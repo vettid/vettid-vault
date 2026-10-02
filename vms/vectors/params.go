@@ -21,6 +21,9 @@ const (
 	KeyBundle      byte = 0x14
 	NonceBundle    byte = 0x15
 
+	SeedManifestKey byte = 0x21 // (spec) §11.10.1 manifest key, P-256 scalar
+	SeedDeviceKey   byte = 0x22 // (spec) §11.10.3 Android device attestation key
+
 	SessionSenderKid    byte = 0x02
 	SessionRecipientKid byte = 0x01
 
@@ -47,4 +50,7 @@ const (
 	ACUserGUID        = "test-user-0001"
 	ACPIN             = "123456"
 	ACToken           = "v4.public.VEVTVC1PTkxZLWFwcA"
+	// ACApprovalRequestID is the unlock that carries a release approval
+	// (spec §16).
+	ACApprovalRequestID = "01JB2Z6V9K3M4N5P6Q7R8S9T22"
 )

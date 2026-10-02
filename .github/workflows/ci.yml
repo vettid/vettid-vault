@@ -19,11 +19,15 @@ jobs:
       - name: go mod verify
         run: go mod verify
       - name: go vet
-        run: go vet ./...
+        run: make vet
       - name: staticcheck
-        run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.1 ./...
-      - name: go test -race
-        run: go test -race -count=1 ./...
+        run: make staticcheck
+      - name: no vector-only code in library packages
+        run: make check-tcb
+      - name: go test -race (incl. vector regeneration)
+        run: |
+          go test -race -count=1 ./...
+          go test -race -count=1 -tags vmsvectors ./...
       - name: fuzz (short)
         run: make fuzz FUZZTIME=10s
 

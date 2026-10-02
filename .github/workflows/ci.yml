@@ -71,6 +71,28 @@ jobs:
           VAULT_IT_LOCALSTACK: http://127.0.0.1:4566
         run: go test -count=1 -p 1 -tags 'devenclave integration' ./parent/ ./integration/
 
+  enclave-image:
+    # Dockerfile.enclave is reproducible: two clean builds give the same
+    # binary (and the same image). The arm64 build's hash is what the
+    # Graviton smoke host's build must match (docs/SMOKE.md).
+    strategy:
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: shellcheck
+        run: shellcheck scripts/build-eif.sh scripts/smoke/run-on-host.sh
+      - name: two clean builds, one binary
+        run: |
+          export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
+          for i in 1 2; do
+            docker build --no-cache -q -f Dockerfile.enclave --build-arg SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" -t "vve:$i" .
+            c=$(docker create "vve:$i"); docker cp "$c:/vault-enclave" "ve$i"; docker rm "$c" >/dev/null
+          done
+          sha256sum ve1 ve2
+          cmp ve1 ve2
+
   gitleaks:
     # Pinned binary over the FULL history (the gitleaks-action fails on a
     # branch's first push, where there is no "before" commit).

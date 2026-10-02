@@ -16,3 +16,5 @@ func procAttr(int, int) *syscall.SysProcAttr { return nil }
 func setLimits(int, ProcConfig) {}
 
 func hardenSelf() []string { return []string{"not Linux"} }
+
+func supervisorDumpable() (int, error) { return -1, errors.New("not Linux") }

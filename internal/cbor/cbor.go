@@ -6,9 +6,11 @@
 // It is written for the trusted code base rather than taken from a general
 // library: it supports only what those formats use (unsigned and negative
 // integers, byte and text strings, arrays, maps, tags, false, true and
-// null), and rejects indefinite lengths, floats, undefined, other simple
-// values, duplicate map keys, invalid UTF-8, nesting deeper than MaxDepth
-// and trailing data. Non-minimal integer and length encodings are accepted:
+// null), and rejects indefinite-length strings, floats, undefined, other
+// simple values, duplicate map keys, invalid UTF-8, nesting deeper than
+// MaxDepth and trailing data. Arrays and maps may have indefinite length
+// (terminated by a break): the AWS Nitro Security Module encodes the
+// attestation document's payload map that way. Non-minimal integer and length encodings are accepted:
 // every caller verifies signatures over the raw bytes it received, so an
 // alternative encoding cannot change what a signature covers.
 //
@@ -99,6 +101,8 @@ func (d *decoder) head() (major byte, arg uint64, err error) {
 	switch {
 	case ai < 24:
 		return major, uint64(ai), nil
+	case ai == 31 && (major == 4 || major == 5):
+		return major, 0, errIndefinite // indefinite-length array or map
 	case ai <= 27:
 		n := 1 << (ai - 24)
 		if len(d.b)-d.off < n {
@@ -118,7 +122,24 @@ func (d *decoder) head() (major byte, arg uint64, err error) {
 		d.off += n
 		return major, v, nil
 	}
-	return 0, 0, ErrSyntax // reserved (28-30) or indefinite length (31)
+	return 0, 0, ErrSyntax // reserved (28-30), indefinite strings, a stray break
+}
+
+// errIndefinite signals an indefinite-length array or map head.
+var errIndefinite = errors.New("cbor: indefinite length")
+
+const breakCode = 0xff
+
+// atBreak consumes a break code if one is next.
+func (d *decoder) atBreak() (bool, error) {
+	if d.off >= len(d.b) {
+		return false, ErrTruncated
+	}
+	if d.b[d.off] == breakCode {
+		d.off++
+		return true, nil
+	}
+	return false, nil
 }
 
 func (d *decoder) item(depth int) (Value, error) {
@@ -127,8 +148,41 @@ func (d *decoder) item(depth int) (Value, error) {
 	}
 	start := d.off
 	major, arg, err := d.head()
-	if err != nil {
+	indefinite := errors.Is(err, errIndefinite)
+	if err != nil && !indefinite {
 		return Value{}, err
+	}
+	if indefinite {
+		// Elements until a break; every element takes at least one byte,
+		// so the input length bounds the work.
+		v := Value{Kind: KindArray}
+		if major == 5 {
+			v.Kind = KindMap
+		}
+		for {
+			end, err := d.atBreak()
+			if err != nil {
+				return Value{}, err
+			}
+			if end {
+				break
+			}
+			if major == 4 {
+				e, err := d.item(depth + 1)
+				if err != nil {
+					return Value{}, err
+				}
+				v.Array = append(v.Array, e)
+				continue
+			}
+			p, err := d.pair(depth, v.Map)
+			if err != nil {
+				return Value{}, err
+			}
+			v.Map = append(v.Map, p)
+		}
+		v.Raw = d.b[start:d.off]
+		return v, nil
 	}
 	var v Value
 	switch major {
@@ -169,23 +223,11 @@ func (d *decoder) item(depth int) (Value, error) {
 		}
 		v = Value{Kind: KindMap, Map: make([]Pair, 0, int(arg))}
 		for i := uint64(0); i < arg; i++ {
-			k, err := d.item(depth + 1)
+			p, err := d.pair(depth, v.Map)
 			if err != nil {
 				return Value{}, err
 			}
-			if k.Kind != KindUint && k.Kind != KindNeg && k.Kind != KindText && k.Kind != KindBytes {
-				return Value{}, ErrSyntax
-			}
-			for _, p := range v.Map {
-				if sameKey(p.Key, k) {
-					return Value{}, ErrDuplicate
-				}
-			}
-			val, err := d.item(depth + 1)
-			if err != nil {
-				return Value{}, err
-			}
-			v.Map = append(v.Map, Pair{Key: k, Value: val})
+			v.Map = append(v.Map, p)
 		}
 	case 6:
 		t, err := d.item(depth + 1)
@@ -209,6 +251,27 @@ func (d *decoder) item(depth int) (Value, error) {
 	}
 	v.Raw = d.b[start:d.off]
 	return v, nil
+}
+
+// pair decodes one map entry; keys are integers or strings and unique.
+func (d *decoder) pair(depth int, seen []Pair) (Pair, error) {
+	k, err := d.item(depth + 1)
+	if err != nil {
+		return Pair{}, err
+	}
+	if k.Kind != KindUint && k.Kind != KindNeg && k.Kind != KindText && k.Kind != KindBytes {
+		return Pair{}, ErrSyntax
+	}
+	for _, p := range seen {
+		if sameKey(p.Key, k) {
+			return Pair{}, ErrDuplicate
+		}
+	}
+	val, err := d.item(depth + 1)
+	if err != nil {
+		return Pair{}, err
+	}
+	return Pair{Key: k, Value: val}, nil
 }
 
 func sameKey(a, b Value) bool {

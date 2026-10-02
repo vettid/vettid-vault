@@ -54,11 +54,7 @@ func DevSupervisor(o DevOptions) (supervisor.Config, error) {
 	spec := Spec(o.Release, "")
 	roots := TLSRoots()
 	egressAddr := o.Egress
-	tr, err := egress.New(egress.Config{Conns: 2, Hosts: []egress.Host{
-		{Name: u.Hostname(), Roots: roots, HTTP2: true},
-		{Name: "android.googleapis.com", Roots: roots, HTTP2: true},
-		{Name: "kms." + KMSRegion + ".amazonaws.com", Roots: roots},
-	}, Dialer: egress.DialerFunc(func(ctx context.Context, host string, port uint16) (net.Conn, error) {
+	dialer := egress.DialerFunc(func(ctx context.Context, host string, port uint16) (net.Conn, error) {
 		var d net.Dialer
 		c, err := d.DialContext(ctx, "tcp", egressAddr)
 		if err != nil {
@@ -69,7 +65,15 @@ func DevSupervisor(o DevOptions) (supervisor.Config, error) {
 			return nil, err
 		}
 		return c, nil
-	})})
+	})
+	hosts := func(region string) []egress.Host {
+		return []egress.Host{
+			{Name: u.Hostname(), Roots: roots, HTTP2: true},
+			{Name: "android.googleapis.com", Roots: roots, HTTP2: true},
+			{Name: "kms." + region + ".amazonaws.com", Roots: roots},
+		}
+	}
+	tr, err := egress.New(egress.Config{Conns: 2, Hosts: hosts(KMSRegion), Dialer: dialer})
 	if err != nil {
 		return supervisor.Config{}, err
 	}
@@ -84,10 +88,14 @@ func DevSupervisor(o DevOptions) (supervisor.Config, error) {
 		Egress:     tr,
 		Proc:       supervisor.ProcConfig{Exec: o.VaultExec},
 		RelayHosts: []string{u.Hostname()},
-		MaxVaults:  o.MaxVaults,
-		DownLock:   o.DownLock,
-		LogLevel:   o.LogLevel,
-		OnReady:    o.OnReady,
+		NitroRoots: TestNitroCA().Roots(),
+		SelftestEgress: func(region string) (*egress.Transport, error) {
+			return egress.New(egress.Config{Conns: 1, Hosts: hosts(region), Dialer: dialer})
+		},
+		MaxVaults: o.MaxVaults,
+		DownLock:  o.DownLock,
+		LogLevel:  o.LogLevel,
+		OnReady:   o.OnReady,
 	}, nil
 }
 

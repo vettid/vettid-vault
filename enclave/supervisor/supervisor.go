@@ -17,6 +17,7 @@ package supervisor
 import (
 	"context"
 	"crypto/rand"
+	"crypto/x509"
 	"encoding/hex"
 	"errors"
 	"log/slog"
@@ -75,6 +76,13 @@ type Config struct {
 	DownLock time.Duration
 	LogLevel slog.Level
 	Now      func() time.Time
+	// NitroRoots verify the self-test's own attestation document (release:
+	// the pinned AWS Nitro root).
+	NitroRoots *x509.CertPool
+	// SelftestEgress builds the self-test's egress for a KMS region: the
+	// release hosts and roots plus kms.<region>.amazonaws.com
+	// (docs/SMOKE.md). Nil: no self-test.
+	SelftestEgress func(region string) (*egress.Transport, error)
 	// OnReady, if set, is called with the instance once it runs (tests).
 	OnReady func(*enclave.Instance)
 }
@@ -95,6 +103,12 @@ type Supervisor struct {
 
 	descMu   sync.Mutex
 	lastDesc []byte
+
+	selftestMode  bool          // set once, before selftestReady closes
+	selftestReady chan struct{} // closed when the hello asked for a self-test
+	selftestOnce  sync.Once
+	selftestDone  chan struct{}
+	hardenNotes   []string
 
 	// Set by start: what the supervisor brokers for vault processes.
 	host      *procHost
@@ -131,7 +145,7 @@ func New(cfg Config) (*Supervisor, error) {
 	if _, err := rand.Read(boot); err != nil {
 		return nil, err
 	}
-	s := &Supervisor{cfg: cfg, link: l, now: cfg.Now, activity: map[string]time.Time{}, bootID: hex.EncodeToString(boot)}
+	s := &Supervisor{cfg: cfg, link: l, now: cfg.Now, activity: map[string]time.Time{}, bootID: hex.EncodeToString(boot), selftestDone: make(chan struct{}), selftestReady: make(chan struct{})}
 	s.log = slog.New(&logHandler{l: l, level: cfg.LogLevel})
 	s.status = &statusFetcher{url: cfg.StatusListURL, http: cfg.Egress.Client(2 * time.Minute), now: cfg.Now}
 	return s, nil
@@ -144,7 +158,8 @@ func (s *Supervisor) Logger() *slog.Logger { return s.log }
 // ends. On return every vault is locked.
 func (s *Supervisor) Run(ctx context.Context) error {
 	if s.cfg.Harden {
-		for _, n := range hardenSelf() {
+		s.hardenNotes = hardenSelf()
+		for _, n := range s.hardenNotes {
 			s.log.Warn("hardening: " + n)
 		}
 	}
@@ -155,6 +170,21 @@ func (s *Supervisor) Run(ctx context.Context) error {
 	conn, err := s.connect(ctx, m.PCR0)
 	if err != nil {
 		return err
+	}
+	if s.selftestMode {
+		// The hardware smoke test (docs/SMOKE.md): no instance, no vault;
+		// answer the parent's self-test request and stop.
+		select {
+		case <-s.selftestDone:
+			select { // let the report reach the parent
+			case <-conn.Done():
+			case <-time.After(10 * time.Second):
+			}
+		case <-conn.Done():
+		case <-ctx.Done():
+		}
+		conn.Close()
+		return nil
 	}
 	if err := s.start(); err != nil {
 		conn.Close()
@@ -223,6 +253,10 @@ func (s *Supervisor) dial(ctx context.Context, release string) (*hostproto.Conn,
 		conn.Close()
 		return nil, ErrHello
 	}
+	if string(r[2]) == "selftest" && s.inst.Load() == nil && s.instID == "" {
+		s.selftestMode = true
+		close(s.selftestReady)
+	}
 	if string(r[2]) == "fresh" && s.inst.Load() != nil && len(s.inst.Load().Vaults()) > 0 {
 		// A restarted parent holds no leases for the vaults running here.
 		s.log.Warn("parent restarted: locking every vault")
@@ -273,6 +307,9 @@ func (s *Supervisor) start() error {
 
 // handle answers the parent's requests.
 func (s *Supervisor) handle(ctx context.Context, f *hostproto.Frame) [][]byte {
+	if f.Kind == hostproto.KindSelftest {
+		return s.handleSelftest(ctx, f)
+	}
 	if s.inst.Load() == nil {
 		return hostproto.Strings(hostproto.StatusError) // not started yet
 	}

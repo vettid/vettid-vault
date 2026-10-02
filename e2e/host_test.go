@@ -32,6 +32,7 @@ import (
 	"github.com/vettid/vettid-vault/internal/enclavetest"
 	"github.com/vettid/vettid-vault/internal/parenttest"
 	"github.com/vettid/vettid-vault/internal/relaytest"
+	"github.com/vettid/vettid-vault/internal/selftest"
 	"github.com/vettid/vettid-vault/parent"
 	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vms/envelope"
@@ -452,5 +453,81 @@ func TestVaultProcessIsolation(t *testing.T) {
 	}
 	if !m1.status() {
 		t.Fatal("status after kill")
+	}
+}
+
+// The hardware smoke test's plumbing off hardware (docs/SMOKE.md): the
+// parent in self-test mode, the dev supervisor and a re-executed vault
+// process, against the fake KMS with a deletable-style test key whose
+// admin statement the §11.10.7 check must refuse (check 6).
+func TestSelftest(t *testing.T) {
+	hs := newHostStack(t)
+	arn := enclavetest.KeyARN(9)
+	admin := `{"Sid":"Admin","Effect":"Allow","Principal":{"AWS":"arn:aws:iam::` + enclavetest.KMSAccount + `:root"},"Action":"kms:*","Resource":"*"}`
+	pcr0 := enclavetest.Spec(3, "").PCR0Hex()
+	good := enclavetest.GoodPolicy(pcr0, []string{pcr0})
+	hs.w.KMS.AddKey(arn, good[:len(good)-2]+","+admin+"]}")
+
+	cl, el := listenTCP(t), listenTCP(t)
+	ctx := ctxT(t, 3*time.Minute)
+	type result struct {
+		rep *selftest.Report
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		rep, err := parent.RunSelftest(ctx, parent.SelftestConfig{ControlListener: cl, EgressListener: el,
+			Allow: parent.DefaultAllow("relay.vettid.test", enclavetest.KMSRegion), Resolve: hs.resolve, Objects: hs.objs,
+			Creds:   parenttest.StaticCreds{AccessKeyID: "AK", SecretAccessKey: "SK", SessionToken: "ST"},
+			Request: selftest.Request{RunID: "run-1", KeyARN: arn, Account: enclavetest.KMSAccount, Region: enclavetest.KMSRegion},
+			Logger:  slog.New(slog.NewTextHandler(io.Discard, nil))})
+		done <- result{rep, err}
+	}()
+	cfg, err := enclavetest.DevSupervisor(enclavetest.DevOptions{Release: 3, Control: cl.Addr().String(), Egress: el.Addr().String(),
+		RelayURL: hostRelay, LogLevel: slog.LevelError,
+		VaultExec: append([]string{hs.encBin, vaultproc.Arg}, enclavetest.DevVaultArgs(3, hostRelay)...)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Harden = true // as the binaries do (this test process becomes non-dumpable)
+	sup, err := supervisor.New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sup.Run(ctx); err != nil {
+		t.Fatalf("supervisor: %v", err)
+	}
+	r := <-done
+	if r.err != nil {
+		t.Fatal(r.err)
+	}
+	for _, c := range r.rep.Checks {
+		t.Logf("%v %v %s %s", c.OK, c.Required, c.Name, c.Detail)
+	}
+	if bad := parent.SelftestVerdict(r.rep, 6); len(bad) != 0 {
+		t.Fatalf("unexpected: %v", bad)
+	}
+	want := map[string]bool{}
+	for _, c := range r.rep.Checks {
+		want[c.Name] = c.OK
+	}
+	for _, n := range []string{"nsm.attestation_verifies", "egress.relay_healthz", "egress.relay_http2", "egress.google_status_list",
+		"kms.policy_check_rejects_test_key", "kms.policy_check_passes_without_admin", "vault_process.kms_recipient_round_trip",
+		"vault_process.seccomp_refuses_socket_vsock", "vault_process.not_dumpable", "s3.stale_if_match_refused", "vault_process.argon2id_default"} {
+		if !want[n] {
+			t.Errorf("%s not OK", n)
+		}
+	}
+	if r.rep.PCR0 != pcr0 || r.rep.VaultPeakRSS < 64<<20 {
+		t.Fatalf("pcr0 %s, vault peak RSS %d", r.rep.PCR0, r.rep.VaultPeakRSS)
+	}
+	// The report carries no secret: no credentials, nothing key-sized in base64.
+	b, _ := json.Marshal(r.rep)
+	if strings.Contains(string(b), "SK") && strings.Contains(string(b), `"SK"`) {
+		t.Fatal("credentials in the report")
+	}
+	// Only smoke/<run_id>/ was touched; the object was deleted again.
+	for _, k := range hs.objs.Keys() {
+		t.Fatalf("object left behind: %s", k)
 	}
 }

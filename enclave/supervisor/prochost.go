@@ -130,7 +130,7 @@ func (h *procHost) freeSlot(i int) {
 // spawn starts a vault process with its channel on fd 3, a minimal
 // environment, no other inherited descriptors, its own user (UIDBase),
 // rlimits, and death with the supervisor.
-func (h *procHost) spawn(j *enclave.Job) (*vproc, error) {
+func (h *procHost) spawn(vaultID, userGUID string, enroll bool, extra ...string) (*vproc, error) {
 	if len(h.cfg.Exec) == 0 {
 		return nil, errSpawn
 	}
@@ -145,7 +145,7 @@ func (h *procHost) spawn(j *enclave.Job) (*vproc, error) {
 	}
 	parentEnd := os.NewFile(uintptr(fds[0]), "vault-channel")
 	childEnd := os.NewFile(uintptr(fds[1]), "vault-channel-child")
-	cmd := exec.Command(h.cfg.Exec[0], h.cfg.Exec[1:]...)
+	cmd := exec.Command(h.cfg.Exec[0], append(append([]string(nil), h.cfg.Exec[1:]...), extra...)...)
 	cmd.Env = []string{"GOMEMLIMIT=" + strconv.FormatUint(h.cfg.MemoryLimit, 10), "GOMAXPROCS=2", "GOTRACEBACK=none"}
 	cmd.Dir = "/"
 	cmd.ExtraFiles = []*os.File{childEnd} // fd 3; everything else is close-on-exec
@@ -166,7 +166,7 @@ func (h *procHost) spawn(j *enclave.Job) (*vproc, error) {
 		h.freeSlot(slot)
 		return nil, errSpawn
 	}
-	p := &vproc{h: h, vaultID: j.VaultID, userGUID: j.UserGUID, enroll: j.Op == enclave.OpEnroll, slot: slot, cmd: cmd, exited: make(chan struct{})}
+	p := &vproc{h: h, vaultID: vaultID, userGUID: userGUID, enroll: enroll, slot: slot, cmd: cmd, exited: make(chan struct{})}
 	p.conn = hostproto.NewConn(c, p.handle, p.notify)
 	go func() {
 		err := cmd.Wait()
@@ -232,7 +232,7 @@ func (h *procHost) Open(ctx context.Context, j *enclave.Job) ([]byte, error) {
 			}
 		}
 	}
-	p, err := h.spawn(j)
+	p, err := h.spawn(j.VaultID, j.UserGUID, j.Op == enclave.OpEnroll)
 	if err != nil {
 		return nil, err
 	}

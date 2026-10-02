@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"os"
 	"testing"
 	"time"
 
@@ -103,5 +104,9 @@ func TestVaultOfStateKey(t *testing.T) {
 func TestErrText(t *testing.T) {
 	if errText(context.Canceled) != "canceled" || errText(&net.OpError{Op: "dial", Err: errors.New("secret detail")}) != "network error" {
 		t.Fatal("errText")
+	}
+	_, err := os.ReadFile("/nonexistent/yama")
+	if got := errText(err); got != "open /nonexistent/yama: no such file or directory" {
+		t.Fatalf("missing file: %q", got)
 	}
 }

@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net"
 	"os"
+	"syscall"
 
 	"github.com/vettid/vettid-vault/internal/hostproto"
 )
@@ -56,6 +58,16 @@ func (h *logHandler) WithGroup(string) slog.Handler { return h }
 func errText(err error) string {
 	if err == nil {
 		return ""
+	}
+	// File-system and system-call errors first: syscall.Errno also
+	// satisfies net.Error, which made a missing file read "network error".
+	var pe *fs.PathError
+	if errors.As(err, &pe) {
+		return pe.Op + " " + pe.Path + ": " + pe.Err.Error()
+	}
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		return errno.Error()
 	}
 	var ne net.Error
 	if errors.As(err, &ne) {

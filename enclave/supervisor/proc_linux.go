@@ -51,3 +51,5 @@ func hardenSelf() []string {
 	}
 	return notes
 }
+
+func supervisorDumpable() (int, error) { return unix.PrctlRetInt(unix.PR_GET_DUMPABLE, 0, 0, 0, 0) }

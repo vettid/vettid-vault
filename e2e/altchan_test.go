@@ -244,6 +244,52 @@ func TestAltchanEnrollUnlock(t *testing.T) {
 		}
 	}
 
+	// A second app pairs with device attestation (§6.7) and unlocks.
+	{
+		a := aw.newApp("member-pair", enclavetest.NewAndroidAttester(0x65, enclavetest.AndroidOptions{}))
+		aw.enroll(a, acPIN)
+		ctx := ctxT(t, 60*time.Second)
+		pc, err := a.dev.Request(ctx, "device.pair.create", []byte(`{"role":"app"}`))
+		if err != nil || !pc.OK() {
+			t.Fatalf("pair.create: %v", err)
+		}
+		link := field(t, pc.Body(), "link")
+		pid := field(t, pc.Body(), "pairing_id")
+		b := aw.newApp("member-pair", enclavetest.NewIOSAttester(0x75, enclavetest.IOSOptions{}))
+		if _, err := b.dev.PairAttested(ctx, link, b.att); err != nil {
+			t.Fatal(err)
+		}
+		waitEvent(t, a.dev, "device.pair.pending", has("pairing_id", pid))
+		if r, err := a.dev.Request(ctx, "device.pair.approve", []byte(`{"pairing_id":"`+pid+`"}`)); err != nil || !r.OK() {
+			t.Fatalf("approve: %v", err)
+		}
+		if err := b.dev.AwaitPaired(ctx); err != nil {
+			t.Fatal(err)
+		}
+		b.vid = a.vid
+		aw.lock(a)
+		if r := aw.mustUnlock(b, acPIN, client.UnlockOptions{}, ""); !r.OK {
+			t.Fatalf("paired app unlock: %+v", r)
+		}
+		aw.status(b)
+		aw.lock(b)
+		// A pairing app without attestation is not admitted.
+		if r := aw.mustUnlock(a, acPIN, client.UnlockOptions{}, ""); !r.OK {
+			t.Fatal(r)
+		}
+		pc, _ = a.dev.Request(ctx, "device.pair.create", []byte(`{"role":"app"}`))
+		c := aw.newApp("member-pair", nil)
+		if _, err := c.dev.Pair(ctx, field(t, pc.Body(), "link")); err != nil {
+			t.Fatal(err)
+		}
+		ctx2, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if _, err := a.dev.WaitEvent(ctx2, "device.pair.pending", nil); err == nil {
+			t.Fatal("unattested app reached approval")
+		}
+		aw.lock(a)
+	}
+
 	// Rolled-back state object.
 	a := aw.newApp("member-rollback", enclavetest.NewAndroidAttester(0x62, enclavetest.AndroidOptions{}))
 	aw.enroll(a, acPIN)

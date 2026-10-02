@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -12,6 +13,7 @@ import (
 	"github.com/vettid/vettid-relay/relayauth"
 	"github.com/vettid/vettid-relay/relayclient"
 
+	"github.com/vettid/vettid-vault/vms/altchan"
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/handshake"
 	"github.com/vettid/vettid-vault/vms/suite"
@@ -36,6 +38,11 @@ func newNewcomer(t testing.TB, base byte) *newcomer {
 // hsInit sends the newcomer's hs.init for (purpose, ctx) into the vault.
 func (n *newcomer) hsInit(t testing.TB, m *Manager, purpose handshake.Purpose, ctxID, msgID string) {
 	t.Helper()
+	n.hsInitAttest(t, m, purpose, ctxID, msgID, nil)
+}
+
+func (n *newcomer) hsInitAttest(t testing.TB, m *Manager, purpose handshake.Purpose, ctxID, msgID string, da *altchan.DeviceAttest) {
+	t.Helper()
 	vaultPK := m.keys.relay.Public().(ed25519.PublicKey)
 	rc := relayclient.New(n.addr.URL, n.relay)
 	tok, err := rc.MintToken(relayauth.EncodeKey(vaultPK), n.addr.URL, relayclient.TokenOptions{TTL: 24 * time.Hour})
@@ -44,7 +51,8 @@ func (n *newcomer) hsInit(t testing.TB, m *Manager, purpose handshake.Purpose, c
 	}
 	cfg := handshake.InitiatorConfig{Purpose: purpose, Ctx: ctxID, Identity: n.ik, StaticKEM: n.kem.Public(), Relay: n.addr,
 		Token: tok, ResponderIK: m.keys.ik.Public().(ed25519.PublicKey), ResponderEK: m.keys.kem.Public(),
-		ResponderRelayKey: m.keys.relay.Public().(ed25519.PublicKey), Policy: policyFor(string(purpose)), Now: m.now()}
+		ResponderRelayKey: m.keys.relay.Public().(ed25519.PublicKey), Policy: policyFor(string(purpose)), Now: m.now(),
+		DeviceAttest: da}
 	if purpose == handshake.PurposeConnection {
 		cfg.ReconnectToken = tok
 	}
@@ -110,6 +118,62 @@ func TestPairingApprovalFirst(t *testing.T) {
 	}
 	if d.depositsTo(n.addr.Mailbox) != 1 {
 		t.Fatal("no hs.resp after approval")
+	}
+}
+
+// §6.7, §11.7: an app pairs with device attestation; the vault verifies
+// it against the challenge of the hs.init (inner id as request_id, empty
+// vault id, inner ts) and carries the binding into
+// the device record (and so the header's
+// unlock keys). Without attestation, or with a failing one, the hs.init is
+// dropped and audited.
+func TestPairingDeviceAttestation(t *testing.T) {
+	d := newDevFixture(t)
+	var gotChallenge [32]byte
+	fail := false
+	d.m.opt.DeviceAttest = func(da *altchan.DeviceAttest, ch [32]byte, _ time.Time) (json.RawMessage, error) {
+		gotChallenge = ch
+		if fail {
+			return nil, errors.New("attestation")
+		}
+		return json.RawMessage(`{"platform":"android","pk":"AQ==","counter":0}`), nil
+	}
+	da := &altchan.DeviceAttest{Platform: altchan.PlatformAndroid, Chain: [][]byte{{1}}}
+	inv := d.invite(t, KindApp, PairingApprovalTTL)
+	n := newNewcomer(t, 0x50)
+	n.hsInitAttest(t, d.m, handshake.PurposeApp, inv.ID, "p1", nil)
+	if len(d.m.st.Inbound) != 0 || !d.audited("pairing_attestation_missing") {
+		t.Fatal("app paired without device attestation")
+	}
+	inv = d.invite(t, KindApp, PairingApprovalTTL)
+	fail = true
+	n.hsInitAttest(t, d.m, handshake.PurposeApp, inv.ID, "p2", da)
+	if len(d.m.st.Inbound) != 0 || !d.audited("pairing_attestation_failed") {
+		t.Fatal("failed attestation accepted")
+	}
+	inv = d.invite(t, KindApp, PairingApprovalTTL)
+	fail = false
+	n.hsInitAttest(t, d.m, handshake.PurposeApp, inv.ID, "p3", da)
+	if len(d.m.st.Inbound) != 1 {
+		t.Fatal("attested app not pending")
+	}
+	for id, ib := range d.m.st.Inbound {
+		pi := d.m.inbound[id]
+		want, _ := altchan.DevattChallenge(pi.Inner().ID, "", envelope.FormatTS(pi.Inner().TS))
+		if gotChallenge != want {
+			t.Fatal("challenge is not bound to the hs.init")
+		}
+		if len(ib.Attestation) == 0 {
+			t.Fatal("binding not kept")
+		}
+		d.m.mu.Lock()
+		if err := d.m.approveInbound(context.Background(), id, d.m.now()); err != nil {
+			t.Fatal(err)
+		}
+		d.m.mu.Unlock()
+		if aw := d.m.st.Awaiting[id]; aw == nil || len(aw.New.Attestation) == 0 {
+			t.Fatal("binding not carried to the device record")
+		}
 	}
 }
 

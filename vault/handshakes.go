@@ -103,10 +103,11 @@ func (m *Manager) handleInit(ctx context.Context, raw []byte, sender ed25519.Pub
 	case inv.EnrollIK != nil:
 		binding = inv.EnrollAttest
 	case inv.Kind == KindApp && m.opt.DeviceAttest != nil:
-		// §6.7: an app pairs with device attestation; the challenge binds
-		// the hs.init's inner id and ts and the vault id (§11.7).
+		// §6.7: an app pairs with device attestation. The challenge is
+		// the §11.7 one with the hs.init's inner id as request_id and an
+		// empty vault_id (a pairing device does not know the vault id yet).
 		da := body.DeviceAttest
-		ch, cerr := altchan.DevattChallenge(pi.Inner().ID, m.st.VaultID, envelope.FormatTS(pi.Inner().TS))
+		ch, cerr := altchan.DevattChallenge(pi.Inner().ID, "", envelope.FormatTS(pi.Inner().TS))
 		if da == nil || cerr != nil {
 			m.audit(now, "pairing_attestation_missing", "")
 			return ackAfterFlush

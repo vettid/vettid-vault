@@ -321,6 +321,13 @@ func (d *Device) CompleteEnrollment(ctx context.Context) error {
 // Pair starts pairing from a QR / link shown by an already paired app
 // (§6.7). It returns the SAS to compare; then call AwaitPaired.
 func (d *Device) Pair(ctx context.Context, link string) (string, error) {
+	return d.PairAttested(ctx, link, nil)
+}
+
+// PairAttested is Pair for an app with a device attestation key: hs.init
+// carries device_attest over the challenge DevattChallenge(hs.init id, "",
+// hs.init ts) (§6.7, §11.7).
+func (d *Device) PairAttested(ctx context.Context, link string, att Attester) (string, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	q, err := invite.ParseLink(link)
@@ -341,7 +348,22 @@ func (d *Device) Pair(ctx context.Context, link string) (string, error) {
 	}
 	d.setVaultFromPrincipal(b.Vault)
 	profile := strictjson.NewBuilder().String("name", d.st.Name).Bytes()
-	if err := d.startInit(handshake.Purpose(d.st.Role), b.InviteID, b.Token, profile); err != nil {
+	var da *altchan.DeviceAttest
+	var id string
+	now := d.cfg.Now().UTC().Truncate(time.Millisecond)
+	if att != nil && d.st.Role == "app" {
+		if id, err = envelope.NewULID(now); err != nil {
+			return "", err
+		}
+		ch, err := altchan.DevattChallenge(id, "", envelope.FormatTS(now))
+		if err != nil {
+			return "", err
+		}
+		if da, err = att.Attest(ch); err != nil {
+			return "", err
+		}
+	}
+	if err := d.startInitWith(handshake.Purpose(d.st.Role), b.InviteID, b.Token, profile, da, id, now); err != nil {
 		return "", err
 	}
 	return d.ini.SAS(), nil
@@ -366,11 +388,22 @@ func (d *Device) awaitPaired(ctx context.Context) error {
 	if v, _ := o.String("vault_id"); v != "" {
 		d.st.VaultID = v
 	}
+	// The release the vault runs under (§10.3), the floor for unlocks.
+	if r, ok, _ := o.OptString("release"); ok && len(r) == 96 {
+		if n, _, err := o.OptUint("release_number", 1, strictjson.MaxSafeInteger); err == nil && n > 0 {
+			a := d.alt()
+			a.Release, a.ReleaseNumber = r, n
+		}
+	}
 	return nil
 }
 
 // startInit sends hs.init to the vault on depositToken.
 func (d *Device) startInit(purpose handshake.Purpose, ctxID, depositToken string, profile json.RawMessage) error {
+	return d.startInitWith(purpose, ctxID, depositToken, profile, nil, "", d.cfg.Now())
+}
+
+func (d *Device) startInitWith(purpose handshake.Purpose, ctxID, depositToken string, profile json.RawMessage, da *altchan.DeviceAttest, id string, now time.Time) error {
 	v := d.st.Vault
 	ek, err := suite.ParsePublicKey(v.KEM)
 	if err != nil {
@@ -383,7 +416,7 @@ func (d *Device) startInit(purpose handshake.Purpose, ctxID, depositToken string
 	ini, err := handshake.NewInitiator(handshake.InitiatorConfig{
 		Purpose: purpose, Ctx: ctxID, Identity: d.ik, StaticKEM: d.kem.Public(), Relay: d.RelayAddr(),
 		Token: tok, Profile: profile, ResponderIK: v.IK, ResponderEK: ek, ResponderRelayKey: v.RelayPK,
-		Policy: d.policy(), Now: d.cfg.Now(),
+		Policy: d.policy(), Now: now, ID: id, DeviceAttest: da,
 	})
 	if err != nil {
 		return err

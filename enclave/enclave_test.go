@@ -372,3 +372,39 @@ func TestUniformSizes(t *testing.T) {
 		t.Fatalf("sizes %v", sizes)
 	}
 }
+
+// §11.3: the app accepts vault.enrolled only with an attestation whose
+// nonce is its own, user_data covers the bundle, and PCRs are the
+// enclave's it sealed to.
+func TestEnrolledAttestationChecked(t *testing.T) {
+	f := newFx(t)
+	a := f.newApp("user-1", android(0x61))
+	e, in := f.enclaveFor(a, "", true)
+	served, _, _ := a.dev.VerifyManifest(f.w.Served(), f.trust)
+	req, err := a.dev.BuildEnroll(a.guid, pin, e, served, a.att)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vid := newVaultID()
+	if _, err := f.w.Post(f.ctx, in, enclave.OpEnroll, vid, a.guid, req); err != nil {
+		t.Fatal(err)
+	}
+	// A device whose pending enrollment has another nonce rejects it.
+	saved, _ := a.dev.Save()
+	var st map[string]any
+	_ = json.Unmarshal(saved, &st)
+	st["alt"].(map[string]any)["enroll_nonce"] = make([]byte, 32)
+	b, _ := json.Marshal(st)
+	other, err := client.Load(client.Config{Now: f.clk.Now, Trust: &f.trust}, b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.deliver(&app{dev: other})
+	if other.VaultID() != "" {
+		t.Fatal("vault.enrolled with a foreign nonce accepted")
+	}
+	f.deliver(a)
+	if a.dev.VaultID() != vid {
+		t.Fatal("vault.enrolled rejected")
+	}
+}

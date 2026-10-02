@@ -640,6 +640,9 @@ func (m *Manager) lockLocked(ctx context.Context) error {
 	if m.locked {
 		return nil
 	}
+	// Deliver what is queued first (an interrupted batch may have left
+	// deposits, such as an hs.fin, in the outbox), then flush.
+	m.drainOutbox(ctx)
 	err := m.persist(ctx, false)
 	if errors.Is(err, ErrSplitBrain) {
 		return err

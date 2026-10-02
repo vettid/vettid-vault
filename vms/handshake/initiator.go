@@ -233,42 +233,54 @@ type Result struct {
 
 // HandleResp processes hs.resp. collectSender is the relay `sender` of the
 // deposit; it must be R's relay key on record (§6.3). sig_R is verified
-// before any epoch key is used; on any failure the handshake is aborted
-// (§6.3: "MUST abort").
+// before any epoch key is used.
+//
+// A message that does not decrypt under eph (wrong sender, malformed,
+// wrong key) is rejected and the handshake stays pending, so unauthenticated
+// junk cannot cancel it. Once a message has decrypted, any failure, and in
+// particular a sig_R that does not verify, aborts the handshake (§6.3:
+// "MUST abort") and destroys its state.
 func (i *Initiator) HandleResp(raw []byte, collectSender ed25519.PublicKey, now time.Time) (*Result, error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.done {
 		return nil, ErrDone
 	}
-	res, err := i.handleResp(raw, collectSender, now)
+	res, decrypted, err := i.handleResp(raw, collectSender, now)
 	if err != nil {
-		i.abortLocked()
+		if decrypted {
+			i.abortLocked()
+		}
 		return nil, err
 	}
 	i.abortLocked() // success also ends the state: wipe eph and K_s
 	return res, nil
 }
 
-func (i *Initiator) handleResp(raw []byte, collectSender ed25519.PublicKey, now time.Time) (*Result, error) {
+func (i *Initiator) handleResp(raw []byte, collectSender ed25519.PublicKey, now time.Time) (*Result, bool, error) {
 	if !suite.EqualPublic(collectSender, i.cfg.ResponderRelayKey) {
-		return nil, ErrSender
+		return nil, false, ErrSender
 	}
 	env, err := envelope.Parse(raw)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if env.Mode() != envelope.ModeSealed {
-		return nil, envelope.ErrWrongMode
+		return nil, false, envelope.ErrWrongMode
 	}
 	if !env.SenderKid().IsAnonymous() {
-		return nil, ErrSenderKid
+		return nil, false, ErrSenderKid
 	}
 	padded, exp, err := envelope.OpenSealed(env, i.eph)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer suite.Wipe(padded)
+	res, err := i.completeResp(env, padded, exp, now)
+	return res, true, err
+}
+
+func (i *Initiator) completeResp(env *envelope.Envelope, padded []byte, exp suite.Exporter, now time.Time) (*Result, error) {
 	ke, err := exp.Export(suite.LabelHsKe, suite.KeySize)
 	if err != nil {
 		return nil, err

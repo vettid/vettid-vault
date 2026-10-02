@@ -355,3 +355,29 @@ func TestRekeyMustTravelInSessionMode(t *testing.T) {
 		t.Fatal("rekey accepted through OpenInit")
 	}
 }
+
+// Messages that never decrypt under eph cannot cancel a pending handshake;
+// the genuine hs.resp still completes it.
+func TestJunkDoesNotCancelHandshake(t *testing.T) {
+	i, r, m := newParty(t, 0x10), newParty(t, 0x20), newParty(t, 0x30)
+	ini, _ := NewInitiator(initCfg(i, r, PurposeConnection))
+	p, _ := OpenInit(ini.Envelope(), r.lookup, t0)
+	_, respEnv, err := p.Respond(respCfg(i, r, PurposeConnection))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ini.HandleResp(respEnv, m.relayPK(), t0); !errors.Is(err, ErrSender) {
+		t.Fatal("wrong sender accepted")
+	}
+	bad := append([]byte(nil), respEnv...)
+	bad[len(bad)-1] ^= 1
+	if _, err := ini.HandleResp(bad, r.relayPK(), t0); err == nil {
+		t.Fatal("tampered accepted")
+	}
+	if _, err := ini.HandleResp([]byte("junk"), r.relayPK(), t0); err == nil {
+		t.Fatal("junk accepted")
+	}
+	if _, err := ini.HandleResp(respEnv, r.relayPK(), t0); err != nil {
+		t.Fatalf("genuine hs.resp after junk: %v", err)
+	}
+}

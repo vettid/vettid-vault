@@ -10,7 +10,7 @@ member's devices, agents and connections over the
 **Phase V3a — alternate channel, device attestation and release updates,
 in process.** On top of the V1 crypto and wire library and the V2 vault
 runtime, the enclave side of the alternate channel (VAULT-MESSAGING
-0.3.0 §11) runs in process: ETKs and attested descriptors, enroll, unlock
+0.3.1 §11) runs in process: ETKs and attested descriptors, enroll, unlock
 and lock with uniform results, replay and rollback protection, backoff,
 Android key attestation and App Attest verified in the enclave, signed
 release manifests, member-approved release moves with their confirmation

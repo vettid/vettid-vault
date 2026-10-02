@@ -1,0 +1,5 @@
+# gitleaks configuration for vettid-vault.
+# Extends the default ruleset. No allowlist yet: nothing in this repository
+# is a secret, and test keys are derived from fixed, public, test-only seeds.
+[extend]
+useDefault = true

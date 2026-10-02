@@ -128,6 +128,33 @@ How a run works:
   `enclave-image` prints for the same commit. That job builds twice and
   requires byte-identical binaries.
 
+## First hardware run (2026-10-02, commit d11cb32)
+
+Results: 33 of 34 checks passed on Nitro. The run used nitro-cli 1.5.0,
+and the binary's sha256 matched CI.
+
+**The one failure was `nsm.attestation_verifies` ("malformed attestation
+document"), and it is fixed.**
+- The cause: the real NSM encodes the attestation payload as an
+  indefinite-length CBOR map (`0xbf … 0xff`), and `internal/cbor`
+  rejected indefinite lengths. KMS accepted the same documents.
+- The fix: the decoder now accepts indefinite-length arrays and maps,
+  still rejecting duplicate keys, nesting beyond MaxDepth, misplaced
+  breaks and indefinite strings.
+- Unchanged: the signature still covers the exact received bytes, and
+  the chain to the pinned root at the document's timestamp and the
+  PCR, digest and field checks are as strict as before.
+- The fake NSM now encodes its documents the same way.
+- `vms/nitro.TestRealDocument` verifies a real NSM document (fixture in
+  `vms/nitro/testdata/`) against the pinned AWS Nitro root.
+- If the check ever fails again, the report carries the document
+  (`attestation_document`, base64). It is public: the test nonce and the
+  self-test user_data only.
+
+**The Yama check's "network error" text was wrong.** A missing file's
+`syscall.Errno` satisfied `net.Error`. Errors are now reported as
+`open <path>: <errno>`.
+
 ## Notes and uncertainties
 
 - **CPUs.** An m7g.large has 2 vCPUs, and the parent keeps at least one,

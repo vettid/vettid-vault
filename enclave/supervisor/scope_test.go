@@ -10,6 +10,7 @@ import (
 
 	"github.com/vettid/vettid-vault/enclave"
 	"github.com/vettid/vettid-vault/internal/hostproto"
+	"github.com/vettid/vettid-vault/internal/selftest"
 	"github.com/vettid/vettid-vault/internal/vaultipc"
 	"github.com/vettid/vettid-vault/vms/nitro"
 )
@@ -87,4 +88,15 @@ func TestChannelScope(t *testing.T) {
 	}
 	// Lifecycle events for another vault are dropped.
 	p.notify(&hostproto.Frame{Kind: vaultipc.KindLifecycle, Fields: str("unlocked", "bbbb", "r", "r", "1")})
+}
+
+// A self-test attestation that does not verify is returned whole (public
+// data) so it can be examined.
+func TestSelftestKeepsUnverifiedDocument(t *testing.T) {
+	s := &Supervisor{cfg: Config{NSM: &stubNSM{}, NitroRoots: x509.NewCertPool()}, now: time.Now}
+	r := &selftest.Report{}
+	s.selftestNSM(r)
+	if string(r.AttestationDocument) != "doc" {
+		t.Fatalf("document not kept: %q", r.AttestationDocument)
+	}
 }

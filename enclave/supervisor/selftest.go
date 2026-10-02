@@ -132,6 +132,9 @@ func (s *Supervisor) selftestNSM(r *selftest.Report) {
 	ok := err == nil && d.CheckUserData(ud[:]) == nil && d.CheckNonce(nonce) == nil && d.CheckFresh(s.now(), 5*time.Minute, time.Minute) == nil &&
 		d.Measurements().Equal(m)
 	r.Add("nsm.attestation_verifies", ok, true, fmt.Sprintf("document %d bytes %s", len(doc), errStr(err)))
+	if !ok {
+		r.AttestationDocument = doc
+	}
 }
 
 // b. The process environment the vault processes depend on.

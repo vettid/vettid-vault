@@ -62,6 +62,11 @@ type Report struct {
 	MemAvailable   uint64 `json:"mem_available_bytes"`
 	SupervisorRSS  uint64 `json:"supervisor_rss_bytes"`
 	VaultPeakRSS   uint64 `json:"vault_process_peak_rss_bytes"`
+	// AttestationDocument is the self-test's own attestation document
+	// (public: PCRs, the test nonce and the self-test user_data, AWS
+	// certificates), included only when it did not verify, so it can be
+	// examined and kept as a test fixture.
+	AttestationDocument []byte `json:"attestation_document,omitempty"`
 }
 
 // Add appends a check.

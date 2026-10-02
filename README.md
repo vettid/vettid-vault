@@ -21,7 +21,7 @@ supervisor, parent and enclave image come in later phases
 | `vms/envelope` | §5 | v2 envelope (session and sealed modes), strict parsing, inner plaintext, padding buckets, size limits, claim-check blobs, ULIDs |
 | `vms/handshake` | §6 | hs.init / hs.resp / hs.fin for pairing, connections, rekeys and reconnects; key schedule and SAS; epochs, keyrings and retention; rotation chains; reconnect-token rules |
 | `vms/invite` | §6.4, §6.7 | Claim bundles, their encryption and hash commitment, QR / link payloads, invite TTLs |
-| `vms/altchan` | §11 | The pure helpers §16 pins: ETK and vault `user_data`, device-attestation challenge, unlock signing string |
+| `vms/altchan` | §11 | The pure helpers §16 pins: ETK and vault `user_data`, device-attestation challenge, unlock signing string; `device_attest` / `device_assertion` wire shapes |
 | `vms/vectors` | §16 | Generates and checks the test vectors |
 
 Dependencies: the Go standard library and `golang.org/x/crypto` (for
@@ -49,40 +49,12 @@ in-repo HPKE key schedule, but have not yet been reproduced with Apple
 CryptoKit (X-Wing) or BouncyCastle. Until they are, treat the
 MLKEM768X25519 interoperability claim as unverified.
 
-## Provisional choices
+## Spec clarifications
 
-Where the spec is silent or ambiguous, this code picks the strictest
-reasonable reading. These choices are reported upstream as spec follow-ups
-and may change:
-
-- `identity.rotate` statement format (§3.4, §6.6): see
-  `vms/handshake/rotation.go`.
-- Claim-check blob layout (§5.5): `nonce(24) ‖ XChaCha20-Poly1305(key,
-  nonce, aad = "vettid/vms/2/blob", content)`, `sha256` over the blob.
-- hs.resp `sender_kid` is all-zero; rekey and reconnect `ctx` is the
-  base64 epoch id; `seq` is absent in sealed mode; the padded length must
-  be exactly the bucket the JSON needs; `re` and `status` appear together.
-- Pairing bundle `kind` is `app` / `desktop` / `agent`; bundle `exp` and
-  QR `e` must be the same instant.
-
-## Specifications
-
-The specifications live in the
-[vettid.org repository](https://github.com/vettid/vettid.org/tree/master/docs),
-which is the **source of truth**:
-
-- [VAULT-MESSAGING.md](https://github.com/vettid/vettid.org/blob/master/docs/VAULT-MESSAGING.md)
-  — keys, the cryptographic construction, the v2 envelope, sessions,
-  invitations, reconnects and pairing.
-- [VAULT-PLAN.md](https://github.com/vettid/vettid.org/blob/master/docs/VAULT-PLAN.md)
-  — how and in what order the vault is built.
-- [RELAY-PROTOCOL.md](https://github.com/vettid/vettid.org/blob/master/docs/RELAY-PROTOCOL.md)
-  and [PQC-MIGRATION.md](https://github.com/vettid/vettid.org/blob/master/docs/PQC-MIGRATION.md)
-  — background.
-
-[`docs/VAULT-MESSAGING.md`](docs/VAULT-MESSAGING.md) is a copy of the
-messaging spec at the version this code implements. If it differs from the
-copy in vettid.org, vettid.org wins.
+Where VAULT-MESSAGING 0.2.1 was silent or ambiguous (the `identity.rotate`
+format, blob layout, per-purpose handshake fields, padding strictness,
+encodings, device attestation fields), the choices made here were folded
+into the spec as **0.2.2**; the code follows 0.2.2.
 
 ## Development
 

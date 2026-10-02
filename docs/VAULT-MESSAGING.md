@@ -1,7 +1,7 @@
 ---
 title: VAULT-MESSAGING
 status: draft
-version: 0.2.1
+version: 0.2.2
 date: 2026-10-02
 owner: Al Liebl (Mesmer)
 component: vault manager (enclave), parent forwarder, apps, desktops, agents, member API vault routes
@@ -14,6 +14,10 @@ related:
   - ACCOUNT-ADMIN-PLAN.md
   - MEMBER-API.md
 changelog:
+  - 0.2.2: V1 implementation clarifications: identity.rotate format,
+    device_attest replaces app_attest, strict inner/padding rules, blob
+    layout, handshake field rules per purpose, epoch and abort rules,
+    bundle/QR encodings, §11 encodings, §16 vectors filled in
   - 0.2.1: enclave TLS uses pinned roots and shared connections
   - 0.2.0: suite 2 becomes HPKE with the MLKEM768X25519 hybrid KEM; remote
     invitations with selectable TTL; reconnect tokens; client-anchored rollback
@@ -242,6 +246,27 @@ data.
 
   Peers store each other's chains (used in §6.6). PQC Phase 2 arrives this
   way, as a hybrid `ik` under suite 3.
+
+**`identity.rotate` statement.** One link of a rotation chain is the JSON
+object
+
+```json
+{ "v": 1, "suite": 2, "old_ik": "<b64>", "new_ik": "<b64>", "new_kem": "<b64 ek>",
+  "sig_old": "<b64>", "sig_new": "<b64>" }
+```
+
+```
+m       = old_ik (32) || new_ik (32) || new_kem (1216)
+sig_old = Ed25519(old_ik, "vettid/vms/2/rotate" || m)
+sig_new = Ed25519(new_ik, "vettid/vms/2/rotate" || m)
+```
+
+- Both signatures MUST verify, and `old_ik` MUST differ from `new_ik`.
+- A chain is an ordered array of statements. Each link's `old_ik` MUST equal
+  the previous link's `new_ik` (the first link's MUST equal the stored `ik`).
+  A receiver MUST reject chains longer than 32 links.
+- The chain resolves to the last link's `new_ik` and `new_kem`; an empty
+  chain resolves to the stored keys.
 - **ETK** rotates at least every 24 h and on every enclave start.
 
 ## 4. Cryptographic construction
@@ -373,8 +398,28 @@ The inner plaintext is a UTF-8 JSON object, followed by padding:
 | `status`, `error` | responses | `ok` or `error` |
 | `body` | MUST | Type-specific. The schema is TBD per feature unless this document defines it. |
 
-- Binary values are encoded as standard base64 with padding.
-- Unknown fields are ignored.
+- Binary values are encoded as standard base64 with padding. Receivers
+  MUST reject non-canonical base64 and base64 containing CR or LF.
+- Unknown fields are ignored. Known fields MUST have exactly the type and
+  form given here; receivers MUST reject anything else.
+- Receivers MUST reject an inner plaintext (including its `body`) that is
+  not valid UTF-8, that has duplicate member names at any depth, or that
+  has any data after the object. Member names are case-sensitive.
+- Integers are plain JSON integers (no sign, fraction or exponent) no
+  larger than 2^53 − 1.
+- `id` and `re` are canonical ULIDs: 26 upper-case Crockford base32
+  characters, the first in `0`–`7`.
+- `ts` and `exp` both use the format `YYYY-MM-DDTHH:MM:SS.mmmZ`: RFC 3339,
+  UTC, exactly three fractional digits, a literal `Z`.
+- `seq` MUST be present in session mode and MUST be absent in sealed
+  mode. It is an integer ≥ 1.
+- `re` and `status` appear together (responses) or not at all (requests and
+  events). `error` is present if and only if `status` is `error`;
+  `error.code` matches `[a-z_][a-z0-9_]*` (at most 64 bytes) and
+  `error.message` is optional.
+- `type` matches `[a-z][a-z0-9-]*(\.[a-z][a-z0-9-]*)*` and is at most
+  64 bytes.
+- `body` MUST be a JSON object (`{}` when empty).
 - A request with an unknown `type` is answered with `error` code
   `unsupported_type`. Any other message with an unknown `type` is dropped.
 
@@ -385,9 +430,18 @@ The padded inner plaintext is `json || 0x80 || 0x00*`, padded to:
 - the next multiple of 512 bytes, up to 16 KiB;
 - above 16 KiB, the next multiple of 16 KiB.
 
+The bucket is computed for `len(json) + 1` (the `0x80` marker counts). The
+padded length MUST be exactly that bucket: over-padding to a larger bucket
+is malformed.
+
 Alternate-channel plaintexts are padded to exactly 4,096 bytes; a 4,096-byte
-inner plaintext produces a 5,252-byte sealed envelope. Receivers MUST reject
-malformed padding.
+inner plaintext produces a 5,252-byte sealed envelope.
+
+Receivers MUST reject malformed padding: a padded length that is not
+exactly the bucket for the JSON it contains (or not exactly 4,096 bytes on
+the alternate channel), a last non-zero byte other than `0x80`, or no
+marker at all. Senders and receivers check the ciphertext length (padded
+length + 16) against the bucket sizes before decrypting.
 
 ### 5.5 Size limits and claim-check
 
@@ -397,10 +451,17 @@ malformed padding.
 - The **claim-check blob flow** (RELAY-PROTOCOL §6.8) SHOULD be used for
   content over 64 KiB, and MUST be used for content that would not otherwise
   fit:
-  1. Encrypt the content under a fresh 256-bit key with XChaCha20-Poly1305.
-  2. Upload it with `PUT /v1/blob/{recipient_mailbox}`.
+  1. Encrypt the content under a fresh 256-bit key:
+
+     ```
+     blob = nonce (24, random) || XChaCha20-Poly1305(key, nonce, aad = "vettid/vms/2/blob", content)
+     ```
+
+  2. Upload `blob` with `PUT /v1/blob/{recipient_mailbox}`.
   3. Send a message whose body carries `{"blob": {"id", "key", "sha256",
-     "size", "mime", "name"}}`.
+     "size", "mime", "name"}}`, where `sha256` is SHA-256 of `blob` (the
+     uploaded bytes) and `size` is the length of `content`. The receiver
+     MUST check `sha256`, in constant time, before decrypting.
 
   Names and MIME types never leave the ciphertext.
 - If the relay does not support blobs, the operation fails with
@@ -442,7 +503,7 @@ hs.init: { "purpose": "app|desktop|agent|connection|rekey|reconnect",
            "suites": [2],
            "profile": { },
            "rotations": [ ],
-           "app_attest": { } }
+           "device_attest": { } }
 hs.resp: { "token": "...", "reconnect_token": "...", "suite": 2,
            "rotations": [ ], "sig": "<b64>" }
 hs.fin:  { "sig": "<b64>" }
@@ -450,14 +511,46 @@ hs.fin:  { "sig": "<b64>" }
 
 Field rules:
 
-- `profile` is self-asserted and optional (§6.4).
-- `rotations` is used only for reconnects (§6.6).
-- `app_attest` is used only when an iOS app pairs (§11.7).
+- `profile` is self-asserted and optional (§6.4). It is allowed only for
+  purposes `app`, `desktop`, `agent` and `connection`.
+- `rotations` is used only for reconnects (§6.6), in both `hs.init` and
+  `hs.resp`; it MUST be absent for every other purpose.
+- `device_attest` is used only for purpose `app` (§6.7, §11.7).
+- `ctx`:
+  - `connection`: the `invite_id`; `app`, `desktop`, `agent`: the pairing
+    id (the bundle's `invite_id`, §6.4);
+  - `rekey`: the standard base64 of the 16-byte `epoch_id` of the current
+    epoch; the responder MUST reject any other value;
+  - `reconnect`: the standard base64 of the stored `epoch_id` of the last
+    epoch (§6.6).
+
+  `ctx` is 1–128 bytes of printable ASCII (`0x21`–`0x7e`).
+- Tokens, per purpose, in both `hs.init` and `hs.resp`:
+
+  | Purpose | `token` | `reconnect_token` |
+  |---|---|---|
+  | `app`, `desktop`, `agent` | required | MUST be absent |
+  | `connection`, `reconnect` | required | required |
+  | `rekey` | optional | optional |
+
+  Both are PASETO v4.public strings (`v4.public.` followed by base64url
+  and `.` characters, at most 4,096 bytes).
+- `from.relay.url` is an absolute `https` base URL without user info, query
+  or fragment (`http` is allowed only for loopback hosts, in development);
+  `from.relay.mailbox` MUST equal the mailbox id derived from
+  `from.relay.pk` (RELAY-PROTOCOL §3.2).
+- `eph` MUST differ from `from.kem`.
+- `suites` is 1–8 strictly ascending integers in [2, 255]. An offer that
+  contains suite 1 is rejected. Unknown suites above 2 are allowed and not
+  chosen.
 - `hs.init` uses `sender_kid` = anonymous or the initiator's static kid, and
-  `recipient_kid` = kid of `ek_R`.
-- `hs.resp` uses `recipient_kid` = kid of `eph`.
+  `recipient_kid` = kid of `ek_R`. A non-anonymous `sender_kid` MUST equal
+  the kid of `from.kem`.
+- `hs.resp` uses `sender_kid` = all-zero and `recipient_kid` = kid of
+  `eph`.
 - On **rekey**, `hs.init` travels in session mode under the current epoch,
-  and `K_s` is the previous epoch's `rk`.
+  and `K_s` is the current (soon previous) epoch's `rk`. A rekey `hs.init`
+  is accepted only under the current epoch.
 
 ### 6.3 Key schedule
 
@@ -493,8 +586,14 @@ Verification and activation:
 - `I` MUST verify `sig_R` before using any epoch key, and MUST abort if it
   fails. For a new peer, `sig_R` is checked under the pinned `ik_R`. For a
   reconnect, it is checked under the current key that `rotations` leads to.
+- The abort applies once a message has decrypted under `eph`: after that,
+  any failure (body, suite, chain or `sig_R`) aborts the handshake and
+  destroys its state. A message that does not decrypt under `eph`, or
+  whose collect `sender` is wrong, is dropped without affecting the
+  handshake.
 - `R` activates the epoch only after `sig_I` verifies. Messages for an
-  inactive epoch are left unacked.
+  inactive epoch are left unacked. An `hs.fin` whose `sig_I` does not
+  verify is dropped; the pending handshake is kept until it expires.
 - The collect `sender` (RELAY-PROTOCOL §6.3) MUST equal `from.relay.pk` for
   `hs.init`. For every later message, `sender` MUST equal the relay key on
   record for the principal whose session decrypts it. A mismatch is acked,
@@ -532,6 +631,16 @@ offer options above them.
   "hint": { "name": "<optional>" } }
 ```
 
+Bundle rules:
+
+- `kind` is `connection`, or `app`, `desktop` or `agent` for pairing
+  (§6.7); it MUST match the QR `t` (`c`, `p`, `d`, `a` respectively).
+- For pairing, `invite_id` carries the pairing id, and `remote` MUST be
+  `false`.
+- `exp` is RFC 3339 UTC in **whole seconds** (`YYYY-MM-DDTHH:MM:SSZ`, no
+  fraction) and MUST equal the QR `e`. This is the only whole-second
+  timestamp in this document; inner timestamps use milliseconds (§5.3).
+
 The bundle is protected and published as follows:
 
 - `blob = nonce(24) || XChaCha20-Poly1305(k_b, nonce, aad = "vettid/vms/2/bundle",
@@ -544,7 +653,12 @@ The bundle is protected and published as follows:
   ```
 
   `t` is `c` for a connection; `p`, `d` and `a` pair an app, desktop or agent
-  (§6.7).
+  (§6.7). `h`, `k` and the link encoding are base64url **without** padding
+  (RFC 4648 §5). `c` is the relay's 26-character claim id.
+- The scanner fetches the claim, MUST check `SHA-256(blob)` = `h` in
+  constant time before decrypting, decrypts under `k`, and MUST reject a
+  bundle whose `kind` does not match `t`, whose `exp` differs from `e`, or
+  that has expired.
 
 ```
 A app            A vault           Relay            B vault           B app
@@ -591,13 +705,20 @@ Rules:
 | Vault ↔ device or agent | 7 days, and on every unlock |
 
 Either side MAY rekey sooner. The side that hits the limit initiates. If both
-sides initiate at once, the `hs.init` with the lower `th1` wins.
+sides initiate at once, the `hs.init` with the lower `th1` wins (compared as
+big-endian byte strings).
+
+Reaching the limit does not stop sending: both sides keep sending in the
+old epoch until the new epoch activates, so that a locked peer does not
+block delivery.
 
 **Key retention:**
 
 - Receive keys of previous epochs are kept for 16 days (the relay TTL plus a
   margin).
-- Send keys of previous epochs are deleted when the new epoch activates.
+- Send keys of previous epochs, and their `rk`, are deleted when the new
+  epoch activates. A rekey is therefore possible only from the current
+  epoch.
 
 **Rationale for epochs rather than a per-message ratchet:**
 
@@ -654,8 +775,9 @@ The responder MUST accept the reconnect only if all of these hold:
   `rotations` chain;
 - `sig_I` verifies under that key.
 
-Each link in a rotation chain is an `identity.rotate` statement signed by the
-old and new `ik`. The responder answers with its own `rotations`, and the
+Each link in a rotation chain is an `identity.rotate` statement (§3.4). When
+`rotations` is non-empty, `from.kem` MUST equal the chain's final
+`new_kem`. The responder answers with its own `rotations`, and the
 initiator verifies `sig_R` the same way.
 
 **Retired keys.** Vaults keep retired static `kem` private keys for 400 days
@@ -698,7 +820,8 @@ Rules:
   pairing and denylists the `jti`.
 - **Agents.** The approval carries the agent's initial LEASH grants, and the
   agent's `ik` is the grantee.
-- **Apps.** For role `app`, `hs.init` carries the device attestation (§11.7).
+- **Apps.** For role `app`, `hs.init` carries the device attestation in
+  `device_attest` (§11.7).
   In the same flush as the device record, the vault adds the app's `ik`,
   `kem` and attestation binding to the sealed header's unlock keys.
 - **Re-pairing.** A re-paired device MUST use a new relay key, because its
@@ -1073,10 +1196,10 @@ leave enclave memory.
   "app": { "ik": "<b64>", "kem": "<b64 ek>",
            "relay": {"url": "<base>", "mailbox": "<id>", "pk": "<b64>"},
            "open_token": "<open token for MB(app), ≤ 10 min>", "name": "<device name>",
-           "app_attest": { } } }
+           "device_attest": { } } }
 ```
 
-`app_attest` is present only on iOS (§11.7).
+`device_attest` is REQUIRED (§11.7).
 
 ```
 App               Relay        Member API               SQS/Parent       Enclave
@@ -1113,8 +1236,10 @@ App               Relay        Member API               SQS/Parent       Enclave
 **Rules:**
 
 - **Binding.** The enclave MUST reject the request if `user_guid` or
-  `request_id` in the ciphertext differ from the queue message, or if `ts`
-  is more than 5 minutes off. It records the queue's `vault_id` in the sealed
+  `request_id` in the ciphertext differ from the queue message, or if the
+  inner `ts` (§5.3) is more than 5 minutes off. The inner `id` of an
+  alternate-channel request equals its `request_id`, and its `sender_kid`
+  is all-zero. It records the queue's `vault_id` in the sealed
   header and in vault state.
 - **Provisional vaults.** A new vault stays **provisional** until
   `vault.enroll.confirm` arrives. If no confirmation arrives within 24 h, a
@@ -1132,17 +1257,20 @@ App               Relay        Member API               SQS/Parent       Enclave
   "device_ik": "<b64>", "pin": "<digits>",
   "min_state_seq": 1234, "min_header_seq": 1301,
   "token": "<fresh standing token for MB(device), sub = vault relay key>",
-  "app_attest_assertion": { },
+  "device_assertion": { },
   "sig": "<b64 Ed25519 by device_ik>" }
 ```
 
-`app_attest_assertion` is present only on iOS (§11.7). `sig` covers the
-following string, where each `\n` is a literal newline:
+`device_assertion` is REQUIRED (§11.7). `sig` covers the following string,
+where each `\n` is a literal newline:
 
 ```
 "vettid/vms/2/unlock" \n user_guid \n vault_id \n request_id \n ts \n etk_kid_hex \n
 min_state_seq \n min_header_seq \n hex(SHA-256(pin)) \n hex(SHA-256(token))
 ```
+
+`ts` is the request's inner `ts` (§5.3). Integers are decimal, hex is
+lowercase, and there is no trailing newline. No field may contain CR or LF.
 
 ```
 App        Member API                   SQS/Parent                 Enclave
@@ -1235,6 +1363,24 @@ member API sees none of it. The challenge is bound to the request:
 ```
 challenge = SHA-256("vettid/vms/2/devatt" || request_id || vault_id_or_empty || ts)   # inside the envelope
 ```
+
+`request_id` and `vault_id` are the ASCII strings exactly as carried in
+JSON (`vault_id` is empty at enrollment), and `ts` is the request's inner
+`ts` (§5.3). Both have fixed lengths, so the concatenation is unambiguous.
+Android and iOS use the same challenge.
+
+**Wire fields.** Enrollment (§11.3) and app pairing (§6.7) carry
+`device_attest`; unlock (§11.4) carries `device_assertion`:
+
+```json
+device_attest:    {"platform": "android", "chain": ["<b64 DER cert, leaf first>", "..."]}
+                | {"platform": "ios", "key_id": "<b64>", "attestation": "<b64 CBOR attestation object>"}
+device_assertion: {"platform": "android", "sig": "<b64 DER ECDSA P-256 signature over challenge>"}
+                | {"platform": "ios", "assertion": "<b64 CBOR assertion>"}
+```
+
+`chain` has 1–10 certificates. Unknown members are ignored; a missing or
+mistyped member, or another `platform`, is rejected.
 
 Each platform has a **device attestation key**: a hardware-held signing key
 that is attested once, when the app enrolls or pairs (§6.7), and then signs
@@ -1481,9 +1627,10 @@ future decision.
 The owner's v0.1 review resolved every design question that v0.1 left open.
 Follow-ups:
 
-1. **Vectors.** Generate the §16 vectors, including vectors that pin
-   MLKEM768X25519 interoperability between Go `crypto/hpke`, CryptoKit and
-   BouncyCastle (codepoint `0x647a`, `ek` 1,216 bytes, `enc` 1,120 bytes).
+1. **Vectors.** The §16 vectors are generated (vettid-vault). Still open:
+   reproduce them with CryptoKit and BouncyCastle to pin MLKEM768X25519
+   interoperability (codepoint `0x647a`, `ek` 1,216 bytes, `enc` 1,120
+   bytes).
 2. **Schemas.** Specify the per-feature body schemas, starting with
    connections, messaging and calls, and the `sync.since` cursor.
 3. **Push.** Specify the push-gateway integration (§14) when that service is
@@ -1493,40 +1640,96 @@ Follow-ups:
 
 ## 16. Test vectors
 
-These vectors use fixed seeds and are for **test use only**. The reference
-implementation generates the TODO values, and the Go, Kotlin and Rust clients
-MUST reproduce them byte for byte. HPKE encapsulation randomness is supplied
-through a deterministic test hook.
+These vectors use fixed seeds and are for **test use only**. The complete
+vectors, with every input, are the JSON files in
+[vettid-vault `testdata/vectors/`](https://github.com/vettid/vettid-vault/tree/main/testdata/vectors);
+the values below are excerpts, and the files are authoritative. The Go,
+Kotlin, Swift and Rust clients MUST reproduce them byte for byte.
+
+- HPKE encapsulation randomness is 64 bytes: bytes [0:32] are the ML-KEM-768
+  encapsulation randomness `m`, bytes [32:64] the X25519 ephemeral secret
+  (X-Wing `EncapsulateDerand`). Implementations supply it through a
+  deterministic test hook.
+- A KEM key's 32-byte seed is the RFC 9180 serialized private key; it is
+  expanded with SHAKE256 as in draft-ietf-hpke-pq.
+- The session vector's inner plaintext is the sealed one with `"seq":1`
+  after `ts`.
+- Tokens, ids, PIN and claim ids in the vectors are dummy values.
 
 ```
-§3.2 keys
-  vault ik seed               : 32 x 0x04       vault ik pk (b64)       : TODO
-  vault MLKEM768X25519 seed   : 32 x 0x05       vault ek (1216 B, b64)  : TODO
-  vault static kid (hex)      : TODO
+§3.2 keys                                                       (keys.json)
+  vault ik seed               : 32 x 0x04
+  vault ik pk (b64)           : ypOsFwUYcHHWe4PH/w7+gQjo7EUwV113JoeTM9vavnw=
+  vault MLKEM768X25519 seed   : 32 x 0x05   vault ek: 1216 B (keys.json)
+  vault static kid (hex)      : 40d6c2c8471844a9
 
-§4.3 sealing (HPKE base, suite 2)
+§4.3 sealing (HPKE base, suite 2)                               (hpke.json)
   encapsulation randomness    : 64 x 0x07
-  enc (1120 B) : TODO   shared_secret : TODO   key / base_nonce / exporter_secret : TODO
+  enc (1120 B)                : hpke.json
+  shared_secret               : 3239a1c6d8d76895e408c7e65ee38d8b43f4732c7a74c5ccfbac6bd63f743bce
+  key                         : f8cfa15ec73bf1031bc50dfc462438a3d6a3d933f7edf6b28bc149fd7400e2a6
+  base_nonce                  : 6666ec691911c5f6f1161207
+  exporter_secret             : 1d7856a1a77eee3accf4e69fb2353f2421e3f15584739e5c6df73d487b4b66b4
 
-§5.2 sealed envelope
+§5.2 sealed envelope                                            (envelope_sealed.json)
   inner : {"v":1,"id":"01JB2Z6V9K3M4N5P6Q7R8S9T0V","type":"test.ping","ts":"2026-10-01T12:00:00.000Z","body":{}}
-  padded length : 512     envelope length : 1668     envelope (b64) : TODO
+  padded length : 512     envelope length : 1668     sender_kid : 0000000000000000
 
-§5.2 session envelope
-  k_i2r : 32 x 0x08   nonce : 24 x 0x09   envelope length : 572   envelope (b64) : TODO
+§5.2 session envelope                                           (envelope_session.json)
+  k_i2r : 32 x 0x08   nonce : 24 x 0x09   sender_kid : 8 x 0x02   recipient_kid : 8 x 0x01
+  envelope length : 572
 
-§6.3 handshake (initiator ik / kem / eph seeds 32 x 0x0a / 0x0b / 0x0c; randomness 64 x 0x0d, 0x0e)
-  K_s, K_e, th1, th, prk, k_i2r, k_r2i, kid_i2r, kid_r2i, rk, epoch_id : TODO
-  sas : TODO      sig_R, sig_I : TODO
+§6.3 handshake, purpose connection                              (handshake.json)
+  initiator ik / kem / eph seeds 32 x 0x0a / 0x0b / 0x0c; relay seeds vault 0x10, initiator 0x11
+  randomness hs.init 64 x 0x0d, hs.resp 64 x 0x0e; hs.fin nonce 24 x 0x0f
+  K_s      : 3e3921cbc2a89f56741ac74c5cb2a10db0dc327c80d113ece000ecdf55eabe2d
+  K_e      : 91bc195aaff1d13d0e8044800c42127df94fcf4231207adc9a84a1be29e0f866
+  th1      : 2999a1fe3626e7fe57ac901c35ee2b7ba7e2e6b92f85596a6a49aa96fa888bd7
+  th       : fd53f877211806d1f4fc0cfa30821d20201e44686e18fe1d222a5f2bd99c29d7
+  prk      : 4cf5ffe8a9d849d312f7313365f3a1fa583e17863cda7a43f97c1b8f84b94345
+  k_i2r    : cf67963c38497b503ebbcdfa8d78924395fe765f5dc37e8d18adeb472b26d379
+  k_r2i    : fe388025380567d3c310943e0352a374b0d0f890f98533fb47f667ee0148fa99
+  kid_i2r  : 1c14c8b40b51f614      kid_r2i : 752c20e9d8f53948
+  rk       : caf3de4dd468f538464963fdbfaa4eb549558ef03cfc1220879f43c2bb41e6dd
+  epoch_id : 42abe40a9588c5d779aebd3b7a3cc2b8
+  sas      : 696599
+  sig_R, sig_I, all three envelopes : handshake.json
 
-§11 alternate channel
-  descriptor bytes, user_data : TODO
-  unlock signing string, vault.unlock envelope (5252 B, b64) : TODO
-  devatt challenges (Android, iOS) : TODO
+§6.4 claim bundle                                               (invite.json)
+  k_b : 32 x 0x14   nonce : 24 x 0x15   blob, h, QR JSON, link : invite.json
+
+§11 alternate channel                                           (altchan.json)
+  ETK seed 32 x 0x06; descriptor bytes and user_data, devatt challenges
+  (enrollment and unlock), unlock signing string and signature, vault.unlock
+  envelope (5252 B, randomness 64 x 0x13) : altchan.json
 ```
+
+Cross-implementation checks against Apple CryptoKit and BouncyCastle are
+pending (§15, follow-up 1).
 
 ## 17. Changelog
 
+- **0.2.2** (2026-10-02): clarifications from the V1 implementation
+  (vettid-vault).
+  - `identity.rotate` statement format and chain rules (§3.4, §6.6).
+  - Strict inner-plaintext rules: types, duplicate names, ULIDs, timestamp
+    format, `seq` only in session mode, `re`/`status`/`error`, `type`
+    grammar, `body` an object (§5.3).
+  - Exact-bucket padding; over-padding is malformed (§5.4).
+  - Claim-check blob layout, AAD and `sha256` coverage (§5.5).
+  - Per-purpose handshake field rules: `ctx` encoding, tokens, relay
+    address, `suites`, kids; `hs.resp` `sender_kid` is all-zero (§6.2).
+  - Abort scope for the initiator; a bad `sig_I` leaves the responder
+    pending (§6.3).
+  - Bundle `kind` for pairing, whole-second bundle `exp` equal to QR `e`,
+    unpadded base64url in QR and links (§6.4).
+  - Sending continues in the old epoch until the new one activates; `rk`
+    is deleted with the send keys (§6.5).
+  - `device_attest` (Android and iOS) replaces `app_attest`, and
+    `device_assertion` replaces `app_attest_assertion` (§6.7, §11.3,
+    §11.4, §11.7); encodings of the devatt challenge and the unlock
+    signing string (§11).
+  - §16 filled in, with the complete vectors in vettid-vault.
 - **0.2.1** (2026-10-02): enclave TLS pins only the allowlisted hosts'
   roots and shares a few HTTP/2 connections per instance across vaults
   (§2.2, §12.2; VAULT-PLAN D5).

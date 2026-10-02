@@ -287,6 +287,12 @@ func TestAltchanEnrollUnlock(t *testing.T) {
 		aw.lock(a)
 	}
 
+	// A confirmed vault is never replaced (§11.3).
+	dup := aw.newApp("member-android", enclavetest.NewAndroidAttester(0x66, enclavetest.AndroidOptions{}))
+	if r := aw.enroll(dup, acPIN); r.OK || r.Code != "vault_exists" {
+		t.Fatalf("second enrollment of a member: %+v", r)
+	}
+
 	// Rolled-back state object.
 	a := aw.newApp("member-rollback", enclavetest.NewAndroidAttester(0x62, enclavetest.AndroidOptions{}))
 	aw.enroll(a, acPIN)

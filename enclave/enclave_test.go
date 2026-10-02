@@ -408,3 +408,26 @@ func TestEnrolledAttestationChecked(t *testing.T) {
 		t.Fatal("vault.enrolled rejected")
 	}
 }
+
+// §11.3 "Provisional vaults": a member's provisional vault blocks a new
+// enrollment for 24 h and may be replaced afterwards.
+func TestProvisionalReplacement(t *testing.T) {
+	f := newFx(t)
+	a := f.newApp("user-1", android(0x61))
+	if r := f.enroll(a, pin); !r.OK {
+		t.Fatal(r)
+	}
+	b := f.newApp("user-1", android(0x62))
+	if r := f.enroll(b, pin); r.OK || r.Code != "vault_exists" {
+		t.Fatalf("within 24 h: %+v", r)
+	}
+	f.clk.Add(25 * time.Hour)
+	f.w.SetStatusList(enclavetest.EmptyStatusList(f.clk.Now()))
+	if err := f.w.Instance(3).Maintain(); err != nil {
+		t.Fatal(err)
+	}
+	f.w.Publish()
+	if r := f.enroll(b, pin); !r.OK {
+		t.Fatalf("after 24 h: %+v", r)
+	}
+}

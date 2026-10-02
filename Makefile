@@ -57,8 +57,21 @@ check-tcb:
 	@for os in linux; do \
 	  if GOOS=$$os $(GO) list -deps $(ENCLAVEPKGS) | grep -E 'aws-sdk-go|smithy-go|vettid-vault/parent|hpkederand|mlkemtest|/devenclave|relaytest|enclavetest|memberapitest|parenttest'; then \
 	    echo "the enclave binary links the AWS SDK, the parent, or dev/test code"; exit 1; fi; done
-	@if GOOS=linux $(GO) list -deps $(ENCLAVEPKGS) | grep -q 'enclave/nsm' && GOOS=linux $(GO) list -deps $(ENCLAVEPKGS) | grep -q 'internal/vsock'; then :; else \
-	  echo "the release enclave binary does not use the real NSM and vsock"; exit 1; fi
+	@if GOOS=linux $(GO) list -deps $(ENCLAVEPKGS) | grep -q 'enclave/nsm' && GOOS=linux $(GO) list -deps $(ENCLAVEPKGS) | grep -q 'internal/vsock' && \
+	  GOOS=linux $(GO) list -deps $(ENCLAVEPKGS) | grep -q 'internal/seccomp'; then :; else \
+	  echo "the release enclave binary does not use the real NSM, vsock and seccomp"; exit 1; fi
+	@# D4 (VAULT-PLAN §5.3): vault and feature code cannot reach the
+	@# supervisor's internals, the vault process has no network, NSM or
+	@# parent, the supervisor runs no feature code, and none of them uses
+	@# unsafe or cgo directly.
+	@if GOOS=linux $(GO) list -deps ./vault/... ./features/... | grep -E 'vettid-vault/(enclave|parent|internal/(hostproto|vsock|vaultipc))'; then \
+	  echo "vault/feature code imports enclave, host or parent packages"; exit 1; fi
+	@if GOOS=linux $(GO) list -deps ./enclave/vaultproc | grep -E 'enclave/(supervisor|egress|awskms|nsm)|internal/vsock|vettid-vault/parent'; then \
+	  echo "the vault process links the supervisor, egress, KMS client, NSM, vsock or parent"; exit 1; fi
+	@if GOOS=linux $(GO) list -deps ./enclave/supervisor | grep -E 'vettid-vault/features|enclave/vaultproc'; then \
+	  echo "the supervisor links feature code or the vault process"; exit 1; fi
+	@if GOOS=linux $(GO) list -f '{{.ImportPath}} {{len .CgoFiles}} {{join .Imports " "}}' ./vault/... ./features/... ./enclave/vaultproc | \
+	  grep -E ' [1-9][0-9]* | unsafe( |$$)'; then echo "unsafe or cgo in vault, feature or vault-process code"; exit 1; fi
 	@echo "check-tcb: ok"
 
 # End-to-end tests against the real vettid-relay binary (built at the

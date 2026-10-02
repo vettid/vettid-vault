@@ -5,11 +5,13 @@ package main
 import (
 	"context"
 	"net"
+	"os"
 
 	"github.com/vettid/vettid-vault/enclave"
 	"github.com/vettid/vettid-vault/enclave/egress"
 	"github.com/vettid/vettid-vault/enclave/nsm"
 	"github.com/vettid/vettid-vault/enclave/supervisor"
+	"github.com/vettid/vettid-vault/enclave/vaultproc"
 	"github.com/vettid/vettid-vault/features/messaging"
 	"github.com/vettid/vettid-vault/internal/hostproto"
 	"github.com/vettid/vettid-vault/internal/vsock"
@@ -41,14 +43,31 @@ func platform() (supervisor.Config, error) {
 	if err != nil {
 		return supervisor.Config{}, err
 	}
+	exe, err := os.Executable()
+	if err != nil {
+		return supervisor.Config{}, err
+	}
 	return supervisor.Config{
 		Enclave: func(id string) enclave.Config { return enclave.ReleaseConfig(id, enclave.ReleaseRelayURL) },
 		NSM:     dev,
 		Control: func(ctx context.Context) (net.Conn, error) { return vsock.Dial(ctx, vsock.CIDHost, controlPort) },
 		Egress:  tr,
-		Features: func() []vault.Feature {
-			return []vault.Feature{messaging.New()}
-		},
+		// One process per vault, each under its own uid (D4).
+		Proc:       supervisor.ProcConfig{Exec: []string{exe, vaultproc.Arg}, UIDBase: vaultUIDBase},
+		RelayHosts: []string{"relay.vettid.org"},
+		Harden:     true,
+	}, nil
+}
+
+// vaultUIDBase is the first uid (and gid) of the vault processes.
+const vaultUIDBase = 200000
+
+// vaultPlatform is a vault process's pinned configuration.
+func vaultPlatform([]string) (vaultproc.Platform, error) {
+	return vaultproc.Platform{
+		Config:         func(id string) enclave.Config { return enclave.ReleaseConfig(id, enclave.ReleaseRelayURL) },
+		Features:       func() []vault.Feature { return []vault.Feature{messaging.New()} },
+		RequireSeccomp: true,
 	}, nil
 }
 

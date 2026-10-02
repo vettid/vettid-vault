@@ -22,10 +22,11 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"runtime"
-	"runtime/debug"
+	"net/url"
+	"os"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -54,14 +55,21 @@ type Config struct {
 	KMSEndpoint string
 	// StatusListURL overrides StatusListURL.
 	StatusListURL string
-	// Features returns fresh feature handlers for one vault.
-	Features func() []vault.Feature
+	// Proc configures the vault processes (one per unlocked vault, D4).
+	Proc ProcConfig
+	// RelayHosts are the relay hosts vault processes may reach (through
+	// the shared egress); default: the host of the instance's relay URL.
+	RelayHosts []string
+	// Harden makes the supervisor non-dumpable and tightens ptrace
+	// (release and development binaries; not tests).
+	Harden bool
 	// MaxVaults caps the vaults running at once (least recently active
 	// is locked first, §12.3); 0 = no cap.
 	MaxVaults int
-	// MemoryHigh is the heap size above which the least recently active
-	// vault is locked (§12.3 memory pressure); 0 = no limit.
-	MemoryHigh uint64
+	// MemoryReserve: while the enclave's available memory is below it,
+	// the least recently active vault is locked (§12.3 memory pressure);
+	// 0 = no limit.
+	MemoryReserve uint64
 	// DownLock is how long the parent may be unreachable before every
 	// vault is locked (its leases are no longer renewed). Default 120 s.
 	DownLock time.Duration
@@ -87,6 +95,14 @@ type Supervisor struct {
 
 	descMu   sync.Mutex
 	lastDesc []byte
+
+	// Set by start: what the supervisor brokers for vault processes.
+	host      *procHost
+	st        *hostStore
+	kms       *awskms.Client
+	encCfg    enclave.Config
+	relayHTTP *http.Client
+	relays    map[string]bool
 }
 
 // Errors.
@@ -97,7 +113,7 @@ var (
 
 // New prepares a supervisor.
 func New(cfg Config) (*Supervisor, error) {
-	if cfg.Enclave == nil || cfg.NSM == nil || cfg.Control == nil || cfg.Egress == nil {
+	if cfg.Enclave == nil || cfg.NSM == nil || cfg.Control == nil || cfg.Egress == nil || len(cfg.Proc.Exec) == 0 {
 		return nil, enclave.ErrConfig
 	}
 	if cfg.Now == nil {
@@ -127,6 +143,11 @@ func (s *Supervisor) Logger() *slog.Logger { return s.log }
 // Run connects to the parent, starts the instance and serves until ctx
 // ends. On return every vault is locked.
 func (s *Supervisor) Run(ctx context.Context) error {
+	if s.cfg.Harden {
+		for _, n := range hardenSelf() {
+			s.log.Warn("hardening: " + n)
+		}
+	}
 	m, err := s.cfg.NSM.Measurements()
 	if err != nil {
 		return err
@@ -226,18 +247,23 @@ func (s *Supervisor) start() error {
 		kms.Endpoint = s.cfg.KMSEndpoint
 	}
 	kms.Now = s.now
-	st := &hostStore{l: s.link, onWrite: s.touchKey}
-	in, err := enclave.New(enclave.Options{
-		Config: cfg, NSM: s.cfg.NSM, KMS: kms, Store: st,
-		StatusList: s.status.get,
-		// Long-poll collect over the shared HTTP/2 connections (§12.2):
-		// WebSocket would need a connection of its own per vault.
-		Vault:     vault.Options{HTTP: s.cfg.Egress.Client(60 * time.Second), WebSocket: false},
-		Features:  s.cfg.Features,
-		Lifecycle: s.lifecycle,
-		Stopped:   s.stopped,
-		Now:       s.now,
-	})
+	s.st = &hostStore{l: s.link, onWrite: s.touchKey}
+	s.kms, s.encCfg = kms, cfg
+	s.relayHTTP = s.cfg.Egress.Client(80 * time.Second)
+	s.relays = map[string]bool{}
+	hosts := s.cfg.RelayHosts
+	if len(hosts) == 0 {
+		if u, err := url.Parse(cfg.RelayURL); err == nil {
+			hosts = []string{u.Hostname()}
+		}
+	}
+	for _, h := range hosts {
+		s.relays[h] = true
+	}
+	s.host = newProcHost(s, s.cfg.Proc)
+	// The instance keeps the ETKs and the outer decryption; vaults run in
+	// their own processes and their secrets never enter this one (§12.4).
+	in, err := enclave.New(enclave.Options{Config: cfg, NSM: s.cfg.NSM, Store: s.st, Host: s.host, Lifecycle: s.lifecycle, Now: s.now})
 	if err != nil {
 		return err
 	}
@@ -300,28 +326,6 @@ func (s *Supervisor) lifecycle(ev vault.LifecycleEvent) {
 		s.forget(ev.VaultID)
 	}
 	s.link.notify(hostproto.KindLifecycle, hostproto.Strings(ev.Event, ev.VaultID, ev.Release, ev.VaultVersion, strconv.Itoa(ev.StateVersion))...)
-}
-
-// stopped is told when a vault's run loop ends on its own (split brain,
-// an internal lock, an error).
-func (s *Supervisor) stopped(id string, err error) {
-	reason := "error"
-	switch {
-	case errors.Is(err, vault.ErrSplitBrain):
-		reason = "split_brain"
-	case errors.Is(err, vault.ErrLocked):
-		reason = "locked"
-	}
-	s.log.Warn("vault stopped", "vault_id", id, "reason", reason)
-	s.forget(id)
-	s.link.notify(hostproto.KindStopped, hostproto.Strings(id, reason)...)
-	// A loop that ended on an error leaves an unlocked manager behind:
-	// lock it (asynchronously: the run goroutine is still finishing).
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		defer cancel()
-		_, _ = s.inst.Load().Lock(ctx, id)
-	}()
 }
 
 func (s *Supervisor) lockVault(ctx context.Context, id, why string) {
@@ -390,26 +394,40 @@ func (s *Supervisor) enforceCap(ctx context.Context) {
 	}
 }
 
-func heapInUse() uint64 {
-	var ms runtime.MemStats
-	runtime.ReadMemStats(&ms)
-	return ms.HeapInuse
+// memAvailable reads MemAvailable from /proc/meminfo (bytes; 0 if
+// unknown).
+func memAvailable() uint64 {
+	b, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return 0
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if rest, ok := strings.CutPrefix(line, "MemAvailable:"); ok {
+			kb, err := strconv.ParseUint(strings.TrimSuffix(strings.TrimSpace(rest), " kB"), 10, 64)
+			if err == nil {
+				return kb * 1024
+			}
+		}
+	}
+	return 0
 }
 
-// relieve locks least recently active vaults while the heap stays above
-// MemoryHigh.
+// relieve locks least recently active vaults while available memory stays
+// below MemoryReserve; each lock ends a process and frees its memory.
 func (s *Supervisor) relieve(ctx context.Context) {
-	if s.cfg.MemoryHigh == 0 {
+	if s.cfg.MemoryReserve == 0 {
 		return
 	}
-	for heapInUse() > s.cfg.MemoryHigh {
+	for {
+		avail := memAvailable()
+		if avail == 0 || avail >= s.cfg.MemoryReserve {
+			return
+		}
 		ids := s.lru()
 		if len(ids) == 0 {
 			return
 		}
 		s.lockVault(ctx, ids[0], "memory_pressure")
-		runtime.GC()
-		debug.FreeOSMemory()
 	}
 }
 
@@ -456,3 +474,23 @@ func (s *Supervisor) StatusList() *devattest.StatusList { return s.status.get() 
 
 // HTTPClient returns a client over the egress transport (tests).
 func (s *Supervisor) HTTPClient() *http.Client { return s.cfg.Egress.Client(60 * time.Second) }
+
+func (s *Supervisor) store() *hostStore { return s.st }
+
+func (s *Supervisor) relayHost(h string) bool { return s.relays[h] }
+
+// VaultPid returns the pid of a vault's process (tests).
+func (s *Supervisor) VaultPid(vaultID string) int {
+	if s.host == nil {
+		return 0
+	}
+	return s.host.Pid(vaultID)
+}
+
+// KillVault kills a vault's process without a flush (tests).
+func (s *Supervisor) KillVault(vaultID string) bool {
+	if s.host == nil {
+		return false
+	}
+	return s.host.Kill(vaultID)
+}

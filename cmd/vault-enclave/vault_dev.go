@@ -5,9 +5,11 @@ package main
 import (
 	"flag"
 	"log/slog"
+	"os"
 	"time"
 
 	"github.com/vettid/vettid-vault/enclave/supervisor"
+	"github.com/vettid/vettid-vault/enclave/vaultproc"
 	"github.com/vettid/vettid-vault/internal/enclavetest"
 )
 
@@ -23,12 +25,27 @@ func platform() (supervisor.Config, error) {
 	relayURL := flag.String("relay-url", "https://relay.vettid.test", "relay base URL (its host is allowlisted)")
 	maxVaults := flag.Int("max-vaults", 0, "vault cap (0 = none)")
 	downLock := flag.Duration("down-lock", 30*time.Second, "lock every vault after the parent is gone this long")
+	uidBase := flag.Int("vault-uid-base", 0, "run vault processes under uid/gid base+i (needs root; 0: keep ids)")
 	debug := flag.Bool("debug", false, "debug logging")
 	flag.Parse()
 	lvl := slog.LevelInfo
 	if *debug {
 		lvl = slog.LevelDebug
 	}
-	return enclavetest.DevSupervisor(enclavetest.DevOptions{Release: *release, Control: *control, Egress: *egress,
-		RelayURL: *relayURL, MaxVaults: *maxVaults, DownLock: *downLock, LogLevel: lvl})
+	exe, err := os.Executable()
+	if err != nil {
+		return supervisor.Config{}, err
+	}
+	cfg, err := enclavetest.DevSupervisor(enclavetest.DevOptions{Release: *release, Control: *control, Egress: *egress,
+		RelayURL: *relayURL, MaxVaults: *maxVaults, DownLock: *downLock, LogLevel: lvl,
+		VaultExec: append([]string{exe, vaultproc.Arg}, enclavetest.DevVaultArgs(*release, *relayURL)...)})
+	cfg.Proc.UIDBase = *uidBase
+	cfg.Harden = true
+	return cfg, err
+}
+
+// vaultPlatform (development): the TEST-ONLY configuration of the test
+// release, from the arguments the supervisor passed.
+func vaultPlatform(args []string) (vaultproc.Platform, error) {
+	return enclavetest.DevVaultPlatform(args)
 }

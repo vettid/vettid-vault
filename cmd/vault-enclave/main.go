@@ -3,6 +3,10 @@
 // ETKs and the alternate channel, the egress transport, and one vault
 // manager per unlocked vault.
 //
+// The same binary, started with vaultproc.Arg, is one vault's process
+// (VAULT-MESSAGING §12.4): the supervisor re-executes itself for every
+// unlocked vault, so there is one measured image.
+//
 // Release builds (no build tags) talk to the parent over vsock, use the
 // real NSM, and reach only relay.vettid.org, kms.<region>.amazonaws.com
 // and android.googleapis.com through TLS against pinned roots. Development
@@ -23,20 +27,30 @@ import (
 	"syscall"
 
 	"github.com/vettid/vettid-vault/enclave/supervisor"
+	"github.com/vettid/vettid-vault/enclave/vaultproc"
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == vaultproc.Arg {
+		// A vault's own process (D4), started by the supervisor.
+		p, err := vaultPlatform(os.Args[2:])
+		if err != nil {
+			os.Exit(vaultproc.ExitError)
+		}
+		vaultproc.Main(p)
+		return
+	}
 	cfg, err := platform()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "vault-enclave:", err)
 		os.Exit(2)
 	}
 	if total := memTotal(); total > 0 {
-		// Collect hard before the enclave runs out of memory, and lock
-		// the least recently active vaults above 70% (§12.3).
-		debug.SetMemoryLimit(int64(total) * 85 / 100)
-		if cfg.MemoryHigh == 0 {
-			cfg.MemoryHigh = total * 70 / 100
+		// Lock the least recently active vaults (ending their processes)
+		// while less than 15% of the enclave's memory is available (§12.3).
+		debug.SetMemoryLimit(int64(total) * 25 / 100) // the supervisor's own heap
+		if cfg.MemoryReserve == 0 {
+			cfg.MemoryReserve = total * 15 / 100
 		}
 	}
 	s, err := supervisor.New(cfg)

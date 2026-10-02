@@ -23,6 +23,17 @@ type statusFetcher struct {
 
 	mu   sync.Mutex
 	list *devattest.StatusList
+	raw  []byte // the list as fetched, for vault processes
+}
+
+// rawList returns the fetched bytes and the fetch time.
+func (s *statusFetcher) rawList() ([]byte, time.Time, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.list == nil {
+		return nil, time.Time{}, false
+	}
+	return s.raw, s.list.FetchedAt, true
 }
 
 func (s *statusFetcher) get() *devattest.StatusList {
@@ -53,7 +64,7 @@ func (s *statusFetcher) fetch(ctx context.Context) error {
 		return err
 	}
 	s.mu.Lock()
-	s.list = l
+	s.list, s.raw = l, b
 	s.mu.Unlock()
 	return nil
 }

@@ -1,5 +1,6 @@
 GO        ?= go
-FUZZTIME  ?= 20s
+FUZZTIME  ?= 50000x
+FUZZMINIMIZE ?= 200x
 # Packages that ship. They must never link the vector-only code, the dev
 # enclave (dev sealer, PIN constructors) or test harnesses.
 LIBPKGS   := ./vms/suite ./vms/envelope ./vms/handshake ./vms/invite ./vms/altchan \
@@ -54,13 +55,17 @@ e2e:
 vectors:
 	$(GO) generate ./vms/vectors
 
-# Every Fuzz* target in every package runs for FUZZTIME. Seed corpora are the
-# f.Add seeds in the tests (plus any regression inputs under testdata/fuzz).
+# Every Fuzz* target in every package runs for FUZZTIME. Budgets are
+# execution counts, not durations: a time-based -fuzztime can expire while a
+# worker is minimizing and fail with "context deadline exceeded" on a loaded
+# runner (golang/go#56238), with no finding. Minimization of a crasher is
+# bounded by a count too. Seed corpora are the f.Add seeds in the tests (plus
+# any regression inputs saved under testdata/fuzz).
 fuzz:
 	@set -e; for pkg in $$($(GO) list ./...); do \
 	  for f in $$($(GO) test -list '^Fuzz' $$pkg | grep '^Fuzz' || true); do \
 	    echo "== $$pkg $$f"; \
-	    $(GO) test $$pkg -run '^$$' -fuzz "^$$f\$$" -fuzztime $(FUZZTIME); \
+	    $(GO) test $$pkg -run '^$$' -fuzz "^$$f\$$" -fuzztime $(FUZZTIME) -fuzzminimizetime $(FUZZMINIMIZE); \
 	  done; \
 	done
 

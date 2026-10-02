@@ -101,7 +101,7 @@ make race      # the same under -race
 make lint      # go vet + staticcheck (pinned), default and vmsvectors builds
 make check-tcb # no vector-only, dev-enclave or test code in release packages
 make e2e       # runtime + client against the real relay binary (race)
-make fuzz      # every fuzz target, FUZZTIME each (default 20s)
+make fuzz      # every fuzz target, FUZZTIME executions each (default 50000x)
 make vectors   # regenerate testdata/vectors
 make scan      # gitleaks over the full history
 ```

@@ -28,8 +28,8 @@ jobs:
         run: |
           go test -race -count=1 ./...
           go test -race -count=1 -tags vmsvectors ./...
-      - name: fuzz (short)
-        run: make fuzz FUZZTIME=10s
+      - name: fuzz (short, execution-count budgets)
+        run: make fuzz
 
   e2e:
     # V2 exit criteria against the real relay binary (go install of

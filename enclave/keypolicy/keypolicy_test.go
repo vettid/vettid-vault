@@ -2,6 +2,7 @@ package keypolicy
 
 import (
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -310,10 +311,16 @@ func FuzzCheckPolicy(f *testing.F) {
 func FuzzPolicyDocument(f *testing.F) {
 	m := testManifest(f)
 	f.Add(examplePolicy())
+	f.Add(strings.Replace(examplePolicy(), `"vettid-release-4"`, "\"vettid-release-\xff\"", 1)) // invalid UTF-8 in Id
 	f.Fuzz(func(t *testing.T, doc string) {
 		r, err := Check(Input{KeyARN: arn4, Account: acct, Region: region, Manifest: m, Target: 4,
 			DescribeKey: []byte(describe(arn4)), GetKeyPolicy: []byte(policyResp(doc)), ListGrants: []byte(noGrants)})
-		if err == nil && r.PolicySHA256 != sha256.Sum256([]byte(doc)) {
+		// The hash covers the policy string as KMS returned it: the JSON
+		// encoding above replaces invalid UTF-8, so compare with the decoded
+		// value.
+		var got string
+		_ = json.Unmarshal(strictjson.MarshalString(doc), &got)
+		if err == nil && r.PolicySHA256 != sha256.Sum256([]byte(got)) {
 			t.Fatal("hash")
 		}
 	})

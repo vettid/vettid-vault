@@ -353,3 +353,17 @@ func TestULID(t *testing.T) {
 		}
 	}
 }
+
+// §4.1/§13.4: every envelope this library produces carries version 2 and
+// suite 2 (never suite 1) in its header, which is part of the AAD.
+func TestEnvelopesCarrySuite2(t *testing.T) {
+	padded, _ := Pad([]byte(specInner))
+	s, _ := SealSession(key32(8), suite.Kid{2}, suite.Kid{1}, padded)
+	k := testKey(t, 5)
+	sl, _, _ := SealSealed(k.Public(), suite.Anonymous, padded)
+	for _, raw := range [][]byte{s, sl} {
+		if raw[0] != 2 || raw[1] != byte(suite.Suite2) || raw[3] != 0 {
+			t.Fatalf("header % x", raw[:4])
+		}
+	}
+}

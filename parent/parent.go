@@ -599,11 +599,33 @@ func (p *Parent) renew(ctx context.Context, id string) {
 func (p *Parent) acquire(ctx context.Context, id string) error {
 	now := p.now()
 	exp := now.Add(p.cfg.LeaseLength)
-	if err := p.cfg.Tables.AcquireLease(ctx, id, p.cfg.InstanceID, now.Unix(), exp.Unix()); err != nil {
+	err := p.cfg.Tables.AcquireLease(ctx, id, p.cfg.InstanceID, now.Unix(), exp.Unix())
+	if !errors.Is(err, ErrLeaseHeld) {
 		return err
 	}
+	// Held by another instance: take it over only if that instance is not
+	// live (no heartbeat for 90 s), conditional on the exact lease (§11.1).
+	holder, hexp, lerr := p.cfg.Tables.Lease(ctx, id)
+	if lerr != nil || holder == "" || holder == p.cfg.InstanceID {
+		return err
+	}
+	hb, herr := p.cfg.Tables.InstanceHeartbeat(ctx, holder)
+	if herr == nil && now.Unix()-hb <= liveHeartbeat {
+		return err // a live holder keeps its lease
+	}
+	if herr != nil && !errors.Is(herr, ErrNotFound) {
+		return herr
+	}
+	if terr := p.cfg.Tables.TakeoverLease(ctx, id, p.cfg.InstanceID, holder, hexp, exp.Unix()); terr != nil {
+		return terr
+	}
+	p.log.Info("lease taken over from an instance that is not live", "vault_id", id, "from", holder)
 	return nil
 }
+
+// liveHeartbeat is how old a heartbeat may be for its instance to be
+// live (§11.1).
+const liveHeartbeat = 90
 
 // isRunning reports whether the enclave runs the vault.
 func (p *Parent) isRunning(id string) bool {

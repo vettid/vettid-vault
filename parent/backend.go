@@ -105,6 +105,12 @@ type Tables interface {
 	// AcquireLease sets the lease if it is absent, expired at now, or
 	// already this instance's (§11.1); ErrLeaseHeld otherwise.
 	AcquireLease(ctx context.Context, vaultID, instanceID string, now, expires int64) error
+	// Lease returns a vault's lease (instance "" if none).
+	Lease(ctx context.Context, vaultID string) (instanceID string, expires int64, err error)
+	// TakeoverLease replaces a lease held by an instance that is not live,
+	// conditional on the exact lease it replaces (§11.1, 0.3.2);
+	// ErrLeaseHeld if it changed.
+	TakeoverLease(ctx context.Context, vaultID, instanceID, oldInstance string, oldExpires, expires int64) error
 	// RenewLease extends this instance's lease; ErrLeaseHeld if it is
 	// not this instance's.
 	RenewLease(ctx context.Context, vaultID, instanceID string, expires int64) error

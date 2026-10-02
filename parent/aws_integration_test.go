@@ -112,6 +112,22 @@ func TestAWSBackend(t *testing.T) {
 	if err := a.AcquireLease(ctx, "v1", "i2", 300, 480); err != nil {
 		t.Fatalf("expired lease not taken: %v", err)
 	}
+	// Takeover only on the exact lease.
+	if id, exp, err := a.Lease(ctx, "v1"); err != nil || id != "i2" || exp != 480 {
+		t.Fatalf("lease: %q %d %v", id, exp, err)
+	}
+	if err := a.TakeoverLease(ctx, "v1", "i3", "i2", 479, 600); !errors.Is(err, ErrLeaseHeld) {
+		t.Fatalf("takeover of another lease value: %v", err)
+	}
+	if err := a.TakeoverLease(ctx, "v1", "i3", "i2", 480, 600); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.TakeoverLease(ctx, "v1", "i2", "i2", 480, 700); !errors.Is(err, ErrLeaseHeld) {
+		t.Fatalf("second takeover: %v", err)
+	}
+	if err := a.TakeoverLease(ctx, "v1", "i2", "i3", 600, 480); err != nil {
+		t.Fatal(err)
+	}
 	// i1's events no longer apply.
 	pcr := "aa" + hex.EncodeToString(make([]byte, 47))
 	if err := a.Lifecycle(ctx, Lifecycle{Event: "unlocked", VaultID: "v1", Release: pcr, VaultVersion: pcr, StateVersion: 1}, "i1", time.Now()); err != nil {

@@ -315,6 +315,7 @@ func TestRequestsAndLeases(t *testing.T) {
 
 	// A lease held by another live instance: the request expires without
 	// reaching the enclave.
+	h.tables.PutInstanceRow(parent.InstanceRow{InstanceID: "i-other", HeartbeatAt: time.Now().Unix()})
 	h.tables.SetLease(vaultID, "i-other", time.Now().Add(time.Minute).Unix())
 	n := len(e.queued)
 	if s := send("unlock", "01JEEEEEEEEEEEEEEEEEEEEEEE"); s.Status != "expired" {
@@ -322,6 +323,19 @@ func TestRequestsAndLeases(t *testing.T) {
 	}
 	if len(e.queued) != n {
 		t.Fatal("request forwarded despite a foreign lease")
+	}
+
+	// A live-looking lease of an instance that is not live (no heartbeat
+	// for 90 s) is taken over, conditional on the exact lease (§11.1).
+	h.tables.PutInstanceRow(parent.InstanceRow{InstanceID: "i-dead", HeartbeatAt: time.Now().Add(-5 * time.Minute).Unix()})
+	h.tables.SetLease(vaultID, "i-dead", time.Now().Add(time.Minute).Unix())
+	send("unlock", "01JFFFFFFFFFFFFFFFFFFFFFFF")
+	waitFor(t, "lease taken over", func() bool {
+		r, _ := h.tables.Vault(vaultID)
+		return r.LeaseInstance == "i-test" || r.LeaseInstance == ""
+	})
+	if len(e.queued) != n+1 {
+		t.Fatal("request not forwarded after a takeover")
 	}
 
 	// Lease lost: another instance takes the lease of a running vault.

@@ -370,6 +370,36 @@ func (a *AWS) AcquireLease(ctx context.Context, vaultID, instanceID string, now,
 		map[string]ddbtypes.AttributeValue{":l": leaseValue(instanceID, expires), ":u": s(isoNow(time.Unix(now, 0))), ":now": n(now), ":me": s(instanceID)})
 }
 
+// Lease implements Tables.
+func (a *AWS) Lease(ctx context.Context, vaultID string) (string, int64, error) {
+	out, err := a.ddb.GetItem(ctx, &dynamodb.GetItemInput{TableName: &a.cfg.VaultsTable, ConsistentRead: aws.Bool(true),
+		Key: map[string]ddbtypes.AttributeValue{"vault_id": s(vaultID)}})
+	if err != nil {
+		return "", 0, errClass("ddb get vault", err)
+	}
+	l, ok := out.Item["lease"].(*ddbtypes.AttributeValueMemberM)
+	if !ok {
+		return "", 0, nil
+	}
+	iid, _ := l.Value["instance_id"].(*ddbtypes.AttributeValueMemberS)
+	exp, _ := l.Value["lease_expires_at"].(*ddbtypes.AttributeValueMemberN)
+	if iid == nil || exp == nil {
+		return "", 0, nil
+	}
+	e, err := strconv.ParseInt(exp.Value, 10, 64)
+	if err != nil {
+		return "", 0, err
+	}
+	return iid.Value, e, nil
+}
+
+// TakeoverLease implements Tables.
+func (a *AWS) TakeoverLease(ctx context.Context, vaultID, me, oldInstance string, oldExpires, expires int64) error {
+	const cond = "attribute_exists(vault_id) AND #lease.#iid = :old AND #lease.#exp = :oldexp"
+	return a.updateVault(ctx, vaultID, "SET #lease = :l", cond, names(cond, nil),
+		map[string]ddbtypes.AttributeValue{":l": leaseValue(me, expires), ":old": s(oldInstance), ":oldexp": n(oldExpires)})
+}
+
 // RenewLease implements Tables.
 func (a *AWS) RenewLease(ctx context.Context, vaultID, instanceID string, expires int64) error {
 	const cond = "attribute_exists(vault_id) AND #lease.#iid = :me"

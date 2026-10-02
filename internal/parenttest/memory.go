@@ -354,6 +354,36 @@ func (t *Tables) AcquireLease(_ context.Context, vaultID, me string, now, expire
 	return nil
 }
 
+// Lease implements parent.Tables.
+func (t *Tables) Lease(_ context.Context, vaultID string) (string, int64, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	r := t.vaults[vaultID]
+	if r == nil {
+		return "", 0, nil
+	}
+	return r.LeaseInstance, r.LeaseExpires, nil
+}
+
+// TakeoverLease implements parent.Tables.
+func (t *Tables) TakeoverLease(_ context.Context, vaultID, me, old string, oldExp, expires int64) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	r := t.vaults[vaultID]
+	if r == nil || r.LeaseInstance != old || r.LeaseExpires != oldExp {
+		return parent.ErrLeaseHeld
+	}
+	r.LeaseInstance, r.LeaseExpires = me, expires
+	return nil
+}
+
+// PutInstanceRow sets a registry row (tests of liveness).
+func (t *Tables) PutInstanceRow(r parent.InstanceRow) {
+	t.mu.Lock()
+	t.instances[r.InstanceID] = r
+	t.mu.Unlock()
+}
+
 // RenewLease implements parent.Tables.
 func (t *Tables) RenewLease(_ context.Context, vaultID, me string, expires int64) error {
 	t.mu.Lock()

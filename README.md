@@ -9,8 +9,9 @@ member's devices, agents and connections over the
 
 **Phase V3b — supervisor, parent and AWS transport.** On top of the V1
 crypto and wire library, the V2 vault runtime and the V3a alternate
-channel, the enclave now runs as a supervisor (one vault manager per
-unlocked vault) with the real NSM, talks to its parent over vsock, and
+channel, the enclave now runs as a supervisor plus one OS process per
+unlocked vault (VAULT-MESSAGING 0.3.2 §12.4: the supervisor never holds a
+vault's DEK or keys) with the real NSM, talks to its parent over vsock, and
 reaches the relay, AWS KMS and Google's attestation status list only
 through TLS it terminates itself against pinned roots, with its own SigV4
 KMS client. The parent (outside the trusted code base) runs the
@@ -24,7 +25,8 @@ LocalStack, the real relay and a stand-in for the member API
 
 | Package / command | What it does |
 |---|---|
-| `cmd/vault-enclave`, `enclave/supervisor` | PID 1 in the enclave: control connection to the parent, ETKs and the alternate channel, vault managers, lease-lost and memory-pressure locks, status-list fetch, sanitized logs |
+| `cmd/vault-enclave`, `enclave/supervisor` | PID 1 in the enclave: control connection to the parent, ETKs and the outer decryption of the alternate channel, the vault processes and their scoped channels, lease-lost and memory-pressure locks, status-list fetch, sanitized logs |
+| `enclave/vaultproc`, `internal/vaultipc`, `internal/seccomp` | One vault's process (the same binary re-executed): unseals with its own KMS Recipient key, runs the manager and features, signs its relay requests; its channel to the supervisor; its syscall filter |
 | `enclave/nsm` | `/dev/nsm`: attestation documents and PCRs (CBOR over the NSM ioctl) |
 | `enclave/egress` | The enclave's only egress: HTTPS to an allowlist, TLS 1.3 against per-host pinned roots, shared HTTP/2 connections |
 | `enclave/awskms` | AWS KMS JSON API with in-repo SigV4 and Recipient attestation |

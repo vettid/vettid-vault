@@ -15,7 +15,12 @@ import (
 	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -23,6 +28,7 @@ import (
 	"github.com/vettid/vettid-vault/enclave"
 	"github.com/vettid/vettid-vault/enclave/awskms"
 	"github.com/vettid/vettid-vault/enclave/supervisor"
+	"github.com/vettid/vettid-vault/enclave/vaultproc"
 	"github.com/vettid/vettid-vault/internal/enclavetest"
 	"github.com/vettid/vettid-vault/internal/parenttest"
 	"github.com/vettid/vettid-vault/internal/relaytest"
@@ -40,6 +46,7 @@ const hostRelay = "https://relay.vettid.test"
 
 type hostStack struct {
 	t       *testing.T
+	encBin  string
 	w       *enclavetest.World
 	objs    *parenttest.Objects
 	queues  *parenttest.Queues
@@ -49,6 +56,7 @@ type hostStack struct {
 }
 
 type hostInstance struct {
+	encBin  string
 	id      string
 	p       *parent.Parent
 	sup     *supervisor.Supervisor
@@ -75,6 +83,11 @@ func tlsFront(t *testing.T, h http.Handler, h2 bool, name string) string {
 
 func newHostStack(t *testing.T) *hostStack {
 	hs := &hostStack{t: t, objs: parenttest.NewObjects(), queues: parenttest.NewQueues(), tables: parenttest.NewTables(), resolve: map[string]string{}}
+	// Vault processes are the dev enclave binary re-executed (D4).
+	hs.encBin = filepath.Join(t.TempDir(), "vault-enclave")
+	if out, err := exec.Command("go", "build", "-tags", "devenclave", "-o", hs.encBin, "../cmd/vault-enclave").CombinedOutput(); err != nil {
+		t.Fatalf("build: %v\n%s", err, out)
+	}
 	hs.w = enclavetest.NewWorld(time.Now, hostRelay)
 	hs.w.AddRelease(enclavetest.Spec(3, "active"))
 	r := relaytest.Start(t, relaytest.Options{"RELAY_BASE_URL": hostRelay})
@@ -109,7 +122,7 @@ func listenTCP(t *testing.T) net.Listener {
 func (hs *hostStack) start(id string, n uint64, maxVaults int) *hostInstance {
 	t := hs.t
 	cl, el := listenTCP(t), listenTCP(t)
-	hi := &hostInstance{id: id, ctl: cl.Addr().String(), egr: el.Addr().String(), release: n,
+	hi := &hostInstance{encBin: hs.encBin, id: id, ctl: cl.Addr().String(), egr: el.Addr().String(), release: n,
 		queue: "http://sqs.test/000000000000/test-vault-control-" + id, in: make(chan *enclave.Instance, 4)}
 	p, err := parent.New(parent.Config{InstanceID: id, QueuePrefix: "test-vault-control-", ControlListener: cl, EgressListener: el,
 		Allow: parent.DefaultAllow("relay.vettid.test", "us-east-1"), Resolve: hs.resolve,
@@ -137,6 +150,7 @@ func (hs *hostStack) start(id string, n uint64, maxVaults int) *hostInstance {
 
 func (hi *hostInstance) startEnclave(t *testing.T, maxVaults int) {
 	cfg, err := enclavetest.DevSupervisor(enclavetest.DevOptions{Release: hi.release, Control: hi.ctl, Egress: hi.egr, RelayURL: hostRelay,
+		VaultExec: append([]string{hi.encBin, vaultproc.Arg}, enclavetest.DevVaultArgs(hi.release, hostRelay)...),
 		MaxVaults: maxVaults, LogLevel: slog.LevelError, OnReady: func(in *enclave.Instance) { hi.in <- in }})
 	if err != nil {
 		t.Fatal(err)
@@ -312,6 +326,7 @@ func waitUntil(t *testing.T, what string, ok func() bool) {
 }
 
 func TestHostStack(t *testing.T) {
+	base := vault.Unlocked() // managers other tests left in this process
 	hs := newHostStack(t)
 	a := hs.start("i-a", 3, 1) // at most one running vault
 
@@ -319,6 +334,12 @@ func TestHostStack(t *testing.T) {
 	m1.enroll(a, "11111111111111111111111111111111")
 	if !m1.status() {
 		t.Fatal("vault.status through the enclave's TLS egress")
+	}
+	// The vault runs in its own process: the supervisor (this test
+	// process) holds no manager and no DEK (§12.4).
+	pid1 := a.sup.VaultPid("11111111111111111111111111111111")
+	if pid1 == 0 || pid1 == os.Getpid() || vault.Unlocked() != base {
+		t.Fatalf("vault process %d; DEK-holding managers in the supervisor: %d", pid1, vault.Unlocked()-base)
 	}
 	if r, _ := hs.tables.Vault("11111111111111111111111111111111"); r.LeaseInstance != "i-a" || r.State != "unlocked" {
 		t.Fatalf("row %+v", r)
@@ -329,9 +350,10 @@ func TestHostStack(t *testing.T) {
 		t.Fatalf("objects %s", keys)
 	}
 
-	// Lock and unlock again.
+	// Lock and unlock again; the lock ends the vault's process.
 	m1.lock(a)
 	waitUntil(t, "lock", func() bool { return len(a.p.RunningVaults()) == 0 })
+	waitUntil(t, "vault process exited", func() bool { return syscall.Kill(pid1, 0) != nil })
 	if u, _ := m1.unlock(a); !u.OK {
 		t.Fatalf("unlock: %+v", u)
 	}
@@ -388,5 +410,47 @@ func TestHostStack(t *testing.T) {
 	}
 	if hs.queues.Exists(a.queue) {
 		t.Fatal("queue left behind")
+	}
+}
+
+// Killing one vault's process leaves the others running, and is reported
+// to the parent (the lease goes back).
+func TestVaultProcessIsolation(t *testing.T) {
+	base := vault.Unlocked()
+	hs := newHostStack(t)
+	a := hs.start("i-a", 3, 0)
+	m1 := hs.newApp("member-1", 0x61)
+	m1.enroll(a, "11111111111111111111111111111111")
+	m2 := hs.newApp("member-2", 0x62)
+	m2.enroll(a, "22222222222222222222222222222222")
+	p1, p2 := a.sup.VaultPid("11111111111111111111111111111111"), a.sup.VaultPid("22222222222222222222222222222222")
+	if p1 == 0 || p2 == 0 || p1 == p2 {
+		t.Fatalf("pids %d %d", p1, p2)
+	}
+	if vault.Unlocked() != base {
+		t.Fatal("a DEK in the supervisor")
+	}
+	// Vault processes are not dumpable: even their own user cannot read
+	// their memory or environment through /proc.
+	for _, pid := range []int{p1, p2} {
+		if _, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/environ"); err == nil {
+			t.Fatalf("vault process %d is dumpable", pid)
+		}
+	}
+	if !a.sup.KillVault("11111111111111111111111111111111") {
+		t.Fatal("kill")
+	}
+	if !m2.status() {
+		t.Fatal("the other vault stopped with the killed one")
+	}
+	if a.sup.VaultPid("22222222222222222222222222222222") != p2 {
+		t.Fatal("the other vault's process changed")
+	}
+	// The killed vault opens again in a new process.
+	if u, _ := m1.unlock(a); !u.OK {
+		t.Fatalf("unlock after kill: %+v", u)
+	}
+	if !m1.status() {
+		t.Fatal("status after kill")
 	}
 }

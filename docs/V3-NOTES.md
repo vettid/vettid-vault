@@ -75,8 +75,9 @@ settled in VAULT-MESSAGING **0.3.1**, which this code follows.
 
 | Package / command | Runs | What it does |
 |---|---|---|
+| `enclave/vaultproc`, `internal/vaultipc`, `internal/seccomp` | enclave (one process per vault) | The vault process, its channel to the supervisor, and its syscall filter |
 | `cmd/vault-enclave` | enclave (PID 1) | Release build: vsock, `/dev/nsm`, pinned roots, `enclave.ReleaseConfig`. `-tags devenclave` (`vault_dev.go`): TCP, fake NSM, test roots (`enclavetest.DevSupervisor`) |
-| `enclave/supervisor` | enclave | Control connection, instance (ETKs, alternate channel), vault managers, lease-lost and memory-pressure locks, descriptor push, status-list fetch, sanitized logs to the parent |
+| `enclave/supervisor` | enclave | Control connection, instance (ETKs, outer decryption), vault processes and their scoped channels, lease-lost and memory-pressure locks, descriptor push, status-list fetch, sanitized logs to the parent |
 | `enclave/nsm` | enclave | `NSM_IOCTL_REQUEST` (`_IOWR(0x0A, 0, 32)`) with `Attestation` and `DescribePCR` CBOR requests |
 | `enclave/egress` | enclave | The only way out: HTTPS to an allowlist, TLS 1.3 only, per-host pinned roots, host-name verification, ALPN h2 required for HTTP/2 hosts, no redirects, a few shared connection pools per host |
 | `enclave/awskms` | enclave | KMS `GenerateDataKey`/`Decrypt` (Recipient, `RSAES_OAEP_SHA_256`) and `DescribeKey`/`GetKeyPolicy`/`ListGrants`, SigV4 signing, credentials from the parent |
@@ -87,38 +88,97 @@ settled in VAULT-MESSAGING **0.3.1**, which this code follows.
 | `internal/memberapitest` | tests | Stand-in for vettid.org `lambda/member/vault.ts` over the same DynamoDB tables and SQS queues |
 | `client` (`MemberAPI`, `EnrollVia`, `UnlockVia`, `LockVia`) | apps | The member API's vault routes; `vaultctl api-enroll`, `api-unlock`, `api-lock` (dev) |
 
-## Process model (D4): goroutines, not processes
+## Process model (D4): one OS process per vault
 
-VAULT-PLAN D4 says "one vault manager process per unlocked vault". V3b
-runs one vault manager **goroutine** per unlocked vault inside the
-supervisor process, and proposes rewording D4 (below). Reasons:
+Owner decision after the first V3b review: "one process per vault, no
+chance of leakage" (VAULT-PLAN D4 and §5.3, VAULT-MESSAGING 0.3.2 §12.4).
 
-1. **D5 already puts every vault's traffic through one process.** TLS ends
-   in the enclave over a few HTTP/2 connections shared by all vaults, so
-   one process holds the TLS session keys and sees every vault's relay
-   requests (tokens, mailbox ids) before encryption. A per-vault process
-   would have to hand its HTTP requests to that process over IPC; the
-   supervisor would see them anyway.
-2. **The unlock happens in the supervisor.** The alternate channel (ETK
-   decryption, device attestation, the manifest, the KMS key check, DEK
-   derivation in `vault.UnlockAlt`) runs where the ETKs live. Moving the
-   resulting manager to a child would mean exporting the DEK and the
-   decrypted state across IPC from a process that already held them.
-3. **Same TCB, same image, same user.** Inside one enclave every process
-   is the same measured binary; process separation would not change what
-   an attacker with code execution in the enclave can reach (a sibling's
-   memory through `/proc` or ptrace, unless privileges are split, which
-   the image does not do).
-4. **Memory.** A Go process costs ~5–10 MB before it holds a vault; with
-   goroutines the enclave fits more vaults per GiB.
+**Supervisor** (PID 1, `enclave/supervisor`): the NSM broker, the ETKs and
+the outer decryption, binding and replay check of alternate-channel
+requests (`enclave.Instance`), the egress (TLS, shared HTTP/2 pool), the
+parent link, and the vault processes' lifecycle (`procHost`). It holds no
+DEK, pepper, relay/identity/KEM/session key or plaintext state. It sees
+the PIN transiently: it decrypts an enroll or unlock with the ETK, hands
+the decrypted request (`enclave.Job`) to the vault's process and wipes
+its copy and the decrypted buffers as soon as `Open` returns.
 
-What processes would have given, and what replaces it:
+**Vault process** (`enclave/vaultproc`, the enclave binary re-executed
+with `__vault-process`, so there is one measured image): started for an
+enroll or unlock, it builds an `enclave.Core` whose dependencies all go
+through its channel, generates its own ephemeral RSA Recipient key, has
+the supervisor attest that key (the attestation binds only the public
+key), and unwraps KMS's `CiphertextForRecipient` itself; derives the DEK;
+runs the vault manager and every feature handler; builds and signs its
+relay requests (the relay key never leaves it); encrypts its state. It
+exits on lock, so all of its memory is released; this closes the
+"secrets left in the Go heap after lock" gap of the goroutine design.
+The §11.10.7 key-policy check runs here too (it is the process that
+decides to seal; the KMS answers it checks are TLS-authenticated public
+data, so nothing is gained by checking in the supervisor, and the vault
+process then trusts no verdict from outside).
 
-| Property | Replacement |
-|---|---|
-| A crash in one vault does not take the others down | `runRecovered` (enclave) recovers a vault run-loop panic: the vault is zeroized without a flush (`ErrPanic`) and reported `Stopped`; the supervisor recovers panics in request handling (the request gets no answer and expires) |
-| Per-vault memory accounting and eviction | `MaxVaults` and `MemoryHigh` (default 70 % of `MemTotal`, `GOMEMLIMIT` 85 %): the least recently active vault (last state write or unlock) is locked like an owner request (§12.3), then `runtime.GC` and `debug.FreeOSMemory` |
-| Locking frees every copy of the vault's secrets | Lock zeroizes the DEK, keys and sessions (V2); copies the Go runtime made (JSON buffers, strings) stay until the GC reuses the memory. **Residual**; candidate fix: Go's `runtime/secret` once it leaves `GOEXPERIMENT` |
+**Channel** (`internal/vaultipc` over `hostproto` frames on a socketpair,
+version "1"):
+
+| Direction | Kind | Fields | Scope enforced by the supervisor |
+|---|---|---|---|
+| sup → vault | `Open` | version, instance_id, PCR0–2, job (9 fields) → ok, result, running | once per process |
+| sup → vault | `Lock` | → ok \| split_brain | |
+| vault → sup | `StoreGet` / `StorePut` / `StoreDelete` | key, data, if_match | `vaults/<own id>/…` and the member's own index object read/write; the member's previous vault (from the index, at enrollment) read-only |
+| vault → sup | `AttestRecipient` | RSA public key (DER) | RSA 2048–4096 only, no user_data or nonce (a vault cannot obtain an attestation that could forge an ETK descriptor) |
+| vault → sup | `AttestVault` | vault bundle, nonce | only while an enrollment is being opened; the supervisor computes user_data |
+| vault → sup | `KMS` | op, key ARN, a, b | ops GenerateDataKey, Decrypt, DescribeKey, GetKeyPolicy, ListGrants; ARN in the pinned namespace |
+| vault → sup | `HTTP` | method, URL, headers, body | https to the relay host(s) only, port 443, GET/POST/PUT/DELETE; a signed request must verify (relayauth) under the one relay key this process has used |
+| vault → sup | `StatusList` | → list, fetched_at | |
+| vault → sup | `Lifecycle` (notification) | event, vault_id, … | own vault_id only |
+| vault → sup | `Log` (notification) | level, message, k/v | tagged with the vault id |
+
+Every other kind is answered `denied`. `vault.Unlocked()` counts
+DEK-holding managers per process; the host-stack tests assert the
+supervisor's count does not move while vaults are unlocked.
+
+**Hardening applied per vault process:**
+
+- own uid and gid (`UIDBase` + slot, release base 200000), no
+  supplementary groups (needs root: PID 1 in the enclave is);
+- `PR_SET_DUMPABLE 0` (set in the process before it reads anything) and
+  `RLIMIT_CORE 0`; non-dumpable processes cannot be traced or have their
+  `/proc/<pid>/mem`/`environ` read, even by their own uid (tested);
+- seccomp filter (`internal/seccomp`, ~60 lines, `PR_SET_NO_NEW_PRIVS`,
+  TSYNC): `socket`, `socketpair`, `ptrace`, `process_vm_readv/writev` →
+  EPERM, foreign architecture → kill. Justification: AF_VSOCK is not
+  namespaced, so without it a vault process could open its own connection
+  to the parent's control port; the process needs no socket beyond its
+  inherited channel. Release builds exit if the filter cannot be
+  installed;
+- no inherited descriptor but the channel (fd 3; Go opens everything
+  close-on-exec), stdin/stdout/stderr on `/dev/null`, working directory
+  `/`, environment `GOMEMLIMIT`, `GOMAXPROCS=2`, `GOTRACEBACK=none` only;
+- rlimits: `RLIMIT_AS` 4 GiB (Go needs headroom for its arenas),
+  `RLIMIT_NOFILE` 64, no core files; `GOMEMLIMIT` 512 MiB;
+- `PDEATHSIG SIGKILL` and its own process group; a closed channel also
+  ends it.
+
+**Supervisor:** `PR_SET_DUMPABLE 0`; `/dev/nsm` chmod 0600 (only root,
+the supervisor, opens it); Yama `ptrace_scope` 3 where the kernel has it.
+
+**Locks:** owner request, memory pressure (least recently active vault
+while available memory is under 15 %), the vault cap, a lost lease, a lost
+parent and shutdown send `Lock` (flush, `vault.locking`, exit); a process
+that does not answer within 60 s is killed. A process that detects a
+split brain zeroizes and exits (code 3) without flushing; the supervisor
+reports it to the parent (`Stopped split_brain`), which releases the
+lease if it is still its own.
+
+**Not done (future):** a per-handler CPU-time limit (RLIMIT_CPU would
+count the whole process lifetime); a seccomp allow list; a read-only,
+empty root for vault processes (the enclave's rootfs is already
+read-only in practice, and they own no files).
+
+**To confirm on hardware (V5):** that the Nitro enclave kernel has
+`CONFIG_SECCOMP_FILTER` (release vault processes refuse to run without
+it), `/proc` mounted (re-exec via `/proc/self/exe`), setuid/setgid to
+unprivileged ids, and Yama (optional).
 
 ## Enclave ↔ parent
 
@@ -208,7 +268,9 @@ Fetched with `openssl s_client -showcerts` and verified with Go's
   Without an answer (enclave gone, timeout) the message stays for
   redelivery (replay set, or `etk_unknown` after an enclave restart).
 - **Leases** (`#lease` map `{instance_id, lease_expires_at}`): acquire if
-  absent, expired or own; renew every 60 s (length 180 s) while the
+  absent, expired or own, or take over the lease of an instance that is
+  not live (no heartbeat for 90 s), conditional on the exact old lease
+  (0.3.2); renew every 60 s (length 180 s) while the
   enclave reports the vault running; a renewal that finds another holder,
   or transient failures until 15 s before the lease lapses, is "lease
   lost": the enclave locks the vault (§12.3). Lifecycle writes and lease
@@ -275,6 +337,15 @@ Fetched with `openssl s_client -showcerts` and verified with Go's
   `supervisor` (host store mapping, writes never cancelled), `parent`
   (registry, store prefixes, requests and slots, leases, lease loss,
   enclave restart, fresh parent, forwarder allowlist).
+- Process model: `supervisor.TestChannelScope` (a vault process cannot
+  reach another vault's objects, another member's index, KMS keys outside
+  the namespace, KMS or other hosts over HTTP, user_data attestations, or
+  the supervisor-only kinds), `vaultproc.TestServeRefusesMalformedOpen`,
+  `vaultproc.TestHardenNotDumpable`, `seccomp.TestFilter`,
+  `enclave.TestJobRoundTrip`/`FuzzParseJob`, `vaultipc.FuzzDecodeHeaders`,
+  and `e2e.TestVaultProcessIsolation` (two vaults in two processes, no DEK
+  in the supervisor, processes not dumpable, killing one leaves the other
+  running, the killed vault reopens in a new process).
 - `e2e.TestHostStack` (`make e2e`): parent and supervisor in process with
   the in-memory backends, the real relay behind a TLS front and the fake
   KMS endpoint: enroll, unlock, lock, the vault cap evicting the least
@@ -313,10 +384,17 @@ Fetched with `openssl s_client -showcerts` and verified with Go's
 - `Instance.Lock`/`LockAll`/`Vaults` let the supervisor lock vaults for
   memory pressure, lease loss and shutdown; locks report a final flush
   that lost (`vault.ErrSplitBrain`).
-- A vault whose run loop ends on an error is locked by the supervisor
-  (before, it stayed in memory, unlocked and idle).
+- A vault whose run loop ends on an error is locked (before, it stayed in
+  memory, unlocked and idle); in a vault process the process then exits.
 
-## Spec and plan questions (proposed wording)
+## Spec and plan questions
+
+All resolved in VAULT-MESSAGING **0.3.2** (vettid.org docs PR
+"Docs: Vault Messaging 0.3.2; D4 process per vault"), with the owner's
+decisions: the lease takeover (1) is approved and implemented
+(`Tables.TakeoverLease`, conditional on the exact old lease); D4 (7) is
+a process per vault, not goroutines. The original questions, for the
+record:
 
 1. **§11.1 lease of a dead holder.** The parent takes a lease only if it
    is absent, expired or its own; the API already treats a lease whose

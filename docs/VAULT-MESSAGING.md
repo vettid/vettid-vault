@@ -1,7 +1,7 @@
 ---
 title: VAULT-MESSAGING
 status: draft
-version: 0.3.1
+version: 0.3.2
 date: 2026-10-02
 owner: Al Liebl (Mesmer)
 component: vault manager (enclave), parent forwarder, apps, desktops, agents, member API vault routes
@@ -14,6 +14,12 @@ related:
   - ACCOUNT-ADMIN-PLAN.md
   - MEMBER-API.md
 changelog:
+  - 0.3.2: V3b implementation (vettid-vault supervisor and parent):
+    lease takeover from a non-live holder, lease taken before forwarding,
+    host-written expired slots, lifecycle writes only by the lease holder,
+    renewal failures, parent restart and loss, KMS over HTTP/1.1, long-poll
+    in the enclave, one OS process per vault (§12.4, §13.3, §13.6),
+    cleanup of the member index object
   - 0.3.1: V3 implementation fixes (vettid-vault V3a, member API vault
     routes): the response slot and vault.enroll.result, result binding and
     codes, per-release header_seq, re-enrollment of an existing vault_id,
@@ -1319,8 +1325,10 @@ state `member` who has accepted the current terms (otherwise `403
 terms_required`). Lock and status stay available for an existing vault
 whatever the account state, because locking only reduces exposure.
 Cancelling the account blocks vault access (every route but lock) at once;
-after the 7-day grace period the API deletes the member's vault rows and
-the stored encrypted state and headers (§11.5).
+after the 7-day grace period the API deletes the member's vault rows, the
+stored encrypted state and headers (`vaults/<vault_id>/`), and the
+enclave's member index object (`users/<hex SHA-256("vettid/vms/2/user" ||
+0x00 || user_guid)>/vault`, which holds only a `vault_id`) (§11.5).
 
 **Instances and leases:**
 
@@ -1341,10 +1349,21 @@ the stored encrypted state and headers (§11.5).
 - **A vault is held by at most one instance**, recorded as the lease
   `{instance_id, lease_expires_at}` in its vault-table row (§11.5):
   - The parent acquires the lease with a conditional write, which succeeds
-    only if the lease is absent, expired or already its own. It does this
-    when the enclave takes the vault for enroll or unlock.
+    only if the lease is absent, expired, already its own, or held by an
+    instance that is not live (below). Taking over a non-live holder's
+    lease is conditional on the exact lease value it replaces
+    (`instance_id` and `lease_expires_at`), so two instances cannot both
+    take it.
+  - The parent acquires the lease **before** it forwards an enroll or
+    unlock to the enclave. If another instance holds the lease, the
+    parent does not forward the request: it deletes the message and marks
+    the response slot `expired` (§11.5, §11.9). If the request does not
+    leave the vault open (a refused unlock, a failed enrollment), the
+    parent releases the lease again.
   - While the vault is unlocked, the parent renews the lease every 60 s,
-    with a lease length of 180 s.
+    with a lease length of 180 s. A renewal that finds another holder, or
+    renewals that keep failing until 15 s before the lease expires, mean
+    the lease is **lost**: the enclave locks the vault (§12.3).
   - The parent releases the lease on lock.
 - **Routing for `GET /api/vault/enclave`:**
   - If the vault has a live lease, the API returns the descriptor of the
@@ -1585,7 +1604,10 @@ Nothing secret is stored:
   envelopes beyond the queue's own retention.
 - **Lifecycle reporting.** The enclave emits lifecycle events (`enrolled`,
   `unlocked`, `locked`, `deleted`, `moved` with the target release, carrying
-  `vault_version` and `state_version`). The parent writes them to the vault table.
+  `vault_version` and `state_version`, a number). The parent writes them to
+  the vault table only while it holds the vault's lease or no lease exists
+  (a conditional write), so an instance that lost a split brain cannot
+  overwrite the holder's values.
 - **Lifecycle values are advisory.** `vault_version` should match the
   `release` in the attested descriptor of the reporting instance, but a
   dishonest parent could misreport any of these values. They therefore serve
@@ -1609,7 +1631,10 @@ answers the parent with
 
 (`envelope` absent for lock, delete and `etk_unknown`). The parent writes
 the response slot: `status: "done"`, the `envelope` if any, and `code:
-"etk_unknown"` when the enclave reported it. `GET /api/vault/requests/{id}`
+"etk_unknown"` when the enclave reported it; or `status: "expired"` for a
+request it did not forward (lease held elsewhere, §11.1) or that the
+enclave could not read (no answer). It writes only slots that are still
+`queued`. `GET /api/vault/requests/{id}`
 returns `{status, envelope?, code?}`; `code` matches `[a-z_][a-z0-9_]*`
 and is a host code, never a sealed outcome. The parent writes the
 lifecycle events to the vault table and deletes the queue message when
@@ -1748,7 +1773,7 @@ envelopes.
 
 | Failure | Behaviour |
 |---|---|
-| Instance gone or lease moved | The API answers `409 instance_moved`, or the request expires with queue retention. The app refetches `/api/vault/enclave` and re-seals. |
+| Instance gone or lease moved | The API answers `409 instance_moved`, or the request expires (queue retention, or the parent found the lease held elsewhere and marked the slot `expired`). The app refetches `/api/vault/enclave` and re-seals. |
 | Unknown or expired `etk_kid` | The enclave reports `etk_unknown`; the response slot carries `code: "etk_unknown"` and no envelope (§11.5). The app refetches and retries. |
 | Decryption, binding, signature or attestation failure | Random bytes of the result's size, or the uniform sealed result (`attestation`). The API cannot tell which. |
 | Bad PIN, backoff, rollback | The uniform sealed result (§11.4) |
@@ -2276,7 +2301,10 @@ Connections whose standing tokens lapsed recover through reconnect tokens
   roots for the allowlisted hosts (VAULT-PLAN §5.2), so root changes are rare
   releases. Each instance carries every vault's relay requests over a few
   shared HTTP/2 connections rather than one connection per vault, so the host
-  cannot attribute traffic to a vault by connection.
+  cannot attribute traffic to a vault by connection. Inside the enclave the
+  collect loop therefore uses the long-poll (a WebSocket would need a
+  connection of its own). AWS KMS endpoints offer only HTTP/1.1; KMS
+  requests use a small pool of keep-alive connections.
 - **On unlock**, in order:
   1. re-mint tokens and start reconnects (§7.2);
   2. rekey due device sessions;
@@ -2290,7 +2318,9 @@ Connections whose standing tokens lapsed recover through reconnect tokens
 |---|---|
 | Owner request (`vault.lock`, API lock route) | Finish the batch, flush, send `vault.locking`, stop the loop, release the lease, zeroize. |
 | Memory pressure (the least recently active vault is evicted) | Same as an owner request. |
-| Enclave release or restart | Same if signalled. Otherwise all vaults lock through loss of memory, and their leases expire. |
+| Enclave release or restart | Same if signalled. Otherwise all vaults lock through loss of memory, and their leases expire; a parent that sees the enclave restart releases the leases it held. |
+| Parent restart (the enclave keeps running) | The enclave locks every vault before it serves the new parent, which holds no leases for them. |
+| Parent unreachable for 120 s | Every vault is locked: its lease can no longer be renewed. |
 | Lease lost (renewal failed) | Same as an owner request, without the final flush if the state write fails. |
 | Split-brain guard: a conditional state write finds a newer version | Zeroize **immediately**, without flushing or acking. |
 | Vault deletion | Run the §7.4 revocations, then destroy the state and the header. |
@@ -2298,7 +2328,50 @@ Connections whose standing tokens lapsed recover through reconnect tokens
 
 There is no idle lock by default; the owner MAY set one. Leases left by a
 lock expire within 60 s (relay) and 180 s (vault lease). Zeroizing covers the
-DEK and the relay, identity, KEM and session keys.
+DEK and the relay, identity, KEM and session keys; with one process per
+vault (§12.4), locking ends the vault's process, which releases all of its
+memory.
+
+### 12.4 Process isolation inside the enclave
+
+The enclave runs a **supervisor** and **one OS process per unlocked
+vault**.
+
+- **The supervisor** (the enclave's first process) keeps only shared
+  duties: access to the NSM, the ETKs and the outer decryption and routing
+  of alternate-channel requests (§11.2, §11.6), the egress (TLS and the
+  shared connections of §12.2), the connection to the parent, and the vault
+  processes' lifecycle. It holds **no per-vault long-term secret**: no DEK,
+  pepper, relay key, identity or KEM key, session key, or vault state in
+  plaintext.
+- **The supervisor sees the PIN transiently.** As the ETK holder it
+  decrypts an enroll or unlock request, hands the decrypted request to the
+  vault's process, and zeroizes its copy at once. It is the enclave's
+  shared trusted base, as the ETK requires.
+- **A vault process** is started for an enroll or unlock and ends on lock.
+  Everything else of the vault runs in it: the sealed header is unsealed
+  there (it attests its own ephemeral RSA key for the KMS `Recipient`, so
+  only that process can read the data key; the supervisor only obtains the
+  attestation document and forwards the KMS call), the DEK is derived
+  there, relay requests are built and signed there (the relay key never
+  leaves it), state objects are encrypted there, and every feature handler
+  runs there.
+- **A vault process reaches nothing but the supervisor**, over one private
+  channel. The supervisor scopes what it brokers to that vault: objects
+  under `vaults/<vault_id>/` and the member's index object (reads of the
+  member's previous vault at re-enrollment, §11.3), relay requests to the
+  allowlisted relay signed by the vault's own relay key, KMS calls, and
+  attestation documents that bind the process's own Recipient key or the
+  vault bundle of §11.3, never arbitrary `user_data`.
+- **Isolation of the processes from each other:** each runs under its own
+  user and group id, is not dumpable and cannot be traced, inherits no
+  file descriptor but its channel and no writable shared file or
+  directory, and runs under resource limits (memory, file descriptors).
+- **Locks:** an owner request, memory pressure, a lost lease or a lost
+  parent make the supervisor ask the process to lock (flush, `vault.locking`,
+  exit); a process that does not exit in time is killed. A process that
+  detects a split brain (§12.3) zeroizes and exits without flushing.
+  Killing one vault's process affects no other vault.
 
 ## 13. Security considerations
 
@@ -2361,6 +2434,11 @@ absorbed (§11.6) and rollbacks are bounded (§13.2). It can misreport the
 advisory lifecycle and lease values, but those affect only routing and
 availability.
 
+Inside the enclave, a flaw in one vault's process (a feature handler, a
+parser) reaches only that vault: its secrets live in its own process, and
+it can read and write only its own objects and use only its own relay key
+(§12.4).
+
 ### 13.4 Downgrade protection
 
 - The suite appears in every header and AAD, in every HPKE `info`, and in
@@ -2420,6 +2498,9 @@ documented.
   time.
 - **Logging.** Keys, PINs, tokens, signatures, attestation tokens and
   plaintext MUST NOT appear in logs, metrics or errors.
+- **Process isolation.** Each unlocked vault MUST run in its own process,
+  and the supervisor MUST NOT hold a vault's DEK, pepper or keys (§12.4).
+  The channel between them MUST be parsed strictly and fuzzed.
 
 ## 14. Push compatibility (deferred)
 
@@ -2559,6 +2640,25 @@ Cross-implementation checks against Apple CryptoKit and BouncyCastle are
 pending (§15, follow-up 1).
 
 ## 17. Changelog
+
+- **0.3.2** (2026-10-02): from the V3b implementation (vettid-vault
+  supervisor and parent) and owner decisions.
+  - §11.1: a lease held by an instance that is not live may be taken over,
+    conditional on the exact old lease; the parent takes the lease before
+    forwarding, does not forward when another instance holds it, and gives
+    it back if the vault did not open; renewal failures until 15 s before
+    expiry mean a lost lease; account deletion also removes the member
+    index object.
+  - §11.5, §11.9: the parent writes `expired` slots for requests it did not
+    forward or the enclave could not read, and only answers `queued` slots;
+    lifecycle writes only by the lease holder (or with no lease);
+    `state_version` is a number.
+  - §12.2: long-poll collect inside the enclave; KMS over HTTP/1.1
+    keep-alive (no HTTP/2 at AWS KMS).
+  - §12.3: parent restart and parent loss lock every vault.
+  - §12.4 (new), §13.3, §13.6: one OS process per vault; the supervisor
+    holds no per-vault secrets and sees the PIN only transiently;
+    per-process users, non-dumpable, resource limits, a scoped channel.
 
 - **0.3.1** (2026-10-02): fixes from the V3 implementations (vettid-vault
   V3a, the member API vault routes).

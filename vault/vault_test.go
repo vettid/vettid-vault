@@ -110,6 +110,8 @@ func (c *fakeCollector) Close() error { return nil }
 
 const testPIN = "1234"
 
+var testRelease = Release{PCR0: "dev", Number: 1}
+
 type fixture struct {
 	t     testing.TB
 	store store.Store
@@ -122,7 +124,7 @@ type fixture struct {
 func newFixture(t testing.TB) *fixture {
 	t.Helper()
 	f := &fixture{t: t, store: store.NewMemory()}
-	f.opts = Options{Store: f.store, Sealer: testSealer{key: bytes.Repeat([]byte{7}, 32)},
+	f.opts = Options{Store: f.store, Sealer: testSealer{key: bytes.Repeat([]byte{7}, 32)}, Release: testRelease,
 		Relay: func(base string, key ed25519.PrivateKey) Relay {
 			f.relay = &stubRelay{base: base, key: key}
 			return f.relay
@@ -309,7 +311,7 @@ func TestHeaderContents(t *testing.T) {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	want := "[backoff header_seq kdf pepper provisional state_seq unlock_keys user_guid v vault_id]"
+	want := "[backoff created_at header_seq kdf manifest_serial pepper provisional sealed_release state_seq unlock_keys user_guid v vault_id]"
 	if fmt.Sprint(keys) != want {
 		t.Fatalf("header members %v", keys)
 	}

@@ -16,10 +16,12 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/vettid/vettid-vault/vault/store"
+	"github.com/vettid/vettid-vault/vms/altchan"
 	"github.com/vettid/vettid-vault/vms/handshake"
 	"github.com/vettid/vettid-vault/vms/suite"
 )
@@ -36,6 +38,7 @@ var (
 	ErrExists     = errors.New("vault: vault exists")
 	ErrMissing    = errors.New("vault: vault missing")
 	ErrCrash      = errors.New("vault: simulated crash")
+	ErrRelease    = errors.New("vault: sealed to another release")
 )
 
 // Options configure a Manager.
@@ -58,6 +61,26 @@ type Options struct {
 	// expiry and reconnects).
 	ConnectionStandingTTL time.Duration
 	Hooks                 Hooks
+	// Release is the running release (§11.10); the header this manager
+	// reads and writes is the one sealed to it, through Sealer.
+	Release Release
+	// DeviceAttest verifies an app's device_attest at pairing (§6.7,
+	// §11.7) against the challenge and returns the binding. If nil, apps
+	// pair without a binding and cannot unlock over the alternate channel
+	// (development).
+	DeviceAttest func(d *altchan.DeviceAttest, challenge [32]byte, now time.Time) (json.RawMessage, error)
+	// Lifecycle receives lifecycle events for the parent (§11.5).
+	Lifecycle func(LifecycleEvent)
+}
+
+// LifecycleEvent is reported to the parent, which writes it to the vault
+// table (§11.5). It is advisory and holds no secrets.
+type LifecycleEvent struct {
+	Event        string // enrolled, unlocked, locked, moved
+	VaultID      string
+	Release      string // moved: the target release; otherwise the running one
+	VaultVersion string // the release that reports
+	StateVersion int
 }
 
 // Hooks let tests and supervisors observe or interrupt processing.
@@ -104,6 +127,7 @@ type Manager struct {
 	locked      bool
 	lockPending bool
 	started     bool
+	hadFailures bool // the header recorded failures before this unlock
 }
 
 // keyset holds the vault's private keys in usable form.
@@ -149,6 +173,10 @@ type CreateParams struct {
 	Provisional bool
 	// App is the first app, bound at enrollment (§11.3). Optional.
 	App *EnrollApp
+	// Release fields of the first header (§11.10): the manifest serial
+	// seen at enrollment and the verified sealing key (§11.10.7).
+	ManifestSerial  uint64
+	SealKeyVerified *SealKeyRecord
 }
 
 // EnrollApp is the first app's public enrollment data (§11.3).
@@ -159,6 +187,12 @@ type EnrollApp struct {
 	Relay     PeerRelay
 	OpenToken string // open token for the app's mailbox, ≤ 10 min
 	RequestID string
+	// Attestation is the verified device-attestation binding (§11.7).
+	Attestation json.RawMessage
+	// Attest, if set, returns the attestation document carried in
+	// vault.enrolled for the exact vault_bundle bytes (nonce = the app's
+	// nonce, user_data = SHA-256("vettid/vms/2/vault" || vault_bundle)).
+	Attest func(vaultBundle []byte) ([]byte, error)
 }
 
 // Create creates a vault: keys, mailbox registration, DEK-encrypted state
@@ -173,7 +207,7 @@ func Create(ctx context.Context, p CreateParams) (*Manager, error) {
 		}
 		p.VaultID = hex.EncodeToString(b)
 	}
-	if !store.ValidKey(store.StateKey(p.VaultID)) || p.RelayURL == "" || p.Store == nil || p.Sealer == nil {
+	if !store.ValidKey(store.StateKey(p.VaultID)) || !validRelease(p.Release) || p.RelayURL == "" || p.Store == nil || p.Sealer == nil {
 		return nil, errors.New("vault: invalid create parameters")
 	}
 	seeds := make([][]byte, 4) // relay, ik, kem, wake
@@ -192,9 +226,12 @@ func Create(ctx context.Context, p CreateParams) (*Manager, error) {
 		V: 1, VaultID: p.VaultID, UserGUID: p.UserGUID,
 		Relay:        RelayState{URL: p.RelayURL, Seed: seeds[0]},
 		IdentitySeed: seeds[1], KEMSeed: seeds[2], WakeSeed: seeds[3],
+		SealedRelease: p.Release.PCR0, AnnouncedRelease: p.Release.PCR0,
 	}
 	st.init()
-	hdr := &Header{V: 1, VaultID: p.VaultID, UserGUID: p.UserGUID, Provisional: p.Provisional, KDF: p.KDF, Pepper: pepper}
+	hdr := &Header{V: 1, VaultID: p.VaultID, UserGUID: p.UserGUID, Provisional: p.Provisional, CreatedAt: now.UTC(),
+		KDF: p.KDF, Pepper: pepper, SealedRelease: p.Release.PCR0, ManifestSerial: p.ManifestSerial,
+		SealKeyVerified: p.SealKeyVerified}
 	dek, err := deriveDEK(p.PIN, p.KDF, pepper, p.VaultID)
 	if err != nil {
 		return nil, err
@@ -227,7 +264,12 @@ func Create(ctx context.Context, p CreateParams) (*Manager, error) {
 	return m, nil
 }
 
-// UnlockParams unlock an existing vault.
+func validRelease(r Release) bool {
+	return r.PCR0 != "" && store.ValidKey("x/"+r.PCR0) && !strings.Contains(r.PCR0, "/")
+}
+
+// UnlockParams unlock an existing vault directly with a PIN (development
+// and tests; the enclave uses UnlockAlt).
 type UnlockParams struct {
 	Options
 	VaultID string
@@ -257,87 +299,18 @@ func backoffFor(failures int) time.Duration {
 	return backoffDelays[i]
 }
 
-// Unlock opens a vault: unseals the header, applies backoff, derives the
-// DEK from the PIN, decrypts the state and applies the rollback checks of
-// §13.2. A failed PIN is counted in the header (header_seq increments);
-// failures never wipe the vault.
+// Unlock opens a vault with a PIN only: the header, backoff, DEK and the
+// rollback checks of §13.2, without device or release checks. A failed PIN
+// is counted in the header (header_seq increments); failures never wipe
+// the vault.
 func Unlock(ctx context.Context, p UnlockParams) (*Manager, UnlockResult, error) {
-	p.Options.defaults()
-	now := p.Now()
-	hblob, hver, err := p.Store.Get(ctx, store.HeaderKey(p.VaultID))
-	if errors.Is(err, store.ErrNotFound) {
-		return nil, UnlockResult{}, ErrMissing
+	m, out := UnlockAlt(ctx, AltUnlockParams{Options: p.Options, VaultID: p.VaultID, PIN: p.PIN,
+		MinStateSeq: p.MinStateSeq, MinHeaderSeq: p.MinHeaderSeq, pinOnly: true})
+	res := UnlockResult{StateSeq: out.StateSeq, HeaderSeq: out.HeaderSeq}
+	if out.OK {
+		return m, res, nil
 	}
-	if err != nil {
-		return nil, UnlockResult{}, err
-	}
-	hdr, err := unsealHeader(ctx, p.Sealer, hblob, p.VaultID)
-	if err != nil {
-		return nil, UnlockResult{}, err
-	}
-	res := UnlockResult{HeaderSeq: hdr.HeaderSeq}
-	if now.Before(hdr.Backoff.NotBefore) {
-		return nil, res, ErrBackoff
-	}
-	if hdr.HeaderSeq < p.MinHeaderSeq {
-		return nil, res, ErrRollback
-	}
-	sblob, sver, err := p.Store.Get(ctx, store.StateKey(p.VaultID))
-	if err != nil {
-		return nil, res, ErrMissing
-	}
-	dek, err := deriveDEK(p.PIN, hdr.KDF, hdr.Pepper, p.VaultID)
-	if err != nil {
-		return nil, res, err
-	}
-	pt, blobSeq, err := decryptState(dek, p.VaultID, sblob)
-	if err != nil {
-		suite.Wipe(dek)
-		hdr.Backoff.Failures++
-		hdr.Backoff.NotBefore = now.Add(backoffFor(hdr.Backoff.Failures))
-		hdr.HeaderSeq++
-		res.HeaderSeq = hdr.HeaderSeq
-		if b, err := sealHeader(ctx, p.Sealer, hdr); err == nil {
-			_, _ = p.Store.Put(ctx, store.HeaderKey(p.VaultID), b, hver)
-		}
-		return nil, res, ErrBadPIN
-	}
-	var st State
-	err = json.Unmarshal(pt, &st)
-	suite.Wipe(pt)
-	if err != nil || st.VaultID != p.VaultID || st.StateSeq != blobSeq {
-		suite.Wipe(dek)
-		return nil, res, ErrState
-	}
-	if st.StateSeq < hdr.StateSeq || st.StateSeq < p.MinStateSeq {
-		suite.Wipe(dek)
-		return nil, res, ErrRollback
-	}
-	st.init()
-	m := newManager(p.Options, &st, hdr, dek)
-	m.stateVer, m.headerVer = sver, hver
-	if err := m.loadKeys(); err != nil {
-		m.zeroize()
-		return nil, res, err
-	}
-	if err := m.restoreLive(); err != nil {
-		m.zeroize()
-		return nil, res, err
-	}
-	m.relay = p.Relay(st.Relay.URL, m.keys.relay)
-	if m.limits, err = m.relay.Register(ctx); err != nil {
-		m.zeroize()
-		return nil, res, err
-	}
-	if hdr.Backoff.Failures > 0 {
-		hdr.Backoff = Backoff{}
-		if err := m.writeHeader(ctx); err != nil {
-			m.zeroize()
-			return nil, res, err
-		}
-	}
-	res.StateSeq, res.HeaderSeq = st.StateSeq, hdr.HeaderSeq
-	return m, res, nil
+	return nil, res, out.err()
 }
 
 func newManager(o Options, st *State, hdr *Header, dek []byte) *Manager {
@@ -532,7 +505,7 @@ func (m *Manager) writeHeader(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	v, err := m.opt.Store.Put(ctx, store.HeaderKey(m.st.VaultID), b, m.headerVer)
+	v, err := m.opt.Store.Put(ctx, store.HeaderKey(m.hdr.VaultID, m.hdr.SealedRelease), b, m.headerVer)
 	if errors.Is(err, store.ErrConflict) {
 		m.splitBrain()
 		return ErrSplitBrain
@@ -546,17 +519,39 @@ func (m *Manager) writeHeader(ctx context.Context) error {
 
 // syncUnlockKeys keeps the header's unlock keys equal to the active apps
 // (§6.7: added in the same flush as the device record; §7.4: removed on
-// unlink).
+// unlink), plus the first app while its enrollment handshake is pending
+// (§11.3). The header's attestation bindings are authoritative: an app
+// already listed keeps its binding (the iOS counter advances there).
 func (m *Manager) syncUnlockKeys() {
+	if m.st == nil {
+		return
+	}
+	prev := map[string]json.RawMessage{}
+	for _, k := range m.hdr.UnlockKeys {
+		prev[string(k.IK)] = k.Attestation
+	}
+	binding := func(ik []byte, fallback json.RawMessage) json.RawMessage {
+		if b, ok := prev[string(ik)]; ok && len(b) > 0 {
+			return b
+		}
+		return fallback
+	}
 	var keys []UnlockKey
 	for _, p := range m.st.Devices {
 		if p.Kind == KindApp && p.State == PeerActive {
-			keys = append(keys, UnlockKey{DeviceID: p.ID, IK: p.IK, KEM: p.KEM})
+			keys = append(keys, UnlockKey{DeviceID: p.ID, IK: p.IK, KEM: p.KEM, Attestation: binding(p.IK, p.Attestation)})
 		}
+	}
+	if inv := m.st.Invites[m.st.VaultID]; inv != nil && inv.EnrollIK != nil && !inv.Used && m.now().Before(inv.Exp) {
+		keys = append(keys, UnlockKey{DeviceID: enrollDeviceID, IK: inv.EnrollIK, KEM: inv.EnrollKEM, Attestation: binding(inv.EnrollIK, inv.EnrollAttest)})
 	}
 	sortUnlockKeys(keys)
 	m.hdr.UnlockKeys = keys
 }
+
+// enrollDeviceID names the first app's unlock key until its enrollment
+// handshake creates the device record.
+const enrollDeviceID = "enroll"
 
 // splitBrain is the §12.3 guard: another writer advanced the state. Zeroize
 // immediately, without flushing or acking.
@@ -567,6 +562,9 @@ func (m *Manager) splitBrain() {
 // zeroize wipes the DEK and every key, and marks the manager locked.
 func (m *Manager) zeroize() {
 	m.locked = true
+	if d, ok := m.opt.Sealer.(interface{ Destroy() }); ok {
+		d.Destroy() // a KMS sealer's cached data key
+	}
 	suite.Wipe(m.dek)
 	m.dek = nil
 	m.keys.destroy()
@@ -647,9 +645,22 @@ func (m *Manager) lockLocked(ctx context.Context) error {
 		return err
 	}
 	m.sendLocking(ctx)
+	vid := m.st.VaultID
 	m.zeroize()
+	m.report("locked", vid, m.opt.Release.PCR0)
 	return err
 }
+
+func (m *Manager) report(event, vaultID, release string) {
+	if m.opt.Lifecycle != nil {
+		m.opt.Lifecycle(LifecycleEvent{Event: event, VaultID: vaultID, Release: release,
+			VaultVersion: m.opt.Release.PCR0, StateVersion: StateVersion})
+	}
+}
+
+// StateVersion is the vault-state format version reported in lifecycle
+// events (§11.5).
+const StateVersion = 1
 
 // Crash discards the in-memory vault without flushing (tests: process
 // death).

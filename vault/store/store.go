@@ -58,6 +58,14 @@ func ValidKey(k string) bool {
 	return true
 }
 
-// Keys of a vault's objects.
-func StateKey(vaultID string) string  { return "vaults/" + vaultID + "/state" }
-func HeaderKey(vaultID string) string { return "vaults/" + vaultID + "/header" }
+// Keys of a vault's objects. The sealed header is one object per release
+// the vault has been sealed to (§11.10.2): vaults/<vault_id>/header/<pcr0>.
+func StateKey(vaultID string) string { return "vaults/" + vaultID + "/state" }
+
+// HeaderKey is the header sealed to release (its PCR0, lowercase hex).
+func HeaderKey(vaultID, release string) string { return "vaults/" + vaultID + "/header/" + release }
+
+// UserKey is the enclave's index from a member to the vault it enrolled
+// (hex of SHA-256 of the user_guid), used to refuse replacing a confirmed
+// vault (§11.3). It holds only a vault_id.
+func UserKey(userHash string) string { return "users/" + userHash + "/vault" }

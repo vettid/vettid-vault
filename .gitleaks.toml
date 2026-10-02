@@ -2,8 +2,10 @@
 # Extends the default ruleset. The only allowlisted values are fixed,
 # test-only vector values from testdata/vectors (VAULT-MESSAGING §16): HPKE
 # intermediate values derived from the public all-0x05 key seed and all-0x07
-# encapsulation randomness. They are public by design and are regenerated
-# deterministically by `go generate ./vms/vectors`.
+# encapsulation randomness, and the PUBLIC keys (SPKI) of the §16
+# release-update test keys (scalars 32 x 0x21 and 32 x 0x22).
+# They are public by design and are regenerated deterministically by
+# `go generate ./vms/vectors`.
 [extend]
 useDefault = true
 
@@ -14,4 +16,6 @@ regexes = [
   '''3239a1c6d8d76895e408c7e65ee38d8b43f4732c7a74c5ccfbac6bd63f743bce''',
   '''f8cfa15ec73bf1031bc50dfc462438a3d6a3d933f7edf6b28bc149fd7400e2a6''',
   '''1d7856a1a77eee3accf4e69fb2353f2421e3f15584739e5c6df73d487b4b66b4''',
+  '''MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAERi26GuT8GpaLTazyDN1tvh''',
+  '''MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE1lqTl3yqPRsIGFL/V6eeRl8W''',
 ]

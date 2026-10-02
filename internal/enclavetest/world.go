@@ -47,6 +47,8 @@ type World struct {
 	Features func() []vault.Feature
 	// VaultOptions is the template for vaults (relay transport etc.).
 	VaultOptions vault.Options
+	// Stopped is passed to instances (run loops that end).
+	Stopped func(vaultID string, err error)
 	RelayURL     string
 
 	mu        sync.Mutex
@@ -186,7 +188,7 @@ func (w *World) StartWith(n uint64, tweak func(*enclave.Config)) (*enclave.Insta
 		vo.Relay = func(base string, key ed25519.PrivateKey) vault.Relay { return w.Relays.New(base, key) }
 	}
 	in, err := enclave.New(enclave.Options{Config: cfg, NSM: NewFakeNSM(r.PCR0, r.PCR1, r.PCR2, w.Now), KMS: w.KMS,
-		Store: w.Store, StatusList: w.StatusList, Vault: vo, Features: w.Features, Lifecycle: w.record, Now: w.Now})
+		Store: w.Store, StatusList: w.StatusList, Vault: vo, Features: w.Features, Lifecycle: w.record, Stopped: w.Stopped, Now: w.Now})
 	if err != nil {
 		return nil, err
 	}

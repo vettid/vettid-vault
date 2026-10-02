@@ -39,7 +39,10 @@ type Options struct {
 	Features func() []vault.Feature
 	// Lifecycle receives lifecycle events for the parent (§11.5).
 	Lifecycle func(vault.LifecycleEvent)
-	Now       func() time.Time
+	// Stopped, if set, is told when a vault's run loop ends and why (an
+	// error is a sentinel without secrets).
+	Stopped func(vaultID string, err error)
+	Now     func() time.Time
 }
 
 // Instance is one enclave instance: its ETKs and the vaults it holds.
@@ -546,7 +549,10 @@ func (in *Instance) startVault(id string, m *vault.Manager) {
 	in.vmu.Unlock()
 	go func() {
 		defer close(r.done)
-		_ = m.Run(ctx)
+		err := m.Run(ctx)
+		if in.opt.Stopped != nil && ctx.Err() == nil {
+			in.opt.Stopped(id, err)
+		}
 		if m.Locked() {
 			// Locked from inside (owner request, split brain): the run loop
 			// ends; drop the vault from this instance.

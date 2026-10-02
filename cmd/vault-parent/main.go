@@ -17,6 +17,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -24,6 +25,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -32,6 +34,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/credentials/ec2rolecreds"
 
+	"github.com/vettid/vettid-vault/internal/selftest"
 	"github.com/vettid/vettid-vault/internal/vsock"
 	"github.com/vettid/vettid-vault/parent"
 )
@@ -64,6 +67,12 @@ func main() {
 		heartbeat    = flag.Duration("heartbeat", 20*time.Second, "registry heartbeat interval (≤ 30 s, §11.1)")
 		sweepEvery   = flag.Duration("sweep", 10*time.Minute, "stale queue sweep interval (negative: never)")
 		debug        = flag.Bool("debug", false, "debug logging")
+		selftestMode = flag.Bool("selftest", false, "hardware smoke test (docs/SMOKE.md): run the enclave's self-test, print the report as JSON, exit non-zero on any unexpected result")
+		smokeKey     = flag.String("smoke-key-arn", "", "selftest: the deletable test KMS key")
+		smokeAccount = flag.String("smoke-account", "", "selftest: the test key's account")
+		runID        = flag.String("run-id", "", "selftest: S3 prefix smoke/<run-id>/ ([a-z0-9-]; default: random)")
+		expectCheck  = flag.Int("expect-key-check", 6, "selftest: the §11.10.7 check expected to refuse the test key (0: any)")
+		smokeTimeout = flag.Duration("selftest-timeout", 10*time.Minute, "selftest: overall timeout")
 		resolve      multi
 		extraAllowed multi
 	)
@@ -99,6 +108,14 @@ func main() {
 	} else {
 		cp = aws.NewCredentialsCache(ec2rolecreds.New())
 	}
+	if *selftestMode {
+		// The smoke test touches no table; NewAWS wants names.
+		for _, t := range []*string{tVaults, tInstances, tRequests} {
+			if *t == "" {
+				*t = "unused-in-selftest"
+			}
+		}
+	}
 	backend, err := parent.NewAWS(parent.AWSConfig{Region: *region, Credentials: cp, Endpoint: *endpoint, Bucket: *bucket,
 		VaultsTable: *tVaults, InstancesTable: *tInstances, RequestsTable: *tRequests, DLQARN: *dlq,
 		// LocalStack does not implement If-Match on DeleteObject.
@@ -129,6 +146,10 @@ func main() {
 		}
 		res[h] = a
 	}
+	if *selftestMode {
+		os.Exit(runSelftest(log, cl, el, append(parent.DefaultAllow(*relayHost, *region), extraAllowed...), res, backend, parent.ProviderCredentials{P: cp},
+			selftest.Request{RunID: *runID, KeyARN: *smokeKey, Account: *smokeAccount, Region: *region}, *expectCheck, *smokeTimeout))
+	}
 	p, err := parent.New(parent.Config{
 		InstanceID: *instanceID, QueuePrefix: *queuePrefix, DLQARN: *dlq,
 		ControlListener: cl, EgressListener: el,
@@ -147,4 +168,45 @@ func main() {
 	if err := p.Run(ctx); err != nil {
 		fail("parent stopped", err)
 	}
+}
+
+// runSelftest runs the hardware smoke test and prints the report.
+func runSelftest(log *slog.Logger, cl, el net.Listener, allow []string, res map[string]string, obj parent.Objects, creds parent.CredentialSource,
+	req selftest.Request, expectCheck int, timeout time.Duration) int {
+	if req.RunID == "" {
+		b := make([]byte, 6)
+		_, _ = rand.Read(b)
+		req.RunID = "run-" + hex.EncodeToString(b)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+	log.Info("selftest: waiting for the enclave", "run_id", req.RunID)
+	rep, err := parent.RunSelftest(ctx, parent.SelftestConfig{ControlListener: cl, EgressListener: el, Allow: allow, Resolve: res,
+		Objects: obj, Creds: creds, Request: req, Timeout: timeout, Logger: log})
+	if err != nil {
+		log.Error("selftest failed", "error", err.Error())
+		fmt.Println(`{"result":"FAIL","error":` + strconv.Quote(err.Error()) + `}`)
+		return 1
+	}
+	bad := parent.SelftestVerdict(rep, expectCheck)
+	out := map[string]any{"result": "PASS", "run_id": req.RunID, "report": rep}
+	if len(bad) > 0 {
+		out["result"], out["unexpected"] = "FAIL", bad
+	}
+	b, _ := json.MarshalIndent(out, "", "  ")
+	fmt.Println(string(b))
+	for _, c := range rep.Checks {
+		status := "PASS"
+		if !c.OK {
+			status = "FAIL"
+			if !c.Required {
+				status = "INFO"
+			}
+		}
+		fmt.Fprintf(os.Stderr, "%-4s %s %s\n", status, c.Name, c.Detail)
+	}
+	if len(bad) > 0 {
+		return 1
+	}
+	return 0
 }

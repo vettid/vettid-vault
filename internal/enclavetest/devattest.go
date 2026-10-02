@@ -403,3 +403,18 @@ func (a *Attester) Assert(s devattest.Signed) (*altchan.DeviceAssertion, error) 
 
 // Key returns the attestation key (tests that forge signatures).
 func (a *Attester) Key() crypto.Signer { return a.key }
+
+// SetCounter sets the App Attest counter of the next assertion minus one
+// (tools running across processes keep it increasing).
+func (a *Attester) SetCounter(c uint32) {
+	a.mu.Lock()
+	a.counter = c
+	a.mu.Unlock()
+}
+
+// Counter returns the last App Attest counter used.
+func (a *Attester) Counter() uint32 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.counter
+}

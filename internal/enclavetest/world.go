@@ -312,3 +312,25 @@ func (w *World) Close() {
 		in.Close(context.Background())
 	}
 }
+
+// SetSerial sets the serial the next Publish increments from (tools that
+// publish across processes keep serials increasing).
+func (w *World) SetSerial(n uint64) {
+	w.mu.Lock()
+	w.serial = n
+	w.mu.Unlock()
+}
+
+// SetSealedRelease records a routing value (as the parent would from a
+// lifecycle event).
+func (w *World) SetSealedRelease(vaultID, release string) {
+	w.mu.Lock()
+	w.sealedTo[vaultID] = release
+	w.mu.Unlock()
+}
+
+// Spec returns the test release spec of release n: PCR bytes derived from
+// the number (TEST ONLY).
+func Spec(n uint64, status string) ReleaseSpec {
+	return ReleaseSpec{Number: n, PCR0: byte(0xa0 + n), PCR1: byte(0x10 + n), PCR2: byte(0x20 + n), Status: status}
+}

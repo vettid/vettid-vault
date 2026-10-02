@@ -124,7 +124,7 @@ func (in *Instance) Process(ctx context.Context, q *QueueMessage) *Response {
 	resp := &Response{RequestID: q.RequestID, Status: StatusDone}
 	switch q.Op {
 	case OpLock:
-		in.lockVault(ctx, q.VaultID)
+		_, _ = in.lockVault(ctx, q.VaultID)
 	case OpDelete:
 		in.deleteVault(ctx, q.VaultID)
 	case OpEnroll, OpUnlock:
@@ -454,7 +454,7 @@ func (in *Instance) unlock(ctx context.Context, q *QueueMessage, inner *envelope
 	}
 	// One manager per vault (D4): a vault this instance runs is locked
 	// (flushed) before it is opened again.
-	in.lockVault(ctx, q.VaultID)
+	_, _ = in.lockVault(ctx, q.VaultID)
 
 	pol := in.cfg.DeviceAttest
 	list := in.statusList()
@@ -580,7 +580,7 @@ func (in *Instance) startVault(id string, m *vault.Manager) {
 	in.vmu.Unlock()
 	go func() {
 		defer close(r.done)
-		err := m.Run(ctx)
+		err := runRecovered(ctx, m)
 		if in.opt.Stopped != nil && ctx.Err() == nil {
 			in.opt.Stopped(id, err)
 		}
@@ -596,6 +596,20 @@ func (in *Instance) startVault(id string, m *vault.Manager) {
 	}()
 }
 
+// ErrPanic reports a vault run loop that panicked: the vault was zeroized
+// without a flush, and the other vaults keep running.
+var ErrPanic = errors.New("enclave: vault run loop panicked")
+
+func runRecovered(ctx context.Context, m *vault.Manager) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			m.Crash()
+			err = ErrPanic
+		}
+	}()
+	return m.Run(ctx)
+}
+
 // Manager returns the running manager of a vault (tests, supervisors).
 func (in *Instance) Manager(vaultID string) *vault.Manager {
 	in.vmu.Lock()
@@ -607,25 +621,57 @@ func (in *Instance) Manager(vaultID string) *vault.Manager {
 }
 
 // lockVault locks a vault this instance runs (§12.3 owner request):
-// finish the batch, flush, vault.locking, zeroize.
-func (in *Instance) lockVault(ctx context.Context, id string) {
+// finish the batch, flush, vault.locking, zeroize. It reports whether the
+// vault was running and the lock's error (vault.ErrSplitBrain when the
+// final flush found a newer state: the vault was zeroized without it).
+func (in *Instance) lockVault(ctx context.Context, id string) (bool, error) {
 	in.vmu.Lock()
 	r := in.vaults[id]
 	delete(in.vaults, id)
 	in.vmu.Unlock()
 	if r == nil {
-		return
+		return false, nil
 	}
 	r.cancel()
 	<-r.done
-	_ = r.m.Lock(ctx)
+	return true, r.m.Lock(ctx)
+}
+
+// Lock locks a running vault outside the alternate channel: memory
+// pressure, a lost lease, or a supervisor shutdown (§12.3). It is
+// serialized with alternate-channel requests.
+func (in *Instance) Lock(ctx context.Context, vaultID string) (bool, error) {
+	in.reqMu.Lock()
+	defer in.reqMu.Unlock()
+	return in.lockVault(ctx, vaultID)
+}
+
+// LockAll locks every running vault (§12.3 "Enclave release or restart",
+// when signalled). The ETKs stay.
+func (in *Instance) LockAll(ctx context.Context) {
+	in.reqMu.Lock()
+	defer in.reqMu.Unlock()
+	for _, id := range in.Vaults() {
+		_, _ = in.lockVault(ctx, id)
+	}
+}
+
+// Vaults returns the ids of the vaults this instance runs.
+func (in *Instance) Vaults() []string {
+	in.vmu.Lock()
+	defer in.vmu.Unlock()
+	ids := make([]string, 0, len(in.vaults))
+	for id := range in.vaults {
+		ids = append(ids, id)
+	}
+	return ids
 }
 
 // deleteVault locks the vault and destroys its state and this release's
 // header (§12.3). The §7.4 revocations on deletion need the unlocked vault
 // and arrive with vault.delete (phase V4).
 func (in *Instance) deleteVault(ctx context.Context, id string) {
-	in.lockVault(ctx, id)
+	_, _ = in.lockVault(ctx, id)
 	for _, k := range []string{store.StateKey(id), store.HeaderKey(id, in.meas.PCR0)} {
 		if _, v, err := in.st.Get(ctx, k); err == nil {
 			_ = in.st.Delete(ctx, k, v)
@@ -643,7 +689,7 @@ func (in *Instance) Close(ctx context.Context) {
 	}
 	in.vmu.Unlock()
 	for _, id := range ids {
-		in.lockVault(ctx, id)
+		_, _ = in.lockVault(ctx, id)
 	}
 	in.mu.Lock()
 	for _, e := range in.etks {

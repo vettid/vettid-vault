@@ -1,10 +1,13 @@
 GO        ?= go
 FUZZTIME  ?= 50000x
 FUZZMINIMIZE ?= 200x
+# Extra flags for fuzzing, e.g. FUZZFLAGS=-parallel=2 on a small machine.
+FUZZFLAGS ?=
 # Packages that ship. They must never link the vector-only code, the dev
 # enclave (dev sealer, PIN constructors) or test harnesses.
 LIBPKGS   := ./vms/suite ./vms/envelope ./vms/handshake ./vms/invite ./vms/altchan \
-             ./vault/... ./client/... ./features/... ./cmd/...
+             ./vms/pins ./vms/nitro ./vms/manifest ./vms/devattest \
+             ./enclave/... ./vault/... ./client/... ./features/... ./cmd/...
 E2ETAGS   := devenclave e2e
 
 .PHONY: all test race lint vet staticcheck fuzz scan tidy vectors check-tcb e2e
@@ -66,7 +69,7 @@ fuzz:
 	@set -e; for pkg in $$($(GO) list ./...); do \
 	  for f in $$($(GO) test -list '^Fuzz' $$pkg | grep '^Fuzz' || true); do \
 	    echo "== $$pkg $$f"; \
-	    $(GO) test $$pkg -run '^$$' -fuzz "^$$f\$$" -fuzztime $(FUZZTIME) -fuzzminimizetime $(FUZZMINIMIZE); \
+	    $(GO) test $$pkg -run '^$$' -fuzz "^$$f\$$" -fuzztime $(FUZZTIME) -fuzzminimizetime $(FUZZMINIMIZE) $(FUZZFLAGS); \
 	  done; \
 	done
 

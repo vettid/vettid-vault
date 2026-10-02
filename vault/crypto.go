@@ -23,8 +23,7 @@ type Sealer interface {
 	Unseal(ctx context.Context, sealed, aad []byte) ([]byte, error)
 }
 
-// Labels for the at-rest formats (provisional: the spec does not define
-// them; see docs/V2-NOTES.md).
+// Labels for the at-rest formats (VAULT-MESSAGING §3.3.1).
 const (
 	labelDEK    = "vettid/vms/2/dek"
 	labelState  = "vettid/vms/2/state"

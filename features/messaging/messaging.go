@@ -1,6 +1,5 @@
 // Package messaging is the first vault feature: 1:1 messages between
-// connections (VAULT-MESSAGING §10, Messaging). Body schemas are defined in
-// docs/V2-NOTES.md until they land in the spec (follow-up 2).
+// connections (VAULT-MESSAGING §10, body schemas in §10.5).
 package messaging
 
 import (

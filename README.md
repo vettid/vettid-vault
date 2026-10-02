@@ -39,8 +39,10 @@ enclave image
 | `cmd/vaultctl` | — | Test driver over `client`; dev builds (`-tags devenclave`) also create and run vaults |
 | `devenclave` | — | Dev sealer and direct create/unlock with a PIN. Every file carries the `devenclave` tag; release builds cannot compile it in (`make check-tcb`) |
 
-Body schemas the spec does not yet define, at-rest formats, and the spec
-issues found in V2 are in [`docs/V2-NOTES.md`](docs/V2-NOTES.md).
+The runtime follows VAULT-MESSAGING 0.2.3, which includes the body schemas
+(§10.1–§10.5) and the DEK and at-rest formats (§3.3.1) settled during V2.
+What V2 deliberately leaves for later is listed in
+[`docs/V2-NOTES.md`](docs/V2-NOTES.md).
 
 Dependencies: the Go standard library, `golang.org/x/crypto`
 (XChaCha20-Poly1305, Argon2id), and

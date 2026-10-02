@@ -35,10 +35,11 @@ staticcheck:
 lint: vet staticcheck
 
 # Release builds must not contain deterministic randomness (derandomized
-# HPKE, ML-KEM test encapsulation), the dev enclave, or test harnesses; and
+# HPKE, ML-KEM test encapsulation), the dev enclave, or test harnesses and
+# test authorities (relaytest, enclavetest: fake NSM and KMS, test roots); and
 # the dev enclave must not compile at all without its build tag.
 check-tcb:
-	@if $(GO) list -deps $(LIBPKGS) | grep -E 'hpkederand|mlkemtest|/devenclave|relaytest'; then \
+	@if $(GO) list -deps $(LIBPKGS) | grep -E 'hpkederand|mlkemtest|/devenclave|relaytest|enclavetest'; then \
 	  echo "dev, test or vector-only code linked into release packages"; exit 1; fi
 	@if $(GO) list ./devenclave >/dev/null 2>&1; then \
 	  echo "devenclave compiles without the devenclave tag"; exit 1; fi

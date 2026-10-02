@@ -162,6 +162,11 @@ API stand-in, and drives them with `vaultctl api-enroll`, `api-unlock`,
 make integration   # docker compose up LocalStack (1.5 GiB cap), run, tear down
 ```
 
+The enclave image is built reproducibly from `Dockerfile.enclave`
+(`scripts/build-eif.sh` turns it into an EIF and prints PCR0-2); the
+hardware smoke test (`vault-parent -selftest`) is described in
+[`docs/SMOKE.md`](docs/SMOKE.md).
+
 ```sh
 make test      # go test ./... and the vector regeneration check
 make race      # the same under -race

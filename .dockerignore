@@ -1,0 +1,9 @@
+.git
+**/*_test.go
+bin
+out
+local
+integration
+e2e
+docs
+*.eif

@@ -1,0 +1,56 @@
+# syntax=docker/dockerfile:1
+#
+# Reproducible enclave image (VAULT-PLAN D3, docs/SMOKE.md): the release
+# vault-enclave binary alone in an empty root file system. nitro-cli
+# build-enclave turns this image into the EIF whose PCR0 the manifest and
+# the sealing-key policies name.
+#
+# Pinned: the builder base image by digest, the Go toolchain by version
+# and SHA-256, the module graph by go.sum. The build is static
+# (CGO_ENABLED=0), path- and VCS-independent (-trimpath, -buildvcs=false,
+# empty build id), and every file in the final image carries
+# SOURCE_DATE_EPOCH as its time.
+
+# debian:bookworm-slim (multi-arch index digest, 2026-09-18)
+FROM docker.io/library/debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS build
+
+ARG GO_VERSION=1.26.8
+ARG GO_SHA256_AMD64=d0f743b33e8d8945e6b1f432edd15785c70507121d6e2a723b21285eddf8b57b
+ARG GO_SHA256_ARM64=211ffced9dcb9633a55eac6364816ec0ddd951389a740e88fa8b3337971bdda0
+ARG SOURCE_DATE_EPOCH=0
+# The EIF runs on the build host's architecture (Graviton: arm64).
+ARG TARGETARCH
+
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && rm -rf /var/lib/apt/lists/*
+
+RUN set -eu; \
+    arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
+    case "$arch" in \
+      amd64) sum="$GO_SHA256_AMD64" ;; \
+      arm64) sum="$GO_SHA256_ARM64" ;; \
+      *) echo "unsupported architecture $arch" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSLo /tmp/go.tgz "https://go.dev/dl/go${GO_VERSION}.linux-${arch}.tar.gz"; \
+    echo "$sum  /tmp/go.tgz" | sha256sum -c -; \
+    tar -C /usr/local -xzf /tmp/go.tgz; \
+    rm /tmp/go.tgz
+
+ENV PATH=/usr/local/go/bin:$PATH \
+    CGO_ENABLED=0 \
+    GOTOOLCHAIN=local \
+    GOFLAGS=-mod=readonly \
+    GOPATH=/go
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download && go mod verify
+COPY . .
+RUN set -eu; \
+    go build -trimpath -buildvcs=false -ldflags='-s -w -buildid=' -o /out/vault-enclave ./cmd/vault-enclave; \
+    touch -h -d "@${SOURCE_DATE_EPOCH}" /out/vault-enclave /out; \
+    sha256sum /out/vault-enclave
+
+FROM scratch
+COPY --from=build /out/vault-enclave /vault-enclave
+# The supervisor re-executes this binary for every vault process (D4).
+CMD ["/vault-enclave"]

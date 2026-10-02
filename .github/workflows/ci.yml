@@ -31,6 +31,18 @@ jobs:
       - name: fuzz (short)
         run: make fuzz FUZZTIME=10s
 
+  e2e:
+    # V2 exit criteria against the real relay binary (go install of
+    # github.com/vettid/vettid-relay/cmd/relay at the go.mod version).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: end-to-end (race)
+        run: make e2e
+
   gitleaks:
     # Pinned binary over the FULL history (the gitleaks-action fails on a
     # branch's first push, where there is no "before" commit).

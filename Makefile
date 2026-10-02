@@ -1,9 +1,12 @@
 GO        ?= go
 FUZZTIME  ?= 20s
-# Packages that ship. They must never link the vector-only code.
-LIBPKGS   := ./vms/suite ./vms/envelope ./vms/handshake ./vms/invite ./vms/altchan
+# Packages that ship. They must never link the vector-only code, the dev
+# enclave (dev sealer, PIN constructors) or test harnesses.
+LIBPKGS   := ./vms/suite ./vms/envelope ./vms/handshake ./vms/invite ./vms/altchan \
+             ./vault/... ./client/... ./features/... ./cmd/...
+E2ETAGS   := devenclave e2e
 
-.PHONY: all test race lint vet staticcheck fuzz scan tidy vectors check-tcb
+.PHONY: all test race lint vet staticcheck fuzz scan tidy vectors check-tcb e2e
 
 all: lint check-tcb test
 
@@ -20,20 +23,32 @@ race:
 vet:
 	$(GO) vet ./...
 	$(GO) vet -tags vmsvectors ./...
+	$(GO) vet -tags '$(E2ETAGS)' ./...
 
 # staticcheck is run at a pinned version via `go run` (fetched on first use).
 staticcheck:
 	$(GO) run honnef.co/go/tools/cmd/staticcheck@v0.8.1 ./...
 	$(GO) run honnef.co/go/tools/cmd/staticcheck@v0.8.1 -tags vmsvectors ./...
+	$(GO) run honnef.co/go/tools/cmd/staticcheck@v0.8.1 -tags '$(E2ETAGS)' ./...
 
 lint: vet staticcheck
 
 # Release builds must not contain deterministic randomness (derandomized
-# HPKE, ML-KEM test encapsulation).
+# HPKE, ML-KEM test encapsulation), the dev enclave, or test harnesses; and
+# the dev enclave must not compile at all without its build tag.
 check-tcb:
-	@if $(GO) list -deps $(LIBPKGS) | grep -E 'hpkederand|mlkemtest'; then \
-	  echo "vector-only code linked into library packages"; exit 1; fi
+	@if $(GO) list -deps $(LIBPKGS) | grep -E 'hpkederand|mlkemtest|/devenclave|relaytest'; then \
+	  echo "dev, test or vector-only code linked into release packages"; exit 1; fi
+	@if $(GO) list ./devenclave >/dev/null 2>&1; then \
+	  echo "devenclave compiles without the devenclave tag"; exit 1; fi
+	@for f in devenclave/*.go cmd/vaultctl/vault_dev.go; do \
+	  head -1 $$f | grep -qx '//go:build devenclave' || { echo "$$f lacks //go:build devenclave"; exit 1; }; done
 	@echo "check-tcb: ok"
+
+# End-to-end tests against the real vettid-relay binary (built at the
+# version in go.mod) and the dev enclave.
+e2e:
+	$(GO) test -race -count=1 -tags '$(E2ETAGS)' ./e2e/
 
 # Regenerate testdata/vectors.
 vectors:

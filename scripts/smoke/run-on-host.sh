@@ -98,7 +98,9 @@ run() {
   for v in SMOKE_REGION SMOKE_BUCKET SMOKE_KEY_ARN SMOKE_ACCOUNT; do
     [ -n "${!v:-}" ] || fail "$v is not set"
   done
-  [ -f "$WORK/out/vault-enclave.eif" ] && [ -x "$WORK/bin/vault-parent" ] || fail "nothing built (run-on-host.sh build COMMIT)"
+  if [ ! -f "$WORK/out/vault-enclave.eif" ] || [ ! -x "$WORK/bin/vault-parent" ]; then
+    fail "nothing built (run-on-host.sh build COMMIT)"
+  fi
   run_id="${SMOKE_RUN_ID:-run-$(date -u +%Y%m%d%H%M%S)}"
   logs="$WORK/runs/$run_id"
   mkdir -p "$logs"

@@ -1,0 +1,278 @@
+package vault
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"sort"
+	"time"
+
+	"github.com/vettid/vettid-relay/relayclient"
+	"github.com/vettid/vettid-vault/vms/envelope"
+)
+
+// Outbox retry backoff for transport errors and 5xx (§8.6: full jitter,
+// 0.25 s × 2ⁿ, capped at 30 s; relayclient retries within one attempt).
+const outboxMaxBackoff = 30 * time.Second
+
+func (m *Manager) queueDeposit(e *OutboxEntry, now time.Time) {
+	e.ID = m.newID(now)
+	e.Op = OpDeposit
+	e.Created = now
+	m.st.Outbox = append(m.st.Outbox, e)
+	m.dirty = true
+}
+
+func (m *Manager) queueRevoke(kind, value string, now time.Time) {
+	m.st.Outbox = append(m.st.Outbox, &OutboxEntry{ID: m.newID(now), Op: OpRevoke, Kind: kind, Value: value, Created: now})
+	m.dirty = true
+}
+
+func (m *Manager) queueDeleteClaim(id string, now time.Time) {
+	m.st.Outbox = append(m.st.Outbox, &OutboxEntry{ID: m.newID(now), Op: OpDeleteClaim, Value: id, Created: now})
+	m.dirty = true
+}
+
+// sealAndQueue seals in to p's current epoch and queues the deposit.
+// It returns the inner id, or "" if p has no session.
+func (m *Manager) sealAndQueue(p *Peer, in *envelope.Inner) string {
+	kr := m.sessions[p.ID]
+	if kr == nil || kr.Current() == nil {
+		return ""
+	}
+	raw, err := kr.Current().Seal(in)
+	if err != nil {
+		return ""
+	}
+	m.queueDeposit(&OutboxEntry{PeerID: p.ID, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Payload: raw}, m.now())
+	return in.ID
+}
+
+// sendTo sends a durable event or request to p. It returns the inner id.
+func (m *Manager) sendTo(p *Peer, typ string, body json.RawMessage, now time.Time) string {
+	id := m.newID(now)
+	return m.sealAndQueue(p, &envelope.Inner{ID: id, Type: typ, TS: now, Body: body})
+}
+
+// ownerDevices returns the active owner devices that receive fan-out:
+// apps and desktops. Agents receive only what their grants cover (§9.1),
+// which in V2 is nothing.
+func (m *Manager) ownerDevices() []*Peer {
+	var out []*Peer
+	for _, p := range m.st.Devices {
+		if p.State == PeerActive && (p.Kind == KindApp || p.Kind == KindDesktop) {
+			out = append(out, p)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}
+
+// notifyDevices makes one deposit per owner device, each under that
+// device's session (§9.1), except the device `except`.
+func (m *Manager) notifyDevices(typ string, body json.RawMessage, except string, now time.Time) {
+	for _, p := range m.ownerDevices() {
+		if p.ID != except {
+			m.sendTo(p, typ, body, now)
+		}
+	}
+}
+
+func (m *Manager) notifyApps(typ string, body json.RawMessage, now time.Time) {
+	for _, p := range m.ownerDevices() {
+		if p.Kind == KindApp {
+			m.sendTo(p, typ, body, now)
+		}
+	}
+}
+
+// sendLocking deposits vault.locking (ephemeral) directly to each device.
+func (m *Manager) sendLocking(ctx context.Context) {
+	now := m.now()
+	for _, p := range m.ownerDevices() {
+		kr := m.sessions[p.ID]
+		if kr == nil || kr.Current() == nil || p.Standing.Token == "" {
+			continue
+		}
+		in := &envelope.Inner{ID: m.newID(now), Type: "vault.locking", TS: now, Exp: now.Add(time.Minute), Body: json.RawMessage(`{}`)}
+		if raw, err := kr.Current().Seal(in); err == nil {
+			_, _ = m.relay.Deposit(ctx, p.Relay.URL, p.Relay.Mailbox, p.Standing.Token, raw)
+		}
+	}
+}
+
+// retryPeer makes p's waiting entries eligible again (after a token
+// refresh or reconnect).
+func (m *Manager) retryPeer(peer string) {
+	for _, e := range m.st.Outbox {
+		if e.PeerID == peer && !e.Done {
+			e.NotBefore = time.Time{}
+		}
+	}
+}
+
+// drainOutbox performs due outbox entries (§8.3 step 5). An entry is
+// marked done when the relay accepted it and removed at the next flush.
+func (m *Manager) drainOutbox(ctx context.Context) {
+	now := m.now()
+	for _, e := range m.st.Outbox {
+		if e.Done || now.Before(e.NotBefore) {
+			continue
+		}
+		var err error
+		switch e.Op {
+		case OpDeposit:
+			err = m.deposit(ctx, e, now)
+		case OpRevoke:
+			err = m.relay.Revoke(ctx, e.Kind, e.Value)
+		case OpDeleteClaim:
+			err = m.relay.DeleteClaim(ctx, e.Value)
+			if RelayCode(err) == CodeClaimUnknown {
+				err = nil
+			}
+		}
+		m.dirty = true
+		if err == nil || e.BestEffort {
+			e.Done = true
+			continue
+		}
+		if e.Done || e.NotBefore.After(now) {
+			continue // finished, or the error handler scheduled the retry
+		}
+		e.Attempts++
+		d := time.Duration(250*(1<<min(e.Attempts, 7))) * time.Millisecond
+		e.NotBefore = now.Add(min(d, outboxMaxBackoff))
+	}
+}
+
+// deposit performs one deposit and applies the §8.6 error table.
+func (m *Manager) deposit(ctx context.Context, e *OutboxEntry, now time.Time) error {
+	tok := e.Token
+	p := m.peer(e.PeerID)
+	if tok == "" {
+		if p == nil {
+			e.Done = true // the principal is gone (§7.4: its outbox entries are deleted)
+			return nil
+		}
+		tok = p.Standing.Token
+	}
+	if h := m.opt.Hooks.DropDeposit; h != nil && h(e) {
+		e.Done = true
+		return nil
+	}
+	_, err := m.relay.Deposit(ctx, e.RelayURL, e.Mailbox, tok, e.Payload)
+	if err == nil {
+		return nil
+	}
+	switch RelayCode(err) {
+	case CodeTokenExpired:
+		if p != nil && e.Token == "" {
+			if p.Kind == KindConnection {
+				m.startReconnect(p, now) // §6.6 "When to use it"
+			}
+			e.NotBefore = now.Add(time.Hour) // retried when a fresh token arrives
+			e.Attempts++
+			return err
+		}
+		e.Done = true
+	case CodeTokenRevoked, CodeMailboxUnknown:
+		// Terminal: stop sending to that mailbox.
+		if p != nil && e.Token == "" {
+			p.State = PeerStale
+			m.audit(now, "peer_stale", p.ID)
+			for _, o := range m.st.Outbox {
+				if o.PeerID == p.ID {
+					o.Done = true
+				}
+			}
+			if p.Kind == KindConnection {
+				m.notifyDevices("connection.event", connEvent(p.ID, "stale"), "", now)
+			}
+		}
+		e.Done = true
+	case CodeTokenUsed:
+		m.audit(now, "open_token_used", e.PeerID)
+		e.Done = true
+	case "":
+		return err // transport or 5xx after relayclient's own retries
+	default:
+		if st, ok := statusOf(err); ok && st < 500 && st != 429 {
+			m.audit(now, "deposit_refused", e.PeerID)
+			e.Done = true
+		}
+	}
+	return err
+}
+
+func (m *Manager) flushIfDirty(ctx context.Context) error {
+	if !m.dirty {
+		return nil
+	}
+	return m.persist(ctx, false)
+}
+
+// housekeeping runs before each batch: expire invites, pairings and
+// handshakes, rekey due sessions, refresh tokens.
+func (m *Manager) housekeeping(now time.Time) {
+	for id, inv := range m.st.Invites {
+		if !inv.Used && !now.Before(inv.Exp) {
+			if inv.OpenJTI != "" {
+				m.denyJTI(inv.OpenJTI, now)
+			}
+			if inv.ClaimID != "" {
+				m.queueDeleteClaim(inv.ClaimID, now)
+			}
+			delete(m.st.Invites, id)
+		} else if inv.Used && now.Sub(inv.Exp) > 24*time.Hour {
+			delete(m.st.Invites, id)
+		}
+	}
+	for id, ib := range m.st.Inbound {
+		if !now.Before(ib.Expires) {
+			if inv := m.st.Invites[ib.InviteID]; inv != nil && inv.OpenJTI != "" {
+				m.denyJTI(inv.OpenJTI, now)
+			}
+			m.dropInbound(id)
+			m.dirty = true
+		}
+	}
+	for id, aw := range m.st.Awaiting {
+		if now.Sub(aw.Created) > HandshakeTTL {
+			if r := m.awaiting[id]; r != nil {
+				r.Abort()
+			}
+			delete(m.awaiting, id)
+			delete(m.st.Awaiting, id)
+		}
+	}
+	for id, og := range m.st.Outgoing {
+		if now.Sub(og.Created) > HandshakeTTL {
+			m.dropOutgoing(id)
+		}
+	}
+	for _, p := range m.allPeers() {
+		if p.State != PeerActive {
+			continue
+		}
+		if kr := m.sessions[p.ID]; kr != nil && kr.Current() != nil && kr.Current().NeedsRekey(now) {
+			m.startRekey(p, now)
+		}
+	}
+	m.refreshHeld(now)
+	m.remintIssued(now)
+	m.pruneIssued(now)
+	m.pruneRetiredKEMs(now)
+}
+
+// unlockKey ordering keeps the sealed header deterministic.
+func sortUnlockKeys(k []UnlockKey) {
+	sort.Slice(k, func(i, j int) bool { return k[i].DeviceID < k[j].DeviceID })
+}
+
+func statusOf(err error) (int, bool) {
+	var e *relayclient.Error
+	if errors.As(err, &e) {
+		return e.Status, true
+	}
+	return 0, false
+}

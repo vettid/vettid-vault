@@ -59,6 +59,7 @@ func WrapCMS(pub *rsa.PublicKey, content []byte, o CMSOptions) []byte {
 	var ek []byte
 	var err error
 	if o.PKCS1v15 {
+		//lint:ignore SA1019 negative test input: the enclave must refuse PKCS#1 v1.5 key transport
 		ek, err = rsa.EncryptPKCS1v15(rand.Reader, pub, cek)
 	} else {
 		ek, err = rsa.EncryptOAEP(sha256.New(), rand.Reader, pub, cek, nil)

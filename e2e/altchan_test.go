@@ -6,7 +6,6 @@ import (
 	"context"
 	"crypto/ed25519"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -35,15 +34,13 @@ type acWorld struct {
 	w     *enclavetest.World
 	relay string
 	trust client.Trust
-	mu    sync.Mutex
-	msgs  map[string]*messaging.Feature
 }
 
 func newACWorld(t *testing.T) *acWorld {
 	t.Helper()
 	r := relaytest.Start(t, nil)
 	w := enclavetest.NewWorld(time.Now, r.URL)
-	aw := &acWorld{t: t, w: w, relay: r.URL, trust: w.Trust(), msgs: map[string]*messaging.Feature{}}
+	aw := &acWorld{t: t, w: w, relay: r.URL, trust: w.Trust()}
 	w.VaultOptions = vault.Options{PollWait: time.Second,
 		Relay: func(base string, key ed25519.PrivateKey) vault.Relay {
 			return vault.NewClientRelay(base, key, nil, time.Now)

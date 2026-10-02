@@ -3,7 +3,10 @@
 //
 //   - the AWS Nitro Enclaves root (attestation documents, §11.2);
 //   - Google's hardware key attestation roots (Android, §11.7);
-//   - Apple's App Attestation root (iOS, §11.7).
+//   - Apple's App Attestation root (iOS, §11.7);
+//   - the TLS roots of the hosts the enclave reaches (§12.2, VAULT-PLAN
+//     §5.2): Amazon Trust Services for relay.vettid.org and the regional
+//     KMS endpoint, Google Trust Services for the attestation status list.
 //
 // Each certificate is the vendor's published file, checked by SHA-256
 // fingerprint in the tests. Changing any of them is a release (§11.10).
@@ -26,6 +29,8 @@ var rootFS embed.FS
 //	AWS:    https://aws-nitro-enclaves.amazonaws.com/AWS_NitroEnclaves_Root-G1.zip
 //	Google: https://developer.android.com/privacy-and-security/security-key-attestation#root_certificate
 //	Apple:  https://www.apple.com/certificateauthority/Apple_App_Attestation_Root_CA.pem
+//	Amazon: https://www.amazontrust.com/repository/ (Amazon Root CA 1-4)
+//	GTS:    https://pki.goog/repository/ (GTS Root R1, R3, R4)
 const (
 	fileNitro = "roots/aws-nitro-enclaves-root-g1.pem"
 	fileApple = "roots/apple-app-attestation-root-ca.pem"
@@ -40,6 +45,31 @@ var fileGoogle = []string{
 	"roots/google-hw-attestation-rsa-2021.pem",
 	"roots/google-hw-attestation-rsa-2022.pem",
 	"roots/google-key-attestation-ca1-ec-2025.pem",
+}
+
+// Amazon Trust Services roots (TLS). Confirmed 2026-10-02 (docs/V3-NOTES.md):
+// relay.vettid.org (ACM) chains leaf -> Amazon RSA 2048 M01 -> Amazon Root
+// CA 1, and kms.<region>.amazonaws.com chains leaf -> Amazon RSA 2048 M04 ->
+// Amazon Root CA 1. Both servers also send Amazon Root CA 1 cross-signed by
+// Starfield Services Root CA - G2; that cross-certificate is not needed and
+// Starfield is not pinned. Roots 2-4 are the other key types ACM and AWS
+// endpoints issue under (RSA 4096, P-256, P-384), so a re-issued
+// certificate of another key type does not force a release.
+var fileAmazonTLS = []string{
+	"roots/tls-amazon-root-ca-1.pem",
+	"roots/tls-amazon-root-ca-2.pem",
+	"roots/tls-amazon-root-ca-3.pem",
+	"roots/tls-amazon-root-ca-4.pem",
+}
+
+// Google Trust Services roots (TLS). android.googleapis.com chains leaf ->
+// WR2 -> GTS Root R1 (served cross-signed by GlobalSign Root CA, which is
+// not pinned); R3 and R4 are the ECDSA roots of GTS's EC issuing CAs. GTS
+// Root R2 is not pinned (no issuing CA of Google's front ends uses it).
+var fileGoogleTLS = []string{
+	"roots/tls-gts-root-r1.pem",
+	"roots/tls-gts-root-r3.pem",
+	"roots/tls-gts-root-r4.pem",
 }
 
 func load(name string) *x509.Certificate {
@@ -59,9 +89,10 @@ func load(name string) *x509.Certificate {
 }
 
 var (
-	once         sync.Once
-	nitro, apple *x509.Certificate
-	google       []*x509.Certificate
+	once                 sync.Once
+	nitro, apple         *x509.Certificate
+	google               []*x509.Certificate
+	amazonTLS, googleTLS []*x509.Certificate
 )
 
 func initAll() {
@@ -69,6 +100,12 @@ func initAll() {
 	apple = load(fileApple)
 	for _, f := range fileGoogle {
 		google = append(google, load(f))
+	}
+	for _, f := range fileAmazonTLS {
+		amazonTLS = append(amazonTLS, load(f))
+	}
+	for _, f := range fileGoogleTLS {
+		googleTLS = append(googleTLS, load(f))
 	}
 }
 
@@ -82,4 +119,27 @@ func AppleAppAttestRoot() *x509.Certificate { once.Do(initAll); return apple }
 func GoogleAttestationRoots() []*x509.Certificate {
 	once.Do(initAll)
 	return append([]*x509.Certificate(nil), google...)
+}
+
+// AmazonTLSRoots returns the Amazon Trust Services roots (relay.vettid.org,
+// kms.<region>.amazonaws.com).
+func AmazonTLSRoots() []*x509.Certificate {
+	once.Do(initAll)
+	return append([]*x509.Certificate(nil), amazonTLS...)
+}
+
+// GoogleTLSRoots returns the Google Trust Services roots
+// (android.googleapis.com, the attestation status list).
+func GoogleTLSRoots() []*x509.Certificate {
+	once.Do(initAll)
+	return append([]*x509.Certificate(nil), googleTLS...)
+}
+
+// Pool returns a pool holding exactly certs.
+func Pool(certs []*x509.Certificate) *x509.CertPool {
+	p := x509.NewCertPool()
+	for _, c := range certs {
+		p.AddCert(c)
+	}
+	return p
 }

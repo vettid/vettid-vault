@@ -111,13 +111,18 @@ func newVaultID() string {
 // real relay and is covered end to end).
 func (f *fx) enroll(a *app, pin string) *altchan.EnrollResult {
 	f.t.Helper()
+	return f.enrollAs(a, pin, newVaultID())
+}
+
+// enrollAs enrolls with a given vault_id (the API reuses a member's).
+func (f *fx) enrollAs(a *app, pin, vid string) *altchan.EnrollResult {
+	f.t.Helper()
 	e, in := f.enclaveFor(a, "", true)
 	served, _, _ := a.dev.VerifyManifest(f.w.Served(), f.trust)
 	req, err := a.dev.BuildEnroll(a.guid, pin, e, served, a.att)
 	if err != nil {
 		f.t.Fatal(err)
 	}
-	vid := newVaultID()
 	resp, err := f.w.Post(f.ctx, in, enclave.OpEnroll, vid, a.guid, req)
 	if err != nil {
 		f.t.Fatal(err)

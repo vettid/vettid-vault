@@ -3,6 +3,7 @@ package enclave_test
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -429,5 +430,69 @@ func TestProvisionalReplacement(t *testing.T) {
 	f.w.Publish()
 	if r := f.enroll(b, pin); !r.OK {
 		t.Fatalf("after 24 h: %+v", r)
+	}
+}
+
+// §11.3 "Re-enrollment": the API reuses the member's vault_id. The
+// enclave refuses while the vault is provisional for less than 24 h and
+// replaces it afterwards; the old app's keys no longer unlock it.
+func TestReenrollSameVaultID(t *testing.T) {
+	f := newFx(t)
+	a := f.newApp("user-1", android(0x61))
+	if r := f.enroll(a, pin); !r.OK {
+		t.Fatal(r)
+	}
+	f.lock(a)
+	b := f.newApp("user-1", ios(0x71))
+	if r := f.enrollAs(b, pin, a.vid); r.OK || r.Code != "vault_exists" {
+		t.Fatalf("within 24 h: %+v", r)
+	}
+	f.clk.Add(25 * time.Hour)
+	f.w.SetStatusList(enclavetest.EmptyStatusList(f.clk.Now()))
+	if err := f.w.Instance(3).Maintain(); err != nil {
+		t.Fatal(err)
+	}
+	f.w.Publish()
+	if r := f.enrollAs(b, pin, a.vid); !r.OK || r.VaultID != a.vid {
+		t.Fatalf("replacement: %+v", r)
+	}
+	f.lock(b)
+	if r := f.mustUnlock(b, pin, client.UnlockOptions{}, ""); !r.OK {
+		t.Fatalf("new app: %+v", r)
+	}
+	f.lock(b)
+	if _, err := f.unlock(a, pin, client.UnlockOptions{}, ""); !errors.Is(err, client.ErrResult) {
+		t.Fatalf("replaced app still answered: %v", err)
+	}
+	// A vault sealed to another release cannot be inspected: refused.
+	c := f.newApp("user-2", android(0x62))
+	if r := f.enroll(c, pin); !r.OK {
+		t.Fatal(r)
+	}
+	f.lock(c)
+	hk := store.HeaderKey(c.vid, r3.PCR0Hex())
+	blob, v, _ := f.w.Store.Get(f.ctx, hk)
+	_ = f.w.Store.Delete(f.ctx, hk, v)
+	_, _ = f.w.Store.Put(f.ctx, store.HeaderKey(c.vid, r4.PCR0Hex()), blob, "")
+	f.clk.Add(25 * time.Hour)
+	f.w.SetStatusList(enclavetest.EmptyStatusList(f.clk.Now()))
+	_ = f.w.Instance(3).Maintain()
+	f.w.Publish()
+	d := f.newApp("user-2", android(0x63))
+	if r := f.enrollAs(d, pin, c.vid); r.OK || r.Code != "vault_exists" {
+		t.Fatalf("sealed elsewhere: %+v", r)
+	}
+}
+
+// §11.1: instance ids match [A-Za-z0-9_-]{1,48}.
+func TestInstanceIDValidated(t *testing.T) {
+	f := newFx(t)
+	for _, id := range []string{"", "i.1", "i 1", strings.Repeat("x", 49)} {
+		if _, err := f.w.StartWith(3, func(c *enclave.Config) { c.InstanceID = id }); !errors.Is(err, enclave.ErrConfig) {
+			t.Errorf("%q: %v", id, err)
+		}
+	}
+	if _, err := f.w.StartWith(3, func(c *enclave.Config) { c.InstanceID = strings.Repeat("A", 48) }); err != nil {
+		t.Fatal(err)
 	}
 }

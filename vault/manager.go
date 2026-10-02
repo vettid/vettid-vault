@@ -177,6 +177,16 @@ type CreateParams struct {
 	// seen at enrollment and the verified sealing key (§11.10.7).
 	ManifestSerial  uint64
 	SealKeyVerified *SealKeyRecord
+	// Replace, if set, overwrites an existing vault's objects at these
+	// versions instead of creating them (§11.3 re-enrollment of a
+	// provisional vault older than 24 h).
+	Replace *Replace
+}
+
+// Replace names the versions of the objects a re-enrollment overwrites
+// ("" for an object that does not exist).
+type Replace struct {
+	State, Header store.Version
 }
 
 // EnrollApp is the first app's public enrollment data (§11.3).
@@ -252,7 +262,10 @@ func Create(ctx context.Context, p CreateParams) (*Manager, error) {
 			return nil, err
 		}
 	}
-	if err := m.persist(ctx, true); err != nil {
+	if r := p.Replace; r != nil {
+		m.stateVer, m.headerVer = r.State, r.Header
+	}
+	if err := m.persist(ctx, p.Replace == nil); err != nil {
 		m.zeroize()
 		return nil, err
 	}

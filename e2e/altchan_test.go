@@ -115,7 +115,10 @@ func (aw *acWorld) enroll(a *acApp, pin string) *altchan.EnrollResult {
 	if err != nil {
 		t.Fatal(err)
 	}
-	vid := randomID()
+	vid := a.vid
+	if vid == "" {
+		vid = randomID()
+	}
 	resp, err := aw.w.Post(ctx, in, enclave.OpEnroll, vid, a.guid, req)
 	if err != nil {
 		t.Fatal(err)
@@ -209,11 +212,15 @@ const acPIN = "246810"
 // and a stale manifest are refused.
 func TestAltchanEnrollUnlock(t *testing.T) {
 	aw := newACWorld(t)
+	var confirmedAndroid string
 	for _, att := range []client.Attester{enclavetest.NewAndroidAttester(0x61, enclavetest.AndroidOptions{}),
 		enclavetest.NewIOSAttester(0x71, enclavetest.IOSOptions{})} {
 		a := aw.newApp("member-"+att.Platform(), att)
 		if r := aw.enroll(a, acPIN); !r.OK {
 			t.Fatalf("%s enroll: %s", att.Platform(), r.Code)
+		}
+		if att.Platform() == "android" {
+			confirmedAndroid = a.vid
 		}
 		aw.status(a)
 		aw.lock(a)
@@ -287,10 +294,16 @@ func TestAltchanEnrollUnlock(t *testing.T) {
 		aw.lock(a)
 	}
 
-	// A confirmed vault is never replaced (§11.3).
-	dup := aw.newApp("member-android", enclavetest.NewAndroidAttester(0x66, enclavetest.AndroidOptions{}))
-	if r := aw.enroll(dup, acPIN); r.OK || r.Code != "vault_exists" {
-		t.Fatalf("second enrollment of a member: %+v", r)
+	// A confirmed vault is never replaced (§11.3), whether the API reuses
+	// the member's vault_id or not.
+	for _, reuse := range []bool{true, false} {
+		dup := aw.newApp("member-android", enclavetest.NewAndroidAttester(0x66, enclavetest.AndroidOptions{}))
+		if reuse {
+			dup.vid = confirmedAndroid
+		}
+		if r := aw.enroll(dup, acPIN); r.OK || r.Code != "vault_exists" {
+			t.Fatalf("second enrollment of a member (reuse %v): %+v", reuse, r)
+		}
 	}
 
 	// Rolled-back state object.

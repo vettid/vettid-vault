@@ -78,7 +78,7 @@ var (
 // New starts an instance: it reads its measurements, creates its KMS
 // recipient key and its first ETK.
 func New(opt Options) (*Instance, error) {
-	if opt.NSM == nil || opt.KMS == nil || opt.Store == nil || opt.Config.DeviceAttest == nil || opt.Config.InstanceID == "" {
+	if opt.NSM == nil || opt.KMS == nil || opt.Store == nil || opt.Config.DeviceAttest == nil || !altchan.ValidInstanceID(opt.Config.InstanceID) {
 		return nil, ErrConfig
 	}
 	if opt.Now == nil {
@@ -312,7 +312,8 @@ func (in *Instance) enroll(ctx context.Context, q *QueueMessage, inner *envelope
 	if !in.inNamespace(own.SealKey) {
 		return fail("release_key")
 	}
-	if code := in.checkExisting(ctx, q, own.SealKey, now); code != "" {
+	replace, code := in.checkExisting(ctx, q, own.SealKey, now)
+	if code != "" {
 		return fail(code)
 	}
 	rec, err := in.checkKey(ctx, m, own)
@@ -327,7 +328,7 @@ func (in *Instance) enroll(ctx context.Context, q *QueueMessage, inner *envelope
 	nonce := r.Nonce
 	mgr, err := vault.Create(ctx, vault.CreateParams{
 		Options: in.vaultOptions(sealer), VaultID: q.VaultID, UserGUID: q.UserGUID, PIN: r.PIN, KDF: kdf,
-		RelayURL: in.cfg.RelayURL, Provisional: true, ManifestSerial: m.Serial, SealKeyVerified: rec,
+		RelayURL: in.cfg.RelayURL, Provisional: true, ManifestSerial: m.Serial, SealKeyVerified: rec, Replace: replace,
 		App: &vault.EnrollApp{Name: r.Name, IK: r.IK, KEM: r.KEM, OpenToken: r.OpenToken, RequestID: q.RequestID,
 			Relay:       vault.PeerRelay{URL: r.Relay.URL, Mailbox: r.Relay.Mailbox, PK: r.Relay.PK},
 			Attestation: binding,
@@ -350,39 +351,66 @@ func (in *Instance) enroll(ctx context.Context, q *QueueMessage, inner *envelope
 	return answer(&altchan.EnrollResult{OK: true, VaultID: q.VaultID})
 }
 
-// checkExisting applies §11.3 "Provisional vaults": a vault id that is
-// already used, or a member whose confirmed (or recent provisional) vault
-// exists, is refused with vault_exists. A provisional vault older than
-// 24 h may be replaced.
-func (in *Instance) checkExisting(ctx context.Context, q *QueueMessage, ownKey string, now time.Time) string {
-	if _, _, err := in.st.Get(ctx, store.StateKey(q.VaultID)); !errors.Is(err, store.ErrNotFound) {
-		return "vault_exists"
+// checkExisting applies §11.3 "Provisional vaults" and "Re-enrollment".
+// The API reuses a member's vault_id, so an enrollment may name a vault
+// that exists: it is refused with vault_exists if that vault is confirmed,
+// provisional for less than 24 h, or sealed to another release (the
+// enclave cannot tell), and otherwise replaced (the returned versions make
+// the new objects overwrite the old ones). The same rule applies through
+// the enclave's member index to another vault_id of the same member.
+func (in *Instance) checkExisting(ctx context.Context, q *QueueMessage, ownKey string, now time.Time) (*vault.Replace, string) {
+	// replaceable reports whether vault id may be replaced, with the
+	// versions of its state and this release's header.
+	replaceable := func(id string) (*vault.Replace, bool, error) {
+		_, sv, err := in.st.Get(ctx, store.StateKey(id))
+		if errors.Is(err, store.ErrNotFound) {
+			if _, hv, herr := in.st.Get(ctx, store.HeaderKey(id, in.meas.PCR0)); herr == nil {
+				return &vault.Replace{Header: hv}, true, nil // a header without state: a broken enrollment
+			}
+			return nil, true, nil
+		}
+		if err != nil {
+			return nil, false, err
+		}
+		hblob, hv, err := in.st.Get(ctx, store.HeaderKey(id, in.meas.PCR0))
+		if err != nil {
+			return nil, false, nil // sealed to another release: cannot tell, refuse
+		}
+		s := in.sealerFor(ownKey, in.meas.PCR0)
+		defer s.Destroy()
+		h, err := vault.PeekHeader(ctx, s, hblob, id, in.meas.PCR0)
+		if err != nil || !h.Provisional || now.Sub(h.CreatedAt) < vault.EnrollWindow {
+			return nil, false, nil
+		}
+		return &vault.Replace{State: sv, Header: hv}, true, nil
+	}
+	rep, ok, err := replaceable(q.VaultID)
+	if err != nil {
+		return nil, "retry"
+	}
+	if !ok {
+		return nil, "vault_exists"
 	}
 	idx, _, err := in.st.Get(ctx, store.UserKey(userHash(q.UserGUID)))
 	if errors.Is(err, store.ErrNotFound) {
-		return ""
+		return rep, ""
 	}
 	if err != nil {
-		return "retry"
+		return nil, "retry"
 	}
 	prev := string(idx)
-	if !validID(prev) || prev == q.VaultID {
-		return "vault_exists"
+	if prev == q.VaultID {
+		return rep, ""
 	}
-	if _, _, err := in.st.Get(ctx, store.StateKey(prev)); errors.Is(err, store.ErrNotFound) {
-		return "" // a stale index entry
+	if !validID(prev) {
+		return nil, "vault_exists"
 	}
-	hblob, _, err := in.st.Get(ctx, store.HeaderKey(prev, in.meas.PCR0))
-	if err != nil {
-		return "vault_exists" // sealed to another release: cannot tell, refuse
+	if _, ok, err := replaceable(prev); err != nil {
+		return nil, "retry"
+	} else if !ok {
+		return nil, "vault_exists"
 	}
-	s := in.sealerFor(ownKey, in.meas.PCR0)
-	defer s.Destroy()
-	h, err := vault.PeekHeader(ctx, s, hblob, prev, in.meas.PCR0)
-	if err != nil || !h.Provisional || now.Sub(h.CreatedAt) < vault.EnrollWindow {
-		return "vault_exists"
-	}
-	return ""
+	return rep, ""
 }
 
 func (in *Instance) indexUser(ctx context.Context, guid, vaultID string) {

@@ -99,7 +99,8 @@ func (f *FakeNSM) Attest(userData, nonce, publicKey []byte) ([]byte, error) {
 // BuildDocument signs an attestation document as the NSM would.
 func BuildDocument(ca *NitroCA, pcrs map[uint64][]byte, ts time.Time, userData, nonce, publicKey []byte) []byte {
 	var p cbor.Encoder
-	p.Map(9).Text("module_id").Text("i-0000000000000000-enc0000000000000000").
+	// An indefinite-length map, as the real NSM encodes it.
+	p.MapIndefinite().Text("module_id").Text("i-0000000000000000-enc0000000000000000").
 		Text("digest").Text("SHA384").
 		Text("timestamp").Uint(uint64(ts.UnixMilli()))
 	p.Text("pcrs").Map(len(pcrs))
@@ -121,7 +122,7 @@ func BuildDocument(ca *NitroCA, pcrs map[uint64][]byte, ts time.Time, userData, 
 	opt("public_key", publicKey)
 	opt("user_data", userData)
 	opt("nonce", nonce)
-	payload := p.Bytes()
+	payload := p.Break().Bytes()
 	var ph cbor.Encoder
 	ph.Map(1).Int(1).Int(-35)
 	prot := ph.Bytes()

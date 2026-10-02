@@ -1,6 +1,9 @@
 package nitro_test
 
 import (
+	"strings"
+	"os"
+	"encoding/base64"
 	"crypto/elliptic"
 	"errors"
 	"testing"
@@ -93,6 +96,11 @@ func FuzzVerify(f *testing.F) {
 	nsm := enclavetest.NewFakeNSM(0xab, 0x11, 0x22, func() time.Time { return t0 })
 	doc, _ := nsm.Attest([]byte("ud"), []byte("n"), nil)
 	f.Add(doc)
+	if b, err := os.ReadFile("testdata/aws-attestation-2025-09-16.b64"); err == nil {
+		if real, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(b))); err == nil {
+			f.Add(real) // the NSM's own encoding
+		}
+	}
 	roots := nsm.CA.Roots()
 	f.Fuzz(func(t *testing.T, b []byte) {
 		_, _ = nitro.Verify(b, roots)

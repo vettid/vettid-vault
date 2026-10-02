@@ -52,29 +52,50 @@ func TestDecodeRFCExamples(t *testing.T) {
 	}
 }
 
+// Indefinite-length arrays and maps are accepted (the Nitro NSM encodes
+// the attestation payload map that way); Raw covers the break.
+func TestDecodeIndefinite(t *testing.T) {
+	v, err := Decode(h("9f018202039f0405ffff")) // [_ 1, [2, 3], [_ 4, 5]]
+	if err != nil || v.Kind != KindArray || len(v.Array) != 3 || len(v.Array[2].Array) != 2 || len(v.Raw) != 10 {
+		t.Fatalf("array: %v %+v", err, v)
+	}
+	m, err := Decode(h("bf6346756ef563416d7421ff")) // {_ "Fun": true, "Amt": -2}
+	if err != nil || m.Kind != KindMap || len(m.Map) != 2 {
+		t.Fatalf("map: %v", err)
+	}
+	if e, ok := m.Lookup("Amt"); !ok || e.Kind != KindNeg || e.Uint != 1 {
+		t.Fatal("lookup in an indefinite map")
+	}
+}
+
 func TestDecodeRejects(t *testing.T) {
 	for name, in := range map[string]string{
-		"indefinite bytes":  "5f42010243030405ff",
-		"indefinite array":  "9f018202039f0405ffff",
-		"indefinite map":    "bf6346756ef563416d7421ff",
-		"float":             "f93c00",
-		"double":            "fb3ff199999999999a",
-		"undefined":         "f7",
-		"simple 16":         "f0",
-		"simple two-byte":   "f818",
-		"false two-byte":    "f814",
-		"null two-byte":     "f816",
-		"reserved ai":       "1c",
-		"duplicate key":     "a2616101616102",
-		"duplicate int key": "a201020103",
-		"bad utf8":          "62c328",
-		"trailing":          "0000",
-		"truncated":         "1a0000",
-		"truncated string":  "45010203",
-		"array too long":    "9a00ffffff",
-		"map too long":      "ba00ffffff00",
-		"array key":         "a1800001",
-		"empty":             "",
+		"indefinite bytes":   "5f42010243030405ff",
+		"indefinite text":    "7f6161ff",
+		"stray break":        "ff",
+		"break in array":     "82ff00",
+		"unterminated array": "9f0102",
+		"break after key":    "bf6161ff",
+		"indefinite dup key": "bf616101616102ff",
+		"indefinite deep":    "9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9fffffffffffffffffffffffffffffffffffff",
+		"float":              "f93c00",
+		"double":             "fb3ff199999999999a",
+		"undefined":          "f7",
+		"simple 16":          "f0",
+		"simple two-byte":    "f818",
+		"false two-byte":     "f814",
+		"null two-byte":      "f816",
+		"reserved ai":        "1c",
+		"duplicate key":      "a2616101616102",
+		"duplicate int key":  "a201020103",
+		"bad utf8":           "62c328",
+		"trailing":           "0000",
+		"truncated":          "1a0000",
+		"truncated string":   "45010203",
+		"array too long":     "9a00ffffff",
+		"map too long":       "ba00ffffff00",
+		"array key":          "a1800001",
+		"empty":              "",
 	} {
 		if _, err := Decode(h(in)); err == nil {
 			t.Errorf("%s: accepted", name)

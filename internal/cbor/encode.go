@@ -63,6 +63,13 @@ func (e *Encoder) Map(n int) *Encoder { return e.head(5, uint64(n)) }
 // Tag appends a tag number; the tagged item follows.
 func (e *Encoder) Tag(t uint64) *Encoder { return e.head(6, t) }
 
+// MapIndefinite starts an indefinite-length map (end it with Break), as
+// the Nitro NSM encodes the attestation payload.
+func (e *Encoder) MapIndefinite() *Encoder { e.buf = append(e.buf, 0xbf); return e }
+
+// Break ends an indefinite-length array or map.
+func (e *Encoder) Break() *Encoder { e.buf = append(e.buf, 0xff); return e }
+
 // Null appends null.
 func (e *Encoder) Null() *Encoder { e.buf = append(e.buf, 0xf6); return e }
 

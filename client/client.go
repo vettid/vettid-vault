@@ -23,9 +23,11 @@ import (
 	"github.com/vettid/vettid-relay/relayclient"
 
 	"github.com/vettid/vettid-vault/internal/strictjson"
+	"github.com/vettid/vettid-vault/vms/altchan"
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/handshake"
 	"github.com/vettid/vettid-vault/vms/invite"
+	"github.com/vettid/vettid-vault/vms/nitro"
 	"github.com/vettid/vettid-vault/vms/suite"
 )
 
@@ -45,6 +47,10 @@ type Config struct {
 	Now      func() time.Time
 	// PollWait is the long-poll wait used while waiting (default 2 s).
 	PollWait time.Duration
+	// Trust pins the Nitro root and manifest keys for the alternate
+	// channel (§11.2). With Trust set, vault.enrolled must carry a valid
+	// attestation for the pending enrollment.
+	Trust *Trust
 }
 
 // State is the device's persistent state.
@@ -65,6 +71,8 @@ type State struct {
 	Seen     map[string]time.Time       `json:"seen,omitempty"`
 	// IssuedExp is the expiry of the standing token we last gave the vault.
 	IssuedExp time.Time `json:"issued_exp,omitempty"`
+	// Alt is the alternate-channel state (§11.10.6, §13.2).
+	Alt *AltState `json:"alt,omitempty"`
 }
 
 // VaultRecord is what the device knows about its vault.
@@ -95,6 +103,7 @@ type Device struct {
 	ini      *handshake.Initiator
 	awaiting []*handshake.Responder
 	events   []*envelope.Inner
+	pending  *pendingUnlock
 }
 
 func (c *Config) defaults() {
@@ -112,6 +121,19 @@ func (c *Config) defaults() {
 
 // New creates a device with fresh keys and registers its mailbox.
 func New(ctx context.Context, cfg Config) (*Device, error) {
+	d, err := Generate(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := d.own.Register(ctx); err != nil {
+		return nil, err
+	}
+	return d, nil
+}
+
+// Generate creates a device with fresh keys without registering its
+// mailbox (in-process tests; New registers).
+func Generate(cfg Config) (*Device, error) {
 	cfg.defaults()
 	st := &State{Role: cfg.Role, Name: cfg.Name, RelayURL: cfg.RelayURL}
 	for _, p := range []*[]byte{&st.IKSeed, &st.KEMSeed, &st.RelaySeed} {
@@ -121,14 +143,7 @@ func New(ctx context.Context, cfg Config) (*Device, error) {
 		}
 		*p = b
 	}
-	d, err := open(cfg, st)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := d.own.Register(ctx); err != nil {
-		return nil, err
-	}
-	return d, nil
+	return open(cfg, st)
 }
 
 // Load restores a device from Save output.
@@ -306,6 +321,13 @@ func (d *Device) CompleteEnrollment(ctx context.Context) error {
 // Pair starts pairing from a QR / link shown by an already paired app
 // (§6.7). It returns the SAS to compare; then call AwaitPaired.
 func (d *Device) Pair(ctx context.Context, link string) (string, error) {
+	return d.PairAttested(ctx, link, nil)
+}
+
+// PairAttested is Pair for an app with a device attestation key: hs.init
+// carries device_attest over the challenge DevattChallenge(hs.init id, "",
+// hs.init ts) (§6.7, §11.7).
+func (d *Device) PairAttested(ctx context.Context, link string, att Attester) (string, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	q, err := invite.ParseLink(link)
@@ -326,7 +348,22 @@ func (d *Device) Pair(ctx context.Context, link string) (string, error) {
 	}
 	d.setVaultFromPrincipal(b.Vault)
 	profile := strictjson.NewBuilder().String("name", d.st.Name).Bytes()
-	if err := d.startInit(handshake.Purpose(d.st.Role), b.InviteID, b.Token, profile); err != nil {
+	var da *altchan.DeviceAttest
+	var id string
+	now := d.cfg.Now().UTC().Truncate(time.Millisecond)
+	if att != nil && d.st.Role == "app" {
+		if id, err = envelope.NewULID(now); err != nil {
+			return "", err
+		}
+		ch, err := altchan.DevattChallenge(id, "", envelope.FormatTS(now))
+		if err != nil {
+			return "", err
+		}
+		if da, err = att.Attest(ch); err != nil {
+			return "", err
+		}
+	}
+	if err := d.startInitWith(handshake.Purpose(d.st.Role), b.InviteID, b.Token, profile, da, id, now); err != nil {
 		return "", err
 	}
 	return d.ini.SAS(), nil
@@ -351,11 +388,22 @@ func (d *Device) awaitPaired(ctx context.Context) error {
 	if v, _ := o.String("vault_id"); v != "" {
 		d.st.VaultID = v
 	}
+	// The release the vault runs under (§10.3), the floor for unlocks.
+	if r, ok, _ := o.OptString("release"); ok && len(r) == 96 {
+		if n, _, err := o.OptUint("release_number", 1, strictjson.MaxSafeInteger); err == nil && n > 0 {
+			a := d.alt()
+			a.Release, a.ReleaseNumber = r, n
+		}
+	}
 	return nil
 }
 
 // startInit sends hs.init to the vault on depositToken.
 func (d *Device) startInit(purpose handshake.Purpose, ctxID, depositToken string, profile json.RawMessage) error {
+	return d.startInitWith(purpose, ctxID, depositToken, profile, nil, "", d.cfg.Now())
+}
+
+func (d *Device) startInitWith(purpose handshake.Purpose, ctxID, depositToken string, profile json.RawMessage, da *altchan.DeviceAttest, id string, now time.Time) error {
 	v := d.st.Vault
 	ek, err := suite.ParsePublicKey(v.KEM)
 	if err != nil {
@@ -368,7 +416,7 @@ func (d *Device) startInit(purpose handshake.Purpose, ctxID, depositToken string
 	ini, err := handshake.NewInitiator(handshake.InitiatorConfig{
 		Purpose: purpose, Ctx: ctxID, Identity: d.ik, StaticKEM: d.kem.Public(), Relay: d.RelayAddr(),
 		Token: tok, Profile: profile, ResponderIK: v.IK, ResponderEK: ek, ResponderRelayKey: v.RelayPK,
-		Policy: d.policy(), Now: d.cfg.Now(),
+		Policy: d.policy(), Now: now, ID: id, DeviceAttest: da,
 	})
 	if err != nil {
 		return err
@@ -511,6 +559,13 @@ func (d *Device) Poll(ctx context.Context) error {
 	return nil
 }
 
+// Deliver processes one message as if collected (in-process tests).
+func (d *Device) Deliver(ctx context.Context, m relayclient.Message) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.handle(ctx, m)
+}
+
 // handle processes one collected message. Classification is by sender and
 // recipient kid only (§13.6).
 func (d *Device) handle(ctx context.Context, m relayclient.Message) {
@@ -608,12 +663,17 @@ func (d *Device) handleEnrolled(env *envelope.Envelope, sender ed25519.PublicKey
 	if err != nil {
 		return
 	}
-	vo, err := bo.Object("vault")
-	if err != nil {
+	if v, err := bo.Uint("v", 1, 1); err != nil || v != 1 {
 		return
 	}
-	pr, err := handshake.ParsePrincipal(vo)
+	if s, err := bo.Uint("suite", 2, 2); err != nil || s != 2 {
+		return
+	}
+	pr, err := handshake.ParsePrincipal(bo)
 	if err != nil || !suite.EqualPublic(sender, pr.Relay.PK) {
+		return
+	}
+	if !d.checkEnrolledAttestation(o, bundle) {
 		return
 	}
 	vid, err := o.String("vault_id")
@@ -632,7 +692,45 @@ func (d *Device) handleEnrolled(env *envelope.Envelope, sender ed25519.PublicKey
 	}
 	d.st.Vault.Token, d.st.Vault.TokenExp = tok, exp
 	d.st.VaultID = vid
+	if a := d.st.Alt; a != nil && a.EnrollNonce != nil {
+		// §11.3 "App state": the release and state_seq.
+		if len(a.EnrollPCRs) >= 96 {
+			a.Release, a.ReleaseNumber = a.EnrollPCRs[:96], a.EnrollNumber
+		}
+		if ss, err := o.Uint("state_seq", 0, strictjson.MaxSafeInteger); err == nil && ss > a.StateSeq {
+			a.StateSeq = ss
+		}
+		a.EnrollNonce, a.EnrollPCRs, a.EnrollNumber = nil, "", 0
+	}
 	d.events = append(d.events, in)
+}
+
+// checkEnrolledAttestation verifies vault.enrolled's attestation (§11.3):
+// nonce = the app's nonce, user_data = SHA-256("vettid/vms/2/vault" ||
+// vault_bundle), and the PCRs of the enclave the request was sealed to.
+// Without Trust (development) a missing attestation is accepted.
+func (d *Device) checkEnrolledAttestation(o strictjson.Object, bundle []byte) bool {
+	t := d.cfg.Trust
+	if t == nil {
+		return true
+	}
+	a := d.st.Alt
+	if a == nil || a.EnrollNonce == nil {
+		return false
+	}
+	doc, err := o.Base64("attestation", -1)
+	if err != nil {
+		return false
+	}
+	nd, err := nitro.Verify(doc, t.NitroRoots)
+	if err != nil {
+		return false
+	}
+	ud := altchan.VaultUserData(bundle)
+	ms := nd.Measurements()
+	return nd.CheckNonce(a.EnrollNonce) == nil && nd.CheckUserData(ud[:]) == nil &&
+		suite.Equal([]byte(ms.PCR0+ms.PCR1+ms.PCR2), []byte(a.EnrollPCRs)) &&
+		nd.CheckFresh(d.cfg.Now(), MaxAttestationAge, attestationSkew) == nil
 }
 
 func (d *Device) handleResp(ctx context.Context, raw []byte, sender ed25519.PublicKey) {

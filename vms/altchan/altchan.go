@@ -20,8 +20,13 @@ import (
 // ErrField is returned for a field that cannot appear in a signed string.
 var ErrField = errors.New("altchan: invalid field")
 
-// PaddedSize is the fixed padded size of alternate-channel plaintexts.
+// PaddedSize is the fixed padded size of alternate-channel plaintexts
+// (results, and requests other than enroll and unlock).
 const PaddedSize = envelope.AltChannelPadded
+
+// RequestPaddedSize is the fixed padded size of vault.enroll and
+// vault.unlock, which carry the release manifest (§5.4, §11.3, §11.4).
+const RequestPaddedSize = 12288
 
 // ETKUserData returns the Nitro attestation user_data for an ETK
 // descriptor: SHA-256("vettid/vms/2/etk" || descriptor_bytes) (§11.2).
@@ -81,13 +86,18 @@ type UnlockFields struct {
 	MinHeaderSeq uint64
 	PIN          string
 	Token        string
+	// Manifest is the exact manifest bytes in the request (§11.10.1);
+	// ToPCR0 the release_update target, "" without one.
+	Manifest []byte
+	ToPCR0   string
 }
 
 // UnlockSigningString returns the string `sig` covers in vault.unlock
 // (§11.4), fields separated by a literal newline, no trailing newline:
 //
 //	"vettid/vms/2/unlock" \n user_guid \n vault_id \n request_id \n ts \n etk_kid_hex \n
-//	min_state_seq \n min_header_seq \n hex(SHA-256(pin)) \n hex(SHA-256(token))
+//	min_state_seq \n min_header_seq \n hex(SHA-256(pin)) \n hex(SHA-256(token)) \n
+//	hex(SHA-256(manifest_bytes)) \n to_pcr0_hex_or_empty
 //
 // Integers are decimal; hex is lowercase. No field may contain a newline.
 func UnlockSigningString(f UnlockFields) (string, error) {
@@ -97,11 +107,15 @@ func UnlockSigningString(f UnlockFields) (string, error) {
 	if _, err := envelope.ParseTS(f.TS); err != nil {
 		return "", ErrField
 	}
-	if f.PIN == "" || f.Token == "" || strings.ContainsAny(f.PIN+f.Token, "\r\n") {
+	if f.PIN == "" || f.Token == "" || strings.ContainsAny(f.PIN+f.Token, "\r\n") || len(f.Manifest) == 0 {
+		return "", ErrField
+	}
+	if f.ToPCR0 != "" && !validPCRHex(f.ToPCR0) {
 		return "", ErrField
 	}
 	pin := sha256.Sum256([]byte(f.PIN))
 	tok := sha256.Sum256([]byte(f.Token))
+	man := sha256.Sum256(f.Manifest)
 	return strings.Join([]string{
 		suite.LabelUnlock,
 		f.UserGUID,
@@ -113,5 +127,37 @@ func UnlockSigningString(f UnlockFields) (string, error) {
 		strconv.FormatUint(f.MinHeaderSeq, 10),
 		hex.EncodeToString(pin[:]),
 		hex.EncodeToString(tok[:]),
+		hex.EncodeToString(man[:]),
+		f.ToPCR0,
 	}, "\n"), nil
+}
+
+func validPCRHex(s string) bool {
+	if len(s) != 96 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// LabelApproval is the release-approval label (§11.10.3).
+const LabelApproval = "vettid/vms/2/release-approval"
+
+// ApprovalSigningString returns the release-approval signing string
+// (§11.10.3), fields separated by a literal newline, no trailing newline:
+//
+//	"vettid/vms/2/release-approval" \n vault_id \n request_id \n from_pcr0_hex \n
+//	to_pcr0_hex \n to_release \n manifest_serial
+func ApprovalSigningString(vaultID, requestID, fromPCR0, toPCR0 string, toRelease, serial uint64) (string, error) {
+	if !validVaultID(vaultID, false) || !envelope.ValidULID(requestID) || !validPCRHex(fromPCR0) || !validPCRHex(toPCR0) ||
+		toRelease == 0 || serial == 0 {
+		return "", ErrField
+	}
+	return strings.Join([]string{LabelApproval, vaultID, requestID, fromPCR0, toPCR0,
+		strconv.FormatUint(toRelease, 10), strconv.FormatUint(serial, 10)}, "\n"), nil
 }

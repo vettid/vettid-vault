@@ -91,7 +91,11 @@ func (m *Manager) sendLocking(ctx context.Context) {
 	now := m.now()
 	for _, p := range m.ownerDevices() {
 		kr := m.sessions[p.ID]
-		if kr == nil || kr.Current() == nil || p.Standing.Token == "" {
+		if kr == nil || kr.Current() == nil || p.Standing.Token == "" || m.outboxPending(p.ID) {
+			// vault.locking is best effort and is deposited directly; it
+			// must not overtake queued messages to the device (an hs.fin
+			// still in the outbox would let it arrive in an epoch the
+			// device has not activated yet).
 			continue
 		}
 		in := &envelope.Inner{ID: m.newID(now), Type: "vault.locking", TS: now, Exp: now.Add(time.Minute), Body: json.RawMessage(`{}`)}
@@ -99,6 +103,16 @@ func (m *Manager) sendLocking(ctx context.Context) {
 			_, _ = m.relay.Deposit(ctx, p.Relay.URL, p.Relay.Mailbox, p.Standing.Token, raw)
 		}
 	}
+}
+
+// outboxPending reports whether deposits to peer are still queued.
+func (m *Manager) outboxPending(peer string) bool {
+	for _, e := range m.st.Outbox {
+		if e.PeerID == peer && !e.Done && e.Op == OpDeposit {
+			return true
+		}
+	}
+	return false
 }
 
 // retryPeer makes p's waiting entries eligible again (after a token
@@ -113,10 +127,25 @@ func (m *Manager) retryPeer(peer string) {
 
 // drainOutbox performs due outbox entries (§8.3 step 5). An entry is
 // marked done when the relay accepted it and removed at the next flush.
+// Deposits to one mailbox stay in order: once an entry for a mailbox is
+// not delivered (waiting for a retry, or failed now), later deposits to
+// that mailbox wait too, so that a message never overtakes an earlier one
+// (an hs.fin, in particular, must precede traffic in its new epoch).
 func (m *Manager) drainOutbox(ctx context.Context) {
 	now := m.now()
+	blocked := map[string]bool{}
 	for _, e := range m.st.Outbox {
-		if e.Done || now.Before(e.NotBefore) {
+		if e.Done {
+			continue
+		}
+		key := e.RelayURL + "|" + e.Mailbox
+		if e.Op == OpDeposit && blocked[key] {
+			continue
+		}
+		if now.Before(e.NotBefore) {
+			if e.Op == OpDeposit {
+				blocked[key] = true
+			}
 			continue
 		}
 		var err error
@@ -136,8 +165,14 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 			e.Done = true
 			continue
 		}
+		if e.Op == OpDeposit && !e.Done {
+			blocked[key] = true
+		}
 		if e.Done || e.NotBefore.After(now) {
 			continue // finished, or the error handler scheduled the retry
+		}
+		if ctx.Err() != nil {
+			continue // interrupted (lock, shutdown): not an attempt
 		}
 		e.Attempts++
 		d := time.Duration(250*(1<<min(e.Attempts, 7))) * time.Millisecond

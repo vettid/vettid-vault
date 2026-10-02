@@ -40,6 +40,23 @@ type State struct {
 
 	Settings Settings                   `json:"settings"`
 	Features map[string]json.RawMessage `json:"features"`
+
+	// Release state (§11.10.4): the release the vault is sealed to, a
+	// pending move, and the release last announced to the owner's devices
+	// (sync.event vault.release, §10.1).
+	SealedRelease    string       `json:"sealed_release"`
+	ReleaseMove      *ReleaseMove `json:"release_move,omitempty"`
+	AnnouncedRelease string       `json:"announced_release,omitempty"`
+}
+
+// ReleaseMove is a recorded, not yet confirmed move to another release
+// (§11.10.4 step 6).
+type ReleaseMove struct {
+	To             string `json:"to"`
+	ToRelease      uint64 `json:"to_release"`
+	From           string `json:"from"`
+	ManifestSerial uint64 `json:"manifest_serial"`
+	ApprovedBy     string `json:"approved_by"`
 }
 
 // RelayState is the vault's own relay identity (§3.2).
@@ -92,6 +109,10 @@ type Peer struct {
 
 	Standing  HeldToken `json:"standing"`  // token the peer issued to us
 	Reconnect HeldToken `json:"reconnect"` // connections only
+
+	// Attestation is an app's device-attestation binding at pairing
+	// (§6.7, §11.7); the sealed header's copy is authoritative afterwards.
+	Attestation json.RawMessage `json:"attestation,omitempty"`
 }
 
 // PeerRelay is a peer's relay address.
@@ -137,20 +158,24 @@ type Invite struct {
 	CreatedBy string    `json:"created_by"`
 	// The first app, bound at enrollment (§11.3): its hs.init is accepted
 	// without approval if it presents exactly these keys.
-	EnrollIK      []byte `json:"enroll_ik,omitempty"`
-	EnrollRelayPK []byte `json:"enroll_relay_pk,omitempty"`
+	EnrollIK      []byte          `json:"enroll_ik,omitempty"`
+	EnrollRelayPK []byte          `json:"enroll_relay_pk,omitempty"`
+	EnrollKEM     []byte          `json:"enroll_kem,omitempty"`
+	EnrollAttest  json.RawMessage `json:"enroll_attest,omitempty"`
 }
 
 // InboundHS is an hs.init awaiting the owner's approval.
 type InboundHS struct {
-	ID       string                 `json:"id"`
-	InviteID string                 `json:"invite_id"`
-	Kind     string                 `json:"kind"`
-	Remote   bool                   `json:"remote"`
-	Sender   []byte                 `json:"sender"`
-	Created  time.Time              `json:"created"`
-	Expires  time.Time              `json:"expires"`
-	Pending  handshake.PendingState `json:"pending"`
+	// Attestation is the verified binding of a pairing app (§6.7).
+	Attestation json.RawMessage        `json:"attestation,omitempty"`
+	ID          string                 `json:"id"`
+	InviteID    string                 `json:"invite_id"`
+	Kind        string                 `json:"kind"`
+	Remote      bool                   `json:"remote"`
+	Sender      []byte                 `json:"sender"`
+	Created     time.Time              `json:"created"`
+	Expires     time.Time              `json:"expires"`
+	Pending     handshake.PendingState `json:"pending"`
 }
 
 // AwaitingHS is a handshake where the vault sent hs.resp and awaits hs.fin.

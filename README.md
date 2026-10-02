@@ -7,13 +7,18 @@ member's devices, agents and connections over the
 
 ## Status
 
-**Phase V2 — vault runtime in dev mode.** On top of the V1 crypto and wire
-library, the repository has the vault runtime (one manager per unlocked
-vault), the first feature (1:1 messaging), a reference client for owner
-devices and the `vaultctl` test driver. It runs against a real relay, with
-a development sealer and direct PIN unlock standing in for the enclave and
-the alternate channel, which arrive in V3 with the supervisor, parent and
-enclave image
+**Phase V3a — alternate channel, device attestation and release updates,
+in process.** On top of the V1 crypto and wire library and the V2 vault
+runtime, the enclave side of the alternate channel (VAULT-MESSAGING
+0.3.1 §11) runs in process: ETKs and attested descriptors, enroll, unlock
+and lock with uniform results, replay and rollback protection, backoff,
+Android key attestation and App Attest verified in the enclave, signed
+release manifests, member-approved release moves with their confirmation
+and abandonment, sealing per release through KMS with Recipient
+attestation, and the enclave's own check of each sealing key's policy.
+Hardware and AWS sit behind interfaces (`NSM`, `KMS`) with TEST-ONLY fakes;
+the vsock parent, the enclave's TLS and SigV4 KMS client and the
+attestation status-list fetch are phase V3b
 ([VAULT-PLAN](https://github.com/vettid/vettid.org/blob/master/docs/VAULT-PLAN.md)
 §4). Nothing here is deployed yet.
 
@@ -25,8 +30,22 @@ enclave image
 | `vms/envelope` | §5 | v2 envelope (session and sealed modes), strict parsing, inner plaintext, padding buckets, size limits, claim-check blobs, ULIDs |
 | `vms/handshake` | §6 | hs.init / hs.resp / hs.fin for pairing, connections, rekeys and reconnects; key schedule and SAS; epochs, keyrings and retention; rotation chains; reconnect-token rules |
 | `vms/invite` | §6.4, §6.7 | Claim bundles, their encryption and hash commitment, QR / link payloads, invite TTLs |
-| `vms/altchan` | §11 | The pure helpers §16 pins: ETK and vault `user_data`, device-attestation challenge, unlock signing string; `device_attest` / `device_assertion` wire shapes |
+| `vms/altchan` | §11 | ETK and vault `user_data`, device-attestation challenge, unlock and release-approval signing strings; requests, results and descriptors; `device_attest` / `device_assertion` wire shapes |
 | `vms/vectors` | §16 | Generates and checks the test vectors |
+
+### Alternate channel, attestation and release updates (V3a)
+
+| Package | Spec | What it does |
+|---|---|---|
+| `vms/pins` | §11.2, §11.7 | Pinned vendor roots: AWS Nitro, Google hardware attestation, Apple App Attest (checked by fingerprint) |
+| `vms/nitro` | §11.2, §11.3 | Nitro attestation documents: COSE_Sign1 ES384, chain, PCRs, user_data, nonce, freshness — the code apps mirror |
+| `vms/manifest` | §11.10.1 | The signed release manifest: strict parsing, ECDSA P-256 over the exact bytes, pinned keys, serial rule |
+| `vms/devattest` | §11.7 | Android key attestation and iOS App Attest (attestations, assertions, counters), the Google status list |
+| `enclave` | §11, §11.10 | ETK lifecycle and descriptors, request binding and replay, enroll, unlock, lock, release moves, KMS sealing (`NSM` and `KMS` interfaces) |
+| `enclave/keypolicy` | §11.10.7 | The sealing-key policy check as a pure function over KMS responses |
+| `enclave/cms` | §11.10.2 | CMS EnvelopedData unwrap for KMS Recipient responses (RSA-OAEP-SHA-256 only) |
+| `internal/cbor`, `internal/der` | — | Small strict decoders for the trusted code base |
+| `internal/enclavetest` | — | TEST-ONLY fake NSM and KMS, test attestation authorities, and a `World` that plays the member API, queues and parent; never linked into release packages (`make check-tcb`) |
 
 ### Runtime (V2)
 
@@ -35,28 +54,35 @@ enclave image
 | `vault` | §3.3, §6–§9, §12, §13.2 | The vault manager: DEK-encrypted state and sealed header (`Sealer` interface), create/unlock with backoff and rollback checks, collect loop (long-poll or WebSocket), routing by sender / recipient kid / session only, pairing, invitations, reconnects, rekeys, rotation, the issued-token registry, outbox, dedupe, response cache, ack-after-flush, lock and the split-brain guard, and the feature-handler registry |
 | `vault/store` | §12.3 | Object store with create-only and version-matched writes: in-memory and local directory (S3 in V3) |
 | `features/messaging` | §10 | 1:1 messages: send, deliver, receipts, history |
-| `client` | §6.7, §9.1, §11.3 | Reference client for an app, desktop or agent: enroll or pair, session and rekeys, requests and events, token refresh |
-| `cmd/vaultctl` | — | Test driver over `client`; dev builds (`-tags devenclave`) also create and run vaults |
+| `client` | §6.7, §9.1, §11 | Reference client for an app, desktop or agent: verify enclaves and manifests, enroll and unlock over the alternate channel, approve release updates, pair (with device attestation), session and rekeys, requests and events, token refresh |
+| `cmd/vaultctl` | — | Test driver over `client`; dev builds (`-tags devenclave`) also create and run vaults, and enroll and unlock through an in-process enclave |
 | `devenclave` | — | Dev sealer and direct create/unlock with a PIN. Every file carries the `devenclave` tag; release builds cannot compile it in (`make check-tcb`) |
 
 The runtime follows VAULT-MESSAGING 0.2.3, which includes the body schemas
 (§10.1–§10.5) and the DEK and at-rest formats (§3.3.1) settled during V2.
 What V2 deliberately leaves for later is listed in
-[`docs/V2-NOTES.md`](docs/V2-NOTES.md).
+[`docs/V2-NOTES.md`](docs/V2-NOTES.md); the V3a choices, what waits for
+V3b, and the spec questions raised are in [`docs/V3-NOTES.md`](docs/V3-NOTES.md).
 
 Dependencies: the Go standard library, `golang.org/x/crypto`
 (XChaCha20-Poly1305, Argon2id), and
 [`vettid-relay`](https://github.com/vettid/vettid-relay)'s public
 `relayclient` and `relayauth` packages (which bring
 `github.com/coder/websocket` for WebSocket collect).
+No new third-party dependency in V3a: CBOR, DER and CMS are parsed by small
+in-repo decoders rather than a general library, to keep the enclave's
+trusted code base small and strict.
 [`docs/MUST-COVERAGE.md`](docs/MUST-COVERAGE.md) maps every MUST in §4–§6,
-and the V2 runtime rules of §7–§13, to the tests that cover them.
+the V2 runtime rules of §7–§13 and the V3a rules of §11–§13 to the tests
+that cover them.
 
 ## Test vectors
 
 [`testdata/vectors/`](testdata/vectors) holds the §16 vectors as JSON:
 `keys`, `hpke`, `envelope_sealed`, `envelope_session`, `handshake` (every
-key-schedule value, SAS and both signatures), `invite` and `altchan`. All
+key-schedule value, SAS and both signatures), `invite`, `altchan` (0.3.0
+unlock signing string and 12,288-byte requests) and `release` (manifest
+signature and release approval, equal to §16). All
 keys come from fixed, public, **test-only** seeds. Every file states its
 inputs, including the values §16 leaves open.
 
@@ -95,6 +121,18 @@ ID=$(bin/vaultctl -state app.json vault-create -store ./dev-vault -relay http://
 bin/vaultctl vault-run -store ./dev-vault -vault-id $ID -pin 2468 &
 bin/vaultctl -state app.json enroll-wait
 bin/vaultctl -state app.json request vault.status
+```
+
+The alternate channel by hand, with an in-process enclave (TEST-ONLY
+fakes; dev build):
+
+```sh
+bin/vaultctl -state app.json init -role app -name phone -relay http://localhost:8080
+bin/vaultctl -state app.json altchan-enroll -store ./dev-ac -relay http://localhost:8080 -guid me -pin 13579 -platform ios
+bin/vaultctl -state app.json altchan-unlock -store ./dev-ac -relay http://localhost:8080 -guid me -pin 13579 &
+bin/vaultctl -state app.json request vault.status
+# a release move: run releases 3 and 4, approve 4
+bin/vaultctl -state app.json altchan-unlock -store ./dev-ac -relay http://localhost:8080 -guid me -pin 13579 -releases 3,4 -approve 4
 ```
 
 ```sh

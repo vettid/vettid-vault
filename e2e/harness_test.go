@@ -63,7 +63,7 @@ func newTestVault(t *testing.T, relayURL, name string, tweak func(*vault.Options
 		t.Fatal(err)
 	}
 	tv := &testVault{t: t, name: name, relay: relayURL, store: st, sealer: sealer}
-	tv.opts = vault.Options{Store: st, Sealer: sealer, PollWait: time.Second}
+	tv.opts = vault.Options{Store: st, Sealer: sealer, PollWait: time.Second, Release: devenclave.Release}
 	if tweak != nil {
 		tweak(&tv.opts)
 	}

@@ -78,12 +78,30 @@ func deriveDEK(pin string, k KDFParams, pepper []byte, vaultID string) ([]byte, 
 	return hkdf.Key(sha256.New, x, pepper, labelDEK+vaultID, 32)
 }
 
-// UnlockKey is an app allowed to unlock (§3.3).
+// UnlockKey is an app allowed to unlock (§3.3): its keys and its
+// device-attestation binding (§11.7), which only the sealed header holds
+// authoritatively (the iOS assertion counter advances here).
 type UnlockKey struct {
 	DeviceID    string          `json:"device_id"`
 	IK          []byte          `json:"ik"`
 	KEM         []byte          `json:"kem"`
-	Attestation json.RawMessage `json:"attestation,omitempty"` // binding, phase V3
+	Attestation json.RawMessage `json:"attestation,omitempty"`
+}
+
+// Release identifies an enclave release (§11.10): its PCR0 (lowercase hex)
+// and its release number, which the image embeds.
+type Release struct {
+	PCR0   string
+	Number uint64
+}
+
+// SealKeyRecord is seal_key_verified (§3.3, §11.10.7): the sealing key a
+// header is sealed under and the SHA-256 of the policy that passed the
+// checks, with the release that ran them.
+type SealKeyRecord struct {
+	KeyARN       string `json:"key_arn"`
+	PolicySHA256 []byte `json:"policy_sha256"`
+	VerifiedBy   string `json:"verified_by"`
 }
 
 // Backoff is the unlock backoff state (§11.8).
@@ -99,12 +117,18 @@ type Header struct {
 	VaultID     string      `json:"vault_id"`
 	UserGUID    string      `json:"user_guid"`
 	Provisional bool        `json:"provisional"`
+	CreatedAt   time.Time   `json:"created_at"`
 	KDF         KDFParams   `json:"kdf"`
 	Pepper      []byte      `json:"pepper"`
 	UnlockKeys  []UnlockKey `json:"unlock_keys"`
 	Backoff     Backoff     `json:"backoff"`
 	StateSeq    uint64      `json:"state_seq"`
 	HeaderSeq   uint64      `json:"header_seq"`
+	// Release fields (§11.10): the release this header is sealed to, the
+	// highest manifest serial seen, and the verified sealing key.
+	SealedRelease   string         `json:"sealed_release"`
+	ManifestSerial  uint64         `json:"manifest_serial"`
+	SealKeyVerified *SealKeyRecord `json:"seal_key_verified,omitempty"`
 }
 
 func headerAAD(vaultID string) []byte { return []byte(labelHeader + "\x00" + vaultID) }
@@ -118,14 +142,14 @@ func sealHeader(ctx context.Context, s Sealer, h *Header) ([]byte, error) {
 	return s.Seal(ctx, b, headerAAD(h.VaultID))
 }
 
-func unsealHeader(ctx context.Context, s Sealer, blob []byte, vaultID string) (*Header, error) {
+func unsealHeader(ctx context.Context, s Sealer, blob []byte, vaultID, release string) (*Header, error) {
 	b, err := s.Unseal(ctx, blob, headerAAD(vaultID))
 	if err != nil {
 		return nil, ErrHeader
 	}
 	defer suite.Wipe(b)
 	var h Header
-	if err := json.Unmarshal(b, &h); err != nil || h.V != 1 || h.VaultID != vaultID {
+	if err := json.Unmarshal(b, &h); err != nil || h.V != 1 || h.VaultID != vaultID || h.SealedRelease != release {
 		return nil, ErrHeader
 	}
 	return &h, nil
@@ -166,4 +190,16 @@ func decryptState(dek []byte, vaultID string, blob []byte) ([]byte, uint64, erro
 		return nil, 0, ErrState
 	}
 	return pt, binary.BigEndian.Uint64(blob[1:9]), nil
+}
+
+// PeekHeader unseals a header blob (the enclave's check for an existing
+// vault at enrollment, §11.3). It returns a copy without secrets.
+func PeekHeader(ctx context.Context, s Sealer, blob []byte, vaultID, release string) (*Header, error) {
+	h, err := unsealHeader(ctx, s, blob, vaultID, release)
+	if err != nil {
+		return nil, err
+	}
+	suite.Wipe(h.Pepper)
+	h.Pepper = nil
+	return h, nil
 }

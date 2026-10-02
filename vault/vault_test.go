@@ -110,6 +110,8 @@ func (c *fakeCollector) Close() error { return nil }
 
 const testPIN = "1234"
 
+var testRelease = Release{PCR0: "dev", Number: 1}
+
 type fixture struct {
 	t     testing.TB
 	store store.Store
@@ -122,7 +124,7 @@ type fixture struct {
 func newFixture(t testing.TB) *fixture {
 	t.Helper()
 	f := &fixture{t: t, store: store.NewMemory()}
-	f.opts = Options{Store: f.store, Sealer: testSealer{key: bytes.Repeat([]byte{7}, 32)},
+	f.opts = Options{Store: f.store, Sealer: testSealer{key: bytes.Repeat([]byte{7}, 32)}, Release: testRelease,
 		Relay: func(base string, key ed25519.PrivateKey) Relay {
 			f.relay = &stubRelay{base: base, key: key}
 			return f.relay
@@ -309,7 +311,7 @@ func TestHeaderContents(t *testing.T) {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	want := "[backoff header_seq kdf pepper provisional state_seq unlock_keys user_guid v vault_id]"
+	want := "[backoff created_at header_seq kdf manifest_serial pepper provisional sealed_release state_seq unlock_keys user_guid v vault_id]"
 	if fmt.Sprint(keys) != want {
 		t.Fatalf("header members %v", keys)
 	}
@@ -547,4 +549,39 @@ func FuzzDeviceMessage(f *testing.F) {
 			t.Fatal("vault locked by a message")
 		}
 	})
+}
+
+// Deposits to one mailbox stay in order: an entry waiting for a retry
+// holds back later deposits to the same mailbox (an hs.fin must precede
+// traffic in its epoch), while other mailboxes proceed.
+func TestOutboxOrderPerMailbox(t *testing.T) {
+	f := newFixture(t)
+	now := time.Now()
+	f.m.mu.Lock()
+	defer f.m.mu.Unlock()
+	f.m.now = func() time.Time { return now }
+	q := func(mb, tag string) {
+		f.m.queueDeposit(&OutboxEntry{RelayURL: "https://r", Mailbox: mb, Token: "t", Payload: []byte(tag)}, now)
+	}
+	q("a", "a1")
+	q("a", "a2")
+	q("b", "b1")
+	f.m.st.Outbox[len(f.m.st.Outbox)-3].NotBefore = now.Add(time.Second) // a1 waits for a retry
+	f.m.drainOutbox(context.Background())                                // a2 must not overtake it
+	var got []string
+	for _, d := range f.relay.deposits {
+		got = append(got, string(d.payload))
+	}
+	if fmt.Sprint(got) != "[b1]" {
+		t.Fatalf("deposits before the retry: %v", got)
+	}
+	now = now.Add(time.Minute)
+	f.m.drainOutbox(context.Background())
+	got = nil
+	for _, d := range f.relay.deposits {
+		got = append(got, string(d.payload))
+	}
+	if fmt.Sprint(got) != "[b1 a1 a2]" {
+		t.Fatalf("deposits: %v", got)
+	}
 }

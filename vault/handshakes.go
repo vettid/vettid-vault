@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/vettid/vettid-vault/internal/strictjson"
+	"github.com/vettid/vettid-vault/vms/altchan"
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/handshake"
 	"github.com/vettid/vettid-vault/vms/invite"
@@ -97,6 +98,25 @@ func (m *Manager) handleInit(ctx context.Context, raw []byte, sender ed25519.Pub
 			return ackAfterFlush
 		}
 	}
+	var binding json.RawMessage
+	switch {
+	case inv.EnrollIK != nil:
+		binding = inv.EnrollAttest
+	case inv.Kind == KindApp && m.opt.DeviceAttest != nil:
+		// §6.7: an app pairs with device attestation. The challenge is
+		// the §11.7 one with the hs.init's inner id as request_id and an
+		// empty vault_id (a pairing device does not know the vault id yet).
+		da := body.DeviceAttest
+		ch, cerr := altchan.DevattChallenge(pi.Inner().ID, "", envelope.FormatTS(pi.Inner().TS))
+		if da == nil || cerr != nil {
+			m.audit(now, "pairing_attestation_missing", "")
+			return ackAfterFlush
+		}
+		if binding, err = m.opt.DeviceAttest(da, ch, now); err != nil {
+			m.audit(now, "pairing_attestation_failed", "")
+			return ackAfterFlush
+		}
+	}
 	inv.Used = true
 	if inv.OpenJTI != "" {
 		m.queueRevoke("jti", inv.OpenJTI, now)
@@ -114,7 +134,7 @@ func (m *Manager) handleInit(ctx context.Context, raw []byte, sender ed25519.Pub
 		return ackAfterFlush
 	}
 	m.st.Inbound[id] = &InboundHS{ID: id, InviteID: inv.ID, Kind: inv.Kind, Remote: inv.Remote, Sender: sender,
-		Created: now, Expires: exp, Pending: ps}
+		Created: now, Expires: exp, Pending: ps, Attestation: binding}
 	m.inbound[id] = pi
 	switch {
 	case inv.EnrollIK != nil:
@@ -168,6 +188,7 @@ func (m *Manager) approveInbound(ctx context.Context, id string, now time.Time) 
 	newPeer := peerFromPrincipal(m.newID(now), ib.Kind, body.From, now)
 	newPeer.Name = profileName(body.Profile)
 	newPeer.Profile = body.Profile
+	newPeer.Attestation = ib.Attestation
 	cfg := handshake.ResponderConfig{Identity: m.keys.ik, Policy: policyFor(ib.Kind), CollectSender: ib.Sender, Now: now}
 	var issued []IssuedToken
 	var err error
@@ -409,7 +430,8 @@ func (m *Manager) activate(p *Peer, ep *handshake.Epoch, purpose handshake.Purpo
 	case isNew && p.Kind == KindConnection:
 		m.notifyDevices("connection.event", connEvent(p.ID, "added"), "", now)
 	case isNew:
-		b := strictjson.NewBuilder().String("device_id", p.ID).String("role", p.Kind).String("vault_id", m.st.VaultID).Bytes()
+		b := strictjson.NewBuilder().String("device_id", p.ID).String("role", p.Kind).String("vault_id", m.st.VaultID).
+			String("release", m.opt.Release.PCR0).Uint("release_number", m.opt.Release.Number).Bytes()
 		m.sendTo(p, "device.paired", b, now)
 		m.notifyDevices("sync.event", strictjson.NewBuilder().String("kind", "device.paired").String("device_id", p.ID).
 			String("role", p.Kind).Bytes(), p.ID, now)
@@ -677,26 +699,42 @@ func (m *Manager) acceptInvite(ctx context.Context, link string, now time.Time) 
 	return p, nil
 }
 
+// VaultBundle returns the exact vault_bundle bytes of vault.enrolled
+// (§11.3): {v, suite, ik, kem, relay{url, mailbox, pk}}.
+func VaultBundle(pr handshake.Principal) []byte {
+	p := handshake.MarshalPrincipal(pr)
+	b := strictjson.NewBuilder().Uint("v", 1).Uint("suite", uint64(suite.Suite2)).Bytes()
+	return append(append(b[:len(b)-1], ','), p[1:]...)
+}
+
 // enrollApp binds the first app (§11.3) and deposits vault.enrolled on the
-// app's open token. Dev builds have no attestation: the field is absent.
+// app's open token, with the enclave's attestation over the bundle when
+// the enclave provides one (dev builds have none).
 func (m *Manager) enrollApp(ctx context.Context, app *EnrollApp, now time.Time) error {
-	bundle := strictjson.NewBuilder().Uint("v", 1).Uint("suite", uint64(suite.Suite2)).
-		Raw("vault", handshake.MarshalPrincipal(handshake.Principal{IK: m.keys.ik.Public().(ed25519.PublicKey), KEM: m.keys.kem.Public(), Relay: m.ownAddr()})).
-		Bytes()
-	pseudo := &Peer{ID: "enroll", Kind: KindApp, Relay: app.Relay}
+	bundle := VaultBundle(handshake.Principal{IK: m.keys.ik.Public().(ed25519.PublicKey), KEM: m.keys.kem.Public(), Relay: m.ownAddr()})
+	pseudo := &Peer{ID: enrollDeviceID, Kind: KindApp, Relay: app.Relay}
 	tok, issued, err := m.mintStanding(pseudo, now, nil)
 	if err != nil {
 		return err
 	}
 	m.st.Issued = append(m.st.Issued, issued...)
 	m.st.Invites[m.st.VaultID] = &Invite{ID: m.st.VaultID, Kind: KindApp, Exp: now.Add(EnrollWindow),
-		EnrollIK: app.IK, EnrollRelayPK: app.Relay.PK, CreatedBy: "enroll"}
+		EnrollIK: app.IK, EnrollRelayPK: app.Relay.PK, EnrollKEM: app.KEM.Bytes(), EnrollAttest: app.Attestation,
+		CreatedBy: "enroll"}
 	reqID := app.RequestID
 	if reqID == "" {
 		reqID = m.newID(now)
 	}
-	body := strictjson.NewBuilder().String("request_id", reqID).String("vault_id", m.st.VaultID).
-		Uint("state_seq", m.st.StateSeq+1).Base64("vault_bundle", bundle).String("token", tok).Bytes()
+	b := strictjson.NewBuilder().String("request_id", reqID).String("vault_id", m.st.VaultID).
+		Uint("state_seq", m.st.StateSeq+1)
+	if app.Attest != nil {
+		doc, err := app.Attest(bundle)
+		if err != nil {
+			return err
+		}
+		b.Base64("attestation", doc)
+	}
+	body := b.Base64("vault_bundle", bundle).String("token", tok).Bytes()
 	in := &envelope.Inner{ID: reqID, Type: "vault.enrolled", TS: now, Body: body}
 	padded, err := envelope.EncodeInner(in, envelope.ModeSealed)
 	if err != nil {

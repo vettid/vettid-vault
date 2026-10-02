@@ -2,11 +2,15 @@ package vectors
 
 import (
 	"bytes"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,6 +22,7 @@ import (
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/handshake"
 	"github.com/vettid/vettid-vault/vms/invite"
+	"github.com/vettid/vettid-vault/vms/manifest"
 	"github.com/vettid/vettid-vault/vms/suite"
 )
 
@@ -406,8 +411,12 @@ func TestVectors(t *testing.T) {
 		}
 		pin := sha256.Sum256([]byte(f.str("pin")))
 		tok := sha256.Sum256([]byte(f.str("token")))
+		rel := load(t, "release.json")
+		man := sha256.Sum256([]byte(rel.str("manifest")))
+		eq(t, "unlock manifest hash", man[:], f.hex("manifest_sha256_hex"))
 		want := strings.Join([]string{"vettid/vms/2/unlock", f.str("user_guid"), f.str("vault_id"), f.str("request_id"),
-			f.str("ts"), f.str("etk_kid_hex"), "1234", "1301", hex.EncodeToString(pin[:]), hex.EncodeToString(tok[:])}, "\n")
+			f.str("ts"), f.str("etk_kid_hex"), "1234", "1301", hex.EncodeToString(pin[:]), hex.EncodeToString(tok[:]),
+			hex.EncodeToString(man[:]), f.str("to_pcr0_hex")}, "\n")
 		if d.str("unlock_signing_string") != want {
 			t.Error("unlock signing string")
 		}
@@ -415,7 +424,7 @@ func TestVectors(t *testing.T) {
 			t.Error("unlock sig")
 		}
 		raw := d.b64("unlock_envelope_b64")
-		if len(raw) != 5252 || d.num("unlock_envelope_len") != 5252 {
+		if len(raw) != 13444 || d.num("unlock_envelope_len") != 13444 {
 			t.Fatalf("unlock envelope %d", len(raw))
 		}
 		e, err := envelope.Parse(raw)
@@ -426,7 +435,7 @@ func TestVectors(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		j, err := envelope.UnpadFixed(pt, 4096)
+		j, err := envelope.UnpadFixed(pt, 12288)
 		if err != nil || string(j) != d.str("unlock_inner") {
 			t.Fatalf("unlock inner: %v", err)
 		}
@@ -441,10 +450,78 @@ func TestVectors(t *testing.T) {
 		if _, err := altchan.ParseDeviceAssertion(ub["device_assertion"]); err != nil {
 			t.Fatalf("device_assertion: %v", err)
 		}
+		var served map[string]string
+		if err := json.Unmarshal(ub["manifest"], &served); err != nil || served["manifest"] != base64.StdEncoding.EncodeToString([]byte(rel.str("manifest"))) {
+			t.Fatal("unlock manifest member")
+		}
 		s, _ := hpkederand.NewSender(etk.Public().Bytes(), []byte(suite.InfoSealed), d.hex("unlock_encapsulation_randomness_hex"))
 		ct, _ := s.Seal(raw[:1140], pt)
 		eq(t, "unlock envelope", append(bytes.Clone(raw[:1140]), ct...), raw)
 	})
+}
+
+// §11.10 release vectors, checked from the receiving side.
+func TestReleaseVectors(t *testing.T) {
+	d := load(t, "release.json")
+	mb := []byte(d.str("manifest"))
+	if len(mb) != 1060 || d.num("manifest_len") != 1060 {
+		t.Fatalf("manifest length %d", len(mb))
+	}
+	h := sha256.Sum256(mb)
+	eq(t, "manifest sha256", h[:], d.hex("manifest_sha256_hex"))
+	dg := sha256.Sum256(append([]byte("vettid/pcr-manifest/1\x00"), mb...))
+	eq(t, "manifest signed digest", dg[:], d.hex("manifest_signed_digest_hex"))
+	spki := d.b64("manifest_key_spki_b64")
+	ks := sha256.Sum256(spki)
+	if hex.EncodeToString(ks[:8]) != d.str("manifest_key_id") {
+		t.Error("key_id")
+	}
+	pk, err := x509.ParsePKIXPublicKey(spki)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub := pk.(*ecdsa.PublicKey)
+	sig := d.b64("manifest_sig_b64")
+	if len(sig) != 64 || !ecdsa.Verify(pub, dg[:], new(big.Int).SetBytes(sig[:32]), new(big.Int).SetBytes(sig[32:])) {
+		t.Error("manifest signature")
+	}
+	priv, err := ecdsa.ParseRawPrivateKey(elliptic.P256(), d.hex("manifest_key_scalar_hex"))
+	if err != nil || !priv.PublicKey.Equal(pub) {
+		t.Error("manifest key scalar")
+	}
+	s, err := manifest.ParseServed([]byte(d.str("served")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := manifest.Verify(s, []*ecdsa.PublicKey{pub}); err != nil || m.Serial != 7 || len(m.Releases) != 2 {
+		t.Fatalf("library verify: %v", err)
+	}
+	a := d.sub("approval")
+	want := strings.Join([]string{"vettid/vms/2/release-approval", a.str("vault_id"), a.str("request_id"), a.str("from_pcr0_hex"),
+		a.str("to_pcr0_hex"), "4", "7"}, "\n")
+	if a.str("signing_string") != want {
+		t.Error("approval string")
+	}
+	if got, _ := altchan.ApprovalSigningString(a.str("vault_id"), a.str("request_id"), a.str("from_pcr0_hex"), a.str("to_pcr0_hex"), 4, 7); got != want {
+		t.Error("approval string (lib)")
+	}
+	ah := sha256.Sum256([]byte(want))
+	eq(t, "approval sha256", ah[:], a.hex("signing_string_sha256_hex"))
+	dk, err := x509.ParsePKIXPublicKey(a.b64("device_key_spki_b64"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ecdsa.VerifyASN1(dk.(*ecdsa.PublicKey), ah[:], a.b64("sig_der_b64")) {
+		t.Error("approval signature")
+	}
+	u := d.sub("unlock_with_update")
+	if !strings.HasSuffix(u.str("signing_string"), "\n"+hex.EncodeToString(h[:])+"\n"+a.str("to_pcr0_hex")) {
+		t.Error("unlock signing string with update")
+	}
+	ik := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{SeedInitIK}, 32))
+	if !ed25519.Verify(ik.Public().(ed25519.PublicKey), []byte(u.str("signing_string")), u.b64("sig_b64")) {
+		t.Error("unlock sig with update")
+	}
 }
 
 func mustSeed(t *testing.T, k *suite.PrivateKey) []byte {

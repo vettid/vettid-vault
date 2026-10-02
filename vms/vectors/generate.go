@@ -4,11 +4,17 @@ package vectors
 
 import (
 	"bytes"
+	"crypto"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
+	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/vettid/vettid-vault/internal/strictjson"
@@ -16,6 +22,7 @@ import (
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/handshake"
 	"github.com/vettid/vettid-vault/vms/invite"
+	"github.com/vettid/vettid-vault/vms/manifest"
 	"github.com/vettid/vettid-vault/vms/suite"
 )
 
@@ -237,6 +244,15 @@ func Generate() (map[string][]byte, error) {
 	if err := put("altchan.json", ac); err != nil {
 		return nil, err
 	}
+
+	// release.json (§11.10)
+	rv, err := genRelease(ini, etk)
+	if err != nil {
+		return nil, err
+	}
+	if err := put("release.json", rv); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 
@@ -404,6 +420,102 @@ func genInvite(t0 time.Time, vault *principal) (obj, error) {
 	}, nil
 }
 
+// specManifest is the §16 release manifest (1,060 bytes).
+func specManifest() []byte {
+	rs := []manifest.Release{
+		{Number: 3, PCR0: strings.Repeat("ab", 48), PCR1: strings.Repeat("11", 48), PCR2: strings.Repeat("22", 48),
+			SealKey: "arn:aws:kms:us-east-1:000000000000:key/test-release-3", Status: manifest.StatusDeprecated,
+			PublishedAt: time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC), Notes: "https://vettid.org/releases/3"},
+		{Number: 4, PCR0: strings.Repeat("cd", 48), PCR1: strings.Repeat("33", 48), PCR2: strings.Repeat("44", 48),
+			SealKey: "arn:aws:kms:us-east-1:000000000000:key/test-release-4", Status: manifest.StatusActive,
+			PublishedAt: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC), Notes: "https://vettid.org/releases/4"},
+	}
+	return manifest.Build(7, time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC), rs)
+}
+
+func p256(seed byte) (*ecdsa.PrivateKey, error) {
+	return ecdsa.ParseRawPrivateKey(elliptic.P256(), rep(seed, 32))
+}
+
+func spkiB64(k *ecdsa.PrivateKey) (string, error) {
+	der, err := x509.MarshalPKIXPublicKey(&k.PublicKey)
+	if err != nil {
+		return "", err
+	}
+	return b64(der), nil
+}
+
+func genRelease(app *principal, etk *suite.PrivateKey) (obj, error) {
+	mk, err := p256(SeedManifestKey)
+	if err != nil {
+		return nil, err
+	}
+	mb := specManifest()
+	served, err := manifest.Sign(mk, mb)
+	if err != nil {
+		return nil, err
+	}
+	mspki, err := spkiB64(mk)
+	if err != nil {
+		return nil, err
+	}
+	mh := sha256.Sum256(mb)
+	md := manifest.Digest(mb)
+	from, to := strings.Repeat("ab", 48), strings.Repeat("cd", 48)
+	as, err := altchan.ApprovalSigningString(ACVaultID, ACApprovalRequestID, from, to, 4, 7)
+	if err != nil {
+		return nil, err
+	}
+	ah := sha256.Sum256([]byte(as))
+	dk, err := p256(SeedDeviceKey)
+	if err != nil {
+		return nil, err
+	}
+	dspki, err := spkiB64(dk)
+	if err != nil {
+		return nil, err
+	}
+	asig, err := dk.Sign(nil, ah[:], crypto.SHA256) // RFC 6979
+	if err != nil {
+		return nil, err
+	}
+	// The unlock that carries this approval: its signing string covers the
+	// manifest and to_pcr0 (§11.4).
+	us, err := altchan.UnlockSigningString(altchan.UnlockFields{UserGUID: ACUserGUID, VaultID: ACVaultID,
+		RequestID: ACApprovalRequestID, TS: TS, ETKKid: etk.Public().Kid(), MinStateSeq: 1234, MinHeaderSeq: 1301,
+		PIN: ACPIN, Token: ACToken, Manifest: mb, ToPCR0: to})
+	if err != nil {
+		return nil, err
+	}
+	usig := ed25519.Sign(app.ik, []byte(us))
+	return obj{
+		{"description", "VAULT-MESSAGING §11.10 release updates. Manifest signature: ECDSA P-256 (RFC 6979 deterministic nonce) over SHA-256(\"vettid/pcr-manifest/1\" || 0x00 || manifest), encoded r || s (IEEE P1363); key_id = hex(SHA-256(SPKI DER)[0:8]). Approval: the §11.10.3 signing string signed by the Android device attestation key (ECDSA P-256 with SHA-256, DER). The unlock signing string is the §11.4 string of the unlock that carries the approval (to_pcr0 = the target). All keys are TEST ONLY."},
+		{"manifest_key_scalar_hex", hx(rep(SeedManifestKey, 32))},
+		{"manifest_key_spki_b64", mspki},
+		{"manifest_key_id", served.KeyID},
+		{"manifest", string(mb)},
+		{"manifest_len", len(mb)},
+		{"manifest_sha256_hex", hx(mh[:])},
+		{"manifest_signed_digest_hex", hx(md[:])},
+		{"manifest_sig_b64", b64(served.Sig)},
+		{"served", string(served.Marshal())},
+		{"approval", obj{
+			{"vault_id", ACVaultID}, {"request_id", ACApprovalRequestID}, {"from_pcr0_hex", from}, {"to_pcr0_hex", to},
+			{"to_release", 4}, {"manifest_serial", 7},
+			{"signing_string", as},
+			{"signing_string_sha256_hex", hx(ah[:])},
+			{"device_key_scalar_hex", hx(rep(SeedDeviceKey, 32))},
+			{"device_key_spki_b64", dspki},
+			{"sig_der_b64", b64(asig)},
+		}},
+		{"unlock_with_update", obj{
+			{"ts", TS}, {"etk_kid_hex", etk.Public().Kid().String()},
+			{"signing_string", us},
+			{"sig_b64", b64(usig)},
+		}},
+	}, nil
+}
+
 func genAltchan(t0 time.Time, app *principal, etk *suite.PrivateKey) (obj, error) {
 	etkKid := etk.Public().Kid()
 	desc := strictjson.NewBuilder().
@@ -423,8 +535,16 @@ func genAltchan(t0 time.Time, app *principal, etk *suite.PrivateKey) (obj, error
 	if err != nil {
 		return nil, err
 	}
+	mk, err := p256(SeedManifestKey)
+	if err != nil {
+		return nil, err
+	}
+	served, err := manifest.Sign(mk, specManifest())
+	if err != nil {
+		return nil, err
+	}
 	fields := altchan.UnlockFields{UserGUID: ACUserGUID, VaultID: ACVaultID, RequestID: ACUnlockRequestID, TS: TS,
-		ETKKid: etkKid, MinStateSeq: 1234, MinHeaderSeq: 1301, PIN: ACPIN, Token: ACToken}
+		ETKKid: etkKid, MinStateSeq: 1234, MinHeaderSeq: 1301, PIN: ACPIN, Token: ACToken, Manifest: served.Manifest}
 	ss, err := altchan.UnlockSigningString(fields)
 	if err != nil {
 		return nil, err
@@ -445,6 +565,7 @@ func genAltchan(t0 time.Time, app *principal, etk *suite.PrivateKey) (obj, error
 		Uint("min_header_seq", 1301).
 		String("token", ACToken).
 		Raw("device_assertion", assertion).
+		Raw("manifest", served.Marshal()).
 		String("sig", b64(sig)).
 		Bytes()
 	t1, _ := envelope.ParseTS(TS)
@@ -452,7 +573,7 @@ func genAltchan(t0 time.Time, app *principal, etk *suite.PrivateKey) (obj, error
 	if err != nil {
 		return nil, err
 	}
-	padded, err := envelope.PadFixed(inner, altchan.PaddedSize)
+	padded, err := envelope.PadFixed(inner, altchan.RequestPaddedSize)
 	if err != nil {
 		return nil, err
 	}
@@ -466,7 +587,7 @@ func genAltchan(t0 time.Time, app *principal, etk *suite.PrivateKey) (obj, error
 	}
 	_ = t0
 	return obj{
-		{"description", "VAULT-MESSAGING §11 alternate channel. The descriptor is compact JSON in the member order of §11.2; user_data = SHA-256(\"vettid/vms/2/etk\" || descriptor). devatt challenge = SHA-256(\"vettid/vms/2/devatt\" || request_id || vault_id_or_empty || ts), the same for Android and iOS. The unlock signing string joins its fields with \\n (no trailing newline); sig is Ed25519 by the device ik (keys.json initiator ik). The vault.unlock inner is padded to exactly 4096 bytes and sealed to the ETK (encapsulation randomness 64 x 0x13, sender_kid all zero). PIN, token, ids and the device_assertion signature (72 x 0x2a) are dummy test values."},
+		{"description", "VAULT-MESSAGING 0.3.0 §11 alternate channel. The descriptor is compact JSON in the member order of §11.2; user_data = SHA-256(\"vettid/vms/2/etk\" || descriptor). devatt challenge = SHA-256(\"vettid/vms/2/devatt\" || request_id || vault_id_or_empty || ts), the same for Android and iOS. The unlock signing string joins its 12 fields with \\n (no trailing newline): it ends with hex(SHA-256(manifest_bytes)) and to_pcr0 (empty here: no release update); sig is Ed25519 by the device ik (keys.json initiator ik). The manifest is release.json's served document. The vault.unlock inner is padded to exactly 12,288 bytes and sealed to the ETK (encapsulation randomness 64 x 0x13, sender_kid all zero). PIN, token, ids and the device_assertion signature (72 x 0x2a) are dummy test values."},
 		{"descriptor", string(desc)},
 		{"descriptor_user_data_hex", hx(ud[:])},
 		{"devatt_enroll", obj{{"request_id", ACEnrollRequestID}, {"vault_id", ""}, {"ts", TS}, {"challenge_hex", hx(enrollChal[:])}}},
@@ -474,7 +595,7 @@ func genAltchan(t0 time.Time, app *principal, etk *suite.PrivateKey) (obj, error
 		{"unlock_fields", obj{
 			{"user_guid", ACUserGUID}, {"vault_id", ACVaultID}, {"request_id", ACUnlockRequestID}, {"ts", TS},
 			{"etk_kid_hex", etkKid.String()}, {"min_state_seq", 1234}, {"min_header_seq", 1301},
-			{"pin", ACPIN}, {"token", ACToken},
+			{"pin", ACPIN}, {"token", ACToken}, {"manifest_sha256_hex", hx(sha256Of(served.Manifest))}, {"to_pcr0_hex", ""},
 		}},
 		{"unlock_signing_string", ss},
 		{"unlock_sig_b64", b64(sig)},
@@ -483,4 +604,9 @@ func genAltchan(t0 time.Time, app *principal, etk *suite.PrivateKey) (obj, error
 		{"unlock_envelope_len", len(env)},
 		{"unlock_envelope_b64", b64(env)},
 	}, nil
+}
+
+func sha256Of(b []byte) []byte {
+	h := sha256.Sum256(b)
+	return h[:]
 }

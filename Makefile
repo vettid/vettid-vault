@@ -1,10 +1,13 @@
 GO        ?= go
 FUZZTIME  ?= 50000x
 FUZZMINIMIZE ?= 200x
+# Extra flags for fuzzing, e.g. FUZZFLAGS=-parallel=2 on a small machine.
+FUZZFLAGS ?=
 # Packages that ship. They must never link the vector-only code, the dev
 # enclave (dev sealer, PIN constructors) or test harnesses.
 LIBPKGS   := ./vms/suite ./vms/envelope ./vms/handshake ./vms/invite ./vms/altchan \
-             ./vault/... ./client/... ./features/... ./cmd/...
+             ./vms/pins ./vms/nitro ./vms/manifest ./vms/devattest \
+             ./enclave/... ./vault/... ./client/... ./features/... ./cmd/...
 E2ETAGS   := devenclave e2e
 
 .PHONY: all test race lint vet staticcheck fuzz scan tidy vectors check-tcb e2e
@@ -35,10 +38,11 @@ staticcheck:
 lint: vet staticcheck
 
 # Release builds must not contain deterministic randomness (derandomized
-# HPKE, ML-KEM test encapsulation), the dev enclave, or test harnesses; and
+# HPKE, ML-KEM test encapsulation), the dev enclave, or test harnesses and
+# test authorities (relaytest, enclavetest: fake NSM and KMS, test roots); and
 # the dev enclave must not compile at all without its build tag.
 check-tcb:
-	@if $(GO) list -deps $(LIBPKGS) | grep -E 'hpkederand|mlkemtest|/devenclave|relaytest'; then \
+	@if $(GO) list -deps $(LIBPKGS) | grep -E 'hpkederand|mlkemtest|/devenclave|relaytest|enclavetest'; then \
 	  echo "dev, test or vector-only code linked into release packages"; exit 1; fi
 	@if $(GO) list ./devenclave >/dev/null 2>&1; then \
 	  echo "devenclave compiles without the devenclave tag"; exit 1; fi
@@ -65,7 +69,7 @@ fuzz:
 	@set -e; for pkg in $$($(GO) list ./...); do \
 	  for f in $$($(GO) test -list '^Fuzz' $$pkg | grep '^Fuzz' || true); do \
 	    echo "== $$pkg $$f"; \
-	    $(GO) test $$pkg -run '^$$' -fuzz "^$$f\$$" -fuzztime $(FUZZTIME) -fuzzminimizetime $(FUZZMINIMIZE); \
+	    $(GO) test $$pkg -run '^$$' -fuzz "^$$f\$$" -fuzztime $(FUZZTIME) -fuzzminimizetime $(FUZZMINIMIZE) $(FUZZFLAGS); \
 	  done; \
 	done
 

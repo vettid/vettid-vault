@@ -16,6 +16,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -34,6 +35,10 @@ type globals struct {
 	state   string
 	timeout time.Duration
 }
+
+// httpClient is the HTTP client for relays and the member API (nil: the
+// default). Development builds can point it at local test servers.
+var httpClient *http.Client
 
 var commands = map[string]command{
 	"init":        {"init -role app|desktop|agent -name NAME -relay URL", cmdInit},
@@ -86,7 +91,7 @@ func load(g *globals) (*client.Device, error) {
 	if err != nil {
 		return nil, err
 	}
-	return client.Load(client.Config{}, b)
+	return client.Load(client.Config{HTTP: httpClient}, b)
 }
 
 func save(g *globals, d *client.Device) error {
@@ -121,7 +126,7 @@ func cmdInit(ctx context.Context, g *globals, args []string) error {
 	if err := os.MkdirAll(filepath.Dir(g.state), 0o700); err != nil {
 		return err
 	}
-	d, err := client.New(ctx, client.Config{Role: *role, Name: *name, RelayURL: *relay})
+	d, err := client.New(ctx, client.Config{Role: *role, Name: *name, RelayURL: *relay, HTTP: httpClient})
 	if err != nil {
 		return err
 	}

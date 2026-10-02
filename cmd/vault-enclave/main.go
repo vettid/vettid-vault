@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -31,6 +32,11 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 2 && os.Args[1] == vaultproc.Arg && slices.Contains(os.Args[2:], vaultproc.SelftestArg) {
+		// The hardware smoke test's vault process (docs/SMOKE.md).
+		vaultproc.SelftestMain()
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == vaultproc.Arg {
 		// A vault's own process (D4), started by the supervisor.
 		p, err := vaultPlatform(os.Args[2:])

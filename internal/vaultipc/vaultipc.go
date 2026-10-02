@@ -45,6 +45,10 @@ const Version = "1"
 const (
 	KindOpen hostproto.Kind = 0x40
 	KindLock hostproto.Kind = 0x41
+	// KindSelftest [key_arn] → [ok, report JSON]: the hardware smoke
+	// test's vault-process checks (docs/SMOKE.md); only a process started
+	// in self-test mode answers it.
+	KindSelftest hostproto.Kind = 0x42
 )
 
 // Vault → supervisor requests.

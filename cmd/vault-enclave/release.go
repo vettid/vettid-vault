@@ -30,16 +30,7 @@ func platform() (supervisor.Config, error) {
 	if err != nil {
 		return supervisor.Config{}, err
 	}
-	amazon := pins.Pool(pins.AmazonTLSRoots())
-	hosts := []egress.Host{
-		{Name: "relay.vettid.org", Roots: amazon, HTTP2: true},
-		{Name: "android.googleapis.com", Roots: pins.Pool(pins.GoogleTLSRoots()), HTTP2: true},
-	}
-	if r := enclave.ReleaseRegion(); r != "" {
-		// KMS endpoints offer HTTP/1.1 only (docs/V3-NOTES.md).
-		hosts = append(hosts, egress.Host{Name: "kms." + r + ".amazonaws.com", Roots: amazon})
-	}
-	tr, err := egress.New(egress.Config{Hosts: hosts, Conns: 4, Dialer: egress.DialerFunc(dialEgress)})
+	tr, err := egress.New(egress.Config{Hosts: releaseHosts(enclave.ReleaseRegion()), Conns: 4, Dialer: egress.DialerFunc(dialEgress)})
 	if err != nil {
 		return supervisor.Config{}, err
 	}
@@ -56,7 +47,28 @@ func platform() (supervisor.Config, error) {
 		Proc:       supervisor.ProcConfig{Exec: []string{exe, vaultproc.Arg}, UIDBase: vaultUIDBase},
 		RelayHosts: []string{"relay.vettid.org"},
 		Harden:     true,
+		NitroRoots: enclave.NitroRoots(),
+		// The hardware smoke test (docs/SMOKE.md) reaches the KMS endpoint
+		// of the test key's region; same roots, same forwarder.
+		SelftestEgress: func(region string) (*egress.Transport, error) {
+			return egress.New(egress.Config{Hosts: releaseHosts(region), Conns: 1, Dialer: egress.DialerFunc(dialEgress)})
+		},
 	}, nil
+}
+
+// releaseHosts is the release egress allowlist: the relay and Google with
+// HTTP/2, and the regional KMS endpoint (HTTP/1.1 only, docs/V3-NOTES.md)
+// when a region is pinned.
+func releaseHosts(region string) []egress.Host {
+	amazon := pins.Pool(pins.AmazonTLSRoots())
+	hosts := []egress.Host{
+		{Name: "relay.vettid.org", Roots: amazon, HTTP2: true},
+		{Name: "android.googleapis.com", Roots: pins.Pool(pins.GoogleTLSRoots()), HTTP2: true},
+	}
+	if region != "" {
+		hosts = append(hosts, egress.Host{Name: "kms." + region + ".amazonaws.com", Roots: amazon})
+	}
+	return hosts
 }
 
 // vaultUIDBase is the first uid (and gid) of the vault processes.

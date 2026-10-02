@@ -65,6 +65,9 @@ const (
 	// Shutdown: []; reply [status] once every vault is locked (§12.3
 	// "Enclave release or restart ... if signalled").
 	KindShutdown Kind = 0x13
+	// Selftest: [request JSON]; reply [status, report JSON]. Only after a
+	// Hello answered "selftest" (the hardware smoke test, docs/SMOKE.md).
+	KindSelftest Kind = 0x14
 )
 
 // Notifications from the enclave to the parent:

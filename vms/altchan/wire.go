@@ -467,6 +467,21 @@ func ParseEnrollResult(raw json.RawMessage) (*EnrollResult, error) {
 	return r, nil
 }
 
+// ValidInstanceID reports whether s is an instance id (§11.1):
+// [A-Za-z0-9_-]{1,48}.
+func ValidInstanceID(s string) bool {
+	if len(s) == 0 || len(s) > 48 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '-') {
+			return false
+		}
+	}
+	return true
+}
+
 // Descriptor is the ETK descriptor (§11.2).
 type Descriptor struct {
 	InstanceID string
@@ -502,7 +517,7 @@ func ParseDescriptor(b []byte) (*Descriptor, error) {
 		return nil, ErrMalformed
 	}
 	d := &Descriptor{Bytes: append([]byte(nil), b...)}
-	if d.InstanceID, err = o.String("instance_id"); err != nil || !validVaultID(d.InstanceID, false) {
+	if d.InstanceID, err = o.String("instance_id"); err != nil || !ValidInstanceID(d.InstanceID) {
 		return nil, ErrMalformed
 	}
 	kid, err := o.String("kid")

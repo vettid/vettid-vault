@@ -129,6 +129,10 @@ func TestDescriptor(t *testing.T) {
 		strings.Replace(string(d), strings.Repeat("ab", 48), strings.Repeat("00", 48), 1),
 		strings.Replace(string(d), p.Kid.String(), "0000000000000000", 1),
 		strings.Replace(string(d), "2026-10-03T12:00:00Z", "2026-10-03T12:00:00.5Z", 1),
+		strings.Replace(string(d), `"i-1"`, `"i.1"`, 1),
+		strings.Replace(string(d), `"i-1"`, `"i 1"`, 1),
+		strings.Replace(string(d), `"i-1"`, `"`+strings.Repeat("a", 49)+`"`, 1),
+		strings.Replace(string(d), `"i-1"`, `""`, 1),
 	} {
 		if _, err := ParseDescriptor([]byte(bad)); err == nil {
 			t.Errorf("accepted %.60s", bad)
@@ -179,9 +183,19 @@ func FuzzParseResults(f *testing.F) {
 	})
 }
 
+func TestValidInstanceID(t *testing.T) {
+	for s, ok := range map[string]bool{"i-0abc_DEF": true, strings.Repeat("Z", 48): true, "": false,
+		strings.Repeat("Z", 49): false, "i.1": false, "i/1": false, "é": false} {
+		if ValidInstanceID(s) != ok {
+			t.Errorf("%q", s)
+		}
+	}
+}
+
 func FuzzParseDescriptor(f *testing.F) {
 	k, _ := suite.NewPrivateKey(bytes.Repeat([]byte{5}, 32))
 	f.Add(MarshalDescriptor("i-1", k.Public(), strings.Repeat("ab", 48), time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)))
+	f.Add(MarshalDescriptor("i-0123456789abcdef_ENC", k.Public(), strings.Repeat("ab", 48), time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)))
 	f.Fuzz(func(t *testing.T, b []byte) {
 		_, _ = ParseDescriptor(b)
 	})

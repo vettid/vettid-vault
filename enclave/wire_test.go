@@ -23,7 +23,12 @@ func TestQueueMessage(t *testing.T) {
 		t.Fatalf("%v", err)
 	}
 	lock := &QueueMessage{Op: OpLock, VaultID: "v", UserGUID: "u", RequestID: "01JB2Z6V9K3M4N5P6Q7R8S9T21", EnqueuedAt: time.Now()}
-	if _, err := ParseQueueMessage(lock.Marshal()); err != nil {
+	if _, err := ParseQueueMessage(lock.Marshal()); err != nil || strings.Contains(string(lock.Marshal()), "etk_kid") {
+		t.Fatal("lock message", err)
+	}
+	// As the member API sends it (§11.5): no etk_kid, no envelope.
+	api := `{"v":1,"op":"lock","vault_id":"0123456789abcdef0123456789abcdef","user_guid":"u","request_id":"01JB2Z6V9K3M4N5P6Q7R8S9T21","enqueued_at":"2026-10-02T12:00:00Z"}`
+	if _, err := ParseQueueMessage([]byte(api)); err != nil {
 		t.Fatal(err)
 	}
 	for name, s := range map[string]string{

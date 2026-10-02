@@ -135,9 +135,9 @@ func ParseQueueMessage(b []byte) (*QueueMessage, error) {
 // Marshal encodes the queue message (§11.5 member order).
 func (q *QueueMessage) Marshal() []byte {
 	b := strictjson.NewBuilder().Uint("v", 1).String("op", q.Op).String("vault_id", q.VaultID).
-		String("user_guid", q.UserGUID).String("request_id", q.RequestID).String("etk_kid", q.ETKKid.String())
-	if q.Envelope != nil {
-		b.Base64("envelope", q.Envelope)
+		String("user_guid", q.UserGUID).String("request_id", q.RequestID)
+	if q.Op == OpEnroll || q.Op == OpUnlock { // absent for lock and delete (§11.5)
+		b.String("etk_kid", q.ETKKid.String()).Base64("envelope", q.Envelope)
 	}
 	return b.String("enqueued_at", q.EnqueuedAt.UTC().Format(time.RFC3339)).Bytes()
 }

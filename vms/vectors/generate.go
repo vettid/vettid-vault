@@ -430,6 +430,11 @@ func genAltchan(t0 time.Time, app *principal, etk *suite.PrivateKey) (obj, error
 		return nil, err
 	}
 	sig := ed25519.Sign(app.ik, []byte(ss))
+	// A dummy Android assertion: the enclave verifies it in phase V3.
+	assertion, err := (&altchan.DeviceAssertion{Platform: altchan.PlatformAndroid, Sig: rep(0x2a, 72)}).Marshal()
+	if err != nil {
+		return nil, err
+	}
 	body := strictjson.NewBuilder().
 		String("user_guid", ACUserGUID).
 		String("vault_id", ACVaultID).
@@ -439,6 +444,7 @@ func genAltchan(t0 time.Time, app *principal, etk *suite.PrivateKey) (obj, error
 		Uint("min_state_seq", 1234).
 		Uint("min_header_seq", 1301).
 		String("token", ACToken).
+		Raw("device_assertion", assertion).
 		String("sig", b64(sig)).
 		Bytes()
 	t1, _ := envelope.ParseTS(TS)
@@ -460,7 +466,7 @@ func genAltchan(t0 time.Time, app *principal, etk *suite.PrivateKey) (obj, error
 	}
 	_ = t0
 	return obj{
-		{"description", "VAULT-MESSAGING §11 alternate channel. The descriptor is compact JSON in the member order of §11.2; user_data = SHA-256(\"vettid/vms/2/etk\" || descriptor). devatt challenge = SHA-256(\"vettid/vms/2/devatt\" || request_id || vault_id_or_empty || ts), the same for Android and iOS. The unlock signing string joins its fields with \\n (no trailing newline); sig is Ed25519 by the device ik (keys.json initiator ik). The vault.unlock inner is padded to exactly 4096 bytes and sealed to the ETK (encapsulation randomness 64 x 0x13, sender_kid all zero). PIN, token and ids are dummy test values."},
+		{"description", "VAULT-MESSAGING §11 alternate channel. The descriptor is compact JSON in the member order of §11.2; user_data = SHA-256(\"vettid/vms/2/etk\" || descriptor). devatt challenge = SHA-256(\"vettid/vms/2/devatt\" || request_id || vault_id_or_empty || ts), the same for Android and iOS. The unlock signing string joins its fields with \\n (no trailing newline); sig is Ed25519 by the device ik (keys.json initiator ik). The vault.unlock inner is padded to exactly 4096 bytes and sealed to the ETK (encapsulation randomness 64 x 0x13, sender_kid all zero). PIN, token, ids and the device_assertion signature (72 x 0x2a) are dummy test values."},
 		{"descriptor", string(desc)},
 		{"descriptor_user_data_hex", hx(ud[:])},
 		{"devatt_enroll", obj{{"request_id", ACEnrollRequestID}, {"vault_id", ""}, {"ts", TS}, {"challenge_hex", hx(enrollChal[:])}}},

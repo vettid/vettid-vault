@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/vettid/vettid-vault/vms/altchan"
 	"github.com/vettid/vettid-vault/vms/suite"
 )
 
@@ -35,7 +36,7 @@ func TestInitRoundTrip(t *testing.T) {
 	for _, p := range []Purpose{PurposeApp, PurposeDesktop, PurposeAgent, PurposeConnection, PurposeRekey, PurposeReconnect} {
 		in := sampleInit(t, p)
 		if p == PurposeApp {
-			in.AppAttest = json.RawMessage(`{ "k" : 1 }`)
+			in.DeviceAttest = &altchan.DeviceAttest{Platform: "android", Chain: [][]byte{{0x30, 0x82}, {0x30, 0x81}}}
 		}
 		if p == PurposeConnection {
 			in.Profile = json.RawMessage(`{"name":"A <b>"}`)
@@ -95,7 +96,10 @@ func TestInitFieldRules(t *testing.T) {
 		{"suites empty", replaceMember(t, good, "suites", []int{})},
 		{"suites float", []byte(strings.Replace(string(good), `"suites":[2]`, `"suites":[2.0]`, 1))},
 		{"rotations outside reconnect", replaceMember(t, good, "rotations", []any{})},
-		{"app_attest outside app", replaceMember(t, good, "app_attest", map[string]int{"a": 1})},
+		{"device_attest outside app", replaceMember(t, good, "device_attest", map[string]any{"platform": "ios", "key_id": "AA==", "attestation": "AA=="})},
+		{"device_attest bad platform", replaceMember(t, app, "device_attest", map[string]any{"platform": "web", "chain": []string{"AA=="}})},
+		{"device_attest empty chain", replaceMember(t, app, "device_attest", map[string]any{"platform": "android", "chain": []string{}})},
+		{"device_attest ios missing key_id", replaceMember(t, app, "device_attest", map[string]any{"platform": "ios", "attestation": "AA=="})},
 		{"profile not object", replaceMember(t, good, "profile", "x")},
 		{"eph wrong size", replaceMember(t, good, "eph", "AAAA")},
 		{"duplicate member", append(bytes.TrimSuffix(bytes.Clone(good), []byte("}")), []byte(`,"ctx":"x"}`)...)},

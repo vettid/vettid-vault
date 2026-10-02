@@ -11,8 +11,7 @@ import (
 // Rotation is an `identity.rotate` statement (§3.4): a link in a rotation
 // chain from an old identity key to a new one, signed by both.
 //
-// PROVISIONAL. §3.4 and §6.6 require statements "signed by both the old and
-// the new ik" but do not define their format. This implementation uses:
+// Format (§3.4):
 //
 //	{"v":1,"suite":2,"old_ik":b64,"new_ik":b64,"new_kem":b64,"sig_old":b64,"sig_new":b64}
 //	m       = old_ik(32) || new_ik(32) || new_kem(1216)

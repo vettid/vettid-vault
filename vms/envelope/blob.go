@@ -6,14 +6,10 @@ import (
 	"github.com/vettid/vettid-vault/vms/suite"
 )
 
-// Claim-check blobs (§5.5). The spec says to encrypt the content under a
-// fresh 256-bit key with XChaCha20-Poly1305 and carry {id, key, sha256,
-// size, mime, name} in the message body. It does not fix the blob layout,
-// AAD or what sha256 covers; this implementation uses (provisionally, see
-// the spec-issues list in the README):
+// Claim-check blobs (§5.5):
 //
 //	blob   = nonce(24) || XChaCha20-Poly1305(key, nonce, aad = "vettid/vms/2/blob", content)
-//	sha256 = SHA-256(blob)    // checked before decryption
+//	sha256 = SHA-256(blob)    // checked in constant time before decryption
 //	size   = len(content)
 
 // BlobDecision says how content of a given size must travel.

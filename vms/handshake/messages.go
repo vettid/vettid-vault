@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/vettid/vettid-vault/internal/strictjson"
+	"github.com/vettid/vettid-vault/vms/altchan"
 	"github.com/vettid/vettid-vault/vms/suite"
 )
 
@@ -53,7 +54,7 @@ const (
 	MaxTokenLen   = 4096
 	MaxURLLen     = 256
 	MaxRotations  = 32
-	MaxOpaqueJSON = 16 * 1024 // profile, app_attest
+	MaxOpaqueJSON = 16 * 1024 // profile
 	MailboxLen    = 26
 )
 
@@ -81,9 +82,9 @@ type Init struct {
 	Token          string // "" when absent (rekey only)
 	ReconnectToken string // "" when absent
 	Suites         []int
-	Profile        json.RawMessage // optional object
-	Rotations      []*Rotation     // reconnect only
-	AppAttest      json.RawMessage // optional object, purpose app only
+	Profile        json.RawMessage       // optional object
+	Rotations      []*Rotation           // reconnect only
+	DeviceAttest   *altchan.DeviceAttest // purpose app only (§6.7, §11.7)
 }
 
 // Resp is the hs.resp body (§6.2).
@@ -333,7 +334,7 @@ func (in *Init) validate() error {
 	if len(in.Rotations) > MaxRotations {
 		return ErrBody
 	}
-	if len(in.AppAttest) > 0 && in.Purpose != PurposeApp {
+	if in.DeviceAttest != nil && in.Purpose != PurposeApp {
 		return ErrBody
 	}
 	return nil
@@ -366,12 +367,12 @@ func (in *Init) Marshal() ([]byte, error) {
 	if len(in.Rotations) > 0 {
 		b.Raw("rotations", marshalRotations(in.Rotations))
 	}
-	if len(in.AppAttest) > 0 {
-		c, err := strictjson.CompactObject(in.AppAttest)
-		if err != nil || len(c) > MaxOpaqueJSON {
+	if in.DeviceAttest != nil {
+		c, err := in.DeviceAttest.Marshal()
+		if err != nil {
 			return nil, ErrBody
 		}
-		b.Raw("app_attest", c)
+		b.Raw("device_attest", c)
 	}
 	return b.Bytes(), nil
 }
@@ -440,8 +441,10 @@ func ParseInit(body []byte) (*Init, error) {
 	if in.Profile, _, err = optOpaque(o, "profile"); err != nil {
 		return nil, ErrBody
 	}
-	if in.AppAttest, _, err = optOpaque(o, "app_attest"); err != nil {
-		return nil, ErrBody
+	if raw, ok := o["device_attest"]; ok {
+		if in.DeviceAttest, err = altchan.ParseDeviceAttest(raw); err != nil {
+			return nil, ErrBody
+		}
 	}
 	var present bool
 	if in.Rotations, present, err = parseRotations(o); err != nil {

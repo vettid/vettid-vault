@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/vettid/vettid-vault/vms/altchan"
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/suite"
 )
@@ -31,8 +32,8 @@ type InitiatorConfig struct {
 	ReconnectToken string
 	Suites         []int // default [2]
 	Profile        json.RawMessage
-	Rotations      []*Rotation // reconnect: own rotations since the last epoch
-	AppAttest      json.RawMessage
+	Rotations      []*Rotation           // reconnect: own rotations since the last epoch
+	DeviceAttest   *altchan.DeviceAttest // purpose app (§6.7)
 
 	// AnonymousSender sets hs.init sender_kid to all-zero instead of the
 	// kid of StaticKEM (§6.2).
@@ -129,7 +130,7 @@ func NewInitiator(cfg InitiatorConfig) (*Initiator, error) {
 		Suites:         cfg.Suites,
 		Profile:        cfg.Profile,
 		Rotations:      cfg.Rotations,
-		AppAttest:      cfg.AppAttest,
+		DeviceAttest:   cfg.DeviceAttest,
 	}
 	bj, err := body.Marshal()
 	if err != nil {

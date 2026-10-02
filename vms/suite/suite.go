@@ -70,8 +70,8 @@ const (
 	LabelUnlock   = "vettid/vms/2/unlock"
 	InfoCall      = "vettid/vms/2/call"
 	LabelCallKey  = "vettid/vms/2/call-key"
-	LabelRotate   = "vettid/vms/2/rotate" // provisional: §3.4 does not define the statement format
-	LabelBlob     = "vettid/vms/2/blob"   // provisional: §5.5 does not define the blob AAD
+	LabelRotate   = "vettid/vms/2/rotate" // identity.rotate statements (§3.4)
+	LabelBlob     = "vettid/vms/2/blob"   // claim-check blobs (§5.5)
 	labelPrefix   = "vettid/vms/2/"
 	labelPrefixV3 = "vettid/vms/3/"
 )

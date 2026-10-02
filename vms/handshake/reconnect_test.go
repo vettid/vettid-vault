@@ -125,6 +125,14 @@ func TestReconnectRejections(t *testing.T) {
 			t.Fatalf("err = %v", err)
 		}
 	})
+	t.Run("from.kem not the chain's final new_kem", func(t *testing.T) {
+		ii := *i
+		rot := rotateParty(t, &ii, 0x90)
+		ii.kem = i.kem // presents the old KEM key after rotating
+		if _, _, err := reconnect(t, &ii, r, base, []*Rotation{rot}, nil); !errors.Is(err, ErrIdentity) {
+			t.Fatalf("err = %v", err)
+		}
+	})
 	t.Run("wrong ctx", func(t *testing.T) {
 		rc := base
 		rc.lastEpoch = [16]byte{9}

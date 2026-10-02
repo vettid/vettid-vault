@@ -430,6 +430,17 @@ func TestVectors(t *testing.T) {
 		if err != nil || string(j) != d.str("unlock_inner") {
 			t.Fatalf("unlock inner: %v", err)
 		}
+		ui, err := envelope.ParseInner(j, envelope.ModeSealed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var ub map[string]json.RawMessage
+		if err := json.Unmarshal(ui.Body, &ub); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := altchan.ParseDeviceAssertion(ub["device_assertion"]); err != nil {
+			t.Fatalf("device_assertion: %v", err)
+		}
 		s, _ := hpkederand.NewSender(etk.Public().Bytes(), []byte(suite.InfoSealed), d.hex("unlock_encapsulation_randomness_hex"))
 		ct, _ := s.Seal(raw[:1140], pt)
 		eq(t, "unlock envelope", append(bytes.Clone(raw[:1140]), ct...), raw)

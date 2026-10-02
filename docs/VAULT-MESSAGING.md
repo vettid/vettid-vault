@@ -1,12 +1,12 @@
 ---
 title: VAULT-MESSAGING
 status: draft
-version: 0.2.2
+version: 0.2.3
 date: 2026-10-02
 owner: Al Liebl (Mesmer)
 component: vault manager (enclave), parent forwarder, apps, desktops, agents, member API vault routes
 related:
-  - RELAY-PROTOCOL.md (0.3.0)
+  - RELAY-PROTOCOL.md (0.4.0)
   - RELAY-PLAN.md
   - PQC-MIGRATION.md
   - CALLING-SERVICE.md
@@ -14,6 +14,10 @@ related:
   - ACCOUNT-ADMIN-PLAN.md
   - MEMBER-API.md
 changelog:
+  - 0.2.3: V2 runtime additions: DEK derivation; §6.6 decides the token
+    class by the collect jti (RELAY-PROTOCOL 0.4.0); approval roles; 7-day
+    pending connection requests; first-app handshake; refusal of revoked
+    relay keys; unknown-type answers; body schemas and error codes (§10)
   - 0.2.2: V1 implementation clarifications: identity.rotate format,
     device_attest replaces app_attest, strict inner/padding rules, blob
     layout, handshake field rules per purpose, epoch and abort rules,
@@ -92,10 +96,12 @@ described in RFC 2119.
 
 ### 1.2 Relay features used
 
-This document uses the following RELAY-PROTOCOL 0.3.0 features:
+This document uses the following RELAY-PROTOCOL 0.4.0 features:
 
 - one-shot **open deposit tokens** (§5.6);
 - **`sender`** in collect responses (§6.3, §6.4);
+- **`jti`** in collect responses: the `jti` of the deposit token a message
+  was accepted under (§6.3, §6.4; new in 0.4.0, used by §6.6);
 - **claims** (§6.9);
 - fractional-second timestamps (§4.1);
 - relay **policy values** advertised at registration:
@@ -224,6 +230,36 @@ contains:
 
 The sealed header MUST NOT contain the relay key, session keys or feature
 data.
+
+#### 3.3.1 DEK derivation and at-rest formats
+
+The DEK is derived from the PIN and a secret that only the sealed header
+holds, so that stolen vault state cannot be brute-forced against PINs
+outside the enclave:
+
+```
+x   = Argon2id(PIN, salt, t, m, p, 32)
+DEK = HKDF-SHA-256(ikm = x, salt = pepper, info = "vettid/vms/2/dek" || vault_id, L = 32)
+```
+
+- The sealed header holds the KDF parameters `{alg: "argon2id", t, m, p,
+  salt}` (`salt` 16 random bytes) and `pepper` (32 random bytes).
+- New vaults use `t = 3`, `m = 64 MiB`, `p = 1`. The enclave MUST refuse
+  parameters below `t = 1`, `m = 8 MiB`.
+- A wrong PIN yields a DEK under which the state does not decrypt; that is
+  the `bad_pin` outcome (§11.4), counted in the backoff state (§11.8).
+
+The reference implementation stores vault state and the sealed header as:
+
+```
+state  = 0x01 || state_seq (8, big-endian) || nonce (24)
+         || XChaCha20-Poly1305(DEK, nonce, aad, state_json)
+aad    = "vettid/vms/2/state" || 0x00 || vault_id || 0x00 || state[0:9]
+header = Seal(header_json, aad = "vettid/vms/2/header" || 0x00 || vault_id)   # sealed to the enclave
+```
+
+Both objects are written create-only at enrollment and with version-matched
+conditional writes afterwards (§12.3).
 
 ### 3.4 Rotation
 
@@ -420,8 +456,11 @@ The inner plaintext is a UTF-8 JSON object, followed by padding:
 - `type` matches `[a-z][a-z0-9-]*(\.[a-z][a-z0-9-]*)*` and is at most
   64 bytes.
 - `body` MUST be a JSON object (`{}` when empty).
-- A request with an unknown `type` is answered with `error` code
-  `unsupported_type`. Any other message with an unknown `type` is dropped.
+- A receiver cannot tell a request from an event by a `type` it does not
+  know. A message **without `re`** whose `type` is unknown is therefore
+  answered with `error` code `unsupported_type`; a sender that did not
+  expect a response drops it (§8.1). A message with `re` whose `type` is
+  unknown is dropped.
 
 ### 5.4 Padding
 
@@ -691,6 +730,12 @@ Rules:
   - The vault does not send `hs.resp` while the connection is pending.
     Anyone who saw the link could have accepted it, so approval is the
     control.
+- **Pending expiry.** A connection request that the owner has neither
+  approved nor declined is dropped after **7 days** (the longest invite
+  TTL).
+- **Who approves.** Connection requests are approved or declined by an
+  owner device of role `app` or `desktop`. Agents MUST NOT create, accept,
+  approve or decline invitations.
 - **Revocation.** The inviter MAY revoke an outstanding invite at any time
   with `connection.invite.cancel`. The vault denylists the open token's `jti`
   and DELETEs the claim. `connection.invite.list` shows outstanding invites.
@@ -748,10 +793,15 @@ outage.
 | Re-minted | After every successful reconnect and every relay-key rotation, and when less than 60 days remain |
 
 **Permitted use.** A reconnect token MAY only be used to deposit an `hs.init`
-with `purpose: reconnect`. The receiving vault MUST drop and audit any other
-message that arrives on a reconnect token. To identify these deposits, the
-vault records which `jti`s are reconnect tokens, and the collect `sender`
-together with the envelope tells it which token class was used.
+with `purpose: reconnect`. The receiving vault records the `jti` of every
+token it issues, with its kind, and decides the token class of each
+collected message by the collect `jti` (RELAY-PROTOCOL 0.4.0 §6.3):
+
+- A message from a connection whose collect `jti` is that of a reconnect
+  token MUST be dropped and audited unless it is a sealed `hs.init` with
+  purpose `reconnect`.
+- A message from a connection that carries **no** `jti` (stored by a
+  pre-0.4 relay) MUST be treated as a reconnect-token deposit.
 
 **When to use it.** A vault uses its reconnect token automatically when it
 is unlocked and either:
@@ -818,6 +868,9 @@ Rules:
 - **Approval first.** The vault MUST NOT send `hs.resp` before approval. If
   the owner rejects, or 10 minutes pass without approval, the vault drops the
   pairing and denylists the `jti`.
+- **Who pairs.** Only an owner device of role `app` creates
+  (`device.pair.create`), approves or rejects pairings. Desktops and agents
+  cannot.
 - **Agents.** The approval carries the agent's initial LEASH grants, and the
   agent's `ik` is the grantee.
 - **Apps.** For role `app`, `hs.init` carries the device attestation in
@@ -825,15 +878,19 @@ Rules:
   In the same flush as the device record, the vault adds the app's `ik`,
   `kem` and attestation binding to the sealed header's unlock keys.
 - **Re-pairing.** A re-paired device MUST use a new relay key, because its
-  old `sub` stays denylisted.
+  old `sub` stays denylisted. The vault MUST refuse an `hs.init` whose
+  collect `sender` is a relay key it has denylisted (§7.4), whatever token
+  it arrived on.
 
 ## 7. Deposit tokens
 
 ### 7.1 Issuance
 
 Tokens are PASETO v4.public, signed by the **recipient's** relay key
-(RELAY-PROTOCOL §5). `iat` SHOULD be backdated 60 s. Every lifetime below is
-also capped by the relay's advertised policy (§1.2).
+(RELAY-PROTOCOL §5). `iat` SHOULD be backdated by up to 60 s
+(RELAY-PROTOCOL §5.2), and every lifetime below is measured from the
+backdated `iat`. Every lifetime is also capped by the relay's advertised
+policy (§1.2).
 
 | Mailbox | `sub` | Kind | `exp − iat` | Default `quota` | Delivered in |
 |---|---|---|---|---|---|
@@ -1033,8 +1090,9 @@ There are no multi-recipient primitives.
 - **V↔V:** between peer vaults.
 - **ACh:** the alternate channel (§11).
 
-**req** marks a request (§8.1). Body schemas are **TBD per feature** unless
-defined in this document.
+**req** marks a request (§8.1). Body schemas for lifecycle, sessions,
+devices, connections and messaging are in §10.1–§10.5; the others are **TBD
+per feature** (§15).
 
 | Group | Type | Dir | req | Purpose |
 |---|---|---|---|---|
@@ -1052,7 +1110,7 @@ defined in this document.
 | Secrets & profile | `secret.put`, `.get`, `.list`, `.delete` | D→V | req | Vault-held secrets |
 | | `profile.get`, `profile.set`, `settings.get`, `settings.set` | D→V | req | Owner profile and policy |
 | | `profile.update` | V↔V | | Shared profile fields to a connection |
-| | `sync.event` / `sync.since` | V→D, V↔V / D→V, V↔V | — / req | Mirror changes; catch up |
+| | `sync.event` / `sync.since` | V→D, V↔V / D→V, V↔V | — / req | Mirror changes (kinds in §10.1); catch up |
 | Connections | `connection.invite.create`, `.list`, `.cancel`, `.accept` | D→V | req | Invitations (§6.4) |
 | | `connection.request.pending` | V→D | | Awaiting approval (profile, `sas`, `remote`) |
 | | `connection.approve`, `.decline`, `.list`, `.get`, `.remove` | D→V | req | Manage connections |
@@ -1102,6 +1160,88 @@ defined in this document.
 - `call.offer`, `call.answer` and `call.end` are durable. `call.ice` is
   ephemeral.
 - A locked callee cannot answer, so the call times out.
+
+### 10.1 Common rules and `sync.event`
+
+- Bodies are JSON objects (§5.3). Unknown members are ignored. Strings are
+  at most 4 KiB unless stated. Timestamps in bodies use the inner `ts`
+  format; invite and pairing expiries (`exp` in responses) are RFC 3339 in
+  whole seconds.
+- Error codes: `bad_request`, `not_found`, `forbidden` (the sender's role may
+  not send this type), `unsupported_type` (§5.3), `internal`, `relay_error`,
+  `ttl_not_allowed`, `claim_unavailable`, `accept_failed`, `approve_failed`,
+  `connection_unavailable`.
+- A type sent by a principal whose role is not listed for it is answered
+  with `forbidden` (requests) or dropped and audited (other messages).
+- Side effects reach the owner's other devices (§9.1) as `sync.event`
+  `{kind, ...}`. Kinds:
+
+  | `kind` | Members |
+  |---|---|
+  | `message.receipt` | `connection_id`, `message_id`, `receipt` (`delivered` \| `read`) |
+  | `message.read` | `connection_id`, `message_id` |
+  | `device.paired` | `device_id`, `role` |
+  | `device.unlinked` | `device_id` |
+
+### 10.2 Lifecycle and sessions
+
+| Type | Request body | Response / event body |
+|---|---|---|
+| `vault.enrolled` | — | §11.3 |
+| `vault.enroll.confirm` (app) | `{}` | `{}` |
+| `vault.status` (app, desktop, agent) | `{}` | `{vault_id, state_seq, header_seq, provisional, devices, connections}` |
+| `vault.lock` (app, desktop) | `{}` | `{}`; then `vault.locking` |
+| `vault.locking` (ephemeral) | — | `{}`, with `exp` = now + 60 s |
+| `relay.token.issued` | — | `{kind: "standing" \| "reconnect", token}` |
+| `relay.token.refresh` (req) | `{}` | `{kind: "standing", token}` |
+| `identity.rotate` | — | `{rotation: <identity.rotate statement, §3.4>}` |
+| `relay.address.update` | — | `{relay: {url, mailbox, pk}, token, reconnect_token?}` |
+
+### 10.3 Devices (§6.7)
+
+| Type | Request body | Response / event body |
+|---|---|---|
+| `device.pair.create` (app) | `{role: "app" \| "desktop" \| "agent"}` | `{pairing_id, link, exp}` |
+| `device.pair.pending` (to apps) | — | `{pairing_id, pending_id, role, name, sas}`; `name` is the new device's self-asserted `profile.name` |
+| `device.pair.approve`, `.reject` (app) | `{pairing_id}` | `{}` |
+| `device.paired` (to the new device) | — | `{device_id, role, vault_id}` |
+| `device.list` (app, desktop) | `{}` | `{devices: [{id, kind, state, name, ik, profile?}]}` |
+| `device.unlink` (app) | `{device_id}` | `{}` |
+| `device.unlinked` (to the unlinked device, best effort) | — | `{}` |
+
+### 10.4 Connections (§6.4)
+
+| Type | Request body | Response / event body |
+|---|---|---|
+| `connection.invite.create` | `{ttl_seconds: 600 \| 3600 \| 86400 \| 604800}` | `{invite_id, link, exp, remote}` |
+| `connection.invite.list` | `{}` | `{invites: [{invite_id, exp, remote}]}` |
+| `connection.invite.cancel` | `{invite_id}` | `{}` |
+| `connection.invite.accept` | `{link}` | `{connection_id, state: "pending"}` |
+| `connection.request.pending` | — | `{pending_id, invite_id, sas, remote, profile?}` |
+| `connection.approve`, `.decline` | `{pending_id}` | `{}` |
+| `connection.list` | `{}` | `{connections: [{id, kind, state, name, ik, profile?}]}` |
+| `connection.get` | `{connection_id}` | `{id, kind, state, name, ik, profile?}` |
+| `connection.remove` | `{connection_id}` | `{}` |
+| `connection.removed` (V↔V) | — | `{}` |
+| `connection.event` | — | `{connection_id, event: "added" \| "removed" \| "stale" \| "rekeyed" \| "reconnected" \| "failed"}` |
+
+The D→V types above are sent by `app` or `desktop` devices (§6.4 "Who
+approves").
+
+### 10.5 Messaging
+
+| Type | Request body | Response / event body |
+|---|---|---|
+| `message.send` | `{connection_id, text}`; `text` 1 byte to 16 KiB (larger content uses the blob flow, §5.5) | `{message_id, sent_at}` |
+| `message.deliver` (V↔V) | — | `{message_id (ULID), text, sent_at}`; idempotent by `message_id` |
+| `message.receipt` (V↔V) | — | `{message_id, receipt: "delivered" \| "read", at}` |
+| `message.new` | — | `{connection_id, message_id, direction: "in" \| "out", text, sent_at, delivered, read}` |
+| `message.list` | `{connection_id, limit?}` (1–500, default 100) | `{messages: [<message.new body>, ...]}`, oldest first |
+| `message.get` | `{connection_id, message_id}` | `<message.new body>` |
+| `message.read` | `{connection_id, message_id}` | `{}`; the vault sends a read receipt |
+| `message.delete` | `{connection_id, message_id}` | `{}`; local only |
+
+The D→V messaging types are sent by `app` or `desktop` devices.
 
 ## 11. Enrollment and unlock (alternate channel)
 
@@ -1247,6 +1387,11 @@ App               Relay        Member API               SQS/Parent       Enclave
   NOT be replaced: the enclave answers `vault_exists`.
 - **App state.** The app stores `vault_id`, the pinned bundle, the release
   and `state_seq` (§13.2).
+- **The first app's handshake.** After `vault.enrolled`, the app sends
+  `hs.init` with purpose `app` and `ctx` = `vault_id`, deposited with the
+  token from `vault.enrolled`. The vault answers it without approval if,
+  and only if, `from.ik` and the collect `sender` equal the keys bound at
+  enrollment and the 24 h provisional window has not passed.
 
 ### 11.4 Unlock
 
@@ -1631,8 +1776,9 @@ Follow-ups:
    reproduce them with CryptoKit and BouncyCastle to pin MLKEM768X25519
    interoperability (codepoint `0x647a`, `ek` 1,216 bytes, `enc` 1,120
    bytes).
-2. **Schemas.** Specify the per-feature body schemas, starting with
-   connections, messaging and calls, and the `sync.since` cursor.
+2. **Schemas.** Lifecycle, sessions, devices, connections and messaging are
+   in §10.1–§10.5. Still open: calls, the other features, and the
+   `sync.since` cursor.
 3. **Push.** Specify the push-gateway integration (§14) when that service is
    scheduled.
 4. **Desktop unlock.** Revisit if a desktop attestation mechanism becomes
@@ -1709,6 +1855,21 @@ pending (§15, follow-up 1).
 
 ## 17. Changelog
 
+- **0.2.3** (2026-10-02): additions from the V2 runtime (vettid-vault).
+  - §1.2, §6.6: RELAY-PROTOCOL 0.4.0 `jti` in collect results; the token
+    class is decided by the collect `jti`, and a connection's message
+    without `jti` is treated as a reconnect-token deposit.
+  - §3.3.1: DEK derivation (Argon2id with a sealed-header pepper and HKDF)
+    and the at-rest formats.
+  - §5.3: unknown types are answered with `unsupported_type` when the
+    message has no `re`.
+  - §6.4: pending connection requests expire after 7 days; apps or
+    desktops approve; agents never.
+  - §6.7: only apps create and approve pairings; `hs.init` from a
+    denylisted relay key is refused.
+  - §7.1: `iat` backdated by up to 60 s; lifetimes measured from it.
+  - §10.1–§10.5: body schemas, error codes and `sync.event` kinds.
+  - §11.3: the first app's handshake.
 - **0.2.2** (2026-10-02): clarifications from the V1 implementation
   (vettid-vault).
   - `identity.rotate` statement format and chain rules (§3.4, §6.6).

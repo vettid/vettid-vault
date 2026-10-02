@@ -3,7 +3,7 @@ module github.com/vettid/vettid-vault
 go 1.26.0
 
 require (
-	github.com/vettid/vettid-relay v0.0.0-20261002161136-1aac4b7666eb
+	github.com/vettid/vettid-relay v0.0.0-20261002171919-01efb93202c8
 	golang.org/x/crypto v0.57.0
 )
 

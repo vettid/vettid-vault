@@ -68,8 +68,8 @@ func (m *Manager) mint(p *Peer, kind string, ttl time.Duration, quota *relayauth
 	if err != nil {
 		return "", acc, err
 	}
-	// relayclient backdates iat by 30 s; exp = iat + ttl.
-	exp := now.UTC().Truncate(time.Second).Add(-30 * time.Second).Add(ttl)
+	// relayclient backdates iat by 60 s (RELAY-PROTOCOL §5.2); exp = iat + ttl.
+	exp := now.UTC().Truncate(time.Second).Add(-tokenBackdate).Add(ttl)
 	return tok, append(acc, IssuedToken{JTI: jti, Kind: kind, Sub: relayauth.EncodeKey(p.Relay.PK), PeerID: p.ID, Exp: exp}), nil
 }
 
@@ -90,12 +90,36 @@ func (m *Manager) heldToken(tok string, p *Peer) (HeldToken, error) {
 	return HeldToken{Token: tok, Exp: c.Exp}, nil
 }
 
-// hasLiveIssued reports whether the vault has an unexpired, undenied token
-// of this kind issued to peer.
-func (m *Manager) hasLiveIssued(peer, kind string, now time.Time) bool {
+// tokenBackdate is how far relayclient backdates iat (RELAY-PROTOCOL §5.2,
+// VAULT-MESSAGING §7.1).
+const tokenBackdate = 60 * time.Second
+
+// reconnectClass reports whether a deposit was made on a reconnect token,
+// by its collect jti (§6.6): the jti is one of our reconnect tokens, or
+// the message carries no jti (a pre-0.4 relay row), which is treated as a
+// reconnect-token deposit.
+func (m *Manager) reconnectClass(jti string) bool {
+	if jti == "" {
+		return true
+	}
 	for _, t := range m.st.Issued {
-		if t.PeerID == peer && t.Kind == kind && !t.Denied && now.Before(t.Exp) {
-			return true
+		if t.JTI == jti {
+			return t.Kind == TokReconnect
+		}
+	}
+	// Tokens minted in handshakes not yet complete.
+	for _, aw := range m.st.Awaiting {
+		for _, t := range aw.Issued {
+			if t.JTI == jti {
+				return t.Kind == TokReconnect
+			}
+		}
+	}
+	for _, og := range m.st.Outgoing {
+		for _, t := range og.Issued {
+			if t.JTI == jti {
+				return t.Kind == TokReconnect
+			}
 		}
 	}
 	return false

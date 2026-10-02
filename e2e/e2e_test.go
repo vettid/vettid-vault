@@ -314,15 +314,15 @@ func TestLockUnlockRollback(t *testing.T) {
 
 // Reconnect (§6.6): B's standing token for A expires while B is locked; on
 // unlock B reconnects with its reconnect token, and messages flow again.
-// (relayclient backdates iat by 30 s, so the shortest useful TTL is ~35 s.)
+// (relayclient backdates iat by 60 s, so the shortest useful TTL is ~65 s.)
 func TestReconnectAfterExpiry(t *testing.T) {
 	r := relaytest.Start(t, nil)
-	a := newTestVault(t, r.URL, "a", func(o *vault.Options) { o.ConnectionStandingTTL = 35 * time.Second })
+	a := newTestVault(t, r.URL, "a", func(o *vault.Options) { o.ConnectionStandingTTL = 65 * time.Second })
 	b := newTestVault(t, r.URL, "b", nil)
 	_, bConn := connect(t, a, b, 600)
 	b.stop()
 	b.manager().Crash()
-	time.Sleep(6 * time.Second) // 35 s TTL minus the 30 s backdate, plus margin
+	time.Sleep(6 * time.Second) // 65 s TTL minus the 60 s backdate, plus margin
 	m, f, err := b.unlock(ctxT(t, 30*time.Second), nil)
 	if err != nil {
 		t.Fatal(err)

@@ -192,6 +192,18 @@ func (m *Manager) handleMessage(ctx context.Context, msg Message, now time.Time)
 		return ackAfterFlush
 	}
 	p := m.peerByRelayKey(sender)
+	// §6.6 permitted use, decided by the collect jti (RELAY-PROTOCOL 0.4.0):
+	// a connection's deposit on its reconnect token (or without a jti) may
+	// only be a sealed hs.init with purpose reconnect, which is the only
+	// message addressed to our static KEM key from a known connection that
+	// handleInit accepts.
+	if p != nil && p.Kind == KindConnection && m.reconnectClass(msg.JTI) {
+		if env.Mode() != envelope.ModeSealed || m.lookupKEM(env.RecipientKid()) == nil {
+			m.audit(now, "reconnect_token_misuse", p.ID)
+			return ackAfterFlush
+		}
+		return m.handleInit(ctx, msg.Payload, sender, p, true, now)
+	}
 	if env.Mode() == envelope.ModeSealed {
 		return m.handleSealed(ctx, env, msg.Payload, sender, p, now)
 	}
@@ -226,7 +238,7 @@ func peerID(p *Peer) string {
 func (m *Manager) handleSealed(ctx context.Context, env *envelope.Envelope, raw []byte, sender ed25519.PublicKey, p *Peer, now time.Time) disposition {
 	rk := env.RecipientKid()
 	if m.lookupKEM(rk) != nil {
-		return m.handleInit(ctx, raw, sender, p, now)
+		return m.handleInit(ctx, raw, sender, p, false, now)
 	}
 	for id, og := range m.st.Outgoing {
 		if kid, err := kidFrom(og.EphKid); err == nil && kid.Equal(rk) {
@@ -277,13 +289,6 @@ func (m *Manager) peerByRelayKey(pk ed25519.PublicKey) *Peer {
 func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep *handshake.Epoch, raw []byte, sender ed25519.PublicKey, now time.Time) disposition {
 	if in.Type == handshake.TypeInit {
 		return m.handleRekeyInit(ctx, p, in, ep, raw, sender, now)
-	}
-	// §6.6 permitted use: a connection holding no live standing token from
-	// us can only have deposited on its reconnect token, which carries
-	// nothing but a sealed reconnect hs.init.
-	if p.Kind == KindConnection && !m.hasLiveIssued(p.ID, TokStanding, now) {
-		m.audit(now, "reconnect_token_misuse", p.ID)
-		return ackAfterFlush
 	}
 	te := m.registry[in.Type]
 	eph := te != nil && te.spec.Ephemeral

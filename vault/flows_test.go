@@ -228,28 +228,88 @@ func TestRepairWithOldRelayKeyRefused(t *testing.T) {
 	}
 }
 
-// §6.6 permitted use: a connection with no live standing token can only
-// have used its reconnect token, which carries nothing but a reconnect
-// hs.init; anything else is dropped and audited.
+// §6.6 permitted use, by the collect jti (RELAY-PROTOCOL 0.4.0): a
+// connection's message on its reconnect token, or without a jti, is
+// dropped and audited unless it is a sealed reconnect hs.init; on a
+// standing token it is processed.
 func TestReconnectTokenMisuseDropped(t *testing.T) {
 	d := newDevFixture(t)
 	p := d.devPeer
 	delete(d.m.st.Devices, p.ID)
 	p.Kind = KindConnection
 	d.m.st.Connections[p.ID] = p
-	d.m.st.Issued = nil // no standing token issued to it is live
-	id, _ := envelope.NewULID(time.Now())
-	raw, _ := d.ep.Seal(&envelope.Inner{ID: id, Type: "connection.list", TS: time.Now(), Body: []byte(`{}`)})
-	env, _ := envelope.Parse(raw)
-	in, ep, err := d.m.sessions[p.ID].Open(env, time.Now())
-	if err != nil {
-		t.Fatal(err)
+	sub := relayauth.EncodeKey(p.Relay.PK)
+	far := time.Now().Add(300 * 24 * time.Hour)
+	d.m.st.Issued = []IssuedToken{
+		{JTI: "standing-1", Kind: TokStanding, Sub: sub, PeerID: p.ID, Exp: time.Now().Add(20 * 24 * time.Hour)},
+		{JTI: "reconnect-1", Kind: TokReconnect, Sub: sub, PeerID: p.ID, Exp: far},
 	}
-	d.m.mu.Lock()
-	d.m.dispatch(context.Background(), p, in, ep, raw, p.Relay.PK, time.Now())
-	d.m.mu.Unlock()
-	if !d.audited("reconnect_token_misuse") || len(d.responses(t)) != 0 {
-		t.Fatal("message on a reconnect token processed")
+	send := func(msgID, jti string) {
+		id, _ := envelope.NewULID(time.Now())
+		raw, _ := d.ep.Seal(&envelope.Inner{ID: id, Type: "relay.token.refresh", TS: time.Now(), Body: []byte(`{}`)})
+		_ = d.m.ProcessBatch(context.Background(), &fakeCollector{}, []Message{{MsgID: msgID, Sender: sub, JTI: jti, Payload: raw}})
+	}
+	for _, c := range []struct{ msgID, jti string }{{"m1", "reconnect-1"}, {"m2", ""}} {
+		before := len(d.m.Audit())
+		send(c.msgID, c.jti)
+		if rs := d.responses(t); len(rs) != 0 || len(d.m.Audit()) == before || !d.audited("reconnect_token_misuse") {
+			t.Fatalf("jti %q: message on a reconnect token processed", c.jti)
+		}
+	}
+	send("m3", "standing-1")
+	if rs := d.responses(t); len(rs) != 1 || rs[0].Type != "relay.token.refresh" {
+		t.Fatalf("standing-token message not processed: %+v", rs)
+	}
+}
+
+// §6.4 / §6.7 who approves: only apps pair; agents never handle
+// connections.
+func TestApprovalRoles(t *testing.T) {
+	d := newDevFixture(t)
+	for _, kind := range []string{KindDesktop, KindAgent} {
+		d.devPeer.Kind = kind
+		_ = d.send("device.pair.create", []byte(`{"role":"desktop"}`))
+		_ = d.send("device.pair.approve", []byte(`{"pairing_id":"x"}`))
+		for _, r := range d.responses(t) {
+			if r.Error == nil || r.Error.Code != "forbidden" {
+				t.Fatalf("%s: pairing request not forbidden: %+v", kind, r)
+			}
+		}
+	}
+	d.devPeer.Kind = KindAgent
+	for _, typ := range []string{"connection.invite.create", "connection.approve", "connection.decline", "connection.invite.accept"} {
+		_ = d.send(typ, []byte(`{}`))
+		rs := d.responses(t)
+		if len(rs) != 1 || rs[0].Error == nil || rs[0].Error.Code != "forbidden" {
+			t.Fatalf("agent %s not forbidden: %+v", typ, rs)
+		}
+	}
+	d.devPeer.Kind = KindDesktop
+	_ = d.send("connection.decline", []byte(`{"pending_id":"x"}`))
+	if rs := d.responses(t); len(rs) != 1 || rs[0].Error == nil || rs[0].Error.Code != "not_found" {
+		t.Fatalf("desktop may decide connections: %+v", rs)
+	}
+}
+
+// §6.4: a pending connection request is dropped after 7 days.
+func TestPendingConnectionExpires(t *testing.T) {
+	d := newDevFixture(t)
+	inv := d.invite(t, KindConnection, 7*24*time.Hour)
+	newNewcomer(t, 0x50).hsInit(t, d.m, handshake.PurposeConnection, inv.ID, "c1")
+	if len(d.m.st.Inbound) != 1 {
+		t.Fatal("no pending request")
+	}
+	in6 := time.Now().Add(6 * 24 * time.Hour)
+	d.m.now = func() time.Time { return in6 }
+	_ = d.m.ProcessBatch(context.Background(), &fakeCollector{}, nil)
+	if len(d.m.st.Inbound) != 1 {
+		t.Fatal("dropped before 7 days")
+	}
+	in8 := time.Now().Add(8 * 24 * time.Hour)
+	d.m.now = func() time.Time { return in8 }
+	_ = d.m.ProcessBatch(context.Background(), &fakeCollector{}, nil)
+	if len(d.m.st.Inbound) != 0 {
+		t.Fatal("pending request kept past 7 days")
 	}
 }
 

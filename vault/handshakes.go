@@ -49,13 +49,20 @@ func (m *Manager) newID(now time.Time) string {
 // handleInit processes a sealed hs.init addressed to the vault's static KEM
 // key (§6.1): first contact on an open token (pairing, invitation, the
 // first app after enrollment) or a reconnect (§6.6).
-func (m *Manager) handleInit(ctx context.Context, raw []byte, sender ed25519.PublicKey, p *Peer, now time.Time) disposition {
+func (m *Manager) handleInit(ctx context.Context, raw []byte, sender ed25519.PublicKey, p *Peer, onReconnectToken bool, now time.Time) disposition {
 	pi, err := handshake.OpenInit(raw, m.lookupKEM, now)
 	if err != nil {
 		m.audit(now, "hs_init_rejected", peerID(p))
 		return ackAfterFlush
 	}
 	body := pi.Init()
+	if onReconnectToken {
+		if err := handshake.CheckReconnectTokenUse(envelope.ModeSealed, pi); err != nil {
+			m.audit(now, "reconnect_token_misuse", peerID(p))
+			pi.Discard()
+			return ackAfterFlush
+		}
+	}
 	if !suite.EqualPublic(sender, body.From.Relay.PK) { // §6.3
 		m.audit(now, "hs_init_sender_mismatch", peerID(p))
 		return ackAfterFlush
@@ -63,10 +70,6 @@ func (m *Manager) handleInit(ctx context.Context, raw []byte, sender ed25519.Pub
 	if body.Purpose == handshake.PurposeReconnect {
 		if p == nil || p.Kind != KindConnection {
 			m.audit(now, "reconnect_unknown_peer", "")
-			return ackAfterFlush
-		}
-		if err := handshake.CheckReconnectTokenUse(envelope.ModeSealed, pi); err != nil {
-			m.audit(now, "reconnect_token_misuse", p.ID)
 			return ackAfterFlush
 		}
 		m.respondReconnect(pi, p, sender, now)
@@ -599,7 +602,9 @@ func (m *Manager) createInvite(ctx context.Context, kind string, ttl time.Durati
 	if err != nil {
 		return nil, "", err
 	}
-	exp := now.Add(ttl).Truncate(time.Second)
+	// The bundle exp equals the open token's exp (§7.1): relayclient
+	// backdates iat by min(60 s, ttl/2) and sets exp = iat + ttl.
+	exp := now.UTC().Truncate(time.Second).Add(-min(tokenBackdate, ttl/2)).Add(ttl)
 	b := &invite.Bundle{Kind: kind, InviteID: id, Remote: remote,
 		Vault: handshake.Principal{IK: m.keys.ik.Public().(ed25519.PublicKey), KEM: m.keys.kem.Public(), Relay: m.ownAddr()},
 		Token: tok, Exp: exp}

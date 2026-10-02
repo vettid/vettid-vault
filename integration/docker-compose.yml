@@ -1,0 +1,19 @@
+# LocalStack for the V3b integration test (S3, SQS, DynamoDB). Everything
+# else (relay, parent, enclave, the member API stand-in) is started by the
+# Go test. Run with `make integration`.
+services:
+  localstack:
+    image: docker.io/localstack/localstack:4.9@sha256:59373b4a27dba3ec15c4db0b7455f0cb68c8a42300e2cbbe362b440f9a131697
+    ports:
+      - "127.0.0.1:4566:4566"
+    environment:
+      SERVICES: s3,sqs,dynamodb
+      SQS_ENDPOINT_STRATEGY: path
+      LOCALSTACK_HOST: 127.0.0.1:4566
+      DEBUG: "0"
+    mem_limit: 1536m
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:4566/_localstack/health"]
+      interval: 2s
+      timeout: 2s
+      retries: 60

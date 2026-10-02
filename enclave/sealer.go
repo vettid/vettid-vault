@@ -86,7 +86,7 @@ const sealLabel = "vettid/vms/2/seal"
 // verified manifest's seal_key (OpenedKey).
 type kmsSealer struct {
 	kms     KMS
-	nsm     NSM
+	attestR func() ([]byte, error) // attestation binding rcpt's public key
 	rcpt    *recipient
 	keyARN  string
 	release string
@@ -106,7 +106,7 @@ func sealAAD(release, arn string, aad []byte) []byte {
 }
 
 func (s *kmsSealer) attest() ([]byte, error) {
-	return s.nsm.Attest(nil, nil, s.rcpt.der)
+	return s.attestR()
 }
 
 // Seal implements vault.Sealer.
@@ -217,38 +217,44 @@ func (s *kmsSealer) Destroy() {
 
 // checkKey runs §11.10.7 on a release's sealing key: it reads the key's
 // metadata, policy and grants from KMS and checks them.
-func (in *Instance) checkKey(ctx context.Context, m *manifest.Manifest, target *manifest.Release) (*vault.SealKeyRecord, error) {
+func (c *Core) checkKey(ctx context.Context, m *manifest.Manifest, target *manifest.Release) (*vault.SealKeyRecord, error) {
 	arn := target.SealKey
-	desc, err := in.kms.DescribeKey(ctx, arn)
+	desc, err := c.kms.DescribeKey(ctx, arn)
 	if err != nil {
 		return nil, ErrKMS
 	}
-	pol, err := in.kms.GetKeyPolicy(ctx, arn)
+	pol, err := c.kms.GetKeyPolicy(ctx, arn)
 	if err != nil {
 		return nil, ErrKMS
 	}
-	gr, err := in.kms.ListGrants(ctx, arn)
+	gr, err := c.kms.ListGrants(ctx, arn)
 	if err != nil {
 		return nil, ErrKMS
 	}
-	r, err := keypolicy.Check(keypolicy.Input{KeyARN: arn, Account: in.cfg.SealAccount, Region: in.cfg.SealRegion,
+	r, err := keypolicy.Check(keypolicy.Input{KeyARN: arn, Account: c.cfg.SealAccount, Region: c.cfg.SealRegion,
 		Manifest: m, Target: target.Number, DescribeKey: desc, GetKeyPolicy: pol, ListGrants: gr})
 	if err != nil {
 		return nil, err
 	}
-	return &vault.SealKeyRecord{KeyARN: r.KeyARN, PolicySHA256: r.PolicySHA256[:], VerifiedBy: in.meas.PCR0}, nil
+	return &vault.SealKeyRecord{KeyARN: r.KeyARN, PolicySHA256: r.PolicySHA256[:], VerifiedBy: c.meas.PCR0}, nil
 }
 
 // inNamespace reports whether a seal_key is a KMS key ARN in the pinned
 // account and region (§11.10.2).
-func (in *Instance) inNamespace(arn string) bool {
-	if in.cfg.SealAccount == "" || in.cfg.SealRegion == "" {
+func (c *Core) inNamespace(arn string) bool { return InNamespace(c.cfg, arn) }
+
+// InNamespace reports whether arn is a KMS key ARN in cfg's pinned
+// sealing-key account and region (§11.10.2).
+func InNamespace(cfg Config, arn string) bool {
+	if cfg.SealAccount == "" || cfg.SealRegion == "" {
 		return false
 	}
-	p := "arn:aws:kms:" + in.cfg.SealRegion + ":" + in.cfg.SealAccount + ":key/"
+	p := "arn:aws:kms:" + cfg.SealRegion + ":" + cfg.SealAccount + ":key/"
 	return len(arn) > len(p) && arn[:len(p)] == p
 }
 
-func (in *Instance) sealerFor(keyARN, release string) *kmsSealer {
-	return &kmsSealer{kms: in.kms, nsm: in.nsm, rcpt: in.rcpt, keyARN: keyARN, release: release, allow: in.inNamespace}
+func (c *Core) sealerFor(keyARN, release string) *kmsSealer {
+	der := c.rcpt.der
+	return &kmsSealer{kms: c.kms, attestR: func() ([]byte, error) { return c.d.AttestRecipient(der) }, rcpt: c.rcpt,
+		keyARN: keyARN, release: release, allow: c.inNamespace}
 }

@@ -7,20 +7,32 @@ member's devices, agents and connections over the
 
 ## Status
 
-**Phase V3a — alternate channel, device attestation and release updates,
-in process.** On top of the V1 crypto and wire library and the V2 vault
-runtime, the enclave side of the alternate channel (VAULT-MESSAGING
-0.3.1 §11) runs in process: ETKs and attested descriptors, enroll, unlock
-and lock with uniform results, replay and rollback protection, backoff,
-Android key attestation and App Attest verified in the enclave, signed
-release manifests, member-approved release moves with their confirmation
-and abandonment, sealing per release through KMS with Recipient
-attestation, and the enclave's own check of each sealing key's policy.
-Hardware and AWS sit behind interfaces (`NSM`, `KMS`) with TEST-ONLY fakes;
-the vsock parent, the enclave's TLS and SigV4 KMS client and the
-attestation status-list fetch are phase V3b
+**Phase V3b — supervisor, parent and AWS transport.** On top of the V1
+crypto and wire library, the V2 vault runtime and the V3a alternate
+channel, the enclave now runs as a supervisor plus one OS process per
+unlocked vault (VAULT-MESSAGING 0.3.2 §12.4: the supervisor never holds a
+vault's DEK or keys) with the real NSM, talks to its parent over vsock, and
+reaches the relay, AWS KMS and Google's attestation status list only
+through TLS it terminates itself against pinned roots, with its own SigV4
+KMS client. The parent (outside the trusted code base) runs the
+instance's SQS queue, registry heartbeat, vault leases, response slots and
+the S3 vault data bucket. An integration test runs it all against
+LocalStack, the real relay and a stand-in for the member API
 ([VAULT-PLAN](https://github.com/vettid/vettid.org/blob/master/docs/VAULT-PLAN.md)
-§4). Nothing here is deployed yet.
+§4 V3). Nothing here is deployed yet (V5).
+
+### Enclave shell, parent and transport (V3b)
+
+| Package / command | What it does |
+|---|---|
+| `cmd/vault-enclave`, `enclave/supervisor` | PID 1 in the enclave: control connection to the parent, ETKs and the outer decryption of the alternate channel, the vault processes and their scoped channels, lease-lost and memory-pressure locks, status-list fetch, sanitized logs |
+| `enclave/vaultproc`, `internal/vaultipc`, `internal/seccomp` | One vault's process (the same binary re-executed): unseals with its own KMS Recipient key, runs the manager and features, signs its relay requests; its channel to the supervisor; its syscall filter |
+| `enclave/nsm` | `/dev/nsm`: attestation documents and PCRs (CBOR over the NSM ioctl) |
+| `enclave/egress` | The enclave's only egress: HTTPS to an allowlist, TLS 1.3 against per-host pinned roots, shared HTTP/2 connections |
+| `enclave/awskms` | AWS KMS JSON API with in-repo SigV4 and Recipient attestation |
+| `internal/hostproto`, `internal/vsock` | Enclave ↔ parent framing (16 KiB chunked writes) and AF_VSOCK sockets |
+| `parent`, `cmd/vault-parent` | Host side: vsock control server, TCP forwarder (allowlist, port 443), SQS queue and consumer, instance registry, leases, response slots, S3 conditional writes, role credentials, health endpoint |
+| `internal/parenttest`, `internal/memberapitest` | TEST-ONLY in-memory AWS backends, and a stand-in for the member API's vault routes over DynamoDB and SQS |
 
 ### Crypto and wire (V1)
 
@@ -71,7 +83,12 @@ Dependencies: the Go standard library, `golang.org/x/crypto`
 `github.com/coder/websocket` for WebSocket collect).
 No new third-party dependency in V3a: CBOR, DER and CMS are parsed by small
 in-repo decoders rather than a general library, to keep the enclave's
-trusted code base small and strict.
+trusted code base small and strict. V3b adds none to the enclave either
+(`golang.org/x/sys` for vsock and the NSM ioctl was already required); the
+parent alone uses the AWS SDK for Go v2 (S3, SQS, DynamoDB, credentials,
+IMDS), which `make check-tcb` keeps out of the enclave binary. V3b choices
+(process model, TLS chains, protocol, spec questions) are in
+[`docs/V3-NOTES.md`](docs/V3-NOTES.md).
 [`docs/MUST-COVERAGE.md`](docs/MUST-COVERAGE.md) maps every MUST in §4–§6,
 the V2 runtime rules of §7–§13 and the V3a rules of §11–§13 to the tests
 that cover them.
@@ -135,12 +152,24 @@ bin/vaultctl -state app.json request vault.status
 bin/vaultctl -state app.json altchan-unlock -store ./dev-ac -relay http://localhost:8080 -guid me -pin 13579 -releases 3,4 -approve 4
 ```
 
+The whole stack (V3b) is easiest through the integration test, which
+builds `vault-parent`, the dev `vault-enclave` and `vaultctl`, starts the
+relay behind a TLS front with the test root, LocalStack, and the member
+API stand-in, and drives them with `vaultctl api-enroll`, `api-unlock`,
+`api-lock` and `request`:
+
+```sh
+make integration   # docker compose up LocalStack (1.5 GiB cap), run, tear down
+```
+
 ```sh
 make test      # go test ./... and the vector regeneration check
 make race      # the same under -race
 make lint      # go vet + staticcheck (pinned), default and vmsvectors builds
-make check-tcb # no vector-only, dev-enclave or test code in release packages
-make e2e       # runtime + client against the real relay binary (race)
+make check-tcb # no vector-only, dev-enclave or test code in release packages;
+               # no AWS SDK or parent in the enclave binary
+make e2e       # runtime + client against the real relay binary (race),
+               # and the parent + supervisor in process
 make fuzz      # every fuzz target, FUZZTIME executions each (default 50000x)
 make vectors   # regenerate testdata/vectors
 make scan      # gitleaks over the full history

@@ -43,6 +43,14 @@ const (
 	sealRegion     = ""
 )
 
+// ReleaseRelayURL is the relay release vaults register at (§11.3), and the
+// only relay host on the release egress allowlist.
+const ReleaseRelayURL = "https://relay.vettid.org"
+
+// ReleaseRegion returns the pinned sealing-key region ("" until V5), which
+// is also the region of the KMS endpoint on the egress allowlist.
+func ReleaseRegion() string { return sealRegion }
+
 // androidSigners are the SHA-256 digests of the VettID app's signing
 // certificates (pinned with the first release).
 var androidSigners [][]byte

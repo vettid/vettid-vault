@@ -4,12 +4,17 @@ package main
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -77,7 +82,7 @@ func cmdVaultCreate(ctx context.Context, _ *globals, args []string) error {
 	if err != nil {
 		return err
 	}
-	app, err := client.Load(client.Config{}, b)
+	app, err := client.Load(client.Config{HTTP: httpClient}, b)
 	if err != nil {
 		return err
 	}
@@ -247,7 +252,7 @@ func loadWithTrust(g *globals, t client.Trust) (*client.Device, error) {
 	if err != nil {
 		return nil, err
 	}
-	return client.Load(client.Config{Trust: &t}, b)
+	return client.Load(client.Config{Trust: &t, HTTP: httpClient}, b)
 }
 
 func randomVaultID() (string, error) {
@@ -402,5 +407,173 @@ func cmdAltUnlock(ctx context.Context, g *globals, args []string) error {
 	sctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 	<-sctx.Done()
+	return nil
+}
+
+// --- the alternate channel through the member API (dev) ---
+
+func init() {
+	commands["api-enroll"] = command{"api-enroll -api URL -guid GUID -pin PIN [-platform android|ios]   (dev) enroll through the member API (test trust and device attestation), finish enrollment", cmdAPIEnroll}
+	commands["api-unlock"] = command{"api-unlock -api URL -guid GUID -pin PIN [-approve N] [-abandon -release N]   (dev) unlock through the member API", cmdAPIUnlock}
+	commands["api-lock"] = command{"api-lock -api URL -guid GUID   (dev) lock through the member API", cmdAPILock}
+	devHTTPFromEnv()
+}
+
+// devHTTPFromEnv configures the HTTP client from VAULTCTL_DEV_RESOLVE
+// ("host=addr,...": dial addr for host) and trusts the TEST-ONLY TLS root
+// (enclavetest) besides the system roots. Development builds only.
+func devHTTPFromEnv() {
+	spec := os.Getenv("VAULTCTL_DEV_RESOLVE")
+	if spec == "" {
+		return
+	}
+	res := map[string]string{}
+	for _, kv := range strings.Split(spec, ",") {
+		if h, a, ok := strings.Cut(kv, "="); ok {
+			res[h] = a
+		}
+	}
+	roots, err := x509.SystemCertPool()
+	if err != nil {
+		roots = x509.NewCertPool()
+	}
+	roots.AddCert(enclavetest.TestTLSCA().Cert)
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.TLSClientConfig = &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}
+	tr.ForceAttemptHTTP2 = true
+	tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, port, _ := net.SplitHostPort(addr)
+		if a, ok := res[host]; ok && port == "443" {
+			addr = a
+		}
+		var d net.Dialer
+		return d.DialContext(ctx, network, addr)
+	}
+	httpClient = &http.Client{Transport: tr, Timeout: 90 * time.Second}
+}
+
+type apiFlags struct {
+	api, guid, pin, platform string
+	seed                     int
+}
+
+func (a *apiFlags) register(fs *flag.FlagSet) {
+	fs.StringVar(&a.api, "api", "", "member API base URL")
+	fs.StringVar(&a.guid, "guid", "", "member user_guid (the test API's bearer token)")
+	fs.StringVar(&a.pin, "pin", "", "PIN")
+	fs.StringVar(&a.platform, "platform", "android", "test device attestation: android or ios")
+	fs.IntVar(&a.seed, "attest-seed", 0x61, "test attestation key seed (1-255)")
+}
+
+func (a *apiFlags) client() *client.MemberAPI {
+	guid := a.guid
+	return &client.MemberAPI{Base: a.api, HTTP: httpClient, Authorize: func(r *http.Request) { r.Header.Set("Authorization", "Bearer "+guid) }}
+}
+
+// testTrust is the TEST-ONLY trust of the dev stack: the test Nitro root
+// and the test manifest key.
+func testTrust() client.Trust {
+	return client.Trust{NitroRoots: enclavetest.TestNitroCA().Roots(), ManifestKeys: []*ecdsa.PublicKey{&enclavetest.ManifestKey().PublicKey}}
+}
+
+func cmdAPIEnroll(ctx context.Context, g *globals, args []string) error {
+	fs := flag.NewFlagSet("api-enroll", flag.ExitOnError)
+	var a apiFlags
+	a.register(fs)
+	_ = fs.Parse(args)
+	if a.api == "" || a.guid == "" || a.pin == "" {
+		return errors.New("-api, -guid and -pin are required")
+	}
+	t := testTrust()
+	d, err := loadWithTrust(g, t)
+	if err != nil {
+		return err
+	}
+	af := altFlags{platform: a.platform, seed: a.seed}
+	dev, keep := af.attester(g)
+	vid, r, err := d.EnrollVia(ctx, a.client(), a.guid, a.pin, t, dev)
+	keep()
+	if err != nil {
+		return err
+	}
+	if !r.OK {
+		return fmt.Errorf("enrollment refused: %s", r.Code)
+	}
+	if err := d.AwaitEnrolled(ctx); err != nil {
+		return err
+	}
+	if err := save(g, d); err != nil {
+		return err
+	}
+	if err := d.CompleteEnrollment(ctx); err != nil {
+		return err
+	}
+	if rr, err := d.Request(ctx, "vault.enroll.confirm", json.RawMessage(`{}`)); err != nil || !rr.OK() {
+		return errors.New("vault.enroll.confirm failed")
+	}
+	fmt.Println(vid)
+	return save(g, d)
+}
+
+func cmdAPIUnlock(ctx context.Context, g *globals, args []string) error {
+	fs := flag.NewFlagSet("api-unlock", flag.ExitOnError)
+	var a apiFlags
+	a.register(fs)
+	approve := fs.Uint64("approve", 0, "approve a move to this test release")
+	abandon := fs.Bool("abandon", false, "abandon an unconfirmed move (with -release)")
+	release := fs.Uint64("release", 0, "send the unlock to this test release")
+	_ = fs.Parse(args)
+	if a.api == "" || a.guid == "" || a.pin == "" {
+		return errors.New("-api, -guid and -pin are required")
+	}
+	t := testTrust()
+	d, err := loadWithTrust(g, t)
+	if err != nil {
+		return err
+	}
+	o := client.UnlockOptions{Abandon: *abandon}
+	if *approve != 0 {
+		o.Approve = &client.Approval{To: enclavetest.Spec(*approve, "").PCR0Hex(), ToRelease: *approve}
+	}
+	rel := ""
+	if *release != 0 {
+		rel = enclavetest.Spec(*release, "").PCR0Hex()
+	}
+	af := altFlags{platform: a.platform, seed: a.seed}
+	dev, keep := af.attester(g)
+	r, err := d.UnlockVia(ctx, a.client(), a.guid, a.pin, t, dev, o, rel)
+	keep()
+	if serr := save(g, d); err == nil {
+		err = serr
+	}
+	if err != nil {
+		return err
+	}
+	if r.ReleaseChanged {
+		fmt.Fprintln(os.Stderr, "note: the vault software was updated since the last unlock (§11.2 step 4)")
+	}
+	printJSON(map[string]any{"ok": r.OK, "code": r.Code, "state_seq": r.StateSeq, "header_seq": r.HeaderSeq,
+		"release_number": r.ReleaseNumber, "release_status": r.ReleaseStatus, "update": r.Update, "update_code": r.UpdateCode,
+		"instance_id": r.InstanceID})
+	return nil
+}
+
+func cmdAPILock(ctx context.Context, g *globals, args []string) error {
+	fs := flag.NewFlagSet("api-lock", flag.ExitOnError)
+	var a apiFlags
+	a.register(fs)
+	_ = fs.Parse(args)
+	if a.api == "" || a.guid == "" {
+		return errors.New("-api and -guid are required")
+	}
+	d, err := load(g)
+	if err != nil {
+		return err
+	}
+	s, err := d.LockVia(ctx, a.client())
+	if err != nil {
+		return err
+	}
+	printJSON(map[string]any{"status": s.Status, "code": s.Code})
 	return nil
 }

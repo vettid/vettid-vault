@@ -2,6 +2,7 @@ package pins
 
 import (
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/hex"
 	"testing"
 	"time"
@@ -34,10 +35,37 @@ func TestFingerprints(t *testing.T) {
 	}
 }
 
+// The TLS roots are the published Amazon Root CA 1-4 and GTS Root R1, R3
+// and R4 (fingerprints from amazontrust.com and pki.goog).
+func TestTLSFingerprints(t *testing.T) {
+	check := func(name string, got []*x509.Certificate, want ...string) {
+		t.Helper()
+		if len(got) != len(want) {
+			t.Fatalf("%s: %d roots", name, len(got))
+		}
+		for i, c := range got {
+			if fp(c.Raw) != want[i] {
+				t.Errorf("%s %d: %s", name, i, fp(c.Raw))
+			}
+		}
+	}
+	check("amazon", AmazonTLSRoots(),
+		"8ecde6884f3d87b1125ba31ac3fcb13d7016de7f57cc904fe1cb97c6ae98196e",
+		"1ba5b2aa8c65401a82960118f80bec4f62304d83cec4713a19c39c011ea46db4",
+		"18ce6cfe7bf14e60b2e347b8dfe868cb31d02ebb3ada271569f50343b46db3a4",
+		"e35d28419ed02025cfa69038cd623962458da5c695fbdea3c22b0bfb25897092")
+	check("gts", GoogleTLSRoots(),
+		"d947432abde7b7fa90fc2e6b59101b1280e0e1c7e4e40fa3c6887fff57a7f4cf",
+		"34d8a73ee208d9bcdb0d956520934b4e40e69482596e8b6f73c8426b010a6f48",
+		"349dfa4058c5e263123b398ae795573c4e1313c83fe68f93556cd5e8031b3c7d")
+}
+
 // Every pinned root is self-signed and valid now.
 func TestRootsValid(t *testing.T) {
 	now := time.Now()
 	all := append(GoogleAttestationRoots(), NitroRoot(), AppleAppAttestRoot())
+	all = append(all, AmazonTLSRoots()...)
+	all = append(all, GoogleTLSRoots()...)
 	for _, c := range all {
 		if err := c.CheckSignatureFrom(c); err != nil {
 			t.Errorf("%s: %v", c.Subject, err)

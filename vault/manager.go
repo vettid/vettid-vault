@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/vettid/vettid-vault/vault/store"
@@ -128,7 +129,16 @@ type Manager struct {
 	lockPending bool
 	started     bool
 	hadFailures bool // the header recorded failures before this unlock
+	holdsDEK    bool // counted in unlocked
 }
+
+// unlocked counts the managers in this process that hold a DEK.
+var unlocked atomic.Int64
+
+// Unlocked returns how many managers in this process hold a DEK. The
+// enclave's supervisor must always report 0: vaults run in their own
+// processes (VAULT-MESSAGING §12.4).
+func Unlocked() int64 { return unlocked.Load() }
 
 // keyset holds the vault's private keys in usable form.
 type keyset struct {
@@ -332,6 +342,10 @@ func newManager(o Options, st *State, hdr *Header, dek []byte) *Manager {
 		sessions: map[string]*handshake.Keyring{}, inbound: map[string]*handshake.PendingInit{},
 		awaiting: map[string]*handshake.Responder{}, outgoing: map[string]*handshake.Initiator{},
 		ephemeralSeen: map[string]time.Time{}, rates: map[string]*rateWindow{}, requests: map[string]string{}, requestTypes: map[string]string{},
+	}
+	if dek != nil {
+		m.holdsDEK = true
+		unlocked.Add(1)
 	}
 	m.registerCore()
 	for _, f := range o.Features {
@@ -575,6 +589,10 @@ func (m *Manager) splitBrain() {
 // zeroize wipes the DEK and every key, and marks the manager locked.
 func (m *Manager) zeroize() {
 	m.locked = true
+	if m.holdsDEK {
+		m.holdsDEK = false
+		unlocked.Add(-1)
+	}
 	if d, ok := m.opt.Sealer.(interface{ Destroy() }); ok {
 		d.Destroy() // a KMS sealer's cached data key
 	}

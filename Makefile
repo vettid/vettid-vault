@@ -9,8 +9,11 @@ LIBPKGS   := ./vms/suite ./vms/envelope ./vms/handshake ./vms/invite ./vms/altch
              ./vms/pins ./vms/nitro ./vms/manifest ./vms/devattest \
              ./enclave/... ./vault/... ./client/... ./features/... ./cmd/...
 E2ETAGS   := devenclave e2e
+# What runs inside the enclave (the release image's binary and everything it
+# links). It must never link the AWS SDK, the parent, or any dev/test code.
+ENCLAVEPKGS := ./cmd/vault-enclave
 
-.PHONY: all test race lint vet staticcheck fuzz scan tidy vectors check-tcb e2e
+.PHONY: all test race lint vet staticcheck fuzz scan tidy vectors check-tcb e2e integration
 
 all: lint check-tcb test
 
@@ -28,12 +31,14 @@ vet:
 	$(GO) vet ./...
 	$(GO) vet -tags vmsvectors ./...
 	$(GO) vet -tags '$(E2ETAGS)' ./...
+	$(GO) vet -tags 'devenclave integration' ./...
 
 # staticcheck is run at a pinned version via `go run` (fetched on first use).
 staticcheck:
 	$(GO) run honnef.co/go/tools/cmd/staticcheck@v0.8.1 ./...
 	$(GO) run honnef.co/go/tools/cmd/staticcheck@v0.8.1 -tags vmsvectors ./...
 	$(GO) run honnef.co/go/tools/cmd/staticcheck@v0.8.1 -tags '$(E2ETAGS)' ./...
+	$(GO) run honnef.co/go/tools/cmd/staticcheck@v0.8.1 -tags 'devenclave integration' ./...
 
 lint: vet staticcheck
 
@@ -42,18 +47,36 @@ lint: vet staticcheck
 # test authorities (relaytest, enclavetest: fake NSM and KMS, test roots); and
 # the dev enclave must not compile at all without its build tag.
 check-tcb:
-	@if $(GO) list -deps $(LIBPKGS) | grep -E 'hpkederand|mlkemtest|/devenclave|relaytest|enclavetest'; then \
+	@if $(GO) list -deps $(LIBPKGS) | grep -E 'hpkederand|mlkemtest|/devenclave|relaytest|enclavetest|parenttest|memberapitest'; then \
 	  echo "dev, test or vector-only code linked into release packages"; exit 1; fi
 	@if $(GO) list ./devenclave >/dev/null 2>&1; then \
 	  echo "devenclave compiles without the devenclave tag"; exit 1; fi
-	@for f in devenclave/*.go cmd/vaultctl/vault_dev.go; do \
+	@for f in devenclave/*.go cmd/vaultctl/vault_dev.go cmd/vault-enclave/vault_dev.go; do \
 	  head -1 $$f | grep -qx '//go:build devenclave' || { echo "$$f lacks //go:build devenclave"; exit 1; }; done
+	@head -1 cmd/vault-enclave/release.go | grep -qx '//go:build !devenclave' || { echo "cmd/vault-enclave/release.go lacks //go:build !devenclave"; exit 1; }
+	@for os in linux; do \
+	  if GOOS=$$os $(GO) list -deps $(ENCLAVEPKGS) | grep -E 'aws-sdk-go|smithy-go|vettid-vault/parent|hpkederand|mlkemtest|/devenclave|relaytest|enclavetest|memberapitest|parenttest'; then \
+	    echo "the enclave binary links the AWS SDK, the parent, or dev/test code"; exit 1; fi; done
+	@if GOOS=linux $(GO) list -deps $(ENCLAVEPKGS) | grep -q 'enclave/nsm' && GOOS=linux $(GO) list -deps $(ENCLAVEPKGS) | grep -q 'internal/vsock'; then :; else \
+	  echo "the release enclave binary does not use the real NSM and vsock"; exit 1; fi
 	@echo "check-tcb: ok"
 
 # End-to-end tests against the real vettid-relay binary (built at the
 # version in go.mod) and the dev enclave.
 e2e:
-	$(GO) test -race -count=1 -tags '$(E2ETAGS)' ./e2e/
+	$(GO) test -race -count=1 -p 1 -parallel 2 -tags '$(E2ETAGS)' ./e2e/
+
+# V3 exit test against LocalStack (VAULT-PLAN §4 V3): the real relay, the
+# parent and dev enclave binaries, the member API stand-in and vaultctl,
+# with LocalStack (S3, SQS, DynamoDB) from integration/docker-compose.yml
+# (memory-capped). Tests run one package at a time.
+COMPOSE    ?= docker compose
+LOCALSTACK ?= http://127.0.0.1:4566
+integration:
+	$(COMPOSE) -f integration/docker-compose.yml up -d
+	@for i in $$(seq 1 90); do curl -sf $(LOCALSTACK)/_localstack/health >/dev/null && break; sleep 2; done
+	@VAULT_IT_LOCALSTACK=$(LOCALSTACK) $(GO) test -count=1 -p 1 -tags 'devenclave integration' ./parent/ ./integration/; \
+	  status=$$?; $(COMPOSE) -f integration/docker-compose.yml down; exit $$status
 
 # Regenerate testdata/vectors.
 vectors:

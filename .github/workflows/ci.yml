@@ -43,6 +43,34 @@ jobs:
       - name: end-to-end (race)
         run: make e2e
 
+  integration:
+    # V3 exit test (VAULT-PLAN §4 V3): relay, parent and dev enclave
+    # binaries, the member API stand-in and vaultctl against LocalStack.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      localstack:
+        image: docker.io/localstack/localstack:4.9@sha256:59373b4a27dba3ec15c4db0b7455f0cb68c8a42300e2cbbe362b440f9a131697
+        ports:
+          - 4566:4566
+        env:
+          SERVICES: s3,sqs,dynamodb
+          SQS_ENDPOINT_STRATEGY: path
+          LOCALSTACK_HOST: 127.0.0.1:4566
+        options: >-
+          --memory 1536m
+          --health-cmd "curl -sf http://127.0.0.1:4566/_localstack/health"
+          --health-interval 2s --health-timeout 2s --health-retries 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: integration (LocalStack)
+        env:
+          VAULT_IT_LOCALSTACK: http://127.0.0.1:4566
+        run: go test -count=1 -p 1 -tags 'devenclave integration' ./parent/ ./integration/
+
   gitleaks:
     # Pinned binary over the FULL history (the gitleaks-action fails on a
     # branch's first push, where there is no "before" commit).

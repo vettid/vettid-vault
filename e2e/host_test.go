@@ -1,0 +1,392 @@
+//go:build devenclave && e2e
+
+package e2e
+
+import (
+	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/json"
+	"io"
+	"log"
+	"log/slog"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/vettid/vettid-vault/client"
+	"github.com/vettid/vettid-vault/enclave"
+	"github.com/vettid/vettid-vault/enclave/awskms"
+	"github.com/vettid/vettid-vault/enclave/supervisor"
+	"github.com/vettid/vettid-vault/internal/enclavetest"
+	"github.com/vettid/vettid-vault/internal/parenttest"
+	"github.com/vettid/vettid-vault/internal/relaytest"
+	"github.com/vettid/vettid-vault/parent"
+	"github.com/vettid/vettid-vault/vault"
+	"github.com/vettid/vettid-vault/vms/envelope"
+)
+
+// The host stack in process (VAULT-PLAN V3): parent (in-memory AWS
+// backends) and supervisor (dev build: fake NSM, test roots) talking over
+// TCP; the enclave's TLS, egress and SigV4 KMS client run unchanged
+// against a TLS front of the real relay and a fake KMS endpoint. The
+// LocalStack run is ./integration.
+const hostRelay = "https://relay.vettid.test"
+
+type hostStack struct {
+	t       *testing.T
+	w       *enclavetest.World
+	objs    *parenttest.Objects
+	queues  *parenttest.Queues
+	tables  *parenttest.Tables
+	resolve map[string]string
+	appHTTP *http.Client
+}
+
+type hostInstance struct {
+	id      string
+	p       *parent.Parent
+	sup     *supervisor.Supervisor
+	in      chan *enclave.Instance
+	stopP   context.CancelFunc
+	stopS   context.CancelFunc
+	pdone   chan struct{}
+	sdone   chan struct{}
+	ctl     string
+	egr     string
+	queue   string
+	release uint64
+}
+
+func tlsFront(t *testing.T, h http.Handler, h2 bool, name string) string {
+	s := httptest.NewUnstartedServer(h)
+	s.EnableHTTP2 = h2
+	s.TLS = &tls.Config{Certificates: []tls.Certificate{enclavetest.ServerCert(name)}}
+	s.Config.ErrorLog = log.New(io.Discard, "", 0)
+	s.StartTLS()
+	t.Cleanup(s.Close)
+	return s.Listener.Addr().String()
+}
+
+func newHostStack(t *testing.T) *hostStack {
+	hs := &hostStack{t: t, objs: parenttest.NewObjects(), queues: parenttest.NewQueues(), tables: parenttest.NewTables(), resolve: map[string]string{}}
+	hs.w = enclavetest.NewWorld(time.Now, hostRelay)
+	hs.w.AddRelease(enclavetest.Spec(3, "active"))
+	r := relaytest.Start(t, relaytest.Options{"RELAY_BASE_URL": hostRelay})
+	target, _ := url.Parse(r.URL)
+	hs.resolve["relay.vettid.test"] = tlsFront(t, &httputil.ReverseProxy{Rewrite: func(p *httputil.ProxyRequest) { p.SetURL(target); p.Out.Host = p.In.Host },
+		FlushInterval: -1, ErrorLog: log.New(io.Discard, "", 0)}, true, "relay.vettid.test")
+	kms := enclavetest.NewKMSServer(hs.w.KMS, enclavetest.KMSRegion, awskms.Credentials{AccessKeyID: "AK", SecretAccessKey: "SK", SessionToken: "ST"})
+	hs.resolve["kms.us-east-1.amazonaws.com"] = tlsFront(t, kms, false, "kms.us-east-1.amazonaws.com")
+	hs.resolve["android.googleapis.com"] = tlsFront(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"entries":{}}`)
+	}), true, "android.googleapis.com")
+	roots := x509.NewCertPool()
+	roots.AddCert(enclavetest.TestTLSCA().Cert)
+	relayAddr := hs.resolve["relay.vettid.test"]
+	hs.appHTTP = &http.Client{Timeout: 60 * time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots}, ForceAttemptHTTP2: true,
+		DialContext: func(ctx context.Context, n, a string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, n, relayAddr)
+		}}}
+	return hs
+}
+
+func listenTCP(t *testing.T) net.Listener {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return l
+}
+
+// start runs a parent and a supervisor of release n.
+func (hs *hostStack) start(id string, n uint64, maxVaults int) *hostInstance {
+	t := hs.t
+	cl, el := listenTCP(t), listenTCP(t)
+	hi := &hostInstance{id: id, ctl: cl.Addr().String(), egr: el.Addr().String(), release: n,
+		queue: "http://sqs.test/000000000000/test-vault-control-" + id, in: make(chan *enclave.Instance, 4)}
+	p, err := parent.New(parent.Config{InstanceID: id, QueuePrefix: "test-vault-control-", ControlListener: cl, EgressListener: el,
+		Allow: parent.DefaultAllow("relay.vettid.test", "us-east-1"), Resolve: hs.resolve,
+		Objects: hs.objs, Queues: hs.queues, Tables: hs.tables, Creds: parenttest.StaticCreds{AccessKeyID: "AK", SecretAccessKey: "SK", SessionToken: "ST"},
+		Heartbeat: 200 * time.Millisecond, LeaseRenew: 300 * time.Millisecond, SweepInterval: -1,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hi.p = p
+	pctx, pcancel := context.WithCancel(context.Background())
+	hi.stopP, hi.pdone = pcancel, make(chan struct{})
+	go func() { defer close(hi.pdone); _ = p.Run(pctx) }()
+	hi.startEnclave(t, maxVaults)
+	t.Cleanup(hi.stop)
+	deadline := time.Now().Add(30 * time.Second)
+	for !p.Health().OK {
+		if time.Now().After(deadline) {
+			t.Fatalf("instance %s not healthy: %+v", id, p.Health())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return hi
+}
+
+func (hi *hostInstance) startEnclave(t *testing.T, maxVaults int) {
+	cfg, err := enclavetest.DevSupervisor(enclavetest.DevOptions{Release: hi.release, Control: hi.ctl, Egress: hi.egr, RelayURL: hostRelay,
+		MaxVaults: maxVaults, LogLevel: slog.LevelError, OnReady: func(in *enclave.Instance) { hi.in <- in }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := supervisor.New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hi.sup = s
+	sctx, scancel := context.WithCancel(context.Background())
+	hi.stopS, hi.sdone = scancel, make(chan struct{})
+	go func() { defer close(hi.sdone); _ = s.Run(sctx) }()
+}
+
+func (hi *hostInstance) stopEnclave() {
+	if hi.stopS != nil {
+		hi.stopS()
+		<-hi.sdone
+		hi.stopS = nil
+	}
+}
+
+func (hi *hostInstance) stop() {
+	if hi.stopP != nil {
+		hi.stopP()
+		<-hi.pdone
+		hi.stopP = nil
+	}
+	hi.stopEnclave()
+}
+
+// --- the member API's part, over the in-memory tables ---
+
+type hostApp struct {
+	hs   *hostStack
+	guid string
+	dev  *client.Device
+	att  client.Attester
+}
+
+func (hs *hostStack) newApp(guid string, seed byte) *hostApp {
+	ctx := ctxT(hs.t, 30*time.Second)
+	t := hs.w.Trust()
+	d, err := client.New(ctx, client.Config{Role: vault.KindApp, Name: guid, RelayURL: hostRelay, HTTP: hs.appHTTP, PollWait: time.Second, Trust: &t})
+	if err != nil {
+		hs.t.Fatal(err)
+	}
+	return &hostApp{hs: hs, guid: guid, dev: d, att: enclavetest.NewAndroidAttester(seed, enclavetest.AndroidOptions{})}
+}
+
+// post sends a sealed request to an instance's queue as the API would and
+// waits for its slot.
+func (hs *hostStack) post(hi *hostInstance, op, vaultID, guid string, r *client.Request) parenttest.SlotRow {
+	hs.t.Helper()
+	hs.tables.PutSlot(r.RequestID, hi.id)
+	b, _ := json.Marshal(map[string]any{"v": 1, "op": op, "vault_id": vaultID, "user_guid": guid, "request_id": r.RequestID,
+		"etk_kid": r.ETKKid, "envelope": r.Envelope, "enqueued_at": time.Now().UTC().Format(time.RFC3339Nano)})
+	if !hs.queues.Send(hi.queue, string(b)) {
+		hs.t.Fatal("no queue")
+	}
+	return hs.waitSlot(r.RequestID)
+}
+
+func (hs *hostStack) waitSlot(rid string) parenttest.SlotRow {
+	hs.t.Helper()
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		if s, _ := hs.tables.Slot(rid); s.Status != "queued" {
+			return s
+		}
+		if time.Now().After(deadline) {
+			hs.t.Fatalf("slot %s not answered", rid)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func (hs *hostStack) enclaveOf(hi *hostInstance, d *client.Device, enroll bool) (*client.Enclave, []byte) {
+	hs.t.Helper()
+	row, ok := hs.tables.Instance(hi.id)
+	if !ok {
+		hs.t.Fatal("instance not registered")
+	}
+	_, m, err := d.VerifyManifest(hs.w.Served(), hs.w.Trust())
+	if err != nil {
+		hs.t.Fatal(err)
+	}
+	e, err := client.VerifyEnclave(row.Descriptor, row.Attestation, m, enroll, hs.w.Trust(), time.Now())
+	if err != nil {
+		hs.t.Fatalf("descriptor: %v", err)
+	}
+	return e, hs.w.Served()
+}
+
+func (a *hostApp) enroll(hi *hostInstance, vaultID string) {
+	hs := a.hs
+	hs.t.Helper()
+	hs.tables.PutVault(parenttest.VaultRow{VaultID: vaultID, UserGUID: a.guid, State: "enrolling"})
+	e, raw := hs.enclaveOf(hi, a.dev, true)
+	served, _, err := a.dev.VerifyManifest(raw, hs.w.Trust())
+	if err != nil {
+		hs.t.Fatal(err)
+	}
+	req, err := a.dev.BuildEnroll(a.guid, pin, e, served, a.att)
+	if err != nil {
+		hs.t.Fatal(err)
+	}
+	s := hs.post(hi, enclave.OpEnroll, vaultID, a.guid, req)
+	r, err := a.dev.OpenEnrollResult(s.Envelope, req.RequestID)
+	if err != nil || !r.OK {
+		hs.t.Fatalf("enroll: %v %+v", err, r)
+	}
+	ctx := ctxT(hs.t, 60*time.Second)
+	if err := a.dev.AwaitEnrolled(ctx); err != nil {
+		hs.t.Fatal(err)
+	}
+	if err := a.dev.CompleteEnrollment(ctx); err != nil {
+		hs.t.Fatal(err)
+	}
+	if rr, err := a.dev.Request(ctx, "vault.enroll.confirm", json.RawMessage(`{}`)); err != nil || !rr.OK() {
+		hs.t.Fatalf("confirm: %v", err)
+	}
+}
+
+func (a *hostApp) unlock(hi *hostInstance) (*client.UnlockOutcome, parenttest.SlotRow) {
+	hs := a.hs
+	hs.t.Helper()
+	e, raw := hs.enclaveOf(hi, a.dev, false)
+	served, m, err := a.dev.VerifyManifest(raw, hs.w.Trust())
+	if err != nil {
+		hs.t.Fatal(err)
+	}
+	req, err := a.dev.BuildUnlock(a.guid, pin, e, served, m, a.att, client.UnlockOptions{})
+	if err != nil {
+		hs.t.Fatal(err)
+	}
+	s := hs.post(hi, enclave.OpUnlock, a.dev.VaultID(), a.guid, req)
+	if s.Code != "" {
+		return &client.UnlockOutcome{Code: s.Code}, s
+	}
+	r, err := a.dev.OpenUnlockResult(s.Envelope)
+	if err != nil {
+		hs.t.Fatalf("unlock result: %v", err)
+	}
+	return &client.UnlockOutcome{OK: r.OK, Code: r.Code}, s
+}
+
+func (a *hostApp) lock(hi *hostInstance) {
+	rid, _ := envelope.NewULID(time.Now())
+	a.hs.tables.PutSlot(rid, hi.id)
+	b, _ := json.Marshal(map[string]any{"v": 1, "op": "lock", "vault_id": a.dev.VaultID(), "user_guid": a.guid, "request_id": rid,
+		"enqueued_at": time.Now().UTC().Format(time.RFC3339Nano)})
+	a.hs.queues.Send(hi.queue, string(b))
+	if s := a.hs.waitSlot(rid); s.Status != "done" {
+		a.hs.t.Fatalf("lock slot %+v", s)
+	}
+}
+
+func (a *hostApp) status() bool {
+	r, err := a.dev.Request(ctxT(a.hs.t, 30*time.Second), "vault.status", json.RawMessage(`{}`))
+	return err == nil && r.OK()
+}
+
+func waitUntil(t *testing.T, what string, ok func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for !ok() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func TestHostStack(t *testing.T) {
+	hs := newHostStack(t)
+	a := hs.start("i-a", 3, 1) // at most one running vault
+
+	m1 := hs.newApp("member-1", 0x61)
+	m1.enroll(a, "11111111111111111111111111111111")
+	if !m1.status() {
+		t.Fatal("vault.status through the enclave's TLS egress")
+	}
+	if r, _ := hs.tables.Vault("11111111111111111111111111111111"); r.LeaseInstance != "i-a" || r.State != "unlocked" {
+		t.Fatalf("row %+v", r)
+	}
+	// State and header live in the bucket under vaults/<id>/.
+	keys := strings.Join(hs.objs.Keys(), " ")
+	if !strings.Contains(keys, "vaults/11111111111111111111111111111111/state") || !strings.Contains(keys, "vaults/11111111111111111111111111111111/header/") {
+		t.Fatalf("objects %s", keys)
+	}
+
+	// Lock and unlock again.
+	m1.lock(a)
+	waitUntil(t, "lock", func() bool { return len(a.p.RunningVaults()) == 0 })
+	if u, _ := m1.unlock(a); !u.OK {
+		t.Fatalf("unlock: %+v", u)
+	}
+	if !m1.status() {
+		t.Fatal("status after unlock")
+	}
+
+	// Vault cap (§12.3 memory pressure): a second vault evicts the least
+	// recently active one, which locks like an owner request.
+	m2 := hs.newApp("member-2", 0x62)
+	m2.enroll(a, "22222222222222222222222222222222")
+	waitUntil(t, "eviction", func() bool {
+		r, _ := hs.tables.Vault("11111111111111111111111111111111")
+		return r.State == "locked" && r.LeaseInstance == ""
+	})
+	if got := a.p.RunningVaults(); len(got) != 1 || got[0] != "22222222222222222222222222222222" {
+		t.Fatalf("running %v", got)
+	}
+
+	// An unknown ETK (a request sealed to a descriptor of a previous
+	// enclave run) gets the etk_unknown host code; after the enclave
+	// restarts, the parent releases the leases its vaults held.
+	e, raw := hs.enclaveOf(a, m1.dev, false)
+	a.stopEnclave()
+	waitUntil(t, "registry withdrawn", func() bool { _, ok := hs.tables.Instance("i-a"); return !ok })
+	a.startEnclave(t, 1)
+	waitUntil(t, "lease released after the enclave restart", func() bool {
+		r, _ := hs.tables.Vault("22222222222222222222222222222222")
+		return r.LeaseInstance == ""
+	})
+	waitUntil(t, "re-registered", func() bool { return a.p.Health().OK })
+	served, m, _ := m1.dev.VerifyManifest(raw, hs.w.Trust())
+	req, err := m1.dev.BuildUnlock(m1.guid, pin, e, served, m, m1.att, client.UnlockOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := hs.post(a, enclave.OpUnlock, m1.dev.VaultID(), m1.guid, req); s.Status != "done" || s.Code != "etk_unknown" || len(s.Envelope) != 0 {
+		t.Fatalf("stale ETK slot %+v", s)
+	}
+	if u, _ := m1.unlock(a); !u.OK {
+		t.Fatalf("unlock after the restart: %+v", u)
+	}
+	if !m1.status() {
+		t.Fatal("status after the restart")
+	}
+
+	// A parent shutdown (§12.3 "if signalled") locks the enclave's vaults
+	// and withdraws the instance and its queue.
+	a.stopP()
+	<-a.pdone
+	a.stopP = nil
+	if r, _ := hs.tables.Vault("11111111111111111111111111111111"); r.State != "locked" || r.LeaseInstance != "" {
+		t.Fatalf("row after the parent shutdown %+v", r)
+	}
+	if hs.queues.Exists(a.queue) {
+		t.Fatal("queue left behind")
+	}
+}

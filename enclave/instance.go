@@ -155,23 +155,26 @@ var errETKUnknown = errors.New("enclave: unknown or expired etk_kid")
 // under this ETK.
 func (in *Instance) openRequest(q *QueueMessage) (*envelope.Inner, *etk, error) {
 	now := in.now()
-	in.mu.Lock()
-	e := in.lookupETK(q.ETKKid, now)
-	in.mu.Unlock()
-	if e == nil {
-		return nil, nil, errETKUnknown
-	}
 	env, err := envelope.Parse(q.Envelope)
 	if err != nil || env.Mode() != envelope.ModeSealed || !env.SenderKid().Equal(suite.Anonymous) {
+		in.mu.Lock()
+		known := in.lookupETK(q.ETKKid, now) != nil
+		in.mu.Unlock()
+		if !known {
+			return nil, nil, errETKUnknown
+		}
 		return nil, nil, errDrop
 	}
+	// Decrypt under the ETK lock, so that rotation cannot destroy the key
+	// in use.
 	in.mu.Lock()
-	key := e.key
-	in.mu.Unlock()
-	if key == nil {
+	e := in.lookupETK(q.ETKKid, now)
+	if e == nil {
+		in.mu.Unlock()
 		return nil, nil, errETKUnknown
 	}
-	padded, _, err := envelope.OpenSealed(env, key)
+	padded, _, err := envelope.OpenSealed(env, e.key)
+	in.mu.Unlock()
 	if err != nil {
 		return nil, nil, errDrop
 	}

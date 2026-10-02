@@ -1,0 +1,131 @@
+// Package parent is the enclave's host side (VAULT-PLAN V3): it runs on
+// the EC2 instance, outside the enclave, and is untrusted
+// (VAULT-MESSAGING §13.3). It moves opaque bytes and never parses
+// envelopes, sealed results or stored objects:
+//
+//   - a vsock (TCP in development) control server for the enclave's
+//     supervisor (package hostproto);
+//   - a TCP forwarder from the enclave to an allowlist (relay, regional
+//     KMS, Google's attestation status list) on port 443 only; TLS ends in
+//     the enclave;
+//   - the instance's SQS queue (created at boot, deleted at shutdown) and
+//     its consumer, which forwards queue messages unchanged;
+//   - the instance registry heartbeat and descriptor publication;
+//   - vault leases (acquire, renew, release with conditional writes,
+//     §11.1), lifecycle events and response slots in DynamoDB, in exactly
+//     the shapes vettid.org's member API reads (lambda/member/vault.ts);
+//   - S3 get/put/delete with create-only and version-matched writes for
+//     the vault objects;
+//   - the instance role's temporary credentials for the enclave's own
+//     SigV4-signed KMS calls;
+//   - a health endpoint, and structured logs that never contain
+//     envelopes, keys or stored objects.
+package parent
+
+import (
+	"context"
+	"errors"
+	"time"
+)
+
+// Errors of the backends.
+var (
+	ErrNotFound = errors.New("parent: not found")
+	ErrConflict = errors.New("parent: conditional write failed")
+	// ErrLeaseHeld means the vault's lease belongs to another instance
+	// (or the vault row does not exist).
+	ErrLeaseHeld = errors.New("parent: lease held elsewhere")
+)
+
+// Objects is the vault data bucket.
+type Objects interface {
+	// Get returns the object and its version (ETag).
+	Get(ctx context.Context, key string) ([]byte, string, error)
+	// Put writes create-only (ifMatch "") or version-matched.
+	Put(ctx context.Context, key string, data []byte, ifMatch string) (string, error)
+	// Delete deletes if the version matches.
+	Delete(ctx context.Context, key string, ifMatch string) error
+}
+
+// QueueMessage is one received SQS message.
+type QueueMessage struct {
+	ID      string
+	Body    []byte
+	Receipt string
+}
+
+// Queues is the instance's SQS queue.
+type Queues interface {
+	// Create creates the queue (idempotent) and returns its URL.
+	Create(ctx context.Context, name string) (string, error)
+	Receive(ctx context.Context, url string) ([]QueueMessage, error)
+	DeleteMessage(ctx context.Context, url, receipt string) error
+	Destroy(ctx context.Context, url string) error
+	// List returns the URLs of queues whose name starts with prefix,
+	// with their creation times.
+	List(ctx context.Context, prefix string) (map[string]time.Time, error)
+}
+
+// InstanceRow is a vault-instances item (§11.5; vault.ts InstanceRow).
+type InstanceRow struct {
+	InstanceID  string
+	Release     string
+	QueueURL    string
+	Descriptor  []byte
+	Attestation []byte
+	HeartbeatAt int64
+	ExpiresAt   int64
+	Load        int
+}
+
+// Lifecycle is a lifecycle event for the vault table (§11.5).
+type Lifecycle struct {
+	Event        string
+	VaultID      string
+	Release      string
+	VaultVersion string
+	StateVersion int
+}
+
+// Slot is a response slot update (§11.5): Status "done" with Envelope
+// and/or Code, or "expired".
+type Slot struct {
+	Status   string
+	Envelope []byte
+	Code     string
+}
+
+// Tables are the member API's DynamoDB tables.
+type Tables interface {
+	PutInstance(ctx context.Context, r InstanceRow) error
+	DeleteInstance(ctx context.Context, instanceID string) error
+	// InstanceHeartbeat returns an instance row's heartbeat_at, or
+	// ErrNotFound.
+	InstanceHeartbeat(ctx context.Context, instanceID string) (int64, error)
+	// AcquireLease sets the lease if it is absent, expired at now, or
+	// already this instance's (§11.1); ErrLeaseHeld otherwise.
+	AcquireLease(ctx context.Context, vaultID, instanceID string, now, expires int64) error
+	// RenewLease extends this instance's lease; ErrLeaseHeld if it is
+	// not this instance's.
+	RenewLease(ctx context.Context, vaultID, instanceID string, expires int64) error
+	// Lifecycle writes an event (and releases the lease on locked and
+	// deleted, if it is this instance's or absent).
+	Lifecycle(ctx context.Context, ev Lifecycle, instanceID string, now time.Time) error
+	// ReleaseLease removes this instance's lease and marks the vault
+	// locked (a vault that stopped without a lifecycle "locked").
+	ReleaseLease(ctx context.Context, vaultID, instanceID string, now time.Time) error
+	// WriteSlot updates a queued response slot; a slot that is gone or
+	// no longer queued is left alone.
+	WriteSlot(ctx context.Context, requestID string, s Slot) error
+}
+
+// Credentials are the instance role's temporary credentials.
+type Credentials struct {
+	AccessKeyID, SecretAccessKey, SessionToken string
+	Expires                                    time.Time
+}
+
+// CredentialSource retrieves credentials for the enclave.
+type CredentialSource interface {
+	Retrieve(ctx context.Context) (Credentials, error)
+}

@@ -48,8 +48,8 @@ type World struct {
 	// VaultOptions is the template for vaults (relay transport etc.).
 	VaultOptions vault.Options
 	// Stopped is passed to instances (run loops that end).
-	Stopped func(vaultID string, err error)
-	RelayURL     string
+	Stopped  func(vaultID string, err error)
+	RelayURL string
 
 	mu        sync.Mutex
 	releases  []ReleaseSpec

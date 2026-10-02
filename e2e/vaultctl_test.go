@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -104,14 +105,14 @@ func TestVaultctlAltchan(t *testing.T) {
 		t.Helper()
 		ctx, cancel := context.WithCancel(context.Background())
 		cmd := exec.CommandContext(ctx, bin, append(append([]string{"-state", app, "-timeout", "120s", "altchan-unlock"}, common...), extra...)...)
-		var out bytes.Buffer
-		cmd.Stdout, cmd.Stderr = &out, &out
+		out := &syncBuffer{}
+		cmd.Stdout, cmd.Stderr = out, out
 		if err := cmd.Start(); err != nil {
 			t.Fatal(err)
 		}
 		deadline := time.Now().Add(60 * time.Second)
 		for !strings.Contains(out.String(), "running until interrupted") {
-			if time.Now().After(deadline) || cmd.ProcessState != nil {
+			if time.Now().After(deadline) {
 				cancel()
 				t.Fatalf("altchan-unlock did not start:\n%s", out.String())
 			}
@@ -148,4 +149,22 @@ func TestVaultctlAltchan(t *testing.T) {
 	if !strings.Contains(out, `"status": "ok"`) {
 		t.Fatalf("status under release 4: %s", out)
 	}
+}
+
+// syncBuffer is a bytes.Buffer safe for a writing process and a reader.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
 }

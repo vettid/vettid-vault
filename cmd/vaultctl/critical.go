@@ -9,10 +9,11 @@ import (
 	"github.com/vettid/vettid-vault/client"
 )
 
-// V4 batch 3: critical-secret use by a connection (VAULT-MESSAGING §10.13).
+// Critical-item use by a connection (VAULT-MESSAGING §10.13): a critical
+// item is usable by a connection when one of its share rules includes it.
 
 func init() {
-	commands["critical"] = command{"critical catalog -id SECRET [-off] | request -connection ID -id SECRET -op sign|auth -payload B64 [-context C] | " +
+	commands["critical"] = command{"critical request -connection ID -item ID -field F -op sign|auth -payload B64 [-context C] | " +
 		"approve -id REQUEST -payload-sha256 B64 (password in VAULTCTL_PASSWORD) | deny -id REQUEST | list", cmdCritical}
 }
 
@@ -22,8 +23,9 @@ func cmdCritical(ctx context.Context, g *globals, args []string) error {
 		return err
 	}
 	fs := flag.NewFlagSet("critical "+op, flag.ExitOnError)
-	id := fs.String("id", "", "secret id (catalog, request) or request id")
-	off := fs.Bool("off", false, "take the secret out of the catalog")
+	id := fs.String("id", "", "request id")
+	item := fs.String("item", "", "item id (request)")
+	field := fs.String("field", "", "field id (request)")
 	conn := fs.String("connection", "", "connection id")
 	operation := fs.String("op", "sign", "sign|auth")
 	payload := fs.String("payload", "", "payload, standard base64")
@@ -32,14 +34,12 @@ func cmdCritical(ctx context.Context, g *globals, args []string) error {
 	_ = fs.Parse(rest)
 	return withDevice(ctx, g, func(d *client.Device) (any, error) {
 		switch op {
-		case "catalog":
-			return nil, d.CriticalSecretCatalog(ctx, *id, !*off)
 		case "request":
 			p, err := base64.StdEncoding.DecodeString(*payload)
 			if err != nil {
 				return nil, errors.New("-payload: standard base64")
 			}
-			rid, err := d.CriticalUseRequest(ctx, *conn, *id, *operation, p, *note)
+			rid, err := d.CriticalUseRequest(ctx, *conn, *item, *field, *operation, p, *note)
 			return map[string]string{"request_id": rid}, err
 		case "approve":
 			h, err := base64.StdEncoding.DecodeString(*hash)

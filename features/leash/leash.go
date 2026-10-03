@@ -1,9 +1,11 @@
 // Package leash is LEASH for the member's agents (VAULT-MESSAGING
 // §10.11): grants that give a paired agent one scope each, the decision
 // behind the runtime's AgentPolicy hook (allow, refer to an app, refuse),
-// agent.request for the catalog, retrieval and use of cataloged vault-held
-// secrets, initial grants at pairing, and optional delegations signed
-// with the member's credential key.
+// agent.request for the catalog, retrieval and use of the items the
+// agent's share rules include, initial grants at pairing, and delegations
+// signed with the member's credential key. An agent's share rule (§10.12)
+// is its grant of scope items.read: the items feature manages it through
+// the AgentRules methods, and decides which items it includes.
 //
 // Ported from vettid.dev's leash_handler.go and agent_handler.go: the
 // per-user "attestation key" and its JWTs published to a public table are
@@ -12,7 +14,8 @@
 // sessions; the agent's Connection Contract (scope tokens, approval mode)
 // becomes the agent's grants, enforced by the vault; secret requests,
 // use-in-enclave actions and the catalog become agent.request operations
-// on `cataloged` secrets. The HTTP action (a stub returning 501 in
+// on the items the agent's share rules include (0.7.0; 0.6.0 used
+// cataloged secrets). The HTTP action (a stub returning 501 in
 // vettid.dev) is not offered: the enclave has no egress beyond the relay.
 package leash
 
@@ -27,7 +30,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/vettid/vettid-vault/features/secrets"
+	"github.com/vettid/vettid-vault/features/itemspec"
 	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vms/envelope"
@@ -52,15 +55,12 @@ const (
 	Auto = "auto"
 )
 
-// Scopes of the LEASH operations (agent.request).
-const (
-	ScopeCatalog = "secrets.catalog"
-	ScopeGet     = "secrets.get"
-	ScopeUse     = "secrets.use"
-)
+// ScopeItems is the scope of the LEASH operations (agent.request): an
+// agent's share rule (§10.11, §10.12).
+const ScopeItems = leashwire.ScopeItems
 
-// opScope maps agent.request operations to their scopes.
-var opScope = map[string]string{"catalog": ScopeCatalog, "secret.get": ScopeGet, "secret.use": ScopeUse}
+// opScope maps agent.request operations to their scope.
+var opScope = map[string]string{"catalog": ScopeItems, "item.get": ScopeItems, "item.use": ScopeItems}
 
 // Delegable are the owner types a grant may give an agent (§10.11).
 // connScoped are those whose body carries connection_id, which a grant's
@@ -72,19 +72,18 @@ var (
 		"message.read": true, "action.invoke": true}
 )
 
-// ValidScope reports whether s is a grant scope.
-func ValidScope(s string) bool {
-	return s == ScopeCatalog || s == ScopeGet || s == ScopeUse || delegable[s]
-}
+// ValidScope reports whether s is a scope leash.grant.issue accepts (an
+// items.read grant is a share rule, §10.12).
+func ValidScope(s string) bool { return delegable[s] }
 
-func secretScoped(scope string) bool {
-	return scope == ScopeCatalog || scope == ScopeGet || scope == ScopeUse
-}
-
-// SecretSource is the vault-held secrets feature (§10.7).
-type SecretSource interface {
-	Catalog() []secrets.CatalogEntry
-	CatalogedValue(id string) (name, value string, ok bool)
+// AgentItems is the items feature: what an agent's share rules include
+// (§10.11). Its methods are called with this feature's lock held and must
+// not call back; rules are the agent's items.read grants in force.
+type AgentItems interface {
+	AgentIncluded(agent string, rules []itemspec.AgentRule, itemID string) string
+	AgentCatalog(agent string, rules []itemspec.AgentRule) []itemspec.Meta
+	AgentRead(agent string, rules []itemspec.AgentRule, itemID string, fields []string) ([]byte, bool)
+	AgentFieldValue(agent string, rules []itemspec.AgentRule, itemID, fieldID string) (string, bool)
 }
 
 // KeyUser gives access to the credential key during the unlock window
@@ -95,17 +94,19 @@ type KeyUser interface {
 
 // Grant is one agent's grant of one scope.
 type Grant struct {
-	ID          string    `json:"id"`
-	AgentID     string    `json:"agent_id"`
-	Version     uint64    `json:"version"`
-	Scope       string    `json:"scope"`
-	Approval    string    `json:"approval"`
-	Connections []string  `json:"connections,omitempty"`
-	Secrets     []string  `json:"secrets,omitempty"`
-	PerHour     uint64    `json:"per_hour,omitempty"`
-	PerDay      uint64    `json:"per_day,omitempty"`
-	Expires     time.Time `json:"expires,omitempty"`
-	IssuedAt    time.Time `json:"issued_at"`
+	ID          string   `json:"id"`
+	AgentID     string   `json:"agent_id"`
+	Version     uint64   `json:"version"`
+	Scope       string   `json:"scope"`
+	Approval    string   `json:"approval"`
+	Connections []string `json:"connections,omitempty"`
+	// Rule is the share rule of an items.read grant (§10.12).
+	Rule     *itemspec.Terms `json:"rule,omitempty"`
+	Created  time.Time       `json:"created,omitempty"`
+	PerHour  uint64          `json:"per_hour,omitempty"`
+	PerDay   uint64          `json:"per_day,omitempty"`
+	Expires  time.Time       `json:"expires,omitempty"`
+	IssuedAt time.Time       `json:"issued_at"`
 	// StatusTTL is the lifetime of the delegation's status statements.
 	StatusTTL time.Duration `json:"status_ttl"`
 	// A signed delegation (§10.11), if any.
@@ -154,8 +155,8 @@ const (
 	KindAllowed   = "leash.allowed"
 	KindRefused   = "leash.refused"
 	KindThrottled = "leash.throttled" // never written singly
-	KindRead      = "leash.secret.read"
-	KindUsed      = "leash.secret.used"
+	KindRead      = "leash.item.read"
+	KindUsed      = "leash.item.used"
 )
 
 // Cooldown is one scope's refusal backoff.
@@ -183,16 +184,16 @@ type AgentState struct {
 // Feature implements vault.Feature, vault.AgentPolicy, vault.AgentGrantor,
 // vault.DeviceRemovedObserver and vault.ConnectionRemovedObserver.
 type Feature struct {
-	mu      sync.Mutex
-	keys    KeyUser
-	secrets SecretSource
-	d       data
+	mu    sync.Mutex
+	keys  KeyUser
+	items AgentItems
+	d     data
 }
 
-// New returns the feature; keys is the credential feature, src the
-// vault-held secrets.
-func New(keys KeyUser, src SecretSource) *Feature {
-	return &Feature{keys: keys, secrets: src, d: data{Grants: map[string]*Grant{}, Agents: map[string]*AgentState{}}}
+// New returns the feature; keys is the credential feature, items the
+// items feature.
+func New(keys KeyUser, items AgentItems) *Feature {
+	return &Feature{keys: keys, items: items, d: data{Grants: map[string]*Grant{}, Agents: map[string]*AgentState{}}}
 }
 
 var (
@@ -258,7 +259,6 @@ type Spec struct {
 	Scope       string
 	Approval    string
 	Connections []string
-	Secrets     []string
 	PerHour     uint64
 	PerDay      uint64
 	Expires     time.Time
@@ -304,9 +304,6 @@ func ParseSpec(o strictjson.Object, now time.Time) (*Spec, error) {
 	if sp.Connections, err = idList(o, "connections"); err != nil || sp.Connections != nil && !connScoped[sp.Scope] {
 		return nil, errBad
 	}
-	if sp.Secrets, err = idList(o, "secrets"); err != nil || sp.Secrets != nil && !secretScoped(sp.Scope) {
-		return nil, errBad
-	}
 	ph, phSet, err := o.OptUint("per_hour", 1, MaxPerHour)
 	if err != nil {
 		return nil, errBad
@@ -325,9 +322,6 @@ func ParseSpec(o strictjson.Object, now time.Time) (*Spec, error) {
 		}
 		if pdSet {
 			sp.PerDay = pd
-		}
-		if sp.Scope == ScopeGet && sp.Secrets == nil {
-			return nil, errBad // values without approval only from named secrets
 		}
 	}
 	sp.StatusTTL = leashwire.DefaultStatusTTL
@@ -372,10 +366,12 @@ func ParseInitialGrants(raw json.RawMessage, now time.Time) ([]*Spec, error) {
 
 // Request is a parsed agent.request body.
 type Request struct {
-	Op       string
-	SecretID string
-	Action   string
-	Data     []byte
+	Op      string
+	ItemID  string
+	Fields  []string
+	FieldID string
+	Action  string
+	Data    []byte
 }
 
 // ParseRequest parses an agent.request body strictly.
@@ -391,10 +387,28 @@ func ParseRequest(body []byte) (*Request, error) {
 	if r.Op == "catalog" {
 		return r, nil
 	}
-	if r.SecretID, err = o.String("secret_id"); err != nil || !envelope.ValidULID(r.SecretID) {
+	if r.ItemID, err = o.String("item_id"); err != nil || !envelope.ValidULID(r.ItemID) {
 		return nil, errBad
 	}
-	if r.Op == "secret.use" {
+	if r.Op == "item.get" {
+		arr, present, err := o.OptArray("fields")
+		if err != nil || present && (len(arr) == 0 || len(arr) > itemspec.MaxFields) {
+			return nil, errBad
+		}
+		seen := map[string]bool{}
+		for _, raw := range arr {
+			v, err := strictjson.AsString(raw)
+			if err != nil || !itemspec.ValidFieldID(v) || seen[v] {
+				return nil, errBad
+			}
+			seen[v] = true
+			r.Fields = append(r.Fields, v)
+		}
+	}
+	if r.Op == "item.use" {
+		if r.FieldID, err = o.String("field_id"); err != nil || !itemspec.ValidFieldID(r.FieldID) {
+			return nil, errBad
+		}
 		if r.Action, err = o.String("action"); err != nil || r.Action != "hmac-sha256" {
 			return nil, errBad
 		}
@@ -408,14 +422,15 @@ func ParseRequest(body []byte) (*Request, error) {
 // --- the policy (§6.8, §10.11) ---
 
 // scopeOf returns the scope a request needs and the members its grants'
-// restrictions apply to. ok is false for a type no grant can cover.
-func scopeOf(typ string, body json.RawMessage) (scope, conn, secret string, parsed, ok bool) {
+// restrictions apply to (item: the item an items.read request is about).
+// ok is false for a type no grant can cover.
+func scopeOf(typ string, body json.RawMessage) (scope, conn, item string, parsed, ok bool) {
 	if typ == "agent.request" {
 		r, err := ParseRequest(body)
 		if err != nil {
 			return "", "", "", false, true
 		}
-		return opScope[r.Op], "", r.SecretID, true, true
+		return opScope[r.Op], "", r.ItemID, true, true
 	}
 	if !delegable[typ] {
 		return "", "", "", true, false
@@ -437,31 +452,52 @@ func contains(l []string, s string) bool {
 	return false
 }
 
-// matches reports whether g covers a request of scope with the members
-// conn and secret.
-func (g *Grant) matches(scope, conn, secret string, now time.Time) bool {
+// matches reports whether g covers a request of scope with the member
+// conn (an items.read grant is narrowed to the item by matching).
+func (g *Grant) matches(scope, conn string, now time.Time) bool {
 	if g.Scope != scope || !g.Expires.IsZero() && !now.Before(g.Expires) {
 		return false
 	}
 	if g.Connections != nil && (conn == "" || !contains(g.Connections, conn)) {
 		return false
 	}
-	// The catalog is filtered by `secrets`, not refused (§10.11).
-	if g.Secrets != nil && scope != ScopeCatalog && (secret == "" || !contains(g.Secrets, secret)) {
-		return false
-	}
 	return true
 }
 
 // matching returns the agent's grants covering a request, sorted by id.
-func (f *Feature) matching(agent, scope, conn, secret string, now time.Time) []*Grant {
+// For an items.read request about an item, it is the one rule that
+// includes the item (with a use left), if any (§10.11).
+func (f *Feature) matching(agent, scope, conn, item string, now time.Time) []*Grant {
 	var out []*Grant
 	for _, g := range f.d.Grants {
-		if g.AgentID == agent && g.matches(scope, conn, secret, now) {
+		if g.AgentID == agent && g.matches(scope, conn, now) {
 			out = append(out, g)
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	if scope == ScopeItems && item != "" {
+		if f.items == nil {
+			return nil
+		}
+		rid := f.items.AgentIncluded(agent, rulesOf(out), item)
+		for _, g := range out {
+			if g.ID == rid {
+				return []*Grant{g}
+			}
+		}
+		return nil
+	}
+	return out
+}
+
+// rulesOf returns the share rules of items.read grants.
+func rulesOf(gs []*Grant) []itemspec.AgentRule {
+	var out []itemspec.AgentRule
+	for _, g := range gs {
+		if g.Rule != nil {
+			out = append(out, g.agentRule())
+		}
+	}
 	return out
 }
 
@@ -560,7 +596,7 @@ func (f *Feature) AgentDecision(s *vault.Session, typ string, body json.RawMessa
 	f.expire(now)
 	agent := s.From().ID
 	st := f.agent(s, agent)
-	scope, conn, secret, parsed, ok := scopeOf(typ, body)
+	scope, conn, item, parsed, ok := scopeOf(typ, body)
 	if st.Suspended {
 		return f.refuse(s, agent, st, KindThrottled, scope)
 	}
@@ -575,7 +611,7 @@ func (f *Feature) AgentDecision(s *vault.Session, typ string, body json.RawMessa
 	}
 	var gs []*Grant
 	if ok {
-		gs = f.matching(agent, scope, conn, secret, now)
+		gs = f.matching(agent, scope, conn, item, now)
 	}
 	if len(gs) == 0 {
 		if st.Cool == nil {
@@ -596,7 +632,10 @@ func (f *Feature) AgentDecision(s *vault.Session, typ string, body json.RawMessa
 	}
 	delete(st.Cool, scope)
 	for _, g := range gs {
-		if g.Approval != Auto {
+		// An auto grant, or an items.read grant whose rule includes the
+		// item (inclusion was the member's decision, §10.11), within its
+		// rate limits.
+		if g.Approval != Auto && g.Scope != ScopeItems {
 			continue
 		}
 		g.roll(now)
@@ -636,11 +675,11 @@ func (f *Feature) AgentCovered(s *vault.Session, typ string, body json.RawMessag
 	if st := f.d.Agents[agent]; st != nil && st.Suspended {
 		return false
 	}
-	scope, conn, secret, parsed, ok := scopeOf(typ, body)
+	scope, conn, item, parsed, ok := scopeOf(typ, body)
 	if !parsed {
 		return true // the handler answers bad_request
 	}
-	return ok && len(f.matching(agent, scope, conn, secret, s.Now())) > 0
+	return ok && len(f.matching(agent, scope, conn, item, s.Now())) > 0
 }
 
 // --- grants ---
@@ -682,8 +721,11 @@ func (g *Grant) JSON() []byte {
 	if g.Connections != nil {
 		b.Raw("connections", strList(g.Connections))
 	}
-	if g.Secrets != nil {
-		b.Raw("secrets", strList(g.Secrets))
+	if g.Rule != nil {
+		b.Raw("tags", strList(g.Rule.Tags)).String("match", g.Rule.Match).String("access", g.Rule.Access)
+		if g.Rule.Uses > 0 {
+			b.Uint("uses", g.Rule.Uses)
+		}
 	}
 	if g.PerHour > 0 {
 		b.Uint("per_hour", g.PerHour).Uint("per_day", g.PerDay)
@@ -822,7 +864,7 @@ func syncRevoked(s *vault.Session, g *Grant) {
 }
 
 func (sp *Spec) apply(g *Grant) {
-	g.Scope, g.Approval, g.Connections, g.Secrets = sp.Scope, sp.Approval, sp.Connections, sp.Secrets
+	g.Scope, g.Approval, g.Connections, g.Rule = sp.Scope, sp.Approval, sp.Connections, nil
 	g.PerHour, g.PerDay, g.Expires, g.StatusTTL = sp.PerHour, sp.PerDay, sp.Expires, sp.StatusTTL
 	g.Delegation, g.DelegationSig, g.Key = nil, nil, nil
 	g.HourStart, g.HourN, g.DayStart, g.DayN, g.LimitedAt = time.Time{}, 0, time.Time{}, 0, time.Time{}
@@ -858,8 +900,8 @@ func (f *Feature) issue(s *vault.Session, body []byte) (json.RawMessage, error) 
 	var g *Grant
 	if hasID {
 		cur := f.d.Grants[gid]
-		if cur == nil || cur.AgentID != agentID {
-			return nil, errNotFound
+		if cur == nil || cur.AgentID != agentID || cur.Scope == ScopeItems {
+			return nil, errNotFound // an items.read grant is replaced as a share rule
 		}
 		if cur.Version != ver {
 			return nil, errConflict
@@ -911,8 +953,12 @@ func (f *Feature) sign(s *vault.Session, g *Grant, agentIK []byte) error {
 		}
 	}
 	d := &leashwire.Delegation{VaultIK: s.IdentityKey(), AgentIK: agentIK, GrantID: g.ID, Version: g.Version,
-		Scope: g.Scope, Approval: g.Approval, Connections: g.Connections, Secrets: g.Secrets, IssuedAt: iat, Expires: exp,
+		Scope: g.Scope, Approval: g.Approval, Connections: g.Connections, IssuedAt: iat, Expires: exp,
 		StatusTTL: g.StatusTTL}
+	if g.Rule != nil {
+		d.Tags, d.Match, d.Access, d.Uses = g.Rule.Tags, g.Rule.Match, g.Rule.Access, g.Rule.Uses
+		d.PerHour, d.PerDay = g.PerHour, g.PerDay
+	}
 	stmt := d.Marshal()
 	sig, err := leashwire.Sign(key, stmt)
 	if err != nil {
@@ -1028,58 +1074,56 @@ func (f *Feature) request(s *vault.Session, body []byte) (json.RawMessage, error
 		return nil, err
 	}
 	agent := s.From().ID
-	gs := f.matching(agent, opScope[r.Op], "", r.SecretID, s.Now())
-	if len(gs) == 0 {
+	gs := f.matching(agent, opScope[r.Op], "", r.ItemID, s.Now())
+	if len(gs) == 0 || f.items == nil {
 		return nil, errForbidden
 	}
+	rules := rulesOf(gs)
 	switch r.Op {
 	case "catalog":
-		allowed := map[string]bool{}
-		unrestricted := false
-		for _, g := range gs {
-			if g.Secrets == nil {
-				unrestricted = true
-			}
-			for _, id := range g.Secrets {
-				allowed[id] = true
-			}
-		}
 		arr := []byte{'['}
-		n := 0
-		for _, e := range f.secrets.Catalog() {
-			if !unrestricted && !allowed[e.ID] {
-				continue
-			}
-			if n > 0 {
+		for i, m := range f.items.AgentCatalog(agent, rules) {
+			if i > 0 {
 				arr = append(arr, ',')
 			}
-			n++
-			b := strictjson.NewBuilder().String("secret_id", e.ID).String("name", e.Name).String("category", e.Category)
-			if e.Description != "" {
-				b.String("description", e.Description)
-			}
-			arr = append(arr, b.Bytes()...)
+			arr = append(arr, m.JSON()...)
 		}
-		return strictjson.NewBuilder().Raw("secrets", append(arr, ']')).Bytes(), nil
-	case "secret.get":
-		name, value, ok := f.secrets.CatalogedValue(r.SecretID)
+		return strictjson.NewBuilder().Raw("items", append(arr, ']')).Bytes(), nil
+	case "item.get":
+		content, ok := f.items.AgentRead(agent, rules, r.ItemID, r.Fields)
 		if !ok {
 			return nil, errNotFound
 		}
-		f.note(s, agent, f.agent(s, agent), vault.Activity{Kind: KindRead, Ref: r.SecretID, Feed: true})
-		return strictjson.NewBuilder().String("secret_id", r.SecretID).String("name", name).String("value", value).Bytes(), nil
-	case "secret.use":
-		_, value, ok := f.secrets.CatalogedValue(r.SecretID)
+		f.note(s, agent, f.agent(s, agent), vault.Activity{Kind: KindRead, Ref: r.ItemID, Feed: true})
+		return agentContent(content), nil
+	case "item.use":
+		value, ok := f.items.AgentFieldValue(agent, rules, r.ItemID, r.FieldID)
 		if !ok {
 			return nil, errNotFound
 		}
 		mac := hmac.New(sha256.New, []byte(value))
 		mac.Write(r.Data)
-		f.note(s, agent, f.agent(s, agent), vault.Activity{Kind: KindUsed, Ref: r.SecretID})
-		return strictjson.NewBuilder().String("secret_id", r.SecretID).String("action", r.Action).
+		f.note(s, agent, f.agent(s, agent), vault.Activity{Kind: KindUsed, Ref: r.ItemID})
+		return strictjson.NewBuilder().String("item_id", r.ItemID).String("field_id", r.FieldID).String("action", r.Action).
 			Base64("result", mac.Sum(nil)).Bytes(), nil
 	}
 	return nil, errBad
+}
+
+// agentContent is an item's content as item.get returns it to an agent
+// (§10.11): the shared content without its version.
+func agentContent(content []byte) []byte {
+	o, err := strictjson.ParseObject(content)
+	if err != nil {
+		return content
+	}
+	b := strictjson.NewBuilder()
+	for _, k := range []string{"item_id", "name", "category", "fields", "notes"} {
+		if v, ok := o[k]; ok {
+			b.Raw(k, v)
+		}
+	}
+	return b.Bytes()
 }
 
 // --- hooks ---
@@ -1184,4 +1228,104 @@ func (f *Feature) Grants() []Grant {
 		out = append(out, *g)
 	}
 	return out
+}
+
+// --- agent share rules (items.read, §10.11, §10.12) ---
+
+// agentRule returns an items.read grant as its share rule.
+func (g *Grant) agentRule() itemspec.AgentRule {
+	r := itemspec.AgentRule{ID: g.ID, Version: g.Version, AgentID: g.AgentID, PerHour: g.PerHour, PerDay: g.PerDay,
+		StatusTTL: g.StatusTTL, Created: g.Created, Updated: g.IssuedAt, Delegation: g.Delegation, DelegationSig: g.DelegationSig, Key: g.Key}
+	if g.Rule != nil {
+		r.Terms = *g.Rule
+		r.Terms.Tags = append([]string(nil), g.Rule.Tags...)
+	}
+	return r
+}
+
+// AgentRules implements items.AgentRules: the agents' share rules in
+// force, sorted by id.
+func (f *Feature) AgentRules(now time.Time) []itemspec.AgentRule {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.expire(now)
+	var out []itemspec.AgentRule
+	for _, g := range f.sorted() {
+		if g.Scope == ScopeItems && g.Rule != nil {
+			out = append(out, g.agentRule())
+		}
+	}
+	return out
+}
+
+// SetAgentRule implements items.AgentRules: an agent's share rule is a
+// grant of scope items.read, created (Version 0) or replaced, signed with
+// the credential key within the unlock window (credential_locked
+// otherwise), and sent to the agent.
+func (f *Feature) SetAgentRule(s *vault.Session, r *itemspec.AgentRule) (*itemspec.AgentRule, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	now := s.Now().UTC().Truncate(time.Millisecond)
+	f.expire(now)
+	agent, ok := s.PairedDevice(r.AgentID)
+	if !ok || agent.Kind != vault.KindAgent || !envelope.ValidULID(r.ID) {
+		return nil, errNotFound
+	}
+	var g *Grant
+	if r.Version == 0 {
+		if f.d.Grants[r.ID] != nil {
+			return nil, errBad
+		}
+		if f.count(r.AgentID) >= MaxGrants {
+			return nil, errLimit
+		}
+		g = &Grant{ID: r.ID, AgentID: r.AgentID, Created: now}
+	} else {
+		cur := f.d.Grants[r.ID]
+		if cur == nil || cur.AgentID != r.AgentID || cur.Scope != ScopeItems {
+			return nil, errNotFound
+		}
+		if cur.Version != r.Version {
+			return nil, errConflict
+		}
+		c := *cur
+		g = &c
+	}
+	terms := r.Terms
+	terms.Tags = append([]string(nil), r.Terms.Tags...)
+	g.Scope, g.Approval, g.Connections, g.Rule = ScopeItems, terms.Mode, nil, &terms
+	g.PerHour, g.PerDay, g.Expires, g.StatusTTL = r.PerHour, r.PerDay, terms.Expires, r.StatusTTL
+	g.Delegation, g.DelegationSig, g.Key = nil, nil, nil
+	g.HourStart, g.HourN, g.DayStart, g.DayN, g.LimitedAt = time.Time{}, 0, time.Time{}, 0, time.Time{}
+	g.Version++
+	g.IssuedAt = now
+	if err := f.sign(s, g, agent.IK); err != nil {
+		return nil, err
+	}
+	f.d.Grants[g.ID] = g
+	if st := f.d.Agents[r.AgentID]; st != nil {
+		delete(st.Cool, ScopeItems)
+	}
+	kind := "leash.grant.issued"
+	if g.Version > 1 {
+		kind = "leash.grant.updated"
+	}
+	s.Record(vault.Activity{Kind: kind, DeviceID: r.AgentID, Ref: g.ID, Audit: true})
+	syncChanged(s, g)
+	f.tell(s, r.AgentID)
+	out := g.agentRule()
+	return &out, nil
+}
+
+// DeleteAgentRule implements items.AgentRules: the rule's grant is
+// revoked and the agent told.
+func (f *Feature) DeleteAgentRule(s *vault.Session, id string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	g := f.d.Grants[id]
+	if g == nil || g.Scope != ScopeItems {
+		return false
+	}
+	f.revoke(s, g, true)
+	return true
 }

@@ -196,7 +196,7 @@ func TestCallSignalling(t *testing.T) {
 
 // V4 batch 2, access sessions (§6.8) through the real relay: a desktop
 // paired without a session is refused; it requests one, an app approves;
-// a secret read from the desktop is held until an app approves it; the
+// a secret item revealed from the desktop is held until an app approves it; the
 // app ends the session and the desktop is refused again. An agent gets
 // nothing beyond its listed types (no LEASH yet).
 func TestDesktopSession(t *testing.T) {
@@ -227,8 +227,9 @@ func TestDesktopSession(t *testing.T) {
 		t.Fatalf("device.list: %s", dl["devices"])
 	}
 
-	// Step-up: the desktop's secret.get waits for the app's approval.
-	sid, _, err := a.app.SecretPut(ctx, "", 0, "wifi", "hunter22", nil)
+	// Step-up: the desktop's item.reveal waits for the app's approval.
+	sid, _, err := a.app.ItemPut(ctx, "", 0, "secret", nil, client.ItemContent{Name: "wifi",
+		Fields: []client.ItemField{{Label: "Password", Kind: "password", Value: "hunter22"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -238,10 +239,10 @@ func TestDesktopSession(t *testing.T) {
 	}
 	done := make(chan res, 1)
 	go func() {
-		rr, err := desk.Request(ctxT(t, 60*time.Second), "secret.get", json.RawMessage(`{"secret_id":"`+sid+`"}`))
+		rr, err := desk.Request(ctxT(t, 60*time.Second), "item.reveal", json.RawMessage(`{"item_id":"`+sid+`"}`))
 		done <- res{rr, err}
 	}()
-	ap := waitEvent(t, a.app, "approval.pending", has("type", "secret.get"))
+	ap := waitEvent(t, a.app, "approval.pending", has("type", "item.reveal"))
 	if field(t, ap.Body, "device_id") != desk.DeviceID() {
 		t.Fatal("approval names the wrong device")
 	}
@@ -251,7 +252,7 @@ func TestDesktopSession(t *testing.T) {
 	}
 	got := <-done
 	if got.err != nil || !got.r.OK() || !strings.Contains(string(got.r.Body()), "hunter22") {
-		t.Fatalf("held secret.get: %v %+v", got.err, got.r)
+		t.Fatalf("held item.reveal: %v %+v", got.err, got.r)
 	}
 	if ws := waitEvent(t, desk, "approval.waiting", nil); field(t, ws.Body, "approval_id") != field(t, ap.Body, "approval_id") {
 		t.Fatal("approval.waiting names another approval")

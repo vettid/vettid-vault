@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vettid/vettid-vault/features/secrets"
+	"github.com/vettid/vettid-vault/features/itemspec"
 	"github.com/vettid/vettid-vault/internal/featuretest"
 	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault"
@@ -35,12 +35,63 @@ func (w *window) UseKey(time.Time, time.Duration) (ed25519.PrivateKey, bool) {
 	return w.key, true
 }
 
+// fakeItems is the items feature as leash sees it: which items each
+// agent rule includes (§10.11, §10.12).
+type fakeItems struct {
+	incl  map[string]map[string]bool // rule → item
+	items map[string]*itemspec.Item
+	used  map[string]int
+}
+
+func (f *fakeItems) AgentIncluded(agent string, rules []itemspec.AgentRule, item string) string {
+	for _, r := range rules {
+		if r.AgentID == agent && f.incl[r.ID][item] && (r.Terms.Uses == 0 || f.used[item] < int(r.Terms.Uses)) {
+			return r.ID
+		}
+	}
+	return ""
+}
+
+func (f *fakeItems) AgentCatalog(agent string, rules []itemspec.AgentRule) []itemspec.Meta {
+	var out []itemspec.Meta
+	for id, it := range f.items {
+		if f.AgentIncluded(agent, rules, id) != "" {
+			out = append(out, itemspec.MetaOf(it, nil))
+		}
+	}
+	return out
+}
+
+func (f *fakeItems) AgentRead(agent string, rules []itemspec.AgentRule, item string, fields []string) ([]byte, bool) {
+	it := f.items[item]
+	if f.AgentIncluded(agent, rules, item) == "" || !it.HasFields(fields) {
+		return nil, false
+	}
+	f.used[item]++
+	return it.Content(fields), true
+}
+
+func (f *fakeItems) AgentFieldValue(agent string, rules []itemspec.AgentRule, item, field string) (string, bool) {
+	if f.AgentIncluded(agent, rules, item) == "" {
+		return "", false
+	}
+	fl, ok := f.items[item].Field(field)
+	if !ok {
+		return "", false
+	}
+	v, ok := itemspec.ValueString(fl.Value)
+	if ok {
+		f.used[item]++
+	}
+	return v, ok
+}
+
 type rig struct {
-	f   *Feature
-	h   *featuretest.Host
-	w   *window
-	sec *secrets.Feature
-	// ids of two secrets: wifi (cataloged) and bank (private)
+	f  *Feature
+	h  *featuretest.Host
+	w  *window
+	it *fakeItems
+	// ids of two items: wifi (a rule may include it) and bank
 	wifi, bank string
 	c1, c2     string // connection ids (ULIDs)
 }
@@ -51,27 +102,42 @@ func newRig(t *testing.T) *rig {
 	t.Helper()
 	// Issuing signs with the credential key: the unlock window is open
 	// unless a test closes it.
-	r := &rig{h: featuretest.NewHost(), w: &window{key: ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0xcc}, 32)), open: true}, sec: secrets.New()}
-	r.f = New(r.w, r.sec)
+	r := &rig{h: featuretest.NewHost(), w: &window{key: ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0xcc}, 32)), open: true},
+		it: &fakeItems{incl: map[string]map[string]bool{}, items: map[string]*itemspec.Item{}, used: map[string]int{}}}
+	r.f = New(r.w, r.it)
 	r.h.AddDevice(agent, vault.KindAgent)
 	r.h.AddDevice("dev-desktop", vault.KindDesktop)
 	r.c1, r.c2 = "01JB2Z6V9K3M4N5P6Q7R8S9AAA", "01JB2Z6V9K3M4N5P6Q7R8S9BBB"
 	for _, c := range []string{r.c1, r.c2} {
 		r.h.Conns[c] = vault.PeerInfo{ID: c, Kind: vault.KindConnection, State: vault.PeerActive}
 	}
-	put := func(name, value, disc string) string {
-		res := featuretest.Call(r.sec, r.h, t0, vault.KindApp, "secret.put",
-			`{"name":"`+name+`","value":"`+value+`","discoverability":"`+disc+`"}`)
-		if !res.OK() {
-			t.Fatalf("secret.put: %s", res.Code)
-		}
-		id, _ := res.Obj(t).String("secret_id")
+	put := func(id, name, value string) string {
+		r.it.items[id] = &itemspec.Item{ID: id, Version: 1, Name: name, Category: "login", Sensitivity: itemspec.Secret, Tags: []string{"zz-tag"},
+			Fields: []itemspec.Field{{ID: "f1", Label: "Password", Kind: "password", Value: json.RawMessage(strictjson.MarshalString(value))},
+				{ID: "f2", Label: "Address", Kind: "address", Value: json.RawMessage(`{"city":"Oslo"}`)}}}
 		return id
 	}
-	r.wifi = put("wifi", "hunter22", "cataloged")
-	r.bank = put("bank", "s3cret", "private")
+	r.wifi = put("01JB2Z6V9K3M4N5P6Q7R8S9W1F", "wifi", "hunter22")
+	r.bank = put("01JB2Z6V9K3M4N5P6Q7R8S9BAN", "bank", "s3cret")
 	r.h.Reset()
 	return r
+}
+
+// rule makes an agent share rule (an items.read grant) including items.
+func (r *rig) rule(t *testing.T, mode string, uses, perHour uint64, items ...string) string {
+	t.Helper()
+	id, _ := envelope.NewULID(t0.Add(time.Duration(len(r.it.incl)) * time.Millisecond))
+	sess := vault.NewSession(context.Background(), r.h, vault.PeerInfo{ID: "dev-app", Kind: vault.KindApp}, t0, nil)
+	ar, err := r.f.SetAgentRule(sess, &itemspec.AgentRule{ID: id, AgentID: agent, PerHour: perHour, PerDay: 1000, StatusTTL: 15 * time.Minute,
+		Terms: itemspec.Terms{Tags: []string{"agent ok"}, Match: "any", Access: "read", Mode: mode, Uses: uses, IncludeExisting: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.it.incl[ar.ID] = map[string]bool{}
+	for _, i := range items {
+		r.it.incl[ar.ID][i] = true
+	}
+	return ar.ID
 }
 
 func (r *rig) issue(t *testing.T, body string) (strictjson.Object, string) {
@@ -119,16 +185,15 @@ func TestAuthorization(t *testing.T) {
 func TestIssueValidation(t *testing.T) {
 	r := newRig(t)
 	for name, body := range map[string]string{
-		"unknown scope":          `{"agent_id":"dev-agent","scope":"secret.get"}`,
+		"unknown scope":          `{"agent_id":"dev-agent","scope":"secrets.get"}`,
+		"items.read by issue":    `{"agent_id":"dev-agent","scope":"items.read"}`,
 		"app-only type":          `{"agent_id":"dev-agent","scope":"device.pair.create"}`,
 		"settings":               `{"agent_id":"dev-agent","scope":"settings.set"}`,
 		"bad approval":           `{"agent_id":"dev-agent","scope":"profile.get","approval":"always"}`,
 		"connections on list":    `{"agent_id":"dev-agent","scope":"connection.list","connections":["01JB2Z6V9K3M4N5P6Q7R8S9T0V"]}`,
-		"secrets on messages":    `{"agent_id":"dev-agent","scope":"message.send","secrets":["01JB2Z6V9K3M4N5P6Q7R8S9T0V"]}`,
 		"empty connections":      `{"agent_id":"dev-agent","scope":"message.send","connections":[]}`,
-		"duplicate secret":       `{"agent_id":"dev-agent","scope":"secrets.use","secrets":["01JB2Z6V9K3M4N5P6Q7R8S9T0V","01JB2Z6V9K3M4N5P6Q7R8S9T0V"]}`,
+		"duplicate connection":   `{"agent_id":"dev-agent","scope":"message.send","connections":["01JB2Z6V9K3M4N5P6Q7R8S9T0V","01JB2Z6V9K3M4N5P6Q7R8S9T0V"]}`,
 		"limits on ask":          `{"agent_id":"dev-agent","scope":"profile.get","per_hour":5}`,
-		"auto get without list":  `{"agent_id":"dev-agent","scope":"secrets.get","approval":"auto"}`,
 		"per_hour too high":      `{"agent_id":"dev-agent","scope":"profile.get","approval":"auto","per_hour":3601}`,
 		"expired":                `{"agent_id":"dev-agent","scope":"profile.get","expires_at":"2026-10-03T11:00:00.000Z"}`,
 		"too far":                `{"agent_id":"dev-agent","scope":"profile.get","expires_at":"2027-10-04T12:00:00.000Z"}`,
@@ -349,73 +414,151 @@ func TestAuditSummaries(t *testing.T) {
 	}
 }
 
-// §10.11 agent.request: catalog, retrieval and use only of cataloged
-// secrets the grants name; never private ones.
+// §10.11 agent.request: catalog, retrieval and use only of the items the
+// agent's share rules include; reads allowed within the rule's limits.
 func TestAgentRequest(t *testing.T) {
 	r := newRig(t)
 	call := func(body string) featuretest.Result {
+		if d := r.decide(t0, "agent.request", body); d != vault.AgentAllow {
+			return featuretest.Result{Code: "forbidden"}
+		}
 		return featuretest.Call(r.f, r.h, t0, vault.KindAgent, "agent.request", body)
 	}
 	if res := call(`{"op":"catalog"}`); res.Code != "forbidden" {
-		t.Fatalf("catalog without a grant: %q", res.Code)
+		t.Fatalf("catalog without a rule: %q", res.Code)
 	}
-	r.issue(t, `{"agent_id":"dev-agent","scope":"secrets.catalog"}`)
+	gid := r.rule(t, Ask, 3, 60, r.wifi)
 	res := call(`{"op":"catalog"}`)
 	if !res.OK() || !strings.Contains(string(res.Body), r.wifi) || strings.Contains(string(res.Body), r.bank) ||
-		strings.Contains(string(res.Body), "hunter22") {
+		strings.Contains(string(res.Body), "hunter22") || strings.Contains(string(res.Body), "zz-tag") {
 		t.Fatalf("catalog: %s", res.Body)
 	}
-	_, gid := r.issue(t, `{"agent_id":"dev-agent","scope":"secrets.get","approval":"auto","secrets":["`+r.wifi+`","`+r.bank+`"]}`)
-	if res := call(`{"op":"secret.get","secret_id":"` + r.wifi + `"}`); !res.OK() || !strings.Contains(string(res.Body), `"value":"hunter22"`) {
-		t.Fatalf("secret.get: %s %s", res.Code, res.Body)
+	if res := call(`{"op":"item.get","item_id":"` + r.wifi + `","fields":["f1"]}`); !res.OK() || !strings.Contains(string(res.Body), `"value":"hunter22"`) ||
+		strings.Contains(string(res.Body), `"version"`) || strings.Contains(string(res.Body), "Oslo") {
+		t.Fatalf("item.get: %s %s", res.Code, res.Body)
 	}
-	if !r.h.HasActivity("leash.secret.read") {
+	if !r.h.HasActivity(KindRead) {
 		t.Fatal("read not recorded")
 	}
-	if res := call(`{"op":"secret.get","secret_id":"` + r.bank + `"}`); res.Code != "not_found" {
-		t.Fatalf("private secret: %q", res.Code)
+	// An item no rule includes is refused like an uncovered request.
+	if res := call(`{"op":"item.get","item_id":"` + r.bank + `"}`); res.Code != "forbidden" {
+		t.Fatalf("item outside the rule: %q", res.Code)
 	}
-	other, _ := envelope.NewULID(t0)
-	if res := call(`{"op":"secret.get","secret_id":"` + other + `"}`); res.Code != "forbidden" {
-		t.Fatalf("secret outside the grant: %q", res.Code)
-	}
-	if res := call(`{"op":"secret.use","secret_id":"` + r.wifi + `","action":"hmac-sha256","data":"aGk="}`); res.Code != "forbidden" {
-		t.Fatalf("use without a use grant: %q", res.Code)
-	}
-	r.issue(t, `{"agent_id":"dev-agent","scope":"secrets.use"}`)
-	res = call(`{"op":"secret.use","secret_id":"` + r.wifi + `","action":"hmac-sha256","data":"aGk="}`)
+	res = featuretest.Call(r.f, r.h, t0, vault.KindAgent, "agent.request", `{"op":"item.use","item_id":"`+r.wifi+`","field_id":"f1","action":"hmac-sha256","data":"aGk="}`)
 	mac := hmac.New(sha256.New, []byte("hunter22"))
 	mac.Write([]byte("hi"))
 	if !res.OK() || !strings.Contains(string(res.Body), base64.StdEncoding.EncodeToString(mac.Sum(nil))) || strings.Contains(string(res.Body), "hunter22") {
-		t.Fatalf("secret.use: %s %s", res.Code, res.Body)
+		t.Fatalf("item.use: %s %s", res.Code, res.Body)
+	}
+	if !r.h.HasActivity(KindUsed) {
+		t.Fatal("use not recorded")
+	}
+	// An address field cannot be used; an unknown field is not found.
+	if res := featuretest.Call(r.f, r.h, t0, vault.KindAgent, "agent.request", `{"op":"item.use","item_id":"`+r.wifi+`","field_id":"f2","action":"hmac-sha256","data":"aGk="}`); res.Code != "not_found" {
+		t.Fatalf("address use: %q", res.Code)
 	}
 	for name, body := range map[string]string{
 		"no op":        `{}`,
-		"bad id":       `{"op":"secret.get","secret_id":"x"}`,
-		"bad action":   `{"op":"secret.use","secret_id":"` + r.wifi + `","action":"sha1","data":"aGk="}`,
-		"empty data":   `{"op":"secret.use","secret_id":"` + r.wifi + `","action":"hmac-sha256","data":""}`,
-		"bad base64":   `{"op":"secret.use","secret_id":"` + r.wifi + `","action":"hmac-sha256","data":"!!"}`,
+		"old op":       `{"op":"secret.get","secret_id":"` + r.wifi + `"}`,
+		"bad id":       `{"op":"item.get","item_id":"x"}`,
+		"bad fields":   `{"op":"item.get","item_id":"` + r.wifi + `","fields":[]}`,
+		"no field":     `{"op":"item.use","item_id":"` + r.wifi + `","action":"hmac-sha256","data":"aGk="}`,
+		"bad action":   `{"op":"item.use","item_id":"` + r.wifi + `","field_id":"f1","action":"sha1","data":"aGk="}`,
+		"empty data":   `{"op":"item.use","item_id":"` + r.wifi + `","field_id":"f1","action":"hmac-sha256","data":""}`,
+		"bad base64":   `{"op":"item.use","item_id":"` + r.wifi + `","field_id":"f1","action":"hmac-sha256","data":"!!"}`,
 		"not a object": `[]`,
 	} {
-		if res := call(body); res.Code != "bad_request" {
+		if res := featuretest.Call(r.f, r.h, t0, vault.KindAgent, "agent.request", body); res.Code != "bad_request" {
 			t.Errorf("%s: %q", name, res.Code)
 		}
 	}
-	// A restricted catalog lists only what the grants name.
-	r2 := newRig(t)
-	r2.issue(t, `{"agent_id":"dev-agent","scope":"secrets.catalog","secrets":["`+other+`"]}`)
-	if res := featuretest.Call(r2.f, r2.h, t0, vault.KindAgent, "agent.request", `{"op":"catalog"}`); !res.OK() || string(res.Body) != `{"secrets":[]}` {
-		t.Fatalf("restricted catalog: %s", res.Body)
+	// uses = 3: one get, one use, one more get; then not covered.
+	if res := featuretest.Call(r.f, r.h, t0, vault.KindAgent, "agent.request", `{"op":"item.get","item_id":"`+r.wifi+`"}`); !res.OK() {
+		t.Fatalf("third use: %q", res.Code)
 	}
-	// Revocation stops it at once.
+	if d := r.decide(t0.Add(time.Hour), "agent.request", `{"op":"item.get","item_id":"`+r.wifi+`"}`); d != vault.AgentDeny {
+		t.Fatalf("uses exhausted: %v", d)
+	}
+	// Revocation through LEASH deletes the rule at once.
 	if res := featuretest.Call(r.f, r.h, t0, vault.KindDesktop, "leash.grant.revoke", `{"grant_id":"`+gid+`"}`); !res.OK() {
 		t.Fatal(res.Code)
 	}
-	if res := call(`{"op":"secret.get","secret_id":"` + r.wifi + `"}`); res.Code != "forbidden" {
-		t.Fatalf("after revoke: %q", res.Code)
+	if len(r.f.AgentRules(t0)) != 0 {
+		t.Fatal("rule after revoke")
 	}
-	if res := featuretest.Call(r.f, r.h, t0, vault.KindApp, "leash.grant.revoke", `{"grant_id":"`+gid+`"}`); res.Code != "not_found" {
-		t.Fatalf("revoke twice: %q", res.Code)
+}
+
+// §10.11: an agent's share rule is an items.read grant: signed (unlock
+// window), delivered to the agent with its tags, replaced by version,
+// rate limits on reads (past them referred).
+func TestAgentRules(t *testing.T) {
+	r := newRig(t)
+	sess := vault.NewSession(context.Background(), r.h, vault.PeerInfo{ID: "dev-app", Kind: vault.KindApp}, t0, nil)
+	id, _ := envelope.NewULID(t0)
+	spec := &itemspec.AgentRule{ID: id, AgentID: agent, PerHour: 2, PerDay: 10, StatusTTL: time.Minute,
+		Terms: itemspec.Terms{Tags: []string{"agent ok", "work"}, Match: "all", Access: "read", Mode: Auto, Uses: 5}}
+	r.w.open = false
+	if _, err := r.f.SetAgentRule(sess, spec); err == nil || err.(*vault.HandlerError).Code != "credential_locked" {
+		t.Fatalf("outside the window: %v", err)
+	}
+	r.w.open = true
+	bad := *spec
+	bad.AgentID = "dev-desktop"
+	if _, err := r.f.SetAgentRule(sess, &bad); err == nil {
+		t.Fatal("a rule for a desktop")
+	}
+	ar, err := r.f.SetAgentRule(sess, spec)
+	if err != nil || ar.Version != 1 {
+		t.Fatal(err)
+	}
+	d, err := leashwire.Verify(r.w.key.Public().(ed25519.PublicKey), ar.Delegation, ar.DelegationSig, t0)
+	if err != nil || d.Scope != ScopeItems || strings.Join(d.Tags, ",") != "agent ok,work" || d.Match != "all" || d.Uses != 5 ||
+		d.PerHour != 2 || d.PerDay != 10 || d.Approval != Auto || d.Connections != nil {
+		t.Fatalf("delegation: %+v %v", d, err)
+	}
+	up := r.h.SentOfType("leash.grant.updated")
+	if len(up) != 1 || !strings.Contains(string(up[0].Body), `"scope":"items.read"`) || !strings.Contains(string(up[0].Body), `"tags":["agent ok","work"]`) {
+		t.Fatalf("agent told: %+v", up)
+	}
+	// Replacement: version checked, signed again.
+	if _, err := r.f.SetAgentRule(sess, spec); err == nil {
+		t.Fatal("version 0 again")
+	}
+	spec.Version = 1
+	spec.Terms.Mode = Ask
+	ar, err = r.f.SetAgentRule(sess, spec)
+	if err != nil || ar.Version != 2 {
+		t.Fatalf("replace: %v", err)
+	}
+	stale := *spec
+	if _, err := r.f.SetAgentRule(sess, &stale); err == nil || err.(*vault.HandlerError).Code != "conflict" {
+		t.Fatalf("stale: %v", err)
+	}
+	// Reads of an included item are allowed whatever the mode (inclusion
+	// was the member's decision), within per_hour; then referred.
+	r.it.incl[id] = map[string]bool{r.wifi: true}
+	body := `{"op":"item.get","item_id":"` + r.wifi + `"}`
+	for i := 0; i < 2; i++ {
+		if d := r.decide(t0.Add(time.Duration(i)*time.Second), "agent.request", body); d != vault.AgentAllow {
+			t.Fatalf("read %d: %v", i, d)
+		}
+	}
+	if d := r.decide(t0.Add(3*time.Second), "agent.request", body); d != vault.AgentAsk {
+		t.Fatalf("past per_hour: %v", d)
+	}
+	from, _ := r.h.Device(agent)
+	if !r.f.AgentCovered(vault.NewSession(context.Background(), r.h, from, t0, nil), "agent.request", json.RawMessage(body)) {
+		t.Fatal("not covered on approval")
+	}
+	// Listed among the agent's grants and the owner's.
+	if res := featuretest.Call(r.f, r.h, t0, vault.KindAgent, "leash.grant.list", `{}`); !res.OK() || !strings.Contains(string(res.Body), id) {
+		t.Fatalf("agent list: %s", res.Body)
+	}
+	if !r.f.DeleteAgentRule(sess, id) || r.f.DeleteAgentRule(sess, id) {
+		t.Fatal("delete")
+	}
+	if d := r.decide(t0.Add(time.Hour), "agent.request", body); d != vault.AgentDeny {
+		t.Fatal("covered after delete")
 	}
 }
 
@@ -454,7 +597,7 @@ func TestReplaceListNotify(t *testing.T) {
 	if res := featuretest.Call(r.f, r.h, t0, vault.KindApp, "leash.grant.list", `{}`); !res.OK() || strings.Count(string(res.Body), "grant_id") != 2 {
 		t.Fatalf("full list: %s", res.Body)
 	}
-	g2 := New(r.w, r.sec)
+	g2 := New(r.w, r.it)
 	featuretest.RoundTrip(t, r.f, g2)
 	if len(g2.Grants()) != 2 {
 		t.Fatal("grants lost in a flush")
@@ -467,7 +610,7 @@ func TestReplaceListNotify(t *testing.T) {
 func TestSignedDelegation(t *testing.T) {
 	r := newRig(t)
 	r.w.open = false
-	body := `{"agent_id":"dev-agent","scope":"secrets.catalog","expires_at":"2026-12-01T00:00:00.000Z"}`
+	body := `{"agent_id":"dev-agent","scope":"connection.list","expires_at":"2026-12-01T00:00:00.000Z"}`
 	if res := featuretest.Call(r.f, r.h, t0, vault.KindApp, "leash.grant.issue", body); res.Code != "credential_locked" {
 		t.Fatalf("outside the window: %q", res.Code)
 	}
@@ -504,7 +647,7 @@ func TestSignedDelegation(t *testing.T) {
 		t.Fatalf("exp without a grant expiry: %s", stmt)
 	}
 	// A replacement is signed again, under its new version.
-	o, _ = r.issue(t, `{"agent_id":"dev-agent","grant_id":"`+gid+`","version":1,"scope":"secrets.catalog"}`)
+	o, _ = r.issue(t, `{"agent_id":"dev-agent","grant_id":"`+gid+`","version":1,"scope":"connection.list"}`)
 	stmt, _ = o.Base64("delegation", -1)
 	sig, _ = o.Base64("delegation_sig", 64)
 	if d, err := leashwire.Verify(key, stmt, sig, t0); err != nil || d.Version != 2 {
@@ -580,7 +723,8 @@ func TestExpiry(t *testing.T) {
 }
 
 func FuzzParseSpec(f *testing.F) {
-	f.Add([]byte(`{"scope":"secrets.get","approval":"auto","secrets":["01JB2Z6V9K3M4N5P6Q7R8S9T0V"],"per_hour":5,"expires_at":"2026-10-04T00:00:00.000Z"}`))
+	f.Add([]byte(`{"scope":"profile.get","approval":"auto","per_hour":5,"expires_at":"2026-10-04T00:00:00.000Z"}`))
+	f.Add([]byte(`{"scope":"items.read","approval":"auto"}`))
 	f.Add([]byte(`{"scope":"message.send","connections":["01JB2Z6V9K3M4N5P6Q7R8S9T0V"],"sign":true}`))
 	f.Fuzz(func(t *testing.T, b []byte) {
 		o, err := strictjson.ParseObject(b)
@@ -598,7 +742,7 @@ func FuzzParseSpec(f *testing.F) {
 }
 
 func FuzzParseInitialGrants(f *testing.F) {
-	f.Add([]byte(`[{"scope":"profile.get"},{"scope":"secrets.catalog","approval":"auto"}]`))
+	f.Add([]byte(`[{"scope":"profile.get"},{"scope":"connection.list","approval":"auto"}]`))
 	f.Fuzz(func(t *testing.T, b []byte) {
 		sps, err := ParseInitialGrants(json.RawMessage(b), t0)
 		if err == nil && (len(sps) == 0 || len(sps) > MaxGrants) {
@@ -609,7 +753,8 @@ func FuzzParseInitialGrants(f *testing.F) {
 
 func FuzzParseRequest(f *testing.F) {
 	f.Add([]byte(`{"op":"catalog"}`))
-	f.Add([]byte(`{"op":"secret.use","secret_id":"01JB2Z6V9K3M4N5P6Q7R8S9T0V","action":"hmac-sha256","data":"aGk="}`))
+	f.Add([]byte(`{"op":"item.use","item_id":"01JB2Z6V9K3M4N5P6Q7R8S9T0V","field_id":"f1","action":"hmac-sha256","data":"aGk="}`))
+	f.Add([]byte(`{"op":"item.get","item_id":"01JB2Z6V9K3M4N5P6Q7R8S9T0V","fields":["f1","f2"]}`))
 	f.Fuzz(func(t *testing.T, b []byte) {
 		r, err := ParseRequest(b)
 		if err == nil && opScope[r.Op] == "" {

@@ -353,3 +353,129 @@ revocation-status Lambda, which needed the parent and public tables.
 - Location, wallet and presence (the rest of V4).
 - The runtime still does not route V↔V responses to features: every
   batch-3 flow between vaults uses events (§10).
+
+## V4 items: items, tags and share rules (0.7.0)
+
+Follows VAULT-MESSAGING 0.7.0 (§10.7, §10.8, §10.12, with §3.5.2,
+§3.5.4, §6.8, §10.1, §10.6, §10.9, §10.11, §10.13, §10.14, §13.5), which
+specifies the approved design note VAULT-ITEMS (owner decisions of
+2026-10-03: sensitivity per item; one tag namespace with sharing by share
+rules; the profile is the `@profile` tag plus a name and photo; files
+later; agents default to `ask`; share rules default to `ask`). No
+production data exists, so nothing is migrated: the replaced features
+are removed.
+
+### Layout
+
+- `features/itemspec` (new, no state): field kinds and value checks with
+  canonical encodings, tag normalisation, share-rule terms and matching,
+  the item's encodings (with and without values, shared content,
+  metadata for connections and agents). Shared by every feature below so
+  that they parse and encode items the same way; fuzzed.
+- `features/items` (new): items, the tag registry, the profile and share
+  rules (connection rules kept here; agent rules kept by leash), the
+  inclusion state per rule and item (pending, included, declined), and
+  the plan/apply machinery: every change (item, tags, sensitivity, rule,
+  merge) is planned against every rule, checked against the limits
+  (pending, given grants, profile), then applied (grants issued or
+  revoked, `share.pending`, `data.shared` via grants), so a refused
+  change has no side effects. Critical items are credential operations
+  through `credential.Feature.Operate`; their metadata is here, their
+  values in the credential.
+- `features/credential`: `credential.secret.*` and the catalog flag are
+  gone; the plaintext holds `items` (values only); `Operate` performs
+  another feature's credential operation (UTK, password, check, op, CEK
+  rotation) and returns `{credential, credential_version, utks}`
+  members; `DeleteObserver` (a credential delete takes the critical
+  items).
+- `features/grants`: items instead of fields and secrets
+  (`{kind: item, ref, fields?}`, requests by `category`), descriptors,
+  rule grants (`IssueRuleGrants`, `RevokeRuleGrant`, `data.shared`),
+  uncounted uses and no expiry for rule grants, per-connection catalogs.
+- `features/leash`: the `secrets.*` scopes are replaced by `items.read`
+  grants, which are the agents' share rules (`SetAgentRule`,
+  `DeleteAgentRule`, `AgentRules` for the items feature); `agent.request`
+  `catalog`, `item.get`, `item.use` through the items feature.
+- `features/critical`: `item_id` + `field_id`; usable only through a
+  rule (`items.Feature.UsableField`); each use through `Operate`.
+- `features/actions`: catalog version 2, `items.share`.
+- Runtime: `vault.AppOnlyForms`: a step-up type's app-only form (a
+  critical item, an agent rule) is refused to a desktop at once instead
+  of being held for an approval it could not pass.
+- Removed: `features/secrets`, `features/profile`.
+- `client` and `vaultctl`: `item`, `tag`, `share` commands; the critical
+  forms through the credential (`ItemPutCritical`, `ItemRevealCritical`,
+  ...); grants by item and category; agent requests by item.
+- `docs/item-templates.json`: the recommended categories and templates
+  the apps share (templates are not in the vault); checked by
+  `itemspec.TestTemplateRegistry`.
+
+Lock order: the items feature calls the credential, grants and leash
+features with its lock held; none of them calls back from those calls.
+They call into the items feature (`Readable`, `Content`, `Usable*`,
+`Agent*`) only from their own handlers, and those entry points call
+nothing outside. Leash passes the agent's rules to the items feature
+instead of the items feature asking leash, so no call path re-enters a
+feature.
+
+### Replaced
+
+| 0.6.0 | 0.7.0 | Why |
+|---|---|---|
+| `secret.put/get/list/delete` | `item.put/get/reveal/list/delete` for `data` and `secret` items; `item.list` filters by tags, category, sensitivity and is paged | One model (VAULT-ITEMS) |
+| `credential.secret.add/get/list/delete` | `item.*` with `sensitivity: critical`: credential, UTK-sealed content and item id, reply-key sealing, as before | Same protections; one model |
+| `credential.secret.catalog`, `discoverability` | Share rules and per-connection catalogs | Sharing by tags; each connection sees only what it is given |
+| Profile fields, `shared`, `order` | Items tagged `@profile`; `profile.get/set` keep the name and photo | Owner decision 3 |
+| Grant items `{kind: field \| secret}` | `{kind: item, ref, fields?}`; requests by category | One model |
+| LEASH `secrets.catalog/get/use`, `secrets` restriction | Agent share rules (`items.read`), signed with the rule in the delegation | VAULT-ITEMS §6 |
+| `profile.fields.read`, `secrets.share` (catalog v1) | `items.share` (catalog v2) | Both act on items now and would be the same |
+| — | `tag.list/set/delete/merge`, `share.rule.set/list/delete`, `share.pending`, `share.decide`, `data.shared`, `item.tag`, `item.sensitivity`, `item.reveal` | New |
+
+### Deviations from the design note
+
+- `item.reveal` is a type of its own: `item.get` never returns `secret`
+  or `critical` values ("values revealed on purpose"), and desktops are
+  held only for the reveal, not for reading data items.
+- `item.tag` and `item.sensitivity` are types of their own: tags change
+  without the password for every sensitivity, and moving to or from
+  critical is a credential operation the vault does without values
+  crossing the session.
+- Field ids are assigned by the vault from a counter and never reused, so
+  a grant restricted to a field never comes to cover another one.
+- `@profile` is allowed only on `data` items (a `secret` item pushed to
+  every connection would not be secret).
+- `access` has the one value `read`; a connection rule that matches a
+  critical item makes it usable (§10.13), never readable; an agent rule
+  never includes it.
+- `tag.delete` of a tag a rule names, and `tag.merge` touching an agent
+  rule, are refused (`in_use`): removing a tag from an `all` rule would
+  widen it, and an agent rule's tags are signed.
+- Critical items are envelope-encrypted (owner decision 2026-10-03,
+  replacing values inside the credential): values in DEK state under a
+  per-item XChaCha20-Poly1305 key; the credential holds only the keys
+  (`{item_id, gen, key}`), so up to 1,000 critical items of up to 12 KiB
+  fit (the old bound was about fifteen). Item keys rotate at every use of
+  the item and for every item at `credential.rotate` and
+  `credential.recover` (`credential.ItemRekeyer`); new ciphertexts are
+  installed only after the credential is sealed, in the same flush.
+- Lists that could outgrow a message are paged or bounded (`item.list`,
+  `tag.list`, `share.rule.list`, previews, `share.pending`,
+  `data.shared`, `data.catalog`).
+
+### OWNER DECISIONS (2026-10-03)
+
+1. Agent `ask`/`auto` decide inclusion (as for connections); reads of an
+   included item are allowed within the rule's `per_hour`/`per_day`,
+   then referred (§10.11). Agreed.
+2. An agent's delegation carries its rule's tag names (§10.11). Agreed.
+3. Envelope encryption for critical items (§10.7), resolving the
+   capacity bound (§15 follow-up 9). Approved and done; item keys rotate
+   at every use of the item (recommended: a key once obtained stops
+   working at the item's next use) and for all items at
+   `credential.rotate`.
+
+### Not in this batch
+
+- Files in items (`file` kind reserved; owner decision 4).
+- Paging of `grant.list` (§15 follow-up 10).
+- ANDROID-PLAN's screens (the note's step 4).

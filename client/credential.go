@@ -16,8 +16,8 @@ import (
 // The Protean Credential from the app's side (VAULT-MESSAGING §3.5): the
 // app keeps the latest blob and a pool of UTKs; every operation seals its
 // critical payload to a fresh UTK, stores the new blob the vault returns
-// (the CEK rotated) and confirms it; secret values come back sealed to a
-// one-time reply key.
+// (the CEK rotated) and confirms it; critical values come back sealed to
+// a one-time reply key.
 
 // CredentialCopy is an app's copy of the Protean Credential.
 type CredentialCopy struct {
@@ -74,7 +74,13 @@ func (d *Device) keep(ctx context.Context, o strictjson.Object) error {
 	if err != nil {
 		return ErrProtocol
 	}
-	v, err := o.Uint("version", 1, strictjson.MaxSafeInteger)
+	// Item operations carry the item's version as `version` and the
+	// credential's as `credential_version` (§10.6).
+	vk := "version"
+	if o.Has("credential_version") {
+		vk = "credential_version"
+	}
+	v, err := o.Uint(vk, 1, strictjson.MaxSafeInteger)
 	if err != nil {
 		return ErrProtocol
 	}
@@ -120,13 +126,13 @@ func (d *Device) sealedOp(ctx context.Context, typ string, withBlob bool, payloa
 	d.mu.Lock()
 	d.lastUTK = u
 	d.mu.Unlock()
-	return d.sealedWith(ctx, typ, u, nil, withBlob, payload, reply)
+	return d.sealedWith(ctx, typ, u, nil, withBlob, payload, reply, nil)
 }
 
 // CredentialRaw sends a credential operation with an explicit UTK and
 // blob (nil: none). It exists for tests of UTK reuse and stale blobs.
 func (d *Device) CredentialRaw(ctx context.Context, typ string, u UTK, blob []byte, payload map[string]any) (strictjson.Object, error) {
-	o, _, _, err := d.sealedWith(ctx, typ, u, blob, blob != nil, payload, false)
+	o, _, _, err := d.sealedWith(ctx, typ, u, blob, blob != nil, payload, false, nil)
 	return o, err
 }
 
@@ -137,7 +143,10 @@ func (d *Device) LastUTK() UTK {
 	return d.lastUTK
 }
 
-func (d *Device) sealedWith(ctx context.Context, typ string, u UTK, blob []byte, withBlob bool, payload map[string]any, reply bool) (strictjson.Object, *suite.PrivateKey, string, error) {
+// sealedWith sends typ with the payload sealed to u, the blob, and extra
+// outer members (an item operation's item_id, version, tags, ...).
+func (d *Device) sealedWith(ctx context.Context, typ string, u UTK, blob []byte, withBlob bool, payload map[string]any, reply bool,
+	extra map[string]any) (strictjson.Object, *suite.PrivateKey, string, error) {
 	var err error
 	var rk *suite.PrivateKey
 	if reply {
@@ -163,7 +172,11 @@ func (d *Device) sealedWith(ctx context.Context, typ string, u UTK, blob []byte,
 	if err != nil {
 		return nil, nil, "", err
 	}
-	body := map[string]any{"utk_id": u.ID, "sealed": base64.StdEncoding.EncodeToString(sealed)}
+	body := map[string]any{}
+	for k, v := range extra {
+		body[k] = v
+	}
+	body["utk_id"], body["sealed"] = u.ID, base64.StdEncoding.EncodeToString(sealed)
 	switch {
 	case blob != nil:
 		body["credential"] = base64.StdEncoding.EncodeToString(blob)
@@ -198,10 +211,25 @@ func (d *Device) sealedWith(ctx context.Context, typ string, u UTK, blob []byte,
 // credOp is sealedOp with the blob; on stale_credential it fetches the
 // latest blob once and retries (§3.5.3).
 func (d *Device) credOp(ctx context.Context, typ string, payload func() map[string]any, reply bool) (strictjson.Object, *suite.PrivateKey, string, error) {
-	o, rk, id, err := d.sealedOp(ctx, typ, true, payload(), reply)
+	return d.credOpWith(ctx, typ, nil, payload, reply)
+}
+
+// credOpWith is credOp with extra outer members.
+func (d *Device) credOpWith(ctx context.Context, typ string, extra map[string]any, payload func() map[string]any, reply bool) (strictjson.Object, *suite.PrivateKey, string, error) {
+	op := func() (strictjson.Object, *suite.PrivateKey, string, error) {
+		u, err := d.takeUTK(ctx)
+		if err != nil {
+			return nil, nil, "", err
+		}
+		d.mu.Lock()
+		d.lastUTK = u
+		d.mu.Unlock()
+		return d.sealedWith(ctx, typ, u, nil, true, payload(), reply, extra)
+	}
+	o, rk, id, err := op()
 	if Code(err) == "stale_credential" {
 		if ferr := d.CredentialFetch(ctx); ferr == nil {
-			return d.sealedOp(ctx, typ, true, payload(), reply)
+			return op()
 		}
 	}
 	return o, rk, id, err
@@ -265,51 +293,6 @@ func (d *Device) CredentialDelete(ctx context.Context, password string) error {
 	d.st.Credential, d.st.UTKs = nil, nil
 	d.mu.Unlock()
 	return nil
-}
-
-// CriticalSecretAdd adds a critical secret and returns its id.
-func (d *Device) CriticalSecretAdd(ctx context.Context, password, name, category, description string, value []byte) (string, error) {
-	o, _, _, err := d.credOp(ctx, "credential.secret.add", func() map[string]any {
-		p := map[string]any{"password": password, "name": name, "category": category, "value": base64.StdEncoding.EncodeToString(value)}
-		if description != "" {
-			p["description"] = description
-		}
-		return p
-	}, false)
-	if err != nil {
-		return "", err
-	}
-	return o.String("secret_id")
-}
-
-// CriticalSecretGet reads a critical secret's value, sealed to a one-time
-// reply key (§3.5.4).
-func (d *Device) CriticalSecretGet(ctx context.Context, password, id string) ([]byte, error) {
-	o, rk, rid, err := d.credOp(ctx, "credential.secret.get", func() map[string]any {
-		return map[string]any{"password": password, "secret_id": id}
-	}, true)
-	if err != nil {
-		return nil, err
-	}
-	defer rk.Destroy()
-	sv, err := o.Base64("value_sealed", -1)
-	if err != nil {
-		return nil, ErrProtocol
-	}
-	return credwire.OpenValue(rk, d.VaultID(), rid, sv)
-}
-
-// CriticalSecretList lists the critical secrets' metadata.
-func (d *Device) CriticalSecretList(ctx context.Context) (strictjson.Object, error) {
-	return d.Op(ctx, "credential.secret.list", nil)
-}
-
-// CriticalSecretDelete deletes a critical secret.
-func (d *Device) CriticalSecretDelete(ctx context.Context, password, id string) error {
-	_, _, _, err := d.credOp(ctx, "credential.secret.delete", func() map[string]any {
-		return map[string]any{"password": password, "secret_id": id}
-	}, false)
-	return err
 }
 
 // CredentialRecover authenticates a recovering app with the credential

@@ -1,12 +1,15 @@
-// Package grants is 1:1 sharing between connections (VAULT-MESSAGING
-// §10.12): a connection asks for profile fields or cataloged vault-held
-// secrets, the member decides, and the connection fetches the current
-// value at most `uses` times until the grant expires or either side
-// revokes it. Every fetch is checked by the member's vault and answered
-// with the value sealed to a one-time key of the device that fetched, so
-// the asking vault never holds the plaintext. The catalog lists the
-// member's cataloged secrets (metadata only), including cataloged critical
-// secrets, which can only be used (§10.13), never granted.
+// Package grants is 1:1 sharing of items between connections
+// (VAULT-MESSAGING §10.12): a grant lets one connection read one item
+// (or some of its fields) at most `uses` times until it expires or either
+// side revokes it. Grants come from share rules (the items feature issues
+// them for included items and the connection is told with data.shared),
+// from one-off requests the member decides (by item, or by category for
+// the member to answer), and from shared actions (§10.14). Every fetch is
+// checked by the member's vault and answered with the item's content
+// sealed to a one-time key of the device that fetched, so the asking vault
+// never holds the plaintext. Each connection's catalog lists only what
+// the member made visible to it: its grants and the critical items its
+// rules make usable (§10.13), never tags or rules.
 //
 // Ported from vettid.dev's grant_handler.go (reference-based data
 // requests, forVault.data.* peer events): the peer flows are events inside
@@ -23,9 +26,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/vettid/vettid-vault/features/credential"
-	"github.com/vettid/vettid-vault/features/profile"
-	"github.com/vettid/vettid-vault/features/secrets"
+	"github.com/vettid/vettid-vault/features/itemspec"
 	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vms/envelope"
@@ -50,6 +51,15 @@ const (
 	MaxFetches        = 64
 	FetchTTL          = 10 * time.Minute
 	MaxCatalog        = 1000
+	// MaxCatalogBytes bounds a data.catalog body (§10.12).
+	MaxCatalogBytes = 131072
+	// MaxShared bounds the descriptors of one data.shared, and
+	// MaxSharedBytes its encoding.
+	MaxShared      = 64
+	MaxSharedBytes = 131072
+	// MaxFetched bounds the fetch ids a grant remembers (a rule grant
+	// without a use limit is fetched many times).
+	MaxFetched = 64
 	// Ended grants and decided requests are kept this long for listings
 	// and for answering `revoked` (§10.12).
 	EndedRetention = 30 * 24 * time.Hour
@@ -57,10 +67,11 @@ const (
 	MaxRequested = 1000
 )
 
-// Item kinds.
+// Item kinds: an item (by id), or a category for the member to answer
+// (requests only).
 const (
-	KindField  = "field"
-	KindSecret = "secret"
+	KindItem     = "item"
+	KindCategory = "category"
 )
 
 // Grant states.
@@ -82,45 +93,52 @@ const (
 
 var valueErrors = map[string]bool{ErrNotFound: true, ErrRevoked: true, ErrExpired: true, ErrExhausted: true, ErrUnavailable: true}
 
-// FieldSource is the profile (§10.8).
-type FieldSource interface {
-	FieldValue(key string) (string, bool)
+// ItemSource is the items feature (§10.7, §10.12). Its methods are
+// called with this feature's lock held and must not call back.
+type ItemSource interface {
+	// Readable returns a data or secret item's metadata restricted to
+	// fields (nil: all); ok is false otherwise.
+	Readable(itemID string, fields []string) (itemspec.Meta, bool)
+	// Content returns a readable item's shareable content.
+	Content(itemID string, fields []string) ([]byte, bool)
+	// HasCategory reports whether a data or secret item of category exists.
+	HasCategory(category string) bool
+	// Usable lists the critical items share rules make usable to conn.
+	Usable(conn string, now time.Time) []itemspec.Meta
 }
 
-// SecretSource is the vault-held secrets (§10.7).
-type SecretSource interface {
-	Catalog() []secrets.CatalogEntry
-	CatalogedValue(id string) (name, value string, ok bool)
-}
-
-// CriticalCatalog is the credential's catalog of critical secrets (§10.13).
-type CriticalCatalog interface {
-	CatalogedSecrets() []credential.Meta
-}
-
-// Item is one requested item.
+// Item is one requested or granted item: {kind: "item", ref: item_id,
+// fields?} or, in a request, {kind: "category", ref: category}.
 type Item struct {
-	Kind  string `json:"kind"`
-	Ref   string `json:"ref"`
-	Label string `json:"label,omitempty"`
+	Kind   string   `json:"kind"`
+	Ref    string   `json:"ref"`
+	Fields []string `json:"fields,omitempty"`
+	Label  string   `json:"label,omitempty"`
 }
 
 // Grant is a grant given (the member's side) or received (the asking
 // side's mirror).
 type Grant struct {
-	ID        string    `json:"id"`
-	Conn      string    `json:"conn"`
-	Direction string    `json:"direction"` // "given" or "received"
-	RequestID string    `json:"request_id"`
-	Kind      string    `json:"kind"`
-	Ref       string    `json:"ref"`
-	Label     string    `json:"label,omitempty"`
-	Uses      uint64    `json:"uses"`
-	Used      uint64    `json:"used"`
-	Expires   time.Time `json:"expires"`
-	State     string    `json:"state"`
-	Created   time.Time `json:"created"`
-	Ended     time.Time `json:"ended,omitempty"`
+	ID        string           `json:"id"`
+	Conn      string           `json:"conn"`
+	Direction string           `json:"direction"` // "given" or "received"
+	RequestID string           `json:"request_id"`
+	Kind      string           `json:"kind"`
+	Ref       string           `json:"ref"`
+	Fields    []string         `json:"fields,omitempty"`
+	Label     string           `json:"label,omitempty"`
+	RuleID    string           `json:"rule_id,omitempty"`
+	Name      string           `json:"name"`
+	Category  string           `json:"category"`
+	Labels    []itemspec.Label `json:"labels,omitempty"` // received side: the granted fields' labels
+	// Uses is 0 for a rule grant without a limit; Expires is zero for one
+	// without an expiry.
+	Uses    uint64    `json:"uses"`
+	Used    uint64    `json:"used"`
+	Expires time.Time `json:"expires"`
+	State   string    `json:"state"`
+	Created time.Time `json:"created"`
+	Ended   time.Time `json:"ended,omitempty"`
 	// Fetched are the fetch ids answered (given side): a repeated fetch is
 	// answered again without counting a use.
 	Fetched []string `json:"fetched,omitempty"`
@@ -189,16 +207,14 @@ func (d *data) init() {
 
 // Feature implements vault.Feature and vault.ConnectionRemovedObserver.
 type Feature struct {
-	mu      sync.Mutex
-	fields  FieldSource
-	secrets SecretSource
-	crit    CriticalCatalog
-	d       data
+	mu    sync.Mutex
+	items ItemSource
+	d     data
 }
 
-// New returns the feature.
-func New(fields FieldSource, src SecretSource, crit CriticalCatalog) *Feature {
-	f := &Feature{fields: fields, secrets: src, crit: crit}
+// New returns the feature; items is the items feature.
+func New(items ItemSource) *Feature {
+	f := &Feature{items: items}
 	f.d.init()
 	return f
 }
@@ -219,7 +235,7 @@ func (f *Feature) Types() []vault.TypeSpec {
 	decide.DesktopApproval = true // it discloses data to a connection (§6.8)
 	return []vault.TypeSpec{
 		r("grant.request"), decide, r("grant.revoke"), r("grant.list"), r("grant.fetch"), r("grant.catalog"),
-		e("data.request"), e("data.decided"), e("data.revoked"), e("data.fetch"), e("data.value"),
+		e("data.request"), e("data.decided"), e("data.shared"), e("data.revoked"), e("data.fetch"), e("data.value"),
 		e("data.catalog.get"), e("data.catalog"),
 	}
 }
@@ -253,6 +269,25 @@ var (
 
 // --- parsing ---
 
+// fieldList parses an optional list of 1–64 distinct field ids.
+func fieldList(o strictjson.Object, name string) ([]string, error) {
+	arr, present, err := o.OptArray(name)
+	if err != nil || present && (len(arr) == 0 || len(arr) > itemspec.MaxFields) {
+		return nil, errBad
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, r := range arr {
+		v, err := strictjson.AsString(r)
+		if err != nil || !itemspec.ValidFieldID(v) || seen[v] {
+			return nil, errBad
+		}
+		seen[v] = true
+		out = append(out, v)
+	}
+	return out, nil
+}
+
 func parseItems(o strictjson.Object) ([]Item, error) {
 	arr, err := o.Array("items")
 	if err != nil || len(arr) == 0 || len(arr) > MaxItems {
@@ -272,19 +307,22 @@ func parseItems(o strictjson.Object) ([]Item, error) {
 			return nil, errBad
 		}
 		switch it.Kind {
-		case KindField:
-			if !profile.ValidKey(it.Ref) {
+		case KindItem:
+			if !envelope.ValidULID(it.Ref) {
 				return nil, errBad
 			}
-		case KindSecret:
-			if !envelope.ValidULID(it.Ref) {
+			if it.Fields, err = fieldList(io, "fields"); err != nil {
+				return nil, err
+			}
+		case KindCategory:
+			if !itemspec.ValidCategory(it.Ref) || io.Has("fields") {
 				return nil, errBad
 			}
 		default:
 			return nil, errBad
 		}
 		l, _, err := io.OptString("label")
-		if err != nil || len(l) > MaxLabel {
+		if err != nil || !itemspec.ValidText(l, MaxLabel) {
 			return nil, errBad
 		}
 		it.Label = l
@@ -387,6 +425,9 @@ type Decision struct {
 	RequestID string
 	Approve   bool
 	Items     []int // nil: all
+	// Answers name the member's item for a request entry (a category
+	// entry needs one), by index.
+	Answers   map[int]Item
 	Uses      uint64
 	ExpiresIn uint64
 }
@@ -422,6 +463,34 @@ func ParseDecide(body []byte) (*Decision, error) {
 			d.Items = append(d.Items, int(v))
 		}
 	}
+	ans, ok, err := o.OptArray("answers")
+	if err != nil || ok && (len(ans) == 0 || len(ans) > MaxItems) {
+		return nil, errBad
+	}
+	for _, raw := range ans {
+		ao, err := strictjson.AsObject(raw)
+		if err != nil {
+			return nil, errBad
+		}
+		idx, err := ao.Uint("index", 0, MaxItems-1)
+		if err != nil {
+			return nil, errBad
+		}
+		if d.Answers == nil {
+			d.Answers = map[int]Item{}
+		}
+		if _, dup := d.Answers[int(idx)]; dup {
+			return nil, errBad
+		}
+		it := Item{Kind: KindItem}
+		if it.Ref, err = ulid(ao, "item_id"); err != nil {
+			return nil, err
+		}
+		if it.Fields, err = fieldList(ao, "fields"); err != nil {
+			return nil, err
+		}
+		d.Answers[int(idx)] = it
+	}
 	if d.Uses, _, err = o.OptUint("uses", 1, MaxUses); err != nil {
 		return nil, errBad
 	}
@@ -431,11 +500,139 @@ func ParseDecide(body []byte) (*Decision, error) {
 	return d, nil
 }
 
+// Descriptor is a grant as it travels between the vaults (§10.12): the
+// item's name, category and the granted fields' labels, never its tags,
+// sensitivity or values.
+type Descriptor struct {
+	GrantID string
+	Ref     string
+	Fields  []string
+	Label   string
+	RuleID  string
+	Meta    itemspec.Meta
+	Uses    uint64    // 0: not counted (a rule grant)
+	Expires time.Time // zero: none (a rule grant)
+}
+
+// JSON encodes a descriptor.
+func (d *Descriptor) JSON() []byte {
+	b := strictjson.NewBuilder().String("grant_id", d.GrantID).String("kind", KindItem).String("ref", d.Ref)
+	if d.Fields != nil {
+		b.Raw("fields", itemspec.StrList(d.Fields))
+	}
+	if d.Label != "" {
+		b.String("label", d.Label)
+	}
+	if d.RuleID != "" {
+		b.String("rule_id", d.RuleID)
+	}
+	b.String("name", d.Meta.Name).String("category", d.Meta.Category).Raw("labels", itemspec.LabelsJSON(d.Meta.Labels))
+	if d.Uses > 0 {
+		b.Uint("uses", d.Uses)
+	}
+	if !d.Expires.IsZero() {
+		b.String("expires_at", envelope.FormatTS(d.Expires))
+	}
+	return b.Bytes()
+}
+
+func descriptorsJSON(ds []Descriptor) []byte {
+	arr := []byte{'['}
+	for i := range ds {
+		if i > 0 {
+			arr = append(arr, ',')
+		}
+		arr = append(arr, ds[i].JSON()...)
+	}
+	return append(arr, ']')
+}
+
+// ParseDescriptor parses one descriptor (from a peer) strictly.
+func ParseDescriptor(raw json.RawMessage) (*Descriptor, error) {
+	g, err := strictjson.AsObject(raw)
+	if err != nil {
+		return nil, errBad
+	}
+	d := &Descriptor{}
+	if d.GrantID, err = ulid(g, "grant_id"); err != nil {
+		return nil, err
+	}
+	if k, err := g.String("kind"); err != nil || k != KindItem {
+		return nil, errBad
+	}
+	if d.Ref, err = ulid(g, "ref"); err != nil {
+		return nil, err
+	}
+	d.Meta.ItemID = d.Ref
+	if d.Fields, err = fieldList(g, "fields"); err != nil {
+		return nil, err
+	}
+	if d.Label, _, err = g.OptString("label"); err != nil || !itemspec.ValidText(d.Label, MaxLabel) {
+		return nil, errBad
+	}
+	if id, ok, err := g.OptString("rule_id"); err != nil || ok && !envelope.ValidULID(id) {
+		return nil, errBad
+	} else {
+		d.RuleID = id
+	}
+	if d.Meta.Name, err = g.String("name"); err != nil || !itemspec.ValidName(d.Meta.Name) {
+		return nil, errBad
+	}
+	if d.Meta.Category, err = g.String("category"); err != nil || !itemspec.ValidCategory(d.Meta.Category) {
+		return nil, errBad
+	}
+	raw2, ok := g["labels"]
+	if !ok {
+		return nil, errBad
+	}
+	if d.Meta.Labels, err = itemspec.ParseLabels(raw2); err != nil {
+		return nil, errBad
+	}
+	if d.Uses, _, err = g.OptUint("uses", 1, itemspec.MaxRuleUses); err != nil {
+		return nil, errBad
+	}
+	if ts, ok, err := g.OptString("expires_at"); err != nil {
+		return nil, errBad
+	} else if ok {
+		if d.Expires, err = envelope.ParseTS(ts); err != nil {
+			return nil, errBad
+		}
+	}
+	return d, nil
+}
+
+func parseDescriptors(o strictjson.Object, name string, max int) ([]Descriptor, error) {
+	arr, err := o.Array(name)
+	if err != nil || len(arr) == 0 || len(arr) > max {
+		return nil, errBad
+	}
+	seen := map[string]bool{}
+	out := make([]Descriptor, 0, len(arr))
+	for _, raw := range arr {
+		d, err := ParseDescriptor(raw)
+		if err != nil || seen[d.GrantID] {
+			return nil, errBad
+		}
+		seen[d.GrantID] = true
+		out = append(out, *d)
+	}
+	return out, nil
+}
+
+// ParseShared parses a data.shared body strictly.
+func ParseShared(body []byte) ([]Descriptor, error) {
+	o, err := strictjson.ParseObject(body)
+	if err != nil {
+		return nil, errBad
+	}
+	return parseDescriptors(o, "grants", MaxShared)
+}
+
 // Decided is a parsed data.decided body.
 type Decided struct {
 	RequestID string
 	Approved  bool
-	Grants    []Grant
+	Grants    []Descriptor
 }
 
 // ParseDecided parses a data.decided body strictly.
@@ -451,52 +648,14 @@ func ParseDecided(body []byte) (*Decided, error) {
 	if d.Approved, err = o.Bool("approved"); err != nil {
 		return nil, errBad
 	}
-	arr, ok, err := o.OptArray("grants")
-	if err != nil || ok != d.Approved {
+	if o.Has("grants") != d.Approved {
 		return nil, errBad
 	}
-	if !ok {
+	if !d.Approved {
 		return d, nil
 	}
-	if len(arr) == 0 || len(arr) > MaxItems {
-		return nil, errBad
-	}
-	seen := map[string]bool{}
-	for _, raw := range arr {
-		g, err := strictjson.AsObject(raw)
-		if err != nil {
-			return nil, errBad
-		}
-		var gr Grant
-		if gr.ID, err = ulid(g, "grant_id"); err != nil || seen[gr.ID] {
-			return nil, errBad
-		}
-		seen[gr.ID] = true
-		if gr.Kind, err = g.String("kind"); err != nil {
-			return nil, errBad
-		}
-		if gr.Ref, err = g.String("ref"); err != nil {
-			return nil, errBad
-		}
-		switch {
-		case gr.Kind == KindField && profile.ValidKey(gr.Ref), gr.Kind == KindSecret && envelope.ValidULID(gr.Ref):
-		default:
-			return nil, errBad
-		}
-		if gr.Label, _, err = g.OptString("label"); err != nil || len(gr.Label) > MaxLabel {
-			return nil, errBad
-		}
-		if gr.Uses, err = g.Uint("uses", 1, MaxUses); err != nil {
-			return nil, errBad
-		}
-		ts, err := g.String("expires_at")
-		if err != nil {
-			return nil, errBad
-		}
-		if gr.Expires, err = envelope.ParseTS(ts); err != nil {
-			return nil, errBad
-		}
-		d.Grants = append(d.Grants, gr)
+	if d.Grants, err = parseDescriptors(o, "grants", MaxItems); err != nil {
+		return nil, err
 	}
 	return d, nil
 }
@@ -545,6 +704,7 @@ type Value struct {
 	GrantID  string
 	Sealed   []byte
 	UsesLeft uint64
+	Counted  bool // uses_left present
 	Error    string
 }
 
@@ -577,79 +737,119 @@ func ParseValue(body []byte) (*Value, error) {
 		len(v.Sealed) < sharewire.EncSize+16 || len(v.Sealed) > sharewire.EncSize+sharewire.MaxValue+16 {
 		return nil, errBad
 	}
-	if v.UsesLeft, err = o.Uint("uses_left", 0, MaxUses); err != nil {
+	if v.UsesLeft, v.Counted, err = o.OptUint("uses_left", 0, itemspec.MaxRuleUses); err != nil {
 		return nil, errBad
 	}
 	return v, nil
 }
 
-// CatalogEntry is one entry of a connection's catalog.
+// CatalogEntry is one entry of a connection's catalog (§10.12): an item
+// it may read (GrantID) or use (Usable).
 type CatalogEntry struct {
-	SecretID    string
-	Name        string
-	Category    string
-	Description string
-	Critical    bool
+	Meta     itemspec.Meta
+	GrantID  string
+	UsesLeft uint64
+	Counted  bool
+	Usable   bool
 }
 
 func (e *CatalogEntry) json() []byte {
-	b := strictjson.NewBuilder().String("secret_id", e.SecretID).String("name", e.Name).String("category", e.Category)
-	if e.Description != "" {
-		b.String("description", e.Description)
+	b := strictjson.NewBuilder().String("item_id", e.Meta.ItemID).String("name", e.Meta.Name).String("category", e.Meta.Category).
+		Raw("labels", itemspec.LabelsJSON(e.Meta.Labels))
+	if e.GrantID != "" {
+		b.String("grant_id", e.GrantID)
+		if e.Counted {
+			b.Uint("uses_left", e.UsesLeft)
+		}
 	}
-	return b.Bool("critical", e.Critical).Bytes()
+	if e.Usable {
+		b.Bool("usable", true)
+	}
+	return b.Bytes()
 }
 
-func catalogJSON(es []CatalogEntry) []byte {
+// catalogJSON encodes entries within MaxCatalog and MaxCatalogBytes; it
+// reports whether entries were left out.
+func catalogJSON(es []CatalogEntry) ([]byte, bool) {
 	arr := []byte{'['}
 	for i := range es {
+		enc := es[i].json()
+		if i >= MaxCatalog || len(arr)+len(enc)+128 > MaxCatalogBytes {
+			return append(arr, ']'), true
+		}
 		if i > 0 {
 			arr = append(arr, ',')
 		}
-		arr = append(arr, es[i].json()...)
+		arr = append(arr, enc...)
 	}
-	return append(arr, ']')
+	return append(arr, ']'), false
 }
 
 // ParseCatalog parses a data.catalog body strictly.
-func ParseCatalog(body []byte) (string, []CatalogEntry, error) {
+func ParseCatalog(body []byte) (string, []CatalogEntry, bool, error) {
+	if len(body) > MaxCatalogBytes+1024 {
+		return "", nil, false, errBad
+	}
 	o, err := strictjson.ParseObject(body)
 	if err != nil {
-		return "", nil, errBad
+		return "", nil, false, errBad
 	}
 	id, err := ulid(o, "request_id")
 	if err != nil {
-		return "", nil, err
+		return "", nil, false, err
 	}
-	arr, err := o.Array("secrets")
+	arr, err := o.Array("items")
 	if err != nil || len(arr) > MaxCatalog {
-		return "", nil, errBad
+		return "", nil, false, errBad
+	}
+	trunc := false
+	if o.Has("truncated") {
+		if trunc, err = o.Bool("truncated"); err != nil {
+			return "", nil, false, errBad
+		}
 	}
 	out := make([]CatalogEntry, 0, len(arr))
 	for _, raw := range arr {
 		eo, err := strictjson.AsObject(raw)
 		if err != nil {
-			return "", nil, errBad
+			return "", nil, false, errBad
 		}
 		var e CatalogEntry
-		if e.SecretID, err = ulid(eo, "secret_id"); err != nil {
-			return "", nil, err
+		if e.Meta.ItemID, err = ulid(eo, "item_id"); err != nil {
+			return "", nil, false, err
 		}
-		if e.Name, err = eo.String("name"); err != nil || e.Name == "" || len(e.Name) > 128 {
-			return "", nil, errBad
+		if e.Meta.Name, err = eo.String("name"); err != nil || !itemspec.ValidName(e.Meta.Name) {
+			return "", nil, false, errBad
 		}
-		if e.Category, err = eo.String("category"); err != nil || e.Category == "" || len(e.Category) > 32 {
-			return "", nil, errBad
+		if e.Meta.Category, err = eo.String("category"); err != nil || !itemspec.ValidCategory(e.Meta.Category) {
+			return "", nil, false, errBad
 		}
-		if e.Description, _, err = eo.OptString("description"); err != nil || len(e.Description) > 1024 {
-			return "", nil, errBad
+		lr, ok := eo["labels"]
+		if !ok {
+			return "", nil, false, errBad
 		}
-		if e.Critical, err = eo.Bool("critical"); err != nil {
-			return "", nil, errBad
+		if e.Meta.Labels, err = itemspec.ParseLabels(lr); err != nil {
+			return "", nil, false, errBad
+		}
+		if gid, ok, err := eo.OptString("grant_id"); err != nil || ok && !envelope.ValidULID(gid) {
+			return "", nil, false, errBad
+		} else {
+			e.GrantID = gid
+		}
+		if e.UsesLeft, e.Counted, err = eo.OptUint("uses_left", 0, itemspec.MaxRuleUses); err != nil || e.Counted && e.GrantID == "" {
+			return "", nil, false, errBad
+		}
+		if eo.Has("usable") {
+			if e.Usable, err = eo.Bool("usable"); err != nil {
+				return "", nil, false, errBad
+			}
+		}
+		if (e.GrantID != "") == e.Usable {
+			return "", nil, false, errBad // exactly one of readable or usable
 		}
 		out = append(out, e)
 	}
-	return id, out, nil
+	return id, out, trunc, nil
 }
 
 // --- JSON ---
@@ -661,6 +861,9 @@ func itemsJSON(items []Item, avail func(Item) bool) []byte {
 			arr = append(arr, ',')
 		}
 		b := strictjson.NewBuilder().String("kind", it.Kind).String("ref", it.Ref)
+		if it.Fields != nil {
+			b.Raw("fields", itemspec.StrList(it.Fields))
+		}
 		if it.Label != "" {
 			b.String("label", it.Label)
 		}
@@ -675,12 +878,34 @@ func itemsJSON(items []Item, avail func(Item) bool) []byte {
 func (g *Grant) json() []byte {
 	b := strictjson.NewBuilder().String("grant_id", g.ID).String("connection_id", g.Conn).String("direction", g.Direction).
 		String("kind", g.Kind).String("ref", g.Ref)
+	if g.Fields != nil {
+		b.Raw("fields", itemspec.StrList(g.Fields))
+	}
 	if g.Label != "" {
 		b.String("label", g.Label)
 	}
-	return b.Uint("uses", g.Uses).Uint("used", g.Used).String("expires_at", envelope.FormatTS(g.Expires)).
-		String("state", g.State).String("created_at", envelope.FormatTS(g.Created)).Bytes()
+	if g.RuleID != "" {
+		b.String("rule_id", g.RuleID)
+	}
+	b.String("name", g.Name).String("category", g.Category)
+	if g.Uses > 0 {
+		b.Uint("uses", g.Uses)
+	}
+	b.Uint("used", g.Used)
+	if !g.Expires.IsZero() {
+		b.String("expires_at", envelope.FormatTS(g.Expires))
+	}
+	return b.String("state", g.State).String("created_at", envelope.FormatTS(g.Created)).Bytes()
 }
+
+// descriptor is a given grant's descriptor (§10.12).
+func (g *Grant) descriptor(meta itemspec.Meta) Descriptor {
+	return Descriptor{GrantID: g.ID, Ref: g.Ref, Fields: g.Fields, Label: g.Label, RuleID: g.RuleID, Meta: meta,
+		Uses: g.Uses, Expires: g.Expires}
+}
+
+// expired reports whether a grant with an expiry is past it.
+func (g *Grant) expired(now time.Time) bool { return !g.Expires.IsZero() && !now.Before(g.Expires) }
 
 func (p *Pending) json(avail func(Item) bool) []byte {
 	b := strictjson.NewBuilder().String("request_id", p.ID).String("connection_id", p.Conn).Raw("items", itemsJSON(p.Items, avail)).
@@ -693,27 +918,18 @@ func (p *Pending) json(avail func(Item) bool) []byte {
 
 // --- helpers ---
 
+// available reports whether a request entry resolves now: an item that
+// is readable with those fields, or a category with a readable item for
+// the member to pick (§10.12).
 func (f *Feature) available(it Item) bool {
 	switch it.Kind {
-	case KindField:
-		_, ok := f.fields.FieldValue(it.Ref)
+	case KindItem:
+		_, ok := f.items.Readable(it.Ref, it.Fields)
 		return ok
-	case KindSecret:
-		_, _, ok := f.secrets.CatalogedValue(it.Ref)
-		return ok
+	case KindCategory:
+		return f.items.HasCategory(it.Ref)
 	}
 	return false
-}
-
-func (f *Feature) value(g *Grant) (string, bool) {
-	switch g.Kind {
-	case KindField:
-		return f.fields.FieldValue(g.Ref)
-	case KindSecret:
-		_, v, ok := f.secrets.CatalogedValue(g.Ref)
-		return v, ok
-	}
-	return "", false
 }
 
 func activeConn(s *vault.Session, id string) bool {
@@ -771,7 +987,7 @@ func (f *Feature) expire(s *vault.Session) {
 	}
 	for _, m := range []map[string]*Grant{f.d.Given, f.d.Received} {
 		for id, g := range m {
-			if g.State == StateActive && !now.Before(g.Expires) {
+			if g.State == StateActive && g.expired(now) {
 				g.end(StateExpired, g.Expires)
 			}
 			if g.State != StateActive && now.Sub(g.Ended) > EndedRetention {
@@ -823,6 +1039,8 @@ func (f *Feature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner
 		f.dataRequest(s, in.Body)
 	case "data.decided":
 		f.dataDecided(s, in.Body)
+	case "data.shared":
+		f.dataShared(s, in.Body)
 	case "data.revoked":
 		f.dataRevoked(s, in.Body)
 	case "data.fetch":
@@ -890,16 +1108,25 @@ func (f *Feature) dataDecided(s *vault.Session, body []byte) {
 		return
 	}
 	r.State = "granted"
+	arr := f.receive(s, conn, d.RequestID, d.Grants)
+	s.NotifyAllDevices("grant.event", ev.String("event", "granted").String("request_id", d.RequestID).Raw("grants", arr).Bytes())
+}
+
+// receive records grants a connection gave this vault (data.decided,
+// data.shared, an action's result) and returns them as grant JSON.
+// Grants already held, or beyond the limit, are skipped.
+func (f *Feature) receive(s *vault.Session, conn, requestID string, ds []Descriptor) []byte {
 	arr := []byte{'['}
 	n := 0
-	for i := range d.Grants {
-		gr := d.Grants[i]
-		key := conn + "|" + gr.ID
+	for i := range ds {
+		gr := &ds[i]
+		key := conn + "|" + gr.GrantID
 		if f.d.Received[key] != nil || countActive(f.d.Received) >= MaxReceived {
 			continue
 		}
-		g := &Grant{ID: gr.ID, Conn: conn, Direction: "received", RequestID: d.RequestID, Kind: gr.Kind, Ref: gr.Ref,
-			Label: gr.Label, Uses: gr.Uses, Expires: gr.Expires, State: StateActive, Created: s.Now().UTC().Truncate(time.Millisecond)}
+		g := &Grant{ID: gr.GrantID, Conn: conn, Direction: "received", RequestID: requestID, Kind: KindItem, Ref: gr.Ref,
+			Fields: gr.Fields, Label: gr.Label, RuleID: gr.RuleID, Name: gr.Meta.Name, Category: gr.Meta.Category, Labels: gr.Meta.Labels,
+			Uses: gr.Uses, Expires: gr.Expires, State: StateActive, Created: s.Now().UTC().Truncate(time.Millisecond)}
 		f.d.Received[key] = g
 		if n > 0 {
 			arr = append(arr, ',')
@@ -909,7 +1136,25 @@ func (f *Feature) dataDecided(s *vault.Session, body []byte) {
 		s.Record(vault.Activity{Kind: "grant.received", ConnectionID: conn, Ref: g.ID, Direction: "in", Audit: true})
 		syncChanged(s, g)
 	}
-	s.NotifyAllDevices("grant.event", ev.String("event", "granted").String("request_id", d.RequestID).Raw("grants", append(arr, ']')).Bytes())
+	return append(arr, ']')
+}
+
+// dataShared records the grants a connection's share rules gave this
+// vault (§10.12) and tells the apps and desktops.
+func (f *Feature) dataShared(s *vault.Session, body []byte) {
+	conn := s.From().ID
+	ds, err := ParseShared(body)
+	if err != nil {
+		malformed(s, conn)
+		return
+	}
+	arr := f.receive(s, conn, "", ds)
+	if len(arr) <= 2 {
+		return // all already held
+	}
+	s.NotifyAllDevices("grant.event", strictjson.NewBuilder().String("connection_id", conn).String("event", "shared").
+		Raw("grants", arr).Bytes())
+	s.Record(vault.Activity{Kind: "grant.shared", ConnectionID: conn, Ref: ds[0].GrantID, Feed: true})
 }
 
 func (f *Feature) fetch(s *vault.Session, body []byte) (json.RawMessage, error) {
@@ -965,11 +1210,15 @@ func (f *Feature) dataValue(s *vault.Session, body []byte) {
 			g.Used = g.Uses
 			g.end(StateUsed, now)
 		case "":
-			if v.UsesLeft <= g.Uses {
-				g.Used = g.Uses - v.UsesLeft
-			}
-			if v.UsesLeft == 0 {
-				g.end(StateUsed, now)
+			if v.Counted && g.Uses > 0 {
+				if v.UsesLeft <= g.Uses {
+					g.Used = g.Uses - v.UsesLeft
+				}
+				if v.UsesLeft == 0 {
+					g.end(StateUsed, now)
+				}
+			} else {
+				g.Used++
 			}
 		}
 		if g.State != prev {
@@ -980,7 +1229,10 @@ func (f *Feature) dataValue(s *vault.Session, body []byte) {
 	if v.Error != "" {
 		b.String("error", v.Error)
 	} else {
-		b.Base64("value_sealed", v.Sealed).Uint("uses_left", v.UsesLeft)
+		b.Base64("value_sealed", v.Sealed)
+		if v.Counted {
+			b.Uint("uses_left", v.UsesLeft)
+		}
 	}
 	_ = s.Send(o.Device, "grant.value", b.Bytes(), vault.SendOptions{}) // only that device (§10.12)
 }
@@ -1010,7 +1262,7 @@ func (f *Feature) catalog(s *vault.Session, body []byte) (json.RawMessage, error
 
 func (f *Feature) dataCatalog(s *vault.Session, body []byte) {
 	conn := s.From().ID
-	id, es, err := ParseCatalog(body)
+	id, es, trunc, err := ParseCatalog(body)
 	if err != nil {
 		malformed(s, conn)
 		return
@@ -1020,8 +1272,12 @@ func (f *Feature) dataCatalog(s *vault.Session, body []byte) {
 		return
 	}
 	delete(f.d.Catalogs, id)
-	_ = s.Send(o.Device, "grant.catalog.result", strictjson.NewBuilder().String("connection_id", conn).String("request_id", id).
-		Raw("secrets", catalogJSON(es)).Bytes(), vault.SendOptions{})
+	arr, _ := catalogJSON(es)
+	b := strictjson.NewBuilder().String("connection_id", conn).String("request_id", id).Raw("items", arr)
+	if trunc {
+		b.Bool("truncated", true)
+	}
+	_ = s.Send(o.Device, "grant.catalog.result", b.Bytes(), vault.SendOptions{})
 }
 
 // --- the member's side ---
@@ -1089,18 +1345,34 @@ func (f *Feature) decide(s *vault.Session, body []byte) (json.RawMessage, error)
 	if d.ExpiresIn > 0 {
 		expIn = d.ExpiresIn
 	}
+	for i := range d.Answers {
+		if i >= len(p.Items) {
+			return nil, errBad
+		}
+	}
 	now := s.Now().UTC().Truncate(time.Millisecond)
 	var made []*Grant
+	var metas []itemspec.Meta
 	for _, i := range idx {
 		if i >= len(p.Items) {
 			return nil, errBad
 		}
 		it := p.Items[i]
-		if !f.available(it) {
+		if a, ok := d.Answers[i]; ok {
+			a.Label = it.Label
+			it = a // the member's item answers this entry
+		}
+		if it.Kind != KindItem {
+			continue // a category entry needs an answer
+		}
+		meta, ok := f.items.Readable(it.Ref, it.Fields)
+		if !ok {
 			continue
 		}
-		made = append(made, &Grant{ID: s.NewID(), Conn: p.Conn, Direction: "given", RequestID: p.ID, Kind: it.Kind, Ref: it.Ref,
-			Label: it.Label, Uses: uses, Expires: now.Add(time.Duration(expIn) * time.Second), State: StateActive, Created: now})
+		made = append(made, &Grant{ID: s.NewID(), Conn: p.Conn, Direction: "given", RequestID: p.ID, Kind: KindItem, Ref: it.Ref,
+			Fields: it.Fields, Label: it.Label, Name: meta.Name, Category: meta.Category, Uses: uses,
+			Expires: now.Add(time.Duration(expIn) * time.Second), State: StateActive, Created: now})
+		metas = append(metas, meta)
 	}
 	if len(made) == 0 {
 		return nil, errBad
@@ -1108,21 +1380,18 @@ func (f *Feature) decide(s *vault.Session, body []byte) (json.RawMessage, error)
 	if countActive(f.d.Given)+len(made) > MaxGiven {
 		return nil, errLimit
 	}
-	wire, resp := []byte{'['}, []byte{'['}
+	ds := make([]Descriptor, len(made))
+	resp := []byte{'['}
 	for i, g := range made {
+		ds[i] = g.descriptor(metas[i])
 		if i > 0 {
-			wire, resp = append(wire, ','), append(resp, ',')
+			resp = append(resp, ',')
 		}
-		b := strictjson.NewBuilder().String("grant_id", g.ID).String("kind", g.Kind).String("ref", g.Ref)
-		if g.Label != "" {
-			b.String("label", g.Label)
-		}
-		wire = append(wire, b.Uint("uses", g.Uses).String("expires_at", envelope.FormatTS(g.Expires)).Bytes()...)
 		resp = append(resp, strictjson.NewBuilder().String("grant_id", g.ID).String("kind", g.Kind).String("ref", g.Ref).Bytes()...)
 	}
-	wire, resp = append(wire, ']'), append(resp, ']')
+	resp = append(resp, ']')
 	if err := s.SendToConnection(p.Conn, "data.decided", strictjson.NewBuilder().String("request_id", p.ID).Bool("approved", true).
-		Raw("grants", wire).Bytes()); err != nil {
+		Raw("grants", descriptorsJSON(ds)).Bytes()); err != nil {
 		return nil, errConn
 	}
 	delete(f.d.Pending, p.ID)
@@ -1165,16 +1434,16 @@ func (f *Feature) dataFetch(s *vault.Session, body []byte) {
 	case g.State == StateExpired:
 		refuse(ErrExpired)
 		return
-	case !repeat && g.Used >= g.Uses:
+	case !repeat && g.Uses > 0 && g.Used >= g.Uses:
 		refuse(ErrExhausted)
 		return
 	}
-	v, ok := f.value(g)
+	v, ok := f.items.Content(g.Ref, g.Fields)
 	if !ok {
 		refuse(ErrUnavailable)
 		return
 	}
-	sealed, err := sharewire.SealValue(fe.Reply, g.ID, fe.FetchID, []byte(v))
+	sealed, err := sharewire.SealValue(fe.Reply, g.ID, fe.FetchID, v)
 	if err != nil {
 		refuse(ErrUnavailable)
 		return
@@ -1182,13 +1451,20 @@ func (f *Feature) dataFetch(s *vault.Session, body []byte) {
 	if !repeat {
 		g.Used++
 		g.Fetched = append(g.Fetched, fe.FetchID)
-		if g.Used >= g.Uses {
+		if len(g.Fetched) > MaxFetched {
+			g.Fetched = g.Fetched[len(g.Fetched)-MaxFetched:]
+		}
+		if g.Uses > 0 && g.Used >= g.Uses {
 			g.end(StateUsed, s.Now().UTC())
 		}
 		s.Record(vault.Activity{Kind: "grant.fetched", ConnectionID: conn, Ref: g.ID, Direction: "out", Audit: true})
 		syncChanged(s, g)
 	}
-	_ = s.SendToConnection(conn, "data.value", base().Base64("value_sealed", sealed).Uint("uses_left", g.Uses-g.Used).Bytes())
+	b := base().Base64("value_sealed", sealed)
+	if g.Uses > 0 {
+		b.Uint("uses_left", g.Uses-g.Used)
+	}
+	_ = s.SendToConnection(conn, "data.value", b.Bytes())
 }
 
 func (f *Feature) dataCatalogGet(s *vault.Session, body []byte) {
@@ -1203,19 +1479,37 @@ func (f *Feature) dataCatalogGet(s *vault.Session, body []byte) {
 		malformed(s, conn)
 		return
 	}
+	_ = s.SendToConnection(conn, "data.catalog", f.catalogBody(s, conn, id))
+}
+
+// catalogBody is a connection's own catalog (§10.12): its active grants
+// and the critical items its rules make usable.
+func (f *Feature) catalogBody(s *vault.Session, conn, id string) []byte {
 	var es []CatalogEntry
-	for _, e := range f.secrets.Catalog() {
-		es = append(es, CatalogEntry{SecretID: e.ID, Name: e.Name, Category: e.Category, Description: e.Description})
-	}
-	if f.crit != nil {
-		for _, m := range f.crit.CatalogedSecrets() {
-			es = append(es, CatalogEntry{SecretID: m.ID, Name: m.Name, Category: m.Category, Description: m.Description, Critical: true})
+	for _, gid := range sortedKeys(f.d.Given) {
+		g := f.d.Given[gid]
+		if g.Conn != conn || g.State != StateActive || g.expired(s.Now()) {
+			continue
 		}
+		meta, ok := f.items.Readable(g.Ref, g.Fields)
+		if !ok {
+			continue
+		}
+		e := CatalogEntry{Meta: meta, GrantID: g.ID}
+		if g.Uses > 0 {
+			e.UsesLeft, e.Counted = g.Uses-g.Used, true
+		}
+		es = append(es, e)
 	}
-	if len(es) > MaxCatalog {
-		es = es[:MaxCatalog]
+	for _, m := range f.items.Usable(conn, s.Now()) {
+		es = append(es, CatalogEntry{Meta: m, Usable: true})
 	}
-	_ = s.SendToConnection(conn, "data.catalog", strictjson.NewBuilder().String("request_id", id).Raw("secrets", catalogJSON(es)).Bytes())
+	arr, trunc := catalogJSON(es)
+	b := strictjson.NewBuilder().String("request_id", id).Raw("items", arr)
+	if trunc {
+		b.Bool("truncated", true)
+	}
+	return b.Bytes()
 }
 
 // --- both sides ---
@@ -1239,11 +1533,15 @@ func (f *Feature) revoke(s *vault.Session, body []byte) (json.RawMessage, error)
 	if g.State == StateRevoked {
 		return nil, nil
 	}
+	f.revokeGrant(s, g)
+	return nil, nil
+}
+
+func (f *Feature) revokeGrant(s *vault.Session, g *Grant) {
 	g.end(StateRevoked, s.Now().UTC())
 	_ = s.SendToConnection(g.Conn, "data.revoked", strictjson.NewBuilder().String("grant_id", g.ID).Bytes())
 	s.Record(vault.Activity{Kind: "grant.revoked", ConnectionID: g.Conn, Ref: g.ID, Direction: "out", Audit: true})
 	syncChanged(s, g)
-	return nil, nil
 }
 
 func (f *Feature) dataRevoked(s *vault.Session, body []byte) {

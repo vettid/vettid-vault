@@ -39,8 +39,9 @@ type TypeSpec struct {
 	// From lists the principal kinds allowed to send this type: "app",
 	// "desktop", "agent", "connection".
 	From []string
-	// Volatile requests have responses that carry secret values
-	// (credential.secret.get, §8.2, §3.5.3): the response is never cached
+	// Volatile requests have responses that carry secret values in the
+	// clear (§8.2; no type needs it today: critical values are sealed to a
+	// reply key, §3.5.4): the response is never cached
 	// or written to vault state, it is deposited from memory only (lost on
 	// a crash), and a retransmission is executed again. Only for types
 	// whose sole side effects are audit and feed entries.
@@ -458,6 +459,14 @@ type AgentGrantor interface {
 // covers it, without counting it as a new request (§6.8).
 type AgentCoverage interface {
 	AgentCovered(s *Session, typ string, body json.RawMessage) bool
+}
+
+// AppOnlyForms is optionally implemented by a feature whose step-up types
+// have forms only an app may send (a critical item's credential operation
+// or an agent's share rule, §10.7, §10.12): the runtime refuses such a
+// request from a desktop with forbidden instead of holding it (§6.8).
+type AppOnlyForms interface {
+	AppOnly(typ string, body json.RawMessage) bool
 }
 
 // DeviceRemovedObserver is implemented by features that keep data per

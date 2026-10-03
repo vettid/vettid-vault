@@ -12,8 +12,8 @@ import (
 // Deps are the features the built-in actions run through (§10.14). A nil
 // field makes the actions that need it answer `unavailable`.
 type Deps struct {
-	// Grants makes the one-use grants of profile.fields.read and
-	// secrets.share, and records those received (§10.12).
+	// Grants makes the one-use grants of items.share, and records those
+	// received (§10.12).
 	Grants GrantIssuer
 	// Audit gives audit.recent a connection's own entries (§10.9).
 	Audit AuditSource
@@ -24,8 +24,8 @@ type Deps struct {
 
 // GrantIssuer is the grants feature (grants.Feature).
 type GrantIssuer interface {
-	IssueForAction(s *vault.Session, conn, invocationID string, items []grants.Item, uses uint64, ttl time.Duration) ([]grants.Desc, error)
-	ReceiveFromAction(s *vault.Session, conn, invocationID string, descs []grants.Desc)
+	IssueForAction(s *vault.Session, conn, invocationID string, items []grants.Item, uses uint64, ttl time.Duration) ([]grants.Descriptor, error)
+	ReceiveFromAction(s *vault.Session, conn, invocationID string, descs []grants.Descriptor)
 }
 
 // AuditSource is the audit log (audit.Feature).

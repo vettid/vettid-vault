@@ -1,0 +1,179 @@
+{
+  "format": 1,
+  "version": 1,
+  "spec": "VAULT-MESSAGING 0.7.0 §10.7",
+  "description": "Recommended item categories and templates the apps share. Templates live in the apps, not in the vault: choosing one pre-fills labelled fields, suggests tags and a sensitivity; the member can add, remove or rename anything, and free-form items need no template. The vault checks only shapes and sizes (§10.7). A template's id goes into item.template, opaque to the vault. Labels are English defaults for the apps to translate; kinds are the field kinds of §10.7.",
+  "categories": [
+    { "category": "identity_document", "label": "Identity document", "icon": "id-card" },
+    { "category": "login", "label": "Login", "icon": "key" },
+    { "category": "payment_card", "label": "Payment card", "icon": "credit-card" },
+    { "category": "bank_account", "label": "Bank account", "icon": "bank" },
+    { "category": "medical", "label": "Medical", "icon": "medical" },
+    { "category": "insurance", "label": "Insurance", "icon": "shield" },
+    { "category": "vehicle", "label": "Vehicle", "icon": "car" },
+    { "category": "contact", "label": "Contact", "icon": "person" },
+    { "category": "note", "label": "Note", "icon": "note" },
+    { "category": "crypto_wallet", "label": "Crypto wallet", "icon": "wallet" },
+    { "category": "other", "label": "Other", "icon": "folder" }
+  ],
+  "templates": [
+    {
+      "template": "passport", "name": "Passport", "category": "identity_document", "sensitivity": "data", "tags": ["identity", "travel"],
+      "fields": [
+        { "label": "Number", "kind": "text" },
+        { "label": "Full name", "kind": "text" },
+        { "label": "Nationality", "kind": "text" },
+        { "label": "Date of birth", "kind": "date" },
+        { "label": "Issued", "kind": "date" },
+        { "label": "Expires", "kind": "date" },
+        { "label": "Issuing authority", "kind": "text" }
+      ]
+    },
+    {
+      "template": "drivers_license", "name": "Driver's licence", "category": "identity_document", "sensitivity": "data", "tags": ["identity", "driving"],
+      "fields": [
+        { "label": "Number", "kind": "text" },
+        { "label": "Full name", "kind": "text" },
+        { "label": "Classes", "kind": "text" },
+        { "label": "Expires", "kind": "date" },
+        { "label": "Address", "kind": "address" }
+      ]
+    },
+    {
+      "template": "national_id", "name": "National ID", "category": "identity_document", "sensitivity": "data", "tags": ["identity"],
+      "fields": [
+        { "label": "Number", "kind": "text" },
+        { "label": "Full name", "kind": "text" },
+        { "label": "Date of birth", "kind": "date" },
+        { "label": "Expires", "kind": "date" }
+      ]
+    },
+    {
+      "template": "login", "name": "Login", "category": "login", "sensitivity": "secret", "tags": [],
+      "fields": [
+        { "label": "Website", "kind": "url" },
+        { "label": "Username", "kind": "text" },
+        { "label": "Password", "kind": "password" },
+        { "label": "One-time code", "kind": "otp" }
+      ]
+    },
+    {
+      "template": "wifi", "name": "Wi-Fi network", "category": "login", "sensitivity": "secret", "tags": ["home"],
+      "fields": [
+        { "label": "Network name", "kind": "text" },
+        { "label": "Password", "kind": "password" }
+      ]
+    },
+    {
+      "template": "payment_card", "name": "Payment card", "category": "payment_card", "sensitivity": "secret", "tags": ["money"],
+      "fields": [
+        { "label": "Cardholder", "kind": "text" },
+        { "label": "Number", "kind": "text" },
+        { "label": "Expires", "kind": "date" },
+        { "label": "Security code", "kind": "password" },
+        { "label": "PIN", "kind": "password" }
+      ]
+    },
+    {
+      "template": "bank_account", "name": "Bank account", "category": "bank_account", "sensitivity": "secret", "tags": ["money"],
+      "fields": [
+        { "label": "Bank", "kind": "text" },
+        { "label": "Account holder", "kind": "text" },
+        { "label": "IBAN or account number", "kind": "text" },
+        { "label": "BIC or routing number", "kind": "text" },
+        { "label": "Online banking", "kind": "url" }
+      ]
+    },
+    {
+      "template": "allergies", "name": "Allergies", "category": "medical", "sensitivity": "data", "tags": ["medical"],
+      "fields": [
+        { "label": "Allergies", "kind": "multiline" },
+        { "label": "Reactions", "kind": "multiline" }
+      ]
+    },
+    {
+      "template": "medications", "name": "Medications", "category": "medical", "sensitivity": "data", "tags": ["medical"],
+      "fields": [
+        { "label": "Medications", "kind": "multiline" },
+        { "label": "Prescribed by", "kind": "text" }
+      ]
+    },
+    {
+      "template": "blood_type", "name": "Blood type", "category": "medical", "sensitivity": "data", "tags": ["medical"],
+      "fields": [
+        { "label": "Blood type", "kind": "text" }
+      ]
+    },
+    {
+      "template": "insurance_card", "name": "Insurance card", "category": "insurance", "sensitivity": "data", "tags": ["insurance"],
+      "fields": [
+        { "label": "Insurer", "kind": "text" },
+        { "label": "Policy number", "kind": "text" },
+        { "label": "Member number", "kind": "text" },
+        { "label": "Valid until", "kind": "date" },
+        { "label": "Phone", "kind": "phone" }
+      ]
+    },
+    {
+      "template": "vehicle", "name": "Vehicle", "category": "vehicle", "sensitivity": "data", "tags": ["vehicle"],
+      "fields": [
+        { "label": "Make and model", "kind": "text" },
+        { "label": "Registration", "kind": "text" },
+        { "label": "VIN", "kind": "text" },
+        { "label": "Insurance policy", "kind": "text" },
+        { "label": "Next inspection", "kind": "date" }
+      ]
+    },
+    {
+      "template": "contact_card", "name": "Contact details", "category": "contact", "sensitivity": "data", "tags": ["@profile"],
+      "fields": [
+        { "label": "Email", "kind": "email" },
+        { "label": "Phone", "kind": "phone" },
+        { "label": "Address", "kind": "address" },
+        { "label": "Website", "kind": "url" }
+      ]
+    },
+    {
+      "template": "emergency_contact", "name": "Emergency contact", "category": "contact", "sensitivity": "data", "tags": ["medical"],
+      "fields": [
+        { "label": "Name", "kind": "text" },
+        { "label": "Relationship", "kind": "text" },
+        { "label": "Phone", "kind": "phone" }
+      ]
+    },
+    {
+      "template": "note", "name": "Note", "category": "note", "sensitivity": "data", "tags": [],
+      "fields": [
+        { "label": "Text", "kind": "multiline" }
+      ]
+    },
+    {
+      "template": "secure_note", "name": "Secure note", "category": "note", "sensitivity": "secret", "tags": [],
+      "fields": [
+        { "label": "Text", "kind": "multiline" }
+      ]
+    },
+    {
+      "template": "recovery_phrase", "name": "Recovery phrase", "category": "crypto_wallet", "sensitivity": "critical", "tags": ["crypto"],
+      "fields": [
+        { "label": "Wallet", "kind": "text" },
+        { "label": "Words", "kind": "multiline" },
+        { "label": "Passphrase", "kind": "password" }
+      ]
+    },
+    {
+      "template": "signing_key", "name": "Signing key", "category": "crypto_wallet", "sensitivity": "critical", "tags": ["crypto"],
+      "fields": [
+        { "label": "Key (Ed25519 seed, base64)", "kind": "password" },
+        { "label": "Public key", "kind": "text" }
+      ]
+    },
+    {
+      "template": "recovery_codes", "name": "Recovery codes", "category": "login", "sensitivity": "critical", "tags": [],
+      "fields": [
+        { "label": "Service", "kind": "url" },
+        { "label": "Codes", "kind": "multiline" }
+      ]
+    }
+  ]
+}

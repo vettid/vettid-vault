@@ -138,7 +138,8 @@ func TestRecoveryFlow(t *testing.T) {
 		t.Fatal(r.Code)
 	}
 	ctx := ctxT(t, 120*time.Second)
-	sid, err := a.dev.CriticalSecretAdd(ctx, recPW, "seed", "seed_phrase", "", []byte("abandon abandon about"))
+	sid, _, err := a.dev.ItemPutCritical(ctx, recPW, "", 0, nil, client.ItemContent{Name: "seed",
+		Fields: []client.ItemField{{Label: "Words", Kind: "multiline", Value: "abandon abandon about"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,8 +176,8 @@ func TestRecoveryFlow(t *testing.T) {
 		t.Fatalf("handshake: %v", err)
 	}
 	// Restricted until the password.
-	if rr, err := b.dev.Request(ctx, "secret.list", []byte(`{}`)); err != nil || rr.ErrorCode() != "forbidden" {
-		t.Fatalf("recovering app read secrets: %v %s", err, rr.ErrorCode())
+	if rr, err := b.dev.Request(ctx, "item.list", []byte(`{}`)); err != nil || rr.ErrorCode() != "forbidden" {
+		t.Fatalf("recovering app listed items: %v %s", err, rr.ErrorCode())
 	}
 	if err := b.dev.CredentialRecover(ctx, "not the password", nil); client.Code(err) != "bad_password" {
 		t.Fatalf("wrong password: %v", err)
@@ -184,11 +185,11 @@ func TestRecoveryFlow(t *testing.T) {
 	if err := b.dev.CredentialRecover(ctx, recPW, nil); err != nil {
 		t.Fatalf("recover: %v", err)
 	}
-	v, err := b.dev.CriticalSecretGet(ctx, recPW, sid)
-	if err != nil || string(v) != "abandon abandon about" {
-		t.Fatalf("critical secret after recovery: %v", err)
+	v, err := b.dev.ItemRevealCritical(ctx, recPW, sid)
+	if err != nil || !strings.Contains(string(v), "abandon abandon about") {
+		t.Fatalf("critical item after recovery: %v", err)
 	}
-	if rr, err := b.dev.Request(ctx, "secret.list", []byte(`{}`)); err != nil || !rr.OK() {
+	if rr, err := b.dev.Request(ctx, "item.list", []byte(`{}`)); err != nil || !rr.OK() {
 		t.Fatal("recovered app still restricted")
 	}
 	// The old app is kept (owner decision), but its copy of the credential
@@ -296,7 +297,7 @@ func TestNoCredentialNoRecovery(t *testing.T) {
 	if err := a.dev.CompleteEnrollment(ctx); err != nil {
 		t.Fatal(err)
 	}
-	for _, typ := range []string{"vault.enroll.confirm", "device.pair.create", "connection.invite.create", "secret.list"} {
+	for _, typ := range []string{"vault.enroll.confirm", "device.pair.create", "connection.invite.create", "item.list"} {
 		if rr, err := a.dev.Request(ctx, typ, []byte(`{"role":"desktop","ttl_seconds":600}`)); err != nil || rr.ErrorCode() != "credential_required" {
 			t.Fatalf("%s without a credential: %v %q", typ, err, rr.ErrorCode())
 		}

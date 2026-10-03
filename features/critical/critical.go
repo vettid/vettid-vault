@@ -1,17 +1,20 @@
-// Package critical is critical-secret use by a connection
-// (VAULT-MESSAGING §10.13): a connection asks the member to use one of the
-// critical secrets in their Protean Credential (an Ed25519 signing key)
-// for one operation; the member consents in their app with the credential
-// password, for that use only, bound to the request and the payload's
-// hash; the vault opens the credential, signs, rotates the CEK and wipes
-// the key; the connection receives only the signature.
+// Package critical is critical-item use by a connection
+// (VAULT-MESSAGING §10.13): a connection asks the member to use a field
+// of one of the critical items in their Protean Credential (an Ed25519
+// signing key, as base64 of its seed) for one operation; the member
+// consents in their app with the credential password, for that use only,
+// bound to the request and the payload's hash; the vault opens the
+// credential, signs, rotates the CEK and wipes the key; the connection
+// receives only the signature. Only items a share rule of that connection
+// makes usable can be asked for.
 //
 // Ported from vettid.dev's critical_secret_handler.go: the password-hash
 // approval becomes a credential operation with a UTK-sealed payload
 // (§3.5.3, §3.5.4) carrying request_id and payload_sha256; standing
 // allowances are gone (every use needs the password); only `sign` and
 // the domain-separated `auth` remain (decrypt and derive were never
-// implemented); only cataloged critical secrets can be asked for.
+// implemented); only critical items a share rule makes usable to the
+// connection can be asked for (0.7.0; 0.6.0 used a catalog flag).
 package critical
 
 import (
@@ -25,6 +28,7 @@ import (
 	"time"
 
 	"github.com/vettid/vettid-vault/features/credential"
+	"github.com/vettid/vettid-vault/features/itemspec"
 	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vms/envelope"
@@ -58,8 +62,10 @@ const (
 type Incoming struct {
 	ID        string    `json:"id"`
 	Conn      string    `json:"conn"`
-	SecretID  string    `json:"secret_id"`
+	ItemID    string    `json:"item_id"`
+	FieldID   string    `json:"field_id"`
 	Name      string    `json:"name"`
+	Label     string    `json:"label"`
 	Operation string    `json:"operation"`
 	Payload   []byte    `json:"payload"`
 	Context   string    `json:"context,omitempty"`
@@ -70,7 +76,8 @@ type Incoming struct {
 type Outgoing struct {
 	ID        string    `json:"id"`
 	Conn      string    `json:"conn"`
-	SecretID  string    `json:"secret_id"`
+	ItemID    string    `json:"item_id"`
+	FieldID   string    `json:"field_id"`
 	Operation string    `json:"operation"`
 	Payload   []byte    `json:"payload"`
 	State     string    `json:"state"` // pending | done
@@ -86,16 +93,34 @@ type data struct {
 	Done map[string]time.Time `json:"done,omitempty"`
 }
 
-// Feature implements vault.Feature and vault.ConnectionRemovedObserver.
-type Feature struct {
-	mu   sync.Mutex
-	cred *credential.Feature
-	d    data
+// Credential performs each use as a credential operation (§3.5.3).
+type Credential interface {
+	Operate(s *vault.Session, in *envelope.Inner, need int, check func(*credential.Payload) error,
+		op func(*credential.Inner, *credential.Payload) error) (*credential.OpResult, error)
 }
 
-// New returns the feature; cred performs the uses (credential.UseSecret).
-func New(cred *credential.Feature) *Feature {
-	return &Feature{cred: cred, d: data{In: map[string]*Incoming{}, Out: map[string]*Outgoing{}, Done: map[string]time.Time{}}}
+// Usable is the items feature: which critical items share rules make
+// usable to a connection (§10.12).
+type Usable interface {
+	UsableField(conn, itemID, fieldID string, now time.Time) (name, label string, ok bool)
+	// UseCriticalField decrypts a field's value with the item key from the
+	// opened credential and re-keys the item; commit installs the new
+	// ciphertext after the credential is sealed (§10.7).
+	UseCriticalField(s *vault.Session, inner *credential.Inner, itemID, fieldID string) (value []byte, commit func(), err error)
+}
+
+// Feature implements vault.Feature and vault.ConnectionRemovedObserver.
+type Feature struct {
+	mu     sync.Mutex
+	cred   Credential
+	usable Usable
+	d      data
+}
+
+// New returns the feature; cred performs the uses, usable says what a
+// connection may ask for.
+func New(cred Credential, usable Usable) *Feature {
+	return &Feature{cred: cred, usable: usable, d: data{In: map[string]*Incoming{}, Out: map[string]*Outgoing{}, Done: map[string]time.Time{}}}
 }
 
 var (
@@ -159,7 +184,8 @@ var (
 type Use struct {
 	RequestID  string
 	Connection string
-	SecretID   string
+	ItemID     string
+	FieldID    string
 	Operation  string
 	Payload    []byte
 	Context    string
@@ -168,7 +194,10 @@ type Use struct {
 func parseUse(o strictjson.Object) (*Use, error) {
 	u := &Use{}
 	var err error
-	if u.SecretID, err = o.String("secret_id"); err != nil || !envelope.ValidULID(u.SecretID) {
+	if u.ItemID, err = o.String("item_id"); err != nil || !envelope.ValidULID(u.ItemID) {
+		return nil, errBad
+	}
+	if u.FieldID, err = o.String("field_id"); err != nil || !itemspec.ValidFieldID(u.FieldID) {
 		return nil, errBad
 	}
 	if u.Operation, err = o.String("operation"); err != nil || u.Operation != OperationSign && u.Operation != OperationAuth {
@@ -352,15 +381,15 @@ func (f *Feature) request(s *vault.Session, body []byte) (json.RawMessage, error
 		return nil, errLimit
 	}
 	id := s.NewID()
-	b := strictjson.NewBuilder().String("request_id", id).String("secret_id", u.SecretID).String("operation", u.Operation).
-		Base64("payload", u.Payload)
+	b := strictjson.NewBuilder().String("request_id", id).String("item_id", u.ItemID).String("field_id", u.FieldID).
+		String("operation", u.Operation).Base64("payload", u.Payload)
 	if u.Context != "" {
 		b.String("context", u.Context)
 	}
 	if err := s.SendToConnection(u.Connection, "critical-secret.use", b.Bytes()); err != nil {
 		return nil, errConn
 	}
-	f.d.Out[id] = &Outgoing{ID: id, Conn: u.Connection, SecretID: u.SecretID, Operation: u.Operation, Payload: u.Payload,
+	f.d.Out[id] = &Outgoing{ID: id, Conn: u.Connection, ItemID: u.ItemID, FieldID: u.FieldID, Operation: u.Operation, Payload: u.Payload,
 		State: "pending", Exp: s.Now().Add(OutgoingTTL).UTC()}
 	s.Record(vault.Activity{Kind: "critical-secret.use.requested", ConnectionID: u.Connection, Ref: id, Direction: "out", Audit: true})
 	return strictjson.NewBuilder().String("request_id", id).Bytes(), nil
@@ -380,9 +409,9 @@ func (f *Feature) incoming(s *vault.Session, body []byte) error {
 		return nil
 	}
 	s.Record(vault.Activity{Kind: "critical-secret.use.requested", ConnectionID: conn, Ref: u.RequestID, Direction: "in", Audit: true})
-	r := &Incoming{ID: u.RequestID, Conn: conn, SecretID: u.SecretID, Operation: u.Operation, Payload: u.Payload,
+	r := &Incoming{ID: u.RequestID, Conn: conn, ItemID: u.ItemID, FieldID: u.FieldID, Operation: u.Operation, Payload: u.Payload,
 		Context: u.Context, Exp: s.Now().Add(RequestTTL).UTC().Truncate(time.Millisecond)}
-	meta, ok := f.cred.CatalogedSecret(u.SecretID)
+	name, label, ok := f.usable.UsableField(conn, u.ItemID, u.FieldID, s.Now())
 	pending := 0
 	for _, x := range f.d.In {
 		if x.Conn == conn {
@@ -390,17 +419,19 @@ func (f *Feature) incoming(s *vault.Session, body []byte) error {
 		}
 	}
 	if !ok || pending >= MaxPendingIn {
-		// Not in the catalog (or too many pending): answered without
-		// asking the member; a private or unknown secret is not told apart.
+		// Not usable by this connection (or too many pending): answered
+		// without asking the member; an item no rule includes is not told
+		// apart from a missing one.
 		f.answer(s, r, StatusUnavailable, nil)
 		s.Record(vault.Activity{Kind: "critical-secret.use.denied", ConnectionID: conn, Ref: u.RequestID, Direction: "in", Audit: true})
 		return nil
 	}
-	r.Name = meta.Name
+	r.Name, r.Label = name, label
 	f.d.In[r.ID] = r
 	h := sha256.Sum256(r.Payload)
-	b := strictjson.NewBuilder().String("request_id", r.ID).String("connection_id", conn).String("secret_id", r.SecretID).
-		String("name", r.Name).String("operation", r.Operation).Base64("payload", r.Payload).Base64("payload_sha256", h[:])
+	b := strictjson.NewBuilder().String("request_id", r.ID).String("connection_id", conn).String("item_id", r.ItemID).
+		String("field_id", r.FieldID).String("name", r.Name).String("label", r.Label).String("operation", r.Operation).
+		Base64("payload", r.Payload).Base64("payload_sha256", h[:])
 	if r.Context != "" {
 		b.String("context", r.Context)
 	}
@@ -434,14 +465,27 @@ func (f *Feature) approve(s *vault.Session, in *envelope.Inner) (json.RawMessage
 	}
 	status := ""
 	var sig, pub []byte
-	use := func(value []byte, b *strictjson.Builder) {
+	_, _, usable := f.usable.UsableField(r.Conn, r.ItemID, r.FieldID, s.Now())
+	commit := func() {}
+	op := func(inner *credential.Inner, _ *credential.Payload) error {
+		var seed []byte
+		if usable {
+			if raw, c, err := f.usable.UseCriticalField(s, inner, r.ItemID, r.FieldID); err == nil {
+				commit = c
+				seed = decodeSeed(raw)
+				suite.Wipe(raw)
+				if seed == nil {
+					status = StatusUnsuitable
+				}
+			}
+		}
 		switch {
-		case value == nil:
-			status = StatusUnavailable // deleted from the credential since
-		case len(value) != SeedSize:
-			status = StatusUnsuitable
+		case status != "":
+		case seed == nil:
+			status = StatusUnavailable // left the credential, or no longer included, since
 		default:
-			key := ed25519.NewKeyFromSeed(value)
+			defer suite.Wipe(seed)
+			key := ed25519.NewKeyFromSeed(seed)
 			defer suite.Wipe(key)
 			msg := r.Payload
 			if r.Operation == OperationAuth {
@@ -451,12 +495,15 @@ func (f *Feature) approve(s *vault.Session, in *envelope.Inner) (json.RawMessage
 			pub = append([]byte(nil), key.Public().(ed25519.PublicKey)...)
 			status = StatusOK
 		}
-		b.String("request_id", r.ID).String("status", status)
+		return nil
 	}
-	out, err := f.cred.UseSecret(s, in, r.SecretID, check, use)
+	res, err := f.cred.Operate(s, in, credential.NeedRequest, check, op)
 	if err != nil {
 		return nil, err // the request stays pending (bad_password, backoff, ...)
 	}
+	commit() // the item's new key is in the sealed credential: install its ciphertext
+	out := strictjson.NewBuilder().String("request_id", r.ID).String("status", status).Base64("credential", res.Credential).
+		Uint("version", res.Version).Raw("utks", res.UTKs).Bytes()
 	f.answer(s, r, status, func(b *strictjson.Builder) {
 		if status == StatusOK {
 			b.Base64("signature", sig).Base64("public_key", pub)
@@ -527,8 +574,9 @@ func (f *Feature) list() []byte {
 			in = append(in, ',')
 		}
 		h := sha256.Sum256(r.Payload)
-		b := strictjson.NewBuilder().String("request_id", r.ID).String("connection_id", r.Conn).String("secret_id", r.SecretID).
-			String("name", r.Name).String("operation", r.Operation).Base64("payload_sha256", h[:])
+		b := strictjson.NewBuilder().String("request_id", r.ID).String("connection_id", r.Conn).String("item_id", r.ItemID).
+			String("field_id", r.FieldID).String("name", r.Name).String("label", r.Label).String("operation", r.Operation).
+			Base64("payload_sha256", h[:])
 		if r.Context != "" {
 			b.String("context", r.Context)
 		}
@@ -544,8 +592,8 @@ func (f *Feature) list() []byte {
 		if i > 0 {
 			out = append(out, ',')
 		}
-		b := strictjson.NewBuilder().String("request_id", o.ID).String("connection_id", o.Conn).String("secret_id", o.SecretID).
-			String("operation", o.Operation).String("state", o.State)
+		b := strictjson.NewBuilder().String("request_id", o.ID).String("connection_id", o.Conn).String("item_id", o.ItemID).
+			String("field_id", o.FieldID).String("operation", o.Operation).String("state", o.State)
 		if o.Status != "" {
 			b.String("status", o.Status)
 		}
@@ -580,4 +628,18 @@ func (f *Feature) Pending() []string {
 		out = append(out, r.ID)
 	}
 	return out
+}
+
+// decodeSeed returns the 32-byte Ed25519 seed a field value holds as
+// standard base64 (§10.13), or nil.
+func decodeSeed(raw []byte) []byte {
+	v, ok := itemspec.ValueString(raw)
+	if !ok {
+		return nil
+	}
+	seed, err := strictjson.DecodeStd(v, SeedSize)
+	if err != nil {
+		return nil
+	}
+	return seed
 }

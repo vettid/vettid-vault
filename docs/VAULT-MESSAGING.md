@@ -1,7 +1,7 @@
 ---
 title: VAULT-MESSAGING
 status: draft
-version: 0.6.0
+version: 0.7.0
 date: 2026-10-03
 owner: Al Liebl (Mesmer)
 component: vault manager (enclave), parent forwarder, apps, desktops, agents, member API vault routes
@@ -13,7 +13,21 @@ related:
   - PUSH-GATEWAY.md
   - ACCOUNT-ADMIN-PLAN.md
   - MEMBER-API.md
+  - VAULT-ITEMS.md (0.1.0, approved 2026-10-03)
 changelog:
+  - 0.7.0: V4 items (VAULT-ITEMS, owner decisions of 2026-10-03): one item
+    model (name, category, typed fields, tags, sensitivity data, secret or
+    critical) replaces profile fields, vault-held secrets and critical
+    secrets (§10.7); critical items' values are encrypted under per-item
+    keys that only the Protean Credential holds (§3.5.2, §3.5.4, §10.7); the tag registry with rename and merge,
+    and the profile as a name and photo plus `@profile` items (§10.8);
+    share rules over tags for connections and agents, `ask` by default
+    with remembered declines, `auto` with a preview, per-connection
+    catalogs, grants of items with field restrictions, `data.shared`, and
+    one-off requests by category (§10.12); agents' rules as signed
+    `items.read` delegations (§10.11); critical-item use through rules
+    (§10.13); `items.share` (§10.14); `in_use`; owner decisions of 2026-10-03
+    on agents' rules (§10.11) and envelope encryption (§10.7)
   - 0.6.0: V4 batch 3: LEASH for the member's agents (grants with scopes,
     approval modes, rate limits and expiry; the AgentPolicy decision;
     agent.request for catalog, retrieval and use without exposure;
@@ -116,7 +130,8 @@ described in RFC 2119.
 2. **Feature scope.**
    - In scope:
      - enrollment, PIN and credential;
-     - secrets, profile and settings;
+     - items (the member's data, with tags and share rules), profile
+       and settings;
      - 1:1 connections and messaging;
      - calls, with signalling over the relay;
      - device and agent pairing;
@@ -124,7 +139,7 @@ described in RFC 2119.
      - audit and feed;
      - wallet and location;
      - shared actions;
-     - grants and critical secrets;
+     - grants and critical-item use;
      - presence, as an on-demand ping.
    - Out of scope: votes, B2C service vaults, org vaults and
      transport-credential minting.
@@ -267,9 +282,13 @@ Rules for all keys:
 - the vault's rotation chain;
 - the wake key;
 - the CEK and the credential record (§3.5): the credential's version, the
-  SHA-256 of its current blob, the password backoff state, the critical
-  secrets' metadata, the latest blob while kept (§3.5.3, §3.5.6), and the
-  LTKs of each app's UTK pool (§3.5.4);
+  SHA-256 of its current blob, the password backoff state, the latest
+  blob while kept (§3.5.3, §3.5.6), and the LTKs of each app's UTK pool
+  (§3.5.4);
+- the items (§10.7): `data` and `secret` items whole; `critical` items'
+  metadata and their values encrypted under item keys that only the
+  credential holds (§3.5.2); the tag registry, the profile object and the
+  share rules (§10.8, §10.12);
 - one **record per owner device and one per connection**, holding:
   - role, relay public key, mailbox address, `ik` and `kem`;
   - the peer's rotation chain;
@@ -403,8 +422,10 @@ sig_new = Ed25519(new_ik, "vettid/vms/2/rotate" || m)
 
 ### 3.5 The Protean Credential
 
-The **Protean Credential** holds the member's critical keys and secrets:
-the credential key, seed phrases, private keys and recovery keys.
+The **Protean Credential** holds the member's critical keys: the
+credential key and the **item keys** of the member's critical items
+(§10.7), such as seed phrases, private keys and recovery keys, whose
+values the vault keeps encrypted under those keys.
 
 - It is held by the member's app.
 - It is sealed so that the vault alone cannot open it.
@@ -476,14 +497,20 @@ locked = t (1) || m_KiB (4, big-endian) || p (1) || salt (16) || nonce (24)
 { "v": 1, "vault_id": "<id>", "version": 3,
   "created_at": "<ts>", "password_changed_at": "<ts>",
   "key": "<b64 32-byte Ed25519 seed>",
-  "secrets": [ { "id": "<ULID>", "name": "...", "category": "seed_phrase",
-                 "description": "...", "value": "<b64>", "created_at": "<ts>" } ],
+  "items": [ { "item_id": "<ULID>", "gen": 4, "key": "<b64 32 bytes>" } ],
   "crypto_keys": [ ] }
 ```
 
-- `category` is one of `seed_phrase`, `private_key`, `signing_key`,
-  `master_password`, `recovery_key`, `other`. A `value` is 1–8,192 bytes;
-  a credential holds at most 64 secrets.
+- `items` holds one entry per critical item (§10.7): its `item_id`, the
+  random 32-byte **item key** its values are encrypted under, and that
+  key's generation `gen` (≥ 1), which the ciphertext's AAD binds. The
+  values (and notes) themselves are not in the credential: the vault
+  keeps them in DEK state as ciphertext under the item key (envelope
+  encryption, §10.7), with the items' metadata (name, category, tags,
+  labels and kinds), so that apps can list them without the password and
+  the credential stays small. A credential holds at most 1,000 entries
+  (about 90 bytes each; `limit`) (0.7.0 replaced 0.6.0's `secrets` by
+  `items`; no blob of an earlier draft exists).
 - `crypto_keys` is reserved for the wallet feature and is empty until then.
 - `version` in `inner` MUST equal the header's `version`; `vault_id` MUST
   equal the vault's.
@@ -601,19 +628,19 @@ ct     = ctx.Seal(aad = type || 0x00 || inner id, pt = payload JSON)
 ```
 
 **Payload.** The payload is a JSON object, strict as in §5.3, of at most
-16 KiB. It holds the operation's critical members (§10.6): `password`,
-`new_password`, `secret_id`, `name`, `category`, `description`, `value`
-and `reply_key`, and, for a critical-secret use (§10.13), `request_id`
-and `payload_sha256`, which bind the member's consent to one request
-and one payload.
+16 KiB. It holds the operation's critical members (§10.6, §10.7):
+`password`, `new_password`, `item_id` (which item an operation acts on),
+`item` (a critical item's content) and `reply_key`, and, for a
+critical-item use (§10.13), `request_id` and `payload_sha256`, which bind
+the member's consent to one request and one payload.
 
 **Using a UTK.** The vault looks the UTK up among those issued to the
 sending app and removes it from the pool before anything else is checked.
 The removal is part of the batch's flush, so the UTK is spent even if the
 operation then fails, for example with `bad_password`.
 
-**Secret values in responses.** A response that would carry a critical
-secret's value seals the value to a **one-time reply key** instead:
+**Critical values in responses.** A response that would carry a critical
+item's values seals them to a **one-time reply key** instead:
 
 - The app generates an MLKEM768X25519 key pair for that request and puts
   its `ek` in the UTK-sealed payload as `reply_key`, so a session-level
@@ -627,7 +654,8 @@ secret's value seals the value to a **one-time reply key** instead:
 
 - Such a response holds no secret in the clear, so it is cached like any
   other (§8.2). A lost response is therefore recovered by retransmission;
-  this replaces the volatile-response rule for `credential.secret.get`.
+  this replaces the volatile-response rule for revealing critical values
+  (`item.reveal`, §10.7).
 - The reply key's private half lives only in the app's memory for that
   request. The session alone, or a cached response, reveals nothing.
 
@@ -636,7 +664,7 @@ secret's value seals the value to a **one-time reply key** instead:
 - **Create.** `credential.create` comes from an app, with
   `{utk_id, sealed{password}}`.
   - The vault generates the CEK and the credential key, seals version 1
-    with no secrets, and returns the blob.
+    with no items, and returns the blob.
   - A vault has at most one credential.
   - Until a credential exists the vault is restricted (§3.5.7).
 - **Distribution.** The app stores the blob and confirms it (§3.5.3).
@@ -690,6 +718,10 @@ setting (§10.8) is on, which is the default.
 - If the vault keeps its stored state in several versions for durability,
   every version holds the same vault-sealed object. The copies under
   destroyed CEKs are useless.
+- The critical items' values are not in the blob but in DEK state,
+  encrypted under the item keys the blob holds (§10.7): whichever copy
+  of the latest blob a recovery uses (§11.11.5), it opens them, and
+  `credential.recover` re-keys every item.
 
 With `credential.backup` off, the vault keeps the latest blob only until
 the app confirms it (§3.5.3), then only its hash and version.
@@ -727,7 +759,7 @@ A vault MUST have a credential before it is used.
   possibly the latest blob.
 - **The vault** (an approved release, §11.10) holds the current CEK but
   not the password. It cannot open the credential, use its keys or read
-  its secrets unless the member's app sends the password for an
+  its critical items unless the member's app sends the password for an
   operation. During that operation, and during an unlock window for the
   credential key, an approved release does see the plaintext. A malicious
   release the member approved is out of scope (§2.2), as for the PIN.
@@ -736,13 +768,15 @@ A vault MUST have a credential before it is used.
   online, through a paired app session, with a UTK, under the backoff.
   The blob is useless once the member uses the credential again.
 - **An attacker reading or altering an app's session** cannot see the
-  password or secret values (UTK and reply-key sealing), replay an
+  password or critical values (UTK and reply-key sealing), replay an
   operation (single-use UTKs), or redirect a payload (bound to type and
   request id).
 - **An attacker who obtains the decrypted vault state** (the DEK, which
   needs the PIN and the enclave) holds the current CEK and, if kept, the
   latest blob, and can guess the password offline against Argon2id. The
-  password, not the PIN, is what protects the credential in that case.
+  password, not the PIN, is what protects the credential in that case,
+  and with it the critical items: their ciphertext in DEK state opens
+  only with the item keys inside the credential (§10.7).
 
 ## 4. Cryptographic construction
 
@@ -1375,16 +1409,20 @@ current access session, so a request made within a session renews it.
   session; responses and the messages of this section always do.
 - Within it, a **desktop** may send the types listed for it in §10. Some
   of them are **step-up types**: the vault holds each such request until
-  an app approves it (below). They are the types that read or change a
-  vault-held secret value, the profile or the settings, create or accept
-  an invitation, remove a connection or lift a block, or disclose data to
-  a connection or change what connections can obtain: `secret.get`,
-  `secret.put`, `secret.delete`, `profile.set`, `settings.set`,
+  an app approves it (below). They are the types that reveal a secret
+  item's values, change items, tags that sharing may depend on, the
+  profile or the settings, create or accept an invitation, remove a
+  connection or lift a block, or disclose data to a connection or change
+  what connections can obtain: `item.put`, `item.reveal`, `item.tag`,
+  `item.sensitivity`, `item.delete`, `tag.delete`, `tag.merge`,
+  `profile.set`, `settings.set`, `share.rule.set`, `share.decide`,
   `connection.invite.create`, `connection.invite.accept`,
   `connection.remove`, `block.remove`, `grant.decide`,
   `action.configure`, `intro.create` and `intro.accept`. Apps are never held. (Types that use the credential,
   such as `critical-secret-use.approve` and signed `leash.grant.issue`,
-  are app-only.)
+  are app-only. A step-up type's app-only form, such as a critical
+  item's `item.put` or an agent's `share.rule.set`, is answered
+  `forbidden` to a desktop at once, never held, §10.7, §10.12.)
 - An **agent** may send only the types listed for agents in §10, unless
   its LEASH grants (§10.11) allow more. For an agent's `agent.request`,
   and for its request of a type that a desktop may send but agents are
@@ -1547,8 +1585,9 @@ batch's flush, behind any queued deposits to the same mailbox, and are
 lost if that deposit fails or the vault stops first. A retransmission of
 such a request is therefore executed again. This is allowed only for types
 whose only side effects are audit and feed entries. No type of this
-document needs it today: `credential.secret.get` seals the value to a
-one-time reply key instead (§3.5.4), so its response is cached normally.
+document needs it today: `item.reveal` of a critical item seals the
+values to a one-time reply key instead (§3.5.4), so its response is
+cached normally.
 
 Both stores are flushed with the state changes before the ack (§8.3).
 
@@ -1678,9 +1717,10 @@ There are no multi-recipient primitives.
 
 **req** marks a request (§8.1). Body schemas for lifecycle, sessions,
 devices and access sessions, connections (with blocks and member
-authentication), messaging, the credential, secrets, profile, settings,
-audit, feed, calls, LEASH, grants, critical-secret use and shared actions
-are in §10.1–§10.14; the others are **TBD per feature** (§15).
+authentication), messaging, the credential, items, tags, profile,
+settings, audit, feed, calls, LEASH, share rules and grants,
+critical-item use and shared actions are in §10.1–§10.14; the others are
+**TBD per feature** (§15).
 
 Every flow between vaults is a set of **events** correlated by ids in
 their bodies (`request_id`, `fetch_id`, `invocation_id`), never a V↔V
@@ -1702,11 +1742,11 @@ an answer to an unknown or expired id is dropped.
 | | `relay.token.issued` / `relay.token.refresh` | any | — / req | Deliver or request a token |
 | | `relay.address.update`, `identity.rotate` | any | | Rotation (§3.4) |
 | Credential | `credential.create`, `.get`, `.version`, `.unlock`, `.lock`, `.rotate`, `.password.change`, `.delete` | D→V | req | Protean Credential lifecycle (§3.5, §10.6) |
-| | `credential.secret.add`, `.get`, `.list`, `.delete` | D→V | req | Critical secrets, inside the credential (§10.6) |
 | | `pin.change` | D→V | req | Re-derive the DEK and re-seal the header (§10.6) |
-| Secrets & profile | `secret.put`, `.get`, `.list`, `.delete` | D→V | req | Vault-held secrets (§10.7) |
-| | `profile.get`, `profile.set`, `settings.get`, `settings.set` | D→V | req | Owner profile and policy (§10.8) |
-| | `profile.update` | V↔V | | Shared profile to a connection (§9.3, §10.8) |
+| Items & profile | `item.put`, `.get`, `.reveal`, `.list`, `.tag`, `.sensitivity`, `.delete` | D→V | req | The member's items: `data`, `secret` and `critical` (§10.7) |
+| | `tag.list`, `.set`, `.delete`, `.merge` | D→V | req | The tag registry; rename and merge (§10.8) |
+| | `profile.get`, `profile.set`, `settings.get`, `settings.set` | D→V | req | Display name and photo; owner policy (§10.8) |
+| | `profile.update` | V↔V | | Shared profile (name, photo, `@profile` items) to a connection (§9.3, §10.8) |
 | | `sync.event` / `sync.since` | V→D, V↔V / D→V, V↔V | — / req | Mirror changes (kinds in §10.1); catch up |
 | Connections | `connection.invite.create`, `.list`, `.cancel`, `.accept` | D→V | req | Invitations (§6.4) |
 | | `connection.request.pending` | V→D | | Awaiting approval (profile, `sas`, `remote`) |
@@ -1732,7 +1772,7 @@ an answer to an unknown or expired id is dropped.
 | | `device.session.request`, `.approve`, `.deny`, `.end` | D→V | req | Access sessions of desktops and agents (§6.8) |
 | | `device.session.pending`, `.granted`, `.ended` | V→D | | Asked; granted; ended or denied |
 | | `approval.pending`, `approval.waiting` / `approval.decide` | V→D / D→V | — / req | A desktop's step-up request or an agent's referred request, held for an app (§6.8) |
-| | `agent.request` | D→V (agent) | req | LEASH: the catalog, a cataloged secret, a use of one without exposure (§10.11) |
+| | `agent.request` | D→V (agent) | req | LEASH: the catalog, an item its share rules include, a use of a field without exposure (§10.11) |
 | LEASH | `leash.grant.issue`, `.revoke`, `.list` | D→V | req | Manage agent grants (§10.11) |
 | | `leash.grant.updated` | V→D (agent) | | The agent's current grants |
 | Wallet | `wallet.*` (list, address, send, ...) | D→V | req | Owner wallet operations |
@@ -1745,10 +1785,12 @@ an answer to an unknown or expired id is dropped.
 | Introductions | `intro.create`, `.cancel`, `.list`, `.accept`, `.decline` | D→V | req | Introduce two connections; answer an introduction (§10.15) |
 | | `intro.offer`, `.answer`, `.connect`, `.invite`, `.link`, `.closed` | V↔V | | Between the introducer and each party |
 | | `intro.pending`, `intro.event` | V→D | | Offered; answered, connecting or closed |
-| Grants | `grant.request`, `.decide`, `.revoke`, `.list`, `.fetch`, `.catalog` | D→V | req | 1:1 grants of profile fields and secrets (§10.12) |
-| | `data.request`, `data.decided`, `data.revoked`, `data.fetch`, `data.value`, `data.catalog.get`, `data.catalog` | V↔V | | Between the two vaults |
+| Sharing | `share.rule.set`, `.list`, `.delete`, `share.decide` | D→V | req | Share rules for connections and agents; decide the items they ask about (§10.12) |
+| | `share.pending` | V→D | | Items waiting for the member's decision (§10.12) |
+| Grants | `grant.request`, `.decide`, `.revoke`, `.list`, `.fetch`, `.catalog` | D→V | req | 1:1 grants of items; a connection's catalog (§10.12) |
+| | `data.request`, `data.decided`, `data.shared`, `data.revoked`, `data.fetch`, `data.value`, `data.catalog.get`, `data.catalog` | V↔V | | Between the two vaults |
 | | `grant.pending`, `grant.event`, `grant.value`, `grant.catalog.result` | V→D | | Asked; granted, denied or revoked; a value sealed to the fetching device; a connection's catalog |
-| Critical secrets | `critical-secret-use.request`, `.approve`, `.deny`, `.list`; `credential.secret.catalog` | D→V | req | Ask a connection's member to use a critical secret; consent with the password; catalog a critical secret (§10.13) |
+| Critical items | `critical-secret-use.request`, `.approve`, `.deny`, `.list` | D→V | req | Ask a connection's member to use a critical item; consent with the password (§10.13) |
 | | `critical-secret.use`, `critical-secret.result` | V↔V | | The request; the result or refusal |
 | | `critical-secret-use.pending`, `critical-secret-use.result` | V→D | | Asked (apps and desktops); the result |
 | Presence | `presence.query`, `presence.set` | D→V | req | Ask; set own state and policy |
@@ -1806,14 +1848,16 @@ an answer to an unknown or expired id is dropped.
     that no LEASH grant covers (§6.8, §10.11), and `credential_locked` a
     signed LEASH grant outside the unlock window. Refusals between vaults
     are not error responses but `status` or `error` members of the
-    answering event (§10.12–§10.14).
+    answering event (§10.12–§10.14);
+  - and (0.7.0) `in_use`: `tag.delete` of a tag a share rule names
+    (§10.8).
 - A request answered with an error changes no state, except the password
   backoff, the spent UTK and the audit log and feed entries of §3.5.3.
   Objects that several
   owner devices can edit carry a `version` (an integer from 1, `0` before
   the first write); a change MUST name the version it was based on, and
   the vault answers `conflict` if it differs.
-- Ids the vault assigns (`secret_id`, `item_id`, `entry_id`) are ULIDs.
+- Ids the vault assigns (`item_id`, `rule_id`, `entry_id`) are ULIDs.
 - A type sent by a principal whose role is not listed for it is answered
   with `forbidden` (requests) or dropped and audited (other messages).
 - Side effects reach the owner's other devices (§9.1) as `sync.event`
@@ -1828,8 +1872,9 @@ an answer to an unknown or expired id is dropped.
   | `vault.release` | `release` (PCR0 hex), `release_number`; sent once after a vault first runs under a new release (§11.10.6) |
   | `credential.changed` | `version` (§3.5.5) |
   | `credential.deleted` | — |
-  | `secret.changed` | `secret_id`, `version` |
-  | `secret.deleted` | `secret_id` |
+  | `item.changed` | `item_id`, `version` (§10.7) |
+  | `item.deleted` | `item_id` (§10.7) |
+  | `tag.changed` | `version`: the registry, or tags on items, changed (§10.8) |
   | `profile.changed` | `version` |
   | `settings.changed` | `version` |
   | `feed.updated` | `item_id`, `seq` |
@@ -1844,7 +1889,9 @@ an answer to an unknown or expired id is dropped.
   | `leash.agent.suspended` | `agent_id`, `suspended` (§10.11) |
   | `grant.changed` | `grant_id`, `state` (`active`, `used`, `expired`, `revoked`) (§10.12) |
   | `grant.request.decided` | `request_id`, `approved` (§10.12) |
-  | `credential.secret.cataloged` | `secret_id`, `cataloged` (§10.13) |
+  | `share.rule.changed` | `rule_id`, `version` (§10.12) |
+  | `share.rule.deleted` | `rule_id` (§10.12) |
+  | `share.decided` | `rule_id`, `included`, `declined` (§10.12) |
   | `critical-secret-use.decided` | `request_id`, `approved` (§10.13) |
   | `action.changed` | `action_id`, `version`: its configuration changed (§10.14) |
   | `action.decided` | `invocation_id`, `approved` (§10.14) |
@@ -2049,21 +2096,23 @@ vault signs a fresh challenge with the member's **credential key**
 
 The D→V messaging types are sent by `app` or `desktop` devices.
 
-### 10.6 Credential and critical secrets (§3.5)
+### 10.6 Credential (§3.5)
 
 Every type below is sent by an owner device of role `app`, except
-`credential.version` and `credential.secret.list`, which an `app` or
-`desktop` may send.
+`credential.version`, which an `app` or `desktop` may send. Critical
+items, the member's data inside the credential, are `item.*` types with
+`sensitivity: "critical"` (§10.7); they follow the rules of this section
+for `credential`, `utk_id` and `sealed`.
 
 - `credential` is the standard base64 of a §3.5.2 blob.
 - `utk_id` and `sealed` carry the UTK-sealed payload (§3.5.4). The
   payload members are shown in `{…}` after `sealed`: `password` and
-  `new_password` (UTF-8, 8–1,024 bytes), `secret_id`, `name`, `category`,
-  `description`, `value` and `reply_key`.
+  `new_password` (UTF-8, 8–1,024 bytes), `item_id`, `item`, `reply_key`,
+  `request_id` and `payload_sha256`.
 - Types that carry `sealed` can answer `utk_invalid` (§3.5.4). Types that
   carry `credential` follow §3.5.3: they can answer `backoff`,
   `stale_credential` and `bad_password`, and on success they rotate the
-  CEK and return the new `credential` and `version`.
+  CEK and return the new `credential` and its version.
 - Every response to a type that spent a UTK carries `utks` (an array of
   §3.5.4 UTKs, possibly empty) to replenish the app's pool.
 
@@ -2078,88 +2127,274 @@ Every type below is sent by an owner device of role `app`, except
 | `credential.lock` | `{}` | `{}` |
 | `credential.rotate` | `{credential, utk_id, sealed{password}}` | `{credential, version, key, utks}`; the vault also rotates `ik` and `kem` (§3.4) |
 | `credential.password.change` | `{credential, utk_id, sealed{password, new_password}}` | `{credential, version, utks}` |
-| `credential.delete` | `{credential, utk_id, sealed{password}}` | `{}` |
-| `credential.secret.add` | `{credential, utk_id, sealed{password, name, category, description?, value}}` | `{secret_id, credential, version, utks}` |
-| `credential.secret.get` | `{credential, utk_id, sealed{password, secret_id, reply_key}}` | `{secret_id, name, category, description?, value_sealed, created_at, credential, version, utks}` (§3.5.4) |
-| `credential.secret.list` | `{}` | `{version, secrets: [{secret_id, name, category, description?, cataloged, created_at}]}` |
-| `credential.secret.catalog` | `{secret_id, cataloged: bool}` | `{}`; lists the secret's metadata in the catalog to connections, for critical-secret use only (§10.13). No password: it changes only vault-held metadata |
-| `credential.secret.delete` | `{credential, utk_id, sealed{password, secret_id}}` | `{credential, version, utks}` |
+| `credential.delete` | `{credential, utk_id, sealed{password}}` | `{}`; the critical items go with it (§10.7) |
 | `credential.recover` | `{credential?, utk_id, sealed{password}}` | `{credential, version, utks}` (§11.11.5) |
 | `pin.change` | `{pin, new_pin}` | `{}`; `bad_pin` if `pin` is wrong |
 
 - `key` is the credential key's public key (base64). `version` is the
-  credential's version (§3.5.2).
-- **Field sizes.** `name` is 1–128 bytes and `description` at most 1,024
-  bytes; `category` and `value` are as in §3.5.2 (`value` is base64,
-  1–8,192 bytes decoded). `reply_key` is a 1,216-byte KEM `ek`. A
-  credential holds at most 64 secrets (`limit`).
-- **Metadata.** The secrets' metadata (`credential.secret.list`) is kept in
-  vault state so that it can be listed without the password. Values are
-  only in the credential.
+  credential's version (§3.5.2). In the `item.*` types, whose own
+  `version` is the item's, the credential's is `credential_version`.
+- `reply_key` is a 1,216-byte KEM `ek`.
 - **Change notices.** Every new version sends
   `sync.event{kind: "credential.changed", version}` to the owner's other
   devices (`credential.deleted` for a delete).
 - **`pin.change`** re-derives the DEK from `new_pin` (§3.3.1, fresh salt)
   and re-encrypts the state and the header. Its crash-safe write order is
   specified together with its implementation (§15).
+- 0.7.0 removed `credential.secret.add`, `.get`, `.list`, `.delete` and
+  `.catalog`: critical secrets are critical items (§10.7), and what a
+  connection may use is decided by share rules (§10.12).
 
-### 10.7 Secrets
+### 10.7 Items
 
-Secrets are vault-held values that the owner can read without the
-password (the "minor" secrets; critical ones belong in the credential).
-They are kept in DEK state. Sent by `app` or `desktop`.
+Everything the member stores is an **item**: a name, a category, typed
+**fields**, free-form **tags** (§10.8) and a **sensitivity** that decides
+where the vault keeps it. Items replace the profile fields, vault-held
+secrets and critical secrets of 0.6.0 (VAULT-ITEMS, owner decisions of
+2026-10-03). Templates (a passport, a login, a bank account) belong to
+the apps, which pre-fill fields and suggest tags and a sensitivity from
+them; a shared registry of recommended templates is kept with the
+reference implementation (vettid-vault `docs/item-templates.json`). The
+vault validates shape and size only.
+
+```json
+item: { "item_id": "<ULID>", "version": 3, "name": "Passport", "category": "identity_document",
+        "sensitivity": "data|secret|critical", "template": "passport", "tags": ["identity", "travel"],
+        "fields": [ { "field_id": "f1", "label": "Number", "kind": "text", "value": "…" },
+                    { "field_id": "f2", "label": "Expires", "kind": "date", "value": "2031-04-30" } ],
+        "notes": "…", "created_at": "<ts>", "updated_at": "<ts>" }
+```
+
+**Members.**
+
+- `name` is 1–128 bytes. `category` matches `[a-z][a-z0-9_]{0,31}`
+  (default `other`); the recommended categories are `identity_document`,
+  `login`, `payment_card`, `bank_account`, `medical`, `insurance`,
+  `vehicle`, `contact`, `note`, `crypto_wallet` and `other`. `template`
+  (optional) matches `[a-z0-9_.-]{1,64}` and is opaque to the vault.
+  `notes` is at most 16,384 bytes. `tags` is at most 16 tags (§10.8).
+- **Text.** No string member of an item may contain a control character
+  (U+0000–U+001F, U+007F), except line feed and tab in `notes` and in
+  `multiline` and `password` values.
+- **Fields** are ordered, at most 64. `label` is 1–64 bytes. `field_id`
+  is assigned by the vault (`f1`, `f2`, ... from a counter of the item,
+  never reused): in `item.put` a field either names a `field_id` of the
+  item's current version (the same field, possibly relabelled) or has
+  none (a new field); any other `field_id` is `bad_request`.
+- **Kinds** drive the apps' input and display; the vault checks only the
+  shape of a `value`. Every kind accepts `""` (not filled in):
+
+  | `kind` | `value` |
+  |---|---|
+  | `text` | a string of at most 16,384 bytes, without line breaks |
+  | `multiline` | a string of at most 16,384 bytes |
+  | `number` | a decimal: `-?[0-9]{1,32}(\.[0-9]{1,32})?` |
+  | `date` | `YYYY-MM-DD` or `YYYY-MM`, a valid calendar date |
+  | `email` | at most 254 bytes: one `@` between a non-empty local part and domain, no white space |
+  | `phone` | at most 32 bytes of digits, spaces and `+-().`, with at least one digit |
+  | `url` | an absolute URI with a scheme, at most 2,048 bytes, no white space |
+  | `password` | a string of at most 16,384 bytes; apps mask it and reveal it on purpose |
+  | `otp` | a TOTP seed: an `otpauth://` URI of at most 2,048 bytes, or a base32 secret (RFC 4648 alphabet, case-insensitive, 16–256 characters, optional `=` padding) |
+  | `address` | an object `{street?, street2?, city?, region?, postal_code?, country?}` of strings of at most 256 bytes without line breaks; `country` is an ISO 3166-1 alpha-2 code in upper case; other members are refused |
+  | `file` | reserved for blob references (owner decision 4: files later); refused with `bad_request` |
+
+- **Size.** An item's encoding as in `item.get` with every value (the
+  canonical JSON the vault returns) is at most 65,536 bytes; a vault
+  holds at most 2,000 items, critical ones included (`limit`).
+
+**Sensitivity**, chosen per item at creation (default `data`; owner
+decision 1):
+
+| `sensitivity` | Kept in | Owner access | Shared |
+|---|---|---|---|
+| `data` | DEK state | apps and desktops, values in `item.get` | by share rules and grants (§10.12) |
+| `secret` | DEK state | apps; desktops with step-up (§6.8); values only through `item.reveal`, audited | by share rules and grants (§10.12) |
+| `critical` | DEK state, its values and notes encrypted under an item key that only the Protean Credential holds (§3.5.2); its metadata (name, category, template, tags, field ids, labels and kinds) in the clear in DEK state | apps only, each read or change a credential operation with the password (§3.5.3) | never readable by anyone else: a share rule can at most make it *usable* (§10.13) |
+
+- A critical item is at most 64 fields and its encoding at most 12,288
+  bytes (its content travels in one UTK payload, §3.5.4); a vault holds
+  at most 1,000 critical items (`limit`).
+- **Envelope encryption** (owner decision of 2026-10-03). A critical
+  item's values and notes are encrypted under a random 32-byte item key:
+
+  ```
+  sealed = nonce (24) || XChaCha20-Poly1305(item key, nonce, aad, values)
+  aad    = "vettid/vms/2/critical-item" || 0x00 || vault_id || 0x00 || item_id
+           || 0x00 || uint64be(gen) || (0x00 || field_id)*    (the item's field ids, in order)
+  values = {"fields": [{"field_id", "value"}], "notes"?}
+  ```
+
+  The ciphertext is kept with the item in DEK state; the key and its
+  generation `gen` only inside the credential (§3.5.2). Without the
+  credential and the password the vault cannot decrypt the values, so
+  every §3.5 property holds as before: the CEK rotates at every use, old
+  blobs are dead, inputs are UTK-sealed, outputs reply-key-sealed, and no
+  plaintext is retained after the operation.
+- **Item keys rotate on every use of the item.** Each operation that
+  opens an item (`item.reveal`, `item.put`, a critical-item use, §10.13)
+  re-encrypts it under a fresh key with `gen` + 1, in the same flush as
+  the CEK rotation; `credential.rotate` and `credential.recover` re-key
+  every critical item. Rationale: a key someone once obtained (from an
+  old blob opened with its CEK and the password, or from a compromised
+  release during an operation) stops opening the item at its next use,
+  as an old blob stops opening at the credential's next use; re-keying
+  one item costs one AEAD pass of at most 12 KiB. Re-keying every item at
+  every credential use would also cover items not used since, at a cost
+  that grows with the number of items; `credential.rotate`, which apps
+  SHOULD offer at least yearly (§3.5.5), does that on demand.
+- `item.sensitivity` changes it. `data` ↔ `secret` is a metadata change.
+  Moving to or from `critical` is a credential operation: the vault moves
+  the values between DEK state and the credential itself, without them
+  crossing the session. Apps MUST warn the member before an item leaves
+  `critical`: its values then live in DEK state, readable by the vault
+  without the password.
+- The tag `@profile` is allowed only on `data` items (§10.8); an item
+  carrying it cannot leave `data` (`bad_request`).
 
 | Type | Request body | Response body |
 |---|---|---|
-| `secret.put` | `{secret_id?, version?, name, value, category?, description?, discoverability?}` | `{secret_id, version, updated_at}` |
-| `secret.get` | `{secret_id}` | `{secret_id, version, name, value, category, description?, discoverability, created_at, updated_at}` |
-| `secret.list` | `{}` | `{secrets: [<secret.get body without value>, ...]}`, sorted by `name` |
-| `secret.delete` | `{secret_id}` | `{}` |
+| `item.put` (app; desktop: step-up) | `data`, `secret`: `{item_id?, version?, sensitivity?, name, category?, template?, tags?, fields?, notes?}` | `{item_id, version, updated_at}` |
+| | `critical` (app): `{version?, sensitivity: "critical", tags?, credential, utk_id, sealed{password, item_id?, item}}`, where `item` is `{name, category?, template?, fields?, notes?}` | `{item_id, version, updated_at, credential, credential_version, utks}` |
+| `item.get` (app, desktop) | `{item_id}` | `<item>`: a `data` item with its values; a `secret` or `critical` item without `value`s and `notes`, with `has_notes` |
+| `item.reveal` (app; desktop: step-up) | `secret`: `{item_id, fields?: [<field_id>]}` (a `data` item: `{item_id}`, as `item.get`) | `<item>` with its values (only those `fields`, without `notes`, if given) |
+| | `critical` (app): `{item_id, credential, utk_id, sealed{password, item_id, reply_key}}` | `{item_id, version, values_sealed, credential, credential_version, utks}` |
+| `item.list` (app, desktop) | `{tags?, match?, category?, sensitivity?, after?, limit?}` | `{items: [<item without values and notes>], next?}` |
+| `item.tag` (app; desktop: step-up) | `{item_id, version, tags}` | `{version}` |
+| `item.sensitivity` (app; desktop: step-up, `data` ↔ `secret` only) | `{item_id, version, sensitivity}`; to or from `critical` (app) also `credential, utk_id, sealed{password, item_id}` | `{version}`; with the credential also `{credential, credential_version, utks}` |
+| `item.delete` (app; desktop: step-up) | `{item_id}`; `critical` (app): `{item_id, credential, utk_id, sealed{password, item_id}}` | `{}`; `critical`: `{credential, credential_version, utks}` |
 
-- Without `secret_id`, `secret.put` creates a secret (version 1, and
-  `version` MUST be absent). With `secret_id`, it replaces that secret and
-  `version` is required (`not_found`, `conflict`).
-- `name` 1–128 bytes; `value` a string of 1–16,384 bytes; `category`
-  matches `[a-z][a-z0-9_]{0,31}` (default `other`); `description` at most
-  1,024 bytes; `discoverability` is `private` (default) or `cataloged`.
-  At most 500 secrets (`limit`).
-- **Discoverability** (0.6.0). A `cataloged` secret's metadata (never its
-  value) is listed in the vault's catalog to its connections (§10.12) and
-  to agents with a `secrets.catalog` grant (§10.11). Only a `cataloged`
-  secret can be granted to a connection (§10.12) or read or used by an
-  agent (§10.11); turning it `private` again stops every later fetch,
-  read and use (grants already issued for it then answer `unavailable`).
-  A `private` secret reaches only the owner's apps and desktops.
-- Changes send `sync.event` `secret.changed` or `secret.deleted`.
+- **Critical forms are app-only.** A desktop's request in a critical form
+  (one that carries `credential`, names `sensitivity: "critical"`, or
+  acts on a critical item) is answered `forbidden` at once, never held
+  for an app's approval it could not pass (§6.8).
+- **Create and replace.** Without `item_id`, `item.put` creates an item
+  (`version` absent); with it, it replaces the item's name, category,
+  template, tags, fields and notes (`version` required, `not_found`,
+  `conflict`, §10.1). A replacement keeps the item's sensitivity
+  (`sensitivity`, if given, MUST equal it; `item.sensitivity` changes it).
+  `tags` absent leaves the tags as they are. For a critical item the
+  content travels in the UTK-sealed `item`, and `item_id` (to replace)
+  inside the payload, so that a session attacker can neither read it nor
+  redirect it to another item; only `version` and `tags` are outside.
+- **Reading.** `item.get` never returns the values of `secret` or
+  `critical` items: the member reveals them on purpose. `item.reveal` of
+  a `secret` item returns them in the clear inside the session (the
+  response is cached like any other, §8.2) and is recorded as
+  `item.revealed`. `item.reveal` of a `critical` item opens the
+  credential and returns the values sealed to the request's one-time
+  reply key (§3.5.4) as `values_sealed`, whose plaintext is
+  `{"fields": [{"field_id", "value"}], "notes"?}`; it is recorded as
+  `item.revealed` and is a feed item.
+- **Listing.** `item.list` returns items sorted by `item_id`, filtered by
+  `tags` (1–16 tags, normalised as in §10.8; `match` `any`, the default,
+  or `all`), `category` and `sensitivity`. `limit` is 1–500 (default
+  100); the vault returns fewer items when the response would exceed
+  131,072 bytes. `next` is present when more items match: the next call
+  passes it as `after`.
+- **Tags** change with `item.put` or `item.tag` (no password, for every
+  sensitivity: tags are metadata). A tag change can include or withdraw
+  the item in share rules (§10.12); the apps show the effect before
+  saving.
+- **Deleting** an item withdraws it from every share rule and revokes its
+  grants (§10.12). A critical item's values are removed from the
+  credential.
+- `credential.delete` (§10.6) deletes every critical item.
+- **Change notices.** `sync.event` `item.changed` (`item_id`, `version`)
+  or `item.deleted` (`item_id`), never with values.
+- **Audit and feed.** `item.added`, `item.updated` (content or tags),
+  `item.deleted`, `item.sensitivity_changed`, `item.revealed`
+  (`ref` = `item_id`); revealing a critical item is also a feed item
+  (`item.revealed`).
 
-### 10.8 Profile and settings
+### 10.8 Tags, profile and settings
 
-**Profile.** The owner's profile is one set of fields, which also holds
-what the earlier design called personal data; `shared` selects what
-connections see. Sent by `app` or `desktop`.
+**Tags.** One namespace of member-defined tags labels items and defines
+sharing: a tag means nothing to connections or agents until a share rule
+names it (§10.12; owner decision 2).
+
+- **Normalisation.** The vault removes leading and trailing spaces, maps
+  `A`–`Z` to `a`–`z` and replaces runs of spaces by one; the result MUST
+  match `[a-z0-9][a-z0-9 _-]{0,31}` (`bad_request` otherwise). Tags are
+  kept sorted, duplicates after normalisation merged.
+- **Reserved tags** start with `@`. The only one is `@profile` (below);
+  any other `@` tag is `bad_request`. Reserved tags cannot be named by a
+  share rule, merged or deleted.
+- **Tag names never leave the vault** in any message to a connection:
+  connections see items (name, category, the field labels they may see),
+  never tags or rules. The exception is an agent's own signed delegation
+  (§10.11), which carries its rule's tags (owner decision of 2026-10-03,
+  §10.11).
+- **The registry** holds optional presentation per tag, versioned as one
+  object (§10.1): `color` (`#rrggbb`), `icon` (`[a-z0-9_.-]{1,64}`, an app
+  icon name) and `description` (at most 256 bytes); at most 512 entries
+  (`limit`).
 
 | Type | Request body | Response body |
 |---|---|---|
-| `profile.get` | `{}` | `{version, name, fields: {<key>: {value, label?, updated_at}}, shared: [<key>], order: [<key>], photo?}` |
-| `profile.set` | `{version, name?, set?: {<key>: {value, label?}}, delete?: [<key>], shared?: [<key>], order?: [<key>], photo?}` | `{version}` |
-| `profile.update` (V↔V) | — | `{version, name, fields: {<key>: {value, label?}}, photo?}` |
+| `tag.list` (app, desktop) | `{after?, limit?}` | `{version, tags: [{tag, color?, icon?, description?, items, rules: [<rule_id>]}], next?}` |
+| `tag.set` (app, desktop) | `{version, tag, color?, icon?, description?}` | `{version}` |
+| `tag.delete` (app; desktop: step-up) | `{version, tag, dry_run?}` | `{version, items}` |
+| `tag.merge` (app; desktop: step-up) | `{version, from: [<tag>], into, dry_run?}` | `{version, items, rules, shares: [{rule_id, item_id, mode}], shares_total}` |
 
-- `<key>` matches `[a-z][a-z0-9_.-]{0,63}`, for example `contact.email.work`.
-  `value` is 1–4,096 bytes; `label` at most 64 bytes; at most 200 fields
-  (`limit`). `name`, the display name, is at most 128 bytes.
-- `photo` is base64 of a JPEG or PNG image of at most 65,536 bytes; in
-  `profile.set`, `""` removes it.
-- `profile.set` applies `delete`, then `set`; `shared` and `order`, if
-  present, replace the lists and MUST name existing keys (a deleted key
-  leaves both lists). The version rules of §10.1 apply.
-- After a change the vault sends `sync.event{kind: "profile.changed"}`,
-  and, if the shared view changed (`name`, `photo`, or a shared field),
-  `profile.update` to every active connection (§9.3).
-- `profile.update` carries only shared fields. A receiver keeps the one
-  with the highest `version` per connection and ignores older ones (§8.4),
-  shows it as the connection's `profile` (§10.4) and notifies its owner
-  devices with `connection.event{event: "profile"}`. It is the peer's
-  self-asserted data, and apps MUST present it as such.
+- `tag.list` lists every tag in the registry, on an item or named by a
+  rule, sorted: `items` is the number of items carrying it, `rules` the
+  share rules naming it (the apps show both on every tag). It is paged
+  like `item.list`: `limit` 1–1,000 (default 500), at most 131,072 bytes,
+  `next` (the last tag returned) to pass as `after`.
+- `tag.set` creates or replaces a registry entry (members absent are
+  cleared).
+- `tag.delete` removes the tag from the registry and from every item. A
+  tag named by a share rule is refused with `in_use`: removing it from
+  the rule could widen what the rule shares.
+- `tag.merge` (1–16 `from` tags; `into` new or existing) replaces each
+  `from` tag by `into` on every item and in every share rule (duplicates
+  removed); registry entries of `from` tags go, and `into` keeps its own
+  entry or takes the first `from` tag's. A rename is a merge of one tag.
+  Items that then newly match a rule are handled as re-tagged (§10.12);
+  `shares` lists them, with the rule's `mode` (`ask`: asked, `auto`:
+  included), within 131,072 bytes, and `shares_total` counts them. A
+  merge of a tag that an agent's rule names is refused with `in_use`:
+  the rule's tags are in its signed delegation (§10.11), which only the
+  member can sign again (`share.rule.set`).
+- With `dry_run: true`, `tag.delete` and `tag.merge` change nothing and
+  answer what they would do; `version` is then the current one.
+- `tag.set`, `tag.delete` and `tag.merge` send one
+  `sync.event{kind: "tag.changed", version}`; the items they change take
+  new versions without `item.changed` notices. They are audited as
+  `tag.changed` (`ref` = the new version).
+
+**Profile.** What connections see of the member is a small profile
+object, the display name and photo, plus the member's `data` items
+tagged **`@profile`** (owner decision 3). Sent by `app` or `desktop`.
+
+| Type | Request body | Response body |
+|---|---|---|
+| `profile.get` | `{}` | `{version, name, photo?}` |
+| `profile.set` | `{version, name?, photo?}` | `{version}` |
+| `profile.update` (V↔V) | — | `{version, name, photo?, items: [{item_id, name, category, fields: [{field_id, label, kind, value}]}]}` |
+
+- `name`, the display name, is at most 128 bytes. `photo` is base64 of a
+  JPEG or PNG image of at most 65,536 bytes; in `profile.set`, `""`
+  removes it. The version rules of §10.1 apply to the profile object.
+- **The shared profile** is `name`, `photo` and every `data` item tagged
+  `@profile`, sorted by `item_id`, with all of its fields (not its notes,
+  tags or other members). At most 32 items carry `@profile`, and a
+  `profile.update` body is at most 196,608 bytes: a change that would
+  exceed either is refused with `limit`.
+- After a change of the profile object, `sync.event{kind:
+  "profile.changed"}`. Whenever the shared profile changes (the name, the
+  photo, or an `@profile` item's tag, name, category or fields), the
+  vault sends `profile.update` to every active connection (§9.3). Its
+  `version` is a counter of the shared profile, distinct from the
+  profile object's.
+- A receiver parses `profile.update` strictly (the field rules of §10.7),
+  keeps the one with the highest `version` per connection and ignores
+  older ones (§8.4), shows it as the connection's `profile` (§10.4) and
+  notifies its owner devices with `connection.event{event: "profile"}`.
+  It is the peer's self-asserted data, and apps MUST present it as such.
+- 0.7.0 removed the profile's own fields, `shared` and `order`: they are
+  `@profile` items, and anything else reaches a connection only through
+  share rules and grants (§10.12).
 
 **Settings.** Owner policy, versioned as one object. Sent by `app` or
 `desktop`.
@@ -2189,7 +2424,8 @@ The vault keeps two records of what happened:
 - the **feed**, the owner's activity list, with read and archive state
   shared by the owner's devices.
 
-Neither holds message text, secret values or keys. Both are DEK state.
+Neither holds message text, item values, tags or keys. Both are DEK
+state.
 All types are sent by `app` or `desktop`.
 
 **Audit.**
@@ -2241,10 +2477,10 @@ entry: { "entry_id": "<ULID>", "seq": 812, "at": "<ts>", "kind": "connection.add
   `connection.stale`, `connection.reconnected`; `identity.rotated`;
   `credential.created`, `credential.rotated`, `credential.password_changed`,
   `credential.password_failed`, `credential.unlocked`, `credential.deleted`;
-  `credential.secret.added`, `credential.secret.read`,
-  `credential.secret.deleted`, `credential.recovered`; `secret.added`,
-  `secret.updated`, `secret.deleted`; `settings.changed` (`ref` = the new
-  version); `recovery.requested`, `recovery.replaced`, `recovery.bad_code`,
+  `credential.recovered`; `item.added`, `item.updated`, `item.deleted`,
+  `item.sensitivity_changed`, `item.revealed` (`ref` = `item_id`),
+  `tag.changed` (`ref` = the registry's new version) (§10.7, §10.8);
+  `settings.changed` (`ref` = the new version); `recovery.requested`, `recovery.replaced`, `recovery.bad_code`,
   `recovery.attestation_failed`, `recovery.registered`,
   `recovery.device_paired`, `recovery.completed`, `recovery.cancelled`,
   `recovery.expired`, `recovery.voided` (§11.11.6); `message.sent`,
@@ -2262,12 +2498,15 @@ entry: { "entry_id": "<ULID>", "seq": 812, "at": "<ts>", "kind": "connection.add
   `leash.grant.revoked`, `leash.rate_limited` (`device_id` = the agent,
   `ref` = `grant_id`), `leash.agent.suspended`, `leash.agent.resumed`,
   `leash.referrals_limited`, and, summarised per agent and hour,
-  `leash.allowed`, `leash.refused`, `leash.secret.read`,
-  `leash.secret.used` and `leash.throttled` with their `<kind>.summary`
+  `leash.allowed`, `leash.refused`, `leash.item.read`,
+  `leash.item.used` and `leash.throttled` with their `<kind>.summary`
   entries (`ref` = the count) (§10.11); `grant.requested`,
   `grant.denied` (`ref` = `request_id`), `grant.issued`,
   `grant.received`, `grant.fetched`, `grant.revoked` (`ref` = `grant_id`)
-  (§10.12); `credential.secret.cataloged` (`ref` = `secret_id`),
+  (§10.12); `share.rule.created`, `share.rule.updated`,
+  `share.rule.deleted` (`ref` = `rule_id`), `share.included`,
+  `share.declined`, `share.withdrawn` (`ref` = `item_id`, with the
+  subject's `connection_id` or `device_id`) (§10.12);
   `critical-secret.use.requested`, `critical-secret.used`,
   `critical-secret.use.denied`, `critical-secret.use.result`
   (`ref` = `request_id`) (§10.13); `action.configured`
@@ -2311,15 +2550,16 @@ item: { "item_id": "<ULID>", "seq": 41, "kind": "connection.request", "at": "<ts
   `connection.added`, `connection.removed`, `connection.stale`,
   `device.pair.pending`, `device.paired`, `device.unlinked`,
   `message.received` (`ref` = `message_id`), `credential.password_failed`,
-  `credential.secret.read`, `credential.rotated`,
+  `item.revealed` (`ref` = `item_id`; critical items), `credential.rotated`,
   `device.session.pending` (`ref` = `request_id`), `approval.pending`
   (`ref` = `approval_id`), `connection.authenticate.requested`
   (`ref` = `request_id`), `call.missed` (`ref` = `call_id`),
-  `leash.rate_limited` (`ref` = `grant_id`), `leash.secret.read`
-  (`ref` = `secret_id`; the first per agent and hour),
+  `leash.rate_limited` (`ref` = `grant_id`), `leash.item.read`
+  (`ref` = `item_id`; the first per agent and hour),
   `leash.agent.suspended`, `leash.referrals_limited`, `grant.request`
   (`ref` = `request_id`),
-  `grant.revoked` (`ref` = `grant_id`), `critical-secret.use.request`
+  `grant.revoked`, `grant.shared` (`ref` = `grant_id`), `share.pending`
+  (`ref` = `rule_id`), `critical-secret.use.request`
   (`ref` = `request_id`), `action.request` (`ref` = `invocation_id`),
   `intro.request` (`ref` = `intro_id`),
   and `guide`. Apps render
@@ -2477,7 +2717,7 @@ becomes hybrid with suite 3.
 ### 10.11 LEASH: the member's agents
 
 LEASH (Lightweight Encrypted Agent Secret Handling, `vettid/LEASH`) is
-VettID's standard for delegating to AI agents: secrets stay in the vault,
+VettID's standard for delegating to AI agents: the member's data stays in the vault,
 the member decides what an agent may do, and every access is audited.
 The vault implements LEASH's vault interface for its member's own agents.
 An agent's LEASH connector is a paired device of role `agent` (§6.7).
@@ -2490,10 +2730,10 @@ LEASH's terms map as follows:
 | Connection Contract | The agent's **grants** (below), each a delegation signed by the member's credential key; issued with the pairing or later by an app, with the member present (the unlock window) |
 | Approval mode | Per grant: `ask` (the default) or `auto`. LEASH's "automatic for all" is not offered |
 | Rate limits; suspension and owner notification | Per grant: `per_hour` and `per_day`; past a limit the grant refers requests to an app until its window ends, and the owner is notified. Per agent: refusal cooldowns, a referral cap and suspension after repeated refusals (below) |
-| Action permissions | The scopes `secrets.use` and the delegable owner types |
+| Action permissions | The scope `items.read` (share rules with the agent as subject, §10.12) and the delegable owner types |
 | Expiry | Per grant (`expires_at`), and the agent's access session (§6.8) |
-| `leash/request_secret` (pattern 1) | `agent.request{op: "secret.get"}` |
-| `leash/execute_action` (pattern 2) | `agent.request{op: "secret.use"}` |
+| `leash/request_secret` (pattern 1) | `agent.request{op: "item.get"}` |
+| `leash/execute_action` (pattern 2) | `agent.request{op: "item.use"}` |
 | `leash/check_status` | `approval.waiting`, then the held request's response (§6.8) |
 | `leash/list_available` | `agent.request{op: "catalog"}` |
 | `leash/connection_info` | `leash.grant.list` from the agent (its own grants) and `vault.status` |
@@ -2508,8 +2748,8 @@ its `ik` and relay key.
 **Grants.** A grant gives one agent one scope:
 
 ```json
-grant: { "grant_id": "<ULID>", "agent_id": "<device id>", "version": 1, "scope": "secrets.get",
-         "approval": "ask", "connections": ["<id>"], "secrets": ["<secret_id>"],
+grant: { "grant_id": "<ULID>", "agent_id": "<device id>", "version": 1, "scope": "message.send",
+         "approval": "ask", "connections": ["<id>"],
          "per_hour": 60, "per_day": 1000, "expires_at": "<ts>", "issued_at": "<ts>",
          "delegation": "<b64>", "delegation_sig": "<b64>", "key": "<b64>" }
 ```
@@ -2518,39 +2758,61 @@ grant: { "grant_id": "<ULID>", "agent_id": "<device id>", "version": 1, "scope":
 
   | Scope | Lets the agent send |
   |---|---|
-  | `secrets.catalog` | `agent.request{op: "catalog"}` |
-  | `secrets.get` | `agent.request{op: "secret.get"}` |
-  | `secrets.use` | `agent.request{op: "secret.use"}` |
+  | `items.read` | `agent.request` (`catalog`, `item.get`, `item.use`) on the items the grant's share rule includes (below) |
   | `connection.list`, `connection.get`, `message.send`, `message.list`, `message.get`, `message.read`, `profile.get`, `action.list`, `action.invoke` | That owner type: the **delegable** types |
 
   No other type is delegable. In particular an agent is never given a type
-  only apps may send, `secret.*` (it sees cataloged secrets only through
-  LEASH), `credential.*`, `device.*`, `approval.*`, `leash.*` (agents
-  may send `leash.grant.list` for their own grants),
+  only apps may send, `item.*`, `tag.*` or `share.*` (it sees items only
+  through LEASH), `credential.*`, `device.*`, `approval.*`, `leash.*`
+  (agents may send `leash.grant.list` for their own grants),
   `settings.*`, `profile.set`, invitations, `connection.approve`,
   `.decline`, `.remove` or `.update`, `block.*`, `call.*`, `grant.*`,
   `critical-secret-use.*` or `connection.authenticate.*`.
 - `approval` is `ask` (the default: every request is referred to an app,
   §6.8) or `auto` (allowed without approval, within the rate limits).
-  `auto` with scope `secrets.get` requires `secrets`: an agent reads
-  values without approval only from secrets the member named.
 - `connections` (1–64 connection ids) restricts the types whose body
   carries `connection_id` (`connection.get`, `message.send`, `.list`,
   `.get`, `.read`, `action.invoke`) to those connections; it is refused
-  (`bad_request`) for other scopes. `secrets` (1–64
-  `secret_id`s) restricts the `secrets.*` scopes to those secrets and is
-  refused for other scopes. A request matches a grant only if it meets
-  its restrictions; a request without the restricted member never
-  matches (on `secrets.catalog`, `secrets` filters the listing instead).
+  (`bad_request`) for other scopes. A request matches a grant only if it
+  meets its restrictions; a request without the restricted member never
+  matches.
 - `per_hour` (1–3,600) and `per_day` (1–86,400) bound the requests the
   grant allows without approval, in windows that start at the first such
-  request; for an `auto` grant they default to 60 and 1,000, and they
-  are refused for an `ask` grant. Requests an app approved are not
-  counted.
-- `expires_at` is optional, in the future and at most 365 days ahead; an
-  expired grant matches nothing and is dropped. `status_ttl` (60–3,600 s,
+  request; for an `auto` or `items.read` grant they default to 60 and
+  1,000, and they are refused for any other `ask` grant. Requests an app
+  approved are not counted.
+- `expires_at` is optional, in the future and at most 365 days ahead (an
+  `items.read` grant: its rule's `expires_at`, §10.12); an expired grant
+  matches nothing and is dropped. `status_ttl` (60–3,600 s,
   default 900) is the lifetime of the grant's status statements (below).
-- An agent holds at most 32 grants (`limit`). `version` follows §10.1.
+- An agent holds at most 32 grants, its `items.read` grants included
+  (`limit`). `version` follows §10.1.
+
+**Agent share rules (`items.read`).** A share rule whose subject is an
+agent (§10.12) is that agent's grant of scope `items.read`:
+
+- An app issues, replaces or deletes it with `share.rule.set` and
+  `share.rule.delete` (§10.12); issuing or replacing it signs a
+  delegation (below), so it needs the unlock window (`credential_locked`
+  outside it). It appears among the agent's grants (`leash.grant.list`,
+  `leash.grant.updated`) with `grant_id` = its `rule_id`, `approval` =
+  its `mode`, and its `tags`, `match`, `access`, `uses`, `per_hour`,
+  `per_day`, `expires_at` and `status_ttl`. `leash.grant.issue` and
+  `device.pair.approve{grants}` refuse scope `items.read`
+  (`bad_request`); `leash.grant.revoke` of it deletes the rule.
+- Its `mode` decides **inclusion** as for a connection (§10.12): `ask`,
+  the default (owner decision 5), asks the member for each item that
+  gains the rule; `auto` includes such items without asking. A rule
+  always names its tags, so `auto` covers only items the member tagged
+  for it (as 0.6.0 required `auto` reads to name their secrets).
+- Owner decision (2026-10-03): an **included** item is read without a
+  further approval within the rule's `per_hour` and `per_day`; past
+  them, requests are referred to an app as for any grant (below), so that
+  `ask` means one prompt per item rather than one per read.
+- It never includes a `critical` item: critical items are never
+  reachable by agents. `uses` counts the reads (`item.get` and
+  `item.use`) of each included item; an item with no use left is no
+  longer included.
 
 **Decisions** (§6.8). For a request of an agent within its access
 session, the vault takes the agent's unexpired grants whose scope is the
@@ -2562,11 +2824,13 @@ request meets:
    *throttled*);
 1. no grant: it **refuses** (`forbidden`, counted as *refused*) and
    starts or extends the scope's cooldown;
-2. an `auto` grant within both of its windows: it **allows** the request
-   and counts it on that grant;
+2. an `auto` grant, or an `items.read` grant whose rule includes the
+   item (for `catalog`, any `items.read` grant), within both of its
+   windows: it **allows** the request and counts it on that grant;
 3. otherwise it **refers** the request to an app (`approval.pending`,
    §6.8), up to the referral cap (below). The first referral of an
-   `auto` grant past a limit in a window records `leash.rate_limited`,
+   `auto` or `items.read` grant past a limit in a window records
+   `leash.rate_limited`,
    in the audit log and as a high-priority feed item.
 
 An `agent.request` whose body does not parse is answered `bad_request`.
@@ -2610,29 +2874,34 @@ first event in it), the first event of each kind is written singly;
 later ones are counted, and when the window ends the vault writes one
 `<kind>.summary` entry whose `ref` is the count of events not written
 singly. The kinds are `leash.allowed` (`ref` = `grant_id`),
-`leash.refused` (`ref` = the scope), `leash.secret.read` and
-`leash.secret.used` (`ref` = `secret_id`), and `leash.throttled` (only
+`leash.refused` (`ref` = the scope), `leash.item.read` and
+`leash.item.used` (`ref` = `item_id`), and `leash.throttled` (only
 ever summarised). An agent therefore adds at most two entries per kind
 and hour. The vault has no timers: a window's summaries are written when
 the agent's next window starts, at its suspension or resumption, or
 when it is unlinked.
 
-**`agent.request`** operates only on `cataloged` vault-held secrets
-(§10.7), and only on those every restricting grant names: any other
-`secret_id` is `not_found` (a private secret is not told apart from a
-missing one). Critical secrets (§3.5) are never reachable by agents.
+**`agent.request`** operates only on the items the agent's `items.read`
+grants include (above). An item none of them includes (or that has no
+use left) is not covered, so the request is refused (`forbidden`, §6.8)
+whether or not the item exists. Critical items are never reachable by
+agents (§3.5).
 
-- `catalog` lists the secrets' metadata, never values (the union of what
-  the matching grants allow).
-- `secret.get` returns the value (LEASH pattern 1, controlled exposure),
-  recorded as `leash.secret.read` in the audit log and the feed (the
-  first per agent and hour; then summarised).
-- `secret.use` uses the value without exposing it (LEASH pattern 2):
-  `action` `hmac-sha256` computes HMAC-SHA-256 with the value's UTF-8
-  bytes as the key over `data` (1–16,384 bytes, base64) and returns the
-  32-byte `result`; recorded as `leash.secret.used`. HTTP requests made
-  by the vault with an injected secret need egress beyond the relay and
-  are not offered (§15).
+- `catalog` lists the included items' metadata: `{items: [{item_id,
+  name, category, labels: [{field_id, label, kind}]}]}`, never tags,
+  rules or values.
+- `item.get{item_id, fields?}` returns `{item_id, name, category,
+  fields: [{field_id, label, kind, value}], notes?}` (LEASH pattern 1,
+  controlled exposure; `notes` only without `fields`; an unknown field is
+  `not_found`), recorded as `leash.item.read` in the audit log and the
+  feed (the first per agent and hour; then summarised).
+- `item.use{item_id, field_id, action: "hmac-sha256", data}` uses a
+  field without exposing it (LEASH pattern 2): HMAC-SHA-256 with the
+  value's UTF-8 bytes as the key over `data` (1–16,384 bytes, base64),
+  answered `{item_id, field_id, action, result}` (32 bytes); recorded as
+  `leash.item.used`. An `address` field cannot be used (`not_found`).
+  HTTP requests made by the vault with an injected secret need egress
+  beyond the relay and are not offered (§15).
 
 **Every grant is a signed delegation.** The member's **credential key**
 (§3.5.1) signs each grant when it is issued, replaced or given with a
@@ -2643,7 +2912,8 @@ grants and can present it.
 ```
 delegation     = standard base64 of the exact bytes
                  {"v":1,"vault_ik":"<b64>","agent_ik":"<b64>","grant_id":"<ULID>","version":1,
-                  "scope":"<scope>","approval":"ask","connections":["<id>"],"secrets":["<id>"],
+                  "scope":"<scope>","approval":"ask","connections":["<id>"],
+                  "tags":["<tag>"],"match":"any","access":"read","uses":10,"per_hour":60,"per_day":1000,
                   "status_ttl":<s>,"iat":<unix s>,"exp":<unix s>}
 delegation_sig = standard base64 of Ed25519(credential key, "vettid/vms/2/leash" || those bytes)
 key            = the credential key's public key
@@ -2654,9 +2924,17 @@ key            = the credential key's public key
   wire format for it. This statement carries the contract's terms and
   the claims of vettid.dev's LEASH token (issuer, the agent's key, grant
   id and version, scope) as canonical JSON: members in the order shown,
-  no whitespace, `connections` and `secrets` only when the grant has
-  them, ids and keys as in the grant, `status_ttl` the lifetime of its
-  status statements in seconds (below), `iat` the issue time.
+  no whitespace, `connections` only when the grant has them; `tags`,
+  `match`, `access`, `per_hour` and `per_day` exactly for scope
+  `items.read` (`uses` when its rule has it); ids and keys as in the
+  grant, `status_ttl` the lifetime of its status statements in seconds
+  (below), `iat` the issue time.
+- **Tags in the delegation** (owner decision of 2026-10-03). An
+  `items.read` delegation carries its rule's tag names, so a relying
+  party the agent shows it to sees them: the one place tag names leave
+  the vault (§10.8), as VAULT-ITEMS §6 asks ("the signed delegation
+  carries the rule"). The agent is the member's own and shows its
+  delegation only to parties it deals with.
 - **Lifetime.** `exp` is the grant's `expires_at` in whole seconds, and
   is absent when the grant has none: LEASH's contract expiry is optional
   (§3.2). (The 24 h cap of the first 0.6.0 draft came from vettid.dev's
@@ -2756,20 +3034,21 @@ rotations  = the vault's identity.rotate statements (§3.4) from the delegation'
 
 | Type | Request body | Response / event body |
 |---|---|---|
-| `leash.grant.issue` (app, within the unlock window) | `{agent_id, grant_id?, version?, scope, approval?, connections?, secrets?, per_hour?, per_day?, expires_at?, status_ttl?}`; without `grant_id` a new grant (`version` absent); with it, a replacement of that grant (`version` required; `conflict`); `credential_locked` outside the window | `<grant>`, with its `delegation`, `delegation_sig` and `key` |
+| `leash.grant.issue` (app, within the unlock window) | `{agent_id, grant_id?, version?, scope, approval?, connections?, per_hour?, per_day?, expires_at?, status_ttl?}` (not `items.read`); without `grant_id` a new grant (`version` absent); with it, a replacement of that grant (`version` required; `conflict`); `credential_locked` outside the window | `<grant>`, with its `delegation`, `delegation_sig` and `key` |
 | `leash.grant.revoke` (app, desktop) | `{grant_id}` | `{}` |
 | `leash.grant.list` (app, desktop: `{agent_id?}`; agent: `{}`, its own) | as left | apps and desktops: `{grants: [<grant>], suspended: [<agent_id>]}`; an agent: `{grants: [<grant>], suspended}` |
 | `leash.grant.updated` (V→D, to the agent) | — | `{grants: [<grant>], suspended}`: all of its grants, after every change and at suspension and resumption |
 | `leash.agent.resume` (app) | `{agent_id}` | `{}`; `not_found` unless the agent is suspended |
 | `leash.status.get` (agent) | `{grant_id}` | `{grant_id, status, status_sig, rotations?}`; `not_found`, `forbidden` (suspended) |
-| `agent.request` (agent) | `{op: "catalog"}`, `{op: "secret.get", secret_id}` or `{op: "secret.use", secret_id, action: "hmac-sha256", data}` | `{secrets: [{secret_id, name, category, description?}]}`, `{secret_id, name, value}` or `{secret_id, action, result}` |
+| `agent.request` (agent) | `{op: "catalog"}`, `{op: "item.get", item_id, fields?}` or `{op: "item.use", item_id, field_id, action: "hmac-sha256", data}` | `{items}`, `{item_id, name, category, fields, notes?}` or `{item_id, field_id, action, result}` |
 
 - `agent_id` names an active device of role `agent` (`not_found`
   otherwise). A grant replaced or issued for an agent is sent to it in
   `leash.grant.updated`, within its access session (§6.8); an agent
   fetches its grants with `leash.grant.list` when a session starts.
-- `leash.grant.revoke` deletes the grant at once. Unlinking the agent
-  revokes all of its grants (§7.4). Removing or blocking a connection
+- `leash.grant.revoke` deletes the grant at once (an `items.read` grant:
+  its share rule). Unlinking the agent revokes all of its grants and
+  deletes its share rules (§7.4). Removing or blocking a connection
   revokes every grant that names it in `connections`: its delegation
   names the connection and cannot be re-signed without the member.
 - Changes are announced as `sync.event` `leash.grant.changed`,
@@ -2777,98 +3056,211 @@ rotations  = the vault's identity.rotate statements (§3.4) from the delegation'
   desktops) and audited (`leash.grant.issued`, `.updated`, `.revoked`,
   `leash.agent.suspended`, `.resumed`, `leash.referrals_limited`).
 
-### 10.12 Grants: sharing between connections
+### 10.12 Share rules and grants: sharing with connections
 
-A **grant** lets one connection read one item of the member's: a profile
-field (§10.8) or a vault-held secret (§10.7). The connection asks; the
-member decides; the connection then fetches the current value, at most
-`uses` times and until the grant expires or either side revokes it. The
-member's vault checks every fetch and answers with the value sealed to a
-one-time key of the device that fetched it, so the asking vault never
-holds the plaintext.
+The member shares items with a connection, or with one of their agents
+(§10.11), by **share rules** over tags: "Dr Lee may read my items tagged
+*medical*". Underneath, every item a rule makes readable to a connection
+is a **grant**: the connection fetches the item's current values, sealed
+to its fetching device, at most `uses` times and until the grant expires
+or is revoked. A connection can also ask for something specific with a
+one-off grant request, which the member answers.
+
+**Share rules.**
+
+```json
+share_rule: { "rule_id": "<ULID>", "version": 1,
+              "subject": { "connection_id": "<id>" },
+              "tags": ["medical"], "match": "any", "access": "read", "mode": "ask",
+              "uses": 10, "expires_at": "<ts>", "include_existing": true,
+              "created_at": "<ts>", "updated_at": "<ts>",
+              "included": ["<item_id>"], "pending": ["<item_id>"], "declined": ["<item_id>"] }
+```
+
+- `subject` is `{connection_id}` (an active connection) or `{agent_id}`
+  (an agent, §10.11; `not_found` otherwise). It cannot change.
+- `tags` is 1–16 tags (§10.8), none reserved. `match` is `any` (the
+  default: an item carrying one of them) or `all` (every one).
+- `access` is `read`, the only value: `data` and `secret` items the rule
+  includes become readable by the subject. A `critical` item is never
+  readable: a connection rule can at most make it **usable** for
+  critical-item use (§10.13), and an agent rule never includes it.
+- `mode` is `ask` (the default, owner decision 2026-10-03) or `auto`.
+- `uses` (1–10,000) bounds the fetches of each included item; absent,
+  fetches are not counted against a limit (each is still audited).
+  `expires_at` (in the future, at most 3,650 days ahead) ends the rule;
+  absent, it lasts until deleted. `include_existing` (default `true`)
+  applies the rule to the items that already match it (below).
+- `included`, `pending` and `declined` list the rule's items in each
+  state (below). A vault holds at most 64 rules per subject and 512 in
+  all, and at most 4,096 pending items (`limit`).
+
+**Matching and inclusion.** An item **matches** a rule while the rule is
+in force and the item's tags meet `tags` and `match`; an agent rule
+never matches a `critical` item. Each matching item is, for that rule,
+**pending** (the member was asked), **included** or **declined**:
+
+- **Mode `ask`.** When an item **gains** the rule (it matches after a
+  change and either did not match before or gained one of the rule's
+  tags: a new item, a re-tag, a merge, a rule that now names its tag),
+  it becomes pending and the member's apps and desktops get
+  `share.pending` ("Share *Allergy list* with *Dr Lee*?"). The member
+  decides with `share.decide`. A declined item is remembered and not
+  asked again until it gains the rule again.
+- **Mode `auto`.** An item that gains the rule is included at once,
+  without asking. The apps show the impact before a rule or a tag change
+  is saved (`dry_run`, below).
+- **`include_existing`.** When a rule is created (or replaced), the items
+  that already match it gain it if `include_existing` is `true`; with
+  `false` only later gains count. `share.rule.set{dry_run: true}` lists
+  them first, so the member confirms the preview either way.
+- **Withdrawal.** An included or pending item that stops matching (its
+  tag removed, the rule changed, deleted or expired, the item deleted or
+  moved to or from `critical`) is withdrawn at once: pending, it is
+  dropped; included, its grant is revoked (the connection is told
+  `data.revoked`) or, for an agent, its reads end. A move to or from
+  `critical` withdraws the item from every rule and then lets it gain
+  the rules it matches.
+- A rule replaced from `ask` to `auto` includes its pending items.
+
+| Type | Request body | Response / event body |
+|---|---|---|
+| `share.rule.set` (app; desktop: step-up; an agent subject: app within the unlock window) | `{rule_id?, version?, subject, tags, match?, access?, mode?, uses?, expires_at?, include_existing?, per_hour?, per_day?, status_ttl?, dry_run?}` | `<share_rule>` (an agent rule with its delegation, §10.11); with `dry_run`: `{matches: [{item_id, name, category, sensitivity, state?}], total}` |
+| `share.rule.list` (app, desktop) | `{connection_id? \| agent_id?, after?, limit?}` | `{rules: [<share_rule>], next?}` |
+| `share.rule.delete` (app, desktop) | `{rule_id}` | `{}` |
+| `share.pending` (V→D, apps and desktops) | — | `{rule_id, subject, items: [{item_id, name, category, sensitivity}], reason: "rule" \| "tagged"}` |
+| `share.decide` (app; desktop: step-up) | `{rule_id, items: [<item_id>], approve}` | `{included: [<item_id>], declined: [<item_id>]}` |
+
+- `share.rule.set` without `rule_id` creates a rule (`version` absent);
+  with it, it replaces the rule (`version` required, `not_found`,
+  `conflict`). `per_hour`, `per_day` and `status_ttl` are only for agent
+  rules (§10.11). With `dry_run: true` it changes nothing and lists the
+  items the rule would match, with their current `state` for a
+  replacement, within 131,072 bytes (`total` counts them all). A
+  desktop's request for an agent subject is answered `forbidden` at once
+  (the delegation needs the credential key, §6.8).
+- `share.rule.list` is sorted by `rule_id` and paged like `item.list`:
+  `limit` 1–500 (default 50), at most 131,072 bytes, `next`.
+- `share.pending` is sent for each batch of items that became pending
+  (split into several messages of at most 131,072 bytes when large):
+  `reason` is `rule` when a rule was created or replaced, `tagged` when
+  items changed. It is also a feed item (`share.pending`, `ref` =
+  `rule_id`). `share.decide` decides the listed pending items of the rule
+  (1–500; items not pending are ignored; none pending is `bad_request`).
+- Removing or blocking a connection, or unlinking an agent, deletes its
+  rules (§7.4).
+- **Change notices.** `sync.event` `share.rule.changed` (`rule_id`,
+  `version`), `share.rule.deleted` (`rule_id`) and `share.decided`
+  (`rule_id`, `included`, `declined`).
+- **Audit.** `share.rule.created`, `share.rule.updated`,
+  `share.rule.deleted` (`ref` = `rule_id`); `share.included`,
+  `share.declined`, `share.withdrawn` (`ref` = `item_id`, with the
+  subject's `connection_id` or `device_id`); every fetch as
+  `grant.fetched` (below).
+
+**Grants.** A grant lets one connection read one item. Grants come from
+share rules (one per included readable item, carrying `rule_id`), from
+one-off requests the member decides, and from shared actions (§10.14).
 
 ```
 B app            B vault                   A vault                    A app
   |--grant.request-->|--data.request---------->|--grant.pending---------->|
   |                  |                         |<--grant.decide-----------|
   |<--grant.event----|<--data.decided----------|                          |
+  |                  |<--data.shared-----------|  (a share rule included an item)
   |--grant.fetch{reply_key}-->|--data.fetch--->|  checks the grant, counts a use
   |<--grant.value{value_sealed}--|<--data.value|                          |
 ```
 
-- **Items.** `{kind: "field", ref: "<profile key>"}` or
-  `{kind: "secret", ref: "<secret_id>"}`, with an optional `label`
-  (at most 128 bytes, the asker's description). Only a `cataloged`
-  vault-held secret can be granted (§10.7). Critical secrets are never
-  granted as values; a connection asks to *use* one instead (§10.13).
-- **Per-connection profile overrides.** A field outside the `shared` set
-  (§10.8) reaches a connection only through a grant: on request, counted,
-  with an expiry, revocable. The vault does not push granted fields in
-  `profile.update`.
-- **Catalog.** A connection learns which secrets it may ask for from the
-  member's catalog: `grant.catalog` asks the connection's vault, which
-  answers `data.catalog` with the metadata (never values) of its
-  `cataloged` vault-held secrets and its cataloged critical secrets
-  (`critical: true`, §10.13). Every connection sees the same catalog.
-
 ```json
 grant: { "grant_id": "<ULID>", "connection_id": "<id>", "direction": "given|received",
-         "kind": "field|secret", "ref": "...", "label": "...", "uses": 3, "used": 1,
-         "expires_at": "<ts>", "state": "active|used|expired|revoked", "created_at": "<ts>" }
+         "kind": "item", "ref": "<item_id>", "fields": ["f1"], "label": "...", "rule_id": "<ULID>",
+         "name": "...", "category": "...", "uses": 3, "used": 1, "expires_at": "<ts>",
+         "state": "active|used|expired|revoked", "created_at": "<ts>" }
 ```
+
+- **Items.** A grant's item is `{kind: "item", ref: <item_id>, fields?}`:
+  `fields` (1–64 `field_id`s) restricts it to those fields; without it
+  the whole item (with its notes) is granted. Only `data` and `secret`
+  items are granted; a `critical` item never is (§10.13).
+- **Descriptors.** Grants travel between the vaults as
+  `{grant_id, kind, ref, fields?, label?, rule_id?, name, category,
+  labels: [{field_id, label, kind}], uses?, expires_at?}`: the item's
+  name, category and the labels of the granted fields, never its tags,
+  sensitivity or values. `uses` and `expires_at` are absent for a rule
+  grant without them.
+- **One-off requests.** `grant.request` asks for 1–16 items, each
+  `{kind: "item", ref: <item_id>, fields?, label?}` (an item the asker
+  knows from the catalog or an earlier grant) or
+  `{kind: "category", ref: <category>, label?}` ("your insurance card":
+  the member picks the item). `label` (at most 128 bytes) is the asker's
+  description.
 
 | Type | Request body | Response / event body |
 |---|---|---|
-| `grant.request` (app, desktop) | `{connection_id, items: [{kind, ref, label?}], uses?, expires_in?, reason?}` | `{request_id}` |
+| `grant.request` (app, desktop) | `{connection_id, items: [<item>], uses?, expires_in?, reason?}` | `{request_id}` |
 | `data.request` (V↔V) | — | `{request_id, items, uses, expires_in, reason?}` |
-| `grant.pending` (V→D, apps and desktops) | — | `{request_id, connection_id, items: [{kind, ref, label?, available}], uses, expires_in, reason?, exp}` |
-| `grant.decide` (app; desktop: step-up) | `{request_id, approve, items?: [<index>], uses?, expires_in?}` | `{grants: [{grant_id, kind, ref}]}` |
-| `data.decided` (V↔V) | — | `{request_id, approved, grants?: [{grant_id, kind, ref, label?, uses, expires_at}]}` |
-| `grant.event` (V→D, apps and desktops) | — | `{connection_id, event: "granted" \| "denied" \| "revoked", request_id?, grant_id?, grants?}` |
+| `grant.pending` (V→D, apps and desktops) | — | `{request_id, connection_id, items: [{kind, ref, fields?, label?, available}], uses, expires_in, reason?, exp}` |
+| `grant.decide` (app; desktop: step-up) | `{request_id, approve, items?: [<index>], answers?: [{index, item_id, fields?}], uses?, expires_in?}` | `{grants: [{grant_id, kind, ref}]}` |
+| `data.decided` (V↔V) | — | `{request_id, approved, grants?: [<descriptor>]}` |
+| `data.shared` (V↔V) | — | `{grants: [<descriptor>]}` (1–64) |
+| `grant.event` (V→D, apps and desktops) | — | `{connection_id, event: "granted" \| "shared" \| "denied" \| "revoked", request_id?, grant_id?, grants?}` |
 | `grant.fetch` (app, desktop) | `{grant_id, reply_key}` | `{fetch_id}` |
 | `data.fetch` (V↔V) | — | `{fetch_id, grant_id, reply_key}` |
-| `data.value` (V↔V) | — | `{fetch_id, grant_id, value_sealed, uses_left}` or `{fetch_id, grant_id, error}` |
+| `data.value` (V↔V) | — | `{fetch_id, grant_id, value_sealed, uses_left?}` or `{fetch_id, grant_id, error}` |
 | `grant.value` (V→D, to the device that fetched) | — | `{connection_id, fetch_id, grant_id, value_sealed?, uses_left?, error?}` |
 | `grant.revoke` (app, desktop) | `{grant_id}` (given or received) | `{}` |
 | `data.revoked` (V↔V) | — | `{grant_id}` |
 | `grant.list` (app, desktop) | `{}` | `{given: [<grant>], received: [<grant>], pending: [{request_id, connection_id, items, uses, expires_in, reason?, exp}], requested: [{request_id, connection_id, items, state}]}` |
 | `grant.catalog` (app, desktop) | `{connection_id}` | `{request_id}` |
 | `data.catalog.get` (V↔V) | — | `{request_id}` |
-| `data.catalog` (V↔V) | — | `{request_id, secrets: [{secret_id, name, category, description?, critical}]}` |
-| `grant.catalog.result` (V→D, to the device that asked) | — | `{connection_id, request_id, secrets}` |
+| `data.catalog` (V↔V) | — | `{request_id, items: [{item_id, name, category, labels: [{field_id, label, kind}], grant_id?, uses_left?, usable?}], truncated?}` |
+| `grant.catalog.result` (V→D, to the device that asked) | — | `{connection_id, request_id, items, truncated?}` |
 
-- **Sizes.** 1–16 items; `uses` 1–100 (default 1: one fetch);
+- **Sizes.** `uses` 1–100 (default 1: one fetch) for one-off grants;
   `expires_in` 60–31,536,000 s (default 604,800, 7 days); `reason` at
-  most 256 bytes; `reply_key` a 1,216-byte KEM `ek`; a catalog lists at
-  most 1,000 entries, each `name` at most 128 bytes and `category` at
-  most 32.
+  most 256 bytes; `reply_key` a 1,216-byte KEM `ek`.
 - **Asking.** The member's vault ignores a `data.request` whose
   `request_id` it already holds from that connection (from another
   connection it is dropped and audited, `drop.grant_duplicate`), keeps
   at most 16 pending requests per connection (more are dropped and
   audited, `drop.grant_limit`) and answers a request undecided after 7
-  days as denied. `available` tells the member whether the item resolves
-  now. A `data.*` message that does not parse is dropped and audited
+  days as denied. `available` tells the member whether an `item` entry
+  resolves now (an existing `data` or `secret` item with those fields);
+  a `category` entry is available when the member answers it. A `data.*`
+  message that does not parse is dropped and audited
   (`drop.grant_malformed`), never answered.
-- **Deciding.** An approval grants each listed item (`items` holds
-  indices into the request's items; default all) that is available, with
-  the request's `uses` and `expires_in` unless the decision sets others,
-  and answers `bad_request` if none is. A vault holds at most 1,000
-  active given and 1,000 active received grants (`limit`); ended grants
-  and decided requests are kept 30 days for `grant.list`, then pruned.
-  The asking vault keeps at most 1,000 requests and 64 outstanding
-  catalog requests (`limit`). A denial, or no decision in 7 days,
-  answers `data.decided{approved: false}`.
+- **Deciding.** An approval grants each listed entry (`items` holds
+  indices into the request's items; default all): an `item` entry if it
+  is available; a `category` entry only through an `answer`, which names
+  the member's item (and optionally its fields) for that index. The
+  request's `uses` and `expires_in` apply unless the decision sets
+  others; `bad_request` if nothing is granted. A vault holds at most
+  1,000 active given and 1,000 active received grants (`limit`); ended
+  grants and decided requests are kept 30 days for `grant.list`, then
+  pruned. The asking vault keeps at most 1,000 requests and 64
+  outstanding catalog requests (`limit`). A denial, or no decision in 7
+  days, answers `data.decided{approved: false}`.
+- **Shared by a rule.** When share rules include readable items for a
+  connection, its vault sends `data.shared` with their descriptors (one
+  message per change, split so that each holds at most 64 descriptors
+  and 131,072 bytes). The receiving vault
+  records them as received grants and tells its apps and desktops
+  `grant.event{event: "shared"}`; it drops a `data.shared` whose grants it
+  already holds.
 - **Fetching.** The member's vault answers a `data.fetch` only for a
   grant it gave that connection. `error` is `not_found` (unknown, or
   given to another connection), `revoked`, `expired`, `exhausted` (no
-  use left) or `unavailable` (the field no longer exists, or the secret
-  was deleted or made private). Otherwise it counts one use and seals
-  the value (a field's `value`, a secret's `value`, as UTF-8):
+  use left) or `unavailable` (the item, or a granted field, no longer
+  exists, or the item is now `critical`). Otherwise it counts one use
+  and seals the item's current content: the UTF-8 JSON
+  `{"item_id", "version", "name", "category", "fields": [{field_id,
+  label, kind, value}], "notes"?}`, restricted to the granted fields
+  (and without `notes` when `fields` is given), at most 65,536 bytes:
 
   ```
   (enc, ctx)   = SetupBaseS(reply_key, info = "vettid/vms/2/grant" || 0x00 || grant_id || 0x00 || fetch_id)
-  value_sealed = enc || ctx.Seal(aad = "", pt = value)
+  value_sealed = enc || ctx.Seal(aad = "", pt = content)
   ```
 
   A `data.fetch` repeating a `fetch_id` it answered is answered again
@@ -2881,25 +3273,41 @@ grant: { "grant_id": "<ULID>", "connection_id": "<id>", "direction": "given|rece
   within its access session (§6.8); it never sees the value. The
   `reply_key`'s private half lives only in that device's memory, for
   that fetch.
+- **Per-connection catalog.** A connection's catalog is what the member
+  made visible to it: one entry per active grant given to it (rule or
+  one-off: `grant_id`, the granted fields' labels, `uses_left` when
+  counted) and one per critical item its rules include (`usable: true`,
+  §10.13). `grant.catalog` asks the connection's vault, which answers
+  `data.catalog` with at most 1,000 entries and 131,072 bytes
+  (`truncated: true` when it left entries out). Each connection sees only
+  its own catalog; tags and rules are never in it.
 - **Revoking.** Either side may revoke: the member's vault stops
   answering for the grant, the other side is told `data.revoked`, and
   both tell their owner devices (`grant.event{revoked}` on the asking
   side, `sync.event{grant.changed}` on both). Revoking a grant that has
-  already ended succeeds and changes nothing.
+  already ended succeeds and changes nothing. Revoking a rule grant does
+  not change the rule: the item stays included without a grant until it
+  is withdrawn and gains the rule again.
 - **Removal.** Removing or blocking a connection drops its grants, both
   ways, its pending requests and its fetches, without notice (§7.4).
 - **Audit and feed.** `grant.requested` (both sides), `grant.issued`,
   `grant.denied`, `grant.received`, `grant.fetched` (each use, on the
   member's side), `grant.revoked`; an incoming request is a feed item
-  (`grant.request`, high), and so is a revocation by the other side
-  (`grant.revoked`).
+  (`grant.request`, high), and so are a revocation by the other side
+  (`grant.revoked`) and items shared by a connection's rule
+  (`grant.shared`).
+- 0.7.0 replaced grant items `{kind: "field" | "secret"}` by
+  `{kind: "item"}`, the `cataloged` flag and the one catalog for every
+  connection by share rules and per-connection catalogs, and added
+  `data.shared`.
 
-### 10.13 Critical-secret use by a connection
+### 10.13 Critical-item use by a connection
 
-A connection never receives a critical secret (§3.5). It may ask the
-member to **use** one, a signing key for example, for one operation; the
-member consents in their app with the credential password, for that use
-only, and the connection receives only the result.
+A connection never receives a critical item's values (§3.5, §10.7). It
+may ask the member to **use** one, a signing key for example, for one
+operation; the member consents in their app with the credential
+password, for that use only, and the connection receives only the
+result.
 
 ```
 B app            B vault                   A vault                      A app
@@ -2912,23 +3320,24 @@ B app            B vault                   A vault                      A app
 
 | Type | Request body | Response / event body |
 |---|---|---|
-| `credential.secret.catalog` (app) | `{secret_id, cataloged: bool}` | `{}` (§10.6) |
-| `critical-secret-use.request` (app, desktop) | `{connection_id, secret_id, operation: "sign" \| "auth", payload, context?}` | `{request_id}` |
-| `critical-secret.use` (V↔V) | — | `{request_id, secret_id, operation, payload, context?}` |
-| `critical-secret-use.pending` (V→D, apps and desktops) | — | `{request_id, connection_id, secret_id, name, operation, payload, payload_sha256, context?, exp}` |
+| `critical-secret-use.request` (app, desktop) | `{connection_id, item_id, field_id, operation: "sign" \| "auth", payload, context?}` | `{request_id}` |
+| `critical-secret.use` (V↔V) | — | `{request_id, item_id, field_id, operation, payload, context?}` |
+| `critical-secret-use.pending` (V→D, apps and desktops) | — | `{request_id, connection_id, item_id, field_id, name, label, operation, payload, payload_sha256, context?, exp}` |
 | `critical-secret-use.approve` (app) | `{request_id, credential, utk_id, sealed{password, request_id, payload_sha256}}` | `{request_id, status, credential, version, utks}` |
 | `critical-secret-use.deny` (app, desktop) | `{request_id}` | `{}` |
 | `critical-secret.result` (V↔V) | — | `{request_id, status: "ok", signature, public_key}` or `{request_id, status: "denied" \| "expired" \| "unavailable" \| "unsuitable"}` |
 | `critical-secret-use.result` (V→D, apps and desktops) | — | `{connection_id, request_id, status, signature?, public_key?}` |
-| `critical-secret-use.list` (app, desktop) | `{}` | `{incoming: [{request_id, connection_id, secret_id, name, operation, payload_sha256, context?, exp}], outgoing: [{request_id, connection_id, secret_id, operation, state, status?}]}` |
+| `critical-secret-use.list` (app, desktop) | `{}` | `{incoming: [{request_id, connection_id, item_id, field_id, name, label, operation, payload_sha256, context?, exp}], outgoing: [{request_id, connection_id, item_id, field_id, operation, state, status?}]}` |
 
-- **What can be asked.** Only a critical secret the member listed with
-  `credential.secret.catalog` (it then appears in the catalog, §10.12).
-  Any other `secret_id` is answered `unavailable` at once, without asking
-  the member, and audited (`critical-secret.use.requested` and
-  `critical-secret.use.denied`). `payload` is 1–4,096 bytes (base64) and
-  `context` at most 256 bytes; the app MUST show both, and the
-  connection's name, to the member. A vault keeps at most 8 pending
+- **What can be asked.** Only a critical item that a share rule of that
+  connection includes (it is then `usable` in the connection's catalog,
+  §10.12), and one of its fields. Any other `item_id` or `field_id` is
+  answered `unavailable` at once, without asking the member, and audited
+  (`critical-secret.use.requested` and `critical-secret.use.denied`);
+  an item the rule does not include is not told apart from a missing
+  one. `payload` is 1–4,096 bytes (base64) and `context` at most 256
+  bytes; the app MUST show both, the item's name and field label, and
+  the connection's name, to the member. A vault keeps at most 8 pending
   requests per connection (more are answered `unavailable`) and answers
   `expired` after 24 h; a repeated `request_id` is ignored.
 - **Consent per use.** `critical-secret-use.approve` is one use of the
@@ -2940,13 +3349,14 @@ B app            B vault                   A vault                      A app
   replay it (§3.5.4). It answers `utk_invalid`, `backoff`,
   `stale_credential` and `bad_password` as §3.5.3 does, and the request
   stays pending for another attempt.
-- **The use.** The vault opens the credential, takes the secret, performs
-  the operation, rotates the CEK (§3.5.3, the new blob in the response),
-  and wipes the plaintext and the key. Nothing is retained: there are no
-  standing allowances, and the next use needs the password again. The
-  secret's value MUST be a 32-byte Ed25519 seed (category
-  `signing_key` or `private_key`); otherwise the status is `unsuitable`
-  (the credential has still been opened and rotated).
+- **The use.** The vault opens the credential, decrypts the field's value
+  with the item key (§10.7), performs the operation, re-keys the item and
+  rotates the CEK (§3.5.3, the new blob in the response), and wipes the
+  plaintext and the keys. Nothing is retained:
+  there are no standing allowances, and the next use needs the password
+  again. The value MUST be the standard base64 of a 32-byte Ed25519 seed
+  (a `password` or `text` field, for example); otherwise the status is
+  `unsuitable` (the credential has still been opened and rotated).
   - `sign`: `signature = Ed25519(seed, payload)`, the payload as is, for
     protocols that need the member's key to sign their own messages.
   - `auth`: `signature = Ed25519(seed, "vettid/vms/2/critical-auth" ||
@@ -2954,10 +3364,11 @@ B app            B vault                   A vault                      A app
     bound to both vaults' `ik` as each has the other on record, like
     §10.4.
 
-  `public_key` is the seed's Ed25519 public key. If the secret has left
-  the credential since it was cataloged, the status is `unavailable`.
+  `public_key` is the seed's Ed25519 public key. If the item or field
+  has left the credential, or the item is no longer included for that
+  connection, when the member approves, the status is `unavailable`.
   `status` in the approval's response is the result sent to the
-  connection.
+  connection; `version` there is the credential's.
 - A denial answers `denied`. The asking vault keeps its requests for
   25 h and forwards results to its apps and desktops; later or unknown
   results, and results from another connection, are dropped. It verifies
@@ -2967,10 +3378,12 @@ B app            B vault                   A vault                      A app
   (`drop.critical_signature`).
 - **Audit and feed.** `critical-secret.use.requested` (both sides),
   `critical-secret.used`, `critical-secret.use.denied`,
-  `critical-secret.use.result`, `credential.secret.cataloged`; an
-  incoming request is a high-priority feed item
-  (`critical-secret.use.request`); `sync.event`
-  `critical-secret-use.decided` and `credential.secret.cataloged`.
+  `critical-secret.use.result`; an incoming request is a high-priority
+  feed item (`critical-secret.use.request`); `sync.event`
+  `critical-secret-use.decided`.
+- The type names are kept from 0.6.0; 0.7.0 replaced `secret_id` by
+  `item_id` and `field_id`, and `credential.secret.catalog` by share
+  rules.
 
 ### 10.14 Shared actions
 
@@ -2981,28 +3394,29 @@ under a permission mode the member sets per action. A connection learns
 which actions it may invoke from the member's offer; an invocation is
 answered with the action's result or a refusal.
 
-**The catalog** (catalog version 1). Each action has a fixed `action_id`
+**The catalog** (catalog version 2). Each action has a fixed `action_id`
 and `version`, a parameter and a result schema, and a sensitivity:
 
 | `action_id` (version 1) | Sensitivity | `params` | `result` |
 |---|---|---|---|
-| `profile.fields.read` | sensitive | `{fields: [<key>]}`, 1–16 profile keys (§10.8) | `{grants: [{grant_id, kind: "field", ref, uses, expires_at}]}` |
-| `secrets.share` | sensitive | `{secret_id}` | `{grants: [{grant_id, kind: "secret", ref, uses, expires_at}]}` |
+| `items.share` | sensitive | `{item_id, fields?: [<field_id>]}`; `fields` 1–64 | `{grants: [<grant descriptor>]}` (§10.12) |
 | `audit.recent` | normal | `{limit?}`, 1–50, default 20 | `{entries: [{kind, at, direction?}]}` |
 | `wallet.request-address` | normal | `{asset: "BTC"}` | `{asset, address}` |
 | `wallet.request-payment` | critical | `{asset: "BTC", amount_sats, memo?}`; `amount_sats` 1–2,100,000,000,000,000, `memo` at most 280 bytes | `{status, txid?}` |
 
-- **`profile.fields.read` and `secrets.share` go through grants
-  (§10.12)**, the same consent and delivery as a request the member
-  decided: the action creates, for the invoking connection, one grant per
-  item that the member's configuration allows (`fields`, `secrets`) and
-  that is available (a field that exists; a cataloged vault-held secret),
-  with `uses` 1 and an expiry of 10 minutes, and returns them. The
-  connection fetches the values with `grant.fetch`, sealed to its
-  fetching device; the invoking vault records the grants as received,
-  and either side can revoke them as any grant. If no requested item is
-  allowed and available, the status is `unavailable`. Critical secrets
-  are never shared.
+- **`items.share` goes through grants (§10.12)**, the same consent and
+  delivery as a request the member decided: if the member's
+  configuration lists the item (`items`) and it is available (a `data`
+  or `secret` item with the requested fields), the action creates, for
+  the invoking connection, one grant of it (restricted to `fields` if
+  given), with `uses` 1 and an expiry of 10 minutes, and returns its
+  descriptor. The connection fetches the values with `grant.fetch`,
+  sealed to its fetching device; the invoking vault records the grant as
+  received, and either side can revoke it as any grant. Otherwise the
+  status is `unavailable`. Critical items are never shared.
+- Catalog version 2 (0.7.0) replaced version 1's `profile.fields.read`
+  and `secrets.share` by `items.share`: profile fields and vault-held
+  secrets are both items now, and the two actions would be the same.
 - **`audit.recent`** returns the newest entries of the member's audit log
   (§10.9) whose `connection_id` is the invoking connection, at most
   `limit`: only `kind`, `at` and `direction`, never `ref`, other
@@ -3032,9 +3446,8 @@ starts in `default-deny`:
   `prompt-each-time`, and is approved only by an **app within the
   credential's unlock window** (§3.5.3; `credential_locked` otherwise):
   the member's phone must be there.
-- `fields` (1–64 profile keys) bounds `profile.fields.read`, `secrets`
-  (1–64 `secret_id`s) bounds `secrets.share`; without them those actions
-  share nothing.
+- `items` (1–64 `item_id`s) bounds `items.share`; without it the action
+  shares nothing.
 
 **Offers.** After every configuration change, and when a connection
 becomes active, the member's vault sends each affected active connection
@@ -3045,8 +3458,8 @@ when none). The receiving vault keeps the latest list per connection
 
 | Type | Request body | Response / event body |
 |---|---|---|
-| `action.list` (app, desktop) | `{connection_id?}` | without it: `{catalog_version, actions: [{action_id, version, sensitivity, available, param_schema, result_schema, mode, config_version, connections?, fields?, secrets?}]}`; with it, what that connection offers: `{actions: [{action_id, version, prompt}]}` |
-| `action.configure` (app; desktop: step-up) | `{action_id, version?, mode, connections?, fields?, secrets?}`; `version` is the configuration version it is based on (`conflict` if stale, §10.1) | `{version}` (the new configuration version) |
+| `action.list` (app, desktop) | `{connection_id?}` | without it: `{catalog_version, actions: [{action_id, version, sensitivity, available, param_schema, result_schema, mode, config_version, connections?, items?}]}`; with it, what that connection offers: `{actions: [{action_id, version, prompt}]}` |
+| `action.configure` (app; desktop: step-up) | `{action_id, version?, mode, connections?, items?}`; `version` is the configuration version it is based on (`conflict` if stale, §10.1) | `{version}` (the new configuration version) |
 | `action.offered` (V↔V) | — | `{actions: [{action_id, version, prompt}]}` (at most 64) |
 | `action.invoke` (app, desktop) | `{connection_id, action_id, params}` | `{invocation_id}` |
 | `action.invocation` (V↔V) | — | `{invocation_id, action_id, version, params}` |
@@ -4651,15 +5064,17 @@ it can read and write only its own objects and use only its own relay key
 | Vault `ik` or `kem` | Impersonate the vault in new handshakes and read new `hs.init`s | Credential rotation, `identity.rotate`, rekey |
 | ETK | PINs in requests sealed to it (≤ 25 h). Requires breaking the enclave. | Enclave restart |
 | Owner app | Whatever its role allows, including unlock attempts if the PIN is known | Unlink from another device |
-| Desktop | Within an access session, what desktops may send; step-up types (secret values, profile, settings, invitations, removals, grant decisions, action configurations, introductions) only with an app's approval; nothing after the session ends (§6.8) | `device.session.end`; unlink |
-| Agent | Within its access session, only what its LEASH grants cover: through `ask` grants nothing without an app's approval of each request (at most 20 referrals an hour), through `auto` grants up to their rate limits; LEASH operations only on cataloged vault-held secrets, never critical ones; never app-only types, invitations, credential, device or grant management. Refused requests are throttled and repeated ones suspend it; its activity is summarised in the audit log, so it cannot push older entries out (§10.11) | `leash.grant.revoke`, `device.session.end`, `device.unlink`; suspension is automatic |
+| Desktop | Within an access session, what desktops may send; step-up types (secret items' values, item and tag changes, profile, settings, share rules and decisions, invitations, removals, grant decisions, action configurations, introductions) only with an app's approval; never critical items; nothing after the session ends (§6.8) | `device.session.end`; unlink |
+| Agent | Within its access session, only what its LEASH grants cover: through `ask` grants nothing without an app's approval of each request (at most 20 referrals an hour), through `auto` grants up to their rate limits; LEASH operations only on the `data` and `secret` items its share rules include, never critical ones; never app-only types, invitations, credential, device or grant management. Refused requests are throttled and repeated ones suspend it; its activity is summarised in the audit log, so it cannot push older entries out (§10.11) | `leash.grant.revoke`, `device.session.end`, `device.unlink`; suspension is automatic |
 | A LEASH delegation (every grant) | A claim, to relying parties that trust the member's credential key, that the agent holds that scope, until the grant's `expires_at` if any; the vault never relies on it. A relying party that requires a status statement accepts a revoked delegation for at most its `status_ttl` (≤ 1 h, default 15 min) plus skew; one that does not can be shown it until `exp` (§10.11) | `leash.grant.revoke` (no new statements); a shorter `status_ttl` |
 | The vault's `ik` as status issuer | Signing statements that keep a revoked or suspended agent's delegations "valid" for relying parties; it grants nothing in the vault itself. An approved release does only what §10.11 says (§2.1) | Rotate the `ik` (§3.4): the chain moves the issuer; revoke the grants |
 | A status statement | Nothing beyond its `not_after`: it names one delegation by hash and is useless without it and the agent's key | — |
 | Issuing grants | Only with the member present: an app within the credential's unlock window, since the credential key signs each grant (§10.11) | — |
-| A connection holding a grant | The granted items' current values, at most `uses` times, until expiry or revocation; no other field or secret. Values are sealed to the fetching device, so the connection's vault never holds them (§10.12) | `grant.revoke`; removing or blocking the connection |
-| A connection asking to use a critical secret | Nothing without the member's password for each use, bound to that request and payload; then one signature (`sign` over the payload as shown to the member, or the domain-separated `auth`), never the key (§10.13) | Deny; take the secret out of the catalog (`credential.secret.catalog`) |
-| A connection offered actions | Only the built-in actions offered to it, under their modes: one-use, 10-minute grants of the fields and secrets the member configured (values sealed to its device), its own entries of the audit log; nothing at all of a critical action without the member's app in the unlock window; at most 60 invocations an hour and 8 pending (§10.14) | `action.configure` (mode `default-deny`), `grant.revoke`, removing the connection |
+| A connection holding a grant | The granted item's current values (the granted fields), at most `uses` times, until expiry or revocation; no other item or field. Values are sealed to the fetching device, so the connection's vault never holds them (§10.12) | `grant.revoke`; removing or blocking the connection |
+| A connection named in a share rule | The `data` and `secret` items the rule includes: in `ask` mode only those the member approved, in `auto` mode every item that gains a matching tag; at most usable, never readable, critical items. Its own catalog only; never the member's tags, rules or other connections' catalogs. Removing the tag, deleting the rule or its expiry ends future fetches at once (§10.12) | `item.tag`, `share.rule.delete`, `grant.revoke`; removing the connection |
+| A tag change | In `auto` rules, sharing the re-tagged item without a prompt: apps preview the effect (`dry_run`), and desktops need an app's approval for tag changes (§6.8, §10.8) | Remove the tag (the grant is revoked at once) |
+| A connection asking to use a critical item | Nothing without the member's password for each use, bound to that request and payload; then one signature (`sign` over the payload as shown to the member, or the domain-separated `auth`), never the key (§10.13) | Deny; remove the tag or the rule that makes it usable |
+| A connection offered actions | Only the built-in actions offered to it, under their modes: one-use, 10-minute grants of the items the member configured (values sealed to its device), its own entries of the audit log; nothing at all of a critical action without the member's app in the unlock window; at most 60 invocations an hour and 8 pending (§10.14) | `action.configure` (mode `default-deny`), `grant.revoke`, removing the connection |
 | A member's vault code for actions | Actions run natively in the vault's process (§12.4) from a catalog fixed in the release; no third-party or downloaded code (§10.14) | A release update (§11.10) |
 | A connection, about the member's other connections | Nothing: no type lists them to a connection or lets it ask for an introduction; it learns of another connection only when the member introduces them, only what the member chose to show, and connects only if both accept and then approve each other with the SAS (§10.15) | Decline; `block.add` |
 | The introducer | Each party's answer; it relays the invitation, so it could substitute a party it is connected to, but the parties still approve each other with the SAS, and the invitation accepts only the `ik` B named (§10.15) | Compare the SAS out of band; decline |
@@ -4670,7 +5085,8 @@ it can read and write only its own objects and use only its own relay key
 | Credential password alone | Nothing without the blob and a paired app | `credential.password.change` |
 | Member's email and account session (24 h, unnoticed) | A recovery: one new attested app as an unlock key. Still needs the PIN and the password, online, under both backoffs (§11.11.2) | Cancel; owner apps see `recovery_pending` and `vault.locking{recovery}` |
 | VettID's API tables | Nothing: the recovery code is stored only sealed to the member's browser, and the enclave enforces the 24 h (§11.11.2) | — |
-| Decrypted vault state (DEK) | Everything in it, plus offline guessing of the credential password against the current CEK and the latest blob (§3.5.8); critical secrets stay sealed under the password | Rotate the relay key and the credential; change the password |
+| Decrypted vault state (DEK) | Everything in it (`data` and `secret` items included), plus offline guessing of the credential password against the current CEK and the latest blob (§3.5.8); critical items' values stay encrypted under item keys that only the credential, sealed under the password, holds (§10.7) | Rotate the relay key and the credential; change the password |
+| A critical item key (from an old blob with its CEK and the password, or from a compromised release during an operation) | That item's ciphertext of that generation only; nothing after the item's next use, which re-keys it (§10.7) | Use the item, or `credential.rotate` (re-keys every item) |
 | An old release, after members moved away | Vaults still sealed to it. A moved vault only if the host serves it a stale header and state **and** an app sends it the PIN; apps never send a PIN to an older release than they last unlocked into (§11.10.6). Residual: an owner device that never learned of the move. | Members move forward; the app warns about `deprecated` and `retired` releases |
 | Manifest key | Listing a release as `active`. A vault still moves only with the member's approval, and only to a sealing key in the pinned namespace. | Rotate the key in a release; apps pin two keys |
 | Sealing-key policy (VettID's AWS account) | A key whose policy let anything other than its release decrypt, or could be changed later, would expose the pepper and allow offline PIN guessing against stored state. The enclave refuses to seal to such a key: before sealing it reads the policy, metadata and grants from KMS over TLS it terminates and checks them (§11.10.7). | Nothing to recover: the check runs before any seal, and a passing policy can never change |
@@ -4737,7 +5153,7 @@ Follow-ups:
    interoperability (codepoint `0x647a`, `ek` 1,216 bytes, `enc` 1,120
    bytes).
 2. **Schemas.** Lifecycle, sessions, devices and access sessions,
-   connections, messaging, the credential, secrets, profile, settings,
+   connections, messaging, the credential, items, tags, profile, settings,
    audit, feed, calls, LEASH, grants, critical-secret use and shared
    actions are in §10.1–§10.14. Still open: location, wallet and
    presence, the `sync.since` cursor, and the crash-safe write order of
@@ -4756,6 +5172,18 @@ Follow-ups:
    the enclave beyond the relay and KMS allowlist; signed delegations
    (§10.11) have no online revocation status. Both wait for a decision on
    enclave egress and a public status route.
+8. **Files in items.** The `file` field kind (§10.7) is reserved until
+   blob storage and its size policy are decided (VAULT-ITEMS owner
+   decision 4).
+9. **Critical item capacity.** Resolved (owner decision of 2026-10-03):
+   envelope encryption (§10.7) keeps only item keys in the credential,
+   about 90 bytes per item, so 1,000 critical items fit within §3.5.2's
+   131,072 bytes and every credential operation still carries the whole
+   blob within one message (§5.5).
+10. **List sizes.** `grant.list`, `critical-secret-use.list` and
+    `action.list` are not paged. With share rules a vault can hold 1,000
+    given grants, so `grant.list` can outgrow one message (§5.5); page it
+    (`after`, `limit`, `next`, as `item.list`) in its next revision.
 
 ## 16. Test vectors
 
@@ -4861,6 +5289,59 @@ Cross-implementation checks against Apple CryptoKit and BouncyCastle are
 pending (§15, follow-up 1).
 
 ## 17. Changelog
+
+- **0.7.0** (2026-10-03): V4 items (vettid-vault): one item model with
+  tags and share rules (VAULT-ITEMS, owner decisions 1–5 of 2026-10-03).
+  - §10.7 (new): items: name, category (recommended list), template,
+    typed fields (`text`, `multiline`, `number`, `date`, `email`, `phone`,
+    `url`, `password`, `otp`, `address`; `file` reserved) with vault
+    assigned, never reused field ids, notes, tags and a sensitivity per
+    item (`data`, `secret`, `critical`); `item.put`, `.get`, `.reveal`,
+    `.list` (filters by tags, category and sensitivity; paged), `.tag`,
+    `.sensitivity`, `.delete`; limits (64 fields, 16 KiB per value, 64 KiB
+    per item, 2,000 items; critical: 12 KiB per item, 1,000 items);
+    `secret` values only revealed on purpose (audited); critical items
+    envelope-encrypted (values in DEK state under per-item keys that only
+    the credential holds, re-keyed at every use of the item and at
+    `credential.rotate` and `.recover`); critical operations are
+    credential operations with the content and the item id sealed to a
+    UTK and values returned sealed to a reply key; moves to and from `critical` done by the vault without values
+    crossing the session; app-only forms refused to desktops at once.
+    Replaces §10.7 secrets and `credential.secret.*`.
+  - §10.8: tags (normalisation, one namespace, reserved `@profile`, never
+    sent to connections), the tag registry (`tag.list`, `.set`, `.delete`,
+    `.merge`, with `dry_run`); the profile is a display name and photo
+    plus the `data` items tagged `@profile` (at most 32), sent in
+    `profile.update` with its own counter; profile fields, `shared` and
+    `order` removed.
+  - §10.12: share rules (`share.rule.set`, `.list`, `.delete`,
+    `share.pending`, `share.decide`) for a connection or an agent: tags
+    with `any` or `all`, `read` access, `ask` (default) or `auto`, uses,
+    expiry, `include_existing` with a preview; inclusion, gains, remembered
+    declines, withdrawal on tag removal, rule change, deletion or expiry;
+    readable inclusions are grants (`rule_id`, no use limit or expiry
+    unless the rule has one) announced by `data.shared`; grants of items
+    with optional field lists; one-off requests by item or by category,
+    answered by the member; descriptors carry name, category and labels,
+    never tags; per-connection catalogs (granted and usable items).
+    Replaces the `cataloged` flag and the one catalog for everyone.
+  - §10.11: the data scopes (`secrets.catalog`, `.get`, `.use`) become an
+    agent's share rules (scope `items.read`, signed delegations carrying
+    the rule's tags, match, access, uses and rate limits; owner
+    decisions of 2026-10-03: reads of included items within the rule's
+    limits; tags in the delegation); `agent.request` ops `catalog`, `item.get`,
+    `item.use`; audit kinds `leash.item.read`, `leash.item.used`.
+  - §10.13: critical-item use names `item_id` and `field_id` and needs a
+    rule that makes the item usable for that connection;
+    `credential.secret.catalog` removed.
+  - §10.14: catalog version 2: `items.share` replaces
+    `profile.fields.read` and `secrets.share`; configurations bound by
+    `items`.
+  - §3.3, §3.5, §3.5.2, §3.5.4, §6.8 (step-up types), §8.2, §10 registry,
+    §10.1 (`in_use`, ids, `sync.event` kinds `item.*`, `tag.changed`,
+    `share.*`), §10.6, §10.9 (audit and feed kinds), §13.5 (share-rule
+    and tag-change rows, a critical item key), §15 (follow-ups 8–10;
+    9 resolved by envelope encryption).
 
 - **0.6.0** (2026-10-03): V4 batch 3 (vettid-vault): LEASH, grants,
   critical-secret use, shared actions.

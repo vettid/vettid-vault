@@ -15,7 +15,7 @@ import (
 
 func init() {
 	commands["action"] = command{"action list [-connection ID] | configure -id ACTION -mode default-deny|allowlist|prompt-each-time|default-allow " +
-		"[-connections a,b] [-fields k,k] [-secrets id,id] | invoke -connection ID -id ACTION [-params JSON] [-wait 60s] | " +
+		"[-connections a,b] [-items id,id] | invoke -connection ID -id ACTION [-params JSON] [-wait 60s] | " +
 		"respond -invocation ID -approve=true|false | pending [-wait 30s]", cmdAction}
 }
 
@@ -35,8 +35,7 @@ func cmdAction(ctx context.Context, g *globals, args []string) error {
 	id := fs.String("id", "", "action id (catalog)")
 	mode := fs.String("mode", "", "permission mode")
 	connsFlag := fs.String("connections", "", "comma-separated connection ids")
-	fields := fs.String("fields", "", "comma-separated profile keys (profile.fields.read)")
-	secretsFlag := fs.String("secrets", "", "comma-separated secret ids (secrets.share)")
+	itemsFlag := fs.String("items", "", "comma-separated item ids (items.share)")
 	conn := fs.String("connection", "", "connection id")
 	params := fs.String("params", "{}", "params JSON object")
 	inv := fs.String("invocation", "", "invocation id")
@@ -49,7 +48,7 @@ func cmdAction(ctx context.Context, g *globals, args []string) error {
 			return d.ActionList(ctx, *conn)
 		case "configure":
 			v, err := d.ActionConfigure(ctx, client.ActionConfig{ActionID: *id, Mode: *mode, Connections: commaList(*connsFlag),
-				Fields: commaList(*fields), Secrets: commaList(*secretsFlag)})
+				Items: commaList(*itemsFlag)})
 			return map[string]any{"version": v}, err
 		case "invoke":
 			iid, err := d.ActionInvoke(ctx, *conn, *id, json.RawMessage(*params))

@@ -8,8 +8,9 @@
 //
 // Ported from vettid.dev's action_{catalog,router,invoker,pending,
 // authorization,schema}.go: the catalog, the per-action modes and the
-// pending approvals are kept; profile.fields.read and secrets.share now
-// make one-use grants (§10.12) instead of returning values; the votes and
+// pending approvals are kept; items.share (catalog version 2, replacing
+// profile.fields.read and secrets.share) makes one-use grants (§10.12)
+// instead of returning values; the votes and
 // introductions entries are gone (introductions are member-initiated,
 // §10.15); JSON-schema validation becomes a strict parser per action;
 // invoker and result signatures are dropped (the session authenticates
@@ -25,7 +26,7 @@ import (
 	"time"
 
 	"github.com/vettid/vettid-vault/features/grants"
-	"github.com/vettid/vettid-vault/features/profile"
+	"github.com/vettid/vettid-vault/features/itemspec"
 	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vms/envelope"
@@ -33,10 +34,9 @@ import (
 
 // Limits (§10.14).
 const (
-	CatalogVersion    = 1
+	CatalogVersion    = 2
 	MaxConnections    = 256
-	MaxFields         = 64
-	MaxSecrets        = 64
+	MaxItems          = 64
 	MaxParams         = 4096
 	MaxResult         = 16384
 	MaxPendingPerConn = 8
@@ -49,7 +49,6 @@ const (
 	GrantTTL          = 10 * time.Minute
 	AuditDefault      = 20
 	AuditMax          = 50
-	MaxRequestFields  = 16
 	MaxMemo           = 280
 	MaxSats           = 2100000000000000
 )
@@ -77,13 +76,12 @@ const (
 	StatusUnavailable = "unavailable"
 )
 
-// Action ids of catalog version 1.
+// Action ids of catalog version 2.
 const (
-	ProfileFieldsRead = "profile.fields.read"
-	SecretsShare      = "secrets.share"
-	AuditRecent       = "audit.recent"
-	WalletAddress     = "wallet.request-address"
-	WalletPayment     = "wallet.request-payment"
+	ItemsShare    = "items.share"
+	AuditRecent   = "audit.recent"
+	WalletAddress = "wallet.request-address"
+	WalletPayment = "wallet.request-payment"
 )
 
 // Def is one built-in action.
@@ -97,22 +95,22 @@ type Def struct {
 }
 
 const grantsResultSchema = `{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","required":["grants"],` +
-	`"properties":{"grants":{"type":"array","items":{"type":"object","required":["grant_id","kind","ref","uses","expires_at"],` +
-	`"properties":{"grant_id":{"type":"string"},"kind":{"type":"string"},"ref":{"type":"string"},"uses":{"type":"integer"},` +
-	`"expires_at":{"type":"string"}}}}}}`
+	`"properties":{"grants":{"type":"array","maxItems":1,"items":{"type":"object",` +
+	`"required":["grant_id","kind","ref","name","category","labels","uses","expires_at"],` +
+	`"properties":{"grant_id":{"type":"string"},"kind":{"const":"item"},"ref":{"type":"string"},` +
+	`"fields":{"type":"array","items":{"type":"string"}},"name":{"type":"string"},"category":{"type":"string"},` +
+	`"labels":{"type":"array","items":{"type":"object","required":["field_id","label","kind"]}},` +
+	`"uses":{"type":"integer"},"expires_at":{"type":"string"}}}}}}`
 
-// Catalog returns catalog version 1, in a fixed order. It is built per
+// Catalog returns catalog version 2, in a fixed order. It is built per
 // call: no package-level mutable state.
 func Catalog() []Def {
 	return []Def{
-		{ID: ProfileFieldsRead, Version: 1, Sensitivity: Sensitive, Available: true,
-			ParamSchema: `{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","required":["fields"],` +
-				`"properties":{"fields":{"type":"array","minItems":1,"maxItems":16,"uniqueItems":true,` +
-				`"items":{"type":"string","pattern":"^[a-z][a-z0-9_.-]{0,63}$"}}},"additionalProperties":false}`,
-			ResultSchema: grantsResultSchema},
-		{ID: SecretsShare, Version: 1, Sensitivity: Sensitive, Available: true,
-			ParamSchema: `{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","required":["secret_id"],` +
-				`"properties":{"secret_id":{"type":"string","pattern":"^[0-7][0-9A-HJKMNP-TV-Z]{25}$"}},"additionalProperties":false}`,
+		{ID: ItemsShare, Version: 1, Sensitivity: Sensitive, Available: true,
+			ParamSchema: `{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","required":["item_id"],` +
+				`"properties":{"item_id":{"type":"string","pattern":"^[0-7][0-9A-HJKMNP-TV-Z]{25}$"},` +
+				`"fields":{"type":"array","minItems":1,"maxItems":64,"uniqueItems":true,` +
+				`"items":{"type":"string","pattern":"^[A-Za-z0-9_-]{1,32}$"}}},"additionalProperties":false}`,
 			ResultSchema: grantsResultSchema},
 		{ID: AuditRecent, Version: 1, Sensitivity: Normal, Available: true,
 			ParamSchema: `{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object",` +
@@ -149,8 +147,7 @@ type Config struct {
 	Version     uint64   `json:"version"`
 	Mode        string   `json:"mode"`
 	Connections []string `json:"connections,omitempty"`
-	Fields      []string `json:"fields,omitempty"`
-	Secrets     []string `json:"secrets,omitempty"`
+	Items       []string `json:"items,omitempty"`
 }
 
 // Offer is one action a connection offers this vault.
@@ -316,13 +313,12 @@ type Configure struct {
 	Mode        string
 	Version     uint64 // the version it is based on, +1 (0: not given)
 	Connections []string
-	Fields      []string
-	Secrets     []string
+	Items       []string
 }
 
 // ParseConfigure parses an action.configure body strictly and checks it
-// against the catalog: modes per sensitivity, fields and secrets only for
-// the actions they bound.
+// against the catalog: modes per sensitivity, items only for the action
+// it bounds.
 func ParseConfigure(body []byte) (*Configure, error) {
 	o, err := strictjson.ParseObject(body)
 	if err != nil {
@@ -361,10 +357,7 @@ func ParseConfigure(body []byte) (*Configure, error) {
 		return nil, err
 	}
 	var present bool
-	if c.Fields, present, err = strList(o, "fields", MaxFields, profile.ValidKey); err != nil || present && (c.ActionID != ProfileFieldsRead || len(c.Fields) == 0) {
-		return nil, errBad
-	}
-	if c.Secrets, present, err = strList(o, "secrets", MaxSecrets, envelope.ValidULID); err != nil || present && (c.ActionID != SecretsShare || len(c.Secrets) == 0) {
+	if c.Items, present, err = strList(o, "items", MaxItems, envelope.ValidULID); err != nil || present && (c.ActionID != ItemsShare || len(c.Items) == 0) {
 		return nil, errBad
 	}
 	return c, nil
@@ -450,12 +443,12 @@ func ParseInvocation(body []byte) (*Invocation, error) {
 
 // Params are an invocation's parsed parameters.
 type Params struct {
-	Fields   []string
-	SecretID string
-	Limit    int
-	Asset    string
-	Sats     uint64
-	Memo     string
+	ItemID string
+	Fields []string
+	Limit  int
+	Asset  string
+	Sats   uint64
+	Memo   string
 }
 
 // ParseParams parses an action's parameters with that action's strict
@@ -479,22 +472,18 @@ func ParseParams(actionID string, raw []byte) (*Params, error) {
 	}
 	p := &Params{}
 	switch actionID {
-	case ProfileFieldsRead:
-		if err := only("fields"); err != nil {
+	case ItemsShare:
+		if err := only("item_id", "fields"); err != nil {
 			return nil, err
 		}
-		l, present, err := strList(o, "fields", MaxRequestFields, profile.ValidKey)
-		if err != nil || !present || len(l) == 0 {
+		if p.ItemID, err = ulid(o, "item_id"); err != nil {
+			return nil, err
+		}
+		l, present, err := strList(o, "fields", itemspec.MaxFields, itemspec.ValidFieldID)
+		if err != nil || present && len(l) == 0 {
 			return nil, errBad
 		}
 		p.Fields = l
-	case SecretsShare:
-		if err := only("secret_id"); err != nil {
-			return nil, err
-		}
-		if p.SecretID, err = ulid(o, "secret_id"); err != nil {
-			return nil, err
-		}
 	case AuditRecent:
 		if err := only("limit"); err != nil {
 			return nil, err
@@ -632,46 +621,21 @@ func ParseOffered(body []byte) ([]Offer, error) {
 	return out, nil
 }
 
-// Descs parses the grants of a profile.fields.read or secrets.share
-// result.
-func Descs(result []byte) ([]grants.Desc, error) {
+// Descs parses the grant of an items.share result (§10.14).
+func Descs(result []byte) ([]grants.Descriptor, error) {
 	o, err := strictjson.ParseObject(result)
 	if err != nil {
 		return nil, errBad
 	}
 	arr, err := o.Array("grants")
-	if err != nil || len(arr) > MaxRequestFields {
+	if err != nil || len(arr) != 1 {
 		return nil, errBad
 	}
-	out := make([]grants.Desc, 0, len(arr))
-	for _, raw := range arr {
-		e, err := strictjson.AsObject(raw)
-		if err != nil {
-			return nil, errBad
-		}
-		var d grants.Desc
-		if d.GrantID, err = ulid(e, "grant_id"); err != nil {
-			return nil, err
-		}
-		if d.Kind, err = e.String("kind"); err != nil || d.Kind != grants.KindField && d.Kind != grants.KindSecret {
-			return nil, errBad
-		}
-		if d.Ref, err = e.String("ref"); err != nil || d.Ref == "" || len(d.Ref) > 64 {
-			return nil, errBad
-		}
-		if d.Uses, err = e.Uint("uses", 1, grants.MaxUses); err != nil {
-			return nil, errBad
-		}
-		ts, err := e.String("expires_at")
-		if err != nil {
-			return nil, errBad
-		}
-		if d.Expires, err = envelope.ParseTS(ts); err != nil {
-			return nil, errBad
-		}
-		out = append(out, d)
+	d, err := grants.ParseDescriptor(arr[0])
+	if err != nil || d.Uses == 0 || d.Expires.IsZero() || d.RuleID != "" {
+		return nil, errBad
 	}
-	return out, nil
+	return []grants.Descriptor{*d}, nil
 }
 
 // --- helpers ---
@@ -869,11 +833,8 @@ func (f *Feature) list(body []byte) (json.RawMessage, error) {
 		if c.Connections != nil {
 			b.Raw("connections", listJSON(c.Connections))
 		}
-		if c.Fields != nil {
-			b.Raw("fields", listJSON(c.Fields))
-		}
-		if c.Secrets != nil {
-			b.Raw("secrets", listJSON(c.Secrets))
+		if c.Items != nil {
+			b.Raw("items", listJSON(c.Items))
 		}
 		arr = append(arr, b.Bytes()...)
 	}
@@ -897,7 +858,7 @@ func (f *Feature) configure(s *vault.Session, body []byte) (json.RawMessage, err
 	for _, p := range active {
 		before[p.ID] = f.offeredTo(p.ID)
 	}
-	next := &Config{Version: cur.Version + 1, Mode: c.Mode, Connections: c.Connections, Fields: c.Fields, Secrets: c.Secrets}
+	next := &Config{Version: cur.Version + 1, Mode: c.Mode, Connections: c.Connections, Items: c.Items}
 	f.d.Configs[c.ActionID] = next
 	for _, id := range sortedKeys(f.d.Pending) {
 		p := f.d.Pending[id]
@@ -1015,34 +976,21 @@ func (f *Feature) execute(s *vault.Session, conn, invocationID string, def Def, 
 	cfg := f.config(def.ID)
 	var out json.RawMessage
 	switch def.ID {
-	case ProfileFieldsRead, SecretsShare:
-		if f.deps.Grants == nil {
+	case ItemsShare:
+		if f.deps.Grants == nil || !contains(cfg.Items, p.ItemID) {
 			return StatusUnavailable, nil
 		}
-		var items []grants.Item
-		if def.ID == ProfileFieldsRead {
-			for _, k := range p.Fields {
-				if contains(cfg.Fields, k) {
-					items = append(items, grants.Item{Kind: grants.KindField, Ref: k})
-				}
-			}
-		} else if contains(cfg.Secrets, p.SecretID) {
-			items = append(items, grants.Item{Kind: grants.KindSecret, Ref: p.SecretID})
-		}
-		if len(items) == 0 {
-			return StatusUnavailable, nil
-		}
+		items := []grants.Item{{Kind: grants.KindItem, Ref: p.ItemID, Fields: p.Fields}}
 		descs, err := f.deps.Grants.IssueForAction(s, conn, invocationID, items, GrantUses, GrantTTL)
 		if err != nil || len(descs) == 0 {
 			return StatusUnavailable, nil
 		}
 		arr := []byte{'['}
-		for i, d := range descs {
+		for i := range descs {
 			if i > 0 {
 				arr = append(arr, ',')
 			}
-			arr = append(arr, strictjson.NewBuilder().String("grant_id", d.GrantID).String("kind", d.Kind).String("ref", d.Ref).
-				Uint("uses", d.Uses).String("expires_at", envelope.FormatTS(d.Expires)).Bytes()...)
+			arr = append(arr, descs[i].JSON()...)
 		}
 		out = strictjson.NewBuilder().Raw("grants", append(arr, ']')).Bytes()
 	case AuditRecent:
@@ -1120,7 +1068,7 @@ func (f *Feature) result(s *vault.Session, body []byte) {
 		return // unknown, late or another connection's
 	}
 	delete(f.d.Outgoing, r.InvocationID)
-	if r.Status == StatusOK && (o.ActionID == ProfileFieldsRead || o.ActionID == SecretsShare) {
+	if r.Status == StatusOK && o.ActionID == ItemsShare {
 		descs, err := Descs(r.Result)
 		if err != nil {
 			s.Record(vault.Activity{Kind: "drop.action_malformed", ConnectionID: conn, Audit: true})

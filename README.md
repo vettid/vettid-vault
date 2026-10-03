@@ -68,9 +68,10 @@ LocalStack, the real relay and a stand-in for the member API
 | `features/messaging` | §10 | 1:1 messages: send, deliver, receipts, history |
 | `features/calls`, `vms/callwire` | §10.10 | Call signalling (offer, answer, ICE, ringing, end, history), the vault-signed ICE configuration and the device-to-device call key (V4 batch 2) |
 | `features/connauth` | §10.4 | Member authentication between connections, signed with the credential key (V4 batch 2) |
-| `features/leash`, `vms/leashwire` | §10.11 | LEASH for the member's agents: grants, the allow/refer/refuse decision behind the runtime's `AgentPolicy` hook, `agent.request` on cataloged secrets, initial grants at pairing, delegations signed with the credential key (V4 batch 3) |
-| `features/grants`, `vms/sharewire` | §10.12 | 1:1 grants of profile fields and cataloged secrets between connections, values sealed to the fetching device; the catalog (V4 batch 3) |
-| `features/critical` | §10.13 | Critical-secret use by a connection, with the member's password for each use (V4 batch 3) |
+| `features/items`, `features/itemspec` | §10.7, §10.8, §10.12 | The member's items (typed fields, tags, sensitivity data, secret or critical; critical values envelope-encrypted under item keys that only the Protean Credential holds), the tag registry, the profile (name, photo, `@profile` items) and share rules over tags for connections and agents, `ask` by default (V4 items) |
+| `features/leash`, `vms/leashwire` | §10.11 | LEASH for the member's agents: grants, the allow/refer/refuse decision behind the runtime's `AgentPolicy` hook, `agent.request` on the items the agent's share rules include (`items.read`), initial grants at pairing, delegations signed with the credential key (V4 batch 3, V4 items) |
+| `features/grants`, `vms/sharewire` | §10.12 | 1:1 grants of items between connections (from share rules, requests and actions), contents sealed to the fetching device; per-connection catalogs (V4 batch 3, V4 items) |
+| `features/critical` | §10.13 | Critical-item use by a connection, with the member's password for each use (V4 batch 3, V4 items) |
 | `features/actions` | §10.14 | Shared actions offered to connections by allowlist (V4 batch 3) |
 | `client` | §6.7, §9.1, §11 | Reference client for an app, desktop or agent: verify enclaves and manifests, enroll and unlock over the alternate channel, approve release updates, pair (with device attestation), session and rekeys, requests and events, token refresh |
 | `cmd/vaultctl` | — | Test driver over `client`; dev builds (`-tags devenclave`) also create and run vaults, and enroll and unlock through an in-process enclave |

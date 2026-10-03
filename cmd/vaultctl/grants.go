@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"strconv"
@@ -13,8 +14,8 @@ import (
 // V4 batch 3: grants between connections (VAULT-MESSAGING §10.12).
 
 func init() {
-	commands["grant"] = command{"grant request -connection ID -field KEY[,KEY] -secret ID[,ID] [-uses N] [-expires-in S] [-reason R] | " +
-		"decide -id REQUEST -approve=true|false [-items 0,2] [-uses N] [-expires-in S] | fetch -id GRANT | revoke -id GRANT | " +
+	commands["grant"] = command{"grant request -connection ID [-item ID[,ID]] [-fields F,F] [-category C[,C]] [-uses N] [-expires-in S] [-reason R] | " +
+		"decide -id REQUEST -approve=true|false [-items 0,2] [-answer INDEX:ITEM_ID[,...]] [-uses N] [-expires-in S] | fetch -id GRANT | revoke -id GRANT | " +
 		"list | catalog -connection ID", cmdGrant}
 }
 
@@ -32,8 +33,10 @@ func cmdGrant(ctx context.Context, g *globals, args []string) error {
 	}
 	fs := flag.NewFlagSet("grant "+op, flag.ExitOnError)
 	conn := fs.String("connection", "", "connection id")
-	fields := fs.String("field", "", "profile field keys (comma-separated)")
-	secrets := fs.String("secret", "", "secret ids (comma-separated)")
+	itemIDs := fs.String("item", "", "item ids (comma-separated)")
+	fields := fs.String("fields", "", "field ids to ask for, of each -item (comma-separated; default all)")
+	cats := fs.String("category", "", "categories for the member to answer (comma-separated)")
+	answers := fs.String("answer", "", "answers to category entries: INDEX:ITEM_ID (comma-separated)")
 	uses := fs.Int("uses", 0, "fetches allowed (1–100)")
 	expIn := fs.Int("expires-in", 0, "grant lifetime in seconds")
 	reason := fs.String("reason", "", "reason shown to the member")
@@ -45,11 +48,11 @@ func cmdGrant(ctx context.Context, g *globals, args []string) error {
 		switch op {
 		case "request":
 			var it []client.GrantItem
-			for _, k := range grantList(*fields) {
-				it = append(it, client.GrantItem{Kind: "field", Ref: k})
+			for _, k := range grantList(*itemIDs) {
+				it = append(it, client.GrantItem{Kind: "item", Ref: k, Fields: grantList(*fields)})
 			}
-			for _, s := range grantList(*secrets) {
-				it = append(it, client.GrantItem{Kind: "secret", Ref: s})
+			for _, c := range grantList(*cats) {
+				it = append(it, client.GrantItem{Kind: "category", Ref: c})
 			}
 			rid, err := d.GrantRequest(ctx, *conn, it, *uses, *expIn, *reason)
 			return map[string]string{"request_id": rid}, err
@@ -62,7 +65,16 @@ func cmdGrant(ctx context.Context, g *globals, args []string) error {
 				}
 				idx = append(idx, n)
 			}
-			gs, err := d.GrantDecide(ctx, *id, *approve, idx, *uses, *expIn)
+			var ans []client.GrantAnswer
+			for _, a := range grantList(*answers) {
+				i, item, ok := strings.Cut(a, ":")
+				n, err := strconv.Atoi(i)
+				if !ok || err != nil {
+					return nil, errors.New("bad -answer")
+				}
+				ans = append(ans, client.GrantAnswer{Index: n, ItemID: item})
+			}
+			gs, err := d.GrantDecideAnswers(ctx, *id, *approve, idx, ans, *uses, *expIn)
 			return map[string]any{"grants": gs}, err
 		case "fetch":
 			r, err := d.GrantFetch(ctx, *id)
@@ -72,14 +84,18 @@ func cmdGrant(ctx context.Context, g *globals, args []string) error {
 			if r.Error != "" {
 				return map[string]string{"error": r.Error}, nil
 			}
-			return map[string]any{"value": string(r.Value), "uses_left": r.UsesLeft}, nil
+			out := map[string]any{"content": json.RawMessage(r.Value)}
+			if r.Counted {
+				out["uses_left"] = r.UsesLeft
+			}
+			return out, nil
 		case "revoke":
 			return nil, d.GrantRevoke(ctx, *id)
 		case "list":
 			return d.GrantList(ctx)
 		case "catalog":
 			c, err := d.GrantCatalog(ctx, *conn)
-			return map[string]any{"secrets": c}, err
+			return map[string]any{"items": c}, err
 		}
 		return nil, errors.New(commands["grant"].usage)
 	})

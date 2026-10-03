@@ -5,6 +5,7 @@ package e2e
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"os/exec"
@@ -16,11 +17,11 @@ import (
 	"github.com/vettid/vettid-vault/internal/relaytest"
 )
 
-// V4 batch 3 through vaultctl (VAULT-PLAN V4 exit: vaultctl scripts
-// exercise the types through the real relay): an agent paired with an
-// initial LEASH grant reads the catalog; a grant issued later lets it read
-// a named secret and is revoked again; the owner catalogs a critical
-// secret, configures an action and lists grants and critical-secret uses.
+// V4 batch 3 and V4 items through vaultctl (VAULT-PLAN V4 exit: vaultctl
+// scripts exercise the types through the real relay): an agent paired
+// with an initial LEASH grant; a share rule for it lets it read the items
+// it includes and is deleted again; the owner keeps a critical item,
+// configures an action and lists grants and critical-item uses.
 func TestVaultctlBatch3(t *testing.T) {
 	r := relaytest.Start(t, nil)
 	dir := t.TempDir()
@@ -85,11 +86,11 @@ func TestVaultctlBatch3(t *testing.T) {
 	run("request", "vault.enroll.confirm")
 
 	val := filepath.Join(dir, "value")
-	if err := os.WriteFile(val, []byte("hunter22"), 0o600); err != nil {
+	if err := os.WriteFile(val, []byte(`{"name":"wifi","fields":[{"label":"Password","kind":"password","value":"hunter22"}]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	out := run("secret", "put", "-name", "wifi", "-value-file", val, "-discoverability", "cataloged")
-	wifi := between(out, `"secret_id": "`, `"`)
+	out := run("item", "put", "-sensitivity", "secret", "-tags", "agent ok", "-content-file", val)
+	wifi := between(out, `"item_id": "`, `"`)
 
 	// Pair an agent with an initial grant and a first access session.
 	runAs(agent, "init", "-role", "agent", "-name", "helper", "-relay", r.URL)
@@ -106,43 +107,60 @@ func TestVaultctlBatch3(t *testing.T) {
 	out = poll(app, "device.pair.pending")
 	run("credential", "unlock") // grants are signed by the credential key (§10.11)
 	run("request", "device.pair.approve", `{"pairing_id":"`+between(out, `"pairing_id": "`, `"`)+`","session_seconds":600,`+
-		`"grants":[{"scope":"secrets.catalog","approval":"auto"}]}`)
+		`"grants":[{"scope":"connection.list","approval":"auto"}]}`)
 	if err := <-paired; err != nil {
 		t.Fatal(err)
 	}
 	agentID := between(runAs(agent, "whoami"), `"device_id": "`, `"`)
-	if out = runAs(agent, "agent", "grants"); !strings.Contains(out, `"secrets.catalog"`) {
+	if out = runAs(agent, "agent", "grants"); !strings.Contains(out, `"connection.list"`) {
 		t.Fatalf("agent grants: %s", out)
 	}
+	if out, err := runErr(agent, "agent", "request", "-op", "item.get", "-item", wifi); err == nil || !strings.Contains(out, "forbidden") {
+		t.Fatalf("item.get without a rule: %v %s", err, out)
+	}
+	out = run("share", "set", "-agent", agentID, "-tags", "Agent OK", "-mode", "auto", "-dry-run")
+	if !strings.Contains(out, wifi) {
+		t.Fatalf("preview: %s", out)
+	}
+	out = run("share", "set", "-agent", agentID, "-tags", "agent ok", "-mode", "auto")
+	rid := between(out, `"rule_id": "`, `"`)
+	if !strings.Contains(out, `"delegation"`) {
+		t.Fatalf("rule: %s", out)
+	}
+	time.Sleep(2 * time.Second) // past the refusal cooldown
 	if out = runAs(agent, "agent", "request", "-op", "catalog"); !strings.Contains(out, wifi) || strings.Contains(out, "hunter22") {
 		t.Fatalf("catalog: %s", out)
 	}
-	if out, err := runErr(agent, "agent", "request", "-op", "secret.get", "-secret", wifi); err == nil || !strings.Contains(out, "forbidden") {
-		t.Fatalf("secret.get without a grant: %v %s", err, out)
+	if out = runAs(agent, "agent", "request", "-op", "item.get", "-item", wifi); !strings.Contains(out, "hunter22") {
+		t.Fatalf("item.get: %s", out)
 	}
-	out = run("leash", "issue", "-agent", agentID, "-scope", "secrets.get", "-approval", "auto", "-secrets", wifi)
-	gid := between(out, `"grant_id": "`, `"`)
-	if out = runAs(agent, "agent", "request", "-op", "secret.get", "-secret", wifi); !strings.Contains(out, "hunter22") {
-		t.Fatalf("secret.get: %s", out)
-	}
-	if out = run("leash", "list", "-agent", agentID); strings.Count(out, `"grant_id"`) != 2 {
+	if out = run("leash", "list", "-agent", agentID); strings.Count(out, `"grant_id"`) != 2 || !strings.Contains(out, `"items.read"`) {
 		t.Fatalf("leash list: %s", out)
 	}
-	run("leash", "revoke", "-id", gid)
-	if out, err := runErr(agent, "agent", "request", "-op", "secret.get", "-secret", wifi); err == nil || !strings.Contains(out, "forbidden") {
-		t.Fatalf("after revoke: %v %s", err, out)
+	if out = run("share", "list", "-agent", agentID); !strings.Contains(out, rid) {
+		t.Fatalf("share list: %s", out)
+	}
+	run("share", "delete", "-rule", rid)
+	if out, err := runErr(agent, "agent", "request", "-op", "item.get", "-item", wifi); err == nil || !strings.Contains(out, "forbidden") {
+		t.Fatalf("after delete: %v %s", err, out)
+	}
+	if out = run("tag", "list"); !strings.Contains(out, `"agent ok"`) {
+		t.Fatalf("tag list: %s", out)
 	}
 
 	// The other batch-3 commands on one vault.
 	seed := filepath.Join(dir, "seed")
-	if err := os.WriteFile(seed, bytes.Repeat([]byte{7}, 32), 0o600); err != nil {
+	if err := os.WriteFile(seed, []byte(`{"name":"signer","fields":[{"label":"Seed","kind":"password","value":"`+
+		base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))+`"}]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	out = run("credential", "secret-add", "-name", "signer", "-category", "signing_key", "-value-file", seed)
-	crit := between(out, `"secret_id": "`, `"`)
-	run("critical", "catalog", "-id", crit)
-	if out = run("credential", "secret-list"); !strings.Contains(out, `"cataloged": true`) {
-		t.Fatalf("catalog flag: %s", out)
+	out = run("item", "put", "-sensitivity", "critical", "-tags", "signing", "-content-file", seed)
+	crit := between(out, `"item_id": "`, `"`)
+	if out = run("item", "list", "-sensitivity", "critical"); !strings.Contains(out, crit) || strings.Contains(out, "BwcH") {
+		t.Fatalf("critical list: %s", out)
+	}
+	if out = run("item", "reveal", "-id", crit); !strings.Contains(out, "BwcH") {
+		t.Fatalf("critical reveal: %s", out)
 	}
 	if out = run("critical", "list"); !strings.Contains(out, `"incoming"`) {
 		t.Fatalf("critical list: %s", out)
@@ -157,7 +175,7 @@ func TestVaultctlBatch3(t *testing.T) {
 	if out = run("grant", "list"); !strings.Contains(out, `"given"`) {
 		t.Fatalf("grant list: %s", out)
 	}
-	if out = run("audit", "-kinds", "leash"); !strings.Contains(out, "leash.grant.revoked") || !strings.Contains(out, "leash.secret.read") {
+	if out = run("audit", "-kinds", "leash"); !strings.Contains(out, "leash.grant.revoked") || !strings.Contains(out, "leash.item.read") {
 		t.Fatalf("audit: %s", out)
 	}
 }

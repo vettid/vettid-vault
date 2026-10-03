@@ -13,14 +13,13 @@ import (
 	"github.com/vettid/vettid-vault/internal/strictjson"
 )
 
-// Feature commands (VAULT-MESSAGING §10.6–§10.9). Passwords come from the
+// Feature commands (VAULT-MESSAGING §10.6, §10.8, §10.9). Passwords come from the
 // environment, never from the command line: VAULTCTL_PASSWORD and, for a
 // change, VAULTCTL_NEW_PASSWORD.
 
 func init() {
-	commands["credential"] = command{"credential create|fetch|version|unlock|lock|rotate|password|delete|recover|secret-add|secret-get|secret-list|secret-delete [flags]", cmdCredential}
-	commands["secret"] = command{"secret put|get|list|delete [flags]   vault-held secrets", cmdSecret}
-	commands["profile"] = command{"profile get | profile set JSON", cmdProfile}
+	commands["credential"] = command{"credential create|fetch|version|unlock|lock|rotate|password|delete|recover [-value-file BLOB]", cmdCredential}
+	commands["profile"] = command{"profile get | profile set JSON   (the display name and photo; @profile items are items)", cmdProfile}
 	commands["settings"] = command{"settings get | settings set VERSION JSON", cmdSettings}
 	commands["audit"] = command{"audit [-connection ID] [-kinds a,b] [-before N] [-limit N]", cmdAudit}
 	commands["feed"] = command{"feed list|get|update|delete|guides [flags]", cmdFeed}
@@ -72,14 +71,9 @@ func cmdCredential(ctx context.Context, g *globals, args []string) error {
 		return err
 	}
 	fs := flag.NewFlagSet("credential "+op, flag.ExitOnError)
-	id := fs.String("id", "", "secret id")
-	name := fs.String("name", "", "secret name")
-	category := fs.String("category", "other", "seed_phrase|private_key|signing_key|master_password|recovery_key|other")
-	desc := fs.String("description", "", "description")
-	valueFile := fs.String("value-file", "", "file holding the secret value")
+	valueFile := fs.String("value-file", "", "recover: the member's own copy of the blob")
 	_ = fs.Parse(rest)
-	needPW := map[string]bool{"create": true, "unlock": true, "rotate": true, "password": true, "delete": true, "recover": true,
-		"secret-add": true, "secret-get": true, "secret-delete": true}
+	needPW := map[string]bool{"create": true, "unlock": true, "rotate": true, "password": true, "delete": true, "recover": true}
 	var pw string
 	if needPW[op] {
 		if pw, err = password("VAULTCTL_PASSWORD"); err != nil {
@@ -121,67 +115,8 @@ func cmdCredential(ctx context.Context, g *globals, args []string) error {
 				blob = b
 			}
 			return nil, d.CredentialRecover(ctx, pw, blob)
-		case "secret-add":
-			v, err := os.ReadFile(*valueFile)
-			if err != nil {
-				return nil, err
-			}
-			sid, err := d.CriticalSecretAdd(ctx, pw, *name, *category, *desc, v)
-			return map[string]string{"secret_id": sid}, err
-		case "secret-get":
-			v, err := d.CriticalSecretGet(ctx, pw, *id)
-			if err != nil {
-				return nil, err
-			}
-			os.Stdout.Write(v)
-			fmt.Println()
-			return map[string]string{"secret_id": *id}, nil
-		case "secret-list":
-			return d.CriticalSecretList(ctx)
-		case "secret-delete":
-			return nil, d.CriticalSecretDelete(ctx, pw, *id)
 		}
 		return nil, errors.New(commands["credential"].usage)
-	})
-}
-
-func cmdSecret(ctx context.Context, g *globals, args []string) error {
-	op, rest, err := sub(args, commands["secret"].usage)
-	if err != nil {
-		return err
-	}
-	fs := flag.NewFlagSet("secret "+op, flag.ExitOnError)
-	id := fs.String("id", "", "secret id (put: replace this secret)")
-	version := fs.Uint64("version", 0, "version being replaced")
-	name := fs.String("name", "", "name")
-	valueFile := fs.String("value-file", "", "file holding the value")
-	category := fs.String("category", "", "category")
-	disc := fs.String("discoverability", "", "private (default) or cataloged (§10.7)")
-	_ = fs.Parse(rest)
-	return withDevice(ctx, g, func(d *client.Device) (any, error) {
-		switch op {
-		case "put":
-			v, err := os.ReadFile(*valueFile)
-			if err != nil {
-				return nil, err
-			}
-			extra := map[string]any{}
-			if *category != "" {
-				extra["category"] = *category
-			}
-			if *disc != "" {
-				extra["discoverability"] = *disc
-			}
-			sid, ver, err := d.SecretPut(ctx, *id, *version, *name, strings.TrimRight(string(v), "\n"), extra)
-			return map[string]any{"secret_id": sid, "version": ver}, err
-		case "get":
-			return d.SecretGet(ctx, *id)
-		case "list":
-			return d.SecretList(ctx)
-		case "delete":
-			return nil, d.SecretDelete(ctx, *id)
-		}
-		return nil, errors.New(commands["secret"].usage)
 	})
 }
 

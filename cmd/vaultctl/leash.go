@@ -15,8 +15,8 @@ import (
 // V4 batch 3, LEASH (VAULT-MESSAGING §10.11).
 
 func init() {
-	commands["leash"] = command{"leash issue -agent ID -scope S [-approval ask|auto] [-connections a,b] [-secrets a,b] [-per-hour N] [-per-day N] [-expires TS] [-grant ID -version N] | revoke -id ID | list [-agent ID] | resume -agent ID   (issue needs the credential unlock window)", cmdLeash}
-	commands["agent"] = command{"agent request -op catalog|secret.get|secret.use [-secret ID] [-data TEXT] | grants   (an agent: LEASH requests, its grants)", cmdAgent}
+	commands["leash"] = command{"leash issue -agent ID -scope S [-approval ask|auto] [-connections a,b] [-per-hour N] [-per-day N] [-expires TS] [-grant ID -version N] | revoke -id ID | list [-agent ID] | resume -agent ID   (issue needs the credential unlock window; an agent's items are share rules: vaultctl share set -agent)", cmdLeash}
+	commands["agent"] = command{"agent request -op catalog|item.get|item.use [-item ID] [-fields F,F] [-field F] [-data TEXT] | grants   (an agent: LEASH requests, its grants)", cmdAgent}
 }
 
 func splitList(s string) []string {
@@ -36,7 +36,6 @@ func cmdLeash(ctx context.Context, g *globals, args []string) error {
 	scope := fs.String("scope", "", "grant scope (§10.11)")
 	approval := fs.String("approval", "", "ask (default) or auto")
 	conns := fs.String("connections", "", "comma-separated connection ids")
-	secs := fs.String("secrets", "", "comma-separated secret ids")
 	perHour := fs.Int("per-hour", 0, "auto grants: requests per hour")
 	perDay := fs.Int("per-day", 0, "auto grants: requests per day")
 	expires := fs.String("expires", "", "expiry (YYYY-MM-DDTHH:MM:SS.mmmZ)")
@@ -53,9 +52,6 @@ func cmdLeash(ctx context.Context, g *globals, args []string) error {
 			}
 			if l := splitList(*conns); l != nil {
 				spec["connections"] = l
-			}
-			if l := splitList(*secs); l != nil {
-				spec["secrets"] = l
 			}
 			if *perHour > 0 {
 				spec["per_hour"] = *perHour
@@ -89,18 +85,24 @@ func cmdAgent(ctx context.Context, g *globals, args []string) error {
 		return err
 	}
 	fs := flag.NewFlagSet("agent "+op, flag.ExitOnError)
-	rop := fs.String("op", "", "catalog, secret.get or secret.use")
-	secret := fs.String("secret", "", "secret id")
-	data := fs.String("data", "", "data for secret.use (hmac-sha256)")
+	rop := fs.String("op", "", "catalog, item.get or item.use")
+	item := fs.String("item", "", "item id")
+	fields := fs.String("fields", "", "item.get: field ids (comma-separated; default all)")
+	field := fs.String("field", "", "item.use: field id")
+	data := fs.String("data", "", "data for item.use (hmac-sha256)")
 	_ = fs.Parse(rest)
 	return withDevice(ctx, g, func(d *client.Device) (any, error) {
 		switch op {
 		case "request":
 			m := map[string]any{}
-			if *secret != "" {
-				m["secret_id"] = *secret
+			if *item != "" {
+				m["item_id"] = *item
 			}
-			if *rop == "secret.use" {
+			if l := splitList(*fields); l != nil && *rop == "item.get" {
+				m["fields"] = l
+			}
+			if *rop == "item.use" {
+				m["field_id"] = *field
 				m["action"] = "hmac-sha256"
 				m["data"] = base64.StdEncoding.EncodeToString([]byte(*data))
 			}

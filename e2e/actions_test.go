@@ -15,7 +15,7 @@ import (
 
 // V4 batch 3, shared actions (§10.14) through the real relay: the
 // built-in catalog run by A's vault, invoked by B under each permission
-// mode (allowlist: profile.fields.read, with the value fetched through
+// mode (allowlist: items.share, with the content fetched through
 // the one-use grant; prompt-each-time approved by A's app; default-allow;
 // default-deny: no longer offered), and a critical action whose approval
 // is refused without the credential's unlock window and then accepted
@@ -26,8 +26,9 @@ func TestSharedAction(t *testing.T) {
 	b := newTestVault(t, r.URL, "b", nil)
 	ctx := ctxT(t, 180*time.Second)
 	aConn, bConn := connect(t, a, b, 600)
-	if _, err := a.app.ProfileSet(ctx, map[string]any{"version": 0, "name": "Ada",
-		"set": map[string]any{"contact.phone": map[string]any{"value": "555-0100"}, "contact.home": map[string]any{"value": "1 Main"}}}); err != nil {
+	phone, _, err := a.app.ItemPut(ctx, "", 0, "", nil, client.ItemContent{Name: "Phone", Category: "contact",
+		Fields: []client.ItemField{{Label: "Mobile", Kind: "phone", Value: "555-0100"}, {Label: "Home", Kind: "text", Value: "1 Main"}}})
+	if err != nil {
 		t.Fatal(err)
 	}
 
@@ -50,13 +51,14 @@ func TestSharedAction(t *testing.T) {
 	}
 	status := func(o strictjson.Object) string { s, _ := o.String("status"); return s }
 
-	// allowlist: runs at once; the field comes through a one-use grant.
-	if _, err := a.app.ActionConfigure(ctx, client.ActionConfig{ActionID: "profile.fields.read", Mode: "allowlist",
-		Connections: []string{aConn}, Fields: []string{"contact.phone"}}); err != nil {
+	// allowlist: runs at once; the item (one field) comes through a
+	// one-use grant.
+	if _, err := a.app.ActionConfigure(ctx, client.ActionConfig{ActionID: "items.share", Mode: "allowlist",
+		Connections: []string{aConn}, Items: []string{phone}}); err != nil {
 		t.Fatal(err)
 	}
-	offered("profile.fields.read", `"profile.fields.read","version":1,"prompt":false`)
-	id, err := b.app.ActionInvoke(ctx, bConn, "profile.fields.read", json.RawMessage(`{"fields":["contact.phone","contact.home"]}`))
+	offered("items.share", `"items.share","version":1,"prompt":false`)
+	id, err := b.app.ActionInvoke(ctx, bConn, "items.share", json.RawMessage(`{"item_id":"`+phone+`","fields":["f1"]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,13 +66,13 @@ func TestSharedAction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status(res) != "ok" || strings.Contains(string(res["result"]), "555") || strings.Contains(string(res["result"]), "contact.home") {
+	if status(res) != "ok" || strings.Contains(string(res["result"]), "555") || strings.Contains(string(res["result"]), "Home") {
 		t.Fatalf("allowlist: %v", res)
 	}
 	ro, _ := strictjson.ParseObject(res["result"])
 	gs, _ := ro.Array("grants")
 	gr, err := b.app.GrantFetch(ctx, field(t, gs[0], "grant_id"))
-	if err != nil || string(gr.Value) != "555-0100" {
+	if err != nil || !strings.Contains(string(gr.Value), "555-0100") || strings.Contains(string(gr.Value), "1 Main") {
 		t.Fatalf("fetch: %v %+v", err, gr)
 	}
 

@@ -12,20 +12,14 @@ import (
 	"github.com/vettid/vettid-vault/vms/suite"
 )
 
-// Critical-secret use by a connection (VAULT-MESSAGING §10.13).
+// Critical-item use by a connection (VAULT-MESSAGING §10.13).
 
-// CriticalSecretCatalog lists (or unlists) a critical secret in the
-// catalog to connections (credential.secret.catalog).
-func (d *Device) CriticalSecretCatalog(ctx context.Context, secretID string, cataloged bool) error {
-	_, err := d.Op(ctx, "credential.secret.catalog", map[string]any{"secret_id": secretID, "cataloged": cataloged})
-	return err
-}
-
-// CriticalUseRequest asks a connection's member to use one of their
-// cataloged critical secrets (operation "sign" or "auth") and returns the
-// request id; the result arrives as critical-secret-use.result.
-func (d *Device) CriticalUseRequest(ctx context.Context, connectionID, secretID, operation string, payload []byte, note string) (string, error) {
-	body := map[string]any{"connection_id": connectionID, "secret_id": secretID, "operation": operation,
+// CriticalUseRequest asks a connection's member to use a field of one of
+// their critical items that a share rule makes usable to this vault
+// (operation "sign" or "auth") and returns the request id; the result
+// arrives as critical-secret-use.result.
+func (d *Device) CriticalUseRequest(ctx context.Context, connectionID, itemID, fieldID, operation string, payload []byte, note string) (string, error) {
+	body := map[string]any{"connection_id": connectionID, "item_id": itemID, "field_id": fieldID, "operation": operation,
 		"payload": base64.StdEncoding.EncodeToString(payload)}
 	if note != "" {
 		body["context"] = note

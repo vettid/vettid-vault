@@ -1,7 +1,7 @@
 // Package sharewire holds the cryptographic pieces of sharing between
-// connections (VAULT-MESSAGING §10.12, §10.13): a granted value sealed to
-// the fetching device's one-time reply key, and the domain-separated
-// message of a critical-secret `auth` use.
+// connections (VAULT-MESSAGING §10.12, §10.13): a granted item's content
+// sealed to the fetching device's one-time reply key, and the
+// domain-separated message of a critical-item `auth` use.
 package sharewire
 
 import (
@@ -15,8 +15,8 @@ const (
 	LabelGrant        = "vettid/vms/2/grant"
 	LabelCriticalAuth = "vettid/vms/2/critical-auth"
 	EncSize           = 1120
-	// MaxValue bounds a granted value (a secret's value, §10.7).
-	MaxValue = 16384
+	// MaxValue bounds a granted value: an item's shared content (§10.12).
+	MaxValue = 65536
 )
 
 // ErrOpen is returned for any value that does not open.

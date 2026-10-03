@@ -10,6 +10,7 @@ import (
 
 	"golang.org/x/crypto/argon2"
 
+	"github.com/vettid/vettid-vault/features/itemspec"
 	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/suite"
@@ -29,10 +30,11 @@ const (
 	lockedPrefix  = 22 // t(1) || m(4) || p(1) || salt(16)
 	saltSize      = 16
 	MaxInner      = 131072
-	MaxSecrets    = 64
-	MaxValue      = 8192
-	MaxName       = 128
-	MaxDesc       = 1024
+	MaxItems      = itemspec.MaxCritItems
+	MaxItemFields = itemspec.MaxCritFields
+	// MaxRaw bounds one stored value or notes (JSON-encoded): a critical
+	// item's whole encoding is at most itemspec.MaxCritBytes (§10.7).
+	MaxRaw        = itemspec.MaxCritBytes
 	MinPassword   = 8
 	MaxPassword   = 1024
 	MaxBlob       = HeaderSize + EncSize + 16 + lockedPrefix + suite.XNonceSize + MaxInner + 16
@@ -42,10 +44,6 @@ const (
 	maxKDFMemKiB  = 1024 * 1024
 	maxKDFThreads = 4
 )
-
-// Categories of critical secrets (§3.5.2).
-var Categories = map[string]bool{"seed_phrase": true, "private_key": true, "signing_key": true,
-	"master_password": true, "recovery_key": true, "other": true}
 
 // KDF are the password key's Argon2id parameters.
 type KDF struct {
@@ -188,14 +186,27 @@ func Open(cek *suite.PrivateKey, vaultID string, blob, password []byte) (uint64,
 	return h.Version, inner, nil
 }
 
-// Secret is a critical secret inside the credential.
-type Secret struct {
-	ID          string
-	Name        string
-	Category    string
-	Description string
-	Value       []byte
-	CreatedAt   time.Time
+// Value is one field value of a critical item inside the credential: its
+// field id and its canonical JSON value (a string or an address object).
+type Value struct {
+	FieldID string
+	Raw     []byte
+}
+
+// Item is the values of one critical item inside the credential (§3.5.2):
+// its metadata is in the items feature's DEK state.
+type Item struct {
+	ID     string
+	Values []Value
+	Notes  []byte // the notes as a JSON string; nil for none
+}
+
+// Wipe zeroizes the item's values.
+func (it *Item) Wipe() {
+	for i := range it.Values {
+		suite.Wipe(it.Values[i].Raw)
+	}
+	suite.Wipe(it.Notes)
 }
 
 // Inner is the credential's plaintext (§3.5.2).
@@ -205,7 +216,7 @@ type Inner struct {
 	CreatedAt         time.Time
 	PasswordChangedAt time.Time
 	Key               []byte // Ed25519 seed
-	Secrets           []Secret
+	Items             []Item
 	CryptoKeys        json.RawMessage // reserved (wallet); "[]"
 }
 
@@ -215,23 +226,29 @@ func (in *Inner) Wipe() {
 		return
 	}
 	suite.Wipe(in.Key)
-	for i := range in.Secrets {
-		suite.Wipe(in.Secrets[i].Value)
+	for i := range in.Items {
+		in.Items[i].Wipe()
 	}
+}
+
+// FindItem returns the index of a critical item, or -1.
+func (in *Inner) FindItem(id string) int {
+	for i := range in.Items {
+		if in.Items[i].ID == id {
+			return i
+		}
+	}
+	return -1
 }
 
 // Marshal encodes the plaintext. The caller wipes the result.
 func (in *Inner) Marshal() []byte {
 	arr := []byte{'['}
-	for i, s := range in.Secrets {
+	for i, it := range in.Items {
 		if i > 0 {
 			arr = append(arr, ',')
 		}
-		b := strictjson.NewBuilder().String("id", s.ID).String("name", s.Name).String("category", s.Category)
-		if s.Description != "" {
-			b.String("description", s.Description)
-		}
-		arr = append(arr, b.Base64("value", s.Value).String("created_at", envelope.FormatTS(s.CreatedAt)).Bytes()...)
+		arr = append(arr, it.Marshal()...)
 	}
 	arr = append(arr, ']')
 	ck := in.CryptoKeys
@@ -240,7 +257,46 @@ func (in *Inner) Marshal() []byte {
 	}
 	return strictjson.NewBuilder().Uint("v", 1).String("vault_id", in.VaultID).Uint("version", in.Version).
 		String("created_at", envelope.FormatTS(in.CreatedAt)).String("password_changed_at", envelope.FormatTS(in.PasswordChangedAt)).
-		Base64("key", in.Key).Raw("secrets", arr).Raw("crypto_keys", ck).Bytes()
+		Base64("key", in.Key).Raw("items", arr).Raw("crypto_keys", ck).Bytes()
+}
+
+// Marshal encodes a critical item's values (§3.5.2):
+//
+//	{"item_id","fields":[{"field_id","value"}],"notes"?}
+//
+// The caller wipes the result.
+func (it *Item) Marshal() []byte {
+	fs := []byte{'['}
+	for i, v := range it.Values {
+		if i > 0 {
+			fs = append(fs, ',')
+		}
+		fs = append(fs, strictjson.NewBuilder().String("field_id", v.FieldID).Raw("value", v.Raw).Bytes()...)
+	}
+	fs = append(fs, ']')
+	b := strictjson.NewBuilder().String("item_id", it.ID).Raw("fields", fs)
+	if it.Notes != nil {
+		b.Raw("notes", it.Notes)
+	}
+	return b.Bytes()
+}
+
+// ValuesJSON is the plaintext of a revealed critical item (§10.7):
+// {"fields":[{"field_id","value"}],"notes"?}. The caller wipes it.
+func (it *Item) ValuesJSON() []byte {
+	fs := []byte{'['}
+	for i, v := range it.Values {
+		if i > 0 {
+			fs = append(fs, ',')
+		}
+		fs = append(fs, strictjson.NewBuilder().String("field_id", v.FieldID).Raw("value", v.Raw).Bytes()...)
+	}
+	fs = append(fs, ']')
+	b := strictjson.NewBuilder().Raw("fields", fs)
+	if it.Notes != nil {
+		b.Raw("notes", it.Notes)
+	}
+	return b.Bytes()
 }
 
 // ParseInner parses the plaintext strictly (§3.5.2).
@@ -271,25 +327,25 @@ func ParseInner(b []byte) (*Inner, error) {
 	if in.Key, err = o.Base64("key", 32); err != nil {
 		return nil, ErrFormat
 	}
-	arr, err := o.Array("secrets")
-	if err != nil || len(arr) > MaxSecrets {
+	arr, err := o.Array("items")
+	if err != nil || len(arr) > MaxItems {
 		in.Wipe()
 		return nil, ErrFormat
 	}
 	seen := map[string]bool{}
 	for _, raw := range arr {
-		so, err := strictjson.AsObject(raw)
+		io, err := strictjson.AsObject(raw)
 		if err != nil {
 			in.Wipe()
 			return nil, ErrFormat
 		}
-		s, err := parseSecret(so)
-		if err != nil || seen[s.ID] {
+		it, err := parseItem(io)
+		if err != nil || seen[it.ID] {
 			in.Wipe()
 			return nil, ErrFormat
 		}
-		seen[s.ID] = true
-		in.Secrets = append(in.Secrets, *s)
+		seen[it.ID] = true
+		in.Items = append(in.Items, *it)
 	}
 	if _, err := o.Array("crypto_keys"); err != nil {
 		in.Wipe()
@@ -299,30 +355,61 @@ func ParseInner(b []byte) (*Inner, error) {
 	return in, nil
 }
 
-func parseSecret(o strictjson.Object) (*Secret, error) {
-	s := &Secret{}
+func parseItem(o strictjson.Object) (*Item, error) {
+	it := &Item{}
 	var err error
-	if s.ID, err = o.String("id"); err != nil || !envelope.ValidULID(s.ID) {
+	if it.ID, err = o.String("item_id"); err != nil || !envelope.ValidULID(it.ID) {
 		return nil, ErrFormat
 	}
-	if s.Name, err = o.String("name"); err != nil || s.Name == "" || len(s.Name) > MaxName {
+	arr, err := o.Array("fields")
+	if err != nil || len(arr) > MaxItemFields {
 		return nil, ErrFormat
 	}
-	if s.Category, err = o.String("category"); err != nil || !Categories[s.Category] {
-		return nil, ErrFormat
+	seen := map[string]bool{}
+	for _, raw := range arr {
+		fo, err := strictjson.AsObject(raw)
+		if err != nil {
+			it.Wipe()
+			return nil, ErrFormat
+		}
+		id, err := fo.String("field_id")
+		if err != nil || !itemspec.ValidFieldID(id) || seen[id] {
+			it.Wipe()
+			return nil, ErrFormat
+		}
+		seen[id] = true
+		v, ok := fo["value"]
+		if !ok || !validRaw(v, true) {
+			it.Wipe()
+			return nil, ErrFormat
+		}
+		it.Values = append(it.Values, Value{FieldID: id, Raw: append([]byte(nil), v...)})
 	}
-	if d, present, err := o.OptString("description"); err != nil || len(d) > MaxDesc {
-		return nil, ErrFormat
-	} else if present {
-		s.Description = d
+	if n, ok := o["notes"]; ok {
+		if !validRaw(n, false) {
+			it.Wipe()
+			return nil, ErrFormat
+		}
+		it.Notes = append([]byte(nil), n...)
 	}
-	if s.Value, err = o.Base64("value", -1); err != nil || len(s.Value) == 0 || len(s.Value) > MaxValue {
-		return nil, ErrFormat
+	return it, nil
+}
+
+// validRaw accepts a JSON string (or, for a value, an address object) of
+// at most MaxRaw bytes; the items feature checked its kind when storing it.
+func validRaw(v []byte, objOK bool) bool {
+	if len(v) == 0 || len(v) > MaxRaw {
+		return false
 	}
-	if s.CreatedAt, err = ts(o, "created_at"); err != nil {
-		return nil, ErrFormat
+	if v[0] == '"' {
+		_, err := strictjson.AsString(v)
+		return err == nil
 	}
-	return s, nil
+	if objOK && v[0] == '{' {
+		_, err := strictjson.AsObject(v)
+		return err == nil
+	}
+	return false
 }
 
 func ts(o strictjson.Object, k string) (time.Time, error) {

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/vettid/vettid-vault/features/credential"
+	"github.com/vettid/vettid-vault/features/items"
 	"github.com/vettid/vettid-vault/internal/featuretest"
 	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault"
@@ -28,22 +29,26 @@ type utk struct {
 	ek *suite.PublicKey
 }
 
-// side is one vault: a credential, the critical feature and a fake host.
+// side is one vault: a credential, items, the critical feature and a fake
+// host.
 type side struct {
-	t    *testing.T
-	h    *featuretest.Host
-	cred *credential.Feature
-	f    *Feature
-	clk  *featuretest.Clock
-	pool []utk
-	blob string
+	t     *testing.T
+	h     *featuretest.Host
+	cred  *credential.Feature
+	items *items.Feature
+	f     *Feature
+	clk   *featuretest.Clock
+	pool  []utk
+	blob  string
 }
 
 func newSide(t *testing.T, clk *featuretest.Clock, ikSeed byte) *side {
 	s := &side{t: t, h: featuretest.NewHost(), clk: clk}
 	s.h.SetIdentity(ikSeed)
 	s.cred = credential.New(credential.Options{KDF: credential.MinKDF})
-	s.f = New(s.cred)
+	s.items = items.New(s.cred)
+	s.cred.AddDeleteObserver(s.items)
+	s.f = New(s.cred, s.items)
 	return s
 }
 
@@ -116,22 +121,28 @@ func (s *side) sealed(f vault.Feature, kind, typ string, payload, extra map[stri
 	return r
 }
 
-// setup creates the credential and a cataloged critical secret holding
-// value; it returns the secret's id.
-func (s *side) setup(value []byte, catalog bool) string {
+// setup creates the credential and a critical item whose field f1 holds
+// value (as base64); with usable, a share rule makes it usable to every
+// connection (§10.12). It returns the item's id.
+func (s *side) setup(value []byte, usable bool) string {
 	s.t.Helper()
 	if r := s.sealed(s.cred, "app", "credential.create", map[string]any{"password": pw}, nil, false); !r.OK() {
 		s.t.Fatalf("create: %s", r.Code)
 	}
-	r := s.sealed(s.cred, "app", "credential.secret.add", map[string]any{"password": pw, "name": "Signer",
-		"category": "signing_key", "value": b64.EncodeToString(value)}, nil, true)
+	item := map[string]any{"name": "Signer", "category": "crypto_wallet",
+		"fields": []map[string]any{{"label": "Seed", "kind": "password", "value": b64.EncodeToString(value)}}}
+	r := s.sealed(s.items, "app", "item.put", map[string]any{"password": pw, "item": item},
+		map[string]any{"sensitivity": "critical", "tags": []string{"signing"}}, true)
 	if !r.OK() {
-		s.t.Fatalf("secret.add: %s", r.Code)
+		s.t.Fatalf("item.put: %s", r.Code)
 	}
-	id, _ := r.Obj(s.t).String("secret_id")
-	if catalog {
-		if r := s.call(s.cred, "app", "credential.secret.catalog", `{"secret_id":"`+id+`","cataloged":true}`); !r.OK() {
-			s.t.Fatalf("catalog: %s", r.Code)
+	id, _ := r.Obj(s.t).String("item_id")
+	if usable {
+		for c := range s.h.Conns {
+			b, _ := json.Marshal(map[string]any{"subject": map[string]any{"connection_id": c}, "tags": []string{"signing"}, "mode": "auto"})
+			if r := s.call(s.items, "app", "share.rule.set", string(b)); !r.OK() {
+				s.t.Fatalf("rule: %s", r.Code)
+			}
 		}
 	}
 	return id
@@ -149,8 +160,8 @@ func ulid(t time.Time) string {
 	return id
 }
 
-func useBody(reqID, secretID, op string, payload []byte) string {
-	b, _ := json.Marshal(map[string]any{"request_id": reqID, "secret_id": secretID, "operation": op,
+func useBody(reqID, itemID, op string, payload []byte) string {
+	b, _ := json.Marshal(map[string]any{"request_id": reqID, "item_id": itemID, "field_id": "f1", "operation": op,
 		"payload": b64.EncodeToString(payload), "context": "invoice 7"})
 	return string(b)
 }
@@ -191,7 +202,7 @@ func TestUseFlow(t *testing.T) {
 			sid := a.setup(seed, true)
 			payload := []byte("tx 0xdeadbeef")
 
-			req, _ := json.Marshal(map[string]any{"connection_id": "conn-a", "secret_id": sid, "operation": op,
+			req, _ := json.Marshal(map[string]any{"connection_id": "conn-a", "item_id": sid, "field_id": "f1", "operation": op,
 				"payload": b64.EncodeToString(payload)})
 			r := b.call(b.f, "app", "critical-secret-use.request", string(req))
 			if !r.OK() {
@@ -286,7 +297,7 @@ func TestForgedResultDropped(t *testing.T) {
 	clk := newClock()
 	b := newSide(t, clk, 0x0b)
 	b.h.AddConnection("conn-a")
-	req, _ := json.Marshal(map[string]any{"connection_id": "conn-a", "secret_id": ulid(clk.T), "operation": "sign",
+	req, _ := json.Marshal(map[string]any{"connection_id": "conn-a", "item_id": ulid(clk.T), "field_id": "f1", "operation": "sign",
 		"payload": b64.EncodeToString([]byte("x"))})
 	r := b.call(b.f, "app", "critical-secret-use.request", string(req))
 	reqID, _ := r.Obj(t).String("request_id")
@@ -390,8 +401,8 @@ func TestConsent(t *testing.T) {
 	}
 }
 
-// Deny from a desktop; uncataloged and unsuitable secrets; limits;
-// expiry; removal.
+// Deny from a desktop; items no rule makes usable; unsuitable values;
+// limits; expiry; removal.
 func TestRefusals(t *testing.T) {
 	a, sid := setupA(t, bytes.Repeat([]byte{0x55}, 32), true)
 	id := a.ask(sid, []byte("p"))
@@ -408,16 +419,16 @@ func TestRefusals(t *testing.T) {
 		t.Fatal("deny not audited or synced")
 	}
 
-	// Not in the catalog: unavailable without asking.
+	// No rule makes it usable: unavailable without asking.
 	b, sid2 := setupA(t, bytes.Repeat([]byte{0x55}, 32), false)
 	b.h.Reset()
 	b.ask(sid2, []byte("p"))
 	if field(t, lastSent(t, b.h, "critical-secret.result").Body, "status") != StatusUnavailable || len(b.h.SentOfType("critical-secret-use.pending")) != 0 {
-		t.Fatal("uncataloged secret asked")
+		t.Fatal("an item no rule includes was asked about")
 	}
 	b.ask(ulid(b.clk.T), []byte("p")) // unknown: the same answer
 	if field(t, lastSent(t, b.h, "critical-secret.result").Body, "status") != StatusUnavailable {
-		t.Fatal("unknown secret")
+		t.Fatal("unknown item")
 	}
 
 	// A value that is not an Ed25519 seed: unsuitable (the credential was
@@ -465,7 +476,7 @@ func TestAuthorizationAndBadBodies(t *testing.T) {
 	a := newSide(t, clk, 0x0a)
 	a.h.AddConnection("conn-b")
 	sid := ulid(clk.T)
-	good := `{"connection_id":"conn-b","secret_id":"` + sid + `","operation":"sign","payload":"cA=="}`
+	good := `{"connection_id":"conn-b","item_id":"` + sid + `","field_id":"f1","operation":"sign","payload":"cA=="}`
 	for kind, want := range map[string]string{"agent": "forbidden", "connection:conn-b": "forbidden", "desktop": "", "app": ""} {
 		if r := a.call(a.f, kind, "critical-secret-use.request", good); r.Code != want {
 			t.Errorf("request from %s: %q", kind, r.Code)
@@ -480,19 +491,21 @@ func TestAuthorizationAndBadBodies(t *testing.T) {
 		t.Error("agent list")
 	}
 	for _, body := range []string{`{}`, `[]`,
-		`{"connection_id":"conn-b","secret_id":"x","operation":"sign","payload":"cA=="}`,
-		`{"connection_id":"conn-b","secret_id":"` + sid + `","operation":"decrypt","payload":"cA=="}`,
-		`{"connection_id":"conn-b","secret_id":"` + sid + `","operation":"sign","payload":""}`,
-		`{"connection_id":"conn-b","secret_id":"` + sid + `","operation":"sign","payload":"cA"}`,
-		`{"connection_id":"conn-b","secret_id":"` + sid + `","operation":"sign","payload":"` + b64.EncodeToString(make([]byte, MaxPayload+1)) + `"}`,
-		`{"connection_id":"conn-b","secret_id":"` + sid + `","operation":"sign","payload":"cA==","context":"` + string(bytes.Repeat([]byte{'x'}, MaxContext+1)) + `"}`,
-		`{"connection_id":"conn-b","secret_id":"` + sid + `","operation":"sign","payload":"cA==","payload":"cA=="}`,
+		`{"connection_id":"conn-b","item_id":"x","field_id":"f1","operation":"sign","payload":"cA=="}`,
+		`{"connection_id":"conn-b","item_id":"` + sid + `","operation":"sign","payload":"cA=="}`,
+		`{"connection_id":"conn-b","item_id":"` + sid + `","field_id":"f 1","operation":"sign","payload":"cA=="}`,
+		`{"connection_id":"conn-b","item_id":"` + sid + `","field_id":"f1","operation":"decrypt","payload":"cA=="}`,
+		`{"connection_id":"conn-b","item_id":"` + sid + `","field_id":"f1","operation":"sign","payload":""}`,
+		`{"connection_id":"conn-b","item_id":"` + sid + `","field_id":"f1","operation":"sign","payload":"cA"}`,
+		`{"connection_id":"conn-b","item_id":"` + sid + `","field_id":"f1","operation":"sign","payload":"` + b64.EncodeToString(make([]byte, MaxPayload+1)) + `"}`,
+		`{"connection_id":"conn-b","item_id":"` + sid + `","field_id":"f1","operation":"sign","payload":"cA==","context":"` + string(bytes.Repeat([]byte{'x'}, MaxContext+1)) + `"}`,
+		`{"connection_id":"conn-b","item_id":"` + sid + `","field_id":"f1","operation":"sign","payload":"cA==","payload":"cA=="}`,
 	} {
 		if r := a.call(a.f, "app", "critical-secret-use.request", body); r.Code != "bad_request" {
 			t.Errorf("%s: %q", body, r.Code)
 		}
 	}
-	if r := a.call(a.f, "app", "critical-secret-use.request", `{"connection_id":"nope","secret_id":"`+sid+`","operation":"sign","payload":"cA=="}`); r.Code != "not_found" {
+	if r := a.call(a.f, "app", "critical-secret-use.request", `{"connection_id":"nope","item_id":"`+sid+`","field_id":"f1","operation":"sign","payload":"cA=="}`); r.Code != "not_found" {
 		t.Errorf("unknown connection: %q", r.Code)
 	}
 	a.h.DownConns["conn-b"] = true
@@ -518,8 +531,8 @@ func TestAuthorizationAndBadBodies(t *testing.T) {
 func TestStateAndList(t *testing.T) {
 	a, sid := setupA(t, bytes.Repeat([]byte{0x66}, 32), true)
 	id := a.ask(sid, []byte("p"))
-	a.call(a.f, "app", "critical-secret-use.request", `{"connection_id":"conn-b","secret_id":"`+sid+`","operation":"auth","payload":"cA=="}`)
-	g := New(a.cred)
+	a.call(a.f, "app", "critical-secret-use.request", `{"connection_id":"conn-b","item_id":"`+sid+`","field_id":"f1","operation":"auth","payload":"cA=="}`)
+	g := New(a.cred, a.items)
 	featuretest.RoundTrip(t, a.f, g)
 	r := a.call(g, "desktop", "critical-secret-use.list", `{}`)
 	o := r.Obj(t)
@@ -531,12 +544,12 @@ func TestStateAndList(t *testing.T) {
 }
 
 func FuzzParseRequest(f *testing.F) {
-	f.Add([]byte(`{"connection_id":"c","secret_id":"01JB2Z6V9K3M4N5P6Q7R8S9T0V","operation":"sign","payload":"cA==","context":"x"}`))
+	f.Add([]byte(`{"connection_id":"c","item_id":"01JB2Z6V9K3M4N5P6Q7R8S9T0V","field_id":"f1","operation":"sign","payload":"cA==","context":"x"}`))
 	f.Fuzz(func(t *testing.T, b []byte) { _, _ = ParseRequest(b) })
 }
 
 func FuzzParseUse(f *testing.F) {
-	f.Add([]byte(`{"request_id":"01JB2Z6V9K3M4N5P6Q7R8S9T0V","secret_id":"01JB2Z6V9K3M4N5P6Q7R8S9T0V","operation":"auth","payload":"cA=="}`))
+	f.Add([]byte(`{"request_id":"01JB2Z6V9K3M4N5P6Q7R8S9T0V","item_id":"01JB2Z6V9K3M4N5P6Q7R8S9T0V","field_id":"f1","operation":"auth","payload":"cA=="}`))
 	f.Fuzz(func(t *testing.T, b []byte) { _, _ = ParseUse(b) })
 }
 

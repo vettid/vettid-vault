@@ -1,11 +1,12 @@
-// Package credential is the Protean Credential and its critical secrets
-// (VAULT-MESSAGING §3.5, §10.6), following the owner's Protean Credential
+// Package credential is the Protean Credential (VAULT-MESSAGING §3.5,
+// §10.6), following the owner's Protean Credential
 // design: the member's app holds the credential, sealed to the vault's CEK
 // and under the member's password; every use carries the credential and
 // the password, sealed to a one-time transaction key (UTK) inside the
 // session; every use rotates the CEK and destroys the old one, so earlier
-// blobs are undecryptable by anyone; secret values return sealed to a
-// one-time reply key. The vault keeps no plaintext afterwards (the
+// blobs are undecryptable by anyone; critical values return sealed to a
+// one-time reply key. The values of the member's critical items live
+// inside it; the items feature performs their operations through Operate. The vault keeps no plaintext afterwards (the
 // credential key only during an unlock window). LAT is superseded by Nitro
 // attestation.
 //
@@ -47,19 +48,6 @@ const (
 	maxPoolDevices = 64
 )
 
-// Meta is a critical secret's metadata, kept in vault state so that it can
-// be listed without the password (§10.6).
-type Meta struct {
-	ID          string    `json:"id"`
-	Name        string    `json:"name"`
-	Category    string    `json:"category"`
-	Description string    `json:"description,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
-	// Cataloged lists the secret in the catalog to connections, for
-	// critical-secret use only (credential.secret.catalog, §10.13).
-	Cataloged bool `json:"cataloged,omitempty"`
-}
-
 // LTK is the private half of an issued UTK.
 type LTK struct {
 	ID      string    `json:"id"`
@@ -75,7 +63,6 @@ type state struct {
 	Acked     bool      `json:"acked,omitempty"` // the app confirmed the latest blob
 	Key       []byte    `json:"key,omitempty"`   // the credential key's public key
 	UpdatedAt time.Time `json:"updated_at,omitempty"`
-	Secrets   []Meta    `json:"secrets,omitempty"`
 	Failures  int       `json:"failures,omitempty"`
 	NotBefore time.Time `json:"not_before,omitempty"`
 	// Pools are the LTKs per app device (§3.5.4).
@@ -100,6 +87,21 @@ type Feature struct {
 	keyExp time.Time
 
 	rotObs []KeyRotationObserver
+	delObs []DeleteObserver
+}
+
+// DeleteObserver is told when the credential is deleted: the critical
+// items' metadata goes with their values (§10.6, §10.7). It must not call
+// back into the credential.
+type DeleteObserver interface {
+	CredentialDeleted(s *vault.Session)
+}
+
+// AddDeleteObserver registers an observer (at construction).
+func (f *Feature) AddDeleteObserver(o DeleteObserver) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.delObs = append(f.delObs, o)
 }
 
 // KeyRotationObserver is told of every credential-key rotation statement
@@ -140,9 +142,7 @@ func (f *Feature) Types() []vault.TypeSpec {
 	return []vault.TypeSpec{
 		r("credential.utk.get", apps), r("credential.create", apps), r("credential.get", apps), r("credential.ack", apps),
 		r("credential.version", owners), r("credential.unlock", apps), r("credential.lock", apps), r("credential.rotate", apps),
-		r("credential.password.change", apps), r("credential.delete", apps),
-		r("credential.secret.add", apps), r("credential.secret.get", apps), r("credential.secret.list", owners),
-		r("credential.secret.delete", apps), r("credential.recover", apps), r("credential.secret.catalog", apps),
+		r("credential.password.change", apps), r("credential.delete", apps), r("credential.recover", apps),
 	}
 }
 
@@ -245,10 +245,21 @@ const (
 	needSealed
 	needPassword
 	needNewPassword
-	needSecretID
-	needSecret
+	needItemID
+	optItemID
+	needItem
 	needReply
 	needRequest
+)
+
+// What another feature's credential operation carries in its sealed
+// payload, besides the password (Operate).
+const (
+	NeedItemID    = needItemID  // item_id (the item the operation acts on)
+	NeedOptItemID = optItemID   // item_id, optional
+	NeedItem      = needItem    // item (a critical item's content, §10.7)
+	NeedReply     = needReply   // reply_key
+	NeedRequest   = needRequest // request_id and payload_sha256 (§10.13)
 )
 
 var needs = map[string]int{
@@ -262,16 +273,11 @@ var needs = map[string]int{
 	"credential.rotate":          needBlob | needSealed | needPassword,
 	"credential.password.change": needBlob | needSealed | needPassword | needNewPassword,
 	"credential.delete":          needBlob | needSealed | needPassword,
-	"credential.secret.add":      needBlob | needSealed | needPassword | needSecret,
-	"credential.secret.get":      needBlob | needSealed | needPassword | needSecretID | needReply,
-	"credential.secret.list":     0,
-	"credential.secret.delete":   needBlob | needSealed | needPassword | needSecretID,
 	"credential.recover":         optBlob | needSealed | needPassword,
-	"credential.secret.catalog":  0,
-	// A critical-secret use by a connection (§10.13): the consent is bound
-	// to the request and the payload.
-	"critical-secret-use.approve": needBlob | needSealed | needPassword | needRequest,
 }
+
+// opNeed is what every operation of another feature carries.
+const opNeed = needBlob | needSealed | needPassword
 
 // Envelope is a parsed request body: the blob and the sealed payload.
 type Envelope struct {
@@ -286,6 +292,14 @@ func ParseEnvelope(typ string, body []byte) (*Envelope, error) {
 	if !ok {
 		return nil, errBad
 	}
+	return parseEnvelope(n, body)
+}
+
+// ParseOpEnvelope parses the outer body of another feature's credential
+// operation (credential, utk_id, sealed) strictly.
+func ParseOpEnvelope(body []byte) (*Envelope, error) { return parseEnvelope(opNeed, body) }
+
+func parseEnvelope(n int, body []byte) (*Envelope, error) {
 	o, err := strictjson.ParseObject(body)
 	if err != nil {
 		return nil, errBad
@@ -337,12 +351,11 @@ func ValidUTKID(s string) bool {
 type Payload struct {
 	Password    []byte
 	NewPassword []byte
-	SecretID    string
-	Name        string
-	Category    string
-	Description string
-	Value       []byte
-	Reply       *suite.PublicKey
+	// ItemID names the item an operation acts on; Item is a critical item's
+	// content (a JSON object the items feature parses).
+	ItemID string
+	Item   []byte
+	Reply  *suite.PublicKey
 	// RequestID and PayloadHash bind a critical-secret use (§10.13).
 	RequestID   string
 	PayloadHash []byte
@@ -355,7 +368,7 @@ func (p *Payload) Wipe() {
 	}
 	suite.Wipe(p.Password)
 	suite.Wipe(p.NewPassword)
-	suite.Wipe(p.Value)
+	suite.Wipe(p.Item)
 }
 
 func password(o strictjson.Object, k string) ([]byte, error) {
@@ -372,6 +385,14 @@ func ParsePayload(typ string, pt []byte) (*Payload, error) {
 	if !ok {
 		return nil, errBad
 	}
+	return parsePayload(n, pt)
+}
+
+// ParseOpPayload parses the opened payload of another feature's operation
+// that carries need (NeedItemID, ...) besides the password.
+func ParseOpPayload(need int, pt []byte) (*Payload, error) { return parsePayload(opNeed|need, pt) }
+
+func parsePayload(n int, pt []byte) (*Payload, error) {
 	o, err := strictjson.ParseObject(pt)
 	if err != nil {
 		return nil, errBad
@@ -388,26 +409,19 @@ func ParsePayload(typ string, pt []byte) (*Payload, error) {
 			return fail()
 		}
 	}
-	if n&needSecretID != 0 {
-		if p.SecretID, err = o.String("secret_id"); err != nil || !envelope.ValidULID(p.SecretID) {
+	if n&(needItemID|optItemID) != 0 {
+		id, present, err := o.OptString("item_id")
+		if err != nil || present && !envelope.ValidULID(id) || !present && n&needItemID != 0 {
 			return fail()
 		}
+		p.ItemID = id
 	}
-	if n&needSecret != 0 {
-		if p.Name, err = o.String("name"); err != nil || p.Name == "" || len(p.Name) > MaxName {
+	if n&needItem != 0 {
+		raw, ok := o["item"]
+		if !ok || len(raw) == 0 || raw[0] != '{' {
 			return fail()
 		}
-		if p.Category, err = o.String("category"); err != nil || !Categories[p.Category] {
-			return fail()
-		}
-		if d, present, err := o.OptString("description"); err != nil || len(d) > MaxDesc {
-			return fail()
-		} else if present {
-			p.Description = d
-		}
-		if p.Value, err = o.Base64("value", -1); err != nil || len(p.Value) == 0 || len(p.Value) > MaxValue {
-			return fail()
-		}
+		p.Item = append([]byte(nil), raw...)
 	}
 	if n&needRequest != 0 {
 		if p.RequestID, err = o.String("request_id"); err != nil || !envelope.ValidULID(p.RequestID) {
@@ -468,13 +482,9 @@ func (f *Feature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner
 			b.Uint("version", f.st.Version).Base64("key", f.st.Key).String("updated_at", envelope.FormatTS(f.st.UpdatedAt))
 		}
 		return b.Bytes(), nil
-	case "credential.secret.list":
-		return f.list(), nil
 	case "credential.lock":
 		f.endWindow()
 		return nil, nil
-	case "credential.secret.catalog":
-		return f.catalog(s, in.Body)
 	}
 	// Everything else spends a UTK first (§3.5.4).
 	p, err := f.spend(s, in, e)
@@ -504,71 +514,16 @@ func (f *Feature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner
 		return f.respond(s, inner, p.Password, func(b *strictjson.Builder) {
 			b.String("expires_at", envelope.FormatTS(f.keyExp))
 		})
-	case "credential.secret.get":
-		for _, sec := range inner.Secrets {
-			if sec.ID == p.SecretID {
-				sealed, err := credwire.SealValue(p.Reply, s.VaultID(), in.ID, sec.Value)
-				if err != nil {
-					return nil, errInternal
-				}
-				sec := sec
-				s.Record(vault.Activity{Kind: "credential.secret.read", Ref: sec.ID, Audit: true, Feed: true})
-				return f.respond(s, inner, p.Password, func(b *strictjson.Builder) {
-					b.String("secret_id", sec.ID).String("name", sec.Name).String("category", sec.Category)
-					if sec.Description != "" {
-						b.String("description", sec.Description)
-					}
-					b.Base64("value_sealed", sealed).String("created_at", envelope.FormatTS(sec.CreatedAt))
-				})
-			}
-		}
-		return nil, errNotFound
 	case "credential.delete":
 		f.endWindow()
 		f.wipeKeys()
 		f.st = state{Pools: map[string][]LTK{}}
 		s.SyncEvent("credential.deleted", nil)
 		s.Record(vault.Activity{Kind: "credential.deleted", Audit: true})
+		for _, o := range f.delObs {
+			o.CredentialDeleted(s) // the critical items go with it (§10.7)
+		}
 		return nil, nil
-	case "credential.secret.add":
-		if len(inner.Secrets) >= MaxSecrets {
-			return nil, errLimit
-		}
-		sec := Secret{ID: s.NewID(), Name: p.Name, Category: p.Category, Description: p.Description,
-			Value: append([]byte(nil), p.Value...), CreatedAt: s.Now().UTC().Truncate(time.Millisecond)}
-		inner.Secrets = append(inner.Secrets, sec)
-		out, err := f.respond(s, inner, p.Password, func(b *strictjson.Builder) { b.String("secret_id", sec.ID) })
-		if err != nil {
-			return nil, err
-		}
-		f.st.Secrets = append(f.st.Secrets, Meta{ID: sec.ID, Name: sec.Name, Category: sec.Category,
-			Description: sec.Description, CreatedAt: sec.CreatedAt})
-		s.Record(vault.Activity{Kind: "credential.secret.added", Ref: sec.ID, Audit: true})
-		return out, nil
-	case "credential.secret.delete":
-		idx := -1
-		for i, sec := range inner.Secrets {
-			if sec.ID == p.SecretID {
-				idx = i
-			}
-		}
-		if idx < 0 {
-			return nil, errNotFound
-		}
-		suite.Wipe(inner.Secrets[idx].Value)
-		inner.Secrets = append(inner.Secrets[:idx:idx], inner.Secrets[idx+1:]...)
-		out, err := f.respond(s, inner, p.Password, nil)
-		if err != nil {
-			return nil, err
-		}
-		for i, m := range f.st.Secrets {
-			if m.ID == p.SecretID {
-				f.st.Secrets = append(f.st.Secrets[:i:i], f.st.Secrets[i+1:]...)
-				break
-			}
-		}
-		s.Record(vault.Activity{Kind: "credential.secret.deleted", Ref: p.SecretID, Audit: true})
-		return out, nil
 	case "credential.password.change":
 		inner.PasswordChangedAt = s.Now().UTC().Truncate(time.Millisecond)
 		out, err := f.respond(s, inner, p.NewPassword, nil)
@@ -639,6 +594,10 @@ func (f *Feature) pruneUTKs(now time.Time) {
 // spend finds the UTK among those issued to the sender, removes it (it is
 // spent whatever happens next) and opens the payload.
 func (f *Feature) spend(s *vault.Session, in *envelope.Inner, e *Envelope) (*Payload, error) {
+	return f.spendNeed(s, in, e, needs[in.Type])
+}
+
+func (f *Feature) spendNeed(s *vault.Session, in *envelope.Inner, e *Envelope, need int) (*Payload, error) {
 	device := s.From().ID
 	pool := f.st.Pools[device]
 	idx := -1
@@ -663,7 +622,7 @@ func (f *Feature) spend(s *vault.Session, in *envelope.Inner, e *Envelope) (*Pay
 		return nil, errUTK
 	}
 	defer suite.Wipe(pt)
-	return ParsePayload(in.Type, pt)
+	return parsePayload(need, pt)
 }
 
 // replenish returns new UTKs when the sender's pool is low.
@@ -814,7 +773,7 @@ func (f *Feature) create(s *vault.Session, p *Payload) (json.RawMessage, error) 
 		return nil, err
 	}
 	pub := ed25519.NewKeyFromSeed(ks).Public().(ed25519.PublicKey)
-	f.st.CEKSeed, f.st.Key, f.st.Secrets, f.st.Failures, f.st.NotBefore = seed, pub, nil, 0, time.Time{}
+	f.st.CEKSeed, f.st.Key, f.st.Failures, f.st.NotBefore = seed, pub, 0, time.Time{}
 	f.commit(s, blob, 1)
 	s.Record(vault.Activity{Kind: "credential.created", Audit: true})
 	return strictjson.NewBuilder().Base64("credential", blob).Uint("version", 1).Base64("key", pub).
@@ -893,21 +852,6 @@ func (f *Feature) recover(s *vault.Session, e *Envelope, p *Payload) (json.RawMe
 	return out, nil
 }
 
-func (f *Feature) list() []byte {
-	arr := []byte{'['}
-	for i, m := range f.st.Secrets {
-		if i > 0 {
-			arr = append(arr, ',')
-		}
-		b := strictjson.NewBuilder().String("secret_id", m.ID).String("name", m.Name).String("category", m.Category)
-		if m.Description != "" {
-			b.String("description", m.Description)
-		}
-		arr = append(arr, b.Bool("cataloged", m.Cataloged).String("created_at", envelope.FormatTS(m.CreatedAt)).Bytes()...)
-	}
-	return strictjson.NewBuilder().Uint("version", f.st.Version).Raw("secrets", append(arr, ']')).Bytes()
-}
-
 // PoolSizeOf returns the number of outstanding UTKs of a device (tests).
 func (f *Feature) PoolSizeOf(device string) int {
 	f.mu.Lock()
@@ -915,91 +859,48 @@ func (f *Feature) PoolSizeOf(device string) int {
 	return len(f.st.Pools[device])
 }
 
-// catalog lists or unlists a critical secret in the catalog to
-// connections (credential.secret.catalog, §10.13). It changes only
-// vault-held metadata, so it needs no password.
-func (f *Feature) catalog(s *vault.Session, body []byte) (json.RawMessage, error) {
-	o, err := strictjson.ParseObject(body)
-	if err != nil {
-		return nil, errBad
-	}
-	id, err := o.String("secret_id")
-	if err != nil || !envelope.ValidULID(id) {
-		return nil, errBad
-	}
-	on, err := o.Bool("cataloged")
-	if err != nil {
-		return nil, errBad
-	}
-	if f.st.CEKSeed == nil {
-		return nil, errCredRequired
-	}
-	for i := range f.st.Secrets {
-		if f.st.Secrets[i].ID == id {
-			if f.st.Secrets[i].Cataloged != on {
-				f.st.Secrets[i].Cataloged = on
-				s.SyncEvent("credential.secret.cataloged", strictjson.NewBuilder().String("secret_id", id).Bool("cataloged", on).Bytes())
-				s.Record(vault.Activity{Kind: "credential.secret.cataloged", Ref: id, Audit: true})
-			}
-			return nil, nil
-		}
-	}
-	return nil, errNotFound
+// OpResult is a completed credential operation of another feature: the
+// new blob, its version and the UTKs to return (§10.6).
+type OpResult struct {
+	Credential []byte
+	Version    uint64
+	UTKs       []byte
 }
 
-// CatalogedSecrets returns the metadata of the critical secrets in the
-// catalog (§10.12, §10.13), in the credential's order.
-func (f *Feature) CatalogedSecrets() []Meta {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	var out []Meta
-	for _, m := range f.st.Secrets {
-		if m.Cataloged {
-			out = append(out, m)
-		}
-	}
-	return out
+// Members adds {credential, credential_version, utks} to a response.
+func (r *OpResult) Members(b *strictjson.Builder) {
+	b.Base64("credential", r.Credential).Uint("credential_version", r.Version).Raw("utks", r.UTKs)
 }
 
-// CatalogedSecret returns a cataloged critical secret's metadata.
-func (f *Feature) CatalogedSecret(id string) (Meta, bool) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	for _, m := range f.st.Secrets {
-		if m.ID == id && m.Cataloged {
-			return m, true
-		}
-	}
-	return Meta{}, false
-}
-
-// UseSecret performs one use of a critical secret for a connection
-// (critical-secret-use.approve, §10.13) as a credential operation
-// (§3.5.3): it spends the UTK, lets check verify the sealed payload's
-// binding (request and payload hash), opens the credential with the
-// password, gives use the secret's value (nil if the credential no longer
-// holds it), rotates the CEK and returns the response with the members
-// use added. The value and the plaintext are wiped before it returns; use
-// must not keep the value.
-func (f *Feature) UseSecret(s *vault.Session, in *envelope.Inner, secretID string, check func(*Payload) error,
-	use func(value []byte, b *strictjson.Builder)) (json.RawMessage, error) {
+// Operate performs one credential operation for another feature (critical
+// items, §10.7; critical-item use, §10.13) as §3.5.3 says: it spends the
+// UTK named in the body (from an app only), parses the sealed payload
+// (the password and need), lets check verify the payload's bindings,
+// opens the credential with the password, lets op read or change the
+// plaintext, then rotates the CEK. An error from check or op is returned
+// as is and leaves the credential unchanged (the UTK stays spent). op
+// must not keep references into the plaintext, which is wiped.
+func (f *Feature) Operate(s *vault.Session, in *envelope.Inner, need int, check func(*Payload) error,
+	op func(*Inner, *Payload) error) (*OpResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.pruneUTKs(s.Now())
 	if s.From().Kind != vault.KindApp || s.From().Recovering {
 		return nil, errForbidden
 	}
-	e, err := ParseEnvelope(in.Type, in.Body)
+	e, err := ParseOpEnvelope(in.Body)
 	if err != nil {
 		return nil, err
 	}
-	p, err := f.spend(s, in, e)
+	p, err := f.spendNeed(s, in, e, opNeed|need)
 	if err != nil {
 		return nil, err
 	}
 	defer p.Wipe()
-	if err := check(p); err != nil {
-		return nil, err
+	if check != nil {
+		if err := check(p); err != nil {
+			return nil, err
+		}
 	}
 	cek, inner, err := f.open(s, e.Blob, p.Password)
 	if err != nil {
@@ -1007,11 +908,12 @@ func (f *Feature) UseSecret(s *vault.Session, in *envelope.Inner, secretID strin
 	}
 	defer cek.Destroy()
 	defer inner.Wipe()
-	var value []byte
-	for _, sec := range inner.Secrets {
-		if sec.ID == secretID {
-			value = sec.Value
-		}
+	if err := op(inner, p); err != nil {
+		return nil, err
 	}
-	return f.respond(s, inner, p.Password, func(b *strictjson.Builder) { use(value, b) })
+	blob, err := f.rotateCEK(s, inner, p.Password)
+	if err != nil {
+		return nil, err
+	}
+	return &OpResult{Credential: blob, Version: f.st.Version, UTKs: f.replenish(s)}, nil
 }

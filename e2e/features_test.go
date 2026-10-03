@@ -79,25 +79,27 @@ func TestCredentialFlow(t *testing.T) {
 	if _, err := a.app.CredentialRaw(ctx, "credential.unlock", takeUTK(t, a.app), b1, map[string]any{"password": credPW}); client.Code(err) != "stale_credential" {
 		t.Fatalf("previous blob: %v", err)
 	}
-	id, err := a.app.CriticalSecretAdd(ctx, credPW, "btc seed", "seed_phrase", "", []byte("zoo zoo zoo wrong"))
+	// A critical item (§10.7): its values inside the credential.
+	id, _, err := a.app.ItemPutCritical(ctx, credPW, "", 0, []string{"crypto"}, client.ItemContent{Name: "btc seed", Category: "crypto_wallet",
+		Fields: []client.ItemField{{Label: "Words", Kind: "multiline", Value: "zoo zoo zoo wrong"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := a.app.CriticalSecretGet(ctx, "not the password", id); client.Code(err) != "bad_password" {
+	if _, err := a.app.ItemRevealCritical(ctx, "not the password", id); client.Code(err) != "bad_password" {
 		t.Fatalf("wrong password: %v", err)
 	}
 	// The desktop may list metadata but never read a value.
-	l, err := desk.CriticalSecretList(ctx)
-	if err != nil || !strings.Contains(string(l["secrets"]), "btc seed") {
+	l, err := desk.ItemList(ctx, map[string]any{"sensitivity": "critical"})
+	if err != nil || !strings.Contains(string(l["items"]), "btc seed") || strings.Contains(string(l["items"]), "zoo") {
 		t.Fatalf("desktop list: %v", err)
 	}
-	if rr := a.request(desk, "credential.secret.get", `{}`); rr.ErrorCode() != "forbidden" {
-		t.Fatalf("desktop read a critical secret: %q", rr.ErrorCode())
+	if rr := a.request(desk, "item.reveal", `{"item_id":"`+id+`"}`); rr.ErrorCode() != "forbidden" {
+		t.Fatalf("desktop read a critical item: %q", rr.ErrorCode())
 	}
 	// Restart the vault: the credential record, the CEK and the UTK pool persist.
 	a.restart()
-	v, err := a.app.CriticalSecretGet(ctx, credPW, id)
-	if err != nil || string(v) != "zoo zoo zoo wrong" {
+	v, err := a.app.ItemRevealCritical(ctx, credPW, id)
+	if err != nil || !strings.Contains(string(v), "zoo zoo zoo wrong") {
 		t.Fatalf("after restart: %v", err)
 	}
 	// Pool replenishment: spend until refills arrive with responses.
@@ -121,37 +123,51 @@ func TestCredentialFlow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, k := range []string{"credential.created", "credential.secret.read", "credential.password_failed", "credential.rotated", "identity.rotated"} {
+	for _, k := range []string{"credential.created", "credential.password_failed", "credential.rotated", "identity.rotated"} {
 		if !strings.Contains(string(au["entries"]), `"`+k+`"`) {
 			t.Errorf("audit lacks %s", k)
 		}
 	}
-	waitEvent(t, desk, "feed.event", has("kind", "credential.secret.read"))
+	ai, err := a.app.AuditList(ctx, map[string]any{"kinds": []string{"item"}}, false)
+	if err != nil || !strings.Contains(string(ai["entries"]), `"item.revealed"`) || !strings.Contains(string(ai["entries"]), `"item.added"`) {
+		t.Fatalf("item audit: %v", err)
+	}
+	waitEvent(t, desk, "feed.event", has("kind", "item.revealed"))
 }
 
-// V4 batch 1, profile, secrets, settings, audit and feed through the real
-// relay between two connected vaults.
-func TestProfileSecretsAuditFeed(t *testing.T) {
+// V4 batch 1 and V4 items, the profile (name and photo, plus @profile
+// items), items, settings, audit and feed through the real relay between
+// two connected vaults.
+func TestProfileItemsAuditFeed(t *testing.T) {
 	r := relaytest.Start(t, nil)
 	a := newTestVault(t, r.URL, "a", nil)
 	b := newTestVault(t, r.URL, "b", nil)
 	ctx := ctxT(t, 120*time.Second)
 	// A's display name goes into its invite hint and hs.init; the shared
-	// profile follows on activation (§6.2, §9.3).
-	if _, err := a.app.ProfileSet(ctx, map[string]any{"version": 0, "name": "Ada",
-		"set":    map[string]any{"contact.email": map[string]any{"value": "ada@example.org"}, "id.passport": map[string]any{"value": "P123"}},
-		"shared": []string{"contact.email"}}); err != nil {
+	// profile (with the @profile items) follows on activation (§6.2, §9.3).
+	if _, err := a.app.ProfileSet(ctx, map[string]any{"version": 0, "name": "Ada"}); err != nil {
+		t.Fatal(err)
+	}
+	email, ev, err := a.app.ItemPut(ctx, "", 0, "", []string{"@profile"}, client.ItemContent{Name: "Email", Category: "contact",
+		Fields: []client.ItemField{{Label: "Email", Kind: "email", Value: "ada@example.org"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := a.app.ItemPut(ctx, "", 0, "", []string{"travel"}, client.ItemContent{Name: "Passport",
+		Fields: []client.ItemField{{Label: "Number", Kind: "text", Value: "P123"}}}); err != nil {
 		t.Fatal(err)
 	}
 	aConn, bConn := connect(t, a, b, 600)
 	waitEvent(t, b.app, "connection.event", has("event", "profile"))
 	g := mustOK(t, b.request(b.app, "connection.get", `{"connection_id":"`+bConn+`"}`))
-	if n, _ := g.String("name"); n != "Ada" || !strings.Contains(string(g["profile"]), "ada@example.org") || strings.Contains(string(g["profile"]), "P123") {
+	if n, _ := g.String("name"); n != "Ada" || !strings.Contains(string(g["profile"]), "ada@example.org") || strings.Contains(string(g["profile"]), "P123") ||
+		strings.Contains(string(g["profile"]), "@profile") {
 		t.Fatalf("B's view of A: %s", g["profile"])
 	}
-	// A changes a shared field: B gets profile.update again.
+	// A changes the @profile item: B gets profile.update again.
 	b.app.Events() // drain
-	if _, err := a.app.ProfileSet(ctx, map[string]any{"version": 1, "set": map[string]any{"contact.email": map[string]any{"value": "ada@new.example.org"}}}); err != nil {
+	if _, _, err := a.app.ItemPut(ctx, email, ev, "", nil, client.ItemContent{Name: "Email", Category: "contact",
+		Fields: []client.ItemField{{ID: "f1", Label: "Email", Kind: "email", Value: "ada@new.example.org"}}}); err != nil {
 		t.Fatal(err)
 	}
 	waitEvent(t, b.app, "connection.event", has("event", "profile"))
@@ -160,20 +176,25 @@ func TestProfileSecretsAuditFeed(t *testing.T) {
 		t.Fatalf("update not applied: %s", g["profile"])
 	}
 
-	// Secrets: put, versioned replace, list without values.
-	sid, v, err := b.app.SecretPut(ctx, "", 0, "wifi", "hunter22", nil)
+	// Items: put, versioned replace, a secret item's values only revealed.
+	sid, v, err := b.app.ItemPut(ctx, "", 0, "secret", []string{"home"}, client.ItemContent{Name: "wifi",
+		Fields: []client.ItemField{{Label: "Password", Kind: "password", Value: "hunter22"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := b.app.SecretPut(ctx, sid, v+1, "wifi", "x", nil); client.Code(err) != "conflict" {
+	if _, _, err := b.app.ItemPut(ctx, sid, v+1, "", nil, client.ItemContent{Name: "wifi"}); client.Code(err) != "conflict" {
 		t.Fatalf("stale version: %v", err)
 	}
-	if _, _, err := b.app.SecretPut(ctx, sid, v, "wifi", "hunter23", nil); err != nil {
+	if _, _, err := b.app.ItemPut(ctx, sid, v, "", nil, client.ItemContent{Name: "wifi",
+		Fields: []client.ItemField{{ID: "f1", Label: "Password", Kind: "password", Value: "hunter23"}}}); err != nil {
 		t.Fatal(err)
 	}
-	s, err := b.app.SecretGet(ctx, sid)
-	if err != nil || !strings.Contains(string(s["value"]), "hunter23") {
-		t.Fatalf("get: %v", err)
+	if s, err := b.app.ItemGet(ctx, sid); err != nil || strings.Contains(string(s["fields"]), "hunter23") {
+		t.Fatalf("item.get of a secret item: %v %s", err, s["fields"])
+	}
+	s, err := b.app.ItemReveal(ctx, sid, nil)
+	if err != nil || !strings.Contains(string(s["fields"]), "hunter23") {
+		t.Fatalf("reveal: %v", err)
 	}
 
 	// Settings.

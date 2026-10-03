@@ -17,8 +17,7 @@ type ActionConfig struct {
 	Mode        string   `json:"mode"` // default-deny, allowlist, prompt-each-time, default-allow
 	Version     *uint64  `json:"version,omitempty"`
 	Connections []string `json:"connections,omitempty"`
-	Fields      []string `json:"fields,omitempty"`
-	Secrets     []string `json:"secrets,omitempty"`
+	Items       []string `json:"items,omitempty"` // items.share
 }
 
 // ActionConfigure sets an action's permission mode and returns the

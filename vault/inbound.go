@@ -379,6 +379,12 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 		return disp(eph)
 	}
 	if p.Kind == KindDesktop && te.spec.DesktopApproval {
+		if af, ok := te.handler.(AppOnlyForms); ok && af.AppOnly(in.Type, in.Body) {
+			// A form only an app may send (§10.7, §10.12): refused at once,
+			// never held for an approval it could not pass.
+			m.respondError(p, in, key, "forbidden", "", now)
+			return disp(eph)
+		}
 		ask = true
 	}
 	if ask {

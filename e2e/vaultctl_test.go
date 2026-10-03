@@ -87,37 +87,45 @@ func TestVaultctlSmoke(t *testing.T) {
 	run("credential", "create")
 	run("request", "vault.enroll.confirm")
 
-	// V4 batch 1 (§10.6–§10.9) through vaultctl's feature commands.
+	// V4 batch 1 and V4 items (§10.6–§10.9) through vaultctl's feature
+	// commands: a critical item, a secret item, tags, the profile.
 	val := filepath.Join(dir, "value")
-	if err := os.WriteFile(val, []byte("seed words here"), 0o600); err != nil {
+	if err := os.WriteFile(val, []byte(`{"name":"seed","category":"crypto_wallet","fields":[{"label":"Words","kind":"multiline","value":"seed words here"}]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	out = run("credential", "secret-add", "-name", "seed", "-category", "seed_phrase", "-value-file", val)
-	id := between(out, `"secret_id": "`, `"`)
-	if out = run("credential", "secret-get", "-id", id); !strings.Contains(out, "seed words here") {
-		t.Fatalf("critical secret: %s", out)
+	out = run("item", "put", "-sensitivity", "critical", "-content-file", val)
+	id := between(out, `"item_id": "`, `"`)
+	if out = run("item", "reveal", "-id", id); !strings.Contains(out, "seed words here") {
+		t.Fatalf("critical item: %s", out)
 	}
-	if out = run("credential", "secret-list"); !strings.Contains(out, `"seed"`) || strings.Contains(out, "seed words") {
+	if out = run("item", "list", "-sensitivity", "critical"); !strings.Contains(out, `"seed"`) || strings.Contains(out, "seed words") {
 		t.Fatalf("critical list: %s", out)
 	}
-	out = run("secret", "put", "-name", "wifi", "-value-file", val)
-	sid := between(out, `"secret_id": "`, `"`)
-	if out = run("secret", "get", "-id", sid); !strings.Contains(out, "seed words here") {
-		t.Fatalf("secret: %s", out)
+	out = run("item", "put", "-sensitivity", "secret", "-tags", "Home,wifi", "-content-file", val)
+	sid := between(out, `"item_id": "`, `"`)
+	if out = run("item", "get", "-id", sid); strings.Contains(out, "seed words here") || !strings.Contains(out, `"home"`) {
+		t.Fatalf("secret item.get: %s", out)
 	}
-	run("profile", "set", `{"version":0,"name":"Phone Owner","set":{"contact.email":{"value":"o@example.org"}},"shared":["contact.email"]}`)
-	if out = run("profile", "get"); !strings.Contains(out, "o@example.org") {
+	if out = run("item", "reveal", "-id", sid); !strings.Contains(out, "seed words here") {
+		t.Fatalf("secret reveal: %s", out)
+	}
+	run("tag", "merge", "-version", "0", "-from", "wifi", "-into", "network")
+	if out = run("item", "list", "-tags", "network"); !strings.Contains(out, sid) {
+		t.Fatalf("after merge: %s", out)
+	}
+	run("profile", "set", `{"version":0,"name":"Phone Owner"}`)
+	if out = run("profile", "get"); !strings.Contains(out, "Phone Owner") {
 		t.Fatalf("profile: %s", out)
 	}
 	run("settings", "set", "0", `{"app.theme":"dark","feed.retention_days":14}`)
 	if out = run("settings", "get"); !strings.Contains(out, `"app.theme": "dark"`) {
 		t.Fatalf("settings: %s", out)
 	}
-	if out = run("audit", "-kinds", "credential"); !strings.Contains(out, "credential.secret.read") {
+	if out = run("audit", "-kinds", "item"); !strings.Contains(out, "item.revealed") {
 		t.Fatalf("audit: %s", out)
 	}
 	run("feed", "guides", "-guides", `[{"guide_id":"welcome","version":1,"title":"Welcome","message":"Hi"}]`)
-	if out = run("feed", "list"); !strings.Contains(out, `"guide"`) || !strings.Contains(out, "credential.secret.read") {
+	if out = run("feed", "list"); !strings.Contains(out, `"guide"`) || !strings.Contains(out, "item.revealed") {
 		t.Fatalf("feed: %s", out)
 	}
 

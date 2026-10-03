@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -13,22 +14,30 @@ import (
 	"github.com/vettid/vettid-vault/vault"
 )
 
-// V4 batch 3, LEASH (§6.7, §6.8, §10.11) through the real relay: an
-// agent paired with initial grants reads the catalog and a named secret
-// without approval (auto), has a profile read referred to the app and
-// approved, and is refused what no grant covers; revoking a grant stops it
-// at once; a grant signed with the credential key verifies under the
-// member's key; unlinking the agent revokes everything.
+// V4 batch 3 and V4 items, LEASH (§6.7, §6.8, §10.11, §10.12) through the
+// real relay: an agent paired with initial grants has a profile read
+// referred to the app and approved, and is refused what no grant covers;
+// an agent share rule (a signed items.read delegation carrying the rule)
+// lets it read and use the items the rule includes, never a critical one;
+// in ask mode the member approves each item first; deleting the rule stops
+// it at once; spam suspends it; unlinking revokes everything.
 func TestLeashAgent(t *testing.T) {
 	r := relaytest.Start(t, nil)
 	a := newTestVault(t, r.URL, "a", nil)
 	ctx := ctxT(t, 180*time.Second)
 
-	wifi, _, err := a.app.SecretPut(ctx, "", 0, "wifi", "hunter22", map[string]any{"discoverability": "cataloged"})
+	wifi, _, err := a.app.ItemPut(ctx, "", 0, "secret", []string{"agent ok"}, client.ItemContent{Name: "wifi",
+		Fields: []client.ItemField{{Label: "Password", Kind: "password", Value: "hunter22"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	bank, _, err := a.app.SecretPut(ctx, "", 0, "bank", "s3cret", nil) // private
+	bank, _, err := a.app.ItemPut(ctx, "", 0, "secret", []string{"money"}, client.ItemContent{Name: "bank",
+		Fields: []client.ItemField{{Label: "PIN", Kind: "password", Value: "s3cret"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	crit, _, err := a.app.ItemPutCritical(ctx, credPW, "", 0, []string{"agent ok"}, client.ItemContent{Name: "seed",
+		Fields: []client.ItemField{{Label: "Words", Kind: "multiline", Value: "never for agents"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,9 +57,7 @@ func TestLeashAgent(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitEvent(t, a.app, "device.pair.pending", has("pairing_id", pid))
-	grants := `[{"scope":"secrets.catalog","approval":"auto"},` +
-		`{"scope":"secrets.get","approval":"auto","secrets":["` + wifi + `","` + bank + `"]},` +
-		`{"scope":"profile.get"}]`
+	grants := `[{"scope":"connection.list","approval":"auto"},{"scope":"profile.get"}]`
 	approve := `{"pairing_id":"` + pid + `","session_seconds":600,"grants":` + grants + `}`
 	// Every grant is a delegation signed by the member's credential key:
 	// the app must open the unlock window first (§10.11).
@@ -60,16 +67,18 @@ func TestLeashAgent(t *testing.T) {
 	if _, err := a.app.CredentialUnlock(ctx, credPW); err != nil {
 		t.Fatal(err)
 	}
+	// items.read is a share rule, never a pairing grant.
+	if rr := a.request(a.app, "device.pair.approve", `{"pairing_id":"`+pid+`","grants":[{"scope":"items.read"}]}`); rr.ErrorCode() != "bad_request" {
+		t.Fatalf("items.read at pairing: %q", rr.ErrorCode())
+	}
 	mustOK(t, a.request(a.app, "device.pair.approve", approve))
 	if err := agent.AwaitPaired(ctx); err != nil {
 		t.Fatal(err)
 	}
 	up := waitEvent(t, agent, "leash.grant.updated", nil)
-	if n := strings.Count(string(up.Body), `"grant_id"`); n != 3 {
+	if n := strings.Count(string(up.Body), `"grant_id"`); n != 2 {
 		t.Fatalf("initial grants: %s", up.Body)
 	}
-	// The agent holds each grant as a delegation it can present: signed by
-	// the member's credential key, for its own identity key.
 	cv, err := a.app.CredentialVersion(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -81,20 +90,52 @@ func TestLeashAgent(t *testing.T) {
 			t.Fatalf("delegation: %v", err)
 		}
 	}
-	waitEvent(t, a.app, "sync.event", syncKind("leash.grant.changed"))
 
-	// Allowed without approval (auto grants).
+	// No rule yet: the catalog is refused.
+	if rr, err := agent.AgentRequest(ctx, "catalog", nil); err != nil || rr.ErrorCode() != "forbidden" {
+		t.Fatalf("catalog without a rule: %v %q", err, rr.ErrorCode())
+	}
+	// An agent share rule (auto): a signed items.read delegation that
+	// carries the rule.
+	rule := map[string]any{"subject": map[string]any{"agent_id": agent.DeviceID()}, "tags": []string{"agent ok"}, "mode": "auto"}
+	ro, err := a.app.ShareRuleSet(ctx, rule)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rid, _ := ro.String("rule_id")
+	waitEvent(t, agent, "leash.grant.updated", func(b json.RawMessage) bool { return strings.Contains(string(b), rid) })
+	var mine json.RawMessage
+	for _, g := range agent.LeashGrants() {
+		if strings.Contains(string(g), rid) {
+			mine = g
+		}
+	}
+	d, err := client.VerifyDelegation(mine, memberKey, time.Now())
+	if err != nil || d.Scope != "items.read" || strings.Join(d.Tags, ",") != "agent ok" || d.Approval != "auto" || d.PerHour != 60 {
+		t.Fatalf("items.read delegation: %+v %v", d, err)
+	}
+	if !strings.Contains(string(ro["included"]), wifi) || strings.Contains(string(ro["included"]), crit) {
+		t.Fatalf("rule includes: %s", ro["included"])
+	}
 	cat, err := agent.AgentRequest(ctx, "catalog", nil)
-	if err != nil || !cat.OK() || !strings.Contains(string(cat.Body()), wifi) || strings.Contains(string(cat.Body()), bank) {
+	if err != nil || !cat.OK() || !strings.Contains(string(cat.Body()), wifi) || strings.Contains(string(cat.Body()), bank) ||
+		strings.Contains(string(cat.Body()), crit) || strings.Contains(string(cat.Body()), "agent ok") {
 		t.Fatalf("catalog: %v %s", err, cat.Body())
 	}
-	get, err := agent.AgentRequest(ctx, "secret.get", map[string]any{"secret_id": wifi})
+	get, err := agent.AgentRequest(ctx, "item.get", map[string]any{"item_id": wifi})
 	if err != nil || !get.OK() || !strings.Contains(string(get.Body()), `"value":"hunter22"`) {
-		t.Fatalf("secret.get: %v %+v", err, get)
+		t.Fatalf("item.get: %v %+v", err, get)
 	}
-	// A private secret is not found, even when the grant names it.
-	if pr, err := agent.AgentRequest(ctx, "secret.get", map[string]any{"secret_id": bank}); err != nil || pr.ErrorCode() != "not_found" {
-		t.Fatalf("private secret: %v %q", err, pr.ErrorCode())
+	for _, id := range []string{bank, crit} { // not included / critical: never
+		if rr, err := agent.AgentRequest(ctx, "item.get", map[string]any{"item_id": id}); err != nil || rr.ErrorCode() != "forbidden" {
+			t.Fatalf("item.get %s: %v %q", id, err, rr.ErrorCode())
+		}
+		time.Sleep(1100 * time.Millisecond) // past the refusal cooldown
+	}
+	time.Sleep(2100 * time.Millisecond)
+	use, err := agent.AgentRequest(ctx, "item.use", map[string]any{"item_id": wifi, "field_id": "f1", "action": "hmac-sha256", "data": "aGk="})
+	if err != nil || !use.OK() || strings.Contains(string(use.Body()), "hunter22") {
+		t.Fatalf("item.use: %v %+v", err, use)
 	}
 
 	// Referred to the app (an ask grant), approved, then answered.
@@ -123,55 +164,51 @@ func TestLeashAgent(t *testing.T) {
 	if rr := a.request(agent, "settings.get", `{}`); rr.ErrorCode() != "forbidden" {
 		t.Fatalf("settings.get: %q", rr.ErrorCode())
 	}
-	if rr, err := agent.AgentRequest(ctx, "secret.use", map[string]any{"secret_id": wifi, "action": "hmac-sha256", "data": "aGk="}); err != nil || rr.ErrorCode() != "forbidden" {
-		t.Fatalf("secret.use without a grant: %v %q", err, rr.ErrorCode())
-	}
-	if rr := a.request(agent, "leash.grant.issue", `{"agent_id":"`+agent.DeviceID()+`","scope":"secrets.use"}`); rr.ErrorCode() != "forbidden" {
-		t.Fatalf("agent issued itself a grant: %q", rr.ErrorCode())
+	if rr := a.request(agent, "share.rule.set", `{}`); rr.ErrorCode() != "forbidden" {
+		t.Fatalf("agent set itself a rule: %q", rr.ErrorCode())
 	}
 
-	// Revoking the secrets.get grant stops it at once.
-	list, err := a.app.LeashGrantList(ctx, agent.DeviceID())
-	if err != nil {
+	// Deleting the rule stops it at once.
+	if err := a.app.ShareRuleDelete(ctx, rid); err != nil {
 		t.Fatal(err)
 	}
-	var getGrant string
-	for _, g := range list {
-		if strings.Contains(string(g), `"scope":"secrets.get"`) {
-			getGrant = field(t, g, "grant_id")
-		}
-	}
-	if err := a.app.LeashGrantRevoke(ctx, getGrant); err != nil {
-		t.Fatal(err)
-	}
-	waitEvent(t, agent, "leash.grant.updated", func(b json.RawMessage) bool { return !strings.Contains(string(b), getGrant) })
-	if rr, err := agent.AgentRequest(ctx, "secret.get", map[string]any{"secret_id": wifi}); err != nil || rr.ErrorCode() != "forbidden" {
-		t.Fatalf("after revoke: %v %q", err, rr.ErrorCode())
+	waitEvent(t, agent, "leash.grant.updated", func(b json.RawMessage) bool { return !strings.Contains(string(b), rid) })
+	time.Sleep(2100 * time.Millisecond)
+	if rr, err := agent.AgentRequest(ctx, "item.get", map[string]any{"item_id": wifi}); err != nil || rr.ErrorCode() != "forbidden" {
+		t.Fatalf("after delete: %v %q", err, rr.ErrorCode())
 	}
 
-	// Issuing needs the credential's unlock window (the phone present).
+	// An ask rule: nothing readable until the member approves the item.
+	// Signing needs the unlock window.
 	if err := a.app.CredentialLock(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := a.app.LeashGrantIssue(ctx, agent.DeviceID(), map[string]any{"scope": "secrets.use", "approval": "auto"}); client.Code(err) != "credential_locked" {
-		t.Fatalf("issued outside the window: %v", err)
+	rule["mode"] = "ask"
+	if _, err := a.app.ShareRuleSet(ctx, rule); client.Code(err) != "credential_locked" {
+		t.Fatalf("rule outside the window: %v", err)
 	}
 	if _, err := a.app.CredentialUnlock(ctx, credPW); err != nil {
 		t.Fatal(err)
 	}
-	g, err := a.app.LeashGrantIssue(ctx, agent.DeviceID(), map[string]any{"scope": "secrets.use", "approval": "auto"})
+	ro, err = a.app.ShareRuleSet(ctx, rule)
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, _ := json.Marshal(map[string]json.RawMessage(g))
-	d, err := client.VerifyDelegation(raw, memberKey, time.Now())
-	if err != nil || d.Scope != "secrets.use" || string(d.AgentIK) != string(agent.IdentityKey()) {
-		t.Fatalf("delegation: %v %+v", err, d)
+	rid, _ = ro.String("rule_id")
+	pend := waitEvent(t, a.app, "share.pending", has("rule_id", rid))
+	if !strings.Contains(string(pend.Body), wifi) || strings.Contains(string(pend.Body), crit) {
+		t.Fatalf("share.pending: %s", pend.Body)
 	}
-	waitEvent(t, agent, "leash.grant.updated", func(b json.RawMessage) bool { return strings.Contains(string(b), `"delegation"`) })
-	use, err := agent.AgentRequest(ctx, "secret.use", map[string]any{"secret_id": wifi, "action": "hmac-sha256", "data": "aGk="})
-	if err != nil || !use.OK() || strings.Contains(string(use.Body()), "hunter22") {
-		t.Fatalf("secret.use: %v %+v", err, use)
+	// (The new rule ended the scope's refusal cooldown, §10.11.)
+	if rr, err := agent.AgentRequest(ctx, "item.get", map[string]any{"item_id": wifi}); err != nil || rr.ErrorCode() != "forbidden" {
+		t.Fatalf("before approval: %v %q", err, rr.ErrorCode())
+	}
+	if _, err := a.app.ShareDecide(ctx, rid, []string{wifi}, true); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(1100 * time.Millisecond)
+	if rr, err := agent.AgentRequest(ctx, "item.get", map[string]any{"item_id": wifi}); err != nil || !rr.OK() {
+		t.Fatalf("after approval: %v %+v", err, rr)
 	}
 
 	// Spam after refusals: the agent hammers a type no grant covers; it
@@ -183,34 +220,39 @@ func TestLeashAgent(t *testing.T) {
 	}
 	waitEvent(t, agent, "leash.grant.updated", func(b json.RawMessage) bool { return strings.Contains(string(b), `"suspended":true`) })
 	waitEvent(t, a.app, "sync.event", syncKind("leash.agent.suspended"))
-	if rr, err := agent.AgentRequest(ctx, "secret.use", map[string]any{"secret_id": wifi, "action": "hmac-sha256", "data": "aGk="}); err != nil || rr.ErrorCode() != "forbidden" {
+	useBody := map[string]any{"item_id": wifi, "field_id": "f1", "action": "hmac-sha256", "data": base64.StdEncoding.EncodeToString([]byte("hi"))}
+	if rr, err := agent.AgentRequest(ctx, "item.use", useBody); err != nil || rr.ErrorCode() != "forbidden" {
 		t.Fatalf("suspended agent: %v %q", err, rr.ErrorCode())
 	}
 	mustOK(t, a.request(a.app, "leash.agent.resume", `{"agent_id":"`+agent.DeviceID()+`"}`))
 	waitEvent(t, agent, "leash.grant.updated", func(b json.RawMessage) bool { return strings.Contains(string(b), `"suspended":false`) })
-	if rr, err := agent.AgentRequest(ctx, "secret.use", map[string]any{"secret_id": wifi, "action": "hmac-sha256", "data": "aGk="}); err != nil || !rr.OK() {
+	if rr, err := agent.AgentRequest(ctx, "item.use", useBody); err != nil || !rr.OK() {
 		t.Fatalf("after resume: %v %+v", err, rr)
 	}
 
 	// Audit (§10.9): refusals and throttling summarised, not one entry each.
-	au, err := a.app.AuditList(ctx, map[string]any{"kinds": []string{"leash", "approval"}}, false)
+	au, err := a.app.AuditList(ctx, map[string]any{"kinds": []string{"leash", "approval", "share"}}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if n := strings.Count(string(au["entries"]), `"kind":"leash.refused"`); n > 3 {
 		t.Errorf("%d single refusal entries", n)
 	}
-	for _, k := range []string{"leash.grant.issued", "leash.allowed", "leash.secret.read", "leash.secret.used", "leash.grant.revoked",
-		"leash.refused", "leash.agent.suspended", "leash.agent.resumed", "leash.throttled.summary", "approval.granted"} {
+	for _, k := range []string{"leash.grant.issued", "leash.allowed", "leash.item.read", "leash.item.used", "leash.grant.revoked",
+		"leash.refused", "leash.agent.suspended", "leash.agent.resumed", "leash.throttled.summary", "approval.granted",
+		"share.rule.created", "share.included", "share.rule.deleted"} {
 		if !strings.Contains(string(au["entries"]), `"`+k+`"`) {
 			t.Errorf("audit lacks %s", k)
 		}
 	}
 
-	// Unlinking revokes every grant (§7.4).
+	// Unlinking revokes every grant and rule (§7.4).
 	mustOK(t, a.request(a.app, "device.unlink", `{"device_id":"`+agent.DeviceID()+`"}`))
 	o := mustOK(t, a.request(a.app, "leash.grant.list", `{}`))
 	if gs, _ := o.Array("grants"); len(gs) != 0 {
 		t.Fatalf("grants after unlink: %d", len(gs))
+	}
+	if o := mustOK(t, a.request(a.app, "share.rule.list", `{}`)); string(o["rules"]) != "[]" {
+		t.Fatalf("rules after unlink: %s", o["rules"])
 	}
 }

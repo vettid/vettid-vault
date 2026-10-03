@@ -12,15 +12,25 @@ import (
 
 // Grants between connections (VAULT-MESSAGING §10.12) from a device's
 // side: ask a connection, decide on a connection's request, fetch a
-// granted value (sealed to a one-time key of this device), revoke, list,
-// read a connection's catalog.
+// granted item's content (sealed to a one-time key of this device),
+// revoke, list, read a connection's catalog of what it shares with us.
 
-// GrantItem is one requested item: kind "field" (a profile key) or
-// "secret" (a secret id), with an optional label.
+// GrantItem is one requested item: kind "item" (an item id, optionally
+// some of its fields) or "category" (for the member to answer), with an
+// optional label.
 type GrantItem struct {
-	Kind  string `json:"kind"`
-	Ref   string `json:"ref"`
-	Label string `json:"label,omitempty"`
+	Kind   string   `json:"kind"`
+	Ref    string   `json:"ref"`
+	Fields []string `json:"fields,omitempty"`
+	Label  string   `json:"label,omitempty"`
+}
+
+// GrantAnswer names the member's item for a request entry (by index), as
+// the answer to a category entry.
+type GrantAnswer struct {
+	Index  int      `json:"index"`
+	ItemID string   `json:"item_id"`
+	Fields []string `json:"fields,omitempty"`
 }
 
 // GrantRequest asks a connection for items; uses and expiresIn are
@@ -47,9 +57,17 @@ func (d *Device) GrantRequest(ctx context.Context, connectionID string, items []
 // may be nil for all; uses and expiresIn 0 keep the request's. It returns
 // the grants made.
 func (d *Device) GrantDecide(ctx context.Context, requestID string, approve bool, items []int, uses, expiresIn int) (json.RawMessage, error) {
+	return d.GrantDecideAnswers(ctx, requestID, approve, items, nil, uses, expiresIn)
+}
+
+// GrantDecideAnswers is GrantDecide with answers to category entries.
+func (d *Device) GrantDecideAnswers(ctx context.Context, requestID string, approve bool, items []int, answers []GrantAnswer, uses, expiresIn int) (json.RawMessage, error) {
 	body := map[string]any{"request_id": requestID, "approve": approve}
 	if items != nil {
 		body["items"] = items
+	}
+	if answers != nil {
+		body["answers"] = answers
 	}
 	if uses > 0 {
 		body["uses"] = uses
@@ -64,11 +82,13 @@ func (d *Device) GrantDecide(ctx context.Context, requestID string, approve bool
 	return o["grants"], nil
 }
 
-// GrantResult is the outcome of a fetch: the value, or the member's vault's
-// refusal (revoked, expired, exhausted, unavailable, not_found).
+// GrantResult is the outcome of a fetch: the item's content (§10.12),
+// or the member's vault's refusal (revoked, expired, exhausted,
+// unavailable, not_found). UsesLeft is meaningful when Counted.
 type GrantResult struct {
 	Value    []byte
 	UsesLeft uint64
+	Counted  bool
 	Error    string
 }
 
@@ -112,7 +132,7 @@ func (d *Device) GrantFetch(ctx context.Context, grantID string) (*GrantResult, 
 	if err != nil {
 		return nil, ErrProtocol
 	}
-	left, err := v.Uint("uses_left", 0, 100)
+	left, counted, err := v.OptUint("uses_left", 0, 10000)
 	if err != nil {
 		return nil, ErrProtocol
 	}
@@ -120,7 +140,7 @@ func (d *Device) GrantFetch(ctx context.Context, grantID string) (*GrantResult, 
 	if err != nil {
 		return nil, ErrProtocol
 	}
-	return &GrantResult{Value: pt, UsesLeft: left}, nil
+	return &GrantResult{Value: pt, UsesLeft: left, Counted: counted}, nil
 }
 
 // GrantRevoke revokes a grant given or gives up one received.
@@ -134,8 +154,9 @@ func (d *Device) GrantList(ctx context.Context) (strictjson.Object, error) {
 	return d.Op(ctx, "grant.list", nil)
 }
 
-// GrantCatalog asks a connection for its catalog and waits for it; it
-// returns the `secrets` array (metadata only).
+// GrantCatalog asks a connection for its catalog (what it makes visible
+// to this vault) and waits for it; it returns the `items` array (metadata
+// only).
 func (d *Device) GrantCatalog(ctx context.Context, connectionID string) (json.RawMessage, error) {
 	o, err := d.Op(ctx, "grant.catalog", map[string]any{"connection_id": connectionID})
 	if err != nil {
@@ -160,5 +181,5 @@ func (d *Device) GrantCatalog(ctx context.Context, connectionID string) (json.Ra
 	if err != nil {
 		return nil, ErrProtocol
 	}
-	return v["secrets"], nil
+	return v["items"], nil
 }

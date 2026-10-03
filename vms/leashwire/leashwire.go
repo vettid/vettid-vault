@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"errors"
+	"regexp"
 	"strconv"
 	"time"
 
@@ -26,7 +27,7 @@ const (
 	Format = 1
 	// MaxBytes bounds a statement.
 	MaxBytes = 8192
-	// MaxList bounds connections and secrets.
+	// MaxList bounds connections.
 	MaxList = 64
 )
 
@@ -42,13 +43,30 @@ type Delegation struct {
 	Scope       string
 	Approval    string
 	Connections []string
-	Secrets     []string
-	IssuedAt    time.Time // whole seconds
-	Expires     time.Time // whole seconds; zero: the grant has no expiry (LEASH §3.2)
+	// The share rule of an items.read delegation (§10.11, §10.12): its
+	// tags, match and access, the uses of each included item (0: not
+	// counted) and the rate limits of the reads.
+	Tags     []string
+	Match    string
+	Access   string
+	Uses     uint64
+	PerHour  uint64
+	PerDay   uint64
+	IssuedAt time.Time // whole seconds
+	Expires  time.Time // whole seconds; zero: the grant has no expiry (LEASH §3.2)
 	// StatusTTL is the lifetime of the status statements the vault (the
 	// status issuer, VaultIK) issues for this delegation.
 	StatusTTL time.Duration
 }
+
+// ScopeItems is the scope of an agent's share rule (§10.11).
+const ScopeItems = "items.read"
+
+// tagRE is a normalised tag (§10.8); MaxTags bounds a rule's tags.
+var tagRE = regexp.MustCompile(`^[a-z0-9][a-z0-9 _-]{0,31}$`)
+
+// MaxTags bounds the tags of an items.read delegation.
+const MaxTags = 16
 
 // Status statement limits (§10.11).
 const (
@@ -69,8 +87,12 @@ func (d *Delegation) Marshal() []byte {
 	if len(d.Connections) > 0 {
 		b.Raw("connections", strList(d.Connections))
 	}
-	if len(d.Secrets) > 0 {
-		b.Raw("secrets", strList(d.Secrets))
+	if len(d.Tags) > 0 {
+		b.Raw("tags", strList(d.Tags)).String("match", d.Match).String("access", d.Access)
+		if d.Uses > 0 {
+			b.Uint("uses", d.Uses)
+		}
+		b.Uint("per_hour", d.PerHour).Uint("per_day", d.PerDay)
 	}
 	b.Uint("status_ttl", uint64(d.StatusTTL/time.Second)).Uint("iat", uint64(d.IssuedAt.Unix()))
 	if !d.Expires.IsZero() {
@@ -146,8 +168,36 @@ func Parse(b []byte) (*Delegation, error) {
 	if d.Connections, err = list(o, "connections"); err != nil {
 		return nil, ErrDelegation
 	}
-	if d.Secrets, err = list(o, "secrets"); err != nil {
-		return nil, ErrDelegation
+	if d.Scope == ScopeItems {
+		if d.Connections != nil {
+			return nil, ErrDelegation
+		}
+		arr, err := o.Array("tags")
+		if err != nil || len(arr) == 0 || len(arr) > MaxTags {
+			return nil, ErrDelegation
+		}
+		for _, r := range arr {
+			t, err := strictjson.AsString(r)
+			if err != nil || !tagRE.MatchString(t) {
+				return nil, ErrDelegation
+			}
+			d.Tags = append(d.Tags, t)
+		}
+		if d.Match, err = o.String("match"); err != nil || d.Match != "any" && d.Match != "all" {
+			return nil, ErrDelegation
+		}
+		if d.Access, err = o.String("access"); err != nil || d.Access != "read" {
+			return nil, ErrDelegation
+		}
+		if d.Uses, _, err = o.OptUint("uses", 1, 10000); err != nil {
+			return nil, ErrDelegation
+		}
+		if d.PerHour, err = o.Uint("per_hour", 1, 3600); err != nil {
+			return nil, ErrDelegation
+		}
+		if d.PerDay, err = o.Uint("per_day", 1, 86400); err != nil {
+			return nil, ErrDelegation
+		}
 	}
 	ttl, err := o.Uint("status_ttl", uint64(MinStatusTTL/time.Second), uint64(MaxStatusTTL/time.Second))
 	if err != nil {

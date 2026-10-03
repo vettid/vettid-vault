@@ -11,10 +11,8 @@ import (
 	"time"
 
 	"github.com/vettid/vettid-vault/features/audit"
-	"github.com/vettid/vettid-vault/features/credential"
 	"github.com/vettid/vettid-vault/features/grants"
-	"github.com/vettid/vettid-vault/features/profile"
-	"github.com/vettid/vettid-vault/features/secrets"
+	"github.com/vettid/vettid-vault/features/items"
 	"github.com/vettid/vettid-vault/internal/featuretest"
 	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault"
@@ -41,24 +39,20 @@ func (w *window) UseKey(time.Time, time.Duration) (ed25519.PrivateKey, bool) {
 	return ed25519.NewKeyFromSeed(bytes.Repeat([]byte{1}, 32)), true
 }
 
-type noCritical struct{}
-
-func (noCritical) CatalogedSecrets() []credential.Meta { return nil }
-
 type side struct {
-	f    *Feature
-	h    *featuretest.Host
-	g    *grants.Feature
-	au   *audit.Feature
-	prof *profile.Feature
-	sec  *secrets.Feature
-	w    *window
-	now  time.Time
+	f   *Feature
+	h   *featuretest.Host
+	g   *grants.Feature
+	au  *audit.Feature
+	it  *items.Feature
+	w   *window
+	now time.Time
 }
 
 func newSide() *side {
-	x := &side{h: featuretest.NewHost(), prof: profile.New(), sec: secrets.New(), au: audit.New(), w: &window{}, now: t0}
-	x.g = grants.New(x.prof, x.sec, noCritical{})
+	x := &side{h: featuretest.NewHost(), it: items.New(nil), au: audit.New(), w: &window{}, now: t0}
+	x.g = grants.New(x.it)
+	x.it.SetGrants(x.g)
 	x.f = New(Deps{Grants: x.g, Audit: x.au, Keys: x.w})
 	x.h.Sinks = append(x.h.Sinks, x.au)
 	x.h.AddDevice("dev-app", vault.KindApp)
@@ -82,6 +76,9 @@ func (x *side) call(kind, typ, body string) featuretest.Result {
 	feat := vault.Feature(x.f)
 	if strings.HasPrefix(typ, "grant.") || strings.HasPrefix(typ, "data.") {
 		feat = x.g
+	}
+	if strings.HasPrefix(typ, "item.") {
+		feat = x.it
 	}
 	return featuretest.Call(feat, x.h, x.now, kind, typ, body)
 }
@@ -192,7 +189,7 @@ func TestCatalogAndConfigure(t *testing.T) {
 		t.Fatal("catalog version")
 	}
 	arr, _ := l.Array("actions")
-	if len(arr) != 5 {
+	if len(arr) != 4 {
 		t.Fatalf("catalog: %d", len(arr))
 	}
 	for _, d := range Catalog() {
@@ -207,14 +204,12 @@ func TestCatalogAndConfigure(t *testing.T) {
 	}
 	for name, body := range map[string]string{
 		"unknown mode":           `{"action_id":"audit.recent","mode":"always"}`,
-		"sensitive allow":        `{"action_id":"profile.fields.read","mode":"default-allow"}`,
-		"secret allow":           `{"action_id":"secrets.share","mode":"default-allow"}`,
+		"sensitive allow":        `{"action_id":"items.share","mode":"default-allow"}`,
 		"critical allow":         `{"action_id":"wallet.request-payment","mode":"default-allow"}`,
 		"critical allowlist":     `{"action_id":"wallet.request-payment","mode":"allowlist","connections":["` + cB + `"]}`,
-		"fields on audit":        `{"action_id":"audit.recent","mode":"allowlist","fields":["a"]}`,
-		"secrets on fields":      `{"action_id":"profile.fields.read","mode":"allowlist","secrets":["` + cA + `"]}`,
-		"empty fields":           `{"action_id":"profile.fields.read","mode":"allowlist","fields":[]}`,
-		"bad key":                `{"action_id":"profile.fields.read","mode":"allowlist","fields":["Bad Key"]}`,
+		"items on audit":         `{"action_id":"audit.recent","mode":"allowlist","items":["` + cA + `"]}`,
+		"empty items":            `{"action_id":"items.share","mode":"allowlist","items":[]}`,
+		"bad item id":            `{"action_id":"items.share","mode":"allowlist","items":["x"]}`,
 		"dup connection":         `{"action_id":"audit.recent","mode":"allowlist","connections":["` + cB + `","` + cB + `"]}`,
 		"bad connection":         `{"action_id":"audit.recent","mode":"allowlist","connections":["x"]}`,
 		"no mode":                `{"action_id":"audit.recent"}`,
@@ -224,8 +219,10 @@ func TestCatalogAndConfigure(t *testing.T) {
 			t.Errorf("%s: %q", name, r.Code)
 		}
 	}
-	if r := a.call(vault.KindApp, "action.configure", `{"action_id":"vote.delegate-proxy","mode":"default-deny"}`); r.Code != "not_found" {
-		t.Fatalf("not in the catalog: %q", r.Code)
+	for _, id := range []string{"vote.delegate-proxy", "secrets.share", "profile.fields.read"} { // the last two: catalog version 1
+		if r := a.call(vault.KindApp, "action.configure", `{"action_id":"`+id+`","mode":"default-deny"}`); r.Code != "not_found" {
+			t.Fatalf("%s not in the catalog: %q", id, r.Code)
+		}
 	}
 	o := a.ok(t, vault.KindApp, "action.configure", `{"action_id":"audit.recent","mode":"allowlist","connections":["`+cB+`"]}`)
 	if v, _ := o.Uint("version", 1, 9); v != 1 {
@@ -253,7 +250,7 @@ func TestOffers(t *testing.T) {
 		t.Fatalf("offers: %+v", offs)
 	}
 	a.h.Reset()
-	a.ok(t, vault.KindApp, "action.configure", `{"action_id":"secrets.share","mode":"prompt-each-time"}`)
+	a.ok(t, vault.KindApp, "action.configure", `{"action_id":"items.share","mode":"prompt-each-time"}`)
 	if offs := a.h.SentOfType("action.offered"); len(offs) != 2 {
 		t.Fatalf("prompt for every connection: %+v", offs)
 	}
@@ -262,7 +259,7 @@ func TestOffers(t *testing.T) {
 		t.Fatal("receiver's devices not told")
 	}
 	l := b.ok(t, vault.KindApp, "action.list", `{"connection_id":"`+cA+`"}`)
-	if !strings.Contains(string(l["actions"]), `"secrets.share"`) || !strings.Contains(string(l["actions"]), `"prompt":true`) {
+	if !strings.Contains(string(l["actions"]), `"items.share"`) || !strings.Contains(string(l["actions"]), `"prompt":true`) {
 		t.Fatalf("offers kept: %s", l["actions"])
 	}
 	// A new connection gets what it is offered.
@@ -270,7 +267,7 @@ func TestOffers(t *testing.T) {
 	cD := "01JB2Z6V9K3M4N5P6Q7R8S9DDD"
 	a.h.Conns[cD] = vault.PeerInfo{ID: cD, Kind: vault.KindConnection, State: vault.PeerActive}
 	a.f.ConnectionAdded(vault.NewSession(context.TODO(), a.h, vault.PeerInfo{}, t0, nil), cD)
-	if s := last(t, a.h, "action.offered"); s.To != cD || !strings.Contains(string(s.Body), "secrets.share") {
+	if s := last(t, a.h, "action.offered"); s.To != cD || !strings.Contains(string(s.Body), "items.share") {
 		t.Fatalf("new connection: %+v", s)
 	}
 	if r := b.call("connection:"+cA, "action.offered", `{"actions":[{"action_id":"x"}]}`); !r.OK() || !b.h.HasActivity("drop.action_malformed") {
@@ -340,30 +337,28 @@ func TestModes(t *testing.T) {
 	}
 }
 
-// profile.fields.read and secrets.share make one-use grants for the
-// configured items only; the invoker fetches the value through grants.
+// items.share makes a one-use grant of a configured, readable item only;
+// the invoker fetches the content through grants (§10.14).
 func TestSharingThroughGrants(t *testing.T) {
 	a, b := pair()
-	if r := featuretest.Call(a.prof, a.h, t0, vault.KindApp, "profile.set",
-		`{"version":0,"name":"A","set":{"contact.phone":{"value":"555"},"contact.home":{"value":"1 Main"}}}`); !r.OK() {
-		t.Fatal(r.Code)
-	}
-	put := func(name, value, disc string) string {
-		r := featuretest.Call(a.sec, a.h, t0, vault.KindApp, "secret.put", `{"name":"`+name+`","value":"`+value+`","discoverability":"`+disc+`"}`)
-		id, _ := r.Obj(t).String("secret_id")
+	put := func(sens, name, value string) string {
+		r := a.call(vault.KindApp, "item.put", `{"name":"`+name+`","sensitivity":"`+sens+`","tags":["zz-hidden"],`+
+			`"fields":[{"label":"Value","kind":"text","value":"`+value+`"},{"label":"Other","kind":"text","value":"other"}]}`)
+		id, _ := r.Obj(t).String("item_id")
 		return id
 	}
-	wifi := put("wifi", "hunter22", "cataloged")
-	bank := put("bank", "s3cret", "private")
+	phone := put("data", "Phone", "555")
+	wifi := put("secret", "Wi-Fi", "hunter22")
+	home := put("data", "Home", "1 Main")
 	a.h.Reset()
-	configure(t, a, b, `{"action_id":"profile.fields.read","mode":"allowlist","connections":["`+cB+`"],"fields":["contact.phone","contact.email"]}`)
-	invoke(t, a, b, ProfileFieldsRead, `{"fields":["contact.phone","contact.home","contact.email"]}`)
+	configure(t, a, b, `{"action_id":"items.share","mode":"allowlist","connections":["`+cB+`"],"items":["`+phone+`","`+wifi+`"]}`)
+	invoke(t, a, b, ItemsShare, `{"item_id":"`+phone+`","fields":["f1"]}`)
 	res := answer(t, a, b)
-	if str(t, res, "status") != StatusOK || strings.Count(string(res), `"grant_id"`) != 1 || !strings.Contains(string(res), `"ref":"contact.phone"`) ||
-		strings.Contains(string(res), "555") {
-		t.Fatalf("fields: %s", res)
+	if str(t, res, "status") != StatusOK || strings.Count(string(res), `"grant_id"`) != 1 || !strings.Contains(string(res), `"ref":"`+phone+`"`) ||
+		strings.Contains(string(res), "555") || strings.Contains(string(res), "zz-hidden") || strings.Contains(string(res), "Other") {
+		t.Fatalf("items.share: %s", res)
 	}
-	// B fetches the value through grants, sealed to its device.
+	// B fetches the content through grants, sealed to its device.
 	o, _ := strictjson.ParseObject(res)
 	r, _ := o.Object("result")
 	gs, _ := r.Array("grants")
@@ -382,7 +377,7 @@ func TestSharingThroughGrants(t *testing.T) {
 	if err != nil {
 		t.Fatalf("grant.value: %s", gv.Body)
 	}
-	if v, err := sharewire.OpenValue(rk, gid, fid, sealed); err != nil || string(v) != "555" {
+	if v, err := sharewire.OpenValue(rk, gid, fid, sealed); err != nil || !strings.Contains(string(v), `"value":"555"`) || strings.Contains(string(v), "Other") {
 		t.Fatalf("value: %q %v", v, err)
 	}
 	// One use only.
@@ -393,25 +388,24 @@ func TestSharingThroughGrants(t *testing.T) {
 	if gv := last(t, b.h, "grant.value"); str(t, gv.Body, "error") != grants.ErrExhausted {
 		t.Fatalf("second fetch: %s", gv.Body)
 	}
-	// Nothing configured requested: unavailable.
-	invoke(t, a, b, ProfileFieldsRead, `{"fields":["contact.home"]}`)
+	// An item not configured, or a field it lacks: unavailable.
+	invoke(t, a, b, ItemsShare, `{"item_id":"`+home+`"}`)
 	if res := answer(t, a, b); str(t, res, "status") != StatusUnavailable {
-		t.Fatalf("unconfigured field: %s", res)
+		t.Fatalf("unconfigured item: %s", res)
 	}
-	// secrets.share: configured and cataloged only.
-	configure(t, a, b, `{"action_id":"secrets.share","mode":"prompt-each-time","secrets":["`+wifi+`","`+bank+`"]}`)
-	id := invoke(t, a, b, SecretsShare, `{"secret_id":"`+wifi+`"}`)
+	invoke(t, a, b, ItemsShare, `{"item_id":"`+phone+`","fields":["f9"]}`)
+	if res := answer(t, a, b); str(t, res, "status") != StatusUnavailable {
+		t.Fatalf("missing field: %s", res)
+	}
+	// prompt-each-time: the member approves; a secret item is shareable too.
+	configure(t, a, b, `{"action_id":"items.share","mode":"prompt-each-time","items":["`+wifi+`"]}`)
+	id := invoke(t, a, b, ItemsShare, `{"item_id":"`+wifi+`"}`)
 	if p := last(t, a.h, "action.pending"); str(t, p.Body, "sensitivity") != Sensitive {
 		t.Fatal("sensitivity not shown")
 	}
 	a.ok(t, vault.KindApp, "action.respond", `{"invocation_id":"`+id+`","approve":true}`)
-	if res := answer(t, a, b); str(t, res, "status") != StatusOK || !strings.Contains(string(res), `"kind":"secret"`) || strings.Contains(string(res), "hunter22") {
-		t.Fatalf("secret: %s", res)
-	}
-	id = invoke(t, a, b, SecretsShare, `{"secret_id":"`+bank+`"}`)
-	a.ok(t, vault.KindApp, "action.respond", `{"invocation_id":"`+id+`","approve":true}`)
-	if res := answer(t, a, b); str(t, res, "status") != StatusUnavailable {
-		t.Fatalf("private secret: %s", res)
+	if res := answer(t, a, b); str(t, res, "status") != StatusOK || !strings.Contains(string(res), `"kind":"item"`) || strings.Contains(string(res), "hunter22") {
+		t.Fatalf("secret item: %s", res)
 	}
 }
 
@@ -487,7 +481,7 @@ func TestLimitsExpiryIdempotency(t *testing.T) {
 	for name, body := range map[string]string{
 		"other version":  `"action_id":"audit.recent","version":2,"params":{}`,
 		"not in catalog": `"action_id":"vote.delegate-proxy","version":1,"params":{}`,
-		"not offered":    `"action_id":"secrets.share","version":1,"params":{"secret_id":"` + cA + `"}`,
+		"not offered":    `"action_id":"items.share","version":1,"params":{"item_id":"` + cA + `"}`,
 		"bad params":     `"action_id":"audit.recent","version":1,"params":{"limit":51}`,
 		"extra params":   `"action_id":"audit.recent","version":1,"params":{"x":1}`,
 		"no params":      `"action_id":"audit.recent","version":1`,
@@ -572,7 +566,7 @@ func TestConnectionRemovedAndRoundTrip(t *testing.T) {
 }
 
 func FuzzParseConfigure(f *testing.F) {
-	f.Add([]byte(`{"action_id":"profile.fields.read","mode":"allowlist","connections":["01JB2Z6V9K3M4N5P6Q7R8S9BBB"],"fields":["a"]}`))
+	f.Add([]byte(`{"action_id":"items.share","mode":"allowlist","connections":["01JB2Z6V9K3M4N5P6Q7R8S9BBB"],"items":["01JB2Z6V9K3M4N5P6Q7R8S9BBB"]}`))
 	f.Fuzz(func(t *testing.T, b []byte) {
 		c, err := ParseConfigure(b)
 		if err != nil {
@@ -600,12 +594,12 @@ func FuzzParseInvocation(f *testing.F) {
 }
 
 func FuzzParseParams(f *testing.F) {
-	f.Add(uint8(0), []byte(`{"fields":["contact.phone"]}`))
-	f.Add(uint8(4), []byte(`{"asset":"BTC","amount_sats":5,"memo":"x"}`))
+	f.Add(uint8(0), []byte(`{"item_id":"01JB2Z6V9K3M4N5P6Q7R8S9BBB","fields":["f1"]}`))
+	f.Add(uint8(3), []byte(`{"asset":"BTC","amount_sats":5,"memo":"x"}`))
 	f.Fuzz(func(t *testing.T, i uint8, b []byte) {
 		cat := Catalog()
 		p, err := ParseParams(cat[int(i)%len(cat)].ID, b)
-		if err == nil && (p.Limit > AuditMax || len(p.Memo) > MaxMemo || len(p.Fields) > MaxRequestFields) {
+		if err == nil && (p.Limit > AuditMax || len(p.Memo) > MaxMemo || len(p.Fields) > 64) {
 			t.Fatalf("accepted %+v", p)
 		}
 	})
@@ -635,6 +629,7 @@ func FuzzParseOffered(f *testing.F) {
 }
 
 func FuzzDescs(f *testing.F) {
-	f.Add([]byte(`{"grants":[{"grant_id":"01JB2Z6V9K3M4N5P6Q7R8S9T0V","kind":"field","ref":"a","uses":1,"expires_at":"2026-10-03T12:00:00.000Z"}]}`))
+	f.Add([]byte(`{"grants":[{"grant_id":"01JB2Z6V9K3M4N5P6Q7R8S9T0V","kind":"item","ref":"01JB2Z6V9K3M4N5P6Q7R8S9T0W","name":"n",` +
+		`"category":"c","labels":[{"field_id":"f1","label":"L","kind":"text"}],"uses":1,"expires_at":"2026-10-03T12:00:00.000Z"}]}`))
 	f.Fuzz(func(t *testing.T, b []byte) { _, _ = Descs(b) })
 }

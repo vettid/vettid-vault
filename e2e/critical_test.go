@@ -10,30 +10,46 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vettid/vettid-vault/client"
 	"github.com/vettid/vettid-vault/internal/relaytest"
 	"github.com/vettid/vettid-vault/internal/strictjson"
 )
 
-// V4 batch 3, critical-secret use (§10.13) through the real relay: A's
-// member holds an Ed25519 signing key in the Protean Credential and lists
-// it in the catalog; B asks A's member to sign a payload; A's app sees the
-// request and approves with the password (bound to the request and the
-// payload); B receives only the signature, which verifies; A's credential
-// rotated (a new version). A second request is denied.
+// Critical-item use (§10.13) through the real relay: A's member holds an
+// Ed25519 signing key in a critical item inside the Protean Credential;
+// before any rule, B's request is refused without asking; a share rule
+// makes it usable (never readable: no grant, nothing fetched); B asks A's
+// member to sign a payload; A's app sees the request and approves with the
+// password (bound to the request and the payload); B receives only the
+// signature, which verifies; A's credential rotated (a new version). A
+// second request is denied.
 func TestCriticalSecretUse(t *testing.T) {
 	r := relaytest.Start(t, nil)
 	a := newTestVault(t, r.URL, "a", nil)
 	b := newTestVault(t, r.URL, "b", nil)
 	ctx := ctxT(t, 120*time.Second)
-	_, bConn := connect(t, a, b, 600)
+	aConn, bConn := connect(t, a, b, 600)
 
 	seed := bytes.Repeat([]byte{0x7a}, 32)
-	sid, err := a.app.CriticalSecretAdd(ctx, credPW, "Signing key", "signing_key", "", seed)
+	sid, _, err := a.app.ItemPutCritical(ctx, credPW, "", 0, []string{"signing"}, client.ItemContent{Name: "Signing key", Category: "crypto_wallet",
+		Fields: []client.ItemField{{Label: "Seed", Kind: "password", Value: base64.StdEncoding.EncodeToString(seed)}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := a.app.CriticalSecretCatalog(ctx, sid, true); err != nil {
+	// Not usable yet: unavailable without asking A's member.
+	early, err := b.app.CriticalUseRequest(ctx, bConn, sid, "f1", "sign", []byte("x"), "")
+	if err != nil {
 		t.Fatal(err)
+	}
+	waitEvent(t, b.app, "critical-secret-use.result", func(raw json.RawMessage) bool {
+		return has("request_id", early)(raw) && has("status", "unavailable")(raw)
+	})
+	if _, err := a.app.ShareRuleSet(ctx, map[string]any{"subject": map[string]any{"connection_id": aConn}, "tags": []string{"signing"}, "mode": "auto"}); err != nil {
+		t.Fatal(err)
+	}
+	cat, err := b.app.GrantCatalog(ctx, bConn)
+	if err != nil || !bytes.Contains(cat, []byte(`"usable":true`)) || bytes.Contains(cat, []byte(`"grant_id"`)) {
+		t.Fatalf("catalog: %s %v", cat, err)
 	}
 	v0, err := a.app.CredentialVersion(ctx)
 	if err != nil {
@@ -42,7 +58,7 @@ func TestCriticalSecretUse(t *testing.T) {
 	ver0, _ := v0.Uint("version", 1, 1<<40)
 
 	payload := []byte("pay 5 EUR to invoice 7")
-	reqID, err := b.app.CriticalUseRequest(ctx, bConn, sid, "sign", payload, "invoice 7")
+	reqID, err := b.app.CriticalUseRequest(ctx, bConn, sid, "f1", "sign", payload, "invoice 7")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +91,7 @@ func TestCriticalSecretUse(t *testing.T) {
 	}
 
 	// A second request, denied by the member.
-	reqID2, err := b.app.CriticalUseRequest(ctx, bConn, sid, "auth", []byte("challenge"), "")
+	reqID2, err := b.app.CriticalUseRequest(ctx, bConn, sid, "f1", "auth", []byte("challenge"), "")
 	if err != nil {
 		t.Fatal(err)
 	}

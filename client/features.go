@@ -56,42 +56,8 @@ func (d *Device) Op(ctx context.Context, typ string, v any) (strictjson.Object, 
 	return strictjson.ParseObject(b)
 }
 
-// SecretPut creates (id "") or replaces a vault-held secret and returns its
-// id and version (§10.7).
-func (d *Device) SecretPut(ctx context.Context, id string, version uint64, name, value string, extra map[string]any) (string, uint64, error) {
-	body := map[string]any{"name": name, "value": value}
-	for k, v := range extra {
-		body[k] = v
-	}
-	if id != "" {
-		body["secret_id"], body["version"] = id, version
-	}
-	o, err := d.Op(ctx, "secret.put", body)
-	if err != nil {
-		return "", 0, err
-	}
-	sid, _ := o.String("secret_id")
-	v, _ := o.Uint("version", 1, strictjson.MaxSafeInteger)
-	return sid, v, nil
-}
-
-// SecretGet reads a vault-held secret.
-func (d *Device) SecretGet(ctx context.Context, id string) (strictjson.Object, error) {
-	return d.Op(ctx, "secret.get", map[string]any{"secret_id": id})
-}
-
-// SecretList lists the vault-held secrets (without values).
-func (d *Device) SecretList(ctx context.Context) (strictjson.Object, error) {
-	return d.Op(ctx, "secret.list", nil)
-}
-
-// SecretDelete deletes a vault-held secret.
-func (d *Device) SecretDelete(ctx context.Context, id string) error {
-	_, err := d.Op(ctx, "secret.delete", map[string]any{"secret_id": id})
-	return err
-}
-
-// ProfileGet returns the owner's profile.
+// ProfileGet returns the owner's profile object: the display name and
+// photo (§10.8; what connections see also includes the @profile items).
 func (d *Device) ProfileGet(ctx context.Context) (strictjson.Object, error) {
 	return d.Op(ctx, "profile.get", nil)
 }

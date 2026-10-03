@@ -38,7 +38,7 @@ func TestLeashStatus(t *testing.T) {
 	if _, err := a.app.CredentialUnlock(ctx, credPW); err != nil {
 		t.Fatal(err)
 	}
-	mustOK(t, a.request(a.app, "device.pair.approve", `{"pairing_id":"`+pid+`","session_seconds":3600,"grants":[{"scope":"secrets.catalog","approval":"auto"}]}`))
+	mustOK(t, a.request(a.app, "device.pair.approve", `{"pairing_id":"`+pid+`","session_seconds":3600,"grants":[{"scope":"connection.list","approval":"auto"}]}`))
 	if err := agent.AwaitPaired(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -72,10 +72,25 @@ func TestLeashStatus(t *testing.T) {
 	if _, err := leashwire.VerifyPresented(memberKey, p2, time.Now().Add(16*time.Minute)); err == nil {
 		t.Fatal("statement outlived its ttl")
 	}
+	// An agent share rule (items.read) is presented the same way: the
+	// delegation carries the rule's tags (§10.11).
+	ro, err := a.app.ShareRuleSet(ctx, map[string]any{"subject": map[string]any{"agent_id": agent.DeviceID()}, "tags": []string{"travel"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rid, _ := ro.String("rule_id")
+	waitEvent(t, agent, "leash.grant.updated", func(b json.RawMessage) bool { return strings.Contains(string(b), rid) })
+	pr, err := agent.LeashPresent(ctx, rid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d, err := leashwire.VerifyPresented(memberKey, pr, time.Now()); err != nil || d.Scope != "items.read" || d.Tags[0] != "travel" {
+		t.Fatalf("items.read presented: %+v %v", d, err)
+	}
 	// Revoked: no new statement. A 60 s statement is always within the
 	// client's refresh margin, so it asks again and gets none; the old
 	// statement lapses within its ttl.
-	g1, err := a.app.LeashGrantIssue(ctx, agent.DeviceID(), map[string]any{"scope": "secrets.catalog", "status_ttl": 60})
+	g1, err := a.app.LeashGrantIssue(ctx, agent.DeviceID(), map[string]any{"scope": "connection.list", "status_ttl": 60})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +111,7 @@ func TestLeashStatus(t *testing.T) {
 	}
 
 	// A locked vault issues nothing (fail closed).
-	g, err := a.app.LeashGrantIssue(ctx, agent.DeviceID(), map[string]any{"scope": "secrets.catalog"})
+	g, err := a.app.LeashGrantIssue(ctx, agent.DeviceID(), map[string]any{"scope": "connection.list"})
 	if err != nil {
 		t.Fatal(err)
 	}

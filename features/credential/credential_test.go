@@ -2,6 +2,7 @@ package credential
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/vettid/vettid-vault/internal/featuretest"
+	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vms/credwire"
 	"github.com/vettid/vettid-vault/vms/envelope"
@@ -33,6 +35,7 @@ type env struct {
 	pools map[string][]utk
 	reply *suite.PrivateKey // the last request's reply key
 	lastI string            // the last request's inner id
+	op    *opFeature
 }
 
 func newEnv(t *testing.T) *env {
@@ -95,7 +98,7 @@ func (e *env) callWith(kind, typ, blob string, payload map[string]any, u utk) fe
 	if payload == nil {
 		payload = map[string]any{}
 	}
-	if typ == "credential.secret.get" {
+	if typ == "test.op" && e.op != nil && e.op.reply {
 		k, _ := suite.GeneratePrivateKey()
 		e.reply = k
 		payload["reply_key"] = base64.StdEncoding.EncodeToString(k.Public().Bytes())
@@ -113,9 +116,39 @@ func (e *env) callWith(kind, typ, blob string, payload map[string]any, u utk) fe
 		body["credential"] = blob
 	}
 	b, _ := json.Marshal(body)
-	r := featuretest.CallID(e.f, e.h, e.clk.T, kind, typ, id, string(b))
+	var f vault.Feature = e.f
+	if typ == "test.op" {
+		f = e.op
+	}
+	r := featuretest.CallID(f, e.h, e.clk.T, kind, typ, id, string(b))
 	e.absorb(kind, r)
 	return r
+}
+
+// opFeature drives Operate, the credential operation of another feature
+// (critical items, §10.7; critical-item use, §10.13), as type test.op.
+type opFeature struct {
+	cred  *Feature
+	need  int
+	reply bool
+	check func(*Payload) error
+	op    func(*Inner, *Payload) error
+}
+
+func (o *opFeature) Name() string { return "op" }
+func (o *opFeature) Types() []vault.TypeSpec {
+	return []vault.TypeSpec{{Type: "test.op", Request: true, From: []string{vault.KindApp, vault.KindDesktop}}}
+}
+func (o *opFeature) Load(json.RawMessage) error     { return nil }
+func (o *opFeature) Save() (json.RawMessage, error) { return json.RawMessage(`{}`), nil }
+func (o *opFeature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner) (json.RawMessage, error) {
+	r, err := o.cred.Operate(s, in, o.need, o.check, o.op)
+	if err != nil {
+		return nil, err
+	}
+	b := strictjson.NewBuilder()
+	r.Members(b)
+	return b.Bytes(), nil
 }
 
 func (e *env) ok(r featuretest.Result) featuretest.Result {
@@ -152,7 +185,7 @@ func TestAuthorizationBySenderKind(t *testing.T) {
 		}
 	}
 	e.create()
-	for _, typ := range []string{"credential.secret.get", "credential.unlock", "credential.rotate", "credential.delete", "credential.get", "credential.ack"} {
+	for _, typ := range []string{"credential.unlock", "credential.rotate", "credential.delete", "credential.get", "credential.ack"} {
 		for _, k := range []string{"desktop", "agent"} {
 			if r := e.raw(k, typ, `{}`); r.Code != "forbidden" {
 				t.Fatalf("%s may send %s: %q", k, typ, r.Code)
@@ -160,7 +193,16 @@ func TestAuthorizationBySenderKind(t *testing.T) {
 		}
 	}
 	e.ok(e.raw("desktop", "credential.version", `{}`))
-	e.ok(e.raw("desktop", "credential.secret.list", `{}`))
+	for _, typ := range []string{"credential.secret.add", "credential.secret.get", "credential.secret.list", "credential.secret.delete", "credential.secret.catalog"} {
+		if r := e.raw("app", typ, `{}`); r.Code != "unsupported_type" {
+			t.Fatalf("%s (removed in 0.7.0): %q", typ, r.Code)
+		}
+	}
+	// Another feature's operation is app-only.
+	e.op = &opFeature{cred: e.f, op: func(*Inner, *Payload) error { return nil }}
+	if r := e.callWith("desktop", "test.op", "", map[string]any{"password": pw}, e.take("app")); r.Code != "forbidden" {
+		t.Fatalf("desktop operation: %q", r.Code)
+	}
 	if !e.f.CredentialReady() {
 		t.Fatal("gate")
 	}
@@ -244,41 +286,78 @@ func TestCEKRotatesOnEveryUse(t *testing.T) {
 	e.ok(e.unlock(b2, pw))
 }
 
-func TestSecretsAndReplyKey(t *testing.T) {
+// §3.5.3, §3.5.4, §10.7: another feature's operation (a critical item)
+// spends a UTK, opens the credential with the password, changes the
+// plaintext and rotates the CEK; values return sealed to a reply key and
+// never reach saved state.
+func TestOperateAndReplyKey(t *testing.T) {
 	e := newEnv(t)
 	blob := e.create()
-	val := []byte("abandon ability able about above absent")
-	r := e.ok(e.call("app", "credential.secret.add", blob, map[string]any{"password": pw, "name": "wallet seed", "category": "seed_phrase",
-		"value": base64.StdEncoding.EncodeToString(val)}))
-	id, _ := r.Obj(t).String("secret_id")
+	val := []byte(`"abandon ability able about above absent"`)
+	add := &opFeature{cred: e.f, need: NeedItem, op: func(in *Inner, p *Payload) error {
+		in.Items = append(in.Items, Item{ID: testID, Values: []Value{{FieldID: "f1", Raw: append([]byte(nil), val...)}},
+			Notes: []byte(`"n"`)})
+		return nil
+	}}
+	e.op = add
+	r := e.ok(e.call("app", "test.op", blob, map[string]any{"password": pw, "item": map[string]any{"name": "seed"}}))
+	if v, _ := r.Obj(t).Uint("credential_version", 1, 9); v != 2 {
+		t.Fatal("not rotated")
+	}
+	old := blob
 	blob = blobOf(t, r)
-	g := e.ok(e.call("app", "credential.secret.get", blob, map[string]any{"password": pw, "secret_id": id}))
-	if bytes.Contains(g.Body, val) || bytes.Contains(g.Body, []byte(base64.StdEncoding.EncodeToString(val))) {
-		t.Fatal("secret value in the clear in the response")
+	// Read it back, sealed to a reply key.
+	var got []byte
+	e.op = &opFeature{cred: e.f, need: NeedItemID | NeedReply, reply: true,
+		check: func(p *Payload) error {
+			if p.ItemID != testID {
+				return errBad
+			}
+			return nil
+		},
+		op: func(in *Inner, p *Payload) error {
+			i := in.FindItem(p.ItemID)
+			if i < 0 {
+				return errNotFound
+			}
+			pt := in.Items[i].ValuesJSON()
+			var err error
+			got, err = credwire.SealValue(p.Reply, e.h.VaultID(), e.lastI, pt)
+			return err
+		}}
+	r = e.ok(e.call("app", "test.op", blob, map[string]any{"password": pw, "item_id": testID}))
+	blob = blobOf(t, r)
+	pt, err := credwire.OpenValue(e.reply, e.h.VaultID(), e.lastI, got)
+	if err != nil || !bytes.Contains(pt, val) || !bytes.Contains(pt, []byte(`"notes":"n"`)) {
+		t.Fatalf("reply-sealed values: %s %v", pt, err)
 	}
-	sv, _ := g.Obj(t).Base64("value_sealed", -1)
-	got, err := credwire.OpenValue(e.reply, e.h.VaultID(), e.lastI, sv)
-	if err != nil || !bytes.Equal(got, val) {
-		t.Fatalf("reply-sealed value: %v", err)
+	if bytes.Contains(r.Body, []byte("abandon")) {
+		t.Fatal("value in the clear in the response")
 	}
-	other, _ := suite.GeneratePrivateKey()
-	if _, err := credwire.OpenValue(other, e.h.VaultID(), e.lastI, sv); err == nil {
-		t.Fatal("opened with another key")
+	// The old blob is dead: every use rotated the CEK.
+	if r := e.call("app", "test.op", old, map[string]any{"password": pw, "item_id": testID}); r.Code != "stale_credential" {
+		t.Fatalf("old blob: %q", r.Code)
 	}
-	blob = blobOf(t, g)
-	if !e.h.HasActivity("credential.secret.read") {
-		t.Fatal("read not audited")
+	// A failed binding check spends the UTK and changes nothing.
+	before, _ := e.f.Save()
+	if r := e.call("app", "test.op", blob, map[string]any{"password": pw, "item_id": "01JB2Z6V9K3M4N5P6Q7R8S9T0W"}); r.Code != "bad_request" {
+		t.Fatalf("binding: %q", r.Code)
+	}
+	after, _ := e.f.Save()
+	var b1, b2 struct {
+		Version uint64 `json:"version"`
+		Hash    []byte `json:"hash"`
+	}
+	_ = json.Unmarshal(before, &b1)
+	_ = json.Unmarshal(after, &b2)
+	if b1.Version != b2.Version || !bytes.Equal(b1.Hash, b2.Hash) {
+		t.Fatal("a refused operation changed the credential")
 	}
 	saved, _ := e.f.Save()
-	for _, secret := range [][]byte{val, []byte(pw)} {
+	for _, secret := range [][]byte{[]byte("abandon"), []byte(pw)} {
 		if bytes.Contains(saved, secret) {
 			t.Fatal("plaintext in saved state")
 		}
-	}
-	d := e.ok(e.call("app", "credential.secret.delete", blob, map[string]any{"password": pw, "secret_id": id}))
-	blob = blobOf(t, d)
-	if r := e.call("app", "credential.secret.get", blob, map[string]any{"password": pw, "secret_id": id}); r.Code != "not_found" {
-		t.Fatalf("deleted secret: %q", r.Code)
 	}
 	g2 := New(Options{KDF: MinKDF})
 	featuretest.RoundTrip(t, e.f, g2)
@@ -492,9 +571,6 @@ func TestBadBodies(t *testing.T) {
 		{"credential.unlock", map[string]any{"password": "short"}},
 		{"credential.unlock", map[string]any{"password": strings.Repeat("p", MaxPassword+1)}},
 		{"credential.unlock", map[string]any{"password": 12345678}},
-		{"credential.secret.add", map[string]any{"password": pw, "name": "n", "category": "bitcoin", "value": "eA=="}},
-		{"credential.secret.add", map[string]any{"password": pw, "name": "", "category": "other", "value": "eA=="}},
-		{"credential.secret.add", map[string]any{"password": pw, "name": "n", "category": "other", "value": ""}},
 		{"credential.password.change", map[string]any{"password": pw, "new_password": "short"}},
 	} {
 		if r := e.call("app", c.typ, blob, c.payload); r.Code != "bad_request" {
@@ -548,7 +624,7 @@ func FuzzParseEnvelope(f *testing.F) {
 }
 
 func FuzzParsePayload(f *testing.F) {
-	f.Add("credential.secret.add", []byte(`{"password":"`+pw+`","name":"n","category":"other","value":"eA=="}`))
+	f.Add("credential.unlock", []byte(`{"password":"`+pw+`"}`))
 	f.Add("credential.password.change", []byte(`{"password":"`+pw+`","new_password":"`+pw+`"}`))
 	f.Fuzz(func(t *testing.T, typ string, b []byte) {
 		p, err := ParsePayload(typ, b)
@@ -558,22 +634,41 @@ func FuzzParsePayload(f *testing.F) {
 		if n := needs[typ]; n&needPassword != 0 && (len(p.Password) < MinPassword || len(p.Password) > MaxPassword) {
 			t.Fatal("bad password accepted")
 		}
-		if len(p.Value) > MaxValue || len(p.Name) > MaxName {
-			t.Fatal("oversized secret accepted")
+	})
+}
+
+func FuzzParseOpPayload(f *testing.F) {
+	f.Add(NeedItem|NeedOptItemID, []byte(`{"password":"`+pw+`","item_id":"`+testID+`","item":{"name":"x"}}`))
+	f.Add(NeedRequest, []byte(`{"password":"`+pw+`","request_id":"`+testID+`","payload_sha256":"`+strings.Repeat("A", 43)+`="}`))
+	f.Add(NeedItemID|NeedReply, []byte(`{"password":"`+pw+`","item_id":"`+testID+`","reply_key":"AA=="}`))
+	f.Fuzz(func(t *testing.T, need int, b []byte) {
+		p, err := ParseOpPayload(need&(NeedItemID|NeedOptItemID|NeedItem|NeedReply|NeedRequest), b)
+		if err != nil {
+			return
+		}
+		if len(p.Password) < MinPassword || len(p.Password) > MaxPassword {
+			t.Fatal("bad password accepted")
+		}
+		if need&NeedItem != 0 && (len(p.Item) == 0 || p.Item[0] != '{') {
+			t.Fatal("item not an object")
+		}
+		if need&NeedItemID != 0 && !envelope.ValidULID(p.ItemID) {
+			t.Fatal("bad item id accepted")
 		}
 	})
 }
 
 func FuzzParseInner(f *testing.F) {
 	in := &Inner{VaultID: "v", Version: 1, CreatedAt: time.Unix(0, 0), PasswordChangedAt: time.Unix(0, 0), Key: make([]byte, 32),
-		Secrets: []Secret{{ID: testID, Name: "n", Category: "other", Value: []byte("v"), CreatedAt: time.Unix(0, 0)}}}
+		Items: []Item{{ID: testID, Values: []Value{{FieldID: "f1", Raw: []byte(`"v"`)}, {FieldID: "f2", Raw: []byte(`{"city":"Oslo"}`)}},
+			Notes: []byte(`"n"`)}}}
 	f.Add(in.Marshal())
 	f.Fuzz(func(t *testing.T, b []byte) {
 		p, err := ParseInner(b)
 		if err != nil {
 			return
 		}
-		if len(p.Key) != 32 || len(p.Secrets) > MaxSecrets {
+		if len(p.Key) != 32 || len(p.Items) > MaxItems {
 			t.Fatal("invalid plaintext accepted")
 		}
 		if _, err := ParseInner(p.Marshal()); err != nil {
@@ -597,16 +692,31 @@ func FuzzOpen(f *testing.F) {
 	})
 }
 
-func TestSecretLimit(t *testing.T) {
+// §3.5.2: the plaintext is bounded (131,072 bytes): an operation that
+// would exceed it is refused with limit and changes nothing.
+func TestInnerLimit(t *testing.T) {
 	e := newEnv(t)
 	blob := e.create()
-	add := func() featuretest.Result {
-		return e.call("app", "credential.secret.add", blob, map[string]any{"password": pw, "name": "n", "category": "other", "value": "dg=="})
+	big := `"` + strings.Repeat("x", 8000) + `"`
+	n := 0
+	e.op = &opFeature{cred: e.f, op: func(in *Inner, _ *Payload) error {
+		n++
+		id, _ := envelope.NewULID(time.Unix(int64(n), 0))
+		in.Items = append(in.Items, Item{ID: id, Values: []Value{{FieldID: "f1", Raw: []byte(big)}}})
+		return nil
+	}}
+	for {
+		r := e.call("app", "test.op", blob, map[string]any{"password": pw})
+		if r.Code == "limit" {
+			break
+		}
+		blob = blobOf(t, e.ok(r))
+		if n > 20 {
+			t.Fatal("no limit")
+		}
 	}
-	for i := 0; i < MaxSecrets; i++ {
-		blob = blobOf(t, e.ok(add()))
+	if n < 15 {
+		t.Fatalf("limit after %d items of 8 KB", n)
 	}
-	if r := add(); r.Code != "limit" {
-		t.Fatalf("over the limit: %q", r.Code)
-	}
+	e.ok(e.unlock(blob, pw))
 }

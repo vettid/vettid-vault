@@ -99,7 +99,7 @@ commands for recovery (the e2e tests drive the client package directly).
 ## Protean Credential corrections (0.4.1, owner review)
 
 The batch-1 port deviated from the owner's Protean Credential design
-(vettid-dev `docs/protean_credential_system_design.md`); 0.4.1 restores it:
+([PROTEAN-CREDENTIAL.md](https://github.com/vettid/vettid.org/blob/master/docs/PROTEAN-CREDENTIAL.md), formerly vettid-dev `docs/protean_credential_system_design.md`); 0.4.1 restores it:
 
 - **CEK rotation on every use.** Every operation that opens the blob seals
   the content under a new CEK as the next version and destroys the old CEK

@@ -448,7 +448,7 @@ values the vault keeps encrypted under those keys.
 - Its contents are never part of vault state.
 
 This section follows the owner's Protean Credential design
-(vettid-dev `docs/protean_credential_system_design.md`) on the new
+([PROTEAN-CREDENTIAL.md](PROTEAN-CREDENTIAL.md)) on the new
 transport. Its three rotating mechanisms map as follows:
 
 - **CEK** (credential encryption key): a new CEK after **every** use of

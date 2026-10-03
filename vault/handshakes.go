@@ -97,6 +97,12 @@ func (m *Manager) handleInit(ctx context.Context, raw []byte, sender ed25519.Pub
 		m.audit(now, "invite_invalid", "")
 		return ackAfterFlush // single use; expired, used or revoked invites are rejected (§6.4)
 	}
+	if inv.IntroIK != nil && !suite.EqualPublic(body.From.IK, inv.IntroIK) {
+		// §10.15: an introduction's invitation is for one identity only;
+		// it stays usable by that one.
+		m.audit(now, "intro_mismatch", "")
+		return ackAfterFlush
+	}
 	if inv.EnrollIK != nil {
 		// The first app (§11.3): its identity was bound at enrollment.
 		if !suite.EqualPublic(body.From.IK, inv.EnrollIK) || !suite.EqualPublic(sender, inv.EnrollRelayPK) {
@@ -140,7 +146,7 @@ func (m *Manager) handleInit(ctx context.Context, raw []byte, sender ed25519.Pub
 		return ackAfterFlush
 	}
 	m.st.Inbound[id] = &InboundHS{ID: id, InviteID: inv.ID, Kind: inv.Kind, Remote: inv.Remote, Sender: sender,
-		Created: now, Expires: exp, Pending: ps, Attestation: binding}
+		Created: now, Expires: exp, Pending: ps, Attestation: binding, IntroBy: inv.IntroBy}
 	m.inbound[id] = pi
 	switch {
 	case inv.EnrollIK != nil:
@@ -156,6 +162,9 @@ func (m *Manager) handleInit(ctx context.Context, raw []byte, sender ed25519.Pub
 			String("sas", pi.SAS()).Bool("remote", inv.Remote)
 		if len(body.Profile) > 0 {
 			b.Raw("profile", body.Profile)
+		}
+		if inv.IntroBy != "" {
+			b.String("introduced_by", inv.IntroBy) // §10.15
 		}
 		m.notifyDevices("connection.request.pending", b.Bytes(), "", now)
 		m.record(Activity{Kind: "connection.request", Ref: id, Feed: true}, now)

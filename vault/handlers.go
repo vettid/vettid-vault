@@ -157,6 +157,15 @@ type Host interface {
 	// vault's identity key (callwire.VouchMessage, §10.10); it signs
 	// nothing that is not a share message.
 	VouchCallShare(deviceIK ed25519.PublicKey, m []byte) ([]byte, error)
+	// CreateIntroInvite makes a remote connection invitation for an
+	// introduction (§10.15): accepted only from expectIK, its pending
+	// request marked introduced_by.
+	CreateIntroInvite(ctx context.Context, expectIK []byte, introBy string, now time.Time) (inviteID, link string, err error)
+	// AcceptInviteLink accepts a connection invitation link as
+	// connection.invite.accept does and returns the new connection's id.
+	AcceptInviteLink(ctx context.Context, link string, now time.Time) (string, error)
+	// CancelInvite revokes an outstanding invitation (§6.4).
+	CancelInvite(id string, now time.Time)
 }
 
 // SendOptions qualify one outbound message.
@@ -265,6 +274,19 @@ func (s *Session) IdentityKey() ed25519.PublicKey { return s.host.IdentityKey() 
 // SignICEConfig signs an ICE configuration (callwire format) with the
 // vault's identity key.
 func (s *Session) SignICEConfig(config []byte) ([]byte, error) { return s.host.SignICEConfig(config) }
+
+// CreateIntroInvite makes an introduction's invitation (§10.15).
+func (s *Session) CreateIntroInvite(expectIK []byte, introBy string) (string, string, error) {
+	return s.host.CreateIntroInvite(s.Context(), expectIK, introBy, s.now)
+}
+
+// AcceptInviteLink accepts a connection invitation link (§6.4).
+func (s *Session) AcceptInviteLink(link string) (string, error) {
+	return s.host.AcceptInviteLink(s.Context(), link, s.now)
+}
+
+// CancelInvite revokes an outstanding invitation.
+func (s *Session) CancelInvite(id string) { s.host.CancelInvite(id, s.now) }
 
 // VouchCallShare signs a device's call key-exchange share (§10.10).
 func (s *Session) VouchCallShare(deviceIK ed25519.PublicKey, m []byte) ([]byte, error) {

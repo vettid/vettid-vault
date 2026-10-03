@@ -49,6 +49,11 @@ type Host struct {
 	IK         ed25519.PublicKey
 	// Identity is the fake vault's identity key (IK is its public half).
 	Identity ed25519.PrivateKey
+	// Introductions' invitations (§10.15).
+	IntroInvites  []IntroInvite
+	AcceptedLinks []string
+	Cancelled     []string
+	InviteErr     error
 }
 
 // NewHost returns a fake host with no connections.
@@ -100,6 +105,32 @@ func (h *Host) Device(id string) (vault.PeerInfo, bool) {
 	p, ok := h.Devices[id]
 	return p, ok
 }
+
+// IntroInvite is a recorded CreateIntroInvite call.
+type IntroInvite struct {
+	ID, Link, IntroBy string
+	ExpectIK          []byte
+}
+
+func (h *Host) CreateIntroInvite(_ context.Context, ik []byte, by string, now time.Time) (string, string, error) {
+	if h.InviteErr != nil {
+		return "", "", h.InviteErr
+	}
+	id := h.NewID(now)
+	inv := IntroInvite{ID: id, Link: "vettid://invite/" + id, IntroBy: by, ExpectIK: append([]byte(nil), ik...)}
+	h.IntroInvites = append(h.IntroInvites, inv)
+	return inv.ID, inv.Link, nil
+}
+
+func (h *Host) AcceptInviteLink(_ context.Context, link string, now time.Time) (string, error) {
+	if h.InviteErr != nil {
+		return "", h.InviteErr
+	}
+	h.AcceptedLinks = append(h.AcceptedLinks, link)
+	return h.NewID(now), nil
+}
+
+func (h *Host) CancelInvite(id string, _ time.Time) { h.Cancelled = append(h.Cancelled, id) }
 
 func (h *Host) PairedDevice(id string) (vault.PeerInfo, bool) {
 	p, ok := h.Devices[id]

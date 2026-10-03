@@ -60,7 +60,62 @@ type Host struct {
 	Chain     []json.RawMessage
 	// LastActive is OwnerLastActive's answer (§9.2 presence).
 	LastActive time.Time
+	// One app per vault (vault.CredentialHost, §6.7.1, §3.5.9): the PIN
+	// VerifyPIN accepts, the transfer in progress, the transfers ended
+	// (id:reason) and the host alarms reported.
+	PIN       string
+	Xfer      *vault.TransferInfo
+	XferEnded []string
+	Alarms    []string
 }
+
+// VerifyPIN implements vault.CredentialHost.
+func (h *Host) VerifyPIN(pin string, _ time.Time) error {
+	if h.PIN == "" || pin != h.PIN {
+		return vault.NewError("bad_pin", "")
+	}
+	return nil
+}
+
+// CreateTransfer implements vault.CredentialHost.
+func (h *Host) CreateTransfer(_ context.Context, by string, now time.Time) (string, string, time.Time, error) {
+	if h.Xfer != nil {
+		return "", "", time.Time{}, vault.NewError("exists", "")
+	}
+	id, _ := envelope.NewULID(now)
+	h.Xfer = &vault.TransferInfo{ID: id, OldDevice: by, State: vault.TransferOpen, Exp: now.Add(10 * time.Minute)}
+	return id, "https://vettid.org/i#test", h.Xfer.Exp, nil
+}
+
+// Transfer implements vault.CredentialHost.
+func (h *Host) Transfer() (vault.TransferInfo, bool) {
+	if h.Xfer == nil {
+		return vault.TransferInfo{}, false
+	}
+	return *h.Xfer, true
+}
+
+// ApproveTransfer implements vault.CredentialHost.
+func (h *Host) ApproveTransfer(_ context.Context, id string, now time.Time) (time.Time, error) {
+	if h.Xfer == nil || h.Xfer.ID != id || !h.Xfer.Scanned {
+		return time.Time{}, vault.NewError("not_found", "")
+	}
+	h.Xfer.State, h.Xfer.Exp = vault.TransferApproved, now.Add(10*time.Minute)
+	return h.Xfer.Exp, nil
+}
+
+// EndTransfer implements vault.CredentialHost.
+func (h *Host) EndTransfer(id, reason string, _ time.Time) error {
+	if h.Xfer == nil || h.Xfer.ID != id {
+		return vault.NewError("not_found", "")
+	}
+	h.Xfer = nil
+	h.XferEnded = append(h.XferEnded, id+":"+reason)
+	return nil
+}
+
+// ReportAlarm implements vault.CredentialHost.
+func (h *Host) ReportAlarm(kind string) { h.Alarms = append(h.Alarms, kind) }
 
 // NewHost returns a fake host with no connections.
 func NewHost() *Host {
@@ -341,6 +396,9 @@ func CallInner(f vault.Feature, h *Host, now time.Time, kind string, in *envelop
 		return Result{Code: "unsupported_type"}
 	}
 	from := vault.PeerInfo{ID: "dev-" + kind, Kind: kind, State: vault.PeerActive, IK: DeviceKey("dev-" + kind).Public().(ed25519.PublicKey)}
+	if kind == "app2" { // another app device (one app per vault: a clone's presenter, §3.5.9)
+		from = vault.PeerInfo{ID: "dev-app2", Kind: vault.KindApp, State: vault.PeerActive}
+	}
 	if kind == "recovering-app" { // an app registered by recovery (§11.11.5)
 		from = vault.PeerInfo{ID: "dev-recovering", Kind: vault.KindApp, State: vault.PeerActive, Recovering: true}
 	}

@@ -132,6 +132,11 @@ type Manager struct {
 	// pairAccess carries device.pair.approve's session_seconds into
 	// approveInbound (§6.8).
 	pairAccess *pendingAccess
+	// replaceAfter is the recovered app whose recovery completed in the
+	// current handler: the other apps are removed after it returns
+	// (§11.11.5). alarms are host alarms reported after the flush (§11.5).
+	replaceAfter string
+	alarms       []string
 
 	locked      bool
 	lockPending bool

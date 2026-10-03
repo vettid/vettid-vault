@@ -36,11 +36,14 @@ type env struct {
 	reply *suite.PrivateKey // the last request's reply key
 	lastI string            // the last request's inner id
 	op    *opFeature
+	extra string // extra top-level body members (callBody)
 }
 
 func newEnv(t *testing.T) *env {
-	return &env{t: t, f: New(Options{KDF: MinKDF}), h: featuretest.NewHost(),
+	e := &env{t: t, f: New(Options{KDF: MinKDF}), h: featuretest.NewHost(),
 		clk: featuretest.Clock{T: time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)}, pools: map[string][]utk{}}
+	e.h.AddDevice("dev-app", vault.KindApp)
+	return e
 }
 
 func (e *env) raw(kind, typ, body string) featuretest.Result {
@@ -116,6 +119,9 @@ func (e *env) callWith(kind, typ, blob string, payload map[string]any, u utk) fe
 		body["credential"] = blob
 	}
 	b, _ := json.Marshal(body)
+	if e.extra != "" {
+		b = append(append(b[:len(b)-1], ','), e.extra+"}"...)
+	}
 	var f vault.Feature = e.f
 	if typ == "test.op" {
 		f = e.op
@@ -332,10 +338,6 @@ func TestOperateAndReplyKey(t *testing.T) {
 	if bytes.Contains(r.Body, []byte("abandon")) {
 		t.Fatal("value in the clear in the response")
 	}
-	// The old blob is dead: every use rotated the CEK.
-	if r := e.call("app", "test.op", old, map[string]any{"password": pw, "item_id": testID}); r.Code != "stale_credential" {
-		t.Fatalf("old blob: %q", r.Code)
-	}
 	// A failed binding check spends the UTK and changes nothing.
 	before, _ := e.f.Save()
 	if r := e.call("app", "test.op", blob, map[string]any{"password": pw, "item_id": "01JB2Z6V9K3M4N5P6Q7R8S9T0W"}); r.Code != "bad_request" {
@@ -361,6 +363,11 @@ func TestOperateAndReplyKey(t *testing.T) {
 	featuretest.RoundTrip(t, e.f, g2)
 	e.f = g2
 	e.ok(e.unlock(blob, pw))
+	// The old blob is dead: every use rotated the CEK. Presented two
+	// versions late it is a clone (§3.5.9).
+	if r := e.call("app", "test.op", old, map[string]any{"password": pw, "item_id": testID}); r.Code != "credential_frozen" {
+		t.Fatalf("old blob: %q", r.Code)
+	}
 }
 
 // §3.5.3: a lost response never loses the credential: the latest blob is
@@ -505,8 +512,9 @@ func TestDelete(t *testing.T) {
 	e.create()
 }
 
-// §11.11.5: recover only from a recovering app, against the vault's copy
-// or (backup off) the member's own blob; no credential → refused.
+// §11.11.5: recover only from a recovering app, against the vault's copy;
+// no credential → refused. The recovered app becomes the holder: the old
+// app's copy is dead and, presented, a clone (§3.5.9).
 func TestRecover(t *testing.T) {
 	e := newEnv(t)
 	if r := e.call("recovering-app", "credential.recover", "", map[string]any{"password": pw}); r.Code != "credential_required" {
@@ -529,24 +537,74 @@ func TestRecover(t *testing.T) {
 	if got == blob || len(e.h.Completed) != 1 {
 		t.Fatal("recover did not rotate or complete")
 	}
-	if r := e.unlock(blob, pw); r.Code != "stale_credential" {
-		t.Fatalf("lost device's copy still usable: %q", r.Code)
+	if e.f.Holder() != "dev-recovering" || e.f.PoolSizeOf("dev-app") != 0 {
+		t.Fatal("the recovered app does not hold the credential alone")
+	}
+	e.pools["app"] = nil // its UTKs went with it
+	if r := e.unlock(blob, pw); r.Code != "credential_frozen" || len(e.h.Alarms) != 1 {
+		t.Fatalf("lost device's copy: %q %v", r.Code, e.h.Alarms)
 	}
 }
 
+// §11.11.5, §3.5.6 (0.9.0): with backup off the vault keeps no copy, so a
+// recovery cannot restore the credential (credential_lost); the
+// recovering app may reset it: the old credential and its critical items
+// are destroyed, a new one is created, the app becomes the holder. A
+// member-supplied blob is no longer accepted.
 func TestRecoverBackupOff(t *testing.T) {
 	e := newEnv(t)
 	e.h.Set.NoBackup = true
 	blob := e.create()
-	e.ok(e.raw("app", "credential.ack", `{"version":1}`))
-	if r := e.call("recovering-app", "credential.recover", "", map[string]any{"password": pw}); r.Code != "credential_required" {
-		t.Fatalf("backup off without a supplied blob: %q", r.Code)
+	if r := e.call("recovering-app", "credential.reset", "", map[string]any{"password": "a new password"}); r.Code != "exists" {
+		t.Fatalf("reset while the vault keeps the blob: %q", r.Code)
 	}
-	e.ok(e.call("recovering-app", "credential.recover", blob, map[string]any{"password": pw}))
-	if len(e.h.Completed) != 1 {
-		t.Fatal("not completed")
+	if r := e.call("app", "credential.reset", "", map[string]any{"password": "a new password"}); r.Code != "forbidden" {
+		t.Fatalf("reset by the app: %q", r.Code)
+	}
+	e.ok(e.raw("app", "credential.ack", `{"version":1}`))
+	if r := e.call("recovering-app", "credential.recover", "", map[string]any{"password": pw}); r.Code != "credential_lost" {
+		t.Fatalf("backup off: %q", r.Code)
+	}
+	if r := e.call("recovering-app", "credential.recover", blob, map[string]any{"password": pw}); r.Code != "credential_lost" {
+		t.Fatalf("a supplied blob is ignored: %q", r.Code)
+	}
+	if len(e.h.Completed) != 0 {
+		t.Fatal("completed")
+	}
+	del := &delObs{}
+	e.f.AddDeleteObserver(del)
+	k1, _ := e.ok(e.raw("app", "credential.version", `{}`)).Obj(t).String("key")
+	r := e.ok(e.call("recovering-app", "credential.reset", "", map[string]any{"password": "a new password"}))
+	if v, _ := r.Obj(t).Uint("version", 1, 9); v != 1 || del.n != 1 || len(e.h.Completed) != 1 || e.f.Holder() != "dev-recovering" {
+		t.Fatalf("reset: version %d, deleted %d, completed %v, holder %s", v, del.n, e.h.Completed, e.f.Holder())
+	}
+	if k2, _ := r.Obj(t).String("key"); k2 == k1 {
+		t.Fatal("same credential key after a reset")
+	}
+	if !e.h.HasActivity("credential.reset") {
+		t.Fatal("not recorded")
+	}
+	nb := blobOf(t, r)
+	if r := e.call("recovering-app", "credential.unlock", nb, map[string]any{"password": "a new password"}); r.Code != "forbidden" {
+		t.Fatalf("still recovering in the fake host: %q", r.Code)
+	}
+	// Its UTKs survived the reset (a spent one opens nothing, a kept one
+	// opens the new credential once the app is ordinary).
+	if e.f.PoolSizeOf("dev-recovering") == 0 {
+		t.Fatal("pool lost")
+	}
+	u := e.take("recovering-app")
+	e.f.mu.Lock()
+	seed := e.f.st.Pools["dev-recovering"][0].Seed
+	e.f.mu.Unlock()
+	if bytes.Equal(seed, make([]byte, len(seed))) || u.id == "" {
+		t.Fatal("UTK seeds wiped by the reset")
 	}
 }
+
+type delObs struct{ n int }
+
+func (d *delObs) CredentialDeleted(*vault.Session) { d.n++ }
 
 func TestRecoverBackoff(t *testing.T) {
 	e := newEnv(t)
@@ -610,6 +668,7 @@ func TestBlobLayers(t *testing.T) {
 func FuzzParseEnvelope(f *testing.F) {
 	f.Add("credential.unlock", []byte(`{"credential":"AAAA","utk_id":"0011223344556677","sealed":"AAAA"}`))
 	f.Add("credential.recover", []byte(`{"utk_id":"0011223344556677","sealed":"AAAA"}`))
+	f.Add("device.transfer.approve", []byte(`{"transfer_id":"`+testID+`","credential":"AAAA","utk_id":"0011223344556677","sealed":"AAAA"}`))
 	f.Fuzz(func(t *testing.T, typ string, b []byte) {
 		e, err := ParseEnvelope(typ, b)
 		if err != nil {
@@ -624,6 +683,7 @@ func FuzzParseEnvelope(f *testing.F) {
 func FuzzParsePayload(f *testing.F) {
 	f.Add("credential.unlock", []byte(`{"password":"`+pw+`"}`))
 	f.Add("credential.password.change", []byte(`{"password":"`+pw+`","new_password":"`+pw+`"}`))
+	f.Add("device.transfer.approve", []byte(`{"password":"`+pw+`","pin":"246810"}`))
 	f.Fuzz(func(t *testing.T, typ string, b []byte) {
 		p, err := ParsePayload(typ, b)
 		if err != nil {
@@ -631,6 +691,9 @@ func FuzzParsePayload(f *testing.F) {
 		}
 		if n := needs[typ]; n&needPassword != 0 && (len(p.Password) < MinPassword || len(p.Password) > MaxPassword) {
 			t.Fatal("bad password accepted")
+		}
+		if n := needs[typ]; n&needPIN != 0 && !validPIN(string(p.PIN)) {
+			t.Fatal("bad PIN accepted")
 		}
 	})
 }

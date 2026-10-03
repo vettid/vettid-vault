@@ -296,22 +296,72 @@ func (d *Device) CredentialDelete(ctx context.Context, password string) error {
 }
 
 // CredentialRecover authenticates a recovering app with the credential
-// password (§11.11.5) against the vault's copy, or against blob (the
-// member's own copy) when the vault keeps none, and keeps the credential
-// handed over; afterwards the app is an ordinary owner app.
-func (d *Device) CredentialRecover(ctx context.Context, password string, blob []byte) error {
-	if blob != nil {
-		d.mu.Lock()
-		d.st.Credential = &CredentialCopy{Blob: blob}
-		d.mu.Unlock()
-	}
-	if _, _, _, err := d.sealedOp(ctx, "credential.recover", blob != nil, map[string]any{"password": password}, false); err != nil {
+// password (§11.11.5) against the vault's copy of the latest blob and
+// keeps the credential handed over; afterwards the app is the vault's one
+// app. With backup off the vault holds no copy: credential_lost
+// (CredentialReset).
+func (d *Device) CredentialRecover(ctx context.Context, password string) error {
+	if _, _, _, err := d.sealedOp(ctx, "credential.recover", false, map[string]any{"password": password}, false); err != nil {
 		return err
 	}
 	d.mu.Lock()
 	d.st.Recovery = nil
 	d.mu.Unlock()
 	return nil
+}
+
+// CredentialReset ends a recovery when the credential is lost (backup off,
+// §11.11.5): a new credential under password; the old one and every
+// critical item are destroyed.
+func (d *Device) CredentialReset(ctx context.Context, password string) error {
+	if _, _, _, err := d.sealedOp(ctx, "credential.reset", false, map[string]any{"password": password}, false); err != nil {
+		return err
+	}
+	d.mu.Lock()
+	d.st.Recovery = nil
+	d.mu.Unlock()
+	return nil
+}
+
+// CredentialAlarmConfirm answers a clone alarm (§3.5.9): mine is "that
+// was me". It returns the alarm's new state (rotation_required).
+func (d *Device) CredentialAlarmConfirm(ctx context.Context, alarmID string, mine bool) (string, error) {
+	o, err := d.Op(ctx, "credential.alarm.confirm", map[string]any{"alarm_id": alarmID, "mine": mine})
+	if err != nil {
+		return "", err
+	}
+	return o.String("state")
+}
+
+// TransferCreate opens a direct transfer to a new phone (§6.7.1) and
+// returns its id and the QR link the new app scans.
+func (d *Device) TransferCreate(ctx context.Context) (id, link string, err error) {
+	o, err := d.Op(ctx, "device.transfer.create", nil)
+	if err != nil {
+		return "", "", err
+	}
+	if id, err = o.String("transfer_id"); err != nil {
+		return "", "", ErrProtocol
+	}
+	if link, err = o.String("link"); err != nil {
+		return "", "", ErrProtocol
+	}
+	return id, link, nil
+}
+
+// TransferApprove approves the new app with the PIN and the credential
+// password (§6.7.1). The vault rotates the CEK: this app's copy is dead
+// and the new app fetches the credential.
+func (d *Device) TransferApprove(ctx context.Context, id, pin, password string) error {
+	_, _, _, err := d.credOpWith(ctx, "device.transfer.approve", map[string]any{"transfer_id": id},
+		func() map[string]any { return map[string]any{"password": password, "pin": pin} }, false)
+	return err
+}
+
+// TransferReject ends a transfer (§6.7.1).
+func (d *Device) TransferReject(ctx context.Context, id string) error {
+	_, err := d.Op(ctx, "device.transfer.reject", map[string]any{"transfer_id": id})
+	return err
 }
 
 // CredentialBlob returns this app's copy of the blob (the member's own

@@ -93,6 +93,7 @@ type AndroidOptions struct {
 	Origin           int64
 	Unlocked         bool
 	BootState        int64
+	BootKey          []byte // RootOfTrust.verifiedBootKey (default 32 zero bytes)
 	NoRootOfTrust    bool
 	Package          string
 	Signers          [][]byte
@@ -155,8 +156,12 @@ func keyDescription(o AndroidOptions) []byte {
 		dExp(503, dNull()),
 		dExp(702, dInt(o.Origin)),
 	}
+	bootKey := o.BootKey
+	if bootKey == nil {
+		bootKey = make([]byte, 32)
+	}
 	if !o.NoRootOfTrust {
-		props = append(props, dExp(704, dSeq(dOct(make([]byte, 32)), dBool(!o.Unlocked), dEnum(o.BootState), dOct(make([]byte, 32)))))
+		props = append(props, dExp(704, dSeq(dOct(bootKey), dBool(!o.Unlocked), dEnum(o.BootState), dOct(make([]byte, 32)))))
 	}
 	props = append(props, dExp(705, dInt(140000)), dExp(706, dInt(202609)))
 	sw := [][]byte{dExp(701, dInt(1790000000000))}
@@ -326,6 +331,10 @@ func IOSAssert(key *ecdsa.PrivateKey, appID string, counter uint32, cdh [32]byte
 	return e.Bytes()
 }
 
+// TestGrapheneOSBootKey is the TEST-ONLY verified boot key fingerprint the
+// test policy allows with verifiedBootState SelfSigned.
+var TestGrapheneOSBootKey = sha256.Sum256([]byte("vettid test grapheneos verified boot key"))
+
 // Policy returns the TEST-ONLY device attestation policy: the test Android
 // and Apple roots and the test app identity.
 func Policy() *devattest.Policy {
@@ -333,8 +342,10 @@ func Policy() *devattest.Policy {
 		AndroidRoots:   []*x509.Certificate{TestAndroidCA().Root.Cert},
 		AndroidPackage: AndroidPackage,
 		AndroidSigners: [][]byte{AndroidSigner[:]},
-		IOSRoots:       nitro.Pool(TestAppleCA().Root.Cert),
-		IOSAppID:       IOSAppID,
+		// The test allowlist for SelfSigned boot (GrapheneOS, §11.7).
+		AndroidSelfSignedBootKeys: [][]byte{TestGrapheneOSBootKey[:]},
+		IOSRoots:                  nitro.Pool(TestAppleCA().Root.Cert),
+		IOSAppID:                  IOSAppID,
 	}
 }
 

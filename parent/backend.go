@@ -78,6 +78,12 @@ type InstanceRow struct {
 	Load        int
 }
 
+// EventAlarmCredentialClone is the vault's content-free host alarm of a
+// Protean Credential clone (VAULT-MESSAGING §3.5.9, §11.5): the parent
+// records it on the vault row (alarm, alarm_pending) and the member API
+// emails the member. It is the only alarm kind.
+const EventAlarmCredentialClone = "alarm.credential_clone"
+
 // Lifecycle is a lifecycle event for the vault table (§11.5).
 type Lifecycle struct {
 	Event        string
@@ -115,7 +121,9 @@ type Tables interface {
 	// not this instance's.
 	RenewLease(ctx context.Context, vaultID, instanceID string, expires int64) error
 	// Lifecycle writes an event (and releases the lease on locked and
-	// deleted, if it is this instance's or absent).
+	// deleted, if it is this instance's or absent). An alarm is written
+	// whoever holds the lease: alarm {kind, alarm_id, at} and
+	// alarm_pending true.
 	Lifecycle(ctx context.Context, ev Lifecycle, instanceID string, now time.Time) error
 	// ReleaseLease removes this instance's lease and marks the vault
 	// locked (a vault that stopped without a lifecycle "locked").

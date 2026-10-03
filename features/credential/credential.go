@@ -29,6 +29,7 @@ import (
 
 	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault"
+	"github.com/vettid/vettid-vault/vms/altchan"
 	"github.com/vettid/vettid-vault/vms/credwire"
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/suite"
@@ -67,6 +68,29 @@ type state struct {
 	NotBefore time.Time `json:"not_before,omitempty"`
 	// Pools are the LTKs per app device (§3.5.4).
 	Pools map[string][]LTK `json:"pools,omitempty"`
+	// Holder is the one app that holds the credential (§3.5.9, 0.9.0).
+	Holder string `json:"holder,omitempty"`
+	// Alarm is the open clone alarm (§3.5.9).
+	Alarm *Alarm `json:"alarm,omitempty"`
+}
+
+// Alarm states (§3.5.9).
+const (
+	AlarmFrozen           = "frozen"
+	AlarmRotationRequired = "rotation_required"
+	AlarmResolved         = "resolved"
+)
+
+// Alarm is a clone alarm: a credential presented by another device, or a
+// stale copy the holder's own retry does not explain (§3.5.9).
+type Alarm struct {
+	ID        string    `json:"id"`
+	Kind      string    `json:"kind"`
+	State     string    `json:"state"`
+	At        time.Time `json:"at"`
+	Presenter string    `json:"presenter"`
+	Version   uint64    `json:"version"`
+	Mine      *bool     `json:"mine,omitempty"`
 }
 
 // Options configure the feature.
@@ -168,6 +192,8 @@ func (f *Feature) Types() []vault.TypeSpec {
 		r("credential.utk.get", apps), r("credential.create", apps), r("credential.get", apps), r("credential.ack", apps),
 		r("credential.version", owners), r("credential.unlock", apps), r("credential.lock", apps), r("credential.rotate", apps),
 		r("credential.password.change", apps), r("credential.delete", apps), r("credential.recover", apps),
+		r("credential.reset", apps), r("credential.alarm.confirm", apps),
+		r("device.transfer.create", apps), r("device.transfer.approve", apps), r("device.transfer.reject", apps),
 	}
 }
 
@@ -230,7 +256,7 @@ func (f *Feature) endWindow() {
 func (f *Feature) UseKey(now time.Time, ttl time.Duration) (ed25519.PrivateKey, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.key == nil || !now.Before(f.keyExp) {
+	if f.key == nil || !now.Before(f.keyExp) || f.st.Alarm != nil {
 		f.endWindow()
 		return nil, false
 	}
@@ -260,6 +286,10 @@ var (
 	errForbidden    = vault.NewError("forbidden", "")
 	errUTK          = vault.NewError("utk_invalid", "")
 	errCredRequired = vault.NewError("credential_required", "")
+	errFrozen       = vault.NewError("credential_frozen", "")
+	errRotation     = vault.NewError("rotation_required", "")
+	errLost         = vault.NewError("credential_lost", "")
+	errTransferring = vault.NewError("transfer_pending", "")
 	b64             = base64.StdEncoding
 )
 
@@ -277,6 +307,7 @@ const (
 	needRequest
 	optItem
 	needHash
+	needPIN
 )
 
 // What another feature's credential operation carries in its sealed
@@ -302,7 +333,12 @@ var needs = map[string]int{
 	"credential.rotate":          needBlob | needSealed | needPassword,
 	"credential.password.change": needBlob | needSealed | needPassword | needNewPassword,
 	"credential.delete":          needBlob | needSealed | needPassword,
-	"credential.recover":         optBlob | needSealed | needPassword,
+	"credential.recover":         needSealed | needPassword,
+	"credential.reset":           needSealed | needPassword,
+	"credential.alarm.confirm":   0,
+	"device.transfer.create":     0,
+	"device.transfer.approve":    needBlob | needSealed | needPassword | needPIN,
+	"device.transfer.reject":     0,
 }
 
 // opNeed is what every operation of another feature carries.
@@ -388,6 +424,8 @@ type Payload struct {
 	// RequestID and PayloadHash bind a critical-secret use (§10.13).
 	RequestID   string
 	PayloadHash []byte
+	// PIN is the vault PIN of a transfer's approval (§6.7.1).
+	PIN []byte
 }
 
 // Wipe zeroizes the payload's secrets.
@@ -398,6 +436,7 @@ func (p *Payload) Wipe() {
 	suite.Wipe(p.Password)
 	suite.Wipe(p.NewPassword)
 	suite.Wipe(p.Item)
+	suite.Wipe(p.PIN)
 }
 
 func password(o strictjson.Object, k string) ([]byte, error) {
@@ -467,6 +506,13 @@ func parsePayload(n int, pt []byte) (*Payload, error) {
 			return fail()
 		}
 	}
+	if n&needPIN != 0 {
+		pin, err := o.String("pin")
+		if err != nil || !validPIN(pin) {
+			return fail()
+		}
+		p.PIN = []byte(pin)
+	}
 	if n&needReply != 0 {
 		ek, err := o.Base64("reply_key", suite.EKSize)
 		if err != nil {
@@ -485,11 +531,17 @@ func (f *Feature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner
 	defer f.mu.Unlock()
 	f.pruneUTKs(s.Now())
 	from := s.From()
-	if from.Recovering && in.Type != "credential.recover" && in.Type != "credential.utk.get" {
+	if from.Recovering && in.Type != "credential.recover" && in.Type != "credential.reset" && in.Type != "credential.utk.get" {
+		return nil, errForbidden
+	}
+	if !from.Recovering && (in.Type == "credential.recover" || in.Type == "credential.reset") {
 		return nil, errForbidden
 	}
 	e, err := ParseEnvelope(in.Type, in.Body)
 	if err != nil {
+		return nil, err
+	}
+	if err := f.gate(s, in.Type); err != nil {
 		return nil, err
 	}
 	switch in.Type {
@@ -517,10 +569,20 @@ func (f *Feature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner
 		if f.st.CEKSeed != nil {
 			b.Uint("version", f.st.Version).Base64("key", f.st.Key).String("updated_at", envelope.FormatTS(f.st.UpdatedAt))
 		}
+		if a := f.st.Alarm; a != nil {
+			b.Raw("alarm", strictjson.NewBuilder().String("alarm_id", a.ID).String("state", a.State).
+				String("at", envelope.FormatTS(a.At)).Bytes())
+		}
 		return b.Bytes(), nil
 	case "credential.lock":
 		f.endWindow()
 		return nil, nil
+	case "credential.alarm.confirm":
+		return f.confirmAlarm(s, in.Body)
+	case "device.transfer.create":
+		return f.transferCreate(s)
+	case "device.transfer.reject":
+		return f.transferReject(s, in.Body)
 	}
 	// Everything else spends a UTK first (§3.5.4).
 	p, err := f.spend(s, in, e)
@@ -532,7 +594,11 @@ func (f *Feature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner
 	case "credential.create":
 		return f.create(s, p)
 	case "credential.recover":
-		return f.recover(s, e, p)
+		return f.recover(s, p)
+	case "credential.reset":
+		return f.reset(s, p)
+	case "device.transfer.approve":
+		return f.transferApprove(s, in.Body, e, p)
 	}
 	// The rest opens the credential with the password (§3.5.3).
 	cek, inner, err := f.open(s, e.Blob, p.Password)
@@ -551,14 +617,7 @@ func (f *Feature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner
 			b.String("expires_at", envelope.FormatTS(f.keyExp))
 		})
 	case "credential.delete":
-		f.endWindow()
-		f.wipeKeys()
-		f.st = state{Pools: map[string][]LTK{}}
-		s.SyncEvent("credential.deleted", nil)
-		s.Record(vault.Activity{Kind: "credential.deleted", Audit: true})
-		for _, o := range f.delObs {
-			o.CredentialDeleted(s) // the critical items go with it (§10.7)
-		}
+		f.deleteAll(s)
 		return nil, nil
 	case "credential.password.change":
 		inner.PasswordChangedAt = s.Now().UTC().Truncate(time.Millisecond)
@@ -572,6 +631,70 @@ func (f *Feature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner
 		return f.rotate(s, inner, p)
 	}
 	return nil, vault.NewError("unsupported_type", "")
+}
+
+// deleteAll destroys the credential, its keys, pools and alarm, and the
+// critical items with it (§3.5.5, §10.7).
+func (f *Feature) deleteAll(s *vault.Session) {
+	f.endWindow()
+	f.wipeKeys()
+	f.st = state{Pools: map[string][]LTK{}}
+	s.SyncEvent("credential.deleted", nil)
+	s.Record(vault.Activity{Kind: "credential.deleted", Audit: true})
+	for _, o := range f.delObs {
+		o.CredentialDeleted(s) // the critical items go with it (§10.7)
+	}
+}
+
+// holderOnly are the types only the holder may send (§3.5.9). A blob
+// presented by another app is a clone (open); the rest is forbidden.
+var holderOnly = map[string]bool{
+	"credential.get": true, "credential.ack": true, "credential.alarm.confirm": true,
+	"device.transfer.create": true, "device.transfer.reject": true,
+}
+
+// allowedFrozen are the types a frozen credential still accepts; in state
+// rotation_required also allowedRotation (§3.5.9).
+var (
+	allowedFrozen   = map[string]bool{"credential.utk.get": true, "credential.version": true, "credential.lock": true, "credential.alarm.confirm": true, "credential.recover": true, "credential.reset": true}
+	allowedRotation = map[string]bool{"credential.get": true, "credential.ack": true, "credential.rotate": true}
+)
+
+// gate applies the holder, transfer and alarm rules of §3.5.9 and §6.7.1
+// before a type runs.
+func (f *Feature) gate(s *vault.Session, typ string) error {
+	from := s.From().ID
+	if holderOnly[typ] && f.st.Holder != "" && from != f.st.Holder {
+		return errForbidden
+	}
+	if typ == "credential.alarm.confirm" {
+		return nil
+	}
+	if a := f.st.Alarm; a != nil && !allowedFrozen[typ] {
+		if a.State == AlarmFrozen || !allowedRotation[typ] {
+			return f.freezeErr()
+		}
+	}
+	if t, ok := s.Transfer(); ok && t.State == vault.TransferApproved && from == t.OldDevice &&
+		typ != "credential.utk.get" && typ != "credential.version" && typ != "credential.lock" && typ != "device.transfer.reject" {
+		return errTransferring // the old app approved; it is about to be removed (§6.7.1)
+	}
+	return nil
+}
+
+func (f *Feature) freezeErr() error {
+	if f.st.Alarm != nil && f.st.Alarm.State == AlarmRotationRequired {
+		return errRotation
+	}
+	return errFrozen
+}
+
+// Frozen reports whether a clone alarm holds credential operations
+// (§3.5.9).
+func (f *Feature) Frozen() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.st.Alarm != nil
 }
 
 // --- UTKs (§3.5.4) ---
@@ -679,12 +802,23 @@ func (f *Feature) open(s *vault.Session, blob, pw []byte) (*suite.PrivateKey, *I
 	if f.st.CEKSeed == nil {
 		return nil, nil, errCredRequired
 	}
-	if now.Before(f.st.NotBefore) {
-		return nil, nil, errBackoff
+	from := s.From().ID
+	if f.st.Holder != "" && from != f.st.Holder && !s.From().Recovering {
+		return nil, nil, f.clone(s, blob) // a blob from an app that is not the holder (§3.5.9)
 	}
 	h := sha256.Sum256(blob)
 	if !suite.Equal(h[:], f.st.Hash) {
-		return nil, nil, errStale
+		hd, err := ParseHeader(blob)
+		if err == nil && hd.Version+1 == f.st.Version && !f.st.Acked {
+			// The holder's own retry: it never received, or never kept,
+			// the current version (§3.5.3). It fetches it with
+			// credential.get.
+			return nil, nil, errStale
+		}
+		return nil, nil, f.clone(s, blob)
+	}
+	if now.Before(f.st.NotBefore) {
+		return nil, nil, errBackoff
 	}
 	cek, err := suite.NewPrivateKey(f.st.CEKSeed)
 	if err != nil {
@@ -712,7 +846,201 @@ func (f *Feature) open(s *vault.Session, blob, pw []byte) (*suite.PrivateKey, *I
 		return nil, nil, errStale
 	}
 	f.st.Failures, f.st.NotBefore = 0, time.Time{}
+	if f.st.Holder == "" && !s.From().Recovering {
+		f.st.Holder = from // a credential of an earlier draft: its first user holds it
+	}
 	return cek, inner, nil
+}
+
+// clone opens a clone alarm (§3.5.9): the presentation is refused, the
+// holder alerted, the member's host told (it emails them), and credential
+// operations frozen until the holder confirms and rotates. A presentation
+// while an alarm is open is refused and audited only.
+func (f *Feature) clone(s *vault.Session, blob []byte) error {
+	presenter := s.From().ID
+	var version uint64
+	if hd, err := ParseHeader(blob); err == nil {
+		version = hd.Version
+	}
+	if a := f.st.Alarm; a != nil {
+		s.Record(vault.Activity{Kind: "credential.clone_detected", DeviceID: presenter, Ref: a.ID, Audit: true})
+		return f.freezeErr()
+	}
+	now := s.Now().UTC().Truncate(time.Millisecond)
+	a := &Alarm{ID: s.NewID(), Kind: "clone", State: AlarmFrozen, At: now, Presenter: presenter, Version: version}
+	f.st.Alarm = a
+	f.endWindow()
+	if t, ok := s.Transfer(); ok {
+		_ = s.EndTransfer(t.ID, "alarm") // a transfer never completes under an alarm
+	}
+	who := "other"
+	if presenter == f.st.Holder || f.st.Holder == "" {
+		who = "holder"
+	}
+	body := strictjson.NewBuilder().String("alarm_id", a.ID).String("kind", a.Kind).String("state", a.State).
+		String("at", envelope.FormatTS(a.At)).String("presenter", who).Uint("version", version).Bytes()
+	if f.st.Holder != "" {
+		_ = s.Send(f.st.Holder, "credential.alarm", body, vault.SendOptions{})
+	}
+	f.alarmEvent(s, a)
+	s.Record(vault.Activity{Kind: "credential.clone_detected", DeviceID: presenter, Ref: a.ID, Audit: true})
+	s.Record(vault.Activity{Kind: "credential.alarm", Ref: a.ID, Feed: true, Priority: "urgent"})
+	s.ReportAlarm(vault.AlarmCredentialClone)
+	return errFrozen
+}
+
+// alarmEvent tells the owner's devices of an alarm's state (§10.1).
+func (f *Feature) alarmEvent(s *vault.Session, a *Alarm) {
+	s.NotifyAllDevices("sync.event", strictjson.NewBuilder().String("kind", "credential.alarm").String("alarm_id", a.ID).
+		String("state", a.State).Bytes())
+}
+
+// confirmAlarm is the holder's answer to an alarm: "that was me" or "not
+// me"; either way the credential must be rotated next (§3.5.9).
+func (f *Feature) confirmAlarm(s *vault.Session, body []byte) (json.RawMessage, error) {
+	o, err := strictjson.ParseObject(body)
+	if err != nil {
+		return nil, errBad
+	}
+	id, err := o.String("alarm_id")
+	if err != nil || !envelope.ValidULID(id) {
+		return nil, errBad
+	}
+	mine, err := o.Bool("mine")
+	if err != nil {
+		return nil, errBad
+	}
+	a := f.st.Alarm
+	if a == nil || a.ID != id {
+		return nil, errNotFound
+	}
+	if a.State == AlarmFrozen {
+		a.State, a.Mine = AlarmRotationRequired, &mine
+		ref := "not_mine"
+		if mine {
+			ref = "mine"
+		}
+		s.Record(vault.Activity{Kind: "credential.alarm.confirmed", Ref: a.ID + ":" + ref, Audit: true})
+		f.alarmEvent(s, a)
+	}
+	return strictjson.NewBuilder().String("state", a.State).Bytes(), nil
+}
+
+// resolveAlarm closes the alarm after the forced rotation (§3.5.9).
+func (f *Feature) resolveAlarm(s *vault.Session) {
+	a := f.st.Alarm
+	if a == nil || a.State != AlarmRotationRequired {
+		return
+	}
+	f.st.Alarm = nil
+	a.State = AlarmResolved
+	s.Record(vault.Activity{Kind: "credential.alarm.resolved", Ref: a.ID, Audit: true})
+	f.alarmEvent(s, a)
+}
+
+// --- one app (§6.7.1, §11.11.5) ---
+
+func validPIN(p string) bool { return altchan.ValidPIN(p) }
+
+func (f *Feature) transferCreate(s *vault.Session) (json.RawMessage, error) {
+	if f.st.CEKSeed == nil {
+		return nil, errCredRequired
+	}
+	id, link, exp, err := s.CreateTransfer()
+	if err != nil {
+		return nil, err
+	}
+	return strictjson.NewBuilder().String("transfer_id", id).String("link", link).
+		String("exp", exp.UTC().Format(time.RFC3339)).Bytes(), nil
+}
+
+func (f *Feature) transferReject(s *vault.Session, body []byte) (json.RawMessage, error) {
+	o, err := strictjson.ParseObject(body)
+	if err != nil {
+		return nil, errBad
+	}
+	id, err := o.String("transfer_id")
+	if err != nil || !envelope.ValidULID(id) {
+		return nil, errBad
+	}
+	if t, ok := s.Transfer(); !ok || t.ID != id || t.OldDevice != s.From().ID {
+		return nil, errNotFound
+	}
+	if err := s.EndTransfer(id, "rejected"); err != nil {
+		return nil, err
+	}
+	return nil, nil
+}
+
+// transferApprove is the old app's approval (§6.7.1, step 3): the PIN, then
+// the password against the current blob; the CEK rotates (the old app's
+// copy is dead and nobody receives the new blob yet: the new app fetches
+// it after its hs.fin) and the vault answers the new app's hs.init.
+func (f *Feature) transferApprove(s *vault.Session, body []byte, e *Envelope, p *Payload) (json.RawMessage, error) {
+	o, _ := strictjson.ParseObject(body)
+	id, err := o.String("transfer_id")
+	if err != nil || !envelope.ValidULID(id) {
+		return nil, errBad
+	}
+	t, ok := s.Transfer()
+	if !ok || t.ID != id || t.OldDevice != s.From().ID || t.State != vault.TransferOpen || !t.Scanned {
+		return nil, errNotFound
+	}
+	if err := s.VerifyPIN(string(p.PIN)); err != nil {
+		return nil, err
+	}
+	cek, inner, err := f.open(s, e.Blob, p.Password)
+	if err != nil {
+		return nil, err
+	}
+	defer cek.Destroy()
+	defer inner.Wipe()
+	f.endWindow()
+	if _, err := f.rotateCEK(s, inner, p.Password); err != nil {
+		return nil, err
+	}
+	exp, err := s.ApproveTransfer(id)
+	if err != nil {
+		return nil, err
+	}
+	return strictjson.NewBuilder().String("exp", envelope.FormatTS(exp)).Bytes(), nil
+}
+
+// TransferCompleted implements vault.TransferObserver: the new app holds
+// the credential; the old app's UTKs are gone with it (§6.7.1).
+func (f *Feature) TransferCompleted(_ *vault.Session, oldDevice, newDevice string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.dropPool(oldDevice)
+	f.st.Holder = newDevice
+}
+
+// DeviceRemoved implements vault.DeviceRemovedObserver.
+func (f *Feature) DeviceRemoved(_ *vault.Session, id string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.dropPool(id)
+}
+
+func (f *Feature) dropPool(id string) {
+	for _, l := range f.st.Pools[id] {
+		suite.Wipe(l.Seed)
+	}
+	delete(f.st.Pools, id)
+}
+
+// CredentialVersion implements vault.CredentialVersioner.
+func (f *Feature) CredentialVersion() uint64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.st.Version
+}
+
+// Holder returns the device that holds the credential (tests).
+func (f *Feature) Holder() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.st.Holder
 }
 
 // acked records that the app holds the latest blob; without backup the
@@ -810,6 +1138,7 @@ func (f *Feature) create(s *vault.Session, p *Payload) (json.RawMessage, error) 
 	}
 	pub := ed25519.NewKeyFromSeed(ks).Public().(ed25519.PublicKey)
 	f.st.CEKSeed, f.st.Key, f.st.Failures, f.st.NotBefore = seed, pub, 0, time.Time{}
+	f.st.Holder = s.From().ID // the one app holds it (§3.5.9)
 	f.commit(s, blob, 1)
 	s.Record(vault.Activity{Kind: "credential.created", Audit: true})
 	return strictjson.NewBuilder().Base64("credential", blob).Uint("version", 1).Base64("key", pub).
@@ -853,6 +1182,7 @@ func (f *Feature) rotate(s *vault.Session, inner *Inner, p *Payload) (json.RawMe
 	commit()
 	f.st.Key = pub
 	s.Record(vault.Activity{Kind: "credential.rotated", Audit: true, Feed: true})
+	f.resolveAlarm(s) // the forced rotation (§3.5.9)
 	for _, o := range f.rotObs {
 		o.CredentialKeyRotated(s, stmt)
 	}
@@ -860,24 +1190,19 @@ func (f *Feature) rotate(s *vault.Session, inner *Inner, p *Payload) (json.RawMe
 }
 
 // recover is the last step of a recovery (§11.11.5): the recovered app
-// authenticates with the password against the latest blob, the vault's
-// copy or, with backup off, the member's own; the CEK rotates and the new
-// blob is handed over; only then does the app become an ordinary app.
-func (f *Feature) recover(s *vault.Session, e *Envelope, p *Payload) (json.RawMessage, error) {
-	if !s.From().Recovering {
-		return nil, errForbidden
-	}
+// authenticates with the password against the vault's copy of the latest
+// blob; the CEK rotates, the critical items are re-keyed and the new blob
+// is handed over; the app becomes the holder and the one app (the old app
+// is removed by the runtime). Without a kept copy (backup off) the
+// credential is lost: credential_lost.
+func (f *Feature) recover(s *vault.Session, p *Payload) (json.RawMessage, error) {
 	if f.st.CEKSeed == nil {
 		return nil, errCredRequired // no credential, no recovery
 	}
-	blob := e.Blob
-	if blob == nil {
-		blob = f.st.Blob
+	if f.st.Blob == nil {
+		return nil, errLost // backup off: credential.reset or vault.delete (§11.11.5)
 	}
-	if blob == nil {
-		return nil, errCredRequired // backup off: the member supplies the blob
-	}
-	cek, inner, err := f.open(s, blob, p.Password)
+	cek, inner, err := f.open(s, f.st.Blob, p.Password)
 	if err != nil {
 		return nil, err
 	}
@@ -887,6 +1212,7 @@ func (f *Feature) recover(s *vault.Session, e *Envelope, p *Payload) (json.RawMe
 	if err != nil {
 		return nil, err
 	}
+	f.endWindow()
 	out, err := f.respond(s, inner, p.Password, nil)
 	if err != nil {
 		return nil, err
@@ -895,7 +1221,53 @@ func (f *Feature) recover(s *vault.Session, e *Envelope, p *Payload) (json.RawMe
 	if err := s.CompleteRecovery(); err != nil {
 		return nil, errInternal
 	}
+	f.handOver(s)
 	s.Record(vault.Activity{Kind: "credential.recovered", Audit: true, Feed: true})
+	return out, nil
+}
+
+// handOver makes the recovered app the holder; an open alarm must still
+// end with a rotation, now by the new holder (§3.5.9).
+func (f *Feature) handOver(s *vault.Session) {
+	for id := range f.st.Pools {
+		if id != s.From().ID {
+			f.dropPool(id)
+		}
+	}
+	f.st.Holder = s.From().ID
+	if a := f.st.Alarm; a != nil && a.State == AlarmFrozen {
+		a.State = AlarmRotationRequired
+		f.alarmEvent(s, a)
+	}
+}
+
+// reset ends a recovery when the vault keeps no copy of the credential
+// (backup off, §11.11.5; OWNER DECISION): the old credential and every
+// critical item are destroyed and a new credential is created under the
+// given password. It is refused while the vault keeps the latest blob.
+func (f *Feature) reset(s *vault.Session, p *Payload) (json.RawMessage, error) {
+	if f.st.CEKSeed == nil {
+		return nil, errCredRequired
+	}
+	if f.st.Blob != nil {
+		return nil, errExists // use credential.recover with the password
+	}
+	me := s.From().ID
+	keep, ok := f.st.Pools[me]
+	delete(f.st.Pools, me) // the recovering app keeps its UTKs
+	f.deleteAll(s)
+	if ok {
+		f.st.Pools[me] = keep
+	}
+	out, err := f.create(s, p)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.CompleteRecovery(); err != nil {
+		return nil, errInternal
+	}
+	f.handOver(s)
+	s.Record(vault.Activity{Kind: "credential.reset", Audit: true, Feed: true})
 	return out, nil
 }
 
@@ -934,6 +1306,12 @@ func (f *Feature) Operate(s *vault.Session, in *envelope.Inner, need int, check 
 	f.pruneUTKs(s.Now())
 	if s.From().Kind != vault.KindApp || s.From().Recovering {
 		return nil, errForbidden
+	}
+	if f.st.Alarm != nil {
+		return nil, f.freezeErr() // §3.5.9
+	}
+	if t, ok := s.Transfer(); ok && t.State == vault.TransferApproved && s.From().ID == t.OldDevice {
+		return nil, errTransferring
 	}
 	e, err := ParseOpEnvelope(in.Body)
 	if err != nil {

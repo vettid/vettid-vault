@@ -67,32 +67,42 @@ func TestAndroidRejects(t *testing.T) {
 	p := enclavetest.Policy()
 	ch := challenge("enroll")
 	other := sha256.Sum256([]byte("another app"))
+	gos := enclavetest.TestGrapheneOSBootKey[:]
 	for name, tc := range map[string]struct {
 		o   enclavetest.AndroidOptions
 		err error
 	}{
-		"software level":       {enclavetest.AndroidOptions{SoftwareLevel: true}, devattest.ErrSecurityLevel},
-		"old version":          {enclavetest.AndroidOptions{Version: 2}, devattest.ErrSecurityLevel},
-		"wrong challenge":      {enclavetest.AndroidOptions{Challenge: challenge("x")}, devattest.ErrChallenge},
-		"unlocked bootloader":  {enclavetest.AndroidOptions{Unlocked: true}, devattest.ErrRootOfTrust},
-		"self-signed boot":     {enclavetest.AndroidOptions{BootState: 1}, devattest.ErrRootOfTrust},
-		"unverified boot":      {enclavetest.AndroidOptions{BootState: 2}, devattest.ErrRootOfTrust},
-		"no root of trust":     {enclavetest.AndroidOptions{NoRootOfTrust: true}, devattest.ErrRootOfTrust},
-		"other package":        {enclavetest.AndroidOptions{Package: "com.evil.app"}, devattest.ErrApplication},
-		"extra package":        {enclavetest.AndroidOptions{ExtraPackage: "com.evil.app"}, devattest.ErrApplication},
-		"other signer":         {enclavetest.AndroidOptions{Signers: [][]byte{other[:]}}, devattest.ErrApplication},
-		"extra signer":         {enclavetest.AndroidOptions{Signers: [][]byte{enclavetest.AndroidSigner[:], other[:]}}, devattest.ErrApplication},
-		"no signer":            {enclavetest.AndroidOptions{Signers: [][]byte{}}, devattest.ErrApplication},
-		"decrypt purpose":      {enclavetest.AndroidOptions{Purposes: []int64{2, 1}}, devattest.ErrKeyProperties},
-		"agree purpose":        {enclavetest.AndroidOptions{Purposes: []int64{2, 6}}, devattest.ErrKeyProperties},
-		"verify only":          {enclavetest.AndroidOptions{Purposes: []int64{3}}, devattest.ErrKeyProperties},
-		"rsa":                  {enclavetest.AndroidOptions{Algorithm: 1}, devattest.ErrKeyProperties},
-		"p-384 curve":          {enclavetest.AndroidOptions{Curve: 2}, devattest.ErrKeyProperties},
-		"imported key":         {enclavetest.AndroidOptions{Origin: 2}, devattest.ErrKeyProperties},
-		"software-only props":  {enclavetest.AndroidOptions{SoftwarePurposes: true}, devattest.ErrKeyProperties},
-		"app id in hw is fine": {enclavetest.AndroidOptions{AppIDInHardware: true}, nil},
-		"sign and verify fine": {enclavetest.AndroidOptions{Purposes: []int64{2, 3}}, nil},
-		"TEE level is fine":    {enclavetest.AndroidOptions{AttestSecurity: 1, KeymintSecurity: 1}, nil},
+		"software level":      {enclavetest.AndroidOptions{SoftwareLevel: true}, devattest.ErrSecurityLevel},
+		"old version":         {enclavetest.AndroidOptions{Version: 2}, devattest.ErrSecurityLevel},
+		"wrong challenge":     {enclavetest.AndroidOptions{Challenge: challenge("x")}, devattest.ErrChallenge},
+		"unlocked bootloader": {enclavetest.AndroidOptions{Unlocked: true}, devattest.ErrRootOfTrust},
+		"self-signed boot":    {enclavetest.AndroidOptions{BootState: 1}, devattest.ErrRootOfTrust},
+		"unverified boot":     {enclavetest.AndroidOptions{BootState: 2}, devattest.ErrRootOfTrust},
+		// GrapheneOS (§11.7, 0.9.0): SelfSigned only with a pinned OS key,
+		// still locked; Unverified and Failed never.
+		"grapheneos self-signed":          {enclavetest.AndroidOptions{BootState: 1, BootKey: gos}, nil},
+		"self-signed, other key":          {enclavetest.AndroidOptions{BootState: 1, BootKey: other[:]}, devattest.ErrRootOfTrust},
+		"self-signed, short key":          {enclavetest.AndroidOptions{BootState: 1, BootKey: gos[:31]}, devattest.ErrRootOfTrust},
+		"grapheneos key, unlocked":        {enclavetest.AndroidOptions{BootState: 1, BootKey: gos, Unlocked: true}, devattest.ErrRootOfTrust},
+		"grapheneos key, unverified boot": {enclavetest.AndroidOptions{BootState: 2, BootKey: gos}, devattest.ErrRootOfTrust},
+		"grapheneos key, failed boot":     {enclavetest.AndroidOptions{BootState: 3, BootKey: gos}, devattest.ErrRootOfTrust},
+		"verified with any key is fine":   {enclavetest.AndroidOptions{BootKey: other[:]}, nil},
+		"no root of trust":                {enclavetest.AndroidOptions{NoRootOfTrust: true}, devattest.ErrRootOfTrust},
+		"other package":                   {enclavetest.AndroidOptions{Package: "com.evil.app"}, devattest.ErrApplication},
+		"extra package":                   {enclavetest.AndroidOptions{ExtraPackage: "com.evil.app"}, devattest.ErrApplication},
+		"other signer":                    {enclavetest.AndroidOptions{Signers: [][]byte{other[:]}}, devattest.ErrApplication},
+		"extra signer":                    {enclavetest.AndroidOptions{Signers: [][]byte{enclavetest.AndroidSigner[:], other[:]}}, devattest.ErrApplication},
+		"no signer":                       {enclavetest.AndroidOptions{Signers: [][]byte{}}, devattest.ErrApplication},
+		"decrypt purpose":                 {enclavetest.AndroidOptions{Purposes: []int64{2, 1}}, devattest.ErrKeyProperties},
+		"agree purpose":                   {enclavetest.AndroidOptions{Purposes: []int64{2, 6}}, devattest.ErrKeyProperties},
+		"verify only":                     {enclavetest.AndroidOptions{Purposes: []int64{3}}, devattest.ErrKeyProperties},
+		"rsa":                             {enclavetest.AndroidOptions{Algorithm: 1}, devattest.ErrKeyProperties},
+		"p-384 curve":                     {enclavetest.AndroidOptions{Curve: 2}, devattest.ErrKeyProperties},
+		"imported key":                    {enclavetest.AndroidOptions{Origin: 2}, devattest.ErrKeyProperties},
+		"software-only props":             {enclavetest.AndroidOptions{SoftwarePurposes: true}, devattest.ErrKeyProperties},
+		"app id in hw is fine":            {enclavetest.AndroidOptions{AppIDInHardware: true}, nil},
+		"sign and verify fine":            {enclavetest.AndroidOptions{Purposes: []int64{2, 3}}, nil},
+		"TEE level is fine":               {enclavetest.AndroidOptions{AttestSecurity: 1, KeymintSecurity: 1}, nil},
 	} {
 		a := enclavetest.NewAndroidAttester(0x62, tc.o)
 		da, _ := a.Attest(ch)
@@ -119,6 +129,24 @@ func TestAndroidRejects(t *testing.T) {
 	}
 	if _, err := devattest.VerifyAttest(p, da, ch, time.Date(2070, 1, 1, 0, 0, 0, 0, time.UTC), enclavetest.EmptyStatusList(time.Date(2070, 1, 1, 0, 0, 0, 0, time.UTC))); !errors.Is(err, devattest.ErrChain) {
 		t.Errorf("expired: %v", err)
+	}
+	// The release's real allowlist: a real GrapheneOS key (Pixel 8 Pro) is
+	// accepted, and the test policy does not accept it.
+	pixel := pins.GrapheneOSVerifiedBootKeys()[11]
+	ga := enclavetest.NewAndroidAttester(0x64, enclavetest.AndroidOptions{BootState: 1, BootKey: pixel})
+	gda, _ := ga.Attest(ch)
+	if _, err := devattest.VerifyAttest(p, gda, ch, now, fresh()); !errors.Is(err, devattest.ErrRootOfTrust) {
+		t.Errorf("test policy accepted a key it does not pin: %v", err)
+	}
+	rel := *p
+	rel.AndroidSelfSignedBootKeys = pins.GrapheneOSVerifiedBootKeys()
+	if _, err := devattest.VerifyAttest(&rel, gda, ch, now, fresh()); err != nil {
+		t.Errorf("pinned GrapheneOS key refused: %v", err)
+	}
+	none := *p
+	none.AndroidSelfSignedBootKeys = nil
+	if _, err := devattest.VerifyAttest(&none, gda, ch, now, fresh()); !errors.Is(err, devattest.ErrRootOfTrust) {
+		t.Errorf("SelfSigned without an allowlist: %v", err)
 	}
 	disabled := *p
 	disabled.AndroidPackage = ""
@@ -251,11 +279,13 @@ func FuzzStatusList(f *testing.F) {
 }
 
 func FuzzKeyDescription(f *testing.F) {
-	da, _ := enclavetest.NewAndroidAttester(0x61, enclavetest.AndroidOptions{}).Attest(challenge("e"))
-	leaf, _ := x509.ParseCertificate(da.Chain[0])
-	for _, e := range leaf.Extensions {
-		if e.Id.Equal(devattest.OIDKeyDescription) {
-			f.Add(e.Value)
+	for _, o := range []enclavetest.AndroidOptions{{}, {BootState: 1, BootKey: enclavetest.TestGrapheneOSBootKey[:]}} {
+		da, _ := enclavetest.NewAndroidAttester(0x61, o).Attest(challenge("e"))
+		leaf, _ := x509.ParseCertificate(da.Chain[0])
+		for _, e := range leaf.Extensions {
+			if e.Id.Equal(devattest.OIDKeyDescription) {
+				f.Add(e.Value)
+			}
 		}
 	}
 	p := enclavetest.Policy()

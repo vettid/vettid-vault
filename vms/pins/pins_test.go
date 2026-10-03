@@ -75,3 +75,26 @@ func TestRootsValid(t *testing.T) {
 		}
 	}
 }
+
+// The GrapheneOS allowlist: 21 device families from the GrapheneOS
+// attestation compatibility guide, distinct, 32 bytes each.
+func TestGrapheneOSBootKeys(t *testing.T) {
+	keys := GrapheneOSVerifiedBootKeys()
+	if len(keys) != 21 {
+		t.Fatalf("%d keys", len(keys))
+	}
+	seen := map[string]bool{}
+	for _, k := range keys {
+		if len(k) != 32 || seen[string(k)] {
+			t.Fatalf("bad or duplicate key %x", k)
+		}
+		seen[string(k)] = true
+	}
+	if hex.EncodeToString(keys[11]) != "896db2d09d84e1d6bb747002b8a114950b946e5825772a9d48ba7eb01d118c1c" { // Pixel 8 Pro
+		t.Fatal("order or value changed")
+	}
+	keys[0][0] ^= 1 // a copy
+	if GrapheneOSVerifiedBootKeys()[0][0] == keys[0][0] {
+		t.Fatal("not a copy")
+	}
+}

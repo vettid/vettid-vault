@@ -73,7 +73,8 @@ func ReleaseConfig(instanceID, relayURL string) Config {
 		SealAccount: sealAccount, SealRegion: sealRegion, RelayURL: relayURL,
 		DeviceAttest: &devattest.Policy{
 			AndroidRoots: pins.GoogleAttestationRoots(), AndroidPackage: androidPackage, AndroidSigners: androidSigners,
-			IOSRoots: apple, IOSAppID: iosAppID,
+			AndroidSelfSignedBootKeys: pins.GrapheneOSVerifiedBootKeys(),
+			IOSRoots:                  apple, IOSAppID: iosAppID,
 		},
 	}
 }

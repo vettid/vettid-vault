@@ -103,6 +103,12 @@ func (m *Manager) handleInit(ctx context.Context, raw []byte, sender ed25519.Pub
 		m.audit(now, "intro_mismatch", "")
 		return ackAfterFlush
 	}
+	if inv.Kind == KindApp && inv.EnrollIK == nil && !inv.Transfer {
+		// One app per vault (§6.7, 0.9.0): only enrollment, recovery and a
+		// direct transfer bring an app.
+		m.audit(now, "one_app", "")
+		return ackAfterFlush
+	}
 	if inv.EnrollIK != nil {
 		// The first app (§11.3): its identity was bound at enrollment.
 		if !suite.EqualPublic(body.From.IK, inv.EnrollIK) || !suite.EqualPublic(sender, inv.EnrollRelayPK) {
@@ -126,6 +132,9 @@ func (m *Manager) handleInit(ctx context.Context, raw []byte, sender ed25519.Pub
 		}
 		if binding, err = m.opt.DeviceAttest(da, ch, now); err != nil {
 			m.audit(now, "pairing_attestation_failed", "")
+			if inv.Transfer {
+				m.record(Activity{Kind: "device.transfer.attestation_failed", Ref: inv.ID, Audit: true}, now)
+			}
 			return ackAfterFlush
 		}
 	}
@@ -168,6 +177,9 @@ func (m *Manager) handleInit(ctx context.Context, raw []byte, sender ed25519.Pub
 		}
 		m.notifyDevices("connection.request.pending", b.Bytes(), "", now)
 		m.record(Activity{Kind: "connection.request", Ref: id, Feed: true}, now)
+	case inv.Transfer:
+		// §6.7.1: the old app approves with its PIN and password.
+		m.transferScanned(inv.ID, id, profileName(body.Profile), pi.SAS(), exp, now)
 	default:
 		// §6.7: approval first; only apps approve.
 		b := strictjson.NewBuilder().String("pairing_id", inv.ID).String("pending_id", id).
@@ -464,6 +476,13 @@ func (m *Manager) activate(p *Peer, ep *handshake.Epoch, purpose handshake.Purpo
 			String("release", m.opt.Release.PCR0).Uint("release_number", m.opt.Release.Number)
 		if p.Access != nil {
 			pb.String("session_expires_at", envelope.FormatTS(p.Access.Expires))
+		}
+		if m.isTransferPeer(p) {
+			// §6.7.1: the new app takes over in this flush.
+			m.completeTransfer(p, now)
+			m.transferPairedBody(pb)
+			m.sendTo(p, "device.paired", pb.Bytes(), now)
+			break
 		}
 		m.sendTo(p, "device.paired", pb.Bytes(), now)
 		if p.Recovering {

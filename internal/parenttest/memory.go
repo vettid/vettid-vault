@@ -241,6 +241,11 @@ type VaultRow struct {
 	LeaseExpires                              int64
 	SealedRelease, VaultVersion, StateVersion string
 	UpdatedAt                                 string
+	// The host alarm (§11.5): alarm {kind, alarm_id, at}, alarm_pending.
+	AlarmKind, AlarmID string
+	AlarmAt            int64
+	AlarmPending       bool
+	Alarms             int
 }
 
 // SlotRow is a response slot.
@@ -255,6 +260,7 @@ type Tables struct {
 	vaults    map[string]*VaultRow
 	instances map[string]parent.InstanceRow
 	slots     map[string]*SlotRow
+	ids       int
 }
 
 // NewTables returns empty tables.
@@ -413,6 +419,14 @@ func (t *Tables) Lifecycle(_ context.Context, ev parent.Lifecycle, me string, no
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	r := t.vaults[ev.VaultID]
+	if r != nil && ev.Event == parent.EventAlarmCredentialClone {
+		// Not lease-conditioned: an alarm is never lost to a lease race.
+		t.ids++
+		r.AlarmKind, r.AlarmID, r.AlarmAt, r.AlarmPending = "credential_clone", strconv.Itoa(t.ids), now.Unix(), true
+		r.Alarms++
+		r.UpdatedAt = now.UTC().Format(time.RFC3339)
+		return nil
+	}
 	if r == nil || !(r.LeaseInstance == "" || r.LeaseInstance == me) {
 		return nil
 	}

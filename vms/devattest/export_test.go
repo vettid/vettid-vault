@@ -8,7 +8,7 @@ func CheckKeyDescription(p *Policy, b []byte) error {
 		return err
 	}
 	if rot, ok := kd.hw.elems[tagRootOfTrust]; ok {
-		_ = checkRootOfTrust(rot)
+		_ = checkRootOfTrust(p, rot)
 	}
 	for _, l := range []authList{kd.sw, kd.hw} {
 		if aid, ok := l.elems[tagAttestationID]; ok {

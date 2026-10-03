@@ -333,6 +333,7 @@ func (m *Manager) completeRecovery(deviceID string, now time.Time) error {
 		return errNotFound
 	}
 	p.Recovering = false
+	m.replaceAfter = deviceID // the other apps go (§11.11.5), after the handler
 	if m.hdr.Recovery != nil {
 		m.hdr.logRecovery(now, "recovery.completed", m.hdr.Recovery.ID)
 		delete(m.st.Invites, m.hdr.Recovery.ID)
@@ -349,5 +350,5 @@ func (m *Manager) completeRecovery(deviceID string, now time.Time) error {
 }
 
 // recoveryAllowed lists what a recovering device may send (§11.11.5).
-var recoveryAllowed = map[string]bool{"credential.recover": true, "credential.utk.get": true, "vault.status": true,
+var recoveryAllowed = map[string]bool{"credential.recover": true, "credential.reset": true, "credential.utk.get": true, "vault.status": true,
 	"relay.token.issued": true, "relay.token.refresh": true, "relay.address.update": true}

@@ -317,6 +317,7 @@ func (m *Manager) housekeeping(now time.Time) {
 			m.dirty = true
 		}
 	}
+	m.expireTransfer(now)
 	for id, aw := range m.st.Awaiting {
 		if now.Sub(aw.Created) > HandshakeTTL {
 			if r := m.awaiting[id]; r != nil {

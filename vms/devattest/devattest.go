@@ -27,7 +27,7 @@ var (
 	ErrRoot           = errors.New("devattest: chain does not end at a pinned root")
 	ErrChallenge      = errors.New("devattest: challenge mismatch")
 	ErrSecurityLevel  = errors.New("devattest: key not hardware-backed")
-	ErrRootOfTrust    = errors.New("devattest: device not locked or boot not verified")
+	ErrRootOfTrust    = errors.New("devattest: device not locked or boot not verified (or OS key not allowed)")
 	ErrApplication    = errors.New("devattest: application id mismatch")
 	ErrKeyProperties  = errors.New("devattest: key properties not allowed")
 	ErrRevoked        = errors.New("devattest: certificate revoked")
@@ -49,6 +49,11 @@ type Policy struct {
 	AndroidSigners [][]byte
 	// AndroidMinVersion is the lowest attestationVersion accepted.
 	AndroidMinVersion int64
+	// AndroidSelfSignedBootKeys are the verified boot key fingerprints
+	// (RootOfTrust.verifiedBootKey, 32 bytes) for which verifiedBootState
+	// SelfSigned is accepted: the GrapheneOS keys pinned in the release
+	// (pins.GrapheneOSVerifiedBootKeys, §11.7, 0.9.0). Empty: Verified only.
+	AndroidSelfSignedBootKeys [][]byte
 
 	IOSRoots *x509.CertPool
 	// IOSAppID is "<team id>.<bundle id>".

@@ -179,10 +179,10 @@ func TestRecoveryFlow(t *testing.T) {
 	if rr, err := b.dev.Request(ctx, "item.list", []byte(`{}`)); err != nil || rr.ErrorCode() != "forbidden" {
 		t.Fatalf("recovering app listed items: %v %s", err, rr.ErrorCode())
 	}
-	if err := b.dev.CredentialRecover(ctx, "not the password", nil); client.Code(err) != "bad_password" {
+	if err := b.dev.CredentialRecover(ctx, "not the password"); client.Code(err) != "bad_password" {
 		t.Fatalf("wrong password: %v", err)
 	}
-	if err := b.dev.CredentialRecover(ctx, recPW, nil); err != nil {
+	if err := b.dev.CredentialRecover(ctx, recPW); err != nil {
 		t.Fatalf("recover: %v", err)
 	}
 	v, err := b.dev.ItemRevealCritical(ctx, recPW, sid)
@@ -192,13 +192,9 @@ func TestRecoveryFlow(t *testing.T) {
 	if rr, err := b.dev.Request(ctx, "item.list", []byte(`{}`)); err != nil || !rr.OK() {
 		t.Fatal("recovered app still restricted")
 	}
-	// The old app is kept (owner decision), but its copy of the credential
-	// is under a destroyed CEK: refused.
-	if _, err := a.dev.CredentialRaw(ctx, "credential.unlock", takeUTK(t, a.dev), a.dev.CredentialBlob(), map[string]any{"password": recPW}); client.Code(err) != "stale_credential" {
-		t.Fatalf("old copy: %v", err)
-	}
+	// The recovered app replaces the old one (0.9.0): one app.
 	dl, err := b.dev.Request(ctx, "device.list", []byte(`{}`))
-	if err != nil || strings.Count(string(dl.Body()), `"kind":"app"`) != 2 {
+	if err != nil || strings.Count(string(dl.Body()), `"kind":"app"`) != 1 {
 		t.Fatalf("devices: %s", dl.Body())
 	}
 	au, err := b.dev.AuditList(ctx, map[string]any{"kinds": []string{"recovery"}}, false)
@@ -232,48 +228,8 @@ func TestRecoveryExpiry(t *testing.T) {
 	}
 }
 
-// §11.11.5: with credential.backup off the vault keeps no copy, so the
-// recovered app must supply the member's own blob.
-func TestRecoveryBackupOff(t *testing.T) {
-	aw, off := newRecWorld(t)
-	a := aw.newApp("member-rb", enclavetest.NewAndroidAttester(0x67, enclavetest.AndroidOptions{}))
-	if r := aw.enroll(a, acPIN); !r.OK {
-		t.Fatal(r.Code)
-	}
-	ctx := ctxT(t, 120*time.Second)
-	if _, err := a.dev.SettingsSet(ctx, 0, map[string]any{"credential.backup": false}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := a.dev.CredentialUnlock(ctx, recPW); err != nil { // a new version, confirmed
-		t.Fatal(err)
-	}
-	if rr, err := a.dev.Request(ctx, "credential.get", []byte(`{}`)); err != nil || rr.ErrorCode() != "not_found" {
-		t.Fatal("the vault kept a copy with backup off")
-	}
-	own := a.dev.CredentialBlob() // the member's own backup
-	qr := requestRecovery(t, aw, a)
-	off.Store(int64(24*time.Hour + time.Minute))
-	b := aw.newApp(a.guid, enclavetest.NewAndroidAttester(0x68, enclavetest.AndroidOptions{}))
-	b.vid = a.vid
-	if res := register(t, aw, b, qr); !res.OK {
-		t.Fatalf("register: %+v", res)
-	}
-	if r := aw.mustUnlock(b, acPIN, client.UnlockOptions{}, ""); !r.OK {
-		t.Fatalf("unlock: %+v", r)
-	}
-	if err := b.dev.CompleteRecoveryHandshake(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if err := b.dev.CredentialRecover(ctx, recPW, nil); client.Code(err) != "credential_required" {
-		t.Fatalf("recover without a blob: %v", err)
-	}
-	if err := b.dev.CredentialRecover(ctx, recPW, own); err != nil {
-		t.Fatalf("recover with the member's blob: %v", err)
-	}
-	if _, err := b.dev.CredentialUnlock(ctx, recPW); err != nil {
-		t.Fatal(err)
-	}
-}
+// TestRecoveryBackupOffLosesCredential (oneapp_test.go) covers a recovery
+// with credential.backup off (0.9.0).
 
 // §3.5.7: a vault without a credential is restricted (and stays
 // provisional) and cannot be recovered (§11.11.1).

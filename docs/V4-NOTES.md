@@ -633,3 +633,82 @@ features).
   a new PSBT).
 - Push wakes for location requests (§14).
 - vaultctl is not a chain client: it signs PSBTs built elsewhere.
+
+## One app per vault (0.9.0)
+
+Owner decisions of 2026-10-03 (PROTEAN-CREDENTIAL §4, VAULT-MESSAGING
+0.9.0): one app per vault, the clone alarm, the direct transfer, recovery
+replacing the app, backup off meaning loss, and GrapheneOS attestation.
+
+### Layout
+
+- `features/credential`: the holder (`state.Holder`), the clone check in
+  `open` (the holder's own retry of the previous, unconfirmed version is
+  the only stale copy that is not a clone), the alarm (`state.Alarm`:
+  frozen → rotation_required → resolved by `credential.rotate`), the
+  freeze gate (before the UTK is spent, also in `Operate` and `UseKey`),
+  `credential.alarm.confirm`, `credential.reset`, and
+  `device.transfer.create`, `.approve` (PIN and password, CEK rotation),
+  `.reject`. `TransferCompleted` and `DeviceRemoved` move the holder and
+  drop UTK pools.
+- `vault/oneapp.go`: the runtime side, behind the optional
+  `vault.CredentialHost` (the Manager implements it; the feature test host
+  too): the transfer state (`State.Transfer`, `Invite.Transfer`), the
+  PIN check against the DEK under the §11.8 backoff, completion at the new
+  app's `hs.fin` (in `activate`), aborts (reject, expiry in housekeeping,
+  alarm, recovery), the removal of a replaced app after a recovery
+  (deferred to after the handler, outside the credential feature's lock)
+  and the host alarm, reported after the batch's flush.
+- `vault/core.go`, `vault/handshakes.go`: `one_app`; app `hs.init`s other
+  than enrollment, recovery or a transfer are dropped (`drop.one_app`);
+  the app cannot be unlinked; `device.pair.approve`/`.reject` do not
+  touch a transfer.
+- `parent`: the lifecycle event `alarm.credential_clone` is accepted and
+  written as `alarm {kind, alarm_id, at}` + `alarm_pending` on the vault
+  row, not lease-conditioned; the member API's mailer (vettid.org PR)
+  picks it up from the table's stream. The parent makes the ULID itself
+  (no crypto packages linked for it).
+- `vms/devattest`, `vms/pins/grapheneos.go`: `SelfSigned` with a pinned
+  `verifiedBootKey` (21 GrapheneOS device families, from the GrapheneOS
+  attestation compatibility guide, copied 2026-10-03); the release config
+  pins them; the test policy pins a test key.
+- `client`, `vaultctl`: `CredentialReset`, `CredentialAlarmConfirm`,
+  `TransferCreate`/`Approve`/`Reject`; `CredentialRecover` lost its blob
+  argument; `vaultctl transfer ...`, `credential reset|confirm`;
+  `credential recover -value-file` is gone.
+
+### Changed behaviour
+
+- A stale blob presented two or more versions late, or after the ack, is
+  now a clone (`credential_frozen`), not `stale_credential`.
+- `credential.recover` no longer accepts the member's own blob; with the
+  backup off it answers `credential_lost`.
+- A recovery removes the old app(s); 0.4.1 kept them (§11.11.8 rewritten).
+- Transfers survive a lock (the pending handshake is vault state); the
+  10-minute expiry is applied at the next batch.
+
+### OWNER DECISIONS (open, with recommendations)
+
+1. Recovery with the backup off: `credential.reset` (a new credential,
+   the critical items destroyed; the account, 24 h and the PIN suffice)
+   or deleting the vault. Recommended: both (implemented: reset;
+   `vault.delete` is still unimplemented, account cancellation deletes
+   the vault today).
+2. Both "that was me" and "not me" force the rotation. Recommended.
+3. The clone email goes through the host: a content-free lifecycle
+   alarm, recorded by the parent, mailed by a member-API Lambda.
+   Recommended (the vault has no email egress).
+4. Same-version-other-bytes and above-current versions count as clones.
+   Recommended (only the vault makes valid blobs).
+5. The transfer does not re-check the old app's attestation (its session,
+   PIN and password prove it). Recommended.
+6. SelfSigned only for GrapheneOS; no other custom OS. Recommended until
+   requested.
+7. At most 4 alarm emails per vault per day (member API). Recommended.
+
+### Not in this change
+
+- `vault.delete` (the recovering app's other choice with the backup off).
+- Migration of vaults with several apps: none exist outside tests; a
+  state without a holder adopts the first app that presents the current
+  blob.

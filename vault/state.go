@@ -48,6 +48,9 @@ type State struct {
 	AccessRequests map[string]*AccessRequest `json:"access_requests,omitempty"`
 	// Held are requests held for an app's approval (§6.8), by approval id.
 	Held map[string]*HeldRequest `json:"held,omitempty"`
+	// Transfer is the direct transfer to a new phone in progress (§6.7.1),
+	// at most one.
+	Transfer *Transfer `json:"transfer,omitempty"`
 
 	// Release state (§11.10.4): the release the vault is sealed to, a
 	// pending move, and the release last announced to the owner's devices
@@ -241,6 +244,9 @@ type Invite struct {
 	// IntroBy is the introducer's connection id.
 	IntroIK []byte `json:"intro_ik,omitempty"`
 	IntroBy string `json:"intro_by,omitempty"`
+	// Transfer marks the pairing of a direct transfer's new app (§6.7.1),
+	// the only app pairing a vault accepts after enrollment.
+	Transfer bool `json:"transfer,omitempty"`
 }
 
 // InboundHS is an hs.init awaiting the owner's approval.

@@ -153,9 +153,11 @@ func (m *Manager) ProcessBatch(ctx context.Context, c Collector, msgs []Message)
 	}
 	if len(msgs) > 0 || m.dirty {
 		if err := m.persist(ctx, false); err != nil {
+			m.alarms = nil
 			return err
 		}
 	}
+	m.reportAlarms()
 	if h := m.opt.Hooks.AfterFlush; h != nil {
 		if err := h(); err != nil {
 			m.zeroize()
@@ -396,6 +398,7 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 		return disp(eph)
 	}
 	body, herr := te.handler.Handle(ctx, s, in)
+	m.afterHandle(now)
 	if te.spec.Request {
 		var he *HandlerError
 		switch {

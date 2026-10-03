@@ -58,6 +58,8 @@ type Host struct {
 	// The fake vault's identity rotation chain (RotationsFrom).
 	ChainFrom []byte
 	Chain     []json.RawMessage
+	// LastActive is OwnerLastActive's answer (§9.2 presence).
+	LastActive time.Time
 }
 
 // NewHost returns a fake host with no connections.
@@ -151,6 +153,8 @@ func (h *Host) RotationsFrom(ik []byte) ([]json.RawMessage, bool) {
 	}
 	return nil, false
 }
+
+func (h *Host) OwnerLastActive() time.Time { return h.LastActive }
 
 func (h *Host) PairedDevice(id string) (vault.PeerInfo, bool) {
 	p, ok := h.Devices[id]

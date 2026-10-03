@@ -15,7 +15,10 @@ import (
 	"github.com/vettid/vettid-vault/features/intro"
 	"github.com/vettid/vettid-vault/features/items"
 	"github.com/vettid/vettid-vault/features/leash"
+	"github.com/vettid/vettid-vault/features/location"
 	"github.com/vettid/vettid-vault/features/messaging"
+	"github.com/vettid/vettid-vault/features/presence"
+	"github.com/vettid/vettid-vault/features/wallet"
 	"github.com/vettid/vettid-vault/vault"
 )
 
@@ -27,6 +30,9 @@ type Options struct {
 	// ICE issues call ICE servers and credentials (CALLING-SERVICE §5);
 	// nil means none (no calling service yet).
 	ICE calls.ICEIssuer
+	// WalletNetworks are the Bitcoin networks new wallets may use; nil
+	// means mainnet, testnet and signet (§10.18).
+	WalletNetworks []string
 }
 
 // Set is one vault's features, with typed access for tests and tools.
@@ -43,6 +49,9 @@ type Set struct {
 	Critical   *critical.Feature
 	Actions    *actions.Feature
 	Intro      *intro.Feature
+	Wallet     *wallet.Feature
+	Location   *location.Feature
+	Presence   *presence.Feature
 }
 
 // NewSet returns fresh instances of every feature.
@@ -61,6 +70,11 @@ func NewSet(o Options) *Set {
 	it.SetGrants(gr)
 	it.SetAgents(ls)
 	aud := audit.New()
+	// The wallet's recovery phrases are critical items; it owns them
+	// (item.put and item.sensitivity refused) and spends through the
+	// credential (§10.18). No chain source: the app is the chain source.
+	wl := wallet.New(cred, it, wallet.Options{Networks: o.WalletNetworks})
+	it.SetGuard(wl)
 	return &Set{
 		Messaging:  messaging.New(),
 		Credential: cred,
@@ -74,15 +88,19 @@ func NewSet(o Options) *Set {
 		Critical:   critical.New(cred, it), // each use is a credential operation (§3.5.3) on a usable item
 		// Built-in actions run through grants, the audit log and the
 		// credential's unlock window (§10.14).
-		Actions: actions.New(actions.Deps{Grants: gr, Audit: aud, Keys: cred}),
-		Intro:   intro.New(),
+		Actions:  actions.New(actions.Deps{Grants: gr, Audit: aud, Keys: cred, Wallet: wl}),
+		Intro:    intro.New(),
+		Wallet:   wl,
+		Location: location.New(),
+		Presence: presence.New(),
 	}
 }
 
 // List returns the features in registration order. The audit log and the
 // feed come first so that they see activity recorded while the others load.
 func (s *Set) List() []vault.Feature {
-	return []vault.Feature{s.Audit, s.Feed, s.Messaging, s.Credential, s.Items, s.Calls, s.ConnAuth, s.Leash, s.Grants, s.Critical, s.Actions, s.Intro}
+	return []vault.Feature{s.Audit, s.Feed, s.Messaging, s.Credential, s.Items, s.Calls, s.ConnAuth, s.Leash, s.Grants, s.Critical, s.Actions, s.Intro,
+		s.Wallet, s.Location, s.Presence}
 }
 
 // New returns a fresh feature list.
@@ -90,4 +108,10 @@ func New(o Options) []vault.Feature { return NewSet(o).List() }
 
 // Dev returns a fresh feature list with test-strength KDF parameters
 // (development builds and tests only).
-func Dev() []vault.Feature { return New(Options{CredentialKDF: credential.MinKDF}) }
+func Dev() []vault.Feature { return New(DevOptions()) }
+
+// DevOptions are the development and test options: test-strength KDF
+// parameters and regtest wallets besides the release networks.
+func DevOptions() Options {
+	return Options{CredentialKDF: credential.MinKDF, WalletNetworks: []string{"mainnet", "testnet", "signet", "regtest"}}
+}

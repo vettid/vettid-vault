@@ -410,11 +410,12 @@ func TestSharingThroughGrants(t *testing.T) {
 }
 
 // Critical actions: never default-allow or allowlist; approved only by an
-// app within the unlock window; the wallet is not there yet.
+// app within the unlock window; without a wallet configured they are
+// unavailable (the wallet's own tests cover a configured wallet).
 func TestCritical(t *testing.T) {
 	a, b := pair()
 	configure(t, a, b, `{"action_id":"wallet.request-payment","mode":"prompt-each-time"}`)
-	id := invoke(t, a, b, WalletPayment, `{"asset":"BTC","amount_sats":1000,"memo":"lunch"}`)
+	id := invoke(t, a, b, WalletPayment, `{"asset":"BTC","amount_sats":1000,"address":"bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080","memo":"lunch"}`)
 	if p := last(t, a.h, "action.pending"); str(t, p.Body, "sensitivity") != Critical {
 		t.Fatal("not critical")
 	}
@@ -437,9 +438,9 @@ func TestCritical(t *testing.T) {
 	}
 	// Denying a critical action needs neither.
 	a.w.open = false
-	id = invoke(t, a, b, WalletPayment, `{"asset":"BTC","amount_sats":1}`)
+	id = invoke(t, a, b, WalletPayment, `{"asset":"BTC","amount_sats":1,"address":"bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080"}`)
 	a.ok(t, vault.KindDesktop, "action.respond", `{"invocation_id":"`+id+`","approve":false}`)
-	// Normal wallet action: defined but unavailable.
+	// Normal wallet action: unavailable without a configured wallet.
 	configure(t, a, b, `{"action_id":"wallet.request-address","mode":"default-allow"}`)
 	invoke(t, a, b, WalletAddress, `{"asset":"BTC"}`)
 	if res := answer(t, a, b); str(t, res, "status") != StatusUnavailable {
@@ -595,7 +596,7 @@ func FuzzParseInvocation(f *testing.F) {
 
 func FuzzParseParams(f *testing.F) {
 	f.Add(uint8(0), []byte(`{"item_id":"01JB2Z6V9K3M4N5P6Q7R8S9BBB","fields":["f1"]}`))
-	f.Add(uint8(3), []byte(`{"asset":"BTC","amount_sats":5,"memo":"x"}`))
+	f.Add(uint8(3), []byte(`{"asset":"BTC","amount_sats":5,"address":"bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080","memo":"x"}`))
 	f.Fuzz(func(t *testing.T, i uint8, b []byte) {
 		cat := Catalog()
 		p, err := ParseParams(cat[int(i)%len(cat)].ID, b)

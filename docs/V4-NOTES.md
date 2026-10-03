@@ -479,3 +479,156 @@ feature.
 - Files in items (`file` kind reserved; owner decision 4).
 - Paging of `grant.list` (§15 follow-up 10).
 - ANDROID-PLAN's screens (the note's step 4).
+
+## Batch 4: location, wallet, presence (0.8.0)
+
+Follows VAULT-MESSAGING 0.8.0 (§9.2, §10.14, §10.16–§10.18, with §3.5.2,
+§6.8, §8.5, §10.1, §10.9, §12.2, §13.5). This completes the V4 feature
+port (VAULT-PLAN §4).
+
+### Layout
+
+- `features/location`: 1:1 shares per connection (once or continuous,
+  with an expiry, cadence and precision), requests, the receiving side's
+  latest sample (and the trail when the sharer allows it) while a share
+  is active.
+- `features/presence`: the presence policy (state, share, except) and
+  on-demand pings. The runtime gained `Host.OwnerLastActive` (the newest
+  `LastActiveAt` of the owner's apps and desktops) for `last_active`.
+- `vms/btc` (new, no state, no network): BIP39 (the English wordlist
+  embedded and hash-checked; PBKDF2 from the standard library), BIP32 and
+  BIP84 accounts and addresses, the PSBT signing policy (`Inspect`),
+  signing (`Sign`), and `BuildPSBT`/`FundingTx` for apps and tests. It is
+  under `vms/` because clients use it too.
+- `features/wallet`: wallets, addresses, PSBT inspection and signing, the
+  history, and the two wallet actions for `features/actions`
+  (`RequestAddress`, `Pay`). `ChainSource` is the hook for vault-side
+  chain access (option b below); nothing configures one.
+- `features/items`: `NewCriticalItem` (another feature creates a critical
+  item inside its credential operation), `UseCriticalValues`,
+  `CriticalExists`, and `ItemGuard`: the wallet owns its items, so
+  `item.put` and `item.sensitivity` of them are `in_use`.
+- `features/credential`: `NeedOptItem` (wallet.create's optional imported
+  phrase) and `NeedHash` (`payload_sha256` alone: a PSBT's hash).
+- `features/actions`: catalog version 3: the wallet actions are available,
+  `items` names the wallet (exactly one), `wallet.request-payment` gains
+  `address`, and its approval is the spend (`action.respond` with the PSBT
+  and the credential).
+- `client` (`wallet.go`, `location.go`, `presence.go`) and `vaultctl`
+  (`wallet`, `location`, `presence`); `vaultctl wallet test-psbt` builds a
+  synthetic regtest PSBT.
+
+Lock order: the wallet calls the credential (`Operate`, `UseKey`) and the
+items feature with its lock held; the items feature calls the wallet only
+through `ItemInUse`, which takes a separate leaf lock. As for critical-item
+use (§10.13), the credential's `Operate` runs the wallet's operation,
+which calls the items feature.
+
+### Dependencies
+
+`github.com/btcsuite/btcd` v0.24.2 (`wire`, `txscript`, `chaincfg`),
+`btcutil` v1.1.6 (`hdkeychain`, addresses, `base58`, `bech32`),
+`btcutil/psbt` v1.1.10, `btcec/v2` v2.3.4 and
+`decred/dcrd/dcrec/secp256k1/v4` v4.4.0 (with `crypto/blake256` and
+`btclog` as transitive packages). These are the Bitcoin libraries of
+btcd and lnd, pure Go, maintained for a decade; the alternative was
+vettid.dev's hand-written BIP32, BIP143 and bech32 (no PSBT, no bech32m,
+no taproot destinations), which is the riskier code to own. Only the
+vault process and clients link them: `make check-tcb` now fails if the
+supervisor links `vms/btc`, btcsuite or decred. The enclave binary grows
+from 14.3 to 16.2 MB with this batch (the libraries and the three
+features).
+
+### Ported, changed or dropped: wallet (from vettid.dev `wallet_handler.go`, `bitcoin.go`, `wallet_mnemonic.go`, `wallet_backup.go`, `wallet_types.go`)
+
+| Old | Now | Why |
+|---|---|---|
+| A 12-word phrase per wallet as a credential secret | A 24-word phrase (or an imported 12–24-word phrase with an optional passphrase) as a **critical item** (`crypto_wallet`, template `wallet.btc.bip84`): envelope-encrypted under an item key only the credential holds, re-keyed at every spend, revealed only sealed to a reply key (`item.reveal`) | §3.5, §10.7: one model for critical data; the member backs up the phrase with the item |
+| One address per wallet (m/84'/c'/0'/0/0), change sent back to it | Receive and change chains, addresses derived from the account key without the password; one address per connection until the app reports it used | Address reuse linked every payment; the vault needs no password to receive |
+| `send` and `send-to-connection`: the vault queried mempool.space through the parent's HTTP proxy, selected coins (largest first, unconfirmed included), estimated fees, signed a raw transaction and broadcast it | The app is the chain source: it builds a PSBT with the full previous transactions; `wallet.psbt.inspect` shows the vault's view; `wallet.sign` checks and signs; the app broadcasts | Owner decision (chain access, below): the enclave has no general egress; the parent must not see addresses; the vault validates what it signs |
+| `get-balance`, `get-fees`, `get-history` from mempool.space | `wallet.history` lists what the vault signed; balances and fees come from the app's chain source; `wallet.balance` only with a `ChainSource` (none configured) | Same |
+| `send-to-connection` (never signed: no credential fields; looked up a profile key nothing wrote) | `wallet.request-address` and `wallet.request-payment` shared actions | Consent and limits of §10.14 |
+| `btc-address-request`/`-response`, `btc-payment-request`, `btc-payment-receipt` peer events | Dropped; the actions' invocation and result | One mechanism; the old address request ignored `is_public` and had no consent or limit |
+| `set-visibility`, wallets in the published profile | Dropped | No public profile (§9.3); addresses are given per request |
+| `move-seed-to-credential` / `move-seed-to-wallet`, legacy mnemonic on record, HKDF from the master secret, `AccountIndex`, `CryptoKeyID` | Dropped | The phrase is always a critical item; `move-seed-to-wallet` made the wallet unsignable |
+| `delete` (soft archive) | `item.delete` of the wallet's item (credential operation) deletes the wallet | The phrase and the wallet go together |
+| Hand-written BIP32, bech32 (v0 only), BIP143, transaction serialisation | btcd | See Dependencies |
+| Fee cap only above 10% of the amount and 100,000 sats | Fee at most 1,000 sat/vB of the signed size, from verified input amounts | A lying chain source or a compromised app cannot burn the wallet in fees |
+| Destinations: P2WPKH only, HRP not checked against the network | Any standard address (P2PKH, P2SH, P2WPKH, P2WSH, P2TR) of the wallet's network, canonical encoding | |
+| Testnet and mainnet | Mainnet, testnet, signet in release builds; regtest in development builds | |
+
+### Ported, changed or dropped: location (from vettid.dev `location.go`)
+
+| Old | Now | Why |
+|---|---|---|
+| The member's own location history (`location.add/list/delete/delete-all/stats`, retention and compaction settings) | Dropped | The vault is not a location log; nothing needed it but sharing |
+| `sharing.toggle` per connection without expiry, pushing every point | `location.share.start` with a mode (once or continuous), an expiry (5 minutes to 7 days; once: 15 minutes), a cadence (10 s to 1 h) and a precision; one share per connection; `location.share.stop` from either side | Explicit, expiring consent; the old toggle never ended |
+| `applyPrecision` (a no-op) | Precision applied by the sending vault: `exact` (5 decimals), `approximate` (0.01° cell, ≥ 1 km accuracy) or `city` (0.1° cell, ≥ 10 km) | The sender's vault is the only place it can be enforced |
+| `location-update` peer event (durable), receiver cache stale after 6 h | `location.update`, ephemeral: forwarded from memory (never in the sender's state or outbox), `exp` bounded, kept by the receiver only while the share is active (the trail only if the sharer allowed it) | Location never at rest on the sending side; nothing kept after a share |
+| `location-request-ping`, auto-fulfil per connection | `location.request` (rate limited, a feed item); the member answers by starting a share | Consent every time |
+| Updates from unknown peers forwarded to the app | Only from the connection of an active share, rate limited | |
+
+### Ported, changed or dropped: presence (from vettid.dev `presence.go`)
+
+| Old | Now | Why |
+|---|---|---|
+| A 30 s heartbeat to every connection while the app was active (`presence.app-active`) | `presence.query` → `presence.ping` → `presence.pong`, on demand (§9.2) | Mailboxes with a 14-day TTL make heartbeats wasteful |
+| `set-default`, `set-override` per connection | `presence.set{state, share, except}`, versioned | |
+| No offline signal | A refusal is silence, like a locked vault | §9.2 (0.8.0) |
+
+### OWNER DECISIONS (to confirm)
+
+1. **Chain access.** Implemented: (a) the member's app is the chain
+   source; the vault never talks to a chain. Not implemented: (b) an
+   allowlisted chain API in the enclave's egress (`ChainSource` is the
+   hook). Recommendation: (a). Under (b) a third party would see AWS
+   addresses asking about each vault's addresses (linking a member's
+   coins to VettID's enclave and to each other), the host would learn
+   when vaults spend, the egress allowlist and pinned roots would grow
+   (each change a release under D1), and the API could still lie about
+   UTXOs. Residual risks of (a): a lying or compromised chain source can
+   withhold coins (a failed or stuck spend), offer coins already spent
+   (the transaction never confirms) or push the fee rate up to the cap;
+   it cannot misstate input amounts (the vault requires the previous
+   transactions and checks their txids), redirect change (re-derived) or,
+   for payment requests, change the payee or amount (checked exactly).
+   The app shows `wallet.psbt.inspect`'s summary, computed by the vault,
+   before the member approves. The app's chain source learns the
+   member's addresses; members who care use their own node or Electrum
+   server.
+2. **Spending needs both the unlock window and the password per spend.**
+   Implemented as instructed: `wallet.sign` and the approval of
+   `wallet.request-payment` need an app, the credential's unlock window
+   and a credential operation with the password. Recommendation: keep it
+   (one rule for every critical action; the app sends `credential.unlock`
+   and the spend with one password entry). Alternative: let the spend's
+   own credential operation count as the presence proof and drop the
+   window for wallet spends.
+3. **BIP84 (P2WPKH) only, previous transactions required.** Taproot
+   (BIP86) accounts can follow as another template. Requiring the full
+   previous transactions (as hardware wallets do) is what makes amounts
+   trustworthy for segwit v0.
+4. **Fee cap 1,000 sat/vB**, fixed in the release. A per-wallet setting
+   could follow.
+5. **Networks**: release builds accept mainnet, testnet and signet;
+   regtest only in development builds (`all.DevOptions`).
+6. **`wallet.request-payment` names its `address`** (catalog version 3):
+   the invoking member chooses where to be paid (usually from their own
+   wallet); the paying vault never looks addresses up.
+7. **One address per connection** for `wallet.request-address`, reused
+   until the app reports it used (`wallet.address.used`). At most 2,000
+   addresses per wallet. A recovery from the phrase in another wallet
+   should scan to `next_receive` rather than a gap of 20.
+8. **BIP39 passphrases are ASCII** (no Unicode normalisation in the
+   enclave).
+9. **Location default precision `exact`** for a share the member starts
+   explicitly to one connection; the apps offer the choice. Location is
+   not tied to share rules or grants: each share is its own consent.
+10. **Presence shares with every connection by default** (`share: all`),
+    with per-connection `except`; `invisible` and refusals are silence.
+
+### Not in batch 4
+
+- Taproot and multisig wallets; RBF fee bumps (the app builds a new PSBT).
+- Push wakes for location requests (§14).
+- vaultctl is not a chain client: it signs PSBTs built elsewhere.

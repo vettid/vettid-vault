@@ -175,6 +175,9 @@ type Host interface {
 	// ik to its current identity key (none if ik is current); ok is false
 	// if ik is not on its chain.
 	RotationsFrom(ik []byte) (chain []json.RawMessage, ok bool)
+	// OwnerLastActive is the latest LastActiveAt of the vault's active app
+	// and desktop devices (not agents); zero if none (§9.2).
+	OwnerLastActive() time.Time
 }
 
 // SendOptions qualify one outbound message.
@@ -304,6 +307,10 @@ func (s *Session) SignLeashStatus(statement []byte) ([]byte, error) {
 
 // RotationsFrom returns the vault's rotation chain from ik.
 func (s *Session) RotationsFrom(ik []byte) ([]json.RawMessage, bool) { return s.host.RotationsFrom(ik) }
+
+// OwnerLastActive returns when an owner app or desktop was last active
+// (§9.2 presence).
+func (s *Session) OwnerLastActive() time.Time { return s.host.OwnerLastActive() }
 
 // VouchCallShare signs a device's call key-exchange share (§10.10).
 func (s *Session) VouchCallShare(deviceIK ed25519.PublicKey, m []byte) ([]byte, error) {

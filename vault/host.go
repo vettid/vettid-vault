@@ -171,6 +171,16 @@ func (h managerHost) NotifyDevicesWith(typ string, body json.RawMessage, except 
 	h.m.notifyDevicesWith(typ, body, except, o, now)
 }
 
+func (h managerHost) OwnerLastActive() time.Time {
+	var t time.Time
+	for _, p := range h.m.st.Devices {
+		if p.State == PeerActive && (p.Kind == KindApp || p.Kind == KindDesktop) && p.LastActiveAt.After(t) {
+			t = p.LastActiveAt
+		}
+	}
+	return t
+}
+
 func (h managerHost) Record(a Activity, now time.Time) { h.m.record(a, now) }
 
 // MaxProfileBytes bounds a connection's stored profile (§10.8: 200 fields

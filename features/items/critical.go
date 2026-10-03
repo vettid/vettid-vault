@@ -100,6 +100,9 @@ func (f *Feature) putCritical(s *vault.Session, in *envelope.Inner, o strictjson
 		if (p.ItemID != "") != hasVer {
 			return errBad
 		}
+		if f.guarded(p.ItemID) {
+			return errInUse // a wallet's content changes only through the wallet (§10.18)
+		}
 		return nil
 	}
 	op := func(inner *credential.Inner, p *credential.Payload) error {
@@ -448,4 +451,139 @@ func (f *Feature) AppOnly(typ string, body json.RawMessage) bool {
 		}
 	}
 	return false
+}
+
+// ItemGuard is a feature that owns some critical items (the wallet,
+// §10.18): their content and sensitivity change only through it, so
+// item.put and item.sensitivity of such an item are refused with in_use.
+// Tags, reveal and delete stay with the member. ItemInUse is called with
+// this feature's lock held and must not call back into it.
+type ItemGuard interface {
+	ItemInUse(itemID string) bool
+}
+
+// SetGuard connects the wallet feature (at construction).
+func (f *Feature) SetGuard(g ItemGuard) { f.guard = g }
+
+func (f *Feature) guarded(id string) bool { return id != "" && f.guard != nil && f.guard.ItemInUse(id) }
+
+// NewField is a field of an item another feature creates.
+type NewField struct {
+	Label, Kind string
+	Value       string
+}
+
+// NewCriticalItem creates a critical item inside another feature's
+// credential operation (op of credential.Operate): its values are
+// encrypted under a fresh item key that goes into the plaintext. It
+// returns the item id and its field ids; commit applies the change (share
+// rules, notices, audit) once the credential is sealed, abort undoes it.
+func (f *Feature) NewCriticalItem(s *vault.Session, inner *credential.Inner, name, category, template string, tags []string,
+	fields []NewField) (id string, fieldIDs []string, commit, abort func(), err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.st.Items) >= itemspec.MaxItems || f.criticalCount() >= itemspec.MaxCritItems {
+		return "", nil, nil, nil, errLimit
+	}
+	arr := []byte{'['}
+	for i, fl := range fields {
+		if i > 0 {
+			arr = append(arr, ',')
+		}
+		arr = append(arr, strictjson.NewBuilder().String("label", fl.Label).String("kind", fl.Kind).String("value", fl.Value).Bytes()...)
+	}
+	body := strictjson.NewBuilder().String("name", name).String("category", category).String("template", template).
+		Raw("fields", append(arr, ']')).Bytes()
+	defer suite.Wipe(body)
+	defer suite.Wipe(arr)
+	o, perr := strictjson.ParseObject(body)
+	if perr != nil {
+		return "", nil, nil, nil, errBad
+	}
+	c, perr := itemspec.ParseContent(o)
+	if perr != nil {
+		return "", nil, nil, nil, errBad
+	}
+	t := now(s)
+	it := &itemspec.Item{ID: s.NewID(), Sensitivity: itemspec.Critical, Created: t, NextField: 1}
+	if !c.Apply(it, nil) {
+		return "", nil, nil, nil, errBad
+	}
+	it.Tags, it.Version, it.Updated = tags, 1, t
+	if err := checkProfileTag(it); err != nil {
+		return "", nil, nil, nil, err
+	}
+	if err := checkCritSize(it); err != nil {
+		return "", nil, nil, nil, err
+	}
+	if err := encrypt(s, it, inner, 1); err != nil {
+		return "", nil, nil, nil, err
+	}
+	ch, err := f.prepare(s, nil, it, nil)
+	if err != nil {
+		if i := inner.FindItem(it.ID); i >= 0 {
+			inner.Items[i].Wipe()
+			inner.Items = append(inner.Items[:i:i], inner.Items[i+1:]...)
+		}
+		return "", nil, nil, nil, err
+	}
+	for _, fl := range it.Fields {
+		fieldIDs = append(fieldIDs, fl.ID)
+	}
+	commit = func() {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.finish(s, ch, "item.added")
+	}
+	abort = func() {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		ch.undo()
+	}
+	return it.ID, fieldIDs, commit, abort, nil
+}
+
+// UseCriticalValues returns every field value of a critical item (field
+// id → canonical JSON) for one use within a credential operation and
+// re-keys the item, as UseCriticalField does. The caller wipes the values.
+func (f *Feature) UseCriticalValues(s *vault.Session, inner *credential.Inner, itemID string) (map[string]json.RawMessage, func(), error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	it := f.st.Items[itemID]
+	i := inner.FindItem(itemID)
+	if it == nil || it.Sensitivity != itemspec.Critical || i < 0 {
+		return nil, nil, errNotFound
+	}
+	pt, err := open(s.VaultID(), it, &inner.Items[i])
+	if err != nil {
+		return nil, nil, errInternal
+	}
+	v, err := ParseValues(pt)
+	suite.Wipe(pt)
+	if err != nil {
+		return nil, nil, errInternal
+	}
+	sealed, gen, err := rekey(s.VaultID(), it, inner, i)
+	if err != nil {
+		for _, x := range v.Fields {
+			suite.Wipe(x)
+		}
+		return nil, nil, errInternal
+	}
+	return v.Fields, func() {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if cur := f.st.Items[itemID]; cur != nil {
+			cur.Sealed, cur.Gen = sealed, gen
+		}
+	}, nil
+}
+
+// CriticalExists reports whether a critical item exists (the wallet
+// notices item.delete and credential.delete of its items, §10.18).
+func (f *Feature) CriticalExists(itemID string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	it := f.st.Items[itemID]
+	return it != nil && it.Sensitivity == itemspec.Critical
 }

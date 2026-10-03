@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"errors"
 	"sort"
 	"time"
 
@@ -137,13 +138,34 @@ func (m *Manager) hPairApprove(ctx context.Context, s *Session, in *envelope.Inn
 		return nil, errNotFound
 	}
 	// An initial access session for a desktop or agent may come with the
-	// pairing approval (§6.8).
+	// pairing approval (§6.8), and an agent's initial LEASH grants
+	// (§6.7, §10.11).
 	secs, present, err := accessSeconds(o, "session_seconds")
 	if err != nil || present && !needsAccess(m.st.Inbound[id].Kind) {
 		return nil, errBadRequest
 	}
-	if present {
-		m.pairAccess = &pendingAccess{inbound: id, seconds: secs, by: s.peer.ID}
+	grants, hasGrants := o["grants"]
+	if hasGrants {
+		g := m.agentGrantor()
+		pi := m.inbound[id]
+		if m.st.Inbound[id].Kind != KindAgent || g == nil || pi == nil {
+			return nil, errBadRequest
+		}
+		// Every grant is a delegation signed by the member's credential
+		// key (§10.11): it is signed now, within the unlock window, for
+		// the agent's identity key from its hs.init.
+		prepared, err := g.PrepareAgentGrants(s, pi.Init().From.IK, grants)
+		if err != nil {
+			var he *HandlerError
+			if errors.As(err, &he) {
+				return nil, he
+			}
+			return nil, errBadRequest
+		}
+		grants = prepared
+	}
+	if present || hasGrants {
+		m.pairAccess = &pendingAccess{inbound: id, seconds: secs, by: s.peer.ID, session: present, grants: grants}
 		defer func() { m.pairAccess = nil }()
 	}
 	if err := m.approveInbound(ctx, id, s.now); err != nil {
@@ -193,6 +215,11 @@ func (m *Manager) hDeviceUnlink(_ context.Context, s *Session, in *envelope.Inne
 	}
 	m.endAccess(context.Background(), p, false, "", s.now) // its access session and held requests go with it
 	m.removePeer(p, "device.unlinked", s.now)
+	for _, f := range m.features {
+		if ob, ok := f.(DeviceRemovedObserver); ok {
+			ob.DeviceRemoved(m.session(s.now), id) // §7.4: an agent's grants go too
+		}
+	}
 	m.record(Activity{Kind: "device.unlinked", DeviceID: id, Audit: true, Feed: true}, s.now)
 	m.notifyDevices("sync.event", strictjson.NewBuilder().String("kind", "device.unlinked").String("device_id", id).Bytes(), "", s.now)
 	return nil, nil

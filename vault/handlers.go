@@ -48,6 +48,10 @@ type TypeSpec struct {
 	// DesktopApproval requests from a desktop are held until an owner app
 	// approves them (§6.8 step-up). Apps are never held.
 	DesktopApproval bool
+	// AgentPolicy types are decided by the AgentPolicy feature for every
+	// agent request, even though agents are listed in From (agent.request,
+	// §10.11): it allows, refers to an app or refuses each one.
+	AgentPolicy bool
 }
 
 // HandlerError is an error response (§5.3 `error`).
@@ -135,8 +139,12 @@ type Host interface {
 	CompleteRecovery(deviceID string, now time.Time) error
 	// IdentityKey is the vault's current identity public key (§3.2).
 	IdentityKey() ed25519.PublicKey
-	// Device returns an active owner device by id.
+	// Device returns an active owner device by id that may receive
+	// messages now (a desktop or agent only within its access session).
 	Device(id string) (PeerInfo, bool)
+	// PairedDevice returns an active owner device by id, with or without
+	// an access session.
+	PairedDevice(id string) (PeerInfo, bool)
 	// Send sends a message to one principal (an active connection or owner
 	// device) with options (an `exp`, or memory-only delivery).
 	Send(to, typ string, body json.RawMessage, o SendOptions, now time.Time) error
@@ -149,6 +157,23 @@ type Host interface {
 	// vault's identity key (callwire.VouchMessage, §10.10); it signs
 	// nothing that is not a share message.
 	VouchCallShare(deviceIK ed25519.PublicKey, m []byte) ([]byte, error)
+	// CreateIntroInvite makes a remote connection invitation for an
+	// introduction (§10.15): accepted only from expectIK, its pending
+	// request marked introduced_by.
+	CreateIntroInvite(ctx context.Context, expectIK []byte, introBy string, now time.Time) (inviteID, link string, err error)
+	// AcceptInviteLink accepts a connection invitation link as
+	// connection.invite.accept does and returns the new connection's id.
+	AcceptInviteLink(ctx context.Context, link string, now time.Time) (string, error)
+	// CancelInvite revokes an outstanding invitation (§6.4).
+	CancelInvite(id string, now time.Time)
+	// SignLeashStatus signs a LEASH status statement with the vault's
+	// current identity key (§10.11); it signs nothing that does not parse
+	// as one.
+	SignLeashStatus(statement []byte) ([]byte, error)
+	// RotationsFrom returns the vault's identity.rotate statements from
+	// ik to its current identity key (none if ik is current); ok is false
+	// if ik is not on its chain.
+	RotationsFrom(ik []byte) (chain []json.RawMessage, ok bool)
 }
 
 // SendOptions qualify one outbound message.
@@ -244,8 +269,12 @@ func (s *Session) Send(to, typ string, body json.RawMessage, o SendOptions) erro
 	return s.host.Send(to, typ, body, o, s.now)
 }
 
-// Device returns an active owner device.
+// Device returns an active owner device that may receive messages now.
 func (s *Session) Device(id string) (PeerInfo, bool) { return s.host.Device(id) }
+
+// PairedDevice returns an active owner device, with or without an access
+// session (§6.8).
+func (s *Session) PairedDevice(id string) (PeerInfo, bool) { return s.host.PairedDevice(id) }
 
 // IdentityKey returns the vault's current identity public key.
 func (s *Session) IdentityKey() ed25519.PublicKey { return s.host.IdentityKey() }
@@ -253,6 +282,27 @@ func (s *Session) IdentityKey() ed25519.PublicKey { return s.host.IdentityKey() 
 // SignICEConfig signs an ICE configuration (callwire format) with the
 // vault's identity key.
 func (s *Session) SignICEConfig(config []byte) ([]byte, error) { return s.host.SignICEConfig(config) }
+
+// CreateIntroInvite makes an introduction's invitation (§10.15).
+func (s *Session) CreateIntroInvite(expectIK []byte, introBy string) (string, string, error) {
+	return s.host.CreateIntroInvite(s.Context(), expectIK, introBy, s.now)
+}
+
+// AcceptInviteLink accepts a connection invitation link (§6.4).
+func (s *Session) AcceptInviteLink(link string) (string, error) {
+	return s.host.AcceptInviteLink(s.Context(), link, s.now)
+}
+
+// CancelInvite revokes an outstanding invitation.
+func (s *Session) CancelInvite(id string) { s.host.CancelInvite(id, s.now) }
+
+// SignLeashStatus signs a LEASH status statement with the vault's ik.
+func (s *Session) SignLeashStatus(statement []byte) ([]byte, error) {
+	return s.host.SignLeashStatus(statement)
+}
+
+// RotationsFrom returns the vault's rotation chain from ik.
+func (s *Session) RotationsFrom(ik []byte) ([]json.RawMessage, bool) { return s.host.RotationsFrom(ik) }
 
 // VouchCallShare signs a device's call key-exchange share (§10.10).
 func (s *Session) VouchCallShare(deviceIK ed25519.PublicKey, m []byte) ([]byte, error) {
@@ -380,13 +430,41 @@ const (
 	AgentAsk                        // held for an owner app's approval (§6.8)
 )
 
-// AgentPolicy is the LEASH hook (§6.8; LEASH is specified with its port):
-// it decides an agent's request of an owner type (one that desktops may
-// send) that the type's own roles do not give agents. Without an
-// AgentPolicy feature, agents get nothing beyond their listed types.
-// App-only types are never offered to it.
+// AgentPolicy is the LEASH hook (§6.8, §10.11): it decides an agent's
+// request of an owner type (one that desktops may send) that the type's
+// own roles do not give agents, and every agent request of a type marked
+// TypeSpec.AgentPolicy. Without an AgentPolicy feature, agents get nothing
+// beyond their listed types. App-only types are never offered to it.
+// AgentDecision may record what it allowed (rate counting, audit); it is
+// also asked again, when an app approves a referred request, whether a
+// grant still covers it.
 type AgentPolicy interface {
 	AgentDecision(s *Session, typ string, body json.RawMessage) AgentDecision
+}
+
+// AgentGrantor is implemented by the LEASH feature: an agent's initial
+// grants come with its pairing approval (device.pair.approve{grants},
+// §6.7, §10.3). PrepareAgentGrants checks and signs them at the approval
+// (for the agent's identity key; a *HandlerError such as
+// credential_locked is answered as is) and returns what AgentPaired
+// installs in the flush that completes the pairing.
+type AgentGrantor interface {
+	PrepareAgentGrants(s *Session, agentIK []byte, grants json.RawMessage) (json.RawMessage, error)
+	AgentPaired(s *Session, agentID string, prepared json.RawMessage)
+}
+
+// AgentCoverage is optionally implemented by the AgentPolicy feature: when
+// an app approves a referred agent request, it says whether a grant still
+// covers it, without counting it as a new request (§6.8).
+type AgentCoverage interface {
+	AgentCovered(s *Session, typ string, body json.RawMessage) bool
+}
+
+// DeviceRemovedObserver is implemented by features that keep data per
+// owner device and act when a device is unlinked (§7.4: an agent's LEASH
+// grants are revoked).
+type DeviceRemovedObserver interface {
+	DeviceRemoved(s *Session, deviceID string)
 }
 
 // HandshakeProfiler supplies the vault's self-asserted hs.init profile and

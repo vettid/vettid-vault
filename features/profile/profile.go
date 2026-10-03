@@ -495,3 +495,17 @@ func stripVersion(b []byte) []byte {
 	}
 	return b
 }
+
+// FieldValue returns a profile field's value (grants of fields, §10.12).
+func (f *Feature) FieldValue(key string) (string, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	fl, ok := f.st.Fields[key]
+	if !ok {
+		return "", false
+	}
+	return fl.Value, true
+}
+
+// ValidKey reports whether s is a profile field key (§10.8).
+func ValidKey(s string) bool { return keyRE.MatchString(s) }

@@ -348,14 +348,17 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 	s := &Session{m: m, peer: p, host: managerHost{m}, from: info(p), ctx: ctx, now: now, inner: in}
 	allowed := te.allows(p.Kind) && !(p.Recovering && !recoveryAllowed[in.Type])
 	ask := false
-	if !allowed && p.Kind == KindAgent && m.hasAccess(p, now) {
-		// LEASH hook (§6.8): the agent's policy may allow an owner type or
-		// refer it to the owner; app-only types never.
+	if p.Kind == KindAgent && m.hasAccess(p, now) && (!allowed || te.spec.AgentPolicy) {
+		// LEASH hook (§6.8, §10.11): the agent's policy may allow an owner
+		// type or refer it to the owner, and decides every agent.request;
+		// app-only types never.
 		switch m.agentDecision(s, te, in) {
 		case AgentAllow:
 			allowed = true
 		case AgentAsk:
 			allowed, ask = true, true
+		default:
+			allowed = false
 		}
 	}
 	if !allowed {

@@ -1,8 +1,11 @@
 package vault
 
 import (
+	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"github.com/vettid/vettid-vault/vms/handshake"
+	"github.com/vettid/vettid-vault/vms/leashwire"
 	"sort"
 	"time"
 	"unicode/utf8"
@@ -68,6 +71,14 @@ func (h managerHost) Device(id string) (PeerInfo, bool) {
 	return info(p), true
 }
 
+func (h managerHost) PairedDevice(id string) (PeerInfo, bool) {
+	p, ok := h.m.st.Devices[id]
+	if !ok || p.State != PeerActive || p.Recovering {
+		return PeerInfo{}, false
+	}
+	return info(p), true
+}
+
 func (h managerHost) Send(to, typ string, body json.RawMessage, o SendOptions, now time.Time) error {
 	p := h.m.peer(to)
 	if p == nil || p.State != PeerActive || p.Recovering || !h.m.hasAccess(p, now) {
@@ -91,6 +102,69 @@ func (h managerHost) VouchCallShare(deviceIK ed25519.PublicKey, m []byte) ([]byt
 		return nil, errBadRequest
 	}
 	return suite.Sign(h.m.keys.ik, callwire.LabelVouch, callwire.VouchMessage(deviceIK, m))
+}
+
+// IntroInviteTTL is the lifetime of an introduction's invitation
+// (§10.15), lowered to the relay's limits.
+const IntroInviteTTL = 24 * time.Hour
+
+func (h managerHost) CreateIntroInvite(ctx context.Context, expectIK []byte, introBy string, now time.Time) (string, string, error) {
+	if len(expectIK) != ed25519.PublicKeySize {
+		return "", "", errBadRequest
+	}
+	ttl := IntroInviteTTL
+	for _, l := range []int64{h.m.limits.OpenTokenMaxLifetimeSeconds, h.m.limits.ClaimTTLSeconds} {
+		if l > 0 && time.Duration(l)*time.Second < ttl {
+			ttl = time.Duration(l) * time.Second
+		}
+	}
+	inv, link, err := h.m.createInvite(ctx, KindConnection, ttl, "intro", now)
+	if err != nil {
+		return "", "", err
+	}
+	inv.IntroIK, inv.IntroBy = append([]byte(nil), expectIK...), introBy
+	h.m.dirty = true
+	return inv.ID, link, nil
+}
+
+func (h managerHost) AcceptInviteLink(ctx context.Context, link string, now time.Time) (string, error) {
+	p, err := h.m.acceptInvite(ctx, link, now)
+	if err != nil {
+		return "", err
+	}
+	return p.ID, nil
+}
+
+func (h managerHost) SignLeashStatus(statement []byte) ([]byte, error) {
+	return leashwire.SignStatus(h.m.keys.ik, statement)
+}
+
+func (h managerHost) RotationsFrom(ik []byte) ([]json.RawMessage, bool) {
+	if suite.EqualPublic(ik, h.m.keys.ik.Public().(ed25519.PublicKey)) {
+		return nil, true
+	}
+	for i, raw := range h.m.st.Rotations {
+		r, err := handshake.ParseRotation(raw)
+		if err == nil && suite.EqualPublic(r.OldIK, ik) {
+			out := make([]json.RawMessage, 0, len(h.m.st.Rotations)-i)
+			for _, x := range h.m.st.Rotations[i:] {
+				out = append(out, append(json.RawMessage(nil), x...))
+			}
+			return out, true
+		}
+	}
+	return nil, false
+}
+
+func (h managerHost) CancelInvite(id string, now time.Time) {
+	inv := h.m.st.Invites[id]
+	if inv == nil || inv.Kind != KindConnection {
+		return
+	}
+	h.m.denyJTI(inv.OpenJTI, now)
+	h.m.queueDeleteClaim(inv.ClaimID, now)
+	delete(h.m.st.Invites, id)
+	h.m.dirty = true
 }
 
 func (h managerHost) NotifyDevicesWith(typ string, body json.RawMessage, except string, o SendOptions, now time.Time) {

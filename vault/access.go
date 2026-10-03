@@ -288,11 +288,14 @@ func (m *Manager) runHeld(ctx context.Context, h *HeldRequest, now time.Time) st
 	case !m.credentialReady():
 		code = "credential_required"
 	}
+	s := &Session{m: m, peer: p, host: managerHost{m}, from: info(p), ctx: ctx, now: now, inner: in}
+	if code == "" && p.Kind == KindAgent && (te.spec.AgentPolicy || !te.allows(KindAgent)) && !m.agentCovered(s, te, in) {
+		code = "forbidden" // no grant covers it any more (§6.8, §10.11)
+	}
 	if code != "" {
 		m.respondError(p, in, h.Key, code, "", now)
 		return code
 	}
-	s := &Session{m: m, peer: p, host: managerHost{m}, from: info(p), ctx: ctx, now: now, inner: in}
 	body, herr := te.handler.Handle(ctx, s, in)
 	var he *HandlerError
 	switch {
@@ -333,10 +336,10 @@ func (m *Manager) expireAccess(now time.Time) {
 }
 
 // agentDecision consults the AgentPolicy feature (LEASH) for an agent's
-// request of an owner type it is not listed for. Without one, or for an
-// app-only type, the answer is AgentDeny.
+// request of an owner type it is not listed for, or of an AgentPolicy
+// type. Without one, or for an app-only type, the answer is AgentDeny.
 func (m *Manager) agentDecision(s *Session, te *typeEntry, in *envelope.Inner) AgentDecision {
-	if !te.allows(KindDesktop) {
+	if !te.spec.AgentPolicy && !te.allows(KindDesktop) {
 		return AgentDeny // app-only types are never delegated
 	}
 	for _, f := range m.features {
@@ -345,4 +348,30 @@ func (m *Manager) agentDecision(s *Session, te *typeEntry, in *envelope.Inner) A
 		}
 	}
 	return AgentDeny
+}
+
+// agentCovered reports whether the LEASH policy still covers an agent's
+// referred request that an app approved: AgentCoverage if the policy
+// implements it (no rate counting), else its decision.
+func (m *Manager) agentCovered(s *Session, te *typeEntry, in *envelope.Inner) bool {
+	if !te.spec.AgentPolicy && !te.allows(KindDesktop) {
+		return false
+	}
+	for _, f := range m.features {
+		if c, ok := f.(AgentCoverage); ok {
+			return c.AgentCovered(s, in.Type, in.Body)
+		}
+	}
+	return m.agentDecision(s, te, in) != AgentDeny
+}
+
+// agentGrantor returns the feature that installs an agent's initial grants
+// (LEASH), or nil.
+func (m *Manager) agentGrantor() AgentGrantor {
+	for _, f := range m.features {
+		if g, ok := f.(AgentGrantor); ok {
+			return g
+		}
+	}
+	return nil
 }

@@ -133,6 +133,9 @@ type Peer struct {
 	Meta *PeerMeta `json:"meta,omitempty"`
 	// Access is a desktop's or agent's access session (§6.8).
 	Access *AccessSession `json:"access,omitempty"`
+	// PairGrants are an agent's initial LEASH grants, from the pairing
+	// approval until the pairing completes (§6.7, §10.11).
+	PairGrants json.RawMessage `json:"pair_grants,omitempty"`
 }
 
 // PeerMeta is the owner's own metadata about a connection: never sent to
@@ -234,6 +237,10 @@ type Invite struct {
 	EnrollRelayPK []byte          `json:"enroll_relay_pk,omitempty"`
 	EnrollKEM     []byte          `json:"enroll_kem,omitempty"`
 	EnrollAttest  json.RawMessage `json:"enroll_attest,omitempty"`
+	// An introduction's invitation (§10.15): accepted only from IntroIK;
+	// IntroBy is the introducer's connection id.
+	IntroIK []byte `json:"intro_ik,omitempty"`
+	IntroBy string `json:"intro_by,omitempty"`
 }
 
 // InboundHS is an hs.init awaiting the owner's approval.
@@ -248,6 +255,7 @@ type InboundHS struct {
 	Created     time.Time              `json:"created"`
 	Expires     time.Time              `json:"expires"`
 	Pending     handshake.PendingState `json:"pending"`
+	IntroBy     string                 `json:"intro_by,omitempty"` // §10.15
 }
 
 // AwaitingHS is a handshake where the vault sent hs.resp and awaits hs.fin.

@@ -20,6 +20,7 @@ import (
 	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vms/callwire"
 	"github.com/vettid/vettid-vault/vms/envelope"
+	"github.com/vettid/vettid-vault/vms/leashwire"
 	"github.com/vettid/vettid-vault/vms/suite"
 )
 
@@ -49,6 +50,14 @@ type Host struct {
 	IK         ed25519.PublicKey
 	// Identity is the fake vault's identity key (IK is its public half).
 	Identity ed25519.PrivateKey
+	// Introductions' invitations (§10.15).
+	IntroInvites  []IntroInvite
+	AcceptedLinks []string
+	Cancelled     []string
+	InviteErr     error
+	// The fake vault's identity rotation chain (RotationsFrom).
+	ChainFrom []byte
+	Chain     []json.RawMessage
 }
 
 // NewHost returns a fake host with no connections.
@@ -97,6 +106,53 @@ func (h *Host) VouchCallShare(deviceIK ed25519.PublicKey, m []byte) ([]byte, err
 }
 
 func (h *Host) Device(id string) (vault.PeerInfo, bool) {
+	p, ok := h.Devices[id]
+	return p, ok
+}
+
+// IntroInvite is a recorded CreateIntroInvite call.
+type IntroInvite struct {
+	ID, Link, IntroBy string
+	ExpectIK          []byte
+}
+
+func (h *Host) CreateIntroInvite(_ context.Context, ik []byte, by string, now time.Time) (string, string, error) {
+	if h.InviteErr != nil {
+		return "", "", h.InviteErr
+	}
+	id := h.NewID(now)
+	inv := IntroInvite{ID: id, Link: "vettid://invite/" + id, IntroBy: by, ExpectIK: append([]byte(nil), ik...)}
+	h.IntroInvites = append(h.IntroInvites, inv)
+	return inv.ID, inv.Link, nil
+}
+
+func (h *Host) AcceptInviteLink(_ context.Context, link string, now time.Time) (string, error) {
+	if h.InviteErr != nil {
+		return "", h.InviteErr
+	}
+	h.AcceptedLinks = append(h.AcceptedLinks, link)
+	return h.NewID(now), nil
+}
+
+func (h *Host) CancelInvite(id string, _ time.Time) { h.Cancelled = append(h.Cancelled, id) }
+
+func (h *Host) SignLeashStatus(statement []byte) ([]byte, error) {
+	return leashwire.SignStatus(h.Identity, statement)
+}
+
+// Chain is the fake vault's rotation chain for RotationsFrom: statements
+// from the key ChainFrom to the current IK.
+func (h *Host) RotationsFrom(ik []byte) ([]json.RawMessage, bool) {
+	if bytes.Equal(ik, h.IK) {
+		return nil, true
+	}
+	if h.ChainFrom != nil && bytes.Equal(ik, h.ChainFrom) {
+		return h.Chain, true
+	}
+	return nil, false
+}
+
+func (h *Host) PairedDevice(id string) (vault.PeerInfo, bool) {
 	p, ok := h.Devices[id]
 	return p, ok
 }

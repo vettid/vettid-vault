@@ -11,10 +11,19 @@ import (
 	"github.com/vettid/vettid-vault/client"
 )
 
-// Shared actions (VAULT-MESSAGING §10.14).
+// Shared actions: the built-in catalog (VAULT-MESSAGING §10.14).
 
 func init() {
-	commands["action"] = command{"action define -name N -kind respond|fixed [-mode ask|auto] [-result JSON] [-connections a,b] [-id ID -version N] [-description D] | delete -id ID | list [-connection ID] | invoke -connection ID -id ACTION [-params JSON] [-wait 60s] | respond -invocation ID -approve=true|false [-result JSON] | pending [-wait 60s]", cmdAction}
+	commands["action"] = command{"action list [-connection ID] | configure -id ACTION -mode default-deny|allowlist|prompt-each-time|default-allow " +
+		"[-connections a,b] [-fields k,k] [-secrets id,id] | invoke -connection ID -id ACTION [-params JSON] [-wait 60s] | " +
+		"respond -invocation ID -approve=true|false | pending [-wait 30s]", cmdAction}
+}
+
+func commaList(s string) []string {
+	if s == "" {
+		return nil
+	}
+	return strings.Split(s, ",")
 }
 
 func cmdAction(ctx context.Context, g *globals, args []string) error {
@@ -23,42 +32,27 @@ func cmdAction(ctx context.Context, g *globals, args []string) error {
 		return err
 	}
 	fs := flag.NewFlagSet("action "+op, flag.ExitOnError)
-	id := fs.String("id", "", "action id")
-	version := fs.Uint64("version", 0, "version the replacement is based on")
-	name := fs.String("name", "", "name")
-	desc := fs.String("description", "", "description")
-	kind := fs.String("kind", "", "respond|fixed")
-	mode := fs.String("mode", "", "ask|auto")
-	result := fs.String("result", "", "result JSON object")
-	connsFlag := fs.String("connections", "", "comma-separated connection ids (the allowlist)")
+	id := fs.String("id", "", "action id (catalog)")
+	mode := fs.String("mode", "", "permission mode")
+	connsFlag := fs.String("connections", "", "comma-separated connection ids")
+	fields := fs.String("fields", "", "comma-separated profile keys (profile.fields.read)")
+	secretsFlag := fs.String("secrets", "", "comma-separated secret ids (secrets.share)")
 	conn := fs.String("connection", "", "connection id")
-	params := fs.String("params", "", "params JSON object")
+	params := fs.String("params", "{}", "params JSON object")
 	inv := fs.String("invocation", "", "invocation id")
 	approve := fs.Bool("approve", false, "approve (false: deny)")
 	wait := fs.Duration("wait", 0, "wait for the result or a pending invocation")
 	_ = fs.Parse(rest)
-	raw := func(s string) json.RawMessage {
-		if s == "" {
-			return nil
-		}
-		return json.RawMessage(s)
-	}
 	return withDevice(ctx, g, func(d *client.Device) (any, error) {
 		switch op {
-		case "define":
-			cs := []string{}
-			if *connsFlag != "" {
-				cs = strings.Split(*connsFlag, ",")
-			}
-			aid, v, err := d.ActionDefine(ctx, client.ActionDef{ActionID: *id, Version: *version, Name: *name, Description: *desc,
-				Kind: *kind, Mode: *mode, Result: raw(*result), Connections: cs})
-			return map[string]any{"action_id": aid, "version": v}, err
-		case "delete":
-			return nil, d.ActionDelete(ctx, *id)
 		case "list":
 			return d.ActionList(ctx, *conn)
+		case "configure":
+			v, err := d.ActionConfigure(ctx, client.ActionConfig{ActionID: *id, Mode: *mode, Connections: commaList(*connsFlag),
+				Fields: commaList(*fields), Secrets: commaList(*secretsFlag)})
+			return map[string]any{"version": v}, err
 		case "invoke":
-			iid, err := d.ActionInvoke(ctx, *conn, *id, raw(*params))
+			iid, err := d.ActionInvoke(ctx, *conn, *id, json.RawMessage(*params))
 			if err != nil || *wait == 0 {
 				return map[string]string{"invocation_id": iid}, err
 			}
@@ -66,7 +60,8 @@ func cmdAction(ctx context.Context, g *globals, args []string) error {
 			defer cancel()
 			return d.ActionResult(wctx, iid)
 		case "respond":
-			return nil, d.ActionRespond(ctx, *inv, *approve, raw(*result))
+			st, err := d.ActionRespond(ctx, *inv, *approve)
+			return map[string]string{"status": st}, err
 		case "pending":
 			w := *wait
 			if w == 0 {

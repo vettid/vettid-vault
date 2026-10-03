@@ -287,18 +287,27 @@ Follows VAULT-MESSAGING 0.6.0 (§10.11–§10.14, with §6.7, §6.8, §9.1,
 | Errors sent to the peer as `err.Error()` strings | Fixed statuses (`ok`, `denied`, `expired`, `unavailable`, `unsuitable`) | No internal error text leaves the vault |
 | The requester did not verify the result | The asking vault verifies the signature before forwarding it | A peer cannot pass off another key's signature |
 
-### Ported, changed or dropped: shared actions (from vettid.dev `action_*.go`)
+### Ported, changed or dropped: shared actions (from vettid.dev `action_*.go`; owner decision 2026-10-03)
 
 | Old | Now | Why |
 |---|---|---|
-| Built-in catalog (`profile.fields.read`, `secrets.share`, `wallet.request-address`, `.request-payment`, `vote.delegate-proxy`, `connection.handoff`, `audit.recent`) | Member-defined actions of kind `respond` or `fixed` | Fields and secrets are grants; wallet is not ported yet; votes are removed; introductions are multi-party; the vault runs no code for actions |
-| Auth modes `default-deny`, `allowlist`, `prompt-each-time`, `default-allow` | A per-action allowlist (deny by default) and `ask` or `auto` (`auto` only for `fixed`) | Least privilege; no "every connection" mode |
-| JSON-schema validation of params and results (`action_schema.go`) | Strict JSON objects with size caps (4 KiB params, 16 KiB results); apps validate | Keeps a schema engine out of the enclave |
-| Ed25519 invoker and result signatures over canonical strings | Dropped | The connection's E2E session authenticates both vaults; both sides audit |
-| Offers in the retained profile (`PeerProfileCache.Actions`) | `action.offered` per connection, the complete list on each change, `sync.event{action.offers}` | No retained or public profile |
-| `forOwner.invoke-action` / `action-result` raw publishes, which the receiver never matched (the mis-routing) | `action.invocation` and `action.result` inside the session, classified by the session that decrypts them (§13.6) | Fixes the mis-routing; a device's `action.invoke` stays a request |
-| Pending queue and sweep (`action_pending.go`) | Pending invocations in feature state, at most 8 per connection, answered `expired` after 24 h (lazily) | |
-| `list-mine`, `list-on-peer`, `set-enabled`, `approve`, `deny` | `action.list{connection_id?}`, `action.define`, `action.respond{approve}` | |
+| Built-in catalog: `profile.fields.read`, `secrets.share`, `wallet.request-address`, `wallet.request-payment`, `vote.delegate-proxy`, `connection.handoff`, `audit.recent` | Catalog v1 keeps the field, secret, wallet and audit actions, run natively in the vault's process; drops votes and handoff | Votes are removed; introductions are started by the member (§10.15) |
+| `profile.fields.read` / `secrets.share` returned plaintext values in the result | One-use, 10-minute grants; values via `grant.fetch`, sealed to the fetching device | One consent and delivery model (§10.12); the invoking vault never holds values |
+| Modes `default-deny`, `allowlist`, `prompt-each-time`, `default-allow` | Kept, with sensitivity rules: sensitive never `default-allow`; critical only `default-deny` or `prompt-each-time`, approved by an app in the unlock window | "The phone must be there for critical actions" |
+| JSON-schema validation (`action_schema.go`) | A strict native parser per action; schema documents are listed for apps | No schema engine in the enclave |
+| Ed25519 invoker and result signatures | Dropped | The E2E session authenticates both vaults |
+| Offers through the published profile cache | `action.offered` per connection, `sync.event{action.offers}` | No retained or public profile |
+| `forOwner.invoke-action` / `action-result` raw publishes (mis-routed) | `action.invocation` / `action.result` in the session | Fixes the mis-routing |
+| `owner_params` allowlists | `fields` / `secrets` in `action.configure` | |
+| `execWalletRequestAddress`, `prepareBTCSend` stubs | Defined, `unavailable` until the wallet lands (batch 4) | Defined now, executed later |
+| Pending queue and sweep | Feature state, 8 pending and 60 an hour per connection, 24 h expiry | Bounded |
+
+### Ported, changed or dropped: introductions (§10.15)
+
+| Old | Now | Why |
+|---|---|---|
+| `connection.handoff`: a connection asks the member to introduce it to one of the member's connections | Dropped. Only the member starts an introduction (`intro.create`) | Owner decision 2026-10-03: connections must not see or ask for another's connections |
+| Peer-mediated invitation, never specified | Both parties accept; A's vault makes a remote invitation bound to C's `ik`, relayed by B; the normal approval and SAS follow | Neither learns the other until both accept; B cannot redirect the invitation to another identity |
 
 ### OWNER DECISIONS (2026-10-03)
 
@@ -315,9 +324,10 @@ Follows VAULT-MESSAGING 0.6.0 (§10.11–§10.14, with §6.7, §6.8, §9.1,
 4–8. Kept as built: the nine delegable owner types; no HTTP action,
    member ↔ agent chat or agent self-requests; critical-secret `sign`
    and `auth`; only cataloged secrets; field grants fetch-only.
-9. **Shared actions: on hold.** The owner is deciding what they should
-   be (vettid.dev's were a built-in catalog executed by the vault);
-   §10.14 and `features/actions` stay as in this PR until then.
+9. **Shared actions are a built-in catalog run by the vault** with
+   per-action permission modes; critical actions need an app in the
+   unlock window; introductions are started only by the member (§10.15).
+   Done.
 10. Desktops step up for `grant.decide` and `action.define`; critical
     actions are app-only. Confirmed.
 11. **Auto-allowed agent activity is summarised** per agent and hour,

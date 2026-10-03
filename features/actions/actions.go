@@ -1,30 +1,31 @@
 // Package actions is shared actions between connections (VAULT-MESSAGING
-// §10.14): the member offers named actions to chosen connections; a
-// connection invokes one and the member answers it, once each. The vault
-// never runs code for an action: either the member answers each
-// invocation (`respond`), or the vault returns a result the member fixed
-// in advance (`fixed`), after the member's approval (`ask`) or at once
-// (`auto`).
+// §10.14): a fixed catalog of actions built into each release and run by
+// the vault itself, natively in the vault's process, under a permission
+// mode the member sets per action (default-deny, allowlist,
+// prompt-each-time, default-allow). A connection learns what it may
+// invoke from the member's offer; an invocation is answered with the
+// action's result or a refusal.
 //
-// Ported from vettid.dev's action_*.go: the fixed built-in catalog
-// (profile fields, secrets, wallet, votes, introductions, audit) becomes
-// member-defined actions (fields and secrets are grants, §10.12); the four
-// authorization modes become a per-action allowlist plus ask/auto; JSON
-// schema validation and the Ed25519 invoker and result signatures are
-// dropped (apps validate params and results; the connection's E2E session
-// authenticates both vaults); invocations and results are types inside
-// the connection's session, which fixes vettid.dev's mis-routing of
-// results to subjects the receiving vault did not listen on.
+// Ported from vettid.dev's action_{catalog,router,invoker,pending,
+// authorization,schema}.go: the catalog, the per-action modes and the
+// pending approvals are kept; profile.fields.read and secrets.share now
+// make one-use grants (§10.12) instead of returning values; the votes and
+// introductions entries are gone (introductions are member-initiated,
+// §10.15); JSON-schema validation becomes a strict parser per action;
+// invoker and result signatures are dropped (the session authenticates
+// both vaults); invocations and results travel as types in the
+// connection's session, which fixes the old mis-routing.
 package actions
 
 import (
 	"context"
 	"encoding/json"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
+	"github.com/vettid/vettid-vault/features/grants"
+	"github.com/vettid/vettid-vault/features/profile"
 	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vms/envelope"
@@ -32,63 +33,143 @@ import (
 
 // Limits (§10.14).
 const (
-	MaxActions     = 64
-	MaxConnections = 256
-	MaxName        = 64
-	MaxDescription = 1024
-	MaxResult      = 16 * 1024
-	MaxParams      = 4 * 1024
-	MaxPending     = 8 // per connection
-	PendingTTL     = 24 * time.Hour
-	OutgoingTTL    = 25 * time.Hour
-	MaxOffers      = 64
+	CatalogVersion    = 1
+	MaxConnections    = 256
+	MaxFields         = 64
+	MaxSecrets        = 64
+	MaxParams         = 4096
+	MaxResult         = 16384
+	MaxPendingPerConn = 8
+	MaxPerHour        = 60
+	PendingTTL        = 24 * time.Hour
+	OutgoingTTL       = 25 * time.Hour
+	MaxOffers         = 64
+	MaxOutgoing       = 256
+	GrantUses         = 1
+	GrantTTL          = 10 * time.Minute
+	AuditDefault      = 20
+	AuditMax          = 50
+	MaxRequestFields  = 16
+	MaxMemo           = 280
+	MaxSats           = 2100000000000000
 )
 
-// Kinds, modes and result statuses.
+// Permission modes.
 const (
-	KindRespond = "respond"
-	KindFixed   = "fixed"
-	ModeAsk     = "ask"
-	ModeAuto    = "auto"
+	ModeDeny   = "default-deny"
+	ModeList   = "allowlist"
+	ModePrompt = "prompt-each-time"
+	ModeAllow  = "default-allow"
+)
 
+// Sensitivities.
+const (
+	Normal    = "normal"
+	Sensitive = "sensitive"
+	Critical  = "critical"
+)
+
+// Result statuses.
+const (
 	StatusOK          = "ok"
 	StatusDenied      = "denied"
 	StatusExpired     = "expired"
 	StatusUnavailable = "unavailable"
 )
 
-// Action is one of the member's action definitions.
-type Action struct {
-	ID          string          `json:"id"`
-	Version     uint64          `json:"version"`
-	Name        string          `json:"name"`
-	Description string          `json:"description,omitempty"`
-	Kind        string          `json:"kind"`
-	Mode        string          `json:"mode"`
-	Result      json.RawMessage `json:"result,omitempty"`
-	Connections []string        `json:"connections"`
-	CreatedAt   time.Time       `json:"created_at"`
-	UpdatedAt   time.Time       `json:"updated_at"`
+// Action ids of catalog version 1.
+const (
+	ProfileFieldsRead = "profile.fields.read"
+	SecretsShare      = "secrets.share"
+	AuditRecent       = "audit.recent"
+	WalletAddress     = "wallet.request-address"
+	WalletPayment     = "wallet.request-payment"
+)
+
+// Def is one built-in action.
+type Def struct {
+	ID           string
+	Version      uint64
+	Sensitivity  string
+	Available    bool // false: answered `unavailable` (the wallet is not there yet)
+	ParamSchema  string
+	ResultSchema string
 }
 
-// Offer is an action a connection offers this vault.
+const grantsResultSchema = `{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","required":["grants"],` +
+	`"properties":{"grants":{"type":"array","items":{"type":"object","required":["grant_id","kind","ref","uses","expires_at"],` +
+	`"properties":{"grant_id":{"type":"string"},"kind":{"type":"string"},"ref":{"type":"string"},"uses":{"type":"integer"},` +
+	`"expires_at":{"type":"string"}}}}}}`
+
+// Catalog returns catalog version 1, in a fixed order. It is built per
+// call: no package-level mutable state.
+func Catalog() []Def {
+	return []Def{
+		{ID: ProfileFieldsRead, Version: 1, Sensitivity: Sensitive, Available: true,
+			ParamSchema: `{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","required":["fields"],` +
+				`"properties":{"fields":{"type":"array","minItems":1,"maxItems":16,"uniqueItems":true,` +
+				`"items":{"type":"string","pattern":"^[a-z][a-z0-9_.-]{0,63}$"}}},"additionalProperties":false}`,
+			ResultSchema: grantsResultSchema},
+		{ID: SecretsShare, Version: 1, Sensitivity: Sensitive, Available: true,
+			ParamSchema: `{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","required":["secret_id"],` +
+				`"properties":{"secret_id":{"type":"string","pattern":"^[0-7][0-9A-HJKMNP-TV-Z]{25}$"}},"additionalProperties":false}`,
+			ResultSchema: grantsResultSchema},
+		{ID: AuditRecent, Version: 1, Sensitivity: Normal, Available: true,
+			ParamSchema: `{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object",` +
+				`"properties":{"limit":{"type":"integer","minimum":1,"maximum":50}},"additionalProperties":false}`,
+			ResultSchema: `{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","required":["entries"],` +
+				`"properties":{"entries":{"type":"array","items":{"type":"object","required":["kind","at"],` +
+				`"properties":{"kind":{"type":"string"},"at":{"type":"string"},"direction":{"enum":["in","out"]}}}}}}`},
+		{ID: WalletAddress, Version: 1, Sensitivity: Normal, Available: false,
+			ParamSchema: `{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","required":["asset"],` +
+				`"properties":{"asset":{"enum":["BTC"]}},"additionalProperties":false}`,
+			ResultSchema: `{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","required":["asset","address"],` +
+				`"properties":{"asset":{"type":"string"},"address":{"type":"string"}}}`},
+		{ID: WalletPayment, Version: 1, Sensitivity: Critical, Available: false,
+			ParamSchema: `{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","required":["asset","amount_sats"],` +
+				`"properties":{"asset":{"enum":["BTC"]},"amount_sats":{"type":"integer","minimum":1,"maximum":2100000000000000},` +
+				`"memo":{"type":"string","maxLength":280}},"additionalProperties":false}`,
+			ResultSchema: `{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","required":["status"],` +
+				`"properties":{"status":{"type":"string"},"txid":{"type":"string"}}}`},
+	}
+}
+
+// Lookup returns a catalog action.
+func Lookup(id string) (Def, bool) {
+	for _, d := range Catalog() {
+		if d.ID == id {
+			return d, true
+		}
+	}
+	return Def{}, false
+}
+
+// Config is the member's configuration of one action (versioned, §10.1).
+type Config struct {
+	Version     uint64   `json:"version"`
+	Mode        string   `json:"mode"`
+	Connections []string `json:"connections,omitempty"`
+	Fields      []string `json:"fields,omitempty"`
+	Secrets     []string `json:"secrets,omitempty"`
+}
+
+// Offer is one action a connection offers this vault.
 type Offer struct {
-	ActionID    string `json:"action_id"`
-	Version     uint64 `json:"version"`
-	Name        string `json:"name"`
-	Description string `json:"description,omitempty"`
+	ActionID string `json:"action_id"`
+	Version  uint64 `json:"version"`
+	Prompt   bool   `json:"prompt"`
 }
 
-// Pending is an invocation from a connection waiting for the member.
+// Pending is an invocation waiting for the member (prompt-each-time).
 type Pending struct {
 	ID       string          `json:"id"`
 	Conn     string          `json:"conn"`
 	ActionID string          `json:"action_id"`
-	Params   json.RawMessage `json:"params,omitempty"`
+	Params   json.RawMessage `json:"params"`
 	Exp      time.Time       `json:"exp"`
 }
 
-// Outgoing is an invocation this vault sent.
+// Outgoing is an invocation this vault sent, kept for its result.
 type Outgoing struct {
 	ID       string    `json:"id"`
 	Conn     string    `json:"conn"`
@@ -97,28 +178,51 @@ type Outgoing struct {
 }
 
 type data struct {
-	Actions map[string]*Action   `json:"actions"`
-	Offers  map[string][]Offer   `json:"offers"`  // per connection
-	Pending map[string]*Pending  `json:"pending"` // by invocation id
-	Out     map[string]*Outgoing `json:"out"`     // by invocation id
-	// Seen are the invocations received, by connection|invocation id, so
-	// that a repeated invocation_id is ignored.
+	Configs  map[string]*Config   `json:"configs"`  // by action_id
+	Offers   map[string][]Offer   `json:"offers"`   // by connection id
+	Pending  map[string]*Pending  `json:"pending"`  // by invocation_id
+	Outgoing map[string]*Outgoing `json:"outgoing"` // by invocation_id
+	// Seen are answered invocation ids (kept 25 h): a repeat is ignored.
 	Seen map[string]time.Time `json:"seen"`
+	// Hits are the invocations received per connection in the last hour.
+	Hits map[string][]time.Time `json:"hits"`
 }
 
-// Feature implements vault.Feature and vault.ConnectionRemovedObserver.
+func (d *data) init() {
+	if d.Configs == nil {
+		d.Configs = map[string]*Config{}
+	}
+	if d.Offers == nil {
+		d.Offers = map[string][]Offer{}
+	}
+	if d.Pending == nil {
+		d.Pending = map[string]*Pending{}
+	}
+	if d.Outgoing == nil {
+		d.Outgoing = map[string]*Outgoing{}
+	}
+	if d.Seen == nil {
+		d.Seen = map[string]time.Time{}
+	}
+	if d.Hits == nil {
+		d.Hits = map[string][]time.Time{}
+	}
+}
+
+// Feature implements vault.Feature, vault.ConnectionObserver and
+// vault.ConnectionRemovedObserver.
 type Feature struct {
-	mu sync.Mutex
-	d  data
+	mu   sync.Mutex
+	deps Deps
+	d    data
 }
 
-func newData() data {
-	return data{Actions: map[string]*Action{}, Offers: map[string][]Offer{}, Pending: map[string]*Pending{},
-		Out: map[string]*Outgoing{}, Seen: map[string]time.Time{}}
+// New returns the feature; deps are the features actions run through.
+func New(deps Deps) *Feature {
+	f := &Feature{deps: deps}
+	f.d.init()
+	return f
 }
-
-// New returns the feature.
-func New(_ Deps) *Feature { return &Feature{d: newData()} }
 
 var (
 	owners = []string{vault.KindApp, vault.KindDesktop}
@@ -131,11 +235,10 @@ func (f *Feature) Name() string { return "actions" }
 // Types implements vault.Feature.
 func (f *Feature) Types() []vault.TypeSpec {
 	return []vault.TypeSpec{
+		{Type: "action.list", Request: true, From: owners},
 		// A desktop changes what connections can obtain only with an
 		// app's approval (§6.8 step-up).
-		{Type: "action.define", Request: true, From: owners, DesktopApproval: true},
-		{Type: "action.delete", Request: true, From: owners},
-		{Type: "action.list", Request: true, From: owners},
+		{Type: "action.configure", Request: true, From: owners, DesktopApproval: true},
 		{Type: "action.invoke", Request: true, From: owners},
 		{Type: "action.respond", Request: true, From: owners},
 		{Type: "action.offered", From: conns},
@@ -150,25 +253,11 @@ func (f *Feature) Types() []vault.TypeSpec {
 func (f *Feature) Load(raw json.RawMessage) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	d := newData()
+	d := data{}
 	if err := json.Unmarshal(raw, &d); err != nil {
 		return err
 	}
-	if d.Actions == nil {
-		d.Actions = map[string]*Action{}
-	}
-	if d.Offers == nil {
-		d.Offers = map[string][]Offer{}
-	}
-	if d.Pending == nil {
-		d.Pending = map[string]*Pending{}
-	}
-	if d.Out == nil {
-		d.Out = map[string]*Outgoing{}
-	}
-	if d.Seen == nil {
-		d.Seen = map[string]time.Time{}
-	}
+	d.init()
 	f.d = d
 	return nil
 }
@@ -181,127 +270,125 @@ func (f *Feature) Save() (json.RawMessage, error) {
 }
 
 var (
-	errBad      = vault.NewError("bad_request", "")
-	errNotFound = vault.NewError("not_found", "")
-	errConflict = vault.NewError("conflict", "")
-	errLimit    = vault.NewError("limit", "")
-	errConn     = vault.NewError("connection_unavailable", "")
+	errBad       = vault.NewError("bad_request", "")
+	errNotFound  = vault.NewError("not_found", "")
+	errConflict  = vault.NewError("conflict", "")
+	errLimit     = vault.NewError("limit", "")
+	errForbidden = vault.NewError("forbidden", "")
+	errLocked    = vault.NewError("credential_locked", "")
+	errConn      = vault.NewError("connection_unavailable", "")
 )
 
-// --- parsers ---
-
-// Define is a parsed action.define body.
-type Define struct {
-	ActionID    string
-	Version     uint64
-	Name        string
-	Description string
-	Kind        string
-	Mode        string
-	Result      json.RawMessage
-	Connections []string
-}
-
-// object validates an optional JSON object member of at most max bytes
-// and returns its compact form (nil when absent).
-func object(o strictjson.Object, name string, max int) (json.RawMessage, error) {
-	raw, present, err := o.OptObjectRaw(name)
-	if err != nil {
-		return nil, errBad
-	}
-	if !present {
-		return nil, nil
-	}
-	c, err := strictjson.CompactObject(raw)
-	if err != nil || len(c) > max {
-		return nil, errBad
-	}
-	return c, nil
-}
+// --- parsing ---
 
 func ulid(o strictjson.Object, name string) (string, error) {
-	s, err := o.String(name)
-	if err != nil || !envelope.ValidULID(s) {
-		return "", errBad
-	}
-	return s, nil
-}
-
-func optText(o strictjson.Object, name string, max int) (string, error) {
-	v, _, err := o.OptString(name)
-	if err != nil || len(v) > max {
+	v, err := o.String(name)
+	if err != nil || !envelope.ValidULID(v) {
 		return "", errBad
 	}
 	return v, nil
 }
 
-// ParseDefine parses an action.define body strictly.
-func ParseDefine(body []byte) (*Define, error) {
+func strList(o strictjson.Object, name string, max int, valid func(string) bool) ([]string, bool, error) {
+	raw, present, err := o.OptArray(name)
+	if err != nil || len(raw) > max {
+		return nil, false, errBad
+	}
+	if !present {
+		return nil, false, nil
+	}
+	seen := map[string]bool{}
+	out := []string{}
+	for _, r := range raw {
+		s, err := strictjson.AsString(r)
+		if err != nil || !valid(s) || seen[s] {
+			return nil, false, errBad
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out, true, nil
+}
+
+// Configure is a parsed action.configure body.
+type Configure struct {
+	ActionID    string
+	Mode        string
+	Version     uint64 // the version it is based on, +1 (0: not given)
+	Connections []string
+	Fields      []string
+	Secrets     []string
+}
+
+// ParseConfigure parses an action.configure body strictly and checks it
+// against the catalog: modes per sensitivity, fields and secrets only for
+// the actions they bound.
+func ParseConfigure(body []byte) (*Configure, error) {
 	o, err := strictjson.ParseObject(body)
 	if err != nil {
 		return nil, errBad
 	}
-	d := &Define{Mode: ModeAsk}
-	id, hasID, err := o.OptString("action_id")
-	if err != nil || hasID && !envelope.ValidULID(id) {
+	c := &Configure{}
+	if c.ActionID, err = o.String("action_id"); err != nil {
 		return nil, errBad
 	}
-	ver, hasVer, err := o.OptUint("version", 1, strictjson.MaxSafeInteger)
-	if err != nil || hasID != hasVer {
+	def, ok := Lookup(c.ActionID)
+	if !ok {
+		return nil, errNotFound
+	}
+	if c.Mode, err = o.String("mode"); err != nil {
 		return nil, errBad
 	}
-	d.ActionID, d.Version = id, ver
-	if d.Name, err = o.String("name"); err != nil || d.Name == "" || len(d.Name) > MaxName {
+	switch c.Mode {
+	case ModeDeny, ModePrompt:
+	case ModeList:
+		if def.Sensitivity == Critical {
+			return nil, errBad // a critical action is always approved by the member
+		}
+	case ModeAllow:
+		if def.Sensitivity != Normal {
+			return nil, errBad // never default-allow for sensitive or critical actions
+		}
+	default:
 		return nil, errBad
 	}
-	if d.Description, err = optText(o, "description", MaxDescription); err != nil {
-		return nil, err
-	}
-	if d.Kind, err = o.String("kind"); err != nil || d.Kind != KindRespond && d.Kind != KindFixed {
-		return nil, errBad
-	}
-	if m, present, err := o.OptString("mode"); err != nil || present && m != ModeAsk && m != ModeAuto {
+	if v, present, err := o.OptUint("version", 0, strictjson.MaxSafeInteger-1); err != nil {
 		return nil, errBad
 	} else if present {
-		d.Mode = m
+		c.Version = v + 1
 	}
-	if d.Result, err = object(o, "result", MaxResult); err != nil {
+	if c.Connections, _, err = strList(o, "connections", MaxConnections, envelope.ValidULID); err != nil {
 		return nil, err
 	}
-	switch d.Kind {
-	case KindRespond:
-		if d.Mode != ModeAsk || d.Result != nil {
-			return nil, errBad // the member answers each invocation
-		}
-	case KindFixed:
-		if d.Result == nil {
-			return nil, errBad
-		}
-	}
-	arr, err := o.Array("connections")
-	if err != nil || len(arr) > MaxConnections {
+	var present bool
+	if c.Fields, present, err = strList(o, "fields", MaxFields, profile.ValidKey); err != nil || present && (c.ActionID != ProfileFieldsRead || len(c.Fields) == 0) {
 		return nil, errBad
 	}
-	seen := map[string]bool{}
-	d.Connections = []string{}
-	for _, r := range arr {
-		c, err := strictjson.AsString(r)
-		if err != nil || !envelope.ValidULID(c) || seen[c] {
-			return nil, errBad
-		}
-		seen[c] = true
-		d.Connections = append(d.Connections, c)
+	if c.Secrets, present, err = strList(o, "secrets", MaxSecrets, envelope.ValidULID); err != nil || present && (c.ActionID != SecretsShare || len(c.Secrets) == 0) {
+		return nil, errBad
 	}
-	return d, nil
+	return c, nil
 }
 
-// Invoke is a parsed action.invoke body: from a device (ConnectionID set)
-// or from a connection (InvocationID and Version set).
+func paramsObject(o strictjson.Object, required bool) (json.RawMessage, error) {
+	raw, present, err := o.OptObjectRaw("params")
+	if err != nil || !present && required {
+		return nil, errBad
+	}
+	if !present {
+		return json.RawMessage(`{}`), nil
+	}
+	c, err := strictjson.CompactObject(raw)
+	if err != nil || len(c) > MaxParams {
+		return nil, errBad
+	}
+	return c, nil
+}
+
+// Invoke is a parsed device action.invoke body.
 type Invoke struct {
 	ConnectionID string
-	InvocationID string
 	ActionID     string
-	Version      uint64
 	Params       json.RawMessage
 }
 
@@ -312,45 +399,146 @@ func ParseInvoke(body []byte) (*Invoke, error) {
 		return nil, errBad
 	}
 	v := &Invoke{}
-	if v.ConnectionID, err = o.String("connection_id"); err != nil || v.ConnectionID == "" || len(v.ConnectionID) > 64 {
+	if v.ConnectionID, err = o.String("connection_id"); err != nil || v.ConnectionID == "" || len(v.ConnectionID) > 128 {
 		return nil, errBad
 	}
-	if v.ActionID, err = ulid(o, "action_id"); err != nil {
-		return nil, err
+	if v.ActionID, err = o.String("action_id"); err != nil || v.ActionID == "" || len(v.ActionID) > 64 {
+		return nil, errBad
 	}
-	if v.Params, err = object(o, "params", MaxParams); err != nil {
+	if v.Params, err = paramsObject(o, false); err != nil {
 		return nil, err
 	}
 	return v, nil
 }
 
-// ParsePeerInvoke parses a connection's action.invocation body strictly.
-func ParsePeerInvoke(body []byte) (*Invoke, error) {
+// Invocation is a parsed action.invocation body (from a connection).
+type Invocation struct {
+	InvocationID string
+	ActionID     string
+	Version      uint64
+	Params       json.RawMessage
+	// Bad: the invocation id parsed but the rest did not (answered
+	// `unavailable`).
+	Bad bool
+}
+
+// ParseInvocation parses a connection's action.invocation body. An error
+// means not even the invocation id parsed (dropped); otherwise Bad marks
+// a body to answer `unavailable`.
+func ParseInvocation(body []byte) (*Invocation, error) {
 	o, err := strictjson.ParseObject(body)
 	if err != nil {
 		return nil, errBad
 	}
-	v := &Invoke{}
+	v := &Invocation{}
 	if v.InvocationID, err = ulid(o, "invocation_id"); err != nil {
 		return nil, err
 	}
-	if v.ActionID, err = ulid(o, "action_id"); err != nil {
-		return nil, err
+	if v.ActionID, err = o.String("action_id"); err != nil || v.ActionID == "" || len(v.ActionID) > 64 {
+		v.Bad = true
+		return v, nil
 	}
 	if v.Version, err = o.Uint("version", 1, strictjson.MaxSafeInteger); err != nil {
-		return nil, errBad
+		v.Bad = true
+		return v, nil
 	}
-	if v.Params, err = object(o, "params", MaxParams); err != nil {
-		return nil, err
+	if v.Params, err = paramsObject(o, true); err != nil {
+		v.Bad = true
 	}
 	return v, nil
+}
+
+// Params are an invocation's parsed parameters.
+type Params struct {
+	Fields   []string
+	SecretID string
+	Limit    int
+	Asset    string
+	Sats     uint64
+	Memo     string
+}
+
+// ParseParams parses an action's parameters with that action's strict
+// parser (§10.14: no general schema engine).
+func ParseParams(actionID string, raw []byte) (*Params, error) {
+	o, err := strictjson.ParseObject(raw)
+	if err != nil {
+		return nil, errBad
+	}
+	only := func(names ...string) error {
+		for k := range o {
+			ok := false
+			for _, n := range names {
+				ok = ok || k == n
+			}
+			if !ok {
+				return errBad // additionalProperties: false
+			}
+		}
+		return nil
+	}
+	p := &Params{}
+	switch actionID {
+	case ProfileFieldsRead:
+		if err := only("fields"); err != nil {
+			return nil, err
+		}
+		l, present, err := strList(o, "fields", MaxRequestFields, profile.ValidKey)
+		if err != nil || !present || len(l) == 0 {
+			return nil, errBad
+		}
+		p.Fields = l
+	case SecretsShare:
+		if err := only("secret_id"); err != nil {
+			return nil, err
+		}
+		if p.SecretID, err = ulid(o, "secret_id"); err != nil {
+			return nil, err
+		}
+	case AuditRecent:
+		if err := only("limit"); err != nil {
+			return nil, err
+		}
+		n, present, err := o.OptUint("limit", 1, AuditMax)
+		if err != nil {
+			return nil, errBad
+		}
+		p.Limit = AuditDefault
+		if present {
+			p.Limit = int(n)
+		}
+	case WalletAddress:
+		if err := only("asset"); err != nil {
+			return nil, err
+		}
+		if p.Asset, err = o.String("asset"); err != nil || p.Asset != "BTC" {
+			return nil, errBad
+		}
+	case WalletPayment:
+		if err := only("asset", "amount_sats", "memo"); err != nil {
+			return nil, err
+		}
+		if p.Asset, err = o.String("asset"); err != nil || p.Asset != "BTC" {
+			return nil, errBad
+		}
+		if p.Sats, err = o.Uint("amount_sats", 1, MaxSats); err != nil {
+			return nil, errBad
+		}
+		m, _, err := o.OptString("memo")
+		if err != nil || len(m) > MaxMemo {
+			return nil, errBad
+		}
+		p.Memo = m
+	default:
+		return nil, errBad
+	}
+	return p, nil
 }
 
 // Respond is a parsed action.respond body.
 type Respond struct {
 	InvocationID string
 	Approve      bool
-	Result       json.RawMessage
 }
 
 // ParseRespond parses an action.respond body strictly.
@@ -366,16 +554,10 @@ func ParseRespond(body []byte) (*Respond, error) {
 	if r.Approve, err = o.Bool("approve"); err != nil {
 		return nil, errBad
 	}
-	if r.Result, err = object(o, "result", MaxResult); err != nil {
-		return nil, err
-	}
-	if !r.Approve && r.Result != nil {
-		return nil, errBad
-	}
 	return r, nil
 }
 
-// Result is a parsed V↔V action.result body.
+// Result is a parsed action.result body (from a connection).
 type Result struct {
 	InvocationID string
 	Status       string
@@ -395,16 +577,20 @@ func ParseResult(body []byte) (*Result, error) {
 	if r.Status, err = o.String("status"); err != nil {
 		return nil, errBad
 	}
-	if r.Result, err = object(o, "result", MaxResult); err != nil {
-		return nil, err
+	raw, present, err := o.OptObjectRaw("result")
+	if err != nil {
+		return nil, errBad
 	}
 	switch r.Status {
 	case StatusOK:
-		if r.Result == nil {
+		if !present {
+			return nil, errBad
+		}
+		if r.Result, err = strictjson.CompactObject(raw); err != nil || len(r.Result) > MaxResult {
 			return nil, errBad
 		}
 	case StatusDenied, StatusExpired, StatusUnavailable:
-		if r.Result != nil {
+		if present {
 			return nil, errBad
 		}
 	default:
@@ -426,70 +612,69 @@ func ParseOffered(body []byte) ([]Offer, error) {
 	out := []Offer{}
 	seen := map[string]bool{}
 	for _, raw := range arr {
-		ao, err := strictjson.AsObject(raw)
+		e, err := strictjson.AsObject(raw)
 		if err != nil {
 			return nil, errBad
 		}
 		var of Offer
-		if of.ActionID, err = ulid(ao, "action_id"); err != nil || seen[of.ActionID] {
+		if of.ActionID, err = e.String("action_id"); err != nil || of.ActionID == "" || len(of.ActionID) > 64 || seen[of.ActionID] {
+			return nil, errBad
+		}
+		if of.Version, err = e.Uint("version", 1, strictjson.MaxSafeInteger); err != nil {
+			return nil, errBad
+		}
+		if of.Prompt, err = e.Bool("prompt"); err != nil {
 			return nil, errBad
 		}
 		seen[of.ActionID] = true
-		if of.Version, err = ao.Uint("version", 1, strictjson.MaxSafeInteger); err != nil {
-			return nil, errBad
-		}
-		if of.Name, err = ao.String("name"); err != nil || of.Name == "" || len(of.Name) > MaxName {
-			return nil, errBad
-		}
-		if of.Description, err = optText(ao, "description", MaxDescription); err != nil {
-			return nil, err
-		}
 		out = append(out, of)
 	}
 	return out, nil
 }
 
-// --- JSON ---
-
-func strList(l []string) []byte {
-	out := []byte{'['}
-	for i, s := range l {
-		if i > 0 {
-			out = append(out, ',')
-		}
-		out = append(out, strictjson.MarshalString(s)...)
+// Descs parses the grants of a profile.fields.read or secrets.share
+// result.
+func Descs(result []byte) ([]grants.Desc, error) {
+	o, err := strictjson.ParseObject(result)
+	if err != nil {
+		return nil, errBad
 	}
-	return append(out, ']')
+	arr, err := o.Array("grants")
+	if err != nil || len(arr) > MaxRequestFields {
+		return nil, errBad
+	}
+	out := make([]grants.Desc, 0, len(arr))
+	for _, raw := range arr {
+		e, err := strictjson.AsObject(raw)
+		if err != nil {
+			return nil, errBad
+		}
+		var d grants.Desc
+		if d.GrantID, err = ulid(e, "grant_id"); err != nil {
+			return nil, err
+		}
+		if d.Kind, err = e.String("kind"); err != nil || d.Kind != grants.KindField && d.Kind != grants.KindSecret {
+			return nil, errBad
+		}
+		if d.Ref, err = e.String("ref"); err != nil || d.Ref == "" || len(d.Ref) > 64 {
+			return nil, errBad
+		}
+		if d.Uses, err = e.Uint("uses", 1, grants.MaxUses); err != nil {
+			return nil, errBad
+		}
+		ts, err := e.String("expires_at")
+		if err != nil {
+			return nil, errBad
+		}
+		if d.Expires, err = envelope.ParseTS(ts); err != nil {
+			return nil, errBad
+		}
+		out = append(out, d)
+	}
+	return out, nil
 }
 
-// JSON is an action's wire form (§10.14).
-func (a *Action) JSON() []byte {
-	b := strictjson.NewBuilder().String("action_id", a.ID).Uint("version", a.Version).String("name", a.Name)
-	if a.Description != "" {
-		b.String("description", a.Description)
-	}
-	b.String("kind", a.Kind).String("mode", a.Mode)
-	if a.Result != nil {
-		b.Raw("result", a.Result)
-	}
-	return b.Raw("connections", strList(a.Connections)).String("created_at", envelope.FormatTS(a.CreatedAt)).
-		String("updated_at", envelope.FormatTS(a.UpdatedAt)).Bytes()
-}
-
-func offersJSON(l []Offer) []byte {
-	arr := []byte{'['}
-	for i, of := range l {
-		if i > 0 {
-			arr = append(arr, ',')
-		}
-		b := strictjson.NewBuilder().String("action_id", of.ActionID).Uint("version", of.Version).String("name", of.Name)
-		if of.Description != "" {
-			b.String("description", of.Description)
-		}
-		arr = append(arr, b.Bytes()...)
-	}
-	return strictjson.NewBuilder().Raw("actions", append(arr, ']')).Bytes()
-}
+// --- helpers ---
 
 func contains(l []string, s string) bool {
 	for _, v := range l {
@@ -500,84 +685,131 @@ func contains(l []string, s string) bool {
 	return false
 }
 
-func (f *Feature) sortedActions() []*Action {
-	out := make([]*Action, 0, len(f.d.Actions))
-	for _, a := range f.d.Actions {
-		out = append(out, a)
+func sortedKeys[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	sort.Strings(out)
 	return out
 }
 
-func (f *Feature) sortedPending() []*Pending {
-	out := make([]*Pending, 0, len(f.d.Pending))
-	for _, p := range f.d.Pending {
-		out = append(out, p)
+func (f *Feature) config(id string) *Config {
+	if c := f.d.Configs[id]; c != nil {
+		return c
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
-	return out
+	return &Config{Mode: ModeDeny}
 }
 
-// offeredTo is the complete list of actions offered to a connection.
+// offeredTo returns what this vault offers connection conn, in catalog
+// order.
 func (f *Feature) offeredTo(conn string) []Offer {
 	out := []Offer{}
-	for _, a := range f.sortedActions() {
-		if contains(a.Connections, conn) {
-			out = append(out, Offer{ActionID: a.ID, Version: a.Version, Name: a.Name, Description: a.Description})
+	for _, def := range Catalog() {
+		c := f.config(def.ID)
+		ok := false
+		switch c.Mode {
+		case ModeList:
+			ok = contains(c.Connections, conn)
+		case ModePrompt:
+			ok = len(c.Connections) == 0 || contains(c.Connections, conn)
+		case ModeAllow:
+			ok = true
+		}
+		if ok {
+			out = append(out, Offer{ActionID: def.ID, Version: def.Version, Prompt: c.Mode == ModePrompt})
 		}
 	}
 	return out
 }
 
-// offer sends each affected active connection its complete list.
-func (f *Feature) offer(s *vault.Session, affected ...[]string) {
-	set := map[string]bool{}
-	for _, l := range affected {
-		for _, c := range l {
-			set[c] = true
+func offerOf(l []Offer, id string) (Offer, bool) {
+	for _, o := range l {
+		if o.ActionID == id {
+			return o, true
 		}
 	}
-	ids := make([]string, 0, len(set))
-	for c := range set {
-		ids = append(ids, c)
+	return Offer{}, false
+}
+
+func offersJSON(l []Offer) []byte {
+	arr := []byte{'['}
+	for i, o := range l {
+		if i > 0 {
+			arr = append(arr, ',')
+		}
+		arr = append(arr, strictjson.NewBuilder().String("action_id", o.ActionID).Uint("version", o.Version).Bool("prompt", o.Prompt).Bytes()...)
 	}
-	sort.Strings(ids)
-	for _, c := range ids {
-		if p, ok := s.Connection(c); ok && p.State == vault.PeerActive {
-			_ = s.SendToConnection(c, "action.offered", offersJSON(f.offeredTo(c)))
+	return strictjson.NewBuilder().Raw("actions", append(arr, ']')).Bytes()
+}
+
+func sameOffers(a, b []Offer) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
 		}
 	}
+	return true
+}
+
+func listJSON(l []string) []byte {
+	arr := []byte{'['}
+	for i, s := range l {
+		if i > 0 {
+			arr = append(arr, ',')
+		}
+		arr = append(arr, strictjson.MarshalString(s)...)
+	}
+	return append(arr, ']')
 }
 
 func (f *Feature) sendResult(s *vault.Session, conn, id, status string, result json.RawMessage) {
 	b := strictjson.NewBuilder().String("invocation_id", id).String("status", status)
-	if result != nil {
+	if status == StatusOK {
 		b.Raw("result", result)
 	}
 	_ = s.SendToConnection(conn, "action.result", b.Bytes())
+	f.d.Seen[id] = s.Now()
 }
 
-// expire answers pending invocations past their exp and forgets old
-// outgoing invocations and seen ids (lazily, §10.14).
+// expire does the lazy housekeeping (§10.14).
 func (f *Feature) expire(s *vault.Session) {
 	now := s.Now()
-	for _, p := range f.sortedPending() {
-		if !now.Before(p.Exp) {
-			delete(f.d.Pending, p.ID)
-			f.sendResult(s, p.Conn, p.ID, StatusExpired, nil)
+	for _, id := range sortedKeys(f.d.Pending) {
+		if p := f.d.Pending[id]; !now.Before(p.Exp) {
+			delete(f.d.Pending, id)
+			f.sendResult(s, p.Conn, id, StatusExpired, nil)
 		}
 	}
-	for id, o := range f.d.Out {
+	for id, o := range f.d.Outgoing {
 		if !now.Before(o.Exp) {
-			delete(f.d.Out, id)
+			delete(f.d.Outgoing, id)
 		}
 	}
-	for k, t := range f.d.Seen {
+	for id, t := range f.d.Seen {
 		if now.Sub(t) >= OutgoingTTL {
-			delete(f.d.Seen, k)
+			delete(f.d.Seen, id)
+		}
+	}
+	for c, hs := range f.d.Hits {
+		var kept []time.Time
+		for _, t := range hs {
+			if now.Sub(t) < time.Hour {
+				kept = append(kept, t)
+			}
+		}
+		if len(kept) == 0 {
+			delete(f.d.Hits, c)
+		} else {
+			f.d.Hits[c] = kept
 		}
 	}
 }
+
+// --- handlers ---
 
 // Handle implements vault.Handler.
 func (f *Feature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner) (json.RawMessage, error) {
@@ -585,189 +817,176 @@ func (f *Feature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner
 	defer f.mu.Unlock()
 	f.expire(s)
 	switch in.Type {
-	case "action.define":
-		return f.define(s, in.Body)
-	case "action.delete":
-		return f.remove(s, in.Body)
 	case "action.list":
-		return f.list(s, in.Body)
+		return f.list(in.Body)
+	case "action.configure":
+		return f.configure(s, in.Body)
 	case "action.invoke":
 		return f.invoke(s, in.Body)
-	case "action.invocation":
-		return nil, f.peerInvoke(s, in.Body)
 	case "action.respond":
 		return f.respond(s, in.Body)
 	case "action.offered":
 		offers, err := ParseOffered(in.Body)
 		if err != nil {
-			return nil, err
+			s.Record(vault.Activity{Kind: "drop.action_malformed", ConnectionID: s.From().ID, Audit: true})
+			return nil, nil
 		}
 		f.d.Offers[s.From().ID] = offers
-		// The owner's devices learn that the connection's offers changed
-		// and fetch them with action.list{connection_id}.
+		// The owner's devices fetch them with action.list{connection_id}.
 		s.SyncEvent("action.offers", strictjson.NewBuilder().String("connection_id", s.From().ID).Bytes())
 		return nil, nil
+	case "action.invocation":
+		f.invocation(s, in.Body)
+		return nil, nil
 	case "action.result":
-		return nil, f.result(s, in.Body)
+		f.result(s, in.Body)
+		return nil, nil
 	}
 	return nil, vault.NewError("unsupported_type", "")
 }
 
-func (f *Feature) define(s *vault.Session, body []byte) (json.RawMessage, error) {
-	d, err := ParseDefine(body)
-	if err != nil {
-		return nil, err
-	}
-	now := s.Now().UTC().Truncate(time.Millisecond)
-	var a *Action
-	var before []string
-	if d.ActionID != "" {
-		cur := f.d.Actions[d.ActionID]
-		if cur == nil {
-			return nil, errNotFound
-		}
-		if cur.Version != d.Version {
-			return nil, errConflict
-		}
-		c := *cur
-		a = &c
-		before = cur.Connections
-	} else {
-		if len(f.d.Actions) >= MaxActions {
-			return nil, errLimit
-		}
-		a = &Action{ID: s.NewID(), CreatedAt: now}
-	}
-	a.Version++
-	a.Name, a.Description, a.Kind, a.Mode, a.Result, a.Connections = d.Name, d.Description, d.Kind, d.Mode, d.Result, d.Connections
-	a.UpdatedAt = now
-	f.d.Actions[a.ID] = a
-	// Pending invocations from connections the action is no longer
-	// offered to can no longer be answered (§10.14).
-	for _, p := range f.sortedPending() {
-		if p.ActionID == a.ID && !contains(a.Connections, p.Conn) {
-			delete(f.d.Pending, p.ID)
-			f.sendResult(s, p.Conn, p.ID, StatusUnavailable, nil)
-		}
-	}
-	s.SyncEvent("action.changed", strictjson.NewBuilder().String("action_id", a.ID).Uint("version", a.Version).Bytes())
-	s.Record(vault.Activity{Kind: "action.defined", Ref: a.ID, Audit: true})
-	f.offer(s, before, a.Connections)
-	return strictjson.NewBuilder().String("action_id", a.ID).Uint("version", a.Version).Bytes(), nil
-}
-
-func (f *Feature) remove(s *vault.Session, body []byte) (json.RawMessage, error) {
-	o, err := strictjson.ParseObject(body)
-	if err != nil {
-		return nil, errBad
-	}
-	id, err := ulid(o, "action_id")
-	if err != nil {
-		return nil, err
-	}
-	a := f.d.Actions[id]
-	if a == nil {
-		return nil, errNotFound
-	}
-	delete(f.d.Actions, id)
-	// Its pending invocations can no longer be answered.
-	for _, p := range f.sortedPending() {
-		if p.ActionID == id {
-			delete(f.d.Pending, p.ID)
-			f.sendResult(s, p.Conn, p.ID, StatusUnavailable, nil)
-		}
-	}
-	s.SyncEvent("action.deleted", strictjson.NewBuilder().String("action_id", id).Bytes())
-	s.Record(vault.Activity{Kind: "action.deleted", Ref: id, Audit: true})
-	f.offer(s, a.Connections)
-	return nil, nil
-}
-
-func (f *Feature) list(s *vault.Session, body []byte) (json.RawMessage, error) {
+func (f *Feature) list(body []byte) (json.RawMessage, error) {
 	o, err := strictjson.ParseObject(body)
 	if err != nil {
 		return nil, errBad
 	}
 	conn, present, err := o.OptString("connection_id")
-	if err != nil || present && (conn == "" || len(conn) > 64) {
+	if err != nil {
 		return nil, errBad
 	}
 	if present {
-		if _, ok := s.Connection(conn); !ok {
-			return nil, errNotFound
-		}
 		return offersJSON(f.d.Offers[conn]), nil
 	}
 	arr := []byte{'['}
-	for i, a := range f.sortedActions() {
+	for i, def := range Catalog() {
 		if i > 0 {
 			arr = append(arr, ',')
 		}
-		arr = append(arr, a.JSON()...)
+		c := f.config(def.ID)
+		b := strictjson.NewBuilder().String("action_id", def.ID).Uint("version", def.Version).String("sensitivity", def.Sensitivity).
+			Bool("available", def.Available).Raw("param_schema", []byte(def.ParamSchema)).Raw("result_schema", []byte(def.ResultSchema)).
+			String("mode", c.Mode).Uint("config_version", c.Version)
+		if c.Connections != nil {
+			b.Raw("connections", listJSON(c.Connections))
+		}
+		if c.Fields != nil {
+			b.Raw("fields", listJSON(c.Fields))
+		}
+		if c.Secrets != nil {
+			b.Raw("secrets", listJSON(c.Secrets))
+		}
+		arr = append(arr, b.Bytes()...)
 	}
-	return strictjson.NewBuilder().Raw("actions", append(arr, ']')).Bytes(), nil
+	return strictjson.NewBuilder().Uint("catalog_version", CatalogVersion).Raw("actions", append(arr, ']')).Bytes(), nil
 }
 
-// invoke: an owner device (or an agent through LEASH, §10.11) invokes an
-// action a connection offers.
+// configure sets an action's permission mode and bounds, re-offers to
+// every affected active connection, and answers pending invocations no
+// longer offered `unavailable`.
+func (f *Feature) configure(s *vault.Session, body []byte) (json.RawMessage, error) {
+	c, err := ParseConfigure(body)
+	if err != nil {
+		return nil, err
+	}
+	cur := f.config(c.ActionID)
+	if c.Version != 0 && c.Version-1 != cur.Version {
+		return nil, errConflict
+	}
+	active := s.Connections()
+	before := map[string][]Offer{}
+	for _, p := range active {
+		before[p.ID] = f.offeredTo(p.ID)
+	}
+	next := &Config{Version: cur.Version + 1, Mode: c.Mode, Connections: c.Connections, Fields: c.Fields, Secrets: c.Secrets}
+	f.d.Configs[c.ActionID] = next
+	for _, id := range sortedKeys(f.d.Pending) {
+		p := f.d.Pending[id]
+		if _, ok := offerOf(f.offeredTo(p.Conn), p.ActionID); p.ActionID == c.ActionID && !ok {
+			delete(f.d.Pending, id)
+			f.sendResult(s, p.Conn, id, StatusUnavailable, nil)
+		}
+	}
+	for _, p := range active {
+		if p.State != vault.PeerActive {
+			continue
+		}
+		if after := f.offeredTo(p.ID); !sameOffers(before[p.ID], after) {
+			_ = s.SendToConnection(p.ID, "action.offered", offersJSON(after))
+		}
+	}
+	s.SyncEvent("action.changed", strictjson.NewBuilder().String("action_id", c.ActionID).Uint("version", next.Version).Bytes())
+	s.Record(vault.Activity{Kind: "action.configured", Ref: c.ActionID, Audit: true})
+	return strictjson.NewBuilder().Uint("version", next.Version).Bytes(), nil
+}
+
+// ConnectionAdded implements vault.ConnectionObserver: a new connection
+// gets what it is offered (§10.14).
+func (f *Feature) ConnectionAdded(s *vault.Session, id string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if l := f.offeredTo(id); len(l) > 0 {
+		_ = s.SendToConnection(id, "action.offered", offersJSON(l))
+	}
+}
+
 func (f *Feature) invoke(s *vault.Session, body []byte) (json.RawMessage, error) {
 	v, err := ParseInvoke(body)
 	if err != nil {
 		return nil, err
 	}
-	p, ok := s.Connection(v.ConnectionID)
-	if !ok || p.State != vault.PeerActive {
+	off, ok := offerOf(f.d.Offers[v.ConnectionID], v.ActionID)
+	if !ok {
 		return nil, errNotFound
 	}
-	var offer *Offer
-	for i, of := range f.d.Offers[v.ConnectionID] {
-		if of.ActionID == v.ActionID {
-			offer = &f.d.Offers[v.ConnectionID][i]
-		}
-	}
-	if offer == nil {
-		return nil, errNotFound
+	if len(f.d.Outgoing) >= MaxOutgoing {
+		return nil, errLimit
 	}
 	id := s.NewID()
-	b := strictjson.NewBuilder().String("invocation_id", id).String("action_id", v.ActionID).Uint("version", offer.Version)
-	if v.Params != nil {
-		b.Raw("params", v.Params)
-	}
+	b := strictjson.NewBuilder().String("invocation_id", id).String("action_id", v.ActionID).Uint("version", off.Version).Raw("params", v.Params)
 	if err := s.SendToConnection(v.ConnectionID, "action.invocation", b.Bytes()); err != nil {
 		return nil, errConn
 	}
-	f.d.Out[id] = &Outgoing{ID: id, Conn: v.ConnectionID, ActionID: v.ActionID, Exp: s.Now().Add(OutgoingTTL)}
+	f.d.Outgoing[id] = &Outgoing{ID: id, Conn: v.ConnectionID, ActionID: v.ActionID, Exp: s.Now().Add(OutgoingTTL)}
 	s.Record(vault.Activity{Kind: "action.invoked", ConnectionID: v.ConnectionID, Ref: id, Direction: "out", Audit: true})
 	return strictjson.NewBuilder().String("invocation_id", id).Bytes(), nil
 }
 
-// peerInvoke: a connection invokes one of the member's actions.
-func (f *Feature) peerInvoke(s *vault.Session, body []byte) error {
-	v, err := ParsePeerInvoke(body)
-	if err != nil {
-		return err
-	}
+// invocation handles a connection's action.invocation.
+func (f *Feature) invocation(s *vault.Session, body []byte) {
 	conn := s.From().ID
-	key := conn + "|" + v.InvocationID
-	if _, dup := f.d.Seen[key]; dup {
-		return nil // a repeated invocation_id is ignored
+	v, err := ParseInvocation(body)
+	if err != nil {
+		s.Record(vault.Activity{Kind: "drop.action_malformed", ConnectionID: conn, Audit: true})
+		return
 	}
-	if _, clash := f.d.Pending[v.InvocationID]; clash {
-		return nil // another connection's pending invocation holds that id
+	if _, dup := f.d.Pending[v.InvocationID]; dup {
+		return
 	}
-	f.d.Seen[key] = s.Now()
+	if _, dup := f.d.Seen[v.InvocationID]; dup {
+		return
+	}
+	now := s.Now()
+	f.d.Hits[conn] = append(f.d.Hits[conn], now)
 	s.Record(vault.Activity{Kind: "action.invoked", ConnectionID: conn, Ref: v.InvocationID, Direction: "in", Audit: true})
-	a := f.d.Actions[v.ActionID]
-	// Unknown, not offered to this connection or another version: not
-	// told apart (§10.14).
-	if a == nil || !contains(a.Connections, conn) || a.Version != v.Version {
-		f.sendResult(s, conn, v.InvocationID, StatusUnavailable, nil)
-		return nil
+	unavailable := func() { f.sendResult(s, conn, v.InvocationID, StatusUnavailable, nil) }
+	if v.Bad || len(f.d.Hits[conn]) > MaxPerHour {
+		unavailable()
+		return
 	}
-	if a.Kind == KindFixed && a.Mode == ModeAuto {
-		f.sendResult(s, conn, v.InvocationID, StatusOK, a.Result)
-		s.Record(vault.Activity{Kind: "action.approved", ConnectionID: conn, Ref: v.InvocationID, Audit: true})
-		return nil
+	def, ok := Lookup(v.ActionID)
+	off, offered := offerOf(f.offeredTo(conn), v.ActionID)
+	if !ok || !offered || off.Version != v.Version {
+		unavailable()
+		return
+	}
+	if _, err := ParseParams(def.ID, v.Params); err != nil {
+		unavailable()
+		return
+	}
+	if !off.Prompt {
+		status, result := f.execute(s, conn, v.InvocationID, def, v.Params)
+		f.sendResult(s, conn, v.InvocationID, status, result)
+		return
 	}
 	n := 0
 	for _, p := range f.d.Pending {
@@ -775,23 +994,85 @@ func (f *Feature) peerInvoke(s *vault.Session, body []byte) error {
 			n++
 		}
 	}
-	if n >= MaxPending {
-		f.sendResult(s, conn, v.InvocationID, StatusUnavailable, nil)
-		return nil
+	if n >= MaxPendingPerConn {
+		unavailable()
+		return
 	}
-	p := &Pending{ID: v.InvocationID, Conn: conn, ActionID: a.ID, Params: v.Params, Exp: s.Now().Add(PendingTTL).UTC().Truncate(time.Millisecond)}
+	p := &Pending{ID: v.InvocationID, Conn: conn, ActionID: def.ID, Params: v.Params, Exp: now.Add(PendingTTL).UTC().Truncate(time.Millisecond)}
 	f.d.Pending[p.ID] = p
-	b := strictjson.NewBuilder().String("invocation_id", p.ID).String("connection_id", conn).String("action_id", a.ID).
-		String("name", a.Name).String("kind", a.Kind)
-	if p.Params != nil {
-		b.Raw("params", p.Params)
-	}
-	s.NotifyAllDevices("action.pending", b.String("exp", envelope.FormatTS(p.Exp)).Bytes())
+	s.NotifyAllDevices("action.pending", strictjson.NewBuilder().String("invocation_id", p.ID).String("connection_id", conn).
+		String("action_id", def.ID).String("sensitivity", def.Sensitivity).Raw("params", p.Params).
+		String("exp", envelope.FormatTS(p.Exp)).Bytes())
 	s.Record(vault.Activity{Kind: "action.request", ConnectionID: conn, Ref: p.ID, Feed: true, Priority: "high"})
-	return nil
 }
 
-// respond: the member answers a pending invocation.
+// execute runs a built-in action for connection conn (§10.14).
+func (f *Feature) execute(s *vault.Session, conn, invocationID string, def Def, raw json.RawMessage) (string, json.RawMessage) {
+	p, err := ParseParams(def.ID, raw)
+	if err != nil || !def.Available {
+		return StatusUnavailable, nil
+	}
+	cfg := f.config(def.ID)
+	var out json.RawMessage
+	switch def.ID {
+	case ProfileFieldsRead, SecretsShare:
+		if f.deps.Grants == nil {
+			return StatusUnavailable, nil
+		}
+		var items []grants.Item
+		if def.ID == ProfileFieldsRead {
+			for _, k := range p.Fields {
+				if contains(cfg.Fields, k) {
+					items = append(items, grants.Item{Kind: grants.KindField, Ref: k})
+				}
+			}
+		} else if contains(cfg.Secrets, p.SecretID) {
+			items = append(items, grants.Item{Kind: grants.KindSecret, Ref: p.SecretID})
+		}
+		if len(items) == 0 {
+			return StatusUnavailable, nil
+		}
+		descs, err := f.deps.Grants.IssueForAction(s, conn, invocationID, items, GrantUses, GrantTTL)
+		if err != nil || len(descs) == 0 {
+			return StatusUnavailable, nil
+		}
+		arr := []byte{'['}
+		for i, d := range descs {
+			if i > 0 {
+				arr = append(arr, ',')
+			}
+			arr = append(arr, strictjson.NewBuilder().String("grant_id", d.GrantID).String("kind", d.Kind).String("ref", d.Ref).
+				Uint("uses", d.Uses).String("expires_at", envelope.FormatTS(d.Expires)).Bytes()...)
+		}
+		out = strictjson.NewBuilder().Raw("grants", append(arr, ']')).Bytes()
+	case AuditRecent:
+		if f.deps.Audit == nil {
+			return StatusUnavailable, nil
+		}
+		arr := []byte{'['}
+		for i, e := range f.deps.Audit.ForConnection(conn, p.Limit) {
+			if i > 0 {
+				arr = append(arr, ',')
+			}
+			b := strictjson.NewBuilder().String("kind", e.Kind).String("at", envelope.FormatTS(e.At))
+			if e.Direction != "" {
+				b.String("direction", e.Direction)
+			}
+			arr = append(arr, b.Bytes()...)
+		}
+		out = strictjson.NewBuilder().Raw("entries", append(arr, ']')).Bytes()
+	default:
+		return StatusUnavailable, nil
+	}
+	if len(out) > MaxResult {
+		return StatusUnavailable, nil
+	}
+	return StatusOK, out
+}
+
+// respond is the member's decision on a pending invocation. A critical
+// action is approved only by an app within the credential's unlock
+// window (§10.14).
 func (f *Feature) respond(s *vault.Session, body []byte) (json.RawMessage, error) {
 	r, err := ParseRespond(body)
 	if err != nil {
@@ -801,94 +1082,96 @@ func (f *Feature) respond(s *vault.Session, body []byte) (json.RawMessage, error
 	if p == nil {
 		return nil, errNotFound
 	}
-	a := f.d.Actions[p.ActionID]
-	if a == nil {
-		return nil, errNotFound
-	}
-	// A respond action takes the member's result; a fixed one has its own.
-	if r.Approve && (a.Kind == KindRespond && r.Result == nil || a.Kind == KindFixed && r.Result != nil) {
-		return nil, errBad
+	def, _ := Lookup(p.ActionID)
+	if r.Approve && def.Sensitivity == Critical {
+		if s.From().Kind != vault.KindApp {
+			return nil, errForbidden
+		}
+		if f.deps.Keys == nil {
+			return nil, errLocked
+		}
+		if _, ok := f.deps.Keys.UseKey(s.Now(), s.Settings().UnlockTTL()); !ok {
+			return nil, errLocked // the member's phone must be there; it stays pending
+		}
 	}
 	delete(f.d.Pending, p.ID)
+	status, result := StatusDenied, json.RawMessage(nil)
+	kind := "action.denied"
 	if r.Approve {
-		res := r.Result
-		if a.Kind == KindFixed {
-			res = a.Result
-		}
-		f.sendResult(s, p.Conn, p.ID, StatusOK, res)
-		s.Record(vault.Activity{Kind: "action.approved", ConnectionID: p.Conn, Ref: p.ID, Audit: true})
-	} else {
-		f.sendResult(s, p.Conn, p.ID, StatusDenied, nil)
-		s.Record(vault.Activity{Kind: "action.denied", ConnectionID: p.Conn, Ref: p.ID, Audit: true})
+		status, result = f.execute(s, p.Conn, p.ID, def, p.Params)
+		kind = "action.approved"
 	}
+	f.sendResult(s, p.Conn, p.ID, status, result)
+	s.Record(vault.Activity{Kind: kind, ConnectionID: p.Conn, Ref: p.ID, Audit: true})
 	s.SyncEvent("action.decided", strictjson.NewBuilder().String("invocation_id", p.ID).Bool("approved", r.Approve).Bytes())
-	return nil, nil
+	return strictjson.NewBuilder().String("status", status).Bytes(), nil
 }
 
-// result: a connection answers one of this vault's invocations.
-func (f *Feature) result(s *vault.Session, body []byte) error {
+// result handles a connection's answer to one of our invocations.
+func (f *Feature) result(s *vault.Session, body []byte) {
+	conn := s.From().ID
 	r, err := ParseResult(body)
 	if err != nil {
-		return err
+		s.Record(vault.Activity{Kind: "drop.action_malformed", ConnectionID: conn, Audit: true})
+		return
 	}
-	conn := s.From().ID
-	o := f.d.Out[r.InvocationID]
+	o := f.d.Outgoing[r.InvocationID]
 	if o == nil || o.Conn != conn {
-		return nil // unknown or late: dropped
+		return // unknown, late or another connection's
 	}
-	delete(f.d.Out, r.InvocationID)
-	b := strictjson.NewBuilder().String("connection_id", conn).String("invocation_id", o.ID).String("action_id", o.ActionID).
-		String("status", r.Status)
-	if r.Result != nil {
+	delete(f.d.Outgoing, r.InvocationID)
+	if r.Status == StatusOK && (o.ActionID == ProfileFieldsRead || o.ActionID == SecretsShare) {
+		descs, err := Descs(r.Result)
+		if err != nil {
+			s.Record(vault.Activity{Kind: "drop.action_malformed", ConnectionID: conn, Audit: true})
+			return
+		}
+		if f.deps.Grants != nil {
+			f.deps.Grants.ReceiveFromAction(s, conn, r.InvocationID, descs)
+		}
+	}
+	b := strictjson.NewBuilder().String("connection_id", conn).String("invocation_id", r.InvocationID).
+		String("action_id", o.ActionID).String("status", r.Status)
+	if r.Status == StatusOK {
 		b.Raw("result", r.Result)
 	}
 	s.NotifyAllDevices("action.result", b.Bytes())
-	s.Record(vault.Activity{Kind: "action.completed", ConnectionID: conn, Ref: o.ID, Direction: "in", Audit: true})
-	return nil
+	s.Record(vault.Activity{Kind: "action.completed", ConnectionID: conn, Ref: r.InvocationID, Direction: "in", Audit: true})
 }
 
-// ConnectionRemoved implements vault.ConnectionRemovedObserver: the
-// connection leaves every allowlist; its offers and its invocations, both
-// ways, are dropped (§10.14, §7.4).
+// ConnectionRemoved implements vault.ConnectionRemovedObserver (§7.4).
 func (f *Feature) ConnectionRemoved(_ *vault.Session, conn string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	for _, a := range f.d.Actions {
-		if contains(a.Connections, conn) {
-			keep := []string{}
-			for _, c := range a.Connections {
-				if c != conn {
-					keep = append(keep, c)
-				}
-			}
-			a.Connections = keep
+	for _, c := range f.d.Configs {
+		if c.Connections == nil {
+			continue
 		}
+		kept := []string{}
+		for _, id := range c.Connections {
+			if id != conn {
+				kept = append(kept, id)
+			}
+		}
+		c.Connections = kept
 	}
 	delete(f.d.Offers, conn)
+	delete(f.d.Hits, conn)
 	for id, p := range f.d.Pending {
 		if p.Conn == conn {
 			delete(f.d.Pending, id)
 		}
 	}
-	for id, o := range f.d.Out {
+	for id, o := range f.d.Outgoing {
 		if o.Conn == conn {
-			delete(f.d.Out, id)
-		}
-	}
-	for k := range f.d.Seen {
-		if strings.HasPrefix(k, conn+"|") {
-			delete(f.d.Seen, k)
+			delete(f.d.Outgoing, id)
 		}
 	}
 }
 
-// PendingInvocations returns the pending invocations (tests and tools).
-func (f *Feature) PendingInvocations() []Pending {
+// PendingInvocations returns the pending invocation ids (tests, tools).
+func (f *Feature) PendingInvocations() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	var out []Pending
-	for _, p := range f.sortedPending() {
-		out = append(out, *p)
-	}
-	return out
+	return sortedKeys(f.d.Pending)
 }

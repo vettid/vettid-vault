@@ -70,7 +70,7 @@ func NewSet(o Options) *Set {
 		Critical:   critical.New(cred), // each use is a credential operation (§3.5.3)
 		// Built-in actions run through grants, the audit log and the
 		// credential's unlock window (§10.14).
-		Actions: actions.New(actions.Deps{Grants: gr, Audit: aud, Keys: cred, Profile: prof, Secrets: sec}),
+		Actions: actions.New(actions.Deps{Grants: gr, Audit: aud, Keys: cred}),
 		Intro:   intro.New(),
 	}
 }

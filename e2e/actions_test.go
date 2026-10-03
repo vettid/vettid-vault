@@ -10,88 +10,151 @@ import (
 
 	"github.com/vettid/vettid-vault/client"
 	"github.com/vettid/vettid-vault/internal/relaytest"
+	"github.com/vettid/vettid-vault/internal/strictjson"
 )
 
-// V4 batch 3, shared actions (§10.14) through the real relay: A offers B
-// a respond action and a fixed auto action; B's vault keeps the offers; B
-// invokes the respond action, A's app answers it, and B's app gets the
-// result; B invokes the auto action and gets the fixed result without A
-// being asked.
+// V4 batch 3, shared actions (§10.14) through the real relay: the
+// built-in catalog run by A's vault, invoked by B under each permission
+// mode (allowlist: profile.fields.read, with the value fetched through
+// the one-use grant; prompt-each-time approved by A's app; default-allow;
+// default-deny: no longer offered), and a critical action whose approval
+// is refused without the credential's unlock window and then accepted
+// with it (the wallet is not there yet: unavailable).
 func TestSharedAction(t *testing.T) {
 	r := relaytest.Start(t, nil)
 	a := newTestVault(t, r.URL, "a", nil)
 	b := newTestVault(t, r.URL, "b", nil)
-	ctx := ctxT(t, 120*time.Second)
+	ctx := ctxT(t, 180*time.Second)
 	aConn, bConn := connect(t, a, b, 600)
+	if _, err := a.app.ProfileSet(ctx, map[string]any{"version": 0, "name": "Ada",
+		"set": map[string]any{"contact.phone": map[string]any{"value": "555-0100"}, "contact.home": map[string]any{"value": "1 Main"}}}); err != nil {
+		t.Fatal(err)
+	}
 
-	respond, _, err := a.app.ActionDefine(ctx, client.ActionDef{Name: "Lunch?", Kind: "respond", Connections: []string{aConn}})
+	offered := func(action, want string) {
+		t.Helper()
+		deadline := time.Now().Add(30 * time.Second)
+		for {
+			l, err := b.app.ActionList(ctx, bConn)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(l["actions"]), want) {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("offer of %s (%s) not seen: %s", action, want, l["actions"])
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+	}
+	status := func(o strictjson.Object) string { s, _ := o.String("status"); return s }
+
+	// allowlist: runs at once; the field comes through a one-use grant.
+	if _, err := a.app.ActionConfigure(ctx, client.ActionConfig{ActionID: "profile.fields.read", Mode: "allowlist",
+		Connections: []string{aConn}, Fields: []string{"contact.phone"}}); err != nil {
+		t.Fatal(err)
+	}
+	offered("profile.fields.read", `"profile.fields.read","version":1,"prompt":false`)
+	id, err := b.app.ActionInvoke(ctx, bConn, "profile.fields.read", json.RawMessage(`{"fields":["contact.phone","contact.home"]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	fixed, _, err := a.app.ActionDefine(ctx, client.ActionDef{Name: "Address", Kind: "fixed", Mode: "auto",
-		Result: json.RawMessage(`{"addr":"1 Main St"}`), Connections: []string{aConn}})
+	res, err := b.app.ActionResult(ctx, id)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// B's vault receives the offers (the second carries both actions).
+	if status(res) != "ok" || strings.Contains(string(res["result"]), "555") || strings.Contains(string(res["result"]), "contact.home") {
+		t.Fatalf("allowlist: %v", res)
+	}
+	ro, _ := strictjson.ParseObject(res["result"])
+	gs, _ := ro.Array("grants")
+	gr, err := b.app.GrantFetch(ctx, field(t, gs[0], "grant_id"))
+	if err != nil || string(gr.Value) != "555-0100" {
+		t.Fatalf("fetch: %v %+v", err, gr)
+	}
+
+	// prompt-each-time: held until A's app approves.
+	if _, err := a.app.ActionConfigure(ctx, client.ActionConfig{ActionID: "audit.recent", Mode: "prompt-each-time"}); err != nil {
+		t.Fatal(err)
+	}
+	offered("audit.recent", `"audit.recent","version":1,"prompt":true`)
+	id, err = b.app.ActionInvoke(ctx, bConn, "audit.recent", json.RawMessage(`{"limit":5}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := waitEvent(t, a.app, "action.pending", has("invocation_id", id))
+	if field(t, p.Body, "connection_id") != aConn {
+		t.Fatalf("pending: %s", p.Body)
+	}
+	if st, err := a.app.ActionRespond(ctx, id, true); err != nil || st != "ok" {
+		t.Fatalf("respond: %q %v", st, err)
+	}
+	if res, err = b.app.ActionResult(ctx, id); err != nil || status(res) != "ok" || !strings.Contains(string(res["result"]), `"entries"`) {
+		t.Fatalf("prompt-each-time: %v %v", err, res)
+	}
+
+	// default-allow: at once, without asking.
+	if _, err := a.app.ActionConfigure(ctx, client.ActionConfig{ActionID: "audit.recent", Mode: "default-allow"}); err != nil {
+		t.Fatal(err)
+	}
+	offered("audit.recent", `"audit.recent","version":1,"prompt":false`)
+	if id, err = b.app.ActionInvoke(ctx, bConn, "audit.recent", nil); err != nil {
+		t.Fatal(err)
+	}
+	if res, err = b.app.ActionResult(ctx, id); err != nil || status(res) != "ok" {
+		t.Fatalf("default-allow: %v %v", err, res)
+	}
+
+	// default-deny: no longer offered; B cannot invoke it.
+	if _, err := a.app.ActionConfigure(ctx, client.ActionConfig{ActionID: "audit.recent", Mode: "default-deny"}); err != nil {
+		t.Fatal(err)
+	}
 	deadline := time.Now().Add(30 * time.Second)
 	for {
-		l, err := b.app.ActionList(ctx, bConn)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if s := string(l["actions"]); strings.Contains(s, respond) && strings.Contains(s, fixed) {
-			if strings.Contains(s, "1 Main St") {
-				t.Fatal("offer reveals the fixed result")
-			}
+		l, _ := b.app.ActionList(ctx, bConn)
+		if !strings.Contains(string(l["actions"]), "audit.recent") {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("offers not received: %s", l["actions"])
+			t.Fatal("offer not withdrawn")
 		}
-		time.Sleep(300 * time.Millisecond)
+		time.Sleep(200 * time.Millisecond)
+	}
+	if _, err := b.app.ActionInvoke(ctx, bConn, "audit.recent", nil); client.Code(err) != "not_found" {
+		t.Fatalf("default-deny: %v", err)
 	}
 
-	iid, err := b.app.ActionInvoke(ctx, bConn, respond, json.RawMessage(`{"when":"noon"}`))
-	if err != nil {
+	// A critical action: approved only by an app within the unlock window.
+	if _, err := a.app.ActionConfigure(ctx, client.ActionConfig{ActionID: "wallet.request-payment", Mode: "default-allow"}); client.Code(err) != "bad_request" {
+		t.Fatalf("critical default-allow: %v", err)
+	}
+	if _, err := a.app.ActionConfigure(ctx, client.ActionConfig{ActionID: "wallet.request-payment", Mode: "prompt-each-time"}); err != nil {
 		t.Fatal(err)
 	}
-	p := waitEvent(t, a.app, "action.pending", has("invocation_id", iid))
-	if field(t, p.Body, "connection_id") != aConn || !strings.Contains(string(p.Body), `"when":"noon"`) {
-		t.Fatalf("pending: %s", p.Body)
-	}
-	if err := a.app.ActionRespond(ctx, iid, true, json.RawMessage(`{"answer":"yes"}`)); err != nil {
+	offered("wallet.request-payment", `"wallet.request-payment","version":1,"prompt":true`)
+	if id, err = b.app.ActionInvoke(ctx, bConn, "wallet.request-payment", json.RawMessage(`{"asset":"BTC","amount_sats":1000}`)); err != nil {
 		t.Fatal(err)
 	}
-	res, err := b.app.ActionResult(ctx, iid)
-	if err != nil {
+	waitEvent(t, a.app, "action.pending", has("invocation_id", id))
+	if _, err := a.app.ActionRespond(ctx, id, true); client.Code(err) != "credential_locked" {
+		t.Fatalf("critical outside the unlock window: %v", err)
+	}
+	if _, err := a.app.CredentialUnlock(ctx, credPW); err != nil {
 		t.Fatal(err)
 	}
-	if st, _ := res.String("status"); st != "ok" || !strings.Contains(string(res["result"]), `"answer":"yes"`) {
-		t.Fatalf("result: %v", res)
+	if st, err := a.app.ActionRespond(ctx, id, true); err != nil || st != "unavailable" {
+		t.Fatalf("critical approved: %q %v", st, err)
+	}
+	if res, err = b.app.ActionResult(ctx, id); err != nil || status(res) != "unavailable" {
+		t.Fatalf("wallet: %v %v", err, res)
 	}
 
-	iid2, err := b.app.ActionInvoke(ctx, bConn, fixed, nil)
+	au, err := a.app.AuditList(ctx, map[string]any{"kinds": []string{"action", "grant"}}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	res2, err := b.app.ActionResult(ctx, iid2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if st, _ := res2.String("status"); st != "ok" || string(res2["result"]) != `{"addr":"1 Main St"}` {
-		t.Fatalf("auto result: %v", res2)
-	}
-	for _, ev := range a.app.Events() {
-		if ev.Type == "action.pending" && has("invocation_id", iid2)(ev.Body) {
-			t.Fatal("auto action asked the member")
-		}
-	}
-	au, err := a.app.AuditList(ctx, map[string]any{"kinds": []string{"action"}}, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, k := range []string{"action.defined", "action.invoked", "action.approved"} {
+	for _, k := range []string{"action.configured", "action.invoked", "action.approved", "grant.issued", "grant.fetched"} {
 		if !strings.Contains(string(au["entries"]), `"`+k+`"`) {
 			t.Errorf("audit lacks %s", k)
 		}

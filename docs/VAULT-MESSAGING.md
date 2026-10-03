@@ -24,7 +24,8 @@ changelog:
     secrets between connections, values sealed to the fetching device,
     and the secrets catalog (§10.12); critical-secret use by a connection
     with the member's password per use (§10.13); shared actions offered
-    to connections by allowlist (§10.14); peer flows are events
+    to connections as a built-in catalog with permission modes (§10.14);
+    introductions started by the member (§10.15); peer flows are events
     correlated by ids; registry, sync.event, audit, feed and threat-model
     rows for all of them
   - 0.5.0: V4 batch 2: access sessions and app approvals for desktops and
@@ -1380,8 +1381,8 @@ current access session, so a request made within a session renews it.
   a connection or change what connections can obtain: `secret.get`,
   `secret.put`, `secret.delete`, `profile.set`, `settings.set`,
   `connection.invite.create`, `connection.invite.accept`,
-  `connection.remove`, `block.remove`, `grant.decide` and
-  `action.define`. Apps are never held. (Types that use the credential,
+  `connection.remove`, `block.remove`, `grant.decide`,
+  `action.configure`, `intro.create` and `intro.accept`. Apps are never held. (Types that use the credential,
   such as `critical-secret-use.approve` and signed `leash.grant.issue`,
   are app-only.)
 - An **agent** may send only the types listed for agents in §10, unless
@@ -1738,9 +1739,12 @@ an answer to an unknown or expired id is dropped.
 | | `wallet.address.share`, `wallet.payment.request` | V↔V | | Between connections |
 | Location | `location.share.start`, `.stop`, `location.get` | D→V | req | Sharing control |
 | | `location.update` | V↔V | | Sample to a connection (latest wins) |
-| Actions | `action.define`, `.delete`, `.list`, `.invoke`, `.respond` | D→V | req | Actions offered to connections; invoke one; answer one (§10.14) |
+| Actions | `action.list`, `.configure`, `.invoke`, `.respond` | D→V | req | The built-in catalog and its permission modes; invoke an action on a connection's vault; approve one (§10.14) |
 | | `action.offered`, `action.invocation`, `action.result` | V↔V | | The actions offered to that connection; an invocation; its result |
 | | `action.pending`, `action.result` | V→D | | Invoked and waiting for the owner; a result |
+| Introductions | `intro.create`, `.cancel`, `.list`, `.accept`, `.decline` | D→V | req | Introduce two connections; answer an introduction (§10.15) |
+| | `intro.offer`, `.answer`, `.connect`, `.invite`, `.link`, `.closed` | V↔V | | Between the introducer and each party |
+| | `intro.pending`, `intro.event` | V→D | | Offered; answered, connecting or closed |
 | Grants | `grant.request`, `.decide`, `.revoke`, `.list`, `.fetch`, `.catalog` | D→V | req | 1:1 grants of profile fields and secrets (§10.12) |
 | | `data.request`, `data.decided`, `data.revoked`, `data.fetch`, `data.value`, `data.catalog.get`, `data.catalog` | V↔V | | Between the two vaults |
 | | `grant.pending`, `grant.event`, `grant.value`, `grant.catalog.result` | V→D | | Asked; granted, denied or revoked; a value sealed to the fetching device; a connection's catalog |
@@ -1842,10 +1846,10 @@ an answer to an unknown or expired id is dropped.
   | `grant.request.decided` | `request_id`, `approved` (§10.12) |
   | `credential.secret.cataloged` | `secret_id`, `cataloged` (§10.13) |
   | `critical-secret-use.decided` | `request_id`, `approved` (§10.13) |
-  | `action.changed` | `action_id`, `version` (§10.14) |
-  | `action.deleted` | `action_id` (§10.14) |
+  | `action.changed` | `action_id`, `version`: its configuration changed (§10.14) |
   | `action.decided` | `invocation_id`, `approved` (§10.14) |
   | `action.offers` | `connection_id`: the actions it offers changed (§10.14) |
+  | `intro.changed` | `intro_id`, `state` (§10.15) |
 
   These go to the owner's other apps and desktops (not agents), never with
   secret values; devices fetch what changed.
@@ -2266,10 +2270,12 @@ entry: { "entry_id": "<ULID>", "seq": 812, "at": "<ts>", "kind": "connection.add
   (§10.12); `credential.secret.cataloged` (`ref` = `secret_id`),
   `critical-secret.use.requested`, `critical-secret.used`,
   `critical-secret.use.denied`, `critical-secret.use.result`
-  (`ref` = `request_id`) (§10.13); `action.defined`, `action.deleted`
+  (`ref` = `request_id`) (§10.13); `action.configured`
   (`ref` = `action_id`), `action.invoked`, `action.approved`,
   `action.denied`, `action.completed` (`ref` = `invocation_id`)
-  (§10.14); `drop.suppressed`;
+  (§10.14); `intro.created`, `intro.offered`, `intro.accepted`,
+  `intro.declined`, `intro.connecting`, `intro.closed`
+  (`ref` = `intro_id`) (§10.15); `drop.suppressed`;
   and `drop.<reason>` for every message the vault dropped
   or refused (§6.3, §6.6, §7.3, §8.4), with the runtime's reason, such as
   `drop.rate_limited`.
@@ -2315,6 +2321,7 @@ item: { "item_id": "<ULID>", "seq": 41, "kind": "connection.request", "at": "<ts
   (`ref` = `request_id`),
   `grant.revoked` (`ref` = `grant_id`), `critical-secret.use.request`
   (`ref` = `request_id`), `action.request` (`ref` = `invocation_id`),
+  `intro.request` (`ref` = `intro_id`),
   and `guide`. Apps render
   items from `kind` and the references; only `guide` items carry `title`
   and `body`.
@@ -2895,81 +2902,205 @@ B app            B vault                   A vault                      A app
 
 ### 10.14 Shared actions
 
-A member offers **actions** to chosen connections: named requests that a
-connection invokes and the member answers, once each. The vault never
-runs code for an action: either the member answers each invocation, or
-the vault returns a result the member fixed in advance.
+A member lets chosen connections **invoke actions** on their vault: a
+fixed catalog of operations built into each release, run by the vault
+itself (native code in the vault's process, §12.4, no third-party code),
+under a permission mode the member sets per action. A connection learns
+which actions it may invoke from the member's offer; an invocation is
+answered with the action's result or a refusal.
 
-```json
-action: { "action_id": "<ULID>", "version": 1, "name": "Payment address",
-          "description": "...", "kind": "respond|fixed", "mode": "ask|auto",
-          "result": { }, "connections": ["<id>"], "created_at": "<ts>", "updated_at": "<ts>" }
-```
+**The catalog** (catalog version 1). Each action has a fixed `action_id`
+and `version`, a parameter and a result schema, and a sensitivity:
 
-- `kind` `respond`: an app or desktop answers each invocation with its
-  own `result`; `mode` MUST be `ask`. `kind` `fixed`: the vault answers
-  with the definition's `result`, after the member approves the
-  invocation (`ask`, the default) or at once (`auto`).
-- `connections` is the allowlist (0–256 connection ids): an action is
-  offered to, and answered for, only those connections. There is no
-  "every connection" mode.
-- `name` 1–64 bytes, `description` at most 1,024 bytes, `result` a JSON
-  object of at most 16 KiB; at most 64 actions (`limit`). Versions as
-  §10.1.
+| `action_id` (version 1) | Sensitivity | `params` | `result` |
+|---|---|---|---|
+| `profile.fields.read` | sensitive | `{fields: [<key>]}`, 1–16 profile keys (§10.8) | `{grants: [{grant_id, kind: "field", ref, uses, expires_at}]}` |
+| `secrets.share` | sensitive | `{secret_id}` | `{grants: [{grant_id, kind: "secret", ref, uses, expires_at}]}` |
+| `audit.recent` | normal | `{limit?}`, 1–50, default 20 | `{entries: [{kind, at, direction?}]}` |
+| `wallet.request-address` | normal | `{asset: "BTC"}` | `{asset, address}` |
+| `wallet.request-payment` | critical | `{asset: "BTC", amount_sats, memo?}`; `amount_sats` 1–2,100,000,000,000,000, `memo` at most 280 bytes | `{status, txid?}` |
 
-**Offers.** After every change to its actions, the member's vault sends
-each affected active connection `action.offered` with the complete list
-of actions offered to it (empty when none remain). The receiving vault
-keeps the latest list per connection (`action.list{connection_id}`) and
-tells its owner devices `sync.event{kind: "action.offers",
-connection_id}`.
+- **`profile.fields.read` and `secrets.share` go through grants
+  (§10.12)**, the same consent and delivery as a request the member
+  decided: the action creates, for the invoking connection, one grant per
+  item that the member's configuration allows (`fields`, `secrets`) and
+  that is available (a field that exists; a cataloged vault-held secret),
+  with `uses` 1 and an expiry of 10 minutes, and returns them. The
+  connection fetches the values with `grant.fetch`, sealed to its
+  fetching device; the invoking vault records the grants as received,
+  and either side can revoke them as any grant. If no requested item is
+  allowed and available, the status is `unavailable`. Critical secrets
+  are never shared.
+- **`audit.recent`** returns the newest entries of the member's audit log
+  (§10.9) whose `connection_id` is the invoking connection, at most
+  `limit`: only `kind`, `at` and `direction`, never `ref`, other
+  connections' entries or `drop.*` entries.
+- **Wallet actions** are defined now and answered `unavailable` until
+  the wallet feature exists (its batch defines the execution);
+  `wallet.request-payment` is critical (it will spend with the member's
+  keys) and keeps its critical rules meanwhile.
+- `param_schema` and `result_schema` (JSON Schema 2020-12 documents in
+  `action.list`) describe the shapes above for apps. The vault checks
+  parameters with its own strict parser per action, never with a general
+  schema engine; parameters that do not parse are answered
+  `unavailable`.
 
-A device's `action.invoke` is a request to its own vault; between the
-vaults the invocation is the event `action.invocation`, so that no type
-is both a request and an event (§10).
+**Permission modes**, per action (`action.configure`); every action
+starts in `default-deny`:
+
+| Mode | Offered to | Runs |
+|---|---|---|
+| `default-deny` | nobody | never: invocations are `unavailable` |
+| `allowlist` | the connections in `connections` | at once, without asking |
+| `prompt-each-time` | every active connection, or only `connections` if given | after the member approves each invocation (`action.pending`, `action.respond`) |
+| `default-allow` | every active connection | at once, without asking |
+
+- A **sensitive** action cannot be `default-allow` (`bad_request`).
+- A **critical** action can only be `default-deny` or
+  `prompt-each-time`, and is approved only by an **app within the
+  credential's unlock window** (§3.5.3; `credential_locked` otherwise):
+  the member's phone must be there.
+- `fields` (1–64 profile keys) bounds `profile.fields.read`, `secrets`
+  (1–64 `secret_id`s) bounds `secrets.share`; without them those actions
+  share nothing.
+
+**Offers.** After every configuration change, and when a connection
+becomes active, the member's vault sends each affected active connection
+`action.offered` with the complete list of actions it may invoke (empty
+when none). The receiving vault keeps the latest list per connection
+(`action.list{connection_id}`) and tells its owner devices
+`sync.event{kind: "action.offers", connection_id}`.
 
 | Type | Request body | Response / event body |
 |---|---|---|
-| `action.define` (app; desktop: step-up) | `{action_id?, version?, name, description?, kind, mode?, result?, connections}` | `{action_id, version}` |
-| `action.delete` (app, desktop) | `{action_id}` | `{}` |
-| `action.list` (app, desktop) | `{connection_id?}` | `{actions: [<action>]}`; with `connection_id`, the actions that connection offers: `{actions: [{action_id, version, name, description?}]}` |
-| `action.offered` (V↔V) | — | `{actions: [{action_id, version, name, description?}]}` (at most 64) |
-| `action.invoke` (app, desktop) | `{connection_id, action_id, params?}` | `{invocation_id}` |
-| `action.invocation` (V↔V) | — | `{invocation_id, action_id, version, params?}` |
-| `action.pending` (V→D, apps and desktops) | — | `{invocation_id, connection_id, action_id, name, kind, params?, exp}` |
-| `action.respond` (app, desktop) | `{invocation_id, approve, result?}` (`result` only, and required on approval, for a `respond` action) | `{}` |
+| `action.list` (app, desktop) | `{connection_id?}` | without it: `{catalog_version, actions: [{action_id, version, sensitivity, available, param_schema, result_schema, mode, config_version, connections?, fields?, secrets?}]}`; with it, what that connection offers: `{actions: [{action_id, version, prompt}]}` |
+| `action.configure` (app; desktop: step-up) | `{action_id, version?, mode, connections?, fields?, secrets?}`; `version` is the configuration version it is based on (`conflict` if stale, §10.1) | `{version}` (the new configuration version) |
+| `action.offered` (V↔V) | — | `{actions: [{action_id, version, prompt}]}` (at most 64) |
+| `action.invoke` (app, desktop) | `{connection_id, action_id, params}` | `{invocation_id}` |
+| `action.invocation` (V↔V) | — | `{invocation_id, action_id, version, params}` |
+| `action.pending` (V→D, apps and desktops) | — | `{invocation_id, connection_id, action_id, sensitivity, params, exp}` |
+| `action.respond` (app, desktop; critical: app in the unlock window) | `{invocation_id, approve}` | `{status}`: the result sent |
 | `action.result` (V↔V) | — | `{invocation_id, status: "ok", result}` or `{invocation_id, status: "denied" \| "expired" \| "unavailable"}` |
 | `action.result` (V→D, apps and desktops) | — | `{connection_id, invocation_id, action_id, status, result?}` |
 
-- `params` is a JSON object of at most 4 KiB, opaque to the vault and
-  shown to the member; apps validate `params` and `result` against what
-  they expect. The vault does not interpret either.
-- The member's vault answers `unavailable` for an action that does not
-  exist, is not offered to that connection, or has another `version`
-  (not told apart), and when it already holds 8 pending invocations from
-  that connection (`fixed` `auto` invocations, answered at once, never
-  count). A pending invocation is answered `expired` after 24 h, and
-  `unavailable` when its action is deleted or no longer offered to that
-  connection. An `invocation_id` the vault already holds, from any
-  connection, is ignored.
-- `action.invoke` by the invoking side needs an offer for that
-  `action_id` from the connection (`not_found` otherwise); the invoking
-  vault keeps its invocations for 25 h and forwards results to its apps
-  and desktops.
-- Desktops: `action.define` is a step-up type (§6.8): it changes what
-  connections can obtain. Agents: `action.list` and `action.invoke` are
-  delegable (§10.11).
-- Removing or blocking a connection removes it from every allowlist and
-  drops its offers and pending invocations (§7.4).
-- **Audit and feed.** `action.defined`, `action.deleted`,
+- The member's vault answers `unavailable` for an action that is not in
+  its catalog, not offered to that connection, of another `version`,
+  whose parameters do not parse, or that cannot run (not told apart);
+  and when it already holds 8 pending invocations from that connection,
+  or has had 60 invocations from it in the last hour (refused ones
+  count, so a connection that keeps invoking stays refused). Malformed
+  `action.*` messages from a connection are dropped and audited
+  (`drop.action_malformed`). A pending
+  invocation is answered `expired` after 24 h, and `unavailable` when a
+  configuration change stops offering it to that connection. A repeated
+  `invocation_id` is ignored.
+- `params` is at most 4 KiB, `result` at most 16 KiB.
+- `action.invoke` needs an offer for that `action_id` from the
+  connection (`not_found` otherwise); the invoking vault keeps its
+  invocations 25 h and forwards results to its apps and desktops; later
+  or unknown results are dropped.
+- A device's `action.invoke` is a request to its own vault; between the
+  vaults the invocation is the event `action.invocation`, so that no type
+  is both a request and an event (§10).
+- Agents: `action.list` and `action.invoke` are delegable (§10.11).
+- Removing or blocking a connection removes it from every
+  configuration's `connections` and drops its offers and invocations
+  (§7.4).
+- **Audit and feed.** `action.configured` (`ref` = `action_id`),
   `action.invoked` (both sides), `action.approved`, `action.denied`,
-  `action.completed`; an invocation waiting for the member is a
-  high-priority feed item (`action.request`); `sync.event`
-  `action.changed`, `action.deleted`, `action.decided`, `action.offers`.
+  `action.completed` (`ref` = `invocation_id`); an invocation waiting
+  for the member is a high-priority feed item (`action.request`);
+  `sync.event` `action.changed` (`action_id`, `version`),
+  `action.decided`, `action.offers`.
 - In vettid.dev, invocations and results were published to subjects
   that the receiving vault did not listen on. Here they are types inside
-  the connection's session, classified like every message by the
-  session that decrypts them (§13.6).
+  the connection's session, classified like every message by the session
+  that decrypts them (§13.6).
+
+### 10.15 Introductions
+
+A member may **introduce** two of their connections to each other. Only
+the member can start one: a connection never sees, lists or asks for the
+member's other connections, and there is no request to be introduced.
+
+```
+A vault             B vault (introducer)              C vault
+  |<--intro.offer{peer: what B shows}--|--intro.offer{peer}------------->|
+  |--intro.answer{accept}------------->|<--intro.answer{accept}----------|
+  |<--intro.connect{peer_ik}-----------|   (only when both accepted)      |
+  |--intro.invite{link}--------------->|--intro.link{link}-------------->|
+  |<----------------- hs.init (§6.4, remote invitation) -----------------|
+  |   connection.request.pending{introduced_by}; A's member approves (SAS)
+```
+
+1. B's app sends `intro.create` naming two active connections, `a` and
+   `c`, and what each will be shown of the other (`to_a` is shown to A
+   about C, `to_c` to C about A): a `name` and an optional `note`, chosen
+   by B and presented as B's words.
+2. B's vault sends each an `intro.offer` with only that. Their apps show
+   it (`intro.pending`) and their members accept or decline; each answer
+   goes back to B only (`intro.answer`).
+3. When **both** have accepted, B's vault sends A `intro.connect` with
+   C's `ik` as B has it on record. A's vault makes a remote invitation
+   (§6.4, TTL 24 h or the relay's maximum if lower) that it accepts only
+   from that `ik` (an `hs.init` from another identity is dropped and
+   audited, `drop.intro_mismatch`, and the invitation stays usable), and
+   returns its link to B (`intro.invite`). B relays it to C
+   (`intro.link`), and C's vault accepts it as `connection.invite.accept`
+   would. A's member then approves the request as any remote one, with
+   the SAS (§6.4); `connection.request.pending` carries
+   `introduced_by` (A's connection id of B).
+4. If either declines, B cancels, or the introduction has not been
+   linked within 7 days, B's vault sends `intro.closed` to each party it
+   had offered it to (except one that declined, which has closed its own
+   copy), without a reason, and each closes its offer (A also cancels an
+   invitation it made and that has not been used). If A cannot make the
+   invitation it closes its copy and tells its devices; B's introduction
+   then closes at its expiry.
+5. **States.** At B: `offered` → `connecting` (both accepted) →
+   `linked` (the link relayed) or `closed`. At A and C: `pending` →
+   `accepted` → `connecting` or `closed`; a `connecting` offer is no
+   longer subject to the 7-day expiry (the invitation's own lifetime
+   governs). Ended records are kept 30 days for `intro.list`. Neither A nor C learns anything about the other
+   beyond what B chose to show them before they answered: no key, relay
+   address, link or answer of the other.
+
+| Type | Request body | Response / event body |
+|---|---|---|
+| `intro.create` (app; desktop: step-up) | `{a, c, to_a: {name, note?}, to_c: {name, note?}}` | `{intro_id, exp}` |
+| `intro.cancel` (app, desktop) | `{intro_id}` | `{}` |
+| `intro.list` (app, desktop) | `{}` | `{made: [{intro_id, a, c, state, exp}], received: [{intro_id, connection_id, peer, state, exp}]}` |
+| `intro.accept`, `intro.decline` (app; desktop: step-up for accept) | `{intro_id}` | `{}` |
+| `intro.offer` (V↔V, B → A, C) | — | `{intro_id, peer: {name, note?}, exp}` |
+| `intro.answer` (V↔V, A, C → B) | — | `{intro_id, accept}` |
+| `intro.connect` (V↔V, B → A) | — | `{intro_id, peer_ik}` |
+| `intro.invite` (V↔V, A → B) | — | `{intro_id, link}` |
+| `intro.link` (V↔V, B → C) | — | `{intro_id, link}` |
+| `intro.closed` (V↔V, B → A, C) | — | `{intro_id}` |
+| `intro.pending` (V→D, apps and desktops of A and C) | — | `{intro_id, connection_id, peer, exp}` |
+| `intro.event` (V→D, apps and desktops) | — | `{intro_id, event: "accepted" \| "declined" \| "connecting" \| "closed", connection_id?}`; B's devices get each answer (and `sync.event{intro.changed, state: "linked"}` once the link is relayed); A's and C's only `connecting` and `closed` |
+
+- **Limits.** `a` ≠ `c`, both active connections of B; at most one open
+  introduction per pair and 16 open per vault (`limit`); `name` 1–128
+  bytes, `note` at most 256. A receiving vault keeps at most 4 open
+  offers per introducer and 16 in all (more are dropped and audited,
+  `drop.intro_limit`) and ignores a repeated `intro_id`.
+- **Authority.** A vault acts on `intro.answer` and `intro.invite` only
+  from the party it sent the offer or `intro.connect` to, on
+  `intro.connect`, `intro.link` and `intro.closed` only from the
+  introducer of an offer it holds and accepted, and drops anything else
+  (`drop.intro`). C's vault accepts the link only once and only while it
+  holds the accepted offer.
+- **What B learns** is each answer and that the link was relayed; the
+  connection itself is between A and C.
+- Removing or blocking a connection closes the introductions it takes
+  part in (an introducer's offers are dropped without notice).
+- Agents never introduce or answer introductions.
+- **Audit and feed.** `intro.created`, `intro.offered` (on A and C),
+  `intro.accepted`, `intro.declined`, `intro.connecting`, `intro.closed`
+  (`ref` = `intro_id`); an offer is a high-priority feed item
+  (`intro.request`); `sync.event{kind: "intro.changed", intro_id,
+  state}`.
 
 ## 11. Enrollment and unlock (alternate channel)
 
@@ -4448,13 +4579,16 @@ it can read and write only its own objects and use only its own relay key
 | Vault `ik` or `kem` | Impersonate the vault in new handshakes and read new `hs.init`s | Credential rotation, `identity.rotate`, rekey |
 | ETK | PINs in requests sealed to it (≤ 25 h). Requires breaking the enclave. | Enclave restart |
 | Owner app | Whatever its role allows, including unlock attempts if the PIN is known | Unlink from another device |
-| Desktop | Within an access session, what desktops may send; step-up types (secret values, profile, settings, invitations, removals, grant decisions, action definitions) only with an app's approval; nothing after the session ends (§6.8) | `device.session.end`; unlink |
+| Desktop | Within an access session, what desktops may send; step-up types (secret values, profile, settings, invitations, removals, grant decisions, action configurations, introductions) only with an app's approval; nothing after the session ends (§6.8) | `device.session.end`; unlink |
 | Agent | Within its access session, only what its LEASH grants cover: through `ask` grants nothing without an app's approval of each request (at most 20 referrals an hour), through `auto` grants up to their rate limits; LEASH operations only on cataloged vault-held secrets, never critical ones; never app-only types, invitations, credential, device or grant management. Refused requests are throttled and repeated ones suspend it; its activity is summarised in the audit log, so it cannot push older entries out (§10.11) | `leash.grant.revoke`, `device.session.end`, `device.unlink`; suspension is automatic |
 | A LEASH delegation (every grant) | A claim, to relying parties that trust the member's credential key, that the agent holds that scope, until the grant's `expires_at` if any; the vault never relies on it. A revoked grant's delegation carries no revocation status: a relying party outside the vault that does not ask the agent's connector for its current grants can be shown one (§10.11) | `leash.grant.revoke` stops the vault and tells the agent at once; give grants an `expires_at` when relying parties outside the vault matter |
 | Issuing grants | Only with the member present: an app within the credential's unlock window, since the credential key signs each grant (§10.11) | — |
 | A connection holding a grant | The granted items' current values, at most `uses` times, until expiry or revocation; no other field or secret. Values are sealed to the fetching device, so the connection's vault never holds them (§10.12) | `grant.revoke`; removing or blocking the connection |
 | A connection asking to use a critical secret | Nothing without the member's password for each use, bound to that request and payload; then one signature (`sign` over the payload as shown to the member, or the domain-separated `auth`), never the key (§10.13) | Deny; take the secret out of the catalog (`credential.secret.catalog`) |
-| A connection offered actions | The fixed results of `auto` actions offered to it and what the member answers; nothing of actions not offered to it (§10.14) | `action.define` (allowlist), `action.delete` |
+| A connection offered actions | Only the built-in actions offered to it, under their modes: one-use, 10-minute grants of the fields and secrets the member configured (values sealed to its device), its own entries of the audit log; nothing at all of a critical action without the member's app in the unlock window; at most 60 invocations an hour and 8 pending (§10.14) | `action.configure` (mode `default-deny`), `grant.revoke`, removing the connection |
+| A member's vault code for actions | Actions run natively in the vault's process (§12.4) from a catalog fixed in the release; no third-party or downloaded code (§10.14) | A release update (§11.10) |
+| A connection, about the member's other connections | Nothing: no type lists them to a connection or lets it ask for an introduction; it learns of another connection only when the member introduces them, only what the member chose to show, and connects only if both accept and then approve each other with the SAS (§10.15) | Decline; `block.add` |
+| The introducer | Each party's answer; it relays the invitation, so it could substitute a party it is connected to, but the parties still approve each other with the SAS, and the invitation accepts only the `ik` B named (§10.15) | Compare the SAS out of band; decline |
 | A call's media key `k_call` | That call's media; it exists only on the two devices of the call, whose key-exchange shares are signed by the devices and vouched for by their vaults (§10.10) | Hang up |
 | PIN alone | Nothing without a registered, attested app | `pin.change` |
 | An app's copy of the Protean Credential | Nothing without the current CEK, which only the vault holds and which rotates at every use; password guesses only online, through a paired app with a UTK, under the backoff (§3.5.8) | Any use of the credential (a new CEK; the old blob is dead) |
@@ -4674,7 +4808,8 @@ pending (§15, follow-up 1).
   - §6.7, §10.3: `device.pair.approve{grants}` carries an agent's initial
     grants. §6.8: `agent.request` goes through the policy; a referred
     request runs on approval only while a grant covers it; `grant.decide`
-    and `action.define` are step-up types. §9.1: agents get no fan-out.
+    `action.configure`, `intro.create` and `intro.accept` are step-up
+    types. §9.1: agents get no fan-out.
   - §10.12 (new): grants of profile fields (the per-connection profile
     overrides deferred in 0.4.0) and cataloged vault-held secrets: ask,
     decide, fetch with uses and expiry, revoke from either side; values
@@ -4684,9 +4819,17 @@ pending (§15, follow-up 1).
     request and the payload's hash), the CEK rotates, only a signature
     (`sign` or the domain-separated `auth`) leaves the vault;
     `credential.secret.catalog`. §3.5.4: the payload members.
-  - §10.14 (new): shared actions (`respond` or `fixed`, `ask` or `auto`,
-    per-connection allowlists), offers, invocations and results, without
-    the vettid.dev mis-routing.
+  - §10.14 (new): shared actions as a built-in catalog run by the vault
+    (`profile.fields.read` and `secrets.share` through one-use grants,
+    `audit.recent`, `wallet.request-address`, `wallet.request-payment`
+    defined and `unavailable` until the wallet), permission modes per
+    action (`default-deny`, `allowlist`, `prompt-each-time`,
+    `default-allow`; none for sensitive, critical only with an app in the
+    unlock window), offers, invocations, results and limits, without the
+    vettid.dev mis-routing (owner decision 2026-10-03).
+  - §10.15 (new): introductions started only by the member: both parties
+    accept, then the first makes an invitation bound to the other's `ik`
+    that the introducer relays; the parties approve each other as usual.
   - §10: flows between vaults are events correlated by ids (the registry's
     V↔V `req` entries for actions and grants are gone); registry rows.
     §10.7: `discoverability` takes effect. §10.1: `sync.event` kinds;

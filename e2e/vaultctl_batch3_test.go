@@ -20,7 +20,7 @@ import (
 // exercise the types through the real relay): an agent paired with an
 // initial LEASH grant reads the catalog; a grant issued later lets it read
 // a named secret and is revoked again; the owner catalogs a critical
-// secret, defines an action and lists grants and critical-secret uses.
+// secret, configures an action and lists grants and critical-secret uses.
 func TestVaultctlBatch3(t *testing.T) {
 	r := relaytest.Start(t, nil)
 	dir := t.TempDir()
@@ -147,11 +147,11 @@ func TestVaultctlBatch3(t *testing.T) {
 	if out = run("critical", "list"); !strings.Contains(out, `"incoming"`) {
 		t.Fatalf("critical list: %s", out)
 	}
-	out = run("action", "define", "-name", "Lunch?", "-kind", "respond")
-	if between(out, `"action_id": "`, `"`) == "" {
-		t.Fatalf("action define: %s", out)
+	out = run("action", "configure", "-id", "audit.recent", "-mode", "default-deny")
+	if !strings.Contains(out, `"version": 1`) {
+		t.Fatalf("action configure: %s", out)
 	}
-	if out = run("action", "list"); !strings.Contains(out, "Lunch?") {
+	if out = run("action", "list"); !strings.Contains(out, "audit.recent") || !strings.Contains(out, "wallet.request-payment") {
 		t.Fatalf("action list: %s", out)
 	}
 	if out = run("grant", "list"); !strings.Contains(out, `"given"`) {

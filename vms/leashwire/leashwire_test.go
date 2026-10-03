@@ -52,7 +52,7 @@ func TestDelegationStrict(t *testing.T) {
 		"whitespace":    bytes.Replace(good, []byte(`,"scope"`), []byte(`, "scope"`), 1),
 		"reordered":     bytes.Replace(bytes.Replace(good, []byte(`"version":3,`), nil, 1), []byte(`"iat"`), []byte(`"version":3,"iat"`), 1),
 		"bad approval":  bytes.Replace(good, []byte(`"auto"`), []byte(`"always"`), 1),
-		"too long":      func() []byte { e := *d; e.Expires = e.IssuedAt.Add(25 * time.Hour); return e.Marshal() }(),
+		"exp at iat":    func() []byte { e := *d; e.Expires = e.IssuedAt; return e.Marshal() }(),
 		"exp before":    func() []byte { e := *d; e.Expires = e.IssuedAt.Add(-time.Second); return e.Marshal() }(),
 		"empty secrets": bytes.Replace(good, []byte(`["01JB2Z6V9K3M4N5P6Q7R8S9T0W"]`), []byte(`[]`), 1),
 		"bad id":        bytes.Replace(good, []byte(`01JB2Z6V9K3M4N5P6Q7R8S9T0V`), []byte(`not-a-ulid`), 1),
@@ -64,6 +64,17 @@ func TestDelegationStrict(t *testing.T) {
 	}
 	if _, err := Parse(good); err != nil {
 		t.Fatal(err)
+	}
+	// Without an expiry (LEASH §3.2: the contract's expiry is optional).
+	open := *d
+	open.Expires = time.Time{}
+	ob := open.Marshal()
+	if bytes.Contains(ob, []byte(`"exp"`)) {
+		t.Fatalf("exp written: %s", ob)
+	}
+	sig, _ := Sign(key(9), ob)
+	if got, err := Verify(key(9).Public().(ed25519.PublicKey), ob, sig, d.IssuedAt.Add(400*24*time.Hour)); err != nil || !got.Expires.IsZero() {
+		t.Fatalf("open-ended delegation: %v", err)
 	}
 	if _, err := Sign(key(9), []byte(`{}`)); err == nil {
 		t.Fatal("signed a non-delegation")

@@ -104,6 +104,7 @@ func TestVaultctlBatch3(t *testing.T) {
 		paired <- err
 	}()
 	out = poll(app, "device.pair.pending")
+	run("credential", "unlock") // grants are signed by the credential key (§10.11)
 	run("request", "device.pair.approve", `{"pairing_id":"`+between(out, `"pairing_id": "`, `"`)+`","session_seconds":600,`+
 		`"grants":[{"scope":"secrets.catalog","approval":"auto"}]}`)
 	if err := <-paired; err != nil {

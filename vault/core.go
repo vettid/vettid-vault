@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"errors"
 	"sort"
 	"time"
 
@@ -146,9 +147,22 @@ func (m *Manager) hPairApprove(ctx context.Context, s *Session, in *envelope.Inn
 	grants, hasGrants := o["grants"]
 	if hasGrants {
 		g := m.agentGrantor()
-		if m.st.Inbound[id].Kind != KindAgent || g == nil || g.ValidateAgentGrants(grants, s.now) != nil {
+		pi := m.inbound[id]
+		if m.st.Inbound[id].Kind != KindAgent || g == nil || pi == nil {
 			return nil, errBadRequest
 		}
+		// Every grant is a delegation signed by the member's credential
+		// key (§10.11): it is signed now, within the unlock window, for
+		// the agent's identity key from its hs.init.
+		prepared, err := g.PrepareAgentGrants(s, pi.Init().From.IK, grants)
+		if err != nil {
+			var he *HandlerError
+			if errors.As(err, &he) {
+				return nil, he
+			}
+			return nil, errBadRequest
+		}
+		grants = prepared
 	}
 	if present || hasGrants {
 		m.pairAccess = &pendingAccess{inbound: id, seconds: secs, by: s.peer.ID, session: present, grants: grants}

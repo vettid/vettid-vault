@@ -22,6 +22,7 @@ type policyType struct {
 	asked    int
 	ran      int
 	valid    bool
+	locked   bool
 	paired   map[string]json.RawMessage
 	removed  []string
 }
@@ -40,11 +41,14 @@ func (p *policyType) AgentDecision(*Session, string, json.RawMessage) AgentDecis
 	return p.decision
 }
 
-func (p *policyType) ValidateAgentGrants(g json.RawMessage, _ time.Time) error {
-	if !p.valid || string(g) == `[]` {
-		return errBadRequest
+func (p *policyType) PrepareAgentGrants(_ *Session, ik []byte, g json.RawMessage) (json.RawMessage, error) {
+	if p.locked {
+		return nil, NewError("credential_locked", "")
 	}
-	return nil
+	if !p.valid || string(g) == `[]` || len(ik) != 32 {
+		return nil, errBadRequest
+	}
+	return json.RawMessage(`["signed"]`), nil
 }
 
 func (p *policyType) AgentPaired(_ *Session, id string, g json.RawMessage) {
@@ -137,6 +141,11 @@ func TestPairingGrants(t *testing.T) {
 	if _, r := approve(KindAgent, 0x44, `[]`); errCode(r) != "bad_request" {
 		t.Fatalf("invalid grants: %+v", r)
 	}
+	pol.locked = true // grants are signed at the approval: the unlock window is needed
+	if _, r := approve(KindAgent, 0x46, `[{"scope":"profile.get"}]`); errCode(r) != "credential_locked" {
+		t.Fatalf("outside the unlock window: %+v", r)
+	}
+	pol.locked = false
 	_, r := approve(KindAgent, 0x48, `[{"scope":"profile.get"}]`)
 	if r == nil || r.Status != envelope.StatusOK {
 		t.Fatalf("agent grants: %+v", r)
@@ -145,7 +154,7 @@ func TestPairingGrants(t *testing.T) {
 	for _, a := range d.m.st.Awaiting {
 		aw = a
 	}
-	if aw == nil || aw.New.Kind != KindAgent || string(aw.New.PairGrants) != `[{"scope":"profile.get"}]` || aw.New.Access != nil {
+	if aw == nil || aw.New.Kind != KindAgent || string(aw.New.PairGrants) != `["signed"]` || aw.New.Access != nil {
 		t.Fatalf("awaiting: %+v", aw)
 	}
 	// Activation installs them (after device.paired) and forgets them.
@@ -154,7 +163,7 @@ func TestPairingGrants(t *testing.T) {
 	d.m.mu.Lock()
 	d.m.activate(p, ep, handshake.PurposeAgent, nil, time.Now())
 	d.m.mu.Unlock()
-	if string(pol.paired[p.ID]) != `[{"scope":"profile.get"}]` || p.PairGrants != nil {
+	if string(pol.paired[p.ID]) != `["signed"]` || p.PairGrants != nil {
 		t.Fatalf("initial grants not installed: %v", pol.paired)
 	}
 	// Without a grantor, grants are refused.

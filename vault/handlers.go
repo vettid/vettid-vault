@@ -406,11 +406,20 @@ type AgentPolicy interface {
 
 // AgentGrantor is implemented by the LEASH feature: an agent's initial
 // grants come with its pairing approval (device.pair.approve{grants},
-// §6.7, §10.3). ValidateAgentGrants checks them at the approval;
-// AgentPaired installs them in the flush that completes the pairing.
+// §6.7, §10.3). PrepareAgentGrants checks and signs them at the approval
+// (for the agent's identity key; a *HandlerError such as
+// credential_locked is answered as is) and returns what AgentPaired
+// installs in the flush that completes the pairing.
 type AgentGrantor interface {
-	ValidateAgentGrants(grants json.RawMessage, now time.Time) error
-	AgentPaired(s *Session, agentID string, grants json.RawMessage)
+	PrepareAgentGrants(s *Session, agentIK []byte, grants json.RawMessage) (json.RawMessage, error)
+	AgentPaired(s *Session, agentID string, prepared json.RawMessage)
+}
+
+// AgentCoverage is optionally implemented by the AgentPolicy feature: when
+// an app approves a referred agent request, it says whether a grant still
+// covers it, without counting it as a new request (§6.8).
+type AgentCoverage interface {
+	AgentCovered(s *Session, typ string, body json.RawMessage) bool
 }
 
 // DeviceRemovedObserver is implemented by features that keep data per

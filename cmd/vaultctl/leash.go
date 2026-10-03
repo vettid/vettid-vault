@@ -15,7 +15,7 @@ import (
 // V4 batch 3, LEASH (VAULT-MESSAGING §10.11).
 
 func init() {
-	commands["leash"] = command{"leash issue -agent ID -scope S [-approval ask|auto] [-connections a,b] [-secrets a,b] [-per-hour N] [-per-day N] [-expires TS] [-sign] [-grant ID -version N] | revoke -id ID | list [-agent ID]", cmdLeash}
+	commands["leash"] = command{"leash issue -agent ID -scope S [-approval ask|auto] [-connections a,b] [-secrets a,b] [-per-hour N] [-per-day N] [-expires TS] [-grant ID -version N] | revoke -id ID | list [-agent ID] | resume -agent ID   (issue needs the credential unlock window)", cmdLeash}
 	commands["agent"] = command{"agent request -op catalog|secret.get|secret.use [-secret ID] [-data TEXT] | grants   (an agent: LEASH requests, its grants)", cmdAgent}
 }
 
@@ -40,7 +40,6 @@ func cmdLeash(ctx context.Context, g *globals, args []string) error {
 	perHour := fs.Int("per-hour", 0, "auto grants: requests per hour")
 	perDay := fs.Int("per-day", 0, "auto grants: requests per day")
 	expires := fs.String("expires", "", "expiry (YYYY-MM-DDTHH:MM:SS.mmmZ)")
-	sign := fs.Bool("sign", false, "sign a delegation with the credential key (needs the unlock window)")
 	grant := fs.String("grant", "", "grant id to replace")
 	version := fs.Int("version", 0, "version of the grant replaced")
 	id := fs.String("id", "", "grant id")
@@ -67,9 +66,6 @@ func cmdLeash(ctx context.Context, g *globals, args []string) error {
 			if *expires != "" {
 				spec["expires_at"] = *expires
 			}
-			if *sign {
-				spec["sign"] = true
-			}
 			if *grant != "" {
 				spec["grant_id"], spec["version"] = *grant, *version
 			}
@@ -79,6 +75,9 @@ func cmdLeash(ctx context.Context, g *globals, args []string) error {
 		case "list":
 			gs, err := d.LeashGrantList(ctx, *agent)
 			return map[string][]json.RawMessage{"grants": gs}, err
+		case "resume":
+			_, err := d.Op(ctx, "leash.agent.resume", map[string]any{"agent_id": *agent})
+			return nil, err
 		}
 		return nil, errors.New(commands["leash"].usage)
 	})

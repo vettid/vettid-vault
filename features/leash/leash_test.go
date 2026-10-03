@@ -49,7 +49,9 @@ const agent = "dev-agent"
 
 func newRig(t *testing.T) *rig {
 	t.Helper()
-	r := &rig{h: featuretest.NewHost(), w: &window{key: ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0xcc}, 32))}, sec: secrets.New()}
+	// Issuing signs with the credential key: the unlock window is open
+	// unless a test closes it.
+	r := &rig{h: featuretest.NewHost(), w: &window{key: ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0xcc}, 32)), open: true}, sec: secrets.New()}
 	r.f = New(r.w, r.sec)
 	r.h.AddDevice(agent, vault.KindAgent)
 	r.h.AddDevice("dev-desktop", vault.KindDesktop)
@@ -131,7 +133,6 @@ func TestIssueValidation(t *testing.T) {
 		"expired":                `{"agent_id":"dev-agent","scope":"profile.get","expires_at":"2026-10-03T11:00:00.000Z"}`,
 		"too far":                `{"agent_id":"dev-agent","scope":"profile.get","expires_at":"2027-10-04T12:00:00.000Z"}`,
 		"version without id":     `{"agent_id":"dev-agent","scope":"profile.get","version":1}`,
-		"sign not bool":          `{"agent_id":"dev-agent","scope":"profile.get","sign":"yes"}`,
 		"duplicate member names": `{"agent_id":"dev-agent","scope":"profile.get","scope":"connection.list"}`,
 	} {
 		if res := featuretest.Call(r.f, r.h, t0, vault.KindApp, "leash.grant.issue", body); res.Code != "bad_request" {
@@ -156,33 +157,39 @@ func TestIssueValidation(t *testing.T) {
 // auto grant within its limits, refer otherwise; restrictions.
 func TestDecisions(t *testing.T) {
 	r := newRig(t)
-	if d := r.decide(t0, "profile.get", `{}`); d != vault.AgentDeny || !r.h.HasActivity("drop.leash_refused") {
+	if d := r.decide(t0, "profile.get", `{}`); d != vault.AgentDeny || !r.h.HasActivity(KindRefused) {
 		t.Fatalf("no grant: %v", d)
 	}
 	if d := r.decide(t0, "settings.get", `{}`); d != vault.AgentDeny {
 		t.Fatal("a non-delegable type was not refused")
 	}
 	r.issue(t, `{"agent_id":"dev-agent","scope":"profile.get"}`)
-	if d := r.decide(t0, "profile.get", `{}`); d != vault.AgentAsk {
+	at := t0.Add(2 * time.Second) // past profile.get's 1 s cooldown
+	if d := r.decide(at, "profile.get", `{}`); d != vault.AgentAsk {
 		t.Fatalf("ask grant: %v", d)
 	}
 	c1 := r.c1
 	r.issue(t, `{"agent_id":"dev-agent","scope":"message.send","approval":"auto","per_hour":2,"connections":["`+c1+`"]}`)
-	if d := r.decide(t0, "message.send", `{"connection_id":"`+c1+`","text":"hi"}`); d != vault.AgentAllow || !r.h.HasActivity("leash.allowed") {
+	if d := r.decide(at, "message.send", `{"connection_id":"`+c1+`","text":"hi"}`); d != vault.AgentAllow || !r.h.HasActivity(KindAllowed) {
 		t.Fatalf("auto grant: %v", d)
 	}
-	if d := r.decide(t0, "message.send", `{"connection_id":"`+r.c2+`","text":"hi"}`); d != vault.AgentDeny {
+	if d := r.decide(at, "message.send", `{"connection_id":"`+r.c2+`","text":"hi"}`); d != vault.AgentDeny {
 		t.Fatalf("restricted connection: %v", d)
 	}
-	if d := r.decide(t0, "message.send", `{"text":"hi"}`); d != vault.AgentDeny {
+	at = at.Add(2 * time.Second)
+	if d := r.decide(at, "message.send", `{"text":"hi"}`); d != vault.AgentDeny {
 		t.Fatalf("missing connection_id: %v", d)
 	}
-	r.decide(t0, "message.send", `{"connection_id":"`+c1+`","text":"hi"}`)
+	at = at.Add(4 * time.Second) // past the second refusal's 2 s cooldown
+	if d := r.decide(at, "message.send", `{"connection_id":"`+c1+`","text":"hi"}`); d != vault.AgentAllow {
+		t.Fatalf("second allowed: %v", d)
+	}
 	// Past the hourly limit: referred, and the owner told once.
 	r.h.Reset()
-	if d := r.decide(t0.Add(time.Minute), "message.send", `{"connection_id":"`+c1+`","text":"hi"}`); d != vault.AgentAsk {
+	if d := r.decide(at.Add(time.Minute), "message.send", `{"connection_id":"`+c1+`","text":"hi"}`); d != vault.AgentAsk {
 		t.Fatalf("over the limit: %v", d)
 	}
+	r.decide(at.Add(2*time.Minute), "message.send", `{"connection_id":"`+c1+`","text":"hi"}`)
 	n := 0
 	for _, a := range r.h.Activities {
 		if a.Kind == "leash.rate_limited" {
@@ -192,18 +199,11 @@ func TestDecisions(t *testing.T) {
 			}
 		}
 	}
-	r.decide(t0.Add(2*time.Minute), "message.send", `{"connection_id":"`+c1+`","text":"hi"}`)
-	n = 0
-	for _, a := range r.h.Activities {
-		if a.Kind == "leash.rate_limited" {
-			n++
-		}
-	}
 	if n != 1 {
 		t.Fatalf("rate_limited recorded %d times in one window", n)
 	}
 	// A new window allows again.
-	if d := r.decide(t0.Add(61*time.Minute), "message.send", `{"connection_id":"`+c1+`","text":"hi"}`); d != vault.AgentAllow {
+	if d := r.decide(at.Add(61*time.Minute), "message.send", `{"connection_id":"`+c1+`","text":"hi"}`); d != vault.AgentAllow {
 		t.Fatalf("next window: %v", d)
 	}
 	// A malformed agent.request is left to the handler (bad_request).
@@ -212,6 +212,140 @@ func TestDecisions(t *testing.T) {
 	}
 	if res := featuretest.Call(r.f, r.h, t0, vault.KindAgent, "agent.request", `{"op":"nope"}`); res.Code != "bad_request" {
 		t.Fatalf("handler: %q", res.Code)
+	}
+}
+
+// §10.11 anti-spam: an exponential cooldown per agent and scope after a
+// refusal, a cap on referrals per hour, suspension after repeated
+// refusals until an app resumes the agent.
+func TestSpamControls(t *testing.T) {
+	r := newRig(t)
+	// Cooldown: 1 s, 2 s, 4 s ... capped at 5 min; requests within it are
+	// throttled without examination.
+	at := t0
+	for i, wait := range []time.Duration{time.Second, 2 * time.Second, 4 * time.Second} {
+		if d := r.decide(at, "profile.get", `{}`); d != vault.AgentDeny {
+			t.Fatalf("refusal %d: %v", i, d)
+		}
+		if d := r.decide(at.Add(wait-time.Millisecond), "profile.get", `{}`); d != vault.AgentDeny {
+			t.Fatal("not throttled")
+		}
+		at = at.Add(wait)
+	}
+	st := r.f.d.Agents[agent]
+	if st.Counts[KindRefused] != 3 || st.Counts[KindThrottled] != 3 {
+		t.Fatalf("counts: %v", st.Counts)
+	}
+	r.decide(at, "profile.get", `{}`) // a 4th refusal: 8 s
+	// Issuing a grant of the scope clears its cooldown.
+	if st.Cool["profile.get"] == nil {
+		t.Fatal("no cooldown")
+	}
+	r.issue(t, `{"agent_id":"dev-agent","scope":"profile.get"}`)
+	if st.Cool["profile.get"] != nil {
+		t.Fatal("cooldown kept after a grant of the scope")
+	}
+	if d := r.decide(at.Add(time.Second), "profile.get", `{}`); d != vault.AgentAsk {
+		t.Fatalf("after the grant: %v", d)
+	}
+	c := &Cooldown{Step: 30, Last: at}
+	st.Cool["x"] = c
+	r.decide(at.Add(10*time.Second), "x", `{}`)
+	if got := st.Cool["x"].Until.Sub(at.Add(10 * time.Second)); got != CooldownMax {
+		t.Fatalf("cooldown not capped: %v", got)
+	}
+
+	// Referral cap: MaxReferralsPerHour per agent and hour, then throttled
+	// and the owner told once.
+	r2 := newRig(t)
+	r2.issue(t, `{"agent_id":"dev-agent","scope":"profile.get"}`)
+	for i := 0; i < MaxReferralsPerHour; i++ {
+		if d := r2.decide(t0.Add(time.Duration(i)*time.Second), "profile.get", `{}`); d != vault.AgentAsk {
+			t.Fatalf("referral %d: %v", i, d)
+		}
+	}
+	if d := r2.decide(t0.Add(time.Minute), "profile.get", `{}`); d != vault.AgentDeny || !r2.h.HasActivity("leash.referrals_limited") {
+		t.Fatalf("over the referral cap: %v", d)
+	}
+	if d := r2.decide(t0.Add(61*time.Minute), "profile.get", `{}`); d != vault.AgentAsk {
+		t.Fatalf("next hour: %v", d)
+	}
+
+	// Suspension after SuspendAfter refusals in the window: every grant
+	// paused, the agent and the owner told; only an app resumes.
+	r3 := newRig(t)
+	r3.issue(t, `{"agent_id":"dev-agent","scope":"profile.get","approval":"auto"}`)
+	for i := 0; i < SuspendAfter; i++ {
+		r3.decide(t0.Add(time.Duration(i)*time.Millisecond), "settings.get", `{}`)
+	}
+	if st := r3.f.d.Agents[agent]; !st.Suspended {
+		t.Fatal("not suspended")
+	}
+	up := r3.h.SentOfType("leash.grant.updated")
+	if len(up) == 0 || !strings.Contains(string(up[len(up)-1].Body), `"suspended":true`) {
+		t.Fatalf("agent not told: %+v", up)
+	}
+	if !r3.h.HasActivity("leash.agent.suspended") {
+		t.Fatal("suspension not recorded")
+	}
+	if d := r3.decide(t0.Add(time.Hour+time.Minute), "profile.get", `{}`); d != vault.AgentDeny {
+		t.Fatal("suspended agent allowed")
+	}
+	from, _ := r3.h.Device(agent)
+	if r3.f.AgentCovered(vault.NewSession(context.Background(), r3.h, from, t0, nil), "profile.get", json.RawMessage(`{}`)) {
+		t.Fatal("suspended agent covered on approval")
+	}
+	if res := featuretest.Call(r3.f, r3.h, t0, vault.KindDesktop, "leash.agent.resume", `{"agent_id":"dev-agent"}`); res.Code != "forbidden" {
+		t.Fatalf("desktop resumed: %q", res.Code)
+	}
+	if res := featuretest.Call(r3.f, r3.h, t0, vault.KindApp, "leash.agent.resume", `{"agent_id":"dev-agent"}`); !res.OK() {
+		t.Fatal(res.Code)
+	}
+	if res := featuretest.Call(r3.f, r3.h, t0, vault.KindApp, "leash.agent.resume", `{"agent_id":"dev-agent"}`); res.Code != "not_found" {
+		t.Fatalf("resume twice: %q", res.Code)
+	}
+	if d := r3.decide(t0.Add(2*time.Hour), "profile.get", `{}`); d != vault.AgentAllow {
+		t.Fatalf("after resume: %v", d)
+	}
+}
+
+// §10.11: agent activity is summarised in the audit log, at most one
+// single entry and one summary per kind, agent and hour, so an agent
+// cannot push older entries out.
+func TestAuditSummaries(t *testing.T) {
+	r := newRig(t)
+	r.issue(t, `{"agent_id":"dev-agent","scope":"profile.get","approval":"auto","per_hour":3600,"per_day":86400}`)
+	for i := 0; i < 100; i++ {
+		r.decide(t0.Add(time.Duration(i)*time.Second), "profile.get", `{}`)
+	}
+	count := func(kind string) (n int, ref string) {
+		for _, a := range r.h.Activities {
+			if a.Kind == kind {
+				n++
+				ref = a.Ref
+			}
+		}
+		return
+	}
+	if n, _ := count(KindAllowed); n != 1 {
+		t.Fatalf("%d single allowed entries", n)
+	}
+	if n, _ := count(KindAllowed + ".summary"); n != 0 {
+		t.Fatal("summary before the window ended")
+	}
+	// The next window writes the summary of the last one.
+	r.decide(t0.Add(time.Hour+time.Minute), "profile.get", `{}`)
+	if n, ref := count(KindAllowed + ".summary"); n != 1 || ref != "99" {
+		t.Fatalf("summary: %d %q", n, ref)
+	}
+	if n, _ := count(KindAllowed); n != 2 {
+		t.Fatal("new window's first entry")
+	}
+	// Unlinking writes the open summaries.
+	r.decide(t0.Add(time.Hour+2*time.Minute), "profile.get", `{}`)
+	r.f.DeviceRemoved(vault.NewSession(context.Background(), r.h, vault.PeerInfo{}, t0.Add(time.Hour+3*time.Minute), nil), agent)
+	if n, ref := count(KindAllowed + ".summary"); n != 2 || ref != "1" {
+		t.Fatalf("summary at unlink: %d %q", n, ref)
 	}
 }
 
@@ -327,16 +461,18 @@ func TestReplaceListNotify(t *testing.T) {
 	}
 }
 
-// §10.11 signed delegations: only within the unlock window; canonical
-// bytes signed by the credential key; at most 24 h.
+// §10.11: every grant is a delegation signed by the credential key, so
+// issuing needs the unlock window; canonical bytes; exp from the grant's
+// expiry (LEASH §3.2), none without one.
 func TestSignedDelegation(t *testing.T) {
 	r := newRig(t)
-	body := `{"agent_id":"dev-agent","scope":"secrets.catalog","sign":true,"expires_at":"2026-12-01T00:00:00.000Z"}`
+	r.w.open = false
+	body := `{"agent_id":"dev-agent","scope":"secrets.catalog","expires_at":"2026-12-01T00:00:00.000Z"}`
 	if res := featuretest.Call(r.f, r.h, t0, vault.KindApp, "leash.grant.issue", body); res.Code != "credential_locked" {
 		t.Fatalf("outside the window: %q", res.Code)
 	}
 	if len(r.f.Grants()) != 0 {
-		t.Fatal("a refused signed grant was stored")
+		t.Fatal("a refused grant was stored")
 	}
 	r.w.open = true
 	o, gid := r.issue(t, body)
@@ -354,54 +490,73 @@ func TestSignedDelegation(t *testing.T) {
 		t.Fatal(err)
 	}
 	ag, _ := r.h.Device(agent)
-	if d.GrantID != gid || !bytes.Equal(d.AgentIK, ag.IK) || !bytes.Equal(d.VaultIK, r.h.IK) || d.Expires.Sub(d.IssuedAt) != 24*time.Hour {
+	want := time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC)
+	if d.GrantID != gid || !bytes.Equal(d.AgentIK, ag.IK) || !bytes.Equal(d.VaultIK, r.h.IK) || !d.Expires.Equal(want) {
 		t.Fatalf("delegation: %+v", d)
 	}
-	if _, err := leashwire.Verify(key, stmt, sig, t0.Add(25*time.Hour)); err == nil {
-		t.Fatal("delegation valid beyond 24 h")
+	if _, err := leashwire.Verify(key, stmt, sig, want); err == nil {
+		t.Fatal("delegation valid past the grant's expiry")
 	}
-	// Grants made with a pairing approval are never signed.
-	if err := r.f.ValidateAgentGrants(json.RawMessage(`[{"scope":"profile.get","sign":true}]`), t0); err == nil {
-		t.Fatal("signed initial grant accepted")
+	// A grant without expiry: the delegation has none either.
+	o, _ = r.issue(t, `{"agent_id":"dev-agent","scope":"profile.get"}`)
+	stmt, _ = o.Base64("delegation", -1)
+	if bytes.Contains(stmt, []byte(`"exp"`)) {
+		t.Fatalf("exp without a grant expiry: %s", stmt)
+	}
+	// A replacement is signed again, under its new version.
+	o, _ = r.issue(t, `{"agent_id":"dev-agent","grant_id":"`+gid+`","version":1,"scope":"secrets.catalog"}`)
+	stmt, _ = o.Base64("delegation", -1)
+	sig, _ = o.Base64("delegation_sig", 64)
+	if d, err := leashwire.Verify(key, stmt, sig, t0); err != nil || d.Version != 2 {
+		t.Fatalf("replacement: %v", err)
 	}
 }
 
-// §6.7, §10.11: initial grants with the pairing approval; unlinking
-// revokes; removing a connection narrows or revokes.
+// §6.7, §10.11: initial grants are signed at the pairing approval
+// (unlock window), installed with the pairing; unlinking revokes; removing
+// a connection revokes the grants that name it.
 func TestPairingUnlinkRemoval(t *testing.T) {
 	r := newRig(t)
+	ag, _ := r.h.Device(agent)
+	sess := vault.NewSession(context.Background(), r.h, vault.PeerInfo{ID: "dev-app", Kind: vault.KindApp}, t0, nil)
 	for name, raw := range map[string]string{
 		"empty":    `[]`,
 		"object":   `{}`,
 		"bad":      `[{"scope":"settings.set"}]`,
 		"too many": "[" + strings.TrimSuffix(strings.Repeat(`{"scope":"profile.get"},`, MaxGrants+1), ",") + "]",
 	} {
-		if err := r.f.ValidateAgentGrants(json.RawMessage(raw), t0); err == nil {
+		if _, err := r.f.PrepareAgentGrants(sess, ag.IK, json.RawMessage(raw)); err == nil {
 			t.Errorf("%s accepted", name)
 		}
 	}
 	c1, c2 := r.c1, r.c2
-	initial := `[{"scope":"profile.get","approval":"auto"},{"scope":"message.send","connections":["` + c1 + `","` + c2 + `"]},{"scope":"message.get","connections":["` + c1 + `"]}]`
-	if err := r.f.ValidateAgentGrants(json.RawMessage(initial), t0); err != nil {
+	initial := `[{"scope":"profile.get","approval":"auto"},{"scope":"message.send","connections":["` + c1 + `","` + c2 + `"]},{"scope":"message.get","connections":["` + c2 + `"]}]`
+	r.w.open = false
+	if _, err := r.f.PrepareAgentGrants(sess, ag.IK, json.RawMessage(initial)); err == nil || err.(*vault.HandlerError).Code != "credential_locked" {
+		t.Fatalf("outside the unlock window: %v", err)
+	}
+	r.w.open = true
+	prepared, err := r.f.PrepareAgentGrants(sess, ag.IK, json.RawMessage(initial))
+	if err != nil {
 		t.Fatal(err)
 	}
-	from, _ := r.h.Device("dev-app")
-	r.f.AgentPaired(vault.NewSession(context.Background(), r.h, from, t0, nil), agent, json.RawMessage(initial))
-	if len(r.f.Grants()) != 3 || len(r.h.SentOfType("leash.grant.updated")) != 1 {
-		t.Fatalf("initial grants: %d", len(r.f.Grants()))
+	r.f.AgentPaired(sess, agent, prepared)
+	gs := r.f.Grants()
+	if len(gs) != 3 || len(r.h.SentOfType("leash.grant.updated")) != 1 {
+		t.Fatalf("initial grants: %d", len(gs))
+	}
+	for _, g := range gs {
+		d, err := leashwire.Verify(r.w.key.Public().(ed25519.PublicKey), g.Delegation, g.DelegationSig, t0)
+		if err != nil || !bytes.Equal(d.AgentIK, ag.IK) || d.GrantID != g.ID {
+			t.Fatalf("initial grant not signed for the agent: %v", err)
+		}
 	}
 	if d := r.decide(t0, "profile.get", `{}`); d != vault.AgentAllow {
 		t.Fatalf("initial auto grant: %v", d)
 	}
 	r.f.ConnectionRemoved(vault.NewSession(context.Background(), r.h, vault.PeerInfo{}, t0, nil), c1)
-	gs := r.f.Grants()
-	if len(gs) != 2 {
+	if gs := r.f.Grants(); len(gs) != 2 {
 		t.Fatalf("after removal: %d grants", len(gs))
-	}
-	for _, g := range gs {
-		if contains(g.Connections, c1) {
-			t.Fatal("removed connection still in a grant")
-		}
 	}
 	r.f.DeviceRemoved(vault.NewSession(context.Background(), r.h, vault.PeerInfo{}, t0, nil), agent)
 	if len(r.f.Grants()) != 0 || !r.h.HasActivity("leash.grant.revoked") {
@@ -432,7 +587,7 @@ func FuzzParseSpec(f *testing.F) {
 		if err != nil {
 			return
 		}
-		sp, err := ParseSpec(o, t0, false)
+		sp, err := ParseSpec(o, t0)
 		if err != nil {
 			return
 		}
@@ -446,12 +601,8 @@ func FuzzParseInitialGrants(f *testing.F) {
 	f.Add([]byte(`[{"scope":"profile.get"},{"scope":"secrets.catalog","approval":"auto"}]`))
 	f.Fuzz(func(t *testing.T, b []byte) {
 		sps, err := ParseInitialGrants(json.RawMessage(b), t0)
-		if err == nil {
-			for _, sp := range sps {
-				if sp.Sign {
-					t.Fatal("signed initial grant")
-				}
-			}
+		if err == nil && (len(sps) == 0 || len(sps) > MaxGrants) {
+			t.Fatal("bad count accepted")
 		}
 	})
 }

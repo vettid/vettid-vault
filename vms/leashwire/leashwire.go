@@ -22,9 +22,6 @@ const (
 	Label = "vettid/vms/2/leash"
 	// Format is the statement's "v".
 	Format = 1
-	// MaxLifetime bounds exp - iat: a delegation cannot be revoked
-	// offline, so it lives at most 24 h.
-	MaxLifetime = 24 * time.Hour
 	// MaxBytes bounds a statement.
 	MaxBytes = 8192
 	// MaxList bounds connections and secrets.
@@ -45,7 +42,7 @@ type Delegation struct {
 	Connections []string
 	Secrets     []string
 	IssuedAt    time.Time // whole seconds
-	Expires     time.Time // whole seconds
+	Expires     time.Time // whole seconds; zero: the grant has no expiry (LEASH §3.2)
 }
 
 // Marshal returns the canonical bytes (§10.11).
@@ -58,7 +55,11 @@ func (d *Delegation) Marshal() []byte {
 	if len(d.Secrets) > 0 {
 		b.Raw("secrets", strList(d.Secrets))
 	}
-	return b.Uint("iat", uint64(d.IssuedAt.Unix())).Uint("exp", uint64(d.Expires.Unix())).Bytes()
+	b.Uint("iat", uint64(d.IssuedAt.Unix()))
+	if !d.Expires.IsZero() {
+		b.Uint("exp", uint64(d.Expires.Unix()))
+	}
+	return b.Bytes()
 }
 
 func strList(l []string) []byte {
@@ -135,11 +136,14 @@ func Parse(b []byte) (*Delegation, error) {
 	if err != nil {
 		return nil, ErrDelegation
 	}
-	exp, err := o.Uint("exp", 1, 1<<40)
-	if err != nil || exp < iat || exp-iat > uint64(MaxLifetime/time.Second) {
+	d.IssuedAt = time.Unix(int64(iat), 0).UTC()
+	exp, hasExp, err := o.OptUint("exp", 1, 1<<40)
+	if err != nil || hasExp && exp <= iat {
 		return nil, ErrDelegation
 	}
-	d.IssuedAt, d.Expires = time.Unix(int64(iat), 0).UTC(), time.Unix(int64(exp), 0).UTC()
+	if hasExp {
+		d.Expires = time.Unix(int64(exp), 0).UTC()
+	}
 	if subtle.ConstantTimeCompare(d.Marshal(), b) != 1 {
 		return nil, ErrDelegation // not canonical
 	}
@@ -155,8 +159,11 @@ func Sign(key ed25519.PrivateKey, statement []byte) ([]byte, error) {
 }
 
 // Verify checks a delegation: canonical form, the signature under the
-// member's credential key, and that it is valid at now. It returns the
-// parsed statement.
+// member's credential key, and that it is valid at now (issued, and not
+// past its exp if it has one). It returns the parsed statement. Whether
+// the grant is still in force is the vault's to say (LEASH §3.4): a
+// verifier also needs the vault's current grants, as the agent holds them
+// in leash.grant.updated.
 func Verify(key ed25519.PublicKey, statement, sig []byte, now time.Time) (*Delegation, error) {
 	d, err := Parse(statement)
 	if err != nil {
@@ -165,7 +172,7 @@ func Verify(key ed25519.PublicKey, statement, sig []byte, now time.Time) (*Deleg
 	if suite.Verify(key, Label, statement, sig) != nil {
 		return nil, ErrDelegation
 	}
-	if now.Before(d.IssuedAt.Add(-time.Minute)) || !now.Before(d.Expires) {
+	if now.Before(d.IssuedAt.Add(-time.Minute)) || !d.Expires.IsZero() && !now.Before(d.Expires) {
 		return nil, ErrDelegation
 	}
 	return d, nil

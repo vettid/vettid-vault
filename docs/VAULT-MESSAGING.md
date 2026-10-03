@@ -17,8 +17,10 @@ changelog:
   - 0.6.0: V4 batch 3: LEASH for the member's agents (grants with scopes,
     approval modes, rate limits and expiry; the AgentPolicy decision;
     agent.request for catalog, retrieval and use without exposure;
-    initial grants at pairing; optional delegations signed with the
-    credential key) (§10.11); 1:1 grants of profile fields and vault-held
+    initial grants at pairing; every grant a delegation signed with the
+    credential key, so issuing needs the member's app in the unlock
+    window; refusal cooldowns, a referral cap and suspension against
+    agent spam; agent activity summarised in the audit log) (§10.11); 1:1 grants of profile fields and vault-held
     secrets between connections, values sealed to the fetching device,
     and the secrets catalog (§10.12); critical-secret use by a connection
     with the member's password per use (§10.13); shared actions offered
@@ -1318,9 +1320,11 @@ Rules:
   (`device.pair.create`), approves or rejects pairings. Desktops and agents
   cannot.
 - **Agents.** The approval MAY carry the agent's initial LEASH grants
-  (`device.pair.approve{grants}`, §10.3, §10.11). They take effect in the
-  flush that completes the pairing, and the agent learns them in
-  `leash.grant.updated`. The agent's `ik` is the grantee.
+  (`device.pair.approve{grants}`, §10.3, §10.11). The member's credential
+  key signs them at the approval, so the app opens the unlock window
+  first; they take effect in the flush that completes the pairing, and
+  the agent learns them in `leash.grant.updated`. The agent's `ik` is the
+  grantee.
 - **Apps.** For role `app`, `hs.init` carries the device attestation in
   `device_attest` (§11.7), over the §11.7 challenge with the `hs.init`
   inner `id` as `request_id`, an empty `vault_id` (the new device does not
@@ -1833,6 +1837,7 @@ an answer to an unknown or expired id is dropped.
   | `approval.decided` | `approval_id`, `approved` (§6.8) |
   | `leash.grant.changed` | `grant_id`, `agent_id`, `version` (§10.11) |
   | `leash.grant.revoked` | `grant_id`, `agent_id` (§10.11) |
+  | `leash.agent.suspended` | `agent_id`, `suspended` (§10.11) |
   | `grant.changed` | `grant_id`, `state` (`active`, `used`, `expired`, `revoked`) (§10.12) |
   | `grant.request.decided` | `request_id`, `approved` (§10.12) |
   | `credential.secret.cataloged` | `secret_id`, `cataloged` (§10.13) |
@@ -1865,7 +1870,7 @@ an answer to an unknown or expired id is dropped.
 |---|---|---|
 | `device.pair.create` (app) | `{role: "app" \| "desktop" \| "agent"}` | `{pairing_id, link, exp}` |
 | `device.pair.pending` (to apps) | — | `{pairing_id, pending_id, role, name, sas}`; `name` is the new device's self-asserted `profile.name` |
-| `device.pair.approve` (app) | `{pairing_id, session_seconds?, grants?}`; `session_seconds` (60–86,400) only for a desktop or agent: its first access session (§6.8); `grants` only for an agent: 1–32 LEASH grant specifications (§10.11), never signed | `{}` |
+| `device.pair.approve` (app) | `{pairing_id, session_seconds?, grants?}`; `session_seconds` (60–86,400) only for a desktop or agent: its first access session (§6.8); `grants` only for an agent: 1–32 LEASH grant specifications (§10.11), signed at the approval (`credential_locked` outside the unlock window) | `{}` |
 | `device.pair.reject` (app) | `{pairing_id}` | `{}` |
 | `device.paired` (to the new device) | — | `{device_id, role, vault_id, release, release_number, session_expires_at?}` (the release the vault runs under) |
 | `device.list` (app, desktop) | `{}` | `{devices: [{id, kind, state, name, ik, profile?, created_at?, last_active_at?, session_expires_at?}]}` |
@@ -2250,9 +2255,12 @@ entry: { "entry_id": "<ULID>", "seq": 812, "at": "<ts>", "kind": "connection.add
   `connection.authenticate.rotation_rejected` (§10.4); `call.outgoing`,
   `call.incoming`, `call.answered`, `call.ended` (`ref` = `call_id`, no
   SDP or keys) (§10.10); `leash.grant.issued`, `leash.grant.updated`,
-  `leash.grant.revoked`, `leash.allowed`, `leash.rate_limited`
-  (`device_id` = the agent, `ref` = `grant_id`), `leash.secret.read`,
-  `leash.secret.used` (`ref` = `secret_id`) (§10.11); `grant.requested`,
+  `leash.grant.revoked`, `leash.rate_limited` (`device_id` = the agent,
+  `ref` = `grant_id`), `leash.agent.suspended`, `leash.agent.resumed`,
+  `leash.referrals_limited`, and, summarised per agent and hour,
+  `leash.allowed`, `leash.refused`, `leash.secret.read`,
+  `leash.secret.used` and `leash.throttled` with their `<kind>.summary`
+  entries (`ref` = the count) (§10.11); `grant.requested`,
   `grant.denied` (`ref` = `request_id`), `grant.issued`,
   `grant.received`, `grant.fetched`, `grant.revoked` (`ref` = `grant_id`)
   (§10.12); `credential.secret.cataloged` (`ref` = `secret_id`),
@@ -2302,7 +2310,9 @@ item: { "item_id": "<ULID>", "seq": 41, "kind": "connection.request", "at": "<ts
   (`ref` = `approval_id`), `connection.authenticate.requested`
   (`ref` = `request_id`), `call.missed` (`ref` = `call_id`),
   `leash.rate_limited` (`ref` = `grant_id`), `leash.secret.read`
-  (`ref` = `secret_id`), `grant.request` (`ref` = `request_id`),
+  (`ref` = `secret_id`; the first per agent and hour),
+  `leash.agent.suspended`, `leash.referrals_limited`, `grant.request`
+  (`ref` = `request_id`),
   `grant.revoked` (`ref` = `grant_id`), `critical-secret.use.request`
   (`ref` = `request_id`), `action.request` (`ref` = `invocation_id`),
   and `guide`. Apps render
@@ -2470,9 +2480,9 @@ LEASH's terms map as follows:
 |---|---|
 | Enrollment: a one-time token; the owner reviews and approves | Agent pairing (§6.7): a 10-minute QR; the agent's self-asserted name and the SAS are shown; an app approves |
 | Connector key pair; an encrypted channel with forward secrecy | The agent's `ik` and `kem`, and the §6 session (epochs, rekeys) |
-| Connection Contract | The agent's **grants** (below), issued with the pairing or later by an app |
+| Connection Contract | The agent's **grants** (below), each a delegation signed by the member's credential key; issued with the pairing or later by an app, with the member present (the unlock window) |
 | Approval mode | Per grant: `ask` (the default) or `auto`. LEASH's "automatic for all" is not offered |
-| Rate limits; suspension and owner notification | Per grant: `per_hour` and `per_day`. Past a limit the grant refers requests to an app until its window ends, and the owner is notified |
+| Rate limits; suspension and owner notification | Per grant: `per_hour` and `per_day`; past a limit the grant refers requests to an app until its window ends, and the owner is notified. Per agent: refusal cooldowns, a referral cap and suspension after repeated refusals (below) |
 | Action permissions | The scopes `secrets.use` and the delegable owner types |
 | Expiry | Per grant (`expires_at`), and the agent's access session (§6.8) |
 | `leash/request_secret` (pattern 1) | `agent.request{op: "secret.get"}` |
@@ -2539,17 +2549,65 @@ session, the vault takes the agent's unexpired grants whose scope is the
 request's (for `agent.request`, its `op`'s) and whose restrictions the
 request meets:
 
-1. none: it **refuses** (`forbidden`; audited `drop.leash_refused`);
-2. an `auto` grant within both of its windows: it **allows** the request,
-   counts it on that grant and audits `leash.allowed`;
+0. a suspended agent, or a request of a scope in its cooldown (below):
+   it **refuses** without looking further (`forbidden`, counted as
+   *throttled*);
+1. no grant: it **refuses** (`forbidden`, counted as *refused*) and
+   starts or extends the scope's cooldown;
+2. an `auto` grant within both of its windows: it **allows** the request
+   and counts it on that grant;
 3. otherwise it **refers** the request to an app (`approval.pending`,
-   §6.8). The first referral of an `auto` grant past a limit in a window
-   records `leash.rate_limited`, in the audit log and as a high-priority
-   feed item.
+   §6.8), up to the referral cap (below). The first referral of an
+   `auto` grant past a limit in a window records `leash.rate_limited`,
+   in the audit log and as a high-priority feed item.
 
 An `agent.request` whose body does not parse is answered `bad_request`.
 When an app approves a referred request, the vault executes it only if a
-grant still covers it (§6.8).
+grant still covers it and the agent is not suspended (§6.8); that check
+counts nothing.
+
+**Refusals do not become spam.** Refused requests cost the agent nothing
+to repeat but cost the vault work and the member attention, so they are
+bounded per agent:
+
+- **Cooldown per scope.** After a refusal, the agent's requests of that
+  scope (for an owner type, the type) are throttled for 1 s, then 2 s,
+  4 s, ... doubling after each further refusal, up to 5 min. A covered
+  request, an hour without refusals, or a new grant of that scope ends
+  the cooldown. An agent that retries once loses seconds; a loop is
+  slowed to one examined request per scope every 5 minutes (about 19 in
+  its first hour).
+- **Referral cap.** At most **20 referrals per agent per hour** reach the
+  member's apps (besides §6.8's limit of 8 held at once). Further
+  requests that would be referred are throttled, and the first time in
+  the hour the member gets a high-priority feed item
+  (`leash.referrals_limited`). Twenty prompts an hour is already more
+  than a person answers with care; more would train the member to
+  approve without reading.
+- **Suspension.** **30 refusals** (refused or throttled) **within an
+  hour** suspend the agent: all of its grants are paused (its requests
+  are throttled, and referred ones are not executed on approval), it is
+  told in `leash.grant.updated{suspended: true}`, and the member gets a
+  high-priority feed item (`leash.agent.suspended`) and
+  `sync.event{leash.agent.suspended}`. An app ends it with
+  `leash.agent.resume{agent_id}`, which also clears the cooldowns and
+  counts. Thirty is above what the cooldown lets one scope reach in an
+  hour (about 19), so an agent that only retries a refused request is
+  slowed, not suspended; one that keeps sending while throttled, or
+  probes many scopes, is suspended within minutes.
+
+**Audit summaries.** Agent activity cannot push older entries out of the
+audit log (§10.9). Per agent and window of one hour (from the agent's
+first event in it), the first event of each kind is written singly;
+later ones are counted, and when the window ends the vault writes one
+`<kind>.summary` entry whose `ref` is the count of events not written
+singly. The kinds are `leash.allowed` (`ref` = `grant_id`),
+`leash.refused` (`ref` = the scope), `leash.secret.read` and
+`leash.secret.used` (`ref` = `secret_id`), and `leash.throttled` (only
+ever summarised). An agent therefore adds at most two entries per kind
+and hour. The vault has no timers: a window's summaries are written when
+the agent's next window starts, at its suspension or resumption, or
+when it is unlinked.
 
 **`agent.request`** operates only on `cataloged` vault-held secrets
 (§10.7), and only on those every restricting grant names: any other
@@ -2559,7 +2617,8 @@ missing one). Critical secrets (§3.5) are never reachable by agents.
 - `catalog` lists the secrets' metadata, never values (the union of what
   the matching grants allow).
 - `secret.get` returns the value (LEASH pattern 1, controlled exposure),
-  recorded as `leash.secret.read` in the audit log and the feed.
+  recorded as `leash.secret.read` in the audit log and the feed (the
+  first per agent and hour; then summarised).
 - `secret.use` uses the value without exposing it (LEASH pattern 2):
   `action` `hmac-sha256` computes HMAC-SHA-256 with the value's UTF-8
   bytes as the key over `data` (1–16,384 bytes, base64) and returns the
@@ -2567,10 +2626,11 @@ missing one). Critical secrets (§3.5) are never reachable by agents.
   by the vault with an injected secret need egress beyond the relay and
   are not offered (§15).
 
-**Signed delegations.** With `sign: true` in `leash.grant.issue`, the
-member's **credential key** (§3.5.1) also signs the grant as a
-*delegation*: a statement, verifiable without the vault, that the member
-delegated the scope to the agent's key.
+**Every grant is a signed delegation.** The member's **credential key**
+(§3.5.1) signs each grant when it is issued, replaced or given with a
+pairing: a statement, verifiable without the vault, that the member
+delegated the scope to the agent's key. The agent receives it with its
+grants and can present it.
 
 ```
 delegation     = standard base64 of the exact bytes
@@ -2581,29 +2641,48 @@ delegation_sig = standard base64 of Ed25519(credential key, "vettid/vms/2/leash"
 key            = the credential key's public key
 ```
 
-- The JSON is canonical: members in the order shown, no whitespace,
-  `connections` and `secrets` present only when the grant has them, ids
-  and keys as in the grant, `iat` the issue time and `exp` = the earlier
-  of `expires_at` and `iat` + 86,400. A verifier MUST check the canonical
-  form, the signature under the member's key (pinned, for a connection,
-  through §10.4), `exp` and that the presenter proves possession of
-  `agent_ik`.
-- Signing uses the credential key, so it needs the member: only an app
-  issues a signed grant, within the unlock window (`credential.unlock`,
-  §3.5.3; `credential_locked` outside it), and the use extends the
-  window. Grants made with a pairing approval are never signed.
-- The vault enforces grants itself and never relies on a delegation. A
-  delegation cannot be revoked offline: revoking the grant stops the
-  vault at once, but a relying party that accepts the delegation does so
-  until its `exp`, at most 24 h. A `credential.rotate` does not resign
-  delegations; they lapse.
+- **Format.** The LEASH paper defines the Connection Contract (§3.2:
+  scope, approval mode, rate limits, action permissions, expiry) but no
+  wire format for it. This statement carries the contract's terms and
+  the claims of vettid.dev's LEASH token (issuer, the agent's key, grant
+  id and version, scope) as canonical JSON: members in the order shown,
+  no whitespace, `connections` and `secrets` only when the grant has
+  them, ids and keys as in the grant, `iat` the issue time.
+- **Lifetime.** `exp` is the grant's `expires_at` in whole seconds, and
+  is absent when the grant has none: LEASH's contract expiry is optional
+  (§3.2). (The 24 h cap of the first 0.6.0 draft came from vettid.dev's
+  token format, not from LEASH, and is gone.)
+- **Revocation** follows LEASH §3.4: the vault invalidates a revoked
+  grant at once, and the connector stops serving within one heartbeat.
+  Here the vault is the enforcement point and never relies on a
+  delegation; the agent is told at once in `leash.grant.updated`, and its
+  connector MUST stop presenting a delegation that is no longer among
+  its current grants. A relying party outside the vault MUST check the
+  canonical form, the signature under the member's key (pinned, for a
+  connection, through §10.4), `exp` if present, and that the presenter
+  proves possession of `agent_ik`. A delegation carries no revocation
+  status: beyond that a relying party trusts the agent's connector
+  (§13.5).
+- **The member present.** Signing uses the credential key, so issuing
+  needs the member: only an app issues or replaces a grant, and only
+  within the credential's unlock window (`credential.unlock`, §3.5.3;
+  `credential_locked` outside it), which each signature extends. A
+  pairing approval with `grants` likewise needs the window: the grants
+  are signed at the approval for the agent's `ik` from its `hs.init`,
+  and take effect when the pairing completes. Revoking and resuming
+  sign nothing and need no window.
+- A replacement is signed again under its new `version`. A
+  `credential.rotate` does not re-sign grants: their delegations name
+  the old key, which verifiers follow through the rotation statements
+  (§3.5.5).
 
 | Type | Request body | Response / event body |
 |---|---|---|
-| `leash.grant.issue` (app) | `{agent_id, grant_id?, version?, scope, approval?, connections?, secrets?, per_hour?, per_day?, expires_at?, sign?}`; without `grant_id` a new grant (`version` absent); with it, a replacement of that grant (`version` required; `conflict`) | `<grant>` |
+| `leash.grant.issue` (app, within the unlock window) | `{agent_id, grant_id?, version?, scope, approval?, connections?, secrets?, per_hour?, per_day?, expires_at?}`; without `grant_id` a new grant (`version` absent); with it, a replacement of that grant (`version` required; `conflict`); `credential_locked` outside the window | `<grant>`, with its `delegation`, `delegation_sig` and `key` |
 | `leash.grant.revoke` (app, desktop) | `{grant_id}` | `{}` |
-| `leash.grant.list` (app, desktop: `{agent_id?}`; agent: `{}`, its own) | as left | `{grants: [<grant>]}` |
-| `leash.grant.updated` (V→D, to the agent) | — | `{grants: [<grant>]}`: all of its grants, after every change |
+| `leash.grant.list` (app, desktop: `{agent_id?}`; agent: `{}`, its own) | as left | apps and desktops: `{grants: [<grant>], suspended: [<agent_id>]}`; an agent: `{grants: [<grant>], suspended}` |
+| `leash.grant.updated` (V→D, to the agent) | — | `{grants: [<grant>], suspended}`: all of its grants, after every change and at suspension and resumption |
+| `leash.agent.resume` (app) | `{agent_id}` | `{}`; `not_found` unless the agent is suspended |
 | `agent.request` (agent) | `{op: "catalog"}`, `{op: "secret.get", secret_id}` or `{op: "secret.use", secret_id, action: "hmac-sha256", data}` | `{secrets: [{secret_id, name, category, description?}]}`, `{secret_id, name, value}` or `{secret_id, action, result}` |
 
 - `agent_id` names an active device of role `agent` (`not_found`
@@ -2612,11 +2691,12 @@ key            = the credential key's public key
   fetches its grants with `leash.grant.list` when a session starts.
 - `leash.grant.revoke` deletes the grant at once. Unlinking the agent
   revokes all of its grants (§7.4). Removing or blocking a connection
-  removes it from every grant's `connections`; a grant left with none is
-  revoked.
-- Changes are announced as `sync.event` `leash.grant.changed` or
-  `leash.grant.revoked` (to apps and desktops) and audited
-  (`leash.grant.issued`, `.updated`, `.revoked`).
+  revokes every grant that names it in `connections`: its delegation
+  names the connection and cannot be re-signed without the member.
+- Changes are announced as `sync.event` `leash.grant.changed`,
+  `leash.grant.revoked` or `leash.agent.suspended` (to apps and
+  desktops) and audited (`leash.grant.issued`, `.updated`, `.revoked`,
+  `leash.agent.suspended`, `.resumed`, `leash.referrals_limited`).
 
 ### 10.12 Grants: sharing between connections
 
@@ -4369,8 +4449,9 @@ it can read and write only its own objects and use only its own relay key
 | ETK | PINs in requests sealed to it (≤ 25 h). Requires breaking the enclave. | Enclave restart |
 | Owner app | Whatever its role allows, including unlock attempts if the PIN is known | Unlink from another device |
 | Desktop | Within an access session, what desktops may send; step-up types (secret values, profile, settings, invitations, removals, grant decisions, action definitions) only with an app's approval; nothing after the session ends (§6.8) | `device.session.end`; unlink |
-| Agent | Within its access session, only what its LEASH grants cover: through `ask` grants nothing without an app's approval of each request, through `auto` grants up to their rate limits; LEASH operations only on cataloged vault-held secrets, never critical ones; never app-only types, invitations, credential, device or grant management (§10.11) | `leash.grant.revoke`, `device.session.end`, `device.unlink` |
-| A signed LEASH delegation | A claim, to relying parties that trust the member's credential key, that the agent holds that scope; the vault never accepts it; valid at most 24 h and not revocable offline (§10.11) | Its `exp`; `leash.grant.revoke` stops the vault at once |
+| Agent | Within its access session, only what its LEASH grants cover: through `ask` grants nothing without an app's approval of each request (at most 20 referrals an hour), through `auto` grants up to their rate limits; LEASH operations only on cataloged vault-held secrets, never critical ones; never app-only types, invitations, credential, device or grant management. Refused requests are throttled and repeated ones suspend it; its activity is summarised in the audit log, so it cannot push older entries out (§10.11) | `leash.grant.revoke`, `device.session.end`, `device.unlink`; suspension is automatic |
+| A LEASH delegation (every grant) | A claim, to relying parties that trust the member's credential key, that the agent holds that scope, until the grant's `expires_at` if any; the vault never relies on it. A revoked grant's delegation carries no revocation status: a relying party outside the vault that does not ask the agent's connector for its current grants can be shown one (§10.11) | `leash.grant.revoke` stops the vault and tells the agent at once; give grants an `expires_at` when relying parties outside the vault matter |
+| Issuing grants | Only with the member present: an app within the credential's unlock window, since the credential key signs each grant (§10.11) | — |
 | A connection holding a grant | The granted items' current values, at most `uses` times, until expiry or revocation; no other field or secret. Values are sealed to the fetching device, so the connection's vault never holds them (§10.12) | `grant.revoke`; removing or blocking the connection |
 | A connection asking to use a critical secret | Nothing without the member's password for each use, bound to that request and payload; then one signature (`sign` over the payload as shown to the member, or the domain-separated `auth`), never the key (§10.13) | Deny; take the secret out of the catalog (`credential.secret.catalog`) |
 | A connection offered actions | The fixed results of `auto` actions offered to it and what the member answers; nothing of actions not offered to it (§10.14) | `action.define` (allowlist), `action.delete` |
@@ -4582,8 +4663,14 @@ pending (§15, follow-up 1).
     limits that fall back to referral, and expiry; the decision (allow,
     refer, refuse) behind §6.8's hook; `agent.request` for the catalog,
     retrieval and HMAC use of cataloged secrets; `leash.grant.issue`,
-    `.revoke`, `.list`, `.updated`; optional delegations signed with the
-    credential key within the unlock window, valid at most 24 h.
+    `.revoke`, `.list`, `.updated`, `leash.agent.resume`; every grant is
+    a delegation signed by the credential key (issuing and pairing with
+    grants need an app within the unlock window; lifetime and revocation
+    from LEASH §3.2 and §3.4); per-agent refusal cooldowns (1 s doubling
+    to 5 min), at most 20 referrals an hour, suspension after 30
+    refusals in an hour until an app resumes the agent; per-agent hourly
+    audit summaries of allowed, refused, throttled, read and used
+    events.
   - §6.7, §10.3: `device.pair.approve{grants}` carries an agent's initial
     grants. §6.8: `agent.request` goes through the policy; a referred
     request runs on approval only while a grant covers it; `grant.decide`

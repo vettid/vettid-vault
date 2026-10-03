@@ -118,7 +118,7 @@ func newData() data {
 }
 
 // New returns the feature.
-func New() *Feature { return &Feature{d: newData()} }
+func New(_ Deps) *Feature { return &Feature{d: newData()} }
 
 var (
 	owners = []string{vault.KindApp, vault.KindDesktop}

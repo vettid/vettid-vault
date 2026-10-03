@@ -27,8 +27,8 @@ type side struct {
 }
 
 func pair() (a, b *side) {
-	a = &side{f: New(), h: featuretest.NewHost(), now: t0}
-	b = &side{f: New(), h: featuretest.NewHost(), now: t0}
+	a = &side{f: New(Deps{}), h: featuretest.NewHost(), now: t0}
+	b = &side{f: New(Deps{}), h: featuretest.NewHost(), now: t0}
 	a.h.Conns[cB] = vault.PeerInfo{ID: cB, Kind: vault.KindConnection, State: vault.PeerActive}
 	a.h.Conns[cC] = vault.PeerInfo{ID: cC, Kind: vault.KindConnection, State: vault.PeerActive}
 	b.h.Conns[cA] = vault.PeerInfo{ID: cA, Kind: vault.KindConnection, State: vault.PeerActive}
@@ -406,7 +406,7 @@ func TestPendingLimitExpiryIdempotency(t *testing.T) {
 		t.Fatalf("repeat handled: %+v", a.h.Sent)
 	}
 	// State survives a flush and unlock.
-	g := New()
+	g := New(Deps{})
 	featuretest.RoundTrip(t, a.f, g)
 	a.f = g
 	// After 24 h every pending invocation is answered `expired`.

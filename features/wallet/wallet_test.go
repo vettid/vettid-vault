@@ -182,22 +182,46 @@ func (e *env) unlock() {
 	e.ok(e.sealed("app", "credential.unlock", nil, map[string]any{"password": pw}, true, false))
 }
 
-// importAbandon imports the BIP84 test phrase on regtest.
+// importAbandon imports the test phrase on regtest, receiving on its
+// BIP84 account (as an app would after finding history there), and
+// returns that account.
 func (e *env) importAbandon() (string, *btc.Account) {
 	e.t.Helper()
-	o := e.ok(e.sealed("app", "wallet.create", map[string]any{"name": "Savings", "network": "regtest", "tags": []string{"Money"}},
+	id, accts := e.importAs(btc.P2WPKH)
+	return id, accts[btc.P2WPKH]
+}
+
+func (e *env) importAs(addrType string) (string, map[string]*btc.Account) {
+	e.t.Helper()
+	o := e.ok(e.sealed("app", "wallet.create", map[string]any{"name": "Savings", "network": "regtest", "tags": []string{"Money"}, "address_type": addrType},
 		map[string]any{"password": pw, "item": map[string]any{"mnemonic": strings.ToUpper(abandon)}}, true, false))
 	id, _ := o.String("wallet_id")
-	fp, _ := o.String("fingerprint")
-	xpub, _ := o.String("xpub")
-	if fp != "73c5da0a" {
+	if fp, _ := o.String("fingerprint"); fp != "73c5da0a" {
 		e.t.Fatalf("fingerprint %s", fp)
 	}
-	a, err := btc.ParseAccount(btc.Regtest, fp, xpub)
-	if err != nil {
-		e.t.Fatal(err)
+	return id, accountsOf(e.t, o)
+}
+
+func accountsOf(t *testing.T, o strictjson.Object) map[string]*btc.Account {
+	t.Helper()
+	n, _ := o.String("network")
+	fp, _ := o.String("fingerprint")
+	arr, _ := o.Array("accounts")
+	out := map[string]*btc.Account{}
+	for _, raw := range arr {
+		ao, _ := strictjson.ParseObject(raw)
+		typ, _ := ao.String("type")
+		x, _ := ao.String("xpub")
+		a, err := btc.ParseAccount(n, typ, fp, x)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out[typ] = a
 	}
-	return id, a
+	if len(out) != 2 {
+		t.Fatalf("accounts: %v", out)
+	}
+	return out
 }
 
 func psbtFor(t *testing.T, a *btc.Account, pay string, amount, change int64) []byte {
@@ -253,9 +277,12 @@ func TestCreateGeneratedAndReveal(t *testing.T) {
 	}
 	seed, _ := btc.Seed(vals.Fields[0].Value, "")
 	n, _ := btc.LookupNetwork(btc.Mainnet)
-	a, _ := btc.NewAccount(seed, n)
-	if x, _ := o.String("xpub"); x != a.XPub {
+	a, _ := btc.NewAccount(seed, n, btc.P2TR)
+	if accountsOf(t, o)[btc.P2TR].XPub != a.XPub {
 		t.Fatal("xpub does not come from the phrase")
+	}
+	if at, _ := o.String("address_type"); at != btc.P2TR {
+		t.Fatal("new wallets receive on taproot")
 	}
 	// item.get shows the metadata, never the phrase.
 	gr := e.call("desktop", "item.get", js(map[string]any{"item_id": id}))
@@ -348,7 +375,7 @@ func TestSign(t *testing.T) {
 		t.Fatal("history")
 	}
 	w := e.wl.Wallets()[0]
-	if w.Next[1] != 1 {
+	if w.Next[btc.P2WPKH][1] != 1 {
 		t.Fatal("change index not advanced")
 	}
 	if !e.h.HasActivity("wallet.signed") {
@@ -475,11 +502,71 @@ func TestPayAddressNetwork(t *testing.T) {
 }
 
 func FuzzParseCreate(f *testing.F) {
-	f.Add([]byte(`{"name":"x","network":"regtest","tags":["a"]}`))
+	f.Add([]byte(`{"name":"x","network":"regtest","tags":["a"],"address_type":"p2tr"}`))
 	f.Fuzz(func(t *testing.T, b []byte) { _, _ = wallet.ParseCreate(b) })
 }
 
 func FuzzParseImport(f *testing.F) {
 	f.Add([]byte(`{"mnemonic":"` + abandon + `","passphrase":"TREZOR"}`))
 	f.Fuzz(func(t *testing.T, b []byte) { _, _ = wallet.ParseImport(b) })
+}
+
+// Taproot (BIP86): the default for new wallets; addresses, the
+// request-address action and a P2TR spend; a mixed spend of an imported
+// phrase with coins on both accounts after the app switches accounts.
+func TestTaproot(t *testing.T) {
+	e := newEnv(t, nil)
+	id, accts := e.importAs(btc.P2TR)
+	tr, wp := accts[btc.P2TR], accts[btc.P2WPKH]
+	o := e.ok(e.call("app", "wallet.address.new", js(map[string]any{"wallet_id": id})))
+	want, _, _ := tr.Address(0, 0)
+	if got, _ := o.String("address"); got != want || !strings.HasPrefix(got, "bcrt1p") {
+		t.Fatal(got)
+	}
+	if p, _ := o.String("path"); p != "m/86'/1'/0'/0/0" {
+		t.Fatal(p)
+	}
+	o = e.ok(e.call("app", "wallet.address.new", js(map[string]any{"wallet_id": id, "type": "p2wpkh"})))
+	if got, _ := o.String("address"); !strings.HasPrefix(got, "bcrt1q") {
+		t.Fatal(got)
+	}
+	e.ok(e.call("app", "action.configure", js(map[string]any{"action_id": "wallet.request-address", "mode": "allowlist",
+		"connections": []string{cA}, "items": []string{id}})))
+	invoke(e, cA, "wallet.request-address", map[string]any{"asset": "BTC"})
+	res, _ := lastResult(e, cA).Object("result")
+	if got, _ := res.String("address"); !strings.HasPrefix(got, "bcrt1p") {
+		t.Fatal("request-address on taproot: " + got)
+	}
+	e.unlock()
+	f1, _ := btc.FundingTx(tr, 0, 0, 90000, 1)
+	f2, _ := btc.FundingTx(wp, 0, 0, 40000, 2)
+	raw, _ := btc.BuildPSBT(tr, []btc.Coin{{PrevTx: f1, Vout: 0}}, []btc.Payee{{Address: payee, Amount: 60000}, {Change: true, Chain: 1, Index: 0, Amount: 29000}})
+	so := e.ok(e.sign(id, raw, nil))
+	txHex, _ := so.String("tx")
+	b, _ := hex.DecodeString(txHex)
+	tx, _ := btc.DecodeTx(b)
+	if len(tx.TxIn[0].Witness) != 1 || len(tx.TxIn[0].Witness[0]) != 64 {
+		t.Fatal("not a key-path schnorr spend")
+	}
+	if w := e.wl.Wallets()[0]; w.Next[btc.P2TR][1] != 1 {
+		t.Fatal("taproot change index")
+	}
+	// The app found history on the BIP84 account too: it switches the
+	// receiving account and spends coins of both in one transaction.
+	e.ok(e.call("app", "wallet.update", js(map[string]any{"wallet_id": id, "version": e.wl.Wallets()[0].Version, "address_type": "p2wpkh"})))
+	mixed, _ := btc.BuildPSBT(wp, []btc.Coin{{PrevTx: f2, Vout: 0}, {PrevTx: f1, Vout: 0, Acct: tr}},
+		[]btc.Payee{{Address: payee, Amount: 120000}, {Change: true, Chain: 1, Index: 0, Amount: 9000}})
+	if in := e.ok(e.call("desktop", "wallet.psbt.inspect", js(map[string]any{"wallet_id": id, "psbt": base64.StdEncoding.EncodeToString(mixed)}))); !strings.Contains(js(in), "p2tr") {
+		t.Fatal("inspect types")
+	}
+	e.ok(e.sign(id, mixed, nil))
+	o = e.ok(e.call("app", "wallet.address.new", js(map[string]any{"wallet_id": id})))
+	if got, _ := o.String("address"); !strings.HasPrefix(got, "bcrt1q") {
+		t.Fatal("receiving account not switched")
+	}
+}
+
+func FuzzParseUpdate(f *testing.F) {
+	f.Add([]byte(`{"wallet_id":"01JB2Z6V9K3M4N5P6Q7R8S9TAA","version":3,"address_type":"p2wpkh"}`))
+	f.Fuzz(func(t *testing.T, b []byte) { _, _ = wallet.ParseUpdate(b) })
 }

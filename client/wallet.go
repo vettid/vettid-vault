@@ -18,7 +18,16 @@ import (
 // critical item. mnemonic "" lets the vault generate a 24-word phrase;
 // otherwise it is imported (with an optional BIP39 passphrase).
 func (d *Device) WalletCreate(ctx context.Context, password, name, network, mnemonic, passphrase string, tags []string) (strictjson.Object, error) {
+	return d.WalletCreateType(ctx, password, name, network, "", mnemonic, passphrase, tags)
+}
+
+// WalletCreateType is WalletCreate with the account to receive on ("":
+// the default, p2tr).
+func (d *Device) WalletCreateType(ctx context.Context, password, name, network, addressType, mnemonic, passphrase string, tags []string) (strictjson.Object, error) {
 	extra := map[string]any{"name": name}
+	if addressType != "" {
+		extra["address_type"] = addressType
+	}
 	if network != "" {
 		extra["network"] = network
 	}
@@ -44,22 +53,61 @@ func (d *Device) WalletList(ctx context.Context) (strictjson.Object, error) {
 	return d.Op(ctx, "wallet.list", nil)
 }
 
-// WalletAccount returns a wallet's account (its public half) for
-// deriving addresses and building PSBTs locally.
-func (d *Device) WalletAccount(ctx context.Context, walletID string) (*btc.Account, error) {
+// WalletAccounts returns a wallet's accounts (their public halves, by
+// address type: "p2tr", "p2wpkh") and the type it receives on, for
+// scanning the chain, deriving addresses and building PSBTs locally.
+func (d *Device) WalletAccounts(ctx context.Context, walletID string) (map[string]*btc.Account, string, error) {
 	o, err := d.Op(ctx, "wallet.get", map[string]any{"wallet_id": walletID})
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	n, _ := o.String("network")
 	fp, _ := o.String("fingerprint")
-	x, _ := o.String("xpub")
-	return btc.ParseAccount(n, fp, x)
+	recv, _ := o.String("address_type")
+	arr, err := o.Array("accounts")
+	if err != nil {
+		return nil, "", ErrProtocol
+	}
+	out := map[string]*btc.Account{}
+	for _, raw := range arr {
+		ao, err := strictjson.ParseObject(raw)
+		if err != nil {
+			return nil, "", ErrProtocol
+		}
+		t, _ := ao.String("type")
+		x, _ := ao.String("xpub")
+		a, err := btc.ParseAccount(n, t, fp, x)
+		if err != nil {
+			return nil, "", ErrProtocol
+		}
+		out[t] = a
+	}
+	return out, recv, nil
 }
 
-// WalletAddressNew issues the next receive (or change) address.
+// WalletUpdate sets the account the wallet receives on ("p2tr" or
+// "p2wpkh"), for example after scanning an imported phrase's accounts.
+func (d *Device) WalletUpdate(ctx context.Context, walletID string, version uint64, addressType string) (uint64, error) {
+	o, err := d.Op(ctx, "wallet.update", map[string]any{"wallet_id": walletID, "version": version, "address_type": addressType})
+	if err != nil {
+		return 0, err
+	}
+	return o.Uint("version", 1, strictjson.MaxSafeInteger)
+}
+
+// WalletAddressNew issues the next receive (or change) address of the
+// account the wallet receives on.
 func (d *Device) WalletAddressNew(ctx context.Context, walletID string, change bool, label string) (strictjson.Object, error) {
+	return d.WalletAddressNewType(ctx, walletID, "", change, label)
+}
+
+// WalletAddressNewType is WalletAddressNew for one account ("": the
+// receiving one).
+func (d *Device) WalletAddressNewType(ctx context.Context, walletID, addressType string, change bool, label string) (strictjson.Object, error) {
 	body := map[string]any{"wallet_id": walletID}
+	if addressType != "" {
+		body["type"] = addressType
+	}
 	if change {
 		body["change"] = true
 	}

@@ -17,6 +17,9 @@ const (
 	DefaultFeedRetentionDays   = 30
 	MaxAppSettings             = 64
 	MaxAppSettingBytes         = 4096
+	// The location log (§10.16).
+	DefaultLocationHistoryDays     = 30
+	DefaultLocationHistoryInterval = 300
 )
 
 var appKeyRE = regexp.MustCompile(`^app\.[a-z0-9_.-]{1,48}$`)
@@ -49,6 +52,28 @@ func (s Settings) FeedRetention() time.Duration {
 	return time.Duration(d) * 24 * time.Hour
 }
 
+// LocationHistoryEnabled reports whether the vault keeps the member's own
+// location log (location.history.enabled, off by default, §10.16).
+func (s Settings) LocationHistoryEnabled() bool { return s.LocationHistory }
+
+// LocationHistoryRetention is how long the log keeps a position.
+func (s Settings) LocationHistoryRetention() time.Duration {
+	d := s.LocationHistoryDays
+	if d == 0 {
+		d = DefaultLocationHistoryDays
+	}
+	return time.Duration(d) * 24 * time.Hour
+}
+
+// LocationHistoryInterval is the log's recording cadence.
+func (s Settings) LocationHistoryInterval() time.Duration {
+	v := s.LocationHistorySeconds
+	if v == 0 {
+		v = DefaultLocationHistoryInterval
+	}
+	return time.Duration(v) * time.Second
+}
+
 // Backup reports whether the vault keeps the credential's copy (§3.5.6,
 // credential.backup, on by default).
 func (s Settings) Backup() bool { return !s.NoBackup }
@@ -60,7 +85,10 @@ func (s Settings) json() []byte {
 		feed = DefaultFeedRetentionDays
 	}
 	b := strictjson.NewBuilder().Bool("connections.auto_approve_in_person", s.AutoApproveInPerson).
-		Bool("credential.backup", s.Backup()).Uint("credential.unlock_ttl_seconds", ttl).Uint("feed.retention_days", feed)
+		Bool("credential.backup", s.Backup()).Uint("credential.unlock_ttl_seconds", ttl).Uint("feed.retention_days", feed).
+		Bool("location.history.enabled", s.LocationHistory).
+		Uint("location.history.interval_seconds", uint64(s.LocationHistoryInterval()/time.Second)).
+		Uint("location.history.retention_days", uint64(s.LocationHistoryRetention()/(24*time.Hour)))
 	keys := make([]string, 0, len(s.App))
 	for k := range s.App {
 		keys = append(keys, k)
@@ -105,6 +133,18 @@ func ApplySettings(cur Settings, body []byte) (Settings, error) {
 			}
 		case "feed.retention_days":
 			if next.FeedRetentionDays, err = set.Uint(k, 1, 365); err != nil {
+				return cur, errBadRequest
+			}
+		case "location.history.enabled":
+			if next.LocationHistory, err = set.Bool(k); err != nil {
+				return cur, errBadRequest
+			}
+		case "location.history.retention_days":
+			if next.LocationHistoryDays, err = set.Uint(k, 1, 365); err != nil {
+				return cur, errBadRequest
+			}
+		case "location.history.interval_seconds":
+			if next.LocationHistorySeconds, err = set.Uint(k, 60, 3600); err != nil {
 				return cur, errBadRequest
 			}
 		case "credential.backup":

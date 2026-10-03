@@ -13,7 +13,8 @@ import (
 
 func init() {
 	commands["location"] = command{"location start -conn ID -mode once|continuous [-precision exact|approximate|city] [-duration S] [-interval S] [-history] [-request ID]" +
-		" | stop -id ID | list | get -conn ID [-history] | request -conn ID [-note T] | update -lat F -lon F [-accuracy M]", cmdLocation}
+		" | stop -id ID | list | get -conn ID [-history] | request -conn ID [-note T] | update -lat F -lon F [-accuracy M] | history [-from TS] [-to TS] [-after TS] [-limit N] | " +
+		"history-delete [-from TS] [-to TS] | history-share -id SHARE -from TS -to TS", cmdLocation}
 }
 
 func cmdLocation(ctx context.Context, g *globals, args []string) error {
@@ -34,6 +35,10 @@ func cmdLocation(ctx context.Context, g *globals, args []string) error {
 	lat := fs.Float64("lat", 0, "latitude")
 	lon := fs.Float64("lon", 0, "longitude")
 	acc := fs.Float64("accuracy", 0, "accuracy in metres")
+	from := fs.String("from", "", "range start (RFC 3339)")
+	to := fs.String("to", "", "range end (RFC 3339)")
+	after := fs.String("after", "", "page after (history)")
+	limit := fs.Int("limit", 0, "page size (history)")
 	_ = fs.Parse(rest)
 	return withDevice(ctx, g, func(d *client.Device) (any, error) {
 		switch op {
@@ -50,6 +55,28 @@ func cmdLocation(ctx context.Context, g *globals, args []string) error {
 		case "request":
 			rid, err := d.LocationRequest(ctx, *conn, *note)
 			return map[string]string{"request_id": rid}, err
+		case "history", "history-delete", "history-share":
+			var f, t time.Time
+			var err error
+			if *from != "" {
+				if f, err = time.Parse(time.RFC3339Nano, *from); err != nil {
+					return nil, errors.New("-from: RFC 3339")
+				}
+			}
+			if *to != "" {
+				if t, err = time.Parse(time.RFC3339Nano, *to); err != nil {
+					return nil, errors.New("-to: RFC 3339")
+				}
+			}
+			switch op {
+			case "history":
+				return d.LocationHistoryList(ctx, f, t, *after, *limit)
+			case "history-delete":
+				n, err := d.LocationHistoryDelete(ctx, f, t)
+				return map[string]uint64{"deleted": n}, err
+			}
+			n, err := d.LocationHistoryShare(ctx, *id, f, t)
+			return map[string]uint64{"sent": n}, err
 		case "update":
 			return nil, d.LocationUpdate(ctx, client.LocationSample{Lat: *lat, Lon: *lon, Accuracy: *acc})
 		}

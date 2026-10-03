@@ -6,9 +6,12 @@ import (
 	"errors"
 	"strconv"
 
+	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/btcutil/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg"
+	"github.com/btcsuite/btcd/txscript"
 )
 
 // Networks.
@@ -46,21 +49,36 @@ func LookupNetwork(name string) (Network, bool) {
 	return Network{Name: name, CoinType: coin, Params: &p}, true
 }
 
-// Purpose is BIP84 (P2WPKH).
-const Purpose = 84
+// Address types and their BIP44-style purposes.
+const (
+	P2WPKH = "p2wpkh" // BIP84, native segwit v0
+	P2TR   = "p2tr"   // BIP86, taproot key path
+)
+
+// PurposeOf returns the purpose of an address type (84 or 86), 0 if unknown.
+func PurposeOf(addrType string) uint32 {
+	switch addrType {
+	case P2WPKH:
+		return 84
+	case P2TR:
+		return 86
+	}
+	return 0
+}
 
 const hardened = hdkeychain.HardenedKeyStart
 
 // MaxIndex bounds address indices the vault derives or accepts.
 const MaxIndex = 1 << 20
 
-// Account is a BIP84 account's public half: what the vault keeps in DEK
-// state so that it can derive addresses and check PSBTs without the
-// recovery phrase.
+// Account is a BIP84 or BIP86 account's public half: what the vault keeps
+// in DEK state so that it can derive addresses and check PSBTs without
+// the recovery phrase.
 type Account struct {
 	Network     Network
+	Type        string  // P2WPKH or P2TR
 	Fingerprint [4]byte // the master key's fingerprint (BIP32)
-	XPub        string  // the account key m/84'/coin'/0', serialised
+	XPub        string  // the account key m/purpose'/coin'/0', serialised
 	key         *hdkeychain.ExtendedKey
 }
 
@@ -70,9 +88,12 @@ var ErrKey = errors.New("btc: invalid key")
 // hash160 is RIPEMD-160(SHA-256(b)) (btcutil's, as Bitcoin defines it).
 func hash160(b []byte) []byte { return btcutil.Hash160(b) }
 
-// AccountPath is the account's derivation path, m/84'/coin'/0'.
+// Purpose is the account's purpose, 84 or 86.
+func (a *Account) Purpose() uint32 { return PurposeOf(a.Type) }
+
+// AccountPath is the account's derivation path, m/purpose'/coin'/0'.
 func (a *Account) AccountPath() []uint32 {
-	return []uint32{hardened + Purpose, hardened + a.Network.CoinType, hardened}
+	return []uint32{hardened + a.Purpose(), hardened + a.Network.CoinType, hardened}
 }
 
 // PathString is a path in the m/84'/1'/0'/0/5 notation.
@@ -98,13 +119,20 @@ func (a *Account) FingerprintHex() string { return hex.EncodeToString(a.Fingerpr
 // Descriptor is the account's output descriptor for one chain (0 receive,
 // 1 change), without checksum.
 func (a *Account) Descriptor(change uint32) string {
-	return "wpkh([" + a.FingerprintHex() + "/84'/" + strconv.FormatUint(uint64(a.Network.CoinType), 10) + "'/0']" +
-		a.XPub + "/" + strconv.FormatUint(uint64(change), 10) + "/*)"
+	fn := "wpkh"
+	if a.Type == P2TR {
+		fn = "tr"
+	}
+	return fn + "([" + a.FingerprintHex() + "/" + strconv.FormatUint(uint64(a.Purpose()), 10) + "'/" +
+		strconv.FormatUint(uint64(a.Network.CoinType), 10) + "'/0']" + a.XPub + "/" + strconv.FormatUint(uint64(change), 10) + "/*)"
 }
 
-// NewAccount derives the BIP84 account of a BIP39 seed.
-func NewAccount(seed []byte, n Network) (*Account, error) {
-	acct, master, err := derivePrivate(seed, n, nil)
+// NewAccount derives the account of a BIP39 seed for an address type.
+func NewAccount(seed []byte, n Network, addrType string) (*Account, error) {
+	if PurposeOf(addrType) == 0 {
+		return nil, ErrKey
+	}
+	acct, master, err := derivePrivate(seed, n, PurposeOf(addrType))
 	if err != nil {
 		return nil, err
 	}
@@ -123,20 +151,20 @@ func NewAccount(seed []byte, n Network) (*Account, error) {
 	if err != nil {
 		return nil, ErrKey
 	}
-	a := &Account{Network: n, XPub: xpub, key: pub}
+	a := &Account{Network: n, Type: addrType, XPub: xpub, key: pub}
 	copy(a.Fingerprint[:], hash160(mpub.SerializeCompressed())[:4])
 	return a, nil
 }
 
-// derivePrivate derives the account key and then path below it; the
-// caller zeroes both returned keys.
-func derivePrivate(seed []byte, n Network, below []uint32) (*hdkeychain.ExtendedKey, *hdkeychain.ExtendedKey, error) {
+// derivePrivate derives the account key m/purpose'/coin'/0'; the caller
+// zeroes both returned keys (the account key and the master key).
+func derivePrivate(seed []byte, n Network, purpose uint32) (*hdkeychain.ExtendedKey, *hdkeychain.ExtendedKey, error) {
 	master, err := hdkeychain.NewMaster(seed, n.Params)
 	if err != nil {
 		return nil, nil, ErrKey
 	}
 	k := master
-	for _, i := range append([]uint32{hardened + Purpose, hardened + n.CoinType, hardened}, below...) {
+	for _, i := range []uint32{hardened + purpose, hardened + n.CoinType, hardened} {
 		next, err := k.Derive(i)
 		if k != master {
 			k.Zero()
@@ -151,9 +179,9 @@ func derivePrivate(seed []byte, n Network, below []uint32) (*hdkeychain.Extended
 }
 
 // ParseAccount restores an account from what the vault stored.
-func ParseAccount(network, fingerprintHex, xpub string) (*Account, error) {
+func ParseAccount(network, addrType, fingerprintHex, xpub string) (*Account, error) {
 	n, ok := LookupNetwork(network)
-	if !ok {
+	if !ok || PurposeOf(addrType) == 0 {
 		return nil, ErrKey
 	}
 	k, err := hdkeychain.NewKeyFromString(xpub)
@@ -164,14 +192,12 @@ func ParseAccount(network, fingerprintHex, xpub string) (*Account, error) {
 	if err != nil || len(fp) != 4 {
 		return nil, ErrKey
 	}
-	a := &Account{Network: n, XPub: xpub, key: k}
+	a := &Account{Network: n, Type: addrType, XPub: xpub, key: k}
 	copy(a.Fingerprint[:], fp)
 	return a, nil
 }
 
-// PubKey derives the public key at chain/index (chain 0 receive, 1
-// change).
-func (a *Account) PubKey(chain, index uint32) ([]byte, error) {
+func (a *Account) pub(chain, index uint32) (*btcec.PublicKey, error) {
 	if chain > 1 || index >= MaxIndex {
 		return nil, ErrKey
 	}
@@ -187,20 +213,46 @@ func (a *Account) PubKey(chain, index uint32) ([]byte, error) {
 	if err != nil {
 		return nil, ErrKey
 	}
+	return pk, nil
+}
+
+// PubKey derives the public key at chain/index (chain 0 receive, 1
+// change) as PSBTs name it: compressed (33 bytes) for P2WPKH, the x-only
+// internal key (32 bytes) for P2TR.
+func (a *Account) PubKey(chain, index uint32) ([]byte, error) {
+	pk, err := a.pub(chain, index)
+	if err != nil {
+		return nil, err
+	}
+	if a.Type == P2TR {
+		return schnorr.SerializePubKey(pk), nil
+	}
 	return pk.SerializeCompressed(), nil
 }
 
-// Address derives the P2WPKH address at chain/index and its script.
+// Address derives the address at chain/index and its output script:
+// P2WPKH, or P2TR with the BIP86 key-path-only tweak.
 func (a *Account) Address(chain, index uint32) (string, []byte, error) {
-	pk, err := a.PubKey(chain, index)
+	pk, err := a.pub(chain, index)
 	if err != nil {
 		return "", nil, err
 	}
-	addr, err := btcutil.NewAddressWitnessPubKeyHash(hash160(pk), a.Network.Params)
+	if a.Type == P2TR {
+		out := txscript.ComputeTaprootKeyNoScript(pk)
+		addr, err := btcutil.NewAddressTaproot(schnorr.SerializePubKey(out), a.Network.Params)
+		if err != nil {
+			return "", nil, ErrKey
+		}
+		script, err := txscript.PayToTaprootScript(out)
+		if err != nil {
+			return "", nil, ErrKey
+		}
+		return addr.EncodeAddress(), script, nil
+	}
+	h := hash160(pk.SerializeCompressed())
+	addr, err := btcutil.NewAddressWitnessPubKeyHash(h, a.Network.Params)
 	if err != nil {
 		return "", nil, ErrKey
 	}
-	return addr.EncodeAddress(), p2wpkh(hash160(pk)), nil
+	return addr.EncodeAddress(), append([]byte{0x00, 0x14}, h...), nil
 }
-
-func p2wpkh(h []byte) []byte { return append([]byte{0x00, 0x14}, h...) }

@@ -1,7 +1,7 @@
 // Package btc is the wallet feature's Bitcoin code (VAULT-MESSAGING
 // §10.18): BIP39 recovery phrases, BIP32/BIP84 account keys and receive
 // addresses, and the validation and signing of PSBTs (BIP174) that spend
-// from a BIP84 (P2WPKH) account. It has no network access and no state:
+// from BIP86 (P2TR key path) and BIP84 (P2WPKH) accounts. It has no network access and no state:
 // chain data comes inside the PSBT, from the member's app.
 //
 // Secp256k1, BIP32, transaction serialisation, sighashes and PSBT

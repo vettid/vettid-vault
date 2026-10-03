@@ -336,4 +336,8 @@ type Settings struct {
 	FeedRetentionDays   uint64            `json:"feed_retention_days,omitempty"`
 	App                 map[string]string `json:"app,omitempty"`
 	NoBackup            bool              `json:"no_backup,omitempty"` // credential.backup off (§3.5.6)
+	// The member's own location log (§10.16): off by default.
+	LocationHistory        bool   `json:"location_history,omitempty"`
+	LocationHistoryDays    uint64 `json:"location_history_days,omitempty"`     // 0 = default
+	LocationHistorySeconds uint64 `json:"location_history_interval,omitempty"` // seconds; 0 = default
 }

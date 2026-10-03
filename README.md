@@ -75,7 +75,7 @@ LocalStack, the real relay and a stand-in for the member API
 | `features/actions` | §10.14 | Shared actions offered to connections by allowlist (V4 batch 3; the wallet actions in V4 batch 4) |
 | `features/location` | §10.16 | 1:1 location shares with a connection: once or continuous, expiring, precision and cadence enforced by the sending vault, positions forwarded from memory (V4 batch 4) |
 | `features/presence` | §9.2, §10.17 | On-demand presence pings with a per-connection policy; refusals are silent (V4 batch 4) |
-| `features/wallet`, `vms/btc` | §10.18 | Bitcoin wallets: BIP84 accounts whose recovery phrase is a critical item, addresses without the password, PSBT signing under a signing policy as a credential operation; the member's app is the chain source (V4 batch 4; btcd libraries, vault process only) |
+| `features/wallet`, `vms/btc` | §10.18 | Bitcoin wallets: BIP86 (taproot, the default) and BIP84 accounts whose recovery phrase is a critical item, addresses without the password, PSBT signing under a signing policy as a credential operation; the member's app is the chain source (V4 batch 4; btcd libraries, vault process only) |
 | `client` | §6.7, §9.1, §11 | Reference client for an app, desktop or agent: verify enclaves and manifests, enroll and unlock over the alternate channel, approve release updates, pair (with device attestation), session and rekeys, requests and events, token refresh |
 | `cmd/vaultctl` | — | Test driver over `client`; dev builds (`-tags devenclave`) also create and run vaults, and enroll and unlock through an in-process enclave |
 | `devenclave` | — | Dev sealer and direct create/unlock with a PIN. Every file carries the `devenclave` tag; release builds cannot compile it in (`make check-tcb`) |

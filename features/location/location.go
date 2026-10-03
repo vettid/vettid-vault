@@ -55,6 +55,9 @@ type Incoming struct {
 	Expires   time.Time `json:"expires"`
 	Last      *Sample   `json:"last,omitempty"`
 	Trail     []Sample  `json:"trail,omitempty"`
+	// Snapshot is the sharer's log snapshot (location.snapshot), kept
+	// with the share.
+	Snapshot []Sample `json:"snapshot,omitempty"`
 }
 
 // InRequest is a connection's request that the member share.
@@ -76,6 +79,9 @@ type data struct {
 	// Ended holds ended incoming share ids until their expiry, so a
 	// repeated location.shared does not revive them.
 	Ended map[string]time.Time `json:"ended"`
+	// Log is the member's own location log (§10.16), oldest first.
+	Log          []LogPoint `json:"log,omitempty"`
+	LogCompacted time.Time  `json:"log_compacted,omitempty"`
 }
 
 func (d *data) init() {
@@ -137,6 +143,12 @@ func (f *Feature) Types() []vault.TypeSpec {
 		{Type: "location.shared", From: conns},
 		{Type: "location.stopped", From: conns},
 		{Type: "location.requested", From: conns},
+		{Type: "location.snapshot", From: conns},
+		// The member's own log: apps; desktops with an app's approval
+		// (§6.8), as it reveals where the member has been.
+		{Type: "location.history.list", Request: true, From: owners, DesktopApproval: true},
+		{Type: "location.history.delete", Request: true, From: owners, DesktopApproval: true},
+		{Type: "location.history.share", Request: true, From: owners, DesktopApproval: true},
 	}
 }
 
@@ -192,6 +204,14 @@ func (f *Feature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner
 		f.stopped(s, in.Body)
 	case "location.requested":
 		f.requested(s, in.Body)
+	case "location.snapshot":
+		f.snapshot(s, in.Body)
+	case "location.history.list":
+		return f.historyList(s, in.Body)
+	case "location.history.delete":
+		return f.historyDelete(s, in.Body)
+	case "location.history.share":
+		return f.historyShare(s, in.Body)
 	default:
 		return nil, vault.NewError("unsupported_type", "")
 	}
@@ -316,6 +336,7 @@ func (f *Feature) deviceUpdate(s *vault.Session, body []byte) {
 		f.drop(s, "drop.location_malformed")
 		return
 	}
+	f.record(s, sm) // the member's own log, if enabled
 	for _, id := range sortedKeys(f.d.Out) {
 		o := f.d.Out[id]
 		if o.Device != s.From().ID {
@@ -466,6 +487,16 @@ func (f *Feature) get(_ *vault.Session, body []byte) (json.RawMessage, error) {
 				arr = append(arr, sh.Trail[i].json("", "", true)...)
 			}
 			b.Raw("history", append(arr, ']'))
+		}
+		if len(sh.Snapshot) > 0 {
+			arr := []byte{'['}
+			for i := range sh.Snapshot {
+				if i > 0 {
+					arr = append(arr, ',')
+				}
+				arr = append(arr, sh.Snapshot[i].json("", "", true)...)
+			}
+			b.Raw("snapshot", append(arr, ']'))
 		}
 		return b.Bytes(), nil
 	}

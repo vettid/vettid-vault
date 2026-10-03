@@ -84,7 +84,7 @@ func TestVaultctlBatch4(t *testing.T) {
 		t.Fatalf("list: %s", out)
 	}
 	out = run("wallet", "address", "-wallet", wid, "-label", "shop")
-	if !strings.Contains(out, `"address": "bcrt1q`) {
+	if !strings.Contains(out, `"address": "bcrt1p`) || !strings.Contains(out, `"type": "p2tr"`) {
 		t.Fatalf("address: %s", out)
 	}
 	psbt := filepath.Join(dir, "spend.psbt")

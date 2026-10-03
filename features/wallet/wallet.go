@@ -1,5 +1,6 @@
 // Package wallet is the member's Bitcoin wallet (VAULT-MESSAGING §10.18):
-// BIP84 (P2WPKH) accounts whose recovery phrase is a critical item
+// BIP86 (P2TR, the default for new wallets) and BIP84 (P2WPKH) accounts
+// of one recovery phrase, which is a critical item
 // (§10.7: envelope-encrypted under an item key that only the Protean
 // Credential holds), receive addresses derived from the account's public
 // key without the password, and PSBT signing as a credential operation
@@ -57,7 +58,7 @@ const (
 	MaxList        = 500
 	EntropyBytes   = 32 // 24 words
 	Category       = "crypto_wallet"
-	Template       = "wallet.btc.bip84"
+	Template       = "wallet.btc"
 	LabelPhrase    = "Recovery phrase"
 	LabelPassword  = "Passphrase"
 	maxPSBTBase64  = (btc.MaxPSBT + 2) / 3 * 4
@@ -110,6 +111,7 @@ type Options struct {
 
 // Addr is an issued address.
 type Addr struct {
+	Type    string    `json:"type"` // btc.P2WPKH or btc.P2TR
 	Chain   uint32    `json:"chain"`
 	Index   uint32    `json:"index"`
 	Address string    `json:"address"`
@@ -137,22 +139,33 @@ type Tx struct {
 	Invocation string    `json:"invocation,omitempty"`
 }
 
-// Wallet is one BIP84 account: its public half and bookkeeping. Its
-// recovery phrase is the critical item with the same id.
+// ConnAddr is the address a connection was given (wallet.request-address).
+type ConnAddr struct {
+	Type  string `json:"type"`
+	Index uint32 `json:"index"`
+}
+
+// Wallet is one recovery phrase's accounts: BIP86 (P2TR) and BIP84
+// (P2WPKH), their public halves and bookkeeping. Its recovery phrase is
+// the critical item with the same id.
 type Wallet struct {
-	ID          string            `json:"id"` // the critical item's id
-	Version     uint64            `json:"version"`
-	Name        string            `json:"name"`
-	Network     string            `json:"network"`
-	Fingerprint string            `json:"fingerprint"`
-	XPub        string            `json:"xpub"`
-	PhraseField string            `json:"phrase_field"`
-	PassField   string            `json:"pass_field"`
-	Next        [2]uint32         `json:"next"`
-	Addrs       []Addr            `json:"addrs,omitempty"`
-	ConnAddr    map[string]uint32 `json:"conn_addr,omitempty"`
-	History     []Tx              `json:"history,omitempty"`
-	Created     time.Time         `json:"created"`
+	ID          string `json:"id"` // the critical item's id
+	Version     uint64 `json:"version"`
+	Name        string `json:"name"`
+	Network     string `json:"network"`
+	Fingerprint string `json:"fingerprint"`
+	// XPubs are the account keys by address type.
+	XPubs map[string]string `json:"xpubs"`
+	// AddressType is the account new receive addresses come from
+	// (wallet.address.new without type, wallet.request-address).
+	AddressType string               `json:"address_type"`
+	PhraseField string               `json:"phrase_field"`
+	PassField   string               `json:"pass_field"`
+	Next        map[string][2]uint32 `json:"next"`
+	Addrs       []Addr               `json:"addrs,omitempty"`
+	ConnAddr    map[string]ConnAddr  `json:"conn_addr,omitempty"`
+	History     []Tx                 `json:"history,omitempty"`
+	Created     time.Time            `json:"created"`
 }
 
 type state struct {
@@ -215,6 +228,9 @@ func (f *Feature) Types() []vault.TypeSpec {
 		{Type: "wallet.create", Request: true, From: apps},
 		{Type: "wallet.list", Request: true, From: owners},
 		{Type: "wallet.get", Request: true, From: owners},
+		// Which account receives (after the app scanned an imported
+		// phrase's accounts, §10.18).
+		{Type: "wallet.update", Request: true, From: owners},
 		{Type: "wallet.address.new", Request: true, From: owners},
 		{Type: "wallet.address.list", Request: true, From: owners},
 		{Type: "wallet.address.used", Request: true, From: owners},
@@ -311,6 +327,8 @@ func (f *Feature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner
 			return nil, err
 		}
 		return f.view(w).Bytes(), nil
+	case "wallet.update":
+		return f.update(s, in.Body)
 	case "wallet.address.new":
 		return f.addressNew(s, in.Body)
 	case "wallet.address.list":
@@ -338,9 +356,33 @@ func (f *Feature) networkAllowed(n string) bool {
 	return false
 }
 
-func (w *Wallet) account() (*btc.Account, error) {
-	return btc.ParseAccount(w.Network, w.Fingerprint, w.XPub)
+// AddressTypes are the wallet's account types, in a fixed order.
+var addressTypes = [...]string{btc.P2TR, btc.P2WPKH} // read-only
+
+func (w *Wallet) account(typ string) (*btc.Account, error) {
+	x, ok := w.XPubs[typ]
+	if !ok {
+		return nil, errBad
+	}
+	return btc.ParseAccount(w.Network, typ, w.Fingerprint, x)
 }
+
+func (w *Wallet) accounts() ([]*btc.Account, error) {
+	out := []*btc.Account{}
+	for _, t := range addressTypes {
+		if _, ok := w.XPubs[t]; !ok {
+			continue
+		}
+		a, err := w.account(t)
+		if err != nil {
+			return nil, errInternal
+		}
+		out = append(out, a)
+	}
+	return out, nil
+}
+
+func validType(t string) bool { return t == btc.P2TR || t == btc.P2WPKH }
 
 func (f *Feature) wallet(body []byte) (*Wallet, error) {
 	o, err := strictjson.ParseObject(body)
@@ -367,9 +409,10 @@ func (f *Feature) walletOf(o strictjson.Object) (*Wallet, error) {
 // CreateRequest is a parsed wallet.create body (outside the sealed
 // payload).
 type CreateRequest struct {
-	Name    string
-	Network string
-	Tags    json.RawMessage
+	Name        string
+	Network     string
+	AddressType string
+	Tags        json.RawMessage
 }
 
 // ParseCreate parses wallet.create's outer members strictly.
@@ -378,7 +421,7 @@ func ParseCreate(body []byte) (*CreateRequest, error) {
 	if err != nil {
 		return nil, errBad
 	}
-	r := &CreateRequest{Network: defaultNetwork}
+	r := &CreateRequest{Network: defaultNetwork, AddressType: btc.P2TR}
 	if r.Name, err = o.String("name"); err != nil || r.Name == "" || len(r.Name) > 128 || !printable(r.Name) {
 		return nil, errBad
 	}
@@ -389,6 +432,11 @@ func ParseCreate(body []byte) (*CreateRequest, error) {
 			return nil, errBad
 		}
 		r.Network = n
+	}
+	if t, present, err := o.OptString("address_type"); err != nil || present && !validType(t) {
+		return nil, errBad
+	} else if present {
+		r.AddressType = t
 	}
 	if o.Has("item_id") || o.Has("fields") {
 		return nil, errBad
@@ -487,11 +535,17 @@ func (f *Feature) create(s *vault.Session, in *envelope.Inner) (json.RawMessage,
 		if err != nil {
 			return errInternal
 		}
-		acct, err := btc.NewAccount(seed, n)
-		suite.Wipe(seed)
-		if err != nil {
-			return errInternal
+		xpubs := map[string]string{}
+		fp := ""
+		for _, t := range addressTypes {
+			acct, err := btc.NewAccount(seed, n, t)
+			if err != nil {
+				suite.Wipe(seed)
+				return errInternal
+			}
+			xpubs[t], fp = acct.XPub, acct.FingerprintHex()
 		}
+		suite.Wipe(seed)
 		id, fids, c, a, err := f.items.NewCriticalItem(s, inner, r.Name, Category, Template, tags,
 			[]items.NewField{{Label: LabelPhrase, Kind: "password", Value: mnemonic}, {Label: LabelPassword, Kind: "password", Value: pass}})
 		if err != nil {
@@ -502,8 +556,9 @@ func (f *Feature) create(s *vault.Session, in *envelope.Inner) (json.RawMessage,
 			return errInternal
 		}
 		commit, abort = c, a
-		w = &Wallet{ID: id, Version: 1, Name: r.Name, Network: r.Network, Fingerprint: acct.FingerprintHex(), XPub: acct.XPub,
-			PhraseField: fids[0], PassField: fids[1], ConnAddr: map[string]uint32{}, Created: s.Now().UTC().Truncate(time.Millisecond)}
+		w = &Wallet{ID: id, Version: 1, Name: r.Name, Network: r.Network, Fingerprint: fp, XPubs: xpubs, AddressType: r.AddressType,
+			PhraseField: fids[0], PassField: fids[1], Next: map[string][2]uint32{}, ConnAddr: map[string]ConnAddr{},
+			Created: s.Now().UTC().Truncate(time.Millisecond)}
 		return nil
 	}
 	res, err := f.cred.Operate(s, in, credential.NeedOptItem, nil, op)
@@ -525,19 +580,26 @@ func (f *Feature) create(s *vault.Session, in *envelope.Inner) (json.RawMessage,
 
 // --- views ---
 
-func pathOf(n btc.Network, chain, index uint32) string {
-	return btc.PathString([]uint32{0x80000000 + btc.Purpose, 0x80000000 + n.CoinType, 0x80000000, chain, index})
+func pathOf(n btc.Network, typ string, chain, index uint32) string {
+	return btc.PathString([]uint32{0x80000000 + btc.PurposeOf(typ), 0x80000000 + n.CoinType, 0x80000000, chain, index})
 }
 
 func (f *Feature) view(w *Wallet) *strictjson.Builder {
 	b := strictjson.NewBuilder().String("wallet_id", w.ID).Uint("version", w.Version).String("name", w.Name).
-		String("network", w.Network).String("fingerprint", w.Fingerprint).String("xpub", w.XPub)
-	if a, err := w.account(); err == nil {
-		b.String("path", btc.PathString(a.AccountPath())).
-			Raw("descriptors", strictjson.NewBuilder().String("receive", a.Descriptor(0)).String("change", a.Descriptor(1)).Bytes())
+		String("network", w.Network).String("fingerprint", w.Fingerprint).String("address_type", w.AddressType)
+	arr := []byte{'['}
+	accts, _ := w.accounts()
+	for i, a := range accts {
+		if i > 0 {
+			arr = append(arr, ',')
+		}
+		nx := w.Next[a.Type]
+		arr = append(arr, strictjson.NewBuilder().String("type", a.Type).String("path", btc.PathString(a.AccountPath())).
+			String("xpub", a.XPub).
+			Raw("descriptors", strictjson.NewBuilder().String("receive", a.Descriptor(0)).String("change", a.Descriptor(1)).Bytes()).
+			Uint("next_receive", uint64(nx[0])).Uint("next_change", uint64(nx[1])).Bytes()...)
 	}
-	return b.Uint("next_receive", uint64(w.Next[0])).Uint("next_change", uint64(w.Next[1])).
-		String("created_at", envelope.FormatTS(w.Created))
+	return b.Raw("accounts", append(arr, ']')).String("created_at", envelope.FormatTS(w.Created))
 }
 
 func (f *Feature) list(body []byte) (json.RawMessage, error) {
@@ -554,11 +616,56 @@ func (f *Feature) list(body []byte) (json.RawMessage, error) {
 	return strictjson.NewBuilder().Raw("wallets", append(arr, ']')).Bytes(), nil
 }
 
+// Update is a parsed wallet.update body.
+type Update struct {
+	WalletID    string
+	Version     uint64
+	AddressType string
+}
+
+// ParseUpdate parses wallet.update strictly.
+func ParseUpdate(body []byte) (*Update, error) {
+	o, err := strictjson.ParseObject(body)
+	if err != nil {
+		return nil, errBad
+	}
+	u := &Update{}
+	if u.WalletID, err = o.String("wallet_id"); err != nil || !envelope.ValidULID(u.WalletID) {
+		return nil, errBad
+	}
+	if u.Version, err = o.Uint("version", 1, strictjson.MaxSafeInteger); err != nil {
+		return nil, errBad
+	}
+	if u.AddressType, err = o.String("address_type"); err != nil || !validType(u.AddressType) {
+		return nil, errBad
+	}
+	return u, nil
+}
+
+// update sets the account that receives (address_type).
+func (f *Feature) update(s *vault.Session, body []byte) (json.RawMessage, error) {
+	u, err := ParseUpdate(body)
+	if err != nil {
+		return nil, err
+	}
+	w := f.st.Wallets[u.WalletID]
+	if w == nil {
+		return nil, errNotFound
+	}
+	if u.Version != w.Version {
+		return nil, vault.NewError("conflict", "")
+	}
+	w.AddressType = u.AddressType
+	w.Version++
+	s.SyncEvent("wallet.changed", strictjson.NewBuilder().String("wallet_id", w.ID).Uint("version", w.Version).Bytes())
+	return strictjson.NewBuilder().Uint("version", w.Version).Bytes(), nil
+}
+
 // --- addresses ---
 
-func (w *Wallet) addr(chain, index uint32) *Addr {
+func (w *Wallet) addr(typ string, chain, index uint32) *Addr {
 	for i := range w.Addrs {
-		if w.Addrs[i].Chain == chain && w.Addrs[i].Index == index {
+		if w.Addrs[i].Type == typ && w.Addrs[i].Chain == chain && w.Addrs[i].Index == index {
 			return &w.Addrs[i]
 		}
 	}
@@ -566,29 +673,34 @@ func (w *Wallet) addr(chain, index uint32) *Addr {
 }
 
 // issue derives and records the next address of a chain.
-func (w *Wallet) issue(chain uint32, label, conn string, now time.Time) (*Addr, error) {
-	if len(w.Addrs) >= MaxAddresses || w.Next[chain] >= btc.MaxIndex {
+func (w *Wallet) issue(typ string, chain uint32, label, conn string, now time.Time) (*Addr, error) {
+	if w.Next == nil {
+		w.Next = map[string][2]uint32{}
+	}
+	nx := w.Next[typ]
+	if len(w.Addrs) >= MaxAddresses || nx[chain] >= btc.MaxIndex {
 		return nil, errLimit
 	}
-	a, err := w.account()
+	a, err := w.account(typ)
 	if err != nil {
-		return nil, errInternal
+		return nil, err
 	}
-	idx := w.Next[chain]
+	idx := nx[chain]
 	addr, _, err := a.Address(chain, idx)
 	if err != nil {
 		return nil, errInternal
 	}
-	w.Addrs = append(w.Addrs, Addr{Chain: chain, Index: idx, Address: addr, Label: label, Conn: conn, Issued: now.UTC().Truncate(time.Millisecond)})
-	w.Next[chain] = idx + 1
+	w.Addrs = append(w.Addrs, Addr{Type: typ, Chain: chain, Index: idx, Address: addr, Label: label, Conn: conn, Issued: now.UTC().Truncate(time.Millisecond)})
+	nx[chain] = idx + 1
+	w.Next[typ] = nx
 	w.Version++
 	return &w.Addrs[len(w.Addrs)-1], nil
 }
 
 func (f *Feature) addrJSON(w *Wallet, a *Addr) []byte {
 	n, _ := btc.LookupNetwork(w.Network)
-	b := strictjson.NewBuilder().String("address", a.Address).Uint("index", uint64(a.Index)).Bool("change", a.Chain == 1).
-		String("path", pathOf(n, a.Chain, a.Index))
+	b := strictjson.NewBuilder().String("address", a.Address).String("type", a.Type).Uint("index", uint64(a.Index)).Bool("change", a.Chain == 1).
+		String("path", pathOf(n, a.Type, a.Chain, a.Index))
 	if a.Label != "" {
 		b.String("label", a.Label)
 	}
@@ -617,16 +729,32 @@ func (f *Feature) addressNew(s *vault.Session, body []byte) (json.RawMessage, er
 			chain = 1
 		}
 	}
+	typ, err := typeOf(o, w)
+	if err != nil {
+		return nil, err
+	}
 	label, _, err := o.OptString("label")
 	if err != nil || len(label) > MaxLabel || !printable(label) {
 		return nil, errBad
 	}
-	a, err := w.issue(chain, label, "", s.Now())
+	a, err := w.issue(typ, chain, label, "", s.Now())
 	if err != nil {
 		return nil, err
 	}
 	s.SyncEvent("wallet.changed", strictjson.NewBuilder().String("wallet_id", w.ID).Uint("version", w.Version).Bytes())
 	return f.addrJSON(w, a), nil
+}
+
+// typeOf parses an optional `type` (default: the wallet's address type).
+func typeOf(o strictjson.Object, w *Wallet) (string, error) {
+	t, present, err := o.OptString("type")
+	if err != nil || present && !validType(t) {
+		return "", errBad
+	}
+	if !present {
+		return w.AddressType, nil
+	}
+	return t, nil
 }
 
 func (f *Feature) addressList(body []byte) (json.RawMessage, error) {
@@ -648,6 +776,10 @@ func (f *Feature) addressList(body []byte) (json.RawMessage, error) {
 			chain = 1
 		}
 	}
+	typ, err := typeOf(o, w)
+	if err != nil {
+		return nil, err
+	}
 	after, hasAfter, err := o.OptUint("after", 0, btc.MaxIndex)
 	if err != nil {
 		return nil, errBad
@@ -662,7 +794,7 @@ func (f *Feature) addressList(body []byte) (json.RawMessage, error) {
 	var sel []*Addr
 	for i := range w.Addrs {
 		a := &w.Addrs[i]
-		if a.Chain == chain && (!hasAfter || uint64(a.Index) > after) {
+		if a.Type == typ && a.Chain == chain && (!hasAfter || uint64(a.Index) > after) {
 			sel = append(sel, a)
 		}
 	}
@@ -748,7 +880,7 @@ func summaryJSON(n btc.Network, sum *btc.Summary) *strictjson.Builder {
 			ins = append(ins, ',')
 		}
 		ins = append(ins, strictjson.NewBuilder().String("txid", in.TxID).Uint("vout", uint64(in.Vout)).
-			Uint("amount_sats", uint64(in.Amount)).String("path", pathOf(n, in.Chain, in.Index)).Bytes()...)
+			Uint("amount_sats", uint64(in.Amount)).String("type", in.Type).String("path", pathOf(n, in.Type, in.Chain, in.Index)).Bytes()...)
 	}
 	outs := []byte{'['}
 	for i, o := range sum.Outputs {
@@ -757,7 +889,7 @@ func summaryJSON(n btc.Network, sum *btc.Summary) *strictjson.Builder {
 		}
 		b := strictjson.NewBuilder().String("address", o.Address).Uint("amount_sats", uint64(o.Amount)).Bool("change", o.Change)
 		if o.Change {
-			b.String("path", pathOf(n, o.Chain, o.Index))
+			b.String("type", o.Type).String("path", pathOf(n, o.Type, o.Chain, o.Index))
 		}
 		outs = append(outs, b.Bytes()...)
 	}
@@ -779,7 +911,7 @@ func (f *Feature) inspect(body []byte) (json.RawMessage, error) {
 	if err != nil {
 		return nil, err
 	}
-	a, err := w.account()
+	a, err := w.accounts()
 	if err != nil {
 		return nil, errInternal
 	}
@@ -787,7 +919,8 @@ func (f *Feature) inspect(body []byte) (json.RawMessage, error) {
 	if err != nil {
 		return nil, psbtError(err)
 	}
-	return summaryJSON(a.Network, sum).Bytes(), nil
+	n, _ := btc.LookupNetwork(w.Network)
+	return summaryJSON(n, sum).Bytes(), nil
 }
 
 // signed is what a successful spend produced.
@@ -812,7 +945,7 @@ func (f *Feature) spend(s *vault.Session, in *envelope.Inner, w *Wallet, raw []b
 	if _, ok := f.cred.UseKey(s.Now(), s.Settings().UnlockTTL()); !ok {
 		return nil, errLocked // spending is a critical action: the member's app in the unlock window
 	}
-	a, err := w.account()
+	a, err := w.accounts()
 	if err != nil {
 		return nil, errInternal
 	}
@@ -886,19 +1019,19 @@ func (f *Feature) recordSpend(s *vault.Session, w *Wallet, sum *btc.Summary, con
 			tx.Payees = append(tx.Payees, Payee{Address: o.Address, Amount: o.Amount})
 			continue
 		}
-		if o.Index >= w.Next[o.Chain] && len(w.Addrs) < MaxAddresses {
-			for w.Next[o.Chain] <= o.Index {
-				if _, err := w.issue(o.Chain, "", "", now); err != nil {
+		if o.Index >= w.Next[o.Type][o.Chain] && len(w.Addrs) < MaxAddresses {
+			for w.Next[o.Type][o.Chain] <= o.Index {
+				if _, err := w.issue(o.Type, o.Chain, "", "", now); err != nil {
 					break
 				}
 			}
 		}
-		if a := w.addr(o.Chain, o.Index); a != nil {
+		if a := w.addr(o.Type, o.Chain, o.Index); a != nil {
 			a.Used = true
 		}
 	}
 	for _, in := range sum.Inputs {
-		if a := w.addr(in.Chain, in.Index); a != nil {
+		if a := w.addr(in.Type, in.Chain, in.Index); a != nil {
 			a.Used = true
 		}
 	}
@@ -1001,12 +1134,12 @@ func (f *Feature) balance(s *vault.Session, body []byte) (json.RawMessage, error
 	if f.opt.Chain == nil {
 		return nil, errUnavail
 	}
-	a, err := w.account()
-	if err != nil {
-		return nil, errInternal
-	}
 	scripts := [][]byte{}
 	for _, ad := range w.Addrs {
+		a, err := w.account(ad.Type)
+		if err != nil {
+			continue
+		}
 		if _, sc, err := a.Address(ad.Chain, ad.Index); err == nil {
 			scripts = append(scripts, sc)
 		}
@@ -1052,19 +1185,19 @@ func (f *Feature) RequestAddress(s *vault.Session, conn, walletID string) (netwo
 	if w == nil {
 		return "", "", errNotFound
 	}
-	if idx, ok := w.ConnAddr[conn]; ok {
-		if a := w.addr(0, idx); a != nil && !a.Used {
+	if ca, ok := w.ConnAddr[conn]; ok && ca.Type == w.AddressType {
+		if a := w.addr(ca.Type, 0, ca.Index); a != nil && !a.Used {
 			return w.Network, a.Address, nil
 		}
 	}
-	a, err := w.issue(0, "", conn, s.Now())
+	a, err := w.issue(w.AddressType, 0, "", conn, s.Now())
 	if err != nil {
 		return "", "", err
 	}
 	if w.ConnAddr == nil {
-		w.ConnAddr = map[string]uint32{}
+		w.ConnAddr = map[string]ConnAddr{}
 	}
-	w.ConnAddr[conn] = a.Index
+	w.ConnAddr[conn] = ConnAddr{Type: a.Type, Index: a.Index}
 	s.SyncEvent("wallet.changed", strictjson.NewBuilder().String("wallet_id", w.ID).Uint("version", w.Version).Bytes())
 	s.Record(vault.Activity{Kind: "wallet.address_issued", ConnectionID: conn, Ref: w.ID, Direction: "out", Audit: true})
 	return w.Network, a.Address, nil

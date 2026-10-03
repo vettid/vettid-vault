@@ -1,12 +1,14 @@
 package location
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
 
 	ft "github.com/vettid/vettid-vault/internal/featuretest"
 	"github.com/vettid/vettid-vault/internal/strictjson"
+	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vms/envelope"
 )
 
@@ -337,4 +339,124 @@ func FuzzParseRequest(f *testing.F) {
 func FuzzParseGet(f *testing.F) {
 	f.Add([]byte(`{"connection_id":"c1","history":true}`))
 	f.Fuzz(func(t *testing.T, b []byte) { _, _ = ParseGet(b) })
+}
+
+// The member's own log (§10.16): off by default; when on, positions at
+// the member's cadence, thinned and capped; owner-only; deletable;
+// shared only as a snapshot through an active share; deleted when
+// turned off.
+func TestHistoryLog(t *testing.T) {
+	f, h := setup()
+	ft.Call(f, h, t0, "app", "location.update", sample(t0))
+	if len(f.d.Log) != 0 {
+		t.Fatal("recorded while off")
+	}
+	h.Set.LocationHistory, h.Set.LocationHistorySeconds = true, 60
+	for i := 0; i < 10; i++ {
+		at := t0.Add(time.Duration(i) * 30 * time.Second)
+		ft.Call(f, h, at, "app", "location.update", sample(at))
+	}
+	if len(f.d.Log) != 5 { // one per minute
+		t.Fatalf("cadence: %d", len(f.d.Log))
+	}
+	if p := f.d.Log[0]; p.Lat != 52.52001 || p.Lon != 13.40495 {
+		t.Fatalf("stored: %+v", p)
+	}
+	for _, kind := range []string{"agent", "connection:c1"} {
+		if r := ft.Call(f, h, t0, kind, "location.history.list", `{}`); r.OK() {
+			t.Fatalf("%s listed the log", kind)
+		}
+	}
+	r := ft.Call(f, h, t0.Add(10*time.Minute), "app", "location.history.list", `{"limit":2}`)
+	o := r.Obj(t)
+	pts, _ := o.Array("points")
+	if len(pts) != 2 || !o.Has("next") {
+		t.Fatalf("list: %s", r.Body)
+	}
+	next, _ := o.String("next")
+	o = ft.Call(f, h, t0.Add(10*time.Minute), "app", "location.history.list", `{"after":"`+next+`"}`).Obj(t)
+	if pts, _ = o.Array("points"); len(pts) != 3 {
+		t.Fatal("paging")
+	}
+	// Snapshot through an active share, at the share's precision.
+	id := start(t, f, h, t0.Add(10*time.Minute), `{"connection_id":"c1","mode":"continuous"}`)
+	h.Reset()
+	o = ft.Call(f, h, t0.Add(10*time.Minute), "app", "location.history.share",
+		`{"share_id":"`+id+`","from":"`+envelope.FormatTS(t0)+`","to":"`+envelope.FormatTS(t0.Add(2*time.Minute))+`"}`).Obj(t)
+	if n, _ := o.Uint("sent", 0, 1000); n != 3 {
+		t.Fatalf("sent %d", n)
+	}
+	snap := h.SentOfType("location.snapshot")
+	if len(snap) != 1 || snap[0].To != "c1" || !strings.Contains(string(snap[0].Body), `"lat":52.525`) {
+		t.Fatalf("snapshot: %+v", snap)
+	}
+	// Receiving side keeps it with the incoming share.
+	g, gh := setup()
+	ft.Call(g, gh, t0, "connection:c1", "location.shared", `{"share_id":"`+id+`","mode":"continuous","precision":"approximate","interval_seconds":60,"history":false,"expires_at":"`+envelope.FormatTS(t0.Add(time.Hour))+`"}`)
+	ft.Call(g, gh, t0, "connection:c1", "location.snapshot", string(snap[0].Body))
+	got := ft.Call(g, gh, t0, "app", "location.get", `{"connection_id":"c1"}`)
+	if !strings.Contains(string(got.Body), `"snapshot"`) {
+		t.Fatalf("snapshot not kept: %s", got.Body)
+	}
+	ft.Call(g, gh, t0, "connection:c2", "location.snapshot", string(snap[0].Body))
+	if !gh.HasActivity("drop.location") {
+		t.Fatal("snapshot from another connection accepted")
+	}
+	// Delete a range, then everything by turning the log off.
+	o = ft.Call(f, h, t0.Add(10*time.Minute), "app", "location.history.delete", `{"to":"`+envelope.FormatTS(t0.Add(time.Minute))+`"}`).Obj(t)
+	if n, _ := o.Uint("deleted", 0, 100); n != 2 || len(f.d.Log) != 3 {
+		t.Fatal("range delete")
+	}
+	h.Set.LocationHistory = false
+	f.SettingsChanged(vaultSession(h, t0), h.Set)
+	if len(f.d.Log) != 0 {
+		t.Fatal("log kept after turning it off")
+	}
+}
+
+func TestHistoryCompaction(t *testing.T) {
+	f := New()
+	now := t0.Add(400 * 24 * time.Hour)
+	for at := t0; at.Before(now); at = at.Add(time.Minute) {
+		f.d.Log = append(f.d.Log, LogPoint{At: at})
+	}
+	f.compact(now, 365*24*time.Hour)
+	if n := len(f.d.Log); n > MaxLogPoints || n < 4000 {
+		t.Fatalf("compacted to %d", n)
+	}
+	if now.Sub(f.d.Log[0].At) > 365*24*time.Hour {
+		t.Fatal("retention")
+	}
+	f.compact(now, 24*time.Hour)
+	if n := len(f.d.Log); n > 1441 {
+		t.Fatalf("retention 1 day: %d", n)
+	}
+}
+
+func FuzzParseRange(f *testing.F) {
+	f.Add([]byte(`{"from":"2026-10-03T12:00:00.000Z","to":"2026-10-03T13:00:00.000Z","share_id":"01JB2Z6V9K3M4N5P6Q7R8S9T0V"}`))
+	f.Add([]byte(`{"after":"2026-10-03T12:00:00.000Z","limit":5}`))
+	f.Fuzz(func(t *testing.T, b []byte) {
+		_, _ = ParseRange(b, true, false)
+		_, _ = ParseRange(b, false, false)
+		_, _ = ParseRange(b, false, true)
+	})
+}
+
+func FuzzParseSnapshot(f *testing.F) {
+	f.Add([]byte(`{"share_id":"01JB2Z6V9K3M4N5P6Q7R8S9T0V","points":[` + sample(t0) + `]}`))
+	f.Fuzz(func(t *testing.T, b []byte) { _, _, _ = ParseSnapshot(b) })
+}
+
+func vaultSession(h *ft.Host, now time.Time) *vault.Session {
+	return vault.NewSession(context.Background(), h, vault.PeerInfo{ID: "dev-app", Kind: vault.KindApp}, now, nil)
+}
+
+// Owner decision of 2026-10-03: shares are approximate unless the member
+// picks another precision.
+func TestDefaultPrecisionApproximate(t *testing.T) {
+	st, err := ParseStart([]byte(`{"connection_id":"c1","mode":"once"}`))
+	if err != nil || st.Precision != Approximate {
+		t.Fatalf("%+v %v", st, err)
+	}
 }

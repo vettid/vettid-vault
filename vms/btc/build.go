@@ -17,6 +17,7 @@ type Coin struct {
 	Vout   uint32
 	Chain  uint32
 	Index  uint32
+	Acct   *Account // the coin's account; nil: BuildPSBT's
 }
 
 // Payee is an output to build.
@@ -28,6 +29,7 @@ type Payee struct {
 	Change bool
 	Chain  uint32
 	Index  uint32
+	Acct   *Account // change: its account; nil: BuildPSBT's
 }
 
 // BuildPSBT makes the unsigned PSBT an app gives the vault (§10.18): the
@@ -46,7 +48,7 @@ func BuildPSBT(a *Account, coins []Coin, payees []Payee) ([]byte, error) {
 		addr := p.Address
 		if p.Change {
 			var err error
-			if addr, _, err = a.Address(p.Chain, p.Index); err != nil {
+			if addr, _, err = or(p.Acct, a).Address(p.Chain, p.Index); err != nil {
 				return nil, err
 			}
 		}
@@ -64,33 +66,42 @@ func BuildPSBT(a *Account, coins []Coin, payees []Payee) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	deriv := func(chain, index uint32) ([]*psbt.Bip32Derivation, error) {
-		pk, err := a.PubKey(chain, index)
-		if err != nil {
-			return nil, err
-		}
-		return []*psbt.Bip32Derivation{{PubKey: pk, MasterKeyFingerprint: a.FingerprintUint32(),
-			Bip32Path: append(a.AccountPath(), chain, index)}}, nil
-	}
 	for i, c := range coins {
-		d, err := deriv(c.Chain, c.Index)
+		ca := or(c.Acct, a)
+		pk, err := ca.PubKey(c.Chain, c.Index)
 		if err != nil {
 			return nil, err
 		}
-		pkt.Inputs[i].NonWitnessUtxo = c.PrevTx
+		in := &pkt.Inputs[i]
+		in.NonWitnessUtxo = c.PrevTx
 		if int(c.Vout) < len(c.PrevTx.TxOut) {
-			pkt.Inputs[i].WitnessUtxo = c.PrevTx.TxOut[c.Vout]
+			in.WitnessUtxo = c.PrevTx.TxOut[c.Vout]
 		}
-		pkt.Inputs[i].Bip32Derivation = d
-		pkt.Inputs[i].SighashType = txscript.SigHashAll
+		path := append(ca.AccountPath(), c.Chain, c.Index)
+		if ca.Type == P2TR {
+			in.TaprootInternalKey = pk
+			in.TaprootBip32Derivation = []*psbt.TaprootBip32Derivation{{XOnlyPubKey: pk, MasterKeyFingerprint: ca.FingerprintUint32(), Bip32Path: path}}
+			in.SighashType = txscript.SigHashDefault
+		} else {
+			in.Bip32Derivation = []*psbt.Bip32Derivation{{PubKey: pk, MasterKeyFingerprint: ca.FingerprintUint32(), Bip32Path: path}}
+			in.SighashType = txscript.SigHashAll
+		}
 	}
 	for i, p := range payees {
-		if p.Change {
-			d, err := deriv(p.Chain, p.Index)
-			if err != nil {
-				return nil, err
-			}
-			pkt.Outputs[i].Bip32Derivation = d
+		if !p.Change {
+			continue
+		}
+		pa := or(p.Acct, a)
+		pk, err := pa.PubKey(p.Chain, p.Index)
+		if err != nil {
+			return nil, err
+		}
+		path := append(pa.AccountPath(), p.Chain, p.Index)
+		if pa.Type == P2TR {
+			pkt.Outputs[i].TaprootInternalKey = pk
+			pkt.Outputs[i].TaprootBip32Derivation = []*psbt.TaprootBip32Derivation{{XOnlyPubKey: pk, MasterKeyFingerprint: pa.FingerprintUint32(), Bip32Path: path}}
+		} else {
+			pkt.Outputs[i].Bip32Derivation = []*psbt.Bip32Derivation{{PubKey: pk, MasterKeyFingerprint: pa.FingerprintUint32(), Bip32Path: path}}
 		}
 	}
 	var buf bytes.Buffer
@@ -98,6 +109,13 @@ func BuildPSBT(a *Account, coins []Coin, payees []Payee) ([]byte, error) {
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+func or(a, b *Account) *Account {
+	if a != nil {
+		return a
+	}
+	return b
 }
 
 // FundingTx makes a synthetic transaction paying amount to the account's

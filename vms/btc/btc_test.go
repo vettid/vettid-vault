@@ -67,7 +67,7 @@ func account(t testing.TB, network string) (*Account, []byte) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a, err := NewAccount(seed, n)
+	a, err := NewAccount(seed, n, P2WPKH)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,14 +90,14 @@ func TestBIP84Vectors(t *testing.T) {
 			t.Fatalf("%d/%d: %s %v", v.chain, v.index, got, err)
 		}
 	}
-	b, err := ParseAccount(Mainnet, a.FingerprintHex(), a.XPub)
+	b, err := ParseAccount(Mainnet, P2WPKH, a.FingerprintHex(), a.XPub)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if x, _, _ := b.Address(0, 0); x != "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu" {
 		t.Fatal("parsed account")
 	}
-	if _, err := ParseAccount(Regtest, a.FingerprintHex(), a.XPub); err == nil {
+	if _, err := ParseAccount(Regtest, P2WPKH, a.FingerprintHex(), a.XPub); err == nil {
 		t.Fatal("mainnet xpub accepted for regtest")
 	}
 	r, _ := account(t, Regtest)
@@ -132,7 +132,7 @@ const payee = "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080"
 func TestSignRegtest(t *testing.T) {
 	a, seed := account(t, Regtest)
 	raw := regtestPSBT(t, a, payee, 70000, 39000)
-	s, err := Inspect(a, raw)
+	s, err := Inspect([]*Account{a}, raw)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +145,7 @@ func TestSignRegtest(t *testing.T) {
 	if err := s.PayCheck(payee, 69999); err == nil {
 		t.Fatal("amount mismatch accepted")
 	}
-	tx, err := Sign(a, s, seed)
+	tx, err := Sign([]*Account{a}, s, seed)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +154,7 @@ func TestSignRegtest(t *testing.T) {
 		t.Fatal("signed tx")
 	}
 	other, _ := Seed(abandon, "x")
-	if _, err := Sign(a, s, other); err == nil {
+	if _, err := Sign([]*Account{a}, s, other); err == nil {
 		t.Fatal("signed with another seed")
 	}
 }
@@ -177,7 +177,7 @@ func TestInspectRefusals(t *testing.T) {
 	a, _ := account(t, Regtest)
 	n, _ := LookupNetwork(Regtest)
 	oseed, _ := Seed(abandon, "other")
-	other, _ := NewAccount(oseed, n)
+	other, _ := NewAccount(oseed, n, P2WPKH)
 	for name, raw := range map[string][]byte{
 		"fee_rate":     regtestPSBT(t, a, payee, 70000, 300),
 		"fee":          regtestPSBT(t, a, payee, 110000, 0),
@@ -190,12 +190,12 @@ func TestInspectRefusals(t *testing.T) {
 		"fake_change":  mutate(t, a, func(p *psbt.Packet) { p.Outputs[1].Bip32Derivation[0].Bip32Path[4] = 5 }),
 		"garbage":      []byte("psbt\xff\x00"),
 	} {
-		if _, err := Inspect(a, raw); err == nil {
+		if _, err := Inspect([]*Account{a}, raw); err == nil {
 			t.Fatalf("%s accepted", name)
 		}
 	}
 	// A PSBT of another account is all foreign inputs.
-	if _, err := Inspect(other, regtestPSBT(t, a, payee, 70000, 39000)); err == nil {
+	if _, err := Inspect([]*Account{other}, regtestPSBT(t, a, payee, 70000, 39000)); err == nil {
 		t.Fatal("other account")
 	}
 }
@@ -219,10 +219,12 @@ func TestCheckAddress(t *testing.T) {
 
 func FuzzInspect(f *testing.F) {
 	a, _ := account(f, Regtest)
+	tr := trAccount(f, Regtest)
 	f.Add(regtestPSBT(f, a, payee, 70000, 39000))
+	f.Add(regtestPSBT(f, tr, payee, 70000, 39000))
 	f.Add([]byte("psbt\xff"))
 	f.Fuzz(func(t *testing.T, raw []byte) {
-		_, _ = Inspect(a, raw)
+		_, _ = Inspect([]*Account{a, tr}, raw)
 	})
 }
 
@@ -250,4 +252,93 @@ func FuzzCheckAddress(f *testing.F) {
 			}
 		}
 	})
+}
+
+func trAccount(t testing.TB, network string) *Account {
+	t.Helper()
+	n, _ := LookupNetwork(network)
+	seed, _ := Seed(abandon, "")
+	a, err := NewAccount(seed, n, P2TR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a
+}
+
+// BIP86 vectors (mnemonic "abandon ... about", no passphrase).
+func TestBIP86Vectors(t *testing.T) {
+	a := trAccount(t, Mainnet)
+	if a.FingerprintHex() != "73c5da0a" || a.XPub != "xpub6BgBgsespWvERF3LHQu6CnqdvfEvtMcQjYrcRzx53QJjSxarj2afYWcLteoGVky7D3UKDP9QyrLprQ3VCECoY49yfdDEHGCtMMj92pReUsQ" {
+		t.Fatalf("account %s %s", a.FingerprintHex(), a.XPub)
+	}
+	for _, v := range []struct {
+		chain, index uint32
+		addr         string
+	}{{0, 0, "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr"},
+		{0, 1, "bc1p4qhjn9zdvkux4e44uhx8tc55attvtyu358kutcqkudyccelu0was9fqzwh"},
+		{1, 0, "bc1p3qkhfews2uk44qtvauqyr2ttdsw7svhkl9nkm9s9c3x4ax5h60wqwruhk7"}} {
+		got, _, err := a.Address(v.chain, v.index)
+		if err != nil || got != v.addr {
+			t.Fatalf("%d/%d: %s %v", v.chain, v.index, got, err)
+		}
+	}
+	if !strings.HasPrefix(a.Descriptor(0), "tr([73c5da0a/86'/0'/0']xpub") {
+		t.Fatal(a.Descriptor(0))
+	}
+}
+
+// A taproot spend, and a mixed one (a P2WPKH and a P2TR coin, taproot
+// change): Schnorr key-path signatures checked by the script engine.
+func TestSignTaprootAndMixed(t *testing.T) {
+	wp, seed := account(t, Regtest)
+	tr := trAccount(t, Regtest)
+	both := []*Account{wp, tr}
+	f1, _ := FundingTx(tr, 0, 0, 80000, 3)
+	f2, _ := FundingTx(wp, 0, 2, 40000, 4)
+	raw, err := BuildPSBT(tr, []Coin{{PrevTx: f1, Vout: 0}}, []Payee{{Address: payee, Amount: 50000}, {Change: true, Chain: 1, Index: 0, Amount: 29500}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := Inspect(both, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Inputs[0].Type != P2TR || !s.Outputs[1].Change || s.Outputs[1].Type != P2TR || s.Fee != 500 {
+		t.Fatalf("%+v", s)
+	}
+	if _, err := Inspect([]*Account{wp}, raw); err == nil {
+		t.Fatal("taproot input accepted without the taproot account")
+	}
+	tx, err := Sign(both, s, seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dec, _ := DecodeTx(tx)
+	if len(dec.TxIn[0].Witness) != 1 || len(dec.TxIn[0].Witness[0]) != 64 || dec.TxHash().String() != s.TxID {
+		t.Fatal("taproot witness")
+	}
+	mixed, _ := BuildPSBT(wp, []Coin{{PrevTx: f1, Vout: 0, Acct: tr}, {PrevTx: f2, Vout: 0, Chain: 0, Index: 2}},
+		[]Payee{{Address: payee, Amount: 100000}, {Change: true, Acct: tr, Chain: 1, Index: 1, Amount: 19000}})
+	ms, err := Inspect(both, mixed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Sign(both, ms, seed); err != nil {
+		t.Fatal(err)
+	}
+	for name, raw := range map[string][]byte{
+		"internal_key": mutate(t, tr, func(p *psbt.Packet) { p.Inputs[0].TaprootInternalKey = p.Inputs[1].TaprootInternalKey }),
+		"leaf_hashes":  mutate(t, tr, func(p *psbt.Packet) { p.Inputs[0].TaprootBip32Derivation[0].LeafHashes = [][]byte{make([]byte, 32)} }),
+		"merkle_root":  mutate(t, tr, func(p *psbt.Packet) { p.Inputs[0].TaprootMerkleRoot = make([]byte, 32) }),
+		"no_prev_tx":   mutate(t, tr, func(p *psbt.Packet) { p.Inputs[1].NonWitnessUtxo = nil }),
+		"key_as_wpkh": mutate(t, tr, func(p *psbt.Packet) {
+			d := p.Inputs[0].TaprootBip32Derivation[0]
+			p.Inputs[0].TaprootBip32Derivation = nil
+			p.Inputs[0].Bip32Derivation = []*psbt.Bip32Derivation{{PubKey: d.XOnlyPubKey, MasterKeyFingerprint: d.MasterKeyFingerprint, Bip32Path: d.Bip32Path}}
+		}),
+	} {
+		if _, err := Inspect(both, raw); err == nil {
+			t.Fatalf("%s accepted", name)
+		}
+	}
 }

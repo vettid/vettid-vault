@@ -152,3 +152,49 @@ func (d *Device) waitObj(ctx context.Context, typ string, pred func(strictjson.O
 	}
 	return strictjson.ParseObject(in.Body)
 }
+
+// LocationHistoryList returns the member's own location log (§10.16), a
+// time range (zero: open) and a page (`after` = the previous `next`).
+func (d *Device) LocationHistoryList(ctx context.Context, from, to time.Time, after string, limit int) (strictjson.Object, error) {
+	return d.Op(ctx, "location.history.list", historyRange(from, to, after, limit, ""))
+}
+
+// LocationHistoryDelete deletes the log's positions in a range (zero
+// bounds: open; both zero: everything) and returns how many.
+func (d *Device) LocationHistoryDelete(ctx context.Context, from, to time.Time) (uint64, error) {
+	o, err := d.Op(ctx, "location.history.delete", historyRange(from, to, "", 0, ""))
+	if err != nil {
+		return 0, err
+	}
+	return o.Uint("deleted", 0, 1<<53)
+}
+
+// LocationHistoryShare sends the connection of an active outgoing share a
+// snapshot of the log between from and to, at the share's precision.
+func (d *Device) LocationHistoryShare(ctx context.Context, shareID string, from, to time.Time) (uint64, error) {
+	o, err := d.Op(ctx, "location.history.share", historyRange(from, to, "", 0, shareID))
+	if err != nil {
+		return 0, err
+	}
+	return o.Uint("sent", 0, 1<<53)
+}
+
+func historyRange(from, to time.Time, after string, limit int, shareID string) map[string]any {
+	b := map[string]any{}
+	if !from.IsZero() {
+		b["from"] = envelope.FormatTS(from)
+	}
+	if !to.IsZero() {
+		b["to"] = envelope.FormatTS(to)
+	}
+	if after != "" {
+		b["after"] = after
+	}
+	if limit > 0 {
+		b["limit"] = limit
+	}
+	if shareID != "" {
+		b["share_id"] = shareID
+	}
+	return b
+}

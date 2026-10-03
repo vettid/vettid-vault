@@ -253,7 +253,7 @@ func ParseStart(body []byte) (*Start, error) {
 	if err != nil {
 		return nil, errBad
 	}
-	st := &Start{Precision: Exact}
+	st := &Start{Precision: Approximate} // owner decision 2026-10-03: approximate by default
 	if st.ConnectionID, err = connID(o); err != nil {
 		return nil, err
 	}

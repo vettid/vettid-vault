@@ -18,9 +18,10 @@ import (
 // broadcasting elsewhere.
 
 func init() {
-	commands["wallet"] = command{"wallet create -name N [-network mainnet|testnet|signet|regtest] [-tags a,b] [-import] " +
+	commands["wallet"] = command{"wallet create -name N [-network mainnet|testnet|signet|regtest] [-type p2tr|p2wpkh] [-tags a,b] [-import] " +
 		"(password in VAULTCTL_PASSWORD; an imported phrase in VAULTCTL_MNEMONIC, passphrase in VAULTCTL_PASSPHRASE) | list | " +
-		"address -wallet ID [-change] [-label L] | addresses -wallet ID [-change] | used -wallet ID -addresses a,b | " +
+		"address -wallet ID [-type p2tr|p2wpkh] [-change] [-label L] | addresses -wallet ID [-type T] [-change] | " +
+		"receive -wallet ID -version N -type p2tr|p2wpkh | used -wallet ID -addresses a,b | " +
 		"inspect -wallet ID -psbt FILE | sign -wallet ID -psbt FILE | pay -wallet ID -invocation ID -psbt FILE | history -wallet ID | " +
 		"test-psbt -wallet ID -to ADDR -amount SATS -out FILE (regtest only: spends a synthetic coin)", cmdWallet}
 }
@@ -46,6 +47,8 @@ func cmdWallet(ctx context.Context, g *globals, args []string) error {
 	name := fs.String("name", "", "wallet name")
 	network := fs.String("network", "", "network (default mainnet)")
 	tags := fs.String("tags", "", "comma-separated tags of the wallet's item")
+	typ := fs.String("type", "", "address type: p2tr (default for new wallets) or p2wpkh")
+	version := fs.Uint64("version", 0, "wallet version (receive)")
 	imp := fs.Bool("import", false, "import the phrase in VAULTCTL_MNEMONIC")
 	wallet := fs.String("wallet", "", "wallet id")
 	change := fs.Bool("change", false, "change chain")
@@ -71,13 +74,20 @@ func cmdWallet(ctx context.Context, g *globals, args []string) error {
 				}
 				pp = os.Getenv("VAULTCTL_PASSPHRASE")
 			}
-			return d.WalletCreate(ctx, pw, *name, *network, m, pp, commaList(*tags))
+			return d.WalletCreateType(ctx, pw, *name, *network, *typ, m, pp, commaList(*tags))
 		case "list":
 			return d.WalletList(ctx)
 		case "address":
-			return d.WalletAddressNew(ctx, *wallet, *change, *label)
+			return d.WalletAddressNewType(ctx, *wallet, *typ, *change, *label)
 		case "addresses":
-			return d.WalletAddressList(ctx, *wallet, map[string]any{"change": *change})
+			f := map[string]any{"change": *change}
+			if *typ != "" {
+				f["type"] = *typ
+			}
+			return d.WalletAddressList(ctx, *wallet, f)
+		case "receive":
+			v, err := d.WalletUpdate(ctx, *wallet, *version, *typ)
+			return map[string]uint64{"version": v}, err
 		case "used":
 			return d.WalletAddressUsed(ctx, *wallet, commaList(*addrs))
 		case "inspect", "sign", "pay":
@@ -99,10 +109,11 @@ func cmdWallet(ctx context.Context, g *globals, args []string) error {
 		case "history":
 			return d.WalletHistory(ctx, *wallet, 0)
 		case "test-psbt":
-			a, err := d.WalletAccount(ctx, *wallet)
+			accts, recv, err := d.WalletAccounts(ctx, *wallet)
 			if err != nil {
 				return nil, err
 			}
+			a := accts[recv]
 			if a.Network.Name != btc.Regtest {
 				return nil, errors.New("test-psbt: regtest wallets only")
 			}
@@ -116,8 +127,8 @@ func cmdWallet(ctx context.Context, g *globals, args []string) error {
 	})
 }
 
-// TestPSBT spends one synthetic coin of 1,000,000 sats at the account's
-// first receive address: amount to `to`, a fee of 1,000 sats, the rest to
+// TestPSBT spends one synthetic coin of 1,000,000 sats at the receiving
+// account's first receive address: amount to `to`, a fee of 1,000 sats, the rest to
 // change 1/0. Regtest only; the coin does not exist on any chain.
 func TestPSBT(a *btc.Account, to string, amount int64) ([]byte, error) {
 	const coin, fee = 1000000, 1000

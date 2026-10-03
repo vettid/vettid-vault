@@ -63,3 +63,30 @@ exits at lock (§12.4).
   back later messages to the same peer, and the spec now says so.
 - Signing with the credential key: the unlock window exists (`UseKey`). The
   features that sign (connection authenticate, actions) come later.
+
+## Recovery (0.4.1)
+
+- `vault/recovery.go`: header-only operations (`RecoveryRequest`,
+  `RecoveryCancel`, `RecoveryRegister`) that run in the vault's process
+  without the PIN, and the unlock-side rules (`recovery_pending`,
+  `cancel_recovery`, the recovered app's invite, restricted device,
+  `completeRecovery`).
+- `enclave/recovery.go`: the three queue operations; `Config.RecoveryNow`
+  is the injectable clock of the delay and expiry (tests only; release
+  configurations leave it nil).
+- `vms/altchan/recovery.go`: the register request and result, the
+  browser-sealed code (P-256 + HKDF + AES-GCM, the one non-PQ key agreement,
+  §11.11.2), the QR payload.
+- `Host.LockReason` carries the lock reason to the vault process over the
+  channel (`KindLock` gains an optional field), so the owner's devices get
+  `vault.locking{reason: "recovery"}`.
+- The parent forwards the three new operations without taking the lease.
+
+Not carried over from vettid.dev: its backup worker, the placeholder
+portal upload, the three recovery flows, the route that skipped the 24 h
+delay, QR rendering through Google Charts and the parent-supplied
+`backup_key`. Recovery is one flow; the code never leaves the enclave
+except sealed to the member's browser.
+
+Not here: the portal pages (request, QR, cancel link) and vaultctl
+commands for recovery (the e2e tests drive the client package directly).

@@ -2,6 +2,7 @@ package enclave
 
 import (
 	"bytes"
+	"encoding/base64"
 	"strings"
 	"testing"
 	"time"
@@ -60,6 +61,8 @@ func TestParseSealed(t *testing.T) {
 
 func FuzzParseQueueMessage(f *testing.F) {
 	f.Add(sampleQueue().Marshal())
+	f.Add((&QueueMessage{Op: OpRecovery, VaultID: "v1", UserGUID: "u1", RequestID: "01JB2Z6V9K3M4N5P6Q7R8S9T21",
+		BrowserKey: append([]byte{4}, bytes.Repeat([]byte{1}, 64)...), EnqueuedAt: time.Unix(1700000000, 0)}).Marshal())
 	f.Fuzz(func(t *testing.T, b []byte) {
 		q, err := ParseQueueMessage(b)
 		if err != nil {
@@ -86,4 +89,32 @@ func FuzzParseSealed(f *testing.F) {
 			t.Fatal("inconsistent parse")
 		}
 	})
+}
+
+// §11.11: recovery messages carry no envelope; only "recovery" carries
+// the browser key (65 bytes); recovery_register carries an envelope.
+func TestQueueRecoveryOps(t *testing.T) {
+	bk := append([]byte{4}, bytes.Repeat([]byte{1}, 64)...)
+	base := QueueMessage{VaultID: "v1", UserGUID: "u1", RequestID: "01JB2Z6V9K3M4N5P6Q7R8S9T21", EnqueuedAt: time.Unix(1700000000, 0)}
+	rq := base
+	rq.Op, rq.BrowserKey = OpRecovery, bk
+	q, err := ParseQueueMessage(rq.Marshal())
+	if err != nil || !bytes.Equal(q.BrowserKey, bk) {
+		t.Fatalf("recovery: %v", err)
+	}
+	cq := base
+	cq.Op = OpRecoveryCancel
+	if _, err := ParseQueueMessage(cq.Marshal()); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	for name, s := range map[string]string{
+		"recovery without key": `{"v":1,"op":"recovery","vault_id":"v1","user_guid":"u1","request_id":"01JB2Z6V9K3M4N5P6Q7R8S9T21","enqueued_at":"2023-11-14T22:13:20Z"}`,
+		"cancel with key":      `{"v":1,"op":"recovery_cancel","vault_id":"v1","user_guid":"u1","request_id":"01JB2Z6V9K3M4N5P6Q7R8S9T21","browser_key":"` + base64.StdEncoding.EncodeToString(bk) + `","enqueued_at":"2023-11-14T22:13:20Z"}`,
+		"short key":            `{"v":1,"op":"recovery","vault_id":"v1","user_guid":"u1","request_id":"01JB2Z6V9K3M4N5P6Q7R8S9T21","browser_key":"AAAA","enqueued_at":"2023-11-14T22:13:20Z"}`,
+		"register without env": `{"v":1,"op":"recovery_register","vault_id":"v1","user_guid":"u1","request_id":"01JB2Z6V9K3M4N5P6Q7R8S9T21","enqueued_at":"2023-11-14T22:13:20Z"}`,
+	} {
+		if _, err := ParseQueueMessage([]byte(s)); err == nil {
+			t.Errorf("%s accepted", name)
+		}
+	}
 }

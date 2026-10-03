@@ -334,3 +334,20 @@ func (w *World) SetSealedRelease(vaultID, release string) {
 func Spec(n uint64, status string) ReleaseSpec {
 	return ReleaseSpec{Number: n, PCR0: byte(0xa0 + n), PCR1: byte(0x10 + n), PCR2: byte(0x20 + n), Status: status}
 }
+
+// Recovery plays POST /api/vault/recovery: the API's request id is the
+// recovery id; the response slot holds the code sealed to browserKey.
+func (w *World) Recovery(ctx context.Context, in *enclave.Instance, vaultID, userGUID string, browserKey []byte) (string, *enclave.Response) {
+	rid, _ := envelope.NewULID(w.Now())
+	q := &enclave.QueueMessage{Op: enclave.OpRecovery, VaultID: vaultID, UserGUID: userGUID, RequestID: rid, EnqueuedAt: w.Now(),
+		BrowserKey: browserKey}
+	return rid, in.Process(ctx, q)
+}
+
+// RecoveryCancel plays a cancel from the portal or the email link: it ends
+// whatever recovery is in progress.
+func (w *World) RecoveryCancel(ctx context.Context, in *enclave.Instance, vaultID, userGUID string) {
+	rid, _ := envelope.NewULID(w.Now())
+	q := &enclave.QueueMessage{Op: enclave.OpRecoveryCancel, VaultID: vaultID, UserGUID: userGUID, RequestID: rid, EnqueuedAt: w.Now()}
+	in.Process(ctx, q)
+}

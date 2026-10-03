@@ -75,6 +75,10 @@ func (h managerHost) SetConnectionProfile(id string, profile json.RawMessage, _ 
 	return nil
 }
 
+func (h managerHost) CompleteRecovery(id string, now time.Time) error {
+	return h.m.completeRecovery(id, now)
+}
+
 func (h managerHost) RotateIdentity(now time.Time) error { return h.m.rotateIdentity(now) }
 
 func (h managerHost) Settings() Settings { return h.m.st.Settings.clone() }

@@ -22,7 +22,7 @@ type env struct {
 }
 
 func newEnv(t *testing.T) *env {
-	return &env{t: t, f: New(Options{KDF: MinKDF, KeepCopy: true}), h: featuretest.NewHost(),
+	return &env{t: t, f: New(Options{KDF: MinKDF}), h: featuretest.NewHost(),
 		clk: featuretest.Clock{T: time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)}}
 }
 
@@ -153,7 +153,7 @@ func TestSecretsRoundTripAndNoPlaintextAtRest(t *testing.T) {
 		t.Fatal("credential.get is not the latest blob")
 	}
 	// Load/Save round trip keeps working.
-	g2 := New(Options{KDF: MinKDF, KeepCopy: true})
+	g2 := New(Options{KDF: MinKDF})
 	featuretest.RoundTrip(t, e.f, g2)
 	e.f = g2
 	e.ok("app", "credential.unlock", use(cred3, pw, ""))
@@ -271,10 +271,10 @@ func TestDelete(t *testing.T) {
 
 func TestNoCopy(t *testing.T) {
 	e := newEnv(t)
-	e.f = New(Options{KDF: MinKDF})
+	e.h.Set.NoBackup = true
 	e.create()
 	if r := e.call("app", "credential.get", `{}`); r.Code != "not_found" {
-		t.Fatal("copy kept although KeepCopy is off")
+		t.Fatal("copy kept although credential.backup is off")
 	}
 }
 
@@ -407,3 +407,60 @@ func FuzzOpen(f *testing.F) {
 
 // testID is a fixed ULID for tests.
 const testID = "01JB2Z6V9K3M4N5P6Q7R8S9T0V"
+
+// §11.11.5: credential.recover from a recovering app only; the password
+// against the kept copy (with the backoff); a fresh version is handed
+// over, so copies on the lost devices go stale.
+func TestRecover(t *testing.T) {
+	e := newEnv(t)
+	cred := e.create()
+	if r := e.call("app", "credential.recover", `{"password":"`+pw+`"}`); r.Code != "forbidden" {
+		t.Fatalf("ordinary app recovered: %q", r.Code)
+	}
+	if r := e.call("recovering-app", "credential.unlock", use(cred, pw, "")); r.Code != "forbidden" {
+		t.Fatalf("recovering app used the credential: %q", r.Code)
+	}
+	if r := e.call("recovering-app", "credential.recover", `{"password":"wrong password"}`); r.Code != "bad_password" {
+		t.Fatalf("wrong password: %q", r.Code)
+	}
+	if len(e.h.Completed) != 0 {
+		t.Fatal("completed without the password")
+	}
+	r := e.ok("recovering-app", "credential.recover", `{"password":"`+pw+`"}`)
+	got := blobOf(t, r)
+	if got == cred || len(e.h.Completed) != 1 || !e.h.HasActivity("credential.recovered") {
+		t.Fatal("recover did not re-seal or complete")
+	}
+	if r := e.call("app", "credential.unlock", use(cred, pw, "")); r.Code != "stale_credential" {
+		t.Fatalf("lost device's copy still usable: %q", r.Code)
+	}
+	e.ok("app", "credential.unlock", use(got, pw, ""))
+}
+
+func TestRecoverBackoff(t *testing.T) {
+	e := newEnv(t)
+	e.create()
+	for i := 0; i < BackoffAfter; i++ {
+		e.call("recovering-app", "credential.recover", `{"password":"wrong password"}`)
+	}
+	if r := e.call("recovering-app", "credential.recover", `{"password":"`+pw+`"}`); r.Code != "backoff" {
+		t.Fatalf("no backoff: %q", r.Code)
+	}
+}
+
+// §3.5.6: with credential.backup off there is no copy; turning it off
+// drops the copy at once; recovery then completes without a credential.
+func TestBackupSetting(t *testing.T) {
+	e := newEnv(t)
+	e.create()
+	e.ok("app", "credential.get", `{}`)
+	e.h.Set.NoBackup = true
+	e.f.SettingsChanged(nil, e.h.Set)
+	if r := e.call("app", "credential.get", `{}`); r.Code != "not_found" {
+		t.Fatal("copy kept after backup was turned off")
+	}
+	r := e.ok("recovering-app", "credential.recover", `{"password":"`+pw+`"}`)
+	if string(r.Body) != `{}` || len(e.h.Completed) != 1 {
+		t.Fatalf("recover without backup: %s", r.Body)
+	}
+}

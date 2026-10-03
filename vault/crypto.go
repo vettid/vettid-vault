@@ -129,6 +129,10 @@ type Header struct {
 	SealedRelease   string         `json:"sealed_release"`
 	ManifestSerial  uint64         `json:"manifest_serial"`
 	SealKeyVerified *SealKeyRecord `json:"seal_key_verified,omitempty"`
+	// Recovery (§11.11): the recovery in progress, and the steps taken
+	// while the vault was locked (moved to the audit log at unlock).
+	Recovery    *RecoveryRecord `json:"recovery,omitempty"`
+	RecoveryLog []RecoveryEvent `json:"recovery_log,omitempty"`
 }
 
 func headerAAD(vaultID string) []byte { return []byte(labelHeader + "\x00" + vaultID) }

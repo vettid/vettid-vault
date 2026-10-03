@@ -51,6 +51,9 @@ func TestSettings(t *testing.T) {
 		!strings.Contains(string(r.Body), `"credential.unlock_ttl_seconds":300`) || !strings.Contains(string(r.Body), `"version":0`) {
 		t.Fatalf("defaults: %s", r.Body)
 	}
+	if !strings.Contains(string(r.Body), `"credential.backup":true`) {
+		t.Fatalf("backup default: %s", r.Body)
+	}
 	_ = d.send("settings.set", []byte(`{"version":0,"set":{"connections.auto_approve_in_person":true,"app.theme":"dark","feed.retention_days":7}}`))
 	if r := one(t, d); r.Status != envelope.StatusOK || string(r.Body) != `{"version":1}` {
 		t.Fatalf("set: %+v", r)
@@ -64,6 +67,7 @@ func TestSettings(t *testing.T) {
 		`{"version":1,"set":{"credential.unlock_ttl_seconds":5}}`: "bad_request",
 		`{"version":1,"set":{}}`:                                  "bad_request",
 		`{"version":1,"set":{"app.x":1}}`:                         "bad_request",
+		`{"version":1,"set":{"audit.retention_days":30}}`:         "bad_request", // fixed retention (§10.9)
 	} {
 		_ = d.send("settings.set", []byte(body))
 		if r := one(t, d); r.Error == nil || r.Error.Code != code {
@@ -111,7 +115,7 @@ func TestActivitySinks(t *testing.T) {
 }
 
 func FuzzApplySettings(f *testing.F) {
-	f.Add([]byte(`{"version":0,"set":{"connections.auto_approve_in_person":true,"app.a":"b","audit.retention_days":30}}`))
+	f.Add([]byte(`{"version":0,"set":{"connections.auto_approve_in_person":true,"app.a":"b","credential.backup":false}}`))
 	f.Fuzz(func(t *testing.T, b []byte) {
 		s, err := ApplySettings(Settings{}, b)
 		if err != nil {

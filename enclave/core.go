@@ -92,6 +92,12 @@ func (c *Core) Open(ctx context.Context, j *Job) ([]byte, *vault.Manager) {
 		res = c.enroll(ctx, j, &m)
 	case OpUnlock:
 		res = c.unlock(ctx, j, &m)
+	case OpRecovery:
+		res = c.recoveryRequest(ctx, j)
+	case OpRecoveryCancel:
+		c.recoveryCancel(ctx, j)
+	case OpRecoveryRegister:
+		res = c.recoveryRegister(ctx, j)
 	default:
 		res = opaque()
 	}
@@ -341,7 +347,7 @@ func (c *Core) unlock(ctx context.Context, q *Job, started **vault.Manager) []by
 	}
 	signing, err := altchan.UnlockSigningString(altchan.UnlockFields{UserGUID: r.UserGUID, VaultID: r.VaultID,
 		RequestID: r.RequestID, TS: ts, ETKKid: q.ETKKid, MinStateSeq: r.MinStateSeq, MinHeaderSeq: r.MinHeaderSeq,
-		PIN: r.PIN, Token: r.Token, Manifest: r.Manifest.Manifest, ToPCR0: toPCR0})
+		PIN: r.PIN, Token: r.Token, Manifest: r.Manifest.Manifest, ToPCR0: toPCR0, CancelRecovery: r.CancelRecovery})
 	if err != nil {
 		return opaque()
 	}
@@ -352,7 +358,7 @@ func (c *Core) unlock(ctx context.Context, q *Job, started **vault.Manager) []by
 	sealer := c.sealerFor("", c.meas.PCR0)
 	p := vault.AltUnlockParams{
 		Options: c.vaultOptions(sealer), VaultID: q.VaultID, UserGUID: q.UserGUID, DeviceIK: r.DeviceIK, PIN: r.PIN,
-		MinStateSeq: r.MinStateSeq, MinHeaderSeq: r.MinHeaderSeq, DeviceToken: r.Token,
+		MinStateSeq: r.MinStateSeq, MinHeaderSeq: r.MinHeaderSeq, DeviceToken: r.Token, CancelRecovery: r.CancelRecovery,
 	}
 	p.VerifyDevice = func(k *vault.UnlockKey) (json.RawMessage, error) {
 		if !ed25519.Verify(ed25519.PublicKey(k.IK), []byte(signing), r.Sig) {
@@ -443,7 +449,8 @@ func (c *Core) unlock(ctx context.Context, q *Job, started **vault.Manager) []by
 	}
 	res := &altchan.UnlockResult{OK: out.OK, Code: out.Code, StateSeq: out.StateSeq, HeaderSeq: out.HeaderSeq,
 		RetryAfter: uint64((out.RetryAfter + time.Second - 1) / time.Second), Token: out.Token,
-		Release: c.meas.PCR0, ReleaseNumber: c.cfg.ReleaseNumber, ReleaseStatus: out.Release.Status, ManifestSerial: out.Serial}
+		Release: c.meas.PCR0, ReleaseNumber: c.cfg.ReleaseNumber, ReleaseStatus: out.Release.Status, ManifestSerial: out.Serial,
+		RecoveryCancelled: out.RecoveryCancelled, VaultBundle: out.VaultBundle}
 	if u := out.Update; u != nil {
 		res.Update = &altchan.UpdateResult{To: u.To, Result: u.Result, Code: u.Code}
 	}

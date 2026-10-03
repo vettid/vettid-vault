@@ -333,7 +333,7 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 		m.respondError(p, in, key, "unsupported_type", "", now)
 		return disp(eph)
 	}
-	if !te.allows(p.Kind) {
+	if !te.allows(p.Kind) || p.Recovering && !recoveryAllowed[in.Type] {
 		if te.spec.Request {
 			m.respondError(p, in, key, "forbidden", "", now)
 		} else {

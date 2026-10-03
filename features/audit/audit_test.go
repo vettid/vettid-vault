@@ -84,14 +84,18 @@ func TestAuthorizationAndBadBodies(t *testing.T) {
 
 func TestRetention(t *testing.T) {
 	f, h := New(), featuretest.NewHost()
-	h.Set.AuditRetentionDays = 30
 	rec(f, h, t0, vault.Activity{Kind: "a", Audit: true})
-	rec(f, h, t0.Add(31*24*time.Hour), vault.Activity{Kind: "b", Audit: true})
-	if es := f.Entries(); len(es) != 1 || es[0].Kind != "b" || es[0].Seq != 2 {
+	rec(f, h, t0.Add(Retention+time.Hour), vault.Activity{Kind: "b", Audit: true})
+	es := f.Entries()
+	if len(es) != 1 || es[0].Kind != "b" || es[0].Seq != 2 {
 		t.Fatalf("retention: %+v", es)
 	}
+	// The oldest kept entry still names the pruned entry's hash.
+	if bytes.Equal(es[0].Prev, make([]byte, 32)) {
+		t.Fatal("chain restarted after pruning")
+	}
 	for i := 0; i < MaxEntries+5; i++ {
-		rec(f, h, t0.Add(31*24*time.Hour), vault.Activity{Kind: "c", Audit: true})
+		rec(f, h, t0.Add(Retention+time.Hour), vault.Activity{Kind: "c", Audit: true})
 	}
 	if n := len(f.Entries()); n != MaxEntries {
 		t.Fatalf("cap: %d", n)
@@ -100,6 +104,59 @@ func TestRetention(t *testing.T) {
 	featuretest.RoundTrip(t, f, g)
 	if len(g.Entries()) != MaxEntries {
 		t.Fatal("round trip")
+	}
+}
+
+// §10.9: drop.* entries are bounded per principal and kind; the rest of
+// the log is not displaced.
+func TestDropThrottle(t *testing.T) {
+	f, h := New(), featuretest.NewHost()
+	rec(f, h, t0, vault.Activity{Kind: "connection.added", ConnectionID: "c1", Audit: true})
+	for i := 0; i < 500; i++ {
+		rec(f, h, t0.Add(time.Duration(i)*time.Second), vault.Activity{Kind: "drop.rate_limited", ConnectionID: "c1", Audit: true})
+	}
+	var drops, suppressed int
+	for _, e := range f.Entries() {
+		switch e.Kind {
+		case "drop.rate_limited":
+			drops++
+		case "drop.suppressed":
+			suppressed++
+		}
+	}
+	if drops != DropsPerHour || suppressed != 1 {
+		t.Fatalf("drops %d suppressed %d", drops, suppressed)
+	}
+	rec(f, h, t0.Add(2*time.Hour), vault.Activity{Kind: "drop.rate_limited", ConnectionID: "c1", Audit: true})
+	if es := f.Entries(); es[len(es)-1].Kind != "drop.rate_limited" {
+		t.Fatal("window did not reset")
+	}
+}
+
+// §10.9: an app that holds (seq, hash) checks that the log extends it.
+func TestAfterSeqExtendsAnchor(t *testing.T) {
+	f, h := New(), featuretest.NewHost()
+	for i := 0; i < 5; i++ {
+		rec(f, h, t0.Add(time.Duration(i)*time.Second), vault.Activity{Kind: "k", Audit: true})
+	}
+	anchor := f.Entries()[1] // seq 2
+	r := featuretest.Call(f, h, t0, "app", "audit.list", `{"after_seq":2,"limit":2}`)
+	var out struct {
+		Entries []struct {
+			Seq  uint64 `json:"seq"`
+			Prev string `json:"prev"`
+			Hash string `json:"hash"`
+		} `json:"entries"`
+		Next uint64 `json:"next_after_seq"`
+	}
+	if err := json.Unmarshal(r.Body, &out); err != nil || len(out.Entries) != 2 || out.Entries[0].Seq != 3 || out.Next != 4 {
+		t.Fatalf("after_seq: %s", r.Body)
+	}
+	if out.Entries[0].Prev != base64.StdEncoding.EncodeToString(anchor.Hash) {
+		t.Fatal("does not extend the anchor")
+	}
+	if r := featuretest.Call(f, h, t0, "app", "audit.list", `{"after_seq":1,"before_seq":3}`); r.Code != "bad_request" {
+		t.Fatal("after_seq with before_seq accepted")
 	}
 }
 

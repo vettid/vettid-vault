@@ -113,6 +113,9 @@ type Peer struct {
 	// Attestation is an app's device-attestation binding at pairing
 	// (§6.7, §11.7); the sealed header's copy is authoritative afterwards.
 	Attestation json.RawMessage `json:"attestation,omitempty"`
+	// Recovering marks an app registered by recovery that has not yet
+	// authenticated with the credential password (§11.11.5).
+	Recovering bool `json:"recovering,omitempty"`
 }
 
 // PeerRelay is a peer's relay address.
@@ -254,6 +257,6 @@ type Settings struct {
 	AutoApproveInPerson bool              `json:"auto_approve_in_person"`
 	CredentialUnlockTTL uint64            `json:"credential_unlock_ttl,omitempty"` // seconds; 0 = default
 	FeedRetentionDays   uint64            `json:"feed_retention_days,omitempty"`
-	AuditRetentionDays  uint64            `json:"audit_retention_days,omitempty"`
 	App                 map[string]string `json:"app,omitempty"`
+	NoBackup            bool              `json:"no_backup,omitempty"` // credential.backup off (§3.5.6)
 }

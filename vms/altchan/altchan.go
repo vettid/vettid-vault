@@ -90,6 +90,8 @@ type UnlockFields struct {
 	// ToPCR0 the release_update target, "" without one.
 	Manifest []byte
 	ToPCR0   string
+	// CancelRecovery adds a 13th line, "cancel_recovery" (§11.11.4).
+	CancelRecovery bool
 }
 
 // UnlockSigningString returns the string `sig` covers in vault.unlock
@@ -116,7 +118,7 @@ func UnlockSigningString(f UnlockFields) (string, error) {
 	pin := sha256.Sum256([]byte(f.PIN))
 	tok := sha256.Sum256([]byte(f.Token))
 	man := sha256.Sum256(f.Manifest)
-	return strings.Join([]string{
+	lines := []string{
 		suite.LabelUnlock,
 		f.UserGUID,
 		f.VaultID,
@@ -129,7 +131,11 @@ func UnlockSigningString(f UnlockFields) (string, error) {
 		hex.EncodeToString(tok[:]),
 		hex.EncodeToString(man[:]),
 		f.ToPCR0,
-	}, "\n"), nil
+	}
+	if f.CancelRecovery {
+		lines = append(lines, "cancel_recovery")
+	}
+	return strings.Join(lines, "\n"), nil
 }
 
 func validPCRHex(s string) bool {

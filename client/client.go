@@ -76,6 +76,8 @@ type State struct {
 	// Credential is this app's copy of the Protean Credential (§3.5): the
 	// sealed blob, useless without the vault's CEK and the password.
 	Credential *CredentialCopy `json:"credential,omitempty"`
+	// Recovery is set while this app recovers a vault (§11.11).
+	Recovery *RecoveryState `json:"recovery,omitempty"`
 }
 
 // VaultRecord is what the device knows about its vault.

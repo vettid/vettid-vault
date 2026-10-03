@@ -38,6 +38,7 @@ type Host struct {
 	Sinks      []vault.ActivitySink
 	ids        int
 	DownConns  map[string]bool // SendToConnection fails for these
+	Completed  []string        // CompleteRecovery calls
 }
 
 // NewHost returns a fake host with no connections.
@@ -108,6 +109,11 @@ func (h *Host) RotateIdentity(time.Time) error {
 		return h.RotateErr
 	}
 	h.Rotations++
+	return nil
+}
+
+func (h *Host) CompleteRecovery(id string, _ time.Time) error {
+	h.Completed = append(h.Completed, id)
 	return nil
 }
 
@@ -183,6 +189,9 @@ func Call(f vault.Feature, h *Host, now time.Time, kind, typ, body string) Resul
 		return Result{Code: "unsupported_type"}
 	}
 	from := vault.PeerInfo{ID: "dev-" + kind, Kind: kind, State: vault.PeerActive}
+	if kind == "recovering-app" { // an app registered by recovery (§11.11.5)
+		from = vault.PeerInfo{ID: "dev-recovering", Kind: vault.KindApp, State: vault.PeerActive, Recovering: true}
+	}
 	if len(kind) > 11 && kind[:11] == "connection:" {
 		from = vault.PeerInfo{ID: kind[11:], Kind: vault.KindConnection, State: vault.PeerActive}
 	}

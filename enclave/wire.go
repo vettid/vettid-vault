@@ -16,6 +16,10 @@ const (
 	OpUnlock = "unlock"
 	OpLock   = "lock"
 	OpDelete = "delete"
+	// Recovery (§11.11).
+	OpRecovery         = "recovery"
+	OpRecoveryCancel   = "recovery_cancel"
+	OpRecoveryRegister = "recovery_register"
 )
 
 // Response statuses.
@@ -40,6 +44,8 @@ type QueueMessage struct {
 	ETKKid     suite.Kid
 	Envelope   []byte
 	EnqueuedAt time.Time
+	// BrowserKey is the member's browser P-256 key (op recovery).
+	BrowserKey []byte
 }
 
 func validID(s string) bool {
@@ -114,16 +120,25 @@ func ParseQueueMessage(b []byte) (*QueueMessage, error) {
 	if err != nil {
 		return nil, ErrMalformed
 	}
+	bk, bkOK, err := o.OptString("browser_key")
+	if err != nil || bkOK != (q.Op == OpRecovery) {
+		return nil, ErrMalformed
+	}
+	if bkOK {
+		if q.BrowserKey, err = strictjson.DecodeStd(bk, altchan.BrowserKeySize); err != nil {
+			return nil, ErrMalformed
+		}
+	}
 	switch q.Op {
-	case OpEnroll, OpUnlock:
+	case OpEnroll, OpUnlock, OpRecoveryRegister:
 		if !envOK || !kidOK {
 			return nil, ErrMalformed
 		}
 		if q.Envelope, err = strictjson.DecodeStd(env, -1); err != nil || len(q.Envelope) != envelope.OverheadSealed+altchan.RequestPaddedSize {
 			return nil, ErrMalformed
 		}
-	case OpLock, OpDelete:
-		if envOK {
+	case OpLock, OpDelete, OpRecovery, OpRecoveryCancel:
+		if envOK || kidOK {
 			return nil, ErrMalformed
 		}
 	default:
@@ -136,11 +151,21 @@ func ParseQueueMessage(b []byte) (*QueueMessage, error) {
 func (q *QueueMessage) Marshal() []byte {
 	b := strictjson.NewBuilder().Uint("v", 1).String("op", q.Op).String("vault_id", q.VaultID).
 		String("user_guid", q.UserGUID).String("request_id", q.RequestID)
-	if q.Op == OpEnroll || q.Op == OpUnlock { // absent for lock and delete (§11.5)
+	if hasEnvelope(q.Op) { // absent for lock, delete, recovery and its cancel (§11.5)
 		b.String("etk_kid", q.ETKKid.String()).Base64("envelope", q.Envelope)
+	}
+	if q.Op == OpRecovery {
+		b.Base64("browser_key", q.BrowserKey)
 	}
 	return b.String("enqueued_at", q.EnqueuedAt.UTC().Format(time.RFC3339)).Bytes()
 }
+
+func hasEnvelope(op string) bool { return op == OpEnroll || op == OpUnlock || op == OpRecoveryRegister }
+
+// requestType is the inner type of each op's request.
+var requestType = map[string]string{OpEnroll: altchan.TypeEnroll, OpUnlock: altchan.TypeUnlock,
+	OpRecovery: altchan.TypeRecoveryRequest, OpRecoveryCancel: altchan.TypeRecoveryCancel,
+	OpRecoveryRegister: altchan.TypeRecoveryRegister}
 
 // Response is what the enclave returns for a queue message. The parent
 // writes Envelope to the response slot (§11.5); the API and parent see

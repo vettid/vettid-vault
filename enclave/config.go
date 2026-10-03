@@ -3,6 +3,7 @@ package enclave
 import (
 	"crypto/ecdsa"
 	"crypto/x509"
+	"time"
 
 	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vms/devattest"
@@ -29,6 +30,10 @@ type Config struct {
 	// KDF returns the KDF parameters for new vaults (default
 	// vault.DefaultKDF: Argon2id t=3, m=64 MiB, p=1).
 	KDF func() (vault.KDFParams, error)
+	// RecoveryNow, if set, is the clock of the recovery's delay and expiry
+	// (§11.11): tests move it past the 24 h delay. Release configurations
+	// leave it nil (the enclave clock).
+	RecoveryNow func() time.Time
 }
 
 // Release pins. Values that VAULT-PLAN phase V5 creates (the manifest

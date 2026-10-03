@@ -291,6 +291,11 @@ func (h *procHost) kill(p *vproc) {
 // and zeroizes, then exits; a process that does not answer in time is
 // killed (§12.3).
 func (h *procHost) Lock(ctx context.Context, id string) (bool, error) {
+	return h.LockReason(ctx, id, "")
+}
+
+// LockReason implements enclave.Host: Lock with a reason in vault.locking.
+func (h *procHost) LockReason(ctx context.Context, id, reason string) (bool, error) {
 	h.mu.Lock()
 	p := h.procs[id]
 	delete(h.procs, id)
@@ -302,7 +307,7 @@ func (h *procHost) Lock(ctx context.Context, id string) (bool, error) {
 	p.stopping = true
 	p.mu.Unlock()
 	lctx, cancel := context.WithTimeout(ctx, h.cfg.LockTimeout)
-	r, err := p.conn.Call(lctx, vaultipc.KindLock)
+	r, err := p.conn.Call(lctx, vaultipc.KindLock, []byte(reason))
 	cancel()
 	if err != nil {
 		h.kill(p)

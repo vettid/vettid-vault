@@ -94,6 +94,11 @@ func (h *LocalHost) Manager(id string) *vault.Manager {
 // The error is vault.ErrSplitBrain when the final flush found a newer
 // state (the vault was zeroized without it).
 func (h *LocalHost) Lock(ctx context.Context, id string) (bool, error) {
+	return h.LockReason(ctx, id, "")
+}
+
+// LockReason implements Host.
+func (h *LocalHost) LockReason(ctx context.Context, id, reason string) (bool, error) {
 	h.mu.Lock()
 	r := h.vaults[id]
 	delete(h.vaults, id)
@@ -103,7 +108,7 @@ func (h *LocalHost) Lock(ctx context.Context, id string) (bool, error) {
 	}
 	r.cancel()
 	<-r.done
-	return true, r.m.Lock(ctx)
+	return true, r.m.LockReason(ctx, reason)
 }
 
 // Vaults implements Host.

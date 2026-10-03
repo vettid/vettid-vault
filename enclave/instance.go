@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vault/store"
 	"github.com/vettid/vettid-vault/vms/altchan"
@@ -56,6 +57,8 @@ type Host interface {
 	Open(ctx context.Context, j *Job) ([]byte, error)
 	// Lock locks a running vault (§12.3); it reports whether it ran.
 	Lock(ctx context.Context, vaultID string) (bool, error)
+	// LockReason is Lock with a reason in vault.locking (§11.11.1).
+	LockReason(ctx context.Context, vaultID, reason string) (bool, error)
 	// Vaults returns the ids of the running vaults.
 	Vaults() []string
 	// Close locks every vault.
@@ -160,7 +163,27 @@ func (in *Instance) Process(ctx context.Context, q *QueueMessage) *Response {
 		_, _ = in.host.Lock(ctx, q.VaultID)
 	case OpDelete:
 		in.deleteVault(ctx, q.VaultID)
-	case OpEnroll, OpUnlock:
+	case OpRecovery, OpRecoveryCancel:
+		// No envelope: the job carries the browser key (not secret). A
+		// recovery locks a running vault first, telling its devices why
+		// (§11.11.1); the vault process then works on the sealed header.
+		if q.Op == OpRecovery {
+			_, _ = in.host.LockReason(ctx, q.VaultID, "recovery")
+		}
+		body := []byte(`{}`)
+		if q.Op == OpRecovery {
+			body = strictjson.NewBuilder().Base64("browser_key", q.BrowserKey).Bytes()
+		}
+		j := &Job{Op: q.Op, VaultID: q.VaultID, UserGUID: q.UserGUID, RequestID: q.RequestID,
+			Inner: &envelope.Inner{Type: requestType[q.Op], ID: q.RequestID, TS: in.now(), Body: body}}
+		res, err := in.host.Open(ctx, j)
+		if q.Op == OpRecovery {
+			if err != nil || len(res) != altchan.SealedCodeSize {
+				res = opaque()
+			}
+			resp.Envelope = res
+		}
+	case OpEnroll, OpUnlock, OpRecoveryRegister:
 		inner, padded, err := in.openRequest(q)
 		if errors.Is(err, errETKUnknown) {
 			resp.Status = StatusETKUnknown
@@ -227,7 +250,7 @@ func (in *Instance) openRequest(q *QueueMessage) (*envelope.Inner, []byte, error
 		suite.Wipe(padded)
 		return nil, nil, errDrop
 	}
-	want := map[string]string{OpEnroll: altchan.TypeEnroll, OpUnlock: altchan.TypeUnlock}[q.Op]
+	want := requestType[q.Op]
 	if inner.Type != want || inner.ID != q.RequestID || inner.Re != "" {
 		suite.Wipe(padded)
 		return nil, nil, errDrop

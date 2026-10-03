@@ -58,9 +58,6 @@ type state struct {
 type Options struct {
 	// KDF for new seals; zero means DefaultKDF. Tests use MinKDF.
 	KDF KDF
-	// KeepCopy keeps the current blob in vault state (§3.5.6). The
-	// reference configuration keeps it.
-	KeepCopy bool
 }
 
 // Feature implements vault.Feature and vault.Zeroizer.
@@ -101,7 +98,7 @@ func (f *Feature) Types() []vault.TypeSpec {
 		r("credential.password.change", apps), r("credential.delete", apps),
 		r("credential.secret.add", apps), {Type: "credential.secret.get", Request: true, Volatile: true, From: apps},
 		r("credential.secret.list", owners),
-		r("credential.secret.delete", apps),
+		r("credential.secret.delete", apps), r("credential.recover", apps),
 	}
 }
 
@@ -162,6 +159,7 @@ var (
 	errStale     = vault.NewError("stale_credential", "")
 	errLimit     = vault.NewError("limit", "")
 	errInternal  = vault.NewError("internal", "")
+	errForbidden = vault.NewError("forbidden", "")
 	b64          = base64.StdEncoding
 	activityPrio = "high"
 )
@@ -211,6 +209,7 @@ var needs = map[string]int{
 	"credential.secret.get":      needBlob | needPassword | needSecretID,
 	"credential.secret.list":     0,
 	"credential.secret.delete":   needBlob | needPassword | needSecretID,
+	"credential.recover":         needPassword,
 }
 
 func password(o strictjson.Object, k string) ([]byte, error) {
@@ -308,6 +307,11 @@ func (f *Feature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner
 	case "credential.lock":
 		f.endWindow()
 		return nil, nil
+	case "credential.recover":
+		return f.recover(s, r)
+	}
+	if s.From().Recovering {
+		return nil, errForbidden
 	}
 	// Everything else opens the credential with the password (§3.5.3).
 	cek, inner, err := f.open(s, r)
@@ -467,7 +471,7 @@ func (f *Feature) commit(s *vault.Session, blob []byte, version uint64) {
 	h := sha256.Sum256(blob)
 	f.st.Version, f.st.Hash, f.st.UpdatedAt = version, h[:], s.Now().UTC().Truncate(time.Millisecond)
 	f.st.Blob = nil
-	if f.opt.KeepCopy {
+	if s.Settings().Backup() {
 		f.st.Blob = blob
 	}
 	s.SyncEvent("credential.changed", strictjson.NewBuilder().Uint("version", version).Bytes())
@@ -556,4 +560,49 @@ func (f *Feature) list() []byte {
 		arr = append(arr, b.String("created_at", envelope.FormatTS(m.CreatedAt)).Bytes()...)
 	}
 	return strictjson.NewBuilder().Uint("version", f.st.Version).Raw("secrets", append(arr, ']')).Bytes()
+}
+
+// SettingsChanged implements vault.SettingsObserver: turning the backup
+// off drops the kept copy at once (§3.5.6).
+func (f *Feature) SettingsChanged(_ *vault.Session, next vault.Settings) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !next.Backup() {
+		f.st.Blob = nil
+	}
+}
+
+// recover is the last step of a recovery (§11.11.5): the recovered app
+// authenticates with the password against the kept copy, which is
+// re-sealed (version + 1, so copies on the lost devices go stale) and
+// handed to it; only then does the app become an ordinary owner app.
+func (f *Feature) recover(s *vault.Session, r *Request) (json.RawMessage, error) {
+	if !s.From().Recovering {
+		return nil, errForbidden
+	}
+	if f.st.CEKSeed == nil || len(f.st.Blob) == 0 {
+		// No credential, or no backup: nothing to authenticate against or
+		// hand over (§11.11.5); the recovery completes with the PIN alone.
+		if err := s.CompleteRecovery(); err != nil {
+			return nil, errInternal
+		}
+		s.Record(vault.Activity{Kind: "credential.recovered", Ref: "none", Audit: true})
+		return json.RawMessage(`{}`), nil
+	}
+	r.Blob = append([]byte(nil), f.st.Blob...)
+	cek, inner, err := f.open(s, r)
+	if err != nil {
+		return nil, err
+	}
+	defer cek.Destroy()
+	defer inner.Wipe()
+	blob, err := f.reseal(s, cek.Public(), inner, r.Password)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.CompleteRecovery(); err != nil {
+		return nil, errInternal
+	}
+	s.Record(vault.Activity{Kind: "credential.recovered", Audit: true, Feed: true})
+	return strictjson.NewBuilder().Base64("credential", blob).Uint("version", f.st.Version).Bytes(), nil
 }

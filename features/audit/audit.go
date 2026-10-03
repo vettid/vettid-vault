@@ -25,7 +25,13 @@ import (
 
 // Limits (§10.9).
 const (
-	MaxEntries   = 10000
+	MaxEntries = 10000
+	// Retention is fixed (§10.9): the log is append-only and no principal
+	// can shorten it.
+	Retention = 730 * 24 * time.Hour
+	// DropsPerHour bounds drop.* entries per principal and kind, so that a
+	// peer cannot flush the log with refused messages.
+	DropsPerHour = 60
 	DefaultLimit = 100
 	MaxLimit     = 500
 	MaxKinds     = 16
@@ -56,12 +62,18 @@ type state struct {
 
 // Feature implements vault.Feature and vault.ActivitySink.
 type Feature struct {
-	mu sync.Mutex
-	st state
+	mu    sync.Mutex
+	st    state
+	drops map[string]*dropWindow // memory only
+}
+
+type dropWindow struct {
+	start time.Time
+	n     int
 }
 
 // New returns an empty audit log.
-func New() *Feature { return &Feature{} }
+func New() *Feature { return &Feature{drops: map[string]*dropWindow{}} }
 
 var owners = []string{vault.KindApp, vault.KindDesktop}
 
@@ -122,6 +134,25 @@ func (f *Feature) RecordActivity(s *vault.Session, a vault.Activity) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	now := s.Now().UTC().Truncate(time.Millisecond)
+	if strings.HasPrefix(a.Kind, "drop.") {
+		key := a.Kind + "|" + a.ConnectionID + "|" + a.DeviceID
+		w := f.drops[key]
+		if w == nil || now.Sub(w.start) >= time.Hour {
+			w = &dropWindow{start: now}
+			f.drops[key] = w
+		}
+		w.n++
+		switch {
+		case w.n == DropsPerHour+1:
+			a = vault.Activity{Kind: "drop.suppressed", ConnectionID: a.ConnectionID, DeviceID: a.DeviceID, Ref: a.Kind, Audit: true}
+		case w.n > DropsPerHour:
+			return
+		}
+	}
+	f.append(s, now, a)
+}
+
+func (f *Feature) append(s *vault.Session, now time.Time, a vault.Activity) {
 	prev := f.st.Head
 	if len(prev) != sha256.Size {
 		prev = make([]byte, sha256.Size)
@@ -131,7 +162,7 @@ func (f *Feature) RecordActivity(s *vault.Session, a vault.Activity) {
 	e.Hash = Hash(prev, e)
 	f.st.Seq, f.st.Head = e.Seq, e.Hash
 	f.st.Entries = append(f.st.Entries, e)
-	f.prune(now, s.Settings().AuditRetention())
+	f.prune(now, Retention)
 }
 
 func clip(s string, n int) string {
@@ -156,6 +187,8 @@ type Query struct {
 	ConnectionID string
 	Kinds        []string
 	BeforeSeq    uint64 // 0: from the newest
+	AfterSeq     uint64 // with After: oldest first, entries with seq > AfterSeq
+	After        bool
 	Limit        int
 }
 
@@ -193,6 +226,11 @@ func ParseQuery(body []byte, needConn bool) (*Query, error) {
 	} else if present {
 		q.BeforeSeq = b
 	}
+	if a, present, err := o.OptUint("after_seq", 0, strictjson.MaxSafeInteger); err != nil || present && q.BeforeSeq != 0 {
+		return nil, errBad
+	} else if present {
+		q.AfterSeq, q.After = a, true
+	}
 	if l, present, err := o.OptUint("limit", 1, MaxLimit); err != nil {
 		return nil, errBad
 	} else if present {
@@ -206,6 +244,9 @@ func (q *Query) match(e *Entry) bool {
 		return false
 	}
 	if q.BeforeSeq != 0 && e.Seq >= q.BeforeSeq {
+		return false
+	}
+	if q.After && e.Seq <= q.AfterSeq {
 		return false
 	}
 	if len(q.Kinds) == 0 {
@@ -249,13 +290,21 @@ func (f *Feature) Handle(_ context.Context, _ *vault.Session, in *envelope.Inner
 	arr := []byte{'['}
 	n := 0
 	var last, next uint64
-	for i := len(f.st.Entries) - 1; i >= 0; i-- {
-		e := f.st.Entries[i]
+	order := make([]*Entry, 0, len(f.st.Entries))
+	if q.After {
+		order = append(order, f.st.Entries...)
+	} else {
+		for i := len(f.st.Entries) - 1; i >= 0; i-- {
+			order = append(order, f.st.Entries[i])
+		}
+	}
+	more := false
+	for _, e := range order {
 		if !q.match(e) {
 			continue
 		}
 		if n == q.Limit {
-			next = last // more remain: the next page is before the last one returned
+			next, more = last, true // more remain: the next page continues from the last one returned
 			break
 		}
 		if n > 0 {
@@ -271,7 +320,11 @@ func (f *Feature) Handle(_ context.Context, _ *vault.Session, in *envelope.Inner
 		head = make([]byte, sha256.Size)
 	}
 	b.Base64("head", head)
-	if next != 0 {
+	b.Uint("seq", f.st.Seq)
+	switch {
+	case more && q.After:
+		b.Uint("next_after_seq", next)
+	case more:
 		b.Uint("next_before_seq", next)
 	}
 	return b.Bytes(), nil

@@ -18,7 +18,7 @@ import (
 // change, VAULTCTL_NEW_PASSWORD.
 
 func init() {
-	commands["credential"] = command{"credential create|fetch|version|unlock|lock|rotate|password|delete|secret-add|secret-get|secret-list|secret-delete [flags]", cmdCredential}
+	commands["credential"] = command{"credential create|fetch|version|unlock|lock|rotate|password|delete|recover|secret-add|secret-get|secret-list|secret-delete [flags]", cmdCredential}
 	commands["secret"] = command{"secret put|get|list|delete [flags]   vault-held secrets", cmdSecret}
 	commands["profile"] = command{"profile get | profile set JSON", cmdProfile}
 	commands["settings"] = command{"settings get | settings set VERSION JSON", cmdSettings}
@@ -78,7 +78,7 @@ func cmdCredential(ctx context.Context, g *globals, args []string) error {
 	desc := fs.String("description", "", "description")
 	valueFile := fs.String("value-file", "", "file holding the secret value")
 	_ = fs.Parse(rest)
-	needPW := map[string]bool{"create": true, "unlock": true, "rotate": true, "password": true, "delete": true,
+	needPW := map[string]bool{"create": true, "unlock": true, "rotate": true, "password": true, "delete": true, "recover": true,
 		"secret-add": true, "secret-get": true, "secret-delete": true}
 	var pw string
 	if needPW[op] {
@@ -109,6 +109,9 @@ func cmdCredential(ctx context.Context, g *globals, args []string) error {
 			return nil, d.CredentialChangePassword(ctx, pw, np)
 		case "delete":
 			return nil, d.CredentialDelete(ctx, pw)
+		case "recover":
+			got, err := d.CredentialRecover(ctx, pw)
+			return map[string]bool{"credential": got}, err
 		case "secret-add":
 			v, err := os.ReadFile(*valueFile)
 			if err != nil {

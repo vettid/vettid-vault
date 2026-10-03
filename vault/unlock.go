@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/vettid/vettid-vault/vault/store"
+	"github.com/vettid/vettid-vault/vms/handshake"
 	"github.com/vettid/vettid-vault/vms/suite"
 )
 
@@ -105,6 +106,10 @@ type AltUnlockParams struct {
 	// key (§11.10.7); errors are ErrSealKeyNamespace or ErrSealKey.
 	SealerFor func(ctx context.Context, target ReleaseEntry) (Sealer, *SealKeyRecord, error)
 	Update    *UpdateRequest
+	// CancelRecovery: the unlock also cancels a pending recovery
+	// (§11.11.4); without it, a device other than the recovery's own is
+	// refused with recovery_pending while a recovery is in progress.
+	CancelRecovery bool
 
 	pinOnly bool // Unlock: no device, manifest or release checks
 }
@@ -133,6 +138,10 @@ type AltUnlockOutcome struct {
 	Token      string
 	Update     *UpdateOutcome
 	Events     []LifecycleEvent
+	// RecoveryCancelled: this unlock cancelled a recovery (§11.11.4).
+	RecoveryCancelled bool
+	// VaultBundle is set for the recovered app (§11.11.5).
+	VaultBundle []byte
 
 	cause error
 }
@@ -225,6 +234,9 @@ func UnlockAlt(ctx context.Context, p AltUnlockParams) (*Manager, *AltUnlockOutc
 			return nil, out.fail(CodeAttestation, err)
 		}
 		key.Attestation = nb // persisted with the next header write
+		if hdr.Recovery != nil && !hdr.isRecoveryKey(key.IK) && !p.CancelRecovery {
+			return nil, out.fail(CodeRecoveryPending, nil) // not a PIN attempt
+		}
 	}
 	if now.Before(hdr.Backoff.NotBefore) {
 		out.RetryAfter = hdr.Backoff.NotBefore.Sub(now)
@@ -283,6 +295,10 @@ func UnlockAlt(ctx context.Context, p AltUnlockParams) (*Manager, *AltUnlockOutc
 	m.stateVer, m.headerVer = sver, hver
 	m.hadFailures = hdr.Backoff.Failures > 0
 	hdr.Backoff = Backoff{} // a correct PIN resets the backoff (§11.8)
+	if p.CancelRecovery && key != nil && hdr.Recovery != nil && !hdr.isRecoveryKey(key.IK) {
+		hdr.cancelRecovery(now, "recovery.cancelled")
+		out.RecoveryCancelled = true
+	}
 	out.StateSeq = st.StateSeq
 	if p.pinOnly {
 		if st.ReleaseMove != nil || st.SealedRelease != own.PCR0 {
@@ -488,6 +504,7 @@ func (m *Manager) resume(ctx context.Context, p AltUnlockParams, out *AltUnlockO
 	if err := m.restoreLive(); err != nil {
 		return fail(CodeMissing, err)
 	}
+	m.applyRecovery(now)
 	var err error
 	m.relay = p.Relay(m.st.Relay.URL, m.keys.relay)
 	if m.limits, err = m.relay.Register(ctx); err != nil {
@@ -499,6 +516,9 @@ func (m *Manager) resume(ctx context.Context, p AltUnlockParams, out *AltUnlockO
 			if suite.EqualPublic(m.hdr.UnlockKeys[i].IK, p.DeviceIK) {
 				out.Token = m.unlockTokens(&m.hdr.UnlockKeys[i], p.DeviceToken, now)
 			}
+		}
+		if m.hdr.isRecoveryKey(p.DeviceIK) {
+			out.VaultBundle = VaultBundle(handshake.Principal{IK: m.keys.ik.Public().(ed25519.PublicKey), KEM: m.keys.kem.Public(), Relay: m.ownAddr()})
 		}
 		if m.st.AnnouncedRelease != p.Release.PCR0 {
 			m.st.AnnouncedRelease = p.Release.PCR0
@@ -541,6 +561,9 @@ func (m *Manager) unlockTokens(k *UnlockKey, deviceToken string, now time.Time) 
 		// The first app before its enrollment handshake: the enrollment
 		// binding names its relay key.
 		inv := m.st.Invites[m.st.VaultID]
+		if r := m.hdr.Recovery; r != nil && m.hdr.isRecoveryKey(k.IK) {
+			inv = m.st.Invites[r.ID] // the recovered app before its handshake (§11.11.5)
+		}
 		if inv == nil || inv.EnrollIK == nil || !suite.EqualPublic(inv.EnrollIK, k.IK) {
 			return ""
 		}

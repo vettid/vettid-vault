@@ -15,7 +15,6 @@ import (
 const (
 	DefaultCredentialUnlockTTL = 300 * time.Second
 	DefaultFeedRetentionDays   = 30
-	DefaultAuditRetentionDays  = 365
 	MaxAppSettings             = 64
 	MaxAppSettingBytes         = 4096
 )
@@ -50,26 +49,18 @@ func (s Settings) FeedRetention() time.Duration {
 	return time.Duration(d) * 24 * time.Hour
 }
 
-// AuditRetention is how long audit entries are kept.
-func (s Settings) AuditRetention() time.Duration {
-	d := s.AuditRetentionDays
-	if d == 0 {
-		d = DefaultAuditRetentionDays
-	}
-	return time.Duration(d) * 24 * time.Hour
-}
+// Backup reports whether the vault keeps the credential's copy (§3.5.6,
+// credential.backup, on by default).
+func (s Settings) Backup() bool { return !s.NoBackup }
 
 func (s Settings) json() []byte {
 	ttl := uint64(s.UnlockTTL() / time.Second)
-	feed, audit := s.FeedRetentionDays, s.AuditRetentionDays
+	feed := s.FeedRetentionDays
 	if feed == 0 {
 		feed = DefaultFeedRetentionDays
 	}
-	if audit == 0 {
-		audit = DefaultAuditRetentionDays
-	}
 	b := strictjson.NewBuilder().Bool("connections.auto_approve_in_person", s.AutoApproveInPerson).
-		Uint("credential.unlock_ttl_seconds", ttl).Uint("feed.retention_days", feed).Uint("audit.retention_days", audit)
+		Bool("credential.backup", s.Backup()).Uint("credential.unlock_ttl_seconds", ttl).Uint("feed.retention_days", feed)
 	keys := make([]string, 0, len(s.App))
 	for k := range s.App {
 		keys = append(keys, k)
@@ -116,10 +107,12 @@ func ApplySettings(cur Settings, body []byte) (Settings, error) {
 			if next.FeedRetentionDays, err = set.Uint(k, 1, 365); err != nil {
 				return cur, errBadRequest
 			}
-		case "audit.retention_days":
-			if next.AuditRetentionDays, err = set.Uint(k, 30, 730); err != nil {
+		case "credential.backup":
+			on, err := set.Bool(k)
+			if err != nil {
 				return cur, errBadRequest
 			}
+			next.NoBackup = !on
 		default:
 			if !appKeyRE.MatchString(k) {
 				return cur, errBadRequest
@@ -154,6 +147,14 @@ func (m *Manager) hSettingsSet(_ context.Context, s *Session, in *envelope.Inner
 		return nil, err
 	}
 	s.host.SetSettings(next)
+	s.Record(Activity{Kind: "settings.changed", DeviceID: s.from.ID, Ref: uitoa(next.Version), Audit: true})
+	if m := s.m; m != nil {
+		for _, f := range m.features {
+			if o, ok := f.(SettingsObserver); ok {
+				o.SettingsChanged(s, next)
+			}
+		}
+	}
 	s.SyncEvent("settings.changed", strictjson.NewBuilder().Uint("version", next.Version).Bytes())
 	return strictjson.NewBuilder().Uint("version", next.Version).Bytes(), nil
 }

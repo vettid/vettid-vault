@@ -51,6 +51,9 @@ func TestSettings(t *testing.T) {
 		!strings.Contains(string(r.Body), `"credential.unlock_ttl_seconds":300`) || !strings.Contains(string(r.Body), `"version":0`) {
 		t.Fatalf("defaults: %s", r.Body)
 	}
+	if !strings.Contains(string(r.Body), `"credential.backup":true`) {
+		t.Fatalf("backup default: %s", r.Body)
+	}
 	_ = d.send("settings.set", []byte(`{"version":0,"set":{"connections.auto_approve_in_person":true,"app.theme":"dark","feed.retention_days":7}}`))
 	if r := one(t, d); r.Status != envelope.StatusOK || string(r.Body) != `{"version":1}` {
 		t.Fatalf("set: %+v", r)
@@ -64,6 +67,7 @@ func TestSettings(t *testing.T) {
 		`{"version":1,"set":{"credential.unlock_ttl_seconds":5}}`: "bad_request",
 		`{"version":1,"set":{}}`:                                  "bad_request",
 		`{"version":1,"set":{"app.x":1}}`:                         "bad_request",
+		`{"version":1,"set":{"audit.retention_days":30}}`:         "bad_request", // fixed retention (§10.9)
 	} {
 		_ = d.send("settings.set", []byte(body))
 		if r := one(t, d); r.Error == nil || r.Error.Code != code {
@@ -111,7 +115,7 @@ func TestActivitySinks(t *testing.T) {
 }
 
 func FuzzApplySettings(f *testing.F) {
-	f.Add([]byte(`{"version":0,"set":{"connections.auto_approve_in_person":true,"app.a":"b","audit.retention_days":30}}`))
+	f.Add([]byte(`{"version":0,"set":{"connections.auto_approve_in_person":true,"app.a":"b","credential.backup":false}}`))
 	f.Fuzz(func(t *testing.T, b []byte) {
 		s, err := ApplySettings(Settings{}, b)
 		if err != nil {
@@ -204,5 +208,45 @@ func TestVolatileResponses(t *testing.T) {
 	}
 	if strings.Contains(string(pt), "TOPSECRETVALUE") {
 		t.Fatal("secret value in vault state")
+	}
+}
+
+// gateFeature is a credential gate under test control.
+type gateFeature struct {
+	recSink
+	ready bool
+}
+
+func (g *gateFeature) CredentialReady() bool { return g.ready }
+
+// §3.5.7: a vault without a credential answers credential_required to all
+// but the listed types, stays provisional, and records has_credential.
+func TestCredentialGate(t *testing.T) {
+	d := newDevFixture(t)
+	g := &gateFeature{}
+	d.m.addFeature(g)
+	for _, typ := range []string{"vault.enroll.confirm", "device.pair.create", "connection.invite.create", "settings.get"} {
+		_ = d.send(typ, []byte(`{}`))
+		if r := one(t, d); r.Error == nil || r.Error.Code != "credential_required" {
+			t.Fatalf("%s on a restricted vault: %+v", typ, r)
+		}
+	}
+	_ = d.send("vault.status", []byte(`{}`))
+	if r := one(t, d); r.Status != envelope.StatusOK {
+		t.Fatal("vault.status refused")
+	}
+	if err := d.m.persist(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	if d.m.hdr.HasCredential {
+		t.Fatal("has_credential without a credential")
+	}
+	g.ready = true
+	_ = d.send("settings.get", []byte(`{}`))
+	if r := one(t, d); r.Status != envelope.StatusOK {
+		t.Fatal("settings.get refused with a credential")
+	}
+	if !d.m.hdr.HasCredential {
+		t.Fatal("has_credential not recorded")
 	}
 }

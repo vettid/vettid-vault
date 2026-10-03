@@ -176,6 +176,7 @@ type UnlockRequest struct {
 	Assertion                    *DeviceAssertion
 	Manifest                     *manifest.Served
 	Update                       *ReleaseUpdate
+	CancelRecovery               bool // §11.11.4
 	Sig                          []byte
 }
 
@@ -195,6 +196,9 @@ func (r *UnlockRequest) Marshal() ([]byte, error) {
 			return nil, err
 		}
 		b.Raw("release_update", strictjson.NewBuilder().String("to", u.To).Uint("to_release", u.ToRelease).Raw("approval", ap).Bytes())
+	}
+	if r.CancelRecovery {
+		b.Bool("cancel_recovery", true)
 	}
 	return b.Base64("sig", r.Sig).Bytes(), nil
 }
@@ -256,6 +260,12 @@ func ParseUnlockRequest(o strictjson.Object) (*UnlockRequest, error) {
 			return nil, ErrMalformed
 		}
 		r.Update = u
+	}
+	if o.Has("cancel_recovery") {
+		if v, err := o.Bool("cancel_recovery"); err != nil || !v {
+			return nil, ErrMalformed // present only as true
+		}
+		r.CancelRecovery = true
 	}
 	if r.Sig, err = o.Base64("sig", ed25519.SignatureSize); err != nil {
 		return nil, ErrMalformed
@@ -338,6 +348,11 @@ type UnlockResult struct {
 	ReleaseStatus  string
 	ManifestSerial uint64
 	Update         *UpdateResult
+	// RecoveryCancelled: this unlock cancelled a recovery (§11.11.4).
+	RecoveryCancelled bool
+	// VaultBundle is present for the recovered app's unlock (§11.11.5):
+	// {v, suite, ik, kem, relay} as in vault.enrolled.
+	VaultBundle []byte
 }
 
 // UpdateResult is the result's `update` member.
@@ -365,6 +380,12 @@ func (r *UnlockResult) Marshal() []byte {
 			ub.String("code", u.Code)
 		}
 		b.Raw("update", ub.Bytes())
+	}
+	if r.RecoveryCancelled {
+		b.Bool("recovery_cancelled", true)
+	}
+	if len(r.VaultBundle) > 0 {
+		b.Base64("vault_bundle", r.VaultBundle)
 	}
 	return b.Bytes()
 }
@@ -424,6 +445,16 @@ func ParseUnlockResult(raw json.RawMessage) (*UnlockResult, error) {
 			return nil, ErrMalformed
 		}
 		r.Update = u
+	}
+	if o.Has("recovery_cancelled") {
+		if r.RecoveryCancelled, err = o.Bool("recovery_cancelled"); err != nil {
+			return nil, ErrMalformed
+		}
+	}
+	if o.Has("vault_bundle") {
+		if r.VaultBundle, err = o.Base64("vault_bundle", -1); err != nil || len(r.VaultBundle) > 2048 {
+			return nil, ErrMalformed
+		}
 	}
 	return r, nil
 }

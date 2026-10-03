@@ -41,7 +41,7 @@ func ParseJob(f [][]byte) (*Job, error) {
 		return nil, ErrJob
 	}
 	j := &Job{Op: string(f[0]), VaultID: string(f[1]), UserGUID: string(f[2]), RequestID: string(f[3])}
-	want := map[string]string{OpEnroll: altchan.TypeEnroll, OpUnlock: altchan.TypeUnlock}[j.Op]
+	want := requestType[j.Op]
 	if want == "" || !validID(j.VaultID) || !validGUID(j.UserGUID) || !envelope.ValidULID(j.RequestID) {
 		return nil, ErrJob
 	}

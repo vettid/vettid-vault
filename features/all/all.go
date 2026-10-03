@@ -34,7 +34,7 @@ type Set struct {
 func NewSet(o Options) *Set {
 	return &Set{
 		Messaging:  messaging.New(),
-		Credential: credential.New(credential.Options{KDF: o.CredentialKDF, KeepCopy: true}),
+		Credential: credential.New(credential.Options{KDF: o.CredentialKDF}),
 		Secrets:    secrets.New(),
 		Profile:    profile.New(),
 		Audit:      audit.New(),

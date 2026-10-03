@@ -4,6 +4,7 @@ package e2e
 
 import (
 	"context"
+	"crypto/ecdh"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -35,6 +36,7 @@ import (
 	"github.com/vettid/vettid-vault/internal/selftest"
 	"github.com/vettid/vettid-vault/parent"
 	"github.com/vettid/vettid-vault/vault"
+	"github.com/vettid/vettid-vault/vms/altchan"
 	"github.com/vettid/vettid-vault/vms/envelope"
 )
 
@@ -270,6 +272,9 @@ func (a *hostApp) enroll(hi *hostInstance, vaultID string) {
 	}
 	if err := a.dev.CompleteEnrollment(ctx); err != nil {
 		hs.t.Fatal(err)
+	}
+	if err := a.dev.CredentialCreate(ctx, credPW); err != nil {
+		hs.t.Fatalf("credential.create: %v", err)
 	}
 	if rr, err := a.dev.Request(ctx, "vault.enroll.confirm", json.RawMessage(`{}`)); err != nil || !rr.OK() {
 		hs.t.Fatalf("confirm: %v", err)
@@ -529,5 +534,66 @@ func TestSelftest(t *testing.T) {
 	// Only smoke/<run_id>/ was touched; the object was deleted again.
 	for _, k := range hs.objs.Keys() {
 		t.Fatalf("object left behind: %s", k)
+	}
+}
+
+// §11.11 through the parent and a vault process: the request locks the
+// running vault (vault.locking{recovery} over the process channel), the
+// code comes back sealed to the browser key in the response slot, a
+// register before the delay is refused, the cancel clears the recovery.
+func TestHostRecovery(t *testing.T) {
+	hs := newHostStack(t)
+	a := hs.start("i-r", 3, 0)
+	m := hs.newApp("member-rec", 0x6a)
+	vid := "33333333333333333333333333333333"
+	m.enroll(a, vid)
+	bk, err := ecdh.P256().GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type slot struct {
+		parenttest.SlotRow
+		RequestID string
+	}
+	send := func(op string, extra map[string]any) slot {
+		rid, _ := envelope.NewULID(time.Now())
+		hs.tables.PutSlot(rid, a.id)
+		msg := map[string]any{"v": 1, "op": op, "vault_id": vid, "user_guid": m.guid, "request_id": rid,
+			"enqueued_at": time.Now().UTC().Format(time.RFC3339Nano)}
+		for k, v := range extra {
+			msg[k] = v
+		}
+		b, _ := json.Marshal(msg)
+		hs.queues.Send(a.queue, string(b))
+		return slot{hs.waitSlot(rid), rid}
+	}
+	s := send("recovery", map[string]any{"browser_key": bk.PublicKey().Bytes()})
+	if s.Status != "done" || len(s.Envelope) != altchan.ResultEnvelopeSize {
+		t.Fatalf("recovery slot %+v", s)
+	}
+	code, err := altchan.OpenRecoveryCode(bk, s.Envelope, vid, s.RequestID)
+	if err != nil {
+		t.Fatalf("sealed code: %v", err)
+	}
+	waitEvent(t, m.dev, "vault.locking", has("reason", "recovery"))
+	if u, _ := m.unlock(a); u.OK || u.Code != vault.CodeRecoveryPending {
+		t.Fatalf("unlock during recovery: %+v", u)
+	}
+	// A new app before the 24 h delay.
+	n := hs.newApp(m.guid, 0x6b)
+	e, _ := hs.enclaveOf(a, n.dev, false)
+	req, err := n.dev.BuildRecoveryRegister(n.guid, code, e, n.att)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rs := hs.post(a, enclave.OpRecoveryRegister, vid, n.guid, req)
+	if rr, err := n.dev.OpenRecoveryResult(rs.Envelope); err != nil || rr.Code != vault.CodeRecoveryEarly {
+		t.Fatalf("early register: %v %+v", err, rr)
+	}
+	if s := send("recovery_cancel", nil); s.Status != "done" {
+		t.Fatalf("cancel slot %+v", s)
+	}
+	if u, _ := m.unlock(a); !u.OK {
+		t.Fatalf("unlock after cancel: %+v", u)
 	}
 }

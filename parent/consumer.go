@@ -33,7 +33,7 @@ func parseRouting(b []byte) (routing, bool) {
 		return routing{}, false
 	}
 	switch r.Op {
-	case "enroll", "unlock", "lock", "delete":
+	case "enroll", "unlock", "lock", "delete", "recovery", "recovery_cancel", "recovery_register":
 	default:
 		return routing{}, false
 	}

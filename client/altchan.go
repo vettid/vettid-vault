@@ -232,6 +232,9 @@ type UnlockOptions struct {
 	// run the vault (§11.10.4): the request goes to the previous release
 	// and approves it as its own target.
 	Abandon bool
+	// CancelRecovery cancels a recovery in progress with this unlock
+	// (§11.11.4).
+	CancelRecovery bool
 }
 
 // pendingUnlock is kept between BuildUnlock and OpenUnlockResult.
@@ -250,7 +253,8 @@ type pendingUnlock struct {
 func (d *Device) BuildUnlock(userGUID, pin string, e *Enclave, served *manifest.Served, m *manifest.Manifest, att Attester, o UnlockOptions) (*Request, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.st.Vault == nil || d.st.VaultID == "" {
+	recovering := d.st.Vault == nil && d.st.Recovery != nil
+	if (d.st.Vault == nil && !recovering) || d.st.VaultID == "" {
 		return nil, ErrNotPaired
 	}
 	a := d.alt()
@@ -276,7 +280,15 @@ func (d *Device) BuildUnlock(userGUID, pin string, e *Enclave, served *manifest.
 	if err != nil {
 		return nil, err
 	}
-	tok, err := d.mintForVault()
+	var tok string
+	if recovering {
+		// The recovered app does not know the vault's relay key yet; the
+		// vault ignores the token of a device it has no record of
+		// (§11.11.5), so an open token for this device's mailbox is sent.
+		tok, err = d.own.MintOpenToken(d.st.RelayURL, 10*time.Minute, "")
+	} else {
+		tok, err = d.mintForVault()
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -304,10 +316,10 @@ func (d *Device) BuildUnlock(userGUID, pin string, e *Enclave, served *manifest.
 	}
 	req := &altchan.UnlockRequest{UserGUID: userGUID, VaultID: d.st.VaultID, RequestID: rid, DeviceIK: d.IdentityKey(),
 		PIN: pin, MinStateSeq: a.StateSeq, MinHeaderSeq: a.HeaderSeq[e.Release.PCR0], Token: tok, Assertion: as,
-		Manifest: served, Update: upd}
+		Manifest: served, Update: upd, CancelRecovery: o.CancelRecovery}
 	ss, err := altchan.UnlockSigningString(altchan.UnlockFields{UserGUID: userGUID, VaultID: d.st.VaultID, RequestID: rid,
 		TS: tss, ETKKid: e.Descriptor.Kid, MinStateSeq: req.MinStateSeq, MinHeaderSeq: req.MinHeaderSeq, PIN: pin,
-		Token: tok, Manifest: served.Manifest, ToPCR0: toPCR0})
+		Token: tok, Manifest: served.Manifest, ToPCR0: toPCR0, CancelRecovery: o.CancelRecovery})
 	if err != nil {
 		return nil, err
 	}
@@ -380,6 +392,11 @@ func (d *Device) OpenUnlockResult(raw []byte) (*altchan.UnlockResult, error) {
 	a.Release = release
 	if number != 0 {
 		a.ReleaseNumber = number
+	}
+	if len(r.VaultBundle) > 0 && d.st.Vault == nil && d.st.Recovery != nil {
+		if err := d.adoptBundle(r.VaultBundle); err != nil {
+			return nil, err
+		}
 	}
 	if r.Token != "" && d.st.Vault != nil {
 		if exp, err := d.heldFromVault(r.Token); err == nil && exp.After(d.st.Vault.TokenExp) {

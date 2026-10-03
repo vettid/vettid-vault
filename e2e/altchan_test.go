@@ -137,6 +137,9 @@ func (aw *acWorld) enroll(a *acApp, pin string) *altchan.EnrollResult {
 	if err := a.dev.CompleteEnrollment(ctx); err != nil {
 		t.Fatalf("first-app handshake: %v", err)
 	}
+	if err := a.dev.CredentialCreate(ctx, credPW); err != nil {
+		t.Fatalf("credential.create: %v", err)
+	}
 	if rr, err := a.dev.Request(ctx, "vault.enroll.confirm", []byte(`{}`)); err != nil || !rr.OK() {
 		t.Fatalf("confirm: %v", err)
 	}

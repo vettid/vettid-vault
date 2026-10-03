@@ -1,7 +1,7 @@
 ---
 title: VAULT-MESSAGING
 status: draft
-version: 0.4.0
+version: 0.4.1
 date: 2026-10-02
 owner: Al Liebl (Mesmer)
 component: vault manager (enclave), parent forwarder, apps, desktops, agents, member API vault routes
@@ -14,6 +14,13 @@ related:
   - ACCOUNT-ADMIN-PLAN.md
   - MEMBER-API.md
 changelog:
+  - 0.4.1: the Protean Credential per the owner's design: the CEK rotates
+    at every use, one-time UTK/LTK transaction keys and reply keys, LAT
+    superseded by Nitro attestation, a credential required before a vault
+    is used (§3.5); recovery when every owner app is lost (§11.11) and its
+    member API routes, never without the credential; credential backup
+    (§3.5.6); an append-only audit log with fixed retention, client
+    anchors and bounded drop entries (§10.9)
   - 0.4.0: V4 batch 1 (owner decision on the Protean Credential): the
     Protean Credential (§3.5) with a hybrid-KEM CEK, a password layer and
     per-use consent, its link to ik/kem rotation (§3.4); body schemas for
@@ -70,7 +77,7 @@ vaults of its connections. It covers:
 - deposit tokens (§7);
 - delivery semantics (§8, §9);
 - the message-type registry (§10);
-- enrollment and unlock over an alternate channel (§11);
+- enrollment, unlock and recovery over an alternate channel (§11);
 - locked vaults (§12).
 
 The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY are to be read as
@@ -176,8 +183,8 @@ hidden. Traffic-analysis resistance is a non-goal (as in RELAY-PROTOCOL
   (§11.10), or enrolled into, after being shown its release number, notes
   and PCR0. No other release can open the vault, and VettID cannot move it
   there (§13.5);
-- recovery when every owner device is lost. Backup and recovery are a
-  separate design.
+- loss of the stored vault state itself. Recovery when every owner app is
+  lost is §11.11; it needs the state, the PIN and the credential password.
 
 ## 3. Principals and keys
 
@@ -236,7 +243,8 @@ Rules for all keys:
 - the wake key;
 - the CEK and the credential record (§3.5): the credential's version, the
   SHA-256 of its current blob, the password backoff state, the critical
-  secrets' metadata and, if kept (§3.5.6), the current blob;
+  secrets' metadata, the latest blob while kept (§3.5.3, §3.5.6), and the
+  LTKs of each app's UTK pool (§3.5.4);
 - one **record per owner device and one per connection**, holding:
   - role, relay public key, mailbox address, `ik` and `kem`;
   - the peer's rotation chain;
@@ -263,6 +271,7 @@ contains:
 - the **unlock keys**: for each app allowed to unlock, its `ik`, its `kem`
   and its device-attestation binding (§11.7);
 - the backoff state (§11.8);
+- `has_credential`, whether the vault has a Protean Credential (§3.5.7);
 - `state_seq` and `header_seq` (§13.2).
 
 The sealed header MUST NOT contain the relay key, session keys or feature
@@ -330,7 +339,7 @@ create-only.
 - **Device relay key.** The device sends `relay.address.update`, and the vault
   denylists the old `sub` after the grace period.
 - **Vault `ik` and `kem`** rotate with the Protean Credential (PQC-MIGRATION
-  §7). A `credential.rotate` (§3.5.4) MUST rotate them, in the same flush
+  §7). A `credential.rotate` (§3.5.5) MUST rotate them, in the same flush
   as the new credential; the vault MAY also rotate them alone, after a
   suspected exposure of its state:
   1. The vault sends an `identity.rotate` statement, signed by both the old
@@ -369,24 +378,37 @@ sig_new = Ed25519(new_ik, "vettid/vms/2/rotate" || m)
 
 ### 3.5 The Protean Credential
 
-The **Protean Credential** holds the member's critical keys and secrets
-(the credential key, seed phrases, private keys, recovery keys). It is
-held by the member's app, sealed so that the vault alone cannot open it,
-and every use of it needs the member's participation: the app supplies the
-credential **and** the member's password, for that one operation. Its
-contents are never part of vault state.
+The **Protean Credential** holds the member's critical keys and secrets:
+the credential key, seed phrases, private keys and recovery keys.
 
-This replaces the earlier design's transport keys: the UTK/LTK pairs only
-protected the password and the request in transit, which the §6 session
-now does. The CEK-sealed blob and the per-use password, which are what
-make the credential unusable without the member, are kept.
+- It is held by the member's app.
+- It is sealed so that the vault alone cannot open it.
+- Every use needs the member's participation: the app supplies the
+  credential **and** the member's password, for that one operation.
+- Its contents are never part of vault state.
+
+This section follows the owner's Protean Credential design
+(vettid-dev `docs/protean_credential_system_design.md`) on the new
+transport. Its three rotating mechanisms map as follows:
+
+- **CEK** (credential encryption key): a new CEK after **every** use of
+  the credential (§3.5.3). Old blobs become undecryptable by anyone,
+  including the vault.
+- **UTK/LTK** (one-time transaction keys): every operation's critical
+  payload is sealed, inside the §6 session, to a single-use key of the
+  vault (§3.5.4).
+- **LAT** (ledger authentication token): **superseded**, by decision of
+  2026-01-08. The app authenticates the enclave by its Nitro attestation
+  (§11.2, §11.3) and the vault's pinned identity (§6.3), which is the
+  mutual authentication the LAT provided.
 
 #### 3.5.1 Keys
 
-- The **CEK** is a KEM key (MLKEM768X25519, §4.1) generated by the vault
-  at `credential.create`. Its private seed is kept in DEK state; it never
-  leaves the vault.
-- The **password key** `K_pw` is derived from the member's password inside
+- **CEK.** A KEM key (MLKEM768X25519, §4.1) generated by the vault. Its
+  private seed is kept in DEK state and never leaves the vault. There is
+  exactly one live CEK per credential; it is replaced, and the old one
+  destroyed, at every use (§3.5.3).
+- **Password key** `K_pw`. It is derived from the member's password inside
   the enclave:
 
   ```
@@ -394,17 +416,21 @@ make the credential unusable without the member, are kept.
   K_pw = HKDF-SHA-256(ikm = x, salt = "vettid/vms/2/credential-pw", info = vault_id, L = 32)
   ```
 
-  New credentials use `t = 3`, `m = 64 MiB`, `p = 1`; the vault MUST refuse
+  New seals use `t = 3`, `m = 64 MiB`, `p = 1`; the vault MUST refuse
   parameters below `t = 1`, `m = 8 MiB`. `salt` is 16 random bytes, fresh
   at every seal.
-- The **credential key** is an Ed25519 key (a hybrid Ed25519 + ML-DSA-65
-  key from PQC Phase 2). It is generated by the vault, exists only inside
-  the credential, and is distinct from the relay, identity and KEM keys
-  (§3.2). It signs what the member approves; the operations that use it
-  are defined with the features that need it.
-- The **password** is a UTF-8 string of 8–1,024 bytes. The app sends it
-  inside the §6 session; the enclave sees it transiently, as it sees the
-  PIN (§12.4), and MUST NOT store or log it.
+- **Credential key.** An Ed25519 key (a hybrid Ed25519 + ML-DSA-65 key
+  from PQC Phase 2).
+  - It is generated by the vault, exists only inside the credential, and
+    is distinct from the relay, identity and KEM keys (§3.2).
+  - It signs what the member approves; the operations that use it are
+    defined with the features that need it.
+- **UTK/LTK pairs.** One-time transaction keys, each an MLKEM768X25519 key pair.
+  - The vault keeps the private halves (LTKs) in DEK state.
+  - It gives the public halves (UTKs) to one app (§3.5.4).
+- **Password.** A UTF-8 string of 8–1,024 bytes. It travels only inside a
+  UTK-sealed payload. The enclave sees it transiently, as it sees the PIN
+  (§12.4), and MUST NOT store or log it.
 
 #### 3.5.2 Format
 
@@ -436,96 +462,242 @@ locked = t (1) || m_KiB (4, big-endian) || p (1) || salt (16) || nonce (24)
 - `version` in `inner` MUST equal the header's `version`; `vault_id` MUST
   equal the vault's.
 
-Both layers are needed: the outer HPKE layer keeps a thief of the app's
-copy from guessing the password offline (only the enclave holds the CEK);
-the inner password layer keeps the vault, which holds the CEK, from
-opening the credential without the member.
+Both layers are needed:
 
-#### 3.5.3 Using the credential
+- The outer HPKE layer keeps a thief of the app's copy from guessing the
+  password offline: only the enclave holds the CEK.
+- The inner password layer keeps the vault, which holds the CEK, from
+  opening the credential without the member.
 
-Every operation that reads or changes the credential carries `credential`
-(the blob) and `password`, from an owner device of role `app`. The vault:
+#### 3.5.3 Using the credential: every use rotates the CEK
 
-1. refuses with `backoff` while the password backoff (below) is in effect;
-2. checks that SHA-256(`credential`) equals the hash of the current blob it
-   recorded, else answers `stale_credential` (an older blob, after a
-   password change or a deleted secret, cannot be replayed);
-3. opens the outer layer with the CEK and the inner layer with `K_pw`. If
-   the inner AEAD fails, it answers `bad_password`, counts the failure and
-   records `credential.password_failed` (§10.9);
-4. performs the operation on the plaintext in memory, and for a change
-   seals a new blob with `version + 1`, a fresh salt, nonce and HPKE
-   context, records its hash and version, and returns it;
-5. zeroizes the plaintext, `x` and `K_pw` before the response is sent.
-   A response that carries a secret's value is never written to vault
-   state (§8.2).
+Every operation that opens the credential comes from an owner device of
+role `app` and carries:
+
+- `credential`: the blob;
+- `utk_id` and `sealed`: the operation's critical payload, sealed to a UTK
+  (§3.5.4).
+
+The vault:
+
+1. **opens `sealed`** with the LTK for `utk_id` and destroys the LTK
+   (§3.5.4). A missing, used, expired or foreign UTK is refused with
+   `utk_invalid`;
+2. refuses with `backoff` while the password backoff (below) is in effect;
+3. **checks the blob.** SHA-256(`credential`) must equal the hash of the
+   current blob, else the answer is `stale_credential`;
+4. **opens it.** The outer layer opens with the current CEK and the inner
+   layer with `K_pw`. If the inner AEAD fails, the answer is
+   `bad_password`; the failure is counted and recorded as
+   `credential.password_failed` (§10.9);
+5. **performs the operation** on the plaintext in memory;
+6. **rotates the CEK**, after every successful opening, whether or not
+   the content changed:
+   - it generates a new CEK;
+   - it seals the (possibly changed) content under it as `version + 1`,
+     with a fresh salt, nonce and HPKE context;
+   - it records the new hash, version and blob (the **latest blob**,
+     below);
+   - it **destroys the old CEK**;
+   - every earlier blob is then undecryptable by anyone, the vault
+     included;
+7. returns the new blob and version, with new UTKs when the app's pool is
+   low (§3.5.4);
+8. zeroizes the plaintext, `x` and `K_pw` before the response is sent.
 
 The vault MUST NOT keep any plaintext of the credential, `K_pw` or the
 password after the operation, except the credential key during an unlock
 window.
 
+**Atomicity of a rotation.** The new CEK, the latest blob and the response
+are written in the batch's flush, before the request is acked (§8.3). A
+lost response therefore never loses the credential:
+
+- **Retransmission.** The response is cached (§8.2). It holds the new blob
+  but no secret value in the clear (§3.5.4), so a retransmission of the
+  request within 24 h gets the same answer.
+- **The latest blob is always kept until the app confirms it.** Even with
+  `credential.backup` off (§3.5.6), the vault keeps the latest blob until
+  the app either presents that version in a later operation or sends
+  `credential.ack{version}`. An app that is answered `stale_credential`
+  fetches it with `credential.get` and retries with a fresh UTK.
+- **A crash.** A crash before the flush leaves the old CEK and blob in
+  force: the request is redelivered and re-executed. A crash after the
+  flush is covered by the outbox and the two rules above.
+
 **Password backoff.** After 5 consecutive failures, the vault refuses
-credential operations for 30 s, then 1 min, 5 min, 15 min and 60 min after
-each further failure (capped at 60 min). A success resets the count. The
-count is in DEK state and survives locks.
+credential operations:
 
-**Unlock window.** `credential.unlock` keeps the credential key (only that
-key) in the vault process's memory for the `credential.unlock_ttl_seconds`
-setting (30–3,600 s, default 300). Operations that sign with the credential
-key may use it within the window; each use extends it to the full TTL.
-The window ends at expiry, `credential.lock`, `credential.rotate`,
-`credential.delete` and vault lock. The key is never written to state.
+- for 30 s, then 1 min, 5 min, 15 min and 60 min after each further
+  failure (capped at 60 min);
+- a success resets the count;
+- the count is in DEK state and survives locks.
 
-#### 3.5.4 Lifecycle
+**Unlock window.** `credential.unlock` keeps the credential key, and only
+that key, in the vault process's memory for the
+`credential.unlock_ttl_seconds` setting (30–3,600 s, default 300).
 
-- **Create.** `credential.create{password}` from an app: the vault
-  generates the CEK and the credential key, seals version 1 with no
-  secrets, and returns the blob. A vault has at most one credential.
-- **Distribution.** The app stores the blob. The vault records its hash
-  and version and, if kept (§3.5.6), the blob, which other apps of the
-  owner fetch with `credential.get`. Other owner devices learn of every
-  change through `sync.event{kind: "credential.changed", version}`.
-- **Password change.** `credential.password.change{credential, password,
-  new_password}` re-seals the same content under the new password.
-- **Rotate.** `credential.rotate{credential, password}` generates a new CEK
-  and a new credential key, seals the content under them with `version + 1`,
-  and in the same flush rotates the vault's `ik` and `kem` (§3.4). Every
-  earlier blob becomes unusable, because its CEK is destroyed. Apps SHOULD
-  offer a rotation at least yearly, and the vault MUST NOT rotate the
-  credential without the member.
-- **Delete.** `credential.delete{credential, password}` destroys the CEK,
-  the recorded hash and any kept copy. Blobs held by apps can no longer be
-  opened by anyone. `vault.delete` does the same.
+- Operations that sign with the credential key may use it within the
+  window; each use extends the window to the full TTL.
+- The window ends at expiry, `credential.lock`, `credential.rotate`,
+  `credential.delete` and vault lock.
+- The key is never written to state.
 
-#### 3.5.5 What VettID and the vault can do
+#### 3.5.4 One-time transaction keys (UTK/LTK)
 
-- **VettID** (host, API, relay) never sees the CEK, the password, `K_pw`
-  or the credential's plaintext. It stores, at most, the DEK-encrypted
-  vault state, which contains the CEK and possibly the blob.
-- **The vault** (an approved release, §11.10) holds the CEK but not the
-  password. It cannot open the credential, use its keys or read its
-  secrets unless the member's app sends the password for an operation.
-  During that operation, and during an unlock window for the credential
-  key, an approved release does see the plaintext; a malicious release the
-  member approved is out of scope (§2.2), as for the PIN.
-- **A thief of an app** with the blob needs the CEK, so it can only guess
-  the password online, through a paired app session, under the backoff.
+The critical payload of every credential operation is sealed to a
+single-use vault key, **inside** the session envelope. Its purpose is to
+limit what a compromise of the device's session, or its session keys,
+can do:
+
+- Someone who reads or alters session traffic still cannot read a
+  password or a secret.
+- They cannot replay an operation: every UTK works once.
+- They cannot move a payload to another operation or request: it is bound
+  to both.
+
+**Pool.** The vault keeps a pool of UTKs for each app:
+
+- `credential.utk.get` tops the app's outstanding UTKs up to 20.
+- Every credential response adds 10 new UTKs when fewer than 10 remain.
+- UTKs are bound to the app they were issued to: another device's
+  request naming them is refused.
+- A UTK expires 30 days after issue; the vault deletes expired LTKs.
+- An app whose pool is empty calls `credential.utk.get` first. It is
+  allowed even on a restricted vault (§3.5.7) and for a recovering app
+  (§11.11.5).
+
+```
+utk    = {"utk_id": "<16 lowercase hex>", "ek": "<b64 1,216 bytes>", "expires_at": "<ts>"}
+sealed = enc (1,120) || ct                     (standard base64 in the body)
+(enc, ctx) = SetupBaseS(ek_UTK, info = "vettid/vms/2/utk" || 0x00 || vault_id || 0x00 || utk_id)
+ct     = ctx.Seal(aad = type || 0x00 || inner id, pt = payload JSON)
+```
+
+**Payload.** The payload is a JSON object, strict as in §5.3, of at most
+16 KiB. It holds the operation's critical members (§10.6): `password`,
+`new_password`, `secret_id`, `name`, `category`, `description`, `value`
+and `reply_key`.
+
+**Using a UTK.** The vault looks the UTK up among those issued to the
+sending app and removes it from the pool before anything else is checked.
+The removal is part of the batch's flush, so the UTK is spent even if the
+operation then fails, for example with `bad_password`.
+
+**Secret values in responses.** A response that would carry a critical
+secret's value seals the value to a **one-time reply key** instead:
+
+- The app generates an MLKEM768X25519 key pair for that request and puts
+  its `ek` in the UTK-sealed payload as `reply_key`, so a session-level
+  attacker can neither read nor replace it.
+- The vault seals the value:
+
+  ```
+  (enc, ctx) = SetupBaseS(reply_key, info = "vettid/vms/2/reply" || 0x00 || vault_id || 0x00 || inner id)
+  value_sealed = enc || ctx.Seal(aad = "", pt = value)
+  ```
+
+- Such a response holds no secret in the clear, so it is cached like any
+  other (§8.2). A lost response is therefore recovered by retransmission;
+  this replaces the volatile-response rule for `credential.secret.get`.
+- The reply key's private half lives only in the app's memory for that
+  request. The session alone, or a cached response, reveals nothing.
+
+#### 3.5.5 Lifecycle
+
+- **Create.** `credential.create` comes from an app, with
+  `{utk_id, sealed{password}}`.
+  - The vault generates the CEK and the credential key, seals version 1
+    with no secrets, and returns the blob.
+  - A vault has at most one credential.
+  - Until a credential exists the vault is restricted (§3.5.7).
+- **Distribution.** The app stores the blob and confirms it (§3.5.3).
+  - Other owner apps fetch the latest blob with `credential.get` when the
+    vault keeps it (§3.5.6).
+  - Every owner device learns of each new version through
+    `sync.event{kind: "credential.changed", version}`.
+  - An app holding an older version is answered `stale_credential` and
+    fetches the latest.
+- **Password change.** `credential.password.change` re-seals the content
+  under the new password (and, like every use, under a new CEK).
+- **Rotate.** `credential.rotate` generates a new credential key.
+  - It rotates the vault's `ik` and `kem` in the same flush (§3.4).
+  - It is the PQC Phase 2 vehicle; the CEK rotates as with every use.
+  - Apps SHOULD offer it at least yearly.
+  - The vault MUST NOT rotate the credential key without the member.
+- **Delete.** `credential.delete` destroys the CEK, the recorded hash, the
+  latest blob and the UTKs.
+  - Blobs held by apps can no longer be opened by anyone.
+  - The vault becomes restricted again (§3.5.7) until a new
+    `credential.create`.
+  - `vault.delete` does the same.
+
+#### 3.5.6 Backup: the vault's copy of the blob
+
+The vault keeps the latest blob in DEK state while the `credential.backup`
+setting (§10.8) is on, which is the default.
+
+- That copy is what `credential.get` returns to the owner's other apps,
+  and what a recovery hands to a new app after the password (§11.11.5).
+- It is sealed to the vault's current CEK outside and to the password
+  inside. It is therefore useless anywhere but in the vault, and to anyone
+  but the member: no copy that could be guessed offline leaves the vault.
+- If the vault keeps its stored state in several versions for durability,
+  every version holds the same vault-sealed object. The copies under
+  destroyed CEKs are useless.
+
+With `credential.backup` off, the vault keeps the latest blob only until
+the app confirms it (§3.5.3), then only its hash and version.
+
+- The credential then lives only with the member.
+- The member needs their own way to restore it: the app SHOULD keep an
+  off-device backup that it updates after every rotation, because only
+  the latest version can be opened.
+- A recovery then requires the member to supply that blob (§11.11.5).
+- Turning the backup on again stores the copy at the next use of the
+  credential.
+
+#### 3.5.7 A vault without a credential is restricted
+
+A vault MUST have a credential before it is used.
+
+- From enrollment until `credential.create` completes, and again after
+  `credential.delete`, the vault answers every request with
+  `credential_required` and drops every other message (audited).
+- The exceptions are the types needed to create the credential and keep
+  the session alive: `vault.status`, `vault.lock`, `credential.utk.get`,
+  `credential.create`, `credential.version`, `relay.token.issued`,
+  `relay.token.refresh` and `relay.address.update`.
+- In particular there is no pairing, no connection or invitation and no
+  feature use, and `vault.enroll.confirm` is refused. The vault therefore
+  stays **provisional** (§11.3) until it has a credential.
+- The sealed header records whether a credential exists (`has_credential`)
+  so that a recovery of a vault without one is refused (§11.11.1).
+
+#### 3.5.8 What VettID and the vault can do
+
+- **VettID** (host, API, relay) never sees the CEK, the LTKs, the
+  password, `K_pw` or the credential's plaintext. It stores, at most, the
+  DEK-encrypted vault state, which contains the current CEK, the LTKs and
+  possibly the latest blob.
+- **The vault** (an approved release, §11.10) holds the current CEK but
+  not the password. It cannot open the credential, use its keys or read
+  its secrets unless the member's app sends the password for an
+  operation. During that operation, and during an unlock window for the
+  credential key, an approved release does see the plaintext. A malicious
+  release the member approved is out of scope (§2.2), as for the PIN.
+- **A thief of an app's stored blob** needs the current CEK, which
+  rotates at every use. The thief can therefore only guess the password
+  online, through a paired app session, with a UTK, under the backoff.
+  The blob is useless once the member uses the credential again.
+- **An attacker reading or altering an app's session** cannot see the
+  password or secret values (UTK and reply-key sealing), replay an
+  operation (single-use UTKs), or redirect a payload (bound to type and
+  request id).
 - **An attacker who obtains the decrypted vault state** (the DEK, which
-  needs the PIN and the enclave) holds the CEK and, if kept, the blob, and
-  can guess the password offline against Argon2id. The password, not the
-  PIN, is what protects the credential in that case.
-
-#### 3.5.6 Open: the vault's copy of the blob
-
-**OWNER DECISION.** Whether the vault keeps the current blob (enabling
-`credential.get` for a second app and recovery after the app loses it) or
-only its hash (the credential then lives only on the member's apps, and a
-lost app copy loses the critical secrets). **Recommendation:** keep the
-copy. It is useless to the vault without the password, it is what lets a
-member's second app or a reinstalled app get the credential back, and the
-residual risk is the offline-guessing case of §3.5.5. The reference
-implementation keeps it; `credential.get` answers `not_found` if a vault
-does not.
+  needs the PIN and the enclave) holds the current CEK and, if kept, the
+  latest blob, and can guess the password offline against Argon2id. The
+  password, not the PIN, is what protects the credential in that case.
 
 ## 4. Cryptographic construction
 
@@ -1212,13 +1384,15 @@ Both of the following layers are REQUIRED:
    different `msg_id`s. Responses are cached for 24 h, so a duplicate request
    gets the cached response again and is not re-executed.
 
-**Exception: responses that carry secret values** (`credential.secret.get`,
-§3.5.3). They are never cached and never written to vault state, so they
-are not in the outbox either. They are deposited from memory after the
+**Exception: responses that carry secret values in the clear.** A type
+may mark its responses volatile: they are never cached and never written to
+vault state, so they are not in the outbox either. They are deposited from memory after the
 batch's flush, behind any queued deposits to the same mailbox, and are
 lost if that deposit fails or the vault stops first. A retransmission of
 such a request is therefore executed again. This is allowed only for types
-whose only side effects are audit and feed entries.
+whose only side effects are audit and feed entries. No type of this
+document needs it today: `credential.secret.get` seals the value to a
+one-time reply key instead (§3.5.4), so its response is cached normally.
 
 Both stores are flushed with the state changes before the ack (§8.3).
 
@@ -1426,10 +1600,14 @@ feature** (§15).
   - `conflict`: the request's `version` is not the current one (§8.4);
   - `exists`: the object already exists (`credential.create`);
   - `limit`: a count or size limit of the feature would be exceeded;
-  - `bad_password`, `backoff`, `stale_credential`: §3.5.3;
+  - `bad_password`, `backoff`, `stale_credential`, `utk_invalid`: §3.5.3,
+    §3.5.4;
+  - `credential_required`: the vault has no credential (§3.5.7), or a
+    recovery needs one (§11.11.5);
   - `bad_pin`: the current PIN given to `pin.change` is wrong.
 - A request answered with an error changes no state, except the password
-  backoff and the audit log and feed entries of §3.5.3. Objects that several
+  backoff, the spent UTK and the audit log and feed entries of §3.5.3.
+  Objects that several
   owner devices can edit carry a `version` (an integer from 1, `0` before
   the first write); a change MUST name the version it was based on, and
   the vault answers `conflict` if it differs.
@@ -1446,7 +1624,7 @@ feature** (§15).
   | `device.paired` | `device_id`, `role` |
   | `device.unlinked` | `device_id` |
   | `vault.release` | `release` (PCR0 hex), `release_number`; sent once after a vault first runs under a new release (§11.10.6) |
-  | `credential.changed` | `version` (§3.5.4) |
+  | `credential.changed` | `version` (§3.5.5) |
   | `credential.deleted` | — |
   | `secret.changed` | `secret_id`, `version` |
   | `secret.deleted` | `secret_id` |
@@ -1466,7 +1644,7 @@ feature** (§15).
 | `vault.enroll.confirm` (app) | `{}` | `{}` |
 | `vault.status` (app, desktop, agent) | `{}` | `{vault_id, state_seq, header_seq, provisional, devices, connections}` |
 | `vault.lock` (app, desktop) | `{}` | `{}`; then `vault.locking` |
-| `vault.locking` (ephemeral) | — | `{}`, with `exp` = now + 60 s |
+| `vault.locking` (ephemeral) | — | `{reason?}`, with `exp` = now + 60 s; `reason` is `"recovery"` when a recovery request locked the vault (§11.11.1) |
 | `relay.token.issued` | — | `{kind: "standing" \| "reconnect", token}` |
 | `relay.token.refresh` (req) | `{}` | `{kind: "standing", token}` |
 | `identity.rotate` | — | `{rotation: <identity.rotate statement, §3.4>}` |
@@ -1520,41 +1698,55 @@ The D→V messaging types are sent by `app` or `desktop` devices.
 
 ### 10.6 Credential and critical secrets (§3.5)
 
-`credential` is the standard base64 of a §3.5.2 blob; `password` and
-`new_password` are UTF-8 strings of 8–1,024 bytes. Every type below is
-sent by an owner device of role `app`, except `credential.version` and
-`credential.secret.list`, which an `app` or `desktop` may send. Types
-that carry `credential` and `password` follow §3.5.3 and can answer
-`backoff`, `stale_credential` and `bad_password`.
+Every type below is sent by an owner device of role `app`, except
+`credential.version` and `credential.secret.list`, which an `app` or
+`desktop` may send.
+
+- `credential` is the standard base64 of a §3.5.2 blob.
+- `utk_id` and `sealed` carry the UTK-sealed payload (§3.5.4). The
+  payload members are shown in `{…}` after `sealed`: `password` and
+  `new_password` (UTF-8, 8–1,024 bytes), `secret_id`, `name`, `category`,
+  `description`, `value` and `reply_key`.
+- Types that carry `sealed` can answer `utk_invalid` (§3.5.4). Types that
+  carry `credential` follow §3.5.3: they can answer `backoff`,
+  `stale_credential` and `bad_password`, and on success they rotate the
+  CEK and return the new `credential` and `version`.
+- Every response to a type that spent a UTK carries `utks` (an array of
+  §3.5.4 UTKs, possibly empty) to replenish the app's pool.
 
 | Type | Request body | Response body |
 |---|---|---|
-| `credential.create` | `{password}` | `{credential, version, key}`; `exists` if the vault has a credential |
-| `credential.get` | `{}` | `{credential, version, updated_at}`; `not_found` if there is none or the vault keeps no copy (§3.5.6) |
+| `credential.utk.get` | `{}` | `{utks}` (tops the app's pool up to 20) |
+| `credential.create` | `{utk_id, sealed{password}}` | `{credential, version, key, utks}`; `exists` if the vault has a credential |
+| `credential.get` | `{}` | `{credential, version, updated_at}`: the latest blob; `not_found` if the vault holds none (§3.5.6) |
+| `credential.ack` | `{version}` | `{}`: the app holds this version (§3.5.3) |
 | `credential.version` | `{}` | `{exists, version?, key?, updated_at?}` |
-| `credential.unlock` | `{credential, password}` | `{expires_at}` (§3.5.3 unlock window) |
+| `credential.unlock` | `{credential, utk_id, sealed{password}}` | `{credential, version, expires_at, utks}` (§3.5.3 unlock window) |
 | `credential.lock` | `{}` | `{}` |
-| `credential.rotate` | `{credential, password}` | `{credential, version, key}`; the vault also rotates `ik` and `kem` (§3.4) |
-| `credential.password.change` | `{credential, password, new_password}` | `{credential, version}` |
-| `credential.delete` | `{credential, password}` | `{}` |
-| `credential.secret.add` | `{credential, password, name, category, description?, value}` | `{secret_id, credential, version}` |
-| `credential.secret.get` | `{credential, password, secret_id}` | `{secret_id, name, category, description?, value, created_at}` |
+| `credential.rotate` | `{credential, utk_id, sealed{password}}` | `{credential, version, key, utks}`; the vault also rotates `ik` and `kem` (§3.4) |
+| `credential.password.change` | `{credential, utk_id, sealed{password, new_password}}` | `{credential, version, utks}` |
+| `credential.delete` | `{credential, utk_id, sealed{password}}` | `{}` |
+| `credential.secret.add` | `{credential, utk_id, sealed{password, name, category, description?, value}}` | `{secret_id, credential, version, utks}` |
+| `credential.secret.get` | `{credential, utk_id, sealed{password, secret_id, reply_key}}` | `{secret_id, name, category, description?, value_sealed, created_at, credential, version, utks}` (§3.5.4) |
 | `credential.secret.list` | `{}` | `{version, secrets: [{secret_id, name, category, description?, created_at}]}` |
-| `credential.secret.delete` | `{credential, password, secret_id}` | `{credential, version}` |
+| `credential.secret.delete` | `{credential, utk_id, sealed{password, secret_id}}` | `{credential, version, utks}` |
+| `credential.recover` | `{credential?, utk_id, sealed{password}}` | `{credential, version, utks}` (§11.11.5) |
 | `pin.change` | `{pin, new_pin}` | `{}`; `bad_pin` if `pin` is wrong |
 
 - `key` is the credential key's public key (base64). `version` is the
   credential's version (§3.5.2).
-- `name` is 1–128 bytes, `description` at most 1,024 bytes, `category` and
-  `value` as in §3.5.2 (`value` base64, 1–8,192 bytes decoded). A
+- **Field sizes.** `name` is 1–128 bytes and `description` at most 1,024
+  bytes; `category` and `value` are as in §3.5.2 (`value` is base64,
+  1–8,192 bytes decoded). `reply_key` is a 1,216-byte KEM `ek`. A
   credential holds at most 64 secrets (`limit`).
-- The secrets' metadata (`credential.secret.list`) is kept in vault state
-  so that it can be listed without the password; values are only in the
-  credential.
-- Every change sends `sync.event{kind: "credential.changed", version}`
-  (`credential.deleted` for a delete) to the owner's other devices.
-- `pin.change` re-derives the DEK from `new_pin` (§3.3.1, fresh salt) and
-  re-encrypts the state and the header. Its crash-safe write order is
+- **Metadata.** The secrets' metadata (`credential.secret.list`) is kept in
+  vault state so that it can be listed without the password. Values are
+  only in the credential.
+- **Change notices.** Every new version sends
+  `sync.event{kind: "credential.changed", version}` to the owner's other
+  devices (`credential.deleted` for a delete).
+- **`pin.change`** re-derives the DEK from `new_pin` (§3.3.1, fresh salt)
+  and re-encrypts the state and the header. Its crash-safe write order is
   specified together with its implementation (§15).
 
 ### 10.7 Secrets
@@ -1620,9 +1812,9 @@ connections see. Sent by `app` or `desktop`.
 | Key | Value | Default |
 |---|---|---|
 | `connections.auto_approve_in_person` | boolean (§6.4) | `false` |
+| `credential.backup` | boolean (§3.5.6) | `true` |
 | `credential.unlock_ttl_seconds` | integer 30–3,600 (§3.5.3) | 300 |
 | `feed.retention_days` | integer 1–365 | 30 |
-| `audit.retention_days` | integer 30–730 | 365 |
 | `app.<name>` | string of at most 4,096 bytes, or `null` to remove; `<name>` matches `[a-z0-9_.-]{1,48}`; at most 64 | — |
 
 `app.*` keys are opaque to the vault; apps use them for preferences that
@@ -1644,7 +1836,7 @@ All types are sent by `app` or `desktop`.
 
 | Type | Request body | Response body |
 |---|---|---|
-| `audit.list` | `{connection_id?, kinds?: [<prefix>], before_seq?, limit?}` | `{entries: [<entry>], head, next_before_seq?}`, newest first |
+| `audit.list` | `{connection_id?, kinds?: [<prefix>], before_seq? \| after_seq?, limit?}` | `{entries: [<entry>], head, seq, next_before_seq? \| next_after_seq?}`; newest first, or oldest first with `after_seq` |
 | `connection.audit.list` | `{connection_id, kinds?, before_seq?, limit?}` | as `audit.list`, for one connection |
 
 ```json
@@ -1668,18 +1860,36 @@ entry: { "entry_id": "<ULID>", "seq": 812, "at": "<ts>", "kind": "connection.add
   and `prev` is the previous entry's `hash` (32 zero bytes for `seq` 1).
   `head` is the newest entry's `hash`. An app can check that the entries
   it receives chain, and that `head` only moves forward.
-- Entries older than `audit.retention_days` are dropped, and the log keeps
-  at most 10,000 entries; the oldest kept entry's `prev` is then not
-  verifiable from genesis.
+- **The log is append-only.** No type changes or deletes an entry, and
+  no principal can shorten it: entries are dropped only by the fixed
+  retention, 730 days or 10,000 entries, whichever comes first. The oldest
+  kept entry's `prev` is the hash of the last dropped one, so the chain
+  still links.
+- **Tampering and rollback are detectable.** The log is part of DEK
+  state, so its integrity rests on the state's AEAD and its freshness on
+  `state_seq` (§13.2): a rolled-back log is a rolled-back state. Apps
+  additionally anchor it: an app keeps the highest (`seq`, `head`) it has
+  verified and, with `after_seq` = that `seq`, checks that the next
+  entries chain from that `head`. A log that does not extend the anchor
+  MUST be reported to the member as tampered. `seq` in the response is the
+  newest entry's.
+- **Drop entries are bounded.** At most 60 `drop.*` entries per kind and
+  principal per hour; the 61st is written once as `drop.suppressed` with
+  `ref` = the suppressed kind. A peer cannot flood the log out.
 - Kinds: `vault.unlocked`, `vault.locked`; `device.paired`,
   `device.unlinked`; `connection.added`, `connection.removed`,
   `connection.stale`, `connection.reconnected`; `identity.rotated`;
   `credential.created`, `credential.rotated`, `credential.password_changed`,
   `credential.password_failed`, `credential.unlocked`, `credential.deleted`;
   `credential.secret.added`, `credential.secret.read`,
-  `credential.secret.deleted`; `secret.added`, `secret.updated`,
-  `secret.deleted`; `message.sent`, `message.received` (no content; `ref` =
-  `message_id`); and `drop.<reason>` for every message the vault dropped
+  `credential.secret.deleted`, `credential.recovered`; `secret.added`,
+  `secret.updated`, `secret.deleted`; `settings.changed` (`ref` = the new
+  version); `recovery.requested`, `recovery.replaced`, `recovery.bad_code`,
+  `recovery.attestation_failed`, `recovery.registered`,
+  `recovery.device_paired`, `recovery.completed`, `recovery.cancelled`,
+  `recovery.expired`, `recovery.voided` (§11.11.6); `message.sent`,
+  `message.received` (no content; `ref` = `message_id`); `drop.suppressed`;
+  and `drop.<reason>` for every message the vault dropped
   or refused (§6.3, §6.6, §7.3, §8.4), with the runtime's reason, such as
   `drop.rate_limited`.
 
@@ -1887,7 +2097,7 @@ App               Relay        Member API               SQS/Parent       Enclave
  |--collect--------->|               |                    |                 |
  |<--vault.enrolled--|  verify attestation (nonce, user_data, PCRs); pin bundle
  |--hs.init (purpose=app) ... hs.fin ===================================> vault
- |--vault.enroll.confirm, credential.create =============================> vault
+ |--credential.utk.get, credential.create, vault.enroll.confirm =========> vault (§3.5.7)
 ```
 
 **`vault.enrolled`** is sealed to the app's `kem`:
@@ -1955,6 +2165,7 @@ size (§11.4).
   "device_assertion": { },
   "manifest": { "manifest": "<b64>", "sig": "<b64>", "key_id": "<hex>" },
   "release_update": { "to": "<pcr0 hex>", "to_release": 5, "approval": { } },
+  "cancel_recovery": true,
   "sig": "<b64 Ed25519 by device_ik>" }
 ```
 
@@ -1973,6 +2184,9 @@ hex(SHA-256(manifest_bytes)) \n to_pcr0_hex_or_empty
 
 `ts` is the request's inner `ts` (§5.3). Integers are decimal, hex is
 lowercase, and there is no trailing newline. No field may contain CR or LF.
+When the request carries `cancel_recovery` (present only as `true`,
+§11.11.4), the string has a thirteenth line, the literal
+`cancel_recovery`.
 
 ```
 App        Member API                   SQS/Parent                 Enclave
@@ -1996,13 +2210,19 @@ one of:
 - `{"ok": true, "state_seq": n, "header_seq": m, "token": "<standing token for
   MB(vault)>", "release": "<PCR0 hex>", "release_number": r,
   "release_status": "active|deprecated|retired", "manifest_serial": s,
-  "update": {"to": "<pcr0>", "result": "moved|refused|abandoned", "code": "<reason>"}}`
+  "update": {"to": "<pcr0>", "result": "moved|refused|abandoned", "code": "<reason>"},
+  "recovery_cancelled": true, "vault_bundle": "<b64>"}`
   — `update` is present only if the request carried `release_update`, or a
   pending move was completed (§11.10.4). After `moved` the vault is locked
   and sealed to the new release; `header_seq` is the new header's, and
   `token` is absent (the vault did not resume).
-- `{"ok": false, "code": "bad_pin|backoff|unknown_device|attestation|state_rollback|vault_missing|manifest|wrong_release|release_key|retry",
-  "header_seq": m, "retry_after": <s>}`
+  — `recovery_cancelled` is present when the unlock cancelled a recovery
+  (§11.11.4); `vault_bundle` only for the app a recovery registered
+  (§11.11.5).
+- `{"ok": false, "code": "bad_pin|backoff|unknown_device|attestation|state_rollback|vault_missing|manifest|wrong_release|release_key|retry|recovery_pending",
+  "header_seq": m, "retry_after": <s>}` — `recovery_pending`: a recovery
+  is in progress and the request did not cancel it (§11.11.4); it is
+  answered before the PIN is tried and is not a PIN failure.
 
 On `state_rollback`, the app MUST warn the user that the vault's stored state
 is older than state this device has already seen (§13.2). `release_key`
@@ -2048,9 +2268,12 @@ Nothing secret is stored:
 with a DLQ after 3 receives:
 
 ```json
-{ "v": 1, "op": "enroll|unlock|lock|delete", "vault_id": "...", "user_guid": "...",
-  "request_id": "<ULID>", "etk_kid": "<16 hex; absent for lock/delete>",
-  "envelope": "<b64; absent for lock/delete>", "enqueued_at": "<RFC 3339>" }
+{ "v": 1, "op": "enroll|unlock|lock|delete|recovery|recovery_cancel|recovery_register",
+  "vault_id": "...", "user_guid": "...", "request_id": "<ULID>",
+  "etk_kid": "<16 hex; enroll, unlock and recovery_register only>",
+  "envelope": "<b64; enroll, unlock and recovery_register only>",
+  "browser_key": "<b64 65-byte P-256 point; recovery only>",
+  "enqueued_at": "<RFC 3339>" }
 ```
 
 The parent forwards the message to the enclave unchanged. The enclave
@@ -2076,7 +2299,11 @@ the enclave reports completion.
   after an abandonment (§11.10.4).
 
 `lock` and `delete` carry no envelope. Locking is harmless, and deletion
-through the API is an operator power the host has anyway (§13.5).
+through the API is an operator power the host has anyway (§13.5). The
+recovery operations are in §11.11; `recovery_register` carries a
+12,288-byte padded request like enroll and unlock, and the response to
+`recovery` is the sealed code (5,252 bytes, §11.11.2). None of them takes
+the lease: the vault is not left open.
 
 ### 11.6 Replay protection
 
@@ -2703,6 +2930,303 @@ attestation conditions as specified, that Nitro attestation documents
 cannot be forged, and that AWS itself does not bypass them. It cannot
 detect a key-policy evaluation flaw in KMS or an AWS insider.
 
+### 11.11 Recovery
+
+Recovery lets a member who has lost **every owner app** get back into
+their vault. They need:
+
+- their account (member session and email);
+- 24 hours during which nobody cancels;
+- a new attested app;
+- their PIN;
+- their Protean Credential password (when a credential exists).
+
+There is one flow and no bypass:
+
+```
+Portal      Member API                   Enclave (vault process)        Owner devices
+ |--POST /api/vault/recovery{browser_key}-->|                                |
+ |          |--queue: recovery----------------->| lock running vault -------->| vault.locking{recovery}
+ |          |   email: requested + cancel link  | mint code; header record   |
+ |          |<--slot: code sealed to browser key-|                            |
+ |          (24 h; cancel from portal, email link or an owner app's unlock)  |
+ |--GET /api/vault/recovery (after available_at)--> sealed code              |
+ | decrypt in the browser; show the QR (rendered locally)                    |
+New app --scan QR--> POST /api/vault/recovery/register --queue--> code + device attestation:
+         |                                       unlock key added (header)   |
+New app --POST /api/vault/unlock (PIN; enclave backoff)--> vault opens; vault_bundle
+New app --hs.init (purpose app, ctx = recovery_id) --> device record, restricted
+New app --credential.recover{password} (credential backoff)--> credential handed over;
+         the app becomes an ordinary owner app
+```
+
+While the vault is locked it has no DEK (§12.1). The recovery record
+therefore lives in the **sealed header**, which a vault process can open
+without the PIN (§3.3). It holds:
+
+- `recovery_id`;
+- the state: `pending` or `registered`;
+- `requested_at`, `not_before` and `expires`;
+- the code's hash and the count of wrong codes;
+- the registered app's `ik`, `kem`, relay key, name and attestation
+  binding.
+
+The header also keeps a log of the steps taken while the vault was locked
+(at most 64). The vault moves that log into the audit log (§10.9) at the
+next unlock.
+
+#### 11.11.1 Request
+
+`POST /api/vault/recovery` (§11.11.7) enqueues the operation `recovery`,
+carrying the browser's public key. It goes to the instance holding the
+vault's live lease, or else to a live instance of the vault's
+`sealed_release`. The queue message's `request_id` is the `recovery_id`.
+
+The enclave:
+
+1. **locks the vault if it is running.** It finishes the batch, flushes,
+   and sends `vault.locking{reason: "recovery"}` to the owner's devices.
+   That notice is the only one owner devices can get from the vault:
+   once it is locked, the vault does not touch the relay;
+2. in the vault's process, refuses the recovery if the sealed header has no
+   credential (`has_credential` false, §3.5.7): a vault without a
+   credential cannot be recovered;
+3. otherwise mints the code and writes the recovery record into the sealed
+   header (`header_seq` + 1);
+4. returns the code, or the refusal, sealed to the browser key (§11.11.2)
+   as the response slot's envelope.
+
+If a recovery is already recorded, a new request replaces it and voids
+the older code. The API allows only one active recovery per vault.
+
+#### 11.11.2 The code
+
+- **Form.** The code is 20 random bytes (160 bits), written as 32
+  Crockford base32 characters (`0-9A-HJKMNP-TV-Z`, upper case, no
+  padding). It is single-use and bound to `vault_id` and `recovery_id`.
+- **Hash.** The header keeps only
+
+  ```
+  SHA-256("vettid/vms/2/recovery-code" || 0x00 || vault_id || 0x00 || recovery_id || 0x00 || code)
+  ```
+
+  The code itself is never stored or logged, by the enclave or the API.
+- **When it is valid.** The code is valid from `not_before` = request + 24 h
+  until `expires` = `not_before` + 24 h. The enclave enforces these times
+  with its own clock, independently of the API.
+- **Wrong codes.** After 5 wrong codes the recovery is void and its record
+  is removed.
+- **Sealed to the browser.** The portal makes a P-256 key pair in the
+  browser (WebCrypto, non-extractable, kept in IndexedDB) and sends the
+  public key with the request. The enclave seals the code to it:
+
+  ```
+  out = 0x01 || eph (65) || nonce (12) || AES-256-GCM(k, nonce, aad = out[0:78], pt)
+  k   = HKDF-SHA-256(ikm = ECDH(eph, browser_key), salt = eph || browser_key,
+                     info = "vettid/vms/2/recovery-code-seal" || 0x00 || vault_id || 0x00 || recovery_id, L = 32)
+  pt  = {"v":1,"vault_id","recovery_id","code","not_before","expires_at"} || 0x00 padding
+      | {"v":1,"vault_id","recovery_id","error":"no_credential"} || 0x00 padding
+  ```
+
+  The second form tells the portal that the vault has no credential and
+  cannot be recovered (§11.11.1); nothing is recorded.
+
+  `out` is exactly 5,252 bytes, the size of every result in a response
+  slot. If the enclave cannot answer (an unknown vault, another member's
+  vault, a store failure), the slot holds random bytes of that size and the
+  portal cannot decrypt them. The member then requests again.
+- **QR.** After `not_before`, the API releases the sealed code to the
+  portal. The portal decrypts it and shows the code as a QR rendered in the
+  page; no third-party QR service is used. The QR payload is the compact
+  JSON
+
+  ```json
+  {"v":1,"t":"r","vault_id":"<id>","recovery_id":"<ULID>","code":"<32 chars>"}
+  ```
+
+  The portal also shows the code as text, in groups of four, for typing.
+- **Why the vault mints the code.** VettID's servers never hold the code
+  in a usable form: the API stores only the ciphertext sealed to the
+  member's browser. The 24 h delay and the expiry are enforced inside the
+  enclave. So a copy of the API's tables, or an operator reading them,
+  cannot register a device, and neither can an API that releases the
+  ciphertext early.
+- **Residual: the portal's code.** A VettID that serves malicious portal
+  code to the member's browser can read the code; the browser key protects
+  data at rest, not against the page's own author. Such an attacker still
+  needs the PIN and the password, guessed online under the enclave's
+  backoffs. The same holds for an attacker who controls the member's email
+  and account session for 24 h without being noticed.
+- **PQC exception.** The browser seal uses P-256 ECDH, the only key
+  agreement in WebCrypto. A recorded ciphertext is worthless to a future
+  quantum attacker, because the code expires within 48 h and is
+  single-use. This is the one place where §1.1 item 7 does not apply.
+
+#### 11.11.3 Register
+
+The new app scans the QR and sends `vault.recovery.register` over the
+alternate channel. Like `vault.unlock`, the request is sealed to the ETK
+of the instance named by `GET /api/vault/enclave` and padded to 12,288
+bytes:
+
+```json
+{ "user_guid": "...", "vault_id": "...", "request_id": "<ULID>",
+  "recovery_id": "<ULID>", "code": "<32 chars>",
+  "app": { "ik": "<b64>", "kem": "<b64 ek>",
+           "relay": {"url": "<base>", "mailbox": "<id>", "pk": "<b64>"},
+           "name": "<device name>", "device_attest": { } } }
+```
+
+The enclave applies the binding and replay rules of §11.3 and §11.6. It
+then checks, in this order:
+
+1. the recovery exists and `recovery_id` matches;
+2. the recovery is still `pending`;
+3. the code has not expired;
+4. `not_before` has passed;
+5. the code matches the hash, compared in constant time;
+6. the device attestation is valid (§11.7), over the challenge with this
+   request's `request_id`, the `vault_id` and the inner `ts`. It is checked
+   only after the code matched, so a failure leaves the code usable.
+
+On success it adds the app to the header's unlock keys and sets the state
+to `registered`; the code is spent.
+
+The answer is `vault.recovery.result`, sealed to `app.kem` and padded like
+unlock results:
+
+- `{"ok": true}`, or
+- `{"ok": false, "code": "no_recovery|used|expired|too_early|bad_code|attestation|bad_request|retry"}`.
+
+A request the enclave cannot read or bind is answered with random bytes.
+
+#### 11.11.4 Cancel
+
+A recovery is cancelled by any of:
+
+- the portal or the email link: `POST /api/vault/recovery/cancel` and
+  `/cancel-link`, which enqueue `recovery_cancel`;
+- an owner app's `vault.unlock` with `cancel_recovery: true`. It cancels
+  only if the unlock succeeds (PIN, device assertion), and the result says
+  `recovery_cancelled: true`;
+- expiry, or the fifth wrong code.
+
+Cancelling removes the record and any registered unlock key. A recovered
+app that was already paired but has not finished `credential.recover` is
+unlinked at the next unlock (§7.4).
+
+While a recovery is in progress, an unlock by any app other than the
+registered one is refused with `recovery_pending`, without trying the
+PIN. That keeps a thief who holds a lost phone and its PIN out of the
+vault for the 24 h, unless they cancel. Cancelling is always allowed,
+because it only reduces exposure. Owner apps learn of the recovery from
+`vault.locking{reason}`, from `recovery` in `GET /api/vault/status`
+(§11.11.7), or from `recovery_pending`, and can cancel from there.
+
+#### 11.11.5 Unlock, password and handover
+
+1. **PIN.** The registered app unlocks with `vault.unlock` and the PIN,
+   under the normal enclave backoff (§11.8).
+   - The app does not know the vault's relay key yet, so its `token` is an
+     open token for its own mailbox. The vault ignores the token of a
+     device it has no record of.
+   - The result carries `token` (a standing token for the vault's mailbox)
+     and `vault_bundle` (`{v, suite, ik, kem, relay}`, as in
+     `vault.enrolled`). The bundle is authenticated by being sealed to
+     `app.kem`, which only the attested enclave received, inside the
+     register request.
+2. **Handshake.** The app sends `hs.init` with purpose `app` and `ctx` =
+   `recovery_id`. It is accepted without approval, exactly as the first
+   app's handshake (§11.3), because its keys were bound at registration.
+   The resulting device record is **recovering**:
+   - it may send only `credential.utk.get`, `credential.recover`,
+     `vault.status` and the token and address types (anything else is
+     `forbidden`);
+   - it receives no fan-out;
+   - it is not announced to the other devices.
+3. **Password.** The app first gets UTKs with `credential.utk.get`, which a
+   recovering app may send. It then sends `credential.recover{credential?,
+   utk_id, sealed{password}}`.
+   - The vault opens the latest blob with the current CEK and the
+     password, under the credential's password backoff (§3.5.3).
+   - The blob is the vault's own copy when it keeps one (§3.5.6).
+     Otherwise the member must supply it in `credential`: their own backup
+     of the latest version. Without it the answer is `credential_required`.
+   - As with every use, the vault then rotates the CEK and returns the new
+     blob (`{credential, version, utks}`). Every copy on the lost devices,
+     and every older backup, becomes undecryptable.
+   - It turns the device into an ordinary owner app, removes the recovery
+     record, and sends `sync.event{kind: "device.paired"}` to the other
+     devices.
+4. **No credential, no recovery.** A vault without a credential is refused
+   at the request (§11.11.1). `credential.recover` on such a vault answers
+   `credential_required` and the device stays restricted. There is no
+   completion on the PIN alone.
+
+#### 11.11.6 Limits and audit
+
+- **Enclave limits:**
+  - 5 wrong codes per recovery;
+  - the PIN backoff (§11.8);
+  - the credential password backoff (§3.5.3);
+  - one recovery per vault (a new request replaces the old).
+- **Member API limits** (§11.11.7): requests, registrations, cancels and
+  status polls are rate-limited.
+- **Audit in the vault.** Every step is recorded (`recovery.*` kinds,
+  §10.9). Steps taken while the vault was locked are written from the
+  header's log at the next unlock.
+- **Audit in the API.** The API audits the request, every cancel, the
+  release of the sealed code and every register request. It never
+  records the code, the browser key or envelopes.
+
+#### 11.11.7 Member API routes
+
+All routes follow MEMBER-API conventions. Each of the following requires
+a member session and the current terms:
+
+| Route | Body | Answer |
+|---|---|---|
+| `POST /api/vault/recovery` | `{browser_key}` (b64 of 65 bytes) | `202 {recovery_id, available_at, expires_at}` |
+| `GET /api/vault/recovery` | — | `{recovery: {recovery_id, state, requested_at, available_at, expires_at, sealed_code?} \| null}` |
+| `POST /api/vault/recovery/cancel` | `{recovery_id}` | `200 {}` |
+| `POST /api/vault/recovery/register` | `{vault_id, request_id, instance_id, etk_kid, envelope}` | `202 {vault_id, request_id}`; the result is polled like unlock (`GET /api/vault/requests/{id}`) |
+
+The email link uses its own route, `POST /api/vault/recovery/cancel-link`
+with body `{token}`. It needs no session: the token stands in for it.
+
+- **State.** `state` is `pending`, `available` (from `available_at`, when
+  `sealed_code` is returned), `cancelled` or `expired`. `sealed_code` is
+  the slot's 5,252 bytes; the API returns it only between `available_at`
+  and `expires_at`.
+- **Request.** The API accepts a request only for a vault in a state other
+  than `enrolling`, and only when no recovery is `pending` or `available`
+  (`409 recovery_active`). It records the recovery on the vault row and
+  sends the member an email with a single-use cancel link (a random
+  256-bit token; the API stores its SHA-256).
+- **Register.** The API forwards a register only while the recovery is
+  `available` (`409 recovery_not_available` otherwise). The enclave
+  re-checks everything; the API's gate only saves work.
+- **Cancel.** A cancel marks the recovery `cancelled`, enqueues
+  `recovery_cancel` and emails the member.
+- **Status.** `GET /api/vault/status` adds `recovery: {state,
+  available_at} | null`, so that owner apps can show the recovery and
+  offer to cancel it.
+
+#### 11.11.8 Decisions
+
+- **Old owner devices are kept** (owner decision, 2026-10-03). After a
+  recovery, the other apps and desktops are still paired, and the
+  recovered app can unlink them (`device.unlink`). A stolen device:
+  - cannot use the vault during the 24 h (`recovery_pending`), though it
+    can cancel the recovery;
+  - after the recovery, holds only a blob under a destroyed CEK.
+- **No recovery without the credential** (owner decision, 2026-10-03).
+  - A recovery always ends with the member's credential password against
+    the latest blob: the vault's backup, or the member's own copy when the
+    backup is off.
+  - A vault without a credential is not recoverable. It cannot exist past
+    enrollment anyway (§3.5.7).
+
 ## 12. Locked vaults and the collect manager
 
 ### 12.1 Locked
@@ -2891,9 +3415,12 @@ it can read and write only its own objects and use only its own relay key
 | ETK | PINs in requests sealed to it (≤ 25 h). Requires breaking the enclave. | Enclave restart |
 | Owner app | Whatever its role allows, including unlock attempts if the PIN is known | Unlink from another device |
 | PIN alone | Nothing without a registered, attested app | `pin.change` |
-| An app's copy of the Protean Credential | Nothing without the CEK, which only the vault holds; password guesses only online, through a paired app, under the backoff (§3.5.3) | `credential.rotate` (destroys the CEK) |
+| An app's copy of the Protean Credential | Nothing without the current CEK, which only the vault holds and which rotates at every use; password guesses only online, through a paired app with a UTK, under the backoff (§3.5.8) | Any use of the credential (a new CEK; the old blob is dead) |
+| An app's session keys | No password or secret value (UTK and reply-key sealing), no replay (single-use UTKs), no redirected payloads (§3.5.4) | Unlink the device |
 | Credential password alone | Nothing without the blob and a paired app | `credential.password.change` |
-| Decrypted vault state (DEK) | Everything in it, plus offline guessing of the credential password against the CEK and the kept blob (§3.5.5); critical secrets stay sealed under the password | Rotate the relay key and the credential; change the password |
+| Member's email and account session (24 h, unnoticed) | A recovery: one new attested app as an unlock key. Still needs the PIN and the password, online, under both backoffs (§11.11.2) | Cancel; owner apps see `recovery_pending` and `vault.locking{recovery}` |
+| VettID's API tables | Nothing: the recovery code is stored only sealed to the member's browser, and the enclave enforces the 24 h (§11.11.2) | — |
+| Decrypted vault state (DEK) | Everything in it, plus offline guessing of the credential password against the current CEK and the latest blob (§3.5.8); critical secrets stay sealed under the password | Rotate the relay key and the credential; change the password |
 | An old release, after members moved away | Vaults still sealed to it. A moved vault only if the host serves it a stale header and state **and** an app sends it the PIN; apps never send a PIN to an older release than they last unlocked into (§11.10.6). Residual: an owner device that never learned of the move. | Members move forward; the app warns about `deprecated` and `retired` releases |
 | Manifest key | Listing a release as `active`. A vault still moves only with the member's approval, and only to a sealing key in the pinned namespace. | Rotate the key in a release; apps pin two keys |
 | Sealing-key policy (VettID's AWS account) | A key whose policy let anything other than its release decrypt, or could be changed later, would expose the pepper and allow offline PIN guessing against stored state. The enclave refuses to seal to such a key: before sealing it reads the policy, metadata and grants from KMS over TLS it terminates and checks them (§11.10.7). | Nothing to recover: the check runs before any seal, and a passing policy can never change |
@@ -2971,8 +3498,6 @@ Follow-ups:
 5. **Release updates.** Implementation in V3: generate the §16 release
    vectors in vettid-vault, the KMS policy shapes in VAULT-PLAN, and an
    app UX review of the approval screen.
-6. **Protean Credential copy.** The vault's copy of the blob (§3.5.6) is an
-   owner decision; the reference implementation keeps it.
 
 ## 16. Test vectors
 
@@ -3079,14 +3604,52 @@ pending (§15, follow-up 1).
 
 ## 17. Changelog
 
+- **0.4.1** (2026-10-03): the owner's Protean Credential design,
+  recovery and backup, audit immutability.
+  - §3.5 (rewritten, owner corrections of 0.4.0):
+    - the CEK rotates at every use, and the old CEK is destroyed, so old
+      blobs are undecryptable;
+    - the latest blob is kept until the app confirms it (`credential.ack`),
+      so a lost response never loses the credential;
+    - UTK/LTK one-time transaction keys (hybrid suite 2, a pool of 20 per
+      app) seal every operation's critical payload inside the session,
+      single-use and bound to type and request;
+    - secret values return sealed to a one-time reply key, so those
+      responses are cached normally;
+    - LAT is superseded by Nitro attestation (decision 2026-01-08);
+    - a vault without a credential is restricted and stays provisional
+      (§3.5.7); `has_credential` is in the sealed header.
+  - §10.6: every credential type rewritten around `utk_id`/`sealed`, new
+    `credential.utk.get` and `credential.ack`; §10.1: `utk_invalid`,
+    `credential_required`; §8.2: no type needs volatile responses now.
+  - §11.3: `credential.create` before `vault.enroll.confirm`.
+  - §11.11 (new): recovery when every owner app is lost. The request locks
+    the vault; a vault-minted, single-use code sealed to the member's
+    browser key becomes valid after 24 h (enforced by the enclave) for
+    24 h; a new attested app registers with it, unlocks with the PIN and
+    receives the credential only after the password (with the member's own
+    blob when the backup is off); a vault without a credential is refused;
+    old devices are kept; cancel by the portal, the email link or an owner
+    app's unlock; limits, audit, member API routes.
+  - §3.5.6: the vault's copy of the credential is normative, under the
+    `credential.backup` setting (on by default).
+  - §10.9: the audit log is append-only with fixed retention (the
+    `audit.retention_days` setting is removed), anchored by apps through
+    `after_seq`, rollback-protected by `state_seq`; `drop.*` entries are
+    bounded; recovery and settings kinds.
+  - §10.2: `vault.locking{reason}`. §10.6: `credential.recover`. §10.8:
+    `credential.backup`. §11.4: `cancel_recovery` (13th signing line),
+    `recovery_pending`, `recovery_cancelled`, `vault_bundle`. §11.5: the
+    recovery queue operations. §13.5: recovery rows.
+
 - **0.4.0** (2026-10-02): V4 batch 1 (vettid-vault) and the owner's
   decision to keep the full Protean Credential.
   - §3.5 (new): the Protean Credential, held by the member's app, sealed to
     a vault-held hybrid-KEM CEK and under a password key, usable only with
     the member's password per operation; the blob format, use rules,
     password backoff, unlock window, lifecycle, and what VettID and the
-    vault can and cannot do with it. The earlier UTK/LTK transport keys
-    are replaced by the §6 sessions.
+    vault can and cannot do with it. (0.4.0 dropped the UTK/LTK
+    transaction keys; 0.4.1 restores them.)
   - §3.2, §3.3, §3.4: the CEK and the credential key; `credential.rotate`
     rotates the vault's `ik` and `kem` in the same flush, which carries the
     PQC Phase 2 migration.

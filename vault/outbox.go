@@ -61,7 +61,7 @@ func (m *Manager) sendTo(p *Peer, typ string, body json.RawMessage, now time.Tim
 func (m *Manager) ownerDevices() []*Peer {
 	var out []*Peer
 	for _, p := range m.st.Devices {
-		if p.State == PeerActive && (p.Kind == KindApp || p.Kind == KindDesktop) {
+		if p.State == PeerActive && !p.Recovering && (p.Kind == KindApp || p.Kind == KindDesktop) {
 			out = append(out, p)
 		}
 	}
@@ -99,7 +99,11 @@ func (m *Manager) sendLocking(ctx context.Context) {
 			// device has not activated yet).
 			continue
 		}
-		in := &envelope.Inner{ID: m.newID(now), Type: "vault.locking", TS: now, Exp: now.Add(time.Minute), Body: json.RawMessage(`{}`)}
+		body := json.RawMessage(`{}`)
+		if m.lockReason != "" {
+			body = json.RawMessage(`{"reason":"` + m.lockReason + `"}`)
+		}
+		in := &envelope.Inner{ID: m.newID(now), Type: "vault.locking", TS: now, Exp: now.Add(time.Minute), Body: body}
 		if raw, err := kr.Current().Seal(in); err == nil {
 			_, _ = m.relay.Deposit(ctx, p.Relay.URL, p.Relay.Mailbox, p.Standing.Token, raw)
 		}

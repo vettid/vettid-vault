@@ -188,6 +188,9 @@ func (m *Manager) approveInbound(ctx context.Context, id string, now time.Time) 
 	newPeer.Name = profileName(body.Profile)
 	newPeer.Profile = body.Profile
 	newPeer.Attestation = ib.Attestation
+	if inv := m.st.Invites[ib.InviteID]; inv != nil && inv.CreatedBy == inviteByRecovery {
+		newPeer.Recovering = true // restricted until credential.recover (§11.11.5)
+	}
 	cfg := handshake.ResponderConfig{Identity: m.keys.ik, Policy: policyFor(ib.Kind), CollectSender: ib.Sender, Now: now}
 	var issued []IssuedToken
 	var err error
@@ -434,6 +437,11 @@ func (m *Manager) activate(p *Peer, ep *handshake.Epoch, purpose handshake.Purpo
 		b := strictjson.NewBuilder().String("device_id", p.ID).String("role", p.Kind).String("vault_id", m.st.VaultID).
 			String("release", m.opt.Release.PCR0).Uint("release_number", m.opt.Release.Number).Bytes()
 		m.sendTo(p, "device.paired", b, now)
+		if p.Recovering {
+			// Announced when the recovery completes (§11.11.5).
+			m.record(Activity{Kind: "recovery.device_paired", DeviceID: p.ID, Audit: true}, now)
+			break
+		}
 		m.notifyDevices("sync.event", strictjson.NewBuilder().String("kind", "device.paired").String("device_id", p.ID).
 			String("role", p.Kind).Bytes(), p.ID, now)
 		m.record(Activity{Kind: "device.paired", DeviceID: p.ID, Audit: true, Feed: true}, now)

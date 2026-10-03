@@ -38,6 +38,7 @@ type Host struct {
 	Sinks      []vault.ActivitySink
 	ids        int
 	DownConns  map[string]bool // SendToConnection fails for these
+	Completed  []string        // CompleteRecovery calls
 }
 
 // NewHost returns a fake host with no connections.
@@ -111,6 +112,11 @@ func (h *Host) RotateIdentity(time.Time) error {
 	return nil
 }
 
+func (h *Host) CompleteRecovery(id string, _ time.Time) error {
+	h.Completed = append(h.Completed, id)
+	return nil
+}
+
 func (h *Host) Settings() vault.Settings     { return h.Set }
 func (h *Host) SetSettings(s vault.Settings) { h.Set = s }
 
@@ -172,6 +178,12 @@ func (c *Clock) Advance(d time.Duration) { c.T = c.T.Add(d) }
 // the runtime's authorization (§10.1): an unknown type is
 // unsupported_type, a sender kind not in TypeSpec.From is forbidden.
 func Call(f vault.Feature, h *Host, now time.Time, kind, typ, body string) Result {
+	id, _ := envelope.NewULID(now)
+	return CallID(f, h, now, kind, typ, id, body)
+}
+
+// CallID is Call with a chosen inner id (payloads bound to it, §3.5.4).
+func CallID(f vault.Feature, h *Host, now time.Time, kind, typ, id, body string) Result {
 	var spec *vault.TypeSpec
 	for _, ts := range f.Types() {
 		if ts.Type == typ {
@@ -183,13 +195,15 @@ func Call(f vault.Feature, h *Host, now time.Time, kind, typ, body string) Resul
 		return Result{Code: "unsupported_type"}
 	}
 	from := vault.PeerInfo{ID: "dev-" + kind, Kind: kind, State: vault.PeerActive}
+	if kind == "recovering-app" { // an app registered by recovery (§11.11.5)
+		from = vault.PeerInfo{ID: "dev-recovering", Kind: vault.KindApp, State: vault.PeerActive, Recovering: true}
+	}
 	if len(kind) > 11 && kind[:11] == "connection:" {
 		from = vault.PeerInfo{ID: kind[11:], Kind: vault.KindConnection, State: vault.PeerActive}
 	}
 	if !spec.Allows(from.Kind) {
 		return Result{Code: "forbidden"}
 	}
-	id, _ := envelope.NewULID(now)
 	in := &envelope.Inner{ID: id, Type: typ, TS: now, Body: json.RawMessage(body)}
 	s := vault.NewSession(context.Background(), h, from, now, in)
 	out, err := f.Handle(context.Background(), s, in)

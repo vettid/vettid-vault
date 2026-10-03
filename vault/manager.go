@@ -127,10 +127,11 @@ type Manager struct {
 	// carrying secret values, TypeSpec.Volatile); drained after the
 	// durable outbox, dropped on failure or lock.
 	volatile []*OutboxEntry
-	dirty         bool
+	dirty    bool
 
 	locked      bool
 	lockPending bool
+	lockReason  string
 	started     bool
 	hadFailures bool // the header recorded failures before this unlock
 	holdsDEK    bool // counted in unlocked
@@ -531,6 +532,9 @@ func (m *Manager) persist(ctx context.Context, create bool) error {
 
 func (m *Manager) writeHeader(ctx context.Context) error {
 	m.syncUnlockKeys()
+	if m.st != nil {
+		m.hdr.HasCredential = m.credentialReady() && m.hasGate()
+	}
 	m.hdr.HeaderSeq++
 	b, err := sealHeader(ctx, m.opt.Sealer, m.hdr)
 	if err != nil {
@@ -569,12 +573,24 @@ func (m *Manager) syncUnlockKeys() {
 	}
 	var keys []UnlockKey
 	for _, p := range m.st.Devices {
+		if p.Recovering && !m.hdr.isRecoveryKey(p.IK) {
+			continue // its recovery was cancelled (§11.11.4)
+		}
 		if p.Kind == KindApp && p.State == PeerActive {
 			keys = append(keys, UnlockKey{DeviceID: p.ID, IK: p.IK, KEM: p.KEM, Attestation: binding(p.IK, p.Attestation)})
 		}
 	}
 	if inv := m.st.Invites[m.st.VaultID]; inv != nil && inv.EnrollIK != nil && !inv.Used && m.now().Before(inv.Exp) {
 		keys = append(keys, UnlockKey{DeviceID: enrollDeviceID, IK: inv.EnrollIK, KEM: inv.EnrollKEM, Attestation: binding(inv.EnrollIK, inv.EnrollAttest)})
+	}
+	if r := m.hdr.Recovery; r != nil && r.State == RecoveryRegistered && r.App != nil {
+		present := false
+		for _, k := range keys {
+			present = present || suite.EqualPublic(k.IK, r.App.IK)
+		}
+		if !present {
+			keys = append(keys, UnlockKey{DeviceID: recoveryDeviceID, IK: r.App.IK, KEM: r.App.KEM, Attestation: binding(r.App.IK, r.App.Attestation)})
+		}
 	}
 	sortUnlockKeys(keys)
 	m.hdr.UnlockKeys = keys
@@ -674,9 +690,14 @@ func (m *Manager) VaultID() string {
 
 // Lock locks the vault on the owner's request (§12.3): flush, send
 // vault.locking to the owner's devices, stop collecting, zeroize.
-func (m *Manager) Lock(ctx context.Context) error {
+func (m *Manager) Lock(ctx context.Context) error { return m.LockReason(ctx, "") }
+
+// LockReason is Lock with a reason in vault.locking ("recovery",
+// §11.11.1; "" for none).
+func (m *Manager) LockReason(ctx context.Context, reason string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.lockReason = reason
 	return m.lockLocked(ctx)
 }
 

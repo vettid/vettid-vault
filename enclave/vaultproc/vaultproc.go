@@ -122,7 +122,11 @@ func (pr *proc) handle(ctx context.Context, f *hostproto.Frame) [][]byte {
 	case vaultipc.KindOpen:
 		return pr.open(ctx, f.Fields)
 	case vaultipc.KindLock:
-		return pr.lock(ctx)
+		reason := ""
+		if len(f.Fields) == 1 && (string(f.Fields[0]) == "" || string(f.Fields[0]) == "recovery") {
+			reason = string(f.Fields[0])
+		}
+		return pr.lock(ctx, reason)
 	}
 	return nil
 }
@@ -207,7 +211,7 @@ func (pr *proc) run(ctx context.Context, m *vault.Manager) {
 // lock is §12.3 owner request (also memory pressure, lease loss, parent
 // gone): finish the batch, flush, vault.locking, zeroize; the supervisor
 // then closes the channel and the process exits.
-func (pr *proc) lock(ctx context.Context) [][]byte {
+func (pr *proc) lock(ctx context.Context, reason string) [][]byte {
 	pr.mu.Lock()
 	m, cancel, done := pr.mgr, pr.cancel, pr.runDone
 	pr.mgr = nil
@@ -217,7 +221,7 @@ func (pr *proc) lock(ctx context.Context) [][]byte {
 	}
 	cancel()
 	<-done
-	if err := m.Lock(ctx); errors.Is(err, vault.ErrSplitBrain) {
+	if err := m.LockReason(ctx, reason); errors.Is(err, vault.ErrSplitBrain) {
 		return hostproto.Strings(vaultipc.StatusSplitBrain)
 	}
 	return hostproto.Strings(hostproto.StatusOK)

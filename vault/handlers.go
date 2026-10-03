@@ -126,6 +126,9 @@ type Host interface {
 	RotateIdentity(now time.Time) error
 	Settings() Settings
 	SetSettings(Settings)
+	// CompleteRecovery makes a recovering device an ordinary app and ends
+	// the recovery (§11.11.5).
+	CompleteRecovery(deviceID string, now time.Time) error
 }
 
 // NewSession returns a session for a message from `from`, acting on h. It
@@ -141,13 +144,16 @@ type PeerInfo struct {
 	Name    string
 	State   string
 	Profile json.RawMessage
+	// Recovering: an app registered by recovery that has not yet
+	// authenticated with the credential password (§11.11.5).
+	Recovering bool
 }
 
 func info(p *Peer) PeerInfo {
 	if p == nil {
 		return PeerInfo{}
 	}
-	return PeerInfo{ID: p.ID, Kind: p.Kind, Name: p.Name, State: p.State, Profile: p.Profile}
+	return PeerInfo{ID: p.ID, Kind: p.Kind, Name: p.Name, State: p.State, Profile: p.Profile, Recovering: p.Recovering}
 }
 
 // From returns the sending principal (zero for vault-internal activity).
@@ -222,6 +228,9 @@ func (s *Session) SetConnectionProfile(id string, profile json.RawMessage) error
 // persists it.
 func (s *Session) RotateIdentity() error { return s.host.RotateIdentity(s.now) }
 
+// CompleteRecovery ends the recovery of the sending device (§11.11.5).
+func (s *Session) CompleteRecovery() error { return s.host.CompleteRecovery(s.from.ID, s.now) }
+
 // Settings returns the owner's settings (§10.8).
 func (s *Session) Settings() Settings { return s.host.Settings() }
 
@@ -248,6 +257,44 @@ type ActivitySink interface {
 // connection becomes active (profile.update on activation, §9.3).
 type ConnectionObserver interface {
 	ConnectionAdded(s *Session, connectionID string)
+}
+
+// CredentialGate is implemented by the credential feature: a vault without
+// a credential is restricted (§3.5.7).
+type CredentialGate interface {
+	CredentialReady() bool
+}
+
+// allowedWithoutCredential are the types a restricted vault still accepts
+// (§3.5.7).
+var allowedWithoutCredential = map[string]bool{"vault.status": true, "vault.lock": true, "credential.utk.get": true,
+	"credential.create": true, "credential.version": true, "relay.token.issued": true, "relay.token.refresh": true,
+	"relay.address.update": true}
+
+// hasGate reports whether a credential feature is present.
+func (m *Manager) hasGate() bool {
+	for _, f := range m.features {
+		if _, ok := f.(CredentialGate); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// credentialReady reports whether no gate restricts the vault.
+func (m *Manager) credentialReady() bool {
+	for _, f := range m.features {
+		if g, ok := f.(CredentialGate); ok && !g.CredentialReady() {
+			return false
+		}
+	}
+	return true
+}
+
+// SettingsObserver is implemented by features that act on a settings
+// change (the credential drops its kept copy when backup is turned off).
+type SettingsObserver interface {
+	SettingsChanged(s *Session, next Settings)
 }
 
 // HandshakeProfiler supplies the vault's self-asserted hs.init profile and

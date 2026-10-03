@@ -320,6 +320,10 @@ func cmdAltEnroll(ctx context.Context, g *globals, args []string) error {
 	if err := d.CompleteEnrollment(ctx); err != nil {
 		return err
 	}
+	// A vault is used only with a credential (§3.5.7).
+	if err := d.CredentialCreate(ctx, devPassword()); err != nil {
+		return fmt.Errorf("credential.create: %w", err)
+	}
 	if rr, err := d.Request(ctx, "vault.enroll.confirm", json.RawMessage(`{}`)); err != nil || !rr.OK() {
 		return errors.New("vault.enroll.confirm failed")
 	}
@@ -508,6 +512,10 @@ func cmdAPIEnroll(ctx context.Context, g *globals, args []string) error {
 	if err := d.CompleteEnrollment(ctx); err != nil {
 		return err
 	}
+	// A vault is used only with a credential (§3.5.7).
+	if err := d.CredentialCreate(ctx, devPassword()); err != nil {
+		return fmt.Errorf("credential.create: %w", err)
+	}
 	if rr, err := d.Request(ctx, "vault.enroll.confirm", json.RawMessage(`{}`)); err != nil || !rr.OK() {
 		return errors.New("vault.enroll.confirm failed")
 	}
@@ -576,4 +584,13 @@ func cmdAPILock(ctx context.Context, g *globals, args []string) error {
 	}
 	printJSON(map[string]any{"status": s.Status, "code": s.Code})
 	return nil
+}
+
+// devPassword is the credential password of development enrollments:
+// VAULTCTL_PASSWORD, or a fixed development value.
+func devPassword() string {
+	if p := os.Getenv("VAULTCTL_PASSWORD"); p != "" {
+		return p
+	}
+	return "development password"
 }

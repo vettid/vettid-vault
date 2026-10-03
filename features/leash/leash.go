@@ -106,6 +106,8 @@ type Grant struct {
 	PerDay      uint64    `json:"per_day,omitempty"`
 	Expires     time.Time `json:"expires,omitempty"`
 	IssuedAt    time.Time `json:"issued_at"`
+	// StatusTTL is the lifetime of the delegation's status statements.
+	StatusTTL time.Duration `json:"status_ttl"`
 	// A signed delegation (§10.11), if any.
 	Delegation    []byte `json:"delegation,omitempty"`
 	DelegationSig []byte `json:"delegation_sig,omitempty"`
@@ -210,6 +212,7 @@ func (f *Feature) Types() []vault.TypeSpec {
 		{Type: "leash.grant.revoke", Request: true, From: owners},
 		{Type: "leash.grant.list", Request: true, From: all},
 		{Type: "leash.agent.resume", Request: true, From: apps},
+		{Type: "leash.status.get", Request: true, From: agents},
 		{Type: "agent.request", Request: true, From: agents, AgentPolicy: true},
 	}
 }
@@ -259,6 +262,7 @@ type Spec struct {
 	PerHour     uint64
 	PerDay      uint64
 	Expires     time.Time
+	StatusTTL   time.Duration
 }
 
 func idList(o strictjson.Object, name string) ([]string, error) {
@@ -325,6 +329,12 @@ func ParseSpec(o strictjson.Object, now time.Time) (*Spec, error) {
 		if sp.Scope == ScopeGet && sp.Secrets == nil {
 			return nil, errBad // values without approval only from named secrets
 		}
+	}
+	sp.StatusTTL = leashwire.DefaultStatusTTL
+	if v, present, err := o.OptUint("status_ttl", uint64(leashwire.MinStatusTTL/time.Second), uint64(leashwire.MaxStatusTTL/time.Second)); err != nil {
+		return nil, errBad
+	} else if present {
+		sp.StatusTTL = time.Duration(v) * time.Second
 	}
 	if s, present, err := o.OptString("expires_at"); err != nil {
 		return nil, errBad
@@ -681,11 +691,87 @@ func (g *Grant) JSON() []byte {
 	if !g.Expires.IsZero() {
 		b.String("expires_at", envelope.FormatTS(g.Expires))
 	}
-	b.String("issued_at", envelope.FormatTS(g.IssuedAt))
+	b.Uint("status_ttl", uint64(g.StatusTTL/time.Second)).String("issued_at", envelope.FormatTS(g.IssuedAt))
 	if g.Delegation != nil {
 		b.Base64("delegation", g.Delegation).Base64("delegation_sig", g.DelegationSig).Base64("key", g.Key)
 	}
 	return b.Bytes()
+}
+
+// statusJSON adds a fresh status statement for g (§10.11): only for a
+// grant in force for an agent that is not suspended.
+func (f *Feature) status(s *vault.Session, g *Grant) (stmt, sig []byte, chain []json.RawMessage, err error) {
+	if st := f.d.Agents[g.AgentID]; st != nil && st.Suspended {
+		return nil, nil, nil, errForbidden
+	}
+	if !g.Expires.IsZero() && !s.Now().Before(g.Expires) || g.Delegation == nil {
+		return nil, nil, nil, errNotFound
+	}
+	d, err := leashwire.Parse(g.Delegation)
+	if err != nil {
+		return nil, nil, nil, errInternal
+	}
+	chain, ok := s.RotationsFrom(d.VaultIK)
+	if !ok || len(chain) > leashwire.MaxRotations {
+		return nil, nil, nil, errInternal
+	}
+	st, err := leashwire.NewStatus(g.Delegation, s.Now())
+	if err != nil {
+		return nil, nil, nil, errNotFound
+	}
+	stmt = st.Marshal()
+	if sig, err = s.SignLeashStatus(stmt); err != nil {
+		return nil, nil, nil, errInternal
+	}
+	return stmt, sig, chain, nil
+}
+
+func statusMembers(b *strictjson.Builder, stmt, sig []byte, chain []json.RawMessage) {
+	b.Base64("status", stmt).Base64("status_sig", sig)
+	if len(chain) > 0 {
+		arr := []byte{'['}
+		for i, r := range chain {
+			if i > 0 {
+				arr = append(arr, ',')
+			}
+			arr = append(arr, r...)
+		}
+		b.Raw("rotations", append(arr, ']'))
+	}
+}
+
+// grantWithStatus is g's JSON with a fresh status statement, if one can be
+// issued.
+func (f *Feature) grantWithStatus(s *vault.Session, g *Grant) []byte {
+	raw := g.JSON()
+	stmt, sig, chain, err := f.status(s, g)
+	if err != nil {
+		return raw
+	}
+	b := strictjson.NewBuilder()
+	statusMembers(b, stmt, sig, chain)
+	extra := b.Bytes()
+	return append(append(raw[:len(raw)-1], ','), extra[1:]...)
+}
+
+// agentList is an agent's own grants, each with a fresh status statement.
+func (f *Feature) agentList(s *vault.Session, agent string) []byte {
+	var gs []*Grant
+	for _, g := range f.d.Grants {
+		if g.AgentID == agent {
+			gs = append(gs, g)
+		}
+	}
+	sort.Slice(gs, func(i, j int) bool { return gs[i].ID < gs[j].ID })
+	arr := []byte{'['}
+	for i, g := range gs {
+		if i > 0 {
+			arr = append(arr, ',')
+		}
+		arr = append(arr, f.grantWithStatus(s, g)...)
+	}
+	st := f.d.Agents[agent]
+	return strictjson.NewBuilder().Raw("grants", append(arr, ']')).Bool("suspended", st != nil && st.Suspended).Bytes()
 }
 
 func (f *Feature) listJSON(agent string) []byte {
@@ -723,7 +809,7 @@ func (f *Feature) listJSON(agent string) []byte {
 
 // tell sends the agent its grants (within its access session, §6.8).
 func (f *Feature) tell(s *vault.Session, agent string) {
-	_ = s.Send(agent, "leash.grant.updated", f.listJSON(agent), vault.SendOptions{})
+	_ = s.Send(agent, "leash.grant.updated", f.agentList(s, agent), vault.SendOptions{})
 }
 
 func syncChanged(s *vault.Session, g *Grant) {
@@ -737,7 +823,7 @@ func syncRevoked(s *vault.Session, g *Grant) {
 
 func (sp *Spec) apply(g *Grant) {
 	g.Scope, g.Approval, g.Connections, g.Secrets = sp.Scope, sp.Approval, sp.Connections, sp.Secrets
-	g.PerHour, g.PerDay, g.Expires = sp.PerHour, sp.PerDay, sp.Expires
+	g.PerHour, g.PerDay, g.Expires, g.StatusTTL = sp.PerHour, sp.PerDay, sp.Expires, sp.StatusTTL
 	g.Delegation, g.DelegationSig, g.Key = nil, nil, nil
 	g.HourStart, g.HourN, g.DayStart, g.DayN, g.LimitedAt = time.Time{}, 0, time.Time{}, 0, time.Time{}
 }
@@ -825,7 +911,8 @@ func (f *Feature) sign(s *vault.Session, g *Grant, agentIK []byte) error {
 		}
 	}
 	d := &leashwire.Delegation{VaultIK: s.IdentityKey(), AgentIK: agentIK, GrantID: g.ID, Version: g.Version,
-		Scope: g.Scope, Approval: g.Approval, Connections: g.Connections, Secrets: g.Secrets, IssuedAt: iat, Expires: exp}
+		Scope: g.Scope, Approval: g.Approval, Connections: g.Connections, Secrets: g.Secrets, IssuedAt: iat, Expires: exp,
+		StatusTTL: g.StatusTTL}
 	stmt := d.Marshal()
 	sig, err := leashwire.Sign(key, stmt)
 	if err != nil {
@@ -883,7 +970,7 @@ func (f *Feature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner
 			return nil, errBad
 		}
 		if s.From().Kind == vault.KindAgent {
-			return f.listJSON(s.From().ID), nil // its own grants only
+			return f.agentList(s, s.From().ID), nil // its own grants only, with status statements
 		}
 		agent, _, err := o.OptString("agent_id")
 		if err != nil {
@@ -892,6 +979,24 @@ func (f *Feature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner
 		return f.listJSON(agent), nil
 	case "agent.request":
 		return f.request(s, in.Body)
+	case "leash.status.get":
+		// A fresh status statement for one of the agent's own grants
+		// (§10.11): none for a revoked, expired or suspended one.
+		id, err := grantID(in.Body)
+		if err != nil {
+			return nil, err
+		}
+		g := f.d.Grants[id]
+		if g == nil || g.AgentID != s.From().ID {
+			return nil, errNotFound
+		}
+		stmt, sig, chain, err := f.status(s, g)
+		if err != nil {
+			return nil, err
+		}
+		b := strictjson.NewBuilder().String("grant_id", g.ID)
+		statusMembers(b, stmt, sig, chain)
+		return b.Bytes(), nil
 	case "leash.agent.resume":
 		o, err := strictjson.ParseObject(in.Body)
 		if err != nil {

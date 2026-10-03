@@ -20,6 +20,7 @@ import (
 	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vms/callwire"
 	"github.com/vettid/vettid-vault/vms/envelope"
+	"github.com/vettid/vettid-vault/vms/leashwire"
 	"github.com/vettid/vettid-vault/vms/suite"
 )
 
@@ -54,6 +55,9 @@ type Host struct {
 	AcceptedLinks []string
 	Cancelled     []string
 	InviteErr     error
+	// The fake vault's identity rotation chain (RotationsFrom).
+	ChainFrom []byte
+	Chain     []json.RawMessage
 }
 
 // NewHost returns a fake host with no connections.
@@ -131,6 +135,22 @@ func (h *Host) AcceptInviteLink(_ context.Context, link string, now time.Time) (
 }
 
 func (h *Host) CancelInvite(id string, _ time.Time) { h.Cancelled = append(h.Cancelled, id) }
+
+func (h *Host) SignLeashStatus(statement []byte) ([]byte, error) {
+	return leashwire.SignStatus(h.Identity, statement)
+}
+
+// Chain is the fake vault's rotation chain for RotationsFrom: statements
+// from the key ChainFrom to the current IK.
+func (h *Host) RotationsFrom(ik []byte) ([]json.RawMessage, bool) {
+	if bytes.Equal(ik, h.IK) {
+		return nil, true
+	}
+	if h.ChainFrom != nil && bytes.Equal(ik, h.ChainFrom) {
+		return h.Chain, true
+	}
+	return nil, false
+}
 
 func (h *Host) PairedDevice(id string) (vault.PeerInfo, bool) {
 	p, ok := h.Devices[id]

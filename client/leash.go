@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/vettid/vettid-vault/internal/strictjson"
+	"github.com/vettid/vettid-vault/vms/handshake"
 	"github.com/vettid/vettid-vault/vms/leashwire"
 )
 
@@ -63,18 +64,18 @@ func (d *Device) AgentRequest(ctx context.Context, op string, members map[string
 // LeashGrants returns the grants in the latest leash.grant.updated this
 // agent received (nil if none).
 func (d *Device) LeashGrants() []json.RawMessage {
-	evs := d.Events()
-	for i := len(evs) - 1; i >= 0; i-- {
-		if evs[i].Type == "leash.grant.updated" && evs[i].Re == "" {
-			o, err := strictjson.ParseObject(evs[i].Body)
-			if err != nil {
-				return nil
-			}
-			gs, _ := o.Array("grants")
-			return gs
-		}
+	d.mu.Lock()
+	body := d.leashGrants
+	d.mu.Unlock()
+	if body == nil {
+		return nil
 	}
-	return nil
+	o, err := strictjson.ParseObject(body)
+	if err != nil {
+		return nil
+	}
+	gs, _ := o.Array("grants")
+	return gs
 }
 
 // VerifyDelegation checks a grant's signed delegation under the member's
@@ -94,4 +95,113 @@ func VerifyDelegation(grant json.RawMessage, memberKey ed25519.PublicKey, now ti
 		return nil, ErrProtocol
 	}
 	return leashwire.Verify(memberKey, stmt, sig, now)
+}
+
+type cachedStatus struct {
+	status, sig []byte
+	chain       []*handshake.Rotation
+	notAfter    time.Time
+	ttl         time.Duration
+}
+
+// LeashStatus fetches a fresh status statement for one of this agent's
+// grants (leash.status.get, §10.11).
+func (d *Device) LeashStatus(ctx context.Context, grantID string) (status, sig []byte, chain []*handshake.Rotation, err error) {
+	o, err := d.Op(ctx, "leash.status.get", map[string]any{"grant_id": grantID})
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return parseStatusMembers(o)
+}
+
+func parseStatusMembers(o strictjson.Object) (status, sig []byte, chain []*handshake.Rotation, err error) {
+	if status, err = o.Base64("status", -1); err != nil {
+		return nil, nil, nil, ErrProtocol
+	}
+	if sig, err = o.Base64("status_sig", ed25519.SignatureSize); err != nil {
+		return nil, nil, nil, ErrProtocol
+	}
+	if raw, ok, err := o.OptArray("rotations"); err != nil {
+		return nil, nil, nil, ErrProtocol
+	} else if ok {
+		for _, r := range raw {
+			rot, err := handshake.ParseRotation(r)
+			if err != nil {
+				return nil, nil, nil, ErrProtocol
+			}
+			chain = append(chain, rot)
+		}
+	}
+	return status, sig, chain, nil
+}
+
+// LeashPresent returns what this agent shows a relying party for one of
+// its grants: the delegation, the member's signature and a status
+// statement, refreshed automatically when less than a quarter of its
+// lifetime (at least a minute) remains.
+func (d *Device) LeashPresent(ctx context.Context, grantID string) (*leashwire.Presented, error) {
+	var grant json.RawMessage
+	for _, g := range d.LeashGrants() {
+		o, err := strictjson.ParseObject(g)
+		if err == nil {
+			if id, _ := o.String("grant_id"); id == grantID {
+				grant = g
+			}
+		}
+	}
+	if grant == nil {
+		gs, err := d.LeashGrantList(ctx, "")
+		if err != nil {
+			return nil, err
+		}
+		for _, g := range gs {
+			o, err := strictjson.ParseObject(g)
+			if err == nil {
+				if id, _ := o.String("grant_id"); id == grantID {
+					grant = g
+				}
+			}
+		}
+	}
+	if grant == nil {
+		return nil, &OpError{Type: "leash.status.get", Code: "not_found"}
+	}
+	o, err := strictjson.ParseObject(grant)
+	if err != nil {
+		return nil, ErrProtocol
+	}
+	del, err := o.Base64("delegation", -1)
+	if err != nil {
+		return nil, ErrProtocol
+	}
+	dsig, err := o.Base64("delegation_sig", ed25519.SignatureSize)
+	if err != nil {
+		return nil, ErrProtocol
+	}
+	now := d.cfg.Now()
+	d.mu.Lock()
+	c := d.leashStatus[grantID]
+	d.mu.Unlock()
+	margin := time.Minute
+	if c != nil && c.ttl/4 > margin {
+		margin = c.ttl / 4
+	}
+	if c == nil || !now.Add(margin).Before(c.notAfter) {
+		st, sig, chain, err := d.LeashStatus(ctx, grantID)
+		if err != nil {
+			return nil, err
+		}
+		ps, err := leashwire.ParseStatus(st)
+		if err != nil {
+			return nil, ErrProtocol
+		}
+		c = &cachedStatus{status: st, sig: sig, chain: chain, notAfter: ps.NotAfter, ttl: ps.NotAfter.Sub(ps.IssuedAt)}
+		d.mu.Lock()
+		if d.leashStatus == nil {
+			d.leashStatus = map[string]*cachedStatus{}
+		}
+		d.leashStatus[grantID] = c
+		d.mu.Unlock()
+	}
+	return &leashwire.Presented{Delegation: del, DelegationSig: dsig, Status: c.status, StatusSig: c.sig, Rotations: c.chain}, nil
 }

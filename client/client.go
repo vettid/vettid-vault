@@ -101,6 +101,11 @@ type Device struct {
 	cfg Config
 	st  *State
 
+	// leashStatus caches an agent's LEASH status statements by grant id
+	// (memory only; refreshed before they expire, §10.11).
+	leashStatus map[string]*cachedStatus
+	leashGrants json.RawMessage // the latest leash.grant.updated body
+
 	ik       ed25519.PrivateKey
 	kem      *suite.PrivateKey
 	relayKey ed25519.PrivateKey
@@ -649,6 +654,10 @@ func (d *Device) handle(ctx context.Context, m relayclient.Message) {
 		d.storeVaultToken(in.Body)
 	case "identity.rotate":
 		d.followRotation(in.Body)
+	case "leash.grant.updated":
+		if in.Re == "" {
+			d.leashGrants = append(json.RawMessage(nil), in.Body...) // the agent's current grants (§10.11); d.mu is held
+		}
 	}
 	d.events = append(d.events, in)
 	d.maintain(ctx, now)

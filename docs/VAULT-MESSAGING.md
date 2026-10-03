@@ -2548,7 +2548,8 @@ grant: { "grant_id": "<ULID>", "agent_id": "<device id>", "version": 1, "scope":
   are refused for an `ask` grant. Requests an app approved are not
   counted.
 - `expires_at` is optional, in the future and at most 365 days ahead; an
-  expired grant matches nothing and is dropped.
+  expired grant matches nothing and is dropped. `status_ttl` (60–3,600 s,
+  default 900) is the lifetime of the grant's status statements (below).
 - An agent holds at most 32 grants (`limit`). `version` follows §10.1.
 
 **Decisions** (§6.8). For a request of an agent within its access
@@ -2643,7 +2644,7 @@ grants and can present it.
 delegation     = standard base64 of the exact bytes
                  {"v":1,"vault_ik":"<b64>","agent_ik":"<b64>","grant_id":"<ULID>","version":1,
                   "scope":"<scope>","approval":"ask","connections":["<id>"],"secrets":["<id>"],
-                  "iat":<unix s>,"exp":<unix s>}
+                  "status_ttl":<s>,"iat":<unix s>,"exp":<unix s>}
 delegation_sig = standard base64 of Ed25519(credential key, "vettid/vms/2/leash" || those bytes)
 key            = the credential key's public key
 ```
@@ -2654,7 +2655,8 @@ key            = the credential key's public key
   the claims of vettid.dev's LEASH token (issuer, the agent's key, grant
   id and version, scope) as canonical JSON: members in the order shown,
   no whitespace, `connections` and `secrets` only when the grant has
-  them, ids and keys as in the grant, `iat` the issue time.
+  them, ids and keys as in the grant, `status_ttl` the lifetime of its
+  status statements in seconds (below), `iat` the issue time.
 - **Lifetime.** `exp` is the grant's `expires_at` in whole seconds, and
   is absent when the grant has none: LEASH's contract expiry is optional
   (§3.2). (The 24 h cap of the first 0.6.0 draft came from vettid.dev's
@@ -2667,9 +2669,9 @@ key            = the credential key's public key
   its current grants. A relying party outside the vault MUST check the
   canonical form, the signature under the member's key (pinned, for a
   connection, through §10.4), `exp` if present, and that the presenter
-  proves possession of `agent_ik`. A delegation carries no revocation
-  status: beyond that a relying party trusts the agent's connector
-  (§13.5).
+  proves possession of `agent_ik`, and SHOULD require a current status
+  statement (below), which bounds how long a revoked delegation can be
+  shown.
 - **The member present.** Signing uses the credential key, so issuing
   needs the member: only an app issues or replaces a grant, and only
   within the credential's unlock window (`credential.unlock`, §3.5.3;
@@ -2683,13 +2685,83 @@ key            = the credential key's public key
   the old key, which verifiers follow through the rotation statements
   (§3.5.5).
 
+**Status statements ("stapling").** A delegation names its **status
+issuer**: the member's vault, by `vault_ik`. The vault signs short-lived
+statements that the delegation is still in force, and the agent staples
+the current one to the delegation it presents. They need neither the
+credential nor the member (they grant nothing new), so the vault issues
+them on its own:
+
+```
+status     = standard base64 of the exact bytes
+             {"v":1,"delegation":"<b64 SHA-256(delegation bytes)>","grant_id":"<ULID>",
+              "status":"valid","issued_at":<unix s>,"not_after":<unix s>}
+status_sig = standard base64 of Ed25519(vault ik, "vettid/vms/2/leash-status" || those bytes)
+rotations  = the vault's identity.rotate statements (§3.4) from the delegation's vault_ik
+             to the ik that signed, in order; absent when it has not rotated
+```
+
+- **Lifetime.** `not_after` = `issued_at` + the delegation's
+  `status_ttl`, and never past the delegation's `exp`. `status_ttl` is
+  set per grant (`leash.grant.issue{status_ttl}`): 60–3,600 s, default
+  900. It is the revocation latency for relying parties outside the
+  vault: 15 minutes by default keeps a revoked delegation usable for at
+  most a quarter of an hour while an agent refreshes about four times an
+  hour per grant; the member may shorten it to a minute for sensitive
+  scopes; an hour is the cap, beyond which a revocation would wait
+  longer than LEASH's "within one heartbeat" (§3.4) can reasonably mean.
+- **Only for delegations in force.** The vault issues a statement only
+  for an unexpired, unrevoked grant of an agent that is not suspended; a
+  revoked grant gets no new statement, so its last one lapses within
+  `status_ttl`. A locked vault (§12.1) issues none: the mechanism fails
+  closed, and an agent whose member's vault stays locked loses its
+  statements within `status_ttl`. Refreshing uses the agent's E2E session
+  and needs its access session (§6.8).
+- **Delivery.** Every grant in `leash.grant.updated` and in an agent's
+  `leash.grant.list` carries a fresh `status`, `status_sig` and
+  `rotations`; `leash.status.get{grant_id}` returns a fresh one
+  (`not_found` for a grant that is not the agent's or not in force,
+  `forbidden` while the agent is suspended). The reference client
+  refreshes a statement when less than a quarter of its lifetime (at
+  least a minute) remains.
+- **Rotation of the vault's `ik`.** The delegation is not re-signed when
+  the vault's `ik` rotates (that would need the member's credential key
+  for every grant): statements are signed by the current `ik` and carry
+  the rotation chain from the delegation's `vault_ik`, which each link
+  signs with both keys (§3.4), at most 32 links. A verifier therefore
+  needs nothing but what the agent presents.
+- **Verification by a relying party that is not connected to the vault**
+  (normative). Given the delegation, `delegation_sig`, the member's
+  credential key it trusts, the statement, `status_sig`, `rotations` and
+  its clock, it MUST check, in order:
+  1. the delegation's canonical form and `delegation_sig` under the
+     member's key, and that `now` < `exp` if `exp` is present;
+  2. the statement's canonical form;
+  3. that `rotations` is a valid chain from the delegation's `vault_ik`
+     (each link as in §3.4); the statement's signer is the chain's last
+     key (the delegation's `vault_ik` if empty);
+  4. `status_sig` under that key;
+  5. that `delegation` equals SHA-256 of the delegation's bytes and
+     `grant_id` the delegation's;
+  6. `issued_at` − 60 s ≤ `now` ≤ `not_after` + 60 s (clock skew);
+  7. that the presenter proves possession of `agent_ik` (for example by
+     signing the relying party's challenge, as LEASH's connector does).
+
+  The reference verifier is `leashwire.VerifyPresented` in vettid-vault
+  (steps 1–6). **Residual:** a revocation takes effect for relying
+  parties within `status_ttl` (plus skew). How a relying party comes to
+  trust the member's credential key in the first place (member
+  authentication, §10.4, for a VettID connection; otherwise LEASH's
+  enrollment and trust model) is outside this document.
+
 | Type | Request body | Response / event body |
 |---|---|---|
-| `leash.grant.issue` (app, within the unlock window) | `{agent_id, grant_id?, version?, scope, approval?, connections?, secrets?, per_hour?, per_day?, expires_at?}`; without `grant_id` a new grant (`version` absent); with it, a replacement of that grant (`version` required; `conflict`); `credential_locked` outside the window | `<grant>`, with its `delegation`, `delegation_sig` and `key` |
+| `leash.grant.issue` (app, within the unlock window) | `{agent_id, grant_id?, version?, scope, approval?, connections?, secrets?, per_hour?, per_day?, expires_at?, status_ttl?}`; without `grant_id` a new grant (`version` absent); with it, a replacement of that grant (`version` required; `conflict`); `credential_locked` outside the window | `<grant>`, with its `delegation`, `delegation_sig` and `key` |
 | `leash.grant.revoke` (app, desktop) | `{grant_id}` | `{}` |
 | `leash.grant.list` (app, desktop: `{agent_id?}`; agent: `{}`, its own) | as left | apps and desktops: `{grants: [<grant>], suspended: [<agent_id>]}`; an agent: `{grants: [<grant>], suspended}` |
 | `leash.grant.updated` (V→D, to the agent) | — | `{grants: [<grant>], suspended}`: all of its grants, after every change and at suspension and resumption |
 | `leash.agent.resume` (app) | `{agent_id}` | `{}`; `not_found` unless the agent is suspended |
+| `leash.status.get` (agent) | `{grant_id}` | `{grant_id, status, status_sig, rotations?}`; `not_found`, `forbidden` (suspended) |
 | `agent.request` (agent) | `{op: "catalog"}`, `{op: "secret.get", secret_id}` or `{op: "secret.use", secret_id, action: "hmac-sha256", data}` | `{secrets: [{secret_id, name, category, description?}]}`, `{secret_id, name, value}` or `{secret_id, action, result}` |
 
 - `agent_id` names an active device of role `agent` (`not_found`
@@ -4581,7 +4653,9 @@ it can read and write only its own objects and use only its own relay key
 | Owner app | Whatever its role allows, including unlock attempts if the PIN is known | Unlink from another device |
 | Desktop | Within an access session, what desktops may send; step-up types (secret values, profile, settings, invitations, removals, grant decisions, action configurations, introductions) only with an app's approval; nothing after the session ends (§6.8) | `device.session.end`; unlink |
 | Agent | Within its access session, only what its LEASH grants cover: through `ask` grants nothing without an app's approval of each request (at most 20 referrals an hour), through `auto` grants up to their rate limits; LEASH operations only on cataloged vault-held secrets, never critical ones; never app-only types, invitations, credential, device or grant management. Refused requests are throttled and repeated ones suspend it; its activity is summarised in the audit log, so it cannot push older entries out (§10.11) | `leash.grant.revoke`, `device.session.end`, `device.unlink`; suspension is automatic |
-| A LEASH delegation (every grant) | A claim, to relying parties that trust the member's credential key, that the agent holds that scope, until the grant's `expires_at` if any; the vault never relies on it. A revoked grant's delegation carries no revocation status: a relying party outside the vault that does not ask the agent's connector for its current grants can be shown one (§10.11) | `leash.grant.revoke` stops the vault and tells the agent at once; give grants an `expires_at` when relying parties outside the vault matter |
+| A LEASH delegation (every grant) | A claim, to relying parties that trust the member's credential key, that the agent holds that scope, until the grant's `expires_at` if any; the vault never relies on it. A relying party that requires a status statement accepts a revoked delegation for at most its `status_ttl` (≤ 1 h, default 15 min) plus skew; one that does not can be shown it until `exp` (§10.11) | `leash.grant.revoke` (no new statements); a shorter `status_ttl` |
+| The vault's `ik` as status issuer | Signing statements that keep a revoked or suspended agent's delegations "valid" for relying parties; it grants nothing in the vault itself. An approved release does only what §10.11 says (§2.1) | Rotate the `ik` (§3.4): the chain moves the issuer; revoke the grants |
+| A status statement | Nothing beyond its `not_after`: it names one delegation by hash and is useless without it and the agent's key | — |
 | Issuing grants | Only with the member present: an app within the credential's unlock window, since the credential key signs each grant (§10.11) | — |
 | A connection holding a grant | The granted items' current values, at most `uses` times, until expiry or revocation; no other field or secret. Values are sealed to the fetching device, so the connection's vault never holds them (§10.12) | `grant.revoke`; removing or blocking the connection |
 | A connection asking to use a critical secret | Nothing without the member's password for each use, bound to that request and payload; then one signature (`sign` over the payload as shown to the member, or the domain-separated `auth`), never the key (§10.13) | Deny; take the secret out of the catalog (`credential.secret.catalog`) |
@@ -4798,7 +4872,11 @@ pending (§15, follow-up 1).
     refer, refuse) behind §6.8's hook; `agent.request` for the catalog,
     retrieval and HMAC use of cataloged secrets; `leash.grant.issue`,
     `.revoke`, `.list`, `.updated`, `leash.agent.resume`; every grant is
-    a delegation signed by the credential key (issuing and pairing with
+    a delegation signed by the credential key, with short-lived status
+    statements signed by the vault's `ik` ("stapling": a 15-minute
+    default lifetime, at most an hour, none for revoked or suspended
+    grants or from a locked vault, the `ik` rotation chain carried,
+    normative offline verification for relying parties) (issuing and pairing with
     grants need an app within the unlock window; lifetime and revocation
     from LEASH §3.2 and §3.4); per-agent refusal cooldowns (1 s doubling
     to 5 min), at most 20 referrals an hour, suspension after 30

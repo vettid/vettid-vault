@@ -166,6 +166,14 @@ type Host interface {
 	AcceptInviteLink(ctx context.Context, link string, now time.Time) (string, error)
 	// CancelInvite revokes an outstanding invitation (§6.4).
 	CancelInvite(id string, now time.Time)
+	// SignLeashStatus signs a LEASH status statement with the vault's
+	// current identity key (§10.11); it signs nothing that does not parse
+	// as one.
+	SignLeashStatus(statement []byte) ([]byte, error)
+	// RotationsFrom returns the vault's identity.rotate statements from
+	// ik to its current identity key (none if ik is current); ok is false
+	// if ik is not on its chain.
+	RotationsFrom(ik []byte) (chain []json.RawMessage, ok bool)
 }
 
 // SendOptions qualify one outbound message.
@@ -287,6 +295,14 @@ func (s *Session) AcceptInviteLink(link string) (string, error) {
 
 // CancelInvite revokes an outstanding invitation.
 func (s *Session) CancelInvite(id string) { s.host.CancelInvite(id, s.now) }
+
+// SignLeashStatus signs a LEASH status statement with the vault's ik.
+func (s *Session) SignLeashStatus(statement []byte) ([]byte, error) {
+	return s.host.SignLeashStatus(statement)
+}
+
+// RotationsFrom returns the vault's rotation chain from ik.
+func (s *Session) RotationsFrom(ik []byte) ([]json.RawMessage, bool) { return s.host.RotationsFrom(ik) }
 
 // VouchCallShare signs a device's call key-exchange share (§10.10).
 func (s *Session) VouchCallShare(deviceIK ed25519.PublicKey, m []byte) ([]byte, error) {

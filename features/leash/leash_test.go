@@ -617,3 +617,70 @@ func FuzzParseRequest(f *testing.F) {
 		}
 	})
 }
+
+// §10.11 status statements: issued by the vault (no credential needed)
+// for grants in force; none for revoked, expired or suspended ones;
+// verifiable offline with the delegation; status_ttl bounds.
+func TestStatusStatements(t *testing.T) {
+	r := newRig(t)
+	for _, ttl := range []string{"59", "3601"} {
+		if res := featuretest.Call(r.f, r.h, t0, vault.KindApp, "leash.grant.issue", `{"agent_id":"dev-agent","scope":"profile.get","status_ttl":`+ttl+`}`); res.Code != "bad_request" {
+			t.Fatalf("status_ttl %s: %q", ttl, res.Code)
+		}
+	}
+	_, gid := r.issue(t, `{"agent_id":"dev-agent","scope":"profile.get","status_ttl":120}`)
+	up := r.h.SentOfType("leash.grant.updated")
+	if len(up) == 0 || !strings.Contains(string(up[len(up)-1].Body), `"status_sig"`) {
+		t.Fatalf("no status in leash.grant.updated: %+v", up)
+	}
+	member := r.w.key.Public().(ed25519.PublicKey)
+	r.w.open = false // statements need no credential
+	get := func(at time.Time) featuretest.Result {
+		return featuretest.Call(r.f, r.h, at, vault.KindAgent, "leash.status.get", `{"grant_id":"`+gid+`"}`)
+	}
+	res := get(t0.Add(time.Minute))
+	if !res.OK() {
+		t.Fatal(res.Code)
+	}
+	o := res.Obj(t)
+	g := r.f.Grants()[0]
+	st, _ := o.Base64("status", -1)
+	ss, _ := o.Base64("status_sig", 64)
+	p := &leashwire.Presented{Delegation: g.Delegation, DelegationSig: g.DelegationSig, Status: st, StatusSig: ss}
+	if _, err := leashwire.VerifyPresented(member, p, t0.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := leashwire.VerifyPresented(member, p, t0.Add(5*time.Minute)); err == nil {
+		t.Fatal("statement outlived its 2-minute ttl")
+	}
+	if res := featuretest.Call(r.f, r.h, t0, vault.KindApp, "leash.status.get", `{"grant_id":"`+gid+`"}`); res.Code != "forbidden" {
+		t.Fatalf("an app asked: %q", res.Code)
+	}
+	// After the vault's ik rotated, statements carry the chain.
+	old := r.h.IK
+	r.h.SetIdentity(0x77)
+	r.h.ChainFrom, r.h.Chain = old, []json.RawMessage{json.RawMessage(`{"fake":1}`)}
+	if res := get(t0.Add(time.Minute)); !res.OK() || !strings.Contains(string(res.Body), `"rotations":[{"fake":1}]`) {
+		t.Fatalf("rotation chain: %s %s", res.Code, res.Body)
+	}
+	// Suspended agent: no statement.
+	r.f.d.Agents[agent] = &AgentState{Suspended: true}
+	if res := get(t0.Add(time.Minute)); res.Code != "forbidden" {
+		t.Fatalf("suspended: %q", res.Code)
+	}
+	delete(r.f.d.Agents, agent)
+	// Revoked: no new statement; the old one simply expires.
+	if res := featuretest.Call(r.f, r.h, t0, vault.KindApp, "leash.grant.revoke", `{"grant_id":"`+gid+`"}`); !res.OK() {
+		t.Fatal(res.Code)
+	}
+	if res := get(t0.Add(time.Minute)); res.Code != "not_found" {
+		t.Fatalf("revoked: %q", res.Code)
+	}
+	// Another agent's grant is not found.
+	r.h.AddDevice("dev-agent2", vault.KindAgent)
+	r.w.open = true
+	_, g2 := r.issue(t, `{"agent_id":"dev-agent2","scope":"profile.get","expires_at":"2026-10-03T12:30:00.000Z"}`)
+	if res := featuretest.Call(r.f, r.h, t0, vault.KindAgent, "leash.status.get", `{"grant_id":"`+g2+`"}`); res.Code != "not_found" {
+		t.Fatalf("another agent's grant: %q", res.Code)
+	}
+}

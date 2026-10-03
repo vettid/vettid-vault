@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"github.com/vettid/vettid-vault/vms/handshake"
+	"github.com/vettid/vettid-vault/vms/leashwire"
 	"sort"
 	"time"
 	"unicode/utf8"
@@ -131,6 +133,27 @@ func (h managerHost) AcceptInviteLink(ctx context.Context, link string, now time
 		return "", err
 	}
 	return p.ID, nil
+}
+
+func (h managerHost) SignLeashStatus(statement []byte) ([]byte, error) {
+	return leashwire.SignStatus(h.m.keys.ik, statement)
+}
+
+func (h managerHost) RotationsFrom(ik []byte) ([]json.RawMessage, bool) {
+	if suite.EqualPublic(ik, h.m.keys.ik.Public().(ed25519.PublicKey)) {
+		return nil, true
+	}
+	for i, raw := range h.m.st.Rotations {
+		r, err := handshake.ParseRotation(raw)
+		if err == nil && suite.EqualPublic(r.OldIK, ik) {
+			out := make([]json.RawMessage, 0, len(h.m.st.Rotations)-i)
+			for _, x := range h.m.st.Rotations[i:] {
+				out = append(out, append(json.RawMessage(nil), x...))
+			}
+			return out, true
+		}
+	}
+	return nil, false
 }
 
 func (h managerHost) CancelInvite(id string, now time.Time) {

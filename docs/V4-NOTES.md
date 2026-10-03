@@ -309,6 +309,19 @@ Follows VAULT-MESSAGING 0.6.0 (§10.11–§10.14, with §6.7, §6.8, §9.1,
 | `connection.handoff`: a connection asks the member to introduce it to one of the member's connections | Dropped. Only the member starts an introduction (`intro.create`) | Owner decision 2026-10-03: connections must not see or ask for another's connections |
 | Peer-mediated invitation, never specified | Both parties accept; A's vault makes a remote invitation bound to C's `ik`, relayed by B; the normal approval and SAS follow | Neither learns the other until both accept; B cannot redirect the invitation to another identity |
 
+### Delegation status statements ("stapling", owner decision 2026-10-03)
+
+Every delegation names its status issuer (the vault, `vault_ik`) and a
+`status_ttl` (60–3,600 s, default 900). The vault signs short statements
+that the delegation is in force (`leash.status.get`, and in every
+`leash.grant.updated`); none for revoked, expired or suspended grants or
+from a locked vault. After an `ik` rotation the statement carries the
+rotation chain instead of re-signing delegations (which would need the
+member's credential key). `leashwire.VerifyPresented` is the offline
+verifier for relying parties; `client.Device.LeashPresent` refreshes the
+statement before it expires. This replaces vettid.dev's public
+revocation-status Lambda, which needed the parent and public tables.
+
 ### OWNER DECISIONS (2026-10-03)
 
 1. **Every LEASH grant is a delegation signed by the member's credential

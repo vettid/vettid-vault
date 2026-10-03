@@ -642,6 +642,14 @@ func (f *Feature) define(s *vault.Session, body []byte) (json.RawMessage, error)
 	a.Name, a.Description, a.Kind, a.Mode, a.Result, a.Connections = d.Name, d.Description, d.Kind, d.Mode, d.Result, d.Connections
 	a.UpdatedAt = now
 	f.d.Actions[a.ID] = a
+	// Pending invocations from connections the action is no longer
+	// offered to can no longer be answered (§10.14).
+	for _, p := range f.sortedPending() {
+		if p.ActionID == a.ID && !contains(a.Connections, p.Conn) {
+			delete(f.d.Pending, p.ID)
+			f.sendResult(s, p.Conn, p.ID, StatusUnavailable, nil)
+		}
+	}
 	s.SyncEvent("action.changed", strictjson.NewBuilder().String("action_id", a.ID).Uint("version", a.Version).Bytes())
 	s.Record(vault.Activity{Kind: "action.defined", Ref: a.ID, Audit: true})
 	f.offer(s, before, a.Connections)

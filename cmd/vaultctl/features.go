@@ -156,6 +156,7 @@ func cmdSecret(ctx context.Context, g *globals, args []string) error {
 	name := fs.String("name", "", "name")
 	valueFile := fs.String("value-file", "", "file holding the value")
 	category := fs.String("category", "", "category")
+	disc := fs.String("discoverability", "", "private (default) or cataloged (§10.7)")
 	_ = fs.Parse(rest)
 	return withDevice(ctx, g, func(d *client.Device) (any, error) {
 		switch op {
@@ -167,6 +168,9 @@ func cmdSecret(ctx context.Context, g *globals, args []string) error {
 			extra := map[string]any{}
 			if *category != "" {
 				extra["category"] = *category
+			}
+			if *disc != "" {
+				extra["discoverability"] = *disc
 			}
 			sid, ver, err := d.SecretPut(ctx, *id, *version, *name, strings.TrimRight(string(v), "\n"), extra)
 			return map[string]any{"secret_id": sid, "version": ver}, err

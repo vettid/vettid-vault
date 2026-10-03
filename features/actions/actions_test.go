@@ -363,7 +363,11 @@ func TestFixedAutoAndUnavailable(t *testing.T) {
 	}
 	// On the answering side: unknown action, not allowlisted, other
 	// version, all `unavailable`.
-	newID := func() string { id, _ := envelope.NewULID(a.now.Add(time.Second)); a.now = a.now.Add(time.Second); return id }
+	newID := func() string {
+		id, _ := envelope.NewULID(a.now.Add(time.Second))
+		a.now = a.now.Add(time.Second)
+		return id
+	}
 	for _, c := range []struct{ from, body string }{
 		{cB, `"action_id":"` + cA + `","version":1`},
 		{cC, `"action_id":"` + fixed + `","version":1`},
@@ -513,4 +517,27 @@ func FuzzParseOffered(f *testing.F) {
 			t.Fatal("too many offers")
 		}
 	})
+}
+
+// §10.14: a pending invocation is answered `unavailable` when its action
+// is no longer offered to that connection.
+func TestRedefineDropsPending(t *testing.T) {
+	a, b, respond, _ := setup(t)
+	inv := b.ok(t, vault.KindApp, "action.invoke", `{"connection_id":"`+cA+`","action_id":"`+respond+`"}`)
+	iid, _ := inv.String("invocation_id")
+	deliver(t, b, cA, a, cB)
+	a.h.Reset()
+	a.ok(t, vault.KindApp, "action.define", `{"action_id":"`+respond+`","version":1,"name":"Lunch?","kind":"respond","connections":["`+cC+`"]}`)
+	var got bool
+	for _, s := range a.h.SentOfType("action.result") {
+		if s.To == cB && str(t, s.Body, "invocation_id") == iid && str(t, s.Body, "status") == StatusUnavailable {
+			got = true
+		}
+	}
+	if !got {
+		t.Fatalf("pending not answered: %+v", a.h.Sent)
+	}
+	if r := a.call(vault.KindApp, "action.respond", `{"invocation_id":"`+iid+`","approve":false}`); r.Code != "not_found" {
+		t.Fatalf("still pending: %q", r.Code)
+	}
 }

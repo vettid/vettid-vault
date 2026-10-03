@@ -5,7 +5,9 @@
 # encapsulation randomness, and the PUBLIC keys (SPKI) of the §16
 # release-update test keys (scalars 32 x 0x21 and 32 x 0x22).
 # They are public by design and are regenerated deterministically by
-# `go generate ./vms/vectors`.
+# `go generate ./vms/vectors`. Also allowlisted: the example ULID of
+# VAULT-MESSAGING §5.3, which tests use as a dummy id (for instance as a
+# `secret_id`, which the generic rule mistakes for a key).
 [extend]
 useDefault = true
 
@@ -18,4 +20,5 @@ regexes = [
   '''1d7856a1a77eee3accf4e69fb2353f2421e3f15584739e5c6df73d487b4b66b4''',
   '''MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAERi26GuT8GpaLTazyDN1tvh''',
   '''MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE1lqTl3yqPRsIGFL/V6eeRl8W''',
+  '''01JB2Z6V9K3M4N5P6Q7R8S9T0V''',
 ]

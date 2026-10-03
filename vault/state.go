@@ -248,7 +248,12 @@ type AuditEntry struct {
 	PeerID string    `json:"peer_id,omitempty"`
 }
 
-// Settings are owner policy values that the runtime needs.
+// Settings are the owner's settings (§10.8), versioned as one object.
 type Settings struct {
-	AutoApproveInPerson bool `json:"auto_approve_in_person"`
+	Version             uint64            `json:"version,omitempty"`
+	AutoApproveInPerson bool              `json:"auto_approve_in_person"`
+	CredentialUnlockTTL uint64            `json:"credential_unlock_ttl,omitempty"` // seconds; 0 = default
+	FeedRetentionDays   uint64            `json:"feed_retention_days,omitempty"`
+	AuditRetentionDays  uint64            `json:"audit_retention_days,omitempty"`
+	App                 map[string]string `json:"app,omitempty"`
 }

@@ -45,6 +45,7 @@ func (m *Manager) Start(ctx context.Context) error {
 	}
 	m.started = true
 	now := m.now()
+	m.record(Activity{Kind: "vault.unlocked", Audit: true}, now)
 	m.remintIssued(now)
 	m.reconnectExpired(now)
 	for _, p := range m.st.Devices {
@@ -312,7 +313,8 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 		return ackAfterFlush
 	}
 	key := p.ID + "|" + in.ID
-	if !eph {
+	volatile := te != nil && te.spec.Volatile && te.spec.Request && in.Re == "" && te.allows(p.Kind)
+	if !eph && !volatile {
 		if _, dup := m.st.SeenInner[key]; dup {
 			// §8.2 layer 2: a retransmission. Re-send a cached response, in a
 			// new envelope; never re-execute.
@@ -339,11 +341,13 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 		}
 		return disp(eph)
 	}
-	s := &Session{m: m, peer: p, ctx: ctx, now: now, inner: in}
+	s := &Session{m: m, peer: p, host: managerHost{m}, from: info(p), ctx: ctx, now: now, inner: in}
 	body, herr := te.handler.Handle(ctx, s, in)
 	if te.spec.Request {
 		var he *HandlerError
 		switch {
+		case herr == nil && volatile:
+			m.respondVolatile(p, in, body, now)
 		case herr == nil:
 			m.respond(p, in, key, body, now)
 		case errors.As(herr, &he):
@@ -369,6 +373,26 @@ func (m *Manager) respond(p *Peer, req *envelope.Inner, key string, body json.Ra
 		body = json.RawMessage(`{}`)
 	}
 	m.sendResponse(p, req, key, &envelope.Inner{Type: req.Type, Re: req.ID, Status: envelope.StatusOK, Body: body}, now)
+}
+
+// respondVolatile sends a response that carries secret values: never
+// cached, never in vault state (§8.2, §3.5.3).
+func (m *Manager) respondVolatile(p *Peer, req *envelope.Inner, body json.RawMessage, now time.Time) {
+	id, err := envelope.NewULID(now)
+	if err != nil {
+		return
+	}
+	out := &envelope.Inner{ID: id, TS: now, Type: req.Type, Re: req.ID, Status: envelope.StatusOK, Body: body}
+	kr := m.sessions[p.ID]
+	if kr == nil || kr.Current() == nil {
+		return
+	}
+	raw, err := kr.Current().Seal(out)
+	if err != nil {
+		return
+	}
+	m.volatile = append(m.volatile, &OutboxEntry{ID: id, Op: OpDeposit, PeerID: p.ID, RelayURL: p.Relay.URL,
+		Mailbox: p.Relay.Mailbox, Payload: raw, BestEffort: true, Created: now})
 }
 
 func (m *Manager) respondError(p *Peer, req *envelope.Inner, key, code, msg string, now time.Time) {
@@ -413,6 +437,15 @@ func (m *Manager) handleResponse(p *Peer, in *envelope.Inner, now time.Time) {
 
 func (m *Manager) audit(now time.Time, event, peer string) {
 	m.st.Audit = append(m.st.Audit, AuditEntry{At: now, Event: event, PeerID: peer})
+	if k := auditKind(event); k != "" {
+		a := Activity{Kind: k, Audit: true}
+		if _, ok := m.st.Connections[peer]; ok {
+			a.ConnectionID = peer
+		} else if peer != "" {
+			a.DeviceID = peer
+		}
+		m.record(a, now)
+	}
 	if n := len(m.st.Audit); n > AuditMax {
 		m.st.Audit = append([]AuditEntry(nil), m.st.Audit[n-AuditMax:]...)
 	}

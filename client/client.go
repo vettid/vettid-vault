@@ -73,6 +73,9 @@ type State struct {
 	IssuedExp time.Time `json:"issued_exp,omitempty"`
 	// Alt is the alternate-channel state (§11.10.6, §13.2).
 	Alt *AltState `json:"alt,omitempty"`
+	// Credential is this app's copy of the Protean Credential (§3.5): the
+	// sealed blob, useless without the vault's CEK and the password.
+	Credential *CredentialCopy `json:"credential,omitempty"`
 }
 
 // VaultRecord is what the device knows about its vault.

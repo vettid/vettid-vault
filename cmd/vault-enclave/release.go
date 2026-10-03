@@ -12,7 +12,7 @@ import (
 	"github.com/vettid/vettid-vault/enclave/nsm"
 	"github.com/vettid/vettid-vault/enclave/supervisor"
 	"github.com/vettid/vettid-vault/enclave/vaultproc"
-	"github.com/vettid/vettid-vault/features/messaging"
+	"github.com/vettid/vettid-vault/features/all"
 	"github.com/vettid/vettid-vault/internal/hostproto"
 	"github.com/vettid/vettid-vault/internal/vsock"
 	"github.com/vettid/vettid-vault/vault"
@@ -78,7 +78,7 @@ const vaultUIDBase = 200000
 func vaultPlatform([]string) (vaultproc.Platform, error) {
 	return vaultproc.Platform{
 		Config:         func(id string) enclave.Config { return enclave.ReleaseConfig(id, enclave.ReleaseRelayURL) },
-		Features:       func() []vault.Feature { return []vault.Feature{messaging.New()} },
+		Features:       func() []vault.Feature { return all.New(all.Options{}) },
 		RequireSeccomp: true,
 	}, nil
 }

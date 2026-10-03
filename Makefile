@@ -47,7 +47,7 @@ lint: vet staticcheck
 # test authorities (relaytest, enclavetest: fake NSM and KMS, test roots); and
 # the dev enclave must not compile at all without its build tag.
 check-tcb:
-	@if $(GO) list -deps $(LIBPKGS) | grep -E 'hpkederand|mlkemtest|/devenclave|relaytest|enclavetest|parenttest|memberapitest'; then \
+	@if $(GO) list -deps $(LIBPKGS) | grep -E 'hpkederand|mlkemtest|/devenclave|relaytest|enclavetest|parenttest|memberapitest|featuretest'; then \
 	  echo "dev, test or vector-only code linked into release packages"; exit 1; fi
 	@if $(GO) list ./devenclave >/dev/null 2>&1; then \
 	  echo "devenclave compiles without the devenclave tag"; exit 1; fi
@@ -55,7 +55,7 @@ check-tcb:
 	  head -1 $$f | grep -qx '//go:build devenclave' || { echo "$$f lacks //go:build devenclave"; exit 1; }; done
 	@head -1 cmd/vault-enclave/release.go | grep -qx '//go:build !devenclave' || { echo "cmd/vault-enclave/release.go lacks //go:build !devenclave"; exit 1; }
 	@for os in linux; do \
-	  if GOOS=$$os $(GO) list -deps $(ENCLAVEPKGS) | grep -E 'aws-sdk-go|smithy-go|vettid-vault/parent|hpkederand|mlkemtest|/devenclave|relaytest|enclavetest|memberapitest|parenttest'; then \
+	  if GOOS=$$os $(GO) list -deps $(ENCLAVEPKGS) | grep -E 'aws-sdk-go|smithy-go|vettid-vault/parent|hpkederand|mlkemtest|/devenclave|relaytest|enclavetest|memberapitest|parenttest|featuretest'; then \
 	    echo "the enclave binary links the AWS SDK, the parent, or dev/test code"; exit 1; fi; done
 	@if GOOS=linux $(GO) list -deps $(ENCLAVEPKGS) | grep -q 'enclave/nsm' && GOOS=linux $(GO) list -deps $(ENCLAVEPKGS) | grep -q 'internal/vsock' && \
 	  GOOS=linux $(GO) list -deps $(ENCLAVEPKGS) | grep -q 'internal/seccomp'; then :; else \

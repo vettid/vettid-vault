@@ -6,6 +6,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/envelope"
 )
 
@@ -37,6 +38,12 @@ type TypeSpec struct {
 	// From lists the principal kinds allowed to send this type: "app",
 	// "desktop", "agent", "connection".
 	From []string
+	// Volatile requests have responses that carry secret values
+	// (credential.secret.get, §8.2, §3.5.3): the response is never cached
+	// or written to vault state, it is deposited from memory only (lost on
+	// a crash), and a retransmission is executed again. Only for types
+	// whose sole side effects are audit and feed entries.
+	Volatile bool
 }
 
 // HandlerError is an error response (§5.3 `error`).
@@ -62,14 +69,7 @@ type typeEntry struct {
 	handler Handler
 }
 
-func (t *typeEntry) allows(kind string) bool {
-	for _, k := range t.spec.From {
-		if k == kind {
-			return true
-		}
-	}
-	return false
-}
+func (t *typeEntry) allows(kind string) bool { return t.spec.Allows(kind) }
 
 func (m *Manager) addFeature(f Feature) {
 	m.features = append(m.features, f)
@@ -92,13 +92,46 @@ func (m *Manager) register(ts TypeSpec, h Handler) {
 }
 
 // Session is what a handler sees: the principal that sent the message and
-// the effects it may cause. It is valid only during Handle.
+// the effects it may cause. It is valid only during Handle (or during an
+// ActivitySink or ConnectionObserver callback).
 type Session struct {
-	m     *Manager
-	peer  *Peer
+	m     *Manager // nil for sessions built with NewSession
+	peer  *Peer    // the sender's record (core handlers); nil otherwise
+	host  Host
+	from  PeerInfo
 	ctx   context.Context
 	now   time.Time
 	inner *envelope.Inner
+}
+
+// Host is what a Session acts on. The Manager implements it for the
+// messages it dispatches; tests of feature packages supply their own.
+// Every method is called with the vault's lock held.
+type Host interface {
+	VaultID() string
+	Connection(id string) (PeerInfo, bool)
+	Connections() []PeerInfo
+	// SendToConnection queues a durable message to an active connection.
+	SendToConnection(id, typ string, body json.RawMessage, now time.Time) error
+	// NotifyDevices sends a durable event to every owner app and desktop
+	// except the device `except` ("" for none).
+	NotifyDevices(typ string, body json.RawMessage, except string, now time.Time)
+	NewID(now time.Time) string
+	// Record passes an activity to the audit log and the feed.
+	Record(a Activity, now time.Time)
+	// SetConnectionProfile replaces a connection's shared profile (§10.8).
+	SetConnectionProfile(id string, profile json.RawMessage, now time.Time) error
+	// RotateIdentity rotates the vault's ik and kem (§3.4) within the
+	// current batch.
+	RotateIdentity(now time.Time) error
+	Settings() Settings
+	SetSettings(Settings)
+}
+
+// NewSession returns a session for a message from `from`, acting on h. It
+// is how feature tests drive handlers; the Manager builds its own.
+func NewSession(ctx context.Context, h Host, from PeerInfo, now time.Time, in *envelope.Inner) *Session {
+	return &Session{host: h, from: from, ctx: ctx, now: now, inner: in}
 }
 
 // PeerInfo is a read-only view of a principal.
@@ -111,32 +144,34 @@ type PeerInfo struct {
 }
 
 func info(p *Peer) PeerInfo {
+	if p == nil {
+		return PeerInfo{}
+	}
 	return PeerInfo{ID: p.ID, Kind: p.Kind, Name: p.Name, State: p.State, Profile: p.Profile}
 }
 
-// From returns the sending principal.
-func (s *Session) From() PeerInfo { return info(s.peer) }
+// From returns the sending principal (zero for vault-internal activity).
+func (s *Session) From() PeerInfo { return s.from }
 
 // Now returns the processing time.
 func (s *Session) Now() time.Time { return s.now }
 
-// Connection returns a connection by id.
-func (s *Session) Connection(id string) (PeerInfo, bool) {
-	p, ok := s.m.st.Connections[id]
-	if !ok {
-		return PeerInfo{}, false
+// Context returns the request context.
+func (s *Session) Context() context.Context {
+	if s.ctx == nil {
+		return context.Background()
 	}
-	return info(p), true
+	return s.ctx
 }
 
-// Connections lists the connections.
-func (s *Session) Connections() []PeerInfo {
-	var out []PeerInfo
-	for _, p := range s.m.st.Connections {
-		out = append(out, info(p))
-	}
-	return out
-}
+// VaultID returns the vault id.
+func (s *Session) VaultID() string { return s.host.VaultID() }
+
+// Connection returns a connection by id.
+func (s *Session) Connection(id string) (PeerInfo, bool) { return s.host.Connection(id) }
+
+// Connections lists the connections, sorted by id.
+func (s *Session) Connections() []PeerInfo { return s.host.Connections() }
 
 // ErrNoSession is returned when a principal has no usable session.
 var ErrNoSession = errors.New("vault: no session with that principal")
@@ -144,27 +179,96 @@ var ErrNoSession = errors.New("vault: no session with that principal")
 // SendToConnection queues a durable message to an active connection, in one
 // deposit under that connection's session (§9.3).
 func (s *Session) SendToConnection(id, typ string, body json.RawMessage) error {
-	p, ok := s.m.st.Connections[id]
-	if !ok || p.State != PeerActive {
-		return ErrNoSession
-	}
-	if s.m.sendTo(p, typ, body, s.now) == "" {
-		return ErrNoSession
-	}
-	return nil
+	return s.host.SendToConnection(id, typ, body, s.now)
 }
 
 // NotifyDevices sends a durable event to every owner device except the
 // sender of the current message (§9.1: side effects reach the owner's other
 // devices as events).
 func (s *Session) NotifyDevices(typ string, body json.RawMessage) {
-	s.m.notifyDevices(typ, body, s.peer.ID, s.now)
+	s.host.NotifyDevices(typ, body, s.from.ID, s.now)
 }
 
 // NotifyAllDevices sends a durable event to every owner device.
 func (s *Session) NotifyAllDevices(typ string, body json.RawMessage) {
-	s.m.notifyDevices(typ, body, "", s.now)
+	s.host.NotifyDevices(typ, body, "", s.now)
+}
+
+// SyncEvent sends sync.event{kind, members...} to the owner's other
+// devices (§10.1). members is a JSON object or nil.
+func (s *Session) SyncEvent(kind string, members []byte) {
+	b := []byte(`{"kind":`)
+	b = append(b, strictjson.MarshalString(kind)...)
+	if len(members) > 2 {
+		b = append(append(b, ','), members[1:]...)
+	} else {
+		b = append(b, '}')
+	}
+	s.NotifyDevices("sync.event", b)
 }
 
 // NewID returns a fresh ULID.
-func (s *Session) NewID() string { return s.m.newID(s.now) }
+func (s *Session) NewID() string { return s.host.NewID(s.now) }
+
+// Record records an activity in the audit log and/or the feed (§10.9).
+func (s *Session) Record(a Activity) { s.host.Record(a, s.now) }
+
+// SetConnectionProfile replaces a connection's shared profile (§10.8).
+func (s *Session) SetConnectionProfile(id string, profile json.RawMessage) error {
+	return s.host.SetConnectionProfile(id, profile, s.now)
+}
+
+// RotateIdentity rotates the vault's ik and kem (§3.4); the batch's flush
+// persists it.
+func (s *Session) RotateIdentity() error { return s.host.RotateIdentity(s.now) }
+
+// Settings returns the owner's settings (§10.8).
+func (s *Session) Settings() Settings { return s.host.Settings() }
+
+// Activity is something that happened in the vault, for the audit log and
+// the feed (§10.9). It never carries content, secret values or keys.
+type Activity struct {
+	Kind         string
+	ConnectionID string
+	DeviceID     string
+	Ref          string
+	Direction    string // "in", "out" or ""
+	Audit        bool   // record in the audit log
+	Feed         bool   // create a feed item
+	Priority     string // feed priority ("" = normal)
+}
+
+// ActivitySink is implemented by features that keep activity (the audit
+// log and the feed).
+type ActivitySink interface {
+	RecordActivity(s *Session, a Activity)
+}
+
+// ConnectionObserver is implemented by features that act when a
+// connection becomes active (profile.update on activation, §9.3).
+type ConnectionObserver interface {
+	ConnectionAdded(s *Session, connectionID string)
+}
+
+// HandshakeProfiler supplies the vault's self-asserted hs.init profile and
+// invite hint name (§6.2, §6.4): its display name only.
+type HandshakeProfiler interface {
+	DisplayName() string
+}
+
+// Zeroizer is implemented by features that hold secrets in memory outside
+// their saved state (the credential unlock window, §3.5.3); the vault calls
+// it when it locks or zeroizes.
+type Zeroizer interface {
+	Zeroize()
+}
+
+// Allows reports whether a principal kind may send a type (§10.1).
+func (t TypeSpec) Allows(kind string) bool {
+	for _, k := range t.From {
+		if k == kind {
+			return true
+		}
+	}
+	return false
+}

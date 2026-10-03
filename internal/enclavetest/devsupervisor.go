@@ -15,7 +15,7 @@ import (
 	"github.com/vettid/vettid-vault/enclave/egress"
 	"github.com/vettid/vettid-vault/enclave/supervisor"
 	"github.com/vettid/vettid-vault/enclave/vaultproc"
-	"github.com/vettid/vettid-vault/features/messaging"
+	"github.com/vettid/vettid-vault/features/all"
 	"github.com/vettid/vettid-vault/internal/hostproto"
 	"github.com/vettid/vettid-vault/vault"
 )
@@ -125,7 +125,7 @@ func DevVaultPlatform(args []string) (vaultproc.Platform, error) {
 	}
 	return vaultproc.Platform{
 		Config:         func(id string) enclave.Config { return DevConfig(id, *n, *relay) },
-		Features:       func() []vault.Feature { return []vault.Feature{messaging.New()} },
+		Features:       func() []vault.Feature { return all.Dev() },
 		RequireSeccomp: true,
 	}, nil
 }

@@ -25,7 +25,7 @@ import (
 	"github.com/vettid/vettid-vault/client"
 	"github.com/vettid/vettid-vault/devenclave"
 	"github.com/vettid/vettid-vault/enclave"
-	"github.com/vettid/vettid-vault/features/messaging"
+	"github.com/vettid/vettid-vault/features/all"
 	"github.com/vettid/vettid-vault/internal/enclavetest"
 	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vault/store"
@@ -92,7 +92,7 @@ func cmdVaultCreate(ctx context.Context, _ *globals, args []string) error {
 	}
 	ra := app.RelayAddr()
 	m, err := devenclave.Create(ctx, vault.CreateParams{
-		Options: vault.Options{Store: st, Sealer: sealer, Features: []vault.Feature{messaging.New()}},
+		Options: vault.Options{Store: st, Sealer: sealer, Features: all.Dev()},
 		PIN:     *pin, RelayURL: *relay, Provisional: true,
 		App: &vault.EnrollApp{Name: "app", IK: app.IdentityKey(), KEM: app.KEMKey(),
 			Relay: vault.PeerRelay{URL: ra.URL, Mailbox: ra.Mailbox, PK: ra.PK}, OpenToken: open},
@@ -122,7 +122,7 @@ func cmdVaultRun(_ context.Context, _ *globals, args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 	m, res, err := devenclave.Unlock(ctx, vault.UnlockParams{
-		Options: vault.Options{Store: st, Sealer: sealer, WebSocket: *ws, Features: []vault.Feature{messaging.New()}},
+		Options: vault.Options{Store: st, Sealer: sealer, WebSocket: *ws, Features: all.Dev()},
 		VaultID: *id, PIN: *pin,
 	})
 	if err != nil {
@@ -189,7 +189,7 @@ func (a *altFlags) devWorld() (*enclavetest.World, []uint64, error) {
 	w.VaultOptions = vault.Options{Relay: func(base string, key ed25519.PrivateKey) vault.Relay {
 		return vault.NewClientRelay(base, key, nil, time.Now)
 	}}
-	w.Features = func() []vault.Feature { return []vault.Feature{messaging.New()} }
+	w.Features = func() []vault.Feature { return all.Dev() }
 	w.SetSerial(uint64(time.Now().Unix()))
 	var nums []uint64
 	for _, f := range strings.Split(a.releases, ",") {

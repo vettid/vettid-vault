@@ -16,6 +16,8 @@ import (
 
 	"github.com/vettid/vettid-vault/client"
 	"github.com/vettid/vettid-vault/devenclave"
+	"github.com/vettid/vettid-vault/features/all"
+	"github.com/vettid/vettid-vault/features/credential"
 	"github.com/vettid/vettid-vault/features/messaging"
 	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault"
@@ -40,6 +42,7 @@ type testVault struct {
 	mu       sync.Mutex
 	m        *vault.Manager
 	msg      *messaging.Feature
+	fs       *all.Set
 	cancel   context.CancelFunc
 	done     chan error
 	finished chan struct{}
@@ -77,9 +80,10 @@ func newTestVault(t *testing.T, relayURL, name string, tweak func(*vault.Options
 		t.Fatal(err)
 	}
 	ra := app.RelayAddr()
-	tv.msg = messaging.New()
+	tv.fs = newSet()
+	tv.msg = tv.fs.Messaging
 	o := tv.opts
-	o.Features = []vault.Feature{tv.msg}
+	o.Features = tv.fs.List()
 	m, err := devenclave.Create(ctx, vault.CreateParams{
 		Options: o, UserGUID: "user-" + name, PIN: pin, RelayURL: relayURL, Provisional: true,
 		App: &vault.EnrollApp{Name: name + "-app", IK: app.IdentityKey(), KEM: app.KEMKey(),
@@ -153,9 +157,13 @@ func (tv *testVault) manager() *vault.Manager {
 
 // unlock opens a new manager for this vault from the store.
 func (tv *testVault) unlock(ctx context.Context, tweak func(*vault.Options)) (*vault.Manager, *messaging.Feature, error) {
-	f := messaging.New()
+	fs := newSet()
+	tv.mu.Lock()
+	tv.fs = fs
+	tv.mu.Unlock()
+	f := fs.Messaging
 	o := tv.opts
-	o.Features = []vault.Feature{f}
+	o.Features = fs.List()
 	if tweak != nil {
 		tweak(&o)
 	}
@@ -272,3 +280,7 @@ func sendText(t *testing.T, tv *testVault, d *client.Device, conn, text string) 
 	id, _ := r.String("message_id")
 	return id
 }
+
+// newSet returns the full feature set with test-strength KDF parameters
+// (the memory rules: minimum Argon2id in tests).
+func newSet() *all.Set { return all.NewSet(all.Options{CredentialKDF: credential.MinKDF}) }

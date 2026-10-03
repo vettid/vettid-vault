@@ -152,11 +152,13 @@ func (m *Manager) handleInit(ctx context.Context, raw []byte, sender ed25519.Pub
 			b.Raw("profile", body.Profile)
 		}
 		m.notifyDevices("connection.request.pending", b.Bytes(), "", now)
+		m.record(Activity{Kind: "connection.request", Ref: id, Feed: true}, now)
 	default:
 		// §6.7: approval first; only apps approve.
 		b := strictjson.NewBuilder().String("pairing_id", inv.ID).String("pending_id", id).
 			String("role", inv.Kind).String("name", profileName(body.Profile)).String("sas", pi.SAS())
 		m.notifyApps("device.pair.pending", b.Bytes(), now)
+		m.record(Activity{Kind: "device.pair.pending", Ref: id, Feed: true, Priority: "high"}, now)
 	}
 	return ackAfterFlush
 }
@@ -170,10 +172,7 @@ func profileName(raw json.RawMessage) string {
 		return ""
 	}
 	n, _, _ := o.OptString("name")
-	if len(n) > 128 {
-		n = n[:128]
-	}
-	return n
+	return truncateUTF8(n, 128)
 }
 
 // approveInbound answers a pending hs.init: this is the approval point
@@ -429,14 +428,18 @@ func (m *Manager) activate(p *Peer, ep *handshake.Epoch, purpose handshake.Purpo
 	switch {
 	case isNew && p.Kind == KindConnection:
 		m.notifyDevices("connection.event", connEvent(p.ID, "added"), "", now)
+		m.record(Activity{Kind: "connection.added", ConnectionID: p.ID, Audit: true, Feed: true}, now)
+		m.connectionAdded(p.ID, now)
 	case isNew:
 		b := strictjson.NewBuilder().String("device_id", p.ID).String("role", p.Kind).String("vault_id", m.st.VaultID).
 			String("release", m.opt.Release.PCR0).Uint("release_number", m.opt.Release.Number).Bytes()
 		m.sendTo(p, "device.paired", b, now)
 		m.notifyDevices("sync.event", strictjson.NewBuilder().String("kind", "device.paired").String("device_id", p.ID).
 			String("role", p.Kind).Bytes(), p.ID, now)
+		m.record(Activity{Kind: "device.paired", DeviceID: p.ID, Audit: true, Feed: true}, now)
 	case purpose == handshake.PurposeReconnect:
 		m.notifyDevices("connection.event", connEvent(p.ID, "reconnected"), "", now)
+		m.record(Activity{Kind: "connection.reconnected", ConnectionID: p.ID, Audit: true}, now)
 		m.retryPeer(p.ID)
 	case purpose == handshake.PurposeRekey && p.Kind == KindConnection:
 		m.notifyDevices("connection.event", connEvent(p.ID, "rekeyed"), "", now)
@@ -630,6 +633,9 @@ func (m *Manager) createInvite(ctx context.Context, kind string, ttl time.Durati
 	b := &invite.Bundle{Kind: kind, InviteID: id, Remote: remote,
 		Vault: handshake.Principal{IK: m.keys.ik.Public().(ed25519.PublicKey), KEM: m.keys.kem.Public(), Relay: m.ownAddr()},
 		Token: tok, Exp: exp}
+	if kind == KindConnection {
+		b.HintName = truncateUTF8(m.displayName(), invite.MaxHintName)
+	}
 	bj, err := b.Marshal()
 	if err != nil {
 		return nil, "", err
@@ -679,7 +685,7 @@ func (m *Manager) acceptInvite(ctx context.Context, link string, now time.Time) 
 		Purpose: handshake.PurposeConnection, Ctx: b.InviteID,
 		Identity: m.keys.ik, StaticKEM: m.keys.kem.Public(), Relay: m.ownAddr(),
 		ResponderIK: b.Vault.IK, ResponderEK: b.Vault.KEM, ResponderRelayKey: b.Vault.Relay.PK,
-		Policy: handshake.PolicyVaultToVault, Now: now,
+		Policy: handshake.PolicyVaultToVault, Now: now, Profile: m.handshakeProfile(),
 	}
 	if cfg.Token, issued, err = m.mintStanding(p, now, issued); err != nil {
 		return nil, err

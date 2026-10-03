@@ -9,6 +9,7 @@ import (
 
 	"github.com/vettid/vettid-relay/relayclient"
 	"github.com/vettid/vettid-vault/vms/envelope"
+	"github.com/vettid/vettid-vault/vms/suite"
 )
 
 // Outbox retry backoff for transport errors and 5xx (§8.6: full jitter,
@@ -178,6 +179,20 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 		d := time.Duration(250*(1<<min(e.Attempts, 7))) * time.Millisecond
 		e.NotBefore = now.Add(min(d, outboxMaxBackoff))
 	}
+	// Volatile deposits go after everything durable to the same mailbox
+	// (so a response never overtakes an hs.fin); one attempt each.
+	vol := m.volatile
+	m.volatile = nil
+	for _, e := range vol {
+		if blocked[e.RelayURL+"|"+e.Mailbox] || ctx.Err() != nil {
+			suite.Wipe(e.Payload)
+			continue // lost: the requester retransmits, which re-executes
+		}
+		if p := m.peer(e.PeerID); p != nil && p.Standing.Token != "" {
+			_, _ = m.relay.Deposit(ctx, e.RelayURL, e.Mailbox, p.Standing.Token, e.Payload)
+		}
+		suite.Wipe(e.Payload)
+	}
 }
 
 // deposit performs one deposit and applies the §8.6 error table.
@@ -222,6 +237,7 @@ func (m *Manager) deposit(ctx context.Context, e *OutboxEntry, now time.Time) er
 			}
 			if p.Kind == KindConnection {
 				m.notifyDevices("connection.event", connEvent(p.ID, "stale"), "", now)
+				m.record(Activity{Kind: "connection.stale", ConnectionID: p.ID, Audit: true, Feed: true}, now)
 			}
 		}
 		e.Done = true

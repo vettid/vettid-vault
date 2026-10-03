@@ -57,6 +57,8 @@ func (m *Manager) registerCore() {
 	r(tokenRefreshType, true, all, m.hTokenRefresh)
 	r("identity.rotate", false, conns, m.hIdentityRotate)
 	r("relay.address.update", false, all, m.hAddressUpdate)
+	r("settings.get", true, owners, m.hSettingsGet)
+	r("settings.set", true, owners, m.hSettingsSet)
 }
 
 func obj(in *envelope.Inner) (strictjson.Object, error) {
@@ -204,6 +206,7 @@ func (m *Manager) hDeviceUnlink(_ context.Context, s *Session, in *envelope.Inne
 		return nil, errNotFound
 	}
 	m.removePeer(p, "device.unlinked", s.now)
+	m.record(Activity{Kind: "device.unlinked", DeviceID: id, Audit: true, Feed: true}, s.now)
 	m.notifyDevices("sync.event", strictjson.NewBuilder().String("kind", "device.unlinked").String("device_id", id).Bytes(), "", s.now)
 	return nil, nil
 }
@@ -391,6 +394,7 @@ func (m *Manager) hConnRemove(_ context.Context, s *Session, in *envelope.Inner)
 		return nil, errNotFound
 	}
 	m.removePeer(p, "connection.removed", s.now)
+	m.record(Activity{Kind: "connection.removed", ConnectionID: id, Direction: "out", Audit: true}, s.now)
 	m.notifyDevices("connection.event", connEvent(id, "removed"), "", s.now)
 	return nil, nil
 }
@@ -399,6 +403,7 @@ func (m *Manager) hConnRemoved(_ context.Context, s *Session, _ *envelope.Inner)
 	p := s.peer
 	p.State = PeerStale // so removePeer sends no notice back
 	m.removePeer(p, "", s.now)
+	m.record(Activity{Kind: "connection.removed", ConnectionID: p.ID, Direction: "in", Audit: true, Feed: true}, s.now)
 	m.notifyDevices("connection.event", connEvent(p.ID, "removed"), "", s.now)
 	return nil, nil
 }
@@ -503,7 +508,19 @@ func (m *Manager) RotateIdentity(ctx context.Context) error {
 	if m.locked {
 		return ErrLocked
 	}
-	now := m.now()
+	if err := m.rotateIdentity(m.now()); err != nil {
+		return err
+	}
+	if err := m.persist(ctx, false); err != nil {
+		return err
+	}
+	m.drainOutbox(ctx)
+	return m.flushIfDirty(ctx)
+}
+
+// rotateIdentity performs the rotation in memory; the caller persists it
+// (in a batch, the batch's flush does).
+func (m *Manager) rotateIdentity(now time.Time) error {
 	ikSeed, err := suite.RandomBytes(32)
 	if err != nil {
 		return err
@@ -533,11 +550,9 @@ func (m *Manager) RotateIdentity(ctx context.Context) error {
 			m.startRekey(p, now)
 		}
 	}
-	if err := m.persist(ctx, false); err != nil {
-		return err
-	}
-	m.drainOutbox(ctx)
-	return m.flushIfDirty(ctx)
+	m.dirty = true
+	m.record(Activity{Kind: "identity.rotated", Audit: true}, now)
+	return nil
 }
 
 // pruneRetiredKEMs drops retired KEM keys after 400 days (§6.6).

@@ -123,6 +123,10 @@ type Manager struct {
 	rates         map[string]*rateWindow
 	requests      map[string]string // our outstanding request inner id -> peer id
 	requestTypes  map[string]string // ... -> type
+	// volatile holds deposits that must never reach vault state (responses
+	// carrying secret values, TypeSpec.Volatile); drained after the
+	// durable outbox, dropped on failure or lock.
+	volatile []*OutboxEntry
 	dirty         bool
 
 	locked      bool
@@ -598,12 +602,21 @@ func (m *Manager) zeroize() {
 	}
 	suite.Wipe(m.dek)
 	m.dek = nil
+	for _, f := range m.features {
+		if z, ok := f.(Zeroizer); ok {
+			z.Zeroize()
+		}
+	}
 	m.keys.destroy()
 	m.keys = nil
 	for _, kr := range m.sessions {
 		kr.Destroy()
 	}
 	m.sessions = map[string]*handshake.Keyring{}
+	for _, e := range m.volatile {
+		suite.Wipe(e.Payload)
+	}
+	m.volatile = nil
 	for _, pi := range m.inbound {
 		pi.Discard()
 	}
@@ -674,6 +687,7 @@ func (m *Manager) lockLocked(ctx context.Context) error {
 	// Deliver what is queued first (an interrupted batch may have left
 	// deposits, such as an hs.fin, in the outbox), then flush.
 	m.drainOutbox(ctx)
+	m.record(Activity{Kind: "vault.locked", Audit: true}, m.now())
 	err := m.persist(ctx, false)
 	if errors.Is(err, ErrSplitBrain) {
 		return err

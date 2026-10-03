@@ -11,7 +11,7 @@ import (
 
 	"github.com/vettid/vettid-vault/client"
 	"github.com/vettid/vettid-vault/enclave"
-	"github.com/vettid/vettid-vault/features/messaging"
+	"github.com/vettid/vettid-vault/features/all"
 	"github.com/vettid/vettid-vault/internal/enclavetest"
 	"github.com/vettid/vettid-vault/internal/relaytest"
 	"github.com/vettid/vettid-vault/vault"
@@ -45,7 +45,7 @@ func newACWorld(t *testing.T) *acWorld {
 		Relay: func(base string, key ed25519.PrivateKey) vault.Relay {
 			return vault.NewClientRelay(base, key, nil, time.Now)
 		}}
-	w.Features = func() []vault.Feature { return []vault.Feature{messaging.New()} }
+	w.Features = all.Dev
 	w.Stopped = func(id string, err error) { t.Logf("vault %s stopped: %v", id[:6], err) }
 	w.AddRelease(rel3)
 	if _, err := w.Start(3); err != nil {

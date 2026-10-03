@@ -70,6 +70,55 @@ func TestVaultctlSmoke(t *testing.T) {
 		t.Fatalf("status: %s", out)
 	}
 	run("request", "vault.enroll.confirm")
+
+	// V4 batch 1 (§10.6–§10.9) through vaultctl's feature commands.
+	t.Setenv("VAULTCTL_PASSWORD", "correct horse battery staple")
+	run("credential", "create")
+	val := filepath.Join(dir, "value")
+	if err := os.WriteFile(val, []byte("seed words here"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out = run("credential", "secret-add", "-name", "seed", "-category", "seed_phrase", "-value-file", val)
+	id := between(out, `"secret_id": "`, `"`)
+	if out = run("credential", "secret-get", "-id", id); !strings.Contains(out, "seed words here") {
+		t.Fatalf("critical secret: %s", out)
+	}
+	if out = run("credential", "secret-list"); !strings.Contains(out, `"seed"`) || strings.Contains(out, "seed words") {
+		t.Fatalf("critical list: %s", out)
+	}
+	out = run("secret", "put", "-name", "wifi", "-value-file", val)
+	sid := between(out, `"secret_id": "`, `"`)
+	if out = run("secret", "get", "-id", sid); !strings.Contains(out, "seed words here") {
+		t.Fatalf("secret: %s", out)
+	}
+	run("profile", "set", `{"version":0,"name":"Phone Owner","set":{"contact.email":{"value":"o@example.org"}},"shared":["contact.email"]}`)
+	if out = run("profile", "get"); !strings.Contains(out, "o@example.org") {
+		t.Fatalf("profile: %s", out)
+	}
+	run("settings", "set", "0", `{"app.theme":"dark","feed.retention_days":14}`)
+	if out = run("settings", "get"); !strings.Contains(out, `"app.theme": "dark"`) {
+		t.Fatalf("settings: %s", out)
+	}
+	if out = run("audit", "-kinds", "credential"); !strings.Contains(out, "credential.secret.read") {
+		t.Fatalf("audit: %s", out)
+	}
+	run("feed", "guides", "-guides", `[{"guide_id":"welcome","version":1,"title":"Welcome","message":"Hi"}]`)
+	if out = run("feed", "list"); !strings.Contains(out, `"guide"`) || !strings.Contains(out, "credential.secret.read") {
+		t.Fatalf("feed: %s", out)
+	}
+}
+
+// between returns the text between the first a and the next b.
+func between(s, a, b string) string {
+	i := strings.Index(s, a)
+	if i < 0 {
+		return ""
+	}
+	s = s[i+len(a):]
+	if j := strings.Index(s, b); j >= 0 {
+		return s[:j]
+	}
+	return ""
 }
 
 // vaultctl drives the alternate channel through an in-process enclave:

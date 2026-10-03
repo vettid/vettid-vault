@@ -184,3 +184,40 @@ stand-in (`make integration`).
 | 13.6 (0.3.2) | The channel is parsed strictly and fuzzed | `enclave.FuzzParseJob`, `vaultipc.FuzzDecodeHeaders`, `hostproto.FuzzParse`, `vaultproc.TestServeRefusesMalformedOpen` |
 | 13.6 | Vault and feature code cannot import enclave/host packages, use unsafe or cgo; the vault process links no network, NSM or parent code; the supervisor links no feature code | `make check-tcb` |
 
+
+## V4 batch 1: credential, secrets, profile, settings, audit, feed (§3.4, §3.5, §9.3, §10.1, §10.6–§10.9; 0.4.0)
+
+Feature handlers are tested in their packages through
+`internal/featuretest` (a fake host, and the runtime's sender-kind rule
+before `Handle`); the same flows run through the runtime and the real relay
+in `e2e.TestCredentialFlow`, `e2e.TestProfileSecretsAuditFeed` and
+`e2e.TestVaultctlSmoke` (vaultctl's feature commands).
+
+| § | Requirement | Test(s) |
+|---|---|---|
+| 3.5.1, 3.5.2 | Blob: HPKE to the CEK over a password layer (Argon2id + HKDF), header as AAD, bound to `vault_id`; refuse KDF parameters below t=1, m=8 MiB | `credential.TestBlobLayers`, `credential.FuzzOpen` |
+| 3.5.2 | Strict plaintext: categories, value sizes, ≤ 64 secrets, versions agree | `credential.FuzzParseInner`, `credential.TestSecretLimit`, `credential.TestBadBodies` |
+| 3.5.3 | Every use carries the blob and the password; an older blob is refused (`stale_credential`) | `credential.TestSecretsRoundTripAndNoPlaintextAtRest`, `credential.TestRotateRotatesIdentityAndCEK`, `e2e.TestCredentialFlow` |
+| 3.5.3 | Wrong password: `bad_password`, counted, audited; backoff after 5 failures; success resets | `credential.TestBadPasswordAndBackoff`, `e2e.TestCredentialFlow` |
+| 3.5.3 | No plaintext, password or secret value in vault state | `credential.TestSecretsRoundTripAndNoPlaintextAtRest` |
+| 8.2, 3.5.3 | A response carrying a secret value is neither cached nor written to state (no outbox entry); a retransmission is executed again | `vault.TestVolatileResponses` (`credential.secret.get` is `Volatile`) |
+| 3.5.3 | Unlock window: memory only; ends at expiry, `credential.lock`, rotation, delete and vault lock | `credential.TestUnlockWindow`, `credential.TestRotateRotatesIdentityAndCEK` |
+| 3.5.4, 3.4 | Rotation: new CEK and credential key, `ik`/`kem` rotated in the same flush; nothing changes if the identity rotation fails | `credential.TestRotateRotatesIdentityAndCEK`, `e2e.TestCredentialFlow` |
+| 3.5.4 | Create once (`exists`); delete destroys the CEK and the copy; the kept copy is the latest blob | `credential.TestCreateOnce`, `credential.TestDelete`, `credential.TestNoCopy` |
+| 10.6 | Roles: apps only, except `credential.version` and `credential.secret.list` (apps and desktops); agents and peers never | `credential.TestAuthorizationBySenderKind`, `e2e.TestCredentialFlow` |
+| 10.1 | `version` on shared objects; `conflict` on a stale version; an error changes no state | `secrets.TestPutGetListDelete`, `profile.TestSetSharesOnlySharedFields`, `vault.TestSettings`, `e2e.TestProfileSecretsAuditFeed` |
+| 10.1 | `sync.event` kinds to the other owner devices, without values | `credential.TestCreateOnce`, `secrets.TestPutGetListDelete`, `profile.TestSetSharesOnlySharedFields`, `feed.TestItemsAndSync`, `e2e.TestCredentialFlow` |
+| 10.7 | Secrets: create/replace, limits, roles, list without values | `secrets.TestAuthorization`, `secrets.TestPutGetListDelete`, `secrets.TestBadBodies`, `secrets.TestLimit`, `secrets.FuzzParsePut` |
+| 6.2, 6.4 | A vault's `hs.init` profile and invite hint carry only its display name | `vault.TestHandshakeProfile`, `e2e.TestProfileSecretsAuditFeed` |
+| 9.3, 10.8 | `profile.update` on activation and when the shared view changes; only shared fields; private changes stay local | `profile.TestSetSharesOnlySharedFields`, `e2e.TestProfileSecretsAuditFeed` |
+| 10.8 | A peer's `profile.update`: strict, highest version wins, stored as the connection's profile, `connection.event{profile}` | `profile.TestUpdateFromPeer`, `profile.FuzzParseUpdate`, `e2e.TestProfileSecretsAuditFeed` |
+| 10.8 | `profile.set` validation (keys, sizes, lists name existing fields, JPEG/PNG photo) | `profile.TestSetBad`, `profile.FuzzParseSet` |
+| 10.8 | Settings keys, ranges, `app.*`, roles; the in-person auto-approval flag is the runtime's | `vault.TestSettings`, `vault.FuzzApplySettings` |
+| 10.9 | Audit: hash chain over the fixed encoding, `head`, per-connection and kind filters, paging, retention and cap | `audit.TestChainAndList`, `audit.TestRetention`, `audit.FuzzParseQuery`, `e2e.TestProfileSecretsAuditFeed` |
+| 10.9 | Audit holds no content (message text) | `e2e.TestProfileSecretsAuditFeed` |
+| 10.9 | Runtime drops, unlock, lock and identity rotation reach the audit log | `vault.TestActivitySinks` |
+| 10.9 | Feed: items from activity, `feed.event` to every owner device, status changes synced, catch-up by `after_seq` with tombstones, retention and cap | `feed.TestItemsAndSync`, `feed.TestRetention`, `feed.FuzzParseList`, `feed.FuzzParseUpdate` |
+| 10.9 | `guide.sync`: new and higher versions only, idempotent | `feed.TestGuides`, `feed.FuzzParseGuides`, `e2e.TestVaultctlSmoke` |
+| 10.6–10.9 | Roles of audit, feed, profile and secrets types | `audit.TestAuthorizationAndBadBodies`, `feed.TestAuthorizationAndBadBodies`, `profile.TestAuthorization`, `secrets.TestAuthorization` |
+| 13.6 | New body parsers are fuzzed | the `Fuzz*` targets above (`make fuzz`) |
+| 13.6 | Feature code keeps no package-level mutable state; the test harness is not linked into release packages | `features/all` (per-vault instances), `make check-tcb` (`featuretest`) |

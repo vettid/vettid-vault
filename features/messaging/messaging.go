@@ -159,6 +159,7 @@ func (f *Feature) send(s *vault.Session, o strictjson.Object) (json.RawMessage, 
 	}
 	f.convs[conn] = append(f.convs[conn], m)
 	s.NotifyDevices("message.new", msgJSON(conn, m))
+	s.Record(vault.Activity{Kind: "message.sent", ConnectionID: conn, Ref: m.ID, Direction: DirOut, Audit: true})
 	return strictjson.NewBuilder().String("message_id", m.ID).String("sent_at", envelope.FormatTS(m.SentAt)).Bytes(), nil
 }
 
@@ -204,6 +205,7 @@ func (f *Feature) deliver(s *vault.Session, body []byte) error {
 		m := &Message{ID: d.MessageID, Dir: DirIn, Text: d.Text, SentAt: d.SentAt}
 		f.convs[conn] = append(f.convs[conn], m)
 		s.NotifyAllDevices("message.new", msgJSON(conn, m))
+		s.Record(vault.Activity{Kind: "message.received", ConnectionID: conn, Ref: m.ID, Direction: DirIn, Audit: true, Feed: true})
 	}
 	return s.SendToConnection(conn, "message.receipt", receiptJSON(d.MessageID, "delivered", s.Now()))
 }

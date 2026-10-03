@@ -262,3 +262,44 @@ func (f *Feature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner
 	}
 	return nil, vault.NewError("unsupported_type", "")
 }
+
+// CatalogEntry is a cataloged secret's metadata (§10.7: listed to
+// connections and agents, never its value).
+type CatalogEntry struct {
+	ID          string
+	Name        string
+	Category    string
+	Description string
+}
+
+// Catalog returns the cataloged secrets' metadata, sorted by name then id
+// (§10.11, §10.12).
+func (f *Feature) Catalog() []CatalogEntry {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []CatalogEntry
+	for _, sec := range f.m {
+		if sec.Discoverability == Cataloged {
+			out = append(out, CatalogEntry{ID: sec.ID, Name: sec.Name, Category: sec.Category, Description: sec.Description})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Name != out[j].Name {
+			return out[i].Name < out[j].Name
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out
+}
+
+// CatalogedValue returns a cataloged secret's name and value; ok is false
+// for a private or unknown secret (not told apart, §10.11).
+func (f *Feature) CatalogedValue(id string) (name, value string, ok bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	sec, found := f.m[id]
+	if !found || sec.Discoverability != Cataloged {
+		return "", "", false
+	}
+	return sec.Name, sec.Value, true
+}

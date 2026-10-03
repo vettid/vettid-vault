@@ -48,6 +48,10 @@ type TypeSpec struct {
 	// DesktopApproval requests from a desktop are held until an owner app
 	// approves them (§6.8 step-up). Apps are never held.
 	DesktopApproval bool
+	// AgentPolicy types are decided by the AgentPolicy feature for every
+	// agent request, even though agents are listed in From (agent.request,
+	// §10.11): it allows, refers to an app or refuses each one.
+	AgentPolicy bool
 }
 
 // HandlerError is an error response (§5.3 `error`).
@@ -135,8 +139,12 @@ type Host interface {
 	CompleteRecovery(deviceID string, now time.Time) error
 	// IdentityKey is the vault's current identity public key (§3.2).
 	IdentityKey() ed25519.PublicKey
-	// Device returns an active owner device by id.
+	// Device returns an active owner device by id that may receive
+	// messages now (a desktop or agent only within its access session).
 	Device(id string) (PeerInfo, bool)
+	// PairedDevice returns an active owner device by id, with or without
+	// an access session.
+	PairedDevice(id string) (PeerInfo, bool)
 	// Send sends a message to one principal (an active connection or owner
 	// device) with options (an `exp`, or memory-only delivery).
 	Send(to, typ string, body json.RawMessage, o SendOptions, now time.Time) error
@@ -244,8 +252,12 @@ func (s *Session) Send(to, typ string, body json.RawMessage, o SendOptions) erro
 	return s.host.Send(to, typ, body, o, s.now)
 }
 
-// Device returns an active owner device.
+// Device returns an active owner device that may receive messages now.
 func (s *Session) Device(id string) (PeerInfo, bool) { return s.host.Device(id) }
+
+// PairedDevice returns an active owner device, with or without an access
+// session (§6.8).
+func (s *Session) PairedDevice(id string) (PeerInfo, bool) { return s.host.PairedDevice(id) }
 
 // IdentityKey returns the vault's current identity public key.
 func (s *Session) IdentityKey() ed25519.PublicKey { return s.host.IdentityKey() }
@@ -380,13 +392,32 @@ const (
 	AgentAsk                        // held for an owner app's approval (§6.8)
 )
 
-// AgentPolicy is the LEASH hook (§6.8; LEASH is specified with its port):
-// it decides an agent's request of an owner type (one that desktops may
-// send) that the type's own roles do not give agents. Without an
-// AgentPolicy feature, agents get nothing beyond their listed types.
-// App-only types are never offered to it.
+// AgentPolicy is the LEASH hook (§6.8, §10.11): it decides an agent's
+// request of an owner type (one that desktops may send) that the type's
+// own roles do not give agents, and every agent request of a type marked
+// TypeSpec.AgentPolicy. Without an AgentPolicy feature, agents get nothing
+// beyond their listed types. App-only types are never offered to it.
+// AgentDecision may record what it allowed (rate counting, audit); it is
+// also asked again, when an app approves a referred request, whether a
+// grant still covers it.
 type AgentPolicy interface {
 	AgentDecision(s *Session, typ string, body json.RawMessage) AgentDecision
+}
+
+// AgentGrantor is implemented by the LEASH feature: an agent's initial
+// grants come with its pairing approval (device.pair.approve{grants},
+// §6.7, §10.3). ValidateAgentGrants checks them at the approval;
+// AgentPaired installs them in the flush that completes the pairing.
+type AgentGrantor interface {
+	ValidateAgentGrants(grants json.RawMessage, now time.Time) error
+	AgentPaired(s *Session, agentID string, grants json.RawMessage)
+}
+
+// DeviceRemovedObserver is implemented by features that keep data per
+// owner device and act when a device is unlinked (§7.4: an agent's LEASH
+// grants are revoked).
+type DeviceRemovedObserver interface {
+	DeviceRemoved(s *Session, deviceID string)
 }
 
 // HandshakeProfiler supplies the vault's self-asserted hs.init profile and

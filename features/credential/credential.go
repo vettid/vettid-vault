@@ -55,6 +55,9 @@ type Meta struct {
 	Category    string    `json:"category"`
 	Description string    `json:"description,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
+	// Cataloged lists the secret in the catalog to connections, for
+	// critical-secret use only (credential.secret.catalog, §10.13).
+	Cataloged bool `json:"cataloged,omitempty"`
 }
 
 // LTK is the private half of an issued UTK.
@@ -139,7 +142,7 @@ func (f *Feature) Types() []vault.TypeSpec {
 		r("credential.version", owners), r("credential.unlock", apps), r("credential.lock", apps), r("credential.rotate", apps),
 		r("credential.password.change", apps), r("credential.delete", apps),
 		r("credential.secret.add", apps), r("credential.secret.get", apps), r("credential.secret.list", owners),
-		r("credential.secret.delete", apps), r("credential.recover", apps),
+		r("credential.secret.delete", apps), r("credential.recover", apps), r("credential.secret.catalog", apps),
 	}
 }
 
@@ -245,6 +248,7 @@ const (
 	needSecretID
 	needSecret
 	needReply
+	needRequest
 )
 
 var needs = map[string]int{
@@ -263,6 +267,10 @@ var needs = map[string]int{
 	"credential.secret.list":     0,
 	"credential.secret.delete":   needBlob | needSealed | needPassword | needSecretID,
 	"credential.recover":         optBlob | needSealed | needPassword,
+	"credential.secret.catalog":  0,
+	// A critical-secret use by a connection (§10.13): the consent is bound
+	// to the request and the payload.
+	"critical-secret-use.approve": needBlob | needSealed | needPassword | needRequest,
 }
 
 // Envelope is a parsed request body: the blob and the sealed payload.
@@ -335,6 +343,9 @@ type Payload struct {
 	Description string
 	Value       []byte
 	Reply       *suite.PublicKey
+	// RequestID and PayloadHash bind a critical-secret use (§10.13).
+	RequestID   string
+	PayloadHash []byte
 }
 
 // Wipe zeroizes the payload's secrets.
@@ -398,6 +409,14 @@ func ParsePayload(typ string, pt []byte) (*Payload, error) {
 			return fail()
 		}
 	}
+	if n&needRequest != 0 {
+		if p.RequestID, err = o.String("request_id"); err != nil || !envelope.ValidULID(p.RequestID) {
+			return fail()
+		}
+		if p.PayloadHash, err = o.Base64("payload_sha256", sha256.Size); err != nil {
+			return fail()
+		}
+	}
 	if n&needReply != 0 {
 		ek, err := o.Base64("reply_key", suite.EKSize)
 		if err != nil {
@@ -454,6 +473,8 @@ func (f *Feature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner
 	case "credential.lock":
 		f.endWindow()
 		return nil, nil
+	case "credential.secret.catalog":
+		return f.catalog(s, in.Body)
 	}
 	// Everything else spends a UTK first (§3.5.4).
 	p, err := f.spend(s, in, e)
@@ -882,7 +903,7 @@ func (f *Feature) list() []byte {
 		if m.Description != "" {
 			b.String("description", m.Description)
 		}
-		arr = append(arr, b.String("created_at", envelope.FormatTS(m.CreatedAt)).Bytes()...)
+		arr = append(arr, b.Bool("cataloged", m.Cataloged).String("created_at", envelope.FormatTS(m.CreatedAt)).Bytes()...)
 	}
 	return strictjson.NewBuilder().Uint("version", f.st.Version).Raw("secrets", append(arr, ']')).Bytes()
 }
@@ -892,4 +913,105 @@ func (f *Feature) PoolSizeOf(device string) int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.st.Pools[device])
+}
+
+// catalog lists or unlists a critical secret in the catalog to
+// connections (credential.secret.catalog, §10.13). It changes only
+// vault-held metadata, so it needs no password.
+func (f *Feature) catalog(s *vault.Session, body []byte) (json.RawMessage, error) {
+	o, err := strictjson.ParseObject(body)
+	if err != nil {
+		return nil, errBad
+	}
+	id, err := o.String("secret_id")
+	if err != nil || !envelope.ValidULID(id) {
+		return nil, errBad
+	}
+	on, err := o.Bool("cataloged")
+	if err != nil {
+		return nil, errBad
+	}
+	if f.st.CEKSeed == nil {
+		return nil, errCredRequired
+	}
+	for i := range f.st.Secrets {
+		if f.st.Secrets[i].ID == id {
+			if f.st.Secrets[i].Cataloged != on {
+				f.st.Secrets[i].Cataloged = on
+				s.SyncEvent("credential.secret.cataloged", strictjson.NewBuilder().String("secret_id", id).Bool("cataloged", on).Bytes())
+				s.Record(vault.Activity{Kind: "credential.secret.cataloged", Ref: id, Audit: true})
+			}
+			return nil, nil
+		}
+	}
+	return nil, errNotFound
+}
+
+// CatalogedSecrets returns the metadata of the critical secrets in the
+// catalog (§10.12, §10.13), in the credential's order.
+func (f *Feature) CatalogedSecrets() []Meta {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []Meta
+	for _, m := range f.st.Secrets {
+		if m.Cataloged {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// CatalogedSecret returns a cataloged critical secret's metadata.
+func (f *Feature) CatalogedSecret(id string) (Meta, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, m := range f.st.Secrets {
+		if m.ID == id && m.Cataloged {
+			return m, true
+		}
+	}
+	return Meta{}, false
+}
+
+// UseSecret performs one use of a critical secret for a connection
+// (critical-secret-use.approve, §10.13) as a credential operation
+// (§3.5.3): it spends the UTK, lets check verify the sealed payload's
+// binding (request and payload hash), opens the credential with the
+// password, gives use the secret's value (nil if the credential no longer
+// holds it), rotates the CEK and returns the response with the members
+// use added. The value and the plaintext are wiped before it returns; use
+// must not keep the value.
+func (f *Feature) UseSecret(s *vault.Session, in *envelope.Inner, secretID string, check func(*Payload) error,
+	use func(value []byte, b *strictjson.Builder)) (json.RawMessage, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pruneUTKs(s.Now())
+	if s.From().Kind != vault.KindApp || s.From().Recovering {
+		return nil, errForbidden
+	}
+	e, err := ParseEnvelope(in.Type, in.Body)
+	if err != nil {
+		return nil, err
+	}
+	p, err := f.spend(s, in, e)
+	if err != nil {
+		return nil, err
+	}
+	defer p.Wipe()
+	if err := check(p); err != nil {
+		return nil, err
+	}
+	cek, inner, err := f.open(s, e.Blob, p.Password)
+	if err != nil {
+		return nil, err
+	}
+	defer cek.Destroy()
+	defer inner.Wipe()
+	var value []byte
+	for _, sec := range inner.Secrets {
+		if sec.ID == secretID {
+			value = sec.Value
+		}
+	}
+	return f.respond(s, inner, p.Password, func(b *strictjson.Builder) { use(value, b) })
 }

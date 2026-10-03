@@ -4,11 +4,15 @@
 package all
 
 import (
+	"github.com/vettid/vettid-vault/features/actions"
 	"github.com/vettid/vettid-vault/features/audit"
 	"github.com/vettid/vettid-vault/features/calls"
 	"github.com/vettid/vettid-vault/features/connauth"
 	"github.com/vettid/vettid-vault/features/credential"
+	"github.com/vettid/vettid-vault/features/critical"
 	"github.com/vettid/vettid-vault/features/feed"
+	"github.com/vettid/vettid-vault/features/grants"
+	"github.com/vettid/vettid-vault/features/leash"
 	"github.com/vettid/vettid-vault/features/messaging"
 	"github.com/vettid/vettid-vault/features/profile"
 	"github.com/vettid/vettid-vault/features/secrets"
@@ -35,6 +39,10 @@ type Set struct {
 	Feed       *feed.Feature
 	Calls      *calls.Feature
 	ConnAuth   *connauth.Feature
+	Leash      *leash.Feature
+	Grants     *grants.Feature
+	Critical   *critical.Feature
+	Actions    *actions.Feature
 }
 
 // NewSet returns fresh instances of every feature.
@@ -42,22 +50,28 @@ func NewSet(o Options) *Set {
 	cred := credential.New(credential.Options{KDF: o.CredentialKDF})
 	auth := connauth.New(cred)        // signs with the credential key in its unlock window
 	cred.AddKeyRotationObserver(auth) // and follows its rotations (§10.4)
+	sec := secrets.New()
+	prof := profile.New()
 	return &Set{
 		Messaging:  messaging.New(),
 		Credential: cred,
-		Secrets:    secrets.New(),
-		Profile:    profile.New(),
+		Secrets:    sec,
+		Profile:    prof,
 		Audit:      audit.New(),
 		Feed:       feed.New(),
 		Calls:      calls.New(calls.Options{ICE: o.ICE}),
 		ConnAuth:   auth,
+		Leash:      leash.New(cred, sec), // signs delegations in the unlock window; reads cataloged secrets
+		Grants:     grants.New(prof, sec, cred),
+		Critical:   critical.New(cred), // each use is a credential operation (§3.5.3)
+		Actions:    actions.New(),
 	}
 }
 
 // List returns the features in registration order. The audit log and the
 // feed come first so that they see activity recorded while the others load.
 func (s *Set) List() []vault.Feature {
-	return []vault.Feature{s.Audit, s.Feed, s.Messaging, s.Credential, s.Secrets, s.Profile, s.Calls, s.ConnAuth}
+	return []vault.Feature{s.Audit, s.Feed, s.Messaging, s.Credential, s.Secrets, s.Profile, s.Calls, s.ConnAuth, s.Leash, s.Grants, s.Critical, s.Actions}
 }
 
 // New returns a fresh feature list.

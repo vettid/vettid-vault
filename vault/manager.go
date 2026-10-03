@@ -145,6 +145,8 @@ type pendingAccess struct {
 	inbound string
 	seconds uint64
 	by      string
+	session bool            // grant an access session of seconds
+	grants  json.RawMessage // an agent's initial LEASH grants (§10.11)
 }
 
 // unlocked counts the managers in this process that hold a DEK.

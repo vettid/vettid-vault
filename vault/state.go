@@ -133,6 +133,9 @@ type Peer struct {
 	Meta *PeerMeta `json:"meta,omitempty"`
 	// Access is a desktop's or agent's access session (§6.8).
 	Access *AccessSession `json:"access,omitempty"`
+	// PairGrants are an agent's initial LEASH grants, from the pairing
+	// approval until the pairing completes (§6.7, §10.11).
+	PairGrants json.RawMessage `json:"pair_grants,omitempty"`
 }
 
 // PeerMeta is the owner's own metadata about a connection: never sent to

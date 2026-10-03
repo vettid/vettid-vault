@@ -195,7 +195,12 @@ func (m *Manager) approveInbound(ctx context.Context, id string, now time.Time) 
 	newPeer.Profile = body.Profile
 	newPeer.Attestation = ib.Attestation
 	if pa := m.pairAccess; pa != nil && pa.inbound == id && needsAccess(newPeer.Kind) {
-		m.grantAccess(newPeer, pa.seconds, pa.by, now)
+		if pa.session {
+			m.grantAccess(newPeer, pa.seconds, pa.by, now)
+		}
+		if newPeer.Kind == KindAgent && len(pa.grants) > 0 {
+			newPeer.PairGrants = append(json.RawMessage(nil), pa.grants...)
+		}
 	}
 	if inv := m.st.Invites[ib.InviteID]; inv != nil && inv.CreatedBy == inviteByRecovery {
 		newPeer.Recovering = true // restricted until credential.recover (§11.11.5)
@@ -460,6 +465,14 @@ func (m *Manager) activate(p *Peer, ep *handshake.Epoch, purpose handshake.Purpo
 		m.notifyDevices("sync.event", strictjson.NewBuilder().String("kind", "device.paired").String("device_id", p.ID).
 			String("role", p.Kind).Bytes(), p.ID, now)
 		m.record(Activity{Kind: "device.paired", DeviceID: p.ID, Audit: true, Feed: true}, now)
+		if len(p.PairGrants) > 0 {
+			// The agent's initial LEASH grants take effect with the
+			// pairing (§6.7, §10.11), after device.paired.
+			if g := m.agentGrantor(); g != nil {
+				g.AgentPaired(m.session(now), p.ID, p.PairGrants)
+			}
+			p.PairGrants = nil
+		}
 	case purpose == handshake.PurposeReconnect:
 		m.notifyDevices("connection.event", connEvent(p.ID, "reconnected"), "", now)
 		m.record(Activity{Kind: "connection.reconnected", ConnectionID: p.ID, Audit: true}, now)

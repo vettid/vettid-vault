@@ -101,6 +101,11 @@ func (h *Host) Device(id string) (vault.PeerInfo, bool) {
 	return p, ok
 }
 
+func (h *Host) PairedDevice(id string) (vault.PeerInfo, bool) {
+	p, ok := h.Devices[id]
+	return p, ok
+}
+
 func (h *Host) Send(to, typ string, body json.RawMessage, o vault.SendOptions, _ time.Time) error {
 	_, conn := h.Conns[to]
 	_, dev := h.Devices[to]

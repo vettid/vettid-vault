@@ -68,6 +68,14 @@ func (h managerHost) Device(id string) (PeerInfo, bool) {
 	return info(p), true
 }
 
+func (h managerHost) PairedDevice(id string) (PeerInfo, bool) {
+	p, ok := h.m.st.Devices[id]
+	if !ok || p.State != PeerActive || p.Recovering {
+		return PeerInfo{}, false
+	}
+	return info(p), true
+}
+
 func (h managerHost) Send(to, typ string, body json.RawMessage, o SendOptions, now time.Time) error {
 	p := h.m.peer(to)
 	if p == nil || p.State != PeerActive || p.Recovering || !h.m.hasAccess(p, now) {

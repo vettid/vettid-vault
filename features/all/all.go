@@ -55,6 +55,7 @@ func NewSet(o Options) *Set {
 	// §10.12).
 	it := items.New(cred)
 	cred.AddDeleteObserver(it)
+	cred.SetItemRekeyer(it) // credential.rotate and .recover re-key every critical item
 	gr := grants.New(it)
 	ls := leash.New(cred, it) // signs delegations in the unlock window; reads the items agents' rules include
 	it.SetGrants(gr)

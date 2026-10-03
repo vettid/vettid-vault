@@ -295,13 +295,11 @@ func TestCriticalItems(t *testing.T) {
 	if got := strs(t, e.item(id), "tags"); strings.Join(got, ",") != "backup,crypto" {
 		t.Fatalf("tags: %v", got)
 	}
-	// Limits: 16 fields.
-	var f17 []field
-	for i := 0; i < 17; i++ {
-		f17 = append(f17, field{Label: "L", Kind: "text", Value: "x"})
-	}
+	// Limits: a critical item's encoding is at most 12,288 bytes (its
+	// content travels in one UTK payload).
 	e.code(e.sealed("app", "item.put", map[string]any{"sensitivity": "critical"},
-		map[string]any{"password": pw, "item": map[string]any{"name": "x", "fields": f17}}, true, false), "limit")
+		map[string]any{"password": pw, "item": map[string]any{"name": "x",
+			"fields": []field{{Label: "L", Kind: "multiline", Value: strings.Repeat("x", 13000)}}}}, true, false), "limit")
 	// Delete needs the password; credential.delete takes every critical item.
 	e.code(e.call("app", "item.delete", js(map[string]any{"item_id": other})), "bad_request")
 	e.ok(e.sealed("app", "item.delete", map[string]any{"item_id": other}, map[string]any{"password": pw, "item_id": other}, true, false))

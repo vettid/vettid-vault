@@ -18,16 +18,16 @@ changelog:
   - 0.7.0: V4 items (VAULT-ITEMS, owner decisions of 2026-10-03): one item
     model (name, category, typed fields, tags, sensitivity data, secret or
     critical) replaces profile fields, vault-held secrets and critical
-    secrets (§10.7); critical items keep their values in the Protean
-    Credential (§3.5.2, §3.5.4); the tag registry with rename and merge,
+    secrets (§10.7); critical items' values are encrypted under per-item
+    keys that only the Protean Credential holds (§3.5.2, §3.5.4, §10.7); the tag registry with rename and merge,
     and the profile as a name and photo plus `@profile` items (§10.8);
     share rules over tags for connections and agents, `ask` by default
     with remembered declines, `auto` with a preview, per-connection
     catalogs, grants of items with field restrictions, `data.shared`, and
     one-off requests by category (§10.12); agents' rules as signed
     `items.read` delegations (§10.11); critical-item use through rules
-    (§10.13); `items.share` (§10.14); `in_use`; OWNER DECISIONS in §10.8,
-    §10.11 and §15
+    (§10.13); `items.share` (§10.14); `in_use`; owner decisions of 2026-10-03
+    on agents' rules (§10.11) and envelope encryption (§10.7)
   - 0.6.0: V4 batch 3: LEASH for the member's agents (grants with scopes,
     approval modes, rate limits and expiry; the AgentPolicy decision;
     agent.request for catalog, retrieval and use without exposure;
@@ -285,9 +285,10 @@ Rules for all keys:
   SHA-256 of its current blob, the password backoff state, the latest
   blob while kept (§3.5.3, §3.5.6), and the LTKs of each app's UTK pool
   (§3.5.4);
-- the items (§10.7): `data` and `secret` items whole, `critical` items'
-  metadata only; the tag registry, the profile object and the share
-  rules (§10.8, §10.12);
+- the items (§10.7): `data` and `secret` items whole; `critical` items'
+  metadata and their values encrypted under item keys that only the
+  credential holds (§3.5.2); the tag registry, the profile object and the
+  share rules (§10.8, §10.12);
 - one **record per owner device and one per connection**, holding:
   - role, relay public key, mailbox address, `ik` and `kem`;
   - the peer's rotation chain;
@@ -421,9 +422,10 @@ sig_new = Ed25519(new_ik, "vettid/vms/2/rotate" || m)
 
 ### 3.5 The Protean Credential
 
-The **Protean Credential** holds the member's critical keys and data:
-the credential key and the values of the member's **critical items**
-(§10.7), such as seed phrases, private keys and recovery keys.
+The **Protean Credential** holds the member's critical keys: the
+credential key and the **item keys** of the member's critical items
+(§10.7), such as seed phrases, private keys and recovery keys, whose
+values the vault keeps encrypted under those keys.
 
 - It is held by the member's app.
 - It is sealed so that the vault alone cannot open it.
@@ -495,18 +497,20 @@ locked = t (1) || m_KiB (4, big-endian) || p (1) || salt (16) || nonce (24)
 { "v": 1, "vault_id": "<id>", "version": 3,
   "created_at": "<ts>", "password_changed_at": "<ts>",
   "key": "<b64 32-byte Ed25519 seed>",
-  "items": [ { "item_id": "<ULID>", "fields": [ { "field_id": "f1", "value": "..." } ],
-               "notes": "..." } ],
+  "items": [ { "item_id": "<ULID>", "gen": 4, "key": "<b64 32 bytes>" } ],
   "crypto_keys": [ ] }
 ```
 
-- `items` holds the values of the member's critical items (§10.7): for
-  each, its `item_id`, each field's `field_id` and `value` (a string, or
-  an `address` object) and its `notes` if any. Their metadata (name,
-  category, tags, labels and kinds) is in DEK state, so that apps can
-  list them without the password. A credential holds at most 64 items,
-  each at most 16 fields (0.7.0 replaced 0.6.0's `secrets` by `items`;
-  no blob of an earlier draft exists).
+- `items` holds one entry per critical item (§10.7): its `item_id`, the
+  random 32-byte **item key** its values are encrypted under, and that
+  key's generation `gen` (≥ 1), which the ciphertext's AAD binds. The
+  values (and notes) themselves are not in the credential: the vault
+  keeps them in DEK state as ciphertext under the item key (envelope
+  encryption, §10.7), with the items' metadata (name, category, tags,
+  labels and kinds), so that apps can list them without the password and
+  the credential stays small. A credential holds at most 1,000 entries
+  (about 90 bytes each; `limit`) (0.7.0 replaced 0.6.0's `secrets` by
+  `items`; no blob of an earlier draft exists).
 - `crypto_keys` is reserved for the wallet feature and is empty until then.
 - `version` in `inner` MUST equal the header's `version`; `vault_id` MUST
   equal the vault's.
@@ -714,6 +718,10 @@ setting (§10.8) is on, which is the default.
 - If the vault keeps its stored state in several versions for durability,
   every version holds the same vault-sealed object. The copies under
   destroyed CEKs are useless.
+- The critical items' values are not in the blob but in DEK state,
+  encrypted under the item keys the blob holds (§10.7): whichever copy
+  of the latest blob a recovery uses (§11.11.5), it opens them, and
+  `credential.recover` re-keys every item.
 
 With `credential.backup` off, the vault keeps the latest blob only until
 the app confirms it (§3.5.3), then only its hash and version.
@@ -766,7 +774,9 @@ A vault MUST have a credential before it is used.
 - **An attacker who obtains the decrypted vault state** (the DEK, which
   needs the PIN and the enclave) holds the current CEK and, if kept, the
   latest blob, and can guess the password offline against Argon2id. The
-  password, not the PIN, is what protects the credential in that case.
+  password, not the PIN, is what protects the credential in that case,
+  and with it the critical items: their ciphertext in DEK state opens
+  only with the item keys inside the credential (§10.7).
 
 ## 4. Cryptographic construction
 
@@ -2199,11 +2209,39 @@ decision 1):
 |---|---|---|---|
 | `data` | DEK state | apps and desktops, values in `item.get` | by share rules and grants (§10.12) |
 | `secret` | DEK state | apps; desktops with step-up (§6.8); values only through `item.reveal`, audited | by share rules and grants (§10.12) |
-| `critical` | the Protean Credential (§3.5); its metadata (name, category, template, tags, field ids, labels and kinds, never values or notes) in DEK state | apps only, each read or change a credential operation with the password (§3.5.3) | never readable by anyone else: a share rule can at most make it *usable* (§10.13) |
+| `critical` | DEK state, its values and notes encrypted under an item key that only the Protean Credential holds (§3.5.2); its metadata (name, category, template, tags, field ids, labels and kinds) in the clear in DEK state | apps only, each read or change a credential operation with the password (§3.5.3) | never readable by anyone else: a share rule can at most make it *usable* (§10.13) |
 
-- A critical item is at most 16 fields and its encoding at most 8,192
-  bytes; a credential holds at most 64 critical items, and its plaintext
-  stays within §3.5.2's 131,072 bytes (`limit`).
+- A critical item is at most 64 fields and its encoding at most 12,288
+  bytes (its content travels in one UTK payload, §3.5.4); a vault holds
+  at most 1,000 critical items (`limit`).
+- **Envelope encryption** (owner decision of 2026-10-03). A critical
+  item's values and notes are encrypted under a random 32-byte item key:
+
+  ```
+  sealed = nonce (24) || XChaCha20-Poly1305(item key, nonce, aad, values)
+  aad    = "vettid/vms/2/critical-item" || 0x00 || vault_id || 0x00 || item_id
+           || 0x00 || uint64be(gen) || (0x00 || field_id)*    (the item's field ids, in order)
+  values = {"fields": [{"field_id", "value"}], "notes"?}
+  ```
+
+  The ciphertext is kept with the item in DEK state; the key and its
+  generation `gen` only inside the credential (§3.5.2). Without the
+  credential and the password the vault cannot decrypt the values, so
+  every §3.5 property holds as before: the CEK rotates at every use, old
+  blobs are dead, inputs are UTK-sealed, outputs reply-key-sealed, and no
+  plaintext is retained after the operation.
+- **Item keys rotate on every use of the item.** Each operation that
+  opens an item (`item.reveal`, `item.put`, a critical-item use, §10.13)
+  re-encrypts it under a fresh key with `gen` + 1, in the same flush as
+  the CEK rotation; `credential.rotate` and `credential.recover` re-key
+  every critical item. Rationale: a key someone once obtained (from an
+  old blob opened with its CEK and the password, or from a compromised
+  release during an operation) stops opening the item at its next use,
+  as an old blob stops opening at the credential's next use; re-keying
+  one item costs one AEAD pass of at most 12 KiB. Re-keying every item at
+  every credential use would also cover items not used since, at a cost
+  that grows with the number of items; `credential.rotate`, which apps
+  SHOULD offer at least yearly (§3.5.5), does that on demand.
 - `item.sensitivity` changes it. `data` ↔ `secret` is a metadata change.
   Moving to or from `critical` is a credential operation: the vault moves
   the values between DEK state and the credential itself, without them
@@ -2284,7 +2322,8 @@ names it (§10.12; owner decision 2).
 - **Tag names never leave the vault** in any message to a connection:
   connections see items (name, category, the field labels they may see),
   never tags or rules. The exception is an agent's own signed delegation
-  (§10.11), which carries its rule's tags (OWNER DECISION, §10.11).
+  (§10.11), which carries its rule's tags (owner decision of 2026-10-03,
+  §10.11).
 - **The registry** holds optional presentation per tag, versioned as one
   object (§10.1): `color` (`#rrggbb`), `icon` (`[a-z0-9_.-]{1,64}`, an app
   icon name) and `description` (at most 256 bytes); at most 512 entries
@@ -2766,11 +2805,10 @@ agent (§10.12) is that agent's grant of scope `items.read`:
   gains the rule; `auto` includes such items without asking. A rule
   always names its tags, so `auto` covers only items the member tagged
   for it (as 0.6.0 required `auto` reads to name their secrets).
-- OWNER DECISION: an **included** item is read without a further
-  approval within the rule's `per_hour` and `per_day`; past them,
-  requests are referred to an app as for any grant (below). Recommended,
-  so that `ask` means one prompt per item rather than one per read; the
-  alternative refers every read of an `ask` rule.
+- Owner decision (2026-10-03): an **included** item is read without a
+  further approval within the rule's `per_hour` and `per_day`; past
+  them, requests are referred to an app as for any grant (below), so that
+  `ask` means one prompt per item rather than one per read.
 - It never includes a `critical` item: critical items are never
   reachable by agents. `uses` counts the reads (`item.get` and
   `item.use`) of each included item; an item with no use left is no
@@ -2891,14 +2929,12 @@ key            = the credential key's public key
   `items.read` (`uses` when its rule has it); ids and keys as in the
   grant, `status_ttl` the lifetime of its status statements in seconds
   (below), `iat` the issue time.
-- **Tags in the delegation** (OWNER DECISION). An `items.read`
-  delegation carries its rule's tag names, so a relying party the agent
-  shows it to sees them: the one place tag names leave the vault
-  (§10.8), as VAULT-ITEMS §6 asks ("the signed delegation carries the
-  rule"). Recommended: keep them, since the agent is the member's own
-  and shows its delegation only to parties it deals with; the
-  alternative is a salted commitment to the tags, which relying parties
-  could check against nothing they can read.
+- **Tags in the delegation** (owner decision of 2026-10-03). An
+  `items.read` delegation carries its rule's tag names, so a relying
+  party the agent shows it to sees them: the one place tag names leave
+  the vault (§10.8), as VAULT-ITEMS §6 asks ("the signed delegation
+  carries the rule"). The agent is the member's own and shows its
+  delegation only to parties it deals with.
 - **Lifetime.** `exp` is the grant's `expires_at` in whole seconds, and
   is absent when the grant has none: LEASH's contract expiry is optional
   (§3.2). (The 24 h cap of the first 0.6.0 draft came from vettid.dev's
@@ -3313,9 +3349,10 @@ B app            B vault                   A vault                      A app
   replay it (§3.5.4). It answers `utk_invalid`, `backoff`,
   `stale_credential` and `bad_password` as §3.5.3 does, and the request
   stays pending for another attempt.
-- **The use.** The vault opens the credential, takes the field's value,
-  performs the operation, rotates the CEK (§3.5.3, the new blob in the
-  response), and wipes the plaintext and the key. Nothing is retained:
+- **The use.** The vault opens the credential, decrypts the field's value
+  with the item key (§10.7), performs the operation, re-keys the item and
+  rotates the CEK (§3.5.3, the new blob in the response), and wipes the
+  plaintext and the keys. Nothing is retained:
   there are no standing allowances, and the next use needs the password
   again. The value MUST be the standard base64 of a 32-byte Ed25519 seed
   (a `password` or `text` field, for example); otherwise the status is
@@ -5048,7 +5085,8 @@ it can read and write only its own objects and use only its own relay key
 | Credential password alone | Nothing without the blob and a paired app | `credential.password.change` |
 | Member's email and account session (24 h, unnoticed) | A recovery: one new attested app as an unlock key. Still needs the PIN and the password, online, under both backoffs (§11.11.2) | Cancel; owner apps see `recovery_pending` and `vault.locking{recovery}` |
 | VettID's API tables | Nothing: the recovery code is stored only sealed to the member's browser, and the enclave enforces the 24 h (§11.11.2) | — |
-| Decrypted vault state (DEK) | Everything in it (`data` and `secret` items included), plus offline guessing of the credential password against the current CEK and the latest blob (§3.5.8); critical items' values stay sealed under the password | Rotate the relay key and the credential; change the password |
+| Decrypted vault state (DEK) | Everything in it (`data` and `secret` items included), plus offline guessing of the credential password against the current CEK and the latest blob (§3.5.8); critical items' values stay encrypted under item keys that only the credential, sealed under the password, holds (§10.7) | Rotate the relay key and the credential; change the password |
+| A critical item key (from an old blob with its CEK and the password, or from a compromised release during an operation) | That item's ciphertext of that generation only; nothing after the item's next use, which re-keys it (§10.7) | Use the item, or `credential.rotate` (re-keys every item) |
 | An old release, after members moved away | Vaults still sealed to it. A moved vault only if the host serves it a stale header and state **and** an app sends it the PIN; apps never send a PIN to an older release than they last unlocked into (§11.10.6). Residual: an owner device that never learned of the move. | Members move forward; the app warns about `deprecated` and `retired` releases |
 | Manifest key | Listing a release as `active`. A vault still moves only with the member's approval, and only to a sealing key in the pinned namespace. | Rotate the key in a release; apps pin two keys |
 | Sealing-key policy (VettID's AWS account) | A key whose policy let anything other than its release decrypt, or could be changed later, would expose the pepper and allow offline PIN guessing against stored state. The enclave refuses to seal to such a key: before sealing it reads the policy, metadata and grants from KMS over TLS it terminates and checks them (§11.10.7). | Nothing to recover: the check runs before any seal, and a passing policy can never change |
@@ -5137,14 +5175,11 @@ Follow-ups:
 8. **Files in items.** The `file` field kind (§10.7) is reserved until
    blob storage and its size policy are decided (VAULT-ITEMS owner
    decision 4).
-9. **Critical item capacity** (OWNER DECISION). §3.5.2 bounds the
-   credential's plaintext at 131,072 bytes, so it holds far fewer than 64
-   critical items of 8,192 bytes (about fifteen at that size); the vault
-   answers `limit` when the next one does not fit.
-   Recommended: keep the bound, since every credential operation carries
-   the whole blob within one message (§5.5); the alternative is a larger
-   credential sent by claim-check, which every app operation would pay
-   for.
+9. **Critical item capacity.** Resolved (owner decision of 2026-10-03):
+   envelope encryption (§10.7) keeps only item keys in the credential,
+   about 90 bytes per item, so 1,000 critical items fit within §3.5.2's
+   131,072 bytes and every credential operation still carries the whole
+   blob within one message (§5.5).
 10. **List sizes.** `grant.list`, `critical-secret-use.list` and
     `action.list` are not paged. With share rules a vault can hold 1,000
     given grants, so `grant.list` can outgrow one message (§5.5); page it
@@ -5264,11 +5299,13 @@ pending (§15, follow-up 1).
     item (`data`, `secret`, `critical`); `item.put`, `.get`, `.reveal`,
     `.list` (filters by tags, category and sensitivity; paged), `.tag`,
     `.sensitivity`, `.delete`; limits (64 fields, 16 KiB per value, 64 KiB
-    per item, 2,000 items; critical: 16 fields, 8 KiB, 64 items within
-    the credential's 128 KiB); `secret` values only revealed on purpose
-    (audited); critical items are credential operations with the content
-    and the item id sealed to a UTK and values returned sealed to a reply
-    key; moves to and from `critical` done by the vault without values
+    per item, 2,000 items; critical: 12 KiB per item, 1,000 items);
+    `secret` values only revealed on purpose (audited); critical items
+    envelope-encrypted (values in DEK state under per-item keys that only
+    the credential holds, re-keyed at every use of the item and at
+    `credential.rotate` and `.recover`); critical operations are
+    credential operations with the content and the item id sealed to a
+    UTK and values returned sealed to a reply key; moves to and from `critical` done by the vault without values
     crossing the session; app-only forms refused to desktops at once.
     Replaces §10.7 secrets and `credential.secret.*`.
   - §10.8: tags (normalisation, one namespace, reserved `@profile`, never
@@ -5290,9 +5327,9 @@ pending (§15, follow-up 1).
     Replaces the `cataloged` flag and the one catalog for everyone.
   - §10.11: the data scopes (`secrets.catalog`, `.get`, `.use`) become an
     agent's share rules (scope `items.read`, signed delegations carrying
-    the rule's tags, match, access, uses and rate limits; OWNER
-    DECISIONS: reads of included items within the rule's limits; tags in
-    the delegation); `agent.request` ops `catalog`, `item.get`,
+    the rule's tags, match, access, uses and rate limits; owner
+    decisions of 2026-10-03: reads of included items within the rule's
+    limits; tags in the delegation); `agent.request` ops `catalog`, `item.get`,
     `item.use`; audit kinds `leash.item.read`, `leash.item.used`.
   - §10.13: critical-item use names `item_id` and `field_id` and needs a
     rule that makes the item usable for that connection;
@@ -5303,7 +5340,8 @@ pending (§15, follow-up 1).
   - §3.3, §3.5, §3.5.2, §3.5.4, §6.8 (step-up types), §8.2, §10 registry,
     §10.1 (`in_use`, ids, `sync.event` kinds `item.*`, `tag.changed`,
     `share.*`), §10.6, §10.9 (audit and feed kinds), §13.5 (share-rule
-    and tag-change rows), §15 (follow-ups 8–10).
+    and tag-change rows, a critical item key), §15 (follow-ups 8–10;
+    9 resolved by envelope encryption).
 
 - **0.6.0** (2026-10-03): V4 batch 3 (vettid-vault): LEASH, grants,
   critical-secret use, shared actions.

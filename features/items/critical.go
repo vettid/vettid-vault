@@ -32,20 +32,8 @@ func (f *Feature) operate(s *vault.Session, in *envelope.Inner, need int, check 
 	return f.cred.Operate(s, in, need, check, op)
 }
 
-// critValues builds the credential's copy of an item's values.
-func critValues(it *itemspec.Item, notes string) credential.Item {
-	ci := credential.Item{ID: it.ID}
-	for _, fl := range it.Fields {
-		ci.Values = append(ci.Values, credential.Value{FieldID: fl.ID, Raw: append([]byte(nil), fl.Value...)})
-	}
-	if notes != "" {
-		ci.Notes = strictjson.MarshalString(notes)
-	}
-	return ci
-}
-
 // stripValues makes an item's DEK copy of a critical item: no values, no
-// notes (HasNotes instead).
+// notes (HasNotes instead); its ciphertext replaces them.
 func stripValues(it *itemspec.Item) {
 	for i := range it.Fields {
 		suite.Wipe(it.Fields[i].Value)
@@ -62,8 +50,34 @@ func checkCritSize(it *itemspec.Item) error {
 	return nil
 }
 
+// encrypt seals an item that holds its values under a fresh key of
+// generation gen, puts the key into the plaintext (replacing the item's
+// entry, or appending one) and turns the item into its DEK copy.
+func encrypt(s *vault.Session, it *itemspec.Item, inner *credential.Inner, gen uint64) error {
+	pt := valuesJSON(it)
+	defer suite.Wipe(pt)
+	e, sealed, err := seal(s.VaultID(), it, gen, pt)
+	if err != nil {
+		return errInternal
+	}
+	if i := inner.FindItem(it.ID); i >= 0 {
+		inner.Items[i].Wipe()
+		inner.Items[i] = e
+	} else {
+		if len(inner.Items) >= credential.MaxItems {
+			e.Wipe()
+			return errLimit
+		}
+		inner.Items = append(inner.Items, e)
+	}
+	stripValues(it)
+	it.Sealed, it.Gen = sealed, gen
+	return nil
+}
+
 // putCritical creates or replaces a critical item: the content is in the
-// sealed payload, item_id too when replacing (§10.7).
+// sealed payload, item_id too when replacing (§10.7). The values are
+// encrypted under a fresh item key, which goes into the credential.
 func (f *Feature) putCritical(s *vault.Session, in *envelope.Inner, o strictjson.Object) (json.RawMessage, error) {
 	if err := appOnly(s); err != nil {
 		return nil, err
@@ -97,8 +111,9 @@ func (f *Feature) putCritical(s *vault.Session, in *envelope.Inner, o strictjson
 		if err != nil {
 			return errBad
 		}
+		gen := uint64(1)
 		if p.ItemID == "" {
-			if len(f.st.Items) >= itemspec.MaxItems || len(inner.Items) >= credential.MaxItems {
+			if len(f.st.Items) >= itemspec.MaxItems || f.criticalCount() >= itemspec.MaxCritItems {
 				return errLimit
 			}
 			it = &itemspec.Item{ID: s.NewID(), Sensitivity: itemspec.Critical, Created: t, NextField: 1}
@@ -110,7 +125,13 @@ func (f *Feature) putCritical(s *vault.Session, in *envelope.Inner, o strictjson
 			if cur.Version != ver {
 				return errConflict
 			}
+			i := inner.FindItem(cur.ID)
+			if i < 0 {
+				return errNotFound
+			}
+			gen = inner.Items[i].Gen + 1
 			it = cur.Clone()
+			it.Sealed = nil
 		}
 		if !c.Apply(it, cur) {
 			return errBad
@@ -126,14 +147,9 @@ func (f *Feature) putCritical(s *vault.Session, in *envelope.Inner, o strictjson
 		if err := checkCritSize(it); err != nil {
 			return err
 		}
-		ci := critValues(it, it.Notes)
-		if i := inner.FindItem(it.ID); i >= 0 {
-			inner.Items[i].Wipe()
-			inner.Items[i] = ci
-		} else {
-			inner.Items = append(inner.Items, ci)
+		if err := encrypt(s, it, inner, gen); err != nil {
+			return err
 		}
-		stripValues(it)
 		var err2 error
 		if ch, err2 = f.prepare(s, cur, it, nil); err2 != nil {
 			return err2
@@ -157,8 +173,19 @@ func (f *Feature) putCritical(s *vault.Session, in *envelope.Inner, o strictjson
 	return b.Bytes(), nil
 }
 
-// revealCritical opens the credential and returns the item's values
-// sealed to the request's reply key (§3.5.4, §10.7).
+func (f *Feature) criticalCount() int {
+	n := 0
+	for _, it := range f.st.Items {
+		if it.Sensitivity == itemspec.Critical {
+			n++
+		}
+	}
+	return n
+}
+
+// revealCritical opens the credential, decrypts the item's values with its
+// key and returns them sealed to the request's reply key (§3.5.4, §10.7);
+// the item is then re-encrypted under a fresh key.
 func (f *Feature) revealCritical(s *vault.Session, in *envelope.Inner, o strictjson.Object, it *itemspec.Item) (json.RawMessage, error) {
 	if err := appOnly(s); err != nil {
 		return nil, err
@@ -166,7 +193,8 @@ func (f *Feature) revealCritical(s *vault.Session, in *envelope.Inner, o strictj
 	if o.Has("fields") {
 		return nil, errBad
 	}
-	var sealed []byte
+	var replySealed, newSealed []byte
+	var gen uint64
 	check := func(p *credential.Payload) error {
 		if p.ItemID != it.ID {
 			return errBad // consent bound to this item
@@ -178,10 +206,15 @@ func (f *Feature) revealCritical(s *vault.Session, in *envelope.Inner, o strictj
 		if i < 0 {
 			return errNotFound
 		}
-		pt := inner.Items[i].ValuesJSON()
+		pt, err := open(s.VaultID(), it, &inner.Items[i])
+		if err != nil {
+			return errInternal
+		}
 		defer suite.Wipe(pt)
-		var err error
-		if sealed, err = credwire.SealValue(p.Reply, s.VaultID(), in.ID, pt); err != nil {
+		if replySealed, err = credwire.SealValue(p.Reply, s.VaultID(), in.ID, pt); err != nil {
+			return errInternal
+		}
+		if newSealed, gen, err = rekey(s.VaultID(), it, inner, i); err != nil {
 			return errInternal
 		}
 		return nil
@@ -190,8 +223,9 @@ func (f *Feature) revealCritical(s *vault.Session, in *envelope.Inner, o strictj
 	if err != nil {
 		return nil, err
 	}
+	it.Sealed, it.Gen = newSealed, gen // the item key rotated with the use
 	s.Record(vault.Activity{Kind: "item.revealed", Ref: it.ID, Audit: true, Feed: true})
-	b := strictjson.NewBuilder().String("item_id", it.ID).Uint("version", it.Version).Base64("values_sealed", sealed)
+	b := strictjson.NewBuilder().String("item_id", it.ID).Uint("version", it.Version).Base64("values_sealed", replySealed)
 	res.Members(b)
 	return b.Bytes(), nil
 }
@@ -229,8 +263,9 @@ func (f *Feature) deleteCritical(s *vault.Session, in *envelope.Inner, cur *item
 	return b.Bytes(), nil
 }
 
-// sensitivityCritical moves an item into or out of the credential: the
-// vault moves the values itself, so they never cross the session (§10.7).
+// sensitivityCritical moves an item into or out of the credential's
+// protection: the vault encrypts or decrypts the values itself, so they
+// never cross the session (§10.7).
 func (f *Feature) sensitivityCritical(s *vault.Session, in *envelope.Inner, cur *itemspec.Item, sens string) (json.RawMessage, error) {
 	if err := appOnly(s); err != nil {
 		return nil, err
@@ -240,6 +275,9 @@ func (f *Feature) sensitivityCritical(s *vault.Session, in *envelope.Inner, cur 
 	if sens == itemspec.Critical {
 		if err := checkCritSize(cur); err != nil {
 			return nil, err
+		}
+		if f.criticalCount() >= itemspec.MaxCritItems {
+			return nil, errLimit
 		}
 	}
 	var ch *change
@@ -252,22 +290,27 @@ func (f *Feature) sensitivityCritical(s *vault.Session, in *envelope.Inner, cur 
 	op := func(inner *credential.Inner, _ *credential.Payload) error {
 		i := inner.FindItem(cur.ID)
 		if sens == itemspec.Critical {
-			if i >= 0 || len(inner.Items) >= credential.MaxItems {
+			if i >= 0 {
 				return errLimit
 			}
-			inner.Items = append(inner.Items, critValues(cur, cur.Notes))
-			stripValues(it)
+			if err := encrypt(s, it, inner, 1); err != nil {
+				return err
+			}
 		} else {
 			if i < 0 {
 				return errNotFound
 			}
-			ci := &inner.Items[i]
+			pt, err := open(s.VaultID(), cur, &inner.Items[i])
+			if err != nil {
+				return errInternal
+			}
+			v, err := ParseValues(pt)
+			suite.Wipe(pt)
+			if err != nil {
+				return errInternal
+			}
 			for k := range it.Fields {
-				for _, v := range ci.Values {
-					if v.FieldID == it.Fields[k].ID {
-						it.Fields[k].Value = append(json.RawMessage(nil), v.Raw...)
-					}
-				}
+				it.Fields[k].Value = v.Fields[it.Fields[k].ID]
 				if it.Fields[k].Value == nil {
 					it.Fields[k].Value = json.RawMessage(`""`)
 					if it.Fields[k].Kind == itemspec.KindAddress {
@@ -275,15 +318,8 @@ func (f *Feature) sensitivityCritical(s *vault.Session, in *envelope.Inner, cur 
 					}
 				}
 			}
-			if ci.Notes != nil {
-				n, err := strictjson.AsString(ci.Notes)
-				if err != nil {
-					return errInternal
-				}
-				it.Notes = n
-			}
-			it.HasNotes = false
-			ci.Wipe()
+			it.Notes, it.HasNotes, it.Sealed, it.Gen = v.Notes, false, nil, 0
+			inner.Items[i].Wipe()
 			inner.Items = append(inner.Items[:i:i], inner.Items[i+1:]...)
 		}
 		var err error
@@ -301,6 +337,84 @@ func (f *Feature) sensitivityCritical(s *vault.Session, in *envelope.Inner, cur 
 	b := strictjson.NewBuilder().Uint("version", it.Version)
 	res.Members(b)
 	return b.Bytes(), nil
+}
+
+// RekeyCriticalItems implements credential.ItemRekeyer: at
+// credential.rotate and credential.recover every critical item is
+// re-encrypted under a fresh key (§10.7). The new ciphertexts are
+// installed by commit, after the credential is sealed.
+func (f *Feature) RekeyCriticalItems(s *vault.Session, inner *credential.Inner) (func(), error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	type next struct {
+		sealed []byte
+		gen    uint64
+	}
+	staged := map[string]next{}
+	for i := range inner.Items {
+		it := f.st.Items[inner.Items[i].ID]
+		if it == nil || it.Sensitivity != itemspec.Critical {
+			continue
+		}
+		sealed, gen, err := rekey(s.VaultID(), it, inner, i)
+		if err != nil {
+			return nil, errInternal
+		}
+		staged[it.ID] = next{sealed, gen}
+	}
+	return func() {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		for id, n := range staged {
+			if it := f.st.Items[id]; it != nil {
+				it.Sealed, it.Gen = n.sealed, n.gen
+			}
+		}
+	}, nil
+}
+
+// UseCriticalField returns a critical item's field value (its canonical
+// JSON) for one use within a credential operation (§10.13) and re-keys
+// the item; commit installs the new ciphertext once the credential is
+// sealed. The caller wipes the value.
+func (f *Feature) UseCriticalField(s *vault.Session, inner *credential.Inner, itemID, fieldID string) ([]byte, func(), error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	it := f.st.Items[itemID]
+	i := inner.FindItem(itemID)
+	if it == nil || it.Sensitivity != itemspec.Critical || i < 0 {
+		return nil, nil, errNotFound
+	}
+	pt, err := open(s.VaultID(), it, &inner.Items[i])
+	if err != nil {
+		return nil, nil, errInternal
+	}
+	v, err := ParseValues(pt)
+	suite.Wipe(pt)
+	if err != nil {
+		return nil, nil, errInternal
+	}
+	raw := v.Fields[fieldID]
+	for id, other := range v.Fields {
+		if id != fieldID {
+			suite.Wipe(other)
+		}
+	}
+	if raw == nil {
+		return nil, nil, errNotFound
+	}
+	sealed, gen, err := rekey(s.VaultID(), it, inner, i)
+	if err != nil {
+		suite.Wipe(raw)
+		return nil, nil, errInternal
+	}
+	return raw, func() {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if cur := f.st.Items[itemID]; cur != nil {
+			cur.Sealed, cur.Gen = sealed, gen
+		}
+	}, nil
 }
 
 // AppOnly implements vault.AppOnlyForms: the forms of the step-up types

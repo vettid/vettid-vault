@@ -293,10 +293,9 @@ func TestCEKRotatesOnEveryUse(t *testing.T) {
 func TestOperateAndReplyKey(t *testing.T) {
 	e := newEnv(t)
 	blob := e.create()
-	val := []byte(`"abandon ability able about above absent"`)
+	val := []byte("abandon ability able about above absent")[:ItemKeySize]
 	add := &opFeature{cred: e.f, need: NeedItem, op: func(in *Inner, p *Payload) error {
-		in.Items = append(in.Items, Item{ID: testID, Values: []Value{{FieldID: "f1", Raw: append([]byte(nil), val...)}},
-			Notes: []byte(`"n"`)})
+		in.Items = append(in.Items, Item{ID: testID, Gen: 1, Key: append([]byte(nil), val...)})
 		return nil
 	}}
 	e.op = add
@@ -320,15 +319,14 @@ func TestOperateAndReplyKey(t *testing.T) {
 			if i < 0 {
 				return errNotFound
 			}
-			pt := in.Items[i].ValuesJSON()
 			var err error
-			got, err = credwire.SealValue(p.Reply, e.h.VaultID(), e.lastI, pt)
+			got, err = credwire.SealValue(p.Reply, e.h.VaultID(), e.lastI, in.Items[i].Key)
 			return err
 		}}
 	r = e.ok(e.call("app", "test.op", blob, map[string]any{"password": pw, "item_id": testID}))
 	blob = blobOf(t, r)
 	pt, err := credwire.OpenValue(e.reply, e.h.VaultID(), e.lastI, got)
-	if err != nil || !bytes.Contains(pt, val) || !bytes.Contains(pt, []byte(`"notes":"n"`)) {
+	if err != nil || !bytes.Equal(pt, val) {
 		t.Fatalf("reply-sealed values: %s %v", pt, err)
 	}
 	if bytes.Contains(r.Body, []byte("abandon")) {
@@ -660,8 +658,7 @@ func FuzzParseOpPayload(f *testing.F) {
 
 func FuzzParseInner(f *testing.F) {
 	in := &Inner{VaultID: "v", Version: 1, CreatedAt: time.Unix(0, 0), PasswordChangedAt: time.Unix(0, 0), Key: make([]byte, 32),
-		Items: []Item{{ID: testID, Values: []Value{{FieldID: "f1", Raw: []byte(`"v"`)}, {FieldID: "f2", Raw: []byte(`{"city":"Oslo"}`)}},
-			Notes: []byte(`"n"`)}}}
+		Items: []Item{{ID: testID, Gen: 3, Key: make([]byte, ItemKeySize)}}}
 	f.Add(in.Marshal())
 	f.Fuzz(func(t *testing.T, b []byte) {
 		p, err := ParseInner(b)
@@ -692,31 +689,25 @@ func FuzzOpen(f *testing.F) {
 	})
 }
 
-// §3.5.2: the plaintext is bounded (131,072 bytes): an operation that
-// would exceed it is refused with limit and changes nothing.
+// §3.5.2: the credential holds only item keys (§10.7), so 1,000 critical
+// items fit within the 131,072-byte plaintext; more are refused with
+// limit and change nothing.
 func TestInnerLimit(t *testing.T) {
 	e := newEnv(t)
 	blob := e.create()
-	big := `"` + strings.Repeat("x", 8000) + `"`
 	n := 0
 	e.op = &opFeature{cred: e.f, op: func(in *Inner, _ *Payload) error {
-		n++
-		id, _ := envelope.NewULID(time.Unix(int64(n), 0))
-		in.Items = append(in.Items, Item{ID: id, Values: []Value{{FieldID: "f1", Raw: []byte(big)}}})
+		for len(in.Items) < n {
+			id, _ := envelope.NewULID(time.Unix(int64(len(in.Items)+1), 0))
+			in.Items = append(in.Items, Item{ID: id, Gen: 1 << 40, Key: bytes.Repeat([]byte{0xee}, ItemKeySize)})
+		}
 		return nil
 	}}
-	for {
-		r := e.call("app", "test.op", blob, map[string]any{"password": pw})
-		if r.Code == "limit" {
-			break
-		}
-		blob = blobOf(t, e.ok(r))
-		if n > 20 {
-			t.Fatal("no limit")
-		}
-	}
-	if n < 15 {
-		t.Fatalf("limit after %d items of 8 KB", n)
+	n = MaxItems
+	blob = blobOf(t, e.ok(e.call("app", "test.op", blob, map[string]any{"password": pw})))
+	n = MaxItems + 1
+	if r := e.call("app", "test.op", blob, map[string]any{"password": pw}); r.Code != "limit" {
+		t.Fatalf("over the limit: %q", r.Code)
 	}
 	e.ok(e.unlock(blob, pw))
 }

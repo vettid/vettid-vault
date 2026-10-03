@@ -450,23 +450,29 @@ feature.
 - `tag.delete` of a tag a rule names, and `tag.merge` touching an agent
   rule, are refused (`in_use`): removing a tag from an `all` rule would
   widen it, and an agent rule's tags are signed.
-- The critical limits (64 items, 16 fields, 8 KiB each) hold, but the
-  credential's 128 KiB plaintext binds first (about fifteen full-size
-  items) (§15 follow-up 9, OWNER DECISION).
+- Critical items are envelope-encrypted (owner decision 2026-10-03,
+  replacing values inside the credential): values in DEK state under a
+  per-item XChaCha20-Poly1305 key; the credential holds only the keys
+  (`{item_id, gen, key}`), so up to 1,000 critical items of up to 12 KiB
+  fit (the old bound was about fifteen). Item keys rotate at every use of
+  the item and for every item at `credential.rotate` and
+  `credential.recover` (`credential.ItemRekeyer`); new ciphertexts are
+  installed only after the credential is sealed, in the same flush.
 - Lists that could outgrow a message are paged or bounded (`item.list`,
   `tag.list`, `share.rule.list`, previews, `share.pending`,
   `data.shared`, `data.catalog`).
 
-### OWNER DECISIONS (open)
+### OWNER DECISIONS (2026-10-03)
 
 1. Agent `ask`/`auto` decide inclusion (as for connections); reads of an
    included item are allowed within the rule's `per_hour`/`per_day`,
-   then referred (§10.11). Recommended.
-2. An agent's delegation carries its rule's tag names, visible to
-   relying parties it is shown to (§10.11). Recommended; the alternative
-   is a commitment.
-3. The credential's 128 KiB plaintext bound limits critical items to
-   about fifteen at full size (§15 follow-up 9). Recommended to keep.
+   then referred (§10.11). Agreed.
+2. An agent's delegation carries its rule's tag names (§10.11). Agreed.
+3. Envelope encryption for critical items (§10.7), resolving the
+   capacity bound (§15 follow-up 9). Approved and done; item keys rotate
+   at every use of the item (recommended: a key once obtained stops
+   working at the item's next use) and for all items at
+   `credential.rotate`.
 
 ### Not in this batch
 

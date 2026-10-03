@@ -45,16 +45,19 @@ const (
 
 // Limits (§10.7, §10.8).
 const (
-	MaxName        = 128
-	MaxNotes       = 16384
-	MaxFields      = 64
-	MaxLabel       = 64
-	MaxValue       = 16384
-	MaxItemBytes   = 65536
-	MaxItems       = 2000
-	MaxCritFields  = 16
-	MaxCritBytes   = 8192
-	MaxCritItems   = 64
+	MaxName      = 128
+	MaxNotes     = 16384
+	MaxFields    = 64
+	MaxLabel     = 64
+	MaxValue     = 16384
+	MaxItemBytes = 65536
+	MaxItems     = 2000
+	// A critical item's content travels in a UTK payload (16 KiB, §3.5.4);
+	// its values are encrypted under a per-item key in DEK state, and the
+	// credential holds only the keys (§3.5.2, §10.7).
+	MaxCritFields  = 64
+	MaxCritBytes   = 12288
+	MaxCritItems   = 1000
 	MaxTags        = 16
 	MaxTagLen      = 32
 	MaxTemplate    = 64
@@ -371,18 +374,22 @@ type Field struct {
 // item keeps no values and no notes here (HasNotes tells whether the
 // credential holds notes).
 type Item struct {
-	ID          string    `json:"id"`
-	Version     uint64    `json:"version"`
-	Name        string    `json:"name"`
-	Category    string    `json:"category"`
-	Sensitivity string    `json:"sensitivity"`
-	Template    string    `json:"template,omitempty"`
-	Tags        []string  `json:"tags,omitempty"`
-	Fields      []Field   `json:"fields,omitempty"`
-	Notes       string    `json:"notes,omitempty"`
-	HasNotes    bool      `json:"has_notes,omitempty"`
-	Created     time.Time `json:"created"`
-	Updated     time.Time `json:"updated"`
+	ID          string   `json:"id"`
+	Version     uint64   `json:"version"`
+	Name        string   `json:"name"`
+	Category    string   `json:"category"`
+	Sensitivity string   `json:"sensitivity"`
+	Template    string   `json:"template,omitempty"`
+	Tags        []string `json:"tags,omitempty"`
+	Fields      []Field  `json:"fields,omitempty"`
+	Notes       string   `json:"notes,omitempty"`
+	HasNotes    bool     `json:"has_notes,omitempty"`
+	// A critical item's values and notes, encrypted under its item key
+	// (whose generation is Gen); the key is in the credential (§10.7).
+	Sealed  []byte    `json:"sealed,omitempty"`
+	Gen     uint64    `json:"gen,omitempty"`
+	Created time.Time `json:"created"`
+	Updated time.Time `json:"updated"`
 	// NextField numbers the next new field (f1, f2, ...; never reused).
 	NextField uint64 `json:"next_field"`
 }
@@ -391,6 +398,7 @@ type Item struct {
 func (it *Item) Clone() *Item {
 	c := *it
 	c.Tags = append([]string(nil), it.Tags...)
+	c.Sealed = append([]byte(nil), it.Sealed...)
 	c.Fields = make([]Field, len(it.Fields))
 	for i, f := range it.Fields {
 		f.Value = append(json.RawMessage(nil), f.Value...)

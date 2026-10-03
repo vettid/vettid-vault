@@ -103,6 +103,10 @@ type Credential interface {
 // usable to a connection (§10.12).
 type Usable interface {
 	UsableField(conn, itemID, fieldID string, now time.Time) (name, label string, ok bool)
+	// UseCriticalField decrypts a field's value with the item key from the
+	// opened credential and re-keys the item; commit installs the new
+	// ciphertext after the credential is sealed (§10.7).
+	UseCriticalField(s *vault.Session, inner *credential.Inner, itemID, fieldID string) (value []byte, commit func(), err error)
 }
 
 // Feature implements vault.Feature and vault.ConnectionRemovedObserver.
@@ -462,15 +466,16 @@ func (f *Feature) approve(s *vault.Session, in *envelope.Inner) (json.RawMessage
 	status := ""
 	var sig, pub []byte
 	_, _, usable := f.usable.UsableField(r.Conn, r.ItemID, r.FieldID, s.Now())
+	commit := func() {}
 	op := func(inner *credential.Inner, _ *credential.Payload) error {
 		var seed []byte
-		if i := inner.FindItem(r.ItemID); i >= 0 && usable {
-			for _, v := range inner.Items[i].Values {
-				if v.FieldID == r.FieldID {
-					seed = decodeSeed(v.Raw)
-					if seed == nil {
-						status = StatusUnsuitable
-					}
+		if usable {
+			if raw, c, err := f.usable.UseCriticalField(s, inner, r.ItemID, r.FieldID); err == nil {
+				commit = c
+				seed = decodeSeed(raw)
+				suite.Wipe(raw)
+				if seed == nil {
+					status = StatusUnsuitable
 				}
 			}
 		}
@@ -496,6 +501,7 @@ func (f *Feature) approve(s *vault.Session, in *envelope.Inner) (json.RawMessage
 	if err != nil {
 		return nil, err // the request stays pending (bad_password, backoff, ...)
 	}
+	commit() // the item's new key is in the sealed credential: install its ciphertext
 	out := strictjson.NewBuilder().String("request_id", r.ID).String("status", status).Base64("credential", res.Credential).
 		Uint("version", res.Version).Raw("utks", res.UTKs).Bytes()
 	f.answer(s, r, status, func(b *strictjson.Builder) {

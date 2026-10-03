@@ -88,6 +88,31 @@ type Feature struct {
 
 	rotObs []KeyRotationObserver
 	delObs []DeleteObserver
+	rekey  ItemRekeyer
+}
+
+// ItemRekeyer re-encrypts every critical item under a fresh key (§10.7):
+// at credential.rotate and credential.recover. It replaces the entries in
+// the plaintext and returns commit, which installs the new ciphertexts
+// once the credential has been sealed. It must not call back into the
+// credential.
+type ItemRekeyer interface {
+	RekeyCriticalItems(s *vault.Session, inner *Inner) (commit func(), err error)
+}
+
+// SetItemRekeyer connects the items feature (at construction).
+func (f *Feature) SetItemRekeyer(r ItemRekeyer) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.rekey = r
+}
+
+// rekeyItems re-keys every critical item in the plaintext (see ItemRekeyer).
+func (f *Feature) rekeyItems(s *vault.Session, inner *Inner) (func(), error) {
+	if f.rekey == nil || len(inner.Items) == 0 {
+		return func() {}, nil
+	}
+	return f.rekey.RekeyCriticalItems(s, inner)
 }
 
 // DeleteObserver is told when the credential is deleted: the critical
@@ -728,7 +753,7 @@ func (f *Feature) respond(s *vault.Session, inner *Inner, pw []byte, extra func(
 func (f *Feature) seal(s *vault.Session, cek *suite.PublicKey, inner *Inner, pw []byte) ([]byte, error) {
 	pt := inner.Marshal()
 	defer suite.Wipe(pt)
-	if len(pt) > MaxInner {
+	if len(pt) > MaxInner || len(inner.Items) > MaxItems {
 		return nil, errLimit
 	}
 	blob, err := Seal(cek, s.VaultID(), inner.Version, pw, f.opt.KDF, pt)
@@ -797,6 +822,11 @@ func (f *Feature) rotate(s *vault.Session, inner *Inner, p *Payload) (json.RawMe
 		suite.Wipe(ks)
 		return nil, errInternal
 	}
+	commit, err := f.rekeyItems(s, inner) // every critical item under a fresh key (§10.7)
+	if err != nil {
+		suite.Wipe(ks)
+		return nil, err
+	}
 	if err := s.RotateIdentity(); err != nil {
 		suite.Wipe(ks)
 		return nil, errInternal
@@ -809,6 +839,7 @@ func (f *Feature) rotate(s *vault.Session, inner *Inner, p *Payload) (json.RawMe
 	if err != nil {
 		return nil, err
 	}
+	commit()
 	f.st.Key = pub
 	s.Record(vault.Activity{Kind: "credential.rotated", Audit: true, Feed: true})
 	for _, o := range f.rotObs {
@@ -841,10 +872,15 @@ func (f *Feature) recover(s *vault.Session, e *Envelope, p *Payload) (json.RawMe
 	}
 	defer cek.Destroy()
 	defer inner.Wipe()
+	commit, err := f.rekeyItems(s, inner)
+	if err != nil {
+		return nil, err
+	}
 	out, err := f.respond(s, inner, p.Password, nil)
 	if err != nil {
 		return nil, err
 	}
+	commit()
 	if err := s.CompleteRecovery(); err != nil {
 		return nil, errInternal
 	}

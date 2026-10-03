@@ -24,17 +24,15 @@ const (
 
 // Format constants (§3.5.2).
 const (
-	FormatV1      = 0x01
-	HeaderSize    = 17 // ver(1) || version(8) || kid(8)
-	EncSize       = 1120
-	lockedPrefix  = 22 // t(1) || m(4) || p(1) || salt(16)
-	saltSize      = 16
-	MaxInner      = 131072
-	MaxItems      = itemspec.MaxCritItems
-	MaxItemFields = itemspec.MaxCritFields
-	// MaxRaw bounds one stored value or notes (JSON-encoded): a critical
-	// item's whole encoding is at most itemspec.MaxCritBytes (§10.7).
-	MaxRaw        = itemspec.MaxCritBytes
+	FormatV1     = 0x01
+	HeaderSize   = 17 // ver(1) || version(8) || kid(8)
+	EncSize      = 1120
+	lockedPrefix = 22 // t(1) || m(4) || p(1) || salt(16)
+	saltSize     = 16
+	MaxInner     = 131072
+	MaxItems     = itemspec.MaxCritItems
+	// ItemKeySize is a critical item's key (§3.5.2, §10.7).
+	ItemKeySize   = 32
 	MinPassword   = 8
 	MaxPassword   = 1024
 	MaxBlob       = HeaderSize + EncSize + 16 + lockedPrefix + suite.XNonceSize + MaxInner + 16
@@ -186,28 +184,18 @@ func Open(cek *suite.PrivateKey, vaultID string, blob, password []byte) (uint64,
 	return h.Version, inner, nil
 }
 
-// Value is one field value of a critical item inside the credential: its
-// field id and its canonical JSON value (a string or an address object).
-type Value struct {
-	FieldID string
-	Raw     []byte
-}
-
-// Item is the values of one critical item inside the credential (§3.5.2):
-// its metadata is in the items feature's DEK state.
+// Item is one critical item's entry inside the credential (§3.5.2): the
+// random key its values are encrypted under (in the items feature's DEK
+// state) and the generation of that key, which the ciphertext's AAD
+// binds. The values themselves are not in the credential.
 type Item struct {
-	ID     string
-	Values []Value
-	Notes  []byte // the notes as a JSON string; nil for none
+	ID  string
+	Gen uint64
+	Key []byte
 }
 
-// Wipe zeroizes the item's values.
-func (it *Item) Wipe() {
-	for i := range it.Values {
-		suite.Wipe(it.Values[i].Raw)
-	}
-	suite.Wipe(it.Notes)
-}
+// Wipe zeroizes the item key.
+func (it *Item) Wipe() { suite.Wipe(it.Key) }
 
 // Inner is the credential's plaintext (§3.5.2).
 type Inner struct {
@@ -260,43 +248,13 @@ func (in *Inner) Marshal() []byte {
 		Base64("key", in.Key).Raw("items", arr).Raw("crypto_keys", ck).Bytes()
 }
 
-// Marshal encodes a critical item's values (§3.5.2):
+// Marshal encodes a critical item's entry (§3.5.2):
 //
-//	{"item_id","fields":[{"field_id","value"}],"notes"?}
+//	{"item_id","gen","key"}
 //
 // The caller wipes the result.
 func (it *Item) Marshal() []byte {
-	fs := []byte{'['}
-	for i, v := range it.Values {
-		if i > 0 {
-			fs = append(fs, ',')
-		}
-		fs = append(fs, strictjson.NewBuilder().String("field_id", v.FieldID).Raw("value", v.Raw).Bytes()...)
-	}
-	fs = append(fs, ']')
-	b := strictjson.NewBuilder().String("item_id", it.ID).Raw("fields", fs)
-	if it.Notes != nil {
-		b.Raw("notes", it.Notes)
-	}
-	return b.Bytes()
-}
-
-// ValuesJSON is the plaintext of a revealed critical item (§10.7):
-// {"fields":[{"field_id","value"}],"notes"?}. The caller wipes it.
-func (it *Item) ValuesJSON() []byte {
-	fs := []byte{'['}
-	for i, v := range it.Values {
-		if i > 0 {
-			fs = append(fs, ',')
-		}
-		fs = append(fs, strictjson.NewBuilder().String("field_id", v.FieldID).Raw("value", v.Raw).Bytes()...)
-	}
-	fs = append(fs, ']')
-	b := strictjson.NewBuilder().Raw("fields", fs)
-	if it.Notes != nil {
-		b.Raw("notes", it.Notes)
-	}
-	return b.Bytes()
+	return strictjson.NewBuilder().String("item_id", it.ID).Uint("gen", it.Gen).Base64("key", it.Key).Bytes()
 }
 
 // ParseInner parses the plaintext strictly (§3.5.2).
@@ -361,55 +319,13 @@ func parseItem(o strictjson.Object) (*Item, error) {
 	if it.ID, err = o.String("item_id"); err != nil || !envelope.ValidULID(it.ID) {
 		return nil, ErrFormat
 	}
-	arr, err := o.Array("fields")
-	if err != nil || len(arr) > MaxItemFields {
+	if it.Gen, err = o.Uint("gen", 1, strictjson.MaxSafeInteger); err != nil {
 		return nil, ErrFormat
 	}
-	seen := map[string]bool{}
-	for _, raw := range arr {
-		fo, err := strictjson.AsObject(raw)
-		if err != nil {
-			it.Wipe()
-			return nil, ErrFormat
-		}
-		id, err := fo.String("field_id")
-		if err != nil || !itemspec.ValidFieldID(id) || seen[id] {
-			it.Wipe()
-			return nil, ErrFormat
-		}
-		seen[id] = true
-		v, ok := fo["value"]
-		if !ok || !validRaw(v, true) {
-			it.Wipe()
-			return nil, ErrFormat
-		}
-		it.Values = append(it.Values, Value{FieldID: id, Raw: append([]byte(nil), v...)})
-	}
-	if n, ok := o["notes"]; ok {
-		if !validRaw(n, false) {
-			it.Wipe()
-			return nil, ErrFormat
-		}
-		it.Notes = append([]byte(nil), n...)
+	if it.Key, err = o.Base64("key", ItemKeySize); err != nil {
+		return nil, ErrFormat
 	}
 	return it, nil
-}
-
-// validRaw accepts a JSON string (or, for a value, an address object) of
-// at most MaxRaw bytes; the items feature checked its kind when storing it.
-func validRaw(v []byte, objOK bool) bool {
-	if len(v) == 0 || len(v) > MaxRaw {
-		return false
-	}
-	if v[0] == '"' {
-		_, err := strictjson.AsString(v)
-		return err == nil
-	}
-	if objOK && v[0] == '{' {
-		_, err := strictjson.AsObject(v)
-		return err == nil
-	}
-	return false
 }
 
 func ts(o strictjson.Object, k string) (time.Time, error) {

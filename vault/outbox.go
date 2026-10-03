@@ -51,17 +51,39 @@ func (m *Manager) sealAndQueue(p *Peer, in *envelope.Inner) string {
 
 // sendTo sends a durable event or request to p. It returns the inner id.
 func (m *Manager) sendTo(p *Peer, typ string, body json.RawMessage, now time.Time) string {
-	id := m.newID(now)
-	return m.sealAndQueue(p, &envelope.Inner{ID: id, Type: typ, TS: now, Body: body})
+	return m.sendWith(p, typ, body, SendOptions{}, now)
+}
+
+// sendWith sends a message to p with options: an `exp`, or memory-only
+// delivery (sealed now, deposited after the flush behind p's queued
+// deposits, never written to state). It returns the inner id, or "".
+func (m *Manager) sendWith(p *Peer, typ string, body json.RawMessage, o SendOptions, now time.Time) string {
+	in := &envelope.Inner{ID: m.newID(now), Type: typ, TS: now, Exp: o.Exp, Body: body}
+	if !o.MemoryOnly {
+		return m.sealAndQueue(p, in)
+	}
+	kr := m.sessions[p.ID]
+	if kr == nil || kr.Current() == nil || p.Standing.Token == "" {
+		return ""
+	}
+	raw, err := kr.Current().Seal(in)
+	if err != nil {
+		return ""
+	}
+	m.volatile = append(m.volatile, &OutboxEntry{ID: in.ID, Op: OpDeposit, PeerID: p.ID, RelayURL: p.Relay.URL,
+		Mailbox: p.Relay.Mailbox, Payload: raw, BestEffort: true, Created: now})
+	return in.ID
 }
 
 // ownerDevices returns the active owner devices that receive fan-out:
-// apps and desktops. Agents receive only what their grants cover (§9.1),
-// which in V2 is nothing.
+// apps, and desktops while their access session lasts (§6.8, §9.1).
+// Agents receive only what their grants cover (§9.1), which until LEASH
+// is nothing.
 func (m *Manager) ownerDevices() []*Peer {
 	var out []*Peer
+	now := m.now()
 	for _, p := range m.st.Devices {
-		if p.State == PeerActive && !p.Recovering && (p.Kind == KindApp || p.Kind == KindDesktop) {
+		if p.State == PeerActive && !p.Recovering && (p.Kind == KindApp || p.Kind == KindDesktop && m.hasAccess(p, now)) {
 			out = append(out, p)
 		}
 	}
@@ -72,9 +94,13 @@ func (m *Manager) ownerDevices() []*Peer {
 // notifyDevices makes one deposit per owner device, each under that
 // device's session (§9.1), except the device `except`.
 func (m *Manager) notifyDevices(typ string, body json.RawMessage, except string, now time.Time) {
+	m.notifyDevicesWith(typ, body, except, SendOptions{}, now)
+}
+
+func (m *Manager) notifyDevicesWith(typ string, body json.RawMessage, except string, o SendOptions, now time.Time) {
 	for _, p := range m.ownerDevices() {
 		if p.ID != except {
-			m.sendTo(p, typ, body, now)
+			m.sendWith(p, typ, body, o, now)
 		}
 	}
 }
@@ -314,6 +340,7 @@ func (m *Manager) housekeeping(now time.Time) {
 		}
 	}
 	m.refreshHeld(now)
+	m.expireAccess(now)
 	m.remintIssued(now)
 	m.pruneIssued(now)
 	m.pruneRetiredKEMs(now)

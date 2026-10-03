@@ -1,12 +1,14 @@
 package vault
 
 import (
+	"crypto/ed25519"
 	"encoding/json"
 	"sort"
 	"time"
 	"unicode/utf8"
 
 	"github.com/vettid/vettid-vault/internal/strictjson"
+	"github.com/vettid/vettid-vault/vms/callwire"
 )
 
 // managerHost is the Host of the sessions a Manager builds. Its methods run
@@ -52,6 +54,40 @@ func (h managerHost) NotifyDevices(typ string, body json.RawMessage, except stri
 }
 
 func (h managerHost) NewID(now time.Time) string { return h.m.newID(now) }
+
+func (h managerHost) IdentityKey() ed25519.PublicKey {
+	return append(ed25519.PublicKey(nil), h.m.keys.ik.Public().(ed25519.PublicKey)...)
+}
+
+func (h managerHost) Device(id string) (PeerInfo, bool) {
+	p, ok := h.m.st.Devices[id]
+	if !ok || p.State != PeerActive || p.Recovering || !h.m.hasAccess(p, h.m.now()) {
+		return PeerInfo{}, false
+	}
+	return info(p), true
+}
+
+func (h managerHost) Send(to, typ string, body json.RawMessage, o SendOptions, now time.Time) error {
+	p := h.m.peer(to)
+	if p == nil || p.State != PeerActive || p.Recovering || !h.m.hasAccess(p, now) {
+		return ErrNoSession // a desktop or agent only within its access session (§6.8)
+	}
+	if h.m.sendWith(p, typ, body, o, now) == "" {
+		return ErrNoSession
+	}
+	return nil
+}
+
+func (h managerHost) SignICEConfig(config []byte) ([]byte, error) {
+	if _, err := callwire.ParseICEConfig(config); err != nil {
+		return nil, err
+	}
+	return callwire.SignICE(h.m.keys.ik, config)
+}
+
+func (h managerHost) NotifyDevicesWith(typ string, body json.RawMessage, except string, o SendOptions, now time.Time) {
+	h.m.notifyDevicesWith(typ, body, except, o, now)
+}
 
 func (h managerHost) Record(a Activity, now time.Time) { h.m.record(a, now) }
 

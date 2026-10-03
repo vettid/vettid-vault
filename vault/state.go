@@ -41,6 +41,14 @@ type State struct {
 	Settings Settings                   `json:"settings"`
 	Features map[string]json.RawMessage `json:"features"`
 
+	// Blocks are the owner's block list (§7.4, §10.4), by block id.
+	Blocks map[string]*Block `json:"blocks,omitempty"`
+	// AccessRequests are desktops' and agents' pending access-session
+	// requests (§6.8), by request id.
+	AccessRequests map[string]*AccessRequest `json:"access_requests,omitempty"`
+	// Held are requests held for an app's approval (§6.8), by approval id.
+	Held map[string]*HeldRequest `json:"held,omitempty"`
+
 	// Release state (§11.10.4): the release the vault is sealed to, a
 	// pending move, and the release last announced to the owner's devices
 	// (sync.event vault.release, §10.1).
@@ -116,6 +124,67 @@ type Peer struct {
 	// Recovering marks an app registered by recovery that has not yet
 	// authenticated with the credential password (§11.11.5).
 	Recovering bool `json:"recovering,omitempty"`
+
+	// LastActiveAt is when the principal's last message was processed
+	// (§10.3, §10.4 listings), to the minute.
+	LastActiveAt time.Time `json:"last_active_at,omitempty"`
+	// Owner metadata of a connection (connection.update, §10.4), versioned
+	// as one object (§10.1).
+	Meta *PeerMeta `json:"meta,omitempty"`
+	// Access is a desktop's or agent's access session (§6.8).
+	Access *AccessSession `json:"access,omitempty"`
+}
+
+// PeerMeta is the owner's own metadata about a connection: never sent to
+// the peer.
+type PeerMeta struct {
+	Version  uint64   `json:"version"`
+	Alias    string   `json:"alias,omitempty"`
+	Note     string   `json:"note,omitempty"`
+	Tags     []string `json:"tags,omitempty"`
+	Favorite bool     `json:"favorite,omitempty"`
+	Archived bool     `json:"archived,omitempty"`
+}
+
+// Block is one block-list entry (§7.4, §10.4): the peer's identity key
+// and relay key, refused in any later handshake.
+type Block struct {
+	ID           string    `json:"id"`
+	IK           []byte    `json:"ik"`
+	RelayPK      []byte    `json:"relay_pk,omitempty"`
+	Name         string    `json:"name,omitempty"`
+	Note         string    `json:"note,omitempty"`
+	ConnectionID string    `json:"connection_id,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+// AccessSession is an app-approved window in which a desktop or agent may
+// act (§6.8). It is not the E2E session of §6.1.
+type AccessSession struct {
+	ID        string    `json:"id"`
+	Expires   time.Time `json:"expires"`
+	GrantedBy string    `json:"granted_by"`
+}
+
+// AccessRequest is a desktop's or agent's pending request for an access
+// session (§6.8).
+type AccessRequest struct {
+	ID       string    `json:"id"`
+	DeviceID string    `json:"device_id"`
+	Seconds  uint64    `json:"seconds"`
+	Created  time.Time `json:"created"`
+	Expires  time.Time `json:"expires"`
+}
+
+// HeldRequest is a desktop's or agent's request held until an app approves
+// or denies it (§6.8). Inner is the request's inner plaintext JSON.
+type HeldRequest struct {
+	ID       string    `json:"id"`
+	DeviceID string    `json:"device_id"`
+	Key      string    `json:"key"` // principal|inner id (§8.2)
+	Inner    []byte    `json:"inner"`
+	Created  time.Time `json:"created"`
+	Expires  time.Time `json:"expires"`
 }
 
 // PeerRelay is a peer's relay address.

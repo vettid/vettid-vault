@@ -294,6 +294,9 @@ func asArray(raw json.RawMessage) ([]json.RawMessage, error) {
 // AsObject parses a raw array element as an object.
 func AsObject(raw json.RawMessage) (Object, error) { return asObject(raw) }
 
+// AsString parses a raw array element as a string.
+func AsString(raw json.RawMessage) (string, error) { return decodeString(raw) }
+
 // AsUint parses a raw array element as an integer in [min, max].
 func AsUint(raw json.RawMessage, min, max uint64) (uint64, error) { return parseUint(raw, min, max) }
 

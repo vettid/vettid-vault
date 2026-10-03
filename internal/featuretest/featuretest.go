@@ -7,6 +7,7 @@ package featuretest
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"sort"
@@ -15,14 +16,16 @@ import (
 
 	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault"
+	"github.com/vettid/vettid-vault/vms/callwire"
 	"github.com/vettid/vettid-vault/vms/envelope"
 )
 
 // Sent is one message a handler queued.
 type Sent struct {
-	To   string // connection id, or "devices"/"devices-except:<id>"
+	To   string // connection or device id, or "devices"/"devices-except:<id>"
 	Type string
 	Body json.RawMessage
+	Opt  vault.SendOptions
 }
 
 // Host is a fake vault.Host.
@@ -39,16 +42,61 @@ type Host struct {
 	ids        int
 	DownConns  map[string]bool // SendToConnection fails for these
 	Completed  []string        // CompleteRecovery calls
+	Devices    map[string]vault.PeerInfo
+	IK         ed25519.PublicKey
 }
 
 // NewHost returns a fake host with no connections.
 func NewHost() *Host {
-	return &Host{ID: "test-vault", Conns: map[string]vault.PeerInfo{}, Profiles: map[string]json.RawMessage{}, DownConns: map[string]bool{}}
+	ik := ed25519.NewKeyFromSeed(identitySeed()).Public().(ed25519.PublicKey)
+	return &Host{ID: "test-vault", Conns: map[string]vault.PeerInfo{}, Profiles: map[string]json.RawMessage{}, DownConns: map[string]bool{},
+		Devices: map[string]vault.PeerInfo{}, IK: ik}
+}
+
+// AddDevice adds an active owner device (id "dev-<kind>" is what Call uses).
+func (h *Host) AddDevice(id, kind string) {
+	h.Devices[id] = vault.PeerInfo{ID: id, Kind: kind, State: vault.PeerActive}
+}
+
+func (h *Host) IdentityKey() ed25519.PublicKey { return h.IK }
+
+// identitySeed is the fake vault's identity key seed (all zero).
+func identitySeed() []byte { return make([]byte, 32) }
+
+func (h *Host) SignICEConfig(config []byte) ([]byte, error) {
+	if _, err := callwire.ParseICEConfig(config); err != nil {
+		return nil, err
+	}
+	return callwire.SignICE(ed25519.NewKeyFromSeed(identitySeed()), config)
+}
+
+func (h *Host) Device(id string) (vault.PeerInfo, bool) {
+	p, ok := h.Devices[id]
+	return p, ok
+}
+
+func (h *Host) Send(to, typ string, body json.RawMessage, o vault.SendOptions, _ time.Time) error {
+	_, conn := h.Conns[to]
+	_, dev := h.Devices[to]
+	if !conn && !dev || h.DownConns[to] {
+		return vault.ErrNoSession
+	}
+	h.Sent = append(h.Sent, Sent{To: to, Type: typ, Body: append(json.RawMessage(nil), body...), Opt: o})
+	return nil
+}
+
+func (h *Host) NotifyDevicesWith(typ string, body json.RawMessage, except string, o vault.SendOptions, _ time.Time) {
+	to := "devices"
+	if except != "" {
+		to = "devices-except:" + except
+	}
+	h.Sent = append(h.Sent, Sent{To: to, Type: typ, Body: append(json.RawMessage(nil), body...), Opt: o})
 }
 
 // AddConnection adds an active connection.
 func (h *Host) AddConnection(id string) {
-	h.Conns[id] = vault.PeerInfo{ID: id, Kind: vault.KindConnection, State: vault.PeerActive}
+	ik := ed25519.NewKeyFromSeed(append(make([]byte, 31), byte(len(h.Conns)+1))).Public().(ed25519.PublicKey)
+	h.Conns[id] = vault.PeerInfo{ID: id, Kind: vault.KindConnection, State: vault.PeerActive, IK: ik}
 }
 
 func (h *Host) VaultID() string { return h.ID }
@@ -184,6 +232,18 @@ func Call(f vault.Feature, h *Host, now time.Time, kind, typ, body string) Resul
 
 // CallID is Call with a chosen inner id (payloads bound to it, §3.5.4).
 func CallID(f vault.Feature, h *Host, now time.Time, kind, typ, id, body string) Result {
+	return CallInner(f, h, now, kind, &envelope.Inner{ID: id, Type: typ, TS: now, Body: json.RawMessage(body)})
+}
+
+// CallExp is Call with an inner `exp` (offers, ephemeral types).
+func CallExp(f vault.Feature, h *Host, now, exp time.Time, kind, typ, body string) Result {
+	id, _ := envelope.NewULID(now)
+	return CallInner(f, h, now, kind, &envelope.Inner{ID: id, Type: typ, TS: now, Exp: exp, Body: json.RawMessage(body)})
+}
+
+// CallInner delivers a complete inner plaintext from a principal of kind.
+func CallInner(f vault.Feature, h *Host, now time.Time, kind string, in *envelope.Inner) Result {
+	typ := in.Type
 	var spec *vault.TypeSpec
 	for _, ts := range f.Types() {
 		if ts.Type == typ {
@@ -204,7 +264,6 @@ func CallID(f vault.Feature, h *Host, now time.Time, kind, typ, id, body string)
 	if !spec.Allows(from.Kind) {
 		return Result{Code: "forbidden"}
 	}
-	in := &envelope.Inner{ID: id, Type: typ, TS: now, Body: json.RawMessage(body)}
 	s := vault.NewSession(context.Background(), h, from, now, in)
 	out, err := f.Handle(context.Background(), s, in)
 	if err != nil {

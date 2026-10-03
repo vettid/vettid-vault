@@ -470,6 +470,10 @@ func (d *Device) SendWithID(ctx context.Context, id, typ string, body json.RawMe
 }
 
 func (d *Device) sendLocked(ctx context.Context, id, typ string, body json.RawMessage, re, status string) (string, error) {
+	return d.sendFull(ctx, id, typ, body, re, status, time.Time{})
+}
+
+func (d *Device) sendFull(ctx context.Context, id, typ string, body json.RawMessage, re, status string, exp time.Time) (string, error) {
 	v := d.st.Vault
 	if v == nil || v.Token == "" || d.keyring.Current() == nil {
 		return "", ErrNotPaired
@@ -481,7 +485,7 @@ func (d *Device) sendLocked(ctx context.Context, id, typ string, body json.RawMe
 			return "", err
 		}
 	}
-	in := &envelope.Inner{ID: id, Type: typ, TS: now, Body: body, Re: re, Status: status}
+	in := &envelope.Inner{ID: id, Type: typ, TS: now, Exp: exp, Body: body, Re: re, Status: status}
 	raw, err := d.keyring.Current().Seal(in)
 	if err != nil {
 		return "", err

@@ -2,6 +2,7 @@ package vault
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"time"
@@ -44,6 +45,9 @@ type TypeSpec struct {
 	// a crash), and a retransmission is executed again. Only for types
 	// whose sole side effects are audit and feed entries.
 	Volatile bool
+	// DesktopApproval requests from a desktop are held until an owner app
+	// approves them (§6.8 step-up). Apps are never held.
+	DesktopApproval bool
 }
 
 // HandlerError is an error response (§5.3 `error`).
@@ -129,6 +133,29 @@ type Host interface {
 	// CompleteRecovery makes a recovering device an ordinary app and ends
 	// the recovery (§11.11.5).
 	CompleteRecovery(deviceID string, now time.Time) error
+	// IdentityKey is the vault's current identity public key (§3.2).
+	IdentityKey() ed25519.PublicKey
+	// Device returns an active owner device by id.
+	Device(id string) (PeerInfo, bool)
+	// Send sends a message to one principal (an active connection or owner
+	// device) with options (an `exp`, or memory-only delivery).
+	Send(to, typ string, body json.RawMessage, o SendOptions, now time.Time) error
+	// NotifyDevicesWith is NotifyDevices with options.
+	NotifyDevicesWith(typ string, body json.RawMessage, except string, o SendOptions, now time.Time)
+	// SignICEConfig signs a call's ICE configuration with the vault's
+	// identity key (§10.10); it signs nothing that does not parse as one.
+	SignICEConfig(config []byte) ([]byte, error)
+}
+
+// SendOptions qualify one outbound message.
+type SendOptions struct {
+	// Exp is the message's `exp` (§5.3); required for ephemeral types
+	// (§8.5). Zero for none.
+	Exp time.Time
+	// MemoryOnly deposits the message from memory after the batch's flush,
+	// behind queued deposits to the same mailbox, once and best effort: it
+	// never reaches vault state (ephemeral types such as call.ice, §8.5).
+	MemoryOnly bool
 }
 
 // NewSession returns a session for a message from `from`, acting on h. It
@@ -143,6 +170,7 @@ type PeerInfo struct {
 	Kind    string
 	Name    string
 	State   string
+	IK      []byte // its current identity key
 	Profile json.RawMessage
 	// Recovering: an app registered by recovery that has not yet
 	// authenticated with the credential password (§11.11.5).
@@ -153,7 +181,7 @@ func info(p *Peer) PeerInfo {
 	if p == nil {
 		return PeerInfo{}
 	}
-	return PeerInfo{ID: p.ID, Kind: p.Kind, Name: p.Name, State: p.State, Profile: p.Profile, Recovering: p.Recovering}
+	return PeerInfo{ID: p.ID, Kind: p.Kind, Name: p.Name, State: p.State, IK: append([]byte(nil), p.IK...), Profile: p.Profile, Recovering: p.Recovering}
 }
 
 // From returns the sending principal (zero for vault-internal activity).
@@ -198,6 +226,36 @@ func (s *Session) NotifyDevices(typ string, body json.RawMessage) {
 // NotifyAllDevices sends a durable event to every owner device.
 func (s *Session) NotifyAllDevices(typ string, body json.RawMessage) {
 	s.host.NotifyDevices(typ, body, "", s.now)
+}
+
+// NotifyDevicesWith sends an event to every owner app and desktop except
+// `except` ("" for none), with options.
+func (s *Session) NotifyDevicesWith(typ string, body json.RawMessage, except string, o SendOptions) {
+	s.host.NotifyDevicesWith(typ, body, except, o, s.now)
+}
+
+// Send sends a message to one principal: an active connection or an
+// active owner device.
+func (s *Session) Send(to, typ string, body json.RawMessage, o SendOptions) error {
+	return s.host.Send(to, typ, body, o, s.now)
+}
+
+// Device returns an active owner device.
+func (s *Session) Device(id string) (PeerInfo, bool) { return s.host.Device(id) }
+
+// IdentityKey returns the vault's current identity public key.
+func (s *Session) IdentityKey() ed25519.PublicKey { return s.host.IdentityKey() }
+
+// SignICEConfig signs an ICE configuration (callwire format) with the
+// vault's identity key.
+func (s *Session) SignICEConfig(config []byte) ([]byte, error) { return s.host.SignICEConfig(config) }
+
+// InnerID returns the id of the message being handled ("" outside Handle).
+func (s *Session) InnerID() string {
+	if s.inner == nil {
+		return ""
+	}
+	return s.inner.ID
 }
 
 // SyncEvent sends sync.event{kind, members...} to the owner's other
@@ -295,6 +353,31 @@ func (m *Manager) credentialReady() bool {
 // change (the credential drops its kept copy when backup is turned off).
 type SettingsObserver interface {
 	SettingsChanged(s *Session, next Settings)
+}
+
+// ConnectionRemovedObserver is implemented by features that keep data per
+// connection and act when a connection is removed or blocked (§7.4).
+type ConnectionRemovedObserver interface {
+	ConnectionRemoved(s *Session, connectionID string)
+}
+
+// AgentDecision is an AgentPolicy's answer for one request.
+type AgentDecision int
+
+// Agent decisions.
+const (
+	AgentDeny  AgentDecision = iota // forbidden
+	AgentAllow                      // within the agent's grants
+	AgentAsk                        // held for an owner app's approval (§6.8)
+)
+
+// AgentPolicy is the LEASH hook (§6.8; LEASH is specified with its port):
+// it decides an agent's request of an owner type (one that desktops may
+// send) that the type's own roles do not give agents. Without an
+// AgentPolicy feature, agents get nothing beyond their listed types.
+// App-only types are never offered to it.
+type AgentPolicy interface {
+	AgentDecision(s *Session, typ string, body json.RawMessage) AgentDecision
 }
 
 // HandshakeProfiler supplies the vault's self-asserted hs.init profile and

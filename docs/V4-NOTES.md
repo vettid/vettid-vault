@@ -1,4 +1,9 @@
-# V4 batch 1 notes
+# V4 notes
+
+Batch 1 (credential, secrets, profile, audit, feed) first; batch 2
+(connections polish, calls, device and agent sessions) at the end.
+
+## Batch 1
 
 Batch 1 of the feature port (VAULT-PLAN §4 V4): the Protean Credential and
 critical secrets, vault-held secrets, profile (with personal data),
@@ -121,3 +126,86 @@ The client keeps the UTK pool and the latest blob, confirms every new blob,
 refetches on `stale_credential`, and opens reply-sealed values
 (`client/credential.go`). `vaultctl credential recover -value-file` takes
 the member's own blob.
+
+## Batch 2: connections, calls, device and agent sessions (0.5.0)
+
+Follows VAULT-MESSAGING 0.5.0 (§6.8, §10.3, §10.4, §10.10).
+
+### Layout
+
+- `vault/access.go`: access sessions and approvals (§6.8) in the
+  runtime: the session gate in dispatch, step-up holding
+  (`TypeSpec.DesktopApproval`), `approval.*`, and the LEASH hook
+  (`vault.AgentPolicy`).
+- `vault/connections.go`: `connection.update`, the block list, the
+  listing fields, `ConnectionRemovedObserver`.
+- `features/calls` + `vms/callwire`: call signalling, the ICE issuer
+  interface (`calls.ICEIssuer`; `NoServers` default, `Coturn` HMAC
+  implementation), the signed ICE configuration and the device-side call
+  key. `Host.SignICEConfig` lets the feature get a configuration signed
+  by the vault's `ik` without holding it; the runtime signs only bytes
+  that parse as an ICE configuration.
+- `features/connauth`: member authentication; it signs through the
+  credential feature's unlock window (`credential.Feature.UseKey`, wired in
+  `features/all`).
+- Runtime additions for features: `Host.Send` to one principal with
+  `SendOptions{Exp, MemoryOnly}` (ephemeral forwards never reach vault
+  state), `NotifyDevicesWith`, `Device`, `IdentityKey`; `PeerInfo.IK`.
+
+### Ported, changed or dropped (from vettid.dev vault-manager)
+
+| Old | Now | Why |
+|---|---|---|
+| `block.add/remove` = a call-only blocklist of owner-space ids, with reason and duration | `block.add{connection_id \| pending_id, note?}`, `.remove`, `.list`: §7.4 "Peer blocked" (removal, sub denylisted) plus an entry on the peer's `ik` and relay key that refuses its handshakes | The spec's revocation already defined blocking; a timed block of a removed connection would only re-allow invitations, which `block.remove` does |
+| `connection-authenticate.request/approve/deny/get/list`, signed with the identity key decrypted from the credential with a password hash | `connection.authenticate.*`, signed with the **credential key** within the unlock window (`credential.unlock` first), binary signed string over both vaults' `ik`s, nonce, request id and context; the requester pins the key | The vault `ik` (which signs handshakes) is no longer in the credential; the credential key is the member's. OWNER DECISION 2 |
+| `connection.update{tags, is_favorite, is_archived, peer_alias}` | `connection.update{version, alias, note, tags, favorite, archived}`, versioned | §10.1 versioned objects |
+| Connection-card extras (message preview, unread count, last call, needs-attention, credential expiry, key rotation count) | `created_at`, `last_active_at` only | Previews and counts are app concerns from `message.list`/`call.list`; rotation and expiry are runtime internals |
+| `connection.rotate` (new X25519 pair) | Dropped | Rekeys (§6.5) and `identity.rotate` replace it |
+| Per-call X25519 pair in the vault; `shared_secret` sent to the app in `call.accepted` | The calling device generates an MLKEM768X25519 key; the answering device encapsulates; vaults relay `ek`/`enc` and never hold `k_call` | PQC Phase 1; no media key in vault state or the response cache. OWNER DECISION 3 |
+| `call.initiate/accept/reject/cancel/offer/answer/candidate/busy/blocked` peer events; `call.start/accept/reject/end/signal` app ops | `call.start` (req), `call.offer`, `call.answer`, `call.ice`, `call.ringing`, `call.end{reason}`, `call.list` | One message per signalling step; rejection, cancel, busy and blocked are `call.end` reasons (blocked peers are removed, so they cannot call) |
+| `call.turn-credentials` (Cloudflare via the parent) | `ICEIssuer` in the vault, the configuration signed by the vault and delivered inside `call.start`/`call.offer` | CALLING-SERVICE §5–§6; the parent holds no TURN secret. No calling service exists yet: the default issues no servers |
+| `call.history`, `call.mark-seen` | `call.list`; missed calls are feed items (read state in the feed) | |
+| Caller display name resolved from the profile | Devices show the connection's `name`/`profile` | The callee already holds it |
+| Event replay protection by event id and a 5-minute freshness window | Inner-id dedupe (§8.2), `exp`, `ts` window (§8.4) | Runtime rules |
+| `device.request-session` / `authorize-session` / `extend-session` / `end-session` with an X25519 session key and approval token | `device.session.request/approve/deny/end`, `device.session.granted/ended`; extension is a new request | The §6 handshake already gives the E2E session; the access session is only authorization |
+| `force_replace` / one active desktop session per owner | Dropped | Each desktop is paired and authorized separately |
+| Desktop "independent" vs "phone-required" capability lists, phone heartbeat freshness | Desktop types per §10 roles, step-up types held for an app's approval (`approval.*`); no heartbeat | Role lists are in the registry; presence is on demand only (§9.2) |
+| `agent.*` runtime (secret requests, http_request/sign actions, catalog, agent chat, approvals, rate limits), agent pairing stage 2 | Agent access sessions and the `AgentPolicy` hook; everything else waits for LEASH (batch 3) | Least privilege: without grants an agent may only ask for a session and read `vault.status` |
+| `agent.approval.pending` / `.decide` (registry) | `approval.pending`, `approval.waiting`, `approval.decide` for desktops and agents | One mechanism |
+
+### OWNER DECISIONS
+
+1. **Desktops need an app-approved access session** (default 1 h, at most
+   24 h; can be granted with the pairing approval), and their step-up
+   requests (secret values, profile, settings, invitations, connection
+   removal, unblock) need an app's approval each. This changes V2, where a
+   paired desktop could do everything its role allowed at any time.
+   Recommendation: keep (it is the old design's model); revisit the
+   step-up list with app UX.
+2. **`connection.authenticate` proves the member, not the vault**: the
+   member's app approves and the vault signs with the credential key
+   (password-gated through the unlock window). The handshake and SAS
+   already authenticate the vault. Recommendation: keep; add a
+   credential-key rotation statement later (§15 item 6) so a rotation is
+   followed instead of reported as a key change.
+3. **Media keys are device-held**: the KEM runs between the two devices;
+   the registry text said "the answering vault". Recommendation: keep (no
+   media key in vault state, response caches or the outbox).
+4. **One call at a time per vault** (`busy`). Recommendation: keep for
+   1:1 calling.
+5. **Re-connecting after removal or block** needs the peer to rotate its
+   relay key, because removal denylists its `sub` (existing §7.4/§6.7
+   behaviour, made explicit in 0.5.0). Recommendation: denylist the
+   issued `jti`s instead (§15 item 7), so `block.remove` and later
+   invitations work.
+
+### Not in batch 2
+
+- TURN credential issuance in production: the `ICEIssuer` interface and a
+  coturn HMAC issuer exist, but no calling service or shared-secret
+  delivery does; release builds issue no servers.
+- LEASH (grants, `agent.request`, the agent's grant-scoped fan-out):
+  batch 3, through `vault.AgentPolicy`.
+- Push wakes for incoming calls (§14).
+- vaultctl call commands run a whole call per invocation (the caller's
+  KEM key lives only in memory); the e2e tests drive the client package.

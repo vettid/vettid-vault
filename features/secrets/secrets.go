@@ -65,10 +65,12 @@ func (f *Feature) Name() string { return "secrets" }
 // Types implements vault.Feature.
 func (f *Feature) Types() []vault.TypeSpec {
 	return []vault.TypeSpec{
-		{Type: "secret.put", Request: true, From: owners},
-		{Type: "secret.get", Request: true, From: owners},
+		// A desktop reads or changes a value only with an app's approval
+		// (§6.8); listing (no values) needs none.
+		{Type: "secret.put", Request: true, From: owners, DesktopApproval: true},
+		{Type: "secret.get", Request: true, From: owners, DesktopApproval: true},
 		{Type: "secret.list", Request: true, From: owners},
-		{Type: "secret.delete", Request: true, From: owners},
+		{Type: "secret.delete", Request: true, From: owners, DesktopApproval: true},
 	}
 }
 

@@ -43,7 +43,8 @@ func TestPairConnectMessage(t *testing.T) {
 	if field(t, pend.Body, "name") != "a-desk" {
 		t.Fatal("pending name")
 	}
-	mustOK(t, a.request(a.app, "device.pair.approve", `{"pairing_id":"`+pairingID+`"}`))
+	// The approval grants the desktop its first access session (§6.8).
+	mustOK(t, a.request(a.app, "device.pair.approve", `{"pairing_id":"`+pairingID+`","session_seconds":3600}`))
 	if err := desk.AwaitPaired(ctx); err != nil {
 		t.Fatalf("await paired: %v", err)
 	}

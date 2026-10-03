@@ -13,22 +13,33 @@ import (
 	"github.com/vettid/vettid-vault/vault"
 )
 
-// pairDesktop pairs a desktop to tv from its app (§6.7).
+// pairDesktop pairs a desktop to tv from its app (§6.7), with a one-hour
+// access session (§6.8).
 func pairDesktop(t *testing.T, tv *testVault, relayURL string) *client.Device {
+	return pairDevice(t, tv, relayURL, vault.KindDesktop, 3600)
+}
+
+// pairDevice pairs a desktop or agent; sessionSeconds > 0 grants an access
+// session with the approval.
+func pairDevice(t *testing.T, tv *testVault, relayURL, role string, sessionSeconds int) *client.Device {
 	t.Helper()
 	ctx := ctxT(t, 60*time.Second)
-	desk, err := client.New(ctx, client.Config{Role: vault.KindDesktop, Name: tv.name + "-desk", RelayURL: relayURL, PollWait: time.Second})
+	desk, err := client.New(ctx, client.Config{Role: role, Name: tv.name + "-" + role, RelayURL: relayURL, PollWait: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
-	pc := mustOK(t, tv.request(tv.app, "device.pair.create", `{"role":"desktop"}`))
+	pc := mustOK(t, tv.request(tv.app, "device.pair.create", `{"role":"`+role+`"}`))
 	link, _ := pc.String("link")
 	pid, _ := pc.String("pairing_id")
 	if _, err := desk.Pair(ctx, link); err != nil {
 		t.Fatal(err)
 	}
 	waitEvent(t, tv.app, "device.pair.pending", has("pairing_id", pid))
-	mustOK(t, tv.request(tv.app, "device.pair.approve", `{"pairing_id":"`+pid+`"}`))
+	body := `{"pairing_id":"` + pid + `"}`
+	if sessionSeconds > 0 {
+		body = `{"pairing_id":"` + pid + `","session_seconds":` + itoa(sessionSeconds) + `}`
+	}
+	mustOK(t, tv.request(tv.app, "device.pair.approve", body))
 	if err := desk.AwaitPaired(ctx); err != nil {
 		t.Fatal(err)
 	}

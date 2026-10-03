@@ -325,6 +325,9 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 		}
 		m.st.SeenInner[key] = now
 	}
+	if !eph {
+		p.LastActiveAt = now.UTC().Truncate(time.Minute) // listings (§10.3, §10.4)
+	}
 	if in.Re != "" {
 		m.handleResponse(p, in, now)
 		return disp(eph)
@@ -342,7 +345,20 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 		}
 		return disp(eph)
 	}
-	if !te.allows(p.Kind) || p.Recovering && !recoveryAllowed[in.Type] {
+	s := &Session{m: m, peer: p, host: managerHost{m}, from: info(p), ctx: ctx, now: now, inner: in}
+	allowed := te.allows(p.Kind) && !(p.Recovering && !recoveryAllowed[in.Type])
+	ask := false
+	if !allowed && p.Kind == KindAgent && m.hasAccess(p, now) {
+		// LEASH hook (§6.8): the agent's policy may allow an owner type or
+		// refer it to the owner; app-only types never.
+		switch m.agentDecision(s, te, in) {
+		case AgentAllow:
+			allowed = true
+		case AgentAsk:
+			allowed, ask = true, true
+		}
+	}
+	if !allowed {
 		if te.spec.Request {
 			m.respondError(p, in, key, "forbidden", "", now)
 		} else {
@@ -350,7 +366,26 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 		}
 		return disp(eph)
 	}
-	s := &Session{m: m, peer: p, host: managerHost{m}, from: info(p), ctx: ctx, now: now, inner: in}
+	if !accessExempt[in.Type] && !m.hasAccess(p, now) {
+		// §6.8: a desktop or agent acts only within an access session.
+		if te.spec.Request {
+			m.respondError(p, in, key, "session_required", "", now)
+		} else {
+			m.audit(now, "session_required", p.ID)
+		}
+		return disp(eph)
+	}
+	if p.Kind == KindDesktop && te.spec.DesktopApproval {
+		ask = true
+	}
+	if ask {
+		if te.spec.Request && !eph && !volatile {
+			m.hold(p, in, key, now)
+		} else {
+			m.audit(now, "approval_required", p.ID)
+		}
+		return disp(eph)
+	}
 	body, herr := te.handler.Handle(ctx, s, in)
 	if te.spec.Request {
 		var he *HandlerError

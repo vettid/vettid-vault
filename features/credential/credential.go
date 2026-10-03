@@ -275,6 +275,8 @@ const (
 	needItem
 	needReply
 	needRequest
+	optItem
+	needHash
 )
 
 // What another feature's credential operation carries in its sealed
@@ -285,6 +287,8 @@ const (
 	NeedItem      = needItem    // item (a critical item's content, §10.7)
 	NeedReply     = needReply   // reply_key
 	NeedRequest   = needRequest // request_id and payload_sha256 (§10.13)
+	NeedOptItem   = optItem     // item, optional (a wallet's imported phrase, §10.18)
+	NeedHash      = needHash    // payload_sha256 alone (a PSBT's hash, §10.18)
 )
 
 var needs = map[string]int{
@@ -441,17 +445,24 @@ func parsePayload(n int, pt []byte) (*Payload, error) {
 		}
 		p.ItemID = id
 	}
-	if n&needItem != 0 {
+	if n&(needItem|optItem) != 0 {
 		raw, ok := o["item"]
-		if !ok || len(raw) == 0 || raw[0] != '{' {
+		if ok && (len(raw) == 0 || raw[0] != '{') || !ok && n&needItem != 0 {
 			return fail()
 		}
-		p.Item = append([]byte(nil), raw...)
+		if ok {
+			p.Item = append([]byte(nil), raw...)
+		}
 	}
 	if n&needRequest != 0 {
 		if p.RequestID, err = o.String("request_id"); err != nil || !envelope.ValidULID(p.RequestID) {
 			return fail()
 		}
+		if p.PayloadHash, err = o.Base64("payload_sha256", sha256.Size); err != nil {
+			return fail()
+		}
+	}
+	if n&needHash != 0 && n&needRequest == 0 {
 		if p.PayloadHash, err = o.Base64("payload_sha256", sha256.Size); err != nil {
 			return fail()
 		}

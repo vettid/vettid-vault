@@ -1,7 +1,7 @@
 ---
 title: VAULT-MESSAGING
 status: draft
-version: 0.7.0
+version: 0.8.0
 date: 2026-10-03
 owner: Al Liebl (Mesmer)
 component: vault manager (enclave), parent forwarder, apps, desktops, agents, member API vault routes
@@ -15,6 +15,20 @@ related:
   - MEMBER-API.md
   - VAULT-ITEMS.md (0.1.0, approved 2026-10-03)
 changelog:
+  - 0.8.0: V4 batch 4: location sharing per connection (once or
+    continuous, expiring, precision and cadence enforced by the sending
+    vault, positions forwarded from memory and kept by the receiver only
+    while the share is active, requests) (§10.16); presence as an
+    on-demand ping with a per-connection policy, refusals silent (§9.2,
+    §10.17); the member's opt-in location log, owner-only, bounded, shared
+    only as a snapshot through a share (§10.16); the Bitcoin wallet: BIP86
+    (taproot, the default) and BIP84 accounts of a recovery phrase that is
+    a critical item, addresses without the password, PSBT signing as a
+    credential operation in the unlock window under a signing policy, the
+    member's app as the chain source (owner decision) (§10.18); the wallet
+    actions run (catalog version 3, `address` in
+    wallet.request-payment) (§10.14); `invalid_psbt` and `unavailable`
+    (§10.1); registry, sync.event, audit, feed and threat-model rows
   - 0.7.0: V4 items (VAULT-ITEMS, owner decisions of 2026-10-03): one item
     model (name, category, typed fields, tags, sensitivity data, secret or
     critical) replaces profile fields, vault-held secrets and critical
@@ -434,7 +448,7 @@ values the vault keeps encrypted under those keys.
 - Its contents are never part of vault state.
 
 This section follows the owner's Protean Credential design
-(vettid-dev `docs/protean_credential_system_design.md`) on the new
+([PROTEAN-CREDENTIAL.md](PROTEAN-CREDENTIAL.md)) on the new
 transport. Its three rotating mechanisms map as follows:
 
 - **CEK** (credential encryption key): a new CEK after **every** use of
@@ -511,7 +525,8 @@ locked = t (1) || m_KiB (4, big-endian) || p (1) || salt (16) || nonce (24)
   the credential stays small. A credential holds at most 1,000 entries
   (about 90 bytes each; `limit`) (0.7.0 replaced 0.6.0's `secrets` by
   `items`; no blob of an earlier draft exists).
-- `crypto_keys` is reserved for the wallet feature and is empty until then.
+- `crypto_keys` is reserved and empty: wallets keep their recovery
+  phrase as a critical item (§10.18, 0.8.0).
 - `version` in `inner` MUST equal the header's `version`; `vault_id` MUST
   equal the vault's.
 
@@ -632,7 +647,9 @@ ct     = ctx.Seal(aad = type || 0x00 || inner id, pt = payload JSON)
 `password`, `new_password`, `item_id` (which item an operation acts on),
 `item` (a critical item's content) and `reply_key`, and, for a
 critical-item use (§10.13), `request_id` and `payload_sha256`, which bind
-the member's consent to one request and one payload.
+the member's consent to one request and one payload. A wallet spend
+(§10.18) binds it with `item_id` (the wallet) and `payload_sha256` (the
+PSBT's hash), and `wallet.create` may carry an imported phrase as `item`.
 
 **Using a UTK.** The vault looks the UTK up among those issued to the
 sending app and removes it from the pool before anything else is checked.
@@ -1418,9 +1435,11 @@ current access session, so a request made within a session renews it.
   `profile.set`, `settings.set`, `share.rule.set`, `share.decide`,
   `connection.invite.create`, `connection.invite.accept`,
   `connection.remove`, `block.remove`, `grant.decide`,
-  `action.configure`, `intro.create` and `intro.accept`. Apps are never held. (Types that use the credential,
-  such as `critical-secret-use.approve` and signed `leash.grant.issue`,
-  are app-only. A step-up type's app-only form, such as a critical
+  `action.configure`, `intro.create`, `intro.accept`,
+  `location.share.start`, `location.history.list`, `.delete` and
+  `.share`, and `presence.set`. Apps are never held. (Types that use the credential,
+  such as `critical-secret-use.approve`, signed `leash.grant.issue`,
+  `wallet.create` and `wallet.sign`, are app-only. A step-up type's app-only form, such as a critical
   item's `item.put` or an agent's `share.rule.set`, is answered
   `forbidden` to a desktop at once, never held, §10.7, §10.12.)
 - An **agent** may send only the types listed for agents in §10, unless
@@ -1511,7 +1530,7 @@ The relay enforces each token's `quota` and its own per-sender limits. On
 top of that, the vault limits each peer to:
 
 - 60 durable messages per minute;
-- 1 `presence.ping` per minute.
+- 1 `presence.ping` answered per minute (§10.17).
 
 Excess messages are acked, dropped and audited.
 
@@ -1635,7 +1654,7 @@ same rule to their local storage.
 | Class | Types | Ack | Dedupe | Staleness |
 |---|---|---|---|---|
 | durable | everything not listed below | after flush | persisted | `ts` window |
-| ephemeral | `call.ice`, `call.ringing`, `presence.*`, `vault.locking` | after handling | in memory, 10 min | `exp` required |
+| ephemeral | `call.ice`, `call.ringing`, `location.update`, `presence.ping`, `presence.pong`, `presence.result`, `vault.locking` | after handling | in memory, 10 min | `exp` required |
 
 A vault forwards ephemeral messages from memory: they are deposited after
 the batch's flush, behind any queued deposits to the same mailbox, once
@@ -1678,18 +1697,22 @@ How each error is handled:
 ### 9.2 Presence ping
 
 The relay has no presence, and heartbeats sent into mailboxes that expire
-would be wasteful. Presence is on demand instead:
+would be wasteful. Presence is on demand instead (§10.17):
 
-1. The app sends `presence.query{connection_id}` to its vault.
-2. The vault sends `presence.ping` to the peer vault. The ping is ephemeral,
-   with `exp` = now + 30 s.
-3. The peer vault replies with `presence.pong{state, last_active}`, but only
-   if it is unlocked and its owner's policy allows it. `last_active` is
-   rounded to 5 minutes.
+1. The app sends `presence.query{connection_id}` to its vault, which
+   answers `{ping_id, exp}`.
+2. The vault sends `presence.ping{ping_id}` to the peer vault. The ping is
+   ephemeral, with `exp` = now + 30 s.
+3. The peer vault replies with `presence.pong{ping_id, state,
+   last_active?}`, but only if it is unlocked and its owner's policy
+   allows it. `last_active` is rounded to 5 minutes. The asking vault
+   passes the answer to the asking device as `presence.result`.
 4. If no pong arrives before `exp`, presence is `unknown`.
 
-A vault answers at most one ping per peer per minute. When its policy
-refuses, it answers `unknown`.
+A vault pings each connection, and answers each peer, at most once per
+minute. When its policy refuses, it **does not answer** (0.8.0; 0.7.0
+answered `unknown`, which told the peer that the vault was unlocked): a
+refusal looks like a locked or offline vault.
 
 ### 9.3 Broadcasts to connections
 
@@ -1719,8 +1742,8 @@ There are no multi-recipient primitives.
 devices and access sessions, connections (with blocks and member
 authentication), messaging, the credential, items, tags, profile,
 settings, audit, feed, calls, LEASH, share rules and grants,
-critical-item use and shared actions are in §10.1–§10.14; the others are
-**TBD per feature** (§15).
+critical-item use, shared actions, introductions, location, presence and
+the wallet are in §10.1–§10.18; push is reserved (§14).
 
 Every flow between vaults is a set of **events** correlated by ids in
 their bodies (`request_id`, `fetch_id`, `invocation_id`), never a V↔V
@@ -1775,10 +1798,12 @@ an answer to an unknown or expired id is dropped.
 | | `agent.request` | D→V (agent) | req | LEASH: the catalog, an item its share rules include, a use of a field without exposure (§10.11) |
 | LEASH | `leash.grant.issue`, `.revoke`, `.list` | D→V | req | Manage agent grants (§10.11) |
 | | `leash.grant.updated` | V→D (agent) | | The agent's current grants |
-| Wallet | `wallet.*` (list, address, send, ...) | D→V | req | Owner wallet operations |
-| | `wallet.address.share`, `wallet.payment.request` | V↔V | | Between connections |
-| Location | `location.share.start`, `.stop`, `location.get` | D→V | req | Sharing control |
-| | `location.update` | V↔V | | Sample to a connection (latest wins) |
+| Wallet | `wallet.create`, `.list`, `.get`, `.update`, `.address.new`, `.address.list`, `.address.used`, `.psbt.inspect`, `.sign`, `.history`, `.balance` | D→V | req | BIP86 and BIP84 accounts of a phrase that is a critical item; PSBT signing (§10.18). Between connections: the wallet actions (§10.14) |
+| Location | `location.share.start`, `.stop`, `.list`, `location.get`, `location.request` | D→V | req | Share with one connection; ask a connection to share (§10.16) |
+| | `location.update` | D→V, V↔V, V→D | | A position: from the source device; reduced, to the connection (ephemeral) |
+| | `location.history.list`, `.delete`, `.share` | D→V | req | The member's own location log; a snapshot through a share (§10.16) |
+| | `location.shared`, `location.stopped`, `location.requested`, `location.snapshot` | V↔V | | A share started or stopped; a request; a log snapshot |
+| | `location.event`, `location.request.pending` | V→D | | Started or stopped; asked to share |
 | Actions | `action.list`, `.configure`, `.invoke`, `.respond` | D→V | req | The built-in catalog and its permission modes; invoke an action on a connection's vault; approve one (§10.14) |
 | | `action.offered`, `action.invocation`, `action.result` | V↔V | | The actions offered to that connection; an invocation; its result |
 | | `action.pending`, `action.result` | V→D | | Invoked and waiting for the owner; a result |
@@ -1793,8 +1818,9 @@ an answer to an unknown or expired id is dropped.
 | Critical items | `critical-secret-use.request`, `.approve`, `.deny`, `.list` | D→V | req | Ask a connection's member to use a critical item; consent with the password (§10.13) |
 | | `critical-secret.use`, `critical-secret.result` | V↔V | | The request; the result or refusal |
 | | `critical-secret-use.pending`, `critical-secret-use.result` | V→D | | Asked (apps and desktops); the result |
-| Presence | `presence.query`, `presence.set` | D→V | req | Ask; set own state and policy |
-| | `presence.ping` / `presence.pong` | V↔V | req / response | On demand (§9.2) |
+| Presence | `presence.query`, `presence.get`, `presence.set` | D→V | req | Ask; read and set own state and policy (§10.17) |
+| | `presence.ping`, `presence.pong` | V↔V | | On demand (§9.2; ephemeral events) |
+| | `presence.result` | V→D | | The answer, to the asking device (ephemeral) |
 | Audit & feed | `audit.list`, `connection.audit.list` | D→V | req | Audit log, whole or per connection (§10.9) |
 | | `feed.list`, `.get`, `.update`, `.delete`, `guide.sync` | D→V | req | Activity feed; app guides as feed items (§10.9) |
 | | `feed.event` | V→D | | New feed item |
@@ -1850,7 +1876,13 @@ an answer to an unknown or expired id is dropped.
     are not error responses but `status` or `error` members of the
     answering event (§10.12–§10.14);
   - and (0.7.0) `in_use`: `tag.delete` of a tag a share rule names
-    (§10.8).
+    (§10.8), and (0.8.0) `item.put` or `item.sensitivity` of a wallet's
+    item (§10.18);
+  - and (0.8.0):
+    - `invalid_psbt`: a PSBT the wallet refuses to sign; `message` holds a
+      short reason (§10.18);
+    - `unavailable`: the operation needs something this release does not
+      have, such as a vault-side chain source (§10.18).
 - A request answered with an error changes no state, except the password
   backoff, the spent UTK and the audit log and feed entries of §3.5.3.
   Objects that several
@@ -1897,6 +1929,12 @@ an answer to an unknown or expired id is dropped.
   | `action.decided` | `invocation_id`, `approved` (§10.14) |
   | `action.offers` | `connection_id`: the actions it offers changed (§10.14) |
   | `intro.changed` | `intro_id`, `state` (§10.15) |
+  | `location.share.changed` | `share_id`, `state` (`active`, `ended`): an outgoing share (§10.16) |
+  | `location.history.changed` | `count`: positions were deleted from the location log (§10.16) |
+  | `presence.changed` | `version` (§10.17) |
+  | `wallet.changed` | `wallet_id`, `version` (§10.18) |
+  | `wallet.signed` | `wallet_id`, `txid` (§10.18) |
+  | `wallet.deleted` | `wallet_id` (§10.18) |
 
   These go to the owner's other apps and desktops (not agents), never with
   secret values; devices fetch what changed.
@@ -2410,6 +2448,9 @@ tagged **`@profile`** (owner decision 3). Sent by `app` or `desktop`.
 | `credential.backup` | boolean (§3.5.6) | `true` |
 | `credential.unlock_ttl_seconds` | integer 30–3,600 (§3.5.3) | 300 |
 | `feed.retention_days` | integer 1–365 | 30 |
+| `location.history.enabled` | boolean: keep the member's own location log (§10.16); turning it off deletes the log | `false` |
+| `location.history.retention_days` | integer 1–365 | 30 |
+| `location.history.interval_seconds` | integer 60–3,600: the log's cadence | 300 |
 | `app.<name>` | string of at most 4,096 bytes, or `null` to remove; `<name>` matches `[a-z0-9_.-]{1,48}`; at most 64 | — |
 
 `app.*` keys are opaque to the vault; apps use them for preferences that
@@ -2514,7 +2555,14 @@ entry: { "entry_id": "<ULID>", "seq": 812, "at": "<ts>", "kind": "connection.add
   `action.denied`, `action.completed` (`ref` = `invocation_id`)
   (§10.14); `intro.created`, `intro.offered`, `intro.accepted`,
   `intro.declined`, `intro.connecting`, `intro.closed`
-  (`ref` = `intro_id`) (§10.15); `drop.suppressed`;
+  (`ref` = `intro_id`) (§10.15); `location.share.started`,
+  `location.share.stopped`, `location.share.received`,
+  `location.share.ended`, `location.requested` (`ref` = `share_id` or
+  `request_id`), `location.history.deleted` (`ref` = the number
+  deleted), `location.history.shared`, `location.history.received`
+  (`ref` = `share_id`) (§10.16); `wallet.created`, `wallet.deleted`,
+  `wallet.address_issued` (`ref` = `wallet_id`), `wallet.signed`
+  (`ref` = `txid`) (§10.18); `drop.suppressed`;
   and `drop.<reason>` for every message the vault dropped
   or refused (§6.3, §6.6, §7.3, §8.4), with the runtime's reason, such as
   `drop.rate_limited`.
@@ -2561,7 +2609,9 @@ item: { "item_id": "<ULID>", "seq": 41, "kind": "connection.request", "at": "<ts
   `grant.revoked`, `grant.shared` (`ref` = `grant_id`), `share.pending`
   (`ref` = `rule_id`), `critical-secret.use.request`
   (`ref` = `request_id`), `action.request` (`ref` = `invocation_id`),
-  `intro.request` (`ref` = `intro_id`),
+  `intro.request` (`ref` = `intro_id`), `location.shared`
+  (`ref` = `share_id`), `location.request` (`ref` = `request_id`),
+  `wallet.signed` (`ref` = `txid`),
   and `guide`. Apps render
   items from `kind` and the references; only `guide` items carry `title`
   and `body`.
@@ -2767,7 +2817,8 @@ grant: { "grant_id": "<ULID>", "agent_id": "<device id>", "version": 1, "scope":
   (agents may send `leash.grant.list` for their own grants),
   `settings.*`, `profile.set`, invitations, `connection.approve`,
   `.decline`, `.remove` or `.update`, `block.*`, `call.*`, `grant.*`,
-  `critical-secret-use.*` or `connection.authenticate.*`.
+  `critical-secret-use.*` or `connection.authenticate.*`, nor (0.8.0)
+  any `location.*`, `presence.*` or `wallet.*` type.
 - `approval` is `ask` (the default: every request is referred to an app,
   §6.8) or `auto` (allowed without approval, within the rate limits).
 - `connections` (1–64 connection ids) restricts the types whose body
@@ -3394,15 +3445,15 @@ under a permission mode the member sets per action. A connection learns
 which actions it may invoke from the member's offer; an invocation is
 answered with the action's result or a refusal.
 
-**The catalog** (catalog version 2). Each action has a fixed `action_id`
+**The catalog** (catalog version 3). Each action has a fixed `action_id`
 and `version`, a parameter and a result schema, and a sensitivity:
 
 | `action_id` (version 1) | Sensitivity | `params` | `result` |
 |---|---|---|---|
 | `items.share` | sensitive | `{item_id, fields?: [<field_id>]}`; `fields` 1–64 | `{grants: [<grant descriptor>]}` (§10.12) |
 | `audit.recent` | normal | `{limit?}`, 1–50, default 20 | `{entries: [{kind, at, direction?}]}` |
-| `wallet.request-address` | normal | `{asset: "BTC"}` | `{asset, address}` |
-| `wallet.request-payment` | critical | `{asset: "BTC", amount_sats, memo?}`; `amount_sats` 1–2,100,000,000,000,000, `memo` at most 280 bytes | `{status, txid?}` |
+| `wallet.request-address` | normal | `{asset: "BTC"}` | `{asset, network, address}` |
+| `wallet.request-payment` | critical | `{asset: "BTC", amount_sats, address, memo?}`; `amount_sats` 1–2,100,000,000,000,000, `address` 14–90 alphanumeric characters, `memo` at most 280 bytes | `{status: "signed", txid}` |
 
 - **`items.share` goes through grants (§10.12)**, the same consent and
   delivery as a request the member decided: if the member's
@@ -3421,10 +3472,32 @@ and `version`, a parameter and a result schema, and a sensitivity:
   (§10.9) whose `connection_id` is the invoking connection, at most
   `limit`: only `kind`, `at` and `direction`, never `ref`, other
   connections' entries or `drop.*` entries.
-- **Wallet actions** are defined now and answered `unavailable` until
-  the wallet feature exists (its batch defines the execution);
-  `wallet.request-payment` is critical (it will spend with the member's
-  keys) and keeps its critical rules meanwhile.
+- **Wallet actions** (§10.18) run on the one wallet the member's
+  configuration names (`items` = `[wallet_id]`; without it they are
+  `unavailable`):
+  - `wallet.request-address` returns a receive address of that wallet's
+    receiving account (`address_type`, by default P2TR) for the invoking
+    connection, the same one until the member's app
+    reports it used (`wallet.address.used`), then a new one; audited as
+    `wallet.address_issued`.
+  - `wallet.request-payment` asks the member to pay `amount_sats` to
+    `address` (the invoking member's choice, usually from their own
+    wallet). Its approval is the spend: `action.respond{invocation_id,
+    approve: true, psbt, credential, utk_id, sealed{password, item_id,
+    request_id, payload_sha256}}` from an app within the unlock window,
+    where `item_id` is the wallet, `request_id` the `invocation_id` and
+    `payload_sha256` the PSBT's hash. Besides §10.18's signing policy the
+    PSBT MUST pay exactly `amount_sats` to `address` (which MUST be of
+    the wallet's network) and nothing to anyone but the wallet itself
+    (`invalid_psbt` otherwise). An error leaves the invocation pending.
+    On success the response holds `txid`, the `summary` and the signed
+    `tx` for the app to broadcast, and the connection gets
+    `{status: "signed", txid}`: the transaction is signed and handed to
+    the member's app, which broadcasts it; the requester watches its
+    chain for `txid`.
+- Catalog version 3 (0.8.0) makes the wallet actions available and adds
+  `address` to `wallet.request-payment` (version 1 was never available,
+  so its number is kept).
 - `param_schema` and `result_schema` (JSON Schema 2020-12 documents in
   `action.list`) describe the shapes above for apps. The vault checks
   parameters with its own strict parser per action, never with a general
@@ -3447,7 +3520,7 @@ starts in `default-deny`:
   credential's unlock window** (§3.5.3; `credential_locked` otherwise):
   the member's phone must be there.
 - `items` (1–64 `item_id`s) bounds `items.share`; without it the action
-  shares nothing.
+  shares nothing. For a wallet action it names exactly one wallet.
 
 **Offers.** After every configuration change, and when a connection
 becomes active, the member's vault sends each affected active connection
@@ -3586,6 +3659,380 @@ A vault             B vault (introducer)              C vault
   (`ref` = `intro_id`); an offer is a high-priority feed item
   (`intro.request`); `sync.event{kind: "intro.changed", intro_id,
   state}`.
+
+### 10.16 Location
+
+A member shares their location with **one connection at a time**, by an
+explicit, expiring share: once (a single position) or continuously
+(positions at a cadence until an expiry), at a precision the member
+chooses. The member's device sends positions to its own vault, which
+reduces them to the share's precision and forwards them to the
+connection's vault **from memory**: a position is never written to the
+sending vault's state or outbox (§8.5). The receiving vault keeps the
+latest position (and the trail, if the sharer allowed it) only while the
+share is active. Either side can stop a share. A connection can ask the
+member to share. Sent by `app` or `desktop` devices (a desktop within its
+access session, §6.8), and by connections where marked; never by agents.
+
+```
+A app            A vault                          B vault                 B apps
+  |--location.share.start-->|--location.shared{share_id,...}-->|--location.event{started}-->|
+  |--location.update(lat,lon,...)-->|  reduce to precision; cadence
+  |                         |--location.update{share_id,...} (ephemeral)-->|--location.update-->|
+  |--location.share.stop--->|--location.stopped{share_id}----->|--location.event{stopped}-->|
+```
+
+| Type | Request body | Response / event body |
+|---|---|---|
+| `location.share.start` (app; desktop: step-up) | `{connection_id, mode: "once" \| "continuous", precision?, duration_seconds?, interval_seconds?, history?, request_id?}` | `{share_id, expires_at}`; `not_found`, `connection_unavailable`, `limit`, `bad_request` |
+| `location.update` (D→V, ephemeral) | — | `<sample>`: `{lat, lon, accuracy_m?, altitude_m?, speed_mps?, heading_deg?, at}` |
+| `location.update` (V↔V, ephemeral) | — | `{share_id, lat, lon, accuracy_m, altitude_m?, speed_mps?, heading_deg?, at}` |
+| `location.update` (V→D, ephemeral) | — | `{connection_id, share_id, lat, lon, accuracy_m, altitude_m?, speed_mps?, heading_deg?, at}`, to apps and desktops |
+| `location.share.stop` (app, desktop) | `{share_id}` (an outgoing or an incoming share) | `{}`; `not_found` |
+| `location.share.list` (app, desktop) | `{}` | `{outgoing: [{share_id, connection_id, mode, precision, interval_seconds?, history, device_id, started_at, expires_at, last_sent_at?}], incoming: [{share_id, connection_id, mode, precision, interval_seconds?, history, started_at, expires_at, last?}]}` (active shares, sorted by `share_id`) |
+| `location.get` (app, desktop) | `{connection_id, history?}` | `{share_id, mode, precision, expires_at, last?, history?}`; `not_found` without an active incoming share from that connection |
+| `location.request` (app, desktop) | `{connection_id, note?}` | `{request_id}`; `limit` (one per connection per 10 minutes) |
+| `location.shared` (V↔V) | — | `{share_id, mode, precision, interval_seconds? (continuous), history, expires_at}` |
+| `location.stopped` (V↔V) | — | `{share_id}` |
+| `location.requested` (V↔V) | — | `{request_id, note?}` |
+| `location.event` (V→D) | — | `{event: "started" \| "stopped", direction: "in" \| "out", connection_id, share_id, mode?, precision?, expires_at?}` |
+| `location.request.pending` (V→D) | — | `{request_id, connection_id, note?, exp}` |
+
+- **Starting.** `mode` `continuous`: `duration_seconds` 300–604,800
+  (default 3,600) and `interval_seconds` 10–3,600 (default 60); `once`:
+  neither (`bad_request`), and the share lasts 15 minutes, the window in
+  which its single position is delivered and shown. `precision` is
+  `approximate` (the default, owner decision of 2026-10-03), `exact` or
+  `city`. `history` (default
+  `false`) lets the receiving vault keep the trail. `request_id` answers
+  a `location.request.pending` (it closes it). A vault keeps one outgoing
+  share per connection: a new start ends the old one (`location.stopped`
+  first) and at most 64 outgoing shares (`limit`). The device that starts
+  a share is its **source**: only that device's positions feed it.
+- **Positions.** `lat` −90 to 90 and `lon` −180 to 180 (JSON numbers),
+  `accuracy_m` 0–1,000,000, `altitude_m` ±100,000, `speed_mps`
+  0–10,000, `heading_deg` 0 to less than 360, and `at` (the fix's time)
+  no more than 5 minutes ahead and 1 hour behind. A device's
+  `location.update` is ephemeral (no response, `exp` required, §8.5);
+  invalid ones are dropped (`drop.location_malformed`).
+- **Forwarding.** For each active outgoing share whose source is the
+  sender, the vault forwards the position as V↔V `location.update`, from
+  memory (§8.5), with `exp` = the earlier of the share's expiry and now +
+  max(2 × interval, 60 s) (`once`: the share's expiry):
+  - `continuous`: at most one position per 0.9 × `interval_seconds`
+    (positions in between are dropped); `once`: the first position, after
+    which the share ends;
+  - reduced to the share's precision first: `exact` rounds `lat`/`lon` to
+    5 decimals (about 1 m); `approximate` replaces them by the centre of
+    their 0.01° cell (about 1 km), `accuracy_m` at least 1,000, and drops
+    `altitude_m`, `speed_mps` and `heading_deg`; `city` uses a 0.1° cell
+    (about 11 km) and `accuracy_m` at least 10,000. Cells are fixed, so a
+    connection that sees a member cross a cell boundary learns that the
+    member was near it; apps SHOULD say so.
+- **Receiving.** A vault accepts `location.shared` from a connection (a
+  new share replaces an earlier incoming share from it; at most 256
+  incoming shares; a repeated or ended `share_id` is ignored; `expires_at`
+  in the future and at most 7 days ahead), tells its apps and desktops
+  (`location.event{started}`) and creates a feed item. It accepts a
+  position only for an active incoming share **from the connection that
+  sent it**, with `exp` at most 24 h ahead, at most one per
+  max(5 s, interval / 2), and only one for a `once` share (others are
+  dropped: `drop.location`, `drop.location_rate`,
+  `drop.location_malformed`). It keeps the latest position as `last`
+  (with `received_at`) and, if `history`, a trail of at most 1,000, and
+  forwards each position to its apps and desktops from memory
+  (`exp` now + 60 s).
+- **Stopping and expiry.** `location.share.stop` of an outgoing share
+  ends it and tells the connection (`location.stopped`); of an incoming
+  share it deletes it and asks the sharer to stop (`location.stopped`),
+  which ends it there (`location.event{stopped, direction: out}`). At
+  `expires_at` both vaults end the share without a message. The receiving
+  vault deletes an incoming share **with its positions** when it stops or
+  expires; nothing of it is kept.
+- **Requests.** `location.request` sends `location.requested`; the
+  receiving vault accepts one per connection per 10 minutes and at most
+  16 pending (24 h), tells its apps and desktops
+  (`location.request.pending`) and creates a feed item. There is no
+  decline message: the member answers by starting a share, or not.
+- Removing or blocking a connection drops every share and request with
+  it (§7.4).
+- **Audit and feed.** `location.share.started`, `location.share.stopped`
+  (`direction` out or in), `location.share.received`,
+  `location.share.ended`, `location.requested` (both sides) (`ref` =
+  `share_id` or `request_id`, never a position); feed items
+  `location.shared` and `location.request`; `sync.event`
+  `location.share.changed{share_id, state: "active" | "ended"}`.
+- **Retention is the peer's.** The receiving vault deletes positions as
+  above, but the receiving member's devices have seen them, and a vault
+  is only trusted for what its own member decides (§2.1): precision,
+  cadence and expiry, which the sending vault enforces, are the
+  protection.
+- Location is not shared through share rules or grants (§10.12): every
+  share is its own consent.
+
+**The member's location log** (owner decision of 2026-10-03). The
+member may have their vault keep their **own** location history. It is
+separate from sharing: the log is never shared by share rules, grants or
+actions, and leaves the vault only as a snapshot the member sends through
+one of their existing location shares. There is no export or backup of
+it outside the service (owner decision).
+
+| Type | Request body | Response / event body |
+|---|---|---|
+| `location.history.list` (app; desktop: step-up) | `{from?, to?, after?, limit?}` | `{enabled, retention_days, interval_seconds, count, points: [{lat, lon, accuracy_m, at}], next?}`, oldest first |
+| `location.history.delete` (app; desktop: step-up) | `{from?, to?}` (neither: everything) | `{deleted}` |
+| `location.history.share` (app; desktop: step-up) | `{share_id, from, to}` | `{sent}`; `not_found` (no such active outgoing share), `connection_unavailable` |
+| `location.snapshot` (V↔V) | — | `{share_id, points: [{lat, lon, accuracy_m, at}]}` (at most 500) |
+| `location.event` (V→D) | — | also `{event: "snapshot", direction: "in", connection_id, share_id, points}` |
+
+- **Settings** (§10.8): `location.history.enabled` (default `false`),
+  `location.history.retention_days` (1–365, default 30) and
+  `location.history.interval_seconds` (60–3,600, default 300).
+- **Recording.** While enabled, the vault records the positions its
+  member's devices send (`location.update`, D→V; the app sends them at
+  the member's cadence whether or not it is sharing), at most one per
+  0.9 × `interval_seconds`, with `lat`/`lon` rounded to 5 decimals and
+  `accuracy_m`, without altitude, speed or heading. A recorded position
+  is a write to DEK state at the batch's flush; because the device's
+  message is ephemeral (§8.5) a crash before that flush loses it.
+- **Bounds.** Positions older than the retention are dropped. Older
+  positions are thinned: all of the last 24 hours are kept, then at most
+  one per 15 minutes up to 7 days, then one per 3 hours. The log holds at
+  most 5,000 positions (the oldest go first): a year at the finest
+  cadence is about 4,900 positions, about 400 KB of state.
+- **Access.** Only the member's apps, and desktops with an app's
+  approval of each request (§6.8), list, delete or share the log; agents
+  and connections never. `list` filters by `from` and `to` (inclusive)
+  and pages by `after` (the `at` of the last position returned, `next`);
+  `limit` 1–1,000 (default 500).
+- **Deleting.** `location.history.delete` removes the positions in a
+  range, or all of them. Turning `location.history.enabled` off deletes
+  the whole log at once (apps warn first). Deletions are audited
+  (`location.history.deleted`, `ref` = the number deleted) and send
+  `sync.event{kind: "location.history.changed", count}`.
+- **Snapshots.** `location.history.share` sends the connection of an
+  active outgoing share the positions between `from` and `to` (the newest
+  500 if more), reduced to that share's precision, as
+  `location.snapshot`. The receiving vault accepts it only for an active
+  incoming share from that connection, keeps it with the share (as
+  `snapshot` in `location.get`) and deletes it with the share; it tells
+  its apps and desktops (`location.event{snapshot}`). Audited as
+  `location.history.shared` and `location.history.received`
+  (`ref` = `share_id`).
+
+### 10.17 Presence
+
+Presence is on demand (§9.2): no heartbeats.
+
+| Type | Request body | Response / event body |
+|---|---|---|
+| `presence.get` (app, desktop) | `{}` | `{version, state, share, except}` |
+| `presence.set` (app; desktop: step-up) | `{version, state?, share?, except?}` | `{version}`; `conflict` |
+| `presence.query` (app, desktop) | `{connection_id}` | `{ping_id, exp}`; `not_found`, `connection_unavailable` |
+| `presence.ping` (V↔V, ephemeral) | — | `{ping_id}` |
+| `presence.pong` (V↔V, ephemeral) | — | `{ping_id, state, last_active?}` |
+| `presence.result` (V→D, ephemeral) | — | `{connection_id, ping_id, state, last_active?}`, to the asking device |
+
+- **The policy** is one versioned object (§10.1): `state` is
+  `available` (the default), `busy`, `away` or `invisible`; `share` is
+  `all` (the default) or `none`; `except` (0–1,024 connection ids,
+  deduplicated and sorted) inverts `share` for those connections, so a
+  member can turn presence off (or on) per connection. Absent members of
+  `presence.set` keep their values. Changes send
+  `sync.event{kind: "presence.changed", version}`.
+- **Asking.** `presence.query` sends the connection `presence.ping` (from
+  memory, `exp` = now + 30 s) and answers `{ping_id, exp}`. A vault pings
+  each connection at most once a minute: a query within the minute
+  returns the earlier `ping_id` and `exp` (and repeats its result if one
+  arrived). If no result arrives before `exp`, the app shows presence as
+  unknown.
+- **Answering.** A vault answers a ping with `presence.pong` (from
+  memory, `exp` = now + 30 s) only if its `state` is not `invisible`, its
+  policy shares with that connection, and it has not answered that
+  connection in the last minute. Otherwise it **does not answer**: a
+  refusal is indistinguishable from a locked or offline vault.
+  `last_active` is the newest activity of the member's apps and desktops
+  (§10.3), rounded down to 5 minutes; it is absent when none is known.
+- The asking vault accepts a pong only for a pending ping it sent to that
+  connection, before its `exp`, with `state` `available`, `busy` or
+  `away` and `last_active` not in the future, and sends the asking device
+  `presence.result` from memory (`exp` = now + 60 s). Anything else is
+  dropped without an audit entry. Pings are not audited.
+- Removing or blocking a connection removes it from `except` and drops
+  its pings (§7.4). Agents never ask or answer.
+
+### 10.18 Wallet
+
+The member's Bitcoin wallets. Each wallet is one BIP39 recovery phrase
+with **two accounts**: BIP86 (taproot, P2TR key path, BIP340 Schnorr
+signatures) and BIP84 (native segwit v0, P2WPKH). The phrase is a
+**critical item** (§10.7): its values are encrypted under an item key
+that only the Protean Credential holds, so the vault cannot spend
+without the member's password. The vault keeps both account keys (the
+public halves) in DEK state and derives receive and change addresses
+without the password. New wallets receive on P2TR (owner decision).
+**The vault never talks to a chain** (owner decision): the member's app
+finds the wallet's coins with its own chain source, builds a PSBT
+(BIP174), and the vault checks and signs it; the app broadcasts the
+transaction.
+
+```
+app (chain source)                                   vault
+  |-- wallet.create{address_type?, credential, sealed{password, item?{mnemonic}}} -->|  critical item + both account keys
+  |   (an imported phrase: scans both accounts' descriptors, then wallet.update{address_type})
+  |-- wallet.address.new ------------------------------------------->|  m/86'/c'/0'/0/i (or m/84'/…)
+  |   (finds coins and previous transactions on its chain source)
+  |-- wallet.psbt.inspect{psbt} ------------------------------------>|  the vault's summary: shown to the member
+  |-- credential.unlock, then wallet.sign{psbt, credential, sealed{password, item_id, payload_sha256}} -->|
+  |<-- {txid, tx, summary, credential, ...} -------------------------|
+  |   (broadcasts tx)
+```
+
+| Type | Request body | Response body |
+|---|---|---|
+| `wallet.create` (app) | `{name, network?, address_type?, tags?, credential, utk_id, sealed{password, item?}}`; `item` = `{mnemonic, passphrase?}` to import a phrase | `<wallet>` and `{credential, credential_version, utks}`; `limit`, `bad_request` |
+| `wallet.list` (app, desktop) | `{}` | `{wallets: [<wallet>]}` |
+| `wallet.get` (app, desktop) | `{wallet_id}` | `<wallet>` |
+| `wallet.update` (app, desktop) | `{wallet_id, version, address_type}` | `{version}`; `conflict` |
+| `wallet.address.new` (app, desktop) | `{wallet_id, type?, change?, label?}` | `<address>`; `limit` |
+| `wallet.address.list` (app, desktop) | `{wallet_id, type?, change?, after?, limit?}` | `{addresses: [<address>], next?}` |
+| `wallet.address.used` (app, desktop) | `{wallet_id, addresses: [<address string>]}` (1–256) | `{marked, version}` |
+| `wallet.psbt.inspect` (app, desktop) | `{wallet_id, psbt}` | `<summary>`; `invalid_psbt` |
+| `wallet.sign` (app) | `{wallet_id, psbt, broadcast?, credential, utk_id, sealed{password, item_id, payload_sha256}}` | `<summary>` and `{tx, credential, credential_version, utks}`; `credential_locked`, `invalid_psbt`, `unavailable` (`broadcast` without a chain source) |
+| `wallet.history` (app, desktop) | `{wallet_id, limit?}` (1–200, default 50) | `{transactions: [{txid, at, sending_sats, change_sats, fee_sats, payees: [{address, amount_sats}], connection_id?, invocation_id?}]}`, newest first |
+| `wallet.balance` (app, desktop) | `{wallet_id}` | `{confirmed_sats, unconfirmed_sats}`; `unavailable` without a vault-side chain source (every release) |
+
+```json
+wallet:  { "wallet_id": "<item_id>", "version": 4, "name": "Savings", "network": "mainnet",
+           "fingerprint": "73c5da0a", "address_type": "p2tr",
+           "accounts": [
+             { "type": "p2tr", "path": "m/86'/0'/0'", "xpub": "xpub6…",
+               "descriptors": { "receive": "tr([73c5da0a/86'/0'/0']xpub6…/0/*)", "change": "tr([…]xpub6…/1/*)" },
+               "next_receive": 3, "next_change": 1 },
+             { "type": "p2wpkh", "path": "m/84'/0'/0'", "xpub": "xpub6…",
+               "descriptors": { "receive": "wpkh([73c5da0a/84'/0'/0']xpub6…/0/*)", "change": "wpkh([…]/1/*)" },
+               "next_receive": 0, "next_change": 0 } ],
+           "created_at": "<ts>" }
+address: { "address": "bc1p…", "type": "p2tr", "index": 2, "change": false, "path": "m/86'/0'/0'/0/2",
+           "label": "…?", "connection_id": "<id>?", "used": false, "issued_at": "<ts>" }
+summary: { "txid": "<64 hex>", "inputs": [{"txid", "vout", "amount_sats", "type", "path"}],
+           "outputs": [{"address", "amount_sats", "change", "type?", "path?"}],
+           "total_in_sats", "sending_sats", "change_sats", "fee_sats", "vsize" }
+```
+
+- **Networks.** `network` is `mainnet` (the default), `testnet` (testnet3
+  and testnet4), `signet` or `regtest`; coin type 0 on mainnet and 1
+  otherwise. A release accepts `mainnet`, `testnet` and `signet`;
+  `regtest` only development builds. `xpub` is an account key in BIP32
+  serialisation (`xpub`/`tpub` versions, for both accounts);
+  `fingerprint` is the master key's.
+- **Accounts.** Every wallet holds the BIP86 account m/86'/c'/0' (`type`
+  `p2tr`: key-path-only outputs, the output key tweaked with no script
+  tree as BIP86 says) and the BIP84 account m/84'/c'/0' (`p2wpkh`).
+  `address_type` names the account that receives: new addresses
+  (`wallet.address.new` without `type`) and `wallet.request-address`
+  (§10.14) come from it. It is `p2tr` by default.
+- **Imported phrases.** The vault cannot tell which account of an
+  imported phrase has history. The app scans both accounts' descriptors
+  on its chain source and sets the receiving account, at
+  `wallet.create{address_type}` or afterwards with `wallet.update`
+  (versioned, §10.1). Coins of either account can be spent, together, in
+  any PSBT, and change can go to either account.
+- **Create.** One credential operation (§3.5.3). Without `item` the vault
+  generates 256 bits of entropy (a 24-word phrase); with it, it imports
+  `mnemonic` (12, 15, 18, 21 or 24 BIP39 English words, any case and
+  spacing, checksum verified, stored in canonical form) and `passphrase`
+  (printable ASCII, at most 256 bytes: the enclave has no Unicode
+  normalisation). The vault creates a critical item (`category`
+  `crypto_wallet`, `template` `wallet.btc`, `name`, `tags`) with two
+  `password` fields, "Recovery phrase" and "Passphrase", and keeps both
+  accounts. `wallet_id` is the item's `item_id`. A vault holds at most
+  16 wallets.
+- **The phrase is the member's.** The member backs it up with
+  `item.reveal` of the wallet's item (values sealed to a reply key,
+  §10.7). The wallet owns its item: `item.put` and `item.sensitivity` of
+  it are refused with `in_use` (a changed phrase would no longer match
+  the accounts); `item.tag` works as for any item; `item.delete` of it
+  (a credential operation) or `credential.delete` deletes the wallet
+  (`sync.event{wallet.deleted}`). A share rule that matches the item can
+  make it at most usable (§10.13), for which a phrase is `unsuitable`.
+- **Addresses.** `wallet.address.new` issues the next index of an
+  account's receive chain (or its change chain with `change: true`); at
+  most 2,000 addresses per wallet, both accounts together.
+  `wallet.address.used` records addresses the app saw funded, so that a
+  connection's address is replaced (`wallet.request-address`, §10.14).
+  `wallet.address.list` lists one account and chain (`type` defaults to
+  `address_type`); `next` pages by `index`; `limit` 1–500 (default 100).
+- **The signing policy.** The vault signs a PSBT (`psbt`: standard base64
+  of BIP174 version 0, at most 65,536 bytes) only if:
+  - it has 1–64 inputs and 1–64 outputs, transaction version 1 or 2;
+  - every input spends an output of **one of the wallet's accounts**,
+    shown by a derivation with the wallet's fingerprint, which the vault
+    re-derives and checks with the output script:
+    - P2WPKH: a BIP32 derivation m/84'/c'/0'/{0,1}/i with the
+      compressed key;
+    - P2TR: a taproot BIP32 derivation m/86'/c'/0'/{0,1}/i with the
+      x-only internal key and no leaf hashes (and `tap_internal_key`, if
+      present, MUST equal it); the vault applies the BIP86 tweak and
+      compares the output key. Script-path data (`tap_leaf_script`,
+      `tap_merkle_root`, script-spend signatures) is refused;
+  - every input carries the **full previous transaction**, whose txid
+    MUST equal the outpoint's (and `witness_utxo`, if present, MUST equal
+    that output), so the amounts the vault signs for are the real ones (a
+    lying source cannot make two signatures over misstated amounts,
+    CVE-2020-14199). Taproot signature hashes commit to every input's
+    amount and script (BIP341), so the vault computes them only from
+    these verified outputs; no duplicate inputs, no finalised or
+    partially signed inputs; sighash SIGHASH_ALL, or for P2TR
+    SIGHASH_DEFAULT (the absent sighash) or SIGHASH_ALL;
+  - every output is a standard address (P2PKH, P2SH, P2WPKH, P2WSH or
+    P2TR) of the wallet's network, of at least 330 sats; an output with
+    one of the accounts' derivations (BIP32 or taproot, as for inputs),
+    re-derived and checked, is **change**;
+  - the fee (inputs minus outputs) is positive and at most 1,000 sat/vB of
+    the signed transaction's virtual size (its stripped size, plus per
+    input a P2WPKH witness of 108 weight units or a P2TR one of 66, 67
+    with SIGHASH_ALL).
+
+  Otherwise the answer is `invalid_psbt` with a short reason as
+  `message` (`malformed`, `foreign_input`, `previous_tx`,
+  `derivation_key`, `internal_key`, `input_script`, `fee_rate`,
+  `other_payee`, …). `wallet.psbt.inspect` applies the same checks
+  without the credential and returns the summary that `wallet.sign`
+  would sign for; apps MUST show it (the payees, amounts, change and fee)
+  to the member before asking for the password.
+- **Spending is a critical action.** `wallet.sign` is app only, needs the
+  credential's unlock window (`credential_locked` otherwise, before the
+  UTK is spent) and is one credential operation: the UTK payload's
+  `item_id` MUST be the wallet and `payload_sha256` the SHA-256 of the
+  PSBT's bytes (`bad_request` otherwise), so the password authorises this
+  PSBT of this wallet only. The vault decrypts the phrase with the item
+  key, derives the keys of both accounts (checking them against the
+  stored account keys), signs every input (ECDSA for P2WPKH; a BIP340
+  Schnorr key-path signature with the BIP86-tweaked key for P2TR),
+  checks each signature with the script engine, re-keys the item
+  (§10.7), rotates the CEK and wipes the phrase, seed and keys. It
+  returns the final transaction (`tx`, hex) and its `txid`;
+  `broadcast: true` is `unavailable` in every release. Signed
+  transactions are kept in the history (the latest 200), their inputs'
+  and change outputs' addresses marked used, and the change account's
+  `next_change` moves past the change the PSBT used.
+- Agents never use wallets: no wallet type is delegable (§10.11).
+  Desktops read, issue addresses, choose the receiving account and
+  inspect, but never create or sign.
+- **Change notices.** `sync.event` `wallet.changed{wallet_id, version}`
+  (created, receiving account changed, addresses issued or used),
+  `wallet.signed{wallet_id, txid}`, `wallet.deleted{wallet_id}`.
+- **Audit and feed.** `wallet.created`, `wallet.deleted`
+  (`ref` = `wallet_id`), `wallet.address_issued` (to a connection;
+  `ref` = `wallet_id`), `wallet.signed` (`ref` = `txid`, also a feed
+  item). No address, amount or key is in the audit log.
+- **Chain access (§12.2).** The enclave reaches only the relay, KMS and
+  the attestation status list. A vault-side chain source (an allowlisted
+  chain API) is not part of this version; the reference implementation
+  keeps an interface for it (`wallet.balance`, `broadcast`).
+- `crypto_keys` in the credential (§3.5.2) stays reserved and empty:
+  wallets are critical items.
 
 ## 11. Enrollment and unlock (alternate channel)
 
@@ -4910,6 +5357,8 @@ Connections whose standing tokens lapsed recover through reconnect tokens
   collect loop therefore uses the long-poll (a WebSocket would need a
   connection of its own). AWS KMS endpoints offer only HTTP/1.1; KMS
   requests use a small pool of keep-alive connections.
+- **No chain access.** The wallet (§10.18) adds no egress: the member's
+  app is the chain source (owner decision, 0.8.0).
 - **On unlock**, in order:
   1. re-mint tokens and start reconnects (§7.2);
   2. rekey due device sessions;
@@ -5064,7 +5513,7 @@ it can read and write only its own objects and use only its own relay key
 | Vault `ik` or `kem` | Impersonate the vault in new handshakes and read new `hs.init`s | Credential rotation, `identity.rotate`, rekey |
 | ETK | PINs in requests sealed to it (≤ 25 h). Requires breaking the enclave. | Enclave restart |
 | Owner app | Whatever its role allows, including unlock attempts if the PIN is known | Unlink from another device |
-| Desktop | Within an access session, what desktops may send; step-up types (secret items' values, item and tag changes, profile, settings, share rules and decisions, invitations, removals, grant decisions, action configurations, introductions) only with an app's approval; never critical items; nothing after the session ends (§6.8) | `device.session.end`; unlink |
+| Desktop | Within an access session, what desktops may send; step-up types (secret items' values, item and tag changes, profile, settings, share rules and decisions, invitations, removals, grant decisions, action configurations, introductions, location shares, the location log, the presence policy) only with an app's approval; never critical items or wallet spends; nothing after the session ends (§6.8) | `device.session.end`; unlink |
 | Agent | Within its access session, only what its LEASH grants cover: through `ask` grants nothing without an app's approval of each request (at most 20 referrals an hour), through `auto` grants up to their rate limits; LEASH operations only on the `data` and `secret` items its share rules include, never critical ones; never app-only types, invitations, credential, device or grant management. Refused requests are throttled and repeated ones suspend it; its activity is summarised in the audit log, so it cannot push older entries out (§10.11) | `leash.grant.revoke`, `device.session.end`, `device.unlink`; suspension is automatic |
 | A LEASH delegation (every grant) | A claim, to relying parties that trust the member's credential key, that the agent holds that scope, until the grant's `expires_at` if any; the vault never relies on it. A relying party that requires a status statement accepts a revoked delegation for at most its `status_ttl` (≤ 1 h, default 15 min) plus skew; one that does not can be shown it until `exp` (§10.11) | `leash.grant.revoke` (no new statements); a shorter `status_ttl` |
 | The vault's `ik` as status issuer | Signing statements that keep a revoked or suspended agent's delegations "valid" for relying parties; it grants nothing in the vault itself. An approved release does only what §10.11 says (§2.1) | Rotate the `ik` (§3.4): the chain moves the issuer; revoke the grants |
@@ -5078,6 +5527,18 @@ it can read and write only its own objects and use only its own relay key
 | A member's vault code for actions | Actions run natively in the vault's process (§12.4) from a catalog fixed in the release; no third-party or downloaded code (§10.14) | A release update (§11.10) |
 | A connection, about the member's other connections | Nothing: no type lists them to a connection or lets it ask for an introduction; it learns of another connection only when the member introduces them, only what the member chose to show, and connects only if both accept and then approve each other with the SAS (§10.15) | Decline; `block.add` |
 | The introducer | Each party's answer; it relays the invitation, so it could substitute a party it is connected to, but the parties still approve each other with the SAS, and the invitation accepts only the `ik` B named (§10.15) | Compare the SAS out of band; decline |
+| A connection the member shares location with | Positions at the share's precision (`exact` about 1 m; `approximate` a 0.01° cell; `city` a 0.1° cell), at most one per 0.9 × the interval, until the share's expiry (at most 7 days) or stop; a trail only if the member allowed it; whatever its own member saw. Cells are fixed: crossing a boundary reveals being near it (§10.16) | `location.share.stop`; removing the connection |
+| The sending vault's state | No position: positions are forwarded from memory, never stored or queued (§8.5, §10.16) | — |
+| A connection asking for location or presence | One location request per 10 minutes (a feed item); one presence answer per minute, only if the policy shares with it; a refusal is silence, like a locked vault (§9.2, §10.17) | `presence.set{except}`, `share: none`, `invisible`; `block.add` |
+| Presence | Whether the member's vault is unlocked, the member's chosen `state` and `last_active` to 5 minutes, to connections the policy allows, on demand only (§10.17) | `presence.set` |
+| An app's session (wallet) | Inspection, addresses and history; no spend: spending needs the password (UTK-sealed, bound to the wallet and the PSBT's hash) and the unlock window (§10.18) | Unlink the device; change the password |
+| The member's chain source (the app's) | It learns the wallet's addresses and spends. Lying, it can withhold coins (a failed spend), offer spent coins (a transaction that never confirms) or raise the fee to the 1,000 sat/vB cap; it cannot misstate input amounts (previous transactions are required and their txids checked), redirect change (re-derived by the vault) or alter a payment request's payee or amount (checked exactly). The app shows the vault's own summary before the member approves (§10.18) | Use another chain source (own node, Electrum server) |
+| A connection with `wallet.request-address` | A receive address of the configured wallet, the same one until it is used; addresses link payments to that connection only (§10.14, §10.18) | `action.configure` (mode `default-deny`) |
+| A connection with `wallet.request-payment` | A request the member sees and approves with the password per payment; nothing without the member's app in the unlock window (§10.14, §10.18) | Deny; `default-deny` |
+| The member's location log | Only the member's own devices see it (desktops with an app's approval each time); it leaves the vault only as a snapshot the member sends through one of their shares, at that share's precision; at most `retention_days` (≤ 365) and 5,000 positions, thinned with age; off by default, deleted when turned off; no export (§10.16) | `location.history.delete`; turn it off |
+| Decrypted vault state (location log) | Where the member has been, within the log's retention and thinning, if the member turned it on (§10.16) | Turn the log off (deletes it) |
+| Decrypted vault state (wallet) | Each wallet's account keys: every address, past and future, and so the wallet's balance and history on chain; never the phrase or keys, which are a critical item (§10.18) | Move the funds to a new wallet |
+| The Bitcoin libraries (btcd) | Parsing PSBTs from the member's own app and deriving keys, in the vault's process only (never the supervisor), so a flaw reaches only that vault (§12.4, §13.3) | A release update |
 | A call's media key `k_call` | That call's media; it exists only on the two devices of the call, whose key-exchange shares are signed by the devices and vouched for by their vaults (§10.10) | Hang up |
 | PIN alone | Nothing without a registered, attested app | `pin.change` |
 | An app's copy of the Protean Credential | Nothing without the current CEK, which only the vault holds and which rotates at every use; password guesses only online, through a paired app with a UTK, under the backoff (§3.5.8) | Any use of the credential (a new CEK; the old blob is dead) |
@@ -5155,8 +5616,8 @@ Follow-ups:
 2. **Schemas.** Lifecycle, sessions, devices and access sessions,
    connections, messaging, the credential, items, tags, profile, settings,
    audit, feed, calls, LEASH, grants, critical-secret use and shared
-   actions are in §10.1–§10.14. Still open: location, wallet and
-   presence, the `sync.since` cursor, and the crash-safe write order of
+   actions are in §10.1–§10.14, and location, presence and the wallet
+   (0.8.0) in §10.16–§10.18. Still open: the `sync.since` cursor, and the crash-safe write order of
    `pin.change` (with its implementation).
 3. **Push.** Specify the push-gateway integration (§14) when that service is
    scheduled.
@@ -5184,6 +5645,11 @@ Follow-ups:
     `action.list` are not paged. With share rules a vault can hold 1,000
     given grants, so `grant.list` can outgrow one message (§5.5); page it
     (`after`, `limit`, `next`, as `item.list`) in its next revision.
+11. **Wallet scope.** Multisig and script-path taproot spends, RBF fee
+    bumps, and a vault-side chain source (an allowlisted chain API in the
+    enclave's egress, with its privacy and trust costs, §10.18) are not in
+    0.8.0; the member's app is the chain source (owner decision). The fee
+    cap (1,000 sat/vB) is fixed per release.
 
 ## 16. Test vectors
 
@@ -5290,6 +5756,54 @@ pending (§15, follow-up 1).
 
 ## 17. Changelog
 
+- **0.8.0** (2026-10-03): V4 batch 4 (vettid-vault): location, presence
+  and the wallet.
+  - §10.16 (new): location shares with one connection: `once` or
+    `continuous` (5 minutes to 7 days, cadence 10 s–1 h), precision
+    `approximate` (the default), `exact` or `city` applied by the sending
+    vault,
+    positions ephemeral and forwarded from memory (never in the sender's
+    state), kept by the receiver only while the share is active (trail
+    only if allowed), either side stops, `location.request`; limits,
+    audit and feed kinds. The member's own location log (owner
+    decision): opt-in settings, recording from the devices' positions at
+    the member's cadence, retention, thinning and a 5,000-position cap,
+    owner devices only, deletion, snapshots through a share
+    (`location.history.*`, `location.snapshot`), no export.
+  - §9.2, §10.17 (new): presence: `presence.query` → `ping` → `pong` →
+    `presence.result`, the policy (`state`, `share`, `except`), one ping
+    and one answer per peer per minute; a refusal is silence (0.7.0
+    answered `unknown`); ping and pong are events, not a request.
+  - §10.18 (new): wallets: a BIP86 (P2TR key path, BIP340) and a BIP84
+    (P2WPKH) account per BIP39 phrase kept as a critical item, P2TR
+    receiving by default, the app choosing the receiving account of an
+    imported phrase (`address_type`, `wallet.update`) (generated or imported; owned by the wallet:
+    `item.put`/`item.sensitivity` `in_use`; `item.delete` deletes the
+    wallet); addresses from the account key; the PSBT signing policy
+    (own inputs and change of either account re-derived, taproot
+    derivations and the BIP86 tweak checked, no script paths, previous
+    transactions required for every input,
+    standard outputs of the network, fee cap); spending as a credential
+    operation bound to the wallet and the PSBT's hash, in the unlock
+    window; the app as the chain source (owner decision); history;
+    `mainnet`, `testnet`, `signet` (`regtest` in development builds).
+  - §10.14: catalog version 3: `wallet.request-address` (`network` in the
+    result) and `wallet.request-payment` (`address` added; approval is
+    the spend; result `{status: "signed", txid}`) run on the configured
+    wallet.
+  - §10.1: `invalid_psbt`, `unavailable`; `in_use` for a wallet's item;
+    `sync.event` kinds `location.share.changed`, `location.history.changed`, `presence.changed`,
+    `wallet.changed`, `wallet.signed`, `wallet.deleted`. §10.9: audit and
+    feed kinds. §10 registry: the wallet, location and presence rows
+    (the placeholders `wallet.address.share` and `wallet.payment.request`
+    are dropped: the wallet actions replace them). §6.8: step-up for
+    `location.share.start`, `location.history.*` and `presence.set`.
+    §10.8: `location.history.*` settings. §7.3, §8.5:
+    `location.update` and the presence events are ephemeral. §3.5.2:
+    `crypto_keys` stays empty. §3.5.4: the wallet's payload members.
+    §10.11: no location, presence or wallet type is delegable. §12.2: no
+    chain egress. §13.5: location, location log, presence and wallet
+    rows. §15: follow-up 11.
 - **0.7.0** (2026-10-03): V4 items (vettid-vault): one item model with
   tags and share rules (VAULT-ITEMS, owner decisions 1–5 of 2026-10-03).
   - §10.7 (new): items: name, category (recommended list), template,

@@ -6,7 +6,7 @@ FUZZFLAGS ?=
 # Packages that ship. They must never link the vector-only code, the dev
 # enclave (dev sealer, PIN constructors) or test harnesses.
 LIBPKGS   := ./vms/suite ./vms/envelope ./vms/handshake ./vms/invite ./vms/altchan ./vms/credwire ./vms/callwire \
-             ./vms/pins ./vms/nitro ./vms/manifest ./vms/devattest \
+             ./vms/pins ./vms/nitro ./vms/manifest ./vms/devattest ./vms/btc \
              ./enclave/... ./vault/... ./client/... ./features/... ./cmd/...
 E2ETAGS   := devenclave e2e
 # What runs inside the enclave (the release image's binary and everything it
@@ -68,8 +68,8 @@ check-tcb:
 	  echo "vault/feature code imports enclave, host or parent packages"; exit 1; fi
 	@if GOOS=linux $(GO) list -deps ./enclave/vaultproc | grep -E 'enclave/(supervisor|egress|awskms|nsm)|internal/vsock|vettid-vault/parent'; then \
 	  echo "the vault process links the supervisor, egress, KMS client, NSM, vsock or parent"; exit 1; fi
-	@if GOOS=linux $(GO) list -deps ./enclave/supervisor | grep -E 'vettid-vault/features|enclave/vaultproc'; then \
-	  echo "the supervisor links feature code or the vault process"; exit 1; fi
+	@if GOOS=linux $(GO) list -deps ./enclave/supervisor | grep -E 'vettid-vault/features|enclave/vaultproc|vettid-vault/vms/btc|btcsuite|decred'; then \
+	  echo "the supervisor links feature code, the vault process or the Bitcoin libraries"; exit 1; fi
 	@if GOOS=linux $(GO) list -f '{{.ImportPath}} {{len .CgoFiles}} {{join .Imports " "}}' ./vault/... ./features/... ./enclave/vaultproc | \
 	  grep -E ' [1-9][0-9]* | unsafe( |$$)'; then echo "unsafe or cgo in vault, feature or vault-process code"; exit 1; fi
 	@echo "check-tcb: ok"

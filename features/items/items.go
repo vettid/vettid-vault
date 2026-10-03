@@ -173,6 +173,7 @@ type Feature struct {
 	cred   Credential
 	grants RuleGrants
 	agents AgentRules
+	guard  ItemGuard
 	st     state
 }
 
@@ -626,6 +627,9 @@ func (f *Feature) sensitivity(s *vault.Session, in *envelope.Inner) (json.RawMes
 	}
 	if sens == cur.Sensitivity {
 		return nil, errBad
+	}
+	if f.guarded(cur.ID) {
+		return nil, errInUse // a wallet's item stays critical (§10.18)
 	}
 	if itemspec.HasTag(cur.Tags, itemspec.ProfileTag) {
 		return nil, errBad // @profile only on data items (§10.8)

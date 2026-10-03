@@ -17,7 +17,6 @@ import (
 	"github.com/vettid/vettid-vault/client"
 	"github.com/vettid/vettid-vault/devenclave"
 	"github.com/vettid/vettid-vault/features/all"
-	"github.com/vettid/vettid-vault/features/credential"
 	"github.com/vettid/vettid-vault/features/messaging"
 	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault"
@@ -287,7 +286,7 @@ func sendText(t *testing.T, tv *testVault, d *client.Device, conn, text string) 
 
 // newSet returns the full feature set with test-strength KDF parameters
 // (the memory rules: minimum Argon2id in tests).
-func newSet() *all.Set { return all.NewSet(all.Options{CredentialKDF: credential.MinKDF}) }
+func newSet() *all.Set { return all.NewSet(all.DevOptions()) }
 
 // credPW is the credential password of the test vaults' first apps.
 const credPW = "correct horse battery staple"

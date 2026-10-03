@@ -388,3 +388,38 @@ Unit tests drive the whole feature set (`features/all`) on the fake host
 | 10.1, 10.9 | `sync.event` kinds (`item.*`, `tag.changed`, `share.*`), audit kinds (`item.*`, `tag.changed`, `share.*`, `leash.item.*`), feed items (`share.pending`, `grant.shared`, critical `item.revealed`) | `items.TestItemsCRUD`, `items.TestShareAsk`, `e2e.TestCredentialFlow`, `e2e.TestItemsShareRules`, `e2e.TestLeashAgent` |
 | 13.6 | New parsers fuzzed | `itemspec.Fuzz*`, `items.FuzzItemTypes`, `credential.FuzzParseOpPayload`, `grants.FuzzParseShared`, `leashwire.FuzzParseDelegation` (items seed) |
 | — | The shared template registry (`docs/item-templates.json`) describes items the vault accepts | `itemspec.TestTemplateRegistry` |
+
+## V4 batch 4: location, wallet, presence (§9.2, §10.14, §10.16–§10.18, §13.5; 0.8.0)
+
+Unit tests drive each feature on the fake host (`location`, `presence`)
+or the credential, items, wallet and actions features together
+(`wallet`); `btc` covers the Bitcoin code with published vectors and
+synthetic regtest PSBTs (no real funds). The flows run through the real
+relay in `e2e.TestLocationShare`, `e2e.TestPresencePing`,
+`e2e.TestLocationHistory`, `e2e.TestWallet`, `e2e.TestWalletTaproot`,
+`e2e.TestSharedAction` and `e2e.TestVaultctlBatch4`.
+
+| § | Requirement | Test(s) |
+|---|---|---|
+| 10.16 | Roles: share control from apps and desktops (start step-up for desktops), samples from devices and connections, peer events only from connections | `location.TestStartValidation`, `e2e.TestLocationShare` |
+| 10.16 | Start: modes, durations, intervals, precision, one outgoing share per connection (replace stops the old), limits; once-shares end after one sample | `location.TestStartValidation`, `location.TestOnceAndReplace`, `location.FuzzParseStart` |
+| 10.16 | Samples: ranges, `at` window, precision applied by the sending vault (exact, approximate, city; altitude, speed and heading dropped), cadence, forwarded from memory only (never in the sender's state) | `location.TestContinuousShare`, `location.TestReduce`, `location.TestSampleValidation`, `location.FuzzParseSample`, `e2e.TestLocationShare` |
+| 10.16 | Receiving: only from the sharing connection for an active share, rate limits, `exp` bound, latest sample and trail only if allowed, everything deleted at stop or expiry; either side stops | `location.TestReceive`, `location.TestIncomingExpiryAndStop`, `location.FuzzParseShared`, `location.FuzzParseShareID` |
+| 10.16 | Default precision `approximate` | `location.TestDefaultPrecisionApproximate`, `e2e.TestLocationHistory` |
+| 10.16 | The member's log: off by default, recorded from devices at the member's cadence only when enabled, owner devices only (desktops step-up; agents and connections never), paged, deleted by range and when turned off, retention, thinning and the 5,000-point cap; shared only as a snapshot through an active share, at its precision; kept by the receiver with that share, only from its connection | `location.TestHistoryLog`, `location.TestHistoryCompaction`, `location.FuzzParseRange`, `location.FuzzParseSnapshot`, `e2e.TestLocationHistory` |
+| 10.16 | Requests: rate limited both ways, pending to apps and desktops, feed item | `location.TestRequests`, `location.FuzzParseRequest`, `location.FuzzParseGet` |
+| 7.4, 10.16 | Removing a connection drops its shares and requests | `location.TestConnectionRemoved` |
+| 9.2, 10.17 | Presence: on-demand ping only, one ping per connection per minute, pong only within `exp`, result to the asking device | `presence.TestQueryPingPong`, `presence.TestQueryErrors`, `presence.FuzzParseQuery`, `presence.FuzzParsePing`, `presence.FuzzParsePong`, `e2e.TestPresencePing` |
+| 9.2, 10.17 | Policy: versioned; `invisible`, `share: none` and per-connection `except` answer nothing (indistinguishable from a locked vault); one answer per peer per minute; `last_active` rounded to 5 minutes | `presence.TestPolicy`, `presence.FuzzParseSet`, `e2e.TestPresencePing` |
+| 10.18 | BIP39 (wordlist hash, vectors, checksum, normalisation, ASCII passphrase), BIP84 and BIP86 (vectors: fingerprint, account key, receive and change addresses), networks and their encodings | `btc.TestWordlist`, `btc.TestBIP39Vectors`, `btc.TestBIP84Vectors`, `btc.TestBIP86Vectors`, `btc.TestCheckAddress`, `btc.FuzzNormalizeMnemonic`, `btc.FuzzCheckAddress` |
+| 10.18 | The recovery phrase is a critical item (credential operation, envelope-encrypted, revealed only sealed to a reply key; never in `item.get` or wallet responses); generated or imported; networks allowed per release | `wallet.TestCreateGeneratedAndReveal`, `wallet.FuzzParseCreate`, `wallet.FuzzParseImport`, `e2e.TestWallet`, `e2e.TestVaultctlBatch4` |
+| 10.18 | The wallet owns its item: `item.put` and `item.sensitivity` refused `in_use`; tags free; `item.delete` (or `credential.delete`) deletes the wallet | `wallet.TestAddressesAndGuard` |
+| 10.18 | Roles: create and sign app only; agents nothing; addresses issued from the account key without the password; `wallet.address.used` | `wallet.TestAddressesAndGuard` |
+| 10.18 | Both accounts per wallet; new wallets receive on P2TR; the app chooses the receiving account for an imported phrase (`address_type`, `wallet.update`); addresses of either type; `request-address` on the receiving account | `wallet.TestTaproot`, `wallet.TestCreateGeneratedAndReveal`, `wallet.FuzzParseUpdate`, `e2e.TestWalletTaproot`, `e2e.TestWallet` |
+| 10.18 | Taproot spends: taproot BIP32 derivations re-derived (x-only key, internal key, script), no leaf hashes, script paths or merkle roots, previous transactions still required, BIP340 key-path signatures (SIGHASH_DEFAULT or ALL) checked by the script engine, taproot change; mixed P2WPKH and P2TR inputs | `btc.TestSignTaprootAndMixed`, `btc.FuzzInspect` (taproot seed), `wallet.TestTaproot`, `e2e.TestWalletTaproot`, `e2e.TestWallet` (mixed spend) |
+| 10.18 | PSBT policy before signing: own inputs re-derived, full previous transactions (txid match), witness UTXO consistent, SIGHASH_ALL, no finalised inputs, standard outputs of the network, dust, change re-derived, fee positive and ≤ 1,000 sat/vB | `btc.TestInspectRefusals`, `btc.FuzzInspect` |
+| 10.18, 3.5.3 | Spending: app within the unlock window (`credential_locked`), password bound to the wallet and the PSBT's hash, the item re-keyed and the CEK rotated, signatures checked by the script engine, history and change index | `wallet.TestSign`, `btc.TestSignRegtest`, `e2e.TestWallet`, `e2e.TestVaultctlBatch4` |
+| 10.18 | Chain access: none in the vault by default (`wallet.balance` and `broadcast` `unavailable`); a `ChainSource` plugs in | `wallet.TestAddressesAndGuard`, `wallet.TestSign` (fake source) |
+| 10.14, 10.18 | `wallet.request-address`: the configured wallet (exactly one), the connection's address kept until used, audited | `wallet.TestActions`, `e2e.TestWallet` |
+| 10.14, 10.18 | `wallet.request-payment`: critical (prompt only), app in the unlock window, the PSBT must pay exactly the amount to the address (network checked) and nothing to others, consent bound to the invocation; a refused approval leaves it pending; the txid to the connection | `wallet.TestActions`, `wallet.TestPayAddressNetwork`, `actions.TestCritical`, `actions.FuzzParseParams`, `e2e.TestWallet` |
+| 13.6 | Bitcoin libraries only in the vault process and clients (not the supervisor); new parsers fuzzed | `make check-tcb`, `btc.Fuzz*`, `wallet.Fuzz*`, `location.Fuzz*`, `presence.Fuzz*` |

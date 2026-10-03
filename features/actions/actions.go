@@ -27,6 +27,7 @@ import (
 
 	"github.com/vettid/vettid-vault/features/grants"
 	"github.com/vettid/vettid-vault/features/itemspec"
+	"github.com/vettid/vettid-vault/features/wallet"
 	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vms/envelope"
@@ -34,7 +35,7 @@ import (
 
 // Limits (§10.14).
 const (
-	CatalogVersion    = 2
+	CatalogVersion    = 3
 	MaxConnections    = 256
 	MaxItems          = 64
 	MaxParams         = 4096
@@ -89,7 +90,7 @@ type Def struct {
 	ID           string
 	Version      uint64
 	Sensitivity  string
-	Available    bool // false: answered `unavailable` (the wallet is not there yet)
+	Available    bool // false: answered `unavailable`
 	ParamSchema  string
 	ResultSchema string
 }
@@ -118,17 +119,18 @@ func Catalog() []Def {
 			ResultSchema: `{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","required":["entries"],` +
 				`"properties":{"entries":{"type":"array","items":{"type":"object","required":["kind","at"],` +
 				`"properties":{"kind":{"type":"string"},"at":{"type":"string"},"direction":{"enum":["in","out"]}}}}}}`},
-		{ID: WalletAddress, Version: 1, Sensitivity: Normal, Available: false,
+		{ID: WalletAddress, Version: 1, Sensitivity: Normal, Available: true,
 			ParamSchema: `{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","required":["asset"],` +
 				`"properties":{"asset":{"enum":["BTC"]}},"additionalProperties":false}`,
-			ResultSchema: `{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","required":["asset","address"],` +
-				`"properties":{"asset":{"type":"string"},"address":{"type":"string"}}}`},
-		{ID: WalletPayment, Version: 1, Sensitivity: Critical, Available: false,
-			ParamSchema: `{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","required":["asset","amount_sats"],` +
+			ResultSchema: `{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","required":["asset","network","address"],` +
+				`"properties":{"asset":{"type":"string"},"network":{"enum":["mainnet","testnet","signet","regtest"]},"address":{"type":"string"}}}`},
+		{ID: WalletPayment, Version: 1, Sensitivity: Critical, Available: true,
+			ParamSchema: `{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","required":["asset","amount_sats","address"],` +
 				`"properties":{"asset":{"enum":["BTC"]},"amount_sats":{"type":"integer","minimum":1,"maximum":2100000000000000},` +
+				`"address":{"type":"string","pattern":"^[A-Za-z0-9]{14,90}$"},` +
 				`"memo":{"type":"string","maxLength":280}},"additionalProperties":false}`,
-			ResultSchema: `{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","required":["status"],` +
-				`"properties":{"status":{"type":"string"},"txid":{"type":"string"}}}`},
+			ResultSchema: `{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","required":["status","txid"],` +
+				`"properties":{"status":{"const":"signed"},"txid":{"type":"string","pattern":"^[0-9a-f]{64}$"}}}`},
 	}
 }
 
@@ -357,10 +359,22 @@ func ParseConfigure(body []byte) (*Configure, error) {
 		return nil, err
 	}
 	var present bool
-	if c.Items, present, err = strList(o, "items", MaxItems, envelope.ValidULID); err != nil || present && (c.ActionID != ItemsShare || len(c.Items) == 0) {
+	if c.Items, present, err = strList(o, "items", MaxItems, envelope.ValidULID); err != nil || present && !itemsAllowed(c.ActionID, len(c.Items)) {
 		return nil, errBad
 	}
 	return c, nil
+}
+
+// itemsAllowed: items.share takes 1–64 items; a wallet action names
+// exactly one wallet (its item id, §10.18).
+func itemsAllowed(actionID string, n int) bool {
+	switch actionID {
+	case ItemsShare:
+		return n > 0
+	case WalletAddress, WalletPayment:
+		return n == 1
+	}
+	return false
 }
 
 func paramsObject(o strictjson.Object, required bool) (json.RawMessage, error) {
@@ -443,12 +457,28 @@ func ParseInvocation(body []byte) (*Invocation, error) {
 
 // Params are an invocation's parsed parameters.
 type Params struct {
-	ItemID string
-	Fields []string
-	Limit  int
-	Asset  string
-	Sats   uint64
-	Memo   string
+	ItemID  string
+	Fields  []string
+	Limit   int
+	Asset   string
+	Sats    uint64
+	Address string
+	Memo    string
+}
+
+// addressChars is the shape of a payee address (its network and checksum
+// are checked by the paying vault's wallet, §10.18).
+func addressChars(a string) bool {
+	if len(a) < 14 || len(a) > 90 {
+		return false
+	}
+	for i := 0; i < len(a); i++ {
+		c := a[i]
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z') {
+			return false
+		}
+	}
+	return true
 }
 
 // ParseParams parses an action's parameters with that action's strict
@@ -504,13 +534,16 @@ func ParseParams(actionID string, raw []byte) (*Params, error) {
 			return nil, errBad
 		}
 	case WalletPayment:
-		if err := only("asset", "amount_sats", "memo"); err != nil {
+		if err := only("asset", "amount_sats", "address", "memo"); err != nil {
 			return nil, err
 		}
 		if p.Asset, err = o.String("asset"); err != nil || p.Asset != "BTC" {
 			return nil, errBad
 		}
 		if p.Sats, err = o.Uint("amount_sats", 1, MaxSats); err != nil {
+			return nil, errBad
+		}
+		if p.Address, err = o.String("address"); err != nil || !addressChars(p.Address) {
 			return nil, errBad
 		}
 		m, _, err := o.OptString("memo")
@@ -788,7 +821,7 @@ func (f *Feature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner
 	case "action.invoke":
 		return f.invoke(s, in.Body)
 	case "action.respond":
-		return f.respond(s, in.Body)
+		return f.respond(s, in)
 	case "action.offered":
 		offers, err := ParseOffered(in.Body)
 		if err != nil {
@@ -1009,8 +1042,17 @@ func (f *Feature) execute(s *vault.Session, conn, invocationID string, def Def, 
 			arr = append(arr, b.Bytes()...)
 		}
 		out = strictjson.NewBuilder().Raw("entries", append(arr, ']')).Bytes()
+	case WalletAddress:
+		if f.deps.Wallet == nil || len(cfg.Items) != 1 {
+			return StatusUnavailable, nil
+		}
+		network, addr, err := f.deps.Wallet.RequestAddress(s, conn, cfg.Items[0])
+		if err != nil {
+			return StatusUnavailable, nil
+		}
+		out = strictjson.NewBuilder().String("asset", "BTC").String("network", network).String("address", addr).Bytes()
 	default:
-		return StatusUnavailable, nil
+		return StatusUnavailable, nil // wallet.request-payment runs only in the member's approval (pay)
 	}
 	if len(out) > MaxResult {
 		return StatusUnavailable, nil
@@ -1021,8 +1063,8 @@ func (f *Feature) execute(s *vault.Session, conn, invocationID string, def Def, 
 // respond is the member's decision on a pending invocation. A critical
 // action is approved only by an app within the credential's unlock
 // window (§10.14).
-func (f *Feature) respond(s *vault.Session, body []byte) (json.RawMessage, error) {
-	r, err := ParseRespond(body)
+func (f *Feature) respond(s *vault.Session, in *envelope.Inner) (json.RawMessage, error) {
+	r, err := ParseRespond(in.Body)
 	if err != nil {
 		return nil, err
 	}
@@ -1041,6 +1083,9 @@ func (f *Feature) respond(s *vault.Session, body []byte) (json.RawMessage, error
 		if _, ok := f.deps.Keys.UseKey(s.Now(), s.Settings().UnlockTTL()); !ok {
 			return nil, errLocked // the member's phone must be there; it stays pending
 		}
+		if def.ID == WalletPayment {
+			return f.pay(s, in, p)
+		}
 	}
 	delete(f.d.Pending, p.ID)
 	status, result := StatusDenied, json.RawMessage(nil)
@@ -1053,6 +1098,34 @@ func (f *Feature) respond(s *vault.Session, body []byte) (json.RawMessage, error
 	s.Record(vault.Activity{Kind: kind, ConnectionID: p.Conn, Ref: p.ID, Audit: true})
 	s.SyncEvent("action.decided", strictjson.NewBuilder().String("invocation_id", p.ID).Bool("approved", r.Approve).Bytes())
 	return strictjson.NewBuilder().String("status", status).Bytes(), nil
+}
+
+// pay is the member's approval of a wallet.request-payment invocation: a
+// spend from the configured wallet (§10.18) of a PSBT the app built, one
+// credential operation bound to the invocation and the PSBT. An error
+// leaves the invocation pending; on success the connection gets the txid
+// and the app the signed transaction to broadcast.
+func (f *Feature) pay(s *vault.Session, in *envelope.Inner, p *Pending) (json.RawMessage, error) {
+	cfg := f.config(WalletPayment)
+	params, err := ParseParams(WalletPayment, p.Params)
+	if err != nil || f.deps.Wallet == nil || len(cfg.Items) != 1 {
+		delete(f.d.Pending, p.ID)
+		f.sendResult(s, p.Conn, p.ID, StatusUnavailable, nil)
+		s.Record(vault.Activity{Kind: "action.approved", ConnectionID: p.Conn, Ref: p.ID, Audit: true})
+		return strictjson.NewBuilder().String("status", StatusUnavailable).Bytes(), nil
+	}
+	txid, members, err := f.deps.Wallet.Pay(s, in, wallet.PayParams{WalletID: cfg.Items[0], Conn: p.Conn, Invocation: p.ID,
+		Address: params.Address, Amount: int64(params.Sats)})
+	if err != nil {
+		return nil, err
+	}
+	delete(f.d.Pending, p.ID)
+	f.sendResult(s, p.Conn, p.ID, StatusOK, strictjson.NewBuilder().String("status", "signed").String("txid", txid).Bytes())
+	s.Record(vault.Activity{Kind: "action.approved", ConnectionID: p.Conn, Ref: p.ID, Audit: true})
+	s.SyncEvent("action.decided", strictjson.NewBuilder().String("invocation_id", p.ID).Bool("approved", true).Bytes())
+	b := strictjson.NewBuilder().String("status", StatusOK).String("txid", txid)
+	members(b)
+	return b.Bytes(), nil
 }
 
 // result handles a connection's answer to one of our invocations.

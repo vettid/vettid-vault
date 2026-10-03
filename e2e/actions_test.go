@@ -19,7 +19,8 @@ import (
 // the one-use grant; prompt-each-time approved by A's app; default-allow;
 // default-deny: no longer offered), and a critical action whose approval
 // is refused without the credential's unlock window and then accepted
-// with it (the wallet is not there yet: unavailable).
+// with it (no wallet configured for the action: unavailable; the wallet's
+// own flows are in wallet_test.go).
 func TestSharedAction(t *testing.T) {
 	r := relaytest.Start(t, nil)
 	a := newTestVault(t, r.URL, "a", nil)
@@ -135,7 +136,7 @@ func TestSharedAction(t *testing.T) {
 		t.Fatal(err)
 	}
 	offered("wallet.request-payment", `"wallet.request-payment","version":1,"prompt":true`)
-	if id, err = b.app.ActionInvoke(ctx, bConn, "wallet.request-payment", json.RawMessage(`{"asset":"BTC","amount_sats":1000}`)); err != nil {
+	if id, err = b.app.ActionInvoke(ctx, bConn, "wallet.request-payment", json.RawMessage(`{"asset":"BTC","amount_sats":1000,"address":"bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080"}`)); err != nil {
 		t.Fatal(err)
 	}
 	waitEvent(t, a.app, "action.pending", has("invocation_id", id))

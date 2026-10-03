@@ -4,6 +4,8 @@ package e2e
 
 import (
 	"bytes"
+	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"strings"
 	"sync/atomic"
@@ -14,6 +16,8 @@ import (
 	"github.com/vettid/vettid-vault/internal/relaytest"
 	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault"
+	"github.com/vettid/vettid-vault/vms/callwire"
+	"github.com/vettid/vettid-vault/vms/envelope"
 )
 
 // V4 batch 2, block (§7.4, §10.4) through the real relay: A blocks B (its
@@ -21,7 +25,7 @@ import (
 // sending); the relay refuses B's deposits and B marks the connection
 // stale; nothing reaches A. B's later attempt to connect through a new
 // invite is refused by A's vault (the identity is blocked), and A cannot
-// accept B's invitation either.
+// accept B's invitation either; after unblock a new connection works.
 func TestBlockRefusesPeer(t *testing.T) {
 	r := relaytest.Start(t, nil)
 	var dropNotices atomic.Bool
@@ -86,14 +90,14 @@ func TestBlockRefusesPeer(t *testing.T) {
 		t.Fatalf("accepting a blocked identity's invite: %q", rr.ErrorCode())
 	}
 
-	// Unblock lifts the block entry. (The removal denylisted B's relay key
-	// at the relay, §7.4, so a new connection needs B to rotate it first.)
+	// Unblock: a fresh connection (same relay keys) works again, through a
+	// new invitation and approval (§7.4: tokens were denied by jti).
 	if err := a.app.BlockRemove(ctx, blockID); err != nil {
 		t.Fatal(err)
 	}
-	if bl, err := a.app.BlockList(ctx); err != nil || string(bl["blocks"]) != "[]" {
-		t.Fatalf("after unblock: %s %v", bl["blocks"], err)
-	}
+	_, bConn2 := connect(t, a, b, 600)
+	id = sendText(t, b, b.app, bConn2, "after unblock")
+	waitEvent(t, a.app, "message.new", has("message_id", id))
 }
 
 // V4 batch 2, calls (§10.10) between two vaults through the real relay:
@@ -324,4 +328,146 @@ func TestConnectionAuthenticate(t *testing.T) {
 	if !strings.Contains(string(l["states"]), `"last_result":"authenticated"`) {
 		t.Fatalf("list: %s", l["states"])
 	}
+
+	// B rotates its credential: the statement (signed by the old and the
+	// new key) reaches A, which follows it; the next authentication is no
+	// key change.
+	if err := b.app.CredentialRotate(ctx, credPW); err != nil {
+		t.Fatal(err)
+	}
+	v, _ = b.app.CredentialVersion(ctx)
+	newKey, _ := v.String("key")
+	waitEvent(t, a.app, "connection.authenticate.key", has("key", newKey))
+	authOnce := func() json.RawMessage {
+		t.Helper()
+		id, err := a.app.AuthRequest(ctx, aConn, "again")
+		if err != nil {
+			t.Fatal(err)
+		}
+		waitEvent(t, b.app, "connection.authenticate.pending", has("request_id", id))
+		if _, err := b.app.CredentialUnlock(ctx, credPW); err != nil {
+			t.Fatal(err)
+		}
+		if err := b.app.AuthApprove(ctx, id); err != nil {
+			t.Fatal(err)
+		}
+		return waitEvent(t, a.app, "connection.authenticate.result", has("request_id", id)).Body
+	}
+	if res := authOnce(); !strings.Contains(string(res), `"key_changed":false`) || !strings.Contains(string(res), newKey) {
+		t.Fatalf("rotation not followed: %s", res)
+	}
+	// A new credential without a rotation statement (delete and create):
+	// the key change is reported.
+	if err := b.app.CredentialDelete(ctx, credPW); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.app.CredentialCreate(ctx, credPW); err != nil {
+		t.Fatal(err)
+	}
+	if res := authOnce(); !strings.Contains(string(res), `"key_changed":true`) {
+		t.Fatalf("unsigned key change not reported: %s", res)
+	}
+}
+
+// V4 batch 2, calls on the desktop (§6.8, §10.10) through the real relay:
+// a desktop within its access session places a call to a peer's phone and
+// answers an incoming one (first answer wins over the app; the late answer
+// is refused); a desktop without a session does not ring and cannot call;
+// a key-exchange share the device did not sign is refused.
+func TestDesktopCalls(t *testing.T) {
+	r := relaytest.Start(t, nil)
+	a := newTestVault(t, r.URL, "a", nil)
+	b := newTestVault(t, r.URL, "b", nil)
+	desk := pairDesktop(t, a, r.URL)
+	idle := pairDevice(t, a, r.URL, vault.KindDesktop, 0) // no access session
+	ctx := ctxT(t, 120*time.Second)
+	aConn, bConn := connect(t, a, b, 600)
+
+	// The desktop calls B's phone.
+	c, err := desk.CallStart(ctx, aConn, "video", "v=0 desk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev := waitEvent(t, b.app, "call.offer", has("call_id", c.ID))
+	if field(t, ev.Body, "media") != "video" {
+		t.Fatal("media flag")
+	}
+	in, err := b.app.IncomingCall(ev)
+	if err != nil {
+		t.Fatalf("phone cannot verify the desktop's offer: %v", err)
+	}
+	if err := b.app.CallAnswer(ctx, in, "v=0 phone"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := desk.CallAccept(c, waitEvent(t, desk, "call.answer", has("call_id", c.ID))); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(c.Key, in.Key) {
+		t.Fatal("desktop and phone keys differ")
+	}
+	if err := desk.CallEnd(ctx, c.ID, "hangup"); err != nil {
+		t.Fatal(err)
+	}
+	waitEvent(t, b.app, "call.end", has("call_id", c.ID))
+
+	// B calls A: A's app and session desktop ring; the desktop answers
+	// first; the app is told answered_elsewhere and its late answer is
+	// refused; the idle desktop never rings.
+	bc, err := b.app.CallStart(ctx, bConn, "audio", "v=0 b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	evApp := waitEvent(t, a.app, "call.offer", has("call_id", bc.ID))
+	evDesk := waitEvent(t, desk, "call.offer", has("call_id", bc.ID))
+	inDesk, err := desk.IncomingCall(evDesk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inApp, err := a.app.IncomingCall(evApp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := desk.CallAnswer(ctx, inDesk, "v=0 desk answer"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.app.CallAccept(bc, waitEvent(t, b.app, "call.answer", has("call_id", bc.ID))); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(bc.Key, inDesk.Key) {
+		t.Fatal("keys differ")
+	}
+	waitEvent(t, a.app, "call.end", has("reason", "answered_elsewhere"))
+	if err := a.app.CallAnswer(ctx, inApp, "v=0 late"); err != nil {
+		t.Fatal(err)
+	}
+	waitEvent(t, a.app, "call.end", has("reason", "unavailable"))
+	if err := b.app.CallEnd(ctx, bc.ID, "hangup"); err != nil {
+		t.Fatal(err)
+	}
+	waitEvent(t, desk, "call.end", has("reason", "hangup"))
+	short, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	if _, err := idle.WaitEvent(short, "call.offer", nil); err == nil {
+		t.Fatal("a desktop without a session rang")
+	}
+	if _, err := idle.CallStart(ctx, aConn, "audio", "v=0"); client.Code(err) != "session_required" {
+		t.Fatalf("call.start without a session: %v", err)
+	}
+
+	// A share the device did not sign (another ek under its signature).
+	sk, _ := callwire.NewOfferKey()
+	other, _ := callwire.NewOfferKey()
+	cid, _ := envelope.NewULID(time.Now())
+	esig, _ := callwire.SignShare(featuretestKey(t), callwire.ShareMessage(callwire.RoleOffer, cid, "audio", sk.Public().Bytes()))
+	body, _ := json.Marshal(map[string]any{"connection_id": aConn, "call_id": cid, "media": "audio", "sdp": "v=0",
+		"ek": other.Public().Bytes(), "ek_sig": esig})
+	if rr := a.request(desk, "call.start", string(body)); rr.ErrorCode() != "bad_request" {
+		t.Fatalf("unsigned share: %q", rr.ErrorCode())
+	}
+}
+
+// featuretestKey is some key that is not the desktop's.
+func featuretestKey(t *testing.T) ed25519.PrivateKey {
+	t.Helper()
+	return ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x42}, 32))
 }

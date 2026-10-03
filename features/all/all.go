@@ -40,6 +40,8 @@ type Set struct {
 // NewSet returns fresh instances of every feature.
 func NewSet(o Options) *Set {
 	cred := credential.New(credential.Options{KDF: o.CredentialKDF})
+	auth := connauth.New(cred)        // signs with the credential key in its unlock window
+	cred.AddKeyRotationObserver(auth) // and follows its rotations (§10.4)
 	return &Set{
 		Messaging:  messaging.New(),
 		Credential: cred,
@@ -48,7 +50,7 @@ func NewSet(o Options) *Set {
 		Audit:      audit.New(),
 		Feed:       feed.New(),
 		Calls:      calls.New(calls.Options{ICE: o.ICE}),
-		ConnAuth:   connauth.New(cred), // signs with the credential key in its unlock window
+		ConnAuth:   auth,
 	}
 }
 

@@ -6,8 +6,10 @@
 package featuretest
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"sort"
@@ -18,6 +20,7 @@ import (
 	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vms/callwire"
 	"github.com/vettid/vettid-vault/vms/envelope"
+	"github.com/vettid/vettid-vault/vms/suite"
 )
 
 // Sent is one message a handler queued.
@@ -44,18 +47,34 @@ type Host struct {
 	Completed  []string        // CompleteRecovery calls
 	Devices    map[string]vault.PeerInfo
 	IK         ed25519.PublicKey
+	// Identity is the fake vault's identity key (IK is its public half).
+	Identity ed25519.PrivateKey
 }
 
 // NewHost returns a fake host with no connections.
 func NewHost() *Host {
-	ik := ed25519.NewKeyFromSeed(identitySeed()).Public().(ed25519.PublicKey)
-	return &Host{ID: "test-vault", Conns: map[string]vault.PeerInfo{}, Profiles: map[string]json.RawMessage{}, DownConns: map[string]bool{},
+	id := ed25519.NewKeyFromSeed(identitySeed())
+	ik := id.Public().(ed25519.PublicKey)
+	return &Host{Identity: id, ID: "test-vault", Conns: map[string]vault.PeerInfo{}, Profiles: map[string]json.RawMessage{}, DownConns: map[string]bool{},
 		Devices: map[string]vault.PeerInfo{}, IK: ik}
 }
 
-// AddDevice adds an active owner device (id "dev-<kind>" is what Call uses).
+// SetIdentity gives the fake vault the identity key of seed byte b.
+func (h *Host) SetIdentity(b byte) {
+	h.Identity = ed25519.NewKeyFromSeed(bytes.Repeat([]byte{b}, 32))
+	h.IK = h.Identity.Public().(ed25519.PublicKey)
+}
+
+// DeviceKey is the deterministic identity key of a test device id.
+func DeviceKey(id string) ed25519.PrivateKey {
+	seed := sha256.Sum256([]byte("featuretest-device|" + id))
+	return ed25519.NewKeyFromSeed(seed[:])
+}
+
+// AddDevice adds an active owner device (id "dev-<kind>" is what Call
+// uses) with the identity key DeviceKey(id).
 func (h *Host) AddDevice(id, kind string) {
-	h.Devices[id] = vault.PeerInfo{ID: id, Kind: kind, State: vault.PeerActive}
+	h.Devices[id] = vault.PeerInfo{ID: id, Kind: kind, State: vault.PeerActive, IK: DeviceKey(id).Public().(ed25519.PublicKey)}
 }
 
 func (h *Host) IdentityKey() ed25519.PublicKey { return h.IK }
@@ -67,7 +86,14 @@ func (h *Host) SignICEConfig(config []byte) ([]byte, error) {
 	if _, err := callwire.ParseICEConfig(config); err != nil {
 		return nil, err
 	}
-	return callwire.SignICE(ed25519.NewKeyFromSeed(identitySeed()), config)
+	return callwire.SignICE(h.Identity, config)
+}
+
+func (h *Host) VouchCallShare(deviceIK ed25519.PublicKey, m []byte) ([]byte, error) {
+	if len(deviceIK) != ed25519.PublicKeySize || !callwire.ValidShareMessage(m) {
+		return nil, errors.New("not a share")
+	}
+	return suite.Sign(h.Identity, callwire.LabelVouch, callwire.VouchMessage(deviceIK, m))
 }
 
 func (h *Host) Device(id string) (vault.PeerInfo, bool) {
@@ -254,7 +280,7 @@ func CallInner(f vault.Feature, h *Host, now time.Time, kind string, in *envelop
 	if spec == nil {
 		return Result{Code: "unsupported_type"}
 	}
-	from := vault.PeerInfo{ID: "dev-" + kind, Kind: kind, State: vault.PeerActive}
+	from := vault.PeerInfo{ID: "dev-" + kind, Kind: kind, State: vault.PeerActive, IK: DeviceKey("dev-" + kind).Public().(ed25519.PublicKey)}
 	if kind == "recovering-app" { // an app registered by recovery (§11.11.5)
 		from = vault.PeerInfo{ID: "dev-recovering", Kind: vault.KindApp, State: vault.PeerActive, Recovering: true}
 	}

@@ -156,7 +156,7 @@ Follows VAULT-MESSAGING 0.5.0 (§6.8, §10.3, §10.4, §10.10).
 
 | Old | Now | Why |
 |---|---|---|
-| `block.add/remove` = a call-only blocklist of owner-space ids, with reason and duration | `block.add{connection_id \| pending_id, note?}`, `.remove`, `.list`: §7.4 "Peer blocked" (removal, sub denylisted) plus an entry on the peer's `ik` and relay key that refuses its handshakes | The spec's revocation already defined blocking; a timed block of a removed connection would only re-allow invitations, which `block.remove` does |
+| `block.add/remove` = a call-only blocklist of owner-space ids, with reason and duration | `block.add{connection_id \| pending_id, note?}`, `.remove`, `.list`: §7.4 "Peer blocked" (removal, tokens denylisted by jti) plus an entry on the peer's `ik` and relay key that refuses its handshakes | The spec's revocation already defined blocking; a timed block of a removed connection would only re-allow invitations, which `block.remove` does |
 | `connection-authenticate.request/approve/deny/get/list`, signed with the identity key decrypted from the credential with a password hash | `connection.authenticate.*`, signed with the **credential key** within the unlock window (`credential.unlock` first), binary signed string over both vaults' `ik`s, nonce, request id and context; the requester pins the key | The vault `ik` (which signs handshakes) is no longer in the credential; the credential key is the member's. OWNER DECISION 2 |
 | `connection.update{tags, is_favorite, is_archived, peer_alias}` | `connection.update{version, alias, note, tags, favorite, archived}`, versioned | §10.1 versioned objects |
 | Connection-card extras (message preview, unread count, last call, needs-attention, credential expiry, key rotation count) | `created_at`, `last_active_at` only | Previews and counts are app concerns from `message.list`/`call.list`; rotation and expiry are runtime internals |
@@ -173,31 +173,29 @@ Follows VAULT-MESSAGING 0.5.0 (§6.8, §10.3, §10.4, §10.10).
 | `agent.*` runtime (secret requests, http_request/sign actions, catalog, agent chat, approvals, rate limits), agent pairing stage 2 | Agent access sessions and the `AgentPolicy` hook; everything else waits for LEASH (batch 3) | Least privilege: without grants an agent may only ask for a session and read `vault.status` |
 | `agent.approval.pending` / `.decide` (registry) | `approval.pending`, `approval.waiting`, `approval.decide` for desktops and agents | One mechanism |
 
-### OWNER DECISIONS
+### OWNER DECISIONS (decided at review)
 
-1. **Desktops need an app-approved access session** (default 1 h, at most
-   24 h; can be granted with the pairing approval), and their step-up
-   requests (secret values, profile, settings, invitations, connection
-   removal, unblock) need an app's approval each. This changes V2, where a
-   paired desktop could do everything its role allowed at any time.
-   Recommendation: keep (it is the old design's model); revisit the
-   step-up list with app UX.
-2. **`connection.authenticate` proves the member, not the vault**: the
-   member's app approves and the vault signs with the credential key
-   (password-gated through the unlock window). The handshake and SAS
-   already authenticate the vault. Recommendation: keep; add a
-   credential-key rotation statement later (§15 item 6) so a rotation is
-   followed instead of reported as a key change.
-3. **Media keys are device-held**: the KEM runs between the two devices;
-   the registry text said "the answering vault". Recommendation: keep (no
-   media key in vault state, response caches or the outbox).
-4. **One call at a time per vault** (`busy`). Recommendation: keep for
-   1:1 calling.
-5. **Re-connecting after removal or block** needs the peer to rotate its
-   relay key, because removal denylists its `sub` (existing §7.4/§6.7
-   behaviour, made explicit in 0.5.0). Recommendation: denylist the
-   issued `jti`s instead (§15 item 7), so `block.remove` and later
-   invitations work.
+1. **Desktops need an app-approved access session**, and their step-up
+   requests need an app's approval each. Agreed.
+2. **`connection.authenticate` proves the member** with the credential
+   key. Kept, and credential-key rotation is followed: `credential.rotate`
+   signs a statement with the old and the new key (`vms/credwire`
+   `KeyRotation`), the connection that pinned the member's key gets the
+   chain (`connection.authenticate.rotated`, and `rotations` in later
+   responses) and moves its pin; a chain that does not verify is
+   rejected and the change reported as `key_changed`.
+3. **Media keys are device-held.** Kept. The shares are now signed by the
+   device and vouched for by its vault (`callwire.ShareMessage`,
+   `VouchCallShare`); the peer vault and the peer device check both.
+   Residual: each member's own vault.
+4. **One call at a time per vault.** Kept.
+5. **Reconnecting after removal or block**: removal now denylists the
+   peer's tokens by jti (`denyPeerTokens`), not its relay key, so a new
+   invitation and approval reconnect the same peer; a fresh connection
+   replaces any stale record of it. Devices keep the sub denylist (§6.7).
+6. **Desktop calls**: a desktop within its session places and answers
+   calls without per-call approval; first answer wins; there is no call
+   handoff between devices (end the call, start a new one).
 
 ### Not in batch 2
 

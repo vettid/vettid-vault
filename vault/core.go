@@ -208,7 +208,14 @@ func (m *Manager) removePeer(p *Peer, notice string, now time.Time) {
 				Payload: raw, BestEffort: true}, now)
 		}
 	}
-	m.denySub(p, now)
+	if p.Kind == KindConnection {
+		// §7.4: every token issued to the peer is denylisted by jti, so
+		// none of them works again, while a later invitation can still
+		// make a fresh connection with the same relay key.
+		m.denyPeerTokens(p, now)
+	} else {
+		m.denySub(p, now) // §6.7: a re-paired device needs a new relay key
+	}
 	for _, e := range m.st.Outbox {
 		if e.PeerID == p.ID {
 			e.Done = true

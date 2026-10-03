@@ -2,6 +2,7 @@ package connauth
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"strings"
 	"testing"
@@ -10,6 +11,7 @@ import (
 	"github.com/vettid/vettid-vault/internal/featuretest"
 	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault"
+	"github.com/vettid/vettid-vault/vms/credwire"
 )
 
 var t0 = time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
@@ -225,6 +227,89 @@ func FuzzParseResponse(f *testing.F) {
 		r, err := ParseResponse(b)
 		if err == nil && r.Status == StatusSigned && (len(r.Key) != ed25519.PublicKeySize || len(r.Sig) != ed25519.SignatureSize) {
 			t.Fatal("invalid response accepted")
+		}
+	})
+}
+
+func rotate(t *testing.T, b *side, seed byte) {
+	t.Helper()
+	nk := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{seed}, 32))
+	r, err := credwire.NewKeyRotation(b.w.key, nk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.w.key = nk
+	b.f.CredentialKeyRotated(vault.NewSession(context.Background(), b.h, vault.PeerInfo{}, t0, nil), r)
+}
+
+func result(t *testing.T, a, b *side) string {
+	t.Helper()
+	resp := run(t, a, b, true)
+	featuretest.Call(a.f, a.h, t0, "connection:cB", "connection.authenticate.response", string(resp))
+	return string(last(t, a.h, "connection.authenticate.result").Body)
+}
+
+// §10.4: a credential-key rotation statement, signed by the old and the
+// new key, is delivered to the connections that pinned the old key and
+// moves their pin; a missed delivery is caught up in the next response;
+// a forged statement is rejected and the new key is reported as changed.
+func TestKeyRotationFollowed(t *testing.T) {
+	a, b := pair()
+	b.w.open = true
+	if r := result(t, a, b); !strings.Contains(r, `"key_changed":false`) {
+		t.Fatal(r)
+	}
+	// Delivered: A follows, and the next authentication is no change.
+	b.h.Reset()
+	rotate(t, b, 0xc1)
+	msg := last(t, b.h, "connection.authenticate.rotated")
+	if msg.To != "cA" {
+		t.Fatalf("delivered to %s", msg.To)
+	}
+	a.h.Reset()
+	featuretest.Call(a.f, a.h, t0, "connection:cB", "connection.authenticate.rotated", string(msg.Body))
+	if k := last(t, a.h, "connection.authenticate.key"); !strings.Contains(string(k.Body), `"connection_id":"cB"`) || !a.h.HasActivity("connection.authenticate.key_rotated") {
+		t.Fatal("rotation not followed")
+	}
+	if r := result(t, a, b); !strings.Contains(r, `"key_changed":false`) {
+		t.Fatalf("followed rotation reported: %s", r)
+	}
+	// Missed: two rotations whose messages never arrive; the response
+	// carries the chain from the key A pinned.
+	rotate(t, b, 0xc2)
+	rotate(t, b, 0xc3)
+	if r := result(t, a, b); !strings.Contains(r, `"key_changed":false`) {
+		t.Fatalf("missed rotations not caught up: %s", r)
+	}
+	// Forged (signed by an attacker's key as "old"): rejected, pin kept,
+	// and the key is then reported as changed.
+	evil := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0xee}, 32))
+	nk := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0xc4}, 32))
+	forged, _ := credwire.NewKeyRotation(evil, nk)
+	forged.Old = b.w.key.Public().(ed25519.PublicKey)
+	a.h.Reset()
+	featuretest.Call(a.f, a.h, t0, "connection:cB", "connection.authenticate.rotated", `{"rotations":[`+string(forged.Marshal())+`]}`)
+	if !a.h.HasActivity("connection.authenticate.rotation_rejected") || len(a.h.SentOfType("connection.authenticate.key")) != 0 {
+		t.Fatal("forged rotation accepted")
+	}
+	b.w.key = nk // B's vault now signs with a key no valid statement leads to
+	if r := result(t, a, b); !strings.Contains(r, `"key_changed":true`) {
+		t.Fatalf("unsigned key change not reported: %s", r)
+	}
+	// Bad bodies.
+	for _, body := range []string{`{}`, `{"rotations":[]}`, `{"rotations":[{"v":1}]}`} {
+		if r := featuretest.Call(a.f, a.h, t0, "connection:cB", "connection.authenticate.rotated", body); r.Code != "bad_request" {
+			t.Errorf("%s: %q", body, r.Code)
+		}
+	}
+}
+
+func FuzzParseRotations(f *testing.F) {
+	r, _ := credwire.NewKeyRotation(ed25519.NewKeyFromSeed(bytes.Repeat([]byte{1}, 32)), ed25519.NewKeyFromSeed(bytes.Repeat([]byte{2}, 32)))
+	f.Add([]byte(`[` + string(r.Marshal()) + `]`))
+	f.Fuzz(func(t *testing.T, b []byte) {
+		if c, err := ParseRotations(b); err == nil && (len(c) == 0 || len(c) > credwire.MaxKeyChain) {
+			t.Fatal("chain length")
 		}
 	})
 }

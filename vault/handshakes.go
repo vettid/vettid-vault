@@ -76,7 +76,9 @@ func (m *Manager) handleInit(ctx context.Context, raw []byte, sender ed25519.Pub
 		m.respondReconnect(pi, p, sender, now)
 		return ackAfterFlush
 	}
-	if p != nil {
+	if p != nil && !(p.Kind == KindConnection && p.State == PeerStale && body.Purpose == handshake.PurposeConnection) {
+		// A stale connection may be made afresh through a new invitation;
+		// the new record replaces it at activation.
 		m.audit(now, "hs_init_from_known_peer", p.ID)
 		return ackAfterFlush
 	}
@@ -434,6 +436,9 @@ func (m *Manager) activate(p *Peer, ep *handshake.Epoch, purpose handshake.Purpo
 	for _, t := range issued {
 		t.PeerID = p.ID
 		m.st.Issued = append(m.st.Issued, t)
+	}
+	if isNew && p.Kind == KindConnection {
+		m.replaceOlderConnections(p, now)
 	}
 	switch {
 	case isNew && p.Kind == KindConnection:

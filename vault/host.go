@@ -9,6 +9,7 @@ import (
 
 	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/callwire"
+	"github.com/vettid/vettid-vault/vms/suite"
 )
 
 // managerHost is the Host of the sessions a Manager builds. Its methods run
@@ -83,6 +84,13 @@ func (h managerHost) SignICEConfig(config []byte) ([]byte, error) {
 		return nil, err
 	}
 	return callwire.SignICE(h.m.keys.ik, config)
+}
+
+func (h managerHost) VouchCallShare(deviceIK ed25519.PublicKey, m []byte) ([]byte, error) {
+	if len(deviceIK) != ed25519.PublicKeySize || !callwire.ValidShareMessage(m) {
+		return nil, errBadRequest
+	}
+	return suite.Sign(h.m.keys.ik, callwire.LabelVouch, callwire.VouchMessage(deviceIK, m))
 }
 
 func (h managerHost) NotifyDevicesWith(typ string, body json.RawMessage, except string, o SendOptions, now time.Time) {

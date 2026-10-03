@@ -279,3 +279,74 @@ func VerifyICE(vaultIK ed25519.PublicKey, config, sig []byte, callID string, now
 	}
 	return c, nil
 }
+
+// Key-exchange shares (§10.10). The device that makes a share (the
+// caller's `ek`, the answerer's `enc`) signs it with its identity key; its
+// own vault checks that signature against the paired device record and
+// vouches for it to the peer vault; the peer vault and the peer device
+// check both. Nobody but the members' own vaults can swap a share
+// unnoticed.
+const (
+	LabelShare = "vettid/vms/2/call-share"
+	LabelVouch = "vettid/vms/2/call-vouch"
+	RoleOffer  = "offer"
+	RoleAnswer = "answer"
+)
+
+// ErrShare is a share whose signatures do not verify.
+var ErrShare = errors.New("callwire: key-exchange share signature invalid")
+
+// ShareMessage is the signed bytes of a share:
+//
+//	role || 0x00 || call_id || 0x00 || media || 0x00 || share
+//
+// role is "offer" (share = ek, media = "audio" or "video") or "answer"
+// (share = enc, media = "").
+func ShareMessage(role, callID, media string, share []byte) []byte {
+	m := make([]byte, 0, len(role)+len(callID)+len(media)+3+len(share))
+	m = append(append(m, role...), 0)
+	m = append(append(m, callID...), 0)
+	m = append(append(m, media...), 0)
+	return append(m, share...)
+}
+
+// SignShare is the device's signature: Ed25519(device ik, "vettid/vms/2/call-share" || m).
+func SignShare(deviceIK ed25519.PrivateKey, m []byte) ([]byte, error) {
+	return suite.Sign(deviceIK, LabelShare, m)
+}
+
+// VouchMessage is what the device's vault signs: device_ik (32) || m.
+func VouchMessage(deviceIK ed25519.PublicKey, m []byte) []byte {
+	return append(append([]byte(nil), deviceIK...), m...)
+}
+
+// VerifyShare checks a vouched share: the device's signature under
+// deviceIK and its vault's signature (Ed25519(vault ik,
+// "vettid/vms/2/call-vouch" || device_ik || m)) under vaultIK.
+func VerifyShare(vaultIK, deviceIK ed25519.PublicKey, m, deviceSig, vaultSig []byte) error {
+	if suite.Verify(deviceIK, LabelShare, m, deviceSig) != nil ||
+		suite.Verify(vaultIK, LabelVouch, VouchMessage(deviceIK, m), vaultSig) != nil {
+		return ErrShare
+	}
+	return nil
+}
+
+// ValidShareMessage reports whether m has the ShareMessage form with a
+// known role (what a vault agrees to vouch for).
+func ValidShareMessage(m []byte) bool {
+	for _, r := range []string{RoleOffer, RoleAnswer} {
+		if len(m) > len(r) && string(m[:len(r)]) == r && m[len(r)] == 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// VerifyDeviceShare checks only the device's signature (what the device's
+// own vault does before vouching).
+func VerifyDeviceShare(deviceIK ed25519.PublicKey, m, deviceSig []byte) error {
+	if suite.Verify(deviceIK, LabelShare, m, deviceSig) != nil {
+		return ErrShare
+	}
+	return nil
+}

@@ -95,6 +95,22 @@ type Feature struct {
 	// The unlock window (§3.5.3): memory only, never saved.
 	key    ed25519.PrivateKey
 	keyExp time.Time
+
+	rotObs []KeyRotationObserver
+}
+
+// KeyRotationObserver is told of every credential-key rotation statement
+// (§3.5.5): member authentication delivers it to the connections that
+// pinned the member's key (§10.4).
+type KeyRotationObserver interface {
+	CredentialKeyRotated(s *vault.Session, r *credwire.KeyRotation)
+}
+
+// AddKeyRotationObserver registers an observer (at construction).
+func (f *Feature) AddKeyRotationObserver(o KeyRotationObserver) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.rotObs = append(f.rotObs, o)
 }
 
 // New returns the feature.
@@ -791,6 +807,16 @@ func (f *Feature) rotate(s *vault.Session, inner *Inner, p *Payload) (json.RawMe
 	if err != nil {
 		return nil, errInternal
 	}
+	// The rotation statement: the new credential key signed by the old one
+	// and by itself (§3.5.5).
+	oldPriv, newPriv := ed25519.NewKeyFromSeed(inner.Key), ed25519.NewKeyFromSeed(ks)
+	stmt, err := credwire.NewKeyRotation(oldPriv, newPriv)
+	suite.Wipe(oldPriv)
+	suite.Wipe(newPriv)
+	if err != nil {
+		suite.Wipe(ks)
+		return nil, errInternal
+	}
 	if err := s.RotateIdentity(); err != nil {
 		suite.Wipe(ks)
 		return nil, errInternal
@@ -805,6 +831,9 @@ func (f *Feature) rotate(s *vault.Session, inner *Inner, p *Payload) (json.RawMe
 	}
 	f.st.Key = pub
 	s.Record(vault.Activity{Kind: "credential.rotated", Audit: true, Feed: true})
+	for _, o := range f.rotObs {
+		o.CredentialKeyRotated(s, stmt)
+	}
 	return out, nil
 }
 

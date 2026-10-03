@@ -340,3 +340,25 @@ func peersJSON(name string, ps map[string]*Peer, now time.Time) json.RawMessage 
 	arr = append(arr, ']')
 	return strictjson.NewBuilder().Raw(name, arr).Bytes()
 }
+
+// replaceOlderConnections drops other records of the same peer (same
+// identity or relay key) when a fresh connection with it activates: a
+// stale record left by a removal the peer made, or by refused deposits.
+// Their tokens are denylisted by jti; no notice is sent.
+func (m *Manager) replaceOlderConnections(p *Peer, now time.Time) {
+	for _, o := range m.allPeers() {
+		if o.Kind != KindConnection || o.ID == p.ID ||
+			!(suite.EqualPublic(o.IK, p.IK) || suite.EqualPublic(o.Relay.PK, p.Relay.PK)) {
+			continue
+		}
+		o.State = PeerStale
+		m.removePeer(o, "", now)
+		m.notifyDevices("connection.event", connEvent(o.ID, "removed"), "", now)
+		s := m.session(now)
+		for _, f := range m.features {
+			if ob, ok := f.(ConnectionRemovedObserver); ok {
+				ob.ConnectionRemoved(s, o.ID)
+			}
+		}
+	}
+}

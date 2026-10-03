@@ -145,6 +145,10 @@ type Host interface {
 	// SignICEConfig signs a call's ICE configuration with the vault's
 	// identity key (§10.10); it signs nothing that does not parse as one.
 	SignICEConfig(config []byte) ([]byte, error)
+	// VouchCallShare signs a device's call key-exchange share with the
+	// vault's identity key (callwire.VouchMessage, §10.10); it signs
+	// nothing that is not a share message.
+	VouchCallShare(deviceIK ed25519.PublicKey, m []byte) ([]byte, error)
 }
 
 // SendOptions qualify one outbound message.
@@ -249,6 +253,11 @@ func (s *Session) IdentityKey() ed25519.PublicKey { return s.host.IdentityKey() 
 // SignICEConfig signs an ICE configuration (callwire format) with the
 // vault's identity key.
 func (s *Session) SignICEConfig(config []byte) ([]byte, error) { return s.host.SignICEConfig(config) }
+
+// VouchCallShare signs a device's call key-exchange share (§10.10).
+func (s *Session) VouchCallShare(deviceIK ed25519.PublicKey, m []byte) ([]byte, error) {
+	return s.host.VouchCallShare(deviceIK, m)
+}
 
 // InnerID returns the id of the message being handled ("" outside Handle).
 func (s *Session) InnerID() string {

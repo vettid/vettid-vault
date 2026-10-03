@@ -18,6 +18,7 @@ package calls
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/sha1" // coturn use-auth-secret is HMAC-SHA1 (CALLING-SERVICE §5)
 	"encoding/base64"
@@ -287,9 +288,76 @@ func (f *Feature) iceFor(ctx context.Context, s *vault.Session, callID string) (
 // Start is a parsed call.start body.
 type Start struct {
 	ConnectionID string
+	CallID       string // chosen by the calling device (a ULID)
 	Media        string
 	SDP          string
 	EK           []byte
+	EKSig        []byte // the device's signature over the share
+}
+
+func sig(o strictjson.Object, name string) ([]byte, error) {
+	b, err := o.Base64(name, ed25519.SignatureSize)
+	if err != nil {
+		return nil, errBad
+	}
+	return b, nil
+}
+
+func callID(o strictjson.Object) (string, error) {
+	id, err := o.String("call_id")
+	if err != nil || !envelope.ValidULID(id) {
+		return "", errBad
+	}
+	return id, nil
+}
+
+// Vouched are the signatures a peer vault passes on with a share.
+type Vouched struct {
+	DeviceIK  []byte
+	DeviceSig []byte
+	VaultSig  []byte
+}
+
+func vouched(o strictjson.Object) (Vouched, error) {
+	var v Vouched
+	var err error
+	if v.DeviceIK, err = o.Base64("device_ik", ed25519.PublicKeySize); err != nil {
+		return v, errBad
+	}
+	if v.DeviceSig, err = sig(o, "device_sig"); err != nil {
+		return v, err
+	}
+	v.VaultSig, err = sig(o, "vault_sig")
+	return v, err
+}
+
+func (v Vouched) add(b *strictjson.Builder) *strictjson.Builder {
+	return b.Base64("device_ik", v.DeviceIK).Base64("device_sig", v.DeviceSig).Base64("vault_sig", v.VaultSig)
+}
+
+// vouch checks a share from one of our devices against its paired record
+// and signs it for the peer vault.
+func vouch(s *vault.Session, m, deviceSig []byte) (Vouched, error) {
+	dev := ed25519.PublicKey(s.From().IK)
+	if callwire.VerifyDeviceShare(dev, m, deviceSig) != nil {
+		return Vouched{}, vault.NewError("bad_request", "share signature")
+	}
+	vs, err := s.VouchCallShare(dev, m)
+	if err != nil {
+		return Vouched{}, errInternal
+	}
+	return Vouched{DeviceIK: append([]byte(nil), dev...), DeviceSig: deviceSig, VaultSig: vs}, nil
+}
+
+// checkPeerShare verifies a share from a connection: its vault's signature
+// under the connection's pinned ik and its device's signature.
+func checkPeerShare(s *vault.Session, m []byte, v Vouched) bool {
+	p, ok := s.Connection(s.From().ID)
+	if !ok || callwire.VerifyShare(p.IK, v.DeviceIK, m, v.DeviceSig, v.VaultSig) != nil {
+		s.Record(vault.Activity{Kind: "drop.call_share", ConnectionID: s.From().ID, Audit: true})
+		return false
+	}
+	return true
 }
 
 func sdp(o strictjson.Object) (string, error) {
@@ -318,6 +386,12 @@ func ParseStart(body []byte) (*Start, error) {
 	if st.ConnectionID, err = o.String("connection_id"); err != nil || st.ConnectionID == "" {
 		return nil, errBad
 	}
+	if st.CallID, err = callID(o); err != nil {
+		return nil, err
+	}
+	if st.EKSig, err = sig(o, "ek_sig"); err != nil {
+		return nil, err
+	}
 	if st.Media, err = media(o); err != nil {
 		return nil, err
 	}
@@ -345,13 +419,20 @@ func (f *Feature) start(ctx context.Context, s *vault.Session, body []byte) (jso
 	if f.busy(now) {
 		return nil, errBusy
 	}
-	id := s.NewID()
+	id := st.CallID
+	if _, dup := f.calls[id]; dup {
+		return nil, vault.NewError("exists", "")
+	}
+	v, err := vouch(s, callwire.ShareMessage(callwire.RoleOffer, id, st.Media, st.EK), st.EKSig)
+	if err != nil {
+		return nil, err
+	}
 	exp := now.Add(OfferTTL).UTC().Truncate(time.Millisecond)
-	cfg, sig, err := f.iceFor(ctx, s, id)
+	cfg, isig, err := f.iceFor(ctx, s, id)
 	if err != nil {
 		return nil, errInternal
 	}
-	offer := strictjson.NewBuilder().String("call_id", id).String("media", st.Media).String("sdp", st.SDP).Base64("ek", st.EK).Bytes()
+	offer := v.add(strictjson.NewBuilder().String("call_id", id).String("media", st.Media).String("sdp", st.SDP).Base64("ek", st.EK)).Bytes()
 	if err := s.Send(st.ConnectionID, "call.offer", offer, vault.SendOptions{Exp: exp}); err != nil {
 		return nil, errConn
 	}
@@ -360,7 +441,7 @@ func (f *Feature) start(ctx context.Context, s *vault.Session, body []byte) (jso
 	f.prune(now)
 	s.Record(vault.Activity{Kind: "call.outgoing", ConnectionID: st.ConnectionID, Ref: id, Direction: DirOut, Audit: true})
 	return strictjson.NewBuilder().String("call_id", id).String("exp", envelope.FormatTS(exp)).
-		Base64("ice_config", cfg).Base64("ice_sig", sig).Bytes(), nil
+		Base64("ice_config", cfg).Base64("ice_sig", isig).Bytes(), nil
 }
 
 // Offer is a parsed call.offer body (from a peer vault, which may be
@@ -370,6 +451,7 @@ type Offer struct {
 	Media  string
 	SDP    string
 	EK     []byte
+	Vouched
 }
 
 // ParseOffer parses a call.offer body strictly.
@@ -391,6 +473,9 @@ func ParseOffer(body []byte) (*Offer, error) {
 	if of.EK, err = o.Base64("ek", callwire.EKSize); err != nil {
 		return nil, errBad
 	}
+	if of.Vouched, err = vouched(o); err != nil {
+		return nil, err
+	}
 	return of, nil
 }
 
@@ -410,6 +495,9 @@ func (f *Feature) offer(ctx context.Context, s *vault.Session, in *envelope.Inne
 	if _, dup := f.calls[of.CallID]; dup {
 		return nil // idempotent by call_id
 	}
+	if !checkPeerShare(s, callwire.ShareMessage(callwire.RoleOffer, of.CallID, of.Media, of.EK), of.Vouched) {
+		return nil // a swapped or unsigned share: no ringing
+	}
 	c := &Call{ID: of.CallID, Conn: conn, Dir: DirIn, Media: of.Media, State: StateRinging, Created: now, Exp: in.Exp}
 	f.calls[of.CallID] = c
 	f.prune(now)
@@ -420,15 +508,16 @@ func (f *Feature) offer(ctx context.Context, s *vault.Session, in *envelope.Inne
 		f.missed(s, c)
 		return nil
 	}
-	cfg, sig, err := f.iceFor(ctx, s, c.ID)
+	cfg, isig, err := f.iceFor(ctx, s, c.ID)
 	if err != nil {
 		f.finish(s, c, "failed")
 		_ = s.SendToConnection(conn, "call.end", endJSON(c.ID, "failed"))
 		return nil
 	}
-	ev := strictjson.NewBuilder().String("call_id", c.ID).String("connection_id", conn).String("media", c.Media).
+	peer, _ := s.Connection(conn)
+	ev := of.Vouched.add(strictjson.NewBuilder().String("call_id", c.ID).String("connection_id", conn).String("media", c.Media).
 		String("sdp", of.SDP).Base64("ek", of.EK).String("exp", envelope.FormatTS(c.Exp)).
-		Base64("ice_config", cfg).Base64("ice_sig", sig).Bytes()
+		Base64("ice_config", cfg).Base64("ice_sig", isig)).Base64("peer_ik", peer.IK).Bytes()
 	s.NotifyDevicesWith("call.offer", ev, "", vault.SendOptions{Exp: c.Exp})
 	return nil
 }
@@ -461,10 +550,13 @@ type Answer struct {
 	CallID string
 	SDP    string
 	Enc    []byte
+	EncSig []byte // from a device
+	Vouched
 }
 
-// ParseAnswer parses a call.answer body strictly.
-func ParseAnswer(body []byte) (*Answer, error) {
+// ParseAnswer parses a call.answer body strictly: from a device it carries
+// enc_sig; from a peer vault the vouched signatures.
+func ParseAnswer(body []byte, fromPeer bool) (*Answer, error) {
 	o, err := strictjson.ParseObject(body)
 	if err != nil {
 		return nil, errBad
@@ -479,6 +571,14 @@ func ParseAnswer(body []byte) (*Answer, error) {
 	if a.Enc, err = o.Base64("enc", callwire.EncSize); err != nil {
 		return nil, errBad
 	}
+	if fromPeer {
+		a.Vouched, err = vouched(o)
+	} else {
+		a.EncSig, err = sig(o, "enc_sig")
+	}
+	if err != nil {
+		return nil, err
+	}
 	return a, nil
 }
 
@@ -491,7 +591,7 @@ func unavailable(s *vault.Session, id string) error {
 // answerFromDevice: an owner device answers an incoming call; it becomes
 // the call's device, the others stop ringing.
 func (f *Feature) answerFromDevice(s *vault.Session, body []byte) error {
-	a, err := ParseAnswer(body)
+	a, err := ParseAnswer(body, false)
 	if err != nil {
 		return err
 	}
@@ -500,7 +600,12 @@ func (f *Feature) answerFromDevice(s *vault.Session, body []byte) error {
 	if c == nil || c.Dir != DirIn || c.State != StateRinging || !now.Before(c.Exp) {
 		return unavailable(s, a.CallID)
 	}
-	out := strictjson.NewBuilder().String("call_id", c.ID).String("sdp", a.SDP).Base64("enc", a.Enc).Bytes()
+	v, err := vouch(s, callwire.ShareMessage(callwire.RoleAnswer, c.ID, "", a.Enc), a.EncSig)
+	if err != nil {
+		s.Record(vault.Activity{Kind: "drop.call_share", DeviceID: s.From().ID, Audit: true})
+		return unavailable(s, a.CallID)
+	}
+	out := v.add(strictjson.NewBuilder().String("call_id", c.ID).String("sdp", a.SDP).Base64("enc", a.Enc)).Bytes()
 	if err := s.SendToConnection(c.Conn, "call.answer", out); err != nil {
 		f.finish(s, c, "unavailable")
 		return unavailable(s, a.CallID)
@@ -514,7 +619,7 @@ func (f *Feature) answerFromDevice(s *vault.Session, body []byte) error {
 // answerFromPeer: the callee answered our call; its answer goes to the
 // calling device.
 func (f *Feature) answerFromPeer(s *vault.Session, body []byte) error {
-	a, err := ParseAnswer(body)
+	a, err := ParseAnswer(body, true)
 	if err != nil {
 		return err
 	}
@@ -522,9 +627,13 @@ func (f *Feature) answerFromPeer(s *vault.Session, body []byte) error {
 	if c == nil || c.Conn != s.From().ID || c.Dir != DirOut || c.State != StateRinging {
 		return nil
 	}
+	if !checkPeerShare(s, callwire.ShareMessage(callwire.RoleAnswer, c.ID, "", a.Enc), a.Vouched) {
+		return nil // the call keeps ringing until it times out or ends
+	}
 	c.State, c.Answered = StateActive, s.Now()
-	_ = s.Send(c.Device, "call.answer", strictjson.NewBuilder().String("call_id", c.ID).String("sdp", a.SDP).
-		Base64("enc", a.Enc).Bytes(), vault.SendOptions{})
+	peer, _ := s.Connection(c.Conn)
+	_ = s.Send(c.Device, "call.answer", a.Vouched.add(strictjson.NewBuilder().String("call_id", c.ID).String("sdp", a.SDP).
+		Base64("enc", a.Enc)).Base64("peer_ik", peer.IK).Bytes(), vault.SendOptions{})
 	s.Record(vault.Activity{Kind: "call.answered", ConnectionID: c.Conn, Ref: c.ID, Direction: DirOut, Audit: true})
 	return nil
 }

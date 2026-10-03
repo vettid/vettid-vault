@@ -207,14 +207,23 @@ func (d *Device) CallStart(ctx context.Context, connectionID, media, sdp string)
 	if err != nil {
 		return nil, err
 	}
-	o, err := d.Op(ctx, "call.start", map[string]any{"connection_id": connectionID, "media": media, "sdp": sdp,
-		"ek": sk.Public().Bytes()})
+	cid, err := envelope.NewULID(d.cfg.Now())
+	if err != nil {
+		return nil, err
+	}
+	ek := sk.Public().Bytes()
+	esig, err := callwire.SignShare(d.ik, callwire.ShareMessage(callwire.RoleOffer, cid, media, ek))
+	if err != nil {
+		return nil, err
+	}
+	o, err := d.Op(ctx, "call.start", map[string]any{"connection_id": connectionID, "call_id": cid, "media": media, "sdp": sdp,
+		"ek": ek, "ek_sig": esig})
 	if err != nil {
 		sk.Destroy()
 		return nil, err
 	}
 	id, err := o.String("call_id")
-	if err != nil {
+	if err != nil || id != cid {
 		sk.Destroy()
 		return nil, ErrCall
 	}
@@ -245,6 +254,14 @@ func (d *Device) IncomingCall(ev *envelope.Inner) (*Call, error) {
 	if err != nil {
 		return nil, err
 	}
+	media, _ := o.String("media")
+	ek, err := o.Base64("ek", callwire.EKSize)
+	if err != nil {
+		return nil, ErrCall
+	}
+	if err := verifyPeerShare(o, callwire.ShareMessage(callwire.RoleOffer, id, media, ek)); err != nil {
+		return nil, err
+	}
 	return &Call{ID: id, Conn: conn, ICE: ice, Offer: ev, Started: d.cfg.Now()}, nil
 }
 
@@ -263,7 +280,12 @@ func (d *Device) CallAnswer(ctx context.Context, c *Call, sdp string) error {
 	if err != nil {
 		return err
 	}
-	body := strictjson.NewBuilder().String("call_id", c.ID).String("sdp", sdp).Base64("enc", enc).Bytes()
+	esig, err := callwire.SignShare(d.ik, callwire.ShareMessage(callwire.RoleAnswer, c.ID, "", enc))
+	if err != nil {
+		suite.Wipe(k)
+		return err
+	}
+	body := strictjson.NewBuilder().String("call_id", c.ID).String("sdp", sdp).Base64("enc", enc).Base64("enc_sig", esig).Bytes()
 	if _, err := d.Send(ctx, "call.answer", body); err != nil {
 		suite.Wipe(k)
 		return err
@@ -285,6 +307,9 @@ func (d *Device) CallAccept(c *Call, ev *envelope.Inner) (sdp string, err error)
 	enc, err := o.Base64("enc", callwire.EncSize)
 	if err != nil {
 		return "", ErrCall
+	}
+	if err := verifyPeerShare(o, callwire.ShareMessage(callwire.RoleAnswer, c.ID, "", enc)); err != nil {
+		return "", err
 	}
 	if c.Key, err = callwire.Accept(c.key, enc, c.ID); err != nil {
 		return "", err
@@ -322,4 +347,18 @@ func (d *Device) SendExp(ctx context.Context, typ string, body json.RawMessage, 
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.sendFull(ctx, "", typ, body, "", "", exp)
+}
+
+// verifyPeerShare checks a share from the other side of a call: its
+// device's signature and its vault's, under the connection's identity key
+// (`peer_ik`, as this device's own vault has it on record, §10.10).
+func verifyPeerShare(o strictjson.Object, m []byte) error {
+	peer, e1 := o.Base64("peer_ik", ed25519.PublicKeySize)
+	dev, e2 := o.Base64("device_ik", ed25519.PublicKeySize)
+	ds, e3 := o.Base64("device_sig", ed25519.SignatureSize)
+	vs, e4 := o.Base64("vault_sig", ed25519.SignatureSize)
+	if e1 != nil || e2 != nil || e3 != nil || e4 != nil {
+		return callwire.ErrShare
+	}
+	return callwire.VerifyShare(peer, dev, m, ds, vs)
 }

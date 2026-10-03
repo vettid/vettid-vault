@@ -383,9 +383,10 @@ func TestBlocks(t *testing.T) {
 	if r == nil || r.Status != envelope.StatusOK {
 		t.Fatalf("block.add: %+v", r)
 	}
-	if d.m.st.Connections["c1"] != nil || !d.m.subDenied(c.Relay.PK) || len(obs.removed) != 1 {
-		t.Fatal("blocked connection not removed with its sub denylisted")
+	if d.m.st.Connections["c1"] != nil || len(obs.removed) != 1 {
+		t.Fatal("blocked connection not removed")
 	}
+	assertTokensDenied(t, d, "c1", c)
 	if find(in, func(e *envelope.Inner) bool {
 		return e.Type == "connection.event" && bodyStr(t, e, "event") == "removed"
 	}) == nil {
@@ -494,4 +495,79 @@ func FuzzParseMetaUpdate(f *testing.F) {
 			t.Fatal("limits not enforced")
 		}
 	})
+}
+
+// assertTokensDenied checks §7.4 for a removed connection: every token
+// issued to it denylisted by jti (revocations queued), its relay key not
+// denylisted as a whole.
+func assertTokensDenied(t *testing.T, d *devFixture, id string, p *Peer) {
+	t.Helper()
+	n := 0
+	for _, it := range d.m.st.Issued {
+		if it.PeerID == id {
+			n++
+			if !it.Denied {
+				t.Fatalf("token %s of the removed connection not denied", it.JTI)
+			}
+		}
+	}
+	if n == 0 {
+		t.Fatal("no tokens were issued to the connection")
+	}
+	revoked := map[string]bool{}
+	for _, e := range d.m.st.Outbox {
+		if e.Op == OpRevoke {
+			revoked[e.Kind+":"+e.Value] = true
+		}
+	}
+	for _, it := range d.m.st.Issued {
+		if it.PeerID == id && !revoked["jti:"+it.JTI] && !d.relayRevoked("jti", it.JTI) {
+			t.Fatalf("jti %s not revoked at the relay", it.JTI)
+		}
+	}
+	if d.m.subDenied(p.Relay.PK) || d.relayRevoked("sub", relayauth.EncodeKey(p.Relay.PK)) {
+		t.Fatal("the peer's relay key was denylisted as a whole")
+	}
+}
+
+func (d *devFixture) relayRevoked(kind, value string) bool {
+	d.relay.mu.Lock()
+	defer d.relay.mu.Unlock()
+	for _, r := range d.relay.revoked {
+		if r == kind+":"+value || r == value {
+			return true
+		}
+	}
+	return false
+}
+
+// §7.4 (0.5.0): after a removal the same peer, with the same relay key,
+// can connect again through a new invitation and the owner's approval.
+func TestReconnectAfterRemoval(t *testing.T) {
+	d := newDevFixture(t)
+	app := d.self()
+	n := newNewcomer(t, 0x80)
+	inv := d.invite(t, KindConnection, time.Hour)
+	n.hsInit(t, d.m, handshake.PurposeConnection, inv.ID, "h1")
+	var pid string
+	for k := range d.m.st.Inbound {
+		pid = k
+	}
+	if pid == "" {
+		t.Fatal("no pending request")
+	}
+	// Removal of a connection record with this identity and relay key.
+	old := d.addConnection("old", 0x80)
+	old.Relay.PK = n.addr.PK
+	old.Relay.Mailbox = n.addr.Mailbox
+	d.sendAs(app, "connection.remove", `{"connection_id":"old"}`)
+	d.inbox(app)
+	assertTokensDenied(t, d, "old", old)
+	// The earlier pending request still needs the owner's approval; a new
+	// one from the same relay key is accepted as a pending request too.
+	inv2 := d.invite(t, KindConnection, time.Hour)
+	n.hsInit(t, d.m, handshake.PurposeConnection, inv2.ID, "h2")
+	if len(d.m.st.Inbound) != 2 || d.audited("hs_init_from_revoked_key") {
+		t.Fatal("re-invitation of a removed peer refused")
+	}
 }

@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -120,6 +121,21 @@ func TestRevokeConnection(t *testing.T) {
 		if ev.Type == "message.new" && has("text", "after removal")(ev.Body) {
 			t.Fatal("removed peer's message delivered")
 		}
+	}
+
+	// 0.5.0 §7.4: the removal denylisted B's tokens by jti, not B's relay
+	// key, so the two can connect again, through a new invitation and A's
+	// approval, with the same relay keys; B's stale record is replaced.
+	aConn2, bConn2 := connect(t, a, b, 600)
+	if aConn2 == aConn || bConn2 == bConn {
+		t.Fatal("connection ids reused")
+	}
+	id = sendText(t, b, b.app, bConn2, "reconnected")
+	waitEvent(t, a.app, "message.new", has("message_id", id))
+	id = sendText(t, a, a.app, aConn2, "welcome back")
+	waitEvent(t, b.app, "message.new", has("message_id", id))
+	if l := mustOK(t, b.request(b.app, "connection.list", `{}`)); strings.Count(string(l["connections"]), `"kind":"connection"`) != 1 {
+		t.Fatalf("B keeps the stale record: %s", l["connections"])
 	}
 }
 

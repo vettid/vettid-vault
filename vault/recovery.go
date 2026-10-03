@@ -70,6 +70,9 @@ var (
 	ErrRecoveryExpired = errors.New("vault: recovery expired")
 	ErrRecoveryCode    = errors.New("vault: wrong recovery code")
 	ErrRecoveryUsed    = errors.New("vault: recovery code already used")
+	// ErrRecoveryNoCredential: a vault without a credential cannot be
+	// recovered (§11.11.1).
+	ErrRecoveryNoCredential = errors.New("vault: no credential; recovery refused")
 )
 
 // Recovery result codes (§11.11).
@@ -169,6 +172,9 @@ func RecoveryRequest(ctx context.Context, p HeaderParams, recoveryID string, del
 	code = codeEnc.EncodeToString(raw)
 	suite.Wipe(raw)
 	err = headerTx(ctx, p, func(h *Header, now time.Time) (bool, error) {
+		if !h.HasCredential {
+			return false, ErrRecoveryNoCredential
+		}
 		if h.Recovery != nil {
 			h.logRecovery(now, "recovery.replaced", h.Recovery.ID)
 			h.dropRecoveryKey()
@@ -343,5 +349,5 @@ func (m *Manager) completeRecovery(deviceID string, now time.Time) error {
 }
 
 // recoveryAllowed lists what a recovering device may send (§11.11.5).
-var recoveryAllowed = map[string]bool{"credential.recover": true, "vault.status": true,
+var recoveryAllowed = map[string]bool{"credential.recover": true, "credential.utk.get": true, "vault.status": true,
 	"relay.token.issued": true, "relay.token.refresh": true, "relay.address.update": true}

@@ -68,6 +68,9 @@ func TestV3Exit(t *testing.T) {
 	if err := m2.CompleteEnrollment(ctx); err != nil {
 		t.Fatal(err)
 	}
+	if err := m2.CredentialCreate(ctx, "member two password"); err != nil {
+		t.Fatal(err)
+	}
 	mustOK(t, req(t, m2, "vault.enroll.confirm", `{}`))
 	if vid2 == vid {
 		t.Fatal("two members share a vault id")

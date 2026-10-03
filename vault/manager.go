@@ -532,6 +532,9 @@ func (m *Manager) persist(ctx context.Context, create bool) error {
 
 func (m *Manager) writeHeader(ctx context.Context) error {
 	m.syncUnlockKeys()
+	if m.st != nil {
+		m.hdr.HasCredential = m.credentialReady() && m.hasGate()
+	}
 	m.hdr.HeaderSeq++
 	b, err := sealHeader(ctx, m.opt.Sealer, m.hdr)
 	if err != nil {

@@ -333,6 +333,15 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 		m.respondError(p, in, key, "unsupported_type", "", now)
 		return disp(eph)
 	}
+	if !allowedWithoutCredential[in.Type] && !m.credentialReady() {
+		// §3.5.7: a vault without a credential is restricted.
+		if te.spec.Request {
+			m.respondError(p, in, key, "credential_required", "", now)
+		} else {
+			m.audit(now, "credential_required", p.ID)
+		}
+		return disp(eph)
+	}
 	if !te.allows(p.Kind) || p.Recovering && !recoveryAllowed[in.Type] {
 		if te.spec.Request {
 			m.respondError(p, in, key, "forbidden", "", now)

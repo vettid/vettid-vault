@@ -42,6 +42,9 @@ type RecoveryCode struct {
 	Code       string
 	NotBefore  time.Time
 	Expires    time.Time
+	// Error is set instead of the code when the vault refused the request
+	// ("no_credential", §11.11.1).
+	Error string
 }
 
 func codeKey(shared, eph, browser []byte, vaultID, recoveryID string) ([]byte, error) {
@@ -77,9 +80,13 @@ func SealRecoveryCode(browserKey []byte, c *RecoveryCode) ([]byte, error) {
 		return nil, err
 	}
 	defer suite.Wipe(k)
-	pt := strictjson.NewBuilder().Uint("v", 1).String("vault_id", c.VaultID).String("recovery_id", c.RecoveryID).
-		String("code", c.Code).String("not_before", envelope.FormatTS(c.NotBefore)).
-		String("expires_at", envelope.FormatTS(c.Expires)).Bytes()
+	b := strictjson.NewBuilder().Uint("v", 1).String("vault_id", c.VaultID).String("recovery_id", c.RecoveryID)
+	if c.Error != "" {
+		b.String("error", c.Error)
+	} else {
+		b.String("code", c.Code).String("not_before", envelope.FormatTS(c.NotBefore)).String("expires_at", envelope.FormatTS(c.Expires))
+	}
+	pt := b.Bytes()
 	n := SealedCodeSize - sealedCodeHeader - 16
 	if len(pt) > n {
 		return nil, ErrMalformed
@@ -139,6 +146,15 @@ func parseCode(b []byte, vaultID, recoveryID string) (*RecoveryCode, error) {
 	}
 	if c.RecoveryID, err = o.String("recovery_id"); err != nil || c.RecoveryID != recoveryID {
 		return nil, ErrMalformed
+	}
+	if e, present, err := o.OptString("error"); err != nil {
+		return nil, ErrMalformed
+	} else if present {
+		if e == "" || len(e) > 64 {
+			return nil, ErrMalformed
+		}
+		c.Error = e
+		return c, nil
 	}
 	if c.Code, err = o.String("code"); err != nil {
 		return nil, ErrMalformed

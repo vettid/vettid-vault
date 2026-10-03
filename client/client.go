@@ -76,6 +76,8 @@ type State struct {
 	// Credential is this app's copy of the Protean Credential (§3.5): the
 	// sealed blob, useless without the vault's CEK and the password.
 	Credential *CredentialCopy `json:"credential,omitempty"`
+	// UTKs is this app's pool of one-time transaction keys (§3.5.4).
+	UTKs []UTK `json:"utks,omitempty"`
 	// Recovery is set while this app recovers a vault (§11.11).
 	Recovery *RecoveryState `json:"recovery,omitempty"`
 }
@@ -109,6 +111,7 @@ type Device struct {
 	awaiting []*handshake.Responder
 	events   []*envelope.Inner
 	pending  *pendingUnlock
+	lastUTK  UTK
 }
 
 func (c *Config) defaults() {

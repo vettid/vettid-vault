@@ -22,7 +22,7 @@ settings, audit, feed and guides. It follows VAULT-MESSAGING 0.4.0
 
 | Old | Now | Why |
 |---|---|---|
-| UTK/LTK transport key pairs, `new_utks` in responses | Gone | They only protected requests in transit; the §6 session does |
+| UTK/LTK transport key pairs, `new_utks` in responses | Restored in 0.4.1 as hybrid one-time keys (see below) | Owner review: they limit a compromise of the device's session |
 | CEK (X25519 ECIES) | CEK is an MLKEM768X25519 key; HPKE suite 2 | PQC Phase 1 (§1.1 item 7) |
 | Password PHC hash computed by the app and compared in the vault | The password itself, inside the session; Argon2id in the enclave; the check is the blob's inner AEAD | The PHC string was a password equivalent; the inner layer also keeps the vault from opening the credential alone |
 | `credential.store`, `credential.sync` (app uploads a blob) | Folded into create/rotate/change: the vault produces every version and records it | An uploaded blob could only roll the credential back |
@@ -90,3 +90,34 @@ except sealed to the member's browser.
 
 Not here: the portal pages (request, QR, cancel link) and vaultctl
 commands for recovery (the e2e tests drive the client package directly).
+
+## Protean Credential corrections (0.4.1, owner review)
+
+The batch-1 port deviated from the owner's Protean Credential design
+(vettid-dev `docs/protean_credential_system_design.md`); 0.4.1 restores it:
+
+- **CEK rotation on every use.** Every operation that opens the blob seals
+  the content under a new CEK as the next version and destroys the old CEK
+  (`rotateCEK`), so earlier blobs cannot be opened by anyone. The latest
+  blob is kept until the app confirms it (`credential.ack`, or the next use
+  of that version); responses are cached (§8.2), so a lost response is
+  recovered by retransmission or `credential.get`.
+- **UTK/LTK restored** as MLKEM768X25519 one-time keys (`vms/credwire`):
+  pools of 20 per app, refilled by 10 under 10, 30-day expiry, spent before
+  anything else is checked, bound to the device, the type and the inner id.
+  Secret values return sealed to a one-time reply key, so
+  `credential.secret.get` no longer needs the volatile-response rule (the
+  runtime keeps the rule for future types).
+- **LAT** is superseded by Nitro attestation (decision 2026-01-08).
+- **A credential is required** (§3.5.7): `vault.CredentialGate`; the runtime
+  answers `credential_required` to all but the listed types and records
+  `has_credential` in the sealed header; `vault.enroll.confirm` needs the
+  credential, so an enrollment without one stays provisional.
+- **Recovery** never completes without the credential: refused at the
+  request for a vault without one (sealed `no_credential` to the browser),
+  and with backup off the recovered app supplies the member's own blob.
+
+The client keeps the UTK pool and the latest blob, confirms every new blob,
+refetches on `stale_credential`, and opens reply-sealed values
+(`client/credential.go`). `vaultctl credential recover -value-file` takes
+the member's own blob.

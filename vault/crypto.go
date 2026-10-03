@@ -131,8 +131,11 @@ type Header struct {
 	SealKeyVerified *SealKeyRecord `json:"seal_key_verified,omitempty"`
 	// Recovery (§11.11): the recovery in progress, and the steps taken
 	// while the vault was locked (moved to the audit log at unlock).
-	Recovery    *RecoveryRecord `json:"recovery,omitempty"`
-	RecoveryLog []RecoveryEvent `json:"recovery_log,omitempty"`
+	Recovery *RecoveryRecord `json:"recovery,omitempty"`
+	// HasCredential records whether the vault has a Protean Credential
+	// (§3.5.7), so that a locked vault without one refuses recovery.
+	HasCredential bool            `json:"has_credential,omitempty"`
+	RecoveryLog   []RecoveryEvent `json:"recovery_log,omitempty"`
 }
 
 func headerAAD(vaultID string) []byte { return []byte(labelHeader + "\x00" + vaultID) }

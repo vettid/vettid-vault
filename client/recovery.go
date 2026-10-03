@@ -108,23 +108,3 @@ func (d *Device) CompleteRecoveryHandshake(ctx context.Context) error {
 	}
 	return d.awaitPaired(ctx)
 }
-
-// CredentialRecover authenticates with the credential password and
-// receives the credential (§11.11.5); afterwards the app is an ordinary
-// owner app. It reports whether a credential was handed over.
-func (d *Device) CredentialRecover(ctx context.Context, password string) (bool, error) {
-	o, err := d.Op(ctx, "credential.recover", map[string]any{"password": password})
-	if err != nil {
-		return false, err
-	}
-	got := o.Has("credential")
-	if got {
-		if err := d.storeCredential(o); err != nil {
-			return false, err
-		}
-	}
-	d.mu.Lock()
-	d.st.Recovery = nil
-	d.mu.Unlock()
-	return got, nil
-}

@@ -178,6 +178,12 @@ func (c *Clock) Advance(d time.Duration) { c.T = c.T.Add(d) }
 // the runtime's authorization (§10.1): an unknown type is
 // unsupported_type, a sender kind not in TypeSpec.From is forbidden.
 func Call(f vault.Feature, h *Host, now time.Time, kind, typ, body string) Result {
+	id, _ := envelope.NewULID(now)
+	return CallID(f, h, now, kind, typ, id, body)
+}
+
+// CallID is Call with a chosen inner id (payloads bound to it, §3.5.4).
+func CallID(f vault.Feature, h *Host, now time.Time, kind, typ, id, body string) Result {
 	var spec *vault.TypeSpec
 	for _, ts := range f.Types() {
 		if ts.Type == typ {
@@ -198,7 +204,6 @@ func Call(f vault.Feature, h *Host, now time.Time, kind, typ, body string) Resul
 	if !spec.Allows(from.Kind) {
 		return Result{Code: "forbidden"}
 	}
-	id, _ := envelope.NewULID(now)
 	in := &envelope.Inner{ID: id, Type: typ, TS: now, Body: json.RawMessage(body)}
 	s := vault.NewSession(context.Background(), h, from, now, in)
 	out, err := f.Handle(context.Background(), s, in)

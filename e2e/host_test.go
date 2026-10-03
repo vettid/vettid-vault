@@ -273,6 +273,9 @@ func (a *hostApp) enroll(hi *hostInstance, vaultID string) {
 	if err := a.dev.CompleteEnrollment(ctx); err != nil {
 		hs.t.Fatal(err)
 	}
+	if err := a.dev.CredentialCreate(ctx, credPW); err != nil {
+		hs.t.Fatalf("credential.create: %v", err)
+	}
 	if rr, err := a.dev.Request(ctx, "vault.enroll.confirm", json.RawMessage(`{}`)); err != nil || !rr.OK() {
 		hs.t.Fatalf("confirm: %v", err)
 	}

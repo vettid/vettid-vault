@@ -3,6 +3,7 @@ package enclave
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/vettid/vettid-vault/internal/strictjson"
@@ -47,6 +48,14 @@ func (c *Core) recoveryRequest(ctx context.Context, j *Job) []byte {
 	p, sealer := c.headerParams(j, c.recoveryNow)
 	defer sealer.Destroy()
 	code, rec, err := vault.RecoveryRequest(ctx, p, j.RequestID, vault.RecoveryDelay)
+	if errors.Is(err, vault.ErrRecoveryNoCredential) {
+		// Tell the member, sealed to their browser (§11.11.1).
+		sealed, err := altchan.SealRecoveryCode(bk, &altchan.RecoveryCode{VaultID: j.VaultID, RecoveryID: j.RequestID, Error: "no_credential"})
+		if err != nil {
+			return opaque()
+		}
+		return sealed
+	}
 	if err != nil {
 		return opaque()
 	}

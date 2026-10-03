@@ -196,14 +196,18 @@ in `e2e.TestCredentialFlow`, `e2e.TestProfileSecretsAuditFeed` and
 | § | Requirement | Test(s) |
 |---|---|---|
 | 3.5.1, 3.5.2 | Blob: HPKE to the CEK over a password layer (Argon2id + HKDF), header as AAD, bound to `vault_id`; refuse KDF parameters below t=1, m=8 MiB | `credential.TestBlobLayers`, `credential.FuzzOpen` |
-| 3.5.2 | Strict plaintext: categories, value sizes, ≤ 64 secrets, versions agree | `credential.FuzzParseInner`, `credential.TestSecretLimit`, `credential.TestBadBodies` |
-| 3.5.3 | Every use carries the blob and the password; an older blob is refused (`stale_credential`) | `credential.TestSecretsRoundTripAndNoPlaintextAtRest`, `credential.TestRotateRotatesIdentityAndCEK`, `e2e.TestCredentialFlow` |
+| 3.5.2, 10.6 | Strict plaintext, request envelopes and UTK payloads: categories, value sizes, ≤ 64 secrets, versions agree | `credential.FuzzParseInner`, `credential.FuzzParseEnvelope`, `credential.FuzzParsePayload`, `credential.TestSecretLimit`, `credential.TestBadBodies` |
+| 3.5.3 | Every use carries the blob and the password; every use rotates the CEK and destroys the old one, so the previous blob is undecryptable (not only refused) | `credential.TestCEKRotatesOnEveryUse`, `e2e.TestCredentialFlow` |
 | 3.5.3 | Wrong password: `bad_password`, counted, audited; backoff after 5 failures; success resets | `credential.TestBadPasswordAndBackoff`, `e2e.TestCredentialFlow` |
-| 3.5.3 | No plaintext, password or secret value in vault state | `credential.TestSecretsRoundTripAndNoPlaintextAtRest` |
-| 8.2, 3.5.3 | A response carrying a secret value is neither cached nor written to state (no outbox entry); a retransmission is executed again | `vault.TestVolatileResponses` (`credential.secret.get` is `Volatile`) |
-| 3.5.3 | Unlock window: memory only; ends at expiry, `credential.lock`, rotation, delete and vault lock | `credential.TestUnlockWindow`, `credential.TestRotateRotatesIdentityAndCEK` |
-| 3.5.4, 3.4 | Rotation: new CEK and credential key, `ik`/`kem` rotated in the same flush; nothing changes if the identity rotation fails | `credential.TestRotateRotatesIdentityAndCEK`, `e2e.TestCredentialFlow` |
-| 3.5.4 | Create once (`exists`); delete destroys the CEK and the copy; the kept copy is the latest blob | `credential.TestCreateOnce`, `credential.TestDelete`, `credential.TestNoCopy` |
+| 3.5.3 | No plaintext, password or secret value in vault state | `credential.TestSecretsAndReplyKey` |
+| 3.5.3 | A lost response never loses the credential: the latest blob is kept until `credential.ack` (even with backup off) and fetched with `credential.get`; responses are cached | `credential.TestLatestBlobKeptUntilAck` |
+| 3.5.4 | UTK pool of 20, refill by 10 under 10, expiry, single use (`utk_invalid` on reuse), bound to the device, the type and the request id | `credential.TestUTKPool`, `credwire.TestPayloadBinding`, `credwire.FuzzOpenPayload`, `e2e.TestCredentialFlow` (reuse refused, replenishment through the relay) |
+| 3.5.4 | Secret values return sealed to a one-time reply key carried in the UTK payload; nothing secret in the clear in the response | `credential.TestSecretsAndReplyKey`, `credwire.TestValue` |
+| 8.2 | A volatile response is neither cached nor written to state; a retransmission is executed again (runtime rule; no type of 0.4.1 needs it) | `vault.TestVolatileResponses` |
+| 3.5.7 | A vault without a credential answers `credential_required` except to the listed types, stays provisional, records `has_credential` | `vault.TestCredentialGate`, `e2e.TestNoCredentialNoRecovery`, `e2e.TestVaultctlSmoke` |
+| 3.5.3 | Unlock window: memory only; ends at expiry, `credential.lock`, rotation, delete and vault lock | `credential.TestUnlockWindow` |
+| 3.5.5, 3.4 | Rotation: new credential key, `ik`/`kem` rotated in the same flush; nothing changes if the identity rotation fails | `credential.TestRotateRotatesIdentity`, `e2e.TestCredentialFlow` |
+| 3.5.5 | Create once (`exists`); delete destroys the CEK, the latest blob and the UTKs and restricts the vault again | `credential.TestCreateOnce`, `credential.TestDelete` |
 | 10.6 | Roles: apps only, except `credential.version` and `credential.secret.list` (apps and desktops); agents and peers never | `credential.TestAuthorizationBySenderKind`, `e2e.TestCredentialFlow` |
 | 10.1 | `version` on shared objects; `conflict` on a stale version; an error changes no state | `secrets.TestPutGetListDelete`, `profile.TestSetSharesOnlySharedFields`, `vault.TestSettings`, `e2e.TestProfileSecretsAuditFeed` |
 | 10.1 | `sync.event` kinds to the other owner devices, without values | `credential.TestCreateOnce`, `secrets.TestPutGetListDelete`, `profile.TestSetSharesOnlySharedFields`, `feed.TestItemsAndSync`, `e2e.TestCredentialFlow` |
@@ -235,11 +239,11 @@ in `e2e.TestCredentialFlow`, `e2e.TestProfileSecretsAuditFeed` and
 | 11.11.3 | Register: binding, order of checks, attestation only after the code, then an unlock key | `vault.TestRecoveryHeaderOps`, `e2e.TestRecoveryFlow`, `altchan.FuzzParseRecoveryRegister` |
 | 11.11.4 | Other apps' unlocks refused with `recovery_pending` (before the PIN); cancel by the API, by an owner unlock with `cancel_recovery` (13th signing line); cancel removes the record and the key | `e2e.TestRecoveryCancel`, `e2e.TestHostRecovery`, `vault.TestRecoveryHeaderOps`, `altchan.TestUnlockSigningStringCancel` |
 | 11.11.5 | PIN under the enclave backoff; `vault_bundle` for the recovered app; first handshake with ctx = recovery id | `e2e.TestRecoveryFlow` |
-| 11.11.5 | Recovering device restricted until `credential.recover`; password under the credential backoff; credential re-sealed (lost copies stale); then an ordinary app | `credential.TestRecover`, `credential.TestRecoverBackoff`, `e2e.TestRecoveryFlow` |
-| 11.11.5 | Without backup or credential: completes on the PIN alone | `credential.TestBackupSetting` |
+| 11.11.5 | Recovering device restricted until `credential.recover`; password under the credential backoff; the CEK rotates (lost copies dead); then an ordinary app | `credential.TestRecover`, `credential.TestRecoverBackoff`, `e2e.TestRecoveryFlow` |
+| 11.11.5 | Backup off: the member supplies the blob (`credential_required` without it); no credential: refused at the request (`no_credential`, sealed to the browser) and at `credential.recover` | `credential.TestRecoverBackupOff`, `credential.TestRecover`, `e2e.TestRecoveryBackupOff`, `e2e.TestNoCredentialNoRecovery`, `vault.TestRecoveryHeaderOps` |
 | 11.11.6 | Steps taken while locked reach the audit log at unlock | `e2e.TestRecoveryFlow` (`recovery.*` in `audit.list`) |
 | 11.5 | Queue ops `recovery` (with `browser_key`), `recovery_cancel`, `recovery_register` | `enclave.TestQueueRecoveryOps`, `enclave.FuzzParseQueueMessage` |
-| 3.5.6 | `credential.backup` on by default; turning it off deletes the copy | `credential.TestBackupSetting`, `vault.TestSettings` |
+| 3.5.6 | `credential.backup` on by default; off: the latest blob kept only until confirmed, an acknowledged copy dropped at once | `credential.TestLatestBlobKeptUntilAck`, `vault.TestSettings` |
 | 10.9 | Append-only, fixed retention (no setting), chain links across pruning | `audit.TestRetention`, `vault.TestSettings` (`audit.retention_days` refused) |
 | 10.9 | Anchor check with `after_seq` | `audit.TestAfterSeqExtendsAnchor` |
 | 10.9 | `drop.*` bounded per principal and kind; `drop.suppressed` | `audit.TestDropThrottle` |

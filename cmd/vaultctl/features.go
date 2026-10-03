@@ -110,8 +110,17 @@ func cmdCredential(ctx context.Context, g *globals, args []string) error {
 		case "delete":
 			return nil, d.CredentialDelete(ctx, pw)
 		case "recover":
-			got, err := d.CredentialRecover(ctx, pw)
-			return map[string]bool{"credential": got}, err
+			// -value-file: the member's own copy of the blob when the vault
+			// keeps none (credential.backup off, §11.11.5).
+			var blob []byte
+			if *valueFile != "" {
+				b, err := os.ReadFile(*valueFile)
+				if err != nil {
+					return nil, err
+				}
+				blob = b
+			}
+			return nil, d.CredentialRecover(ctx, pw, blob)
 		case "secret-add":
 			v, err := os.ReadFile(*valueFile)
 			if err != nil {

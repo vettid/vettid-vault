@@ -210,3 +210,43 @@ func TestVolatileResponses(t *testing.T) {
 		t.Fatal("secret value in vault state")
 	}
 }
+
+// gateFeature is a credential gate under test control.
+type gateFeature struct {
+	recSink
+	ready bool
+}
+
+func (g *gateFeature) CredentialReady() bool { return g.ready }
+
+// §3.5.7: a vault without a credential answers credential_required to all
+// but the listed types, stays provisional, and records has_credential.
+func TestCredentialGate(t *testing.T) {
+	d := newDevFixture(t)
+	g := &gateFeature{}
+	d.m.addFeature(g)
+	for _, typ := range []string{"vault.enroll.confirm", "device.pair.create", "connection.invite.create", "settings.get"} {
+		_ = d.send(typ, []byte(`{}`))
+		if r := one(t, d); r.Error == nil || r.Error.Code != "credential_required" {
+			t.Fatalf("%s on a restricted vault: %+v", typ, r)
+		}
+	}
+	_ = d.send("vault.status", []byte(`{}`))
+	if r := one(t, d); r.Status != envelope.StatusOK {
+		t.Fatal("vault.status refused")
+	}
+	if err := d.m.persist(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	if d.m.hdr.HasCredential {
+		t.Fatal("has_credential without a credential")
+	}
+	g.ready = true
+	_ = d.send("settings.get", []byte(`{}`))
+	if r := one(t, d); r.Status != envelope.StatusOK {
+		t.Fatal("settings.get refused with a credential")
+	}
+	if !d.m.hdr.HasCredential {
+		t.Fatal("has_credential not recorded")
+	}
+}

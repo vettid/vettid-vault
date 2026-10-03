@@ -24,7 +24,18 @@ func newRecFixture(t *testing.T) *recFixture {
 	if err := f.m.Lock(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	return &recFixture{fixture: f, now: time.Now()}
+	r := &recFixture{fixture: f, now: time.Now()}
+	// The vault has a credential (§3.5.7); without one, recovery is refused.
+	if _, _, err := RecoveryRequest(context.Background(), r.params(), recID, RecoveryDelay); !errors.Is(err, ErrRecoveryNoCredential) {
+		t.Fatalf("recovery of a vault without a credential: %v", err)
+	}
+	if err := headerTx(context.Background(), r.params(), func(h *Header, _ time.Time) (bool, error) {
+		h.HasCredential = true
+		return false, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return r
 }
 
 func (r *recFixture) params() HeaderParams {

@@ -69,11 +69,15 @@ func TestVaultctlSmoke(t *testing.T) {
 	if !strings.Contains(out, `"status": "ok"`) || !strings.Contains(out, vaultID) {
 		t.Fatalf("status: %s", out)
 	}
+	// A vault is used only with a credential (§3.5.7).
+	t.Setenv("VAULTCTL_PASSWORD", "correct horse battery staple")
+	if out = run("request", "vault.enroll.confirm"); !strings.Contains(out, "credential_required") {
+		t.Fatalf("confirm without a credential: %s", out)
+	}
+	run("credential", "create")
 	run("request", "vault.enroll.confirm")
 
 	// V4 batch 1 (§10.6–§10.9) through vaultctl's feature commands.
-	t.Setenv("VAULTCTL_PASSWORD", "correct horse battery staple")
-	run("credential", "create")
 	val := filepath.Join(dir, "value")
 	if err := os.WriteFile(val, []byte("seed words here"), 0o600); err != nil {
 		t.Fatal(err)

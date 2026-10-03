@@ -259,6 +259,38 @@ type ConnectionObserver interface {
 	ConnectionAdded(s *Session, connectionID string)
 }
 
+// CredentialGate is implemented by the credential feature: a vault without
+// a credential is restricted (§3.5.7).
+type CredentialGate interface {
+	CredentialReady() bool
+}
+
+// allowedWithoutCredential are the types a restricted vault still accepts
+// (§3.5.7).
+var allowedWithoutCredential = map[string]bool{"vault.status": true, "vault.lock": true, "credential.utk.get": true,
+	"credential.create": true, "credential.version": true, "relay.token.issued": true, "relay.token.refresh": true,
+	"relay.address.update": true}
+
+// hasGate reports whether a credential feature is present.
+func (m *Manager) hasGate() bool {
+	for _, f := range m.features {
+		if _, ok := f.(CredentialGate); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// credentialReady reports whether no gate restricts the vault.
+func (m *Manager) credentialReady() bool {
+	for _, f := range m.features {
+		if g, ok := f.(CredentialGate); ok && !g.CredentialReady() {
+			return false
+		}
+	}
+	return true
+}
+
 // SettingsObserver is implemented by features that act on a settings
 // change (the credential drops its kept copy when backup is turned off).
 type SettingsObserver interface {

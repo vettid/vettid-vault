@@ -100,6 +100,10 @@ func newTestVault(t *testing.T, relayURL, name string, tweak func(*vault.Options
 	if err := app.CompleteEnrollment(ctx); err != nil {
 		t.Fatalf("enroll handshake: %v", err)
 	}
+	// A vault is used only with a credential (§3.5.7).
+	if err := app.CredentialCreate(ctx, credPW); err != nil {
+		t.Fatalf("credential.create: %v", err)
+	}
 	r := tv.request(app, "vault.enroll.confirm", `{}`)
 	if !r.OK() {
 		t.Fatalf("confirm: %s", r.ErrorCode())
@@ -284,3 +288,6 @@ func sendText(t *testing.T, tv *testVault, d *client.Device, conn, text string) 
 // newSet returns the full feature set with test-strength KDF parameters
 // (the memory rules: minimum Argon2id in tests).
 func newSet() *all.Set { return all.NewSet(all.Options{CredentialKDF: credential.MinKDF}) }
+
+// credPW is the credential password of the test vaults' first apps.
+const credPW = "correct horse battery staple"

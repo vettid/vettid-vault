@@ -207,3 +207,52 @@ Follows VAULT-MESSAGING 0.5.0 (§6.8, §10.3, §10.4, §10.10).
 - Push wakes for incoming calls (§14).
 - vaultctl call commands run a whole call per invocation (the caller's
   KEM key lives only in memory); the e2e tests drive the client package.
+
+## Batch 3: LEASH, grants, critical-secret use, shared actions (0.6.0)
+
+Follows VAULT-MESSAGING 0.6.0 (§10.11–§10.14, with §6.7, §6.8, §9.1,
+§10.1, §10.3, §10.6, §10.7, §10.9, §13.5).
+
+### Layout
+
+- Runtime (`vault/`): `TypeSpec.AgentPolicy` makes the `AgentPolicy`
+  feature decide every agent request of that type (`agent.request`), not
+  only owner types agents are not listed for; when an app approves a
+  referred agent request, the policy is asked again and a request no
+  grant covers any more is answered `forbidden`. `AgentGrantor`:
+  `device.pair.approve{grants}` is validated at the approval, kept on the
+  pending device record (`Peer.PairGrants`) and installed after
+  `device.paired` when the pairing completes. `DeviceRemovedObserver`
+  (unlink revokes an agent's grants). `Host.PairedDevice` (a device with
+  or without an access session).
+- `features/leash` + `vms/leashwire`: grants, the decision, `agent.request`,
+  signed delegations (canonical JSON signed by the credential key through
+  `credential.Feature.UseKey`).
+- `features/grants` + `vms/sharewire`: grants between connections, values
+  sealed to the fetching device's reply key; the catalog.
+- `features/critical`: critical-secret use; each approval is a credential
+  operation through `credential.Feature.UseSecret` (UTK spent first, the
+  sealed payload bound to the request and the payload's hash, the CEK
+  rotated, the plaintext wiped). `credential.secret.catalog` lists a
+  critical secret's metadata in the catalog.
+- `features/actions`: shared actions.
+- Accessors for features: `secrets.Feature.Catalog`/`CatalogedValue`,
+  `profile.Feature.FieldValue`, `credential.Feature.CatalogedSecrets`.
+- Every flow between vaults is a set of events correlated by ids, like
+  connection authentication and calls; the runtime still has no V↔V
+  request/response routing to features (§10, 0.6.0).
+
+### Ported, changed or dropped: LEASH (from vettid.dev `leash_handler.go`, `agent_*.go`, `capabilities.go`)
+
+| Old | Now | Why |
+|---|---|---|
+| `grant.attest` / `leash.attest`: a `leash+jwt` signed by a per-user "attestation key" generated and kept in vault storage, its public key and every issuance published through the parent to a public DynamoDB table, a public revocation-status Lambda, `vettid:grant_version`, `vettid:profile_version`, `vettid:revocation_url` | Grants enforced by the vault itself; an optional delegation (canonical JSON, Ed25519 by the member's **credential key**, at most 24 h) for relying parties | A vault-held signing key can be used by the vault (any approved release) without the member; the credential key needs the password. Publishing issuances through the untrusted parent to public tables told VettID who delegates what to which agent. There is no egress for an online status check, so delegations are short (§15 follow-up 7) |
+| Connection Contract: `Scope` capability tokens (`secrets.catalog.read`, `secrets.get`, `secrets.action`, `message.send`, `message.recv`), `ApprovalMode` (`always_ask`, `auto_within_contract`, `auto_all`), `DefaultAgentCapabilities` granted on pairing | One grant per scope, `ask` or `auto`, restrictions to connections or secrets, hourly and daily limits, expiry; an agent paired without grants can do nothing | Least privilege; "automatic for all" is not offered; the contract is per grant so it can be changed and revoked piecemeal |
+| `agent_secret_request`, `agent_action_request`, `agent_catalog_request` in an X25519-encrypted agent envelope | `agent.request{op: catalog \| secret.get \| secret.use}` in the §6 session, decided by the policy | One session, typed messages, decisions in one place |
+| Agent actions `http_request` (returned 501) and `sign` (HMAC-SHA-256 with the secret) | `secret.use` with `hmac-sha256` | The enclave has no egress beyond the relay and KMS; HTTP execution waits for that decision |
+| In-memory pending approvals (`addPendingApproval`, `agent.secret.request` / `agent.action.request` to the app, `HandleAppApprovalResponse`, cleanup loop) | Referred requests are §6.8 held requests (`approval.pending` / `approval.decide`), persisted, 5-minute expiry | One approval mechanism for desktops and agents |
+| `agent_rate_limit.go` (token bucket per agent connection) | Per-grant hourly and daily windows; past a limit the grant refers requests to an app and the owner gets one `leash.rate_limited` feed item per window | LEASH asks for suspension and notification; referral keeps the agent usable under the member's eye |
+| Agent chat (`agent_message`, `agent_message_response`, `message.recv`) | Dropped | Not part of LEASH; an agent can be delegated `message.*` to connections. A member ↔ agent chat would be its own feature |
+| Agent-initiated leash minting (`leash_mint_request`, `agent_leash_granted` / `_denied`) | Dropped: only an app issues grants | An agent asking for its own powers is a UI flow the member can serve out of band; it is not needed for the vault's enforcement |
+| Agent pairing stage 2 (X25519 connection key, NATS credentials) | §6.7 pairing with initial grants | |
+| `capability.*` (capability requests between connections) | Dropped | Superseded by grants (§10.12) |

@@ -286,3 +286,53 @@ relay in `e2e.TestBlockRefusesPeer`, `e2e.TestCallSignalling`,
 | 10.9 | Batch-2 audit and feed kinds (no SDP, keys or content) | `calls.TestCallFlow`, `connauth.TestAuthenticate`, `e2e.TestCallSignalling`, `e2e.TestDesktopSession` |
 | 13.6 | New parsers fuzzed | `vault.FuzzParseMetaUpdate`, `vault.FuzzDeviceMessage` (every registered type), `callwire.FuzzParseICEConfig`, `callwire.FuzzAccept`, `calls.FuzzParse*`, `connauth.FuzzParse*` |
 | 13.6 | No package-level mutable state in feature code; the vault's `ik` signs only ICE configurations for features (`Host.SignICEConfig` parses first) | `features/all` (per-vault instances), `calls.TestCallFlow` |
+
+## V4 batch 3: LEASH, grants, critical-secret use, shared actions (§6.7, §6.8, §9.1, §10.1, §10.6, §10.7, §10.11–§10.14, §13.5; 0.6.0)
+
+Runtime rules (the policy for `agent.request`, the re-check on approval,
+initial grants at pairing) are tested in `vault` with in-process devices;
+the features in their packages through `internal/featuretest`; the flows
+through the real relay in `e2e.TestLeashAgent`, `e2e.TestGrantShareAndRevoke`,
+`e2e.TestCriticalSecretUse`, `e2e.TestSharedAction` and
+`e2e.TestVaultctlBatch3` (vaultctl's batch-3 commands).
+
+| § | Requirement | Test(s) |
+|---|---|---|
+| 6.8, 10.11 | `agent.request` is decided by the policy for every agent request (refuse `forbidden`, allow, refer to an app); no policy without an access session (`session_required`); other principals never reach it | `vault.TestAgentPolicyType`, `leash.TestAuthorization`, `e2e.TestLeashAgent` |
+| 6.8, 10.11 | A referred request runs on approval only while a grant covers it (otherwise `forbidden`) | `vault.TestAgentPolicyType` |
+| 6.7, 10.3 | `device.pair.approve{grants}` only for agents, validated at the approval (never signed), installed when the pairing completes after `device.paired`, then `leash.grant.updated` | `vault.TestPairingGrants`, `leash.TestPairingUnlinkRemoval`, `e2e.TestLeashAgent` |
+| 10.11 | Scopes: the three LEASH operations and the nine delegable owner types only; never app-only, credential, device, settings, invitation, grant or approval types | `leash.TestIssueValidation`, `leash.TestDecisions`, `e2e.TestLeashAgent` (`settings.get`) |
+| 10.11 | Restrictions (`connections` only for connection-scoped types, `secrets` only for `secrets.*`; a request without the member never matches; the catalog filtered), `auto` `secrets.get` needs `secrets`, limits only on `auto`, expiry in the future and ≤ 365 days, at most 32 grants, versions and `conflict` | `leash.TestIssueValidation`, `leash.TestDecisions`, `leash.TestAgentRequest`, `leash.TestReplaceListNotify`, `leash.FuzzParseSpec` |
+| 10.11 | Decisions: none → refuse (`drop.leash_refused`); `auto` within both windows → allow (`leash.allowed`); past a limit → refer, `leash.rate_limited` once per window (high-priority feed item); a new window allows again | `leash.TestDecisions` |
+| 10.11 | `agent.request`: only cataloged vault-held secrets the grants name (a private one is `not_found`); `secret.get` returns the value (`leash.secret.read`); `secret.use` returns HMAC-SHA-256, never the value; bad bodies `bad_request` | `leash.TestAgentRequest`, `leash.FuzzParseRequest`, `e2e.TestLeashAgent` |
+| 10.11 | Revocation at once (agent told, `sync.event{leash.grant.revoked}`); unlink revokes all (§7.4); removing a connection narrows or revokes; expired grants dropped | `leash.TestAgentRequest`, `leash.TestPairingUnlinkRemoval`, `leash.TestExpiry`, `e2e.TestLeashAgent` |
+| 10.11 | Signed delegation: only within the unlock window (`credential_locked`), canonical bytes, Ed25519 by the credential key, `exp` ≤ 24 h; verifiers check form, signature and expiry | `leashwire.TestDelegationRoundTrip`, `leashwire.TestDelegationStrict`, `leashwire.FuzzParseDelegation`, `leash.TestSignedDelegation`, `e2e.TestLeashAgent` |
+| 9.1 | Agents get no fan-out, only responses, §6.8 messages and their own `leash.grant.updated` within their session | `leash.TestReplaceListNotify`, `e2e.TestLeashAgent` |
+| 10.7, 10.12 | `discoverability` takes effect: only `cataloged` secrets are listed (metadata only), granted, or read and used by agents; turning one private stops later fetches (`unavailable`) | `leash.TestAgentRequest`, `grants.TestCatalog`, `grants.TestDenyPartialAndUnavailable`, `e2e.TestGrantShareAndRevoke`, `e2e.TestVaultctlBatch3` |
+| 10.12 | Ask, decide, fetch and revoke as events correlated by `request_id`/`fetch_id`; `grant.pending` to apps and desktops; `grant.event` granted, denied, revoked | `grants.TestShareFetchRevoke`, `grants.TestDenyPartialAndUnavailable`, `e2e.TestGrantShareAndRevoke` |
+| 10.12 | Roles: device types from apps and desktops; `data.*` only from connections; agents never; `grant.decide` a desktop step-up type | `grants.TestAuthorization` |
+| 10.12 | Only available items granted (existing fields, cataloged secrets); none → `bad_request`; partial `items`; the decision may set `uses` and `expires_in` | `grants.TestDenyPartialAndUnavailable`, `e2e.TestGrantShareAndRevoke` |
+| 10.12 | Values sealed to the fetching device's one-time `reply_key`, bound to grant and fetch; the asking vault never holds plaintext; `grant.value` only to the fetching device | `sharewire.TestSealValue`, `sharewire.FuzzOpenValue`, `grants.TestShareFetchRevoke`, `e2e.TestGrantShareAndRevoke` |
+| 10.12 | Fetch refusals `not_found`, `revoked`, `expired`, `exhausted`, `unavailable` (audited); uses counted; a repeated `fetch_id` answered again without a use | `grants.TestShareFetchRevoke`, `grants.TestExpiry`, `grants.TestDenyPartialAndUnavailable` |
+| 10.12 | Repeated `request_id` ignored (another connection's dropped, `drop.grant_duplicate`); at most 16 pending per connection (`drop.grant_limit`); undecided after 7 days → denied; fetches forgotten after 10 min; limits on active grants | `grants.TestIdempotencyAndLimits`, `grants.TestExpiry` |
+| 10.12 | Either side revokes, the other is told; removing or blocking a connection drops everything of it without notice | `grants.TestShareFetchRevoke`, `grants.TestRelinquishAndRemoval` |
+| 10.12 | Catalog: cataloged vault-held secrets and cataloged critical secrets (`critical: true`), metadata only, to the asking device | `grants.TestCatalog`, `e2e.TestGrantShareAndRevoke` |
+| 10.12 | Malformed peer messages dropped and audited, never answered; state survives a flush and unlock | `grants.TestBadBodies`, `grants.TestRoundTrip`, `grants.FuzzPeerMessage` |
+| 10.6, 10.13 | `credential.secret.catalog` (app only, no password) lists a critical secret's metadata; `cataloged` in `credential.secret.list`; `sync.event{credential.secret.cataloged}` | `critical.TestRefusals`, `e2e.TestCriticalSecretUse`, `e2e.TestVaultctlBatch3` |
+| 10.13 | Roles: request, deny, list from apps and desktops; approve only from apps; `critical-secret.use` and `.result` only from connections | `critical.TestAuthorizationAndBadBodies`, `critical.TestConsent` |
+| 3.5.4, 10.13 | Consent per use: the UTK-sealed password bound to `request_id` and `payload_sha256` (constant time); a mismatch is `bad_request` with the UTK spent and nothing signed | `critical.TestConsent` |
+| 3.5.3, 10.13 | Each use opens and rotates the credential (the old blob `stale_credential`); `bad_password` and `backoff` keep the request pending; nothing retained | `critical.TestUseFlow`, `critical.TestConsent`, `e2e.TestCriticalSecretUse` |
+| 10.13 | `sign` over the payload; `auth` domain-separated over both vaults' `ik`, the request id and the payload; `public_key`; not a 32-byte seed → `unsuitable`; deleted since → `unavailable` | `critical.TestUseFlow`, `critical.TestRefusals`, `sharewire.TestAuthMessage`, `e2e.TestCriticalSecretUse` |
+| 10.13 | Only cataloged critical secrets (others `unavailable` without asking, private and unknown not told apart); at most 8 pending per connection; `expired` after 24 h; repeated `request_id` ignored; denial | `critical.TestRefusals`, `critical.TestUseFlow` |
+| 10.13 | The asking vault accepts results only for its own pending request from that connection, verifies the signature (`drop.critical_signature`), forwards to apps and desktops | `critical.TestForgedResultDropped`, `critical.TestUseFlow`, `e2e.TestCriticalSecretUse` |
+| 10.13, 7.4 | Removing a connection drops its requests without notice | `critical.TestRefusals` |
+| 10.14 | Roles: apps and desktops define, delete, list, invoke, respond; connections send `action.offered`, `action.invocation`, `action.result`; agents only through LEASH; `action.define` a desktop step-up type; no type is both a request and an event | `actions.TestAuthorization` |
+| 10.14 | Definitions: `respond` needs `ask` and no result; `fixed` a result object ≤ 16 KiB; at most 64; allowlist of distinct ids; versioned replacement (`conflict`); delete | `actions.TestDefineReplaceDelete`, `actions.TestBadBodies` |
+| 10.14 | Complete offered list to each affected active connection after every change (empty when none remain); never the fixed result; the receiver keeps it and tells its devices (`sync.event{action.offers}`) | `actions.TestDefineReplaceDelete`, `e2e.TestSharedAction` |
+| 10.14 | Invoking needs an offer (`not_found`); `respond` answered by the member; deny; `fixed` + `ask` approved returns the fixed result; `fixed` + `auto` answered at once | `actions.TestInvokeRespond`, `actions.TestDenyAndFixedAsk`, `actions.TestFixedAutoAndUnavailable`, `e2e.TestSharedAction` |
+| 10.14 | `unavailable` for an unknown action, one not offered to that connection, another version, a 9th pending invocation, or after a deletion or redefinition stops the offer | `actions.TestFixedAutoAndUnavailable`, `actions.TestPendingLimitExpiryIdempotency`, `actions.TestRedefineDropsPending` |
+| 10.14 | `expired` after 24 h; a repeated `invocation_id` ignored; late or foreign results dropped; state survives a flush | `actions.TestPendingLimitExpiryIdempotency`, `actions.TestInvokeRespond` |
+| 10.14, 7.4 | Removing a connection drops it from allowlists, its offers and invocations both ways | `actions.TestConnectionRemoved` |
+| 10.1, 10.9 | Batch-3 `sync.event`, audit and feed kinds (no values, payloads or signatures in the log) | `leash.TestReplaceListNotify`, `grants.TestShareFetchRevoke`, `critical.TestUseFlow`, `actions.TestInvokeRespond`, `e2e.TestLeashAgent`, `e2e.TestCriticalSecretUse`, `e2e.TestSharedAction` |
+| 13.6 | New parsers fuzzed | `leashwire.FuzzParseDelegation`, `sharewire.FuzzOpenValue`, `leash.Fuzz*`, `grants.Fuzz*`, `critical.Fuzz*`, `actions.Fuzz*` |
+| 13.6 | No package-level mutable state in feature code (per-vault instances in `features/all`) | `features/all` |

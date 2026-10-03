@@ -256,3 +256,87 @@ Follows VAULT-MESSAGING 0.6.0 (§10.11–§10.14, with §6.7, §6.8, §9.1,
 | Agent-initiated leash minting (`leash_mint_request`, `agent_leash_granted` / `_denied`) | Dropped: only an app issues grants | An agent asking for its own powers is a UI flow the member can serve out of band; it is not needed for the vault's enforcement |
 | Agent pairing stage 2 (X25519 connection key, NATS credentials) | §6.7 pairing with initial grants | |
 | `capability.*` (capability requests between connections) | Dropped | Superseded by grants (§10.12) |
+
+### Ported, changed or dropped: grants (from vettid.dev `grant_handler.go`, `data.*` peer flows)
+
+| Old | Now | Why |
+|---|---|---|
+| `forVault.data.request`, `data.grant.created`, `.denied`, `.revoked`, `.fetch`, `.fetch-response`, with no dedupe | `data.request`, `data.decided`, `data.revoked`, `data.fetch`, `data.value` inside the connection's session, deduped by inner id and by `request_id` / `fetch_id` | §13.6 classification; idempotency |
+| The fetch response carried the plaintext value to the asking vault | `value_sealed` to a one-time reply key of the fetching device | The asking vault never holds the value |
+| `item_kind` `data` (profile and personal-data, alias keys) and `secret` | `field` (a profile key) and `secret` (a cataloged vault-held secret); critical secrets only in the catalog, for use (§10.13) | One profile store (batch 1); critical values never leave the credential |
+| Alias-group `Items` with singular mirror fields | 1–16 `items`, one grant per approved item, `items` indices in the decision | No legacy wire to stay compatible with |
+| `one-shot`, `renewable`, `agent-renewable` modes; `HandleRenew` | `uses` (1–100) and `expires_in`; a new request instead of a renewal | Simpler; agents go through LEASH |
+| `deliver_to`, `requester_guid`, `owner_guid` | Dropped; the connection comes from the session | No owner-space ids |
+| `HandleListOutbound`, `Inbound`, `Pending`, `MyRequests` | One `grant.list{given, received, pending, requested}` | |
+| The catalog in the published profile | `grant.catalog` → `data.catalog.get` / `data.catalog`, on demand | No retained or public profile (§9.3) |
+| Requester-only relinquish path | Either side's `grant.revoke`, mirrored by `data.revoked` | Symmetric rule |
+| `profile.sharing-settings` (per-connection overrides, deferred in batch 1) | Field grants | Per-connection disclosure on request, counted, expiring, revocable |
+| `credential.secret.set-discoverability` (deferred in batch 1) | `credential.secret.catalog` for critical secrets; `discoverability` of vault-held secrets now takes effect | The catalog is what grants, critical-secret use and LEASH read |
+
+### Ported, changed or dropped: critical-secret use (from vettid.dev `critical_secret_handler.go`)
+
+| Old | Now | Why |
+|---|---|---|
+| `CriticalSecretAllowance` (allow for a window, `max_uses`, `expires_at`) | Dropped: every use is one approval with the password | §3.5: consent per use, CEK rotation per use, no standing authority |
+| Approval with `encrypted_credential`, `encrypted_password_hash`, an ephemeral key and `key_id` | `critical-secret-use.approve{request_id, credential, utk_id, sealed{password, request_id, payload_sha256}}` through `credential.UseSecret` | The UTK payload is bound to the type, inner id, request and payload hash; the old approval could be redirected to another pending request in the same session |
+| Operations `sign`, `auth`, `decrypt`, `derive` (the last two "not yet implemented") | `sign` and `auth` | Never implemented; no defined semantics |
+| `auth` prefix `vettid-critical-auth-v1\|<owner_guid>\|` | `vettid/vms/2/critical-auth` ‖ requester `ik` ‖ owner `ik` ‖ request id ‖ payload | Binds both vaults and the request, like §10.4 |
+| The `performer` test seam that skipped the password gate | Dropped; tests drive the real credential at `MinKDF` | The seam bypassed a security check in production code |
+| Any critical secret could be asked for | Only cataloged ones | Least privilege, as for grants |
+| Errors sent to the peer as `err.Error()` strings | Fixed statuses (`ok`, `denied`, `expired`, `unavailable`, `unsuitable`) | No internal error text leaves the vault |
+| The requester did not verify the result | The asking vault verifies the signature before forwarding it | A peer cannot pass off another key's signature |
+
+### Ported, changed or dropped: shared actions (from vettid.dev `action_*.go`)
+
+| Old | Now | Why |
+|---|---|---|
+| Built-in catalog (`profile.fields.read`, `secrets.share`, `wallet.request-address`, `.request-payment`, `vote.delegate-proxy`, `connection.handoff`, `audit.recent`) | Member-defined actions of kind `respond` or `fixed` | Fields and secrets are grants; wallet is not ported yet; votes are removed; introductions are multi-party; the vault runs no code for actions |
+| Auth modes `default-deny`, `allowlist`, `prompt-each-time`, `default-allow` | A per-action allowlist (deny by default) and `ask` or `auto` (`auto` only for `fixed`) | Least privilege; no "every connection" mode |
+| JSON-schema validation of params and results (`action_schema.go`) | Strict JSON objects with size caps (4 KiB params, 16 KiB results); apps validate | Keeps a schema engine out of the enclave |
+| Ed25519 invoker and result signatures over canonical strings | Dropped | The connection's E2E session authenticates both vaults; both sides audit |
+| Offers in the retained profile (`PeerProfileCache.Actions`) | `action.offered` per connection, the complete list on each change, `sync.event{action.offers}` | No retained or public profile |
+| `forOwner.invoke-action` / `action-result` raw publishes, which the receiver never matched (the mis-routing) | `action.invocation` and `action.result` inside the session, classified by the session that decrypts them (§13.6) | Fixes the mis-routing; a device's `action.invoke` stays a request |
+| Pending queue and sweep (`action_pending.go`) | Pending invocations in feature state, at most 8 per connection, answered `expired` after 24 h (lazily) | |
+| `list-mine`, `list-on-peer`, `set-enabled`, `approve`, `deny` | `action.list{connection_id?}`, `action.define`, `action.respond{approve}` | |
+
+### OWNER DECISIONS (open; the implementation follows the recommendation)
+
+1. **LEASH delegations signed by the credential key, optional and at most
+   24 h**, with no online revocation status. Recommended: keep optional;
+   the vault never relies on them. Alternative: no signed delegations at
+   all until a relying party needs one.
+2. **`auto` approval for `secrets.get`** only with an explicit `secrets`
+   list. Recommended as implemented. Alternative: values always need an
+   app's approval (`ask` only), which is what desktops get.
+3. **Rate limits fall back to referral** instead of refusing or
+   suspending the agent. Recommended as implemented.
+4. **Delegable owner types**: `connection.list`, `connection.get`,
+   `message.send`, `.list`, `.get`, `.read`, `profile.get`,
+   `action.list`, `action.invoke`. Recommended as implemented; widen
+   only per type.
+5. **No LEASH HTTP action** (and no member ↔ agent chat, no
+   agent-initiated grant requests). HTTP needs enclave egress beyond the
+   relay and KMS; recommended to keep it out until that is decided.
+6. **Critical-secret `sign` signs the payload as given** (needed for
+   external protocols); `auth` is domain-separated. Recommended: keep
+   both, with the app showing the payload. Alternative: `auth` only.
+7. **Only cataloged secrets** (vault-held and critical) can be granted,
+   used or reached by agents, and the catalog is the same for every
+   connection. Recommended as implemented.
+8. **Field grants are fetch-only**: they are not pushed in
+   `profile.update`. Recommended as implemented (per-connection overrides
+   stay counted and revocable).
+9. **Shared actions run no code in the vault** (`respond`, `fixed`);
+   no "every connection" mode; no JSON schemas in the vault.
+   Recommended as implemented.
+10. **Desktops**: `grant.decide` and `action.define` are step-up types;
+    `critical-secret-use.approve`, `leash.grant.issue` and
+    `credential.secret.catalog` are app-only. Recommended as implemented.
+
+### Not in batch 3
+
+- LEASH's HTTP action execution and an online status for delegations
+  (VAULT-MESSAGING §15 follow-up 7).
+- Location, wallet and presence (the rest of V4).
+- The runtime still does not route V↔V responses to features: every
+  batch-3 flow between vaults uses events (§10).

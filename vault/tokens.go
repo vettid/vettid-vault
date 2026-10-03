@@ -244,15 +244,35 @@ func (m *Manager) denySub(p *Peer, now time.Time) {
 	m.queueRevoke("sub", sub, now)
 }
 
-// subDenied reports whether tokens to this relay key were revoked.
-func (m *Manager) subDenied(pk ed25519.PublicKey) bool {
-	sub := relayauth.EncodeKey(pk)
-	for _, t := range m.st.Issued {
-		if t.Sub == sub && t.Denied {
-			return true
+// denyPeerTokens revokes, by jti, every token issued to principal p,
+// including those minted in handshakes still in flight (§7.4).
+func (m *Manager) denyPeerTokens(p *Peer, now time.Time) {
+	deny := func(t *IssuedToken) {
+		if t.PeerID == p.ID && !t.Denied && t.Kind != TokOpen {
+			t.Denied = true
+			m.queueRevoke("jti", t.JTI, now)
 		}
 	}
-	return slices.Contains(m.st.DeniedSubs, sub)
+	for i := range m.st.Issued {
+		deny(&m.st.Issued[i])
+	}
+	for _, aw := range m.st.Awaiting {
+		for i := range aw.Issued {
+			deny(&aw.Issued[i])
+		}
+	}
+	for _, og := range m.st.Outgoing {
+		for i := range og.Issued {
+			deny(&og.Issued[i])
+		}
+	}
+}
+
+// subDenied reports whether a relay key was denylisted as a whole (an
+// unlinked device, §6.7). Connections are denied by jti (§7.4), which does
+// not refuse a later connection with the same relay key.
+func (m *Manager) subDenied(pk ed25519.PublicKey) bool {
+	return slices.Contains(m.st.DeniedSubs, relayauth.EncodeKey(pk))
 }
 
 // denyJTI revokes one token (§7.4: invites and pairings).

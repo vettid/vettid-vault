@@ -59,6 +59,8 @@ func (m *Manager) registerCore() {
 	r("relay.address.update", false, all, m.hAddressUpdate)
 	r("settings.get", true, owners, m.hSettingsGet)
 	r("settings.set", true, owners, m.hSettingsSet)
+	m.registerAccess()
+	m.registerConnections()
 }
 
 func obj(in *envelope.Inner) (strictjson.Object, error) {
@@ -134,6 +136,16 @@ func (m *Manager) hPairApprove(ctx context.Context, s *Session, in *envelope.Inn
 	if id == "" {
 		return nil, errNotFound
 	}
+	// An initial access session for a desktop or agent may come with the
+	// pairing approval (§6.8).
+	secs, present, err := accessSeconds(o, "session_seconds")
+	if err != nil || present && !needsAccess(m.st.Inbound[id].Kind) {
+		return nil, errBadRequest
+	}
+	if present {
+		m.pairAccess = &pendingAccess{inbound: id, seconds: secs, by: s.peer.ID}
+		defer func() { m.pairAccess = nil }()
+	}
 	if err := m.approveInbound(ctx, id, s.now); err != nil {
 		return nil, NewError("approve_failed", "")
 	}
@@ -160,34 +172,8 @@ func (m *Manager) hPairReject(_ context.Context, s *Session, in *envelope.Inner)
 	return nil, nil
 }
 
-func peerJSON(p *Peer) []byte {
-	b := strictjson.NewBuilder().String("id", p.ID).String("kind", p.Kind).String("state", p.State).String("name", p.Name).
-		Base64("ik", p.IK)
-	if len(p.Profile) > 0 {
-		b.Raw("profile", p.Profile)
-	}
-	return b.Bytes()
-}
-
-func peersJSON(name string, ps map[string]*Peer) json.RawMessage {
-	ids := make([]string, 0, len(ps))
-	for id := range ps {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	arr := []byte{'['}
-	for i, id := range ids {
-		if i > 0 {
-			arr = append(arr, ',')
-		}
-		arr = append(arr, peerJSON(ps[id])...)
-	}
-	arr = append(arr, ']')
-	return strictjson.NewBuilder().Raw(name, arr).Bytes()
-}
-
-func (m *Manager) hDeviceList(context.Context, *Session, *envelope.Inner) (json.RawMessage, error) {
-	return peersJSON("devices", m.st.Devices), nil
+func (m *Manager) hDeviceList(_ context.Context, s *Session, _ *envelope.Inner) (json.RawMessage, error) {
+	return peersJSON("devices", m.st.Devices, s.now), nil
 }
 
 // hDeviceUnlink applies §7.4 "Device unlinked": device.unlinked (best
@@ -205,6 +191,7 @@ func (m *Manager) hDeviceUnlink(_ context.Context, s *Session, in *envelope.Inne
 	if !ok {
 		return nil, errNotFound
 	}
+	m.endAccess(context.Background(), p, false, "", s.now) // its access session and held requests go with it
 	m.removePeer(p, "device.unlinked", s.now)
 	m.record(Activity{Kind: "device.unlinked", DeviceID: id, Audit: true, Feed: true}, s.now)
 	m.notifyDevices("sync.event", strictjson.NewBuilder().String("kind", "device.unlinked").String("device_id", id).Bytes(), "", s.now)
@@ -221,7 +208,14 @@ func (m *Manager) removePeer(p *Peer, notice string, now time.Time) {
 				Payload: raw, BestEffort: true}, now)
 		}
 	}
-	m.denySub(p, now)
+	if p.Kind == KindConnection {
+		// §7.4: every token issued to the peer is denylisted by jti, so
+		// none of them works again, while a later invitation can still
+		// make a fresh connection with the same relay key.
+		m.denyPeerTokens(p, now)
+	} else {
+		m.denySub(p, now) // §6.7: a re-paired device needs a new relay key
+	}
 	for _, e := range m.st.Outbox {
 		if e.PeerID == p.ID {
 			e.Done = true
@@ -359,11 +353,11 @@ func (m *Manager) hConnDecline(_ context.Context, s *Session, in *envelope.Inner
 	return nil, nil
 }
 
-func (m *Manager) hConnList(context.Context, *Session, *envelope.Inner) (json.RawMessage, error) {
-	return peersJSON("connections", m.st.Connections), nil
+func (m *Manager) hConnList(_ context.Context, s *Session, _ *envelope.Inner) (json.RawMessage, error) {
+	return peersJSON("connections", m.st.Connections, s.now), nil
 }
 
-func (m *Manager) hConnGet(_ context.Context, _ *Session, in *envelope.Inner) (json.RawMessage, error) {
+func (m *Manager) hConnGet(_ context.Context, s *Session, in *envelope.Inner) (json.RawMessage, error) {
 	o, err := obj(in)
 	if err != nil {
 		return nil, err
@@ -376,7 +370,7 @@ func (m *Manager) hConnGet(_ context.Context, _ *Session, in *envelope.Inner) (j
 	if !ok {
 		return nil, errNotFound
 	}
-	return peerJSON(p), nil
+	return peerJSON(p, s.now), nil
 }
 
 // hConnRemove applies §7.4 "Connection removed".
@@ -393,18 +387,12 @@ func (m *Manager) hConnRemove(_ context.Context, s *Session, in *envelope.Inner)
 	if !ok {
 		return nil, errNotFound
 	}
-	m.removePeer(p, "connection.removed", s.now)
-	m.record(Activity{Kind: "connection.removed", ConnectionID: id, Direction: "out", Audit: true}, s.now)
-	m.notifyDevices("connection.event", connEvent(id, "removed"), "", s.now)
+	m.removeConnection(p, "out", s.now)
 	return nil, nil
 }
 
 func (m *Manager) hConnRemoved(_ context.Context, s *Session, _ *envelope.Inner) (json.RawMessage, error) {
-	p := s.peer
-	p.State = PeerStale // so removePeer sends no notice back
-	m.removePeer(p, "", s.now)
-	m.record(Activity{Kind: "connection.removed", ConnectionID: p.ID, Direction: "in", Audit: true, Feed: true}, s.now)
-	m.notifyDevices("connection.event", connEvent(p.ID, "removed"), "", s.now)
+	m.removeConnection(s.peer, "in", s.now)
 	return nil, nil
 }
 

@@ -1,8 +1,8 @@
 ---
 title: VAULT-MESSAGING
 status: draft
-version: 0.4.1
-date: 2026-10-02
+version: 0.5.0
+date: 2026-10-03
 owner: Al Liebl (Mesmer)
 component: vault manager (enclave), parent forwarder, apps, desktops, agents, member API vault routes
 related:
@@ -14,6 +14,16 @@ related:
   - ACCOUNT-ADMIN-PLAN.md
   - MEMBER-API.md
 changelog:
+  - 0.5.0: V4 batch 2: access sessions and app approvals for desktops and
+    agents, with the LEASH hook (§6.8); the block list, connection
+    metadata and member authentication with the credential key (§10.4);
+    call signalling with device-held media keys and vault-signed ICE
+    configurations (§10.10); fan-out to desktops only within an access
+    session (§9.1); credential-key rotation statements followed by
+    authenticated connections (§3.5.5, §10.4); removal by jti so peers can
+    reconnect through a new invitation (§7.4); desktop calls and signed
+    key-exchange shares, no call handoff (§10.10); body schemas, error
+    codes, sync.event kinds and audit and feed kinds for all of them
   - 0.4.1: the Protean Credential per the owner's design: the CEK rotates
     at every use, one-time UTK/LTK transaction keys and reply keys, LAT
     superseded by Nitro attestation, a credential required before a vault
@@ -73,7 +83,8 @@ vaults of its connections. It covers:
 - keys (§3);
 - one hybrid post-quantum construction and one envelope for every payload
   (§4, §5);
-- sessions, invitations, reconnects and pairing (§6);
+- sessions, invitations, reconnects, pairing, and the access sessions of
+  desktops and agents (§6);
 - deposit tokens (§7);
 - delivery semantics (§8, §9);
 - the message-type registry (§10);
@@ -622,6 +633,23 @@ secret's value seals the value to a **one-time reply key** instead:
   under the new password (and, like every use, under a new CEK).
 - **Rotate.** `credential.rotate` generates a new credential key.
   - It rotates the vault's `ik` and `kem` in the same flush (§3.4).
+  - The vault signs a **credential-key rotation statement** with the old
+    and the new credential key, while it holds both, and delivers it to
+    the connections that pinned the member's key (§10.4):
+
+    ```json
+    { "v": 1, "old_key": "<b64>", "new_key": "<b64>", "sig_old": "<b64>", "sig_new": "<b64>" }
+    ```
+
+    ```
+    m       = old_key (32) || new_key (32)
+    sig_old = Ed25519(old credential key, "vettid/vms/2/credential-rotate" || m)
+    sig_new = Ed25519(new credential key, "vettid/vms/2/credential-rotate" || m)
+    ```
+
+    Both signatures MUST verify and `old_key` MUST differ from `new_key`.
+    A vault keeps its latest 32 statements. A new credential after
+    `credential.delete` has no statement.
   - It is the PQC Phase 2 vehicle; the CEK rotates as with every use.
   - Apps SHOULD offer it at least yearly.
   - The vault MUST NOT rotate the credential key without the member.
@@ -1286,8 +1314,86 @@ Rules:
   `kem` and attestation binding to the sealed header's unlock keys.
 - **Re-pairing.** A re-paired device MUST use a new relay key, because its
   old `sub` stays denylisted. The vault MUST refuse an `hs.init` whose
-  collect `sender` is a relay key it has denylisted (§7.4), whatever token
-  it arrived on.
+  collect `sender` is a relay key it has denylisted as a whole (an unlinked
+  device, §7.4), whatever token it arrived on. Removed connections are
+  denylisted by `jti` instead and may connect again (§7.4).
+
+### 6.8 Access sessions and approvals for desktops and agents
+
+Pairing (§6.7) gives a desktop or an agent an E2E session with the vault.
+It does not, by itself, let the device act. A desktop or agent acts only
+within an **access session**: a time-limited authorization that an owner
+app grants. (An access session is unrelated to the E2E session of §6.1;
+its end does not end the E2E session or the pairing.) Apps need none.
+
+**Requesting and granting:**
+
+1. The desktop or agent sends `device.session.request{seconds?}` (60 s to
+   24 h, default 1 h).
+2. The vault asks the owner's apps with `device.session.pending`. A newer
+   request from the same device replaces an older one; a request no app
+   decides within 10 minutes is dropped.
+3. An app answers `device.session.approve{request_id, seconds?}` (the app
+   may change the length) or `device.session.deny`. The device is told
+   with `device.session.granted{session_id, expires_at}` or
+   `device.session.ended{reason: "denied"}`.
+
+`device.pair.approve` MAY carry `session_seconds` to grant the first access
+session together with the pairing (§10.3). A grant replaces the device's
+current access session, so a request made within a session renews it.
+
+**What a desktop or agent may do:**
+
+- Without an access session, the vault answers every request of a type
+  the device's role may send with `session_required` (other types remain
+  `forbidden`) and drops every other message (audited), except
+  `vault.status`, `device.session.request`, `device.session.end`,
+  `relay.token.issued`, `relay.token.refresh`, `relay.address.update` and
+  the handshake. Feature messages the vault addresses to one device (such
+  as a call's answer) also reach a desktop or agent only within its
+  session; responses and the messages of this section always do.
+- Within it, a **desktop** may send the types listed for it in §10. Some
+  of them are **step-up types**: the vault holds each such request until
+  an app approves it (below). They are the types that read or change a
+  vault-held secret value, the profile or the settings, create or accept
+  an invitation, remove a connection or lift a block: `secret.get`,
+  `secret.put`, `secret.delete`, `profile.set`, `settings.set`,
+  `connection.invite.create`, `connection.invite.accept`,
+  `connection.remove` and `block.remove`. Apps are never held.
+- An **agent** may send only the types listed for agents in §10, unless
+  its grants allow more. Grants are LEASH's (specified with its port): the
+  vault asks its LEASH policy, for an agent's request of a type that a
+  desktop may send, whether to allow it, refer it to an app as for a
+  step-up type, or refuse it (`forbidden`). Without LEASH every such
+  request is refused. Types only apps may send are never delegated.
+- Fan-out reaches a desktop only within its access session (§9.1).
+
+**Approvals.** A held request is kept for at most 5 minutes, at most 8 per
+device (`limit` beyond that):
+
+1. The vault sends the owner's apps `approval.pending{approval_id,
+   device_id, role, name, type, body, exp}` and the requester
+   `approval.waiting{approval_id, request_id, exp}`; a requester that
+   receives it waits up to `exp` for the response instead of the usual
+   30 s (§8.1).
+2. An app answers `approval.decide{approval_id, approve}`. On approval the
+   vault executes the request then, as the requester's (its access
+   session must still be valid), and answers the requester as usual; on
+   denial it answers `denied`; at expiry `approval_timeout`.
+3. The held request keeps its inner `id`: a retransmission while it is
+   held is absorbed by the dedupe of §8.2, and once answered gets the
+   cached response.
+
+**Ending.** An app ends a device's access session with
+`device.session.end{device_id}`; a desktop or agent ends its own with
+`device.session.end{}`. Held requests of the device are answered
+`denied`, its pending request is dropped, and the device is told
+`device.session.ended{reason: "ended"}` when an app ended it. Unlinking
+(§7.4) ends everything of the device. Access sessions also simply expire;
+the device knows `expires_at`.
+
+Every grant, end and decision is audited (§10.9), and the owner's other
+devices learn of it as `sync.event` (§10.1).
 
 ## 7. Deposit tokens
 
@@ -1348,15 +1454,36 @@ The actions for each event are applied in one flush, in the order listed:
 
 | Event | Actions |
 |---|---|
-| Connection removed | Send `connection.removed` (best effort). Denylist `sub` = peer relay key, which also kills its reconnect token. Delete the tokens held for the peer, its session keys and its outbox entries. |
-| Peer blocked | As for connection removed, plus a block entry on the peer's `ik` |
-| Device unlinked | Send `device.unlinked` (best effort). Denylist `sub`. Remove the device from the unlock keys. Delete its wake reference. |
+| Connection removed | Send `connection.removed` (best effort). Denylist the `jti` of every token the vault issued to the peer (standing and reconnect, including those minted in handshakes still in flight), so that none of them is accepted again. Delete the tokens held for the peer, its session keys and its outbox entries. |
+| Peer blocked | As for connection removed, plus a block entry on the peer's `ik` and relay key (§10.4) |
+| Device unlinked | End its access session and drop its held and pending requests (§6.8). Send `device.unlinked` (best effort). Denylist `sub`. Remove the device from the unlock keys. Delete its wake reference. |
 | Agent revoked | As for device unlinked, plus revoke all of the agent's LEASH grants |
 | Invite or pairing cancelled or expired | Denylist the open token's `jti`. DELETE the claim. |
 
 The relay retains denylist entries for its maximum token lifetime
 (RELAY-PROTOCOL §5.5). This is why reconnect tokens raise denylist retention
 at the relay.
+
+**Connecting again after a removal.** A removed connection's tokens are
+denylisted by `jti`, not by `sub`, so its relay key itself is not refused:
+
+- The removed peer cannot deposit with any token it held: each is
+  denylisted at the relay, and messages that still arrive find no session
+  and are dropped and audited.
+- A fresh connection with the same peer (the same relay key) is made only
+  through the normal flow: a new invitation from one owner and, on the
+  inviter's side, the usual pending request and approval (§6.4). The
+  removed peer gets no shortcut: reconnect tokens are denylisted, and an
+  `hs.init` with purpose `reconnect` from a peer without a record is
+  dropped.
+- A blocked peer is refused by its block entry (§10.4) until the owner
+  lifts it with `block.remove`; then the same applies.
+- When the new connection activates, the vault deletes any older record of
+  the same peer (same `ik` or relay key), such as a `stale` one left
+  after the peer removed it or after refused deposits, without a notice;
+  owner devices get `connection.event{removed}` for the old id. An
+  `hs.init` of purpose `connection` from a peer whose record is `stale`
+  is accepted as a new connection request for that reason.
 
 ## 8. Delivery semantics
 
@@ -1440,7 +1567,12 @@ same rule to their local storage.
 | Class | Types | Ack | Dedupe | Staleness |
 |---|---|---|---|---|
 | durable | everything not listed below | after flush | persisted | `ts` window |
-| ephemeral | `call.ice`, `presence.*`, `vault.locking` | after handling | in memory, 10 min | `exp` required |
+| ephemeral | `call.ice`, `call.ringing`, `presence.*`, `vault.locking` | after handling | in memory, 10 min | `exp` required |
+
+A vault forwards ephemeral messages from memory: they are deposited after
+the batch's flush, behind any queued deposits to the same mailbox, once
+and best effort, and never written to vault state (they are lost if the
+deposit fails or the vault stops first).
 
 ### 8.6 Retries
 
@@ -1466,8 +1598,9 @@ How each error is handled:
 ### 9.1 Owner devices
 
 - The vault makes **one deposit per owner device**, each under that device's
-  session. It filters by role, so an agent receives only what its grants
-  cover.
+  session. It filters by role: apps receive fan-out; desktops only within
+  their access session (§6.8); agents only what their grants cover
+  (nothing until LEASH).
 - A response goes only to the device that sent the request. Side effects
   reach the owner's other devices as `sync.event`, or as feature events.
 - A device that has not collected for longer than the relay TTL resyncs
@@ -1514,8 +1647,9 @@ There are no multi-recipient primitives.
 - **ACh:** the alternate channel (§11).
 
 **req** marks a request (§8.1). Body schemas for lifecycle, sessions,
-devices, connections, messaging, the credential, secrets, profile,
-settings, audit and feed are in §10.1–§10.9; the others are **TBD per
+devices and access sessions, connections (with blocks and member
+authentication), messaging, the credential, secrets, profile, settings,
+audit, feed and calls are in §10.1–§10.10; the others are **TBD per
 feature** (§15).
 
 | Group | Type | Dir | req | Purpose |
@@ -1538,23 +1672,29 @@ feature** (§15).
 | | `sync.event` / `sync.since` | V→D, V↔V / D→V, V↔V | — / req | Mirror changes (kinds in §10.1); catch up |
 | Connections | `connection.invite.create`, `.list`, `.cancel`, `.accept` | D→V | req | Invitations (§6.4) |
 | | `connection.request.pending` | V→D | | Awaiting approval (profile, `sas`, `remote`) |
-| | `connection.approve`, `.decline`, `.list`, `.get`, `.remove` | D→V | req | Manage connections |
+| | `connection.approve`, `.decline`, `.list`, `.get`, `.remove`, `.update` | D→V | req | Manage connections; the owner's own metadata |
 | | `connection.removed` | V↔V | | Notify the peer |
 | | `connection.event` | V→D | | Added, pending, stale, removed, rekeyed, reconnected |
-| | `block.add`, `.remove`, `.list` | D→V | req | Block list |
+| | `block.add`, `.remove`, `.list` | D→V | req | Block list (§7.4) |
+| | `connection.authenticate.request`, `.approve`, `.deny`, `.list` | D→V | req | Member authentication (§10.4) |
+| | `connection.authenticate.challenge`, `.response`, `.rotated` | V↔V | | Challenge; the member's signature or refusal; credential-key rotation statements |
+| | `connection.authenticate.pending` / `.result` / `.key` | V→D | | Asked to authenticate; the verdict; the pinned key followed a rotation |
 | Messaging | `message.send` | D→V | req | Send to a connection |
 | | `message.deliver`, `message.receipt` | V↔V | | Message; delivered or read receipt |
 | | `message.new` | V→D | | Incoming message |
 | | `message.list`, `.get`, `.read`, `.delete` | D→V | req | History and read state |
-| Calls | `call.start` | D→V | req | The vault issues the ICE config (CALLING-SERVICE §6) |
-| | `call.offer` / `call.answer` | V↔V, V→D / V↔V, D→V | | SDP and signed ICE config; call KEM `ek` / `enc` |
-| | `call.ice` | any | | Trickle ICE (ephemeral) |
-| | `call.end` | any | | Hang up, busy, decline, timeout |
+| Calls | `call.start`, `call.list` | D→V | req | Place a call (the vault issues its signed ICE config, CALLING-SERVICE §6); call history (§10.10) |
+| | `call.offer` | V↔V, V→D | | SDP and the caller device's KEM `ek`; to devices with their vault's signed ICE config |
+| | `call.answer` | D→V, V↔V, V→D | | SDP and the answering device's KEM `enc` |
+| | `call.ice`, `call.ringing` | any | | Trickle ICE; the callee rings (ephemeral) |
+| | `call.end` | any | | Hang up, decline, busy, timeout, answered elsewhere |
 | Devices & agents | `device.pair.create`, `.approve`, `.reject`, `device.list`, `device.unlink` | D→V | req | Pairing and management (§6.7) |
 | | `device.pair.pending` | V→D | | Awaiting approval (`sas`) |
 | | `device.paired`, `device.unlinked` | V→D | | Welcome and removal notices |
-| | `agent.request` | D→V (agent) | req | Agent operation, checked against its grants |
-| | `agent.approval.pending` / `.decide` | V→D / D→V | — / req | Owner approval outside standing grants |
+| | `device.session.request`, `.approve`, `.deny`, `.end` | D→V | req | Access sessions of desktops and agents (§6.8) |
+| | `device.session.pending`, `.granted`, `.ended` | V→D | | Asked; granted; ended or denied |
+| | `approval.pending`, `approval.waiting` / `approval.decide` | V→D / D→V | — / req | A desktop's step-up request or an agent's referred request, held for an app (§6.8) |
+| | `agent.request` | D→V (agent) | req | Reserved for LEASH |
 | LEASH | `leash.grant.issue`, `.revoke`, `.list` | D→V | req | Manage agent grants |
 | | `leash.grant.updated` | V→D (agent) | | The agent's current grants |
 | Wallet | `wallet.*` (list, address, send, ...) | D→V | req | Owner wallet operations |
@@ -1574,17 +1714,19 @@ feature** (§15).
 | | `feed.event` | V→D | | New feed item |
 | Push | `push.register`, `push.unregister` | D→V | req | Reserved (§14) |
 
-**Calls** (CALLING-SERVICE §7, §9):
+**Calls** (CALLING-SERVICE §7, §9; §10.10):
 
-- `call.offer` carries a fresh ephemeral KEM `ek`.
-- The answering vault runs
+- `call.offer` carries a fresh ephemeral KEM `ek`, generated by the
+  calling device, which keeps its private half.
+- The answering **device** runs
   `SetupBaseS(ek, info = "vettid/vms/2/call" || call_id)` and returns the
-  resulting `enc` in `call.answer`. It derives
+  resulting `enc` in `call.answer`. Both devices derive
   `K = ctx.Export("vettid/vms/2/call-key", 32)`, and from it
   `k_call = HKDF-SHA-256(ikm = K, salt = "vettid-call-v1", info = call_id)`.
+  The vaults relay `ek` and `enc` and never hold `k_call`.
 - Offers carry `exp`, 45 s by default.
-- `call.offer`, `call.answer` and `call.end` are durable. `call.ice` is
-  ephemeral.
+- `call.offer`, `call.answer` and `call.end` are durable. `call.ice` and
+  `call.ringing` are ephemeral.
 - A locked callee cannot answer, so the call times out.
 
 ### 10.1 Common rules and `sync.event`
@@ -1604,7 +1746,18 @@ feature** (§15).
     §3.5.4;
   - `credential_required`: the vault has no credential (§3.5.7), or a
     recovery needs one (§11.11.5);
-  - `bad_pin`: the current PIN given to `pin.change` is wrong.
+  - `bad_pin`: the current PIN given to `pin.change` is wrong;
+  - and (0.5.0):
+    - `session_required`: a desktop or agent has no access session
+      (§6.8);
+    - `denied`: an app denied a held request, or the device's access
+      session ended while it was held (§6.8);
+    - `approval_timeout`: no app decided a held request in time (§6.8);
+    - `busy`: `call.start` while a call is ringing or active (§10.10);
+    - `credential_locked`: the operation signs with the credential key
+      and the unlock window is closed (§3.5.3, §10.4);
+    - `blocked`: `connection.invite.accept` of an invitation from a
+      blocked identity (§10.4).
 - A request answered with an error changes no state, except the password
   backoff, the spent UTK and the audit log and feed entries of §3.5.3.
   Objects that several
@@ -1632,6 +1785,11 @@ feature** (§15).
   | `settings.changed` | `version` |
   | `feed.updated` | `item_id`, `seq` |
   | `feed.deleted` | `item_id`, `seq` |
+  | `connection.changed` | `connection_id`, `version` (`connection.update`, §10.4) |
+  | `block.added`, `block.removed` | `block_id` (§10.4) |
+  | `connection.authenticate.decided` | `request_id`, `approved` (§10.4) |
+  | `device.session` | `device_id`, `expires_at` (absent when the session ended) (§6.8) |
+  | `approval.decided` | `approval_id`, `approved` (§6.8) |
 
   These go to the owner's other apps and desktops (not agents), never with
   secret values; devices fetch what changed.
@@ -1656,11 +1814,29 @@ feature** (§15).
 |---|---|---|
 | `device.pair.create` (app) | `{role: "app" \| "desktop" \| "agent"}` | `{pairing_id, link, exp}` |
 | `device.pair.pending` (to apps) | — | `{pairing_id, pending_id, role, name, sas}`; `name` is the new device's self-asserted `profile.name` |
-| `device.pair.approve`, `.reject` (app) | `{pairing_id}` | `{}` |
-| `device.paired` (to the new device) | — | `{device_id, role, vault_id, release, release_number}` (the release the vault runs under) |
-| `device.list` (app, desktop) | `{}` | `{devices: [{id, kind, state, name, ik, profile?}]}` |
+| `device.pair.approve` (app) | `{pairing_id, session_seconds?}`; `session_seconds` (60–86,400) only for a desktop or agent: its first access session (§6.8) | `{}` |
+| `device.pair.reject` (app) | `{pairing_id}` | `{}` |
+| `device.paired` (to the new device) | — | `{device_id, role, vault_id, release, release_number, session_expires_at?}` (the release the vault runs under) |
+| `device.list` (app, desktop) | `{}` | `{devices: [{id, kind, state, name, ik, profile?, created_at?, last_active_at?, session_expires_at?}]}` |
 | `device.unlink` (app) | `{device_id}` | `{}` |
 | `device.unlinked` (to the unlinked device, best effort) | — | `{}` |
+| `device.session.request` (desktop, agent) | `{seconds?}` (60–86,400, default 3,600) | `{request_id, exp}` |
+| `device.session.pending` (to apps) | — | `{request_id, device_id, role, name, seconds, exp}` |
+| `device.session.approve` (app) | `{request_id, seconds?}` | `{device_id, session_id, expires_at}` |
+| `device.session.deny` (app) | `{request_id}` | `{}` |
+| `device.session.granted` (to the device) | — | `{session_id, expires_at}` |
+| `device.session.end` (app: `{device_id}`; desktop, agent: `{}`, its own) | as left | `{}` |
+| `device.session.ended` (to the device) | — | `{reason: "denied" \| "ended"}` |
+| `approval.pending` (to apps) | — | `{approval_id, device_id, role, name, type, body, exp}`; `body` is the held request's body |
+| `approval.waiting` (to the requester) | — | `{approval_id, request_id, exp}` |
+| `approval.decide` (app) | `{approval_id, approve: bool}` | `{result}`: `"ok"` or the error code the held request was answered with |
+
+- `last_active_at` is when the vault last processed a durable message from
+  the principal, to the minute; `session_expires_at` is present while an
+  access session lasts.
+- A held request that is approved is executed when the decision arrives,
+  so `approval.decide` answers with its outcome; the requester gets the
+  request's own response.
 
 ### 10.4 Connections (§6.4)
 
@@ -1672,14 +1848,131 @@ feature** (§15).
 | `connection.invite.accept` | `{link}` | `{connection_id, state: "pending"}` |
 | `connection.request.pending` | — | `{pending_id, invite_id, sas, remote, profile?}` |
 | `connection.approve`, `.decline` | `{pending_id}` | `{}` |
-| `connection.list` | `{}` | `{connections: [{id, kind, state, name, ik, profile?}]}` |
-| `connection.get` | `{connection_id}` | `{id, kind, state, name, ik, profile?}` |
+| `connection.list` | `{}` | `{connections: [<connection>]}` |
+| `connection.get` | `{connection_id}` | `<connection>` |
+| `connection.update` | `{connection_id, version, alias?, note?, tags?, favorite?, archived?}` (at least one) | `{version}` |
 | `connection.remove` | `{connection_id}` | `{}` |
 | `connection.removed` (V↔V) | — | `{}` |
 | `connection.event` | — | `{connection_id, event: "added" \| "removed" \| "stale" \| "rekeyed" \| "reconnected" \| "failed" \| "profile"}`; `profile`: the connection's shared profile changed (§10.8) |
+| `block.add` | `{connection_id \| pending_id, note?}` (exactly one of the ids) | `{block_id}` |
+| `block.remove` | `{block_id}` | `{}` |
+| `block.list` | `{}` | `{blocks: [{block_id, ik, name?, note?, created_at}]}` |
+
+```json
+connection: { "id": "<id>", "kind": "connection", "state": "active", "name": "...", "ik": "<b64>",
+              "profile": { }, "created_at": "<ts>", "last_active_at": "<ts>",
+              "version": 2, "alias": "...", "note": "...", "tags": ["family"],
+              "favorite": true, "archived": false }
+```
 
 The D→V types above are sent by `app` or `desktop` devices (§6.4 "Who
-approves").
+approves"); for desktops, `connection.invite.create`,
+`connection.invite.accept`, `connection.remove` and `block.remove` are
+step-up types (§6.8).
+
+- **Metadata.** `alias` (at most 128 bytes), `note` (at most 1,024 bytes),
+  `tags` (at most 16 distinct tags matching `[a-z0-9_.-]{1,32}`),
+  `favorite` and `archived` are the owner's own metadata. They are never
+  sent to the peer, are versioned as one object per connection (§10.1;
+  `version` is `0` before the first update) and are announced to the
+  other devices as `sync.event{kind: "connection.changed"}`. `""` clears
+  `alias` or `note`; `tags` replaces the list. `name` and `profile` remain
+  the peer's self-asserted values (§10.8).
+- **`last_active_at`** is when the vault last processed a durable message
+  from the connection, to the minute; `created_at` is when the connection
+  was made.
+
+**Block list.** `block.add` blocks a connection or the sender of a pending
+connection request:
+
+- A connection is removed as §7.4 "Peer blocked" says (the peer gets a
+  best-effort `connection.removed`, never a reason) and its `ik` and relay
+  key are recorded in a block entry.
+- A pending request is declined and its `hs.init` identity (`from.ik`,
+  `from.relay.pk`) recorded.
+- An identity already blocked is answered `exists`; the list holds at most
+  1,000 entries (`limit`). `note` is at most 256 bytes.
+- A vault MUST refuse (drop and audit as `drop.blocked`) a connection
+  `hs.init` whose `from.ik` or collect `sender` is on its block list, and
+  answers `connection.invite.accept` of a blocked identity's invitation
+  with `blocked`.
+- A block entry follows neither the peer's identity rotation nor a new
+  relay key of the peer: it guards against reconnecting by accident, while
+  reaching the vault at all always needs a new invitation from its owner
+  (§6.4).
+- `block.remove` deletes the entry. The owner may then connect with the
+  same peer again through a new invitation and approval (§7.4).
+- Changes are announced as `sync.event` `block.added` / `block.removed`,
+  and audited (`connection.blocked`, `connection.unblocked`).
+
+**Member authentication.** The handshake (with the SAS, §6.3) authenticates
+a connection's *vault*. `connection.authenticate.*` asks the connection's
+*member* to prove that they are present now: their app approves, and their
+vault signs a fresh challenge with the member's **credential key**
+(§3.5.1), which only the member's password unlocks.
+
+| Type | Request body | Response / event body |
+|---|---|---|
+| `connection.authenticate.request` (app, desktop) | `{connection_id, context?}` | `{request_id, exp}` |
+| `connection.authenticate.challenge` (V↔V) | — | `{request_id, nonce, context?}`, with `exp` |
+| `connection.authenticate.pending` (V→D, apps and desktops) | — | `{connection_id, request_id, context?, exp}` |
+| `connection.authenticate.approve` (app) | `{request_id}` | `{}`; `credential_locked` outside the unlock window |
+| `connection.authenticate.deny` (app, desktop) | `{request_id}` | `{}` |
+| `connection.authenticate.response` (V↔V) | — | `{request_id, status: "signed", key, sig, signed_at, rotations?}` or `{request_id, status: "denied"}` |
+| `connection.authenticate.rotated` (V↔V) | — | `{rotations: [<statement>, ...]}` (1–32 credential-key rotation statements, §3.5.5) |
+| `connection.authenticate.key` (V→D, every owner app and desktop) | — | `{connection_id, key}`: the pinned key followed a rotation |
+| `connection.authenticate.result` (V→D, every owner app and desktop) | — | `{connection_id, request_id, authenticated, key?, key_changed?, reason?}` |
+| `connection.authenticate.list` (app, desktop) | `{}` | `{states: [{connection_id, key?, verified_at?, last_result?, last_at?}]}` |
+
+- `nonce` is 32 random bytes; `context` is at most 256 bytes and shown to
+  the member. A challenge lives 10 minutes (`exp`). A vault keeps at most
+  8 outstanding challenges it sent per connection (`limit`) and 4 it
+  received (more are dropped and audited).
+- To approve, the app opens the credential's unlock window
+  (`credential.unlock`, §3.5.3) and sends `connection.authenticate.approve`;
+  the use extends the window. The vault signs
+
+  ```
+  m   = challenger_ik (32) || responder_ik (32) || nonce (32) || request_id (26) || context
+  sig = Ed25519(credential key, "vettid/vms/2/conn-auth" || m)
+  ```
+
+  where `challenger_ik` is the requesting vault's `ik` and `responder_ik`
+  the signing vault's, each as the other side has it on record. `key` is
+  the credential key's public key.
+- The requesting vault checks that the response answers an outstanding
+  challenge it sent to that connection, verifies `sig` under `key` over
+  `m`, and tells every owner device the verdict: `reason` is `denied` or
+  `bad_signature`. It pins `key` at the first success. A later success
+  under another key sets `key_changed: true` and re-pins, unless the
+  pinned key leads to it through valid rotation statements (below); apps
+  MUST show a key change.
+- **Following a credential-key rotation.** A vault records, per
+  connection, the credential key it last signed a response with (the key
+  that connection pinned).
+  - At `credential.rotate` (§3.5.5) it sends every active connection with
+    such a key `connection.authenticate.rotated` carrying its statements
+    from that key to the new one, in order.
+  - A signed response whose `key` differs from the one recorded for that
+    connection carries the same chain as `rotations`, so a requester that
+    missed a delivery catches up.
+  - The receiver follows the chain from its pinned key: each statement's
+    `old_key` MUST equal the previous one's `new_key` (the first's the
+    pinned key), both signatures MUST verify, and the chain is at most 32
+    statements. On success it pins the last `new_key` and tells every owner
+    device with `connection.authenticate.key` (a delivered chain) or with
+    `key_changed: false` (a response).
+  - **Failure.** A chain that does not verify (forged, unsigned, broken or
+    too long) changes nothing: it is dropped and audited
+    (`connection.authenticate.rotation_rejected`), and the next
+    authentication under the new key reports `key_changed: true`. A
+    receiver with no pinned key ignores `rotated`.
+- Approvals, denials and verdicts are audited
+  (`connection.authenticate.requested`, `.signed`, `.denied`,
+  `connection.authenticated`, `connection.authenticate_failed`,
+  `connection.authenticate.key_rotated`,
+  `connection.authenticate.rotation_rejected`); an incoming challenge is a
+  feed item.
 
 ### 10.5 Messaging
 
@@ -1888,7 +2181,17 @@ entry: { "entry_id": "<ULID>", "seq": 812, "at": "<ts>", "kind": "connection.add
   `recovery.attestation_failed`, `recovery.registered`,
   `recovery.device_paired`, `recovery.completed`, `recovery.cancelled`,
   `recovery.expired`, `recovery.voided` (§11.11.6); `message.sent`,
-  `message.received` (no content; `ref` = `message_id`); `drop.suppressed`;
+  `message.received` (no content; `ref` = `message_id`);
+  `connection.blocked`, `connection.unblocked` (`ref` = `block_id`);
+  `connection.authenticate.requested`, `connection.authenticate.signed`,
+  `connection.authenticate.denied`, `connection.authenticated`,
+  `connection.authenticate_failed` (`ref` = `request_id`);
+  `device.session.granted`, `device.session.ended`, `approval.granted`,
+  `approval.denied` (`ref` = `approval_id`) (§6.8);
+  `connection.authenticate.key_rotated`,
+  `connection.authenticate.rotation_rejected` (§10.4); `call.outgoing`,
+  `call.incoming`, `call.answered`, `call.ended` (`ref` = `call_id`, no
+  SDP or keys) (§10.10); `drop.suppressed`;
   and `drop.<reason>` for every message the vault dropped
   or refused (§6.3, §6.6, §7.3, §8.4), with the runtime's reason, such as
   `drop.rate_limited`.
@@ -1924,7 +2227,10 @@ item: { "item_id": "<ULID>", "seq": 41, "kind": "connection.request", "at": "<ts
   `connection.added`, `connection.removed`, `connection.stale`,
   `device.pair.pending`, `device.paired`, `device.unlinked`,
   `message.received` (`ref` = `message_id`), `credential.password_failed`,
-  `credential.secret.read`, `credential.rotated`, and `guide`. Apps render
+  `credential.secret.read`, `credential.rotated`,
+  `device.session.pending` (`ref` = `request_id`), `approval.pending`
+  (`ref` = `approval_id`), `connection.authenticate.requested`
+  (`ref` = `request_id`), `call.missed` (`ref` = `call_id`), and `guide`. Apps render
   items from `kind` and the references; only `guide` items carry `title`
   and `body`.
 - Items older than `feed.retention_days` are dropped, and the feed keeps at
@@ -1936,6 +2242,145 @@ item: { "item_id": "<ULID>", "seq": 41, "kind": "connection.request", "at": "<ts
   `guide_id` matches `[a-z0-9_.-]{1,64}`, `version` is 1–2^31, `title` at
   most 256 bytes, `message` at most 4,096, `priority` as for items
   (default `normal`); at most 64 guides per request.
+
+### 10.10 Calls
+
+1:1 voice and video calls between connections (CALLING-SERVICE). Signalling
+travels over the relay inside the E2E sessions: device → its vault →
+the peer vault → the peer's devices. Media flows directly or through TURN,
+end-to-end encrypted under `k_call`, which only the two devices of the
+call hold. Sent by `app` or `desktop` devices, and by connections where
+marked; never by agents. A vault takes part in at most one call at a time.
+
+**Devices.** An app, or a desktop within its access session (§6.8), places
+and answers calls, each with its own key exchange. The access session is
+the authorization: call types are not step-up types, and placing or
+answering a call needs no per-call approval. A desktop without a session
+is not rung (§9.1) and its `call.start` is answered `session_required`.
+Agents never place or take calls.
+
+**No handoff.** A call stays on the device that placed or answered it for
+its whole life. There is no handoff or transfer between devices, and no
+message for one: to switch devices the member ends the call and starts a
+new one on the other device.
+
+| Type | Request body | Response / event body |
+|---|---|---|
+| `call.start` (D→V) | `{connection_id, call_id, media: "audio" \| "video", sdp, ek, ek_sig}` | `{call_id, exp, ice_config, ice_sig}`; `busy`, `exists`, `not_found`, `connection_unavailable`, `bad_request` (also for a share signature that does not verify) |
+| `call.offer` (V↔V, with `exp`) | — | `{call_id, media, sdp, ek, device_ik, device_sig, vault_sig}` |
+| `call.offer` (V→D, with `exp`) | — | `{call_id, connection_id, media, sdp, ek, device_ik, device_sig, vault_sig, peer_ik, exp, ice_config, ice_sig}` |
+| `call.ringing` (D→V, V↔V, V→D; ephemeral) | — | `{call_id}` |
+| `call.answer` (D→V) | — | `{call_id, sdp, enc, enc_sig}` |
+| `call.answer` (V↔V) | — | `{call_id, sdp, enc, device_ik, device_sig, vault_sig}` |
+| `call.answer` (V→D) | — | `{call_id, sdp, enc, device_ik, device_sig, vault_sig, peer_ik}` |
+| `call.ice` (D→V, V↔V, V→D; ephemeral) | — | `{call_id, candidates: [{candidate, sdp_mid?, sdp_mline_index?}]}` |
+| `call.end` (D→V, V↔V, V→D) | — | `{call_id, reason}` |
+| `call.list` (D→V) | `{limit?}` (1–200, default 50) | `{calls: [{call_id, connection_id, direction: "in" \| "out", media, state, reason?, started_at, answered_at?, ended_at?}]}`, newest first |
+
+- `call_id` is a ULID chosen by the calling device (it is signed into the
+  share before the vault sees it); the vault refuses one already in use
+  (`exists`). `media` (`audio` or `video`) is in the offer; video is
+  negotiated in the SDP as usual. `sdp` is 1 byte to
+  32 KiB; `ek` is a 1,216-byte KEM `ek` and `enc` 1,120 bytes (§10, the
+  call key). A `call.ice` carries 1–16 candidates, each `candidate` at most
+  1,024 bytes, `sdp_mid` at most 64 bytes, `sdp_mline_index` 0–1,023.
+  `reason` is `hangup`, `decline`, `busy`, `timeout`,
+  `answered_elsewhere`, `unavailable` or `failed`. `state` is `ringing`,
+  `active` or `ended`.
+- **Placing a call.** The caller's device generates the ephemeral KEM key,
+  signs its share (below) and sends `call.start`. The vault refuses with
+  `busy` while another call is ringing or active, checks and vouches for
+  the share, sends the connection `call.offer` with `exp` = now + 45 s,
+  records the sending device as the call's device, and answers with its
+  signed ICE configuration.
+- **Ringing.** The callee's vault drops an offer without `exp` or with an
+  `exp` more than 90 s ahead, and treats a repeated `call_id` as a
+  duplicate. If a call is ringing or active it answers `call.end{busy}`.
+  Otherwise it sends every owner app and desktop (within its access
+  session, §9.1) `call.offer` with the same `exp` and its own signed ICE
+  configuration. A ringing device MAY send `call.ringing`, which the vault
+  forwards once to the caller's vault, which forwards it to the call's
+  device.
+- **Answering.** The first answer wins. The first device to send `call.answer` (with `enc`,
+  §10, the call key) becomes the callee's call device; the vault forwards
+  the answer to the caller's vault and tells its other devices
+  `call.end{answered_elsewhere}`. A device answering a call that is no
+  longer ringing gets `call.end{unavailable}`. The caller's vault
+  forwards the answer to the call's device only; that device derives
+  `k_call` with its private KEM key.
+- **ICE.** A device's `call.ice` is forwarded to the peer vault, which
+  forwards it to its call's device, or to every owner device while its
+  call is still ringing. Only the call's device may send it; a vault
+  forwards at most 256 per call. `call.ice` and `call.ringing` are
+  ephemeral (`exp` = now + 30 s) and forwarded from memory (§8.5).
+- **Ending.** The call's device, or any owner device while an incoming
+  call rings (declining), sends `call.end`; the vault forwards it to the
+  peer vault and tells its other devices. A vault that receives
+  `call.end` from the peer tells all its owner devices. An incoming call
+  that ends before it was answered (or is answered `busy`) is a missed
+  call (feed `call.missed`). Removing or blocking the connection ends its
+  live calls (`unavailable`). A ringing call stops counting as busy at its
+  `exp`, an active call 12 h after it was answered.
+- **Authority.** A vault acts on a call message from a connection only
+  for a call with that connection, and on one from a device only as
+  stated above; anything else is dropped.
+- **History.** The vault keeps the latest 200 calls (no SDP, no keys).
+
+**Signed key-exchange shares.** The device that makes a share (the
+caller's `ek`, the answerer's `enc`) signs it with its identity key; its
+own vault vouches for it to the peer vault:
+
+```
+m          = role || 0x00 || call_id || 0x00 || media || 0x00 || share
+             role "offer": share = ek, media = "audio" | "video"
+             role "answer": share = enc, media = ""
+device_sig = Ed25519(device ik, "vettid/vms/2/call-share" || m)       # ek_sig / enc_sig
+vault_sig  = Ed25519(vault ik,  "vettid/vms/2/call-vouch" || device_ik (32) || m)
+```
+
+What each party checks:
+
+| Party | Checks | On failure |
+|---|---|---|
+| The device's own vault (`call.start`, D→V `call.answer`) | `device_sig` under the `ik` of the sending device's paired record | Refuses: `bad_request` for `call.start`; `call.end{unavailable}` to the answering device; audited `drop.call_share` |
+| The peer vault (V↔V `call.offer`, `call.answer`) | `vault_sig` under the connection's pinned `ik` (§6.3, followed through `identity.rotate`), and `device_sig` under `device_ik` | Drops (audited `drop.call_share`): an offer rings nobody; an answer is not passed on and the call keeps ringing until it ends or times out |
+| The peer device (V→D `call.offer`, `call.answer`) | `vault_sig` under `peer_ik` (the connection's `ik` as its own vault has it on record, the same as `connection.get` returns) and `device_sig` under `device_ik` | MUST NOT use the share (no answer, no media key) |
+
+The relay, the hosts and the peer vault therefore cannot swap a share
+unnoticed. **Residual:** each member's own vault can. It vouches for which
+`device_ik` is its member's device and tells its own devices `peer_ik`, so
+it could substitute a share in either direction of its member's calls (and
+then learn `k_call`). A member's own vault is trusted for that member's
+calls, as it is for everything else of the member (§2.1).
+
+**Vault-signed ICE configuration** (CALLING-SERVICE §6). Each vault gives
+only its own devices an ICE configuration, for each call, signed by its
+`ik`:
+
+```
+ice_config = standard base64 of the exact bytes
+             {"v":1,"call_id":"<id>","exp":<unix s>,"ice_servers":[{"urls":["..."],"username":"...","credential":"..."}]}
+ice_sig    = standard base64 of Ed25519(vault ik, "vettid/vms/2/ice" || those bytes)
+```
+
+- The JSON is in canonical form: members in the order shown, no
+  whitespace, `username` and `credential` both present or both absent; at
+  most 8 servers of 1–4 URLs (`stun:`, `stuns:`, `turn:` or `turns:`, at
+  most 512 bytes, no spaces or control characters).
+- A device MUST verify `ice_sig` under its vault's current `ik`, and that
+  `call_id` is the call's and `exp` has not passed, and MUST NOT use
+  servers from any other source. The calling service therefore cannot
+  inject or reorder servers.
+- The servers and short-lived credentials come from the vault's ICE
+  issuer (CALLING-SERVICE §5: coturn `use-auth-secret` or a managed
+  provider), valid 6 h. Without a calling service the list is empty and
+  devices use host and server-reflexive candidates. How the issuer's
+  shared secret reaches the vault is open (CALLING-SERVICE §10).
+
+**PQC.** `k_call` comes from MLKEM768X25519 (suite 2, PQC Phase 1).
+DTLS-SRTP below the frame encryption is classical and not relied upon
+(CALLING-SERVICE §7). The ICE configuration's signature is Ed25519 and
+becomes hybrid with suite 3.
 
 ## 11. Enrollment and unlock (alternate channel)
 
@@ -3409,11 +3854,13 @@ it can read and write only its own objects and use only its own relay key
 |---|---|---|
 | Vault relay key | Collect, ack or delete the vault's mailbox (DoS); deposit as the vault; mint tokens. No plaintext, and no forged content. | Rotate (§3.4) |
 | Device relay key | Deposit as the device. Its content remains unforgeable. | Unlink and re-pair |
-| Reconnect token | Nothing without the holder's relay key (sender-bound), and even then only a 4-message quota of `hs.init`s that must be signed by the stored `ik` | Denylist `sub` |
+| Reconnect token | Nothing without the holder's relay key (sender-bound), and even then only a 4-message quota of `hs.init`s that must be signed by the stored `ik` | Denylist its `jti` (removal does, §7.4) |
 | Session epoch key | Read and forge messages in that epoch and direction. Vault-to-vault epochs last at most 24 h. | Next rekey |
 | Vault `ik` or `kem` | Impersonate the vault in new handshakes and read new `hs.init`s | Credential rotation, `identity.rotate`, rekey |
 | ETK | PINs in requests sealed to it (≤ 25 h). Requires breaking the enclave. | Enclave restart |
 | Owner app | Whatever its role allows, including unlock attempts if the PIN is known | Unlink from another device |
+| Desktop | Within an access session, what desktops may send; step-up types (secret values, profile, settings, invitations, removals) only with an app's approval; nothing after the session ends (§6.8) | `device.session.end`; unlink |
+| A call's media key `k_call` | That call's media; it exists only on the two devices of the call, whose key-exchange shares are signed by the devices and vouched for by their vaults (§10.10) | Hang up |
 | PIN alone | Nothing without a registered, attested app | `pin.change` |
 | An app's copy of the Protean Credential | Nothing without the current CEK, which only the vault holds and which rotates at every use; password guesses only online, through a paired app with a UTK, under the backoff (§3.5.8) | Any use of the credential (a new CEK; the old blob is dead) |
 | An app's session keys | No password or secret value (UTK and reply-key sealing), no replay (single-use UTKs), no redirected payloads (§3.5.4) | Unlink the device |
@@ -3486,10 +3933,11 @@ Follow-ups:
    reproduce them with CryptoKit and BouncyCastle to pin MLKEM768X25519
    interoperability (codepoint `0x647a`, `ek` 1,216 bytes, `enc` 1,120
    bytes).
-2. **Schemas.** Lifecycle, sessions, devices, connections, messaging, the
-   credential, secrets, profile, settings, audit and feed are in
-   §10.1–§10.9. Still open: calls, the other features, the `sync.since`
-   cursor, and the crash-safe write order of `pin.change` (with its
+2. **Schemas.** Lifecycle, sessions, devices and access sessions,
+   connections, messaging, the credential, secrets, profile, settings,
+   audit, feed and calls are in §10.1–§10.10. Still open: LEASH (and
+   `agent.request`), grants, the other features, the `sync.since` cursor,
+   and the crash-safe write order of `pin.change` (with its
    implementation).
 3. **Push.** Specify the push-gateway integration (§14) when that service is
    scheduled.
@@ -3498,6 +3946,8 @@ Follow-ups:
 5. **Release updates.** Implementation in V3: generate the §16 release
    vectors in vettid-vault, the KMS policy shapes in VAULT-PLAN, and an
    app UX review of the approval screen.
+6. **ICE issuer secret.** How the coturn shared secret (or a managed
+   provider's credentials) reaches the enclave (CALLING-SERVICE §5, §10).
 
 ## 16. Test vectors
 
@@ -3603,6 +4053,56 @@ Cross-implementation checks against Apple CryptoKit and BouncyCastle are
 pending (§15, follow-up 1).
 
 ## 17. Changelog
+
+- **0.5.0** (2026-10-03): V4 batch 2 (vettid-vault): connections polish,
+  calls, device and agent sessions.
+  - §6.8 (new): access sessions for desktops and agents, requested by the
+    device and granted by an app (or with the pairing approval); step-up
+    types a desktop sends only with an app's approval; the LEASH hook for
+    agents (allow, refer to an app, refuse; never app-only types);
+    approvals (`approval.pending`, `.waiting`, `.decide`), expiry and
+    ending. Replaces `agent.approval.pending` / `.decide` in the registry;
+    `agent.request` is reserved for LEASH.
+  - §9.1: fan-out reaches desktops only within their access session.
+  - §10.4: `connection.update` (the owner's alias, note, tags, favorite,
+    archived; versioned, never sent to the peer); `created_at` and
+    `last_active_at` in listings; the block list (`block.add` of a
+    connection or a pending request, `block.remove`, `block.list`) and its
+    refusal of blocked identities; member authentication
+    (`connection.authenticate.*`), signed with the member's credential key
+    within the unlock window, pinned by the requester.
+  - §10.10 (new): call signalling: `call.start`, `call.offer`,
+    `call.ringing`, `call.answer`, `call.ice`, `call.end`, `call.list`; one
+    call at a time (`busy`); the media key agreed by the two devices (the
+    KEM in §10 is now run by the answering device, not its vault); each
+    vault signs the ICE configuration for its own devices.
+  - §8.5: `call.ringing` is ephemeral; ephemeral forwards are memory-only.
+  - §7.4: unlinking ends the device's access session.
+  - §10.1: error codes `session_required`, `denied`, `approval_timeout`,
+    `busy`, `credential_locked`, `blocked`; `sync.event` kinds
+    `connection.changed`, `block.added`, `block.removed`,
+    `connection.authenticate.decided`, `device.session`,
+    `approval.decided`. §10.3: `device.pair.approve{session_seconds}`,
+    `device.list` fields. §10.9: audit and feed kinds. §13.5: desktop and
+    call-key rows. §15: follow-up 6.
+  - Owner review of the first 0.5.0 draft:
+    - §3.5.5, §10.4: credential-key rotation statements, signed by the old
+      and the new credential key at `credential.rotate`, delivered
+      (`connection.authenticate.rotated`, and `rotations` in responses) to
+      the connections that pinned the member's key, which follow the
+      chain instead of reporting a key change; forged or broken chains
+      are rejected and audited.
+    - §7.4, §6.7: a removed or blocked connection's tokens are denylisted
+      by `jti`, not by relay key, so the owner can connect with the same
+      peer again through a new invitation and approval (after
+      `block.remove` for a block); a fresh connection replaces an older
+      record of the same peer.
+    - §10.10: desktops within an access session place and answer calls
+      (no per-call approval); first answer wins; no call handoff between
+      devices; the calling device chooses `call_id`; key-exchange shares
+      are signed by the device and vouched for by its vault, and checked
+      by the peer vault and the peer device (residual: each member's own
+      vault).
 
 - **0.4.1** (2026-10-03): the owner's Protean Credential design,
   recovery and backup, audit immutability.

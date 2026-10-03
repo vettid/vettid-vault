@@ -76,8 +76,14 @@ func (m *Manager) handleInit(ctx context.Context, raw []byte, sender ed25519.Pub
 		m.respondReconnect(pi, p, sender, now)
 		return ackAfterFlush
 	}
-	if p != nil {
+	if p != nil && !(p.Kind == KindConnection && p.State == PeerStale && body.Purpose == handshake.PurposeConnection) {
+		// A stale connection may be made afresh through a new invitation;
+		// the new record replaces it at activation.
 		m.audit(now, "hs_init_from_known_peer", p.ID)
+		return ackAfterFlush
+	}
+	if body.Purpose == handshake.PurposeConnection && m.blockedIdentity(body.From.IK, sender) {
+		m.audit(now, "blocked", "") // §7.4: a block entry refuses the identity in any later handshake
 		return ackAfterFlush
 	}
 	// §6.7: a re-paired device MUST use a new relay key; a relay key whose
@@ -188,6 +194,9 @@ func (m *Manager) approveInbound(ctx context.Context, id string, now time.Time) 
 	newPeer.Name = profileName(body.Profile)
 	newPeer.Profile = body.Profile
 	newPeer.Attestation = ib.Attestation
+	if pa := m.pairAccess; pa != nil && pa.inbound == id && needsAccess(newPeer.Kind) {
+		m.grantAccess(newPeer, pa.seconds, pa.by, now)
+	}
 	if inv := m.st.Invites[ib.InviteID]; inv != nil && inv.CreatedBy == inviteByRecovery {
 		newPeer.Recovering = true // restricted until credential.recover (§11.11.5)
 	}
@@ -428,15 +437,21 @@ func (m *Manager) activate(p *Peer, ep *handshake.Epoch, purpose handshake.Purpo
 		t.PeerID = p.ID
 		m.st.Issued = append(m.st.Issued, t)
 	}
+	if isNew && p.Kind == KindConnection {
+		m.replaceOlderConnections(p, now)
+	}
 	switch {
 	case isNew && p.Kind == KindConnection:
 		m.notifyDevices("connection.event", connEvent(p.ID, "added"), "", now)
 		m.record(Activity{Kind: "connection.added", ConnectionID: p.ID, Audit: true, Feed: true}, now)
 		m.connectionAdded(p.ID, now)
 	case isNew:
-		b := strictjson.NewBuilder().String("device_id", p.ID).String("role", p.Kind).String("vault_id", m.st.VaultID).
-			String("release", m.opt.Release.PCR0).Uint("release_number", m.opt.Release.Number).Bytes()
-		m.sendTo(p, "device.paired", b, now)
+		pb := strictjson.NewBuilder().String("device_id", p.ID).String("role", p.Kind).String("vault_id", m.st.VaultID).
+			String("release", m.opt.Release.PCR0).Uint("release_number", m.opt.Release.Number)
+		if p.Access != nil {
+			pb.String("session_expires_at", envelope.FormatTS(p.Access.Expires))
+		}
+		m.sendTo(p, "device.paired", pb.Bytes(), now)
 		if p.Recovering {
 			// Announced when the recovery completes (§11.11.5).
 			m.record(Activity{Kind: "recovery.device_paired", DeviceID: p.ID, Audit: true}, now)
@@ -686,6 +701,9 @@ func (m *Manager) acceptInvite(ctx context.Context, link string, now time.Time) 
 	}
 	if suite.EqualPublic(b.Vault.IK, m.keys.ik.Public().(ed25519.PublicKey)) {
 		return nil, errBadRequest // our own invitation
+	}
+	if m.blockedIdentity(b.Vault.IK, b.Vault.Relay.PK) {
+		return nil, NewError("blocked", "")
 	}
 	p := peerFromPrincipal(m.newID(now), KindConnection, b.Vault, now)
 	var issued []IssuedToken

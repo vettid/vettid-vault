@@ -66,6 +66,8 @@ LocalStack, the real relay and a stand-in for the member API
 | `vault` | §3.3, §6–§9, §12, §13.2 | The vault manager: DEK-encrypted state and sealed header (`Sealer` interface), create/unlock with backoff and rollback checks, collect loop (long-poll or WebSocket), routing by sender / recipient kid / session only, pairing, invitations, reconnects, rekeys, rotation, the issued-token registry, outbox, dedupe, response cache, ack-after-flush, lock and the split-brain guard, and the feature-handler registry |
 | `vault/store` | §12.3 | Object store with create-only and version-matched writes: in-memory and local directory (S3 in V3) |
 | `features/messaging` | §10 | 1:1 messages: send, deliver, receipts, history |
+| `features/calls`, `vms/callwire` | §10.10 | Call signalling (offer, answer, ICE, ringing, end, history), the vault-signed ICE configuration and the device-to-device call key (V4 batch 2) |
+| `features/connauth` | §10.4 | Member authentication between connections, signed with the credential key (V4 batch 2) |
 | `client` | §6.7, §9.1, §11 | Reference client for an app, desktop or agent: verify enclaves and manifests, enroll and unlock over the alternate channel, approve release updates, pair (with device attestation), session and rekeys, requests and events, token refresh |
 | `cmd/vaultctl` | — | Test driver over `client`; dev builds (`-tags devenclave`) also create and run vaults, and enroll and unlock through an in-process enclave |
 | `devenclave` | — | Dev sealer and direct create/unlock with a PIN. Every file carries the `devenclave` tag; release builds cannot compile it in (`make check-tcb`) |

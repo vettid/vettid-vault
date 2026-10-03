@@ -5,6 +5,7 @@ package e2e
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,15 +29,24 @@ func TestVaultctlSmoke(t *testing.T) {
 	}
 	app := filepath.Join(dir, "app.json")
 	store := filepath.Join(dir, "store")
+	runErr := func(state string, args ...string) (string, error) {
+		var out bytes.Buffer
+		cmd := exec.Command(bin, append([]string{"-state", state, "-timeout", "60s"}, args...)...)
+		cmd.Stdout, cmd.Stderr = &out, &out
+		err := cmd.Run()
+		return out.String(), err
+	}
+	runAs := func(state string, args ...string) string {
+		t.Helper()
+		out, err := runErr(state, args...)
+		if err != nil {
+			t.Fatalf("vaultctl %v: %v\n%s", args, err, out)
+		}
+		return out
+	}
 	run := func(args ...string) string {
 		t.Helper()
-		var out bytes.Buffer
-		cmd := exec.Command(bin, append([]string{"-state", app, "-timeout", "60s"}, args...)...)
-		cmd.Stdout, cmd.Stderr = &out, &out
-		if err := cmd.Run(); err != nil {
-			t.Fatalf("vaultctl %v: %v\n%s", args, err, out.String())
-		}
-		return out.String()
+		return runAs(app, args...)
 	}
 	run("init", "-role", "app", "-name", "phone", "-relay", r.URL)
 	vaultID := strings.TrimSpace(run("vault-create", "-store", store, "-relay", r.URL, "-pin", "2468", "-app", app))
@@ -109,6 +119,56 @@ func TestVaultctlSmoke(t *testing.T) {
 	run("feed", "guides", "-guides", `[{"guide_id":"welcome","version":1,"title":"Welcome","message":"Hi"}]`)
 	if out = run("feed", "list"); !strings.Contains(out, `"guide"`) || !strings.Contains(out, "credential.secret.read") {
 		t.Fatalf("feed: %s", out)
+	}
+
+	// V4 batch 2 (§6.8, §10.4, §10.10): a desktop paired without an access
+	// session is refused, gets one from the app, and loses it again.
+	if out = run("block", "list"); !strings.Contains(out, `"blocks": []`) {
+		t.Fatalf("block list: %s", out)
+	}
+	if out = run("call", "list"); !strings.Contains(out, `"calls": []`) {
+		t.Fatalf("call list: %s", out)
+	}
+	desk := filepath.Join(dir, "desk.json")
+	runAs(desk, "init", "-role", "desktop", "-name", "laptop", "-relay", r.URL)
+	out = run("request", "device.pair.create", `{"role":"desktop"}`)
+	link := between(out, `"link": "`, `"`)
+	paired := make(chan error, 1)
+	go func() {
+		out, err := runErr(desk, "pair", "-link", link)
+		if err != nil {
+			err = fmt.Errorf("%v: %s", err, out)
+		}
+		paired <- err
+	}()
+	poll := func(state, marker string) string {
+		t.Helper()
+		for range 30 {
+			if out := runAs(state, "events", "-wait", "1s"); strings.Contains(out, marker) {
+				return out
+			}
+		}
+		t.Fatalf("no %s", marker)
+		return ""
+	}
+	out = poll(app, "device.pair.pending")
+	run("request", "device.pair.approve", `{"pairing_id":"`+between(out, `"pairing_id": "`, `"`)+`"}`)
+	if err := <-paired; err != nil {
+		t.Fatal(err)
+	}
+	if out = runAs(desk, "request", "connection.list"); !strings.Contains(out, "session_required") {
+		t.Fatalf("desktop without a session: %s", out)
+	}
+	runAs(desk, "session", "request", "-seconds", "600")
+	out = poll(app, "device.session.pending")
+	run("session", "approve", "-id", between(out, `"request_id": "`, `"`))
+	if out = runAs(desk, "request", "connection.list"); !strings.Contains(out, `"status": "ok"`) {
+		t.Fatalf("desktop within its session: %s", out)
+	}
+	deskID := between(runAs(desk, "whoami"), `"device_id": "`, `"`)
+	run("session", "end", "-device", deskID)
+	if out = runAs(desk, "request", "connection.list"); !strings.Contains(out, "session_required") {
+		t.Fatalf("desktop after the end: %s", out)
 	}
 }
 

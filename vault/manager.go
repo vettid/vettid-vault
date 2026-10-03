@@ -129,12 +129,22 @@ type Manager struct {
 	volatile []*OutboxEntry
 	dirty    bool
 
+	// pairAccess carries device.pair.approve's session_seconds into
+	// approveInbound (§6.8).
+	pairAccess *pendingAccess
+
 	locked      bool
 	lockPending bool
 	lockReason  string
 	started     bool
 	hadFailures bool // the header recorded failures before this unlock
 	holdsDEK    bool // counted in unlocked
+}
+
+type pendingAccess struct {
+	inbound string
+	seconds uint64
+	by      string
 }
 
 // unlocked counts the managers in this process that hold a DEK.
@@ -392,6 +402,15 @@ func (st *State) init() {
 	}
 	if st.Features == nil {
 		st.Features = map[string]json.RawMessage{}
+	}
+	if st.Blocks == nil {
+		st.Blocks = map[string]*Block{}
+	}
+	if st.AccessRequests == nil {
+		st.AccessRequests = map[string]*AccessRequest{}
+	}
+	if st.Held == nil {
+		st.Held = map[string]*HeldRequest{}
 	}
 }
 

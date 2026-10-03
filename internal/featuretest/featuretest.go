@@ -6,7 +6,10 @@
 package featuretest
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"sort"
@@ -15,14 +18,17 @@ import (
 
 	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault"
+	"github.com/vettid/vettid-vault/vms/callwire"
 	"github.com/vettid/vettid-vault/vms/envelope"
+	"github.com/vettid/vettid-vault/vms/suite"
 )
 
 // Sent is one message a handler queued.
 type Sent struct {
-	To   string // connection id, or "devices"/"devices-except:<id>"
+	To   string // connection or device id, or "devices"/"devices-except:<id>"
 	Type string
 	Body json.RawMessage
+	Opt  vault.SendOptions
 }
 
 // Host is a fake vault.Host.
@@ -39,16 +45,84 @@ type Host struct {
 	ids        int
 	DownConns  map[string]bool // SendToConnection fails for these
 	Completed  []string        // CompleteRecovery calls
+	Devices    map[string]vault.PeerInfo
+	IK         ed25519.PublicKey
+	// Identity is the fake vault's identity key (IK is its public half).
+	Identity ed25519.PrivateKey
 }
 
 // NewHost returns a fake host with no connections.
 func NewHost() *Host {
-	return &Host{ID: "test-vault", Conns: map[string]vault.PeerInfo{}, Profiles: map[string]json.RawMessage{}, DownConns: map[string]bool{}}
+	id := ed25519.NewKeyFromSeed(identitySeed())
+	ik := id.Public().(ed25519.PublicKey)
+	return &Host{Identity: id, ID: "test-vault", Conns: map[string]vault.PeerInfo{}, Profiles: map[string]json.RawMessage{}, DownConns: map[string]bool{},
+		Devices: map[string]vault.PeerInfo{}, IK: ik}
+}
+
+// SetIdentity gives the fake vault the identity key of seed byte b.
+func (h *Host) SetIdentity(b byte) {
+	h.Identity = ed25519.NewKeyFromSeed(bytes.Repeat([]byte{b}, 32))
+	h.IK = h.Identity.Public().(ed25519.PublicKey)
+}
+
+// DeviceKey is the deterministic identity key of a test device id.
+func DeviceKey(id string) ed25519.PrivateKey {
+	seed := sha256.Sum256([]byte("featuretest-device|" + id))
+	return ed25519.NewKeyFromSeed(seed[:])
+}
+
+// AddDevice adds an active owner device (id "dev-<kind>" is what Call
+// uses) with the identity key DeviceKey(id).
+func (h *Host) AddDevice(id, kind string) {
+	h.Devices[id] = vault.PeerInfo{ID: id, Kind: kind, State: vault.PeerActive, IK: DeviceKey(id).Public().(ed25519.PublicKey)}
+}
+
+func (h *Host) IdentityKey() ed25519.PublicKey { return h.IK }
+
+// identitySeed is the fake vault's identity key seed (all zero).
+func identitySeed() []byte { return make([]byte, 32) }
+
+func (h *Host) SignICEConfig(config []byte) ([]byte, error) {
+	if _, err := callwire.ParseICEConfig(config); err != nil {
+		return nil, err
+	}
+	return callwire.SignICE(h.Identity, config)
+}
+
+func (h *Host) VouchCallShare(deviceIK ed25519.PublicKey, m []byte) ([]byte, error) {
+	if len(deviceIK) != ed25519.PublicKeySize || !callwire.ValidShareMessage(m) {
+		return nil, errors.New("not a share")
+	}
+	return suite.Sign(h.Identity, callwire.LabelVouch, callwire.VouchMessage(deviceIK, m))
+}
+
+func (h *Host) Device(id string) (vault.PeerInfo, bool) {
+	p, ok := h.Devices[id]
+	return p, ok
+}
+
+func (h *Host) Send(to, typ string, body json.RawMessage, o vault.SendOptions, _ time.Time) error {
+	_, conn := h.Conns[to]
+	_, dev := h.Devices[to]
+	if !conn && !dev || h.DownConns[to] {
+		return vault.ErrNoSession
+	}
+	h.Sent = append(h.Sent, Sent{To: to, Type: typ, Body: append(json.RawMessage(nil), body...), Opt: o})
+	return nil
+}
+
+func (h *Host) NotifyDevicesWith(typ string, body json.RawMessage, except string, o vault.SendOptions, _ time.Time) {
+	to := "devices"
+	if except != "" {
+		to = "devices-except:" + except
+	}
+	h.Sent = append(h.Sent, Sent{To: to, Type: typ, Body: append(json.RawMessage(nil), body...), Opt: o})
 }
 
 // AddConnection adds an active connection.
 func (h *Host) AddConnection(id string) {
-	h.Conns[id] = vault.PeerInfo{ID: id, Kind: vault.KindConnection, State: vault.PeerActive}
+	ik := ed25519.NewKeyFromSeed(append(make([]byte, 31), byte(len(h.Conns)+1))).Public().(ed25519.PublicKey)
+	h.Conns[id] = vault.PeerInfo{ID: id, Kind: vault.KindConnection, State: vault.PeerActive, IK: ik}
 }
 
 func (h *Host) VaultID() string { return h.ID }
@@ -184,6 +258,18 @@ func Call(f vault.Feature, h *Host, now time.Time, kind, typ, body string) Resul
 
 // CallID is Call with a chosen inner id (payloads bound to it, §3.5.4).
 func CallID(f vault.Feature, h *Host, now time.Time, kind, typ, id, body string) Result {
+	return CallInner(f, h, now, kind, &envelope.Inner{ID: id, Type: typ, TS: now, Body: json.RawMessage(body)})
+}
+
+// CallExp is Call with an inner `exp` (offers, ephemeral types).
+func CallExp(f vault.Feature, h *Host, now, exp time.Time, kind, typ, body string) Result {
+	id, _ := envelope.NewULID(now)
+	return CallInner(f, h, now, kind, &envelope.Inner{ID: id, Type: typ, TS: now, Exp: exp, Body: json.RawMessage(body)})
+}
+
+// CallInner delivers a complete inner plaintext from a principal of kind.
+func CallInner(f vault.Feature, h *Host, now time.Time, kind string, in *envelope.Inner) Result {
+	typ := in.Type
 	var spec *vault.TypeSpec
 	for _, ts := range f.Types() {
 		if ts.Type == typ {
@@ -194,7 +280,7 @@ func CallID(f vault.Feature, h *Host, now time.Time, kind, typ, id, body string)
 	if spec == nil {
 		return Result{Code: "unsupported_type"}
 	}
-	from := vault.PeerInfo{ID: "dev-" + kind, Kind: kind, State: vault.PeerActive}
+	from := vault.PeerInfo{ID: "dev-" + kind, Kind: kind, State: vault.PeerActive, IK: DeviceKey("dev-" + kind).Public().(ed25519.PublicKey)}
 	if kind == "recovering-app" { // an app registered by recovery (§11.11.5)
 		from = vault.PeerInfo{ID: "dev-recovering", Kind: vault.KindApp, State: vault.PeerActive, Recovering: true}
 	}
@@ -204,7 +290,6 @@ func CallID(f vault.Feature, h *Host, now time.Time, kind, typ, id, body string)
 	if !spec.Allows(from.Kind) {
 		return Result{Code: "forbidden"}
 	}
-	in := &envelope.Inner{ID: id, Type: typ, TS: now, Body: json.RawMessage(body)}
 	s := vault.NewSession(context.Background(), h, from, now, in)
 	out, err := f.Handle(context.Background(), s, in)
 	if err != nil {

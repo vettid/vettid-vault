@@ -5,7 +5,7 @@ FUZZMINIMIZE ?= 200x
 FUZZFLAGS ?=
 # Packages that ship. They must never link the vector-only code, the dev
 # enclave (dev sealer, PIN constructors) or test harnesses.
-LIBPKGS   := ./vms/suite ./vms/envelope ./vms/handshake ./vms/invite ./vms/altchan ./vms/credwire \
+LIBPKGS   := ./vms/suite ./vms/envelope ./vms/handshake ./vms/invite ./vms/altchan ./vms/credwire ./vms/callwire \
              ./vms/pins ./vms/nitro ./vms/manifest ./vms/devattest \
              ./enclave/... ./vault/... ./client/... ./features/... ./cmd/...
 E2ETAGS   := devenclave e2e

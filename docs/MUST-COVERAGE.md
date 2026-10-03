@@ -247,3 +247,42 @@ in `e2e.TestCredentialFlow`, `e2e.TestProfileSecretsAuditFeed` and
 | 10.9 | Append-only, fixed retention (no setting), chain links across pruning | `audit.TestRetention`, `vault.TestSettings` (`audit.retention_days` refused) |
 | 10.9 | Anchor check with `after_seq` | `audit.TestAfterSeqExtendsAnchor` |
 | 10.9 | `drop.*` bounded per principal and kind; `drop.suppressed` | `audit.TestDropThrottle` |
+
+## V4 batch 2: connections, calls, device and agent sessions (§6.8, §7.4, §8.5, §9.1, §10.1, §10.3, §10.4, §10.10; 0.5.0)
+
+Runtime rules (access sessions, approvals, the block list, connection
+metadata) are tested in `vault` with in-process devices; the features in
+their packages through `internal/featuretest`; the flows through the real
+relay in `e2e.TestBlockRefusesPeer`, `e2e.TestCallSignalling`,
+`e2e.TestDesktopSession`, `e2e.TestConnectionAuthenticate` and
+`e2e.TestVaultctlSmoke` (vaultctl's session commands).
+
+| § | Requirement | Test(s) |
+|---|---|---|
+| 6.8 | A desktop or agent without an access session: `session_required` (requests) or dropped and audited (events), except the listed types | `vault.TestAccessSessions`, `e2e.TestDesktopSession`, `e2e.TestVaultctlSmoke` |
+| 6.8 | Only desktops and agents request sessions; only apps approve, deny or decide; lengths 60 s–24 h; a newer request replaces an older one; requests expire after 10 min | `vault.TestAccessSessions` |
+| 6.8 | Grant with the pairing approval (`session_seconds`); grant, end (by an app or the device itself), expiry; the device is told; `sync.event{device.session}` | `vault.TestAccessSessions`, `e2e.TestPairConnectMessage`, `e2e.TestDesktopSession` |
+| 6.8 | Step-up types from a desktop are held for an app: `approval.pending` to apps, `approval.waiting` to the requester, executed on approval as the requester's, `denied`, `approval_timeout` after 5 min | `vault.TestAccessSessions`, `vault.TestBlocks` (`block.remove`), `e2e.TestDesktopSession` (`secret.get`) |
+| 6.8 | Agents: nothing beyond their listed types without LEASH; the policy may allow or refer an owner type, never an app-only type | `vault.TestAgentPolicyHook`, `e2e.TestDesktopSession` |
+| 7.4, 6.8 | Unlinking ends the device's access session, held requests and pending request | `vault.TestAccessSessions` |
+| 9.1 | Fan-out reaches desktops only within their access session | `vault.TestAccessSessions`, `e2e.TestPairConnectMessage` (desktop with a session gets `message.new`) |
+| 7.4, 10.4 | Block: the connection removed (tokens denylisted by jti, peer notified best effort), a block entry on its `ik` and relay key; refused deposits mark the peer stale; nothing reaches the owner | `vault.TestBlocks`, `e2e.TestBlockRefusesPeer` |
+| 10.4 | A blocked identity's `hs.init` is dropped (`drop.blocked`), even from a new relay key; its invitation is answered `blocked`; a pending request can be blocked; `exists`, `not_found`, bad bodies; after unblock a new connection works | `vault.TestBlocks`, `e2e.TestBlockRefusesPeer` |
+| 7.4, 6.7 | Removal denylists every token issued to the peer by jti (including handshakes in flight), not its relay key; the removed peer's deposits are refused; a new invitation and approval reconnect the same peer (same relay key); a fresh connection replaces a stale record | `vault.TestBlocks`, `vault.TestReconnectAfterRemoval`, `e2e.TestRevokeConnection` |
+| 3.5.5, 10.4 | `credential.rotate` signs a rotation statement with the old and the new credential key; delivered to connections that pinned the old key; followed chains move the pin (`connection.authenticate.key`, then `key_changed: false`); missed deliveries caught up in the response's `rotations`; forged, unsigned, broken or overlong chains rejected and audited, then `key_changed: true` | `credwire.TestKeyRotationChain`, `credwire.FuzzParseKeyRotation`, `connauth.TestKeyRotationFollowed`, `connauth.FuzzParseRotations`, `e2e.TestConnectionAuthenticate` |
+| 10.10 | Desktops within an access session place and answer calls (no per-call approval); without a session no ringing and `session_required`; first answer wins across app and desktop, late answers refused | `e2e.TestDesktopCalls` |
+| 10.10 | Key-exchange shares: signed by the device, checked against its paired record and vouched for by its vault; checked by the peer vault under the connection's pinned `ik` and by the peer device under `peer_ik`; a swapped `ek` or `enc` is refused (no ringing; answer not passed on) and audited | `calls.TestSwappedShares`, `e2e.TestDesktopCalls`, `e2e.TestCallSignalling` |
+| 10.4 | `connection.update`: versioned (`conflict`), field limits, in the listings, never sent to the peer; `sync.event{connection.changed}` | `vault.TestConnectionUpdate`, `vault.FuzzParseMetaUpdate` |
+| 10.4 | Removal or blocking tells features (`ConnectionRemovedObserver`): calls end, authentication state dropped | `vault.TestBlocks`, `calls.TestMissedDeclineAndAuthority`, `connauth.TestAuthenticate` |
+| 10.4 | Member authentication: signed with the credential key only within the unlock window (`credential_locked`), only by apps; the signed bytes bind both vaults' `ik`, nonce, request id and context; verified and pinned by the requester; key change reported; denial; replay of a response ignored; limits and expiry | `connauth.TestAuthenticate`, `connauth.TestLimitsAndRoles`, `e2e.TestConnectionAuthenticate` |
+| 10.10 | Offer with `exp` (45 s; refused without one or more than 90 s ahead), idempotent by `call_id`; busy (one call at a time); missed calls in the feed | `calls.TestCallFlow`, `calls.TestBusy`, `calls.TestMissedDeclineAndAuthority`, `e2e.TestCallSignalling` |
+| 10.10 | Each vault signs the ICE configuration for its own devices; devices verify signature, call id, expiry and canonical form | `callwire.TestICEConfig`, `calls.TestCallFlow`, `e2e.TestCallSignalling` |
+| 10.10 | The media key is agreed device to device (MLKEM768X25519 bound to `call_id`); vaults relay `ek`/`enc` only | `callwire.TestMediaKeyAgreement`, `calls.TestCallFlow`, `e2e.TestCallSignalling` |
+| 10.10 | Answer from the first device (`answered_elsewhere` to the others, `unavailable` to a late one); answer and ICE to the call's device only; authority per connection and device | `calls.TestCallFlow`, `calls.TestMissedDeclineAndAuthority`, `e2e.TestCallSignalling` |
+| 8.5, 10.10 | `call.ice` and `call.ringing` are ephemeral (`exp`) and forwarded memory-only, never in vault state | `calls.TestCallFlow`, `e2e.TestCallSignalling` |
+| 10.10 | Roles: apps and desktops; peers offer; never agents | `calls.TestAuthorization` |
+| 10.10 | coturn `use-auth-secret` credentials; no servers without a calling service | `calls.TestCoturnIssuer` |
+| 10.1 | New error codes and `sync.event` kinds | the tests above |
+| 10.9 | Batch-2 audit and feed kinds (no SDP, keys or content) | `calls.TestCallFlow`, `connauth.TestAuthenticate`, `e2e.TestCallSignalling`, `e2e.TestDesktopSession` |
+| 13.6 | New parsers fuzzed | `vault.FuzzParseMetaUpdate`, `vault.FuzzDeviceMessage` (every registered type), `callwire.FuzzParseICEConfig`, `callwire.FuzzAccept`, `calls.FuzzParse*`, `connauth.FuzzParse*` |
+| 13.6 | No package-level mutable state in feature code; the vault's `ik` signs only ICE configurations for features (`Host.SignICEConfig` parses first) | `features/all` (per-vault instances), `calls.TestCallFlow` |

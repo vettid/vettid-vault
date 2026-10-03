@@ -78,7 +78,7 @@ func (f *Feature) Name() string { return "profile" }
 func (f *Feature) Types() []vault.TypeSpec {
 	return []vault.TypeSpec{
 		{Type: "profile.get", Request: true, From: owners},
-		{Type: "profile.set", Request: true, From: owners},
+		{Type: "profile.set", Request: true, From: owners, DesktopApproval: true}, // §6.8
 		{Type: "profile.update", From: conns},
 	}
 }

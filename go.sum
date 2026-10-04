@@ -113,8 +113,8 @@ github.com/stretchr/testify v1.8.0/go.mod h1:yNjHg4UonilssWZ8iaSj1OCr/vHnekPRkoO
 github.com/stretchr/testify v1.8.4 h1:CcVxjf3Q8PM0mHUKJCdn+eZZtm5yQwehR5yeSVQQcUk=
 github.com/stretchr/testify v1.8.4/go.mod h1:sz/lmYIOXD/1dqDmKjjqLyZ2RngseejIcXlSw2iwfAo=
 github.com/syndtr/goleveldb v1.0.1-0.20210819022825-2ae1ddf74ef7/go.mod h1:q4W45IWZaF22tdD+VEXcAWRA037jwmWEB5VWYORlTpc=
-github.com/vettid/vettid-relay v0.0.0-20261004100140-0df7ea401f26 h1:Em1szuj27sNvl7NkGIpBe2WzJNpvgMf7SOOFKDqRymg=
-github.com/vettid/vettid-relay v0.0.0-20261004100140-0df7ea401f26/go.mod h1:d+zS5Kxndcr/zEndHaDVEZaWeuGWFuE9Mh45k3PiCxg=
+github.com/vettid/vettid-relay v0.0.0-20261004125620-d3a1b451d21e h1:5Mj2zyuM6lzjN7wHSRwWtD7A6Kkz7WN8avgNi4lmYwg=
+github.com/vettid/vettid-relay v0.0.0-20261004125620-d3a1b451d21e/go.mod h1:d+zS5Kxndcr/zEndHaDVEZaWeuGWFuE9Mh45k3PiCxg=
 golang.org/x/crypto v0.0.0-20170930174604-9419663f5a44/go.mod h1:6SG95UA2DQfeDnfUPMdvaQW0Q7yPrPDi9nlGo2tz2b4=
 golang.org/x/crypto v0.0.0-20190308221718-c2843e01d9a2/go.mod h1:djNgcEr1/C05ACkg1iLfiJU5Ep61QUkGW8qpdssI0+w=
 golang.org/x/crypto v0.0.0-20200622213623-75b288015ac9/go.mod h1:LzIPMQfyMNhhGPhUkYOs5KpL4U8rLKemX1yGLhDgUto=

@@ -14,7 +14,7 @@ require (
 	github.com/btcsuite/btcd/btcutil v1.1.6
 	github.com/btcsuite/btcd/btcutil/psbt v1.1.10
 	github.com/btcsuite/btcd/chaincfg/chainhash v1.1.0
-	github.com/vettid/vettid-relay v0.0.0-20261004100140-0df7ea401f26
+	github.com/vettid/vettid-relay v0.0.0-20261004125620-d3a1b451d21e
 	golang.org/x/crypto v0.57.0
 	golang.org/x/sys v0.48.0
 )

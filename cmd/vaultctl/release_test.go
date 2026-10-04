@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vettid/vettid-vault/enclave/releasecfg"
 	"github.com/vettid/vettid-vault/vms/manifest"
 )
 
@@ -111,12 +112,27 @@ func TestKeycheckExitStatus(t *testing.T) {
 	if got := exitCode(cmdKeycheck(ctx, nil, []string{"-key-arn", arn4, "-config", cfg, "-manifest", other, "-fixtures", filepath.Join(fixtures, "pass")})); got != keycheckOther {
 		t.Fatalf("unpinned manifest key: exit %d", got)
 	}
-	// The committed channel files still have placeholders: nothing to
-	// check against yet (status 9, not a pass).
+	// The committed channel files: one that still has placeholders has
+	// nothing to check against yet (status 9, not a pass); a complete one
+	// pins the real account, so the test account's key fails a numbered
+	// check (1–8), never passes.
 	for _, ch := range []string{"prod", "staging"} {
-		err := cmdKeycheck(ctx, nil, []string{"-key-arn", arn4, "-config", "../../enclave/releasecfg/" + ch + ".json", "-channel", ch, "-manifest", mf, "-fixtures", filepath.Join(fixtures, "pass")})
-		if exitCode(err) != keycheckOther || !strings.Contains(err.Error(), "not final") {
-			t.Fatalf("%s placeholders: %v", ch, err)
+		path := "../../enclave/releasecfg/" + ch + ".json"
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f, err := releasecfg.Parse(b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = cmdKeycheck(ctx, nil, []string{"-key-arn", arn4, "-config", path, "-channel", ch, "-manifest", mf, "-fixtures", filepath.Join(fixtures, "pass")})
+		if len(f.Missing) > 0 {
+			if exitCode(err) != keycheckOther || !strings.Contains(err.Error(), "not final") {
+				t.Fatalf("%s placeholders: %v", ch, err)
+			}
+		} else if code := exitCode(err); code < 1 || code > 8 {
+			t.Fatalf("%s (complete) with the test account's key: exit %d (%v), want a failed check 1-8", ch, code, err)
 		}
 	}
 	if exitCode(cmdKeycheck(ctx, nil, []string{"-key-arn", arn4})) != keycheckOther {

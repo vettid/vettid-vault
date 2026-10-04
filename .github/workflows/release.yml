@@ -136,6 +136,9 @@ jobs:
         run: |
           uname -m
           docker version --format 'docker {{.Server.Version}} ({{.Server.Arch}})'
+          # The point of building here: no Nitro Enclaves device is needed
+          # to build an EIF, only to run one.
+          if [ -e /dev/nitro_enclaves ]; then echo "unexpected: this runner has a Nitro Enclaves device"; else echo "no /dev/nitro_enclaves on this runner"; fi
           release/rebuild.sh "$RUNNER_TEMP/out"
           sha256sum "$RUNNER_TEMP"/out/vault-enclave "$RUNNER_TEMP"/out/vault-parent "$RUNNER_TEMP"/out/vault-enclave.eif
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -188,7 +191,7 @@ jobs:
             echo "### Release build: channel ${{ needs.gate.outputs.channel }}, release ${{ needs.gate.outputs.release }}"
             echo
             echo "Two clean arm64 builds match: enclave and parent binaries, measured EIF sections and PCR0/1/2."
-            echo "The EIF files differ only in nitro-cli's unmeasured metadata (build time)."
+            echo "The EIF files differ only in nitro-cli's unmeasured metadata section (build time, docker storage details)."
             echo
             echo '```json'
             cat "$A/measurements.json"

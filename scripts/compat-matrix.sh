@@ -53,7 +53,9 @@ fi
 
 work="$(mktemp -d)"
 cleanup() {
-  for d in "$work"/tree-*; do [ -d "$d" ] && git worktree remove --force "$d" >/dev/null 2>&1 || true; done
+  for d in "$work"/tree-*; do
+    if [ -d "$d" ]; then git worktree remove --force "$d" >/dev/null 2>&1 || true; fi
+  done
   rm -rf "$work"
 }
 trap cleanup EXIT

@@ -1,0 +1,1 @@
+{"Grants":[{"GrantId":"g1","GranteePrincipal":"arn:aws:iam::111122223333:role/vettid-enclave-host","KeyId":"arn:aws:kms:us-east-1:111122223333:key/00000004-0000-4000-8000-000000000004","Operations":["Decrypt"]}],"Truncated":false}

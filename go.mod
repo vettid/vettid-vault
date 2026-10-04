@@ -4,8 +4,10 @@ go 1.26.0
 
 require (
 	github.com/aws/aws-sdk-go-v2 v1.47.1
+	github.com/aws/aws-sdk-go-v2/config v1.33.6
 	github.com/aws/aws-sdk-go-v2/credentials v1.20.6
 	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.70.0
+	github.com/aws/aws-sdk-go-v2/service/kms v1.61.1
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.114.0
 	github.com/aws/aws-sdk-go-v2/service/sqs v1.52.1
 	github.com/aws/smithy-go v1.28.1
@@ -30,6 +32,10 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/internal/endpoint-discovery v1.13.4 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.14.4 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/s3shared v1.20.4 // indirect
+	github.com/aws/aws-sdk-go-v2/service/signin v1.10.1 // indirect
+	github.com/aws/aws-sdk-go-v2/service/sso v1.38.1 // indirect
+	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.43.1 // indirect
+	github.com/aws/aws-sdk-go-v2/service/sts v1.51.1 // indirect
 	github.com/btcsuite/btclog v0.0.0-20170628155309-84c8d2346e9f // indirect
 	github.com/coder/websocket v1.8.15 // indirect
 	github.com/decred/dcrd/crypto/blake256 v1.1.0 // indirect

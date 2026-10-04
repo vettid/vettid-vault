@@ -84,7 +84,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: shellcheck
-        run: shellcheck scripts/build-eif.sh scripts/smoke/run-on-host.sh
+        run: shellcheck scripts/build-eif.sh scripts/smoke/run-on-host.sh scripts/compat-matrix.sh release/rebuild.sh
       - name: two clean builds, one binary
         run: |
           export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)

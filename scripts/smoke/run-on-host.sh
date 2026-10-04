@@ -86,7 +86,7 @@ build() {
      -o "$WORK/bin/vault-parent" ./cmd/vault-parent) || fail "vault-parent build"
 
   step "EIF (reproducible image, nitro-cli $(rpm -q --qf '%{VERSION}' aws-nitro-enclaves-cli))"
-  (cd "$WORK/src" && scripts/build-eif.sh "$WORK/out") || fail "EIF build"
+  (cd "$WORK/src" && GO="$(go_bin)" GOTOOLCHAIN=local scripts/build-eif.sh "$WORK/out") || fail "EIF build"
   cp "$WORK/out/measurements.json" "$WORK/measurements.json"
   echo "measurements:"
   cat "$WORK/measurements.json"

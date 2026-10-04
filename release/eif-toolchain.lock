@@ -1,0 +1,26 @@
+# The EIF toolchain (VAULT-RELEASES §5.1). Everything that goes into an
+# EIF besides the enclave image is pinned here: the build container, the
+# Amazon Linux 2023 repository snapshot, the aws-nitro-enclaves-cli
+# packages (by RPM SHA-256) and the kernel, init and module blobs that
+# nitro-cli puts into the EIF (they are part of PCR0). Changing any of
+# these changes every PCR0, so it is a release change like any other.
+#
+# release/Dockerfile.eif-builder checks every sha256 line below; the
+# release workflow records this file's SHA-256 in measurements.json.
+#
+# KEY=VALUE lines:
+base_image=docker.io/library/amazonlinux:2023@sha256:5b29412077a463b4a3a8fbc99a8cdf4b929f38a3ecc8dac10328d8f36b0099b8
+releasever=2023.12.20260918
+arch=aarch64
+nitro_cli_version=1.5.0-0.amzn2023
+#
+# sha256sum lines (paths inside the builder; the RPMs are fetched for
+# aarch64 from the pinned repository snapshot):
+4c1f5c964787145415692df0814646d8ba46053bd61bea866f598adf9c36140f  /toolchain/aws-nitro-enclaves-cli-1.5.0-0.amzn2023.aarch64.rpm
+028013b5832dfef516ae25786a99465401ec7ad5e0a316f7bad0a792d6512284  /toolchain/aws-nitro-enclaves-cli-devel-1.5.0-0.amzn2023.aarch64.rpm
+03808bbf031a6f27178b35657e6b4b8cdf11820c349396407995ceeec82ec9b9  /usr/share/nitro_enclaves/blobs/Image
+424e97785438d01e1436e738df0192142d81657a7b11d008f2cb9e5637b6354b  /usr/share/nitro_enclaves/blobs/Image.config
+e3a26db3f0375d58ed9756cb986a717a6286f38c6e54e82b457527467fc5ae4c  /usr/share/nitro_enclaves/blobs/cmdline
+a056a462b30ff749e536e4ec5846388a4048abf10c65d4623333d52c8f724c88  /usr/share/nitro_enclaves/blobs/init
+0d5a5e98f80b138c0ead6d5d7bbb1bcf53dada73b57d7b1de384981060052e3e  /usr/share/nitro_enclaves/blobs/linuxkit
+86154e77eeeea24b7835787ea0b0bc20758293703ffca15f346bf78b5788ef7b  /usr/share/nitro_enclaves/blobs/nsm.ko

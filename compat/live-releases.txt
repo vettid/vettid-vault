@@ -1,0 +1,14 @@
+# Live production releases (VAULT-RELEASES §11.3): one release tag per
+# line, every release in the production manifest that is not `removed`
+# (active, deprecated, retired), oldest first. The compatibility matrix
+# (scripts/compat-matrix.sh, .github/workflows/compat.yml) builds each
+# tag's parent and dev enclave and runs the move-only contract tests
+# against this tree's client, member API stand-in, relay and release.
+#
+# Update it in the publish step of every release and every status change
+# (docs/RELEASING.md). Empty until production release 1; until then the
+# CI job runs one synthetic row against the pull request's base commit
+# (advisory).
+#
+# Example:
+#   release/prod/1

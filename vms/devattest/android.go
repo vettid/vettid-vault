@@ -4,6 +4,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/x509"
 	"encoding/asn1"
 	"time"
@@ -27,6 +28,7 @@ const (
 	curveP256     = 1
 	originGen     = 0
 	bootVerified  = 0
+	bootSelfSign  = 1
 	digestSHA256  = 4
 )
 
@@ -165,9 +167,10 @@ func parseKeyDescription(b []byte) (*keyDescription, error) {
 	return kd, nil
 }
 
-// rootOfTrust checks RootOfTrust: deviceLocked true, verifiedBootState
-// Verified.
-func checkRootOfTrust(e der.Element) error {
+// checkRootOfTrust checks RootOfTrust: deviceLocked true, and
+// verifiedBootState Verified, or SelfSigned with a verifiedBootKey the
+// policy pins (GrapheneOS, §11.7). Unverified and Failed are refused.
+func checkRootOfTrust(p *Policy, e der.Element) error {
 	if !e.Is(der.ClassUniversal, der.TagSequence) {
 		return ErrFormat
 	}
@@ -176,7 +179,8 @@ func checkRootOfTrust(e der.Element) error {
 	if err != nil {
 		return ErrFormat
 	}
-	if _, err := der.OctetString(vbk); err != nil {
+	bootKey, err := der.OctetString(vbk)
+	if err != nil {
 		return ErrFormat
 	}
 	lk, err := r.Next()
@@ -195,10 +199,24 @@ func checkRootOfTrust(e der.Element) error {
 	if err != nil {
 		return ErrFormat
 	}
-	if !locked || state != bootVerified {
+	if !locked {
 		return ErrRootOfTrust
 	}
-	return nil
+	switch state {
+	case bootVerified:
+		return nil
+	case bootSelfSign:
+		ok := 0
+		for _, k := range p.AndroidSelfSignedBootKeys {
+			if len(k) == 32 && len(bootKey) == 32 {
+				ok |= subtle.ConstantTimeCompare(k, bootKey)
+			}
+		}
+		if ok == 1 {
+			return nil
+		}
+	}
+	return ErrRootOfTrust
 }
 
 // checkApplicationID parses AttestationApplicationId and requires every
@@ -392,7 +410,7 @@ func verifyAndroid(p *Policy, chainDER [][]byte, challenge [32]byte, now time.Ti
 	if !ok {
 		return nil, ErrRootOfTrust
 	}
-	if err := checkRootOfTrust(rot); err != nil {
+	if err := checkRootOfTrust(p, rot); err != nil {
 		return nil, err
 	}
 	aid, ok := hw.elems[tagAttestationID]

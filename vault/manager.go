@@ -132,6 +132,15 @@ type Manager struct {
 	// pairAccess carries device.pair.approve's session_seconds into
 	// approveInbound (§6.8).
 	pairAccess *pendingAccess
+	// replaceAfter is the recovered app whose recovery completed in the
+	// current handler: the other apps are removed after it returns
+	// (§11.11.5). alarms are host alarms reported after the flush (§11.5).
+	replaceAfter string
+	alarms       []string
+	// deletePending: a deletion was marked in this batch; it is finished
+	// after the flush (§12.5).
+	deletePending bool
+	deleteRequest string
 
 	locked      bool
 	lockPending bool
@@ -554,7 +563,7 @@ func (m *Manager) persist(ctx context.Context, create bool) error {
 func (m *Manager) writeHeader(ctx context.Context) error {
 	m.syncUnlockKeys()
 	if m.st != nil {
-		m.hdr.HasCredential = m.credentialReady() && m.hasGate()
+		m.hdr.HasCredential = m.credentialExists() && m.hasGate()
 	}
 	m.hdr.HeaderSeq++
 	b, err := sealHeader(ctx, m.opt.Sealer, m.hdr)
@@ -718,8 +727,33 @@ func (m *Manager) Lock(ctx context.Context) error { return m.LockReason(ctx, "")
 func (m *Manager) LockReason(ctx context.Context, reason string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if reason == LockDelete {
+		return m.deleteLocked(ctx, "host")
+	}
 	m.lockReason = reason
 	return m.lockLocked(ctx)
+}
+
+// LockDelete as a lock reason deletes the running vault (§12.5): the
+// host's deletion (account cancellation) with the full semantics.
+const LockDelete = "delete"
+
+// Delete deletes the running vault (§12.5) on the host's authority.
+func (m *Manager) Delete(ctx context.Context) error { return m.LockReason(ctx, LockDelete) }
+
+func (m *Manager) deleteLocked(ctx context.Context, via string) error {
+	if m.locked {
+		return ErrLocked
+	}
+	m.beginDelete(via, m.now())
+	m.deletePending = false
+	if err := m.persist(ctx, false); err != nil {
+		if errors.Is(err, ErrSplitBrain) {
+			return err
+		}
+		// Not marked: finish anyway; erasing needs no marker.
+	}
+	return m.finishDelete(ctx)
 }
 
 func (m *Manager) lockLocked(ctx context.Context) error {

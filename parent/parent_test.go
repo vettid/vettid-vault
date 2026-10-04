@@ -353,6 +353,15 @@ func TestRequestsAndLeases(t *testing.T) {
 	if r, _ := h.tables.Vault(vaultID); r.LeaseInstance != "i-other" {
 		t.Fatalf("loser released the winner's lease: %+v", r)
 	}
+	// A host alarm (§11.5) is recorded whoever holds the lease; an unknown
+	// alarm kind is refused by the parser.
+	e.lifecycle("alarm.credential_clone")
+	waitFor(t, "alarm recorded", func() bool { r, _ := h.tables.Vault(vaultID); return r.AlarmPending })
+	e.lifecycle("alarm.other")
+	time.Sleep(100 * time.Millisecond)
+	if r, _ := h.tables.Vault(vaultID); r.AlarmKind != "credential_clone" || r.Alarms != 1 || r.LeaseInstance != "i-other" {
+		t.Fatalf("alarm row %+v", r)
+	}
 	// No envelope bytes in the logs.
 	h.logMu.Lock()
 	logs := h.logs.String()

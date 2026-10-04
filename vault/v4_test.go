@@ -217,7 +217,8 @@ type gateFeature struct {
 	ready bool
 }
 
-func (g *gateFeature) CredentialReady() bool { return g.ready }
+func (g *gateFeature) CredentialReady() bool  { return g.ready }
+func (g *gateFeature) CredentialExists() bool { return g.ready }
 
 // §3.5.7: a vault without a credential answers credential_required to all
 // but the listed types, stays provisional, and records has_credential.

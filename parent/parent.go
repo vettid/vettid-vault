@@ -376,7 +376,7 @@ func parseLifecycle(f *hostproto.Frame) (Lifecycle, bool) {
 	}
 	ev := Lifecycle{Event: string(f.Fields[0]), VaultID: string(f.Fields[1]), Release: string(f.Fields[2]), VaultVersion: string(f.Fields[3])}
 	switch ev.Event {
-	case "enrolled", "unlocked", "locked", "moved", "deleted":
+	case "enrolled", "unlocked", "locked", "moved", "deleted", EventAlarmCredentialClone:
 	default:
 		return Lifecycle{}, false
 	}

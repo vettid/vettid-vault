@@ -84,6 +84,17 @@ func (d *devFixture) audited(event string) bool {
 	return false
 }
 
+// transferInvite opens a direct transfer from the fixture's app (§6.7.1).
+func (d *devFixture) transferInvite(t testing.TB) *Invite {
+	d.m.mu.Lock()
+	defer d.m.mu.Unlock()
+	id, _, _, err := d.m.createTransfer(context.Background(), "dev1", d.m.now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return d.m.st.Invites[id]
+}
+
 func (d *devFixture) invite(t testing.TB, kind string, ttl time.Duration) *Invite {
 	d.m.mu.Lock()
 	defer d.m.mu.Unlock()
@@ -139,19 +150,24 @@ func TestPairingDeviceAttestation(t *testing.T) {
 		return json.RawMessage(`{"platform":"android","pk":"AQ==","counter":0}`), nil
 	}
 	da := &altchan.DeviceAttest{Platform: altchan.PlatformAndroid, Chain: [][]byte{{1}}}
-	inv := d.invite(t, KindApp, PairingApprovalTTL)
+	// One app per vault (0.9.0): an app pairing that is not a transfer is
+	// dropped whatever it carries.
+	plain := d.invite(t, KindApp, PairingApprovalTTL)
 	n := newNewcomer(t, 0x50)
+	n.hsInitAttest(t, d.m, handshake.PurposeApp, plain.ID, "p0", da)
+	if len(d.m.st.Inbound) != 0 || !d.audited("one_app") {
+		t.Fatal("a second app reached approval")
+	}
+	inv := d.transferInvite(t)
 	n.hsInitAttest(t, d.m, handshake.PurposeApp, inv.ID, "p1", nil)
 	if len(d.m.st.Inbound) != 0 || !d.audited("pairing_attestation_missing") {
 		t.Fatal("app paired without device attestation")
 	}
-	inv = d.invite(t, KindApp, PairingApprovalTTL)
 	fail = true
 	n.hsInitAttest(t, d.m, handshake.PurposeApp, inv.ID, "p2", da)
 	if len(d.m.st.Inbound) != 0 || !d.audited("pairing_attestation_failed") {
 		t.Fatal("failed attestation accepted")
 	}
-	inv = d.invite(t, KindApp, PairingApprovalTTL)
 	fail = false
 	n.hsInitAttest(t, d.m, handshake.PurposeApp, inv.ID, "p3", da)
 	if len(d.m.st.Inbound) != 1 {

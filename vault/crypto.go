@@ -134,8 +134,11 @@ type Header struct {
 	Recovery *RecoveryRecord `json:"recovery,omitempty"`
 	// HasCredential records whether the vault has a Protean Credential
 	// (§3.5.7), so that a locked vault without one refuses recovery.
-	HasCredential bool            `json:"has_credential,omitempty"`
-	RecoveryLog   []RecoveryEvent `json:"recovery_log,omitempty"`
+	HasCredential bool `json:"has_credential,omitempty"`
+	// Deleting marks a deletion in progress (§12.5): any later unlock or
+	// recovery finishes it instead of opening the vault.
+	Deleting    bool            `json:"deleting,omitempty"`
+	RecoveryLog []RecoveryEvent `json:"recovery_log,omitempty"`
 }
 
 func headerAAD(vaultID string) []byte { return []byte(labelHeader + "\x00" + vaultID) }

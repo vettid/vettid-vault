@@ -162,7 +162,7 @@ func (in *Instance) Process(ctx context.Context, q *QueueMessage) *Response {
 	case OpLock:
 		_, _ = in.host.Lock(ctx, q.VaultID)
 	case OpDelete:
-		in.deleteVault(ctx, q.VaultID)
+		in.deleteVault(ctx, q.VaultID, q.UserGUID)
 	case OpRecovery, OpRecoveryCancel:
 		// No envelope: the job carries the browser key (not secret). A
 		// recovery locks a running vault first, telling its devices why
@@ -304,15 +304,18 @@ func (in *Instance) LockAll(ctx context.Context) {
 // Vaults returns the ids of the vaults this instance runs.
 func (in *Instance) Vaults() []string { return in.host.Vaults() }
 
-// deleteVault locks the vault and destroys its state and this release's
-// header (§12.3). The §7.4 revocations on deletion need the unlocked vault
-// and arrive with vault.delete (phase V4).
-func (in *Instance) deleteVault(ctx context.Context, id string) {
-	_, _ = in.host.Lock(ctx, id)
-	for _, k := range []string{store.StateKey(id), store.HeaderKey(id, in.meas.PCR0)} {
-		if _, v, err := in.st.Get(ctx, k); err == nil {
-			_ = in.st.Delete(ctx, k, v)
-		}
+// deleteVault is the host's deletion (account cancellation, §12.5): a
+// running vault deletes itself with the full semantics (notices,
+// revocations, keys destroyed, storage erased, `deleted` reported);
+// otherwise the stored objects are erased here. Either way the result is
+// idempotent: a missing object is already deleted.
+func (in *Instance) deleteVault(ctx context.Context, id, userGUID string) {
+	ran, err := in.host.LockReason(ctx, id, vault.LockDelete)
+	if ran && err == nil {
+		return
+	}
+	if err := vault.EraseStored(ctx, in.st, id, userGUID, nil, in.meas.PCR0, "", ""); err != nil {
+		return // retried by the next delete request
 	}
 	in.emit(vault.LifecycleEvent{Event: "deleted", VaultID: id, Release: in.meas.PCR0, VaultVersion: in.meas.PCR0, StateVersion: vault.StateVersion})
 }

@@ -150,6 +150,31 @@ func TestAWSBackend(t *testing.T) {
 	if it["state"].(*ddbS).Value != "locked" || it["sealed_release"].(*ddbS).Value != pcr || it["lease"] != nil {
 		t.Fatalf("lifecycle: %v", it)
 	}
+	// A host alarm (§11.5): alarm {kind, alarm_id, at} and alarm_pending,
+	// whoever holds the lease; nothing for a missing row.
+	if err := a.Lifecycle(ctx, Lifecycle{Event: EventAlarmCredentialClone, VaultID: "v1", Release: pcr, VaultVersion: pcr, StateVersion: 1}, "i9", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Lifecycle(ctx, Lifecycle{Event: EventAlarmCredentialClone, VaultID: "nope", Release: pcr, VaultVersion: pcr, StateVersion: 1}, "i9", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	it, _ = memberapitest.VaultItem(ctx, db, tn.Vaults, "v1")
+	if err := a.Lifecycle(ctx, Lifecycle{Event: "deleted", VaultID: "v2-missing", Release: pcr, VaultVersion: pcr, StateVersion: 1}, "i9", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	al, ok := it["alarm"].(*ddbtypes.AttributeValueMemberM)
+	if !ok || al.Value["kind"].(*ddbS).Value != "credential_clone" || len(al.Value["alarm_id"].(*ddbS).Value) != 26 ||
+		!it["alarm_pending"].(*ddbtypes.AttributeValueMemberBOOL).Value {
+		t.Fatalf("alarm: %v", it)
+	}
+	// A deletion (§12.5): state deleted and the member's notice.
+	if err := a.Lifecycle(ctx, Lifecycle{Event: "deleted", VaultID: "v1", Release: pcr, VaultVersion: pcr, StateVersion: 1}, "i9", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	it, _ = memberapitest.VaultItem(ctx, db, tn.Vaults, "v1")
+	if it["state"].(*ddbS).Value != "deleted" || it["alarm"].(*ddbtypes.AttributeValueMemberM).Value["kind"].(*ddbS).Value != "vault_deleted" {
+		t.Fatalf("deleted: %v", it)
+	}
 
 	// Slots: only queued slots are answered.
 	if _, err := db.PutItem(ctx, &dynamodb.PutItemInput{TableName: &tn.Requests, Item: map[string]ddbAttr{"request_id": s("r1"), "status": s("queued")}}); err != nil {

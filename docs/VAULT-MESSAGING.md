@@ -1,7 +1,7 @@
 ---
 title: VAULT-MESSAGING
 status: draft
-version: 0.8.0
+version: 0.9.0
 date: 2026-10-03
 owner: Al Liebl (Mesmer)
 component: vault manager (enclave), parent forwarder, apps, desktops, agents, member API vault routes
@@ -15,6 +15,24 @@ related:
   - MEMBER-API.md
   - VAULT-ITEMS.md (0.1.0, approved 2026-10-03)
 changelog:
+  - 0.9.0: one app per vault (owner decisions of 2026-10-03,
+    PROTEAN-CREDENTIAL §4): the member's single app is the credential's
+    holder and the only app; no second app pairs (`one_app`) (§6.7);
+    a credential presented by another device, or a stale copy the
+    holder's own retry does not explain, is a clone: refused, an urgent
+    alert to the app, audit, a content-free host alarm that the member
+    API turns into an email, a freeze of credential operations until the
+    app confirms, then a forced rotation (§3.5.9, §11.5); direct transfer
+    to a new phone with the PIN and the password, no wait (§6.7.1);
+    recovery replaces the old app and keeps desktops and agents; with
+    backup off a recovery restores access only, to reset the credential
+    or delete the vault (§11.11.5, §11.11.8); no off-device copy of the
+    credential (§3.5.6); GrapheneOS accepted through pinned verified-boot
+    keys (§11.7); vault deletion (`vault.delete`, crash-safe, the member
+    emailed) (§12.5); a vault reports only to its owner (§13.7); a
+    holderless vault adopts no app (§3.5.9); `one_app`,
+    `credential_frozen`, `rotation_required`, `credential_lost`,
+    `transfer_pending` (§10.1)
   - 0.8.0: V4 batch 4: location sharing per connection (once or
     continuous, expiring, precision and cadence enforced by the sending
     vault, positions forwarded from memory and kept by the receiver only
@@ -177,6 +195,12 @@ described in RFC 2119.
    a hybrid X25519 + ML-KEM-768 KEM (§4). Signatures stay Ed25519. Every
    structure carries a suite or version field, so PQC Phase 2 (Ed25519 +
    ML-DSA-65) is a suite bump.
+8. **One app per vault** (owner decision, 2026-10-03; 0.9.0). A vault has
+   exactly one device of role `app`. That app **holds** the Protean
+   Credential and is the only one that unlocks. Desktops and agents pair
+   as before and never hold the credential. A second copy of the
+   credential is treated as theft (§3.5.9); the app moves to a new phone
+   by direct transfer (§6.7.1) or by recovery (§11.11).
 
 ### 1.2 Relay features used
 
@@ -237,8 +261,9 @@ hidden. Traffic-analysis resistance is a non-goal (as in RELAY-PROTOCOL
   (§11.10), or enrolled into, after being shown its release number, notes
   and PCR0. No other release can open the vault, and VettID cannot move it
   there (§13.5);
-- loss of the stored vault state itself. Recovery when every owner app is
-  lost is §11.11; it needs the state, the PIN and the credential password.
+- loss of the stored vault state itself. Recovery when the app is lost
+  is §11.11; it needs the state, the PIN and, with the backup on, the
+  credential password.
 
 ## 3. Principals and keys
 
@@ -247,7 +272,7 @@ hidden. Traffic-analysis resistance is a non-goal (as in RELAY-PROTOCOL
 | Principal | Relay mailbox | Notes |
 |---|---|---|
 | Vault | yes | One per member, inside the enclave. Identified to VettID by an opaque `vault_id` (§11.5). |
-| Owner device, role `app` | yes | A phone or tablet installation. The only role that may unlock (§11.7). |
+| Owner device, role `app` | yes | A phone or tablet installation. **Exactly one per vault** (§6.7): the holder of the Protean Credential (§3.5) and the only role that may unlock (§11.7). |
 | Owner device, role `desktop` | yes | Does not unlock in 0.2. |
 | Owner device, role `agent` | yes | Acts under LEASH grants. Never unlocks. |
 | Peer vault | yes | A connection's vault |
@@ -441,7 +466,9 @@ credential key and the **item keys** of the member's critical items
 (§10.7), such as seed phrases, private keys and recovery keys, whose
 values the vault keeps encrypted under those keys.
 
-- It is held by the member's app.
+- It is held by the member's one app, the **holder** (§1.1 item 8). The
+  vault records which device that is; a direct transfer (§6.7.1) or a
+  recovery (§11.11.5) moves it.
 - It is sealed so that the vault alone cannot open it.
 - Every use needs the member's participation: the app supplies the
   credential **and** the member's password, for that one operation.
@@ -539,8 +566,8 @@ Both layers are needed:
 
 #### 3.5.3 Using the credential: every use rotates the CEK
 
-Every operation that opens the credential comes from an owner device of
-role `app` and carries:
+Every operation that opens the credential comes from the **holder**
+(§3.5.9) and carries:
 
 - `credential`: the blob;
 - `utk_id` and `sealed`: the operation's critical payload, sealed to a UTK
@@ -548,18 +575,26 @@ role `app` and carries:
 
 The vault:
 
-1. **opens `sealed`** with the LTK for `utk_id` and destroys the LTK
+1. refuses with `credential_frozen` or `rotation_required` while a clone
+   alarm is open (§3.5.9), before anything else (the UTK is not spent),
+   and with `transfer_pending` from an old app whose transfer it approved
+   (§6.7.1);
+2. **opens `sealed`** with the LTK for `utk_id` and destroys the LTK
    (§3.5.4). A missing, used, expired or foreign UTK is refused with
    `utk_invalid`;
-2. refuses with `backoff` while the password backoff (below) is in effect;
 3. **checks the blob.** SHA-256(`credential`) must equal the hash of the
-   current blob, else the answer is `stale_credential`;
-4. **opens it.** The outer layer opens with the current CEK and the inner
+   current blob, and the presenter must be the holder. If not, the vault
+   applies the clone rule of §3.5.9: the holder's own retry with the
+   previous, unconfirmed version is answered `stale_credential`; anything
+   else is a clone, answered `credential_frozen`. The check comes before
+   the backoff, so a clone is detected even while the backoff runs;
+4. refuses with `backoff` while the password backoff (below) is in effect;
+5. **opens it.** The outer layer opens with the current CEK and the inner
    layer with `K_pw`. If the inner AEAD fails, the answer is
    `bad_password`; the failure is counted and recorded as
    `credential.password_failed` (§10.9);
-5. **performs the operation** on the plaintext in memory;
-6. **rotates the CEK**, after every successful opening, whether or not
+6. **performs the operation** on the plaintext in memory;
+7. **rotates the CEK**, after every successful opening, whether or not
    the content changed:
    - it generates a new CEK;
    - it seals the (possibly changed) content under it as `version + 1`,
@@ -569,9 +604,9 @@ The vault:
    - it **destroys the old CEK**;
    - every earlier blob is then undecryptable by anyone, the vault
      included;
-7. returns the new blob and version, with new UTKs when the app's pool is
+8. returns the new blob and version, with new UTKs when the app's pool is
    low (§3.5.4);
-8. zeroizes the plaintext, `x` and `K_pw` before the response is sent.
+9. zeroizes the plaintext, `x` and `K_pw` before the response is sent.
 
 The vault MUST NOT keep any plaintext of the credential, `K_pw` or the
 password after the operation, except the credential key during an unlock
@@ -587,8 +622,10 @@ lost response therefore never loses the credential:
 - **The latest blob is always kept until the app confirms it.** Even with
   `credential.backup` off (§3.5.6), the vault keeps the latest blob until
   the app either presents that version in a later operation or sends
-  `credential.ack{version}`. An app that is answered `stale_credential`
-  fetches it with `credential.get` and retries with a fresh UTK.
+  `credential.ack{version}`. The holder, answered `stale_credential` for
+  its previous version (§3.5.9), fetches it with `credential.get` and
+  retries with a fresh UTK. This is the only stale copy that is not a
+  clone.
 - **A crash.** A crash before the flush leaves the old CEK and blob in
   force: the request is redelivered and re-executed. A crash after the
   flush is covered by the outbox and the two rules above.
@@ -650,6 +687,8 @@ critical-item use (§10.13), `request_id` and `payload_sha256`, which bind
 the member's consent to one request and one payload. A wallet spend
 (§10.18) binds it with `item_id` (the wallet) and `payload_sha256` (the
 PSBT's hash), and `wallet.create` may carry an imported phrase as `item`.
+A transfer's approval (§6.7.1) carries the `pin` (4–32 ASCII digits, as
+at unlock) with the password.
 
 **Using a UTK.** The vault looks the UTK up among those issued to the
 sending app and removes it from the pool before anything else is checked.
@@ -684,13 +723,16 @@ item's values seals them to a **one-time reply key** instead:
     with no items, and returns the blob.
   - A vault has at most one credential.
   - Until a credential exists the vault is restricted (§3.5.7).
-- **Distribution.** The app stores the blob and confirms it (§3.5.3).
-  - Other owner apps fetch the latest blob with `credential.get` when the
-    vault keeps it (§3.5.6).
-  - Every owner device learns of each new version through
-    `sync.event{kind: "credential.changed", version}`.
-  - An app holding an older version is answered `stale_credential` and
-    fetches the latest.
+- **Distribution.** The app that sent `credential.create` becomes the
+  holder. It stores the blob and confirms it (§3.5.3).
+  - There are no other apps to distribute it to (§6.7). Only the holder
+    may fetch the latest blob (`credential.get`), and only to recover
+    from its own lost response (§3.5.9).
+  - Desktops learn of each new version through
+    `sync.event{kind: "credential.changed", version}`; they never hold
+    the blob.
+  - The holder changes only by a direct transfer (§6.7.1) or a recovery
+    (§11.11.5); both rotate the CEK, so the old holder's copy is dead.
 - **Password change.** `credential.password.change` re-seals the content
   under the new password (and, like every use, under a new CEK).
 - **Rotate.** `credential.rotate` generates a new credential key.
@@ -720,15 +762,17 @@ item's values seals them to a **one-time reply key** instead:
   - Blobs held by apps can no longer be opened by anyone.
   - The vault becomes restricted again (§3.5.7) until a new
     `credential.create`.
-  - `vault.delete` does the same.
+  - `vault.delete` does the same, as the first step of the vault's
+    deletion (§12.5).
 
 #### 3.5.6 Backup: the vault's copy of the blob
 
 The vault keeps the latest blob in DEK state while the `credential.backup`
 setting (§10.8) is on, which is the default.
 
-- That copy is what `credential.get` returns to the owner's other apps,
-  and what a recovery hands to a new app after the password (§11.11.5).
+- That copy is what `credential.get` returns to the holder after a lost
+  response (§3.5.9), and what a recovery hands to the new app after the
+  password (§11.11.5).
 - It is sealed to the vault's current CEK outside and to the password
   inside. It is therefore useless anywhere but in the vault, and to anyone
   but the member: no copy that could be guessed offline leaves the vault.
@@ -741,13 +785,23 @@ setting (§10.8) is on, which is the default.
   `credential.recover` re-keys every item.
 
 With `credential.backup` off, the vault keeps the latest blob only until
-the app confirms it (§3.5.3), then only its hash and version.
+the holder confirms it (§3.5.3), then only its hash and version.
 
-- The credential then lives only with the member.
-- The member needs their own way to restore it: the app SHOULD keep an
-  off-device backup that it updates after every rotation, because only
-  the latest version can be opened.
-- A recovery then requires the member to supply that blob (§11.11.5).
+- The credential then lives **only on the holder's phone**. There is no
+  off-device copy and no export (owner decision, 2026-10-03): the app
+  MUST NOT write the blob anywhere but its own protected storage (no
+  cloud or device backup, no file, no QR, no copy to another device).
+  A member-supplied blob is never accepted (0.9.0 removed it from
+  `credential.recover`).
+- **Losing the phone with the backup off loses the credential and every
+  critical item permanently.** A recovery can then only reset the
+  credential, destroying the critical items, or delete the vault
+  (§11.11.5).
+- The app MUST warn clearly before turning the backup off, saying exactly
+  that, and MUST ask the member to confirm. An app approving a desktop's
+  `settings.set` that turns it off (§6.8) shows the same warning.
+- Moving to a new phone while holding the old one is a direct transfer
+  (§6.7.1), which works with the backup off.
 - Turning the backup on again stores the copy at the next use of the
   credential.
 
@@ -794,6 +848,123 @@ A vault MUST have a credential before it is used.
   password, not the PIN, is what protects the credential in that case,
   and with it the critical items: their ciphertext in DEK state opens
   only with the item keys inside the credential (§10.7).
+- **A thief who copies the blob and presents it** (through the holder's
+  session, or as any other device) is detected unless the copy is
+  byte-identical to the current blob and used before the member uses it
+  again: every other presentation is a clone (§3.5.9). The vault refuses
+  it, alerts the app and the member, and forces a rotation that kills
+  every copy.
+
+#### 3.5.9 One holder; clone alarm, freeze and forced rotation
+
+The credential is useful only while exactly one copy circulates, on the
+holder (owner decision, 2026-10-03; PROTEAN-CREDENTIAL §4). A second
+copy is the signal of theft, so the vault treats it as an alarm, not as a
+routine refresh.
+
+**The holder.** The credential state records the holder's device id.
+`credential.create` sets it to the sender; a completed transfer
+(§6.7.1) or recovery (§11.11.5) moves it. Only the holder may send the
+types that carry or return a blob: `credential.get`, `.ack`, `.unlock`,
+`.rotate`, `.password.change`, `.delete`, the critical-item, critical-use
+and wallet operations (§10.7, §10.13, §10.18) and `device.transfer.*`
+(§6.7.1). **A vault with a credential but no holder** (a state of an
+earlier draft) never adopts an app that presents a blob: it refuses
+every request with `credential_required` (§3.5.7) except the recovery
+path (§11.11.5: a recovering app's `credential.utk.get`,
+`credential.recover`, `credential.reset` and `vault.delete`) and the
+types a restricted vault always accepts. Vaults with several apps from
+earlier drafts are not migrated; none exist outside tests.
+
+**Detection.** Whenever a request presents a blob whose SHA-256 differs
+from the current hash:
+
+- **The holder's own retry is not a clone.** If the presenter is the
+  holder, the blob's header `version` is exactly the current version − 1,
+  and the holder has not yet confirmed the current version (by
+  `credential.ack`, or by presenting it), the answer is
+  `stale_credential`. This is the app re-fetching after a lost response
+  or a crash; it fetches the latest blob with `credential.get`.
+- **Everything else is a clone:** a presenter other than the holder; an
+  older version; the previous version after the holder confirmed the
+  current one; the current version with different bytes; a version above
+  the current one. (Only the vault can make a valid blob, so the last two
+  are tampering. OWNER DECISION, recommended: count them as clones.)
+
+**On a clone,** in the request's flush (the UTK is spent):
+
+1. the vault **refuses** with `credential_frozen`. It does not open the
+   blob and returns nothing;
+2. it **opens an alarm** `{alarm_id (ULID), kind: "clone", at, state:
+   "frozen", presenter, version}` in DEK state, so it survives locks. The
+   unlock window ends at once, and an open transfer is aborted (§6.7.1);
+3. it sends the holder an **urgent alert**: `credential.alarm{alarm_id,
+   kind: "clone", state: "frozen", at, presenter: "holder" | "other",
+   version}` (durable), a feed item `credential.alarm` with priority
+   `urgent` (`ref` = `alarm_id`), and `sync.event{kind:
+   "credential.alarm", alarm_id, state}` to the owner's apps and
+   desktops (§9.1);
+4. it records `credential.clone_detected` in the audit log (`ref` =
+   `alarm_id`, `device_id` = the presenter);
+5. it reports the **host alarm** `alarm.credential_clone` (§11.5): a
+   content-free event that the parent records on the vault row and the
+   member API turns into an **email to the member** (MEMBER-API). The
+   vault has no email egress; the event carries no data beyond its kind
+   and the vault id. OWNER DECISION (recommended: this path).
+
+Nothing of the alarm reaches a connection (§13.7).
+
+A clone presented while an alarm is open is refused with the current
+freeze code and audited (`credential.clone_detected`), but opens no new
+alarm and reports nothing to the host.
+
+**Freeze.** While an alarm is open, credential operations wait for the
+member:
+
+- In state `frozen`, every credential operation is refused with
+  `credential_frozen`; in state `rotation_required`, with
+  `rotation_required`. This covers critical items (§10.7), critical-item
+  use (§10.13), wallet signing (§10.18), `credential.unlock` (so signed
+  LEASH grants and member authentication answer `credential_locked`) and
+  `device.transfer.create` and `.approve`.
+- These refusals come before the UTK is spent (§3.5.3, step 1).
+- Still allowed: `credential.utk.get`, `credential.version` (which shows
+  the alarm), `credential.lock`, `credential.alarm.confirm`; in state
+  `rotation_required` the holder's `credential.get`, `credential.ack` and
+  `credential.rotate`; and a recovering app's `credential.recover` and
+  `credential.reset` (§11.11.5).
+- **Everything else keeps working**: messaging, connections, calls,
+  `data` and `secret` items, desktops and agents.
+
+**Confirm.** The holder answers `credential.alarm.confirm{alarm_id,
+mine}`: `true` for "that was me" (for example a restored phone backup),
+`false` for "not me". Both move the alarm to `rotation_required`
+(OWNER DECISION, recommended: a "that was me" that skipped the rotation
+would keep a known second copy alive). On "not me" the app SHOULD also
+suggest changing the password and the PIN. The vault audits
+`credential.alarm.confirmed` (`ref` = `<alarm_id>:mine` or
+`<alarm_id>:not_mine`) and sends `sync.event{kind:
+"credential.alarm", alarm_id, state: "rotation_required"}`.
+
+**Forced rotation.** In state `rotation_required` the only credential
+operation is `credential.rotate` (§3.5.5) by the holder, with the current
+blob and the password: a new credential key (with its rotation statement
+to the connections that pinned it, §10.4), a new CEK, every critical item
+re-keyed (§10.7), and the vault's `ik` and `kem` rotated (§3.4). On
+success the alarm closes (`state: "resolved"`, audit
+`credential.alarm.resolved`, `sync.event`) and credential operations
+resume. Every older blob, the clone included, is dead; presenting it later
+opens a new alarm.
+
+- If the holder's own blob is stale, because the clone was used first,
+  the holder fetches the latest with `credential.get`, allowed in
+  `rotation_required`.
+- **Residual.** With the backup off and the latest blob already confirmed
+  by whoever used the clone, no copy of the latest version exists: the
+  credential is lost, and only a recovery (§11.11.5) helps.
+- A recovery completed during an alarm (`credential.recover`) moves the
+  alarm to `rotation_required`: the recovered app is the new holder and
+  must rotate.
 
 ## 4. Cryptographic construction
 
@@ -1174,6 +1345,7 @@ Bundle rules:
   who holds the link can read it.
 - `kind` is `connection`, or `app`, `desktop` or `agent` for pairing
   (§6.7); it MUST match the QR `t` (`c`, `p`, `d`, `a` respectively).
+  Since 0.9.0, `app` (`p`) is used only by a direct transfer (§6.7.1).
 - For pairing, `invite_id` carries the pairing id, and `remote` MUST be
   `false`.
 - `exp` is RFC 3339 UTC in **whole seconds** (`YYYY-MM-DDTHH:MM:SSZ`, no
@@ -1191,8 +1363,8 @@ The bundle is protected and published as follows:
   {"v":2,"t":"c","r":"<relay base URL>","c":"<claim_id>","h":"<b64url SHA-256(blob)>","k":"<b64url k_b>","e":<unix exp>}
   ```
 
-  `t` is `c` for a connection; `p`, `d` and `a` pair an app, desktop or agent
-  (§6.7). `h`, `k` and the link encoding are base64url **without** padding
+  `t` is `c` for a connection; `p` transfers the app to a new phone
+  (§6.7.1); `d` and `a` pair a desktop or agent (§6.7). `h`, `k` and the link encoding are base64url **without** padding
   (RFC 4648 §5). `c` is the relay's 26-character claim id.
 - The scanner fetches the claim, MUST check `SHA-256(blob)` = `h` in
   constant time before decrypting, decrypts under `k`, and MUST reject a
@@ -1345,9 +1517,21 @@ so that they can still open reconnect `hs.init`s sealed to an older key.
 
 ### 6.7 Owner device and agent pairing
 
-The first app is bound at enrollment (§11.3). Every other app, desktop and
-agent pairs from an app that is already paired. The QR (TTL 10 min) is shown
-on the paired app; the new device scans it, or the code is pasted.
+**One app per vault** (owner decision, 2026-10-03). A vault has exactly
+one device of role `app`, the holder of the Protean Credential (§3.5.9).
+An app is bound only:
+
+- at enrollment (§11.3), the first and only app;
+- by a direct transfer, which replaces it (§6.7.1);
+- by a recovery, which replaces it (§11.11.5).
+
+No second app pairs: `device.pair.create{role: "app"}` is answered
+`one_app`; the app cannot be unlinked (`device.unlink` of the app is
+answered `forbidden`: it leaves only by a transfer or a recovery); and an `hs.init` of purpose `app` that is not one of these
+three handshakes is dropped and audited (`drop.one_app`). Desktops and
+agents pair from the app as below; they never hold the credential. The QR
+(TTL 10 min) is shown on the app; the new device scans it, or the code is
+pasted.
 
 ```
 Paired app            Vault                Relay              New device/agent
@@ -1377,18 +1561,112 @@ Rules:
   first; they take effect in the flush that completes the pairing, and
   the agent learns them in `leash.grant.updated`. The agent's `ik` is the
   grantee.
-- **Apps.** For role `app`, `hs.init` carries the device attestation in
-  `device_attest` (§11.7), over the §11.7 challenge with the `hs.init`
-  inner `id` as `request_id`, an empty `vault_id` (the new device does not
-  know it yet) and the `hs.init` inner `ts`. The vault drops (and audits)
-  an app's `hs.init` without a valid attestation.
+- **Apps.** An app pairs only by a direct transfer (§6.7.1). Its
+  `hs.init` carries the device attestation in `device_attest` (§11.7),
+  over the §11.7 challenge with the `hs.init` inner `id` as `request_id`,
+  an empty `vault_id` (the new device does not know it yet) and the
+  `hs.init` inner `ts`. The vault drops (and audits) an app's `hs.init`
+  without a valid attestation.
   In the same flush as the device record, the vault adds the app's `ik`,
-  `kem` and attestation binding to the sealed header's unlock keys.
+  `kem` and attestation binding to the sealed header's unlock keys, and
+  removes the old app's.
 - **Re-pairing.** A re-paired device MUST use a new relay key, because its
   old `sub` stays denylisted. The vault MUST refuse an `hs.init` whose
   collect `sender` is a relay key it has denylisted as a whole (an unlinked
   device, §7.4), whatever token it arrived on. Removed connections are
   denylisted by `jti` instead and may connect again (§7.4).
+
+#### 6.7.1 Direct transfer to a new phone
+
+A member who still holds the old phone moves the app, and with it the
+credential, to a new phone without the 24 h wait of a recovery (owner
+decision, 2026-10-03). The old app's session, the PIN and the credential
+password are the proof. The QR is the pairing QR with `t: "p"` and bundle
+`kind: "app"` (§6.4), TTL 10 minutes; nothing else uses it.
+
+```
+Old app (holder)           Vault                  Relay             New app
+  |--device.transfer.create-->|                     |                   |
+  |<--{transfer_id, link, exp}|--PUT claim (p)----->|                   |
+  |   shows QR                |                     |<--GET claim-------|
+  |                           |<--collect-----------|<--hs.init (app,   |
+  |                           |  device_attest ok   |   device_attest)  |
+  |<--device.transfer.pending{name, sas}            |                   | shows SAS
+  |   compare SAS; PIN + password                   |                   |
+  |--device.transfer.approve{credential, utk_id, sealed{password, pin}}->|
+  |                           |  PIN; open; CEK rotates (v+1, kept)     |
+  |<--{exp}-------------------|--hs.resp----------->|------------------>|
+  |                           |<--------------------|<--hs.fin----------|
+  |                           |  one flush: new app record + unlock key,|
+  |                           |  holder := new app, old app removed     |
+  |<--device.unlinked{transferred} (best effort)    |                   |
+  |                           |--device.paired{transfer, credential_version}->|
+  |                           |<--credential.get, credential.ack, credential.utk.get--|
+```
+
+1. The holder sends `device.transfer.create`. It is refused with
+   `credential_frozen` or `rotation_required` during a clone alarm
+   (§3.5.9), and `exists` while another transfer is open: one at a time.
+   The vault creates the invitation and answers `{transfer_id, link,
+   exp}`; audit `device.transfer.started`.
+2. The new app scans the QR and sends `hs.init` (purpose `app`) with
+   `device_attest`, which is REQUIRED (§11.7). An invalid attestation drops
+   the `hs.init` (audit `device.transfer.attestation_failed`); the holder
+   sees no pending transfer. Otherwise the vault sends the holder
+   `device.transfer.pending{transfer_id, name, sas}`.
+3. The holder compares the SAS and sends `device.transfer.approve` with
+   its current blob and, sealed to a UTK (§3.5.4), the `password` and the
+   `pin`. The vault:
+   - spends the UTK;
+   - checks the PIN against the vault's DEK derivation (§3.3.1): `bad_pin`
+     on a mismatch, counted in the unlock backoff of §11.8 (and audited
+     `vault.pin_failed`), and `backoff` while that backoff runs;
+   - opens the credential with the password (§3.5.3: `bad_password`,
+     `backoff`, and the clone rule of §3.5.9);
+   - **rotates the CEK** (version + 1). Nobody receives the new blob yet:
+     the vault keeps it as the latest blob, unconfirmed, whatever
+     `credential.backup` says (§3.5.3). The old app's copy is dead;
+   - records the transfer as approved with `exp` = now + 10 minutes,
+     sends `hs.resp`, answers `{exp}` and audits
+     `device.transfer.approved`. From now on the old app's credential
+     operations are refused with `transfer_pending`.
+4. The new app's `hs.fin` completes the transfer in **one flush**: the new
+   device record (role `app`, attestation binding, unlock key); the
+   holder becomes the new app; the old app is **removed** as by
+   `device.unlink` (§7.4: `device.unlinked{reason: "transferred"}` best
+   effort, relay key denylisted, unlock key and UTK pool removed). The new
+   app receives `device.paired{…, transfer: true, credential_version}`;
+   the vault audits `device.transferred` (`device_id` = the new app, `ref`
+   = `transfer_id`), creates the feed item `device.transferred` and sends
+   desktops `sync.event{kind: "device.transferred", device_id,
+   old_device_id}`.
+5. The new app fetches the blob with `credential.get`, confirms it with
+   `credential.ack` and fills its UTK pool with `credential.utk.get`.
+   It unlocks later with the PIN, like any app (§11.4).
+
+**Failures and aborts.** An aborted transfer is audited
+`device.transfer.aborted` (`ref` = `transfer_id`) and announced as
+`sync.event{kind: "device.transfer", transfer_id, state: "aborted",
+reason}` (`reason`: `rejected`, `expired`, `alarm`, `replaced` or
+`failed`); the pairing's `jti` is denylisted, and a pending `hs.init` or
+an answered handshake of the new app is dropped.
+
+| Case | What happens |
+|---|---|
+| The holder rejects (`device.transfer.reject`), before or after the scan, or after its own approval while the new app has not finished | Aborted. Nothing else changes (after an approval the old app fetches the rotated blob, as in the offline row below). |
+| No scan, or no approval, within 10 minutes | Aborted. Nothing else changes. |
+| The new app's attestation fails | Its `hs.init` is dropped; the transfer stays open until its 10 minutes run out. |
+| Wrong PIN or password at approval | `bad_pin` / `bad_password`, counted in their backoffs. The transfer stays pending until its 10 minutes run out; the member may retry. |
+| The new app goes offline after the approval (no `hs.fin` by `exp`) | Aborted. The old app was never removed and stays the holder. Its blob is now the previous, unconfirmed version, so it is answered `stale_credential` (not a clone, §3.5.9) and fetches the rotated blob with `credential.get`. |
+| The old app goes offline before approving | The transfer times out; nothing changes. |
+| The old app goes offline after approving | Nothing is needed from it: the transfer completes at `hs.fin`. The old app learns of its removal from `device.unlinked` (best effort) or from its relay key being refused. |
+| A clone alarm opens (§3.5.9) | An open transfer is aborted. |
+| The vault locks | The transfer and its pending handshake are kept in vault state; its 10 minutes still run and are checked at the next unlock, which aborts an expired one. |
+| A recovery completes (§11.11.5) | An open transfer is aborted (`replaced`). |
+
+OWNER DECISION (recommended: as specified): the transfer does not
+re-check the old app's device attestation; its session, the PIN and the
+password prove it.
 
 ### 6.8 Access sessions and approvals for desktops and agents
 
@@ -1764,7 +2042,8 @@ an answer to an unknown or expired id is dropped.
 | Sessions | `hs.init`, `hs.resp`, `hs.fin` | D↔V, V↔V | | Handshake, rekey, reconnect (§6) |
 | | `relay.token.issued` / `relay.token.refresh` | any | — / req | Deliver or request a token |
 | | `relay.address.update`, `identity.rotate` | any | | Rotation (§3.4) |
-| Credential | `credential.create`, `.get`, `.version`, `.unlock`, `.lock`, `.rotate`, `.password.change`, `.delete` | D→V | req | Protean Credential lifecycle (§3.5, §10.6) |
+| Credential | `credential.create`, `.get`, `.version`, `.unlock`, `.lock`, `.rotate`, `.password.change`, `.delete`, `.recover`, `.reset` | D→V | req | Protean Credential lifecycle (§3.5, §10.6) |
+| | `credential.alarm` / `credential.alarm.confirm` | V→D / D→V | — / req | Clone alarm to the holder; its confirmation (§3.5.9) |
 | | `pin.change` | D→V | req | Re-derive the DEK and re-seal the header (§10.6) |
 | Items & profile | `item.put`, `.get`, `.reveal`, `.list`, `.tag`, `.sensitivity`, `.delete` | D→V | req | The member's items: `data`, `secret` and `critical` (§10.7) |
 | | `tag.list`, `.set`, `.delete`, `.merge` | D→V | req | The tag registry; rename and merge (§10.8) |
@@ -1791,6 +2070,8 @@ an answer to an unknown or expired id is dropped.
 | | `call.end` | any | | Hang up, decline, busy, timeout, answered elsewhere |
 | Devices & agents | `device.pair.create`, `.approve`, `.reject`, `device.list`, `device.unlink` | D→V | req | Pairing and management (§6.7) |
 | | `device.pair.pending` | V→D | | Awaiting approval (`sas`) |
+| | `device.transfer.create`, `.approve`, `.reject` | D→V | req | Direct transfer of the app to a new phone (§6.7.1) |
+| | `device.transfer.pending` | V→D | | The new phone scanned: name and `sas` |
 | | `device.paired`, `device.unlinked` | V→D | | Welcome and removal notices |
 | | `device.session.request`, `.approve`, `.deny`, `.end` | D→V | req | Access sessions of desktops and agents (§6.8) |
 | | `device.session.pending`, `.granted`, `.ended` | V→D | | Asked; granted; ended or denied |
@@ -1882,7 +2163,18 @@ an answer to an unknown or expired id is dropped.
     - `invalid_psbt`: a PSBT the wallet refuses to sign; `message` holds a
       short reason (§10.18);
     - `unavailable`: the operation needs something this release does not
-      have, such as a vault-side chain source (§10.18).
+      have, such as a vault-side chain source (§10.18);
+  - and (0.9.0):
+    - `one_app`: `device.pair.create{role: "app"}`; the vault already has
+      its app (§6.7);
+    - `credential_frozen`: a clone alarm is open and awaits the holder's
+      confirmation, or the request presented a clone (§3.5.9);
+    - `rotation_required`: the alarm is confirmed; only
+      `credential.rotate` runs until the forced rotation (§3.5.9);
+    - `credential_lost`: `credential.recover` when the vault keeps no copy
+      of the latest blob (backup off, §11.11.5);
+    - `transfer_pending`: a credential operation of the old app after it
+      approved a transfer (§6.7.1).
 - A request answered with an error changes no state, except the password
   backoff, the spent UTK and the audit log and feed entries of §3.5.3.
   Objects that several
@@ -1901,6 +2193,9 @@ an answer to an unknown or expired id is dropped.
   | `message.read` | `connection_id`, `message_id` |
   | `device.paired` | `device_id`, `role` |
   | `device.unlinked` | `device_id` |
+  | `device.transferred` | `device_id` (the new app), `old_device_id` (§6.7.1) |
+  | `device.transfer` | `transfer_id`, `state` (`aborted`), `reason` (§6.7.1) |
+  | `credential.alarm` | `alarm_id`, `state` (`frozen`, `rotation_required`, `resolved`) (§3.5.9) |
   | `vault.release` | `release` (PCR0 hex), `release_number`; sent once after a vault first runs under a new release (§11.10.6) |
   | `credential.changed` | `version` (§3.5.5) |
   | `credential.deleted` | — |
@@ -1936,7 +2231,7 @@ an answer to an unknown or expired id is dropped.
   | `wallet.signed` | `wallet_id`, `txid` (§10.18) |
   | `wallet.deleted` | `wallet_id` (§10.18) |
 
-  These go to the owner's other apps and desktops (not agents), never with
+  These go to the owner's app and desktops other than the sender (not agents), never with
   secret values; devices fetch what changed.
 
 ### 10.2 Lifecycle and sessions
@@ -1947,6 +2242,7 @@ an answer to an unknown or expired id is dropped.
 | `vault.enroll.confirm` (app) | `{}` | `{}` |
 | `vault.status` (app, desktop, agent) | `{}` | `{vault_id, state_seq, header_seq, provisional, devices, connections}` |
 | `vault.lock` (app, desktop) | `{}` | `{}`; then `vault.locking` |
+| `vault.delete` (app: the holder, a recovering app, or the enrolling app before a credential exists) | `{confirm: "delete my vault", credential?, utk_id, sealed{pin, password?}}` | `{}`; then the deletion of §12.5. `bad_request` without the exact phrase or a needed member; `bad_pin`, `backoff`, `bad_password`, `credential_frozen` / `rotation_required` (holder during an alarm), `forbidden` |
 | `vault.locking` (ephemeral) | — | `{reason?}`, with `exp` = now + 60 s; `reason` is `"recovery"` when a recovery request locked the vault (§11.11.1) |
 | `relay.token.issued` | — | `{kind: "standing" \| "reconnect", token}` |
 | `relay.token.refresh` (req) | `{}` | `{kind: "standing", token}` |
@@ -1957,14 +2253,18 @@ an answer to an unknown or expired id is dropped.
 
 | Type | Request body | Response / event body |
 |---|---|---|
-| `device.pair.create` (app) | `{role: "app" \| "desktop" \| "agent"}` | `{pairing_id, link, exp}` |
+| `device.pair.create` (app) | `{role: "desktop" \| "agent"}` | `{pairing_id, link, exp}`; `{role: "app"}` is answered `one_app` (§6.7) |
 | `device.pair.pending` (to apps) | — | `{pairing_id, pending_id, role, name, sas}`; `name` is the new device's self-asserted `profile.name` |
 | `device.pair.approve` (app) | `{pairing_id, session_seconds?, grants?}`; `session_seconds` (60–86,400) only for a desktop or agent: its first access session (§6.8); `grants` only for an agent: 1–32 LEASH grant specifications (§10.11), signed at the approval (`credential_locked` outside the unlock window) | `{}` |
 | `device.pair.reject` (app) | `{pairing_id}` | `{}` |
-| `device.paired` (to the new device) | — | `{device_id, role, vault_id, release, release_number, session_expires_at?}` (the release the vault runs under) |
+| `device.paired` (to the new device) | — | `{device_id, role, vault_id, release, release_number, session_expires_at?, transfer?, credential_version?}` (the release the vault runs under); `transfer: true` and the credential's `credential_version` for a transferred app (§6.7.1) |
 | `device.list` (app, desktop) | `{}` | `{devices: [{id, kind, state, name, ik, profile?, created_at?, last_active_at?, session_expires_at?}]}` |
-| `device.unlink` (app) | `{device_id}` | `{}` |
-| `device.unlinked` (to the unlinked device, best effort) | — | `{}` |
+| `device.unlink` (app) | `{device_id}` | `{}`; `forbidden` for the app itself (0.9.0: it leaves by a transfer or a recovery) |
+| `device.unlinked` (to the unlinked device, best effort) | — | `{reason?}`: `"transferred"` for the old app of a transfer (§6.7.1), `"replaced"` for the old app of a recovery (§11.11.5) |
+| `device.transfer.create` (the holder) | `{}` | `{transfer_id, link, exp}`; `exists` while a transfer is open; `credential_frozen` or `rotation_required` during an alarm (§6.7.1) |
+| `device.transfer.pending` (to the holder) | — | `{transfer_id, name, sas}`; `name` is the new app's self-asserted `profile.name` |
+| `device.transfer.approve` (the holder) | `{transfer_id, credential, utk_id, sealed{password, pin}}` | `{exp}`: the new app must finish its handshake by then; `bad_pin`, `backoff`, `bad_password`, `stale_credential`, `credential_frozen`, `utk_invalid` |
+| `device.transfer.reject` (the holder) | `{transfer_id}` | `{}`; cancels the transfer before or after the scan, or after the approval until the new app finishes |
 | `device.session.request` (desktop, agent) | `{seconds?}` (60–86,400, default 3,600) | `{request_id, exp}` |
 | `device.session.pending` (to apps) | — | `{request_id, device_id, role, name, seconds, exp}` |
 | `device.session.approve` (app) | `{request_id, seconds?}` | `{device_id, session_id, expires_at}` |
@@ -2136,8 +2436,12 @@ The D→V messaging types are sent by `app` or `desktop` devices.
 
 ### 10.6 Credential (§3.5)
 
-Every type below is sent by an owner device of role `app`, except
-`credential.version`, which an `app` or `desktop` may send. Critical
+Every type below is sent by the vault's app, except
+`credential.version`, which an `app` or `desktop` may send. The types that
+carry or return a blob (`credential.get`, `.ack`, `.unlock`, `.rotate`,
+`.password.change`, `.delete`) and `credential.alarm.confirm` are the
+**holder's** only (§3.5.9); `credential.recover` and `credential.reset`
+are the recovering app's only (§11.11.5). Critical
 items, the member's data inside the credential, are `item.*` types with
 `sensitivity: "critical"` (§10.7); they follow the rules of this section
 for `credential`, `utk_id` and `sealed`.
@@ -2146,11 +2450,14 @@ for `credential`, `utk_id` and `sealed`.
 - `utk_id` and `sealed` carry the UTK-sealed payload (§3.5.4). The
   payload members are shown in `{…}` after `sealed`: `password` and
   `new_password` (UTF-8, 8–1,024 bytes), `item_id`, `item`, `reply_key`,
-  `request_id` and `payload_sha256`.
+  `request_id`, `payload_sha256` and `pin` (§6.7.1).
 - Types that carry `sealed` can answer `utk_invalid` (§3.5.4). Types that
   carry `credential` follow §3.5.3: they can answer `backoff`,
   `stale_credential` and `bad_password`, and on success they rotate the
-  CEK and return the new `credential` and its version.
+  CEK and return the new `credential` and its version. They also follow
+  §3.5.9: a clone is answered `credential_frozen`, and during an alarm
+  they answer `credential_frozen` or `rotation_required`; the old app of
+  an approved transfer gets `transfer_pending` (§6.7.1).
 - Every response to a type that spent a UTK carries `utks` (an array of
   §3.5.4 UTKs, possibly empty) to replenish the app's pool.
 
@@ -2158,15 +2465,18 @@ for `credential`, `utk_id` and `sealed`.
 |---|---|---|
 | `credential.utk.get` | `{}` | `{utks}` (tops the app's pool up to 20) |
 | `credential.create` | `{utk_id, sealed{password}}` | `{credential, version, key, utks}`; `exists` if the vault has a credential |
-| `credential.get` | `{}` | `{credential, version, updated_at}`: the latest blob; `not_found` if the vault holds none (§3.5.6) |
+| `credential.get` | `{}` | `{credential, version, updated_at}`: the latest blob, to the holder only (§3.5.9); `not_found` if the vault holds none (§3.5.6) |
 | `credential.ack` | `{version}` | `{}`: the app holds this version (§3.5.3) |
-| `credential.version` | `{}` | `{exists, version?, key?, updated_at?}` |
+| `credential.version` | `{}` | `{exists, version?, key?, updated_at?, alarm?}`; `alarm` = `{alarm_id, state, at}` while a clone alarm is open (§3.5.9) |
 | `credential.unlock` | `{credential, utk_id, sealed{password}}` | `{credential, version, expires_at, utks}` (§3.5.3 unlock window) |
 | `credential.lock` | `{}` | `{}` |
 | `credential.rotate` | `{credential, utk_id, sealed{password}}` | `{credential, version, key, utks}`; the vault also rotates `ik` and `kem` (§3.4) |
 | `credential.password.change` | `{credential, utk_id, sealed{password, new_password}}` | `{credential, version, utks}` |
 | `credential.delete` | `{credential, utk_id, sealed{password}}` | `{}`; the critical items go with it (§10.7) |
-| `credential.recover` | `{credential?, utk_id, sealed{password}}` | `{credential, version, utks}` (§11.11.5) |
+| `credential.recover` | `{utk_id, sealed{password}}` | `{credential, version, utks}` (§11.11.5); `credential_lost` if the vault keeps no copy of the latest blob (backup off). 0.9.0 removed the member-supplied `credential` |
+| `credential.reset` | `{utk_id, sealed{password}}` | `{credential, version, key, utks}`: a new credential after a recovery with the backup off; the old credential and every critical item are destroyed (§11.11.5); `exists` if the vault keeps the latest blob (use `credential.recover`) |
+| `credential.alarm` (V→D, to the holder; durable) | — | `{alarm_id, kind: "clone", state: "frozen", at, presenter: "holder" \| "other", version}`: an urgent alert (§3.5.9) |
+| `credential.alarm.confirm` | `{alarm_id, mine: bool}` | `{state: "rotation_required"}`; `not_found` if no such alarm is open (§3.5.9) |
 | `pin.change` | `{pin, new_pin}` | `{}`; `bad_pin` if `pin` is wrong |
 
 - `key` is the credential key's public key (base64). `version` is the
@@ -2518,7 +2828,16 @@ entry: { "entry_id": "<ULID>", "seq": 812, "at": "<ts>", "kind": "connection.add
   `connection.stale`, `connection.reconnected`; `identity.rotated`;
   `credential.created`, `credential.rotated`, `credential.password_changed`,
   `credential.password_failed`, `credential.unlocked`, `credential.deleted`;
-  `credential.recovered`; `item.added`, `item.updated`, `item.deleted`,
+  `credential.recovered`; `credential.clone_detected` (`ref` =
+  `alarm_id`, `device_id` = the presenter), `credential.alarm.confirmed`
+  (`ref` = `<alarm_id>:mine` or `<alarm_id>:not_mine`),
+  `credential.alarm.resolved` (`ref` = `alarm_id`), `credential.reset`
+  (§3.5.9, §11.11.5); `vault.pin_failed` (a wrong PIN at a transfer's
+  approval, §6.7.1); `device.transfer.started`,
+  `device.transfer.approved`, `device.transferred`,
+  `device.transfer.aborted`, `device.transfer.attestation_failed`
+  (`ref` = `transfer_id`), `device.replaced` (`device_id` = the old app a
+  recovery removed) (§6.7.1, §11.11.5); `item.added`, `item.updated`, `item.deleted`,
   `item.sensitivity_changed`, `item.revealed` (`ref` = `item_id`),
   `tag.changed` (`ref` = the registry's new version) (§10.7, §10.8);
   `settings.changed` (`ref` = the new version); `recovery.requested`, `recovery.replaced`, `recovery.bad_code`,
@@ -2565,7 +2884,7 @@ entry: { "entry_id": "<ULID>", "seq": 812, "at": "<ts>", "kind": "connection.add
   (`ref` = `txid`) (§10.18); `drop.suppressed`;
   and `drop.<reason>` for every message the vault dropped
   or refused (§6.3, §6.6, §7.3, §8.4), with the runtime's reason, such as
-  `drop.rate_limited`.
+  `drop.rate_limited` or `drop.one_app` (§6.7).
 
 **Feed.**
 
@@ -2611,7 +2930,10 @@ item: { "item_id": "<ULID>", "seq": 41, "kind": "connection.request", "at": "<ts
   (`ref` = `request_id`), `action.request` (`ref` = `invocation_id`),
   `intro.request` (`ref` = `intro_id`), `location.shared`
   (`ref` = `share_id`), `location.request` (`ref` = `request_id`),
-  `wallet.signed` (`ref` = `txid`),
+  `wallet.signed` (`ref` = `txid`), `credential.alarm` (priority
+  `urgent`, `ref` = `alarm_id`), `device.transferred` (`ref` =
+  `transfer_id`), `device.replaced` (`device_id` = the old app),
+  `credential.reset`,
   and `guide`. Apps render
   items from `kind` and the references; only `guide` items carry `title`
   and `body`.
@@ -4343,7 +4665,7 @@ Nothing secret is stored:
 
 | Store | Contents | Retention |
 |---|---|---|
-| Vault table | `user_guid`, **`vault_id`** (opaque, 128-bit random, 32 lowercase hex characters, assigned by the API at a member's first enrollment; the routing key for alternate-channel requests), `state` (`enrolling`, `locked`, `unlocked`, `deleted`), **lease** (`instance_id`, `lease_expires_at`), **`sealed_release`** (the PCR0 the vault is sealed to; routing aid, §11.10.5), **`vault_version`** (release that last opened the vault), **`state_version`** (vault-state format version), `created_at`, `updated_at` | account lifetime |
+| Vault table | `user_guid`, **`vault_id`** (opaque, 128-bit random, 32 lowercase hex characters, assigned by the API at a member's first enrollment; the routing key for alternate-channel requests), `state` (`enrolling`, `locked`, `unlocked`, `deleted`), **lease** (`instance_id`, `lease_expires_at`), **`sealed_release`** (the PCR0 the vault is sealed to; routing aid, §11.10.5), **`vault_version`** (release that last opened the vault), **`state_version`** (vault-state format version), **`alarm`** (`kind`, `alarm_id`, `at`, `emailed_at`; the last host alarm, below) and `alarm_pending`, `created_at`, `updated_at` | account lifetime |
 | Instance registry | `instance_id`, **`release`** (PCR0 from its descriptor), queue URL, descriptor, attestation, `heartbeat_at` | while the instance is live |
 | Request table (response slots) | `request_id`, `vault_id`, `op`, `status` (`queued`, `done`, `expired`), opaque response `envelope` (≤ 8 KiB) and/or a host `code` | TTL 15 min |
 | Audit log | enroll, unlock and lock requests: member, time, `vault_id`, request id, never PINs or envelopes | MEMBER-API audit retention |
@@ -4356,6 +4678,22 @@ Nothing secret is stored:
   the vault table only while it holds the vault's lease or no lease exists
   (a conditional write), so an instance that lost a split brain cannot
   overwrite the holder's values.
+- **Host alarms** (0.9.0). The vault reports a clone alarm (§3.5.9) as
+  the lifecycle event `alarm.credential_clone`, once per alarm. It
+  carries nothing but its kind, the `vault_id` and the usual release
+  fields: no device, version or time from the vault. The parent records
+  it on the vault row, **whatever the lease** (an alarm is never lost to a
+  lease race): `alarm = {kind: "credential_clone", alarm_id, at}`, where
+  the parent makes `alarm_id` (a ULID) and `at` (Unix seconds), and
+  `alarm_pending = true`. The member API emails the member and clears
+  `alarm_pending` (MEMBER-API). Alarm kinds other than those listed here
+  are rejected by the parent. A dishonest host can suppress the email but
+  not the vault's own alert to the app, its freeze or its audit entry.
+- **Deletion notice** (0.9.0). On the lifecycle event `deleted` (§12.5)
+  the parent also records `alarm = {kind: "vault_deleted", alarm_id, at}`
+  and `alarm_pending = true`, whatever the lease: the vault's own audit
+  log is gone, so the member API emails the member and then deletes the
+  vault rows (MEMBER-API), after which the member enrolls afresh.
 - **Lifecycle values are advisory.** `vault_version` should match the
   `release` in the attested descriptor of the reporting instance, but a
   dishonest parent could misreport any of these values. They therefore serve
@@ -4393,7 +4731,7 @@ the enclave reports completion.
 
 - **Lifecycle events:** `enrolled` and `unlocked` at enrollment; `moved`
   with the target release after a move, and back to the earlier release
-  after an abandonment (§11.10.4).
+  after an abandonment (§11.10.4); `alarm.credential_clone` (above).
 
 `lock` and `delete` carry no envelope. Locking is harmless, and deletion
 through the API is an operator power the host has anyway (§13.5). The
@@ -4455,8 +4793,9 @@ SHA-256(authenticatorData || clientDataHash).
 mistyped member, or another `platform`, is rejected.
 
 Each platform has a **device attestation key**: a hardware-held signing key
-that is attested once, when the app enrolls or pairs (§6.7), and then signs
-the challenge at every unlock.
+that is attested once, when the app enrolls (§11.3), is transferred to
+(§6.7.1) or registers for a recovery (§11.11.3), and then signs the
+challenge at every unlock.
 
 - **Android (hardware key attestation).**
   - At enrollment or pairing, the app generates a non-exportable EC P-256
@@ -4467,7 +4806,8 @@ the challenge at every unlock.
     pinned in the image, then checks the attestation extension: the
     challenge; attestation and key security level `TrustedEnvironment` or
     `StrongBox` (never `Software`); `RootOfTrust` with `deviceLocked` true and
-    `verifiedBootState` `Verified`; the `attestationApplicationId` package
+    `verifiedBootState` `Verified`, or `SelfSigned` with an allowlisted
+    `verifiedBootKey` (GrapheneOS, below); the `attestationApplicationId` package
     name and signing-certificate digest of the VettID app; a signing-only,
     non-exportable key.
   - Certificate revocation uses Google's attestation status list. The
@@ -4485,6 +4825,52 @@ the challenge at every unlock.
   - The enclave stores the attested public key with that app's unlock key in
     the sealed header. Each unlock carries a signature over `challenge` by
     that key.
+- **GrapheneOS** (owner decision, 2026-10-03; 0.9.0). GrapheneOS runs
+  with the device's bootloader locked to its own signing key, so the
+  attestation reports `verifiedBootState` `SelfSigned`. The enclave
+  accepts `SelfSigned` **only** when `verifiedBootKey` (32 bytes) equals
+  one of the GrapheneOS verified boot key fingerprints pinned in the
+  release (vettid-vault `vms/pins`); `deviceLocked` true is still
+  required, and every other check is unchanged. `Verified` is accepted as
+  before; `Unverified` and `Failed` are refused, and so is `SelfSigned`
+  with any other key (another custom OS, or a self-built one).
+  - Source: the GrapheneOS Attestation Compatibility Guide,
+    <https://grapheneos.org/articles/attestation-compatibility-guide>, which
+    tells apps to "enforce that `verifiedBootState` is either `Verified`
+    or `SelfSigned`" and, for `SelfSigned`, to "check that
+    `verifiedBootKey` matches one of the official GrapheneOS verified boot
+    keys".
+  - The allowlist is part of the release: adding a device family or
+    changing a key is a release update (§11.10). Fingerprints as of
+    2026-10-03 (SHA-256, lowercase hex):
+
+    | Device | `verifiedBootKey` |
+    |---|---|
+    | Pixel 10a | `d8f879d10419eddc9fcda6280718be763f6bf12299e1f72df3ea8ad8a8eb7f80` |
+    | Pixel 10 Pro Fold | `55a2d44103e56d5ec65496399c417987ba77730e6488fc60ba058d09fc3caee3` |
+    | Pixel 10 Pro XL | `141d7fc32af7958a416f2661b37cf6f27bfb376fb5ce616aeaa27a82c7a04f74` |
+    | Pixel 10 Pro | `4e8ee8f717754052198ca6d2d3aaa232e2461b4293c0d6f297e519cc778de093` |
+    | Pixel 10 | `3f7415ea26f5df5b14ea6d153256071a7a1af9ce7b0970b7311cc463c7ea02c7` |
+    | Pixel 9a | `0508de44ee00bfb49ece32c418af1896391abde0f05b64f41bc9a2dfb589445b` |
+    | Pixel 9 Pro Fold | `af4d2c6e62be0fec54f0271b9776ff061dd8392d9f51cf6ab1551d346679e24c` |
+    | Pixel 9 Pro XL | `55d3c2323db91bb91f20d38d015e85112d038f6b6b5738fe352c1a80dba57023` |
+    | Pixel 9 Pro | `f729cab861da1b83fdfab402fc9480758f2ae78ee0b61c1f2137dd1ab7076e86` |
+    | Pixel 9 | `9e6a8f3e0d761a780179f93acd5721ba1ab7c8c537c7761073c0a754b0e932de` |
+    | Pixel 8a | `096b8bd6d44527a24ac1564b308839f67e78202185cbff9cfdcb10e63250bc5e` |
+    | Pixel 8 Pro | `896db2d09d84e1d6bb747002b8a114950b946e5825772a9d48ba7eb01d118c1c` |
+    | Pixel 8 | `cd7479653aa88208f9f03034810ef9b7b0af8a9d41e2000e458ac403a2acb233` |
+    | Pixel Fold | `ee0c9dfef6f55a878538b0dbf7e78e3bc3f1a13c8c44839b095fe26dd5fe2842` |
+    | Pixel Tablet | `94df136e6c6aa08dc26580af46f36419b5f9baf46039db076f5295b91aaff230` |
+    | Pixel 7a | `508d75dea10c5cbc3e7632260fc0b59f6055a8a49dd84e693b6d8899edbb01e4` |
+    | Pixel 7 Pro | `bc1c0dd95664604382bb888412026422742eb333071ea0b2d19036217d49182f` |
+    | Pixel 7 | `3efe5392be3ac38afb894d13de639e521675e62571a8a9b3ef9fc8c44fd17fa1` |
+    | Pixel 6a | `08c860350a9600692d10c8512f7b8e80707757468e8fbfeea2a870c0a83d6031` |
+    | Pixel 6 Pro | `439b76524d94c40652ce1bf0d8243773c634d2f99ba3160d8d02aa5e29ff925c` |
+    | Pixel 6 | `f0a890375d1405e62ebfd87e8d3f475f948ef031bbf9ddd516d5f600a23677e8` |
+
+  - OWNER DECISION (recommended: GrapheneOS only). Other hardened OSes
+    (for example CalyxOS) would each be an allowlist entry in a release;
+    none is added until requested.
 - **iOS (App Attest).**
   - At enrollment or pairing, the app sends an attestation object with
     `clientDataHash` = `challenge`. The enclave verifies it against Apple's
@@ -5029,14 +5415,22 @@ detect a key-policy evaluation flaw in KMS or an AWS insider.
 
 ### 11.11 Recovery
 
-Recovery lets a member who has lost **every owner app** get back into
-their vault. They need:
+Recovery lets a member who has lost **their app** (the vault's one app,
+§6.7) get back into their vault. A member who still holds the old phone
+uses a direct transfer instead (§6.7.1). They need:
 
 - their account (member session and email);
 - 24 hours during which nobody cancels;
 - a new attested app;
 - their PIN;
-- their Protean Credential password (when a credential exists).
+- their Protean Credential password, when the vault keeps the latest
+  blob (`credential.backup` on). With the backup off the credential is
+  lost, and the recovery can only reset it or delete the vault
+  (§11.11.5).
+
+The new app **replaces** the old one: the old app is removed and its keys
+revoked, and the credential copy it held is dead. Desktops and agents are
+kept (owner decision, 2026-10-03).
 
 There is one flow and no bypass:
 
@@ -5054,7 +5448,8 @@ New app --scan QR--> POST /api/vault/recovery/register --queue--> code + device 
 New app --POST /api/vault/unlock (PIN; enclave backoff)--> vault opens; vault_bundle
 New app --hs.init (purpose app, ctx = recovery_id) --> device record, restricted
 New app --credential.recover{password} (credential backoff)--> credential handed over;
-         the app becomes an ordinary owner app
+         the app becomes the vault's app (holder); the old app is removed
+         (backup off: credential_lost --> credential.reset, or vault.delete)
 ```
 
 While the vault is locked it has no DEK (§12.1). The recovery record
@@ -5237,28 +5632,70 @@ because it only reduces exposure. Owner apps learn of the recovery from
    app's handshake (§11.3), because its keys were bound at registration.
    The resulting device record is **recovering**:
    - it may send only `credential.utk.get`, `credential.recover`,
-     `vault.status` and the token and address types (anything else is
-     `forbidden`);
+     `credential.reset`, `vault.delete`, `vault.status` and the token and
+     address types (anything else is `forbidden`);
    - it receives no fan-out;
    - it is not announced to the other devices.
 3. **Password.** The app first gets UTKs with `credential.utk.get`, which a
-   recovering app may send. It then sends `credential.recover{credential?,
-   utk_id, sealed{password}}`.
-   - The vault opens the latest blob with the current CEK and the
-     password, under the credential's password backoff (§3.5.3).
-   - The blob is the vault's own copy when it keeps one (§3.5.6).
-     Otherwise the member must supply it in `credential`: their own backup
-     of the latest version. Without it the answer is `credential_required`.
-   - As with every use, the vault then rotates the CEK and returns the new
-     blob (`{credential, version, utks}`). Every copy on the lost devices,
-     and every older backup, becomes undecryptable.
-   - It turns the device into an ordinary owner app, removes the recovery
-     record, and sends `sync.event{kind: "device.paired"}` to the other
-     devices.
-4. **No credential, no recovery.** A vault without a credential is refused
+   recovering app may send. It then sends `credential.recover{utk_id,
+   sealed{password}}`.
+   - The vault opens its own copy of the latest blob (§3.5.6) with the
+     current CEK and the password, under the credential's password
+     backoff (§3.5.3). 0.9.0 removed the member-supplied blob: there is
+     no off-device copy to supply (§3.5.6).
+   - As with every use, the vault then rotates the CEK, re-keys every
+     critical item (§10.7) and returns the new blob (`{credential,
+     version, utks}`). The copy on the lost phone becomes undecryptable.
+   - **The new app replaces the old one,** in the same flush:
+     - the device becomes the vault's app and the credential's holder
+       (§3.5.9), and the recovery record is removed;
+     - every other device of role `app` is removed as by `device.unlink`
+       (§7.4): `device.unlinked{reason: "replaced"}` best effort, its
+       relay key denylisted, its unlock key and UTK pool removed, audit
+       `device.replaced` and a feed item, `sync.event{kind:
+       "device.unlinked"}`;
+     - **desktops and agents are kept**, with their access sessions and
+       LEASH grants;
+     - the other devices receive `sync.event{kind: "device.paired"}`.
+   - A clone alarm that is open (§3.5.9) moves to `rotation_required`:
+     the recovered app must rotate before using the credential.
+4. **Backup off: no recovery of the credential, only of access.** When
+   the vault keeps no copy of the latest blob (`credential.backup` off,
+   §3.5.6), there is nothing to recover and nothing may be recovered
+   (owner decision, 2026-10-03: otherwise a bad actor could retrieve
+   secrets). The recovery restores **access to the vault only**, so that
+   the member can reset the credential or delete the vault:
+   `credential.recover` answers `credential_lost` without opening
+   anything, and the device stays restricted. No message on this path
+   returns any credential content or critical item: a recovering app
+   cannot send `credential.get`, `credential.version` or any item type
+   (`forbidden`), `credential.reset` destroys the critical items before
+   it creates the new credential, and `vault.delete` returns `{}`. The
+   member lost the credential and every critical item with the phone. The
+   app explains this and offers (owner decision, 2026-10-03):
+   - **a new credential**: `credential.reset{utk_id, sealed{password}}`
+     with a new password. The vault destroys the old credential and every
+     critical item (as `credential.delete`, §3.5.5), creates a new
+     credential (version 1, a new credential key, no rotation statement),
+     and completes the recovery exactly as in step 3: the app becomes the
+     holder and replaces the old app. It answers `{credential, version,
+     key, utks}`, audits `credential.reset` and creates a feed item.
+     `credential.reset` is refused with `exists` when the vault does keep
+     the latest blob: the member must then use `credential.recover` with
+     the password.
+   - **deleting the vault**: `vault.delete` (§10.2, §12.5) with the PIN
+     alone: the password cannot be checked, the credential being lost, and
+     the account, the email and the 24 h wait already stood in front of
+     the PIN. With the backup on, a recovering app's `vault.delete` needs
+     the password too, checked against the vault's copy.
+   - With the backup off a recovery therefore rests on the account (email
+     and session), the 24 h wait and the PIN, not on the password. It
+     exposes no critical item: they are destroyed. That is the price of
+     keeping no copy outside the phone.
+5. **No credential, no recovery.** A vault without a credential is refused
    at the request (§11.11.1). `credential.recover` on such a vault answers
    `credential_required` and the device stays restricted. There is no
-   completion on the PIN alone.
+   completion on the PIN alone, except the reset of step 4.
 
 #### 11.11.6 Limits and audit
 
@@ -5311,16 +5748,24 @@ with body `{token}`. It needs no session: the token stands in for it.
 
 #### 11.11.8 Decisions
 
-- **Old owner devices are kept** (owner decision, 2026-10-03). After a
-  recovery, the other apps and desktops are still paired, and the
-  recovered app can unlink them (`device.unlink`). A stolen device:
+- **The recovered app replaces the old app; desktops and agents are
+  kept** (owner decision, 2026-10-03, replacing 0.4.1's "old owner devices
+  are kept"). The old app is removed at `credential.recover` (or
+  `credential.reset`), its unlock key and device keys revoked, and the
+  credential copy it held is under a destroyed CEK. A stolen phone:
   - cannot use the vault during the 24 h (`recovery_pending`), though it
     can cancel the recovery;
-  - after the recovery, holds only a blob under a destroyed CEK.
+  - after the recovery, is no longer a device of the vault.
 - **No recovery without the credential** (owner decision, 2026-10-03).
-  - A recovery always ends with the member's credential password against
-    the latest blob: the vault's backup, or the member's own copy when the
-    backup is off.
+  - With the backup on, a recovery always ends with the member's
+    credential password against the vault's copy of the latest blob.
+  - With the backup off, no copy exists and **no recovery of the
+    credential is possible** (owner decision, 2026-10-03: a recovery that
+    could return secrets could hand them to a bad actor). The recovery
+    restores access to the vault only, so that the member can reset the
+    credential (destroying the critical items) or delete the vault
+    (§11.11.5 step 4, §12.5). A vault never runs without a credential
+    (§3.5.7).
   - A vault without a credential is not recoverable. It cannot exist past
     enrollment anyway (§3.5.7).
 
@@ -5427,6 +5872,64 @@ vault**.
   detects a split brain (§12.3) zeroizes and exits without flushing.
   Killing one vault's process affects no other vault.
 
+### 12.5 Vault deletion
+
+A vault is deleted on one of three authorities:
+
+| Authority | Request | What it needs |
+|---|---|---|
+| The holder (§3.5.9) | `vault.delete` (§10.2) | the phrase `delete my vault`, the PIN and the credential password over the current blob, both UTK-sealed; both backoffs apply; refused (`credential_frozen`, `rotation_required`) while a clone alarm is open |
+| A recovering app (§11.11.5) | `vault.delete` | the phrase and the PIN; and the password against the vault's copy when it keeps one (backup on). With the backup off, the PIN only (OWNER DECISION, §15). Allowed during an alarm: the recovery path |
+| The enrolling app of a vault without a credential (§3.5.7) | `vault.delete` | the phrase and the PIN |
+| The host | the queue operation `delete` (§11.5): account cancellation (MEMBER-API) | the member API's own checks |
+
+A running vault deletes itself with the full semantics below; the host's
+`delete` asks a running vault to do so (as a lock with the reason
+`delete`) and otherwise erases the stored objects itself. Desktops and
+agents cannot delete a vault.
+
+**Order.** The steps run in this order, so that a crash at any point
+converges to "deleted", never to a vault that runs again:
+
+1. **Mark**, in the request's flush: state and sealed header record
+   `deleting`. In the same flush the credential (CEK, credential state,
+   UTK pools) and the features' secrets are destroyed; every active
+   connection is sent `connection.removed`, every owner device
+   `device.unlinked{reason: "vault_deleted"}`; every token the vault
+   issued is revoked at the relay by `jti` and every peer's relay key by
+   `sub` (§7.4); open invitation claims are deleted; a transfer ends. The
+   requester's `{}` follows. Nothing else in the batch is handled.
+2. **Drain**: the outbox is delivered once, best effort.
+3. **Zeroize**: every key and the DEK are wiped; the vault is locked and
+   its process exits (§12.4).
+4. **Erase**, through the parent's store with conditional deletes, a
+   missing object counting as deleted: the state object; the headers of
+   every release the vault knew (a pending move's target and source),
+   its own release's header last, since that header is the deletion
+   marker; and the enclave's member index object if it still names this
+   vault (§11.5).
+5. **Report** the lifecycle event `deleted` (§11.5). The parent marks the
+   row `deleted` and records the `vault_deleted` notice; the member API
+   emails the member and deletes the vault rows (MEMBER-API).
+
+**Convergence.** A header that records `deleting` is never opened again:
+an unlock, a recovery request, registration or cancellation that reads
+it finishes step 4 instead (and answers as for a missing vault). A crash
+after step 1 therefore loses at most the best-effort notices and
+revocations, never the deletion. Deletion is idempotent.
+
+**The relay mailbox.** RELAY-PROTOCOL 0.4.0 cannot delete a mailbox.
+After a deletion every token the vault issued is denylisted and every
+peer key revoked, so deposits are refused (`token_revoked`); messages
+already deposited expire after `message_ttl_seconds` (14 days); the
+registration stays, empty, with a key nobody holds. A relay route to
+delete a mailbox is recommended (§15).
+
+**What is left.** Nothing of the vault's contents: state, headers and
+index are erased, and the DEK, CEK and keys existed only in the
+enclave's memory. The member API keeps its own audit records
+(MEMBER-API).
+
 ## 13. Security considerations
 
 ### 13.1 Why the relay key is PIN-only
@@ -5512,7 +6015,7 @@ it can read and write only its own objects and use only its own relay key
 | Session epoch key | Read and forge messages in that epoch and direction. Vault-to-vault epochs last at most 24 h. | Next rekey |
 | Vault `ik` or `kem` | Impersonate the vault in new handshakes and read new `hs.init`s | Credential rotation, `identity.rotate`, rekey |
 | ETK | PINs in requests sealed to it (≤ 25 h). Requires breaking the enclave. | Enclave restart |
-| Owner app | Whatever its role allows, including unlock attempts if the PIN is known | Unlink from another device |
+| Owner app (the vault's one app) | Whatever its role allows, including unlock attempts if the PIN is known; with the PIN and the password, a transfer to another phone (§6.7.1) | Recovery (§11.11), which replaces it |
 | Desktop | Within an access session, what desktops may send; step-up types (secret items' values, item and tag changes, profile, settings, share rules and decisions, invitations, removals, grant decisions, action configurations, introductions, location shares, the location log, the presence policy) only with an app's approval; never critical items or wallet spends; nothing after the session ends (§6.8) | `device.session.end`; unlink |
 | Agent | Within its access session, only what its LEASH grants cover: through `ask` grants nothing without an app's approval of each request (at most 20 referrals an hour), through `auto` grants up to their rate limits; LEASH operations only on the `data` and `secret` items its share rules include, never critical ones; never app-only types, invitations, credential, device or grant management. Refused requests are throttled and repeated ones suspend it; its activity is summarised in the audit log, so it cannot push older entries out (§10.11) | `leash.grant.revoke`, `device.session.end`, `device.unlink`; suspension is automatic |
 | A LEASH delegation (every grant) | A claim, to relying parties that trust the member's credential key, that the agent holds that scope, until the grant's `expires_at` if any; the vault never relies on it. A relying party that requires a status statement accepts a revoked delegation for at most its `status_ttl` (≤ 1 h, default 15 min) plus skew; one that does not can be shown it until `exp` (§10.11) | `leash.grant.revoke` (no new statements); a shorter `status_ttl` |
@@ -5541,10 +6044,19 @@ it can read and write only its own objects and use only its own relay key
 | The Bitcoin libraries (btcd) | Parsing PSBTs from the member's own app and deriving keys, in the vault's process only (never the supervisor), so a flaw reaches only that vault (§12.4, §13.3) | A release update |
 | A call's media key `k_call` | That call's media; it exists only on the two devices of the call, whose key-exchange shares are signed by the devices and vouched for by their vaults (§10.10) | Hang up |
 | PIN alone | Nothing without a registered, attested app | `pin.change` |
-| An app's copy of the Protean Credential | Nothing without the current CEK, which only the vault holds and which rotates at every use; password guesses only online, through a paired app with a UTK, under the backoff (§3.5.8) | Any use of the credential (a new CEK; the old blob is dead) |
+| An app's copy of the Protean Credential | Nothing without the current CEK, which only the vault holds and which rotates at every use; password guesses only online, through the holder's session with a UTK, under the backoff (§3.5.8). Presenting it while it is not the current blob is a clone: refused, the app alerted, the member emailed, credential operations frozen until a forced rotation (§3.5.9) | Any use of the credential (a new CEK; the old blob is dead); the forced rotation |
+| A clone presented through the holder's session (a stolen session and an old copy, or a restored phone backup) | Nothing: refused with `credential_frozen`, never opened; the alarm freezes credential operations (messaging continues) until the holder confirms and rotates (§3.5.9) | `credential.alarm.confirm`, then `credential.rotate`; change the password and PIN if it was not the member |
+| A thief with the app's session and the PIN, without the password | No deletion: the holder's `vault.delete` needs the password too (§12.5) | — |
+| The member's account, email and PIN, for 24 h unnoticed, with the backup off | A recovery that restores access only: a reset or a deletion, never the credential or a critical item (§11.11.5, §12.5) | Cancel the recovery; turn the backup on |
+| VettID (operator) | Deleting a vault (the host's `delete`, an operator power it had anyway, §13.5 list), never reading it; the member is emailed | — |
+| A byte-identical copy of the current blob, used before the member's next use | Undetectable at that moment; a use still needs the password and the holder's session. The member's next use then presents a stale copy and raises the alarm (§3.5.9) | The alarm and the forced rotation |
+| A dishonest host, about clone alarms | Suppressing or delaying the member's email; not the vault's alert to the app, its freeze or its audit entry (§11.5) | — |
+| A transfer (§6.7.1) | Moving the app needs the holder's session, the PIN and the password; the new phone must pass device attestation; the old app is removed and its copy dead | Recovery, if the member lost the phone to it |
+| A recovery with `credential.backup` off | The account (email and session) for 24 h unnoticed and the PIN: a new credential, with every critical item destroyed, or deletion of the vault; never the old critical items (§11.11.5) | Cancel within the 24 h; keep the backup on |
+| A GrapheneOS device | Treated as any attested app: accepted only with a locked bootloader and a verified boot key pinned in the release (§11.7) | A release update removes a key |
 | An app's session keys | No password or secret value (UTK and reply-key sealing), no replay (single-use UTKs), no redirected payloads (§3.5.4) | Unlink the device |
 | Credential password alone | Nothing without the blob and a paired app | `credential.password.change` |
-| Member's email and account session (24 h, unnoticed) | A recovery: one new attested app as an unlock key. Still needs the PIN and the password, online, under both backoffs (§11.11.2) | Cancel; owner apps see `recovery_pending` and `vault.locking{recovery}` |
+| Member's email and account session (24 h, unnoticed) | A recovery: one new attested app that replaces the member's app. Still needs the PIN and, with the backup on, the password, online, under both backoffs (§11.11.2); with the backup off, a reset that destroys the critical items (§11.11.5) | Cancel; the app sees `recovery_pending` and `vault.locking{recovery}` |
 | VettID's API tables | Nothing: the recovery code is stored only sealed to the member's browser, and the enclave enforces the 24 h (§11.11.2) | — |
 | Decrypted vault state (DEK) | Everything in it (`data` and `secret` items included), plus offline guessing of the credential password against the current CEK and the latest blob (§3.5.8); critical items' values stay encrypted under item keys that only the credential, sealed under the password, holds (§10.7) | Rotate the relay key and the credential; change the password |
 | A critical item key (from an old blob with its CEK and the password, or from a compromised release during an operation) | That item's ciphertext of that generation only; nothing after the item's next use, which re-keys it (§10.7) | Use the item, or `credential.rotate` (re-keys every item) |
@@ -5589,6 +6101,28 @@ documented.
 - **Process isolation.** Each unlocked vault MUST run in its own process,
   and the supervisor MUST NOT hold a vault's DEK, pepper or keys (§12.4).
   The channel between them MUST be parsed strictly and fuzzed.
+
+### 13.7 A vault reports only to its owner
+
+(Owner decision, 2026-10-03: "real vaults should only ever report to
+their owner. Period.")
+
+- A vault MUST send its credential state, alarms, freezes, transfers,
+  recoveries, device list, settings, audit log, feed and vault status
+  only to its owner's devices (§9.1), each within its role (§6.8).
+- To its host it reports only the content-free lifecycle events and
+  alarms of §11.5 (`enrolled`, `unlocked`, `locked`, `moved`, `deleted`,
+  `alarm.credential_clone`).
+- To a connection it sends only what the member's features share with
+  that connection by the member's own decisions: messages, calls, the
+  shared profile, granted and shared items, action results,
+  introductions, location and presence under their policies, the
+  credential key's public rotation statements and the signatures the
+  member approved (§10.4, §10.13). A refused or failed credential
+  operation (wrong password, backoff, an alarm or freeze) leaves a
+  connection's request pending; it never tells the connection why.
+- It never answers a principal that is not its owner's device, its
+  connection or its host; a holderless vault (§3.5.9) adopts no one.
 
 ## 14. Push compatibility (deferred)
 
@@ -5650,6 +6184,35 @@ Follow-ups:
     enclave's egress, with its privacy and trust costs, §10.18) are not in
     0.8.0; the member's app is the chain source (owner decision). The fee
     cap (1,000 sat/vB) is fixed per release.
+12. **Relay mailbox deletion.** RELAY-PROTOCOL 0.4.0 has no route to
+    delete a mailbox, so a deleted vault leaves its mailbox registered and
+    empty of valid tokens (§12.5). Recommended: add an owner-signed
+    `DELETE /v1/mailbox` (messages, denylist, claims and blobs deleted;
+    later deposits `mailbox_unknown`) in the relay's next minor version.
+13. **OWNER DECISIONS of 0.9.0** (each with the recommendation the text
+    follows; to confirm at review):
+    1. Recovery with the backup off restores access only: reset the
+       credential (critical items destroyed) or delete the vault
+       (§11.11.5). Decided 2026-10-03.
+    2. "That was me" and "not me" both force the rotation (§3.5.9).
+       Recommended: yes.
+    3. The clone email goes through a content-free host alarm that the
+       member API turns into an email (§3.5.9, §11.5). Recommended: yes;
+       the vault has no email egress.
+    4. A blob with the current version but other bytes, or a version above
+       the current one, is a clone (§3.5.9). Recommended: yes.
+    5. A transfer does not re-check the old app's device attestation
+       (§6.7.1). Recommended: no re-check.
+    6. `SelfSigned` boot is accepted for GrapheneOS only (§11.7).
+       Recommended: GrapheneOS only, others on request.
+    7. At most 4 alarm emails per vault per day (MEMBER-API).
+       Recommended: 4.
+    (Items 2–7 were confirmed by the owner on 2026-10-03.)
+    8. `vault.delete` from a recovering app with the backup off, or from
+       the enrolling app before a credential exists, needs the PIN only
+       (§12.5). Recommended: yes: there is no password to check, and the
+       recovery's 24 h and the account (or, before a credential, the
+       enrollment minutes earlier) gate it; deletion exposes nothing.
 
 ## 16. Test vectors
 
@@ -5756,6 +6319,56 @@ pending (§15, follow-up 1).
 
 ## 17. Changelog
 
+- **0.9.0** (2026-10-03): one app per vault (owner decisions of
+  2026-10-03, PROTEAN-CREDENTIAL §4).
+  - §1.1 item 8, §3.1, §6.7: a vault has exactly one app, the holder of
+    the credential; apps are bound only at enrollment, by a transfer or by
+    a recovery; `device.pair.create{role: "app"}` answers `one_app`; any
+    other app `hs.init` is dropped (`drop.one_app`). Desktops and agents
+    are unchanged.
+  - §3.5.3, §3.5.5, §3.5.9 (new): the holder; only it sends blob-carrying
+    types; the clone rule (only the holder's retry with the previous,
+    unconfirmed version is `stale_credential`); on a clone: refusal
+    (`credential_frozen`), alarm, urgent `credential.alarm` to the app,
+    feed item, audit, host alarm; freeze of credential operations while
+    messaging continues; `credential.alarm.confirm`; forced
+    `credential.rotate` (state `rotation_required`).
+  - §3.5.6: no off-device copy and no export of the credential; losing
+    the phone with the backup off loses the credential and every critical
+    item; the app MUST warn before turning the backup off.
+  - §6.4, §6.7.1 (new), §10.3: direct transfer to a new phone
+    (`device.transfer.create`, `.pending`, `.approve` with PIN and
+    password, `.reject`; CEK rotated at approval; one flush at `hs.fin`
+    moving the holder and removing the old app; failure and abort cases).
+  - §11.11, §11.11.5, §11.11.8: the recovered app replaces the old app
+    (removed, keys revoked; desktops and agents kept); `credential.recover`
+    without the member-supplied blob; backup off: `credential_lost`, then
+    `credential.reset` or `vault.delete`; with the backup off the recovery
+    restores access only and returns no credential content.
+  - §11.5: the lifecycle event `alarm.credential_clone` and the vault-row
+    `alarm` and `alarm_pending`; MEMBER-API emails the member. The
+    `deleted` event also records a `vault_deleted` notice.
+  - §10.2, §12.5 (new): `vault.delete` from the holder (phrase, PIN,
+    password; refused during an alarm), a recovering app (PIN, and the
+    password when the vault keeps the blob) or the enrolling app before a
+    credential exists (PIN), and the host's `delete`: mark, notify and
+    revoke, drain, zeroize, erase (own header last), report; any later
+    touch of a marked header finishes it. The relay mailbox cannot be
+    deleted (RELAY-PROTOCOL 0.4.0): everything is denylisted; a relay
+    route is recommended (§15).
+  - §3.5.9, §13.7 (new): a holderless vault never adopts an app; a vault
+    reports only to its owner's devices, its host (content-free events)
+    and, as the member's features decide, its connections.
+  - §11.7: `SelfSigned` accepted with a GrapheneOS verified boot key pinned
+    in the release (deviceLocked still required); `Unverified` and
+    `Failed` refused.
+  - §10.1: `one_app`, `credential_frozen`, `rotation_required`,
+    `credential_lost`, `transfer_pending`; `sync.event` kinds
+    `credential.alarm`, `device.transferred`, `device.transfer`. §10.6:
+    `credential.alarm`, `.alarm.confirm`, `.reset`, the holder-only types,
+    `alarm` in `credential.version`. §10.9: audit and feed kinds. §13.5:
+    rows for clones, transfers, backup-off recovery, the host and
+    GrapheneOS. §15: follow-ups 12 and 13 (owner decisions).
 - **0.8.0** (2026-10-03): V4 batch 4 (vettid-vault): location, presence
   and the wallet.
   - §10.16 (new): location shares with one connection: `once` or

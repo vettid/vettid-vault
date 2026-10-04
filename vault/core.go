@@ -107,6 +107,11 @@ func (m *Manager) hPairCreate(ctx context.Context, s *Session, in *envelope.Inne
 	if err != nil || (role != KindApp && role != KindDesktop && role != KindAgent) {
 		return nil, errBadRequest
 	}
+	if role == KindApp {
+		// One app per vault (§6.7, 0.9.0): a new phone takes over by a
+		// direct transfer (§6.7.1), never as a second app.
+		return nil, NewError("one_app", "")
+	}
 	inv, link, err := m.createInvite(ctx, role, PairingApprovalTTL, s.peer.ID, s.now)
 	if err != nil {
 		return nil, NewError("relay_error", "")
@@ -134,7 +139,7 @@ func (m *Manager) hPairApprove(ctx context.Context, s *Session, in *envelope.Inn
 		return nil, err
 	}
 	id := m.inboundFor(pid, "device")
-	if id == "" {
+	if id == "" || m.isTransferInbound(id) {
 		return nil, errNotFound
 	}
 	// An initial access session for a desktop or agent may come with the
@@ -184,7 +189,7 @@ func (m *Manager) hPairReject(_ context.Context, s *Session, in *envelope.Inner)
 		return nil, err
 	}
 	id := m.inboundFor(pid, "device")
-	if id == "" {
+	if id == "" || m.isTransferInbound(id) {
 		return nil, errNotFound
 	}
 	if inv := m.st.Invites[m.st.Inbound[id].InviteID]; inv != nil && inv.OpenJTI != "" {
@@ -213,6 +218,10 @@ func (m *Manager) hDeviceUnlink(_ context.Context, s *Session, in *envelope.Inne
 	if !ok {
 		return nil, errNotFound
 	}
+	if p.Kind == KindApp {
+		// The one app leaves only by a transfer or a recovery (§6.7).
+		return nil, errForbiddenH
+	}
 	m.endAccess(context.Background(), p, false, "", s.now) // its access session and held requests go with it
 	m.removePeer(p, "device.unlinked", s.now)
 	for _, f := range m.features {
@@ -228,8 +237,13 @@ func (m *Manager) hDeviceUnlink(_ context.Context, s *Session, in *envelope.Inne
 // removePeer sends a best-effort notice, denylists the peer's sub, and
 // deletes its tokens, sessions and outbox entries (§7.4).
 func (m *Manager) removePeer(p *Peer, notice string, now time.Time) {
+	m.removePeerWith(p, notice, json.RawMessage(`{}`), now)
+}
+
+// removePeerWith is removePeer with a notice body.
+func (m *Manager) removePeerWith(p *Peer, notice string, body json.RawMessage, now time.Time) {
 	if kr := m.sessions[p.ID]; kr != nil && kr.Current() != nil && p.Standing.Token != "" && p.State == PeerActive {
-		in := &envelope.Inner{ID: m.newID(now), Type: notice, TS: now, Body: json.RawMessage(`{}`)}
+		in := &envelope.Inner{ID: m.newID(now), Type: notice, TS: now, Body: body}
 		if raw, err := kr.Current().Seal(in); err == nil {
 			m.queueDeposit(&OutboxEntry{RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Token: p.Standing.Token,
 				Payload: raw, BestEffort: true}, now)

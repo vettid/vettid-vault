@@ -76,9 +76,8 @@ func TestCredentialFlow(t *testing.T) {
 	if _, err := a.app.CredentialUnlock(ctx, credPW); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := a.app.CredentialRaw(ctx, "credential.unlock", takeUTK(t, a.app), b1, map[string]any{"password": credPW}); client.Code(err) != "stale_credential" {
-		t.Fatalf("previous blob: %v", err)
-	}
+	// An older blob presented now would be a clone (§3.5.9): see
+	// TestCloneAlarm.
 	// A critical item (§10.7): its values inside the credential.
 	id, _, err := a.app.ItemPutCritical(ctx, credPW, "", 0, []string{"crypto"}, client.ItemContent{Name: "btc seed", Category: "crypto_wallet",
 		Fields: []client.ItemField{{Label: "Words", Kind: "multiline", Value: "zoo zoo zoo wrong"}}})

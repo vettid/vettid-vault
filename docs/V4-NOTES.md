@@ -633,3 +633,97 @@ features).
   a new PSBT).
 - Push wakes for location requests (§14).
 - vaultctl is not a chain client: it signs PSBTs built elsewhere.
+
+## One app per vault (0.9.0)
+
+Owner decisions of 2026-10-03 (PROTEAN-CREDENTIAL §4, VAULT-MESSAGING
+0.9.0): one app per vault, the clone alarm, the direct transfer, recovery
+replacing the app, backup off meaning loss, and GrapheneOS attestation.
+
+### Layout
+
+- `features/credential`: the holder (`state.Holder`), the clone check in
+  `open` (the holder's own retry of the previous, unconfirmed version is
+  the only stale copy that is not a clone), the alarm (`state.Alarm`:
+  frozen → rotation_required → resolved by `credential.rotate`), the
+  freeze gate (before the UTK is spent, also in `Operate` and `UseKey`),
+  `credential.alarm.confirm`, `credential.reset`, and
+  `device.transfer.create`, `.approve` (PIN and password, CEK rotation),
+  `.reject`. `TransferCompleted` and `DeviceRemoved` move the holder and
+  drop UTK pools.
+- `vault/oneapp.go`: the runtime side, behind the optional
+  `vault.CredentialHost` (the Manager implements it; the feature test host
+  too): the transfer state (`State.Transfer`, `Invite.Transfer`), the
+  PIN check against the DEK under the §11.8 backoff, completion at the new
+  app's `hs.fin` (in `activate`), aborts (reject, expiry in housekeeping,
+  alarm, recovery), the removal of a replaced app after a recovery
+  (deferred to after the handler, outside the credential feature's lock)
+  and the host alarm, reported after the batch's flush.
+- `vault/core.go`, `vault/handshakes.go`: `one_app`; app `hs.init`s other
+  than enrollment, recovery or a transfer are dropped (`drop.one_app`);
+  the app cannot be unlinked; `device.pair.approve`/`.reject` do not
+  touch a transfer.
+- `parent`: the lifecycle event `alarm.credential_clone` is accepted and
+  written as `alarm {kind, alarm_id, at}` + `alarm_pending` on the vault
+  row, not lease-conditioned; the member API's mailer (vettid.org PR)
+  picks it up from the table's stream. The parent makes the ULID itself
+  (no crypto packages linked for it).
+- `vms/devattest`, `vms/pins/grapheneos.go`: `SelfSigned` with a pinned
+  `verifiedBootKey` (21 GrapheneOS device families, from the GrapheneOS
+  attestation compatibility guide, copied 2026-10-03); the release config
+  pins them; the test policy pins a test key.
+- `client`, `vaultctl`: `CredentialReset`, `CredentialAlarmConfirm`,
+  `TransferCreate`/`Approve`/`Reject`; `CredentialRecover` lost its blob
+  argument; `vaultctl transfer ...`, `credential reset|confirm`;
+  `credential recover -value-file` is gone.
+
+### Changed behaviour
+
+- A stale blob presented two or more versions late, or after the ack, is
+  now a clone (`credential_frozen`), not `stale_credential`.
+- `credential.recover` no longer accepts the member's own blob; with the
+  backup off it answers `credential_lost`.
+- A recovery removes the old app(s); 0.4.1 kept them (§11.11.8 rewritten).
+- Transfers survive a lock (the pending handshake is vault state); the
+  10-minute expiry is applied at the next batch.
+
+### Vault deletion (§12.5) and the owner-only rule (§13.7)
+
+- `vault/delete.go`: `beginDelete` (mark state and header, destroy the
+  credential through `VaultDeleting`, notify connections and devices,
+  revoke every jti and peer sub, delete claims), `finishDelete` (drain,
+  zeroize, `EraseStored`, report `deleted`), run after the batch's flush;
+  `Manager.Delete` / `LockReason("delete")` for the host. A header marked
+  `Deleting` is finished, never opened, by any unlock or recovery that
+  reads it. `vault.delete` is authorized by the credential feature
+  (phrase, PIN, password as applicable) and marked after the handler
+  returns (outside its lock).
+- `enclave`: the queue's `delete` asks a running vault (process or local)
+  to delete itself, else erases the stored objects; the vault process
+  accepts the lock reason `delete`.
+- `parent`: `deleted` also records the `vault_deleted` notice for the
+  member API's mailer, which then removes the vault rows.
+- The relay cannot delete a mailbox (RELAY-PROTOCOL 0.4.0): everything is
+  denylisted; a `DELETE /v1/mailbox` is recommended (spec §15).
+- The no-holder adoption path is gone: a holderless credential restricts
+  the vault (`CredentialReady` false, `CredentialExists` true) to the
+  recovery path and deletion.
+- The clone alert goes only to the holder when it is a paired app.
+
+### OWNER DECISIONS
+
+Confirmed 2026-10-03: backup-off recovery restores access only (reset or
+delete); both confirm answers force the rotation; the host-alarm email
+path; tampered or future versions are clones; no re-attestation of the
+old app at transfer; GrapheneOS only; 4 alarm emails per vault per day.
+
+Open (recommendation): `vault.delete` with the PIN only from a recovering
+app when the credential is lost, or from the enrolling app before a
+credential exists (recommended: yes; no password exists to check, and the
+recovery's 24 h and account, or the enrollment, gate it; deletion exposes
+nothing).
+
+### Not in this change
+
+- Migration of vaults with several apps: none exist outside tests.
+- A relay route to delete a mailbox (vettid-relay untouched).

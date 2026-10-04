@@ -18,7 +18,9 @@ import (
 // change, VAULTCTL_NEW_PASSWORD.
 
 func init() {
-	commands["credential"] = command{"credential create|fetch|version|unlock|lock|rotate|password|delete|recover [-value-file BLOB]", cmdCredential}
+	commands["credential"] = command{"credential create|fetch|version|unlock|lock|rotate|password|delete|recover|reset | credential confirm ALARM_ID mine|not-mine", cmdCredential}
+	commands["delete-vault"] = command{"delete-vault CONFIRMATION   (CONFIRMATION must be \"delete my vault\"; reads VAULTCTL_PIN and VAULTCTL_PASSWORD, the password empty when the credential is lost)", cmdDeleteVault}
+	commands["transfer"] = command{"transfer create | transfer approve ID | transfer reject ID   (move the app to a new phone; approve reads VAULTCTL_PIN and VAULTCTL_PASSWORD)", cmdTransfer}
 	commands["profile"] = command{"profile get | profile set JSON   (the display name and photo; @profile items are items)", cmdProfile}
 	commands["settings"] = command{"settings get | settings set VERSION JSON", cmdSettings}
 	commands["audit"] = command{"audit [-connection ID] [-kinds a,b] [-before N] [-limit N]", cmdAudit}
@@ -65,15 +67,54 @@ func sub(args []string, usage string) (string, []string, error) {
 	return args[0], args[1:], nil
 }
 
+func cmdDeleteVault(ctx context.Context, g *globals, args []string) error {
+	if len(args) != 1 || args[0] != "delete my vault" {
+		return errors.New(commands["delete-vault"].usage)
+	}
+	pin, err := password("VAULTCTL_PIN")
+	if err != nil {
+		return err
+	}
+	pw := os.Getenv("VAULTCTL_PASSWORD")
+	return withDevice(ctx, g, func(d *client.Device) (any, error) {
+		return nil, d.VaultDelete(ctx, pin, pw)
+	})
+}
+
+func cmdTransfer(ctx context.Context, g *globals, args []string) error {
+	op, rest, err := sub(args, commands["transfer"].usage)
+	if err != nil {
+		return err
+	}
+	var pin, pw string
+	if op == "approve" {
+		if pin, err = password("VAULTCTL_PIN"); err != nil {
+			return err
+		}
+		if pw, err = password("VAULTCTL_PASSWORD"); err != nil {
+			return err
+		}
+	}
+	return withDevice(ctx, g, func(d *client.Device) (any, error) {
+		switch {
+		case op == "create" && len(rest) == 0:
+			id, link, err := d.TransferCreate(ctx)
+			return map[string]string{"transfer_id": id, "link": link}, err
+		case op == "approve" && len(rest) == 1:
+			return nil, d.TransferApprove(ctx, rest[0], pin, pw)
+		case op == "reject" && len(rest) == 1:
+			return nil, d.TransferReject(ctx, rest[0])
+		}
+		return nil, errors.New(commands["transfer"].usage)
+	})
+}
+
 func cmdCredential(ctx context.Context, g *globals, args []string) error {
 	op, rest, err := sub(args, commands["credential"].usage)
 	if err != nil {
 		return err
 	}
-	fs := flag.NewFlagSet("credential "+op, flag.ExitOnError)
-	valueFile := fs.String("value-file", "", "recover: the member's own copy of the blob")
-	_ = fs.Parse(rest)
-	needPW := map[string]bool{"create": true, "unlock": true, "rotate": true, "password": true, "delete": true, "recover": true}
+	needPW := map[string]bool{"create": true, "unlock": true, "rotate": true, "password": true, "delete": true, "recover": true, "reset": true}
 	var pw string
 	if needPW[op] {
 		if pw, err = password("VAULTCTL_PASSWORD"); err != nil {
@@ -104,17 +145,16 @@ func cmdCredential(ctx context.Context, g *globals, args []string) error {
 		case "delete":
 			return nil, d.CredentialDelete(ctx, pw)
 		case "recover":
-			// -value-file: the member's own copy of the blob when the vault
-			// keeps none (credential.backup off, §11.11.5).
-			var blob []byte
-			if *valueFile != "" {
-				b, err := os.ReadFile(*valueFile)
-				if err != nil {
-					return nil, err
-				}
-				blob = b
+			return nil, d.CredentialRecover(ctx, pw)
+		case "reset":
+			// The credential is lost (backup off, §11.11.5): a new one.
+			return nil, d.CredentialReset(ctx, pw)
+		case "confirm":
+			if len(rest) != 2 || rest[1] != "mine" && rest[1] != "not-mine" {
+				return nil, errors.New(commands["credential"].usage)
 			}
-			return nil, d.CredentialRecover(ctx, pw, blob)
+			st, err := d.CredentialAlarmConfirm(ctx, rest[0], rest[1] == "mine")
+			return map[string]string{"state": st}, err
 		}
 		return nil, errors.New(commands["credential"].usage)
 	})

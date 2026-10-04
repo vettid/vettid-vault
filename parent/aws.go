@@ -3,6 +3,7 @@ package parent
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"errors"
 	"io"
@@ -419,6 +420,9 @@ func (a *AWS) ReleaseLease(ctx context.Context, vaultID, instanceID string, now 
 // while no lease exists) writes lifecycle values, so a vault's loser in
 // a split brain cannot overwrite the winner's.
 func (a *AWS) Lifecycle(ctx context.Context, ev Lifecycle, instanceID string, now time.Time) error {
+	if ev.Event == EventAlarmCredentialClone {
+		return a.alarm(ctx, ev.VaultID, "credential_clone", now)
+	}
 	const cond = "attribute_exists(vault_id) AND (attribute_not_exists(#lease) OR #lease.#iid = :me)"
 	nm := names(cond, map[string]string{"#u": "updated_at", "#vv": "vault_version", "#sv": "state_version"})
 	vals := map[string]ddbtypes.AttributeValue{":u": s(isoNow(now)), ":me": s(instanceID), ":vv": s(ev.VaultVersion), ":sv": n(int64(ev.StateVersion))}
@@ -441,7 +445,32 @@ func (a *AWS) Lifecycle(ctx context.Context, ev Lifecycle, instanceID string, no
 	}
 	err := a.updateVault(ctx, ev.VaultID, update, cond, nm, vals)
 	if errors.Is(err, ErrLeaseHeld) {
-		return nil // another instance holds the vault now
+		err = nil // another instance holds the vault now
+	}
+	if err == nil && ev.Event == "deleted" {
+		// The member is told (§12.5): the vault's own audit log is gone.
+		err = a.alarm(ctx, ev.VaultID, "vault_deleted", now)
+	}
+	return err
+}
+
+// alarm records a host alarm (credential_clone) or notice (vault_deleted) on the vault row (VAULT-MESSAGING §11.5,
+// MEMBER-API "Vault alarms"): alarm = {kind, alarm_id (ULID), at (epoch
+// s)} and alarm_pending = true, which the member API's alarm mailer picks
+// up from the table's stream. It is not conditional on the lease: an
+// alarm is never lost to a lease race. A missing row is ignored.
+func (a *AWS) alarm(ctx context.Context, vaultID, kind string, now time.Time) error {
+	id, err := newULID(now)
+	if err != nil {
+		return err
+	}
+	al := &ddbtypes.AttributeValueMemberM{Value: map[string]ddbtypes.AttributeValue{
+		"kind": s(kind), "alarm_id": s(id), "at": n(now.Unix())}}
+	err = a.updateVault(ctx, vaultID, "SET #al = :al, #ap = :t, #u = :u", "attribute_exists(vault_id)",
+		map[string]string{"#al": "alarm", "#ap": "alarm_pending", "#u": "updated_at"},
+		map[string]ddbtypes.AttributeValue{":al": al, ":t": &ddbtypes.AttributeValueMemberBOOL{Value: true}, ":u": s(isoNow(now))})
+	if errors.Is(err, ErrLeaseHeld) {
+		return nil // no such vault row
 	}
 	return err
 }
@@ -483,4 +512,29 @@ func (p ProviderCredentials) Retrieve(ctx context.Context) (Credentials, error) 
 		out.Expires = c.Expires
 	}
 	return out, nil
+}
+
+// newULID returns a ULID (26 Crockford base32 characters, upper case): a
+// 48-bit millisecond time and 80 random bits.
+func newULID(now time.Time) (string, error) {
+	var b [16]byte
+	ms := uint64(now.UnixMilli())
+	for i := 5; i >= 0; i-- {
+		b[i] = byte(ms)
+		ms >>= 8
+	}
+	if _, err := rand.Read(b[6:]); err != nil {
+		return "", err
+	}
+	const alpha = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+	out := make([]byte, 26)
+	hi := uint64(b[0])<<56 | uint64(b[1])<<48 | uint64(b[2])<<40 | uint64(b[3])<<32 | uint64(b[4])<<24 | uint64(b[5])<<16 | uint64(b[6])<<8 | uint64(b[7])
+	lo := uint64(b[8])<<56 | uint64(b[9])<<48 | uint64(b[10])<<40 | uint64(b[11])<<32 | uint64(b[12])<<24 | uint64(b[13])<<16 | uint64(b[14])<<8 | uint64(b[15])
+	// 128 bits as 26 five-bit groups, the first group holding 3 bits.
+	for i := 25; i >= 0; i-- {
+		out[i] = alpha[lo&31]
+		lo = lo>>5 | hi<<59
+		hi >>= 5
+	}
+	return string(out), nil
 }

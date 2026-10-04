@@ -216,6 +216,12 @@ func UnlockAlt(ctx context.Context, p AltUnlockParams) (*Manager, *AltUnlockOutc
 	if err != nil {
 		return nil, out.drop(ErrHeader)
 	}
+	if hdr.Deleting {
+		// A deletion was interrupted (§12.5): finish it, never open.
+		suite.Wipe(hdr.Pepper)
+		_ = EraseStored(ctx, p.Store, p.VaultID, hdr.UserGUID, nil, own.PCR0, "", "")
+		return nil, out.drop(ErrDeleted)
+	}
 	out.HeaderSeq = hdr.HeaderSeq
 	var key *UnlockKey
 	if !p.pinOnly {

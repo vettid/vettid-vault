@@ -387,12 +387,16 @@ type ConnectionObserver interface {
 // CredentialGate is implemented by the credential feature: a vault without
 // a credential is restricted (§3.5.7).
 type CredentialGate interface {
+	// CredentialReady: the vault has a credential and its holder (§3.5.9).
 	CredentialReady() bool
+	// CredentialExists: the vault has a credential, held or not (a vault
+	// with a credential can be recovered, §11.11.1).
+	CredentialExists() bool
 }
 
 // allowedWithoutCredential are the types a restricted vault still accepts
 // (§3.5.7).
-var allowedWithoutCredential = map[string]bool{"vault.status": true, "vault.lock": true, "credential.utk.get": true,
+var allowedWithoutCredential = map[string]bool{"vault.status": true, "vault.lock": true, "vault.delete": true, "credential.utk.get": true,
 	"credential.create": true, "credential.version": true, "relay.token.issued": true, "relay.token.refresh": true,
 	"relay.address.update": true}
 
@@ -410,6 +414,16 @@ func (m *Manager) hasGate() bool {
 func (m *Manager) credentialReady() bool {
 	for _, f := range m.features {
 		if g, ok := f.(CredentialGate); ok && !g.CredentialReady() {
+			return false
+		}
+	}
+	return true
+}
+
+// credentialExists reports whether the vault has a credential (or no gate).
+func (m *Manager) credentialExists() bool {
+	for _, f := range m.features {
+		if g, ok := f.(CredentialGate); ok && !g.CredentialExists() {
 			return false
 		}
 	}

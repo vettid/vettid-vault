@@ -112,7 +112,10 @@ func ParseEnrollRequest(o strictjson.Object) (*EnrollRequest, error) {
 	if r.KEM, err = EnrollKEM(o); err != nil {
 		return nil, err
 	}
-	app, _ := o.Object("app")
+	app, err := o.Object("app")
+	if err != nil {
+		return nil, ErrMalformed
+	}
 	if r.UserGUID, err = o.String("user_guid"); err != nil {
 		return nil, ErrMalformed
 	}
@@ -256,7 +259,10 @@ func ParseUnlockRequest(o strictjson.Object) (*UnlockRequest, error) {
 	if raw, present, err := o.OptObjectRaw("release_update"); err != nil {
 		return nil, ErrMalformed
 	} else if present {
-		uo, _ := strictjson.AsObject(raw)
+		uo, err := strictjson.AsObject(raw)
+		if err != nil {
+			return nil, ErrMalformed
+		}
 		u := &ReleaseUpdate{}
 		if u.To, err = uo.String("to"); err != nil || !manifest.ValidPCR(u.To) {
 			return nil, ErrMalformed
@@ -445,7 +451,10 @@ func ParseUnlockResult(raw json.RawMessage) (*UnlockResult, error) {
 	if raw, present, err := o.OptObjectRaw("update"); err != nil {
 		return nil, ErrMalformed
 	} else if present {
-		uo, _ := strictjson.AsObject(raw)
+		uo, err := strictjson.AsObject(raw)
+		if err != nil {
+			return nil, ErrMalformed
+		}
 		u := &UpdateResult{}
 		if u.To, err = uo.String("to"); err != nil {
 			return nil, ErrMalformed

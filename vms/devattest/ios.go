@@ -174,17 +174,27 @@ func parseNonceExt(b []byte) ([]byte, error) {
 	if err != nil || !r.Empty() {
 		return nil, ErrFormat
 	}
-	c, _ := seq.Children()
+	c, err := seq.Children()
+	if err != nil {
+		return nil, ErrFormat
+	}
 	t, err := c.Expect(der.ClassContext, 1, true)
 	if err != nil || !c.Empty() {
 		return nil, ErrFormat
 	}
-	in, _ := t.Children()
+	in, err := t.Children()
+	if err != nil {
+		return nil, ErrFormat
+	}
 	o, err := in.Next()
 	if err != nil || !in.Empty() {
 		return nil, ErrFormat
 	}
-	return der.OctetString(o)
+	n, err := der.OctetString(o)
+	if err != nil {
+		return nil, ErrFormat
+	}
+	return n, nil
 }
 
 // checkCOSEKey requires the credential public key in authData to be the

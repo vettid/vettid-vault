@@ -59,10 +59,10 @@ type authList struct {
 
 func parseAuthList(e der.Element) (authList, error) {
 	al := authList{elems: map[uint64]der.Element{}}
-	if !e.Is(der.ClassUniversal, der.TagSequence) || !e.Constructed {
+	r, err := e.ChildrenOf(der.ClassUniversal, der.TagSequence)
+	if err != nil {
 		return al, ErrFormat
 	}
-	r, _ := e.Children()
 	for !r.Empty() {
 		t, err := r.Next()
 		if err != nil || t.Class != der.ClassContext || !t.Constructed {
@@ -98,10 +98,10 @@ func (a authList) intSet(tag uint64) ([]int64, bool, error) {
 	if !ok {
 		return nil, false, nil
 	}
-	if !e.Is(der.ClassUniversal, der.TagSet) {
+	r, err := e.ChildrenOf(der.ClassUniversal, der.TagSet)
+	if err != nil {
 		return nil, true, ErrFormat
 	}
-	r, _ := e.Children()
 	var out []int64
 	for !r.Empty() {
 		x, err := r.Next()
@@ -123,7 +123,10 @@ func parseKeyDescription(b []byte) (*keyDescription, error) {
 	if err != nil || !r.Empty() {
 		return nil, ErrFormat
 	}
-	c, _ := seq.Children()
+	c, err := seq.Children()
+	if err != nil {
+		return nil, ErrFormat
+	}
 	kd := &keyDescription{}
 	ints := []*int64{&kd.version, &kd.attestSecurity, nil, &kd.keymintSecurity}
 	for _, p := range ints {
@@ -171,10 +174,10 @@ func parseKeyDescription(b []byte) (*keyDescription, error) {
 // verifiedBootState Verified, or SelfSigned with a verifiedBootKey the
 // policy pins (GrapheneOS, §11.7). Unverified and Failed are refused.
 func checkRootOfTrust(p *Policy, e der.Element) error {
-	if !e.Is(der.ClassUniversal, der.TagSequence) {
+	r, err := e.ChildrenOf(der.ClassUniversal, der.TagSequence)
+	if err != nil {
 		return ErrFormat
 	}
-	r, _ := e.Children()
 	vbk, err := r.Next()
 	if err != nil {
 		return ErrFormat
@@ -231,7 +234,10 @@ func checkApplicationID(p *Policy, e der.Element) error {
 	if err != nil || !r.Empty() {
 		return ErrFormat
 	}
-	c, _ := seq.Children()
+	c, err := seq.Children()
+	if err != nil {
+		return ErrFormat
+	}
 	infos, err := c.Expect(der.ClassUniversal, der.TagSet, true)
 	if err != nil {
 		return ErrFormat
@@ -240,14 +246,20 @@ func checkApplicationID(p *Policy, e der.Element) error {
 	if err != nil || !c.Empty() {
 		return ErrFormat
 	}
-	ir, _ := infos.Children()
+	ir, err := infos.Children()
+	if err != nil {
+		return ErrFormat
+	}
 	n := 0
 	for !ir.Empty() {
 		pi, err := ir.Expect(der.ClassUniversal, der.TagSequence, true)
 		if err != nil {
 			return ErrFormat
 		}
-		pr, _ := pi.Children()
+		pr, err := pi.Children()
+		if err != nil {
+			return ErrFormat
+		}
 		ne, err := pr.Next()
 		if err != nil {
 			return ErrFormat
@@ -271,7 +283,10 @@ func checkApplicationID(p *Policy, e der.Element) error {
 	if n == 0 {
 		return ErrApplication
 	}
-	dr, _ := digests.Children()
+	dr, err := digests.Children()
+	if err != nil {
+		return ErrFormat
+	}
 	n = 0
 	for !dr.Empty() {
 		de, err := dr.Next()

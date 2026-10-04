@@ -70,6 +70,10 @@ func main() {
 	defer cancel()
 	if err := cmd.run(ctx, g, flag.Args()[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "vaultctl:", err)
+		var ee *exitError
+		if errors.As(err, &ee) {
+			os.Exit(ee.code)
+		}
 		os.Exit(1)
 	}
 }

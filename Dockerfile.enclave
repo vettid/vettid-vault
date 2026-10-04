@@ -62,6 +62,20 @@ RUN set -eu; \
     touch -h -d "@${SOURCE_DATE_EPOCH}" /out/vault-enclave /out; \
     sha256sum /out/vault-enclave
 
+# The release's vault-parent binary (VAULT-RELEASES §5.1), built with
+# the same pinned toolchain and flags (docker build --target parent). It
+# runs on the host, so it is not part of the EIF; the default target
+# below does not build it.
+FROM build AS parent-build
+RUN set -eu; \
+    go build -trimpath -buildvcs=false -ldflags='-s -w -buildid=' -o /out/vault-parent ./cmd/vault-parent; \
+    touch -h -d "@${SOURCE_DATE_EPOCH}" /out/vault-parent; \
+    sha256sum /out/vault-parent
+
+FROM scratch AS parent
+COPY --from=parent-build /out/vault-parent /vault-parent
+
+# The enclave image (the default target).
 FROM scratch
 COPY --from=build /out/vault-enclave /vault-enclave
 # The supervisor re-executes this binary for every vault process (D4).

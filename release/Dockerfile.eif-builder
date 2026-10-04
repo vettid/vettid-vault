@@ -1,0 +1,31 @@
+# syntax=docker/dockerfile:1
+#
+# The pinned EIF toolchain (VAULT-RELEASES §5.1): Amazon Linux 2023 at a
+# fixed repository snapshot with aws-nitro-enclaves-cli at a fixed
+# version, every RPM and every blob that goes into an EIF checked against
+# release/eif-toolchain.lock (build context: release/). scripts/build-eif.sh runs nitro-cli
+# build-enclave in this container (EIF_BUILDER) with the host's docker
+# socket mounted; building an EIF needs docker and the blobs, not the
+# Nitro Enclaves device.
+#
+# The base image digest below must equal the lock's base_image
+# (scripts/lint_test.go checks it).
+FROM docker.io/library/amazonlinux:2023@sha256:5b29412077a463b4a3a8fbc99a8cdf4b929f38a3ecc8dac10328d8f36b0099b8
+
+COPY eif-toolchain.lock /toolchain/eif-toolchain.lock
+
+RUN set -eu; \
+    lock=/toolchain/eif-toolchain.lock; \
+    val() { sed -n "s/^$1=//p" "$lock"; }; \
+    arch="$(uname -m)"; \
+    if [ "$arch" != "$(val arch)" ]; then echo "the EIF toolchain is pinned for $(val arch), not $arch" >&2; exit 1; fi; \
+    rv="$(val releasever)"; ver="$(val nitro_cli_version)"; \
+    dnf -y -q --releasever="$rv" install dnf-plugins-core; \
+    cd /toolchain; \
+    dnf -q --releasever="$rv" download "aws-nitro-enclaves-cli-$ver" "aws-nitro-enclaves-cli-devel-$ver"; \
+    grep -E '^[0-9a-f]{64}  /toolchain/' "$lock" | sha256sum -c -; \
+    dnf -y -q --releasever="$rv" install ./aws-nitro-enclaves-cli-*.rpm; \
+    grep -E '^[0-9a-f]{64}  /usr/' "$lock" | sha256sum -c -; \
+    rm -f ./*.rpm; dnf clean all; \
+    mkdir -p /var/log/nitro_enclaves; \
+    nitro-cli --version

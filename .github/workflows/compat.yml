@@ -1,0 +1,73 @@
+name: compat
+
+# The compatibility matrix (VAULT-RELEASES §3.4, §11.3;
+# scripts/compat-matrix.sh): every live production release, listed in
+# compat/live-releases.txt, must keep working with this tree's client,
+# member API stand-in, relay and release under the move-only contract,
+# and its frozen vectors (testdata/releases/<n>/) must still be derived.
+# Nightly, and on pull requests that touch wire, storage or host code.
+
+on:
+  schedule:
+    - cron: '17 5 * * *'
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'client/**'
+      - 'vms/**'
+      - 'enclave/**'
+      - 'parent/**'
+      - 'vault/**'
+      - 'internal/**'
+      - 'cmd/vault-enclave/**'
+      - 'cmd/vault-parent/**'
+      - 'cmd/vaultctl/**'
+      - 'integration/**'
+      - 'compat/**'
+      - 'testdata/**'
+      - 'scripts/compat-matrix.sh'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/compat.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  matrix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      localstack:
+        image: docker.io/localstack/localstack:4.9@sha256:59373b4a27dba3ec15c4db0b7455f0cb68c8a42300e2cbbe362b440f9a131697
+        ports:
+          - 4566:4566
+        env:
+          SERVICES: s3,sqs,dynamodb
+          SQS_ENDPOINT_STRATEGY: path
+          LOCALSTACK_HOST: 127.0.0.1:4566
+        options: >-
+          --memory 1536m
+          --health-cmd "curl -sf http://127.0.0.1:4566/_localstack/health"
+          --health-interval 2s --health-timeout 2s --health-retries 60
+    env:
+      VAULT_IT_LOCALSTACK: http://127.0.0.1:4566
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: frozen vectors of live releases (testdata/releases)
+        run: go test -count=1 -run '^TestFrozenReleaseVectors$' -v ./vms/vectors/
+      - name: live releases (compat/live-releases.txt)
+        run: scripts/compat-matrix.sh
+      - name: synthetic previous release (advisory until production release 1)
+        # Before release 1 nothing is frozen: a deliberate wire change may
+        # break this row. It shows the matrix works and flags accidental
+        # breaks early.
+        continue-on-error: true
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || 'HEAD^' }}
+        run: scripts/compat-matrix.sh --no-list --synthetic "$BASE"

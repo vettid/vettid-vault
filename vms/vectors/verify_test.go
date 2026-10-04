@@ -32,9 +32,9 @@ type doc struct {
 	m map[string]json.RawMessage
 }
 
-func load(t testing.TB, name string) doc {
+func load(t testing.TB, dir, name string) doc {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join(Dir, name))
+	b, err := os.ReadFile(filepath.Join(dir, name))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,15 +141,20 @@ func kemFrom(t *testing.T, d doc) *suite.PrivateKey {
 
 // TestVectors checks every vector file from the receiving side, deriving
 // each value independently of the generator.
-func TestVectors(t *testing.T) {
-	keys := load(t, "keys.json")
+func TestVectors(t *testing.T) { checkVectors(t, Dir) }
+
+// checkVectors checks the vector files in dir: HEAD's code must derive
+// every value of them, whether they are HEAD's own vectors or a published
+// release's frozen ones (TestFrozenReleaseVectors).
+func checkVectors(t *testing.T, dir string) {
+	keys := load(t, dir, "keys.json")
 	vault := checkPrincipal(t, keys.sub("vault"))
 	ini := checkPrincipal(t, keys.sub("initiator"))
 	eph := kemFrom(t, keys.sub("initiator_ephemeral"))
 	etk := kemFrom(t, keys.sub("etk"))
 
 	t.Run("hpke", func(t *testing.T) {
-		d := load(t, "hpke.json")
+		d := load(t, dir, "hpke.json")
 		eq(t, "recipient ek", d.b64("recipient_ek_b64"), vault.kem.Public().Bytes())
 		s, err := hpkederand.NewSender(d.b64("recipient_ek_b64"), []byte(d.str("info")), d.hex("encapsulation_randomness_hex"))
 		if err != nil {
@@ -167,8 +172,8 @@ func TestVectors(t *testing.T) {
 	})
 
 	t.Run("envelope_sealed", func(t *testing.T) {
-		d := load(t, "envelope_sealed.json")
-		h := load(t, "hpke.json")
+		d := load(t, dir, "envelope_sealed.json")
+		h := load(t, dir, "hpke.json")
 		raw := d.b64("envelope_b64")
 		if len(raw) != d.num("envelope_len") || len(raw) != 1668 || d.num("padded_len") != 512 {
 			t.Fatalf("lengths %d", len(raw))
@@ -203,7 +208,7 @@ func TestVectors(t *testing.T) {
 	})
 
 	t.Run("envelope_session", func(t *testing.T) {
-		d := load(t, "envelope_session.json")
+		d := load(t, dir, "envelope_session.json")
 		raw := d.b64("envelope_b64")
 		if len(raw) != d.num("envelope_len") || len(raw) != 572 {
 			t.Fatalf("length %d", len(raw))
@@ -235,7 +240,7 @@ func TestVectors(t *testing.T) {
 	})
 
 	t.Run("handshake", func(t *testing.T) {
-		d := load(t, "handshake.json")
+		d := load(t, dir, "handshake.json")
 		in := d.sub("inputs")
 		eq(t, "eph seed", in.hex("initiator_eph_seed_hex"), mustSeed(t, eph))
 		envInit := d.b64("hs_init_envelope_b64")
@@ -361,7 +366,7 @@ func TestVectors(t *testing.T) {
 	})
 
 	t.Run("invite", func(t *testing.T) {
-		d := load(t, "invite.json")
+		d := load(t, dir, "invite.json")
 		blob := d.b64("blob_b64")
 		nonce := d.hex("nonce_hex")
 		ct, _ := suite.SealX(d.hex("k_b_hex"), nonce, []byte("vettid/vms/2/bundle"), []byte(d.str("bundle_json")))
@@ -387,7 +392,7 @@ func TestVectors(t *testing.T) {
 	})
 
 	t.Run("altchan", func(t *testing.T) {
-		d := load(t, "altchan.json")
+		d := load(t, dir, "altchan.json")
 		desc := []byte(d.str("descriptor"))
 		ud := sha256.Sum256(append([]byte("vettid/vms/2/etk"), desc...))
 		eq(t, "descriptor user_data", ud[:], d.hex("descriptor_user_data_hex"))
@@ -411,7 +416,7 @@ func TestVectors(t *testing.T) {
 		}
 		pin := sha256.Sum256([]byte(f.str("pin")))
 		tok := sha256.Sum256([]byte(f.str("token")))
-		rel := load(t, "release.json")
+		rel := load(t, dir, "release.json")
 		man := sha256.Sum256([]byte(rel.str("manifest")))
 		eq(t, "unlock manifest hash", man[:], f.hex("manifest_sha256_hex"))
 		want := strings.Join([]string{"vettid/vms/2/unlock", f.str("user_guid"), f.str("vault_id"), f.str("request_id"),
@@ -468,8 +473,10 @@ func TestVectors(t *testing.T) {
 }
 
 // §11.10 release vectors, checked from the receiving side.
-func TestReleaseVectors(t *testing.T) {
-	d := load(t, "release.json")
+func TestReleaseVectors(t *testing.T) { checkReleaseVectors(t, Dir) }
+
+func checkReleaseVectors(t *testing.T, dir string) {
+	d := load(t, dir, "release.json")
 	mb := []byte(d.str("manifest"))
 	if len(mb) != 1060 || d.num("manifest_len") != 1060 {
 		t.Fatalf("manifest length %d", len(mb))

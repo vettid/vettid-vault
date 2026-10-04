@@ -1,0 +1,266 @@
+name: release
+
+# The release build (VAULT-RELEASES §5, §10.1 step 2; docs/RELEASING.md).
+#
+# - A signed tag release/prod/<n> or release/staging/<n> builds that
+#   channel's release <n>: refused while the channel file has
+#   placeholders, or if its release number is not <n>, or if GitHub cannot
+#   verify the tag's signature.
+# - workflow_dispatch builds a dry run: channel none (the constant-free
+#   image) or a complete staging/prod channel file, without a GitHub
+#   release.
+# - Pull requests that touch the build run the channel-none dry run.
+#
+# Every run builds the EIF twice from clean, on two arm64 runners, with
+# the pinned toolchain (release/rebuild.sh), and requires identical
+# binaries, identical measured EIF sections and identical PCR0/1/2. The
+# EIF file's own SHA-256 differs between the builds: nitro-cli writes the
+# build time and the docker host's details into the EIF's metadata
+# section, which no PCR covers (internal/eif). Building an EIF needs
+# docker and nitro-cli's blobs, not Nitro Enclaves hardware.
+
+on:
+  push:
+    tags:
+      - 'release/prod/*'
+      - 'release/staging/*'
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: 'Dry run channel: none (no release constants) or a complete staging/prod channel file'
+        type: choice
+        options: [none, staging, prod]
+        default: none
+  pull_request:
+    paths:
+      - 'release/**'
+      - 'scripts/build-eif.sh'
+      - 'Dockerfile.enclave'
+      - '.dockerignore'
+      - 'internal/eif/**'
+      - 'cmd/eifinfo/**'
+      - 'cmd/releasecfg/**'
+      - 'enclave/releasecfg/**'
+      - '.github/workflows/release.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      channel: ${{ steps.channel.outputs.channel }}
+      release: ${{ steps.channel.outputs.release }}
+      publish: ${{ steps.channel.outputs.publish }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: channel and release number
+        id: channel
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_CHANNEL: ${{ inputs.channel }}
+        run: |
+          publish=false
+          case "$EVENT" in
+            push)
+              if ! [[ "$REF_NAME" =~ ^release/(prod|staging)/([1-9][0-9]*)$ ]]; then
+                echo "::error::tag $REF_NAME is not release/<prod|staging>/<n>"; exit 1
+              fi
+              channel="${BASH_REMATCH[1]}"; release="${BASH_REMATCH[2]}"; publish=true ;;
+            workflow_dispatch) channel="$INPUT_CHANNEL"; release=0 ;;
+            *) channel=none; release=0 ;;
+          esac
+          if [ "$channel" != none ]; then
+            # The release gate (VAULT-MESSAGING §11.10.8): no placeholder,
+            # no missing value, the file is the channel's own.
+            if ! go run ./cmd/releasecfg check "$channel"; then
+              echo "::error::enclave/releasecfg/$channel.json is not final; no $channel release can be built (docs/RELEASING.md, 'Unblocking real releases')"
+              exit 1
+            fi
+            file_release="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["release"])' "enclave/releasecfg/$channel.json")"
+            if [ "$publish" = true ] && [ "$release" != "$file_release" ]; then
+              echo "::error::tag says release $release, enclave/releasecfg/$channel.json says $file_release"; exit 1
+            fi
+            release="$file_release"
+          fi
+          echo "channel=$channel" >>"$GITHUB_OUTPUT"
+          echo "release=$release" >>"$GITHUB_OUTPUT"
+          echo "publish=$publish" >>"$GITHUB_OUTPUT"
+          echo "channel $channel, release $release, publish $publish"
+      - name: the release tag is signed (GitHub verified)
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          obj="$(gh api "repos/$REPO/git/ref/tags/$TAG" --jq '.object.type + " " + .object.sha')"
+          read -r type sha <<<"$obj"
+          if [ "$type" != tag ]; then echo "::error::$TAG is a lightweight tag; release tags are annotated and signed"; exit 1; fi
+          verified="$(gh api "repos/$REPO/git/tags/$sha" --jq '.verification.verified')"
+          reason="$(gh api "repos/$REPO/git/tags/$sha" --jq '.verification.reason')"
+          if [ "$verified" != true ]; then echo "::error::$TAG's signature is not verified by GitHub ($reason)"; exit 1; fi
+          echo "$TAG: signed, verified ($reason)"
+
+  build:
+    needs: gate
+    strategy:
+      fail-fast: false
+      matrix:
+        # Two clean builds on two runners, from two checkout paths.
+        builder: [a, b]
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: ${{ matrix.builder == 'a' && 'vettid-vault' || 'elsewhere/build-b/vettid-vault' }}
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: ${{ matrix.builder == 'a' && 'vettid-vault' || 'elsewhere/build-b/vettid-vault' }}/go.mod
+          cache: false
+      - name: build (pinned toolchain, no build cache)
+        working-directory: ${{ matrix.builder == 'a' && 'vettid-vault' || 'elsewhere/build-b/vettid-vault' }}
+        env:
+          CHANNEL: ${{ needs.gate.outputs.channel }}
+        run: |
+          uname -m
+          docker version --format 'docker {{.Server.Version}} ({{.Server.Arch}})'
+          # The point of building here: no Nitro Enclaves device is needed
+          # to build an EIF, only to run one.
+          if [ -e /dev/nitro_enclaves ]; then echo "unexpected: this runner has a Nitro Enclaves device"; else echo "no /dev/nitro_enclaves on this runner"; fi
+          release/rebuild.sh "$RUNNER_TEMP/out"
+          sha256sum "$RUNNER_TEMP"/out/vault-enclave "$RUNNER_TEMP"/out/vault-parent "$RUNNER_TEMP"/out/vault-enclave.eif
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: build-${{ matrix.builder }}
+          path: |
+            ${{ runner.temp }}/out/vault-enclave.eif
+            ${{ runner.temp }}/out/vault-enclave
+            ${{ runner.temp }}/out/vault-parent
+            ${{ runner.temp }}/out/measurements.json
+            ${{ runner.temp }}/out/build-enclave.json
+            ${{ runner.temp }}/out/eif.json
+          if-no-files-found: error
+          retention-days: 30
+
+  compare:
+    needs: [gate, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: build-a
+          path: ${{ runner.temp }}/a
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: build-b
+          path: ${{ runner.temp }}/b
+      - name: the two builds are identical
+        env:
+          A: ${{ runner.temp }}/a
+          B: ${{ runner.temp }}/b
+        run: |
+          set -x
+          cmp "$A/vault-enclave" "$B/vault-enclave"
+          cmp "$A/vault-parent" "$B/vault-parent"
+          go run ./cmd/eifinfo compare "$A/vault-enclave.eif" "$B/vault-enclave.eif"
+          go run ./cmd/eifinfo match "$A/measurements.json" "$B/measurements.json"
+          for d in "$A" "$B"; do go run ./cmd/eifinfo pcrs "$d/vault-enclave.eif" "$d/build-enclave.json"; done
+      - name: summary
+        env:
+          A: ${{ runner.temp }}/a
+          B: ${{ runner.temp }}/b
+        run: |
+          {
+            echo "### Release build: channel ${{ needs.gate.outputs.channel }}, release ${{ needs.gate.outputs.release }}"
+            echo
+            echo "Two clean arm64 builds match: enclave and parent binaries, measured EIF sections and PCR0/1/2."
+            echo "The EIF files differ only in nitro-cli's unmeasured metadata section (build time, docker storage details)."
+            echo
+            echo '```json'
+            cat "$A/measurements.json"
+            echo '```'
+            echo
+            echo "Second build's EIF SHA-256: $(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["eif_sha256"])' "$B/measurements.json")"
+          } >>"$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release
+          path: |
+            ${{ runner.temp }}/a/vault-enclave.eif
+            ${{ runner.temp }}/a/vault-parent
+            ${{ runner.temp }}/a/measurements.json
+          if-no-files-found: error
+          retention-days: 90
+
+  attest:
+    # GitHub artifact attestations (SLSA build provenance, Sigstore). Not
+    # for pull requests from forks, which get no id-token.
+    needs: compare
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release
+          path: release
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            release/vault-enclave.eif
+            release/vault-parent
+            release/measurements.json
+
+  publish:
+    # A draft GitHub release for a release tag; the owner publishes it
+    # after the independent rebuild (docs/RELEASING.md).
+    needs: [gate, attest]
+    if: needs.gate.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release
+          path: release
+      - name: draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+          CHANNEL: ${{ needs.gate.outputs.channel }}
+          RELEASE: ${{ needs.gate.outputs.release }}
+        run: |
+          pcr0="$(python3 -c 'import json; print(json.load(open("release/measurements.json"))["pcr0"])')"
+          cat >notes.md <<EOF
+          Vault release $RELEASE ($CHANNEL channel), built from \`$GITHUB_SHA\` by [run $GITHUB_RUN_ID]($GITHUB_SERVER_URL/$REPO/actions/runs/$GITHUB_RUN_ID).
+
+          PCR0: \`$pcr0\`
+
+          Draft until the independent rebuild matches (docs/RELEASING.md). Verify the assets with
+          \`gh attestation verify <file> --repo $REPO\` and rebuild with \`CHANNEL=$CHANNEL release/rebuild.sh out measurements.json\`.
+          EOF
+          cp release/vault-parent release/vault-parent-arm64
+          gh release create "$TAG" --repo "$REPO" --draft --verify-tag --title "Vault $CHANNEL release $RELEASE" --notes-file notes.md \
+            release/vault-enclave.eif release/vault-parent-arm64 release/measurements.json

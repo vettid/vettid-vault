@@ -104,6 +104,11 @@ type stack struct {
 	parentBin string
 	enclBin   string
 	ctlBin    string
+	// prevDir and prevRelease: instances of prevRelease run the parent
+	// and dev enclave binaries in prevDir, built from a previous release's
+	// tag (the compatibility matrix, VAULT-RELEASES §11.3).
+	prevDir     string
+	prevRelease uint64
 	instances []*instance
 }
 
@@ -276,13 +281,17 @@ func (s *stack) start(name string, n uint64, parentFlags ...string) *instance {
 		"-queue-prefix", s.qprefix, "-relay-host", relayHost, "-control-tcp", ctl, "-egress-tcp", egr,
 		"-aws-endpoint", s.ep, "-static-credentials", "-health", in.health, "-heartbeat", "2s", "-sweep", "-1s",
 		"-resolve", relayHost + "=" + s.relayAddr, "-resolve", kmsHost + "=" + s.kmsAddr, "-resolve", gHost + "=" + s.gAddr}
-	in.parent = exec.Command(s.parentBin, append(args, parentFlags...)...)
+	parentBin, enclBin := s.parentBin, s.enclBin
+	if s.prevDir != "" && n == s.prevRelease {
+		parentBin, enclBin = filepath.Join(s.prevDir, "vault-parent"), filepath.Join(s.prevDir, "vault-enclave")
+	}
+	in.parent = exec.Command(parentBin, append(args, parentFlags...)...)
 	in.parent.Env = []string{"AWS_ACCESS_KEY_ID=test", "AWS_SECRET_ACCESS_KEY=test", "PATH=" + os.Getenv("PATH"), "GOMAXPROCS=2"}
 	in.parent.Stdout, in.parent.Stderr = in.plog, in.plog
 	if err := in.parent.Start(); err != nil {
 		t.Fatal(err)
 	}
-	in.enclave = exec.Command(s.enclBin, "-release", fmt.Sprint(n), "-control", ctl, "-egress", egr, "-relay-url", relayURL)
+	in.enclave = exec.Command(enclBin, "-release", fmt.Sprint(n), "-control", ctl, "-egress", egr, "-relay-url", relayURL)
 	in.enclave.Env = []string{"PATH=" + os.Getenv("PATH"), "GOMAXPROCS=2"}
 	in.enclave.Stdout, in.enclave.Stderr = in.elog, in.elog
 	if err := in.enclave.Start(); err != nil {

@@ -173,9 +173,18 @@ make integration   # docker compose up LocalStack (1.5 GiB cap), run, tear down
 ```
 
 The enclave image is built reproducibly from `Dockerfile.enclave`
-(`scripts/build-eif.sh` turns it into an EIF and prints PCR0-2); the
-hardware smoke test (`vault-parent -selftest`) is described in
-[`docs/SMOKE.md`](docs/SMOKE.md).
+(`scripts/build-eif.sh` turns it into an EIF and writes
+`measurements.json`); the hardware smoke test (`vault-parent -selftest`)
+is described in [`docs/SMOKE.md`](docs/SMOKE.md).
+
+Releases are built by the `release` workflow (two clean arm64 builds with
+a pinned nitro-cli toolchain, compared byte for byte, attested) and
+checked, signed and published as described in
+[`docs/RELEASING.md`](docs/RELEASING.md), which also explains how anyone
+can rebuild a release and match its PCRs (`release/rebuild.sh`), and the
+compatibility matrix that keeps live releases working. `vaultctl keycheck`
+runs the enclave's §11.10.7 check on a live release key; `vaultctl
+manifest` renders, checks and signs release manifests.
 
 Release constants (VAULT-MESSAGING 0.10.0 §11.10.8) are per channel:
 `enclave/releasecfg/prod.json` and `staging.json` are committed and

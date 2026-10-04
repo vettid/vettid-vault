@@ -1,11 +1,11 @@
 package nitro_test
 
 import (
-	"strings"
-	"os"
-	"encoding/base64"
 	"crypto/elliptic"
+	"encoding/base64"
 	"errors"
+	"os"
+	"strings"
 	"testing"
 	"time"
 

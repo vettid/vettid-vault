@@ -2,12 +2,12 @@
   "channel": "prod",
   "release": 0,
   "manifest_keys": [
-    "TODO-O3: SubjectPublicKeyInfo (base64 DER) of manifest key A (KMS ECC_NIST_P256, vault production account)",
+    "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE7xDU6CSVsFDJvP7UXigsN9SDB+KIppU85Y3DRvo0oMQZYKHZ1S/3OaNdFk2/HJX+hohYdyU6QIFPXiDBirflCQ==",
     "TODO-O3: SubjectPublicKeyInfo (base64 DER) of manifest key B (offline hardware token)"
   ],
-  "seal_account": "TODO-O1: the vault production account id (12 digits)",
+  "seal_account": "369484479783",
   "seal_region": "us-east-1",
-  "retirement_principal": "TODO-O1: arn:aws:iam::<vault production account>:role/vettid-org-vault-key-retirement",
+  "retirement_principal": "arn:aws:iam::369484479783:role/vettid-org-vault-key-retirement",
   "retirement_window_days": 30,
   "android_signers": [
     "TODO-O8: SHA-256 (64 lowercase hex) of the Play app signing certificate",

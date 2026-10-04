@@ -3,7 +3,7 @@
   "release": 0,
   "manifest_keys": [
     "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE7xDU6CSVsFDJvP7UXigsN9SDB+KIppU85Y3DRvo0oMQZYKHZ1S/3OaNdFk2/HJX+hohYdyU6QIFPXiDBirflCQ==",
-    "TODO-O3: SubjectPublicKeyInfo (base64 DER) of manifest key B (offline hardware token)"
+    "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEIcIodW3liYaxACuOdB0If8igq/oWfVOcLGbWTy1vUNzTlvsVNe3ljfqpqfTCZwtR611EYk7UPTCfjaEEMPLxfQ=="
   ],
   "seal_account": "369484479783",
   "seal_region": "us-east-1",

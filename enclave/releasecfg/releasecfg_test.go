@@ -47,7 +47,9 @@ func TestCommittedFiles(t *testing.T) {
 		if f.Config.Channel != ch || f.Config.SealRegion != "us-east-1" || f.Config.RelayURL != "https://relay.vettid.org" {
 			t.Fatalf("%s: %+v", ch, f.Config)
 		}
-		if bytes.Contains(b, []byte(Placeholder)) != (len(f.Missing) > 0) {
+		// A placeholder is always reported missing; a value can also be
+		// missing without one (release 0 before the first release).
+		if bytes.Contains(b, []byte(Placeholder)) && len(f.Missing) == 0 {
 			t.Fatalf("%s: placeholders %v", ch, f.Missing)
 		}
 		if len(f.Missing) > 0 {

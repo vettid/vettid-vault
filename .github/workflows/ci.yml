@@ -83,6 +83,9 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
       - name: shellcheck
         run: shellcheck scripts/build-eif.sh scripts/smoke/run-on-host.sh scripts/compat-matrix.sh release/rebuild.sh
       - name: two clean builds, one binary
@@ -97,7 +100,7 @@ jobs:
       - name: release gate refuses placeholders (VAULT-MESSAGING §11.10.8)
         run: |
           for ch in prod staging; do
-            if grep -q '"TODO-' "enclave/releasecfg/$ch.json"; then
+            if ! go run ./cmd/releasecfg check "$ch" >/dev/null 2>&1; then
               msg=$(CHANNEL=$ch scripts/build-eif.sh "out-$ch" 2>&1 || true)
               echo "$msg" | grep -q "still has placeholders" || { echo "build-eif.sh did not refuse $ch: $msg"; exit 1; }
               if docker build -q -f Dockerfile.enclave --build-arg CHANNEL=$ch -t "vve-$ch" . >/dev/null 2>&1; then

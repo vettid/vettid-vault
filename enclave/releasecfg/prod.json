@@ -11,7 +11,7 @@
   "retirement_window_days": 30,
   "android_signers": [
     "TODO-O8: SHA-256 (64 lowercase hex) of the Play app signing certificate",
-    "TODO-O8: SHA-256 (64 lowercase hex) of the upload certificate (direct builds)"
+    "31a19613aa10f209e08945f947f94f7ce3e6e5ac342457ff9969a67986928e65"
   ],
   "relay_url": "https://relay.vettid.org"
 }

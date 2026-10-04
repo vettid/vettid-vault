@@ -78,6 +78,7 @@ LocalStack, the real relay and a stand-in for the member API
 | `features/wallet`, `vms/btc` | §10.18 | Bitcoin wallets: BIP86 (taproot, the default) and BIP84 accounts whose recovery phrase is a critical item, addresses without the password, PSBT signing under a signing policy as a credential operation; the member's app is the chain source (V4 batch 4; btcd libraries, vault process only) |
 | `client` | §6.7, §9.1, §11 | Reference client for an app, desktop or agent: verify enclaves and manifests, enroll and unlock over the alternate channel, approve release updates, pair (with device attestation), session and rekeys, requests and events, token refresh |
 | `cmd/vaultctl` | — | Test driver over `client`; dev builds (`-tags devenclave`) also create and run vaults, and enroll and unlock through an in-process enclave |
+| `cmd/devstack` | — | Long-running local dev stack for app development (relay, LocalStack, parent, dev enclave, member API stand-in, vaultctl peer, control port). Dev builds only (`-tags devenclave`); without the tag it is a stub (`make check-tcb`) |
 | `devenclave` | — | Dev sealer and direct create/unlock with a PIN. Every file carries the `devenclave` tag; release builds cannot compile it in (`make check-tcb`) |
 
 The runtime follows VAULT-MESSAGING 0.2.3, which includes the body schemas
@@ -172,6 +173,87 @@ API stand-in, and drives them with `vaultctl api-enroll`, `api-unlock`,
 make integration   # docker compose up LocalStack (1.5 GiB cap), run, tear down
 ```
 
+### Local dev stack for app development
+
+`cmd/devstack` runs the same stack as a long-lived service that a phone
+reaches over `adb reverse` (vettid-android's `devStack` build and its
+instrumented tests): the real `vettid-relay` binary at the `go.mod`
+version, LocalStack, `vault-parent` (release build, TCP mode), the dev
+`vault-enclave` (fake NSM and KMS, TEST-ONLY roots, test release 3), the
+member API stand-in and a second member's vault enrolled with `vaultctl`
+(the peer). Every key is TEST-ONLY; nothing survives a restart.
+
+```sh
+# from a checkout
+go run -tags devenclave ./cmd/devstack -dev-device-policy device-policy.json
+# or by commit, without a checkout
+go run -tags devenclave github.com/vettid/vettid-vault/cmd/devstack@<commit> -dev-device-policy device-policy.json
+adb reverse tcp:18080 tcp:18080; adb reverse tcp:18081 tcp:18081; adb reverse tcp:18082 tcp:18082
+```
+
+It builds the binaries from its own source tree (the checkout, or the
+module cache for `@<commit>`; `-src DIR` overrides) into `-data DIR`
+(default `$XDG_CACHE_HOME/vettid-devstack`), writes `run/ready.json`
+when up, keeps `run/logs/` (`relay.log`, `parent.log`, `enclave.log`,
+`compose.log`; request lines on stderr carry method, path and status
+only) and stops on SIGINT or SIGTERM, tearing everything down. `go run`
+does not forward SIGTERM to the program, so under `go run` the stack also
+stops when the `go` process exits (`kill <go run pid>` works); a script
+may instead `go build -tags devenclave -o devstack ...` and signal the
+binary. One stack per data directory.
+
+| Flag | Default | |
+|---|---|---|
+| `-relay-port` | 18080 | the relay, plain HTTP; tokens name it `https://relay.vettid.test`, so clients map that origin to this port |
+| `-api-port` | 18081 | the member API stand-in (`Authorization: Bearer <user_guid>`) |
+| `-ctl-port` | 18082 | dev control (below) |
+| `-dev-device-policy` | — | extends the dev enclave's device-attestation policy (below) |
+| `-localstack` | — | an external LocalStack endpoint; without it, `integration/docker-compose.yml` is started (one container, 1.5 GiB cap) and stopped on exit, and an already running LocalStack on :4566 is refused rather than shared |
+| `-compose` | `podman compose`, else `docker compose` | compose command |
+| `-wait-free-mem` | 8 | refuse to start unless this many GB of memory are available (0: no check); `-mem-wait 10m` keeps re-checking |
+
+Everything listens on 127.0.0.1. Child processes run with
+`GOMAXPROCS=2` and builds with `-p 2`. The control port (TEST-ONLY):
+
+| Endpoint | |
+|---|---|
+| `GET /dev/health` | `{"ok": true}` |
+| `GET /dev/info` | what `ready.json` holds |
+| `GET /dev/trust` | the test Nitro root (DER, base64), the test manifest keys (SPKI DER, base64), the relay URL, and the dev device policy in force (`null`: TEST policy only) |
+| `POST /dev/peer/request` | `{"type": T, "body": {...}}`: `vaultctl request` on the peer; answers the vault's response |
+| `POST /dev/peer/event` | `{"type": T, "match": {k: v}, "timeout_s": N}`: waits (default 90 s, at most 300) for a peer event of type T whose body matches; others are kept for later calls |
+
+**Dev device policy.** The dev enclave verifies device attestation
+against the TEST policy (`internal/enclavetest.Policy`: the TEST Android
+CA, `com.vettid.app`, the TEST signing digest, the TEST GrapheneOS boot
+key). `vault-enclave -dev-device-policy FILE` (devenclave builds only;
+release builds do not contain the flag, `make check-tcb`) adds to it, so
+a real phone's Keystore attestation can enroll against the dev stack:
+
+```json
+{
+  "google_attestation_roots": true,
+  "android_packages": ["com.vettid.app.dev", "com.vettid.app.devstack"],
+  "android_signers_sha256": ["<SHA-256 of the debug signing certificate>"],
+  "grapheneos_boot_keys": true
+}
+```
+
+`google_attestation_roots` adds the pinned Google Hardware Attestation
+roots (`pins.GoogleAttestationRoots`, including Key Attestation CA1, the
+2025 EC root); `android_roots_pem` adds further self-signed CA roots (PEM
+strings); `android_packages` are accepted besides `com.vettid.app`;
+`android_signers_sha256` are 64 hex digits or keytool's colon-separated
+form (`keytool -list -v -keystore ~/.android/debug.keystore -storepass
+android | grep SHA256`); `grapheneos_boot_keys` adds the pinned GrapheneOS
+verified boot keys (`pins.GrapheneOSVerifiedBootKeys`) for
+`verifiedBootState` SelfSigned. Parsing is strict (no unknown or duplicate
+members, at most 32 KiB, bounded lists) and the policy must add
+something; it never removes the TEST entries, so TEST attesters keep
+working. The status list stays the stack's empty one.
+
+The stack's own test runs with `make integration`.
+
 The enclave image is built reproducibly from `Dockerfile.enclave`
 (`scripts/build-eif.sh` turns it into an EIF and writes
 `measurements.json`); the hardware smoke test (`vault-parent -selftest`)
@@ -210,7 +292,8 @@ make channels  # each channel's embedded constants and enclave build
 make race      # the same under -race
 make lint      # go vet + staticcheck (pinned), default and vmsvectors builds
 make check-tcb # no vector-only, dev-enclave or test code in release packages;
-               # no AWS SDK or parent in the enclave binary
+               # no AWS SDK or parent in the enclave binary; cmd/devstack and
+               # -dev-device-policy only in devenclave builds
 make e2e       # runtime + client against the real relay binary (race),
                # and the parent + supervisor in process
 make fuzz      # every fuzz target, FUZZTIME executions each (default 50000x)

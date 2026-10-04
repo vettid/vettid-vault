@@ -67,6 +67,20 @@ check-tcb:
 	@for f in devenclave/*.go cmd/vaultctl/vault_dev.go cmd/vault-enclave/vault_dev.go; do \
 	  head -1 $$f | grep -qx '//go:build devenclave' || { echo "$$f lacks //go:build devenclave"; exit 1; }; done
 	@head -1 cmd/vault-enclave/release.go | grep -qx '//go:build !devenclave' || { echo "cmd/vault-enclave/release.go lacks //go:build !devenclave"; exit 1; }
+	@# Dev tooling (cmd/devstack, -dev-device-policy): devenclave builds
+	@# only. Without the tag cmd/devstack is a stub that links no module
+	@# code; every source file naming the dev device policy carries the
+	@# tag; and a release enclave binary does not contain the flag.
+	@for f in cmd/devstack/*.go; do [ "$$f" = cmd/devstack/release.go ] && continue; \
+	  head -1 $$f | grep -qE '^//go:build devenclave( && [a-z]+)*$$' || { echo "$$f lacks //go:build devenclave"; exit 1; }; done
+	@head -1 cmd/devstack/release.go | grep -qx '//go:build !devenclave' || { echo "cmd/devstack/release.go lacks //go:build !devenclave"; exit 1; }
+	@if $(GO) list -deps ./cmd/devstack | grep -v '/cmd/devstack$$' | grep -E '^github\.com/|^golang\.org/x/'; then \
+	  echo "cmd/devstack links module or third-party code without the devenclave tag"; exit 1; fi
+	@for f in $$(grep -rlE 'dev-device-policy|DevDevicePolicy|DevVaultPolicyArgs' --include='*.go' . | grep -v '^./internal/enclavetest/'); do \
+	  head -1 $$f | grep -qE '^//go:build devenclave( && [a-z]+)*$$' || { echo "$$f uses the dev device policy without //go:build devenclave"; exit 1; }; done
+	@tmp=$$(mktemp -d) && trap 'rm -rf $$tmp' EXIT && GOOS=linux $(GO) build -o $$tmp/ve ./cmd/vault-enclave && \
+	  if grep -aqE 'dev-device-policy|DevDevicePolicy|device-policy' $$tmp/ve; then \
+	    echo "the release enclave binary contains the dev device policy"; exit 1; fi
 	@for os in linux; do \
 	  if GOOS=$$os $(GO) list -deps $(ENCLAVEPKGS) | grep -E 'aws-sdk-go|smithy-go|vettid-vault/parent|hpkederand|mlkemtest|/devenclave|relaytest|enclavetest|memberapitest|parenttest|featuretest'; then \
 	    echo "the enclave binary links the AWS SDK, the parent, or dev/test code"; exit 1; fi; done
@@ -116,7 +130,7 @@ LOCALSTACK ?= http://127.0.0.1:4566
 integration:
 	$(COMPOSE) -f integration/docker-compose.yml up -d
 	@for i in $$(seq 1 90); do curl -sf $(LOCALSTACK)/_localstack/health >/dev/null && break; sleep 2; done
-	@VAULT_IT_LOCALSTACK=$(LOCALSTACK) $(GO) test -count=1 -p 1 -tags 'devenclave integration' ./parent/ ./integration/; \
+	@VAULT_IT_LOCALSTACK=$(LOCALSTACK) $(GO) test -count=1 -p 1 -tags 'devenclave integration' ./parent/ ./integration/ ./cmd/devstack/; \
 	  status=$$?; $(COMPOSE) -f integration/docker-compose.yml down; exit $$status
 
 # Regenerate testdata/vectors.

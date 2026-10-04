@@ -44,6 +44,11 @@ type Policy struct {
 	AndroidRoots []*x509.Certificate // compared by SubjectPublicKeyInfo
 	// AndroidPackage is the VettID app's package name.
 	AndroidPackage string
+	// AndroidDevPackages are further package names accepted in place of
+	// AndroidPackage. Development only: set by the dev enclave's device
+	// policy file (debug and dev-stack application ids);
+	// release configurations leave it empty.
+	AndroidDevPackages []string
 	// AndroidSigners are SHA-256 digests of the app's signing
 	// certificates; every digest in an attestation must be listed.
 	AndroidSigners [][]byte

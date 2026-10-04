@@ -293,3 +293,37 @@ func FuzzKeyDescription(f *testing.F) {
 		_ = devattest.CheckKeyDescription(p, b)
 	})
 }
+
+// AndroidDevPackages (the dev enclave's device policy file) accepts the
+// listed packages besides AndroidPackage, and nothing else.
+func TestAndroidDevPackages(t *testing.T) {
+	ch := challenge("enroll")
+	dev := enclavetest.NewAndroidAttester(0x62, enclavetest.AndroidOptions{Package: "com.vettid.app.devstack"})
+	da, _ := dev.Attest(ch)
+	p := enclavetest.Policy()
+	if _, err := devattest.VerifyAttest(p, da, ch, now, fresh()); !errors.Is(err, devattest.ErrApplication) {
+		t.Fatalf("dev package without the dev policy: %v", err)
+	}
+	p.AndroidDevPackages = []string{"", "com.vettid.app.dev", "com.vettid.app.devstack"}
+	if _, err := devattest.VerifyAttest(p, da, ch, now, fresh()); err != nil {
+		t.Fatalf("dev package: %v", err)
+	}
+	// The release package still passes; others and prefixes do not.
+	rel := enclavetest.NewAndroidAttester(0x63, enclavetest.AndroidOptions{ExtraPackage: "com.vettid.app.dev"})
+	da, _ = rel.Attest(ch)
+	if _, err := devattest.VerifyAttest(p, da, ch, now, fresh()); err != nil {
+		t.Fatalf("release + dev package: %v", err)
+	}
+	for _, pkg := range []string{"com.vettid.app.devstack2", "com.vettid.app.de", "com.evil.app"} {
+		a := enclavetest.NewAndroidAttester(0x64, enclavetest.AndroidOptions{Package: pkg})
+		da, _ := a.Attest(ch)
+		if _, err := devattest.VerifyAttest(p, da, ch, now, fresh()); !errors.Is(err, devattest.ErrApplication) {
+			t.Fatalf("%s: %v", pkg, err)
+		}
+	}
+	// An empty AndroidPackage still disables Android.
+	p.AndroidPackage = ""
+	if _, err := devattest.VerifyAttest(p, da, ch, now, fresh()); !errors.Is(err, devattest.ErrPlatform) {
+		t.Fatalf("no package: %v", err)
+	}
+}

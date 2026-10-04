@@ -109,6 +109,13 @@ jobs:
               echo "$ch: refused while placeholders remain"
             else
               docker build -q -f Dockerfile.enclave --build-arg CHANNEL=$ch --build-arg SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)" -t "vve-$ch" .
+              # build-eif.sh for a complete channel gets as far as the two
+              # binaries (no nitro-cli here: EIF_BUILDER names no image, so
+              # the EIF step itself fails afterwards, as expected).
+              msg=$(CHANNEL=$ch EIF_BUILDER=vettid-no-such-eif-builder scripts/build-eif.sh "out-$ch" 2>&1 || true)
+              echo "$msg" | grep -q "binary sha256" || { echo "build-eif.sh did not build the $ch binaries: $msg"; exit 1; }
+              test -s "out-$ch/vault-enclave" && test -s "out-$ch/vault-parent"
+              echo "$ch: build-eif.sh built both binaries"
             fi
           done
 

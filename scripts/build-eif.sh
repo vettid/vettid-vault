@@ -51,9 +51,11 @@ case "$channel" in
   none) ;;
   prod|staging)
     cfg="enclave/releasecfg/${channel}.json"
-    if grep -q '"TODO-' "$cfg"; then
+    # The same check Dockerfile.enclave runs: TODO- placeholders and missing
+    # values (release 0, empty key lists) alike.
+    if ! out="$("$go" run ./cmd/releasecfg check "$channel" 2>&1)"; then
       log "FAIL $cfg still has placeholders; refusing to build a $channel release image:"
-      grep -n '"TODO-' "$cfg" >&2
+      echo "$out" >&2
       exit 1
     fi
     cfgsum="$(sha256sum "$cfg" | cut -d' ' -f1)"

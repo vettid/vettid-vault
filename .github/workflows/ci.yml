@@ -71,7 +71,7 @@ jobs:
       - name: integration (LocalStack)
         env:
           VAULT_IT_LOCALSTACK: http://127.0.0.1:4566
-        run: go test -count=1 -p 1 -tags 'devenclave integration' ./parent/ ./integration/
+        run: go test -count=1 -p 1 -tags 'devenclave integration' ./parent/ ./integration/ ./cmd/devstack/
 
   enclave-image:
     # Dockerfile.enclave is reproducible: two clean builds give the same

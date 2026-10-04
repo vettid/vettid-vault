@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -55,29 +56,7 @@ func Binary(t testing.TB) string {
 			buildErr = err
 			return
 		}
-		out, err := exec.Command("go", "list", "-C", root, "-m", "-f", "{{.Version}}", module).Output()
-		if err != nil {
-			buildErr = fmt.Errorf("relaytest: go list: %w", err)
-			return
-		}
-		version := strings.TrimSpace(string(out))
-		cache, err := os.UserCacheDir()
-		if err != nil {
-			cache = os.TempDir()
-		}
-		dir := filepath.Join(cache, "vettid-vault-test", "relay-"+version)
-		binPath = filepath.Join(dir, "relay")
-		if _, err := os.Stat(binPath); err == nil {
-			return
-		}
-		cmd := exec.Command("go", "install", module+"/cmd/relay@"+version)
-		cmd.Env = append(os.Environ(), "GOBIN="+dir, "CGO_ENABLED=0", "GOFLAGS=")
-		cmd.Dir = os.TempDir()
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		if err := cmd.Run(); err != nil {
-			buildErr = fmt.Errorf("relaytest: building relay %s: %v: %s", version, err, stderr.String())
-		}
+		binPath, buildErr = BuildBinary(root)
 	})
 	if buildErr != nil {
 		t.Fatal(buildErr)
@@ -85,11 +64,40 @@ func Binary(t testing.TB) string {
 	return binPath
 }
 
+// BuildBinary builds (or finds in the per-version cache) the relay binary
+// at the version the module in root (a vettid-vault source tree) requires.
+func BuildBinary(root string) (string, error) {
+	out, err := exec.Command("go", "list", "-C", root, "-m", "-f", "{{.Version}}", module).Output()
+	if err != nil {
+		return "", fmt.Errorf("relaytest: go list: %w", err)
+	}
+	version := strings.TrimSpace(string(out))
+	cache, err := os.UserCacheDir()
+	if err != nil {
+		cache = os.TempDir()
+	}
+	dir := filepath.Join(cache, "vettid-vault-test", "relay-"+version)
+	bin := filepath.Join(dir, "relay")
+	if _, err := os.Stat(bin); err == nil {
+		return bin, nil
+	}
+	cmd := exec.Command("go", "install", module+"/cmd/relay@"+version)
+	cmd.Env = append(os.Environ(), "GOBIN="+dir, "CGO_ENABLED=0", "GOFLAGS=")
+	cmd.Dir = os.TempDir()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("relaytest: building relay %s: %v: %s", version, err, stderr.String())
+	}
+	return bin, nil
+}
+
 // Relay is a running relay.
 type Relay struct {
-	URL  string
-	cmd  *exec.Cmd
-	logs *bytes.Buffer
+	URL      string
+	cmd      *exec.Cmd
+	logs     *syncBuffer
+	stopOnce sync.Once
 }
 
 // Options override relay settings (environment variable → value).
@@ -109,16 +117,32 @@ func freePort() (string, error) {
 // open tokens and claims, 400-day token lifetimes, relaxed rate limits.
 func Start(t testing.TB, opts Options) *Relay {
 	t.Helper()
-	bin := Binary(t)
-	addr, err := freePort()
+	r, err := Run(Binary(t), filepath.Join(t.TempDir(), "relay.db"), nil, opts)
 	if err != nil {
 		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		r.Stop()
+		if t.Failed() {
+			t.Logf("relay output:\n%s", r.logs.String())
+		}
+	})
+	return r
+}
+
+// Run starts bin with its database at dbPath and the test defaults of
+// Start, overridden by opts, and waits until it is healthy. Its output
+// goes to logs (nil: kept in memory, see Logs). The caller stops it.
+func Run(bin, dbPath string, logs io.Writer, opts Options) (*Relay, error) {
+	addr, err := freePort()
+	if err != nil {
+		return nil, err
 	}
 	url := "http://" + addr
 	env := map[string]string{
 		"RELAY_LISTEN_ADDR":                addr,
 		"RELAY_BASE_URL":                   url,
-		"RELAY_DB_PATH":                    filepath.Join(t.TempDir(), "relay.db"),
+		"RELAY_DB_PATH":                    dbPath,
 		"RELAY_METRICS_ADDR":               "",
 		"RELAY_LOG_LEVEL":                  "warn",
 		"RELAY_VISIBILITY_TIMEOUT":         "2s",
@@ -141,19 +165,16 @@ func Start(t testing.TB, opts Options) *Relay {
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
-	logs := &bytes.Buffer{}
-	cmd.Stdout, cmd.Stderr = logs, logs
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
+	buf := &syncBuffer{}
+	var w io.Writer = buf
+	if logs != nil {
+		w = io.MultiWriter(buf, logs)
 	}
-	r := &Relay{URL: url, cmd: cmd, logs: logs}
-	t.Cleanup(func() {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		if t.Failed() {
-			t.Logf("relay output:\n%s", logs.String())
-		}
-	})
+	cmd.Stdout, cmd.Stderr = w, w
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	r := &Relay{URL: url, cmd: cmd, logs: buf}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	for {
@@ -161,13 +182,47 @@ func Start(t testing.TB, opts Options) *Relay {
 		if err == nil {
 			resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
-				return r
+				return r, nil
 			}
 		}
 		select {
 		case <-ctx.Done():
-			t.Fatalf("relay did not start: %s", logs.String())
+			r.Stop()
+			return nil, fmt.Errorf("relaytest: relay did not start: %s", buf.String())
 		case <-time.After(50 * time.Millisecond):
 		}
 	}
+}
+
+// Stop kills the relay and waits for it.
+func (r *Relay) Stop() {
+	r.stopOnce.Do(func() {
+		_ = r.cmd.Process.Kill()
+		_ = r.cmd.Wait()
+	})
+}
+
+// Logs returns the relay's output so far (the last 1 MiB).
+func (r *Relay) Logs() string { return r.logs.String() }
+
+// syncBuffer keeps the last 1 MiB written.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  []byte
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.b = append(s.b, p...)
+	if over := len(s.b) - 1<<20; over > 0 {
+		s.b = append(s.b[:0], s.b[over:]...)
+	}
+	return len(p), nil
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return string(s.b)
 }

@@ -3,6 +3,7 @@ package enclavetest
 import (
 	"context"
 	"crypto/ecdsa"
+	"encoding/base64"
 	"errors"
 	"flag"
 	"log/slog"
@@ -35,6 +36,10 @@ type DevOptions struct {
 	DownLock  time.Duration
 	LogLevel  slog.Level
 	OnReady   func(*enclave.Instance)
+	// DevicePolicy extends the TEST device-attestation policy
+	// (DEVELOPMENT ONLY, -dev-device-policy); nil: the TEST policy. The
+	// vault processes need it too: append DevVaultPolicyArgs to VaultExec.
+	DevicePolicy *DevDevicePolicy
 }
 
 // DevSupervisor returns a supervisor configuration for development and
@@ -79,7 +84,7 @@ func DevSupervisor(o DevOptions) (supervisor.Config, error) {
 	}
 	control := o.Control
 	return supervisor.Config{
-		Enclave: func(id string) enclave.Config { return DevConfig(id, o.Release, o.RelayURL) },
+		Enclave: func(id string) enclave.Config { return devConfig(id, o.Release, o.RelayURL, o.DevicePolicy) },
 		NSM:     NewFakeNSM(spec.PCR0, spec.PCR1, spec.PCR2, time.Now),
 		Control: func(ctx context.Context) (net.Conn, error) {
 			var d net.Dialer
@@ -103,10 +108,14 @@ func DevSupervisor(o DevOptions) (supervisor.Config, error) {
 // the test manifest key, sealing namespace and device-attestation roots,
 // and the minimum KDF.
 func DevConfig(instanceID string, n uint64, relayURL string) enclave.Config {
+	return devConfig(instanceID, n, relayURL, nil)
+}
+
+func devConfig(instanceID string, n uint64, relayURL string, dp *DevDevicePolicy) enclave.Config {
 	mk := ManifestKey()
 	return enclave.Config{InstanceID: instanceID, ReleaseNumber: n, ManifestKeys: []*ecdsa.PublicKey{&mk.PublicKey},
 		SealAccount: KMSAccount, SealRegion: KMSRegion,
-		RetirementPrincipal: RetirementRole, RetirementWindowDays: RetirementWindow, DeviceAttest: Policy(), RelayURL: relayURL, KDF: vault.MinKDF}
+		RetirementPrincipal: RetirementRole, RetirementWindowDays: RetirementWindow, DeviceAttest: dp.Apply(Policy()), RelayURL: relayURL, KDF: vault.MinKDF}
 }
 
 // DevVaultArgs are the arguments after vaultproc.Arg for a dev vault
@@ -115,17 +124,37 @@ func DevVaultArgs(n uint64, relayURL string) []string {
 	return []string{"-release", strconv.FormatUint(n, 10), "-relay-url", relayURL}
 }
 
-// DevVaultPlatform parses DevVaultArgs into a dev vault process's
+// DevVaultPolicyArgs are the arguments that pass a dev device policy on
+// to a dev vault process (none for nil).
+func DevVaultPolicyArgs(p *DevDevicePolicy) []string {
+	if p == nil {
+		return nil
+	}
+	return []string{"-device-policy", base64.StdEncoding.EncodeToString(p.raw)}
+}
+
+// DevVaultPlatform parses DevVaultArgs (and DevVaultPolicyArgs) into a dev vault process's
 // platform (TEST-ONLY configuration, the messaging feature).
 func DevVaultPlatform(args []string) (vaultproc.Platform, error) {
 	fs := flag.NewFlagSet("vault-process", flag.ContinueOnError)
 	n := fs.Uint64("release", 3, "test release")
 	relay := fs.String("relay-url", "", "relay URL")
-	if err := fs.Parse(args); err != nil || *n == 0 || *n > 15 || *relay == "" {
+	policy := fs.String("device-policy", "", "dev device policy (base64)")
+	if err := fs.Parse(args); err != nil || *n == 0 || *n > 15 || *relay == "" || fs.NArg() != 0 {
 		return vaultproc.Platform{}, errors.New("enclavetest: bad vault process arguments")
 	}
+	var dp *DevDevicePolicy
+	if *policy != "" {
+		b, err := base64.StdEncoding.Strict().DecodeString(*policy)
+		if err != nil {
+			return vaultproc.Platform{}, errors.New("enclavetest: bad vault process arguments")
+		}
+		if dp, err = ParseDevDevicePolicy(b); err != nil {
+			return vaultproc.Platform{}, err
+		}
+	}
 	return vaultproc.Platform{
-		Config:         func(id string) enclave.Config { return DevConfig(id, *n, *relay) },
+		Config:         func(id string) enclave.Config { return devConfig(id, *n, *relay, dp) },
 		Features:       func() []vault.Feature { return all.Dev() },
 		RequireSeccomp: true,
 	}, nil

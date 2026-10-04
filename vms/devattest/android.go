@@ -263,7 +263,7 @@ func checkApplicationID(p *Policy, e der.Element) error {
 		if _, err := der.Int(ve); err != nil {
 			return ErrFormat
 		}
-		if !suite.Equal(name, []byte(p.AndroidPackage)) {
+		if !p.androidPackageAllowed(name) {
 			return ErrApplication
 		}
 		n++
@@ -297,6 +297,20 @@ func checkApplicationID(p *Policy, e der.Element) error {
 		return ErrApplication
 	}
 	return nil
+}
+
+// androidPackageAllowed reports whether name is the app's package or one
+// of the development packages.
+func (p *Policy) androidPackageAllowed(name []byte) bool {
+	if suite.Equal(name, []byte(p.AndroidPackage)) {
+		return true
+	}
+	for _, d := range p.AndroidDevPackages {
+		if d != "" && suite.Equal(name, []byte(d)) {
+			return true
+		}
+	}
+	return false
 }
 
 func validAt(c *x509.Certificate, now time.Time) bool {

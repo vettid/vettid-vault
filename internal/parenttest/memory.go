@@ -440,6 +440,11 @@ func (t *Tables) Lifecycle(_ context.Context, ev parent.Lifecycle, me string, no
 		r.State = ev.Event
 		r.LeaseInstance, r.LeaseExpires = "", 0
 	}
+	if ev.Event == "deleted" {
+		t.ids++
+		r.AlarmKind, r.AlarmID, r.AlarmAt, r.AlarmPending = "vault_deleted", strconv.Itoa(t.ids), now.Unix(), true
+		r.Alarms++
+	}
 	return nil
 }
 

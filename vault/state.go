@@ -51,6 +51,9 @@ type State struct {
 	// Transfer is the direct transfer to a new phone in progress (§6.7.1),
 	// at most one.
 	Transfer *Transfer `json:"transfer,omitempty"`
+	// Deleting marks a deletion in progress (§12.5): the vault never runs
+	// again.
+	Deleting *Deletion `json:"deleting,omitempty"`
 
 	// Release state (§11.10.4): the release the vault is sealed to, a
 	// pending move, and the release last announced to the owner's devices

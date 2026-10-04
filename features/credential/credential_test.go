@@ -684,6 +684,7 @@ func FuzzParsePayload(f *testing.F) {
 	f.Add("credential.unlock", []byte(`{"password":"`+pw+`"}`))
 	f.Add("credential.password.change", []byte(`{"password":"`+pw+`","new_password":"`+pw+`"}`))
 	f.Add("device.transfer.approve", []byte(`{"password":"`+pw+`","pin":"246810"}`))
+	f.Add("vault.delete", []byte(`{"pin":"246810"}`))
 	f.Fuzz(func(t *testing.T, typ string, b []byte) {
 		p, err := ParsePayload(typ, b)
 		if err != nil {

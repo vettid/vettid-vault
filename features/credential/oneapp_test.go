@@ -330,7 +330,8 @@ func FuzzOneAppBodies(f *testing.F) {
 	f.Add(0, []byte(`{"alarm_id":"`+testID+`","mine":true}`))
 	f.Add(1, []byte(`{"transfer_id":"`+testID+`"}`))
 	f.Add(2, []byte(`{}`))
-	types := []string{"credential.alarm.confirm", "device.transfer.reject", "device.transfer.create", "device.transfer.approve", "credential.reset"}
+	f.Add(5, []byte(`{"confirm":"delete my vault","utk_id":"0011223344556677","sealed":"AAAA"}`))
+	types := []string{"credential.alarm.confirm", "device.transfer.reject", "device.transfer.create", "device.transfer.approve", "credential.reset", "vault.delete"}
 	h := featuretest.NewHost()
 	h.AddDevice("dev-app", vault.KindApp)
 	cr := New(Options{KDF: MinKDF})
@@ -342,4 +343,108 @@ func FuzzOneAppBodies(f *testing.F) {
 		_ = featuretest.Call(cr, h, now, "app", types[i%len(types)], string(b))
 		h.Xfer = nil
 	})
+}
+
+// §12.5: vault.delete authorizes a deletion: the confirmation phrase and
+// the PIN always; the holder's current blob and password; refused during
+// an alarm; nothing of the credential is returned.
+func TestVaultDelete(t *testing.T) {
+	e := newEnv(t)
+	e.h.PIN = "246810"
+	blob := e.create()
+	del := func(kind, blob string, payload map[string]any, confirm string) featuretest.Result {
+		return e.callBody(kind, "vault.delete", blob, payload, `"confirm":"`+confirm+`"`)
+	}
+	if r := del("app", blob, map[string]any{"pin": "246810", "password": pw}, "yes"); r.Code != "bad_request" {
+		t.Fatalf("confirmation: %q", r.Code)
+	}
+	if r := del("app", blob, map[string]any{"pin": "135791", "password": pw}, vault.DeleteConfirmation); r.Code != "bad_pin" {
+		t.Fatalf("wrong PIN: %q", r.Code)
+	}
+	if r := del("app", blob, map[string]any{"pin": "246810", "password": "wrong password"}, vault.DeleteConfirmation); r.Code != "bad_password" {
+		t.Fatalf("wrong password: %q", r.Code)
+	}
+	if r := del("app", blob, map[string]any{"pin": "246810"}, vault.DeleteConfirmation); r.Code != "bad_request" {
+		t.Fatalf("no password: %q", r.Code)
+	}
+	if r := del("app2", blob, map[string]any{"pin": "246810", "password": pw}, vault.DeleteConfirmation); r.Code != "forbidden" {
+		t.Fatalf("another app: %q", r.Code)
+	}
+	if len(e.h.Deletions) != 0 {
+		t.Fatal("deleted early")
+	}
+	r := e.ok(del("app", blob, map[string]any{"pin": "246810", "password": pw}, vault.DeleteConfirmation))
+	if strings.Contains(string(r.Body), "credential") || len(e.h.Deletions) != 1 || e.h.Deletions[0] != "app" {
+		t.Fatalf("delete: %s %v", r.Body, e.h.Deletions)
+	}
+	e.f.VaultDeleting(nil)
+	if e.f.CredentialExists() {
+		t.Fatal("credential kept")
+	}
+}
+
+func TestVaultDeleteDuringAlarmAndRecovery(t *testing.T) {
+	e := newEnv(t)
+	e.h.PIN = "246810"
+	b1 := e.create()
+	b2 := blobOf(t, e.ok(e.unlock(b1, pw)))
+	e.ok(e.raw("app", "credential.ack", `{"version":2}`))
+	e.unlock(b1, pw) // a clone: frozen
+	if r := e.callBody("app", "vault.delete", b2, map[string]any{"pin": "246810", "password": pw}, `"confirm":"`+vault.DeleteConfirmation+`"`); r.Code != "credential_frozen" {
+		t.Fatalf("delete during an alarm: %q", r.Code)
+	}
+	// The recovery path: backup on → the password against the vault's copy.
+	if r := e.callBody("recovering-app", "vault.delete", "", map[string]any{"pin": "246810"}, `"confirm":"`+vault.DeleteConfirmation+`"`); r.Code != "bad_request" {
+		t.Fatalf("recovery delete without the password (backup on): %q", r.Code)
+	}
+	e.ok(e.callBody("recovering-app", "vault.delete", "", map[string]any{"pin": "246810", "password": pw}, `"confirm":"`+vault.DeleteConfirmation+`"`))
+	if len(e.h.Deletions) != 1 || e.h.Deletions[0] != "recovery" {
+		t.Fatalf("%v", e.h.Deletions)
+	}
+}
+
+// §11.11.5 (0.9.0): with backup off a recovery restores access only: no
+// credential content is ever returned; the app may reset or delete (PIN
+// only, the credential being lost).
+func TestBackupOffRecoveryAccessOnly(t *testing.T) {
+	e := newEnv(t)
+	e.h.PIN = "246810"
+	e.h.Set.NoBackup = true
+	e.create()
+	e.ok(e.raw("app", "credential.ack", `{"version":1}`))
+	for _, typ := range []string{"credential.get", "credential.version"} {
+		if r := e.raw("recovering-app", typ, `{}`); r.Code != "forbidden" {
+			t.Fatalf("%s from a recovering app: %q", typ, r.Code)
+		}
+	}
+	if r := e.call("recovering-app", "credential.recover", "", map[string]any{"password": pw}); r.Code != "credential_lost" || r.Body != nil {
+		t.Fatalf("recover: %q %s", r.Code, r.Body)
+	}
+	e.ok(e.callBody("recovering-app", "vault.delete", "", map[string]any{"pin": "246810"}, `"confirm":"`+vault.DeleteConfirmation+`"`))
+	if len(e.h.Deletions) != 1 {
+		t.Fatal("not deleted")
+	}
+}
+
+// §3.5.9 (0.9.0): a credential without a holder never adopts an app: the
+// vault is restricted to the recovery path and deletion.
+func TestNoHolderNoAdoption(t *testing.T) {
+	e := newEnv(t)
+	blob := e.create()
+	e.f.mu.Lock()
+	e.f.st.Holder = ""
+	e.f.mu.Unlock()
+	if e.f.CredentialReady() || !e.f.CredentialExists() {
+		t.Fatal("holderless credential ready")
+	}
+	if r := e.unlock(blob, pw); r.Code != "forbidden" && r.Code != "credential_required" {
+		t.Fatalf("holderless unlock: %q", r.Code)
+	}
+	if e.f.Holder() != "" {
+		t.Fatal("adopted")
+	}
+	e.ok(e.call("recovering-app", "credential.recover", "", map[string]any{"password": pw}))
+	if e.f.Holder() != "dev-recovering" {
+		t.Fatal("recovery did not set the holder")
+	}
 }

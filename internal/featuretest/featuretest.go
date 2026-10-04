@@ -67,6 +67,14 @@ type Host struct {
 	Xfer      *vault.TransferInfo
 	XferEnded []string
 	Alarms    []string
+	// Deletions are the vault deletions started (vault.DeleteHost), by via.
+	Deletions []string
+}
+
+// DeleteVault implements vault.DeleteHost.
+func (h *Host) DeleteVault(via string, _ time.Time) error {
+	h.Deletions = append(h.Deletions, via)
+	return nil
 }
 
 // VerifyPIN implements vault.CredentialHost.

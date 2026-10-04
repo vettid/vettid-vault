@@ -445,12 +445,16 @@ func (a *AWS) Lifecycle(ctx context.Context, ev Lifecycle, instanceID string, no
 	}
 	err := a.updateVault(ctx, ev.VaultID, update, cond, nm, vals)
 	if errors.Is(err, ErrLeaseHeld) {
-		return nil // another instance holds the vault now
+		err = nil // another instance holds the vault now
+	}
+	if err == nil && ev.Event == "deleted" {
+		// The member is told (§12.5): the vault's own audit log is gone.
+		err = a.alarm(ctx, ev.VaultID, "vault_deleted", now)
 	}
 	return err
 }
 
-// alarm records a host alarm on the vault row (VAULT-MESSAGING §11.5,
+// alarm records a host alarm (credential_clone) or notice (vault_deleted) on the vault row (VAULT-MESSAGING §11.5,
 // MEMBER-API "Vault alarms"): alarm = {kind, alarm_id (ULID), at (epoch
 // s)} and alarm_pending = true, which the member API's alarm mailer picks
 // up from the table's stream. It is not conditional on the lease: an

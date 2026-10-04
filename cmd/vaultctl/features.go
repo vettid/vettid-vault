@@ -19,6 +19,7 @@ import (
 
 func init() {
 	commands["credential"] = command{"credential create|fetch|version|unlock|lock|rotate|password|delete|recover|reset | credential confirm ALARM_ID mine|not-mine", cmdCredential}
+	commands["delete-vault"] = command{"delete-vault CONFIRMATION   (CONFIRMATION must be \"delete my vault\"; reads VAULTCTL_PIN and VAULTCTL_PASSWORD, the password empty when the credential is lost)", cmdDeleteVault}
 	commands["transfer"] = command{"transfer create | transfer approve ID | transfer reject ID   (move the app to a new phone; approve reads VAULTCTL_PIN and VAULTCTL_PASSWORD)", cmdTransfer}
 	commands["profile"] = command{"profile get | profile set JSON   (the display name and photo; @profile items are items)", cmdProfile}
 	commands["settings"] = command{"settings get | settings set VERSION JSON", cmdSettings}
@@ -64,6 +65,20 @@ func sub(args []string, usage string) (string, []string, error) {
 		return "", nil, errors.New(usage)
 	}
 	return args[0], args[1:], nil
+}
+
+func cmdDeleteVault(ctx context.Context, g *globals, args []string) error {
+	if len(args) != 1 || args[0] != "delete my vault" {
+		return errors.New(commands["delete-vault"].usage)
+	}
+	pin, err := password("VAULTCTL_PIN")
+	if err != nil {
+		return err
+	}
+	pw := os.Getenv("VAULTCTL_PASSWORD")
+	return withDevice(ctx, g, func(d *client.Device) (any, error) {
+		return nil, d.VaultDelete(ctx, pin, pw)
+	})
 }
 
 func cmdTransfer(ctx context.Context, g *globals, args []string) error {

@@ -123,7 +123,7 @@ func (pr *proc) handle(ctx context.Context, f *hostproto.Frame) [][]byte {
 		return pr.open(ctx, f.Fields)
 	case vaultipc.KindLock:
 		reason := ""
-		if len(f.Fields) == 1 && (string(f.Fields[0]) == "" || string(f.Fields[0]) == "recovery") {
+		if len(f.Fields) == 1 && (string(f.Fields[0]) == "" || string(f.Fields[0]) == "recovery" || string(f.Fields[0]) == vault.LockDelete) {
 			reason = string(f.Fields[0])
 		}
 		return pr.lock(ctx, reason)

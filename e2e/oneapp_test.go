@@ -121,6 +121,12 @@ func TestCloneAlarm(t *testing.T) {
 		Fields: []client.ItemField{{Label: "Words", Kind: "multiline", Value: "abandon"}}}); client.Code(err) != "credential_frozen" {
 		t.Fatalf("frozen critical item: %v", err)
 	}
+	// Only the owner's devices hear of it (§3.5.9): never a connection.
+	quiet, qcancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer qcancel()
+	if _, err := b.app.WaitEvent(quiet, "credential.alarm", nil); err == nil {
+		t.Fatal("a connection's app received the alarm")
+	}
 	// Normal messaging and other features keep working.
 	sendText(t, a, a.app, aConn, "still here")
 	waitEvent(t, b.app, "message.new", nil)
@@ -448,5 +454,157 @@ func TestGrapheneOS(t *testing.T) {
 		BootKey: enclavetest.TestGrapheneOSBootKey[:]}))
 	if r := aw.enroll(u, acPIN); r.OK || r.Code != "attestation" {
 		t.Fatalf("unverified boot: %+v", r)
+	}
+}
+
+// acConnect connects two alternate-channel apps' vaults (§6.4).
+func acConnect(t *testing.T, a, b *acApp) {
+	t.Helper()
+	ctx := ctxT(t, 60*time.Second)
+	inv, err := a.dev.Request(ctx, "connection.invite.create", []byte(`{"ttl_seconds":600}`))
+	if err != nil || !inv.OK() {
+		t.Fatalf("invite: %v", err)
+	}
+	if r, err := b.dev.Request(ctx, "connection.invite.accept", []byte(`{"link":"`+field(t, inv.Body(), "link")+`"}`)); err != nil || !r.OK() {
+		t.Fatalf("accept: %v", err)
+	}
+	pend := waitEvent(t, a.dev, "connection.request.pending", nil)
+	if r, err := a.dev.Request(ctx, "connection.approve", []byte(`{"pending_id":"`+field(t, pend.Body, "pending_id")+`"}`)); err != nil || !r.OK() {
+		t.Fatalf("approve: %v", err)
+	}
+	waitEvent(t, b.dev, "connection.event", has("event", "added"))
+	waitEvent(t, a.dev, "connection.event", has("event", "added"))
+}
+
+func storeHas(t *testing.T, aw *acWorld, key string) bool {
+	t.Helper()
+	_, _, err := aw.w.Store.Get(context.Background(), key)
+	return err == nil
+}
+
+// §12.5: vault.delete from the app: the PIN and the password (refused
+// while a clone alarm is open); connections and devices are told, every
+// token is revoked at the relay, the stored objects are erased, the host
+// reports `deleted`, and the member can enroll afresh.
+func TestVaultDelete(t *testing.T) {
+	aw := newACWorld(t)
+	a := aw.newApp("member-del", enclavetest.NewAndroidAttester(0x88, enclavetest.AndroidOptions{}))
+	if r := aw.enroll(a, acPIN); !r.OK {
+		t.Fatal(r.Code)
+	}
+	b := aw.newApp("member-del-peer", enclavetest.NewAndroidAttester(0x89, enclavetest.AndroidOptions{}))
+	if r := aw.enroll(b, acPIN); !r.OK {
+		t.Fatal(r.Code)
+	}
+	acConnect(t, a, b)
+	desk := acPairDesktop(t, aw, a)
+	ctx := ctxT(t, 180*time.Second)
+	vid := a.vid
+
+	// Refused during a clone alarm, until the forced rotation.
+	old := a.dev.CredentialBlob()
+	if _, err := a.dev.CredentialUnlock(ctx, credPW); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.dev.CredentialUnlock(ctx, credPW); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.dev.CredentialRaw(ctx, "credential.unlock", takeUTK(t, a.dev), old, map[string]any{"password": credPW}); client.Code(err) != "credential_frozen" {
+		t.Fatalf("clone: %v", err)
+	}
+	if err := a.dev.VaultDelete(ctx, acPIN, credPW); client.Code(err) != "credential_frozen" {
+		t.Fatalf("delete during an alarm: %v", err)
+	}
+	id, _ := alarmOf(t, a.dev)
+	if _, err := a.dev.CredentialAlarmConfirm(ctx, id, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.dev.CredentialRotate(ctx, credPW); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.dev.VaultDelete(ctx, "999999", credPW); client.Code(err) != "bad_pin" {
+		t.Fatalf("wrong PIN: %v", err)
+	}
+	if err := a.dev.VaultDelete(ctx, acPIN, "not the password"); client.Code(err) != "bad_password" {
+		t.Fatalf("wrong password: %v", err)
+	}
+	if err := a.dev.VaultDelete(ctx, acPIN, credPW); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	waitEvent(t, b.dev, "connection.event", has("event", "removed"))
+	waitEvent(t, desk, "device.unlinked", has("reason", "vault_deleted"))
+	deadline := time.Now().Add(15 * time.Second)
+	for storeHas(t, aw, "vaults/"+vid+"/state") || storeHas(t, aw, "vaults/"+vid+"/header/"+aw.w.SealedRelease(vid)) {
+		if time.Now().After(deadline) {
+			t.Fatal("storage not erased")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	deleted := false
+	for _, ev := range aw.w.Events() {
+		deleted = deleted || ev.Event == "deleted" && ev.VaultID == vid
+	}
+	if !deleted {
+		t.Fatal("no deleted lifecycle event")
+	}
+	// The relay refuses the desktop's deposits: its key is denylisted.
+	short, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if r, err := desk.Request(short, "vault.status", []byte(`{}`)); err == nil && r.OK() {
+		t.Fatal("deleted vault answered")
+	}
+	// Nothing unlocks; the member enrolls afresh.
+	if r, err := aw.unlock(a, acPIN, client.UnlockOptions{}, ""); err == nil && r.OK {
+		t.Fatal("deleted vault unlocked")
+	}
+	fresh := aw.newApp(a.guid, enclavetest.NewAndroidAttester(0x8a, enclavetest.AndroidOptions{}))
+	if r := aw.enroll(fresh, acPIN); !r.OK {
+		t.Fatalf("fresh enrollment: %+v", r)
+	}
+}
+
+// §11.11.5, §12.5: with the backup off, a recovery restores access only;
+// the recovering app may delete the vault with the PIN alone.
+func TestVaultDeleteViaRecoveryBackupOff(t *testing.T) {
+	aw, off := newRecWorld(t)
+	a := aw.newApp("member-rd", enclavetest.NewAndroidAttester(0x8b, enclavetest.AndroidOptions{}))
+	if r := aw.enroll(a, acPIN); !r.OK {
+		t.Fatal(r.Code)
+	}
+	ctx := ctxT(t, 180*time.Second)
+	if _, err := a.dev.SettingsSet(ctx, 0, map[string]any{"credential.backup": false}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.dev.CredentialUnlock(ctx, credPW); err != nil {
+		t.Fatal(err)
+	}
+	qr := requestRecovery(t, aw, a)
+	off.Store(int64(24*time.Hour + time.Minute))
+	b := aw.newApp(a.guid, enclavetest.NewIOSAttester(0x95, enclavetest.IOSOptions{}))
+	b.vid = a.vid
+	if res := register(t, aw, b, qr); !res.OK {
+		t.Fatalf("register: %+v", res)
+	}
+	if r := aw.mustUnlock(b, acPIN, client.UnlockOptions{}, ""); !r.OK {
+		t.Fatalf("unlock: %+v", r)
+	}
+	if err := b.dev.CompleteRecoveryHandshake(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.dev.CredentialRecover(ctx, credPW); client.Code(err) != "credential_lost" {
+		t.Fatalf("recover: %v", err)
+	}
+	if rr, err := b.dev.Request(ctx, "credential.get", []byte(`{}`)); err != nil || rr.ErrorCode() != "forbidden" {
+		t.Fatal("a recovering app fetched the credential")
+	}
+	if err := b.dev.VaultDelete(ctx, acPIN, ""); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for storeHas(t, aw, "vaults/"+a.vid+"/state") {
+		if time.Now().After(deadline) {
+			t.Fatal("storage not erased")
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }

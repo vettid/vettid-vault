@@ -358,6 +358,35 @@ func (d *Device) TransferApprove(ctx context.Context, id, pin, password string) 
 	return err
 }
 
+// VaultDelete deletes the vault (§12.5) with the confirmation phrase, the
+// PIN and the credential password: from the holder with its blob; from a
+// recovering app against the vault's own copy, or with the PIN only when
+// the credential is lost (password ""). The vault answers, then tells
+// every device and connection and erases itself.
+func (d *Device) VaultDelete(ctx context.Context, pin, password string) error {
+	payload := func() map[string]any {
+		p := map[string]any{"pin": pin}
+		if password != "" {
+			p["password"] = password
+		}
+		return p
+	}
+	extra := map[string]any{"confirm": "delete my vault"}
+	d.mu.Lock()
+	holder := d.st.Credential != nil && d.st.Recovery == nil
+	d.mu.Unlock()
+	if holder {
+		_, _, _, err := d.credOpWith(ctx, "vault.delete", extra, payload, false)
+		return err
+	}
+	u, err := d.takeUTK(ctx)
+	if err != nil {
+		return err
+	}
+	_, _, _, err = d.sealedWith(ctx, "vault.delete", u, nil, false, payload(), false, extra)
+	return err
+}
+
 // TransferReject ends a transfer (§6.7.1).
 func (d *Device) TransferReject(ctx context.Context, id string) error {
 	_, err := d.Op(ctx, "device.transfer.reject", map[string]any{"transfer_id": id})

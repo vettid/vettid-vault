@@ -25,11 +25,14 @@ changelog:
     app confirms, then a forced rotation (§3.5.9, §11.5); direct transfer
     to a new phone with the PIN and the password, no wait (§6.7.1);
     recovery replaces the old app and keeps desktops and agents; with
-    backup off a recovery can only reset the credential or delete the
-    vault (§11.11.5, §11.11.8); no off-device copy of the credential
-    (§3.5.6); GrapheneOS accepted through pinned verified-boot keys
-    (§11.7); `one_app`, `credential_frozen`, `rotation_required`,
-    `credential_lost`, `transfer_pending` (§10.1)
+    backup off a recovery restores access only, to reset the credential
+    or delete the vault (§11.11.5, §11.11.8); no off-device copy of the
+    credential (§3.5.6); GrapheneOS accepted through pinned verified-boot
+    keys (§11.7); vault deletion (`vault.delete`, crash-safe, the member
+    emailed) (§12.5); a vault reports only to its owner (§13.7); a
+    holderless vault adopts no app (§3.5.9); `one_app`,
+    `credential_frozen`, `rotation_required`, `credential_lost`,
+    `transfer_pending` (§10.1)
   - 0.8.0: V4 batch 4: location sharing per connection (once or
     continuous, expiring, precision and cadence enforced by the sending
     vault, positions forwarded from memory and kept by the receiver only
@@ -759,7 +762,8 @@ item's values seals them to a **one-time reply key** instead:
   - Blobs held by apps can no longer be opened by anyone.
   - The vault becomes restricted again (§3.5.7) until a new
     `credential.create`.
-  - `vault.delete` does the same.
+  - `vault.delete` does the same, as the first step of the vault's
+    deletion (§12.5).
 
 #### 3.5.6 Backup: the vault's copy of the blob
 
@@ -864,9 +868,13 @@ routine refresh.
 types that carry or return a blob: `credential.get`, `.ack`, `.unlock`,
 `.rotate`, `.password.change`, `.delete`, the critical-item, critical-use
 and wallet operations (§10.7, §10.13, §10.18) and `device.transfer.*`
-(§6.7.1). (A vault state from an earlier draft records no holder: the
-first app that presents the current blob becomes it. Vaults with several
-apps from earlier drafts are not migrated; none exist outside tests.)
+(§6.7.1). **A vault with a credential but no holder** (a state of an
+earlier draft) never adopts an app that presents a blob: it refuses
+every request with `credential_required` (§3.5.7) except the recovery
+path (§11.11.5: a recovering app's `credential.utk.get`,
+`credential.recover`, `credential.reset` and `vault.delete`) and the
+types a restricted vault always accepts. Vaults with several apps from
+earlier drafts are not migrated; none exist outside tests.
 
 **Detection.** Whenever a request presents a blob whose SHA-256 differs
 from the current hash:
@@ -903,6 +911,8 @@ from the current hash:
    member API turns into an **email to the member** (MEMBER-API). The
    vault has no email egress; the event carries no data beyond its kind
    and the vault id. OWNER DECISION (recommended: this path).
+
+Nothing of the alarm reaches a connection (§13.7).
 
 A clone presented while an alarm is open is refused with the current
 freeze code and audited (`credential.clone_detected`), but opens no new
@@ -2232,6 +2242,7 @@ an answer to an unknown or expired id is dropped.
 | `vault.enroll.confirm` (app) | `{}` | `{}` |
 | `vault.status` (app, desktop, agent) | `{}` | `{vault_id, state_seq, header_seq, provisional, devices, connections}` |
 | `vault.lock` (app, desktop) | `{}` | `{}`; then `vault.locking` |
+| `vault.delete` (app: the holder, a recovering app, or the enrolling app before a credential exists) | `{confirm: "delete my vault", credential?, utk_id, sealed{pin, password?}}` | `{}`; then the deletion of §12.5. `bad_request` without the exact phrase or a needed member; `bad_pin`, `backoff`, `bad_password`, `credential_frozen` / `rotation_required` (holder during an alarm), `forbidden` |
 | `vault.locking` (ephemeral) | — | `{reason?}`, with `exp` = now + 60 s; `reason` is `"recovery"` when a recovery request locked the vault (§11.11.1) |
 | `relay.token.issued` | — | `{kind: "standing" \| "reconnect", token}` |
 | `relay.token.refresh` (req) | `{}` | `{kind: "standing", token}` |
@@ -4678,6 +4689,11 @@ Nothing secret is stored:
   `alarm_pending` (MEMBER-API). Alarm kinds other than those listed here
   are rejected by the parent. A dishonest host can suppress the email but
   not the vault's own alert to the app, its freeze or its audit entry.
+- **Deletion notice** (0.9.0). On the lifecycle event `deleted` (§12.5)
+  the parent also records `alarm = {kind: "vault_deleted", alarm_id, at}`
+  and `alarm_pending = true`, whatever the lease: the vault's own audit
+  log is gone, so the member API emails the member and then deletes the
+  vault rows (MEMBER-API), after which the member enrolls afresh.
 - **Lifecycle values are advisory.** `vault_version` should match the
   `release` in the attested descriptor of the reporting instance, but a
   dishonest parent could misreport any of these values. They therefore serve
@@ -5643,11 +5659,20 @@ because it only reduces exposure. Owner apps learn of the recovery from
      - the other devices receive `sync.event{kind: "device.paired"}`.
    - A clone alarm that is open (§3.5.9) moves to `rotation_required`:
      the recovered app must rotate before using the credential.
-4. **Backup off: the credential is lost.** When the vault keeps no copy
-   of the latest blob (`credential.backup` off, §3.5.6), `credential.recover`
-   answers `credential_lost` and the device stays restricted. The member
-   lost the credential and every critical item with the phone. The app
-   explains this and offers (OWNER DECISION, recommended: both):
+4. **Backup off: no recovery of the credential, only of access.** When
+   the vault keeps no copy of the latest blob (`credential.backup` off,
+   §3.5.6), there is nothing to recover and nothing may be recovered
+   (owner decision, 2026-10-03: otherwise a bad actor could retrieve
+   secrets). The recovery restores **access to the vault only**, so that
+   the member can reset the credential or delete the vault:
+   `credential.recover` answers `credential_lost` without opening
+   anything, and the device stays restricted. No message on this path
+   returns any credential content or critical item: a recovering app
+   cannot send `credential.get`, `credential.version` or any item type
+   (`forbidden`), `credential.reset` destroys the critical items before
+   it creates the new credential, and `vault.delete` returns `{}`. The
+   member lost the credential and every critical item with the phone. The
+   app explains this and offers (owner decision, 2026-10-03):
    - **a new credential**: `credential.reset{utk_id, sealed{password}}`
      with a new password. The vault destroys the old credential and every
      critical item (as `credential.delete`, §3.5.5), creates a new
@@ -5658,9 +5683,11 @@ because it only reduces exposure. Owner apps learn of the recovery from
      `credential.reset` is refused with `exists` when the vault does keep
      the latest blob: the member must then use `credential.recover` with
      the password.
-   - **deleting the vault**: `vault.delete` (§10.2), which a recovering
-     app may send. Its implementation is still open (§15); until then the
-     member deletes the vault by cancelling the account (MEMBER-API).
+   - **deleting the vault**: `vault.delete` (§10.2, §12.5) with the PIN
+     alone: the password cannot be checked, the credential being lost, and
+     the account, the email and the 24 h wait already stood in front of
+     the PIN. With the backup on, a recovering app's `vault.delete` needs
+     the password too, checked against the vault's copy.
    - With the backup off a recovery therefore rests on the account (email
      and session), the 24 h wait and the PIN, not on the password. It
      exposes no critical item: they are destroyed. That is the price of
@@ -5732,10 +5759,13 @@ with body `{token}`. It needs no session: the token stands in for it.
 - **No recovery without the credential** (owner decision, 2026-10-03).
   - With the backup on, a recovery always ends with the member's
     credential password against the vault's copy of the latest blob.
-  - With the backup off, no copy exists: the recovery can only reset the
+  - With the backup off, no copy exists and **no recovery of the
+    credential is possible** (owner decision, 2026-10-03: a recovery that
+    could return secrets could hand them to a bad actor). The recovery
+    restores access to the vault only, so that the member can reset the
     credential (destroying the critical items) or delete the vault
-    (OWNER DECISION, recommended: allow both; §11.11.5 step 4). A vault
-    never runs without a credential (§3.5.7).
+    (§11.11.5 step 4, §12.5). A vault never runs without a credential
+    (§3.5.7).
   - A vault without a credential is not recoverable. It cannot exist past
     enrollment anyway (§3.5.7).
 
@@ -5841,6 +5871,64 @@ vault**.
   exit); a process that does not exit in time is killed. A process that
   detects a split brain (§12.3) zeroizes and exits without flushing.
   Killing one vault's process affects no other vault.
+
+### 12.5 Vault deletion
+
+A vault is deleted on one of three authorities:
+
+| Authority | Request | What it needs |
+|---|---|---|
+| The holder (§3.5.9) | `vault.delete` (§10.2) | the phrase `delete my vault`, the PIN and the credential password over the current blob, both UTK-sealed; both backoffs apply; refused (`credential_frozen`, `rotation_required`) while a clone alarm is open |
+| A recovering app (§11.11.5) | `vault.delete` | the phrase and the PIN; and the password against the vault's copy when it keeps one (backup on). With the backup off, the PIN only (OWNER DECISION, §15). Allowed during an alarm: the recovery path |
+| The enrolling app of a vault without a credential (§3.5.7) | `vault.delete` | the phrase and the PIN |
+| The host | the queue operation `delete` (§11.5): account cancellation (MEMBER-API) | the member API's own checks |
+
+A running vault deletes itself with the full semantics below; the host's
+`delete` asks a running vault to do so (as a lock with the reason
+`delete`) and otherwise erases the stored objects itself. Desktops and
+agents cannot delete a vault.
+
+**Order.** The steps run in this order, so that a crash at any point
+converges to "deleted", never to a vault that runs again:
+
+1. **Mark**, in the request's flush: state and sealed header record
+   `deleting`. In the same flush the credential (CEK, credential state,
+   UTK pools) and the features' secrets are destroyed; every active
+   connection is sent `connection.removed`, every owner device
+   `device.unlinked{reason: "vault_deleted"}`; every token the vault
+   issued is revoked at the relay by `jti` and every peer's relay key by
+   `sub` (§7.4); open invitation claims are deleted; a transfer ends. The
+   requester's `{}` follows. Nothing else in the batch is handled.
+2. **Drain**: the outbox is delivered once, best effort.
+3. **Zeroize**: every key and the DEK are wiped; the vault is locked and
+   its process exits (§12.4).
+4. **Erase**, through the parent's store with conditional deletes, a
+   missing object counting as deleted: the state object; the headers of
+   every release the vault knew (a pending move's target and source),
+   its own release's header last, since that header is the deletion
+   marker; and the enclave's member index object if it still names this
+   vault (§11.5).
+5. **Report** the lifecycle event `deleted` (§11.5). The parent marks the
+   row `deleted` and records the `vault_deleted` notice; the member API
+   emails the member and deletes the vault rows (MEMBER-API).
+
+**Convergence.** A header that records `deleting` is never opened again:
+an unlock, a recovery request, registration or cancellation that reads
+it finishes step 4 instead (and answers as for a missing vault). A crash
+after step 1 therefore loses at most the best-effort notices and
+revocations, never the deletion. Deletion is idempotent.
+
+**The relay mailbox.** RELAY-PROTOCOL 0.4.0 cannot delete a mailbox.
+After a deletion every token the vault issued is denylisted and every
+peer key revoked, so deposits are refused (`token_revoked`); messages
+already deposited expire after `message_ttl_seconds` (14 days); the
+registration stays, empty, with a key nobody holds. A relay route to
+delete a mailbox is recommended (§15).
+
+**What is left.** Nothing of the vault's contents: state, headers and
+index are erased, and the DEK, CEK and keys existed only in the
+enclave's memory. The member API keeps its own audit records
+(MEMBER-API).
 
 ## 13. Security considerations
 
@@ -5958,6 +6046,9 @@ it can read and write only its own objects and use only its own relay key
 | PIN alone | Nothing without a registered, attested app | `pin.change` |
 | An app's copy of the Protean Credential | Nothing without the current CEK, which only the vault holds and which rotates at every use; password guesses only online, through the holder's session with a UTK, under the backoff (§3.5.8). Presenting it while it is not the current blob is a clone: refused, the app alerted, the member emailed, credential operations frozen until a forced rotation (§3.5.9) | Any use of the credential (a new CEK; the old blob is dead); the forced rotation |
 | A clone presented through the holder's session (a stolen session and an old copy, or a restored phone backup) | Nothing: refused with `credential_frozen`, never opened; the alarm freezes credential operations (messaging continues) until the holder confirms and rotates (§3.5.9) | `credential.alarm.confirm`, then `credential.rotate`; change the password and PIN if it was not the member |
+| A thief with the app's session and the PIN, without the password | No deletion: the holder's `vault.delete` needs the password too (§12.5) | — |
+| The member's account, email and PIN, for 24 h unnoticed, with the backup off | A recovery that restores access only: a reset or a deletion, never the credential or a critical item (§11.11.5, §12.5) | Cancel the recovery; turn the backup on |
+| VettID (operator) | Deleting a vault (the host's `delete`, an operator power it had anyway, §13.5 list), never reading it; the member is emailed | — |
 | A byte-identical copy of the current blob, used before the member's next use | Undetectable at that moment; a use still needs the password and the holder's session. The member's next use then presents a stale copy and raises the alarm (§3.5.9) | The alarm and the forced rotation |
 | A dishonest host, about clone alarms | Suppressing or delaying the member's email; not the vault's alert to the app, its freeze or its audit entry (§11.5) | — |
 | A transfer (§6.7.1) | Moving the app needs the holder's session, the PIN and the password; the new phone must pass device attestation; the old app is removed and its copy dead | Recovery, if the member lost the phone to it |
@@ -6010,6 +6101,28 @@ documented.
 - **Process isolation.** Each unlocked vault MUST run in its own process,
   and the supervisor MUST NOT hold a vault's DEK, pepper or keys (§12.4).
   The channel between them MUST be parsed strictly and fuzzed.
+
+### 13.7 A vault reports only to its owner
+
+(Owner decision, 2026-10-03: "real vaults should only ever report to
+their owner. Period.")
+
+- A vault MUST send its credential state, alarms, freezes, transfers,
+  recoveries, device list, settings, audit log, feed and vault status
+  only to its owner's devices (§9.1), each within its role (§6.8).
+- To its host it reports only the content-free lifecycle events and
+  alarms of §11.5 (`enrolled`, `unlocked`, `locked`, `moved`, `deleted`,
+  `alarm.credential_clone`).
+- To a connection it sends only what the member's features share with
+  that connection by the member's own decisions: messages, calls, the
+  shared profile, granted and shared items, action results,
+  introductions, location and presence under their policies, the
+  credential key's public rotation statements and the signatures the
+  member approved (§10.4, §10.13). A refused or failed credential
+  operation (wrong password, backoff, an alarm or freeze) leaves a
+  connection's request pending; it never tells the connection why.
+- It never answers a principal that is not its owner's device, its
+  connection or its host; a holderless vault (§3.5.9) adopts no one.
 
 ## 14. Push compatibility (deferred)
 
@@ -6071,14 +6184,16 @@ Follow-ups:
     enclave's egress, with its privacy and trust costs, §10.18) are not in
     0.8.0; the member's app is the chain source (owner decision). The fee
     cap (1,000 sat/vB) is fixed per release.
-12. **`vault.delete`.** Still not implemented in the vault. 0.9.0 lets a
-    recovering app send it after `credential_lost` (§11.11.5); until it
-    exists, a member deletes the vault by cancelling the account.
+12. **Relay mailbox deletion.** RELAY-PROTOCOL 0.4.0 has no route to
+    delete a mailbox, so a deleted vault leaves its mailbox registered and
+    empty of valid tokens (§12.5). Recommended: add an owner-signed
+    `DELETE /v1/mailbox` (messages, denylist, claims and blobs deleted;
+    later deposits `mailbox_unknown`) in the relay's next minor version.
 13. **OWNER DECISIONS of 0.9.0** (each with the recommendation the text
     follows; to confirm at review):
-    1. Recovery with the backup off may reset the credential (critical
-       items destroyed; account, 24 h and PIN suffice) or delete the
-       vault (§11.11.5). Recommended: allow both.
+    1. Recovery with the backup off restores access only: reset the
+       credential (critical items destroyed) or delete the vault
+       (§11.11.5). Decided 2026-10-03.
     2. "That was me" and "not me" both force the rotation (§3.5.9).
        Recommended: yes.
     3. The clone email goes through a content-free host alarm that the
@@ -6092,6 +6207,12 @@ Follow-ups:
        Recommended: GrapheneOS only, others on request.
     7. At most 4 alarm emails per vault per day (MEMBER-API).
        Recommended: 4.
+    (Items 2–7 were confirmed by the owner on 2026-10-03.)
+    8. `vault.delete` from a recovering app with the backup off, or from
+       the enrolling app before a credential exists, needs the PIN only
+       (§12.5). Recommended: yes: there is no password to check, and the
+       recovery's 24 h and the account (or, before a credential, the
+       enrollment minutes earlier) gate it; deletion exposes nothing.
 
 ## 16. Test vectors
 
@@ -6222,9 +6343,22 @@ pending (§15, follow-up 1).
   - §11.11, §11.11.5, §11.11.8: the recovered app replaces the old app
     (removed, keys revoked; desktops and agents kept); `credential.recover`
     without the member-supplied blob; backup off: `credential_lost`, then
-    `credential.reset` or `vault.delete`.
+    `credential.reset` or `vault.delete`; with the backup off the recovery
+    restores access only and returns no credential content.
   - §11.5: the lifecycle event `alarm.credential_clone` and the vault-row
-    `alarm` and `alarm_pending`; MEMBER-API emails the member.
+    `alarm` and `alarm_pending`; MEMBER-API emails the member. The
+    `deleted` event also records a `vault_deleted` notice.
+  - §10.2, §12.5 (new): `vault.delete` from the holder (phrase, PIN,
+    password; refused during an alarm), a recovering app (PIN, and the
+    password when the vault keeps the blob) or the enrolling app before a
+    credential exists (PIN), and the host's `delete`: mark, notify and
+    revoke, drain, zeroize, erase (own header last), report; any later
+    touch of a marked header finishes it. The relay mailbox cannot be
+    deleted (RELAY-PROTOCOL 0.4.0): everything is denylisted; a relay
+    route is recommended (§15).
+  - §3.5.9, §13.7 (new): a holderless vault never adopts an app; a vault
+    reports only to its owner's devices, its host (content-free events)
+    and, as the member's features decide, its connections.
   - §11.7: `SelfSigned` accepted with a GrapheneOS verified boot key pinned
     in the release (deviceLocked still required); `Unverified` and
     `Failed` refused.

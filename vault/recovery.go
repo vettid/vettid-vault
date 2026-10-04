@@ -135,6 +135,11 @@ func headerTx(ctx context.Context, p HeaderParams, fn func(h *Header, now time.T
 	if h.UserGUID != p.UserGUID {
 		return ErrHeader
 	}
+	if h.Deleting {
+		// A deletion was interrupted (§12.5): finish it.
+		_ = EraseStored(ctx, p.Store, p.VaultID, h.UserGUID, nil, p.Release.PCR0, "", "")
+		return ErrMissing
+	}
 	keep, ferr := fn(h, now)
 	if ferr != nil && !keep {
 		return ferr
@@ -350,5 +355,5 @@ func (m *Manager) completeRecovery(deviceID string, now time.Time) error {
 }
 
 // recoveryAllowed lists what a recovering device may send (§11.11.5).
-var recoveryAllowed = map[string]bool{"credential.recover": true, "credential.reset": true, "credential.utk.get": true, "vault.status": true,
+var recoveryAllowed = map[string]bool{"credential.recover": true, "credential.reset": true, "vault.delete": true, "credential.utk.get": true, "vault.status": true,
 	"relay.token.issued": true, "relay.token.refresh": true, "relay.address.update": true}

@@ -382,6 +382,11 @@ func (m *Manager) sortedDevices() []*Peer {
 // afterHandle runs deferred work of a handler: the apps a completed
 // recovery replaced.
 func (m *Manager) afterHandle(now time.Time) {
+	if via := m.deleteRequest; via != "" {
+		m.deleteRequest = ""
+		m.beginDelete(via, now)
+		return
+	}
 	if keep := m.replaceAfter; keep != "" {
 		m.replaceAfter = ""
 		m.replaceApps(keep, now)

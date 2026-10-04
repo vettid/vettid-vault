@@ -167,6 +167,10 @@ func (m *Manager) ProcessBatch(ctx context.Context, c Collector, msgs []Message)
 	for _, id := range durable {
 		_ = c.Ack(ctx, id) // idempotent; a lost ack means redelivery, which dedupe absorbs
 	}
+	if m.deletePending {
+		m.deletePending = false
+		return m.finishDelete(ctx) // §12.5; the vault is locked afterwards
+	}
 	m.drainOutbox(ctx)
 	if err := m.flushIfDirty(ctx); err != nil {
 		return err
@@ -180,6 +184,9 @@ func (m *Manager) ProcessBatch(ctx context.Context, c Collector, msgs []Message)
 // handleMessage classifies one message only by its collect sender, its
 // recipient_kid and the session that decrypts it (§13.6).
 func (m *Manager) handleMessage(ctx context.Context, msg Message, now time.Time) disposition {
+	if m.st.Deleting != nil {
+		return ackAfterFlush // being deleted (§12.5): nothing more is handled
+	}
 	if _, seen := m.st.SeenMsgIDs[msg.MsgID]; seen {
 		return ackAfterFlush // relay msg_id dedupe (§8.2 layer 1)
 	}
@@ -338,7 +345,8 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 		m.respondError(p, in, key, "unsupported_type", "", now)
 		return disp(eph)
 	}
-	if !allowedWithoutCredential[in.Type] && !m.credentialReady() {
+	if !allowedWithoutCredential[in.Type] && !m.credentialReady() &&
+		!(p.Recovering && recoveryAllowed[in.Type] && m.credentialExists()) {
 		// §3.5.7: a vault without a credential is restricted.
 		if te.spec.Request {
 			m.respondError(p, in, key, "credential_required", "", now)

@@ -687,28 +687,43 @@ replacing the app, backup off meaning loss, and GrapheneOS attestation.
 - Transfers survive a lock (the pending handshake is vault state); the
   10-minute expiry is applied at the next batch.
 
-### OWNER DECISIONS (open, with recommendations)
+### Vault deletion (§12.5) and the owner-only rule (§13.7)
 
-1. Recovery with the backup off: `credential.reset` (a new credential,
-   the critical items destroyed; the account, 24 h and the PIN suffice)
-   or deleting the vault. Recommended: both (implemented: reset;
-   `vault.delete` is still unimplemented, account cancellation deletes
-   the vault today).
-2. Both "that was me" and "not me" force the rotation. Recommended.
-3. The clone email goes through the host: a content-free lifecycle
-   alarm, recorded by the parent, mailed by a member-API Lambda.
-   Recommended (the vault has no email egress).
-4. Same-version-other-bytes and above-current versions count as clones.
-   Recommended (only the vault makes valid blobs).
-5. The transfer does not re-check the old app's attestation (its session,
-   PIN and password prove it). Recommended.
-6. SelfSigned only for GrapheneOS; no other custom OS. Recommended until
-   requested.
-7. At most 4 alarm emails per vault per day (member API). Recommended.
+- `vault/delete.go`: `beginDelete` (mark state and header, destroy the
+  credential through `VaultDeleting`, notify connections and devices,
+  revoke every jti and peer sub, delete claims), `finishDelete` (drain,
+  zeroize, `EraseStored`, report `deleted`), run after the batch's flush;
+  `Manager.Delete` / `LockReason("delete")` for the host. A header marked
+  `Deleting` is finished, never opened, by any unlock or recovery that
+  reads it. `vault.delete` is authorized by the credential feature
+  (phrase, PIN, password as applicable) and marked after the handler
+  returns (outside its lock).
+- `enclave`: the queue's `delete` asks a running vault (process or local)
+  to delete itself, else erases the stored objects; the vault process
+  accepts the lock reason `delete`.
+- `parent`: `deleted` also records the `vault_deleted` notice for the
+  member API's mailer, which then removes the vault rows.
+- The relay cannot delete a mailbox (RELAY-PROTOCOL 0.4.0): everything is
+  denylisted; a `DELETE /v1/mailbox` is recommended (spec §15).
+- The no-holder adoption path is gone: a holderless credential restricts
+  the vault (`CredentialReady` false, `CredentialExists` true) to the
+  recovery path and deletion.
+- The clone alert goes only to the holder when it is a paired app.
+
+### OWNER DECISIONS
+
+Confirmed 2026-10-03: backup-off recovery restores access only (reset or
+delete); both confirm answers force the rotation; the host-alarm email
+path; tampered or future versions are clones; no re-attestation of the
+old app at transfer; GrapheneOS only; 4 alarm emails per vault per day.
+
+Open (recommendation): `vault.delete` with the PIN only from a recovering
+app when the credential is lost, or from the enrolling app before a
+credential exists (recommended: yes; no password exists to check, and the
+recovery's 24 h and account, or the enrollment, gate it; deletion exposes
+nothing).
 
 ### Not in this change
 
-- `vault.delete` (the recovering app's other choice with the backup off).
-- Migration of vaults with several apps: none exist outside tests; a
-  state without a holder adopts the first app that presents the current
-  blob.
+- Migration of vaults with several apps: none exist outside tests.
+- A relay route to delete a mailbox (vettid-relay untouched).

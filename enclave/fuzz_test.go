@@ -2,6 +2,7 @@ package enclave_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -29,10 +30,14 @@ func FuzzProcessBody(f *testing.F) {
 	if err != nil {
 		f.Fatal(err)
 	}
-	f.Add([]byte(`{"user_guid":"u","request_id":"01JB2Z6V9K3M4N5P6Q7R8S9T21","app":{}}`), true)
-	f.Add([]byte(`{"user_guid":"u","vault_id":"v","request_id":"01JB2Z6V9K3M4N5P6Q7R8S9T21","pin":"1234"}`), false)
+	// The manifest document is host input (0.10.0): fuzzed with the body.
+	doc := w.Served()
+	f.Add([]byte(`{"user_guid":"u","request_id":"01JB2Z6V9K3M4N5P6Q7R8S9T21","app":{}}`), true, doc)
+	f.Add([]byte(`{"user_guid":"u","vault_id":"v","request_id":"01JB2Z6V9K3M4N5P6Q7R8S9T21","pin":"1234"}`), false, doc)
+	f.Add([]byte(`{"user_guid":"u","vault_id":"vault-1","request_id":"01JB2Z6V9K3M4N5P6Q7R8S9T21","pin":"123456","manifest_sha256":"`+
+		strings.Repeat("0", 64)+`","manifest_serial":1}`), false, []byte(`{}`))
 	n := 0
-	f.Fuzz(func(t *testing.T, body []byte, enroll bool) {
+	f.Fuzz(func(t *testing.T, body []byte, enroll bool, doc []byte) {
 		n++
 		rid, _ := envelope.NewULID(now.Add(time.Duration(n) * time.Millisecond))
 		typ, op := altchan.TypeUnlock, enclave.OpUnlock
@@ -44,7 +49,7 @@ func FuzzProcessBody(f *testing.F) {
 			return // not a JSON object, or too large
 		}
 		resp := in.Process(context.Background(), &enclave.QueueMessage{Op: op, VaultID: "vault-1", UserGUID: "u", RequestID: rid,
-			ETKKid: d.Kid, Envelope: env, EnqueuedAt: now})
+			ETKKid: d.Kid, Envelope: env, EnqueuedAt: now, ManifestSHA256: strings.Repeat("0", 64)}, doc)
 		if len(resp.Envelope) != altchan.ResultEnvelopeSize {
 			t.Fatalf("answer of %d bytes", len(resp.Envelope))
 		}

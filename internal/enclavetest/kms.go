@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +25,10 @@ const (
 	KMSAccount = "111122223333"
 	KMSRegion  = "us-east-1"
 	HostRole   = "arn:aws:iam::111122223333:role/vettid-enclave-host"
+	// RetirementRole and RetirementWindow are the test release's pinned
+	// retirement principal and pending window (0.10.0; staging's 7 days).
+	RetirementRole   = "arn:aws:iam::111122223333:role/vettid-org-vault-key-retirement"
+	RetirementWindow = 7
 )
 
 // KeyARN returns the test sealing-key ARN of release n.
@@ -88,7 +93,11 @@ func GoodPolicy(decrypt string, gdk []string) string {
 		`"Condition":{"StringEqualsIgnoreCase":{"kms:RecipientAttestation:ImageSha384":"` + decrypt + `"},"StringEquals":{"kms:CallerAccount":"` + KMSAccount + `"}}},` +
 		`{"Sid":"Seal","Effect":"Allow","Principal":{"AWS":"` + HostRole + `"},"Action":"kms:GenerateDataKey","Resource":"*",` +
 		`"Condition":{"StringEqualsIgnoreCase":{"kms:RecipientAttestation:ImageSha384":` + string(vals) + `},"StringEquals":{"kms:CallerAccount":"` + KMSAccount + `"}}},` +
-		`{"Sid":"Verify","Effect":"Allow","Principal":{"AWS":"` + HostRole + `"},"Action":["kms:DescribeKey","kms:GetKeyPolicy","kms:ListGrants"],"Resource":"*"}]}`
+		`{"Sid":"Verify","Effect":"Allow","Principal":{"AWS":["` + HostRole + `","` + RetirementRole + `"]},"Action":["kms:DescribeKey","kms:GetKeyPolicy","kms:ListGrants"],"Resource":"*"},` +
+		`{"Sid":"RetireAfterNotice","Effect":"Allow","Principal":{"AWS":"` + RetirementRole + `"},"Action":"kms:ScheduleKeyDeletion","Resource":"*",` +
+		`"Condition":{"NumericEquals":{"kms:ScheduleKeyDeletionPendingWindowInDays":"` + strconv.Itoa(RetirementWindow) + `"},"StringEquals":{"kms:CallerAccount":"` + KMSAccount + `"}}},` +
+		`{"Sid":"RescueBeforeDeletion","Effect":"Allow","Principal":{"AWS":"` + RetirementRole + `"},"Action":["kms:CancelKeyDeletion","kms:EnableKey"],"Resource":"*",` +
+		`"Condition":{"StringEquals":{"kms:CallerAccount":"` + KMSAccount + `"}}}]}`
 }
 
 // GoodDescribe returns a DescribeKey response for a single-region,

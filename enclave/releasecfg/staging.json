@@ -1,0 +1,15 @@
+{
+  "channel": "staging",
+  "release": 0,
+  "manifest_keys": [
+    "TODO-W3: SubjectPublicKeyInfo (base64 DER) of the staging manifest key (KMS, staging account)"
+  ],
+  "seal_account": "TODO-O2: the staging account id (12 digits)",
+  "seal_region": "us-east-1",
+  "retirement_principal": "TODO-O2: arn:aws:iam::<staging account>:role/vettid-org-vault-key-retirement",
+  "retirement_window_days": 7,
+  "android_signers": [
+    "TODO-O8: SHA-256 (64 lowercase hex) of the signing certificate of staging app builds"
+  ],
+  "relay_url": "https://relay.vettid.org"
+}

@@ -114,11 +114,13 @@ func (c *Core) statusList() *devattest.StatusList {
 	return c.d.StatusList()
 }
 
-// verifyManifest checks the served manifest under the pinned keys and
-// finds this release's entry, which must match the embedded release number
-// and the measured PCR1 and PCR2.
-func (c *Core) verifyManifest(s *manifest.Served, serialSeen uint64) (*manifest.Manifest, *manifest.Release, error) {
-	m, err := manifest.Verify(s, c.cfg.ManifestKeys)
+// verifyManifest checks the served manifest the host supplied (doc)
+// against the hash and serial in the sealed request (0.10.0, M1) and under
+// the pinned keys, applies the serial rule, and finds this release's
+// entry, which must match the embedded release number and the measured
+// PCR1 and PCR2. Every failure is the result code manifest.
+func (c *Core) verifyManifest(doc []byte, sha256Hex string, serial, serialSeen uint64) (*manifest.Manifest, *manifest.Release, error) {
+	m, err := manifest.VerifyByHash(doc, sha256Hex, serial, c.cfg.ManifestKeys)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -194,7 +196,7 @@ func (c *Core) enroll(ctx context.Context, q *Job, started **vault.Manager) []by
 	if r.UserGUID != q.UserGUID || r.RequestID != q.RequestID {
 		return opaque() // binding (§11.3): a redirected request is rejected
 	}
-	m, own, err := c.verifyManifest(r.Manifest, 0)
+	m, own, err := c.verifyManifest(q.Manifest, r.ManifestSHA256, r.ManifestSerial, 0)
 	if err != nil || own.Status != manifest.StatusActive {
 		return fail("manifest") // enrollment goes only to an active release
 	}
@@ -347,7 +349,7 @@ func (c *Core) unlock(ctx context.Context, q *Job, started **vault.Manager) []by
 	}
 	signing, err := altchan.UnlockSigningString(altchan.UnlockFields{UserGUID: r.UserGUID, VaultID: r.VaultID,
 		RequestID: r.RequestID, TS: ts, ETKKid: q.ETKKid, MinStateSeq: r.MinStateSeq, MinHeaderSeq: r.MinHeaderSeq,
-		PIN: r.PIN, Token: r.Token, Manifest: r.Manifest.Manifest, ToPCR0: toPCR0, CancelRecovery: r.CancelRecovery})
+		PIN: r.PIN, Token: r.Token, ManifestSHA256: r.ManifestSHA256, ToPCR0: toPCR0, CancelRecovery: r.CancelRecovery})
 	if err != nil {
 		return opaque()
 	}
@@ -377,7 +379,7 @@ func (c *Core) unlock(ctx context.Context, q *Job, started **vault.Manager) []by
 		return json.Marshal(nb)
 	}
 	p.Manifest = func(seen uint64) (*vault.ManifestView, error) {
-		m, own, err := c.verifyManifest(r.Manifest, seen)
+		m, own, err := c.verifyManifest(q.Manifest, r.ManifestSHA256, r.ManifestSerial, seen)
 		if err != nil {
 			return nil, err
 		}

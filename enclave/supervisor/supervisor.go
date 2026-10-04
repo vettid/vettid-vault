@@ -315,10 +315,13 @@ func (s *Supervisor) handle(ctx context.Context, f *hostproto.Frame) [][]byte {
 	}
 	switch f.Kind {
 	case hostproto.KindQueue:
-		if len(f.Fields) != 1 {
+		// [queue message, manifest document] (0.10.0: the parent supplies
+		// the served manifest an enroll or unlock names by hash; empty if
+		// it has none).
+		if len(f.Fields) != 2 {
 			return nil
 		}
-		resp := s.process(ctx, f.Fields[0])
+		resp := s.process(ctx, f.Fields[0], f.Fields[1])
 		return [][]byte{[]byte(hostproto.StatusOK), resp}
 	case hostproto.KindLeaseLost:
 		if len(f.Fields) != 1 {
@@ -341,7 +344,7 @@ func (s *Supervisor) handle(ctx context.Context, f *hostproto.Frame) [][]byte {
 }
 
 // process runs one queue message and enforces the vault cap afterwards.
-func (s *Supervisor) process(ctx context.Context, raw []byte) (resp []byte) {
+func (s *Supervisor) process(ctx context.Context, raw, manifestDoc []byte) (resp []byte) {
 	defer func() {
 		if r := recover(); r != nil {
 			// A panic must not take every vault down; the request gets
@@ -350,7 +353,7 @@ func (s *Supervisor) process(ctx context.Context, raw []byte) (resp []byte) {
 			resp = nil
 		}
 	}()
-	resp = s.inst.Load().ProcessRaw(ctx, raw)
+	resp = s.inst.Load().ProcessRaw(ctx, raw, manifestDoc)
 	s.enforceCap(ctx)
 	return resp
 }

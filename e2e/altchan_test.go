@@ -110,8 +110,8 @@ func (aw *acWorld) enroll(a *acApp, pin string) *altchan.EnrollResult {
 	t.Helper()
 	ctx := ctxT(t, 60*time.Second)
 	e, in := aw.enclave(a, "", true)
-	served, _, _ := a.dev.VerifyManifest(aw.w.Served(), aw.trust)
-	req, err := a.dev.BuildEnroll(a.guid, pin, e, served, a.att)
+	_, m, _ := a.dev.VerifyManifest(aw.w.Served(), aw.trust)
+	req, err := a.dev.BuildEnroll(a.guid, pin, e, m, a.att)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,11 +149,11 @@ func (aw *acWorld) enroll(a *acApp, pin string) *altchan.EnrollResult {
 func (aw *acWorld) unlock(a *acApp, pin string, o client.UnlockOptions, release string) (*altchan.UnlockResult, error) {
 	aw.t.Helper()
 	e, in := aw.enclave(a, release, false)
-	served, m, err := a.dev.VerifyManifest(aw.w.Served(), aw.trust)
+	_, m, err := a.dev.VerifyManifest(aw.w.Served(), aw.trust)
 	if err != nil {
 		return nil, err
 	}
-	req, err := a.dev.BuildUnlock(a.guid, pin, e, served, m, a.att, o)
+	req, err := a.dev.BuildUnlock(a.guid, pin, e, m, a.att, o)
 	if err != nil {
 		return nil, err
 	}
@@ -236,15 +236,15 @@ func TestAltchanEnrollUnlock(t *testing.T) {
 
 		// Replay: the same sealed request twice.
 		e, in := aw.enclave(a, "", false)
-		served, m, _ := a.dev.VerifyManifest(aw.w.Served(), aw.trust)
-		req, _ := a.dev.BuildUnlock(a.guid, acPIN, e, served, m, a.att, client.UnlockOptions{})
+		_, m, _ := a.dev.VerifyManifest(aw.w.Served(), aw.trust)
+		req, _ := a.dev.BuildUnlock(a.guid, acPIN, e, m, a.att, client.UnlockOptions{})
 		ctx := ctxT(t, 60*time.Second)
 		first, _ := aw.w.Post(ctx, in, enclave.OpUnlock, a.vid, a.guid, req)
 		if r, err := a.dev.OpenUnlockResult(first.Envelope); err != nil || !r.OK {
 			t.Fatalf("first: %v", err)
 		}
 		aw.lock(a)
-		_, _ = a.dev.BuildUnlock(a.guid, acPIN, e, served, m, a.att, client.UnlockOptions{})
+		_, _ = a.dev.BuildUnlock(a.guid, acPIN, e, m, a.att, client.UnlockOptions{})
 		again, _ := aw.w.Post(ctx, in, enclave.OpUnlock, a.vid, a.guid, req)
 		if _, err := a.dev.OpenUnlockResult(again.Envelope); err != client.ErrResult {
 			t.Fatalf("replayed unlock accepted: %v", err)

@@ -122,6 +122,7 @@ type fakeEnclave struct {
 	conn   *hostproto.Conn
 	mu     sync.Mutex
 	queued [][]byte
+	docs   [][]byte // the manifest document field of each queue frame
 	lost   []string
 	answer func(msg []byte) []byte
 	shut   int
@@ -140,6 +141,7 @@ func (h *harness) connect(boot string, answer func([]byte) []byte) *fakeEnclave 
 		switch f.Kind {
 		case hostproto.KindQueue:
 			e.queued = append(e.queued, f.Fields[0])
+			e.docs = append(e.docs, f.Field(1))
 			var resp []byte
 			if e.answer != nil {
 				resp = e.answer(f.Fields[0])
@@ -172,8 +174,24 @@ func (e *fakeEnclave) lifecycle(ev string) {
 	_ = e.conn.Notify(hostproto.KindLifecycle, hostproto.Strings(ev, vaultID, pcr, pcr, "1")...)
 }
 
+// testDoc is a served manifest document (its manifest bytes are "{}"),
+// and testDocSHA its manifest_sha256.
+const (
+	testDoc    = `{"manifest":"e30=","sig":"AA==","key_id":"0000000000000000"}`
+	testDocSHA = "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+)
+
 func queueMsg(op, rid string) string {
-	return `{"v":1,"op":"` + op + `","vault_id":"` + vaultID + `","user_guid":"u1","request_id":"` + rid + `","enqueued_at":"2026-10-02T12:00:00.000Z"}`
+	return queueMsgSHA(op, rid, testDocSHA)
+}
+
+// queueMsgSHA is a queue message; enroll and unlock carry manifest_sha256.
+func queueMsgSHA(op, rid, sha string) string {
+	ms := ""
+	if op == "enroll" || op == "unlock" {
+		ms = `,"manifest_sha256":"` + sha + `"`
+	}
+	return `{"v":1,"op":"` + op + `","vault_id":"` + vaultID + `","user_guid":"u1","request_id":"` + rid + `"` + ms + `,"enqueued_at":"2026-10-02T12:00:00.000Z"}`
 }
 
 func response(rid, status string, env []byte) []byte {
@@ -248,6 +266,76 @@ func TestRegistryAndStore(t *testing.T) {
 	h.stop()
 	if h.queues.Exists(h.queue) {
 		t.Fatal("queue not deleted at shutdown")
+	}
+}
+
+// 0.10.0 (M1): the parent supplies the manifest document an enroll or
+// unlock names by hash, from manifests/<sha256>.json; nothing if the
+// object is missing, too large or not that manifest; never for other ops.
+func TestManifestDocument(t *testing.T) {
+	h := newHarness(t, nil)
+	h.tables.PutVault(parenttest.VaultRow{VaultID: vaultID, UserGUID: "u1", State: "locked"})
+	if _, err := h.objs.Put(context.Background(), "manifests/"+testDocSHA+".json", []byte(testDoc), ""); err != nil {
+		t.Fatal(err)
+	}
+	wrong := strings.Repeat("ab", 32)
+	if _, err := h.objs.Put(context.Background(), "manifests/"+wrong+".json", []byte(testDoc), ""); err != nil {
+		t.Fatal(err)
+	}
+	e := h.connect("boot-1", func(msg []byte) []byte {
+		var m struct {
+			RequestID string `json:"request_id"`
+		}
+		_ = json.Unmarshal(msg, &m)
+		return response(m.RequestID, "done", nil)
+	})
+	e.descriptor()
+	waitFor(t, "ready", func() bool { return h.p.Health().Release == pcr })
+	send := func(msg, rid string) {
+		t.Helper()
+		h.tables.PutSlot(rid, "i-test")
+		h.queues.Send(h.queue, msg)
+		waitFor(t, "slot "+rid, func() bool { s, _ := h.tables.Slot(rid); return s.Status != "queued" })
+	}
+	last := func() []byte {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		return e.docs[len(e.docs)-1]
+	}
+	send(queueMsg("unlock", "01JAAAAAAAAAAAAAAAAAAAAAAA"), "01JAAAAAAAAAAAAAAAAAAAAAAA")
+	if string(last()) != testDoc {
+		t.Fatalf("unlock got %q", last())
+	}
+	send(queueMsg("enroll", "01JBBBBBBBBBBBBBBBBBBBBBBB"), "01JBBBBBBBBBBBBBBBBBBBBBBB")
+	if string(last()) != testDoc {
+		t.Fatalf("enroll got %q", last())
+	}
+	// Missing object: forwarded without a document (the enclave answers
+	// "manifest").
+	send(queueMsgSHA("unlock", "01JCCCCCCCCCCCCCCCCCCCCCCC", strings.Repeat("cd", 32)), "01JCCCCCCCCCCCCCCCCCCCCCCC")
+	if len(last()) != 0 {
+		t.Fatal("document for a missing object")
+	}
+	// An object whose manifest does not hash to its name.
+	send(queueMsgSHA("unlock", "01JDDDDDDDDDDDDDDDDDDDDDDD", wrong), "01JDDDDDDDDDDDDDDDDDDDDDDD")
+	if len(last()) != 0 {
+		t.Fatal("document that is not the named manifest")
+	}
+	// A lock carries none.
+	send(queueMsg("lock", "01JEEEEEEEEEEEEEEEEEEEEEEE"), "01JEEEEEEEEEEEEEEEEEEEEEEE")
+	if len(last()) != 0 {
+		t.Fatal("document for a lock")
+	}
+	// Malformed: unlock without manifest_sha256, upper-case hash, or a
+	// hash on a lock are unreadable and dropped.
+	for _, m := range []string{
+		strings.Replace(queueMsg("unlock", "01JFFFFFFFFFFFFFFFFFFFFFFF"), `,"manifest_sha256":"`+testDocSHA+`"`, ``, 1),
+		queueMsgSHA("unlock", "01JFFFFFFFFFFFFFFFFFFFFFFF", strings.ToUpper(testDocSHA)),
+		strings.Replace(queueMsg("lock", "01JFFFFFFFFFFFFFFFFFFFFFFF"), `,"enqueued_at"`, `,"manifest_sha256":"`+testDocSHA+`","enqueued_at"`, 1),
+	} {
+		if _, ok := parent.ParseRoutingForTest([]byte(m)); ok {
+			t.Errorf("accepted %s", m)
+		}
 	}
 }
 

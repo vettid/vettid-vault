@@ -450,9 +450,16 @@ func TestVectors(t *testing.T) {
 		if _, err := altchan.ParseDeviceAssertion(ub["device_assertion"]); err != nil {
 			t.Fatalf("device_assertion: %v", err)
 		}
-		var served map[string]string
-		if err := json.Unmarshal(ub["manifest"], &served); err != nil || served["manifest"] != base64.StdEncoding.EncodeToString([]byte(rel.str("manifest"))) {
-			t.Fatal("unlock manifest member")
+		// 0.10.0: the request names the manifest by hash and serial; the
+		// document itself is not in the request.
+		var mh string
+		var ms int
+		if json.Unmarshal(ub["manifest_sha256"], &mh) != nil || mh != rel.str("manifest_sha256_hex") ||
+			json.Unmarshal(ub["manifest_serial"], &ms) != nil || ms != 7 {
+			t.Fatal("unlock manifest_sha256 / manifest_serial")
+		}
+		if _, ok := ub["manifest"]; ok {
+			t.Fatal("unlock still carries the manifest document")
 		}
 		s, _ := hpkederand.NewSender(etk.Public().Bytes(), []byte(suite.InfoSealed), d.hex("unlock_encapsulation_randomness_hex"))
 		ct, _ := s.Seal(raw[:1140], pt)
@@ -521,6 +528,31 @@ func TestReleaseVectors(t *testing.T) {
 	ik := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{SeedInitIK}, 32))
 	if !ed25519.Verify(ik.Public().(ed25519.PublicKey), []byte(u.str("signing_string")), u.b64("sig_b64")) {
 		t.Error("unlock sig with update")
+	}
+	// 0.10.0: removed and ends_at.
+	n := d.sub("manifest_0_10_0")
+	nb := []byte(n.str("manifest"))
+	if len(nb) != n.num("manifest_len") {
+		t.Error("0.10.0 manifest length")
+	}
+	nh := sha256.Sum256(nb)
+	eq(t, "0.10.0 manifest sha256", nh[:], n.hex("manifest_sha256_hex"))
+	if n.str("object_key") != "manifests/"+hex.EncodeToString(nh[:])+".json" {
+		t.Error("object key")
+	}
+	ndg := sha256.Sum256(append([]byte("vettid/pcr-manifest/1\x00"), nb...))
+	eq(t, "0.10.0 manifest signed digest", ndg[:], n.hex("manifest_signed_digest_hex"))
+	nsig := n.b64("manifest_sig_b64")
+	if len(nsig) != 64 || !ecdsa.Verify(pub, ndg[:], new(big.Int).SetBytes(nsig[:32]), new(big.Int).SetBytes(nsig[32:])) {
+		t.Error("0.10.0 manifest signature")
+	}
+	nm, err := manifest.VerifyByHash([]byte(n.str("served")), n.str("manifest_sha256_hex"), 8, []*ecdsa.PublicKey{pub})
+	if err != nil || len(nm.Releases) != 3 || nm.Releases[0].Status != manifest.StatusRemoved || nm.Releases[0].EndsAt.IsZero() ||
+		nm.Releases[1].Status != manifest.StatusRetired || !nm.Releases[2].EndsAt.IsZero() {
+		t.Fatalf("0.10.0 library verify: %v", err)
+	}
+	if !bytes.Contains(nb, []byte(`"status":"removed","published_at":"2025-09-01T00:00:00Z","ends_at":"2026-09-01T00:00:00Z","notes"`)) {
+		t.Error("0.10.0 member order")
 	}
 }
 

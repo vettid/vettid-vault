@@ -54,8 +54,11 @@ const (
 
 // Requests from the parent to the enclave:
 const (
-	// Queue: [queue message bytes]; reply [status, response bytes] (empty
-	// response bytes: the message did not parse).
+	// Queue: [queue message bytes, manifest document]; reply [status,
+	// response bytes] (empty response bytes: the message did not parse).
+	// The manifest document is the served manifest an enroll or unlock
+	// names by manifest_sha256, read by the parent from the vault data
+	// bucket (VAULT-MESSAGING 0.10.0); empty for other ops or if missing.
 	KindQueue Kind = 0x10
 	// LeaseLost: [vault_id]; reply [status]. The enclave locks the vault
 	// (§12.3 "Lease lost").

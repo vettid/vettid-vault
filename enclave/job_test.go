@@ -7,6 +7,7 @@ import (
 
 	"github.com/vettid/vettid-vault/vms/altchan"
 	"github.com/vettid/vettid-vault/vms/envelope"
+	"github.com/vettid/vettid-vault/vms/manifest"
 	"github.com/vettid/vettid-vault/vms/suite"
 )
 
@@ -22,6 +23,14 @@ func TestJobRoundTrip(t *testing.T) {
 	if err != nil || g.Op != j.Op || g.VaultID != j.VaultID || !g.ETKKid.Equal(j.ETKKid) || !g.Inner.TS.Equal(j.Inner.TS) || !bytes.Equal(g.Inner.Body, j.Inner.Body) {
 		t.Fatalf("%+v %v", g, err)
 	}
+	if g.Manifest != nil {
+		t.Fatal("manifest from an empty field")
+	}
+	// 0.10.0: the manifest document travels with the job.
+	j.Manifest = []byte(`{"manifest":"e30="}`)
+	if g2, err := ParseJob(j.Fields()); err != nil || !bytes.Equal(g2.Manifest, j.Manifest) {
+		t.Fatalf("manifest field: %v", err)
+	}
 	g.Wipe()
 	if !bytes.Equal(g.Inner.Body, make([]byte, len(g.Inner.Body))) {
 		t.Fatal("wipe")
@@ -30,7 +39,8 @@ func TestJobRoundTrip(t *testing.T) {
 	for name, f := range map[string][][]byte{
 		"op": bad(0, "lock"), "vault": bad(1, "A/B"), "guid": bad(2, "a b"), "ulid": bad(3, "x"), "kid": bad(4, "00112233445566"),
 		"type": bad(5, altchan.TypeEnroll), "id": bad(6, "01JYYYYYYYYYYYYYYYYYYYYYYY"), "ts": bad(7, "2026-10-02T12:00:00Z"), "body": bad(8, ""),
-		"count": testJob().Fields()[:8],
+		"count":              testJob().Fields()[:9],
+		"manifest too large": bad(9, string(make([]byte, manifest.MaxServed+1))),
 	} {
 		if _, err := ParseJob(f); err == nil {
 			t.Errorf("%s accepted", name)
@@ -39,10 +49,10 @@ func TestJobRoundTrip(t *testing.T) {
 }
 
 func FuzzParseJob(f *testing.F) {
-	f.Add([]byte("unlock"), []byte(`{"a":1}`), []byte("2026-10-02T12:00:00.123Z"))
-	f.Fuzz(func(t *testing.T, op, body, ts []byte) {
+	f.Add([]byte("unlock"), []byte(`{"a":1}`), []byte("2026-10-02T12:00:00.123Z"), []byte(`{"manifest":"e30="}`))
+	f.Fuzz(func(t *testing.T, op, body, ts, doc []byte) {
 		fs := testJob().Fields()
-		fs[0], fs[7], fs[8] = op, ts, body
+		fs[0], fs[7], fs[8], fs[9] = op, ts, body, doc
 		j, err := ParseJob(fs)
 		if err != nil {
 			return

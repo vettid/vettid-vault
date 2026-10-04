@@ -86,10 +86,12 @@ type UnlockFields struct {
 	MinHeaderSeq uint64
 	PIN          string
 	Token        string
-	// Manifest is the exact manifest bytes in the request (§11.10.1);
-	// ToPCR0 the release_update target, "" without one.
-	Manifest []byte
-	ToPCR0   string
+	// ManifestSHA256 is the request's manifest_sha256, hex(SHA-256) of
+	// the exact manifest bytes (§11.10.1; 0.10.0: the request carries the
+	// hash, not the document, and the line is unchanged); ToPCR0 the
+	// release_update target, "" without one.
+	ManifestSHA256 string
+	ToPCR0         string
 	// CancelRecovery adds a 13th line, "cancel_recovery" (§11.11.4).
 	CancelRecovery bool
 }
@@ -109,7 +111,7 @@ func UnlockSigningString(f UnlockFields) (string, error) {
 	if _, err := envelope.ParseTS(f.TS); err != nil {
 		return "", ErrField
 	}
-	if f.PIN == "" || f.Token == "" || strings.ContainsAny(f.PIN+f.Token, "\r\n") || len(f.Manifest) == 0 {
+	if f.PIN == "" || f.Token == "" || strings.ContainsAny(f.PIN+f.Token, "\r\n") || !validSHA256Hex(f.ManifestSHA256) {
 		return "", ErrField
 	}
 	if f.ToPCR0 != "" && !validPCRHex(f.ToPCR0) {
@@ -117,7 +119,6 @@ func UnlockSigningString(f UnlockFields) (string, error) {
 	}
 	pin := sha256.Sum256([]byte(f.PIN))
 	tok := sha256.Sum256([]byte(f.Token))
-	man := sha256.Sum256(f.Manifest)
 	lines := []string{
 		suite.LabelUnlock,
 		f.UserGUID,
@@ -129,7 +130,7 @@ func UnlockSigningString(f UnlockFields) (string, error) {
 		strconv.FormatUint(f.MinHeaderSeq, 10),
 		hex.EncodeToString(pin[:]),
 		hex.EncodeToString(tok[:]),
-		hex.EncodeToString(man[:]),
+		f.ManifestSHA256,
 		f.ToPCR0,
 	}
 	if f.CancelRecovery {
@@ -138,8 +139,12 @@ func UnlockSigningString(f UnlockFields) (string, error) {
 	return strings.Join(lines, "\n"), nil
 }
 
-func validPCRHex(s string) bool {
-	if len(s) != 96 {
+func validPCRHex(s string) bool { return lowerHex(s, 96) }
+
+func validSHA256Hex(s string) bool { return lowerHex(s, 64) }
+
+func lowerHex(s string, n int) bool {
+	if len(s) != n {
 		return false
 	}
 	for i := 0; i < len(s); i++ {

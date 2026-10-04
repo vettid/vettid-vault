@@ -159,6 +159,10 @@ type Request struct {
 	RequestID string
 	ETKKid    string
 	Envelope  []byte
+	// ManifestSHA256 names the manifest the request was built with; it
+	// goes in the POST body, and the member API copies it into the queue
+	// message so the host can supply the document (0.10.0, M1).
+	ManifestSHA256 string
 	// ReleaseChanged is set when the routed release differs from the one
 	// the app last unlocked into: the app tells the user before it sends
 	// the PIN (§11.2 step 4).
@@ -166,8 +170,9 @@ type Request struct {
 }
 
 // BuildEnroll builds a vault.enroll request sealed to the enclave's ETK
-// (§11.3), attesting a fresh device key with the request's challenge.
-func (d *Device) BuildEnroll(userGUID, pin string, e *Enclave, served *manifest.Served, att Attester) (*Request, error) {
+// (§11.3), attesting a fresh device key with the request's challenge. m is
+// the verified manifest; the request names it by hash and serial (0.10.0).
+func (d *Device) BuildEnroll(userGUID, pin string, e *Enclave, m *manifest.Manifest, att Attester) (*Request, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	now := d.cfg.Now()
@@ -195,7 +200,7 @@ func (d *Device) BuildEnroll(userGUID, pin string, e *Enclave, served *manifest.
 	ra := d.RelayAddr()
 	body, err := (&altchan.EnrollRequest{UserGUID: userGUID, RequestID: rid, Nonce: nonce, PIN: pin,
 		IK: d.IdentityKey(), KEM: d.kem.Public(), Relay: altchan.RelayAddr{URL: ra.URL, Mailbox: ra.Mailbox, PK: ra.PK},
-		OpenToken: open, Name: d.st.Name, Attest: da, Manifest: served}).Marshal()
+		OpenToken: open, Name: d.st.Name, Attest: da, ManifestSHA256: manifest.SHA256Hex(m.Bytes), ManifestSerial: m.Serial}).Marshal()
 	if err != nil {
 		return nil, err
 	}
@@ -207,7 +212,7 @@ func (d *Device) BuildEnroll(userGUID, pin string, e *Enclave, served *manifest.
 	a.EnrollNonce = nonce
 	a.EnrollPCRs = e.Measurements.PCR0 + e.Measurements.PCR1 + e.Measurements.PCR2
 	a.EnrollNumber = e.Release.Number
-	return &Request{RequestID: rid, ETKKid: e.Descriptor.Kid.String(), Envelope: env}, nil
+	return &Request{RequestID: rid, ETKKid: e.Descriptor.Kid.String(), Envelope: env, ManifestSHA256: manifest.SHA256Hex(m.Bytes)}, nil
 }
 
 // OpenEnrollResult reads vault.enroll.result from the response slot.
@@ -248,9 +253,10 @@ type pendingUnlock struct {
 
 // BuildUnlock builds a vault.unlock request (§11.4) for the enclave e:
 // rollback minimums, a fresh token for this device's mailbox, the device
-// assertion over the challenge, the manifest, an optional release
-// approval, and the Ed25519 signature by this app's identity key.
-func (d *Device) BuildUnlock(userGUID, pin string, e *Enclave, served *manifest.Served, m *manifest.Manifest, att Attester, o UnlockOptions) (*Request, error) {
+// assertion over the challenge, the verified manifest m by hash and serial
+// (0.10.0), an optional release approval, and the Ed25519 signature by
+// this app's identity key.
+func (d *Device) BuildUnlock(userGUID, pin string, e *Enclave, m *manifest.Manifest, att Attester, o UnlockOptions) (*Request, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	recovering := d.st.Vault == nil && d.st.Recovery != nil
@@ -316,10 +322,10 @@ func (d *Device) BuildUnlock(userGUID, pin string, e *Enclave, served *manifest.
 	}
 	req := &altchan.UnlockRequest{UserGUID: userGUID, VaultID: d.st.VaultID, RequestID: rid, DeviceIK: d.IdentityKey(),
 		PIN: pin, MinStateSeq: a.StateSeq, MinHeaderSeq: a.HeaderSeq[e.Release.PCR0], Token: tok, Assertion: as,
-		Manifest: served, Update: upd, CancelRecovery: o.CancelRecovery}
+		ManifestSHA256: manifest.SHA256Hex(m.Bytes), ManifestSerial: m.Serial, Update: upd, CancelRecovery: o.CancelRecovery}
 	ss, err := altchan.UnlockSigningString(altchan.UnlockFields{UserGUID: userGUID, VaultID: d.st.VaultID, RequestID: rid,
 		TS: tss, ETKKid: e.Descriptor.Kid, MinStateSeq: req.MinStateSeq, MinHeaderSeq: req.MinHeaderSeq, PIN: pin,
-		Token: tok, Manifest: served.Manifest, ToPCR0: toPCR0, CancelRecovery: o.CancelRecovery})
+		Token: tok, ManifestSHA256: req.ManifestSHA256, ToPCR0: toPCR0, CancelRecovery: o.CancelRecovery})
 	if err != nil {
 		return nil, err
 	}
@@ -336,7 +342,7 @@ func (d *Device) BuildUnlock(userGUID, pin string, e *Enclave, served *manifest.
 	if upd != nil {
 		d.pending.toNumber = upd.ToRelease
 	}
-	return &Request{RequestID: rid, ETKKid: e.Descriptor.Kid.String(), Envelope: env, ReleaseChanged: changed}, nil
+	return &Request{RequestID: rid, ETKKid: e.Descriptor.Kid.String(), Envelope: env, ManifestSHA256: req.ManifestSHA256, ReleaseChanged: changed}, nil
 }
 
 // OpenUnlockResult reads vault.unlock.result (§11.4) and records the

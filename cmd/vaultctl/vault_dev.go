@@ -282,7 +282,7 @@ func cmdAltEnroll(ctx context.Context, g *globals, args []string) error {
 	if err != nil {
 		return err
 	}
-	served, m, err := d.VerifyManifest(w.Served(), t)
+	_, m, err := d.VerifyManifest(w.Served(), t)
 	if err != nil {
 		return err
 	}
@@ -291,7 +291,7 @@ func cmdAltEnroll(ctx context.Context, g *globals, args []string) error {
 		return err
 	}
 	dev, keep := a.attester(g)
-	req, err := d.BuildEnroll(a.guid, a.pin, e, served, dev)
+	req, err := d.BuildEnroll(a.guid, a.pin, e, m, dev)
 	keep()
 	if err != nil {
 		return err
@@ -360,7 +360,7 @@ func cmdAltUnlock(ctx context.Context, g *globals, args []string) error {
 	if err != nil {
 		return err
 	}
-	served, m, err := d.VerifyManifest(w.Served(), t)
+	_, m, err := d.VerifyManifest(w.Served(), t)
 	if err != nil {
 		return err
 	}
@@ -373,7 +373,7 @@ func cmdAltUnlock(ctx context.Context, g *globals, args []string) error {
 		o.Approve = &client.Approval{To: enclavetest.Spec(*approve, "").PCR0Hex(), ToRelease: *approve}
 	}
 	dev, keep := a.attester(g)
-	req, err := d.BuildUnlock(a.guid, a.pin, e, served, m, dev, o)
+	req, err := d.BuildUnlock(a.guid, a.pin, e, m, dev, o)
 	keep()
 	if err != nil {
 		return err

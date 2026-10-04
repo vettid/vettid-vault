@@ -5,6 +5,7 @@ import (
 
 	"github.com/vettid/vettid-vault/vms/altchan"
 	"github.com/vettid/vettid-vault/vms/envelope"
+	"github.com/vettid/vettid-vault/vms/manifest"
 	"github.com/vettid/vettid-vault/vms/suite"
 )
 
@@ -20,6 +21,10 @@ type Job struct {
 	ETKKid    suite.Kid
 	// Inner is the decrypted request (type, id, ts, body).
 	Inner *envelope.Inner
+	// Manifest is the served manifest document the parent supplied for
+	// an enroll or unlock (0.10.0, M1), or empty. It is host input: the
+	// vault verifies it against the hash in the sealed request.
+	Manifest []byte
 }
 
 // ErrJob is a malformed job.
@@ -29,15 +34,16 @@ var ErrJob = errors.New("enclave: malformed job")
 const MaxJobBody = altchan.RequestPaddedSize
 
 // Fields encodes the job for the vault channel:
-// [op, vault_id, user_guid, request_id, etk_kid, type, id, ts, body].
+// [op, vault_id, user_guid, request_id, etk_kid, type, id, ts, body,
+// manifest document].
 func (j *Job) Fields() [][]byte {
 	return [][]byte{[]byte(j.Op), []byte(j.VaultID), []byte(j.UserGUID), []byte(j.RequestID), []byte(j.ETKKid.String()),
-		[]byte(j.Inner.Type), []byte(j.Inner.ID), []byte(envelope.FormatTS(j.Inner.TS)), j.Inner.Body}
+		[]byte(j.Inner.Type), []byte(j.Inner.ID), []byte(envelope.FormatTS(j.Inner.TS)), j.Inner.Body, j.Manifest}
 }
 
 // ParseJob decodes Fields strictly.
 func ParseJob(f [][]byte) (*Job, error) {
-	if len(f) != 9 {
+	if len(f) != 10 || len(f[9]) > manifest.MaxServed {
 		return nil, ErrJob
 	}
 	j := &Job{Op: string(f[0]), VaultID: string(f[1]), UserGUID: string(f[2]), RequestID: string(f[3])}
@@ -58,6 +64,9 @@ func ParseJob(f [][]byte) (*Job, error) {
 		return nil, ErrJob
 	}
 	j.Inner = &envelope.Inner{Type: want, ID: j.RequestID, TS: ts, Body: append([]byte(nil), f[8]...)}
+	if len(f[9]) > 0 {
+		j.Manifest = append([]byte(nil), f[9]...)
+	}
 	return j, nil
 }
 

@@ -50,6 +50,7 @@ import (
 	"github.com/vettid/vettid-vault/internal/memberapitest"
 	"github.com/vettid/vettid-vault/internal/relaytest"
 	"github.com/vettid/vettid-vault/parent"
+	"github.com/vettid/vettid-vault/vms/manifest"
 )
 
 const (
@@ -221,7 +222,7 @@ func newStack(t *testing.T) *stack {
 
 	// The member API stand-in.
 	s.api = httptest.NewServer(memberapitest.New(memberapitest.Config{DDB: s.db, SQS: s.sqs, Tables: s.tables,
-		QueueURLPrefix: urlPrefix, Manifest: s.w.Served, Sent: func(rid, q, body string) {
+		QueueURLPrefix: urlPrefix, Manifest: s.publishedManifest, Sent: func(rid, q, body string) {
 			s.sentMu.Lock()
 			s.sent[rid] = [2]string{q, body}
 			s.sentMu.Unlock()
@@ -438,6 +439,23 @@ func (s *stack) getObject(key string) []byte {
 		s.t.Fatal(err)
 	}
 	return b
+}
+
+// publishedManifest serves the world's current manifest the way the
+// publish step does (VAULT-MESSAGING 0.10.0): the document goes to the
+// vault data bucket as manifests/<sha256>.json before the site serves it,
+// and the parent reads it from there.
+func (s *stack) publishedManifest() []byte {
+	doc := s.w.Served()
+	sv, err := manifest.ParseServed(doc)
+	if err != nil {
+		panic(err)
+	}
+	if _, err := s.s3.PutObject(context.Background(), &s3.PutObjectInput{Bucket: aws.String(s.bucket),
+		Key: aws.String(manifest.ObjectKey(manifest.SHA256Hex(sv.Manifest))), Body: bytes.NewReader(doc)}); err != nil {
+		panic(err)
+	}
+	return doc
 }
 
 // putObject overwrites an object unconditionally, as a dishonest host

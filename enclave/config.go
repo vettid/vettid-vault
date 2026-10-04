@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"time"
 
+	"github.com/vettid/vettid-vault/enclave/releasecfg"
 	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vms/devattest"
 	"github.com/vettid/vettid-vault/vms/nitro"
@@ -23,6 +24,12 @@ type Config struct {
 	// SealAccount and SealRegion are the pinned sealing-key namespace
 	// (§11.10.2).
 	SealAccount, SealRegion string
+	// RetirementPrincipal and RetirementWindowDays are the pinned
+	// retirement role and pending window that a release key's policy may
+	// allow to schedule its deletion (§11.10.7, 0.10.0); empty: no key
+	// may allow it.
+	RetirementPrincipal  string
+	RetirementWindowDays int
 	// DeviceAttest is the device attestation policy (§11.7).
 	DeviceAttest *devattest.Policy
 	// RelayURL is the relay new vaults register at (§11.3).
@@ -36,47 +43,73 @@ type Config struct {
 	RecoveryNow func() time.Time
 }
 
-// Release pins. Values that VAULT-PLAN phase V5 creates (the manifest
-// key, the sealing-key account and region) and the Android app-signing
-// certificate digest are not known yet: they are empty, and an image built
-// with them empty refuses every enrollment and unlock (fail closed).
+// Release pins that are the same in every channel. The per-channel
+// constants (release number, manifest keys, sealing-key account and
+// region, retirement principal and window, Android signing digests, relay
+// URL) are the committed channel file the build embeds (package
+// releasecfg, §11.10.8). A build without a channel, or with an incomplete
+// channel file, pins none of them and refuses every enrollment and unlock
+// (fail closed).
 const (
-	releaseNumber  = 0 // set per release; 0 is not a release
 	androidPackage = "com.vettid.app"
 	iosAppID       = "3X25CJ86MV.com.vettid.app"
-	sealAccount    = ""
-	sealRegion     = ""
 )
 
-// ReleaseRelayURL is the relay release vaults register at (§11.3), and the
-// only relay host on the release egress allowlist.
-const ReleaseRelayURL = "https://relay.vettid.org"
+// DefaultRelayURL is the relay of a build without channel constants.
+const DefaultRelayURL = "https://relay.vettid.org"
 
-// ReleaseRegion returns the pinned sealing-key region ("" until V5), which
-// is also the region of the KMS endpoint on the egress allowlist.
-func ReleaseRegion() string { return sealRegion }
+// release returns the embedded channel constants, or nil.
+func release() *releasecfg.Config {
+	_, c := releasecfg.Embedded()
+	return c
+}
 
-// androidSigners are the SHA-256 digests of the VettID app's signing
-// certificates (pinned with the first release).
-var androidSigners [][]byte
+// ReleaseChannel returns the channel this image was built for ("" for a
+// build without one).
+func ReleaseChannel() string {
+	ch, _ := releasecfg.Embedded()
+	return ch
+}
 
-// manifestKeys are the pinned manifest public keys (V5).
-var manifestKeys []*ecdsa.PublicKey
+// ReleaseRelayURL returns the relay release vaults register at (§11.3);
+// its host is the only relay host on the release egress allowlist.
+func ReleaseRelayURL() string {
+	if c := release(); c != nil {
+		return c.RelayURL
+	}
+	return DefaultRelayURL
+}
+
+// ReleaseRegion returns the pinned sealing-key region ("" without
+// complete channel constants), which is also the region of the KMS
+// endpoint on the egress allowlist.
+func ReleaseRegion() string {
+	if c := release(); c != nil {
+		return c.SealRegion
+	}
+	return ""
+}
 
 // ReleaseConfig returns the configuration a release image runs with: the
-// vendor roots from package pins and the constants above.
+// vendor roots from package pins and the embedded channel constants.
 func ReleaseConfig(instanceID, relayURL string) Config {
 	apple := x509.NewCertPool()
 	apple.AddCert(pins.AppleAppAttestRoot())
-	return Config{
-		InstanceID: instanceID, ReleaseNumber: releaseNumber, ManifestKeys: manifestKeys,
-		SealAccount: sealAccount, SealRegion: sealRegion, RelayURL: relayURL,
+	cfg := Config{
+		InstanceID: instanceID, RelayURL: relayURL,
 		DeviceAttest: &devattest.Policy{
-			AndroidRoots: pins.GoogleAttestationRoots(), AndroidPackage: androidPackage, AndroidSigners: androidSigners,
+			AndroidRoots: pins.GoogleAttestationRoots(), AndroidPackage: androidPackage,
 			AndroidSelfSignedBootKeys: pins.GrapheneOSVerifiedBootKeys(),
 			IOSRoots:                  apple, IOSAppID: iosAppID,
 		},
 	}
+	if c := release(); c != nil {
+		cfg.ReleaseNumber, cfg.ManifestKeys = c.Release, c.ManifestKeys
+		cfg.SealAccount, cfg.SealRegion = c.SealAccount, c.SealRegion
+		cfg.RetirementPrincipal, cfg.RetirementWindowDays = c.RetirementPrincipal, c.RetirementWindowDays
+		cfg.DeviceAttest.AndroidSigners = c.AndroidSigners
+	}
+	return cfg
 }
 
 // NitroRoots returns the pinned AWS Nitro root for verifying attestation

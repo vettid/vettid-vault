@@ -1,7 +1,7 @@
 ---
 title: VAULT-MESSAGING
 status: draft
-version: 0.9.1
+version: 0.10.0
 date: 2026-10-04
 owner: Al Liebl (Mesmer)
 component: vault manager (enclave), parent forwarder, apps, desktops, agents, member API vault routes
@@ -14,7 +14,19 @@ related:
   - ACCOUNT-ADMIN-PLAN.md
   - MEMBER-API.md
   - VAULT-ITEMS.md (0.1.0, approved 2026-10-03)
+  - VAULT-RELEASES.md (0.1.0, approved 2026-10-04)
+  - RELEASE-UPDATES.md (0.2.0)
 changelog:
+  - 0.10.0: V5 release model (VAULT-RELEASES, owner decisions of
+    2026-10-04): enroll and unlock requests carry the manifest's hash and
+    serial instead of the document, which the host supplies from the vault
+    data bucket and the enclave verifies (manifest by hash, O10); the
+    manifest may grow to 65,536 bytes (§11.3, §11.4, §11.5, §11.10.1,
+    §11.10.4); the status `removed` and the optional `ends_at` date
+    (§11.10.1, §11.10.5, §11.10.6); the §11.10.7 key check admits a pinned
+    retirement role that may schedule the key's deletion with the pinned
+    window, cancel it and re-enable the key, and nothing else (§11.10.7,
+    §13.5); per-channel release constants (§11.10.8)
   - 0.9.1: vault deletion deletes the vault's relay mailbox
     (RELAY-PROTOCOL 0.5.0 `DELETE /v1/mailbox`, owner decision of
     2026-10-04): right after the marking flush, before the drain; the
@@ -407,8 +419,9 @@ aad'   = "vettid/vms/2/seal" || 0x00 || release_pcr0 || 0x00 || key_arn || 0x00 
 `blob` is the KMS `CiphertextBlob`. To unseal, the enclave takes `key_arn`
 from the object, requires it to be in the pinned sealing-key namespace
 (§11.10.2), calls `Decrypt` with it as `KeyId`, and, once the request's
-manifest is verified, requires it to equal this release's `seal_key`
-(else result code `manifest`). This lets the enclave open the header, and
+manifest (§11.10.1, supplied by the host and matched to the request's
+`manifest_sha256`) is verified, requires it to equal this release's
+`seal_key` (else result code `manifest`). This lets the enclave open the header, and
 answer sealed, before the manifest step of §11.10.4.
 
 Both objects are written create-only at enrollment and with version-matched
@@ -1143,8 +1156,8 @@ is malformed.
 
 Alternate-channel plaintexts are padded to exactly 4,096 bytes; a 4,096-byte
 inner plaintext produces a 5,252-byte sealed envelope. The exceptions are
-the `vault.enroll` and `vault.unlock` requests, which carry the signed
-release manifest (§11.3, §11.4) and are padded to exactly **12,288 bytes**
+the `vault.enroll` and `vault.unlock` requests, which carry the device
+attestation and the manifest's hash (§11.3, §11.4) and are padded to exactly **12,288 bytes**
 (a 13,444-byte envelope), whether or not an unlock carries a release
 update.
 
@@ -4386,6 +4399,10 @@ body `{error, message}` and add `code` (equal to `error`) and any fields
 named here. Each request envelope is sealed to
 an instance's ETK and padded to a fixed size (12,288 bytes for
 `vault.enroll` and `vault.unlock`, 4,096 otherwise, §5.4), and the API, queue and parent see only opaque bytes.
+The enroll and unlock bodies also carry `manifest_sha256` in the clear
+(64 lowercase hex, REQUIRED; otherwise `400 bad_request`), the hash of the
+public manifest the sealed request names, so that the host can supply
+that manifest to the enclave (§11.5, "Manifest by hash").
 
 **Access.** `GET /api/vault/enclave`, enroll and unlock require a member in
 state `member` who has accepted the current terms (otherwise `403
@@ -4494,14 +4511,17 @@ leave enclave memory.
            "relay": {"url": "<base>", "mailbox": "<id>", "pk": "<b64>"},
            "open_token": "<open token for MB(app), ≤ 10 min>", "name": "<device name>",
            "device_attest": { } },
-  "manifest": { "manifest": "<b64>", "sig": "<b64>", "key_id": "<hex>" } }
+  "manifest_sha256": "<64 hex>", "manifest_serial": 7 }
 ```
 
-`device_attest` is REQUIRED (§11.7). `manifest` is the served manifest
-document (§11.10.1), REQUIRED: the enclave verifies it, finds its own
-release's entry (which must be `active`) and verifies its own sealing key
-(§11.10.7) before sealing the first header. The request is padded to
-exactly 12,288 bytes (§5.4).
+`device_attest` is REQUIRED (§11.7). `manifest_sha256` (64 lowercase hex,
+SHA-256 of the exact manifest bytes) and `manifest_serial` (that
+manifest's `serial`) are REQUIRED and name the manifest the app verified
+(§11.10.1). The request does not carry the document: the host supplies it
+(§11.5, "Manifest by hash"), and the enclave verifies it and its match
+with these two fields, finds its own release's entry (which must be
+`active`) and verifies its own sealing key (§11.10.7) before sealing the
+first header. The request is padded to exactly 12,288 bytes (§5.4).
 
 ```
 App               Relay        Member API               SQS/Parent       Enclave
@@ -4589,14 +4609,15 @@ size (§11.4).
   "min_state_seq": 1234, "min_header_seq": 1301,
   "token": "<fresh standing token for MB(device), sub = vault relay key>",
   "device_assertion": { },
-  "manifest": { "manifest": "<b64>", "sig": "<b64>", "key_id": "<hex>" },
+  "manifest_sha256": "<64 hex>", "manifest_serial": 7,
   "release_update": { "to": "<pcr0 hex>", "to_release": 5, "approval": { } },
   "cancel_recovery": true,
   "sig": "<b64 Ed25519 by device_ik>" }
 ```
 
-`manifest` is the served manifest document (§11.10.1), REQUIRED.
-`release_update` is present only when the member approved a release update
+`manifest_sha256` and `manifest_serial` are REQUIRED and name the manifest
+the app verified, exactly as in `vault.enroll` (§11.3); the host supplies
+the document (§11.5). `release_update` is present only when the member approved a release update
 (§11.10.3). The request is padded to exactly 12,288 bytes (§5.4).
 
 `device_assertion` is REQUIRED (§11.7). `sig` covers the following string,
@@ -4608,7 +4629,9 @@ min_state_seq \n min_header_seq \n hex(SHA-256(pin)) \n hex(SHA-256(token)) \n
 hex(SHA-256(manifest_bytes)) \n to_pcr0_hex_or_empty
 ```
 
-`ts` is the request's inner `ts` (§5.3). Integers are decimal, hex is
+`ts` is the request's inner `ts` (§5.3). The line
+`hex(SHA-256(manifest_bytes))` is exactly the request's `manifest_sha256`
+(the string is unchanged from 0.9.1). Integers are decimal, hex is
 lowercase, and there is no trailing newline. No field may contain CR or LF.
 When the request carries `cancel_recovery` (present only as `true`,
 §11.11.4), the string has a thirteenth line, the literal
@@ -4635,7 +4658,7 @@ one of:
 
 - `{"ok": true, "state_seq": n, "header_seq": m, "token": "<standing token for
   MB(vault)>", "release": "<PCR0 hex>", "release_number": r,
-  "release_status": "active|deprecated|retired", "manifest_serial": s,
+  "release_status": "active|deprecated|retired|removed", "manifest_serial": s,
   "update": {"to": "<pcr0>", "result": "moved|refused|abandoned", "code": "<reason>"},
   "recovery_cancelled": true, "vault_bundle": "<b64>"}`
   — `update` is present only if the request carried `release_update`, or a
@@ -4714,12 +4737,19 @@ with a DLQ after 3 receives:
   "vault_id": "...", "user_guid": "...", "request_id": "<ULID>",
   "etk_kid": "<16 hex; enroll, unlock and recovery_register only>",
   "envelope": "<b64; enroll, unlock and recovery_register only>",
+  "manifest_sha256": "<64 hex; enroll and unlock only>",
   "browser_key": "<b64 65-byte P-256 point; recovery only>",
   "enqueued_at": "<RFC 3339>" }
 ```
 
-The parent forwards the message to the enclave unchanged. The enclave
-answers the parent with
+`manifest_sha256` is REQUIRED for `enroll` and `unlock` and absent for
+every other op. The member API copies it from the request body (§11.1,
+MEMBER-API) after checking only its format (64 lowercase hex); it cannot
+check it against the sealed request, and does not need to.
+
+The parent forwards the message to the enclave unchanged, for `enroll`
+and `unlock` together with the manifest document it names (below). The
+enclave answers the parent with
 
 ```json
 { "v": 1, "request_id": "<ULID>", "status": "done|etk_unknown", "envelope": "<b64, 5,252 bytes>" }
@@ -4739,6 +4769,44 @@ the enclave reports completion.
 - **Lifecycle events:** `enrolled` and `unlocked` at enrollment; `moved`
   with the target release after a move, and back to the earlier release
   after an abandonment (§11.10.4); `alarm.credential_clone` (above).
+
+**Manifest by hash** (0.10.0, owner decision O10). Enroll and unlock
+requests name the manifest by `manifest_sha256` and `manifest_serial`
+(§11.3, §11.4) instead of carrying it, so the manifest can outgrow the
+12,288-byte request (§11.10.1):
+
+- **Publication.** The step that publishes a manifest first writes the
+  exact served document bytes (§11.10.1) to the vault data bucket as
+  `manifests/<manifest_sha256>.json`, where `manifest_sha256` is the
+  lowercase hex SHA-256 of the manifest bytes (not of the served
+  document), and only then lets the site serve it. Objects under
+  `manifests/` are never modified; the host role may only read that
+  prefix.
+- **Parent.** For an `enroll` or `unlock` message, the parent reads
+  `manifests/<manifest_sha256>.json`, refusing an object larger than
+  90,112 bytes, and forwards the document to the enclave together with
+  the message (the vsock queue frame is `[queue message, served document
+  or empty]`). It MAY cache a few documents by hash, and MAY skip an
+  object whose manifest bytes do not hash to its name (so that a corrupt
+  object is not cached). If the object is missing, too large or skipped
+  it forwards the message with no document; it never alters the message,
+  and there is no host code for this case.
+- **Enclave.** Before it uses the manifest (§11.3; §11.10.4 step 1), the
+  enclave checks, in this order, and answers the sealed result code
+  `manifest` on the first failure: a document is present; it parses as a
+  served document (strict format, at most 90,112 bytes); the SHA-256 of
+  its manifest bytes equals the request's `manifest_sha256`; the signature
+  verifies under a pinned key (`key_id` selects it); the manifest bytes
+  parse strictly (§11.10.1); `serial` equals the request's
+  `manifest_serial`; for an unlock, `serial` is at least the
+  `manifest_serial` recorded in the sealed header (rollback protection is
+  unchanged, §13.2); and its own release is listed with its own number,
+  PCR1 and PCR2. A `manifest` failure is not a PIN failure and does not
+  count toward backoff.
+- **What the host can do.** A dishonest host can withhold the document or
+  supply another one. Either fails `manifest` (a denial of service it can
+  cause anyway); it cannot make the enclave accept a manifest the app did
+  not verify, because the hash is inside the sealed, signed request.
 
 `lock` and `delete` carry no envelope. Locking is harmless, and deletion
 through the API is an operator power the host has anyway (§13.5). The
@@ -4927,7 +4995,8 @@ envelopes.
 | Bad PIN, backoff, rollback | The uniform sealed result (§11.4) |
 | State write conflict | The vault locks (§12.3) and the result says `retry`. |
 | The vault's release is not running | `503 release_starting` with `retry_after`; the app retries (§11.10.5). |
-| Stale, invalid or unsigned manifest | Result code `manifest`; the app refetches the manifest. Not counted as a PIN failure. |
+| Stale, invalid or unsigned manifest; the host withheld the document or supplied another; hash or serial mismatch (§11.5) | Result code `manifest`; the app refetches the manifest and retries once. Not counted as a PIN failure. |
+| The vault's release is `removed` (§11.10.5) | `410 release_unavailable`; the release has ended. |
 | Header or state belongs to another release | Result code `wrong_release` (§11.10.4). |
 
 ### 11.10 Release updates
@@ -4943,7 +5012,10 @@ decision D1):
 - A vault moves to a newer release only during an unlock in which the member
   approves that release in the app (or back, before the newer release has
   ever run it, §11.10.4). Declining, or not answering, changes nothing.
-- VettID cannot move a vault, and cannot force a member to update.
+- VettID cannot move a vault, and cannot force a member to update. It
+  runs a release for a bounded time (0.10.0, VAULT-RELEASES §3.5): after
+  notice the release ends (`removed`) and its sealing key is deleted, so
+  a vault never moved off it is lost. Confidentiality never changes.
 
 #### 11.10.1 The release manifest
 
@@ -4951,14 +5023,24 @@ VettID publishes the releases it runs in a signed **release manifest** at
 `https://vettid.org/.well-known/vettid/pcr-manifest.json`.
 
 **Manifest bytes** are a compact JSON object, parsed with the strict rules
-of §5.3, at most **4,096 bytes**:
+of §5.3, at most **65,536 bytes** (0.10.0; 4,096 before):
 
 ```json
 {"v":1,"serial":7,"issued_at":"<RFC 3339, whole seconds>","releases":[
+  {"release":3,"pcr0":"<96 hex>","pcr1":"<96 hex>","pcr2":"<96 hex>",
+   "seal_key":"<sealing-key identifier, ≤ 256 bytes>","status":"deprecated",
+   "published_at":"<RFC 3339, whole seconds>","ends_at":"<RFC 3339, whole seconds>",
+   "notes":"<https URL>"},
   {"release":4,"pcr0":"<96 hex>","pcr1":"<96 hex>","pcr2":"<96 hex>",
    "seal_key":"<sealing-key identifier, ≤ 256 bytes>","status":"active",
    "published_at":"<RFC 3339, whole seconds>","notes":"<https URL>"}]}
 ```
+
+An entry is about 530 bytes. The limit leaves room for the active
+release, a year of deprecated and retired releases and the `removed`
+entries that a live key still admits (VAULT-RELEASES §4.2): 15–30 entries.
+The manifest no longer travels inside the enroll and unlock requests;
+they carry its hash (§11.5, "Manifest by hash").
 
 - `serial` is an integer that increases with every publication. A manifest
   with a lower `serial` than one already seen MUST be refused (by apps and
@@ -4975,13 +5057,26 @@ of §5.3, at most **4,096 bytes**:
   | Status | Enroll into | Move into | Unlock a vault sealed to it |
   |---|---|---|---|
   | `active` | yes | yes | yes |
-  | `deprecated` | no | no | yes; apps urge an update |
-  | `retired` | no | no | yes; apps warn that the release is no longer maintained |
+  | `deprecated` | no | no | yes, move-only (VAULT-RELEASES §3.4); apps urge an update |
+  | `retired` | no | no | yes, move-only; apps give the final warning with `ends_at` |
+  | `removed` | no | no | no: not routed (`410 release_unavailable`, §11.10.5); the release has ended and its sealing key is pending deletion or deleted |
 
+  These four statuses are fixed from release 1 on. Parsers MUST refuse
+  an unknown status (and so the whole manifest) and ignore unknown
+  members (§5.3), so later fields are additive only.
+- `ends_at` (0.10.0, optional) is the release's end date, RFC 3339 in
+  whole seconds UTC (the format of `published_at`), placed after
+  `published_at` and before `notes`. Publishers set it on `deprecated`
+  and `retired` entries once the date is known, and MAY keep it on
+  `removed` entries. Parsers validate its format wherever it appears and
+  do not refuse it because of the entry's status. Apps show it for
+  `deprecated` and `retired` releases.
 - The manifest MUST list every release that still runs for any vault, and
-  every release that the sealing policy of an `active` release admits
-  (§11.10.7). A release absent from the manifest is unknown: apps refuse to
-  send it a PIN.
+  every release that the sealing policy of any release key not yet
+  deleted admits (§11.10.7, check 6). A `removed` release therefore stays
+  listed while some live key still admits its PCR0, and is dropped once
+  none does. A release absent from the manifest is unknown: apps refuse
+  to send it a PIN.
 - `notes` is an `https` URL of human-readable release notes.
 
 **The served document** wraps the exact manifest bytes:
@@ -4998,6 +5093,13 @@ key_id = hex(SHA-256(SubjectPublicKeyInfo DER of the public key)[0:8])
 
 - Signatures are verified over the exact bytes, so no JSON
   canonicalization is needed.
+- The served document is at most **90,112 bytes**.
+- **How apps learn the manifest** (unchanged by 0.10.0): before each
+  enroll and unlock they fetch the served document from the URL above,
+  verify it (signature, strict format, the serial rule), store the
+  highest `serial` seen and send `manifest_sha256` = hex(SHA-256(manifest
+  bytes)) and `manifest_serial` in the request. On a `manifest` result
+  they refetch and retry once.
 - The **manifest key** is an ECDSA P-256 key held by VettID in a hardware
   key store and used for nothing else. Its public key is **pinned in every
   app and in every release image**. Apps and images MAY pin two keys to
@@ -5012,8 +5114,8 @@ Each release R has a **sealing key** `SK_R` with two operations:
   enclave attested as release R** (its PCR0).
 - **seal**: create an object sealed to R. It is available only to enclaves
   attested as a release that R's sealing policy admits: R itself, and the
-  releases allowed to move vaults into R (at least every `active` and
-  `deprecated` release published before R).
+  releases allowed to move vaults into R (every release not `removed`
+  when R's key is created, VAULT-RELEASES §6.2).
 
 Neither operation gives the host any key material. A sealed object is
 authenticated encryption under a fresh data key that only an attested
@@ -5059,8 +5161,9 @@ to_pcr0_hex \n to_release \n manifest_serial
   unlock only and cannot be replayed.
 - `from_pcr0_hex` is the release the vault is sealed to, which is the
   release of the instance the unlock request is sealed to (§11.2); `to_pcr0_hex` and `to_release` are the
-  target's manifest entry; `manifest_serial` is the serial of the manifest
-  in the same request. Integers are decimal; hex is lowercase.
+  target's manifest entry; `manifest_serial` is the request's
+  `manifest_serial`, the serial of the manifest the request names.
+  Integers are decimal; hex is lowercase.
 - It is signed with the app's **device attestation key** (§11.7), the same
   key and encoding as `device_assertion`:
   - Android: ECDSA P-256 with SHA-256 over the string's bytes, DER-encoded;
@@ -5082,15 +5185,21 @@ approval is bound to the app's unlock key as well.
 
 #### 11.10.4 The move
 
-Every unlock request carries the current signed manifest (§11.4). An
-enclave of release N processes an unlock in this order:
+Every unlock request names the current signed manifest by its hash and
+serial, and the host supplies the document (§11.4, §11.5). An enclave of
+release N processes an unlock in this order:
 
 1. The normal checks of §11.4, in their order, up to and including the
    rollback checks (§13.2). Before deriving the DEK, it verifies the
-   manifest: the signature under a pinned key, the strict format, and
-   `serial` ≥ the `manifest_serial` recorded in the sealed header. A
-   failure gives the result code `manifest`. A manifest failure is not a PIN
-   failure and does not count toward backoff.
+   manifest as §11.5 ("Manifest by hash") lists: the document is present,
+   its hash and serial match the request's `manifest_sha256` and
+   `manifest_serial`, the signature verifies under a pinned key, the
+   format is strict, `serial` ≥ the `manifest_serial` recorded in the
+   sealed header, and its own release is listed. A failure gives the
+   result code `manifest`. A manifest failure is not a PIN failure and
+   does not count toward backoff. The enclave does not refuse an unlock
+   because its own entry is `removed`: a rescue (§11.10.5) reopens the
+   release under the same manifest.
 2. It derives the DEK and loads the state. If the state records a
    **pending move** (step 6), it never resumes the vault, with one
    exception: an **abandonment** (see "Abandoning an unconfirmed move"
@@ -5194,11 +5303,20 @@ Several releases run at once.
   `release_starting` (MEMBER-API error body plus `code`, `release` and
   `retry_after`); the app retries after `retry_after`. A release that is
   unknown or whose image can no longer be started answers `410` with error
-  `release_unavailable`. The API learns each release's status and
-  availability from the signed manifest, as operations publish it
-  (VAULT-PLAN §5.1); `retired` releases are still routed. VettID keeps
-  each release's image and sealing key while any vault is sealed to it
-  (VAULT-PLAN §5.1).
+  `release_unavailable`; so does a `removed` release (0.10.0), unless
+  operations have reopened it for a rescue. The API learns each release's
+  status and availability from the signed manifest, as operations publish
+  it (VAULT-PLAN §5.1); `deprecated` and `retired` releases are still
+  routed. VettID keeps each release's image and sealing key until the
+  release's `ends_at` (VAULT-RELEASES §3.5); then the release is
+  `removed`, its instances stop and its key is scheduled for deletion
+  with the pinned window (§11.10.7), after which every vault still sealed
+  to it is permanently unopenable.
+- **Rescue.** During the deletion window, operations MAY reopen a
+  `removed` release for a member who asks: cancel the key's deletion,
+  enable it, start an instance and route the member's vault to it, with
+  the manifest unchanged. The app offers only the move; then the key is
+  scheduled for deletion again (VAULT-RELEASES §10.3).
 - The `moved` lifecycle event updates `sealed_release`; the next unlock is
   routed to the new release.
 - An app MAY ask for a specific release with
@@ -5220,15 +5338,20 @@ value, and keeps N's release and `header_seq` until the move is confirmed
 or abandoned.
 
 - It fetches the manifest before each unlock, refuses one with a lower
-  `serial` than stored, and sends it in the unlock request.
+  `serial` than stored, and sends its `manifest_sha256` and
+  `manifest_serial` in the unlock request (§11.10.1).
 - It MUST NOT send a PIN to a release with a **lower** release number than
   the one it last unlocked into (a rollback; it shows an error).
 - If the routed release is **newer** than the stored one and listed in the
   manifest, the vault was moved from another device. The app tells the user
   ("vault software was updated") before sending the PIN, as §11.2 step 4
   requires.
-- For a `deprecated` or `retired` release, it shows the status and offers
-  the newest `active` release.
+- For a `deprecated` or `retired` release, it shows the status and the
+  `ends_at` date if present, and offers the newest `active` release.
+- For a `removed` release, it tells the member that the release has ended
+  and the vault can no longer be opened (enroll a new vault). Only if the
+  API routes the vault anyway (a rescue, §11.10.5) does it unlock, and
+  then it offers only the move.
 - After `update: moved`, it records the new release and sequence numbers
   and unlocks again, which reaches the new release. If that release
   repeatedly fails to unlock the vault, the app MAY offer to return to the
@@ -5252,7 +5375,11 @@ nothing in the enclave noticed.)
 enclave's own release key) and before a move (the target's key,
 §11.10.4 step 4). A key whose policy passes these checks can never be
 changed again (no principal may call `PutKeyPolicy` or `CreateGrant`), so
-one successful check per key is enough. The enclave records it in the
+one successful check per key is enough. Only the key's state can change,
+and only along Enabled → PendingDeletion → deleted, or PendingDeletion →
+Disabled → Enabled (a cancelled deletion, then `EnableKey`), by the pinned
+retirement principal (below); the record stays valid through all of them,
+and check 2 refuses new seals while the key is not `Enabled`. The enclave records it in the
 sealed header it writes, as `seal_key_verified = {key_arn,
 policy_sha256, verified_by}` (`verified_by` the PCR0 of the release that ran
 the check); later header writes under the same key, by the same
@@ -5288,7 +5415,9 @@ shape or truncated listing refuses the seal.
    `MultiRegion` present and `false` (a replica could carry a different
    policy); `AWSAccountId` = the pinned account; no `CustomKeyStoreId`,
    `CloudHsmClusterId` or `XksKeyConfiguration`. Unknown members of the
-   responses are ignored; known members with another type fail.
+   responses are ignored; known members with another type fail. A key
+   pending deletion, or disabled after a cancelled deletion, is refused
+   for new seals until it is enabled again.
 3. **No grants** (`ListGrants`): the list is empty and not truncated
    (`Truncated` false, no `NextMarker`). A
    grant is an authorization outside the policy, so none may exist; with
@@ -5312,13 +5441,26 @@ shape or truncated listing refuses the seal.
    | `kms:Decrypt` | an attestation condition whose every value is the **target release's PCR0** |
    | `kms:GenerateDataKey` | an attestation condition whose every value is the PCR0 of a release in the manifest numbered **at or below** the target (the target and the releases admitted to seal for it, §11.10.2) |
    | `kms:DescribeKey`, `kms:GetKeyPolicy`, `kms:ListGrants`, `kms:ListKeyPolicies`, `kms:GetKeyRotationStatus`, `kms:ListResourceTags` | no condition required (read-only metadata) |
+   | `kms:ScheduleKeyDeletion` (0.10.0) | a **retirement statement** (below) with `NumericEquals` `kms:ScheduleKeyDeletionPendingWindowInDays` = the pinned window (check 7) |
+   | `kms:CancelKeyDeletion`, `kms:EnableKey` (0.10.0) | a retirement statement |
+
+   A **retirement statement** is an `Allow` statement whose actions are
+   only `kms:ScheduleKeyDeletion`, `kms:CancelKeyDeletion` and
+   `kms:EnableKey` (one or more of them): never with `kms:Decrypt`,
+   `kms:GenerateDataKey` or a read-only action. Its principal is the
+   pinned retirement principal (check 8). A release image pins two
+   **retirement constants** (§11.10.8): `retirement_principal`, an IAM
+   role ARN in the pinned account (not the account root; for vettid.org
+   `arn:aws:iam::<account>:role/vettid-org-vault-key-retirement`), and
+   `retirement_window_days` (30 in production, 7 in staging; 7–30). An
+   image without a pinned retirement principal (development builds)
+   treats the three actions as disqualifying, as before 0.10.0.
 
    Every other action disqualifies the key, among them `kms:PutKeyPolicy`,
    `kms:CreateGrant`, `kms:Encrypt` (anyone could then forge sealed
    objects), `kms:ReEncryptFrom` / `kms:ReEncryptTo` (re-encryption to a
    key the caller controls bypasses the attestation gate),
-   `kms:GenerateDataKeyWithoutPlaintext`, `kms:ScheduleKeyDeletion`,
-   `kms:CancelKeyDeletion`, `kms:DisableKey`, `kms:EnableKey`,
+   `kms:GenerateDataKeyWithoutPlaintext`, `kms:DisableKey`,
    `kms:ImportKeyMaterial`, `kms:DeleteImportedKeyMaterial`,
    `kms:UpdatePrimaryRegion`, `kms:ReplicateKey`, `kms:TagResource`,
    `kms:UntagResource`, `kms:UpdateKeyDescription`, and
@@ -5342,6 +5484,17 @@ shape or truncated listing refuses the seal.
    `kms:EncryptionContext:<key>`; `StringEquals` on `kms:CallerAccount`
    (required, and equal to the pinned account, check 8); and `ArnEquals` on
    `aws:PrincipalArn` with ARNs in the pinned account. Anything else fails.
+
+   **The retirement window condition** (0.10.0). One more entry is
+   accepted, only in a retirement statement that contains
+   `kms:ScheduleKeyDeletion`, and REQUIRED there: operator `NumericEquals`
+   (not `NumericEqualsIfExists`, not another numeric operator) on the key
+   `kms:ScheduleKeyDeletionPendingWindowInDays`, with a single value (a
+   JSON string or a JSON number, in canonical decimal, not an array) equal
+   to the pinned `retirement_window_days`. `NumericEquals` anywhere else,
+   or this key under any other operator, fails. KMS documents the key and
+   its 7–30-day range; the window applies when the deletion is scheduled,
+   so the key can only be deleted after exactly that notice.
 8. **Principals.** Releases are public and reproducible, so anyone can run
    a genuine release image in their own AWS account and present a valid
    attestation with its PCR0. The attestation condition alone therefore
@@ -5356,7 +5509,16 @@ shape or truncated listing refuses the seal.
 
    The `Decrypt` and `GenerateDataKey` statements MUST also carry
    `StringEquals` `kms:CallerAccount` = the pinned account, as defence in
-   depth against a principal-shape mistake. Read-only statements are held
+   depth against a principal-shape mistake.
+
+   In a **retirement statement** (0.10.0), `Principal` is exactly
+   `{"AWS": "<pinned retirement principal>"}`: one ARN string, not an
+   array, not the account root, not the host role. Retirement statements
+   MUST also carry `StringEquals` `kms:CallerAccount` = the pinned
+   account. The retirement principal MUST NOT appear among the principals
+   of a `Decrypt` or `GenerateDataKey` statement; it MAY appear in the
+   read-only statement's principals (it reads the key's policy for
+   `vaultctl keycheck`, VAULT-RELEASES §6.2). Read-only statements are held
    to the same pinned-account rule: foreign reads of a key's metadata would
    be harmless, but there is no reason to allow them.
 
@@ -5380,16 +5542,35 @@ stand for the releases' PCR0s:
       "Condition": {"StringEqualsIgnoreCase": {"kms:RecipientAttestation:ImageSha384": ["<pcr0-3>", "<pcr0-4>"]},
                     "StringEquals": {"kms:CallerAccount": "111122223333"}} },
     { "Sid": "EnclaveVerifiesThisPolicy", "Effect": "Allow",
-      "Principal": {"AWS": "arn:aws:iam::111122223333:role/vettid-enclave-host"},
-      "Action": ["kms:DescribeKey", "kms:GetKeyPolicy", "kms:ListGrants"], "Resource": "*" }
+      "Principal": {"AWS": ["arn:aws:iam::111122223333:role/vettid-enclave-host",
+                            "arn:aws:iam::111122223333:role/vettid-org-vault-key-retirement"]},
+      "Action": ["kms:DescribeKey", "kms:GetKeyPolicy", "kms:ListGrants"], "Resource": "*" },
+    { "Sid": "RetireAfterNotice", "Effect": "Allow",
+      "Principal": {"AWS": "arn:aws:iam::111122223333:role/vettid-org-vault-key-retirement"},
+      "Action": "kms:ScheduleKeyDeletion", "Resource": "*",
+      "Condition": {"NumericEquals": {"kms:ScheduleKeyDeletionPendingWindowInDays": "30"},
+                    "StringEquals": {"kms:CallerAccount": "111122223333"}} },
+    { "Sid": "RescueBeforeDeletion", "Effect": "Allow",
+      "Principal": {"AWS": "arn:aws:iam::111122223333:role/vettid-org-vault-key-retirement"},
+      "Action": ["kms:CancelKeyDeletion", "kms:EnableKey"], "Resource": "*",
+      "Condition": {"StringEquals": {"kms:CallerAccount": "111122223333"}} }
   ]
 }
 ```
 
+The example pins `retirement_principal` =
+`arn:aws:iam::111122223333:role/vettid-org-vault-key-retirement` and
+`retirement_window_days` = 30.
+
 There is no administrator statement, so KMS's lockout safety check rejects
 the policy unless the key is created with `BypassPolicyLockoutSafetyCheck`
 (VAULT-PLAN §5.1). That is intended: nobody, including the AWS account
-root, can change the policy, add grants, disable or delete the key.
+root, can change the policy, add grants or disable the key. Only the
+pinned retirement principal can end the key, and only by scheduling its
+deletion with exactly the pinned window; within that window it can cancel
+the deletion and re-enable the key (a rescue, §11.10.5). Ending a key
+ends availability for vaults still sealed to it, never confidentiality:
+no statement lets anything but the release open what is sealed to it.
 
 **Variants that MUST fail** (each changes one thing in the example):
 
@@ -5413,12 +5594,64 @@ root, can change the policy, add grants, disable or delete the key.
 | `Decrypt` without the `kms:CallerAccount` condition, or with another account | 8 |
 | `ListGrants` returns one grant | 3 |
 | `DescribeKey` shows `Origin` = `EXTERNAL` or `MultiRegion` = `true` | 2 |
+| `ScheduleKeyDeletion` without the window condition, or with `NumericGreaterThanOrEquals`, `NumericEqualsIfExists`, another value, or an array value | 7 |
+| `ScheduleKeyDeletion` or `CancelKeyDeletion` for the host role, the account root, or a second ARN (an array) | 8 |
+| `"Action": "kms:DisableKey"` for the retirement principal | 6 |
+| `kms:EnableKey` in the `Decrypt` statement | 6 |
+| A retirement statement whose principal is not the pinned retirement principal | 8 |
+| A retirement statement that also lists `kms:DescribeKey` | 6 |
+| `NumericEquals` (on the window key) in the `Decrypt` statement | 7 |
+| A retirement statement without the `kms:CallerAccount` condition | 8 |
+| The retirement principal added to the `Decrypt` statement's principals | 8 |
+| An image without a pinned retirement principal checks the example | 6 (retirement actions disqualify) |
 
 **What remains trusted.** The check moves the guarantee from VettID's word
 to AWS's documented behaviour: that KMS enforces key policies, grants and
 attestation conditions as specified, that Nitro attestation documents
 cannot be forged, and that AWS itself does not bypass them. It cannot
 detect a key-policy evaluation flaw in KMS or an AWS insider.
+
+#### 11.10.8 Channels and release constants
+
+(0.10.0; VAULT-RELEASES §3.1, §5.2.) VettID builds three channels:
+
+| | dev | staging | production |
+|---|---|---|---|
+| Build | development enclave (fake NSM and KMS) | release build, channel `staging` | release build, channel `prod` |
+| Manifest key | a test key | the staging key (deletable) | key A (KMS) and key B (offline) |
+| Manifest URL | none | `https://staging.vettid.org/.well-known/vettid/pcr-manifest.json` | `https://vettid.org/.well-known/vettid/pcr-manifest.json` |
+| Sealing-key account | none | the staging account | the vault production account |
+| Retirement window | none | 7 days | 30 days |
+| Release numbers | 0 | its own sequence | 1, 2, 3, … |
+
+**Release constants.** Each release image embeds the constants of exactly
+one channel, from a committed per-channel file selected at build time,
+so that the image is reproducible from its tag and the channel is
+recorded in the build's measurements:
+
+- the release number (§11.10.1);
+- the manifest public keys (production: key A and key B; staging: the
+  staging key), `key_id` selecting one;
+- the sealing-key account and region (§11.10.2);
+- `retirement_principal` and `retirement_window_days` (§11.10.7; a
+  channel file with another window than its channel's, 30 or 7 days, is
+  malformed);
+- the Android signing-certificate digests (§11.7);
+- the relay URL (§11.3).
+
+GrapheneOS verified-boot keys and the vendor roots stay in code and are
+the same for every channel. A release build MUST refuse a channel file
+with a placeholder or a missing value, and an image whose configuration
+is incomplete refuses every enrollment and unlock (fail closed).
+
+**Channels cannot cross.** A staging image is never mistaken for a
+production one: its constants are measured, so its PCR0 differs;
+production apps and images never pin the staging manifest key, so no
+production manifest can list it and no staging manifest is accepted by
+production code; each image refuses sealing keys outside its channel's
+account (§11.10.2); and production keys' policies name production PCR0s
+only (§11.10.7). Apps pin per channel too: a production app pins only the
+production manifest keys and URL.
 
 ### 11.11 Recovery
 
@@ -6011,6 +6244,11 @@ client**:
 
 The split-brain guard (§12.3) separately catches stale writers.
 
+Manifest by hash (0.10.0, §11.5) changes none of this: the manifest
+`serial` recorded in the sealed header still bounds the manifests an
+enclave accepts, and the app still refuses a manifest with a lower serial
+than it has seen.
+
 ### 13.3 Parent and host
 
 The parent can delay, drop, reorder or replay what it forwards. Replays are
@@ -6087,9 +6325,10 @@ it can read and write only its own objects and use only its own relay key
 | VettID's API tables | Nothing: the recovery code is stored only sealed to the member's browser, and the enclave enforces the 24 h (§11.11.2) | — |
 | Decrypted vault state (DEK) | Everything in it (`data` and `secret` items included), plus offline guessing of the credential password against the current CEK and the latest blob (§3.5.8); critical items' values stay encrypted under item keys that only the credential, sealed under the password, holds (§10.7) | Rotate the relay key and the credential; change the password |
 | A critical item key (from an old blob with its CEK and the password, or from a compromised release during an operation) | That item's ciphertext of that generation only; nothing after the item's next use, which re-keys it (§10.7) | Use the item, or `credential.rotate` (re-keys every item) |
-| An old release, after members moved away | Vaults still sealed to it. A moved vault only if the host serves it a stale header and state **and** an app sends it the PIN; apps never send a PIN to an older release than they last unlocked into (§11.10.6). Residual: an owner device that never learned of the move. | Members move forward; the app warns about `deprecated` and `retired` releases |
-| Manifest key | Listing a release as `active`. A vault still moves only with the member's approval, and only to a sealing key in the pinned namespace. | Rotate the key in a release; apps pin two keys |
-| Sealing-key policy (VettID's AWS account) | A key whose policy let anything other than its release decrypt, or could be changed later, would expose the pepper and allow offline PIN guessing against stored state. The enclave refuses to seal to such a key: before sealing it reads the policy, metadata and grants from KMS over TLS it terminates and checks them (§11.10.7). | Nothing to recover: the check runs before any seal, and a passing policy can never change |
+| An old release, after members moved away | Vaults still sealed to it. A moved vault only if the host serves it a stale header and state **and** an app sends it the PIN; apps never send a PIN to an older release than they last unlocked into (§11.10.6). Residual: an owner device that never learned of the move. | Members move forward; the app warns about `deprecated` and `retired` releases; the release ends at its `ends_at` (§11.10.5) |
+| Manifest key | Listing a release as `active`, or marking one `removed` (routing only: the API stops routing it). A vault still moves only with the member's approval, and only to a sealing key in the pinned namespace. A manifest the host supplies must match the hash in the sealed request (§11.5). | Rotate the key in a release; apps pin two keys |
+| Sealing-key policy (VettID's AWS account) | A key whose policy let anything other than its release decrypt, or could be changed later, would expose the pepper and allow offline PIN guessing against stored state. The enclave refuses to seal to such a key: before sealing it reads the policy, metadata and grants from KMS over TLS it terminates and checks them (§11.10.7). | Nothing to recover: the check runs before any seal, and a passing policy can never change; only the pinned retirement principal can delete the key, after notice (below) |
+| Retirement principal (0.10.0) | Scheduling the deletion of a release key, always with the pinned window: 30 days later every vault still sealed to that release is permanently unopenable. Availability only, never confidentiality: it cannot read, open, move or re-key anything, change the policy or add grants. | Cancel the deletion within the 30 days (`CancelKeyDeletion`, `EnableKey`); a CloudTrail alarm on every `ScheduleKeyDeletion` (VAULT-RELEASES §8.7) |
 
 As operator of the host, queues and API, VettID **can**:
 
@@ -6097,7 +6336,10 @@ As operator of the host, queues and API, VettID **can**:
 - lock vaults;
 - delete stored state;
 - observe the metadata in §2.2;
-- publish new releases and mark old ones `deprecated` or `retired`.
+- publish new releases and mark old ones `deprecated` or `retired`;
+- end a release after notice (`removed`, VAULT-RELEASES §3.5): its
+  instances stop and its sealing key is deleted after the pinned window,
+  after which vaults still sealed to it are lost.
 
 It **cannot**:
 
@@ -6107,7 +6349,10 @@ It **cannot**:
 - move a vault to another release, or **force an update**: only the
   member's approval at unlock moves a vault (§11.10). A vault therefore
   stays on its release, including any unfixed vulnerability, until the
-  member approves an update; the app makes that visible.
+  member approves an update; the app makes that visible. A member who
+  never moves loses access when the release ends (its `ends_at`, after at
+  least 90 days' notice): that is a loss of availability, never of
+  confidentiality.
 
 These "cannot" statements do not rest on VettID's word about its key
 policies: the enclave verifies each sealing key's policy before sealing to
@@ -6241,6 +6486,33 @@ Follow-ups:
        (§12.5). Recommended: yes: there is no password to check, and the
        recovery's 24 h and the account (or, before a credential, the
        enrollment minutes earlier) gate it; deletion exposes nothing.
+14. **OWNER DECISIONS of 0.10.0.** The release model itself (VAULT-RELEASES
+    R1–R4, O1–O10) was decided on 2026-10-04. These details are new in
+    this text; each is written as recommended, to confirm at review:
+    1. **OWNER DECISION:** a retirement statement contains only the three
+       retirement actions, never a read-only action (§11.10.7).
+       Recommended: yes; the read-only actions go in the read-only
+       statement, and the stricter shape is simpler to check.
+    2. **OWNER DECISION:** `ends_at` is validated wherever it appears but
+       not restricted by status in parsers (§11.10.1). Recommended: yes;
+       release 1's parser must not refuse a later manifest that keeps the
+       date on a `removed` entry (C1, forward compatibility).
+    3. **OWNER DECISION:** the enclave does not refuse an unlock because
+       its own entry is `removed` (§11.10.4), so a rescue needs no new
+       manifest; availability is enforced by routing (`410`) and the key
+       state. Recommended: yes.
+    4. **OWNER DECISION:** a manifest document the host cannot find is
+       answered by the enclave's sealed `manifest` result, not by a new
+       host code (§11.5). Recommended: yes; it keeps the outcome
+       uniform and the app's handling (refetch, retry once) unchanged.
+    5. **OWNER DECISION:** the hash in the clear (`manifest_sha256` in the
+       enroll and unlock bodies and the queue message) names a public
+       document and reveals only which manifest the app holds.
+       Recommended: acceptable.
+15. **Member API.** The vault routes' `manifest_sha256` field, its copy
+    into the queue message and `410 release_unavailable` for a `removed`
+    release are specified here and in MEMBER-API; the member-API code
+    follows in VAULT-RELEASES W8.
 
 ## 16. Test vectors
 
@@ -6342,10 +6614,52 @@ carries the approval; `altchan.json` is regenerated for 0.3.0.
   approval sig (DER, b64) : MEQCIH8lw3H0EdOnkuiH6yMEMR/zIh16+kPuacXjK77FnYf+AiBGvXMyQ6vhmpA1JRJYd804f5qw9Dtyo7kXZZ/TTSMCSA==
 ```
 
+**0.10.0.** `altchan.json` is regenerated: the `vault.unlock` request
+carries `manifest_sha256` and `manifest_serial` instead of the served
+manifest (§11.4); the unlock signing string is unchanged.
+`release.json` gains a 0.10.0 manifest vector (`manifest_0_10_0`) with a
+`removed` and a `retired` entry carrying `ends_at`, its SHA-256 and its
+signature under the test manifest key (vettid-vault phase V5 W1). The
+values in the files are authoritative.
+
+```
+§11.10.1 manifest 0.10.0 (serial 8, releases 2 removed, 3 retired, 4 active)
+  manifest bytes : 1,619 B (release.json manifest_0_10_0)
+  SHA-256        : 1076917dbc01969c1dedaaaa0ec81d711a7d4babc184a834aa8d3fe275c97c9d
+  bucket object  : manifests/1076917dbc01969c1dedaaaa0ec81d711a7d4babc184a834aa8d3fe275c97c9d.json
+```
+
 Cross-implementation checks against Apple CryptoKit and BouncyCastle are
 pending (§15, follow-up 1).
 
 ## 17. Changelog
+
+- **0.10.0** (2026-10-04): the V5 release model (VAULT-RELEASES 0.1.0,
+  owner decisions of 2026-10-04, R1–R4, O1–O10).
+  - §11.1, §11.3, §11.4, §11.5, §11.10.1, §11.10.4: manifest by hash
+    (O10). Enroll and unlock requests carry `manifest_sha256` and
+    `manifest_serial` instead of the served document; the request bodies
+    and the queue message carry `manifest_sha256` in the clear; the
+    publish step writes the served document to
+    `manifests/<manifest_sha256>.json` in the vault data bucket first;
+    the parent forwards it with the message; the enclave checks presence,
+    format, hash, signature, serial match and rollback, else `manifest`.
+    The unlock signing string is unchanged.
+  - §11.10.1: manifest bytes up to 65,536 (was 4,096); served document up
+    to 90,112 bytes; status `removed`; optional `ends_at`; the four
+    statuses are fixed; a `removed` release stays listed while a live key
+    admits it.
+  - §11.10.2, §11.10.5, §11.10.6, §11.9: admitted releases are those not
+    `removed`; a release is kept until its `ends_at`; `removed` answers
+    `410 release_unavailable`; rescue; what apps show.
+  - §11.10.7: the pinned retirement principal and window; retirement
+    statements (`ScheduleKeyDeletion` with `NumericEquals` on the pinned
+    window, `CancelKeyDeletion`, `EnableKey`); checks 2, 6, 7 and 8; the
+    example policy and nine must-fail variants.
+  - §11.10.8 (new): channels and per-channel release constants.
+  - §13.2: unchanged by manifest by hash. §13.5: the retirement
+    principal row, ending a release after notice, availability versus
+    confidentiality. §15 items 14–15, §16.
 
 - **0.9.1** (2026-10-04): vault deletion deletes the relay mailbox (owner
   decision of 2026-10-04).

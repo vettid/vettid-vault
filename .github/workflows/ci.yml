@@ -28,6 +28,8 @@ jobs:
         run: |
           go test -race -count=1 ./...
           go test -race -count=1 -tags vmsvectors ./...
+      - name: release channels (embedded constants, both channel builds)
+        run: make channels
       - name: fuzz (short, execution-count budgets)
         run: make fuzz
 
@@ -92,6 +94,20 @@ jobs:
           done
           sha256sum ve1 ve2
           cmp ve1 ve2
+      - name: release gate refuses placeholders (VAULT-MESSAGING §11.10.8)
+        run: |
+          for ch in prod staging; do
+            if grep -q '"TODO-' "enclave/releasecfg/$ch.json"; then
+              msg=$(CHANNEL=$ch scripts/build-eif.sh "out-$ch" 2>&1 || true)
+              echo "$msg" | grep -q "still has placeholders" || { echo "build-eif.sh did not refuse $ch: $msg"; exit 1; }
+              if docker build -q -f Dockerfile.enclave --build-arg CHANNEL=$ch -t "vve-$ch" . >/dev/null 2>&1; then
+                echo "Dockerfile.enclave built a $ch image with placeholders"; exit 1
+              fi
+              echo "$ch: refused while placeholders remain"
+            else
+              docker build -q -f Dockerfile.enclave --build-arg CHANNEL=$ch --build-arg SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)" -t "vve-$ch" .
+            fi
+          done
 
   gitleaks:
     # Pinned binary over the FULL history (the gitleaks-action fails on a

@@ -177,8 +177,19 @@ The enclave image is built reproducibly from `Dockerfile.enclave`
 hardware smoke test (`vault-parent -selftest`) is described in
 [`docs/SMOKE.md`](docs/SMOKE.md).
 
+Release constants (VAULT-MESSAGING 0.10.0 §11.10.8) are per channel:
+`enclave/releasecfg/prod.json` and `staging.json` are committed and
+embedded by the build tag `vettid_channel_prod` / `vettid_channel_staging`,
+which `CHANNEL=prod|staging scripts/build-eif.sh` selects (default `none`:
+no constants, the smoke-test image, which refuses every enrollment and
+unlock). The build refuses a channel file with a `TODO-…` placeholder or a
+missing value (`go run ./cmd/releasecfg check prod`); the production
+values wait for owner decisions O1 (vault account), O3 (manifest keys) and
+O8 (Android signing digests).
+
 ```sh
-make test      # go test ./... and the vector regeneration check
+make test      # go test ./..., the vector regeneration check, `make channels`
+make channels  # each channel's embedded constants and enclave build
 make race      # the same under -race
 make lint      # go vet + staticcheck (pinned), default and vmsvectors builds
 make check-tcb # no vector-only, dev-enclave or test code in release packages;

@@ -105,7 +105,8 @@ func DevSupervisor(o DevOptions) (supervisor.Config, error) {
 func DevConfig(instanceID string, n uint64, relayURL string) enclave.Config {
 	mk := ManifestKey()
 	return enclave.Config{InstanceID: instanceID, ReleaseNumber: n, ManifestKeys: []*ecdsa.PublicKey{&mk.PublicKey},
-		SealAccount: KMSAccount, SealRegion: KMSRegion, DeviceAttest: Policy(), RelayURL: relayURL, KDF: vault.MinKDF}
+		SealAccount: KMSAccount, SealRegion: KMSRegion,
+		RetirementPrincipal: RetirementRole, RetirementWindowDays: RetirementWindow, DeviceAttest: Policy(), RelayURL: relayURL, KDF: vault.MinKDF}
 }
 
 // DevVaultArgs are the arguments after vaultproc.Arg for a dev vault

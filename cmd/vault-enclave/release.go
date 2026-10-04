@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"net"
+	"net/url"
 	"os"
 
 	"github.com/vettid/vettid-vault/enclave"
@@ -39,13 +40,13 @@ func platform() (supervisor.Config, error) {
 		return supervisor.Config{}, err
 	}
 	return supervisor.Config{
-		Enclave: func(id string) enclave.Config { return enclave.ReleaseConfig(id, enclave.ReleaseRelayURL) },
+		Enclave: func(id string) enclave.Config { return enclave.ReleaseConfig(id, enclave.ReleaseRelayURL()) },
 		NSM:     dev,
 		Control: func(ctx context.Context) (net.Conn, error) { return vsock.Dial(ctx, vsock.CIDHost, controlPort) },
 		Egress:  tr,
 		// One process per vault, each under its own uid (D4).
 		Proc:       supervisor.ProcConfig{Exec: []string{exe, vaultproc.Arg}, UIDBase: vaultUIDBase},
-		RelayHosts: []string{"relay.vettid.org"},
+		RelayHosts: []string{relayHost()},
 		Harden:     true,
 		NitroRoots: enclave.NitroRoots(),
 		// The hardware smoke test (docs/SMOKE.md) reaches the KMS endpoint
@@ -62,7 +63,7 @@ func platform() (supervisor.Config, error) {
 func releaseHosts(region string) []egress.Host {
 	amazon := pins.Pool(pins.AmazonTLSRoots())
 	hosts := []egress.Host{
-		{Name: "relay.vettid.org", Roots: amazon, HTTP2: true},
+		{Name: relayHost(), Roots: amazon, HTTP2: true},
 		{Name: "android.googleapis.com", Roots: pins.Pool(pins.GoogleTLSRoots()), HTTP2: true},
 	}
 	if region != "" {
@@ -71,13 +72,22 @@ func releaseHosts(region string) []egress.Host {
 	return hosts
 }
 
+// relayHost is the host of the channel's relay URL.
+func relayHost() string {
+	u, err := url.Parse(enclave.ReleaseRelayURL())
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
+}
+
 // vaultUIDBase is the first uid (and gid) of the vault processes.
 const vaultUIDBase = 200000
 
 // vaultPlatform is a vault process's pinned configuration.
 func vaultPlatform([]string) (vaultproc.Platform, error) {
 	return vaultproc.Platform{
-		Config:         func(id string) enclave.Config { return enclave.ReleaseConfig(id, enclave.ReleaseRelayURL) },
+		Config:         func(id string) enclave.Config { return enclave.ReleaseConfig(id, enclave.ReleaseRelayURL()) },
 		Features:       func() []vault.Feature { return all.New(all.Options{}) },
 		RequireSeccomp: true,
 	}, nil

@@ -2,7 +2,9 @@ package parent
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"regexp"
@@ -25,6 +27,9 @@ type routing struct {
 	Op        string `json:"op"`
 	VaultID   string `json:"vault_id"`
 	RequestID string `json:"request_id"`
+	// ManifestSHA256 names the manifest an enroll or unlock was built
+	// with (0.10.0): the parent supplies that document to the enclave.
+	ManifestSHA256 string `json:"manifest_sha256"`
 }
 
 func parseRouting(b []byte) (routing, bool) {
@@ -37,8 +42,13 @@ func parseRouting(b []byte) (routing, bool) {
 	default:
 		return routing{}, false
 	}
+	if (r.Op == "enroll" || r.Op == "unlock") != (r.ManifestSHA256 != "") || r.ManifestSHA256 != "" && !sha256RE.MatchString(r.ManifestSHA256) {
+		return routing{}, false
+	}
 	return r, r.V == 1 && vaultIDOK(r.VaultID) && ulidRE.MatchString(r.RequestID)
 }
+
+var sha256RE = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // enclaveResponse is the enclave's answer (§11.5).
 type enclaveResponse struct {
@@ -114,8 +124,18 @@ func (p *Parent) handleMessage(ctx context.Context, m QueueMessage) {
 		log.Warn("enclave gone; message left for redelivery")
 		return
 	}
+	// §11.5 (0.10.0): an enroll or unlock names its manifest by hash; the
+	// enclave gets that document with the message (none if the bucket
+	// has no such object: the enclave then answers "manifest").
+	var doc []byte
+	if r.ManifestSHA256 != "" {
+		doc = p.manifestDoc(ctx, r.ManifestSHA256)
+		if doc == nil {
+			log.Warn("no manifest document for the request's hash", "manifest_sha256", r.ManifestSHA256)
+		}
+	}
 	cctx, cancel := context.WithTimeout(ctx, p.cfg.RequestTimeout)
-	rep, err := s.conn.Call(cctx, hostproto.KindQueue, m.Body)
+	rep, err := s.conn.Call(cctx, hostproto.KindQueue, m.Body, doc)
 	cancel()
 	if err != nil || len(rep) != 2 || string(rep[0]) != hostproto.StatusOK {
 		// Not processed (or the enclave failed mid-way): redelivery hits
@@ -160,6 +180,54 @@ func (p *Parent) handleMessage(ctx context.Context, m QueueMessage) {
 	p.mu.Unlock()
 	log.Info("request answered", "slot", slot.Status, "code", slot.Code)
 	p.deleteMsg(ctx, m)
+}
+
+// Manifest documents (0.10.0): the vault data bucket holds every served
+// manifest as manifests/<sha256>.json, written by the publish step before
+// the site serves it, never changed. The parent reads them on demand and
+// keeps a few by hash. It checks only the size and that the document's
+// manifest bytes hash to the name (so a corrupt object is not cached);
+// the enclave verifies everything else.
+const (
+	maxManifestDoc    = 90112
+	manifestCacheSize = 16
+)
+
+func (p *Parent) manifestDoc(ctx context.Context, sha string) []byte {
+	p.mu.Lock()
+	if d, ok := p.manifests[sha]; ok {
+		p.mu.Unlock()
+		return d
+	}
+	p.mu.Unlock()
+	b, _, err := p.cfg.Objects.Get(ctx, "manifests/"+sha+".json")
+	if err != nil || len(b) == 0 || len(b) > maxManifestDoc || !docHashes(b, sha) {
+		return nil
+	}
+	p.mu.Lock()
+	if p.manifests == nil || len(p.manifests) >= manifestCacheSize {
+		p.manifests = map[string][]byte{}
+	}
+	p.manifests[sha] = b
+	p.mu.Unlock()
+	return b
+}
+
+// docHashes reports whether a served document's manifest bytes hash to
+// sha (hex).
+func docHashes(doc []byte, sha string) bool {
+	var d struct {
+		Manifest string `json:"manifest"`
+	}
+	if json.Unmarshal(doc, &d) != nil {
+		return false
+	}
+	mb, err := base64.StdEncoding.DecodeString(d.Manifest)
+	if err != nil {
+		return false
+	}
+	h := sha256.Sum256(mb)
+	return hex.EncodeToString(h[:]) == sha
 }
 
 func (p *Parent) writeSlot(ctx context.Context, requestID string, s Slot) {

@@ -143,18 +143,23 @@ func (in *Instance) emit(ev vault.LifecycleEvent) {
 	}
 }
 
-// ProcessRaw handles one raw queue message and returns the raw response.
-// A message that does not parse gets no response (nil).
-func (in *Instance) ProcessRaw(ctx context.Context, b []byte) []byte {
+// ProcessRaw handles one raw queue message, with the manifest document
+// the parent supplied for it (enroll and unlock, 0.10.0; may be empty),
+// and returns the raw response. A message that does not parse gets no
+// response (nil).
+func (in *Instance) ProcessRaw(ctx context.Context, b, manifestDoc []byte) []byte {
 	q, err := ParseQueueMessage(b)
 	if err != nil {
 		return nil
 	}
-	return in.Process(ctx, q).Marshal()
+	return in.Process(ctx, q, manifestDoc).Marshal()
 }
 
-// Process handles one queue message (§11.5).
-func (in *Instance) Process(ctx context.Context, q *QueueMessage) *Response {
+// Process handles one queue message (§11.5). manifestDoc is the served
+// manifest the parent supplied for an enroll or unlock (host input,
+// verified in the vault against the sealed request's hash); a document
+// over the size limit is dropped.
+func (in *Instance) Process(ctx context.Context, q *QueueMessage, manifestDoc []byte) *Response {
 	in.reqMu.Lock()
 	defer in.reqMu.Unlock()
 	resp := &Response{RequestID: q.RequestID, Status: StatusDone}
@@ -194,6 +199,9 @@ func (in *Instance) Process(ctx context.Context, q *QueueMessage) *Response {
 			return resp
 		}
 		j := &Job{Op: q.Op, VaultID: q.VaultID, UserGUID: q.UserGUID, RequestID: q.RequestID, ETKKid: q.ETKKid, Inner: inner}
+		if (q.Op == OpEnroll || q.Op == OpUnlock) && len(manifestDoc) <= manifest.MaxServed {
+			j.Manifest = manifestDoc
+		}
 		res, err := in.host.Open(ctx, j)
 		// The decrypted request (with the PIN) is wiped as soon as the
 		// vault has it (§12.4).

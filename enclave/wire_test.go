@@ -14,13 +14,14 @@ import (
 func sampleQueue() *QueueMessage {
 	return &QueueMessage{Op: OpUnlock, VaultID: "0123456789abcdef0123456789abcdef", UserGUID: "user-1",
 		RequestID: "01JB2Z6V9K3M4N5P6Q7R8S9T21", ETKKid: suite.Kid{1, 2, 3, 4, 5, 6, 7, 8},
-		Envelope: bytes.Repeat([]byte{1}, altchan.RequestEnvelopeSize), EnqueuedAt: time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)}
+		Envelope: bytes.Repeat([]byte{1}, altchan.RequestEnvelopeSize), EnqueuedAt: time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC),
+		ManifestSHA256: strings.Repeat("ab", 32)}
 }
 
 func TestQueueMessage(t *testing.T) {
 	b := sampleQueue().Marshal()
 	q, err := ParseQueueMessage(b)
-	if err != nil || q.Op != OpUnlock || len(q.Envelope) != altchan.RequestEnvelopeSize {
+	if err != nil || q.Op != OpUnlock || len(q.Envelope) != altchan.RequestEnvelopeSize || q.ManifestSHA256 != strings.Repeat("ab", 32) {
 		t.Fatalf("%v", err)
 	}
 	lock := &QueueMessage{Op: OpLock, VaultID: "v", UserGUID: "u", RequestID: "01JB2Z6V9K3M4N5P6Q7R8S9T21", EnqueuedAt: time.Now()}
@@ -40,10 +41,18 @@ func TestQueueMessage(t *testing.T) {
 		"duplicate":      strings.Replace(string(b), `"op":"unlock",`, `"op":"unlock","op":"unlock",`, 1),
 		"v2":             strings.Replace(string(b), `"v":1`, `"v":2`, 1),
 		"envelope short": strings.Replace(string(b), `"envelope":"AQEB`, `"envelope":"`, 1),
+		// 0.10.0: enroll and unlock name their manifest by hash.
+		"no manifest_sha256":    strings.Replace(string(b), `"manifest_sha256"`, `"manifest_sha256x"`, 1),
+		"upper manifest_sha256": strings.Replace(string(b), strings.Repeat("ab", 32), strings.Repeat("AB", 32), 1),
+		"short manifest_sha256": strings.Replace(string(b), strings.Repeat("ab", 32), strings.Repeat("ab", 31), 1),
 	} {
 		if _, err := ParseQueueMessage([]byte(s)); err == nil {
 			t.Errorf("%s accepted", name)
 		}
+	}
+	hashLock := strings.Replace(string(lock.Marshal()), `"enqueued_at"`, `"manifest_sha256":"`+strings.Repeat("ab", 32)+`","enqueued_at"`, 1)
+	if _, err := ParseQueueMessage([]byte(hashLock)); err == nil {
+		t.Error("lock with a manifest_sha256 accepted")
 	}
 	envLock := strings.Replace(string(lock.Marshal()), `"enqueued_at"`, `"envelope":"AAAA","enqueued_at"`, 1)
 	if _, err := ParseQueueMessage([]byte(envLock)); err == nil {

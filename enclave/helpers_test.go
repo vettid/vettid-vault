@@ -118,8 +118,8 @@ func (f *fx) enroll(a *app, pin string) *altchan.EnrollResult {
 func (f *fx) enrollAs(a *app, pin, vid string) *altchan.EnrollResult {
 	f.t.Helper()
 	e, in := f.enclaveFor(a, "", true)
-	served, _, _ := a.dev.VerifyManifest(f.w.Served(), f.trust)
-	req, err := a.dev.BuildEnroll(a.guid, pin, e, served, a.att)
+	_, m, _ := a.dev.VerifyManifest(f.w.Served(), f.trust)
+	req, err := a.dev.BuildEnroll(a.guid, pin, e, m, a.att)
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -163,11 +163,11 @@ func (f *fx) unlock(a *app, pin string, o client.UnlockOptions, release string) 
 	if f.served != nil {
 		doc, f.served = f.served, nil
 	}
-	served, m, err := a.dev.VerifyManifest(doc, f.trust)
+	_, m, err := a.dev.VerifyManifest(doc, f.trust)
 	if err != nil {
 		return nil, err
 	}
-	req, err := a.dev.BuildUnlock(a.guid, pin, e, served, m, a.att, o)
+	req, err := a.dev.BuildUnlock(a.guid, pin, e, m, a.att, o)
 	if err != nil {
 		return nil, err
 	}

@@ -7,6 +7,7 @@ import (
 	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/altchan"
 	"github.com/vettid/vettid-vault/vms/envelope"
+	"github.com/vettid/vettid-vault/vms/manifest"
 	"github.com/vettid/vettid-vault/vms/suite"
 )
 
@@ -46,6 +47,11 @@ type QueueMessage struct {
 	EnqueuedAt time.Time
 	// BrowserKey is the member's browser P-256 key (op recovery).
 	BrowserKey []byte
+	// ManifestSHA256 names the manifest the request was built with (ops
+	// enroll and unlock, 0.10.0): the parent supplies that document from
+	// manifests/<sha256>.json. A routing value only: the enclave checks
+	// the document against the hash inside the sealed request.
+	ManifestSHA256 string
 }
 
 func validID(s string) bool {
@@ -129,6 +135,11 @@ func ParseQueueMessage(b []byte) (*QueueMessage, error) {
 			return nil, ErrMalformed
 		}
 	}
+	ms, msOK, err := o.OptString("manifest_sha256")
+	if err != nil || msOK != (q.Op == OpEnroll || q.Op == OpUnlock) || msOK && !manifest.ValidSHA256Hex(ms) {
+		return nil, ErrMalformed
+	}
+	q.ManifestSHA256 = ms
 	switch q.Op {
 	case OpEnroll, OpUnlock, OpRecoveryRegister:
 		if !envOK || !kidOK {
@@ -153,6 +164,9 @@ func (q *QueueMessage) Marshal() []byte {
 		String("user_guid", q.UserGUID).String("request_id", q.RequestID)
 	if hasEnvelope(q.Op) { // absent for lock, delete, recovery and its cancel (§11.5)
 		b.String("etk_kid", q.ETKKid.String()).Base64("envelope", q.Envelope)
+	}
+	if q.Op == OpEnroll || q.Op == OpUnlock {
+		b.String("manifest_sha256", q.ManifestSHA256)
 	}
 	if q.Op == OpRecovery {
 		b.Base64("browser_key", q.BrowserKey)

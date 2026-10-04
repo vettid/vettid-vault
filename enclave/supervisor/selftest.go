@@ -213,6 +213,13 @@ func (s *Supervisor) selftestKeyPolicy(ctx context.Context, r *selftest.Report, 
 	m, _ := s.cfg.NSM.Measurements()
 	in := keypolicy.Input{KeyARN: req.KeyARN, Account: req.Account, Region: req.Region, Manifest: selftestManifest(m, req.KeyARN),
 		Target: 1, DescribeKey: desc, GetKeyPolicy: pol, ListGrants: gr}
+	// The image's pinned retirement role and window (0.10.0), if it pins
+	// them for the test key's account.
+	if s.cfg.Enclave != nil {
+		if c := s.cfg.Enclave("selftest"); c.RetirementPrincipal != "" && c.SealAccount == req.Account {
+			in.RetirementPrincipal, in.RetirementWindowDays = c.RetirementPrincipal, c.RetirementWindowDays
+		}
+	}
 	_, err := keypolicy.Check(in)
 	var ce *keypolicy.CheckError
 	if errors.As(err, &ce) {

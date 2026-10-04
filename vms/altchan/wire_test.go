@@ -8,13 +8,11 @@ import (
 	"time"
 
 	"github.com/vettid/vettid-vault/internal/strictjson"
-	"github.com/vettid/vettid-vault/vms/manifest"
 	"github.com/vettid/vettid-vault/vms/suite"
 )
 
-func testServed() *manifest.Served {
-	return &manifest.Served{Manifest: []byte(`{"v":1}`), Sig: bytes.Repeat([]byte{1}, 64), KeyID: "1edbb48b6669decd"}
-}
+// testManifestSHA256 is hex(SHA-256("{}")).
+const testManifestSHA256 = "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
 
 func testKEM(t testing.TB) *suite.PrivateKey {
 	k, err := suite.NewPrivateKey(bytes.Repeat([]byte{5}, 32))
@@ -29,13 +27,13 @@ func sampleEnroll(t testing.TB) *EnrollRequest {
 		PIN: "123456", IK: bytes.Repeat([]byte{1}, 32), KEM: testKEM(t).Public(),
 		Relay:     RelayAddr{URL: "https://relay.example", Mailbox: "mb", PK: bytes.Repeat([]byte{2}, 32)},
 		OpenToken: "v4.public.x", Name: "phone",
-		Attest: &DeviceAttest{Platform: PlatformIOS, KeyID: []byte{1}, Attestation: []byte{2}}, Manifest: testServed()}
+		Attest: &DeviceAttest{Platform: PlatformIOS, KeyID: []byte{1}, Attestation: []byte{2}}, ManifestSHA256: testManifestSHA256, ManifestSerial: 7}
 }
 
 func sampleUnlock() *UnlockRequest {
 	return &UnlockRequest{UserGUID: "user-1", VaultID: "vault-1", RequestID: "01JB2Z6V9K3M4N5P6Q7R8S9T21",
 		DeviceIK: bytes.Repeat([]byte{1}, 32), PIN: "123456", MinStateSeq: 3, MinHeaderSeq: 4, Token: "v4.public.y",
-		Assertion: &DeviceAssertion{Platform: PlatformAndroid, Sig: []byte{3}}, Manifest: testServed(),
+		Assertion: &DeviceAssertion{Platform: PlatformAndroid, Sig: []byte{3}}, ManifestSHA256: testManifestSHA256, ManifestSerial: 7,
 		Update: &ReleaseUpdate{To: strings.Repeat("cd", 48), ToRelease: 4, Approval: &DeviceAssertion{Platform: PlatformAndroid, Sig: []byte{4}}},
 		Sig:    bytes.Repeat([]byte{7}, ed25519.SignatureSize)}
 }
@@ -71,6 +69,17 @@ func TestRequestRoundTrip(t *testing.T) {
 		},
 		"no assertion": func(s string) string { return strings.Replace(s, `"device_assertion"`, `"device_assertionx"`, 1) },
 		"dup":          func(s string) string { return strings.Replace(s, `"pin":"123456"`, `"pin":"123456","pin":"123456"`, 1) },
+		"no manifest_sha256": func(s string) string {
+			return strings.Replace(s, `"manifest_sha256"`, `"manifest_sha256x"`, 1)
+		},
+		"upper manifest_sha256": func(s string) string {
+			return strings.Replace(s, testManifestSHA256, strings.ToUpper(testManifestSHA256), 1)
+		},
+		"manifest_serial 0":  func(s string) string { return strings.Replace(s, `"manifest_serial":7`, `"manifest_serial":0`, 1) },
+		"no manifest_serial": func(s string) string { return strings.Replace(s, `"manifest_serial":7`, `"manifest_serialx":7`, 1) },
+		"old manifest document": func(s string) string {
+			return strings.Replace(s, `"manifest_sha256":"`+testManifestSHA256+`","manifest_serial":7`, `"manifest":{"manifest":"e30=","sig":"`+strings.Repeat("A", 86)+`==","key_id":"1edbb48b6669decd"}`, 1)
+		},
 	} {
 		o, err := strictjson.ParseObject([]byte(mut(string(b))))
 		if err != nil {

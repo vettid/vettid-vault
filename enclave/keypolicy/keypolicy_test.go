@@ -19,6 +19,8 @@ const (
 	arn3   = "arn:aws:kms:us-east-1:111122223333:key/0000abcd-12ab-34cd-56ef-1234567890ab"
 	arn5   = "arn:aws:kms:us-east-1:111122223333:key/5555abcd-12ab-34cd-56ef-1234567890ab"
 	host   = "arn:aws:iam::111122223333:role/vettid-enclave-host"
+	retire = "arn:aws:iam::111122223333:role/vettid-org-vault-key-retirement"
+	window = 30
 )
 
 var (
@@ -41,7 +43,9 @@ func testManifest(t testing.TB) *manifest.Manifest {
 	return m
 }
 
-// The §11.10.7 example policy (with real PCR0 values substituted).
+// The §11.10.7 example policy (0.10.0, with real PCR0 values
+// substituted): the attestation statements, the read-only statement for
+// the host and retirement roles, and the two retirement statements.
 func examplePolicy() string {
 	return `{
   "Version": "2012-10-17",
@@ -58,11 +62,37 @@ func examplePolicy() string {
       "Condition": {"StringEqualsIgnoreCase": {"kms:RecipientAttestation:ImageSha384": ["` + pcr0r3 + `", "` + pcr0r4 + `"]},
                     "StringEquals": {"kms:CallerAccount": "111122223333"}} },
     { "Sid": "EnclaveVerifiesThisPolicy", "Effect": "Allow",
-      "Principal": {"AWS": "` + host + `"},
-      "Action": ["kms:DescribeKey", "kms:GetKeyPolicy", "kms:ListGrants"], "Resource": "*" }
+      "Principal": {"AWS": ["` + host + `", "` + retire + `"]},
+      "Action": ["kms:DescribeKey", "kms:GetKeyPolicy", "kms:ListGrants"], "Resource": "*" },
+    { "Sid": "RetireAfterNotice", "Effect": "Allow",
+      "Principal": {"AWS": "` + retire + `"},
+      "Action": "kms:ScheduleKeyDeletion", "Resource": "*",
+      "Condition": {"NumericEquals": {"kms:ScheduleKeyDeletionPendingWindowInDays": "30"},
+                    "StringEquals": {"kms:CallerAccount": "111122223333"}} },
+    { "Sid": "RescueBeforeDeletion", "Effect": "Allow",
+      "Principal": {"AWS": "` + retire + `"},
+      "Action": ["kms:CancelKeyDeletion", "kms:EnableKey"], "Resource": "*",
+      "Condition": {"StringEquals": {"kms:CallerAccount": "111122223333"}} }
   ]
 }`
 }
+
+// The read-only statement's principal and first action, for variants.
+const roStmt = `"Principal": {"AWS": ["` + host + `", "` + retire + `"]},
+      "Action": ["kms:DescribeKey"`
+
+// The retirement statements, for variants.
+const (
+	schedStmt = `"Principal": {"AWS": "` + retire + `"},
+      "Action": "kms:ScheduleKeyDeletion"`
+	windowCond = `{"NumericEquals": {"kms:ScheduleKeyDeletionPendingWindowInDays": "30"},`
+	rescueStmt = `"Principal": {"AWS": "` + retire + `"},
+      "Action": ["kms:CancelKeyDeletion", "kms:EnableKey"]`
+	rescueCond = `"Action": ["kms:CancelKeyDeletion", "kms:EnableKey"], "Resource": "*",
+      "Condition": {"StringEquals": {"kms:CallerAccount": "111122223333"}} }`
+	decryptPrin = `"Principal": {"AWS": "` + host + `"},
+      "Action": "kms:Decrypt"`
+)
 
 func describe(arn string) string {
 	return `{"KeyMetadata":{"AWSAccountId":"111122223333","Arn":"` + arn + `","CreationDate":1.7593344E9,` +
@@ -80,6 +110,7 @@ const noGrants = `{"Grants":[],"Truncated":false}`
 
 func input(t testing.TB, policy, desc, grants string) Input {
 	return Input{KeyARN: arn4, Account: acct, Region: region, Manifest: testManifest(t), Target: 4,
+		RetirementPrincipal: retire, RetirementWindowDays: window,
 		DescribeKey: []byte(desc), GetKeyPolicy: []byte(policyResp(policy)), ListGrants: []byte(grants)}
 }
 
@@ -158,11 +189,9 @@ func TestMustFailVariants(t *testing.T) {
 		{name: "other account on GenerateDataKey", policy: repl(`"Principal": {"AWS": "`+host+`"},
       "Action": "kms:GenerateDataKey"`, `"Principal": {"AWS": "arn:aws:iam::444455556666:role/x"},
       "Action": "kms:GenerateDataKey"`), want: ErrPrincipal},
-		{name: "Service principal", policy: repl(`"Principal": {"AWS": "`+host+`"},
-      "Action": ["kms:DescribeKey"`, `"Principal": {"Service": "ec2.amazonaws.com"},
+		{name: "Service principal", policy: repl(roStmt, `"Principal": {"Service": "ec2.amazonaws.com"},
       "Action": ["kms:DescribeKey"`), want: ErrPrincipal},
-		{name: "Principal * on read-only", policy: repl(`"Principal": {"AWS": "`+host+`"},
-      "Action": ["kms:DescribeKey"`, `"Principal": "*",
+		{name: "Principal * on read-only", policy: repl(roStmt, `"Principal": "*",
       "Action": ["kms:DescribeKey"`), want: ErrPrincipal},
 		{name: "Decrypt without CallerAccount", policy: repl(pcr0r4+`"},
                     "StringEquals": {"kms:CallerAccount": "111122223333"}} },
@@ -241,14 +270,11 @@ func TestMoreRefusals(t *testing.T) {
     { "Sid": "SealFrom`, `"kms:CallerAccount": "111122223333", "kms:RecipientAttestation:PCR9": "`+pcr0r4+`"}} },
     { "Sid": "SealFrom`), want: ErrCondition},
 		{name: "attestation value not hex", policy: repl(`"kms:RecipientAttestation:ImageSha384": "`+pcr0r4+`"`, `"kms:RecipientAttestation:ImageSha384": "`+pcr0r4[:94]+`zz"`), want: ErrCondition},
-		{name: "account id principal", policy: repl(`"Principal": {"AWS": "`+host+`"},
-      "Action": ["kms:DescribeKey"`, `"Principal": {"AWS": "111122223333"},
+		{name: "account id principal", policy: repl(roStmt, `"Principal": {"AWS": "111122223333"},
       "Action": ["kms:DescribeKey"`), want: ErrPrincipal},
-		{name: "user principal", policy: repl(`"Principal": {"AWS": "`+host+`"},
-      "Action": ["kms:DescribeKey"`, `"Principal": {"AWS": "arn:aws:iam::111122223333:user/alice"},
+		{name: "user principal", policy: repl(roStmt, `"Principal": {"AWS": "arn:aws:iam::111122223333:user/alice"},
       "Action": ["kms:DescribeKey"`), want: ErrPrincipal},
-		{name: "two principal kinds", policy: repl(`"Principal": {"AWS": "`+host+`"},
-      "Action": ["kms:DescribeKey"`, `"Principal": {"AWS": "`+host+`", "Service": "kms.amazonaws.com"},
+		{name: "two principal kinds", policy: repl(roStmt, `"Principal": {"AWS": "`+host+`", "Service": "kms.amazonaws.com"},
       "Action": ["kms:DescribeKey"`), want: ErrPrincipal},
 		{name: "foreign PrincipalArn condition", policy: repl(`"kms:CallerAccount": "111122223333"}} },
     { "Sid": "SealFrom`, `"kms:CallerAccount": "111122223333"}, "ArnEquals": {"aws:PrincipalArn": "arn:aws:iam::444455556666:role/x"}} },
@@ -279,6 +305,141 @@ func TestMoreRefusals(t *testing.T) {
 	}
 }
 
+// The retirement delta (0.10.0, VAULT-RELEASES §4.1): every must-fail
+// variant of the spec's table plus further refusals, each with its check.
+func TestRetirementMustFailVariants(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		policy func(string) string
+		want   error
+	}{
+		{name: "ScheduleKeyDeletion without the window condition", policy: repl(windowCond, `{`), want: ErrCondition},
+		{name: "NumericGreaterThanOrEquals window", policy: repl(windowCond, `{"NumericGreaterThanOrEquals": {"kms:ScheduleKeyDeletionPendingWindowInDays": "30"},`), want: ErrCondition},
+		{name: "NumericLessThanEquals window", policy: repl(windowCond, `{"NumericLessThanEquals": {"kms:ScheduleKeyDeletionPendingWindowInDays": "30"},`), want: ErrCondition},
+		{name: "NumericEqualsIfExists window", policy: repl(windowCond, `{"NumericEqualsIfExists": {"kms:ScheduleKeyDeletionPendingWindowInDays": "30"},`), want: ErrCondition},
+		{name: "window 7 instead of 30", policy: repl(windowCond, `{"NumericEquals": {"kms:ScheduleKeyDeletionPendingWindowInDays": "7"},`), want: ErrCondition},
+		{name: "window as an array", policy: repl(windowCond, `{"NumericEquals": {"kms:ScheduleKeyDeletionPendingWindowInDays": ["30"]},`), want: ErrCondition},
+		{name: "window with two values", policy: repl(windowCond, `{"NumericEquals": {"kms:ScheduleKeyDeletionPendingWindowInDays": ["30", "7"]},`), want: ErrCondition},
+		{name: "window 030", policy: repl(windowCond, `{"NumericEquals": {"kms:ScheduleKeyDeletionPendingWindowInDays": "030"},`), want: ErrCondition},
+		{name: "window 30.0", policy: repl(windowCond, `{"NumericEquals": {"kms:ScheduleKeyDeletionPendingWindowInDays": 30.0},`), want: ErrCondition},
+		{name: "window under StringEquals", policy: repl(windowCond+`
+                    "StringEquals": {"kms:CallerAccount": "111122223333"}} }`, `{"StringEquals": {"kms:ScheduleKeyDeletionPendingWindowInDays": "30", "kms:CallerAccount": "111122223333"}} }`), want: ErrCondition},
+		{name: "NumericEquals on another key", policy: repl(windowCond, `{"NumericEquals": {"kms:ScheduleKeyDeletionPendingWindowInDays": "30", "kms:GrantIsForAWSResource": "1"},`), want: ErrCondition},
+		{name: "ScheduleKeyDeletion for the host role", policy: repl(schedStmt, `"Principal": {"AWS": "`+host+`"},
+      "Action": "kms:ScheduleKeyDeletion"`), want: ErrPrincipal},
+		{name: "ScheduleKeyDeletion for the account root", policy: repl(schedStmt, `"Principal": {"AWS": "arn:aws:iam::111122223333:root"},
+      "Action": "kms:ScheduleKeyDeletion"`), want: ErrPrincipal},
+		{name: "ScheduleKeyDeletion for a second ARN", policy: repl(schedStmt, `"Principal": {"AWS": ["`+retire+`", "`+host+`"]},
+      "Action": "kms:ScheduleKeyDeletion"`), want: ErrPrincipal},
+		{name: "ScheduleKeyDeletion principal as a one-element array", policy: repl(schedStmt, `"Principal": {"AWS": ["`+retire+`"]},
+      "Action": "kms:ScheduleKeyDeletion"`), want: ErrPrincipal},
+		{name: "CancelKeyDeletion for the host role", policy: repl(rescueStmt, `"Principal": {"AWS": "`+host+`"},
+      "Action": ["kms:CancelKeyDeletion", "kms:EnableKey"]`), want: ErrPrincipal},
+		{name: "CancelKeyDeletion for the account root", policy: repl(rescueStmt, `"Principal": {"AWS": "arn:aws:iam::111122223333:root"},
+      "Action": ["kms:CancelKeyDeletion", "kms:EnableKey"]`), want: ErrPrincipal},
+		{name: "CancelKeyDeletion for a second ARN", policy: repl(rescueStmt, `"Principal": {"AWS": ["`+retire+`", "`+host+`"]},
+      "Action": ["kms:CancelKeyDeletion", "kms:EnableKey"]`), want: ErrPrincipal},
+		{name: "retirement statement for another role", policy: repl(rescueStmt, `"Principal": {"AWS": "arn:aws:iam::111122223333:role/someone-else"},
+      "Action": ["kms:CancelKeyDeletion", "kms:EnableKey"]`), want: ErrPrincipal},
+		{name: "retirement statement for another account's role", policy: repl(schedStmt, `"Principal": {"AWS": "arn:aws:iam::444455556666:role/vettid-org-vault-key-retirement"},
+      "Action": "kms:ScheduleKeyDeletion"`), want: ErrPrincipal},
+		{name: "DisableKey for the retirement principal", policy: repl(`"kms:CancelKeyDeletion", "kms:EnableKey"], "Resource"`, `"kms:CancelKeyDeletion", "kms:EnableKey", "kms:DisableKey"], "Resource"`), want: ErrActions},
+		{name: "PutKeyPolicy for the retirement principal", policy: repl(`"kms:CancelKeyDeletion", "kms:EnableKey"], "Resource"`, `"kms:CancelKeyDeletion", "kms:PutKeyPolicy"], "Resource"`), want: ErrActions},
+		{name: "EnableKey in the Decrypt statement", policy: repl(`"Action": "kms:Decrypt"`, `"Action": ["kms:Decrypt", "kms:EnableKey"]`), want: ErrActions},
+		{name: "ScheduleKeyDeletion in the GenerateDataKey statement", policy: repl(`"Action": "kms:GenerateDataKey"`, `"Action": ["kms:GenerateDataKey", "kms:ScheduleKeyDeletion"]`), want: ErrActions},
+		{name: "retirement statement with DescribeKey", policy: repl(`"kms:CancelKeyDeletion", "kms:EnableKey"], "Resource"`, `"kms:CancelKeyDeletion", "kms:EnableKey", "kms:DescribeKey"], "Resource"`), want: ErrActions},
+		{name: "NumericEquals in the Decrypt statement", policy: repl(`"Condition": {"StringEqualsIgnoreCase": {"kms:RecipientAttestation:ImageSha384": "`+pcr0r4+`"},`, `"Condition": {"NumericEquals": {"kms:ScheduleKeyDeletionPendingWindowInDays": "30"}, "StringEqualsIgnoreCase": {"kms:RecipientAttestation:ImageSha384": "`+pcr0r4+`"},`), want: ErrCondition},
+		{name: "NumericEquals in the rescue statement", policy: repl(rescueCond, `"Action": ["kms:CancelKeyDeletion", "kms:EnableKey"], "Resource": "*",
+      "Condition": {"NumericEquals": {"kms:ScheduleKeyDeletionPendingWindowInDays": "30"}, "StringEquals": {"kms:CallerAccount": "111122223333"}} }`), want: ErrCondition},
+		{name: "rescue statement without CallerAccount", policy: repl(rescueCond, `"Action": ["kms:CancelKeyDeletion", "kms:EnableKey"], "Resource": "*" }`), want: ErrPrincipal},
+		{name: "schedule statement without CallerAccount", policy: repl(windowCond+`
+                    "StringEquals": {"kms:CallerAccount": "111122223333"}} }`, `{"NumericEquals": {"kms:ScheduleKeyDeletionPendingWindowInDays": "30"}} }`), want: ErrPrincipal},
+		{name: "retirement statement with another CallerAccount", policy: repl(rescueCond, `"Action": ["kms:CancelKeyDeletion", "kms:EnableKey"], "Resource": "*",
+      "Condition": {"StringEquals": {"kms:CallerAccount": "444455556666"}} }`), want: ErrPrincipal},
+		{name: "retirement principal on the Decrypt statement", policy: repl(decryptPrin, `"Principal": {"AWS": ["`+host+`", "`+retire+`"]},
+      "Action": "kms:Decrypt"`), want: ErrPrincipal},
+		{name: "retirement principal alone on GenerateDataKey", policy: repl(`"Principal": {"AWS": "`+host+`"},
+      "Action": "kms:GenerateDataKey"`, `"Principal": {"AWS": "`+retire+`"},
+      "Action": "kms:GenerateDataKey"`), want: ErrPrincipal},
+		{name: "ScheduleKeyDeletion wildcard", policy: repl(`"Action": "kms:ScheduleKeyDeletion"`, `"Action": "kms:Schedule*"`), want: ErrActions},
+		{name: "case variant of ScheduleKeyDeletion", policy: repl(`"Action": "kms:ScheduleKeyDeletion"`, `"Action": "kms:scheduleKeyDeletion"`), want: ErrActions},
+	} {
+		_, err := Check(input(t, tc.policy(examplePolicy()), describe(arn4), noGrants))
+		if !errors.Is(err, tc.want) {
+			t.Errorf("%s: got %v, want %v", tc.name, err, tc.want)
+		}
+	}
+}
+
+// What still passes under the delta, and how the pinned constants act.
+func TestRetirementPinned(t *testing.T) {
+	// The window as a JSON number; the two retirement statements merged;
+	// the retirement role absent from the read-only statement; a policy
+	// without retirement statements at all.
+	for name, f := range map[string]func(string) string{
+		"window as a number": repl(windowCond, `{"NumericEquals": {"kms:ScheduleKeyDeletionPendingWindowInDays": 30},`),
+		"no retirement role among readers": repl(roStmt, `"Principal": {"AWS": "`+host+`"},
+      "Action": ["kms:DescribeKey"`),
+		"no retirement statements": func(p string) string {
+			return p[:strings.Index(p, `,
+    { "Sid": "RetireAfterNotice"`)] + "\n  ]\n}"
+		},
+	} {
+		pol := f(examplePolicy())
+		if _, err := Check(input(t, pol, describe(arn4), noGrants)); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	// Staging: window 7 pinned, 7 in the policy.
+	in := input(t, repl(windowCond, `{"NumericEquals": {"kms:ScheduleKeyDeletionPendingWindowInDays": "7"},`)(examplePolicy()), describe(arn4), noGrants)
+	in.RetirementWindowDays = 7
+	if _, err := Check(in); err != nil {
+		t.Errorf("staging window: %v", err)
+	}
+	// Without a pinned retirement principal the retirement actions
+	// disqualify the key (as before 0.10.0).
+	in = input(t, examplePolicy(), describe(arn4), noGrants)
+	in.RetirementPrincipal, in.RetirementWindowDays = "", 0
+	if _, err := Check(in); !errors.Is(err, ErrActions) {
+		t.Errorf("unpinned: %v", err)
+	}
+	// Invalid pinned constants refuse every key.
+	for name, f := range map[string]func(*Input){
+		"root as retirement principal": func(i *Input) { i.RetirementPrincipal = "arn:aws:iam::111122223333:root" },
+		"other account":                func(i *Input) { i.RetirementPrincipal = "arn:aws:iam::444455556666:role/r" },
+		"user":                         func(i *Input) { i.RetirementPrincipal = "arn:aws:iam::111122223333:user/r" },
+		"window 6":                     func(i *Input) { i.RetirementWindowDays = 6 },
+		"window 31":                    func(i *Input) { i.RetirementWindowDays = 31 },
+		"window without principal":     func(i *Input) { i.RetirementPrincipal = "" },
+	} {
+		in := input(t, examplePolicy(), describe(arn4), noGrants)
+		f(&in)
+		if _, err := Check(in); !errors.Is(err, ErrIdentity) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	// Check 2 is unchanged: a key pending deletion, or disabled after a
+	// cancellation, is refused for new seals.
+	for _, st := range []string{"PendingDeletion", "Disabled"} {
+		if _, err := Check(input(t, examplePolicy(), repl(`"KeyState":"Enabled"`, `"KeyState":"`+st+`"`)(describe(arn4)), noGrants)); !errors.Is(err, ErrMetadata) {
+			t.Errorf("%s: %v", st, err)
+		}
+	}
+}
+
+func TestWindowValue(t *testing.T) {
+	for raw, want := range map[string]string{`"30"`: "30", `30`: "30", `"7"`: "7", `7`: "7"} {
+		if v, ok := windowValue(json.RawMessage(raw)); !ok || v != want {
+			t.Errorf("%s: %q %v", raw, v, ok)
+		}
+	}
+	for _, raw := range []string{``, `""`, `"030"`, `030`, `30.0`, `3e1`, `-30`, `"+30"`, `["30"]`, `{}`, `true`, `"1000"`, `" 30"`, `null`} {
+		if _, ok := windowValue(json.RawMessage(raw)); ok {
+			t.Errorf("%s accepted", raw)
+		}
+	}
+}
+
 func TestIAMARN(t *testing.T) {
 	for s, ok := range map[string]bool{
 		"arn:aws:iam::111122223333:root":              true,
@@ -304,6 +465,7 @@ func FuzzCheckPolicy(f *testing.F) {
 	f.Add([]byte(policyResp(examplePolicy())), []byte(describe(arn4)), []byte(noGrants))
 	f.Fuzz(func(t *testing.T, pol, desc, grants []byte) {
 		_, _ = Check(Input{KeyARN: arn4, Account: acct, Region: region, Manifest: m, Target: 4,
+			RetirementPrincipal: retire, RetirementWindowDays: window,
 			DescribeKey: desc, GetKeyPolicy: pol, ListGrants: grants})
 	})
 }
@@ -311,9 +473,11 @@ func FuzzCheckPolicy(f *testing.F) {
 func FuzzPolicyDocument(f *testing.F) {
 	m := testManifest(f)
 	f.Add(examplePolicy())
+	f.Add(strings.Replace(examplePolicy(), `"30"}`, `30}`, 1))
 	f.Add(strings.Replace(examplePolicy(), `"vettid-release-4"`, "\"vettid-release-\xff\"", 1)) // invalid UTF-8 in Id
 	f.Fuzz(func(t *testing.T, doc string) {
 		r, err := Check(Input{KeyARN: arn4, Account: acct, Region: region, Manifest: m, Target: 4,
+			RetirementPrincipal: retire, RetirementWindowDays: window,
 			DescribeKey: []byte(describe(arn4)), GetKeyPolicy: []byte(policyResp(doc)), ListGrants: []byte(noGrants)})
 		// The hash covers the policy string as KMS returned it: the JSON
 		// encoding above replaces invalid UTF-8, so compare with the decoded

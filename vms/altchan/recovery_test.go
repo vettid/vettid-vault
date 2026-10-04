@@ -65,7 +65,7 @@ func TestRecoveryQR(t *testing.T) {
 
 func TestUnlockSigningStringCancel(t *testing.T) {
 	f := UnlockFields{UserGUID: "user-1", VaultID: "vault-1", RequestID: recID, TS: "2026-10-01T12:00:00.000Z",
-		PIN: "123456", Token: "v4.public.VEVTVA", Manifest: []byte("{}")}
+		PIN: "123456", Token: "v4.public.VEVTVA", ManifestSHA256: "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"}
 	plain, _ := UnlockSigningString(f)
 	f.CancelRecovery = true
 	s, _ := UnlockSigningString(f)

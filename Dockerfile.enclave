@@ -18,6 +18,12 @@ ARG GO_VERSION=1.26.8
 ARG GO_SHA256_AMD64=d0f743b33e8d8945e6b1f432edd15785c70507121d6e2a723b21285eddf8b57b
 ARG GO_SHA256_ARM64=211ffced9dcb9633a55eac6364816ec0ddd951389a740e88fa8b3337971bdda0
 ARG SOURCE_DATE_EPOCH=0
+# The release channel (VAULT-MESSAGING §11.10.8): prod or staging embeds
+# that channel's committed constants (enclave/releasecfg/<channel>.json,
+# build tag vettid_channel_<channel>) after the release gate refuses any
+# placeholder; none (the default) embeds nothing and the image refuses
+# every enrollment and unlock (the hardware smoke test).
+ARG CHANNEL=none
 # The EIF runs on the build host's architecture (Graviton: arm64).
 ARG TARGETARCH
 
@@ -46,7 +52,13 @@ COPY go.mod go.sum ./
 RUN go mod download && go mod verify
 COPY . .
 RUN set -eu; \
-    go build -trimpath -buildvcs=false -ldflags='-s -w -buildid=' -o /out/vault-enclave ./cmd/vault-enclave; \
+    tags=""; \
+    case "$CHANNEL" in \
+      none) ;; \
+      prod|staging) go run ./cmd/releasecfg check "$CHANNEL"; tags="-tags=vettid_channel_$CHANNEL" ;; \
+      *) echo "unknown CHANNEL $CHANNEL (prod, staging or none)" >&2; exit 1 ;; \
+    esac; \
+    go build -trimpath -buildvcs=false $tags -ldflags='-s -w -buildid=' -o /out/vault-enclave ./cmd/vault-enclave; \
     touch -h -d "@${SOURCE_DATE_EPOCH}" /out/vault-enclave /out; \
     sha256sum /out/vault-enclave
 

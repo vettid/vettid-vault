@@ -209,8 +209,18 @@ func (hs *hostStack) newApp(guid string, seed byte) *hostApp {
 func (hs *hostStack) post(hi *hostInstance, op, vaultID, guid string, r *client.Request) parenttest.SlotRow {
 	hs.t.Helper()
 	hs.tables.PutSlot(r.RequestID, hi.id)
-	b, _ := json.Marshal(map[string]any{"v": 1, "op": op, "vault_id": vaultID, "user_guid": guid, "request_id": r.RequestID,
-		"etk_kid": r.ETKKid, "envelope": r.Envelope, "enqueued_at": time.Now().UTC().Format(time.RFC3339Nano)})
+	m := map[string]any{"v": 1, "op": op, "vault_id": vaultID, "user_guid": guid, "request_id": r.RequestID,
+		"etk_kid": r.ETKKid, "envelope": r.Envelope, "enqueued_at": time.Now().UTC().Format(time.RFC3339Nano)}
+	if op == "enroll" || op == "unlock" {
+		// 0.10.0: the request names its manifest by hash; the publish
+		// step has put the document in the bucket, where the parent
+		// reads it.
+		m["manifest_sha256"] = r.ManifestSHA256
+		if doc := hs.w.ManifestDoc(r.ManifestSHA256); doc != nil {
+			_, _ = hs.objs.Put(context.Background(), "manifests/"+r.ManifestSHA256+".json", doc, "")
+		}
+	}
+	b, _ := json.Marshal(m)
 	if !hs.queues.Send(hi.queue, string(b)) {
 		hs.t.Fatal("no queue")
 	}
@@ -253,11 +263,11 @@ func (a *hostApp) enroll(hi *hostInstance, vaultID string) {
 	hs.t.Helper()
 	hs.tables.PutVault(parenttest.VaultRow{VaultID: vaultID, UserGUID: a.guid, State: "enrolling"})
 	e, raw := hs.enclaveOf(hi, a.dev, true)
-	served, _, err := a.dev.VerifyManifest(raw, hs.w.Trust())
+	_, m, err := a.dev.VerifyManifest(raw, hs.w.Trust())
 	if err != nil {
 		hs.t.Fatal(err)
 	}
-	req, err := a.dev.BuildEnroll(a.guid, pin, e, served, a.att)
+	req, err := a.dev.BuildEnroll(a.guid, pin, e, m, a.att)
 	if err != nil {
 		hs.t.Fatal(err)
 	}
@@ -285,11 +295,11 @@ func (a *hostApp) unlock(hi *hostInstance) (*client.UnlockOutcome, parenttest.Sl
 	hs := a.hs
 	hs.t.Helper()
 	e, raw := hs.enclaveOf(hi, a.dev, false)
-	served, m, err := a.dev.VerifyManifest(raw, hs.w.Trust())
+	_, m, err := a.dev.VerifyManifest(raw, hs.w.Trust())
 	if err != nil {
 		hs.t.Fatal(err)
 	}
-	req, err := a.dev.BuildUnlock(a.guid, pin, e, served, m, a.att, client.UnlockOptions{})
+	req, err := a.dev.BuildUnlock(a.guid, pin, e, m, a.att, client.UnlockOptions{})
 	if err != nil {
 		hs.t.Fatal(err)
 	}
@@ -391,8 +401,8 @@ func TestHostStack(t *testing.T) {
 		return r.LeaseInstance == ""
 	})
 	waitUntil(t, "re-registered", func() bool { return a.p.Health().OK })
-	served, m, _ := m1.dev.VerifyManifest(raw, hs.w.Trust())
-	req, err := m1.dev.BuildUnlock(m1.guid, pin, e, served, m, m1.att, client.UnlockOptions{})
+	_, m, _ := m1.dev.VerifyManifest(raw, hs.w.Trust())
+	req, err := m1.dev.BuildUnlock(m1.guid, pin, e, m, m1.att, client.UnlockOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

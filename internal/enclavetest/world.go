@@ -50,11 +50,19 @@ type World struct {
 	// Stopped is passed to instances (run loops that end).
 	Stopped  func(vaultID string, err error)
 	RelayURL string
+	// Withhold makes the parent stand-in supply no manifest document;
+	// Substitute, if set, is supplied instead of the named one (a
+	// dishonest or broken host). Set them between requests.
+	Withhold   bool
+	Substitute []byte
 
-	mu        sync.Mutex
-	releases  []ReleaseSpec
-	served    *manifest.Served
-	manifest  *manifest.Manifest
+	mu       sync.Mutex
+	releases []ReleaseSpec
+	served   *manifest.Served
+	manifest *manifest.Manifest
+	// docs are the published documents by manifest_sha256: the vault
+	// data bucket's manifests/<sha256>.json (0.10.0).
+	docs      map[string][]byte
 	serial    uint64
 	instances map[string]*enclave.Instance
 	sealedTo  map[string]string // vault_id -> sealed_release (from lifecycle events)
@@ -69,7 +77,7 @@ func NewWorld(now func() time.Time, relayURL string) *World {
 		now = time.Now
 	}
 	w := &World{Now: now, Store: store.NewMemory(), Key: ManifestKey(), Relays: &MemRelays{}, RelayURL: relayURL,
-		instances: map[string]*enclave.Instance{}, sealedTo: map[string]string{}}
+		instances: map[string]*enclave.Instance{}, sealedTo: map[string]string{}, docs: map[string][]byte{}}
 	w.KMS = NewFakeKMS("world", TestNitroCA().Roots(), now)
 	w.list = EmptyStatusList(now())
 	return w
@@ -130,6 +138,21 @@ func (w *World) Publish() {
 		panic(err)
 	}
 	w.served, w.manifest = s, m
+	w.docs[manifest.SHA256Hex(b)] = s.Marshal()
+}
+
+// ManifestDoc returns the published document with the given
+// manifest_sha256, as the parent reads it from the bucket.
+func (w *World) ManifestDoc(sha256Hex string) []byte {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.Withhold {
+		return nil
+	}
+	if w.Substitute != nil {
+		return w.Substitute
+	}
+	return w.docs[sha256Hex]
 }
 
 // Served returns the served manifest document bytes.
@@ -146,6 +169,7 @@ func (w *World) ServedAt(serial uint64) []byte {
 	defer w.mu.Unlock()
 	b := manifest.Build(serial, w.Now().UTC().Truncate(time.Second), w.manifest.Releases)
 	s, _ := manifest.Sign(w.Key, b)
+	w.docs[manifest.SHA256Hex(b)] = s.Marshal() // it was published once
 	return s.Marshal()
 }
 
@@ -161,7 +185,8 @@ func (w *World) spec(n uint64) (ReleaseSpec, bool) {
 // Config returns an instance configuration for release n.
 func (w *World) Config(n uint64, id string) enclave.Config {
 	return enclave.Config{InstanceID: id, ReleaseNumber: n, ManifestKeys: []*ecdsa.PublicKey{&w.Key.PublicKey},
-		SealAccount: KMSAccount, SealRegion: KMSRegion, DeviceAttest: Policy(), RelayURL: w.RelayURL, KDF: vault.MinKDF}
+		SealAccount: KMSAccount, SealRegion: KMSRegion,
+		RetirementPrincipal: RetirementRole, RetirementWindowDays: RetirementWindow, DeviceAttest: Policy(), RelayURL: w.RelayURL, KDF: vault.MinKDF}
 }
 
 // Start starts an instance of release n (one per release).
@@ -286,7 +311,12 @@ func (w *World) Post(ctx context.Context, in *enclave.Instance, op, vaultID, use
 	}
 	q := &enclave.QueueMessage{Op: op, VaultID: vaultID, UserGUID: userGUID, RequestID: r.RequestID, ETKKid: kid,
 		Envelope: r.Envelope, EnqueuedAt: w.Now()}
-	raw := in.ProcessRaw(ctx, q.Marshal())
+	var doc []byte
+	if op == enclave.OpEnroll || op == enclave.OpUnlock {
+		q.ManifestSHA256 = r.ManifestSHA256
+		doc = w.ManifestDoc(r.ManifestSHA256)
+	}
+	raw := in.ProcessRaw(ctx, q.Marshal(), doc)
 	if raw == nil {
 		return nil, enclave.ErrMalformed
 	}
@@ -297,7 +327,7 @@ func (w *World) Post(ctx context.Context, in *enclave.Instance, op, vaultID, use
 func (w *World) Lock(ctx context.Context, in *enclave.Instance, vaultID, userGUID string) {
 	rid, _ := envelope.NewULID(w.Now())
 	q := &enclave.QueueMessage{Op: enclave.OpLock, VaultID: vaultID, UserGUID: userGUID, RequestID: rid, EnqueuedAt: w.Now()}
-	in.Process(ctx, q)
+	in.Process(ctx, q, nil)
 }
 
 // Close stops every instance.
@@ -341,7 +371,7 @@ func (w *World) Recovery(ctx context.Context, in *enclave.Instance, vaultID, use
 	rid, _ := envelope.NewULID(w.Now())
 	q := &enclave.QueueMessage{Op: enclave.OpRecovery, VaultID: vaultID, UserGUID: userGUID, RequestID: rid, EnqueuedAt: w.Now(),
 		BrowserKey: browserKey}
-	return rid, in.Process(ctx, q)
+	return rid, in.Process(ctx, q, nil)
 }
 
 // RecoveryCancel plays a cancel from the portal or the email link: it ends
@@ -349,5 +379,5 @@ func (w *World) Recovery(ctx context.Context, in *enclave.Instance, vaultID, use
 func (w *World) RecoveryCancel(ctx context.Context, in *enclave.Instance, vaultID, userGUID string) {
 	rid, _ := envelope.NewULID(w.Now())
 	q := &enclave.QueueMessage{Op: enclave.OpRecoveryCancel, VaultID: vaultID, UserGUID: userGUID, RequestID: rid, EnqueuedAt: w.Now()}
-	in.Process(ctx, q)
+	in.Process(ctx, q, nil)
 }

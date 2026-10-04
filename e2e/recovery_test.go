@@ -238,8 +238,8 @@ func TestNoCredentialNoRecovery(t *testing.T) {
 	a := aw.newApp("member-nc", enclavetest.NewAndroidAttester(0x69, enclavetest.AndroidOptions{}))
 	ctx := ctxT(t, 60*time.Second)
 	e, in := aw.enclave(a, "", true)
-	served, _, _ := a.dev.VerifyManifest(aw.w.Served(), aw.trust)
-	req, err := a.dev.BuildEnroll(a.guid, acPIN, e, served, a.att)
+	_, m, _ := a.dev.VerifyManifest(aw.w.Served(), aw.trust)
+	req, err := a.dev.BuildEnroll(a.guid, acPIN, e, m, a.att)
 	if err != nil {
 		t.Fatal(err)
 	}

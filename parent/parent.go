@@ -27,6 +27,8 @@ type Parent struct {
 	running map[string]*lease
 	desc    *descriptor
 	stats   stats
+	// manifests caches manifest documents by manifest_sha256 (0.10.0).
+	manifests map[string][]byte
 
 	events chan func(context.Context)
 }

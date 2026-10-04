@@ -139,7 +139,7 @@ func (pr *proc) open(ctx context.Context, f [][]byte) [][]byte {
 	}
 	pr.opened = true
 	pr.mu.Unlock()
-	if len(f) != 14 || string(f[0]) != vaultipc.Version || !altchan.ValidInstanceID(string(f[1])) {
+	if len(f) != 15 || string(f[0]) != vaultipc.Version || !altchan.ValidInstanceID(string(f[1])) {
 		return hostproto.Strings(hostproto.StatusInvalid)
 	}
 	j, err := enclave.ParseJob(f[5:])

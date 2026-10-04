@@ -162,14 +162,15 @@ type posted struct {
 func (a *MemberAPI) Enroll(ctx context.Context, instanceID string, r *Request) (string, error) {
 	var out posted
 	err := a.do(ctx, http.MethodPost, "/api/vault/enroll", map[string]string{"request_id": r.RequestID, "instance_id": instanceID,
-		"etk_kid": r.ETKKid, "envelope": base64.StdEncoding.EncodeToString(r.Envelope)}, &out)
+		"etk_kid": r.ETKKid, "envelope": base64.StdEncoding.EncodeToString(r.Envelope), "manifest_sha256": r.ManifestSHA256}, &out)
 	return out.VaultID, err
 }
 
 // Unlock posts a sealed vault.unlock.
 func (a *MemberAPI) Unlock(ctx context.Context, vaultID, instanceID string, r *Request) error {
 	return a.do(ctx, http.MethodPost, "/api/vault/unlock", map[string]string{"vault_id": vaultID, "request_id": r.RequestID,
-		"instance_id": instanceID, "etk_kid": r.ETKKid, "envelope": base64.StdEncoding.EncodeToString(r.Envelope)}, nil)
+		"instance_id": instanceID, "etk_kid": r.ETKKid, "envelope": base64.StdEncoding.EncodeToString(r.Envelope),
+		"manifest_sha256": r.ManifestSHA256}, nil)
 }
 
 // Lock posts a lock request (no envelope).
@@ -247,6 +248,16 @@ func retryable(err error, s *Slot) bool {
 	return err == nil && s != nil && (s.Status == "expired" || s.Code == "etk_unknown")
 }
 
+// refetchManifest fetches and verifies the served manifest again.
+func (a *MemberAPI) refetchManifest(ctx context.Context, d *Device, t Trust) (*manifest.Manifest, error) {
+	raw, err := a.Manifest(ctx)
+	if err != nil {
+		return nil, err
+	}
+	_, m, err := d.VerifyManifest(raw, t)
+	return m, err
+}
+
 // maxAttempts bounds re-seals after instance_moved, etk_unknown or expiry.
 const maxAttempts = 4
 
@@ -273,16 +284,17 @@ func (d *Device) EnrollVia(ctx context.Context, api *MemberAPI, userGUID, pin st
 	if err != nil {
 		return "", nil, err
 	}
-	served, m, err := d.VerifyManifest(raw, t)
+	_, m, err := d.VerifyManifest(raw, t)
 	if err != nil {
 		return "", nil, err
 	}
+	refetched := false
 	for attempt := 1; ; attempt++ {
 		info, e, err := api.enclaveFor(ctx, "", m, true, t)
 		if err != nil {
 			return "", nil, err
 		}
-		req, err := d.BuildEnroll(userGUID, pin, e, served, att)
+		req, err := d.BuildEnroll(userGUID, pin, e, m, att)
 		if err != nil {
 			return "", nil, err
 		}
@@ -303,6 +315,15 @@ func (d *Device) EnrollVia(ctx context.Context, api *MemberAPI, userGUID, pin st
 		r, err := d.OpenEnrollResult(slot.Envelope, req.RequestID)
 		if err != nil {
 			return "", nil, err
+		}
+		if !r.OK && r.Code == "manifest" && !refetched {
+			// The host had no document for this manifest (or a stale
+			// one): refetch it and retry once (§11.5, 0.10.0).
+			refetched = true
+			if m, err = api.refetchManifest(ctx, d, t); err != nil {
+				return "", nil, err
+			}
+			continue
 		}
 		return vid, &EnrollOutcome{OK: r.OK, Code: r.Code, InstanceID: info.InstanceID}, nil
 	}
@@ -336,16 +357,17 @@ func (d *Device) UnlockVia(ctx context.Context, api *MemberAPI, userGUID, pin st
 	if err != nil {
 		return nil, err
 	}
-	served, m, err := d.VerifyManifest(raw, t)
+	_, m, err := d.VerifyManifest(raw, t)
 	if err != nil {
 		return nil, err
 	}
+	refetched := false
 	for attempt := 1; ; attempt++ {
 		info, e, err := api.enclaveFor(ctx, release, m, false, t)
 		if err != nil {
 			return nil, err
 		}
-		req, err := d.BuildUnlock(userGUID, pin, e, served, m, att, o)
+		req, err := d.BuildUnlock(userGUID, pin, e, m, att, o)
 		if err != nil {
 			return nil, err
 		}
@@ -366,6 +388,13 @@ func (d *Device) UnlockVia(ctx context.Context, api *MemberAPI, userGUID, pin st
 		r, err := d.OpenUnlockResult(slot.Envelope)
 		if err != nil {
 			return nil, err
+		}
+		if !r.OK && r.Code == "manifest" && !refetched {
+			refetched = true // as in EnrollVia: refetch and retry once
+			if m, err = api.refetchManifest(ctx, d, t); err != nil {
+				return nil, err
+			}
+			continue
 		}
 		out := &UnlockOutcome{OK: r.OK, Code: r.Code, StateSeq: r.StateSeq, HeaderSeq: r.HeaderSeq, ReleaseNumber: r.ReleaseNumber,
 			ReleaseStatus: r.ReleaseStatus, InstanceID: info.InstanceID, ReleaseChanged: req.ReleaseChanged}

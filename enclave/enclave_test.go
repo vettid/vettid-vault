@@ -14,6 +14,7 @@ import (
 	"github.com/vettid/vettid-vault/vms/altchan"
 	"github.com/vettid/vettid-vault/vms/devattest"
 	"github.com/vettid/vettid-vault/vms/envelope"
+	"github.com/vettid/vettid-vault/vms/manifest"
 	"github.com/vettid/vettid-vault/vms/suite"
 )
 
@@ -92,8 +93,8 @@ func TestReplayRefused(t *testing.T) {
 	f.enroll(a, pin)
 	f.lock(a)
 	e, in := f.enclaveFor(a, "", false)
-	served, m, _ := a.dev.VerifyManifest(f.w.Served(), f.trust)
-	req, err := a.dev.BuildUnlock(a.guid, pin, e, served, m, a.att, client.UnlockOptions{})
+	_, m, _ := a.dev.VerifyManifest(f.w.Served(), f.trust)
+	req, err := a.dev.BuildUnlock(a.guid, pin, e, m, a.att, client.UnlockOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +104,7 @@ func TestReplayRefused(t *testing.T) {
 		t.Fatalf("first: %v %+v", err, r)
 	}
 	// The same request again (and to another vault id: redirected).
-	if _, err := a.dev.BuildUnlock(a.guid, pin, e, served, m, a.att, client.UnlockOptions{}); err != nil {
+	if _, err := a.dev.BuildUnlock(a.guid, pin, e, m, a.att, client.UnlockOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	again, _ := f.w.Post(f.ctx, in, enclave.OpUnlock, a.vid, a.guid, req)
@@ -123,15 +124,15 @@ func TestETKLifecycle(t *testing.T) {
 	f.enroll(a, pin)
 	f.lock(a)
 	e, in := f.enclaveFor(a, "", false)
-	served, m, _ := a.dev.VerifyManifest(f.w.Served(), f.trust)
-	req, _ := a.dev.BuildUnlock(a.guid, pin, e, served, m, a.att, client.UnlockOptions{})
+	_, m, _ := a.dev.VerifyManifest(f.w.Served(), f.trust)
+	req, _ := a.dev.BuildUnlock(a.guid, pin, e, m, a.att, client.UnlockOptions{})
 	f.clk.Add(6 * time.Minute)
 	resp, _ := f.w.Post(f.ctx, in, enclave.OpUnlock, a.vid, a.guid, req)
 	if _, err := a.dev.OpenUnlockResult(resp.Envelope); !errors.Is(err, client.ErrResult) {
 		t.Fatal("stale request answered")
 	}
 	// Rotate: the old ETK still works for an hour.
-	req, _ = a.dev.BuildUnlock(a.guid, pin, e, served, m, a.att, client.UnlockOptions{})
+	req, _ = a.dev.BuildUnlock(a.guid, pin, e, m, a.att, client.UnlockOptions{})
 	if err := in.RotateETK(); err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +145,7 @@ func TestETKLifecycle(t *testing.T) {
 	if err := in.Maintain(); err != nil {
 		t.Fatal(err)
 	}
-	req, _ = a.dev.BuildUnlock(a.guid, pin, e, served, m, a.att, client.UnlockOptions{})
+	req, _ = a.dev.BuildUnlock(a.guid, pin, e, m, a.att, client.UnlockOptions{})
 	resp, _ = f.w.Post(f.ctx, in, enclave.OpUnlock, a.vid, a.guid, req)
 	if resp.Status != enclave.StatusETKUnknown || resp.Envelope != nil {
 		t.Fatalf("destroyed ETK: %s", resp.Status)
@@ -354,10 +355,10 @@ func TestUniformSizes(t *testing.T) {
 	f.enroll(a, pin)
 	f.lock(a)
 	e, in := f.enclaveFor(a, "", false)
-	served, m, _ := a.dev.VerifyManifest(f.w.Served(), f.trust)
+	_, m, _ := a.dev.VerifyManifest(f.w.Served(), f.trust)
 	sizes := map[int]bool{}
 	for _, p := range []string{pin, "000000"} {
-		req, err := a.dev.BuildUnlock(a.guid, p, e, served, m, a.att, client.UnlockOptions{})
+		req, err := a.dev.BuildUnlock(a.guid, p, e, m, a.att, client.UnlockOptions{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -367,7 +368,8 @@ func TestUniformSizes(t *testing.T) {
 	}
 	junk, _ := suite.RandomBytes(altchan.RequestEnvelopeSize)
 	rid, _ := envelope.NewULID(f.clk.Now())
-	resp, _ := f.w.Post(f.ctx, in, enclave.OpUnlock, a.vid, a.guid, &client.Request{RequestID: rid, ETKKid: e.Descriptor.Kid.String(), Envelope: junk})
+	resp, _ := f.w.Post(f.ctx, in, enclave.OpUnlock, a.vid, a.guid, &client.Request{RequestID: rid, ETKKid: e.Descriptor.Kid.String(), Envelope: junk,
+		ManifestSHA256: manifest.SHA256Hex(m.Bytes)})
 	sizes[len(resp.Envelope)] = true
 	if len(sizes) != 1 || !sizes[altchan.ResultEnvelopeSize] {
 		t.Fatalf("sizes %v", sizes)
@@ -381,8 +383,8 @@ func TestEnrolledAttestationChecked(t *testing.T) {
 	f := newFx(t)
 	a := f.newApp("user-1", android(0x61))
 	e, in := f.enclaveFor(a, "", true)
-	served, _, _ := a.dev.VerifyManifest(f.w.Served(), f.trust)
-	req, err := a.dev.BuildEnroll(a.guid, pin, e, served, a.att)
+	_, m, _ := a.dev.VerifyManifest(f.w.Served(), f.trust)
+	req, err := a.dev.BuildEnroll(a.guid, pin, e, m, a.att)
 	if err != nil {
 		t.Fatal(err)
 	}

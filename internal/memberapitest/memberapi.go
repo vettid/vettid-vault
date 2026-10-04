@@ -54,6 +54,7 @@ var (
 	ulidRE       = regexp.MustCompile(`^[0-7][0-9A-HJKMNP-TV-Z]{25}$`)
 	vaultIDRE    = regexp.MustCompile(`^[0-9a-f]{32}$`)
 	kidRE        = regexp.MustCompile(`^[0-9a-f]{16}$`)
+	sha256RE     = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	pcr0RE       = regexp.MustCompile(`^[0-9a-f]{96}$`)
 	instanceIDRE = regexp.MustCompile(`^[A-Za-z0-9_-]{1,48}$`)
 	codeRE       = regexp.MustCompile(`^[a-z_][a-z0-9_]{0,63}$`)
@@ -471,7 +472,9 @@ func (a *API) routeToRelease(ctx context.Context, release string, now int64) (an
 	if err != nil {
 		return nil, err
 	}
-	if rel == nil || rel.available != nil && !*rel.available {
+	// 0.10.0: a removed release is not routed unless operations reopened
+	// it for a rescue (available set explicitly).
+	if rel == nil || rel.available != nil && !*rel.available || rel.status == "removed" && rel.available == nil {
 		return nil, vaultError(410, "release_unavailable", "The enclave release this vault is sealed to can no longer be started.", nil)
 	}
 	inst, err := a.pickInstance(ctx, release, now)
@@ -517,7 +520,7 @@ func (a *API) routeForEnrollment(ctx context.Context, now int64) (any, error) {
 
 // --- requests ---
 
-func (a *API) enqueue(ctx context.Context, op, guid string, v *vaultRow, requestID string, inst *instanceRow, kid, env string) error {
+func (a *API) enqueue(ctx context.Context, op, guid string, v *vaultRow, requestID string, inst *instanceRow, kid, env, manifestSHA string) error {
 	created := a.nowISO()
 	_, err := a.cfg.DDB.PutItem(ctx, &dynamodb.PutItemInput{TableName: &a.cfg.Tables.Requests, ConditionExpression: aws.String("attribute_not_exists(request_id)"),
 		Item: map[string]ddbtypes.AttributeValue{"request_id": s(requestID), "vault_id": s(v.VaultID), "user_guid": s(guid), "op": s(op),
@@ -535,6 +538,9 @@ func (a *API) enqueue(ctx context.Context, op, guid string, v *vaultRow, request
 		`,"request_id":` + jsonString(requestID))
 	if env != "" {
 		b.WriteString(`,"etk_kid":` + jsonString(kid) + `,"envelope":` + jsonString(env))
+	}
+	if manifestSHA != "" {
+		b.WriteString(`,"manifest_sha256":` + jsonString(manifestSHA)) // enroll and unlock (0.10.0)
 	}
 	b.WriteString(`,"enqueued_at":` + jsonString(created) + `}`)
 	body := b.String()
@@ -653,6 +659,10 @@ func (a *API) enroll(ctx context.Context, guid string, body map[string]any) (any
 	if err != nil {
 		return nil, err
 	}
+	ms, err := field(body, "manifest_sha256", sha256RE, "64 lowercase hex")
+	if err != nil {
+		return nil, err
+	}
 	now := a.nowS()
 	pointer, cur, err := a.currentVault(ctx, guid)
 	if err != nil {
@@ -673,7 +683,7 @@ func (a *API) enroll(ctx context.Context, guid string, body map[string]any) (any
 	if err != nil {
 		return nil, err
 	}
-	if err := a.enqueue(ctx, "enroll", guid, v, rid, inst, kid, env); err != nil {
+	if err := a.enqueue(ctx, "enroll", guid, v, rid, inst, kid, env, ms); err != nil {
 		return nil, err
 	}
 	return map[string]any{"vault_id": v.VaultID, "request_id": rid}, nil
@@ -700,6 +710,10 @@ func (a *API) unlock(ctx context.Context, guid string, body map[string]any) (any
 	if err != nil {
 		return nil, err
 	}
+	ms, err := field(body, "manifest_sha256", sha256RE, "64 lowercase hex")
+	if err != nil {
+		return nil, err
+	}
 	_, cur, err := a.currentVault(ctx, guid)
 	if err != nil {
 		return nil, err
@@ -712,7 +726,7 @@ func (a *API) unlock(ctx context.Context, guid string, body map[string]any) (any
 	if err != nil {
 		return nil, err
 	}
-	if err := a.enqueue(ctx, "unlock", guid, v, rid, inst, kid, env); err != nil {
+	if err := a.enqueue(ctx, "unlock", guid, v, rid, inst, kid, env, ms); err != nil {
 		return nil, err
 	}
 	return map[string]any{"vault_id": v.VaultID, "request_id": rid}, nil
@@ -740,7 +754,7 @@ func (a *API) lock(ctx context.Context, guid string, body map[string]any) (any, 
 		return nil, err
 	}
 	if holder != nil {
-		if err := a.enqueue(ctx, "lock", guid, v, rid, holder, "", ""); err != nil {
+		if err := a.enqueue(ctx, "lock", guid, v, rid, holder, "", "", ""); err != nil {
 			return nil, err
 		}
 	} else {

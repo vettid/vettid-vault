@@ -39,7 +39,7 @@ import (
 )
 
 // Version is the channel version (Open's first field).
-const Version = "1"
+const Version = "2" // 2: the job carries the manifest document (VAULT-MESSAGING 0.10.0)
 
 // Supervisor → vault.
 const (

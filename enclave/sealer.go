@@ -232,6 +232,7 @@ func (c *Core) checkKey(ctx context.Context, m *manifest.Manifest, target *manif
 		return nil, ErrKMS
 	}
 	r, err := keypolicy.Check(keypolicy.Input{KeyARN: arn, Account: c.cfg.SealAccount, Region: c.cfg.SealRegion,
+		RetirementPrincipal: c.cfg.RetirementPrincipal, RetirementWindowDays: c.cfg.RetirementWindowDays,
 		Manifest: m, Target: target.Number, DescribeKey: desc, GetKeyPolicy: pol, ListGrants: gr})
 	if err != nil {
 		return nil, err

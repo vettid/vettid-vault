@@ -67,7 +67,11 @@ type EnrollRequest struct {
 	OpenToken string
 	Name      string
 	Attest    *DeviceAttest
-	Manifest  *manifest.Served
+	// ManifestSHA256 and ManifestSerial name the manifest the app
+	// verified (0.10.0, M1): hex(SHA-256(manifest bytes)) and its serial.
+	// The host supplies the document; the enclave checks it against them.
+	ManifestSHA256 string
+	ManifestSerial uint64
 }
 
 // Marshal encodes the body in §11.3 member order.
@@ -79,7 +83,8 @@ func (r *EnrollRequest) Marshal() ([]byte, error) {
 	app := strictjson.NewBuilder().Base64("ik", r.IK).Base64("kem", r.KEM.Bytes()).Raw("relay", r.Relay.marshal()).
 		String("open_token", r.OpenToken).String("name", r.Name).Raw("device_attest", da).Bytes()
 	return strictjson.NewBuilder().String("user_guid", r.UserGUID).String("request_id", r.RequestID).
-		Base64("nonce", r.Nonce).String("pin", r.PIN).Raw("app", app).Raw("manifest", r.Manifest.Marshal()).Bytes(), nil
+		Base64("nonce", r.Nonce).String("pin", r.PIN).Raw("app", app).
+		String("manifest_sha256", r.ManifestSHA256).Uint("manifest_serial", r.ManifestSerial).Bytes(), nil
 }
 
 // EnrollKEM extracts app.kem first, so that a later failure can be
@@ -149,14 +154,24 @@ func ParseEnrollRequest(o strictjson.Object) (*EnrollRequest, error) {
 	if r.Attest, err = ParseDeviceAttest(da); err != nil {
 		return nil, ErrMalformed
 	}
-	mo, err := o.Object("manifest")
-	if err != nil {
-		return nil, ErrMalformed
-	}
-	if r.Manifest, err = manifest.ServedFrom(mo); err != nil {
-		return nil, ErrMalformed
+	if r.ManifestSHA256, r.ManifestSerial, err = parseManifestRef(o); err != nil {
+		return nil, err
 	}
 	return r, nil
+}
+
+// parseManifestRef reads manifest_sha256 (64 lowercase hex) and
+// manifest_serial (1 to 2^53-1), both REQUIRED (0.10.0).
+func parseManifestRef(o strictjson.Object) (string, uint64, error) {
+	h, err := o.String("manifest_sha256")
+	if err != nil || !manifest.ValidSHA256Hex(h) {
+		return "", 0, ErrMalformed
+	}
+	n, err := o.Uint("manifest_serial", 1, strictjson.MaxSafeInteger)
+	if err != nil {
+		return "", 0, ErrMalformed
+	}
+	return h, n, nil
 }
 
 // ReleaseUpdate is the unlock's release_update (§11.10.3).
@@ -174,7 +189,8 @@ type UnlockRequest struct {
 	MinStateSeq, MinHeaderSeq    uint64
 	Token                        string
 	Assertion                    *DeviceAssertion
-	Manifest                     *manifest.Served
+	ManifestSHA256               string // 0.10.0 (M1), as in EnrollRequest
+	ManifestSerial               uint64
 	Update                       *ReleaseUpdate
 	CancelRecovery               bool // §11.11.4
 	Sig                          []byte
@@ -189,7 +205,7 @@ func (r *UnlockRequest) Marshal() ([]byte, error) {
 	b := strictjson.NewBuilder().String("user_guid", r.UserGUID).String("vault_id", r.VaultID).
 		String("request_id", r.RequestID).Base64("device_ik", r.DeviceIK).String("pin", r.PIN).
 		Uint("min_state_seq", r.MinStateSeq).Uint("min_header_seq", r.MinHeaderSeq).String("token", r.Token).
-		Raw("device_assertion", da).Raw("manifest", r.Manifest.Marshal())
+		Raw("device_assertion", da).String("manifest_sha256", r.ManifestSHA256).Uint("manifest_serial", r.ManifestSerial)
 	if u := r.Update; u != nil {
 		ap, err := u.Approval.Marshal()
 		if err != nil {
@@ -234,12 +250,8 @@ func ParseUnlockRequest(o strictjson.Object) (*UnlockRequest, error) {
 	if r.Assertion, err = ParseDeviceAssertion(da); err != nil {
 		return nil, ErrMalformed
 	}
-	mo, err := o.Object("manifest")
-	if err != nil {
-		return nil, ErrMalformed
-	}
-	if r.Manifest, err = manifest.ServedFrom(mo); err != nil {
-		return nil, ErrMalformed
+	if r.ManifestSHA256, r.ManifestSerial, err = parseManifestRef(o); err != nil {
+		return nil, err
 	}
 	if raw, present, err := o.OptObjectRaw("release_update"); err != nil {
 		return nil, ErrMalformed

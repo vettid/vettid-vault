@@ -13,7 +13,7 @@ E2ETAGS   := devenclave e2e
 # links). It must never link the AWS SDK, the parent, or any dev/test code.
 ENCLAVEPKGS := ./cmd/vault-enclave
 
-.PHONY: all test race lint vet staticcheck fuzz scan tidy vectors check-tcb e2e integration
+.PHONY: all test channels race lint vet staticcheck fuzz scan tidy vectors check-tcb e2e integration
 
 all: lint check-tcb test
 
@@ -22,6 +22,17 @@ all: lint check-tcb test
 test:
 	$(GO) test ./...
 	$(GO) test -tags vmsvectors ./vms/vectors
+	$(MAKE) channels
+
+# The per-channel release constants (VAULT-MESSAGING §11.10.8): each
+# channel's build embeds its committed file, and the release gate refuses
+# placeholders (Dockerfile.enclave and scripts/build-eif.sh run it).
+CHANNELS := prod staging
+channels:
+	@for ch in $(CHANNELS); do \
+	  $(GO) test -count=1 -tags vettid_channel_$$ch ./enclave/releasecfg || exit 1; \
+	  GOOS=linux $(GO) build -tags vettid_channel_$$ch -o /dev/null ./cmd/vault-enclave || exit 1; \
+	done
 
 race:
 	$(GO) test -race ./...
@@ -32,6 +43,8 @@ vet:
 	$(GO) vet -tags vmsvectors ./...
 	$(GO) vet -tags '$(E2ETAGS)' ./...
 	$(GO) vet -tags 'devenclave integration' ./...
+	$(GO) vet -tags vettid_channel_prod ./enclave/... ./cmd/...
+	$(GO) vet -tags vettid_channel_staging ./enclave/... ./cmd/...
 
 # staticcheck is run at a pinned version via `go run` (fetched on first use).
 staticcheck:
@@ -72,6 +85,21 @@ check-tcb:
 	  echo "the supervisor links feature code, the vault process or the Bitcoin libraries"; exit 1; fi
 	@if GOOS=linux $(GO) list -f '{{.ImportPath}} {{len .CgoFiles}} {{join .Imports " "}}' ./vault/... ./features/... ./enclave/vaultproc | \
 	  grep -E ' [1-9][0-9]* | unsafe( |$$)'; then echo "unsafe or cgo in vault, feature or vault-process code"; exit 1; fi
+	@# Release constants (VAULT-MESSAGING §11.10.8): one channel per
+	@# build, chosen by build tag, embedded from the committed file; no
+	@# -ldflags -X values; each channel's enclave binary links the same
+	@# (clean) dependencies plus releasecfg.
+	@head -1 enclave/releasecfg/embed_prod.go | grep -qx '//go:build vettid_channel_prod' || { echo "embed_prod.go build constraint"; exit 1; }
+	@head -1 enclave/releasecfg/embed_staging.go | grep -qx '//go:build vettid_channel_staging' || { echo "embed_staging.go build constraint"; exit 1; }
+	@head -1 enclave/releasecfg/embed_none.go | grep -qx '//go:build !vettid_channel_prod && !vettid_channel_staging' || { echo "embed_none.go build constraint"; exit 1; }
+	@if $(GO) build -tags 'vettid_channel_prod vettid_channel_staging' ./enclave/releasecfg 2>/dev/null; then \
+	  echo "the prod and staging channels compile into one binary"; exit 1; fi
+	@if grep -nE 'ldflags.*-X' Dockerfile.enclave scripts/build-eif.sh; then echo "release constants set with -ldflags -X"; exit 1; fi
+	@for ch in prod staging; do \
+	  if GOOS=linux $(GO) list -tags vettid_channel_$$ch -deps $(ENCLAVEPKGS) | grep -E 'aws-sdk-go|smithy-go|vettid-vault/parent|hpkederand|mlkemtest|/devenclave|relaytest|enclavetest|memberapitest|parenttest|featuretest'; then \
+	    echo "the $$ch enclave binary links the AWS SDK, the parent, or dev/test code"; exit 1; fi; \
+	  GOOS=linux $(GO) list -tags vettid_channel_$$ch -deps $(ENCLAVEPKGS) | grep -q 'enclave/releasecfg$$' || { echo "the $$ch enclave binary does not embed releasecfg"; exit 1; }; \
+	done
 	@echo "check-tcb: ok"
 
 # End-to-end tests against the real vettid-relay binary (built at the

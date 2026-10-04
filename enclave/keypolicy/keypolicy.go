@@ -7,11 +7,19 @@
 // It fails closed: any failure, unknown member, unexpected type, wildcard,
 // operator or principal outside the allow-list, or truncated listing
 // refuses the key. Each refusal names the spec's check (1-8).
+//
+// Since VAULT-MESSAGING 0.10.0 a release image may pin a retirement
+// principal and window (VAULT-RELEASES §4.1): exactly that role may then
+// schedule the key's deletion with exactly that pending window, cancel the
+// deletion and re-enable the key, in statements of their own. Nothing else
+// changes: no principal may change the policy, add grants or disable the
+// key.
 package keypolicy
 
 import (
 	"crypto/sha256"
 	"encoding/json"
+	"strconv"
 	"strings"
 
 	"github.com/vettid/vettid-vault/internal/strictjson"
@@ -62,6 +70,12 @@ type Input struct {
 	// whose key this is.
 	Manifest *manifest.Manifest
 	Target   uint64
+	// RetirementPrincipal and RetirementWindowDays are the pinned
+	// retirement role (an IAM role ARN in Account) and its pending window
+	// in days (7-30). Empty: the retirement actions disqualify a key, as
+	// before 0.10.0.
+	RetirementPrincipal  string
+	RetirementWindowDays int
 	// Raw KMS responses (JSON bodies).
 	DescribeKey  []byte
 	GetKeyPolicy []byte
@@ -78,6 +92,19 @@ type Result struct {
 const (
 	actDecrypt = "kms:Decrypt"
 	actGDK     = "kms:GenerateDataKey"
+	// The retirement actions, allowed only to the pinned retirement
+	// principal in statements of their own (0.10.0).
+	actSchedule = "kms:ScheduleKeyDeletion"
+	actCancel   = "kms:CancelKeyDeletion"
+	actEnable   = "kms:EnableKey"
+)
+
+var retirement = map[string]bool{actSchedule: true, actCancel: true, actEnable: true}
+
+// The KMS documented range of a deletion's pending window.
+const (
+	minWindowDays = 7
+	maxWindowDays = 30
 )
 
 var readOnly = map[string]bool{
@@ -89,7 +116,7 @@ const maxResponse = 64 * 1024
 
 // Check runs the §11.10.7 checks in order.
 func Check(in Input) (*Result, error) {
-	if !validAccount(in.Account) || !validRegion(in.Region) || in.Manifest == nil {
+	if !validAccount(in.Account) || !validRegion(in.Region) || in.Manifest == nil || !validRetirement(in) {
 		return nil, ErrIdentity
 	}
 	target, ok := in.Manifest.ByNumber(in.Target)
@@ -142,6 +169,18 @@ func validAccount(a string) bool {
 		}
 	}
 	return true
+}
+
+// validRetirement checks the pinned retirement constants: none at all, or
+// an IAM role (not the account root) in the pinned account with a window
+// in KMS's range.
+func validRetirement(in Input) bool {
+	if in.RetirementPrincipal == "" {
+		return in.RetirementWindowDays == 0
+	}
+	acct, ok := iamARNAccount(in.RetirementPrincipal)
+	return ok && acct == in.Account && !strings.HasSuffix(in.RetirementPrincipal, ":root") &&
+		in.RetirementWindowDays >= minWindowDays && in.RetirementWindowDays <= maxWindowDays
 }
 
 func validRegion(r string) bool {
@@ -388,6 +427,8 @@ type cond struct {
 }
 
 const (
+	keyWindow  = "kms:ScheduleKeyDeletionPendingWindowInDays"
+	opNumEq    = "NumericEquals"
 	keyImage   = "kms:RecipientAttestation:ImageSha384"
 	keyPCR0    = "kms:RecipientAttestation:PCR0"
 	keyPCRPfx  = "kms:RecipientAttestation:PCR"
@@ -402,6 +443,19 @@ func parseConditions(c strictjson.Object) ([]cond, error) {
 	for op, raw := range c {
 		switch op {
 		case "StringEquals", "StringEqualsIgnoreCase", "ArnEquals":
+		case opNumEq:
+			// Only the deletion window (0.10.0), one value; where it may
+			// appear and which value it must have is checkAllow's.
+			inner, err := strictjson.AsObject(raw)
+			if err != nil || len(inner) != 1 {
+				return nil, ErrCondition
+			}
+			v, ok := windowValue(inner[keyWindow])
+			if !ok {
+				return nil, ErrCondition
+			}
+			out = append(out, cond{op: op, key: keyWindow, values: []string{v}})
+			continue
 		default:
 			return nil, ErrCondition // …IfExists, ForAnyValue:/ForAllValues:, Null, negated, Like, …
 		}
@@ -421,6 +475,30 @@ func parseConditions(c strictjson.Object) ([]cond, error) {
 		}
 	}
 	return out, nil
+}
+
+// windowValue reads the deletion window's condition value: one JSON
+// string or number in canonical decimal (no array, sign, fraction,
+// exponent or leading zero).
+func windowValue(raw json.RawMessage) (string, bool) {
+	if len(raw) == 0 {
+		return "", false
+	}
+	s := string(raw)
+	if raw[0] == '"' {
+		if json.Unmarshal(raw, &s) != nil {
+			return "", false
+		}
+	}
+	if s == "" || len(s) > 3 || s[0] == '0' {
+		return "", false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return "", false
+		}
+	}
+	return s, true
 }
 
 func allowedEntry(op, key string, vals []string) error {
@@ -512,8 +590,11 @@ func checkAllow(s statement, in Input, target *manifest.Release) error {
 	}
 	// 6. Actions: explicit names from the list; Decrypt and
 	// GenerateDataKey only under an attestation condition naming the
-	// admitted releases.
+	// admitted releases; the retirement actions only with a pinned
+	// retirement principal and only among themselves.
 	gated := map[string]bool{}
+	retire := map[string]bool{}
+	readOnlyN := 0
 	for _, a := range s.actions {
 		if strings.ContainsAny(a, "*?") {
 			return ErrActions
@@ -522,9 +603,15 @@ func checkAllow(s statement, in Input, target *manifest.Release) error {
 		case a == actDecrypt || a == actGDK:
 			gated[a] = true
 		case readOnly[a]:
+			readOnlyN++
+		case retirement[a] && in.RetirementPrincipal != "":
+			retire[a] = true
 		default:
 			return ErrActions
 		}
+	}
+	if len(retire) > 0 && (len(gated) > 0 || readOnlyN > 0) {
+		return ErrActions // a retirement statement holds retirement actions only
 	}
 	for a := range gated {
 		admitted := admittedFor(a, in, target)
@@ -532,10 +619,32 @@ func checkAllow(s statement, in Input, target *manifest.Release) error {
 			return err
 		}
 	}
-	// 8. Principals in the pinned account; CallerAccount on the gated
-	// statements.
+	// 7. The deletion window: NumericEquals only in the statement that
+	// allows ScheduleKeyDeletion, and required there, with the pinned
+	// value.
+	window := ""
+	for _, c := range conds {
+		if c.op == opNumEq {
+			window = c.values[0]
+		}
+	}
+	if window != "" && !retire[actSchedule] {
+		return ErrCondition
+	}
+	if retire[actSchedule] && window != strconv.Itoa(in.RetirementWindowDays) {
+		return ErrCondition
+	}
+	// 8. Principals in the pinned account; exactly the retirement
+	// principal on a retirement statement and never on a gated one;
+	// CallerAccount on the gated and retirement statements.
 	if err := checkPrincipal(s.principal, in.Account); err != nil {
 		return err
+	}
+	if len(retire) > 0 && !exactPrincipal(s.principal, in.RetirementPrincipal) {
+		return ErrPrincipal
+	}
+	if len(gated) > 0 && in.RetirementPrincipal != "" && namesPrincipal(s.principal, in.RetirementPrincipal) {
+		return ErrPrincipal
 	}
 	callerOK := false
 	for _, c := range conds {
@@ -555,10 +664,40 @@ func checkAllow(s statement, in Input, target *manifest.Release) error {
 			}
 		}
 	}
-	if len(gated) > 0 && !callerOK {
+	if (len(gated) > 0 || len(retire) > 0) && !callerOK {
 		return ErrPrincipal
 	}
 	return nil
+}
+
+// exactPrincipal reports whether raw is exactly {"AWS": "<arn>"}: one
+// string, not an array.
+func exactPrincipal(raw json.RawMessage, arn string) bool {
+	o, err := strictjson.AsObject(raw)
+	if err != nil || len(o) != 1 {
+		return false
+	}
+	v, ok := o["AWS"]
+	if !ok || len(v) == 0 || v[0] != '"' {
+		return false
+	}
+	var s string
+	return json.Unmarshal(v, &s) == nil && s == arn
+}
+
+// namesPrincipal reports whether a (checked) principal lists arn.
+func namesPrincipal(raw json.RawMessage, arn string) bool {
+	o, err := strictjson.AsObject(raw)
+	if err != nil {
+		return false
+	}
+	arns, _ := stringOrArray(o["AWS"])
+	for _, a := range arns {
+		if a == arn {
+			return true
+		}
+	}
+	return false
 }
 
 // admittedFor returns the releases whose PCRs an action's attestation

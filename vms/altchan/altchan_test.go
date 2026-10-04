@@ -31,7 +31,7 @@ func TestDevattChallenge(t *testing.T) {
 func TestUnlockSigningString(t *testing.T) {
 	f := UnlockFields{UserGUID: "user-1", VaultID: "vault-1", RequestID: "01JB2Z6V9K3M4N5P6Q7R8S9T0V",
 		TS: "2026-10-01T12:00:00.000Z", ETKKid: suite.Kid{1, 2, 3, 4, 5, 6, 7, 8}, MinStateSeq: 1234, MinHeaderSeq: 1301,
-		PIN: "123456", Token: "v4.public.VEVTVA", Manifest: []byte("{}")}
+		PIN: "123456", Token: "v4.public.VEVTVA", ManifestSHA256: "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"}
 	s, err := UnlockSigningString(f)
 	if err != nil {
 		t.Fatal(err)
@@ -48,7 +48,9 @@ func TestUnlockSigningString(t *testing.T) {
 	}
 	for name, g := range map[string]func(*UnlockFields){
 		"newline":     func(f *UnlockFields) { f.UserGUID = "a\nb" },
-		"no manifest": func(f *UnlockFields) { f.Manifest = nil },
+		"no manifest": func(f *UnlockFields) { f.ManifestSHA256 = "" },
+		"upper hash":  func(f *UnlockFields) { f.ManifestSHA256 = strings.ToUpper(f.ManifestSHA256) },
+		"short hash":  func(f *UnlockFields) { f.ManifestSHA256 = f.ManifestSHA256[:62] },
 		"upper pcr0":  func(f *UnlockFields) { f.ToPCR0 = strings.Repeat("CD", 48) },
 		"short pcr0":  func(f *UnlockFields) { f.ToPCR0 = "cd" },
 	} {

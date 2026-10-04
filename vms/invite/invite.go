@@ -337,8 +337,8 @@ func OpenBundle(blob []byte, q *QR, now time.Time) (*Bundle, error) {
 	if err != nil {
 		return nil, err
 	}
-	want, _ := q.Kind.BundleKind()
-	if b.Kind != want {
+	want, ok := q.Kind.BundleKind()
+	if !ok || b.Kind != want {
 		return nil, ErrKind
 	}
 	if b.Exp.Unix() != q.Exp {

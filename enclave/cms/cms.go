@@ -74,7 +74,11 @@ func seq(r *der.Reader) (*der.Reader, error) {
 	if err != nil {
 		return nil, ErrFormat
 	}
-	return e.Children()
+	c, err := e.Children()
+	if err != nil {
+		return nil, ErrFormat
+	}
+	return c, nil
 }
 
 // algID reads AlgorithmIdentifier { OID, params? } and returns the params
@@ -112,15 +116,21 @@ func sha256AlgID(r *der.Reader) error {
 }
 
 func checkOAEPParams(p *der.Element) error {
-	if p == nil || !p.Is(der.ClassUniversal, der.TagSequence) {
+	if p == nil {
 		return ErrFormat // absent parameters mean SHA-1: refused
 	}
-	r, _ := p.Children()
+	r, err := p.ChildrenOf(der.ClassUniversal, der.TagSequence)
+	if err != nil {
+		return ErrFormat
+	}
 	h, err := r.Expect(der.ClassContext, 0, true)
 	if err != nil {
 		return ErrFormat
 	}
-	hr, _ := h.Children()
+	hr, err := h.Children()
+	if err != nil {
+		return ErrFormat
+	}
 	if err := sha256AlgID(hr); err != nil || !hr.Empty() {
 		return ErrFormat
 	}
@@ -128,7 +138,10 @@ func checkOAEPParams(p *der.Element) error {
 	if err != nil {
 		return ErrFormat
 	}
-	mr, _ := m.Children()
+	mr, err := m.Children()
+	if err != nil {
+		return ErrFormat
+	}
 	_, mp, err := algID(mr, oidMGF1)
 	if err != nil || mp == nil || !mr.Empty() {
 		return ErrFormat
@@ -162,7 +175,10 @@ func Unwrap(b []byte, key *rsa.PrivateKey) ([]byte, error) {
 	if err != nil || !ci.Empty() {
 		return nil, ErrFormat
 	}
-	wr, _ := wrap.Children()
+	wr, err := wrap.Children()
+	if err != nil {
+		return nil, ErrFormat
+	}
 	ed, err := seq(wr)
 	if err != nil || !wr.Empty() {
 		return nil, ErrFormat
@@ -181,7 +197,10 @@ func Unwrap(b []byte, key *rsa.PrivateKey) ([]byte, error) {
 	if err != nil {
 		return nil, ErrFormat
 	}
-	rr, _ := ris.Children()
+	rr, err := ris.Children()
+	if err != nil {
+		return nil, ErrFormat
+	}
 	ri, err := seq(rr)
 	if err != nil || !rr.Empty() { // exactly one recipient
 		return nil, ErrFormat

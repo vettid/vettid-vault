@@ -115,12 +115,23 @@ func (r *Reader) Peek() (Tag, bool) {
 	return e.Tag, true
 }
 
-// Children returns a reader over a constructed element's content.
+// Children returns a reader over a constructed element's content. It
+// returns ErrTag (and a nil reader) for a primitive element; callers must
+// check the error.
 func (e Element) Children() (*Reader, error) {
 	if !e.Constructed {
 		return nil, ErrTag
 	}
 	return &Reader{b: e.Content, ber: e.ber}, nil
+}
+
+// ChildrenOf requires e to be a constructed element with the given class
+// and number and returns a reader over its content.
+func (e Element) ChildrenOf(class uint8, number uint64) (*Reader, error) {
+	if !e.Is(class, number) || !e.Constructed {
+		return nil, ErrTag
+	}
+	return e.Children()
 }
 
 func parse(b []byte, ber bool, depth int) (Element, []byte, error) {
@@ -159,6 +170,11 @@ func parse(b []byte, ber bool, depth int) (Element, []byte, error) {
 			return Element{}, nil, ErrSyntax
 		}
 		t.Number = n
+	}
+	// SEQUENCE and SET are always constructed (X.690 8.9.1, 8.11.1); a
+	// primitive encoding of either is malformed in BER and DER alike.
+	if t.Class == ClassUniversal && (t.Number == TagSequence || t.Number == TagSet) && !t.Constructed {
+		return Element{}, nil, ErrSyntax
 	}
 	if i >= len(b) {
 		return Element{}, nil, ErrTruncated
@@ -275,7 +291,10 @@ func OctetContent(e Element) ([]byte, error) {
 	if !e.ber {
 		return nil, ErrSyntax
 	}
-	r, _ := e.Children()
+	r, err := e.Children()
+	if err != nil {
+		return nil, err
+	}
 	var out []byte
 	for !r.Empty() {
 		s, err := r.Next()

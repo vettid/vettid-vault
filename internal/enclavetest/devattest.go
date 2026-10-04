@@ -100,6 +100,9 @@ type AndroidOptions struct {
 	ExtraPackage     string // a second package in the application id
 	AppIDInHardware  bool
 	SoftwarePurposes bool // properties only in the software-enforced list
+	// MutateKeyDescription, if set, rewrites the encoded key description
+	// before it is signed into the leaf (malformed-input tests).
+	MutateKeyDescription func([]byte) []byte
 }
 
 func (o *AndroidOptions) defaults() {
@@ -201,13 +204,17 @@ func TestAndroidCA() *AndroidCA {
 
 // Attest returns a certificate chain (leaf first) attesting key.
 func (ca *AndroidCA) Attest(key *ecdsa.PrivateKey, o AndroidOptions) [][]byte {
+	kd := keyDescription(o)
+	if o.MutateKeyDescription != nil {
+		kd = o.MutateKeyDescription(kd)
+	}
 	ca.mu.Lock()
 	ca.serial++
 	s := ca.serial
 	ca.mu.Unlock()
 	leaf := ca.Inter.Issue(&x509.Certificate{SerialNumber: big.NewInt(s), Subject: pkix.Name{CommonName: "Android Keystore Key"},
 		KeyUsage:        x509.KeyUsageDigitalSignature,
-		ExtraExtensions: []pkix.Extension{{Id: devattest.OIDKeyDescription, Value: keyDescription(o)}}}, key.Public())
+		ExtraExtensions: []pkix.Extension{{Id: devattest.OIDKeyDescription, Value: kd}}}, key.Public())
 	return [][]byte{leaf.Raw, ca.Inter.Cert.Raw, ca.Root.Cert.Raw}
 }
 
@@ -248,6 +255,9 @@ type IOSOptions struct {
 	AppID      string // default IOSAppID
 	Counter    uint32 // must be 0 in a real attestation
 	WrongNonce bool
+	// MutateNonceExt, if set, rewrites the encoded nonce extension before
+	// it is signed into the leaf (malformed-input tests).
+	MutateNonceExt func([]byte) []byte
 }
 
 func point(key *ecdsa.PrivateKey) []byte {
@@ -293,13 +303,17 @@ func (ca *AppleCA) Attest(key *ecdsa.PrivateKey, cdh [32]byte, o IOSOptions) []b
 	if o.WrongNonce {
 		nonce[0] ^= 1
 	}
+	ext := dSeq(dExp(1, dOct(nonce)))
+	if o.MutateNonceExt != nil {
+		ext = o.MutateNonceExt(ext)
+	}
 	ca.mu.Lock()
 	ca.serial++
 	s := ca.serial
 	ca.mu.Unlock()
 	leaf := ca.Inter.Issue(&x509.Certificate{SerialNumber: big.NewInt(s), Subject: pkix.Name{CommonName: "TEST App Attest credential"},
 		KeyUsage:        x509.KeyUsageDigitalSignature,
-		ExtraExtensions: []pkix.Extension{{Id: devattest.OIDAppAttestNonce, Value: dSeq(dExp(1, dOct(nonce)))}}}, key.Public())
+		ExtraExtensions: []pkix.Extension{{Id: devattest.OIDAppAttestNonce, Value: ext}}}, key.Public())
 	var att cbor.Encoder
 	att.Map(3).Text("fmt").Text("apple-appattest").
 		Text("attStmt").Map(2).Text("x5c").Array(2).ByteString(leaf.Raw).ByteString(ca.Inter.Cert.Raw).

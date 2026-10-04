@@ -236,7 +236,10 @@ func ParseRecoveryRegister(o strictjson.Object) (*RecoveryRegisterRequest, error
 	if r.KEM, err = EnrollKEM(o); err != nil {
 		return nil, err
 	}
-	app, _ := o.Object("app")
+	app, err := o.Object("app")
+	if err != nil {
+		return nil, ErrMalformed
+	}
 	for _, f := range []struct {
 		n string
 		d *string

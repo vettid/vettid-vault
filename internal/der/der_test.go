@@ -24,7 +24,10 @@ func TestHighTag(t *testing.T) {
 	if !e.Is(ClassContext, 709) || !e.Constructed {
 		t.Fatalf("%+v", e.Tag)
 	}
-	r, _ := e.Children()
+	r, err := e.Children()
+	if err != nil {
+		t.Fatal(err)
+	}
 	in, err := r.Next()
 	if err != nil {
 		t.Fatal(err)
@@ -69,6 +72,75 @@ func TestRejects(t *testing.T) {
 	}
 }
 
+// SEQUENCE and SET are always constructed: a primitive encoding is a
+// syntax error in both readers, at any depth.
+func TestPrimitiveConstructed(t *testing.T) {
+	for _, in := range []string{"1000", "1100", "1003020101", "1101ff", "3003" + "110100", "a103" + "100100"} {
+		for _, r := range []*Reader{NewReader(h(in)), NewBERReader(h(in))} {
+			e, err := r.Next()
+			if err != nil {
+				continue
+			}
+			c, err := e.Children()
+			if err != nil {
+				t.Fatalf("%s: %v", in, err)
+			}
+			if _, err := c.Next(); err == nil {
+				t.Errorf("%s accepted", in)
+			}
+		}
+	}
+	for _, in := range []string{"1000", "1100"} {
+		if _, err := NewReader(h(in)).Next(); err != ErrSyntax {
+			t.Errorf("%s: %v", in, err)
+		}
+	}
+	// A primitive [16] or [17] in another class is not a SEQUENCE or SET.
+	if _, err := NewReader(h("9000")).Next(); err != nil {
+		t.Errorf("context [16]: %v", err)
+	}
+}
+
+func TestChildren(t *testing.T) {
+	e, err := NewReader(h("0401aa")).Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r, err := e.Children(); err != ErrTag || r != nil {
+		t.Fatalf("primitive Children: %v %v", r, err)
+	}
+	s, err := NewReader(h("3003020101")).Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ChildrenOf(ClassUniversal, TagSet); err != ErrTag {
+		t.Fatalf("SEQUENCE as SET: %v", err)
+	}
+	r, err := s.ChildrenOf(ClassUniversal, TagSequence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v, err := r.Next(); err != nil || !v.Is(ClassUniversal, TagInteger) {
+		t.Fatalf("%v %+v", err, v)
+	}
+	// A constructed context tag numbered like SET is not a SET.
+	c, err := NewReader(h("b100")).Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.ChildrenOf(ClassUniversal, TagSet); err != ErrTag {
+		t.Fatalf("[17] as SET: %v", err)
+	}
+	// A BER constructed OCTET STRING outside BER mode is refused.
+	o, err := NewReader(h("2403040100")).Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OctetString(o); err == nil {
+		t.Fatal("constructed OCTET STRING in DER")
+	}
+}
+
 func TestBERIndefinite(t *testing.T) {
 	// SEQUENCE (indefinite) { constructed OCTET STRING (indefinite) { 04 01 aa, 04 02 bb cc } }
 	b := h("3080" + "2480" + "0401aa" + "0402bbcc" + "0000" + "0000")
@@ -79,7 +151,10 @@ func TestBERIndefinite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r, _ := e.Children()
+	r, err := e.Children()
+	if err != nil {
+		t.Fatal(err)
+	}
 	o, err := r.Next()
 	if err != nil {
 		t.Fatal(err)
@@ -119,6 +194,8 @@ func walk(r *Reader, depth int) {
 func FuzzParse(f *testing.F) {
 	f.Add(h("bf854504" + "04020102"))
 	f.Add(h("30802480" + "0401aa00000000"))
+	f.Add(h("3005" + "a103110102")) // primitive SET inside a SEQUENCE
+	f.Add(h("1003" + "020101"))     // primitive SEQUENCE
 	f.Fuzz(func(t *testing.T, b []byte) {
 		walk(NewReader(b), 0)
 		walk(NewBERReader(b), 0)

@@ -62,7 +62,52 @@ func FuzzUnwrap(f *testing.F) {
 	k := testKey()
 	f.Add(enclavetest.WrapCMS(&k.PublicKey, []byte("data key"), enclavetest.CMSOptions{}))
 	f.Add(enclavetest.WrapCMS(&k.PublicKey, []byte("data key"), enclavetest.CMSOptions{Indefinite: true}))
+	for _, v := range enclavetest.PrimitiveConstructedVariants(enclavetest.WrapCMS(&k.PublicKey, []byte("data key"), enclavetest.CMSOptions{})) {
+		f.Add(v)
+	}
 	f.Fuzz(func(t *testing.T, b []byte) {
 		_, _ = cms.Unwrap(b, k)
 	})
+}
+
+// A SEQUENCE or SET encoded as primitive is refused, without a panic, at
+// every position in the EnvelopedData (DER and indefinite-length BER)
+// that Unwrap interprets. The recipient identifier is skipped unread (KMS
+// addresses the one recipient), so the test issuer Name inside it is the
+// one position where the change is not seen.
+func TestUnwrapPrimitiveConstructed(t *testing.T) {
+	k := testKey()
+	for _, o := range []enclavetest.CMSOptions{{}, {Indefinite: true}} {
+		env := enclavetest.WrapCMS(&k.PublicKey, []byte("data key"), o)
+		vs := enclavetest.PrimitiveConstructedVariants(env)
+		if len(vs) < 8 {
+			t.Fatalf("%+v: only %d SEQUENCE/SET positions", o, len(vs))
+		}
+		skipped := 0
+		for i, v := range vs {
+			_, err := cms.Unwrap(v, k)
+			if err == nil {
+				// issuerAndSerialNumber { Name (empty SEQUENCE), INTEGER 1 }
+				if p := diffAt(env, v); bytes.HasPrefix(env[p:], []byte{0x30, 0x00, 0x02, 0x01, 0x01}) {
+					skipped++
+					continue
+				}
+			}
+			if !errors.Is(err, cms.ErrFormat) {
+				t.Errorf("%+v variant %d: %v", o, i, err)
+			}
+		}
+		if skipped > 1 {
+			t.Errorf("%+v: %d unread positions", o, skipped)
+		}
+	}
+}
+
+func diffAt(a, b []byte) int {
+	for i := range a {
+		if a[i] != b[i] {
+			return i
+		}
+	}
+	return len(a)
 }

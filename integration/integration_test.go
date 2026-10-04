@@ -62,7 +62,7 @@ func TestV3Exit(t *testing.T) {
 	api2 := &client.MemberAPI{Base: s.api.URL, Authorize: bearer("member-2")}
 	att2 := enclavetest.NewAndroidAttester(0x62, enclavetest.AndroidOptions{})
 	trust := s.w.Trust()
-	vid2, er, err := m2.EnrollVia(ctx, api2, "member-2", "24680", trust, att2)
+	vid2, er, err := m2.EnrollVia(ctx, api2, "member-2", "246801", trust, att2)
 	if err != nil || !er.OK {
 		t.Fatalf("member 2 enroll: %v %+v", err, er)
 	}
@@ -146,7 +146,7 @@ func TestV3Exit(t *testing.T) {
 	if sl, err := m2.LockVia(ctx, api2); err != nil || sl.Status != "done" {
 		t.Fatalf("member 2 lock: %v %+v", err, sl)
 	}
-	if u, err := m2.UnlockVia(ctx, api2, "member-2", "24680", trust, att2, client.UnlockOptions{}, ""); err != nil || !u.OK {
+	if u, err := m2.UnlockVia(ctx, api2, "member-2", "246801", trust, att2, client.UnlockOptions{}, ""); err != nil || !u.OK {
 		t.Fatalf("member 2 unlock: %v %+v", err, u)
 	}
 	before := s.vaultRow(vid2)

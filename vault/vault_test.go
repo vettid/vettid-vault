@@ -185,7 +185,7 @@ func TestBadPINBackoff(t *testing.T) {
 	f.opts.Now = func() time.Time { return now }
 	var last uint64
 	for i := 1; i <= 3; i++ {
-		_, res, err := f.unlock("9999", 0, 0)
+		_, res, err := f.unlock("999999", 0, 0)
 		if !errors.Is(err, ErrBadPIN) {
 			t.Fatalf("attempt %d: %v", i, err)
 		}
@@ -286,19 +286,19 @@ func TestStateBlobBinding(t *testing.T) {
 func TestKDF(t *testing.T) {
 	k, _ := MinKDF()
 	pep := bytes.Repeat([]byte{2}, 32)
-	a, err := deriveDEK("1234", k, pep, "v1")
+	a, err := deriveDEK("123456", k, pep, "v1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, _ := deriveDEK("1234", k, pep, "v1")
-	c, _ := deriveDEK("1235", k, pep, "v1")
-	d, _ := deriveDEK("1234", k, bytes.Repeat([]byte{3}, 32), "v1")
+	b, _ := deriveDEK("123456", k, pep, "v1")
+	c, _ := deriveDEK("123457", k, pep, "v1")
+	d, _ := deriveDEK("123456", k, bytes.Repeat([]byte{3}, 32), "v1")
 	if !bytes.Equal(a, b) || bytes.Equal(a, c) || bytes.Equal(a, d) {
 		t.Fatal("DEK derivation")
 	}
 	bad := k
 	bad.MemoryKiB = 1024
-	if _, err := deriveDEK("1234", bad, pep, "v1"); !errors.Is(err, ErrKDF) {
+	if _, err := deriveDEK("123456", bad, pep, "v1"); !errors.Is(err, ErrKDF) {
 		t.Fatal("weak params accepted")
 	}
 }

@@ -31,9 +31,9 @@ const ResultEnvelopeSize = envelope.OverheadSealed + PaddedSize
 // RequestEnvelopeSize is the size of a sealed enroll or unlock request.
 const RequestEnvelopeSize = envelope.OverheadSealed + RequestPaddedSize
 
-// ValidPIN accepts 4-32 ASCII digits.
+// ValidPIN accepts 6-32 ASCII digits (VAULT-MESSAGING §11.3).
 func ValidPIN(p string) bool {
-	if len(p) < 4 || len(p) > 32 {
+	if len(p) < 6 || len(p) > 32 {
 		return false
 	}
 	for i := 0; i < len(p); i++ {

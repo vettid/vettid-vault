@@ -45,10 +45,10 @@ func TestVaultctlBatch4(t *testing.T) {
 	run := func(args ...string) string { t.Helper(); return runAs(app, args...) }
 
 	run("init", "-role", "app", "-name", "phone", "-relay", r.URL)
-	vaultID := strings.TrimSpace(run("vault-create", "-store", store, "-relay", r.URL, "-pin", "2468", "-app", app))
+	vaultID := strings.TrimSpace(run("vault-create", "-store", store, "-relay", r.URL, "-pin", "246802", "-app", app))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	vr := exec.CommandContext(ctx, bin, "vault-run", "-store", store, "-vault-id", vaultID, "-pin", "2468")
+	vr := exec.CommandContext(ctx, bin, "vault-run", "-store", store, "-vault-id", vaultID, "-pin", "246802")
 	var vlog bytes.Buffer
 	vr.Stdout, vr.Stderr = &vlog, &vlog
 	if err := vr.Start(); err != nil {

@@ -145,8 +145,8 @@ A dev vault by hand (dev build of vaultctl):
 ```sh
 go build -tags devenclave -o bin/vaultctl ./cmd/vaultctl
 bin/vaultctl -state app.json init -role app -name phone -relay http://localhost:8080
-ID=$(bin/vaultctl -state app.json vault-create -store ./dev-vault -relay http://localhost:8080 -pin 2468 -app app.json)
-bin/vaultctl vault-run -store ./dev-vault -vault-id $ID -pin 2468 &
+ID=$(bin/vaultctl -state app.json vault-create -store ./dev-vault -relay http://localhost:8080 -pin 246802 -app app.json)
+bin/vaultctl vault-run -store ./dev-vault -vault-id $ID -pin 246802 &
 bin/vaultctl -state app.json enroll-wait
 bin/vaultctl -state app.json request vault.status
 ```
@@ -156,11 +156,11 @@ fakes; dev build):
 
 ```sh
 bin/vaultctl -state app.json init -role app -name phone -relay http://localhost:8080
-bin/vaultctl -state app.json altchan-enroll -store ./dev-ac -relay http://localhost:8080 -guid me -pin 13579 -platform ios
-bin/vaultctl -state app.json altchan-unlock -store ./dev-ac -relay http://localhost:8080 -guid me -pin 13579 &
+bin/vaultctl -state app.json altchan-enroll -store ./dev-ac -relay http://localhost:8080 -guid me -pin 135791 -platform ios
+bin/vaultctl -state app.json altchan-unlock -store ./dev-ac -relay http://localhost:8080 -guid me -pin 135791 &
 bin/vaultctl -state app.json request vault.status
 # a release move: run releases 3 and 4, approve 4
-bin/vaultctl -state app.json altchan-unlock -store ./dev-ac -relay http://localhost:8080 -guid me -pin 13579 -releases 3,4 -approve 4
+bin/vaultctl -state app.json altchan-unlock -store ./dev-ac -relay http://localhost:8080 -guid me -pin 135791 -releases 3,4 -approve 4
 ```
 
 The whole stack (V3b) is easiest through the integration test, which

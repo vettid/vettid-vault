@@ -49,13 +49,13 @@ func TestVaultctlSmoke(t *testing.T) {
 		return runAs(app, args...)
 	}
 	run("init", "-role", "app", "-name", "phone", "-relay", r.URL)
-	vaultID := strings.TrimSpace(run("vault-create", "-store", store, "-relay", r.URL, "-pin", "2468", "-app", app))
+	vaultID := strings.TrimSpace(run("vault-create", "-store", store, "-relay", r.URL, "-pin", "246802", "-app", app))
 	if len(vaultID) != 32 {
 		t.Fatalf("vault id %q", vaultID)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	vr := exec.CommandContext(ctx, bin, "vault-run", "-store", store, "-vault-id", vaultID, "-pin", "2468", "-ws")
+	vr := exec.CommandContext(ctx, bin, "vault-run", "-store", store, "-vault-id", vaultID, "-pin", "246802", "-ws")
 	var vlog bytes.Buffer
 	vr.Stdout, vr.Stderr = &vlog, &vlog
 	if err := vr.Start(); err != nil {
@@ -216,7 +216,7 @@ func TestVaultctlAltchan(t *testing.T) {
 		}
 		return out.String()
 	}
-	common := []string{"-store", st, "-relay", r.URL, "-guid", "member-1", "-pin", "13579", "-platform", "ios"}
+	common := []string{"-store", st, "-relay", r.URL, "-guid", "member-1", "-pin", "135791", "-platform", "ios"}
 	run("init", "-role", "app", "-name", "phone", "-relay", r.URL)
 	vid := strings.TrimSpace(run(append([]string{"altchan-enroll"}, common...)...))
 	if len(vid) != 32 {

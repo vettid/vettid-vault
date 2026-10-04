@@ -31,6 +31,10 @@ var vaultIDRE = regexp.MustCompile(`(?m)^[0-9a-f]{32}$`)
 func TestV3Exit(t *testing.T) {
 	s := newStack(t)
 	a := s.start("a", 3)
+	// The instance queue carries vettid.org's policy from SSM.
+	if p := s.queuePolicyOf(a); !sameJSON(p, s.queuePolicy) {
+		t.Fatalf("queue policy: %q", p)
+	}
 
 	// --- member 1 (vaultctl): enroll ---
 	m1 := filepath.Join(s.dir, "member1.json")

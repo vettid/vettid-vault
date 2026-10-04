@@ -67,7 +67,9 @@ func TestSharedAction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status(res) != "ok" || strings.Contains(string(res["result"]), "555") || strings.Contains(string(res["result"]), "Home") {
+	// The field values themselves must not travel in the result, only the
+	// grant (a bare "555" also matched an expires_at ending in .555Z).
+	if status(res) != "ok" || strings.Contains(string(res["result"]), "555-0100") || strings.Contains(string(res["result"]), "1 Main") {
 		t.Fatalf("allowlist: %v", res)
 	}
 	ro, _ := strictjson.ParseObject(res["result"])

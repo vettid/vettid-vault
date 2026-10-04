@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -33,6 +34,10 @@ type AWSConfig struct {
 	VaultsTable, InstancesTable, RequestsTable string
 	// DLQARN is the dead-letter queue for the instance queue (optional).
 	DLQARN string
+	// QueuePolicy is the instance queue's access policy (vettid.org SSM
+	// vault/control-queue-policy: SendMessage for the member API's roles
+	// in their account). Create refuses to make a queue without it.
+	QueuePolicy string
 	// EmulateConditionalDelete replaces S3's If-Match delete by a
 	// compare-then-delete (not atomic) where the service does not
 	// implement it (LocalStack). Never set against AWS.
@@ -199,13 +204,18 @@ func (a *AWS) Delete(ctx context.Context, key, ifMatch string) error {
 // --- SQS ---
 
 // Create implements Queues: retention 5 min (§11.5), visibility 120 s,
-// long polling, and a redrive to the DLQ after 3 receives.
+// long polling, a redrive to the DLQ after 3 receives, and vettid.org's
+// queue policy. Without a policy it fails closed (ErrConfig, no call).
 func (a *AWS) Create(ctx context.Context, name string) (string, error) {
+	if a.cfg.QueuePolicy == "" {
+		return "", fmt.Errorf("%w: no control-queue policy", ErrConfig)
+	}
 	attrs := map[string]string{
 		string(sqstypes.QueueAttributeNameMessageRetentionPeriod):        "300",
 		string(sqstypes.QueueAttributeNameVisibilityTimeout):             "120",
 		string(sqstypes.QueueAttributeNameReceiveMessageWaitTimeSeconds): "20",
 		string(sqstypes.QueueAttributeNameSqsManagedSseEnabled):          "true",
+		string(sqstypes.QueueAttributeNamePolicy):                        a.cfg.QueuePolicy,
 	}
 	if a.cfg.DLQARN != "" {
 		attrs[string(sqstypes.QueueAttributeNameRedrivePolicy)] = `{"deadLetterTargetArn":"` + a.cfg.DLQARN + `","maxReceiveCount":"3"}`

@@ -120,6 +120,25 @@ checks it).
 the owner rebuilds the tag on a separate arm64 machine (below) and the
 measurements must match. Then publish the draft GitHub release.
 
+**The vettid.org release entry and the AMI.** vettid.org's entry for the
+release pins the release tag, its source commit C, PCR0, the SHA-256 of
+`measurements.json` and the SHA-256 of `deploy/host/SHA256SUMS` at C:
+
+```sh
+git checkout <C> && sha256sum deploy/host/SHA256SUMS
+gh release download release/prod/N -p measurements.json -O - | sha256sum
+```
+
+The host AMI is built by vettid.org's `VettidOrgVaultRelease<N>Stack`
+(EC2 Image Builder, VAULT-RELEASES §8.3): it installs the release's EIF
+and `vault-parent-arm64` (checked against those pins and
+`nitro-cli describe-eif`), then the files listed in `deploy/host/SHA256SUMS`
+at C, checked with `sha256sum -c`, and runs their `install.sh`
+([`deploy/host/README.md`](../deploy/host/README.md)). Each release thus
+runs its own parent with its own units. After changing anything in
+`deploy/host/`, run `make host-sums` (a test fails on a stale
+`SHA256SUMS`).
+
 **4. Staging**, hardware self-test and the compatibility run on staging
 hardware (VAULT-RELEASES §10.1 step 4, §11).
 

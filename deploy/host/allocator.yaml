@@ -1,0 +1,6 @@
+---
+# Nitro Enclaves allocator (/etc/nitro_enclaves/allocator.yaml): the vault
+# enclave gets 1 vCPU and 5 GiB on an m7g.large (owner decision O6).
+# vault-enclave.service runs it with the same --cpu-count and --memory.
+memory_mib: 5120
+cpu_count: 1

@@ -16,6 +16,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/sqs"
+	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
 
 	"github.com/vettid/vettid-vault/internal/memberapitest"
 )
@@ -80,7 +82,20 @@ func TestAWSBackend(t *testing.T) {
 		t.Fatalf("after delete: %v", err)
 	}
 
-	// SQS.
+	// SQS: no queue without a policy (fail closed); the policy is set at
+	// creation.
+	if _, err := a.Create(ctx, pfx+"-vault-control-i0"); !errors.Is(err, ErrConfig) {
+		t.Fatalf("create without a policy: %v", err)
+	}
+	if qs, err := a.List(ctx, pfx+"-vault-control-"); err != nil || len(qs) != 0 {
+		t.Fatalf("queue created without a policy: %v %v", qs, err)
+	}
+	policy := `{"Version":"2012-10-17","Statement":[{"Sid":"MemberApiSend","Effect":"Allow","Principal":{"AWS":"arn:aws:iam::000000000000:root"},` +
+		`"Action":"sqs:SendMessage","Resource":"arn:aws:sqs:us-east-1:000000000000:` + pfx + `-vault-control-i1"}]}`
+	if err := ValidateQueuePolicy(policy); err != nil {
+		t.Fatal(err)
+	}
+	a.cfg.QueuePolicy = policy
 	url, err := a.Create(ctx, pfx+"-vault-control-i1")
 	if err != nil {
 		t.Fatal(err)
@@ -88,6 +103,14 @@ func TestAWSBackend(t *testing.T) {
 	qs, err := a.List(ctx, pfx+"-vault-control-")
 	if err != nil || len(qs) != 1 {
 		t.Fatalf("list: %v %v", qs, err)
+	}
+	at, err := a.sqs.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{QueueUrl: aws.String(url),
+		AttributeNames: []sqstypes.QueueAttributeName{sqstypes.QueueAttributeNamePolicy}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameJSON(at.Attributes[string(sqstypes.QueueAttributeNamePolicy)], policy) {
+		t.Fatalf("queue policy: %q", at.Attributes[string(sqstypes.QueueAttributeNamePolicy)])
 	}
 	if err := a.Destroy(ctx, url); err != nil {
 		t.Fatal(err)

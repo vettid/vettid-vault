@@ -1,0 +1,65 @@
+[Unit]
+Description=VettID vault parent (vsock control and egress, instance queue, registry, leases)
+Documentation=https://github.com/vettid/vettid-vault/blob/main/deploy/host/README.md
+Requires=vault-host-config.service
+Wants=vault-enclave.service network-online.target
+# The enclave dials the parent with backoff, so it may start first; being
+# ordered after it means the parent stops first, and its shutdown (lock
+# every vault through the enclave, flush lifecycle events, delete the
+# instance row and the queue) runs while the enclave is still up.
+After=vault-host-config.service vault-enclave.service network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/run/vettid/parent.env
+ExecStart=/opt/vettid/bin/vault-parent \
+    -instance-id ${VAULT_INSTANCE_ID} \
+    -region ${VAULT_REGION} \
+    -bucket ${VAULT_BUCKET} \
+    -table-vaults ${VAULT_TABLE_VAULTS} \
+    -table-instances ${VAULT_TABLE_INSTANCES} \
+    -table-requests ${VAULT_TABLE_REQUESTS} \
+    -queue-prefix ${VAULT_QUEUE_PREFIX} \
+    -dlq-arn ${VAULT_DLQ_ARN} \
+    -relay-host ${VAULT_RELAY_HOST} \
+    -queue-policy-param ${VAULT_QUEUE_POLICY_PARAM} \
+    -control-port 5000 \
+    -egress-port 5001 \
+    -health 127.0.0.1:8081
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+# The parent's shutdown takes at most 60 s.
+TimeoutStopSec=90
+StandardOutput=append:/var/log/vettid/vault-parent.log
+StandardError=inherit
+
+# Runs as root with every capability dropped: it needs AF_VSOCK, IMDS (the
+# instance role) and the network, none of which needs a capability, and it
+# writes no files. Root keeps the vsock/IMDS setup identical to the
+# hardware smoke test. No PrivateDevices=, ProtectClock= or
+# ProtectKernelLogs=: they install device rules, and the vsock path should
+# not depend on them.
+User=root
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/log/vettid
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_VSOCK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

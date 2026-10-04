@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+# vault-host-config (vault-host-config.service, oneshot at boot): turns
+# /etc/vettid/host.env (EC2 user data) and vettid.org's SSM parameters into
+# /run/vettid/parent.env and /run/vettid/lifecycle.env, and configures the
+# CloudWatch agent. Fails closed: any missing or malformed input stops the
+# boot of vault-parent, vault-enclave and vault-lifecycle. See README.md.
+#
+# It calls only IMDSv2 and SSM (the host's DNS firewall allows nothing
+# else it would need); the account comes from the instance identity
+# document. There are no secrets on the host.
+set -euo pipefail
+umask 077
+
+HOST_ENV=${HOST_ENV:-/etc/vettid/host.env}
+RUN_DIR=${RUN_DIR:-/run/vettid}
+CWA_TEMPLATE=/opt/vettid/etc/amazon-cloudwatch-agent.json.tmpl
+CWA_CONFIG=/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+CWA_CTL=/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl
+IMDS=http://169.254.169.254
+SSM_DEADLINE_S=${SSM_DEADLINE_S:-300}
+
+log() { printf '%s vault-host-config: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
+die() {
+	log "FATAL: $*"
+	exit 1
+}
+
+# check NAME VALUE REGEX
+check() {
+	[[ $2 =~ $3 ]] || die "$1 is malformed: '$2'"
+}
+
+# --- host.env (EC2 user data, cloud-init write_files) ---
+[[ -r $HOST_ENV ]] || die "$HOST_ENV is missing (the launch template's user data writes it)"
+VETTID_SSM_PREFIX='' VETTID_REGION='' VETTID_RELEASE='' VETTID_ASG_NAME='' VETTID_LIFECYCLE_HOOK=''
+while IFS= read -r line || [[ -n $line ]]; do
+	line=${line%$'\r'}
+	[[ -z $line || $line == \#* ]] && continue
+	[[ $line =~ ^([A-Z_]+)=(.*)$ ]] || die "$HOST_ENV: not KEY=value: '$line'"
+	key=${BASH_REMATCH[1]} val=${BASH_REMATCH[2]}
+	if [[ $val =~ ^\"(.*)\"$ || $val =~ ^\'(.*)\'$ ]]; then
+		val=${BASH_REMATCH[1]}
+	fi
+	case $key in
+	VETTID_SSM_PREFIX | VETTID_REGION | VETTID_RELEASE | VETTID_ASG_NAME | VETTID_LIFECYCLE_HOOK)
+		printf -v "$key" '%s' "$val"
+		;;
+	*) log "warning: $HOST_ENV: ignoring unknown key $key" ;;
+	esac
+done <"$HOST_ENV"
+check VETTID_SSM_PREFIX "$VETTID_SSM_PREFIX" '^/[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*$'
+check VETTID_REGION "$VETTID_REGION" '^[a-z]{2}(-[a-z]+)+-[0-9]$'
+check VETTID_RELEASE "$VETTID_RELEASE" '^[1-9][0-9]{0,8}$'
+check VETTID_ASG_NAME "$VETTID_ASG_NAME" '^[A-Za-z0-9_.-]{1,255}$'
+check VETTID_LIFECYCLE_HOOK "$VETTID_LIFECYCLE_HOOK" '^[A-Za-z0-9_./-]{1,255}$'
+log "release $VETTID_RELEASE, parameters under $VETTID_SSM_PREFIX"
+
+# --- IMDSv2 ---
+imds_get() {
+	local path=$1 token i
+	for i in $(seq 1 30); do
+		if token=$(curl -sf --max-time 5 -X PUT "$IMDS/latest/api/token" -H 'X-aws-ec2-metadata-token-ttl-seconds: 300') &&
+			curl -sf --max-time 5 -H "X-aws-ec2-metadata-token: $token" "$IMDS/$path"; then
+			return 0
+		fi
+		sleep 2
+	done
+	return 1
+}
+instance_id=$(imds_get latest/meta-data/instance-id) || die "IMDSv2: no instance id"
+check instance-id "$instance_id" '^i-[0-9a-f]{8,17}$'
+identity=$(imds_get latest/dynamic/instance-identity/document) || die "IMDSv2: no identity document"
+read -r account imds_region < <(python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["accountId"], d["region"])' <<<"$identity") ||
+	die "IMDSv2: unreadable identity document"
+check account "$account" '^[0-9]{12}$'
+[[ $imds_region == "$VETTID_REGION" ]] || die "instance region $imds_region is not VETTID_REGION $VETTID_REGION"
+log "instance $instance_id, account $account"
+
+# --- SSM (retried for ~5 min while vettid.org's stacks settle; then fail) ---
+names=(data-bucket-name vaults-table-name vault-instances-table-name vault-requests-table-name
+	control-queue-prefix dlq-arn relay-host host-log-group)
+full=()
+for n in "${names[@]}"; do full+=("$VETTID_SSM_PREFIX/$n"); done
+declare -A param
+deadline=$((SECONDS + SSM_DEADLINE_S))
+delay=2
+values=''
+export AWS_PAGER=''
+while :; do
+	if out=$(aws ssm get-parameters --region "$VETTID_REGION" --names "${full[@]}" --output json 2>&1) &&
+		values=$(python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+bad = d.get("InvalidParameters") or []
+if bad:
+    print("missing: " + " ".join(bad), file=sys.stderr)
+    sys.exit(3)
+for p in d.get("Parameters", []):
+    v = p.get("Value", "")
+    if any(c in v for c in "\t\r\n"):
+        print("control character in " + p["Name"], file=sys.stderr)
+        sys.exit(4)
+    print(p["Name"] + "\t" + v)
+' <<<"$out" 2>&1); then
+		param=()
+		while IFS=$'\t' read -r k v; do param[$k]=$v; done <<<"$values"
+		ok=1
+		for f in "${full[@]}"; do [[ -n ${param[$f]:-} ]] || ok=0; done
+		((ok)) && break
+		values="empty value"
+	fi
+	((SECONDS < deadline)) || die "SSM parameters unavailable: ${values:-$out}"
+	log "SSM not ready (${values:-${out:0:200}}); retrying in ${delay}s"
+	sleep "$delay"
+	delay=$((delay * 2 > 30 ? 30 : delay * 2))
+	values=''
+done
+p() { printf '%s' "${param[$VETTID_SSM_PREFIX/$1]}"; }
+bucket=$(p data-bucket-name)
+t_vaults=$(p vaults-table-name)
+t_instances=$(p vault-instances-table-name)
+t_requests=$(p vault-requests-table-name)
+queue_prefix=$(p control-queue-prefix)
+dlq_arn=$(p dlq-arn)
+relay_host=$(p relay-host)
+log_group=$(p host-log-group)
+check data-bucket-name "$bucket" '^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$'
+check vaults-table-name "$t_vaults" '^[A-Za-z0-9_.-]{3,255}$'
+check vault-instances-table-name "$t_instances" '^[A-Za-z0-9_.-]{3,255}$'
+check vault-requests-table-name "$t_requests" '^[A-Za-z0-9_.-]{3,255}$'
+# The parent's queue name is prefix + instance id (≤ 80 characters).
+check control-queue-prefix "$queue_prefix" '^[A-Za-z0-9_-]{1,60}$'
+check dlq-arn "$dlq_arn" "^arn:aws:sqs:$VETTID_REGION:$account:[A-Za-z0-9_-]{1,80}\$"
+check relay-host "$relay_host" '^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$'
+check host-log-group "$log_group" '^[A-Za-z0-9_./#-]{1,512}$'
+
+# --- outputs ---
+install -d -m 0700 "$RUN_DIR"
+tmp=$(mktemp "$RUN_DIR/.parent.env.XXXXXX")
+cat >"$tmp" <<EOF
+VAULT_INSTANCE_ID=$instance_id
+VAULT_REGION=$VETTID_REGION
+VAULT_BUCKET=$bucket
+VAULT_TABLE_VAULTS=$t_vaults
+VAULT_TABLE_INSTANCES=$t_instances
+VAULT_TABLE_REQUESTS=$t_requests
+VAULT_QUEUE_PREFIX=$queue_prefix
+VAULT_DLQ_ARN=$dlq_arn
+VAULT_RELAY_HOST=$relay_host
+VAULT_QUEUE_POLICY_PARAM=$VETTID_SSM_PREFIX/control-queue-policy
+EOF
+chmod 0600 "$tmp"
+mv -f "$tmp" "$RUN_DIR/parent.env"
+tmp=$(mktemp "$RUN_DIR/.lifecycle.env.XXXXXX")
+cat >"$tmp" <<EOF
+VAULT_INSTANCE_ID=$instance_id
+VETTID_REGION=$VETTID_REGION
+VETTID_ASG_NAME=$VETTID_ASG_NAME
+VETTID_LIFECYCLE_HOOK=$VETTID_LIFECYCLE_HOOK
+EOF
+chmod 0600 "$tmp"
+mv -f "$tmp" "$RUN_DIR/lifecycle.env"
+log "wrote $RUN_DIR/parent.env and $RUN_DIR/lifecycle.env"
+
+# --- CloudWatch agent (logs only; a failure here does not stop the vault) ---
+if [[ -x $CWA_CTL && -r $CWA_TEMPLATE ]]; then
+	install -d -m 0755 "$(dirname "$CWA_CONFIG")"
+	sed -e "s|__LOG_GROUP__|$log_group|g" -e "s|__REGION__|$VETTID_REGION|g" "$CWA_TEMPLATE" >"$CWA_CONFIG.tmp"
+	chmod 0644 "$CWA_CONFIG.tmp"
+	mv -f "$CWA_CONFIG.tmp" "$CWA_CONFIG"
+	# fetch-config without -s: the agent unit is ordered after this one,
+	# so a blocking start from here would deadlock; --no-block queues it.
+	if "$CWA_CTL" -a fetch-config -m ec2 -c "file:$CWA_CONFIG" &&
+		systemctl --no-block restart amazon-cloudwatch-agent.service; then
+		log "CloudWatch agent: log group $log_group"
+	else
+		log "warning: CloudWatch agent not configured"
+	fi
+else
+	log "warning: CloudWatch agent or template missing; host logs stay local"
+fi
+log "done"

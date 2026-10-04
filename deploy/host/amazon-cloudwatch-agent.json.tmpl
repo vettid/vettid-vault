@@ -1,0 +1,35 @@
+{
+  "agent": {
+    "region": "__REGION__",
+    "run_as_user": "root",
+    "logfile": "/opt/aws/amazon-cloudwatch-agent/logs/amazon-cloudwatch-agent.log"
+  },
+  "logs": {
+    "logs_collected": {
+      "files": {
+        "collect_list": [
+          {
+            "file_path": "/var/log/vettid/vault-parent.log",
+            "log_group_name": "__LOG_GROUP__",
+            "log_stream_name": "{instance_id}/vault-parent"
+          },
+          {
+            "file_path": "/var/log/vettid/vault-lifecycle.log",
+            "log_group_name": "__LOG_GROUP__",
+            "log_stream_name": "{instance_id}/vault-lifecycle"
+          },
+          {
+            "file_path": "/var/log/vettid/vault-host-config.log",
+            "log_group_name": "__LOG_GROUP__",
+            "log_stream_name": "{instance_id}/vault-host-config"
+          },
+          {
+            "file_path": "/var/log/vettid/vault-enclave.log",
+            "log_group_name": "__LOG_GROUP__",
+            "log_stream_name": "{instance_id}/vault-enclave"
+          }
+        ]
+      }
+    }
+  }
+}

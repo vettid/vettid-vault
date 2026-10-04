@@ -56,7 +56,7 @@ jobs:
         ports:
           - 4566:4566
         env:
-          SERVICES: s3,sqs,dynamodb
+          SERVICES: s3,sqs,dynamodb,ssm
           SQS_ENDPOINT_STRATEGY: path
           LOCALSTACK_HOST: 127.0.0.1:4566
         options: >-

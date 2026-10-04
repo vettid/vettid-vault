@@ -1,9 +1,14 @@
-// Package scripts holds the checks of the enclave image build and the
-// smoke-test scripts (docs/SMOKE.md); there is no Go code here.
+// Package scripts holds the checks of the enclave image build, the
+// smoke-test scripts (docs/SMOKE.md) and the host files (deploy/host);
+// there is no Go code here.
 package scripts
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -78,6 +83,82 @@ func TestScripts(t *testing.T) {
 		}
 		if st, err := os.Stat(p); err != nil || st.Mode()&0o111 == 0 {
 			t.Errorf("%s is not executable", p)
+		}
+	}
+}
+
+// The host files (deploy/host): SHA256SUMS lists every other file with its
+// current hash (vettid.org pins SHA256SUMS per release; `make host-sums`),
+// the scripts parse, nothing runs the enclave in debug mode, and the
+// scripts call no AWS service beyond the host's DNS allowlist.
+func TestHostFiles(t *testing.T) {
+	const dir = "../deploy/host"
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var want []string
+	for _, e := range ents {
+		if e.IsDir() {
+			t.Errorf("deploy/host/%s: no subdirectories (the AMI build fetches a flat list)", e.Name())
+			continue
+		}
+		b := []byte(read(t, filepath.Join(dir, e.Name())))
+		if strings.Contains(string(b), "debug-mode") {
+			t.Errorf("deploy/host/%s mentions debug-mode", e.Name())
+		}
+		if regexp.MustCompile(`AKIA[0-9A-Z]{16}|aws_secret_access_key`).Match(b) {
+			t.Errorf("deploy/host/%s contains credentials", e.Name())
+		}
+		if e.Name() == "SHA256SUMS" {
+			continue
+		}
+		want = append(want, fmt.Sprintf("%x  %s", sha256.Sum256(b), e.Name()))
+	}
+	// os.ReadDir sorts by name (byte order, as LC_ALL=C sort does).
+	if got := read(t, filepath.Join(dir, "SHA256SUMS")); got != strings.Join(want, "\n")+"\n" {
+		t.Errorf("deploy/host/SHA256SUMS is stale (make host-sums):\n%s\nwant:\n%s", got, strings.Join(want, "\n"))
+	}
+
+	for _, s := range []string{"install.sh", "vault-host-config", "vault-lifecycle"} {
+		p := filepath.Join(dir, s)
+		src := read(t, p)
+		if !strings.HasPrefix(src, "#!/usr/bin/env bash\n") || !strings.Contains(src, "set -euo pipefail") {
+			t.Errorf("%s: missing shebang or set -euo pipefail", s)
+		}
+		if st, err := os.Stat(p); err != nil || st.Mode()&0o111 == 0 {
+			t.Errorf("%s is not executable", s)
+		}
+		// jq is not on the host; STS is not on the DNS allowlist.
+		if regexp.MustCompile(`\bjq\b|\bsts\b`).MatchString(src) {
+			t.Errorf("%s uses jq or STS", s)
+		}
+		if out, err := exec.Command("bash", "-n", p).CombinedOutput(); err != nil {
+			t.Errorf("bash -n %s: %v\n%s", s, err, out)
+		}
+	}
+
+	// The units run what install.sh installs, the enclave in production
+	// mode with the allocator's resources.
+	enc := read(t, filepath.Join(dir, "vault-enclave.service"))
+	if !strings.Contains(enc, "ExecStart=/usr/bin/nitro-cli run-enclave --eif-path /opt/vettid/vault-enclave.eif --cpu-count 1 --memory 5120 --enclave-cid 16\n") {
+		t.Error("vault-enclave.service: unexpected run-enclave command")
+	}
+	alloc := read(t, filepath.Join(dir, "allocator.yaml"))
+	if !strings.Contains(alloc, "\nmemory_mib: 5120\n") || !strings.Contains(alloc, "\ncpu_count: 1\n") {
+		t.Error("allocator.yaml does not match the enclave's resources")
+	}
+	par := read(t, filepath.Join(dir, "vault-parent.service"))
+	for _, f := range []string{"-instance-id", "-region", "-bucket", "-table-vaults", "-table-instances", "-table-requests",
+		"-queue-prefix", "-dlq-arn", "-relay-host", "-queue-policy-param"} {
+		if !strings.Contains(par, "    "+f+" ${VAULT_") {
+			t.Errorf("vault-parent.service lacks %s", f)
+		}
+	}
+	env := read(t, filepath.Join(dir, "vault-host-config"))
+	for _, v := range regexp.MustCompile(`\$\{(VAULT_[A-Z_]+)\}`).FindAllStringSubmatch(par, -1) {
+		if !strings.Contains(env, "\n"+v[1]+"=") {
+			t.Errorf("vault-host-config does not write %s", v[1])
 		}
 	}
 }

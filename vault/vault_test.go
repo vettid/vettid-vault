@@ -47,6 +47,9 @@ type stubRelay struct {
 	deposits []stubDeposit
 	revoked  []string
 	failWith error
+	// mailboxDeleted counts DeleteMailbox calls; deleteErr fails them.
+	mailboxDeleted int
+	deleteErr      error
 }
 
 type stubDeposit struct {
@@ -83,6 +86,15 @@ func (r *stubRelay) GetClaim(context.Context, string, string) ([]byte, error) {
 	return nil, errors.New("none")
 }
 func (r *stubRelay) DeleteClaim(context.Context, string) error { return nil }
+func (r *stubRelay) DeleteMailbox(context.Context) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.deleteErr != nil {
+		return r.deleteErr
+	}
+	r.mailboxDeleted++
+	return nil
+}
 func (r *stubRelay) client() *relayclient.Client {
 	c := relayclient.New(r.base, r.key)
 	return c

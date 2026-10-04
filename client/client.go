@@ -271,6 +271,17 @@ func (d *Device) OpenToken() (string, error) {
 	return d.own.MintOpenToken(d.st.RelayURL, 10*time.Minute, "")
 }
 
+// VaultMailbox returns the relay URL and mailbox id of the vault this
+// device is paired with ("" before pairing).
+func (d *Device) VaultMailbox() (url, mailbox string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.st.Vault == nil {
+		return "", ""
+	}
+	return d.st.Vault.RelayURL, d.st.Vault.Mailbox
+}
+
 func (d *Device) vaultPeerAddr() (url, mailbox string, pk ed25519.PublicKey) {
 	v := d.st.Vault
 	return v.RelayURL, v.Mailbox, v.RelayPK

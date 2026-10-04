@@ -33,6 +33,10 @@ type Relay interface {
 	PutClaim(ctx context.Context, data []byte, ttl time.Duration) (string, time.Time, error)
 	GetClaim(ctx context.Context, relayURL, claimID string) ([]byte, error)
 	DeleteClaim(ctx context.Context, claimID string) error
+	// DeleteMailbox deletes the vault's own mailbox and everything in it
+	// (RELAY-PROTOCOL 0.5.0 §6.10; idempotent). A relay before 0.5.0
+	// answers not_found.
+	DeleteMailbox(ctx context.Context) error
 	MintToken(sub ed25519.PublicKey, ttl time.Duration, jti string, quota *relayauth.Quota) (string, error)
 	MintOpenToken(ttl time.Duration, jti string) (string, error)
 }
@@ -126,6 +130,10 @@ func (r *ClientRelay) GetClaim(ctx context.Context, relayURL, claimID string) ([
 
 func (r *ClientRelay) DeleteClaim(ctx context.Context, claimID string) error {
 	return r.client(r.base).DeleteClaim(ctx, claimID)
+}
+
+func (r *ClientRelay) DeleteMailbox(ctx context.Context) error {
+	return r.client(r.base).DeleteMailbox(ctx)
 }
 
 func (r *ClientRelay) MintToken(sub ed25519.PublicKey, ttl time.Duration, jti string, quota *relayauth.Quota) (string, error) {

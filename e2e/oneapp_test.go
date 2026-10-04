@@ -4,10 +4,13 @@ package e2e
 
 import (
 	"context"
+	"crypto/ed25519"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/vettid/vettid-relay/relayclient"
 
 	"github.com/vettid/vettid-vault/client"
 	"github.com/vettid/vettid-vault/internal/enclavetest"
@@ -483,9 +486,10 @@ func storeHas(t *testing.T, aw *acWorld, key string) bool {
 }
 
 // §12.5: vault.delete from the app: the PIN and the password (refused
-// while a clone alarm is open); connections and devices are told, every
-// token is revoked at the relay, the stored objects are erased, the host
-// reports `deleted`, and the member can enroll afresh.
+// while a clone alarm is open); connections and devices are told, the
+// vault's relay mailbox is deleted (RELAY-PROTOCOL 0.5.0: deposits get
+// mailbox_unknown), the stored objects are erased, the host reports
+// `deleted`, and the member can enroll afresh.
 func TestVaultDelete(t *testing.T) {
 	aw := newACWorld(t)
 	a := aw.newApp("member-del", enclavetest.NewAndroidAttester(0x88, enclavetest.AndroidOptions{}))
@@ -528,6 +532,14 @@ func TestVaultDelete(t *testing.T) {
 	if err := a.dev.VaultDelete(ctx, acPIN, "not the password"); client.Code(err) != "bad_password" {
 		t.Fatalf("wrong password: %v", err)
 	}
+	// The vault's mailbox exists: a deposit with a bogus token gets past
+	// the mailbox check (§5.3 step 1) and fails on the token.
+	relayURL, mailbox := a.dev.VaultMailbox()
+	probe := relayclient.New(relayURL, ed25519.NewKeyFromSeed(make([]byte, 32)))
+	probe.MaxAttempts = 1
+	if _, err := probe.Deposit(ctx, mailbox, "v4.public.bogus", []byte("x")); !relayclient.IsCode(err, "token_invalid") {
+		t.Fatalf("probe before deletion: %v", err)
+	}
 	if err := a.dev.VaultDelete(ctx, acPIN, credPW); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
@@ -547,7 +559,11 @@ func TestVaultDelete(t *testing.T) {
 	if !deleted {
 		t.Fatal("no deleted lifecycle event")
 	}
-	// The relay refuses the desktop's deposits: its key is denylisted.
+	// The vault's relay mailbox is gone (RELAY-PROTOCOL 0.5.0 §6.10), so
+	// the relay refuses every deposit, the desktop's included.
+	if _, err := probe.Deposit(ctx, mailbox, "v4.public.bogus", []byte("x")); !relayclient.IsCode(err, "mailbox_unknown") {
+		t.Fatalf("vault mailbox after deletion: %v", err)
+	}
 	short, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if r, err := desk.Request(short, "vault.status", []byte(`{}`)); err == nil && r.OK() {

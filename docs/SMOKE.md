@@ -39,7 +39,7 @@ Required checks (any FAIL fails the run):
 | `nsm.attestation_verifies` | document with nonce and the self-test user_data verifies against the pinned AWS Nitro root, is fresh, PCRs match |
 | `proc.mounted`, `proc.self_exe` | `/proc` mounted; `/proc/self/exe` resolves (vault processes are re-executions of it) |
 | `supervisor.not_dumpable` | `PR_SET_DUMPABLE` 0 |
-| `egress.relay_healthz` | `GET https://relay.vettid.org/healthz` through the parent's forwarder, TLS against the pinned Amazon roots: 200, `status ok`, protocol `0.4.0` |
+| `egress.relay_healthz` | `GET https://relay.vettid.org/healthz` through the parent's forwarder, TLS against the pinned Amazon roots: 200, `status ok`, protocol `0.4.0` or a later `0.x` (0.5.0 adds mailbox deletion) |
 | `egress.relay_http2` | the relay connection is HTTP/2 |
 | `egress.google_status_list` | the attestation status list from `android.googleapis.com` (GTS roots) parses |
 | `kms.read_key` | DescribeKey, GetKeyPolicy, ListGrants on the test key over enclave TLS to `kms.<region>.amazonaws.com` (HTTP/1.1), SigV4 with the instance role's credentials passed by the parent |

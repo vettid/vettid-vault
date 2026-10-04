@@ -2,11 +2,11 @@
   "channel": "staging",
   "release": 0,
   "manifest_keys": [
-    "TODO-W3: SubjectPublicKeyInfo (base64 DER) of the staging manifest key (KMS, staging account)"
+    "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEok8gqeC5VcGx4KL+B5fL7UgENBXf+59RigkR0TZ0NqjiWM2VK6V1+paNoqRTBx7nXXN3L/2ehjsTb31GGVkEAw=="
   ],
-  "seal_account": "TODO-O2: the staging account id (12 digits)",
+  "seal_account": "347272280361",
   "seal_region": "us-east-1",
-  "retirement_principal": "TODO-O2: arn:aws:iam::<staging account>:role/vettid-org-vault-key-retirement",
+  "retirement_principal": "arn:aws:iam::347272280361:role/vettid-org-vault-key-retirement",
   "retirement_window_days": 7,
   "android_signers": [
     "TODO-O8: SHA-256 (64 lowercase hex) of the signing certificate of staging app builds"

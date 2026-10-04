@@ -53,9 +53,9 @@ case "$channel" in
     cfg="enclave/releasecfg/${channel}.json"
     # The same check Dockerfile.enclave runs: TODO- placeholders and missing
     # values (release 0, empty key lists) alike.
-    if ! out="$("$go" run ./cmd/releasecfg check "$channel" 2>&1)"; then
+    if ! gate="$("$go" run ./cmd/releasecfg check "$channel" 2>&1)"; then
       log "FAIL $cfg still has placeholders; refusing to build a $channel release image:"
-      echo "$out" >&2
+      echo "$gate" >&2
       exit 1
     fi
     cfgsum="$(sha256sum "$cfg" | cut -d' ' -f1)"

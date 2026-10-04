@@ -704,7 +704,8 @@ replacing the app, backup off meaning loss, and GrapheneOS attestation.
 - `parent`: `deleted` also records the `vault_deleted` notice for the
   member API's mailer, which then removes the vault rows.
 - The relay cannot delete a mailbox (RELAY-PROTOCOL 0.4.0): everything is
-  denylisted; a `DELETE /v1/mailbox` is recommended (spec §15).
+  denylisted; a `DELETE /v1/mailbox` is recommended (spec §15). Done in
+  0.9.1, below.
 - The no-holder adoption path is gone: a holderless credential restricts
   the vault (`CredentialReady` false, `CredentialExists` true) to the
   recovery path and deletion.
@@ -727,3 +728,33 @@ nothing).
 
 - Migration of vaults with several apps: none exist outside tests.
 - A relay route to delete a mailbox (vettid-relay untouched).
+
+## Relay mailbox deletion (0.9.1)
+
+VAULT-MESSAGING 0.9.1 (owner decision of 2026-10-04) with RELAY-PROTOCOL
+0.5.0 (`DELETE /v1/mailbox`, vettid-relay `protocol-0.5`).
+
+- `vault.Relay.DeleteMailbox` (`relayclient.DeleteMailbox`); the test
+  relays implement it.
+- `finishDelete` (§12.5 step 2): `deleteMailbox` runs first, once, after
+  the marking flush and before the drain, while the relay key still
+  exists. On success every queued `revoke` and `delete_claim` outbox entry
+  is marked done: they concerned the deleted mailbox. On failure (a relay
+  before 0.5.0 answers `not_found`; an unreachable relay after
+  relayclient's retries) they stay and the drain delivers them, as in
+  0.9.0. Connection and device notices go to their own mailboxes either
+  way.
+- Crash safety is unchanged: a crash before step 2 converges through the
+  header marker without the relay key, so the mailbox then stays (as on
+  an old relay). The relay's delete is idempotent.
+- `client.Device.VaultMailbox` (the paired vault's relay URL and mailbox),
+  used by `e2e.TestVaultDelete` to check `mailbox_unknown` after the
+  deletion.
+- The hardware self-test (`egress.relay_healthz`, docs/SMOKE.md) required
+  the relay protocol to be exactly `0.4.0`; it now accepts `0.4.0` and
+  every later `0.x` (`supervisor.RelayProtocolOK`), so it keeps passing
+  once relay.vettid.org runs 0.5.0. Releases before this change fail that
+  check against a 0.5.0 relay (the self-test only; nothing at runtime
+  reads the version).
+- go.mod pins the relay at the `protocol-0.5` branch commit (pseudo-version)
+  until that PR merges; re-pin to the merge commit then.

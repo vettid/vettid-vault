@@ -116,6 +116,9 @@ func (r *MemRelay) GetClaim(context.Context, string, string) ([]byte, error) {
 // DeleteClaim implements vault.Relay.
 func (r *MemRelay) DeleteClaim(context.Context, string) error { return nil }
 
+// DeleteMailbox implements vault.Relay.
+func (r *MemRelay) DeleteMailbox(context.Context) error { return nil }
+
 func (r *MemRelay) client() *relayclient.Client { return relayclient.New(r.base, r.key) }
 
 // MintToken implements vault.Relay.

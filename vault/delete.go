@@ -28,7 +28,13 @@ import (
 //     issued is revoked by jti and every peer's relay key by sub; open
 //     claims are deleted. A vault whose header says Deleting never runs
 //     again: any later unlock or recovery finishes the deletion instead.
-//  2. drain: the outbox is delivered once, best effort.
+//  2. relay and drain: the vault's own mailbox is deleted at the relay
+//     (RELAY-PROTOCOL 0.5.0 §6.10) with its messages, denylist, blobs and
+//     claims; the queued revocations and claim deletions concerned that
+//     mailbox and are dropped. If the deletion fails (a relay before 0.5.0
+//     answers not_found) they stay queued as the fallback. Then the outbox
+//     is delivered once, best effort (the notices go to the connections'
+//     and devices' mailboxes, not this one).
 //  3. zeroize: every key in memory is wiped and the vault is locked.
 //  4. erase: the state object, then the headers of every release the vault
 //     knew (its own last: it is the deletion marker), then the enclave's
@@ -140,6 +146,7 @@ func (m *Manager) denySubOnly(p *Peer, now time.Time) {
 // finishDelete runs steps 2–5 after the marking flush. It returns nil
 // once the vault is gone (or another writer took it, ErrSplitBrain).
 func (m *Manager) finishDelete(ctx context.Context) error {
+	m.deleteMailbox(ctx)
 	m.drainOutbox(ctx)
 	vid, guid := m.st.VaultID, m.st.UserGUID
 	releases := []string{}
@@ -158,6 +165,24 @@ func (m *Manager) finishDelete(ctx context.Context) error {
 	}
 	m.report("deleted", vid, m.opt.Release.PCR0)
 	return nil
+}
+
+// deleteMailbox deletes the vault's relay mailbox (step 2), once: the relay
+// key exists only until step 3, and after a crash the convergence path
+// (an unlock or recovery that finds the marker) has no key to sign with,
+// so the mailbox then stays, as on a relay before 0.5.0. The request is
+// idempotent at the relay. On success every queued revocation and claim
+// deletion is done: they concerned this mailbox, which no longer exists.
+func (m *Manager) deleteMailbox(ctx context.Context) {
+	if err := m.relay.DeleteMailbox(ctx); err != nil {
+		return // the revocations and claim deletions remain the fallback
+	}
+	for _, e := range m.st.Outbox {
+		if e.Op == OpRevoke || e.Op == OpDeleteClaim {
+			e.Done = true
+		}
+	}
+	m.dirty = true
 }
 
 // UserIndexHash is the store key component of a member's index object

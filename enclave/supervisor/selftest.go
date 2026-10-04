@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -167,9 +168,26 @@ func (s *Supervisor) selftestRelay(ctx context.Context, r *selftest.Report, hc *
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	var h struct{ Status, Protocol string }
 	_ = json.Unmarshal(b, &h)
-	r.Add("egress.relay_healthz", resp.StatusCode == 200 && h.Status == "ok" && h.Protocol == "0.4.0", true,
+	r.Add("egress.relay_healthz", resp.StatusCode == 200 && h.Status == "ok" && RelayProtocolOK(h.Protocol), true,
 		fmt.Sprintf("%s %d protocol=%s", resp.Proto, resp.StatusCode, h.Protocol))
 	r.Add("egress.relay_http2", resp.ProtoMajor == 2, true, resp.Proto)
+}
+
+// MinRelayMinor is the oldest RELAY-PROTOCOL minor version (0.x) the vault
+// works with: 0.4.0 (collect jti, §1.2). Later minors are additive (spec
+// §7.3); 0.5.0 adds the mailbox deletion that §12.5 uses when available.
+const MinRelayMinor = 4
+
+// RelayProtocolOK reports whether a relay's /healthz protocol version
+// ("0.<minor>.<patch>") is one the vault works with.
+func RelayProtocolOK(v string) bool {
+	parts := strings.Split(v, ".")
+	if len(parts) != 3 || parts[0] != "0" {
+		return false
+	}
+	minor, err1 := strconv.Atoi(parts[1])
+	_, err2 := strconv.Atoi(parts[2])
+	return err1 == nil && err2 == nil && minor >= MinRelayMinor && parts[1] == strconv.Itoa(minor)
 }
 
 // selftestManifest is an unsigned, in-memory manifest naming this

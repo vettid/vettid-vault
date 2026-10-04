@@ -1,12 +1,12 @@
 ---
 title: VAULT-MESSAGING
 status: draft
-version: 0.9.0
-date: 2026-10-03
+version: 0.9.1
+date: 2026-10-04
 owner: Al Liebl (Mesmer)
 component: vault manager (enclave), parent forwarder, apps, desktops, agents, member API vault routes
 related:
-  - RELAY-PROTOCOL.md (0.4.0)
+  - RELAY-PROTOCOL.md (0.5.0)
   - RELAY-PLAN.md
   - PQC-MIGRATION.md
   - CALLING-SERVICE.md
@@ -15,6 +15,11 @@ related:
   - MEMBER-API.md
   - VAULT-ITEMS.md (0.1.0, approved 2026-10-03)
 changelog:
+  - 0.9.1: vault deletion deletes the vault's relay mailbox
+    (RELAY-PROTOCOL 0.5.0 `DELETE /v1/mailbox`, owner decision of
+    2026-10-04): right after the marking flush, before the drain; the
+    queued revocations and claim deletions are then moot; on a relay
+    before 0.5.0 they remain the fallback (§1.2, §12.5, §15 item 12)
   - 0.9.0: one app per vault (owner decisions of 2026-10-03,
     PROTEAN-CREDENTIAL §4): the member's single app is the credential's
     holder and the only app; no second app pairs (`one_app`) (§6.7);
@@ -204,13 +209,15 @@ described in RFC 2119.
 
 ### 1.2 Relay features used
 
-This document uses the following RELAY-PROTOCOL 0.4.0 features:
+This document uses the following RELAY-PROTOCOL 0.5.0 features:
 
 - one-shot **open deposit tokens** (§5.6);
 - **`sender`** in collect responses (§6.3, §6.4);
 - **`jti`** in collect responses: the `jti` of the deposit token a message
   was accepted under (§6.3, §6.4; new in 0.4.0, used by §6.6);
 - **claims** (§6.9);
+- **mailbox deletion**, `DELETE /v1/mailbox` (§6.10; new in 0.5.0, used
+  by §12.5);
 - fractional-second timestamps (§4.1);
 - relay **policy values** advertised at registration:
   - `max_token_lifetime_seconds`;
@@ -5899,7 +5906,16 @@ converges to "deleted", never to a vault that runs again:
    issued is revoked at the relay by `jti` and every peer's relay key by
    `sub` (§7.4); open invitation claims are deleted; a transfer ends. The
    requester's `{}` follows. Nothing else in the batch is handled.
-2. **Drain**: the outbox is delivered once, best effort.
+2. **Relay mailbox, then drain** (0.9.1): the vault deletes its own relay
+   mailbox (RELAY-PROTOCOL 0.5.0 §6.10, `DELETE /v1/mailbox` signed with
+   the vault relay key), once. With it go every message waiting there,
+   the denylist, blobs and the vault's claims, and from then on every
+   deposit is refused (`mailbox_unknown`), so the revocations and claim
+   deletions queued in step 1 are moot and are dropped from the outbox.
+   If the request fails (a relay before 0.5.0 answers `not_found`, or
+   the relay is unreachable after the client's retries), they stay
+   queued as the fallback. Then the outbox is delivered once, best effort:
+   the notices go to the connections' and devices' own mailboxes.
 3. **Zeroize**: every key and the DEK are wiped; the vault is locked and
    its process exits (§12.4).
 4. **Erase**, through the parent's store with conditional deletes, a
@@ -5915,15 +5931,26 @@ converges to "deleted", never to a vault that runs again:
 **Convergence.** A header that records `deleting` is never opened again:
 an unlock, a recovery request, registration or cancellation that reads
 it finishes step 4 instead (and answers as for a missing vault). A crash
-after step 1 therefore loses at most the best-effort notices and
-revocations, never the deletion. Deletion is idempotent.
+after step 1 therefore loses at most the best-effort notices, the relay
+mailbox deletion and the revocations, never the deletion of the vault.
+Deletion is idempotent.
 
-**The relay mailbox.** RELAY-PROTOCOL 0.4.0 cannot delete a mailbox.
-After a deletion every token the vault issued is denylisted and every
-peer key revoked, so deposits are refused (`token_revoked`); messages
-already deposited expire after `message_ttl_seconds` (14 days); the
-registration stays, empty, with a key nobody holds. A relay route to
-delete a mailbox is recommended (§15).
+**The relay mailbox.** The relay key exists only in the running vault
+(§1.1 decision 3), so only step 2 can delete the mailbox; the relay's
+delete is idempotent, so a repeat is harmless. Order: the mailbox goes
+after the marking flush (a vault that is not yet marked can still run
+again and must keep its mailbox) and before zeroize (which destroys the
+key). Deleting it before the drain makes the queued revocations
+unnecessary: a deposit into a mailbox that no longer exists is refused
+whatever token it carries. The key is never registered again (step 3
+destroys it), and the relay keeps a tombstone that would refuse every
+token minted before the deletion even if it were (RELAY-PROTOCOL §6.10).
+The mailbox stays registered only where step 2 could not delete it: a
+crash between steps 1 and 2, a relay before 0.5.0 or one unreachable at
+that moment (then the revocations apply, as in 0.9.0), and a vault the
+host erases while it is locked (no key; its tokens expire on their own).
+There, messages already deposited expire after `message_ttl_seconds` (14
+days) and the registration stays, empty, with a key nobody holds.
 
 **What is left.** Nothing of the vault's contents: state, headers and
 index are erased, and the DEK, CEK and keys existed only in the
@@ -6184,11 +6211,12 @@ Follow-ups:
     enclave's egress, with its privacy and trust costs, §10.18) are not in
     0.8.0; the member's app is the chain source (owner decision). The fee
     cap (1,000 sat/vB) is fixed per release.
-12. **Relay mailbox deletion.** RELAY-PROTOCOL 0.4.0 has no route to
-    delete a mailbox, so a deleted vault leaves its mailbox registered and
-    empty of valid tokens (§12.5). Recommended: add an owner-signed
-    `DELETE /v1/mailbox` (messages, denylist, claims and blobs deleted;
-    later deposits `mailbox_unknown`) in the relay's next minor version.
+12. **Relay mailbox deletion.** Resolved (owner decision of 2026-10-04;
+    0.9.1): RELAY-PROTOCOL 0.5.0 adds the owner-signed `DELETE
+    /v1/mailbox` (§6.10), and a vault deletion uses it in step 2 (§12.5).
+    Left: a vault the host erases while it is locked cannot delete its
+    mailbox (there is no relay key outside the PIN-protected state, §1.1
+    decision 3); its tokens expire on their own.
 13. **OWNER DECISIONS of 0.9.0** (each with the recommendation the text
     follows; to confirm at review):
     1. Recovery with the backup off restores access only: reset the
@@ -6318,6 +6346,18 @@ Cross-implementation checks against Apple CryptoKit and BouncyCastle are
 pending (§15, follow-up 1).
 
 ## 17. Changelog
+
+- **0.9.1** (2026-10-04): vault deletion deletes the relay mailbox (owner
+  decision of 2026-10-04).
+  - §1.2: RELAY-PROTOCOL 0.5.0; mailbox deletion (§6.10).
+  - §12.5: step 2 deletes the vault's relay mailbox (`DELETE
+    /v1/mailbox`) after the marking flush and before the drain; on
+    success the queued revocations and claim deletions are dropped (moot);
+    on failure (a relay before 0.5.0, an unreachable relay) they remain the
+    fallback. Why this order, and where the mailbox can remain (a crash
+    between steps 1 and 2, an old or unreachable relay, a locked vault the
+    host erases).
+  - §15 item 12: resolved.
 
 - **0.9.0** (2026-10-03): one app per vault (owner decisions of
   2026-10-03, PROTEAN-CREDENTIAL §4).

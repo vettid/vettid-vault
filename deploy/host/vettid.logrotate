@@ -1,0 +1,9 @@
+/var/log/vettid/*.log {
+    daily
+    rotate 3
+    copytruncate
+    missingok
+    notifempty
+    compress
+    delaycompress
+}

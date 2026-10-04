@@ -6,7 +6,12 @@
 // does.
 //
 //	vault-parent -region us-east-1 -bucket B -table-vaults T1 -table-instances T2 \
-//	    -table-requests T3 -queue-prefix vettid-org-vault-control-
+//	    -table-requests T3 -queue-prefix vettid-org-vault-control- \
+//	    -queue-policy-param /vettid-org/prod/vault/control-queue-policy
+//
+// The instance queue gets the access policy vettid.org publishes in that
+// SSM parameter; without a valid one the parent exits before creating
+// anything (fail closed). deploy/host runs it under systemd.
 //
 // Development and integration tests use -control-tcp/-egress-tcp instead
 // of vsock, -aws-endpoint for LocalStack, -static-credentials and
@@ -54,6 +59,7 @@ func main() {
 		tRequests    = flag.String("table-requests", "", "vault-requests table")
 		queuePrefix  = flag.String("queue-prefix", "vettid-org-vault-control-", "queue name prefix")
 		dlq          = flag.String("dlq-arn", "", "dead-letter queue ARN (optional)")
+		policyParam  = flag.String("queue-policy-param", "", "SSM parameter holding the control queue's access policy (vettid.org /vettid-org/<stage>/vault/control-queue-policy); required except in -selftest")
 		relayHost    = flag.String("relay-host", "relay.vettid.org", "relay host on the egress allowlist")
 		controlPort  = flag.Uint("control-port", 5000, "vsock control port")
 		egressPort   = flag.Uint("egress-port", 5001, "vsock egress port")
@@ -108,16 +114,33 @@ func main() {
 	} else {
 		cp = aws.NewCredentialsCache(ec2rolecreds.New())
 	}
+	var (
+		queuePolicy string
+		err         error
+	)
 	if *selftestMode {
-		// The smoke test touches no table; NewAWS wants names.
+		// The smoke test touches no table and creates no queue; NewAWS
+		// wants names.
 		for _, t := range []*string{tVaults, tInstances, tRequests} {
 			if *t == "" {
 				*t = "unused-in-selftest"
 			}
 		}
+	} else {
+		// Fail closed: no queue without vettid.org's policy.
+		if *policyParam == "" {
+			fail("configuration", errors.New("-queue-policy-param is required"))
+		}
+		pctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		queuePolicy, err = parent.LoadQueuePolicy(pctx, parent.NewSSM(*region, *endpoint, cp, nil), *policyParam)
+		cancel()
+		if err != nil {
+			fail("control-queue policy", err)
+		}
+		log.Info("control-queue policy loaded", "parameter", *policyParam, "bytes", len(queuePolicy))
 	}
 	backend, err := parent.NewAWS(parent.AWSConfig{Region: *region, Credentials: cp, Endpoint: *endpoint, Bucket: *bucket,
-		VaultsTable: *tVaults, InstancesTable: *tInstances, RequestsTable: *tRequests, DLQARN: *dlq,
+		VaultsTable: *tVaults, InstancesTable: *tInstances, RequestsTable: *tRequests, DLQARN: *dlq, QueuePolicy: queuePolicy,
 		// LocalStack does not implement If-Match on DeleteObject.
 		EmulateConditionalDelete: *endpoint != ""})
 	if err != nil {

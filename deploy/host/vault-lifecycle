@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# vault-lifecycle (vault-lifecycle.service): watches the instance's Auto
+# Scaling target lifecycle state through IMDSv2 every 5 s. On Terminated it
+# drains the host (stopping vault-parent locks the enclave's vaults,
+# releases their leases, deletes the instance row and the queue; then the
+# enclave stops) and completes the ASG's termination lifecycle action.
+# If that fails, the hook's heartbeat timeout (300 s, default result
+# CONTINUE) lets the termination proceed anyway. See README.md.
+#
+# Environment (/run/vettid/lifecycle.env, written by vault-host-config):
+# VAULT_INSTANCE_ID, VETTID_REGION, VETTID_ASG_NAME, VETTID_LIFECYCLE_HOOK.
+set -euo pipefail
+
+: "${VAULT_INSTANCE_ID:?}" "${VETTID_REGION:?}" "${VETTID_ASG_NAME:?}" "${VETTID_LIFECYCLE_HOOK:?}"
+IMDS=http://169.254.169.254
+export AWS_PAGER=''
+
+log() { printf '%s vault-lifecycle: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
+
+target_state() {
+	local token
+	token=$(curl -sf --max-time 3 -X PUT "$IMDS/latest/api/token" -H 'X-aws-ec2-metadata-token-ttl-seconds: 60') || return 1
+	curl -sf --max-time 3 -H "X-aws-ec2-metadata-token: $token" "$IMDS/latest/meta-data/autoscaling/target-lifecycle-state"
+}
+
+drain() {
+	log "draining: stopping vault-parent (locks vaults, releases leases, deletes the queue and the instance row)"
+	systemctl stop vault-parent.service || log "warning: vault-parent did not stop cleanly"
+	systemctl stop vault-enclave.service || log "warning: vault-enclave did not stop cleanly"
+	local i
+	for i in 1 2 3 4 5; do
+		if aws autoscaling complete-lifecycle-action --lifecycle-hook-name "$VETTID_LIFECYCLE_HOOK" \
+			--auto-scaling-group-name "$VETTID_ASG_NAME" --instance-id "$VAULT_INSTANCE_ID" \
+			--lifecycle-action-result CONTINUE --region "$VETTID_REGION"; then
+			log "lifecycle action completed (CONTINUE)"
+			return 0
+		fi
+		sleep $((i * 3))
+	done
+	log "warning: could not complete the lifecycle action; the hook's heartbeat timeout (CONTINUE) applies"
+}
+
+log "watching $VAULT_INSTANCE_ID in $VETTID_ASG_NAME"
+last=''
+drained=0
+while :; do
+	state=$(target_state 2>/dev/null) || state=''
+	if [[ $state != "$last" ]]; then
+		log "target lifecycle state: ${state:-unavailable}"
+		last=$state
+	fi
+	if [[ $state == Terminated ]] && ((drained == 0)); then
+		drained=1
+		drain
+	fi
+	sleep 5
+done

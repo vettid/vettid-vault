@@ -32,6 +32,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"syscall"
@@ -44,6 +45,9 @@ import (
 	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
+	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
+	"github.com/aws/aws-sdk-go-v2/service/ssm"
+	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 
 	"github.com/vettid/vettid-vault/enclave/awskms"
 	"github.com/vettid/vettid-vault/internal/enclavetest"
@@ -109,7 +113,10 @@ type stack struct {
 	// tag (the compatibility matrix, VAULT-RELEASES §11.3).
 	prevDir     string
 	prevRelease uint64
-	instances []*instance
+	// policyParam holds queuePolicy in LocalStack SSM (vettid.org's
+	// vault/control-queue-policy).
+	policyParam, queuePolicy string
+	instances                []*instance
 }
 
 type instance struct {
@@ -202,6 +209,17 @@ func newStack(t *testing.T) *stack {
 	}
 	urlPrefix := strings.TrimSuffix(*probe.QueueUrl, "probe")
 	_, _ = s.sqs.DeleteQueue(ctx, &sqs.DeleteQueueInput{QueueUrl: probe.QueueUrl})
+	// vettid.org's control-queue policy (SSM vault/control-queue-policy):
+	// SendMessage for the member API's account.
+	s.policyParam = "/" + s.pfx + "/vault/control-queue-policy"
+	s.queuePolicy = `{"Version":"2012-10-17","Statement":[{"Sid":"MemberApiSend","Effect":"Allow",` +
+		`"Principal":{"AWS":"arn:aws:iam::000000000000:root"},"Action":"sqs:SendMessage",` +
+		`"Resource":"arn:aws:sqs:` + region + `:000000000000:` + s.qprefix + `*"}]}`
+	ssmc := ssm.NewFromConfig(ac, func(o *ssm.Options) { o.BaseEndpoint = aws.String(ep) })
+	if _, err := ssmc.PutParameter(ctx, &ssm.PutParameterInput{Name: aws.String(s.policyParam), Value: aws.String(s.queuePolicy),
+		Type: ssmtypes.ParameterTypeString}); err != nil {
+		t.Fatalf("policy parameter: %v", err)
+	}
 
 	// Releases, manifest and KMS keys (test world).
 	s.w = enclavetest.NewWorld(time.Now, relayURL)
@@ -284,6 +302,10 @@ func (s *stack) start(name string, n uint64, parentFlags ...string) *instance {
 	parentBin, enclBin := s.parentBin, s.enclBin
 	if s.prevDir != "" && n == s.prevRelease {
 		parentBin, enclBin = filepath.Join(s.prevDir, "vault-parent"), filepath.Join(s.prevDir, "vault-enclave")
+	} else {
+		// Older tags' parents (the compatibility matrix) do not know
+		// the flag; HEAD's refuses to start without it.
+		args = append(args, "-queue-policy-param", s.policyParam)
 	}
 	in.parent = exec.Command(parentBin, append(args, parentFlags...)...)
 	in.parent.Env = []string{"AWS_ACCESS_KEY_ID=test", "AWS_SECRET_ACCESS_KEY=test", "PATH=" + os.Getenv("PATH"), "GOMAXPROCS=2"}
@@ -422,6 +444,32 @@ func queueCount(s *stack) int {
 		s.t.Fatal(err)
 	}
 	return len(r.QueueUrls)
+}
+
+// queuePolicyOf returns the Policy attribute of an instance's queue.
+func (s *stack) queuePolicyOf(in *instance) string {
+	s.t.Helper()
+	ctx := ctxT(s.t, 10*time.Second)
+	u, err := s.sqs.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{QueueName: aws.String(s.qprefix + in.id)})
+	if err != nil {
+		s.t.Fatal(err)
+	}
+	at, err := s.sqs.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{QueueUrl: u.QueueUrl,
+		AttributeNames: []sqstypes.QueueAttributeName{sqstypes.QueueAttributeNamePolicy}})
+	if err != nil {
+		s.t.Fatal(err)
+	}
+	return at.Attributes[string(sqstypes.QueueAttributeNamePolicy)]
+}
+
+// sameJSON compares two JSON documents semantically (SQS may reformat a
+// policy).
+func sameJSON(a, b string) bool {
+	var x, y any
+	if json.Unmarshal([]byte(a), &x) != nil || json.Unmarshal([]byte(b), &y) != nil {
+		return false
+	}
+	return reflect.DeepEqual(x, y)
 }
 
 // lastSent returns the last queue message the API sent for op.

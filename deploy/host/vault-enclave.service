@@ -1,0 +1,25 @@
+[Unit]
+Description=VettID vault enclave (Nitro, production mode)
+Documentation=https://github.com/vettid/vettid-vault/blob/main/deploy/host/README.md
+Requires=nitro-enclaves-allocator.service vault-host-config.service
+After=nitro-enclaves-allocator.service vault-host-config.service
+# Started before the parent (the enclave retries its vsock dial with
+# backoff) so that it is stopped after the parent's shutdown has locked
+# its vaults. PartOf: stopping or restarting the parent stops or restarts
+# the enclave too.
+Before=vault-parent.service
+PartOf=vault-parent.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# 1 vCPU, 5 GiB (allocator.yaml, O6); CID 16. Never in debug mode: a
+# debug enclave has zeroed PCRs and cannot unseal anything.
+ExecStart=/usr/bin/nitro-cli run-enclave --eif-path /opt/vettid/vault-enclave.eif --cpu-count 1 --memory 5120 --enclave-cid 16
+ExecStop=/usr/bin/nitro-cli terminate-enclave --all
+TimeoutStartSec=300
+StandardOutput=append:/var/log/vettid/vault-enclave.log
+StandardError=inherit
+
+[Install]
+WantedBy=multi-user.target

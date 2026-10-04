@@ -95,8 +95,8 @@ No new third-party dependency in V3a: CBOR, DER and CMS are parsed by small
 in-repo decoders rather than a general library, to keep the enclave's
 trusted code base small and strict. V3b adds none to the enclave either
 (`golang.org/x/sys` for vsock and the NSM ioctl was already required); the
-parent alone uses the AWS SDK for Go v2 (S3, SQS, DynamoDB, credentials,
-IMDS), which `make check-tcb` keeps out of the enclave binary. V3b choices
+parent alone uses the AWS SDK for Go v2 (S3, SQS, DynamoDB, SSM for the
+control-queue policy, credentials, IMDS), which `make check-tcb` keeps out of the enclave binary. V3b choices
 (process model, TLS chains, protocol, spec questions) are in
 [`docs/V3-NOTES.md`](docs/V3-NOTES.md).
 [`docs/MUST-COVERAGE.md`](docs/MUST-COVERAGE.md) maps every MUST in §4–§6,
@@ -176,6 +176,14 @@ The enclave image is built reproducibly from `Dockerfile.enclave`
 (`scripts/build-eif.sh` turns it into an EIF and writes
 `measurements.json`); the hardware smoke test (`vault-parent -selftest`)
 is described in [`docs/SMOKE.md`](docs/SMOKE.md).
+
+On a release host, `vault-parent` runs under systemd with the units and
+scripts in [`deploy/host/`](deploy/host/README.md), which vettid.org's
+release AMI installs. It needs `-queue-policy-param`, the SSM parameter
+holding the instance queue's access policy
+(`/vettid-org/<stage>/vault/control-queue-policy`), and exits before
+creating anything if that parameter is missing, empty or invalid (fail
+closed); only `-selftest` runs without it.
 
 Releases are built by the `release` workflow (two clean arm64 builds with
 a pinned nitro-cli toolchain, compared byte for byte, attested) and

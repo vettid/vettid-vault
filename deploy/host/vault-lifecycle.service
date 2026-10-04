@@ -1,0 +1,17 @@
+[Unit]
+Description=VettID vault ASG lifecycle watcher (drain on termination)
+Documentation=https://github.com/vettid/vettid-vault/blob/main/deploy/host/README.md
+Requires=vault-host-config.service
+After=vault-host-config.service
+
+[Service]
+Type=simple
+EnvironmentFile=/run/vettid/lifecycle.env
+ExecStart=/opt/vettid/bin/vault-lifecycle
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/vettid/vault-lifecycle.log
+StandardError=inherit
+
+[Install]
+WantedBy=multi-user.target

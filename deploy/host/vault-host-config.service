@@ -1,0 +1,19 @@
+[Unit]
+Description=VettID vault host configuration (host.env + SSM -> /run/vettid)
+Documentation=https://github.com/vettid/vettid-vault/blob/main/deploy/host/README.md
+# host.env is written by cloud-init (write_files, cloud-init.service).
+After=network-online.target cloud-init.service
+Wants=network-online.target
+Before=vault-parent.service vault-enclave.service vault-lifecycle.service amazon-cloudwatch-agent.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/vettid/bin/vault-host-config
+# SSM is retried for about 5 minutes before the unit fails.
+TimeoutStartSec=420
+StandardOutput=append:/var/log/vettid/vault-host-config.log
+StandardError=inherit
+
+[Install]
+WantedBy=multi-user.target

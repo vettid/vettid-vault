@@ -4421,7 +4421,10 @@ enclave's member index object (`users/<hex SHA-256("vettid/vms/2/user" ||
   prefix `vettid-org-`), which the parent creates at boot and deletes at
   shutdown. `instance_id` matches `[A-Za-z0-9_-]{1,48}`. The API sends only
   to that name in its own account. A sweeper removes queues of instances
-  that have gone away.
+  that have gone away. The parent creates the queue with the access policy
+  the deployment publishes (vettid.org: SSM
+  `/vettid-org/<stage>/vault/control-queue-policy`, SendMessage for the
+  member API's roles) and creates none without a valid one.
 - The instance publishes `{instance_id, release, queue_url, descriptor,
   attestation, heartbeat_at}` to an **instance registry** and heartbeats at
   least every 30 s. An instance whose `heartbeat_at` is more than 90 s old

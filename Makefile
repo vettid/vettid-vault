@@ -13,7 +13,7 @@ E2ETAGS   := devenclave e2e
 # links). It must never link the AWS SDK, the parent, or any dev/test code.
 ENCLAVEPKGS := ./cmd/vault-enclave
 
-.PHONY: all test channels race lint vet staticcheck fuzz scan tidy vectors check-tcb e2e integration
+.PHONY: all test channels race lint vet staticcheck fuzz scan tidy vectors check-tcb e2e integration host-sums
 
 all: lint check-tcb test
 
@@ -139,6 +139,11 @@ fuzz:
 
 scan:
 	gitleaks git --redact .
+
+# deploy/host/SHA256SUMS: every other file of deploy/host (vettid.org pins
+# this file's SHA-256 per release; scripts/lint_test.go checks it).
+host-sums:
+	cd deploy/host && find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' | LC_ALL=C sort | xargs sha256sum > SHA256SUMS
 
 tidy:
 	$(GO) mod tidy

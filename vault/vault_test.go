@@ -120,7 +120,7 @@ func (c *fakeCollector) Ack(_ context.Context, id string) error {
 }
 func (c *fakeCollector) Close() error { return nil }
 
-const testPIN = "1234"
+const testPIN = "123456"
 
 var testRelease = Release{PCR0: "dev", Number: 1}
 

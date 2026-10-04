@@ -235,7 +235,7 @@ func TestTransfer(t *testing.T) {
 		t.Fatalf("approve before the scan: %q", r.Code)
 	}
 	e.h.Xfer.Scanned = true
-	if r := appr("13579", pw); r.Code != "bad_pin" {
+	if r := appr("135791", pw); r.Code != "bad_pin" {
 		t.Fatalf("wrong PIN: %q", r.Code)
 	}
 	if r := appr("abc", pw); r.Code != "bad_request" {

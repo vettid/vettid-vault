@@ -33,7 +33,7 @@ func FuzzProcessBody(f *testing.F) {
 	// The manifest document is host input (0.10.0): fuzzed with the body.
 	doc := w.Served()
 	f.Add([]byte(`{"user_guid":"u","request_id":"01JB2Z6V9K3M4N5P6Q7R8S9T21","app":{}}`), true, doc)
-	f.Add([]byte(`{"user_guid":"u","vault_id":"v","request_id":"01JB2Z6V9K3M4N5P6Q7R8S9T21","pin":"1234"}`), false, doc)
+	f.Add([]byte(`{"user_guid":"u","vault_id":"v","request_id":"01JB2Z6V9K3M4N5P6Q7R8S9T21","pin":"123456"}`), false, doc)
 	f.Add([]byte(`{"user_guid":"u","vault_id":"vault-1","request_id":"01JB2Z6V9K3M4N5P6Q7R8S9T21","pin":"123456","manifest_sha256":"`+
 		strings.Repeat("0", 64)+`","manifest_serial":1}`), false, []byte(`{}`))
 	n := 0

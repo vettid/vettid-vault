@@ -194,11 +194,11 @@ func TestVerifyPIN(t *testing.T) {
 	if err := d.m.verifyPIN(testPIN, now); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.m.verifyPIN("12a4", now); err == nil {
+	if err := d.m.verifyPIN("12a456", now); err == nil {
 		t.Fatal("malformed PIN")
 	}
 	for i := 0; i < 3; i++ {
-		if err := d.m.verifyPIN("9999", now); err == nil || err.(*HandlerError).Code != "bad_pin" {
+		if err := d.m.verifyPIN("999999", now); err == nil || err.(*HandlerError).Code != "bad_pin" {
 			t.Fatalf("wrong PIN: %v", err)
 		}
 	}

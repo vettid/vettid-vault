@@ -14,8 +14,9 @@ import (
 // trial-decrypts under other keys (§4.4).
 type KeyLookup func(kid suite.Kid) *suite.PrivateKey
 
-// PendingInit is a decrypted, validated hs.init awaiting the responder's
-// decision (approval for pairing and connections, §6.4, §6.7).
+// PendingInit is a decrypted, validated hs.init that the responder has not
+// answered yet. Since 0.10.3 a vault answers at once (§6.4, §6.7): the SAS
+// exists only after hs.fin, and approval follows the handshake.
 type PendingInit struct {
 	mu    sync.Mutex
 	env   []byte
@@ -23,7 +24,6 @@ type PendingInit struct {
 	body  *Init
 	ks    []byte
 	th1   [32]byte
-	sas   string
 	used  bool
 }
 
@@ -118,11 +118,6 @@ func OpenRekeyInit(raw []byte, current *Epoch, now time.Time) (*PendingInit, err
 func newPending(raw []byte, in *envelope.Inner, body *Init, ks []byte) (*PendingInit, error) {
 	p := &PendingInit{env: append([]byte(nil), raw...), inner: in, body: body, ks: ks}
 	p.th1 = Th1(p.env)
-	var err error
-	if p.sas, err = SAS(ks, p.th1); err != nil {
-		suite.Wipe(ks)
-		return nil, err
-	}
 	return p, nil
 }
 
@@ -131,9 +126,6 @@ func (p *PendingInit) Init() *Init { return p.body }
 
 // Inner returns the hs.init inner plaintext.
 func (p *PendingInit) Inner() *envelope.Inner { return p.inner }
-
-// SAS returns the short authentication string (§6.3).
-func (p *PendingInit) SAS() string { return p.sas }
 
 // Th1 returns th1.
 func (p *PendingInit) Th1() [32]byte { return p.th1 }
@@ -147,9 +139,9 @@ func (p *PendingInit) Discard() {
 	p.ks = nil
 }
 
-// ResponderConfig configures hs.resp. Calling Respond is the approval: the
-// runtime MUST NOT call it before the owner approves a pairing (§6.7) or a
-// remote invite (§6.4).
+// ResponderConfig configures hs.resp. Since 0.10.3 Respond is not the
+// approval: hs.resp carries only a request token where approval is needed
+// (§6.4, §6.7, §7.1), and the runtime activates the epoch at approval.
 type ResponderConfig struct {
 	Identity       ed25519.PrivateKey // ik_R
 	Token          string
@@ -185,7 +177,12 @@ type Responder struct {
 	sender   ed25519.PublicKey
 	suiteID  uint8
 	policy   Policy
-	done     bool
+	purpose  Purpose
+	// commit and nR are sas_commit from hs.init and the responder's n_R,
+	// for a purpose with a SAS (0.10.3).
+	commit []byte
+	nR     []byte
+	done   bool
 }
 
 // Respond checks the initiator against the record (rekey, reconnect),
@@ -208,6 +205,13 @@ func (p *PendingInit) Respond(cfg ResponderConfig) (*Responder, []byte, error) {
 	chosen, err := suite.Negotiate(p.body.Suites, cfg.PinnedSuite)
 	if err != nil {
 		return nil, nil, err
+	}
+	var nR []byte
+	if p.body.Purpose.HasSAS() {
+		// n_R is chosen only now, after hs.init has been opened (§6.2).
+		if nR, err = suite.RandomBytes(SASNonceSize); err != nil {
+			return nil, nil, err
+		}
 	}
 	id, now, err := innerMeta(cfg.ID, cfg.Now)
 	if err != nil {
@@ -232,7 +236,7 @@ func (p *PendingInit) Respond(cfg ResponderConfig) (*Responder, []byte, error) {
 		sched.Destroy()
 		return nil, nil, err
 	}
-	resp := &Resp{Token: cfg.Token, ReconnectToken: cfg.ReconnectToken, Suite: int(chosen), Rotations: cfg.Rotations, Sig: sig}
+	resp := &Resp{Token: cfg.Token, ReconnectToken: cfg.ReconnectToken, Suite: int(chosen), Rotations: cfg.Rotations, SASNonce: nR, Sig: sig}
 	rb, err := resp.Marshal(p.body.Purpose)
 	if err != nil {
 		sched.Destroy()
@@ -252,7 +256,8 @@ func (p *PendingInit) Respond(cfg ResponderConfig) (*Responder, []byte, error) {
 	p.used = true
 	suite.Wipe(p.ks)
 	p.ks = nil
-	return &Responder{sched: sched, verifyIK: verifyIK, sender: p.body.From.Relay.PK, suiteID: chosen, policy: cfg.Policy}, out, nil
+	return &Responder{sched: sched, verifyIK: verifyIK, sender: p.body.From.Relay.PK, suiteID: chosen, policy: cfg.Policy,
+		purpose: p.body.Purpose, commit: append([]byte(nil), p.body.SASCommit...), nR: nR}, out, nil
 }
 
 // checkInitiator applies §6.3 and §6.6 and returns the key sig_I must
@@ -316,51 +321,79 @@ func (r *Responder) Abort() {
 	r.sched.Destroy()
 }
 
+// FinResult is the outcome of a valid hs.fin on the responder side.
+type FinResult struct {
+	// Epoch is the established epoch (§6.3). It is active at once for
+	// rekeys, reconnects and handshakes answered without approval; for a
+	// connection, pairing or transfer the runtime activates it at approval.
+	Epoch *Epoch
+	// Inner is the hs.fin inner plaintext.
+	Inner *envelope.Inner
+	// SAS is the short authentication string for a purpose with a SAS,
+	// "" otherwise (§6.3, 0.10.3).
+	SAS string
+}
+
 // HandleFin processes hs.fin: it decrypts it with the pending epoch's i2r
-// key, verifies sig_I, and only then activates the epoch (§6.3). On any
-// failure the pending state is kept, so that a forged message cannot
-// cancel a genuine handshake; the runtime leaves the message unacked.
-func (r *Responder) HandleFin(raw []byte, collectSender ed25519.PublicKey, now time.Time) (*Epoch, *envelope.Inner, error) {
+// key, verifies sig_I and then, for a purpose with a SAS, the commitment
+// to n_I; only then is the epoch established (§6.3). A message that does
+// not decrypt, is malformed or whose sig_I does not verify leaves the
+// pending state as it is, so that a forged message cannot cancel a genuine
+// handshake. An hs.fin whose sig_I verifies but whose n_I does not open
+// sas_commit can only come from the initiator: the handshake is aborted
+// and ErrSASCommit returned.
+func (r *Responder) HandleFin(raw []byte, collectSender ed25519.PublicKey, now time.Time) (*FinResult, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.done {
-		return nil, nil, ErrDone
+		return nil, ErrDone
 	}
 	if !suite.EqualPublic(collectSender, r.sender) {
-		return nil, nil, ErrSender
+		return nil, ErrSender
 	}
 	env, err := envelope.Parse(raw)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	if env.Mode() != envelope.ModeSession {
-		return nil, nil, envelope.ErrWrongMode
+		return nil, envelope.ErrWrongMode
 	}
-	// A not-yet-active epoch, used only to decrypt and check hs.fin.
+	// A not-yet-established epoch, used only to decrypt and check hs.fin.
 	pending := newEpoch(r.sched, RoleResponder, r.suiteID, r.policy, now)
+	fail := func(err error) (*FinResult, error) {
+		pending.Destroy()
+		return nil, err
+	}
 	in, err := pending.Open(env)
 	if err != nil {
-		pending.Destroy()
-		return nil, nil, err
+		return fail(err)
 	}
 	if in.Type != TypeFin {
-		pending.Destroy()
-		return nil, nil, ErrType
+		return fail(ErrType)
 	}
 	if err := in.CheckTime(now, true); err != nil {
-		pending.Destroy()
-		return nil, nil, err
+		return fail(err)
 	}
-	sig, err := ParseFin(in.Body)
+	fin, err := ParseFin(in.Body, r.purpose)
 	if err != nil {
-		pending.Destroy()
-		return nil, nil, err
+		return fail(err)
 	}
-	if err := VerifyFin(r.verifyIK, r.sched.Th, sig); err != nil {
-		pending.Destroy()
-		return nil, nil, ErrSigFin
+	if err := VerifyFin(r.verifyIK, r.sched.Th, fin.Sig); err != nil {
+		return fail(ErrSigFin)
+	}
+	var sas string
+	if r.purpose.HasSAS() {
+		if !CheckSASCommit(r.commit, fin.SASNonce) {
+			// Signed by the initiator: abort and destroy the state (§6.3).
+			r.done = true
+			r.sched.Destroy()
+			return fail(ErrSASCommit)
+		}
+		if sas, err = SAS(r.sched.PRK, r.sched.Th, fin.SASNonce, r.nR); err != nil {
+			return fail(err)
+		}
 	}
 	r.done = true
 	r.sched.Destroy()
-	return pending, in, nil
+	return &FinResult{Epoch: pending, Inner: in, SAS: sas}, nil
 }

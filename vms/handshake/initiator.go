@@ -62,7 +62,7 @@ type Initiator struct {
 	env  []byte
 	th1  [32]byte
 	ks   []byte
-	sas  string
+	nI   []byte // the SAS nonce n_I, committed in hs.init (0.10.3)
 	done bool
 }
 
@@ -80,7 +80,8 @@ func innerMeta(id string, now time.Time) (string, time.Time, error) {
 }
 
 // NewInitiator builds and seals hs.init. It generates a fresh ephemeral KEM
-// key for forward secrecy (§6.5).
+// key for forward secrecy (§6.5) and, for a purpose with a SAS, the nonce
+// n_I that hs.init commits to (§6.2, 0.10.3).
 func NewInitiator(cfg InitiatorConfig) (*Initiator, error) {
 	if len(cfg.Identity) != ed25519.PrivateKeySize || cfg.StaticKEM == nil ||
 		len(cfg.ResponderIK) != ed25519.PublicKeySize || len(cfg.ResponderRelayKey) != ed25519.PublicKeySize {
@@ -116,6 +117,16 @@ func NewInitiator(cfg InitiatorConfig) (*Initiator, error) {
 	if err != nil {
 		return nil, err
 	}
+	var nI, commit []byte
+	if cfg.Purpose.HasSAS() {
+		// n_I is fixed before hs.init is built (§6.2).
+		if nI, err = suite.RandomBytes(SASNonceSize); err != nil {
+			eph.Destroy()
+			return nil, err
+		}
+		c := SASCommit(nI)
+		commit = c[:]
+	}
 	body := &Init{
 		Purpose: cfg.Purpose,
 		Ctx:     cfg.Ctx,
@@ -131,6 +142,7 @@ func NewInitiator(cfg InitiatorConfig) (*Initiator, error) {
 		Profile:        cfg.Profile,
 		Rotations:      cfg.Rotations,
 		DeviceAttest:   cfg.DeviceAttest,
+		SASCommit:      commit,
 	}
 	bj, err := body.Marshal()
 	if err != nil {
@@ -139,7 +151,7 @@ func NewInitiator(cfg InitiatorConfig) (*Initiator, error) {
 	}
 	in := &envelope.Inner{ID: cfg.ID, Type: TypeInit, TS: cfg.Now, Body: bj}
 
-	i := &Initiator{cfg: cfg, body: body, eph: eph}
+	i := &Initiator{cfg: cfg, body: body, eph: eph, nI: nI}
 	if rekey {
 		// §6.2: on rekey, hs.init travels in session mode under the current
 		// epoch, and K_s is that epoch's rk.
@@ -174,19 +186,11 @@ func NewInitiator(cfg InitiatorConfig) (*Initiator, error) {
 		}
 	}
 	i.th1 = Th1(i.env)
-	if i.sas, err = SAS(i.ks, i.th1); err != nil {
-		i.Abort()
-		return nil, err
-	}
 	return i, nil
 }
 
 // Envelope returns hs.init, ready to deposit.
 func (i *Initiator) Envelope() []byte { return append([]byte(nil), i.env...) }
-
-// SAS returns the short authentication string, which depends only on
-// hs.init (§6.3).
-func (i *Initiator) SAS() string { return i.sas }
 
 // Th1 returns th1, which also decides simultaneous rekeys (§6.5).
 func (i *Initiator) Th1() [32]byte { return i.th1 }
@@ -212,6 +216,8 @@ func (i *Initiator) abortLocked() {
 	}
 	suite.Wipe(i.ks)
 	i.ks = nil
+	suite.Wipe(i.nI)
+	i.nI = nil
 }
 
 // Result is the outcome of a completed handshake on the initiator side.
@@ -230,6 +236,10 @@ type Result struct {
 	ResponderKEM *suite.PublicKey
 	// Inner is the hs.resp inner plaintext.
 	Inner *envelope.Inner
+	// SAS is the short authentication string for a purpose with a SAS
+	// (§6.3, 0.10.3), "" otherwise. It exists only now, after sig_R
+	// verified; hs.fin reveals n_I to the responder.
+	SAS string
 }
 
 // HandleResp processes hs.resp. collectSender is the relay `sender` of the
@@ -321,13 +331,19 @@ func (i *Initiator) completeResp(env *envelope.Envelope, padded []byte, exp suit
 	if err := VerifyResp(verifyIK, th, resp.Sig); err != nil {
 		return nil, ErrSigResp
 	}
+	var sas string
+	if i.cfg.Purpose.HasSAS() {
+		if sas, err = SAS(sched.PRK, th, i.nI, resp.SASNonce); err != nil {
+			return nil, err
+		}
+	}
 	epoch := newEpoch(sched, RoleInitiator, uint8(resp.Suite), i.cfg.Policy, now)
 	sigI, err := SignFin(i.cfg.Identity, th)
 	if err != nil {
 		epoch.Destroy()
 		return nil, err
 	}
-	fb, err := MarshalFin(sigI)
+	fb, err := (&Fin{Sig: sigI, SASNonce: i.nI}).Marshal(i.cfg.Purpose)
 	if err != nil {
 		epoch.Destroy()
 		return nil, err
@@ -342,5 +358,5 @@ func (i *Initiator) completeResp(env *envelope.Envelope, padded []byte, exp suit
 		epoch.Destroy()
 		return nil, err
 	}
-	return &Result{Epoch: epoch, Fin: fin, Resp: resp, ResponderIK: verifyIK, ResponderKEM: newKEM, Inner: in}, nil
+	return &Result{Epoch: epoch, Fin: fin, Resp: resp, ResponderIK: verifyIK, ResponderKEM: newKEM, Inner: in, SAS: sas}, nil
 }

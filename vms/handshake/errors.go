@@ -13,17 +13,20 @@ import "errors"
 
 // Errors. None of them carries key material, plaintext or input bytes.
 var (
-	ErrBody         = errors.New("handshake: malformed message body")
-	ErrType         = errors.New("handshake: unexpected message type")
-	ErrPurpose      = errors.New("handshake: purpose not allowed here")
-	ErrNoKey        = errors.New("handshake: no key for recipient kid")
-	ErrSenderKid    = errors.New("handshake: sender kid does not match")
-	ErrSender       = errors.New("handshake: relay sender does not match")
-	ErrIdentity     = errors.New("handshake: identity key does not match the record")
-	ErrCtx          = errors.New("handshake: ctx does not match")
-	ErrRotation     = errors.New("handshake: invalid rotation statement or chain")
-	ErrSigResp      = errors.New("handshake: sig_R verification failed")
-	ErrSigFin       = errors.New("handshake: sig_I verification failed")
+	ErrBody      = errors.New("handshake: malformed message body")
+	ErrType      = errors.New("handshake: unexpected message type")
+	ErrPurpose   = errors.New("handshake: purpose not allowed here")
+	ErrNoKey     = errors.New("handshake: no key for recipient kid")
+	ErrSenderKid = errors.New("handshake: sender kid does not match")
+	ErrSender    = errors.New("handshake: relay sender does not match")
+	ErrIdentity  = errors.New("handshake: identity key does not match the record")
+	ErrCtx       = errors.New("handshake: ctx does not match")
+	ErrRotation  = errors.New("handshake: invalid rotation statement or chain")
+	ErrSigResp   = errors.New("handshake: sig_R verification failed")
+	ErrSigFin    = errors.New("handshake: sig_I verification failed")
+	// ErrSASCommit: sig_I verified, but n_I does not open sas_commit. Only
+	// the initiator can have sent it; the handshake is aborted (§6.3).
+	ErrSASCommit    = errors.New("handshake: n_I does not match sas_commit")
 	ErrAborted      = errors.New("handshake: handshake aborted")
 	ErrDone         = errors.New("handshake: handshake already completed")
 	ErrConfig       = errors.New("handshake: invalid configuration")

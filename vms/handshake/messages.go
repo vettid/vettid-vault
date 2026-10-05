@@ -48,6 +48,14 @@ func (p Purpose) IsPairing() bool {
 	return p == PurposeApp || p == PurposeDesktop || p == PurposeAgent
 }
 
+// HasSAS reports whether a handshake of purpose p has a SAS, and so the
+// commitment fields (§6.2, 0.10.3): app, desktop, agent and connection.
+// Rekeys and reconnects carry none.
+func (p Purpose) HasSAS() bool { return p.IsPairing() || p == PurposeConnection }
+
+// SASNonceSize is the size of n_I and n_R (§6.2).
+const SASNonceSize = 32
+
 // Field limits. The spec leaves these open; they bound what a parser keeps.
 const (
 	MaxCtxLen     = 128
@@ -85,6 +93,9 @@ type Init struct {
 	Profile        json.RawMessage       // optional object
 	Rotations      []*Rotation           // reconnect only
 	DeviceAttest   *altchan.DeviceAttest // purpose app only (§6.7, §11.7)
+	// SASCommit is SHA-256("vettid/vms/2/sas-commit" || n_I), present
+	// exactly for purposes with a SAS (§6.2, §6.3, 0.10.3).
+	SASCommit []byte
 }
 
 // Resp is the hs.resp body (§6.2).
@@ -93,7 +104,17 @@ type Resp struct {
 	ReconnectToken string
 	Suite          int
 	Rotations      []*Rotation
-	Sig            []byte
+	// SASNonce is n_R, present exactly for purposes with a SAS (0.10.3).
+	SASNonce []byte
+	Sig      []byte
+}
+
+// Fin is the hs.fin body (§6.2).
+type Fin struct {
+	Sig []byte
+	// SASNonce is n_I, revealed here; present exactly for purposes with
+	// a SAS (0.10.3).
+	SASNonce []byte
 }
 
 // MailboxID derives a relay mailbox id from a relay public key
@@ -175,20 +196,41 @@ func validCtx(s string) bool {
 // tokenRules gives, per purpose, whether token and reconnect_token are
 // required (1), optional (0) or forbidden (-1), in hs.init and hs.resp.
 //
-//   - Pairing (app/desktop/agent): standing token required; reconnect
-//     tokens are for connections only (§6.6), so forbidden.
-//   - connection, reconnect: both required (§6.6: "delivered in hs.init,
-//     hs.resp").
+//   - Pairing (app/desktop/agent): a token is required; reconnect tokens
+//     are for connections only (§6.6), so forbidden.
+//   - connection: a request token is required; the reconnect token
+//     follows in connection.approved, so it is forbidden here (0.10.3).
+//   - reconnect: both required (§6.6: "delivered in hs.init, hs.resp").
 //   - rekey: both optional (existing tokens stay valid).
 func tokenRules(p Purpose) (token, reconnect int) {
 	switch p {
-	case PurposeApp, PurposeDesktop, PurposeAgent:
+	case PurposeApp, PurposeDesktop, PurposeAgent, PurposeConnection:
 		return 1, -1
-	case PurposeConnection, PurposeReconnect:
+	case PurposeReconnect:
 		return 1, 1
 	default:
 		return 0, 0
 	}
+}
+
+// checkSASField applies the commitment rule of §6.2: a 32-byte value
+// exactly for purposes with a SAS, absent otherwise.
+func checkSASField(p Purpose, v []byte) error {
+	if p.HasSAS() != (v != nil) || v != nil && len(v) != SASNonceSize {
+		return ErrBody
+	}
+	return nil
+}
+
+func optSASField(o strictjson.Object, name string) ([]byte, error) {
+	if !o.Has(name) {
+		return nil, nil
+	}
+	b, err := o.Base64(name, SASNonceSize)
+	if err != nil {
+		return nil, ErrBody
+	}
+	return b, nil
 }
 
 func checkTokenRule(rule int, v string) error {
@@ -337,7 +379,7 @@ func (in *Init) validate() error {
 	if in.DeviceAttest != nil && in.Purpose != PurposeApp {
 		return ErrBody
 	}
-	return nil
+	return checkSASField(in.Purpose, in.SASCommit)
 }
 
 // Marshal encodes the hs.init body.
@@ -373,6 +415,9 @@ func (in *Init) Marshal() ([]byte, error) {
 			return nil, ErrBody
 		}
 		b.Raw("device_attest", c)
+	}
+	if in.SASCommit != nil {
+		b.Base64("sas_commit", in.SASCommit)
 	}
 	return b.Bytes(), nil
 }
@@ -453,6 +498,9 @@ func ParseInit(body []byte) (*Init, error) {
 	if present && in.Purpose != PurposeReconnect {
 		return nil, ErrBody
 	}
+	if in.SASCommit, err = optSASField(o, "sas_commit"); err != nil {
+		return nil, ErrBody
+	}
 	if err := in.validate(); err != nil {
 		return nil, err
 	}
@@ -473,7 +521,7 @@ func (r *Resp) validate(p Purpose) error {
 	if len(r.Rotations) > MaxRotations {
 		return ErrBody
 	}
-	return nil
+	return checkSASField(p, r.SASNonce)
 }
 
 // Marshal encodes the hs.resp body for a handshake of purpose p.
@@ -491,6 +539,9 @@ func (r *Resp) Marshal(p Purpose) ([]byte, error) {
 	b.Uint("suite", uint64(r.Suite))
 	if len(r.Rotations) > 0 {
 		b.Raw("rotations", marshalRotations(r.Rotations))
+	}
+	if r.SASNonce != nil {
+		b.Base64("sas_nonce", r.SASNonce)
 	}
 	b.Base64("sig", r.Sig)
 	return b.Bytes(), nil
@@ -529,29 +580,43 @@ func ParseResp(body []byte, p Purpose) (*Resp, error) {
 	if r.Sig, err = o.Base64("sig", ed25519.SignatureSize); err != nil {
 		return nil, ErrBody
 	}
+	if r.SASNonce, err = optSASField(o, "sas_nonce"); err != nil {
+		return nil, ErrBody
+	}
 	if err := r.validate(p); err != nil {
 		return nil, err
 	}
 	return r, nil
 }
 
-// MarshalFin encodes the hs.fin body {sig}.
-func MarshalFin(sig []byte) ([]byte, error) {
-	if len(sig) != ed25519.SignatureSize {
+// Marshal encodes the hs.fin body {sig, sas_nonce?} for a handshake of
+// purpose p.
+func (f *Fin) Marshal(p Purpose) ([]byte, error) {
+	if len(f.Sig) != ed25519.SignatureSize || checkSASField(p, f.SASNonce) != nil {
 		return nil, ErrBody
 	}
-	return strictjson.NewBuilder().Base64("sig", sig).Bytes(), nil
+	b := strictjson.NewBuilder().Base64("sig", f.Sig)
+	if f.SASNonce != nil {
+		b.Base64("sas_nonce", f.SASNonce)
+	}
+	return b.Bytes(), nil
 }
 
-// ParseFin parses an hs.fin body and returns sig_I.
-func ParseFin(body []byte) ([]byte, error) {
+// ParseFin parses an hs.fin body for a handshake of purpose p.
+func ParseFin(body []byte, p Purpose) (*Fin, error) {
 	o, err := strictjson.ParseObject(body)
 	if err != nil {
 		return nil, ErrBody
 	}
-	sig, err := o.Base64("sig", ed25519.SignatureSize)
-	if err != nil {
+	f := &Fin{}
+	if f.Sig, err = o.Base64("sig", ed25519.SignatureSize); err != nil {
 		return nil, ErrBody
 	}
-	return sig, nil
+	if f.SASNonce, err = optSASField(o, "sas_nonce"); err != nil {
+		return nil, ErrBody
+	}
+	if checkSASField(p, f.SASNonce) != nil {
+		return nil, ErrBody
+	}
+	return f, nil
 }

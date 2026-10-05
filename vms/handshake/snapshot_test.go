@@ -50,7 +50,7 @@ func TestSnapshotsCompleteHandshake(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p2.SAS() != ini2.SAS() || p2.Init().Ctx != testInviteID {
+	if p2.Init().Ctx != testInviteID {
 		t.Fatal("restored pending differs")
 	}
 	resp, respEnv, err := p2.Respond(respCfg(i, r, PurposeConnection))
@@ -69,7 +69,7 @@ func TestSnapshotsCompleteHandshake(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	er, _, err := resp2.HandleFin(res.Fin, i.relayPK(), t0)
+	fr, err := resp2.HandleFin(res.Fin, i.relayPK(), t0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +80,10 @@ func TestSnapshotsCompleteHandshake(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	er2, err := ImportEpoch(roundTrip(t, er.Export()))
+	if fr.SAS == "" || fr.SAS != res.SAS {
+		t.Fatal("SAS after a restored responder differs")
+	}
+	er2, err := ImportEpoch(roundTrip(t, fr.Epoch.Export()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +111,7 @@ func TestAcceptRekey(t *testing.T) {
 		t.Fatal(err)
 	}
 	p, err := AcceptRekey(ini.Envelope(), in, e, t0)
-	if err != nil || p.SAS() != ini.SAS() {
+	if err != nil || p.Th1() != ini.Th1() {
 		t.Fatalf("AcceptRekey: %v", err)
 	}
 }

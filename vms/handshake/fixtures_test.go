@@ -72,7 +72,7 @@ func initCfg(i, r *party, purpose Purpose) InitiatorConfig {
 		Policy:            PolicyVaultToVault,
 		Now:               t0,
 	}
-	if purpose == PurposeConnection || purpose == PurposeReconnect {
+	if purpose == PurposeReconnect {
 		c.ReconnectToken = tokB
 	}
 	return c
@@ -86,7 +86,7 @@ func respCfg(i, r *party, purpose Purpose) ResponderConfig {
 		CollectSender: i.relayPK(),
 		Now:           t0,
 	}
-	if purpose == PurposeConnection || purpose == PurposeReconnect {
+	if purpose == PurposeReconnect {
 		c.ReconnectToken = tokD
 	}
 	return c
@@ -103,9 +103,6 @@ func runHandshake(t testing.TB, i, r *party, purpose Purpose) (*Epoch, *Epoch) {
 	if err != nil {
 		t.Fatalf("OpenInit: %v", err)
 	}
-	if p.SAS() != ini.SAS() {
-		t.Fatalf("SAS mismatch")
-	}
 	resp, respEnv, err := p.Respond(respCfg(i, r, purpose))
 	if err != nil {
 		t.Fatalf("Respond: %v", err)
@@ -114,9 +111,12 @@ func runHandshake(t testing.TB, i, r *party, purpose Purpose) (*Epoch, *Epoch) {
 	if err != nil {
 		t.Fatalf("HandleResp: %v", err)
 	}
-	er, _, err := resp.HandleFin(res.Fin, i.relayPK(), t0)
+	fr, err := resp.HandleFin(res.Fin, i.relayPK(), t0)
 	if err != nil {
 		t.Fatalf("HandleFin: %v", err)
 	}
-	return res.Epoch, er
+	if fr.SAS != res.SAS || purpose.HasSAS() != (len(res.SAS) == 6) {
+		t.Fatalf("SAS %q vs %q", res.SAS, fr.SAS)
+	}
+	return res.Epoch, fr.Epoch
 }

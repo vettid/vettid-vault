@@ -47,33 +47,34 @@ const (
 // Labels (§4.1, §4.3, §4.4, §6.3, §6.4, §11). All are ASCII with no
 // terminator and embed the suite number.
 const (
-	LabelKid      = "vettid/vms/2/kid"
-	InfoSealed    = "vettid/vms/2/sealed"
-	LabelHsKs     = "vettid/vms/2/hs-ks"
-	LabelHsKe     = "vettid/vms/2/hs-ke"
-	LabelTh1      = "vettid/vms/2/th1"
-	LabelTh       = "vettid/vms/2/th"
-	LabelSession  = "vettid/vms/2/session"
-	LabelI2R      = "vettid/vms/2/i2r"
-	LabelR2I      = "vettid/vms/2/r2i"
-	LabelKidI2R   = "vettid/vms/2/kid-i2r"
-	LabelKidR2I   = "vettid/vms/2/kid-r2i"
-	LabelRK       = "vettid/vms/2/rk"
-	LabelEpoch    = "vettid/vms/2/epoch"
-	LabelSigResp  = "vettid/vms/2/sig-resp"
-	LabelSigFin   = "vettid/vms/2/sig-fin"
-	LabelSAS      = "vettid/vms/2/sas"
-	LabelBundle   = "vettid/vms/2/bundle"
-	LabelETK      = "vettid/vms/2/etk"
-	LabelVault    = "vettid/vms/2/vault"
-	LabelDevatt   = "vettid/vms/2/devatt"
-	LabelUnlock   = "vettid/vms/2/unlock"
-	InfoCall      = "vettid/vms/2/call"
-	LabelCallKey  = "vettid/vms/2/call-key"
-	LabelRotate   = "vettid/vms/2/rotate" // identity.rotate statements (§3.4)
-	LabelBlob     = "vettid/vms/2/blob"   // claim-check blobs (§5.5)
-	labelPrefix   = "vettid/vms/2/"
-	labelPrefixV3 = "vettid/vms/3/"
+	LabelKid       = "vettid/vms/2/kid"
+	InfoSealed     = "vettid/vms/2/sealed"
+	LabelHsKs      = "vettid/vms/2/hs-ks"
+	LabelHsKe      = "vettid/vms/2/hs-ke"
+	LabelTh1       = "vettid/vms/2/th1"
+	LabelTh        = "vettid/vms/2/th"
+	LabelSession   = "vettid/vms/2/session"
+	LabelI2R       = "vettid/vms/2/i2r"
+	LabelR2I       = "vettid/vms/2/r2i"
+	LabelKidI2R    = "vettid/vms/2/kid-i2r"
+	LabelKidR2I    = "vettid/vms/2/kid-r2i"
+	LabelRK        = "vettid/vms/2/rk"
+	LabelEpoch     = "vettid/vms/2/epoch"
+	LabelSigResp   = "vettid/vms/2/sig-resp"
+	LabelSigFin    = "vettid/vms/2/sig-fin"
+	LabelSAS       = "vettid/vms/2/sas"
+	LabelSASCommit = "vettid/vms/2/sas-commit" // 0.10.3 (§6.3)
+	LabelBundle    = "vettid/vms/2/bundle"
+	LabelETK       = "vettid/vms/2/etk"
+	LabelVault     = "vettid/vms/2/vault"
+	LabelDevatt    = "vettid/vms/2/devatt"
+	LabelUnlock    = "vettid/vms/2/unlock"
+	InfoCall       = "vettid/vms/2/call"
+	LabelCallKey   = "vettid/vms/2/call-key"
+	LabelRotate    = "vettid/vms/2/rotate" // identity.rotate statements (§3.4)
+	LabelBlob      = "vettid/vms/2/blob"   // claim-check blobs (§5.5)
+	labelPrefix    = "vettid/vms/2/"
+	labelPrefixV3  = "vettid/vms/3/"
 )
 
 var _ = labelPrefixV3 // documented for suite 3; not used by suite 2

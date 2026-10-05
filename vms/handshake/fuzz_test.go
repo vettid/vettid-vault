@@ -40,7 +40,7 @@ func FuzzParseInit(f *testing.F) {
 }
 
 func FuzzParseResp(f *testing.F) {
-	r := &Resp{Token: tokC, ReconnectToken: tokD, Suite: 2, Sig: make([]byte, 64)}
+	r := &Resp{Token: tokC, Suite: 2, SASNonce: make([]byte, 32), Sig: make([]byte, 64)}
 	b, _ := r.Marshal(PurposeConnection)
 	f.Add(b, uint8(0))
 	f.Add([]byte(`{"suite":2,"sig":""}`), uint8(4))
@@ -62,12 +62,26 @@ func FuzzParseResp(f *testing.F) {
 }
 
 func FuzzParseFin(f *testing.F) {
-	b, _ := MarshalFin(make([]byte, 64))
-	f.Add(b)
-	f.Fuzz(func(t *testing.T, b []byte) {
-		sig, err := ParseFin(b)
-		if err == nil && len(sig) != 64 {
-			t.Fatal("bad sig length accepted")
+	b, _ := (&Fin{Sig: make([]byte, 64), SASNonce: make([]byte, 32)}).Marshal(PurposeConnection)
+	f.Add(b, uint8(3))
+	b, _ = (&Fin{Sig: make([]byte, 64)}).Marshal(PurposeRekey)
+	f.Add(b, uint8(4))
+	purposes := []Purpose{PurposeApp, PurposeDesktop, PurposeAgent, PurposeConnection, PurposeRekey, PurposeReconnect}
+	f.Fuzz(func(t *testing.T, b []byte, pi uint8) {
+		p := purposes[int(pi)%len(purposes)]
+		fin, err := ParseFin(b, p)
+		if err != nil {
+			return
+		}
+		if len(fin.Sig) != 64 || p.HasSAS() != (len(fin.SASNonce) == 32) {
+			t.Fatal("bad hs.fin accepted")
+		}
+		out, err := fin.Marshal(p)
+		if err != nil {
+			t.Fatalf("accepted body does not re-marshal: %v", err)
+		}
+		if _, err := ParseFin(out, p); err != nil {
+			t.Fatalf("re-marshalled body rejected: %v", err)
 		}
 	})
 }

@@ -23,11 +23,15 @@ func sampleInit(t testing.TB, purpose Purpose) *Init {
 		From: Principal{IK: i.pub(), KEM: i.kem.Public(), Relay: i.addr},
 		Eph:  eph.Public(), Token: tokA, Suites: []int{2},
 	}
-	if purpose == PurposeConnection || purpose == PurposeReconnect {
+	if purpose == PurposeReconnect {
 		in.ReconnectToken = tokB
 	}
 	if purpose == PurposeRekey {
 		in.Token = ""
+	}
+	if purpose.HasSAS() {
+		c := SASCommit(bytes.Repeat([]byte{0x16}, 32))
+		in.SASCommit = c[:]
 	}
 	return in
 }
@@ -88,7 +92,10 @@ func TestInitFieldRules(t *testing.T) {
 		{"ctx with space", replaceMember(t, good, "ctx", "a b")},
 		{"missing token", replaceMember(t, good, "token", nil)},
 		{"bad token", replaceMember(t, good, "token", "v3.local.x")},
-		{"connection without reconnect_token", replaceMember(t, good, "reconnect_token", nil)},
+		{"connection with reconnect_token (0.10.3)", replaceMember(t, good, "reconnect_token", tokB)},
+		{"connection without sas_commit", replaceMember(t, good, "sas_commit", nil)},
+		{"sas_commit wrong size", replaceMember(t, good, "sas_commit", "AAAA")},
+		{"pairing without sas_commit", replaceMember(t, app, "sas_commit", nil)},
 		{"pairing with reconnect_token", replaceMember(t, app, "reconnect_token", tokB)},
 		{"suite 1 offered", replaceMember(t, good, "suites", []int{1, 2})},
 		{"suites unsorted", replaceMember(t, good, "suites", []int{3, 2})},
@@ -162,7 +169,8 @@ func TestMailboxIDMatchesRelayVector(t *testing.T) {
 }
 
 func TestRespFieldRules(t *testing.T) {
-	r := &Resp{Token: tokC, ReconnectToken: tokD, Suite: 2, Sig: make([]byte, 64)}
+	nR := bytes.Repeat([]byte{0x17}, 32)
+	r := &Resp{Token: tokC, Suite: 2, SASNonce: nR, Sig: make([]byte, 64)}
 	b, err := r.Marshal(PurposeConnection)
 	if err != nil {
 		t.Fatal(err)
@@ -170,8 +178,21 @@ func TestRespFieldRules(t *testing.T) {
 	if _, err := ParseResp(b, PurposeConnection); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ParseResp(b, PurposeApp); err == nil {
+	if _, err := ParseResp(replaceMember(t, b, "reconnect_token", tokD), PurposeConnection); err == nil {
+		t.Fatal("reconnect_token accepted for a connection (0.10.3)")
+	}
+	if _, err := ParseResp(replaceMember(t, b, "reconnect_token", tokD), PurposeApp); err == nil {
 		t.Fatal("reconnect_token accepted for pairing")
+	}
+	if _, err := ParseResp(b, PurposeReconnect); err == nil {
+		t.Fatal("sas_nonce accepted for a reconnect")
+	}
+	if _, err := ParseResp(replaceMember(t, b, "sas_nonce", "AAAA"), PurposeConnection); err == nil {
+		t.Fatal("short sas_nonce accepted")
+	}
+	r.SASNonce = nil
+	if _, err := r.Marshal(PurposeConnection); err == nil {
+		t.Fatal("missing sas_nonce marshalled")
 	}
 	if _, err := ParseResp(replaceMember(t, b, "rotations", []any{}), PurposeConnection); err == nil {
 		t.Fatal("rotations accepted outside reconnect")
@@ -182,10 +203,20 @@ func TestRespFieldRules(t *testing.T) {
 	if _, err := ParseResp(replaceMember(t, b, "suite", "2"), PurposeConnection); err == nil {
 		t.Fatal("string suite accepted")
 	}
-	if _, err := ParseFin([]byte(`{"sig":"` + strings.Repeat("A", 86) + `=="}`)); err != nil {
+	if _, err := ParseFin([]byte(`{"sig":"`+strings.Repeat("A", 86)+`=="}`), PurposeRekey); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ParseFin([]byte(`{"sig":"` + strings.Repeat("A", 86) + "\n" + `=="}`)); err == nil {
+	if _, err := ParseFin([]byte(`{"sig":"`+strings.Repeat("A", 86)+`=="}`), PurposeConnection); err == nil {
+		t.Fatal("hs.fin without sas_nonce accepted for a connection")
+	}
+	nonce := `,"sas_nonce":"` + strings.Repeat("A", 43) + `="`
+	if _, err := ParseFin([]byte(`{"sig":"`+strings.Repeat("A", 86)+`=="`+nonce+`}`), PurposeConnection); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseFin([]byte(`{"sig":"`+strings.Repeat("A", 86)+`=="`+nonce+`}`), PurposeReconnect); err == nil {
+		t.Fatal("sas_nonce accepted for a reconnect")
+	}
+	if _, err := ParseFin([]byte(`{"sig":"`+strings.Repeat("A", 86)+"\n"+`=="}`), PurposeRekey); err == nil {
 		t.Fatal("base64 with newline accepted")
 	}
 }

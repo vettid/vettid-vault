@@ -80,13 +80,28 @@ func TestV3Exit(t *testing.T) {
 		t.Fatal("two members share a vault id")
 	}
 
+	// 0.10.5 (§6.4): a first request, declined by member 1 after the
+	// handshake, reaches member 2 as peer_declined and failed (declined).
 	inv := firstBody(t, s.mustVaultctl(m1, "request", "connection.invite.create", `{"ttl_seconds":3600}`))
 	link, _ := inv["link"].(string)
 	acc := mustOK(t, req(t, m2, "connection.invite.accept", `{"link":"`+link+`"}`))
+	declined, _ := acc.String("connection_id")
+	pending := s.waitCtlEvent(m1, "connection.request.pending", nil)
+	s.mustVaultctl(m1, "request", "connection.decline", `{"pending_id":"`+str(pending, "pending_id")+`"}`)
+	waitEvent(t, m2, "sync.event", func(b json.RawMessage) bool {
+		return has("connection_id", declined)(b) && has("state", "peer_declined")(b)
+	})
+	waitEvent(t, m2, "connection.event", func(b json.RawMessage) bool {
+		return has("connection_id", declined)(b) && has("event", "failed")(b) && has("reason", "declined")(b)
+	})
+
+	inv = firstBody(t, s.mustVaultctl(m1, "request", "connection.invite.create", `{"ttl_seconds":3600}`))
+	link, _ = inv["link"].(string)
+	acc = mustOK(t, req(t, m2, "connection.invite.accept", `{"link":"`+link+`"}`))
 	m2conn, _ := acc.String("connection_id")
 	// 0.10.3: the handshake runs first; both members compare the SAS and
 	// each approves its own side.
-	pending := s.waitCtlEvent(m1, "connection.request.pending", nil)
+	pending = s.waitCtlEvent(m1, "connection.request.pending", nil)
 	sas := str(pending, "sas")
 	if len(sas) != 6 {
 		t.Fatal("no SAS")

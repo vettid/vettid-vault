@@ -34,12 +34,15 @@ const (
 	RequestTokenConnection  = 16 * 24 * time.Hour // ≤ 16 d for a peer vault
 	RequestTokenDevice      = 10 * time.Minute    // ≤ 10 min for a new device
 	connectionApprovedType  = "connection.approved"
+	connectionDeclinedType  = "connection.declined"
+	devicePairRejectedType  = "device.pair.rejected"
 	connectionRequestKind   = "connection.request"
 	requestStatePending     = "pending"
 	requestStateApproved    = "approved"
 	requestStateWaiting     = "waiting"
 	requestStatePeerApprove = "peer_approved"
 	requestStateDeclined    = "declined"
+	requestStatePeerDecline = "peer_declined"
 	requestStateExpired     = "expired"
 )
 
@@ -232,6 +235,11 @@ func (m *Manager) peerApproved(r *Request, in *envelope.Inner, now time.Time) {
 		m.audit(now, "bad_connection_approved", "")
 		return
 	}
+	if r.PeerRequest == nil {
+		// connection.declined still goes on the request token (§6.4, 0.10.5).
+		held := r.Peer.Standing
+		r.PeerRequest = &held
+	}
 	r.Peer.Standing, r.Peer.Reconnect = st, rt
 	r.PeerApproved = true
 	m.dirty = true
@@ -274,6 +282,73 @@ func (m *Manager) dropRequest(r *Request, now time.Time) {
 	m.dirty = true
 }
 
+// peerRequestToken is the token the peer issued for this request: its
+// request token, kept aside once the peer's connection.approved replaced
+// it with the standing token.
+func (r *Request) peerRequestToken() HeldToken {
+	if r.PeerRequest != nil {
+		return *r.PeerRequest
+	}
+	return r.Peer.Standing
+}
+
+// sendEnded tells the peer that its member (or ours) ended the request
+// (VAULT-MESSAGING 0.10.5): connection.declined to a peer vault (§6.4),
+// device.pair.rejected to a new device (§6.7). It is sealed under the
+// handshake's epoch, which is never activated, and queued on the token
+// the peer issued, before the request is dropped in the same flush (§7.4):
+// the entry carries its own copy of the token, so dropping the request
+// does not cancel it, and the tokens denylisted then are the vault's own.
+// Best effort: retried as any deposit (§8.6) until `until` (a pairing's
+// 10 minutes) or the token's expiry, whichever is first. Without the epoch or a token nothing is sent.
+func (m *Manager) sendEnded(r *Request, typ string, until time.Time, now time.Time) {
+	ep, tok := m.reqEpochs[r.ID], r.peerRequestToken()
+	if ep == nil || tok.Token == "" {
+		return
+	}
+	raw, err := ep.Seal(&envelope.Inner{ID: m.newID(now), Type: typ, TS: now, Body: []byte(`{}`)})
+	if err != nil {
+		return
+	}
+	if !tok.Exp.IsZero() && (until.IsZero() || tok.Exp.Before(until)) {
+		until = tok.Exp
+	}
+	p := r.Peer
+	m.queueDeposit(&OutboxEntry{Op: OpDeposit, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Token: tok.Token, Payload: raw,
+		NotAfter: until}, now)
+}
+
+// declineRequest is our member's decline (or block) of a connection
+// request whose SAS is known: connection.declined to the peer first, then
+// the drop (§6.4, §7.4, 0.10.5).
+func (m *Manager) declineRequest(r *Request, now time.Time) {
+	m.sendEnded(r, connectionDeclinedType, time.Time{}, now)
+	m.dropRequest(r, now)
+}
+
+// peerDeclined handles the peer's connection.declined before activation
+// (§6.4, 0.10.5): the request ends as a drop, the devices learn it
+// (peer_declined; failed with reason declined on the accepter's side), and
+// it is audited with a feed item.
+func (m *Manager) peerDeclined(r *Request, now time.Time) {
+	m.dropRequest(r, now)
+	m.notifyDevices("sync.event", m.requestSync(r, requestStatePeerDecline), "", now)
+	if r.Dir == ReqOut {
+		m.notifyDevices("connection.event", strictjson.NewBuilder().String("connection_id", r.ID).String("event", "failed").
+			String("reason", "declined").Bytes(), "", now)
+	}
+	m.record(Activity{Kind: "connection.request.peer_declined", Ref: r.ID, Audit: true, Feed: true}, now)
+}
+
+// peerDeclinedActive handles a connection.declined that reaches a
+// connection already active on our side (§6.4 "After activation"): the
+// decliner has denylisted every token it issued, so it is handled as
+// connection.removed from that peer, without a notice back.
+func (m *Manager) peerDeclinedActive(p *Peer, now time.Time) {
+	m.record(Activity{Kind: "connection.request.peer_declined", ConnectionID: p.ID, Ref: p.ID, Audit: true}, now)
+	m.removeConnection(p, "in", now)
+}
+
 // dropAwaiting ends a first-contact handshake that has not completed: its
 // request token is denylisted; a transfer it belonged to is aborted.
 func (m *Manager) dropAwaiting(id, reason string, now time.Time) {
@@ -313,7 +388,8 @@ func (m *Manager) requestByKids(env *envelope.Envelope, sender ed25519.PublicKey
 
 // handleRequestMessage handles a message under a request's epoch before
 // activation (§6.4 "Before activation", §6.7): connection.approved is
-// processed; before our member's approval anything else is acked,
+// processed, and (0.10.5) connection.declined ends the request; before
+// our member's approval anything else is acked,
 // dropped and audited; after it, left unacked for activation.
 func (m *Manager) handleRequestMessage(id string, env *envelope.Envelope, now time.Time) disposition {
 	r, ep := m.st.Requests[id], m.reqEpochs[id]
@@ -333,6 +409,15 @@ func (m *Manager) handleRequestMessage(id string, env *envelope.Envelope, now ti
 		m.peerApproved(r, in, now)
 		return ackAfterFlush
 	}
+	if r.Peer.Kind == KindConnection && in.Type == connectionDeclinedType && in.Re == "" {
+		// Whether or not our member approved (§6.4, 0.10.5).
+		if err := in.CheckTime(now, true); err != nil {
+			m.audit(now, "stale_or_future", "")
+			return ackAfterFlush
+		}
+		m.peerDeclined(r, now)
+		return ackAfterFlush
+	}
 	if r.Peer.Kind == KindConnection && r.Approved {
 		return noAck // the peer may be active already: processed at activation
 	}
@@ -341,8 +426,9 @@ func (m *Manager) handleRequestMessage(id string, env *envelope.Envelope, now ti
 }
 
 // handleOnRequestToken handles a deposit made on a request token we
-// issued (§7.1): only the rest of the handshake (hs.resp, hs.fin) and
-// connection.approved are accepted; relay.token.refresh is answered
+// issued (§7.1): only the rest of the handshake (hs.resp, hs.fin),
+// connection.approved and connection.declined are accepted (the last also
+// once the connection is active, 0.10.5); relay.token.refresh is answered
 // forbidden; anything else is acked, dropped and audited.
 func (m *Manager) handleOnRequestToken(ctx context.Context, env *envelope.Envelope, raw []byte, sender ed25519.PublicKey, p *Peer, now time.Time) disposition {
 	if env.Mode() == envelope.ModeSealed {
@@ -363,9 +449,20 @@ func (m *Manager) handleOnRequestToken(ctx context.Context, env *envelope.Envelo
 	}
 	if p != nil {
 		if kr := m.sessions[p.ID]; kr != nil {
-			if in, _, err := kr.Open(env, now); err == nil && in.Type == tokenRefreshType && in.Re == "" {
-				m.respondError(p, in, p.ID+"|"+in.ID, "forbidden", "", now)
-				return ackAfterFlush
+			if in, _, err := kr.Open(env, now); err == nil && in.Re == "" {
+				switch {
+				case in.Type == tokenRefreshType:
+					m.respondError(p, in, p.ID+"|"+in.ID, "forbidden", "", now)
+					return ackAfterFlush
+				case in.Type == connectionDeclinedType && p.Kind == KindConnection && p.State == PeerActive:
+					// §6.4 "After activation" (0.10.5).
+					if err := in.CheckTime(now, true); err != nil {
+						m.audit(now, "stale_or_future", p.ID)
+						return ackAfterFlush
+					}
+					m.peerDeclinedActive(p, now)
+					return ackAfterFlush
+				}
 			}
 		}
 	}
@@ -456,7 +553,7 @@ func (m *Manager) hConnDecline(_ context.Context, s *Session, in *envelope.Inner
 	r, waiting := m.connRequest(id, dir)
 	switch {
 	case r != nil:
-		m.dropRequest(r, s.now)
+		m.declineRequest(r, s.now) // connection.declined first (§6.4, 0.10.5)
 	case waiting && dir == ReqOut:
 		oid := m.waitingOutgoing(id)
 		p := m.st.Outgoing[oid].New
@@ -469,7 +566,9 @@ func (m *Manager) hConnDecline(_ context.Context, s *Session, in *envelope.Inner
 	default:
 		return nil, errNotFound
 	}
-	// A decline is not sent to the peer (§6.4): its request ends by expiry.
+	// A decline in waiting (the accepter: no token to the inviter, no
+	// epoch) or of an hs.init without hs.fin (the inviter: never shown)
+	// sends nothing (§6.4, 0.10.5); the peer's request ends by expiry.
 	m.record(Activity{Kind: "connection.request.declined", Ref: id, Audit: true}, s.now)
 	m.notifyDevices("sync.event", m.requestSync(r, requestStateDeclined), s.peer.ID, s.now)
 	return nil, nil

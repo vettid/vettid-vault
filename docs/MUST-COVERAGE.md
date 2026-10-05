@@ -2,8 +2,9 @@
 
 (Updated for VAULT-MESSAGING 0.10.0: manifest by hash, `removed` and
 `ends_at`, the retirement key-policy delta, per-channel release constants;
-and for 0.10.2 and 0.10.3: connection requests, the SAS commitment, the
-handshake before approval, request tokens.)
+for 0.10.2 and 0.10.3: connection requests, the SAS commitment, the
+handshake before approval, request tokens; and for 0.10.5:
+`connection.declined` and `device.pair.rejected`.)
 
 Every MUST / MUST NOT in VAULT-MESSAGING 0.2.3 §4–§6 (plus the §13.4 and
 §13.6 rules they rely on), and the named test that covers it. Normative
@@ -67,7 +68,13 @@ end covers §7, §8, §11.8, §12 and §13.2.
 | 6.4 | 0.10.2/0.10.3: both members see the SAS (`connection.request.pending`, `connection.request.outgoing`); each approves its side; `connection.approved{token, reconnect_token}` both ways; active with both approvals, in either order; `connection.event{added, pending_id}`; `connection.request.list` | `vault.TestConnectionRequestBothApprove`, `e2e.TestPairConnectMessage`, `e2e.TestIntroductionAccepted`, `integration.TestV3Exit` |
 | 6.4 | 0.10.3: approving while the SAS is unknown is `bad_request`; before activation only `connection.approved` is taken (else `drop.unapproved_peer`, or left unacked after the member's approval) | `vault.TestConnectionRequestBothApprove`, `vault.TestPreActivationAndRequestToken` |
 | 6.4 | 0.10.2: `exists{connection_id}` before any hs.init for a connected or requested vault; the inviter's drop by sender or `from.ik` (`drop.hs_init_from_known_peer`) | `vault.TestAcceptExists`, `vault.TestInviterDropsKnownIdentity`, `e2e.TestBlockRefusesPeer` |
-| 6.4 | 0.10.2: a decline is not sent to the peer and denylists the request token; an outgoing request fails after 8 days (`connection.event{failed}`); at most 256 requests each way | `vault.TestDeclineRequest`, `vault.TestOutgoingRequestExpires`, `e2e.TestBlockRefusesPeer` |
+| 6.4 | A decline denylists the request token (0.10.2; since 0.10.5 it is also sent, below); an outgoing request fails after 8 days (`connection.event{failed}`); at most 256 requests each way | `vault.TestDeclineRequest`, `vault.TestOutgoingRequestExpires`, `e2e.TestBlockRefusesPeer` |
+| 6.4, 7.4 | 0.10.5: the member's decline sends `connection.declined{}` under the handshake's epoch on the request token the **peer** issued (also after the peer's `connection.approved` replaced it), queued first in the flush that drops the request; the decliner denylists only its own tokens | `vault.TestDeclineSentInviterToAccepter`, `vault.TestDeclineSentAccepterToInviter`, `vault.TestDeclineAfterPeerApproval`, `vault.TestDeclineRequest` |
+| 6.4, 10.4 | 0.10.5: `block.add{pending_id}` sends `connection.declined` too, indistinguishable from a decline | `vault.TestBlockPendingSendsDecline` |
+| 6.4 | 0.10.5: nothing is sent by an accepter in `waiting`, for an `hs.init` without `hs.fin`, or at expiry | `vault.TestDeclineWaitingSendsNothing`, `vault.TestExpirySendsNoDecline` |
+| 6.4, 10.1, 10.4, 10.9 | 0.10.5: the receiver, whether or not its member approved, ends the request: `sync.event{connection.request, state: peer_declined}` in both directions, `connection.event{failed, reason: declined}` on the accepter's side, every token it issued denylisted (request, standing, reconnect), the slot freed, `exists` cleared, audit and feed `connection.request.peer_declined` | `vault.TestDeclineSentInviterToAccepter`, `vault.TestDeclineSentAccepterToInviter`, `vault.TestDeclineAfterPeerApproval`, `e2e.TestConnectionDeclineSent`, `e2e.TestVaultctlDecline`, `integration.TestV3Exit` |
+| 6.4 | 0.10.5: a late or duplicate `connection.declined` finds no request and is dropped and audited | `vault.TestDeclineSentInviterToAccepter` |
+| 6.4 | 0.10.5: one that reaches a connection already active (the receiver's approval completed it while the decline was in flight) is handled as `connection.removed` (no notice back; `connection.event{removed}`), audited `connection.request.peer_declined` | `vault.TestDeclineCrossingActivation` |
 | 6.4, 6.7 | Apps or desktops approve connections; only apps create and approve pairings; agents neither | `vault.TestApprovalRoles`, `e2e.TestPairConnectMessage` |
 | 6.5 | Epoch ends at 24 h / 10,000 (vault↔vault), 7 d (device) | `handshake.TestEpochPolicy` |
 | 6.5 | Lower th1 wins a simultaneous rekey | `handshake.TestSimultaneousRekeyLowerTh1Wins` |
@@ -79,6 +86,8 @@ end covers §7, §8, §11.8, §12 and §13.2.
 | 6.6 | `from.kem` MUST equal the chain's final `new_kem` | `handshake.TestReconnectWithRotations`, `handshake.TestReconnectRejections` |
 | 6.6 | Reconnect token lifetime ≤ 365 d and relay cap; re-mint < 60 d | `handshake.TestReconnectTokenParameters` |
 | 6.7 | 0.10.3: hs.resp at once with a request token; `device.pair.pending{sas}` after hs.fin; nothing but the handshake before approval (`drop.unapproved_peer`); the approval activates and sends `device.paired{token}`; drop after 10 min and denylist the open and request tokens | `vault.TestPairingHandshakeThenApproval`, `vault.TestInviteExpiry`, `e2e.TestPairConnectMessage` |
+| 6.7, 6.7.1 | 0.10.5: the owner's `device.pair.reject` or `device.transfer.reject` after `hs.fin` sends `device.pair.rejected{}` under the handshake's epoch on the token the new device issued in `hs.init`, before the drop; nothing before `hs.fin`, nor for an expiry, a clone alarm or a recovery; retries end with the pairing's 10 minutes | `vault.TestPairRejectedSent`, `vault.TestTransferRejectedSent`, `vault.TestOutboxNotAfter` |
+| 6.7 | 0.10.5: the new device stops waiting on `device.pair.rejected`, drops its handshake state and request token (Go client: `ErrPairRejected`; `vaultctl pair` reports "rejected on your phone") | `e2e.TestPairingRejectSent`, `e2e.TestTransfer`, `e2e.TestVaultctlDecline` |
 | 6.7 | Re-paired device MUST use a new relay key; hs.init from a denylisted relay key refused | `vault.TestRepairWithOldRelayKeyRefused` |
 | 13.4 | Records pin the highest suite; lower suites rejected | `suite.TestDowngradePin`, `handshake.TestDowngradeChosenSuite` |
 | 13.4 | sig_R covers th, which covers the `suites` offer | `handshake.TestDowngradeSuitesStripDetected` |
@@ -98,7 +107,7 @@ end covers §7, §8, §11.8, §12 and §13.2.
 | 5.3 | Unknown type without `re` answered with `unsupported_type`; role not allowed → `forbidden` | `vault.TestRequestResponseAndDedupe` |
 | 11.3 | First app: purpose app, ctx = vault_id, pre-authorized keys only | `e2e.TestPairConnectMessage`, `e2e.TestVaultctlSmoke` |
 | 7.1 | Token kinds, lifetimes and quotas (peer 20,000 / 512 MiB; reconnect 4 / 64 KiB, ≤ 365 d) | `vault.TestTokenQuotas` |
-| 7.1 | 0.10.3: request tokens (8 / 64 KiB; ≤ 16 d, a device ≤ 10 min) carry only hs.resp, hs.fin and `connection.approved` (else `drop.request_token_misuse`); `relay.token.refresh` on one is `forbidden` | `vault.TestPairingHandshakeThenApproval`, `vault.TestPreActivationAndRequestToken` |
+| 7.1 | 0.10.3: request tokens (8 / 64 KiB; ≤ 16 d, a device ≤ 10 min) carry only hs.resp, hs.fin, `connection.approved` and (0.10.5) `connection.declined`, the last also once the connection is active (else `drop.request_token_misuse`); `relay.token.refresh` on one is `forbidden` | `vault.TestPairingHandshakeThenApproval`, `vault.TestPreActivationAndRequestToken`, `vault.TestDeclineCrossingActivation` |
 | 7.2 | Re-mint standing tokens < 10 d, reconnect < 60 d; holder refresh | `vault.TestRemintStanding`, `e2e.TestReconnectAfterExpiry` |
 | 7.3 | 60 durable messages per peer per minute; excess acked, dropped, audited | `vault.TestPeerRateLimit` |
 | 7.4 | Connection removed / device unlinked: notice, denylist sub, delete tokens, sessions, outbox | `e2e.TestRevokeConnection`, `vault.TestRepairWithOldRelayKeyRefused` |

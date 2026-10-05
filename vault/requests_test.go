@@ -300,8 +300,9 @@ func TestPreActivationAndRequestToken(t *testing.T) {
 	}
 }
 
-// §6.4 (0.10.2): declining is not sent to the peer; the request token is
-// denylisted; an unknown request is not_found.
+// §6.4 (0.10.5): declining sends connection.declined (until 0.10.4 the
+// peer was not told); the request token is denylisted; an unknown request
+// is not_found.
 func TestDeclineRequest(t *testing.T) {
 	d := newDevFixture(t)
 	inv := d.invite(t, KindConnection, time.Hour)
@@ -317,8 +318,10 @@ func TestDeclineRequest(t *testing.T) {
 	d.m.drainOutbox(context.Background())
 	d.m.mu.Unlock()
 	c, _ := relayauth.ParseToken(n.tok, d.m.keys.relay.Public().(ed25519.PublicKey))
-	if len(d.m.st.Requests) != 0 || !containsStr(d.relay.revoked, "jti:"+c.Jti) || len(n.received(d)) != 0 {
-		t.Fatal("decline did not drop the request and its token, or told the peer")
+	got := n.received(d)
+	if len(d.m.st.Requests) != 0 || !containsStr(d.relay.revoked, "jti:"+c.Jti) || len(got) != 1 ||
+		got[0].Type != "connection.declined" || string(got[0].Body) != `{}` {
+		t.Fatalf("decline did not drop the request and its token, or did not tell the peer: %+v", got)
 	}
 	_ = d.send("connection.decline", []byte(`{"pending_id":"`+pid+`"}`))
 	_ = d.send("connection.approve", []byte(`{"pending_id":"`+pid+`","connection_id":"x"}`))

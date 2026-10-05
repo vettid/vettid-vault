@@ -173,6 +173,10 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 		if e.Op == OpDeposit && blocked[key] {
 			continue
 		}
+		if !e.NotAfter.IsZero() && !now.Before(e.NotAfter) {
+			e.Done, m.dirty = true, true // past its retries (0.10.5)
+			continue
+		}
 		if now.Before(e.NotBefore) {
 			if e.Op == OpDeposit {
 				blocked[key] = true

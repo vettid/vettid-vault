@@ -830,3 +830,87 @@ the intermediate 0.10.2 handshake order was never built.
   built after this change.
 - vettid-android must implement the same (§15 item 17 follow-ups) before
   it can pair with or connect through a vault built from this tree.
+
+## Declines and rejections sent (0.10.5)
+
+VAULT-MESSAGING 0.10.5 (owner decisions of 2026-10-05, §15 item 18,
+reversing 0.10.2 decision 2): a declined connection request is sent to
+the other party as `connection.declined{}`, and the owner's rejection of a
+pairing or transfer after its `hs.fin` is sent to the new device as
+`device.pair.rejected{}`. 0.10.4 (what PR #26 settled) needed no code; the
+`docs/VAULT-MESSAGING.md` copy moves from 0.10.3 to 0.10.5 (vettid.org
+master 9f7fe1e).
+
+### Layout
+
+- `vault/requests.go`: `sendEnded` seals `{}` under the request's
+  handshake epoch (established, never activated) and queues it on the
+  token the peer issued, with its own copy of the token, before
+  `dropRequest` in the same flush (§7.4): the tokens denylisted then are
+  the vault's own. `declineRequest` (= `sendEnded(connection.declined)` +
+  `dropRequest`) serves `connection.decline` of a request whose SAS is
+  known and `block.add{pending_id}` (`vault/connections.go`). A decline in
+  `waiting` (accepter) or of an `hs.init` without `hs.fin` (inviter) still
+  just drops, as do expiry and an aborted handshake.
+- `Request.PeerRequest` keeps the peer's request token once its
+  `connection.approved` replaced `Peer.Standing` with the standing token,
+  so `connection.declined` always travels on the request token (§7.1),
+  also when the peer approved first.
+- Receiving (`handleRequestMessage`): `connection.declined` under a
+  request's epoch, whether or not our member approved, checks `ts` and
+  ends the request (`peerDeclined`): `dropRequest` (every token issued to
+  the peer denylisted, slot freed, `exists` cleared),
+  `sync.event{connection.request, state: peer_declined}`, on the
+  accepter's side `connection.event{failed, reason: declined}`, activity
+  `connection.request.peer_declined` (audit and feed, `ref` = pending_id
+  or connection_id).
+- After activation (`handleOnRequestToken`): a `connection.declined` on a
+  request token that opens under an active connection's session is
+  `peerDeclinedActive`: audited `connection.request.peer_declined`, then
+  `removeConnection(p, "in")` (no notice back; `connection.event{removed}`,
+  feed `connection.removed`; the request token is denylisted with the
+  rest). Late and duplicate copies find no epoch and are dropped as
+  `drop.request_token_misuse` (or `drop.unknown_kid`).
+- Pairing and transfer: `device.pair.reject` (`vault/core.go`) and
+  `abortTransfer("rejected")` (`vault/oneapp.go`, from
+  `device.transfer.reject`) call `sendEnded(device.pair.rejected)` on the
+  device's `hs.init` token when the request exists (after `hs.fin`);
+  never for `expired`, `alarm`, `replaced` or `failed`, nor before
+  `hs.fin`.
+- `OutboxEntry.NotAfter` ends the retries of these best-effort deposits:
+  a pairing's at its 10 minutes, a decline's at the token's expiry.
+- `client`: `device.pair.rejected` from the vault's relay key under the
+  handshake's epoch, while not yet paired, drops the keyring and the
+  vault record (handshake state and request token); `AwaitPaired` returns
+  `ErrPairRejected`. `vaultctl pair` prints "rejected on your phone" and
+  exits non-zero. Ignored once paired.
+
+### Compatibility
+
+- Staging S2 (`release/staging/2`, bf0cc31) predates this: it neither
+  sends nor understands either message. Mixed versions behave as 0.10.4
+  (§15 item 18), which the S2 code does as specified:
+  - An S2 vault receiving `connection.declined` before activation handles
+    it as any other message on a request token or under an unapproved
+    request's epoch: before its member's approval acked, dropped and
+    audited (`drop.unapproved_peer`); after it, left unacked (redelivered
+    each lease) until the request's expiry drops it, after which it is
+    `drop.request_token_misuse`. It never reaches the unknown-type rule,
+    so no `unsupported_type` is sent back.
+  - In the after-activation race an S2 receiver drops it as
+    `drop.request_token_misuse`; its connection turns `stale` at its next
+    deposit (the decliner denylisted its tokens), as in 0.10.4.
+  - A vault from this tree whose peer runs S2 receives nothing and its
+    request ends at expiry, as before.
+  - A new device on older client code opens `device.pair.rejected`, does
+    not recognise it, sends nothing and keeps waiting for
+    `device.paired` until its 10 minutes end.
+- No handshake, envelope or vector change: pairing, enrollment and
+  connections between S2 and this tree work in both directions; only
+  the two new notices are missing where one side is S2. State gains two
+  optional fields (`Request.peer_request`, `OutboxEntry.not_after`),
+  ignored by older code.
+- The code lands in a later staging release; vettid-android follows (§15
+  item 18: show "<name> declined your connection request" / "<name>
+  declined the connection" on `peer_declined`, and end the new app's wait
+  with "Rejected on your phone").

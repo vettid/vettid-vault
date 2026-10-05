@@ -115,6 +115,18 @@ func cmdCredential(ctx context.Context, g *globals, args []string) error {
 		return err
 	}
 	needPW := map[string]bool{"create": true, "unlock": true, "rotate": true, "password": true, "delete": true, "recover": true, "reset": true}
+	if op == "recover" {
+		// §11.11.5 step 1 (0.10.6): the recovered app's unlock said whether
+		// the vault keeps a copy; without one there is nothing to recover,
+		// so do not ask for the password.
+		d, err := load(g)
+		if err != nil {
+			return err
+		}
+		if on, known := d.RecoveryCredentialBackup(); known && !on {
+			return errors.New("the vault keeps no copy of the credential (credential.backup off): use `credential reset` with a new password, or `delete-vault`")
+		}
+	}
 	var pw string
 	if needPW[op] {
 		if pw, err = password("VAULTCTL_PASSWORD"); err != nil {

@@ -57,22 +57,26 @@ type hostStack struct {
 	tables  *parenttest.Tables
 	resolve map[string]string
 	appHTTP *http.Client
+	// recClock, if set, is the enclave's recovery clock file
+	// (enclavetest.DevRecoveryClock), for instances started after it is set.
+	recClock string
 }
 
 type hostInstance struct {
-	encBin  string
-	id      string
-	p       *parent.Parent
-	sup     *supervisor.Supervisor
-	in      chan *enclave.Instance
-	stopP   context.CancelFunc
-	stopS   context.CancelFunc
-	pdone   chan struct{}
-	sdone   chan struct{}
-	ctl     string
-	egr     string
-	queue   string
-	release uint64
+	encBin   string
+	id       string
+	p        *parent.Parent
+	sup      *supervisor.Supervisor
+	in       chan *enclave.Instance
+	stopP    context.CancelFunc
+	stopS    context.CancelFunc
+	pdone    chan struct{}
+	sdone    chan struct{}
+	ctl      string
+	egr      string
+	queue    string
+	release  uint64
+	recClock string
 }
 
 func tlsFront(t *testing.T, h http.Handler, h2 bool, name string) string {
@@ -126,7 +130,7 @@ func listenTCP(t *testing.T) net.Listener {
 func (hs *hostStack) start(id string, n uint64, maxVaults int) *hostInstance {
 	t := hs.t
 	cl, el := listenTCP(t), listenTCP(t)
-	hi := &hostInstance{encBin: hs.encBin, id: id, ctl: cl.Addr().String(), egr: el.Addr().String(), release: n,
+	hi := &hostInstance{encBin: hs.encBin, id: id, ctl: cl.Addr().String(), egr: el.Addr().String(), release: n, recClock: hs.recClock,
 		queue: "http://sqs.test/000000000000/test-vault-control-" + id, in: make(chan *enclave.Instance, 4)}
 	p, err := parent.New(parent.Config{InstanceID: id, QueuePrefix: "test-vault-control-", ControlListener: cl, EgressListener: el,
 		Allow: parent.DefaultAllow("relay.vettid.test", "us-east-1"), Resolve: hs.resolve,
@@ -154,8 +158,9 @@ func (hs *hostStack) start(id string, n uint64, maxVaults int) *hostInstance {
 
 func (hi *hostInstance) startEnclave(t *testing.T, maxVaults int) {
 	cfg, err := enclavetest.DevSupervisor(enclavetest.DevOptions{Release: hi.release, Control: hi.ctl, Egress: hi.egr, RelayURL: hostRelay,
-		VaultExec: append([]string{hi.encBin, vaultproc.Arg}, enclavetest.DevVaultArgs(hi.release, hostRelay)...),
-		MaxVaults: maxVaults, LogLevel: slog.LevelError, OnReady: func(in *enclave.Instance) { hi.in <- in }})
+		VaultExec: append(append([]string{hi.encBin, vaultproc.Arg}, enclavetest.DevVaultArgs(hi.release, hostRelay)...),
+			enclavetest.DevVaultRecoveryClockArgs(hi.recClock)...),
+		RecoveryClock: hi.recClock, MaxVaults: maxVaults, LogLevel: slog.LevelError, OnReady: func(in *enclave.Instance) { hi.in <- in }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -578,6 +583,10 @@ func TestSelftest(t *testing.T) {
 // register before the delay is refused, the cancel clears the recovery.
 func TestHostRecovery(t *testing.T) {
 	hs := newHostStack(t)
+	hs.recClock = filepath.Join(t.TempDir(), "recovery-clock")
+	if err := os.WriteFile(hs.recClock, []byte("0s"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	a := hs.start("i-r", 3, 0)
 	m := hs.newApp("member-rec", 0x6a)
 	vid := "33333333333333333333333333333333"
@@ -622,8 +631,23 @@ func TestHostRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	rs := hs.post(a, enclave.OpRecoveryRegister, vid, n.guid, req)
-	if rr, err := n.dev.OpenRecoveryResult(rs.Envelope); err != nil || rr.Code != vault.CodeRecoveryEarly {
-		t.Fatalf("early register: %v %+v", err, rr)
+	if rr, err := n.dev.OpenRecoveryResult(rs.Envelope); err != nil || rr.Code != vault.CodeRecoveryEarly || rs.Code != "" {
+		t.Fatalf("early register: %v %+v %q", err, rr, rs.Code)
+	}
+	// After the delay: the register succeeds, and the vault process's
+	// answer reaches the slot with the clear marker (§11.5, 0.10.6).
+	if err := os.WriteFile(hs.recClock, []byte("24h1m"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	n2 := hs.newApp(m.guid, 0x6c)
+	e2, _ := hs.enclaveOf(a, n2.dev, false)
+	req2, err := n2.dev.BuildRecoveryRegister(n2.guid, code, e2, n2.att)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rs2 := hs.post(a, enclave.OpRecoveryRegister, vid, n2.guid, req2)
+	if rr, err := n2.dev.OpenRecoveryResult(rs2.Envelope); err != nil || !rr.OK || rs2.Status != "done" || rs2.Code != enclave.CodeRecoveryRegistered {
+		t.Fatalf("register: %v %+v %+v", err, rr, rs2)
 	}
 	if s := send("recovery_cancel", nil); s.Status != "done" {
 		t.Fatalf("cancel slot %+v", s)

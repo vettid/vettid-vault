@@ -371,6 +371,11 @@ type UnlockResult struct {
 	// VaultBundle is present for the recovered app's unlock (§11.11.5):
 	// {v, suite, ik, kem, relay} as in vault.enrolled.
 	VaultBundle []byte
+	// CredentialBackup is the vault's credential.backup setting, sent with
+	// VaultBundle to the recovered app (§11.11.5 step 1, 0.10.6), so that
+	// it asks for the credential password only when the vault keeps a
+	// copy. nil when absent (another app, or a vault before 0.10.6).
+	CredentialBackup *bool
 }
 
 // UpdateResult is the result's `update` member.
@@ -404,6 +409,9 @@ func (r *UnlockResult) Marshal() []byte {
 	}
 	if len(r.VaultBundle) > 0 {
 		b.Base64("vault_bundle", r.VaultBundle)
+	}
+	if r.CredentialBackup != nil {
+		b.Bool("credential_backup", *r.CredentialBackup)
 	}
 	return b.Bytes()
 }
@@ -476,6 +484,13 @@ func ParseUnlockResult(raw json.RawMessage) (*UnlockResult, error) {
 		if r.VaultBundle, err = o.Base64("vault_bundle", -1); err != nil || len(r.VaultBundle) > 2048 {
 			return nil, ErrMalformed
 		}
+	}
+	if o.Has("credential_backup") {
+		v, err := o.Bool("credential_backup")
+		if err != nil {
+			return nil, ErrMalformed
+		}
+		r.CredentialBackup = &v
 	}
 	return r, nil
 }

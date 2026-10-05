@@ -75,7 +75,7 @@ func (f *fakeRecoveryAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"recovery": rec})
 	case r.Method == "POST" && r.URL.Path == "/api/vault/recovery/cancel":
 		f.cancelled = append(f.cancelled, body["recovery_id"].(string))
-		writeJSON(w, 200, map[string]any{})
+		writeJSON(w, 200, map[string]any{"cancelled": true}) // 0.10.6
 	default:
 		writeJSON(w, 404, map[string]any{"error": "not_found"})
 	}

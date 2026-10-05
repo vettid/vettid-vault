@@ -6,7 +6,7 @@
 //
 // Supervisor → vault (requests):
 //
-//	Open  [version, instance_id, pcr0, pcr1, pcr2, job (9 fields)] → [ok, result, running "1"|"0"]
+//	Open  [version, instance_id, pcr0, pcr1, pcr2, job (9 fields)] → [ok, result, running "1"|"0", registered "1"|"0"]
 //	Lock  []                                                          → [ok | split_brain]
 //
 // Vault → supervisor (requests; the supervisor answers [status, ...]):
@@ -39,7 +39,9 @@ import (
 )
 
 // Version is the channel version (Open's first field).
-const Version = "2" // 2: the job carries the manifest document (VAULT-MESSAGING 0.10.0)
+// 2: the job carries the manifest document (VAULT-MESSAGING 0.10.0).
+// 3: Open's answer says whether a recovery register succeeded (0.10.6).
+const Version = "3"
 
 // Supervisor → vault.
 const (

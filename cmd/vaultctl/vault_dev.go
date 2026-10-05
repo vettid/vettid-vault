@@ -29,6 +29,7 @@ import (
 	"github.com/vettid/vettid-vault/internal/enclavetest"
 	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vault/store"
+	"github.com/vettid/vettid-vault/vms/altchan"
 )
 
 // Dev builds add the vault commands: a vault with a dev sealer whose key is
@@ -400,6 +401,9 @@ func cmdAltUnlock(ctx context.Context, g *globals, args []string) error {
 	if u := r.Update; u != nil {
 		out["update"] = map[string]string{"to": u.To, "result": u.Result, "code": u.Code}
 	}
+	if r.CredentialBackup != nil {
+		out["credential_backup"] = *r.CredentialBackup // a recovered app (§11.11.5 step 1)
+	}
 	printJSON(out)
 	if !r.OK || in.Manager(d.VaultID()) == nil {
 		if r.Code == "state_rollback" {
@@ -420,6 +424,7 @@ func init() {
 	commands["api-enroll"] = command{"api-enroll -api URL -guid GUID -pin PIN [-platform android|ios]   (dev) enroll through the member API (test trust and device attestation), finish enrollment", cmdAPIEnroll}
 	commands["api-unlock"] = command{"api-unlock -api URL -guid GUID -pin PIN [-approve N] [-abandon -release N]   (dev) unlock through the member API", cmdAPIUnlock}
 	commands["api-lock"] = command{"api-lock -api URL -guid GUID   (dev) lock through the member API", cmdAPILock}
+	commands["api-recover"] = command{"api-recover -api URL -guid GUID -pin PIN -qr QR_PAYLOAD [-platform android|ios]   (dev) a new app recovers the vault (§11.11.3, §11.11.5 steps 1-2): register with the portal's code, unlock, first handshake; then `credential recover` (credential_backup true) or `credential reset`", cmdAPIRecover}
 	devHTTPFromEnv()
 }
 
@@ -560,10 +565,67 @@ func cmdAPIUnlock(ctx context.Context, g *globals, args []string) error {
 	if r.ReleaseChanged {
 		fmt.Fprintln(os.Stderr, "note: the vault software was updated since the last unlock (§11.2 step 4)")
 	}
-	printJSON(map[string]any{"ok": r.OK, "code": r.Code, "state_seq": r.StateSeq, "header_seq": r.HeaderSeq,
+	out := map[string]any{"ok": r.OK, "code": r.Code, "state_seq": r.StateSeq, "header_seq": r.HeaderSeq,
 		"release_number": r.ReleaseNumber, "release_status": r.ReleaseStatus, "update": r.Update, "update_code": r.UpdateCode,
-		"instance_id": r.InstanceID})
+		"instance_id": r.InstanceID}
+	if r.CredentialBackup != nil {
+		out["credential_backup"] = *r.CredentialBackup // a recovered app (§11.11.5 step 1)
+	}
+	printJSON(out)
 	return nil
+}
+
+func cmdAPIRecover(ctx context.Context, g *globals, args []string) error {
+	fs := flag.NewFlagSet("api-recover", flag.ExitOnError)
+	var a apiFlags
+	a.register(fs)
+	qrArg := fs.String("qr", "", "the recovery QR payload (from the portal, or devstack's /dev/recovery/code)")
+	_ = fs.Parse(args)
+	if a.api == "" || a.guid == "" || a.pin == "" || *qrArg == "" {
+		return errors.New("-api, -guid, -pin and -qr are required")
+	}
+	qr, err := altchan.ParseRecoveryQR([]byte(*qrArg))
+	if err != nil {
+		return fmt.Errorf("-qr: %w", err)
+	}
+	t := testTrust()
+	d, err := loadWithTrust(g, t)
+	if err != nil {
+		return err
+	}
+	af := altFlags{platform: a.platform, seed: a.seed}
+	dev, keep := af.attester(g)
+	defer keep()
+	api := a.client()
+	rr, slot, err := d.RecoveryRegisterVia(ctx, api, a.guid, qr, t, dev)
+	if serr := save(g, d); err == nil {
+		err = serr
+	}
+	if err != nil {
+		return err
+	}
+	if !rr.OK {
+		return fmt.Errorf("register refused: %s", rr.Code)
+	}
+	u, err := d.UnlockVia(ctx, api, a.guid, a.pin, t, dev, client.UnlockOptions{}, "")
+	if serr := save(g, d); err == nil {
+		err = serr
+	}
+	if err != nil {
+		return err
+	}
+	if !u.OK {
+		return fmt.Errorf("unlock refused: %s", u.Code)
+	}
+	if err := d.CompleteRecoveryHandshake(ctx); err != nil {
+		return err
+	}
+	out := map[string]any{"registered": true, "slot_code": slot.Code, "vault_id": d.VaultID()}
+	if u.CredentialBackup != nil {
+		out["credential_backup"] = *u.CredentialBackup
+	}
+	printJSON(out)
+	return save(g, d)
 }
 
 func cmdAPILock(ctx context.Context, g *globals, args []string) error {

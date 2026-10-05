@@ -76,31 +76,32 @@ func (c *Core) recoveryCancel(ctx context.Context, j *Job) {
 }
 
 // recoveryRegister checks the code and the new app's device attestation
-// and registers the app as an unlock key (§11.11.3).
-func (c *Core) recoveryRegister(ctx context.Context, q *Job) []byte {
+// and registers the app as an unlock key (§11.11.3). ok reports a sealed
+// {"ok": true}: the answer then carries the clear marker (0.10.6).
+func (c *Core) recoveryRegister(ctx context.Context, q *Job) (res []byte, ok bool) {
 	inner := q.Inner
 	o, err := strictjson.ParseObject(inner.Body)
 	if err != nil {
-		return opaque()
+		return opaque(), false
 	}
 	kem, err := altchan.EnrollKEM(o)
 	if err != nil {
-		return opaque()
+		return opaque(), false
 	}
-	answer := func(code string) []byte {
+	answer := func(code string) ([]byte, bool) {
 		r := &altchan.RecoveryResult{OK: code == "", Code: code}
 		env, err := altchan.SealResult(kem, altchan.TypeRecoveryResult, q.RequestID, r.Marshal(), c.now())
 		if err != nil {
-			return opaque()
+			return opaque(), false
 		}
-		return env
+		return env, r.OK
 	}
 	r, err := altchan.ParseRecoveryRegister(o)
 	if err != nil || handshake.ValidateRelayAddr(handshake.RelayAddr{URL: r.Relay.URL, Mailbox: r.Relay.Mailbox, PK: r.Relay.PK}) != nil {
 		return answer("bad_request")
 	}
 	if r.UserGUID != q.UserGUID || r.VaultID != q.VaultID || r.RequestID != q.RequestID {
-		return opaque() // redirected (§11.6)
+		return opaque(), false // redirected (§11.6)
 	}
 	ch, err := altchan.DevattChallenge(q.RequestID, q.VaultID, envelope.FormatTS(inner.TS))
 	if err != nil {

@@ -83,10 +83,9 @@ func (c *Core) release() vault.Release {
 
 // Open runs an enroll or unlock job and returns the sealed result (or
 // random bytes of its size) and the unlocked manager, if the vault is now
-// open. The caller runs the manager.
-func (c *Core) Open(ctx context.Context, j *Job) ([]byte, *vault.Manager) {
-	var m *vault.Manager
-	var res []byte
+// open. The caller runs the manager. registered reports a recovery
+// register whose sealed result is {"ok": true} (§11.11.3, 0.10.6).
+func (c *Core) Open(ctx context.Context, j *Job) (res []byte, m *vault.Manager, registered bool) {
 	switch j.Op {
 	case OpEnroll:
 		res = c.enroll(ctx, j, &m)
@@ -97,11 +96,11 @@ func (c *Core) Open(ctx context.Context, j *Job) ([]byte, *vault.Manager) {
 	case OpRecoveryCancel:
 		c.recoveryCancel(ctx, j)
 	case OpRecoveryRegister:
-		res = c.recoveryRegister(ctx, j)
+		res, registered = c.recoveryRegister(ctx, j)
 	default:
 		res = opaque()
 	}
-	return res, m
+	return res, m, registered
 }
 
 // UserIndexKey is the store key of the enclave's member index object.
@@ -452,7 +451,7 @@ func (c *Core) unlock(ctx context.Context, q *Job, started **vault.Manager) []by
 	res := &altchan.UnlockResult{OK: out.OK, Code: out.Code, StateSeq: out.StateSeq, HeaderSeq: out.HeaderSeq,
 		RetryAfter: uint64((out.RetryAfter + time.Second - 1) / time.Second), Token: out.Token,
 		Release: c.meas.PCR0, ReleaseNumber: c.cfg.ReleaseNumber, ReleaseStatus: out.Release.Status, ManifestSerial: out.Serial,
-		RecoveryCancelled: out.RecoveryCancelled, VaultBundle: out.VaultBundle}
+		RecoveryCancelled: out.RecoveryCancelled, VaultBundle: out.VaultBundle, CredentialBackup: out.CredentialBackup}
 	if u := out.Update; u != nil {
 		res.Update = &altchan.UpdateResult{To: u.To, Result: u.Result, Code: u.Code}
 	}

@@ -228,6 +228,67 @@ func TestControl(t *testing.T) {
 	mu.Unlock()
 }
 
+// Events that reach the peer while one of its own requests runs (the
+// peer's connection.event{added} during its connection.approve) are
+// printed by `vaultctl request` after the response; /dev/peer/event
+// returns them.
+func TestControlKeepsEventsFromRequests(t *testing.T) {
+	s := &stack{opts: &options{}, relayL: listener(t), apiL: listener(t), ctlL: listener(t), started: time.Now()}
+	var mu sync.Mutex
+	polls := 0
+	indent := func(v string) string { // vaultctl prints indented JSON
+		var b bytes.Buffer
+		_ = json.Indent(&b, []byte(v), "", "  ")
+		return b.String() + "\n"
+	}
+	s.vaultctlFn = func(args ...string) (string, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch args[0] {
+		case "request":
+			if args[1] == "fail.me" {
+				// A failed request's output is not taken for events.
+				return `{"type":"connection.event","body":{"connection_id":"bad"}}`, errors.New("exit 1")
+			}
+			return indent(`{"status":"ok","body":{"approved":true}}`) +
+				indent(`{"type":"connection.event","id":"e1","ts":1,"re":"","body":{"event":"added","connection_id":"c9"}}`) +
+				indent(`{"type":"message.new","id":"e2","ts":2,"re":"","body":{"connection_id":"c9","text":"hi"}}`) +
+				indent(`{"no_type":true}`), nil
+		case "events":
+			polls++
+			return "", nil
+		}
+		return "", errors.New("unexpected")
+	}
+	srv := httptest.NewServer(s.control())
+	defer srv.Close()
+
+	if code, _ := post(t, srv.URL+"/dev/peer/request", `{"type":"fail.me"}`); code != 502 {
+		t.Fatalf("failed request: %d", code)
+	}
+	code, m := post(t, srv.URL+"/dev/peer/request", `{"type":"connection.approve","body":{"connection_id":"c9"}}`)
+	if code != 200 || m["status"] != "ok" || m["body"].(map[string]any)["approved"] != true {
+		t.Fatalf("request: %d %v", code, m)
+	}
+	code, m = post(t, srv.URL+"/dev/peer/event", `{"type":"connection.event","match":{"event":"added","connection_id":"c9"},"timeout_s":5}`)
+	if code != 200 || m["id"] != "e1" {
+		t.Fatalf("event from the request: %d %v", code, m)
+	}
+	code, m = post(t, srv.URL+"/dev/peer/event", `{"type":"message.new","match":{"text":"hi"},"timeout_s":5}`)
+	if code != 200 || m["id"] != "e2" {
+		t.Fatalf("second event from the request: %d %v", code, m)
+	}
+	mu.Lock()
+	if polls != 0 {
+		t.Errorf("the events were polled for (%d), not kept from the request", polls)
+	}
+	mu.Unlock()
+	// Taken once; the failed request's output was not kept.
+	if code, _ := post(t, srv.URL+"/dev/peer/event", `{"type":"connection.event","timeout_s":1}`); code != 404 {
+		t.Fatalf("event returned twice or failed output kept: %d", code)
+	}
+}
+
 func TestLogged(t *testing.T) {
 	h := logged("x", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(204)

@@ -220,7 +220,7 @@ Everything listens on 127.0.0.1. Child processes run with
 | `GET /dev/health` | `{"ok": true}` |
 | `GET /dev/info` | what `ready.json` holds |
 | `GET /dev/trust` | the test Nitro root (DER, base64), the test manifest keys (SPKI DER, base64), the relay URL, and the dev device policy in force (`null`: TEST policy only) |
-| `POST /dev/peer/request` | `{"type": T, "body": {...}}`: `vaultctl request` on the peer; answers the vault's response |
+| `POST /dev/peer/request` | `{"type": T, "body": {...}}`: `vaultctl request` on the peer; answers the vault's response. Events the peer received while the request ran are kept for `/dev/peer/event` |
 | `POST /dev/peer/event` | `{"type": T, "match": {k: v}, "timeout_s": N}`: waits (default 90 s, at most 300) for a peer event of type T whose body matches; others are kept for later calls |
 
 **Dev device policy.** The dev enclave verifies device attestation

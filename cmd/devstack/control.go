@@ -23,7 +23,9 @@ import (
 //	                         and manifest keys (SPKI DER, base64), the relay URL, and the
 //	                         dev device policy in force (null: the TEST policy only)
 //	POST /dev/peer/request   {"type": T, "body": {...}}: `vaultctl request T BODY` on the
-//	                         peer vault; answers the vault's response object
+//	                         peer vault; answers the vault's response object. The events
+//	                         the peer received while the request ran (vaultctl prints them
+//	                         after the response) are kept for /dev/peer/event
 //	POST /dev/peer/event     {"type": T, "match": {k: v}, "timeout_s": N}: waits (default
 //	                         90 s, at most 300) for a peer event of type T whose body
 //	                         matches; events that do not match are kept for later calls
@@ -71,8 +73,13 @@ func (s *stack) control() http.Handler {
 		}
 		s.peerMu.Lock()
 		out, err := s.vaultctlFn("request", in.Type, body)
-		s.peerMu.Unlock()
 		vs := jsonValues(out)
+		if err == nil && len(vs) > 1 {
+			// What vaultctl printed after the response: the events that
+			// reached the peer while it waited for it.
+			s.keepEvents(vs[1:])
+		}
+		s.peerMu.Unlock()
 		if err != nil || len(vs) == 0 {
 			writeJSON(w, 502, map[string]any{"error": "vaultctl", "output": out})
 			return
@@ -106,14 +113,24 @@ func (s *stack) control() http.Handler {
 				return
 			}
 			out, _ := s.vaultctlFn("events", "-wait", "3s")
-			s.peerEvents = append(s.peerEvents, jsonValues(out)...)
-			if len(s.peerEvents) > 1000 {
-				s.peerEvents = s.peerEvents[len(s.peerEvents)-1000:]
-			}
+			s.keepEvents(jsonValues(out))
 			s.peerMu.Unlock()
 		}
 	})
 	return mux
+}
+
+// keepEvents queues events vaultctl printed for /dev/peer/event, the
+// latest 1000 (peerMu held).
+func (s *stack) keepEvents(evs []map[string]any) {
+	for _, ev := range evs {
+		if _, ok := ev["type"].(string); ok {
+			s.peerEvents = append(s.peerEvents, ev)
+		}
+	}
+	if len(s.peerEvents) > 1000 {
+		s.peerEvents = s.peerEvents[len(s.peerEvents)-1000:]
+	}
 }
 
 // takeEvent removes and returns the first kept event of type typ whose

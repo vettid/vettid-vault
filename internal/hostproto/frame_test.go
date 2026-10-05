@@ -150,3 +150,52 @@ func FuzzParse(f *testing.F) {
 		}
 	})
 }
+
+func TestStopExpected(t *testing.T) {
+	for r, want := range map[string]bool{
+		StopLocked: true, "moved": true, "deleted": true, "idle": true,
+		StopSplitBrain: false, StopError: false, "": false, "LOCKED": false, "crashed": false,
+	} {
+		if StopExpected(r) != want {
+			t.Errorf("%q: %v", r, !want)
+		}
+	}
+}
+
+// Notify only queues: a vault process that closes its channel right after
+// its last notification (the lifecycle "locked" of the member's lock) must
+// Flush first, or the frames still queued are lost.
+func TestFlushBeforeClose(t *testing.T) {
+	a, b := net.Pipe()
+	var mu sync.Mutex
+	got := 0
+	server := NewConn(b, nil, func(f *Frame) {
+		time.Sleep(time.Millisecond) // a slow reader keeps frames queued
+		mu.Lock()
+		got++
+		mu.Unlock()
+	})
+	defer server.Close()
+	client := NewConn(a, nil, nil)
+	for i := 0; i < 100; i++ {
+		if err := client.Notify(KindLifecycle, Strings("locked", "v", "r", "r", "1")...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := client.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+	client.Close()
+	<-server.Done()
+	mu.Lock()
+	defer mu.Unlock()
+	if got != 100 {
+		t.Fatalf("%d of 100 notifications delivered", got)
+	}
+	// Flush on a closed connection returns at once.
+	if err := client.Flush(ctx); err != nil && err != ErrClosed {
+		t.Fatal(err)
+	}
+}

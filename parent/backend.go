@@ -35,6 +35,10 @@ var (
 	// ErrLeaseHeld means the vault's lease belongs to another instance
 	// (or the vault row does not exist).
 	ErrLeaseHeld = errors.New("parent: lease held elsewhere")
+	// ErrQueueDeletedRecently means a queue of the same name was deleted
+	// less than 60 s ago and SQS refuses to create it yet (a restart right
+	// after a clean stop). Queues.Create returns it wrapped.
+	ErrQueueDeletedRecently = errors.New("parent: queue deleted recently")
 )
 
 // Objects is the vault data bucket.

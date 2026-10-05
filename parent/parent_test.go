@@ -542,3 +542,32 @@ func TestConfig(t *testing.T) {
 		t.Fatal("bad host")
 	}
 }
+
+// The member's lock is a normal ending: "vault stopped" is INFO for it,
+// WARN for split brain and errors; either way the lease is released.
+func TestStoppedLogLevels(t *testing.T) {
+	h := newHarness(t, nil)
+	h.tables.PutVault(parenttest.VaultRow{VaultID: vaultID, UserGUID: "u1"})
+	e := h.connect("boot-1", nil)
+	e.descriptor()
+	for _, c := range []struct{ reason, level string }{
+		{hostproto.StopLocked, "INFO"}, {hostproto.StopSplitBrain, "WARN"}, {hostproto.StopError, "WARN"}, {"unheard-of", "WARN"},
+	} {
+		h.tables.SetLease(vaultID, "i-test", time.Now().Add(time.Minute).Unix())
+		e.lifecycle("unlocked")
+		waitFor(t, "running", func() bool { return len(h.p.RunningVaults()) == 1 })
+		_ = e.conn.Notify(hostproto.KindStopped, hostproto.Strings(vaultID, c.reason)...)
+		want := `"level":"` + c.level + `","msg":"vault stopped","vault_id":"` + vaultID + `","reason":"` + c.reason + `"`
+		waitFor(t, c.reason+" logged at "+c.level, func() bool {
+			h.logMu.Lock()
+			defer h.logMu.Unlock()
+			return strings.Contains(h.logs.String(), want)
+		})
+		// The vault stopped without a lifecycle "locked": the lease goes and
+		// the row says locked (Tables.ReleaseLease).
+		waitFor(t, "lease released, vault locked", func() bool {
+			r, _ := h.tables.Vault(vaultID)
+			return r.LeaseInstance == "" && r.State == "locked"
+		})
+	}
+}

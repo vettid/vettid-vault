@@ -287,6 +287,22 @@ func (s *stack) addRelease(n uint64) {
 	}
 }
 
+// parentHasFlag reports whether a vault-parent binary lists -name in its
+// -h output (flag usage: "  -name ...").
+func parentHasFlag(t *testing.T, bin, name string) bool {
+	t.Helper()
+	out, _ := exec.Command(bin, "-h").CombinedOutput() // -h exits 0 or 2 depending on the flag set
+	for _, l := range strings.Split(string(out), "\n") {
+		if f := strings.Fields(l); len(f) > 0 && f[0] == "-"+name {
+			return true
+		}
+	}
+	if !strings.Contains(string(out), "-instance-id") {
+		t.Fatalf("%s -h: no flag usage: %s", bin, out)
+	}
+	return false
+}
+
 // start runs a parent and an enclave of release n.
 func (s *stack) start(name string, n uint64, parentFlags ...string) *instance {
 	t := s.t
@@ -302,9 +318,10 @@ func (s *stack) start(name string, n uint64, parentFlags ...string) *instance {
 	parentBin, enclBin := s.parentBin, s.enclBin
 	if s.prevDir != "" && n == s.prevRelease {
 		parentBin, enclBin = filepath.Join(s.prevDir, "vault-parent"), filepath.Join(s.prevDir, "vault-enclave")
-	} else {
-		// Older tags' parents (the compatibility matrix) do not know
-		// the flag; HEAD's refuses to start without it.
+	}
+	// Parents since #16 refuse to start without the control-queue policy;
+	// older tags' parents (the compatibility matrix) do not know the flag.
+	if parentBin == s.parentBin || parentHasFlag(t, parentBin, "queue-policy-param") {
 		args = append(args, "-queue-policy-param", s.policyParam)
 	}
 	in.parent = exec.Command(parentBin, append(args, parentFlags...)...)

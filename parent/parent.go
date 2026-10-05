@@ -65,11 +65,49 @@ func New(cfg Config) (*Parent, error) {
 	return p, nil
 }
 
+// queueRecreateWait bounds the wait for SQS to allow recreating the queue
+// after its deletion (SQS refuses for 60 s); queueRetryBase is the first
+// backoff, doubled up to queueRetryMax.
+var (
+	queueRecreateWait = 90 * time.Second
+	queueRetryBase    = time.Second
+	queueRetryMax     = 10 * time.Second
+)
+
+// createQueue creates the instance queue. A restart within 60 s of a clean
+// stop finds the queue deleted recently: it waits for SQS (with backoff, up
+// to queueRecreateWait) instead of exiting into a restart loop. Other
+// errors fail at once.
+func (p *Parent) createQueue(ctx context.Context) (string, error) {
+	deadline := time.Now().Add(queueRecreateWait)
+	wait := queueRetryBase
+	logged := false
+	for {
+		url, err := p.cfg.Queues.Create(ctx, p.cfg.QueueName())
+		left := time.Until(deadline)
+		if err == nil || !errors.Is(err, ErrQueueDeletedRecently) || left <= 0 {
+			return url, err
+		}
+		if !logged {
+			p.log.Info("waiting for SQS to allow recreating the queue", "queue", p.cfg.QueueName())
+			logged = true
+		}
+		t := time.NewTimer(min(wait, left))
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return "", ctx.Err()
+		case <-t.C:
+		}
+		wait = min(2*wait, queueRetryMax)
+	}
+}
+
 // Run creates the queue, serves the enclave and the forwarder, and runs
 // until ctx ends; then it locks the enclave's vaults, withdraws the
 // instance and deletes the queue.
 func (p *Parent) Run(ctx context.Context) error {
-	url, err := p.cfg.Queues.Create(ctx, p.cfg.QueueName())
+	url, err := p.createQueue(ctx)
 	if err != nil {
 		return err
 	}
@@ -325,11 +363,15 @@ func (p *Parent) notify(s *session, f *hostproto.Frame) {
 			return
 		}
 		id, reason := string(f.Fields[0]), string(f.Fields[1])
-		p.log.Warn("vault stopped", "vault_id", id, "reason", reason)
+		lvl := slog.LevelWarn
+		if hostproto.StopExpected(reason) {
+			lvl = slog.LevelInfo // the member's lock, a move: not a crash
+		}
+		p.log.Log(context.Background(), lvl, "vault stopped", "vault_id", id, "reason", truncate(reason, 64))
 		p.mu.Lock()
 		_, was := p.running[id]
 		delete(p.running, id)
-		if reason == "split_brain" {
+		if reason == hostproto.StopSplitBrain {
 			p.stats.splitBrain++
 		}
 		p.mu.Unlock()

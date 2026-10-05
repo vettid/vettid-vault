@@ -104,6 +104,11 @@ func (s *Supervisor) runSelftest(ctx context.Context, req *selftest.Request) *se
 	r.SupervisorRSS = selfStatus("VmRSS")
 	r.Add("memory.reported", r.MemTotal > 0, true, fmt.Sprintf("total=%d available=%d supervisor_rss=%d vault_peak_rss=%d",
 		r.MemTotal, r.MemAvailable, r.SupervisorRSS, r.VaultPeakRSS))
+
+	// g. Capacity (W9), when asked: synthetic vault processes only.
+	if req.Capacity != nil {
+		s.selftestCapacity(ctx, r, *req.Capacity)
+	}
 	return r
 }
 

@@ -29,6 +29,9 @@ import (
 //	POST /dev/peer/event     {"type": T, "match": {k: v}, "timeout_s": N}: waits (default
 //	                         90 s, at most 300) for a peer event of type T whose body
 //	                         matches; events that do not match are kept for later calls
+//	POST /dev/recovery/code  {"guid": G}: plays the account portal's recovery for member G
+//	                         (needs -recovery-skew; recovery.go): the opened code and its
+//	                         QR payload
 func (s *stack) control() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /dev/health", func(w http.ResponseWriter, r *http.Request) {
@@ -86,6 +89,7 @@ func (s *stack) control() http.Handler {
 		}
 		writeJSON(w, 200, vs[0])
 	})
+	mux.HandleFunc("POST /dev/recovery/code", s.recoveryCode)
 	mux.HandleFunc("POST /dev/peer/event", func(w http.ResponseWriter, r *http.Request) {
 		var in struct {
 			Type     string            `json:"type"`

@@ -48,8 +48,12 @@ func SelftestMain() {
 func serveSelftest(c net.Conn, seccompErr error) int {
 	done := make(chan struct{})
 	var conn *hostproto.Conn
+	cv := &capacityVault{}
 	conn = hostproto.NewConn(c, func(ctx context.Context, f *hostproto.Frame) [][]byte {
-		if f.Kind != vaultipc.KindSelftest || len(f.Fields) != 1 {
+		switch {
+		case f.Kind == vaultipc.KindSelftestCapacity:
+			return cv.handle(channel{c: conn}, conn.Done(), f.Fields)
+		case f.Kind != vaultipc.KindSelftest || len(f.Fields) != 1:
 			return hostproto.Strings(hostproto.StatusInvalid)
 		}
 		r := runSelftest(ctx, channel{c: conn}, string(f.Fields[0]), seccompErr)
@@ -61,8 +65,11 @@ func serveSelftest(c net.Conn, seccompErr error) int {
 	return ExitLocked
 }
 
-func procStatus(field string) uint64 {
-	f, err := os.Open("/proc/self/status")
+func procStatus(field string) uint64 { return procField("/proc/self/status", field) }
+
+// procField reads a "Field:   N kB" line of a /proc file (bytes; 0 if absent).
+func procField(path, field string) uint64 {
+	f, err := os.Open(path)
 	if err != nil {
 		return 0
 	}

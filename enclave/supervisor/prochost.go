@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -208,15 +209,26 @@ func (h *procHost) exited(p *vproc) {
 	if stopping {
 		return
 	}
-	reason := "error"
-	switch p.exitCode {
-	case 0:
-		reason = "locked"
-	case 3: // vaultproc.ExitSplitBrain
-		reason = "split_brain"
-	}
-	h.s.log.Warn("vault process ended", "vault_id", p.vaultID, "reason", reason, "code", p.exitCode)
+	reason, lvl := stopReason(p.exitCode)
+	h.s.log.Log(context.Background(), lvl, "vault process ended", "vault_id", p.vaultID, "reason", reason, "code", p.exitCode)
 	h.s.link.notify(hostproto.KindStopped, hostproto.Strings(p.vaultID, reason)...)
+}
+
+// stopReason maps a vault process's exit code to its Stopped reason and
+// log level: a vault that locked itself (the member's lock, a move, a
+// deletion) ended normally (INFO); split brain, errors and signals are WARN.
+func stopReason(exitCode int) (string, slog.Level) {
+	reason := hostproto.StopError
+	switch exitCode {
+	case 0: // vaultproc.ExitLocked
+		reason = hostproto.StopLocked
+	case 3: // vaultproc.ExitSplitBrain
+		reason = hostproto.StopSplitBrain
+	}
+	if hostproto.StopExpected(reason) {
+		return reason, slog.LevelInfo
+	}
+	return reason, slog.LevelWarn
 }
 
 // Open implements enclave.Host: lock a running process of the vault, start

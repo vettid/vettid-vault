@@ -2,11 +2,16 @@ package vectors
 
 import (
 	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/ecdh"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
+	"crypto/hkdf"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/base32"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -570,6 +575,117 @@ func checkReleaseVectors(t *testing.T, dir string) {
 	if !bytes.Contains(nb, []byte(`"status":"removed","published_at":"2025-09-01T00:00:00Z","ends_at":"2026-09-01T00:00:00Z","notes"`)) {
 		t.Error("0.10.0 member order")
 	}
+}
+
+// §11.11.2 recovery vectors, checked from the portal's side: the browser
+// key opens both seals with an independent key schedule, and the library
+// opens them and builds the QR.
+func TestRecoveryVectors(t *testing.T) { checkRecoveryVectors(t, Dir) }
+
+func checkRecoveryVectors(t *testing.T, dir string) {
+	d := load(t, dir, "recovery.json")
+	bk, err := ecdh.P256().NewPrivateKey(d.hex("browser_key_scalar_hex"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bpub := bk.PublicKey().Bytes()
+	eq(t, "browser key", bpub, d.hex("browser_key_pub_hex"))
+	vid, rid, code := d.str("vault_id"), d.str("recovery_id"), d.str("code")
+	cb, err := base32.NewEncoding("0123456789ABCDEFGHJKMNPQRSTVWXYZ").WithPadding(base32.NoPadding).DecodeString(code)
+	if err != nil || len(code) != 32 {
+		t.Fatalf("code form: %v", err)
+	}
+	eq(t, "code bytes", cb, d.hex("code_bytes_hex"))
+	ch := sha256.Sum256([]byte("vettid/vms/2/recovery-code\x00" + vid + "\x00" + rid + "\x00" + code))
+	eq(t, "code hash", ch[:], d.hex("code_hash_hex"))
+	info := "vettid/vms/2/recovery-code-seal\x00" + vid + "\x00" + rid
+	open := func(name string) map[string]any {
+		s := d.sub(name)
+		out := s.b64("out_b64")
+		if len(out) != 5252 || s.num("out_len") != 5252 || out[0] != 0x01 {
+			t.Fatalf("%s: out length %d", name, len(out))
+		}
+		oh := sha256.Sum256(out)
+		eq(t, name+" out sha256", oh[:], s.hex("out_sha256_hex"))
+		eph, err := ecdh.P256().NewPrivateKey(s.hex("eph_scalar_hex"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		eq(t, name+" eph", out[1:66], eph.PublicKey().Bytes())
+		eq(t, name+" eph pub", out[1:66], s.hex("eph_pub_hex"))
+		eq(t, name+" nonce", out[66:78], s.hex("nonce_hex"))
+		eq(t, name+" aad", out[:78], s.hex("aad_hex"))
+		// The portal's side: ECDH with the browser key.
+		ephPub, err := ecdh.P256().NewPublicKey(out[1:66])
+		if err != nil {
+			t.Fatal(err)
+		}
+		shared, err := bk.ECDH(ephPub)
+		if err != nil {
+			t.Fatal(err)
+		}
+		eq(t, name+" ecdh", shared, s.hex("ecdh_shared_hex"))
+		salt := append(append([]byte(nil), out[1:66]...), bpub...)
+		eq(t, name+" salt", salt, s.hex("hkdf_salt_hex"))
+		k, err := hkdf.Key(sha256.New, shared, salt, info, 32)
+		if err != nil {
+			t.Fatal(err)
+		}
+		eq(t, name+" k", k, s.hex("k_hex"))
+		blk, _ := aes.NewCipher(k)
+		g, _ := cipher.NewGCM(blk)
+		pt, err := g.Open(nil, out[66:78], out[78:], out[:78])
+		if err != nil {
+			t.Fatalf("%s: AES-GCM open: %v", name, err)
+		}
+		js := []byte(s.str("pt_json"))
+		if len(pt) != s.num("pt_len") || len(pt) != 5252-78-16 {
+			t.Fatalf("%s: pt length %d", name, len(pt))
+		}
+		eq(t, name+" pt", pt, append(bytes.Clone(js), make([]byte, len(pt)-len(js))...))
+		var m map[string]any
+		if err := json.Unmarshal(js, &m); err != nil {
+			t.Fatal(err)
+		}
+		if m["v"] != float64(1) || m["vault_id"] != vid || m["recovery_id"] != rid {
+			t.Fatalf("%s: pt %s", name, js)
+		}
+		return m
+	}
+	m := open("sealed")
+	if len(m) != 6 || m["code"] != code || m["not_before"] != d.str("not_before") || m["expires_at"] != d.str("expires_at") {
+		t.Fatalf("sealed pt: %v", m)
+	}
+	if nb, _ := envelope.ParseTS(d.str("not_before")); !nb.Add(24 * time.Hour).Equal(mustTS(t, d.str("expires_at"))) {
+		t.Error("expires_at = not_before + 24 h")
+	}
+	if m := open("no_credential"); len(m) != 4 || m["error"] != "no_credential" {
+		t.Fatalf("no_credential pt: %v", m)
+	}
+	// The library opens both.
+	c, err := altchan.OpenRecoveryCode(bk, d.sub("sealed").b64("out_b64"), vid, rid)
+	if err != nil || c.Code != code || envelope.FormatTS(c.NotBefore) != d.str("not_before") || envelope.FormatTS(c.Expires) != d.str("expires_at") {
+		t.Fatalf("library open: %v", err)
+	}
+	if r, err := altchan.OpenRecoveryCode(bk, d.sub("no_credential").b64("out_b64"), vid, rid); err != nil || r.Error != "no_credential" || r.Code != "" {
+		t.Fatalf("library open (no_credential): %v", err)
+	}
+	// The QR payload.
+	want := `{"v":1,"t":"r","vault_id":"` + vid + `","recovery_id":"` + rid + `","code":"` + code + `"}`
+	if d.str("qr") != want || string(altchan.RecoveryQR(c)) != want {
+		t.Errorf("qr: %s", d.str("qr"))
+	}
+	if q, err := altchan.ParseRecoveryQR([]byte(d.str("qr"))); err != nil || q.Code != code || q.VaultID != vid || q.RecoveryID != rid {
+		t.Errorf("parse qr: %v", err)
+	}
+}
+
+func mustTS(t *testing.T, s string) time.Time {
+	ts, err := envelope.ParseTS(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ts
 }
 
 func mustSeed(t *testing.T, k *suite.PrivateKey) []byte {

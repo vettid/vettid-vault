@@ -14,6 +14,11 @@ import (
 // published and kept while the release lives (until it is removed).
 const ReleasesDir = "../../testdata/releases"
 
+// addedLater are vector files added after the first refs the matrix
+// checks (the synthetic row's base): a frozen directory may lack them, and
+// they are checked when present. Every production release has them.
+var addedLater = map[string]bool{"recovery.json": true}
+
 var releaseDirName = regexp.MustCompile(`^[1-9][0-9]*$`)
 
 // frozenDirs lists the frozen vector directories: every
@@ -58,12 +63,15 @@ func TestFrozenReleaseVectors(t *testing.T) {
 	for name, dir := range dirs {
 		t.Run(name, func(t *testing.T) {
 			for _, f := range Files {
-				if _, err := os.Stat(filepath.Join(dir, f)); err != nil {
+				if _, err := os.Stat(filepath.Join(dir, f)); err != nil && !(addedLater[f] && os.IsNotExist(err)) {
 					t.Fatalf("frozen vectors incomplete: %v", err)
 				}
 			}
 			checkVectors(t, dir)
 			checkReleaseVectors(t, dir)
+			if _, err := os.Stat(filepath.Join(dir, "recovery.json")); err == nil {
+				checkRecoveryVectors(t, dir)
+			}
 		})
 	}
 }

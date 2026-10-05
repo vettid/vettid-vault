@@ -109,8 +109,10 @@ that cover them.
 [`testdata/vectors/`](testdata/vectors) holds the §16 vectors as JSON:
 `keys`, `hpke`, `envelope_sealed`, `envelope_session`, `handshake` (every
 key-schedule value, SAS and both signatures), `invite`, `altchan` (0.3.0
-unlock signing string and 12,288-byte requests) and `release` (manifest
-signature and release approval, equal to §16). All
+unlock signing string and 12,288-byte requests), `release` (manifest
+signature and release approval, equal to §16) and `recovery` (§11.11.2:
+the recovery code and the `no_credential` refusal sealed to a fixed
+browser P-256 key, with every intermediate value, and the QR payload). All
 keys come from fixed, public, **test-only** seeds. Every file states its
 inputs, including the values §16 leaves open.
 
@@ -211,6 +213,7 @@ binary. One stack per data directory.
 | `-localstack` | — | an external LocalStack endpoint; without it, `integration/docker-compose.yml` is started (one container, 1.5 GiB cap) and stopped on exit, and an already running LocalStack on :4566 is refused rather than shared |
 | `-compose` | `podman compose`, else `docker compose` | compose command |
 | `-wait-free-mem` | 8 | refuse to start unless this many GB of memory are available (0: no check); `-mem-wait 10m` keeps re-checking |
+| `-recovery-skew` | 0 | e.g. `24h`: `POST /dev/recovery/code` moves the recovery clock of the enclave and the member API stand-in forward this much after minting each code, skipping the 24 h recovery delay (below) |
 
 Everything listens on 127.0.0.1. Child processes run with
 `GOMAXPROCS=2` and builds with `-p 2`. The control port (TEST-ONLY):
@@ -222,6 +225,17 @@ Everything listens on 127.0.0.1. Child processes run with
 | `GET /dev/trust` | the test Nitro root (DER, base64), the test manifest keys (SPKI DER, base64), the relay URL, and the dev device policy in force (`null`: TEST policy only) |
 | `POST /dev/peer/request` | `{"type": T, "body": {...}}`: `vaultctl request` on the peer; answers the vault's response. Events the peer received while the request ran are kept for `/dev/peer/event` |
 | `POST /dev/peer/event` | `{"type": T, "match": {k: v}, "timeout_s": N}`: waits (default 90 s, at most 300) for a peer event of type T whose body matches; others are kept for later calls |
+| `POST /dev/recovery/code` | `{"guid": G, "timeout_s": N}` (needs `-recovery-skew`): plays the account portal's recovery for member G (VAULT-MESSAGING §11.11): a fresh browser P-256 key, `POST /api/vault/recovery`, the recovery clock moved past the delay, the sealed code fetched and opened. Answers `{vault_id, recovery_id, code, qr, not_before, expires_at, available_at}`, `qr` being the QR payload the app scans and registers with (`POST /api/vault/recovery/register`); `422 {"error": "no_credential"}` for a vault without a credential (that recovery is cancelled); member API refusals (`404`, `409 recovery_active`) as they come |
+
+**Recovery.** The member API stand-in serves `POST`/`GET
+/api/vault/recovery`, `POST /api/vault/recovery/cancel` and `POST
+/api/vault/recovery/register` as vettid.org's MEMBER-API "Vault
+recovery" (no cancel link, email, rate limits or audit; the `Recovery`
+object also carries `vault_id`). A recovery locks the member's vault
+until it is cancelled or completed. With `-recovery-skew`, the dev
+enclave runs with `-dev-recovery-clock FILE` (devenclave builds only):
+its recovery clock is real time plus the duration in the file, which
+devstack advances (`run/recovery-clock`).
 
 **Dev device policy.** The dev enclave verifies device attestation
 against the TEST policy (`internal/enclavetest.Policy`: the TEST Android

@@ -84,6 +84,12 @@ type stack struct {
 	ctlBin             string
 	parentArgs         []string
 
+	// The recovery clock (-recovery-skew): its offset from real time, in
+	// the member API stand-in and, through recClock, the dev enclave.
+	recOff   atomic.Int64
+	recClock string
+	recMu    sync.Mutex
+
 	peerState  string
 	vaultctlFn func(args ...string) (string, error)
 	peerMu     sync.Mutex
@@ -211,6 +217,23 @@ func (s *stack) start(ctx context.Context) error {
 	return nil
 }
 
+// recoveryNow is the member API's recovery clock.
+func (s *stack) recoveryNow() time.Time { return time.Now().Add(time.Duration(s.recOff.Load())) }
+
+// setRecoveryOffset sets the recovery clock's offset, for the enclave
+// (the clock file) and the member API.
+func (s *stack) setRecoveryOffset(d time.Duration) error {
+	tmp := s.recClock + ".tmp"
+	if err := os.WriteFile(tmp, []byte(d.String()+"\n"), 0o644); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, s.recClock); err != nil {
+		return err
+	}
+	s.recOff.Store(int64(d))
+	return nil
+}
+
 func (s *stack) apiURL() string { return "http://" + s.apiL.Addr().String() }
 func (s *stack) ctlURL() string { return "http://" + s.ctlL.Addr().String() }
 
@@ -219,6 +242,7 @@ func (s *stack) info() map[string]any {
 	m := map[string]any{
 		"relay_url":       relayURL,
 		"relay_transport": "http://" + s.relayL.Addr().String(),
+		"relay_tls":       s.relayTLS, // relay.vettid.test's TLS front (vaultctl: VAULTCTL_DEV_RESOLVE)
 		"api":             s.apiURL(),
 		"ctl":             s.ctlURL(),
 		"peer_guid":       peerGUID,
@@ -229,6 +253,7 @@ func (s *stack) info() map[string]any {
 		"pid":             os.Getpid(),
 		"localstack":      s.ep,
 		"device_policy":   nil,
+		"recovery_skew":   s.opts.recoverySkew.String(),
 	}
 	if s.policy != nil {
 		m["device_policy"] = s.policy.Summary()
@@ -363,7 +388,8 @@ func (s *stack) setupAWS(ctx context.Context) error {
 	if err := memberapitest.PutRelease(ctx, db, s.tables.Releases, enclavetest.Spec(release, "").PCR0Hex(), release, "active"); err != nil {
 		return err
 	}
-	api := memberapitest.New(memberapitest.Config{DDB: db, SQS: sq, Tables: s.tables, QueueURLPrefix: urlPrefix, Manifest: s.publishedManifest})
+	api := memberapitest.New(memberapitest.Config{DDB: db, SQS: sq, Tables: s.tables, QueueURLPrefix: urlPrefix, Manifest: s.publishedManifest,
+		RecoveryNow: s.recoveryNow})
 	s.serve(s.apiL, logged("api", api))
 	s.parentArgs = []string{"-instance-id", pfx + "-a", "-region", region, "-bucket", s.bucket,
 		"-table-vaults", s.tables.Vaults, "-table-instances", s.tables.Instances, "-table-requests", s.tables.Requests,
@@ -461,6 +487,17 @@ func (s *stack) startInstance(ctx context.Context) error {
 	eargs := []string{"-release", strconv.Itoa(release), "-control", ctl, "-egress", egr, "-relay-url", relayURL}
 	if s.opts.devicePolicy != "" {
 		eargs = append(eargs, "-dev-device-policy", s.opts.devicePolicy)
+	}
+	if s.opts.recoverySkew > 0 {
+		abs, err := filepath.Abs(filepath.Join(s.runDir, "recovery-clock"))
+		if err != nil {
+			return err
+		}
+		s.recClock = abs
+		if err := s.setRecoveryOffset(0); err != nil {
+			return err
+		}
+		eargs = append(eargs, "-dev-recovery-clock", s.recClock)
 	}
 	e := exec.Command(s.enclBin, eargs...)
 	e.Env = []string{"PATH=" + os.Getenv("PATH"), childProcs}

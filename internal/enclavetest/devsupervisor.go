@@ -6,10 +6,13 @@ import (
 	"encoding/base64"
 	"errors"
 	"flag"
+	"io"
 	"log/slog"
 	"net"
 	"net/url"
+	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/vettid/vettid-vault/enclave"
@@ -40,6 +43,11 @@ type DevOptions struct {
 	// (DEVELOPMENT ONLY, -dev-device-policy); nil: the TEST policy. The
 	// vault processes need it too: append DevVaultPolicyArgs to VaultExec.
 	DevicePolicy *DevDevicePolicy
+	// RecoveryClock, if set, names a file holding the offset (a Go
+	// duration) of the recovery clock from the real one (DEVELOPMENT ONLY,
+	// -dev-recovery-clock; DevRecoveryClock). The vault processes need it
+	// too: append DevVaultRecoveryClockArgs to VaultExec.
+	RecoveryClock string
 }
 
 // DevSupervisor returns a supervisor configuration for development and
@@ -84,8 +92,14 @@ func DevSupervisor(o DevOptions) (supervisor.Config, error) {
 	}
 	control := o.Control
 	return supervisor.Config{
-		Enclave: func(id string) enclave.Config { return devConfig(id, o.Release, o.RelayURL, o.DevicePolicy) },
-		NSM:     NewFakeNSM(spec.PCR0, spec.PCR1, spec.PCR2, time.Now),
+		Enclave: func(id string) enclave.Config {
+			c := devConfig(id, o.Release, o.RelayURL, o.DevicePolicy)
+			if o.RecoveryClock != "" {
+				c.RecoveryNow = DevRecoveryClock(o.RecoveryClock)
+			}
+			return c
+		},
+		NSM: NewFakeNSM(spec.PCR0, spec.PCR1, spec.PCR2, time.Now),
 		Control: func(ctx context.Context) (net.Conn, error) {
 			var d net.Dialer
 			return d.DialContext(ctx, "tcp", control)
@@ -133,6 +147,46 @@ func DevVaultPolicyArgs(p *DevDevicePolicy) []string {
 	return []string{"-device-policy", base64.StdEncoding.EncodeToString(p.raw)}
 }
 
+// DevVaultRecoveryClockArgs pass a recovery clock file on to a dev vault
+// process (none for "").
+func DevVaultRecoveryClockArgs(path string) []string {
+	if path == "" {
+		return nil
+	}
+	return []string{"-recovery-clock", path}
+}
+
+// MaxRecoveryClockFile bounds the recovery clock file.
+const MaxRecoveryClockFile = 64
+
+// DevRecoveryClock is a DEVELOPMENT-ONLY recovery clock
+// (enclave.Config.RecoveryNow): the real time plus the duration written in
+// the file at path (e.g. "24h"), read at every call, so that a dev stack
+// can move it past a recovery's 24 h delay while the enclave runs. A
+// missing or malformed file is an offset of zero.
+func DevRecoveryClock(path string) func() time.Time {
+	return func() time.Time {
+		return time.Now().Add(readRecoveryOffset(path))
+	}
+}
+
+func readRecoveryOffset(path string) time.Duration {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, MaxRecoveryClockFile+1))
+	if err != nil || len(b) > MaxRecoveryClockFile {
+		return 0
+	}
+	d, err := time.ParseDuration(strings.TrimSpace(string(b)))
+	if err != nil || d < 0 {
+		return 0
+	}
+	return d
+}
+
 // DevVaultPlatform parses DevVaultArgs (and DevVaultPolicyArgs) into a dev vault process's
 // platform (TEST-ONLY configuration, the messaging feature).
 func DevVaultPlatform(args []string) (vaultproc.Platform, error) {
@@ -140,6 +194,7 @@ func DevVaultPlatform(args []string) (vaultproc.Platform, error) {
 	n := fs.Uint64("release", 3, "test release")
 	relay := fs.String("relay-url", "", "relay URL")
 	policy := fs.String("device-policy", "", "dev device policy (base64)")
+	clock := fs.String("recovery-clock", "", "recovery clock file (DevRecoveryClock)")
 	if err := fs.Parse(args); err != nil || *n == 0 || *n > 15 || *relay == "" || fs.NArg() != 0 {
 		return vaultproc.Platform{}, errors.New("enclavetest: bad vault process arguments")
 	}
@@ -154,7 +209,13 @@ func DevVaultPlatform(args []string) (vaultproc.Platform, error) {
 		}
 	}
 	return vaultproc.Platform{
-		Config:         func(id string) enclave.Config { return devConfig(id, *n, *relay, dp) },
+		Config: func(id string) enclave.Config {
+			c := devConfig(id, *n, *relay, dp)
+			if *clock != "" {
+				c.RecoveryNow = DevRecoveryClock(*clock)
+			}
+			return c
+		},
 		Features:       func() []vault.Feature { return all.Dev() },
 		RequireSeccomp: true,
 	}, nil

@@ -30,9 +30,9 @@ import (
 //   - the move: the member approves release 4 in an unlock of the old
 //     release, which seals to HEAD's key; HEAD's release then unlocks it.
 //
-// Not covered here: recovery and the host delete (the member API
-// stand-in has no routes for them yet), device attestation roots (C6,
-// test CA only) and AWS itself (C5).
+// Not covered here: recovery (the member API stand-in has its routes,
+// cmd/devstack exercises them) and the host delete (no stand-in route
+// yet), device attestation roots (C6, test CA only) and AWS itself (C5).
 func TestCompatMoveOnly(t *testing.T) {
 	prev := os.Getenv("VAULT_COMPAT_PREV_BIN")
 	if prev == "" {

@@ -7,7 +7,7 @@
 //
 // Left out: sessions (a member is named by "Authorization: Bearer
 // <user_guid>" and is always a member who accepted the current terms),
-// rate limits and the audit log.
+// rate limits, the audit log, email and the recovery cancel link.
 package memberapitest
 
 import (
@@ -79,6 +79,10 @@ type Config struct {
 	// Sent, if set, sees every queue message sent (tests that replay one
 	// as a dishonest host would).
 	Sent func(requestID, queueURL, body string)
+	// RecoveryNow, if set, is the clock of the recovery's times (requested,
+	// available, expires; DEVELOPMENT: the dev stack moves it forward
+	// together with the enclave's recovery clock). Default Now.
+	RecoveryNow func() time.Time
 }
 
 // API serves the vault routes.
@@ -93,6 +97,9 @@ type API struct {
 func New(cfg Config) *API {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
+	}
+	if cfg.RecoveryNow == nil {
+		cfg.RecoveryNow = cfg.Now
 	}
 	return &API{cfg: cfg, StartRequests: map[string]int{}}
 }
@@ -191,6 +198,16 @@ func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodPost && r.URL.Path == "/api/vault/lock":
 		out, err = a.lock(ctx, guid, body)
 		status = 202
+	case r.Method == http.MethodPost && r.URL.Path == "/api/vault/recovery":
+		out, err = a.recoveryRequest(ctx, guid, body)
+		status = 202
+	case r.Method == http.MethodGet && r.URL.Path == "/api/vault/recovery":
+		out, err = a.recoveryStatus(ctx, guid)
+	case r.Method == http.MethodPost && r.URL.Path == "/api/vault/recovery/cancel":
+		out, err = a.recoveryCancel(ctx, guid, body)
+	case r.Method == http.MethodPost && r.URL.Path == "/api/vault/recovery/register":
+		out, err = a.recoveryRegister(ctx, guid, body)
+		status = 202
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, requestsPathPrefix):
 		out, err = a.request(ctx, guid, strings.TrimPrefix(r.URL.Path, requestsPathPrefix))
 	default:
@@ -259,6 +276,7 @@ type vaultRow struct {
 	VaultID, UserGUID, State, SealedRelease, VaultVersion string
 	StateVersion                                          any
 	Lease                                                 *lease
+	Recovery                                              *recoveryRow
 	CreatedAt, UpdatedAt                                  string
 }
 
@@ -272,6 +290,15 @@ func parseVault(it map[string]ddbtypes.AttributeValue) *vaultRow {
 		v.StateVersion = x
 	} else if sv := str(it, "state_version"); sv != "" {
 		v.StateVersion = sv
+	}
+	if m, ok := it["recovery"].(*ddbtypes.AttributeValueMemberM); ok {
+		r := &recoveryRow{ID: str(m.Value, "recovery_id"), State: str(m.Value, "state")}
+		r.RequestedAt, _ = num(m.Value, "requested_at")
+		r.AvailableAt, _ = num(m.Value, "available_at")
+		r.ExpiresAt, _ = num(m.Value, "expires_at")
+		if r.ID != "" {
+			v.Recovery = r
+		}
 	}
 	if m, ok := it["lease"].(*ddbtypes.AttributeValueMemberM); ok {
 		l := &lease{instanceID: str(m.Value, "instance_id")}
@@ -521,10 +548,16 @@ func (a *API) routeForEnrollment(ctx context.Context, now int64) (any, error) {
 // --- requests ---
 
 func (a *API) enqueue(ctx context.Context, op, guid string, v *vaultRow, requestID string, inst *instanceRow, kid, env, manifestSHA string) error {
+	return a.enqueueWith(ctx, op, guid, v, requestID, inst, kid, env, manifestSHA, "", requestTTLS)
+}
+
+// enqueueWith is enqueue with vault.ts's extra fields: the recovery's
+// browser_key (after manifest_sha256) and the slot's TTL.
+func (a *API) enqueueWith(ctx context.Context, op, guid string, v *vaultRow, requestID string, inst *instanceRow, kid, env, manifestSHA, browserKey string, ttlS int64) error {
 	created := a.nowISO()
 	_, err := a.cfg.DDB.PutItem(ctx, &dynamodb.PutItemInput{TableName: &a.cfg.Tables.Requests, ConditionExpression: aws.String("attribute_not_exists(request_id)"),
 		Item: map[string]ddbtypes.AttributeValue{"request_id": s(requestID), "vault_id": s(v.VaultID), "user_guid": s(guid), "op": s(op),
-			"status": s("queued"), "instance_id": s(inst.InstanceID), "created_at": s(created), "expires_at": n(a.nowS() + requestTTLS)}})
+			"status": s("queued"), "instance_id": s(inst.InstanceID), "created_at": s(created), "expires_at": n(a.nowS() + ttlS)}})
 	if err != nil {
 		if code(err) == "ConditionalCheckFailedException" {
 			return vaultError(409, "duplicate_request", "request_id has already been used", nil)
@@ -541,6 +574,9 @@ func (a *API) enqueue(ctx context.Context, op, guid string, v *vaultRow, request
 	}
 	if manifestSHA != "" {
 		b.WriteString(`,"manifest_sha256":` + jsonString(manifestSHA)) // enroll and unlock (0.10.0)
+	}
+	if browserKey != "" {
+		b.WriteString(`,"browser_key":` + jsonString(browserKey)) // recovery (§11.11.1)
 	}
 	b.WriteString(`,"enqueued_at":` + jsonString(created) + `}`)
 	body := b.String()
@@ -601,9 +637,13 @@ func (a *API) status(ctx context.Context, guid string) (any, error) {
 		}
 		return s
 	}
+	var rec any
+	if rn := a.recoveryNowS(); recoveryActive(v.Recovery, rn) {
+		rec = map[string]any{"state": recoveryState(v.Recovery, rn), "available_at": isoS(v.Recovery.AvailableAt)}
+	}
 	return map[string]any{"vault": map[string]any{"vault_id": v.VaultID, "state": v.State, "sealed_release": nul(v.SealedRelease),
 		"vault_version": nul(v.VaultVersion), "state_version": v.StateVersion, "leased": v.Lease != nil && v.Lease.expires > now,
-		"created_at": v.CreatedAt, "updated_at": v.UpdatedAt}}, nil
+		"recovery": rec, "created_at": v.CreatedAt, "updated_at": v.UpdatedAt}}, nil
 }
 
 func (a *API) enclave(ctx context.Context, guid string, requested *string) (any, error) {

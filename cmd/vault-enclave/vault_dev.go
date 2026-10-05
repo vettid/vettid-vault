@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/vettid/vettid-vault/enclave/supervisor"
@@ -31,6 +32,7 @@ func platform() (supervisor.Config, error) {
 	uidBase := flag.Int("vault-uid-base", 0, "run vault processes under uid/gid base+i (needs root; 0: keep ids)")
 	debug := flag.Bool("debug", false, "debug logging")
 	devPolicy := flag.String("dev-device-policy", "", "JSON file extending the TEST device-attestation policy (DEVELOPMENT ONLY; enclavetest.DevDevicePolicy)")
+	recClock := flag.String("dev-recovery-clock", "", "file holding the recovery clock's offset from real time, e.g. 24h, re-read at every check (DEVELOPMENT ONLY; enclavetest.DevRecoveryClock)")
 	flag.Parse()
 	if flag.NArg() != 0 {
 		return supervisor.Config{}, fmt.Errorf("unexpected arguments %q", flag.Args())
@@ -46,6 +48,14 @@ func platform() (supervisor.Config, error) {
 		}
 		fmt.Fprintf(os.Stderr, "vault-enclave: DEVELOPMENT device policy from %s extends the TEST policy: %v\n", *devPolicy, dp.Summary())
 	}
+	if *recClock != "" {
+		abs, err := filepath.Abs(*recClock)
+		if err != nil {
+			return supervisor.Config{}, fmt.Errorf("-dev-recovery-clock: %w", err)
+		}
+		*recClock = abs
+		fmt.Fprintf(os.Stderr, "vault-enclave: DEVELOPMENT recovery clock: real time plus the duration in %s\n", abs)
+	}
 	lvl := slog.LevelInfo
 	if *debug {
 		lvl = slog.LevelDebug
@@ -55,9 +65,9 @@ func platform() (supervisor.Config, error) {
 		return supervisor.Config{}, err
 	}
 	cfg, err := enclavetest.DevSupervisor(enclavetest.DevOptions{Release: *release, Control: *control, Egress: *egress,
-		RelayURL: *relayURL, MaxVaults: *maxVaults, DownLock: *downLock, LogLevel: lvl, DevicePolicy: dp,
-		VaultExec: append(append([]string{exe, vaultproc.Arg}, enclavetest.DevVaultArgs(*release, *relayURL)...),
-			enclavetest.DevVaultPolicyArgs(dp)...)})
+		RelayURL: *relayURL, MaxVaults: *maxVaults, DownLock: *downLock, LogLevel: lvl, DevicePolicy: dp, RecoveryClock: *recClock,
+		VaultExec: append(append(append([]string{exe, vaultproc.Arg}, enclavetest.DevVaultArgs(*release, *relayURL)...),
+			enclavetest.DevVaultPolicyArgs(dp)...), enclavetest.DevVaultRecoveryClockArgs(*recClock)...)})
 	cfg.Proc.UIDBase = *uidBase
 	cfg.Harden = true
 	return cfg, err

@@ -79,7 +79,7 @@ git push origin release/prod/N
 1. `gate`: the tag is `release/<prod|staging>/<n>`, GitHub verifies its
    signature, the channel file passes the release gate and says
    `"release": n`.
-2. `build` ×2: two `ubuntu-24.04-arm` runners, two checkout paths, each
+2. `build` ×2: two `ubuntu-26.04-arm` runners, two checkout paths, each
    runs `release/rebuild.sh` (the pinned toolchain image, then
    `scripts/build-eif.sh` with no docker build cache).
 3. `compare`: the enclave and parent binaries are byte-identical, the

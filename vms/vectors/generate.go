@@ -5,11 +5,16 @@ package vectors
 import (
 	"bytes"
 	"crypto"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/ecdh"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
+	"crypto/hkdf"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/base32"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
@@ -253,7 +258,111 @@ func Generate() (map[string][]byte, error) {
 	if err := put("release.json", rv); err != nil {
 		return nil, err
 	}
+
+	// recovery.json (§11.11.2)
+	rc, err := genRecovery(t0)
+	if err != nil {
+		return nil, err
+	}
+	if err := put("recovery.json", rc); err != nil {
+		return nil, err
+	}
 	return out, nil
+}
+
+// recoveryCodeEncoding is the code's form (§11.11.2): Crockford base32,
+// upper case, no padding.
+var recoveryCodeEncoding = base32.NewEncoding("0123456789ABCDEFGHJKMNPQRSTVWXYZ").WithPadding(base32.NoPadding)
+
+// genRecovery seals a recovery code, and the no_credential refusal, to the
+// fixed browser key through altchan.SealRecoveryCode, with the ephemeral
+// scalar and the nonce scripted.
+func genRecovery(t0 time.Time) (obj, error) {
+	bk, err := ecdh.P256().NewPrivateKey(rep(SeedBrowserKey, 32))
+	if err != nil {
+		return nil, err
+	}
+	bpub := bk.PublicKey().Bytes()
+	code := recoveryCodeEncoding.EncodeToString(rep(RecCodeBytes, 20))
+	notBefore := t0.Add(24 * time.Hour)
+	c := &altchan.RecoveryCode{VaultID: ACVaultID, RecoveryID: RecRecoveryID, Code: code, NotBefore: notBefore, Expires: notBefore.Add(24 * time.Hour)}
+	refusal := &altchan.RecoveryCode{VaultID: ACVaultID, RecoveryID: RecRecoveryID, Error: "no_credential"}
+	info := altchan.LabelRecoverySeal + "\x00" + ACVaultID + "\x00" + RecRecoveryID
+	seal := func(rc *altchan.RecoveryCode, ephSeed, nonceByte byte) (obj, error) {
+		var sealed []byte
+		if err := with(newScript(rep(ephSeed, 32), rep(nonceByte, 12)), func() error {
+			var err error
+			sealed, err = altchan.SealRecoveryCode(bpub, rc)
+			return err
+		}); err != nil {
+			return nil, err
+		}
+		eph, err := ecdh.P256().NewPrivateKey(rep(ephSeed, 32))
+		if err != nil {
+			return nil, err
+		}
+		shared, err := eph.ECDH(bk.PublicKey())
+		if err != nil {
+			return nil, err
+		}
+		salt := append(eph.PublicKey().Bytes(), bpub...)
+		k, err := hkdf.Key(sha256.New, shared, salt, info, 32)
+		if err != nil {
+			return nil, err
+		}
+		got, err := altchan.OpenRecoveryCode(bk, sealed, ACVaultID, RecRecoveryID)
+		if err != nil {
+			return nil, err
+		}
+		if got.Code != rc.Code || got.Error != rc.Error {
+			return nil, errors.New("vectors: recovery seal does not open")
+		}
+		blk, _ := aes.NewCipher(k)
+		g, _ := cipher.NewGCM(blk)
+		pt, err := g.Open(nil, sealed[66:78], sealed[78:], sealed[:78])
+		if err != nil {
+			return nil, err
+		}
+		js := bytes.TrimRight(pt, "\x00")
+		return obj{
+			{"eph_scalar_hex", hx(rep(ephSeed, 32))},
+			{"eph_pub_hex", hx(eph.PublicKey().Bytes())},
+			{"nonce_hex", hx(rep(nonceByte, 12))},
+			{"ecdh_shared_hex", hx(shared)},
+			{"hkdf_salt_hex", hx(salt)},
+			{"k_hex", hx(k)},
+			{"aad_hex", hx(sealed[:78])},
+			{"pt_json", string(js)},
+			{"pt_len", len(pt)},
+			{"out_len", len(sealed)},
+			{"out_sha256_hex", hx(sha256Of(sealed))},
+			{"out_b64", b64(sealed)},
+		}, nil
+	}
+	sc, err := seal(c, SeedRecEph, NonceRec)
+	if err != nil {
+		return nil, err
+	}
+	nc, err := seal(refusal, SeedRecEphNoCred, NonceRecNoCred)
+	if err != nil {
+		return nil, err
+	}
+	ch := sha256.Sum256([]byte("vettid/vms/2/recovery-code\x00" + ACVaultID + "\x00" + RecRecoveryID + "\x00" + code))
+	return obj{
+		{"description", "VAULT-MESSAGING §11.11.2 recovery code sealed to the portal's browser key. out = 0x01 || eph (65, uncompressed P-256) || nonce (12) || AES-256-GCM(k, nonce, aad = out[0:78], pt); k = HKDF-SHA-256(ikm = ECDH(eph, browser_key) x-coordinate, salt = eph || browser_key (both 65-byte uncompressed points), info = \"vettid/vms/2/recovery-code-seal\" || 0x00 || vault_id || 0x00 || recovery_id, L = 32); pt = the compact JSON pt_json followed by 0x00 bytes up to pt_len; out is 5,252 bytes. The ephemeral scalar and nonce are the scripted randomness (the scalar drawn first). no_credential is the refusal (§11.11.1). code_hash = SHA-256(\"vettid/vms/2/recovery-code\" || 0x00 || vault_id || 0x00 || recovery_id || 0x00 || code), what the sealed header keeps. qr is the QR payload (compact JSON). The browser key is TEST ONLY; the portal's real key is a non-extractable WebCrypto key."},
+		{"browser_key_scalar_hex", hx(rep(SeedBrowserKey, 32))},
+		{"browser_key_pub_hex", hx(bpub)},
+		{"vault_id", ACVaultID},
+		{"recovery_id", RecRecoveryID},
+		{"code_bytes_hex", hx(rep(RecCodeBytes, 20))},
+		{"code", code},
+		{"not_before", envelope.FormatTS(c.NotBefore)},
+		{"expires_at", envelope.FormatTS(c.Expires)},
+		{"code_hash_hex", hx(ch[:])},
+		{"sealed", sc},
+		{"no_credential", nc},
+		{"qr", string(altchan.RecoveryQR(c))},
+	}, nil
 }
 
 func genHandshake(t0 time.Time, vault, ini *principal, eph *suite.PrivateKey) (obj, error) {

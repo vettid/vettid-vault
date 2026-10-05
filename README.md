@@ -109,8 +109,10 @@ that cover them.
 [`testdata/vectors/`](testdata/vectors) holds the §16 vectors as JSON:
 `keys`, `hpke`, `envelope_sealed`, `envelope_session`, `handshake` (every
 key-schedule value, SAS and both signatures), `invite`, `altchan` (0.3.0
-unlock signing string and 12,288-byte requests) and `release` (manifest
-signature and release approval, equal to §16). All
+unlock signing string and 12,288-byte requests), `release` (manifest
+signature and release approval, equal to §16) and `recovery` (§11.11.2:
+the recovery code and the `no_credential` refusal sealed to a fixed
+browser P-256 key, with every intermediate value, and the QR payload). All
 keys come from fixed, public, **test-only** seeds. Every file states its
 inputs, including the values §16 leaves open.
 

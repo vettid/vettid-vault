@@ -163,17 +163,18 @@ func testRecovery(t *testing.T, o *options, info map[string]any) {
 	// A member with a credential, through vaultctl (api-enroll creates it).
 	const guid = "member-recovery"
 	state := filepath.Join(t.TempDir(), "member.json")
-	vaultctl := func(args ...string) string {
+	vaultctlAs := func(state string, env []string, args ...string) string {
 		t.Helper()
 		cmd := exec.Command(filepath.Join(o.dataDir, "bin", "vaultctl"), append([]string{"-state", state, "-timeout", "150s"}, args...)...)
-		cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "VAULTCTL_DEV_RESOLVE=" + relayHost + "=" + info["relay_tls"].(string),
-			childProcs}
+		cmd.Env = append([]string{"PATH=" + os.Getenv("PATH"), "VAULTCTL_DEV_RESOLVE=" + relayHost + "=" + info["relay_tls"].(string),
+			childProcs}, env...)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("vaultctl %v: %v\n%s", args, err, out)
 		}
 		return string(out)
 	}
+	vaultctl := func(args ...string) string { t.Helper(); return vaultctlAs(state, nil, args...) }
 	vaultctl("init", "-role", "app", "-name", "phone", "-relay", relayURL)
 	vaultctl("api-enroll", "-api", api, "-guid", guid, "-pin", "13572468")
 	if code, m := call("GET", api+"/api/vault/recovery", guid, nil); code != 200 || m["recovery"] != nil {
@@ -226,10 +227,43 @@ func testRecovery(t *testing.T, o *options, info map[string]any) {
 	if code, m := reg(vid); code != 202 || m["vault_id"] != vid {
 		t.Fatalf("register: %d %v", code, m)
 	}
+	// That register was random bytes: no marker, the code stays available.
+	if _, m := call("GET", api+"/api/vault/recovery", guid, nil); m["recovery"].(map[string]any)["state"] != "available" {
+		t.Fatalf("after a bad register: %v", m)
+	}
 
-	// Cancel: the recovery ends, register is refused.
-	if code, m := call("POST", api+"/api/vault/recovery/cancel", guid, map[string]any{"recovery_id": rid}); code != 200 {
+	// A real register by a new app (vaultctl api-recover): the enclave's
+	// clear marker reaches the slot, the API records the recovery as
+	// registered and stops releasing the code (0.10.6 §11.5, §11.11.7);
+	// the unlock result carries credential_backup (§11.11.5 step 1).
+	state2 := filepath.Join(t.TempDir(), "new-phone.json")
+	vaultctlAs(state2, nil, "init", "-role", "app", "-name", "new phone", "-relay", relayURL)
+	out := vaultctlAs(state2, nil, "api-recover", "-api", api, "-guid", guid, "-pin", "13572468", "-qr", rc["qr"].(string), "-attest-seed", "98")
+	var rec2 map[string]any
+	if err := json.Unmarshal([]byte(out[strings.Index(out, "{"):]), &rec2); err != nil || rec2["slot_code"] != "recovery_registered" ||
+		rec2["credential_backup"] != true || rec2["vault_id"] != vid {
+		t.Fatalf("api-recover: %v\n%s", err, out)
+	}
+	code, m = call("GET", api+"/api/vault/recovery", guid, nil)
+	rec, _ = m["recovery"].(map[string]any)
+	if code != 200 || rec["state"] != "registered" || rec["sealed_code"] != nil || rec["recovery_id"] != rid {
+		t.Fatalf("after register: %d %v", code, m)
+	}
+	if _, m := call("GET", api+"/api/vault/status", guid, nil); m["vault"].(map[string]any)["recovery"].(map[string]any)["state"] != "registered" {
+		t.Fatalf("status after register: %v", m)
+	}
+	if code, m := reg(vid); code != 409 || m["error"] != "recovery_not_available" {
+		t.Fatalf("register after registered: %d %v", code, m)
+	}
+	vaultctlAs(state2, []string{"VAULTCTL_PASSWORD=development password"}, "credential", "recover")
+
+	// Cancel: the recovery ends ({cancelled: true}, then false), register
+	// is refused.
+	if code, m := call("POST", api+"/api/vault/recovery/cancel", guid, map[string]any{"recovery_id": rid}); code != 200 || m["cancelled"] != true {
 		t.Fatalf("cancel: %d %v", code, m)
+	}
+	if code, m := call("POST", api+"/api/vault/recovery/cancel", guid, map[string]any{"recovery_id": rid}); code != 200 || m["cancelled"] != false {
+		t.Fatalf("second cancel: %d %v", code, m)
 	}
 	if _, m := call("GET", api+"/api/vault/recovery", guid, nil); m["recovery"].(map[string]any)["state"] != "cancelled" {
 		t.Fatalf("after cancel: %v", m)

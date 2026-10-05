@@ -142,6 +142,9 @@ type AltUnlockOutcome struct {
 	RecoveryCancelled bool
 	// VaultBundle is set for the recovered app (§11.11.5).
 	VaultBundle []byte
+	// CredentialBackup is set with VaultBundle: the credential.backup
+	// setting (§11.11.5 step 1, 0.10.6).
+	CredentialBackup *bool
 
 	cause error
 }
@@ -525,6 +528,8 @@ func (m *Manager) resume(ctx context.Context, p AltUnlockParams, out *AltUnlockO
 		}
 		if m.hdr.isRecoveryKey(p.DeviceIK) {
 			out.VaultBundle = VaultBundle(handshake.Principal{IK: m.keys.ik.Public().(ed25519.PublicKey), KEM: m.keys.kem.Public(), Relay: m.ownAddr()})
+			backup := m.st.Settings.Backup()
+			out.CredentialBackup = &backup
 		}
 		if m.st.AnnouncedRelease != p.Release.PCR0 {
 			m.st.AnnouncedRelease = p.Release.PCR0

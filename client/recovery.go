@@ -18,6 +18,26 @@ import (
 type RecoveryState struct {
 	RecoveryID string `json:"recovery_id"`
 	RequestID  string `json:"request_id,omitempty"` // the pending register request
+	// CredentialBackup is the vault's credential.backup setting from the
+	// unlock result (§11.11.5 step 1, 0.10.6); nil until then, or from a
+	// vault that does not send it.
+	CredentialBackup *bool `json:"credential_backup,omitempty"`
+}
+
+// RecoveryCredentialBackup reports, for a recovering app after its PIN
+// unlock, whether the vault keeps a copy of the credential (§11.11.5 step
+// 1, 0.10.6): with known and !backup the app does not ask for the password
+// (credential.recover cannot succeed) and goes straight to
+// CredentialReset or deleting the vault (step 4). known is false before
+// the unlock or for a vault that does not say (then ask for the password;
+// credential.recover answers credential_lost if there is no copy).
+func (d *Device) RecoveryCredentialBackup() (backup, known bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.st.Recovery == nil || d.st.Recovery.CredentialBackup == nil {
+		return false, false
+	}
+	return *d.st.Recovery.CredentialBackup, true
 }
 
 // BuildRecoveryRegister builds vault.recovery.register (§11.11.3) for the

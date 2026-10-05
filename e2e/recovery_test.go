@@ -83,6 +83,10 @@ func register(t *testing.T, aw *acWorld, b *acApp, qr *altchan.RecoveryCode) *al
 	if err != nil {
 		t.Fatalf("recovery result: %v", err)
 	}
+	// §11.5, §11.11.3 (0.10.6): the clear marker exactly on {"ok": true}.
+	if want := map[bool]string{true: enclave.CodeRecoveryRegistered}[r.OK]; resp.Code != want {
+		t.Fatalf("register answer code %q for %+v", resp.Code, r)
+	}
 	return r
 }
 
@@ -107,7 +111,7 @@ func TestRecoveryCancel(t *testing.T) {
 	}
 	// Cancel from the portal or the email link.
 	aw.w.RecoveryCancel(ctxT(t, 30*time.Second), aw.w.Instance(3), a.vid, a.guid)
-	if r := aw.mustUnlock(a, acPIN, client.UnlockOptions{}, ""); !r.OK {
+	if r := aw.mustUnlock(a, acPIN, client.UnlockOptions{}, ""); !r.OK || r.CredentialBackup != nil || len(r.VaultBundle) != 0 {
 		t.Fatalf("unlock after cancel: %+v", r)
 	}
 	aw.lock(a)

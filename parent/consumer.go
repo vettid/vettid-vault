@@ -56,7 +56,15 @@ type enclaveResponse struct {
 	RequestID string `json:"request_id"`
 	Status    string `json:"status"`
 	Envelope  string `json:"envelope"`
+	// Code is the enclave's clear marker of a successful recovery
+	// register (0.10.6), the only code a "done" answer carries.
+	Code string `json:"code"`
 }
+
+// codeRecoveryRegistered is copied from a register's answer into its slot
+// (§11.5, §11.11.3, 0.10.6): the member API then records the recovery as
+// registered and stops releasing the spent code (§11.11.7).
+const codeRecoveryRegistered = "recovery_registered"
 
 // maxConcurrent bounds queue messages in flight to the enclave.
 const maxConcurrent = 8
@@ -159,6 +167,9 @@ func (p *Parent) handleMessage(ctx context.Context, m QueueMessage) {
 						slot = Slot{Status: "expired"}
 					} else {
 						slot.Envelope = env
+						if er.Code == codeRecoveryRegistered && r.Op == "recovery_register" {
+							slot.Code = codeRecoveryRegistered
+						}
 					}
 				}
 			case "etk_unknown":

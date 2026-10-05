@@ -31,13 +31,13 @@ func NewLocalHost(core *Core, stopped func(vaultID string, err error)) *LocalHos
 }
 
 // Open implements Host.
-func (h *LocalHost) Open(ctx context.Context, j *Job) ([]byte, error) {
+func (h *LocalHost) Open(ctx context.Context, j *Job) ([]byte, bool, error) {
 	_, _ = h.Lock(ctx, j.VaultID)
-	res, m := h.core.Open(ctx, j)
+	res, m, registered := h.core.Open(ctx, j)
 	if m != nil {
 		h.start(j.VaultID, m)
 	}
-	return res, nil
+	return res, registered, nil
 }
 
 func (h *LocalHost) start(id string, m *vault.Manager) {

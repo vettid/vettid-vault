@@ -3,8 +3,9 @@
 (Updated for VAULT-MESSAGING 0.10.0: manifest by hash, `removed` and
 `ends_at`, the retirement key-policy delta, per-channel release constants;
 for 0.10.2 and 0.10.3: connection requests, the SAS commitment, the
-handshake before approval, request tokens; and for 0.10.5:
-`connection.declined` and `device.pair.rejected`.)
+handshake before approval, request tokens; for 0.10.5:
+`connection.declined` and `device.pair.rejected`; and for 0.10.6: the
+recovery marker, `credential_backup` and the lock state.)
 
 Every MUST / MUST NOT in VAULT-MESSAGING 0.2.3 §4–§6 (plus the §13.4 and
 §13.6 rules they rely on), and the named test that covers it. Normative
@@ -500,3 +501,13 @@ relay in `e2e.TestSecondAppRefused`, `e2e.TestCloneAlarm`,
 | 11.10.1 | Publisher side: canonical manifest bytes (member order, sorted, no candidates), `serial` above the published one, statuses only forward, no PCR or key changed, nothing dropped before `removed`; signed only by a pinned key (KMS key A, or key B's imported signature), verified before it is written | `manifesttool.TestRender`, `manifesttool.TestCheckSuccessor`, `manifesttool.TestSignFileAndImport`, `manifesttool.TestKMSSigner`, `vaultctl.TestManifestCommands` |
 | 11.10.7 | The same check on a live key before it is named in a manifest (VAULT-RELEASES §6.2, layer 2): the enclave's KMS client and `keypolicy`, the channel's pinned constants; exit status = the failing check | `keycheck.TestRecordedFixtures`, `keycheck.TestFetchAndRecord`, `keycheck.TestLoadManifestSigned`, `vaultctl.TestKeycheckExitStatus` |
 | 11.10.1–4 | Move-only contract (VAULT-RELEASES §3.4): a previous release's parent and enclave against this tree's client, member API stand-in and release; deprecated and retired releases still unlock and move; frozen vectors of live releases still derived | `integration.TestCompatMoveOnly` (`scripts/compat-matrix.sh`), `vectors.TestFrozenReleaseVectors` |
+
+## Recovery and lock-state gaps (§11.5, §11.11.3, §11.11.5, §11.11.7; 0.10.6)
+
+| § | Requirement | Test(s) |
+|---|---|---|
+| 11.5, 11.11.3 | The enclave's answer to a `recovery_register` whose sealed result is `{"ok": true}` carries the clear marker `code: "recovery_registered"` after the envelope; no other answer (a refusal, random bytes, another op) carries it; the vault process reports it to the supervisor with Open's answer (vaultipc 3) | `enclave.TestResponseCode`, `e2e.TestRecoveryFlow` and every `register` (marker exactly on `ok`), `e2e.TestHostRecovery` (through a vault process and the parent) |
+| 11.5 | The parent copies the marker into the response slot's `code`, with the envelope, only for `recovery_register`; never without an envelope or for another value | `parent.TestRecoveryRegisteredMarker`, `e2e.TestHostRecovery` |
+| 11.11.7 | Member API stand-in as vault.ts: the register slot names its `recovery_id`, the marker makes the recovery `registered` (no `sealed_code`, still active and cancellable, `409 recovery_not_available` for a new register); cancel answers `{cancelled}`; status reports `unlocked` only under a live lease | `devstack.TestDevStackLocalStack` (`vaultctl api-recover`, LocalStack) |
+| 11.11.5 | The registered app's unlock result carries `credential_backup` (the vault's setting) after `vault_bundle`; no other app's result carries it; the client keeps it (`RecoveryCredentialBackup`) and `vaultctl credential recover` does not ask for a password the vault cannot use | `altchan.TestSealOpen`, `e2e.TestRecoveryReplacesApp` (true), `e2e.TestRecoveryBackupOffLosesCredential` (false), `e2e.TestRecoveryCancel` (absent for an owner app), `devstack.TestDevStackLocalStack` |
+| 11.5 | A stopped vault is locked: the lease release on a stopped vault turns `unlocked` into `locked`; the vault process delivers its lifecycle `locked` before it exits (both since vettid-vault #31) | `parent.TestAWSBackend` (LocalStack), `hostproto.TestFlushBeforeClose`, `e2e.TestHostStack` |

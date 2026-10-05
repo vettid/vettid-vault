@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/vettid/vettid-vault/vms/altchan"
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/manifest"
 )
@@ -348,6 +349,9 @@ type UnlockOutcome struct {
 	UpdateCode     string
 	InstanceID     string
 	ReleaseChanged bool
+	// CredentialBackup: the recovered app's unlock carries the vault's
+	// credential.backup setting (§11.11.5 step 1, 0.10.6); nil otherwise.
+	CredentialBackup *bool
 }
 
 // UnlockVia unlocks the vault through the member API (§11.4). release is
@@ -397,11 +401,61 @@ func (d *Device) UnlockVia(ctx context.Context, api *MemberAPI, userGUID, pin st
 			continue
 		}
 		out := &UnlockOutcome{OK: r.OK, Code: r.Code, StateSeq: r.StateSeq, HeaderSeq: r.HeaderSeq, ReleaseNumber: r.ReleaseNumber,
-			ReleaseStatus: r.ReleaseStatus, InstanceID: info.InstanceID, ReleaseChanged: req.ReleaseChanged}
+			ReleaseStatus: r.ReleaseStatus, InstanceID: info.InstanceID, ReleaseChanged: req.ReleaseChanged, CredentialBackup: r.CredentialBackup}
 		if r.Update != nil {
 			out.Update, out.UpdateCode = r.Update.Result, r.Update.Code
 		}
 		return out, nil
+	}
+}
+
+// RecoveryRegister posts a sealed vault.recovery.register (§11.11.3,
+// MEMBER-API "Vault recovery").
+func (a *MemberAPI) RecoveryRegister(ctx context.Context, vaultID, instanceID string, r *Request) error {
+	return a.do(ctx, http.MethodPost, "/api/vault/recovery/register", map[string]string{"vault_id": vaultID, "request_id": r.RequestID,
+		"instance_id": instanceID, "etk_kid": r.ETKKid, "envelope": base64.StdEncoding.EncodeToString(r.Envelope)}, nil)
+}
+
+// RecoveryRegisterVia registers this new app with the recovery code from
+// the portal's QR through the member API (§11.11.3): verify the manifest
+// and the routed enclave, seal the request, post it, poll the slot and
+// open the result. The slot is returned too: its code is
+// recovery_registered when the enclave said so in the clear (0.10.6),
+// which the app ignores (it reads the sealed result).
+func (d *Device) RecoveryRegisterVia(ctx context.Context, api *MemberAPI, userGUID string, qr *altchan.RecoveryCode, t Trust, att Attester) (*altchan.RecoveryResult, *Slot, error) {
+	raw, err := api.Manifest(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	_, m, err := d.VerifyManifest(raw, t)
+	if err != nil {
+		return nil, nil, err
+	}
+	for attempt := 1; ; attempt++ {
+		info, e, err := api.enclaveFor(ctx, "", m, false, t)
+		if err != nil {
+			return nil, nil, err
+		}
+		req, err := d.BuildRecoveryRegister(userGUID, qr, e, att)
+		if err != nil {
+			return nil, nil, err
+		}
+		err = api.RecoveryRegister(ctx, qr.VaultID, info.InstanceID, req)
+		var slot *Slot
+		if err == nil {
+			slot, err = api.Poll(ctx, req.RequestID)
+		}
+		if retryable(err, slot) && attempt < maxAttempts {
+			continue
+		}
+		if err != nil {
+			return nil, nil, err
+		}
+		if slot.Status != "done" || len(slot.Envelope) == 0 {
+			return nil, slot, fmt.Errorf("client: recovery register not answered (%s %s)", slot.Status, slot.Code)
+		}
+		r, err := d.OpenRecoveryResult(slot.Envelope)
+		return r, slot, err
 	}
 }
 

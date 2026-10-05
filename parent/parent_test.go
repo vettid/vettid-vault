@@ -459,6 +459,63 @@ func TestRequestsAndLeases(t *testing.T) {
 	}
 }
 
+// §11.5, §11.11.3 (0.10.6): the enclave's clear marker on a successful
+// register is copied into the slot's code, with the envelope; on any other
+// op, without an envelope, or with another value it is not.
+func TestRecoveryRegisteredMarker(t *testing.T) {
+	h := newHarness(t, nil)
+	h.tables.PutVault(parenttest.VaultRow{VaultID: vaultID, UserGUID: "u1", State: "locked"})
+	env := bytes.Repeat([]byte{7}, 5252)
+	marked := func(rid string, env []byte, code string) []byte {
+		m := map[string]any{"v": 1, "request_id": rid, "status": "done", "code": code}
+		if env != nil {
+			m["envelope"] = base64.StdEncoding.EncodeToString(env)
+		}
+		b, _ := json.Marshal(m)
+		return b
+	}
+	e := h.connect("boot-1", func(msg []byte) []byte {
+		var m struct {
+			RequestID string `json:"request_id"`
+		}
+		_ = json.Unmarshal(msg, &m)
+		switch m.RequestID {
+		case "01JAAAAAAAAAAAAAAAAAAAAAAA", "01JBBBBBBBBBBBBBBBBBBBBBBB":
+			return marked(m.RequestID, env, "recovery_registered")
+		case "01JCCCCCCCCCCCCCCCCCCCCCCC":
+			return marked(m.RequestID, nil, "recovery_registered")
+		case "01JDDDDDDDDDDDDDDDDDDDDDDD":
+			return marked(m.RequestID, env, "something_else")
+		}
+		return response(m.RequestID, "done", env)
+	})
+	e.descriptor()
+	waitFor(t, "ready", func() bool { return h.p.Health().Release == pcr })
+	send := func(op, rid string) parenttest.SlotRow {
+		t.Helper()
+		h.tables.PutSlot(rid, "i-test")
+		h.queues.Send(h.queue, queueMsg(op, rid))
+		var s parenttest.SlotRow
+		waitFor(t, "slot "+rid, func() bool { s, _ = h.tables.Slot(rid); return s.Status != "queued" })
+		return s
+	}
+	if s := send("recovery_register", "01JAAAAAAAAAAAAAAAAAAAAAAA"); s.Status != "done" || s.Code != "recovery_registered" || len(s.Envelope) != 5252 {
+		t.Fatalf("registered slot %+v", s)
+	}
+	if s := send("recovery", "01JBBBBBBBBBBBBBBBBBBBBBBB"); s.Status != "done" || s.Code != "" || len(s.Envelope) != 5252 {
+		t.Fatalf("marker on another op %+v", s)
+	}
+	if s := send("recovery_register", "01JCCCCCCCCCCCCCCCCCCCCCCC"); s.Status != "done" || s.Code != "" {
+		t.Fatalf("marker without an envelope %+v", s)
+	}
+	if s := send("recovery_register", "01JDDDDDDDDDDDDDDDDDDDDDDD"); s.Status != "done" || s.Code != "" || len(s.Envelope) != 5252 {
+		t.Fatalf("another code %+v", s)
+	}
+	if s := send("recovery_register", "01JEEEEEEEEEEEEEEEEEEEEEEE"); s.Status != "done" || s.Code != "" {
+		t.Fatalf("unmarked register %+v", s)
+	}
+}
+
 func TestEnclaveRestartReleasesLeases(t *testing.T) {
 	h := newHarness(t, nil)
 	h.tables.PutVault(parenttest.VaultRow{VaultID: vaultID, UserGUID: "u1"})

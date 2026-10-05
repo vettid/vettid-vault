@@ -233,7 +233,7 @@ func stopReason(exitCode int) (string, slog.Level) {
 
 // Open implements enclave.Host: lock a running process of the vault, start
 // a new one, hand it the job, and keep it if the vault opened.
-func (h *procHost) Open(ctx context.Context, j *enclave.Job) ([]byte, error) {
+func (h *procHost) Open(ctx context.Context, j *enclave.Job) ([]byte, bool, error) {
 	_, _ = h.Lock(ctx, j.VaultID)
 	prev := ""
 	if j.Op == enclave.OpEnroll {
@@ -246,7 +246,7 @@ func (h *procHost) Open(ctx context.Context, j *enclave.Job) ([]byte, error) {
 	}
 	p, err := h.spawn(j.VaultID, j.UserGUID, j.Op == enclave.OpEnroll)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	p.prevRead = prev
 	p.mu.Lock()
@@ -260,20 +260,22 @@ func (h *procHost) Open(ctx context.Context, j *enclave.Job) ([]byte, error) {
 	p.mu.Lock()
 	p.opening = false
 	p.mu.Unlock()
-	if err != nil || len(r) != 3 || string(r[0]) != hostproto.StatusOK {
+	if err != nil || len(r) != 4 || string(r[0]) != hostproto.StatusOK {
 		h.kill(p)
-		return nil, errSpawn
+		return nil, false, errSpawn
 	}
 	res := append([]byte(nil), r[1]...)
+	// Only a register can report success (the clear marker, 0.10.6).
+	registered := string(r[3]) == "1" && j.Op == enclave.OpRecoveryRegister
 	if string(r[2]) != "1" {
 		h.stop(p)
-		return res, nil
+		return res, registered, nil
 	}
 	h.mu.Lock()
 	h.procs[j.VaultID] = p
 	h.mu.Unlock()
 	h.s.touch(j.VaultID)
-	return res, nil
+	return res, registered, nil
 }
 
 // stop ends a process that holds no unlocked vault (closing its channel

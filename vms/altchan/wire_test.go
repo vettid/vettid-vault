@@ -3,6 +3,7 @@ package altchan
 import (
 	"bytes"
 	"crypto/ed25519"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -120,8 +121,25 @@ func TestSealOpen(t *testing.T) {
 	ok := &UnlockResult{OK: true, StateSeq: 5, HeaderSeq: 6, Token: "t", Release: strings.Repeat("ab", 48), ReleaseNumber: 3,
 		ReleaseStatus: "active", ManifestSerial: 7, Update: &UpdateResult{To: strings.Repeat("cd", 48), Result: "refused", Code: "downgrade"}}
 	r, err = ParseUnlockResult(ok.Marshal())
-	if err != nil || r.Update.Code != "downgrade" || r.ManifestSerial != 7 {
+	if err != nil || r.Update.Code != "downgrade" || r.ManifestSerial != 7 || r.CredentialBackup != nil {
 		t.Fatalf("%v %+v", err, r)
+	}
+	// §11.11.5 step 1 (0.10.6): the recovered app's result carries
+	// credential_backup after vault_bundle.
+	for _, on := range []bool{true, false} {
+		rec := &UnlockResult{OK: true, StateSeq: 5, HeaderSeq: 6, Token: "t", Release: strings.Repeat("ab", 48), ReleaseNumber: 3,
+			ReleaseStatus: "active", VaultBundle: []byte(`{"v":1}`), CredentialBackup: &on}
+		b := rec.Marshal()
+		if want := fmt.Sprintf(`"vault_bundle":"eyJ2IjoxfQ==","credential_backup":%t}`, on); !strings.HasSuffix(string(b), want) {
+			t.Fatalf("member order: %s", b)
+		}
+		r, err = ParseUnlockResult(b)
+		if err != nil || r.CredentialBackup == nil || *r.CredentialBackup != on {
+			t.Fatalf("%v %+v", err, r)
+		}
+		if _, err := ParseUnlockResult([]byte(strings.Replace(string(b), fmt.Sprint(on), `"yes"`, 1))); err == nil {
+			t.Fatal("non-boolean credential_backup accepted")
+		}
 	}
 }
 
@@ -185,6 +203,9 @@ func FuzzParseResults(f *testing.F) {
 	f.Add((&UnlockResult{OK: false, Code: "bad_pin", HeaderSeq: 9}).Marshal())
 	f.Add((&UnlockResult{OK: true, Release: strings.Repeat("ab", 48), ReleaseNumber: 1, ReleaseStatus: "active",
 		Update: &UpdateResult{To: "x", Result: "moved"}}).Marshal())
+	backup := false
+	f.Add((&UnlockResult{OK: true, Release: strings.Repeat("ab", 48), ReleaseNumber: 1, ReleaseStatus: "active",
+		VaultBundle: []byte("{}"), CredentialBackup: &backup}).Marshal())
 	f.Add((&EnrollResult{OK: true, VaultID: "v"}).Marshal())
 	f.Fuzz(func(t *testing.T, b []byte) {
 		_, _ = ParseUnlockResult(b)

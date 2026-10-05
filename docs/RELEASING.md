@@ -17,45 +17,37 @@ formats are VAULT-MESSAGING 0.10.0 §11.10.
 | Manifest rendering, checking and signing | `vaultctl manifest` ([`internal/manifesttool`](../internal/manifesttool)) |
 | Compatibility matrix and frozen vectors | [`.github/workflows/compat.yml`](../.github/workflows/compat.yml), [`scripts/compat-matrix.sh`](../scripts/compat-matrix.sh), [`compat/live-releases.txt`](../compat/live-releases.txt), [`testdata/releases/`](../testdata/releases) |
 
-## Today: dry runs only
+## Status: staging releases, production not yet
 
-The committed channel files still have placeholders (`TODO-…`), so the
-release gate refuses every `prod` and `staging` build, in the workflow,
-in `Dockerfile.enclave` and in `scripts/build-eif.sh`. What runs today is
-the **dry run** with channel `none`: the constant-free image of the
-hardware smoke test, which refuses every enrollment and unlock. It
+**Staging** is complete: `go run ./cmd/releasecfg check staging` passes,
+and staging releases 1 and 2 were built, compared and published for
+real (`release/staging/1` and `release/staging/2`; release 1 has since
+been removed in the retirement drill). **Production** has no release
+yet: `enclave/releasecfg/prod.json` still has `"release": 0` and one
+`TODO-…` placeholder, so the release gate refuses every `prod` build, in
+the workflow, in `Dockerfile.enclave` and in `scripts/build-eif.sh`.
+
+The **dry run** with channel `none` (the constant-free image of the
+hardware smoke test, which refuses every enrollment and unlock) still
 exercises everything else: the pinned toolchain, two clean builds on two
 runners, the byte comparison, the PCR recomputation, the attestations.
-
 A dry run starts on every pull request that touches the build, and by
 hand from the Actions tab (`release` → *Run workflow*, channel `none`).
-`vaultctl keycheck` and `vaultctl manifest sign` likewise refuse the
-committed channel files (no account, no manifest keys yet) and work with
-test files.
 
-### Unblocking real releases
+### Unblocking production release 1
 
-A channel builds once its file in `enclave/releasecfg/` has no
-placeholder left (`go run ./cmd/releasecfg check prod` passes):
+| Value | State |
+|---|---|
+| `seal_account`, `retirement_principal` | done: vettid-vault-prod 369484479783 and its `vettid-org-vault-key-retirement` role (fixed name, VAULT-RELEASES §6.3) |
+| `manifest_keys` | done: key A (KMS `ECC_NIST_P256`) and key B (offline token), both SubjectPublicKeyInfo, base64 DER |
+| `android_signers` | **open**: the upload certificate is pinned; the Play app signing certificate waits for O8 (SHA-256, lowercase hex) |
+| `release` | the release commit sets it to 1 |
 
-| Value | Waits for | Then |
-|---|---|---|
-| `seal_account`, `retirement_principal` (prod) | O1 and W3: the vault production account and its `vettid-org-vault-key-retirement` role (fixed name, VAULT-RELEASES §6.3) | the account id and the role ARN |
-| `seal_account`, `retirement_principal` (staging) | O2 and W3: the staging account | as above, in the staging account |
-| `manifest_keys` (prod) | O3 and W3: key A (KMS `ECC_NIST_P256`) and key B (offline token) | both SubjectPublicKeyInfo, base64 DER (`aws kms get-public-key`; the token's export) |
-| `manifest_keys` (staging) | W3: the staging manifest key | its SubjectPublicKeyInfo |
-| `android_signers` | O8: the Play app signing certificate and the upload certificate | their SHA-256, lowercase hex |
-| `release` | the release commit | the release number |
-
-Also needed before the first real tag:
-
-- the owner's tag-signing key (SSH or GPG) added to their GitHub account,
-  so that GitHub shows the tag as *Verified*; the workflow refuses an
-  unsigned, lightweight or unverified tag;
-- the release role in the vettid.org stacks (W5) for `vaultctl keycheck`,
-  and the manifest-signer role for key A.
-
-No workflow change is needed: the gate passes once the file is complete.
+The owner's tag-signing key is on their GitHub account (the staging tags
+show as *Verified*; the workflow refuses an unsigned, lightweight or
+unverified tag), and the retirement and manifest-signer roles exist in the
+vettid.org stacks. No workflow change is needed: the gate passes once
+the file is complete.
 
 ## A release, step by step
 
@@ -149,7 +141,7 @@ reader in every release key's policy):
 
 ```sh
 vaultctl manifest render -releases releases.json -previous published.json -out draft.json
-AWS_PROFILE=vault-key-retirement vaultctl keycheck -channel prod \
+AWS_PROFILE=vault-prod-key-retirement vaultctl keycheck -channel prod \
   -key-arn arn:aws:kms:us-east-1:<account>:key/<id> -manifest draft.json -record keycheck/N
 ```
 
@@ -196,7 +188,7 @@ vaultctl manifest check -in m.json -previous published.json
 only, MFA):
 
 ```sh
-AWS_PROFILE=vault-manifest-signer vaultctl manifest sign -in m.json \
+AWS_PROFILE=vault-prod-manifest-signer vaultctl manifest sign -in m.json \
   -kms-key arn:aws:kms:us-east-1:<account>:key/<key A> -channel prod -out pcr-manifest.json
 vaultctl manifest check -in pcr-manifest.json -channel prod
 ```

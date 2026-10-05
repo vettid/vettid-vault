@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -36,7 +36,7 @@ jobs:
   e2e:
     # V2 exit criteria against the real relay binary (go install of
     # github.com/vettid/vettid-relay/cmd/relay at the go.mod version).
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -48,7 +48,7 @@ jobs:
   integration:
     # V3 exit test (VAULT-PLAN §4 V3): relay, parent and dev enclave
     # binaries, the member API stand-in and vaultctl against LocalStack.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     services:
       localstack:
@@ -79,7 +79,7 @@ jobs:
     # Graviton smoke host's build must match (docs/SMOKE.md).
     strategy:
       matrix:
-        runner: [ubuntu-latest, ubuntu-24.04-arm]
+        runner: [ubuntu-26.04, ubuntu-26.04-arm]
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -122,7 +122,7 @@ jobs:
   gitleaks:
     # Pinned binary over the FULL history (the gitleaks-action fails on a
     # branch's first push, where there is no "before" commit).
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

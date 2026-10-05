@@ -41,9 +41,15 @@ func TestQueueDeletedRecentlyWaits(t *testing.T) {
 	if q.CreateRefusals < 3 {
 		t.Fatalf("refusals: %d", q.CreateRefusals)
 	}
-	h.logMu.Lock()
-	logs := h.logs.String()
-	h.logMu.Unlock()
+	// "queue ready" is logged just after the create returns, so the queue can
+	// accept a message before the line is written: wait for the line too.
+	logs := ""
+	waitFor(t, "queue ready logged", func() bool {
+		h.logMu.Lock()
+		logs = h.logs.String()
+		h.logMu.Unlock()
+		return strings.Contains(logs, `"msg":"queue ready"`)
+	})
 	if n := strings.Count(logs, `"level":"INFO","msg":"waiting for SQS to allow recreating the queue"`); n != 1 {
 		t.Fatalf("wait logged %d times:\n%s", n, logs)
 	}

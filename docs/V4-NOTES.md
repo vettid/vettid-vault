@@ -758,3 +758,75 @@ VAULT-MESSAGING 0.9.1 (owner decision of 2026-10-04) with RELAY-PROTOCOL
   reads the version).
 - go.mod pins the relay at the `protocol-0.5` branch commit (pseudo-version)
   until that PR merges; re-pin to the merge commit then.
+
+## Connection requests and the SAS commitment (0.10.2, 0.10.3)
+
+VAULT-MESSAGING 0.10.2 (connection requests, from the Android A4 build)
+and 0.10.3 (the ZRTP-style SAS commitment), implemented together: 0.10.3
+replaces 0.10.2's "the accepter holds `hs.fin` until its member approves"
+by "the handshake runs first, each approval is `connection.approved`", so
+the intermediate 0.10.2 handshake order was never built.
+
+### Layout
+
+- `vms/handshake`: `sas_commit` in `hs.init`, `sas_nonce` (n_R) in
+  `hs.resp` and (n_I) in `hs.fin`, for purposes app, desktop, agent and
+  connection (`Purpose.HasSAS`); `SASCommit`, `CheckSASCommit` and the new
+  `SAS(prk, th, n_I, n_R)`. The initiator draws n_I before building
+  `hs.init` and learns the SAS in `HandleResp` (`Result.SAS`); the
+  responder draws n_R in `Respond` and checks sig_I, then the commitment,
+  in `HandleFin`, which returns a `FinResult` (epoch, inner, SAS) or
+  `ErrSASCommit` (aborted). A connection handshake carries no
+  `reconnect_token`. Snapshots carry n_I, the commitment and n_R.
+- `vault/requests.go` (new): request tokens (`TokRequest`, 8 messages /
+  64 KiB, ≤ 16 d or ≤ 10 min for a device), `Request` (an established,
+  inactive epoch awaiting approval), `connection.approve` / `.decline`
+  with `pending_id` or `connection_id`, `connection.approved` both ways,
+  activation with both approvals, `connection.request.list`, the
+  pre-activation rules, the request-token class (only `hs.resp`, `hs.fin`,
+  `connection.approved`; `relay.token.refresh` forbidden), expiry (7 d
+  incoming, 16 d approved incoming, 8 d outgoing with
+  `connection.event{failed}`, 10 min pairings), limits (256 each way).
+- `vault/handshakes.go`: every first-contact `hs.init` is answered at
+  once (`respondFirst`); enrollment and recovery get the standing token
+  and are active at `hs.fin` as before; everything else becomes a
+  `Request` at `hs.fin`. `connection.invite.accept` answers `exists` with
+  `{connection_id}` before any `hs.init`, and `{connection_id, state:
+  "waiting", remote, exp, name?}` otherwise. The inviter's drop also
+  checks `from.ik` against active connections and devices.
+- Pairing (§6.7): `device.pair.pending` once `hs.fin` checked out;
+  `device.pair.approve` activates and sends `device.paired{token}` (every
+  `device.paired` now carries a standing token). Transfer (§6.7.1):
+  `device.transfer.pending` after `hs.fin`; `device.transfer.approve`
+  answers `{}` and completes the transfer after its response, in the same
+  flush; `transfer_pending` is no longer produced.
+- `features/critical`: `critical-secret-use.get`. `client`: `Pair`
+  returns the SAS after the handshake; `device.paired`'s token replaces
+  the request token; `CriticalUseGet`.
+- `testdata/vectors/handshake.json` regenerated (n_I 32 × 0x16, n_R 32 ×
+  0x17; the connection handshake's tokens are request tokens and it has
+  no reconnect tokens). K_s, K_e and prk are unchanged, as §16 says.
+
+### Compatibility
+
+- Not backward compatible, by design (§6.2 rejects a body without the
+  commitment fields): a vault or client before this change and one after
+  it cannot complete a pairing, transfer, enrollment, recovery or
+  connection handshake with each other. Rekeys and reconnects are
+  unchanged, so existing sessions and connections keep working across an
+  update of either side.
+- Staging S1 (`release/staging/1`, built from 87187e7) predates this: S1
+  vaults do not pair, enroll or connect with apps or vaultctl built from
+  this tree, nor with vaults on a later staging release. Moving an S1
+  vault to a later staging release (§11.10) keeps its connections and
+  devices; in-flight handshakes made by S1 are dropped at the first
+  unlock under the new release (audit `drop.handshake_not_restored`).
+  No production release exists, so `compat/live-releases.txt` is empty.
+- The compat matrix's synthetic row (the pull request's base as the
+  "previous release", `continue-on-error`, advisory until production
+  release 1) enrolls HEAD's vaultctl into the base's enclave; that
+  handshake now fails, so the row reports a failure without failing the
+  job. It becomes binding only with production release 1, which will be
+  built after this change.
+- vettid-android must implement the same (§15 item 17 follow-ups) before
+  it can pair with or connect through a vault built from this tree.

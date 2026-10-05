@@ -1,7 +1,7 @@
 ---
 title: VAULT-MESSAGING
 status: draft
-version: 0.10.0
+version: 0.10.3
 date: 2026-10-04
 owner: Al Liebl (Mesmer)
 component: vault manager (enclave), parent forwarder, apps, desktops, agents, member API vault routes
@@ -17,6 +17,34 @@ related:
   - VAULT-RELEASES.md (0.1.0, approved 2026-10-04)
   - RELEASE-UPDATES.md (0.2.0)
 changelog:
+  - 0.10.3: the SAS is committed (ZRTP-style): `hs.init` carries
+    `sas_commit`, `hs.resp` and `hs.fin` carry the nonces `n_R` and
+    `n_I`, and `sas` is derived from `prk`, `th` and both nonces, so a
+    party in the middle of a remote link can no longer match the codes
+    (§6.2, §6.3; §15 item 17 resolved). The handshake now runs before
+    approval: `hs.resp` and `hs.fin` are sent at once with request
+    tokens, and each member's approval is `connection.approved`, which
+    carries the standing and reconnect tokens; a connection is active
+    with both (§6.4, §7.1, §7.4, §10.4). Pairing and transfer follow the
+    same order; `device.paired` carries the standing token, and a
+    transfer completes at its approval (§6.7, §6.7.1, §10.3). The
+    handshake vector is regenerated (§16)
+  - 0.10.2: connection requests, from the Android A4 build: both members
+    see and confirm the safety code; the accepting vault's member approves
+    too, and its vault completes the handshake only then (§6.4, §10.4);
+    `connection.invite.accept` returns `sas` and answers `exists` for a
+    vault already connected or requested; the inviter's drop of such an
+    `hs.init` and the accepter's 8-day expiry (`failed`) are specified
+    (§6.4); `connection.request.list`, `connection.request.outgoing` and
+    the `connection.request` sync kind; `pending_id` in
+    `connection.event{added}` (§10.1, §10.4); the link URL
+    `<relay>/connect#<payload>` on the invitation's own relay, the QR
+    unchanged (§6.4);
+    `critical-secret-use.get` returns an incoming request with its payload
+    (§10.13); §15 items 16–17
+  - 0.10.1: the vault PIN is 6–32 ASCII digits (was 4–32), owner decision
+    of 2026-10-04; the enclave refuses shorter PINs everywhere it takes one
+    (§11.3, §6.7.1, §10.6)
   - 0.10.0: V5 release model (VAULT-RELEASES, owner decisions of
     2026-10-04): enroll and unlock requests carry the manifest's hash and
     serial instead of the document, which the host supplies from the vault
@@ -596,9 +624,7 @@ Every operation that opens the credential comes from the **holder**
 The vault:
 
 1. refuses with `credential_frozen` or `rotation_required` while a clone
-   alarm is open (§3.5.9), before anything else (the UTK is not spent),
-   and with `transfer_pending` from an old app whose transfer it approved
-   (§6.7.1);
+   alarm is open (§3.5.9), before anything else (the UTK is not spent);
 2. **opens `sealed`** with the LTK for `utk_id` and destroys the LTK
    (§3.5.4). A missing, used, expired or foreign UTK is refused with
    `utk_invalid`;
@@ -707,8 +733,8 @@ critical-item use (§10.13), `request_id` and `payload_sha256`, which bind
 the member's consent to one request and one payload. A wallet spend
 (§10.18) binds it with `item_id` (the wallet) and `payload_sha256` (the
 PSBT's hash), and `wallet.create` may carry an imported phrase as `item`.
-A transfer's approval (§6.7.1) carries the `pin` (4–32 ASCII digits, as
-at unlock) with the password.
+A transfer's approval (§6.7.1) carries the `pin` (6–32 ASCII digits,
+§11.3) with the password.
 
 **Using a UTK.** The vault looks the UTK up among those issued to the
 sending app and removes it from the pool before anything else is checked.
@@ -1207,12 +1233,18 @@ responder's `ik_R` and `ek_R`, from one of:
 I                                                         R
 |--hs.init  [sealed to ek_R]------------------------------>|  K_s = Export(init ctx)
 |   {purpose, ctx, from{ik,kem,relay}, eph, token,          |
-|    reconnect_token, suites, ...}                          |
+|    reconnect_token, suites, sas_commit, ...}              |
 |<--hs.resp [sealed to eph]--------------------------------|  K_e = Export(resp ctx)
-|   {token, reconnect_token, suite, sig_R, ...}            |
-|--hs.fin   [session mode, new epoch]--------------------->|  epoch active
-|   {sig_I}                                                |
+|   {token, reconnect_token, suite, sas_nonce = n_R,       |
+|    sig_R, ...}                                           |
+|  verify sig_R; sas known                                 |
+|--hs.fin   [session mode, new epoch]--------------------->|  check sig_I and n_I;
+|   {sig_I, sas_nonce = n_I}                               |  sas known; epoch
+|                                                          |  established (§6.3)
 ```
+
+`sas_commit`, `n_I` and `n_R` exist for purposes `app`, `desktop`, `agent`
+and `connection` (0.10.3); rekeys and reconnects carry none and have no SAS.
 
 ### 6.2 Bodies
 
@@ -1227,10 +1259,11 @@ hs.init: { "purpose": "app|desktop|agent|connection|rekey|reconnect",
            "suites": [2],
            "profile": { },
            "rotations": [ ],
-           "device_attest": { } }
+           "device_attest": { },
+           "sas_commit": "<b64 32 bytes>" }
 hs.resp: { "token": "...", "reconnect_token": "...", "suite": 2,
-           "rotations": [ ], "sig": "<b64>" }
-hs.fin:  { "sig": "<b64>" }
+           "rotations": [ ], "sas_nonce": "<b64 n_R, 32 bytes>", "sig": "<b64>" }
+hs.fin:  { "sig": "<b64>", "sas_nonce": "<b64 n_I, 32 bytes>" }
 ```
 
 Field rules:
@@ -1244,6 +1277,20 @@ Field rules:
 - `rotations` is used only for reconnects (§6.6), in both `hs.init` and
   `hs.resp`; it MUST be absent for every other purpose.
 - `device_attest` is used only for purpose `app` (§6.7, §11.7).
+- **SAS commitment** (0.10.3, §6.3). For purposes `app`, `desktop`,
+  `agent` and `connection`, `hs.init` MUST carry `sas_commit`, and
+  `hs.resp` and `hs.fin` MUST carry `sas_nonce`; for `rekey` and
+  `reconnect` all three MUST be absent. Each is the standard base64 of
+  exactly 32 bytes. `n_I` and `n_R` are fresh output of a CSPRNG for
+  each handshake and are never reused; `n_I` is chosen before `hs.init`
+  is built, `n_R` only after `hs.init` has been opened. A message that
+  breaks these rules is rejected as a malformed body.
+- `token` in a `connection` handshake (both `hs.init` and `hs.resp`) is
+  a **request token** (0.10.3, §7.1); the standing and reconnect tokens
+  follow in `connection.approved` (§6.4). In an `app`, `desktop` or
+  `agent` handshake that needs the owner's approval (§6.7, §6.7.1),
+  `hs.resp`'s `token` is a request token too, and the standing token
+  follows in `device.paired`.
 - `ctx`:
   - `connection`: the `invite_id`; `app`, `desktop`, `agent`: the pairing
     id (the bundle's `invite_id`, §6.4);
@@ -1258,7 +1305,8 @@ Field rules:
   | Purpose | `token` | `reconnect_token` |
   |---|---|---|
   | `app`, `desktop`, `agent` | required | MUST be absent |
-  | `connection`, `reconnect` | required | required |
+  | `connection` | required (a request token) | MUST be absent (0.10.3: in `connection.approved`) |
+  | `reconnect` | required | required |
   | `rekey` | optional | optional |
 
   Both are PASETO v4.public strings (`v4.public.` followed by base64url
@@ -1296,8 +1344,9 @@ rk       = HKDF-Expand(prk, "vettid/vms/2/rk"      || th, 32)
 epoch_id = HKDF-Expand(prk, "vettid/vms/2/epoch"   || th, 16)
 sig_R    = Ed25519(ik_R, "vettid/vms/2/sig-resp" || th)
 sig_I    = Ed25519(ik_I, "vettid/vms/2/sig-fin"  || th)
-sas      = uint32be(HKDF-SHA-256(ikm = K_s, salt = "vettid/vms/2/sas", info = th1, L = 4))
-           mod 1,000,000, shown as 6 zero-padded digits
+sas_commit = SHA-256("vettid/vms/2/sas-commit" || n_I)     # in hs.init
+sas      = uint32be(HKDF-Expand(prk, "vettid/vms/2/sas" || th || n_I || n_R, 4))
+           mod 1,000,000, shown as 6 zero-padded digits    # 0.10.3
 ```
 
 Session-mode envelopes use the epoch keys and kids:
@@ -1319,15 +1368,51 @@ Verification and activation:
   destroys its state. A message that does not decrypt under `eph`, or
   whose collect `sender` is wrong, is dropped without affecting the
   handshake.
-- `R` activates the epoch only after `sig_I` verifies. Messages for an
-  inactive epoch are left unacked. An `hs.fin` whose `sig_I` does not
-  verify is dropped; the pending handshake is kept until it expires.
+- `I` processes **one** `hs.resp` per `hs.init`: once it has sent `hs.fin`
+  (and so revealed `n_I`), any further `hs.resp` for that handshake is
+  acked, dropped and audited. `R` sends one `hs.resp` per `hs.init`;
+  its retries resend the same bytes.
+- `R` **establishes** the epoch only after `sig_I` verifies and, where
+  the purpose has a SAS, SHA-256(`"vettid/vms/2/sas-commit"` || `n_I`)
+  equals `sas_commit`. An `hs.fin` whose `sig_I` does not verify is
+  dropped; the pending handshake is kept until it expires. An `hs.fin`
+  whose `sig_I` verifies but whose `n_I` does not match the commitment
+  can only come from `I`: `R` aborts the handshake, destroys its state
+  and audits `drop.sas_commit_mismatch`; a connection request or pairing
+  it belonged to is dropped (§6.4, §6.7).
+- An established epoch is **active** at once for rekeys, reconnects and
+  handshakes answered without approval (§11.3, §11.11.5). For a
+  connection it becomes active only when both members have approved
+  (§6.4); for a pairing or transfer, at the owner's approval (§6.7,
+  §6.7.1). Messages for an inactive epoch are left unacked, except as
+  §6.4 and §6.7 say for a pending request.
 - The collect `sender` (RELAY-PROTOCOL §6.3) MUST equal `from.relay.pk` for
   `hs.init`. For every later message, `sender` MUST equal the relay key on
   record for the principal whose session decrypts it. A mismatch is acked,
   dropped and audited.
-- `sas` depends only on `hs.init`, so either side can display it before
-  `hs.resp` is sent.
+- **The SAS** (0.10.3). `sas` exists only once both nonces are fixed:
+  `I` computes it after verifying `sig_R` (it then sends `hs.fin`), `R`
+  after checking `hs.fin` as above. Neither side shows a code earlier.
+  For a connection both members see it (§6.4); for a pairing or
+  transfer, the owner's app and the new device (§6.7, §6.7.1).
+- **Why the commitment.** `I` fixes `n_I` (by `sas_commit`) before it
+  sees `n_R`; `R` chooses `n_R` before it learns `n_I`; and after `n_I`
+  is revealed nothing that enters `sas` can change (`th` and `prk` are
+  fixed by `hs.resp`). So neither side, and no party in the middle, can
+  steer `sas`. A man in the middle between two members runs two
+  handshakes, one with each. In the one where it is the responder it
+  must send `n_R` before the victim reveals `n_I`; in the one where it
+  is the initiator it must commit to its `n_I` before the victim sends
+  `n_R`. Each victim's SAS is therefore uniform over the 10^6 codes and
+  independent of the other's, whichever order the attacker runs them
+  in, so the two codes match with probability about 10^-6 per attempt
+  (the modulo bias is below 2.5 × 10^-13). An attempt costs a fresh
+  invitation (single use, §6.4) or a fresh accept by the victim, and a
+  failed one shows the members different codes. Before 0.10.3, `sas`
+  depended only on `hs.init`, which the initiator alone chooses; an
+  attacker could try about 10^6 `hs.init`s offline until the codes
+  matched (§15 item 17). `prk` and `th` in the derivation bind the code
+  to both identities, both KEM exchanges and this handshake.
 
 ### 6.4 Connections and invitations
 
@@ -1391,40 +1476,188 @@ The bundle is protected and published as follows:
   bundle whose `kind` does not match `t`, whose `exp` differs from `e`, or
   that has expired.
 
+**Invitation URL** (0.10.2). A connection invitation (`t` = `c`) is shared
+as a URL on **the invitation's own relay** (`r` in the payload):
+
+```
+<r>/connect#<link>          e.g. https://relay.vettid.org/connect#<link>
+```
+
+- `<link>` is the base64url payload above and is the whole fragment: no
+  query, no other path, nothing else in the fragment. Apps build the URL
+  from `link` (§10.4) and the payload's `r`. The relay that carries the
+  connection also hosts its link, so a home appliance or a self-hosted
+  relay (owner decision, 2026-10-04) needs nothing from vettid.org.
+- The fragment never reaches a server, so the payload stays out of
+  requests, access logs and referrers.
+- **The relay serves `/connect`** (RELAY-PROTOCOL): a static page, the
+  same for every relay, that says to open the link in the VettID app.
+  It MUST NOT send the fragment anywhere: no network requests at all
+  (`Content-Security-Policy: default-src 'none'`, inline style and one
+  inline script allowed by hash), no third-party content,
+  `Referrer-Policy: no-referrer`. Its inline script MAY read the fragment
+  locally only to build an "Open in VettID" link `vettid://connect#<link>`
+  and a copy button.
+- **Opening the app.** Every relay serves
+  `/.well-known/assetlinks.json` for the VettID app's signing keys (and
+  later `apple-app-site-association`), built into the relay software. For
+  the relays VettID runs, the app declares the host, so the URL opens the
+  app directly as a verified App Link. A self-hosted relay's host cannot
+  be declared in advance, so there the page's "Open in VettID" link uses
+  the `vettid:` scheme. Another app could register that scheme too and
+  receive the payload; it learns nothing it could not get by holding the
+  link, and accepting with it is caught by the SAS comparison (§6.3).
+- Apps MUST accept the URL form on any relay, the `vettid://connect#`
+  form and the bare payload, pasted or opened, and MAY find any of them
+  inside surrounding text. The payload inside is authoritative: the host
+  of the URL is not trusted, and its `r` decides the relay. Apps pass the
+  bare payload to `connection.invite.accept`, which accepts only that.
+- **QR codes keep the compact JSON.** It needs a smaller QR version than
+  the URL (no base64url growth, no prefix) and is read only by the VettID
+  scanner. Scanners MUST also accept a QR holding the bare payload or
+  the URL form, so that a later switch to URL QRs, which a phone's camera
+  would open, needs no app release.
+- Pairing and transfer links (`t` = `p`, `d`, `a`) are used in person
+  and stay bare payloads.
+
 ```
 A app            A vault           Relay            B vault           B app
   |--invite.create{ttl}-->|           |                 |                |
   |                  |--PUT claim---->|                 |                |
   |<--QR / link------|                |                 |<--invite.accept{QR}
   |                  |                |<--GET claim-----|  check h, decrypt, exp
-  |                  |                |<--hs.init (open token)-----------|
+  |                  |                |<--hs.init{sas_commit}------------|
+  |                  |                |   (open token)  |--{connection_id, waiting}-->|
   |                  |<--collect------|                 |                |
+  |                  |--hs.resp{n_R}->|---------------->|  (at once, no approval)
+  |                  |                |<--hs.fin{n_I}---|  (at once)     |
+  |                  |<--collect------|                 |--request.outgoing{sas}-->|
   |<--request.pending{profile,sas,remote}               |                |
-  |--approve-------->|--hs.resp------>|---------------->|                |
-  |                  |<---------------|<--hs.fin--------|                |
+  |   (each member compares the SAS with the other's screen)             |
+  |--approve-------->|--connection.approved{tokens}---->|<--approve------|
+  |                  |<------------connection.approved{tokens}-----------|
   |<--connection.event{added}         |                 |--connection.event{added}-->|
 ```
+
+(0.10.3) The handshake runs to its end before anyone approves; the SAS
+exists only after `hs.resp` (at the accepter) and `hs.fin` (at the
+inviter), and approval is a separate, authenticated message in each
+direction.
 
 Rules:
 
 - **Single use.** Every invite is single-use. The inviting vault accepts at
   most one `hs.init` per `invite_id` and rejects invites that are expired,
   used or revoked. The claim is single-fetch.
+- **The handshake first** (0.10.3). The SAS depends on both sides'
+  nonces (§6.3), so the vaults complete the handshake before either
+  member decides:
+  - The **inviting** vault answers a valid `hs.init` for a live
+    invitation with `hs.resp` at once, after the checks of this section
+    (single use, block list, the inviter's drop, limits). `hs.resp`
+    carries only a request token (§7.1) and reveals nothing the bundle
+    does not, except that the vault processed the `hs.init`.
+  - The **accepting** vault answers `hs.resp` with `hs.fin` at once and
+    then knows the SAS. It answers `connection.invite.accept` before
+    that, with `state: "waiting"`, and sends the SAS to its apps and
+    desktops in `connection.request.outgoing` once it has it.
+  - The inviting vault knows the SAS once `hs.fin` checks out (§6.3) and
+    only then tells its devices, with `connection.request.pending`. An
+    `hs.init` that never gets its `hs.fin` is never shown and is dropped
+    at the 7-day expiry below.
+- **Safety code (SAS, §6.3), both sides** (0.10.2). Both apps MUST show
+  it, as six digits, with the other side's name, and ask their member to
+  compare it with the code on the other member's screen (in person, or
+  over a channel they trust, such as a call). Each member decides only
+  for their own side:
+  - The **inviter** approves (`connection.approve{pending_id}`) or
+    declines the incoming request, as below.
+  - The **accepter** approves (`connection.approve{connection_id}`) or
+    declines (`connection.decline{connection_id}`) its outgoing request.
+  - **Approval** (0.10.3). On its member's approval a vault sends the
+    peer `connection.approved{token, reconnect_token}` (V↔V, session
+    mode under the handshake's epoch), carrying the standing and
+    reconnect tokens for the peer (§6.6, §7.1). A vault makes the
+    connection active, and sends its devices `connection.event{added}`,
+    when it holds both its own member's approval and the peer's
+    `connection.approved`, in either order; the epoch becomes active
+    then (§6.3). Neither side shares a profile or anything else before
+    that. An approval of a request whose SAS is not yet known (`waiting`)
+    is answered `bad_request`.
+  - **Before activation**, a vault accepts from the peer, under the
+    handshake's epoch or the request token, only the rest of the
+    handshake and `connection.approved`. Before its own member's approval, anything
+    else is acked, dropped and audited (`drop.unapproved_peer`); after
+    it, anything else is left unacked and processed at activation (the
+    peer may already be active and its messages may overtake its
+    `connection.approved`).
+  - **Declining** drops the request, its handshake state and the tokens
+    held for the peer, and denylists the request token the vault issued
+    (§7.4). A member who sees a different code declines; the decline is
+    not sent to the peer, whose request then ends by expiry (below).
+- **What an unapproved party holds** (0.10.3). A party that completed
+  the handshake but that a member has not approved (anyone who saw a
+  remote link) holds a pending request on the other side and a request
+  token for at most 8 small deposits, which the vault drops (above) and
+  revokes when the request ends. It gets no standing or reconnect token,
+  no profile and no epoch the vault will use, and it cannot make the
+  codes match except by the 10^-6 chance of §6.3.
 - **In-person invites (10 min).** Approval is explicit by default; the owner
-  MAY enable auto-approval for in-person invites. Apps SHOULD offer to
-  compare the SAS as a safety number.
+  MAY enable auto-approval for in-person invites, which skips the
+  inviter's approval only. The accepter always approves. With
+  auto-approval the inviting vault approves when `hs.fin` checks out and
+  still sends `connection.request.pending` (with `state: "approved"`),
+  so that its app shows the code for the accepter to compare.
 - **Remote invites.** The resulting connection stays **`pending`** until the
   inviter explicitly approves it in the app.
   - Auto-approval MUST NOT apply.
   - The app shows the invitee's presented `profile`, which is self-asserted
     and labelled as such, and the SAS. The app SHOULD suggest comparing the
     SAS over a channel the inviter trusts, such as a call.
-  - The vault does not send `hs.resp` while the connection is pending.
-    Anyone who saw the link could have accepted it, so approval is the
-    control.
-- **Pending expiry.** A connection request that the owner has neither
-  approved nor declined is dropped after **7 days** (the longest invite
-  TTL).
+  - The vault does not send `connection.approved`, and the connection
+    does not become active, while the request is pending. Anyone who saw
+    the link could have accepted it, so approval, after comparing the
+    SAS, is the control. (Before 0.10.3 the vault held back `hs.resp`;
+    it now sends it at once, as above.)
+- **Already connected** (0.10.2). After opening the bundle and before
+  making an `hs.init`, the accepting vault MUST answer
+  `connection.invite.accept` with `exists` (body `{connection_id}`, its
+  own id for that peer) if `vault.ik` or `vault.relay.pk` is that of one
+  of its connections that is not `stale`, or of one of its outgoing
+  requests. The claim has then been fetched, so the link is spent; the
+  inviter's invitation stays outstanding until its `exp` or
+  `connection.invite.cancel`. A member whose connection is broken
+  removes it and asks for a new invitation.
+- **The inviter's drop.** An `hs.init` of purpose `connection` whose
+  collect `sender` or `from.ik` is that of an active connection or a
+  device of the inviting vault is dropped and audited
+  (`drop.hs_init_from_known_peer`); the invitation is not used. A peer
+  whose record is `stale` is accepted (§7.4). No answer is sent: the
+  accepting vault's own check above, and its expiry below, keep its
+  member from waiting.
+- **Request expiry and retention.**
+  - An **incoming** request (the inviter's) that the owner has neither
+    approved nor declined **7 days** after its `hs.init` (the longest
+    invite TTL) is dropped, whether or not its `hs.fin` came. Once
+    approved, it waits for the peer's `connection.approved` until 16 days
+    after its `hs.init` (the accepter's 8 days, with room for a vault
+    that was locked) and is then dropped. A declined request is dropped
+    at once. Every drop denylists the request token the vault issued
+    (§7.4).
+  - An **outgoing** request (the accepter's) that is not active **8 days**
+    after the accept (the inviter's 7 days and a day for delivery) is
+    dropped, with its handshake state, and the vault denylists the
+    request token it issued and sends `connection.event{connection_id,
+    event: "failed"}`, as for an aborted `hs.resp` (§6.3). A later
+    `hs.resp` or `connection.approved` finds no handshake and is
+    dropped.
+  - A handshake aborted on a commitment mismatch (§6.3) drops the
+    incoming request, which its devices were never shown, and denylists
+    its request token.
+  - `connection.request.list` (§10.4) returns both kinds until they end,
+    with their SAS, so an app can show a request again at any time; the
+    ends are announced as `sync.event{kind: "connection.request"}` and
+    `connection.event`.
 - **Who approves.** Connection requests are approved or declined by an
   owner device of role `app` or `desktop`. Agents MUST NOT create, accept,
   approve or decline invitations.
@@ -1441,7 +1674,9 @@ Rules:
 | Vault ↔ vault | **24 h or 10,000 messages** in either direction |
 | Vault ↔ device or agent | 7 days, and on every unlock |
 
-Either side MAY rekey sooner. The side that hits the limit initiates. If both
+Either side MAY rekey sooner. The side that hits the limit initiates. A
+new connection's or device's first epoch counts from its activation
+(§6.3), not from `hs.fin`; a pending one is never rekeyed (0.10.3). If both
 sides initiate at once, the `hs.init` with the lower `th1` wins (compared as
 big-endian byte strings).
 
@@ -1481,7 +1716,7 @@ outage.
 | Binding | Sender-bound: `sub` = the peer's relay key |
 | Lifetime | ≤ 365 days, and ≤ the relay's `max_token_lifetime_seconds` |
 | `quota` | `{"msgs": 4, "bytes": 65536}` |
-| Delivered in | `hs.init`, `hs.resp`, `relay.token.issued` |
+| Delivered in | `connection.approved` (a new connection, 0.10.3), `hs.init` and `hs.resp` of a reconnect, `relay.token.issued` |
 | Re-minted | After every successful reconnect and every relay-key rotation, and when less than 60 days remain |
 
 **Permitted use.** A reconnect token MAY only be used to deposit an `hs.init`
@@ -1559,19 +1794,33 @@ Paired app            Vault                Relay              New device/agent
   |             PUT claim (kind=p|d|a) ------->|                     |
   |<--QR / code-----------------|              |<--register MB(dev)--|
   |                             |              |<--GET claim---------|
-  |                             |<--collect----|<--hs.init (open)----|  shows SAS
+  |                             |<--collect----|<--hs.init{sas_commit} (open)
+  |                             |--hs.resp{n_R}->|------------------>|  (at once)
+  |                             |<-------------|<--hs.fin{n_I}-------|  shows SAS
   |<--device.pair.pending{name,role,sas}       |                     |
   |   user compares SAS         |              |                     |
-  |--device.pair.approve{grants}-->|--hs.resp->|-------------------->|
-  |                             |<-------------|<--hs.fin------------|
-  |                             |--device.paired{role,grants}------->|
+  |--device.pair.approve{grants}-->|  epoch active, device record    |
+  |                             |--device.paired{role,grants,token}->|
 ```
 
 Rules:
 
-- **Approval first.** The vault MUST NOT send `hs.resp` before approval. If
-  the owner rejects, or 10 minutes pass without approval, the vault drops the
-  pairing and denylists the `jti`.
+- **Handshake, then approval** (0.10.3). The vault answers a valid
+  `hs.init` for a live pairing with `hs.resp` at once (for an app, after
+  the attestation check of §6.7.1); `hs.resp` carries a request token
+  (§7.1). The new device sends `hs.fin` at once and shows the SAS. Once
+  `hs.fin` checks out (§6.3), the vault sends `device.pair.pending` with
+  the SAS. The vault MUST NOT activate the epoch, create the device
+  record or give the device anything but the handshake before the
+  owner's approval; before it, every other message from the device is
+  acked, dropped and audited (`drop.unapproved_peer`). At the approval
+  the epoch becomes active and the vault sends `device.paired`, which
+  carries the device's standing token. If the owner rejects, or
+  10 minutes pass without approval, the vault drops the pairing and its
+  handshake state and denylists the open token's and the request
+  token's `jti`. The new device shows only the code; its user compares
+  it on the app, and it waits for `device.paired` until the pairing's
+  `exp`.
 - **Who pairs.** Only an owner device of role `app` creates
   (`device.pair.create`), approves or rejects pairings. Desktops and agents
   cannot.
@@ -1610,17 +1859,19 @@ Old app (holder)           Vault                  Relay             New app
   |<--{transfer_id, link, exp}|--PUT claim (p)----->|                   |
   |   shows QR                |                     |<--GET claim-------|
   |                           |<--collect-----------|<--hs.init (app,   |
-  |                           |  device_attest ok   |   device_attest)  |
-  |<--device.transfer.pending{name, sas}            |                   | shows SAS
+  |                           |  device_attest ok   |   device_attest,  |
+  |                           |                     |   sas_commit)     |
+  |                           |--hs.resp{n_R}------>|------------------>|  (at once)
+  |                           |<--------------------|<--hs.fin{n_I}-----|  shows SAS
+  |<--device.transfer.pending{name, sas}            |                   |
   |   compare SAS; PIN + password                   |                   |
   |--device.transfer.approve{credential, utk_id, sealed{password, pin}}->|
-  |                           |  PIN; open; CEK rotates (v+1, kept)     |
-  |<--{exp}-------------------|--hs.resp----------->|------------------>|
-  |                           |<--------------------|<--hs.fin----------|
+  |                           |  PIN; open; CEK rotates (v+1, kept);    |
   |                           |  one flush: new app record + unlock key,|
   |                           |  holder := new app, old app removed     |
+  |<--{}----------------------|                     |                   |
   |<--device.unlinked{transferred} (best effort)    |                   |
-  |                           |--device.paired{transfer, credential_version}->|
+  |                           |--device.paired{transfer, credential_version, token}->|
   |                           |<--credential.get, credential.ack, credential.utk.get--|
 ```
 
@@ -1632,8 +1883,11 @@ Old app (holder)           Vault                  Relay             New app
 2. The new app scans the QR and sends `hs.init` (purpose `app`) with
    `device_attest`, which is REQUIRED (§11.7). An invalid attestation drops
    the `hs.init` (audit `device.transfer.attestation_failed`); the holder
-   sees no pending transfer. Otherwise the vault sends the holder
-   `device.transfer.pending{transfer_id, name, sas}`.
+   sees no pending transfer. Otherwise the vault answers with `hs.resp`
+   at once (0.10.3, as for any pairing, §6.7), the new app answers with
+   `hs.fin` and shows the SAS, and once `hs.fin` checks out (§6.3) the
+   vault sends the holder `device.transfer.pending{transfer_id, name,
+   sas}`.
 3. The holder compares the SAS and sends `device.transfer.approve` with
    its current blob and, sealed to a UTK (§3.5.4), the `password` and the
    `pin`. The vault:
@@ -1646,20 +1900,22 @@ Old app (holder)           Vault                  Relay             New app
    - **rotates the CEK** (version + 1). Nobody receives the new blob yet:
      the vault keeps it as the latest blob, unconfirmed, whatever
      `credential.backup` says (§3.5.3). The old app's copy is dead;
-   - records the transfer as approved with `exp` = now + 10 minutes,
-     sends `hs.resp`, answers `{exp}` and audits
-     `device.transfer.approved`. From now on the old app's credential
-     operations are refused with `transfer_pending`.
-4. The new app's `hs.fin` completes the transfer in **one flush**: the new
-   device record (role `app`, attestation binding, unlock key); the
-   holder becomes the new app; the old app is **removed** as by
-   `device.unlink` (§7.4: `device.unlinked{reason: "transferred"}` best
-   effort, relay key denylisted, unlock key and UTK pool removed). The new
-   app receives `device.paired{…, transfer: true, credential_version}`;
-   the vault audits `device.transferred` (`device_id` = the new app, `ref`
-   = `transfer_id`), creates the feed item `device.transferred` and sends
+   - audits `device.transfer.approved` and, since the new app's
+     handshake is already complete (0.10.3), completes the transfer in
+     the same flush (step 4) and answers `{}`.
+4. The approval completes the transfer in **one flush**: the epoch
+   becomes active; the new device record (role `app`, attestation
+   binding, unlock key); the holder becomes the new app; the old app is
+   **removed** as by `device.unlink` (§7.4: `device.unlinked{reason:
+   "transferred"}` best effort after the response, relay key denylisted,
+   unlock key and UTK pool removed). The new app receives
+   `device.paired{…, transfer: true, credential_version, token}`; the
+   vault audits `device.transferred` (`device_id` = the new app, `ref` =
+   `transfer_id`), creates the feed item `device.transferred` and sends
    desktops `sync.event{kind: "device.transferred", device_id,
-   old_device_id}`.
+   old_device_id}`. As before 0.10.3, the old app is removed only once
+   the new app has completed the handshake; there is no longer an
+   approved-but-unfinished state.
 5. The new app fetches the blob with `credential.get`, confirms it with
    `credential.ack` and fills its UTK pool with `credential.utk.get`.
    It unlocks later with the PIN, like any app (§11.4).
@@ -1668,18 +1924,20 @@ Old app (holder)           Vault                  Relay             New app
 `device.transfer.aborted` (`ref` = `transfer_id`) and announced as
 `sync.event{kind: "device.transfer", transfer_id, state: "aborted",
 reason}` (`reason`: `rejected`, `expired`, `alarm`, `replaced` or
-`failed`); the pairing's `jti` is denylisted, and a pending `hs.init` or
-an answered handshake of the new app is dropped.
+`failed`); the pairing's `jti` and the request token's are denylisted,
+and the new app's handshake state is dropped. A commitment mismatch at
+`hs.fin` (§6.3) aborts it with `failed`.
 
 | Case | What happens |
 |---|---|
-| The holder rejects (`device.transfer.reject`), before or after the scan, or after its own approval while the new app has not finished | Aborted. Nothing else changes (after an approval the old app fetches the rotated blob, as in the offline row below). |
+| The holder rejects (`device.transfer.reject`), before or after the scan | Aborted. Nothing else changes. (Since 0.10.3 an approval completes the transfer, so there is nothing to reject after it.) |
 | No scan, or no approval, within 10 minutes | Aborted. Nothing else changes. |
 | The new app's attestation fails | Its `hs.init` is dropped; the transfer stays open until its 10 minutes run out. |
 | Wrong PIN or password at approval | `bad_pin` / `bad_password`, counted in their backoffs. The transfer stays pending until its 10 minutes run out; the member may retry. |
-| The new app goes offline after the approval (no `hs.fin` by `exp`) | Aborted. The old app was never removed and stays the holder. Its blob is now the previous, unconfirmed version, so it is answered `stale_credential` (not a clone, §3.5.9) and fetches the rotated blob with `credential.get`. |
+| The new app goes offline before its `hs.fin` | No SAS is shown; the transfer times out after 10 minutes; nothing changes. |
+| The new app goes offline after its `hs.fin` | The approval still completes the transfer. `device.paired` waits in the new app's mailbox (relay TTL); if the new app never returns, the member recovers (§11.11), as when a new app is lost after a transfer. |
 | The old app goes offline before approving | The transfer times out; nothing changes. |
-| The old app goes offline after approving | Nothing is needed from it: the transfer completes at `hs.fin`. The old app learns of its removal from `device.unlinked` (best effort) or from its relay key being refused. |
+| The old app goes offline after approving | Nothing is needed from it: the approval completed the transfer. The old app learns of its removal from `device.unlinked` (best effort) or from its relay key being refused. |
 | A clone alarm opens (§3.5.9) | An open transfer is aborted. |
 | The vault locks | The transfer and its pending handshake are kept in vault state; its 10 minutes still run and are checked at the next unlock, which aborts an expired one. |
 | A recovery completes (§11.11.5) | An open transfer is aborted (`replaced`). |
@@ -1791,16 +2049,26 @@ policy (§1.2).
 
 | Mailbox | `sub` | Kind | `exp − iat` | Default `quota` | Delivered in |
 |---|---|---|---|---|---|
-| Vault | each owner device | standing | ≤ 30 d | none | `hs.resp`, `relay.token.issued`, unlock result |
-| Vault | each peer vault | standing | ≤ 30 d | 20,000 msgs / 512 MiB | handshake, `relay.token.issued` |
-| Vault | each peer vault | **reconnect** (§6.6) | ≤ 365 d | 4 msgs / 64 KiB | handshake, `relay.token.issued` |
+| Vault | each owner device | standing | ≤ 30 d | none | `device.paired` (0.10.3), `hs.resp` of a handshake answered without approval (§11.3, §11.11.5), `relay.token.issued`, unlock result |
+| Vault | each peer vault | standing | ≤ 30 d | 20,000 msgs / 512 MiB | `connection.approved` (0.10.3), reconnect handshake, `relay.token.issued` |
+| Vault | each peer vault | **reconnect** (§6.6) | ≤ 365 d | 4 msgs / 64 KiB | `connection.approved` (0.10.3), reconnect handshake, `relay.token.issued` |
+| Vault | a requesting peer vault or new device | **request** (0.10.3) | ≤ 16 d (a device: ≤ 10 min) | 8 msgs / 64 KiB | `hs.init` (the accepter's), `hs.resp` of a handshake that needs approval |
 | Vault | invitee | open | = invite TTL (10 min default, up to 7 d) | one deposit | claim bundle |
 | Vault | new device | open | ≤ 10 min | one deposit | claim bundle |
 | Device | its vault | standing | ≤ 30 d | none | `hs.init`, `relay.token.issued`, unlock request |
 | Device (app) | the vault being enrolled | open | ≤ 10 min | one deposit | enrollment request, inside the ciphertext |
-| Peer vault | this vault | standing and reconnect | as above | peer's choice | handshake, `relay.token.issued` |
+| Peer vault | this vault | request, then standing and reconnect | as above | peer's choice | handshake, `connection.approved`, `relay.token.issued` |
 
 Devices never hold tokens for peers, and peers never hold tokens for devices.
+
+**Request tokens** (0.10.3) cover only the rest of a handshake that
+awaits approval (§6.4, §6.7): a holder may deposit `hs.resp`, `hs.fin`
+and `connection.approved` with it, and the receiving vault, which records
+each token's kind by `jti` (§6.6), acks, drops and audits anything else
+that arrives on one. A request token is not refreshed
+(`relay.token.refresh` is answered `forbidden`); it is replaced by the
+standing token in `connection.approved` or `device.paired`, and
+denylisted when the request or pairing ends without one (§7.4).
 
 ### 7.2 Refresh
 
@@ -1843,6 +2111,7 @@ The actions for each event are applied in one flush, in the order listed:
 | Device unlinked | End its access session and drop its held and pending requests (§6.8). Send `device.unlinked` (best effort). Denylist `sub`. Remove the device from the unlock keys. Delete its wake reference. |
 | Agent revoked | As for device unlinked, plus revoke all of the agent's LEASH grants |
 | Invite or pairing cancelled or expired | Denylist the open token's `jti`. DELETE the claim. |
+| Connection request or pairing ended without activation (declined, rejected, expired, aborted; 0.10.3) | Denylist the `jti` of the request token the vault issued in the handshake. Delete the tokens held for the peer and the handshake state. |
 
 The relay retains denylist entries for its maximum token lifetime
 (RELAY-PROTOCOL §5.5). This is why reconnect tokens raise denylist retention
@@ -2071,8 +2340,10 @@ an answer to an unknown or expired id is dropped.
 | | `profile.update` | V↔V | | Shared profile (name, photo, `@profile` items) to a connection (§9.3, §10.8) |
 | | `sync.event` / `sync.since` | V→D, V↔V / D→V, V↔V | — / req | Mirror changes (kinds in §10.1); catch up |
 | Connections | `connection.invite.create`, `.list`, `.cancel`, `.accept` | D→V | req | Invitations (§6.4) |
-| | `connection.request.pending` | V→D | | Awaiting approval (profile, `sas`, `remote`) |
-| | `connection.approve`, `.decline`, `.list`, `.get`, `.remove`, `.update` | D→V | req | Manage connections; the owner's own metadata |
+| | `connection.request.pending`, `connection.request.outgoing` | V→D | | An incoming request awaiting approval (profile, `sas`, `remote`); an outgoing one (`sas`) (§6.4) |
+| | `connection.request.list` | D→V | req | Pending incoming and outgoing requests with their SAS (§6.4) |
+| | `connection.approve`, `.decline`, `.list`, `.get`, `.remove`, `.update` | D→V | req | Approve or decline a request; manage connections; the owner's own metadata |
+| | `connection.approved` | V↔V | | The member approved the request after comparing the SAS; the standing and reconnect tokens (§6.4, 0.10.3) |
 | | `connection.removed` | V↔V | | Notify the peer |
 | | `connection.event` | V→D | | Added, pending, stale, removed, rekeyed, reconnected |
 | | `block.add`, `.remove`, `.list` | D→V | req | Block list (§7.4) |
@@ -2116,7 +2387,7 @@ an answer to an unknown or expired id is dropped.
 | Grants | `grant.request`, `.decide`, `.revoke`, `.list`, `.fetch`, `.catalog` | D→V | req | 1:1 grants of items; a connection's catalog (§10.12) |
 | | `data.request`, `data.decided`, `data.shared`, `data.revoked`, `data.fetch`, `data.value`, `data.catalog.get`, `data.catalog` | V↔V | | Between the two vaults |
 | | `grant.pending`, `grant.event`, `grant.value`, `grant.catalog.result` | V→D | | Asked; granted, denied or revoked; a value sealed to the fetching device; a connection's catalog |
-| Critical items | `critical-secret-use.request`, `.approve`, `.deny`, `.list` | D→V | req | Ask a connection's member to use a critical item; consent with the password (§10.13) |
+| Critical items | `critical-secret-use.request`, `.approve`, `.deny`, `.list`, `.get` | D→V | req | Ask a connection's member to use a critical item; consent with the password (§10.13) |
 | | `critical-secret.use`, `critical-secret.result` | V↔V | | The request; the result or refusal |
 | | `critical-secret-use.pending`, `critical-secret-use.result` | V→D | | Asked (apps and desktops); the result |
 | Presence | `presence.query`, `presence.get`, `presence.set` | D→V | req | Ask; read and set own state and policy (§10.17) |
@@ -2153,7 +2424,9 @@ an answer to an unknown or expired id is dropped.
   `ttl_not_allowed`, `claim_unavailable`, `accept_failed`, `approve_failed`,
   `connection_unavailable`, and (0.4.0):
   - `conflict`: the request's `version` is not the current one (§8.4);
-  - `exists`: the object already exists (`credential.create`);
+  - `exists`: the object already exists (`credential.create`; since
+    0.10.2 also `connection.invite.accept` of a vault already connected
+    or requested, with body `{connection_id}`, §6.4);
   - `limit`: a count or size limit of the feature would be exceeded;
   - `bad_password`, `backoff`, `stale_credential`, `utk_invalid`: §3.5.3,
     §3.5.4;
@@ -2193,8 +2466,8 @@ an answer to an unknown or expired id is dropped.
       `credential.rotate` runs until the forced rotation (§3.5.9);
     - `credential_lost`: `credential.recover` when the vault keeps no copy
       of the latest blob (backup off, §11.11.5);
-    - `transfer_pending`: a credential operation of the old app after it
-      approved a transfer (§6.7.1).
+    - `transfer_pending`: reserved; unused since 0.10.3, when the
+      approval of a transfer completes it at once (§6.7.1).
 - A request answered with an error changes no state, except the password
   backoff, the spent UTK and the audit log and feed entries of §3.5.3.
   Objects that several
@@ -2227,6 +2500,7 @@ an answer to an unknown or expired id is dropped.
   | `feed.updated` | `item_id`, `seq` |
   | `feed.deleted` | `item_id`, `seq` |
   | `connection.changed` | `connection_id`, `version` (`connection.update`, §10.4) |
+  | `connection.request` | `pending_id` (incoming) or `connection_id` (outgoing), `state` (`approved`, `peer_approved`, `declined`, `expired`) (§6.4); `peer_approved`: the peer's `connection.approved` arrived (0.10.3) |
   | `block.added`, `block.removed` | `block_id` (§10.4) |
   | `connection.authenticate.decided` | `request_id`, `approved` (§10.4) |
   | `device.session` | `device_id`, `expires_at` (absent when the session ended) (§6.8) |
@@ -2277,13 +2551,13 @@ an answer to an unknown or expired id is dropped.
 | `device.pair.pending` (to apps) | — | `{pairing_id, pending_id, role, name, sas}`; `name` is the new device's self-asserted `profile.name` |
 | `device.pair.approve` (app) | `{pairing_id, session_seconds?, grants?}`; `session_seconds` (60–86,400) only for a desktop or agent: its first access session (§6.8); `grants` only for an agent: 1–32 LEASH grant specifications (§10.11), signed at the approval (`credential_locked` outside the unlock window) | `{}` |
 | `device.pair.reject` (app) | `{pairing_id}` | `{}` |
-| `device.paired` (to the new device) | — | `{device_id, role, vault_id, release, release_number, session_expires_at?, transfer?, credential_version?}` (the release the vault runs under); `transfer: true` and the credential's `credential_version` for a transferred app (§6.7.1) |
+| `device.paired` (to the new device) | — | `{device_id, role, vault_id, release, release_number, token, session_expires_at?, transfer?, credential_version?}` (the release the vault runs under); `token`: the device's standing token, replacing the request token of `hs.resp` (0.10.3, §7.1); `transfer: true` and the credential's `credential_version` for a transferred app (§6.7.1) |
 | `device.list` (app, desktop) | `{}` | `{devices: [{id, kind, state, name, ik, profile?, created_at?, last_active_at?, session_expires_at?}]}` |
 | `device.unlink` (app) | `{device_id}` | `{}`; `forbidden` for the app itself (0.9.0: it leaves by a transfer or a recovery) |
 | `device.unlinked` (to the unlinked device, best effort) | — | `{reason?}`: `"transferred"` for the old app of a transfer (§6.7.1), `"replaced"` for the old app of a recovery (§11.11.5) |
 | `device.transfer.create` (the holder) | `{}` | `{transfer_id, link, exp}`; `exists` while a transfer is open; `credential_frozen` or `rotation_required` during an alarm (§6.7.1) |
 | `device.transfer.pending` (to the holder) | — | `{transfer_id, name, sas}`; `name` is the new app's self-asserted `profile.name` |
-| `device.transfer.approve` (the holder) | `{transfer_id, credential, utk_id, sealed{password, pin}}` | `{exp}`: the new app must finish its handshake by then; `bad_pin`, `backoff`, `bad_password`, `stale_credential`, `credential_frozen`, `utk_invalid` |
+| `device.transfer.approve` (the holder) | `{transfer_id, credential, utk_id, sealed{password, pin}}` | `{}`: the transfer is complete (0.10.3; was `{exp}`); `bad_pin`, `backoff`, `bad_password`, `stale_credential`, `credential_frozen`, `utk_invalid` |
 | `device.transfer.reject` (the holder) | `{transfer_id}` | `{}`; cancels the transfer before or after the scan, or after the approval until the new app finishes |
 | `device.session.request` (desktop, agent) | `{seconds?}` (60–86,400, default 3,600) | `{request_id, exp}` |
 | `device.session.pending` (to apps) | — | `{request_id, device_id, role, name, seconds, exp}` |
@@ -2310,15 +2584,18 @@ an answer to an unknown or expired id is dropped.
 | `connection.invite.create` | `{ttl_seconds: 600 \| 3600 \| 86400 \| 604800}` | `{invite_id, link, exp, remote}` |
 | `connection.invite.list` | `{}` | `{invites: [{invite_id, exp, remote}]}` |
 | `connection.invite.cancel` | `{invite_id}` | `{}` |
-| `connection.invite.accept` | `{link}` | `{connection_id, state: "pending"}` |
-| `connection.request.pending` | — | `{pending_id, invite_id, sas, remote, profile?}` |
-| `connection.approve`, `.decline` | `{pending_id}` | `{}` |
+| `connection.invite.accept` | `{link}` (the bare payload, §6.4) | `{connection_id, state: "waiting", remote, exp, name?}`: an outgoing request (§6.4); the SAS follows in `connection.request.outgoing` once the handshake has run (0.10.3); `name` is the bundle's `hint.name`. `exists` with body `{connection_id}` for a vault already connected or requested; `blocked`, `limit`, `claim_unavailable`, `bad_request`, `accept_failed` |
+| `connection.request.pending` (incoming, to apps and desktops) | — | `{pending_id, invite_id, sas, remote, state, exp, profile?, introduced_by?}`, once `hs.fin` has checked out; `state` is `pending`, or `approved` under in-person auto-approval (§6.4) |
+| `connection.request.outgoing` (to apps and desktops, the accepting device included) | — | `{connection_id, sas, remote, exp, name?, introduced_by?}`, once the vault has sent `hs.fin` and knows the SAS (0.10.3), whichever device accepted or for an introduction (§10.15) |
+| `connection.request.list` | `{}` | `{incoming: [{pending_id, invite_id, sas, remote, state, peer_approved, created_at, exp, profile?, introduced_by?}], outgoing: [{connection_id, sas?, remote, state, peer_approved, created_at, exp, name?, introduced_by?}]}` |
+| `connection.approved` (V↔V, session mode under the handshake's epoch) | — | `{token, reconnect_token}`: the standing and reconnect tokens for the peer (§6.4, §7.1); sent once, at the member's approval |
+| `connection.approve`, `.decline` | `{pending_id}` (an incoming request) or `{connection_id}` (an outgoing one), exactly one | `{}`; `not_found` for an unknown or ended request; `bad_request` for an approval while the SAS is not yet known (0.10.3) |
 | `connection.list` | `{}` | `{connections: [<connection>]}` |
 | `connection.get` | `{connection_id}` | `<connection>` |
 | `connection.update` | `{connection_id, version, alias?, note?, tags?, favorite?, archived?}` (at least one) | `{version}` |
 | `connection.remove` | `{connection_id}` | `{}` |
 | `connection.removed` (V↔V) | — | `{}` |
-| `connection.event` | — | `{connection_id, event: "added" \| "removed" \| "stale" \| "rekeyed" \| "reconnected" \| "failed" \| "profile"}`; `profile`: the connection's shared profile changed (§10.8) |
+| `connection.event` | — | `{connection_id, event: "added" \| "removed" \| "stale" \| "rekeyed" \| "reconnected" \| "failed" \| "profile", pending_id?}`; `profile`: the connection's shared profile changed (§10.8); `failed`: an outgoing request ended without a connection (§6.4); `pending_id` with `added` on the inviter's side names the request it came from (on the accepter's side `connection_id` is the accept's) |
 | `block.add` | `{connection_id \| pending_id, note?}` (exactly one of the ids) | `{block_id}` |
 | `block.remove` | `{block_id}` | `{}` |
 | `block.list` | `{}` | `{blocks: [{block_id, ik, name?, note?, created_at}]}` |
@@ -2329,6 +2606,24 @@ connection: { "id": "<id>", "kind": "connection", "state": "active", "name": "..
               "version": 2, "alias": "...", "note": "...", "tags": ["family"],
               "favorite": true, "archived": false }
 ```
+
+- **Requests** (0.10.2, §6.4; states 0.10.3). In
+  `connection.request.list`, an incoming request is listed once its
+  `hs.fin` has checked out; its `state` is `pending` (awaiting the owner)
+  or `approved` (the owner approved, awaiting the peer's approval). An
+  outgoing request's `state` is `waiting` (no `hs.resp` yet; `sas`
+  absent), `pending` (the SAS is known, awaiting the member) or
+  `approved`. `peer_approved` is whether the peer's `connection.approved`
+  has arrived; a request with both approvals is a connection and leaves
+  the list. `exp` is when the request is dropped (§6.4 "Request expiry
+  and retention"); `created_at` is when the vault received the `hs.init`
+  or sent it. Both lists are newest first; a vault holds at most 256
+  requests of each kind (more are refused: an `hs.init` is dropped and
+  audited, an accept is answered `limit`). `introduced_by` is the vault's
+  connection id of the introducer (§10.15). Approvals, the peer's
+  approval and declines reach the other devices as
+  `sync.event{kind: "connection.request"}`, and so does an incoming
+  request's expiry.
 
 The D→V types above are sent by `app` or `desktop` devices (§6.4 "Who
 approves"); for desktops, `connection.invite.create`,
@@ -2476,8 +2771,7 @@ for `credential`, `utk_id` and `sealed`.
   `stale_credential` and `bad_password`, and on success they rotate the
   CEK and return the new `credential` and its version. They also follow
   §3.5.9: a clone is answered `credential_frozen`, and during an alarm
-  they answer `credential_frozen` or `rotation_required`; the old app of
-  an approved transfer gets `transfer_pending` (§6.7.1).
+  they answer `credential_frozen` or `rotation_required`.
 - Every response to a type that spent a UTK carries `utks` (an array of
   §3.5.4 UTKs, possibly empty) to replenish the app's pool.
 
@@ -2497,7 +2791,7 @@ for `credential`, `utk_id` and `sealed`.
 | `credential.reset` | `{utk_id, sealed{password}}` | `{credential, version, key, utks}`: a new credential after a recovery with the backup off; the old credential and every critical item are destroyed (§11.11.5); `exists` if the vault keeps the latest blob (use `credential.recover`) |
 | `credential.alarm` (V→D, to the holder; durable) | — | `{alarm_id, kind: "clone", state: "frozen", at, presenter: "holder" \| "other", version}`: an urgent alert (§3.5.9) |
 | `credential.alarm.confirm` | `{alarm_id, mine: bool}` | `{state: "rotation_required"}`; `not_found` if no such alarm is open (§3.5.9) |
-| `pin.change` | `{pin, new_pin}` | `{}`; `bad_pin` if `pin` is wrong |
+| `pin.change` | `{pin, new_pin}` | `{}`; `bad_pin` if `pin` is wrong; `bad_request` if `new_pin` is not 6–32 digits (§11.3) |
 
 - `key` is the credential key's public key (base64). `version` is the
   credential's version (§3.5.2). In the `item.*` types, whose own
@@ -3721,6 +4015,7 @@ B app            B vault                   A vault                      A app
 | `critical-secret.result` (V↔V) | — | `{request_id, status: "ok", signature, public_key}` or `{request_id, status: "denied" \| "expired" \| "unavailable" \| "unsuitable"}` |
 | `critical-secret-use.result` (V→D, apps and desktops) | — | `{connection_id, request_id, status, signature?, public_key?}` |
 | `critical-secret-use.list` (app, desktop) | `{}` | `{incoming: [{request_id, connection_id, item_id, field_id, name, label, operation, payload_sha256, context?, exp}], outgoing: [{request_id, connection_id, item_id, field_id, operation, state, status?}]}` |
+| `critical-secret-use.get` (app, desktop) | `{request_id}` (an incoming request) | the `critical-secret-use.pending` body: `{request_id, connection_id, item_id, field_id, name, label, operation, payload, payload_sha256, context?, exp}`; `not_found` for an unknown, answered or expired request |
 
 - **What can be asked.** Only a critical item that a share rule of that
   connection includes (it is then `usable` in the connection's catalog,
@@ -3728,9 +4023,17 @@ B app            B vault                   A vault                      A app
   answered `unavailable` at once, without asking the member, and audited
   (`critical-secret.use.requested` and `critical-secret.use.denied`);
   an item the rule does not include is not told apart from a missing
-  one. `payload` is 1–4,096 bytes (base64) and `context` at most 256
-  bytes; the app MUST show both, the item's name and field label, and
-  the connection's name, to the member. A vault keeps at most 8 pending
+  one. `payload` is 1–4,096 bytes (before its base64) and `context` at
+  most 256 bytes; the app MUST show both, the item's name and field
+  label, and the connection's name, to the member.
+- **Showing a request again** (0.10.2). `critical-secret-use.list` gives
+  only `payload_sha256`, which keeps the list small; an app that shows an
+  incoming request from the list (or from the feed) fetches it with
+  `critical-secret-use.get`. Before showing a payload, from `.pending` or
+  `.get`, the app MUST check that SHA-256(`payload`) equals
+  `payload_sha256`, and MUST NOT offer the approval otherwise; the
+  `payload_sha256` it seals in the approval is the one it computed from
+  the payload it showed. A vault keeps at most 8 pending
   requests per connection (more are answered `unavailable`) and answers
   `expired` after 24 h; a repeated `request_id` is ignored.
 - **Consent per use.** `critical-secret-use.approve` is one use of the
@@ -3930,7 +4233,9 @@ A vault             B vault (introducer)              C vault
   |<--intro.connect{peer_ik}-----------|   (only when both accepted)      |
   |--intro.invite{link}--------------->|--intro.link{link}-------------->|
   |<----------------- hs.init (§6.4, remote invitation) -----------------|
-  |   connection.request.pending{introduced_by}; A's member approves (SAS)
+  |------------------------------ hs.resp ------------------------------>|
+  |<------------------------------ hs.fin -------------------------------|
+  |   connection.request.pending{introduced_by}; both members approve (SAS)
 ```
 
 1. B's app sends `intro.create` naming two active connections, `a` and
@@ -3949,7 +4254,10 @@ A vault             B vault (introducer)              C vault
    (`intro.link`), and C's vault accepts it as `connection.invite.accept`
    would. A's member then approves the request as any remote one, with
    the SAS (§6.4); `connection.request.pending` carries
-   `introduced_by` (A's connection id of B).
+   `introduced_by` (A's connection id of B). C's member approves C's
+   outgoing request with the same SAS (§6.4, 0.10.2);
+   `connection.request.outgoing` carries `introduced_by` (C's connection
+   id of B).
 4. If either declines, B cancels, or the introduction has not been
    linked within 7 days, B's vault sends `intro.closed` to each party it
    had offered it to (except one that declined, which has closed its own
@@ -4421,10 +4729,7 @@ enclave's member index object (`users/<hex SHA-256("vettid/vms/2/user" ||
   prefix `vettid-org-`), which the parent creates at boot and deletes at
   shutdown. `instance_id` matches `[A-Za-z0-9_-]{1,48}`. The API sends only
   to that name in its own account. A sweeper removes queues of instances
-  that have gone away. The parent creates the queue with the access policy
-  the deployment publishes (vettid.org: SSM
-  `/vettid-org/<stage>/vault/control-queue-policy`, SendMessage for the
-  member API's roles) and creates none without a valid one.
+  that have gone away.
 - The instance publishes `{instance_id, release, queue_url, descriptor,
   attestation, heartbeat_at}` to an **instance registry** and heartbeats at
   least every 30 s. An instance whose `heartbeat_at` is more than 90 s old
@@ -4525,6 +4830,14 @@ manifest's `serial`) are REQUIRED and name the manifest the app verified
 with these two fields, finds its own release's entry (which must be
 `active`) and verifies its own sealing key (§11.10.7) before sealing the
 first header. The request is padded to exactly 12,288 bytes (§5.4).
+
+**The vault PIN** is 6–32 ASCII digits (owner decision, 2026-10-04) in
+every message that sets or checks one: `vault.enroll`, `vault.unlock`, a
+transfer's approval (§6.7.1) and `pin.change` (`pin` and `new_pin`). The
+enclave refuses any other value as malformed before deriving anything from
+it. Apps also refuse weak PINs (repeats, runs such as 123456, short repeated
+patterns, common PINs); the vault does not judge strength. No vault exists
+with a shorter PIN, so none is migrated.
 
 ```
 App               Relay        Member API               SQS/Parent       Enclave
@@ -6280,6 +6593,7 @@ it can read and write only its own objects and use only its own relay key
 | Vault relay key | Collect, ack or delete the vault's mailbox (DoS); deposit as the vault; mint tokens. No plaintext, and no forged content. | Rotate (§3.4) |
 | Device relay key | Deposit as the device. Its content remains unforgeable. | Unlink and re-pair |
 | Reconnect token | Nothing without the holder's relay key (sender-bound), and even then only a 4-message quota of `hs.init`s that must be signed by the stored `ik` | Denylist its `jti` (removal does, §7.4) |
+| A remote invitation link, held or substituted in transit (0.10.3) | Completing a handshake: a pending request on the inviter's side and a request token for 8 small deposits that are dropped until approval (§6.4, §7.1). A party in the middle that substitutes the link makes the two members' codes match with probability about 10^-6 per attempt, one attempt per invitation or accept (§6.3) | The members compare the SAS and decline; the request expires; `connection.invite.cancel` |
 | Session epoch key | Read and forge messages in that epoch and direction. Vault-to-vault epochs last at most 24 h. | Next rekey |
 | Vault `ik` or `kem` | Impersonate the vault in new handshakes and read new `hs.init`s | Credential rotation, `identity.rotate`, rekey |
 | ETK | PINs in requests sealed to it (≤ 25 h). Requires breaking the enclave. | Enclave restart |
@@ -6297,7 +6611,7 @@ it can read and write only its own objects and use only its own relay key
 | A connection offered actions | Only the built-in actions offered to it, under their modes: one-use, 10-minute grants of the items the member configured (values sealed to its device), its own entries of the audit log; nothing at all of a critical action without the member's app in the unlock window; at most 60 invocations an hour and 8 pending (§10.14) | `action.configure` (mode `default-deny`), `grant.revoke`, removing the connection |
 | A member's vault code for actions | Actions run natively in the vault's process (§12.4) from a catalog fixed in the release; no third-party or downloaded code (§10.14) | A release update (§11.10) |
 | A connection, about the member's other connections | Nothing: no type lists them to a connection or lets it ask for an introduction; it learns of another connection only when the member introduces them, only what the member chose to show, and connects only if both accept and then approve each other with the SAS (§10.15) | Decline; `block.add` |
-| The introducer | Each party's answer; it relays the invitation, so it could substitute a party it is connected to, but the parties still approve each other with the SAS, and the invitation accepts only the `ik` B named (§10.15) | Compare the SAS out of band; decline |
+| The introducer | Each party's answer; it relays the invitation, so it could substitute a party it is connected to, but the parties still approve each other with the SAS, which it cannot steer (about 10^-6 per attempt, §6.3), and the invitation accepts only the `ik` B named (§10.15) | Compare the SAS out of band; decline |
 | A connection the member shares location with | Positions at the share's precision (`exact` about 1 m; `approximate` a 0.01° cell; `city` a 0.1° cell), at most one per 0.9 × the interval, until the share's expiry (at most 7 days) or stop; a trail only if the member allowed it; whatever its own member saw. Cells are fixed: crossing a boundary reveals being near it (§10.16) | `location.share.stop`; removing the connection |
 | The sending vault's state | No position: positions are forwarded from memory, never stored or queued (§8.5, §10.16) | — |
 | A connection asking for location or presence | One location request per 10 minutes (a feed item); one presence answer per minute, only if the policy shares with it; a refusal is silence, like a locked vault (§9.2, §10.17) | `presence.set{except}`, `share: none`, `invisible`; `block.add` |
@@ -6516,6 +6830,89 @@ Follow-ups:
     into the queue message and `410 release_unavailable` for a `removed`
     release are specified here and in MEMBER-API; the member-API code
     follows in VAULT-RELEASES W8.
+16. **Connection requests (0.10.2).** Follow-ups: vettid-vault (the SAS
+    in the accept response, the accepter's approval gating `hs.fin`,
+    `exists`, the `from.ik` check in the inviter's drop, the 8-day
+    outgoing expiry, `connection.request.list` and `.outgoing`, the
+    `connection.request` sync kind, `pending_id` in `added`,
+    `critical-secret-use.get`) and the apps (the `vettid:` scheme, the
+    App Link host relay.vettid.org); vettid-relay serves `/connect` and
+    `/.well-known/assetlinks.json` (and later
+    `apple-app-site-association`), RELAY-PROTOCOL to describe them (§6.4). These land in a staging release after
+    S1; nothing in production depends on the 0.10.1 shapes.
+    **OWNER DECISIONS of 0.10.2** (each written as recommended, to
+    confirm at review):
+    1. The accepter's member approves too, always, also when the inviter
+       auto-approves in person; the vault sends `hs.fin` only then.
+       Recommended: yes; the SAS protects only when both compare. (Since
+       0.10.3 `hs.fin` is sent at once and the approval travels in
+       `connection.approved`; item 17.)
+    2. A decline is not sent to the peer; the peer's request ends by
+       expiry (8 days for the accepter). Recommended: yes, as other
+       refusals (§9.2); anyone could have accepted a remote link.
+    3. `exists` spends the link and offers no override; a member whose
+       connection is broken removes it and asks for a new invitation.
+       Recommended: yes; an override (`replace`, keeping the opened
+       bundle until `exp`) can come later if this proves common.
+    4. The invitation URL is `<relay>/connect#<link>` on the
+       invitation's own relay, with the payload in the fragment, built by
+       the apps; QR codes keep the compact JSON. Owner decision
+       2026-10-04: the relay hosts it, so home appliances and
+       self-hosted relays work without vettid.org.
+    5. `critical-secret-use.get` rather than payloads inline in
+       `critical-secret-use.list`. Recommended: yes; 8 pending requests
+       per connection of up to 4,096 bytes each would let the list
+       outgrow one message (§5.5).
+17. **SAS strength.** Before 0.10.3, `sas` (§6.3) depended only on
+    `hs.init`, which the initiator alone chooses. A party that substitutes a remote invitation
+    link (a man in the middle between two members) receives the victim's
+    `hs.init`, learns its SAS, and can then try fresh `hs.init`s to the
+    real inviter until one yields the same six digits (about 10^6
+    handshake constructions, minutes of CPU), so the two codes the
+    members compare match. Comparing the SAS therefore did not reliably
+    detect a substituted remote link.
+    **Resolved in 0.10.3** by a ZRTP-style commitment (§6.3): `hs.init`
+    carries `sas_commit` = SHA-256 of the initiator's 32-byte nonce
+    `n_I`, `hs.resp` carries the responder's `n_R`, `hs.fin` reveals
+    `n_I`, and `sas` is expanded from `prk` over `th`, `n_I` and `n_R`.
+    Neither side, and no party in the middle, can steer it: matching
+    codes in a substituted link take about 10^-6 per attempt, one
+    attempt per invitation or accept. Since the SAS now exists only after
+    `hs.fin`, the handshake runs before approval and each approval is a
+    `connection.approved` message (§6.4); pairing and transfer follow
+    the same order (§6.7, §6.7.1). Rekeys and reconnects have no SAS and
+    do not change.
+    Follow-ups: vettid-vault (the commitment fields and check, the new
+    derivation, `hs.resp` at once and `hs.fin` at once, request tokens
+    and their kind, `connection.approved`, activation after both
+    approvals, `device.paired{token}`, the transfer completing at the
+    approval, `connection.request.list` states, regenerated
+    `handshake.json`); vettid-android (the same on the device side, the
+    new accept response and `connection.request.outgoing` on the
+    accepting device, the vector tests); the desktop later.
+    **OWNER DECISIONS of 0.10.3** (each written as recommended):
+    1. A commitment rather than a longer code. Recommended: yes; a
+       longer code only raises the attacker's offline work, which stays
+       cheap, while the commitment caps every attempt at 10^-6.
+    2. The inviting vault (and the vault in a pairing) sends `hs.resp`
+       at once, before anyone approves. Recommended: yes; the SAS cannot
+       exist earlier, and `hs.resp` carries only a request token.
+    3. Request tokens (8 messages / 64 KiB, for the rest of the
+       handshake and `connection.approved` only) in the handshake; the
+       standing and reconnect tokens move into `connection.approved`
+       and `device.paired`. Recommended: yes; otherwise anyone who saw
+       a remote link would hold a 20,000-message token before approval.
+    4. Each side's approval is sent to the peer (`connection.approved`)
+       and a connection is active only with both; a decline is still not
+       sent (0.10.2 decision 2). Recommended: yes.
+    5. Pairing and transfer use the same commitment and order, with no
+       exception for the in-person QR; a transfer's approval now
+       completes it at once (`{}` instead of `{exp}`; `transfer_pending`
+       is retired). Recommended: yes; one handshake, and the old app is
+       still removed only after the new app finished the handshake.
+    6. The SAS stays six digits. Recommended: yes; 10^-6 per attempt,
+       with one attempt per invitation or accept, each visible as a
+       mismatch to the members.
 
 ## 16. Test vectors
 
@@ -6632,10 +7029,103 @@ values in the files are authoritative.
   bucket object  : manifests/1076917dbc01969c1dedaaaa0ec81d711a7d4babc184a834aa8d3fe275c97c9d.json
 ```
 
+**0.10.2.** No vector changes: the invitation URL (§6.4) is the
+payload's `r`, `/connect#`, then `invite.json`'s `link`.
+
+**0.10.3.** `handshake.json` is regenerated for the SAS commitment
+(§6.3). New inputs: `n_I` = 32 x 0x16 and `n_R` = 32 x 0x17, carried in
+`hs.init` (`sas_commit`), `hs.resp` and `hs.fin` (`sas_nonce`); every
+other input is unchanged. `K_s`, `K_e` and `prk` depend only on the KEM
+randomness and keys, not on the bodies, so they keep the values above;
+the envelope bytes change, and with them `th1`, `th` and everything
+expanded from `th`. The values marked "regenerate" are produced by
+vettid-vault's reference implementation into `handshake.json` and copied
+here then; until that is done, the 0.10.2 values above for those lines
+are void. The 0.10.2 `sas` (696599, the old derivation) is no longer a
+valid vector.
+
+```
+§6.3 handshake 0.10.3, purpose connection                       (handshake.json)
+  inputs as above, plus n_I 32 x 0x16, n_R 32 x 0x17
+  n_I (b64)  : FhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhY=
+  n_R (b64)  : FxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxc=
+  sas_commit : 8e1e9d648451f0f78b42a5df826d753e0fc7d26350385e315ab0b2ac87069ada
+               = SHA-256("vettid/vms/2/sas-commit" || n_I)
+  K_s, K_e, prk : unchanged (above)
+  th1, th, k_i2r, k_r2i, kid_i2r, kid_r2i, rk, epoch_id : regenerate
+  sas = uint32be(HKDF-Expand(prk, "vettid/vms/2/sas" || th || n_I || n_R, 4)) mod 10^6 : regenerate
+  sig_R, sig_I, all three envelopes : handshake.json (regenerate)
+```
+
 Cross-implementation checks against Apple CryptoKit and BouncyCastle are
 pending (§15, follow-up 1).
 
 ## 17. Changelog
+
+- **0.10.3** (2026-10-04): the SAS commitment (§15 item 17).
+  - §6.1, §6.2, §6.3: `sas_commit` in `hs.init`, `sas_nonce` (`n_R`) in
+    `hs.resp`, `sas_nonce` (`n_I`) in `hs.fin`, for purposes `app`,
+    `desktop`, `agent` and `connection`; `sas` =
+    HKDF-Expand(`prk`, label || `th` || `n_I` || `n_R`) mod 10^6; the
+    responder checks the commitment at `hs.fin` (a mismatch aborts,
+    `drop.sas_commit_mismatch`); the initiator processes one `hs.resp`
+    per `hs.init`; an epoch is established at `hs.fin` and activated at
+    approval; why a party in the middle succeeds with about 10^-6.
+  - §6.4: the handshake runs before approval (`hs.resp` and `hs.fin` at
+    once); the accept answers `state: "waiting"` without `sas`, which
+    follows in `connection.request.outgoing` on every device; the
+    inviter is told only after `hs.fin`; `connection.approved` in each
+    direction, activation with both approvals; what an unapproved party
+    holds; in-person auto-approval still shows the code; expiry and
+    retention restated.
+  - §6.5: a first epoch counts from activation.
+  - §6.6, §7.1, §7.4: request tokens (8 messages / 64 KiB) in the
+    connection handshake and in `hs.resp` of a pairing that needs
+    approval; standing and reconnect tokens in `connection.approved`
+    and `device.paired`; the request token is denylisted when a request
+    or pairing ends without activation.
+  - §6.7, §6.7.1, §10.3: pairing and transfer: `hs.resp` at once, the SAS
+    after `hs.fin`, activation at the approval; a transfer completes at
+    its approval (`{}` instead of `{exp}`), `transfer_pending` retired
+    (§3.5.3, §10.1, §10.6).
+  - §10, §10.1, §10.4: `connection.approved` (V↔V); `state` in
+    `connection.request.pending`; `connection.request.list` states and
+    `peer_approved`; the `peer_approved` sync state; the accept
+    response.
+  - §10.15, §13.5: the introduction diagram; threat rows for a remote
+    link and the introducer.
+  - §15 item 17 resolved, with owner decisions; §16: new handshake vector
+    inputs (`n_I`, `n_R`, `sas_commit`), values to be regenerated.
+
+- **0.10.2** (2026-10-04): connection requests, from the Android A4
+  build (vettid-android).
+  - §6.3, §6.4: both members see the SAS: the accepting vault returns it
+    in the `connection.invite.accept` response. Each side approves its
+    own request after comparing; the accepting vault holds `hs.fin` (and
+    stores an early `hs.resp`) until its member approves; in-person
+    auto-approval skips only the inviter's approval.
+  - §6.4: an accepting vault already connected to the inviter (or with
+    an outgoing request to it) answers `exists{connection_id}` before any
+    `hs.init`; the inviter's drop of an `hs.init` from a known peer
+    (sender or `from.ik`) is specified; outgoing requests expire after
+    8 days with `connection.event{failed}`; retention of incoming
+    requests after approval (16 days).
+  - §6.4: the invitation URL `<relay>/connect#<link>` on the
+    invitation's own relay, the relay's `/connect` page rules, App Links
+    and the `vettid:` fallback; QR codes unchanged; apps accept every
+    form and pass the bare payload.
+  - §10, §10.1, §10.4: `connection.request.list`,
+    `connection.request.outgoing`, `connection.approve` / `.decline` with
+    `{connection_id}` for an outgoing request, `exp` and `introduced_by`
+    in `connection.request.pending`, `pending_id` in
+    `connection.event{added}`, the `connection.request` sync kind,
+    `exists` for `connection.invite.accept`.
+  - §10.13: `critical-secret-use.get` (an incoming request with its
+    payload); the app checks the payload against `payload_sha256`;
+    `payload`'s 4,096 bytes are before base64.
+  - §10.15: the introduced party approves its outgoing request with the
+    SAS.
+  - §15 items 16 (follow-ups and owner decisions) and 17 (SAS strength).
 
 - **0.10.0** (2026-10-04): the V5 release model (VAULT-RELEASES 0.1.0,
   owner decisions of 2026-10-04, R1–R4, O1–O10).

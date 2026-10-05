@@ -436,12 +436,23 @@ func (a *AWS) RenewLease(ctx context.Context, vaultID, instanceID string, expire
 		map[string]ddbtypes.AttributeValue{":l": leaseValue(instanceID, expires), ":me": s(instanceID)})
 }
 
-// ReleaseLease implements Tables: removes this instance's lease (and the
-// unlocked state with it).
+// ReleaseLease implements Tables: removes this instance's lease, then marks
+// the vault locked if it is still "unlocked" and nobody took a new lease
+// meanwhile (a failed condition there is not an error: another instance
+// holds it, or a lifecycle write already set the state).
 func (a *AWS) ReleaseLease(ctx context.Context, vaultID, instanceID string, now time.Time) error {
 	const cond = "attribute_exists(vault_id) AND #lease.#iid = :me"
-	return a.updateVault(ctx, vaultID, "SET #u = :u REMOVE #lease", cond, names(cond, map[string]string{"#u": "updated_at"}),
-		map[string]ddbtypes.AttributeValue{":u": s(isoNow(now)), ":me": s(instanceID)})
+	if err := a.updateVault(ctx, vaultID, "SET #u = :u REMOVE #lease", cond, names(cond, map[string]string{"#u": "updated_at"}),
+		map[string]ddbtypes.AttributeValue{":u": s(isoNow(now)), ":me": s(instanceID)}); err != nil {
+		return err
+	}
+	const lcond = "attribute_exists(vault_id) AND attribute_not_exists(#lease) AND #st = :unl"
+	err := a.updateVault(ctx, vaultID, "SET #st = :lk, #u = :u", lcond, names(lcond, map[string]string{"#u": "updated_at", "#st": "state"}),
+		map[string]ddbtypes.AttributeValue{":u": s(isoNow(now)), ":unl": s("unlocked"), ":lk": s("locked")})
+	if errors.Is(err, ErrLeaseHeld) {
+		return nil
+	}
+	return err
 }
 
 // Lifecycle implements Tables (§11.5). Only the lease holder (or anyone

@@ -277,6 +277,15 @@ type Tables struct {
 	instances map[string]parent.InstanceRow
 	slots     map[string]*SlotRow
 	ids       int
+	events    map[string][]string
+}
+
+// LifecycleEvents returns the lifecycle events the parent wrote for a
+// vault, in order (whether or not they applied).
+func (t *Tables) LifecycleEvents(vaultID string) []string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([]string(nil), t.events[vaultID]...)
 }
 
 // NewTables returns empty tables.
@@ -427,6 +436,9 @@ func (t *Tables) ReleaseLease(_ context.Context, vaultID, me string, now time.Ti
 		return parent.ErrLeaseHeld
 	}
 	r.LeaseInstance, r.LeaseExpires = "", 0
+	if r.State == "unlocked" {
+		r.State = "locked" // as parent.AWS: a vault that stopped without a lifecycle "locked"
+	}
 	return nil
 }
 
@@ -434,6 +446,10 @@ func (t *Tables) ReleaseLease(_ context.Context, vaultID, me string, now time.Ti
 func (t *Tables) Lifecycle(_ context.Context, ev parent.Lifecycle, me string, now time.Time) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if t.events == nil {
+		t.events = map[string][]string{}
+	}
+	t.events[ev.VaultID] = append(t.events[ev.VaultID], ev.Event)
 	r := t.vaults[ev.VaultID]
 	if r != nil && ev.Event == parent.EventAlarmCredentialClone {
 		// Not lease-conditioned: an alarm is never lost to a lease race.

@@ -563,6 +563,11 @@ func TestStoppedLogLevels(t *testing.T) {
 			defer h.logMu.Unlock()
 			return strings.Contains(h.logs.String(), want)
 		})
-		waitFor(t, "lease released", func() bool { r, _ := h.tables.Vault(vaultID); return r.LeaseInstance == "" })
+		// The vault stopped without a lifecycle "locked": the lease goes and
+		// the row says locked (Tables.ReleaseLease).
+		waitFor(t, "lease released, vault locked", func() bool {
+			r, _ := h.tables.Vault(vaultID)
+			return r.LeaseInstance == "" && r.State == "locked"
+		})
 	}
 }

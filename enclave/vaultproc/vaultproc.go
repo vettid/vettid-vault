@@ -97,6 +97,12 @@ func Serve(c net.Conn, p Platform) int {
 	pr.log = slog.New(&logHandler{conn: pr.conn})
 	select {
 	case code := <-pr.exit:
+		// The vault ended on its own (the member's lock, split brain, an
+		// error): deliver what it queued, its lifecycle "locked" above all,
+		// before the channel closes.
+		fctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = pr.conn.Flush(fctx)
+		cancel()
 		pr.conn.Close()
 		return code
 	case <-pr.conn.Done():

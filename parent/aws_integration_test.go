@@ -173,6 +173,28 @@ func TestAWSBackend(t *testing.T) {
 	if it["state"].(*ddbS).Value != "locked" || it["sealed_release"].(*ddbS).Value != pcr || it["lease"] != nil {
 		t.Fatalf("lifecycle: %v", it)
 	}
+	// A vault that stopped without a lifecycle "locked": the lease goes
+	// and an unlocked vault is marked locked; other states stay.
+	for _, c := range []struct{ id, state, want string }{{"v3", "unlocked", "locked"}, {"v4", "enrolling", "enrolling"}} {
+		if _, err := db.PutItem(ctx, &dynamodb.PutItemInput{TableName: &tn.Vaults, Item: map[string]ddbAttr{"vault_id": s(c.id), "user_guid": s("u"), "state": s(c.state)}}); err != nil {
+			t.Fatal(err)
+		}
+		if err := a.AcquireLease(ctx, c.id, "i1", 100, 280); err != nil {
+			t.Fatal(err)
+		}
+		if err := a.ReleaseLease(ctx, c.id, "i2", time.Now()); !errors.Is(err, ErrLeaseHeld) {
+			t.Fatalf("release of another's lease: %v", err)
+		}
+		if it, _ := memberapitest.VaultItem(ctx, db, tn.Vaults, c.id); it["state"].(*ddbS).Value != c.state || it["lease"] == nil {
+			t.Fatalf("after a refused release: %v", it)
+		}
+		if err := a.ReleaseLease(ctx, c.id, "i1", time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		if it, _ := memberapitest.VaultItem(ctx, db, tn.Vaults, c.id); it["state"].(*ddbS).Value != c.want || it["lease"] != nil {
+			t.Fatalf("released %s: %v", c.state, it)
+		}
+	}
 	// A host alarm (§11.5): alarm {kind, alarm_id, at} and alarm_pending,
 	// whoever holds the lease; nothing for a missing row.
 	if err := a.Lifecycle(ctx, Lifecycle{Event: EventAlarmCredentialClone, VaultID: "v1", Release: pcr, VaultVersion: pcr, StateVersion: 1}, "i9", time.Now()); err != nil {

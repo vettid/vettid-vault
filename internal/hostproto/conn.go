@@ -6,6 +6,7 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // ErrClosed is returned once the connection has failed or been closed.
@@ -33,6 +34,9 @@ type Conn struct {
 	cancel   context.CancelFunc
 	nextID   atomic.Uint64
 	sem      chan struct{}
+	// unwritten counts frames queued for the writer and not yet written
+	// (Flush).
+	unwritten atomic.Int64
 
 	mu      sync.Mutex
 	pending map[uint64]chan *Frame
@@ -62,8 +66,27 @@ func (x *Conn) Err() error {
 	return x.err
 }
 
-// Close ends the connection.
+// Close ends the connection. Frames still queued are dropped: Flush first
+// to deliver them.
 func (x *Conn) Close() { x.fail(ErrClosed) }
+
+// Flush waits until every frame queued so far (notifications in
+// particular: Notify only queues) has been written, the connection has
+// ended, or ctx is done.
+func (x *Conn) Flush(ctx context.Context) error {
+	t := time.NewTicker(2 * time.Millisecond)
+	defer t.Stop()
+	for x.unwritten.Load() > 0 {
+		select {
+		case <-x.done:
+			return ErrClosed
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-t.C:
+		}
+	}
+	return nil
+}
 
 func (x *Conn) fail(err error) {
 	x.once.Do(func() {
@@ -85,10 +108,12 @@ func (x *Conn) send(f *Frame) error {
 	if err != nil {
 		return err
 	}
+	x.unwritten.Add(1)
 	select {
 	case x.out <- b:
 		return nil
 	case <-x.done:
+		x.unwritten.Add(-1)
 		return ErrClosed
 	}
 }
@@ -97,7 +122,9 @@ func (x *Conn) writeLoop() {
 	for {
 		select {
 		case b := <-x.out:
-			if err := WriteChunked(x.c, b); err != nil {
+			err := WriteChunked(x.c, b)
+			x.unwritten.Add(-1)
+			if err != nil {
 				x.fail(err)
 				return
 			}

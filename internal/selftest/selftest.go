@@ -18,6 +18,9 @@ type Request struct {
 	KeyARN  string `json:"key_arn"`
 	Account string `json:"account"`
 	Region  string `json:"region"`
+	// Capacity, if set, also runs the capacity measurement (synthetic
+	// vault processes; see CapacityRequest).
+	Capacity *CapacityRequest `json:"capacity,omitempty"`
 }
 
 var (
@@ -33,8 +36,11 @@ var ErrRequest = errors.New("selftest: malformed request")
 func ParseRequest(b []byte) (*Request, error) {
 	var r Request
 	if len(b) > 4096 || json.Unmarshal(b, &r) != nil || !runIDRE.MatchString(r.RunID) || !accountRE.MatchString(r.Account) ||
-		!regionRE.MatchString(r.Region) || len(r.KeyARN) > 256 {
+		!regionRE.MatchString(r.Region) || len(r.KeyARN) > 256 || r.Capacity != nil && !r.Capacity.valid() {
 		return nil, ErrRequest
+	}
+	if r.Capacity != nil {
+		r.Capacity.Defaults()
 	}
 	return &r, nil
 }
@@ -67,6 +73,8 @@ type Report struct {
 	// certificates), included only when it did not verify, so it can be
 	// examined and kept as a test fixture.
 	AttestationDocument []byte `json:"attestation_document,omitempty"`
+	// Capacity is the capacity measurement, when requested.
+	Capacity *CapacityReport `json:"capacity,omitempty"`
 }
 
 // Add appends a check.

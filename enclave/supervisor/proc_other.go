@@ -18,3 +18,5 @@ func setLimits(int, ProcConfig) {}
 func hardenSelf() []string { return []string{"not Linux"} }
 
 func supervisorDumpable() (int, error) { return -1, errors.New("not Linux") }
+
+func selfCPUMicros() int64 { return 0 }

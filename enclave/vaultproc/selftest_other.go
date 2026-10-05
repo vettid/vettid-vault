@@ -14,3 +14,5 @@ type limitResult struct {
 }
 
 func limits() map[string]limitResult { return map[string]limitResult{} }
+
+func cpuMicros() int64 { return 0 }

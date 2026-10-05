@@ -53,3 +53,12 @@ func hardenSelf() []string {
 }
 
 func supervisorDumpable() (int, error) { return unix.PrctlRetInt(unix.PR_GET_DUMPABLE, 0, 0, 0, 0) }
+
+// selfCPUMicros is the supervisor's user and system CPU time.
+func selfCPUMicros() int64 {
+	var ru unix.Rusage
+	if unix.Getrusage(unix.RUSAGE_SELF, &ru) != nil {
+		return 0
+	}
+	return (int64(ru.Utime.Sec)+int64(ru.Stime.Sec))*1e6 + int64(ru.Utime.Usec) + int64(ru.Stime.Usec)
+}

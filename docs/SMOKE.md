@@ -64,6 +64,107 @@ Informational checks (reported, never fail the run):
 - `vault_process.open_fds`
 - `s3.conditional_delete`
 
+## Capacity measurement (W9)
+
+`vault-parent -selftest -capacity N` runs the self-test above and then
+measures how many vaults the enclave holds (VAULT-RELEASES §8.8, O6). It
+is part of the self-test: the supervisor accepts it only in an enclave
+whose parent's hello asked for the self-test, before any instance exists,
+and only a vault process started in self-test mode answers its requests.
+The release image is unchanged; the same EIF and PCR0 run it.
+
+**What runs.** Synthetic vault processes, spawned exactly like real ones
+(re-executed enclave binary, own uid 200000+slot, rlimits including
+`RLIMIT_AS` 4 GiB, seccomp, minimal environment, `GOMEMLIMIT` 512 MiB).
+Each one does what an unlocking vault does to its memory, one Argon2id at
+the release's parameters (t=3, 64 MiB) from a fixed test PIN and a fresh
+salt, then decrypts random state of `-capacity-state-kib` (default
+1024 KiB) with AES-256-GCM. At rest it holds the state and makes one
+channel round trip (a status-list request) every long-poll period (25 s),
+as an idle vault's long poll does. No member data, no KMS or S3 traffic,
+no key leaves a process; the report holds sizes, times and counts only.
+
+**Phases.**
+
+1. Unlock latency, on an otherwise empty enclave: for each level of
+   `-capacity-unlocks` (default `1,2,4`), `-capacity-unlock-samples`
+   (default 8) unlocks, that many at a time. Each sample is process
+   start + hardening + Argon2id as the supervisor sees it (no KMS or S3
+   round trip), reported as p50/p95/max, with the KDF alone.
+2. Fill: one synthetic vault after another, up to N. Before each, the
+   available memory (`MemAvailable`) must exceed the floor by one
+   unlock's peak; if not, the run waits up to `-capacity-settle`
+   (default 180 s) for the runtime to return the KDF memory (an idle Go
+   process collects every 2 minutes) and stops (`memory_floor`) if it
+   does not come back.
+3. Steady state: after `-capacity-settle`, every vault's RSS, PSS and
+   private memory, the enclave's available memory and the supervisor's
+   RSS; then idle CPU time per vault and of the supervisor over
+   `-capacity-idle` (default 60 s).
+4. Teardown: every synthetic process ends; the available memory after
+   it is reported.
+
+**Safety limits.**
+
+- The floor is 15% of the enclave's memory (the release's lock
+  threshold, §12.3), at least 256 MiB; `-capacity-floor-mib` can raise
+  it, never lower it. No process is started, and no concurrent-unlock
+  level is run, unless the available memory stays above the floor by the
+  measured unlock peak (+10%; 96 MiB until measured). The enclave is
+  never driven out of memory.
+- N is at most 1000; state at most 64 MiB; at most 4 unlock levels of
+  1–8, 64 samples each.
+- `-capacity-budget` (default 90 min) bounds the run: the fill stops
+  (`time_budget`) early enough for the steady-state windows and the
+  teardown. The parent's timeout is then the budget plus 20 minutes.
+- Whatever ends the run (N reached, floor, budget, a failed spawn, the
+  parent's timeout), every synthetic process is ended; the vault
+  processes also die with the supervisor (`PDEATHSIG`).
+- `-capacity` without `-selftest` is refused.
+
+**Report.** The JSON report gains a `capacity` section (all sizes in
+bytes, times in ms): `params`, `mem_total_bytes`, `floor_bytes`,
+`baseline_available_bytes`, `baseline_supervisor_rss_bytes`, `unlock`
+(per level: `p50_ms`, `p95_ms`, `max_ms`, `kdf_p50_ms`, `kdf_p95_ms`),
+`steps` (available memory and supervisor RSS by number of vaults),
+`held`, `stop_reason` (`max_vaults`, `memory_floor`, `time_budget`, or
+`spawn_failed`, `timeout`, `error`), `vault_rss_bytes`,
+`vault_pss_bytes`, `vault_private_bytes` (min/mean/max at steady state),
+`vault_rss_after_unlock_bytes`, `vault_peak_rss_bytes`,
+`steady_available_bytes`, `marginal_bytes_per_vault` ((baseline −
+steady available) / held), `projected_max_vaults` ((baseline − floor −
+one unlock's peak) / marginal), `idle_cpu_ms_per_vault_minute`,
+`supervisor_cpu_ms_per_minute_idle`, `torn_down`,
+`available_after_bytes`. The parent also prints `CAPACITY …` lines.
+Checks: `capacity.measured` and `capacity.torn_down` (required),
+`capacity.unlock_latency` (informational).
+
+The answer to O6 is `held` when the run stopped at `memory_floor` (the
+vaults the enclave held with room for one more unlock), and
+`projected_max_vaults` otherwise (N or the budget reached first). RSS
+counts the shared binary pages in every process; PSS and the marginal
+available memory do not.
+
+**On a staging host** (as root through SSM, executionTimeout at least
+7200 s; the same steps as the RUNBOOK's canary self-test):
+
+```sh
+systemctl stop vault-parent      # also stops the enclave
+systemctl start vault-enclave    # a fresh enclave, which dials the self-test parent
+/opt/vettid/bin/vault-parent -selftest -smoke-key-arn <vault/smoke-key-arn> -smoke-account <account> \
+  -bucket <data bucket> -region us-east-1 -capacity 400 \
+  >/root/capacity-report.json 2>/root/capacity.log
+grep -E '^(PASS|FAIL|INFO|CAPACITY) ' /root/capacity.log
+systemctl stop vault-enclave
+sleep 60                         # SQS refuses to recreate the instance queue within 60 s of its deletion
+systemctl start vault-enclave vault-parent
+```
+
+With the smoke script: `SMOKE_CAPACITY=400 run-on-host.sh run` (and
+`SMOKE_MEMORY_MIB=5120` at `prepare` for the O6 allocation).
+Off hardware, `TestSelftestCapacity` (e2e, dev enclave) runs it with
+N = 3.
+
 ## The test key and the instance role
 
 **Test key** (owner decision: a normal, deletable key). The key policy

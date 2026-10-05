@@ -55,3 +55,12 @@ func limits() map[string]limitResult {
 	}
 	return out
 }
+
+// cpuMicros is this process's user and system CPU time.
+func cpuMicros() int64 {
+	var ru unix.Rusage
+	if unix.Getrusage(unix.RUSAGE_SELF, &ru) != nil {
+		return 0
+	}
+	return (int64(ru.Utime.Sec)+int64(ru.Stime.Sec))*1e6 + int64(ru.Utime.Usec) + int64(ru.Stime.Usec)
+}

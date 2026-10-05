@@ -51,6 +51,13 @@ const (
 	// test's vault-process checks (docs/SMOKE.md); only a process started
 	// in self-test mode answers it.
 	KindSelftest hostproto.Kind = 0x42
+	// KindSelftestCapacity [op, arg] → [ok, stats JSON]: the self-test's
+	// capacity measurement (docs/SMOKE.md); op "unlock" runs one Argon2id
+	// at the release's parameters and, with arg (state bytes) > 0, holds
+	// random state of that size with an idle loop; op "stats" reports the
+	// process's memory and CPU time. Only a process started in self-test
+	// mode answers it.
+	KindSelftestCapacity hostproto.Kind = 0x43
 )
 
 // Vault → supervisor requests.

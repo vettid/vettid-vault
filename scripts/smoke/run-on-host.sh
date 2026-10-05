@@ -9,7 +9,8 @@
 #
 # run needs: SMOKE_REGION, SMOKE_BUCKET, SMOKE_KEY_ARN, SMOKE_ACCOUNT
 # (optional: SMOKE_RUN_ID, SMOKE_EXPECT_KEY_CHECK=6, SMOKE_CPUS=1,
-# SMOKE_MEMORY_MIB=3072, SMOKE_REPO). Every step is idempotent and ends
+# SMOKE_MEMORY_MIB=3072, SMOKE_REPO, SMOKE_CAPACITY=N: also the capacity
+# measurement with up to N synthetic vaults). Every step is idempotent and ends
 # with a PASS or FAIL line.
 set -euo pipefail
 
@@ -111,7 +112,7 @@ run() {
   step "vault-parent -selftest (run $run_id)"
   "$WORK/bin/vault-parent" -selftest -region "$SMOKE_REGION" -bucket "$SMOKE_BUCKET" \
     -smoke-key-arn "$SMOKE_KEY_ARN" -smoke-account "$SMOKE_ACCOUNT" -run-id "$run_id" \
-    -expect-key-check "${SMOKE_EXPECT_KEY_CHECK:-6}" -health "" \
+    -expect-key-check "${SMOKE_EXPECT_KEY_CHECK:-6}" -health "" -capacity "${SMOKE_CAPACITY:-0}" \
     >"$logs/report.json" 2>"$logs/parent.log" &
   parent_pid=$!
 
@@ -133,7 +134,7 @@ run() {
   nitro-cli terminate-enclave --all >/dev/null 2>&1 || true
 
   echo "checks:"
-  grep -E '^(PASS|FAIL|INFO) ' "$logs/parent.log" | sed 's/^/  /' || true
+  grep -E '^(PASS|FAIL|INFO|CAPACITY) ' "$logs/parent.log" | sed 's/^/  /' || true
   built_pcr0="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["pcr0"])' "$WORK/measurements.json")"
   ran_pcr0="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("report",{}).get("pcr0",""))' "$logs/report.json" 2>/dev/null || true)"
   if [ "$built_pcr0" = "$ran_pcr0" ]; then

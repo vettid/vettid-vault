@@ -501,11 +501,15 @@ func TestVaultProcessIsolation(t *testing.T) {
 	}
 }
 
-// The hardware smoke test's plumbing off hardware (docs/SMOKE.md): the
-// parent in self-test mode, the dev supervisor and a re-executed vault
-// process, against the fake KMS with a deletable-style test key whose
-// admin statement the §11.10.7 check must refuse (check 6).
-func TestSelftest(t *testing.T) {
+type selftestResult struct {
+	rep *selftest.Report
+	err error
+}
+
+// runSelftestE2E runs the self-test (parent, dev supervisor, re-executed
+// vault processes) against the fake KMS with a deletable-style test key.
+func runSelftestE2E(t *testing.T, capacity *selftest.CapacityRequest) (*hostStack, *selftest.Report) {
+	t.Helper()
 	hs := newHostStack(t)
 	arn := enclavetest.KeyARN(9)
 	admin := `{"Sid":"Admin","Effect":"Allow","Principal":{"AWS":"arn:aws:iam::` + enclavetest.KMSAccount + `:root"},"Action":"kms:*","Resource":"*"}`
@@ -514,19 +518,15 @@ func TestSelftest(t *testing.T) {
 	hs.w.KMS.AddKey(arn, good[:len(good)-2]+","+admin+"]}")
 
 	cl, el := listenTCP(t), listenTCP(t)
-	ctx := ctxT(t, 3*time.Minute)
-	type result struct {
-		rep *selftest.Report
-		err error
-	}
-	done := make(chan result, 1)
+	ctx := ctxT(t, 5*time.Minute)
+	done := make(chan selftestResult, 1)
 	go func() {
 		rep, err := parent.RunSelftest(ctx, parent.SelftestConfig{ControlListener: cl, EgressListener: el,
 			Allow: parent.DefaultAllow("relay.vettid.test", enclavetest.KMSRegion), Resolve: hs.resolve, Objects: hs.objs,
 			Creds:   parenttest.StaticCreds{AccessKeyID: "AK", SecretAccessKey: "SK", SessionToken: "ST"},
-			Request: selftest.Request{RunID: "run-1", KeyARN: arn, Account: enclavetest.KMSAccount, Region: enclavetest.KMSRegion},
+			Request: selftest.Request{RunID: "run-1", KeyARN: arn, Account: enclavetest.KMSAccount, Region: enclavetest.KMSRegion, Capacity: capacity},
 			Logger:  slog.New(slog.NewTextHandler(io.Discard, nil))})
-		done <- result{rep, err}
+		done <- selftestResult{rep, err}
 	}()
 	cfg, err := enclavetest.DevSupervisor(enclavetest.DevOptions{Release: 3, Control: cl.Addr().String(), Egress: el.Addr().String(),
 		RelayURL: hostRelay, LogLevel: slog.LevelError,
@@ -546,14 +546,61 @@ func TestSelftest(t *testing.T) {
 	if r.err != nil {
 		t.Fatal(r.err)
 	}
-	for _, c := range r.rep.Checks {
-		t.Logf("%v %v %s %s", c.OK, c.Required, c.Name, c.Detail)
+	return hs, r.rep
+}
+
+// The capacity measurement off hardware, with a tiny N (docs/SMOKE.md):
+// synthetic vault processes spawned like real ones, unlock latency,
+// steady state, teardown; the rest of the self-test still passes.
+func TestSelftestCapacity(t *testing.T) {
+	_, rep := runSelftestE2E(t, &selftest.CapacityRequest{MaxVaults: 3, StateKiB: 256, UnlockConcurrency: []int{1, 2}, UnlockSamples: 2,
+		SettleSeconds: 1, IdleSeconds: 2, StepEvery: 1})
+	c := rep.Capacity
+	if c == nil {
+		t.Fatal("no capacity section")
 	}
-	if bad := parent.SelftestVerdict(r.rep, 6); len(bad) != 0 {
+	for _, l := range c.Lines() {
+		t.Log(l)
+	}
+	if bad := parent.SelftestVerdict(rep, 6); len(bad) != 0 {
 		t.Fatalf("unexpected: %v", bad)
 	}
+	if c.Held != 3 || c.StopReason != "max_vaults" || !c.TornDown {
+		t.Fatalf("held %d stop %s torn down %v notes %v", c.Held, c.StopReason, c.TornDown, c.Notes)
+	}
+	if len(c.Unlock) != 2 || c.Unlock[0].Samples != 2 || c.Unlock[1].Samples != 2 || c.Unlock[0].KDFP50Ms <= 0 || c.Unlock[1].P50Ms < c.Unlock[1].KDFP50Ms {
+		t.Fatalf("unlock %+v", c.Unlock)
+	}
+	if c.VaultRSS.N != 3 || c.VaultRSS.Mean == 0 || c.VaultPeakRSS < 64<<20 || c.MemTotal == 0 || c.FloorBytes < c.MemTotal*15/100 ||
+		c.BaselineSupervisorRSS == 0 || len(c.Steps) < 4 {
+		t.Fatalf("report %+v", c)
+	}
+	ok := map[string]bool{}
+	for _, ch := range rep.Checks {
+		ok[ch.Name] = ch.OK
+	}
+	if !ok["capacity.measured"] || !ok["capacity.torn_down"] || !ok["capacity.unlock_latency"] {
+		t.Fatalf("checks %+v", rep.Checks)
+	}
+}
+
+// The hardware smoke test's plumbing off hardware (docs/SMOKE.md): the
+// parent in self-test mode, the dev supervisor and a re-executed vault
+// process, against the fake KMS with a deletable-style test key whose
+// admin statement the §11.10.7 check must refuse (check 6).
+func TestSelftest(t *testing.T) {
+	hs, rep := runSelftestE2E(t, nil)
+	for _, c := range rep.Checks {
+		t.Logf("%v %v %s %s", c.OK, c.Required, c.Name, c.Detail)
+	}
+	if bad := parent.SelftestVerdict(rep, 6); len(bad) != 0 {
+		t.Fatalf("unexpected: %v", bad)
+	}
+	if rep.Capacity != nil {
+		t.Fatal("capacity measured without being asked")
+	}
 	want := map[string]bool{}
-	for _, c := range r.rep.Checks {
+	for _, c := range rep.Checks {
 		want[c.Name] = c.OK
 	}
 	for _, n := range []string{"nsm.attestation_verifies", "egress.relay_healthz", "egress.relay_http2", "egress.google_status_list",
@@ -563,11 +610,11 @@ func TestSelftest(t *testing.T) {
 			t.Errorf("%s not OK", n)
 		}
 	}
-	if r.rep.PCR0 != pcr0 || r.rep.VaultPeakRSS < 64<<20 {
-		t.Fatalf("pcr0 %s, vault peak RSS %d", r.rep.PCR0, r.rep.VaultPeakRSS)
+	if rep.PCR0 != enclavetest.Spec(3, "").PCR0Hex() || rep.VaultPeakRSS < 64<<20 {
+		t.Fatalf("pcr0 %s, vault peak RSS %d", rep.PCR0, rep.VaultPeakRSS)
 	}
 	// The report carries no secret: no credentials, nothing key-sized in base64.
-	b, _ := json.Marshal(r.rep)
+	b, _ := json.Marshal(rep)
 	if strings.Contains(string(b), "SK") && strings.Contains(string(b), `"SK"`) {
 		t.Fatal("credentials in the report")
 	}

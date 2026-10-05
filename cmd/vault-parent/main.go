@@ -78,7 +78,15 @@ func main() {
 		smokeAccount = flag.String("smoke-account", "", "selftest: the test key's account")
 		runID        = flag.String("run-id", "", "selftest: S3 prefix smoke/<run-id>/ ([a-z0-9-]; default: random)")
 		expectCheck  = flag.Int("expect-key-check", 6, "selftest: the §11.10.7 check expected to refuse the test key (0: any)")
-		smokeTimeout = flag.Duration("selftest-timeout", 10*time.Minute, "selftest: overall timeout")
+		smokeTimeout = flag.Duration("selftest-timeout", 10*time.Minute, "selftest: overall timeout (with -capacity: the budget plus 20m)")
+		capVaults    = flag.Int("capacity", 0, "selftest: also measure capacity with up to N synthetic vault processes (docs/SMOKE.md; 0: off)")
+		capStateKiB  = flag.Int("capacity-state-kib", 1024, "selftest -capacity: decrypted state per synthetic vault (KiB)")
+		capFloorMiB  = flag.Int("capacity-floor-mib", 0, "selftest -capacity: raise the memory floor (MiB; never below 15% of the enclave's memory)")
+		capUnlocks   = flag.String("capacity-unlocks", "1,2,4", "selftest -capacity: concurrent-unlock levels to time")
+		capSamples   = flag.Int("capacity-unlock-samples", 8, "selftest -capacity: unlocks timed per level")
+		capSettle    = flag.Duration("capacity-settle", 180*time.Second, "selftest -capacity: wait for memory to come back at the floor, and before the steady-state measurement")
+		capIdle      = flag.Duration("capacity-idle", 60*time.Second, "selftest -capacity: idle CPU measurement window")
+		capBudget    = flag.Duration("capacity-budget", 90*time.Minute, "selftest -capacity: time for the whole measurement (the fill stops early enough)")
 		resolve      multi
 		extraAllowed multi
 	)
@@ -169,9 +177,24 @@ func main() {
 		}
 		res[h] = a
 	}
+	var capReq *selftest.CapacityRequest
+	if *capVaults != 0 {
+		if !*selftestMode {
+			fail("configuration", errors.New("-capacity runs only with -selftest"))
+		}
+		capReq, err = capacityRequest(*capVaults, *capStateKiB, *capFloorMiB, *capUnlocks, *capSamples, *capSettle, *capIdle, *capBudget)
+		if err != nil {
+			fail("configuration", err)
+		}
+		timeoutSet := false
+		flag.Visit(func(f *flag.Flag) { timeoutSet = timeoutSet || f.Name == "selftest-timeout" })
+		if !timeoutSet {
+			*smokeTimeout = *capBudget + 20*time.Minute
+		}
+	}
 	if *selftestMode {
 		os.Exit(runSelftest(log, cl, el, append(parent.DefaultAllow(*relayHost, *region), extraAllowed...), res, backend, parent.ProviderCredentials{P: cp},
-			selftest.Request{RunID: *runID, KeyARN: *smokeKey, Account: *smokeAccount, Region: *region}, *expectCheck, *smokeTimeout))
+			selftest.Request{RunID: *runID, KeyARN: *smokeKey, Account: *smokeAccount, Region: *region, Capacity: capReq}, *expectCheck, *smokeTimeout))
 	}
 	p, err := parent.New(parent.Config{
 		InstanceID: *instanceID, QueuePrefix: *queuePrefix, DLQARN: *dlq,
@@ -228,8 +251,33 @@ func runSelftest(log *slog.Logger, cl, el net.Listener, allow []string, res map[
 		}
 		fmt.Fprintf(os.Stderr, "%-4s %s %s\n", status, c.Name, c.Detail)
 	}
+	for _, l := range rep.Capacity.Lines() {
+		fmt.Fprintln(os.Stderr, l)
+	}
 	if len(bad) > 0 {
 		return 1
 	}
 	return 0
+}
+
+// capacityRequest builds the capacity measurement's parameters from the
+// flags (validated again, with the same rules, by the enclave).
+func capacityRequest(n, stateKiB, floorMiB int, unlocks string, samples int, settle, idle, budget time.Duration) (*selftest.CapacityRequest, error) {
+	c := &selftest.CapacityRequest{MaxVaults: n, StateKiB: stateKiB, FloorMiB: floorMiB, UnlockSamples: samples,
+		SettleSeconds: int(settle / time.Second), IdleSeconds: int(idle / time.Second), BudgetMinutes: int(budget / time.Minute)}
+	if settle < time.Second || idle < time.Second || budget < time.Minute {
+		return nil, errors.New("-capacity-settle and -capacity-idle must be at least 1s, -capacity-budget at least 1m")
+	}
+	for _, u := range strings.Split(unlocks, ",") {
+		v, err := strconv.Atoi(strings.TrimSpace(u))
+		if err != nil {
+			return nil, fmt.Errorf("bad -capacity-unlocks %q", unlocks)
+		}
+		c.UnlockConcurrency = append(c.UnlockConcurrency, v)
+	}
+	b, _ := json.Marshal(selftest.Request{RunID: "check", KeyARN: "x", Account: "000000000000", Region: "us-east-1", Capacity: c})
+	if _, err := selftest.ParseRequest(b); err != nil {
+		return nil, errors.New("bad -capacity parameters (docs/SMOKE.md has the limits)")
+	}
+	return c, nil
 }

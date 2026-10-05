@@ -1,6 +1,6 @@
 {
   "channel": "staging",
-  "release": 1,
+  "release": 2,
   "manifest_keys": [
     "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEok8gqeC5VcGx4KL+B5fL7UgENBXf+59RigkR0TZ0NqjiWM2VK6V1+paNoqRTBx7nXXN3L/2ehjsTb31GGVkEAw=="
   ],
@@ -9,7 +9,8 @@
   "retirement_principal": "arn:aws:iam::347272280361:role/vettid-org-vault-key-retirement",
   "retirement_window_days": 7,
   "android_signers": [
-    "bd83a0753faa6af6f8d81b9f76a04ac1a499ea6c7f46c6f1113d4b5787ecb2c4"
+    "bd83a0753faa6af6f8d81b9f76a04ac1a499ea6c7f46c6f1113d4b5787ecb2c4",
+    "2fed27b72746797a931fd414ff3dac4cd969fa0c2ff36209ae05365f580014f2"
   ],
   "relay_url": "https://relay.vettid.org"
 }

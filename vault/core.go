@@ -194,7 +194,9 @@ func (m *Manager) hPairReject(_ context.Context, s *Session, in *envelope.Inner)
 	r, waiting := m.pairingRequest(pid)
 	switch {
 	case r != nil && !m.isTransferRequest(r.ID):
+		// After hs.fin the device is told first (§6.7, 0.10.5).
 		pid = r.InviteID
+		m.sendEnded(r, devicePairRejectedType, r.Expires, s.now)
 		m.dropRequest(r, s.now)
 	case waiting != "" && !m.isTransferRequest(waiting):
 		pid = m.st.Awaiting[waiting].InviteID

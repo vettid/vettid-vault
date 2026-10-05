@@ -215,7 +215,7 @@ func (m *Manager) hBlockAdd(_ context.Context, s *Session, in *envelope.Inner) (
 		if m.blockedIdentity(b.IK, nil) {
 			return nil, NewError("exists", "")
 		}
-		m.dropRequest(r, s.now) // declined (§10.4)
+		m.declineRequest(r, s.now) // declined, connection.declined sent (§10.4, 0.10.5)
 		m.notifyDevices("sync.event", m.requestSync(r, requestStateDeclined), s.peer.ID, s.now)
 	}
 	m.st.Blocks[b.ID] = b

@@ -267,6 +267,11 @@ func (m *Manager) abortTransfer(reason string, now time.Time) {
 	if t == nil {
 		return
 	}
+	if r := m.st.Requests[t.Inbound]; r != nil && reason == "rejected" {
+		// The holder's rejection after the new app's hs.fin is sent to it
+		// first (§6.7, 0.10.5); an expiry, alarm or recovery sends nothing.
+		m.sendEnded(r, devicePairRejectedType, r.Expires, now)
+	}
 	if inv := m.st.Invites[t.ID]; inv != nil {
 		if inv.OpenJTI != "" {
 			m.denyJTI(inv.OpenJTI, now)

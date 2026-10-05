@@ -5,6 +5,7 @@ package e2e
 import (
 	"context"
 	"crypto/ed25519"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -217,7 +218,8 @@ func appCount(t *testing.T, d *client.Device) (apps int, body string) {
 // rotated) and the old app is removed at once; desktops stay. Since
 // 0.10.3 the approval completes the transfer (the new app's handshake ran
 // first). Aborts: a rejection, also after failed approvals, leaves the old
-// app as it was.
+// app as it was, and the new app learns it from device.pair.rejected
+// (0.10.5).
 func TestTransfer(t *testing.T) {
 	aw := newACWorld(t)
 	a := aw.newApp("member-tr", enclavetest.NewAndroidAttester(0x81, enclavetest.AndroidOptions{}))
@@ -249,6 +251,10 @@ func TestTransfer(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitEvent(t, desk, "sync.event", has("state", "aborted"))
+	// After its hs.fin the new app is told (device.pair.rejected, 0.10.5).
+	if err := c.dev.AwaitPaired(ctxT(t, 30*time.Second)); !errors.Is(err, client.ErrPairRejected) {
+		t.Fatalf("new app after a rejection: %v", err)
+	}
 	if _, err := a.dev.CredentialUnlock(ctx, credPW); err != nil {
 		t.Fatalf("old app after a rejection: %v", err)
 	}
@@ -273,10 +279,8 @@ func TestTransfer(t *testing.T) {
 	if err := a.dev.TransferReject(ctx, id); err != nil {
 		t.Fatal(err)
 	}
-	short, cancel := context.WithTimeout(context.Background(), 4*time.Second)
-	defer cancel()
-	if err := c.dev.AwaitPaired(short); err == nil {
-		t.Fatal("the aborted new app paired")
+	if err := c.dev.AwaitPaired(ctxT(t, 30*time.Second)); !errors.Is(err, client.ErrPairRejected) {
+		t.Fatalf("the aborted new app: %v", err)
 	}
 	if _, err := a.dev.CredentialUnlock(ctx, credPW); err != nil {
 		t.Fatalf("old app after the abort: %v", err)

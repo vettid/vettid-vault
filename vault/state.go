@@ -320,14 +320,18 @@ type Request struct {
 	SAS   string               `json:"sas"`
 	// Approved: our member approved (connection.approved sent);
 	// PeerApproved: the peer's connection.approved arrived.
-	Approved     bool      `json:"approved,omitempty"`
-	PeerApproved bool      `json:"peer_approved,omitempty"`
-	InviteID     string    `json:"invite_id,omitempty"` // invite_id or pairing_id
-	Remote       bool      `json:"remote,omitempty"`
-	Name         string    `json:"name,omitempty"` // outgoing: the bundle's hint.name
-	IntroBy      string    `json:"intro_by,omitempty"`
-	Created      time.Time `json:"created"`
-	Expires      time.Time `json:"expires"`
+	Approved     bool `json:"approved,omitempty"`
+	PeerApproved bool `json:"peer_approved,omitempty"`
+	// PeerRequest keeps the peer's request token once its
+	// connection.approved replaced Peer.Standing: connection.declined
+	// still travels on it (§6.4, 0.10.5).
+	PeerRequest *HeldToken `json:"peer_request,omitempty"`
+	InviteID    string     `json:"invite_id,omitempty"` // invite_id or pairing_id
+	Remote      bool       `json:"remote,omitempty"`
+	Name        string     `json:"name,omitempty"` // outgoing: the bundle's hint.name
+	IntroBy     string     `json:"intro_by,omitempty"`
+	Created     time.Time  `json:"created"`
+	Expires     time.Time  `json:"expires"`
 }
 
 // CachedResponse is a response kept for 24 h so a duplicate request gets
@@ -362,7 +366,10 @@ type OutboxEntry struct {
 	Created    time.Time `json:"created"`
 	Attempts   int       `json:"attempts"`
 	NotBefore  time.Time `json:"not_before,omitempty"`
-	Done       bool      `json:"done,omitempty"` // removed at the next flush
+	// NotAfter ends the retries of a best-effort deposit (0.10.5:
+	// connection.declined, device.pair.rejected); zero: no limit.
+	NotAfter time.Time `json:"not_after,omitempty"`
+	Done     bool      `json:"done,omitempty"` // removed at the next flush
 }
 
 // AuditEntry records a dropped or refused message (§6.3, §6.6, §7.3).

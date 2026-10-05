@@ -31,11 +31,16 @@ import (
 	"github.com/vettid/vettid-vault/vms/suite"
 )
 
+const devicePairRejected = "device.pair.rejected"
+
 // Errors.
 var (
 	ErrNotPaired = errors.New("client: not paired with a vault")
 	ErrProtocol  = errors.New("client: unexpected message from the vault")
 	ErrToken     = errors.New("client: token invalid")
+	// ErrPairRejected: the owner rejected this pairing or transfer on the
+	// phone (device.pair.rejected, VAULT-MESSAGING §6.7, 0.10.5).
+	ErrPairRejected = errors.New("client: pairing rejected on the phone")
 )
 
 // Config configures a Device.
@@ -429,13 +434,20 @@ func (d *Device) startPairing(ctx context.Context, link string, att Attester) er
 }
 
 // AwaitPaired waits for device.paired, which the vault sends at the
-// owner's approval with the device's standing token (§6.7, 0.10.3).
+// owner's approval with the device's standing token (§6.7, 0.10.3), or
+// device.pair.rejected, the owner's rejection (0.10.5), which ends the
+// wait with ErrPairRejected.
 func (d *Device) AwaitPaired(ctx context.Context) error { return d.awaitPaired(ctx) }
 
 func (d *Device) awaitPaired(ctx context.Context) error {
-	in, err := d.waitFor(ctx, func(in *envelope.Inner) bool { return in.Type == "device.paired" })
+	in, err := d.waitFor(ctx, func(in *envelope.Inner) bool {
+		return in.Type == "device.paired" || in.Type == devicePairRejected
+	})
 	if err != nil {
 		return err
+	}
+	if in.Type == devicePairRejected {
+		return ErrPairRejected
 	}
 	o, err := strictjson.ParseObject(in.Body)
 	if err != nil {
@@ -686,6 +698,15 @@ func (d *Device) handle(ctx context.Context, m relayclient.Message) {
 		return
 	}
 	switch in.Type {
+	case devicePairRejected:
+		// §6.7 (0.10.5): only while pairing, under the handshake's epoch.
+		// The device stops waiting and drops the handshake state and the
+		// request token; it sends nothing back (the token is denylisted).
+		if in.Re != "" || d.st.DeviceID != "" {
+			return
+		}
+		d.keyring = &handshake.Keyring{}
+		d.st.Vault, d.sas = nil, ""
 	case "device.paired":
 		// The device's standing token (§10.3, 0.10.3) replaces the request
 		// token of the pairing's hs.resp, before maintain() looks at it.

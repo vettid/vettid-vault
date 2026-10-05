@@ -44,7 +44,7 @@ var commands = map[string]command{
 	"init":        {"init -role app|desktop|agent -name NAME -relay URL", cmdInit},
 	"open-token":  {"open-token            print a 10-minute open token for this device's mailbox", cmdOpenToken},
 	"enroll-wait": {"enroll-wait           wait for vault.enrolled, then run the first-app handshake", cmdEnrollWait},
-	"pair":        {"pair -link LINK       pair from a QR/link; prints the SAS, waits for approval", cmdPair},
+	"pair":        {"pair -link LINK       pair from a QR/link; prints the SAS, waits for approval (or the rejection)", cmdPair},
 	"request":     {"request TYPE [JSON]   send a request and print the response", cmdRequest},
 	"send":        {"send TYPE [JSON]      send a message without waiting", cmdSend},
 	"events":      {"events [-wait 5s]     collect and print events", cmdEvents},
@@ -196,6 +196,14 @@ func cmdPair(ctx context.Context, g *globals, args []string) error {
 		return err
 	}
 	if err := d.AwaitPaired(ctx); err != nil {
+		if errors.Is(err, client.ErrPairRejected) {
+			// device.pair.rejected (§6.7, 0.10.5): the handshake state is
+			// dropped; keep that, and stop waiting.
+			fmt.Println("rejected on your phone")
+			if serr := save(g, d); serr != nil {
+				return serr
+			}
+		}
 		return err
 	}
 	fmt.Println("paired; device", d.DeviceID())

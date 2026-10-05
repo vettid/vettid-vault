@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"strconv"
 	"sync"
 	"time"
@@ -97,6 +98,13 @@ type Queues struct {
 	Visibility time.Duration
 	// Base is the URL prefix (default http://sqs.test/000000000000/).
 	Base string
+	// DeletedRecently, if set, refuses to recreate a queue for that long
+	// after its deletion, as SQS does for 60 s
+	// (parent.ErrQueueDeletedRecently).
+	DeletedRecently time.Duration
+	// CreateRefusals counts the creates refused that way.
+	CreateRefusals int
+	deleted        map[string]time.Time
 }
 
 type queue struct {
@@ -120,6 +128,10 @@ func (q *Queues) Create(_ context.Context, name string) (string, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	u := q.Base + name
+	if at, ok := q.deleted[u]; ok && time.Since(at) < q.DeletedRecently {
+		q.CreateRefusals++
+		return "", fmt.Errorf("%w: sqs create: AWS.SimpleQueueService.QueueDeletedRecently", parent.ErrQueueDeletedRecently)
+	}
 	if q.queues[u] == nil {
 		q.queues[u] = &queue{notify: make(chan struct{}, 1)}
 		q.created[u] = time.Now()
@@ -201,6 +213,10 @@ func (q *Queues) Destroy(_ context.Context, url string) error {
 	defer q.mu.Unlock()
 	delete(q.queues, url)
 	delete(q.created, url)
+	if q.deleted == nil {
+		q.deleted = map[string]time.Time{}
+	}
+	q.deleted[url] = time.Now()
 	return nil
 }
 

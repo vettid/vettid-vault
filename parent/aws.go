@@ -222,9 +222,27 @@ func (a *AWS) Create(ctx context.Context, name string) (string, error) {
 	}
 	out, err := a.sqs.CreateQueue(ctx, &sqs.CreateQueueInput{QueueName: &name, Attributes: attrs})
 	if err != nil {
+		if queueDeletedRecently(err) {
+			return "", fmt.Errorf("%w: %w", ErrQueueDeletedRecently, errClass("sqs create", err))
+		}
 		return "", errClass("sqs create", err)
 	}
 	return *out.QueueUrl, nil
+}
+
+// queueDeletedRecently reports SQS's refusal to recreate a queue within
+// 60 s of its deletion (the JSON protocol's code, or the query-compatible
+// one).
+func queueDeletedRecently(err error) bool {
+	var qd *sqstypes.QueueDeletedRecently
+	if errors.As(err, &qd) {
+		return true
+	}
+	switch apiCode(err) {
+	case "QueueDeletedRecently", "AWS.SimpleQueueService.QueueDeletedRecently":
+		return true
+	}
+	return false
 }
 
 // Receive implements Queues (long poll, up to 10 messages).

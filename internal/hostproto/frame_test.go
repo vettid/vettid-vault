@@ -150,3 +150,14 @@ func FuzzParse(f *testing.F) {
 		}
 	})
 }
+
+func TestStopExpected(t *testing.T) {
+	for r, want := range map[string]bool{
+		StopLocked: true, "moved": true, "deleted": true, "idle": true,
+		StopSplitBrain: false, StopError: false, "": false, "LOCKED": false, "crashed": false,
+	} {
+		if StopExpected(r) != want {
+			t.Errorf("%q: %v", r, !want)
+		}
+	}
+}

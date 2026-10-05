@@ -63,7 +63,8 @@ func TestBlockRefusesPeer(t *testing.T) {
 	// identity's hs.init (audited), and asks nobody.
 	inv := mustOK(t, a.request(a.app, "connection.invite.create", `{"ttl_seconds":3600}`))
 	link, _ := inv.String("link")
-	mustOK(t, b.request(b.app, "connection.invite.accept", `{"link":"`+link+`"}`))
+	refused := mustOK(t, b.request(b.app, "connection.invite.accept", `{"link":"`+link+`"}`))
+	refusedID, _ := refused.String("connection_id")
 	deadline := time.Now().Add(30 * time.Second)
 	for {
 		au, err := a.app.AuditList(ctx, map[string]any{"kinds": []string{"drop.blocked"}}, false)
@@ -95,6 +96,20 @@ func TestBlockRefusesPeer(t *testing.T) {
 	if err := a.app.BlockRemove(ctx, blockID); err != nil {
 		t.Fatal(err)
 	}
+	// B's refused request is still outgoing (waiting; it would fail after
+	// 8 days): a new link from A is answered exists with its id, before
+	// any hs.init (0.10.2), until B's member declines it.
+	inv = mustOK(t, a.request(a.app, "connection.invite.create", `{"ttl_seconds":600}`))
+	link, _ = inv.String("link")
+	ex := b.request(b.app, "connection.invite.accept", `{"link":"`+link+`"}`)
+	if ex.ErrorCode() != "exists" || field(t, ex.Body(), "connection_id") != refusedID {
+		t.Fatalf("accept with an outgoing request: %q %s", ex.ErrorCode(), ex.Body())
+	}
+	rl := mustOK(t, b.request(b.app, "connection.request.list", `{}`))
+	if !strings.Contains(string(rl["outgoing"]), refusedID) || !strings.Contains(string(rl["outgoing"]), `"state":"waiting"`) {
+		t.Fatalf("request list: %s", rl["outgoing"])
+	}
+	mustOK(t, b.request(b.app, "connection.decline", `{"connection_id":"`+refusedID+`"}`))
 	_, bConn2 := connect(t, a, b, 600)
 	id = sendText(t, b, b.app, bConn2, "after unblock")
 	waitEvent(t, a.app, "message.new", has("message_id", id))

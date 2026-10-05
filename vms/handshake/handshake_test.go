@@ -1,6 +1,7 @@
 package handshake
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -100,7 +101,7 @@ func TestMustActivateOnlyAfterSigI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := resp.HandleFin(res.Fin, i.relayPK(), t0); !errors.Is(err, ErrSigFin) {
+	if _, err := resp.HandleFin(res.Fin, i.relayPK(), t0); !errors.Is(err, ErrSigFin) {
 		t.Fatalf("err = %v, want ErrSigFin", err)
 	}
 	// Still pending (not activated, not cancelled by the bad message).
@@ -138,7 +139,7 @@ func TestMustCheckCollectSender(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := resp2.HandleFin(res2.Fin, mallory.relayPK(), t0); !errors.Is(err, ErrSender) {
+	if _, err := resp2.HandleFin(res2.Fin, mallory.relayPK(), t0); !errors.Is(err, ErrSender) {
 		t.Fatalf("hs.fin sender: err = %v, want ErrSender", err)
 	}
 	_ = resp
@@ -232,22 +233,113 @@ func TestMustNotTrialDecrypt(t *testing.T) {
 	}
 }
 
-// §6.3: sas depends only on hs.init; both sides compute the same value,
-// six digits.
+// §6.3 (0.10.3): the SAS exists only after hs.resp (initiator) and hs.fin
+// (responder); both compute the same six digits from prk, th and both
+// nonces.
 func TestSASBothSides(t *testing.T) {
 	i, r := newParty(t, 0x10), newParty(t, 0x20)
-	ini, _ := NewInitiator(initCfg(i, r, PurposeApp))
+	for _, purpose := range []Purpose{PurposeApp, PurposeDesktop, PurposeAgent, PurposeConnection} {
+		ini, _ := NewInitiator(initCfg(i, r, purpose))
+		if ini.Body().SASCommit == nil {
+			t.Fatalf("%s: no sas_commit", purpose)
+		}
+		p, err := OpenInit(ini.Envelope(), r.lookup, t0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, respEnv, err := p.Respond(respCfg(i, r, purpose))
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := ini.HandleResp(respEnv, r.relayPK(), t0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fr, err := resp.HandleFin(res.Fin, i.relayPK(), t0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(res.SAS) != 6 || res.SAS != fr.SAS {
+			t.Fatalf("%s: SAS %q vs %q", purpose, res.SAS, fr.SAS)
+		}
+		for _, c := range res.SAS {
+			if c < '0' || c > '9' {
+				t.Fatal("non-digit SAS")
+			}
+		}
+		// One hs.resp per hs.init: n_I is revealed, the state is gone.
+		if _, err := ini.HandleResp(respEnv, r.relayPK(), t0); !errors.Is(err, ErrDone) {
+			t.Fatalf("second hs.resp: %v", err)
+		}
+	}
+}
+
+// §6.3 (0.10.3): the SAS depends on both nonces.
+func TestSASDependsOnBothNonces(t *testing.T) {
+	prk := bytes.Repeat([]byte{1}, 32)
+	var th [32]byte
+	a := bytes.Repeat([]byte{0x16}, 32)
+	b := bytes.Repeat([]byte{0x17}, 32)
+	s1, _ := SAS(prk, th, a, b)
+	s2, _ := SAS(prk, th, b, a)
+	s3, _ := SAS(prk, th, a, a)
+	if s1 == s2 && s1 == s3 {
+		t.Fatal("SAS does not depend on the nonces")
+	}
+	if _, err := SAS(prk, th, a[:31], b); err == nil {
+		t.Fatal("short nonce accepted")
+	}
+	c := SASCommit(a)
+	if !CheckSASCommit(c[:], a) || CheckSASCommit(c[:], b) || CheckSASCommit(c[:], nil) {
+		t.Fatal("commitment check")
+	}
+}
+
+// §6.3 (0.10.3): an hs.fin whose sig_I verifies but whose n_I does not
+// open sas_commit aborts the handshake and destroys its state.
+func TestSASCommitMismatchAborts(t *testing.T) {
+	i, r := newParty(t, 0x10), newParty(t, 0x20)
+	ini, _ := NewInitiator(initCfg(i, r, PurposeConnection))
 	p, err := OpenInit(ini.Envelope(), r.lookup, t0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(ini.SAS()) != 6 || ini.SAS() != p.SAS() {
-		t.Fatalf("SAS %q vs %q", ini.SAS(), p.SAS())
+	resp, respEnv, err := p.Respond(respCfg(i, r, PurposeConnection))
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, c := range ini.SAS() {
-		if c < '0' || c > '9' {
-			t.Fatal("non-digit SAS")
-		}
+	ini.nI = bytes.Repeat([]byte{0x99}, 32) // a nonce other than the committed one
+	res, err := ini.HandleResp(respEnv, r.relayPK(), t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resp.HandleFin(res.Fin, i.relayPK(), t0); !errors.Is(err, ErrSASCommit) {
+		t.Fatalf("err = %v, want ErrSASCommit", err)
+	}
+	if !resp.done {
+		t.Fatal("responder kept the handshake after a commitment mismatch")
+	}
+	if _, err := resp.HandleFin(res.Fin, i.relayPK(), t0); !errors.Is(err, ErrDone) {
+		t.Fatalf("after abort: %v", err)
+	}
+}
+
+// §6.2 (0.10.3): rekeys and reconnects carry no commitment fields and
+// have no SAS.
+func TestNoSASForRekeyAndReconnect(t *testing.T) {
+	if PurposeRekey.HasSAS() || PurposeReconnect.HasSAS() {
+		t.Fatal("rekey or reconnect has a SAS")
+	}
+	in := sampleInit(t, PurposeReconnect)
+	c := SASCommit(make([]byte, 32))
+	in.SASCommit = c[:]
+	if _, err := in.Marshal(); err == nil {
+		t.Fatal("sas_commit accepted for a reconnect")
+	}
+	in = sampleInit(t, PurposeConnection)
+	in.SASCommit = nil
+	if _, err := in.Marshal(); err == nil {
+		t.Fatal("connection hs.init without sas_commit accepted")
 	}
 }
 

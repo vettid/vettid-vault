@@ -28,9 +28,12 @@ type State struct {
 	Issued     []IssuedToken          `json:"issued"`
 	DeniedSubs []string               `json:"denied_subs,omitempty"` // relay keys we revoked (§7.4); refused for re-pairing (§6.7)
 	Invites    map[string]*Invite     `json:"invites"`
-	Inbound    map[string]*InboundHS  `json:"inbound"`  // hs.init awaiting approval
 	Awaiting   map[string]*AwaitingHS `json:"awaiting"` // our hs.resp sent, awaiting hs.fin
 	Outgoing   map[string]*OutgoingHS `json:"outgoing"` // our hs.init sent, awaiting hs.resp
+	// Requests are connection requests, pairings and transfers whose
+	// handshake is complete and which await approval (§6.4, §6.7,
+	// 0.10.3), by pending_id (incoming) or connection_id (outgoing).
+	Requests map[string]*Request `json:"requests,omitempty"`
 
 	SeenMsgIDs map[string]time.Time      `json:"seen_msg_ids"` // relay msg_id dedupe (16 d)
 	SeenInner  map[string]time.Time      `json:"seen_inner"`   // principal|inner id (16 d)
@@ -214,6 +217,9 @@ const (
 	TokStanding  = "standing"
 	TokReconnect = "reconnect"
 	TokOpen      = "open"
+	// TokRequest covers only the rest of a handshake that awaits
+	// approval and connection.approved (§7.1, 0.10.3).
+	TokRequest = "request"
 )
 
 // IssuedToken is one entry of the issued-token registry (§7, §3.3).
@@ -252,21 +258,6 @@ type Invite struct {
 	Transfer bool `json:"transfer,omitempty"`
 }
 
-// InboundHS is an hs.init awaiting the owner's approval.
-type InboundHS struct {
-	// Attestation is the verified binding of a pairing app (§6.7).
-	Attestation json.RawMessage        `json:"attestation,omitempty"`
-	ID          string                 `json:"id"`
-	InviteID    string                 `json:"invite_id"`
-	Kind        string                 `json:"kind"`
-	Remote      bool                   `json:"remote"`
-	Sender      []byte                 `json:"sender"`
-	Created     time.Time              `json:"created"`
-	Expires     time.Time              `json:"expires"`
-	Pending     handshake.PendingState `json:"pending"`
-	IntroBy     string                 `json:"intro_by,omitempty"` // §10.15
-}
-
 // AwaitingHS is a handshake where the vault sent hs.resp and awaits hs.fin.
 // Peer is the record that becomes active (new principals) or the existing
 // peer id (rekey, reconnect).
@@ -279,6 +270,15 @@ type AwaitingHS struct {
 	Resp    handshake.ResponderState `json:"resp"`
 	// Tokens minted for the peer in hs.resp, recorded on activation.
 	Issued []IssuedToken `json:"issued,omitempty"`
+
+	// First contact (0.10.3): the invitation or pairing the hs.init used.
+	// Direct handshakes (enrollment, recovery) are answered without
+	// approval and active at hs.fin; the others become a Request.
+	InviteID string    `json:"invite_id,omitempty"`
+	Remote   bool      `json:"remote,omitempty"`
+	IntroBy  string    `json:"intro_by,omitempty"` // §10.15
+	Expires  time.Time `json:"expires,omitempty"`
+	Direct   bool      `json:"direct,omitempty"`
 }
 
 // OutgoingHS is a handshake the vault initiated, awaiting hs.resp.
@@ -292,6 +292,42 @@ type OutgoingHS struct {
 	Created time.Time                `json:"created"`
 	Init    handshake.InitiatorState `json:"init"`
 	Issued  []IssuedToken            `json:"issued,omitempty"`
+
+	// An outgoing connection request in state waiting (§6.4, §10.4):
+	// what the accept learned from the bundle, and when it ends.
+	Remote  bool      `json:"remote,omitempty"`
+	Name    string    `json:"name,omitempty"`
+	IntroBy string    `json:"intro_by,omitempty"`
+	Expires time.Time `json:"expires,omitempty"`
+}
+
+// Request directions.
+const (
+	ReqIn  = "in"  // the inviting vault's request (pending_id), or a pairing
+	ReqOut = "out" // the accepting vault's request (connection_id)
+)
+
+// Request is a connection request, pairing or transfer whose handshake
+// has completed: the epoch is established but not active until approval
+// (§6.3, §6.4, §6.7, 0.10.3).
+type Request struct {
+	ID  string `json:"id"`
+	Dir string `json:"dir"`
+	// Peer is the principal's record. Until the peer's connection.approved
+	// arrives, Standing holds the request token the peer issued.
+	Peer  *Peer                `json:"peer"`
+	Epoch handshake.EpochState `json:"epoch"`
+	SAS   string               `json:"sas"`
+	// Approved: our member approved (connection.approved sent);
+	// PeerApproved: the peer's connection.approved arrived.
+	Approved     bool      `json:"approved,omitempty"`
+	PeerApproved bool      `json:"peer_approved,omitempty"`
+	InviteID     string    `json:"invite_id,omitempty"` // invite_id or pairing_id
+	Remote       bool      `json:"remote,omitempty"`
+	Name         string    `json:"name,omitempty"` // outgoing: the bundle's hint.name
+	IntroBy      string    `json:"intro_by,omitempty"`
+	Created      time.Time `json:"created"`
+	Expires      time.Time `json:"expires"`
 }
 
 // CachedResponse is a response kept for 24 h so a duplicate request gets

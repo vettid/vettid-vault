@@ -55,10 +55,12 @@ type TypeSpec struct {
 	AgentPolicy bool
 }
 
-// HandlerError is an error response (§5.3 `error`).
+// HandlerError is an error response (§5.3 `error`). Body, if set, is the
+// response body (e.g. exists{connection_id}, §10.1).
 type HandlerError struct {
 	Code    string
 	Message string
+	Body    json.RawMessage
 }
 
 func (e *HandlerError) Error() string { return "vault: " + e.Code }
@@ -163,8 +165,9 @@ type Host interface {
 	// request marked introduced_by.
 	CreateIntroInvite(ctx context.Context, expectIK []byte, introBy string, now time.Time) (inviteID, link string, err error)
 	// AcceptInviteLink accepts a connection invitation link as
-	// connection.invite.accept does and returns the new connection's id.
-	AcceptInviteLink(ctx context.Context, link string, now time.Time) (string, error)
+	// connection.invite.accept does and returns the new connection's id;
+	// introBy is the introducer's connection id (§10.15), or "".
+	AcceptInviteLink(ctx context.Context, link, introBy string, now time.Time) (string, error)
 	// CancelInvite revokes an outstanding invitation (§6.4).
 	CancelInvite(id string, now time.Time)
 	// SignLeashStatus signs a LEASH status statement with the vault's
@@ -292,9 +295,15 @@ func (s *Session) CreateIntroInvite(expectIK []byte, introBy string) (string, st
 	return s.host.CreateIntroInvite(s.Context(), expectIK, introBy, s.now)
 }
 
-// AcceptInviteLink accepts a connection invitation link (§6.4).
+// AcceptInviteLink accepts a connection invitation link (§6.4). Sent by a
+// connection (an introduction's link, §10.15), the outgoing request is
+// marked introduced_by that connection.
 func (s *Session) AcceptInviteLink(link string) (string, error) {
-	return s.host.AcceptInviteLink(s.Context(), link, s.now)
+	by := ""
+	if s.from.Kind == KindConnection {
+		by = s.from.ID
+	}
+	return s.host.AcceptInviteLink(s.Context(), link, by, s.now)
 }
 
 // CancelInvite revokes an outstanding invitation.

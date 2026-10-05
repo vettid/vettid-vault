@@ -93,6 +93,16 @@ func (e *Epoch) RecvKid() suite.Kid { return e.recvKid }
 // Created returns the activation time.
 func (e *Epoch) Created() time.Time { return e.created }
 
+// MarkActivated sets the activation time to now and restarts the epoch's
+// message counts: a new connection's or device's first epoch counts from
+// its activation at approval, not from hs.fin (§6.5, 0.10.3).
+func (e *Epoch) MarkActivated(now time.Time) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.created = now
+	e.sent, e.received = 0, 0
+}
+
 // Counts returns the numbers of messages sent and received.
 func (e *Epoch) Counts() (sent, received uint64) {
 	e.mu.Lock()

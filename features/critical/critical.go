@@ -139,6 +139,7 @@ func (f *Feature) Types() []vault.TypeSpec {
 		{Type: "critical-secret-use.approve", Request: true, From: apps},
 		{Type: "critical-secret-use.deny", Request: true, From: owners},
 		{Type: "critical-secret-use.list", Request: true, From: owners},
+		{Type: "critical-secret-use.get", Request: true, From: owners},
 		{Type: "critical-secret.use", From: conns},
 		{Type: "critical-secret.result", From: conns},
 	}
@@ -315,6 +316,18 @@ func (f *Feature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner
 			return nil, errBad
 		}
 		return f.list(), nil
+	case "critical-secret-use.get":
+		// Showing a request again (§10.13, 0.10.2): the pending body,
+		// payload included, of an incoming request still open.
+		id, err := RequestID(in.Body)
+		if err != nil {
+			return nil, err
+		}
+		r := f.d.In[id]
+		if r == nil {
+			return nil, errNotFound
+		}
+		return pendingBody(r), nil
 	case "critical-secret.result":
 		return nil, f.result(s, in.Body)
 	}
@@ -428,16 +441,22 @@ func (f *Feature) incoming(s *vault.Session, body []byte) error {
 	}
 	r.Name, r.Label = name, label
 	f.d.In[r.ID] = r
+	s.NotifyAllDevices("critical-secret-use.pending", pendingBody(r))
+	s.Record(vault.Activity{Kind: "critical-secret.use.request", ConnectionID: conn, Ref: r.ID, Feed: true, Priority: "high"})
+	return nil
+}
+
+// pendingBody is the critical-secret-use.pending body (§10.13), which
+// critical-secret-use.get returns too.
+func pendingBody(r *Incoming) []byte {
 	h := sha256.Sum256(r.Payload)
-	b := strictjson.NewBuilder().String("request_id", r.ID).String("connection_id", conn).String("item_id", r.ItemID).
+	b := strictjson.NewBuilder().String("request_id", r.ID).String("connection_id", r.Conn).String("item_id", r.ItemID).
 		String("field_id", r.FieldID).String("name", r.Name).String("label", r.Label).String("operation", r.Operation).
 		Base64("payload", r.Payload).Base64("payload_sha256", h[:])
 	if r.Context != "" {
 		b.String("context", r.Context)
 	}
-	s.NotifyAllDevices("critical-secret-use.pending", b.String("exp", envelope.FormatTS(r.Exp)).Bytes())
-	s.Record(vault.Activity{Kind: "critical-secret.use.request", ConnectionID: conn, Ref: r.ID, Feed: true, Priority: "high"})
-	return nil
+	return b.String("exp", envelope.FormatTS(r.Exp)).Bytes()
 }
 
 // approve: the member's consent with the password, for this use only

@@ -219,7 +219,7 @@ func TestSignLabels(t *testing.T) {
 // §13.4: every label embeds the suite number.
 func TestLabelsEmbedSuite(t *testing.T) {
 	for _, l := range []string{LabelKid, InfoSealed, LabelHsKs, LabelHsKe, LabelTh1, LabelTh, LabelSession, LabelI2R,
-		LabelR2I, LabelKidI2R, LabelKidR2I, LabelRK, LabelEpoch, LabelSigResp, LabelSigFin, LabelSAS, LabelBundle,
+		LabelR2I, LabelKidI2R, LabelKidR2I, LabelRK, LabelEpoch, LabelSigResp, LabelSigFin, LabelSAS, LabelSASCommit, LabelBundle,
 		LabelETK, LabelVault, LabelDevatt, LabelUnlock, InfoCall, LabelCallKey, LabelRotate, LabelBlob} {
 		if !strings.HasPrefix(l, labelPrefix) || len(l) == len(labelPrefix) {
 			t.Errorf("label %q", l)

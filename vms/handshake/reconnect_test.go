@@ -76,8 +76,11 @@ func reconnect(t *testing.T, i, r *party, rc reconnectCase, rotI, rotR []*Rotati
 	if err != nil {
 		return nil, nil, err
 	}
-	er, _, err := resp.HandleFin(res.Fin, i.relayPK(), t0)
-	return res, er, err
+	fr, err := resp.HandleFin(res.Fin, i.relayPK(), t0)
+	if err != nil {
+		return nil, nil, err
+	}
+	return res, fr.Epoch, nil
 }
 
 // §6.6: a reconnect needs no SAS when identities match; both sides follow

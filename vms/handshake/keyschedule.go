@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"crypto/hkdf"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/binary"
 	"fmt"
 
@@ -93,15 +94,31 @@ func (s *Schedule) Destroy() {
 	}
 }
 
-// SAS computes the short authentication string (§6.3):
-// uint32be(HKDF-SHA-256(ikm = K_s, salt = "vettid/vms/2/sas", info = th1,
-// L = 4)) mod 1,000,000, as 6 zero-padded digits. It depends only on
-// hs.init, so both sides can show it before hs.resp is sent.
-func SAS(ks []byte, th1 [32]byte) (string, error) {
-	if len(ks) != suite.KeySize {
+// SASCommit returns the commitment to the initiator's SAS nonce (§6.3,
+// 0.10.3): SHA-256("vettid/vms/2/sas-commit" || n_I).
+func SASCommit(nI []byte) [32]byte { return suite.LabeledHash(suite.LabelSASCommit, nI) }
+
+// CheckSASCommit reports, in constant time, whether n_I opens commit.
+func CheckSASCommit(commit, nI []byte) bool {
+	c := SASCommit(nI)
+	return len(nI) == SASNonceSize && subtle.ConstantTimeCompare(c[:], commit) == 1
+}
+
+// SAS computes the short authentication string (§6.3, 0.10.3):
+// uint32be(HKDF-Expand(prk, "vettid/vms/2/sas" || th || n_I || n_R, 4))
+// mod 1,000,000, as 6 zero-padded digits. It exists only once both nonces
+// are fixed: at the initiator after sig_R verifies, at the responder after
+// hs.fin and the commitment check.
+func SAS(prk []byte, th [32]byte, nI, nR []byte) (string, error) {
+	if len(prk) != suite.KeySize {
 		return "", suite.ErrKeySize
 	}
-	b, err := hkdf.Key(sha256.New, ks, []byte(suite.LabelSAS), string(th1[:]), 4)
+	if len(nI) != SASNonceSize || len(nR) != SASNonceSize {
+		return "", ErrBody
+	}
+	info := make([]byte, 0, len(suite.LabelSAS)+len(th)+2*SASNonceSize)
+	info = append(append(append(append(info, suite.LabelSAS...), th[:]...), nI...), nR...)
+	b, err := hkdf.Expand(sha256.New, prk, string(info), 4)
 	if err != nil {
 		return "", err
 	}

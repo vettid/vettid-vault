@@ -321,9 +321,17 @@ func checkVectors(t *testing.T, dir string) {
 		eq(t, "kid_r2i", sc.KidR2I[:], d.hex("kid_r2i_hex"))
 		eq(t, "rk", sc.RK, d.hex("rk_hex"))
 		eq(t, "epoch_id", sc.EpochID[:], d.hex("epoch_id_hex"))
-		sas, _ := handshake.SAS(ks, th1)
+		// The SAS commitment and the SAS (0.10.3).
+		nI, nR := in.hex("n_I_hex"), in.hex("n_R_hex")
+		commit := sha256.Sum256(append([]byte("vettid/vms/2/sas-commit"), nI...))
+		eq(t, "sas_commit", commit[:], d.hex("sas_commit_hex"))
+		eq(t, "hs.init sas_commit", p.Init().SASCommit, commit[:])
+		sas, _ := handshake.SAS(sc.PRK, th, nI, nR)
 		if sas != d.str("sas") {
 			t.Errorf("sas %s", sas)
+		}
+		if !strings.Contains(d.str("hs_resp_inner"), `"sas_nonce":"`+base64.StdEncoding.EncodeToString(nR)+`"`) {
+			t.Error("n_R not in hs.resp")
 		}
 
 		// Signatures.
@@ -358,11 +366,12 @@ func checkVectors(t *testing.T, dir string) {
 		if err != nil || fin.Type != "hs.fin" || fin.Seq != 1 || fin.ID != in.str("fin_id") {
 			t.Fatalf("hs.fin inner: %v", err)
 		}
-		got, err := handshake.ParseFin(fin.Body)
+		got, err := handshake.ParseFin(fin.Body, handshake.PurposeConnection)
 		if err != nil {
 			t.Fatal(err)
 		}
-		eq(t, "hs.fin sig", got, sigI)
+		eq(t, "hs.fin sig", got.Sig, sigI)
+		eq(t, "hs.fin n_I", got.SASNonce, nI)
 	})
 
 	t.Run("invite", func(t *testing.T) {

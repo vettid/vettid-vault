@@ -113,6 +113,8 @@ type Device struct {
 
 	keyring  *handshake.Keyring
 	ini      *handshake.Initiator
+	sas      string // the SAS of the last pairing handshake (0.10.3)
+	hsFailed bool   // the last hs.resp aborted the handshake
 	awaiting []*handshake.Responder
 	events   []*envelope.Inner
 	pending  *pendingUnlock
@@ -343,7 +345,9 @@ func (d *Device) CompleteEnrollment(ctx context.Context) error {
 }
 
 // Pair starts pairing from a QR / link shown by an already paired app
-// (§6.7). It returns the SAS to compare; then call AwaitPaired.
+// (§6.7). The vault answers hs.init at once; Pair completes the handshake
+// (hs.fin) and returns the SAS to compare (0.10.3). Then call AwaitPaired,
+// which waits for the owner's approval (device.paired).
 func (d *Device) Pair(ctx context.Context, link string) (string, error) {
 	return d.PairAttested(ctx, link, nil)
 }
@@ -352,23 +356,56 @@ func (d *Device) Pair(ctx context.Context, link string) (string, error) {
 // carries device_attest over the challenge DevattChallenge(hs.init id, "",
 // hs.init ts) (§6.7, §11.7).
 func (d *Device) PairAttested(ctx context.Context, link string, att Attester) (string, error) {
+	if err := d.startPairing(ctx, link, att); err != nil {
+		return "", err
+	}
+	return d.awaitHandshake(ctx)
+}
+
+// awaitHandshake polls until the vault's hs.resp completed the handshake
+// and returns its SAS.
+func (d *Device) awaitHandshake(ctx context.Context) (string, error) {
+	for {
+		d.mu.Lock()
+		if d.ini == nil {
+			sas, failed := d.sas, d.hsFailed
+			d.mu.Unlock()
+			if failed || sas == "" {
+				return "", ErrProtocol
+			}
+			return sas, nil
+		}
+		d.mu.Unlock()
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		if err := d.Poll(ctx); err != nil && ctx.Err() == nil {
+			var re *relayclient.Error
+			if !errors.As(err, &re) {
+				time.Sleep(100 * time.Millisecond)
+			}
+		}
+	}
+}
+
+func (d *Device) startPairing(ctx context.Context, link string, att Attester) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	q, err := invite.ParseLink(link)
 	if err != nil {
-		return "", err
+		return err
 	}
 	want := map[string]invite.Kind{"app": invite.KindApp, "desktop": invite.KindDesktop, "agent": invite.KindAgent}[d.st.Role]
 	if q.Kind != want {
-		return "", ErrProtocol
+		return ErrProtocol
 	}
 	blob, err := d.relayClient(q.Relay).GetClaim(ctx, q.ClaimID)
 	if err != nil {
-		return "", err
+		return err
 	}
 	b, err := invite.OpenBundle(blob, q, d.cfg.Now())
 	if err != nil {
-		return "", err
+		return err
 	}
 	d.setVaultFromPrincipal(b.Vault)
 	profile := strictjson.NewBuilder().String("name", d.st.Name).Bytes()
@@ -377,24 +414,22 @@ func (d *Device) PairAttested(ctx context.Context, link string, att Attester) (s
 	now := d.cfg.Now().UTC().Truncate(time.Millisecond)
 	if att != nil && d.st.Role == "app" {
 		if id, err = envelope.NewULID(now); err != nil {
-			return "", err
+			return err
 		}
 		ch, err := altchan.DevattChallenge(id, "", envelope.FormatTS(now))
 		if err != nil {
-			return "", err
+			return err
 		}
 		if da, err = att.Attest(ch); err != nil {
-			return "", err
+			return err
 		}
 	}
-	if err := d.startInitWith(handshake.Purpose(d.st.Role), b.InviteID, b.Token, profile, da, id, now); err != nil {
-		return "", err
-	}
-	return d.ini.SAS(), nil
+	d.sas, d.hsFailed = "", false
+	return d.startInitWith(handshake.Purpose(d.st.Role), b.InviteID, b.Token, profile, da, id, now)
 }
 
-// AwaitPaired waits for the vault's hs.resp (after the owner approves),
-// completes the handshake and waits for device.paired.
+// AwaitPaired waits for device.paired, which the vault sends at the
+// owner's approval with the device's standing token (§6.7, 0.10.3).
 func (d *Device) AwaitPaired(ctx context.Context) error { return d.awaitPaired(ctx) }
 
 func (d *Device) awaitPaired(ctx context.Context) error {
@@ -633,9 +668,9 @@ func (d *Device) handle(ctx context.Context, m relayclient.Message) {
 		for i, r := range d.awaiting {
 			rk, sk := r.Kids()
 			if env.RecipientKid().Equal(rk) && env.SenderKid().Equal(sk) {
-				e, _, err := r.HandleFin(m.Payload, sender, now)
+				fr, err := r.HandleFin(m.Payload, sender, now)
 				if err == nil {
-					d.keyring.Activate(e, now)
+					d.keyring.Activate(fr.Epoch, now)
 					d.awaiting = append(d.awaiting[:i:i], d.awaiting[i+1:]...)
 				}
 				return
@@ -651,6 +686,16 @@ func (d *Device) handle(ctx context.Context, m relayclient.Message) {
 		return
 	}
 	switch in.Type {
+	case "device.paired":
+		// The device's standing token (§10.3, 0.10.3) replaces the request
+		// token of the pairing's hs.resp, before maintain() looks at it.
+		if o, err := strictjson.ParseObject(in.Body); err == nil {
+			if tok, ok, _ := o.OptString("token"); ok {
+				if exp, err := d.heldFromVault(tok); err == nil {
+					d.st.Vault.Token, d.st.Vault.TokenExp = tok, exp
+				}
+			}
+		}
 	case "relay.token.issued":
 		d.storeVaultToken(in.Body)
 	case "relay.token.refresh":
@@ -770,11 +815,11 @@ func (d *Device) handleResp(ctx context.Context, raw []byte, sender ed25519.Publ
 	res, err := d.ini.HandleResp(raw, sender, now)
 	if err != nil {
 		if _, xerr := d.ini.Export(); errors.Is(xerr, handshake.ErrDone) {
-			d.ini = nil
+			d.ini, d.hsFailed = nil, true
 		}
 		return
 	}
-	d.ini = nil
+	d.ini, d.sas = nil, res.SAS
 	if res.Resp.Token != "" {
 		if exp, err := d.heldFromVault(res.Resp.Token); err == nil {
 			d.st.Vault.Token, d.st.Vault.TokenExp = res.Resp.Token, exp

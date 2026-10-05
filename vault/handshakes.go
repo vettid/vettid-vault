@@ -15,12 +15,17 @@ import (
 	"github.com/vettid/vettid-vault/vms/suite"
 )
 
-// Handshake time limits.
+// Handshake and request time limits (§6.4, §6.7, 0.10.2, 0.10.3).
 const (
 	PairingApprovalTTL = 10 * time.Minute    // §6.7
-	ConnectionPending  = 7 * 24 * time.Hour  // remote invites stay pending at most the longest TTL
-	HandshakeTTL       = 16 * 24 * time.Hour // awaiting hs.resp / hs.fin
+	ConnectionPending  = 7 * 24 * time.Hour  // an incoming request neither approved nor declined
+	ApprovedRetention  = 16 * 24 * time.Hour // an approved incoming request awaiting the peer's approval
+	OutgoingRequestTTL = 8 * 24 * time.Hour  // an outgoing request not active by then fails
+	HandshakeTTL       = 16 * 24 * time.Hour // rekeys and reconnects awaiting hs.resp / hs.fin
 	EnrollWindow       = 24 * time.Hour      // provisional window (§11.3)
+	// MaxRequests bounds incoming and outgoing connection requests, each
+	// (§10.4).
+	MaxRequests = 256
 )
 
 func policyFor(kind string) handshake.Policy {
@@ -82,6 +87,14 @@ func (m *Manager) handleInit(ctx context.Context, raw []byte, sender ed25519.Pub
 		m.audit(now, "hs_init_from_known_peer", p.ID)
 		return ackAfterFlush
 	}
+	if body.Purpose == handshake.PurposeConnection {
+		// §6.4 "The inviter's drop" (0.10.2): the identity of an active
+		// connection or of a device, whatever relay key it comes from.
+		if k := m.knownIdentity(body.From.IK); k != nil {
+			m.audit(now, "hs_init_from_known_peer", k.ID)
+			return ackAfterFlush
+		}
+	}
 	if body.Purpose == handshake.PurposeConnection && m.blockedIdentity(body.From.IK, sender) {
 		m.audit(now, "blocked", "") // §7.4: a block entry refuses the identity in any later handshake
 		return ackAfterFlush
@@ -138,6 +151,10 @@ func (m *Manager) handleInit(ctx context.Context, raw []byte, sender ed25519.Pub
 			return ackAfterFlush
 		}
 	}
+	if inv.Kind == KindConnection && m.countRequests(ReqIn) >= MaxRequests {
+		m.audit(now, "request_limit", "") // §10.4: at most 256 incoming requests
+		return ackAfterFlush
+	}
 	inv.Used = true
 	if inv.OpenJTI != "" {
 		m.queueRevoke("jti", inv.OpenJTI, now)
@@ -145,49 +162,86 @@ func (m *Manager) handleInit(ctx context.Context, raw []byte, sender ed25519.Pub
 	if inv.ClaimID != "" {
 		m.queueDeleteClaim(inv.ClaimID, now)
 	}
+	m.respondFirst(pi, inv, sender, binding, now)
+	return ackAfterFlush
+}
+
+// respondFirst answers a first-contact hs.init at once (§6.4, §6.7,
+// 0.10.3): the SAS exists only after hs.fin, so the handshake runs before
+// anyone approves. hs.resp carries a request token, except for the
+// handshakes answered without approval (enrollment and recovery, §11.3,
+// §11.11.5), which get the standing token.
+func (m *Manager) respondFirst(pi *handshake.PendingInit, inv *Invite, sender ed25519.PublicKey, binding json.RawMessage, now time.Time) {
+	body := pi.Init()
+	direct := inv.EnrollIK != nil
+	p := peerFromPrincipal(m.newID(now), inv.Kind, body.From, now)
+	p.Name = profileName(body.Profile)
+	p.Profile = body.Profile
+	p.Attestation = binding
+	if inv.CreatedBy == inviteByRecovery {
+		p.Recovering = true // restricted until credential.recover (§11.11.5)
+	}
+	held, err := m.heldToken(body.Token, p)
+	if err != nil {
+		m.audit(now, "hs_init_bad_token", "")
+		pi.Discard()
+		return
+	}
+	p.Standing = held
+	cfg := handshake.ResponderConfig{Identity: m.keys.ik, Policy: policyFor(inv.Kind), CollectSender: sender, Now: now}
+	var issued []IssuedToken
+	if direct {
+		cfg.Token, issued, err = m.mintStanding(p, now, nil)
+	} else {
+		cfg.Token, err = m.mintRequest(p, now)
+	}
+	if err != nil {
+		pi.Discard()
+		return
+	}
+	resp, env, err := pi.Respond(cfg)
+	if err != nil {
+		m.audit(now, "respond_failed", "")
+		m.denyPeerTokens(p, now)
+		return
+	}
+	rs, err := resp.Export()
+	if err != nil {
+		resp.Abort()
+		m.denyPeerTokens(p, now)
+		return
+	}
 	id := m.newID(now)
 	exp := now.Add(PairingApprovalTTL)
 	if inv.Kind == KindConnection {
 		exp = now.Add(ConnectionPending)
+	} else if direct {
+		exp = now.Add(HandshakeTTL)
 	}
-	ps, err := pi.Export()
-	if err != nil {
-		return ackAfterFlush
+	m.st.Awaiting[id] = &AwaitingHS{ID: id, PeerID: p.ID, New: p, Purpose: body.Purpose, Created: now, Resp: rs, Issued: issued,
+		InviteID: inv.ID, Remote: inv.Remote, IntroBy: inv.IntroBy, Expires: exp, Direct: direct}
+	m.awaiting[id] = resp
+	m.queueDeposit(&OutboxEntry{Op: OpDeposit, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Token: body.Token, Payload: env}, now)
+	if inv.Transfer {
+		m.transferStarted(inv.ID, id, exp, now)
 	}
-	m.st.Inbound[id] = &InboundHS{ID: id, InviteID: inv.ID, Kind: inv.Kind, Remote: inv.Remote, Sender: sender,
-		Created: now, Expires: exp, Pending: ps, Attestation: binding, IntroBy: inv.IntroBy}
-	m.inbound[id] = pi
-	switch {
-	case inv.EnrollIK != nil:
-		_ = m.approveInbound(ctx, id, now) // pre-authorized at enrollment
-	case inv.Kind == KindConnection:
-		if invite.AutoApproveAllowed(inv.Remote, false, m.st.Settings.AutoApproveInPerson) {
-			_ = m.approveInbound(ctx, id, now)
-			break
+}
+
+// knownIdentity returns the active connection or device whose identity
+// key is ik (§6.4 "The inviter's drop"), or nil. Stale connections are not
+// known: a fresh invitation may replace them (§7.4).
+func (m *Manager) knownIdentity(ik []byte) *Peer {
+	for _, p := range m.st.Devices {
+		if suite.EqualPublic(p.IK, ik) {
+			return p
 		}
-		// §6.4: remote invites stay pending until the owner approves; the
-		// profile is self-asserted and shown as such, with the SAS.
-		b := strictjson.NewBuilder().String("pending_id", id).String("invite_id", inv.ID).
-			String("sas", pi.SAS()).Bool("remote", inv.Remote)
-		if len(body.Profile) > 0 {
-			b.Raw("profile", body.Profile)
-		}
-		if inv.IntroBy != "" {
-			b.String("introduced_by", inv.IntroBy) // §10.15
-		}
-		m.notifyDevices("connection.request.pending", b.Bytes(), "", now)
-		m.record(Activity{Kind: "connection.request", Ref: id, Feed: true}, now)
-	case inv.Transfer:
-		// §6.7.1: the old app approves with its PIN and password.
-		m.transferScanned(inv.ID, id, profileName(body.Profile), pi.SAS(), exp, now)
-	default:
-		// §6.7: approval first; only apps approve.
-		b := strictjson.NewBuilder().String("pairing_id", inv.ID).String("pending_id", id).
-			String("role", inv.Kind).String("name", profileName(body.Profile)).String("sas", pi.SAS())
-		m.notifyApps("device.pair.pending", b.Bytes(), now)
-		m.record(Activity{Kind: "device.pair.pending", Ref: id, Feed: true, Priority: "high"}, now)
 	}
-	return ackAfterFlush
+	for _, p := range m.st.Connections {
+		if p.State != PeerStale && suite.EqualPublic(p.IK, ik) {
+			return p
+		}
+	}
+	return nil
 }
 
 func profileName(raw json.RawMessage) string {
@@ -200,80 +254,6 @@ func profileName(raw json.RawMessage) string {
 	}
 	n, _, _ := o.OptString("name")
 	return truncateUTF8(n, 128)
-}
-
-// approveInbound answers a pending hs.init: this is the approval point
-// (§6.4, §6.7). It mints the tokens for the new principal and deposits
-// hs.resp.
-func (m *Manager) approveInbound(ctx context.Context, id string, now time.Time) error {
-	ib, pi := m.st.Inbound[id], m.inbound[id]
-	if ib == nil || pi == nil {
-		return errNotFound
-	}
-	body := pi.Init()
-	newPeer := peerFromPrincipal(m.newID(now), ib.Kind, body.From, now)
-	newPeer.Name = profileName(body.Profile)
-	newPeer.Profile = body.Profile
-	newPeer.Attestation = ib.Attestation
-	if pa := m.pairAccess; pa != nil && pa.inbound == id && needsAccess(newPeer.Kind) {
-		if pa.session {
-			m.grantAccess(newPeer, pa.seconds, pa.by, now)
-		}
-		if newPeer.Kind == KindAgent && len(pa.grants) > 0 {
-			newPeer.PairGrants = append(json.RawMessage(nil), pa.grants...)
-		}
-	}
-	if inv := m.st.Invites[ib.InviteID]; inv != nil && inv.CreatedBy == inviteByRecovery {
-		newPeer.Recovering = true // restricted until credential.recover (§11.11.5)
-	}
-	cfg := handshake.ResponderConfig{Identity: m.keys.ik, Policy: policyFor(ib.Kind), CollectSender: ib.Sender, Now: now}
-	var issued []IssuedToken
-	var err error
-	if cfg.Token, issued, err = m.mintStanding(newPeer, now, issued); err != nil {
-		return err
-	}
-	if ib.Kind == KindConnection {
-		if cfg.ReconnectToken, issued, err = m.mintReconnect(newPeer, now, issued); err != nil {
-			return err
-		}
-	}
-	resp, env, err := pi.Respond(cfg)
-	if err != nil {
-		m.audit(now, "respond_failed", "")
-		m.dropInbound(id)
-		return err
-	}
-	if newPeer.Standing, err = m.heldToken(body.Token, newPeer); err != nil {
-		resp.Abort()
-		m.dropInbound(id)
-		return err
-	}
-	if body.ReconnectToken != "" {
-		if newPeer.Reconnect, err = m.heldToken(body.ReconnectToken, newPeer); err != nil {
-			resp.Abort()
-			m.dropInbound(id)
-			return err
-		}
-	}
-	rs, err := resp.Export()
-	if err != nil {
-		return err
-	}
-	m.st.Awaiting[id] = &AwaitingHS{ID: id, PeerID: newPeer.ID, New: newPeer, Purpose: body.Purpose, Created: now, Resp: rs, Issued: issued}
-	m.awaiting[id] = resp
-	m.queueDeposit(&OutboxEntry{Op: OpDeposit, RelayURL: newPeer.Relay.URL, Mailbox: newPeer.Relay.Mailbox,
-		Token: body.Token, Payload: env}, now)
-	delete(m.st.Inbound, id)
-	delete(m.inbound, id)
-	return nil
-}
-
-func (m *Manager) dropInbound(id string) {
-	if pi := m.inbound[id]; pi != nil {
-		pi.Discard()
-	}
-	delete(m.inbound, id)
-	delete(m.st.Inbound, id)
 }
 
 // respondReconnect answers a reconnect hs.init (§6.6): no SAS or approval,
@@ -406,37 +386,51 @@ func (m *Manager) peer(id string) *Peer {
 }
 
 // handleFin completes a handshake the vault responded to. The epoch is
-// activated only after sig_I verifies (§6.3); a bad hs.fin is dropped and
-// the handshake stays pending until it expires.
+// established only after sig_I and, where the purpose has a SAS, the
+// commitment check (§6.3); a bad hs.fin is dropped and the handshake stays
+// pending until it expires, while a commitment mismatch aborts it. Rekeys,
+// reconnects and direct handshakes become active at once; the others
+// become a request that awaits approval (0.10.3).
 func (m *Manager) handleFin(ctx context.Context, id string, raw []byte, sender ed25519.PublicKey, now time.Time) disposition {
 	aw, r := m.st.Awaiting[id], m.awaiting[id]
-	ep, _, err := r.HandleFin(raw, sender, now)
-	if errors.Is(err, handshake.ErrType) {
+	fr, err := r.HandleFin(raw, sender, now)
+	switch {
+	case errors.Is(err, handshake.ErrType):
 		// A message in the new epoch that arrived before hs.fin: the epoch
-		// is not active yet, so leave it unacked for redelivery (§6.3).
+		// is not established yet, so leave it unacked for redelivery.
 		return noAck
-	}
-	if err != nil {
+	case errors.Is(err, handshake.ErrSASCommit):
+		// Signed by the initiator, yet n_I does not open its commitment:
+		// abort and drop the request it belonged to (§6.3, §6.4, §6.7).
+		m.audit(now, "sas_commit_mismatch", aw.PeerID)
+		m.dropAwaiting(id, "failed", now)
+		return ackAfterFlush
+	case err != nil:
 		m.audit(now, "hs_fin_rejected", aw.PeerID)
+		return ackAfterFlush
+	}
+	delete(m.st.Awaiting, id)
+	delete(m.awaiting, id)
+	if aw.New != nil && !aw.Direct {
+		m.newRequest(aw, fr, now)
 		return ackAfterFlush
 	}
 	p := aw.New
 	if p == nil {
 		p = m.peer(aw.PeerID)
 	}
-	delete(m.st.Awaiting, id)
-	delete(m.awaiting, id)
 	if p == nil {
-		ep.Destroy()
+		fr.Epoch.Destroy()
 		return ackAfterFlush
 	}
-	m.activate(p, ep, aw.Purpose, aw.Issued, now)
+	m.activate(p, fr.Epoch, aw.Purpose, aw.Issued, "", now)
 	return ackAfterFlush
 }
 
 // activate installs a new epoch for p and finishes the bookkeeping of a
-// completed handshake.
-func (m *Manager) activate(p *Peer, ep *handshake.Epoch, purpose handshake.Purpose, issued []IssuedToken, now time.Time) {
+// completed handshake, or of an approved request (pendingID: the incoming
+// connection request it came from, for connection.event{added}).
+func (m *Manager) activate(p *Peer, ep *handshake.Epoch, purpose handshake.Purpose, issued []IssuedToken, pendingID string, now time.Time) {
 	isNew := m.peer(p.ID) == nil
 	if isNew {
 		if p.Kind == KindConnection {
@@ -468,12 +462,22 @@ func (m *Manager) activate(p *Peer, ep *handshake.Epoch, purpose handshake.Purpo
 	}
 	switch {
 	case isNew && p.Kind == KindConnection:
-		m.notifyDevices("connection.event", connEvent(p.ID, "added"), "", now)
+		ev := strictjson.NewBuilder().String("connection_id", p.ID).String("event", "added")
+		if pendingID != "" {
+			ev.String("pending_id", pendingID) // §10.4 (0.10.2)
+		}
+		m.notifyDevices("connection.event", ev.Bytes(), "", now)
 		m.record(Activity{Kind: "connection.added", ConnectionID: p.ID, Audit: true, Feed: true}, now)
 		m.connectionAdded(p.ID, now)
 	case isNew:
 		pb := strictjson.NewBuilder().String("device_id", p.ID).String("role", p.Kind).String("vault_id", m.st.VaultID).
 			String("release", m.opt.Release.PCR0).Uint("release_number", m.opt.Release.Number)
+		// The device's standing token (§10.3, 0.10.3): it replaces the
+		// request token of a pairing's hs.resp.
+		if tok, iss, err := m.mintStanding(p, now, nil); err == nil {
+			m.st.Issued = append(m.st.Issued, iss...)
+			pb.String("token", tok)
+		}
 		if p.Access != nil {
 			pb.String("session_expires_at", envelope.FormatTS(p.Access.Expires))
 		}
@@ -525,6 +529,7 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 			delete(m.st.Outgoing, id)
 			delete(m.outgoing, id)
 			if og.New != nil {
+				m.denyPeerTokens(og.New, now)
 				m.notifyDevices("connection.event", connEvent(og.PeerID, "failed"), "", now)
 			}
 		} else {
@@ -534,10 +539,11 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 	}
 	delete(m.st.Outgoing, id)
 	delete(m.outgoing, id)
-	p := og.New
-	if p == nil {
-		p = m.peer(og.PeerID)
+	if og.New != nil {
+		m.outgoingEstablished(og, res, now)
+		return ackAfterFlush
 	}
+	p := m.peer(og.PeerID)
 	if p == nil {
 		res.Epoch.Destroy()
 		return ackAfterFlush
@@ -562,7 +568,7 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 		}
 	}
 	fin := res.Fin
-	m.activate(p, res.Epoch, og.Purpose, og.Issued, now)
+	m.activate(p, res.Epoch, og.Purpose, og.Issued, "", now)
 	m.queueDeposit(&OutboxEntry{Op: OpDeposit, PeerID: p.ID, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Payload: fin}, now)
 	return ackAfterFlush
 }
@@ -575,18 +581,19 @@ func (m *Manager) dropOutgoing(id string) {
 	delete(m.st.Outgoing, id)
 }
 
-func (m *Manager) recordOutgoing(ini *handshake.Initiator, peerID string, newPeer *Peer, purpose handshake.Purpose, issued []IssuedToken, now time.Time) (string, error) {
+func (m *Manager) recordOutgoing(ini *handshake.Initiator, peerID string, newPeer *Peer, purpose handshake.Purpose, issued []IssuedToken, now time.Time) (*OutgoingHS, error) {
 	s, err := ini.Export()
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	id := m.newID(now)
 	kid := ini.EphKid()
 	th1 := ini.Th1()
-	m.st.Outgoing[id] = &OutgoingHS{ID: id, PeerID: peerID, New: newPeer, Purpose: purpose,
+	og := &OutgoingHS{ID: id, PeerID: peerID, New: newPeer, Purpose: purpose,
 		EphKid: kid[:], Th1: th1[:], Created: now, Init: s, Issued: issued}
+	m.st.Outgoing[id] = og
 	m.outgoing[id] = ini
-	return id, nil
+	return og, nil
 }
 
 func (m *Manager) hasOutgoing(peerID string, purpose handshake.Purpose) bool {
@@ -725,12 +732,17 @@ func (m *Manager) createInvite(ctx context.Context, kind string, ttl time.Durati
 }
 
 // acceptInvite starts a connection from an invitation link (§6.4): fetch
-// the claim, check the commitment, decrypt the bundle, and send hs.init on
-// the open token.
-func (m *Manager) acceptInvite(ctx context.Context, link string, now time.Time) (*Peer, error) {
+// the claim, check the commitment, decrypt the bundle, answer exists for a
+// vault already connected or requested (0.10.2), and send hs.init on the
+// open token with a request token (0.10.3). introBy is the introducer's
+// connection id for an introduction's link (§10.15).
+func (m *Manager) acceptInvite(ctx context.Context, link, introBy string, now time.Time) (*OutgoingHS, error) {
 	q, err := invite.ParseLink(link)
 	if err != nil || q.Kind != invite.KindConnection {
 		return nil, errBadRequest
+	}
+	if m.countRequests(ReqOut) >= MaxRequests {
+		return nil, NewError("limit", "")
 	}
 	blob, err := m.relay.GetClaim(ctx, q.Relay, q.ClaimID)
 	if err != nil {
@@ -746,30 +758,60 @@ func (m *Manager) acceptInvite(ctx context.Context, link string, now time.Time) 
 	if m.blockedIdentity(b.Vault.IK, b.Vault.Relay.PK) {
 		return nil, NewError("blocked", "")
 	}
+	if cid := m.existingWith(b.Vault.IK, b.Vault.Relay.PK); cid != "" {
+		// §6.4 "Already connected": the link is spent; no hs.init.
+		return nil, &HandlerError{Code: "exists", Body: strictjson.NewBuilder().String("connection_id", cid).Bytes()}
+	}
 	p := peerFromPrincipal(m.newID(now), KindConnection, b.Vault, now)
-	var issued []IssuedToken
 	cfg := handshake.InitiatorConfig{
 		Purpose: handshake.PurposeConnection, Ctx: b.InviteID,
 		Identity: m.keys.ik, StaticKEM: m.keys.kem.Public(), Relay: m.ownAddr(),
 		ResponderIK: b.Vault.IK, ResponderEK: b.Vault.KEM, ResponderRelayKey: b.Vault.Relay.PK,
 		Policy: handshake.PolicyVaultToVault, Now: now, Profile: m.handshakeProfile(),
 	}
-	if cfg.Token, issued, err = m.mintStanding(p, now, issued); err != nil {
-		return nil, err
-	}
-	if cfg.ReconnectToken, issued, err = m.mintReconnect(p, now, issued); err != nil {
+	if cfg.Token, err = m.mintRequest(p, now); err != nil {
 		return nil, err
 	}
 	ini, err := handshake.NewInitiator(cfg)
 	if err != nil {
+		m.denyPeerTokens(p, now)
 		return nil, err
 	}
-	if _, err := m.recordOutgoing(ini, p.ID, p, handshake.PurposeConnection, issued, now); err != nil {
+	og, err := m.recordOutgoing(ini, p.ID, p, handshake.PurposeConnection, nil, now)
+	if err != nil {
+		m.denyPeerTokens(p, now)
 		return nil, err
 	}
+	og.Remote, og.Name, og.IntroBy = b.Remote, truncateUTF8(b.HintName, invite.MaxHintName), introBy
+	og.Expires = now.Add(OutgoingRequestTTL)
 	m.queueDeposit(&OutboxEntry{Op: OpDeposit, RelayURL: b.Vault.Relay.URL, Mailbox: b.Vault.Relay.Mailbox,
 		Token: b.Token, Payload: ini.Envelope()}, now)
-	return p, nil
+	return og, nil
+}
+
+// existingWith returns our id for a peer with identity ik or relay key
+// relayPK: a connection that is not stale, or an outgoing request (§6.4
+// "Already connected").
+func (m *Manager) existingWith(ik, relayPK []byte) string {
+	same := func(p *Peer) bool {
+		return p != nil && (suite.EqualPublic(p.IK, ik) || suite.EqualPublic(p.Relay.PK, relayPK))
+	}
+	for _, p := range m.st.Connections {
+		if p.State != PeerStale && same(p) {
+			return p.ID
+		}
+	}
+	for _, og := range m.st.Outgoing {
+		if og.Purpose == handshake.PurposeConnection && same(og.New) {
+			return og.New.ID
+		}
+	}
+	for _, r := range m.st.Requests {
+		if r.Dir == ReqOut && same(r.Peer) {
+			return r.ID
+		}
+	}
+	return ""
 }
 
 // VaultBundle returns the exact vault_bundle bytes of vault.enrolled

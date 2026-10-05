@@ -37,11 +37,11 @@ func rekey(t *testing.T, ip, rp *party, kI, kR *Keyring, now time.Time) {
 		t.Fatalf("rekey HandleResp: %v", err)
 	}
 	kI.Activate(res.Epoch, now)
-	er, _, err := resp.HandleFin(res.Fin, ip.relayPK(), now)
+	fr, err := resp.HandleFin(res.Fin, ip.relayPK(), now)
 	if err != nil {
 		t.Fatalf("rekey HandleFin: %v", err)
 	}
-	kR.Activate(er, now)
+	kR.Activate(fr.Epoch, now)
 }
 
 func sealOpen(t *testing.T, from *Epoch, to *Keyring, now time.Time) error {

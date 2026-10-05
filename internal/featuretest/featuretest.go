@@ -103,13 +103,15 @@ func (h *Host) Transfer() (vault.TransferInfo, bool) {
 	return *h.Xfer, true
 }
 
-// ApproveTransfer implements vault.CredentialHost.
-func (h *Host) ApproveTransfer(_ context.Context, id string, now time.Time) (time.Time, error) {
+// ApproveTransfer implements vault.CredentialHost. The runtime completes
+// the transfer after the handler returns (0.10.3); the test calls
+// TransferCompleted itself.
+func (h *Host) ApproveTransfer(_ context.Context, id string, now time.Time) error {
 	if h.Xfer == nil || h.Xfer.ID != id || !h.Xfer.Scanned {
-		return time.Time{}, vault.NewError("not_found", "")
+		return vault.NewError("not_found", "")
 	}
-	h.Xfer.State, h.Xfer.Exp = vault.TransferApproved, now.Add(10*time.Minute)
-	return h.Xfer.Exp, nil
+	h.Xfer.State = vault.TransferApproved
+	return nil
 }
 
 // EndTransfer implements vault.CredentialHost.
@@ -191,7 +193,7 @@ func (h *Host) CreateIntroInvite(_ context.Context, ik []byte, by string, now ti
 	return inv.ID, inv.Link, nil
 }
 
-func (h *Host) AcceptInviteLink(_ context.Context, link string, now time.Time) (string, error) {
+func (h *Host) AcceptInviteLink(_ context.Context, link, _ string, now time.Time) (string, error) {
 	if h.InviteErr != nil {
 		return "", h.InviteErr
 	}

@@ -303,7 +303,7 @@ func (m *Manager) runHeld(ctx context.Context, h *HeldRequest, now time.Time) st
 		m.respond(p, in, h.Key, body, now)
 		return "ok"
 	case errors.As(herr, &he):
-		m.respondError(p, in, h.Key, he.Code, he.Message, now)
+		m.respondErrorBody(p, in, h.Key, he.Code, he.Message, he.Body, now)
 		return he.Code
 	default:
 		m.respondError(p, in, h.Key, "internal", "", now)

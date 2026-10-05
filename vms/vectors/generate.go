@@ -273,11 +273,14 @@ func genHandshake(t0 time.Time, vault, ini *principal, eph *suite.PrivateKey) (o
 	icfg := handshake.InitiatorConfig{
 		Purpose: handshake.PurposeConnection, Ctx: HSInviteID,
 		Identity: ini.ik, StaticKEM: ini.kem.Public(), Relay: ini.addr,
-		Token: HSTokenInit, ReconnectToken: HSReconnectInit, Suites: []int{2},
+		Token: HSTokenInit, Suites: []int{2},
 		ResponderIK: vault.ikPub(), ResponderEK: vault.kem.Public(), ResponderRelayKey: vault.relayPub(),
 		Policy: handshake.PolicyVaultToVault, ID: HSInitID, FinID: HSFinID, Now: t0,
 	}
-	if err := with(newScript(rep(SeedInitEph, 32), rep(RandInit, 64)), func() error {
+	// Draw order: the ephemeral seed, n_I (before hs.init is built), the
+	// encapsulation randomness of hs.init; then n_R (after hs.init is
+	// opened) and that of hs.resp (§6.2, 0.10.3).
+	if err := with(newScript(rep(SeedInitEph, 32), rep(NonceSASI, 32), rep(RandInit, 64)), func() error {
 		var err error
 		in, err = handshake.NewInitiator(icfg)
 		return err
@@ -288,10 +291,10 @@ func genHandshake(t0 time.Time, vault, ini *principal, eph *suite.PrivateKey) (o
 	if pend, err = handshake.OpenInit(in.Envelope(), lookup, t0); err != nil {
 		return nil, err
 	}
-	if err := with(newScript(rep(RandResp, 64)), func() error {
+	if err := with(newScript(rep(NonceSASR, 32), rep(RandResp, 64)), func() error {
 		var err error
 		resp, renv, err = pend.Respond(handshake.ResponderConfig{
-			Identity: vault.ik, Token: HSTokenResp, ReconnectToken: HSReconnectResp,
+			Identity: vault.ik, Token: HSTokenResp,
 			Policy: handshake.PolicyVaultToVault, CollectSender: ini.relayPub(), ID: HSRespID, Now: t0,
 		})
 		return err
@@ -305,12 +308,12 @@ func genHandshake(t0 time.Time, vault, ini *principal, eph *suite.PrivateKey) (o
 	}); err != nil {
 		return nil, err
 	}
-	ep, _, err := resp.HandleFin(res.Fin, ini.relayPub(), t0)
+	fr, err := resp.HandleFin(res.Fin, ini.relayPub(), t0)
 	if err != nil {
 		return nil, err
 	}
-	if ep.ID() != res.Epoch.ID() {
-		return nil, errors.New("vectors: epoch mismatch")
+	if fr.Epoch.ID() != res.Epoch.ID() || fr.SAS != res.SAS {
+		return nil, errors.New("vectors: epoch or SAS mismatch")
 	}
 
 	// Intermediate values, recomputed from the receiving side.
@@ -333,7 +336,12 @@ func genHandshake(t0 time.Time, vault, ini *principal, eph *suite.PrivateKey) (o
 	if err != nil {
 		return nil, err
 	}
-	sas, _ := handshake.SAS(ks, th1)
+	nI, nR := rep(NonceSASI, 32), rep(NonceSASR, 32)
+	commit := handshake.SASCommit(nI)
+	sas, err := handshake.SAS(s.PRK, th, nI, nR)
+	if err != nil || sas != res.SAS {
+		return nil, errors.New("vectors: SAS mismatch")
+	}
 	sigR, _ := handshake.SignResp(vault.ik, th)
 	sigI, _ := handshake.SignFin(ini.ik, th)
 	rin, err := envelope.DecodeInner(rpad, envelope.ModeSealed)
@@ -343,12 +351,14 @@ func genHandshake(t0 time.Time, vault, ini *principal, eph *suite.PrivateKey) (o
 	initBody := in.Body()
 	ib, _ := initBody.Marshal()
 	return obj{
-		{"description", "VAULT-MESSAGING §6.1-§6.3 handshake, purpose connection: the initiator (keys.json initiator, ephemeral seed 32 x 0x0c) to the vault (keys.json vault). hs.init is sealed to the vault ek with encapsulation randomness 64 x 0x0d and sender_kid = kid(initiator ek); hs.resp is sealed to eph with randomness 64 x 0x0e and sender_kid all zero; hs.fin is a session-mode envelope in the new epoch (direction i2r) with nonce 24 x 0x0f. Tokens are dummy strings, not real PASETO tokens."},
+		{"description", "VAULT-MESSAGING 0.10.3 §6.1-§6.3 handshake, purpose connection: the initiator (keys.json initiator, ephemeral seed 32 x 0x0c) to the vault (keys.json vault). hs.init is sealed to the vault ek with encapsulation randomness 64 x 0x0d and sender_kid = kid(initiator ek), and carries sas_commit = SHA-256(\"vettid/vms/2/sas-commit\" || n_I); hs.resp is sealed to eph with randomness 64 x 0x0e and sender_kid all zero, and carries sas_nonce = n_R; hs.fin is a session-mode envelope in the new epoch (direction i2r) with nonce 24 x 0x0f, and reveals sas_nonce = n_I. sas = uint32be(HKDF-Expand(prk, \"vettid/vms/2/sas\" || th || n_I || n_R, 4)) mod 10^6. The tokens are request tokens (dummy strings, not real PASETO tokens); a connection handshake carries no reconnect tokens since 0.10.3."},
 		{"inputs", obj{
 			{"initiator_eph_seed_hex", hx(rep(SeedInitEph, 32))},
 			{"init_encapsulation_randomness_hex", hx(rep(RandInit, 64))},
 			{"resp_encapsulation_randomness_hex", hx(rep(RandResp, 64))},
 			{"fin_nonce_hex", hx(rep(NonceFin, 24))},
+			{"n_I_hex", hx(nI)},
+			{"n_R_hex", hx(nR)},
 			{"ts", TS},
 			{"init_id", HSInitID}, {"resp_id", HSRespID}, {"fin_id", HSFinID},
 		}},
@@ -368,6 +378,7 @@ func genHandshake(t0 time.Time, vault, ini *principal, eph *suite.PrivateKey) (o
 		{"kid_r2i_hex", hx(s.KidR2I[:])},
 		{"rk_hex", hx(s.RK)},
 		{"epoch_id_hex", hx(s.EpochID[:])},
+		{"sas_commit_hex", hx(commit[:])},
 		{"sas", sas},
 		{"sig_R_b64", b64(sigR)},
 		{"sig_I_b64", b64(sigI)},

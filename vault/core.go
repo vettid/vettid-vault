@@ -50,6 +50,10 @@ func (m *Manager) registerCore() {
 	r("connection.invite.accept", true, owners, m.hInviteAccept)
 	r("connection.approve", true, owners, m.hConnApprove)
 	r("connection.decline", true, owners, m.hConnDecline)
+	r("connection.request.list", true, owners, m.hRequestList)
+	// connection.approved is handled before activation (requests.go); a
+	// copy that arrives once the connection is active is ignored.
+	r(connectionApprovedType, false, conns, func(context.Context, *Session, *envelope.Inner) (json.RawMessage, error) { return nil, nil })
 	r("connection.list", true, owners, m.hConnList)
 	r("connection.get", true, owners, m.hConnGet)
 	r("connection.remove", true, owners, m.hConnRemove)
@@ -120,15 +124,6 @@ func (m *Manager) hPairCreate(ctx context.Context, s *Session, in *envelope.Inne
 		String("exp", inv.Exp.UTC().Format(time.RFC3339)).Bytes(), nil
 }
 
-func (m *Manager) inboundFor(inviteID, kind string) string {
-	for id, ib := range m.st.Inbound {
-		if (ib.InviteID == inviteID || id == inviteID) && (kind == "" || (kind == KindConnection) == (ib.Kind == KindConnection)) {
-			return id
-		}
-	}
-	return ""
-}
-
 func (m *Manager) hPairApprove(ctx context.Context, s *Session, in *envelope.Inner) (json.RawMessage, error) {
 	o, err := obj(in)
 	if err != nil {
@@ -138,28 +133,33 @@ func (m *Manager) hPairApprove(ctx context.Context, s *Session, in *envelope.Inn
 	if err != nil {
 		return nil, err
 	}
-	id := m.inboundFor(pid, "device")
-	if id == "" || m.isTransferInbound(id) {
+	r, waiting := m.pairingRequest(pid)
+	if r == nil {
+		if waiting != "" && !m.isTransferRequest(waiting) {
+			return nil, errBadRequest // the SAS is not known yet (0.10.3)
+		}
+		return nil, errNotFound
+	}
+	if m.isTransferRequest(r.ID) {
 		return nil, errNotFound
 	}
 	// An initial access session for a desktop or agent may come with the
 	// pairing approval (§6.8), and an agent's initial LEASH grants
 	// (§6.7, §10.11).
 	secs, present, err := accessSeconds(o, "session_seconds")
-	if err != nil || present && !needsAccess(m.st.Inbound[id].Kind) {
+	if err != nil || present && !needsAccess(r.Peer.Kind) {
 		return nil, errBadRequest
 	}
 	grants, hasGrants := o["grants"]
 	if hasGrants {
 		g := m.agentGrantor()
-		pi := m.inbound[id]
-		if m.st.Inbound[id].Kind != KindAgent || g == nil || pi == nil {
+		if r.Peer.Kind != KindAgent || g == nil {
 			return nil, errBadRequest
 		}
 		// Every grant is a delegation signed by the member's credential
 		// key (§10.11): it is signed now, within the unlock window, for
 		// the agent's identity key from its hs.init.
-		prepared, err := g.PrepareAgentGrants(s, pi.Init().From.IK, grants)
+		prepared, err := g.PrepareAgentGrants(s, r.Peer.IK, grants)
 		if err != nil {
 			var he *HandlerError
 			if errors.As(err, &he) {
@@ -169,13 +169,16 @@ func (m *Manager) hPairApprove(ctx context.Context, s *Session, in *envelope.Inn
 		}
 		grants = prepared
 	}
-	if present || hasGrants {
-		m.pairAccess = &pendingAccess{inbound: id, seconds: secs, by: s.peer.ID, session: present, grants: grants}
-		defer func() { m.pairAccess = nil }()
+	// The approval activates the epoch and creates the device record,
+	// which gets device.paired with its standing token (§6.7, 0.10.3).
+	p := r.Peer
+	if present && needsAccess(p.Kind) {
+		m.grantAccess(p, secs, s.peer.ID, s.now)
 	}
-	if err := m.approveInbound(ctx, id, s.now); err != nil {
-		return nil, NewError("approve_failed", "")
+	if hasGrants {
+		p.PairGrants = append(json.RawMessage(nil), grants...)
 	}
+	m.activateRequest(r, s.now)
 	return nil, nil
 }
 
@@ -188,14 +191,20 @@ func (m *Manager) hPairReject(_ context.Context, s *Session, in *envelope.Inner)
 	if err != nil {
 		return nil, err
 	}
-	id := m.inboundFor(pid, "device")
-	if id == "" || m.isTransferInbound(id) {
+	r, waiting := m.pairingRequest(pid)
+	switch {
+	case r != nil && !m.isTransferRequest(r.ID):
+		pid = r.InviteID
+		m.dropRequest(r, s.now)
+	case waiting != "" && !m.isTransferRequest(waiting):
+		pid = m.st.Awaiting[waiting].InviteID
+		m.dropAwaiting(waiting, "rejected", s.now)
+	default:
 		return nil, errNotFound
 	}
-	if inv := m.st.Invites[m.st.Inbound[id].InviteID]; inv != nil && inv.OpenJTI != "" {
+	if inv := m.st.Invites[pid]; inv != nil && inv.OpenJTI != "" {
 		m.denyJTI(inv.OpenJTI, s.now)
 	}
-	m.dropInbound(id)
 	return nil, nil
 }
 
@@ -348,50 +357,21 @@ func (m *Manager) hInviteAccept(ctx context.Context, s *Session, in *envelope.In
 	if err != nil {
 		return nil, err
 	}
-	p, err := m.acceptInvite(ctx, link, s.now)
+	og, err := m.acceptInvite(ctx, link, "", s.now)
 	if err != nil {
 		if he, ok := err.(*HandlerError); ok {
 			return nil, he
 		}
 		return nil, NewError("accept_failed", "")
 	}
-	return strictjson.NewBuilder().String("connection_id", p.ID).String("state", PeerPending).Bytes(), nil
-}
-
-func (m *Manager) hConnApprove(ctx context.Context, s *Session, in *envelope.Inner) (json.RawMessage, error) {
-	o, err := obj(in)
-	if err != nil {
-		return nil, err
+	// §10.4 (0.10.3): the SAS follows in connection.request.outgoing once
+	// the handshake has run.
+	b := strictjson.NewBuilder().String("connection_id", og.New.ID).String("state", requestStateWaiting).
+		Bool("remote", og.Remote).String("exp", envelope.FormatTS(og.Expires))
+	if og.Name != "" {
+		b.String("name", og.Name)
 	}
-	pid, err := str(o, "pending_id")
-	if err != nil {
-		return nil, err
-	}
-	id := m.inboundFor(pid, KindConnection)
-	if id == "" {
-		return nil, errNotFound
-	}
-	if err := m.approveInbound(ctx, id, s.now); err != nil {
-		return nil, NewError("approve_failed", "")
-	}
-	return nil, nil
-}
-
-func (m *Manager) hConnDecline(_ context.Context, s *Session, in *envelope.Inner) (json.RawMessage, error) {
-	o, err := obj(in)
-	if err != nil {
-		return nil, err
-	}
-	pid, err := str(o, "pending_id")
-	if err != nil {
-		return nil, err
-	}
-	id := m.inboundFor(pid, KindConnection)
-	if id == "" {
-		return nil, errNotFound
-	}
-	m.dropInbound(id)
-	return nil, nil
+	return b.Bytes(), nil
 }
 
 func (m *Manager) hConnList(_ context.Context, s *Session, _ *envelope.Inner) (json.RawMessage, error) {

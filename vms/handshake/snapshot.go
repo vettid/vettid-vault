@@ -148,7 +148,7 @@ type InitiatorState struct {
 	EphSeed           []byte  `json:"eph_seed"`
 	Env               []byte  `json:"env"`
 	Ks                []byte  `json:"ks"`
-	SAS               string  `json:"sas"`
+	NI                []byte  `json:"n_i,omitempty"` // the SAS nonce (0.10.3)
 	Th1               []byte  `json:"th1"`
 	Body              []byte  `json:"body"`
 }
@@ -172,7 +172,7 @@ func (i *Initiator) Export() (InitiatorState, error) {
 	return InitiatorState{
 		Purpose: i.cfg.Purpose, Suites: append([]int(nil), i.cfg.Suites...), PinnedSuite: i.cfg.PinnedSuite,
 		Policy: i.cfg.Policy, ResponderIK: cp(i.cfg.ResponderIK), ResponderRelayKey: cp(i.cfg.ResponderRelayKey),
-		EphSeed: seed, Env: cp(i.env), Ks: cp(i.ks), SAS: i.sas, Th1: cp(i.th1[:]), Body: body,
+		EphSeed: seed, Env: cp(i.env), Ks: cp(i.ks), NI: cp(i.nI), Th1: cp(i.th1[:]), Body: body,
 	}, nil
 }
 
@@ -187,14 +187,14 @@ func RestoreInitiator(s InitiatorState, identity ed25519.PrivateKey) (*Initiator
 		return nil, err
 	}
 	body, err := ParseInit(s.Body)
-	if err != nil || !body.Eph.Equal(eph.Public()) {
+	if err != nil || !body.Eph.Equal(eph.Public()) || body.Purpose.HasSAS() && !CheckSASCommit(body.SASCommit, s.NI) {
 		eph.Destroy()
 		return nil, ErrConfig
 	}
 	i := &Initiator{
 		cfg: InitiatorConfig{Purpose: s.Purpose, Suites: s.Suites, PinnedSuite: s.PinnedSuite, Policy: s.Policy,
 			Identity: identity, ResponderIK: cp(s.ResponderIK), ResponderRelayKey: cp(s.ResponderRelayKey)},
-		body: body, eph: eph, env: cp(s.Env), ks: cp(s.Ks), sas: s.SAS,
+		body: body, eph: eph, env: cp(s.Env), ks: cp(s.Ks), nI: cp(s.NI),
 	}
 	copy(i.th1[:], s.Th1)
 	return i, nil
@@ -252,10 +252,13 @@ type ResponderState struct {
 	Th1, Th                     []byte
 	KidI2R, KidR2I              []byte
 	EpochID                     []byte
-	VerifyIK                    []byte `json:"verify_ik"`
-	Sender                      []byte `json:"sender"`
-	Suite                       uint8  `json:"suite"`
-	Policy                      Policy `json:"policy"`
+	VerifyIK                    []byte  `json:"verify_ik"`
+	Sender                      []byte  `json:"sender"`
+	Suite                       uint8   `json:"suite"`
+	Policy                      Policy  `json:"policy"`
+	Purpose                     Purpose `json:"purpose,omitempty"`
+	SASCommit                   []byte  `json:"sas_commit,omitempty"` // from hs.init (0.10.3)
+	NR                          []byte  `json:"n_r,omitempty"`        // our SAS nonce (0.10.3)
 }
 
 // Export returns the responder's persistent state.
@@ -270,6 +273,7 @@ func (r *Responder) Export() (ResponderState, error) {
 		Ks: cp(s.Ks), Ke: cp(s.Ke), PRK: cp(s.PRK), KI2R: cp(s.KI2R), KR2I: cp(s.KR2I), RK: cp(s.RK),
 		Th1: cp(s.Th1[:]), Th: cp(s.Th[:]), KidI2R: cp(s.KidI2R[:]), KidR2I: cp(s.KidR2I[:]), EpochID: cp(s.EpochID[:]),
 		VerifyIK: cp(r.verifyIK), Sender: cp(r.sender), Suite: r.suiteID, Policy: r.policy,
+		Purpose: r.purpose, SASCommit: cp(r.commit), NR: cp(r.nR),
 	}, nil
 }
 
@@ -283,6 +287,9 @@ func RestoreResponder(s ResponderState) (*Responder, error) {
 	if len(s.EpochID) != suite.EpochIDSize || len(s.VerifyIK) != ed25519.PublicKeySize || len(s.Sender) != ed25519.PublicKeySize {
 		return nil, ErrConfig
 	}
+	if !s.Purpose.Valid() || s.Purpose.HasSAS() && (len(s.SASCommit) != SASNonceSize || len(s.NR) != SASNonceSize) {
+		return nil, ErrConfig
+	}
 	sc := &Schedule{Ks: cp(s.Ks), Ke: cp(s.Ke), PRK: cp(s.PRK), KI2R: cp(s.KI2R), KR2I: cp(s.KR2I), RK: cp(s.RK)}
 	copy(sc.Th1[:], s.Th1)
 	copy(sc.Th[:], s.Th)
@@ -294,7 +301,8 @@ func RestoreResponder(s ResponderState) (*Responder, error) {
 	if sc.KidR2I, err = kidOf(s.KidR2I); err != nil {
 		return nil, err
 	}
-	return &Responder{sched: sc, verifyIK: cp(s.VerifyIK), sender: cp(s.Sender), suiteID: s.Suite, policy: s.Policy}, nil
+	return &Responder{sched: sc, verifyIK: cp(s.VerifyIK), sender: cp(s.Sender), suiteID: s.Suite, policy: s.Policy,
+		purpose: s.Purpose, commit: cp(s.SASCommit), nR: cp(s.NR)}, nil
 }
 
 // AcceptRekey builds a PendingInit from a session-mode hs.init that the

@@ -1,7 +1,9 @@
 # VAULT-MESSAGING §4–§6 requirements → tests
 
 (Updated for VAULT-MESSAGING 0.10.0: manifest by hash, `removed` and
-`ends_at`, the retirement key-policy delta, per-channel release constants.)
+`ends_at`, the retirement key-policy delta, per-channel release constants;
+and for 0.10.2 and 0.10.3: connection requests, the SAS commitment, the
+handshake before approval, request tokens.)
 
 Every MUST / MUST NOT in VAULT-MESSAGING 0.2.3 §4–§6 (plus the §13.4 and
 §13.6 rules they rely on), and the named test that covers it. Normative
@@ -46,19 +48,26 @@ end covers §7, §8, §11.8, §12 and §13.2.
 | 6.2 | hs.resp: recipient_kid = kid(eph) | `handshake.TestHandshakeKids` |
 | 6.2 | Rekey hs.init travels in session mode; K_s = previous rk | `handshake.TestRekeyMustTravelInSessionMode`, `handshake.TestRekeyAndRetention`, `handshake.TestRekeyCtxMustBeCurrentEpoch` |
 | 6.2 | Field rules (`profile`, `rotations`, `device_attest`, `ctx`, tokens per purpose, relay address, `eph` ≠ `from.kem`) | `handshake.TestInitFieldRules`, `handshake.TestRespFieldRules`, `handshake.TestRelayAddrRules`, `handshake.TestInitEphMustDifferFromStatic`, `handshake.FuzzParseInit`, `handshake.FuzzParseResp` |
+| 6.2 | 0.10.3: `sas_commit` (hs.init), `sas_nonce` (hs.resp n_R, hs.fin n_I), 32 bytes each, exactly for app, desktop, agent and connection, absent for rekey and reconnect; a connection handshake carries a request token and no `reconnect_token` | `handshake.TestInitFieldRules`, `handshake.TestRespFieldRules`, `handshake.TestNoSASForRekeyAndReconnect`, `handshake.FuzzParseFin`, `vectors.TestVectors` (handshake) |
 | 6.3 | Key schedule, th1/th, kids, rk, epoch_id, SAS | `vectors.TestVectors` (handshake), `handshake.TestSASBothSides` |
+| 6.3 | 0.10.3: `sas_commit` = SHA-256(label ‖ n_I); `sas` from prk, th, n_I and n_R; the initiator knows it after sig_R, the responder after sig_I and the commitment; one hs.resp per hs.init | `handshake.TestSASBothSides`, `handshake.TestSASDependsOnBothNonces`, `vectors.TestVectors` (handshake) |
+| 6.3 | 0.10.3: an hs.fin whose sig_I verifies but whose n_I does not open the commitment aborts the handshake (`drop.sas_commit_mismatch`); its request is dropped, never shown, the request token denylisted | `handshake.TestSASCommitMismatchAborts`, `vault.TestSASCommitMismatch` |
 | 6.3 | Session kids per direction (i2r: recipient kid_i2r, sender kid_r2i) | `handshake.TestSessionDirectionKids`, `vectors.TestVectors` (hs.fin) |
 | 6.3 | I MUST verify sig_R before using any epoch key, MUST abort on failure | `handshake.TestMustVerifySigRAndAbort`, `handshake.TestJunkDoesNotCancelHandshake` |
 | 6.3 | Abort only once a message decrypted under eph; junk is dropped | `handshake.TestJunkDoesNotCancelHandshake`, `handshake.TestMustVerifySigRAndAbort` |
 | 6.3 | R activates the epoch only after sig_I verifies | `handshake.TestMustActivateOnlyAfterSigI` |
 | 6.3 | Collect `sender` MUST equal from.relay.pk (hs.init) and the record (later) | `handshake.TestMustCheckCollectSender`, `handshake.TestRekeyRequiresRecordIdentity` |
-| 6.3 | SAS depends only on hs.init | `handshake.TestSASBothSides` |
+| 6.3 | (Before 0.10.3: SAS depended only on hs.init; replaced by the commitment above) | — |
 | 6.4 | Invite TTL MUST be ≤ both relay limits; app MUST NOT offer more | `invite.TestInviteTTL` |
 | 6.4 | Remote invites: auto-approval MUST NOT apply | `invite.TestAutoApproval` |
 | 6.4 | Bundle encryption; MUST check `h` before decrypting; MUST reject wrong `kind`, `exp` ≠ `e`, expired | `invite.TestInviteFlow`, `invite.TestBundleCommitment`, `invite.TestBundleChecks`, `invite.TestQRStrict`, `vectors.TestVectors` (invite) |
 | 6.4 | Single use per invite_id; reject expired, used or revoked invites | `vault.TestInviteSingleUse`, `vault.TestInviteCancelled`, `vault.TestInviteExpiry`, `invite.TestBundleChecks` |
-| 6.4 | Remote invites stay pending; auto-approval MUST NOT apply; no hs.resp while pending | `vault.TestRemoteInviteStaysPending`, `e2e.TestPairConnectMessage` |
-| 6.4 | Pending connection requests dropped after 7 days | `vault.TestPendingConnectionExpires` |
+| 6.4 | Remote invites stay pending; auto-approval MUST NOT apply; 0.10.3: hs.resp at once, no `connection.approved` while pending; in-person auto-approval approves at hs.fin and still shows the code | `vault.TestRemoteInviteStaysPending`, `e2e.TestPairConnectMessage` |
+| 6.4 | Pending connection requests dropped 7 days after hs.init (`sync.event{connection.request, expired}`); approved ones kept 16 days | `vault.TestPendingConnectionExpires` |
+| 6.4 | 0.10.2/0.10.3: both members see the SAS (`connection.request.pending`, `connection.request.outgoing`); each approves its side; `connection.approved{token, reconnect_token}` both ways; active with both approvals, in either order; `connection.event{added, pending_id}`; `connection.request.list` | `vault.TestConnectionRequestBothApprove`, `e2e.TestPairConnectMessage`, `e2e.TestIntroductionAccepted`, `integration.TestV3Exit` |
+| 6.4 | 0.10.3: approving while the SAS is unknown is `bad_request`; before activation only `connection.approved` is taken (else `drop.unapproved_peer`, or left unacked after the member's approval) | `vault.TestConnectionRequestBothApprove`, `vault.TestPreActivationAndRequestToken` |
+| 6.4 | 0.10.2: `exists{connection_id}` before any hs.init for a connected or requested vault; the inviter's drop by sender or `from.ik` (`drop.hs_init_from_known_peer`) | `vault.TestAcceptExists`, `vault.TestInviterDropsKnownIdentity`, `e2e.TestBlockRefusesPeer` |
+| 6.4 | 0.10.2: a decline is not sent to the peer and denylists the request token; an outgoing request fails after 8 days (`connection.event{failed}`); at most 256 requests each way | `vault.TestDeclineRequest`, `vault.TestOutgoingRequestExpires`, `e2e.TestBlockRefusesPeer` |
 | 6.4, 6.7 | Apps or desktops approve connections; only apps create and approve pairings; agents neither | `vault.TestApprovalRoles`, `e2e.TestPairConnectMessage` |
 | 6.5 | Epoch ends at 24 h / 10,000 (vault↔vault), 7 d (device) | `handshake.TestEpochPolicy` |
 | 6.5 | Lower th1 wins a simultaneous rekey | `handshake.TestSimultaneousRekeyLowerTh1Wins` |
@@ -69,7 +78,7 @@ end covers §7, §8, §11.8, §12 and §13.2.
 | 6.6 | Initiator verifies sig_R through the responder's chain | `handshake.TestReconnectWithRotations`, `handshake.TestReconnectRejections` ("responder chain wrong") |
 | 6.6 | `from.kem` MUST equal the chain's final `new_kem` | `handshake.TestReconnectWithRotations`, `handshake.TestReconnectRejections` |
 | 6.6 | Reconnect token lifetime ≤ 365 d and relay cap; re-mint < 60 d | `handshake.TestReconnectTokenParameters` |
-| 6.7 | Vault MUST NOT send hs.resp before approval; apps approve; drop after 10 min and denylist the jti | `vault.TestPairingApprovalFirst`, `vault.TestInviteExpiry`, `e2e.TestPairConnectMessage` |
+| 6.7 | 0.10.3: hs.resp at once with a request token; `device.pair.pending{sas}` after hs.fin; nothing but the handshake before approval (`drop.unapproved_peer`); the approval activates and sends `device.paired{token}`; drop after 10 min and denylist the open and request tokens | `vault.TestPairingHandshakeThenApproval`, `vault.TestInviteExpiry`, `e2e.TestPairConnectMessage` |
 | 6.7 | Re-paired device MUST use a new relay key; hs.init from a denylisted relay key refused | `vault.TestRepairWithOldRelayKeyRefused` |
 | 13.4 | Records pin the highest suite; lower suites rejected | `suite.TestDowngradePin`, `handshake.TestDowngradeChosenSuite` |
 | 13.4 | sig_R covers th, which covers the `suites` offer | `handshake.TestDowngradeSuitesStripDetected` |
@@ -89,6 +98,7 @@ end covers §7, §8, §11.8, §12 and §13.2.
 | 5.3 | Unknown type without `re` answered with `unsupported_type`; role not allowed → `forbidden` | `vault.TestRequestResponseAndDedupe` |
 | 11.3 | First app: purpose app, ctx = vault_id, pre-authorized keys only | `e2e.TestPairConnectMessage`, `e2e.TestVaultctlSmoke` |
 | 7.1 | Token kinds, lifetimes and quotas (peer 20,000 / 512 MiB; reconnect 4 / 64 KiB, ≤ 365 d) | `vault.TestTokenQuotas` |
+| 7.1 | 0.10.3: request tokens (8 / 64 KiB; ≤ 16 d, a device ≤ 10 min) carry only hs.resp, hs.fin and `connection.approved` (else `drop.request_token_misuse`); `relay.token.refresh` on one is `forbidden` | `vault.TestPairingHandshakeThenApproval`, `vault.TestPreActivationAndRequestToken` |
 | 7.2 | Re-mint standing tokens < 10 d, reconnect < 60 d; holder refresh | `vault.TestRemintStanding`, `e2e.TestReconnectAfterExpiry` |
 | 7.3 | 60 durable messages per peer per minute; excess acked, dropped, audited | `vault.TestPeerRateLimit` |
 | 7.4 | Connection removed / device unlinked: notice, denylist sub, delete tokens, sessions, outbox | `e2e.TestRevokeConnection`, `vault.TestRepairWithOldRelayKeyRefused` |
@@ -456,9 +466,9 @@ relay in `e2e.TestSecondAppRefused`, `e2e.TestCloneAlarm`,
 | 3.5.9, 11.11.5 | A recovery during an alarm hands over and leaves `rotation_required` | `credential.TestRecoverDuringAlarm` |
 | 11.5 | Host alarm `alarm.credential_clone`: content-free lifecycle event, accepted by the parent's parser (other alarm kinds refused), written as `alarm {kind, alarm_id (ULID), at}` + `alarm_pending` whoever holds the lease, nothing for a missing row | `parent.TestParseAlarmEvent`, `parent.TestAlarmULID`, `parent.TestRequestsAndLeases` (memory tables), `parent.TestAWSBackend` (LocalStack) |
 | 6.7.1 | Transfer: holder-only create, one at a time (`exists`), QR `p` / kind `app`; the new app's `hs.init` needs device attestation; pending only to the old app; `device.pair.approve` cannot approve it | `vault.TestTransferRuntime`, `vault.TestPairingDeviceAttestation`, `credential.TestTransfer`, `e2e.TestTransfer` |
-| 6.7.1 | Approval: UTK-sealed PIN and password; PIN against the DEK under the unlock backoff (`bad_pin`, `backoff`, `vault.pin_failed`), then the password (`bad_password`); the CEK rotates (old copy dead, nobody gets the new blob); `{exp}`; the old app then gets `transfer_pending` | `credential.TestTransfer`, `vault.TestVerifyPIN`, `e2e.TestTransfer` |
-| 6.7.1 | Completion at `hs.fin` in one flush: the new app is the holder and the only unlock key; the old app removed (relay key denylisted, `device.unlinked{transferred}`, UTK pool gone); `device.paired{transfer, credential_version}`; `device.transferred` audit, feed and sync; desktops kept; the critical items open on the new app; the old app cannot unlock | `vault.TestTransferRuntime`, `credential.TestTransfer`, `e2e.TestTransfer` |
-| 6.7.1 | Aborts: reject before or after the approval, expiry before the scan and after the approval (the old app keeps the credential and fetches the rotated blob as its explained retry), an alarm; audited and announced with a reason | `vault.TestTransferExpiry`, `credential.TestTransferAbortKeepsHolder`, `e2e.TestTransfer` |
+| 6.7.1 | Approval: UTK-sealed PIN and password; PIN against the DEK under the unlock backoff (`bad_pin`, `backoff`, `vault.pin_failed`), then the password (`bad_password`); the CEK rotates (old copy dead, nobody gets the new blob); 0.10.3: `{}`, the transfer completes at once (`transfer_pending` retired) | `credential.TestTransfer`, `vault.TestVerifyPIN`, `e2e.TestTransfer` |
+| 6.7.1 | Completion at the approval (0.10.3; was at `hs.fin`) in one flush, after the approval's response: the new app is the holder and the only unlock key; the old app removed (relay key denylisted, `device.unlinked{transferred}`, UTK pool gone); `device.paired{transfer, credential_version}`; `device.transferred` audit, feed and sync; desktops kept; the critical items open on the new app; the old app cannot unlock | `vault.TestTransferRuntime`, `credential.TestTransfer`, `e2e.TestTransfer` |
+| 6.7.1 | Aborts: reject before the approval (also after failed attempts), expiry before or after the scan, a commitment mismatch (`failed`), an alarm; audited and announced with a reason | `vault.TestTransferExpiry`, `credential.TestTransferAbortKeepsHolder`, `e2e.TestTransfer` |
 | 11.11.5 | Recovery replaces the app: the recovered app is the holder, every other app removed (`device.replaced`), desktops and agents kept and working, the old app's unlock key revoked and its copy a clone | `vault.TestRecoveryReplacesApps`, `credential.TestRecover`, `e2e.TestRecoveryReplacesApp`, `e2e.TestRecoveryFlow` |
 | 3.5.6, 11.11.5 | Backup off: no member-supplied blob; `credential.recover` answers `credential_lost`; `credential.reset` (recovering app only, `exists` while the vault keeps the blob) destroys the old credential and the critical items, creates a new one, completes the recovery and keeps the app's UTKs | `credential.TestRecoverBackupOff`, `e2e.TestRecoveryBackupOffLosesCredential` |
 | 11.7 | GrapheneOS: `SelfSigned` accepted only with a pinned `verifiedBootKey` (the release's 21 GrapheneOS fingerprints; the test policy's own key), still locked; `Unverified` and `Failed` refused whatever the key; another self-signed OS refused; enrollment and unlock with an allowed key | `devattest.TestAndroidRejects`, `pins.TestGrapheneOSBootKeys`, `devattest.FuzzKeyDescription`, `e2e.TestGrapheneOS` |

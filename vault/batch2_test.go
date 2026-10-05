@@ -54,10 +54,11 @@ func (d *devFixture) addDevice(t testing.TB, id, kind string, seed byte) *tdev {
 	if err != nil {
 		t.Fatal(err)
 	}
-	vep, _, err := resp.HandleFin(res.Fin, pk, now)
+	vfr, err := resp.HandleFin(res.Fin, pk, now)
 	if err != nil {
 		t.Fatal(err)
 	}
+	vep := vfr.Epoch
 	p := &Peer{ID: id, Kind: kind, Name: id + "-name", State: PeerActive, IK: ik.Public().(ed25519.PublicKey), KEM: kem.Public().Bytes(),
 		Relay: PeerRelay{URL: addr.URL, Mailbox: addr.Mailbox, PK: pk}, Standing: HeldToken{Token: "v4.public.VEVTVA", Exp: now.Add(20 * 24 * time.Hour)}}
 	m.mu.Lock()
@@ -401,7 +402,7 @@ func TestBlocks(t *testing.T) {
 	pk := n.relay.Public().(ed25519.PublicKey)
 	n.addr.PK, n.addr.Mailbox = pk, relayauth.MailboxID(pk)
 	n.hsInit(t, d.m, handshake.PurposeConnection, inv.ID, "h1")
-	if len(d.m.st.Inbound) != 0 || !d.audited("blocked") {
+	if d.firstContact() != 0 || !d.audited("blocked") {
 		t.Fatal("blocked identity accepted")
 	}
 	// Duplicates, bad bodies, list and remove.
@@ -425,16 +426,17 @@ func TestBlocks(t *testing.T) {
 	d.inbox(app)
 	inv = d.invite(t, KindConnection, time.Hour)
 	n.hsInit(t, d.m, handshake.PurposeConnection, inv.ID, "h2")
-	if len(d.m.st.Inbound) != 1 {
+	n.finish(t, d)
+	if len(d.m.st.Requests) != 1 {
 		t.Fatal("unblocked identity still refused")
 	}
 	// Block the pending request itself.
 	var pid string
-	for k := range d.m.st.Inbound {
+	for k := range d.m.st.Requests {
 		pid = k
 	}
 	id = d.sendAs(app, "block.add", `{"pending_id":"`+pid+`"}`)
-	if r := find(d.inbox(app)["dev1"], reply(id)); r == nil || r.Status != envelope.StatusOK || len(d.m.st.Inbound) != 0 || len(d.m.st.Blocks) != 1 {
+	if r := find(d.inbox(app)["dev1"], reply(id)); r == nil || r.Status != envelope.StatusOK || d.firstContact() != 0 || len(d.m.st.Blocks) != 1 {
 		t.Fatalf("pending block: %+v", r)
 	}
 	// A desktop's block.remove is a step-up type (§6.8).
@@ -549,11 +551,7 @@ func TestReconnectAfterRemoval(t *testing.T) {
 	n := newNewcomer(t, 0x80)
 	inv := d.invite(t, KindConnection, time.Hour)
 	n.hsInit(t, d.m, handshake.PurposeConnection, inv.ID, "h1")
-	var pid string
-	for k := range d.m.st.Inbound {
-		pid = k
-	}
-	if pid == "" {
+	if d.firstContact() != 1 {
 		t.Fatal("no pending request")
 	}
 	// Removal of a connection record with this identity and relay key.
@@ -567,7 +565,7 @@ func TestReconnectAfterRemoval(t *testing.T) {
 	// one from the same relay key is accepted as a pending request too.
 	inv2 := d.invite(t, KindConnection, time.Hour)
 	n.hsInit(t, d.m, handshake.PurposeConnection, inv2.ID, "h2")
-	if len(d.m.st.Inbound) != 2 || d.audited("hs_init_from_revoked_key") {
+	if d.firstContact() != 2 || d.audited("hs_init_from_revoked_key") {
 		t.Fatal("re-invitation of a removed peer refused")
 	}
 }

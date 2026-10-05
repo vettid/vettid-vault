@@ -115,3 +115,10 @@ func (d *Device) CriticalUseDeny(ctx context.Context, requestID string) error {
 func (d *Device) CriticalUseList(ctx context.Context) (strictjson.Object, error) {
 	return d.Op(ctx, "critical-secret-use.list", nil)
 }
+
+// CriticalUseGet returns an incoming request with its payload, to show it
+// again (§10.13, 0.10.2). The caller MUST check SHA-256(payload) against
+// payload_sha256 before offering the approval.
+func (d *Device) CriticalUseGet(ctx context.Context, requestID string) (strictjson.Object, error) {
+	return d.Op(ctx, "critical-secret-use.get", map[string]any{"request_id": requestID})
+}

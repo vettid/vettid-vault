@@ -112,9 +112,11 @@ type Manager struct {
 	collector Collector
 
 	sessions map[string]*handshake.Keyring
-	inbound  map[string]*handshake.PendingInit
 	awaiting map[string]*handshake.Responder
-	outgoing map[string]*handshake.Initiator
+	// reqEpochs are the established, not yet active epochs of Requests
+	// (§6.3, 0.10.3).
+	reqEpochs map[string]*handshake.Epoch
+	outgoing  map[string]*handshake.Initiator
 
 	registry map[string]*typeEntry
 	features []Feature
@@ -129,9 +131,10 @@ type Manager struct {
 	volatile []*OutboxEntry
 	dirty    bool
 
-	// pairAccess carries device.pair.approve's session_seconds into
-	// approveInbound (§6.8).
-	pairAccess *pendingAccess
+	// transferAfter is the transfer request the current handler approved:
+	// the transfer completes after the handler returns (§6.7.1), outside
+	// the credential feature's lock.
+	transferAfter string
 	// replaceAfter is the recovered app whose recovery completed in the
 	// current handler: the other apps are removed after it returns
 	// (§11.11.5). alarms are host alarms reported after the flush (§11.5).
@@ -148,14 +151,6 @@ type Manager struct {
 	started     bool
 	hadFailures bool // the header recorded failures before this unlock
 	holdsDEK    bool // counted in unlocked
-}
-
-type pendingAccess struct {
-	inbound string
-	seconds uint64
-	by      string
-	session bool            // grant an access session of seconds
-	grants  json.RawMessage // an agent's initial LEASH grants (§10.11)
 }
 
 // unlocked counts the managers in this process that hold a DEK.
@@ -365,7 +360,7 @@ func Unlock(ctx context.Context, p UnlockParams) (*Manager, UnlockResult, error)
 func newManager(o Options, st *State, hdr *Header, dek []byte) *Manager {
 	m := &Manager{
 		opt: o, now: o.Now, st: st, hdr: hdr, dek: dek,
-		sessions: map[string]*handshake.Keyring{}, inbound: map[string]*handshake.PendingInit{},
+		sessions: map[string]*handshake.Keyring{}, reqEpochs: map[string]*handshake.Epoch{},
 		awaiting: map[string]*handshake.Responder{}, outgoing: map[string]*handshake.Initiator{},
 		ephemeralSeen: map[string]time.Time{}, rates: map[string]*rateWindow{}, requests: map[string]string{}, requestTypes: map[string]string{},
 	}
@@ -393,14 +388,14 @@ func (st *State) init() {
 	if st.Invites == nil {
 		st.Invites = map[string]*Invite{}
 	}
-	if st.Inbound == nil {
-		st.Inbound = map[string]*InboundHS{}
-	}
 	if st.Awaiting == nil {
 		st.Awaiting = map[string]*AwaitingHS{}
 	}
 	if st.Outgoing == nil {
 		st.Outgoing = map[string]*OutgoingHS{}
+	}
+	if st.Requests == nil {
+		st.Requests = map[string]*Request{}
 	}
 	if st.SeenMsgIDs == nil {
 		st.SeenMsgIDs = map[string]time.Time{}
@@ -456,26 +451,35 @@ func (m *Manager) restoreLive() error {
 		}
 		m.sessions[p.ID] = kr
 	}
-	for id, ib := range m.st.Inbound {
-		pi, err := handshake.RestorePending(ib.Pending)
-		if err != nil {
-			return ErrState
-		}
-		m.inbound[id] = pi
-	}
+	// In-flight handshakes and requests that do not restore (made by an
+	// earlier release, before 0.10.3) are dropped: they would fail anyway,
+	// and the vault must still unlock.
 	for id, aw := range m.st.Awaiting {
 		r, err := handshake.RestoreResponder(aw.Resp)
 		if err != nil {
-			return ErrState
+			delete(m.st.Awaiting, id)
+			m.audit(m.now(), "handshake_not_restored", aw.PeerID)
+			continue
 		}
 		m.awaiting[id] = r
 	}
 	for id, og := range m.st.Outgoing {
 		i, err := handshake.RestoreInitiator(og.Init, m.keys.ik)
 		if err != nil {
-			return ErrState
+			delete(m.st.Outgoing, id)
+			m.audit(m.now(), "handshake_not_restored", og.PeerID)
+			continue
 		}
 		m.outgoing[id] = i
+	}
+	for id, r := range m.st.Requests {
+		e, err := handshake.ImportEpoch(r.Epoch)
+		if err != nil || r.Peer == nil {
+			delete(m.st.Requests, id)
+			m.audit(m.now(), "handshake_not_restored", "")
+			continue
+		}
+		m.reqEpochs[id] = e
 	}
 	return nil
 }
@@ -487,9 +491,9 @@ func (m *Manager) exportLive() {
 			p.Sessions = kr.Export()
 		}
 	}
-	for id, pi := range m.inbound {
-		if s, err := pi.Export(); err == nil {
-			m.st.Inbound[id].Pending = s
+	for id, e := range m.reqEpochs {
+		if r := m.st.Requests[id]; r != nil {
+			r.Epoch = e.Export()
 		}
 	}
 	for id, r := range m.awaiting {
@@ -663,8 +667,8 @@ func (m *Manager) zeroize() {
 		suite.Wipe(e.Payload)
 	}
 	m.volatile = nil
-	for _, pi := range m.inbound {
-		pi.Discard()
+	for _, e := range m.reqEpochs {
+		e.Destroy()
 	}
 	for _, r := range m.awaiting {
 		r.Abort()
@@ -672,7 +676,7 @@ func (m *Manager) zeroize() {
 	for _, i := range m.outgoing {
 		i.Abort()
 	}
-	m.inbound, m.awaiting, m.outgoing = nil, nil, nil
+	m.reqEpochs, m.awaiting, m.outgoing = nil, nil, nil
 	if m.st != nil {
 		suite.Wipe(m.st.Relay.Seed)
 		suite.Wipe(m.st.IdentitySeed)

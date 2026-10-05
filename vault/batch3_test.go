@@ -1,17 +1,13 @@
 package vault
 
 import (
-	"bytes"
 	"context"
-	"crypto/ed25519"
 	"encoding/json"
 	"testing"
 	"time"
 
-	"github.com/vettid/vettid-relay/relayauth"
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/handshake"
-	"github.com/vettid/vettid-vault/vms/suite"
 )
 
 // policyType is a LEASH-like feature: an agent-only type decided by the
@@ -131,6 +127,7 @@ func TestPairingGrants(t *testing.T) {
 		inv := d.invite(t, kind, PairingApprovalTTL)
 		n := newNewcomer(t, base)
 		n.hsInit(t, d.m, handshake.Purpose(kind), inv.ID, "p"+string(rune('a'+base%20)))
+		n.finish(t, d)
 		d.inbox(app)
 		id := d.sendAs(app, "device.pair.approve", `{"pairing_id":"`+inv.ID+`","grants":`+grants+`}`)
 		return inv.ID, find(d.inbox(app)["dev1"], reply(id))
@@ -150,66 +147,30 @@ func TestPairingGrants(t *testing.T) {
 	if r == nil || r.Status != envelope.StatusOK {
 		t.Fatalf("agent grants: %+v", r)
 	}
-	var aw *AwaitingHS
-	for _, a := range d.m.st.Awaiting {
-		aw = a
+	// The approval activates the pairing: the grants are installed (after
+	// device.paired) and forgotten.
+	var p *Peer
+	for _, x := range d.m.st.Devices {
+		if x.Kind == KindAgent {
+			p = x
+		}
 	}
-	if aw == nil || aw.New.Kind != KindAgent || string(aw.New.PairGrants) != `["signed"]` || aw.New.Access != nil {
-		t.Fatalf("awaiting: %+v", aw)
+	if p == nil || p.Access != nil {
+		t.Fatalf("agent: %+v", p)
 	}
-	// Activation installs them (after device.paired) and forgets them.
-	ep, _ := pairEpoch(t, d.m, 0x4c)
-	p := aw.New
-	d.m.mu.Lock()
-	d.m.activate(p, ep, handshake.PurposeAgent, nil, time.Now())
-	d.m.mu.Unlock()
 	if string(pol.paired[p.ID]) != `["signed"]` || p.PairGrants != nil {
 		t.Fatalf("initial grants not installed: %v", pol.paired)
 	}
 	// Without a grantor, grants are refused.
 	d2 := newDevFixture(t)
 	inv := d2.invite(t, KindAgent, PairingApprovalTTL)
-	newNewcomer(t, 0x50).hsInit(t, d2.m, handshake.PurposeAgent, inv.ID, "q1")
+	n2 := newNewcomer(t, 0x50)
+	n2.hsInit(t, d2.m, handshake.PurposeAgent, inv.ID, "q1")
+	n2.finish(t, d2)
 	id := d2.sendAs(d2.self(), "device.pair.approve", `{"pairing_id":"`+inv.ID+`","grants":[{"scope":"profile.get"}]}`)
 	if r := find(d2.inbox(d2.self())["dev1"], reply(id)); errCode(r) != "bad_request" {
 		t.Fatalf("no grantor: %+v", r)
 	}
-}
-
-// pairEpoch runs a device handshake against m and returns the vault's
-// epoch for it.
-func pairEpoch(t testing.TB, m *Manager, seed byte) (*handshake.Epoch, ed25519.PublicKey) {
-	t.Helper()
-	ik := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{seed}, 32))
-	rk := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{seed + 1}, 32))
-	kem, _ := suite.NewPrivateKey(bytes.Repeat([]byte{seed + 2}, 32))
-	pk := rk.Public().(ed25519.PublicKey)
-	addr := handshake.RelayAddr{URL: "https://relay.example.org", Mailbox: relayauth.MailboxID(pk), PK: pk}
-	now := time.Now()
-	ini, err := handshake.NewInitiator(handshake.InitiatorConfig{Purpose: handshake.PurposeAgent, Ctx: "01JB2Z6V9K3M4N5P6Q7R8S9T0V",
-		Identity: ik, StaticKEM: kem.Public(), Relay: addr, Token: "v4.public.VEVTVA",
-		ResponderIK: m.keys.ik.Public().(ed25519.PublicKey), ResponderEK: m.keys.kem.Public(), ResponderRelayKey: m.keys.relay.Public().(ed25519.PublicKey),
-		Policy: handshake.PolicyVaultToDevice, Now: now})
-	if err != nil {
-		t.Fatal(err)
-	}
-	pi, err := handshake.OpenInit(ini.Envelope(), m.lookupKEM, now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp, renv, err := pi.Respond(handshake.ResponderConfig{Identity: m.keys.ik, Token: "v4.public.VEVTVA", Policy: handshake.PolicyVaultToDevice, CollectSender: pk, Now: now})
-	if err != nil {
-		t.Fatal(err)
-	}
-	res, err := ini.HandleResp(renv, m.keys.relay.Public().(ed25519.PublicKey), now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	vep, _, err := resp.HandleFin(res.Fin, pk, now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return vep, pk
 }
 
 // §10.1: PairedDevice sees devices with or without an access session;

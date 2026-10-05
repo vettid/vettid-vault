@@ -205,18 +205,18 @@ func (m *Manager) hBlockAdd(_ context.Context, s *Session, in *envelope.Inner) (
 		}
 		m.removeConnection(p, "out", s.now)
 	} else {
-		id := m.inboundFor(pid, KindConnection)
-		if id == "" || m.inbound[id] == nil {
+		r, _ := m.connRequest(pid, ReqIn)
+		if r == nil {
 			return nil, errNotFound
 		}
-		init := m.inbound[id].Init()
-		b.IK = append([]byte(nil), init.From.IK...)
-		b.RelayPK = append([]byte(nil), init.From.Relay.PK...)
-		b.Name = profileName(init.Profile)
+		b.IK = append([]byte(nil), r.Peer.IK...)
+		b.RelayPK = append([]byte(nil), r.Peer.Relay.PK...)
+		b.Name = r.Peer.Name
 		if m.blockedIdentity(b.IK, nil) {
 			return nil, NewError("exists", "")
 		}
-		m.dropInbound(id)
+		m.dropRequest(r, s.now) // declined (§10.4)
+		m.notifyDevices("sync.event", m.requestSync(r, requestStateDeclined), s.peer.ID, s.now)
 	}
 	m.st.Blocks[b.ID] = b
 	m.dirty = true

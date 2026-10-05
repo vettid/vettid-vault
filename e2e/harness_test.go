@@ -243,8 +243,10 @@ func has(name, value string) func(json.RawMessage) bool {
 	}
 }
 
-// connect connects a and b by a remote invite from a (open token + claim,
-// §6.4) and returns each side's connection id.
+// connect connects a and b by an invite from a (open token + claim, §6.4)
+// and returns each side's connection id. Since 0.10.3 the handshake runs
+// first; both members see the same SAS, and each approves its own side
+// (the inviter its incoming request, the accepter its outgoing one).
 func connect(t *testing.T, a, b *testVault, ttl int) (aConn, bConn string) {
 	t.Helper()
 	inv := mustOK(t, a.request(a.app, "connection.invite.create", `{"ttl_seconds":`+itoa(ttl)+`}`))
@@ -255,18 +257,31 @@ func connect(t *testing.T, a, b *testVault, ttl int) (aConn, bConn string) {
 	}
 	acc := mustOK(t, b.request(b.app, "connection.invite.accept", `{"link":"`+link+`"}`))
 	bConn, _ = acc.String("connection_id")
+	if st, _ := acc.String("state"); st != "waiting" {
+		t.Fatalf("accept state %q", st)
+	}
+	if r, _ := acc.Bool("remote"); r != remote {
+		t.Fatal("accept remote flag")
+	}
+	out := waitEvent(t, b.app, "connection.request.outgoing", has("connection_id", bConn))
 	pend := waitEvent(t, a.app, "connection.request.pending", nil)
 	po, _ := strictjson.ParseObject(pend.Body)
 	if r, _ := po.Bool("remote"); r != remote {
 		t.Fatal("pending remote flag")
 	}
-	if sas, _ := po.String("sas"); len(sas) != 6 {
-		t.Fatal("no SAS")
+	sas, _ := po.String("sas")
+	if len(sas) != 6 || sas != field(t, out.Body, "sas") {
+		t.Fatalf("SAS differs: inviter %q, accepter %q", sas, field(t, out.Body, "sas"))
 	}
 	pid, _ := po.String("pending_id")
 	mustOK(t, a.request(a.app, "connection.approve", `{"pending_id":"`+pid+`"}`))
-	waitEvent(t, b.app, "connection.event", has("event", "added"))
-	ev := waitEvent(t, a.app, "connection.event", has("event", "added"))
+	mustOK(t, b.request(b.app, "connection.approve", `{"connection_id":"`+bConn+`"}`))
+	waitEvent(t, b.app, "connection.event", func(m json.RawMessage) bool {
+		return has("event", "added")(m) && has("connection_id", bConn)(m)
+	})
+	ev := waitEvent(t, a.app, "connection.event", func(m json.RawMessage) bool {
+		return has("event", "added")(m) && has("pending_id", pid)(m)
+	})
 	aConn = field(t, ev.Body, "connection_id")
 	return aConn, bConn
 }

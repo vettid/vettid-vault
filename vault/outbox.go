@@ -308,18 +308,10 @@ func (m *Manager) housekeeping(now time.Time) {
 			delete(m.st.Invites, id)
 		}
 	}
-	for id, ib := range m.st.Inbound {
-		if !now.Before(ib.Expires) {
-			if inv := m.st.Invites[ib.InviteID]; inv != nil && inv.OpenJTI != "" {
-				m.denyJTI(inv.OpenJTI, now)
-			}
-			m.dropInbound(id)
-			m.dirty = true
-		}
-	}
 	m.expireTransfer(now)
+	m.expireRequests(now)
 	for id, aw := range m.st.Awaiting {
-		if now.Sub(aw.Created) > HandshakeTTL {
+		if aw.New == nil && now.Sub(aw.Created) > HandshakeTTL {
 			if r := m.awaiting[id]; r != nil {
 				r.Abort()
 			}
@@ -328,7 +320,7 @@ func (m *Manager) housekeeping(now time.Time) {
 		}
 	}
 	for id, og := range m.st.Outgoing {
-		if now.Sub(og.Created) > HandshakeTTL {
+		if og.New == nil && now.Sub(og.Created) > HandshakeTTL {
 			m.dropOutgoing(id)
 		}
 	}

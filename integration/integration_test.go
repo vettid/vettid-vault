@@ -84,8 +84,18 @@ func TestV3Exit(t *testing.T) {
 	link, _ := inv["link"].(string)
 	acc := mustOK(t, req(t, m2, "connection.invite.accept", `{"link":"`+link+`"}`))
 	m2conn, _ := acc.String("connection_id")
+	// 0.10.3: the handshake runs first; both members compare the SAS and
+	// each approves its own side.
 	pending := s.waitCtlEvent(m1, "connection.request.pending", nil)
+	sas := str(pending, "sas")
+	if len(sas) != 6 {
+		t.Fatal("no SAS")
+	}
+	waitEvent(t, m2, "connection.request.outgoing", func(b json.RawMessage) bool {
+		return has("connection_id", m2conn)(b) && has("sas", sas)(b) // the same code on both sides
+	})
 	s.mustVaultctl(m1, "request", "connection.approve", `{"pending_id":"`+str(pending, "pending_id")+`"}`)
+	mustOK(t, req(t, m2, "connection.approve", `{"connection_id":"`+m2conn+`"}`))
 	waitEvent(t, m2, "connection.event", has("event", "added"))
 	sendText(t, m2, m2conn, "hello from member 2")
 	got := s.waitCtlEvent(m1, "message.new", func(b map[string]any) bool { return str(b, "text") == "hello from member 2" })

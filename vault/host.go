@@ -127,12 +127,12 @@ func (h managerHost) CreateIntroInvite(ctx context.Context, expectIK []byte, int
 	return inv.ID, link, nil
 }
 
-func (h managerHost) AcceptInviteLink(ctx context.Context, link string, now time.Time) (string, error) {
-	p, err := h.m.acceptInvite(ctx, link, now)
+func (h managerHost) AcceptInviteLink(ctx context.Context, link, introBy string, now time.Time) (string, error) {
+	og, err := h.m.acceptInvite(ctx, link, introBy, now)
 	if err != nil {
 		return "", err
 	}
-	return p.ID, nil
+	return og.New.ID, nil
 }
 
 func (h managerHost) SignLeashStatus(statement []byte) ([]byte, error) {

@@ -450,6 +450,19 @@ func TestRefusals(t *testing.T) {
 	if field(t, lastSent(t, d.h, "critical-secret.result").Body, "status") != StatusUnavailable || len(d.f.Pending()) != MaxPendingIn {
 		t.Fatal("limit")
 	}
+	// Showing a request again (§10.13, 0.10.2): get returns the pending
+	// body with the payload; an unknown request is not_found.
+	gid := d.f.Pending()[0]
+	g := d.call(d.f, "app", "critical-secret-use.get", `{"request_id":"`+gid+`"}`)
+	if g.Code != "" || field(t, g.Body, "request_id") != gid || field(t, g.Body, "payload") == "" || field(t, g.Body, "payload_sha256") == "" {
+		t.Fatalf("get: %s %s", g.Code, g.Body)
+	}
+	if r := d.call(d.f, "app", "critical-secret-use.get", `{"request_id":"01JB2Z6V9K3M4N5P6Q7R8S9T0V"}`); r.Code != "not_found" {
+		t.Fatalf("get unknown: %q", r.Code)
+	}
+	if r := d.call(d.f, "app", "critical-secret-use.get", `{}`); r.Code != "bad_request" {
+		t.Fatalf("get without id: %q", r.Code)
+	}
 	// Expiry after 24 h: answered expired.
 	d.clk.Advance(RequestTTL + time.Hour)
 	d.h.Reset()

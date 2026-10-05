@@ -70,6 +70,12 @@ func TestIntroductionAccepted(t *testing.T) {
 		t.Fatal("no SAS")
 	}
 	mustOK(t, w.a.request(w.a.app, "connection.approve", `{"pending_id":"`+field(t, pend.Body, "pending_id")+`"}`))
+	// C's member approves C's outgoing request with the same SAS (0.10.2).
+	out := waitEvent(t, w.c.app, "connection.request.outgoing", has("introduced_by", w.cB))
+	if field(t, out.Body, "sas") != field(t, pend.Body, "sas") {
+		t.Fatal("A and C see different codes")
+	}
+	mustOK(t, w.c.request(w.c.app, "connection.approve", `{"connection_id":"`+field(t, out.Body, "connection_id")+`"}`))
 	notB := func(own string) func(json.RawMessage) bool {
 		return func(b json.RawMessage) bool { return has("event", "added")(b) && !has("connection_id", own)(b) }
 	}

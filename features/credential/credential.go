@@ -310,7 +310,6 @@ var (
 	errFrozen       = vault.NewError("credential_frozen", "")
 	errRotation     = vault.NewError("rotation_required", "")
 	errLost         = vault.NewError("credential_lost", "")
-	errTransferring = vault.NewError("transfer_pending", "")
 	b64             = base64.StdEncoding
 )
 
@@ -709,10 +708,6 @@ func (f *Feature) gate(s *vault.Session, typ string) error {
 			return f.freezeErr()
 		}
 	}
-	if t, ok := s.Transfer(); ok && t.State == vault.TransferApproved && from == t.OldDevice &&
-		typ != "credential.utk.get" && typ != "credential.version" && typ != "credential.lock" && typ != "device.transfer.reject" {
-		return errTransferring // the old app approved; it is about to be removed (§6.7.1)
-	}
 	return nil
 }
 
@@ -1010,7 +1005,8 @@ func (f *Feature) transferReject(s *vault.Session, body []byte) (json.RawMessage
 // transferApprove is the old app's approval (§6.7.1, step 3): the PIN, then
 // the password against the current blob; the CEK rotates (the old app's
 // copy is dead and nobody receives the new blob yet: the new app fetches
-// it after its hs.fin) and the vault answers the new app's hs.init.
+// it after device.paired), and the approval completes the transfer, whose
+// handshake is already complete (0.10.3): the answer is {}.
 func (f *Feature) transferApprove(s *vault.Session, body []byte, e *Envelope, p *Payload) (json.RawMessage, error) {
 	o, _ := strictjson.ParseObject(body)
 	id, err := o.String("transfer_id")
@@ -1034,11 +1030,10 @@ func (f *Feature) transferApprove(s *vault.Session, body []byte, e *Envelope, p 
 	if _, err := f.rotateCEK(s, inner, p.Password); err != nil {
 		return nil, err
 	}
-	exp, err := s.ApproveTransfer(id)
-	if err != nil {
+	if err := s.ApproveTransfer(id); err != nil {
 		return nil, err
 	}
-	return strictjson.NewBuilder().String("exp", envelope.FormatTS(exp)).Bytes(), nil
+	return nil, nil
 }
 
 // vaultDelete authorizes a deletion (§12.5): the confirmation phrase and
@@ -1393,9 +1388,6 @@ func (f *Feature) Operate(s *vault.Session, in *envelope.Inner, need int, check 
 	}
 	if f.st.Alarm != nil {
 		return nil, f.freezeErr() // §3.5.9
-	}
-	if t, ok := s.Transfer(); ok && t.State == vault.TransferApproved && s.From().ID == t.OldDevice {
-		return nil, errTransferring
 	}
 	e, err := ParseOpEnvelope(in.Body)
 	if err != nil {

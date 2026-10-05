@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -50,6 +51,9 @@ type stubRelay struct {
 	// mailboxDeleted counts DeleteMailbox calls; deleteErr fails them.
 	mailboxDeleted int
 	deleteErr      error
+	// claims holds claims put through this relay; two fixtures may share
+	// it (a connection between two vaults in process).
+	claims *map[string][]byte
 }
 
 type stubDeposit struct {
@@ -79,11 +83,25 @@ func (r *stubRelay) Revoke(_ context.Context, kind, value string) error {
 	r.revoked = append(r.revoked, kind+":"+value)
 	return nil
 }
-func (r *stubRelay) PutClaim(context.Context, []byte, time.Duration) (string, time.Time, error) {
-	return "abcdefghijklmnopqrstuvwxyz", time.Now().Add(time.Hour), nil
+func (r *stubRelay) PutClaim(_ context.Context, blob []byte, _ time.Duration) (string, time.Time, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.claims == nil {
+		return "abcdefghijklmnopqrstuvwxyz", time.Now().Add(time.Hour), nil
+	}
+	id := "claim" + strings.Repeat("a", 20) + string(rune('a'+len(*r.claims)%26))
+	(*r.claims)[id] = append([]byte(nil), blob...)
+	return id, time.Now().Add(time.Hour), nil
 }
-func (r *stubRelay) GetClaim(context.Context, string, string) ([]byte, error) {
-	return nil, errors.New("none")
+func (r *stubRelay) GetClaim(_ context.Context, _, id string) ([]byte, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.claims == nil || (*r.claims)[id] == nil {
+		return nil, errors.New("none")
+	}
+	b := (*r.claims)[id]
+	delete(*r.claims, id) // single fetch
+	return b, nil
 }
 func (r *stubRelay) DeleteClaim(context.Context, string) error { return nil }
 func (r *stubRelay) DeleteMailbox(context.Context) error {
@@ -369,10 +387,11 @@ func newDevFixture(t testing.TB) *devFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	vep, _, err := resp.HandleFin(res.Fin, pk, now)
+	vfr, err := resp.HandleFin(res.Fin, pk, now)
 	if err != nil {
 		t.Fatal(err)
 	}
+	vep := vfr.Epoch
 	p := &Peer{ID: "dev1", Kind: KindApp, State: PeerActive, IK: devIK.Public().(ed25519.PublicKey), KEM: devKEM.Public().Bytes(),
 		Relay: PeerRelay{URL: addr.URL, Mailbox: addr.Mailbox, PK: pk}, Standing: HeldToken{Token: "v4.public.VEVTVA", Exp: now.Add(20 * 24 * time.Hour)}}
 	m.st.Devices[p.ID] = p

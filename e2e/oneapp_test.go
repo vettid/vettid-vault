@@ -214,8 +214,10 @@ func appCount(t *testing.T, d *client.Device) (apps int, body string) {
 // §6.7.1: direct transfer to a new phone with the old one in hand: the
 // old app shows the QR, the new app scans and attests, the old app
 // approves with the PIN and the password, the credential moves (CEK
-// rotated) and the old app is removed at once; desktops stay. Aborts: a
-// rejection before or after the approval leaves the old app as it was.
+// rotated) and the old app is removed at once; desktops stay. Since
+// 0.10.3 the approval completes the transfer (the new app's handshake ran
+// first). Aborts: a rejection, also after failed approvals, leaves the old
+// app as it was.
 func TestTransfer(t *testing.T) {
 	aw := newACWorld(t)
 	a := aw.newApp("member-tr", enclavetest.NewAndroidAttester(0x81, enclavetest.AndroidOptions{}))
@@ -251,8 +253,8 @@ func TestTransfer(t *testing.T) {
 		t.Fatalf("old app after a rejection: %v", err)
 	}
 
-	// Abort 2: approved, then the new app never finishes; the old app
-	// ends it and keeps the credential (it fetches the rotated blob).
+	// Abort 2: wrong PIN and password at the approval change nothing; the
+	// old app then rejects and keeps the credential.
 	id, link, err = a.dev.TransferCreate(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -267,12 +269,6 @@ func TestTransfer(t *testing.T) {
 	}
 	if err := a.dev.TransferApprove(ctx, id, acPIN, "not the password"); client.Code(err) != "bad_password" {
 		t.Fatalf("wrong password: %v", err)
-	}
-	if err := a.dev.TransferApprove(ctx, id, acPIN, credPW); err != nil {
-		t.Fatalf("approve: %v", err)
-	}
-	if _, err := a.dev.CredentialUnlock(ctx, credPW); client.Code(err) != "transfer_pending" {
-		t.Fatalf("old app after its approval: %v", err)
 	}
 	if err := a.dev.TransferReject(ctx, id); err != nil {
 		t.Fatal(err)
@@ -468,12 +464,20 @@ func acConnect(t *testing.T, a, b *acApp) {
 	if err != nil || !inv.OK() {
 		t.Fatalf("invite: %v", err)
 	}
-	if r, err := b.dev.Request(ctx, "connection.invite.accept", []byte(`{"link":"`+field(t, inv.Body(), "link")+`"}`)); err != nil || !r.OK() {
+	acc, err := b.dev.Request(ctx, "connection.invite.accept", []byte(`{"link":"`+field(t, inv.Body(), "link")+`"}`))
+	if err != nil || !acc.OK() {
 		t.Fatalf("accept: %v", err)
 	}
 	pend := waitEvent(t, a.dev, "connection.request.pending", nil)
+	out := waitEvent(t, b.dev, "connection.request.outgoing", nil)
+	if field(t, pend.Body, "sas") != field(t, out.Body, "sas") {
+		t.Fatal("the two members see different codes")
+	}
 	if r, err := a.dev.Request(ctx, "connection.approve", []byte(`{"pending_id":"`+field(t, pend.Body, "pending_id")+`"}`)); err != nil || !r.OK() {
 		t.Fatalf("approve: %v", err)
+	}
+	if r, err := b.dev.Request(ctx, "connection.approve", []byte(`{"connection_id":"`+field(t, acc.Body(), "connection_id")+`"}`)); err != nil || !r.OK() {
+		t.Fatalf("approve (accepter): %v", err)
 	}
 	waitEvent(t, b.dev, "connection.event", has("event", "added"))
 	waitEvent(t, a.dev, "connection.event", has("event", "added"))

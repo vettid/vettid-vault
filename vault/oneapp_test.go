@@ -58,10 +58,11 @@ func TestOneApp(t *testing.T) {
 	}
 }
 
-// §6.7.1: the transfer's runtime side: one at a time, the new app's
-// attested hs.init asks only the old app, device.pair.approve cannot
-// approve it, the approval answers it, and the completion makes the new
-// app the vault's only app and unlock key.
+// §6.7.1: the transfer's runtime side: one at a time; the new app's
+// attested hs.init is answered at once and, once hs.fin checked out, asks
+// only the old app with the SAS; device.pair.approve cannot approve it;
+// the approval completes it (0.10.3), making the new app the vault's only
+// app and unlock key.
 func TestTransferRuntime(t *testing.T) {
 	d := newDevFixture(t)
 	sinkOf(d)
@@ -77,36 +78,45 @@ func TestTransferRuntime(t *testing.T) {
 	}
 	n := newNewcomer(t, 0x50)
 	n.hsInitAttest(t, d.m, handshake.PurposeApp, inv.ID, "t1", testAttest)
+	if d.m.st.Transfer.Inbound == "" || d.depositsTo(n.addr.Mailbox) != 1 {
+		t.Fatal("hs.init not answered at once")
+	}
+	if d.depositsTo(d.devPeer.Relay.Mailbox) != 0 {
+		t.Fatal("old app asked before hs.fin")
+	}
+	sas := n.finish(t, d)
 	var pending bool
 	for _, r := range d.responses(t) {
-		pending = pending || r.Type == "device.transfer.pending" && strings.Contains(string(r.Body), `"sas"`) &&
+		pending = pending || r.Type == "device.transfer.pending" && bodyStr(t, r, "sas") == sas &&
 			strings.Contains(string(r.Body), inv.ID)
 	}
-	if !pending || d.m.st.Transfer.Inbound == "" {
+	if !pending {
 		t.Fatal("old app not asked")
 	}
 	if c := d.errorCode(t, "device.pair.approve", `{"pairing_id":"`+inv.ID+`"}`); c != "not_found" {
 		t.Fatalf("device.pair.approve on a transfer: %q", c)
 	}
+	r := d.m.st.Requests[d.m.st.Transfer.Inbound]
+	if r == nil || len(r.Peer.Attestation) == 0 {
+		t.Fatal("the new app's request lost its attestation")
+	}
+	p := r.Peer
+	// The approval completes the transfer after the handler (afterHandle).
 	d.m.mu.Lock()
-	ib := d.m.st.Transfer.Inbound
-	exp, err := d.m.approveTransfer(context.Background(), inv.ID, d.m.now())
+	err := d.m.approveTransfer(context.Background(), inv.ID, d.m.now())
+	if err == nil {
+		d.m.afterRespond(d.m.now())
+		d.m.syncUnlockKeys()
+		d.m.drainOutbox(context.Background())
+	}
 	d.m.mu.Unlock()
-	if err != nil || exp.Before(time.Now()) || d.m.st.Transfer.State != TransferApproved {
+	if err != nil {
 		t.Fatalf("approve: %v", err)
 	}
-	aw := d.m.st.Awaiting[ib]
-	if aw == nil || aw.PeerID != d.m.st.Transfer.NewPeer || len(aw.New.Attestation) == 0 {
-		t.Fatal("hs.resp not sent for the new app")
+	got := n.received(d)
+	if len(got) != 1 || got[0].Type != "device.paired" || !strings.Contains(string(got[0].Body), `"transfer":true`) || bodyStr(t, got[0], "token") == "" {
+		t.Fatalf("device.paired: %+v", got)
 	}
-	// Completion (what activate does at hs.fin).
-	d.m.mu.Lock()
-	p := aw.New
-	p.State = PeerActive
-	d.m.st.Devices[p.ID] = p
-	d.m.completeTransfer(p, d.m.now())
-	d.m.syncUnlockKeys()
-	d.m.mu.Unlock()
 	if d.m.st.Devices["dev1"] != nil || d.m.st.Transfer != nil {
 		t.Fatal("old app kept")
 	}
@@ -143,14 +153,12 @@ func TestTransferExpiry(t *testing.T) {
 	inv := d.transferInvite(t)
 	n := newNewcomer(t, 0x50)
 	n.hsInitAttest(t, d.m, handshake.PurposeApp, inv.ID, "t1", testAttest)
+	n.finish(t, d)
 	d.m.mu.Lock()
-	if _, err := d.m.approveTransfer(context.Background(), inv.ID, d.m.now()); err != nil {
-		t.Fatal(err)
-	}
 	later := time.Now().Add(PairingApprovalTTL + time.Minute)
 	d.m.housekeeping(later)
 	d.m.mu.Unlock()
-	if d.m.st.Transfer != nil || len(d.m.st.Awaiting) != 0 || d.m.st.Devices["dev1"] == nil {
+	if d.m.st.Transfer != nil || len(d.m.st.Awaiting) != 0 || len(d.m.st.Requests) != 0 || d.m.st.Devices["dev1"] == nil {
 		t.Fatal("expired transfer not aborted cleanly")
 	}
 	// Before the scan: the invitation's own expiry.

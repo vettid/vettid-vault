@@ -245,20 +245,13 @@ func TestTransfer(t *testing.T) {
 		t.Fatalf("wrong password: %q", r.Code)
 	}
 	r := e.ok(appr("246810", pw))
-	if ex, _ := r.Obj(t).String("exp"); ex == "" || strings.Contains(string(r.Body), `"credential"`) {
-		t.Fatalf("approve response %s", r.Body)
+	if b := string(r.Body); b != "" && b != "{}" && b != "null" {
+		t.Fatalf("approve response %s (0.10.3: {})", r.Body)
 	}
 	if e.h.Xfer.State != vault.TransferApproved {
 		t.Fatal("not approved")
 	}
-	// The old app is about to go: no credential operations.
-	if r := e.unlock(blob, pw); r.Code != "transfer_pending" {
-		t.Fatalf("old app after approval: %q", r.Code)
-	}
-	if r := e.raw("app", "credential.get", `{}`); r.Code != "transfer_pending" {
-		t.Fatalf("old app get: %q", r.Code)
-	}
-	// Completion: the new app holds the credential.
+	// Completion, in the approval's flush: the new app holds the credential.
 	e.f.TransferCompleted(nil, "dev-app", "dev-app2")
 	if e.f.Holder() != "dev-app2" || e.f.PoolSizeOf("dev-app") != 0 {
 		t.Fatal("holder not moved")
@@ -279,12 +272,13 @@ func TestTransferAbortKeepsHolder(t *testing.T) {
 	o := e.ok(e.raw("app", "device.transfer.create", `{}`)).Obj(t)
 	id, _ := o.String("transfer_id")
 	e.h.Xfer.Scanned = true
-	e.ok(e.callBody("app", "device.transfer.approve", blob, map[string]any{"password": pw, "pin": "246810"}, `"transfer_id":"`+id+`"`))
-	// The new app never finished: the runtime aborted the transfer.
-	e.h.Xfer = nil
-	if r := e.unlock(blob, pw); r.Code != "stale_credential" || len(e.h.Alarms) != 0 {
-		t.Fatalf("old app after an abort: %q %v", r.Code, e.h.Alarms)
+	// A wrong PIN changes nothing; the transfer then times out (the
+	// runtime aborts it): the old app keeps its credential as it was.
+	if r := e.callBody("app", "device.transfer.approve", blob, map[string]any{"password": pw, "pin": "135791"}, `"transfer_id":"`+id+`"`); r.Code != "bad_pin" {
+		t.Fatalf("wrong PIN: %q", r.Code)
 	}
+	e.h.Xfer = nil
+	e.ok(e.unlock(blob, pw))
 	latest := blobOf(t, e.ok(e.raw("app", "credential.get", `{}`)))
 	e.ok(e.unlock(latest, pw))
 	// Reject: the holder ends an open transfer.

@@ -30,11 +30,12 @@ func TestIntroInvite(t *testing.T) {
 	}
 	d.responses(t)
 	wrong.hsInit(t, d.m, handshake.PurposeConnection, id, "w1")
-	if len(d.m.st.Inbound) != 0 || !d.audited("intro_mismatch") || d.m.st.Invites[id].Used {
+	if d.firstContact() != 0 || !d.audited("intro_mismatch") || d.m.st.Invites[id].Used {
 		t.Fatal("another identity was accepted or used up the invitation")
 	}
 	right.hsInit(t, d.m, handshake.PurposeConnection, id, "r1")
-	if len(d.m.st.Inbound) != 1 {
+	right.finish(t, d)
+	if len(d.m.st.Requests) != 1 {
 		t.Fatal("the named identity was refused")
 	}
 	var found bool
@@ -46,9 +47,9 @@ func TestIntroInvite(t *testing.T) {
 	if !found {
 		t.Fatal("pending request without introduced_by")
 	}
-	for _, ib := range d.m.st.Inbound {
-		if ib.IntroBy != "conn-B" || !ib.Remote {
-			t.Fatalf("inbound: %+v", ib)
+	for _, r := range d.m.st.Requests {
+		if r.IntroBy != "conn-B" || !r.Remote {
+			t.Fatalf("request: %+v", r)
 		}
 	}
 	// Cancelling an introduction's invitation denylists it.

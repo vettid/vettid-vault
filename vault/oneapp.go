@@ -21,8 +21,10 @@ import (
 
 // Transfer states (§6.7.1).
 const (
-	TransferOpen     = "open"     // the QR is out, or the new app scanned it
-	TransferApproved = "approved" // the old app approved; waiting for hs.fin
+	TransferOpen = "open" // the QR is out, or the new app scanned it
+	// TransferApproved lasts only within the batch of the approval, which
+	// completes the transfer (0.10.3).
+	TransferApproved = "approved"
 )
 
 // AlarmCredentialClone is the content-free host alarm of a clone (§11.5).
@@ -34,8 +36,8 @@ type Transfer struct {
 	OldDevice string    `json:"old_device"`
 	State     string    `json:"state"`
 	Exp       time.Time `json:"exp"`
-	Inbound   string    `json:"inbound,omitempty"`  // the new app's pending hs.init
-	NewPeer   string    `json:"new_peer,omitempty"` // its device id, after approval
+	Inbound   string    `json:"inbound,omitempty"`  // the new app's handshake, then its request
+	NewPeer   string    `json:"new_peer,omitempty"` // its device id, at approval
 }
 
 // TransferInfo is the credential feature's view of a transfer.
@@ -58,9 +60,9 @@ type CredentialHost interface {
 	CreateTransfer(ctx context.Context, by string, now time.Time) (id, link string, exp time.Time, err error)
 	// Transfer returns the transfer in progress.
 	Transfer() (TransferInfo, bool)
-	// ApproveTransfer answers the new app's hs.init; the transfer
-	// completes at its hs.fin before the returned time.
-	ApproveTransfer(ctx context.Context, id string, now time.Time) (time.Time, error)
+	// ApproveTransfer approves the new app, whose handshake is complete
+	// (Scanned): the transfer completes in the same flush (0.10.3).
+	ApproveTransfer(ctx context.Context, id string, now time.Time) error
 	// EndTransfer aborts the transfer (rejected, alarm, ...).
 	EndTransfer(id, reason string, now time.Time) error
 	// ReportAlarm reports a content-free alarm to the host after the
@@ -115,10 +117,10 @@ func (s *Session) Transfer() (TransferInfo, bool) {
 }
 
 // ApproveTransfer approves the transfer's new app (§6.7.1).
-func (s *Session) ApproveTransfer(id string) (time.Time, error) {
+func (s *Session) ApproveTransfer(id string) error {
 	h, ok := s.credHost()
 	if !ok {
-		return time.Time{}, errUnavailable
+		return errUnavailable
 	}
 	return h.ApproveTransfer(s.Context(), id, s.now)
 }
@@ -150,10 +152,11 @@ func (h managerHost) Transfer() (TransferInfo, bool) {
 	if t == nil {
 		return TransferInfo{}, false
 	}
-	return TransferInfo{ID: t.ID, OldDevice: t.OldDevice, State: t.State, Exp: t.Exp, Scanned: t.Inbound != ""}, true
+	// Scanned: the new app's handshake is complete and its SAS known.
+	return TransferInfo{ID: t.ID, OldDevice: t.OldDevice, State: t.State, Exp: t.Exp, Scanned: h.m.st.Requests[t.Inbound] != nil}, true
 }
 
-func (h managerHost) ApproveTransfer(ctx context.Context, id string, now time.Time) (time.Time, error) {
+func (h managerHost) ApproveTransfer(ctx context.Context, id string, now time.Time) error {
 	return h.m.approveTransfer(ctx, id, now)
 }
 
@@ -212,46 +215,49 @@ func (m *Manager) createTransfer(ctx context.Context, by string, now time.Time) 
 	return inv.ID, link, inv.Exp, nil
 }
 
-// transferScanned records the new app's attested hs.init and asks the old
-// app (called from handleInit).
-func (m *Manager) transferScanned(inviteID, inboundID, name, sas string, exp time.Time, now time.Time) {
+// transferStarted records the new app's attested hs.init, answered at
+// once (called from handleInit).
+func (m *Manager) transferStarted(inviteID, id string, exp time.Time, now time.Time) {
 	t := m.st.Transfer
-	if t == nil || t.ID != inviteID || t.State != TransferOpen {
-		m.dropInbound(inboundID)
+	if t == nil || t.ID != inviteID || t.State != TransferOpen || t.Inbound != "" {
+		m.dropAwaiting(id, "", now)
 		return
 	}
-	t.Inbound, t.Exp = inboundID, exp
+	t.Inbound, t.Exp = id, exp
+	m.dirty = true
+}
+
+// transferScanned asks the old app once the new app's hs.fin checked out
+// and the SAS is known (§6.7.1 step 2).
+func (m *Manager) transferScanned(r *Request, now time.Time) {
+	t := m.st.Transfer
 	old := m.st.Devices[t.OldDevice]
 	if old == nil {
 		m.abortTransfer("expired", now)
 		return
 	}
 	m.sendTo(old, "device.transfer.pending", strictjson.NewBuilder().String("transfer_id", t.ID).
-		String("name", name).String("sas", sas).Bytes(), now)
+		String("name", r.Peer.Name).String("sas", r.SAS).Bytes(), now)
 }
 
-// approveTransfer answers the new app's hs.init (§6.7.1, step 3). The
-// credential feature has checked the PIN and the password and rotated the
-// CEK.
-func (m *Manager) approveTransfer(ctx context.Context, id string, now time.Time) (time.Time, error) {
+// approveTransfer approves the new app (§6.7.1, step 3). The credential
+// feature has checked the PIN and the password and rotated the CEK. The
+// new app's handshake is complete, so the approval completes the transfer
+// (step 4), after the handler returns (afterHandle), in the same flush.
+func (m *Manager) approveTransfer(_ context.Context, id string, now time.Time) error {
 	t := m.st.Transfer
-	if t == nil || t.ID != id || t.State != TransferOpen || t.Inbound == "" || m.st.Inbound[t.Inbound] == nil {
-		return time.Time{}, errNotFound
+	if t == nil || t.ID != id || t.State != TransferOpen || t.Inbound == "" {
+		return errNotFound
 	}
-	ib := t.Inbound
-	if err := m.approveInbound(ctx, ib, now); err != nil {
-		m.abortTransfer("failed", now)
-		return time.Time{}, NewError("approve_failed", "")
+	r := m.st.Requests[t.Inbound]
+	if r == nil {
+		return errNotFound
 	}
-	aw := m.st.Awaiting[ib]
-	if aw == nil {
-		m.abortTransfer("failed", now)
-		return time.Time{}, NewError("approve_failed", "")
-	}
-	t.State, t.NewPeer, t.Inbound, t.Exp = TransferApproved, aw.PeerID, "", now.Add(PairingApprovalTTL)
+	t.State, t.NewPeer = TransferApproved, r.Peer.ID
+	m.transferAfter = r.ID
 	m.dirty = true
 	m.record(Activity{Kind: "device.transfer.approved", DeviceID: t.OldDevice, Ref: t.ID, Audit: true}, now)
-	return t.Exp, nil
+	return nil
 }
 
 // abortTransfer ends a transfer that has not completed: the old app stays
@@ -270,18 +276,14 @@ func (m *Manager) abortTransfer(reason string, now time.Time) {
 		}
 		delete(m.st.Invites, t.ID)
 	}
-	if t.Inbound != "" {
-		m.dropInbound(t.Inbound)
-	}
-	if t.NewPeer != "" {
-		for id, aw := range m.st.Awaiting {
-			if aw.PeerID == t.NewPeer {
-				if r := m.awaiting[id]; r != nil {
-					r.Abort()
-				}
-				delete(m.awaiting, id)
-				delete(m.st.Awaiting, id)
-			}
+	if id := t.Inbound; id != "" {
+		// The new app's handshake state and request token (§7.4).
+		t.Inbound = ""
+		if r := m.st.Requests[id]; r != nil {
+			m.dropRequest(r, now)
+		}
+		if m.st.Awaiting[id] != nil {
+			m.dropAwaiting(id, reason, now)
 		}
 	}
 	m.st.Transfer = nil
@@ -301,8 +303,8 @@ func (m *Manager) expireTransfer(now time.Time) {
 		m.abortTransfer("expired", now)
 		return
 	}
-	if t.State == TransferOpen && t.Inbound != "" && m.st.Inbound[t.Inbound] == nil {
-		m.abortTransfer("expired", now) // the pending hs.init went away
+	if t.State == TransferOpen && t.Inbound != "" && m.st.Awaiting[t.Inbound] == nil && m.st.Requests[t.Inbound] == nil {
+		m.abortTransfer("expired", now) // the new app's handshake went away
 	}
 }
 
@@ -312,8 +314,8 @@ func (m *Manager) isTransferPeer(p *Peer) bool {
 	return t != nil && t.State == TransferApproved && p.Kind == KindApp && p.ID == t.NewPeer
 }
 
-// completeTransfer runs at the new app's hs.fin, in the flush that adds
-// its device record (§6.7.1, step 4): the new app becomes the holder and
+// completeTransfer runs at the approval, in the flush that adds the new
+// app's device record (§6.7.1, step 4): the new app becomes the holder and
 // the old app is removed.
 func (m *Manager) completeTransfer(p *Peer, now time.Time) {
 	t := m.st.Transfer
@@ -322,6 +324,13 @@ func (m *Manager) completeTransfer(p *Peer, now time.Time) {
 		delete(m.st.Invites, t.ID)
 	}
 	if old := m.st.Devices[t.OldDevice]; old != nil {
+		// What is queued for the old app (the approval's response) still
+		// goes out, before device.unlinked, on its token.
+		for _, e := range m.st.Outbox {
+			if e.PeerID == old.ID && e.Op == OpDeposit && !e.Done && e.Token == "" {
+				e.PeerID, e.Token, e.BestEffort = "", old.Standing.Token, true
+			}
+		}
 		m.removeApp(old, "transferred", now)
 	}
 	sess := m.session(now)
@@ -393,6 +402,18 @@ func (m *Manager) afterHandle(now time.Time) {
 	}
 }
 
+// afterRespond runs deferred work that must follow the handler's
+// response: a transfer approved by the old app completes now (§6.7.1,
+// 0.10.3), so that the old app gets its {} before device.unlinked.
+func (m *Manager) afterRespond(now time.Time) {
+	if id := m.transferAfter; id != "" {
+		m.transferAfter = ""
+		if r := m.st.Requests[id]; r != nil && m.st.Transfer != nil && m.st.Transfer.State == TransferApproved {
+			m.activateRequest(r, now) // completes the transfer (isTransferPeer)
+		}
+	}
+}
+
 // reportAlarms sends the batch's alarms to the host after its flush.
 func (m *Manager) reportAlarms() {
 	if len(m.alarms) == 0 || m.st == nil {
@@ -416,12 +437,18 @@ func (m *Manager) transferPairedBody(b *strictjson.Builder) {
 
 var errForbiddenH = &HandlerError{Code: "forbidden"}
 
-// isTransferInbound reports whether a pending hs.init is a transfer's.
-func (m *Manager) isTransferInbound(id string) bool {
-	ib := m.st.Inbound[id]
-	if ib == nil {
-		return false
+// isTransferRequest reports whether a handshake or request (by id) is a
+// transfer's new app.
+func (m *Manager) isTransferRequest(id string) bool {
+	if m.st.Transfer != nil && m.st.Transfer.Inbound == id {
+		return true
 	}
-	inv := m.st.Invites[ib.InviteID]
-	return inv != nil && inv.Transfer || m.st.Transfer != nil && m.st.Transfer.Inbound == id
+	inviteID := ""
+	if r := m.st.Requests[id]; r != nil {
+		inviteID = r.InviteID
+	} else if aw := m.st.Awaiting[id]; aw != nil {
+		inviteID = aw.InviteID
+	}
+	inv := m.st.Invites[inviteID]
+	return inv != nil && inv.Transfer
 }

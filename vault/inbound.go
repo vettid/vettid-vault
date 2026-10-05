@@ -202,6 +202,11 @@ func (m *Manager) handleMessage(ctx context.Context, msg Message, now time.Time)
 		return ackAfterFlush
 	}
 	p := m.peerByRelayKey(sender)
+	// §7.1 (0.10.3): a request token covers only the rest of a handshake
+	// that awaits approval and connection.approved.
+	if m.issuedKind(msg.JTI) == TokRequest {
+		return m.handleOnRequestToken(ctx, env, msg.Payload, sender, p, now)
+	}
 	// §6.6 permitted use, decided by the collect jti (RELAY-PROTOCOL 0.4.0):
 	// a connection's deposit on its reconnect token (or without a jti) may
 	// only be a sealed hs.init with purpose reconnect, which is the only
@@ -230,9 +235,13 @@ func (m *Manager) handleMessage(ctx context.Context, msg Message, now time.Time)
 			}
 		}
 	}
-	// Not an active epoch: perhaps hs.fin for a handshake awaiting it.
+	// Not an active epoch: perhaps hs.fin for a handshake awaiting it, or
+	// a message under a request's epoch before activation (0.10.3).
 	if id := m.awaitingByKids(env, sender); id != "" {
 		return m.handleFin(ctx, id, msg.Payload, sender, now)
+	}
+	if id := m.requestByKids(env, sender); id != "" {
+		return m.handleRequestMessage(id, env, now)
 	}
 	m.audit(now, "unknown_kid", peerID(p))
 	return ackAfterFlush
@@ -415,11 +424,12 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 		case herr == nil:
 			m.respond(p, in, key, body, now)
 		case errors.As(herr, &he):
-			m.respondError(p, in, key, he.Code, he.Message, now)
+			m.respondErrorBody(p, in, key, he.Code, he.Message, he.Body, now)
 		default:
 			m.respondError(p, in, key, "internal", "", now)
 		}
 	}
+	m.afterRespond(now)
 	return disp(eph)
 }
 
@@ -460,8 +470,12 @@ func (m *Manager) respondVolatile(p *Peer, req *envelope.Inner, body json.RawMes
 }
 
 func (m *Manager) respondError(p *Peer, req *envelope.Inner, key, code, msg string, now time.Time) {
+	m.respondErrorBody(p, req, key, code, msg, nil, now)
+}
+
+func (m *Manager) respondErrorBody(p *Peer, req *envelope.Inner, key, code, msg string, body json.RawMessage, now time.Time) {
 	m.sendResponse(p, req, key, &envelope.Inner{Type: req.Type, Re: req.ID, Status: envelope.StatusError,
-		Error: &envelope.Error{Code: code, Message: msg}}, now)
+		Error: &envelope.Error{Code: code, Message: msg}, Body: body}, now)
 }
 
 func (m *Manager) sendResponse(p *Peer, req *envelope.Inner, key string, out *envelope.Inner, now time.Time) {

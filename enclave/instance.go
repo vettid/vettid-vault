@@ -53,8 +53,9 @@ type Options struct {
 type Host interface {
 	// Open runs a decrypted enroll or unlock job, locking a running
 	// instance of the vault first (one manager per vault, D4), and returns
-	// the sealed result (or random bytes of its size).
-	Open(ctx context.Context, j *Job) ([]byte, error)
+	// the sealed result (or random bytes of its size), and whether it is a
+	// recovery_register's {"ok": true} (the clear marker, 0.10.6).
+	Open(ctx context.Context, j *Job) ([]byte, bool, error)
 	// Lock locks a running vault (§12.3); it reports whether it ran.
 	Lock(ctx context.Context, vaultID string) (bool, error)
 	// LockReason is Lock with a reason in vault.locking (§11.11.1).
@@ -181,7 +182,7 @@ func (in *Instance) Process(ctx context.Context, q *QueueMessage, manifestDoc []
 		}
 		j := &Job{Op: q.Op, VaultID: q.VaultID, UserGUID: q.UserGUID, RequestID: q.RequestID,
 			Inner: &envelope.Inner{Type: requestType[q.Op], ID: q.RequestID, TS: in.now(), Body: body}}
-		res, err := in.host.Open(ctx, j)
+		res, _, err := in.host.Open(ctx, j)
 		if q.Op == OpRecovery {
 			if err != nil || len(res) != altchan.SealedCodeSize {
 				res = opaque()
@@ -202,15 +203,20 @@ func (in *Instance) Process(ctx context.Context, q *QueueMessage, manifestDoc []
 		if (q.Op == OpEnroll || q.Op == OpUnlock) && len(manifestDoc) <= manifest.MaxServed {
 			j.Manifest = manifestDoc
 		}
-		res, err := in.host.Open(ctx, j)
+		res, registered, err := in.host.Open(ctx, j)
 		// The decrypted request (with the PIN) is wiped as soon as the
 		// vault has it (§12.4).
 		j.Wipe()
 		suite.Wipe(padded)
 		if err != nil || res == nil {
-			res = opaque()
+			res, registered = opaque(), false
 		}
 		resp.Envelope = res
+		if registered && q.Op == OpRecoveryRegister {
+			// §11.5, §11.11.3 (0.10.6): a successful register says so in
+			// the clear, so that the member API retires the spent code.
+			resp.Code = CodeRecoveryRegistered
+		}
 	}
 	return resp
 }

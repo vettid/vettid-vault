@@ -169,7 +169,7 @@ The whole stack (V3b) is easiest through the integration test, which
 builds `vault-parent`, the dev `vault-enclave` and `vaultctl`, starts the
 relay behind a TLS front with the test root, LocalStack, and the member
 API stand-in, and drives them with `vaultctl api-enroll`, `api-unlock`,
-`api-lock` and `request`:
+`api-lock`, `api-recover` and `request`:
 
 ```sh
 make integration   # docker compose up LocalStack (1.5 GiB cap), run, tear down
@@ -232,7 +232,13 @@ Everything listens on 127.0.0.1. Child processes run with
 /api/vault/recovery/register` as vettid.org's MEMBER-API "Vault
 recovery" (no cancel link, email, rate limits or audit; the `Recovery`
 object also carries `vault_id`). A recovery locks the member's vault
-until it is cancelled or completed. With `-recovery-skew`, the dev
+until it is cancelled or completed. As in production (VAULT-MESSAGING
+0.10.6), a register answered with the host's `recovery_registered` marker
+turns the recovery `registered` (the code is spent and no longer
+returned), cancels answer `{cancelled}`, and the registered app's unlock
+result carries `credential_backup` (ask for the password only when it is
+`true`). `vaultctl api-recover -qr QR` plays the new app (register,
+unlock, first handshake). With `-recovery-skew`, the dev
 enclave runs with `-dev-recovery-clock FILE` (devenclave builds only):
 its recovery clock is real time plus the duration in the file, which
 devstack advances (`run/recovery-clock`).

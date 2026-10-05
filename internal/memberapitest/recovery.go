@@ -14,8 +14,10 @@ import (
 
 // Vault recovery (vault.ts "recovery", MEMBER-API.md "Vault recovery",
 // VAULT-MESSAGING §11.11): the request, its status (with the sealed code
-// once available), cancel and register. Left out: the cancel link and its
-// email, rate limits and audit.
+// once available), cancel and register, and the registered state (0.10.6):
+// a register slot answered with the host's recovery_registered marker
+// spends the code. Left out: the cancel link and its email, rate limits
+// and audit.
 
 // The code becomes usable 24 h after the request, for 24 h (§11.11.2).
 const (
@@ -25,9 +27,19 @@ const (
 
 // recoveryRow is the vault row's recovery (vault.ts RecoveryRow).
 type recoveryRow struct {
-	ID, State                           string // pending | cancelled
+	ID, State                           string // pending | registered | cancelled
 	RequestedAt, AvailableAt, ExpiresAt int64
+	// RegisterIDs are the register requests sent for this recovery, so
+	// that their slots can be checked (vault.ts register_ids).
+	RegisterIDs []string
 }
+
+// registeredCode is the host's copy of the enclave's clear marker of a
+// successful register (§11.5, 0.10.6; vault.ts REGISTERED_CODE).
+const registeredCode = "recovery_registered"
+
+// maxRegisterIDs: at most this many register ids are kept on a recovery.
+const maxRegisterIDs = 10
 
 func (a *API) recoveryNowS() int64 { return a.cfg.RecoveryNow().Unix() }
 
@@ -40,6 +52,9 @@ func recoveryState(r *recoveryRow, now int64) string {
 		return ""
 	case r.State == "cancelled":
 		return "cancelled"
+	case r.State == "registered":
+		// The code is spent; it stays registered after expires_at (0.10.6).
+		return "registered"
 	case now >= r.ExpiresAt:
 		return "expired"
 	case now >= r.AvailableAt:
@@ -48,9 +63,96 @@ func recoveryState(r *recoveryRow, now int64) string {
 	return "pending"
 }
 
+// recoveryActive: pending, available or registered, before expires_at.
 func recoveryActive(r *recoveryRow, now int64) bool {
+	if r == nil || now >= r.ExpiresAt {
+		return false
+	}
 	st := recoveryState(r, now)
-	return st == "pending" || st == "available"
+	return st == "pending" || st == "available" || st == "registered"
+}
+
+// isRegisteredSlot: a register slot answered with the marker.
+func isRegisteredSlot(it map[string]ddbtypes.AttributeValue) bool {
+	return it != nil && str(it, "op") == "recovery_register" && str(it, "status") == "done" && str(it, "code") == registeredCode &&
+		str(it, "recovery_id") != ""
+}
+
+// markRegistered records that the code of r is spent: pending ->
+// registered, only for the same recovery and never over a cancel
+// (conditional). It returns the recovery as it now is.
+func (a *API) markRegistered(ctx context.Context, v *vaultRow, r *recoveryRow) (*recoveryRow, error) {
+	if r.State != "pending" {
+		return r, nil
+	}
+	_, err := a.cfg.DDB.UpdateItem(ctx, &dynamodb.UpdateItemInput{TableName: &a.cfg.Tables.Vaults,
+		Key:                      map[string]ddbtypes.AttributeValue{"vault_id": s(v.VaultID)},
+		UpdateExpression:         aws.String("SET recovery.#st = :reg, updated_at = :now"),
+		ConditionExpression:      aws.String("recovery.recovery_id = :id AND recovery.#st = :pending"),
+		ExpressionAttributeNames: map[string]string{"#st": "state"},
+		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{":reg": s("registered"), ":pending": s("pending"),
+			":id": s(r.ID), ":now": s(a.nowISO())}})
+	if code(err) == "ConditionalCheckFailedException" {
+		return r, nil // cancelled or replaced meanwhile
+	}
+	if err != nil {
+		return nil, err
+	}
+	c := *r
+	c.State = "registered"
+	return &c, nil
+}
+
+// refreshRegistered: while the code is available, a slot of this
+// recovery's register requests answered with the marker means the code is
+// spent.
+func (a *API) refreshRegistered(ctx context.Context, guid string, v *vaultRow) error {
+	r := v.Recovery
+	if r == nil || recoveryState(r, a.recoveryNowS()) != "available" || len(r.RegisterIDs) == 0 {
+		return nil
+	}
+	ids := r.RegisterIDs
+	if len(ids) > maxRegisterIDs {
+		ids = ids[len(ids)-maxRegisterIDs:]
+	}
+	for _, id := range ids {
+		if !ulidRE.MatchString(id) {
+			continue
+		}
+		g, err := a.cfg.DDB.GetItem(ctx, &dynamodb.GetItemInput{TableName: &a.cfg.Tables.Requests, ConsistentRead: aws.Bool(true),
+			Key: map[string]ddbtypes.AttributeValue{"request_id": s(id)}})
+		if err != nil {
+			return err
+		}
+		if isRegisteredSlot(g.Item) && str(g.Item, "user_guid") == guid && str(g.Item, "recovery_id") == r.ID {
+			nr, err := a.markRegistered(ctx, v, r)
+			if err != nil {
+				return err
+			}
+			v.Recovery = nr
+			return nil
+		}
+	}
+	return nil
+}
+
+// recordRegisterID remembers a register request on its recovery (best
+// effort: the app's poll finds the slot anyway).
+func (a *API) recordRegisterID(ctx context.Context, v *vaultRow, recoveryID, requestID string) {
+	ids := append(append([]string(nil), v.Recovery.RegisterIDs...), requestID)
+	if len(ids) > maxRegisterIDs {
+		ids = ids[len(ids)-maxRegisterIDs:]
+	}
+	l := make([]ddbtypes.AttributeValue, len(ids))
+	for i, id := range ids {
+		l[i] = s(id)
+	}
+	_, _ = a.cfg.DDB.UpdateItem(ctx, &dynamodb.UpdateItemInput{TableName: &a.cfg.Tables.Vaults,
+		Key:                 map[string]ddbtypes.AttributeValue{"vault_id": s(v.VaultID)},
+		UpdateExpression:    aws.String("SET recovery.register_ids = :ids, updated_at = :now"),
+		ConditionExpression: aws.String("recovery.recovery_id = :id"),
+		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{":ids": &ddbtypes.AttributeValueMemberL{Value: l},
+			":id": s(recoveryID), ":now": s(a.nowISO())}})
 }
 
 // recoverableVault: enrolled (not enrolling) and not deleted.
@@ -94,11 +196,16 @@ func (a *API) recoveryInstance(ctx context.Context, v *vaultRow, now int64) (*in
 // setRecovery writes the recovery, conditional on the one read (or none).
 func (a *API) setRecovery(ctx context.Context, v *vaultRow, r *recoveryRow, expectID string) error {
 	cond := "attribute_not_exists(recovery)"
-	vals := map[string]ddbtypes.AttributeValue{
-		":r": &ddbtypes.AttributeValueMemberM{Value: map[string]ddbtypes.AttributeValue{"recovery_id": s(r.ID), "state": s(r.State),
-			"requested_at": n(r.RequestedAt), "available_at": n(r.AvailableAt), "expires_at": n(r.ExpiresAt)}},
-		":now": s(a.nowISO()),
+	rm := map[string]ddbtypes.AttributeValue{"recovery_id": s(r.ID), "state": s(r.State),
+		"requested_at": n(r.RequestedAt), "available_at": n(r.AvailableAt), "expires_at": n(r.ExpiresAt)}
+	if len(r.RegisterIDs) > 0 {
+		l := make([]ddbtypes.AttributeValue, len(r.RegisterIDs))
+		for i, id := range r.RegisterIDs {
+			l[i] = s(id)
+		}
+		rm["register_ids"] = &ddbtypes.AttributeValueMemberL{Value: l}
 	}
+	vals := map[string]ddbtypes.AttributeValue{":r": &ddbtypes.AttributeValueMemberM{Value: rm}, ":now": s(a.nowISO())}
 	if expectID != "" {
 		cond = "recovery.recovery_id = :id"
 		vals[":id"] = s(expectID)
@@ -147,7 +254,7 @@ func (a *API) recoveryRequest(ctx context.Context, guid string, body map[string]
 		return nil, err
 	}
 	// The slot keeps the sealed code until the recovery expires.
-	if err := a.enqueueWith(ctx, "recovery", guid, v, r.ID, inst, "", "", "", bk, r.ExpiresAt-rn+3600); err != nil {
+	if err := a.enqueueWith(ctx, "recovery", guid, v, r.ID, inst, "", "", "", bk, r.ExpiresAt-rn+3600, nil); err != nil {
 		return nil, err
 	}
 	return map[string]any{"recovery_id": r.ID, "available_at": isoS(r.AvailableAt), "expires_at": isoS(r.ExpiresAt)}, nil
@@ -162,6 +269,9 @@ func (a *API) recoveryStatus(ctx context.Context, guid string) (any, error) {
 	rn := a.recoveryNowS()
 	if v == nil || v.Recovery == nil {
 		return map[string]any{"recovery": nil}, nil
+	}
+	if err := a.refreshRegistered(ctx, guid, v); err != nil {
+		return nil, err
 	}
 	r := v.Recovery
 	st := recoveryState(r, rn)
@@ -203,7 +313,7 @@ func (a *API) recoveryCancel(ctx context.Context, guid string, body map[string]a
 	}
 	r := v.Recovery
 	if !recoveryActive(r, a.recoveryNowS()) {
-		return map[string]any{}, nil // nothing to cancel: a no-op
+		return map[string]any{"cancelled": false}, nil // nothing to cancel: a no-op
 	}
 	c := *r
 	c.State = "cancelled"
@@ -214,7 +324,7 @@ func (a *API) recoveryCancel(ctx context.Context, guid string, body map[string]a
 	if inst, err := a.recoveryInstance(ctx, v, a.nowS()); err == nil {
 		_ = a.enqueue(ctx, "recovery_cancel", guid, v, a.newULID(), inst, "", "", "")
 	}
-	return map[string]any{}, nil
+	return map[string]any{"cancelled": true}, nil
 }
 
 func (a *API) recoveryRegister(ctx context.Context, guid string, body map[string]any) (any, error) {
@@ -260,8 +370,13 @@ func (a *API) recoveryRegister(ctx context.Context, guid string, body map[string
 	if rel == nil || rel.available != nil && !*rel.available || rel.status == "removed" && rel.available == nil {
 		return nil, vaultError(410, "release_unavailable", "The enclave release this vault is sealed to can no longer be started.", nil)
 	}
-	if err := a.enqueue(ctx, "recovery_register", guid, v, rid, inst, kid, env, ""); err != nil {
+	// The slot names its recovery, so its answer can retire the code
+	// (0.10.6 §11.11.7).
+	recID := v.Recovery.ID
+	if err := a.enqueueWith(ctx, "recovery_register", guid, v, rid, inst, kid, env, "", "", requestTTLS,
+		map[string]ddbtypes.AttributeValue{"recovery_id": s(recID)}); err != nil {
 		return nil, err
 	}
+	a.recordRegisterID(ctx, v, recID, rid)
 	return map[string]any{"vault_id": v.VaultID, "request_id": rid}, nil
 }

@@ -29,6 +29,13 @@ const (
 	StatusETKUnknown = "etk_unknown"
 )
 
+// CodeRecoveryRegistered is the clear marker on the answer to a
+// recovery_register whose sealed result is {"ok": true} (§11.5, §11.11.3,
+// 0.10.6): the host copies it into the response slot's code, so that the
+// member API stops releasing the spent code. It is the only response code
+// that reflects a sealed outcome.
+const CodeRecoveryRegistered = "recovery_registered"
+
 // ErrMalformed is returned for a malformed queue message.
 var ErrMalformed = errors.New("enclave: malformed message")
 
@@ -188,6 +195,8 @@ type Response struct {
 	RequestID string
 	Status    string
 	Envelope  []byte
+	// Code is CodeRecoveryRegistered or empty (0.10.6).
+	Code string
 }
 
 // Marshal encodes the response for the parent.
@@ -195,6 +204,9 @@ func (r *Response) Marshal() []byte {
 	b := strictjson.NewBuilder().Uint("v", 1).String("request_id", r.RequestID).String("status", r.Status)
 	if r.Envelope != nil {
 		b.Base64("envelope", r.Envelope)
+	}
+	if r.Code != "" {
+		b.String("code", r.Code)
 	}
 	return b.Bytes()
 }
@@ -229,6 +241,11 @@ func ParseResponse(b []byte) (*Response, error) {
 		if r.Envelope, err = strictjson.DecodeStd(s, altchan.ResultEnvelopeSize); err != nil {
 			return nil, ErrMalformed
 		}
+	}
+	if c, ok, err := o.OptString("code"); err != nil || ok && (c != CodeRecoveryRegistered || r.Envelope == nil) {
+		return nil, ErrMalformed
+	} else if ok {
+		r.Code = c
 	}
 	return r, nil
 }

@@ -355,8 +355,12 @@ func TestRecoveryReplacesApp(t *testing.T) {
 	if res := register(t, aw, b, qr); !res.OK {
 		t.Fatalf("register: %+v", res)
 	}
-	if r := aw.mustUnlock(b, acPIN, client.UnlockOptions{}, ""); !r.OK {
+	if r := aw.mustUnlock(b, acPIN, client.UnlockOptions{}, ""); !r.OK || r.CredentialBackup == nil || !*r.CredentialBackup {
 		t.Fatalf("unlock: %+v", r)
+	}
+	// §11.11.5 step 1 (0.10.6): the vault keeps a copy, so ask for the password.
+	if on, known := b.dev.RecoveryCredentialBackup(); !on || !known {
+		t.Fatalf("credential_backup %v %v", on, known)
 	}
 	if err := b.dev.CompleteRecoveryHandshake(ctx); err != nil {
 		t.Fatal(err)
@@ -405,8 +409,13 @@ func TestRecoveryBackupOffLosesCredential(t *testing.T) {
 	if res := register(t, aw, b, qr); !res.OK {
 		t.Fatalf("register: %+v", res)
 	}
-	if r := aw.mustUnlock(b, acPIN, client.UnlockOptions{}, ""); !r.OK {
+	if r := aw.mustUnlock(b, acPIN, client.UnlockOptions{}, ""); !r.OK || r.CredentialBackup == nil || *r.CredentialBackup {
 		t.Fatalf("unlock: %+v", r)
+	}
+	// §11.11.5 step 1 (0.10.6): no copy, so the app need not ask for the
+	// password (the vault would answer credential_lost anyway).
+	if on, known := b.dev.RecoveryCredentialBackup(); on || !known {
+		t.Fatalf("credential_backup %v %v", on, known)
 	}
 	if err := b.dev.CompleteRecoveryHandshake(ctx); err != nil {
 		t.Fatal(err)

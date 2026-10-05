@@ -404,6 +404,10 @@ func (d *Device) OpenUnlockResult(raw []byte) (*altchan.UnlockResult, error) {
 			return nil, err
 		}
 	}
+	if d.st.Recovery != nil && r.CredentialBackup != nil {
+		b := *r.CredentialBackup
+		d.st.Recovery.CredentialBackup = &b
+	}
 	if r.Token != "" && d.st.Vault != nil {
 		if exp, err := d.heldFromVault(r.Token); err == nil && exp.After(d.st.Vault.TokenExp) {
 			d.st.Vault.Token, d.st.Vault.TokenExp = r.Token, exp

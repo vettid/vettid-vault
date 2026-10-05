@@ -83,8 +83,34 @@ func FuzzParseQueueMessage(f *testing.F) {
 	})
 }
 
+// §11.5 (0.10.6): the register's marker follows the envelope; a code
+// other than the marker, or a marker without an envelope, is malformed.
+func TestResponseCode(t *testing.T) {
+	r := &Response{RequestID: "01JB2Z6V9K3M4N5P6Q7R8S9T21", Status: StatusDone, Envelope: opaque(), Code: CodeRecoveryRegistered}
+	b := r.Marshal()
+	if !strings.HasSuffix(string(b), `","code":"recovery_registered"}`) {
+		t.Fatalf("member order: %s", b)
+	}
+	p, err := ParseResponse(b)
+	if err != nil || p.Code != CodeRecoveryRegistered || len(p.Envelope) != altchan.ResultEnvelopeSize {
+		t.Fatalf("parse: %v %+v", err, p)
+	}
+	if p, err := ParseResponse((&Response{RequestID: r.RequestID, Status: StatusDone, Envelope: r.Envelope}).Marshal()); err != nil || p.Code != "" {
+		t.Fatalf("no marker: %v %+v", err, p)
+	}
+	for _, bad := range []*Response{
+		{RequestID: r.RequestID, Status: StatusDone, Envelope: r.Envelope, Code: "etk_unknown"},
+		{RequestID: r.RequestID, Status: StatusDone, Code: CodeRecoveryRegistered},
+	} {
+		if _, err := ParseResponse(bad.Marshal()); err == nil {
+			t.Errorf("accepted %s", bad.Marshal())
+		}
+	}
+}
+
 func FuzzParseResponse(f *testing.F) {
 	f.Add((&Response{RequestID: "01JB2Z6V9K3M4N5P6Q7R8S9T21", Status: StatusDone, Envelope: opaque()}).Marshal())
+	f.Add((&Response{RequestID: "01JB2Z6V9K3M4N5P6Q7R8S9T21", Status: StatusDone, Envelope: opaque(), Code: CodeRecoveryRegistered}).Marshal())
 	f.Fuzz(func(t *testing.T, b []byte) {
 		_, _ = ParseResponse(b)
 	})

@@ -296,6 +296,13 @@ func parseVault(it map[string]ddbtypes.AttributeValue) *vaultRow {
 		r.RequestedAt, _ = num(m.Value, "requested_at")
 		r.AvailableAt, _ = num(m.Value, "available_at")
 		r.ExpiresAt, _ = num(m.Value, "expires_at")
+		if l, ok := m.Value["register_ids"].(*ddbtypes.AttributeValueMemberL); ok {
+			for _, x := range l.Value {
+				if id, ok := x.(*ddbtypes.AttributeValueMemberS); ok {
+					r.RegisterIDs = append(r.RegisterIDs, id.Value)
+				}
+			}
+		}
 		if r.ID != "" {
 			v.Recovery = r
 		}
@@ -548,16 +555,22 @@ func (a *API) routeForEnrollment(ctx context.Context, now int64) (any, error) {
 // --- requests ---
 
 func (a *API) enqueue(ctx context.Context, op, guid string, v *vaultRow, requestID string, inst *instanceRow, kid, env, manifestSHA string) error {
-	return a.enqueueWith(ctx, op, guid, v, requestID, inst, kid, env, manifestSHA, "", requestTTLS)
+	return a.enqueueWith(ctx, op, guid, v, requestID, inst, kid, env, manifestSHA, "", requestTTLS, nil)
 }
 
 // enqueueWith is enqueue with vault.ts's extra fields: the recovery's
-// browser_key (after manifest_sha256) and the slot's TTL.
-func (a *API) enqueueWith(ctx context.Context, op, guid string, v *vaultRow, requestID string, inst *instanceRow, kid, env, manifestSHA, browserKey string, ttlS int64) error {
+// browser_key (after manifest_sha256), the slot's TTL and extra slot
+// attributes (a register's recovery_id).
+func (a *API) enqueueWith(ctx context.Context, op, guid string, v *vaultRow, requestID string, inst *instanceRow, kid, env, manifestSHA, browserKey string,
+	ttlS int64, slot map[string]ddbtypes.AttributeValue) error {
 	created := a.nowISO()
+	item := map[string]ddbtypes.AttributeValue{"request_id": s(requestID), "vault_id": s(v.VaultID), "user_guid": s(guid), "op": s(op),
+		"status": s("queued"), "instance_id": s(inst.InstanceID), "created_at": s(created), "expires_at": n(a.nowS() + ttlS)}
+	for k, x := range slot {
+		item[k] = x
+	}
 	_, err := a.cfg.DDB.PutItem(ctx, &dynamodb.PutItemInput{TableName: &a.cfg.Tables.Requests, ConditionExpression: aws.String("attribute_not_exists(request_id)"),
-		Item: map[string]ddbtypes.AttributeValue{"request_id": s(requestID), "vault_id": s(v.VaultID), "user_guid": s(guid), "op": s(op),
-			"status": s("queued"), "instance_id": s(inst.InstanceID), "created_at": s(created), "expires_at": n(a.nowS() + ttlS)}})
+		Item: item})
 	if err != nil {
 		if code(err) == "ConditionalCheckFailedException" {
 			return vaultError(409, "duplicate_request", "request_id has already been used", nil)
@@ -637,12 +650,22 @@ func (a *API) status(ctx context.Context, guid string) (any, error) {
 		}
 		return s
 	}
+	if err := a.refreshRegistered(ctx, guid, v); err != nil {
+		return nil, err
+	}
+	// A vault runs only under a live lease: unlocked without one is a
+	// vault that stopped before its host recorded the lock (0.10.6 §11.5).
+	leased := v.Lease != nil && v.Lease.expires > now
+	state := v.State
+	if state == "unlocked" && !leased {
+		state = "locked"
+	}
 	var rec any
 	if rn := a.recoveryNowS(); recoveryActive(v.Recovery, rn) {
 		rec = map[string]any{"state": recoveryState(v.Recovery, rn), "available_at": isoS(v.Recovery.AvailableAt)}
 	}
-	return map[string]any{"vault": map[string]any{"vault_id": v.VaultID, "state": v.State, "sealed_release": nul(v.SealedRelease),
-		"vault_version": nul(v.VaultVersion), "state_version": v.StateVersion, "leased": v.Lease != nil && v.Lease.expires > now,
+	return map[string]any{"vault": map[string]any{"vault_id": v.VaultID, "state": state, "sealed_release": nul(v.SealedRelease),
+		"vault_version": nul(v.VaultVersion), "state_version": v.StateVersion, "leased": leased,
 		"recovery": rec, "created_at": v.CreatedAt, "updated_at": v.UpdatedAt}}, nil
 }
 
@@ -844,6 +867,20 @@ func (a *API) request(ctx context.Context, guid, rid string) (any, error) {
 		}
 		if c := str(it, "code"); codeRE.MatchString(c) {
 			out["code"] = c
+		}
+		// The app polls its register result: the moment to retire the
+		// code (0.10.6 §11.11.7).
+		if isRegisteredSlot(it) && vaultIDRE.MatchString(str(it, "vault_id")) {
+			g, err := a.cfg.DDB.GetItem(ctx, &dynamodb.GetItemInput{TableName: &a.cfg.Tables.Vaults, ConsistentRead: aws.Bool(true),
+				Key: map[string]ddbtypes.AttributeValue{"vault_id": s(str(it, "vault_id"))}})
+			if err != nil {
+				return nil, err
+			}
+			if v := parseVault(g.Item); v != nil && v.Recovery != nil && v.UserGUID == guid && v.Recovery.ID == str(it, "recovery_id") {
+				if _, err := a.markRegistered(ctx, v, v.Recovery); err != nil {
+					return nil, err
+				}
+			}
 		}
 	}
 	return out, nil

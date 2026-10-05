@@ -19,7 +19,13 @@
 //	-relay-port (18080)  the relay, plain HTTP; tokens name it https://relay.vettid.test
 //	-api-port   (18081)  the member API stand-in ("Authorization: Bearer <user_guid>")
 //	-ctl-port   (18082)  dev control: GET /dev/health, GET /dev/info, GET /dev/trust,
-//	                     POST /dev/peer/request, POST /dev/peer/event
+//	                     POST /dev/peer/request, POST /dev/peer/event, POST /dev/recovery/code
+//
+// With -recovery-skew (e.g. 24h), POST /dev/recovery/code {"guid": G}
+// plays the account portal's recovery for member G: it requests a
+// recovery with a fresh browser key, moves the recovery clock of the
+// enclave and the member API forward past the 24 h delay, and returns the
+// opened code and its QR payload for the app to register with.
 //
 // Run it from a checkout or by module version:
 //
@@ -66,6 +72,7 @@ type options struct {
 	src                         string
 	minFreeGB                   int
 	memWait                     time.Duration
+	recoverySkew                time.Duration
 }
 
 func parseFlags(args []string) (*options, error) {
@@ -85,6 +92,7 @@ func parseFlags(args []string) (*options, error) {
 	fs.StringVar(&o.src, "src", "", "vettid-vault source tree to build the binaries from (default: this command's own module)")
 	fs.IntVar(&o.minFreeGB, "wait-free-mem", 8, "refuse to start unless this many GB of memory are available (0: no check)")
 	fs.DurationVar(&o.memWait, "mem-wait", 0, "with -wait-free-mem: keep re-checking (every 30 s) this long before refusing")
+	fs.DurationVar(&o.recoverySkew, "recovery-skew", 0, "POST /dev/recovery/code moves the recovery clock (enclave and member API) forward this much after each code is minted, e.g. 24h to skip the recovery delay (0: no recovery clock; DEVELOPMENT ONLY)")
 	if err := fs.Parse(args); err != nil {
 		return nil, err
 	}
@@ -101,8 +109,8 @@ func parseFlags(args []string) (*options, error) {
 		}
 		ports[p] = true
 	}
-	if o.minFreeGB < 0 || o.memWait < 0 {
-		return nil, errors.New("-wait-free-mem and -mem-wait must not be negative")
+	if o.minFreeGB < 0 || o.memWait < 0 || o.recoverySkew < 0 {
+		return nil, errors.New("-wait-free-mem, -mem-wait and -recovery-skew must not be negative")
 	}
 	if o.localstack != "" && !strings.HasPrefix(o.localstack, "http://") && !strings.HasPrefix(o.localstack, "https://") {
 		return nil, errors.New("-localstack must be an http(s) URL")

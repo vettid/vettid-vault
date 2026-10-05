@@ -80,12 +80,33 @@ const (
 	// Lifecycle: [event, vault_id, release, vault_version, state_version]
 	// (§11.5).
 	KindLifecycle Kind = 0x21
-	// Stopped: [vault_id, reason]: a vault's run loop ended without a
-	// lifecycle "locked" (split brain, errors).
+	// Stopped: [vault_id, reason]: a vault's run loop ended on its own
+	// (StopLocked: the vault locked itself, e.g. the member's lock; split
+	// brain; errors).
 	KindStopped Kind = 0x22
 	// Log: [level, message, key, value, ...]: sanitized enclave logs.
 	KindLog Kind = 0x23
 )
+
+// Stopped reasons. A vault that locked itself (the member's lock, a move,
+// a deletion, the idle lock) ends as expected; split brain and errors do
+// not.
+const (
+	StopLocked     = "locked"
+	StopSplitBrain = "split_brain"
+	StopError      = "error"
+)
+
+// StopExpected reports whether a Stopped reason is a normal ending (logged
+// at INFO) rather than a crash or an unexpected exit (WARN). Unknown
+// reasons are unexpected.
+func StopExpected(reason string) bool {
+	switch reason {
+	case StopLocked, "moved", "deleted", "idle":
+		return true
+	}
+	return false
+}
 
 // KindReply answers a request; its id is the request's.
 const KindReply Kind = 0x7f

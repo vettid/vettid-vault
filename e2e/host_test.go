@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -372,6 +373,30 @@ func TestHostStack(t *testing.T) {
 	waitUntil(t, "vault process exited", func() bool { return syscall.Kill(pid1, 0) != nil })
 	if u, _ := m1.unlock(a); !u.OK {
 		t.Fatalf("unlock: %+v", u)
+	}
+	if !m1.status() {
+		t.Fatal("status after unlock")
+	}
+	// The member's own lock (vault.lock from the app): the vault process
+	// ends by itself, and its lifecycle "locked" reaches the parent before
+	// the process's channel closes; the row says locked.
+	pid1 = a.sup.VaultPid("11111111111111111111111111111111")
+	nev := len(hs.tables.LifecycleEvents("11111111111111111111111111111111"))
+	if r, err := m1.dev.Request(ctxT(t, 30*time.Second), "vault.lock", json.RawMessage(`{}`)); err != nil || !r.OK() {
+		t.Fatalf("vault.lock: %+v %v", r, err)
+	}
+	waitUntil(t, "app lock", func() bool { return len(a.p.RunningVaults()) == 0 })
+	waitUntil(t, "vault process exited after the app lock", func() bool { return syscall.Kill(pid1, 0) != nil })
+	waitUntil(t, "lifecycle locked", func() bool {
+		ev := hs.tables.LifecycleEvents("11111111111111111111111111111111")
+		return len(ev) > nev && slices.Contains(ev[nev:], "locked")
+	})
+	waitUntil(t, "row locked", func() bool {
+		r, _ := hs.tables.Vault("11111111111111111111111111111111")
+		return r.State == "locked" && r.LeaseInstance == ""
+	})
+	if u, _ := m1.unlock(a); !u.OK {
+		t.Fatalf("unlock after the app lock: %+v", u)
 	}
 	if !m1.status() {
 		t.Fatal("status after unlock")

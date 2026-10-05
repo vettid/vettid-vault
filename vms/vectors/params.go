@@ -26,6 +26,14 @@ const (
 	SeedManifestKey byte = 0x21 // (spec) §11.10.1 manifest key, P-256 scalar
 	SeedDeviceKey   byte = 0x22 // (spec) §11.10.3 Android device attestation key
 
+	// §11.11.2 recovery code seal (recovery.json).
+	SeedBrowserKey   byte = 0x23 // the portal's P-256 key, private scalar
+	SeedRecEph       byte = 0x24 // the code's ephemeral scalar
+	NonceRec         byte = 0x25
+	SeedRecEphNoCred byte = 0x26 // the no_credential refusal's ephemeral scalar
+	NonceRecNoCred   byte = 0x27
+	RecCodeBytes     byte = 0x28 // the code's 20 bytes
+
 	SessionSenderKid    byte = 0x02
 	SessionRecipientKid byte = 0x01
 
@@ -56,4 +64,7 @@ const (
 	// ACApprovalRequestID is the unlock that carries a release approval
 	// (spec §16).
 	ACApprovalRequestID = "01JB2Z6V9K3M4N5P6Q7R8S9T22"
+	// RecRecoveryID is the recovery's id (the queue message's request_id,
+	// §11.11.1) for ACVaultID.
+	RecRecoveryID = "01JB2Z6V9K3M4N5P6Q7R8S9T30"
 )

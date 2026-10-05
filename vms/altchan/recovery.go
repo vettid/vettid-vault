@@ -52,6 +52,25 @@ func codeKey(shared, eph, browser []byte, vaultID, recoveryID string) ([]byte, e
 	return hkdf.Key(sha256.New, shared, salt, LabelRecoverySeal+"\x00"+vaultID+"\x00"+recoveryID, 32)
 }
 
+// ephemeralP256 draws the seal's ephemeral key from the library's
+// randomness source (the OS CSPRNG; scripted only in vmsvectors builds, for
+// the §16 recovery vector): a 32-byte scalar, redrawn in the negligible
+// case that it is 0 or not below the group order.
+func ephemeralP256() (*ecdh.PrivateKey, error) {
+	for range 8 {
+		b, err := suite.RandomBytes(32)
+		if err != nil {
+			return nil, err
+		}
+		k, err := ecdh.P256().NewPrivateKey(b)
+		suite.Wipe(b)
+		if err == nil {
+			return k, nil
+		}
+	}
+	return nil, suite.ErrRandom
+}
+
 // SealRecoveryCode seals the code to the browser's P-256 key (§11.11.2):
 //
 //	out = 0x01 || eph (65) || nonce (12) || AES-256-GCM(k, nonce, aad = out[0:78], pt)
@@ -59,13 +78,14 @@ func codeKey(shared, eph, browser []byte, vaultID, recoveryID string) ([]byte, e
 //	                   info = label || 0x00 || vault_id || 0x00 || recovery_id)
 //
 // pt is the JSON {v, vault_id, recovery_id, code, not_before, expires_at}
-// followed by zero bytes up to SealedCodeSize.
+// followed by zero bytes up to SealedCodeSize. Its random draws, in order:
+// the ephemeral scalar (32 bytes), then the nonce (12).
 func SealRecoveryCode(browserKey []byte, c *RecoveryCode) ([]byte, error) {
 	pub, err := ecdh.P256().NewPublicKey(browserKey)
 	if err != nil {
 		return nil, ErrMalformed
 	}
-	eph, err := ecdh.P256().GenerateKey(nil)
+	eph, err := ephemeralP256()
 	if err != nil {
 		return nil, err
 	}

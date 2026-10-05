@@ -3,7 +3,8 @@
 # test-only vector values from testdata/vectors (VAULT-MESSAGING §16): HPKE
 # intermediate values derived from the public all-0x05 key seed and all-0x07
 # encapsulation randomness, and the PUBLIC keys (SPKI) of the §16
-# release-update test keys (scalars 32 x 0x21 and 32 x 0x22).
+# release-update test keys (scalars 32 x 0x21 and 32 x 0x22) and the PUBLIC
+# key of the §11.11.2 recovery vector's browser key (scalar 32 x 0x23).
 # They are public by design and are regenerated deterministically by
 # `go generate ./vms/vectors`. Also allowlisted: the example ULID of
 # VAULT-MESSAGING §5.3, which tests use as a dummy id (for instance as a
@@ -20,5 +21,6 @@ regexes = [
   '''1d7856a1a77eee3accf4e69fb2353f2421e3f15584739e5c6df73d487b4b66b4''',
   '''MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAERi26GuT8GpaLTazyDN1tvh''',
   '''MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE1lqTl3yqPRsIGFL/V6eeRl8W''',
+  '''042464a2f8813e007299b9c0beef9c8d6d8d17470b32bba0329c145f0cfc60b683f831a3''',
   '''01JB2Z6V9K3M4N5P6Q7R8S9T0V''',
 ]

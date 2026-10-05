@@ -29,13 +29,14 @@ func TestParseFlags(t *testing.T) {
 		t.Fatalf("defaults: %+v", o)
 	}
 	o, err = parseFlags([]string{"-relay-port", "0", "-api-port", "0", "-ctl-port", "0", "-wait-free-mem", "0", "-localstack", "http://127.0.0.1:4566"})
-	if err != nil || o.relayPort != 0 || o.minFreeGB != 0 {
+	if err != nil || o.relayPort != 0 || o.minFreeGB != 0 || o.recoverySkew != 0 {
 		t.Fatalf("%+v %v", o, err)
 	}
 	for _, bad := range [][]string{
 		{"-relay-port", "18081"},
 		{"-ctl-port", "70000"},
 		{"-wait-free-mem", "-1"},
+		{"-recovery-skew", "-24h"},
 		{"-localstack", "127.0.0.1:4566"},
 		{"extra"},
 		{"-unknown"},

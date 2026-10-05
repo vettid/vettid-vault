@@ -283,7 +283,7 @@ wire, storage or host code) checks every tag in
 | C5 AWS | — (LocalStack, a fake KMS) | real KMS, SigV4 endpoints, Amazon roots (hardware smoke) |
 | C6 device attestation | test CA only | vendor roots and signing digests |
 | C7 relay | messages flow through this tree's relay with an old vault | — |
-| C8 member API features | lock and status | recovery and host delete (the stand-in has no routes for them yet) |
+| C8 member API features | lock and status | recovery (the stand-in has its routes; the compat row does not exercise them yet) and host delete (no stand-in route yet) |
 
 Until production release 1 the list is empty, and the workflow runs one
 **synthetic** row against the pull request's base commit (nightly: the

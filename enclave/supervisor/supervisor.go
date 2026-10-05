@@ -376,7 +376,7 @@ func (s *Supervisor) lockVault(ctx context.Context, id, why string) {
 	s.forget(id)
 	if errors.Is(err, vault.ErrSplitBrain) {
 		s.log.Warn("vault locked without final flush: newer state written elsewhere", "vault_id", id, "trigger", why)
-		s.link.notify(hostproto.KindStopped, hostproto.Strings(id, "split_brain")...)
+		s.link.notify(hostproto.KindStopped, hostproto.Strings(id, hostproto.StopSplitBrain)...)
 		return
 	}
 	if err != nil {

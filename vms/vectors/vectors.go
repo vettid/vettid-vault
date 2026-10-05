@@ -24,7 +24,7 @@ package vectors
 const Dir = "../../testdata/vectors"
 
 // Files are the vector files, in generation order.
-var Files = []string{"keys.json", "hpke.json", "envelope_sealed.json", "envelope_session.json", "handshake.json", "invite.json", "altchan.json", "release.json"}
+var Files = []string{"keys.json", "hpke.json", "envelope_sealed.json", "envelope_session.json", "handshake.json", "invite.json", "altchan.json", "release.json", "recovery.json"}
 
 // Fixed inputs shared by the generator and the checker (§16).
 const (

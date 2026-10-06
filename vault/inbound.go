@@ -46,6 +46,7 @@ func (m *Manager) Start(ctx context.Context) error {
 	m.started = true
 	now := m.now()
 	m.record(Activity{Kind: "vault.unlocked", Audit: true}, now)
+	m.ownerCheckInit(now)
 	m.remintIssued(now)
 	m.reconnectExpired(now)
 	for _, p := range m.st.Devices {
@@ -53,6 +54,7 @@ func (m *Manager) Start(ctx context.Context) error {
 			m.startRekey(p, now) // device sessions rekey on every unlock (§6.5)
 		}
 	}
+	m.ownerCheckTick(now) // past the deadline: held from the unlock on (§3.6.3)
 	if err := m.persist(ctx, false); err != nil {
 		return err
 	}
@@ -131,6 +133,7 @@ func (m *Manager) ProcessBatch(ctx context.Context, c Collector, msgs []Message)
 		return ErrLocked
 	}
 	now := m.now()
+	m.refreshOwnerCred()
 	m.housekeeping(now)
 	var durable, ephemeral []string
 	for _, msg := range msgs {
@@ -365,6 +368,20 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 		}
 		return disp(eph)
 	}
+	m.refreshOwnerCred()
+	if p.Kind != KindConnection && !p.Recovering {
+		// The daily owner check (§3.6.3): past the deadline the app, and
+		// with the hold on every owner device, may send only the hold's
+		// allow list. A recovering app keeps its own set (§11.11.5).
+		if st := m.ownerCheckState(now); st != OwnerCheckOK && !m.holdAllows(p, in.Type, st) {
+			if te.spec.Request {
+				m.respondError(p, in, key, "owner_check_required", "", now)
+			} else {
+				m.audit(now, "owner_check", p.ID)
+			}
+			return disp(eph)
+		}
+	}
 	s := &Session{m: m, peer: p, host: managerHost{m}, from: info(p), ctx: ctx, now: now, inner: in}
 	allowed := te.allows(p.Kind) && !(p.Recovering && !recoveryAllowed[in.Type])
 	ask := false
@@ -399,7 +416,8 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 		return disp(eph)
 	}
 	if p.Kind == KindDesktop && te.spec.DesktopApproval {
-		if af, ok := te.handler.(AppOnlyForms); ok && af.AppOnly(in.Type, in.Body) {
+		if af, ok := te.handler.(AppOnlyForms); ok && af.AppOnly(in.Type, in.Body) ||
+			in.Type == "settings.set" && namesOwnerCheck(in.Body) { // §3.6.2, §3.6.7
 			// A form only an app may send (§10.7, §10.12): refused at once,
 			// never held for an approval it could not pass.
 			m.respondError(p, in, key, "forbidden", "", now)

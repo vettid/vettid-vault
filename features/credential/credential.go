@@ -194,7 +194,7 @@ func (f *Feature) Types() []vault.TypeSpec {
 		r("credential.password.change", apps), r("credential.delete", apps), r("credential.recover", apps),
 		r("credential.reset", apps), r("credential.alarm.confirm", apps),
 		r("device.transfer.create", apps), r("device.transfer.approve", apps), r("device.transfer.reject", apps),
-		r("vault.delete", apps),
+		r("vault.delete", apps), r(vault.TypeOwnerCheck, apps),
 	}
 }
 
@@ -329,6 +329,7 @@ const (
 	needHash
 	needPIN
 	optPassword
+	optHold
 )
 
 // What another feature's credential operation carries in its sealed
@@ -361,6 +362,7 @@ var needs = map[string]int{
 	"device.transfer.approve":    needBlob | needSealed | needPassword | needPIN,
 	"device.transfer.reject":     0,
 	"vault.delete":               optBlob | needSealed | optPassword | needPIN,
+	vault.TypeOwnerCheck:         needBlob | needSealed | needPassword | needPIN | optHold,
 }
 
 // opNeed is what every operation of another feature carries.
@@ -446,8 +448,14 @@ type Payload struct {
 	// RequestID and PayloadHash bind a critical-secret use (§10.13).
 	RequestID   string
 	PayloadHash []byte
-	// PIN is the vault PIN of a transfer's approval (§6.7.1).
+	// PIN is the vault PIN of a transfer's approval (§6.7.1) or an owner
+	// check (§3.6.1).
 	PIN []byte
+	// Hold and HoldOffUntil are an owner check's hold change (§3.6.7):
+	// HasHold when `hold` is present; HoldOffUntil "" when absent.
+	HasHold      bool
+	Hold         bool
+	HoldOffUntil string
 }
 
 // Wipe zeroizes the payload's secrets.
@@ -540,6 +548,19 @@ func parsePayload(n int, pt []byte) (*Payload, error) {
 		}
 		p.PIN = []byte(pin)
 	}
+	if n&optHold != 0 {
+		if o.Has("hold") {
+			if p.Hold, err = o.Bool("hold"); err != nil {
+				return fail()
+			}
+			p.HasHold = true
+		}
+		if v, present, err := o.OptString("hold_off_until"); err != nil || present && (v == "" || len(v) > 64) {
+			return fail()
+		} else if present {
+			p.HoldOffUntil = v
+		}
+	}
 	if n&needReply != 0 {
 		ek, err := o.Base64("reply_key", suite.EKSize)
 		if err != nil {
@@ -620,7 +641,13 @@ func (f *Feature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner
 	defer p.Wipe()
 	switch in.Type {
 	case "credential.create":
-		return f.create(s, p)
+		out, err := f.create(s, p)
+		if err == nil {
+			s.OwnerCheckEnrolled() // the first one starts the clock (§3.6.1)
+		}
+		return out, err
+	case vault.TypeOwnerCheck:
+		return f.ownerCheck(s, e, p)
 	case "credential.recover":
 		return f.recover(s, p)
 	case "credential.reset":
@@ -680,7 +707,7 @@ func (f *Feature) deleteAll(s *vault.Session) {
 // presented by another app is a clone (open); the rest is forbidden.
 var holderOnly = map[string]bool{
 	"credential.get": true, "credential.ack": true, "credential.alarm.confirm": true,
-	"device.transfer.create": true, "device.transfer.reject": true, "vault.delete": true,
+	"device.transfer.create": true, "device.transfer.reject": true, "vault.delete": true, vault.TypeOwnerCheck: true,
 }
 
 // allowedFrozen are the types a frozen credential still accepts; in state
@@ -827,16 +854,25 @@ func (f *Feature) replenish(s *vault.Session) []byte {
 // open performs steps 2–4 of §3.5.3. On success the caller owns the CEK
 // and the plaintext and must destroy and wipe them.
 func (f *Feature) open(s *vault.Session, blob, pw []byte) (*suite.PrivateKey, *Inner, error) {
-	now := s.Now()
+	if err := f.checkBlob(s, blob); err != nil {
+		return nil, nil, err
+	}
+	return f.openChecked(s, blob, pw)
+}
+
+// checkBlob is step 3 of §3.5.3: the presented blob is the current one,
+// from the holder; the holder's own retry is stale_credential, anything
+// else a clone (§3.5.9).
+func (f *Feature) checkBlob(s *vault.Session, blob []byte) error {
 	if f.st.CEKSeed == nil {
-		return nil, nil, errCredRequired
+		return errCredRequired
 	}
 	from := s.From().ID
 	if f.st.Holder == "" && !s.From().Recovering {
-		return nil, nil, errCredRequired // no holder: only the recovery path (§3.5.9)
+		return errCredRequired // no holder: only the recovery path (§3.5.9)
 	}
 	if from != f.st.Holder && !s.From().Recovering {
-		return nil, nil, f.clone(s, blob) // a blob from an app that is not the holder (§3.5.9)
+		return f.clone(s, blob) // a blob from an app that is not the holder (§3.5.9)
 	}
 	h := sha256.Sum256(blob)
 	if !suite.Equal(h[:], f.st.Hash) {
@@ -845,10 +881,17 @@ func (f *Feature) open(s *vault.Session, blob, pw []byte) (*suite.PrivateKey, *I
 			// The holder's own retry: it never received, or never kept,
 			// the current version (§3.5.3). It fetches it with
 			// credential.get.
-			return nil, nil, errStale
+			return errStale
 		}
-		return nil, nil, f.clone(s, blob)
+		return f.clone(s, blob)
 	}
+	return nil
+}
+
+// openChecked performs steps 4–5 of §3.5.3 on a checked blob: the
+// password backoff, then the password.
+func (f *Feature) openChecked(s *vault.Session, blob, pw []byte) (*suite.PrivateKey, *Inner, error) {
+	now := s.Now()
 	if now.Before(f.st.NotBefore) {
 		return nil, nil, errBackoff
 	}
@@ -1017,11 +1060,19 @@ func (f *Feature) transferApprove(s *vault.Session, body []byte, e *Envelope, p 
 	if !ok || t.ID != id || t.OldDevice != s.From().ID || t.State != vault.TransferOpen || !t.Scanned {
 		return nil, errNotFound
 	}
+	// The approval is an owner check (§3.6.1): its wrong entries are
+	// failed checks, and its success starts the new app's clock.
 	if err := s.VerifyPIN(string(p.PIN)); err != nil {
+		if vault.IsCode(err, "bad_pin") {
+			s.OwnerCheckFailed("pin")
+		}
 		return nil, err
 	}
 	cek, inner, err := f.open(s, e.Blob, p.Password)
 	if err != nil {
+		if err == errPassword {
+			s.OwnerCheckFailed("password")
+		}
 		return nil, err
 	}
 	defer cek.Destroy()
@@ -1033,6 +1084,7 @@ func (f *Feature) transferApprove(s *vault.Session, body []byte, e *Envelope, p 
 	if err := s.ApproveTransfer(id); err != nil {
 		return nil, err
 	}
+	_, _ = s.OwnerCheckPassed(nil, false)
 	return nil, nil
 }
 
@@ -1297,6 +1349,9 @@ func (f *Feature) recover(s *vault.Session, p *Payload) (json.RawMessage, error)
 		return nil, err
 	}
 	commit()
+	// A completed recovery starts the clock and ends a hold (§3.6.1),
+	// before the other devices are told of the new app.
+	_, _ = s.OwnerCheckPassed(nil, false)
 	if err := s.CompleteRecovery(); err != nil {
 		return nil, errInternal
 	}
@@ -1342,6 +1397,9 @@ func (f *Feature) reset(s *vault.Session, p *Payload) (json.RawMessage, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A completed recovery starts the clock and ends a hold (§3.6.1),
+	// before the other devices are told of the new app.
+	_, _ = s.OwnerCheckPassed(nil, false)
 	if err := s.CompleteRecovery(); err != nil {
 		return nil, errInternal
 	}

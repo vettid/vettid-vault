@@ -869,3 +869,36 @@ func TestStatusStatements(t *testing.T) {
 		t.Fatalf("another agent's grant: %q", res.Code)
 	}
 }
+
+// §3.6.3, §10.11 (0.13.0): a held vault issues and renews no status
+// statement (grants stay); after the check, agents in a session get
+// leash.grant.updated with fresh statements. With the hold off (due)
+// statements renew as usual.
+func TestStatusWhileHeld(t *testing.T) {
+	r := newRig(t)
+	_, gid := r.issue(t, `{"agent_id":"dev-agent","scope":"profile.get","status_ttl":120}`)
+	get := func() featuretest.Result {
+		return featuretest.Call(r.f, r.h, t0.Add(time.Minute), vault.KindAgent, "leash.status.get", `{"grant_id":"`+gid+`"}`)
+	}
+	r.h.Hold = vault.OwnerCheckHeld
+	if res := get(); res.Code != "owner_check_required" {
+		t.Fatalf("held: %q", res.Code)
+	}
+	if res := featuretest.Call(r.f, r.h, t0, vault.KindApp, "leash.grant.list", `{}`); !res.OK() || strings.Contains(string(res.Body), `"status_sig"`) {
+		t.Fatalf("list while held: %s %s", res.Code, res.Body)
+	}
+	if len(r.f.Grants()) != 1 {
+		t.Fatal("grant removed by the hold")
+	}
+	r.h.Hold = vault.OwnerCheckDue
+	if res := get(); !res.OK() {
+		t.Fatalf("hold off: %q", res.Code)
+	}
+	r.h.Hold = ""
+	r.h.Reset()
+	r.f.OwnerHoldEnded(vault.NewSession(context.Background(), r.h, vault.PeerInfo{}, t0.Add(time.Hour), nil))
+	up := r.h.SentOfType("leash.grant.updated")
+	if len(up) != 1 || up[0].To != "dev-agent" || !strings.Contains(string(up[0].Body), `"status_sig"`) {
+		t.Fatalf("after the check: %+v", up)
+	}
+}

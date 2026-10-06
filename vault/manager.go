@@ -72,6 +72,10 @@ type Options struct {
 	DeviceAttest func(d *altchan.DeviceAttest, challenge [32]byte, now time.Time) (json.RawMessage, error)
 	// Lifecycle receives lifecycle events for the parent (§11.5).
 	Lifecycle func(LifecycleEvent)
+	// OwnerCheckClock, if set, is the clock the daily owner check compares
+	// (§3.6; tests move it past a deadline while messages keep the real
+	// time). Nil: Now.
+	OwnerCheckClock func() time.Time
 }
 
 // LifecycleEvent is reported to the parent, which writes it to the vault
@@ -163,6 +167,9 @@ type Manager struct {
 	started     bool
 	hadFailures bool // the header recorded failures before this unlock
 	holdsDEK    bool // counted in unlocked
+	// ocCred caches whether the vault has a credential, for the owner
+	// check (refreshOwnerCred).
+	ocCred bool
 }
 
 // unlocked counts the managers in this process that hold a DEK.

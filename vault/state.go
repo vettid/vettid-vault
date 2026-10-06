@@ -68,6 +68,10 @@ type State struct {
 	// Account is the member's account snapshot from the member API
 	// (0.15.0, §11.13): display only.
 	Account *AccountState `json:"account,omitempty"`
+
+	// OwnerCheck is the daily owner check's record (§3.6.1); nil in a
+	// vault from before 0.13.0 until its first start.
+	OwnerCheck *OwnerCheck `json:"owner_check,omitempty"`
 }
 
 // ReleaseMove is a recorded, not yet confirmed move to another release
@@ -399,4 +403,9 @@ type Settings struct {
 	LocationHistory        bool   `json:"location_history,omitempty"`
 	LocationHistoryDays    uint64 `json:"location_history_days,omitempty"`     // 0 = default
 	LocationHistorySeconds uint64 `json:"location_history_interval,omitempty"` // seconds; 0 = default
+	// The daily owner check (§3.6.2, §3.6.7): the interval (0 = 24 h) and
+	// the hold switch (off only through a successful check).
+	OwnerCheckSeconds uint64     `json:"owner_check_interval,omitempty"`
+	HoldOff           bool       `json:"hold_off,omitempty"`
+	HoldOffUntil      *time.Time `json:"hold_off_until,omitempty"`
 }

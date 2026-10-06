@@ -502,6 +502,13 @@ func (f *Feature) offer(ctx context.Context, s *vault.Session, in *envelope.Inne
 	f.calls[of.CallID] = c
 	f.prune(now)
 	s.Record(vault.Activity{Kind: "call.incoming", ConnectionID: conn, Ref: c.ID, Direction: DirIn, Audit: true})
+	if s.OwnerHeld() {
+		// A held vault rings no device and does not answer, not even busy:
+		// the caller times out as with a locked callee (§3.6.3, §10.10).
+		f.finish(s, c, "unavailable")
+		f.missed(s, c)
+		return nil
+	}
 	if f.busyExcept(c.ID, now) {
 		f.finish(s, c, "busy")
 		_ = s.SendToConnection(conn, "call.end", endJSON(c.ID, "busy"))

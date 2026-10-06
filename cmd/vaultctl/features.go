@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/vettid/vettid-vault/client"
 	"github.com/vettid/vettid-vault/internal/strictjson"
@@ -21,6 +22,7 @@ func init() {
 	commands["credential"] = command{"credential create|fetch|version|unlock|lock|rotate|password|delete|recover|reset | credential confirm ALARM_ID mine|not-mine", cmdCredential}
 	commands["delete-vault"] = command{"delete-vault CONFIRMATION   (CONFIRMATION must be \"delete my vault\"; reads VAULTCTL_PIN and VAULTCTL_PASSWORD, the password empty when the credential is lost)", cmdDeleteVault}
 	commands["transfer"] = command{"transfer create | transfer approve ID | transfer reject ID   (move the app to a new phone; approve reads VAULTCTL_PIN and VAULTCTL_PASSWORD)", cmdTransfer}
+	commands["owner-check"] = command{"owner-check [-hold on|off] [-until RFC3339] | owner-check status   (the daily owner check, §3.6; reads VAULTCTL_PIN and VAULTCTL_PASSWORD)", cmdOwnerCheck}
 	commands["profile"] = command{"profile get | profile set JSON   (the display name and photo; @profile items are items)", cmdProfile}
 	commands["settings"] = command{"settings get | settings set VERSION JSON", cmdSettings}
 	commands["audit"] = command{"audit [-connection ID] [-kinds a,b] [-before N] [-limit N]", cmdAudit}
@@ -106,6 +108,63 @@ func cmdTransfer(ctx context.Context, g *globals, args []string) error {
 			return nil, d.TransferReject(ctx, rest[0])
 		}
 		return nil, errors.New(commands["transfer"].usage)
+	})
+}
+
+func cmdOwnerCheck(ctx context.Context, g *globals, args []string) error {
+	if len(args) == 1 && args[0] == "status" {
+		return withDevice(ctx, g, func(d *client.Device) (any, error) {
+			st, err := d.OwnerCheckState(ctx)
+			if err != nil {
+				return nil, err
+			}
+			out := map[string]any{"state": st.State, "failures": st.Failures, "hold": st.Hold}
+			if !st.Deadline.IsZero() {
+				out["deadline"] = st.Deadline.UTC().Format(time.RFC3339)
+			}
+			return out, nil
+		})
+	}
+	fs := flag.NewFlagSet("owner-check", flag.ContinueOnError)
+	hold := fs.String("hold", "", "on or off")
+	until := fs.String("until", "", "with -hold off: when the hold comes back on (RFC 3339, at most 30 days ahead)")
+	if err := fs.Parse(args); err != nil || fs.NArg() != 0 || *hold != "" && *hold != "on" && *hold != "off" || *until != "" && *hold != "off" {
+		return errors.New(commands["owner-check"].usage)
+	}
+	var on *bool
+	var off *client.HoldOff
+	switch *hold {
+	case "on":
+		t := true
+		on = &t
+	case "off":
+		off = &client.HoldOff{}
+		if *until != "" {
+			u, err := time.Parse(time.RFC3339, *until)
+			if err != nil {
+				return errors.New(commands["owner-check"].usage)
+			}
+			off.Until = u
+		}
+	}
+	pin, err := password("VAULTCTL_PIN")
+	if err != nil {
+		return err
+	}
+	pw, err := password("VAULTCTL_PASSWORD")
+	if err != nil {
+		return err
+	}
+	return withDevice(ctx, g, func(d *client.Device) (any, error) {
+		r, err := d.OwnerCheck(ctx, pin, pw, on, off)
+		if err != nil {
+			return nil, err
+		}
+		out := map[string]any{"deadline": r.Deadline.UTC().Format(time.RFC3339), "interval_seconds": int64(r.Interval / time.Second), "hold": r.Hold}
+		if !r.HoldOffUntil.IsZero() {
+			out["hold_off_until"] = r.HoldOffUntil.UTC().Format(time.RFC3339)
+		}
+		return out, nil
 	})
 }
 

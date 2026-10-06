@@ -759,6 +759,11 @@ func (f *Feature) status(s *vault.Session, g *Grant) (stmt, sig []byte, chain []
 	if st := f.d.Agents[g.AgentID]; st != nil && st.Suspended {
 		return nil, nil, nil, errForbidden
 	}
+	if s.OwnerHeld() {
+		// A held vault issues and renews no status statement: agents are
+		// paused from the deadline (§3.6.3, §10.11).
+		return nil, nil, nil, errOwnerCheck
+	}
 	if !g.Expires.IsZero() && !s.Now().Before(g.Expires) || !g.served() {
 		return nil, nil, nil, errNotFound
 	}
@@ -860,6 +865,27 @@ func (f *Feature) listJSON(agent string) []byte {
 		sus = []string{}
 	}
 	return b.Raw("suspended", strList(sus)).Bytes()
+}
+
+var errOwnerCheck = vault.NewError("owner_check_required", "")
+
+// OwnerHoldStarted implements vault.OwnerHoldObserver.
+func (f *Feature) OwnerHoldStarted(*vault.Session) {}
+
+// OwnerHoldEnded implements vault.OwnerHoldObserver: after a check, agents
+// with a session receive leash.grant.updated with fresh status statements
+// (§3.6.3, §10.11).
+func (f *Feature) OwnerHoldEnded(s *vault.Session) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	seen := map[string]bool{}
+	for _, g := range f.sorted() {
+		if seen[g.AgentID] {
+			continue
+		}
+		seen[g.AgentID] = true
+		f.tell(s, g.AgentID) // only within its access session (§6.8)
+	}
 }
 
 // tell sends the agent its grants (within its access session, §6.8).

@@ -180,3 +180,19 @@ func FuzzParsePong(f *testing.F) {
 	f.Add([]byte(`{"ping_id":"01JB2Z6V9K3M4N5P6Q7R8S9T0V","state":"away","last_active":"2026-10-03T11:55:00.000Z"}`))
 	f.Fuzz(func(t *testing.T, b []byte) { _, _ = ParsePong(b) })
 }
+
+// §3.6.3, §10.17 (0.13.0): a held vault does not answer pings; with the
+// hold off (due) it does.
+func TestHeldVaultDoesNotAnswer(t *testing.T) {
+	peer, hp := setup()
+	hp.Hold = "held"
+	ft.CallExp(peer, hp, t0, t0.Add(PingTTL), "connection:c1", "presence.ping", `{"ping_id":"01JB2Z6V9K3M4N5P6Q7R8S9T0V"}`)
+	if len(hp.SentOfType("presence.pong")) != 0 {
+		t.Fatal("a held vault answered")
+	}
+	hp.Hold = "due"
+	ft.CallExp(peer, hp, t0.Add(time.Second), t0.Add(PingTTL), "connection:c1", "presence.ping", `{"ping_id":"01JB2Z6V9K3M4N5P6Q7R8S9T0W"}`)
+	if len(hp.SentOfType("presence.pong")) != 1 {
+		t.Fatal("a due vault (hold off) did not answer")
+	}
+}

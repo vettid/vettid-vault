@@ -58,6 +58,9 @@ func (m *Manager) sendTo(p *Peer, typ string, body json.RawMessage, now time.Tim
 // delivery (sealed now, deposited after the flush behind p's queued
 // deposits, never written to state). It returns the inner id, or "".
 func (m *Manager) sendWith(p *Peer, typ string, body json.RawMessage, o SendOptions, now time.Time) string {
+	if !m.holdDelivers(p, typ, body, now) {
+		return "" // the owner check's hold (§3.6.3): no fan-out
+	}
 	in := &envelope.Inner{ID: m.newID(now), Type: typ, TS: now, Exp: o.Exp, Body: body}
 	if !o.MemoryOnly {
 		return m.sealAndQueue(p, in)
@@ -338,6 +341,7 @@ func (m *Manager) housekeeping(now time.Time) {
 	}
 	m.refreshHeld(now)
 	m.expireAccess(now)
+	m.ownerCheckTick(now)
 	m.remintIssued(now)
 	m.pruneIssued(now)
 	m.pruneRetiredKEMs(now)

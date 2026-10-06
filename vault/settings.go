@@ -26,6 +26,10 @@ var appKeyRE = regexp.MustCompile(`^app\.[a-z0-9_.-]{1,48}$`)
 
 func (s Settings) clone() Settings {
 	c := s
+	if s.HoldOffUntil != nil {
+		u := *s.HoldOffUntil
+		c.HoldOffUntil = &u
+	}
 	if s.App != nil {
 		c.App = make(map[string]string, len(s.App))
 		for k, v := range s.App {
@@ -88,7 +92,12 @@ func (s Settings) json() []byte {
 		Bool("credential.backup", s.Backup()).Uint("credential.unlock_ttl_seconds", ttl).Uint("feed.retention_days", feed).
 		Bool("location.history.enabled", s.LocationHistory).
 		Uint("location.history.interval_seconds", uint64(s.LocationHistoryInterval()/time.Second)).
-		Uint("location.history.retention_days", uint64(s.LocationHistoryRetention()/(24*time.Hour)))
+		Uint("location.history.retention_days", uint64(s.LocationHistoryRetention()/(24*time.Hour))).
+		Bool("owner_check.hold", !s.HoldOff)
+	if s.HoldOff && s.HoldOffUntil != nil {
+		b.String("owner_check.hold_off_until", envelope.FormatTS(*s.HoldOffUntil))
+	}
+	b.Uint("owner_check.interval_seconds", uint64(s.OwnerCheckInterval()/time.Second))
 	keys := make([]string, 0, len(s.App))
 	for k := range s.App {
 		keys = append(keys, k)
@@ -153,6 +162,23 @@ func ApplySettings(cur Settings, body []byte) (Settings, error) {
 				return cur, errBadRequest
 			}
 			next.NoBackup = !on
+		case "owner_check.interval_seconds":
+			// §3.6.2: 1 h to 24 h; the check cannot be turned off.
+			if next.OwnerCheckSeconds, err = set.Uint(k, uint64(MinOwnerCheckInterval/time.Second),
+				uint64(DefaultOwnerCheckInterval/time.Second)); err != nil {
+				return cur, errBadRequest
+			}
+		case "owner_check.hold":
+			on, err := set.Bool(k)
+			if err != nil {
+				return cur, errBadRequest
+			}
+			if !on {
+				return cur, errOwnerCheckRequired // off only within a check (§3.6.7)
+			}
+			next.HoldOff, next.HoldOffUntil = false, nil
+		case "owner_check.hold_off_until":
+			return cur, errOwnerCheckRequired
 		default:
 			if !appKeyRE.MatchString(k) {
 				return cur, errBadRequest
@@ -182,7 +208,11 @@ func ApplySettings(cur Settings, body []byte) (Settings, error) {
 }
 
 func (m *Manager) hSettingsSet(_ context.Context, s *Session, in *envelope.Inner) (json.RawMessage, error) {
-	next, err := ApplySettings(s.Settings(), in.Body)
+	if s.from.Kind != KindApp && namesOwnerCheck(in.Body) {
+		return nil, errForbiddenH // holder only (§3.6.2, §3.6.7), never held for approval
+	}
+	prev := s.Settings()
+	next, err := ApplySettings(prev, in.Body)
 	if err != nil {
 		return nil, err
 	}
@@ -196,5 +226,29 @@ func (m *Manager) hSettingsSet(_ context.Context, s *Session, in *envelope.Inner
 		}
 	}
 	s.SyncEvent("settings.changed", strictjson.NewBuilder().Uint("version", next.Version).Bytes())
+	if s.m != nil {
+		m.settingsOwnerCheck(prev, next, s.now)
+	}
 	return strictjson.NewBuilder().Uint("version", next.Version).Bytes(), nil
+}
+
+var errOwnerCheckRequired = &HandlerError{Code: "owner_check_required"}
+
+// namesOwnerCheck reports whether a settings.set body names an owner-check
+// setting.
+func namesOwnerCheck(body []byte) bool {
+	o, err := strictjson.ParseObject(body)
+	if err != nil {
+		return false
+	}
+	set, err := o.Object("set")
+	if err != nil {
+		return false
+	}
+	for _, k := range ownerCheckKeys {
+		if set.Has(k) {
+			return true
+		}
+	}
+	return false
 }

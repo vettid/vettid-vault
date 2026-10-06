@@ -5,9 +5,10 @@
 for 0.10.2 and 0.10.3: connection requests, the SAS commitment, the
 handshake before approval, request tokens; for 0.10.5:
 `connection.declined` and `device.pair.rejected`; for 0.10.6: the
-recovery marker, `credential_backup` and the lock state; and for 0.12.0:
+recovery marker, `credential_backup` and the lock state; for 0.12.0:
 LEASH delegations and status statements in the LEASH paper's §3.5 format;
-and for 0.15.0: enrollment codes, app keys and the account snapshot.)
+for 0.13.0: the daily owner check and the hold; and for 0.15.0:
+enrollment codes, app keys and the account snapshot.)
 
 Every MUST / MUST NOT in VAULT-MESSAGING 0.2.3 §4–§6 (plus the §13.4 and
 §13.6 rules they rely on), and the named test that covers it. Normative
@@ -536,3 +537,36 @@ holds the vectors §15 item 20 asks for (not printed in §16).
 | 11.5, 11.13 | Queue op `account` (no envelope, no lease, answered `done`) and `account` in unlock (OPTIONAL); to the running vault process, dropped without one | `enclave.TestQueueAppKeyAndAccount`, `enclave.TestAccountOp`, `integration.TestV3Exit` |
 | 11.13 | Snapshot parsed strictly (unknown members ignored, wrong types refused, over 2 KiB refused); kept only if `as_of` is later; `version` + 1 and `received_at`; `sync.event{account.changed, version}` to the app and desktops, never agents or connections; `account.get` `{account \| null, version, received_at}` | `vault.TestParseAccountSnapshot`, `vault.TestAccountInVault`, `enclave.TestAccountOp`, `integration.TestV3Exit` |
 | 11.12.1, 11.12.2, 11.11.7 | Member API stand-in: setup code issue, QR and typed redeem (one `404 invalid_code`), pending key, signed requests with the key matrix (session no longer reaches enclave, enroll, unlock or register), recovery claim and recovering key, slots polled by their own key | `integration.TestV3Exit`, `devstack.TestDevStackLocalStack`, `e2e.*` through `vaultctl api-*` |
+
+## Daily owner check and the hold (§3.5.3, §3.6, §6.7.1, §6.8, §9.1, §10.1, §10.2, §10.8–§10.11, §10.17, §11.11.5, §12.3; 0.13.0)
+
+Owner decisions of 2026-10-05 and 2026-10-06 (§15 item 22). The runtime
+keeps the record and the hold (`vault`, with a stand-in credential
+feature), the credential feature runs the check (`credential`, on the
+fake host), and calls, presence and LEASH apply their gates (`calls`,
+`presence`, `leash`). `e2e.TestOwnerCheckHeldVault` runs a held vault
+through the real relay with an injectable owner-check clock
+(`vault.Options.OwnerCheckClock`).
+
+The message type is `vault.owner-check` (owner decision of 2026-10-06,
+VAULT-MESSAGING 0.15.2): 0.13.0's `vault.owner_check` broke §5.3's type
+grammar.
+
+| § | Requirement | Test(s) |
+|---|---|---|
+| 3.6.1 | The check, in order: alarm refusal before the UTK is spent; the UTK; a bad hold change is `bad_request` before the PIN (not a failed check); the blob (`stale_credential` for the holder's retry, the clone rule); the PIN under the §11.8 backoff (`bad_pin`, a failed check, the password not tried); the password backoff and the password (`bad_password`, a failed check); on success the CEK rotates and the answer is `{credential, version, utks, deadline, interval_seconds, hold, hold_off_until?}`; holder only (`forbidden`) | `credential.TestOwnerCheck`, `credential.TestOwnerCheckDuringAlarm`, `e2e.TestOwnerCheckHeldVault` |
+| 3.6.1 | The record `{last_at, deadline, failures}` in DEK state, on the vault's clock; a success sets `last_at` = now, `deadline` = now + interval, `failures` = 0, audits `owner_check.passed` and sends the other devices `sync.event{owner_check, deadline}` | `vault.TestOwnerCheckHold`, `vault.TestOwnerCheckTenFailuresLock` |
+| 3.6.1 | What starts the clock: every new credential starts it fresh (owner decision of 2026-10-06): `credential.create` (at enrollment, and after a `credential.delete`, which also ends a hold); a completed recovery (`credential.recover`, `credential.reset`); a transfer's approval (its wrong entries are failed checks); a vault from before 0.13.0 at its first start, if it has a credential. A vault without a credential is never gated | `vault.TestOwnerCheckClockStart`, `credential.TestOwnerCheckClockStarters`, `credential.TestTransferApprovalIsCheck`, `credential.TestOwnerCheck` |
+| 3.6.2 | `owner_check.interval_seconds` 3,600–86,400 (default 86,400, else `bad_request`); app only (a desktop's `settings.set` naming any owner-check key `forbidden` at once, never held); shorter applies at once (and may hold at once), longer from the next check | `vault.TestOwnerCheckSettings` |
+| 3.6.3 | The app gate: past the deadline the holder may send only its row of the allow list, whatever the hold switch; requests answered `owner_check_required`, other messages dropped and audited `drop.owner_check`; with the hold on, desktops and agents only theirs; a recovering app its own set; the transport types for any device; the alarm's path, an open transfer and a call answered before the deadline | `vault.TestOwnerCheckHold`, `vault.TestOwnerCheckDue`, `vault.TestHoldAllowList`, `e2e.TestOwnerCheckHeldVault` |
+| 3.6.3 | Entering the hold (one flush): the unlock window ends, held approvals answered `owner_check_required`, access-session requests dropped, a ringing call stops ringing on the devices only (`call.end{unavailable}`), audit `owner_check.held`, `vault.held` to the app and desktops in a session | `vault.TestOwnerCheckHold`, `credential.TestHoldEndsUnlockWindow`, `calls.TestCallsWhileHeld` |
+| 3.6.3, 9.1 | Fan-out stops except `vault.held`, `vault.locking`, the clone alarm (with its `sync.event` and feed item), `device.transfer.pending`, `device.unlinked`, the token, address, rotation and call messages; with the hold off only the app's fan-out stops (it still rings); `vault.held{deadline, waiting{messages, requests, calls, other}}` counts what would have made a feed item since the deadline, at the start and on count changes at most every 10 minutes per device | `vault.TestOwnerCheckHold`, `vault.TestOwnerCheckDue`, `vault.TestHoldAllowList`, `e2e.TestOwnerCheckHeldVault` |
+| 3.6.3, 10.10 | Held: an offer rings no device and is not answered (not even `busy`), a missed call is recorded and counted; the hold off: it rings | `calls.TestCallsWhileHeld` |
+| 3.6.3, 10.17 | Held: pings are not answered; the hold off: they are | `presence.TestHeldVaultDoesNotAnswer` |
+| 3.6.3, 10.11 | Held: no status statement issued or renewed, grants kept, `leash.status.get` `owner_check_required`; after the check agents in a session get `leash.grant.updated` with fresh statements; the hold off: statements renew | `leash.TestStatusWhileHeld`, `e2e.TestOwnerCheckHeldVault` |
+| 3.6.3, 6.4 | Held: in-person auto-approval does not apply (the request waits) | `vault.TestHeldRequestNotAutoApproved` |
+| 3.6.4 | Failed checks: `owner_check.failed` (audit and feed, `high`, `ref` = `pin`/`password`) besides `vault.pin_failed` / `credential.password_failed`; `failures` survives locks; the tenth consecutive failure audits `owner_check.locked` (`ref` = the count, feed `urgent`), answers, sends `vault.locking{reason: "owner_check"}` and locks as an owner request | `vault.TestOwnerCheckTenFailuresLock`, `credential.TestOwnerCheck` |
+| 3.6.7 | The hold switch: off only within a successful check (`hold: false`, `hold_off_until` in the future and ≤ 30 days, only with `hold: false`); `settings.set` naming `hold: false` or `hold_off_until` is `owner_check_required`; on by `settings.set` or a check, clearing `hold_off_until`; back on by itself at `hold_off_until` (held at once past the deadline); every change audited and a feed item (`owner_check.hold_changed`, `on`, `off`, `off_until:<ts>`, `on:expired`) with `sync.event{settings.changed}`; `vault.status` reports `hold`, `hold_off_until` and `state` `due` | `vault.TestOwnerCheckSettings`, `vault.TestOwnerCheckDue`, `credential.TestOwnerCheck`, `credential.TestHoldChangeParse` |
+| 10.2 | `vault.status.owner_check`: `{state, deadline, interval_seconds, failures, hold, hold_off_until?}` to apps and desktops, `{state}` to agents (`deadline` absent before the clock starts) | `vault.TestOwnerCheckHold`, `vault.TestOwnerCheckDue` |
+| 11.13, 3.6.3 | 0.15.0 with the hold: the op `account` is stored while held, `account.get` is not on the allow list, `sync.event{account.changed}` waits for the check | `vault.TestHeldAccountSnapshot`, `vault.TestHoldAllowList` |
+| 13.6 | New parsers fuzzed | `credential.FuzzParsePayload` (owner-check seeds) |

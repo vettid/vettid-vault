@@ -226,6 +226,7 @@ func (m *Manager) record(a Activity, now time.Time) {
 	if m.st == nil {
 		return
 	}
+	m.countHeld(a)
 	var s *Session
 	for _, f := range m.features {
 		if sink, ok := f.(ActivitySink); ok {

@@ -117,7 +117,8 @@ func (m *Manager) newRequest(aw *AwaitingHS, fr *handshake.FinResult, now time.T
 	m.dirty = true
 	switch {
 	case p.Kind == KindConnection:
-		if invite.AutoApproveAllowed(r.Remote, false, m.st.Settings.AutoApproveInPerson) {
+		if invite.AutoApproveAllowed(r.Remote, false, m.st.Settings.AutoApproveInPerson) && m.ownerCheckState(now) != OwnerCheckHeld {
+			// (Not while held: the request waits for the member, §3.6.3.)
 			// In-person auto-approval skips the inviter's approval only;
 			// its app still shows the code for the accepter (§6.4).
 			if err := m.approveRequest(r, now); err != nil {

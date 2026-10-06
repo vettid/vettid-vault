@@ -69,7 +69,49 @@ type Host struct {
 	Alarms    []string
 	// Deletions are the vault deletions started (vault.DeleteHost), by via.
 	Deletions []string
+	// The daily owner check (vault.OwnerCheckHost, §3.6): the state
+	// OwnerCheckState reports ("" = ok), the checks passed (with their
+	// hold changes, nil for none), the failures by ref, and how often the
+	// clock was started at enrollment.
+	Hold        string
+	Passed      []*vault.HoldChange
+	PassedAudit []bool
+	CheckFailed []string
+	Enrolled    int
+	CheckInfo   vault.OwnerCheckInfo
 }
+
+// OwnerCheckState implements vault.OwnerCheckHost.
+func (h *Host) OwnerCheckState(time.Time) string {
+	if h.Hold == "" {
+		return vault.OwnerCheckOK
+	}
+	return h.Hold
+}
+
+// OwnerCheckPassed implements vault.OwnerCheckHost.
+func (h *Host) OwnerCheckPassed(c *vault.HoldChange, audit bool, _ string, now time.Time) vault.OwnerCheckInfo {
+	h.Passed = append(h.Passed, c)
+	h.PassedAudit = append(h.PassedAudit, audit)
+	h.Hold = ""
+	i := h.CheckInfo
+	if i.Interval == 0 {
+		i.Interval = vault.DefaultOwnerCheckInterval
+	}
+	i.Deadline = now.Add(i.Interval)
+	i.Hold = c == nil || c.On
+	if c != nil && !c.On && !c.Until.IsZero() {
+		u := c.Until
+		i.HoldOffUntil = &u
+	}
+	return i
+}
+
+// OwnerCheckFailed implements vault.OwnerCheckHost.
+func (h *Host) OwnerCheckFailed(ref string, _ time.Time) { h.CheckFailed = append(h.CheckFailed, ref) }
+
+// OwnerCheckEnrolled implements vault.OwnerCheckHost.
+func (h *Host) OwnerCheckEnrolled(time.Time) { h.Enrolled++ }
 
 // DeleteVault implements vault.DeleteHost.
 func (h *Host) DeleteVault(via string, _ time.Time) error {

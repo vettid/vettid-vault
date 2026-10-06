@@ -287,6 +287,9 @@ func (f *Feature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner
 	case "presence.query":
 		return f.query(s, in.Body)
 	case "presence.ping":
+		if s.OwnerHeld() {
+			break // a held vault does not answer (§3.6.3, §10.17)
+		}
 		f.pinged(s, in.Body)
 	case "presence.pong":
 		f.pongReceived(s, in.Body)

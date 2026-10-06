@@ -1,0 +1,43 @@
+{
+  "context_delegation": "leash/v1/delegation",
+  "context_status": "leash/v1/status",
+  "credential_key_seed_hex": "3030303030303030303030303030303030303030303030303030303030303030",
+  "credential_key_pk_b64": "G6QHW3fJ4/s+zeFc2vUiHzwQNz5iP3sOHvdjZrCvcTc=",
+  "agent_ik_seed_hex": "3131313131313131313131313131313131313131313131313131313131313131",
+  "agent_ik_pk_b64": "SAdaWX5yGhVuLgeZ3lzAxTJNxufq8c3UYlCGjsUyFd0=",
+  "vault_ik_seed_hex": "0404040404040404040404040404040404040404040404040404040404040404",
+  "vault_ik_pk_b64": "ypOsFwUYcHHWe4PH/w7+gQjo7EUwV113JoeTM9vavnw=",
+  "skew_seconds": 60,
+  "a": {
+    "case": "items.read, auto, with exp",
+    "nonce_hex": "32323232323232323232323232323232",
+    "iat": 1790856000,
+    "delegation_json": "{\"approval\":\"auto\",\"exp\":1798632000,\"grant_id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T41\",\"iat\":1790856000,\"iss\":\"G6QHW3fJ4/s+zeFc2vUiHzwQNz5iP3sOHvdjZrCvcTc=\",\"limits\":{\"per_day\":1000,\"per_hour\":60},\"nonce\":\"MjIyMjIyMjIyMjIyMjIyMg==\",\"scope\":{\"access\":\"read\",\"match\":\"any\",\"op\":\"items.read\",\"tags\":[\"api-keys\",\"work\"],\"uses\":10},\"status_issuer\":\"ypOsFwUYcHHWe4PH/w7+gQjo7EUwV113JoeTM9vavnw=\",\"status_ttl\":900,\"sub\":\"SAdaWX5yGhVuLgeZ3lzAxTJNxufq8c3UYlCGjsUyFd0=\",\"v\":1,\"version\":1}",
+    "delegation_len": 467,
+    "delegation_b64": "eyJhcHByb3ZhbCI6ImF1dG8iLCJleHAiOjE3OTg2MzIwMDAsImdyYW50X2lkIjoiMDFKQjJaNlY5SzNNNE41UDZRN1I4UzlUNDEiLCJpYXQiOjE3OTA4NTYwMDAsImlzcyI6Ikc2UUhXM2ZKNC9zK3plRmMydlVpSHp3UU56NWlQM3NPSHZkalpyQ3ZjVGM9IiwibGltaXRzIjp7InBlcl9kYXkiOjEwMDAsInBlcl9ob3VyIjo2MH0sIm5vbmNlIjoiTWpJeU1qSXlNakl5TWpJeU1qSXlNZz09Iiwic2NvcGUiOnsiYWNjZXNzIjoicmVhZCIsIm1hdGNoIjoiYW55Iiwib3AiOiJpdGVtcy5yZWFkIiwidGFncyI6WyJhcGkta2V5cyIsIndvcmsiXSwidXNlcyI6MTB9LCJzdGF0dXNfaXNzdWVyIjoieXBPc0Z3VVljSEhXZTRQSC93NytnUWpvN0VVd1YxMTNKb2VUTTl2YXZudz0iLCJzdGF0dXNfdHRsIjo5MDAsInN1YiI6IlNBZGFXWDV5R2hWdUxnZVozbHpBeFRKTnh1ZnE4YzNVWWxDR2pzVXlGZDA9IiwidiI6MSwidmVyc2lvbiI6MX0=",
+    "delegation_sha256_hex": "82403562f0a1b62c520c468d46f58a473eefc0cae0ac6a0d8d8bdaef225ea436",
+    "sig_b64": "xGYxdD9lhE27/4NjTmDl1L+9/UJRv3cdRdWp3yOVxCOPgicdwrL+lv9A7lP4RNkE47XVEpAjAvh7Dc0z9dBKCw==",
+    "status_issued_at": 1790856060,
+    "status_json": "{\"delegation\":\"gkA1YvChtixSDEaNRvWKRz7vwMrgrGoNjYva7yJepDY=\",\"grant_id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T41\",\"issued_at\":1790856060,\"not_after\":1790856960,\"status\":\"valid\",\"v\":1}",
+    "status_b64": "eyJkZWxlZ2F0aW9uIjoiZ2tBMVl2Q2h0aXhTREVhTlJ2V0tSejd2d01yZ3JHb05qWXZhN3lKZXBEWT0iLCJncmFudF9pZCI6IjAxSkIyWjZWOUszTTRONVA2UTdSOFM5VDQxIiwiaXNzdWVkX2F0IjoxNzkwODU2MDYwLCJub3RfYWZ0ZXIiOjE3OTA4NTY5NjAsInN0YXR1cyI6InZhbGlkIiwidiI6MX0=",
+    "status_sig_b64": "aSkNJrcIZmkYLzpX5Z7jb/1tHXkwrcNHBZURMycInB9vWdwEpGJB3RDzPmzUscKL6H3tRaOSyZID653kpcgACg==",
+    "accept_from": 1790856000,
+    "accept_to": 1790857020
+  },
+  "b": {
+    "case": "message.send, ask, one connection, version 2, no exp, status_ttl 300",
+    "nonce_hex": "33333333333333333333333333333333",
+    "iat": 1790856000,
+    "delegation_json": "{\"approval\":\"ask\",\"grant_id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T42\",\"iat\":1790856000,\"iss\":\"G6QHW3fJ4/s+zeFc2vUiHzwQNz5iP3sOHvdjZrCvcTc=\",\"nonce\":\"MzMzMzMzMzMzMzMzMzMzMw==\",\"scope\":{\"connections\":[\"01JB2Z6V9K3M4N5P6Q7R8S9T43\"],\"op\":\"message.send\"},\"status_issuer\":\"ypOsFwUYcHHWe4PH/w7+gQjo7EUwV113JoeTM9vavnw=\",\"status_ttl\":300,\"sub\":\"SAdaWX5yGhVuLgeZ3lzAxTJNxufq8c3UYlCGjsUyFd0=\",\"v\":1,\"version\":2}",
+    "delegation_len": 389,
+    "delegation_b64": "eyJhcHByb3ZhbCI6ImFzayIsImdyYW50X2lkIjoiMDFKQjJaNlY5SzNNNE41UDZRN1I4UzlUNDIiLCJpYXQiOjE3OTA4NTYwMDAsImlzcyI6Ikc2UUhXM2ZKNC9zK3plRmMydlVpSHp3UU56NWlQM3NPSHZkalpyQ3ZjVGM9Iiwibm9uY2UiOiJNek16TXpNek16TXpNek16TXpNek13PT0iLCJzY29wZSI6eyJjb25uZWN0aW9ucyI6WyIwMUpCMlo2VjlLM000TjVQNlE3UjhTOVQ0MyJdLCJvcCI6Im1lc3NhZ2Uuc2VuZCJ9LCJzdGF0dXNfaXNzdWVyIjoieXBPc0Z3VVljSEhXZTRQSC93NytnUWpvN0VVd1YxMTNKb2VUTTl2YXZudz0iLCJzdGF0dXNfdHRsIjozMDAsInN1YiI6IlNBZGFXWDV5R2hWdUxnZVozbHpBeFRKTnh1ZnE4YzNVWWxDR2pzVXlGZDA9IiwidiI6MSwidmVyc2lvbiI6Mn0=",
+    "delegation_sha256_hex": "36ce9294e797cf1eecff1c61b8a21647e45a20eedd6acdb2abe2a591e322bacc",
+    "sig_b64": "PS1c/aT/OAMyYaPhSudMMJX7TjCaXVrkjk6zOmjoFfZR9ZxjkzjTgfMg6smbq6KCDRoqh4AmXwUAtnJivESDBw==",
+    "status_issued_at": 1790856060,
+    "status_json": "{\"delegation\":\"Ns6SlOeXzx7s/xxhuKIWR+RaIO7das2yq+KlkeMiusw=\",\"grant_id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T42\",\"issued_at\":1790856060,\"not_after\":1790856360,\"status\":\"valid\",\"v\":1}",
+    "status_b64": "eyJkZWxlZ2F0aW9uIjoiTnM2U2xPZVh6eDdzL3h4aHVLSVdSK1JhSU83ZGFzMnlxK0tsa2VNaXVzdz0iLCJncmFudF9pZCI6IjAxSkIyWjZWOUszTTRONVA2UTdSOFM5VDQyIiwiaXNzdWVkX2F0IjoxNzkwODU2MDYwLCJub3RfYWZ0ZXIiOjE3OTA4NTYzNjAsInN0YXR1cyI6InZhbGlkIiwidiI6MX0=",
+    "status_sig_b64": "AcQTmAdY8UpkeDssy4iHgHo8hKPZxwq1FJI8YHOwSUOgHRlCEc+SV4VVZr7fTn/jzKrFo9EilExC3XwKJKW1Bw==",
+    "accept_from": 1790856000,
+    "accept_to": 1790856420
+  }
+}

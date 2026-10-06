@@ -78,9 +78,12 @@ func (d *Device) LeashGrants() []json.RawMessage {
 	return gs
 }
 
-// VerifyDelegation checks a grant's signed delegation under the member's
-// credential key (pinned by the verifier, e.g. through member
-// authentication, §10.4) and returns the statement.
+// VerifyDelegation checks a grant's signed delegation (§10.11, 0.12.0):
+// its sig under the delegation's iss, which must be the member's
+// credential key as the verifier pinned it (e.g. through member
+// authentication, §10.4), and its exp. It returns the statement. Whether
+// the grant is still in force is said by a status statement
+// (leashwire.VerifyPresented).
 func VerifyDelegation(grant json.RawMessage, memberKey ed25519.PublicKey, now time.Time) (*leashwire.Delegation, error) {
 	o, err := strictjson.ParseObject(grant)
 	if err != nil {
@@ -90,7 +93,7 @@ func VerifyDelegation(grant json.RawMessage, memberKey ed25519.PublicKey, now ti
 	if err != nil {
 		return nil, ErrProtocol
 	}
-	sig, err := o.Base64("delegation_sig", ed25519.SignatureSize)
+	sig, err := o.Base64("sig", ed25519.SignatureSize)
 	if err != nil {
 		return nil, ErrProtocol
 	}
@@ -136,8 +139,8 @@ func parseStatusMembers(o strictjson.Object) (status, sig []byte, chain []*hands
 }
 
 // LeashPresent returns what this agent shows a relying party for one of
-// its grants: the delegation, the member's signature and a status
-// statement, refreshed automatically when less than a quarter of its
+// its grants: the delegation, the member's signature (sig), a status
+// statement and the vault's rotation chain, refreshed automatically when less than a quarter of its
 // lifetime (at least a minute) remains.
 func (d *Device) LeashPresent(ctx context.Context, grantID string) (*leashwire.Presented, error) {
 	var grant json.RawMessage
@@ -174,7 +177,7 @@ func (d *Device) LeashPresent(ctx context.Context, grantID string) (*leashwire.P
 	if err != nil {
 		return nil, ErrProtocol
 	}
-	dsig, err := o.Base64("delegation_sig", ed25519.SignatureSize)
+	dsig, err := o.Base64("sig", ed25519.SignatureSize)
 	if err != nil {
 		return nil, ErrProtocol
 	}
@@ -203,5 +206,5 @@ func (d *Device) LeashPresent(ctx context.Context, grantID string) (*leashwire.P
 		d.leashStatus[grantID] = c
 		d.mu.Unlock()
 	}
-	return &leashwire.Presented{Delegation: del, DelegationSig: dsig, Status: c.status, StatusSig: c.sig, Rotations: c.chain}, nil
+	return &leashwire.Presented{Delegation: del, Sig: dsig, Status: c.status, StatusSig: c.sig, Rotations: c.chain}, nil
 }

@@ -4,7 +4,9 @@
 # intermediate values derived from the public all-0x05 key seed and all-0x07
 # encapsulation randomness, and the PUBLIC keys (SPKI) of the §16
 # release-update test keys (scalars 32 x 0x21 and 32 x 0x22) and the PUBLIC
-# key of the §11.11.2 recovery vector's browser key (scalar 32 x 0x23).
+# key of the §11.11.2 recovery vector's browser key (scalar 32 x 0x23), and
+# the PUBLIC credential key of the §10.11 LEASH vectors (seed 32 x 0x30,
+# leash.json).
 # They are public by design and are regenerated deterministically by
 # `go generate ./vms/vectors`. Also allowlisted: the example ULID of
 # VAULT-MESSAGING §5.3, which tests use as a dummy id (for instance as a
@@ -22,5 +24,6 @@ regexes = [
   '''MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAERi26GuT8GpaLTazyDN1tvh''',
   '''MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE1lqTl3yqPRsIGFL/V6eeRl8W''',
   '''042464a2f8813e007299b9c0beef9c8d6d8d17470b32bba0329c145f0cfc60b683f831a3''',
+  '''G6QHW3fJ4/s\+zeFc2vUiHzwQNz5iP3sOHvdjZrCvcTc=''',
   '''01JB2Z6V9K3M4N5P6Q7R8S9T0V''',
 ]

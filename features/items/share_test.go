@@ -479,14 +479,17 @@ func TestAgentRules(t *testing.T) {
 	if err != nil {
 		t.Fatal("no delegation")
 	}
-	d, err := leashwire.Parse(del)
-	if err != nil || d.Scope != leashwire.ScopeItems || d.GrantID != rid || strings.Join(d.Tags, ",") != "agent ok" || d.Match != "any" ||
-		d.Access != "read" || d.Uses != 3 || d.PerHour != 10 || d.PerDay != 1000 || d.Approval != "auto" {
+	d, err := leashwire.ParseCanonical(del)
+	if err != nil || d.Scope.Op != leashwire.ScopeItems || d.GrantID != rid || strings.Join(d.Scope.Tags, ",") != "agent ok" ||
+		d.Scope.Match != "any" || d.Scope.Access != "read" || d.Scope.Uses != 3 || d.Limits == nil || d.Limits.PerHour != 10 ||
+		d.Limits.PerDay != 1000 || d.Approval != "auto" || len(d.Nonce) != leashwire.NonceSize {
 		t.Fatalf("delegation: %+v %v", d, err)
 	}
-	key, _ := o.Base64("key", ed25519.PublicKeySize)
-	sig, _ := o.Base64("delegation_sig", -1)
-	if _, err := leashwire.Verify(key, del, sig, e.clk.T); err != nil {
+	if o.Has("key") || o.Has("delegation_sig") {
+		t.Fatal("0.12.0: the rule carries sig and no key")
+	}
+	sig, _ := o.Base64("sig", ed25519.SignatureSize)
+	if _, err := leashwire.Verify(d.Iss, del, sig, e.clk.T); err != nil {
 		t.Fatalf("delegation does not verify: %v", err)
 	}
 	if len(e.sentTo("dev-agent", "leash.grant.updated")) != 1 {

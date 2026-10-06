@@ -837,8 +837,8 @@ type AgentRule struct {
 	StatusTTL time.Duration
 	Created   time.Time
 	Updated   time.Time
-	// The signed delegation (§10.11).
+	// The signed delegation (§10.11) and its sig, if served (0.12.0
+	// format).
 	Delegation    []byte
 	DelegationSig []byte
-	Key           []byte
 }

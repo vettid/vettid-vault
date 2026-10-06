@@ -115,6 +115,20 @@ func TestVaultctlBatch3(t *testing.T) {
 	if out = runAs(agent, "agent", "grants"); !strings.Contains(out, `"connection.list"`) {
 		t.Fatalf("agent grants: %s", out)
 	}
+	// The delegation with a fresh status statement, verified under iss
+	// (§10.11, 0.12.0): the grant object carries sig, never key.
+	gid := between(runAs(agent, "agent", "grants"), `"grant_id": "`, `"`)
+	if out = runAs(agent, "agent", "present", "-grant", gid); !strings.Contains(out, `"verified": true`) ||
+		!strings.Contains(out, `"status_sig"`) || !strings.Contains(out, `"member_key_pinned": false`) {
+		t.Fatalf("agent present: %s", out)
+	}
+	iss := between(out, `"iss": "`, `"`)
+	if out = runAs(agent, "agent", "present", "-grant", gid, "-member-key", iss); !strings.Contains(out, `"member_key_pinned": true`) {
+		t.Fatalf("agent present (pinned): %s", out)
+	}
+	if out, err := runErr(agent, "agent", "present", "-grant", gid, "-member-key", base64.StdEncoding.EncodeToString(make([]byte, 32))); err == nil {
+		t.Fatalf("agent present under another key: %s", out)
+	}
 	if out, err := runErr(agent, "agent", "request", "-op", "item.get", "-item", wifi); err == nil || !strings.Contains(out, "forbidden") {
 		t.Fatalf("item.get without a rule: %v %s", err, out)
 	}

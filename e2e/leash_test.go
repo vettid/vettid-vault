@@ -86,8 +86,12 @@ func TestLeashAgent(t *testing.T) {
 	memberKey, _ := cv.Base64("key", 32)
 	for _, g := range agent.LeashGrants() {
 		d, err := client.VerifyDelegation(g, memberKey, time.Now())
-		if err != nil || string(d.AgentIK) != string(agent.IdentityKey()) {
+		if err != nil || string(d.Sub) != string(agent.IdentityKey()) || string(d.Iss) != string(memberKey) {
 			t.Fatalf("delegation: %v", err)
+		}
+		// 0.12.0: the grant object carries sig and no key.
+		if strings.Contains(string(g), `"key"`) || strings.Contains(string(g), `"delegation_sig"`) || !strings.Contains(string(g), `"sig"`) {
+			t.Fatalf("grant object: %s", g)
 		}
 	}
 
@@ -111,7 +115,7 @@ func TestLeashAgent(t *testing.T) {
 		}
 	}
 	d, err := client.VerifyDelegation(mine, memberKey, time.Now())
-	if err != nil || d.Scope != "items.read" || strings.Join(d.Tags, ",") != "agent ok" || d.Approval != "auto" || d.PerHour != 60 {
+	if err != nil || d.Scope.Op != "items.read" || strings.Join(d.Scope.Tags, ",") != "agent ok" || d.Approval != "auto" || d.Limits == nil || d.Limits.PerHour != 60 {
 		t.Fatalf("items.read delegation: %+v %v", d, err)
 	}
 	if !strings.Contains(string(ro["included"]), wifi) || strings.Contains(string(ro["included"]), crit) {

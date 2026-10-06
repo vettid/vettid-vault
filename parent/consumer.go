@@ -66,6 +66,11 @@ type enclaveResponse struct {
 // registered and stops releasing the spent code (§11.11.7).
 const codeRecoveryRegistered = "recovery_registered"
 
+// codeRecoveryUnavailable is copied from a refused recovery request's
+// answer into its slot (0.16.0, §11.5, §11.11.2): the member API ends the
+// recovery at once.
+const codeRecoveryUnavailable = "recovery_unavailable"
+
 // maxConcurrent bounds queue messages in flight to the enclave.
 const maxConcurrent = 8
 
@@ -167,8 +172,9 @@ func (p *Parent) handleMessage(ctx context.Context, m QueueMessage) {
 						slot = Slot{Status: "expired"}
 					} else {
 						slot.Envelope = env
-						if er.Code == codeRecoveryRegistered && r.Op == "recovery_register" {
-							slot.Code = codeRecoveryRegistered
+						if er.Code == codeRecoveryRegistered && r.Op == "recovery_register" ||
+							er.Code == codeRecoveryUnavailable && r.Op == "recovery" {
+							slot.Code = er.Code
 						}
 					}
 				}

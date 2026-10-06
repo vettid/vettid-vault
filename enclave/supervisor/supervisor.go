@@ -366,7 +366,7 @@ func (s *Supervisor) lifecycle(ev vault.LifecycleEvent) {
 		s.forget(ev.VaultID)
 	}
 	s.link.notify(hostproto.KindLifecycle, append(hostproto.Strings(ev.Event, ev.VaultID, ev.Release, ev.VaultVersion,
-		strconv.Itoa(ev.StateVersion)), ev.AppKey, []byte(strconv.FormatUint(ev.AppKeySeq, 10)))...)
+		strconv.Itoa(ev.StateVersion)), ev.AppKey, []byte(strconv.FormatUint(ev.AppKeySeq, 10)), []byte(enclave.BackupField(ev.CredentialBackup)))...)
 }
 
 func (s *Supervisor) lockVault(ctx context.Context, id, why string) {

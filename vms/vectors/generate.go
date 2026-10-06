@@ -443,13 +443,17 @@ func genRecovery(t0 time.Time) (obj, error) {
 	if err != nil {
 		return nil, err
 	}
+	nb, err := seal(&altchan.RecoveryCode{VaultID: ACVaultID, RecoveryID: RecRecoveryID, Error: "no_backup"}, SeedRecEphNoBack, NonceRecNoBack)
+	if err != nil {
+		return nil, err
+	}
 	nc, err := seal(refusal, SeedRecEphNoCred, NonceRecNoCred)
 	if err != nil {
 		return nil, err
 	}
 	ch := sha256.Sum256([]byte("vettid/vms/2/recovery-code\x00" + ACVaultID + "\x00" + RecRecoveryID + "\x00" + code))
 	return obj{
-		{"description", "VAULT-MESSAGING §11.11.2 recovery code sealed to the portal's browser key. out = 0x01 || eph (65, uncompressed P-256) || nonce (12) || AES-256-GCM(k, nonce, aad = out[0:78], pt); k = HKDF-SHA-256(ikm = ECDH(eph, browser_key) x-coordinate, salt = eph || browser_key (both 65-byte uncompressed points), info = \"vettid/vms/2/recovery-code-seal\" || 0x00 || vault_id || 0x00 || recovery_id, L = 32); pt = the compact JSON pt_json followed by 0x00 bytes up to pt_len; out is 5,252 bytes. The ephemeral scalar and nonce are the scripted randomness (the scalar drawn first). no_credential is the refusal (§11.11.1). code_hash = SHA-256(\"vettid/vms/2/recovery-code\" || 0x00 || vault_id || 0x00 || recovery_id || 0x00 || code), what the sealed header keeps. qr is the QR payload (compact JSON). The browser key is TEST ONLY; the portal's real key is a non-extractable WebCrypto key."},
+		{"description", "VAULT-MESSAGING §11.11.2 recovery code sealed to the portal's browser key. out = 0x01 || eph (65, uncompressed P-256) || nonce (12) || AES-256-GCM(k, nonce, aad = out[0:78], pt); k = HKDF-SHA-256(ikm = ECDH(eph, browser_key) x-coordinate, salt = eph || browser_key (both 65-byte uncompressed points), info = \"vettid/vms/2/recovery-code-seal\" || 0x00 || vault_id || 0x00 || recovery_id, L = 32); pt = the compact JSON pt_json followed by 0x00 bytes up to pt_len; out is 5,252 bytes. The ephemeral scalar and nonce are the scripted randomness (the scalar drawn first). no_credential and no_backup (0.16.0) are the refusals (§11.11.1, §11.11.2). code_hash = SHA-256(\"vettid/vms/2/recovery-code\" || 0x00 || vault_id || 0x00 || recovery_id || 0x00 || code), what the sealed header keeps. qr is the QR payload (compact JSON). The browser key is TEST ONLY; the portal's real key is a non-extractable WebCrypto key."},
 		{"browser_key_scalar_hex", hx(rep(SeedBrowserKey, 32))},
 		{"browser_key_pub_hex", hx(bpub)},
 		{"vault_id", ACVaultID},
@@ -461,6 +465,7 @@ func genRecovery(t0 time.Time) (obj, error) {
 		{"code_hash_hex", hx(ch[:])},
 		{"sealed", sc},
 		{"no_credential", nc},
+		{"no_backup", nb},
 		{"qr", string(altchan.RecoveryQR(c))},
 	}, nil
 }

@@ -111,6 +111,17 @@ func (h *LocalHost) LockReason(ctx context.Context, id, reason string) (bool, er
 	return true, r.m.LockReason(ctx, reason)
 }
 
+// RecoveryRefusal implements Host.
+func (h *LocalHost) RecoveryRefusal(_ context.Context, id string) (bool, string) {
+	h.mu.Lock()
+	r := h.vaults[id]
+	h.mu.Unlock()
+	if r == nil {
+		return false, ""
+	}
+	return true, r.m.RecoveryRefusal()
+}
+
 // Account implements Host.
 func (h *LocalHost) Account(ctx context.Context, id string, snapshot []byte) (bool, error) {
 	h.mu.Lock()

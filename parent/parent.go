@@ -419,11 +419,20 @@ func parseLifecycle(f *hostproto.Frame) (Lifecycle, bool) {
 	// 0.15.0: [event, vault_id, release, vault_version, state_version,
 	// app_key (SPKI DER or empty), app_key_seq]; an enclave before it
 	// sends the first five.
-	if len(f.Fields) != 5 && len(f.Fields) != 7 {
+	if len(f.Fields) != 5 && len(f.Fields) != 7 && len(f.Fields) != 8 {
 		return Lifecycle{}, false
 	}
+	if len(f.Fields) == 8 {
+		// 0.16.0: the backup bit, "1", "0" or "" (not reported).
+		switch string(f.Fields[7]) {
+		case "1", "0":
+		case "":
+		default:
+			return Lifecycle{}, false
+		}
+	}
 	ev := Lifecycle{Event: string(f.Fields[0]), VaultID: string(f.Fields[1]), Release: string(f.Fields[2]), VaultVersion: string(f.Fields[3])}
-	if len(f.Fields) == 7 && len(f.Fields[5]) > 0 {
+	if len(f.Fields) >= 7 && len(f.Fields[5]) > 0 {
 		if len(f.Fields[5]) > 256 {
 			return Lifecycle{}, false
 		}
@@ -433,9 +442,17 @@ func parseLifecycle(f *hostproto.Frame) (Lifecycle, bool) {
 		}
 		ev.AppKey, ev.AppKeySeq = clone(f.Fields[5]), seq
 	}
+	if len(f.Fields) == 8 && len(f.Fields[7]) == 1 {
+		b := string(f.Fields[7]) == "1"
+		ev.CredentialBackup = &b
+	}
 	switch ev.Event {
 	case EventAppKey:
 		if ev.AppKey == nil {
+			return Lifecycle{}, false
+		}
+	case EventCredentialBackup:
+		if ev.CredentialBackup == nil {
 			return Lifecycle{}, false
 		}
 	case "enrolled", "unlocked", "locked", "moved", "deleted", EventAlarmCredentialClone:

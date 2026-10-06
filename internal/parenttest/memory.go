@@ -267,6 +267,8 @@ type VaultRow struct {
 	AppKey    []byte
 	AppKeyID  string
 	AppKeySeq uint64
+	// CredentialBackup is the reported backup bit (0.16.0, §11.5).
+	CredentialBackup *bool
 }
 
 // SlotRow is a response slot.
@@ -472,6 +474,13 @@ func (t *Tables) Lifecycle(_ context.Context, ev parent.Lifecycle, me string, no
 		return nil
 	}
 	if r == nil || !(r.LeaseInstance == "" || r.LeaseInstance == me) {
+		return nil
+	}
+	if ev.CredentialBackup != nil {
+		b := *ev.CredentialBackup
+		r.CredentialBackup = &b
+	}
+	if ev.Event == parent.EventCredentialBackup {
 		return nil
 	}
 	r.VaultVersion, r.StateVersion, r.UpdatedAt = ev.VaultVersion, strconv.Itoa(ev.StateVersion), now.UTC().Format(time.RFC3339)

@@ -75,3 +75,34 @@ func TestParseLifecycleAppKey(t *testing.T) {
 		}
 	}
 }
+
+// §11.5 (0.16.0): the backup bit as the eighth field; the event
+// credential_backup needs it.
+func TestParseLifecycleBackup(t *testing.T) {
+	pcr := strings.Repeat("a", 96)
+	frame := func(fs ...string) *hostproto.Frame {
+		f := &hostproto.Frame{}
+		for _, s := range fs {
+			f.Fields = append(f.Fields, []byte(s))
+		}
+		return f
+	}
+	ev, ok := parseLifecycle(frame("locked", "v1", pcr, pcr, "1", "", "0", "0"))
+	if !ok || ev.CredentialBackup == nil || *ev.CredentialBackup {
+		t.Fatalf("%+v %v", ev, ok)
+	}
+	if ev, ok := parseLifecycle(frame("unlocked", "v1", pcr, pcr, "1", "k", "2", "1")); !ok || string(ev.AppKey) != "k" || ev.AppKeySeq != 2 || !*ev.CredentialBackup {
+		t.Fatalf("app key with the bit: %+v", ev)
+	}
+	if ev, ok := parseLifecycle(frame(EventCredentialBackup, "v1", pcr, pcr, "1", "", "0", "1")); !ok || !*ev.CredentialBackup {
+		t.Fatal("credential_backup event")
+	}
+	if ev, ok := parseLifecycle(frame("unlocked", "v1", pcr, pcr, "1", "", "0", "")); !ok || ev.CredentialBackup != nil {
+		t.Fatal("unreported bit")
+	}
+	for _, f := range []*hostproto.Frame{frame(EventCredentialBackup, "v1", pcr, pcr, "1", "", "0", ""), frame("locked", "v1", pcr, pcr, "1", "", "0", "yes")} {
+		if _, ok := parseLifecycle(f); ok {
+			t.Fatalf("accepted %q", f.Fields)
+		}
+	}
+}

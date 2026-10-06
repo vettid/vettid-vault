@@ -607,66 +607,46 @@ func TestRecover(t *testing.T) {
 	}
 }
 
-// §11.11.5, §3.5.6 (0.9.0): with backup off the vault keeps no copy, so a
-// recovery cannot restore the credential (credential_lost); the
-// recovering app may reset it: the old credential and its critical items
-// are destroyed, a new one is created, the app becomes the holder. A
-// member-supplied blob is no longer accepted.
-func TestRecoverBackupOff(t *testing.T) {
+// §3.5.6, §11.11.5 (0.16.0): the vault has a backup copy only while the
+// setting is on and the latest blob was sealed with it on; with it off a
+// recovering app gets nothing (no reset, no deletion, no credential_lost:
+// credential.recover is refused), and only the holder may reset.
+func TestBackupCopyAndRecoveringApp(t *testing.T) {
 	e := newEnv(t)
-	e.h.Set.NoBackup = true
 	blob := e.create()
-	if r := e.call("recovering-app", "credential.reset", "", map[string]any{"password": "a new password"}); r.Code != "exists" {
-		t.Fatalf("reset while the vault keeps the blob: %q", r.Code)
+	if !e.f.HasBackupCopy() {
+		t.Fatal("no backup copy with the setting on")
 	}
-	// The holder's form (0.15.2) needs the blob, the PIN and both passwords.
-	if r := e.call("app", "credential.reset", "", map[string]any{"password": "a new password"}); r.Code != "bad_request" {
-		t.Fatalf("reset by the app in the recovering form: %q", r.Code)
+	e.h.Set.NoBackup = true
+	e.f.SettingsChanged(nil, e.h.Set)
+	if e.f.HasBackupCopy() {
+		t.Fatal("backup copy with the setting off")
 	}
-	e.ok(e.raw("app", "credential.ack", `{"version":1}`))
-	if r := e.call("recovering-app", "credential.recover", "", map[string]any{"password": pw}); r.Code != "credential_lost" {
-		t.Fatalf("backup off: %q", r.Code)
+	e.h.Set.NoBackup = false
+	e.f.SettingsChanged(nil, e.h.Set)
+	if e.f.HasBackupCopy() {
+		t.Fatal("a copy before the next use")
 	}
-	if r := e.call("recovering-app", "credential.recover", blob, map[string]any{"password": pw}); r.Code != "credential_lost" {
-		t.Fatalf("a supplied blob is ignored: %q", r.Code)
+	nb := blobOf(t, e.ok(e.unlock(blob, pw)))
+	if !e.f.HasBackupCopy() {
+		t.Fatal("no copy after a use with the setting on")
+	}
+	_ = nb
+	for _, typ := range []string{"credential.reset", "vault.delete", "credential.get", "credential.version"} {
+		if r := e.call("recovering-app", typ, "", map[string]any{"password": pw, "pin": "246810"}); r.Code != "forbidden" {
+			t.Fatalf("%s from a recovering app: %q", typ, r.Code)
+		}
+	}
+	e.h.Set.NoBackup = true
+	e.f.SettingsChanged(nil, e.h.Set)
+	e.ok(e.raw("app", "credential.ack", `{"version":2}`))
+	if r := e.call("recovering-app", "credential.recover", "", map[string]any{"password": pw}); r.Code != "forbidden" || r.Body != nil {
+		t.Fatalf("recover without a copy: %q", r.Code)
 	}
 	if len(e.h.Completed) != 0 {
 		t.Fatal("completed")
 	}
-	del := &delObs{}
-	e.f.AddDeleteObserver(del)
-	k1, _ := e.ok(e.raw("app", "credential.version", `{}`)).Obj(t).String("key")
-	r := e.ok(e.call("recovering-app", "credential.reset", "", map[string]any{"password": "a new password"}))
-	if v, _ := r.Obj(t).Uint("version", 1, 9); v != 1 || del.n != 1 || len(e.h.Completed) != 1 || e.f.Holder() != "dev-recovering" {
-		t.Fatalf("reset: version %d, deleted %d, completed %v, holder %s", v, del.n, e.h.Completed, e.f.Holder())
-	}
-	if k2, _ := r.Obj(t).String("key"); k2 == k1 {
-		t.Fatal("same credential key after a reset")
-	}
-	if !e.h.HasActivity("credential.reset") {
-		t.Fatal("not recorded")
-	}
-	nb := blobOf(t, r)
-	if r := e.call("recovering-app", "credential.unlock", nb, map[string]any{"password": "a new password"}); r.Code != "forbidden" {
-		t.Fatalf("still recovering in the fake host: %q", r.Code)
-	}
-	// Its UTKs survived the reset (a spent one opens nothing, a kept one
-	// opens the new credential once the app is ordinary).
-	if e.f.PoolSizeOf("dev-recovering") == 0 {
-		t.Fatal("pool lost")
-	}
-	u := e.take("recovering-app")
-	e.f.mu.Lock()
-	seed := e.f.st.Pools["dev-recovering"][0].Seed
-	e.f.mu.Unlock()
-	if bytes.Equal(seed, make([]byte, len(seed))) || u.id == "" {
-		t.Fatal("UTK seeds wiped by the reset")
-	}
 }
-
-type delObs struct{ n int }
-
-func (d *delObs) CredentialDeleted(*vault.Session) { d.n++ }
 
 func TestRecoverBackoff(t *testing.T) {
 	e := newEnv(t)

@@ -33,6 +33,8 @@ const (
 	SeedRecEphNoCred byte = 0x26 // the no_credential refusal's ephemeral scalar
 	NonceRecNoCred   byte = 0x27
 	RecCodeBytes     byte = 0x28 // the code's 20 bytes
+	SeedRecEphNoBack byte = 0x28 // (spec 0.16.0) the no_backup refusal's ephemeral scalar
+	NonceRecNoBack   byte = 0x29 // (spec 0.16.0)
 
 	// §10.11 LEASH delegation and status statement (leash.json, 0.12.0).
 	SeedLeashCredKey byte = 0x30 // (spec) the member's credential key (iss)

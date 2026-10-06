@@ -341,7 +341,7 @@ func TestHeaderContents(t *testing.T) {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	want := "[backoff created_at header_seq kdf manifest_serial pepper provisional sealed_release state_seq unlock_keys user_guid v vault_id]"
+	want := "[backoff created_at credential_backup header_seq kdf manifest_serial pepper provisional sealed_release state_seq unlock_keys user_guid v vault_id]"
 	if fmt.Sprint(keys) != want {
 		t.Fatalf("header members %v", keys)
 	}

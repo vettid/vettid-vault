@@ -86,6 +86,12 @@ func str(o strictjson.Object, k string) (string, error) {
 }
 
 func (m *Manager) hStatus(_ context.Context, s *Session, _ *envelope.Inner) (json.RawMessage, error) {
+	if s.peer.Recovering {
+		// 0.16.0 (§10.2, §11.11.5): nothing about the vault before the
+		// credential password.
+		return strictjson.NewBuilder().String("vault_id", m.st.VaultID).Uint("state_seq", m.st.StateSeq).
+			Uint("header_seq", m.hdr.HeaderSeq).Bytes(), nil
+	}
 	return strictjson.NewBuilder().String("vault_id", m.st.VaultID).Uint("state_seq", m.st.StateSeq).
 		Uint("header_seq", m.hdr.HeaderSeq).Bool("provisional", m.hdr.Provisional).
 		Uint("devices", uint64(len(m.st.Devices))).Uint("connections", uint64(len(m.st.Connections))).

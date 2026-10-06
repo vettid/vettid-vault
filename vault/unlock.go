@@ -510,6 +510,18 @@ func (m *Manager) resume(ctx context.Context, p AltUnlockParams, out *AltUnlockO
 			m.hdr.SealKeyVerified = r
 		}
 	}
+	if !p.pinOnly && m.hdr.isRecoveryKey(p.DeviceIK) && !(m.hasGate() && m.credentialExists() && m.backupCopy()) {
+		// §11.11.5 step 1 (0.16.0): a vault without a backup copy is not
+		// recovered. The recovery and its unlock key go (as a cancel), the
+		// header is written and the vault locks again before it serves
+		// anything; no token, no bundle.
+		m.hdr.cancelRecovery(now, "recovery.cancelled")
+		if err := m.writeHeader(ctx); err != nil && errors.Is(err, ErrSplitBrain) {
+			return nil, out.fail(CodeRetry, err)
+		}
+		out.HeaderSeq = m.hdr.HeaderSeq
+		return fail(CodeNoBackup, ErrRecoveryNoBackup)
+	}
 	if err := m.loadKeys(); err != nil {
 		return fail(CodeMissing, err)
 	}
@@ -531,7 +543,7 @@ func (m *Manager) resume(ctx context.Context, p AltUnlockParams, out *AltUnlockO
 		}
 		if m.hdr.isRecoveryKey(p.DeviceIK) {
 			out.VaultBundle = VaultBundle(handshake.Principal{IK: m.keys.ik.Public().(ed25519.PublicKey), KEM: m.keys.kem.Public(), Relay: m.ownAddr()})
-			backup := m.st.Settings.Backup()
+			backup := true // 0.16.0: always true here (no_backup refused above)
 			out.CredentialBackup = &backup
 		}
 		if len(p.Account) > 0 {

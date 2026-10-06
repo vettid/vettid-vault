@@ -486,6 +486,8 @@ func TestRecoveryRegisteredMarker(t *testing.T) {
 			return marked(m.RequestID, nil, "recovery_registered")
 		case "01JDDDDDDDDDDDDDDDDDDDDDDD":
 			return marked(m.RequestID, env, "something_else")
+		case "01JFFFFFFFFFFFFFFFFFFFFFFF", "01JGGGGGGGGGGGGGGGGGGGGGGG":
+			return marked(m.RequestID, env, "recovery_unavailable")
 		}
 		return response(m.RequestID, "done", env)
 	})
@@ -513,6 +515,14 @@ func TestRecoveryRegisteredMarker(t *testing.T) {
 	}
 	if s := send("recovery_register", "01JEEEEEEEEEEEEEEEEEEEEEEE"); s.Status != "done" || s.Code != "" {
 		t.Fatalf("unmarked register %+v", s)
+	}
+	// 0.16.0 (§11.5, §11.11.2): a refused recovery request's marker, on
+	// that op only.
+	if s := send("recovery", "01JFFFFFFFFFFFFFFFFFFFFFFF"); s.Status != "done" || s.Code != "recovery_unavailable" || len(s.Envelope) != 5252 {
+		t.Fatalf("refused recovery slot %+v", s)
+	}
+	if s := send("recovery_register", "01JGGGGGGGGGGGGGGGGGGGGGGG"); s.Status != "done" || s.Code != "" {
+		t.Fatalf("recovery_unavailable on a register %+v", s)
 	}
 }
 

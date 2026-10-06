@@ -237,6 +237,17 @@ func TestAWSBackend(t *testing.T) {
 	if k := appKey("enrolled", "k1", 1); k["key"].(*ddbS).Value != "azE=" || k["seq"].(*ddbtypes.AttributeValueMemberN).Value != "1" {
 		t.Fatalf("enrolled did not replace: %v", k)
 	}
+	// The backup bit (0.16.0, §11.5): on locked, and the event alone.
+	f, tr := false, true
+	if err := a.Lifecycle(ctx, Lifecycle{Event: "locked", VaultID: "v1", Release: pcr, VaultVersion: pcr, StateVersion: 1, CredentialBackup: &tr}, "i9", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Lifecycle(ctx, Lifecycle{Event: EventCredentialBackup, VaultID: "v1", Release: pcr, VaultVersion: pcr, StateVersion: 1, CredentialBackup: &f}, "i9", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if it, _ := memberapitest.VaultItem(ctx, db, tn.Vaults, "v1"); it["credential_backup"] == nil || it["credential_backup"].(*ddbtypes.AttributeValueMemberBOOL).Value {
+		t.Fatalf("credential_backup %v", it["credential_backup"])
+	}
 	// A deletion (§12.5): state deleted and the member's notice.
 	if err := a.Lifecycle(ctx, Lifecycle{Event: "deleted", VaultID: "v1", Release: pcr, VaultVersion: pcr, StateVersion: 1}, "i9", time.Now()); err != nil {
 		t.Fatal(err)

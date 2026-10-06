@@ -144,6 +144,10 @@ type Header struct {
 	// at each transfer or recovery). Both are reported to the host (§11.5).
 	AppKey    []byte `json:"app_key,omitempty"`
 	AppKeySeq uint64 `json:"app_key_seq,omitempty"`
+	// CredentialBackup records whether the vault keeps a backup copy of
+	// its credential (0.16.0, §3.3, §3.5.6), so whether it can be
+	// recovered; nil in a header written before 0.16.0.
+	CredentialBackup *bool `json:"credential_backup,omitempty"`
 }
 
 func headerAAD(vaultID string) []byte { return []byte(labelHeader + "\x00" + vaultID) }

@@ -662,6 +662,21 @@ func checkRecoveryVectors(t *testing.T, dir string) {
 	if m := open("no_credential"); len(m) != 4 || m["error"] != "no_credential" {
 		t.Fatalf("no_credential pt: %v", m)
 	}
+	// 0.16.0 (§16): the no_backup refusal, eph 32 x 0x28, nonce 12 x 0x29;
+	// absent from frozen vectors of earlier releases.
+	if _, ok := d.m["no_backup"]; ok {
+		nb := d.sub("no_backup")
+		eq(t, "no_backup eph scalar", nb.hex("eph_scalar_hex"), bytes.Repeat([]byte{0x28}, 32))
+		eq(t, "no_backup nonce", nb.hex("nonce_hex"), bytes.Repeat([]byte{0x29}, 12))
+		if m := open("no_backup"); len(m) != 4 || m["error"] != "no_backup" {
+			t.Fatalf("no_backup pt: %v", m)
+		}
+		if r, err := altchan.OpenRecoveryCode(bk, nb.b64("out_b64"), vid, rid); err != nil || r.Error != "no_backup" || r.Code != "" {
+			t.Fatalf("library open (no_backup): %v", err)
+		}
+	} else if dir == Dir {
+		t.Error("recovery.json lacks no_backup (0.16.0)")
+	}
 	// The library opens both.
 	c, err := altchan.OpenRecoveryCode(bk, d.sub("sealed").b64("out_b64"), vid, rid)
 	if err != nil || c.Code != code || envelope.FormatTS(c.NotBefore) != d.str("not_before") || envelope.FormatTS(c.Expires) != d.str("expires_at") {

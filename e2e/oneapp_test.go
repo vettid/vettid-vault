@@ -4,6 +4,7 @@ package e2e
 
 import (
 	"context"
+	"crypto/ecdh"
 	"crypto/ed25519"
 	"errors"
 	"strings"
@@ -14,17 +15,19 @@ import (
 	"github.com/vettid/vettid-relay/relayclient"
 
 	"github.com/vettid/vettid-vault/client"
+	"github.com/vettid/vettid-vault/enclave"
 	"github.com/vettid/vettid-vault/internal/enclavetest"
 	"github.com/vettid/vettid-vault/internal/relaytest"
 	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault"
+	"github.com/vettid/vettid-vault/vms/altchan"
 )
 
 // One app per vault (VAULT-MESSAGING 0.9.0, owner decisions of
 // 2026-10-03) through the real relay: no second app; the clone alarm, the
 // freeze while messaging goes on, the confirmation and the forced
 // rotation; the direct transfer and its aborts; recovery replacing the
-// app while a desktop stays; recovery with backup off; GrapheneOS.
+// app while a desktop stays; no recovery with backup off (0.16.0); GrapheneOS.
 
 func alarmOf(t *testing.T, d *client.Device) (id, state string) {
 	t.Helper()
@@ -382,62 +385,69 @@ func TestRecoveryReplacesApp(t *testing.T) {
 	}
 }
 
-// §11.11.5, §3.5.6 (0.9.0): with backup off, losing the app loses the
-// credential and its critical items: the recovery answers credential_lost
-// and continues only with a new credential (OWNER DECISION).
-func TestRecoveryBackupOffLosesCredential(t *testing.T) {
-	aw, off := newRecWorld(t)
+// §11.11.1, §11.11.2, §11.5 (0.16.0): with the backup off there is no
+// recovery: the running vault refuses the request from its own state
+// before anything is locked (sealed no_backup, slot marker
+// recovery_unavailable), a locked vault refuses it from its header, the
+// host learns the bit (credential_backup), and nothing is recorded.
+func TestRecoveryBackupOffRefused(t *testing.T) {
+	aw, _ := newRecWorld(t)
 	a := aw.newApp("member-ro", enclavetest.NewAndroidAttester(0x83, enclavetest.AndroidOptions{}))
 	if r := aw.enroll(a, acPIN); !r.OK {
 		t.Fatal(r.Code)
 	}
 	ctx := ctxT(t, 180*time.Second)
-	if _, _, err := a.dev.ItemPutCritical(ctx, credPW, "", 0, nil, client.ItemContent{Name: "seed",
-		Fields: []client.ItemField{{Label: "Words", Kind: "multiline", Value: "abandon abandon about"}}}); err != nil {
-		t.Fatal(err)
-	}
 	if _, err := a.dev.SettingsSet(ctx, 0, map[string]any{"credential.backup": false}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := a.dev.CredentialUnlock(ctx, credPW); err != nil { // a new version, confirmed
 		t.Fatal(err)
 	}
-	qr := requestRecovery(t, aw, a)
-	off.Store(int64(24*time.Hour + time.Minute))
-	b := aw.newApp(a.guid, enclavetest.NewAndroidAttester(0x84, enclavetest.AndroidOptions{}))
-	b.vid = a.vid
-	if res := register(t, aw, b, qr); !res.OK {
-		t.Fatalf("register: %+v", res)
+	waitUntil(t, "credential_backup event", func() bool {
+		for _, ev := range aw.w.Events() {
+			if ev.Event == vault.EventCredentialBackup && ev.VaultID == a.vid && ev.CredentialBackup != nil && !*ev.CredentialBackup {
+				return true
+			}
+		}
+		return false
+	})
+	refused := func(running bool) {
+		t.Helper()
+		bk, err := ecdh.P256().GenerateKey(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rid, resp := aw.w.Recovery(ctx, aw.w.Instance(3), a.vid, a.guid, bk.PublicKey().Bytes())
+		if resp.Code != enclave.CodeRecoveryUnavailable || len(resp.Envelope) != altchan.ResultEnvelopeSize {
+			t.Fatalf("answer %q %d", resp.Code, len(resp.Envelope))
+		}
+		c, err := altchan.OpenRecoveryCode(bk, resp.Envelope, a.vid, rid)
+		if err != nil || c.Error != "no_backup" || c.Code != "" {
+			t.Fatalf("sealed refusal %+v %v", c, err)
+		}
+		if running && aw.instanceOf(a).Manager(a.vid) == nil {
+			t.Fatal("the refused request locked the vault")
+		}
 	}
-	if r := aw.mustUnlock(b, acPIN, client.UnlockOptions{}, ""); !r.OK || r.CredentialBackup == nil || *r.CredentialBackup {
-		t.Fatalf("unlock: %+v", r)
+	refused(true)
+	for _, ev := range a.dev.Events() {
+		if ev.Type == "vault.locking" {
+			t.Fatal("vault.locking for a refused request")
+		}
 	}
-	// §11.11.5 step 1 (0.10.6): no copy, so the app need not ask for the
-	// password (the vault would answer credential_lost anyway).
-	if on, known := b.dev.RecoveryCredentialBackup(); on || !known {
-		t.Fatalf("credential_backup %v %v", on, known)
+	aw.lock(a)
+	refused(false)
+	if r := aw.mustUnlock(a, acPIN, client.UnlockOptions{}, ""); !r.OK {
+		t.Fatalf("unlock after the refusals (nothing recorded): %+v", r)
 	}
-	if err := b.dev.CompleteRecoveryHandshake(ctx); err != nil {
-		t.Fatal(err)
+	var locked *bool
+	for _, ev := range aw.w.Events() {
+		if ev.Event == "locked" && ev.VaultID == a.vid {
+			locked = ev.CredentialBackup
+		}
 	}
-	if err := b.dev.CredentialRecover(ctx, credPW); client.Code(err) != "credential_lost" {
-		t.Fatalf("recover with backup off: %v", err)
-	}
-	if rr, err := b.dev.Request(ctx, "item.list", []byte(`{}`)); err != nil || rr.ErrorCode() != "forbidden" {
-		t.Fatal("restricted until a new credential")
-	}
-	if err := b.dev.CredentialReset(ctx, "a brand new password"); err != nil {
-		t.Fatalf("reset: %v", err)
-	}
-	l, err := b.dev.ItemList(ctx, map[string]any{"sensitivity": "critical"})
-	if err != nil || strings.Contains(string(l["items"]), "seed") {
-		t.Fatalf("critical items survived: %s %v", l["items"], err)
-	}
-	if _, err := b.dev.CredentialUnlock(ctx, "a brand new password"); err != nil {
-		t.Fatal(err)
-	}
-	if n, _ := appCount(t, b.dev); n != 1 {
-		t.Fatal("old app kept")
+	if locked == nil || *locked {
+		t.Fatalf("locked event's bit %v", locked)
 	}
 }
 
@@ -593,51 +603,5 @@ func TestVaultDelete(t *testing.T) {
 	fresh := aw.newApp(a.guid, enclavetest.NewAndroidAttester(0x8a, enclavetest.AndroidOptions{}))
 	if r := aw.enroll(fresh, acPIN); !r.OK {
 		t.Fatalf("fresh enrollment: %+v", r)
-	}
-}
-
-// §11.11.5, §12.5: with the backup off, a recovery restores access only;
-// the recovering app may delete the vault with the PIN alone.
-func TestVaultDeleteViaRecoveryBackupOff(t *testing.T) {
-	aw, off := newRecWorld(t)
-	a := aw.newApp("member-rd", enclavetest.NewAndroidAttester(0x8b, enclavetest.AndroidOptions{}))
-	if r := aw.enroll(a, acPIN); !r.OK {
-		t.Fatal(r.Code)
-	}
-	ctx := ctxT(t, 180*time.Second)
-	if _, err := a.dev.SettingsSet(ctx, 0, map[string]any{"credential.backup": false}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := a.dev.CredentialUnlock(ctx, credPW); err != nil {
-		t.Fatal(err)
-	}
-	qr := requestRecovery(t, aw, a)
-	off.Store(int64(24*time.Hour + time.Minute))
-	b := aw.newApp(a.guid, enclavetest.NewIOSAttester(0x95, enclavetest.IOSOptions{}))
-	b.vid = a.vid
-	if res := register(t, aw, b, qr); !res.OK {
-		t.Fatalf("register: %+v", res)
-	}
-	if r := aw.mustUnlock(b, acPIN, client.UnlockOptions{}, ""); !r.OK {
-		t.Fatalf("unlock: %+v", r)
-	}
-	if err := b.dev.CompleteRecoveryHandshake(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if err := b.dev.CredentialRecover(ctx, credPW); client.Code(err) != "credential_lost" {
-		t.Fatalf("recover: %v", err)
-	}
-	if rr, err := b.dev.Request(ctx, "credential.get", []byte(`{}`)); err != nil || rr.ErrorCode() != "forbidden" {
-		t.Fatal("a recovering app fetched the credential")
-	}
-	if err := b.dev.VaultDelete(ctx, acPIN, ""); err != nil {
-		t.Fatalf("delete: %v", err)
-	}
-	deadline := time.Now().Add(15 * time.Second)
-	for storeHas(t, aw, "vaults/"+a.vid+"/state") {
-		if time.Now().After(deadline) {
-			t.Fatal("storage not erased")
-		}
-		time.Sleep(50 * time.Millisecond)
 	}
 }

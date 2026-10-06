@@ -83,16 +83,19 @@ func (c *Core) release() vault.Release {
 
 // Open runs an enroll or unlock job and returns the sealed result (or
 // random bytes of its size) and the unlocked manager, if the vault is now
-// open. The caller runs the manager. registered reports a recovery
-// register whose sealed result is {"ok": true} (§11.11.3, 0.10.6).
-func (c *Core) Open(ctx context.Context, j *Job) (res []byte, m *vault.Manager, registered bool) {
+// open. The caller runs the manager. marker reports the clear marker of
+// the answer: a recovery register whose sealed result is {"ok": true}
+// (recovery_registered, §11.11.3, 0.10.6), or a recovery request the
+// vault refused (recovery_unavailable, §11.11.2, 0.16.0).
+func (c *Core) Open(ctx context.Context, j *Job) (res []byte, m *vault.Manager, marker bool) {
+	var registered bool
 	switch j.Op {
 	case OpEnroll:
 		res = c.enroll(ctx, j, &m)
 	case OpUnlock:
 		res = c.unlock(ctx, j, &m)
 	case OpRecovery:
-		res = c.recoveryRequest(ctx, j)
+		res, registered = c.recoveryRequest(ctx, j)
 	case OpRecoveryCancel:
 		c.recoveryCancel(ctx, j)
 	case OpRecoveryRegister:

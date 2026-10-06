@@ -434,6 +434,9 @@ type vaultRow struct {
 	State, SealedRelease, VaultVersion, LeaseInstance string
 	// AppKeyID, AppKeySeq: the app_key the parent wrote (0.15.0).
 	AppKeyID, AppKeySeq string
+	// CredentialBackup: the backup bit the parent wrote (0.16.0): "true",
+	// "false" or "".
+	CredentialBackup string
 }
 
 func (s *stack) vaultRow(id string) vaultRow {
@@ -451,6 +454,9 @@ func (s *stack) vaultRow(id string) vaultRow {
 	r := vaultRow{State: str(it, "state"), SealedRelease: str(it, "sealed_release"), VaultVersion: str(it, "vault_version")}
 	if l, ok := it["lease"].(*ddbtypes.AttributeValueMemberM); ok {
 		r.LeaseInstance = str(l.Value, "instance_id")
+	}
+	if b, ok := it["credential_backup"].(*ddbtypes.AttributeValueMemberBOOL); ok {
+		r.CredentialBackup = fmt.Sprint(b.Value)
 	}
 	if k, ok := it["app_key"].(*ddbtypes.AttributeValueMemberM); ok {
 		r.AppKeyID = str(k.Value, "kid")

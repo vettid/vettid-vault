@@ -6,7 +6,8 @@
 # release-update test keys (scalars 32 x 0x21 and 32 x 0x22) and the PUBLIC
 # key of the §11.11.2 recovery vector's browser key (scalar 32 x 0x23), and
 # the PUBLIC credential key of the §10.11 LEASH vectors (seed 32 x 0x30,
-# leash.json).
+# leash.json), and the PUBLIC key (SPKI) of the 0.15.0 app-key vector
+# (scalar 32 x 0x41, appkey.json).
 # They are public by design and are regenerated deterministically by
 # `go generate ./vms/vectors`. Also allowlisted: the example ULID of
 # VAULT-MESSAGING §5.3, which tests use as a dummy id (for instance as a
@@ -26,4 +27,5 @@ regexes = [
   '''042464a2f8813e007299b9c0beef9c8d6d8d17470b32bba0329c145f0cfc60b683f831a3''',
   '''G6QHW3fJ4/s\+zeFc2vUiHzwQNz5iP3sOHvdjZrCvcTc=''',
   '''01JB2Z6V9K3M4N5P6Q7R8S9T0V''',
+  '''MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEZpI3VGYrivhlu/KoncHtr3sZZHVE''',
 ]

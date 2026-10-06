@@ -429,7 +429,8 @@ func TestOwnerCheckTenFailuresLock(t *testing.T) {
 
 // §3.6.1: a vault from before 0.13.0 starts its clock at its first start
 // if it has a credential; without one, the first credential.create starts
-// it and a later one does not move it. A vault without a credential is
+// it, and a later one (after credential.delete) starts it fresh and ends a
+// hold (owner decision of 2026-10-06). A vault without a credential is
 // never gated.
 func TestOwnerCheckClockStart(t *testing.T) {
 	d := newDevFixture(t)
@@ -448,10 +449,12 @@ func TestOwnerCheckClockStart(t *testing.T) {
 	if d.m.ownerCheckState(time.Now()) != OwnerCheckHeld {
 		t.Fatal("not held")
 	}
-	dl := d.m.st.OwnerCheck.Deadline
+	d.m.ownerCheckTick(time.Now())
+	d.m.st.OwnerCheck.Failures = 3
 	d.m.ownerCheckEnrolled(time.Now())
-	if !d.m.st.OwnerCheck.Deadline.Equal(dl) {
-		t.Fatal("a later credential.create moved the clock")
+	if rec := d.m.st.OwnerCheck; rec.Deadline.Before(time.Now().Add(23*time.Hour)) || rec.Failures != 0 || rec.Gate != "" ||
+		d.m.ownerCheckState(time.Now()) != OwnerCheckOK {
+		t.Fatalf("a new credential did not start the clock fresh: %+v", rec)
 	}
 	d2 := newDevFixture(t)
 	d2.m.addFeature(&ocFeature{})

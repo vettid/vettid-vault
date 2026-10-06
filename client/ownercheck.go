@@ -13,8 +13,7 @@ import (
 // with the blob; the CEK rotates. A check may also turn the hold off (with
 // an optional end at most 30 days ahead) or on (§3.6.7).
 
-// TypeOwnerCheck is the check's message type, as vault.TypeOwnerCheck
-// (pending the owner's decision on its spelling, see there).
+// TypeOwnerCheck is the check's message type, as vault.TypeOwnerCheck.
 const TypeOwnerCheck = "vault.owner-check"
 
 // OwnerCheckResult is a successful check's answer (§3.6.1).

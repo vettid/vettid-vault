@@ -24,14 +24,9 @@ import (
 // The record lives in DEK state (State.OwnerCheck), so it survives locks;
 // the clock runs on the vault's own clock (Options.Now).
 
-// TypeOwnerCheck is the owner check's message type (§3.6.1, §10.2).
-//
-// PENDING OWNER DECISION: VAULT-MESSAGING 0.13.0 names it
-// "vault.owner_check", but §5.3 restricts every `type` to
-// [a-z][a-z0-9-]*(\.[a-z][a-z0-9-]*)* (no underscore), which the envelope
-// parser enforces. Until the spec resolves the contradiction this tree
-// uses the hyphenated form, the registry's convention for multi-word
-// segments (wallet.request-address, critical-secret.use.request).
+// TypeOwnerCheck is the owner check's message type (§3.6.1, §10.2):
+// "vault.owner-check" (owner decision of 2026-10-06, VAULT-MESSAGING
+// 0.15.2; 0.13.0's "vault.owner_check" broke §5.3's type grammar).
 const TypeOwnerCheck = "vault.owner-check"
 
 // Owner-check constants (§3.6.2, §3.6.3, §3.6.4, §3.6.7).
@@ -131,8 +126,8 @@ type OwnerCheckHost interface {
 	// OwnerCheckFailed counts a failed check (ref "pin" or "password");
 	// the tenth consecutive one locks the vault after the batch (§3.6.4).
 	OwnerCheckFailed(ref string, now time.Time)
-	// OwnerCheckEnrolled starts the clock at the vault's first
-	// credential.create (§3.6.1); later calls do nothing.
+	// OwnerCheckEnrolled starts the clock fresh at a credential.create
+	// (§3.6.1; owner decision of 2026-10-06: every new credential).
 	OwnerCheckEnrolled(now time.Time)
 }
 
@@ -278,10 +273,17 @@ func (m *Manager) startClock(rec *OwnerCheck, now time.Time) {
 	rec.LastAt, rec.Deadline, rec.Failures = now, now.Add(m.st.Settings.OwnerCheckInterval()), 0
 }
 
+// ownerCheckEnrolled starts the clock fresh when the vault gets a new
+// credential by credential.create (owner decision of 2026-10-06: a vault
+// is without a credential only during enrollment, and every new credential
+// starts the clock fresh, as a recovery or a transfer does): the first one
+// at enrollment, and one after a credential.delete, which also ends a
+// hold.
 func (m *Manager) ownerCheckEnrolled(now time.Time) {
 	rec := m.ownerCheckRecord()
 	if !rec.Deadline.IsZero() {
-		return // a later credential.create does not move the clock
+		m.ownerCheckPassed(nil, false, "", now)
+		return
 	}
 	m.startClock(rec, now)
 	m.dirty = true

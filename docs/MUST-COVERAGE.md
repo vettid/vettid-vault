@@ -548,16 +548,15 @@ fake host), and calls, presence and LEASH apply their gates (`calls`,
 through the real relay with an injectable owner-check clock
 (`vault.Options.OwnerCheckClock`).
 
-**Pending owner decision:** §5.3 restricts `type` to
-`[a-z][a-z0-9-]*(\.[a-z][a-z0-9-]*)*`, which excludes the name
-`vault.owner_check` used throughout 0.13.0. This tree registers
-`vault.TypeOwnerCheck` = `vault.owner-check` until the spec settles it.
+The message type is `vault.owner-check` (owner decision of 2026-10-06,
+VAULT-MESSAGING 0.15.2): 0.13.0's `vault.owner_check` broke §5.3's type
+grammar.
 
 | § | Requirement | Test(s) |
 |---|---|---|
 | 3.6.1 | The check, in order: alarm refusal before the UTK is spent; the UTK; a bad hold change is `bad_request` before the PIN (not a failed check); the blob (`stale_credential` for the holder's retry, the clone rule); the PIN under the §11.8 backoff (`bad_pin`, a failed check, the password not tried); the password backoff and the password (`bad_password`, a failed check); on success the CEK rotates and the answer is `{credential, version, utks, deadline, interval_seconds, hold, hold_off_until?}`; holder only (`forbidden`) | `credential.TestOwnerCheck`, `credential.TestOwnerCheckDuringAlarm`, `e2e.TestOwnerCheckHeldVault` |
 | 3.6.1 | The record `{last_at, deadline, failures}` in DEK state, on the vault's clock; a success sets `last_at` = now, `deadline` = now + interval, `failures` = 0, audits `owner_check.passed` and sends the other devices `sync.event{owner_check, deadline}` | `vault.TestOwnerCheckHold`, `vault.TestOwnerCheckTenFailuresLock` |
-| 3.6.1 | What starts the clock: enrollment's first `credential.create` (a later one does not move it); a completed recovery (`credential.recover`, `credential.reset`); a transfer's approval (its wrong entries are failed checks); a vault from before 0.13.0 at its first start, if it has a credential. A vault without a credential is never gated | `vault.TestOwnerCheckClockStart`, `credential.TestOwnerCheckClockStarters`, `credential.TestTransferApprovalIsCheck`, `credential.TestOwnerCheck` |
+| 3.6.1 | What starts the clock: every new credential starts it fresh (owner decision of 2026-10-06): `credential.create` (at enrollment, and after a `credential.delete`, which also ends a hold); a completed recovery (`credential.recover`, `credential.reset`); a transfer's approval (its wrong entries are failed checks); a vault from before 0.13.0 at its first start, if it has a credential. A vault without a credential is never gated | `vault.TestOwnerCheckClockStart`, `credential.TestOwnerCheckClockStarters`, `credential.TestTransferApprovalIsCheck`, `credential.TestOwnerCheck` |
 | 3.6.2 | `owner_check.interval_seconds` 3,600–86,400 (default 86,400, else `bad_request`); app only (a desktop's `settings.set` naming any owner-check key `forbidden` at once, never held); shorter applies at once (and may hold at once), longer from the next check | `vault.TestOwnerCheckSettings` |
 | 3.6.3 | The app gate: past the deadline the holder may send only its row of the allow list, whatever the hold switch; requests answered `owner_check_required`, other messages dropped and audited `drop.owner_check`; with the hold on, desktops and agents only theirs; a recovering app its own set; the transport types for any device; the alarm's path, an open transfer and a call answered before the deadline | `vault.TestOwnerCheckHold`, `vault.TestOwnerCheckDue`, `vault.TestHoldAllowList`, `e2e.TestOwnerCheckHeldVault` |
 | 3.6.3 | Entering the hold (one flush): the unlock window ends, held approvals answered `owner_check_required`, access-session requests dropped, a ringing call stops ringing on the devices only (`call.end{unavailable}`), audit `owner_check.held`, `vault.held` to the app and desktops in a session | `vault.TestOwnerCheckHold`, `credential.TestHoldEndsUnlockWindow`, `calls.TestCallsWhileHeld` |

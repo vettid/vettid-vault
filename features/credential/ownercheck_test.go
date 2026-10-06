@@ -161,8 +161,10 @@ func TestTransferApprovalIsCheck(t *testing.T) {
 	}
 }
 
-// §3.6.1: a later credential.create (after credential.delete) does not move
-// the clock; a completed recovery starts it.
+// §3.6.1 (owner decision of 2026-10-06): every new credential starts the
+// clock fresh: credential.create (also after credential.delete), a
+// completed recovery (credential.recover, and credential.reset after a
+// backup-off recovery).
 func TestOwnerCheckClockStarters(t *testing.T) {
 	e := newEnv(t)
 	blob := e.create()
@@ -170,13 +172,24 @@ func TestOwnerCheckClockStarters(t *testing.T) {
 	e.pools["app"] = nil // the pools went with the credential
 	e.create()
 	if e.h.Enrolled != 2 {
-		t.Fatalf("OwnerCheckEnrolled calls %d (the host ignores the second)", e.h.Enrolled)
+		t.Fatalf("credential.create after credential.delete did not start the clock: %d", e.h.Enrolled)
 	}
 	e2 := newEnv(t)
 	e2.create()
 	e2.ok(e2.call("recovering-app", "credential.recover", "", map[string]any{"password": pw}))
 	if len(e2.h.Passed) != 1 || e2.h.Passed[0] != nil {
 		t.Fatalf("recovery did not start the clock: %v", e2.h.Passed)
+	}
+	// Backup off: the recovering app's credential.reset makes a new
+	// credential and starts the clock.
+	e3 := newEnv(t)
+	e3.h.Set = vault.Settings{NoBackup: true}
+	b3 := e3.create()
+	e3.ok(e3.raw("app", "credential.ack", `{"version":1}`))
+	_ = b3
+	e3.ok(e3.call("recovering-app", "credential.reset", "", map[string]any{"password": pw}))
+	if len(e3.h.Passed) != 1 || e3.h.Passed[0] != nil || e3.h.PassedAudit[0] {
+		t.Fatalf("reset did not start the clock: %v", e3.h.Passed)
 	}
 }
 

@@ -61,8 +61,22 @@ func TestLeashStatus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := leashwire.VerifyPresented(memberKey, p1, time.Now()); err != nil {
+	d1, err := leashwire.VerifyPresented(memberKey, p1, time.Now())
+	if err != nil {
 		t.Fatal(err)
+	}
+	// 0.12.0 (LEASH §3.5): iss is the member's credential key, sub the
+	// agent's ik, status_issuer the vault's ik; an auto grant carries its
+	// limits; a fresh 16-byte nonce; JCS bytes.
+	if string(d1.Iss) != string(memberKey) || string(d1.Sub) != string(agent.IdentityKey()) || d1.Scope.Op != "connection.list" ||
+		d1.Approval != "auto" || d1.Limits == nil || d1.Limits.PerHour != 60 || d1.Limits.PerDay != 1000 || len(d1.Nonce) != leashwire.NonceSize {
+		t.Fatalf("presented delegation: %+v", d1)
+	}
+	if _, err := leashwire.ParseCanonical(p1.Delegation); err != nil {
+		t.Fatal("delegation not in JCS")
+	}
+	if _, err := leashwire.VerifyPresented(memberKey, &leashwire.Presented{Delegation: p1.Delegation, Sig: p1.Sig}, time.Now()); err == nil {
+		t.Fatal("accepted without a status statement")
 	}
 	// Fresh enough: the cached statement is reused.
 	p2, err := agent.LeashPresent(ctx, gid)
@@ -84,7 +98,8 @@ func TestLeashStatus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if d, err := leashwire.VerifyPresented(memberKey, pr, time.Now()); err != nil || d.Scope != "items.read" || d.Tags[0] != "travel" {
+	if d, err := leashwire.VerifyPresented(memberKey, pr, time.Now()); err != nil || d.Scope.Op != "items.read" || d.Scope.Tags[0] != "travel" ||
+		d.Limits == nil {
 		t.Fatalf("items.read presented: %+v %v", d, err)
 	}
 	// Revoked: no new statement. A 60 s statement is always within the

@@ -27,6 +27,7 @@ import (
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/handshake"
 	"github.com/vettid/vettid-vault/vms/invite"
+	"github.com/vettid/vettid-vault/vms/leashwire"
 	"github.com/vettid/vettid-vault/vms/manifest"
 	"github.com/vettid/vettid-vault/vms/suite"
 )
@@ -267,7 +268,97 @@ func Generate() (map[string][]byte, error) {
 	if err := put("recovery.json", rc); err != nil {
 		return nil, err
 	}
+
+	// leash.json (§10.11)
+	lv, err := genLeash(vault)
+	if err != nil {
+		return nil, err
+	}
+	if err := put("leash.json", lv); err != nil {
+		return nil, err
+	}
 	return out, nil
+}
+
+// genLeash signs the two §10.11 delegations with the credential key and
+// their status statements with the vault's ik, through leashwire, with the
+// nonces drawn from scripted randomness.
+func genLeash(vault *principal) (obj, error) {
+	cred := ed25519.NewKeyFromSeed(rep(SeedLeashCredKey, 32))
+	agent := ed25519.NewKeyFromSeed(rep(SeedLeashAgentIK, 32))
+	iat := time.Unix(LeashIAT, 0).UTC()
+	one := func(d *leashwire.Delegation, nonceByte byte, inputs obj) (obj, error) {
+		if err := with(newScript(rep(nonceByte, leashwire.NonceSize)), func() error {
+			var err error
+			d.Nonce, err = leashwire.NewNonce()
+			return err
+		}); err != nil {
+			return nil, err
+		}
+		d.Iss, d.Sub, d.StatusIssuer, d.IssuedAt = cred.Public().(ed25519.PublicKey), agent.Public().(ed25519.PublicKey), vault.ikPub(), iat
+		del := d.Marshal()
+		sig, err := leashwire.Sign(cred, del)
+		if err != nil {
+			return nil, err
+		}
+		st, err := leashwire.NewStatus(del, iat.Add(LeashStatusAfter*time.Second))
+		if err != nil {
+			return nil, err
+		}
+		stb := st.Marshal()
+		ssig, err := leashwire.SignStatus(vault.ik, stb)
+		if err != nil {
+			return nil, err
+		}
+		p := &leashwire.Presented{Delegation: del, Sig: sig, Status: stb, StatusSig: ssig}
+		from, to := st.IssuedAt.Add(-leashwire.StatusSkew), st.NotAfter.Add(leashwire.StatusSkew)
+		for _, now := range []time.Time{from, to} {
+			if _, err := leashwire.VerifyPresented(cred.Public().(ed25519.PublicKey), p, now); err != nil {
+				return nil, err
+			}
+		}
+		return append(inputs,
+			member{"nonce_hex", hx(d.Nonce)},
+			member{"iat", LeashIAT},
+			member{"delegation_json", string(del)},
+			member{"delegation_len", len(del)},
+			member{"delegation_b64", b64(del)},
+			member{"delegation_sha256_hex", hx(sha256Of(del))},
+			member{"sig_b64", b64(sig)},
+			member{"status_issued_at", st.IssuedAt.Unix()},
+			member{"status_json", string(stb)},
+			member{"status_b64", b64(stb)},
+			member{"status_sig_b64", b64(ssig)},
+			member{"accept_from", from.Unix()},
+			member{"accept_to", to.Unix()},
+		), nil
+	}
+	a, err := one(&leashwire.Delegation{GrantID: LeashGrantA, Version: 1, Approval: "auto",
+		Scope:  leashwire.Scope{Op: leashwire.ScopeItems, Tags: []string{"api-keys", "work"}, Match: "any", Access: "read", Uses: 10},
+		Limits: &leashwire.Limits{PerHour: 60, PerDay: 1000}, StatusTTL: 900 * time.Second, Expires: time.Unix(LeashExpA, 0).UTC()},
+		NonceLeashA, obj{{"case", "items.read, auto, with exp"}})
+	if err != nil {
+		return nil, err
+	}
+	b, err := one(&leashwire.Delegation{GrantID: LeashGrantB, Version: 2, Approval: "ask",
+		Scope: leashwire.Scope{Op: "message.send", Connections: []string{LeashConnectionB}}, StatusTTL: 300 * time.Second},
+		NonceLeashB, obj{{"case", "message.send, ask, one connection, version 2, no exp, status_ttl 300"}})
+	if err != nil {
+		return nil, err
+	}
+	return obj{
+		{"context_delegation", leashwire.Label},
+		{"context_status", leashwire.LabelStatus},
+		{"credential_key_seed_hex", hx(rep(SeedLeashCredKey, 32))},
+		{"credential_key_pk_b64", b64(cred.Public().(ed25519.PublicKey))},
+		{"agent_ik_seed_hex", hx(rep(SeedLeashAgentIK, 32))},
+		{"agent_ik_pk_b64", b64(agent.Public().(ed25519.PublicKey))},
+		{"vault_ik_seed_hex", hx(rep(vault.ikSeed, 32))},
+		{"vault_ik_pk_b64", b64(vault.ikPub())},
+		{"skew_seconds", int(leashwire.StatusSkew / time.Second)},
+		{"a", a},
+		{"b", b},
+	}, nil
 }
 
 // recoveryCodeEncoding is the code's form (§11.11.2): Crockford base32,

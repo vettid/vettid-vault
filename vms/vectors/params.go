@@ -34,6 +34,12 @@ const (
 	NonceRecNoCred   byte = 0x27
 	RecCodeBytes     byte = 0x28 // the code's 20 bytes
 
+	// §10.11 LEASH delegation and status statement (leash.json, 0.12.0).
+	SeedLeashCredKey byte = 0x30 // (spec) the member's credential key (iss)
+	SeedLeashAgentIK byte = 0x31 // (spec) the agent's ik (sub)
+	NonceLeashA      byte = 0x32 // (spec)
+	NonceLeashB      byte = 0x33 // (spec)
+
 	SessionSenderKid    byte = 0x02
 	SessionRecipientKid byte = 0x01
 
@@ -58,9 +64,18 @@ const (
 	ACEnrollRequestID = "01JB2Z6V9K3M4N5P6Q7R8S9T20"
 	ACUnlockRequestID = "01JB2Z6V9K3M4N5P6Q7R8S9T21"
 	ACVaultID         = "test-vault-0001"
-	ACUserGUID        = "test-user-0001"
-	ACPIN             = "123456"
-	ACToken           = "v4.public.VEVTVC1PTkxZLWFwcA"
+
+	// §10.11 LEASH vectors (spec 0.12.0). Times are Unix seconds; the
+	// statements are issued 60 s after the delegations.
+	LeashGrantA      = "01JB2Z6V9K3M4N5P6Q7R8S9T41"
+	LeashGrantB      = "01JB2Z6V9K3M4N5P6Q7R8S9T42"
+	LeashConnectionB = "01JB2Z6V9K3M4N5P6Q7R8S9T43"
+	LeashIAT         = 1790856000 // 2026-10-01T12:00:00Z
+	LeashExpA        = 1798632000
+	LeashStatusAfter = 60
+	ACUserGUID       = "test-user-0001"
+	ACPIN            = "123456"
+	ACToken          = "v4.public.VEVTVC1PTkxZLWFwcA"
 	// ACApprovalRequestID is the unlock that carries a release approval
 	// (spec §16).
 	ACApprovalRequestID = "01JB2Z6V9K3M4N5P6Q7R8S9T22"

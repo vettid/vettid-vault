@@ -109,10 +109,12 @@ type Grant struct {
 	IssuedAt time.Time       `json:"issued_at"`
 	// StatusTTL is the lifetime of the delegation's status statements.
 	StatusTTL time.Duration `json:"status_ttl"`
-	// A signed delegation (§10.11), if any.
+	// A signed delegation (§10.11), if any, and the credential key's
+	// signature over it (the grant object's "sig"). A stored delegation in
+	// the 0.6.0 format is not served (owner decision 8 of 0.12.0); the
+	// member re-issues the grant.
 	Delegation    []byte `json:"delegation,omitempty"`
 	DelegationSig []byte `json:"delegation_sig,omitempty"`
-	Key           []byte `json:"key,omitempty"`
 	// Rate windows of the requests allowed without approval.
 	HourStart time.Time `json:"hour_start,omitempty"`
 	HourN     uint64    `json:"hour_n,omitempty"`
@@ -734,10 +736,21 @@ func (g *Grant) JSON() []byte {
 		b.String("expires_at", envelope.FormatTS(g.Expires))
 	}
 	b.Uint("status_ttl", uint64(g.StatusTTL/time.Second)).String("issued_at", envelope.FormatTS(g.IssuedAt))
-	if g.Delegation != nil {
-		b.Base64("delegation", g.Delegation).Base64("delegation_sig", g.DelegationSig).Base64("key", g.Key)
+	if g.served() {
+		b.Base64("delegation", g.Delegation).Base64("sig", g.DelegationSig)
 	}
 	return b.Bytes()
+}
+
+// served reports whether g's delegation is served: one in the 0.12.0
+// format (owner decision 8: a stored 0.6.0 delegation is not served and
+// gets no status statement; the member re-issues the grant).
+func (g *Grant) served() bool {
+	if g.Delegation == nil {
+		return false
+	}
+	_, err := leashwire.ParseCanonical(g.Delegation)
+	return err == nil
 }
 
 // statusJSON adds a fresh status statement for g (§10.11): only for a
@@ -746,14 +759,14 @@ func (f *Feature) status(s *vault.Session, g *Grant) (stmt, sig []byte, chain []
 	if st := f.d.Agents[g.AgentID]; st != nil && st.Suspended {
 		return nil, nil, nil, errForbidden
 	}
-	if !g.Expires.IsZero() && !s.Now().Before(g.Expires) || g.Delegation == nil {
+	if !g.Expires.IsZero() && !s.Now().Before(g.Expires) || !g.served() {
 		return nil, nil, nil, errNotFound
 	}
-	d, err := leashwire.Parse(g.Delegation)
+	d, err := leashwire.ParseCanonical(g.Delegation)
 	if err != nil {
 		return nil, nil, nil, errInternal
 	}
-	chain, ok := s.RotationsFrom(d.VaultIK)
+	chain, ok := s.RotationsFrom(d.StatusIssuer)
 	if !ok || len(chain) > leashwire.MaxRotations {
 		return nil, nil, nil, errInternal
 	}
@@ -866,7 +879,7 @@ func syncRevoked(s *vault.Session, g *Grant) {
 func (sp *Spec) apply(g *Grant) {
 	g.Scope, g.Approval, g.Connections, g.Rule = sp.Scope, sp.Approval, sp.Connections, nil
 	g.PerHour, g.PerDay, g.Expires, g.StatusTTL = sp.PerHour, sp.PerDay, sp.Expires, sp.StatusTTL
-	g.Delegation, g.DelegationSig, g.Key = nil, nil, nil
+	g.Delegation, g.DelegationSig = nil, nil
 	g.HourStart, g.HourN, g.DayStart, g.DayN, g.LimitedAt = time.Time{}, 0, time.Time{}, 0, time.Time{}
 }
 
@@ -952,12 +965,18 @@ func (f *Feature) sign(s *vault.Session, g *Grant, agentIK []byte) error {
 			exp = iat.Add(time.Second)
 		}
 	}
-	d := &leashwire.Delegation{VaultIK: s.IdentityKey(), AgentIK: agentIK, GrantID: g.ID, Version: g.Version,
-		Scope: g.Scope, Approval: g.Approval, Connections: g.Connections, IssuedAt: iat, Expires: exp,
-		StatusTTL: g.StatusTTL}
+	nonce, err := leashwire.NewNonce() // new for each signature, a replacement's included
+	if err != nil {
+		return errInternal
+	}
+	d := &leashwire.Delegation{Iss: key.Public().(ed25519.PublicKey), Sub: agentIK, StatusIssuer: s.IdentityKey(),
+		GrantID: g.ID, Version: g.Version, Approval: g.Approval, Scope: leashwire.Scope{Op: g.Scope, Connections: g.Connections},
+		StatusTTL: g.StatusTTL, Nonce: nonce, IssuedAt: iat, Expires: exp}
 	if g.Rule != nil {
-		d.Tags, d.Match, d.Access, d.Uses = g.Rule.Tags, g.Rule.Match, g.Rule.Access, g.Rule.Uses
-		d.PerHour, d.PerDay = g.PerHour, g.PerDay
+		d.Scope.Tags, d.Scope.Match, d.Scope.Access, d.Scope.Uses = g.Rule.Tags, g.Rule.Match, g.Rule.Access, g.Rule.Uses
+	}
+	if g.PerHour > 0 { // every auto and items.read grant (§10.11)
+		d.Limits = &leashwire.Limits{PerHour: g.PerHour, PerDay: g.PerDay}
 	}
 	stmt := d.Marshal()
 	sig, err := leashwire.Sign(key, stmt)
@@ -965,7 +984,6 @@ func (f *Feature) sign(s *vault.Session, g *Grant, agentIK []byte) error {
 		return errInternal
 	}
 	g.Delegation, g.DelegationSig = stmt, sig
-	g.Key = append([]byte(nil), key.Public().(ed25519.PublicKey)...)
 	return nil
 }
 
@@ -1235,7 +1253,10 @@ func (f *Feature) Grants() []Grant {
 // agentRule returns an items.read grant as its share rule.
 func (g *Grant) agentRule() itemspec.AgentRule {
 	r := itemspec.AgentRule{ID: g.ID, Version: g.Version, AgentID: g.AgentID, PerHour: g.PerHour, PerDay: g.PerDay,
-		StatusTTL: g.StatusTTL, Created: g.Created, Updated: g.IssuedAt, Delegation: g.Delegation, DelegationSig: g.DelegationSig, Key: g.Key}
+		StatusTTL: g.StatusTTL, Created: g.Created, Updated: g.IssuedAt}
+	if g.served() {
+		r.Delegation, r.DelegationSig = g.Delegation, g.DelegationSig
+	}
 	if g.Rule != nil {
 		r.Terms = *g.Rule
 		r.Terms.Tags = append([]string(nil), g.Rule.Tags...)
@@ -1295,7 +1316,7 @@ func (f *Feature) SetAgentRule(s *vault.Session, r *itemspec.AgentRule) (*itemsp
 	terms.Tags = append([]string(nil), r.Terms.Tags...)
 	g.Scope, g.Approval, g.Connections, g.Rule = ScopeItems, terms.Mode, nil, &terms
 	g.PerHour, g.PerDay, g.Expires, g.StatusTTL = r.PerHour, r.PerDay, terms.Expires, r.StatusTTL
-	g.Delegation, g.DelegationSig, g.Key = nil, nil, nil
+	g.Delegation, g.DelegationSig = nil, nil
 	g.HourStart, g.HourN, g.DayStart, g.DayN, g.LimitedAt = time.Time{}, 0, time.Time{}, 0, time.Time{}
 	g.Version++
 	g.IssuedAt = now

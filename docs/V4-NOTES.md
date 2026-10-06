@@ -322,6 +322,23 @@ verifier for relying parties; `client.Device.LeashPresent` refreshes the
 statement before it expires. This replaces vettid.dev's public
 revocation-status Lambda, which needed the parent and public tables.
 
+### LEASH §3.5 format (VAULT-MESSAGING 0.12.0, owner decision 2026-10-05)
+
+The delegation and the status statement are the LEASH paper's §3.5
+format, version 1, byte for byte: RFC 8785 (JCS) JSON; `iss` (the
+credential key), `sub` (the agent's `ik`), `status_issuer` (the vault's
+`ik`), `scope` as an object (`op`, `connections`; for `items.read` the
+rule's `tags`, `match`, `access`, `uses`), `limits` for every `auto` and
+`items.read` grant, a fresh 16-byte `nonce` per signature; context
+strings `leash/v1/delegation` and `leash/v1/status`. The grant object
+carries `sig` (was `delegation_sig`) and no `key`. The verifier
+(`leashwire.VerifyPresented`) runs the paper's steps 1–5 in order,
+rejects unknown members and a delegation without a status statement, and
+no longer checks `iat`. The vault's `ik` rotation chain stays a VettID
+binding. Stored 0.6.0-format delegations are not served (no delegation,
+`sig` or status statement); the member re-issues the grant (decision 8).
+`testdata/vectors/leash.json` reproduces §16's two vectors.
+
 ### OWNER DECISIONS (2026-10-03)
 
 1. **Every LEASH grant is a delegation signed by the member's credential

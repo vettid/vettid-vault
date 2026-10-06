@@ -619,7 +619,7 @@ func (f *Feature) ruleJSON(r *ruleView) []byte {
 	if a := r.agent; a != nil {
 		b.Uint("per_hour", a.PerHour).Uint("per_day", a.PerDay).Uint("status_ttl", uint64(a.StatusTTL/time.Second))
 		if a.Delegation != nil {
-			b.Base64("delegation", a.Delegation).Base64("delegation_sig", a.DelegationSig).Base64("key", a.Key)
+			b.Base64("delegation", a.Delegation).Base64("sig", a.DelegationSig)
 		}
 	}
 	b.String("created_at", envelope.FormatTS(r.Created)).String("updated_at", envelope.FormatTS(r.Updated))

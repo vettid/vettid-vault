@@ -512,8 +512,8 @@ func TestAgentRules(t *testing.T) {
 		t.Fatal(err)
 	}
 	d, err := leashwire.Verify(r.w.key.Public().(ed25519.PublicKey), ar.Delegation, ar.DelegationSig, t0)
-	if err != nil || d.Scope != ScopeItems || strings.Join(d.Tags, ",") != "agent ok,work" || d.Match != "all" || d.Uses != 5 ||
-		d.PerHour != 2 || d.PerDay != 10 || d.Approval != Auto || d.Connections != nil {
+	if err != nil || d.Scope.Op != ScopeItems || strings.Join(d.Scope.Tags, ",") != "agent ok,work" || d.Scope.Match != "all" ||
+		d.Scope.Uses != 5 || d.Limits == nil || d.Limits.PerHour != 2 || d.Limits.PerDay != 10 || d.Approval != Auto || d.Scope.Connections != nil {
 		t.Fatalf("delegation: %+v %v", d, err)
 	}
 	up := r.h.SentOfType("leash.grant.updated")
@@ -623,20 +623,25 @@ func TestSignedDelegation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sig, _ := o.Base64("delegation_sig", 64)
-	key, _ := o.Base64("key", 32)
-	if !bytes.Equal(key, r.w.key.Public().(ed25519.PublicKey)) {
-		t.Fatal("key is not the credential key")
+	sig, _ := o.Base64("sig", 64)
+	if o.Has("key") || o.Has("delegation_sig") {
+		t.Fatal("0.12.0: the grant carries sig and no key")
 	}
+	key := r.w.key.Public().(ed25519.PublicKey)
 	d, err := leashwire.Verify(key, stmt, sig, t0.Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
 	ag, _ := r.h.Device(agent)
 	want := time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC)
-	if d.GrantID != gid || !bytes.Equal(d.AgentIK, ag.IK) || !bytes.Equal(d.VaultIK, r.h.IK) || !d.Expires.Equal(want) {
+	if d.GrantID != gid || !bytes.Equal(d.Iss, key) || !bytes.Equal(d.Sub, ag.IK) || !bytes.Equal(d.StatusIssuer, r.h.IK) ||
+		!d.Expires.Equal(want) || d.Scope.Op != "connection.list" || d.Approval != "ask" || d.Limits != nil {
 		t.Fatalf("delegation: %+v", d)
 	}
+	if _, err := leashwire.ParseCanonical(stmt); err != nil {
+		t.Fatal("not JCS")
+	}
+	firstNonce := d.Nonce
 	if _, err := leashwire.Verify(key, stmt, sig, want); err == nil {
 		t.Fatal("delegation valid past the grant's expiry")
 	}
@@ -649,9 +654,44 @@ func TestSignedDelegation(t *testing.T) {
 	// A replacement is signed again, under its new version.
 	o, _ = r.issue(t, `{"agent_id":"dev-agent","grant_id":"`+gid+`","version":1,"scope":"connection.list"}`)
 	stmt, _ = o.Base64("delegation", -1)
-	sig, _ = o.Base64("delegation_sig", 64)
-	if d, err := leashwire.Verify(key, stmt, sig, t0); err != nil || d.Version != 2 {
+	sig, _ = o.Base64("sig", 64)
+	if d, err := leashwire.Verify(key, stmt, sig, t0); err != nil || d.Version != 2 || bytes.Equal(d.Nonce, firstNonce) {
 		t.Fatalf("replacement: %v", err)
+	}
+	// An auto grant carries its limits (0.12.0).
+	o, _ = r.issue(t, `{"agent_id":"dev-agent","scope":"profile.get","approval":"auto","per_hour":7}`)
+	stmt, _ = o.Base64("delegation", -1)
+	if d, err := leashwire.ParseCanonical(stmt); err != nil || d.Limits == nil || d.Limits.PerHour != 7 || d.Limits.PerDay != 1000 {
+		t.Fatalf("auto limits: %s", stmt)
+	}
+}
+
+// Owner decision 8 of 0.12.0: a stored grant whose delegation is in the
+// 0.6.0 format is not served (no delegation, no sig, no status statement);
+// the member re-issues it, which signs it in the 0.12.0 format.
+func TestOldFormatDelegationNotServed(t *testing.T) {
+	r := newRig(t)
+	_, gid := r.issue(t, `{"agent_id":"dev-agent","scope":"profile.get"}`)
+	old := []byte(`{"v":1,"vault_ik":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","agent_ik":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",` +
+		`"grant_id":"` + gid + `","version":1,"scope":"profile.get","approval":"ask","status_ttl":900,"iat":1790000000}`)
+	r.f.mu.Lock()
+	r.f.d.Grants[gid].Delegation = old
+	r.f.mu.Unlock()
+	res := featuretest.Call(r.f, r.h, t0, vault.KindAgent, "leash.grant.list", `{}`)
+	if !res.OK() || strings.Contains(string(res.Body), `"delegation"`) || strings.Contains(string(res.Body), `"status"`) ||
+		!strings.Contains(string(res.Body), gid) {
+		t.Fatalf("old delegation served: %s %s", res.Code, res.Body)
+	}
+	if res := featuretest.Call(r.f, r.h, t0, vault.KindAgent, "leash.status.get", `{"grant_id":"`+gid+`"}`); res.Code != "not_found" {
+		t.Fatalf("status for an old delegation: %q", res.Code)
+	}
+	o, _ := r.issue(t, `{"agent_id":"dev-agent","grant_id":"`+gid+`","version":1,"scope":"profile.get"}`)
+	stmt, _ := o.Base64("delegation", -1)
+	if _, err := leashwire.ParseCanonical(stmt); err != nil {
+		t.Fatal("re-issue did not sign in the 0.12.0 format")
+	}
+	if res := featuretest.Call(r.f, r.h, t0, vault.KindAgent, "leash.status.get", `{"grant_id":"`+gid+`"}`); !res.OK() {
+		t.Fatalf("status after re-issue: %q", res.Code)
 	}
 }
 
@@ -690,7 +730,7 @@ func TestPairingUnlinkRemoval(t *testing.T) {
 	}
 	for _, g := range gs {
 		d, err := leashwire.Verify(r.w.key.Public().(ed25519.PublicKey), g.Delegation, g.DelegationSig, t0)
-		if err != nil || !bytes.Equal(d.AgentIK, ag.IK) || d.GrantID != g.ID {
+		if err != nil || !bytes.Equal(d.Sub, ag.IK) || d.GrantID != g.ID {
 			t.Fatalf("initial grant not signed for the agent: %v", err)
 		}
 	}
@@ -791,7 +831,7 @@ func TestStatusStatements(t *testing.T) {
 	g := r.f.Grants()[0]
 	st, _ := o.Base64("status", -1)
 	ss, _ := o.Base64("status_sig", 64)
-	p := &leashwire.Presented{Delegation: g.Delegation, DelegationSig: g.DelegationSig, Status: st, StatusSig: ss}
+	p := &leashwire.Presented{Delegation: g.Delegation, Sig: g.DelegationSig, Status: st, StatusSig: ss}
 	if _, err := leashwire.VerifyPresented(member, p, t0.Add(2*time.Minute)); err != nil {
 		t.Fatal(err)
 	}

@@ -175,7 +175,8 @@ func (d *Device) ClaimVia(ctx context.Context, api *MemberAPI, qr *altchan.Recov
 	return r, nil
 }
 
-// UserGUID returns the member's id from the redeem or claim.
+// UserGUID returns the member's id from the redeem, the claim or a
+// transfer's device.paired (§6.7.1).
 func (d *Device) UserGUID() string {
 	d.mu.Lock()
 	defer d.mu.Unlock()

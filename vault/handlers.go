@@ -75,6 +75,17 @@ var (
 // NewError returns an error response with a code and a non-secret message.
 func NewError(code, msg string) error { return &HandlerError{Code: code, Message: msg} }
 
+// BackoffError is the `backoff` error response (§10.1): since 0.17.0 its
+// body is {retry_after}, the whole seconds (rounded up, at least 1) until
+// the backoff that refused the request ends, as in the unlock result.
+func BackoffError(left time.Duration) error {
+	s := uint64(1)
+	if left > time.Second {
+		s = uint64((left + time.Second - 1) / time.Second)
+	}
+	return &HandlerError{Code: "backoff", Body: strictjson.NewBuilder().Uint("retry_after", s).Bytes()}
+}
+
 type typeEntry struct {
 	spec    TypeSpec
 	handler Handler

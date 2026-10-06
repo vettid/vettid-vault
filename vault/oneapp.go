@@ -183,7 +183,7 @@ func (m *Manager) verifyPIN(pin string, now time.Time) error {
 		return errBadRequest
 	}
 	if now.Before(m.hdr.Backoff.NotBefore) {
-		return NewError("backoff", "")
+		return BackoffError(m.hdr.Backoff.NotBefore.Sub(now))
 	}
 	dek, err := deriveDEK(pin, m.hdr.KDF, m.hdr.Pepper, m.st.VaultID)
 	ok := err == nil && subtle.ConstantTimeCompare(dek, m.dek) == 1
@@ -434,9 +434,13 @@ func (m *Manager) reportAlarms() {
 	m.alarms = nil
 }
 
-// transferPairedBody adds the transfer members to device.paired.
+// transferPairedBody adds the transfer members to device.paired: since
+// 0.17.0 also the member's user_guid from the sealed header, which the new
+// app's unlocks name and sign (§6.7.1, §11.4) and which it has no other
+// way to learn.
 func (m *Manager) transferPairedBody(b *strictjson.Builder) {
 	b.Bool("transfer", true)
+	b.String("user_guid", m.hdr.UserGUID)
 	for _, f := range m.features {
 		if v, ok := f.(CredentialVersioner); ok {
 			b.Uint("credential_version", v.CredentialVersion())

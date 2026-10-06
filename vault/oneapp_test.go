@@ -118,6 +118,10 @@ func TestTransferRuntime(t *testing.T) {
 	if len(got) != 1 || got[0].Type != "device.paired" || !strings.Contains(string(got[0].Body), `"transfer":true`) || bodyStr(t, got[0], "token") == "" {
 		t.Fatalf("device.paired: %+v", got)
 	}
+	// §6.7.1 (0.17.0): the member's user_guid from the sealed header.
+	if g := bodyStr(t, got[0], "user_guid"); g == "" || g != d.m.hdr.UserGUID {
+		t.Fatalf("device.paired user_guid %q, header %q", g, d.m.hdr.UserGUID)
+	}
 	if d.m.st.Devices["dev1"] != nil || d.m.st.Transfer != nil {
 		t.Fatal("old app kept")
 	}
@@ -242,6 +246,9 @@ func TestVerifyPIN(t *testing.T) {
 	}
 	if err := d.m.verifyPIN(testPIN, now); err == nil || err.(*HandlerError).Code != "backoff" {
 		t.Fatalf("backoff: %v", err)
+	} else if want := `{"retry_after":30}`; string(err.(*HandlerError).Body) != want {
+		// §10.1 (0.17.0): the seconds until the backoff ends.
+		t.Fatalf("backoff body %s, want %s", err.(*HandlerError).Body, want)
 	}
 	if err := d.m.verifyPIN(testPIN, now.Add(time.Minute)); err != nil || d.m.hdr.Backoff.Failures != 0 {
 		t.Fatalf("after the backoff: %v", err)

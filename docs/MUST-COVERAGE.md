@@ -591,3 +591,10 @@ grammar.
 | 11.11.5, 10.2 | The recovering app may send only `credential.utk.get`, `credential.recover`, `vault.status` (reduced to `{vault_id, state_seq, header_seq}`) and the token and address types; no `credential.reset`, no `vault.delete`, no `credential_lost`; no fan-out until `credential.recover` succeeds | `vault.TestRecoveringStatusReduced`, `credential.TestBackupCopyAndRecoveringApp`, `credential.TestVaultDeleteDuringAlarmAndRecovery` |
 | 16 | `recovery.json` gains the `no_backup` refusal (eph 32 × 0x28, nonce 12 × 0x29) | `vectors.TestRecoveryVectors`, `vectors.TestVectorsUpToDate` |
 | 11.11.7 | Member API stand-in: `409 recovery_unavailable` (`reason: no_backup`) when the row's bit is false | code review (`internal/memberapitest`) |
+
+## A transferred app's `user_guid`; `backoff` carries `retry_after` (§3.6.1, §6.7.1, §10.1, §10.3, §15 item 25; 0.17.0)
+
+| § | Requirement | Test(s) |
+|---|---|---|
+| 6.7.1, 10.3 | A transfer's `device.paired` carries the member's `user_guid` from the sealed header (a plain pairing's does not); the reference client stores it (1–128 printable ASCII) and the new app unlocks with it | `vault.TestTransferRuntime`, `e2e.TestTransfer` |
+| 10.1, 3.6.1 | A `backoff` error's body is `{retry_after}`: whole seconds, rounded up, at least 1, until the PIN backoff (§11.8) or the password backoff (§3.5.3) that refused the request ends | `vault.TestVerifyPIN`, `credential.TestOwnerCheckBackoffRetryAfter` |

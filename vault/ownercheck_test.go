@@ -580,3 +580,28 @@ func TestHeldRequestNotAutoApproved(t *testing.T) {
 		t.Fatal("app told while held")
 	}
 }
+
+// §11.13 with §3.6.3 (0.15.0): while held the op account is still stored,
+// but account.get is not on the allow list and account.changed waits for
+// the check.
+func TestHeldAccountSnapshot(t *testing.T) {
+	f := newOCFixture(t)
+	f.pastDeadline()
+	_ = f.m.ProcessBatch(context.Background(), &fakeCollector{}, nil) // enter the hold
+	f.inbox(f.app, f.desk)
+	snap := `{"v":1,"as_of":"` + envelope.FormatTS(time.Now()) + `","state":"member"}`
+	if err := f.m.SetAccount(context.Background(), []byte(snap)); err != nil {
+		t.Fatal(err)
+	}
+	if f.m.AccountVersion() != 1 {
+		t.Fatal("snapshot not stored while held")
+	}
+	in := f.inbox(f.app, f.desk)
+	if find(in["dev1"], ofType("sync.event")) != nil || find(in["desk1"], ofType("sync.event")) != nil {
+		t.Fatal("account.changed delivered while held")
+	}
+	id := f.sendAs(f.app, "account.get", `{}`)
+	if r := find(f.inbox(f.app)["dev1"], reply(id)); errCode(r) != "owner_check_required" {
+		t.Fatalf("account.get while held: %+v", r)
+	}
+}

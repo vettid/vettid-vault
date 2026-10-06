@@ -1,6 +1,7 @@
 package vault
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"strings"
@@ -129,6 +130,35 @@ func TestTransferRuntime(t *testing.T) {
 	}
 	if !d.hasActivity("device.transferred") {
 		t.Fatal("not audited")
+	}
+	// 0.15.0 (§6.7.1 step 4, §11.5): the new app's api_key is the vault's
+	// app key, app_key_seq + 1, reported (app_key) after the flush.
+	if !bytes.Equal(d.m.hdr.AppKey, testAppKeyDER(t, n.ik[0])) || d.m.hdr.AppKeySeq != 1 || !d.m.appKeyChanged {
+		t.Fatalf("app key %x seq %d", d.m.hdr.AppKey, d.m.hdr.AppKeySeq)
+	}
+	var evs []LifecycleEvent
+	d.m.opt.Lifecycle = func(ev LifecycleEvent) { evs = append(evs, ev) }
+	d.m.mu.Lock()
+	d.m.reportAppKey()
+	d.m.mu.Unlock()
+	if len(evs) != 1 || evs[0].Event != EventAppKey || evs[0].AppKeySeq != 1 || !bytes.Equal(evs[0].AppKey, d.m.hdr.AppKey) {
+		t.Fatalf("app_key event %+v", evs)
+	}
+}
+
+// §6.2 (0.15.0): a transfer's hs.init without api_key is dropped like one
+// with a failed attestation.
+func TestTransferNeedsAPIKey(t *testing.T) {
+	d := newDevFixture(t)
+	sinkOf(d)
+	attestOK(d)
+	inv := d.transferInvite(t)
+	n := newNewcomer(t, 0x50)
+	n.noAPIKey = true
+	n.hsInitAttest(t, d.m, handshake.PurposeApp, inv.ID, "t1", testAttest)
+	if d.m.st.Transfer.Inbound != "" || d.depositsTo(n.addr.Mailbox) != 0 || !d.audited("transfer_api_key_missing") ||
+		!d.hasActivity("device.transfer.attestation_failed") {
+		t.Fatal("transfer hs.init without api_key answered")
 	}
 }
 

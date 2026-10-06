@@ -17,7 +17,7 @@
 // Everything listens on 127.0.0.1:
 //
 //	-relay-port (18080)  the relay, plain HTTP; tokens name it https://relay.vettid.test
-//	-api-port   (18081)  the member API stand-in ("Authorization: Bearer <user_guid>")
+//	-api-port   (18081)  the member API stand-in (the portal: "Authorization: Bearer <user_guid>"; apps sign with their app key, 0.15.0)
 //	-ctl-port   (18082)  dev control: GET /dev/health, GET /dev/info, GET /dev/trust,
 //	                     POST /dev/peer/request, POST /dev/peer/event, POST /dev/recovery/code
 //

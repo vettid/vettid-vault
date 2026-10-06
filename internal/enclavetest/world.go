@@ -39,6 +39,9 @@ func (r ReleaseSpec) PCR0Hex() string { return PCRHex(r.PCR0) }
 // KMS with one sealing key per release, and the signed release manifest.
 // Instances of several releases run side by side (§11.10.5).
 type World struct {
+	// Account, if set, is the account snapshot the API puts in each
+	// unlock (0.15.0, §11.13).
+	Account  func(userGUID string) []byte
 	Now      func() time.Time
 	Store    store.Store
 	KMS      *FakeKMS
@@ -311,6 +314,12 @@ func (w *World) Post(ctx context.Context, in *enclave.Instance, op, vaultID, use
 	}
 	q := &enclave.QueueMessage{Op: op, VaultID: vaultID, UserGUID: userGUID, RequestID: r.RequestID, ETKKid: kid,
 		Envelope: r.Envelope, EnqueuedAt: w.Now()}
+	if op == enclave.OpEnroll || op == enclave.OpRecoveryRegister {
+		q.AppKey = r.AppKey // the key the API checked the request's signature with (0.15.0)
+	}
+	if op == enclave.OpUnlock && w.Account != nil {
+		q.Account = w.Account(userGUID) // §11.13
+	}
 	var doc []byte
 	if op == enclave.OpEnroll || op == enclave.OpUnlock {
 		q.ManifestSHA256 = r.ManifestSHA256

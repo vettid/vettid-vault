@@ -17,7 +17,7 @@ const ReleasesDir = "../../testdata/releases"
 // addedLater are vector files added after the first refs the matrix
 // checks (the synthetic row's base): a frozen directory may lack them, and
 // they are checked when present. Every production release has them.
-var addedLater = map[string]bool{"recovery.json": true, "leash.json": true}
+var addedLater = map[string]bool{"recovery.json": true, "leash.json": true, "appkey.json": true}
 
 var releaseDirName = regexp.MustCompile(`^[1-9][0-9]*$`)
 
@@ -74,6 +74,9 @@ func TestFrozenReleaseVectors(t *testing.T) {
 			}
 			if _, err := os.Stat(filepath.Join(dir, "leash.json")); err == nil {
 				checkLeashVectors(t, dir)
+			}
+			if _, err := os.Stat(filepath.Join(dir, "appkey.json")); err == nil {
+				checkAppKeyVectors(t, dir)
 			}
 		})
 	}

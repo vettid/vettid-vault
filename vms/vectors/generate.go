@@ -277,6 +277,15 @@ func Generate() (map[string][]byte, error) {
 	if err := put("leash.json", lv); err != nil {
 		return nil, err
 	}
+
+	// appkey.json (§11.12, 0.15.0)
+	av, err := genAppKey()
+	if err != nil {
+		return nil, err
+	}
+	if err := put("appkey.json", av); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 

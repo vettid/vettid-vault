@@ -262,6 +262,11 @@ type VaultRow struct {
 	AlarmAt            int64
 	AlarmPending       bool
 	Alarms             int
+	// The app key the enclave reported (0.15.0, §11.5): SPKI DER, akid,
+	// seq; written by the parent whatever the lease.
+	AppKey    []byte
+	AppKeyID  string
+	AppKeySeq uint64
 }
 
 // SlotRow is a response slot.
@@ -457,6 +462,13 @@ func (t *Tables) Lifecycle(_ context.Context, ev parent.Lifecycle, me string, no
 		r.AlarmKind, r.AlarmID, r.AlarmAt, r.AlarmPending = "credential_clone", strconv.Itoa(t.ids), now.Unix(), true
 		r.Alarms++
 		r.UpdatedAt = now.UTC().Format(time.RFC3339)
+		return nil
+	}
+	if r != nil && len(ev.AppKey) > 0 && (ev.Event == "enrolled" || ev.AppKeySeq > r.AppKeySeq) {
+		// Not lease-conditioned: only by seq (enrolled: always), as parent.AWS.
+		r.AppKey, r.AppKeyID, r.AppKeySeq = append([]byte(nil), ev.AppKey...), parent.AppKeyID(ev.AppKey), ev.AppKeySeq
+	}
+	if ev.Event == parent.EventAppKey {
 		return nil
 	}
 	if r == nil || !(r.LeaseInstance == "" || r.LeaseInstance == me) {

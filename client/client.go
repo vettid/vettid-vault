@@ -85,6 +85,12 @@ type State struct {
 	UTKs []UTK `json:"utks,omitempty"`
 	// Recovery is set while this app recovers a vault (§11.11).
 	Recovery *RecoveryState `json:"recovery,omitempty"`
+	// AppKey is the app key's P-256 scalar (0.15.0, §11.12.2; an app
+	// holds it in hardware, this reference client in its state).
+	AppKey []byte `json:"app_key,omitempty"`
+	// UserGUID is the member's id from the redeem or the recovery claim
+	// (0.15.0): the sealed requests carry it.
+	UserGUID string `json:"user_guid,omitempty"`
 }
 
 // VaultRecord is what the device knows about its vault.
@@ -430,7 +436,15 @@ func (d *Device) startPairing(ctx context.Context, link string, att Attester) er
 		}
 	}
 	d.sas, d.hsFailed = "", false
-	return d.startInitWith(handshake.Purpose(d.st.Role), b.InviteID, b.Token, profile, da, id, now)
+	var apiKey []byte
+	if d.st.Role == "app" {
+		// An app pairs only as a transfer's new app: its hs.init carries
+		// its app key (0.15.0, §6.2, §6.7.1).
+		if _, apiKey, err = d.appKeyLocked(); err != nil {
+			return err
+		}
+	}
+	return d.startInitWith(handshake.Purpose(d.st.Role), b.InviteID, b.Token, profile, da, id, now, apiKey)
 }
 
 // AwaitPaired waits for device.paired, which the vault sends at the
@@ -471,10 +485,11 @@ func (d *Device) awaitPaired(ctx context.Context) error {
 
 // startInit sends hs.init to the vault on depositToken.
 func (d *Device) startInit(purpose handshake.Purpose, ctxID, depositToken string, profile json.RawMessage) error {
-	return d.startInitWith(purpose, ctxID, depositToken, profile, nil, "", d.cfg.Now())
+	return d.startInitWith(purpose, ctxID, depositToken, profile, nil, "", d.cfg.Now(), nil)
 }
 
-func (d *Device) startInitWith(purpose handshake.Purpose, ctxID, depositToken string, profile json.RawMessage, da *altchan.DeviceAttest, id string, now time.Time) error {
+func (d *Device) startInitWith(purpose handshake.Purpose, ctxID, depositToken string, profile json.RawMessage, da *altchan.DeviceAttest, id string, now time.Time,
+	apiKey []byte) error {
 	v := d.st.Vault
 	ek, err := suite.ParsePublicKey(v.KEM)
 	if err != nil {
@@ -487,7 +502,7 @@ func (d *Device) startInitWith(purpose handshake.Purpose, ctxID, depositToken st
 	ini, err := handshake.NewInitiator(handshake.InitiatorConfig{
 		Purpose: purpose, Ctx: ctxID, Identity: d.ik, StaticKEM: d.kem.Public(), Relay: d.RelayAddr(),
 		Token: tok, Profile: profile, ResponderIK: v.IK, ResponderEK: ek, ResponderRelayKey: v.RelayPK,
-		Policy: d.policy(), Now: now, ID: id, DeviceAttest: da,
+		Policy: d.policy(), Now: now, ID: id, DeviceAttest: da, APIKey: apiKey,
 	})
 	if err != nil {
 		return err

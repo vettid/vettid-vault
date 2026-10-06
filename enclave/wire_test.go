@@ -2,6 +2,10 @@ package enclave
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
 	"encoding/base64"
 	"strings"
 	"testing"
@@ -147,6 +151,59 @@ func TestQueueRecoveryOps(t *testing.T) {
 		"cancel with key":      `{"v":1,"op":"recovery_cancel","vault_id":"v1","user_guid":"u1","request_id":"01JB2Z6V9K3M4N5P6Q7R8S9T21","browser_key":"` + base64.StdEncoding.EncodeToString(bk) + `","enqueued_at":"2023-11-14T22:13:20Z"}`,
 		"short key":            `{"v":1,"op":"recovery","vault_id":"v1","user_guid":"u1","request_id":"01JB2Z6V9K3M4N5P6Q7R8S9T21","browser_key":"AAAA","enqueued_at":"2023-11-14T22:13:20Z"}`,
 		"register without env": `{"v":1,"op":"recovery_register","vault_id":"v1","user_guid":"u1","request_id":"01JB2Z6V9K3M4N5P6Q7R8S9T21","enqueued_at":"2023-11-14T22:13:20Z"}`,
+	} {
+		if _, err := ParseQueueMessage([]byte(s)); err == nil {
+			t.Errorf("%s accepted", name)
+		}
+	}
+}
+
+func testAppKeyDER(t *testing.T) []byte {
+	t.Helper()
+	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, _ := x509.MarshalPKIXPublicKey(&k.PublicKey)
+	return der
+}
+
+// §11.5 (0.15.0): app_key is REQUIRED for enroll and recovery_register
+// and absent otherwise (standard base64 of a P-256 SPKI DER); account is
+// REQUIRED for the op account, OPTIONAL for unlock, absent otherwise; the
+// op account carries no envelope.
+func TestQueueAppKeyAndAccount(t *testing.T) {
+	der := testAppKeyDER(t)
+	en := sampleQueue()
+	en.Op, en.AppKey = OpEnroll, der
+	q, err := ParseQueueMessage(en.Marshal())
+	if err != nil || !bytes.Equal(q.AppKey, der) {
+		t.Fatalf("enroll: %v", err)
+	}
+	b := string(en.Marshal())
+	if !strings.Contains(b, `"app_key":"`+base64.StdEncoding.EncodeToString(der)+`","enqueued_at"`) {
+		t.Fatalf("member order: %s", b)
+	}
+	acct := `{"v":1,"as_of":"2026-10-06T12:00:00.000Z","state":"member"}`
+	un := sampleQueue()
+	un.Account = []byte(acct)
+	if q, err := ParseQueueMessage(un.Marshal()); err != nil || string(q.Account) != acct {
+		t.Fatalf("unlock with account: %v", err)
+	}
+	ao := &QueueMessage{Op: OpAccount, VaultID: "v1", UserGUID: "u1", RequestID: "01JB2Z6V9K3M4N5P6Q7R8S9T21", EnqueuedAt: time.Unix(1700000000, 0),
+		Account: []byte(acct)}
+	if q, err := ParseQueueMessage(ao.Marshal()); err != nil || string(q.Account) != acct {
+		t.Fatalf("account op: %v", err)
+	}
+	ak := base64.StdEncoding.EncodeToString(der)
+	for name, s := range map[string]string{
+		"enroll without app_key":  strings.Replace(b, `"app_key":"`+ak+`",`, "", 1),
+		"enroll bad app_key":      strings.Replace(b, ak, "AAAA", 1),
+		"unlock with app_key":     strings.Replace(string(sampleQueue().Marshal()), `"enqueued_at"`, `"app_key":"`+ak+`","enqueued_at"`, 1),
+		"account op without body": `{"v":1,"op":"account","vault_id":"v1","user_guid":"u1","request_id":"01JB2Z6V9K3M4N5P6Q7R8S9T21","enqueued_at":"2023-11-14T22:13:20Z"}`,
+		"account not an object":   `{"v":1,"op":"account","vault_id":"v1","user_guid":"u1","request_id":"01JB2Z6V9K3M4N5P6Q7R8S9T21","account":"x","enqueued_at":"2023-11-14T22:13:20Z"}`,
+		"lock with account":       `{"v":1,"op":"lock","vault_id":"v1","user_guid":"u1","request_id":"01JB2Z6V9K3M4N5P6Q7R8S9T21","account":{"v":1},"enqueued_at":"2023-11-14T22:13:20Z"}`,
+		"account with envelope":   `{"v":1,"op":"account","vault_id":"v1","user_guid":"u1","request_id":"01JB2Z6V9K3M4N5P6Q7R8S9T21","envelope":"AAAA","account":{"v":1},"enqueued_at":"2023-11-14T22:13:20Z"}`,
 	} {
 		if _, err := ParseQueueMessage([]byte(s)); err == nil {
 			t.Errorf("%s accepted", name)

@@ -192,8 +192,8 @@ func (c *Core) enroll(ctx context.Context, q *Job, started **vault.Manager) []by
 	if err != nil || handshake.ValidateRelayAddr(handshake.RelayAddr{URL: r.Relay.URL, Mailbox: r.Relay.Mailbox, PK: r.Relay.PK}) != nil {
 		return fail("bad_request")
 	}
-	if r.UserGUID != q.UserGUID || r.RequestID != q.RequestID {
-		return opaque() // binding (§11.3): a redirected request is rejected
+	if r.UserGUID != q.UserGUID || r.RequestID != q.RequestID || !suite.Equal(r.APIKey, q.AppKey) {
+		return opaque() // binding (§11.3; app.api_key since 0.15.0): a redirected request is rejected
 	}
 	m, own, err := c.verifyManifest(q.Manifest, r.ManifestSHA256, r.ManifestSerial, 0)
 	if err != nil || own.Status != manifest.StatusActive {
@@ -233,7 +233,7 @@ func (c *Core) enroll(ctx context.Context, q *Job, started **vault.Manager) []by
 		RelayURL: c.cfg.RelayURL, Provisional: true, ManifestSerial: m.Serial, SealKeyVerified: rec, Replace: replace,
 		App: &vault.EnrollApp{Name: r.Name, IK: r.IK, KEM: r.KEM, OpenToken: r.OpenToken, RequestID: q.RequestID,
 			Relay:       vault.PeerRelay{URL: r.Relay.URL, Mailbox: r.Relay.Mailbox, PK: r.Relay.PK},
-			Attestation: binding,
+			Attestation: binding, APIKey: r.APIKey,
 			Attest: func(bundle []byte) ([]byte, error) {
 				return c.d.AttestVault(bundle, nonce)
 			}},
@@ -246,8 +246,11 @@ func (c *Core) enroll(ctx context.Context, q *Job, started **vault.Manager) []by
 		return fail("retry")
 	}
 	c.indexUser(ctx, q.UserGUID, q.VaultID)
-	c.emit(vault.LifecycleEvent{Event: "enrolled", VaultID: q.VaultID, Release: c.meas.PCR0, VaultVersion: c.meas.PCR0, StateVersion: vault.StateVersion})
-	c.emit(vault.LifecycleEvent{Event: "unlocked", VaultID: q.VaultID, Release: c.meas.PCR0, VaultVersion: c.meas.PCR0, StateVersion: vault.StateVersion})
+	ak, seq := mgr.AppKey() // §11.5 (0.15.0): the app key on enrolled and unlocked
+	c.emit(vault.LifecycleEvent{Event: "enrolled", VaultID: q.VaultID, Release: c.meas.PCR0, VaultVersion: c.meas.PCR0, StateVersion: vault.StateVersion,
+		AppKey: ak, AppKeySeq: seq})
+	c.emit(vault.LifecycleEvent{Event: "unlocked", VaultID: q.VaultID, Release: c.meas.PCR0, VaultVersion: c.meas.PCR0, StateVersion: vault.StateVersion,
+		AppKey: ak, AppKeySeq: seq})
 	*started = mgr
 	return answer(&altchan.EnrollResult{OK: true, VaultID: q.VaultID})
 }
@@ -360,6 +363,7 @@ func (c *Core) unlock(ctx context.Context, q *Job, started **vault.Manager) []by
 	p := vault.AltUnlockParams{
 		Options: c.vaultOptions(sealer), VaultID: q.VaultID, UserGUID: q.UserGUID, DeviceIK: r.DeviceIK, PIN: r.PIN,
 		MinStateSeq: r.MinStateSeq, MinHeaderSeq: r.MinHeaderSeq, DeviceToken: r.Token, CancelRecovery: r.CancelRecovery,
+		Account: q.Account,
 	}
 	p.VerifyDevice = func(k *vault.UnlockKey) (json.RawMessage, error) {
 		if !ed25519.Verify(ed25519.PublicKey(k.IK), []byte(signing), r.Sig) {

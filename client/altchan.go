@@ -163,6 +163,10 @@ type Request struct {
 	// goes in the POST body, and the member API copies it into the queue
 	// message so the host can supply the document (0.10.0, M1).
 	ManifestSHA256 string
+	// AppKey is the app key (SPKI DER) sealed in an enroll or register
+	// (0.15.0): the key the API request must be signed with, which the API
+	// copies into the queue message's app_key.
+	AppKey []byte
 	// ReleaseChanged is set when the routed release differs from the one
 	// the app last unlocked into: the app tells the user before it sends
 	// the PIN (§11.2 step 4).
@@ -197,8 +201,12 @@ func (d *Device) BuildEnroll(userGUID, pin string, e *Enclave, m *manifest.Manif
 	if err != nil {
 		return nil, err
 	}
+	_, apiKey, err := d.appKeyLocked()
+	if err != nil {
+		return nil, err
+	}
 	ra := d.RelayAddr()
-	body, err := (&altchan.EnrollRequest{UserGUID: userGUID, RequestID: rid, Nonce: nonce, PIN: pin,
+	body, err := (&altchan.EnrollRequest{APIKey: apiKey, UserGUID: userGUID, RequestID: rid, Nonce: nonce, PIN: pin,
 		IK: d.IdentityKey(), KEM: d.kem.Public(), Relay: altchan.RelayAddr{URL: ra.URL, Mailbox: ra.Mailbox, PK: ra.PK},
 		OpenToken: open, Name: d.st.Name, Attest: da, ManifestSHA256: manifest.SHA256Hex(m.Bytes), ManifestSerial: m.Serial}).Marshal()
 	if err != nil {
@@ -212,7 +220,8 @@ func (d *Device) BuildEnroll(userGUID, pin string, e *Enclave, m *manifest.Manif
 	a.EnrollNonce = nonce
 	a.EnrollPCRs = e.Measurements.PCR0 + e.Measurements.PCR1 + e.Measurements.PCR2
 	a.EnrollNumber = e.Release.Number
-	return &Request{RequestID: rid, ETKKid: e.Descriptor.Kid.String(), Envelope: env, ManifestSHA256: manifest.SHA256Hex(m.Bytes)}, nil
+	return &Request{RequestID: rid, ETKKid: e.Descriptor.Kid.String(), Envelope: env, ManifestSHA256: manifest.SHA256Hex(m.Bytes),
+		AppKey: apiKey}, nil
 }
 
 // OpenEnrollResult reads vault.enroll.result from the response slot.

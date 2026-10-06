@@ -60,6 +60,10 @@ type Host interface {
 	Lock(ctx context.Context, vaultID string) (bool, error)
 	// LockReason is Lock with a reason in vault.locking (§11.11.1).
 	LockReason(ctx context.Context, vaultID, reason string) (bool, error)
+	// Account gives a running vault the member's account snapshot (the
+	// queue op account, 0.15.0, §11.13); it reports whether the vault
+	// runs here (otherwise the snapshot is dropped).
+	Account(ctx context.Context, vaultID string, snapshot []byte) (bool, error)
 	// Vaults returns the ids of the running vaults.
 	Vaults() []string
 	// Close locks every vault.
@@ -169,6 +173,8 @@ func (in *Instance) Process(ctx context.Context, q *QueueMessage, manifestDoc []
 		_, _ = in.host.Lock(ctx, q.VaultID)
 	case OpDelete:
 		in.deleteVault(ctx, q.VaultID, q.UserGUID)
+	case OpAccount:
+		_, _ = in.host.Account(ctx, q.VaultID, q.Account) // no running vault: dropped (§11.5)
 	case OpRecovery, OpRecoveryCancel:
 		// No envelope: the job carries the browser key (not secret). A
 		// recovery locks a running vault first, telling its devices why
@@ -199,7 +205,11 @@ func (in *Instance) Process(ctx context.Context, q *QueueMessage, manifestDoc []
 			resp.Envelope = opaque()
 			return resp
 		}
-		j := &Job{Op: q.Op, VaultID: q.VaultID, UserGUID: q.UserGUID, RequestID: q.RequestID, ETKKid: q.ETKKid, Inner: inner}
+		j := &Job{Op: q.Op, VaultID: q.VaultID, UserGUID: q.UserGUID, RequestID: q.RequestID, ETKKid: q.ETKKid, Inner: inner,
+			AppKey: q.AppKey}
+		if q.Op == OpUnlock {
+			j.Account = q.Account
+		}
 		if (q.Op == OpEnroll || q.Op == OpUnlock) && len(manifestDoc) <= manifest.MaxServed {
 			j.Manifest = manifestDoc
 		}

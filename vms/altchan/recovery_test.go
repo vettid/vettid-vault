@@ -76,7 +76,8 @@ func TestUnlockSigningStringCancel(t *testing.T) {
 
 func testRegister(t testing.TB) []byte {
 	kem, _ := suite.GeneratePrivateKey()
-	r := &RecoveryRegisterRequest{UserGUID: "u", VaultID: recVault, RequestID: recID, RecoveryID: recID, Code: strings.Repeat("A", 32),
+	_, ak := testAppKey(t, 0x41)
+	r := &RecoveryRegisterRequest{APIKey: ak, UserGUID: "u", VaultID: recVault, RequestID: recID, RecoveryID: recID, Code: strings.Repeat("A", 32),
 		IK: make([]byte, 32), KEM: kem.Public(), Relay: RelayAddr{URL: "https://relay.example.org", Mailbox: "m", PK: make([]byte, 32)},
 		Name: "phone", Attest: &DeviceAttest{Platform: PlatformAndroid, Chain: [][]byte{{1, 2, 3}}}}
 	b, err := r.Marshal()

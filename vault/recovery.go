@@ -41,6 +41,9 @@ type RecoveryApp struct {
 	RelayPK     []byte          `json:"relay_pk"`
 	Name        string          `json:"name,omitempty"`
 	Attestation json.RawMessage `json:"attestation,omitempty"`
+	// APIKey is the recovering app's app key (0.15.0, §11.11.3): the
+	// vault's app key once the recovery completes.
+	APIKey []byte `json:"api_key,omitempty"`
 }
 
 // RecoveryRecord is the header's recovery state.
@@ -339,6 +342,9 @@ func (m *Manager) completeRecovery(deviceID string, now time.Time) error {
 	}
 	p.Recovering = false
 	m.replaceAfter = deviceID // the other apps go (§11.11.5), after the handler
+	if r := m.hdr.Recovery; r != nil && r.App != nil && len(r.App.APIKey) > 0 {
+		m.setAppKey(r.App.APIKey) // §11.11.5 step 3 (0.15.0)
+	}
 	if m.hdr.Recovery != nil {
 		m.hdr.logRecovery(now, "recovery.completed", m.hdr.Recovery.ID)
 		delete(m.st.Invites, m.hdr.Recovery.ID)

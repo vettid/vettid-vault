@@ -5,9 +5,11 @@
 // the real parent and enclave against LocalStack exactly as they will run
 // against the member API.
 //
-// Left out: sessions (a member is named by "Authorization: Bearer
+// Left out: sessions (a portal member is named by "Authorization: Bearer
 // <user_guid>" and is always a member who accepted the current terms),
-// rate limits, the audit log, email and the recovery cancel link.
+// rate limits, the typed redeem's flat timing, the audit log, email and
+// the recovery cancel link. Apps sign every request with their app key
+// (MEMBER-API 2.0.0, appkeys.go).
 package memberapitest
 
 import (
@@ -17,6 +19,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"regexp"
 	"sort"
@@ -83,6 +86,12 @@ type Config struct {
 	// available, expires; DEVELOPMENT: the dev stack moves it forward
 	// together with the enclave's recovery clock). Default Now.
 	RecoveryNow func() time.Time
+	// Origin is the member API origin the setup code's QR names (§11.12.1);
+	// default http://<Host>.
+	Origin string
+	// Email returns a member's email (setup codes, email_hint); default
+	// <guid>@example.org.
+	Email func(guid string) string
 }
 
 // API serves the vault routes.
@@ -91,6 +100,7 @@ type API struct {
 	mu  sync.Mutex
 	// StartRequests records on-demand start requests per release.
 	StartRequests map[string]int
+	ks            *keyStore
 }
 
 // New returns the stand-in.
@@ -167,19 +177,38 @@ func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(a.cfg.Manifest())
 		return
 	}
-	guid, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if !ok || guid == "" {
-		writeJSON(w, 401, map[string]any{"error": "unauthorized", "message": "sign in"})
-		return
-	}
 	var body map[string]any
+	var raw []byte
 	if r.Method == http.MethodPost {
-		if json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024)).Decode(&body) != nil {
+		b, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 64*1024))
+		if err != nil || len(b) > 0 && json.Unmarshal(b, &body) != nil {
 			writeJSON(w, 400, map[string]any{"error": "bad_request", "message": "invalid JSON"})
 			return
 		}
+		raw = b
+		if body == nil {
+			body = map[string]any{}
+		}
 	}
+	c, err := a.authenticate(ctx, r, raw, body)
+	if err != nil {
+		a.writeErr(w, err)
+		return
+	}
+	ctx = context.WithValue(ctx, callerCtxKey{}, c)
+	guid := c.guid
 	switch {
+	case r.URL.Path == "/api/vault/enroll-code" && r.Method == http.MethodPost:
+		out, err = a.enrollCodeIssue(guid, a.origin(r))
+		status = 201
+	case r.URL.Path == "/api/vault/enroll-code" && r.Method == http.MethodGet:
+		out, err = a.enrollCodeGet(guid)
+	case r.URL.Path == "/api/vault/enroll-code" && r.Method == http.MethodDelete:
+		out, err = a.enrollCodeRevoke(guid)
+	case r.Method == http.MethodPost && r.URL.Path == "/api/vault/enroll/redeem":
+		out, err = a.redeem(ctx, c, body)
+	case r.Method == http.MethodPost && r.URL.Path == "/api/vault/recovery/claim":
+		out, err = a.recoveryClaim(ctx, c, body)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/vault/status":
 		out, err = a.status(ctx, guid)
 	case r.Method == http.MethodGet && r.URL.Path == enclavePath:
@@ -214,21 +243,25 @@ func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		err = notFound("No such route")
 	}
 	if err != nil {
-		var ae *apiError
-		if !errors.As(err, &ae) {
-			ae = &apiError{status: 500, code: "internal", msg: "internal error"}
-		}
-		b := map[string]any{"error": ae.code, "message": ae.msg}
-		if ae.status != 500 && ae.code != "bad_request" && ae.code != "not_found" {
-			b["code"] = ae.code
-		}
-		for k, v := range ae.extra {
-			b[k] = v
-		}
-		writeJSON(w, ae.status, b)
+		a.writeErr(w, err)
 		return
 	}
 	writeJSON(w, status, out)
+}
+
+func (a *API) writeErr(w http.ResponseWriter, err error) {
+	var ae *apiError
+	if !errors.As(err, &ae) {
+		ae = &apiError{status: 500, code: "internal", msg: "internal error"}
+	}
+	b := map[string]any{"error": ae.code, "message": ae.msg}
+	if ae.status != 500 && ae.code != "bad_request" && ae.code != "not_found" && ae.code != "unauthorized" {
+		b["code"] = ae.code
+	}
+	for k, v := range ae.extra {
+		b[k] = v
+	}
+	writeJSON(w, ae.status, b)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -277,7 +310,9 @@ type vaultRow struct {
 	StateVersion                                          any
 	Lease                                                 *lease
 	Recovery                                              *recoveryRow
-	CreatedAt, UpdatedAt                                  string
+	// AppKey is the app_key the host wrote from the enclave's reports.
+	AppKey               *appKey
+	CreatedAt, UpdatedAt string
 }
 
 func parseVault(it map[string]ddbtypes.AttributeValue) *vaultRow {
@@ -305,6 +340,11 @@ func parseVault(it map[string]ddbtypes.AttributeValue) *vaultRow {
 		}
 		if r.ID != "" {
 			v.Recovery = r
+		}
+	}
+	if m, ok := it["app_key"].(*ddbtypes.AttributeValueMemberM); ok {
+		if k, ok := parseKey(str(m.Value, "key")); ok && k.kid == str(m.Value, "kid") {
+			v.AppKey = k
 		}
 	}
 	if m, ok := it["lease"].(*ddbtypes.AttributeValueMemberM); ok {
@@ -569,6 +609,14 @@ func (a *API) enqueueWith(ctx context.Context, op, guid string, v *vaultRow, req
 	for k, x := range slot {
 		item[k] = x
 	}
+	c := callerOf(ctx)
+	if c != nil && c.app != nil {
+		item["app_kid"] = s(c.app.kid) // only this key may poll it (MEMBER-API 2.0.0)
+		ks := a.keys()
+		a.mu.Lock()
+		ks.slotSigner[requestID] = c.app
+		a.mu.Unlock()
+	}
 	_, err := a.cfg.DDB.PutItem(ctx, &dynamodb.PutItemInput{TableName: &a.cfg.Tables.Requests, ConditionExpression: aws.String("attribute_not_exists(request_id)"),
 		Item: item})
 	if err != nil {
@@ -590,6 +638,13 @@ func (a *API) enqueueWith(ctx context.Context, op, guid string, v *vaultRow, req
 	}
 	if browserKey != "" {
 		b.WriteString(`,"browser_key":` + jsonString(browserKey)) // recovery (§11.11.1)
+	}
+	if (op == "enroll" || op == "recovery_register") && c != nil && c.app != nil {
+		// The key the request was signed with (0.15.0, §11.5).
+		b.WriteString(`,"app_key":` + jsonString(base64.StdEncoding.EncodeToString(c.app.der)))
+	}
+	if op == "unlock" || op == "account" {
+		b.WriteString(`,"account":` + string(a.Snapshot(guid))) // §11.13
 	}
 	b.WriteString(`,"enqueued_at":` + jsonString(created) + `}`)
 	body := b.String()
@@ -821,9 +876,13 @@ func (a *API) lock(ctx context.Context, guid string, body map[string]any) (any, 
 			return nil, err
 		}
 	} else {
+		item := map[string]ddbtypes.AttributeValue{"request_id": s(rid), "vault_id": s(v.VaultID), "user_guid": s(guid), "op": s("lock"),
+			"status": s("done"), "created_at": s(a.nowISO()), "expires_at": n(a.nowS() + requestTTLS)}
+		if c := callerOf(ctx); c != nil && c.app != nil {
+			item["app_kid"] = s(c.app.kid)
+		}
 		_, err := a.cfg.DDB.PutItem(ctx, &dynamodb.PutItemInput{TableName: &a.cfg.Tables.Requests, ConditionExpression: aws.String("attribute_not_exists(request_id)"),
-			Item: map[string]ddbtypes.AttributeValue{"request_id": s(rid), "vault_id": s(v.VaultID), "user_guid": s(guid), "op": s("lock"),
-				"status": s("done"), "created_at": s(a.nowISO()), "expires_at": n(a.nowS() + requestTTLS)}})
+			Item: item})
 		if err != nil {
 			if code(err) == "ConditionalCheckFailedException" {
 				return nil, vaultError(409, "duplicate_request", "request_id has already been used", nil)
@@ -848,6 +907,9 @@ func (a *API) request(ctx context.Context, guid, rid string) (any, error) {
 	exp, _ := num(it, "expires_at")
 	if it == nil || str(it, "user_guid") != guid || exp <= now {
 		return nil, notFound("No such request")
+	}
+	if c := callerOf(ctx); c != nil && c.app != nil && str(it, "app_kid") != c.app.kid {
+		return nil, notFound("No such request") // another key's slot (MEMBER-API 2.0.0)
 	}
 	st := str(it, "status")
 	if st == "queued" {
@@ -877,6 +939,7 @@ func (a *API) request(ctx context.Context, guid, rid string) (any, error) {
 				return nil, err
 			}
 			if v := parseVault(g.Item); v != nil && v.Recovery != nil && v.UserGUID == guid && v.Recovery.ID == str(it, "recovery_id") {
+				a.registeredBy(v.VaultID, rid)
 				if _, err := a.markRegistered(ctx, v, v.Recovery); err != nil {
 					return nil, err
 				}

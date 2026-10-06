@@ -31,6 +31,11 @@ func TestJobRoundTrip(t *testing.T) {
 	if g2, err := ParseJob(j.Fields()); err != nil || !bytes.Equal(g2.Manifest, j.Manifest) {
 		t.Fatalf("manifest field: %v", err)
 	}
+	// 0.15.0: the app key and the account snapshot travel with the job.
+	j.AppKey, j.Account = []byte{1, 2, 3}, []byte(`{"v":1}`)
+	if g3, err := ParseJob(j.Fields()); err != nil || !bytes.Equal(g3.AppKey, j.AppKey) || !bytes.Equal(g3.Account, j.Account) {
+		t.Fatalf("app key / account fields: %v", err)
+	}
 	g.Wipe()
 	if !bytes.Equal(g.Inner.Body, make([]byte, len(g.Inner.Body))) {
 		t.Fatal("wipe")

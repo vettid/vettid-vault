@@ -2,6 +2,7 @@ package parent
 
 import (
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -34,5 +35,43 @@ func TestParseAlarmEvent(t *testing.T) {
 	}
 	if !f(EventAlarmCredentialClone) || f("alarm.other") || f("alarm") {
 		t.Fatal("alarm parsing")
+	}
+}
+
+// §11.5 (0.15.0): lifecycle frames carry the app key and its sequence
+// (seven fields; five from an enclave before 0.15.0); the event app_key
+// needs a key; a malformed sequence is refused.
+func TestParseLifecycleAppKey(t *testing.T) {
+	pcr := strings.Repeat("a", 96)
+	frame := func(fs ...string) *hostproto.Frame {
+		f := &hostproto.Frame{}
+		for _, s := range fs {
+			f.Fields = append(f.Fields, []byte(s))
+		}
+		return f
+	}
+	ev, ok := parseLifecycle(frame("unlocked", "v1", pcr, pcr, "1", "\x30\x59key", "3"))
+	if !ok || string(ev.AppKey) != "\x30\x59key" || ev.AppKeySeq != 3 {
+		t.Fatalf("%+v %v", ev, ok)
+	}
+	if ev, ok := parseLifecycle(frame("locked", "v1", pcr, pcr, "1", "", "0")); !ok || ev.AppKey != nil {
+		t.Fatal("no key")
+	}
+	if _, ok := parseLifecycle(frame("locked", "v1", pcr, pcr, "1")); !ok {
+		t.Fatal("five fields")
+	}
+	if _, ok := parseLifecycle(frame(EventAppKey, "v1", pcr, pcr, "1", "k", "2")); !ok {
+		t.Fatal("app_key event")
+	}
+	for _, f := range []*hostproto.Frame{
+		frame(EventAppKey, "v1", pcr, pcr, "1", "", "0"),
+		frame("unlocked", "v1", pcr, pcr, "1", "k", "0"),
+		frame("unlocked", "v1", pcr, pcr, "1", "k", "02"),
+		frame("unlocked", "v1", pcr, pcr, "1", "k"),
+		frame("unlocked", "v1", pcr, pcr, "1", strings.Repeat("k", 257), "1"),
+	} {
+		if _, ok := parseLifecycle(f); ok {
+			t.Fatalf("accepted %q", f.Fields)
+		}
 	}
 }

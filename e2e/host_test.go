@@ -226,6 +226,9 @@ func (hs *hostStack) post(hi *hostInstance, op, vaultID, guid string, r *client.
 			_, _ = hs.objs.Put(context.Background(), "manifests/"+r.ManifestSHA256+".json", doc, "")
 		}
 	}
+	if op == "enroll" || op == "recovery_register" {
+		m["app_key"] = r.AppKey // 0.15.0: the key the API checked the signature with
+	}
 	b, _ := json.Marshal(m)
 	if !hs.queues.Send(hi.queue, string(b)) {
 		hs.t.Fatal("no queue")
@@ -370,6 +373,30 @@ func TestHostStack(t *testing.T) {
 	keys := strings.Join(hs.objs.Keys(), " ")
 	if !strings.Contains(keys, "vaults/11111111111111111111111111111111/state") || !strings.Contains(keys, "vaults/11111111111111111111111111111111/header/") {
 		t.Fatalf("objects %s", keys)
+	}
+
+	// 0.15.0 (§11.5): the parent wrote the app key the enclave reported.
+	_, akDER, _ := m1.dev.AppKey()
+	if r, _ := hs.tables.Vault("11111111111111111111111111111111"); r.AppKeyID != parent.AppKeyID(akDER) || r.AppKeySeq != 1 {
+		t.Fatalf("app key on the row: %+v", r)
+	}
+	// §11.13: the queue op account reaches the vault's process.
+	rid, _ := envelope.NewULID(time.Now())
+	hs.tables.PutSlot(rid, a.id)
+	acct := `{"v":1,"as_of":"` + envelope.FormatTS(time.Now()) + `","email_hint":"m***@example.org","state":"member"}`
+	b, _ := json.Marshal(map[string]any{"v": 1, "op": "account", "vault_id": "11111111111111111111111111111111", "user_guid": "member-1",
+		"request_id": rid, "account": json.RawMessage(acct), "enqueued_at": time.Now().UTC().Format(time.RFC3339Nano)})
+	hs.queues.Send(a.queue, string(b))
+	if s := hs.waitSlot(rid); s.Status != "done" || s.Envelope != nil {
+		t.Fatalf("account slot %+v", s)
+	}
+	if _, err := m1.dev.WaitEvent(ctxT(t, 30*time.Second), "sync.event", func(b json.RawMessage) bool {
+		return strings.Contains(string(b), `"account.changed"`)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if r, err := m1.dev.Request(ctxT(t, 30*time.Second), "account.get", json.RawMessage(`{}`)); err != nil || !strings.Contains(string(r.Body()), `"email_hint":"m***@example.org"`) {
+		t.Fatalf("account.get: %v", err)
 	}
 
 	// Lock and unlock again; the lock ends the vault's process.

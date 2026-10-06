@@ -464,19 +464,37 @@ func devHTTPFromEnv() {
 type apiFlags struct {
 	api, guid, pin, platform string
 	seed                     int
+	typed                    bool
 }
 
 func (a *apiFlags) register(fs *flag.FlagSet) {
 	fs.StringVar(&a.api, "api", "", "member API base URL")
-	fs.StringVar(&a.guid, "guid", "", "member user_guid (the test API's bearer token)")
+	fs.StringVar(&a.guid, "guid", "", "member user_guid: the test portal's bearer token (setup codes); the app itself signs with its app key")
+	fs.BoolVar(&a.typed, "typed", false, "api-enroll: redeem the typed code with the member's email instead of the QR secret")
 	fs.StringVar(&a.pin, "pin", "", "PIN")
 	fs.StringVar(&a.platform, "platform", "android", "test device attestation: android or ios")
 	fs.IntVar(&a.seed, "attest-seed", 0x61, "test attestation key seed (1-255)")
 }
 
-func (a *apiFlags) client() *client.MemberAPI {
+// portal is the test portal's member session (setup codes, §11.12.1).
+func (a *apiFlags) portal() *client.MemberAPI {
 	guid := a.guid
 	return &client.MemberAPI{Base: a.api, HTTP: httpClient, Authorize: func(r *http.Request) { r.Header.Set("Authorization", "Bearer "+guid) }}
+}
+
+// client is the app's member API client: every request signed by its app
+// key (0.15.0, §11.12.2).
+func (a *apiFlags) client(d *client.Device) (*client.MemberAPI, error) {
+	return d.APIFor(a.api, httpClient)
+}
+
+// userGUID is the member id the app learned from the redeem or the claim
+// (-guid before 0.15.0 state).
+func (a *apiFlags) userGUID(d *client.Device) string {
+	if g := d.UserGUID(); g != "" {
+		return g
+	}
+	return a.guid
 }
 
 // testTrust is the TEST-ONLY trust of the dev stack: the test Nitro root
@@ -498,9 +516,37 @@ func cmdAPIEnroll(ctx context.Context, g *globals, args []string) error {
 	if err != nil {
 		return err
 	}
+	// The portal issues a setup code; the app redeems it with its app
+	// key (§11.12.1) and enrolls with the member id it names.
+	code, err := a.portal().IssueEnrollCode(ctx)
+	if err != nil {
+		return fmt.Errorf("enroll-code: %w", err)
+	}
+	api, err := a.client(d)
+	if err != nil {
+		return err
+	}
+	qr, err := code.QR()
+	if err != nil {
+		return err
+	}
+	q, err := altchan.ParseEnrollQR(qr)
+	if err != nil || q.API != strings.TrimRight(a.api, "/") {
+		return fmt.Errorf("the setup code is for another member API (%s)", q.API)
+	}
+	var red *client.RedeemResult
+	if a.typed {
+		red, err = d.RedeemVia(ctx, api, "", a.guid+"@example.org", code.Code)
+	} else {
+		red, err = d.RedeemVia(ctx, api, q.SecretString(), "", "")
+	}
+	if err != nil {
+		return fmt.Errorf("redeem: %w", err)
+	}
+	fmt.Fprintf(os.Stderr, "setting up a vault for %s\n", red.EmailHint)
 	af := altFlags{platform: a.platform, seed: a.seed}
 	dev, keep := af.attester(g)
-	vid, r, err := d.EnrollVia(ctx, a.client(), a.guid, a.pin, t, dev)
+	vid, r, err := d.EnrollVia(ctx, api, red.UserGUID, a.pin, t, dev)
 	keep()
 	if err != nil {
 		return err
@@ -536,11 +582,15 @@ func cmdAPIUnlock(ctx context.Context, g *globals, args []string) error {
 	abandon := fs.Bool("abandon", false, "abandon an unconfirmed move (with -release)")
 	release := fs.Uint64("release", 0, "send the unlock to this test release")
 	_ = fs.Parse(args)
-	if a.api == "" || a.guid == "" || a.pin == "" {
-		return errors.New("-api, -guid and -pin are required")
+	if a.api == "" || a.pin == "" {
+		return errors.New("-api and -pin are required")
 	}
 	t := testTrust()
 	d, err := loadWithTrust(g, t)
+	if err != nil {
+		return err
+	}
+	api, err := a.client(d)
 	if err != nil {
 		return err
 	}
@@ -554,7 +604,7 @@ func cmdAPIUnlock(ctx context.Context, g *globals, args []string) error {
 	}
 	af := altFlags{platform: a.platform, seed: a.seed}
 	dev, keep := af.attester(g)
-	r, err := d.UnlockVia(ctx, a.client(), a.guid, a.pin, t, dev, o, rel)
+	r, err := d.UnlockVia(ctx, api, a.userGUID(d), a.pin, t, dev, o, rel)
 	keep()
 	if serr := save(g, d); err == nil {
 		err = serr
@@ -581,8 +631,8 @@ func cmdAPIRecover(ctx context.Context, g *globals, args []string) error {
 	a.register(fs)
 	qrArg := fs.String("qr", "", "the recovery QR payload (from the portal, or devstack's /dev/recovery/code)")
 	_ = fs.Parse(args)
-	if a.api == "" || a.guid == "" || a.pin == "" || *qrArg == "" {
-		return errors.New("-api, -guid, -pin and -qr are required")
+	if a.api == "" || a.pin == "" || *qrArg == "" {
+		return errors.New("-api, -pin and -qr are required")
 	}
 	qr, err := altchan.ParseRecoveryQR([]byte(*qrArg))
 	if err != nil {
@@ -596,8 +646,19 @@ func cmdAPIRecover(ctx context.Context, g *globals, args []string) error {
 	af := altFlags{platform: a.platform, seed: a.seed}
 	dev, keep := af.attester(g)
 	defer keep()
-	api := a.client()
-	rr, slot, err := d.RecoveryRegisterVia(ctx, api, a.guid, qr, t, dev)
+	if qr.API != "" && qr.API != strings.TrimRight(a.api, "/") {
+		return fmt.Errorf("the recovery code is for another member API (%s)", qr.API)
+	}
+	api, err := a.client(d)
+	if err != nil {
+		return err
+	}
+	// The new app claims the recovery with its app key (§11.11.7): the
+	// answer names the member.
+	if _, err := d.ClaimVia(ctx, api, qr); err != nil {
+		return fmt.Errorf("claim: %w", err)
+	}
+	rr, slot, err := d.RecoveryRegisterVia(ctx, api, d.UserGUID(), qr, t, dev)
 	if serr := save(g, d); err == nil {
 		err = serr
 	}
@@ -607,7 +668,7 @@ func cmdAPIRecover(ctx context.Context, g *globals, args []string) error {
 	if !rr.OK {
 		return fmt.Errorf("register refused: %s", rr.Code)
 	}
-	u, err := d.UnlockVia(ctx, api, a.guid, a.pin, t, dev, client.UnlockOptions{}, "")
+	u, err := d.UnlockVia(ctx, api, d.UserGUID(), a.pin, t, dev, client.UnlockOptions{}, "")
 	if serr := save(g, d); err == nil {
 		err = serr
 	}
@@ -633,14 +694,18 @@ func cmdAPILock(ctx context.Context, g *globals, args []string) error {
 	var a apiFlags
 	a.register(fs)
 	_ = fs.Parse(args)
-	if a.api == "" || a.guid == "" {
-		return errors.New("-api and -guid are required")
+	if a.api == "" {
+		return errors.New("-api is required")
 	}
 	d, err := load(g)
 	if err != nil {
 		return err
 	}
-	s, err := d.LockVia(ctx, a.client())
+	api, err := a.client(d)
+	if err != nil {
+		return err
+	}
+	s, err := d.LockVia(ctx, api)
 	if err != nil {
 		return err
 	}

@@ -3,7 +3,10 @@ package vault
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -36,6 +39,23 @@ type newcomer struct {
 	sas    string
 	tok    string
 	n      int
+	// noAPIKey leaves api_key out of a transfer's hs.init.
+	noAPIKey bool
+}
+
+// testAppKeyDER is a fixed P-256 app key's SPKI DER (scalar 32 x b), TEST
+// ONLY.
+func testAppKeyDER(t testing.TB, b byte) []byte {
+	t.Helper()
+	k, err := ecdsa.ParseRawPrivateKey(elliptic.P256(), bytes.Repeat([]byte{b | 1}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.MarshalPKIXPublicKey(&k.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return der
 }
 
 func newNewcomer(t testing.TB, base byte) *newcomer {
@@ -66,6 +86,9 @@ func (n *newcomer) hsInitAttest(t testing.TB, m *Manager, purpose handshake.Purp
 		Token: tok, ResponderIK: m.keys.ik.Public().(ed25519.PublicKey), ResponderEK: m.keys.kem.Public(),
 		ResponderRelayKey: m.keys.relay.Public().(ed25519.PublicKey), Policy: policyFor(string(purpose)), Now: now,
 		DeviceAttest: da, ID: id}
+	if inv := m.st.Invites[ctxID]; inv != nil && inv.Transfer && !n.noAPIKey {
+		cfg.APIKey = testAppKeyDER(t, n.ik[0]) // a transfer's new app (0.15.0, §6.2)
+	}
 	ini, err := handshake.NewInitiator(cfg)
 	if err != nil {
 		t.Fatal(err)

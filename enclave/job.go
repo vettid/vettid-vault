@@ -25,6 +25,12 @@ type Job struct {
 	// an enroll or unlock (0.10.0, M1), or empty. It is host input: the
 	// vault verifies it against the hash in the sealed request.
 	Manifest []byte
+	// AppKey is the queue message's app_key (enroll, recovery_register;
+	// 0.15.0), bound to the sealed app.api_key.
+	AppKey []byte
+	// Account is the queue message's account snapshot (unlock; 0.15.0,
+	// §11.13), applied after a successful unlock.
+	Account []byte
 }
 
 // ErrJob is a malformed job.
@@ -35,15 +41,18 @@ const MaxJobBody = altchan.RequestPaddedSize
 
 // Fields encodes the job for the vault channel:
 // [op, vault_id, user_guid, request_id, etk_kid, type, id, ts, body,
-// manifest document].
+// manifest document, app key, account snapshot].
 func (j *Job) Fields() [][]byte {
 	return [][]byte{[]byte(j.Op), []byte(j.VaultID), []byte(j.UserGUID), []byte(j.RequestID), []byte(j.ETKKid.String()),
-		[]byte(j.Inner.Type), []byte(j.Inner.ID), []byte(envelope.FormatTS(j.Inner.TS)), j.Inner.Body, j.Manifest}
+		[]byte(j.Inner.Type), []byte(j.Inner.ID), []byte(envelope.FormatTS(j.Inner.TS)), j.Inner.Body, j.Manifest, j.AppKey, j.Account}
 }
+
+// MaxJobAccount bounds a job's account snapshot (§11.13: 2 KiB).
+const MaxJobAccount = 2048
 
 // ParseJob decodes Fields strictly.
 func ParseJob(f [][]byte) (*Job, error) {
-	if len(f) != 10 || len(f[9]) > manifest.MaxServed {
+	if len(f) != 12 || len(f[9]) > manifest.MaxServed || len(f[10]) > altchan.MaxAppKeyB64 || len(f[11]) > MaxJobAccount {
 		return nil, ErrJob
 	}
 	j := &Job{Op: string(f[0]), VaultID: string(f[1]), UserGUID: string(f[2]), RequestID: string(f[3])}
@@ -66,6 +75,12 @@ func ParseJob(f [][]byte) (*Job, error) {
 	j.Inner = &envelope.Inner{Type: want, ID: j.RequestID, TS: ts, Body: append([]byte(nil), f[8]...)}
 	if len(f[9]) > 0 {
 		j.Manifest = append([]byte(nil), f[9]...)
+	}
+	if len(f[10]) > 0 {
+		j.AppKey = append([]byte(nil), f[10]...)
+	}
+	if len(f[11]) > 0 {
+		j.Account = append([]byte(nil), f[11]...)
 	}
 	return j, nil
 }

@@ -2,6 +2,11 @@ package handshake
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -108,6 +113,8 @@ func TestInitFieldRules(t *testing.T) {
 		{"device_attest empty chain", replaceMember(t, app, "device_attest", map[string]any{"platform": "android", "chain": []string{}})},
 		{"device_attest ios missing key_id", replaceMember(t, app, "device_attest", map[string]any{"platform": "ios", "attestation": "AA=="})},
 		{"profile not object", replaceMember(t, good, "profile", "x")},
+		{"api_key outside app (0.15.0)", replaceMember(t, good, "api_key", testAPIKeyB64(t))},
+		{"api_key not P-256 SPKI", replaceMember(t, app, "api_key", "AAAA")},
 		{"eph wrong size", replaceMember(t, good, "eph", "AAAA")},
 		{"duplicate member", append(bytes.TrimSuffix(bytes.Clone(good), []byte("}")), []byte(`,"ctx":"x"}`)...)},
 		{"case-variant member", []byte(strings.Replace(string(good), `"purpose"`, `"Purpose"`, 1))},
@@ -218,5 +225,32 @@ func TestRespFieldRules(t *testing.T) {
 	}
 	if _, err := ParseFin([]byte(`{"sig":"`+strings.Repeat("A", 86)+"\n"+`=="}`), PurposeRekey); err == nil {
 		t.Fatal("base64 with newline accepted")
+	}
+}
+
+func testAPIKeyB64(t testing.TB) string {
+	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, _ := x509.MarshalPKIXPublicKey(&k.PublicKey)
+	return base64.StdEncoding.EncodeToString(der)
+}
+
+// §6.2 (0.15.0): a transfer's hs.init carries the new app's api_key, for
+// purpose app only, and it round-trips.
+func TestInitAPIKey(t *testing.T) {
+	app, _ := sampleInit(t, PurposeApp).Marshal()
+	b := replaceMember(t, app, "api_key", testAPIKeyB64(t))
+	in, err := ParseInit(b)
+	if err != nil || len(in.APIKey) == 0 {
+		t.Fatal(err)
+	}
+	again, err := in.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseInit(again); err != nil {
+		t.Fatal(err)
 	}
 }

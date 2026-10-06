@@ -59,12 +59,40 @@ func TestV3Exit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	api2 := &client.MemberAPI{Base: s.api.URL, Authorize: bearer("member-2")}
+	// 0.15.0 (§11.12): the portal issues a setup code; the app redeems
+	// the typed form with the member's email and its app key, which then
+	// signs every request; a session no longer reaches enroll or unlock.
+	portal2 := &client.MemberAPI{Base: s.api.URL, Authorize: bearer("member-2")}
+	code, err := portal2.IssueEnrollCode(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api2, err := m2.APIFor(s.api.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m2.RedeemVia(ctx, api2, "", "member-2@example.org", "ZZZZ-ZZZZ"); client.APICode(err) != "invalid_code" {
+		t.Fatalf("wrong code: %v", err)
+	}
+	red, err := m2.RedeemVia(ctx, api2, "", "  Member-2@Example.org ", strings.ToLower(code.Code))
+	if err != nil || red.UserGUID != "member-2" || red.EmailHint != "m***@example.org" {
+		t.Fatalf("redeem: %v %+v", err, red)
+	}
+	if _, err := m2.RedeemVia(ctx, api2, code.Secret, "", ""); client.APICode(err) != "invalid_code" {
+		t.Fatalf("second redeem: %v", err)
+	}
+	if _, err := portal2.Enclave(ctx, ""); client.APICode(err) != "unauthorized" {
+		t.Fatalf("a session reached enclave: %v", err)
+	}
 	att2 := enclavetest.NewAndroidAttester(0x62, enclavetest.AndroidOptions{})
 	trust := s.w.Trust()
-	vid2, er, err := m2.EnrollVia(ctx, api2, "member-2", "246801", trust, att2)
-	if err != nil || !er.OK {
+	vid2, er, err := m2.EnrollVia(ctx, api2, red.UserGUID, "246801", trust, att2)
+	if err != nil || !er.OK || vid2 != red.VaultID {
 		t.Fatalf("member 2 enroll: %v %+v", err, er)
+	}
+	_, akDER, _ := m2.AppKey()
+	if row := s.vaultRow(vid2); row.AppKeyID != parent.AppKeyID(akDER) || row.AppKeySeq != "1" {
+		t.Fatalf("app_key on the vault row: %+v", row)
 	}
 	if err := m2.AwaitEnrolled(ctx); err != nil {
 		t.Fatal(err)
@@ -174,9 +202,20 @@ func TestV3Exit(t *testing.T) {
 	if u, err := m2.UnlockVia(ctx, api2, "member-2", "246801", trust, att2, client.UnlockOptions{}, ""); err != nil || !u.OK {
 		t.Fatalf("member 2 unlock: %v %+v", err, u)
 	}
+	// §11.13: the unlock carried the account snapshot; account.get shows it.
+	if r := req(t, m2, "account.get", `{}`); !r.OK() || !strings.Contains(string(r.Body()), `"email_hint":"m***@example.org"`) {
+		t.Fatalf("account.get: %s %s", r.ErrorCode(), r.Body())
+	}
+	// The op account reaches the running vault: account.changed.
+	if _, err := s.mapi.PushAccount(ctx, "member-2"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m2.WaitEvent(ctx, "sync.event", func(b json.RawMessage) bool { return strings.Contains(string(b), `"account.changed"`) }); err != nil {
+		t.Fatal(err)
+	}
 	before := s.vaultRow(vid2)
 	rid, q, body := s.lastSent("unlock")
-	s.requeue(rid, q, body, "member-2")
+	s.requeue(rid, q, body, "member-2", parent.AppKeyID(akDER))
 	slot, err := api2.Poll(ctx, rid)
 	if err != nil || slot.Status != "done" || len(slot.Envelope) != 5252 {
 		t.Fatalf("replayed unlock: %v %+v", err, slot)

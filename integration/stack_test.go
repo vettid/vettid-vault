@@ -100,6 +100,7 @@ type stack struct {
 	kmsAddr   string
 	gAddr     string
 	api       *httptest.Server
+	mapi      *memberapitest.API
 	appHTTP   *http.Client
 	s3        *s3.Client
 
@@ -244,12 +245,13 @@ func newStack(t *testing.T) *stack {
 	}), true, gHost).Listener.Addr().String()
 
 	// The member API stand-in.
-	s.api = httptest.NewServer(memberapitest.New(memberapitest.Config{DDB: s.db, SQS: s.sqs, Tables: s.tables,
+	s.mapi = memberapitest.New(memberapitest.Config{DDB: s.db, SQS: s.sqs, Tables: s.tables,
 		QueueURLPrefix: urlPrefix, Manifest: s.publishedManifest, Sent: func(rid, q, body string) {
 			s.sentMu.Lock()
 			s.sent[rid] = [2]string{q, body}
 			s.sentMu.Unlock()
-		}}))
+		}})
+	s.api = httptest.NewServer(s.mapi)
 	t.Cleanup(s.api.Close)
 
 	roots := x509.NewCertPool()
@@ -430,6 +432,8 @@ func jsonValues(out string) []map[string]any {
 // vaultRow is what the parent wrote to a vault's row.
 type vaultRow struct {
 	State, SealedRelease, VaultVersion, LeaseInstance string
+	// AppKeyID, AppKeySeq: the app_key the parent wrote (0.15.0).
+	AppKeyID, AppKeySeq string
 }
 
 func (s *stack) vaultRow(id string) vaultRow {
@@ -447,6 +451,12 @@ func (s *stack) vaultRow(id string) vaultRow {
 	r := vaultRow{State: str(it, "state"), SealedRelease: str(it, "sealed_release"), VaultVersion: str(it, "vault_version")}
 	if l, ok := it["lease"].(*ddbtypes.AttributeValueMemberM); ok {
 		r.LeaseInstance = str(l.Value, "instance_id")
+	}
+	if k, ok := it["app_key"].(*ddbtypes.AttributeValueMemberM); ok {
+		r.AppKeyID = str(k.Value, "kid")
+		if n, ok := k.Value["seq"].(*ddbtypes.AttributeValueMemberN); ok {
+			r.AppKeySeq = n.Value
+		}
 	}
 	return r
 }
@@ -543,12 +553,13 @@ func (s *stack) putObject(key string, b []byte) {
 
 // requeue makes a response slot queued again and re-sends a queue
 // message, as a dishonest host replaying a request would.
-func (s *stack) requeue(rid, queue, body, guid string) {
+func (s *stack) requeue(rid, queue, body, guid, appKID string) {
 	s.t.Helper()
 	ctx := ctxT(s.t, 10*time.Second)
 	_, err := s.db.PutItem(ctx, &dynamodb.PutItemInput{TableName: aws.String(s.tables.Requests), Item: map[string]ddbtypes.AttributeValue{
 		"request_id": &ddbtypes.AttributeValueMemberS{Value: rid}, "user_guid": &ddbtypes.AttributeValueMemberS{Value: guid},
-		"status": &ddbtypes.AttributeValueMemberS{Value: "queued"}, "created_at": &ddbtypes.AttributeValueMemberS{Value: time.Now().UTC().Format(time.RFC3339)},
+		"app_kid": &ddbtypes.AttributeValueMemberS{Value: appKID},
+		"status":  &ddbtypes.AttributeValueMemberS{Value: "queued"}, "created_at": &ddbtypes.AttributeValueMemberS{Value: time.Now().UTC().Format(time.RFC3339)},
 		"expires_at": &ddbtypes.AttributeValueMemberN{Value: fmt.Sprint(time.Now().Unix() + 900)}}})
 	if err != nil {
 		s.t.Fatal(err)

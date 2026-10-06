@@ -6,8 +6,9 @@
 //
 // Supervisor → vault (requests):
 //
-//	Open  [version, instance_id, pcr0, pcr1, pcr2, job (9 fields)] → [ok, result, running "1"|"0", registered "1"|"0"]
-//	Lock  []                                                          → [ok | split_brain]
+//	Open    [version, instance_id, pcr0, pcr1, pcr2, job (12 fields)] → [ok, result, running "1"|"0", registered "1"|"0"]
+//	Lock    []                                                          → [ok | split_brain]
+//	Account [snapshot]                                                  → [ok, running "1"|"0"]
 //
 // Vault → supervisor (requests; the supervisor answers [status, ...]):
 //
@@ -21,7 +22,8 @@
 //	StatusList      []                            → [status, list, fetched_at]
 //
 // Vault → supervisor (notifications): Lifecycle [event, vault_id,
-// release, vault_version, state_version], Log [level, message, k, v ...].
+// release, vault_version, state_version, app_key (SPKI DER or empty),
+// app_key_seq], Log [level, message, k, v ...].
 //
 // No message from the vault to the supervisor carries a DEK, pepper, key
 // or plaintext state: stored objects are DEK-encrypted, relay requests are
@@ -41,7 +43,9 @@ import (
 // Version is the channel version (Open's first field).
 // 2: the job carries the manifest document (VAULT-MESSAGING 0.10.0).
 // 3: Open's answer says whether a recovery register succeeded (0.10.6).
-const Version = "3"
+// 4: the job carries the app key and the account snapshot; Account;
+// Lifecycle carries the app key and its sequence (0.15.0).
+const Version = "4"
 
 // Supervisor → vault.
 const (
@@ -58,6 +62,9 @@ const (
 	// process's memory and CPU time. Only a process started in self-test
 	// mode answers it.
 	KindSelftestCapacity hostproto.Kind = 0x43
+	// KindAccount [snapshot] → [ok, running "1"|"0"]: the queue op
+	// account for the running vault (0.15.0, §11.13).
+	KindAccount hostproto.Kind = 0x44
 )
 
 // Vault → supervisor requests.

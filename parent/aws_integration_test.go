@@ -212,6 +212,31 @@ func TestAWSBackend(t *testing.T) {
 		!it["alarm_pending"].(*ddbtypes.AttributeValueMemberBOOL).Value {
 		t.Fatalf("alarm: %v", it)
 	}
+	// The app key (0.15.0, §11.5): whatever the lease, by seq; enrolled
+	// always replaces it.
+	appKey := func(event, key string, seq uint64) map[string]ddbtypes.AttributeValue {
+		t.Helper()
+		if err := a.Lifecycle(ctx, Lifecycle{Event: event, VaultID: "v1", Release: pcr, VaultVersion: pcr, StateVersion: 1,
+			AppKey: []byte(key), AppKeySeq: seq}, "i9", time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		it, _ := memberapitest.VaultItem(ctx, db, tn.Vaults, "v1")
+		m, _ := it["app_key"].(*ddbtypes.AttributeValueMemberM)
+		if m == nil {
+			t.Fatalf("no app_key after %s", event)
+		}
+		return m.Value
+	}
+	if k := appKey(EventAppKey, "k2", 2); k["key"].(*ddbS).Value != "azI=" || k["kid"].(*ddbS).Value != AppKeyID([]byte("k2")) ||
+		k["seq"].(*ddbtypes.AttributeValueMemberN).Value != "2" {
+		t.Fatalf("app_key %v", k)
+	}
+	if k := appKey("unlocked", "k1", 1); k["key"].(*ddbS).Value != "azI=" {
+		t.Fatalf("older key written: %v", k)
+	}
+	if k := appKey("enrolled", "k1", 1); k["key"].(*ddbS).Value != "azE=" || k["seq"].(*ddbtypes.AttributeValueMemberN).Value != "1" {
+		t.Fatalf("enrolled did not replace: %v", k)
+	}
 	// A deletion (§12.5): state deleted and the member's notice.
 	if err := a.Lifecycle(ctx, Lifecycle{Event: "deleted", VaultID: "v1", Release: pcr, VaultVersion: pcr, StateVersion: 1}, "i9", time.Now()); err != nil {
 		t.Fatal(err)

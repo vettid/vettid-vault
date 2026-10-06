@@ -62,8 +62,12 @@ func (d *Device) BuildRecoveryRegister(userGUID string, qr *altchan.RecoveryCode
 	if err != nil {
 		return nil, err
 	}
+	_, apiKey, err := d.appKeyLocked()
+	if err != nil {
+		return nil, err
+	}
 	ra := d.RelayAddr()
-	body, err := (&altchan.RecoveryRegisterRequest{UserGUID: userGUID, VaultID: qr.VaultID, RequestID: rid,
+	body, err := (&altchan.RecoveryRegisterRequest{APIKey: apiKey, UserGUID: userGUID, VaultID: qr.VaultID, RequestID: rid,
 		RecoveryID: qr.RecoveryID, Code: qr.Code, IK: d.IdentityKey(), KEM: d.kem.Public(),
 		Relay: altchan.RelayAddr{URL: ra.URL, Mailbox: ra.Mailbox, PK: ra.PK}, Name: d.st.Name, Attest: da}).Marshal()
 	if err != nil {
@@ -75,7 +79,7 @@ func (d *Device) BuildRecoveryRegister(userGUID string, qr *altchan.RecoveryCode
 	}
 	d.st.VaultID = qr.VaultID
 	d.st.Recovery = &RecoveryState{RecoveryID: qr.RecoveryID, RequestID: rid}
-	return &Request{RequestID: rid, ETKKid: e.Descriptor.Kid.String(), Envelope: env}, nil
+	return &Request{RequestID: rid, ETKKid: e.Descriptor.Kid.String(), Envelope: env, AppKey: apiKey}, nil
 }
 
 // OpenRecoveryResult reads vault.recovery.result from the response slot.

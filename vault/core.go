@@ -64,6 +64,7 @@ func (m *Manager) registerCore() {
 	r("relay.address.update", false, all, m.hAddressUpdate)
 	r("settings.get", true, owners, m.hSettingsGet)
 	r("settings.set", true, owners, m.hSettingsSet)
+	r("account.get", true, owners, m.hAccountGet)
 	m.registerAccess()
 	m.registerConnections()
 }

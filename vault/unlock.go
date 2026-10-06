@@ -110,6 +110,9 @@ type AltUnlockParams struct {
 	// (§11.11.4); without it, a device other than the recovery's own is
 	// refused with recovery_pending while a recovery is in progress.
 	CancelRecovery bool
+	// Account is the queue message's account snapshot (0.15.0, §11.13),
+	// applied after a successful unlock; nil for none.
+	Account []byte
 
 	pinOnly bool // Unlock: no device, manifest or release checks
 }
@@ -531,6 +534,9 @@ func (m *Manager) resume(ctx context.Context, p AltUnlockParams, out *AltUnlockO
 			backup := m.st.Settings.Backup()
 			out.CredentialBackup = &backup
 		}
+		if len(p.Account) > 0 {
+			m.applyAccount(p.Account, now) // §11.13: with every unlock
+		}
 		if m.st.AnnouncedRelease != p.Release.PCR0 {
 			m.st.AnnouncedRelease = p.Release.PCR0
 			m.notifyDevices("sync.event", releaseEvent(p.Release), "", now)
@@ -554,7 +560,9 @@ func (m *Manager) resume(ctx context.Context, p AltUnlockParams, out *AltUnlockO
 	}
 	out.OK, out.Code = true, ""
 	out.StateSeq, out.HeaderSeq = m.st.StateSeq, m.hdr.HeaderSeq
-	out.Events = append(out.Events, lifecycle(p.Options, "unlocked", p.VaultID, p.Release.PCR0))
+	ev := lifecycle(p.Options, "unlocked", p.VaultID, p.Release.PCR0)
+	ev.AppKey, ev.AppKeySeq = m.AppKey()
+	out.Events = append(out.Events, ev)
 	return m, out
 }
 

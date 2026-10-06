@@ -40,6 +40,13 @@ const (
 	NonceLeashA      byte = 0x32 // (spec)
 	NonceLeashB      byte = 0x33 // (spec)
 
+	// §11.12 app key and setup code (appkey.json, 0.15.0; not in §16:
+	// generated here for the member API and the apps to reproduce).
+	SeedAppKey   byte = 0x41 // the app key, P-256 scalar
+	NonceApp     byte = 0x42 // the request nonce, 16 bytes
+	SeedKCode    byte = 0x43 // the member API's k_code (HMAC key)
+	SeedQRSecret byte = 0x2a // the QR secret, 16 bytes
+
 	SessionSenderKid    byte = 0x02
 	SessionRecipientKid byte = 0x01
 
@@ -64,6 +71,9 @@ const (
 	ACEnrollRequestID = "01JB2Z6V9K3M4N5P6Q7R8S9T20"
 	ACUnlockRequestID = "01JB2Z6V9K3M4N5P6Q7R8S9T21"
 	ACVaultID         = "test-vault-0001"
+	// ACAppVaultID is the vault of the app-key vectors (32 hex, as the
+	// member API assigns).
+	ACAppVaultID = "0123456789abcdef0123456789abcdef"
 
 	// §10.11 LEASH vectors (spec 0.12.0). Times are Unix seconds; the
 	// statements are issued 60 s after the delegations.

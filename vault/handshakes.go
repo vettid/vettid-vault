@@ -129,6 +129,17 @@ func (m *Manager) handleInit(ctx context.Context, raw []byte, sender ed25519.Pub
 			return ackAfterFlush
 		}
 	}
+	// §6.2 (0.15.0): api_key is REQUIRED in a transfer's hs.init (its
+	// absence drops it like a failed attestation) and absent otherwise.
+	if inv.Transfer && body.APIKey == nil {
+		m.audit(now, "transfer_api_key_missing", "")
+		m.record(Activity{Kind: "device.transfer.attestation_failed", Ref: inv.ID, Audit: true}, now)
+		return ackAfterFlush
+	}
+	if !inv.Transfer && body.APIKey != nil {
+		m.audit(now, "api_key_unexpected", "")
+		return ackAfterFlush
+	}
 	var binding json.RawMessage
 	switch {
 	case inv.EnrollIK != nil:
@@ -178,6 +189,7 @@ func (m *Manager) respondFirst(pi *handshake.PendingInit, inv *Invite, sender ed
 	p.Name = profileName(body.Profile)
 	p.Profile = body.Profile
 	p.Attestation = binding
+	p.APIKey = body.APIKey // a transfer's new app (0.15.0)
 	if inv.CreatedBy == inviteByRecovery {
 		p.Recovering = true // restricted until credential.recover (§11.11.5)
 	}

@@ -191,7 +191,7 @@ func TestAuthorizationBySenderKind(t *testing.T) {
 		}
 	}
 	e.create()
-	for _, typ := range []string{"credential.unlock", "credential.rotate", "credential.delete", "credential.get", "credential.ack"} {
+	for _, typ := range []string{"credential.unlock", "credential.rotate", "credential.reset", "credential.get", "credential.ack"} {
 		for _, k := range []string{"desktop", "agent"} {
 			if r := e.raw(k, typ, `{}`); r.Code != "forbidden" {
 				t.Fatalf("%s may send %s: %q", k, typ, r.Code)
@@ -498,18 +498,79 @@ func TestUnlockWindow(t *testing.T) {
 	}
 }
 
-func TestDelete(t *testing.T) {
+// §3.5.5, §10.6, §15 item 23 (0.15.2): there is no credential.delete; the
+// holder's credential.reset{credential, utk_id, sealed{pin, password,
+// new_password}} verifies the blob, the PIN and the current password as an
+// owner check does (failed entries are failed checks), then replaces the
+// credential in one step: version 1, a new key, the old blob dead, every
+// critical item destroyed, the clock started fresh; refused during an
+// alarm and to another app.
+func TestHolderReset(t *testing.T) {
 	e := newEnv(t)
+	e.h.PIN = "246810"
+	if f := (&Feature{}); len(f.Types()) > 0 {
+		for _, ts := range f.Types() {
+			if ts.Type == "credential.delete" {
+				t.Fatal("credential.delete still registered")
+			}
+		}
+	}
+	if r := e.raw("app", "credential.delete", `{}`); r.Code != "unsupported_type" {
+		t.Fatalf("credential.delete: %q", r.Code)
+	}
 	blob := e.create()
-	e.ok(e.call("app", "credential.delete", blob, map[string]any{"password": pw}))
-	if e.f.CredentialReady() {
-		t.Fatal("still ready after delete (§3.5.7)")
+	reset := func(b, pin, cur string) featuretest.Result {
+		return e.call("app", "credential.reset", b, map[string]any{"pin": pin, "password": cur, "new_password": "a brand new password"})
 	}
-	if ex, _ := e.ok(e.raw("app", "credential.version", `{}`)).Obj(t).Bool("exists"); ex {
-		t.Fatal("exists after delete")
+	if r := e.call("app", "credential.reset", blob, map[string]any{"password": pw}); r.Code != "bad_request" {
+		t.Fatalf("recovering form from the holder: %q", r.Code)
 	}
-	e.pools["app"] = nil // the delete destroyed the pool
-	e.create()
+	if r := reset(blob, "135791", pw); r.Code != "bad_pin" {
+		t.Fatalf("wrong PIN: %q", r.Code)
+	}
+	if r := reset(blob, "246810", "wrong password"); r.Code != "bad_password" {
+		t.Fatalf("wrong password: %q", r.Code)
+	}
+	if strings.Join(e.h.CheckFailed, ",") != "pin,password" {
+		t.Fatalf("failed checks %v", e.h.CheckFailed)
+	}
+	key0, _ := e.ok(e.raw("app", "credential.version", `{}`)).Obj(t).String("key")
+	r := e.ok(reset(blob, "246810", pw))
+	o := r.Obj(t)
+	if v, _ := o.Uint("version", 1, 10); v != 1 || !o.Has("key") || !o.Has("utks") {
+		t.Fatalf("reset answer %s", r.Body)
+	}
+	if k, _ := o.String("key"); k == key0 {
+		t.Fatal("same credential key")
+	}
+	if len(e.h.Passed) != 1 || e.h.Passed[0] != nil || e.h.PassedAudit[0] || !e.h.HasActivity("credential.reset") {
+		t.Fatalf("clock not started fresh: %v", e.h.Passed)
+	}
+	if e.f.Holder() != "dev-app" {
+		t.Fatal("holder changed")
+	}
+	nb := blobOf(t, r)
+	e.ok(e.raw("app", "credential.ack", `{"version":1}`))
+	e.ok(e.unlock(nb, "a brand new password"))
+	if r := e.unlock(blob, pw); r.Code == "" {
+		t.Fatal("the old blob still opens")
+	}
+	for _, a := range e.h.Activities {
+		if a.Kind == "credential.deleted" {
+			t.Fatal("credential.deleted recorded (removed in 0.15.2)")
+		}
+	}
+	if len(e.h.SentOfType("sync.event")) > 0 {
+		for _, s := range e.h.SentOfType("sync.event") {
+			if strings.Contains(string(s.Body), "credential.deleted") {
+				t.Fatal("credential.deleted sync.event")
+			}
+		}
+	}
+	// Another app may not reset.
+	if r := e.call("app2", "credential.reset", nb, map[string]any{"pin": "246810", "password": "a brand new password", "new_password": pw}); r.Code != "forbidden" {
+		t.Fatalf("another app: %q", r.Code)
+	}
 }
 
 // §11.11.5: recover only from a recovering app, against the vault's copy;
@@ -558,8 +619,9 @@ func TestRecoverBackupOff(t *testing.T) {
 	if r := e.call("recovering-app", "credential.reset", "", map[string]any{"password": "a new password"}); r.Code != "exists" {
 		t.Fatalf("reset while the vault keeps the blob: %q", r.Code)
 	}
-	if r := e.call("app", "credential.reset", "", map[string]any{"password": "a new password"}); r.Code != "forbidden" {
-		t.Fatalf("reset by the app: %q", r.Code)
+	// The holder's form (0.15.2) needs the blob, the PIN and both passwords.
+	if r := e.call("app", "credential.reset", "", map[string]any{"password": "a new password"}); r.Code != "bad_request" {
+		t.Fatalf("reset by the app in the recovering form: %q", r.Code)
 	}
 	e.ok(e.raw("app", "credential.ack", `{"version":1}`))
 	if r := e.call("recovering-app", "credential.recover", "", map[string]any{"password": pw}); r.Code != "credential_lost" {

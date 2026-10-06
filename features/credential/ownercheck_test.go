@@ -161,18 +161,15 @@ func TestTransferApprovalIsCheck(t *testing.T) {
 	}
 }
 
-// §3.6.1 (owner decision of 2026-10-06): every new credential starts the
-// clock fresh: credential.create (also after credential.delete), a
-// completed recovery (credential.recover, and credential.reset after a
-// backup-off recovery).
+// §3.6.1 (0.15.2): the first credential.create starts the clock; every
+// new credential starts it fresh: the holder's credential.reset
+// (TestHolderReset), a completed recovery (credential.recover, and
+// credential.reset after a backup-off recovery).
 func TestOwnerCheckClockStarters(t *testing.T) {
 	e := newEnv(t)
-	blob := e.create()
-	e.ok(e.call("app", "credential.delete", blob, map[string]any{"password": pw}))
-	e.pools["app"] = nil // the pools went with the credential
 	e.create()
-	if e.h.Enrolled != 2 {
-		t.Fatalf("credential.create after credential.delete did not start the clock: %d", e.h.Enrolled)
+	if e.h.Enrolled != 1 {
+		t.Fatalf("credential.create did not start the clock: %d", e.h.Enrolled)
 	}
 	e2 := newEnv(t)
 	e2.create()
@@ -238,4 +235,18 @@ func TestHoldChangeParse(t *testing.T) {
 		t.Fatalf("%+v", c)
 	}
 	_ = vault.HoldChange{}
+}
+
+// §3.5.9 with §3.5.5 (0.15.2): the holder's reset is a credential
+// operation, refused during a clone alarm before the UTK is spent.
+func TestHolderResetDuringAlarm(t *testing.T) {
+	e := newEnv(t)
+	e.h.PIN = "246810"
+	blob := e.create()
+	if r := e.call("app2", "credential.unlock", blob, map[string]any{"password": pw}); r.Code != "credential_frozen" {
+		t.Fatal(r.Code)
+	}
+	if r := e.call("app", "credential.reset", blob, map[string]any{"pin": "246810", "password": pw, "new_password": pw}); r.Code != "credential_frozen" {
+		t.Fatalf("reset during the alarm: %q", r.Code)
+	}
 }

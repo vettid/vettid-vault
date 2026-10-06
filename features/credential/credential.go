@@ -191,7 +191,7 @@ func (f *Feature) Types() []vault.TypeSpec {
 	return []vault.TypeSpec{
 		r("credential.utk.get", apps), r("credential.create", apps), r("credential.get", apps), r("credential.ack", apps),
 		r("credential.version", owners), r("credential.unlock", apps), r("credential.lock", apps), r("credential.rotate", apps),
-		r("credential.password.change", apps), r("credential.delete", apps), r("credential.recover", apps),
+		r("credential.password.change", apps), r("credential.recover", apps),
 		r("credential.reset", apps), r("credential.alarm.confirm", apps),
 		r("device.transfer.create", apps), r("device.transfer.approve", apps), r("device.transfer.reject", apps),
 		r("vault.delete", apps), r(vault.TypeOwnerCheck, apps),
@@ -354,7 +354,6 @@ var needs = map[string]int{
 	"credential.lock":            0,
 	"credential.rotate":          needBlob | needSealed | needPassword,
 	"credential.password.change": needBlob | needSealed | needPassword | needNewPassword,
-	"credential.delete":          needBlob | needSealed | needPassword,
 	"credential.recover":         needSealed | needPassword,
 	"credential.reset":           needSealed | needPassword,
 	"credential.alarm.confirm":   0,
@@ -364,6 +363,11 @@ var needs = map[string]int{
 	"vault.delete":               optBlob | needSealed | optPassword | needPIN,
 	vault.TypeOwnerCheck:         needBlob | needSealed | needPassword | needPIN | optHold,
 }
+
+// holderResetNeed is what the holder's credential.reset carries (0.15.2,
+// §3.5.5): the current blob, the PIN, the current password and the new
+// one. A recovering app's form is needs["credential.reset"].
+const holderResetNeed = needBlob | needSealed | needPassword | needNewPassword | needPIN
 
 // opNeed is what every operation of another feature carries.
 const opNeed = needBlob | needSealed | needPassword
@@ -583,10 +587,17 @@ func (f *Feature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner
 		in.Type != "vault.delete" {
 		return nil, errForbidden
 	}
-	if !from.Recovering && (in.Type == "credential.recover" || in.Type == "credential.reset") {
+	if !from.Recovering && in.Type == "credential.recover" {
 		return nil, errForbidden
 	}
-	e, err := ParseEnvelope(in.Type, in.Body)
+	holderReset := in.Type == "credential.reset" && !from.Recovering
+	var e *Envelope
+	var err error
+	if holderReset {
+		e, err = parseEnvelope(holderResetNeed, in.Body)
+	} else {
+		e, err = ParseEnvelope(in.Type, in.Body)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -634,11 +645,18 @@ func (f *Feature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner
 		return f.transferReject(s, in.Body)
 	}
 	// Everything else spends a UTK first (§3.5.4).
-	p, err := f.spend(s, in, e)
+	need := needs[in.Type]
+	if holderReset {
+		need = holderResetNeed
+	}
+	p, err := f.spendNeed(s, in, e, need)
 	if err != nil {
 		return nil, err
 	}
 	defer p.Wipe()
+	if holderReset {
+		return f.holderReset(s, e, p)
+	}
 	switch in.Type {
 	case "credential.create":
 		out, err := f.create(s, p)
@@ -673,9 +691,6 @@ func (f *Feature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner
 		return f.respond(s, inner, p.Password, func(b *strictjson.Builder) {
 			b.String("expires_at", envelope.FormatTS(f.keyExp))
 		})
-	case "credential.delete":
-		f.deleteAll(s)
-		return nil, nil
 	case "credential.password.change":
 		inner.PasswordChangedAt = s.Now().UTC().Truncate(time.Millisecond)
 		out, err := f.respond(s, inner, p.NewPassword, nil)
@@ -696,8 +711,6 @@ func (f *Feature) deleteAll(s *vault.Session) {
 	f.endWindow()
 	f.wipeKeys()
 	f.st = state{Pools: map[string][]LTK{}}
-	s.SyncEvent("credential.deleted", nil)
-	s.Record(vault.Activity{Kind: "credential.deleted", Audit: true})
 	for _, o := range f.delObs {
 		o.CredentialDeleted(s) // the critical items go with it (§10.7)
 	}
@@ -730,7 +743,11 @@ func (f *Feature) gate(s *vault.Session, typ string) error {
 	if typ == "credential.alarm.confirm" {
 		return nil
 	}
-	if a := f.st.Alarm; a != nil && !allowedFrozen[typ] && !(typ == "vault.delete" && s.From().Recovering) {
+	if typ == "credential.reset" && !s.From().Recovering && from != f.st.Holder {
+		return errForbidden // the holder's form (0.15.2)
+	}
+	if a := f.st.Alarm; a != nil && (!allowedFrozen[typ] || typ == "credential.reset" && !s.From().Recovering) &&
+		!(typ == "vault.delete" && s.From().Recovering) {
 		if a.State == AlarmFrozen || !allowedRotation[typ] {
 			return f.freezeErr()
 		}
@@ -806,12 +823,8 @@ func (f *Feature) pruneUTKs(now time.Time) {
 	}
 }
 
-// spend finds the UTK among those issued to the sender, removes it (it is
-// spent whatever happens next) and opens the payload.
-func (f *Feature) spend(s *vault.Session, in *envelope.Inner, e *Envelope) (*Payload, error) {
-	return f.spendNeed(s, in, e, needs[in.Type])
-}
-
+// spendNeed finds the UTK among those issued to the sender, removes it
+// (it is spent whatever happens next) and opens the payload (need).
 func (f *Feature) spendNeed(s *vault.Session, in *envelope.Inner, e *Envelope, need int) (*Payload, error) {
 	device := s.From().ID
 	pool := f.st.Pools[device]
@@ -1404,6 +1417,49 @@ func (f *Feature) reset(s *vault.Session, p *Payload) (json.RawMessage, error) {
 		return nil, errInternal
 	}
 	f.handOver(s)
+	s.Record(vault.Activity{Kind: "credential.reset", Audit: true, Feed: true})
+	return out, nil
+}
+
+// holderReset is the holder's credential.reset (0.15.2, §3.5.5, §10.6):
+// the current blob, the PIN and the current password are verified as in
+// an owner check (§3.6.1 steps 1–7, the same backoffs; a bad_pin or
+// bad_password is a failed check), then the credential and every
+// critical item are destroyed and version 1 of a new credential is made
+// under new_password in the same flush; the owner check's clock starts
+// fresh. The holder keeps its UTK pool. Refused while held (the hold's
+// allow list does not name it).
+func (f *Feature) holderReset(s *vault.Session, e *Envelope, p *Payload) (json.RawMessage, error) {
+	if err := f.checkBlob(s, e.Blob); err != nil {
+		return nil, err
+	}
+	if err := s.VerifyPIN(string(p.PIN)); err != nil {
+		if vault.IsCode(err, "bad_pin") {
+			s.OwnerCheckFailed("pin")
+		}
+		return nil, err
+	}
+	cek, inner, err := f.openChecked(s, e.Blob, p.Password)
+	if err != nil {
+		if err == errPassword {
+			s.OwnerCheckFailed("password")
+		}
+		return nil, err
+	}
+	cek.Destroy()
+	inner.Wipe()
+	me := s.From().ID
+	keep, ok := f.st.Pools[me]
+	delete(f.st.Pools, me)
+	f.deleteAll(s)
+	if ok {
+		f.st.Pools[me] = keep
+	}
+	out, err := f.create(s, &Payload{Password: p.NewPassword})
+	if err != nil {
+		return nil, err
+	}
+	_, _ = s.OwnerCheckPassed(nil, false) // a new credential starts the clock fresh (§3.6.1)
 	s.Record(vault.Activity{Kind: "credential.reset", Audit: true, Feed: true})
 	return out, nil
 }

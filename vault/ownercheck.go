@@ -273,12 +273,10 @@ func (m *Manager) startClock(rec *OwnerCheck, now time.Time) {
 	rec.LastAt, rec.Deadline, rec.Failures = now, now.Add(m.st.Settings.OwnerCheckInterval()), 0
 }
 
-// ownerCheckEnrolled starts the clock fresh when the vault gets a new
-// credential by credential.create (owner decision of 2026-10-06: a vault
-// is without a credential only during enrollment, and every new credential
-// starts the clock fresh, as a recovery or a transfer does): the first one
-// at enrollment, and one after a credential.delete, which also ends a
-// hold.
+// ownerCheckEnrolled starts the clock at the vault's first
+// credential.create (§3.6.1). Since 0.15.2 there is no later one (no
+// credential.delete); were one to come, it would start the clock fresh,
+// as every new credential does.
 func (m *Manager) ownerCheckEnrolled(now time.Time) {
 	rec := m.ownerCheckRecord()
 	if !rec.Deadline.IsZero() {

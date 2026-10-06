@@ -281,8 +281,8 @@ func (f *Feature) ItemInUse(id string) bool {
 	return f.owned[id]
 }
 
-// prune drops wallets whose item is gone (item.delete or
-// credential.delete of the member's recovery phrase).
+// prune drops wallets whose item is gone (item.delete, or credential.reset
+// or the vault's deletion, of the member's recovery phrase).
 func (f *Feature) prune(s *vault.Session) {
 	if f.items == nil {
 		return

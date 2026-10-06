@@ -300,11 +300,13 @@ func TestCriticalItems(t *testing.T) {
 	e.code(e.sealed("app", "item.put", map[string]any{"sensitivity": "critical"},
 		map[string]any{"password": pw, "item": map[string]any{"name": "x",
 			"fields": []field{{Label: "L", Kind: "multiline", Value: strings.Repeat("x", 13000)}}}}, true, false), "limit")
-	// Delete needs the password; credential.delete takes every critical item.
+	// Delete needs the password; credential.reset (0.15.2) takes every
+	// critical item.
 	e.code(e.call("app", "item.delete", js(map[string]any{"item_id": other})), "bad_request")
 	e.ok(e.sealed("app", "item.delete", map[string]any{"item_id": other}, map[string]any{"password": pw, "item_id": other}, true, false))
 	e.code(e.call("app", "item.get", js(map[string]any{"item_id": other})), "not_found")
-	e.ok(e.sealed("app", "credential.delete", nil, map[string]any{"password": pw}, true, false))
+	e.h.PIN = "246810"
+	e.ok(e.sealed("app", "credential.reset", nil, map[string]any{"password": pw, "pin": "246810", "new_password": pw}, true, false))
 	e.code(e.call("app", "item.get", js(map[string]any{"item_id": id})), "not_found")
 }
 

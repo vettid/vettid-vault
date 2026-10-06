@@ -21,6 +21,10 @@ const (
 	OpRecovery         = "recovery"
 	OpRecoveryCancel   = "recovery_cancel"
 	OpRecoveryRegister = "recovery_register"
+	// OpAccount carries the member's account snapshot to a running vault
+	// (0.15.0, §11.13): no envelope, no lease; dropped without a running
+	// vault.
+	OpAccount = "account"
 )
 
 // Response statuses.
@@ -59,6 +63,13 @@ type QueueMessage struct {
 	// manifests/<sha256>.json. A routing value only: the enclave checks
 	// the document against the hash inside the sealed request.
 	ManifestSHA256 string
+	// AppKey is the app key the request was signed with at the API (SPKI
+	// DER; enroll and recovery_register, 0.15.0): bound to the sealed
+	// app.api_key (§11.3, §11.11.3).
+	AppKey []byte
+	// Account is the account snapshot (op account, REQUIRED; unlock,
+	// OPTIONAL; §11.5, §11.13): host data, display only.
+	Account []byte
 }
 
 func validID(s string) bool {
@@ -147,6 +158,23 @@ func ParseQueueMessage(b []byte) (*QueueMessage, error) {
 		return nil, ErrMalformed
 	}
 	q.ManifestSHA256 = ms
+	ak, akOK, err := o.OptString("app_key")
+	if err != nil || akOK != (q.Op == OpEnroll || q.Op == OpRecoveryRegister) {
+		return nil, ErrMalformed
+	}
+	if akOK {
+		if _, q.AppKey, err = altchan.ParseAppKey(ak); err != nil {
+			return nil, ErrMalformed
+		}
+	}
+	if raw, ok := o["account"]; ok != (q.Op == OpAccount) && !(ok && q.Op == OpUnlock) {
+		return nil, ErrMalformed
+	} else if ok {
+		if len(raw) == 0 || raw[0] != '{' || len(raw) > 2*1024 {
+			return nil, ErrMalformed // parsed strictly by the vault (§11.13)
+		}
+		q.Account = append([]byte(nil), raw...)
+	}
 	switch q.Op {
 	case OpEnroll, OpUnlock, OpRecoveryRegister:
 		if !envOK || !kidOK {
@@ -155,7 +183,7 @@ func ParseQueueMessage(b []byte) (*QueueMessage, error) {
 		if q.Envelope, err = strictjson.DecodeStd(env, -1); err != nil || len(q.Envelope) != envelope.OverheadSealed+altchan.RequestPaddedSize {
 			return nil, ErrMalformed
 		}
-	case OpLock, OpDelete, OpRecovery, OpRecoveryCancel:
+	case OpLock, OpDelete, OpRecovery, OpRecoveryCancel, OpAccount:
 		if envOK || kidOK {
 			return nil, ErrMalformed
 		}
@@ -177,6 +205,12 @@ func (q *QueueMessage) Marshal() []byte {
 	}
 	if q.Op == OpRecovery {
 		b.Base64("browser_key", q.BrowserKey)
+	}
+	if q.Op == OpEnroll || q.Op == OpRecoveryRegister {
+		b.Base64("app_key", q.AppKey)
+	}
+	if len(q.Account) > 0 {
+		b.Raw("account", q.Account)
 	}
 	return b.String("enqueued_at", q.EnqueuedAt.UTC().Format(time.RFC3339)).Bytes()
 }

@@ -24,7 +24,8 @@ func testKEM(t testing.TB) *suite.PrivateKey {
 }
 
 func sampleEnroll(t testing.TB) *EnrollRequest {
-	return &EnrollRequest{UserGUID: "user-1", RequestID: "01JB2Z6V9K3M4N5P6Q7R8S9T20", Nonce: bytes.Repeat([]byte{9}, 32),
+	_, ak := testAppKey(t, 0x41)
+	return &EnrollRequest{APIKey: ak, UserGUID: "user-1", RequestID: "01JB2Z6V9K3M4N5P6Q7R8S9T20", Nonce: bytes.Repeat([]byte{9}, 32),
 		PIN: "123456", IK: bytes.Repeat([]byte{1}, 32), KEM: testKEM(t).Public(),
 		Relay:     RelayAddr{URL: "https://relay.example", Mailbox: "mb", PK: bytes.Repeat([]byte{2}, 32)},
 		OpenToken: "v4.public.x", Name: "phone",

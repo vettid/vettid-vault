@@ -5,6 +5,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -202,9 +206,45 @@ func testRecovery(t *testing.T, o *options, info map[string]any) {
 		t.Fatalf("second request: %d %v", code, m)
 	}
 
+	// 0.15.0 (§11.11.7, §11.12.2): a new app claims the recovery with
+	// its app key, which then signs its enclave and register requests; a
+	// member session no longer reaches them.
+	ck, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	ckDER, _ := x509.MarshalPKIXPublicKey(&ck.PublicKey)
+	scall := func(method, path, vault string, body any) (int, map[string]any) {
+		t.Helper()
+		var raw []byte
+		if body != nil {
+			raw, _ = json.Marshal(body)
+		}
+		req, _ := http.NewRequest(method, api+path, bytes.NewReader(raw))
+		nonce, _ := altchan.NewAppNonce()
+		ar := &altchan.AppRequest{Method: method, Path: req.URL.EscapedPath(), Query: req.URL.RawQuery, VaultID: vault,
+			KID: altchan.AppKeyID(ckDER), TS: time.Now().Unix(), Nonce: nonce, Body: raw}
+		h, err := ar.Sign(ck)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set(altchan.AppHeaderName, h)
+		r, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer r.Body.Close()
+		var m map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&m)
+		return r.StatusCode, m
+	}
+	if code, m := call("GET", api+"/api/vault/enclave", guid, nil); code != 401 {
+		t.Fatalf("a session reached enclave: %d %v", code, m)
+	}
+	if code, m := scall("POST", "/api/vault/recovery/claim", vid, map[string]any{"vault_id": vid, "recovery_id": rid,
+		"app_key": base64.StdEncoding.EncodeToString(ckDER)}); code != 200 || m["user_guid"] != guid {
+		t.Fatalf("claim: %d %v", code, m)
+	}
 	// Register: routed and queued like an unlock (the envelope is opaque
 	// to the API; this one is not a real request).
-	code, enc := call("GET", api+"/api/vault/enclave", guid, nil)
+	code, enc := scall("GET", "/api/vault/enclave", vid, nil)
 	var desc struct {
 		Kid string `json:"kid"`
 	}
@@ -218,10 +258,10 @@ func testRecovery(t *testing.T, o *options, info map[string]any) {
 	reg := func(vaultID string) (int, map[string]any) {
 		t.Helper()
 		reqID, _ := envelope.NewULID(time.Now())
-		return call("POST", api+"/api/vault/recovery/register", guid, map[string]any{"vault_id": vaultID, "request_id": reqID,
+		return scall("POST", "/api/vault/recovery/register", vaultID, map[string]any{"vault_id": vaultID, "request_id": reqID,
 			"instance_id": enc["instance_id"], "etk_kid": desc.Kid, "envelope": base64.StdEncoding.EncodeToString(env)})
 	}
-	if code, m := reg(strings.Repeat("0", 32)); code != 404 {
+	if code, m := reg(strings.Repeat("0", 32)); code != 401 {
 		t.Fatalf("register to another vault: %d %v", code, m)
 	}
 	if code, m := reg(vid); code != 202 || m["vault_id"] != vid {

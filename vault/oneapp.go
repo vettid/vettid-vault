@@ -338,6 +338,9 @@ func (m *Manager) completeTransfer(p *Peer, now time.Time) {
 		}
 		m.removeApp(old, "transferred", now)
 	}
+	if len(p.APIKey) > 0 {
+		m.setAppKey(p.APIKey) // §6.7.1 step 4 (0.15.0): reported after the flush
+	}
 	sess := m.session(now)
 	for _, f := range m.features {
 		if o, ok := f.(TransferObserver); ok {

@@ -139,6 +139,11 @@ type Header struct {
 	// recovery finishes it instead of opening the vault.
 	Deleting    bool            `json:"deleting,omitempty"`
 	RecoveryLog []RecoveryEvent `json:"recovery_log,omitempty"`
+	// AppKey is the app's app key (SPKI DER, 0.15.0, §11.12.2), kept with
+	// its unlock key; AppKeySeq counts its changes (1 at enrollment, + 1
+	// at each transfer or recovery). Both are reported to the host (§11.5).
+	AppKey    []byte `json:"app_key,omitempty"`
+	AppKeySeq uint64 `json:"app_key_seq,omitempty"`
 }
 
 func headerAAD(vaultID string) []byte { return []byte(labelHeader + "\x00" + vaultID) }

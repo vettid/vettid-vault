@@ -93,6 +93,9 @@ type Init struct {
 	Profile        json.RawMessage       // optional object
 	Rotations      []*Rotation           // reconnect only
 	DeviceAttest   *altchan.DeviceAttest // purpose app only (§6.7, §11.7)
+	// APIKey is the new app's app key, SPKI DER (0.15.0, §6.2, §11.12):
+	// purpose app only; the vault requires it in a transfer's hs.init.
+	APIKey []byte
 	// SASCommit is SHA-256("vettid/vms/2/sas-commit" || n_I), present
 	// exactly for purposes with a SAS (§6.2, §6.3, 0.10.3).
 	SASCommit []byte
@@ -379,6 +382,14 @@ func (in *Init) validate() error {
 	if in.DeviceAttest != nil && in.Purpose != PurposeApp {
 		return ErrBody
 	}
+	if in.APIKey != nil {
+		if in.Purpose != PurposeApp {
+			return ErrBody
+		}
+		if _, err := altchan.ParseAppKeyDER(in.APIKey); err != nil {
+			return ErrBody
+		}
+	}
 	return checkSASField(in.Purpose, in.SASCommit)
 }
 
@@ -415,6 +426,9 @@ func (in *Init) Marshal() ([]byte, error) {
 			return nil, ErrBody
 		}
 		b.Raw("device_attest", c)
+	}
+	if in.APIKey != nil {
+		b.Base64("api_key", in.APIKey)
 	}
 	if in.SASCommit != nil {
 		b.Base64("sas_commit", in.SASCommit)
@@ -488,6 +502,13 @@ func ParseInit(body []byte) (*Init, error) {
 	}
 	if raw, ok := o["device_attest"]; ok {
 		if in.DeviceAttest, err = altchan.ParseDeviceAttest(raw); err != nil {
+			return nil, ErrBody
+		}
+	}
+	if s, ok, err := o.OptString("api_key"); err != nil {
+		return nil, ErrBody
+	} else if ok {
+		if _, in.APIKey, err = altchan.ParseAppKey(s); err != nil {
 			return nil, ErrBody
 		}
 	}

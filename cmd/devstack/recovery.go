@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/vettid/vettid-vault/vms/altchan"
@@ -126,6 +127,7 @@ func (s *stack) playPortal(ctx context.Context, guid string) (int, map[string]an
 		_, _, _ = s.apiCall(ctx, guid, "POST", "/api/vault/recovery/cancel", map[string]any{"recovery_id": rid})
 		return 422, map[string]any{"error": c.Error, "vault_id": vid, "recovery_id": rid}
 	}
+	c.API = strings.TrimRight(s.apiURL(), "/") // the QR names its member API (0.15.0, §11.11.2)
 	return 200, map[string]any{"vault_id": c.VaultID, "recovery_id": c.RecoveryID, "code": c.Code, "qr": string(altchan.RecoveryQR(c)),
 		"not_before": envelope.FormatTS(c.NotBefore), "expires_at": envelope.FormatTS(c.Expires), "available_at": rec["available_at"]}
 }

@@ -64,6 +64,10 @@ type State struct {
 	SealedRelease    string       `json:"sealed_release"`
 	ReleaseMove      *ReleaseMove `json:"release_move,omitempty"`
 	AnnouncedRelease string       `json:"announced_release,omitempty"`
+
+	// Account is the member's account snapshot from the member API
+	// (0.15.0, §11.13): display only.
+	Account *AccountState `json:"account,omitempty"`
 }
 
 // ReleaseMove is a recorded, not yet confirmed move to another release
@@ -133,6 +137,9 @@ type Peer struct {
 	// Recovering marks an app registered by recovery that has not yet
 	// authenticated with the credential password (§11.11.5).
 	Recovering bool `json:"recovering,omitempty"`
+	// APIKey is a transfer's new app's app key from its hs.init (0.15.0,
+	// §6.2): the vault's app key once the transfer completes.
+	APIKey []byte `json:"api_key,omitempty"`
 
 	// LastActiveAt is when the principal's last message was processed
 	// (§10.3, §10.4 listings), to the minute.

@@ -77,12 +77,21 @@ type Options struct {
 // LifecycleEvent is reported to the parent, which writes it to the vault
 // table (§11.5). It is advisory and holds no secrets.
 type LifecycleEvent struct {
-	Event        string // enrolled, unlocked, locked, moved
+	Event        string // enrolled, unlocked, locked, moved, app_key, ...
 	VaultID      string
 	Release      string // moved: the target release; otherwise the running one
 	VaultVersion string // the release that reports
 	StateVersion int
+	// AppKey and AppKeySeq are the vault's current app key (SPKI DER) and
+	// its change count (0.15.0, §11.5): on enrolled, unlocked, locked and
+	// app_key; nil and 0 for a vault without one.
+	AppKey    []byte
+	AppKeySeq uint64
 }
+
+// EventAppKey reports a changed app key (a transfer or a recovery
+// replaced the app, §11.5, 0.15.0), after the flush that wrote it.
+const EventAppKey = "app_key"
 
 // Hooks let tests and supervisors observe or interrupt processing.
 type Hooks struct {
@@ -140,6 +149,9 @@ type Manager struct {
 	// (§11.11.5). alarms are host alarms reported after the flush (§11.5).
 	replaceAfter string
 	alarms       []string
+	// appKeyChanged: the header's app key changed in this batch; reported
+	// to the host after the flush (§11.5).
+	appKeyChanged bool
 	// deletePending: a deletion was marked in this batch; it is finished
 	// after the flush (§12.5).
 	deletePending bool
@@ -230,6 +242,9 @@ type EnrollApp struct {
 	RequestID string
 	// Attestation is the verified device-attestation binding (§11.7).
 	Attestation json.RawMessage
+	// APIKey is the app key (SPKI DER, 0.15.0): the header's app key,
+	// app_key_seq 1.
+	APIKey []byte
 	// Attest, if set, returns the attestation document carried in
 	// vault.enrolled for the exact vault_bundle bytes (nonce = the app's
 	// nonce, user_data = SHA-256("vettid/vms/2/vault" || vault_bundle)).
@@ -273,6 +288,9 @@ func Create(ctx context.Context, p CreateParams) (*Manager, error) {
 	hdr := &Header{V: 1, VaultID: p.VaultID, UserGUID: p.UserGUID, Provisional: p.Provisional, CreatedAt: now.UTC(),
 		KDF: p.KDF, Pepper: pepper, SealedRelease: p.Release.PCR0, ManifestSerial: p.ManifestSerial,
 		SealKeyVerified: p.SealKeyVerified}
+	if p.App != nil && len(p.App.APIKey) > 0 {
+		hdr.AppKey, hdr.AppKeySeq = append([]byte(nil), p.App.APIKey...), 1
+	}
 	dek, err := deriveDEK(p.PIN, p.KDF, pepper, p.VaultID)
 	if err != nil {
 		return nil, err
@@ -781,9 +799,41 @@ func (m *Manager) lockLocked(ctx context.Context) error {
 
 func (m *Manager) report(event, vaultID, release string) {
 	if m.opt.Lifecycle != nil {
-		m.opt.Lifecycle(LifecycleEvent{Event: event, VaultID: vaultID, Release: release,
-			VaultVersion: m.opt.Release.PCR0, StateVersion: StateVersion})
+		ev := LifecycleEvent{Event: event, VaultID: vaultID, Release: release,
+			VaultVersion: m.opt.Release.PCR0, StateVersion: StateVersion}
+		if event == "locked" || event == EventAppKey || event == "unlocked" || event == "enrolled" {
+			ev.AppKey, ev.AppKeySeq = m.AppKey()
+		}
+		m.opt.Lifecycle(ev)
 	}
+}
+
+// AppKey returns the vault's app key and its change count (0.15.0).
+// It reads the header, which a lock leaves in place.
+func (m *Manager) AppKey() ([]byte, uint64) {
+	if m.hdr == nil || len(m.hdr.AppKey) == 0 {
+		return nil, 0
+	}
+	return append([]byte(nil), m.hdr.AppKey...), m.hdr.AppKeySeq
+}
+
+// setAppKey makes key the vault's app key (a transfer's or a recovery's
+// new app, §6.7.1, §11.11.5): app_key_seq + 1, written with the batch's
+// header and reported after the flush.
+func (m *Manager) setAppKey(key []byte) {
+	m.hdr.AppKey = append([]byte(nil), key...)
+	m.hdr.AppKeySeq++
+	m.appKeyChanged = true
+	m.dirty = true
+}
+
+// reportAppKey reports a changed app key after the flush that stored it.
+func (m *Manager) reportAppKey() {
+	if !m.appKeyChanged || m.st == nil {
+		return
+	}
+	m.appKeyChanged = false
+	m.report(EventAppKey, m.st.VaultID, m.opt.Release.PCR0)
 }
 
 // StateVersion is the vault-state format version reported in lifecycle

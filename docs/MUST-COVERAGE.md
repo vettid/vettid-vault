@@ -6,7 +6,8 @@ for 0.10.2 and 0.10.3: connection requests, the SAS commitment, the
 handshake before approval, request tokens; for 0.10.5:
 `connection.declined` and `device.pair.rejected`; for 0.10.6: the
 recovery marker, `credential_backup` and the lock state; and for 0.12.0:
-LEASH delegations and status statements in the LEASH paper's §3.5 format.)
+LEASH delegations and status statements in the LEASH paper's §3.5 format;
+and for 0.15.0: enrollment codes, app keys and the account snapshot.)
 
 Every MUST / MUST NOT in VAULT-MESSAGING 0.2.3 §4–§6 (plus the §13.4 and
 §13.6 rules they rely on), and the named test that covers it. Normative
@@ -512,3 +513,26 @@ relay in `e2e.TestSecondAppRefused`, `e2e.TestCloneAlarm`,
 | 11.11.7 | Member API stand-in as vault.ts: the register slot names its `recovery_id`, the marker makes the recovery `registered` (no `sealed_code`, still active and cancellable, `409 recovery_not_available` for a new register); cancel answers `{cancelled}`; status reports `unlocked` only under a live lease | `devstack.TestDevStackLocalStack` (`vaultctl api-recover`, LocalStack) |
 | 11.11.5 | The registered app's unlock result carries `credential_backup` (the vault's setting) after `vault_bundle`; no other app's result carries it; the client keeps it (`RecoveryCredentialBackup`) and `vaultctl credential recover` does not ask for a password the vault cannot use | `altchan.TestSealOpen`, `e2e.TestRecoveryReplacesApp` (true), `e2e.TestRecoveryBackupOffLosesCredential` (false), `e2e.TestRecoveryCancel` (absent for an owner app), `devstack.TestDevStackLocalStack` |
 | 11.5 | A stopped vault is locked: the lease release on a stopped vault turns `unlocked` into `locked`; the vault process delivers its lifecycle `locked` before it exits (both since vettid-vault #31) | `parent.TestAWSBackend` (LocalStack), `hostproto.TestFlushBeforeClose`, `e2e.TestHostStack` |
+
+## Enrollment codes, app keys and account status (§6.2, §6.7.1, §11.3, §11.5, §11.11, §11.12, §11.13, §13.7; 0.15.0)
+
+Owner decision of 2026-10-05, approved 2026-10-06 (ENROLLMENT-CODES.md,
+MEMBER-API 2.0.0). The enclave records and reports the app key; it never
+checks app-key signatures (§11.12.2), which the member API stand-in
+(`internal/memberapitest`) checks as the member API does. `appkey.json`
+holds the vectors §15 item 20 asks for (not printed in §16).
+
+| § | Requirement | Test(s) |
+|---|---|---|
+| 11.12.2 | App key: standard base64 of the canonical SPKI DER of a P-256 key; `akid` = hex(SHA-256(SPKI)[0:16]); signing string `"vettid/member-api/app/1" \n METHOD \n path \n query \n vault_id \n akid \n ts \n nonce \n hex(SHA-256(body))`; `X-VettID-App` header strictly parsed; ECDSA P-256 | `altchan.TestParseAppKey`, `altchan.TestAppRequestSigning`, `altchan.FuzzParseAppHeader`, `vectors.TestAppKeyVectors` |
+| 11.12.1 | Setup code: 31-symbol alphabet without 0, 1, I, L, O; 8 symbols by rejection sampling (bytes ≥ 248 discarded); normalization (spaces, hyphens, upper case); 16-byte QR secret, 22 characters base64url; QR `{"v":1,"t":"e","api","s"}`; `api` an origin; MACs as specified | `altchan.TestSetupCode`, `altchan.TestEnrollQR`, `altchan.FuzzParseEnrollQR`, `vectors.TestAppKeyVectors` |
+| 11.11.2 | Recovery QR gains `api` (after `t`) | `altchan.TestEnrollQR`, `vectors.TestAppKeyVectors` |
+| 11.3, 11.11.3 | `app.api_key` REQUIRED in `vault.enroll` and `vault.recovery.register` | `altchan.TestRequestRoundTrip`, `altchan.FuzzParseRecoveryRegister` |
+| 11.3, 11.5, 11.11.3 | The sealed `app.api_key` must equal the queue message's `app_key` (REQUIRED for enroll and recovery_register, absent otherwise): a mismatch is answered with random bytes | `enclave.TestEnrollAppKey`, `enclave.TestQueueAppKeyAndAccount` |
+| 6.2 | hs.init `api_key` only for purpose app; REQUIRED in a transfer's hs.init (otherwise dropped like a failed attestation), absent otherwise | `handshake.TestInitFieldRules`, `handshake.TestInitAPIKey`, `vault.TestTransferNeedsAPIKey` |
+| 11.3, 6.7.1, 11.11.5 | The header keeps the app key and `app_key_seq` (1 at enrollment; + 1 when a transfer or a recovery replaces the app) | `enclave.TestEnrollAppKey`, `vault.TestTransferRuntime`, `vault.TestRecoveryAppKey` |
+| 11.5 | `enrolled`, `unlocked` and `locked` carry `app_key` and `app_key_seq`; the event `app_key` is reported after the flush that stored the header; the vault process, supervisor and parent carry them (vaultipc 4) | `enclave.TestEnrollAppKey`, `vault.TestTransferRuntime`, `parent.TestParseLifecycleAppKey`, `integration.TestV3Exit` |
+| 11.5 | The parent writes `app_key = {key, kid, seq}` whatever the lease, only when `seq` is higher (`enrolled`: always) | `parent.TestAppKeyWrite` (memory), `parent.TestAWSBackend` (LocalStack), `integration.TestV3Exit` |
+| 11.5, 11.13 | Queue op `account` (no envelope, no lease, answered `done`) and `account` in unlock (OPTIONAL); to the running vault process, dropped without one | `enclave.TestQueueAppKeyAndAccount`, `enclave.TestAccountOp`, `integration.TestV3Exit` |
+| 11.13 | Snapshot parsed strictly (unknown members ignored, wrong types refused, over 2 KiB refused); kept only if `as_of` is later; `version` + 1 and `received_at`; `sync.event{account.changed, version}` to the app and desktops, never agents or connections; `account.get` `{account \| null, version, received_at}` | `vault.TestParseAccountSnapshot`, `vault.TestAccountInVault`, `enclave.TestAccountOp`, `integration.TestV3Exit` |
+| 11.12.1, 11.12.2, 11.11.7 | Member API stand-in: setup code issue, QR and typed redeem (one `404 invalid_code`), pending key, signed requests with the key matrix (session no longer reaches enclave, enroll, unlock or register), recovery claim and recovering key, slots polled by their own key | `integration.TestV3Exit`, `devstack.TestDevStackLocalStack`, `e2e.*` through `vaultctl api-*` |

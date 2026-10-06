@@ -462,6 +462,9 @@ func (a *AWS) Lifecycle(ctx context.Context, ev Lifecycle, instanceID string, no
 	if ev.Event == EventAlarmCredentialClone {
 		return a.alarm(ctx, ev.VaultID, "credential_clone", now)
 	}
+	if err := a.appKey(ctx, ev, now); err != nil || ev.Event == EventAppKey {
+		return err
+	}
 	const cond = "attribute_exists(vault_id) AND (attribute_not_exists(#lease) OR #lease.#iid = :me)"
 	nm := names(cond, map[string]string{"#u": "updated_at", "#vv": "vault_version", "#sv": "state_version"})
 	vals := map[string]ddbtypes.AttributeValue{":u": s(isoNow(now)), ":me": s(instanceID), ":vv": s(ev.VaultVersion), ":sv": n(int64(ev.StateVersion))}
@@ -489,6 +492,35 @@ func (a *AWS) Lifecycle(ctx context.Context, ev Lifecycle, instanceID string, no
 	if err == nil && ev.Event == "deleted" {
 		// The member is told (§12.5): the vault's own audit log is gone.
 		err = a.alarm(ctx, ev.VaultID, "vault_deleted", now)
+	}
+	return err
+}
+
+// appKey writes the reported app key (0.15.0, §11.5): app_key = {key,
+// kid, seq} whatever the lease, when seq is higher than the row's;
+// enrolled always replaces it (a replaced provisional vault starts at 1).
+// A failed condition (an older report, a missing row) is not an error.
+func (a *AWS) appKey(ctx context.Context, ev Lifecycle, now time.Time) error {
+	if len(ev.AppKey) == 0 {
+		return nil
+	}
+	cond := "attribute_exists(vault_id) AND (attribute_not_exists(#ak) OR #ak.#seq < :seq)"
+	if ev.Event == "enrolled" {
+		cond = "attribute_exists(vault_id)"
+	}
+	nm := map[string]string{"#ak": "app_key", "#u": "updated_at"}
+	if ev.Event != "enrolled" {
+		nm["#seq"] = "seq"
+	}
+	ak := &ddbtypes.AttributeValueMemberM{Value: map[string]ddbtypes.AttributeValue{
+		"key": s(base64.StdEncoding.EncodeToString(ev.AppKey)), "kid": s(AppKeyID(ev.AppKey)), "seq": n(int64(ev.AppKeySeq))}}
+	vals := map[string]ddbtypes.AttributeValue{":ak": ak, ":u": s(isoNow(now))}
+	if ev.Event != "enrolled" {
+		vals[":seq"] = n(int64(ev.AppKeySeq))
+	}
+	err := a.updateVault(ctx, ev.VaultID, "SET #ak = :ak, #u = :u", cond, nm, vals)
+	if errors.Is(err, ErrLeaseHeld) {
+		return nil
 	}
 	return err
 }

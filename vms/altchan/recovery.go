@@ -40,8 +40,12 @@ type RecoveryCode struct {
 	VaultID    string
 	RecoveryID string
 	Code       string
-	NotBefore  time.Time
-	Expires    time.Time
+	// API is the QR's member API origin (0.15.0, §11.11.2): an identifier
+	// the app compares with its own, never an address. Empty: the 0.10.6
+	// payload (the recovery.json vector).
+	API       string
+	NotBefore time.Time
+	Expires   time.Time
 	// Error is set instead of the code when the vault refused the request
 	// ("no_credential", §11.11.1).
 	Error string
@@ -195,10 +199,14 @@ func parseCode(b []byte, vaultID, recoveryID string) (*RecoveryCode, error) {
 }
 
 // RecoveryQR is the QR payload the portal shows and the new app scans
-// (§11.11.2): compact JSON {"v":1,"t":"r","vault_id","recovery_id","code"}.
+// (§11.11.2): compact JSON {"v":1,"t":"r","api","vault_id","recovery_id","code"}
+// (api since 0.15.0; absent when c.API is empty, the 0.10.6 form).
 func RecoveryQR(c *RecoveryCode) []byte {
-	return strictjson.NewBuilder().Uint("v", 1).String("t", "r").String("vault_id", c.VaultID).
-		String("recovery_id", c.RecoveryID).String("code", c.Code).Bytes()
+	b := strictjson.NewBuilder().Uint("v", 1).String("t", "r")
+	if c.API != "" {
+		b.String("api", c.API)
+	}
+	return b.String("vault_id", c.VaultID).String("recovery_id", c.RecoveryID).String("code", c.Code).Bytes()
 }
 
 // ParseRecoveryQR parses the QR payload strictly.
@@ -213,6 +221,11 @@ func ParseRecoveryQR(b []byte) (*RecoveryCode, error) {
 	}
 	if t, err := o.String("t"); err != nil || t != "r" {
 		return nil, ErrMalformed
+	}
+	if api, ok, err := o.OptString("api"); err != nil || ok && !validOrigin(api) {
+		return nil, ErrMalformed
+	} else if ok {
+		c.API = api // an app of 0.15.0 requires it and compares it with its own (§11.11.2)
 	}
 	if c.VaultID, err = o.String("vault_id"); err != nil || !validVaultID(c.VaultID, false) {
 		return nil, ErrMalformed
@@ -234,6 +247,8 @@ type RecoveryRegisterRequest struct {
 	Relay                                          RelayAddr
 	Name                                           string
 	Attest                                         *DeviceAttest
+	// APIKey is the new app's app key, SPKI DER (0.15.0, §11.11.3).
+	APIKey []byte
 }
 
 // Marshal encodes the body.
@@ -243,7 +258,7 @@ func (r *RecoveryRegisterRequest) Marshal() ([]byte, error) {
 		return nil, err
 	}
 	app := strictjson.NewBuilder().Base64("ik", r.IK).Base64("kem", r.KEM.Bytes()).Raw("relay", r.Relay.marshal()).
-		String("name", r.Name).Raw("device_attest", da).Bytes()
+		String("name", r.Name).Raw("device_attest", da).Base64("api_key", r.APIKey).Bytes()
 	return strictjson.NewBuilder().String("user_guid", r.UserGUID).String("vault_id", r.VaultID).
 		String("request_id", r.RequestID).String("recovery_id", r.RecoveryID).String("code", r.Code).Raw("app", app).Bytes(), nil
 }
@@ -296,6 +311,9 @@ func ParseRecoveryRegister(o strictjson.Object) (*RecoveryRegisterRequest, error
 	}
 	if r.Attest, err = ParseDeviceAttest(da); err != nil {
 		return nil, ErrMalformed
+	}
+	if r.APIKey, err = appAPIKey(app); err != nil {
+		return nil, err
 	}
 	return r, nil
 }

@@ -3,6 +3,7 @@ package client
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -26,8 +27,17 @@ type MemberAPI struct {
 	// Base is the API origin, e.g. https://vettid.org.
 	Base string
 	HTTP *http.Client
-	// Authorize adds the member session to a request.
+	// Authorize adds the member session to a request (the portal's
+	// routes; an app signs instead).
 	Authorize func(*http.Request)
+	// AppKey, if set, signs every request (X-VettID-App, 0.15.0,
+	// §11.12.2) instead of Authorize; Vault names the vault the header
+	// carries ("" before enrollment).
+	AppKey *ecdsa.PrivateKey
+	Vault  func() string
+	// Now is the signing clock (default time.Now).
+	Now     func() time.Time
+	unbound bool // a redeem: the header's vault is empty
 	// PollInterval is the slot polling interval (default 600 ms; the API
 	// allows 2 polls per second).
 	PollInterval time.Duration
@@ -61,11 +71,13 @@ type Slot struct {
 
 func (a *MemberAPI) do(ctx context.Context, method, path string, body any, out any) error {
 	var rd io.Reader
+	var raw []byte
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
 			return err
 		}
+		raw = b
 		rd = bytes.NewReader(b)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(a.Base, "/")+path, rd)
@@ -75,7 +87,12 @@ func (a *MemberAPI) do(ctx context.Context, method, path string, body any, out a
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	if a.Authorize != nil {
+	switch {
+	case a.AppKey != nil:
+		if err := a.signApp(req, raw); err != nil {
+			return err
+		}
+	case a.Authorize != nil:
 		a.Authorize(req)
 	}
 	hc := a.HTTP
@@ -109,6 +126,13 @@ func (a *MemberAPI) do(ctx context.Context, method, path string, body any, out a
 		return json.Unmarshal(b, out)
 	}
 	return nil
+}
+
+func (a *MemberAPI) now() time.Time {
+	if a.Now != nil {
+		return a.Now()
+	}
+	return time.Now()
 }
 
 // Enclave fetches the instance to seal to (release "" = routed by the
@@ -469,4 +493,13 @@ func (d *Device) LockVia(ctx context.Context, api *MemberAPI) (*Slot, error) {
 		return nil, err
 	}
 	return api.Poll(ctx, rid)
+}
+
+// APICode returns the member API error code of err ("" if it is not one).
+func APICode(err error) string {
+	var ae *APIError
+	if errors.As(err, &ae) {
+		return ae.Code
+	}
+	return ""
 }

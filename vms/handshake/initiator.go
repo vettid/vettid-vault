@@ -34,6 +34,7 @@ type InitiatorConfig struct {
 	Profile        json.RawMessage
 	Rotations      []*Rotation           // reconnect: own rotations since the last epoch
 	DeviceAttest   *altchan.DeviceAttest // purpose app (§6.7)
+	APIKey         []byte                // a transfer's new app: its app key (0.15.0, §6.2)
 
 	// AnonymousSender sets hs.init sender_kid to all-zero instead of the
 	// kid of StaticKEM (§6.2).
@@ -142,6 +143,7 @@ func NewInitiator(cfg InitiatorConfig) (*Initiator, error) {
 		Profile:        cfg.Profile,
 		Rotations:      cfg.Rotations,
 		DeviceAttest:   cfg.DeviceAttest,
+		APIKey:         cfg.APIKey,
 		SASCommit:      commit,
 	}
 	bj, err := body.Marshal()

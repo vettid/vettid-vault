@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -415,11 +416,28 @@ func vaultIDOK(s string) bool {
 }
 
 func parseLifecycle(f *hostproto.Frame) (Lifecycle, bool) {
-	if len(f.Fields) != 5 {
+	// 0.15.0: [event, vault_id, release, vault_version, state_version,
+	// app_key (SPKI DER or empty), app_key_seq]; an enclave before it
+	// sends the first five.
+	if len(f.Fields) != 5 && len(f.Fields) != 7 {
 		return Lifecycle{}, false
 	}
 	ev := Lifecycle{Event: string(f.Fields[0]), VaultID: string(f.Fields[1]), Release: string(f.Fields[2]), VaultVersion: string(f.Fields[3])}
+	if len(f.Fields) == 7 && len(f.Fields[5]) > 0 {
+		if len(f.Fields[5]) > 256 {
+			return Lifecycle{}, false
+		}
+		seq, err := strconv.ParseUint(string(f.Fields[6]), 10, 53)
+		if err != nil || seq == 0 || strconv.FormatUint(seq, 10) != string(f.Fields[6]) {
+			return Lifecycle{}, false
+		}
+		ev.AppKey, ev.AppKeySeq = clone(f.Fields[5]), seq
+	}
 	switch ev.Event {
+	case EventAppKey:
+		if ev.AppKey == nil {
+			return Lifecycle{}, false
+		}
 	case "enrolled", "unlocked", "locked", "moved", "deleted", EventAlarmCredentialClone:
 	default:
 		return Lifecycle{}, false

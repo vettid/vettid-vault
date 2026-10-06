@@ -24,6 +24,8 @@ package parent
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"time"
 )
@@ -95,6 +97,24 @@ type Lifecycle struct {
 	Release      string
 	VaultVersion string
 	StateVersion int
+	// AppKey (SPKI DER) and AppKeySeq are the vault's app key as the
+	// enclave reports it (0.15.0, §11.5): on enrolled, unlocked, locked
+	// and app_key. The parent writes app_key = {key, kid, seq} on the
+	// vault row whatever the lease, when seq is higher than the row's
+	// (enrolled: always).
+	AppKey    []byte
+	AppKeySeq uint64
+}
+
+// EventAppKey is the lifecycle event of a changed app key (a transfer or
+// a recovery, §11.5, 0.15.0).
+const EventAppKey = "app_key"
+
+// AppKeyID is akid: the first 16 bytes of SHA-256(SPKI DER), 32 lowercase
+// hex (§11.12.2).
+func AppKeyID(der []byte) string {
+	h := sha256.Sum256(der)
+	return hex.EncodeToString(h[:16])
 }
 
 // Slot is a response slot update (§11.5): Status "done" with Envelope

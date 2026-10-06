@@ -133,8 +133,27 @@ func (pr *proc) handle(ctx context.Context, f *hostproto.Frame) [][]byte {
 			reason = string(f.Fields[0])
 		}
 		return pr.lock(ctx, reason)
+	case vaultipc.KindAccount:
+		if len(f.Fields) != 1 {
+			return hostproto.Strings(hostproto.StatusInvalid)
+		}
+		return pr.account(ctx, f.Fields[0])
 	}
 	return nil
+}
+
+// account applies the queue op account to the running vault (§11.13).
+func (pr *proc) account(ctx context.Context, snapshot []byte) [][]byte {
+	pr.mu.Lock()
+	m := pr.mgr
+	pr.mu.Unlock()
+	if m == nil {
+		return hostproto.Strings(hostproto.StatusOK, "0")
+	}
+	if err := m.SetAccount(ctx, snapshot); err != nil {
+		return hostproto.Strings(hostproto.StatusError)
+	}
+	return hostproto.Strings(hostproto.StatusOK, "1")
 }
 
 func (pr *proc) open(ctx context.Context, f [][]byte) [][]byte {
@@ -145,7 +164,7 @@ func (pr *proc) open(ctx context.Context, f [][]byte) [][]byte {
 	}
 	pr.opened = true
 	pr.mu.Unlock()
-	if len(f) != 15 || string(f[0]) != vaultipc.Version || !altchan.ValidInstanceID(string(f[1])) {
+	if len(f) != 17 || string(f[0]) != vaultipc.Version || !altchan.ValidInstanceID(string(f[1])) {
 		return hostproto.Strings(hostproto.StatusInvalid)
 	}
 	j, err := enclave.ParseJob(f[5:])
@@ -173,7 +192,8 @@ func (pr *proc) open(ctx context.Context, f [][]byte) [][]byte {
 			if ev.VaultID != vid {
 				return
 			}
-			_ = pr.conn.Notify(vaultipc.KindLifecycle, hostproto.Strings(ev.Event, ev.VaultID, ev.Release, ev.VaultVersion, fmt.Sprint(ev.StateVersion))...)
+			_ = pr.conn.Notify(vaultipc.KindLifecycle, append(hostproto.Strings(ev.Event, ev.VaultID, ev.Release, ev.VaultVersion,
+				fmt.Sprint(ev.StateVersion)), ev.AppKey, []byte(fmt.Sprint(ev.AppKeySeq)))...)
 		},
 	})
 	if err != nil {

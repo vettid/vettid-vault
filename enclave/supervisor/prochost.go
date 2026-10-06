@@ -334,6 +334,24 @@ func (h *procHost) LockReason(ctx context.Context, id, reason string) (bool, err
 	return true, nil
 }
 
+// Account implements enclave.Host: the snapshot goes to the vault's
+// process (§11.13); without one it is dropped.
+func (h *procHost) Account(ctx context.Context, id string, snapshot []byte) (bool, error) {
+	h.mu.Lock()
+	p := h.procs[id]
+	h.mu.Unlock()
+	if p == nil {
+		return false, nil
+	}
+	actx, cancel := context.WithTimeout(ctx, h.cfg.LockTimeout)
+	defer cancel()
+	r, err := p.conn.Call(actx, vaultipc.KindAccount, snapshot)
+	if err != nil {
+		return true, err
+	}
+	return len(r) == 2 && string(r[1]) == "1", nil
+}
+
 // Vaults implements enclave.Host.
 func (h *procHost) Vaults() []string {
 	h.mu.Lock()
@@ -578,15 +596,19 @@ func (p *vproc) notify(f *hostproto.Frame) {
 	s := p.h.s
 	switch f.Kind {
 	case vaultipc.KindLifecycle:
-		if len(f.Fields) != 5 || string(f.Fields[1]) != p.vaultID {
+		if len(f.Fields) != 7 || string(f.Fields[1]) != p.vaultID || len(f.Fields[5]) > 256 {
 			return
 		}
 		sv, err := strconv.Atoi(string(f.Fields[4]))
 		if err != nil {
 			return
 		}
+		seq, err := strconv.ParseUint(string(f.Fields[6]), 10, 53)
+		if err != nil {
+			return
+		}
 		s.lifecycle(vault.LifecycleEvent{Event: string(f.Fields[0]), VaultID: p.vaultID, Release: string(f.Fields[2]),
-			VaultVersion: string(f.Fields[3]), StateVersion: sv})
+			VaultVersion: string(f.Fields[3]), StateVersion: sv, AppKey: append([]byte(nil), f.Fields[5]...), AppKeySeq: seq})
 	case vaultipc.KindLog:
 		if len(f.Fields) < 2 {
 			return

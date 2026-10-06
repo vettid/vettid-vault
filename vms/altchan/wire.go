@@ -72,6 +72,9 @@ type EnrollRequest struct {
 	// The host supplies the document; the enclave checks it against them.
 	ManifestSHA256 string
 	ManifestSerial uint64
+	// APIKey is the app key's SPKI DER (0.15.0, app.api_key, §11.12): the
+	// enclave binds it to the queue message's app_key and records it.
+	APIKey []byte
 }
 
 // Marshal encodes the body in §11.3 member order.
@@ -81,7 +84,7 @@ func (r *EnrollRequest) Marshal() ([]byte, error) {
 		return nil, err
 	}
 	app := strictjson.NewBuilder().Base64("ik", r.IK).Base64("kem", r.KEM.Bytes()).Raw("relay", r.Relay.marshal()).
-		String("open_token", r.OpenToken).String("name", r.Name).Raw("device_attest", da).Bytes()
+		String("open_token", r.OpenToken).String("name", r.Name).Raw("device_attest", da).Base64("api_key", r.APIKey).Bytes()
 	return strictjson.NewBuilder().String("user_guid", r.UserGUID).String("request_id", r.RequestID).
 		Base64("nonce", r.Nonce).String("pin", r.PIN).Raw("app", app).
 		String("manifest_sha256", r.ManifestSHA256).Uint("manifest_serial", r.ManifestSerial).Bytes(), nil
@@ -157,10 +160,26 @@ func ParseEnrollRequest(o strictjson.Object) (*EnrollRequest, error) {
 	if r.Attest, err = ParseDeviceAttest(da); err != nil {
 		return nil, ErrMalformed
 	}
+	if r.APIKey, err = appAPIKey(app); err != nil {
+		return nil, err
+	}
 	if r.ManifestSHA256, r.ManifestSerial, err = parseManifestRef(o); err != nil {
 		return nil, err
 	}
 	return r, nil
+}
+
+// appAPIKey reads app.api_key, REQUIRED since 0.15.0 (§11.3, §11.11.3).
+func appAPIKey(app strictjson.Object) ([]byte, error) {
+	s, err := app.String("api_key")
+	if err != nil {
+		return nil, ErrMalformed
+	}
+	_, der, err := ParseAppKey(s)
+	if err != nil {
+		return nil, ErrMalformed
+	}
+	return der, nil
 }
 
 // parseManifestRef reads manifest_sha256 (64 lowercase hex) and

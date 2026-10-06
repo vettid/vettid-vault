@@ -315,7 +315,6 @@ var (
 	errNotFound     = vault.NewError("not_found", "")
 	errExists       = vault.NewError("exists", "")
 	errPassword     = vault.NewError("bad_password", "")
-	errBackoff      = vault.NewError("backoff", "")
 	errStale        = vault.NewError("stale_credential", "")
 	errLimit        = vault.NewError("limit", "")
 	errInternal     = vault.NewError("internal", "")
@@ -917,7 +916,7 @@ func (f *Feature) checkBlob(s *vault.Session, blob []byte) error {
 func (f *Feature) openChecked(s *vault.Session, blob, pw []byte) (*suite.PrivateKey, *Inner, error) {
 	now := s.Now()
 	if now.Before(f.st.NotBefore) {
-		return nil, nil, errBackoff
+		return nil, nil, vault.BackoffError(f.st.NotBefore.Sub(now))
 	}
 	cek, err := suite.NewPrivateKey(f.st.CEKSeed)
 	if err != nil {

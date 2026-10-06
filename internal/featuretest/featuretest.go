@@ -465,7 +465,7 @@ func CallInner(f vault.Feature, h *Host, now time.Time, kind string, in *envelop
 	if err != nil {
 		var he *vault.HandlerError
 		if errors.As(err, &he) {
-			return Result{Code: he.Code}
+			return Result{Code: he.Code, Body: he.Body}
 		}
 		return Result{Code: "internal"}
 	}

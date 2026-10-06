@@ -89,7 +89,8 @@ type State struct {
 	// holds it in hardware, this reference client in its state).
 	AppKey []byte `json:"app_key,omitempty"`
 	// UserGUID is the member's id from the redeem or the recovery claim
-	// (0.15.0): the sealed requests carry it.
+	// (0.15.0), or a transfer's device.paired (0.17.0): the sealed
+	// requests carry it.
 	UserGUID string `json:"user_guid,omitempty"`
 }
 
@@ -731,6 +732,13 @@ func (d *Device) handle(ctx context.Context, m relayclient.Message) {
 					d.st.Vault.Token, d.st.Vault.TokenExp = tok, exp
 				}
 			}
+			// A transferred app learns the member's user_guid here
+			// (§6.7.1, 0.17.0); it has no redeem or claim.
+			if tr, err := o.Bool("transfer"); err == nil && tr {
+				if g, ok, _ := o.OptString("user_guid"); ok && validUserGUID(g) {
+					d.st.UserGUID = g
+				}
+			}
 		}
 	case "relay.token.issued":
 		d.storeVaultToken(in.Body)
@@ -941,4 +949,19 @@ func (d *Device) maintain(ctx context.Context, now time.Time) {
 	if v.TokenExp.Sub(now) < 3*24*time.Hour && now.Before(v.TokenExp) {
 		_, _ = d.sendLocked(ctx, "", "relay.token.refresh", json.RawMessage(`{}`), "", "")
 	}
+}
+
+// validUserGUID checks a user_guid from device.paired (§6.7.1, 0.17.0):
+// 1–128 printable ASCII characters, so that it fits the unlock's signing
+// string (§11.4).
+func validUserGUID(s string) bool {
+	if len(s) == 0 || len(s) > 128 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x21 || s[i] > 0x7e {
+			return false
+		}
+	}
+	return true
 }

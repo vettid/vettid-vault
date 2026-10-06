@@ -239,3 +239,27 @@ func TestHolderResetDuringAlarm(t *testing.T) {
 		t.Fatalf("reset during the alarm: %q", r.Code)
 	}
 }
+
+// §3.6.1 steps 4 and 6, §10.1 (0.17.0): a check refused by the password
+// backoff answers backoff with {retry_after}, the seconds until it ends.
+func TestOwnerCheckBackoffRetryAfter(t *testing.T) {
+	e := newEnv(t)
+	e.h.PIN = "246810"
+	blob := e.create()
+	for i := 0; i < BackoffAfter; i++ {
+		if r := e.check(blob, map[string]any{"pin": "246810", "password": "wrong password"}); r.Code != "bad_password" {
+			t.Fatalf("attempt %d: %q", i, r.Code)
+		}
+	}
+	r := e.check(blob, map[string]any{"pin": "246810", "password": pw})
+	if r.Code != "backoff" {
+		t.Fatalf("in backoff: %q", r.Code)
+	}
+	left := e.f.st.NotBefore.Sub(e.clk.T)
+	ra, err := r.Obj(t).Uint("retry_after", 1, 3600)
+	if err != nil || ra != uint64((left+time.Second-1)/time.Second) {
+		t.Fatalf("retry_after %d (%v), left %v: %s", ra, err, left, r.Body)
+	}
+	e.clk.Advance(time.Duration(ra) * time.Second)
+	e.ok(e.check(blob, map[string]any{"pin": "246810", "password": pw}))
+}

@@ -295,7 +295,9 @@ func TestTransfer(t *testing.T) {
 		t.Fatal(err)
 	}
 	old := a.dev.CredentialBlob()
-	b := aw.newApp(a.guid, enclavetest.NewIOSAttester(0x93, enclavetest.IOSOptions{}))
+	// The new app is not told the member's user_guid: it learns it from
+	// device.paired (§6.7.1, 0.17.0) and unlocks with it below.
+	b := aw.newApp("new-phone", enclavetest.NewIOSAttester(0x93, enclavetest.IOSOptions{}))
 	if _, err := b.dev.PairAttested(ctx, link, b.att); err != nil {
 		t.Fatal(err)
 	}
@@ -305,6 +307,9 @@ func TestTransfer(t *testing.T) {
 	}
 	if err := b.dev.AwaitPaired(ctx); err != nil {
 		t.Fatalf("new app: %v", err)
+	}
+	if b.guid = b.dev.UserGUID(); b.guid != a.guid {
+		t.Fatalf("device.paired user_guid %q, want %q", b.guid, a.guid)
 	}
 	b.vid = a.vid
 	waitEvent(t, desk, "sync.event", syncKind("device.transferred"))

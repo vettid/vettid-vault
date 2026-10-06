@@ -429,8 +429,8 @@ func TestOwnerCheckTenFailuresLock(t *testing.T) {
 
 // §3.6.1: a vault from before 0.13.0 starts its clock at its first start
 // if it has a credential; without one, the first credential.create starts
-// it, and a later one (after credential.delete) starts it fresh and ends a
-// hold (owner decision of 2026-10-06). A vault without a credential is
+// it (a new credential would start it fresh and end a hold). A vault
+// without a credential is
 // never gated.
 func TestOwnerCheckClockStart(t *testing.T) {
 	d := newDevFixture(t)
@@ -487,7 +487,7 @@ func TestHoldAllowList(t *testing.T) {
 		}
 	}
 	for _, typ := range []string{"credential.alarm.confirm", "credential.rotate", "device.transfer.approve", "device.transfer.reject",
-		"call.ice", "call.answer", "credential.unlock", "device.transfer.create", "settings.set", "vault.delete", "pin.change",
+		"call.ice", "call.answer", "credential.unlock", "credential.reset", "device.transfer.create", "settings.set", "vault.delete", "pin.change",
 		"approval.decide", "device.session.approve", "account.get", "message.send", "location.update", "device.unlink"} {
 		if m.holdAllows(app, typ, OwnerCheckHeld) {
 			t.Fatalf("app %s allowed", typ)

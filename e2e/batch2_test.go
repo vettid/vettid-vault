@@ -372,12 +372,9 @@ func TestConnectionAuthenticate(t *testing.T) {
 	if res := authOnce(); !strings.Contains(string(res), `"key_changed":false`) || !strings.Contains(string(res), newKey) {
 		t.Fatalf("rotation not followed: %s", res)
 	}
-	// A new credential without a rotation statement (delete and create):
-	// the key change is reported.
-	if err := b.app.CredentialDelete(ctx, credPW); err != nil {
-		t.Fatal(err)
-	}
-	if err := b.app.CredentialCreate(ctx, credPW); err != nil {
+	// A new credential without a rotation statement (the holder's
+	// credential.reset, 0.15.2): the key change is reported.
+	if err := b.app.CredentialResetHolder(ctx, pin, credPW, credPW); err != nil {
 		t.Fatal(err)
 	}
 	if res := authOnce(); !strings.Contains(string(res), `"key_changed":true`) {

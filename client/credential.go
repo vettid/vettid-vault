@@ -284,15 +284,16 @@ func (d *Device) CredentialChangePassword(ctx context.Context, password, newPass
 	return err
 }
 
-// CredentialDelete deletes the credential and the local copy.
-func (d *Device) CredentialDelete(ctx context.Context, password string) error {
-	if _, _, _, err := d.credOp(ctx, "credential.delete", func() map[string]any { return map[string]any{"password": password} }, false); err != nil {
-		return err
-	}
-	d.mu.Lock()
-	d.st.Credential, d.st.UTKs = nil, nil
-	d.mu.Unlock()
-	return nil
+// CredentialResetHolder replaces the holder's credential with a new one
+// (VAULT-MESSAGING 0.15.2, §3.5.5): the current blob, the PIN and the
+// current password, verified as an owner check, and the new password.
+// Every critical item is destroyed; the app keeps the new blob. There is
+// no credential deletion on its own.
+func (d *Device) CredentialResetHolder(ctx context.Context, pin, password, newPassword string) error {
+	_, _, _, err := d.credOp(ctx, "credential.reset", func() map[string]any {
+		return map[string]any{"pin": pin, "password": password, "new_password": newPassword}
+	}, false)
+	return err
 }
 
 // CredentialRecover authenticates a recovering app with the credential

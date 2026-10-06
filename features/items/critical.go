@@ -580,7 +580,7 @@ func (f *Feature) UseCriticalValues(s *vault.Session, inner *credential.Inner, i
 }
 
 // CriticalExists reports whether a critical item exists (the wallet
-// notices item.delete and credential.delete of its items, §10.18).
+// notices item.delete and credential.reset of its items, §10.18).
 func (f *Feature) CriticalExists(itemID string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()

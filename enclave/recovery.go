@@ -35,37 +35,48 @@ func (c *Core) recoveryNow() time.Time {
 }
 
 // recoveryRequest mints the code, records it and returns it sealed to
-// the member's browser key (§11.11.1, §11.11.2). Any failure is answered
-// with random bytes of the same size.
-func (c *Core) recoveryRequest(ctx context.Context, j *Job) []byte {
+// the member's browser key (§11.11.1, §11.11.2). A vault without a
+// credential or without a backup copy of it (0.16.0) is refused, sealed
+// too, and refused reports the clear marker recovery_unavailable. Any
+// failure is answered with random bytes of the same size.
+func (c *Core) recoveryRequest(ctx context.Context, j *Job) (res []byte, refused bool) {
 	o, err := strictjson.ParseObject(j.Inner.Body)
 	if err != nil {
-		return opaque()
+		return opaque(), false
 	}
 	bk, err := o.Base64("browser_key", altchan.BrowserKeySize)
 	if err != nil {
-		return opaque()
+		return opaque(), false
 	}
 	p, sealer := c.headerParams(j, c.recoveryNow)
 	defer sealer.Destroy()
 	code, rec, err := vault.RecoveryRequest(ctx, p, j.RequestID, vault.RecoveryDelay)
-	if errors.Is(err, vault.ErrRecoveryNoCredential) {
-		// Tell the member, sealed to their browser (§11.11.1).
-		sealed, err := altchan.SealRecoveryCode(bk, &altchan.RecoveryCode{VaultID: j.VaultID, RecoveryID: j.RequestID, Error: "no_credential"})
-		if err != nil {
-			return opaque()
-		}
-		return sealed
-	}
-	if err != nil {
-		return opaque()
+	switch {
+	case errors.Is(err, vault.ErrRecoveryNoCredential):
+		return RefuseRecovery(bk, j.VaultID, j.RequestID, "no_credential")
+	case errors.Is(err, vault.ErrRecoveryNoBackup):
+		return RefuseRecovery(bk, j.VaultID, j.RequestID, "no_backup")
+	case err != nil:
+		return opaque(), false
 	}
 	sealed, err := altchan.SealRecoveryCode(bk, &altchan.RecoveryCode{VaultID: j.VaultID, RecoveryID: j.RequestID, Code: code,
 		NotBefore: rec.NotBefore, Expires: rec.Expires})
 	if err != nil {
-		return opaque()
+		return opaque(), false
 	}
-	return sealed
+	return sealed, false
+}
+
+// RefuseRecovery seals a recovery refusal to the member's browser key
+// (§11.11.2: {"v":1,"vault_id","recovery_id","error"}): "no_credential"
+// or "no_backup" (0.16.0). It carries no secret, so the instance can seal
+// it for a running vault without opening anything.
+func RefuseRecovery(browserKey []byte, vaultID, recoveryID, reason string) ([]byte, bool) {
+	sealed, err := altchan.SealRecoveryCode(browserKey, &altchan.RecoveryCode{VaultID: vaultID, RecoveryID: recoveryID, Error: reason})
+	if err != nil {
+		return opaque(), false
+	}
+	return sealed, true
 }
 
 // recoveryCancel ends whatever recovery is in progress (the API keeps at

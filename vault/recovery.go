@@ -76,6 +76,9 @@ var (
 	// ErrRecoveryNoCredential: a vault without a credential cannot be
 	// recovered (§11.11.1).
 	ErrRecoveryNoCredential = errors.New("vault: no credential; recovery refused")
+	// ErrRecoveryNoBackup: a vault that keeps no backup copy of its
+	// credential cannot be recovered (0.16.0, §11.11.1).
+	ErrRecoveryNoBackup = errors.New("vault: no backup copy of the credential; recovery refused")
 )
 
 // Recovery result codes (§11.11).
@@ -86,7 +89,24 @@ const (
 	CodeRecoveryExpired = "expired"
 	CodeRecoveryCode    = "bad_code"
 	CodeRecoveryUsed    = "used"
+	// CodeNoBackup refuses a register or the registered app's unlock when
+	// the vault keeps no backup copy of its credential (0.16.0).
+	CodeNoBackup = "no_backup"
 )
+
+// RecoveryRefusal is the sealed refusal's error for a header (§11.11.1):
+// "no_credential", "no_backup" (0.16.0), or "" when it may be recovered.
+// A header from before 0.16.0 has no backup bit and counts as having a
+// copy; the registered app's unlock then decides from the state.
+func (h *Header) RecoveryRefusal() string {
+	switch {
+	case !h.HasCredential:
+		return "no_credential"
+	case h.CredentialBackup != nil && !*h.CredentialBackup:
+		return "no_backup"
+	}
+	return ""
+}
 
 var codeEnc = base32.NewEncoding("0123456789ABCDEFGHJKMNPQRSTVWXYZ").WithPadding(base32.NoPadding)
 
@@ -180,8 +200,11 @@ func RecoveryRequest(ctx context.Context, p HeaderParams, recoveryID string, del
 	code = codeEnc.EncodeToString(raw)
 	suite.Wipe(raw)
 	err = headerTx(ctx, p, func(h *Header, now time.Time) (bool, error) {
-		if !h.HasCredential {
+		switch h.RecoveryRefusal() {
+		case "no_credential":
 			return false, ErrRecoveryNoCredential
+		case "no_backup":
+			return false, ErrRecoveryNoBackup
 		}
 		if h.Recovery != nil {
 			h.logRecovery(now, "recovery.replaced", h.Recovery.ID)
@@ -247,6 +270,11 @@ func RecoveryRegister(ctx context.Context, p HeaderParams, recoveryID, code stri
 		if r.State != RecoveryPending {
 			return false, ErrRecoveryUsed
 		}
+		if h.RecoveryRefusal() != "" {
+			// §11.11.3 check 2 (0.16.0): no credential or no backup copy.
+			h.cancelRecovery(now, "recovery.cancelled")
+			return true, ErrRecoveryNoBackup
+		}
 		if !now.Before(r.Expires) {
 			h.cancelRecovery(now, "recovery.expired")
 			return true, ErrRecoveryExpired
@@ -292,6 +320,8 @@ func RecoveryCodeResult(err error) string {
 		return CodeRecoveryCode
 	case errors.Is(err, ErrRecoveryUsed):
 		return CodeRecoveryUsed
+	case errors.Is(err, ErrRecoveryNoBackup), errors.Is(err, ErrRecoveryNoCredential):
+		return CodeNoBackup
 	case errors.Is(err, ErrDeviceAttestation):
 		return CodeAttestation
 	}
@@ -361,5 +391,7 @@ func (m *Manager) completeRecovery(deviceID string, now time.Time) error {
 }
 
 // recoveryAllowed lists what a recovering device may send (§11.11.5).
-var recoveryAllowed = map[string]bool{"credential.recover": true, "credential.reset": true, "vault.delete": true, "credential.utk.get": true, "vault.status": true,
+// 0.16.0 removed credential.reset and vault.delete: there is no recovery
+// with the backup off.
+var recoveryAllowed = map[string]bool{"credential.recover": true, "credential.utk.get": true, "vault.status": true,
 	"relay.token.issued": true, "relay.token.refresh": true, "relay.address.update": true}

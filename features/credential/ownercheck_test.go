@@ -163,8 +163,7 @@ func TestTransferApprovalIsCheck(t *testing.T) {
 
 // §3.6.1 (0.15.2): the first credential.create starts the clock; every
 // new credential starts it fresh: the holder's credential.reset
-// (TestHolderReset), a completed recovery (credential.recover, and
-// credential.reset after a backup-off recovery).
+// (TestHolderReset) and a completed recovery (credential.recover).
 func TestOwnerCheckClockStarters(t *testing.T) {
 	e := newEnv(t)
 	e.create()
@@ -177,17 +176,7 @@ func TestOwnerCheckClockStarters(t *testing.T) {
 	if len(e2.h.Passed) != 1 || e2.h.Passed[0] != nil {
 		t.Fatalf("recovery did not start the clock: %v", e2.h.Passed)
 	}
-	// Backup off: the recovering app's credential.reset makes a new
-	// credential and starts the clock.
-	e3 := newEnv(t)
-	e3.h.Set = vault.Settings{NoBackup: true}
-	b3 := e3.create()
-	e3.ok(e3.raw("app", "credential.ack", `{"version":1}`))
-	_ = b3
-	e3.ok(e3.call("recovering-app", "credential.reset", "", map[string]any{"password": pw}))
-	if len(e3.h.Passed) != 1 || e3.h.Passed[0] != nil || e3.h.PassedAudit[0] {
-		t.Fatalf("reset did not start the clock: %v", e3.h.Passed)
-	}
+
 }
 
 // §3.6.3: the hold ends the unlock window.

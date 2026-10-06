@@ -465,6 +465,16 @@ func (a *AWS) Lifecycle(ctx context.Context, ev Lifecycle, instanceID string, no
 	if err := a.appKey(ctx, ev, now); err != nil || ev.Event == EventAppKey {
 		return err
 	}
+	if ev.Event == EventCredentialBackup {
+		// 0.16.0 (§11.5): the bit alone, under the lease rule.
+		const cond = "attribute_exists(vault_id) AND (attribute_not_exists(#lease) OR #lease.#iid = :me)"
+		err := a.updateVault(ctx, ev.VaultID, "SET #cb = :cb, #u = :u", cond, names(cond, map[string]string{"#cb": "credential_backup", "#u": "updated_at"}),
+			map[string]ddbtypes.AttributeValue{":cb": &ddbtypes.AttributeValueMemberBOOL{Value: *ev.CredentialBackup}, ":u": s(isoNow(now)), ":me": s(instanceID)})
+		if errors.Is(err, ErrLeaseHeld) {
+			return nil
+		}
+		return err
+	}
 	const cond = "attribute_exists(vault_id) AND (attribute_not_exists(#lease) OR #lease.#iid = :me)"
 	nm := names(cond, map[string]string{"#u": "updated_at", "#vv": "vault_version", "#sv": "state_version"})
 	vals := map[string]ddbtypes.AttributeValue{":u": s(isoNow(now)), ":me": s(instanceID), ":vv": s(ev.VaultVersion), ":sv": n(int64(ev.StateVersion))}
@@ -484,6 +494,11 @@ func (a *AWS) Lifecycle(ctx context.Context, ev Lifecycle, instanceID string, no
 		update = "SET #st = :st, #vv = :vv, #sv = :sv, #u = :u REMOVE #lease"
 	default:
 		return nil
+	}
+	if ev.CredentialBackup != nil {
+		nm["#cb"] = "credential_backup"
+		vals[":cb"] = &ddbtypes.AttributeValueMemberBOOL{Value: *ev.CredentialBackup}
+		update = strings.Replace(update, "SET ", "SET #cb = :cb, ", 1)
 	}
 	err := a.updateVault(ctx, ev.VaultID, update, cond, nm, vals)
 	if errors.Is(err, ErrLeaseHeld) {

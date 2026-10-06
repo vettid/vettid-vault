@@ -241,6 +241,12 @@ func (a *API) recoveryRequest(ctx context.Context, guid string, body map[string]
 	if recoveryActive(v.Recovery, rn) {
 		return nil, vaultError(409, "recovery_active", "A recovery is already in progress", nil)
 	}
+	if v.CredentialBackup != nil && !*v.CredentialBackup {
+		// MEMBER-API 2.1.0, VAULT-MESSAGING 0.16.0 §11.11.7: no recovery with
+		// the backup off; nothing is enqueued, locked or emailed.
+		return nil, vaultError(409, "recovery_unavailable", "This vault cannot be recovered: its credential backup is off",
+			map[string]any{"reason": "no_backup"})
+	}
 	inst, err := a.recoveryInstance(ctx, v, a.nowS())
 	if err != nil {
 		return nil, err

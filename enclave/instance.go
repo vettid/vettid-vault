@@ -60,6 +60,10 @@ type Host interface {
 	Lock(ctx context.Context, vaultID string) (bool, error)
 	// LockReason is Lock with a reason in vault.locking (§11.11.1).
 	LockReason(ctx context.Context, vaultID, reason string) (bool, error)
+	// RecoveryRefusal asks a running vault whether it refuses a recovery
+	// ("no_credential", "no_backup" or ""; 0.16.0, §11.11.1) without
+	// locking it; ran reports whether it runs here.
+	RecoveryRefusal(ctx context.Context, vaultID string) (ran bool, why string)
 	// Account gives a running vault the member's account snapshot (the
 	// queue op account, 0.15.0, §11.13); it reports whether the vault
 	// runs here (otherwise the snapshot is dropped).
@@ -179,7 +183,15 @@ func (in *Instance) Process(ctx context.Context, q *QueueMessage, manifestDoc []
 		// No envelope: the job carries the browser key (not secret). A
 		// recovery locks a running vault first, telling its devices why
 		// (§11.11.1); the vault process then works on the sealed header.
+		// 0.16.0: a running vault that cannot be recovered (no credential,
+		// no backup copy) refuses from its own state before anything is
+		// locked or recorded.
 		if q.Op == OpRecovery {
+			if ran, why := in.host.RecoveryRefusal(ctx, q.VaultID); ran && why != "" {
+				res, _ := RefuseRecovery(q.BrowserKey, q.VaultID, q.RequestID, why)
+				resp.Envelope, resp.Code = res, CodeRecoveryUnavailable
+				return resp
+			}
 			_, _ = in.host.LockReason(ctx, q.VaultID, "recovery")
 		}
 		body := []byte(`{}`)
@@ -188,12 +200,15 @@ func (in *Instance) Process(ctx context.Context, q *QueueMessage, manifestDoc []
 		}
 		j := &Job{Op: q.Op, VaultID: q.VaultID, UserGUID: q.UserGUID, RequestID: q.RequestID,
 			Inner: &envelope.Inner{Type: requestType[q.Op], ID: q.RequestID, TS: in.now(), Body: body}}
-		res, _, err := in.host.Open(ctx, j)
+		res, refused, err := in.host.Open(ctx, j)
 		if q.Op == OpRecovery {
 			if err != nil || len(res) != altchan.SealedCodeSize {
-				res = opaque()
+				res, refused = opaque(), false
 			}
 			resp.Envelope = res
+			if refused {
+				resp.Code = CodeRecoveryUnavailable // §11.11.2 (0.16.0)
+			}
 		}
 	case OpEnroll, OpUnlock, OpRecoveryRegister:
 		inner, padded, err := in.openRequest(q)

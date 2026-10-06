@@ -133,6 +133,15 @@ func (pr *proc) handle(ctx context.Context, f *hostproto.Frame) [][]byte {
 			reason = string(f.Fields[0])
 		}
 		return pr.lock(ctx, reason)
+	case vaultipc.KindRecoverable:
+		pr.mu.Lock()
+		m := pr.mgr
+		pr.mu.Unlock()
+		why := ""
+		if m != nil {
+			why = m.RecoveryRefusal()
+		}
+		return hostproto.Strings(hostproto.StatusOK, why)
 	case vaultipc.KindAccount:
 		if len(f.Fields) != 1 {
 			return hostproto.Strings(hostproto.StatusInvalid)
@@ -193,7 +202,7 @@ func (pr *proc) open(ctx context.Context, f [][]byte) [][]byte {
 				return
 			}
 			_ = pr.conn.Notify(vaultipc.KindLifecycle, append(hostproto.Strings(ev.Event, ev.VaultID, ev.Release, ev.VaultVersion,
-				fmt.Sprint(ev.StateVersion)), ev.AppKey, []byte(fmt.Sprint(ev.AppKeySeq)))...)
+				fmt.Sprint(ev.StateVersion)), ev.AppKey, []byte(fmt.Sprint(ev.AppKeySeq)), []byte(enclave.BackupField(ev.CredentialBackup)))...)
 		},
 	})
 	if err != nil {

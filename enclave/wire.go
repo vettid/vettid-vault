@@ -40,6 +40,36 @@ const (
 // that reflects a sealed outcome.
 const CodeRecoveryRegistered = "recovery_registered"
 
+// BackupField encodes a lifecycle event's backup bit for the host
+// channels: "1", "0", or "" when not reported (0.16.0).
+func BackupField(b *bool) string {
+	switch {
+	case b == nil:
+		return ""
+	case *b:
+		return "1"
+	}
+	return "0"
+}
+
+// ParseBackupField decodes BackupField; ok is false for anything else.
+func ParseBackupField(s string) (*bool, bool) {
+	switch s {
+	case "":
+		return nil, true
+	case "1", "0":
+		b := s == "1"
+		return &b, true
+	}
+	return nil, false
+}
+
+// CodeRecoveryUnavailable is the clear marker on the answer to a recovery
+// request the vault refused (no credential, or no backup copy of it;
+// 0.16.0, §11.5, §11.11.2): the member API ends the recovery at once. It
+// says no more than the backup bit the host already has.
+const CodeRecoveryUnavailable = "recovery_unavailable"
+
 // ErrMalformed is returned for a malformed queue message.
 var ErrMalformed = errors.New("enclave: malformed message")
 
@@ -229,7 +259,8 @@ type Response struct {
 	RequestID string
 	Status    string
 	Envelope  []byte
-	// Code is CodeRecoveryRegistered or empty (0.10.6).
+	// Code is CodeRecoveryRegistered (0.10.6), CodeRecoveryUnavailable
+	// (0.16.0) or empty.
 	Code string
 }
 
@@ -276,7 +307,7 @@ func ParseResponse(b []byte) (*Response, error) {
 			return nil, ErrMalformed
 		}
 	}
-	if c, ok, err := o.OptString("code"); err != nil || ok && (c != CodeRecoveryRegistered || r.Envelope == nil) {
+	if c, ok, err := o.OptString("code"); err != nil || ok && (c != CodeRecoveryRegistered && c != CodeRecoveryUnavailable || r.Envelope == nil) {
 		return nil, ErrMalformed
 	} else if ok {
 		r.Code = c

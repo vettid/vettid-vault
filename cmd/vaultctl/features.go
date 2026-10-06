@@ -174,18 +174,6 @@ func cmdCredential(ctx context.Context, g *globals, args []string) error {
 		return err
 	}
 	needPW := map[string]bool{"create": true, "unlock": true, "rotate": true, "password": true, "recover": true, "reset": true}
-	if op == "recover" {
-		// §11.11.5 step 1 (0.10.6): the recovered app's unlock said whether
-		// the vault keeps a copy; without one there is nothing to recover,
-		// so do not ask for the password.
-		d, err := load(g)
-		if err != nil {
-			return err
-		}
-		if on, known := d.RecoveryCredentialBackup(); known && !on {
-			return errors.New("the vault keeps no copy of the credential (credential.backup off): use `credential reset` with a new password, or `delete-vault`")
-		}
-	}
 	var pw string
 	if needPW[op] {
 		if pw, err = password("VAULTCTL_PASSWORD"); err != nil {
@@ -216,21 +204,18 @@ func cmdCredential(ctx context.Context, g *globals, args []string) error {
 		case "recover":
 			return nil, d.CredentialRecover(ctx, pw)
 		case "reset":
-			if d.CredentialBlob() != nil {
-				// The holder's new credential (0.15.2, §3.5.5): the PIN,
-				// the current password and VAULTCTL_NEW_PASSWORD.
-				pin, err := password("VAULTCTL_PIN")
-				if err != nil {
-					return nil, err
-				}
-				np, err := password("VAULTCTL_NEW_PASSWORD")
-				if err != nil {
-					return nil, err
-				}
-				return nil, d.CredentialResetHolder(ctx, pin, pw, np)
+			// The holder's new credential (0.15.2, §3.5.5): the PIN, the
+			// current password and VAULTCTL_NEW_PASSWORD. 0.16.0 removed
+			// the recovering app's reset.
+			pin, err := password("VAULTCTL_PIN")
+			if err != nil {
+				return nil, err
 			}
-			// The credential is lost (backup off, §11.11.5): a new one.
-			return nil, d.CredentialReset(ctx, pw)
+			np, err := password("VAULTCTL_NEW_PASSWORD")
+			if err != nil {
+				return nil, err
+			}
+			return nil, d.CredentialResetHolder(ctx, pin, pw, np)
 		case "confirm":
 			if len(rest) != 2 || rest[1] != "mine" && rest[1] != "not-mine" {
 				return nil, errors.New(commands["credential"].usage)

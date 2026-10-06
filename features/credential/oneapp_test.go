@@ -387,36 +387,13 @@ func TestVaultDeleteDuringAlarmAndRecovery(t *testing.T) {
 	if r := e.callBody("app", "vault.delete", b2, map[string]any{"pin": "246810", "password": pw}, `"confirm":"`+vault.DeleteConfirmation+`"`); r.Code != "credential_frozen" {
 		t.Fatalf("delete during an alarm: %q", r.Code)
 	}
-	// The recovery path: backup on → the password against the vault's copy.
-	if r := e.callBody("recovering-app", "vault.delete", "", map[string]any{"pin": "246810"}, `"confirm":"`+vault.DeleteConfirmation+`"`); r.Code != "bad_request" {
-		t.Fatalf("recovery delete without the password (backup on): %q", r.Code)
+	// 0.16.0: a recovering app does not delete (it recovers first and
+	// deletes as the holder).
+	if r := e.callBody("recovering-app", "vault.delete", "", map[string]any{"pin": "246810", "password": pw}, `"confirm":"`+vault.DeleteConfirmation+`"`); r.Code != "forbidden" {
+		t.Fatalf("recovery delete: %q", r.Code)
 	}
-	e.ok(e.callBody("recovering-app", "vault.delete", "", map[string]any{"pin": "246810", "password": pw}, `"confirm":"`+vault.DeleteConfirmation+`"`))
-	if len(e.h.Deletions) != 1 || e.h.Deletions[0] != "recovery" {
+	if len(e.h.Deletions) != 0 {
 		t.Fatalf("%v", e.h.Deletions)
-	}
-}
-
-// §11.11.5 (0.9.0): with backup off a recovery restores access only: no
-// credential content is ever returned; the app may reset or delete (PIN
-// only, the credential being lost).
-func TestBackupOffRecoveryAccessOnly(t *testing.T) {
-	e := newEnv(t)
-	e.h.PIN = "246810"
-	e.h.Set.NoBackup = true
-	e.create()
-	e.ok(e.raw("app", "credential.ack", `{"version":1}`))
-	for _, typ := range []string{"credential.get", "credential.version"} {
-		if r := e.raw("recovering-app", typ, `{}`); r.Code != "forbidden" {
-			t.Fatalf("%s from a recovering app: %q", typ, r.Code)
-		}
-	}
-	if r := e.call("recovering-app", "credential.recover", "", map[string]any{"password": pw}); r.Code != "credential_lost" || r.Body != nil {
-		t.Fatalf("recover: %q %s", r.Code, r.Body)
-	}
-	e.ok(e.callBody("recovering-app", "vault.delete", "", map[string]any{"pin": "246810"}, `"confirm":"`+vault.DeleteConfirmation+`"`))
-	if len(e.h.Deletions) != 1 {
-		t.Fatal("not deleted")
 	}
 }
 

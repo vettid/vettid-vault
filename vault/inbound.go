@@ -58,6 +58,7 @@ func (m *Manager) Start(ctx context.Context) error {
 	if err := m.persist(ctx, false); err != nil {
 		return err
 	}
+	m.reportAppKey() // a backup bit first recorded by this release (0.16.0)
 	m.drainOutbox(ctx)
 	return m.flushIfDirty(ctx)
 }

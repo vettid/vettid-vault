@@ -9,6 +9,7 @@
 //	Open    [version, instance_id, pcr0, pcr1, pcr2, job (12 fields)] → [ok, result, running "1"|"0", registered "1"|"0"]
 //	Lock    []                                                          → [ok | split_brain]
 //	Account [snapshot]                                                  → [ok, running "1"|"0"]
+//	Recoverable []                                                      → [ok, "" | no_credential | no_backup]
 //
 // Vault → supervisor (requests; the supervisor answers [status, ...]):
 //
@@ -23,7 +24,8 @@
 //
 // Vault → supervisor (notifications): Lifecycle [event, vault_id,
 // release, vault_version, state_version, app_key (SPKI DER or empty),
-// app_key_seq], Log [level, message, k, v ...].
+// app_key_seq, credential_backup ("1", "0" or "" when not reported)], Log
+// [level, message, k, v ...].
 //
 // No message from the vault to the supervisor carries a DEK, pepper, key
 // or plaintext state: stored objects are DEK-encrypted, relay requests are
@@ -45,7 +47,10 @@ import (
 // 3: Open's answer says whether a recovery register succeeded (0.10.6).
 // 4: the job carries the app key and the account snapshot; Account;
 // Lifecycle carries the app key and its sequence (0.15.0).
-const Version = "4"
+// 5: Recoverable; Lifecycle carries the backup bit; Open's last field
+// is the answer's clear marker (recovery_registered or
+// recovery_unavailable) (0.16.0).
+const Version = "5"
 
 // Supervisor → vault.
 const (
@@ -65,6 +70,10 @@ const (
 	// KindAccount [snapshot] → [ok, running "1"|"0"]: the queue op
 	// account for the running vault (0.15.0, §11.13).
 	KindAccount hostproto.Kind = 0x44
+	// KindRecoverable [] → [ok, "" | "no_credential" | "no_backup"]: does
+	// the running vault refuse a recovery (0.16.0, §11.11.1)? Nothing is
+	// locked.
+	KindRecoverable hostproto.Kind = 0x45
 )
 
 // Vault → supervisor requests.

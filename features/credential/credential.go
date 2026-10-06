@@ -72,6 +72,10 @@ type state struct {
 	Holder string `json:"holder,omitempty"`
 	// Alarm is the open clone alarm (§3.5.9).
 	Alarm *Alarm `json:"alarm,omitempty"`
+	// NoBackupCopy: the latest blob was sealed with credential.backup off
+	// (0.16.0, §3.5.6), so the vault has no backup copy even if it still
+	// keeps the blob until the app's ack.
+	NoBackupCopy bool `json:"no_backup_copy,omitempty"`
 }
 
 // Alarm states (§3.5.9).
@@ -290,9 +294,20 @@ func (f *Feature) UseKey(now time.Time, ttl time.Duration) (ed25519.PrivateKey, 
 func (f *Feature) SettingsChanged(_ *vault.Session, next vault.Settings) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if !next.Backup() && f.st.Acked {
-		f.st.Blob = nil
+	if !next.Backup() {
+		f.st.NoBackupCopy = true // 0.16.0: from now, until the next use with it on
+		if f.st.Acked {
+			f.st.Blob = nil
+		}
 	}
+}
+
+// HasBackupCopy implements vault.CredentialBackupCopy (0.16.0, §3.5.6):
+// the setting was on when the latest blob the vault keeps was sealed.
+func (f *Feature) HasBackupCopy() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.st.CEKSeed != nil && f.st.Blob != nil && !f.st.NoBackupCopy
 }
 
 var (
@@ -309,7 +324,6 @@ var (
 	errCredRequired = vault.NewError("credential_required", "")
 	errFrozen       = vault.NewError("credential_frozen", "")
 	errRotation     = vault.NewError("rotation_required", "")
-	errLost         = vault.NewError("credential_lost", "")
 	b64             = base64.StdEncoding
 )
 
@@ -355,7 +369,6 @@ var needs = map[string]int{
 	"credential.rotate":          needBlob | needSealed | needPassword,
 	"credential.password.change": needBlob | needSealed | needPassword | needNewPassword,
 	"credential.recover":         needSealed | needPassword,
-	"credential.reset":           needSealed | needPassword,
 	"credential.alarm.confirm":   0,
 	"device.transfer.create":     0,
 	"device.transfer.approve":    needBlob | needSealed | needPassword | needPIN,
@@ -366,7 +379,7 @@ var needs = map[string]int{
 
 // holderResetNeed is what the holder's credential.reset carries (0.15.2,
 // §3.5.5): the current blob, the PIN, the current password and the new
-// one. A recovering app's form is needs["credential.reset"].
+// one. 0.16.0 removed the recovering app's form.
 const holderResetNeed = needBlob | needSealed | needPassword | needNewPassword | needPIN
 
 // opNeed is what every operation of another feature carries.
@@ -583,14 +596,15 @@ func (f *Feature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner
 	defer f.mu.Unlock()
 	f.pruneUTKs(s.Now())
 	from := s.From()
-	if from.Recovering && in.Type != "credential.recover" && in.Type != "credential.reset" && in.Type != "credential.utk.get" &&
-		in.Type != "vault.delete" {
+	if from.Recovering && in.Type != "credential.recover" && in.Type != "credential.utk.get" {
+		// 0.16.0: a recovering app proves the password with
+		// credential.recover before anything else (no reset, no deletion).
 		return nil, errForbidden
 	}
 	if !from.Recovering && in.Type == "credential.recover" {
 		return nil, errForbidden
 	}
-	holderReset := in.Type == "credential.reset" && !from.Recovering
+	holderReset := in.Type == "credential.reset"
 	var e *Envelope
 	var err error
 	if holderReset {
@@ -668,8 +682,6 @@ func (f *Feature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner
 		return f.ownerCheck(s, e, p)
 	case "credential.recover":
 		return f.recover(s, p)
-	case "credential.reset":
-		return f.reset(s, p)
 	case "device.transfer.approve":
 		return f.transferApprove(s, in.Body, e, p)
 	case "vault.delete":
@@ -726,7 +738,7 @@ var holderOnly = map[string]bool{
 // allowedFrozen are the types a frozen credential still accepts; in state
 // rotation_required also allowedRotation (§3.5.9).
 var (
-	allowedFrozen   = map[string]bool{"credential.utk.get": true, "credential.version": true, "credential.lock": true, "credential.alarm.confirm": true, "credential.recover": true, "credential.reset": true}
+	allowedFrozen   = map[string]bool{"credential.utk.get": true, "credential.version": true, "credential.lock": true, "credential.alarm.confirm": true, "credential.recover": true}
 	allowedRotation = map[string]bool{"credential.get": true, "credential.ack": true, "credential.rotate": true}
 )
 
@@ -734,20 +746,19 @@ var (
 // before a type runs.
 func (f *Feature) gate(s *vault.Session, typ string) error {
 	from := s.From().ID
-	// vault.delete also comes from a recovering app (§11.11.5) or, before
-	// any credential exists, from the enrolling app (§12.5).
-	deleteAlt := typ == "vault.delete" && (s.From().Recovering || f.st.CEKSeed == nil)
+	// vault.delete also comes from the enrolling app before any credential
+	// exists (§12.5); 0.16.0 removed the recovering app as an authority.
+	deleteAlt := typ == "vault.delete" && f.st.CEKSeed == nil
 	if holderOnly[typ] && from != f.st.Holder && !deleteAlt {
 		return errForbidden
 	}
 	if typ == "credential.alarm.confirm" {
 		return nil
 	}
-	if typ == "credential.reset" && !s.From().Recovering && from != f.st.Holder {
-		return errForbidden // the holder's form (0.15.2)
+	if typ == "credential.reset" && from != f.st.Holder {
+		return errForbidden // the holder's only (0.15.2, 0.16.0)
 	}
-	if a := f.st.Alarm; a != nil && (!allowedFrozen[typ] || typ == "credential.reset" && !s.From().Recovering) &&
-		!(typ == "vault.delete" && s.From().Recovering) {
+	if a := f.st.Alarm; a != nil && !allowedFrozen[typ] {
 		if a.State == AlarmFrozen || !allowedRotation[typ] {
 			return f.freezeErr()
 		}
@@ -1102,32 +1113,22 @@ func (f *Feature) transferApprove(s *vault.Session, body []byte, e *Envelope, p 
 }
 
 // vaultDelete authorizes a deletion (§12.5): the confirmation phrase and
-// the PIN always; the password against the current blob from the holder,
-// or against the vault's own copy from a recovering app when the vault
-// keeps one. Without a kept copy (backup off: the credential is lost) or
-// without any credential, the PIN is the last factor: the recovery's 24 h
-// and the member's account already stood in front of it (OWNER DECISION).
-// Nothing of the credential is returned.
+// the PIN always, and the password against the current blob from the
+// holder; the enrolling app before any credential exists with the PIN
+// alone. 0.16.0 removed the recovering app (it recovers first and deletes
+// as the holder; without the credential the member starts over from the
+// portal, §11.11.9). Nothing of the credential is returned.
 func (f *Feature) vaultDelete(s *vault.Session, body []byte, e *Envelope, p *Payload) (json.RawMessage, error) {
 	o, _ := strictjson.ParseObject(body)
 	if c, err := o.String("confirm"); err != nil || c != vault.DeleteConfirmation {
 		return nil, errBad
 	}
-	from := s.From()
 	via := "app"
-	if from.Recovering {
-		via = "recovery"
-	}
 	if err := s.VerifyPIN(string(p.PIN)); err != nil {
 		return nil, err
 	}
 	var blob []byte
-	switch {
-	case f.st.CEKSeed == nil:
-	case from.Recovering && f.st.Blob == nil:
-	case from.Recovering:
-		blob = f.st.Blob
-	default:
+	if f.st.CEKSeed != nil {
 		if e.Blob == nil {
 			return nil, errBad
 		}
@@ -1252,6 +1253,7 @@ func (f *Feature) commit(s *vault.Session, blob []byte, version uint64) {
 	h := sha256.Sum256(blob)
 	f.st.Version, f.st.Hash, f.st.UpdatedAt = version, h[:], s.Now().UTC().Truncate(time.Millisecond)
 	f.st.Blob, f.st.Acked = blob, false
+	f.st.NoBackupCopy = !s.Settings().Backup()
 	s.SyncEvent("credential.changed", strictjson.NewBuilder().Uint("version", version).Bytes())
 }
 
@@ -1337,14 +1339,16 @@ func (f *Feature) rotate(s *vault.Session, inner *Inner, p *Payload) (json.RawMe
 // authenticates with the password against the vault's copy of the latest
 // blob; the CEK rotates, the critical items are re-keyed and the new blob
 // is handed over; the app becomes the holder and the one app (the old app
-// is removed by the runtime). Without a kept copy (backup off) the
-// credential is lost: credential_lost.
+// is removed by the runtime). A vault without a backup copy never gets
+// here (0.16.0, §11.11.1, §11.11.5).
 func (f *Feature) recover(s *vault.Session, p *Payload) (json.RawMessage, error) {
 	if f.st.CEKSeed == nil {
 		return nil, errCredRequired // no credential, no recovery
 	}
 	if f.st.Blob == nil {
-		return nil, errLost // backup off: credential.reset or vault.delete (§11.11.5)
+		// 0.16.0: a vault without a backup copy is never recovered; the
+		// enclave refuses it before a recovering app exists (§11.11.1).
+		return nil, errForbidden
 	}
 	cek, inner, err := f.open(s, f.st.Blob, p.Password)
 	if err != nil {
@@ -1386,39 +1390,6 @@ func (f *Feature) handOver(s *vault.Session) {
 		a.State = AlarmRotationRequired
 		f.alarmEvent(s, a)
 	}
-}
-
-// reset ends a recovery when the vault keeps no copy of the credential
-// (backup off, §11.11.5; OWNER DECISION): the old credential and every
-// critical item are destroyed and a new credential is created under the
-// given password. It is refused while the vault keeps the latest blob.
-func (f *Feature) reset(s *vault.Session, p *Payload) (json.RawMessage, error) {
-	if f.st.CEKSeed == nil {
-		return nil, errCredRequired
-	}
-	if f.st.Blob != nil {
-		return nil, errExists // use credential.recover with the password
-	}
-	me := s.From().ID
-	keep, ok := f.st.Pools[me]
-	delete(f.st.Pools, me) // the recovering app keeps its UTKs
-	f.deleteAll(s)
-	if ok {
-		f.st.Pools[me] = keep
-	}
-	out, err := f.create(s, p)
-	if err != nil {
-		return nil, err
-	}
-	// A completed recovery starts the clock and ends a hold (§3.6.1),
-	// before the other devices are told of the new app.
-	_, _ = s.OwnerCheckPassed(nil, false)
-	if err := s.CompleteRecovery(); err != nil {
-		return nil, errInternal
-	}
-	f.handOver(s)
-	s.Record(vault.Activity{Kind: "credential.reset", Audit: true, Feed: true})
-	return out, nil
 }
 
 // holderReset is the holder's credential.reset (0.15.2, §3.5.5, §10.6):

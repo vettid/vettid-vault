@@ -24,13 +24,10 @@ type RecoveryState struct {
 	CredentialBackup *bool `json:"credential_backup,omitempty"`
 }
 
-// RecoveryCredentialBackup reports, for a recovering app after its PIN
-// unlock, whether the vault keeps a copy of the credential (§11.11.5 step
-// 1, 0.10.6): with known and !backup the app does not ask for the password
-// (credential.recover cannot succeed) and goes straight to
-// CredentialReset or deleting the vault (step 4). known is false before
-// the unlock or for a vault that does not say (then ask for the password;
-// credential.recover answers credential_lost if there is no copy).
+// RecoveryCredentialBackup reports the credential_backup member of a
+// recovering app's unlock result (§11.11.5 step 1, 0.10.6). Since 0.16.0 it
+// is always true (a vault without a backup copy refuses that unlock with
+// no_backup); apps MAY ignore it. known is false before the unlock.
 func (d *Device) RecoveryCredentialBackup() (backup, known bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()

@@ -232,8 +232,8 @@ func TestRecoveryExpiry(t *testing.T) {
 	}
 }
 
-// TestRecoveryBackupOffLosesCredential (oneapp_test.go) covers a recovery
-// with credential.backup off (0.9.0).
+// TestRecoveryBackupOffRefused (oneapp_test.go) covers the refusal of a recovery
+// with credential.backup off (0.16.0).
 
 // §3.5.7: a vault without a credential is restricted (and stays
 // provisional) and cannot be recovered (§11.11.1).
@@ -269,7 +269,7 @@ func TestNoCredentialNoRecovery(t *testing.T) {
 	bk, _ := ecdh.P256().GenerateKey(nil)
 	rid, resp := aw.w.Recovery(ctx, aw.w.Instance(3), a.vid, a.guid, bk.PublicKey().Bytes())
 	c, err := altchan.OpenRecoveryCode(bk, resp.Envelope, a.vid, rid)
-	if err != nil || c.Error != "no_credential" || c.Code != "" {
-		t.Fatalf("recovery of a vault without a credential: %v %+v", err, c)
+	if err != nil || c.Error != "no_credential" || c.Code != "" || resp.Code != enclave.CodeRecoveryUnavailable {
+		t.Fatalf("recovery of a vault without a credential: %v %+v %q", err, c, resp.Code)
 	}
 }

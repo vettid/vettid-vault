@@ -31,11 +31,53 @@ func newRecFixture(t *testing.T) *recFixture {
 	}
 	if err := headerTx(context.Background(), r.params(), func(h *Header, _ time.Time) (bool, error) {
 		h.HasCredential = true
+		yes := true
+		h.CredentialBackup = &yes // a backup copy (0.16.0)
 		return false, nil
 	}); err != nil {
 		t.Fatal(err)
 	}
 	return r
+}
+
+func (r *recFixture) setBackup(t *testing.T, b *bool) {
+	t.Helper()
+	if err := headerTx(context.Background(), r.params(), func(h *Header, _ time.Time) (bool, error) {
+		h.CredentialBackup = b
+		return false, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// §11.11.1, §11.11.3 (0.16.0): a vault without a backup copy is refused
+// at the request (nothing recorded) and at the register (the recovery is
+// removed, no_backup); a header from before 0.16.0 (no bit) counts as
+// having one, the registered app's unlock decides.
+func TestRecoveryNoBackup(t *testing.T) {
+	r := newRecFixture(t)
+	ctx := context.Background()
+	no := false
+	r.setBackup(t, &no)
+	if _, _, err := RecoveryRequest(ctx, r.params(), recID, RecoveryDelay); !errors.Is(err, ErrRecoveryNoBackup) {
+		t.Fatalf("request with the backup off: %v", err)
+	}
+	if h, _ := r.header(t); h.Recovery != nil || h.RecoveryRefusal() != "no_backup" {
+		t.Fatal("recorded")
+	}
+	r.setBackup(t, nil)
+	code, _, err := RecoveryRequest(ctx, r.params(), recID, RecoveryDelay)
+	if err != nil {
+		t.Fatalf("pre-0.16.0 header: %v", err)
+	}
+	r.setBackup(t, &no)
+	r.now = r.now.Add(RecoveryDelay + time.Minute)
+	if err := RecoveryRegister(ctx, r.params(), recID, code, testApp, ok); RecoveryCodeResult(err) != CodeNoBackup {
+		t.Fatalf("register with the backup off: %v", err)
+	}
+	if h, _ := r.header(t); h.Recovery != nil || findUnlockKey(h, testApp.IK) != nil {
+		t.Fatal("recovery kept after a no_backup register")
+	}
 }
 
 func (r *recFixture) params() HeaderParams {
@@ -169,5 +211,43 @@ func TestRecoveryCode(t *testing.T) {
 	a := RecoveryCodeHash("v", recID, "X")
 	if bytes.Equal(a, RecoveryCodeHash("w", recID, "X")) || bytes.Equal(a, RecoveryCodeHash("v", recID, "Y")) {
 		t.Fatal("hash not bound")
+	}
+}
+
+// §11.11.5 step 1 (0.16.0): the registered app's unlock of a vault without
+// a backup copy (here, no credential feature at all) is refused no_backup,
+// with no token or bundle, the recovery and its unlock key are removed and
+// the vault stays locked.
+func TestRecoveryUnlockNoBackup(t *testing.T) {
+	r := newRecFixture(t)
+	ctx := context.Background()
+	r.setBackup(t, nil) // a header from before 0.16.0: the unlock decides
+	code, _, err := RecoveryRequest(ctx, r.params(), recID, RecoveryDelay)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.now = r.now.Add(RecoveryDelay + time.Minute)
+	if err := RecoveryRegister(ctx, r.params(), recID, code, testApp, ok); err != nil {
+		t.Fatal(err)
+	}
+	o := r.opts
+	o.Now = func() time.Time { return r.now }
+	m, out := UnlockAlt(ctx, AltUnlockParams{Options: o, VaultID: r.vid, UserGUID: "u1", DeviceIK: testApp.IK, PIN: testPIN,
+		VerifyDevice: func(k *UnlockKey) (json.RawMessage, error) { return k.Attestation, nil },
+		Manifest: func(seen uint64) (*ManifestView, error) {
+			own := ReleaseEntry{PCR0: testRelease.PCR0, Number: testRelease.Number, Status: "active"}
+			return &ManifestView{Serial: seen + 1, Own: own, Lookup: func(string) (ReleaseEntry, bool) { return own, true }}, nil
+		},
+		OwnKeyCheck: func(context.Context, ReleaseEntry) (*SealKeyRecord, error) {
+			return &SealKeyRecord{VerifiedBy: testRelease.PCR0}, nil
+		}})
+	if m != nil || out.OK || out.Code != CodeNoBackup || out.Token != "" || out.VaultBundle != nil {
+		t.Fatalf("unlock: %+v", out)
+	}
+	if h, _ := r.header(t); h.Recovery != nil || findUnlockKey(h, testApp.IK) != nil {
+		t.Fatal("recovery kept")
+	}
+	if Unlocked() != 0 && m != nil {
+		t.Fatal("still open")
 	}
 }

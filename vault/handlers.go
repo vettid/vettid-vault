@@ -403,6 +403,13 @@ type CredentialGate interface {
 	CredentialExists() bool
 }
 
+// CredentialBackupCopy is implemented by the credential feature: whether
+// the vault keeps a backup copy of the current blob (0.16.0, §3.5.6), so
+// whether it can be recovered.
+type CredentialBackupCopy interface {
+	HasBackupCopy() bool
+}
+
 // allowedWithoutCredential are the types a restricted vault still accepts
 // (§3.5.7).
 var allowedWithoutCredential = map[string]bool{"vault.status": true, "vault.lock": true, "vault.delete": true, "credential.utk.get": true,
@@ -427,6 +434,17 @@ func (m *Manager) credentialReady() bool {
 		}
 	}
 	return true
+}
+
+// backupCopy reports whether the vault keeps a backup copy of its
+// credential (0.16.0): false without a credential feature that says so.
+func (m *Manager) backupCopy() bool {
+	for _, f := range m.features {
+		if b, ok := f.(CredentialBackupCopy); ok {
+			return b.HasBackupCopy()
+		}
+	}
+	return false
 }
 
 // credentialExists reports whether the vault has a credential (or no gate).

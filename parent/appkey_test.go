@@ -36,3 +36,25 @@ func TestAppKeyWrite(t *testing.T) {
 		t.Fatalf("enrolled did not replace: %+v", r)
 	}
 }
+
+// §11.5 (0.16.0): the backup bit is written under the lease rule.
+func TestCredentialBackupWrite(t *testing.T) {
+	tb := parenttest.NewTables()
+	tb.PutVault(parenttest.VaultRow{VaultID: "v1", UserGUID: "u1", State: "locked"})
+	ctx, now := context.Background(), time.Now()
+	f, tr := false, true
+	if err := tb.Lifecycle(ctx, parent.Lifecycle{Event: "unlocked", VaultID: "v1", CredentialBackup: &tr}, "me", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := tb.Lifecycle(ctx, parent.Lifecycle{Event: parent.EventCredentialBackup, VaultID: "v1", CredentialBackup: &f}, "me", now); err != nil {
+		t.Fatal(err)
+	}
+	if r, _ := tb.Vault("v1"); r.CredentialBackup == nil || *r.CredentialBackup {
+		t.Fatalf("bit %+v", r.CredentialBackup)
+	}
+	tb.PutVault(parenttest.VaultRow{VaultID: "v2", UserGUID: "u1", State: "unlocked", LeaseInstance: "other", LeaseExpires: now.Add(time.Hour).Unix()})
+	_ = tb.Lifecycle(ctx, parent.Lifecycle{Event: parent.EventCredentialBackup, VaultID: "v2", CredentialBackup: &f}, "me", now)
+	if r, _ := tb.Vault("v2"); r.CredentialBackup != nil {
+		t.Fatal("written without the lease")
+	}
+}

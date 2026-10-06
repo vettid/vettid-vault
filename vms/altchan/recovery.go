@@ -47,7 +47,7 @@ type RecoveryCode struct {
 	NotBefore time.Time
 	Expires   time.Time
 	// Error is set instead of the code when the vault refused the request
-	// ("no_credential", §11.11.1).
+	// ("no_credential", §11.11.1; "no_backup", 0.16.0).
 	Error string
 }
 

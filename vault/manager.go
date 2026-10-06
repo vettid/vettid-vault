@@ -91,7 +91,14 @@ type LifecycleEvent struct {
 	// app_key; nil and 0 for a vault without one.
 	AppKey    []byte
 	AppKeySeq uint64
+	// CredentialBackup is the vault's backup bit (0.16.0, §11.5): on
+	// enrolled, unlocked, locked and credential_backup; nil when not
+	// reported.
+	CredentialBackup *bool
 }
+
+// EventCredentialBackup reports a changed backup bit (0.16.0, §11.5).
+const EventCredentialBackup = "credential_backup"
 
 // EventAppKey reports a changed app key (a transfer or a recovery
 // replaced the app, §11.5, 0.15.0), after the flush that wrote it.
@@ -156,6 +163,9 @@ type Manager struct {
 	// appKeyChanged: the header's app key changed in this batch; reported
 	// to the host after the flush (§11.5).
 	appKeyChanged bool
+	// backupChanged: the header's credential_backup changed; reported
+	// after the flush (0.16.0, §11.5).
+	backupChanged bool
 	// deletePending: a deletion was marked in this batch; it is finished
 	// after the flush (§12.5).
 	deletePending bool
@@ -593,6 +603,15 @@ func (m *Manager) writeHeader(ctx context.Context) error {
 	m.syncUnlockKeys()
 	if m.st != nil {
 		m.hdr.HasCredential = m.credentialExists() && m.hasGate()
+		// §3.3, §11.5 (0.16.0): the backup bit, and an event when it
+		// changes on a running vault (reported after the write).
+		b := m.hdr.HasCredential && m.backupCopy()
+		if m.hdr.CredentialBackup == nil || *m.hdr.CredentialBackup != b {
+			if m.hdr.CredentialBackup != nil || m.started {
+				m.backupChanged = true
+			}
+			m.hdr.CredentialBackup = &b
+		}
 	}
 	m.hdr.HeaderSeq++
 	b, err := sealHeader(ctx, m.opt.Sealer, m.hdr)
@@ -811,6 +830,9 @@ func (m *Manager) report(event, vaultID, release string) {
 		if event == "locked" || event == EventAppKey || event == "unlocked" || event == "enrolled" {
 			ev.AppKey, ev.AppKeySeq = m.AppKey()
 		}
+		if event == "locked" || event == EventCredentialBackup || event == "unlocked" || event == "enrolled" {
+			ev.CredentialBackup = m.CredentialBackup()
+		}
 		m.opt.Lifecycle(ev)
 	}
 }
@@ -822,6 +844,33 @@ func (m *Manager) AppKey() ([]byte, uint64) {
 		return nil, 0
 	}
 	return append([]byte(nil), m.hdr.AppKey...), m.hdr.AppKeySeq
+}
+
+// CredentialBackup returns the header's backup bit (nil before 0.16.0).
+func (m *Manager) CredentialBackup() *bool {
+	if m.hdr == nil || m.hdr.CredentialBackup == nil {
+		return nil
+	}
+	b := *m.hdr.CredentialBackup
+	return &b
+}
+
+// RecoveryRefusal reports whether a running vault would refuse a recovery
+// (0.16.0, §11.11.1): "no_credential", "no_backup" or "". It decides from
+// its own state, before anything is locked.
+func (m *Manager) RecoveryRefusal() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.locked || m.st == nil {
+		return ""
+	}
+	switch {
+	case !m.hasGate() || !m.credentialExists():
+		return "no_credential"
+	case !m.backupCopy():
+		return "no_backup"
+	}
+	return ""
 }
 
 // setAppKey makes key the vault's app key (a transfer's or a recovery's
@@ -836,11 +885,17 @@ func (m *Manager) setAppKey(key []byte) {
 
 // reportAppKey reports a changed app key after the flush that stored it.
 func (m *Manager) reportAppKey() {
-	if !m.appKeyChanged || m.st == nil {
+	if m.st == nil {
 		return
 	}
-	m.appKeyChanged = false
-	m.report(EventAppKey, m.st.VaultID, m.opt.Release.PCR0)
+	if m.appKeyChanged {
+		m.appKeyChanged = false
+		m.report(EventAppKey, m.st.VaultID, m.opt.Release.PCR0)
+	}
+	if m.backupChanged {
+		m.backupChanged = false
+		m.report(EventCredentialBackup, m.st.VaultID, m.opt.Release.PCR0)
+	}
 }
 
 // StateVersion is the vault-state format version reported in lifecycle

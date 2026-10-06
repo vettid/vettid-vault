@@ -311,7 +311,10 @@ type vaultRow struct {
 	Lease                                                 *lease
 	Recovery                                              *recoveryRow
 	// AppKey is the app_key the host wrote from the enclave's reports.
-	AppKey               *appKey
+	AppKey *appKey
+	// CredentialBackup is the backup bit the host wrote (0.16.0); nil
+	// until a 0.16.0 release reports it.
+	CredentialBackup     *bool
 	CreatedAt, UpdatedAt string
 }
 
@@ -341,6 +344,10 @@ func parseVault(it map[string]ddbtypes.AttributeValue) *vaultRow {
 		if r.ID != "" {
 			v.Recovery = r
 		}
+	}
+	if b, ok := it["credential_backup"].(*ddbtypes.AttributeValueMemberBOOL); ok {
+		x := b.Value
+		v.CredentialBackup = &x
 	}
 	if m, ok := it["app_key"].(*ddbtypes.AttributeValueMemberM); ok {
 		if k, ok := parseKey(str(m.Value, "key")); ok && k.kid == str(m.Value, "kid") {

@@ -104,7 +104,14 @@ type Lifecycle struct {
 	// (enrolled: always).
 	AppKey    []byte
 	AppKeySeq uint64
+	// CredentialBackup is the vault's backup bit (0.16.0, §11.5): on
+	// enrolled, unlocked, locked and credential_backup; nil when not
+	// reported. Written under the lease rule.
+	CredentialBackup *bool
 }
+
+// EventCredentialBackup reports a changed backup bit (0.16.0, §11.5).
+const EventCredentialBackup = "credential_backup"
 
 // EventAppKey is the lifecycle event of a changed app key (a transfer or
 // a recovery, §11.5, 0.15.0).

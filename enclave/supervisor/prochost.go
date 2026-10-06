@@ -334,6 +334,28 @@ func (h *procHost) LockReason(ctx context.Context, id, reason string) (bool, err
 	return true, nil
 }
 
+// RecoveryRefusal implements enclave.Host: the running vault's process
+// answers from its own state; nothing is locked (0.16.0).
+func (h *procHost) RecoveryRefusal(ctx context.Context, id string) (bool, string) {
+	h.mu.Lock()
+	p := h.procs[id]
+	h.mu.Unlock()
+	if p == nil {
+		return false, ""
+	}
+	rctx, cancel := context.WithTimeout(ctx, h.cfg.LockTimeout)
+	defer cancel()
+	r, err := p.conn.Call(rctx, vaultipc.KindRecoverable)
+	if err != nil || len(r) != 2 || string(r[0]) != hostproto.StatusOK {
+		return true, "" // unknown: the job decides from the header after the lock
+	}
+	switch why := string(r[1]); why {
+	case "no_credential", "no_backup":
+		return true, why
+	}
+	return true, ""
+}
+
 // Account implements enclave.Host: the snapshot goes to the vault's
 // process (§11.13); without one it is dropped.
 func (h *procHost) Account(ctx context.Context, id string, snapshot []byte) (bool, error) {
@@ -596,7 +618,11 @@ func (p *vproc) notify(f *hostproto.Frame) {
 	s := p.h.s
 	switch f.Kind {
 	case vaultipc.KindLifecycle:
-		if len(f.Fields) != 7 || string(f.Fields[1]) != p.vaultID || len(f.Fields[5]) > 256 {
+		if len(f.Fields) != 8 || string(f.Fields[1]) != p.vaultID || len(f.Fields[5]) > 256 {
+			return
+		}
+		backup, ok := enclave.ParseBackupField(string(f.Fields[7]))
+		if !ok {
 			return
 		}
 		sv, err := strconv.Atoi(string(f.Fields[4]))
@@ -608,7 +634,8 @@ func (p *vproc) notify(f *hostproto.Frame) {
 			return
 		}
 		s.lifecycle(vault.LifecycleEvent{Event: string(f.Fields[0]), VaultID: p.vaultID, Release: string(f.Fields[2]),
-			VaultVersion: string(f.Fields[3]), StateVersion: sv, AppKey: append([]byte(nil), f.Fields[5]...), AppKeySeq: seq})
+			VaultVersion: string(f.Fields[3]), StateVersion: sv, AppKey: append([]byte(nil), f.Fields[5]...), AppKeySeq: seq,
+			CredentialBackup: backup})
 	case vaultipc.KindLog:
 		if len(f.Fields) < 2 {
 			return

@@ -299,23 +299,9 @@ func (d *Device) CredentialResetHolder(ctx context.Context, pin, password, newPa
 // CredentialRecover authenticates a recovering app with the credential
 // password (§11.11.5) against the vault's copy of the latest blob and
 // keeps the credential handed over; afterwards the app is the vault's one
-// app. With backup off the vault holds no copy: credential_lost
-// (CredentialReset).
+// app. A vault without a backup copy is never recovered (0.16.0).
 func (d *Device) CredentialRecover(ctx context.Context, password string) error {
 	if _, _, _, err := d.sealedOp(ctx, "credential.recover", false, map[string]any{"password": password}, false); err != nil {
-		return err
-	}
-	d.mu.Lock()
-	d.st.Recovery = nil
-	d.mu.Unlock()
-	return nil
-}
-
-// CredentialReset ends a recovery when the credential is lost (backup off,
-// §11.11.5): a new credential under password; the old one and every
-// critical item are destroyed.
-func (d *Device) CredentialReset(ctx context.Context, password string) error {
-	if _, _, _, err := d.sealedOp(ctx, "credential.reset", false, map[string]any{"password": password}, false); err != nil {
 		return err
 	}
 	d.mu.Lock()

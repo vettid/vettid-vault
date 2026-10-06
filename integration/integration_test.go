@@ -103,6 +103,9 @@ func TestV3Exit(t *testing.T) {
 	if err := m2.CredentialCreate(ctx, "member two password"); err != nil {
 		t.Fatal(err)
 	}
+	// 0.16.0 (§11.5): the credential's first blob is a backup copy; the
+	// parent records the bit.
+	waitFor(t, "credential_backup on the row", func() bool { return s.vaultRow(vid2).CredentialBackup == "true" })
 	mustOK(t, req(t, m2, "vault.enroll.confirm", `{}`))
 	if vid2 == vid {
 		t.Fatal("two members share a vault id")

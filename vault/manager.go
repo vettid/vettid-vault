@@ -95,6 +95,9 @@ type LifecycleEvent struct {
 	// enrolled, unlocked, locked and credential_backup; nil when not
 	// reported.
 	CredentialBackup *bool
+	// Name is the name request of account_name (0.18.0, §11.5); nil on
+	// every other event.
+	Name *NameChange
 }
 
 // EventCredentialBackup reports a changed backup bit (0.16.0, §11.5).
@@ -163,6 +166,9 @@ type Manager struct {
 	// appKeyChanged: the header's app key changed in this batch; reported
 	// to the host after the flush (§11.5).
 	appKeyChanged bool
+	// nameReport: a name request stored in this batch; reported as
+	// account_name after the flush (0.18.0, §11.5).
+	nameReport *NameChange
 	// backupChanged: the header's credential_backup changed; reported
 	// after the flush (0.16.0, §11.5).
 	backupChanged bool
@@ -233,6 +239,10 @@ type CreateParams struct {
 	Provisional bool
 	// App is the first app, bound at enrollment (§11.3). Optional.
 	App *EnrollApp
+	// Account is the enroll queue message's account snapshot (0.18.0,
+	// §11.5, §11.13), stored before the first flush. The enclave refuses
+	// an enrollment without a valid one; development vaults may omit it.
+	Account []byte
 	// Release fields of the first header (§11.10): the manifest serial
 	// seen at enrollment and the verified sealing key (§11.10.7).
 	ManifestSerial  uint64
@@ -321,6 +331,10 @@ func Create(ctx context.Context, p CreateParams) (*Manager, error) {
 	if m.limits, err = m.relay.Register(ctx); err != nil {
 		m.zeroize()
 		return nil, err
+	}
+	if len(p.Account) > 0 && !m.applyAccount(p.Account, now) {
+		m.zeroize()
+		return nil, ErrAccount
 	}
 	if p.App != nil {
 		if err := m.enrollApp(ctx, p.App, now); err != nil {
@@ -896,6 +910,7 @@ func (m *Manager) reportAppKey() {
 		m.backupChanged = false
 		m.report(EventCredentialBackup, m.st.VaultID, m.opt.Release.PCR0)
 	}
+	m.reportName()
 }
 
 // StateVersion is the vault-state format version reported in lifecycle

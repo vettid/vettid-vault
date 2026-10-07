@@ -41,6 +41,8 @@ type newcomer struct {
 	n      int
 	// noAPIKey leaves api_key out of a transfer's hs.init.
 	noAPIKey bool
+	// noProfile: a connection hs.init without the core names (§6.2).
+	noProfile bool
 }
 
 // testAppKeyDER is a fixed P-256 app key's SPKI DER (scalar 32 x b), TEST
@@ -86,6 +88,9 @@ func (n *newcomer) hsInitAttest(t testing.TB, m *Manager, purpose handshake.Purp
 		Token: tok, ResponderIK: m.keys.ik.Public().(ed25519.PublicKey), ResponderEK: m.keys.kem.Public(),
 		ResponderRelayKey: m.keys.relay.Public().(ed25519.PublicKey), Policy: policyFor(string(purpose)), Now: now,
 		DeviceAttest: da, ID: id}
+	if purpose == handshake.PurposeConnection && !n.noProfile {
+		cfg.Profile = json.RawMessage(`{"first_name":"Nora","last_name":"Newcomer"}`) // §6.2 (0.18.0)
+	}
 	if inv := m.st.Invites[ctxID]; inv != nil && inv.Transfer && !n.noAPIKey {
 		cfg.APIKey = testAppKeyDER(t, n.ik[0]) // a transfer's new app (0.15.0, §6.2)
 	}

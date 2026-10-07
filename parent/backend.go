@@ -108,7 +108,23 @@ type Lifecycle struct {
 	// enrolled, unlocked, locked and credential_backup; nil when not
 	// reported. Written under the lease rule.
 	CredentialBackup *bool
+	// Name is the member's name request (0.18.0, §11.5): on account_name
+	// only. The parent writes name_change = {seq, first_name, last_name,
+	// at} and name_change_pending = true on the vault row whatever the
+	// lease, when seq is higher than the row's.
+	Name *NameChange
 }
+
+// NameChange is account_name's request (0.18.0, §10.8, §11.5).
+type NameChange struct {
+	Seq       uint64
+	FirstName string
+	LastName  string
+}
+
+// EventAccountName reports the member's approved name change request
+// (0.18.0, §11.5).
+const EventAccountName = "account_name"
 
 // EventCredentialBackup reports a changed backup bit (0.16.0, §11.5).
 const EventCredentialBackup = "credential_backup"

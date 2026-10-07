@@ -198,7 +198,7 @@ func (f *Feature) Types() []vault.TypeSpec {
 		r("credential.password.change", apps), r("credential.recover", apps),
 		r("credential.reset", apps), r("credential.alarm.confirm", apps),
 		r("device.transfer.create", apps), r("device.transfer.approve", apps), r("device.transfer.reject", apps),
-		r("vault.delete", apps), r(vault.TypeOwnerCheck, apps),
+		r("vault.delete", apps), r(vault.TypeOwnerCheck, apps), r(vault.TypeAccountNameSet, apps),
 	}
 }
 
@@ -343,6 +343,7 @@ const (
 	needPIN
 	optPassword
 	optHold
+	needNames
 )
 
 // What another feature's credential operation carries in its sealed
@@ -374,6 +375,7 @@ var needs = map[string]int{
 	"device.transfer.reject":     0,
 	"vault.delete":               optBlob | needSealed | optPassword | needPIN,
 	vault.TypeOwnerCheck:         needBlob | needSealed | needPassword | needPIN | optHold,
+	vault.TypeAccountNameSet:     needBlob | needSealed | needPassword | needPIN | needNames,
 }
 
 // holderResetNeed is what the holder's credential.reset carries (0.15.2,
@@ -472,6 +474,10 @@ type Payload struct {
 	HasHold      bool
 	Hold         bool
 	HoldOffUntil string
+	// FirstName and LastName are account.name.set's requested names
+	// (0.18.0, §10.8), as sent (the handler trims and checks them).
+	FirstName string
+	LastName  string
 }
 
 // Wipe zeroizes the payload's secrets.
@@ -577,6 +583,14 @@ func parsePayload(n int, pt []byte) (*Payload, error) {
 			p.HoldOffUntil = v
 		}
 	}
+	if n&needNames != 0 {
+		if p.FirstName, err = o.String("first_name"); err != nil {
+			return fail()
+		}
+		if p.LastName, err = o.String("last_name"); err != nil {
+			return fail()
+		}
+	}
 	if n&needReply != 0 {
 		ek, err := o.Base64("reply_key", suite.EKSize)
 		if err != nil {
@@ -679,6 +693,8 @@ func (f *Feature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner
 		return out, err
 	case vault.TypeOwnerCheck:
 		return f.ownerCheck(s, e, p)
+	case vault.TypeAccountNameSet:
+		return f.nameSet(s, e, p)
 	case "credential.recover":
 		return f.recover(s, p)
 	case "device.transfer.approve":
@@ -732,6 +748,7 @@ func (f *Feature) deleteAll(s *vault.Session) {
 var holderOnly = map[string]bool{
 	"credential.get": true, "credential.ack": true, "credential.alarm.confirm": true,
 	"device.transfer.create": true, "device.transfer.reject": true, "vault.delete": true, vault.TypeOwnerCheck: true,
+	vault.TypeAccountNameSet: true,
 }
 
 // allowedFrozen are the types a frozen credential still accepts; in state

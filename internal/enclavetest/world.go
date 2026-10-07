@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
+	"encoding/json"
 	"errors"
 	"sync"
 	"time"
@@ -40,14 +41,16 @@ func (r ReleaseSpec) PCR0Hex() string { return PCRHex(r.PCR0) }
 // Instances of several releases run side by side (§11.10.5).
 type World struct {
 	// Account, if set, is the account snapshot the API puts in each
-	// unlock (0.15.0, §11.13).
-	Account  func(userGUID string) []byte
-	Now      func() time.Time
-	Store    store.Store
-	KMS      *FakeKMS
-	Key      *ecdsa.PrivateKey
-	Relays   *MemRelays
-	Features func() []vault.Feature
+	// unlock (0.15.0, §11.13) and enroll (0.18.0, REQUIRED there: nil
+	// puts Snapshot's in it, unless NoEnrollAccount).
+	Account         func(userGUID string) []byte
+	NoEnrollAccount bool
+	Now             func() time.Time
+	Store           store.Store
+	KMS             *FakeKMS
+	Key             *ecdsa.PrivateKey
+	Relays          *MemRelays
+	Features        func() []vault.Feature
 	// VaultOptions is the template for vaults (relay transport etc.).
 	VaultOptions vault.Options
 	// Stopped is passed to instances (run loops that end).
@@ -317,8 +320,11 @@ func (w *World) Post(ctx context.Context, in *enclave.Instance, op, vaultID, use
 	if op == enclave.OpEnroll || op == enclave.OpRecoveryRegister {
 		q.AppKey = r.AppKey // the key the API checked the request's signature with (0.15.0)
 	}
-	if op == enclave.OpUnlock && w.Account != nil {
+	switch {
+	case (op == enclave.OpUnlock || op == enclave.OpEnroll) && w.Account != nil:
 		q.Account = w.Account(userGUID) // §11.13
+	case op == enclave.OpEnroll && !w.NoEnrollAccount:
+		q.Account = Snapshot(w.Now(), "Test", "Member") // §11.5 (0.18.0)
 	}
 	var doc []byte
 	if op == enclave.OpEnroll || op == enclave.OpUnlock {
@@ -389,4 +395,14 @@ func (w *World) RecoveryCancel(ctx context.Context, in *enclave.Instance, vaultI
 	rid, _ := envelope.NewULID(w.Now())
 	q := &enclave.QueueMessage{Op: enclave.OpRecoveryCancel, VaultID: vaultID, UserGUID: userGUID, RequestID: rid, EnqueuedAt: w.Now()}
 	in.Process(ctx, q, nil)
+}
+
+// Snapshot is a well-formed account snapshot (§11.13, 0.18.0) as of t
+// with the names first and last.
+func Snapshot(t time.Time, first, last string) []byte {
+	b, _ := json.Marshal(map[string]any{"v": 1, "as_of": t.UTC().Format("2006-01-02T15:04:05.000Z"), "email_hint": "m***@example.org",
+		"first_name": first, "last_name": last, "name_change": map[string]any{"allowed_after": nil, "last": nil},
+		"state": "member", "account_status": "active", "deletes_at": nil, "terms": map[string]any{"needs_acceptance": false},
+		"subscription": nil, "voting_rights": false})
+	return b
 }

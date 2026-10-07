@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vettid/vettid-vault/features/items"
 	"github.com/vettid/vettid-vault/internal/featuretest"
 	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault"
@@ -373,20 +374,141 @@ func TestProfile(t *testing.T) {
 	}
 	e.code(e.call("app", "item.put", `{"name":"P","tags":["@profile"]}`), "limit")
 	// A peer's update: strict, highest version wins.
-	up := `{"version":3,"name":"Bo","items":[{"item_id":"01JB2Z6V9K3M4N5P6Q7R8S9T0V","name":"Card","category":"contact",` +
+	core := peerCore(e, "cA")
+	up := `{"version":3,` + core + `,"name":"Bo","items":[{"item_id":"01JB2Z6V9K3M4N5P6Q7R8S9T0V","name":"Card","category":"contact",` +
 		`"fields":[{"field_id":"f1","label":"Phone","kind":"phone","value":"+47 1234"}]}]}`
 	e.ok(e.call("connection:cA", "profile.update", up))
-	if !bytes.Contains(e.h.Profiles["cA"], []byte("+47 1234")) {
-		t.Fatal("peer profile not stored")
+	if !bytes.Contains(e.h.Profiles["cA"], []byte("+47 1234")) || !bytes.HasPrefix(e.h.Profiles["cA"], []byte(`{"version":3,`+core+`,"name":"Bo",`)) {
+		t.Fatalf("peer profile not stored: %s", e.h.Profiles["cA"])
 	}
-	e.ok(e.call("connection:cA", "profile.update", `{"version":2,"name":"Old","items":[]}`))
+	e.ok(e.call("connection:cA", "profile.update", `{"version":2,`+core+`,"name":"Old","items":[]}`))
 	if bytes.Contains(e.h.Profiles["cA"], []byte("Old")) {
 		t.Fatal("older update applied")
 	}
-	for _, b := range []string{`{"version":4,"name":"x"}`, `{"version":4,"name":"x","items":[{"item_id":"bad","name":"n","category":"c","fields":[]}]}`,
-		`{"version":4,"name":"x","items":[{"item_id":"01JB2Z6V9K3M4N5P6Q7R8S9T0V","name":"n","category":"c","fields":[{"label":"L","kind":"text","value":"v"}]}]}`,
-		`{"version":4,"name":"x","items":[{"item_id":"01JB2Z6V9K3M4N5P6Q7R8S9T0V","name":"n","category":"c","fields":[{"field_id":"f1","label":"L","kind":"date","value":"no"}]}]}`} {
+	for _, b := range []string{`{"version":4,` + core + `,"name":"x"}`, `{"version":4,` + core + `,"name":"x","items":[{"item_id":"bad","name":"n","category":"c","fields":[]}]}`,
+		`{"version":4,` + core + `,"name":"x","items":[{"item_id":"01JB2Z6V9K3M4N5P6Q7R8S9T0V","name":"n","category":"c","fields":[{"label":"L","kind":"text","value":"v"}]}]}`,
+		`{"version":4,` + core + `,"name":"x","items":[{"item_id":"01JB2Z6V9K3M4N5P6Q7R8S9T0V","name":"n","category":"c","fields":[{"field_id":"f1","label":"L","kind":"date","value":"no"}]}]}`} {
 		e.code(e.call("connection:cA", "profile.update", b), "bad_request")
+	}
+}
+
+// peerCore is connection id's core members: names and its pinned ik.
+func peerCore(e *env, id string) string {
+	return `"first_name":"Bo","last_name":"Berg","ik":"` + base64.StdEncoding.EncodeToString(e.h.Conns[id].IK) + `"`
+}
+
+// §10.8 (0.18.0): every profile.update carries the core (the snapshot's
+// names and the vault's ik) before the extras; the display name is
+// optional; profile.get returns the core and profile.set refuses it.
+func TestProfileCore(t *testing.T) {
+	e := newEnv(t)
+	ik := base64.StdEncoding.EncodeToString(e.h.IK)
+	o := e.ok(e.call("app", "profile.get", `{}`))
+	if string(o["first_name"]) != `"Ada"` || string(o["last_name"]) != `"Lovelace"` || string(o["ik"]) != `"`+ik+`"` || o.Has("name") {
+		t.Fatalf("profile.get: %v", o)
+	}
+	for _, b := range []string{`{"version":0,"first_name":"Eve"}`, `{"version":0,"last_name":"X"}`, `{"version":0,"ik":"` + ik + `"}`} {
+		e.code(e.call("app", "profile.set", b), "bad_request")
+	}
+	// The first change counts the core and sends it; a photo-only change
+	// keeps the display name absent.
+	e.ok(e.call("app", "profile.set", `{"version":0,"photo":"`+base64.StdEncoding.EncodeToString([]byte("\x89PNG\r\n\x1a\nimg"))+`"}`))
+	ups := e.sentTo("cA", "profile.update")
+	want := `{"version":1,"first_name":"Ada","last_name":"Lovelace","ik":"` + ik + `","photo":`
+	if len(ups) != 1 || !bytes.HasPrefix(ups[0].Body, []byte(want)) || bytes.Contains(ups[0].Body, []byte(`"name":"`)) {
+		t.Fatalf("profile.update: %v", ups)
+	}
+	// New names from a snapshot: one update to every connection; the same
+	// names again change nothing.
+	e.h.Reset()
+	e.h.FirstName, e.h.LastName = "Ada", "King"
+	f := e.set.Items
+	f.ProfileCoreChanged(vault.NewSession(context.Background(), e.h, vault.PeerInfo{}, e.clk.T, nil))
+	for _, c := range []string{"cA", "cB"} {
+		if ups := e.sentTo(c, "profile.update"); len(ups) != 1 || !bytes.HasPrefix(ups[0].Body, []byte(`{"version":2,"first_name":"Ada","last_name":"King",`)) {
+			t.Fatalf("%s after the name change: %v", c, ups)
+		}
+	}
+	e.h.Reset()
+	f.ProfileCoreChanged(vault.NewSession(context.Background(), e.h, vault.PeerInfo{}, e.clk.T, nil))
+	if len(e.h.SentOfType("profile.update")) != 0 {
+		t.Fatal("unchanged names re-sent")
+	}
+	// After an ik rotation the connection whose epoch predates it waits
+	// for its epoch under the new ik (ConnectionRotated).
+	e.h.SetIdentity(0x77)
+	c := e.h.Conns["cA"]
+	c.RotationPending = true
+	e.h.Conns["cA"] = c
+	f.ProfileCoreChanged(vault.NewSession(context.Background(), e.h, vault.PeerInfo{}, e.clk.T, nil))
+	if len(e.sentTo("cA", "profile.update")) != 0 || len(e.sentTo("cB", "profile.update")) != 1 {
+		t.Fatalf("after the rotation: %v", e.h.Sent)
+	}
+	e.h.Reset()
+	c.RotationPending = false
+	e.h.Conns["cA"] = c
+	f.ConnectionRotated(vault.NewSession(context.Background(), e.h, vault.PeerInfo{}, e.clk.T, nil), "cA")
+	newIK := base64.StdEncoding.EncodeToString(e.h.IK)
+	if ups := e.sentTo("cA", "profile.update"); len(ups) != 1 || !bytes.Contains(ups[0].Body, []byte(`{"version":3,"first_name":"Ada","last_name":"King","ik":"`+newIK+`"`)) {
+		t.Fatalf("in the new epoch: %v", ups)
+	}
+	// Without names nothing is sent, and the vault says why.
+	e.h.Reset()
+	e.h.FirstName = ""
+	e.ok(e.call("app", "profile.set", `{"version":1,"name":"Al"}`))
+	if len(e.h.SentOfType("profile.update")) != 0 || !e.h.HasActivity("profile.core_missing") {
+		t.Fatalf("without names: %v", e.h.Sent)
+	}
+}
+
+// §10.8 "Receiving" (0.18.0): after the version check, an update without
+// the complete core is dropped (drop.profile_malformed), one with an
+// earlier ik of the peer's chain is ignored, any other ik is dropped
+// (drop.profile_ik_mismatch); none changes the kept profile or tells a
+// device.
+func TestProfileReceiveCore(t *testing.T) {
+	e := newEnv(t)
+	core := peerCore(e, "cA")
+	e.ok(e.call("connection:cA", "profile.update", `{"version":5,`+core+`,"items":[]}`))
+	kept := string(e.h.Profiles["cA"])
+	if kept != `{"version":5,`+core+`,"items":[]}` {
+		t.Fatalf("kept %s", kept)
+	}
+	old := make([]byte, 32)
+	old[0] = 9
+	e.h.PriorIKs = map[string][][]byte{"cA": {old}}
+	ik := func(b []byte) string { return base64.StdEncoding.EncodeToString(b) }
+	other := make([]byte, 32)
+	other[0] = 8
+	cases := []struct{ body, audit string }{
+		{`{"version":4,"items":[]}`, ""}, // not newer: ignored first
+		{`{"version":6,"last_name":"Berg","ik":"` + ik(e.h.Conns["cA"].IK) + `","items":[]}`, "drop.profile_malformed"},
+		{`{"version":6,"first_name":"","last_name":"Berg","ik":"` + ik(e.h.Conns["cA"].IK) + `","items":[]}`, "drop.profile_malformed"},
+		{`{"version":6,"first_name":"Bo\u2028","last_name":"Berg","ik":"` + ik(e.h.Conns["cA"].IK) + `","items":[]}`, "drop.profile_malformed"},
+		{`{"version":6,"first_name":"Bo","last_name":7,"ik":"` + ik(e.h.Conns["cA"].IK) + `","items":[]}`, "drop.profile_malformed"},
+		{`{"version":6,"first_name":"Bo","last_name":"Berg","ik":"AAAA","items":[]}`, "drop.profile_malformed"},
+		{`{"version":6,"first_name":"Bo","last_name":"Berg","ik":"` + ik(old) + `","items":[]}`, ""},
+		{`{"version":6,"first_name":"Bo","last_name":"Berg","ik":"` + ik(other) + `","items":[]}`, "drop.profile_ik_mismatch"},
+	}
+	for _, c := range cases {
+		e.h.Reset()
+		e.ok(e.call("connection:cA", "profile.update", c.body))
+		if string(e.h.Profiles["cA"]) != kept || len(e.h.SentOfType("connection.event")) != 0 {
+			t.Fatalf("%s changed the profile", c.body)
+		}
+		if c.audit == "" && len(e.h.Activities) != 0 || c.audit != "" && !e.h.HasActivity(c.audit) {
+			t.Fatalf("%s: activities %+v", c.body, e.h.Activities)
+		}
+		for _, a := range e.h.Activities {
+			if a.Ref != "cA" || a.ConnectionID != "cA" || !a.Audit {
+				t.Fatalf("audit entry %+v", a)
+			}
+		}
+	}
+	// The next valid one replaces it.
+	e.ok(e.call("connection:cA", "profile.update", `{"version":6,`+core+`,"name":"Bo","items":[]}`))
+	if !bytes.Contains(e.h.Profiles["cA"], []byte(`"name":"Bo"`)) {
+		t.Fatal("valid update after the drops")
 	}
 }
 
@@ -645,5 +767,26 @@ func FuzzItemTypes(f *testing.F) {
 			e.call("app", typ, body)
 		}
 		e.call("connection:cA", "profile.update", body)
+	})
+}
+
+// §10.8 (0.18.0): a parsed update without Malformed has a valid core, and
+// its canonical form parses to the same.
+func FuzzParseUpdate(f *testing.F) {
+	ik := base64.StdEncoding.EncodeToString(make([]byte, 32))
+	f.Add([]byte(`{"version":3,"first_name":"Bo","last_name":"Berg","ik":"` + ik + `","name":"B","items":[]}`))
+	f.Add([]byte(`{"version":3,"last_name":"Berg","ik":"AAAA","items":[]}`))
+	f.Fuzz(func(t *testing.T, b []byte) {
+		u, err := items.ParseUpdate(b)
+		if err != nil || u.Malformed {
+			return
+		}
+		if !vault.ValidAccountName(u.FirstName) || !vault.ValidAccountName(u.LastName) || len(u.IK) != 32 {
+			t.Fatalf("accepted core %+v", u)
+		}
+		v, err := items.ParseUpdate(u.Marshal())
+		if err != nil || v.Malformed || !bytes.Equal(v.Marshal(), u.Marshal()) {
+			t.Fatalf("canonical form %s: %v", u.Marshal(), err)
+		}
 	})
 }

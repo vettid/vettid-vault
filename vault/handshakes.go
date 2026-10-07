@@ -162,6 +162,12 @@ func (m *Manager) handleInit(ctx context.Context, raw []byte, sender ed25519.Pub
 			return ackAfterFlush
 		}
 	}
+	if inv.Kind == KindConnection && !ValidHandshakeProfile(body.Profile) {
+		// §6.2 (0.18.0): a vault's connection hs.init carries the
+		// account's first and last name.
+		m.audit(now, "profile_malformed", "")
+		return ackAfterFlush
+	}
 	if inv.Kind == KindConnection && m.countRequests(ReqIn) >= MaxRequests {
 		m.audit(now, "request_limit", "") // §10.4: at most 256 incoming requests
 		return ackAfterFlush
@@ -444,6 +450,9 @@ func (m *Manager) handleFin(ctx context.Context, id string, raw []byte, sender e
 // connection request it came from, for connection.event{added}).
 func (m *Manager) activate(p *Peer, ep *handshake.Epoch, purpose handshake.Purpose, issued []IssuedToken, pendingID string, now time.Time) {
 	isNew := m.peer(p.ID) == nil
+	// §10.8 (0.18.0): the first epoch under the vault's new ik carries
+	// the profile.update with it.
+	rotated := !isNew && m.rotationPending(p)
 	if isNew {
 		if p.Kind == KindConnection {
 			m.st.Connections[p.ID] = p
@@ -524,6 +533,9 @@ func (m *Manager) activate(p *Peer, ep *handshake.Epoch, purpose handshake.Purpo
 	case purpose == handshake.PurposeRekey && p.Kind == KindConnection:
 		m.notifyDevices("connection.event", connEvent(p.ID, "rekeyed"), "", now)
 	}
+	if rotated && p.State == PeerActive {
+		m.connectionRotated(p.ID, now)
+	}
 }
 
 func connEvent(id, ev string) json.RawMessage {
@@ -579,9 +591,10 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 			p.Chain = append(p.Chain, r.Marshal())
 		}
 	}
-	fin := res.Fin
+	// hs.fin goes first: what activation sends in the new epoch (the
+	// profile.update after an ik rotation, §10.8) follows it.
+	m.queueDeposit(&OutboxEntry{Op: OpDeposit, PeerID: p.ID, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Payload: res.Fin}, now)
 	m.activate(p, res.Epoch, og.Purpose, og.Issued, "", now)
-	m.queueDeposit(&OutboxEntry{Op: OpDeposit, PeerID: p.ID, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Payload: fin}, now)
 	return ackAfterFlush
 }
 
@@ -774,12 +787,20 @@ func (m *Manager) acceptInvite(ctx context.Context, link, introBy string, now ti
 		// §6.4 "Already connected": the link is spent; no hs.init.
 		return nil, &HandlerError{Code: "exists", Body: strictjson.NewBuilder().String("connection_id", cid).Bytes()}
 	}
+	// §6.2, §10.8 (0.18.0): the hs.init profile carries the core names;
+	// a vault that somehow lacks them sends none (the enrollment rule
+	// excludes it) rather than one its peer drops.
+	profile, ok := m.handshakeProfile()
+	if !ok {
+		m.record(Activity{Kind: "profile.core_missing", Audit: true}, now)
+		return nil, errUnavailable
+	}
 	p := peerFromPrincipal(m.newID(now), KindConnection, b.Vault, now)
 	cfg := handshake.InitiatorConfig{
 		Purpose: handshake.PurposeConnection, Ctx: b.InviteID,
 		Identity: m.keys.ik, StaticKEM: m.keys.kem.Public(), Relay: m.ownAddr(),
 		ResponderIK: b.Vault.IK, ResponderEK: b.Vault.KEM, ResponderRelayKey: b.Vault.Relay.PK,
-		Policy: handshake.PolicyVaultToVault, Now: now, Profile: m.handshakeProfile(),
+		Policy: handshake.PolicyVaultToVault, Now: now, Profile: profile,
 	}
 	if cfg.Token, err = m.mintRequest(p, now); err != nil {
 		return nil, err

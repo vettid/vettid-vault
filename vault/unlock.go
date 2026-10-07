@@ -575,6 +575,13 @@ func (m *Manager) resume(ctx context.Context, p AltUnlockParams, out *AltUnlockO
 	ev := lifecycle(p.Options, "unlocked", p.VaultID, p.Release.PCR0)
 	ev.AppKey, ev.AppKeySeq = m.AppKey()
 	out.Events = append(out.Events, ev)
+	if n := m.pendingNameChange(); n != nil {
+		// §11.5 (0.19.0): a still-pending name request again with every
+		// unlocked report (the row's seq condition makes it idempotent).
+		ne := lifecycle(p.Options, EventAccountName, p.VaultID, p.Release.PCR0)
+		ne.Name = n
+		out.Events = append(out.Events, ne)
+	}
 	return m, out
 }
 

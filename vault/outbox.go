@@ -154,7 +154,7 @@ func (m *Manager) outboxPending(peer string) bool {
 func (m *Manager) retryPeer(peer string) {
 	for _, e := range m.st.Outbox {
 		if e.PeerID == peer && !e.Done {
-			e.NotBefore = time.Time{}
+			e.NotBefore, e.AwaitToken = time.Time{}, false
 		}
 	}
 }
@@ -165,15 +165,20 @@ func (m *Manager) retryPeer(peer string) {
 // not delivered (waiting for a retry, or failed now), later deposits to
 // that mailbox wait too, so that a message never overtakes an earlier one
 // (an hs.fin, in particular, must precede traffic in its new epoch).
+// A deposit waiting for a fresh standing token (AwaitToken) holds back
+// only the later deposits on the peer's standing token, not one with a
+// token of its own: the reconnect's hs.init that brings the fresh token
+// (§6.6) must not wait behind it.
 func (m *Manager) drainOutbox(ctx context.Context) {
 	now := m.now()
 	blocked := map[string]bool{}
+	awaiting := map[string]bool{}
 	for _, e := range m.st.Outbox {
 		if e.Done {
 			continue
 		}
 		key := e.RelayURL + "|" + e.Mailbox
-		if e.Op == OpDeposit && blocked[key] {
+		if e.Op == OpDeposit && (blocked[key] || awaiting[key] && e.Token == "") {
 			continue
 		}
 		if !e.NotAfter.IsZero() && !now.Before(e.NotAfter) {
@@ -181,7 +186,9 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 			continue
 		}
 		if now.Before(e.NotBefore) {
-			if e.Op == OpDeposit {
+			if e.Op == OpDeposit && e.AwaitToken {
+				awaiting[key] = true
+			} else if e.Op == OpDeposit {
 				blocked[key] = true
 			}
 			continue
@@ -203,7 +210,9 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 			e.Done = true
 			continue
 		}
-		if e.Op == OpDeposit && !e.Done {
+		if e.Op == OpDeposit && !e.Done && e.AwaitToken {
+			awaiting[key] = true
+		} else if e.Op == OpDeposit && !e.Done {
 			blocked[key] = true
 		}
 		if e.Done || e.NotBefore.After(now) {
@@ -258,6 +267,7 @@ func (m *Manager) deposit(ctx context.Context, e *OutboxEntry, now time.Time) er
 				m.startReconnect(p, now) // §6.6 "When to use it"
 			}
 			e.NotBefore = now.Add(time.Hour) // retried when a fresh token arrives
+			e.AwaitToken = true
 			e.Attempts++
 			return err
 		}

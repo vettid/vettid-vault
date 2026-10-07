@@ -79,6 +79,41 @@ type Host struct {
 	CheckFailed []string
 	Enrolled    int
 	CheckInfo   vault.OwnerCheckInfo
+	// The account's names (vault.ProfileHost, 0.18.0, §10.8; "" for
+	// none: NewHost sets Ada Lovelace), the peers' earlier identity keys
+	// by connection id, the snapshot's name_change.allowed_after and the
+	// name requests recorded (vault.NameRequestHost).
+	FirstName, LastName string
+	PriorIKs            map[string][][]byte
+	AllowedAfter        time.Time
+	NameRequests        []vault.NameChange
+}
+
+// AccountNames implements vault.ProfileHost.
+func (h *Host) AccountNames() (string, string, bool) {
+	return h.FirstName, h.LastName, h.FirstName != "" && h.LastName != ""
+}
+
+// PriorIdentity implements vault.ProfileHost.
+func (h *Host) PriorIdentity(id string, ik []byte) bool {
+	for _, k := range h.PriorIKs[id] {
+		if bytes.Equal(k, ik) {
+			return true
+		}
+	}
+	return false
+}
+
+// AccountAllowedAfter implements vault.NameRequestHost.
+func (h *Host) AccountAllowedAfter() time.Time { return h.AllowedAfter }
+
+// RequestAccountName implements vault.NameRequestHost: the request is
+// recorded with the next seq.
+func (h *Host) RequestAccountName(first, last, _ string, now time.Time) json.RawMessage {
+	n := vault.NameChange{Seq: uint64(len(h.NameRequests) + 1), FirstName: first, LastName: last}
+	h.NameRequests = append(h.NameRequests, n)
+	r := &vault.NameRequest{Seq: n.Seq, FirstName: first, LastName: last, RequestedAt: now.UTC().Truncate(time.Millisecond), State: vault.NamePending}
+	return r.JSON()
 }
 
 // OwnerCheckState implements vault.OwnerCheckHost.
@@ -174,7 +209,7 @@ func NewHost() *Host {
 	id := ed25519.NewKeyFromSeed(identitySeed())
 	ik := id.Public().(ed25519.PublicKey)
 	return &Host{Identity: id, ID: "test-vault", Conns: map[string]vault.PeerInfo{}, Profiles: map[string]json.RawMessage{}, DownConns: map[string]bool{},
-		Devices: map[string]vault.PeerInfo{}, IK: ik}
+		Devices: map[string]vault.PeerInfo{}, IK: ik, FirstName: "Ada", LastName: "Lovelace"}
 }
 
 // SetIdentity gives the fake vault the identity key of seed byte b.
@@ -456,6 +491,9 @@ func CallInner(f vault.Feature, h *Host, now time.Time, kind string, in *envelop
 	}
 	if len(kind) > 11 && kind[:11] == "connection:" {
 		from = vault.PeerInfo{ID: kind[11:], Kind: vault.KindConnection, State: vault.PeerActive}
+		if c, ok := h.Conns[from.ID]; ok {
+			from.IK = c.IK // the pinned ik (§10.8 profile.update's check)
+		}
 	}
 	if !spec.Allows(from.Kind) {
 		return Result{Code: "forbidden"}

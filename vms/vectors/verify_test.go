@@ -157,6 +157,30 @@ func checkVectors(t *testing.T, dir string) {
 	ini := checkPrincipal(t, keys.sub("initiator"))
 	eph := kemFrom(t, keys.sub("initiator_ephemeral"))
 	etk := kemFrom(t, keys.sub("etk"))
+	if _, ok := keys.m["ik_fingerprint"]; ok { // 0.18.0; absent in older frozen vectors
+		t.Run("ik_fingerprint", func(t *testing.T) {
+			d := keys.sub("ik_fingerprint")
+			ik := vault.ik.Public().(ed25519.PublicKey)
+			eq(t, "ik", d.b64("ik_b64"), ik)
+			h := sha256.Sum256(append([]byte("vettid/vms/2/ik-fp"), ik...))
+			eq(t, "sha256", h[:], d.hex("sha256_hex"))
+			fp := suite.IKFingerprint(ik)
+			eq(t, "sha256 (suite)", fp[:], h[:])
+			hx := hex.EncodeToString(h[:16])
+			var g []string
+			for i := 0; i < 32; i += 4 {
+				g = append(g, hx[i:i+4])
+			}
+			if s := strings.Join(g, " "); d.str("shown") != s || suite.FormatIKFingerprint(ik) != s {
+				t.Fatalf("shown %q, want %q", d.str("shown"), s)
+			}
+			// §16 (0.18.0): the vector the spec prints.
+			if d.str("shown") != "9a1f bb7d 873e eafb 494b ef94 f072 7b25" ||
+				d.str("sha256_hex") != "9a1fbb7d873eeafb494bef94f0727b2539c2faf27783d46d4e6862673f6216c3" {
+				t.Fatal("not the §16 vector")
+			}
+		})
+	}
 
 	t.Run("hpke", func(t *testing.T) {
 		d := load(t, dir, "hpke.json")

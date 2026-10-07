@@ -229,6 +229,9 @@ func (hs *hostStack) post(hi *hostInstance, op, vaultID, guid string, r *client.
 	if op == "enroll" || op == "recovery_register" {
 		m["app_key"] = r.AppKey // 0.15.0: the key the API checked the signature with
 	}
+	if op == "enroll" {
+		m["account"] = json.RawMessage(enclavetest.Snapshot(time.Now(), "Host", "Member")) // 0.18.0 (§11.5)
+	}
 	b, _ := json.Marshal(m)
 	if !hs.queues.Send(hi.queue, string(b)) {
 		hs.t.Fatal("no queue")
@@ -383,7 +386,7 @@ func TestHostStack(t *testing.T) {
 	// §11.13: the queue op account reaches the vault's process.
 	rid, _ := envelope.NewULID(time.Now())
 	hs.tables.PutSlot(rid, a.id)
-	acct := `{"v":1,"as_of":"` + envelope.FormatTS(time.Now()) + `","email_hint":"m***@example.org","state":"member"}`
+	acct := string(enclavetest.Snapshot(time.Now(), "Host", "Member")) // newer than the enrollment's
 	b, _ := json.Marshal(map[string]any{"v": 1, "op": "account", "vault_id": "11111111111111111111111111111111", "user_guid": "member-1",
 		"request_id": rid, "account": json.RawMessage(acct), "enqueued_at": time.Now().UTC().Format(time.RFC3339Nano)})
 	hs.queues.Send(a.queue, string(b))
@@ -398,6 +401,15 @@ func TestHostStack(t *testing.T) {
 	if r, err := m1.dev.Request(ctxT(t, 30*time.Second), "account.get", json.RawMessage(`{}`)); err != nil || !strings.Contains(string(r.Body()), `"email_hint":"m***@example.org"`) {
 		t.Fatalf("account.get: %v", err)
 	}
+	// 0.18.0 (§10.8, §11.5): a name request travels from the vault's
+	// process through the supervisor to the parent, which writes the row.
+	if _, err := m1.dev.AccountNameSet(ctxT(t, 30*time.Second), pin, credPW, "Ada", "King"); err != nil {
+		t.Fatalf("account.name.set: %v", err)
+	}
+	waitUntil(t, "name_change on the row", func() bool {
+		r, _ := hs.tables.Vault("11111111111111111111111111111111")
+		return r.NameChangePending && r.NameChange != nil && *r.NameChange == parent.NameChange{Seq: 1, FirstName: "Ada", LastName: "King"}
+	})
 
 	// Lock and unlock again; the lock ends the vault's process.
 	m1.lock(a)

@@ -398,6 +398,13 @@ func newDevFixture(t testing.TB) *devFixture {
 	m.st.Issued = append(m.st.Issued, IssuedToken{JTI: "j1", Kind: TokStanding, Sub: relayauth.EncodeKey(pk), PeerID: p.ID, Exp: now.Add(20 * 24 * time.Hour)})
 	m.sessions[p.ID] = &handshake.Keyring{}
 	m.sessions[p.ID].Activate(vep, now)
+	// Every vault holds the account's names from its enrollment on
+	// (0.18.0, §10.8): an old snapshot, so tests' snapshots are newer.
+	a, err := ParseAccountSnapshot(snapshotAt(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.st.Account = &AccountState{Snapshot: a.Raw, AsOf: a.AsOf, Version: 1, ReceivedAt: now, FirstName: a.FirstName, LastName: a.LastName}
 	return &devFixture{fixture: f, dev: devIK, devKey: devRelay, devPeer: p, ep: res.Epoch}
 }
 

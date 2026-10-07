@@ -216,6 +216,25 @@ func TestV3Exit(t *testing.T) {
 	if _, err := m2.WaitEvent(ctx, "sync.event", func(b json.RawMessage) bool { return strings.Contains(string(b), `"account.changed"`) }); err != nil {
 		t.Fatal(err)
 	}
+	// 0.18.0 (§10.8, §11.5, MEMBER-API 2.2.0): the app's name change: the
+	// vault reports account_name, the parent writes the vault row, the
+	// vault-names job applies it and pushes the snapshot, which settles
+	// the request.
+	if _, err := m2.AccountNameSet(ctx, "246801", "member two password", "Ada", "King"); err != nil {
+		t.Fatalf("account.name.set: %v", err)
+	}
+	waitFor(t, "name_change on the vault row", func() bool { p, seq := s.namePending(vid2); return p && seq == "1" })
+	if st, err := s.mapi.ProcessNameChanges(ctx, "member-2"); err != nil || st != vault.NameApplied {
+		t.Fatalf("name change job: %q %v", st, err)
+	}
+	if p, _ := s.namePending(vid2); p {
+		t.Fatal("name_change_pending not cleared")
+	}
+	waitFor(t, "the name request applied", func() bool {
+		r := req(t, m2, "account.get", `{}`)
+		b := string(r.Body())
+		return r.OK() && strings.Contains(b, `"first_name":"Ada","last_name":"King"`) && strings.Contains(b, `"state":"applied"`)
+	})
 	before := s.vaultRow(vid2)
 	rid, q, body := s.lastSent("unlock")
 	s.requeue(rid, q, body, "member-2", parent.AppKeyID(akDER))

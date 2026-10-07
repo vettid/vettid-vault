@@ -222,6 +222,10 @@ type PeerInfo struct {
 	// Recovering: an app registered by recovery that has not yet
 	// authenticated with the credential password (§11.11.5).
 	Recovering bool
+	// RotationPending: a connection whose current epoch was made before
+	// the vault's latest ik rotation; the profile.update with the new ik
+	// waits for the epoch under it (§10.8, 0.18.0).
+	RotationPending bool
 }
 
 func info(p *Peer) PeerInfo {
@@ -535,8 +539,9 @@ type DeviceRemovedObserver interface {
 	DeviceRemoved(s *Session, deviceID string)
 }
 
-// HandshakeProfiler supplies the vault's self-asserted hs.init profile and
-// invite hint name (§6.2, §6.4): its display name only.
+// HandshakeProfiler supplies the display name of the vault's hs.init
+// profile, beside the account's names (§6.2, 0.18.0), and its invite hint
+// name (§6.4).
 type HandshakeProfiler interface {
 	DisplayName() string
 }

@@ -14,7 +14,6 @@ package vaultproc
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -201,8 +200,7 @@ func (pr *proc) open(ctx context.Context, f [][]byte) [][]byte {
 			if ev.VaultID != vid {
 				return
 			}
-			_ = pr.conn.Notify(vaultipc.KindLifecycle, append(hostproto.Strings(ev.Event, ev.VaultID, ev.Release, ev.VaultVersion,
-				fmt.Sprint(ev.StateVersion)), ev.AppKey, []byte(fmt.Sprint(ev.AppKeySeq)), []byte(enclave.BackupField(ev.CredentialBackup)))...)
+			_ = pr.conn.Notify(vaultipc.KindLifecycle, enclave.LifecycleFields(ev)...)
 		},
 	})
 	if err != nil {

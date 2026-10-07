@@ -462,6 +462,9 @@ func (a *AWS) Lifecycle(ctx context.Context, ev Lifecycle, instanceID string, no
 	if ev.Event == EventAlarmCredentialClone {
 		return a.alarm(ctx, ev.VaultID, "credential_clone", now)
 	}
+	if ev.Event == EventAccountName {
+		return a.nameChange(ctx, ev, now)
+	}
 	if err := a.appKey(ctx, ev, now); err != nil || ev.Event == EventAppKey {
 		return err
 	}
@@ -534,6 +537,27 @@ func (a *AWS) appKey(ctx context.Context, ev Lifecycle, now time.Time) error {
 		vals[":seq"] = n(int64(ev.AppKeySeq))
 	}
 	err := a.updateVault(ctx, ev.VaultID, "SET #ak = :ak, #u = :u", cond, nm, vals)
+	if errors.Is(err, ErrLeaseHeld) {
+		return nil
+	}
+	return err
+}
+
+// nameChange writes the member's name request (0.18.0, §11.5, MEMBER-API
+// 2.2.0 "Name changes from the vault"): name_change = {seq, first_name,
+// last_name, at (epoch s)} and name_change_pending = true, whatever the
+// lease, when seq is higher than the row's (absent: 0), so a stale
+// instance can only report an older request. The member API's
+// vault-names job picks it up from the table's stream. A failed
+// condition (an older report, a missing row) is not an error.
+func (a *AWS) nameChange(ctx context.Context, ev Lifecycle, now time.Time) error {
+	nc := &ddbtypes.AttributeValueMemberM{Value: map[string]ddbtypes.AttributeValue{
+		"seq": n(int64(ev.Name.Seq)), "first_name": s(ev.Name.FirstName), "last_name": s(ev.Name.LastName), "at": n(now.Unix())}}
+	err := a.updateVault(ctx, ev.VaultID, "SET #nc = :nc, #ncp = :t, #u = :u",
+		"attribute_exists(vault_id) AND (attribute_not_exists(#nc) OR #nc.#seq < :seq)",
+		map[string]string{"#nc": "name_change", "#ncp": "name_change_pending", "#seq": "seq", "#u": "updated_at"},
+		map[string]ddbtypes.AttributeValue{":nc": nc, ":t": &ddbtypes.AttributeValueMemberBOOL{Value: true},
+			":seq": n(int64(ev.Name.Seq)), ":u": s(isoNow(now))})
 	if errors.Is(err, ErrLeaseHeld) {
 		return nil
 	}

@@ -106,3 +106,37 @@ func TestParseLifecycleBackup(t *testing.T) {
 		}
 	}
 }
+
+// §11.5 (0.18.0): the name request as the last three fields; the event
+// account_name needs it, and no other event may carry one.
+func TestParseLifecycleName(t *testing.T) {
+	pcr := strings.Repeat("a", 96)
+	frame := func(fs ...string) *hostproto.Frame {
+		f := &hostproto.Frame{}
+		for _, s := range fs {
+			f.Fields = append(f.Fields, []byte(s))
+		}
+		return f
+	}
+	ev, ok := parseLifecycle(frame(EventAccountName, "v1", pcr, pcr, "1", "", "0", "", "3", "Ada", "O’Brien"))
+	if !ok || ev.Name == nil || *ev.Name != (NameChange{Seq: 3, FirstName: "Ada", LastName: "O’Brien"}) {
+		t.Fatalf("%+v %v", ev, ok)
+	}
+	if ev, ok := parseLifecycle(frame("unlocked", "v1", pcr, pcr, "1", "k", "2", "1", "0", "", "")); !ok || ev.Name != nil || !*ev.CredentialBackup {
+		t.Fatalf("11 fields without a request: %+v", ev)
+	}
+	for _, f := range []*hostproto.Frame{
+		frame(EventAccountName, "v1", pcr, pcr, "1", "", "0", "", "0", "", ""),
+		frame(EventAccountName, "v1", pcr, pcr, "1", "", "0", ""),
+		frame("unlocked", "v1", pcr, pcr, "1", "", "0", "", "3", "Ada", "King"),
+		frame(EventAccountName, "v1", pcr, pcr, "1", "", "0", "", "03", "Ada", "King"),
+		frame(EventAccountName, "v1", pcr, pcr, "1", "", "0", "", "3", "", "King"),
+		frame(EventAccountName, "v1", pcr, pcr, "1", "", "0", "", "3", "Ada", "K "),
+		frame(EventAccountName, "v1", pcr, pcr, "1", "", "0", "", "3", "Ada", strings.Repeat("x", 161)),
+		frame(EventAccountName, "v1", pcr, pcr, "1", "", "0", "", "3", "Ada"),
+	} {
+		if _, ok := parseLifecycle(f); ok {
+			t.Fatalf("accepted %q", f.Fields)
+		}
+	}
+}

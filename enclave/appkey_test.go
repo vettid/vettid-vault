@@ -81,13 +81,14 @@ func TestAccountOp(t *testing.T) {
 	in := f.w.Instance(3)
 	snap := func(at time.Time) []byte {
 		return strictjson.NewBuilder().Uint("v", 1).String("as_of", envelope.FormatTS(at)).String("email_hint", "u***@example.org").
+			String("first_name", "Ada").String("last_name", "Lovelace").Raw("name_change", []byte(`{"allowed_after":null,"last":null}`)).
 			String("state", "member").String("account_status", "active").Raw("deletes_at", []byte("null")).
 			Raw("terms", []byte(`{"needs_acceptance":false}`)).Raw("subscription", []byte("null")).Bool("voting_rights", false).
 			String("future_member", "ignored").Bytes()
 	}
 	rid, _ := envelope.NewULID(f.clk.Now())
 	q := &enclave.QueueMessage{Op: enclave.OpAccount, VaultID: a.vid, UserGUID: a.guid, RequestID: rid, EnqueuedAt: f.clk.Now(),
-		Account: snap(f.clk.Now())}
+		Account: snap(f.clk.Now().Add(time.Millisecond))} // newer than the enrollment's (0.18.0)
 	raw := q.Marshal()
 	if !strings.Contains(string(raw), `"account":{"v":1`) {
 		t.Fatalf("%s", raw)
@@ -98,7 +99,7 @@ func TestAccountOp(t *testing.T) {
 		t.Fatalf("%v %+v", err, r)
 	}
 	m := in.Manager(a.vid)
-	if m == nil || m.AccountVersion() != 1 {
+	if m == nil || m.AccountVersion() != 2 { // 1: the enrollment's (0.18.0)
 		t.Fatal("snapshot not stored")
 	}
 	f.lock(a)
@@ -108,16 +109,16 @@ func TestAccountOp(t *testing.T) {
 	if r, err := enclave.ParseResponse(in.ProcessRaw(context.Background(), q2.Marshal(), nil)); err != nil || r.Status != enclave.StatusDone {
 		t.Fatal("op account on a locked vault not answered")
 	}
-	// The unlock's snapshot, newer: version 2. An older one: ignored.
+	// The unlock's snapshot, newer: version 3. An older one: ignored.
 	f.w.Account = func(string) []byte { return snap(f.clk.Now().Add(time.Minute)) }
 	f.mustUnlock(a, pin, client.UnlockOptions{}, "")
-	if m := in.Manager(a.vid); m == nil || m.AccountVersion() != 2 {
+	if m := in.Manager(a.vid); m == nil || m.AccountVersion() != 3 {
 		t.Fatal("unlock snapshot not applied")
 	}
 	f.lock(a)
 	f.w.Account = func(string) []byte { return snap(f.clk.Now().Add(-time.Hour)) }
 	f.mustUnlock(a, pin, client.UnlockOptions{}, "")
-	if m := in.Manager(a.vid); m == nil || m.AccountVersion() != 2 {
+	if m := in.Manager(a.vid); m == nil || m.AccountVersion() != 3 {
 		t.Fatal("older snapshot applied")
 	}
 }

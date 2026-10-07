@@ -74,6 +74,9 @@ type HeldCounts struct {
 type HeldNotice struct {
 	At     time.Time  `json:"at"`
 	Counts HeldCounts `json:"counts"`
+	// Start: the notice sent when the gate began; the first count change
+	// after it is sent at once (0.19.0, §3.6.3).
+	Start bool `json:"start,omitempty"`
 }
 
 // OwnerCheckInterval is the setting owner_check.interval_seconds (§3.6.2).
@@ -447,21 +450,22 @@ func (m *Manager) heldNotices(now, oc time.Time, force bool) {
 		rec.Notices = map[string]HeldNotice{}
 	}
 	body := strictjson.NewBuilder().String("deadline", envelope.FormatTS(rec.Deadline)).
-		Raw("waiting", strictjson.NewBuilder().Uint("messages", rec.Waiting.Messages).Uint("requests", rec.Waiting.Requests).
-			Uint("calls", rec.Waiting.Calls).Uint("other", rec.Waiting.Other).Bytes()).Bytes()
+		Raw("waiting", heldCountsJSON(rec.Waiting)).Bytes()
 	for _, p := range m.ownerDevices() {
 		if p.Kind != KindApp && rec.Gate != OwnerCheckHeld {
 			continue // with the hold off only the app is gated
 		}
 		n, sent := rec.Notices[p.ID]
-		if sent && oc.Sub(n.At) < HeldNoticeEvery {
+		// 0.19.0: the first count change after the start notice goes at
+		// once; the 10 minutes run from that notice.
+		if sent && !n.Start && oc.Sub(n.At) < HeldNoticeEvery {
 			continue
 		}
 		if !force && (sent && n.Counts == rec.Waiting || !sent && rec.Waiting == (HeldCounts{})) {
 			continue
 		}
 		if m.sendTo(p, "vault.held", body, now) != "" {
-			rec.Notices[p.ID] = HeldNotice{At: oc, Counts: rec.Waiting}
+			rec.Notices[p.ID] = HeldNotice{At: oc, Counts: rec.Waiting, Start: force}
 			m.dirty = true
 		}
 	}
@@ -575,10 +579,12 @@ func (m *Manager) callAnsweredBefore(device string, t time.Time) bool {
 }
 
 // ownerCheckStatus is vault.status's owner_check member (§10.2): the
-// state alone to agents.
-func (m *Manager) ownerCheckStatus(kind string, now time.Time) []byte {
-	b := strictjson.NewBuilder().String("state", m.ownerCheckState(now))
-	if kind == KindAgent {
+// state alone to agents; since 0.19.0 with waiting (the vault.held
+// counts) while due or held, for a device that receives vault.held.
+func (m *Manager) ownerCheckStatus(p *Peer, now time.Time) []byte {
+	state := m.ownerCheckState(now)
+	b := strictjson.NewBuilder().String("state", state)
+	if p.Kind == KindAgent {
 		return b.Bytes()
 	}
 	i := m.ownerCheckInfo()
@@ -594,7 +600,21 @@ func (m *Manager) ownerCheckStatus(kind string, now time.Time) []byte {
 	if i.HoldOffUntil != nil {
 		b.String("hold_off_until", envelope.FormatTS(*i.HoldOffUntil))
 	}
+	if rec := m.st.OwnerCheck; rec != nil && state != OwnerCheckOK && m.getsHeld(p, state, now) {
+		b.Raw("waiting", heldCountsJSON(rec.Waiting))
+	}
 	return b.Bytes()
+}
+
+// getsHeld reports whether owner device p receives vault.held in state
+// (§3.6.3): the app; a desktop with an access session while held.
+func (m *Manager) getsHeld(p *Peer, state string, now time.Time) bool {
+	return p.Kind == KindApp || p.Kind == KindDesktop && state == OwnerCheckHeld && m.hasAccess(p, now)
+}
+
+func heldCountsJSON(w HeldCounts) []byte {
+	return strictjson.NewBuilder().Uint("messages", w.Messages).Uint("requests", w.Requests).
+		Uint("calls", w.Calls).Uint("other", w.Other).Bytes()
 }
 
 // settingsOwnerCheck applies an accepted settings.set to the record

@@ -716,7 +716,7 @@ func (f *Feature) prepare(s *vault.Session, before, after *itemspec.Item, cross 
 	} else {
 		delete(f.st.Items, id)
 	}
-	if err := f.checkProfile(s); err != nil {
+	if err := f.checkProfile(); err != nil {
 		ch.undo()
 		return nil, err
 	}

@@ -243,6 +243,16 @@ func (m *Manager) settleNameRequest(last *NameResult, now time.Time) bool {
 	return true
 }
 
+// pendingNameChange is the latest name request while it is still
+// pending (0.19.0: re-reported with every unlocked report, §11.5), or nil.
+func (m *Manager) pendingNameChange() *NameChange {
+	r := m.st.NameRequest
+	if r == nil || r.State != NamePending {
+		return nil
+	}
+	return &NameChange{Seq: r.Seq, FirstName: r.FirstName, LastName: r.LastName}
+}
+
 // reportName reports a stored name request to the parent after the flush
 // that stored it (§11.5, as app_key).
 func (m *Manager) reportName() {

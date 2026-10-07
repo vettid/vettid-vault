@@ -186,13 +186,20 @@ func (f *Feature) updateBody(s *vault.Session, v uint64) ([]byte, bool) {
 	return f.bodyWith(c, v), true
 }
 
-// checkProfile checks the shared profile's limits (§10.8), with the
-// current core (or the largest one, without names).
-func (f *Feature) checkProfile(s *vault.Session) error {
-	c := currentCore(s)
-	if c == nil {
-		c = &Core{FirstName: strings.Repeat("x", vault.MaxAccountName), LastName: strings.Repeat("x", vault.MaxAccountName), IK: make([]byte, 32)}
-	}
+// worstName is a name at its largest encoding (§10.8, 0.19.0): 160 bytes
+// that each escape to two (`"`), 322 bytes as a JSON string with its
+// quotes. The encoder (strictjson.MarshalString) writes names as raw UTF-8
+// and escapes only `"` and `\` in them, since names have no control
+// characters, U+2028 or U+2029 (vault.ValidAccountName).
+var worstName = strings.Repeat(`"`, vault.MaxAccountName)
+
+// checkProfile checks the shared profile's limits (§10.8) whenever the
+// display name, the photo or the @profile items change: at most 32 items,
+// and (0.19.0) the profile.update body at most 196,608 bytes with
+// maximum-length names, so that a later name change never brings it over
+// the limit.
+func (f *Feature) checkProfile() error {
+	c := &Core{FirstName: worstName, LastName: worstName, IK: make([]byte, 32)}
 	if len(f.profileItems()) > MaxProfileItems || len(f.bodyWith(c, strictjson.MaxSafeInteger)) > MaxProfileUpdate {
 		return errLimit
 	}
@@ -286,7 +293,7 @@ func (f *Feature) profileSet(s *vault.Session, body []byte) (json.RawMessage, er
 	if hasPhoto {
 		f.st.Profile.Photo = photo
 	}
-	if err := f.checkProfile(s); err != nil {
+	if err := f.checkProfile(); err != nil {
 		f.st.Profile = old
 		return nil, err
 	}

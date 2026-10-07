@@ -95,7 +95,7 @@ func (m *Manager) hStatus(_ context.Context, s *Session, _ *envelope.Inner) (jso
 	return strictjson.NewBuilder().String("vault_id", m.st.VaultID).Uint("state_seq", m.st.StateSeq).
 		Uint("header_seq", m.hdr.HeaderSeq).Bool("provisional", m.hdr.Provisional).
 		Uint("devices", uint64(len(m.st.Devices))).Uint("connections", uint64(len(m.st.Connections))).
-		Raw("owner_check", m.ownerCheckStatus(s.peer.Kind, s.now)).Bytes(), nil
+		Raw("owner_check", m.ownerCheckStatus(s.peer, s.now)).Bytes(), nil
 }
 
 func (m *Manager) hLock(_ context.Context, _ *Session, _ *envelope.Inner) (json.RawMessage, error) {

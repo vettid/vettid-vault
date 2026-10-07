@@ -203,16 +203,38 @@ func TestOwnerCheckHold(t *testing.T) {
 	if len(in["dev1"]) != 1 || len(in["desk1"]) != 1 || !strings.Contains(string(in["dev1"][0].Body), "credential.alarm") {
 		t.Fatalf("fan-out while held: %d %d", len(in["dev1"]), len(in["desk1"]))
 	}
-	// Counts: what would have made a feed item, sent at most every 10 min.
-	f.m.mu.Lock()
-	for _, k := range []string{"message.received", "message.received", "connection.request", "call.missed", "grant.request"} {
-		f.m.record(Activity{Kind: k, Feed: true}, time.Now())
+	// Counts: what would have made a feed item. The first change after
+	// the start notice is sent at once (0.19.0); later ones at most every
+	// 10 minutes from that notice.
+	record := func(kinds ...string) {
+		f.m.mu.Lock()
+		for _, k := range kinds {
+			f.m.record(Activity{Kind: k, Feed: true}, time.Now())
+		}
+		f.m.record(Activity{Kind: "message.sent", Audit: true}, time.Now()) // no feed item: not counted
+		f.m.mu.Unlock()
+		_ = f.m.ProcessBatch(context.Background(), &fakeCollector{}, nil)
 	}
-	f.m.record(Activity{Kind: "message.sent", Audit: true}, time.Now()) // no feed item: not counted
-	f.m.mu.Unlock()
-	_ = f.m.ProcessBatch(context.Background(), &fakeCollector{}, nil)
+	record("message.received", "message.received")
+	in = f.inbox(f.app, f.desk)
+	for _, dev := range []string{"dev1", "desk1"} {
+		if ev := find(in[dev], ofType("vault.held")); ev == nil || !strings.Contains(string(ev.Body), `"waiting":{"messages":2,"requests":0,"calls":0,"other":0}`) {
+			t.Fatalf("%s: first change not sent at once: %+v", dev, ev)
+		}
+	}
+	record("connection.request", "call.missed", "grant.request")
 	if ev := find(f.inbox(f.app)["dev1"], ofType("vault.held")); ev != nil {
 		t.Fatal("vault.held within 10 minutes")
+	}
+	// vault.status carries the same counts (0.19.0) to the app and the
+	// desktop in its session, not to the agent.
+	for _, td := range []*tdev{f.app, f.desk} {
+		if w := string(f.status(t, td)["waiting"]); w != `{"messages":2,"requests":1,"calls":1,"other":1}` {
+			t.Fatalf("%s status waiting %s", td.peer.ID, w)
+		}
+	}
+	if f.status(t, f.agent).Has("waiting") {
+		t.Fatal("agent status with waiting")
 	}
 	for id, n := range f.m.st.OwnerCheck.Notices {
 		n.At = n.At.Add(-11 * time.Minute)
@@ -240,6 +262,9 @@ func TestOwnerCheckHold(t *testing.T) {
 	}
 	if r := f.req(t, f.app, "test.req", `{}`); errCode(r) != "" {
 		t.Fatalf("after the check: %q", errCode(r))
+	}
+	if f.status(t, f.app).Has("waiting") {
+		t.Fatal("waiting after the check")
 	}
 	if rec := f.m.st.OwnerCheck; rec.Gate != "" || rec.Waiting != (HeldCounts{}) || rec.Deadline.Before(time.Now().Add(23*time.Hour)) {
 		t.Fatalf("record after the check %+v", rec)
@@ -274,8 +299,11 @@ func TestOwnerCheckDue(t *testing.T) {
 		t.Fatal("hold entered with the hold off")
 	}
 	oc := f.status(t, f.desk)
-	if st, _ := oc.String("state"); st != OwnerCheckDue || !oc.Has("hold_off_until") {
-		t.Fatalf("status %v", oc)
+	if st, _ := oc.String("state"); st != OwnerCheckDue || !oc.Has("hold_off_until") || oc.Has("waiting") {
+		t.Fatalf("status %v (no waiting for a desktop while due, 0.19.0)", oc)
+	}
+	if w := string(f.status(t, f.app)["waiting"]); w != `{"messages":0,"requests":0,"calls":0,"other":0}` {
+		t.Fatalf("app waiting while due: %s", w)
 	}
 	// Fan-out: desktops as usual, the app nothing.
 	f.m.mu.Lock()

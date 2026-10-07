@@ -9,7 +9,9 @@ recovery marker, `credential_backup` and the lock state; for 0.12.0:
 LEASH delegations and status statements in the LEASH paper's §3.5 format;
 for 0.13.0: the daily owner check and the hold; for 0.15.0:
 enrollment codes, app keys and the account snapshot; and for 0.18.0: the
-shared profile's core and the name change from the app.)
+shared profile's core and the name change from the app; and for 0.19.0:
+the held counts in `vault.status`, the worst-case profile size and the
+0.18.0 errata.)
 
 Every MUST / MUST NOT in VAULT-MESSAGING 0.2.3 §4–§6 (plus the §13.4 and
 §13.6 rules they rely on), and the named test that covers it. Normative
@@ -612,10 +614,23 @@ grammar.
 | 10.8, 10.9 | Receiving: strict parse, then the version check, then `drop.profile_malformed` for a missing or invalid core member, an earlier `ik` of the peer's chain ignored without an audit entry, any other `ik` `drop.profile_ik_mismatch` (`ref` = the connection id); a dropped update changes nothing and tells no device | `items.TestProfileReceiveCore`, `items.FuzzParseUpdate` |
 | 6.2 | A vault's connection `hs.init` profile is `{first_name, last_name, name?}`; one without both names is dropped (`drop.profile_malformed`) and the invitation stays usable; a vault without names sends no `hs.init` (`profile.core_missing`) | `vault.TestHandshakeProfile`, `vault.TestHandshakeProfileRequired`, `vault.TestAcceptWithoutNames` |
 | 10.4 | A connection's `name` is the display name of its kept profile (absent without one); `profile` is the peer's kept update | `e2e.TestProfileCoreNamesAndRotation` |
-| 10.8 | `account.name.set`: the holder's only (`forbidden` otherwise), refused during an alarm and while held; `too_soon {allowed_after}` while the snapshot's `allowed_after` lies ahead (nothing counted); the PIN and the password as the owner check (the same failed checks), the CEK rotates, not an owner check (the deadline does not move); the registration rule on the trimmed names (`bad_request`, also for the current names); answer `{credential, version, utks, request}` | `credential.TestAccountNameSet`, `credential.TestAccountNameSetDuringAlarm`, `vault.TestNormalizeRequestedName`, `vault.TestHoldAllowList` |
+| 10.8 | (0.19.0 erratum: the names are checked before the blob, the PIN and the password, step 3 before step 4) `account.name.set`: the holder's only (`forbidden` otherwise), refused during an alarm and while held; `too_soon {allowed_after}` while the snapshot's `allowed_after` lies ahead (nothing counted); the PIN and the password as the owner check (the same failed checks), the CEK rotates, not an owner check (the deadline does not move); the registration rule on the trimmed names (`bad_request`, also for the current names); answer `{credential, version, utks, request}` | `credential.TestAccountNameSet`, `credential.TestAccountNameSetDuringAlarm`, `vault.TestNormalizeRequestedName`, `vault.TestHoldAllowList` |
 | 10.8, 11.5 | The request gets the next `seq`, is stored `pending` (replacing one still pending), audited `account.name_requested` (`ref` = `seq`, no names), announced `sync.event{account.changed}`, and reported as the host event `account_name {seq, first_name, last_name}` after the flush that stored it | `vault.TestNameRequest`, `vault.TestNameRequestNotReportedWithoutFlush` |
 | 10.8, 11.13 | A stored snapshot's `name_change.last` with the pending `seq` sets its state and reason (`account.name_applied` / `account.name_refused`); a higher `seq` refuses it with `account`; `account.get` returns `name_request` | `vault.TestNameRequest`, `e2e.TestProfileCoreNamesAndRotation`, `integration.TestV3Exit` |
 | 11.5 | The lifecycle frame's name fields (vaultipc 6, 11 fields: `name_seq`, `first_name`, `last_name`); the parent writes `name_change = {seq, first_name, last_name, at}` and `name_change_pending = true` whatever the lease, when `seq` is higher than the row's | `enclave.TestLifecycleNameFields`, `parent.TestParseLifecycleName`, `parent.TestNameChangeWrite`, `parent.TestAWSBackend` (LocalStack), `e2e.TestHostStack`, `integration.TestV3Exit` |
 | 16 | The `ik` fingerprint: SHA-256("vettid/vms/2/ik-fp" ‖ ik), shown as its first 16 bytes in 8 groups of 4 lowercase hex digits; the §16 vector in `keys.json` (`ik_fingerprint`) | `vectors.TestVectors` (ik_fingerprint), `vectors.TestVectorsUpToDate`, `suite.TestLabelsEmbedSuite` |
 | 11.5 | Member API stand-in: the snapshot's names and `name_change`, `account` in `enroll`, the vault-names job (claim, `invalid` / `too_soon`, the result, the push) | `integration.TestV3Exit` |
 | 6.6, 8.6 | (Found with 0.18.0's activation updates.) A deposit waiting for a fresh standing token holds back only later deposits on the standing token, not the reconnect's `hs.init` that brings it | `vault.TestAwaitTokenDoesNotBlockReconnect`, `e2e.TestReconnectAfterExpiry` |
+
+## Held counts in `vault.status`; the worst-case profile size; 0.18.0 errata (§3.6.3, §10.1, §10.2, §10.4, §10.8, §11.5, §11.13, §15 item 27; 0.19.0)
+
+| § | Requirement | Test(s) |
+|---|---|---|
+| 10.2, 3.6.3 | `vault.status`'s `owner_check.waiting {messages, requests, calls, other}` while `due` or `held`, for the devices that get `vault.held` (the app; a desktop with an access session only while `held`); absent for agents, for a desktop while `due`, and once the check succeeded | `vault.TestOwnerCheckHold`, `vault.TestOwnerCheckDue` |
+| 3.6.3 | The first count change after the hold's start notice is sent at once; later changes at most once per 10 minutes from that notice, with the latest counts | `vault.TestOwnerCheckHold` |
+| 10.8 | Whenever the display name, the photo or the `@profile` items change, the `profile.update` size is checked with each name counted as a 322-byte JSON string (160 bytes, only `"` and `\` escaped: the encoder writes names as raw UTF-8), refused with `limit` over 196,608 bytes | `items.TestProfileSizeWorstCaseNames` |
+| 10.8, 11.5 | A still-pending name request is reported again (`account_name`) with every `unlocked` report; a settled one is not; the parent treats the failed `seq` condition as done | `vault.TestNameRequestReReportedOnUnlock`, `parent.TestNameChangeWrite` |
+| 10.8 | The names are trimmed of U+0020 only; other white space at either end fails the pattern | `vault.TestNormalizeRequestedName` |
+| 11.13 | `name_change.last.status` is `applied` or `refused` (any other refuses the snapshot); `reason` is kept only with `refused` | `vault.TestParseAccountSnapshot` |
+| 10.4, 10.8 | A vault without names answers `connection.invite.accept` with `internal`, sends no `hs.init` and audits `profile.core_missing` | `vault.TestAcceptWithoutNames` |
+| 10.1, 10.2 | `sync.event{account.changed}` for a name request alone repeats the stored snapshot's `version` | `vault.TestNameRequest` |

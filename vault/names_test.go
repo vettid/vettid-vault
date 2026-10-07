@@ -202,7 +202,8 @@ func TestNormalizeRequestedName(t *testing.T) {
 			t.Errorf("%q: %q %v", in, got, ok)
 		}
 	}
-	for _, in := range []string{"", " ", "-Ada", "Ada1", "Ada!", "A\tB", strings.Repeat("a", 41), strings.Repeat("😀", 1), "a" + strings.Repeat("𝒜", 20)} {
+	// 0.19.0: trimmed of U+0020 only; other white space at an end fails.
+	for _, in := range []string{"\tAda", "Ada\n", "\u00a0Ada", "Ada\u3000", "", " ", "-Ada", "Ada1", "Ada!", "A\tB", strings.Repeat("a", 41), strings.Repeat("😀", 1), "a" + strings.Repeat("𝒜", 20)} {
 		if got, ok := NormalizeRequestedName(in); ok {
 			t.Errorf("%q accepted as %q", in, got)
 		}
@@ -239,5 +240,41 @@ func TestAwaitTokenDoesNotBlockReconnect(t *testing.T) {
 	}
 	if strings.Join(got, ",") != "hs.init" {
 		t.Fatalf("deposits %v", got)
+	}
+}
+
+// §11.5 (0.19.0): a still-pending name request is reported again with
+// every unlocked report; a settled one is not.
+func TestNameRequestReReportedOnUnlock(t *testing.T) {
+	f := newFixture(t)
+	f.m.mu.Lock()
+	f.m.requestAccountName("Ada", "King", "", time.Now())
+	f.m.mu.Unlock()
+	if err := f.m.Lock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	unlock := func() []LifecycleEvent {
+		t.Helper()
+		m, out := UnlockAlt(context.Background(), AltUnlockParams{Options: f.opts, VaultID: f.vid, PIN: testPIN, pinOnly: true})
+		if m == nil || !out.OK {
+			t.Fatalf("unlock: %+v", out)
+		}
+		f.m = m
+		return out.Events
+	}
+	evs := unlock()
+	if len(evs) != 2 || evs[0].Event != "unlocked" || evs[1].Event != EventAccountName ||
+		*evs[1].Name != (NameChange{Seq: 1, FirstName: "Ada", LastName: "King"}) || evs[1].VaultID != f.vid {
+		t.Fatalf("events %+v", evs)
+	}
+	f.m.mu.Lock()
+	f.m.st.NameRequest.State = NameApplied
+	f.m.dirty = true
+	f.m.mu.Unlock()
+	if err := f.m.Lock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if evs := unlock(); len(evs) != 1 || evs[0].Event != "unlocked" {
+		t.Fatalf("settled request re-reported: %+v", evs)
 	}
 }

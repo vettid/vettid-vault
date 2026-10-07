@@ -157,7 +157,7 @@ func (m *Manager) ProcessBatch(ctx context.Context, c Collector, msgs []Message)
 	}
 	if len(msgs) > 0 || m.dirty {
 		if err := m.persist(ctx, false); err != nil {
-			m.alarms, m.appKeyChanged = nil, false
+			m.alarms, m.appKeyChanged, m.nameReport = nil, false, nil
 			return err
 		}
 	}

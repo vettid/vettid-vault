@@ -104,6 +104,17 @@ func (p *principal) keysObj() obj {
 	}
 }
 
+// ikFingerprintObj is the §10.8 ik fingerprint of ik (0.18.0).
+func ikFingerprintObj(ik ed25519.PublicKey) obj {
+	fp := suite.IKFingerprint(ik)
+	return obj{
+		{"description", "VAULT-MESSAGING 0.18.0 §10.8: the fingerprint of the vault ik above, which apps show in a connection's details. sha256 = SHA-256(\"vettid/vms/2/ik-fp\" || ik), ik the 32 raw bytes; shown = its first 16 bytes in lowercase hex, in 8 groups of 4 digits separated by spaces."},
+		{"ik_b64", b64(ik)},
+		{"sha256_hex", hx(fp[:])},
+		{"shown", suite.FormatIKFingerprint(ik)},
+	}
+}
+
 // Generate builds every vector file through the library's sending code.
 func Generate() (map[string][]byte, error) {
 	t0, _ := time.Parse(time.RFC3339, "2026-10-01T12:00:00Z")
@@ -142,6 +153,7 @@ func Generate() (map[string][]byte, error) {
 		{"initiator", ini.keysObj()},
 		{"initiator_ephemeral", obj{{"kem_seed_hex", hx(rep(SeedInitEph, 32))}, {"ek_b64", b64(eph.Public().Bytes())}, {"kid_hex", hx(ephKid[:])}}},
 		{"etk", obj{{"kem_seed_hex", hx(rep(SeedETK, 32))}, {"ek_b64", b64(etk.Public().Bytes())}, {"kid_hex", hx(etkKid[:])}}},
+		{"ik_fingerprint", ikFingerprintObj(vault.ikPub())},
 	}); err != nil {
 		return nil, err
 	}

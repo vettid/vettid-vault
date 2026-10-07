@@ -269,6 +269,11 @@ type VaultRow struct {
 	AppKeySeq uint64
 	// CredentialBackup is the reported backup bit (0.16.0, §11.5).
 	CredentialBackup *bool
+	// NameChange and NameChangePending are the member's name request as
+	// the host wrote it (0.18.0, §11.5); NameChangeAt its Unix seconds.
+	NameChange        *parent.NameChange
+	NameChangeAt      int64
+	NameChangePending bool
 }
 
 // SlotRow is a response slot.
@@ -464,6 +469,15 @@ func (t *Tables) Lifecycle(_ context.Context, ev parent.Lifecycle, me string, no
 		r.AlarmKind, r.AlarmID, r.AlarmAt, r.AlarmPending = "credential_clone", strconv.Itoa(t.ids), now.Unix(), true
 		r.Alarms++
 		r.UpdatedAt = now.UTC().Format(time.RFC3339)
+		return nil
+	}
+	if ev.Event == parent.EventAccountName {
+		// Not lease-conditioned: only by seq, as parent.AWS.
+		if r != nil && ev.Name != nil && (r.NameChange == nil || ev.Name.Seq > r.NameChange.Seq) {
+			n := *ev.Name
+			r.NameChange, r.NameChangeAt, r.NameChangePending = &n, now.Unix(), true
+			r.UpdatedAt = now.UTC().Format(time.RFC3339)
+		}
 		return nil
 	}
 	if r != nil && len(ev.AppKey) > 0 && (ev.Event == "enrolled" || ev.AppKeySeq > r.AppKeySeq) {

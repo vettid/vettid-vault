@@ -68,6 +68,7 @@ const (
 	LabelETK       = "vettid/vms/2/etk"
 	LabelVault     = "vettid/vms/2/vault"
 	LabelDevatt    = "vettid/vms/2/devatt"
+	LabelIKFP      = "vettid/vms/2/ik-fp" // 0.18.0 (§10.8)
 	LabelUnlock    = "vettid/vms/2/unlock"
 	InfoCall       = "vettid/vms/2/call"
 	LabelCallKey   = "vettid/vms/2/call-key"

@@ -618,11 +618,15 @@ func (p *vproc) notify(f *hostproto.Frame) {
 	s := p.h.s
 	switch f.Kind {
 	case vaultipc.KindLifecycle:
-		if len(f.Fields) != 8 || string(f.Fields[1]) != p.vaultID || len(f.Fields[5]) > 256 {
+		if len(f.Fields) != enclave.LifecycleFieldCount || string(f.Fields[1]) != p.vaultID || len(f.Fields[5]) > 256 {
 			return
 		}
 		backup, ok := enclave.ParseBackupField(string(f.Fields[7]))
 		if !ok {
+			return
+		}
+		name, ok := enclave.ParseNameFields(f.Fields[8], f.Fields[9], f.Fields[10])
+		if !ok || (name != nil) != (string(f.Fields[0]) == vault.EventAccountName) {
 			return
 		}
 		sv, err := strconv.Atoi(string(f.Fields[4]))
@@ -635,7 +639,7 @@ func (p *vproc) notify(f *hostproto.Frame) {
 		}
 		s.lifecycle(vault.LifecycleEvent{Event: string(f.Fields[0]), VaultID: p.vaultID, Release: string(f.Fields[2]),
 			VaultVersion: string(f.Fields[3]), StateVersion: sv, AppKey: append([]byte(nil), f.Fields[5]...), AppKeySeq: seq,
-			CredentialBackup: backup})
+			CredentialBackup: backup, Name: name})
 	case vaultipc.KindLog:
 		if len(f.Fields) < 2 {
 			return

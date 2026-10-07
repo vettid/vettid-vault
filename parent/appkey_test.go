@@ -58,3 +58,31 @@ func TestCredentialBackupWrite(t *testing.T) {
 		t.Fatal("written without the lease")
 	}
 }
+
+// §11.5 (0.18.0): name_change = {seq, first_name, last_name, at} and
+// name_change_pending = true, whatever the lease, when seq is higher than
+// the row's.
+func TestNameChangeWrite(t *testing.T) {
+	tb := parenttest.NewTables()
+	tb.PutVault(parenttest.VaultRow{VaultID: "v1", UserGUID: "u1", State: "unlocked", LeaseInstance: "other", LeaseExpires: time.Now().Add(time.Hour).Unix()})
+	ctx, now := context.Background(), time.Now()
+	write := func(seq uint64, last string) {
+		ev := parent.Lifecycle{Event: parent.EventAccountName, VaultID: "v1", Name: &parent.NameChange{Seq: seq, FirstName: "Ada", LastName: last}}
+		if err := tb.Lifecycle(ctx, ev, "me", now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(2, "King")
+	r, _ := tb.Vault("v1")
+	if r.NameChange == nil || *r.NameChange != (parent.NameChange{Seq: 2, FirstName: "Ada", LastName: "King"}) || !r.NameChangePending || r.NameChangeAt != now.Unix() {
+		t.Fatalf("row %+v", r)
+	}
+	write(1, "Old")
+	if r, _ := tb.Vault("v1"); r.NameChange.LastName != "King" {
+		t.Fatal("an older request replaced a newer one")
+	}
+	write(3, "Byron")
+	if r, _ := tb.Vault("v1"); r.NameChange.Seq != 3 || r.NameChange.LastName != "Byron" || r.State != "unlocked" || r.LeaseInstance != "other" {
+		t.Fatalf("row %+v", r)
+	}
+}

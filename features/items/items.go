@@ -134,6 +134,8 @@ type Profile struct {
 	Photo   []byte `json:"photo,omitempty"`
 	// Shared is the shared profile's counter (profile.update's version).
 	Shared uint64 `json:"shared"`
+	// Core is the core last counted in Shared (0.18.0, §10.8).
+	Core *Core `json:"core,omitempty"`
 	// Peers is the highest profile.update version seen per connection.
 	Peers map[string]uint64 `json:"peers,omitempty"`
 }
@@ -166,6 +168,7 @@ func (st *state) init() {
 }
 
 // Feature implements vault.Feature, vault.ConnectionObserver,
+// vault.ProfileObserver,
 // vault.ConnectionRemovedObserver, vault.DeviceRemovedObserver,
 // vault.HandshakeProfiler and credential.DeleteObserver.
 type Feature struct {
@@ -278,7 +281,7 @@ func (f *Feature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner
 	case "tag.merge":
 		return f.tagMerge(s, in.Body)
 	case "profile.get":
-		return f.profileGet(in.Body)
+		return f.profileGet(s, in.Body)
 	case "profile.set":
 		return f.profileSet(s, in.Body)
 	case "profile.update":
@@ -713,7 +716,7 @@ func (f *Feature) prepare(s *vault.Session, before, after *itemspec.Item, cross 
 	} else {
 		delete(f.st.Items, id)
 	}
-	if err := f.checkProfile(); err != nil {
+	if err := f.checkProfile(s); err != nil {
 		ch.undo()
 		return nil, err
 	}

@@ -439,6 +439,24 @@ type vaultRow struct {
 	CredentialBackup string
 }
 
+// namePending reports the vault row's name_change_pending and
+// name_change.seq as the host wrote them (0.18.0, §11.5).
+func (s *stack) namePending(id string) (bool, string) {
+	s.t.Helper()
+	it, err := memberapitest.VaultItem(ctxT(s.t, 10*time.Second), s.db, s.tables.Vaults, id)
+	if err != nil {
+		s.t.Fatal(err)
+	}
+	p, _ := it["name_change_pending"].(*ddbtypes.AttributeValueMemberBOOL)
+	seq := ""
+	if m, ok := it["name_change"].(*ddbtypes.AttributeValueMemberM); ok {
+		if n, ok := m.Value["seq"].(*ddbtypes.AttributeValueMemberN); ok {
+			seq = n.Value
+		}
+	}
+	return p != nil && p.Value, seq
+}
+
 func (s *stack) vaultRow(id string) vaultRow {
 	s.t.Helper()
 	it, err := memberapitest.VaultItem(ctxT(s.t, 10*time.Second), s.db, s.tables.Vaults, id)

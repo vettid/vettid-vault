@@ -222,8 +222,8 @@ func (in *Instance) Process(ctx context.Context, q *QueueMessage, manifestDoc []
 		}
 		j := &Job{Op: q.Op, VaultID: q.VaultID, UserGUID: q.UserGUID, RequestID: q.RequestID, ETKKid: q.ETKKid, Inner: inner,
 			AppKey: q.AppKey}
-		if q.Op == OpUnlock {
-			j.Account = q.Account
+		if q.Op == OpUnlock || q.Op == OpEnroll {
+			j.Account = q.Account // enroll: REQUIRED, checked by the job (0.18.0)
 		}
 		if (q.Op == OpEnroll || q.Op == OpUnlock) && len(manifestDoc) <= manifest.MaxServed {
 			j.Manifest = manifestDoc

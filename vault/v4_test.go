@@ -132,18 +132,23 @@ func FuzzApplySettings(f *testing.F) {
 
 type namer struct{ recSink }
 
-func (namer) DisplayName() string { return "Ada" }
+func (namer) DisplayName() string { return "Bo" }
 
-// §6.2, §6.4: a vault's hs.init profile and invite hint carry only its
-// display name.
+// §6.2, §6.4 (0.18.0): a vault's hs.init profile carries the account's
+// names and its display name, if any; none without the names.
 func TestHandshakeProfile(t *testing.T) {
 	d := newDevFixture(t)
-	if d.m.handshakeProfile() != nil {
-		t.Fatal("profile without a name")
+	d.m.st.Account = nil
+	if p, ok := d.m.handshakeProfile(); ok || p != nil {
+		t.Fatal("profile without the account's names")
+	}
+	d.m.applyAccount(snapshotNamed(time.Now(), "Ada", "King", `{"allowed_after":null,"last":null}`, ""), time.Now())
+	if p, ok := d.m.handshakeProfile(); !ok || string(p) != `{"first_name":"Ada","last_name":"King"}` {
+		t.Fatalf("hs.init profile %s", p)
 	}
 	d.m.addFeature(&namer{})
-	if got := string(d.m.handshakeProfile()); got != `{"name":"Ada"}` {
-		t.Fatalf("hs.init profile %s", got)
+	if p, _ := d.m.handshakeProfile(); string(p) != `{"first_name":"Ada","last_name":"King","name":"Bo"}` {
+		t.Fatalf("hs.init profile %s", p)
 	}
 	inv, _, err := d.m.createInvite(context.Background(), KindConnection, 10*time.Minute, "dev1", time.Now())
 	if err != nil || inv == nil {

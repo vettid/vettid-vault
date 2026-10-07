@@ -198,6 +198,11 @@ func (c *Core) enroll(ctx context.Context, q *Job, started **vault.Manager) []by
 	if r.UserGUID != q.UserGUID || r.RequestID != q.RequestID || !suite.Equal(r.APIKey, q.AppKey) {
 		return opaque() // binding (§11.3; app.api_key since 0.15.0): a redirected request is rejected
 	}
+	if _, err := vault.ParseAccountSnapshot(q.Account); err != nil {
+		// §11.5 (0.18.0): every vault holds the account's names from its
+		// first moment (§10.8).
+		return fail("bad_request")
+	}
 	m, own, err := c.verifyManifest(q.Manifest, r.ManifestSHA256, r.ManifestSerial, 0)
 	if err != nil || own.Status != manifest.StatusActive {
 		return fail("manifest") // enrollment goes only to an active release
@@ -234,6 +239,7 @@ func (c *Core) enroll(ctx context.Context, q *Job, started **vault.Manager) []by
 	mgr, err := vault.Create(ctx, vault.CreateParams{
 		Options: c.vaultOptions(sealer), VaultID: q.VaultID, UserGUID: q.UserGUID, PIN: r.PIN, KDF: kdf,
 		RelayURL: c.cfg.RelayURL, Provisional: true, ManifestSerial: m.Serial, SealKeyVerified: rec, Replace: replace,
+		Account: q.Account,
 		App: &vault.EnrollApp{Name: r.Name, IK: r.IK, KEM: r.KEM, OpenToken: r.OpenToken, RequestID: q.RequestID,
 			Relay:       vault.PeerRelay{URL: r.Relay.URL, Mailbox: r.Relay.Mailbox, PK: r.Relay.PK},
 			Attestation: binding, APIKey: r.APIKey,

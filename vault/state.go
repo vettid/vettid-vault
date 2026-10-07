@@ -68,6 +68,10 @@ type State struct {
 	// Account is the member's account snapshot from the member API
 	// (0.15.0, §11.13): display only.
 	Account *AccountState `json:"account,omitempty"`
+	// NameRequest is the latest account.name.set request and NameSeq its
+	// counter (0.18.0, §10.8; from 1).
+	NameRequest *NameRequest `json:"name_request,omitempty"`
+	NameSeq     uint64       `json:"name_seq,omitempty"`
 
 	// OwnerCheck is the daily owner check's record (§3.6.1); nil in a
 	// vault from before 0.13.0 until its first start.
@@ -381,6 +385,9 @@ type OutboxEntry struct {
 	// connection.declined, device.pair.rejected); zero: no limit.
 	NotAfter time.Time `json:"not_after,omitempty"`
 	Done     bool      `json:"done,omitempty"` // removed at the next flush
+	// AwaitToken: the peer's standing token expired; the deposit waits
+	// for the fresh one the reconnect it started brings (§6.6, §8.6).
+	AwaitToken bool `json:"await_token,omitempty"`
 }
 
 // AuditEntry records a dropped or refused message (§6.3, §6.6, §7.3).

@@ -488,7 +488,7 @@ func TestHoldAllowList(t *testing.T) {
 	}
 	for _, typ := range []string{"credential.alarm.confirm", "credential.rotate", "device.transfer.approve", "device.transfer.reject",
 		"call.ice", "call.answer", "credential.unlock", "credential.reset", "device.transfer.create", "settings.set", "vault.delete", "pin.change",
-		"approval.decide", "device.session.approve", "account.get", "message.send", "location.update", "device.unlink"} {
+		"approval.decide", "device.session.approve", "account.get", TypeAccountNameSet, "message.send", "location.update", "device.unlink"} {
 		if m.holdAllows(app, typ, OwnerCheckHeld) {
 			t.Fatalf("app %s allowed", typ)
 		}
@@ -592,11 +592,10 @@ func TestHeldAccountSnapshot(t *testing.T) {
 	f.pastDeadline()
 	_ = f.m.ProcessBatch(context.Background(), &fakeCollector{}, nil) // enter the hold
 	f.inbox(f.app, f.desk)
-	snap := `{"v":1,"as_of":"` + envelope.FormatTS(time.Now()) + `","state":"member"}`
-	if err := f.m.SetAccount(context.Background(), []byte(snap)); err != nil {
+	if err := f.m.SetAccount(context.Background(), snapshotAt(time.Now(), "")); err != nil {
 		t.Fatal(err)
 	}
-	if f.m.AccountVersion() != 1 {
+	if f.m.AccountVersion() != 2 { // the fixture's is 1
 		t.Fatal("snapshot not stored while held")
 	}
 	in := f.inbox(f.app, f.desk)

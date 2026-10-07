@@ -571,6 +571,9 @@ func (m *Manager) rotateIdentity(now time.Time) error {
 	}
 	m.dirty = true
 	m.record(Activity{Kind: "identity.rotated", Audit: true}, now)
+	// §10.8 (0.18.0): the core's ik changed; each connection gets the
+	// update once its epoch under the new ik is active.
+	m.profileCoreChanged(now)
 	return nil
 }
 

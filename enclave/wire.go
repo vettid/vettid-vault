@@ -2,9 +2,12 @@ package enclave
 
 import (
 	"errors"
+	"strconv"
 	"time"
 
+	"github.com/vettid/vettid-vault/internal/hostproto"
 	"github.com/vettid/vettid-vault/internal/strictjson"
+	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vms/altchan"
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/manifest"
@@ -52,6 +55,40 @@ func BackupField(b *bool) string {
 	return "0"
 }
 
+// LifecycleFields encodes a lifecycle event for the host channels
+// (vaultipc 6, hostproto): [event, vault_id, release, vault_version,
+// state_version, app_key (SPKI DER or empty), app_key_seq,
+// credential_backup, name_seq, first_name, last_name]; the last three
+// (0.18.0) are "0", "" and "" except for account_name.
+func LifecycleFields(ev vault.LifecycleEvent) [][]byte {
+	seq, first, last := "0", "", ""
+	if n := ev.Name; n != nil {
+		seq, first, last = strconv.FormatUint(n.Seq, 10), n.FirstName, n.LastName
+	}
+	return append(hostproto.Strings(ev.Event, ev.VaultID, ev.Release, ev.VaultVersion, strconv.Itoa(ev.StateVersion)),
+		ev.AppKey, []byte(strconv.FormatUint(ev.AppKeySeq, 10)), []byte(BackupField(ev.CredentialBackup)),
+		[]byte(seq), []byte(first), []byte(last))
+}
+
+// LifecycleFieldCount is the number of LifecycleFields.
+const LifecycleFieldCount = 11
+
+// ParseNameFields decodes LifecycleFields' last three: nil for "0", "",
+// "" (no name request); a canonical seq ≥ 1 and two names
+// (vault.ValidAccountName) for account_name. ok is false for anything
+// else.
+func ParseNameFields(seq, first, last []byte) (*vault.NameChange, bool) {
+	if string(seq) == "0" && len(first) == 0 && len(last) == 0 {
+		return nil, true
+	}
+	n, err := strconv.ParseUint(string(seq), 10, 53)
+	if err != nil || n == 0 || strconv.FormatUint(n, 10) != string(seq) ||
+		!vault.ValidAccountName(string(first)) || !vault.ValidAccountName(string(last)) {
+		return nil, false
+	}
+	return &vault.NameChange{Seq: n, FirstName: string(first), LastName: string(last)}, true
+}
+
 // ParseBackupField decodes BackupField; ok is false for anything else.
 func ParseBackupField(s string) (*bool, bool) {
 	switch s {
@@ -97,8 +134,10 @@ type QueueMessage struct {
 	// DER; enroll and recovery_register, 0.15.0): bound to the sealed
 	// app.api_key (§11.3, §11.11.3).
 	AppKey []byte
-	// Account is the account snapshot (op account, REQUIRED; unlock,
-	// OPTIONAL; §11.5, §11.13): host data, display only.
+	// Account is the account snapshot (op account, REQUIRED; enroll,
+	// REQUIRED since 0.18.0, refused by the enclave with bad_request when
+	// absent or invalid; unlock, OPTIONAL; §11.5, §11.13): host data whose
+	// names go to the vault's connections (§10.8).
 	Account []byte
 }
 
@@ -197,7 +236,9 @@ func ParseQueueMessage(b []byte) (*QueueMessage, error) {
 			return nil, ErrMalformed
 		}
 	}
-	if raw, ok := o["account"]; ok != (q.Op == OpAccount) && !(ok && q.Op == OpUnlock) {
+	// An enroll without one parses: the enclave answers it bad_request
+	// (§11.5, 0.18.0), which needs the sealed request opened.
+	if raw, ok := o["account"]; ok != (q.Op == OpAccount) && !(ok && (q.Op == OpUnlock || q.Op == OpEnroll)) {
 		return nil, ErrMalformed
 	} else if ok {
 		if len(raw) == 0 || raw[0] != '{' || len(raw) > 2*1024 {

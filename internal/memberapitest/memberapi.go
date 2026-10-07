@@ -92,6 +92,9 @@ type Config struct {
 	// Email returns a member's email (setup codes, email_hint); default
 	// <guid>@example.org.
 	Email func(guid string) string
+	// Names returns a member's registration names (0.18.0, the snapshot's
+	// first_name and last_name); default Test Member.
+	Names func(guid string) (first, last string)
 }
 
 // API serves the vault routes.
@@ -101,6 +104,10 @@ type API struct {
 	// StartRequests records on-demand start requests per release.
 	StartRequests map[string]int
 	ks            *keyStore
+	// The members' names and the vaults' name change results (0.18.0),
+	// by user_guid (names.go).
+	nm map[string]*memberNames
+	nr map[string]*nameResult
 }
 
 // New returns the stand-in.
@@ -650,8 +657,8 @@ func (a *API) enqueueWith(ctx context.Context, op, guid string, v *vaultRow, req
 		// The key the request was signed with (0.15.0, §11.5).
 		b.WriteString(`,"app_key":` + jsonString(base64.StdEncoding.EncodeToString(c.app.der)))
 	}
-	if op == "unlock" || op == "account" {
-		b.WriteString(`,"account":` + string(a.Snapshot(guid))) // §11.13
+	if op == "enroll" || op == "unlock" || op == "account" {
+		b.WriteString(`,"account":` + string(a.Snapshot(guid))) // §11.13; enroll since 0.18.0 (§11.5)
 	}
 	b.WriteString(`,"enqueued_at":` + jsonString(created) + `}`)
 	body := b.String()

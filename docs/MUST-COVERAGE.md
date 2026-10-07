@@ -7,8 +7,9 @@ handshake before approval, request tokens; for 0.10.5:
 `connection.declined` and `device.pair.rejected`; for 0.10.6: the
 recovery marker, `credential_backup` and the lock state; for 0.12.0:
 LEASH delegations and status statements in the LEASH paper's §3.5 format;
-for 0.13.0: the daily owner check and the hold; and for 0.15.0:
-enrollment codes, app keys and the account snapshot.)
+for 0.13.0: the daily owner check and the hold; for 0.15.0:
+enrollment codes, app keys and the account snapshot; and for 0.18.0: the
+shared profile's core and the name change from the app.)
 
 Every MUST / MUST NOT in VAULT-MESSAGING 0.2.3 §4–§6 (plus the §13.4 and
 §13.6 rules they rely on), and the named test that covers it. Normative
@@ -598,3 +599,23 @@ grammar.
 |---|---|---|
 | 6.7.1, 10.3 | A transfer's `device.paired` carries the member's `user_guid` from the sealed header (a plain pairing's does not); the reference client stores it (1–128 printable ASCII) and the new app unlocks with it | `vault.TestTransferRuntime`, `e2e.TestTransfer` |
 | 10.1, 3.6.1 | A `backoff` error's body is `{retry_after}`: whole seconds, rounded up, at least 1, until the PIN backoff (§11.8) or the password backoff (§3.5.3) that refused the request ends | `vault.TestVerifyPIN`, `credential.TestOwnerCheckBackoffRetryAfter` |
+
+## The shared profile's core; names change only in the app (§6.2, §9.3, §10.4, §10.8, §10.9, §11.5, §11.13, §16, §15 item 26; 0.18.0)
+
+| § | Requirement | Test(s) |
+|---|---|---|
+| 11.13 | The snapshot's `first_name`, `last_name` (strings of 1–160 bytes without C0, C1, U+2028, U+2029) and `name_change {allowed_after, last}` are required (still `v: 1`); a snapshot without them is refused and the stored one kept | `vault.TestParseAccountSnapshot`, `vault.FuzzParseAccountSnapshot`, `vault.TestAccountInVault` |
+| 11.5, 11.3 | `account` is REQUIRED in `enroll`: without a well-formed one the enrollment is answered `bad_request`; the vault stores it with its first flush | `enclave.TestEnrollNeedsAccount`, `e2e.TestHostStack` |
+| 10.8 | Every `profile.update` carries the core `{first_name, last_name, ik}` before the optional `name`, `photo` and `items`; `profile.get` returns it; `profile.set` naming a core member is `bad_request`; the display name is optional (absent by default) | `items.TestProfileCore`, `items.TestProfile`, `e2e.TestProfileCoreNamesAndRotation` |
+| 10.8 | Sent on activation (§9.3), on a change of the extras, when a stored snapshot's names differ from the ones last sent (not for the same names again), once when a vault first stores names, and after an `ik` rotation only in the epoch under the new `ik` (after `identity.rotate`; the connection's update waits while its epoch predates the rotation) | `items.TestProfileCore`, `vault.TestRotationPending`, `e2e.TestProfileCoreNamesAndRotation` |
+| 10.8 | No update without the complete core: none is sent and `profile.core_missing` is audited | `items.TestProfileCore` |
+| 10.8, 10.9 | Receiving: strict parse, then the version check, then `drop.profile_malformed` for a missing or invalid core member, an earlier `ik` of the peer's chain ignored without an audit entry, any other `ik` `drop.profile_ik_mismatch` (`ref` = the connection id); a dropped update changes nothing and tells no device | `items.TestProfileReceiveCore`, `items.FuzzParseUpdate` |
+| 6.2 | A vault's connection `hs.init` profile is `{first_name, last_name, name?}`; one without both names is dropped (`drop.profile_malformed`) and the invitation stays usable; a vault without names sends no `hs.init` (`profile.core_missing`) | `vault.TestHandshakeProfile`, `vault.TestHandshakeProfileRequired`, `vault.TestAcceptWithoutNames` |
+| 10.4 | A connection's `name` is the display name of its kept profile (absent without one); `profile` is the peer's kept update | `e2e.TestProfileCoreNamesAndRotation` |
+| 10.8 | `account.name.set`: the holder's only (`forbidden` otherwise), refused during an alarm and while held; `too_soon {allowed_after}` while the snapshot's `allowed_after` lies ahead (nothing counted); the PIN and the password as the owner check (the same failed checks), the CEK rotates, not an owner check (the deadline does not move); the registration rule on the trimmed names (`bad_request`, also for the current names); answer `{credential, version, utks, request}` | `credential.TestAccountNameSet`, `credential.TestAccountNameSetDuringAlarm`, `vault.TestNormalizeRequestedName`, `vault.TestHoldAllowList` |
+| 10.8, 11.5 | The request gets the next `seq`, is stored `pending` (replacing one still pending), audited `account.name_requested` (`ref` = `seq`, no names), announced `sync.event{account.changed}`, and reported as the host event `account_name {seq, first_name, last_name}` after the flush that stored it | `vault.TestNameRequest`, `vault.TestNameRequestNotReportedWithoutFlush` |
+| 10.8, 11.13 | A stored snapshot's `name_change.last` with the pending `seq` sets its state and reason (`account.name_applied` / `account.name_refused`); a higher `seq` refuses it with `account`; `account.get` returns `name_request` | `vault.TestNameRequest`, `e2e.TestProfileCoreNamesAndRotation`, `integration.TestV3Exit` |
+| 11.5 | The lifecycle frame's name fields (vaultipc 6, 11 fields: `name_seq`, `first_name`, `last_name`); the parent writes `name_change = {seq, first_name, last_name, at}` and `name_change_pending = true` whatever the lease, when `seq` is higher than the row's | `enclave.TestLifecycleNameFields`, `parent.TestParseLifecycleName`, `parent.TestNameChangeWrite`, `parent.TestAWSBackend` (LocalStack), `e2e.TestHostStack`, `integration.TestV3Exit` |
+| 16 | The `ik` fingerprint: SHA-256("vettid/vms/2/ik-fp" ‖ ik), shown as its first 16 bytes in 8 groups of 4 lowercase hex digits; the §16 vector in `keys.json` (`ik_fingerprint`) | `vectors.TestVectors` (ik_fingerprint), `vectors.TestVectorsUpToDate`, `suite.TestLabelsEmbedSuite` |
+| 11.5 | Member API stand-in: the snapshot's names and `name_change`, `account` in `enroll`, the vault-names job (claim, `invalid` / `too_soon`, the result, the push) | `integration.TestV3Exit` |
+| 6.6, 8.6 | (Found with 0.18.0's activation updates.) A deposit waiting for a fresh standing token holds back only later deposits on the standing token, not the reconnect's `hs.init` that brings it | `vault.TestAwaitTokenDoesNotBlockReconnect`, `e2e.TestReconnectAfterExpiry` |

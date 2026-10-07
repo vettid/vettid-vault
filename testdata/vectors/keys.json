@@ -31,5 +31,11 @@
     "kem_seed_hex": "0606060606060606060606060606060606060606060606060606060606060606",
     "ek_b64": "w/mmMFIihiwsiewNvYBcVHshIEBbqOmUlHsddOrMWCdyYLqDfeKaCiuEp/yAWJM0+yYmyfYcAciNYLILBygRDwhA/AGmGHpQarI9K0Wf4IU8RPhqaZUzKEV395E7aYmDYbtn03EWgMbCXyUkxWAiInR38ooZTpC0cCkBsARrp5jNG4QxkvO8hByPl0ihqzS1M2sSxYWF/NAQv9bEjndedhUlsmDH9uZG6PF2kKq1G6swyXY/xTuFR9C1awyCxFjGHYRYfZiXhWALjph6NkI9OIyhHWF2WgGkp5yiCpJZCElOrgo7bbGwjLu3pKte3Nlr12cl6SgFWwwog+vOClm8nsKCzzALpsU4DRtw8TstxvYWx2CHpzpw2qt6b5cXHKWZe/QOh7lfM6UzR7pse6ibzskEFwEib9oSQ/Sx+gR3QMe3U9Yw/jhvCeKi+WVZrpee2fpaeNExDvMR+XzDtqc4vuRbdeOgzHFMgfchh7EFohILm+qqwRa/mDXFBHE/Ihi1JvE9iowCyVqg8pJ8J+mW5FZFeOBWInsHu9qK8MxdmfVeq5houOtNGxQGWEOyKeo+Kgp0jYnEwwQZjNRM93GAu4Zk+aoalRFScjPNtoJpdtNCdvYiV+w4IXK/l7MQvdNAVuph8tdM4cyVRLAiY8w9MTOjCJEVVjRaF8Mqy0cERPVTb9Ifgcw8loq35Nuc6lZMVdOmAQZjdfZBdpHA7js5Iohg8bwAaTKTxLyjJxdtpStygklbr8KTLRFUwDZy9NtJvUCWfKQfuPhpY4KlIIxVR2QOUZNFmzUH9IF643B5MFCJaaGLHRaOZ7WTlTIWC1ClOOyQdOcz36pK8JdV+DFyDOyFGfO9dICVOTR7h4aGj7KrmrdC/gIMh5MNN8Raqbg2yYa6AYBKXeJpdKxkfYuSFIS3SNmZlEeHX+J0atERL8V+o5mfWJk3TOJTbFgxADPM2rx11jpkGlZRvQgHmkHB5ZiUyzoci6x2FOlgWBodGRo6OGIJtugu/JK2VcUdkeEejTkZCGOQmpfMYBevLDVQC4YKIcnEjUiDTrVh9YxoM3KWj9ib5SommVMXhVsxI6zCBxaDymadeMPM5bucn5QppkO7sUAdHWZdv0Ws5lJMujsNM1ghBdx8OBZf8JWdMlkU9DekAIynUYeLuCh+6vCSAhsbNke7SptWKnqugGJXOfZrY2wwmgk3asTOxtds5GKa70auSItMaWEGlSdZTgwi7FUib0cIW+xeA0PL+0If/IOLVulVPkEc45yBGhtKU7BRtASvO1i/ZRN2NgwECmB/lGxjVwILofqZ2vGa0/AgQxqYsWRwQAODg3Gf+fx9TMdda8ttTwDINIdLAbmoXgwPXGMnNKMmTRVslzwUyukgvwkXzMySS6kP7xh/l4MRmnomhiHH8pu7KNoczqs2lgnGTvxekaeUUbyBAOq8hVQdHyQ1uWtTL6FMHLdrmZCMQYEY4kcsZlEatViqBvA/2PwV8QogmdxN8TYNFZENKndH2KurQPo9d7dHDYR3zWMCSqQCaPVROdN1SCI+1YI/E2gFdSwLX38j7f2QqJ3R+Q7jRN8Lfj26phk3C5VZQliPDOSecvFWunQ698z51KifMQwwEg==",
     "kid_hex": "d6c9d114385e91df"
+  },
+  "ik_fingerprint": {
+    "description": "VAULT-MESSAGING 0.18.0 §10.8: the fingerprint of the vault ik above, which apps show in a connection's details. sha256 = SHA-256(\"vettid/vms/2/ik-fp\" || ik), ik the 32 raw bytes; shown = its first 16 bytes in lowercase hex, in 8 groups of 4 digits separated by spaces.",
+    "ik_b64": "ypOsFwUYcHHWe4PH/w7+gQjo7EUwV113JoeTM9vavnw=",
+    "sha256_hex": "9a1fbb7d873eeafb494bef94f0727b2539c2faf27783d46d4e6862673f6216c3",
+    "shown": "9a1f bb7d 873e eafb 494b ef94 f072 7b25"
   }
 }

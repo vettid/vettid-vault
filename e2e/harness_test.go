@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/vettid/vettid-vault/devenclave"
 	"github.com/vettid/vettid-vault/features/all"
 	"github.com/vettid/vettid-vault/features/messaging"
+	"github.com/vettid/vettid-vault/internal/enclavetest"
 	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vault/store"
@@ -85,6 +87,8 @@ func newTestVault(t *testing.T, relayURL, name string, tweak func(*vault.Options
 	o.Features = tv.fs.List()
 	m, err := devenclave.Create(ctx, vault.CreateParams{
 		Options: o, UserGUID: "user-" + name, PIN: pin, RelayURL: relayURL, Provisional: true,
+		// §11.5 (0.18.0): every vault holds the account's names.
+		Account: enclavetest.Snapshot(time.Now().Add(-time.Hour), "Member", strings.ToUpper(name)),
 		App: &vault.EnrollApp{Name: name + "-app", IK: app.IdentityKey(), KEM: app.KEMKey(),
 			Relay: vault.PeerRelay{URL: ra.URL, Mailbox: ra.Mailbox, PK: ra.PK}, OpenToken: open},
 	})

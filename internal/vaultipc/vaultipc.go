@@ -24,7 +24,8 @@
 //
 // Vault → supervisor (notifications): Lifecycle [event, vault_id,
 // release, vault_version, state_version, app_key (SPKI DER or empty),
-// app_key_seq, credential_backup ("1", "0" or "" when not reported)], Log
+// app_key_seq, credential_backup ("1", "0" or "" when not reported),
+// name_seq, first_name, last_name ("0", "", "" except for account_name)], Log
 // [level, message, k, v ...].
 //
 // No message from the vault to the supervisor carries a DEK, pepper, key
@@ -50,7 +51,9 @@ import (
 // 5: Recoverable; Lifecycle carries the backup bit; Open's last field
 // is the answer's clear marker (recovery_registered or
 // recovery_unavailable) (0.16.0).
-const Version = "5"
+// 6: Lifecycle carries a name request (name_seq, first_name, last_name;
+// the event account_name, 0.18.0).
+const Version = "6"
 
 // Supervisor → vault.
 const (

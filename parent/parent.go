@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/vettid/vettid-vault/internal/hostproto"
 )
@@ -419,10 +420,10 @@ func parseLifecycle(f *hostproto.Frame) (Lifecycle, bool) {
 	// 0.15.0: [event, vault_id, release, vault_version, state_version,
 	// app_key (SPKI DER or empty), app_key_seq]; an enclave before it
 	// sends the first five.
-	if len(f.Fields) != 5 && len(f.Fields) != 7 && len(f.Fields) != 8 {
+	if len(f.Fields) != 5 && len(f.Fields) != 7 && len(f.Fields) != 8 && len(f.Fields) != 11 {
 		return Lifecycle{}, false
 	}
-	if len(f.Fields) == 8 {
+	if len(f.Fields) >= 8 {
 		// 0.16.0: the backup bit, "1", "0" or "" (not reported).
 		switch string(f.Fields[7]) {
 		case "1", "0":
@@ -442,9 +443,18 @@ func parseLifecycle(f *hostproto.Frame) (Lifecycle, bool) {
 		}
 		ev.AppKey, ev.AppKeySeq = clone(f.Fields[5]), seq
 	}
-	if len(f.Fields) == 8 && len(f.Fields[7]) == 1 {
+	if len(f.Fields) >= 8 && len(f.Fields[7]) == 1 {
 		b := string(f.Fields[7]) == "1"
 		ev.CredentialBackup = &b
+	}
+	if len(f.Fields) == 11 {
+		// 0.18.0: name_seq, first_name, last_name ("0", "", "" except for
+		// account_name).
+		n, ok := parseNameFields(f.Fields[8], f.Fields[9], f.Fields[10])
+		if !ok {
+			return Lifecycle{}, false
+		}
+		ev.Name = n
 	}
 	switch ev.Event {
 	case EventAppKey:
@@ -455,8 +465,15 @@ func parseLifecycle(f *hostproto.Frame) (Lifecycle, bool) {
 		if ev.CredentialBackup == nil {
 			return Lifecycle{}, false
 		}
+	case EventAccountName:
+		if ev.Name == nil {
+			return Lifecycle{}, false
+		}
 	case "enrolled", "unlocked", "locked", "moved", "deleted", EventAlarmCredentialClone:
 	default:
+		return Lifecycle{}, false
+	}
+	if ev.Name != nil && ev.Event != EventAccountName {
 		return Lifecycle{}, false
 	}
 	if !vaultIDOK(ev.VaultID) || !isHex(ev.Release, 96) || !isHex(ev.VaultVersion, 96) {
@@ -474,6 +491,32 @@ func parseLifecycle(f *hostproto.Frame) (Lifecycle, bool) {
 	}
 	ev.StateVersion = n
 	return ev, true
+}
+
+// parseNameFields decodes a lifecycle frame's name request (0.18.0):
+// nil for "0", "", ""; otherwise a canonical seq ≥ 1 and two names of
+// 1–160 bytes of UTF-8 without control characters (§10.8, §11.13).
+func parseNameFields(seq, first, last []byte) (*NameChange, bool) {
+	if string(seq) == "0" && len(first) == 0 && len(last) == 0 {
+		return nil, true
+	}
+	n, err := strconv.ParseUint(string(seq), 10, 53)
+	if err != nil || n == 0 || strconv.FormatUint(n, 10) != string(seq) || !accountName(first) || !accountName(last) {
+		return nil, false
+	}
+	return &NameChange{Seq: n, FirstName: string(first), LastName: string(last)}, true
+}
+
+func accountName(b []byte) bool {
+	if len(b) == 0 || len(b) > 160 || !utf8.Valid(b) {
+		return false
+	}
+	for _, r := range string(b) {
+		if r < 0x20 || r >= 0x80 && r <= 0x9f || r == 0x2028 || r == 0x2029 {
+			return false
+		}
+	}
+	return true
 }
 
 // onLifecycle updates the running set at once and queues the table write.

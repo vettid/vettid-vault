@@ -26,7 +26,14 @@ func (h managerHost) Connection(id string) (PeerInfo, bool) {
 	if !ok {
 		return PeerInfo{}, false
 	}
-	return info(p), true
+	return h.connInfo(p), true
+}
+
+// connInfo is a connection's PeerInfo with RotationPending (§10.8).
+func (h managerHost) connInfo(p *Peer) PeerInfo {
+	i := info(p)
+	i.RotationPending = h.m.rotationPending(p)
+	return i
 }
 
 func (h managerHost) Connections() []PeerInfo {
@@ -37,7 +44,7 @@ func (h managerHost) Connections() []PeerInfo {
 	sort.Strings(ids)
 	out := make([]PeerInfo, 0, len(ids))
 	for _, id := range ids {
-		out = append(out, info(h.m.st.Connections[id]))
+		out = append(out, h.connInfo(h.m.st.Connections[id]))
 	}
 	return out
 }
@@ -196,9 +203,9 @@ func (h managerHost) SetConnectionProfile(id string, profile json.RawMessage, _ 
 		return errBadRequest
 	}
 	p.Profile = append(json.RawMessage(nil), profile...)
-	if n := profileName(profile); n != "" {
-		p.Name = n
-	}
+	// §10.4 (0.18.0): name is the display name of the kept profile,
+	// absent when it has none.
+	p.Name = profileName(profile)
 	h.m.dirty = true
 	return nil
 }
@@ -261,14 +268,19 @@ func (m *Manager) displayName() string {
 	return ""
 }
 
-// handshakeProfile is the vault's hs.init profile for purpose connection:
-// {name} only (§6.2).
-func (m *Manager) handshakeProfile() json.RawMessage {
-	n := m.displayName()
-	if n == "" {
-		return nil
+// handshakeProfile is the vault's hs.init profile for purpose connection
+// (§6.2, 0.18.0): {first_name, last_name, name?}, the core names and the
+// display name, if any. ok is false without the account's names.
+func (m *Manager) handshakeProfile() (json.RawMessage, bool) {
+	first, last, ok := m.accountNames()
+	if !ok {
+		return nil, false
 	}
-	return strictjson.NewBuilder().String("name", n).Bytes()
+	b := strictjson.NewBuilder().String("first_name", first).String("last_name", last)
+	if n := m.displayName(); n != "" {
+		b.String("name", n)
+	}
+	return b.Bytes(), true
 }
 
 // dropReasons maps the runtime's audit events to the audit log's drop.*

@@ -67,6 +67,8 @@ func cmdVaultCreate(ctx context.Context, _ *globals, args []string) error {
 	relay := fs.String("relay", "", "relay base URL")
 	pin := fs.String("pin", "", "PIN")
 	appState := fs.String("app", "", "state file of the app to enroll")
+	first := fs.String("first-name", "Dev", "the account's first name (the snapshot's, 0.18.0)")
+	last := fs.String("last-name", "Member", "the account's last name")
 	_ = fs.Parse(args)
 	if *dir == "" || *relay == "" || *pin == "" || *appState == "" {
 		return errors.New("-store, -relay, -pin and -app are required")
@@ -95,6 +97,8 @@ func cmdVaultCreate(ctx context.Context, _ *globals, args []string) error {
 	m, err := devenclave.Create(ctx, vault.CreateParams{
 		Options: vault.Options{Store: st, Sealer: sealer, Features: all.Dev()},
 		PIN:     *pin, RelayURL: *relay, Provisional: true,
+		// §11.5 (0.18.0): every vault holds the account's names.
+		Account: enclavetest.Snapshot(time.Now(), *first, *last),
 		App: &vault.EnrollApp{Name: "app", IK: app.IdentityKey(), KEM: app.KEMKey(),
 			Relay: vault.PeerRelay{URL: ra.URL, Mailbox: ra.Mailbox, PK: ra.PK}, OpenToken: open},
 	})

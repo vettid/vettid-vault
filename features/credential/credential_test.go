@@ -728,6 +728,7 @@ func FuzzParsePayload(f *testing.F) {
 	f.Add("device.transfer.approve", []byte(`{"password":"`+pw+`","pin":"246810"}`))
 	f.Add("vault.delete", []byte(`{"pin":"246810"}`))
 	f.Add(vault.TypeOwnerCheck, []byte(`{"password":"`+pw+`","pin":"246810","hold":false,"hold_off_until":"2026-10-07T12:00:00.000Z"}`))
+	f.Add(vault.TypeAccountNameSet, []byte(`{"password":"`+pw+`","pin":"246810","first_name":"Ada","last_name":"King"}`))
 	f.Fuzz(func(t *testing.T, typ string, b []byte) {
 		p, err := ParsePayload(typ, b)
 		if err != nil {

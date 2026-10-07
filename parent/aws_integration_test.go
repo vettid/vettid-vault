@@ -248,6 +248,22 @@ func TestAWSBackend(t *testing.T) {
 	if it, _ := memberapitest.VaultItem(ctx, db, tn.Vaults, "v1"); it["credential_backup"] == nil || it["credential_backup"].(*ddbtypes.AttributeValueMemberBOOL).Value {
 		t.Fatalf("credential_backup %v", it["credential_backup"])
 	}
+	// A name request (0.18.0, §11.5): whatever the lease, by seq.
+	nameEv := func(seq uint64, last string) Lifecycle {
+		return Lifecycle{Event: EventAccountName, VaultID: "v1", Release: pcr, VaultVersion: pcr, StateVersion: 1,
+			Name: &NameChange{Seq: seq, FirstName: "Ada", LastName: last}}
+	}
+	for _, ev := range []Lifecycle{nameEv(2, "King"), nameEv(1, "Old")} {
+		if err := a.Lifecycle(ctx, ev, "someone-else", time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	nit, _ := memberapitest.VaultItem(ctx, db, tn.Vaults, "v1")
+	nc, _ := nit["name_change"].(*ddbtypes.AttributeValueMemberM)
+	if nc == nil || nc.Value["seq"].(*ddbtypes.AttributeValueMemberN).Value != "2" || nc.Value["last_name"].(*ddbS).Value != "King" ||
+		nc.Value["first_name"].(*ddbS).Value != "Ada" || nc.Value["at"] == nil || !nit["name_change_pending"].(*ddbtypes.AttributeValueMemberBOOL).Value {
+		t.Fatalf("name_change %v %v", nit["name_change"], nit["name_change_pending"])
+	}
 	// A deletion (§12.5): state deleted and the member's notice.
 	if err := a.Lifecycle(ctx, Lifecycle{Event: "deleted", VaultID: "v1", Release: pcr, VaultVersion: pcr, StateVersion: 1}, "i9", time.Now()); err != nil {
 		t.Fatal(err)

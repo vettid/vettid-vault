@@ -77,8 +77,9 @@ const (
 const (
 	// Descriptor: [release, descriptor, attestation] (§11.2).
 	KindDescriptor Kind = 0x20
-	// Lifecycle: [event, vault_id, release, vault_version, state_version]
-	// (§11.5).
+	// Lifecycle: [event, vault_id, release, vault_version, state_version,
+	// app_key, app_key_seq, credential_backup, name_seq, first_name,
+	// last_name] (§11.5; enclave.LifecycleFields).
 	KindLifecycle Kind = 0x21
 	// Stopped: [vault_id, reason]: a vault's run loop ended on its own
 	// (StopLocked: the vault locked itself, e.g. the member's lock; split

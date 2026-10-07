@@ -220,7 +220,7 @@ func TestSignLabels(t *testing.T) {
 func TestLabelsEmbedSuite(t *testing.T) {
 	for _, l := range []string{LabelKid, InfoSealed, LabelHsKs, LabelHsKe, LabelTh1, LabelTh, LabelSession, LabelI2R,
 		LabelR2I, LabelKidI2R, LabelKidR2I, LabelRK, LabelEpoch, LabelSigResp, LabelSigFin, LabelSAS, LabelSASCommit, LabelBundle,
-		LabelETK, LabelVault, LabelDevatt, LabelUnlock, InfoCall, LabelCallKey, LabelRotate, LabelBlob} {
+		LabelETK, LabelVault, LabelDevatt, LabelUnlock, InfoCall, LabelCallKey, LabelRotate, LabelBlob, LabelIKFP} {
 		if !strings.HasPrefix(l, labelPrefix) || len(l) == len(labelPrefix) {
 			t.Errorf("label %q", l)
 		}

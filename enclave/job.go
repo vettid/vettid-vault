@@ -28,8 +28,9 @@ type Job struct {
 	// AppKey is the queue message's app_key (enroll, recovery_register;
 	// 0.15.0), bound to the sealed app.api_key.
 	AppKey []byte
-	// Account is the queue message's account snapshot (unlock; 0.15.0,
-	// §11.13), applied after a successful unlock.
+	// Account is the queue message's account snapshot (unlock, 0.15.0;
+	// enroll, REQUIRED since 0.18.0; §11.13), applied after a successful
+	// unlock or with the enrollment's first flush.
 	Account []byte
 }
 

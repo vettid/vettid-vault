@@ -397,10 +397,15 @@ func (w *World) RecoveryCancel(ctx context.Context, in *enclave.Instance, vaultI
 	in.Process(ctx, q, nil)
 }
 
-// Snapshot is a well-formed account snapshot (§11.13, 0.18.0) as of t
-// with the names first and last.
+// Snapshot is a well-formed account snapshot (§11.13, 0.18.0, 0.20.0) as
+// of t with the names first and last and the email member@example.org.
 func Snapshot(t time.Time, first, last string) []byte {
-	b, _ := json.Marshal(map[string]any{"v": 1, "as_of": t.UTC().Format("2006-01-02T15:04:05.000Z"), "email_hint": "m***@example.org",
+	return SnapshotEmail(t, first, last, "member@example.org")
+}
+
+// SnapshotEmail is Snapshot with the member's email (0.20.0).
+func SnapshotEmail(t time.Time, first, last, email string) []byte {
+	b, _ := json.Marshal(map[string]any{"v": 1, "as_of": t.UTC().Format("2006-01-02T15:04:05.000Z"), "email": email,
 		"first_name": first, "last_name": last, "name_change": map[string]any{"allowed_after": nil, "last": nil},
 		"state": "member", "account_status": "active", "deletes_at": nil, "terms": map[string]any{"needs_acceptance": false},
 		"subscription": nil, "voting_rights": false})

@@ -205,8 +205,10 @@ func TestV3Exit(t *testing.T) {
 	if u, err := m2.UnlockVia(ctx, api2, "member-2", "246801", trust, att2, client.UnlockOptions{}, ""); err != nil || !u.OK {
 		t.Fatalf("member 2 unlock: %v %+v", err, u)
 	}
-	// §11.13: the unlock carried the account snapshot; account.get shows it.
-	if r := req(t, m2, "account.get", `{}`); !r.OK() || !strings.Contains(string(r.Body()), `"email_hint":"m***@example.org"`) {
+	// §11.13: the unlock carried the account snapshot; account.get shows it,
+	// with the full email and no email_hint (0.20.0).
+	if r := req(t, m2, "account.get", `{}`); !r.OK() || !strings.Contains(string(r.Body()), `"email":"member-2@example.org"`) ||
+		strings.Contains(string(r.Body()), "email_hint") {
 		t.Fatalf("account.get: %s %s", r.ErrorCode(), r.Body())
 	}
 	// The op account reaches the running vault: account.changed.

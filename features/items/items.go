@@ -16,7 +16,9 @@
 // Lock order: this feature calls the credential, grants and leash
 // features while holding its lock; none of them calls back into it from
 // those calls. They call into it (Readable, AgentRead, ...) only from
-// their own handlers, and those entry points call nothing outside.
+// their own handlers, and those entry points call nothing outside. The
+// audit feature calls ItemName from its search (§10.9), without holding
+// its own lock.
 package items
 
 import (

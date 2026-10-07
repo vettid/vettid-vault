@@ -314,9 +314,10 @@ func validOrigin(s string) bool {
 	return true
 }
 
-// EmailHint is the masked email of the redeem answer and the account
-// snapshot (§11.12.1, §11.13): the local part's first character, "***",
-// "@" and the domain.
+// EmailHint is the masked email of the redeem and recovery-claim answers
+// (§11.11.7, §11.12.1): the local part's first character, "***", "@" and
+// the domain. Since 0.20.0 the account snapshot carries the full email
+// instead (§11.13).
 func EmailHint(email string) string {
 	local, domain, ok := strings.Cut(email, "@")
 	if !ok || local == "" {

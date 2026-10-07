@@ -89,7 +89,8 @@ type Config struct {
 	// Origin is the member API origin the setup code's QR names (§11.12.1);
 	// default http://<Host>.
 	Origin string
-	// Email returns a member's email (setup codes, email_hint); default
+	// Email returns a member's email (setup codes, the redeem and claim
+	// answers' email_hint, the snapshot's email since 0.20.0); default
 	// <guid>@example.org.
 	Email func(guid string) string
 	// Names returns a member's registration names (0.18.0, the snapshot's

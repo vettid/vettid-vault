@@ -80,7 +80,7 @@ func TestAccountOp(t *testing.T) {
 	}
 	in := f.w.Instance(3)
 	snap := func(at time.Time) []byte {
-		return strictjson.NewBuilder().Uint("v", 1).String("as_of", envelope.FormatTS(at)).String("email_hint", "u***@example.org").
+		return strictjson.NewBuilder().Uint("v", 1).String("as_of", envelope.FormatTS(at)).String("email", "user@example.org").
 			String("first_name", "Ada").String("last_name", "Lovelace").Raw("name_change", []byte(`{"allowed_after":null,"last":null}`)).
 			String("state", "member").String("account_status", "active").Raw("deletes_at", []byte("null")).
 			Raw("terms", []byte(`{"needs_acceptance":false}`)).Raw("subscription", []byte("null")).Bool("voting_rights", false).

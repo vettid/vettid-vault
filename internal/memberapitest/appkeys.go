@@ -443,7 +443,7 @@ func (a *API) registeredBy(vaultID, requestID string) {
 // snapshot to the vault").
 func (a *API) Snapshot(guid string) []byte {
 	b, _ := json.Marshal(map[string]any{"v": 1, "as_of": a.cfg.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
-		"email_hint": altchan.EmailHint(a.email(guid)), "first_name": a.names(guid).first, "last_name": a.names(guid).last,
+		"email": altchan.NormalizeEmail(a.email(guid)), "first_name": a.names(guid).first, "last_name": a.names(guid).last,
 		"name_change": a.nameChange(guid), "state": "member", "account_status": "active", "deletes_at": nil,
 		"terms":        map[string]any{"needs_acceptance": false},
 		"subscription": nil, "voting_rights": false})

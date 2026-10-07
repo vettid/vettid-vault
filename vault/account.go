@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -16,7 +17,13 @@ import (
 // sends it with every unlock and, for a running vault, as the queue op
 // `account`. The vault keeps the newest one in DEK state and its apps and
 // desktops read it with account.get; agents and connections never see it
-// (§13.7). Nothing in the vault depends on it.
+// (§13.7). Nothing in the vault depends on it. Since 0.20.0 it carries
+// the member's full email, which only account.get returns, to the app and
+// desktops: it never goes into a profile, an hs.init, an invitation, a
+// feed item, an audit entry, a LEASH statement, a message to a connection
+// or an agent, or an event to the host (§11.13, §13.7). The vault reads
+// only the names and name_change out of it; the email stays in the
+// stored bytes.
 
 // MaxAccountSnapshot bounds a snapshot (§11.13: at most 2 KiB).
 const MaxAccountSnapshot = 2048
@@ -50,6 +57,9 @@ type AccountSnapshot struct {
 	// name_change.last (nil: null).
 	AllowedAfter time.Time
 	Last         *NameResult
+	// Email is the member's full verified address (0.20.0). The vault
+	// returns it only in account.get, to the app and desktops (§11.13).
+	Email string
 }
 
 // NameResult is a snapshot's name_change.last (0.18.0, §11.13): the member
@@ -79,12 +89,36 @@ func ValidAccountName(s string) bool {
 	return true
 }
 
+// MinAccountEmail and MaxAccountEmail bound the snapshot's email (§11.13,
+// 0.20.0: 3–1,016 bytes, the registration rule's 254 characters).
+const (
+	MinAccountEmail = 3
+	MaxAccountEmail = 1016
+)
+
+// ValidAccountEmail reports whether s is an email as the snapshot carries
+// it (§11.13, 0.20.0): a UTF-8 string of 3–1,016 bytes with an "@" and
+// without control characters (C0, DEL, C1). The vault does not check it
+// further: it is display only and shown only to the member.
+func ValidAccountEmail(s string) bool {
+	if len(s) < MinAccountEmail || len(s) > MaxAccountEmail || !utf8.ValidString(s) || !strings.Contains(s, "@") {
+		return false
+	}
+	for _, r := range s {
+		if r < 0x20 || r >= 0x7f && r <= 0x9f {
+			return false
+		}
+	}
+	return true
+}
+
 // ParseAccountSnapshot parses a snapshot strictly (§11.13): an object of
-// at most 2 KiB, v = 1, as_of an RFC 3339 time, and (0.18.0, required)
+// at most 2 KiB, v = 1, as_of an RFC 3339 time, (0.18.0, required)
 // first_name and last_name (ValidAccountName) and name_change
-// {allowed_after: RFC 3339 | null, last: {seq, status, reason?} | null};
-// the other members the spec names must have their types; unknown members
-// are ignored.
+// {allowed_after: RFC 3339 | null, last: {seq, status, reason?} | null},
+// and (0.20.0, required) email (ValidAccountEmail); the other members the
+// spec names must have their types; unknown members, 0.15.0's email_hint
+// among them, are ignored.
 func ParseAccountSnapshot(raw []byte) (*AccountSnapshot, error) {
 	if len(raw) == 0 || len(raw) > MaxAccountSnapshot {
 		return nil, ErrAccount
@@ -115,7 +149,10 @@ func ParseAccountSnapshot(raw []byte) (*AccountSnapshot, error) {
 	if err != nil || !parseNameChange(nc, a) {
 		return nil, ErrAccount
 	}
-	for _, k := range []string{"email_hint", "state", "account_status"} {
+	if a.Email, err = o.String("email"); err != nil || !ValidAccountEmail(a.Email) {
+		return nil, ErrAccount
+	}
+	for _, k := range []string{"state", "account_status"} {
 		if o.Has(k) {
 			if _, err := o.String(k); err != nil {
 				return nil, ErrAccount

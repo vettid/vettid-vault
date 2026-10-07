@@ -17,7 +17,7 @@ func snapshotAt(t time.Time, extra string) []byte {
 
 // snapshotNamed is a snapshot with names and name_change (0.18.0).
 func snapshotNamed(t time.Time, first, last, nameChange, extra string) []byte {
-	return []byte(`{"v":1,"as_of":"` + envelope.FormatTS(t) + `","email_hint":"m***@example.org",` +
+	return []byte(`{"v":1,"as_of":"` + envelope.FormatTS(t) + `","email":"member@example.org",` +
 		`"first_name":` + string(strictjson.MarshalString(first)) + `,"last_name":` + string(strictjson.MarshalString(last)) +
 		`,"name_change":` + nameChange + `,"state":"member","account_status":"active",` +
 		`"deletes_at":null,"terms":{"needs_acceptance":false},"subscription":{"type_name":"Member","status":"active","paid":true,` +
@@ -33,7 +33,7 @@ func TestParseAccountSnapshot(t *testing.T) {
 		a.FirstName != "Ada" || a.LastName != "Lovelace" || !a.AllowedAfter.IsZero() || a.Last != nil {
 		t.Fatalf("%+v %v", a, err)
 	}
-	const core = `"first_name":"Ada","last_name":"Lovelace","name_change":{"allowed_after":null,"last":null}`
+	const core = `"email":"m@example.org","first_name":"Ada","last_name":"Lovelace","name_change":{"allowed_after":null,"last":null}`
 	if _, err := ParseAccountSnapshot([]byte(`{"v":1,"as_of":"2026-10-06T12:00:00Z",` + core + `,"subscription":null,"deletes_at":"2026-10-13T00:00:00Z"}`)); err != nil {
 		t.Fatal(err)
 	}
@@ -52,23 +52,56 @@ func TestParseAccountSnapshot(t *testing.T) {
 		`{"v":1,"as_of":"2026-10-06T12:00:00Z",` + core + `,"pad":"` + strings.Repeat("x", MaxAccountSnapshot) + `"}`,
 		// 0.18.0: the names and name_change are required.
 		`{"v":1,"as_of":"2026-10-06T12:00:00Z"}`,
-		`{"v":1,"as_of":"2026-10-06T12:00:00Z","last_name":"L","name_change":{"allowed_after":null,"last":null}}`,
+		`{"v":1,"as_of":"2026-10-06T12:00:00Z","email":"m@example.org","last_name":"L","name_change":{"allowed_after":null,"last":null}}`,
 		`{"v":1,"as_of":"2026-10-06T12:00:00Z","first_name":"A","last_name":"L"}`,
-		`{"v":1,"as_of":"2026-10-06T12:00:00Z","first_name":"","last_name":"L","name_change":{"allowed_after":null,"last":null}}`,
-		`{"v":1,"as_of":"2026-10-06T12:00:00Z","first_name":"A\u0085","last_name":"L","name_change":{"allowed_after":null,"last":null}}`,
-		`{"v":1,"as_of":"2026-10-06T12:00:00Z","first_name":"A","last_name":"` + strings.Repeat("x", 161) + `","name_change":{"allowed_after":null,"last":null}}`,
-		`{"v":1,"as_of":"2026-10-06T12:00:00Z","first_name":"A","last_name":1,"name_change":{"allowed_after":null,"last":null}}`,
-		`{"v":1,"as_of":"2026-10-06T12:00:00Z","first_name":"A","last_name":"L","name_change":{"last":null}}`,
-		`{"v":1,"as_of":"2026-10-06T12:00:00Z","first_name":"A","last_name":"L","name_change":{"allowed_after":null}}`,
-		`{"v":1,"as_of":"2026-10-06T12:00:00Z","first_name":"A","last_name":"L","name_change":{"allowed_after":"soon","last":null}}`,
-		`{"v":1,"as_of":"2026-10-06T12:00:00Z","first_name":"A","last_name":"L","name_change":{"allowed_after":null,"last":{"seq":0,"status":"applied"}}}`,
-		`{"v":1,"as_of":"2026-10-06T12:00:00Z","first_name":"A","last_name":"L","name_change":{"allowed_after":null,"last":{"seq":1,"status":"done"}}}`,
-		`{"v":1,"as_of":"2026-10-06T12:00:00Z","first_name":"A","last_name":"L","name_change":{"allowed_after":null,"last":{"seq":1,"status":"refused","reason":2}}}`,
-		`{"v":1,"as_of":"2026-10-06T12:00:00Z","first_name":"A","last_name":"L","name_change":null}`,
+		`{"v":1,"as_of":"2026-10-06T12:00:00Z","email":"m@example.org","first_name":"","last_name":"L","name_change":{"allowed_after":null,"last":null}}`,
+		`{"v":1,"as_of":"2026-10-06T12:00:00Z","email":"m@example.org","first_name":"A\u0085","last_name":"L","name_change":{"allowed_after":null,"last":null}}`,
+		`{"v":1,"as_of":"2026-10-06T12:00:00Z","email":"m@example.org","first_name":"A","last_name":"` + strings.Repeat("x", 161) + `","name_change":{"allowed_after":null,"last":null}}`,
+		`{"v":1,"as_of":"2026-10-06T12:00:00Z","email":"m@example.org","first_name":"A","last_name":1,"name_change":{"allowed_after":null,"last":null}}`,
+		`{"v":1,"as_of":"2026-10-06T12:00:00Z","email":"m@example.org","first_name":"A","last_name":"L","name_change":{"last":null}}`,
+		`{"v":1,"as_of":"2026-10-06T12:00:00Z","email":"m@example.org","first_name":"A","last_name":"L","name_change":{"allowed_after":null}}`,
+		`{"v":1,"as_of":"2026-10-06T12:00:00Z","email":"m@example.org","first_name":"A","last_name":"L","name_change":{"allowed_after":"soon","last":null}}`,
+		`{"v":1,"as_of":"2026-10-06T12:00:00Z","email":"m@example.org","first_name":"A","last_name":"L","name_change":{"allowed_after":null,"last":{"seq":0,"status":"applied"}}}`,
+		`{"v":1,"as_of":"2026-10-06T12:00:00Z","email":"m@example.org","first_name":"A","last_name":"L","name_change":{"allowed_after":null,"last":{"seq":1,"status":"done"}}}`,
+		`{"v":1,"as_of":"2026-10-06T12:00:00Z","email":"m@example.org","first_name":"A","last_name":"L","name_change":{"allowed_after":null,"last":{"seq":1,"status":"refused","reason":2}}}`,
+		`{"v":1,"as_of":"2026-10-06T12:00:00Z","email":"m@example.org","first_name":"A","last_name":"L","name_change":null}`,
 	} {
 		if _, err := ParseAccountSnapshot([]byte(bad)); err == nil {
 			t.Fatalf("accepted %s", bad)
 		}
+	}
+}
+
+// §11.13 (0.20.0): email is required, a string of 3–1,016 bytes with an
+// "@" and without control characters (C0, DEL, C1); an email_hint is an
+// unknown member (ignored, whatever its type); the stored bytes keep the
+// snapshot as received.
+func TestAccountSnapshotEmail(t *testing.T) {
+	const rest = `"first_name":"Ada","last_name":"Lovelace","name_change":{"allowed_after":null,"last":null}`
+	snap := func(email string) []byte {
+		return []byte(`{"v":1,"as_of":"2026-10-07T12:00:00Z",` + email + rest + `}`)
+	}
+	a, err := ParseAccountSnapshot(snapshotAt(time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC), ""))
+	if err != nil || a.Email != "member@example.org" || !bytes.Contains(a.Raw, []byte(`"email":"member@example.org"`)) {
+		t.Fatalf("%+v %v", a, err)
+	}
+	long := strings.Repeat("x", MaxAccountEmail-len("@example.org")) + "@example.org"
+	for _, good := range []string{`"email":"a@b",`, `"email":"` + long + `",`, `"email":"ü@exämple.org",`,
+		`"email":"m@example.org","email_hint":"m***@example.org",`, `"email":"m@example.org","email_hint":5,`} {
+		if a, err := ParseAccountSnapshot(snap(good)); err != nil || a.Email == "" {
+			t.Fatalf("refused %s: %v", good, err)
+		}
+	}
+	for _, bad := range []string{``, `"email_hint":"m***@example.org",`, `"email":null,`, `"email":5,`, `"email":"",`,
+		`"email":"ab",`, `"email":"member.example.org",`, `"email":"` + long + `x",`,
+		`"email":"m@example.org\n",`, `"email":"m\u0000@example.org",`, `"email":"m\u007f@example.org",`,
+		`"email":"m\u0085@example.org",`, `"email":"m\t@example.org",`} {
+		if _, err := ParseAccountSnapshot(snap(bad)); err == nil {
+			t.Fatalf("accepted %s", bad)
+		}
+	}
+	if !ValidAccountEmail("a@b") || ValidAccountEmail(string([]byte{'a', 0xff, '@', 'b'})) {
+		t.Fatal("ValidAccountEmail")
 	}
 }
 
@@ -137,7 +170,8 @@ func TestRecoveryAppKey(t *testing.T) {
 	}
 }
 
-// §11.13 (0.18.0): whatever the snapshot parser accepts has valid names.
+// §11.13 (0.18.0, 0.20.0): whatever the snapshot parser accepts has valid
+// names and a valid email.
 func FuzzParseAccountSnapshot(f *testing.F) {
 	f.Add(snapshotAt(time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC), ""))
 	f.Add(snapshotNamed(time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC), "Ada", "King",
@@ -147,7 +181,7 @@ func FuzzParseAccountSnapshot(f *testing.F) {
 		if err != nil {
 			return
 		}
-		if !ValidAccountName(a.FirstName) || !ValidAccountName(a.LastName) || len(a.Raw) > MaxAccountSnapshot {
+		if !ValidAccountName(a.FirstName) || !ValidAccountName(a.LastName) || !ValidAccountEmail(a.Email) || len(a.Raw) > MaxAccountSnapshot {
 			t.Fatalf("accepted %+v", a)
 		}
 		if a.Last != nil && (a.Last.Seq == 0 || a.Last.Status != NameApplied && a.Last.Status != NameRefused) {

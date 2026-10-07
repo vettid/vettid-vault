@@ -25,7 +25,7 @@ func init() {
 	commands["owner-check"] = command{"owner-check [-hold on|off] [-until RFC3339] | owner-check status   (the daily owner check, §3.6; reads VAULTCTL_PIN and VAULTCTL_PASSWORD)", cmdOwnerCheck}
 	commands["profile"] = command{"profile get | profile set JSON   (the display name and photo; @profile items are items)", cmdProfile}
 	commands["settings"] = command{"settings get | settings set VERSION JSON", cmdSettings}
-	commands["audit"] = command{"audit [-connection ID] [-kinds a,b] [-before N] [-limit N]", cmdAudit}
+	commands["audit"] = command{"audit [-connection ID] [-kinds a,b] [-q TEXT] [-since RFC3339] [-until RFC3339] [-before N | -after N] [-limit N] [-all]", cmdAudit}
 	commands["feed"] = command{"feed list|get|update|delete|guides [flags]", cmdFeed}
 }
 
@@ -294,22 +294,39 @@ func cmdAudit(ctx context.Context, g *globals, args []string) error {
 	conn := fs.String("connection", "", "connection id (connection.audit.list)")
 	kinds := fs.String("kinds", "", "comma-separated kind prefixes")
 	before := fs.Uint64("before", 0, "before_seq")
-	limit := fs.Uint64("limit", 0, "limit")
+	after := fs.Int64("after", -1, "after_seq (oldest first)")
+	limit := fs.Int("limit", 0, "limit")
+	text := fs.String("q", "", "search the kind and the current connection, device and item names (0.20.0)")
+	since := fs.String("since", "", "RFC 3339 time, inclusive (0.20.0)")
+	until := fs.String("until", "", "RFC 3339 time, exclusive (0.20.0)")
+	all := fs.Bool("all", false, "follow the cursors (also across partial pages) to the end; prints the entries")
 	_ = fs.Parse(args)
-	q := map[string]any{}
-	if *conn != "" {
-		q["connection_id"] = *conn
-	}
+	q := client.AuditQuery{ConnectionID: *conn, Q: *text, BeforeSeq: *before, Limit: *limit}
 	if *kinds != "" {
-		q["kinds"] = strings.Split(*kinds, ",")
+		q.Kinds = strings.Split(*kinds, ",")
 	}
-	if *before != 0 {
-		q["before_seq"] = *before
+	if *after >= 0 {
+		q.After, q.AfterSeq = true, uint64(*after)
 	}
-	if *limit != 0 {
-		q["limit"] = *limit
+	for _, t := range []struct {
+		s   string
+		dst *time.Time
+	}{{*since, &q.Since}, {*until, &q.Until}} {
+		if t.s == "" {
+			continue
+		}
+		v, err := time.Parse(time.RFC3339Nano, t.s)
+		if err != nil {
+			return fmt.Errorf("audit: %q is not an RFC 3339 time", t.s)
+		}
+		*t.dst = v
 	}
-	return withDevice(ctx, g, func(d *client.Device) (any, error) { return d.AuditList(ctx, q, *conn != "") })
+	return withDevice(ctx, g, func(d *client.Device) (any, error) {
+		if *all {
+			return d.AuditSearchAll(ctx, q, *conn != "", 0)
+		}
+		return d.AuditList(ctx, q.Body(), *conn != "")
+	})
 }
 
 func cmdFeed(ctx context.Context, g *globals, args []string) error {

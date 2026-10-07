@@ -298,6 +298,12 @@ func (h *Host) RotationsFrom(ik []byte) ([]json.RawMessage, bool) {
 
 func (h *Host) OwnerLastActive() time.Time { return h.LastActive }
 
+// ListedDevice implements vault.DeviceLister: any device in Devices.
+func (h *Host) ListedDevice(id string) (vault.PeerInfo, bool) {
+	p, ok := h.Devices[id]
+	return p, ok
+}
+
 func (h *Host) PairedDevice(id string) (vault.PeerInfo, bool) {
 	p, ok := h.Devices[id]
 	return p, ok

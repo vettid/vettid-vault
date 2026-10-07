@@ -17,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault"
@@ -36,6 +38,11 @@ const (
 	MaxLimit     = 500
 	MaxKinds     = 16
 	MaxKindLen   = 64
+	// MaxQ bounds q, in bytes (0.20.0).
+	MaxQ = 128
+	// SearchBudget is how many entries a request with q evaluates at
+	// most (0.20.0): those that pass the other filters.
+	SearchBudget = 2000
 )
 
 const label = "vettid/vms/2/audit"
@@ -65,6 +72,14 @@ type Feature struct {
 	mu    sync.Mutex
 	st    state
 	drops map[string]*dropWindow // memory only
+	items ItemNames
+}
+
+// ItemNames is the items feature: an item's current name for the search
+// (§10.9, 0.20.0); ok is false for an item that does not exist. It must
+// not call back into this feature.
+type ItemNames interface {
+	ItemName(itemID string) (name string, ok bool)
 }
 
 type dropWindow struct {
@@ -74,6 +89,11 @@ type dropWindow struct {
 
 // New returns an empty audit log.
 func New() *Feature { return &Feature{drops: map[string]*dropWindow{}} }
+
+// SetItems connects the items feature (at construction), whose item
+// names the search reads; without it entries are found by their kind,
+// connection and device only.
+func (f *Feature) SetItems(it ItemNames) { f.items = it }
 
 var owners = []string{vault.KindApp, vault.KindDesktop}
 
@@ -190,6 +210,13 @@ type Query struct {
 	AfterSeq     uint64 // with After: oldest first, entries with seq > AfterSeq
 	After        bool
 	Limit        int
+	// Q is the search string, lower-cased (strings.ToLower); "" for none
+	// (0.20.0).
+	Q string
+	// Since and Until bound at in Unix milliseconds, inclusive and
+	// exclusive, when HasSince / HasUntil (0.20.0).
+	Since, Until       int64
+	HasSince, HasUntil bool
 }
 
 var errBad = vault.NewError("bad_request", "")
@@ -236,7 +263,55 @@ func ParseQuery(body []byte, needConn bool) (*Query, error) {
 	} else if present {
 		q.Limit = int(l)
 	}
+	if s, present, err := o.OptString("q"); err != nil || present && !ValidQ(s) {
+		return nil, errBad
+	} else if present {
+		q.Q = strings.ToLower(s)
+	}
+	var err2 error
+	if q.Since, q.HasSince, err2 = optTime(o, "since"); err2 != nil {
+		return nil, errBad
+	}
+	if q.Until, q.HasUntil, err2 = optTime(o, "until"); err2 != nil {
+		return nil, errBad
+	}
+	if q.HasSince && q.HasUntil && q.Since >= q.Until {
+		return nil, errBad
+	}
 	return q, nil
+}
+
+// ValidQ reports whether s is a search string (§10.9, 0.20.0): 1–128
+// bytes of UTF-8, without control characters (C0, DEL, C1), not only
+// white space.
+func ValidQ(s string) bool {
+	if s == "" || len(s) > MaxQ || !utf8.ValidString(s) {
+		return false
+	}
+	blank := true
+	for _, r := range s {
+		if r < 0x20 || r >= 0x7f && r <= 0x9f {
+			return false
+		}
+		if !unicode.IsSpace(r) {
+			blank = false
+		}
+	}
+	return !blank
+}
+
+// optTime parses an optional RFC 3339 member (any offset) into Unix
+// milliseconds.
+func optTime(o strictjson.Object, k string) (int64, bool, error) {
+	s, present, err := o.OptString(k)
+	if err != nil || !present {
+		return 0, present, err
+	}
+	t, err := time.Parse(time.RFC3339Nano, s)
+	if err != nil {
+		return 0, true, err
+	}
+	return t.UnixMilli(), true, nil
 }
 
 func (q *Query) match(e *Entry) bool {
@@ -247,6 +322,9 @@ func (q *Query) match(e *Entry) bool {
 		return false
 	}
 	if q.After && e.Seq <= q.AfterSeq {
+		return false
+	}
+	if at := e.At.UnixMilli(); q.HasSince && at < q.Since || q.HasUntil && at >= q.Until {
 		return false
 	}
 	if len(q.Kinds) == 0 {
@@ -279,17 +357,17 @@ func EntryJSON(e *Entry) []byte {
 	return b.Base64("prev", e.Prev).Base64("hash", e.Hash).Bytes()
 }
 
-// Handle implements vault.Handler.
-func (f *Feature) Handle(_ context.Context, _ *vault.Session, in *envelope.Inner) (json.RawMessage, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
+// Handle implements vault.Handler. With q (0.20.0) it evaluates at most
+// SearchBudget entries that pass the other filters; a page the budget cut
+// short carries partial and the cursor of the last entry evaluated.
+func (f *Feature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner) (json.RawMessage, error) {
 	q, err := ParseQuery(in.Body, in.Type == "connection.audit.list")
 	if err != nil {
 		return nil, err
 	}
-	arr := []byte{'['}
-	n := 0
-	var last, next uint64
+	// Entries never change once appended; the search reads names from
+	// other features and the host without this feature's lock.
+	f.mu.Lock()
 	order := make([]*Entry, 0, len(f.st.Entries))
 	if q.After {
 		order = append(order, f.st.Entries...)
@@ -298,10 +376,36 @@ func (f *Feature) Handle(_ context.Context, _ *vault.Session, in *envelope.Inner
 			order = append(order, f.st.Entries[i])
 		}
 	}
-	more := false
+	head, seq := f.st.Head, f.st.Seq
+	f.mu.Unlock()
+	var names *searchNames
+	if q.Q != "" {
+		names = newSearchNames(s, f.items)
+	}
+	arr := []byte{'['}
+	n, evaluated := 0, 0
+	var last, lastEval, next uint64
+	more, partial := false, false
 	for _, e := range order {
 		if !q.match(e) {
 			continue
+		}
+		if names != nil {
+			if evaluated == SearchBudget {
+				// Entries remain that the budget does not reach.
+				if n < q.Limit {
+					next, partial = lastEval, true
+				} else {
+					next = last
+				}
+				more = true
+				break
+			}
+			evaluated++
+			lastEval = e.Seq
+			if !names.match(e, q.Q) {
+				continue
+			}
 		}
 		if n == q.Limit {
 			next, more = last, true // more remain: the next page continues from the last one returned
@@ -315,17 +419,19 @@ func (f *Feature) Handle(_ context.Context, _ *vault.Session, in *envelope.Inner
 		last = e.Seq
 	}
 	b := strictjson.NewBuilder().Raw("entries", append(arr, ']'))
-	head := f.st.Head
 	if len(head) == 0 {
 		head = make([]byte, sha256.Size)
 	}
 	b.Base64("head", head)
-	b.Uint("seq", f.st.Seq)
+	b.Uint("seq", seq)
 	switch {
 	case more && q.After:
 		b.Uint("next_after_seq", next)
 	case more:
 		b.Uint("next_before_seq", next)
+	}
+	if partial {
+		b.Bool("partial", true)
 	}
 	return b.Bytes(), nil
 }

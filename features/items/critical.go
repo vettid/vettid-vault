@@ -587,3 +587,17 @@ func (f *Feature) CriticalExists(itemID string) bool {
 	it := f.st.Items[itemID]
 	return it != nil && it.Sensitivity == itemspec.Critical
 }
+
+// ItemName returns an item's current name (§10.7), whatever its
+// sensitivity (a critical item's name is DEK-state metadata here), for the
+// audit search (§10.9, 0.20.0); ok is false for an item that does not
+// exist (deleted). It calls nothing outside this feature.
+func (f *Feature) ItemName(itemID string) (string, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	it := f.st.Items[itemID]
+	if it == nil {
+		return "", false
+	}
+	return it.Name, true
+}

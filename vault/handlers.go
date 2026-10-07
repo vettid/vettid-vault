@@ -226,13 +226,19 @@ type PeerInfo struct {
 	// the vault's latest ik rotation; the profile.update with the new ik
 	// waits for the epoch under it (§10.8, 0.18.0).
 	RotationPending bool
+	// Alias is a connection's owner alias (connection.update, §10.4).
+	Alias string
 }
 
 func info(p *Peer) PeerInfo {
 	if p == nil {
 		return PeerInfo{}
 	}
-	return PeerInfo{ID: p.ID, Kind: p.Kind, Name: p.Name, State: p.State, IK: append([]byte(nil), p.IK...), Profile: p.Profile, Recovering: p.Recovering}
+	i := PeerInfo{ID: p.ID, Kind: p.Kind, Name: p.Name, State: p.State, IK: append([]byte(nil), p.IK...), Profile: p.Profile, Recovering: p.Recovering}
+	if p.Meta != nil {
+		i.Alias = p.Meta.Alias
+	}
+	return i
 }
 
 // From returns the sending principal (zero for vault-internal activity).

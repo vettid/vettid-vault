@@ -9,9 +9,10 @@ recovery marker, `credential_backup` and the lock state; for 0.12.0:
 LEASH delegations and status statements in the LEASH paper's §3.5 format;
 for 0.13.0: the daily owner check and the hold; for 0.15.0:
 enrollment codes, app keys and the account snapshot; and for 0.18.0: the
-shared profile's core and the name change from the app; and for 0.19.0:
+shared profile's core and the name change from the app; for 0.19.0:
 the held counts in `vault.status`, the worst-case profile size and the
-0.18.0 errata.)
+0.18.0 errata; and for 0.20.0: the full email in the account snapshot and
+the audit search.)
 
 Every MUST / MUST NOT in VAULT-MESSAGING 0.2.3 §4–§6 (plus the §13.4 and
 §13.6 rules they rely on), and the named test that covers it. Normative
@@ -634,3 +635,18 @@ grammar.
 | 11.13 | `name_change.last.status` is `applied` or `refused` (any other refuses the snapshot); `reason` is kept only with `refused` | `vault.TestParseAccountSnapshot` |
 | 10.4, 10.8 | A vault without names answers `connection.invite.accept` with `internal`, sends no `hs.init` and audits `profile.core_missing` | `vault.TestAcceptWithoutNames` |
 | 10.1, 10.2 | `sync.event{account.changed}` for a name request alone repeats the stored snapshot's `version` | `vault.TestNameRequest` |
+
+## The full email in the snapshot; audit search in the vault (§10.2, §10.9, §11.13, §13.7, §15 item 28; 0.20.0)
+
+| § | Requirement | Test(s) |
+|---|---|---|
+| 11.13 | The snapshot's `email` is required (still `v: 1`): a string of 3–1,016 bytes with an `@`, without control characters (C0, DEL, C1); a snapshot without it, or with a bad one, is refused and the stored one kept; an `email_hint` is an unknown member and ignored, whatever its type | `vault.TestAccountSnapshotEmail`, `vault.TestParseAccountSnapshot`, `vault.FuzzParseAccountSnapshot` |
+| 11.13, 10.2 | `account.get` returns the snapshot with the full `email` to the app and desktops (stored as received); agents may not ask | `vault.TestAccountInVault`, `e2e.TestEmailStaysWithTheMember`, `e2e.TestHostStack`, `integration.TestV3Exit` |
+| 11.13, 13.7 | The email (or a hint or its domain) is in no `profile.update` (on activation, after a name change), no `hs.init` profile, no invitation, no feed item, no audit entry, nothing a connection lists, and no lifecycle event or host audit entry | `e2e.TestEmailStaysWithTheMember` |
+| 11.11.7, 11.12.1 | The redeem and recovery-claim answers keep the masked `email_hint` (member API; the stand-in and the client unchanged) | `integration.TestV3Exit`, `vectors.TestAppKeyVectors` (`email_hint`) |
+| 11.5 | Member API stand-in: the snapshot carries `email` (trimmed and lower-cased), not `email_hint` | `integration.TestV3Exit` |
+| 10.9 | `q` matches, case-insensitively (`strings.ToLower`, per field): the `kind`, the `kind` with `.`, `_`, `-` as spaces; the entry's connection's current `name`, `alias`, profile `first_name`, `last_name`, display name and "First Last"; its device's current name (as `device.list`, any state); for `item.*`, `share.included`/`declined`/`withdrawn`, `wallet.created`/`deleted`/`address_issued`, the item's current name (critical items included) | `audit.TestSearchFields`, `vault.TestSearchNamesFromManager`, `e2e.TestAuditSearch` |
+| 10.9 | Never searched: field labels or values, tags, notes, the profile's other members, ids, refs that are not item ids; no match across two fields; a removed connection, unlinked device or deleted item adds no text; names are those held when the vault answers; the entries (and `hash`) are unchanged | `audit.TestSearchNeverSearched`, `e2e.TestAuditSearch` |
+| 10.9 | With `q`, at most 2,000 entries that pass the other filters (`connection_id`, `kinds`, `since`, `until`, the cursor) are evaluated; a budget run out before `limit` matches answers the matches so far (possibly none), `partial: true` and `next_before_seq` / `next_after_seq` = the last evaluated `seq`; with `limit` matches and entries left the cursor is the last returned, without `partial`; no cursor is the end; without `q` no budget | `audit.TestSearchBudget`, `e2e.TestAuditSearch` (`client.AuditSearchAll`) |
+| 10.9 | `since` inclusive, `until` exclusive, RFC 3339 with any offset, compared in Unix milliseconds; either alone; a filter, not a cursor (an `at` that steps back is still filtered) | `audit.TestSinceUntil`, `e2e.TestAuditSearch` |
+| 10.9 | `bad_request` for a `q` that is empty, over 128 bytes, only white space or with a control character (C0, DEL, C1) or not a string; a `since` / `until` that is not an RFC 3339 time; `since` ≥ `until`; the same on `connection.audit.list`; `kinds` still 1–16 prefixes; agents and connections still `forbidden` | `audit.TestSearchErrors`, `audit.FuzzValidQ`, `audit.FuzzParseQuery` |

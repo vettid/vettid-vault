@@ -398,7 +398,7 @@ func TestHostStack(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if r, err := m1.dev.Request(ctxT(t, 30*time.Second), "account.get", json.RawMessage(`{}`)); err != nil || !strings.Contains(string(r.Body()), `"email_hint":"m***@example.org"`) {
+	if r, err := m1.dev.Request(ctxT(t, 30*time.Second), "account.get", json.RawMessage(`{}`)); err != nil || !strings.Contains(string(r.Body()), `"email":"member@example.org"`) {
 		t.Fatalf("account.get: %v", err)
 	}
 	// 0.18.0 (§10.8, §11.5): a name request travels from the vault's

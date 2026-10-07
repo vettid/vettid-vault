@@ -70,6 +70,7 @@ func NewSet(o Options) *Set {
 	it.SetGrants(gr)
 	it.SetAgents(ls)
 	aud := audit.New()
+	aud.SetItems(it) // the search reads the items' current names (§10.9, 0.20.0)
 	// The wallet's recovery phrases are critical items; it owns them
 	// (item.put and item.sensitivity refused) and spends through the
 	// credential (§10.18). No chain source: the app is the chain source.

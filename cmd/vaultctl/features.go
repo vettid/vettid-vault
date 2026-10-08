@@ -25,7 +25,9 @@ func init() {
 	commands["owner-check"] = command{"owner-check [-hold on|off] [-until RFC3339] | owner-check status   (the daily owner check, §3.6; reads VAULTCTL_PIN and VAULTCTL_PASSWORD)", cmdOwnerCheck}
 	commands["profile"] = command{"profile get | profile set JSON   (the display name and photo; @profile items are items)", cmdProfile}
 	commands["settings"] = command{"settings get | settings set VERSION JSON", cmdSettings}
-	commands["audit"] = command{"audit [-connection ID] [-kinds a,b] [-q TEXT] [-since RFC3339] [-until RFC3339] [-before N | -after N] [-limit N] [-all]", cmdAudit}
+	commands["audit"] = command{"audit [-connection ID] [-kinds a,b] [-q TEXT] [-since RFC3339] [-until RFC3339] [-before N | -after N] [-limit N] [-all] | " +
+		"audit export [-dry-run] [-format csv|json] [-connection ID] [-kinds a,b] [-q TEXT] [-since RFC3339] [-until RFC3339] [-upto N]   " +
+		"(History export, §10.9: the preview, then the export with VAULTCTL_PIN; prints the answer and the entries read with audit.list)", cmdAudit}
 	commands["feed"] = command{"feed list|get|update|delete|guides [flags]", cmdFeed}
 }
 
@@ -295,7 +297,89 @@ func cmdSettings(ctx context.Context, g *globals, args []string) error {
 	})
 }
 
+// auditFilters registers audit.list's filters on fs and returns a
+// function that builds the query once fs is parsed.
+func auditFilters(fs *flag.FlagSet) func() (client.AuditQuery, error) {
+	conn := fs.String("connection", "", "connection id")
+	kinds := fs.String("kinds", "", "comma-separated kind prefixes")
+	text := fs.String("q", "", "search the kind and the current connection, device and item names (0.20.0)")
+	since := fs.String("since", "", "RFC 3339 time, inclusive (0.20.0)")
+	until := fs.String("until", "", "RFC 3339 time, exclusive (0.20.0)")
+	return func() (client.AuditQuery, error) {
+		q := client.AuditQuery{ConnectionID: *conn, Q: *text}
+		if *kinds != "" {
+			q.Kinds = strings.Split(*kinds, ",")
+		}
+		for _, t := range []struct {
+			s   string
+			dst *time.Time
+		}{{*since, &q.Since}, {*until, &q.Until}} {
+			if t.s == "" {
+				continue
+			}
+			v, err := time.Parse(time.RFC3339Nano, t.s)
+			if err != nil {
+				return q, fmt.Errorf("audit: %q is not an RFC 3339 time", t.s)
+			}
+			*t.dst = v
+		}
+		return q, nil
+	}
+}
+
+// cmdAuditExport is History's export (§10.9, 0.22.0): -dry-run prints
+// the preview; otherwise it previews (unless -upto names the bound), sends
+// the export with VAULTCTL_PIN and prints the vault's answer and the
+// entries read with audit.list below the bound. The vault writes no file;
+// a member's app writes CSV or JSON from these entries.
+func cmdAuditExport(ctx context.Context, g *globals, args []string) error {
+	fs := flag.NewFlagSet("audit export", flag.ExitOnError)
+	query := auditFilters(fs)
+	dry := fs.Bool("dry-run", false, "preview: count the entries, no PIN")
+	format := fs.String("format", "json", "csv or json")
+	upto := fs.Uint64("upto", 0, "upto_seq from a preview (0: preview first)")
+	_ = fs.Parse(args)
+	q, err := query()
+	if err != nil {
+		return err
+	}
+	var pin string
+	if !*dry {
+		if pin, err = password("VAULTCTL_PIN"); err != nil {
+			return err
+		}
+	}
+	return withDevice(ctx, g, func(d *client.Device) (any, error) {
+		if *dry {
+			return d.AuditExportPreview(ctx, q, *format)
+		}
+		bound := *upto
+		if bound == 0 {
+			p, err := d.AuditExportPreview(ctx, q, *format)
+			if err != nil {
+				return nil, err
+			}
+			if p.Count == 0 {
+				return p, nil
+			}
+			bound = p.UptoSeq
+		}
+		r, err := d.AuditExport(ctx, q, *format, bound, pin)
+		if err != nil {
+			return nil, err
+		}
+		es, err := d.AuditExportEntries(ctx, q, r)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"export": r, "entries": es}, nil
+	})
+}
+
 func cmdAudit(ctx context.Context, g *globals, args []string) error {
+	if len(args) > 0 && args[0] == "export" {
+		return cmdAuditExport(ctx, g, args[1:])
+	}
 	fs := flag.NewFlagSet("audit", flag.ExitOnError)
 	conn := fs.String("connection", "", "connection id (connection.audit.list)")
 	kinds := fs.String("kinds", "", "comma-separated kind prefixes")

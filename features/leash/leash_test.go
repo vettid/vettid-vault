@@ -902,3 +902,13 @@ func TestStatusWhileHeld(t *testing.T) {
 		t.Fatalf("after the check: %+v", up)
 	}
 }
+
+// §10.11 (0.22.0): no audit.* type is delegable to an agent; in
+// particular audit.export (History export, §10.9).
+func TestAuditNeverDelegable(t *testing.T) {
+	for _, typ := range []string{"audit.list", "connection.audit.list", "audit.export"} {
+		if ValidScope(typ) {
+			t.Errorf("%s is delegable", typ)
+		}
+	}
+}

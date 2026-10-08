@@ -73,6 +73,9 @@ type Feature struct {
 	st    state
 	drops map[string]*dropWindow // memory only
 	items ItemNames
+	cred  Credential
+	// exportMax overrides ExportMax (tests); 0 means ExportMax.
+	exportMax int
 }
 
 // ItemNames is the items feature: an item's current name for the search
@@ -105,6 +108,9 @@ func (f *Feature) Types() []vault.TypeSpec {
 	return []vault.TypeSpec{
 		{Type: "audit.list", Request: true, From: owners},
 		{Type: "connection.audit.list", Request: true, From: owners},
+		// History export (0.22.0): the holder's app only. Desktops are
+		// refused at once and, app-only, it is never delegated (§10.11).
+		{Type: "audit.export", Request: true, From: []string{vault.KindApp}},
 	}
 }
 
@@ -361,6 +367,9 @@ func EntryJSON(e *Entry) []byte {
 // SearchBudget entries that pass the other filters; a page the budget cut
 // short carries partial and the cursor of the last entry evaluated.
 func (f *Feature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner) (json.RawMessage, error) {
+	if in.Type == "audit.export" {
+		return f.export(s, in)
+	}
 	q, err := ParseQuery(in.Body, in.Type == "connection.audit.list")
 	if err != nil {
 		return nil, err

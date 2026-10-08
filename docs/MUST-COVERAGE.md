@@ -15,7 +15,8 @@ the held counts in `vault.status`, the worst-case profile size and the
 the audit search; and for 0.21.0: kept values on item edits, the item's
 size, dry runs, named limits, share.pending.list and
 share.decide{include, decline}, grant labels and names, and suitability
-before the password; for 0.21.1: the 0.21.0 errata.)
+before the password; for 0.21.1: the 0.21.0 errata; and for 0.22.0:
+History export, `audit.export`.)
 
 Every MUST / MUST NOT in VAULT-MESSAGING 0.2.3 §4–§6 (plus the §13.4 and
 §13.6 rules they rely on), and the named test that covers it. Normative
@@ -687,3 +688,20 @@ grammar.
 | 10.7 | A move to `critical` checks the 12,288-byte size on the item as it will be stored, with `"sensitivity":"critical"` (`limit` `item_size` with that `size`; nothing moves) | `items.TestMoveToCriticalSize` |
 | 10.13 | A request recorded before 0.21.0 has no `kind`: `.list` and `.get` omit it (and the state keeps none) while the field is not usable; the vault fills in the current kind once it is; the request still expires 24 h after it arrived | `critical.TestKindAbsentBefore021` |
 | 10.13 | An incoming use is checked usable (`unavailable`), then suitable (`unsuitable`), then against the 8 pending per connection (`unavailable`): an unsuitable request is `unsuitable` even at the cap | `critical.TestCheckOrder` |
+
+## History export (§3.5.4, §3.5.9, §10, §10.9, §10.11, §15 item 30; 0.22.0)
+
+| § | Requirement | Test(s) |
+|---|---|---|
+| 10.9, 3.5.9 | `audit.export` is the holder's app only: a desktop is answered `forbidden` at once (never held for approval); an agent, a recovering app, another app and a connection `forbidden`; without the credential feature `forbidden` | `audit.TestExportHolderOnly`, `credential.TestSpendPINForExport`, `e2e.TestAuditExport` |
+| 10.11 | No `audit.*` type is delegable (app-only types are never delegated; not a LEASH scope) | `leash.TestAuditNeverDelegable`, `e2e.TestAuditExport` (agent) |
+| 10.9, 3.6.3 | While the app is gated (past the owner check's deadline) the preview and the export are `owner_check_required` | `e2e.TestAuditExportHeld` |
+| 10.9, 3.5.9 | While a clone alarm is open the preview and the export are refused with the alarm's freeze code (`credential_frozen`, `rotation_required`) before anything else (even a malformed body) and without spending the UTK | `audit.TestExportCheckOrder`, `credential.TestSpendPINForExport` |
+| 10.9 | The preview (`dry_run: true`) takes `audit.list`'s filters (`connection_id`, `kinds`, `q`, `since`, `until`) with their `bad_request` rules; `before_seq`, `after_seq`, `limit`, `utk_id`, `sealed` and `upto_seq` are `bad_request`; `format`, if present, `csv` or `json`; it answers `{count, more, upto_seq, upto_hash, oldest_seq?, newest_seq?, oldest_at?, newest_at?}` (the range only with `count` > 0; `upto_seq`/`upto_hash` the log's newest entry), spends nothing and writes no entry | `audit.TestExportPreviewFilters`, `e2e.TestAuditExport` |
+| 10.9 | `q` is evaluated over the whole log without the 2,000-entry budget (the count is exact); at most 10,000 entries newest first, `more` beyond | `audit.TestExportWholeLogAndCap` |
+| 10.9, 3.5.4 | The export carries `utk_id` and `sealed` = `{pin}` alone, bound to `audit.export` and the request id; single-use; no blob, password or CEK rotation; the answer has no `utks` or `credential` | `credential.TestSpendPINForExport`, `e2e.TestAuditExport` (`client.AuditExport`) |
+| 10.9 | The export's order: the alarm, the UTK (`utk_invalid`), the shape (`bad_request`: a bad filter, `format` absent or not `csv`/`json`, a PIN not 6–32 digits, `upto_seq` not an integer 1…newest seq; the UTK spent), `not_found` when nothing matches with `seq` ≤ `upto_seq` (the PIN not tried), the §11.8 backoff (`backoff` with `retry_after`), the PIN | `audit.TestExportCheckOrder`, `credential.TestSpendPINForExport`, `e2e.TestAuditExport` |
+| 10.9 | A wrong PIN is `bad_pin`, audited `vault.pin_failed` and counted in the §11.8 PIN backoff only: the owner check's `failures` stay 0, no `owner_check.failed` entry, no feed item; three failures start the backoff | `audit.TestExportCheckOrder`, `e2e.TestAuditExport` |
+| 10.9 | The right PIN, in one flush, resets the PIN backoff, appends exactly one `audit.exported` (`device_id` = the app, no `connection_id`) and answers the preview's members for the entries with `seq` ≤ `upto_seq`, plus `entry_seq`; no feed item; not an owner check | `audit.TestExportCheckOrder`, `e2e.TestAuditExport` |
+| 10.9 | `audit.exported`'s `ref`: `format=…;count=…;seqs=<oldest>-<newest>;filters=<none\|connection,kinds,q,dates>[;since=<ts>][;until=<ts>]`, times in UTC `ts` format, naming no connection, kind prefix or search text | `audit.TestExportSummary`, `e2e.TestAuditExport` |
+| 10.9 | `upto_seq` bounds the export: entries written after the preview (`audit.exported` among them) are not counted; `upto_hash` is the hash of `upto_seq`'s entry; an unfiltered export read with `audit.list` from `before_seq` = `upto_seq` + 1 is one chain ending at `upto_hash` | `audit.TestExportUptoBound`, `e2e.TestAuditExport` (`client.AuditExportEntries`) |

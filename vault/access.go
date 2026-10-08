@@ -205,7 +205,7 @@ func (m *Manager) hold(p *Peer, in *envelope.Inner, key string, now time.Time) {
 		}
 	}
 	if n >= MaxHeldPerDevice {
-		m.respondError(p, in, key, "limit", "", now)
+		m.respondErrorBody(p, in, key, "limit", "", limitBody("held_approvals", MaxHeldPerDevice, -1), now)
 		return
 	}
 	c := *in

@@ -75,6 +75,43 @@ var (
 // NewError returns an error response with a code and a non-secret message.
 func NewError(code, msg string) error { return &HandlerError{Code: code, Message: msg} }
 
+// LimitError is the `limit` error response (§10.1): since 0.21.0 its body
+// names the limit, {limit, max}, where max is the bound (a count, or bytes
+// for a *_size limit). The names are the table of §10.1.
+func LimitError(name string, max int) error {
+	return &HandlerError{Code: "limit", Body: limitBody(name, max, -1)}
+}
+
+// LimitSizeError is the `limit` error response of a size limit (§10.1,
+// 0.21.0): {limit, max, size}, size being the size the refused request
+// would have reached as the vault counted it.
+func LimitSizeError(name string, max, size int) error {
+	return &HandlerError{Code: "limit", Body: limitBody(name, max, size)}
+}
+
+func limitBody(name string, max, size int) json.RawMessage {
+	b := strictjson.NewBuilder().String("limit", name).Uint("max", uint64(max))
+	if size >= 0 {
+		b.Uint("size", uint64(size))
+	}
+	return b.Bytes()
+}
+
+// LimitName returns the name a `limit` error carries ("" for any other
+// error).
+func LimitName(err error) string {
+	he, ok := err.(*HandlerError)
+	if !ok || he.Code != "limit" {
+		return ""
+	}
+	o, perr := strictjson.ParseObject(he.Body)
+	if perr != nil {
+		return ""
+	}
+	n, _ := o.String("limit")
+	return n
+}
+
 // BackoffError is the `backoff` error response (§10.1): since 0.17.0 its
 // body is {retry_after}, the whole seconds (rounded up, at least 1) until
 // the backoff that refused the request ends, as in the unlock result.
@@ -536,6 +573,14 @@ type AgentCoverage interface {
 // request from a desktop with forbidden instead of holding it (§6.8).
 type AppOnlyForms interface {
 	AppOnly(typ string, body json.RawMessage) bool
+}
+
+// ReadOnlyForms is optionally implemented by a feature whose step-up
+// types have read-only forms (item.put and item.tag with dry_run, §10.7,
+// 0.21.0): a desktop's request in such a form is handled at once, without
+// an app's approval (§6.8). AppOnlyForms is checked first.
+type ReadOnlyForms interface {
+	ReadOnly(typ string, body json.RawMessage) bool
 }
 
 // DeviceRemovedObserver is implemented by features that keep data per

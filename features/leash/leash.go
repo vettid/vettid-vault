@@ -249,7 +249,6 @@ var (
 	errBad       = vault.NewError("bad_request", "")
 	errNotFound  = vault.NewError("not_found", "")
 	errForbidden = vault.NewError("forbidden", "")
-	errLimit     = vault.NewError("limit", "")
 	errConflict  = vault.NewError("conflict", "")
 	errLocked    = vault.NewError("credential_locked", "")
 	errInternal  = vault.NewError("internal", "")
@@ -949,7 +948,7 @@ func (f *Feature) issue(s *vault.Session, body []byte) (json.RawMessage, error) 
 		g = &c
 	} else {
 		if f.count(agentID) >= MaxGrants {
-			return nil, errLimit
+			return nil, vault.LimitError("agent_grants", MaxGrants)
 		}
 		g = &Grant{ID: s.NewID(), AgentID: agentID}
 	}
@@ -1324,7 +1323,7 @@ func (f *Feature) SetAgentRule(s *vault.Session, r *itemspec.AgentRule) (*itemsp
 			return nil, errBad
 		}
 		if f.count(r.AgentID) >= MaxGrants {
-			return nil, errLimit
+			return nil, vault.LimitError("agent_grants", MaxGrants)
 		}
 		g = &Grant{ID: r.ID, AgentID: r.AgentID, Created: now}
 	} else {

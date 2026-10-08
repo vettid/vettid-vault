@@ -23,7 +23,7 @@ func (f *Feature) IssueRuleGrants(s *vault.Session, conn, ruleID string, metas [
 		return nil, errBad
 	}
 	if countActive(f.d.Given)+len(metas) > MaxGiven {
-		return nil, errLimit
+		return nil, vault.LimitError("grants_given", MaxGiven)
 	}
 	now := s.Now().UTC().Truncate(time.Millisecond)
 	ids := make([]string, len(metas))
@@ -106,7 +106,7 @@ func (f *Feature) IssueForAction(s *vault.Session, conn, invocationID string, it
 		metas = append(metas, meta)
 	}
 	if countActive(f.d.Given)+len(made) > MaxGiven {
-		return nil, errLimit
+		return nil, vault.LimitError("grants_given", MaxGiven)
 	}
 	out := make([]Descriptor, 0, len(made))
 	for i, g := range made {

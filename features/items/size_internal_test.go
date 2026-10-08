@@ -34,14 +34,14 @@ func TestProfileSizeWorstCaseNames(t *testing.T) {
 	}
 	base, _ := size(0)
 	// Fits with the current (short) names, not with the longest ones.
-	if n, err := size(MaxProfileUpdate - base - 100); n > MaxProfileUpdate || err != errLimit {
+	if n, err := size(MaxProfileUpdate - base - 100); n > MaxProfileUpdate || vault.LimitName(err) != "profile_size" {
 		t.Fatalf("near the limit: %d bytes, %v", n, err)
 	}
 	// 2 × (322 − 3) bytes of headroom: accepted.
 	if _, err := size(MaxProfileUpdate - base - 2*(322-3)); err != nil {
 		t.Fatalf("with room for the longest names: %v", err)
 	}
-	if _, err := size(MaxProfileUpdate - base - 2*(322-3) + 1); err != errLimit {
+	if _, err := size(MaxProfileUpdate - base - 2*(322-3) + 1); vault.LimitName(err) != "profile_size" {
 		t.Fatalf("one byte over with the longest names: %v", err)
 	}
 }

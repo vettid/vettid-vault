@@ -424,7 +424,11 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 			m.respondError(p, in, key, "forbidden", "", now)
 			return disp(eph)
 		}
-		ask = true
+		// A read-only form (a dry run, §10.7 0.21.0) changes nothing: no
+		// step-up.
+		if rf, ok := te.handler.(ReadOnlyForms); !ok || !rf.ReadOnly(in.Type, in.Body) {
+			ask = true
+		}
 	}
 	if ask {
 		if te.spec.Request && !eph && !volatile {

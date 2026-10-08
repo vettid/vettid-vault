@@ -13,7 +13,6 @@ import (
 var (
 	errBad      = vault.NewError("bad_request", "")
 	errNotFound = vault.NewError("not_found", "")
-	errLimit    = vault.NewError("limit", "")
 	errConn     = vault.NewError("connection_unavailable", "")
 )
 

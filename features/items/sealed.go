@@ -139,18 +139,33 @@ func open(vaultID string, it *itemspec.Item, e *credential.Item) ([]byte, error)
 
 // rekey re-encrypts an item's values under a fresh key (gen + 1),
 // replacing its entry in the plaintext; it returns the new ciphertext and
-// generation for the caller to install once the credential is sealed.
-func rekey(vaultID string, it *itemspec.Item, inner *credential.Inner, i int) ([]byte, uint64, error) {
+// generation for the caller to install once the credential is sealed, and
+// the item's size without its tags (0.21.0, §10.7: recorded whenever its
+// values open; 0 if the plaintext does not parse).
+func rekey(vaultID string, it *itemspec.Item, inner *credential.Inner, i int) ([]byte, uint64, int, error) {
 	pt, err := open(vaultID, it, &inner.Items[i])
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
 	defer suite.Wipe(pt)
 	e, sealed, err := seal(vaultID, it, inner.Items[i].Gen+1, pt)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
 	inner.Items[i].Wipe()
 	inner.Items[i] = e
-	return sealed, e.Gen, nil
+	return sealed, e.Gen, sizeNoTags(it, pt), nil
+}
+
+// sizeNoTags is the size without its tags of a critical item whose
+// values plaintext is pt (0 if it does not parse).
+func sizeNoTags(it *itemspec.Item, pt []byte) int {
+	v, err := ParseValues(pt)
+	if err != nil {
+		return 0
+	}
+	defer wipeValues(v)
+	full := withValues(it, v)
+	full.RecordSize()
+	return full.SizeNoTags
 }

@@ -153,7 +153,6 @@ func (f *Feature) Save() (json.RawMessage, error) {
 var (
 	errBad      = vault.NewError("bad_request", "")
 	errNotFound = vault.NewError("not_found", "")
-	errLimit    = vault.NewError("limit", "")
 	errExists   = vault.NewError("exists", "")
 	errConn     = vault.NewError("connection_unavailable", "")
 )
@@ -496,7 +495,7 @@ func (f *Feature) create(s *vault.Session, body []byte) (json.RawMessage, error)
 		}
 	}
 	if f.openMade() >= MaxOpen {
-		return nil, errLimit
+		return nil, vault.LimitError("introductions", MaxOpen)
 	}
 	now := s.Now().UTC().Truncate(time.Millisecond)
 	m := &Made{ID: s.NewID(), A: c.A, C: c.C, ToA: c.ToA, ToC: c.ToC, Answers: map[string]string{}, State: StateOffered, Exp: now.Add(TTL)}

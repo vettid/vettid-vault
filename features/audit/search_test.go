@@ -312,3 +312,32 @@ func FuzzValidQ(f *testing.F) {
 		}
 	})
 }
+
+// §10.9 (0.21.0, stating 0.20.0's behaviour): the budget runs out only
+// when a 2,001st entry passing the other filters would be evaluated; a
+// request that found limit matches by the 2,000th is not partial.
+func TestSearchBudgetEdge(t *testing.T) {
+	f, h := New(), featuretest.NewHost()
+	for i := 1; i <= 2001; i++ {
+		k := "noise.entry"
+		if i == 2 {
+			k = "needle.found"
+		}
+		rec(f, h, t0.Add(time.Duration(i)*time.Millisecond), vault.Activity{Kind: k, Audit: true})
+	}
+	// Newest first, 2001..2 evaluated: the 2,000th evaluated is the match.
+	p := list(t, f, h, "audit.list", `{"q":"needle","limit":1}`)
+	if seqs(p) != "2" || p.Partial != nil || p.NextBefore == nil || *p.NextBefore != 2 {
+		t.Fatalf("limit at the 2,000th: %s %+v", seqs(p), p)
+	}
+	// Without the limit reached: entry 1 would be the 2,001st: partial.
+	p = list(t, f, h, "audit.list", `{"q":"needle","limit":2}`)
+	if seqs(p) != "2" || p.Partial == nil || p.NextBefore == nil || *p.NextBefore != 2 {
+		t.Fatalf("budget out at the 2,001st: %s %+v", seqs(p), p)
+	}
+	// connection.audit.list takes after_seq (oldest first).
+	p = list(t, f, h, "connection.audit.list", `{"connection_id":"c1","after_seq":0}`)
+	if p.NextBefore != nil {
+		t.Fatalf("connection.audit.list after_seq: %+v", p)
+	}
+}

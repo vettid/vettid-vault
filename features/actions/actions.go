@@ -272,7 +272,6 @@ var (
 	errBad       = vault.NewError("bad_request", "")
 	errNotFound  = vault.NewError("not_found", "")
 	errConflict  = vault.NewError("conflict", "")
-	errLimit     = vault.NewError("limit", "")
 	errForbidden = vault.NewError("forbidden", "")
 	errLocked    = vault.NewError("credential_locked", "")
 	errConn      = vault.NewError("connection_unavailable", "")
@@ -933,7 +932,7 @@ func (f *Feature) invoke(s *vault.Session, body []byte) (json.RawMessage, error)
 		return nil, errNotFound
 	}
 	if len(f.d.Outgoing) >= MaxOutgoing {
-		return nil, errLimit
+		return nil, vault.LimitError("action_invocations", MaxOutgoing)
 	}
 	id := s.NewID()
 	b := strictjson.NewBuilder().String("invocation_id", id).String("action_id", v.ActionID).Uint("version", off.Version).Raw("params", v.Params)

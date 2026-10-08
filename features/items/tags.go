@@ -163,7 +163,7 @@ func (f *Feature) tagSet(s *vault.Session, body []byte) (json.RawMessage, error)
 		return nil, err
 	}
 	if f.st.Registry[tag] == nil && len(f.st.Registry) >= MaxRegistry {
-		return nil, errLimit
+		return nil, vault.LimitError("tag_registry", MaxRegistry)
 	}
 	f.st.Registry[tag] = e
 	f.tagsChanged(s)

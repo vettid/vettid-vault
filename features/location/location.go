@@ -294,7 +294,7 @@ func (f *Feature) start(s *vault.Session, body []byte) (json.RawMessage, error) 
 		}
 	}
 	if old == nil && len(f.d.Out) >= MaxOutgoing {
-		return nil, errLimit
+		return nil, vault.LimitError("location_shares", MaxOutgoing)
 	}
 	now := s.Now()
 	o := &Outgoing{ID: s.NewID(), Conn: st.ConnectionID, Mode: st.Mode, Precision: st.Precision,
@@ -512,7 +512,7 @@ func (f *Feature) request(s *vault.Session, body []byte) (json.RawMessage, error
 		return nil, errNotFound
 	}
 	if _, recent := f.d.SentReq[r.ConnectionID]; recent {
-		return nil, errLimit
+		return nil, vault.LimitError("location_requests", 1) // one per connection per 10 minutes
 	}
 	id := s.NewID()
 	b := strictjson.NewBuilder().String("request_id", id)

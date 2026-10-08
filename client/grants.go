@@ -150,6 +150,9 @@ func (d *Device) GrantRevoke(ctx context.Context, grantID string) error {
 }
 
 // GrantList lists grants given and received and requests pending and made.
+// Since 0.21.0 a received grant carries its labels, and a pending
+// request's item entries available, and (available) the member's item's
+// name, category and labels.
 func (d *Device) GrantList(ctx context.Context) (strictjson.Object, error) {
 	return d.Op(ctx, "grant.list", nil)
 }

@@ -191,7 +191,7 @@ func (m *Manager) hBlockAdd(_ context.Context, s *Session, in *envelope.Inner) (
 		return nil, errBadRequest
 	}
 	if len(m.st.Blocks) >= MaxBlocks {
-		return nil, NewError("limit", "")
+		return nil, LimitError("blocks", MaxBlocks)
 	}
 	b := &Block{ID: m.newID(s.now), Note: note, CreatedAt: s.now.UTC().Truncate(time.Millisecond)}
 	if hasConn {

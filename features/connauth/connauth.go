@@ -153,7 +153,6 @@ func (f *Feature) Save() (json.RawMessage, error) {
 var (
 	errBad      = vault.NewError("bad_request", "")
 	errNotFound = vault.NewError("not_found", "")
-	errLimit    = vault.NewError("limit", "")
 	errLocked   = vault.NewError("credential_locked", "")
 	errConn     = vault.NewError("connection_unavailable", "")
 )
@@ -242,7 +241,7 @@ func (f *Feature) request(s *vault.Session, body []byte) (json.RawMessage, error
 		return nil, errNotFound
 	}
 	if count(f.d.Out, conn) >= MaxPendingOut {
-		return nil, errLimit
+		return nil, vault.LimitError("auth_challenges", MaxPendingOut)
 	}
 	nonce, err := suite.RandomBytes(NonceSize)
 	if err != nil {

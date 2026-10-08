@@ -11,8 +11,11 @@ for 0.13.0: the daily owner check and the hold; for 0.15.0:
 enrollment codes, app keys and the account snapshot; and for 0.18.0: the
 shared profile's core and the name change from the app; for 0.19.0:
 the held counts in `vault.status`, the worst-case profile size and the
-0.18.0 errata; and for 0.20.0: the full email in the account snapshot and
-the audit search.)
+0.18.0 errata; for 0.20.0: the full email in the account snapshot and
+the audit search; and for 0.21.0: kept values on item edits, the item's
+size, dry runs, named limits, share.pending.list and
+share.decide{include, decline}, grant labels and names, and suitability
+before the password.)
 
 Every MUST / MUST NOT in VAULT-MESSAGING 0.2.3 §4–§6 (plus the §13.4 and
 §13.6 rules they rely on), and the named test that covers it. Normative
@@ -650,3 +653,26 @@ grammar.
 | 10.9 | With `q`, at most 2,000 entries that pass the other filters (`connection_id`, `kinds`, `since`, `until`, the cursor) are evaluated; a budget run out before `limit` matches answers the matches so far (possibly none), `partial: true` and `next_before_seq` / `next_after_seq` = the last evaluated `seq`; with `limit` matches and entries left the cursor is the last returned, without `partial`; no cursor is the end; without `q` no budget | `audit.TestSearchBudget`, `e2e.TestAuditSearch` (`client.AuditSearchAll`) |
 | 10.9 | `since` inclusive, `until` exclusive, RFC 3339 with any offset, compared in Unix milliseconds; either alone; a filter, not a cursor (an `at` that steps back is still filtered) | `audit.TestSinceUntil`, `e2e.TestAuditSearch` |
 | 10.9 | `bad_request` for a `q` that is empty, over 128 bytes, only white space or with a control character (C0, DEL, C1) or not a string; a `since` / `until` that is not an RFC 3339 time; `since` ≥ `until`; the same on `connection.audit.list`; `kinds` still 1–16 prefixes; agents and connections still `forbidden` | `audit.TestSearchErrors`, `audit.FuzzValidQ`, `audit.FuzzParseQuery` |
+
+## Kept values, size, dry runs, named limits, sharing and suitability (§10.1, §10.7, §10.8, §10.9, §10.12, §10.13, §11.13, §15 item 29; 0.21.0)
+
+| § | Requirement | Test(s) |
+|---|---|---|
+| 10.7 | An `item.put` replacing an item of any sensitivity keeps the stored value of a field sent with its `field_id` and without `value`; its `kind` MUST be the stored one (`bad_request` otherwise); its label and position may change; a field left out is removed | `items.TestKeptValuesDataSecret`, `items.TestKeptValuesCritical`, `itemspec.TestApplyKept`, `e2e.TestKeptValuesAndDryRun` |
+| 10.7 | `keep_notes: true` keeps the notes (in the sealed `item` for a critical item, in the request otherwise); `notes` with `keep_notes` is `bad_request`; neither removes the notes; a new field, and every field of a new item, needs a `value`; `keep_notes` on a new item is `bad_request` | `items.TestKeptValuesDataSecret`, `items.TestKeptValuesCritical`, `itemspec.TestParseContentKept` |
+| 10.7 | A secret edit reads the kept values from DEK state: no `item.reveal`, recorded as `item.updated`, never `item.revealed`; no kept value leaves the vault | `items.TestKeptValuesDataSecret`, `e2e.TestKeptValuesAndDryRun` |
+| 10.7 | A critical edit is one credential operation: the vault opens the stored values with the current key, merges, checks the merged item (shapes, 64 fields, 12,288 bytes with the kept values), seals under the next generation and wipes the plaintext it opened | `items.TestKeptValuesCritical` (generation, wiped buffers, limit with `size`), `e2e.TestKeptValuesAndDryRun` |
+| 10.7 | The size is the content encoding without `item_id`, `version`, `created_at`, `updated_at` and `field_id`s, members in order, `template`/`notes` only when set, `tags`/`fields` always, the address member order, Go's escapes without HTML escaping | `itemspec.TestSizeEncoding`, `items.TestItemSize` |
+| 10.7 | `item.get` returns `size` for every sensitivity; recorded for a critical item whenever its values are written or opened (a reveal, a use, a re-key; kept across tag changes), absent until then for an item written earlier; not in `item.list`, never sent to a connection | `items.TestItemSize`, `itemspec.TestSizeEncoding`, `e2e.TestKeptValuesAndDryRun` |
+| 10.7 | `file` stays reserved: refused with `bad_request` | `itemspec.TestParseContentKept` |
+| 10.7 | `item.put{dry_run}` and `item.tag{dry_run}` answer `{version?, shares: [{rule_id, subject, mode, usable?}], withdrawals: [{rule_id, subject, state}]}` sorted by `rule_id`, planned as the real request; content members ignored; `credential`/`utk_id`/`sealed` refused; `bad_request`, `not_found`, `conflict` and the `share_pending`, `grants_given`, `profile_items` limits; nothing recorded or sent | `items.TestDryRun`, `items.TestDryRunSharingLimits`, `e2e.TestKeptValuesAndDryRun` |
+| 10.7, 6.8 | A dry run needs no step-up from a desktop (`vault.ReadOnlyForms`); critical items stay app-only (`forbidden`) | `vault.TestReadOnlyFormsAndHeldLimit`, `items.TestDryRun`, `e2e.TestKeptValuesAndDryRun` |
+| 10.1 | Every `limit` error carries `{limit, max, size?}` (`size` only for a size limit), with the names of the §10.1 table | `vault.TestLimitBody`, `vault.TestReadOnlyFormsAndHeldLimit` (`held_approvals`), `items.TestKeptValuesDataSecret` (`item_size`), `items.TestDryRun` (`profile_items`), `items.TestDryRunSharingLimits` (`share_rules_subject`, `share_pending`), `items.TestShareDecideBothAtomic` (`grants_given`), `items.TestProfileSizeWorstCaseNames` (`profile_size`), `grants.TestLimitNames` (`catalog_requests`, `grant_requests`), `critical.TestOutgoingLimit` (`critical_use_requests`), `e2e.TestKeptValuesAndDryRun` (`client.LimitOf`) |
+| 10.12 | `share.pending.list{rule_id? \| connection_id? \| agent_id?, after?, limit?}` answers `{pending: [{rule_id, subject, item_id, name, category, sensitivity, at}], next?}`, sorted by rule then item, paged with an opaque cursor; at most one filter | `items.TestSharePendingList`, `e2e.TestSharingAndSuitability` |
+| 10.12 | `share.decide{rule_id, include?, decline?}`: 1–500 ids together, no overlap, not mixed with `items`/`approve`; one change, one response, one `share.decided`, nothing on an error; the old form stays valid | `items.TestShareDecideBoth`, `items.TestShareDecideBothAtomic`, `e2e.TestSharingAndSuitability` |
+| 10.12 | A received grant in `grant.list` carries the descriptor's `labels` as received (not refreshed); a given grant none | `grants.TestReceivedLabels`, `e2e.TestSharingAndSuitability` |
+| 10.12 | An available `item` entry of `grant.pending` and of `grant.list`'s `pending` (which carries `available`) has the item's `name`, `category` and the requested fields' `labels` in the item's order; unavailable and `category` entries none; `requested` entries exactly as sent, `state` `pending`/`granted`/`denied` | `grants.TestPendingEntryDetails`, `e2e.TestSharingAndSuitability` |
+| 10.13 | Suitable is a `password`, `text` or `multiline` field of an item that is not a wallet's; any other request is answered `unsuitable` at once: no member, no credential operation, audited (`requested`, `denied`), no `.pending`, no feed item, not in `.list`; a suitable field without a seed is found at the use | `critical.TestSuitability`, `e2e.TestSharingAndSuitability` |
+| 10.13 | `.pending`, `.list` and `.get` carry the field's `kind`; at most 64 outstanding outgoing requests (`critical_use_requests`) | `critical.TestSuitability`, `critical.TestOutgoingLimit`, `e2e.TestSharingAndSuitability` |
+| 10.9 | The budget runs out when a 2,001st entry would be evaluated: `limit` matches by the 2,000th is not `partial`; `since` ≥ `until` in Unix milliseconds; `connection.audit.list` takes `after_seq` (unchanged behaviour, stated) | `audit.TestSearchBudgetEdge`, `audit.TestSearchBudget`, `audit.TestSearchErrors` |
+| 11.13, 10.8 | The snapshot's `email` excludes C0, DEL, C1, U+2028 and U+2029; names (snapshot, `account.name.set`, the profile receiver) exclude DEL too | `vault.TestAccountControlSet`, `vault.TestParseAccountSnapshot` |

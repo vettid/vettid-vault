@@ -316,7 +316,6 @@ var (
 	errExists       = vault.NewError("exists", "")
 	errPassword     = vault.NewError("bad_password", "")
 	errStale        = vault.NewError("stale_credential", "")
-	errLimit        = vault.NewError("limit", "")
 	errInternal     = vault.NewError("internal", "")
 	errForbidden    = vault.NewError("forbidden", "")
 	errUTK          = vault.NewError("utk_invalid", "")
@@ -1253,8 +1252,11 @@ func (f *Feature) respond(s *vault.Session, inner *Inner, pw []byte, extra func(
 func (f *Feature) seal(s *vault.Session, cek *suite.PublicKey, inner *Inner, pw []byte) ([]byte, error) {
 	pt := inner.Marshal()
 	defer suite.Wipe(pt)
-	if len(pt) > MaxInner || len(inner.Items) > MaxItems {
-		return nil, errLimit
+	if len(inner.Items) > MaxItems {
+		return nil, vault.LimitError("critical_items", MaxItems)
+	}
+	if len(pt) > MaxInner {
+		return nil, vault.LimitSizeError("credential_size", MaxInner, len(pt))
 	}
 	blob, err := Seal(cek, s.VaultID(), inner.Version, pw, f.opt.KDF, pt)
 	if err != nil {

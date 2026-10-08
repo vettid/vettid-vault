@@ -14,18 +14,24 @@ import (
 // Items, tags and share rules (VAULT-MESSAGING §10.7, §10.8, §10.12).
 // Critical items are credential operations: the password comes from
 // VAULTCTL_PASSWORD. Item content is JSON, {name, category?, template?,
-// fields?: [{field_id?, label, kind, value}], notes?}, from -content or a
-// file (-content-file) so that values stay off the command line.
+// fields?: [{field_id?, label, kind, value?}], notes?, keep_notes?}, from
+// -content or a file (-content-file) so that values stay off the command
+// line; a replacement's field with its field_id and no value keeps the
+// stored value, and keep_notes the notes (0.21.0, §10.7 Kept values), so
+// that a secret item is edited without a reveal and a critical one with
+// one password entry.
 
 func init() {
 	commands["item"] = command{"item put [-id ID -version N] [-sensitivity data|secret|critical] [-tags a,b] (-content JSON | -content-file F) | " +
 		"get -id ID | reveal -id ID [-fields f1,f2] | list [-tags a,b] [-match any|all] [-category C] [-sensitivity S] [-after ID] [-limit N] | " +
-		"tag -id ID -version N -tags a,b | sensitivity -id ID -version N -to S | delete -id ID", cmdItem}
+		"tag -id ID -version N -tags a,b [-dry-run] | sensitivity -id ID -version N -to S | delete -id ID   " +
+		"(put -dry-run [-id ID -version N] [-sensitivity S] [-tags a,b]: the sharing effect, without content or password)", cmdItem}
 	commands["tag"] = command{"tag list | set -version N -tag T [-color #rrggbb] [-icon I] [-description D] | " +
 		"delete -version N -tag T [-dry-run] | merge -version N -from a,b -into c [-dry-run]", cmdTag}
 	commands["share"] = command{"share set [-rule ID -version N] (-connection ID | -agent ID) -tags a,b [-match any|all] [-mode ask|auto] [-uses N] " +
 		"[-expires TS] [-include-existing=false] [-per-hour N] [-per-day N] [-status-ttl S] [-dry-run] | list [-connection ID | -agent ID] | " +
-		"delete -rule ID | decide -rule ID -items a,b [-decline]   (an agent rule needs the credential unlock window)", cmdShare}
+		"delete -rule ID | decide -rule ID (-items a,b [-decline] | [-include a,b] [-decline-items c,d]) | " +
+		"pending [-rule ID | -connection ID | -agent ID] [-after C] [-limit N] [-all]   (an agent rule needs the credential unlock window)", cmdShare}
 }
 
 func readContent(inline, file string) (client.ItemContent, error) {
@@ -74,6 +80,7 @@ func cmdItem(ctx context.Context, g *globals, args []string) error {
 	fields := fs.String("fields", "", "reveal: field ids (comma-separated)")
 	content := fs.String("content", "", "item content JSON")
 	contentFile := fs.String("content-file", "", "file holding the item content JSON")
+	dry := fs.Bool("dry-run", false, "put, tag: only show what the change would do to sharing")
 	_ = fs.Parse(rest)
 	tagList := func() []string {
 		if *tags == "" {
@@ -84,6 +91,9 @@ func cmdItem(ctx context.Context, g *globals, args []string) error {
 	return withDevice(ctx, g, func(d *client.Device) (any, error) {
 		switch op {
 		case "put":
+			if *dry {
+				return d.ItemPutDryRun(ctx, *id, *version, *sens, tagList())
+			}
 			c, err := readContent(*content, *contentFile)
 			if err != nil {
 				return nil, err
@@ -137,6 +147,9 @@ func cmdItem(ctx context.Context, g *globals, args []string) error {
 			}
 			return d.ItemList(ctx, f)
 		case "tag":
+			if *dry {
+				return d.ItemTagDryRun(ctx, *id, *version, tagList())
+			}
 			v, err := d.ItemTag(ctx, *id, *version, tagList())
 			return map[string]any{"version": v}, err
 		case "sensitivity":
@@ -234,6 +247,11 @@ func cmdShare(ctx context.Context, g *globals, args []string) error {
 	dry := fs.Bool("dry-run", false, "list the items the rule would match")
 	items := fs.String("items", "", "decide: comma-separated item ids")
 	decline := fs.Bool("decline", false, "decide: decline (default: approve)")
+	include := fs.String("include", "", "decide: comma-separated item ids to include (with -decline-items, one change)")
+	declineItems := fs.String("decline-items", "", "decide: comma-separated item ids to decline")
+	after := fs.String("after", "", "pending: the previous page's next")
+	limit := fs.Int("limit", 0, "pending: page size")
+	all := fs.Bool("all", false, "pending: every page")
 	_ = fs.Parse(rest)
 	return withDevice(ctx, g, func(d *client.Device) (any, error) {
 		switch op {
@@ -273,7 +291,27 @@ func cmdShare(ctx context.Context, g *globals, args []string) error {
 		case "delete":
 			return nil, d.ShareRuleDelete(ctx, *rule)
 		case "decide":
+			if *include != "" || *declineItems != "" {
+				return d.ShareDecideBoth(ctx, *rule, splitList(*include), splitList(*declineItems))
+			}
 			return d.ShareDecide(ctx, *rule, splitList(*items), !*decline)
+		case "pending":
+			f := map[string]any{}
+			for k, v := range map[string]string{"rule_id": *rule, "connection_id": *conn, "agent_id": *agent} {
+				if v != "" {
+					f[k] = v
+				}
+			}
+			if *limit > 0 {
+				f["limit"] = *limit
+			}
+			if *all {
+				return d.SharePendingAll(ctx, f)
+			}
+			if *after != "" {
+				f["after"] = *after
+			}
+			return d.SharePendingList(ctx, f)
 		}
 		return nil, errors.New(commands["share"].usage)
 	})

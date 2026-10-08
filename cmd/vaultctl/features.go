@@ -47,6 +47,12 @@ func withDevice(ctx context.Context, g *globals, fn func(d *client.Device) (any,
 	if err != nil {
 		if c := client.Code(err); c != "" {
 			_ = save(g, d)
+			if l, ok := client.LimitOf(err); ok { // §10.1 (0.21.0): which limit
+				if l.HasSize {
+					return fmt.Errorf("error limit %s (max %d, size %d)", l.Name, l.Max, l.Size)
+				}
+				return fmt.Errorf("error limit %s (max %d)", l.Name, l.Max)
+			}
 			return fmt.Errorf("error %s", c)
 		}
 		return err

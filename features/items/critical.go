@@ -43,12 +43,59 @@ func stripValues(it *itemspec.Item) {
 	it.Notes = ""
 }
 
+// checkCritSize checks a critical item that holds its values: at most 64
+// fields (ParseContent already refuses more) and a size of at most 12,288
+// bytes (§10.7; limit item_size).
 func checkCritSize(it *itemspec.Item) error {
-	if len(it.Fields) > itemspec.MaxCritFields || it.Size() > itemspec.MaxCritBytes {
-		return errLimit
+	if len(it.Fields) > itemspec.MaxCritFields {
+		return errBad
+	}
+	if n := it.Size(); n > itemspec.MaxCritBytes {
+		return vault.LimitSizeError("item_size", itemspec.MaxCritBytes, n)
 	}
 	return nil
 }
+
+func critItemsLimit() error { return vault.LimitError("critical_items", itemspec.MaxCritItems) }
+
+// newCritLimit is the limit a new critical item reaches, if any.
+func (f *Feature) newCritLimit() error {
+	if len(f.st.Items) >= itemspec.MaxItems {
+		return vault.LimitError("items", itemspec.MaxItems)
+	}
+	if f.criticalCount() >= itemspec.MaxCritItems {
+		return critItemsLimit()
+	}
+	return nil
+}
+
+// withValues returns a copy of a critical item's DEK copy holding the
+// values and notes of its opened plaintext (the values alias v's: wipe
+// v, not the copy).
+func withValues(it *itemspec.Item, v *Values) *itemspec.Item {
+	c := it.Clone()
+	for k := range c.Fields {
+		c.Fields[k].Value = v.Fields[c.Fields[k].ID]
+	}
+	c.Notes, c.HasNotes = v.Notes, false
+	return c
+}
+
+func wipeValues(v *Values) {
+	for _, x := range v.Fields {
+		suite.Wipe(x)
+	}
+}
+
+func wipeFields(it *itemspec.Item) {
+	for k := range it.Fields {
+		suite.Wipe(it.Fields[k].Value)
+	}
+}
+
+// testHookKept, if set (tests), sees the stored values a critical
+// replacement opened for its kept values, before they are wiped.
+var testHookKept func(*Values)
 
 // encrypt seals an item that holds its values under a fresh key of
 // generation gen, puts the key into the plaintext (replacing the item's
@@ -66,10 +113,11 @@ func encrypt(s *vault.Session, it *itemspec.Item, inner *credential.Inner, gen u
 	} else {
 		if len(inner.Items) >= credential.MaxItems {
 			e.Wipe()
-			return errLimit
+			return critItemsLimit()
 		}
 		inner.Items = append(inner.Items, e)
 	}
+	it.RecordSize() // the size item.get reports (0.21.0, §10.7)
 	stripValues(it)
 	it.Sealed, it.Gen = sealed, gen
 	return nil
@@ -82,7 +130,7 @@ func (f *Feature) putCritical(s *vault.Session, in *envelope.Inner, o strictjson
 	if err := appOnly(s); err != nil {
 		return nil, err
 	}
-	if o.Has("item_id") || o.Has("name") || o.Has("fields") || o.Has("notes") {
+	if o.Has("item_id") || o.Has("name") || o.Has("fields") || o.Has("notes") || o.Has("keep_notes") {
 		return nil, errBad // the content and the item travel sealed
 	}
 	ver, hasVer, err := o.OptUint("version", 1, strictjson.MaxSafeInteger)
@@ -115,9 +163,13 @@ func (f *Feature) putCritical(s *vault.Session, in *envelope.Inner, o strictjson
 			return errBad
 		}
 		gen := uint64(1)
+		base := cur
 		if p.ItemID == "" {
-			if len(f.st.Items) >= itemspec.MaxItems || f.criticalCount() >= itemspec.MaxCritItems {
-				return errLimit
+			if c.Keeps() {
+				return errBad // nothing to keep in a new item
+			}
+			if err := f.newCritLimit(); err != nil {
+				return err
 			}
 			it = &itemspec.Item{ID: s.NewID(), Sensitivity: itemspec.Critical, Created: t, NextField: 1}
 		} else {
@@ -135,8 +187,30 @@ func (f *Feature) putCritical(s *vault.Session, in *envelope.Inner, o strictjson
 			gen = inner.Items[i].Gen + 1
 			it = cur.Clone()
 			it.Sealed = nil
+			base = cur
+			if c.Keeps() {
+				// Kept values (0.21.0, §10.7): within this operation, open
+				// the stored values with the current item key and merge;
+				// the result is sealed below under the next generation and
+				// every plaintext is wiped.
+				pt, err := open(s.VaultID(), cur, &inner.Items[i])
+				if err != nil {
+					return errInternal
+				}
+				v, err := ParseValues(pt)
+				suite.Wipe(pt)
+				if err != nil {
+					return errInternal
+				}
+				defer wipeValues(v)
+				if testHookKept != nil {
+					testHookKept(v)
+				}
+				base = withValues(cur, v)
+			}
 		}
-		if !c.Apply(it, cur) {
+		defer wipeFields(it) // values copied in; nil once encrypted
+		if !c.Apply(it, base) {
 			return errBad
 		}
 		if hasTags {
@@ -198,6 +272,7 @@ func (f *Feature) revealCritical(s *vault.Session, in *envelope.Inner, o strictj
 	}
 	var replySealed, newSealed []byte
 	var gen uint64
+	var size int
 	check := func(p *credential.Payload) error {
 		if p.ItemID != it.ID {
 			return errBad // consent bound to this item
@@ -217,7 +292,7 @@ func (f *Feature) revealCritical(s *vault.Session, in *envelope.Inner, o strictj
 		if replySealed, err = credwire.SealValue(p.Reply, s.VaultID(), in.ID, pt); err != nil {
 			return errInternal
 		}
-		if newSealed, gen, err = rekey(s.VaultID(), it, inner, i); err != nil {
+		if newSealed, gen, size, err = rekey(s.VaultID(), it, inner, i); err != nil {
 			return errInternal
 		}
 		return nil
@@ -227,6 +302,9 @@ func (f *Feature) revealCritical(s *vault.Session, in *envelope.Inner, o strictj
 		return nil, err
 	}
 	it.Sealed, it.Gen = newSealed, gen // the item key rotated with the use
+	if size > 0 {
+		it.SizeNoTags = size
+	}
 	s.Record(vault.Activity{Kind: "item.revealed", Ref: it.ID, Audit: true, Feed: true})
 	b := strictjson.NewBuilder().String("item_id", it.ID).Uint("version", it.Version).Base64("values_sealed", replySealed)
 	res.Members(b)
@@ -276,11 +354,11 @@ func (f *Feature) sensitivityCritical(s *vault.Session, in *envelope.Inner, cur 
 	it := cur.Clone()
 	it.Sensitivity, it.Version, it.Updated = sens, it.Version+1, now(s)
 	if sens == itemspec.Critical {
-		if err := checkCritSize(cur); err != nil {
+		if err := checkCritSize(it); err != nil {
 			return nil, err
 		}
 		if f.criticalCount() >= itemspec.MaxCritItems {
-			return nil, errLimit
+			return nil, critItemsLimit()
 		}
 	}
 	var ch *change
@@ -294,7 +372,7 @@ func (f *Feature) sensitivityCritical(s *vault.Session, in *envelope.Inner, cur 
 		i := inner.FindItem(cur.ID)
 		if sens == itemspec.Critical {
 			if i >= 0 {
-				return errLimit
+				return critItemsLimit()
 			}
 			if err := encrypt(s, it, inner, 1); err != nil {
 				return err
@@ -352,6 +430,7 @@ func (f *Feature) RekeyCriticalItems(s *vault.Session, inner *credential.Inner) 
 	type next struct {
 		sealed []byte
 		gen    uint64
+		size   int
 	}
 	staged := map[string]next{}
 	for i := range inner.Items {
@@ -359,11 +438,11 @@ func (f *Feature) RekeyCriticalItems(s *vault.Session, inner *credential.Inner) 
 		if it == nil || it.Sensitivity != itemspec.Critical {
 			continue
 		}
-		sealed, gen, err := rekey(s.VaultID(), it, inner, i)
+		sealed, gen, size, err := rekey(s.VaultID(), it, inner, i)
 		if err != nil {
 			return nil, errInternal
 		}
-		staged[it.ID] = next{sealed, gen}
+		staged[it.ID] = next{sealed, gen, size}
 	}
 	return func() {
 		f.mu.Lock()
@@ -371,6 +450,9 @@ func (f *Feature) RekeyCriticalItems(s *vault.Session, inner *credential.Inner) 
 		for id, n := range staged {
 			if it := f.st.Items[id]; it != nil {
 				it.Sealed, it.Gen = n.sealed, n.gen
+				if n.size > 0 {
+					it.SizeNoTags = n.size
+				}
 			}
 		}
 	}, nil
@@ -406,7 +488,7 @@ func (f *Feature) UseCriticalField(s *vault.Session, inner *credential.Inner, it
 	if raw == nil {
 		return nil, nil, errNotFound
 	}
-	sealed, gen, err := rekey(s.VaultID(), it, inner, i)
+	sealed, gen, size, err := rekey(s.VaultID(), it, inner, i)
 	if err != nil {
 		suite.Wipe(raw)
 		return nil, nil, errInternal
@@ -416,6 +498,9 @@ func (f *Feature) UseCriticalField(s *vault.Session, inner *credential.Inner, it
 		defer f.mu.Unlock()
 		if cur := f.st.Items[itemID]; cur != nil {
 			cur.Sealed, cur.Gen = sealed, gen
+			if size > 0 {
+				cur.SizeNoTags = size
+			}
 		}
 	}, nil
 }
@@ -482,8 +567,8 @@ func (f *Feature) NewCriticalItem(s *vault.Session, inner *credential.Inner, nam
 	fields []NewField) (id string, fieldIDs []string, commit, abort func(), err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if len(f.st.Items) >= itemspec.MaxItems || f.criticalCount() >= itemspec.MaxCritItems {
-		return "", nil, nil, nil, errLimit
+	if err := f.newCritLimit(); err != nil {
+		return "", nil, nil, nil, err
 	}
 	arr := []byte{'['}
 	for i, fl := range fields {
@@ -563,11 +648,9 @@ func (f *Feature) UseCriticalValues(s *vault.Session, inner *credential.Inner, i
 	if err != nil {
 		return nil, nil, errInternal
 	}
-	sealed, gen, err := rekey(s.VaultID(), it, inner, i)
+	sealed, gen, size, err := rekey(s.VaultID(), it, inner, i)
 	if err != nil {
-		for _, x := range v.Fields {
-			suite.Wipe(x)
-		}
+		wipeValues(v)
 		return nil, nil, errInternal
 	}
 	return v.Fields, func() {
@@ -575,6 +658,9 @@ func (f *Feature) UseCriticalValues(s *vault.Session, inner *credential.Inner, i
 		defer f.mu.Unlock()
 		if cur := f.st.Items[itemID]; cur != nil {
 			cur.Sealed, cur.Gen = sealed, gen
+			if size > 0 {
+				cur.SizeNoTags = size
+			}
 		}
 	}, nil
 }

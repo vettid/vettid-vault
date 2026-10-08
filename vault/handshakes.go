@@ -767,7 +767,7 @@ func (m *Manager) acceptInvite(ctx context.Context, link, introBy string, now ti
 		return nil, errBadRequest
 	}
 	if m.countRequests(ReqOut) >= MaxRequests {
-		return nil, NewError("limit", "")
+		return nil, LimitError("connection_requests", MaxRequests)
 	}
 	blob, err := m.relay.GetClaim(ctx, q.Relay, q.ClaimID)
 	if err != nil {

@@ -14,10 +14,47 @@ import (
 // Feature operations of VAULT-MESSAGING §10.6–§10.9. Each is a request to
 // the vault; errors carry the response's error code.
 
-// OpError is an error response.
+// OpError is an error response. Body is the error's body, if any
+// (limit's {limit, max, size?} since 0.21.0, backoff's {retry_after}).
 type OpError struct {
 	Type string
 	Code string
+	Body json.RawMessage
+}
+
+// Limit is a `limit` error's body (§10.1, 0.21.0): the limit's name, its
+// bound and, for a size limit, the size the refused request reached.
+type Limit struct {
+	Name    string
+	Max     uint64
+	Size    uint64
+	HasSize bool
+}
+
+// LimitOf returns the limit a `limit` error names; ok is false for any
+// other error, or a limit error without the body.
+func LimitOf(err error) (Limit, bool) {
+	var oe *OpError
+	if !errors.As(err, &oe) || oe.Code != "limit" {
+		return Limit{}, false
+	}
+	o, perr := strictjson.ParseObject(oe.Body)
+	if perr != nil {
+		return Limit{}, false
+	}
+	var l Limit
+	var e1, e2 error
+	l.Name, e1 = o.String("limit")
+	l.Max, e2 = o.Uint("max", 0, strictjson.MaxSafeInteger)
+	if e1 != nil || e2 != nil {
+		return Limit{}, false
+	}
+	if v, present, err := o.OptUint("size", 0, strictjson.MaxSafeInteger); err != nil {
+		return Limit{}, false
+	} else if present {
+		l.Size, l.HasSize = v, true
+	}
+	return l, true
 }
 
 func (e *OpError) Error() string { return fmt.Sprintf("client: %s: %s", e.Type, e.Code) }
@@ -49,7 +86,7 @@ func (d *Device) Op(ctx context.Context, typ string, v any) (strictjson.Object, 
 		return nil, err
 	}
 	if !r.OK() {
-		return nil, &OpError{Type: typ, Code: r.ErrorCode()}
+		return nil, &OpError{Type: typ, Code: r.ErrorCode(), Body: r.Body()}
 	}
 	b := r.Body()
 	if len(b) == 0 {

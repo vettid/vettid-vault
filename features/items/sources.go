@@ -79,20 +79,27 @@ func (f *Feature) Usable(conn string, now time.Time) []itemspec.Meta {
 }
 
 // UsableField returns a usable critical item's name and a field's label
-// for a use request of conn (§10.13); ok is false otherwise (an item not
-// included is not told apart from a missing one).
-func (f *Feature) UsableField(conn, itemID, fieldID string, now time.Time) (name, label string, ok bool) {
+// and kind for a use request of conn (§10.13); ok is false otherwise (an
+// item not included is not told apart from a missing one). suitable
+// (0.21.0) is whether the field can hold an Ed25519 seed: a password,
+// text or multiline field of an item that is not a wallet's. The wallet's
+// ItemInUse takes only its own guard lock.
+func (f *Feature) UsableField(conn, itemID, fieldID string, now time.Time) (name, label, kind string, suitable, ok bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	it := f.st.Items[itemID]
 	if it == nil || it.Sensitivity != itemspec.Critical || !f.usableIncl(conn, itemID, now) {
-		return "", "", false
+		return "", "", "", false, false
 	}
 	fl, found := it.Field(fieldID)
-	if !found || fl.Kind == itemspec.KindAddress {
-		return "", "", false
+	if !found {
+		return "", "", "", false, false
 	}
-	return it.Name, fl.Label, true
+	switch fl.Kind {
+	case itemspec.KindPassword, itemspec.KindText, itemspec.KindMultiline:
+		suitable = !f.guarded(itemID)
+	}
+	return it.Name, fl.Label, fl.Kind, suitable, true
 }
 
 // --- agents (§10.11) ---

@@ -25,6 +25,7 @@ import (
 	"context"
 	"encoding/json"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -58,6 +59,9 @@ const (
 	MaxDisplayName   = 128
 	MaxTagDesc       = 256
 	MaxMergeFrom     = 16
+	// MaxGivenGrants is the grants feature's bound on active given grants
+	// (grants.MaxGiven), named in the grants_given limit (§10.1).
+	MaxGivenGrants = 1000
 )
 
 // Inclusion states (§10.12).
@@ -218,6 +222,7 @@ func (f *Feature) Types() []vault.TypeSpec {
 		r("tag.list", false), r("tag.set", false), r("tag.delete", true), r("tag.merge", true),
 		r("profile.get", false), r("profile.set", true),
 		r("share.rule.set", true), r("share.rule.list", false), r("share.rule.delete", false), r("share.decide", true),
+		r("share.pending.list", false),
 		{Type: "profile.update", From: conns},
 	}
 }
@@ -246,7 +251,6 @@ var (
 	errBad       = vault.NewError("bad_request", "")
 	errNotFound  = vault.NewError("not_found", "")
 	errConflict  = vault.NewError("conflict", "")
-	errLimit     = vault.NewError("limit", "")
 	errForbidden = vault.NewError("forbidden", "")
 	errInUse     = vault.NewError("in_use", "")
 	errInternal  = vault.NewError("internal", "")
@@ -296,6 +300,8 @@ func (f *Feature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner
 		return f.ruleDelete(s, in.Body)
 	case "share.decide":
 		return f.decide(s, in.Body)
+	case "share.pending.list":
+		return f.pendingList(s, in.Body)
 	}
 	return nil, vault.NewError("unsupported_type", "")
 }
@@ -342,6 +348,11 @@ func (f *Feature) put(s *vault.Session, in *envelope.Inner) (json.RawMessage, er
 	if err != nil || hasSens && !itemspec.ValidSensitivity(sens) {
 		return nil, errBad
 	}
+	if dry, err := dryRun(o); err != nil {
+		return nil, err
+	} else if dry {
+		return f.putDryRun(s, o, sens, hasSens)
+	}
 	if sens == itemspec.Critical {
 		return f.putCritical(s, in, o)
 	}
@@ -368,7 +379,7 @@ func (f *Feature) put(s *vault.Session, in *envelope.Inner) (json.RawMessage, er
 	var cur, it *itemspec.Item
 	if !hasID {
 		if len(f.st.Items) >= itemspec.MaxItems {
-			return nil, errLimit
+			return nil, vault.LimitError("items", itemspec.MaxItems)
 		}
 		if !hasSens {
 			sens = itemspec.Data
@@ -387,6 +398,10 @@ func (f *Feature) put(s *vault.Session, in *envelope.Inner) (json.RawMessage, er
 		}
 		it = cur.Clone()
 	}
+	// Kept values (0.21.0, §10.7): a field sent without value keeps the
+	// value cur holds in DEK state, keep_notes the notes. For a secret
+	// item this is not a reveal: nothing leaves the vault and the change
+	// is recorded as item.updated only.
 	if !c.Apply(it, cur) {
 		return nil, errBad
 	}
@@ -398,8 +413,8 @@ func (f *Feature) put(s *vault.Session, in *envelope.Inner) (json.RawMessage, er
 	if err := checkProfileTag(it); err != nil {
 		return nil, err
 	}
-	if it.Size() > itemspec.MaxItemBytes {
-		return nil, errLimit
+	if n := it.Size(); n > itemspec.MaxItemBytes {
+		return nil, vault.LimitSizeError("item_size", itemspec.MaxItemBytes, n)
 	}
 	ch, err := f.prepare(s, cur, it, nil)
 	if err != nil {
@@ -427,7 +442,14 @@ func (f *Feature) get(body []byte) (json.RawMessage, error) {
 	if it == nil {
 		return nil, errNotFound
 	}
-	return it.JSON(it.Sensitivity == itemspec.Data), nil
+	enc := it.JSON(it.Sensitivity == itemspec.Data)
+	// size (0.21.0, §10.7): the member's own devices only; a critical
+	// item last written before 0.21.0 has none until its values open.
+	if n, ok := it.CurrentSize(); ok {
+		enc = append(enc[:len(enc)-1], `,"size":`...)
+		enc = append(strconv.AppendInt(enc, int64(n), 10), '}')
+	}
+	return enc, nil
 }
 
 func idList(o strictjson.Object, name string, max int, valid func(string) bool) ([]string, bool, error) {
@@ -583,6 +605,10 @@ func (f *Feature) tag(s *vault.Session, body []byte) (json.RawMessage, error) {
 	if err != nil || !has {
 		return nil, errBad
 	}
+	dry, err := dryRun(o)
+	if err != nil {
+		return nil, err
+	}
 	cur := f.st.Items[id]
 	if cur == nil {
 		return nil, errNotFound
@@ -595,8 +621,11 @@ func (f *Feature) tag(s *vault.Session, body []byte) (json.RawMessage, error) {
 	if err := checkProfileTag(it); err != nil {
 		return nil, err
 	}
-	if it.Sensitivity != itemspec.Critical && it.Size() > itemspec.MaxItemBytes {
-		return nil, errLimit
+	if dry {
+		return f.dryRunAnswer(s, cur, it)
+	}
+	if n := it.Size(); it.Sensitivity != itemspec.Critical && n > itemspec.MaxItemBytes {
+		return nil, vault.LimitSizeError("item_size", itemspec.MaxItemBytes, n)
 	}
 	ch, err := f.prepare(s, cur, it, nil)
 	if err != nil {

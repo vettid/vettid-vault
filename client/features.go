@@ -254,6 +254,122 @@ func (d *Device) AuditSearchAll(ctx context.Context, q AuditQuery, perConnection
 	}
 }
 
+// AuditExportResult is audit.export's answer (§10.9, 0.22.0): the count
+// (at most 10,000, newest first), More when more entries match, the bound
+// UptoSeq and its UptoHash (the log head of the export file), the range
+// when Count > 0, and, for an export (not a preview), EntrySeq, the seq
+// of its audit.exported entry.
+type AuditExportResult struct {
+	Count     uint64    `json:"count"`
+	More      bool      `json:"more"`
+	UptoSeq   uint64    `json:"upto_seq"`
+	UptoHash  []byte    `json:"upto_hash"`
+	OldestSeq uint64    `json:"oldest_seq,omitempty"`
+	NewestSeq uint64    `json:"newest_seq,omitempty"`
+	OldestAt  time.Time `json:"oldest_at,omitzero"`
+	NewestAt  time.Time `json:"newest_at,omitzero"`
+	EntrySeq  uint64    `json:"entry_seq,omitempty"`
+}
+
+func parseAuditExport(o strictjson.Object) (*AuditExportResult, error) {
+	r := &AuditExportResult{}
+	var err error
+	if r.Count, err = o.Uint("count", 0, 10000); err != nil {
+		return nil, ErrProtocol
+	}
+	if r.More, err = o.Bool("more"); err != nil {
+		return nil, ErrProtocol
+	}
+	if r.UptoSeq, err = o.Uint("upto_seq", 0, strictjson.MaxSafeInteger); err != nil {
+		return nil, ErrProtocol
+	}
+	if r.UptoHash, err = o.Base64("upto_hash", 32); err != nil {
+		return nil, ErrProtocol
+	}
+	if r.Count > 0 {
+		if r.OldestSeq, err = o.Uint("oldest_seq", 1, strictjson.MaxSafeInteger); err != nil {
+			return nil, ErrProtocol
+		}
+		if r.NewestSeq, err = o.Uint("newest_seq", 1, strictjson.MaxSafeInteger); err != nil {
+			return nil, ErrProtocol
+		}
+		for _, t := range []struct {
+			k   string
+			dst *time.Time
+		}{{"oldest_at", &r.OldestAt}, {"newest_at", &r.NewestAt}} {
+			s, err := o.String(t.k)
+			if err != nil {
+				return nil, ErrProtocol
+			}
+			if *t.dst, err = envelope.ParseTS(s); err != nil {
+				return nil, ErrProtocol
+			}
+		}
+	}
+	if v, present, err := o.OptUint("entry_seq", 1, strictjson.MaxSafeInteger); err != nil {
+		return nil, ErrProtocol
+	} else if present {
+		r.EntrySeq = v
+	}
+	return r, nil
+}
+
+// exportFilters is q's filters as audit.export takes them (no cursor or
+// limit).
+func exportFilters(q AuditQuery) map[string]any {
+	q.BeforeSeq, q.After, q.AfterSeq, q.Limit = 0, false, 0, 0
+	return q.Body()
+}
+
+// AuditExportPreview sends audit.export's dry run (§10.9, 0.22.0): it
+// counts the entries q's filters match (q's cursor and limit are ignored)
+// without the PIN; format ("csv", "json" or "" for none) is only checked.
+// Only the holder's app may send it.
+func (d *Device) AuditExportPreview(ctx context.Context, q AuditQuery, format string) (*AuditExportResult, error) {
+	b := exportFilters(q)
+	b["dry_run"] = true
+	if format != "" {
+		b["format"] = format
+	}
+	o, err := d.Op(ctx, "audit.export", b)
+	if err != nil {
+		return nil, err
+	}
+	return parseAuditExport(o)
+}
+
+// AuditExport sends the export (§10.9, 0.22.0): the same filters, format
+// ("csv" or "json"), the preview's uptoSeq and the vault PIN alone sealed
+// to a UTK, as the enrolling app's vault.delete carries it. A wrong PIN
+// is bad_pin and counts in the PIN backoff (backoff with retry_after);
+// it is not a failed owner check. The answer authorises writing the
+// file; AuditExportEntries reads the entries.
+func (d *Device) AuditExport(ctx context.Context, q AuditQuery, format string, uptoSeq uint64, pin string) (*AuditExportResult, error) {
+	extra := exportFilters(q)
+	extra["format"], extra["upto_seq"] = format, uptoSeq
+	u, err := d.takeUTK(ctx)
+	if err != nil {
+		return nil, err
+	}
+	o, _, _, err := d.sealedWith(ctx, "audit.export", u, nil, false, map[string]any{"pin": pin}, false, extra)
+	if err != nil {
+		return nil, err
+	}
+	return parseAuditExport(o)
+}
+
+// AuditExportEntries reads an export's entries with audit.list (§10.9,
+// 0.22.0): q's filters, from before_seq = r.UptoSeq + 1, limit 100,
+// following the cursors (also across partial pages), and keeps the first
+// r.Count. Fewer come back when the retention dropped entries meanwhile.
+func (d *Device) AuditExportEntries(ctx context.Context, q AuditQuery, r *AuditExportResult) ([]json.RawMessage, error) {
+	if r == nil || r.Count == 0 {
+		return nil, nil
+	}
+	q.After, q.AfterSeq, q.BeforeSeq, q.Limit = false, 0, r.UptoSeq+1, 100
+	return d.AuditSearchAll(ctx, q, false, int(r.Count))
+}
+
 // FeedList returns feed.list.
 func (d *Device) FeedList(ctx context.Context, q map[string]any) (strictjson.Object, error) {
 	return d.Op(ctx, "feed.list", q)

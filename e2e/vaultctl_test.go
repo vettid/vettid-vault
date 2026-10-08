@@ -124,6 +124,18 @@ func TestVaultctlSmoke(t *testing.T) {
 	if out = run("audit", "-kinds", "item"); !strings.Contains(out, "item.revealed") {
 		t.Fatalf("audit: %s", out)
 	}
+	// History export (§10.9, 0.22.0): the preview, then the export with
+	// the PIN, which prints the answer and the entries.
+	if out = run("audit", "export", "-dry-run", "-kinds", "item"); !strings.Contains(out, `"count": 4`) || !strings.Contains(out, `"upto_seq"`) {
+		t.Fatalf("audit export -dry-run: %s", out)
+	}
+	t.Setenv("VAULTCTL_PIN", "246802")
+	if out = run("audit", "export", "-format", "csv", "-kinds", "item"); !strings.Contains(out, `"entry_seq"`) || !strings.Contains(out, "item.revealed") {
+		t.Fatalf("audit export: %s", out)
+	}
+	if out = run("audit", "-kinds", "audit"); !strings.Contains(out, "format=csv;count=4;") {
+		t.Fatalf("audit.exported: %s", out)
+	}
 	run("feed", "guides", "-guides", `[{"guide_id":"welcome","version":1,"title":"Welcome","message":"Hi"}]`)
 	if out = run("feed", "list"); !strings.Contains(out, `"guide"`) || !strings.Contains(out, "item.revealed") {
 		t.Fatalf("feed: %s", out)

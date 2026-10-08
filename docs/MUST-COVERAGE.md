@@ -15,7 +15,7 @@ the held counts in `vault.status`, the worst-case profile size and the
 the audit search; and for 0.21.0: kept values on item edits, the item's
 size, dry runs, named limits, share.pending.list and
 share.decide{include, decline}, grant labels and names, and suitability
-before the password.)
+before the password; for 0.21.1: the 0.21.0 errata.)
 
 Every MUST / MUST NOT in VAULT-MESSAGING 0.2.3 §4–§6 (plus the §13.4 and
 §13.6 rules they rely on), and the named test that covers it. Normative
@@ -676,3 +676,14 @@ grammar.
 | 10.13 | `.pending`, `.list` and `.get` carry the field's `kind`; at most 64 outstanding outgoing requests (`critical_use_requests`) | `critical.TestSuitability`, `critical.TestOutgoingLimit`, `e2e.TestSharingAndSuitability` |
 | 10.9 | The budget runs out when a 2,001st entry would be evaluated: `limit` matches by the 2,000th is not `partial`; `since` ≥ `until` in Unix milliseconds; `connection.audit.list` takes `after_seq` (unchanged behaviour, stated) | `audit.TestSearchBudgetEdge`, `audit.TestSearchBudget`, `audit.TestSearchErrors` |
 | 11.13, 10.8 | The snapshot's `email` excludes C0, DEL, C1, U+2028 and U+2029; names (snapshot, `account.name.set`, the profile receiver) exclude DEL too | `vault.TestAccountControlSet`, `vault.TestParseAccountSnapshot` |
+
+## 0.21.0 errata (§10.1, §10.7, §10.13, §15 item 29.7; 0.21.1)
+
+| § | Requirement | Test(s) |
+|---|---|---|
+| 10.7, 6.8 | A dry run follows the access rule of the call it previews but never needs step-up: a desktop's dry run of `item.tag` on a critical item is answered at once (not an app-only form; the real `item.tag` is a step-up request); a dry run of `item.put` for a critical item is `forbidden` from a desktop | `items.TestDryRunErrata`, `items.TestDryRun`, `vault.TestReadOnlyFormsAndHeldLimit` |
+| 10.7 | `item.put`'s dry run requires `version` together with `item_id` (`bad_request` with only one) | `items.TestDryRunErrata`, `items.TestDryRun` |
+| 10.7, 10.1 | More than 64 fields is `bad_request` for every sensitivity, critical included, never a `limit`; 64 is accepted | `items.TestFieldCountEveryCritical`, `items.TestLimits` |
+| 10.7 | A move to `critical` checks the 12,288-byte size on the item as it will be stored, with `"sensitivity":"critical"` (`limit` `item_size` with that `size`; nothing moves) | `items.TestMoveToCriticalSize` |
+| 10.13 | A request recorded before 0.21.0 has no `kind`: `.list` and `.get` omit it (and the state keeps none) while the field is not usable; the vault fills in the current kind once it is; the request still expires 24 h after it arrived | `critical.TestKindAbsentBefore021` |
+| 10.13 | An incoming use is checked usable (`unavailable`), then suitable (`unsuitable`), then against the 8 pending per connection (`unavailable`): an unsuitable request is `unsuitable` even at the cap | `critical.TestCheckOrder` |

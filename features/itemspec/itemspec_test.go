@@ -378,8 +378,10 @@ func TestTemplateRegistry(t *testing.T) {
 		}
 		seen[tp.Template] = true
 		for _, tag := range tp.Tags {
-			n, err := NormalizeTag(tag, true)
-			if err != nil || n != tag || tag == ProfileTag && tp.Sensitivity != Data {
+			// No template carries a reserved tag: only the member puts an
+			// item into the shared profile (owner decision 2026-10-08).
+			n, err := NormalizeTag(tag, false)
+			if err != nil || n != tag || strings.HasPrefix(tag, "@") {
 				t.Errorf("%s: tag %q", tp.Template, tag)
 			}
 		}

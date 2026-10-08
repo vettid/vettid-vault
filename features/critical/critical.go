@@ -66,6 +66,7 @@ type Incoming struct {
 	FieldID   string    `json:"field_id"`
 	Name      string    `json:"name"`
 	Label     string    `json:"label"`
+	Kind      string    `json:"kind,omitempty"` // the field's kind when the request arrived (0.21.0)
 	Operation string    `json:"operation"`
 	Payload   []byte    `json:"payload"`
 	Context   string    `json:"context,omitempty"`
@@ -102,7 +103,9 @@ type Credential interface {
 // Usable is the items feature: which critical items share rules make
 // usable to a connection (§10.12).
 type Usable interface {
-	UsableField(conn, itemID, fieldID string, now time.Time) (name, label string, ok bool)
+	// suitable (0.21.0) is whether the field can hold the seed at all: a
+	// password, text or multiline field of an item that is not a wallet's.
+	UsableField(conn, itemID, fieldID string, now time.Time) (name, label, kind string, suitable, ok bool)
 	// UseCriticalField decrypts a field's value with the item key from the
 	// opened credential and re-keys the item; commit installs the new
 	// ciphertext after the credential is sealed (§10.7).
@@ -176,7 +179,6 @@ func (f *Feature) Save() (json.RawMessage, error) {
 var (
 	errBad      = vault.NewError("bad_request", "")
 	errNotFound = vault.NewError("not_found", "")
-	errLimit    = vault.NewError("limit", "")
 	errConn     = vault.NewError("connection_unavailable", "")
 )
 
@@ -341,6 +343,11 @@ func (f *Feature) expire(s *vault.Session) {
 	for _, r := range f.sortedIn() {
 		if !now.Before(r.Exp) {
 			f.answer(s, r, StatusExpired, nil)
+		} else if r.Kind == "" {
+			// Recorded before 0.21.0: the field's kind as it is now.
+			if _, _, kind, _, ok := f.usable.UsableField(r.Conn, r.ItemID, r.FieldID, now); ok {
+				r.Kind = kind
+			}
 		}
 	}
 	for id, o := range f.d.Out {
@@ -391,7 +398,7 @@ func (f *Feature) request(s *vault.Session, body []byte) (json.RawMessage, error
 		}
 	}
 	if n >= MaxOutgoing {
-		return nil, errLimit
+		return nil, vault.LimitError("critical_use_requests", MaxOutgoing)
 	}
 	id := s.NewID()
 	b := strictjson.NewBuilder().String("request_id", id).String("item_id", u.ItemID).String("field_id", u.FieldID).
@@ -424,7 +431,18 @@ func (f *Feature) incoming(s *vault.Session, body []byte) error {
 	s.Record(vault.Activity{Kind: "critical-secret.use.requested", ConnectionID: conn, Ref: u.RequestID, Direction: "in", Audit: true})
 	r := &Incoming{ID: u.RequestID, Conn: conn, ItemID: u.ItemID, FieldID: u.FieldID, Operation: u.Operation, Payload: u.Payload,
 		Context: u.Context, Exp: s.Now().Add(RequestTTL).UTC().Truncate(time.Millisecond)}
-	name, label, ok := f.usable.UsableField(conn, u.ItemID, u.FieldID, s.Now())
+	name, label, kind, suitable, ok := f.usable.UsableField(conn, u.ItemID, u.FieldID, s.Now())
+	if ok && !suitable {
+		// Suitability (0.21.0): a field that cannot hold an Ed25519 seed
+		// (by kind, or a wallet's item) is unsuitable at once, without
+		// asking the member or opening the credential. It is not shown
+		// to the member (no .pending, no feed item, not in .list); the
+		// audit log records it. The connection already sees the kind in
+		// its catalog.
+		f.answer(s, r, StatusUnsuitable, nil)
+		s.Record(vault.Activity{Kind: "critical-secret.use.denied", ConnectionID: conn, Ref: u.RequestID, Direction: "in", Audit: true})
+		return nil
+	}
 	pending := 0
 	for _, x := range f.d.In {
 		if x.Conn == conn {
@@ -439,7 +457,7 @@ func (f *Feature) incoming(s *vault.Session, body []byte) error {
 		s.Record(vault.Activity{Kind: "critical-secret.use.denied", ConnectionID: conn, Ref: u.RequestID, Direction: "in", Audit: true})
 		return nil
 	}
-	r.Name, r.Label = name, label
+	r.Name, r.Label, r.Kind = name, label, kind
 	f.d.In[r.ID] = r
 	s.NotifyAllDevices("critical-secret-use.pending", pendingBody(r))
 	s.Record(vault.Activity{Kind: "critical-secret.use.request", ConnectionID: conn, Ref: r.ID, Feed: true, Priority: "high"})
@@ -451,8 +469,11 @@ func (f *Feature) incoming(s *vault.Session, body []byte) error {
 func pendingBody(r *Incoming) []byte {
 	h := sha256.Sum256(r.Payload)
 	b := strictjson.NewBuilder().String("request_id", r.ID).String("connection_id", r.Conn).String("item_id", r.ItemID).
-		String("field_id", r.FieldID).String("name", r.Name).String("label", r.Label).String("operation", r.Operation).
-		Base64("payload", r.Payload).Base64("payload_sha256", h[:])
+		String("field_id", r.FieldID).String("name", r.Name).String("label", r.Label)
+	if r.Kind != "" { // a request recorded before 0.21.0 has none
+		b.String("kind", r.Kind)
+	}
+	b.String("operation", r.Operation).Base64("payload", r.Payload).Base64("payload_sha256", h[:])
 	if r.Context != "" {
 		b.String("context", r.Context)
 	}
@@ -484,11 +505,13 @@ func (f *Feature) approve(s *vault.Session, in *envelope.Inner) (json.RawMessage
 	}
 	status := ""
 	var sig, pub []byte
-	_, _, usable := f.usable.UsableField(r.Conn, r.ItemID, r.FieldID, s.Now())
+	_, _, _, suitable, usable := f.usable.UsableField(r.Conn, r.ItemID, r.FieldID, s.Now())
 	commit := func() {}
 	op := func(inner *credential.Inner, _ *credential.Payload) error {
 		var seed []byte
-		if usable {
+		if usable && !suitable {
+			status = StatusUnsuitable // its kind changed since (§10.13)
+		} else if usable {
 			if raw, c, err := f.usable.UseCriticalField(s, inner, r.ItemID, r.FieldID); err == nil {
 				commit = c
 				seed = decodeSeed(raw)
@@ -594,8 +617,11 @@ func (f *Feature) list() []byte {
 		}
 		h := sha256.Sum256(r.Payload)
 		b := strictjson.NewBuilder().String("request_id", r.ID).String("connection_id", r.Conn).String("item_id", r.ItemID).
-			String("field_id", r.FieldID).String("name", r.Name).String("label", r.Label).String("operation", r.Operation).
-			Base64("payload_sha256", h[:])
+			String("field_id", r.FieldID).String("name", r.Name).String("label", r.Label)
+		if r.Kind != "" {
+			b.String("kind", r.Kind)
+		}
+		b.String("operation", r.Operation).Base64("payload_sha256", h[:])
 		if r.Context != "" {
 			b.String("context", r.Context)
 		}

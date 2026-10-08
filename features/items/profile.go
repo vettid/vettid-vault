@@ -200,8 +200,11 @@ var worstName = strings.Repeat(`"`, vault.MaxAccountName)
 // the limit.
 func (f *Feature) checkProfile() error {
 	c := &Core{FirstName: worstName, LastName: worstName, IK: make([]byte, 32)}
-	if len(f.profileItems()) > MaxProfileItems || len(f.bodyWith(c, strictjson.MaxSafeInteger)) > MaxProfileUpdate {
-		return errLimit
+	if len(f.profileItems()) > MaxProfileItems {
+		return vault.LimitError("profile_items", MaxProfileItems)
+	}
+	if n := len(f.bodyWith(c, strictjson.MaxSafeInteger)); n > MaxProfileUpdate {
+		return vault.LimitSizeError("profile_size", MaxProfileUpdate, n)
 	}
 	return nil
 }
@@ -373,11 +376,11 @@ func ParseUpdate(body []byte) (*Update, error) {
 		}
 		ids := map[string]bool{}
 		for _, fl := range c.Fields {
-			if fl.ID == "" || ids[fl.ID] {
-				return nil, errBad
+			if fl.ID == "" || ids[fl.ID] || fl.Keep {
+				return nil, errBad // every value is present (no kept values here)
 			}
 			ids[fl.ID] = true
-			it.Fields = append(it.Fields, itemspec.Field(fl))
+			it.Fields = append(it.Fields, itemspec.Field{ID: fl.ID, Label: fl.Label, Kind: fl.Kind, Value: fl.Value})
 		}
 		u.Items = append(u.Items, it)
 	}

@@ -196,7 +196,7 @@ func (d *Device) sealedWith(ctx context.Context, typ string, u UTK, blob []byte,
 		return nil, nil, "", err
 	}
 	if !r.OK() {
-		return nil, nil, "", &OpError{Type: typ, Code: r.ErrorCode()}
+		return nil, nil, "", &OpError{Type: typ, Code: r.ErrorCode(), Body: r.Body()}
 	}
 	o, err := strictjson.ParseObject(r.Body())
 	if err != nil {

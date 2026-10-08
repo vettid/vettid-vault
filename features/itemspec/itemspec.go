@@ -392,6 +392,10 @@ type Item struct {
 	Updated time.Time `json:"updated"`
 	// NextField numbers the next new field (f1, f2, ...; never reused).
 	NextField uint64 `json:"next_field"`
+	// SizeNoTags is a critical item's size without its tags' encoding,
+	// recorded whenever the vault holds its values (0.21.0, §10.7); 0
+	// until then. Data and secret items compute theirs.
+	SizeNoTags int `json:"size_no_tags,omitempty"`
 }
 
 // Clone returns a deep copy.
@@ -496,9 +500,75 @@ func fieldsJSON(fs []Field, only []string, values, ids bool) []byte {
 	return append(arr, ']')
 }
 
-// Size is the length of the item's encoding with its values: the size
-// the limits of §10.7 bound.
-func (it *Item) Size() int { return len(it.JSON(true)) }
+// Size is the item's size (§10.7 Size, 0.21.0): the length of its content
+// encoding with every value and without the members the vault assigns
+// (item_id, version, created_at, updated_at, the fields' field_ids),
+//
+//	{"name","category","sensitivity"[,"template"],"tags":[…],
+//	 "fields":[{"label","kind","value"},…][,"notes"]}
+//
+// template only when set, notes only when not empty, tags and fields
+// always. A field without a value (a critical item's DEK copy) counts
+// as "" ({} for an address), as its sealed plaintext does. The values are
+// their canonical JSON (ParseValue: Go's encoding/json without HTML
+// escaping).
+func (it *Item) Size() int { return len(it.sizeEncoding()) }
+
+func (it *Item) sizeEncoding() []byte {
+	b := strictjson.NewBuilder().String("name", it.Name).String("category", it.Category).String("sensitivity", it.Sensitivity)
+	if it.Template != "" {
+		b.String("template", it.Template)
+	}
+	b.Raw("tags", strList(nonNil(it.Tags)))
+	arr := []byte{'['}
+	for i, f := range it.Fields {
+		if i > 0 {
+			arr = append(arr, ',')
+		}
+		v := f.Value
+		if v == nil {
+			v = EmptyValue(f.Kind)
+		}
+		arr = append(arr, strictjson.NewBuilder().String("label", f.Label).String("kind", f.Kind).Raw("value", v).Bytes()...)
+	}
+	b.Raw("fields", append(arr, ']'))
+	if it.Notes != "" {
+		b.String("notes", it.Notes)
+	}
+	return b.Bytes()
+}
+
+// TagsSize is the length of the tags' encoding within the size (§10.7):
+// a critical item's recorded size (SizeNoTags) plus this is its size, so
+// that a tag change needs no credential operation to keep it.
+func TagsSize(tags []string) int { return len(strList(nonNil(tags))) }
+
+// EmptyValue is the value a field without a stored value has: "" or, for
+// an address, {} (§10.7, as item.sensitivity restores it).
+func EmptyValue(kind string) json.RawMessage {
+	if kind == KindAddress {
+		return json.RawMessage(`{}`)
+	}
+	return json.RawMessage(`""`)
+}
+
+// CurrentSize is the size item.get reports (§10.7, 0.21.0): computed from
+// the values for a data or secret item, recorded for a critical one
+// (ok false for a critical item whose values no release of 0.21.0 or
+// later has opened yet).
+func (it *Item) CurrentSize() (int, bool) {
+	if it.Sensitivity != Critical {
+		return it.Size(), true
+	}
+	if it.SizeNoTags == 0 {
+		return 0, false
+	}
+	return it.SizeNoTags + TagsSize(it.Tags), true
+}
+
+// RecordSize records a critical item's size from it, which must hold
+// every value (§10.7, 0.21.0).
+func (it *Item) RecordSize() { it.SizeNoTags = it.Size() - TagsSize(it.Tags) }
 
 // Content is the shareable content of an item (§10.12, §10.11): what a
 // grant fetch seals and what an agent's item.get returns.
@@ -596,12 +666,14 @@ func (m Meta) JSON() []byte {
 // --- content in requests (item.put, the sealed critical item) ---
 
 // FieldIn is a field of an item.put: an existing field (ID set) or a new
-// one.
+// one. Keep marks an existing field sent without value, which keeps its
+// stored value (0.21.0, §10.7 Kept values).
 type FieldIn struct {
 	ID    string
 	Label string
 	Kind  string
 	Value json.RawMessage
+	Keep  bool
 }
 
 // Content is a parsed item content.
@@ -614,12 +686,31 @@ type ContentIn struct {
 	HasFields   bool
 	NotesGiven  bool
 	ValuesGiven bool
+	// KeepNotes is keep_notes: true (0.21.0): the stored notes stay.
+	KeepNotes bool
+}
+
+// Keeps reports whether the content keeps a stored value or the notes
+// (§10.7 Kept values).
+func (c *ContentIn) Keeps() bool {
+	if c.KeepNotes {
+		return true
+	}
+	for _, f := range c.Fields {
+		if f.Keep {
+			return true
+		}
+	}
+	return false
 }
 
 // ParseContent parses an item's content members (name, category?,
-// template?, fields?, notes?) from o strictly: names, labels, kinds and
-// values as §10.7 says. Field ids, if present, must have the shape of one
-// and be distinct; whether they exist is the caller's check.
+// template?, fields?, notes?, keep_notes?) from o strictly: names,
+// labels, kinds and values as §10.7 says. Field ids, if present, must
+// have the shape of one and be distinct; whether they exist is the
+// caller's check. A field with a field_id may omit value (0.21.0, Kept
+// values: Apply takes the stored one); notes and keep_notes together are
+// refused.
 func ParseContent(o strictjson.Object) (*ContentIn, error) {
 	c := &ContentIn{Category: "other"}
 	var err error
@@ -667,20 +758,37 @@ func ParseContent(o strictjson.Object) (*ContentIn, error) {
 		}
 		rv, ok := fo["value"]
 		if !ok {
-			return nil, ErrInvalid
-		}
-		if f.Value, err = ParseValue(f.Kind, rv); err != nil {
+			if f.ID == "" {
+				return nil, ErrInvalid // a new field needs a value
+			}
+			f.Keep = true
+		} else if f.Value, err = ParseValue(f.Kind, rv); err != nil {
 			return nil, err
 		}
 		c.Fields = append(c.Fields, f)
+	}
+	if o.Has("keep_notes") {
+		k, err := o.Bool("keep_notes")
+		if err != nil || k && c.NotesGiven {
+			return nil, ErrInvalid
+		}
+		c.KeepNotes = k
 	}
 	return c, nil
 }
 
 // Apply builds the item's next fields from c: fields with an id keep it
 // (they must exist in cur, nil for a new item), new fields take the next
-// ids. It returns false if c names a field the item does not have.
+// ids. A kept field (0.21.0, §10.7 Kept values) takes a copy of cur's
+// stored value ("" or {} if cur holds none) and must keep cur's kind;
+// keep_notes takes cur's notes. cur must therefore hold the values it
+// keeps (for a critical item, the caller fills them from the opened
+// plaintext). It returns false if c names a field the item does not
+// have, changes a kept field's kind, or keeps anything of a new item.
 func (c *ContentIn) Apply(it *Item, cur *Item) bool {
+	if c.KeepNotes && cur == nil {
+		return false
+	}
 	next := it.NextField
 	if next == 0 {
 		next = 1
@@ -688,20 +796,36 @@ func (c *ContentIn) Apply(it *Item, cur *Item) bool {
 	out := make([]Field, 0, len(c.Fields))
 	for _, f := range c.Fields {
 		id := f.ID
+		v := f.Value
 		if id != "" {
 			if cur == nil {
 				return false
 			}
-			if _, ok := cur.Field(id); !ok {
+			old, ok := cur.Field(id)
+			if !ok {
 				return false
+			}
+			if f.Keep {
+				if old.Kind != f.Kind {
+					return false // the stored value was checked for its kind
+				}
+				v = old.Value
+				if v == nil {
+					v = EmptyValue(f.Kind)
+				}
+				v = append(json.RawMessage(nil), v...)
 			}
 		} else {
 			id = "f" + strconv.FormatUint(next, 10)
 			next++
 		}
-		out = append(out, Field{ID: id, Label: f.Label, Kind: f.Kind, Value: f.Value})
+		out = append(out, Field{ID: id, Label: f.Label, Kind: f.Kind, Value: v})
 	}
-	it.Name, it.Category, it.Template, it.Fields, it.Notes, it.NextField = c.Name, c.Category, c.Template, out, c.Notes, next
+	notes := c.Notes
+	if c.KeepNotes {
+		notes = cur.Notes
+	}
+	it.Name, it.Category, it.Template, it.Fields, it.Notes, it.NextField = c.Name, c.Category, c.Template, out, notes, next
 	return true
 }
 

@@ -198,7 +198,7 @@ func ApplySettings(cur Settings, body []byte) (Settings, error) {
 		}
 	}
 	if len(next.App) > MaxAppSettings {
-		return cur, NewError("limit", "")
+		return cur, LimitError("app_settings", MaxAppSettings)
 	}
 	if v != cur.Version {
 		return cur, NewError("conflict", "")

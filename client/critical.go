@@ -93,7 +93,7 @@ func (d *Device) criticalApprove(ctx context.Context, password, requestID string
 		return nil, err
 	}
 	if !r.OK() {
-		return nil, &OpError{Type: typ, Code: r.ErrorCode()}
+		return nil, &OpError{Type: typ, Code: r.ErrorCode(), Body: r.Body()}
 	}
 	o, err := strictjson.ParseObject(r.Body())
 	if err != nil {
@@ -112,6 +112,9 @@ func (d *Device) CriticalUseDeny(ctx context.Context, requestID string) error {
 }
 
 // CriticalUseList lists pending incoming and recent outgoing requests.
+// Incoming entries carry the field's kind (0.21.0); a request for a field
+// that cannot hold a seed was answered unsuitable at once and is not
+// listed (the audit log has it).
 func (d *Device) CriticalUseList(ctx context.Context) (strictjson.Object, error) {
 	return d.Op(ctx, "critical-secret-use.list", nil)
 }

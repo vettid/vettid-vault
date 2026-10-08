@@ -76,17 +76,25 @@ const MaxAccountName = 160
 
 // ValidAccountName reports whether s is a name as the snapshot and the
 // shared profile's core carry it (§10.8, §11.13): a UTF-8 string of 1–160
-// bytes without control characters (C0, C1, U+2028, U+2029).
+// bytes without control characters (C0, DEL, C1, U+2028, U+2029; DEL
+// since 0.21.0).
 func ValidAccountName(s string) bool {
 	if s == "" || len(s) > MaxAccountName || !utf8.ValidString(s) {
 		return false
 	}
+	return !hasAccountControl(s)
+}
+
+// hasAccountControl reports whether s holds a character of the set the
+// snapshot's names and email exclude (§10.8, §11.13, 0.21.0): C0
+// (U+0000–U+001F), DEL (U+007F), C1 (U+0080–U+009F), U+2028 and U+2029.
+func hasAccountControl(s string) bool {
 	for _, r := range s {
-		if r < 0x20 || r >= 0x80 && r <= 0x9f || r == 0x2028 || r == 0x2029 {
-			return false
+		if r < 0x20 || r >= 0x7f && r <= 0x9f || r == 0x2028 || r == 0x2029 {
+			return true
 		}
 	}
-	return true
+	return false
 }
 
 // MinAccountEmail and MaxAccountEmail bound the snapshot's email (§11.13,
@@ -98,18 +106,14 @@ const (
 
 // ValidAccountEmail reports whether s is an email as the snapshot carries
 // it (§11.13, 0.20.0): a UTF-8 string of 3–1,016 bytes with an "@" and
-// without control characters (C0, DEL, C1). The vault does not check it
-// further: it is display only and shown only to the member.
+// without control characters (C0, DEL, C1 and, since 0.21.0, U+2028 and
+// U+2029: the names' set). The vault does not check it further: it is
+// display only and shown only to the member.
 func ValidAccountEmail(s string) bool {
 	if len(s) < MinAccountEmail || len(s) > MaxAccountEmail || !utf8.ValidString(s) || !strings.Contains(s, "@") {
 		return false
 	}
-	for _, r := range s {
-		if r < 0x20 || r >= 0x7f && r <= 0x9f {
-			return false
-		}
-	}
-	return true
+	return !hasAccountControl(s)
 }
 
 // ParseAccountSnapshot parses a snapshot strictly (§11.13): an object of

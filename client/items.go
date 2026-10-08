@@ -15,21 +15,27 @@ import (
 // one-time reply key, and the new blob is kept (§3.5.3, §3.5.4).
 
 // ItemField is one field of an item to put. ID is empty for a new field;
-// Value is a string, or an address object (map[string]string).
+// Value is a string, or an address object (map[string]string). Value nil
+// on an existing field (ID set) keeps its stored value (0.21.0, §10.7
+// Kept values; the kind must stay the stored one): the app edits a
+// secret or critical item without revealing it.
 type ItemField struct {
 	ID    string `json:"field_id,omitempty"`
 	Label string `json:"label"`
 	Kind  string `json:"kind"`
-	Value any    `json:"value"`
+	Value any    `json:"value,omitempty"`
 }
 
-// ItemContent is an item's content: what item.put sets.
+// ItemContent is an item's content: what item.put sets. KeepNotes keeps
+// the stored notes of a replaced item (0.21.0); with Notes "" and
+// KeepNotes false the notes are removed.
 type ItemContent struct {
-	Name     string      `json:"name"`
-	Category string      `json:"category,omitempty"`
-	Template string      `json:"template,omitempty"`
-	Fields   []ItemField `json:"fields,omitempty"`
-	Notes    string      `json:"notes,omitempty"`
+	Name      string      `json:"name"`
+	Category  string      `json:"category,omitempty"`
+	Template  string      `json:"template,omitempty"`
+	Fields    []ItemField `json:"fields,omitempty"`
+	Notes     string      `json:"notes,omitempty"`
+	KeepNotes bool        `json:"keep_notes,omitempty"`
 }
 
 func (c ItemContent) body() map[string]any {
@@ -45,6 +51,9 @@ func (c ItemContent) body() map[string]any {
 	}
 	if c.Notes != "" {
 		b["notes"] = c.Notes
+	}
+	if c.KeepNotes {
+		b["keep_notes"] = true
 	}
 	return b
 }
@@ -220,4 +229,83 @@ func (d *Device) ShareRuleDelete(ctx context.Context, ruleID string) error {
 // ShareDecide approves or declines pending items of a rule.
 func (d *Device) ShareDecide(ctx context.Context, ruleID string, items []string, approve bool) (strictjson.Object, error) {
 	return d.Op(ctx, "share.decide", map[string]any{"rule_id": ruleID, "items": items, "approve": approve})
+}
+
+// ShareDecideBoth includes some pending items of a rule and declines
+// others in one change (0.21.0, §10.12); either list may be empty, not
+// both. It returns {included, declined}.
+func (d *Device) ShareDecideBoth(ctx context.Context, ruleID string, include, decline []string) (strictjson.Object, error) {
+	body := map[string]any{"rule_id": ruleID}
+	if len(include) > 0 {
+		body["include"] = include
+	}
+	if len(decline) > 0 {
+		body["decline"] = decline
+	}
+	return d.Op(ctx, "share.decide", body)
+}
+
+// SharePendingList lists the items waiting for the member's share
+// decision (0.21.0, §10.12): filter may name one of rule_id,
+// connection_id, agent_id, and after (the previous page's next) and
+// limit. It returns {pending: [{rule_id, subject, item_id, name,
+// category, sensitivity, at}], next?}.
+func (d *Device) SharePendingList(ctx context.Context, filter map[string]any) (strictjson.Object, error) {
+	return d.Op(ctx, "share.pending.list", filter)
+}
+
+// SharePendingAll pages share.pending.list to the end (filter as
+// SharePendingList, without after) and returns every entry.
+func (d *Device) SharePendingAll(ctx context.Context, filter map[string]any) ([]json.RawMessage, error) {
+	body := map[string]any{}
+	for k, v := range filter {
+		body[k] = v
+	}
+	var out []json.RawMessage
+	for {
+		o, err := d.SharePendingList(ctx, body)
+		if err != nil {
+			return nil, err
+		}
+		arr, err := o.Array("pending")
+		if err != nil {
+			return nil, ErrProtocol
+		}
+		out = append(out, arr...)
+		next, more, err := o.OptString("next")
+		if err != nil {
+			return nil, ErrProtocol
+		}
+		if !more {
+			return out, nil
+		}
+		body["after"] = next
+	}
+}
+
+// ItemPutDryRun previews what an item.put would do to sharing (0.21.0,
+// §10.7): id "" for a new item of sensitivity ("" for data) with tags;
+// with id, the item (at version) with the new tags (nil: unchanged). It
+// changes nothing and returns {version?, shares, withdrawals}.
+func (d *Device) ItemPutDryRun(ctx context.Context, id string, version uint64, sensitivity string, tags []string) (strictjson.Object, error) {
+	body := map[string]any{"dry_run": true}
+	if id != "" {
+		body["item_id"], body["version"] = id, version
+	}
+	if sensitivity != "" {
+		body["sensitivity"] = sensitivity
+	}
+	if tags != nil {
+		body["tags"] = tags
+	}
+	return d.Op(ctx, "item.put", body)
+}
+
+// ItemTagDryRun previews an item.tag (0.21.0, §10.7) and returns
+// {version, shares, withdrawals}.
+func (d *Device) ItemTagDryRun(ctx context.Context, id string, version uint64, tags []string) (strictjson.Object, error) {
+	if tags == nil {
+		tags = []string{}
+	}
+	return d.Op(ctx, "item.tag", map[string]any{"item_id": id, "version": version, "tags": tags, "dry_run": true})
 }

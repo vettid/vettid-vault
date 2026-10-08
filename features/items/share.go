@@ -182,10 +182,10 @@ func (f *Feature) checkPlan(plan []action) error {
 		}
 	}
 	if pending > MaxPending {
-		return errLimit
+		return vault.LimitError("share_pending", MaxPending)
 	}
 	if grants > 0 && (f.grants == nil || grants > f.grants.GivenRoom()) {
-		return errLimit
+		return vault.LimitError("grants_given", MaxGivenGrants)
 	}
 	return nil
 }
@@ -531,8 +531,11 @@ func (f *Feature) ruleSet(s *vault.Session, body []byte) (json.RawMessage, error
 		old = r
 	} else {
 		subj, all := f.countRules(s, sp.Conn, sp.Agent)
-		if subj >= MaxRulesPerSubj || all >= MaxRules {
-			return nil, errLimit
+		if subj >= MaxRulesPerSubj {
+			return nil, vault.LimitError("share_rules_subject", MaxRulesPerSubj)
+		}
+		if all >= MaxRules {
+			return nil, vault.LimitError("share_rules", MaxRules)
 		}
 	}
 	if sp.Conn != "" {
@@ -722,6 +725,63 @@ func (f *Feature) ruleDelete(s *vault.Session, body []byte) (json.RawMessage, er
 	return nil, nil
 }
 
+// decideLists parses share.decide's item lists: {items, approve}, or
+// (0.21.0) {include?, decline?}, together 1–500 distinct ids; mixing the
+// forms is bad_request.
+func decideLists(o strictjson.Object) (include, decline []string, err error) {
+	oldForm := o.Has("items") || o.Has("approve")
+	if !o.Has("include") && !o.Has("decline") {
+		if !oldForm {
+			return nil, nil, errBad
+		}
+		ids, present, err := idList(o, "items", MaxDecide, envelope.ValidULID)
+		if err != nil || !present {
+			return nil, nil, errBad
+		}
+		approve, err := o.Bool("approve")
+		if err != nil {
+			return nil, nil, errBad
+		}
+		if approve {
+			return ids, nil, nil
+		}
+		return nil, ids, nil
+	}
+	if oldForm {
+		return nil, nil, errBad
+	}
+	seen := map[string]bool{}
+	list := func(name string) ([]string, error) {
+		arr, _, err := o.OptArray(name)
+		if err != nil {
+			return nil, errBad
+		}
+		var out []string
+		for _, r := range arr {
+			v, err := strictjson.AsString(r)
+			if err != nil || !envelope.ValidULID(v) || seen[v] {
+				return nil, errBad // in both lists, or twice in one
+			}
+			seen[v] = true
+			out = append(out, v)
+		}
+		return out, nil
+	}
+	if include, err = list("include"); err != nil {
+		return nil, nil, err
+	}
+	if decline, err = list("decline"); err != nil {
+		return nil, nil, err
+	}
+	if n := len(include) + len(decline); n == 0 || n > MaxDecide {
+		return nil, nil, errBad
+	}
+	return include, decline, nil
+}
+
+// decide includes and declines pending items of a rule in one change
+// (§10.12; both lists at once since 0.21.0): one response, one
+// share.decided, and on an error (a limit) no change at all.
 func (f *Feature) decide(s *vault.Session, body []byte) (json.RawMessage, error) {
 	o, err := strictjson.ParseObject(body)
 	if err != nil {
@@ -731,29 +791,31 @@ func (f *Feature) decide(s *vault.Session, body []byte) (json.RawMessage, error)
 	if err != nil {
 		return nil, err
 	}
-	ids, present, err := idList(o, "items", MaxDecide, envelope.ValidULID)
-	if err != nil || !present {
-		return nil, errBad
-	}
-	approve, err := o.Bool("approve")
+	include, decline, err := decideLists(o)
 	if err != nil {
-		return nil, errBad
+		return nil, err
 	}
 	r, ok := f.findRule(s, rid)
 	if !ok {
 		return nil, errNotFound
 	}
-	var plan []action
-	var declined []string
-	for _, id := range ids {
+	pending := func(id string) *itemspec.Item {
 		inc := f.incl(rid, id)
 		it := f.st.Items[id]
 		if inc == nil || inc.State != StatePending || it == nil {
-			continue
+			return nil // not pending: ignored
 		}
-		if approve {
+		return it
+	}
+	var plan []action
+	var declined []string
+	for _, id := range include {
+		if it := pending(id); it != nil {
 			plan = append(plan, action{op: opInclude, rule: *r, item: it})
-		} else {
+		}
+	}
+	for _, id := range decline {
+		if pending(id) != nil {
 			declined = append(declined, id)
 		}
 	}

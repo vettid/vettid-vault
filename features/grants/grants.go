@@ -263,7 +263,6 @@ func (f *Feature) Save() (json.RawMessage, error) {
 var (
 	errBad      = vault.NewError("bad_request", "")
 	errNotFound = vault.NewError("not_found", "")
-	errLimit    = vault.NewError("limit", "")
 	errConn     = vault.NewError("connection_unavailable", "")
 )
 
@@ -854,7 +853,11 @@ func ParseCatalog(body []byte) (string, []CatalogEntry, bool, error) {
 
 // --- JSON ---
 
-func itemsJSON(items []Item, avail func(Item) bool) []byte {
+// itemsJSON encodes request entries; with detail (the member's side:
+// grant.pending, grant.list's pending) each carries available and, for an
+// available item entry (0.21.0, §10.12), the member's item's name,
+// category and the labels of the requested fields.
+func itemsJSON(items []Item, detail func(Item) (bool, *itemspec.Meta)) []byte {
 	arr := []byte{'['}
 	for i, it := range items {
 		if i > 0 {
@@ -867,8 +870,12 @@ func itemsJSON(items []Item, avail func(Item) bool) []byte {
 		if it.Label != "" {
 			b.String("label", it.Label)
 		}
-		if avail != nil {
-			b.Bool("available", avail(it))
+		if detail != nil {
+			ok, meta := detail(it)
+			b.Bool("available", ok)
+			if ok && meta != nil {
+				b.String("name", meta.Name).String("category", meta.Category).Raw("labels", itemspec.LabelsJSON(meta.Labels))
+			}
 		}
 		arr = append(arr, b.Bytes()...)
 	}
@@ -888,6 +895,11 @@ func (g *Grant) json() []byte {
 		b.String("rule_id", g.RuleID)
 	}
 	b.String("name", g.Name).String("category", g.Category)
+	if g.Direction == "received" {
+		// The descriptor's labels as the connection's vault sent them
+		// (0.21.0, §10.12); a given grant carries none.
+		b.Raw("labels", itemspec.LabelsJSON(g.Labels))
+	}
 	if g.Uses > 0 {
 		b.Uint("uses", g.Uses)
 	}
@@ -907,8 +919,8 @@ func (g *Grant) descriptor(meta itemspec.Meta) Descriptor {
 // expired reports whether a grant with an expiry is past it.
 func (g *Grant) expired(now time.Time) bool { return !g.Expires.IsZero() && !now.Before(g.Expires) }
 
-func (p *Pending) json(avail func(Item) bool) []byte {
-	b := strictjson.NewBuilder().String("request_id", p.ID).String("connection_id", p.Conn).Raw("items", itemsJSON(p.Items, avail)).
+func (p *Pending) json(detail func(Item) (bool, *itemspec.Meta)) []byte {
+	b := strictjson.NewBuilder().String("request_id", p.ID).String("connection_id", p.Conn).Raw("items", itemsJSON(p.Items, detail)).
 		Uint("uses", p.Uses).Uint("expires_in", p.ExpiresIn)
 	if p.Reason != "" {
 		b.String("reason", p.Reason)
@@ -922,14 +934,25 @@ func (p *Pending) json(avail func(Item) bool) []byte {
 // is readable with those fields, or a category with a readable item for
 // the member to pick (§10.12).
 func (f *Feature) available(it Item) bool {
+	ok, _ := f.entryDetail(it)
+	return ok
+}
+
+// entryDetail is available(it) and, for an available item entry, the
+// item's metadata restricted to the requested fields (all without
+// fields), in the item's order (0.21.0, §10.12).
+func (f *Feature) entryDetail(it Item) (bool, *itemspec.Meta) {
 	switch it.Kind {
 	case KindItem:
-		_, ok := f.items.Readable(it.Ref, it.Fields)
-		return ok
+		m, ok := f.items.Readable(it.Ref, it.Fields)
+		if !ok {
+			return false, nil
+		}
+		return true, &m
 	case KindCategory:
-		return f.items.HasCategory(it.Ref)
+		return f.items.HasCategory(it.Ref), nil
 	}
-	return false
+	return false, nil
 }
 
 func activeConn(s *vault.Session, id string) bool {
@@ -1072,7 +1095,7 @@ func (f *Feature) request(s *vault.Session, body []byte) (json.RawMessage, error
 		return nil, errNotFound
 	}
 	if len(f.d.Requested) >= MaxRequested {
-		return nil, errLimit
+		return nil, vault.LimitError("grant_requests", MaxRequested)
 	}
 	id := s.NewID()
 	b := strictjson.NewBuilder().String("request_id", id).Raw("items", itemsJSON(r.Items, nil)).Uint("uses", r.Uses).
@@ -1175,7 +1198,7 @@ func (f *Feature) fetch(s *vault.Session, body []byte) (json.RawMessage, error) 
 		return nil, errNotFound
 	}
 	if len(f.d.Fetches) >= MaxFetches {
-		return nil, errLimit
+		return nil, vault.LimitError("grant_fetches", MaxFetches)
 	}
 	id := s.NewID()
 	b := strictjson.NewBuilder().String("fetch_id", id).String("grant_id", gid).Base64("reply_key", reply.Bytes()).Bytes()
@@ -1250,7 +1273,7 @@ func (f *Feature) catalog(s *vault.Session, body []byte) (json.RawMessage, error
 		return nil, errNotFound
 	}
 	if len(f.d.Catalogs) >= MaxFetches {
-		return nil, errLimit
+		return nil, vault.LimitError("catalog_requests", MaxFetches)
 	}
 	id := s.NewID()
 	if err := s.Send(conn, "data.catalog.get", strictjson.NewBuilder().String("request_id", id).Bytes(), vault.SendOptions{}); err != nil {
@@ -1308,7 +1331,7 @@ func (f *Feature) dataRequest(s *vault.Session, body []byte) {
 	p := &Pending{ID: r.ID, Conn: conn, Items: r.Items, Uses: r.Uses, ExpiresIn: r.ExpiresIn, Reason: r.Reason,
 		Exp: s.Now().Add(PendingTTL).UTC().Truncate(time.Millisecond)}
 	f.d.Pending[r.ID] = p
-	s.NotifyAllDevices("grant.pending", p.json(f.available))
+	s.NotifyAllDevices("grant.pending", p.json(f.entryDetail))
 	s.Record(vault.Activity{Kind: "grant.requested", ConnectionID: conn, Ref: r.ID, Direction: "in", Audit: true})
 	s.Record(vault.Activity{Kind: "grant.request", ConnectionID: conn, Ref: r.ID, Feed: true, Priority: "high"})
 }
@@ -1378,7 +1401,7 @@ func (f *Feature) decide(s *vault.Session, body []byte) (json.RawMessage, error)
 		return nil, errBad
 	}
 	if countActive(f.d.Given)+len(made) > MaxGiven {
-		return nil, errLimit
+		return nil, vault.LimitError("grants_given", MaxGiven)
 	}
 	ds := make([]Descriptor, len(made))
 	resp := []byte{'['}
@@ -1591,7 +1614,7 @@ func (f *Feature) list() []byte {
 		if i > 0 {
 			pend = append(pend, ',')
 		}
-		pend = append(pend, f.d.Pending[k].json(nil)...)
+		pend = append(pend, f.d.Pending[k].json(f.entryDetail)...)
 	}
 	pend = append(pend, ']')
 	req := []byte{'['}

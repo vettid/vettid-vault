@@ -201,7 +201,6 @@ var (
 var (
 	errBad      = vault.NewError("bad_request", "")
 	errNotFound = vault.NewError("not_found", "")
-	errLimit    = vault.NewError("limit", "")
 	errLocked   = vault.NewError("credential_locked", "")
 	errInternal = vault.NewError("internal", "")
 	errUnavail  = vault.NewError("unavailable", "")
@@ -497,7 +496,7 @@ func (f *Feature) create(s *vault.Session, in *envelope.Inner) (json.RawMessage,
 		return nil, errBad
 	}
 	if len(f.st.Wallets) >= MaxWallets {
-		return nil, errLimit
+		return nil, vault.LimitError("wallets", MaxWallets)
 	}
 	o, _ := strictjson.ParseObject(in.Body)
 	var tags []string
@@ -679,7 +678,7 @@ func (w *Wallet) issue(typ string, chain uint32, label, conn string, now time.Ti
 	}
 	nx := w.Next[typ]
 	if len(w.Addrs) >= MaxAddresses || nx[chain] >= btc.MaxIndex {
-		return nil, errLimit
+		return nil, vault.LimitError("wallet_addresses", MaxAddresses)
 	}
 	a, err := w.account(typ)
 	if err != nil {

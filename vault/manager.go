@@ -183,6 +183,13 @@ type Manager struct {
 	locked      bool
 	lockPending bool
 	lockReason  string
+	// unlockedBy: the app whose unlock started this manager (its device
+	// id; "" for a PIN-only unlock or an app without a device record
+	// yet), audited on vault.unlocked (0.23.2, §10.9).
+	unlockedBy string
+	// lockBy: the owner device whose vault.lock is pending, audited on
+	// vault.locked (0.23.2); "" for every other lock.
+	lockBy      string
 	started     bool
 	hadFailures bool // the header recorded failures before this unlock
 	holdsDEK    bool // counted in unlocked
@@ -796,6 +803,7 @@ func (m *Manager) LockReason(ctx context.Context, reason string) error {
 		return m.deleteLocked(ctx, "host")
 	}
 	m.lockReason = reason
+	m.lockBy = "" // the host's lock, not a device's (0.23.2)
 	return m.lockLocked(ctx)
 }
 
@@ -828,7 +836,13 @@ func (m *Manager) lockLocked(ctx context.Context) error {
 	// Deliver what is queued first (an interrupted batch may have left
 	// deposits, such as an hs.fin, in the outbox), then flush.
 	m.drainOutbox(ctx)
-	m.record(Activity{Kind: "vault.locked", Audit: true}, m.now())
+	// A device's vault.lock names the device (0.23.2, §10.9); a lock
+	// with a reason (owner check, recovery) or by the host has none.
+	by := ""
+	if m.lockReason == "" {
+		by = m.lockBy
+	}
+	m.record(Activity{Kind: "vault.locked", DeviceID: by, Audit: true}, m.now())
 	err := m.persist(ctx, false)
 	if errors.Is(err, ErrSplitBrain) {
 		return err

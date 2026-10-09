@@ -19,7 +19,8 @@ before the password; for 0.21.1: the 0.21.0 errata; for 0.22.0:
 History export, `audit.export`; and for 0.23.0: a connection's asks
 (no approval fatigue), rate limits on connection rules, overlapping
 rules (ask wins), the 0.22.0 errata and the month hint; for 0.23.1: the
-0.23.0 errata.)
+0.23.0 errata; for 0.23.2: the device on `vault.unlocked` and
+`vault.locked`.)
 
 Every MUST / MUST NOT in VAULT-MESSAGING 0.2.3 §4–§6 (plus the §13.4 and
 §13.6 rules they rely on), and the named test that covers it. Normative
@@ -748,3 +749,14 @@ grammar.
 | 10.12 | `retry_after` is at most 86,400: the vault clamps what it sends, and a received `data.value` with more is malformed | `grants.TestRetryAfterMax` |
 | 10.12 | A received `limits: {}` means no limits | `grants.TestEmptyLimitsMeanNone`, `grants.TestRateLimitedWire` |
 | 10.4.1 | Ask-state changes send `sync.event{kind: "connection.changed", connection_id, version}` to every owner device | `vault.TestResumeAlwaysClears`, `vault.TestAsksTypes` |
+
+## The device on vault.unlocked and vault.locked (§10.9, §15 item 31.14; 0.23.2)
+
+| § | Requirement | Test(s) |
+|---|---|---|
+| 10.9, 11.4 | `vault.unlocked` carries `device_id`, the device record of the app whose unlock opened the vault | `vault.TestUnlockedNamesDevice` |
+| 10.9, 11.10.4 | The confirming unlock at a move's new release names the app as well | `vault.TestUnlockedNamesDeviceOnMoveConfirmation` |
+| 10.9 | An unlock without a device (PIN-only, development) has no `device_id` | `vault.TestUnlockedPINOnlyNoDevice` |
+| 10.9, 10.2 | `vault.locked` carries `device_id` when an owner device's `vault.lock` locked the vault | `vault.TestLockedNamesRequestingDevice` |
+| 10.9, 12.3 | Every other lock has no `device_id`: the host's lock (account site route, lease, memory, restart), a recovery, ten failed owner checks, also with a device's `vault.lock` in the same batch | `vault.TestLockedByHostNoDevice`, `vault.TestLockedByOwnerCheckNoDevice` |
+| 10.9 | Entries with `device_id` are found by the device's name, whatever their kind | `audit.TestSearchFields` (entry 13, `vault.unlocked`) |

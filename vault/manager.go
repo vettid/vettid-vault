@@ -76,6 +76,9 @@ type Options struct {
 	// (§3.6; tests move it past a deadline while messages keep the real
 	// time). Nil: Now.
 	OwnerCheckClock func() time.Time
+	// AskRand, if set, draws the delay of a suppressed ask's neutral
+	// answer (§10.4.1): a uniform value in [0, n). Nil: crypto/rand.
+	AskRand func(n int64) int64
 }
 
 // LifecycleEvent is reported to the parent, which writes it to the vault

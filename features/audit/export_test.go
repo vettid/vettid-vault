@@ -433,3 +433,65 @@ func FuzzParseExport(f *testing.F) {
 		}
 	})
 }
+
+// §10.9 Order of checks (0.23.0, errata to 0.22.0): the sender and the
+// holder (forbidden) before the clone alarm; the alarm before anything
+// about the body; then bad_request at once for a request without a
+// spendable UTK (not a JSON object, dry_run not a boolean, a preview with
+// utk_id, sealed or upto_seq, an export without a readable utk_id and
+// sealed) — the UTK unspent; only then the export's steps (the spend
+// first).
+func TestExportErrataOrder(t *testing.T) {
+	f, h, c := exportFixture(t)
+	c.alarm = "credential_frozen"
+	c.utks["u1"] = "246810"
+	for _, kind := range []string{"desktop", "agent", "app2", "recovering-app"} {
+		if r := featuretest.Call(f, h, t0, kind, "audit.export", `{"utk_id":"u1","sealed":"AAAA","format":"json","upto_seq":13}`); r.Code != "forbidden" {
+			t.Errorf("%s during an alarm: %q (the holder check comes first)", kind, r.Code)
+		}
+	}
+	for _, b := range []string{`[]`, `{"dry_run":"yes"}`, `{"dry_run":true,"utk_id":"u1"}`} {
+		if r := featuretest.Call(f, h, t0, "app", "audit.export", b); r.Code != "credential_frozen" {
+			t.Errorf("%s during an alarm: %q", b, r.Code)
+		}
+	}
+	c.alarm = ""
+	for _, b := range []string{`[]`, `{"dry_run":"yes"}`, `{"dry_run":1}`, `{"dry_run":true,"utk_id":"u1"}`, `{"dry_run":true,"sealed":"AAAA"}`,
+		`{"dry_run":true,"upto_seq":3}`, `{"sealed":"AAAA","format":"json","upto_seq":13}`, `{"utk_id":"u1","format":"json","upto_seq":13}`,
+		`{"utk_id":"u1","sealed":7,"format":"json","upto_seq":13}`, `{"utk_id":"","sealed":"AAAA","format":"json","upto_seq":13}`} {
+		if r := featuretest.Call(f, h, t0, "app", "audit.export", b); r.Code != "bad_request" {
+			t.Errorf("%s: %q", b, r.Code)
+		}
+	}
+	if len(c.spent) != 0 || c.utks["u1"] == "" {
+		t.Fatalf("a UTK was spent before the export's steps: %v", c.spent)
+	}
+	// With a spendable UTK, a bad filter costs it (the export's step 2).
+	if r := featuretest.Call(f, h, t0, "app", "audit.export", `{"utk_id":"u1","sealed":"AAAA","format":"pdf","upto_seq":13}`); r.Code != "bad_request" || len(c.spent) != 1 {
+		t.Fatalf("shape after the spend: %q %v", r.Code, c.spent)
+	}
+}
+
+// §10.9 (0.23.0): the preview of an empty log answers count 0, upto_seq
+// 0 and upto_hash 32 zero bytes (audit.list's head then); an export can
+// then only be bad_request (upto_seq ≥ 1 is required).
+func TestExportEmptyLog(t *testing.T) {
+	f := New()
+	h := featuretest.NewHost()
+	c := &fakeCred{holder: "dev-app", utks: map[string]string{"u1": "246810"}}
+	f.SetCredential(c)
+	p := parsePreview(t, featuretest.Call(f, h, t0, "app", "audit.export", `{"dry_run":true}`))
+	if p.Code != "" || p.Count != 0 || p.More || p.Upto != 0 || p.HasRange || p.UptoHash != base64.StdEncoding.EncodeToString(make([]byte, 32)) {
+		t.Fatalf("empty preview %+v", p)
+	}
+	l := featuretest.Call(f, h, t0, "app", "audit.list", `{}`)
+	if !l.OK() || !strings.Contains(string(l.Body), `"head":"`+base64.StdEncoding.EncodeToString(make([]byte, 32))+`"`) {
+		t.Fatalf("audit.list head: %s", l.Body)
+	}
+	for _, upto := range []string{"0", "1"} {
+		if r := featuretest.Call(f, h, t0, "app", "audit.export", `{"utk_id":"u1","sealed":"AAAA","format":"json","upto_seq":`+upto+`}`); r.Code != "bad_request" {
+			t.Fatalf("export of an empty log (upto %s): %q", upto, r.Code)
+		}
+		c.utks["u1"] = "246810"
+	}
+}

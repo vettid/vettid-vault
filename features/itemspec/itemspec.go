@@ -949,6 +949,54 @@ func (t *Terms) JSONMembers(b *strictjson.Builder) {
 	b.Bool("include_existing", t.IncludeExisting)
 }
 
+// Rate limit ranges of a share rule (§10.11; for connection rules since
+// 0.23.0, §10.12).
+const (
+	MaxRulePerHour = 3600
+	MaxRulePerDay  = 86400
+)
+
+// RateLimits are a connection rule's rate limits (§10.12 Rate limits for
+// connections, 0.23.0): at most PerHour and PerDay fetches of the rule's
+// items in total, in fixed windows; 0 is no limit. Grants and their
+// descriptors carry them as `limits`.
+type RateLimits struct {
+	PerHour uint64 `json:"per_hour,omitempty"`
+	PerDay  uint64 `json:"per_day,omitempty"`
+}
+
+// Set reports whether either limit is set.
+func (l RateLimits) Set() bool { return l.PerHour > 0 || l.PerDay > 0 }
+
+// JSON encodes {per_hour?, per_day?}.
+func (l RateLimits) JSON() []byte {
+	b := strictjson.NewBuilder()
+	if l.PerHour > 0 {
+		b.Uint("per_hour", l.PerHour)
+	}
+	if l.PerDay > 0 {
+		b.Uint("per_day", l.PerDay)
+	}
+	return b.Bytes()
+}
+
+// ParseRateLimits parses a `limits` object strictly: per_hour 1–3,600 and
+// per_day 1–86,400, each optional.
+func ParseRateLimits(raw json.RawMessage) (RateLimits, error) {
+	o, err := strictjson.AsObject(raw)
+	if err != nil {
+		return RateLimits{}, ErrInvalid
+	}
+	var l RateLimits
+	if l.PerHour, _, err = o.OptUint("per_hour", 1, MaxRulePerHour); err != nil {
+		return RateLimits{}, ErrInvalid
+	}
+	if l.PerDay, _, err = o.OptUint("per_day", 1, MaxRulePerDay); err != nil {
+		return RateLimits{}, ErrInvalid
+	}
+	return l, nil
+}
+
 // AgentRule is a share rule whose subject is an agent: a LEASH grant of
 // scope items.read (§10.11), kept by the leash feature.
 type AgentRule struct {

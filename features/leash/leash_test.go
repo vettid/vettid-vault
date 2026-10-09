@@ -43,11 +43,24 @@ type fakeItems struct {
 	used  map[string]int
 }
 
-func (f *fakeItems) AgentIncluded(agent string, rules []itemspec.AgentRule, item string) string {
+func (f *fakeItems) AgentIncluding(agent string, rules []itemspec.AgentRule, item string) []string {
+	var out []string
 	for _, r := range rules {
-		if r.AgentID == agent && f.incl[r.ID][item] && (r.Terms.Uses == 0 || f.used[item] < int(r.Terms.Uses)) {
-			return r.ID
+		if r.AgentID != agent || !f.incl[r.ID][item] {
+			continue
 		}
+		if r.Terms.Uses > 0 && f.used[item] >= int(r.Terms.Uses) {
+			return nil // no use left in one: included in none (0.23.0)
+		}
+		out = append(out, r.ID)
+	}
+	return out
+}
+
+// AgentIncluded reports whether a rule includes the item.
+func (f *fakeItems) AgentIncluded(agent string, rules []itemspec.AgentRule, item string) string {
+	if ids := f.AgentIncluding(agent, rules, item); len(ids) > 0 {
+		return ids[0]
 	}
 	return ""
 }
@@ -909,6 +922,24 @@ func TestAuditNeverDelegable(t *testing.T) {
 	for _, typ := range []string{"audit.list", "connection.audit.list", "audit.export"} {
 		if ValidScope(typ) {
 			t.Errorf("%s is delegable", typ)
+		}
+	}
+}
+
+// §10.4.1 (0.23.0): connection.asks.mute and .resume are never
+// delegable: no LEASH grant can give them to an agent.
+func TestAsksNeverDelegable(t *testing.T) {
+	r := newRig(t)
+	for _, typ := range []string{"connection.asks.mute", "connection.asks.resume"} {
+		if ValidScope(typ) {
+			t.Fatalf("%s is a scope", typ)
+		}
+		if res := featuretest.Call(r.f, r.h, t0, vault.KindApp, "leash.grant.issue", `{"agent_id":"`+agent+`","scope":"`+typ+`"}`); res.Code != "bad_request" {
+			t.Fatalf("%s issued: %q", typ, res.Code)
+		}
+		s := vault.NewSession(context.TODO(), r.h, vault.PeerInfo{ID: agent, Kind: vault.KindAgent}, t0, nil)
+		if d := r.f.AgentDecision(s, typ, json.RawMessage(`{"connection_id":"`+r.c1+`","muted":true}`)); d == vault.AgentAllow {
+			t.Fatalf("%s allowed to an agent", typ)
 		}
 	}
 }

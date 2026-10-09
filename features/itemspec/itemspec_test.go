@@ -351,10 +351,12 @@ func TestTemplateRegistry(t *testing.T) {
 			Sensitivity string   `json:"sensitivity"`
 			Tags        []string `json:"tags"`
 			Fields      []struct {
-				Label string `json:"label"`
-				Kind  string `json:"kind"`
+				Label  string `json:"label"`
+				Kind   string `json:"kind"`
+				Format string `json:"format"`
 			} `json:"fields"`
 		} `json:"templates"`
+		Version int `json:"version"`
 	}
 	if err := json.Unmarshal(b, &reg); err != nil {
 		t.Fatal(err)
@@ -371,7 +373,7 @@ func TestTemplateRegistry(t *testing.T) {
 			t.Errorf("recommended category %q missing", c)
 		}
 	}
-	seen := map[string]bool{}
+	seen, months := map[string]bool{}, map[string]bool{}
 	for _, tp := range reg.Templates {
 		if !templateRE.MatchString(tp.Template) || seen[tp.Template] || !ValidName(tp.Name) || !cats[tp.Category] || !ValidSensitivity(tp.Sensitivity) {
 			t.Errorf("template %+v", tp)
@@ -392,6 +394,23 @@ func TestTemplateRegistry(t *testing.T) {
 			if !ValidLabel(f.Label) || !ValidKind(f.Kind) {
 				t.Errorf("%s: field %+v", tp.Template, f)
 			}
+			// The only hint (VAULT-ITEMS 0.1.2): "format": "month" on a
+			// date field.
+			if f.Format != "" && (f.Format != "month" || f.Kind != KindDate) {
+				t.Errorf("%s: field %+v: format", tp.Template, f)
+			}
+			if f.Format == "month" {
+				months[tp.Template+"/"+f.Label] = true
+			}
 		}
+	}
+	// Registry version 3 (VAULT-ITEMS 0.1.2): the payment card's expiry
+	// is a month, and nothing else is.
+	if reg.Version != 3 || len(months) != 1 || !months["payment_card/Expires"] {
+		t.Errorf("version %d, month fields %v", reg.Version, months)
+	}
+	// A month date is a valid date value (§10.7).
+	if _, err := ParseValue(KindDate, json.RawMessage(`"2029-04"`)); err != nil {
+		t.Error("YYYY-MM is not a date value")
 	}
 }

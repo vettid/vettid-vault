@@ -615,13 +615,48 @@ func (f *Feature) offer(s *vault.Session, body []byte) {
 	if !now.Before(exp) {
 		return
 	}
+	// An offer is an ask of the introducer (§10.4.1, 0.23.0): mute, pause,
+	// the cooldown (any offer from that introducer), the pending cap and
+	// the ask rate. A suppressed one is answered `accept: false`, later,
+	// by the vault.
+	v := s.Ask(from, vault.Ask{Source: f.Name(), Ref: of.ID, Idents: []string{AskIdent}, Pending: f.pendingFrom(from, now), Exp: exp,
+		AnswerType: "intro.answer", Answer: answerBody(of.ID, false)})
+	if !v.Passed() {
+		return
+	}
 	r := &Received{ID: of.ID, Conn: from, Peer: of.Peer, State: StatePending, Exp: exp}
 	f.d.Received[r.ID] = r
 	s.NotifyAllDevices("intro.pending", strictjson.NewBuilder().String("intro_id", r.ID).String("connection_id", from).
 		Raw("peer", r.Peer.json()).String("exp", envelope.FormatTS(exp)).Bytes())
 	s.Record(vault.Activity{Kind: "intro.offered", ConnectionID: from, Ref: r.ID, Direction: "in", Audit: true})
-	s.Record(vault.Activity{Kind: "intro.request", ConnectionID: from, Ref: r.ID, Feed: true, Priority: "high"})
+	s.Record(vault.Activity{Kind: "intro.request", ConnectionID: from, Ref: r.ID, Feed: true, Priority: "high", AskBatch: true})
 	changed(s, r.ID, StatePending)
+}
+
+// AskIdent is an offer's identity for the §10.4.1 cooldown: any offer
+// from that introducer.
+const AskIdent = "intro"
+
+func answerBody(id string, accept bool) []byte {
+	return strictjson.NewBuilder().String("intro_id", id).Bool("accept", accept).Bytes()
+}
+
+func (f *Feature) pendingFrom(conn string, now time.Time) int {
+	n := 0
+	for _, r := range f.d.Received {
+		if r.Conn == conn && r.State == StatePending && now.Before(r.Exp) {
+			n++
+		}
+	}
+	return n
+}
+
+// PendingAsks implements vault.AskSource: the introducer's offers
+// waiting for the member.
+func (f *Feature) PendingAsks(conn string, now time.Time) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.pendingFrom(conn, now)
 }
 
 // answer: the member accepts or declines an offer.
@@ -634,7 +669,7 @@ func (f *Feature) answer(s *vault.Session, accept bool, body []byte) (json.RawMe
 	if r == nil || r.State != StatePending {
 		return nil, errNotFound
 	}
-	if err := s.SendToConnection(r.Conn, "intro.answer", strictjson.NewBuilder().String("intro_id", id).Bool("accept", accept).Bytes()); err != nil {
+	if err := s.SendToConnection(r.Conn, "intro.answer", answerBody(id, accept)); err != nil {
 		return nil, errConn
 	}
 	if accept {
@@ -644,6 +679,7 @@ func (f *Feature) answer(s *vault.Session, accept bool, body []byte) (json.RawMe
 		return nil, nil
 	}
 	s.Record(vault.Activity{Kind: "intro.declined", ConnectionID: r.Conn, Ref: id, Direction: "out", Audit: true})
+	s.AskDeclined(r.Conn, []string{AskIdent}) // §10.4.1
 	f.closeReceived(s, r, false)
 	changed(s, id, StateClosed)
 	return nil, nil

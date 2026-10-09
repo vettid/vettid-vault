@@ -82,7 +82,11 @@ func cmdGrant(ctx context.Context, g *globals, args []string) error {
 				return nil, err
 			}
 			if r.Error != "" {
-				return map[string]string{"error": r.Error}, nil
+				out := map[string]any{"error": r.Error}
+				if r.RetryAfter > 0 {
+					out["retry_after"] = r.RetryAfter // rate_limited (0.23.0)
+				}
+				return out, nil
 			}
 			out := map[string]any{"content": json.RawMessage(r.Value)}
 			if r.Counted {

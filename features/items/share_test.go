@@ -196,7 +196,12 @@ func TestShareAuto(t *testing.T) {
 	e.code(e.call("app", "share.rule.set", js(map[string]any{"rule_id": r2, "version": 1, "subject": conn("cB"), "tags": []string{"x"}})), "conflict")
 	e.code(e.call("app", "share.rule.set", js(map[string]any{"subject": conn("nobody"), "tags": []string{"x"}})), "not_found")
 	e.code(e.call("app", "share.rule.set", js(map[string]any{"subject": conn("cA"), "tags": []string{"@profile"}})), "bad_request")
-	e.code(e.call("app", "share.rule.set", js(map[string]any{"subject": conn("cA"), "tags": []string{"x"}, "per_hour": 5})), "bad_request")
+	// 0.23.0: a connection rule takes per_hour and per_day (agent ranges);
+	// status_ttl stays agent-only.
+	e.code(e.call("app", "share.rule.set", js(map[string]any{"subject": conn("cA"), "tags": []string{"x"}, "status_ttl": 600})), "bad_request")
+	e.code(e.call("app", "share.rule.set", js(map[string]any{"subject": conn("cA"), "tags": []string{"x"}, "per_hour": 0})), "bad_request")
+	e.code(e.call("app", "share.rule.set", js(map[string]any{"subject": conn("cA"), "tags": []string{"x"}, "per_hour": 3601})), "bad_request")
+	e.code(e.call("app", "share.rule.set", js(map[string]any{"subject": conn("cA"), "tags": []string{"x"}, "per_day": 86401})), "bad_request")
 }
 
 // §10.12: each connection sees only its own catalog; no tags or rules.

@@ -350,6 +350,7 @@ func (m *Manager) housekeeping(now time.Time) {
 		}
 	}
 	m.refreshHeld(now)
+	m.sendHeldAnswers(now) // §10.4.1: the neutral answers that are due
 	m.expireAccess(now)
 	m.ownerCheckTick(now)
 	m.remintIssued(now)

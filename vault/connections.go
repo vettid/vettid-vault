@@ -317,6 +317,7 @@ func peerJSON(p *Peer, now time.Time) []byte {
 			b.Raw("tags", tags)
 		}
 		b.Bool("favorite", meta.Favorite).Bool("archived", meta.Archived)
+		b.Raw("asks", p.Asks.AskJSON(now)) // §10.4.1 (0.23.0)
 	}
 	if needsAccess(p.Kind) && p.Access != nil && now.Before(p.Access.Expires) {
 		b.String("session_expires_at", envelope.FormatTS(p.Access.Expires))

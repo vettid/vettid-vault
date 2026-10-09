@@ -216,6 +216,7 @@ func (f *Feature) tagDelete(s *vault.Session, body []byte) (json.RawMessage, err
 		}
 		f.st.Items[it.ID] = it
 	}
+	plan = f.resolve(s, plan, rs) // ask wins (0.23.0, §10.12)
 	f.apply(s, plan, "tagged")
 	delete(f.st.Registry, tag)
 	f.tagsChanged(s)
@@ -302,6 +303,7 @@ func (f *Feature) tagMerge(s *vault.Session, body []byte) (json.RawMessage, erro
 			plan = append(plan, f.planPair(s, &oldRules[i], &newRules[i], cur, it, false, true)...)
 		}
 	}
+	plan = f.resolve(s, plan, newRules) // ask wins, over the rules after the merge (0.23.0)
 	shares := []byte{'['}
 	n := 0
 	for _, a := range plan {

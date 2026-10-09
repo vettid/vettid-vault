@@ -87,6 +87,73 @@ type Host struct {
 	PriorIKs            map[string][][]byte
 	AllowedAfter        time.Time
 	NameRequests        []vault.NameChange
+	// Asks from connections (vault.AskHost, §10.4.1, 0.23.0): with AsksOn
+	// the host keeps each connection's state as the vault does
+	// (vault.CheckAsk); OtherPending are the asks other features hold per
+	// connection, AskRand the delay's draw (nil: crypto/rand). Without
+	// AsksOn every ask passes.
+	AsksOn       bool
+	Asks         map[string]*vault.AskState
+	OtherPending map[string]int
+	AskRand      func(n int64) int64
+	// AskSources are the features whose pending asks count, by name (the
+	// asking feature's own are skipped, as the vault does).
+	AskSources map[string]vault.AskSource
+}
+
+func (h *Host) askState(conn string) *vault.AskState {
+	if h.Asks == nil {
+		h.Asks = map[string]*vault.AskState{}
+	}
+	st := h.Asks[conn]
+	if st == nil {
+		st = &vault.AskState{}
+		h.Asks[conn] = st
+	}
+	return st
+}
+
+// Ask implements vault.AskHost.
+func (h *Host) Ask(conn string, a vault.Ask, now time.Time) vault.AskVerdict {
+	if !h.AsksOn {
+		return vault.AskVerdict{Cooled: make([]bool, len(a.Idents))}
+	}
+	others := h.OtherPending[conn]
+	for name, src := range h.AskSources {
+		if name != a.Source {
+			others += src.PendingAsks(conn, now)
+		}
+	}
+	return vault.CheckAsk(h.askState(conn), conn, a, others, now, vault.AskDelay(h.AskRand),
+		func(x vault.Activity) { h.Record(x, now) })
+}
+
+// AskDeclined implements vault.AskHost.
+func (h *Host) AskDeclined(conn string, idents []string, now time.Time) {
+	if !h.AsksOn {
+		return
+	}
+	if vault.DeclineAsk(h.askState(conn), idents, now) {
+		h.Record(vault.Activity{Kind: "connection.asks_paused", ConnectionID: conn, Audit: true, Feed: true, Priority: "high"}, now)
+	}
+}
+
+// ReleaseAsks sends the held neutral answers due at now, as the vault's
+// housekeeping does, and returns them.
+func (h *Host) ReleaseAsks(now time.Time) []vault.HeldAnswer {
+	var out []vault.HeldAnswer
+	conns := make([]string, 0, len(h.Asks))
+	for c := range h.Asks {
+		conns = append(conns, c)
+	}
+	sort.Strings(conns)
+	for _, c := range conns {
+		for _, a := range vault.DueAnswers(h.Asks[c], now) {
+			_ = h.SendToConnection(c, a.Type, a.Body, now)
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 // AccountNames implements vault.ProfileHost.

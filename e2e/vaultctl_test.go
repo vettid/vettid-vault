@@ -124,6 +124,14 @@ func TestVaultctlSmoke(t *testing.T) {
 	if out = run("audit", "-kinds", "item"); !strings.Contains(out, "item.revealed") {
 		t.Fatalf("audit: %s", out)
 	}
+	// A connection's asks (0.23.0, §10.4.1): the commands reach the vault
+	// (no such connection here).
+	for _, args := range [][]string{{"connection", "asks", "-connection", "nope"}, {"connection", "asks-mute", "-connection", "nope"},
+		{"connection", "asks-mute", "-connection", "nope", "-unmute"}, {"connection", "asks-resume", "-connection", "nope"}} {
+		if out, err := runErr(app, args...); err == nil || !strings.Contains(out, "not_found") {
+			t.Fatalf("vaultctl %v: %v %s", args, err, out)
+		}
+	}
 	// History export (§10.9, 0.22.0): the preview, then the export with
 	// the PIN, which prints the answer and the entries.
 	if out = run("audit", "export", "-dry-run", "-kinds", "item"); !strings.Contains(out, `"count": 4`) || !strings.Contains(out, `"upto_seq"`) {

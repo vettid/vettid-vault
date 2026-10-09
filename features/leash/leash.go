@@ -80,7 +80,9 @@ func ValidScope(s string) bool { return delegable[s] }
 // (§10.11). Its methods are called with this feature's lock held and must
 // not call back; rules are the agent's items.read grants in force.
 type AgentItems interface {
-	AgentIncluded(agent string, rules []itemspec.AgentRule, itemID string) string
+	// AgentIncluding returns the ids of the rules that include the item
+	// (none if one of them has no use left; 0.23.0).
+	AgentIncluding(agent string, rules []itemspec.AgentRule, itemID string) []string
 	AgentCatalog(agent string, rules []itemspec.AgentRule) []itemspec.Meta
 	AgentRead(agent string, rules []itemspec.AgentRule, itemID string, fields []string) ([]byte, bool)
 	AgentFieldValue(agent string, rules []itemspec.AgentRule, itemID, fieldID string) (string, bool)
@@ -466,8 +468,9 @@ func (g *Grant) matches(scope, conn string, now time.Time) bool {
 }
 
 // matching returns the agent's grants covering a request, sorted by id.
-// For an items.read request about an item, it is the one rule that
-// includes the item (with a use left), if any (§10.11).
+// For an items.read request about an item, they are the rules that
+// include the item (none if one of them has no use left; since 0.23.0
+// every one of them, §10.11, §10.12 Overlapping rules).
 func (f *Feature) matching(agent, scope, conn, item string, now time.Time) []*Grant {
 	var out []*Grant
 	for _, g := range f.d.Grants {
@@ -480,13 +483,14 @@ func (f *Feature) matching(agent, scope, conn, item string, now time.Time) []*Gr
 		if f.items == nil {
 			return nil
 		}
-		rid := f.items.AgentIncluded(agent, rulesOf(out), item)
+		ids := f.items.AgentIncluding(agent, rulesOf(out), item)
+		var incl []*Grant
 		for _, g := range out {
-			if g.ID == rid {
-				return []*Grant{g}
+			if contains(ids, g.ID) {
+				incl = append(incl, g)
 			}
 		}
-		return nil
+		return incl
 	}
 	return out
 }
@@ -632,6 +636,37 @@ func (f *Feature) AgentDecision(s *vault.Session, typ string, body json.RawMessa
 		return f.refuse(s, agent, st, KindRefused, scope)
 	}
 	delete(st.Cool, scope)
+	if scope == ScopeItems && item != "" {
+		// item.get and item.use (0.23.0, §10.11 decision step 2): allowed
+		// only if every items.read grant whose rule includes the item is
+		// within both of its windows, and counted on each (the strictest
+		// applies, §10.12 Overlapping rules).
+		within := true
+		for _, g := range gs {
+			g.roll(now)
+			if g.HourN < g.PerHour && g.DayN < g.PerDay {
+				continue
+			}
+			within = false
+			window := g.HourStart
+			if g.DayN >= g.PerDay {
+				window = g.DayStart
+			}
+			if !g.LimitedAt.Equal(window) {
+				g.LimitedAt = window
+				s.Record(vault.Activity{Kind: "leash.rate_limited", DeviceID: agent, Ref: g.ID, Audit: true, Feed: true, Priority: "high"})
+			}
+		}
+		if within {
+			for _, g := range gs {
+				g.HourN++
+				g.DayN++
+			}
+			f.note(s, agent, st, vault.Activity{Kind: KindAllowed, Ref: gs[0].ID})
+			return vault.AgentAllow
+		}
+		gs = nil // referred
+	}
 	for _, g := range gs {
 		// An auto grant, or an items.read grant whose rule includes the
 		// item (inclusion was the member's decision, §10.11), within its

@@ -85,7 +85,10 @@ type RuleGrants interface {
 	// IssueRuleGrants gives conn one grant per item (all fields) for a
 	// rule and tells the connection (data.shared); it returns the grant
 	// ids in order.
-	IssueRuleGrants(s *vault.Session, conn, ruleID string, metas []itemspec.Meta, uses uint64, expires time.Time) ([]string, error)
+	IssueRuleGrants(s *vault.Session, conn, ruleID string, metas []itemspec.Meta, uses uint64, limits itemspec.RateLimits, expires time.Time) ([]string, error)
+	// SetRuleLimits sets the limits of a rule's given grants to the
+	// rule's current ones (0.23.0).
+	SetRuleLimits(s *vault.Session, ruleID string, limits itemspec.RateLimits)
 	// RevokeRuleGrant revokes a grant and tells the connection.
 	RevokeRuleGrant(s *vault.Session, grantID string)
 	// GivenRoom is how many more active grants may be given.
@@ -114,6 +117,23 @@ type Rule struct {
 	Terms   itemspec.Terms `json:"terms"`
 	Created time.Time      `json:"created"`
 	Updated time.Time      `json:"updated"`
+	// Limits are the rule's per_hour and per_day (0.23.0, §10.12 Rate
+	// limits for connections); Windows count the connection's fetches of
+	// the rule's items, kept across replacements.
+	Limits  itemspec.RateLimits `json:"limits,omitempty"`
+	Windows RateWindows         `json:"windows,omitempty"`
+}
+
+// RateWindows are a connection rule's fixed rate windows (§10.12): each
+// starts at the first counted fetch after the last one ended.
+type RateWindows struct {
+	HourStart time.Time `json:"hour_start,omitempty"`
+	HourN     uint64    `json:"hour_n,omitempty"`
+	DayStart  time.Time `json:"day_start,omitempty"`
+	DayN      uint64    `json:"day_n,omitempty"`
+	// FedAt is when the last share.rate_limited feed item was created (at
+	// most one per rule per 24 hours).
+	FedAt time.Time `json:"fed_at,omitempty"`
 }
 
 // Inclusion is one item's state for one rule (§10.12).
@@ -765,6 +785,7 @@ func (f *Feature) prepare(s *vault.Session, before, after *itemspec.Item, cross 
 		}
 		ch.plan = append(ch.plan, f.planPair(s, r, r, before, after, true, true)...)
 	}
+	ch.plan = f.resolve(s, ch.plan, rules) // ask wins (0.23.0, §10.12)
 	if err := f.checkPlan(ch.plan); err != nil {
 		ch.undo()
 		return nil, err

@@ -56,12 +56,24 @@ type Item struct {
 	Ref          string    `json:"ref,omitempty"`
 	Title        string    `json:"title,omitempty"`
 	Body         string    `json:"body,omitempty"`
+	// Count is the number of asks a batch's item stands for (§10.4.1,
+	// 0.23.0); 0 or 1 is not sent.
+	Count int `json:"count,omitempty"`
+}
+
+// Batch is a connection's open batch of asks (§10.4.1): the feed item
+// that stands for it and when its first ask reached the member.
+type Batch struct {
+	ItemID string    `json:"item_id"`
+	Start  time.Time `json:"start"`
 }
 
 type state struct {
 	Seq    uint64            `json:"seq"`
 	Items  []*Item           `json:"items"`
 	Guides map[string]uint64 `json:"guides,omitempty"` // guide_id -> version seen
+	// Batches are the open batches of asks, by connection id.
+	Batches map[string]*Batch `json:"batches,omitempty"`
 }
 
 // Feature implements vault.Feature and vault.ActivitySink.
@@ -122,7 +134,48 @@ func (f *Feature) RecordActivity(s *vault.Session, a vault.Activity) {
 	if !priorities[p] {
 		p = "normal"
 	}
-	f.add(s, &Item{Kind: a.Kind, Priority: p, ConnectionID: a.ConnectionID, DeviceID: a.DeviceID, Ref: a.Ref})
+	if a.AskBatch && a.ConnectionID != "" && f.batched(s, a.ConnectionID) {
+		return
+	}
+	it := &Item{Kind: a.Kind, Priority: p, ConnectionID: a.ConnectionID, DeviceID: a.DeviceID, Ref: a.Ref}
+	f.add(s, it)
+	if a.AskBatch && a.ConnectionID != "" {
+		if f.st.Batches == nil {
+			f.st.Batches = map[string]*Batch{}
+		}
+		f.st.Batches[a.ConnectionID] = &Batch{ItemID: it.ID, Start: it.At}
+	}
+}
+
+// batched counts an ask into its connection's open batch (§10.4.1): an
+// ask within 10 minutes of the batch's first updates the batch's item (a
+// new seq, the same item_id, count) instead of creating one; it reports
+// false when no batch is open (none, ended, or its item deleted).
+func (f *Feature) batched(s *vault.Session, conn string) bool {
+	now := s.Now()
+	for c, b := range f.st.Batches {
+		if !now.Before(b.Start.Add(vault.AskBatchWindow)) {
+			delete(f.st.Batches, c)
+		}
+	}
+	b := f.st.Batches[conn]
+	if b == nil {
+		return false
+	}
+	it := f.find(b.ItemID)
+	if it == nil || it.Status == StatusDeleted {
+		delete(f.st.Batches, conn)
+		return false
+	}
+	if it.Count < 1 {
+		it.Count = 1
+	}
+	it.Count++
+	f.st.Seq++
+	it.Seq = f.st.Seq
+	s.NotifyAllDevices("sync.event", strictjson.NewBuilder().String("kind", "feed.updated").String("item_id", it.ID).
+		Uint("seq", it.Seq).Bytes())
+	return true
 }
 
 // add stores a new item and sends feed.event to every owner device.
@@ -157,6 +210,9 @@ func ItemJSON(it *Item) []byte {
 	}
 	if it.Ref != "" {
 		b.String("ref", it.Ref)
+	}
+	if it.Count >= 2 {
+		b.Uint("count", uint64(it.Count))
 	}
 	if it.Status != StatusDeleted {
 		if it.Title != "" {

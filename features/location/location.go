@@ -543,6 +543,12 @@ func (f *Feature) requested(s *vault.Session, body []byte) {
 	}
 	now := s.Now()
 	q := &InRequest{ID: r.RequestID, Conn: conn, Note: r.Note, Exp: ts(now.Add(RequestTTL))}
+	// A request is an ask (§10.4.1, 0.23.0): mute, pause, the pending cap
+	// and the ask rate; it has no cooldown and, suppressed, no answer (as
+	// when the member does not share).
+	if v := s.Ask(conn, vault.Ask{Source: f.Name(), Ref: q.ID, Pending: f.pendingFrom(conn, now), Exp: q.Exp}); !v.Passed() {
+		return
+	}
 	f.d.Requests[q.ID] = q
 	f.d.RecvReq[conn] = ts(now)
 	b := strictjson.NewBuilder().String("request_id", q.ID).String("connection_id", conn)
@@ -551,7 +557,25 @@ func (f *Feature) requested(s *vault.Session, body []byte) {
 	}
 	s.NotifyAllDevices("location.request.pending", b.String("exp", envelope.FormatTS(q.Exp)).Bytes())
 	s.Record(vault.Activity{Kind: "location.requested", ConnectionID: conn, Ref: q.ID, Direction: "in", Audit: true})
-	s.Record(vault.Activity{Kind: "location.request", ConnectionID: conn, Ref: q.ID, Feed: true})
+	s.Record(vault.Activity{Kind: "location.request", ConnectionID: conn, Ref: q.ID, Feed: true, AskBatch: true})
+}
+
+func (f *Feature) pendingFrom(conn string, now time.Time) int {
+	n := 0
+	for _, r := range f.d.Requests {
+		if r.Conn == conn && now.Before(r.Exp) {
+			n++
+		}
+	}
+	return n
+}
+
+// PendingAsks implements vault.AskSource: the connection's requests
+// waiting for the member.
+func (f *Feature) PendingAsks(conn string, now time.Time) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.pendingFrom(conn, now)
 }
 
 func (f *Feature) shared(s *vault.Session, body []byte) {

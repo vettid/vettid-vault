@@ -84,12 +84,15 @@ func (d *Device) GrantDecideAnswers(ctx context.Context, requestID string, appro
 
 // GrantResult is the outcome of a fetch: the item's content (§10.12),
 // or the member's vault's refusal (revoked, expired, exhausted,
-// unavailable, not_found). UsesLeft is meaningful when Counted.
+// unavailable, not_found, or since 0.23.0 rate_limited with RetryAfter). UsesLeft is meaningful when Counted.
 type GrantResult struct {
 	Value    []byte
 	UsesLeft uint64
 	Counted  bool
 	Error    string
+	// RetryAfter is rate_limited's retry_after, in seconds (0.23.0): when
+	// the item can be fetched again.
+	RetryAfter uint64
 }
 
 // GrantFetch fetches a received grant's current value: a one-time
@@ -126,7 +129,11 @@ func (d *Device) GrantFetch(ctx context.Context, grantID string) (*GrantResult, 
 		return nil, ErrProtocol
 	}
 	if e, ok, _ := v.OptString("error"); ok {
-		return &GrantResult{Error: e}, nil
+		ra, _, err := v.OptUint("retry_after", 1, 86400)
+		if err != nil {
+			return nil, ErrProtocol
+		}
+		return &GrantResult{Error: e, RetryAfter: ra}, nil
 	}
 	sealed, err := v.Base64("value_sealed", -1)
 	if err != nil {

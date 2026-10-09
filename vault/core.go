@@ -67,6 +67,7 @@ func (m *Manager) registerCore() {
 	r("account.get", true, owners, m.hAccountGet)
 	m.registerAccess()
 	m.registerConnections()
+	m.registerAsks()
 }
 
 func obj(in *envelope.Inner) (strictjson.Object, error) {

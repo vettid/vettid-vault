@@ -29,12 +29,17 @@ type ruleView struct {
 	Terms   itemspec.Terms
 	Created time.Time
 	Updated time.Time
-	agent   *itemspec.AgentRule
+	// Limits are a connection rule's rate limits (0.23.0, §10.12).
+	Limits itemspec.RateLimits
+	agent  *itemspec.AgentRule
 }
 
 func connView(r *Rule) ruleView {
-	return ruleView{ID: r.ID, Version: r.Version, Conn: r.Conn, Terms: r.Terms, Created: r.Created, Updated: r.Updated}
+	return ruleView{ID: r.ID, Version: r.Version, Conn: r.Conn, Terms: r.Terms, Created: r.Created, Updated: r.Updated, Limits: r.Limits}
 }
+
+// sameSubject reports whether two rules have the same subject.
+func (r *ruleView) sameSubject(q *ruleView) bool { return r.Conn == q.Conn && r.Agent == q.Agent }
 
 func agentView(r *itemspec.AgentRule) ruleView {
 	return ruleView{ID: r.ID, Version: r.Version, Agent: r.AgentID, Terms: r.Terms, Created: r.Created, Updated: r.Updated, agent: r}
@@ -85,7 +90,8 @@ func (f *Feature) incl(rule, item string) *Inclusion {
 // --- plans ---
 
 const (
-	opWithdraw = iota
+	opNone     = -1 // resolve: an action dropped (the item stays as it is)
+	opWithdraw = iota - 1
 	opPend
 	opInclude
 )
@@ -95,6 +101,13 @@ type action struct {
 	op   int
 	rule ruleView
 	item *itemspec.Item
+	// askRule names the ask rule that holds an item pending in an auto
+	// rule (0.23.0, §10.12 Overlapping rules).
+	askRule string
+	// promote: an inclusion of a pending item by a rule replaced from ask
+	// to auto, which includes it in every rule of the subject where it is
+	// pending.
+	promote bool
 }
 
 func live(inc *Inclusion) bool {
@@ -127,8 +140,11 @@ func (f *Feature) planPair(s *vault.Session, oldR, newR *ruleView, oldI, newI *i
 		}
 		return nil
 	}
-	if inc != nil && inc.State == StatePending && newR.Terms.Mode == itemspec.ModeAuto {
-		return []action{{op: opInclude, rule: *newR, item: newI}} // ask → auto includes the pending
+	if inc != nil && inc.State == StatePending && newR.Terms.Mode == itemspec.ModeAuto &&
+		oldR != nil && oldR.ID == newR.ID && oldR.Terms.Mode == itemspec.ModeAsk {
+		// ask → auto includes the pending (unless another ask rule holds
+		// the item, resolve).
+		return []action{{op: opInclude, rule: *newR, item: newI, promote: true}}
 	}
 	gain := !mb && newGain || mb && tagGain && oldI != nil && newR.Terms.GainedTag(oldI.Tags, newI.Tags)
 	if !gain || live(inc) {
@@ -152,6 +168,138 @@ func (f *Feature) planFresh(s *vault.Session, r *ruleView, it *itemspec.Item) []
 		op = opInclude
 	}
 	return []action{{op: op, rule: *r, item: it}}
+}
+
+// --- overlapping rules: ask wins (0.23.0, §10.12) ---
+
+// planState is an item's state in a rule after a plan: the plan's last
+// action for the pair, else its current inclusion ("" for none).
+type planState map[[2]string]string
+
+func (f *Feature) planStates(plan []action) planState {
+	st := planState{}
+	for _, a := range plan {
+		k := [2]string{a.rule.ID, a.item.ID}
+		switch a.op {
+		case opWithdraw:
+			st[k] = ""
+		case opPend:
+			st[k] = StatePending
+		case opInclude:
+			st[k] = StateIncluded
+		}
+	}
+	return st
+}
+
+func (f *Feature) stateIn(st planState, rule, item string) string {
+	if v, ok := st[[2]string{rule, item}]; ok {
+		return v
+	}
+	if inc := f.incl(rule, item); inc != nil {
+		return inc.State
+	}
+	return ""
+}
+
+// holder returns the ask rule that holds it for r's subject: among the
+// other rules of the subject (rules, as they are after the change), the
+// lowest id of an ask rule that covers it (matches it) and does not
+// include it; "" if none.
+func (f *Feature) holder(s *vault.Session, rules []ruleView, r *ruleView, it *itemspec.Item, st planState) string {
+	h := ""
+	for i := range rules {
+		q := &rules[i]
+		if q.ID == r.ID || !q.sameSubject(r) || q.Terms.Mode != itemspec.ModeAsk || !q.matches(it, s.Now()) {
+			continue
+		}
+		if it.ID != "" && f.stateIn(st, q.ID, it.ID) == StateIncluded {
+			continue // the member approved this item for this subject
+		}
+		if h == "" || q.ID < h {
+			h = q.ID
+		}
+	}
+	return h
+}
+
+// resolve applies "ask wins" to a plan made over rules (the rules as they
+// are after the change, in the same flush): an item gaining an auto rule
+// is included at once only if no ask rule of the same subject holds it;
+// otherwise it becomes pending there with that ask rule's id. A rule
+// replaced from ask to auto includes a pending item, in every rule of the
+// subject where it is pending, only if no other ask rule holds it.
+func (f *Feature) resolve(s *vault.Session, plan []action, rules []ruleView) []action {
+	st := f.planStates(plan)
+	for i := range plan {
+		a := &plan[i]
+		if a.op != opInclude || a.rule.Terms.Mode != itemspec.ModeAuto {
+			continue
+		}
+		if h := f.holder(s, rules, &a.rule, a.item, st); h != "" {
+			if a.promote {
+				a.op = opNone // stays pending: no change
+				continue
+			}
+			a.op, a.askRule = opPend, h
+		}
+	}
+	out := plan[:0]
+	for _, a := range plan {
+		if a.op != opNone {
+			out = append(out, a)
+		}
+	}
+	plan = out
+	st = f.planStates(plan)
+	var extra []action
+	for _, a := range plan {
+		if a.op != opInclude || !a.promote || a.item.ID == "" {
+			continue
+		}
+		for i := range rules {
+			q := &rules[i]
+			k := [2]string{q.ID, a.item.ID}
+			if q.ID == a.rule.ID || !q.sameSubject(&a.rule) || f.stateIn(st, q.ID, a.item.ID) != StatePending {
+				continue
+			}
+			if _, planned := st[k]; planned {
+				continue
+			}
+			st[k] = StateIncluded
+			extra = append(extra, action{op: opInclude, rule: *q, item: a.item})
+		}
+	}
+	return append(plan, extra...)
+}
+
+// overlap describes a pending entry for the member (share.pending,
+// share.pending.list): the ask rule that holds an item pending in an auto
+// rule (ask_rule_id), and whether another rule of the subject already
+// includes the item (shared). rules are the rules in force.
+func (f *Feature) overlap(s *vault.Session, rules []ruleView, r *ruleView, it *itemspec.Item) (askRule string, shared bool) {
+	if r.Terms.Mode == itemspec.ModeAuto {
+		askRule = f.holder(s, rules, r, it, nil)
+	}
+	for i := range rules {
+		q := &rules[i]
+		if q.ID != r.ID && q.sameSubject(r) && f.stateIn(nil, q.ID, it.ID) == StateIncluded {
+			shared = true
+		}
+	}
+	return askRule, shared
+}
+
+// overlapMembers adds a pending entry's 0.23.0 members (share.pending's
+// items, share.pending.list's entries): ask_rule_id? and shared?.
+func overlapMembers(b *strictjson.Builder, askRule string, shared bool) *strictjson.Builder {
+	if askRule != "" {
+		b.String("ask_rule_id", askRule)
+	}
+	if shared {
+		b.Bool("shared", true)
+	}
+	return b
 }
 
 // readable reports whether an inclusion of it makes a grant (§10.12).
@@ -274,12 +422,17 @@ func (f *Feature) apply(s *vault.Session, plan []action, reason string) {
 		b := incl[rid]
 		f.issue(s, &b.rule, b.items)
 	}
+	var cur []ruleView
+	if len(pendOrder) > 0 {
+		cur = f.rules(s)
+	}
 	for _, rid := range pendOrder {
 		b := pend[rid]
 		var encs [][]byte
 		for _, it := range b.items {
-			encs = append(encs, strictjson.NewBuilder().String("item_id", it.ID).String("name", it.Name).
-				String("category", it.Category).String("sensitivity", it.Sensitivity).Bytes())
+			ask, shared := f.overlap(s, cur, &b.rule, it)
+			encs = append(encs, overlapMembers(strictjson.NewBuilder().String("item_id", it.ID).String("name", it.Name).
+				String("category", it.Category).String("sensitivity", it.Sensitivity), ask, shared).Bytes())
 		}
 		// One share.pending per batch, split to stay within a message.
 		for _, arr := range chunkArrays(encs, MaxMessageBytes) {
@@ -325,7 +478,7 @@ func (f *Feature) issue(s *vault.Session, r *ruleView, its []*itemspec.Item) {
 		for i, it := range chunk {
 			metas[i] = itemspec.MetaOf(it, nil)
 		}
-		ids, err := f.grants.IssueRuleGrants(s, r.Conn, r.ID, metas, r.Terms.Uses, r.Terms.Expires)
+		ids, err := f.grants.IssueRuleGrants(s, r.Conn, r.ID, metas, r.Terms.Uses, r.Limits, r.Terms.Expires)
 		if err != nil {
 			continue // checked beforehand (checkPlan); the item stays included without a grant
 		}
@@ -398,6 +551,8 @@ type ruleSpec struct {
 	PerDay    uint64
 	StatusTTL time.Duration
 	DryRun    bool
+	// Limits are a connection rule's per_hour and per_day (0.23.0).
+	Limits itemspec.RateLimits
 }
 
 // ParseRuleSet parses a share.rule.set body strictly.
@@ -450,8 +605,18 @@ func ParseRuleSet(body []byte, now time.Time) (*ruleSpec, error) {
 	if err != nil {
 		return nil, errBad
 	}
-	if sp.Conn != "" && (phSet || pdSet || ttlSet) {
+	if sp.Conn != "" && ttlSet {
 		return nil, errBad // agent rules only (§10.11)
+	}
+	if sp.Conn != "" {
+		// 0.23.0 (§10.12 Rate limits for connections): optional, no
+		// default.
+		if phSet {
+			sp.Limits.PerHour = ph
+		}
+		if pdSet {
+			sp.Limits.PerDay = pd
+		}
 	}
 	if sp.Agent != "" {
 		sp.PerHour, sp.PerDay, sp.StatusTTL = DefaultPerHour, DefaultPerDay, leashwire.DefaultStatusTTL
@@ -501,13 +666,24 @@ func (f *Feature) sortedItems() []*itemspec.Item {
 	return out
 }
 
-// planRule plans a rule's creation or replacement over every item.
+// planRule plans a rule's creation or replacement over every item, with
+// ask wins over the rules as they will be (§10.12).
 func (f *Feature) planRule(s *vault.Session, oldR, newR *ruleView) []action {
 	var plan []action
 	for _, it := range f.sortedItems() {
 		plan = append(plan, f.planPair(s, oldR, newR, it, it, false, newR.Terms.IncludeExisting)...)
 	}
-	return plan
+	after := f.rules(s)
+	found := false
+	for i := range after {
+		if after[i].ID == newR.ID {
+			after[i], found = *newR, true
+		}
+	}
+	if !found {
+		after = append(after, *newR)
+	}
+	return f.resolve(s, plan, after)
 }
 
 func (f *Feature) ruleSet(s *vault.Session, body []byte) (json.RawMessage, error) {
@@ -557,13 +733,13 @@ func (f *Feature) ruleSet(s *vault.Session, body []byte) (json.RawMessage, error
 	if id == "" {
 		id = s.NewID()
 	}
-	next := ruleView{ID: id, Version: sp.Version + 1, Conn: sp.Conn, Agent: sp.Agent, Terms: sp.Terms, Created: t, Updated: t}
+	next := ruleView{ID: id, Version: sp.Version + 1, Conn: sp.Conn, Agent: sp.Agent, Terms: sp.Terms, Created: t, Updated: t, Limits: sp.Limits}
 	if old != nil {
 		next.Created = old.Created
 	}
 	plan := f.planRule(s, old, &next)
 	if sp.DryRun {
-		return f.dryRunMatches(s, &next), nil
+		return f.dryRunMatches(s, &next, plan), nil
 	}
 	if err := f.checkPlan(plan); err != nil {
 		return nil, err
@@ -576,7 +752,16 @@ func (f *Feature) ruleSet(s *vault.Session, body []byte) (json.RawMessage, error
 		}
 		next = agentView(ar)
 	} else {
-		f.st.Rules[id] = &Rule{ID: id, Version: next.Version, Conn: sp.Conn, Terms: sp.Terms, Created: next.Created, Updated: t}
+		nr := &Rule{ID: id, Version: next.Version, Conn: sp.Conn, Terms: sp.Terms, Created: next.Created, Updated: t, Limits: sp.Limits}
+		if prev := f.st.Rules[id]; prev != nil {
+			// The windows are kept when the rule is replaced: a lowered
+			// limit applies at once to the open window (0.23.0).
+			nr.Windows = prev.Windows
+			if prev.Limits != sp.Limits && f.grants != nil {
+				f.grants.SetRuleLimits(s, id, sp.Limits) // a given grant carries the rule's current limits
+			}
+		}
+		f.st.Rules[id] = nr
 	}
 	f.apply(s, plan, "rule")
 	kind := "share.rule.created"
@@ -590,8 +775,16 @@ func (f *Feature) ruleSet(s *vault.Session, body []byte) (json.RawMessage, error
 
 // dryRunMatches lists the items a rule would match, with their current
 // state for that rule (§10.12): at most MaxMessageBytes of them, and the
-// total.
-func (f *Feature) dryRunMatches(s *vault.Session, r *ruleView) []byte {
+// total. Since 0.23.0 an entry whose state the request would change
+// carries outcome (include or ask) and, when an ask rule of the subject
+// holds it, ask_rule_id (plan: the resolved plan of the request).
+func (f *Feature) dryRunMatches(s *vault.Session, r *ruleView, plan []action) []byte {
+	outcome := map[string]*action{}
+	for i := range plan {
+		if a := &plan[i]; a.rule.ID == r.ID && a.op != opWithdraw {
+			outcome[a.item.ID] = a
+		}
+	}
 	arr := []byte{'['}
 	n := 0
 	for _, it := range f.sortedItems() {
@@ -603,6 +796,16 @@ func (f *Feature) dryRunMatches(s *vault.Session, r *ruleView) []byte {
 			String("sensitivity", it.Sensitivity)
 		if inc := f.incl(r.ID, it.ID); inc != nil {
 			b.String("state", inc.State)
+		}
+		if a := outcome[it.ID]; a != nil {
+			if a.op == opInclude {
+				b.String("outcome", "include")
+			} else {
+				b.String("outcome", "ask")
+				if a.askRule != "" {
+					b.String("ask_rule_id", a.askRule)
+				}
+			}
 		}
 		e := b.Bytes()
 		if len(arr)+len(e)+2 > MaxMessageBytes {
@@ -619,6 +822,15 @@ func (f *Feature) dryRunMatches(s *vault.Session, r *ruleView) []byte {
 func (f *Feature) ruleJSON(r *ruleView) []byte {
 	b := strictjson.NewBuilder().String("rule_id", r.ID).Uint("version", r.Version).Raw("subject", subjectJSON(r))
 	r.Terms.JSONMembers(b)
+	if r.Agent == "" {
+		// A connection rule's rate limits (0.23.0), when set.
+		if r.Limits.PerHour > 0 {
+			b.Uint("per_hour", r.Limits.PerHour)
+		}
+		if r.Limits.PerDay > 0 {
+			b.Uint("per_day", r.Limits.PerDay)
+		}
+	}
 	if a := r.agent; a != nil {
 		b.Uint("per_hour", a.PerHour).Uint("per_day", a.PerDay).Uint("status_ttl", uint64(a.StatusTTL/time.Second))
 		if a.Delegation != nil {
@@ -780,8 +992,12 @@ func decideLists(o strictjson.Object) (include, decline []string, err error) {
 }
 
 // decide includes and declines pending items of a rule in one change
-// (§10.12; both lists at once since 0.21.0): one response, one
-// share.decided, and on an error (a limit) no change at all.
+// (§10.12; both lists at once since 0.21.0): one response, and on an
+// error (a limit) no change at all. Since 0.23.0 an answer is per item and
+// subject (Overlapping rules): an inclusion includes the item in every
+// rule of the subject where it is pending; a decline declines it in every
+// rule of the subject where it is pending or included, withdrawing it
+// where it was included. One share.decided per rule changed.
 func (f *Feature) decide(s *vault.Session, body []byte) (json.RawMessage, error) {
 	o, err := strictjson.ParseObject(body)
 	if err != nil {
@@ -807,19 +1023,44 @@ func (f *Feature) decide(s *vault.Session, body []byte) (json.RawMessage, error)
 		}
 		return it
 	}
+	rules := f.rules(s)
+	var subj []*ruleView // the rules of the subject, sorted by id
+	for i := range rules {
+		if rules[i].sameSubject(r) {
+			subj = append(subj, &rules[i])
+		}
+	}
+	type change struct {
+		rule *ruleView
+		item string
+	}
 	var plan []action
-	var declined []string
+	var includedIDs, declinedIDs []string
 	for _, id := range include {
-		if it := pending(id); it != nil {
-			plan = append(plan, action{op: opInclude, rule: *r, item: it})
+		it := pending(id)
+		if it == nil {
+			continue
+		}
+		includedIDs = append(includedIDs, id)
+		for _, q := range subj {
+			if inc := f.incl(q.ID, id); inc != nil && inc.State == StatePending {
+				plan = append(plan, action{op: opInclude, rule: *q, item: it})
+			}
 		}
 	}
+	var declines []change
 	for _, id := range decline {
-		if pending(id) != nil {
-			declined = append(declined, id)
+		if pending(id) == nil {
+			continue
+		}
+		declinedIDs = append(declinedIDs, id)
+		for _, q := range subj {
+			if inc := f.incl(q.ID, id); live(inc) {
+				declines = append(declines, change{rule: q, item: id})
+			}
 		}
 	}
-	if len(plan) == 0 && len(declined) == 0 {
+	if len(plan) == 0 && len(declines) == 0 {
 		return nil, errBad
 	}
 	if err := f.checkPlan(plan); err != nil {
@@ -827,16 +1068,41 @@ func (f *Feature) decide(s *vault.Session, body []byte) (json.RawMessage, error)
 	}
 	f.apply(s, plan, "")
 	t := now(s)
-	for _, id := range declined {
-		f.st.Incl[rid][id] = &Inclusion{State: StateDeclined, Conn: r.Conn, Agent: r.Agent, At: t}
-		s.Record(r.activity("share.declined", id))
+	perRule := map[string]*[2][]string{}
+	var order []string
+	note := func(rule, item string, k int) {
+		e := perRule[rule]
+		if e == nil {
+			e = &[2][]string{}
+			perRule[rule] = e
+			order = append(order, rule)
+		}
+		e[k] = append(e[k], item)
 	}
-	var included []string
 	for _, a := range plan {
-		included = append(included, a.item.ID)
+		note(a.rule.ID, a.item.ID, 0)
 	}
-	inc, dec := itemspec.StrList(nonNil(included)), itemspec.StrList(nonNil(declined))
-	s.SyncEvent("share.decided", strictjson.NewBuilder().String("rule_id", rid).Raw("included", inc).Raw("declined", dec).Bytes())
+	for _, d := range declines {
+		inc := f.incl(d.rule.ID, d.item)
+		if inc.State == StateIncluded {
+			// A decline stops sharing the item with the subject: an
+			// explicit act of the member, not a silent withdrawal.
+			if inc.GrantID != "" && f.grants != nil {
+				f.grants.RevokeRuleGrant(s, inc.GrantID)
+			}
+			s.Record(d.rule.activity("share.withdrawn", d.item))
+		}
+		f.st.Incl[d.rule.ID][d.item] = &Inclusion{State: StateDeclined, Conn: d.rule.Conn, Agent: d.rule.Agent, At: t}
+		s.Record(d.rule.activity("share.declined", d.item))
+		note(d.rule.ID, d.item, 1)
+	}
+	sort.Strings(order)
+	for _, id := range order {
+		e := perRule[id]
+		s.SyncEvent("share.decided", strictjson.NewBuilder().String("rule_id", id).Raw("included", itemspec.StrList(nonNil(e[0]))).
+			Raw("declined", itemspec.StrList(nonNil(e[1]))).Bytes())
+	}
+	inc, dec := itemspec.StrList(nonNil(includedIDs)), itemspec.StrList(nonNil(declinedIDs))
 	return strictjson.NewBuilder().Raw("included", inc).Raw("declined", dec).Bytes(), nil
 }
 

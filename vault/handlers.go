@@ -437,6 +437,10 @@ type Activity struct {
 	Audit        bool   // record in the audit log
 	Feed         bool   // create a feed item
 	Priority     string // feed priority ("" = normal)
+	// AskBatch marks the feed item of a connection's ask that reached the
+	// member (§10.4.1, 0.23.0): asks of one connection within 10 minutes
+	// of the first form one batch, one feed item with `count`.
+	AskBatch bool
 }
 
 // ActivitySink is implemented by features that keep activity (the audit

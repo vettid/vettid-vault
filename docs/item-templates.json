@@ -1,8 +1,8 @@
 {
   "format": 1,
-  "version": 2,
+  "version": 3,
   "spec": "VAULT-MESSAGING 0.7.0 §10.7",
-  "description": "Recommended item categories and templates the apps share. Templates live in the apps, not in the vault: choosing one pre-fills labelled fields, suggests tags and a sensitivity; the member can add, remove or rename anything, and free-form items need no template. The vault checks only shapes and sizes (§10.7). A template's id goes into item.template, opaque to the vault. Templates never suggest a reserved tag such as @profile: only the member puts an item into the shared profile (§10.8). Contact information is one item per contact point (email address, phone number, postal address, website), because sharing is per item; contact_card, retired 2026-10-08, may still appear in item.template of existing items. Labels are English defaults for the apps to translate; kinds are the field kinds of §10.7.",
+  "description": "Recommended item categories and templates the apps share. Templates live in the apps, not in the vault: choosing one pre-fills labelled fields, suggests tags and a sensitivity; the member can add, remove or rename anything, and free-form items need no template. The vault checks only shapes and sizes (§10.7). A template's id goes into item.template, opaque to the vault. Templates never suggest a reserved tag such as @profile: only the member puts an item into the shared profile (§10.8). Contact information is one item per contact point (email address, phone number, postal address, website), because sharing is per item; contact_card, retired 2026-10-08, may still appear in item.template of existing items. Labels are English defaults for the apps to translate; kinds are the field kinds of §10.7. A date field may carry the presentation hint format month (VAULT-ITEMS 0.1.2, VAULT-MESSAGING 0.23.0 §10.7): the app collects a year and a month and stores YYYY-MM, as for a payment card's expiry; the hint is not stored in the item and the vault never sees it.",
   "categories": [
     { "category": "identity_document", "label": "Identity document", "icon": "id-card" },
     { "category": "login", "label": "Login", "icon": "key" },
@@ -69,7 +69,7 @@
       "fields": [
         { "label": "Cardholder", "kind": "text" },
         { "label": "Number", "kind": "text" },
-        { "label": "Expires", "kind": "date" },
+        { "label": "Expires", "kind": "date", "format": "month" },
         { "label": "Security code", "kind": "password" },
         { "label": "PIN", "kind": "password" }
       ]

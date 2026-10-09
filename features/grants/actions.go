@@ -16,7 +16,8 @@ import (
 // IssueRuleGrants implements items.RuleGrants: it gives conn one grant
 // per item (all fields) for a share rule and tells the connection in one
 // data.shared. It must not call back into the items feature.
-func (f *Feature) IssueRuleGrants(s *vault.Session, conn, ruleID string, metas []itemspec.Meta, uses uint64, expires time.Time) ([]string, error) {
+func (f *Feature) IssueRuleGrants(s *vault.Session, conn, ruleID string, metas []itemspec.Meta, uses uint64, limits itemspec.RateLimits,
+	expires time.Time) ([]string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if len(metas) == 0 || len(metas) > MaxShared {
@@ -30,7 +31,7 @@ func (f *Feature) IssueRuleGrants(s *vault.Session, conn, ruleID string, metas [
 	ds := make([]Descriptor, len(metas))
 	for i, m := range metas {
 		g := &Grant{ID: s.NewID(), Conn: conn, Direction: "given", RequestID: ruleID, Kind: KindItem, Ref: m.ItemID,
-			RuleID: ruleID, Name: m.Name, Category: m.Category, Uses: uses, Expires: expires, State: StateActive, Created: now}
+			RuleID: ruleID, Name: m.Name, Category: m.Category, Uses: uses, Expires: expires, Limits: limits, State: StateActive, Created: now}
 		f.d.Given[g.ID] = g
 		ids[i], ds[i] = g.ID, g.descriptor(m)
 		s.Record(vault.Activity{Kind: "grant.issued", ConnectionID: conn, Ref: g.ID, Direction: "out", Audit: true})
@@ -55,6 +56,22 @@ func (f *Feature) IssueRuleGrants(s *vault.Session, conn, ruleID string, metas [
 	}
 	flush()
 	return ids, nil
+}
+
+// SetRuleLimits implements items.RuleGrants: a replaced rule's given
+// grants carry its current rate limits (0.23.0, §10.12). The connection
+// keeps those of the descriptors it received.
+func (f *Feature) SetRuleLimits(s *vault.Session, ruleID string, limits itemspec.RateLimits) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, id := range sortedKeys(f.d.Given) {
+		if g := f.d.Given[id]; g.RuleID == ruleID && g.Limits != limits {
+			g.Limits = limits
+			if g.State == StateActive {
+				syncChanged(s, g)
+			}
+		}
+	}
 }
 
 // RevokeRuleGrant implements items.RuleGrants: a withdrawn item's grant

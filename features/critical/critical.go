@@ -457,11 +457,42 @@ func (f *Feature) incoming(s *vault.Session, body []byte) error {
 		s.Record(vault.Activity{Kind: "critical-secret.use.denied", ConnectionID: conn, Ref: u.RequestID, Direction: "in", Audit: true})
 		return nil
 	}
+	// Then (0.23.0) the ask checks of §10.4.1: mute, pause, the cooldown
+	// of the same item_id and field_id, the pending cap and the ask rate.
+	// A suppressed request is answered `denied`, later, by the vault.
+	v := s.Ask(conn, vault.Ask{Source: f.Name(), Ref: r.ID, Idents: []string{askIdent(r)}, Pending: pending, Exp: r.Exp,
+		AnswerType: "critical-secret.result", Answer: resultBody(r.ID, StatusDenied)})
+	if !v.Passed() {
+		f.d.Done[r.ID] = s.Now().Add(OutgoingTTL) // a repeated request_id is ignored
+		return nil
+	}
 	r.Name, r.Label, r.Kind = name, label, kind
 	f.d.In[r.ID] = r
 	s.NotifyAllDevices("critical-secret-use.pending", pendingBody(r))
-	s.Record(vault.Activity{Kind: "critical-secret.use.request", ConnectionID: conn, Ref: r.ID, Feed: true, Priority: "high"})
+	s.Record(vault.Activity{Kind: "critical-secret.use.request", ConnectionID: conn, Ref: r.ID, Feed: true, Priority: "high", AskBatch: true})
 	return nil
+}
+
+// askIdent is a use's identity for the §10.4.1 cooldown: the same item_id
+// and field_id, whatever the operation and payload.
+func askIdent(r *Incoming) string { return "critical:" + r.ItemID + "/" + r.FieldID }
+
+func resultBody(id, status string) []byte {
+	return strictjson.NewBuilder().String("request_id", id).String("status", status).Bytes()
+}
+
+// PendingAsks implements vault.AskSource: the connection's uses waiting
+// for the member.
+func (f *Feature) PendingAsks(conn string, now time.Time) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, r := range f.d.In {
+		if r.Conn == conn && now.Before(r.Exp) {
+			n++
+		}
+	}
+	return n
 }
 
 // pendingBody is the critical-secret-use.pending body (§10.13), which
@@ -571,6 +602,7 @@ func (f *Feature) deny(s *vault.Session, body []byte) (json.RawMessage, error) {
 	}
 	f.answer(s, r, StatusDenied, nil)
 	s.Record(vault.Activity{Kind: "critical-secret.use.denied", ConnectionID: r.Conn, Ref: r.ID, Direction: "out", Audit: true})
+	s.AskDeclined(r.Conn, []string{askIdent(r)}) // §10.4.1
 	s.SyncEvent("critical-secret-use.decided", strictjson.NewBuilder().String("request_id", r.ID).Bool("approved", false).Bytes())
 	return nil, nil
 }

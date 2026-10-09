@@ -15,7 +15,7 @@ import (
 // declines, items already pending) and answers what it would do to
 // sharing, without changing, recording or sending anything.
 //
-//	{version?, shares: [{rule_id, subject, mode, usable?}],
+//	{version?, shares: [{rule_id, subject, mode, ask_rule_id?, usable?}],
 //	 withdrawals: [{rule_id, subject, state}]}
 
 // putDryRun answers item.put{dry_run: true, item_id?, version?,
@@ -92,6 +92,7 @@ func (f *Feature) dryRunAnswer(s *vault.Session, before, after *itemspec.Item) (
 	for i := range rules {
 		plan = append(plan, f.planPair(s, &rules[i], &rules[i], before, after, true, true)...)
 	}
+	plan = f.resolve(s, plan, rules)
 	if err := f.checkPlan(plan); err != nil {
 		return nil, err
 	}
@@ -111,6 +112,9 @@ func (f *Feature) dryRunAnswer(s *vault.Session, before, after *itemspec.Item) (
 			continue
 		}
 		b.String("mode", a.rule.Terms.Mode)
+		if a.askRule != "" {
+			b.String("ask_rule_id", a.askRule) // an ask rule of the subject holds it (0.23.0)
+		}
 		if a.item.Sensitivity == itemspec.Critical {
 			b.Bool("usable", true) // a connection rule makes it usable only (§10.13)
 		}
@@ -213,9 +217,10 @@ outer:
 			if inc.State != StatePending || it == nil || r.ID == afterRule && id <= afterItem {
 				continue
 			}
-			enc := strictjson.NewBuilder().String("rule_id", r.ID).Raw("subject", subjectJSON(r)).String("item_id", id).
+			ask, shared := f.overlap(s, rs, r, it)
+			enc := overlapMembers(strictjson.NewBuilder().String("rule_id", r.ID).Raw("subject", subjectJSON(r)).String("item_id", id).
 				String("name", it.Name).String("category", it.Category).String("sensitivity", it.Sensitivity).
-				String("at", envelope.FormatTS(inc.At)).Bytes()
+				String("at", envelope.FormatTS(inc.At)), ask, shared).Bytes()
 			if count >= limit || count > 0 && len(arr)+len(enc)+64 > MaxListBytes {
 				more = true
 				break outer

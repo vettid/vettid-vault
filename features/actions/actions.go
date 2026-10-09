@@ -763,12 +763,17 @@ func listJSON(l []string) []byte {
 }
 
 func (f *Feature) sendResult(s *vault.Session, conn, id, status string, result json.RawMessage) {
+	_ = s.SendToConnection(conn, "action.result", resultBody(id, status, result))
+	f.d.Seen[id] = s.Now()
+}
+
+// resultBody is action.result's body.
+func resultBody(id, status string, result json.RawMessage) []byte {
 	b := strictjson.NewBuilder().String("invocation_id", id).String("status", status)
 	if status == StatusOK {
 		b.Raw("result", result)
 	}
-	_ = s.SendToConnection(conn, "action.result", b.Bytes())
-	f.d.Seen[id] = s.Now()
+	return b.Bytes()
 }
 
 // expire does the lazy housekeeping (§10.14).
@@ -991,12 +996,41 @@ func (f *Feature) invocation(s *vault.Session, body []byte) {
 		unavailable()
 		return
 	}
-	p := &Pending{ID: v.InvocationID, Conn: conn, ActionID: def.ID, Params: v.Params, Exp: now.Add(PendingTTL).UTC().Truncate(time.Millisecond)}
+	exp := now.Add(PendingTTL).UTC().Truncate(time.Millisecond)
+	// An invocation that waits for the member is an ask (§10.4.1, 0.23.0):
+	// mute, pause, the cooldown of the same action_id, the pending cap and
+	// the ask rate. A suppressed one is answered `denied`, later, by the
+	// vault.
+	verdict := s.Ask(conn, vault.Ask{Source: f.Name(), Ref: v.InvocationID, Idents: []string{askIdent(def.ID)}, Pending: n, Exp: exp,
+		AnswerType: "action.result", Answer: resultBody(v.InvocationID, StatusDenied, nil)})
+	if !verdict.Passed() {
+		f.d.Seen[v.InvocationID] = now // a repeat is ignored
+		return
+	}
+	p := &Pending{ID: v.InvocationID, Conn: conn, ActionID: def.ID, Params: v.Params, Exp: exp}
 	f.d.Pending[p.ID] = p
 	s.NotifyAllDevices("action.pending", strictjson.NewBuilder().String("invocation_id", p.ID).String("connection_id", conn).
 		String("action_id", def.ID).String("sensitivity", def.Sensitivity).Raw("params", p.Params).
 		String("exp", envelope.FormatTS(p.Exp)).Bytes())
-	s.Record(vault.Activity{Kind: "action.request", ConnectionID: conn, Ref: p.ID, Feed: true, Priority: "high"})
+	s.Record(vault.Activity{Kind: "action.request", ConnectionID: conn, Ref: p.ID, Feed: true, Priority: "high", AskBatch: true})
+}
+
+// askIdent is an invocation's identity for the §10.4.1 cooldown: the
+// same action_id.
+func askIdent(actionID string) string { return "action:" + actionID }
+
+// PendingAsks implements vault.AskSource: the connection's invocations
+// waiting for the member.
+func (f *Feature) PendingAsks(conn string, now time.Time) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, p := range f.d.Pending {
+		if p.Conn == conn && now.Before(p.Exp) {
+			n++
+		}
+	}
+	return n
 }
 
 // execute runs a built-in action for connection conn (§10.14).
@@ -1095,6 +1129,9 @@ func (f *Feature) respond(s *vault.Session, in *envelope.Inner) (json.RawMessage
 	}
 	f.sendResult(s, p.Conn, p.ID, status, result)
 	s.Record(vault.Activity{Kind: kind, ConnectionID: p.Conn, Ref: p.ID, Audit: true})
+	if !r.Approve {
+		s.AskDeclined(p.Conn, []string{askIdent(p.ActionID)}) // §10.4.1
+	}
 	s.SyncEvent("action.decided", strictjson.NewBuilder().String("invocation_id", p.ID).Bool("approved", r.Approve).Bytes())
 	return strictjson.NewBuilder().String("status", status).Bytes(), nil
 }

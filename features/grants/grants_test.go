@@ -30,6 +30,24 @@ const (
 type fakeItems struct {
 	items  map[string]*itemspec.Item
 	usable map[string][]itemspec.Meta // by connection
+	// The rate check (0.23.0): retry > 0 refuses rule fetches of an item;
+	// fetched counts the fetches counted in rule windows.
+	retry   map[string]time.Duration
+	fetched map[string]int
+}
+
+func (f *fakeItems) RuleFetchAllowed(_ *vault.Session, _, item string) (time.Duration, bool) {
+	if d := f.retry[item]; d > 0 {
+		return d, false
+	}
+	return 0, true
+}
+
+func (f *fakeItems) RuleFetched(_, item string, _ time.Time) {
+	if f.fetched == nil {
+		f.fetched = map[string]int{}
+	}
+	f.fetched[item]++
 }
 
 func (f *fakeItems) Readable(id string, fields []string) (itemspec.Meta, bool) {
@@ -352,7 +370,7 @@ func TestRuleGrants(t *testing.T) {
 	s := vault.NewSession(context.TODO(), a.h, vault.PeerInfo{}, t0, nil)
 	m, _ := a.it.Readable(s1, nil)
 	rule := "01JB2Z6V9K3M4N5P6Q7R8S9T09"
-	ids, err := a.f.IssueRuleGrants(s, "cB", rule, []itemspec.Meta{m}, 0, time.Time{})
+	ids, err := a.f.IssueRuleGrants(s, "cB", rule, []itemspec.Meta{m}, 0, itemspec.RateLimits{}, time.Time{})
 	if err != nil || len(ids) != 1 {
 		t.Fatal(err)
 	}

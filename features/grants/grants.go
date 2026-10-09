@@ -89,9 +89,17 @@ const (
 	ErrExpired     = "expired"
 	ErrExhausted   = "exhausted"
 	ErrUnavailable = "unavailable"
+	// ErrRateLimited (0.23.0): a rate limit of a rule that includes the
+	// item is reached; data.value carries retry_after.
+	ErrRateLimited = "rate_limited"
 )
 
-var valueErrors = map[string]bool{ErrNotFound: true, ErrRevoked: true, ErrExpired: true, ErrExhausted: true, ErrUnavailable: true}
+var valueErrors = map[string]bool{ErrNotFound: true, ErrRevoked: true, ErrExpired: true, ErrExhausted: true, ErrUnavailable: true,
+	ErrRateLimited: true}
+
+// MaxRetryAfter bounds a data.value's retry_after (a day: the longest
+// window).
+const MaxRetryAfter = 86400
 
 // ItemSource is the items feature (§10.7, §10.12). Its methods are
 // called with this feature's lock held and must not call back.
@@ -105,6 +113,12 @@ type ItemSource interface {
 	HasCategory(category string) bool
 	// Usable lists the critical items share rules make usable to conn.
 	Usable(conn string, now time.Time) []itemspec.Meta
+	// RuleFetchAllowed is the rate check of a fetch through a rule grant
+	// (0.23.0, §10.12): ok is false while a window of a rule of conn that
+	// includes the item is full, retry the time until they end.
+	RuleFetchAllowed(s *vault.Session, conn, itemID string) (retry time.Duration, ok bool)
+	// RuleFetched counts an answered fetch in those rules' windows.
+	RuleFetched(conn, itemID string, now time.Time)
 }
 
 // Item is one requested or granted item: {kind: "item", ref: item_id,
@@ -136,9 +150,12 @@ type Grant struct {
 	Uses    uint64    `json:"uses"`
 	Used    uint64    `json:"used"`
 	Expires time.Time `json:"expires"`
-	State   string    `json:"state"`
-	Created time.Time `json:"created"`
-	Ended   time.Time `json:"ended,omitempty"`
+	// Limits are a rule grant's rate limits (0.23.0): a given grant the
+	// rule's current ones, a received one its descriptor's.
+	Limits  itemspec.RateLimits `json:"limits,omitempty"`
+	State   string              `json:"state"`
+	Created time.Time           `json:"created"`
+	Ended   time.Time           `json:"ended,omitempty"`
 	// Fetched are the fetch ids answered (given side): a repeated fetch is
 	// answered again without counting a use.
 	Fetched []string `json:"fetched,omitempty"`
@@ -511,6 +528,8 @@ type Descriptor struct {
 	Meta    itemspec.Meta
 	Uses    uint64    // 0: not counted (a rule grant)
 	Expires time.Time // zero: none (a rule grant)
+	// Limits are the issuing rule's rate limits at issue (0.23.0).
+	Limits itemspec.RateLimits
 }
 
 // JSON encodes a descriptor.
@@ -528,6 +547,9 @@ func (d *Descriptor) JSON() []byte {
 	b.String("name", d.Meta.Name).String("category", d.Meta.Category).Raw("labels", itemspec.LabelsJSON(d.Meta.Labels))
 	if d.Uses > 0 {
 		b.Uint("uses", d.Uses)
+	}
+	if d.Limits.Set() {
+		b.Raw("limits", d.Limits.JSON())
 	}
 	if !d.Expires.IsZero() {
 		b.String("expires_at", envelope.FormatTS(d.Expires))
@@ -589,6 +611,11 @@ func ParseDescriptor(raw json.RawMessage) (*Descriptor, error) {
 	}
 	if d.Uses, _, err = g.OptUint("uses", 1, itemspec.MaxRuleUses); err != nil {
 		return nil, errBad
+	}
+	if raw, ok := g["limits"]; ok {
+		if d.Limits, err = itemspec.ParseRateLimits(raw); err != nil {
+			return nil, errBad
+		}
 	}
 	if ts, ok, err := g.OptString("expires_at"); err != nil {
 		return nil, errBad
@@ -705,6 +732,8 @@ type Value struct {
 	UsesLeft uint64
 	Counted  bool // uses_left present
 	Error    string
+	// RetryAfter is rate_limited's retry_after in seconds (0.23.0).
+	RetryAfter uint64
 }
 
 // ParseValue parses a data.value body strictly: a sealed value with
@@ -730,7 +759,15 @@ func ParseValue(body []byte) (*Value, error) {
 			return nil, errBad
 		}
 		v.Error = e
+		if ra, ok, err := o.OptUint("retry_after", 1, MaxRetryAfter); err != nil || ok != (e == ErrRateLimited) {
+			return nil, errBad // retry_after with rate_limited only, and always with it
+		} else {
+			v.RetryAfter = ra
+		}
 		return v, nil
+	}
+	if o.Has("retry_after") {
+		return nil, errBad
 	}
 	if v.Sealed, err = o.Base64("value_sealed", -1); err != nil ||
 		len(v.Sealed) < sharewire.EncSize+16 || len(v.Sealed) > sharewire.EncSize+sharewire.MaxValue+16 {
@@ -904,6 +941,9 @@ func (g *Grant) json() []byte {
 		b.Uint("uses", g.Uses)
 	}
 	b.Uint("used", g.Used)
+	if g.Limits.Set() {
+		b.Raw("limits", g.Limits.JSON())
+	}
 	if !g.Expires.IsZero() {
 		b.String("expires_at", envelope.FormatTS(g.Expires))
 	}
@@ -913,7 +953,7 @@ func (g *Grant) json() []byte {
 // descriptor is a given grant's descriptor (§10.12).
 func (g *Grant) descriptor(meta itemspec.Meta) Descriptor {
 	return Descriptor{GrantID: g.ID, Ref: g.Ref, Fields: g.Fields, Label: g.Label, RuleID: g.RuleID, Meta: meta,
-		Uses: g.Uses, Expires: g.Expires}
+		Uses: g.Uses, Expires: g.Expires, Limits: g.Limits}
 }
 
 // expired reports whether a grant with an expiry is past it.
@@ -995,7 +1035,7 @@ func (f *Feature) expire(s *vault.Session) {
 		p := f.d.Pending[id]
 		if !now.Before(p.Exp) {
 			delete(f.d.Pending, id)
-			_ = s.SendToConnection(p.Conn, "data.decided", strictjson.NewBuilder().String("request_id", p.ID).Bool("approved", false).Bytes())
+			_ = s.SendToConnection(p.Conn, "data.decided", deniedBody(p.ID))
 		}
 	}
 	for id, o := range f.d.Fetches {
@@ -1149,7 +1189,7 @@ func (f *Feature) receive(s *vault.Session, conn, requestID string, ds []Descrip
 		}
 		g := &Grant{ID: gr.GrantID, Conn: conn, Direction: "received", RequestID: requestID, Kind: KindItem, Ref: gr.Ref,
 			Fields: gr.Fields, Label: gr.Label, RuleID: gr.RuleID, Name: gr.Meta.Name, Category: gr.Meta.Category, Labels: gr.Meta.Labels,
-			Uses: gr.Uses, Expires: gr.Expires, State: StateActive, Created: s.Now().UTC().Truncate(time.Millisecond)}
+			Uses: gr.Uses, Expires: gr.Expires, Limits: gr.Limits, State: StateActive, Created: s.Now().UTC().Truncate(time.Millisecond)}
 		f.d.Received[key] = g
 		if n > 0 {
 			arr = append(arr, ',')
@@ -1251,6 +1291,9 @@ func (f *Feature) dataValue(s *vault.Session, body []byte) {
 	b := strictjson.NewBuilder().String("connection_id", conn).String("fetch_id", v.FetchID).String("grant_id", v.GrantID)
 	if v.Error != "" {
 		b.String("error", v.Error)
+		if v.RetryAfter > 0 {
+			b.Uint("retry_after", v.RetryAfter) // passed on (0.23.0)
+		}
 	} else {
 		b.Base64("value_sealed", v.Sealed)
 		if v.Counted {
@@ -1328,12 +1371,55 @@ func (f *Feature) dataRequest(s *vault.Session, body []byte) {
 		s.Record(vault.Activity{Kind: "drop.grant_limit", ConnectionID: conn, Audit: true})
 		return
 	}
-	p := &Pending{ID: r.ID, Conn: conn, Items: r.Items, Uses: r.Uses, ExpiresIn: r.ExpiresIn, Reason: r.Reason,
-		Exp: s.Now().Add(PendingTTL).UTC().Truncate(time.Millisecond)}
+	exp := s.Now().Add(PendingTTL).UTC().Truncate(time.Millisecond)
+	// A grant request is an ask (§10.4.1, 0.23.0): mute, pause, the
+	// cooldown of each entry, the pending cap and the ask rate. A
+	// suppressed request is answered as a decline, later, by the vault.
+	idents := make([]string, len(r.Items))
+	for i, it := range r.Items {
+		idents[i] = AskIdent(it)
+	}
+	v := s.Ask(conn, vault.Ask{Source: f.Name(), Ref: r.ID, Idents: idents, Pending: n, Exp: exp,
+		AnswerType: "data.decided", Answer: deniedBody(r.ID)})
+	if !v.Passed() {
+		return
+	}
+	items := r.Items[:0:0]
+	for i, it := range r.Items {
+		if !v.Cooled[i] {
+			items = append(items, it) // the entries in cooldown are left out
+		}
+	}
+	p := &Pending{ID: r.ID, Conn: conn, Items: items, Uses: r.Uses, ExpiresIn: r.ExpiresIn, Reason: r.Reason, Exp: exp}
 	f.d.Pending[r.ID] = p
 	s.NotifyAllDevices("grant.pending", p.json(f.entryDetail))
 	s.Record(vault.Activity{Kind: "grant.requested", ConnectionID: conn, Ref: r.ID, Direction: "in", Audit: true})
-	s.Record(vault.Activity{Kind: "grant.request", ConnectionID: conn, Ref: r.ID, Feed: true, Priority: "high"})
+	s.Record(vault.Activity{Kind: "grant.request", ConnectionID: conn, Ref: r.ID, Feed: true, Priority: "high", AskBatch: true})
+}
+
+// AskIdent is a grant request entry's identity for the §10.4.1 cooldown:
+// its kind and ref (the same item_id whatever its fields, or the same
+// category).
+func AskIdent(it Item) string { return "grant:" + it.Kind + ":" + it.Ref }
+
+// deniedBody is data.decided for a refused request: the member's decline,
+// and the neutral answer of a suppressed one (§10.4.1).
+func deniedBody(id string) []byte {
+	return strictjson.NewBuilder().String("request_id", id).Bool("approved", false).Bytes()
+}
+
+// PendingAsks implements vault.AskSource: the connection's requests
+// waiting for the member.
+func (f *Feature) PendingAsks(conn string, now time.Time) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, p := range f.d.Pending {
+		if p.Conn == conn && now.Before(p.Exp) {
+			n++
+		}
+	}
+	return n
 }
 
 func (f *Feature) decide(s *vault.Session, body []byte) (json.RawMessage, error) {
@@ -1350,8 +1436,13 @@ func (f *Feature) decide(s *vault.Session, body []byte) (json.RawMessage, error)
 	}
 	if !d.Approve {
 		delete(f.d.Pending, p.ID)
-		_ = s.SendToConnection(p.Conn, "data.decided", strictjson.NewBuilder().String("request_id", p.ID).Bool("approved", false).Bytes())
+		_ = s.SendToConnection(p.Conn, "data.decided", deniedBody(p.ID))
 		s.Record(vault.Activity{Kind: "grant.denied", ConnectionID: p.Conn, Ref: p.ID, Direction: "out", Audit: true})
+		idents := make([]string, len(p.Items))
+		for i, it := range p.Items {
+			idents[i] = AskIdent(it)
+		}
+		s.AskDeclined(p.Conn, idents) // a decline of the whole request (§10.4.1)
 		decided(false)
 		return strictjson.NewBuilder().Raw("grants", []byte("[]")).Bytes(), nil
 	}
@@ -1437,10 +1528,15 @@ func (f *Feature) dataFetch(s *vault.Session, body []byte) {
 	base := func() *strictjson.Builder {
 		return strictjson.NewBuilder().String("fetch_id", fe.FetchID).String("grant_id", fe.GrantID)
 	}
-	refuse := func(code string) {
+	refuseWith := func(code string, extra func(*strictjson.Builder)) {
 		s.Record(vault.Activity{Kind: "drop.grant_" + code, ConnectionID: conn, Ref: fe.GrantID, Audit: true})
-		_ = s.SendToConnection(conn, "data.value", base().String("error", code).Bytes())
+		b := base().String("error", code)
+		if extra != nil {
+			extra(b)
+		}
+		_ = s.SendToConnection(conn, "data.value", b.Bytes())
 	}
+	refuse := func(code string) { refuseWith(code, nil) }
 	g := f.d.Given[fe.GrantID]
 	if g == nil || g.Conn != conn {
 		refuse(ErrNotFound)
@@ -1450,6 +1546,12 @@ func (f *Feature) dataFetch(s *vault.Session, body []byte) {
 	for _, id := range g.Fetched {
 		repeat = repeat || id == fe.FetchID
 	}
+	// The rule grants of the item (0.23.0, §10.12 Overlapping rules): a
+	// fetch through one needs a use left on every one that has uses.
+	group := []*Grant{g}
+	if g.RuleID != "" {
+		group = f.ruleGrantsOf(conn, g.Ref)
+	}
 	switch {
 	case g.State == StateRevoked:
 		refuse(ErrRevoked)
@@ -1457,7 +1559,7 @@ func (f *Feature) dataFetch(s *vault.Session, body []byte) {
 	case g.State == StateExpired:
 		refuse(ErrExpired)
 		return
-	case !repeat && g.Uses > 0 && g.Used >= g.Uses:
+	case !repeat && (g.State == StateUsed || spent(group)):
 		refuse(ErrExhausted)
 		return
 	}
@@ -1466,28 +1568,111 @@ func (f *Feature) dataFetch(s *vault.Session, body []byte) {
 		refuse(ErrUnavailable)
 		return
 	}
+	if !repeat && g.RuleID != "" {
+		// The rate limits of the rules that include the item, checked
+		// last; no use is counted (0.23.0, §10.12).
+		if retry, ok := f.items.RuleFetchAllowed(s, conn, g.Ref); !ok {
+			refuseWith(ErrRateLimited, func(b *strictjson.Builder) { b.Uint("retry_after", retryAfter(retry)) })
+			return
+		}
+	}
 	sealed, err := sharewire.SealValue(fe.Reply, g.ID, fe.FetchID, v)
 	if err != nil {
 		refuse(ErrUnavailable)
 		return
 	}
 	if !repeat {
-		g.Used++
+		now := s.Now().UTC()
 		g.Fetched = append(g.Fetched, fe.FetchID)
 		if len(g.Fetched) > MaxFetched {
 			g.Fetched = g.Fetched[len(g.Fetched)-MaxFetched:]
 		}
-		if g.Uses > 0 && g.Used >= g.Uses {
-			g.end(StateUsed, s.Now().UTC())
+		if g.RuleID == "" {
+			g.Used++
+			if g.Uses > 0 && g.Used >= g.Uses {
+				g.end(StateUsed, now)
+			}
+			syncChanged(s, g)
+		} else {
+			// One use on each rule grant of the item that has uses (a
+			// grant without counts its fetches); when one is spent all
+			// are, in this flush.
+			last := false
+			for _, x := range group {
+				if x.Uses > 0 || x == g {
+					x.Used++
+				}
+				last = last || x.Uses > 0 && x.Used >= x.Uses
+			}
+			for _, x := range group {
+				if last {
+					x.end(StateUsed, now)
+				}
+				if last || x == g || x.Uses > 0 {
+					syncChanged(s, x)
+				}
+			}
+			f.items.RuleFetched(conn, g.Ref, s.Now())
 		}
 		s.Record(vault.Activity{Kind: "grant.fetched", ConnectionID: conn, Ref: g.ID, Direction: "out", Audit: true})
-		syncChanged(s, g)
 	}
 	b := base().Base64("value_sealed", sealed)
-	if g.Uses > 0 {
-		b.Uint("uses_left", g.Uses-g.Used)
+	if left, counted := usesLeft(group); counted {
+		b.Uint("uses_left", left)
 	}
 	_ = s.SendToConnection(conn, "data.value", b.Bytes())
+}
+
+// ruleGrantsOf returns the rule grants of an item to conn (0.23.0,
+// §10.12): the given grants of rules for that item that are active or
+// spent (not revoked or expired), sorted by id.
+func (f *Feature) ruleGrantsOf(conn, item string) []*Grant {
+	var out []*Grant
+	for _, id := range sortedKeys(f.d.Given) {
+		x := f.d.Given[id]
+		if x.Conn == conn && x.Ref == item && x.RuleID != "" && (x.State == StateActive || x.State == StateUsed) {
+			out = append(out, x)
+		}
+	}
+	return out
+}
+
+// spent reports whether a grant of the group has no use left.
+func spent(group []*Grant) bool {
+	for _, x := range group {
+		if x.State == StateUsed || x.Uses > 0 && x.Used >= x.Uses {
+			return true
+		}
+	}
+	return false
+}
+
+// usesLeft is the least uses left of the group's grants that have uses.
+func usesLeft(group []*Grant) (uint64, bool) {
+	var left uint64
+	counted := false
+	for _, x := range group {
+		if x.Uses == 0 {
+			continue
+		}
+		l := uint64(0)
+		if x.Used < x.Uses {
+			l = x.Uses - x.Used
+		}
+		if !counted || l < left {
+			left, counted = l, true
+		}
+	}
+	return left, counted
+}
+
+// retryAfter is retry_after's whole seconds, rounded up and at least 1.
+func retryAfter(d time.Duration) uint64 {
+	n := uint64((d + time.Second - 1) / time.Second)
+	if n < 1 {
+		n = 1
+	}
+	return min(n, MaxRetryAfter)
 }
 
 func (f *Feature) dataCatalogGet(s *vault.Session, body []byte) {
@@ -1519,9 +1704,11 @@ func (f *Feature) catalogBody(s *vault.Session, conn, id string) []byte {
 			continue
 		}
 		e := CatalogEntry{Meta: meta, GrantID: g.ID}
-		if g.Uses > 0 {
-			e.UsesLeft, e.Counted = g.Uses-g.Used, true
+		group := []*Grant{g}
+		if g.RuleID != "" {
+			group = f.ruleGrantsOf(conn, g.Ref) // the least of the item's rule grants (0.23.0)
 		}
+		e.UsesLeft, e.Counted = usesLeft(group)
 		es = append(es, e)
 	}
 	for _, m := range f.items.Usable(conn, s.Now()) {

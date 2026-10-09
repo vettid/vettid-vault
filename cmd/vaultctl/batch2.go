@@ -21,7 +21,8 @@ func init() {
 	commands["session"] = command{"session request [-seconds N] | approve -id ID [-seconds N] | deny -id ID | end [-device ID]", cmdSession}
 	commands["approval"] = command{"approval decide -id ID -approve=true|false   held desktop/agent requests", cmdApproval}
 	commands["block"] = command{"block add -connection ID|-pending ID [-note N] | remove -id ID | list", cmdBlock}
-	commands["connection"] = command{"connection update -connection ID -version N [-alias A] [-note N] [-tags a,b] [-favorite=bool] [-archived=bool] | auth -connection ID [-context C] | auth-approve -id ID | auth-deny -id ID | auth-list", cmdConnection}
+	commands["connection"] = command{"connection update -connection ID -version N [-alias A] [-note N] [-tags a,b] [-favorite=bool] [-archived=bool] | auth -connection ID [-context C] | auth-approve -id ID | auth-deny -id ID | auth-list | " +
+		"asks -connection ID | asks-mute -connection ID [-unmute] | asks-resume -connection ID   (a connection's asks, §10.4.1)", cmdConnection}
 	commands["call"] = command{"call dial -connection ID [-media audio|video] [-hold 2s] | answer [-wait 60s] | end -id ID [-reason hangup] | list", cmdCall}
 }
 
@@ -113,6 +114,7 @@ func cmdConnection(ctx context.Context, g *globals, args []string) error {
 	arch := fs.String("archived", "", "true|false")
 	ctxt := fs.String("context", "", "authentication context shown to the peer")
 	id := fs.String("id", "", "authentication request id")
+	unmute := fs.Bool("unmute", false, "asks-mute: unmute instead")
 	_ = fs.Parse(rest)
 	return withDevice(ctx, g, func(d *client.Device) (any, error) {
 		switch op {
@@ -147,6 +149,20 @@ func cmdConnection(ctx context.Context, g *globals, args []string) error {
 			return nil, d.AuthDeny(ctx, *id)
 		case "auth-list":
 			return d.Op(ctx, "connection.authenticate.list", nil)
+		case "asks":
+			a, err := d.ConnectionAsks(ctx, *conn)
+			if err != nil {
+				return nil, err
+			}
+			out := map[string]any{"muted": a.Muted, "paused": a.Paused, "cooldowns": a.Cooldowns}
+			if a.Paused {
+				out["paused_at"] = a.PausedAt
+			}
+			return out, nil
+		case "asks-mute":
+			return nil, d.ConnectionAsksMute(ctx, *conn, !*unmute)
+		case "asks-resume":
+			return nil, d.ConnectionAsksResume(ctx, *conn)
 		}
 		return nil, errors.New(commands["connection"].usage)
 	})

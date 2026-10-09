@@ -300,6 +300,14 @@ func (f *Feature) challenge(s *vault.Session, in *envelope.Inner) error {
 	if !in.Exp.IsZero() && in.Exp.Before(c.Exp) {
 		c.Exp = in.Exp
 	}
+	// A received challenge is an ask (§10.4.1, 0.23.0): mute, pause, the
+	// cooldown (any challenge), the pending cap and the ask rate. A
+	// suppressed one is answered `denied`, later, by the vault.
+	v := s.Ask(conn, vault.Ask{Source: f.Name(), Ref: c.ID, Idents: []string{AskIdent}, Pending: count(f.d.In, conn), Exp: c.Exp,
+		AnswerType: "connection.authenticate.response", Answer: deniedBody(c.ID)})
+	if !v.Passed() {
+		return nil
+	}
 	f.d.In[c.ID] = c
 	b := strictjson.NewBuilder().String("connection_id", conn).String("request_id", c.ID).String("exp", envelope.FormatTS(c.Exp))
 	if c.Context != "" {
@@ -307,8 +315,30 @@ func (f *Feature) challenge(s *vault.Session, in *envelope.Inner) error {
 	}
 	s.NotifyDevicesWith("connection.authenticate.pending", b.Bytes(), "", vault.SendOptions{Exp: c.Exp})
 	s.Record(vault.Activity{Kind: "connection.authenticate.requested", ConnectionID: conn, Ref: c.ID, Direction: "in", Audit: true,
-		Feed: true, Priority: "high"})
+		Feed: true, Priority: "high", AskBatch: true})
 	return nil
+}
+
+// AskIdent is a challenge's identity for the §10.4.1 cooldown: any
+// challenge from the connection.
+const AskIdent = "auth"
+
+func deniedBody(id string) []byte {
+	return strictjson.NewBuilder().String("request_id", id).String("status", StatusDenied).Bytes()
+}
+
+// PendingAsks implements vault.AskSource: the connection's challenges
+// waiting for the member.
+func (f *Feature) PendingAsks(conn string, now time.Time) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, c := range f.d.In {
+		if c.Conn == conn && now.Before(c.Exp) {
+			n++
+		}
+	}
+	return n
 }
 
 func requestID(body []byte) (string, error) {
@@ -378,9 +408,9 @@ func (f *Feature) deny(s *vault.Session, body []byte) (json.RawMessage, error) {
 		return nil, errNotFound
 	}
 	delete(f.d.In, id)
-	_ = s.SendToConnection(c.Conn, "connection.authenticate.response",
-		strictjson.NewBuilder().String("request_id", id).String("status", StatusDenied).Bytes())
+	_ = s.SendToConnection(c.Conn, "connection.authenticate.response", deniedBody(id))
 	s.Record(vault.Activity{Kind: "connection.authenticate.denied", ConnectionID: c.Conn, Ref: id, Direction: "out", Audit: true})
+	s.AskDeclined(c.Conn, []string{AskIdent}) // §10.4.1
 	s.SyncEvent("connection.authenticate.decided", strictjson.NewBuilder().String("request_id", id).Bool("approved", false).Bytes())
 	return nil, nil
 }

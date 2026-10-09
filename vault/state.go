@@ -160,6 +160,9 @@ type Peer struct {
 	// PairGrants are an agent's initial LEASH grants, from the pairing
 	// approval until the pairing completes (§6.7, §10.11).
 	PairGrants json.RawMessage `json:"pair_grants,omitempty"`
+	// Asks is a connection's §10.4.1 state (0.23.0): mute, pause,
+	// cooldowns, the ask-rate window and the held neutral answers.
+	Asks *AskState `json:"asks,omitempty"`
 }
 
 // PeerMeta is the owner's own metadata about a connection: never sent to

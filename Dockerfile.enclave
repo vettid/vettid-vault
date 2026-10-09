@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1
-#
 # Reproducible enclave image (VAULT-PLAN D3, docs/SMOKE.md): the release
 # vault-enclave binary alone in an empty root file system. nitro-cli
 # build-enclave turns this image into the EIF whose PCR0 the manifest and
@@ -12,7 +10,7 @@
 # SOURCE_DATE_EPOCH as its time.
 
 # debian:bookworm-slim (multi-arch index digest, 2026-09-18)
-FROM docker.io/library/debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS build
+FROM public.ecr.aws/docker/library/debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS build
 
 ARG GO_VERSION=1.26.8
 ARG GO_SHA256_AMD64=d0f743b33e8d8945e6b1f432edd15785c70507121d6e2a723b21285eddf8b57b

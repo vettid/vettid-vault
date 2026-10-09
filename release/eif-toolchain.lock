@@ -9,7 +9,7 @@
 # release workflow records this file's SHA-256 in measurements.json.
 #
 # KEY=VALUE lines:
-base_image=docker.io/library/amazonlinux:2023@sha256:5b29412077a463b4a3a8fbc99a8cdf4b929f38a3ecc8dac10328d8f36b0099b8
+base_image=public.ecr.aws/docker/library/amazonlinux:2023@sha256:5b29412077a463b4a3a8fbc99a8cdf4b929f38a3ecc8dac10328d8f36b0099b8
 releasever=2023.12.20260918
 arch=aarch64
 nitro_cli_version=1.5.0-0.amzn2023

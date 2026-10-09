@@ -45,7 +45,7 @@ func (m *Manager) Start(ctx context.Context) error {
 	}
 	m.started = true
 	now := m.now()
-	m.record(Activity{Kind: "vault.unlocked", Audit: true}, now)
+	m.record(Activity{Kind: "vault.unlocked", DeviceID: m.unlockedBy, Audit: true}, now)
 	m.ownerCheckInit(now)
 	m.remintIssued(now)
 	m.reconnectExpired(now)

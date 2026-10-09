@@ -535,6 +535,7 @@ func (m *Manager) resume(ctx context.Context, p AltUnlockParams, out *AltUnlockO
 		return fail(CodeRetry, err)
 	}
 	if !p.pinOnly {
+		m.unlockedBy = m.unlockDevice(p.DeviceIK)
 		m.syncUnlockKeysWith(findUnlockKey(m.hdr, p.DeviceIK))
 		for i := range m.hdr.UnlockKeys {
 			if suite.EqualPublic(m.hdr.UnlockKeys[i].IK, p.DeviceIK) {
@@ -583,6 +584,19 @@ func (m *Manager) resume(ctx context.Context, p AltUnlockParams, out *AltUnlockO
 		out.Events = append(out.Events, ne)
 	}
 	return m, out
+}
+
+// unlockDevice is the device id of the app that unlocks with ik, for
+// vault.unlocked (0.23.2, §10.9): the app's device record, as device.list
+// lists it. The first app before its enrollment handshake and a recovered
+// app before its handshake have none ("").
+func (m *Manager) unlockDevice(ik ed25519.PublicKey) string {
+	for _, d := range m.st.Devices {
+		if d.Kind == KindApp && suite.EqualPublic(d.IK, ik) {
+			return d.ID
+		}
+	}
+	return ""
 }
 
 // unlockTokens handles the tokens of an unlock (§11.4): it stores the

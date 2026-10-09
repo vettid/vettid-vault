@@ -99,8 +99,9 @@ func (m *Manager) hStatus(_ context.Context, s *Session, _ *envelope.Inner) (jso
 		Raw("owner_check", m.ownerCheckStatus(s.peer, s.now)).Bytes(), nil
 }
 
-func (m *Manager) hLock(_ context.Context, _ *Session, _ *envelope.Inner) (json.RawMessage, error) {
+func (m *Manager) hLock(_ context.Context, s *Session, _ *envelope.Inner) (json.RawMessage, error) {
 	m.lockPending = true // after this batch: flush, vault.locking, zeroize (§12.3)
+	m.lockBy = s.from.ID // audited on vault.locked (0.23.2)
 	return nil, nil
 }
 

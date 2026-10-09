@@ -323,15 +323,13 @@ func DeclineAsk(st *AskState, idents []string, now time.Time) (paused bool) {
 	return false
 }
 
-// ResumeAsks ends a pause and clears the decline times and cooldowns; on
-// a connection that is not paused and has no cooldown in force it changes
-// nothing (§10.4.1) and reports false.
+// ResumeAsks ends a pause, if any, and always clears the decline times
+// and cooldowns (§10.4.1; 0.23.1, owner decision of 2026-10-09); it
+// reports whether anything was cleared.
 func ResumeAsks(st *AskState, now time.Time) bool {
-	if !st.Paused() && st.cooldownsInForce(now) == 0 {
-		return false
-	}
+	changed := st.Paused() || len(st.Declines) > 0 || len(st.Cooldowns) > 0
 	st.PausedAt, st.Declines, st.Cooldowns = time.Time{}, nil, nil
-	return true
+	return changed
 }
 
 // DueAnswers removes and returns the held answers due at now.
@@ -477,8 +475,8 @@ func (m *Manager) hAsksMute(_ context.Context, s *Session, in *envelope.Inner) (
 	return json.RawMessage(`{}`), nil
 }
 
-// hAsksResume ends a pause and clears the decline times and cooldowns
-// (§10.4.1).
+// hAsksResume always clears the decline times and cooldowns and ends a
+// pause, if any (§10.4.1, 0.23.1).
 func (m *Manager) hAsksResume(_ context.Context, s *Session, in *envelope.Inner) (json.RawMessage, error) {
 	o, err := obj(in)
 	if err != nil {
@@ -492,10 +490,12 @@ func (m *Manager) hAsksResume(_ context.Context, s *Session, in *envelope.Inner)
 	if p == nil {
 		return nil, errNotFound
 	}
-	if ResumeAsks(m.askState(p), s.now) {
-		m.dirty = true
-		m.record(Activity{Kind: "connection.asks_resumed", ConnectionID: id, Audit: true}, s.now)
-		m.connChanged(p, s.now)
-	}
+	// Always: a resume clears the decline history and cooldowns and ends
+	// a pause if any, and is audited even when nothing was paused
+	// (0.23.1).
+	ResumeAsks(m.askState(p), s.now)
+	m.dirty = true
+	m.record(Activity{Kind: "connection.asks_resumed", ConnectionID: id, Audit: true}, s.now)
+	m.connChanged(p, s.now)
 	return json.RawMessage(`{}`), nil
 }

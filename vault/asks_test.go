@@ -163,8 +163,8 @@ func TestAskCooldown(t *testing.T) {
 
 // The pause: when the third decline falls within 30 days of the first of
 // those three (sliding); once. Resume ends it and clears the decline
-// times and cooldowns; on a connection neither paused nor in cooldown it
-// changes nothing.
+// times and cooldowns, and (0.23.1) clears them on a connection that is
+// not paused too.
 func TestAskPauseResume(t *testing.T) {
 	st := &AskState{}
 	if DeclineAsk(st, []string{"auth"}, askT0) || DeclineAsk(st, []string{"auth"}, askT0.Add(10*24*time.Hour)) {
@@ -186,9 +186,15 @@ func TestAskPauseResume(t *testing.T) {
 	if !ResumeAsks(st, now) || st.Paused() || st.Declines != nil || st.Cooldowns != nil {
 		t.Fatalf("resume: %+v", st)
 	}
+	// 0.23.1 (owner decision of 2026-10-09): resume always clears the
+	// decline history and cooldowns, paused or not.
 	st.Declines = []time.Time{now}
-	if ResumeAsks(st, now) || len(st.Declines) != 1 {
-		t.Fatal("resume changed a connection that was neither paused nor in cooldown")
+	st.Cooldowns = []AskCooldownEntry{{ID: "auth", Until: now.Add(AskCooldownTTL)}}
+	if !ResumeAsks(st, now) || st.Declines != nil || st.Cooldowns != nil || st.Paused() {
+		t.Fatalf("resume of a connection that was not paused kept its history: %+v", st)
+	}
+	if ResumeAsks(st, now) {
+		t.Fatal("resume reported a change on a clear connection")
 	}
 }
 
@@ -288,13 +294,14 @@ func TestAsksTypes(t *testing.T) {
 	if !rec.has("connection.asks_muted") || !strings.HasPrefix(get(), `"asks":{"muted":true,"paused":false,"cooldowns":0}`) {
 		t.Fatal("mute not audited or not shown")
 	}
-	// Resume on a connection neither paused nor in cooldown changes
-	// nothing (no audit entry).
+	// Resume on a connection neither paused nor in cooldown is still
+	// audited (0.23.1).
 	d.sendAs(app, "connection.asks.resume", `{"connection_id":"c1"}`)
 	d.inbox(app)
-	if rec.has("connection.asks_resumed") {
-		t.Fatal("a resume that changed nothing was audited")
+	if !rec.has("connection.asks_resumed") {
+		t.Fatal("a resume of a connection that was not paused was not audited")
 	}
+	rec.kinds = nil
 	// Three declines pause: one connection.asks_paused (high, feed).
 	d.m.mu.Lock()
 	h := managerHost{d.m}

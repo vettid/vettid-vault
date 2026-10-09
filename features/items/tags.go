@@ -311,7 +311,13 @@ func (f *Feature) tagMerge(s *vault.Session, body []byte) (json.RawMessage, erro
 			continue
 		}
 		n++
-		e := strictjson.NewBuilder().String("rule_id", a.rule.ID).String("item_id", a.item.ID).String("mode", a.rule.Terms.Mode).Bytes()
+		eb := strictjson.NewBuilder().String("rule_id", a.rule.ID).String("item_id", a.item.ID).String("mode", a.rule.Terms.Mode)
+		if a.askRule != "" {
+			// An ask rule of the subject holds it: a merge can leave an
+			// auto entry pending (0.23.1, as item.put and item.tag).
+			eb.String("ask_rule_id", a.askRule)
+		}
+		e := eb.Bytes()
 		if len(shares)+len(e)+2 > MaxMessageBytes {
 			continue // counted in shares_total, not listed
 		}

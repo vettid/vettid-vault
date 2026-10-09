@@ -10,7 +10,7 @@
 #
 # The base image digest below must equal the lock's base_image
 # (scripts/lint_test.go checks it).
-FROM docker.io/library/amazonlinux:2023@sha256:5b29412077a463b4a3a8fbc99a8cdf4b929f38a3ecc8dac10328d8f36b0099b8
+FROM public.ecr.aws/docker/library/amazonlinux:2023@sha256:5b29412077a463b4a3a8fbc99a8cdf4b929f38a3ecc8dac10328d8f36b0099b8
 
 COPY eif-toolchain.lock /toolchain/eif-toolchain.lock
 

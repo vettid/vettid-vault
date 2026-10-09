@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1
-#
 # Reproducible enclave image (VAULT-PLAN D3, docs/SMOKE.md): the release
 # vault-enclave binary alone in an empty root file system. nitro-cli
 # build-enclave turns this image into the EIF whose PCR0 the manifest and

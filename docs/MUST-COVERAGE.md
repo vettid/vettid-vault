@@ -18,7 +18,8 @@ share.decide{include, decline}, grant labels and names, and suitability
 before the password; for 0.21.1: the 0.21.0 errata; for 0.22.0:
 History export, `audit.export`; and for 0.23.0: a connection's asks
 (no approval fatigue), rate limits on connection rules, overlapping
-rules (ask wins), the 0.22.0 errata and the month hint.)
+rules (ask wins), the 0.22.0 errata and the month hint; for 0.23.1: the
+0.23.0 errata.)
 
 Every MUST / MUST NOT in VAULT-MESSAGING 0.2.3 §4–§6 (plus the §13.4 and
 §13.6 rules they rely on), and the named test that covers it. Normative
@@ -716,7 +717,7 @@ grammar.
 | 10.4.1 | The cooldown: 7 days after a decline of the same ask (a grant entry's kind and ref, a use's item_id and field_id, an action_id, any challenge, any offer from the introducer); a grant request with some entries in cooldown reaches the member without them, all of them: suppressed; at most 64 cooldowns, the oldest dropped; location requests have none | `vault.TestAskCooldown`, `items.TestAsksGrantPartialCooldown`, `items.TestAsksEveryKind`, `e2e.TestConnectionAsksE2E` |
 | 10.4.1 | A decline is an explicit refusal of a whole ask (`grant.decide{approve: false}`, `critical-secret-use.deny`, `action.respond{approve: false}`, `connection.authenticate.deny`, `intro.decline`); a partial approval is not; the third decline within 30 days of the first of three (sliding) pauses the asks, once: one high-priority feed item and audit entry `connection.asks_paused`, `sync.event{connection.changed}` | `vault.TestAskPauseResume`, `vault.TestAsksTypes`, `items.TestAsksPendingRatePause`, `items.TestAsksGrantPartialCooldown` |
 | 10.4.1 | No oracle: a suppressed ask is answered exactly as the member's decline of its kind (same type and members; none for a location request), never at once: after a uniform 1–20 minute delay, at most until 1 minute before the ask's exp; at most 16 held per connection (beyond: no answer); a repeat of a held ask is ignored; housekeeping sends it when due | `vault.TestAskHeldAnswers`, `vault.TestAskHeldAnswerSent`, `items.TestAsksEveryKind` (byte-identical to the decline, per kind), `e2e.TestConnectionAsksE2E` |
-| 10.4.1 | `connection.asks.mute{connection_id, muted}` and `connection.asks.resume{connection_id}` answer `{}` or `not_found`, app and desktop without step-up, not delegable; resume ends a pause and clears decline times and cooldowns, and changes nothing without a pause or cooldown; unmuting does not resume; `<connection>.asks {muted, paused, paused_at?, cooldowns}`; changes audited (`connection.asks_muted`, `_unmuted`, `_resumed`) with `sync.event{connection.changed}` | `vault.TestAsksTypes`, `leash.TestAsksNeverDelegable`, `e2e.TestConnectionAsksE2E`, `e2e.TestVaultctlSmoke` |
+| 10.4.1 | `connection.asks.mute{connection_id, muted}` and `connection.asks.resume{connection_id}` answer `{}` or `not_found`, app and desktop without step-up, not delegable; resume ends a pause and clears decline times and cooldowns (0.23.1: always, audited even without a pause; below); unmuting does not resume; `<connection>.asks {muted, paused, paused_at?, cooldowns}`; changes audited (`connection.asks_muted`, `_unmuted`, `_resumed`) with `sync.event{connection.changed}` | `vault.TestAsksTypes`, `leash.TestAsksNeverDelegable`, `e2e.TestConnectionAsksE2E`, `e2e.TestVaultctlSmoke` |
 | 10.4.1 | Every suppressed ask is audited `drop.ask_muted`, `_paused`, `_cooldown`, `_pending` or `_rate` (connection_id, ref = the ask's id), a removed grant entry `drop.ask_cooldown`; no feed item, no `.pending` | `vault.TestAskCheckOrder`, `items.TestAsksEveryKind`, `items.TestAsksGrantPartialCooldown` |
 | 10.4.1, 10.9 | Batching: asks of one connection within 10 minutes of the first are one feed item (the first's), updated with a new seq and the same item_id, `count` from 2 (`sync.event{feed.updated}`); the per-type `.pending` events are still sent; a new batch after 10 minutes | `items.TestAsksBatching` |
 | 10.12 | A connection rule takes `per_hour` (1–3,600) and `per_day` (1–86,400), optional, no default (`status_ttl` stays agent-only); shown on the rule, as `limits` on given grants (the rule's current) and descriptors (at issue), on received grants as received | `items.TestShareAuto`, `items.TestConnRuleRateLimits`, `grants.TestRateLimitedFetch`, `grants.TestRateLimitedWire`, `e2e.TestRuleLimitsAndOverlapE2E` |
@@ -731,3 +732,19 @@ grammar.
 | 10.9 | The empty-log preview answers `count` 0, `upto_seq` 0 and `upto_hash` 32 zero bytes; an export of it is `bad_request` | `audit.TestExportEmptyLog` |
 | 6.3, 6.5 | A message of the new epoch that reaches the vault, as responder, before `hs.fin` is left unacked (not processed, dropped or deduplicated) and taken on redelivery after `hs.fin` | `vault.TestNewEpochBeforeFinUnacked` |
 | 10.7 | Registry version 3: `payment_card`'s Expires carries `"format": "month"` (the only hint, on a `date` field); `YYYY-MM` is a date value; no template carries a reserved tag | `itemspec.TestTemplateRegistry` |
+
+## 0.23.0 errata (§10.4.1, §10.8, §10.12, §10.16, §15 item 31.13; 0.23.1)
+
+| § | Requirement | Test(s) |
+|---|---|---|
+| 10.8, 10.12 | `tag.merge`'s `shares` (dry run and real) carry `ask_rule_id` on an `auto` entry that an `ask` rule of the subject holds, as `item.put`'s and `item.tag`'s dry runs do | `items.TestMergeSharesAskRuleID` |
+| 10.4.1 | A suppressed ask's answer is due at min(the random 1–20 minute delay, exp − 1 minute), never earlier than now; held answers are kept in DEK state, and one due while the vault is locked is sent at the first housekeeping after unlock | `vault.TestHeldAnswerDueClamp`, `vault.TestAskHeldAnswers`, `vault.TestHeldAnswerAfterUnlock` |
+| 10.4.1 | An ask that joins a batch whose feed item is read or archived updates its `count` and `seq` and keeps its status; a deleted item ends the batch and the ask starts a new one | `items.TestBatchReadArchivedDeleted` |
+| 10.12 | A rule's windows count only fetches through the rule grants of the item; a fetch through a one-off (or shared-action) grant is neither counted nor refused by them | `grants.TestOneOffFetchNotInRuleWindows`, `grants.TestRateLimitedFetch` |
+| 10.12 | A repeated `fetch_id` is answered again, uncounted, even while a window is full | `items.TestRuleWindowsWithoutLimits` |
+| 10.12 | The windows count a rule's fetches even without limits, so a limit set later applies to the open window | `items.TestRuleWindowsWithoutLimits` |
+| 10.4.1 | (Owner decision of 2026-10-09.) `connection.asks.resume` always clears the connection's decline times and cooldowns and ends a pause if any; it is audited `connection.asks_resumed` and sends `sync.event{connection.changed}` even when nothing was paused | `vault.TestResumeAlwaysClears`, `vault.TestAskPauseResume`, `vault.TestAsksTypes` |
+| 10.4.1, 10.16 | Each grant entry removed for a cooldown is audited `drop.ask_cooldown` on its own, also when the reduced request is then suppressed; a suppressed location request does not use location's one-per-10-minutes allowance | `vault.TestCooledEntriesAuditedWhenSuppressed`, `vault.TestAskCooldown`, `items.TestSuppressedLocationKeepsAllowance` |
+| 10.12 | `retry_after` is at most 86,400: the vault clamps what it sends, and a received `data.value` with more is malformed | `grants.TestRetryAfterMax` |
+| 10.12 | A received `limits: {}` means no limits | `grants.TestEmptyLimitsMeanNone`, `grants.TestRateLimitedWire` |
+| 10.4.1 | Ask-state changes send `sync.event{kind: "connection.changed", connection_id, version}` to every owner device | `vault.TestResumeAlwaysClears`, `vault.TestAsksTypes` |

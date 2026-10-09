@@ -69,8 +69,8 @@ func (d *Device) ConnectionAsksMute(ctx context.Context, connectionID string, mu
 	return err
 }
 
-// ConnectionAsksResume ends a pause of a connection's asks and clears
-// their decline times and cooldowns.
+// ConnectionAsksResume always clears a connection's decline times and
+// cooldowns and ends a pause of its asks, if any (0.23.1).
 func (d *Device) ConnectionAsksResume(ctx context.Context, connectionID string) error {
 	_, err := d.Op(ctx, "connection.asks.resume", map[string]any{"connection_id": connectionID})
 	return err

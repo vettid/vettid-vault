@@ -505,7 +505,9 @@ func (t *Tables) Lifecycle(_ context.Context, ev parent.Lifecycle, me string, no
 		r.State = "unlocked"
 	case "locked", "deleted":
 		r.State = ev.Event
-		r.LeaseInstance, r.LeaseExpires = "", 0
+		if !(ev.Event == "locked" && ev.KeepLease) {
+			r.LeaseInstance, r.LeaseExpires = "", 0
+		}
 	}
 	if ev.Event == "deleted" {
 		t.ids++

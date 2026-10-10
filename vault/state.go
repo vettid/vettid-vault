@@ -76,6 +76,12 @@ type State struct {
 	// OwnerCheck is the daily owner check's record (§3.6.1); nil in a
 	// vault from before 0.13.0 until its first start.
 	OwnerCheck *OwnerCheck `json:"owner_check,omitempty"`
+
+	// Push is the app's push registration (0.24.0, §14.1), at most one;
+	// PushRegs are when registrations reached the gateway (the rolling
+	// 24 h window of push_registrations).
+	Push     *PushRegistration `json:"push,omitempty"`
+	PushRegs []time.Time       `json:"push_regs,omitempty"`
 }
 
 // ReleaseMove is a recorded, not yet confirmed move to another release
@@ -391,6 +397,9 @@ type OutboxEntry struct {
 	// AwaitToken: the peer's standing token expired; the deposit waits
 	// for the fresh one the reconnect it started brings (§6.6, §8.6).
 	AwaitToken bool `json:"await_token,omitempty"`
+	// Wake is the deposit's push wake class (0.24.0, §14.2): the app is
+	// woken once the relay accepted it; "" for none.
+	Wake string `json:"wake,omitempty"`
 }
 
 // AuditEntry records a dropped or refused message (§6.3, §6.6, §7.3).

@@ -77,6 +77,8 @@ LocalStack, the real relay and a stand-in for the member API
 | `features/presence` | §9.2, §10.17 | On-demand presence pings with a per-connection policy; refusals are silent (V4 batch 4) |
 | `features/wallet`, `vms/btc` | §10.18 | Bitcoin wallets: BIP86 (taproot, the default) and BIP84 accounts whose recovery phrase is a critical item, addresses without the password, PSBT signing under a signing policy as a credential operation; the member's app is the chain source (V4 batch 4; btcd libraries, vault process only) |
 | `client` | §6.7, §9.1, §11 | Reference client for an app, desktop or agent: verify enclaves and manifests, enroll and unlock over the alternate channel, approve release updates, pair (with device attestation), session and rekeys, requests and events, token refresh |
+| `vault/push.go`, `vms/pushwire` | §14 | Push (0.24.0, N3): `push.register` / `push.unregister`, the app's one registration in DEK state (wake key, wake blob, token hash; never the token), `push` in `device.list`, the wake rules (triggers after accepted deposits, 5 s debounce, hourly caps, retries, `push.token-needed`); the gateway wire and a client signing with the wake key (docs/V4-NOTES.md "Push") |
+| `internal/pushtest` | — | TEST-ONLY push gateway stand-in: PUSH-GATEWAY's signature, attestation and blob rules against the TEST Nitro root; records wakes instead of sending them, injects failures |
 | `cmd/vaultctl` | — | Test driver over `client`; dev builds (`-tags devenclave`) also create and run vaults, and enroll and unlock through an in-process enclave |
 | `cmd/devstack` | — | Long-running local dev stack for app development (relay, LocalStack, parent, dev enclave, member API stand-in, vaultctl peer, control port). Dev builds only (`-tags devenclave`); without the tag it is a stub (`make check-tcb`) |
 | `devenclave` | — | Dev sealer and direct create/unlock with a PIN. Every file carries the `devenclave` tag; release builds cannot compile it in (`make check-tcb`) |
@@ -213,6 +215,7 @@ binary. One stack per data directory.
 | `-localstack` | — | an external LocalStack endpoint; without it, `integration/docker-compose.yml` is started (one container, 1.5 GiB cap) and stopped on exit, and an already running LocalStack on :4566 is refused rather than shared |
 | `-compose` | `podman compose`, else `docker compose` | compose command |
 | `-wait-free-mem` | 8 | refuse to start unless this many GB of memory are available (0: no check); `-mem-wait 10m` keeps re-checking |
+| (push) | — | the push gateway stand-in (`internal/pushtest`) on `https://push.vettid.test` behind a TLS front with the test root: the dev enclave runs with `-push-url` (dev builds only) and the parent allows the host, so `push.register` works against the dev enclave's TEST attestation |
 | `-recovery-skew` | 0 | e.g. `24h`: `POST /dev/recovery/code` moves the recovery clock of the enclave and the member API stand-in forward this much after minting each code, skipping the 24 h recovery delay (below) |
 
 Everything listens on 127.0.0.1. Child processes run with
@@ -226,6 +229,16 @@ Everything listens on 127.0.0.1. Child processes run with
 | `POST /dev/peer/request` | `{"type": T, "body": {...}}`: `vaultctl request` on the peer; answers the vault's response. Events the peer received while the request ran are kept for `/dev/peer/event` |
 | `POST /dev/peer/event` | `{"type": T, "match": {k: v}, "timeout_s": N}`: waits (default 90 s, at most 300) for a peer event of type T whose body matches; others are kept for later calls |
 | `POST /dev/recovery/code` | `{"guid": G, "timeout_s": N}` (needs `-recovery-skew`): plays the account portal's recovery for member G (VAULT-MESSAGING §11.11): a fresh browser P-256 key, `POST /api/vault/recovery`, the recovery clock moved past the delay, the sealed code fetched and opened. Answers `{vault_id, recovery_id, code, qr, not_before, expires_at, available_at}`, `qr` being the QR payload the app scans and registers with (`POST /api/vault/recovery/register`); `422 {"error": "no_credential"}` for a vault without a credential (that recovery is cancelled); member API refusals (`404`, `409 recovery_active`) as they come |
+
+**Push.** `GET /dev/push` lists the stand-in's registrations count,
+recorded wakes (`{at, platform, environment?, app_id, token_sha256,
+class}`: the token only as its SHA-256) and refusals; `POST /dev/push/fail
+{status, code, retry_after?, count?}` answers the next wakes with an error
+(410 `token_gone`, 400 `token_invalid`, 410 `blob_invalid`, 429, 502);
+`POST /dev/push/reseal {count?}` answers with a reseal; `POST
+/dev/push/reset` forgets everything but the blob key; `POST /dev/push/wait
+{wakes, timeout_s}` waits for N wakes. `vaultctl push register|unregister|status`
+drives an app's registration.
 
 **Recovery.** The member API stand-in serves `POST`/`GET
 /api/vault/recovery`, `POST /api/vault/recovery/cancel` and `POST
@@ -301,8 +314,11 @@ Release constants (VAULT-MESSAGING 0.10.0 §11.10.8) are per channel:
 embedded by the build tag `vettid_channel_prod` / `vettid_channel_staging`,
 which `CHANNEL=prod|staging scripts/build-eif.sh` selects (default `none`:
 no constants, the smoke-test image, which refuses every enrollment and
-unlock). The build refuses a channel file with a `TODO-…` placeholder or a
-missing value (`go run ./cmd/releasecfg check prod`); the production
+unlock). Since 0.24.0 each file also pins its channel's push gateway
+(`push_url`: `https://push.vettid.org` or `https://push.staging.vettid.org`;
+any other value is malformed), which is on the image's egress allowlist;
+the parent allows both gateway hosts (`parent.PushHosts`). The build
+refuses a channel file with a `TODO-…` placeholder or a missing value (`go run ./cmd/releasecfg check prod`); the production
 values wait for owner decisions O1 (vault account), O3 (manifest keys) and
 O8 (Android signing digests).
 

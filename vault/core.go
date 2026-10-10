@@ -68,6 +68,7 @@ func (m *Manager) registerCore() {
 	m.registerAccess()
 	m.registerConnections()
 	m.registerAsks()
+	m.registerPush()
 }
 
 func obj(in *envelope.Inner) (strictjson.Object, error) {
@@ -221,7 +222,7 @@ func (m *Manager) hPairReject(_ context.Context, s *Session, in *envelope.Inner)
 }
 
 func (m *Manager) hDeviceList(_ context.Context, s *Session, _ *envelope.Inner) (json.RawMessage, error) {
-	return peersJSON("devices", m.st.Devices, s.now), nil
+	return m.devicesJSON(s.now), nil
 }
 
 // hDeviceUnlink applies §7.4 "Device unlinked": device.unlinked (best

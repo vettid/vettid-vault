@@ -58,7 +58,7 @@ func stagingConfig(t *testing.T, dir string, keys ...*ecdsa.PrivateKey) string {
 	return writeFile(t, dir, "staging.json", []byte(`{"channel":"staging","release":4,"manifest_keys":[`+strings.Join(ks, ",")+`],`+
 		`"seal_account":"111122223333","seal_region":"us-east-1",`+
 		`"retirement_principal":"arn:aws:iam::111122223333:role/vettid-org-vault-key-retirement","retirement_window_days":7,`+
-		`"android_signers":["`+strings.Repeat("5a", 32)+`"],"relay_url":"https://relay.vettid.test"}`))
+		`"android_signers":["`+strings.Repeat("5a", 32)+`"],"relay_url":"https://relay.vettid.test","push_url":"https://push.staging.vettid.org"}`))
 }
 
 const arn4 = "arn:aws:kms:us-east-1:111122223333:key/00000004-0000-4000-8000-000000000004"

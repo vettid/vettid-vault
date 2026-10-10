@@ -37,6 +37,11 @@ func (m *Manager) queueDeleteClaim(id string, now time.Time) {
 // sealAndQueue seals in to p's current epoch and queues the deposit.
 // It returns the inner id, or "" if p has no session.
 func (m *Manager) sealAndQueue(p *Peer, in *envelope.Inner) string {
+	return m.sealAndQueueWake(p, in, "")
+}
+
+// sealAndQueueWake is sealAndQueue with a push wake class (§14.2).
+func (m *Manager) sealAndQueueWake(p *Peer, in *envelope.Inner, wake string) string {
 	kr := m.sessions[p.ID]
 	if kr == nil || kr.Current() == nil {
 		return ""
@@ -45,7 +50,7 @@ func (m *Manager) sealAndQueue(p *Peer, in *envelope.Inner) string {
 	if err != nil {
 		return ""
 	}
-	m.queueDeposit(&OutboxEntry{PeerID: p.ID, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Payload: raw}, m.now())
+	m.queueDeposit(&OutboxEntry{PeerID: p.ID, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Payload: raw, Wake: wake}, m.now())
 	return in.ID
 }
 
@@ -63,7 +68,7 @@ func (m *Manager) sendWith(p *Peer, typ string, body json.RawMessage, o SendOpti
 	}
 	in := &envelope.Inner{ID: m.newID(now), Type: typ, TS: now, Exp: o.Exp, Body: body}
 	if !o.MemoryOnly {
-		return m.sealAndQueue(p, in)
+		return m.sealAndQueueWake(p, in, m.wakeClass(p, typ, body))
 	}
 	kr := m.sessions[p.ID]
 	if kr == nil || kr.Current() == nil || p.Standing.Token == "" {
@@ -116,9 +121,11 @@ func (m *Manager) notifyApps(typ string, body json.RawMessage, now time.Time) {
 	}
 }
 
-// sendLocking deposits vault.locking (ephemeral) directly to each device.
-func (m *Manager) sendLocking(ctx context.Context) {
+// sendLocking deposits vault.locking (ephemeral) directly to each device
+// and returns the devices whose mailbox accepted it.
+func (m *Manager) sendLocking(ctx context.Context) map[string]bool {
 	now := m.now()
+	ok := map[string]bool{}
 	for _, p := range m.ownerDevices() {
 		kr := m.sessions[p.ID]
 		if kr == nil || kr.Current() == nil || p.Standing.Token == "" || m.outboxPending(p.ID) {
@@ -134,9 +141,12 @@ func (m *Manager) sendLocking(ctx context.Context) {
 		}
 		in := &envelope.Inner{ID: m.newID(now), Type: "vault.locking", TS: now, Exp: now.Add(time.Minute), Body: body}
 		if raw, err := kr.Current().Seal(in); err == nil {
-			_, _ = m.relay.Deposit(ctx, p.Relay.URL, p.Relay.Mailbox, p.Standing.Token, raw)
+			if _, err := m.relay.Deposit(ctx, p.Relay.URL, p.Relay.Mailbox, p.Standing.Token, raw); err == nil {
+				ok[p.ID] = true
+			}
 		}
 	}
+	return ok
 }
 
 // outboxPending reports whether deposits to peer are still queued.
@@ -197,6 +207,9 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 		switch e.Op {
 		case OpDeposit:
 			err = m.deposit(ctx, e, now)
+			if err == nil && !e.Done {
+				m.pushDeposited(e.PeerID, e.Wake) // §14.2: after the relay accepted it
+			}
 		case OpRevoke:
 			err = m.relay.Revoke(ctx, e.Kind, e.Value)
 		case OpDeleteClaim:

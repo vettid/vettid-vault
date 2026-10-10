@@ -2,6 +2,7 @@ package enclave
 
 import (
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"sync"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/manifest"
 	"github.com/vettid/vettid-vault/vms/nitro"
+	"github.com/vettid/vettid-vault/vms/pushwire"
 	"github.com/vettid/vettid-vault/vms/suite"
 )
 
@@ -120,6 +122,11 @@ func New(opt Options) (*Instance, error) {
 			return nil, ErrConfig
 		}
 		nsm := opt.NSM
+		if opt.Vault.Push == nil && opt.Config.PushURL != "" {
+			// In process (tests, development): the client attests itself.
+			opt.Vault.Push = &pushwire.Client{BaseURL: opt.Config.PushURL, HTTP: opt.Vault.HTTP,
+				Attest: func(pub ed25519.PublicKey, d [32]byte) ([]byte, error) { return nsm.Attest(d[:], nil, pub) }}
+		}
 		core, err := NewCore(CoreDeps{Config: opt.Config, Meas: m, Store: opt.Store, KMS: opt.KMS,
 			AttestRecipient: func(pub []byte) ([]byte, error) { return nsm.Attest(nil, nil, pub) },
 			AttestVault: func(bundle, nonce []byte) ([]byte, error) {

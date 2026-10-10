@@ -1,0 +1,115 @@
+package supervisor
+
+import (
+	"bytes"
+	"context"
+	"crypto/ed25519"
+	"encoding/base64"
+	"net/http"
+	"net/http/httptest"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/vettid/vettid-relay/relayauth"
+
+	"github.com/vettid/vettid-vault/enclave"
+	"github.com/vettid/vettid-vault/internal/hostproto"
+	"github.com/vettid/vettid-vault/internal/vaultipc"
+	"github.com/vettid/vettid-vault/vms/nitro"
+	"github.com/vettid/vettid-vault/vms/pushwire"
+)
+
+type recNSM struct {
+	mu     sync.Mutex
+	ud, pk []byte
+}
+
+func (n *recNSM) Attest(ud, nonce, pk []byte) ([]byte, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.ud, n.pk = append([]byte(nil), ud...), append([]byte(nil), pk...)
+	return []byte("doc"), nil
+}
+func (n *recNSM) Measurements() (nitro.Measurements, error) { return nitro.Measurements{}, nil }
+
+// VAULT-MESSAGING 0.24.0 §14.3, PUSH-GATEWAY §5.1: a vault process
+// reaches only its channel's gateway, with requests signed by a key that
+// is not its relay key; the supervisor attaches a registration's
+// attestation over the digest it computes.
+func TestPushChannel(t *testing.T) {
+	var mu sync.Mutex
+	var got []*http.Request
+	gw := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		got = append(got, r.Clone(context.Background()))
+		mu.Unlock()
+		w.Header().Set("Retry-After", "9")
+		w.WriteHeader(201)
+		_, _ = w.Write([]byte(`{"wake_blob":"QUJD"}`))
+	}))
+	defer gw.Close()
+	nsm := &recNSM{}
+	s := &Supervisor{encCfg: enclave.Config{PushURL: gw.URL}, cfg: Config{NSM: nsm}, relayHTTP: gw.Client(), activity: map[string]time.Time{}}
+	p := &vproc{h: &procHost{s: s}, vaultID: "aaaa"}
+	_, wake, _ := ed25519.GenerateKey(nil)
+	_, relay, _ := ed25519.GenerateKey(nil)
+	p.relayKey = relay.Public().(ed25519.PublicKey)
+	body := []byte(`{"platform":"fcm","token":"t","app_id":"a"}`)
+	signed := func(k ed25519.PrivateKey, path string, b []byte, at time.Time) []byte {
+		h := http.Header{}
+		relayauth.SetHeaders(h, k, http.MethodPost, path, at, relayauth.BodyHash(b))
+		h.Set(pushwire.HeaderAttestation, "Zm9yZ2Vk") // never passed on
+		return vaultipc.EncodeHeaders(h)
+	}
+	call := func(f ...[]byte) [][]byte {
+		return p.handle(context.Background(), &hostproto.Frame{Kind: vaultipc.KindPush, ID: 1, Fields: f})
+	}
+	now := time.Now()
+	for name, f := range map[string][][]byte{
+		"other path":   {[]byte("/v1/health"), signed(wake, "/v1/health", body, now), body},
+		"unsigned":     {[]byte(pushwire.PathRegister), vaultipc.EncodeHeaders(http.Header{}), body},
+		"wrong body":   {[]byte(pushwire.PathRegister), signed(wake, pushwire.PathRegister, body, now), []byte(`{}`)},
+		"stale":        {[]byte(pushwire.PathRegister), signed(wake, pushwire.PathRegister, body, now.Add(-time.Hour)), body},
+		"relay key":    {[]byte(pushwire.PathRegister), signed(relay, pushwire.PathRegister, body, now), body},
+		"other path 2": {[]byte("/v1/register/../wake"), signed(wake, "/v1/register/../wake", body, now), body},
+	} {
+		if r := call(f...); string(r[0]) != vaultipc.StatusDenied {
+			t.Errorf("%s: %s", name, r[0])
+		}
+	}
+	r := call([]byte(pushwire.PathRegister), signed(wake, pushwire.PathRegister, body, now), body)
+	if len(r) != 4 || string(r[0]) != "ok" || string(r[1]) != "201" || string(r[3]) != `{"wake_blob":"QUJD"}` {
+		t.Fatalf("register: %q", r)
+	}
+	if rh, _ := vaultipc.DecodeHeaders(r[2]); rh.Get("Retry-After") != "9" {
+		t.Fatal("Retry-After not passed back")
+	}
+	mu.Lock()
+	req := got[0]
+	mu.Unlock()
+	ts := req.Header.Get(relayauth.HeaderTimestamp)
+	d := relayauth.Digest(http.MethodPost, pushwire.PathRegister, ts, relayauth.BodyHash(body))
+	if !bytes.Equal(nsm.ud, d[:]) || !bytes.Equal(nsm.pk, wake.Public().(ed25519.PublicKey)) {
+		t.Fatal("attestation not over the digest and the wake key")
+	}
+	if req.Header.Get(pushwire.HeaderAttestation) != base64.StdEncoding.EncodeToString([]byte("doc")) || req.URL.Path != pushwire.PathRegister {
+		t.Fatalf("forwarded %v %s", req.Header, req.URL.Path)
+	}
+	// A wake carries no attestation.
+	nsm.ud = nil
+	wb := pushwire.WakeBody("QUJD")
+	if r := call([]byte(pushwire.PathWake), signed(wake, pushwire.PathWake, wb, now), wb); string(r[0]) != "ok" {
+		t.Fatalf("wake: %q", r[0])
+	}
+	mu.Lock()
+	if got[1].Header.Get(pushwire.HeaderAttestation) != "" || nsm.ud != nil {
+		t.Fatal("wake attested")
+	}
+	mu.Unlock()
+	// Without a gateway in the release, nothing.
+	s.encCfg.PushURL = ""
+	if r := call([]byte(pushwire.PathWake), signed(wake, pushwire.PathWake, wb, now), wb); string(r[0]) != vaultipc.StatusDenied {
+		t.Fatal("no gateway: not denied")
+	}
+}

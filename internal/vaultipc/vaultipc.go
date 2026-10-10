@@ -21,6 +21,7 @@
 //	KMS             [op, key_arn, a, b]           → [status, out1, out2]
 //	HTTP            [method, url, headers, body]  → [status, code, headers, body]
 //	StatusList      []                            → [status, list, fetched_at]
+//	Push            [path, headers, body]         → [status, code, headers, body]
 //
 // Vault → supervisor (notifications): Lifecycle [event, vault_id,
 // release, vault_version, state_version, app_key (SPKI DER or empty),
@@ -53,7 +54,8 @@ import (
 // recovery_unavailable) (0.16.0).
 // 6: Lifecycle carries a name request (name_seq, first_name, last_name;
 // the event account_name, 0.18.0).
-const Version = "6"
+// 7: Push (0.24.0).
+const Version = "7"
 
 // Supervisor → vault.
 const (
@@ -89,6 +91,13 @@ const (
 	KindKMS             hostproto.Kind = 0x55
 	KindHTTP            hostproto.Kind = 0x56
 	KindStatusList      hostproto.Kind = 0x57
+	// KindPush carries a request to the channel's push gateway (0.24.0,
+	// §14): POST to path (/v1/register or /v1/wake) of the gateway URL
+	// the supervisor pins, signed by a wake key in this process. The
+	// supervisor verifies the signature and, for a registration, attaches
+	// the NSM attestation itself (public_key = the wake key, user_data =
+	// the request's digest, PUSH-GATEWAY §5.1).
+	KindPush hostproto.Kind = 0x58
 )
 
 // Vault → supervisor notifications.
@@ -98,7 +107,7 @@ const (
 )
 
 // VaultRequests is every request kind a vault process may send.
-var VaultRequests = []hostproto.Kind{KindStoreGet, KindStorePut, KindStoreDelete, KindAttestRecipient, KindAttestVault, KindKMS, KindHTTP, KindStatusList}
+var VaultRequests = []hostproto.Kind{KindStoreGet, KindStorePut, KindStoreDelete, KindAttestRecipient, KindAttestVault, KindKMS, KindHTTP, KindStatusList, KindPush}
 
 // KMS operations.
 const (

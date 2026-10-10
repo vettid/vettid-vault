@@ -2,7 +2,8 @@
 // one channel (VAULT-MESSAGING §11.10.8, VAULT-RELEASES §5.2): the
 // release number, the pinned manifest keys, the sealing-key account and
 // region, the retirement principal and window, the Android
-// signing-certificate digests and the relay URL.
+// signing-certificate digests, the relay URL and (VAULT-MESSAGING
+// 0.24.0) the push gateway URL.
 //
 // Each channel's constants are a committed file (prod.json, staging.json)
 // that the build embeds, selected by the build tag vettid_channel_prod or
@@ -47,6 +48,12 @@ const Placeholder = "TODO-"
 // Pinned retirement windows per channel (VAULT-RELEASES §3.1, §4.1).
 var windowDays = map[string]uint64{ChannelProd: 30, ChannelStaging: 7}
 
+// PushURLs are the channels' push gateways (VAULT-MESSAGING 0.24.0
+// §11.10.8, PUSH-GATEWAY §10.4): a channel file must name its own, so a
+// staging image can never wake through the production gateway or the
+// reverse. The hosts are the ones vettid.org's DNS firewall allows.
+var PushURLs = map[string]string{ChannelProd: "https://push.vettid.org", ChannelStaging: "https://push.staging.vettid.org"}
+
 // Errors.
 var (
 	ErrFormat     = errors.New("releasecfg: malformed channel file")
@@ -65,6 +72,8 @@ type Config struct {
 	RetirementWindowDays int
 	AndroidSigners       [][]byte
 	RelayURL             string
+	// PushURL is the channel's push gateway (0.24.0, §11.10.8).
+	PushURL string
 }
 
 // File is a parsed channel file: the complete constants and the names of
@@ -88,7 +97,7 @@ func Parse(b []byte) (*File, error) {
 		return nil, ErrFormat
 	}
 	members := []string{"channel", "release", "manifest_keys", "seal_account", "seal_region",
-		"retirement_principal", "retirement_window_days", "android_signers", "relay_url"}
+		"retirement_principal", "retirement_window_days", "android_signers", "relay_url", "push_url"}
 	if len(o) != len(members) {
 		return nil, ErrFormat
 	}
@@ -164,6 +173,9 @@ func Parse(b []byte) (*File, error) {
 		c.AndroidSigners = append(c.AndroidSigners, d)
 	}
 	if c.RelayURL, err = value(o, "relay_url", validRelayURL, missing); err != nil {
+		return nil, err
+	}
+	if c.PushURL, err = value(o, "push_url", func(s string) bool { return s == PushURLs[c.Channel] }, missing); err != nil {
 		return nil, err
 	}
 	f.Missing = dedupe(f.Missing)

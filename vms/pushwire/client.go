@@ -31,10 +31,28 @@ type Client struct {
 }
 
 // ErrTransport is a gateway that could not be reached or did not answer
-// in time (no connection, a timeout, an unreadable answer).
+// in time (no connection, a timeout, an answer cut off while read).
 var ErrTransport = errors.New("pushwire: gateway unreachable")
 
-const maxAnswer = 16 << 10
+// ErrOversized is a gateway answer longer than MaxAnswer: the gateway
+// answered, but not with anything the vault reads.
+var ErrOversized = errors.New("pushwire: gateway answer too large")
+
+// MaxAnswer bounds a gateway answer's body. The enclave's supervisor
+// passes at most MaxAnswer+1 bytes on, so an oversized answer is still
+// recognised behind it.
+const MaxAnswer = 16 << 10
+
+// Answered reports whether err, from Register or Wake, means the gateway
+// answered over HTTP: an error answer (*Error), an answer that does not
+// parse (ErrResponse) or one that is too large (ErrOversized). Such a
+// registration counts toward push_registrations whatever the answer; a
+// timeout or no connection does not (VAULT-MESSAGING 0.24.1 §14.1 check
+// 5, owner decision 2026-10-10).
+func Answered(err error) bool {
+	var ge *Error
+	return err == nil || errors.As(err, &ge) || errors.Is(err, ErrResponse) || errors.Is(err, ErrOversized)
+}
 
 // Register sends POST /v1/register and returns the wake blob. A gateway
 // error is an *Error; anything else that fails is ErrTransport (or
@@ -93,9 +111,12 @@ func (c *Client) do(ctx context.Context, key ed25519.PrivateKey, path string, bo
 		return 0, nil, ErrTransport
 	}
 	defer resp.Body.Close()
-	ans, err := io.ReadAll(io.LimitReader(resp.Body, maxAnswer+1))
-	if err != nil || len(ans) > maxAnswer {
+	ans, err := io.ReadAll(io.LimitReader(resp.Body, MaxAnswer+1))
+	if err != nil {
 		return 0, nil, ErrTransport
+	}
+	if len(ans) > MaxAnswer {
+		return 0, nil, ErrOversized
 	}
 	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
 		// Relay §7.2: the header may carry retry_after when the body does not.

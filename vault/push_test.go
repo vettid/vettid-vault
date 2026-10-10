@@ -265,17 +265,36 @@ func TestPushRegisterChecks(t *testing.T) {
 }
 
 // §14.1 check 5: 20 registrations that reached the gateway in 24 hours.
+// Every HTTP answer counts, an unparsable or oversized one included
+// (0.24.1, owner decision 2026-10-10); a timeout or no connection does not.
 func TestPushRegistrationLimit(t *testing.T) {
 	d, g := pushFixture(t)
-	g.regErr = &pushwire.Error{Status: 403, Code: "attestation_invalid"} // reached: counted
-	d.errorCode(t, "push.register", fcmReg)
-	g.regErr = pushwire.ErrTransport // never reached: not counted
-	d.errorCode(t, "push.register", fcmReg)
-	g.regErr = nil
-	if n := len(d.m.st.PushRegs); n != 1 {
-		t.Fatalf("counted %d", n)
+	for _, c := range []struct {
+		err     error
+		counted bool
+	}{
+		{&pushwire.Error{Status: 403, Code: "attestation_invalid"}, true},
+		{&pushwire.Error{Status: 401, Code: "signature_invalid"}, true},
+		{pushwire.ErrResponse, true},
+		{pushwire.ErrOversized, true},
+		{pushwire.ErrTransport, false},
+		{context.DeadlineExceeded, false},
+	} {
+		n := len(d.m.st.PushRegs)
+		g.regErr = c.err
+		if code := d.errorCode(t, "push.register", fcmReg); code != "gateway_error" {
+			t.Fatalf("%v: %s", c.err, code)
+		}
+		if got := len(d.m.st.PushRegs) - n; got != map[bool]int{true: 1, false: 0}[c.counted] {
+			t.Fatalf("%v: counted %d", c.err, got)
+		}
 	}
-	for i := 1; i < MaxPushRegistrations; i++ {
+	g.regErr = nil
+	used := len(d.m.st.PushRegs)
+	if used != 4 {
+		t.Fatalf("counted %d", used)
+	}
+	for i := used; i < MaxPushRegistrations; i++ {
 		if c := d.errorCode(t, "push.register", `{"platform":"fcm","token":"t`+strings.Repeat("x", i)+`","app_id":"a"}`); c != "" {
 			t.Fatalf("%d: %s", i, c)
 		}

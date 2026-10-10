@@ -986,6 +986,12 @@ real gateway (`vettid/vettid-push`, FCM and APNs) is N4.
    attestation too); a timeout or no connection does not. The counter is
    written even when the request fails, which "each failure changing
    nothing" does not mention; it is a rate counter like the PIN backoff.
+   VAULT-MESSAGING 0.24.1 (owner decision 2026-10-10) makes this
+   normative and adds that an answer that does not parse
+   (`pushwire.ErrResponse`) or is longer than `pushwire.MaxAnswer`
+   (`pushwire.ErrOversized`) counts too (`pushwire.Answered`); the
+   supervisor passes an oversized answer on cut to `MaxAnswer`+1 bytes
+   so the vault process can tell it from a failed connection.
 3. **A 429 without `retry_after`** waits 60 s (the spec gives no default).
 4. **Other gateway answers to `push.register`.** Only 400 with
    `platform_invalid`, `app_invalid` or `token_invalid` is `bad_request`;

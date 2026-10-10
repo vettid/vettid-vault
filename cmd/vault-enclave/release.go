@@ -58,8 +58,9 @@ func platform() (supervisor.Config, error) {
 }
 
 // releaseHosts is the release egress allowlist: the relay and Google with
-// HTTP/2, and the regional KMS endpoint (HTTP/1.1 only, docs/V3-NOTES.md)
-// when a region is pinned.
+// HTTP/2, the regional KMS endpoint (HTTP/1.1 only, docs/V3-NOTES.md)
+// when a region is pinned, and the channel's push gateway (0.24.0, behind
+// the relay's load balancer: Amazon's roots, HTTP/2).
 func releaseHosts(region string) []egress.Host {
 	amazon := pins.Pool(pins.AmazonTLSRoots())
 	hosts := []egress.Host{
@@ -69,12 +70,20 @@ func releaseHosts(region string) []egress.Host {
 	if region != "" {
 		hosts = append(hosts, egress.Host{Name: "kms." + region + ".amazonaws.com", Roots: amazon})
 	}
+	if h := hostOf(enclave.ReleasePushURL()); h != "" {
+		hosts = append(hosts, egress.Host{Name: h, Roots: amazon, HTTP2: true})
+	}
 	return hosts
 }
 
 // relayHost is the host of the channel's relay URL.
-func relayHost() string {
-	u, err := url.Parse(enclave.ReleaseRelayURL())
+func relayHost() string { return hostOf(enclave.ReleaseRelayURL()) }
+
+func hostOf(s string) string {
+	if s == "" {
+		return ""
+	}
+	u, err := url.Parse(s)
 	if err != nil {
 		return ""
 	}

@@ -32,6 +32,7 @@ func platform() (supervisor.Config, error) {
 	uidBase := flag.Int("vault-uid-base", 0, "run vault processes under uid/gid base+i (needs root; 0: keep ids)")
 	debug := flag.Bool("debug", false, "debug logging")
 	devPolicy := flag.String("dev-device-policy", "", "JSON file extending the TEST device-attestation policy (DEVELOPMENT ONLY; enclavetest.DevDevicePolicy)")
+	pushURL := flag.String("push-url", "", "push gateway stand-in, https://host (its host is allowlisted; DEVELOPMENT ONLY); empty: push.register is unavailable")
 	recClock := flag.String("dev-recovery-clock", "", "file holding the recovery clock's offset from real time, e.g. 24h, re-read at every check (DEVELOPMENT ONLY; enclavetest.DevRecoveryClock)")
 	flag.Parse()
 	if flag.NArg() != 0 {
@@ -65,9 +66,9 @@ func platform() (supervisor.Config, error) {
 		return supervisor.Config{}, err
 	}
 	cfg, err := enclavetest.DevSupervisor(enclavetest.DevOptions{Release: *release, Control: *control, Egress: *egress,
-		RelayURL: *relayURL, MaxVaults: *maxVaults, DownLock: *downLock, LogLevel: lvl, DevicePolicy: dp, RecoveryClock: *recClock,
-		VaultExec: append(append(append([]string{exe, vaultproc.Arg}, enclavetest.DevVaultArgs(*release, *relayURL)...),
-			enclavetest.DevVaultPolicyArgs(dp)...), enclavetest.DevVaultRecoveryClockArgs(*recClock)...)})
+		RelayURL: *relayURL, MaxVaults: *maxVaults, DownLock: *downLock, LogLevel: lvl, DevicePolicy: dp, RecoveryClock: *recClock, PushURL: *pushURL,
+		VaultExec: append(append(append(append([]string{exe, vaultproc.Arg}, enclavetest.DevVaultArgs(*release, *relayURL)...),
+			enclavetest.DevVaultPolicyArgs(dp)...), enclavetest.DevVaultRecoveryClockArgs(*recClock)...), enclavetest.DevVaultPushArgs(*pushURL)...)})
 	cfg.Proc.UIDBase = *uidBase
 	cfg.Harden = true
 	return cfg, err

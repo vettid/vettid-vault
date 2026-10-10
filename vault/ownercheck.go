@@ -503,7 +503,8 @@ func (m *Manager) holdAllows(p *Peer, typ, state string) bool {
 	case KindApp: // the holder: gated whether or not the hold is on
 		switch typ {
 		case TypeOwnerCheck, "vault.status", "vault.lock", "credential.utk.get", "credential.get", "credential.ack",
-			"credential.version", "credential.lock", "call.end":
+			"credential.version", "credential.lock", "call.end",
+			"push.register", "push.unregister": // 0.24.0: the held wakes need a current token
 			return true
 		case "credential.alarm.confirm":
 			return m.alarmState() != ""
@@ -544,7 +545,7 @@ func (m *Manager) holdDelivers(p *Peer, typ string, body json.RawMessage, now ti
 		return true
 	}
 	switch typ {
-	case "vault.held", "vault.locking", "credential.alarm", "device.transfer.pending", "device.unlinked",
+	case "vault.held", "vault.locking", "credential.alarm", "device.transfer.pending", "device.unlinked", TypePushTokenNeeded,
 		tokenIssuedType, tokenRefreshType, "relay.address.update", "identity.rotate", "call.end", "call.ice":
 		return true
 	case "sync.event", "feed.event":

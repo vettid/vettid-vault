@@ -931,3 +931,91 @@ master 9f7fe1e).
   item 18: show "<name> declined your connection request" / "<name>
   declined the connection" on `peer_declined`, and end the new app's wait
   with "Rejected on your phone").
+
+## Push (0.24.0, N3)
+
+VAULT-MESSAGING 0.24.0 §14 and PUSH-GATEWAY 0.4.0 on the vault side; the
+real gateway (`vettid/vettid-push`, FCM and APNs) is N4.
+
+### Layout
+
+- `vms/pushwire`: the registration (`push.register`'s body and the
+  gateway's `POST /v1/register` body, §14.1 check 2), the token hash
+  (check 4), paths, codes, bodies, and `Client`, which signs with the wake
+  key (Relay Protocol §4.1) and makes one attempt per call. PUSH-GATEWAY
+  §15's vector is `pushwire.TestVector`.
+- `vault/push.go`: `push.register`, `push.unregister`, the registration
+  in DEK state (`State.Push`, at most one; `State.PushRegs`, the 24 h
+  window), `push` on the app's `device.list` entry, the erasure when a
+  transfer or recovery removes the app, the triggers and the wake loop.
+  `vault/pushsched.go`: the debounce and caps as a pure scheduler.
+- Triggers are marked on the outbox entry (`OutboxEntry.wake`) when the
+  message is queued and fire when the relay accepts the deposit
+  (`drainOutbox`); `vault.locking` (deposited directly at the lock) wakes
+  from `lockLocked`, within the 3 s budget, before zeroizing.
+- Wakes run in their own goroutine (a slow gateway never holds up a
+  batch), with a copy of the wake key that `zeroize` wipes; outcomes reach
+  the manager through a second goroutine, so a lock that waits for its
+  wake never deadlocks with an outcome.
+- Enclave: the gateway URL is a channel constant (`push_url` in
+  `enclave/releasecfg/<channel>.json`, which must equal the channel's,
+  `releasecfg.PushURLs`), on the release egress allowlist with Amazon's
+  roots (HTTP/2). A vault process reaches it through `vaultipc.KindPush`
+  (path, signed headers, body): the supervisor verifies the signature,
+  refuses the process's relay key, and attaches a registration's
+  attestation itself, `public_key` = the wake key and `user_data` = the
+  digest it computes, so a vault process never obtains an attestation over
+  user data of its choosing. The parent allows both channels' gateway
+  hosts (`parent.PushHosts`; it is built once for every channel); the
+  enclave and the host's DNS firewall each allow only their channel's.
+- Dev: `vault-enclave -push-url` (dev builds), `internal/pushtest` (the
+  stand-in: real signature, attestation and blob rules against the TEST
+  Nitro root and test PCR0s; records wakes, injects failures), the dev
+  stack's `push.vettid.test` and `/dev/push*`, `vaultctl push`.
+
+### Spec questions (conservative readings)
+
+1. **`push.token_needed` breaks §5.3's type grammar**
+   (`[a-z][a-z0-9-]*` segments: no underscore), so no conforming parser
+   accepts it. As with `vault.owner_check` → `vault.owner-check` (0.15.2),
+   the vault sends **`push.token-needed`**; the spec and ANDROID-PLAN
+   should be corrected to match.
+2. **Which registrations count toward `push_registrations`.** "20
+   registrations that reached the gateway": every request that got an HTTP
+   answer from the gateway counts, whatever the answer (a refused
+   attestation too); a timeout or no connection does not. The counter is
+   written even when the request fails, which "each failure changing
+   nothing" does not mention; it is a rate counter like the PIN backoff.
+3. **A 429 without `retry_after`** waits 60 s (the spec gives no default).
+4. **Other gateway answers to `push.register`.** Only 400 with
+   `platform_invalid`, `app_invalid` or `token_invalid` is `bad_request`;
+   any other answer (401, other 4xx, a 201 that does not parse) is
+   `gateway_error`. At a wake, anything other than 202, the three "gone"
+   answers and 429 is treated as a 5xx (retried, then dropped).
+5. **Exempt wakes.** The 10-per-hour exemption counts every wake that
+   carried an exempt trigger (vault.locking, credential.alarm, an urgent
+   item), whether or not the hourly cap was reached; a retry is part of
+   its wake and is not counted again.
+6. **The lock wake** obeys the debounce and caps: when the debounce or
+   cap would push it past the 3 s budget (a wake went out less than 2 s
+   before, which the gateway would coalesce anyway), it is not sent. Its
+   outcome is not recorded (the vault is zeroizing).
+7. **`push.unregister` takes `{}` only** (another member: `bad_request`).
+   A vault without a credential answers `push.register`
+   `credential_required` (§3.5.7 comes before the type's checks): it has
+   no holder.
+8. **Registration errors of the gateway** (`retry_after` on
+   `gateway_error`) are passed on only from a 429 or 502, as written.
+
+### Compatibility
+
+- State gains `push`, `push_regs` and `OutboxEntry.wake`, ignored by
+  older code. A release without a gateway URL (a dev build without
+  `-push-url`, the smoke-test image) answers `push.register`
+  `unavailable`.
+- The staging channel file gains `push_url` (and prod's); the next
+  staging release (S9) carries it with the release number the release
+  process sets. Until vettid.org's gateway exists (N4) a staging vault
+  answers `push.register` with `gateway_error`.
+- `vaultipc.Version` 7 (the supervisor and its vault processes are one
+  binary).

@@ -48,6 +48,10 @@ type DevOptions struct {
 	// -dev-recovery-clock; DevRecoveryClock). The vault processes need it
 	// too: append DevVaultRecoveryClockArgs to VaultExec.
 	RecoveryClock string
+	// PushURL, if set, is the push gateway stand-in (https://host,
+	// internal/pushtest; 0.24.0): its host is allowlisted with the test
+	// TLS root. The vault processes need it too: append DevVaultPushArgs.
+	PushURL string
 }
 
 // DevSupervisor returns a supervisor configuration for development and
@@ -63,6 +67,14 @@ func DevSupervisor(o DevOptions) (supervisor.Config, error) {
 	u, err := url.Parse(o.RelayURL)
 	if err != nil || u.Scheme != "https" || u.Port() != "" || u.Path != "" || u.Hostname() == "" {
 		return supervisor.Config{}, errors.New("enclavetest: relay URL must be https://host")
+	}
+	var pushHost string
+	if o.PushURL != "" {
+		pu, err := url.Parse(o.PushURL)
+		if err != nil || pu.Scheme != "https" || pu.Port() != "" || pu.Path != "" || pu.Hostname() == "" {
+			return supervisor.Config{}, errors.New("enclavetest: push URL must be https://host")
+		}
+		pushHost = pu.Hostname()
 	}
 	spec := Spec(o.Release, "")
 	roots := TLSRoots()
@@ -80,11 +92,15 @@ func DevSupervisor(o DevOptions) (supervisor.Config, error) {
 		return c, nil
 	})
 	hosts := func(region string) []egress.Host {
-		return []egress.Host{
+		h := []egress.Host{
 			{Name: u.Hostname(), Roots: roots, HTTP2: true},
 			{Name: "android.googleapis.com", Roots: roots, HTTP2: true},
 			{Name: "kms." + region + ".amazonaws.com", Roots: roots},
 		}
+		if pushHost != "" {
+			h = append(h, egress.Host{Name: pushHost, Roots: roots, HTTP2: true})
+		}
+		return h
 	}
 	tr, err := egress.New(egress.Config{Conns: 2, Hosts: hosts(KMSRegion), Dialer: dialer})
 	if err != nil {
@@ -94,6 +110,7 @@ func DevSupervisor(o DevOptions) (supervisor.Config, error) {
 	return supervisor.Config{
 		Enclave: func(id string) enclave.Config {
 			c := devConfig(id, o.Release, o.RelayURL, o.DevicePolicy)
+			c.PushURL = o.PushURL
 			if o.RecoveryClock != "" {
 				c.RecoveryNow = DevRecoveryClock(o.RecoveryClock)
 			}
@@ -156,6 +173,15 @@ func DevVaultRecoveryClockArgs(path string) []string {
 	return []string{"-recovery-clock", path}
 }
 
+// DevVaultPushArgs pass the push gateway stand-in's URL on to a dev vault
+// process (none for "").
+func DevVaultPushArgs(pushURL string) []string {
+	if pushURL == "" {
+		return nil
+	}
+	return []string{"-push-url", pushURL}
+}
+
 // MaxRecoveryClockFile bounds the recovery clock file.
 const MaxRecoveryClockFile = 64
 
@@ -195,6 +221,7 @@ func DevVaultPlatform(args []string) (vaultproc.Platform, error) {
 	relay := fs.String("relay-url", "", "relay URL")
 	policy := fs.String("device-policy", "", "dev device policy (base64)")
 	clock := fs.String("recovery-clock", "", "recovery clock file (DevRecoveryClock)")
+	push := fs.String("push-url", "", "push gateway stand-in URL (DevVaultPushArgs)")
 	if err := fs.Parse(args); err != nil || *n == 0 || *n > 15 || *relay == "" || fs.NArg() != 0 {
 		return vaultproc.Platform{}, errors.New("enclavetest: bad vault process arguments")
 	}
@@ -211,6 +238,7 @@ func DevVaultPlatform(args []string) (vaultproc.Platform, error) {
 	return vaultproc.Platform{
 		Config: func(id string) enclave.Config {
 			c := devConfig(id, *n, *relay, dp)
+			c.PushURL = *push
 			if *clock != "" {
 				c.RecoveryNow = DevRecoveryClock(*clock)
 			}

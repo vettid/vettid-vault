@@ -79,6 +79,11 @@ type Options struct {
 	// AskRand, if set, draws the delay of a suppressed ask's neutral
 	// answer (§10.4.1): a uniform value in [0, n). Nil: crypto/rand.
 	AskRand func(n int64) int64
+	// Push is the channel's push gateway (0.24.0, §14); nil: the release
+	// has none and push.register is answered unavailable.
+	Push PushGateway
+	// PushTiming overrides the wake rules' numbers (tests).
+	PushTiming *PushTiming
 }
 
 // LifecycleEvent is reported to the parent, which writes it to the vault
@@ -196,6 +201,11 @@ type Manager struct {
 	// ocCred caches whether the vault has a credential, for the owner
 	// check (refreshOwnerCred).
 	ocCred bool
+	// push sends the registration's wakes (0.24.0, §14.2); pushGen
+	// changes with every registration so that late outcomes of an older
+	// one are ignored.
+	push    *pusher
+	pushGen uint64
 }
 
 // unlocked counts the managers in this process that hold a DEK.
@@ -711,6 +721,10 @@ func (m *Manager) splitBrain() {
 // zeroize wipes the DEK and every key, and marks the manager locked.
 func (m *Manager) zeroize() {
 	m.locked = true
+	if m.push != nil {
+		m.push.stop()
+		m.push = nil
+	}
 	if m.holdsDEK {
 		m.holdsDEK = false
 		unlocked.Add(-1)
@@ -750,6 +764,9 @@ func (m *Manager) zeroize() {
 		suite.Wipe(m.st.IdentitySeed)
 		suite.Wipe(m.st.KEMSeed)
 		suite.Wipe(m.st.WakeSeed)
+		if m.st.Push != nil {
+			suite.Wipe(m.st.Push.WakeSeed)
+		}
 		for _, r := range m.st.RetiredKEMs {
 			suite.Wipe(r.Seed)
 		}
@@ -847,7 +864,7 @@ func (m *Manager) lockLocked(ctx context.Context) error {
 	if errors.Is(err, ErrSplitBrain) {
 		return err
 	}
-	m.sendLocking(ctx)
+	m.pushLockWake(m.sendLocking(ctx)) // §14.2 trigger 3, before zeroizing
 	vid := m.st.VaultID
 	m.zeroize()
 	m.report("locked", vid, m.opt.Release.PCR0)

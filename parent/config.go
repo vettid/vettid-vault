@@ -103,7 +103,16 @@ func (c *Config) defaults() error {
 // QueueName is this instance's queue name (§11.1).
 func (c *Config) QueueName() string { return c.QueuePrefix + c.InstanceID }
 
-// DefaultAllow returns the release allowlist for a region (§12.2).
+// PushHosts are the push gateways of the release channels
+// (VAULT-MESSAGING 0.24.0 §11.10.8, §14.3). The parent is built once for
+// every channel, so it allows both; each enclave image reaches only its
+// own channel's (its egress allowlist and pinned URL), and the host's DNS
+// firewall answers only its stage's name.
+var PushHosts = []string{"push.vettid.org", "push.staging.vettid.org"}
+
+// DefaultAllow returns the release allowlist for a region (§12.2): the
+// relay, the regional KMS endpoint, Google's attestation status list and
+// the push gateways (0.24.0).
 func DefaultAllow(relayHost, region string) []string {
-	return []string{strings.ToLower(relayHost), "kms." + region + ".amazonaws.com", "android.googleapis.com"}
+	return append([]string{strings.ToLower(relayHost), "kms." + region + ".amazonaws.com", "android.googleapis.com"}, PushHosts...)
 }

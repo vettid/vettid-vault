@@ -356,6 +356,7 @@ func (m *Manager) completeTransfer(p *Peer, now time.Time) {
 // a best-effort device.unlinked{reason}, its relay key denylisted, its
 // unlock key removed at the flush, its per-device feature data dropped.
 func (m *Manager) removeApp(p *Peer, reason string, now time.Time) {
+	m.pushRemoved(p.ID, reason, now) // 0.24.0, §14.1: ref transferred or replaced
 	m.removePeerWith(p, "device.unlinked", strictjson.NewBuilder().String("reason", reason).Bytes(), now)
 	sess := m.session(now)
 	for _, f := range m.features {

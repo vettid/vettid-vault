@@ -32,6 +32,8 @@ import (
 //	POST /dev/recovery/code  {"guid": G}: plays the account portal's recovery for member G
 //	                         (needs -recovery-skew; recovery.go): the opened code and its
 //	                         QR payload
+//	GET  /dev/push, POST /dev/push/{fail,reseal,reset,wait}: the push gateway
+//	                         stand-in (push.go)
 func (s *stack) control() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /dev/health", func(w http.ResponseWriter, r *http.Request) {
@@ -90,6 +92,7 @@ func (s *stack) control() http.Handler {
 		writeJSON(w, 200, vs[0])
 	})
 	mux.HandleFunc("POST /dev/recovery/code", s.recoveryCode)
+	s.pushControl(mux) // push.go
 	mux.HandleFunc("POST /dev/peer/event", func(w http.ResponseWriter, r *http.Request) {
 		var in struct {
 			Type     string            `json:"type"`

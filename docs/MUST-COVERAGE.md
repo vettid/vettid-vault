@@ -760,3 +760,27 @@ grammar.
 | 10.9, 10.2 | `vault.locked` carries `device_id` when an owner device's `vault.lock` locked the vault | `vault.TestLockedNamesRequestingDevice` |
 | 10.9, 12.3 | Every other lock has no `device_id`: the host's lock (account site route, lease, memory, restart), a recovery, ten failed owner checks, also with a device's `vault.lock` in the same batch | `vault.TestLockedByHostNoDevice`, `vault.TestLockedByOwnerCheckNoDevice` |
 | 10.9 | Entries with `device_id` are found by the device's name, whatever their kind | `audit.TestSearchFields` (entry 13, `vault.unlocked`) |
+
+## Push (§3.6.3, §10.1, §10.3, §10.9, §11.10.8, §12.2, §14; 0.24.0)
+
+| § | Requirement | Test(s) |
+|---|---|---|
+| 14.1 | `push.register` from the holder only: a desktop, an agent or a recovering app is `forbidden` | `vault.TestPushRegisterChecks` |
+| 14.1 | Check 2: `platform` fcm or apns; fcm token 1–4,096 printable ASCII, apns 64–200 lowercase hex (even); `app_id` 1–255 of `[A-Za-z0-9][A-Za-z0-9._-]*`; `environment` required for apns, absent for fcm; strict members → `bad_request`, nothing sent | `pushwire.TestValidate`, `vault.TestPushRegisterChecks` |
+| 14.1, 11.10.8 | Check 3: a release without a gateway URL answers `unavailable`; the channel files carry their own channel's URL (`push.vettid.org`, `push.staging.vettid.org`), placeholders refused by the release gate | `vault.TestPushRegisterChecks`, `releasecfg.TestCommittedFiles`, `releasecfg.TestRefusals` |
+| 14.1 | Check 4: `token_hash` = SHA-256("vettid/vms/2/push-token" ‖ lp(platform) ‖ lp(app_id) ‖ lp(environment) ‖ lp(token)); equal to the stored one: the push state, no gateway call | `pushwire.TestTokenHash`, `vault.TestPushRegister` |
+| 14.1, 10.1 | Check 5: `limit` (`push_registrations`, 20) when 20 registrations reached the gateway in the rolling 24 h (DEK state); the window rolls | `vault.TestPushRegistrationLimit` |
+| 14.1, PG 3, 5.1 | A fresh Ed25519 wake key per registration; `POST /v1/register` signed by it with an attestation whose `public_key` is the wake key and `user_data` the request digest; the supervisor computes the digest and attaches the attestation; the vault process's relay key is refused | `supervisor.TestPushChannel`, `pushtest.TestRegisterRefusals`, `e2e.TestHostPush` |
+| 14.1 | On 201 one flush stores `{wake_sk, wake_blob, token_hash, platform, environment, app_id, registered_at, state}`, replacing and wiping any previous one; audits `push.registered` (`device_id`, `ref` = platform); the token is never stored | `vault.TestPushRegister` |
+| 14.1 | Gateway 400 `platform_invalid`/`app_invalid`/`token_invalid` → `bad_request` (code as message); 403, 429, 5xx, timeout, no connection → `gateway_error` with `retry_after` from a 429 or 502; the previous registration stays | `vault.TestPushRegisterChecks` |
+| 14.1 | At most one registration per vault; a rotation replaces key and blob | `vault.TestPushRegister` |
+| 14.1 | `push.unregister` erases (wiped) in one flush, audits `push.unregistered{ref: app}`; without one `{}` and no write; a transfer or recovery that removes the app erases it with `ref` `transferred` / `replaced` | `vault.TestPushUnregister`, `vault.TestPushErasedWithApp` |
+| 10.3 | `push` on the app's `device.list` entry while registered, with `last_wake_at`/`last_result` after a wake | `vault.TestPushRegister`, `vault.TestPushOutcomes`, `e2e.TestHostPush` |
+| 14.2 | Wakes after the relay accepted the deposit of: a new feed item of priority normal/high/urgent that is not a guide, `vault.held`, `credential.alarm`; nothing else (low items, guides, message.new, sync.event, responses); never desktops; none without a registration | `vault.TestPushWakeTriggers`, `vault.TestPushWakeAfterDepositOnly` |
+| 14.2 | `vault.locking` wakes before zeroizing (one attempt, ≤ 3 s), not for the app's own `vault.lock` | `vault.TestPushLockWake`, `e2e.TestHostPush` |
+| 14.2 | Debounce 5 s merging triggers, one in flight; 30 per rolling hour then one per 10 minutes; exempt triggers skip the cap up to 10 per hour and count toward it | `vault.TestSched*`, `vault.TestPushDebounceMerges` |
+| 14.2 | 202: `sent`, `last_wake_at`, a `reseal` replaces the blob at the next flush; 410 `token_gone`, 400 `token_invalid`, 410 `blob_invalid`: erased in one flush, `push.token_gone` audited (`ref` = code), `push.token-needed{reason}` to the app, no wake; 429: wait `retry_after` (≤ 3,600 s), `rate_limited`; 5xx/timeout: retries after 5, 30, 120 s (±20 %), then dropped, `gateway_error`, not audited; no audit or feed entry per wake | `vault.TestPushOutcomes`, `vault.TestSchedRetries`, `vault.TestSchedRateLimited` |
+| 3.6.3 | While held the holder may send `push.register`/`push.unregister`; `push.token-needed` is still delivered; feed items do not wake (not delivered) | `vault.TestPushWhileHeld` |
+| 14.3, 12.2 | The enclave reaches only its channel's gateway (egress allowlist, pinned URL); the parent allows the gateway hosts | `supervisor.TestPushChannel`, `e2e.TestHostPush` |
+| PG 4, 5.2 | Wake blobs are opaque to the vault (base64url, ≤ 6,144 bytes); a wake is `{wake_blob, class: notify}` signed by the wake key | `pushwire.TestBlobsAndAnswers`, `pushtest.TestRegisterAndWake` |
+| PG 15 | The registration request vector (key, body hash, canonical string, signature) | `pushwire.TestVector` |

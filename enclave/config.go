@@ -34,6 +34,9 @@ type Config struct {
 	DeviceAttest *devattest.Policy
 	// RelayURL is the relay new vaults register at (§11.3).
 	RelayURL string
+	// PushURL is the channel's push gateway (0.24.0, §11.10.8, §14);
+	// empty: push.register is answered unavailable.
+	PushURL string
 	// KDF returns the KDF parameters for new vaults (default
 	// vault.DefaultKDF: Argon2id t=3, m=64 MiB, p=1).
 	KDF func() (vault.KDFParams, error)
@@ -80,6 +83,15 @@ func ReleaseRelayURL() string {
 	return DefaultRelayURL
 }
 
+// ReleasePushURL returns the channel's push gateway ("" without complete
+// channel constants); its host is on the release egress allowlist.
+func ReleasePushURL() string {
+	if c := release(); c != nil {
+		return c.PushURL
+	}
+	return ""
+}
+
 // ReleaseRegion returns the pinned sealing-key region ("" without
 // complete channel constants), which is also the region of the KMS
 // endpoint on the egress allowlist.
@@ -108,6 +120,7 @@ func ReleaseConfig(instanceID, relayURL string) Config {
 		cfg.SealAccount, cfg.SealRegion = c.SealAccount, c.SealRegion
 		cfg.RetirementPrincipal, cfg.RetirementWindowDays = c.RetirementPrincipal, c.RetirementWindowDays
 		cfg.DeviceAttest.AndroidSigners = c.AndroidSigners
+		cfg.PushURL = c.PushURL
 	}
 	return cfg
 }

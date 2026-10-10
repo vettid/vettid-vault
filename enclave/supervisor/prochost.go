@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rsa"
 	"crypto/x509"
+	"encoding/base64"
 	"errors"
 	"io"
 	"log/slog"
@@ -28,6 +29,7 @@ import (
 	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vault/store"
 	"github.com/vettid/vettid-vault/vms/altchan"
+	"github.com/vettid/vettid-vault/vms/pushwire"
 )
 
 // ProcConfig configures the vault processes (VAULT-MESSAGING §12.4).
@@ -480,6 +482,8 @@ func (p *vproc) handle(ctx context.Context, f *hostproto.Frame) [][]byte {
 		return p.kms(ctx, f.Fields)
 	case vaultipc.KindHTTP:
 		return p.http(ctx, f.Fields)
+	case vaultipc.KindPush:
+		return p.push(ctx, f.Fields)
 	case vaultipc.KindStatusList:
 		b, at, ok := s.status.rawList()
 		if !ok {
@@ -601,6 +605,80 @@ func (p *vproc) http(ctx context.Context, f [][]byte) [][]byte {
 	defer resp.Body.Close()
 	b, err := io.ReadAll(io.LimitReader(resp.Body, vaultipc.MaxBody+1))
 	if err != nil || len(b) > vaultipc.MaxBody {
+		return hostproto.Strings(hostproto.StatusError)
+	}
+	rh := http.Header{}
+	for _, k := range []string{"Content-Type", "Retry-After"} {
+		if v := resp.Header.Values(k); len(v) > 0 {
+			rh[k] = v
+		}
+	}
+	return [][]byte{[]byte(hostproto.StatusOK), []byte(strconv.Itoa(resp.StatusCode)), vaultipc.EncodeHeaders(rh), b}
+}
+
+// maxPushBody bounds a push gateway request (a registration: a 4 KiB
+// token and the rest; a wake: a 6 KiB blob).
+const maxPushBody = 16 << 10
+
+// push carries a request to the channel's push gateway (0.24.0, §14.3):
+// POST to /v1/register or /v1/wake of the pinned gateway URL only, signed
+// (Relay Protocol §4.1) by a key that is not this process's relay key
+// (PUSH-GATEWAY §3). For a registration the supervisor attaches the NSM
+// attestation itself, with public_key = the signing key and user_data =
+// the request's digest, which it computes: a vault process never obtains
+// an attestation over user_data of its choosing (PUSH-GATEWAY §5.1).
+func (p *vproc) push(ctx context.Context, f [][]byte) [][]byte {
+	s := p.h.s
+	base := s.encCfg.PushURL
+	if base == "" || len(f) != 3 || len(f[2]) > maxPushBody {
+		return deny()
+	}
+	path := string(f[0])
+	if path != pushwire.PathRegister && path != pushwire.PathWake {
+		return deny()
+	}
+	in, err := vaultipc.DecodeHeaders(f[1])
+	if err != nil {
+		return deny()
+	}
+	sr, err := relayauth.ParseHeaders(in)
+	bh := relayauth.BodyHash(f[2])
+	if err != nil || sr.Verify(http.MethodPost, path, bh, time.Now()) != nil {
+		return deny()
+	}
+	p.mu.Lock()
+	relayKey := p.relayKey != nil && p.relayKey.Equal(sr.Key)
+	p.mu.Unlock()
+	if relayKey {
+		return deny()
+	}
+	hdr := http.Header{}
+	for _, k := range []string{relayauth.HeaderKey, relayauth.HeaderTimestamp, relayauth.HeaderSig} {
+		hdr.Set(k, in.Get(k))
+	}
+	hdr.Set("Content-Type", "application/json")
+	if path == pushwire.PathRegister {
+		d := relayauth.Digest(http.MethodPost, path, sr.Timestamp, bh)
+		doc, err := s.cfg.NSM.Attest(d[:], nil, sr.Key)
+		if err != nil {
+			return hostproto.Strings(hostproto.StatusError)
+		}
+		hdr.Set(pushwire.HeaderAttestation, base64.StdEncoding.EncodeToString(doc))
+	}
+	rctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(rctx, http.MethodPost, strings.TrimSuffix(base, "/")+path, bytes.NewReader(f[2]))
+	if err != nil {
+		return deny()
+	}
+	req.Header = hdr
+	resp, err := s.relayHTTP.Do(req)
+	if err != nil {
+		return hostproto.Strings(hostproto.StatusError)
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(io.LimitReader(resp.Body, maxPushBody+1))
+	if err != nil || len(b) > maxPushBody {
 		return hostproto.Strings(hostproto.StatusError)
 	}
 	rh := http.Header{}

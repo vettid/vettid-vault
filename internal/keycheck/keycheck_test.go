@@ -44,7 +44,7 @@ func writeConfig(t testing.TB, pub *ecdsa.PublicKey) string {
 	cfg := `{"channel":"staging","release":4,"manifest_keys":["` + base64.StdEncoding.EncodeToString(der) + `"],` +
 		`"seal_account":"111122223333","seal_region":"us-east-1",` +
 		`"retirement_principal":"arn:aws:iam::111122223333:role/vettid-org-vault-key-retirement","retirement_window_days":7,` +
-		`"android_signers":["` + strings.Repeat("5a", 32) + `"],"relay_url":"https://relay.vettid.test"}`
+		`"android_signers":["` + strings.Repeat("5a", 32) + `"],"relay_url":"https://relay.vettid.test","push_url":"https://push.staging.vettid.org"}`
 	p := filepath.Join(t.TempDir(), "staging.json")
 	if err := os.WriteFile(p, []byte(cfg), 0o644); err != nil {
 		t.Fatal(err)

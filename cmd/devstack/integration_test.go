@@ -115,6 +115,7 @@ func TestDevStackLocalStack(t *testing.T) {
 	}
 
 	testRecovery(t, o, info)
+	testPush(t, info) // last: it locks the peer's vault
 
 	cancel()
 	select {
@@ -312,4 +313,69 @@ func testRecovery(t *testing.T, o *options, info map[string]any) {
 		t.Fatalf("register after cancel: %d %v", code, m)
 	}
 
+}
+
+// testPush: the peer registers through the stack's push gateway stand-in
+// (the dev enclave's TEST attestation, through the supervisor), device.list
+// shows the state, and a host lock wakes it (VAULT-MESSAGING 0.24.0 §14).
+func testPush(t *testing.T, info map[string]any) {
+	ctl, api := info["ctl"].(string), info["api"].(string)
+	post := func(url, guid, body string) (int, map[string]any) {
+		t.Helper()
+		req, _ := http.NewRequest("POST", url, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		if guid != "" {
+			req.Header.Set("Authorization", "Bearer "+guid)
+		}
+		r, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer r.Body.Close()
+		var m map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&m)
+		return r.StatusCode, m
+	}
+	code, m := post(ctl+"/dev/peer/request", "", `{"type":"push.register","body":{"platform":"fcm","token":"devstack-token","app_id":"com.vettid.app"}}`)
+	if code != 200 || !strings.Contains(fmt.Sprint(m), "active") {
+		t.Fatalf("push.register: %d %v", code, m)
+	}
+	code, m = post(ctl+"/dev/peer/request", "", `{"type":"device.list"}`)
+	if code != 200 || !strings.Contains(fmt.Sprint(m), "push:map[app_id:com.vettid.app") {
+		t.Fatalf("device.list: %d %v", code, m)
+	}
+	r, err := http.Get(ctl + "/dev/push")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var st map[string]any
+	_ = json.NewDecoder(r.Body).Decode(&st)
+	r.Body.Close()
+	if st["registrations"] != float64(1) {
+		t.Fatalf("stand-in: %v", st)
+	}
+	// A host lock: vault.locking wakes the app before the vault zeroizes.
+	req, _ := http.NewRequest("GET", api+"/api/vault/status", nil)
+	req.Header.Set("Authorization", "Bearer "+peerGUID)
+	r, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var vs map[string]any
+	_ = json.NewDecoder(r.Body).Decode(&vs)
+	r.Body.Close()
+	vv, _ := vs["vault"].(map[string]any)
+	vid, _ := vv["vault_id"].(string)
+	rid, _ := envelope.NewULID(time.Now())
+	if code, m := post(api+"/api/vault/lock", peerGUID, `{"vault_id":"`+vid+`","request_id":"`+rid+`"}`); code != 202 {
+		t.Fatalf("lock %s: %d %v (status %v)", vid, code, m, vs)
+	}
+	code, m = post(ctl+"/dev/push/wait", "", `{"wakes":1,"timeout_s":60}`)
+	if code != 200 {
+		t.Fatalf("no wake: %d %v", code, m)
+	}
+	w := m["wakes"].([]any)[0].(map[string]any)
+	if w["platform"] != "fcm" || w["app_id"] != "com.vettid.app" || w["class"] != "notify" {
+		t.Fatalf("wake %v", w)
+	}
 }

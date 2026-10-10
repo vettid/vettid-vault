@@ -60,6 +60,9 @@ type hostStack struct {
 	// recClock, if set, is the enclave's recovery clock file
 	// (enclavetest.DevRecoveryClock), for instances started after it is set.
 	recClock string
+	// pushURL, if set, is the push gateway stand-in (https://push.vettid.test)
+	// for instances started after it is set.
+	pushURL string
 }
 
 type hostInstance struct {
@@ -77,6 +80,7 @@ type hostInstance struct {
 	queue    string
 	release  uint64
 	recClock string
+	pushURL  string
 }
 
 func tlsFront(t *testing.T, h http.Handler, h2 bool, name string) string {
@@ -130,10 +134,10 @@ func listenTCP(t *testing.T) net.Listener {
 func (hs *hostStack) start(id string, n uint64, maxVaults int) *hostInstance {
 	t := hs.t
 	cl, el := listenTCP(t), listenTCP(t)
-	hi := &hostInstance{encBin: hs.encBin, id: id, ctl: cl.Addr().String(), egr: el.Addr().String(), release: n, recClock: hs.recClock,
+	hi := &hostInstance{encBin: hs.encBin, id: id, ctl: cl.Addr().String(), egr: el.Addr().String(), release: n, recClock: hs.recClock, pushURL: hs.pushURL,
 		queue: "http://sqs.test/000000000000/test-vault-control-" + id, in: make(chan *enclave.Instance, 4)}
 	p, err := parent.New(parent.Config{InstanceID: id, QueuePrefix: "test-vault-control-", ControlListener: cl, EgressListener: el,
-		Allow: parent.DefaultAllow("relay.vettid.test", "us-east-1"), Resolve: hs.resolve,
+		Allow: append(parent.DefaultAllow("relay.vettid.test", "us-east-1"), "push.vettid.test"), Resolve: hs.resolve,
 		Objects: hs.objs, Queues: hs.queues, Tables: hs.tables, Creds: parenttest.StaticCreds{AccessKeyID: "AK", SecretAccessKey: "SK", SessionToken: "ST"},
 		Heartbeat: 200 * time.Millisecond, LeaseRenew: 300 * time.Millisecond, SweepInterval: -1,
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
@@ -158,9 +162,9 @@ func (hs *hostStack) start(id string, n uint64, maxVaults int) *hostInstance {
 
 func (hi *hostInstance) startEnclave(t *testing.T, maxVaults int) {
 	cfg, err := enclavetest.DevSupervisor(enclavetest.DevOptions{Release: hi.release, Control: hi.ctl, Egress: hi.egr, RelayURL: hostRelay,
-		VaultExec: append(append([]string{hi.encBin, vaultproc.Arg}, enclavetest.DevVaultArgs(hi.release, hostRelay)...),
-			enclavetest.DevVaultRecoveryClockArgs(hi.recClock)...),
-		RecoveryClock: hi.recClock, MaxVaults: maxVaults, LogLevel: slog.LevelError, OnReady: func(in *enclave.Instance) { hi.in <- in }})
+		VaultExec: append(append(append([]string{hi.encBin, vaultproc.Arg}, enclavetest.DevVaultArgs(hi.release, hostRelay)...),
+			enclavetest.DevVaultRecoveryClockArgs(hi.recClock)...), enclavetest.DevVaultPushArgs(hi.pushURL)...),
+		RecoveryClock: hi.recClock, PushURL: hi.pushURL, MaxVaults: maxVaults, LogLevel: slog.LevelError, OnReady: func(in *enclave.Instance) { hi.in <- in }})
 	if err != nil {
 		t.Fatal(err)
 	}

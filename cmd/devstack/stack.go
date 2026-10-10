@@ -39,6 +39,7 @@ import (
 	"github.com/vettid/vettid-vault/enclave/awskms"
 	"github.com/vettid/vettid-vault/internal/enclavetest"
 	"github.com/vettid/vettid-vault/internal/memberapitest"
+	"github.com/vettid/vettid-vault/internal/pushtest"
 	"github.com/vettid/vettid-vault/internal/relaytest"
 	"github.com/vettid/vettid-vault/parent"
 	"github.com/vettid/vettid-vault/vms/manifest"
@@ -89,6 +90,9 @@ type stack struct {
 	recOff   atomic.Int64
 	recClock string
 	recMu    sync.Mutex
+
+	push    *pushtest.Server
+	pushTLS string // push.vettid.test's TLS front (the stand-in)
 
 	peerState  string
 	vaultctlFn func(args ...string) (string, error)
@@ -196,6 +200,7 @@ func (s *stack) start(ctx context.Context) error {
 		}
 		_, _ = io.WriteString(w, `{"entries":{}}`)
 	}), true, gHost)
+	s.startPush()
 
 	if err := s.startInstance(ctx); err != nil {
 		return err
@@ -254,6 +259,8 @@ func (s *stack) info() map[string]any {
 		"localstack":      s.ep,
 		"device_policy":   nil,
 		"recovery_skew":   s.opts.recoverySkew.String(),
+		"push_url":        pushURL,
+		"push_tls":        s.pushTLS, // the push gateway stand-in's TLS front
 	}
 	if s.policy != nil {
 		m["device_policy"] = s.policy.Summary()
@@ -474,7 +481,8 @@ func (s *stack) startInstance(ctx context.Context) error {
 		*p = a
 	}
 	args := append(append([]string(nil), s.parentArgs...), "-control-tcp", ctl, "-egress-tcp", egr, "-health", health,
-		"-resolve", relayHost+"="+s.relayTLS, "-resolve", kmsHost+"="+s.kmsAddr, "-resolve", gHost+"="+s.gAddr)
+		"-resolve", relayHost+"="+s.relayTLS, "-resolve", kmsHost+"="+s.kmsAddr, "-resolve", gHost+"="+s.gAddr,
+		"-allow", pushHost, "-resolve", pushHost+"="+s.pushTLS)
 	plog, err := s.logFile("parent.log")
 	if err != nil {
 		return err
@@ -484,7 +492,7 @@ func (s *stack) startInstance(ctx context.Context) error {
 		return err
 	}
 	// The enclave stops after the parent (cleanups run last first).
-	eargs := []string{"-release", strconv.Itoa(release), "-control", ctl, "-egress", egr, "-relay-url", relayURL}
+	eargs := []string{"-release", strconv.Itoa(release), "-control", ctl, "-egress", egr, "-relay-url", relayURL, "-push-url", pushURL}
 	if s.opts.devicePolicy != "" {
 		eargs = append(eargs, "-dev-device-policy", s.opts.devicePolicy)
 	}

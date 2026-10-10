@@ -12,8 +12,10 @@ import (
 
 	"github.com/vettid/vettid-vault/internal/hostproto"
 	"github.com/vettid/vettid-vault/internal/vaultipc"
+	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vault/store"
 	"github.com/vettid/vettid-vault/vms/devattest"
+	"github.com/vettid/vettid-vault/vms/pushwire"
 )
 
 // chanTimeout bounds one request over the channel (a relay long-poll is
@@ -177,6 +179,53 @@ func (t chanTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		h = http.Header{}
 	}
 	r, err := t.ch.call(req.Context(), vaultipc.KindHTTP, []byte(req.Method), []byte(req.URL.String()), vaultipc.EncodeHeaders(h), body)
+	if err != nil {
+		return nil, err
+	}
+	if !ok(r, 4) {
+		return nil, errChan
+	}
+	code, err := strconv.Atoi(string(r[1]))
+	if err != nil || code < 100 || code > 599 {
+		return nil, errChan
+	}
+	rh, err := vaultipc.DecodeHeaders(r[2])
+	if err != nil {
+		return nil, errChan
+	}
+	return &http.Response{StatusCode: code, Status: strconv.Itoa(code) + " " + http.StatusText(code), Proto: "HTTP/2.0", ProtoMajor: 2,
+		Header: rh, Body: io.NopCloser(bytes.NewReader(r[3])), ContentLength: int64(len(r[3])), Request: req}, nil
+}
+
+// pushGateway is the channel's push gateway through the supervisor (nil
+// without one: push.register is answered unavailable). The supervisor
+// attaches the registration's attestation (vaultipc.KindPush).
+func pushGateway(base string, ch channel) vault.PushGateway {
+	if base == "" {
+		return nil
+	}
+	return &pushwire.Client{BaseURL: base, HTTP: &http.Client{Transport: chanPushTransport{ch: ch}, Timeout: 20 * time.Second}}
+}
+
+// chanPushTransport carries a push gateway request (signed in this
+// process by the wake key) to the supervisor, which sends it to the
+// gateway URL it pins; only the path is passed.
+type chanPushTransport struct{ ch channel }
+
+func (t chanPushTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	var body []byte
+	if req.Body != nil {
+		b, err := io.ReadAll(io.LimitReader(req.Body, vaultipc.MaxBody+1))
+		req.Body.Close()
+		if err != nil || len(b) > vaultipc.MaxBody {
+			return nil, errChan
+		}
+		body = b
+	}
+	if req.Method != http.MethodPost {
+		return nil, errChan
+	}
+	r, err := t.ch.call(req.Context(), vaultipc.KindPush, []byte(req.URL.EscapedPath()), vaultipc.EncodeHeaders(req.Header), body)
 	if err != nil {
 		return nil, err
 	}

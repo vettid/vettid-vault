@@ -29,7 +29,7 @@ func complete(t *testing.T) string {
 	return `{"channel":"prod","release":1,"manifest_keys":["` + spki(t, 0x21) + `","` + spki(t, 0x23) + `"],` +
 		`"seal_account":"111122223333","seal_region":"us-east-1",` +
 		`"retirement_principal":"arn:aws:iam::111122223333:role/vettid-org-vault-key-retirement","retirement_window_days":30,` +
-		`"android_signers":["` + strings.Repeat("ab", 32) + `"],"relay_url":"https://relay.vettid.org"}`
+		`"android_signers":["` + strings.Repeat("ab", 32) + `"],"relay_url":"https://relay.vettid.org","push_url":"https://push.vettid.org"}`
 }
 
 // The committed channel files parse, are their channel's, and are
@@ -44,7 +44,7 @@ func TestCommittedFiles(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", ch, err)
 		}
-		if f.Config.Channel != ch || f.Config.SealRegion != "us-east-1" || f.Config.RelayURL != "https://relay.vettid.org" {
+		if f.Config.Channel != ch || f.Config.SealRegion != "us-east-1" || f.Config.RelayURL != "https://relay.vettid.org" || f.Config.PushURL != PushURLs[ch] {
 			t.Fatalf("%s: %+v", ch, f.Config)
 		}
 		// A placeholder is always reported missing; a value can also be
@@ -99,7 +99,8 @@ func TestCompletePasses(t *testing.T) {
 		len(c.AndroidSigners) != 1 || len(c.AndroidSigners[0]) != 32 {
 		t.Fatalf("%+v", c)
 	}
-	st := strings.NewReplacer(`"channel":"prod"`, `"channel":"staging"`, `"retirement_window_days":30`, `"retirement_window_days":7`).Replace(complete(t))
+	st := strings.NewReplacer(`"channel":"prod"`, `"channel":"staging"`, `"retirement_window_days":30`, `"retirement_window_days":7`,
+		`"push_url":"https://push.vettid.org"`, `"push_url":"https://push.staging.vettid.org"`).Replace(complete(t))
 	if _, err := Check(ChannelStaging, []byte(st)); err != nil {
 		t.Fatal(err)
 	}
@@ -120,9 +121,16 @@ func TestRefusals(t *testing.T) {
 			return strings.Replace(s, "arn:aws:iam::111122223333:role/vettid-org-vault-key-retirement", "TODO-O1", 1)
 		}, ErrIncomplete},
 		"placeholder relay": {func(s string) string { return strings.Replace(s, "https://relay.vettid.org", "TODO-x", 1) }, ErrIncomplete},
-		"release 0":         {func(s string) string { return strings.Replace(s, `"release":1`, `"release":0`, 1) }, ErrIncomplete},
-		"wrong channel":     {func(s string) string { return strings.Replace(s, `"channel":"prod"`, `"channel":"staging"`, 1) }, ErrFormat},
-		"unknown channel":   {func(s string) string { return strings.Replace(s, `"channel":"prod"`, `"channel":"dev"`, 1) }, ErrFormat},
+		"placeholder push":  {func(s string) string { return strings.Replace(s, "https://push.vettid.org", "TODO-x", 1) }, ErrIncomplete},
+		"other channel's push": {func(s string) string {
+			return strings.Replace(s, "https://push.vettid.org", "https://push.staging.vettid.org", 1)
+		}, ErrFormat},
+		"push with a path": {func(s string) string {
+			return strings.Replace(s, "https://push.vettid.org", "https://push.vettid.org/v1", 1)
+		}, ErrFormat},
+		"release 0":       {func(s string) string { return strings.Replace(s, `"release":1`, `"release":0`, 1) }, ErrIncomplete},
+		"wrong channel":   {func(s string) string { return strings.Replace(s, `"channel":"prod"`, `"channel":"staging"`, 1) }, ErrFormat},
+		"unknown channel": {func(s string) string { return strings.Replace(s, `"channel":"prod"`, `"channel":"dev"`, 1) }, ErrFormat},
 		"prod window 7": {func(s string) string {
 			return strings.Replace(s, `"retirement_window_days":30`, `"retirement_window_days":7`, 1)
 		}, ErrFormat},

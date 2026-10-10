@@ -27,8 +27,11 @@ type Parent struct {
 	sess    *session
 	bootID  string // the connected enclave's boot id
 	running map[string]*lease
-	desc    *descriptor
-	stats   stats
+	// taking counts the enroll and unlock requests of each vault between
+	// taking the lease and the decision to keep or give it back.
+	taking map[string]int
+	desc   *descriptor
+	stats  stats
 	// manifests caches manifest documents by manifest_sha256 (0.10.0).
 	manifests map[string][]byte
 
@@ -62,7 +65,7 @@ func New(cfg Config) (*Parent, error) {
 	if err := cfg.defaults(); err != nil {
 		return nil, err
 	}
-	p := &Parent{cfg: cfg, log: cfg.Logger, now: cfg.Now, running: map[string]*lease{}, events: make(chan func(context.Context), 1024)}
+	p := &Parent{cfg: cfg, log: cfg.Logger, now: cfg.Now, running: map[string]*lease{}, taking: map[string]int{}, events: make(chan func(context.Context), 1024)}
 	p.fwd = newForwarder(&p.cfg)
 	return p, nil
 }
@@ -529,6 +532,11 @@ func (p *Parent) onLifecycle(ev Lifecycle) {
 		}
 	case "locked", "deleted":
 		delete(p.running, ev.VaultID)
+		// An unlock of a vault that runs here locks the running process
+		// first; that lock must not drop the lease the unlock took
+		// (staging S8 canary, 2026-10-10). handleMessage releases it if
+		// the vault does not open again.
+		ev.KeepLease = ev.Event == "locked" && p.taking[ev.VaultID] > 0
 	}
 	p.mu.Unlock()
 	p.log.Info("lifecycle", "event", ev.Event, "vault_id", ev.VaultID)
@@ -715,6 +723,22 @@ func (p *Parent) renew(ctx context.Context, id string) {
 			cancel()
 		}
 	}
+}
+
+// beginTake and endTake bracket an enroll or unlock that holds the lease
+// it took (see Lifecycle.KeepLease).
+func (p *Parent) beginTake(id string) {
+	p.mu.Lock()
+	p.taking[id]++
+	p.mu.Unlock()
+}
+
+func (p *Parent) endTake(id string) {
+	p.mu.Lock()
+	if p.taking[id]--; p.taking[id] <= 0 {
+		delete(p.taking, id)
+	}
+	p.mu.Unlock()
 }
 
 // acquire takes the lease before an enroll or unlock is forwarded.

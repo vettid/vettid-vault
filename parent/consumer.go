@@ -131,6 +131,11 @@ func (p *Parent) handleMessage(ctx context.Context, m QueueMessage) {
 			}
 			return
 		}
+		// Until the keep-or-release decision below, a "locked" of this
+		// vault keeps the lease (an unlock of a running vault locks it
+		// first, Lifecycle.KeepLease).
+		p.beginTake(r.VaultID)
+		defer p.endTake(r.VaultID)
 	}
 	s := p.session()
 	if s == nil {

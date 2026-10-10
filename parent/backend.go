@@ -113,6 +113,13 @@ type Lifecycle struct {
 	// at} and name_change_pending = true on the vault row whatever the
 	// lease, when seq is higher than the row's.
 	Name *NameChange
+	// KeepLease is set by the parent, never parsed from the enclave: a
+	// "locked" that the enclave reports while an enroll or unlock of the
+	// same vault is in flight here (the enclave locks a running vault
+	// before it opens it again) leaves the lease in place. The request
+	// took the lease for the vault it is opening; the parent gives it
+	// back afterwards if the vault did not open (§11.1).
+	KeepLease bool
 }
 
 // NameChange is account_name's request (0.18.0, §10.8, §11.5).

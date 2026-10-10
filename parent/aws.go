@@ -495,6 +495,9 @@ func (a *AWS) Lifecycle(ctx context.Context, ev Lifecycle, instanceID string, no
 		nm["#st"] = "state"
 		vals[":st"] = s(ev.Event)
 		update = "SET #st = :st, #vv = :vv, #sv = :sv, #u = :u REMOVE #lease"
+		if ev.Event == "locked" && ev.KeepLease {
+			update = "SET #st = :st, #vv = :vv, #sv = :sv, #u = :u"
+		}
 	default:
 		return nil
 	}

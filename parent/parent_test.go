@@ -638,3 +638,72 @@ func TestStoppedLogLevels(t *testing.T) {
 		})
 	}
 }
+
+// An unlock of a vault that is already running here (the app's unlock
+// screen while the vault is open, the confirming unlock after a release
+// update): the enclave locks the running process and opens the vault
+// again within the one request. The lock's lifecycle write must not drop
+// the lease the request took, or the next renewal finds no lease, the
+// parent reports it lost and the enclave locks the vault it just opened
+// (staging S8 canary, 2026-10-10).
+func TestUnlockOfRunningVaultKeepsLease(t *testing.T) {
+	h := newHarness(t, nil)
+	h.tables.PutVault(parenttest.VaultRow{VaultID: vaultID, UserGUID: "u1", State: "locked"})
+	env := bytes.Repeat([]byte{7}, 5252)
+	var e *fakeEnclave
+	running := false
+	var rmu sync.Mutex
+	e = h.connect("boot-1", func(msg []byte) []byte {
+		var m struct {
+			RequestID string `json:"request_id"`
+		}
+		_ = json.Unmarshal(msg, &m)
+		rmu.Lock()
+		defer rmu.Unlock()
+		if running {
+			e.lifecycle("locked") // the running process is locked first
+		}
+		if m.RequestID == "01JCCCCCCCCCCCCCCCCCCCCCCC" { // a wrong PIN: stays locked
+			running = false
+			return response(m.RequestID, "done", env)
+		}
+		e.lifecycle("unlocked")
+		running = true
+		return response(m.RequestID, "done", env)
+	})
+	e.descriptor()
+	waitFor(t, "ready", func() bool { return h.p.Health().Release == pcr })
+	send := func(rid string) {
+		t.Helper()
+		h.tables.PutSlot(rid, "i-test")
+		h.queues.Send(h.queue, queueMsg("unlock", rid))
+		waitFor(t, "slot "+rid, func() bool { s, _ := h.tables.Slot(rid); return s.Status != "queued" })
+		waitFor(t, "queue drained", func() bool { return h.queues.Pending(h.queue) == 0 })
+	}
+	send("01JAAAAAAAAAAAAAAAAAAAAAAA")
+	// The vault is open; unlock it again twice.
+	send("01JBBBBBBBBBBBBBBBBBBBBBBB")
+	if r, _ := h.tables.Vault(vaultID); r.LeaseInstance != "i-test" || r.State != "unlocked" {
+		t.Fatalf("vault after a re-unlock %+v", r)
+	}
+	send("01JDDDDDDDDDDDDDDDDDDDDDDD")
+	// Several renewal ticks (100 ms) later the lease is still ours, renewed,
+	// and nothing was reported lost.
+	r0, _ := h.tables.Vault(vaultID)
+	waitFor(t, "renewal", func() bool { r, _ := h.tables.Vault(vaultID); return r.LeaseExpires > r0.LeaseExpires })
+	time.Sleep(300 * time.Millisecond)
+	e.mu.Lock()
+	lost := len(e.lost)
+	e.mu.Unlock()
+	if r, _ := h.tables.Vault(vaultID); lost != 0 || h.p.Health().LeasesLost != 0 || r.LeaseInstance != "i-test" || r.State != "unlocked" ||
+		len(h.p.RunningVaults()) != 1 {
+		t.Fatalf("lease lost after a re-unlock: lost %d, health %+v, row %+v", lost, h.p.Health(), r)
+	}
+	// A re-unlock that leaves the vault locked (a wrong PIN locks the
+	// running process, then the open fails) still gives the lease back.
+	send("01JCCCCCCCCCCCCCCCCCCCCCCC")
+	waitFor(t, "lease returned", func() bool { r, _ := h.tables.Vault(vaultID); return r.LeaseInstance == "" && r.State == "locked" })
+	if len(h.p.RunningVaults()) != 0 {
+		t.Fatal("stale running set")
+	}
+}

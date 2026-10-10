@@ -166,6 +166,14 @@ func TestAWSBackend(t *testing.T) {
 	if err := a.Lifecycle(ctx, Lifecycle{Event: "moved", VaultID: "v1", Release: pcr, VaultVersion: pcr, StateVersion: 1}, "i2", time.Now()); err != nil {
 		t.Fatal(err)
 	}
+	// A lock during an unlock of the running vault keeps the lease.
+	if err := a.Lifecycle(ctx, Lifecycle{Event: "locked", VaultID: "v1", Release: pcr, VaultVersion: pcr, StateVersion: 1, KeepLease: true}, "i2", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	it, _ = memberapitest.VaultItem(ctx, db, tn.Vaults, "v1")
+	if it["state"].(*ddbS).Value != "locked" || it["lease"] == nil {
+		t.Fatalf("lock that keeps the lease: %v", it)
+	}
 	if err := a.Lifecycle(ctx, Lifecycle{Event: "locked", VaultID: "v1", Release: pcr, VaultVersion: pcr, StateVersion: 1}, "i2", time.Now()); err != nil {
 		t.Fatal(err)
 	}

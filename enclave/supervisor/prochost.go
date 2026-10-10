@@ -677,8 +677,12 @@ func (p *vproc) push(ctx context.Context, f [][]byte) [][]byte {
 		return hostproto.Strings(hostproto.StatusError)
 	}
 	defer resp.Body.Close()
-	b, err := io.ReadAll(io.LimitReader(resp.Body, maxPushBody+1))
-	if err != nil || len(b) > maxPushBody {
+	// An answer longer than pushwire.MaxAnswer is passed on cut to
+	// MaxAnswer+1 bytes, so the vault process sees that the gateway
+	// answered (it counts toward push_registrations, VAULT-MESSAGING
+	// 0.24.1 §14.1) and refuses the answer as oversized.
+	b, err := io.ReadAll(io.LimitReader(resp.Body, pushwire.MaxAnswer+1))
+	if err != nil {
 		return hostproto.Strings(hostproto.StatusError)
 	}
 	rh := http.Header{}

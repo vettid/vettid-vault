@@ -137,10 +137,9 @@ func (m *Manager) hPushRegister(ctx context.Context, s *Session, in *envelope.In
 	rctx, cancel := context.WithTimeout(ctx, m.pushTiming().RegisterTimeout)
 	blob, err := m.opt.Push.Register(rctx, sk, r)
 	cancel()
-	var ge *pushwire.Error
-	if err == nil || errors.As(err, &ge) {
-		// It reached the gateway: counted, whatever the answer (§14.1
-		// check 5; docs/V4-NOTES.md "Push").
+	if pushwire.Answered(err) {
+		// It reached the gateway: counted, whatever the answer, an
+		// unparsable or oversized one included (§14.1 check 5, 0.24.1).
 		m.st.PushRegs = append(m.st.PushRegs, now.UTC())
 		m.dirty = true
 	}

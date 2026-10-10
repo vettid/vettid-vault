@@ -113,3 +113,26 @@ func TestPushChannel(t *testing.T) {
 		t.Fatal("no gateway: not denied")
 	}
 }
+
+// VAULT-MESSAGING 0.24.1 §14.1 check 5 (owner decision 2026-10-10): an
+// oversized gateway answer is passed on cut to pushwire.MaxAnswer+1 bytes,
+// so the vault process sees that the gateway answered (it counts) and
+// refuses the answer as oversized; it is never an IPC error.
+func TestPushOversizedAnswer(t *testing.T) {
+	gw := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(201)
+		_, _ = w.Write(bytes.Repeat([]byte("A"), 4*pushwire.MaxAnswer))
+	}))
+	defer gw.Close()
+	s := &Supervisor{encCfg: enclave.Config{PushURL: gw.URL}, cfg: Config{NSM: &recNSM{}}, relayHTTP: gw.Client(), activity: map[string]time.Time{}}
+	p := &vproc{h: &procHost{s: s}, vaultID: "aaaa"}
+	_, wake, _ := ed25519.GenerateKey(nil)
+	body := []byte(`{"platform":"fcm","token":"t","app_id":"a"}`)
+	h := http.Header{}
+	relayauth.SetHeaders(h, wake, http.MethodPost, pushwire.PathRegister, time.Now(), relayauth.BodyHash(body))
+	r := p.handle(context.Background(), &hostproto.Frame{Kind: vaultipc.KindPush, ID: 1,
+		Fields: [][]byte{[]byte(pushwire.PathRegister), vaultipc.EncodeHeaders(h), body}})
+	if len(r) != 4 || string(r[0]) != "ok" || string(r[1]) != "201" || len(r[3]) != pushwire.MaxAnswer+1 {
+		t.Fatalf("oversized: %q %q len %d", r[0], r[1], len(r[3]))
+	}
+}

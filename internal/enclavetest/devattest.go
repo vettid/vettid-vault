@@ -286,6 +286,11 @@ type IOSOptions struct {
 	// MutateNonceExt, if set, rewrites the encoded nonce extension before
 	// it is signed into the leaf (malformed-input tests).
 	MutateNonceExt func([]byte) []byte
+	// Under, if set, is another App Attest key: the credential
+	// certificate is then issued by that key instead of the App Attest
+	// CA, and that key's own genuine (non-CA) credential certificate
+	// follows it in x5c (a chain extended below an attested key).
+	Under *ecdsa.PrivateKey
 }
 
 func point(key *ecdsa.PrivateKey) []byte {
@@ -339,13 +344,25 @@ func (ca *AppleCA) Attest(key *ecdsa.PrivateKey, cdh [32]byte, o IOSOptions) []b
 	ca.serial++
 	s := ca.serial
 	ca.mu.Unlock()
-	leaf := ca.Inter.Issue(&x509.Certificate{SerialNumber: big.NewInt(s), Subject: pkix.Name{CommonName: "TEST App Attest credential"},
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(s), Subject: pkix.Name{CommonName: "TEST App Attest credential"},
 		KeyUsage:        x509.KeyUsageDigitalSignature,
-		ExtraExtensions: []pkix.Extension{{Id: devattest.OIDAppAttestNonce, Value: ext}}}, key.Public())
+		ExtraExtensions: []pkix.Extension{{Id: devattest.OIDAppAttestNonce, Value: ext}}}
+	x5c := [][]byte{nil, ca.Inter.Cert.Raw}
+	if o.Under == nil {
+		x5c[0] = ca.Inter.Issue(tmpl, key.Public()).Raw
+	} else {
+		under := ca.Inter.Issue(&x509.Certificate{SerialNumber: big.NewInt(s + 500000), Subject: pkix.Name{CommonName: "TEST App Attest credential (issuing)"},
+			KeyUsage:        x509.KeyUsageDigitalSignature,
+			ExtraExtensions: []pkix.Extension{{Id: devattest.OIDAppAttestNonce, Value: ext}}}, o.Under.Public())
+		x5c = [][]byte{(&CA{Cert: under, Key: o.Under}).Issue(tmpl, key.Public()).Raw, under.Raw, ca.Inter.Cert.Raw}
+	}
 	var att cbor.Encoder
-	att.Map(3).Text("fmt").Text("apple-appattest").
-		Text("attStmt").Map(2).Text("x5c").Array(2).ByteString(leaf.Raw).ByteString(ca.Inter.Cert.Raw).
-		Text("receipt").ByteString([]byte("TEST receipt")).
+	st := att.Map(3).Text("fmt").Text("apple-appattest").
+		Text("attStmt").Map(2).Text("x5c").Array(len(x5c))
+	for _, c := range x5c {
+		st.ByteString(c)
+	}
+	att.Text("receipt").ByteString([]byte("TEST receipt")).
 		Text("authData").ByteString(ad)
 	return att.Bytes()
 }

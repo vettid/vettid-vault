@@ -213,14 +213,17 @@ func CheckSigner(p *Policy, b *Binding) string {
 // BindSigner binds an Android key that has no recorded signer from the
 // certificate chain of that key, re-sent by the app (§11.7.1, "Vaults
 // enrolled before 0.27.0"). The chain is verified as at attestation
-// (pinned root, the attestation extension, the channel's package, exactly
-// one pinned signing digest), with two differences: the leaf's public key
+// (pinned root, the chain rules of checkAndroidChain, the attestation
+// extension, the channel's package, exactly one pinned signing digest),
+// with two differences: the leaf's public key
 // must equal the bound key and the chain's serial numbers must equal the
 // stored ones, and the challenge and the certificates' validity periods
 // are not checked again (both were when the chain was first accepted, and
 // the equal serials tie this chain to that one). It returns the binding
 // with the signer recorded. Any failure is ErrApplication, ErrChain or
-// the attestation error; the caller answers `attestation`.
+// the attestation error; the caller answers `attestation`. That includes
+// a chain an earlier release accepted and this one refuses (a chain
+// extended below an attested key): such a key stays unbound.
 func BindSigner(p *Policy, b *Binding, chain [][]byte) (*Binding, error) {
 	if p == nil || b == nil || b.Platform != altchan.PlatformAndroid || b.Signer != "" {
 		return nil, ErrPlatform

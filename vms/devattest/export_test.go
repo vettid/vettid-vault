@@ -1,5 +1,7 @@
 package devattest
 
+import "time"
+
 // CheckKeyDescription runs the key-description checks on raw extension
 // bytes (fuzzing only).
 func CheckKeyDescription(p *Policy, b []byte) error {
@@ -49,3 +51,17 @@ func CheckKeyDescriptionStrict(p *Policy, b []byte) error {
 
 // ParseNonceExt exposes the App Attest nonce extension parser.
 var ParseNonceExt = parseNonceExt
+
+// CheckAndroidChain runs the chain rules alone (no key description, no
+// status list): the pinned root, the signatures, the CA and extension
+// placement rules and the path validation. now nil: as BindSigner.
+func CheckAndroidChain(p *Policy, chain [][]byte, now *time.Time) error {
+	_, err := checkAndroidChain(p, chain, now)
+	return err
+}
+
+// ParseKeyDescription reports whether raw extension bytes parse.
+func ParseKeyDescription(b []byte) error {
+	_, err := parseKeyDescription(b)
+	return err
+}

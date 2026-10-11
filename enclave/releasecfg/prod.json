@@ -14,5 +14,7 @@
     "31a19613aa10f209e08945f947f94f7ce3e6e5ac342457ff9969a67986928e65"
   ],
   "relay_url": "https://relay.vettid.org",
-  "push_url": "https://push.vettid.org"
+  "push_url": "https://push.vettid.org",
+  "android_package": "com.vettid.app",
+  "features": []
 }

@@ -66,13 +66,15 @@ const modulePath = "github.com/vettid/vettid-vault"
 type options struct {
 	relayPort, apiPort, ctlPort int
 	devicePolicy                string
-	dataDir                     string
-	localstack                  string
-	compose                     string
-	src                         string
-	minFreeGB                   int
-	memWait                     time.Duration
-	recoverySkew                time.Duration
+	// features is the dev enclave's optional feature list (-features).
+	features     string
+	dataDir      string
+	localstack   string
+	compose      string
+	src          string
+	minFreeGB    int
+	memWait      time.Duration
+	recoverySkew time.Duration
 }
 
 func parseFlags(args []string) (*options, error) {
@@ -86,6 +88,7 @@ func parseFlags(args []string) (*options, error) {
 	fs.IntVar(&o.apiPort, "api-port", 18081, "member API stand-in port (127.0.0.1)")
 	fs.IntVar(&o.ctlPort, "ctl-port", 18082, "dev control port (127.0.0.1)")
 	fs.StringVar(&o.devicePolicy, "dev-device-policy", "", "JSON file extending the dev enclave's TEST device-attestation policy (passed to vault-enclave)")
+	fs.StringVar(&o.features, "features", "", "optional features the dev enclave's vaults register (passed to vault-enclave as -dev-features): all, none (production release 1's list) or a comma-separated list; empty: all")
 	fs.StringVar(&o.dataDir, "data", filepath.Join(cache, "vettid-devstack"), "data directory (binaries in bin/, this run in run/: logs, ready.json)")
 	fs.StringVar(&o.localstack, "localstack", "", "external LocalStack endpoint (e.g. http://127.0.0.1:4566); empty: start integration/docker-compose.yml and stop it on exit")
 	fs.StringVar(&o.compose, "compose", "", "compose command for LocalStack (default: \"podman compose\" if podman is installed, else \"docker compose\")")
@@ -140,6 +143,11 @@ func main() {
 func run(ctx context.Context, o *options, ready func(map[string]any)) (err error) {
 	if err := memCheck(ctx, o.minFreeGB, o.memWait); err != nil {
 		return err
+	}
+	if o.features != "" {
+		if _, err := enclavetest.ParseDevFeatures(o.features); err != nil {
+			return fmt.Errorf("-features: %w", err)
+		}
 	}
 	var dp *enclavetest.DevDevicePolicy
 	if o.devicePolicy != "" {

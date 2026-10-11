@@ -32,6 +32,9 @@ func TestParseFlags(t *testing.T) {
 	if err != nil || o.relayPort != 0 || o.minFreeGB != 0 || o.recoverySkew != 0 {
 		t.Fatalf("%+v %v", o, err)
 	}
+	if o, err = parseFlags([]string{"-features", "none"}); err != nil || o.features != "none" {
+		t.Fatalf("-features: %+v %v", o, err)
+	}
 	for _, bad := range [][]string{
 		{"-relay-port", "18081"},
 		{"-ctl-port", "70000"},

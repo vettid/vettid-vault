@@ -31,6 +31,7 @@ CHANNELS := prod staging
 channels:
 	@for ch in $(CHANNELS); do \
 	  $(GO) test -count=1 -tags vettid_channel_$$ch ./enclave/releasecfg || exit 1; \
+	  $(GO) test -count=1 -tags vettid_channel_$$ch -run 'TestReleaseConfig' ./enclave || exit 1; \
 	  GOOS=linux $(GO) build -tags vettid_channel_$$ch -o /dev/null ./cmd/vault-enclave || exit 1; \
 	done
 
@@ -79,7 +80,7 @@ check-tcb:
 	@for f in $$(grep -rlE 'dev-device-policy|DevDevicePolicy|DevVaultPolicyArgs' --include='*.go' . | grep -v '^./internal/enclavetest/'); do \
 	  head -1 $$f | grep -qE '^//go:build devenclave( && [a-z]+)*$$' || { echo "$$f uses the dev device policy without //go:build devenclave"; exit 1; }; done
 	@tmp=$$(mktemp -d) && trap 'rm -rf $$tmp' EXIT && GOOS=linux $(GO) build -o $$tmp/ve ./cmd/vault-enclave && \
-	  if grep -aqE 'dev-device-policy|DevDevicePolicy|device-policy' $$tmp/ve; then \
+	  if grep -aqE 'dev-device-policy|DevDevicePolicy|device-policy|dev-features' $$tmp/ve; then \
 	    echo "the release enclave binary contains the dev device policy"; exit 1; fi
 	@for os in linux; do \
 	  if GOOS=$$os $(GO) list -deps $(ENCLAVEPKGS) | grep -E 'aws-sdk-go|smithy-go|vettid-vault/parent|hpkederand|mlkemtest|/devenclave|relaytest|enclavetest|memberapitest|parenttest|featuretest|pushtest'; then \

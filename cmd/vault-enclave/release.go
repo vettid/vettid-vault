@@ -96,8 +96,10 @@ const vaultUIDBase = 200000
 // vaultPlatform is a vault process's pinned configuration.
 func vaultPlatform([]string) (vaultproc.Platform, error) {
 	return vaultproc.Platform{
-		Config:         func(id string) enclave.Config { return enclave.ReleaseConfig(id, enclave.ReleaseRelayURL()) },
-		Features:       func() []vault.Feature { return all.New(all.Options{}) },
+		Config: func(id string) enclave.Config { return enclave.ReleaseConfig(id, enclave.ReleaseRelayURL()) },
+		// The optional features are the embedded channel file's list
+		// (0.26.0, §11.10.8): measured, and nothing at run time adds one.
+		Features:       func() []vault.Feature { return all.New(all.Options{Optional: enclave.ReleaseFeatures()}) },
 		RequireSeccomp: true,
 	}, nil
 }

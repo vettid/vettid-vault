@@ -130,8 +130,23 @@ type typeEntry struct {
 
 func (t *typeEntry) allows(kind string) bool { return t.spec.Allows(kind) }
 
+// Optional features the core refuses something without (0.26.0,
+// §11.10.8, "Not listed means not registered"): the feature packages'
+// names.
+const (
+	featureLeash    = "leash"
+	featureLocation = "location"
+)
+
+// hasFeature reports whether the image registered the named feature.
+func (m *Manager) hasFeature(name string) bool { return m.featureNames[name] }
+
 func (m *Manager) addFeature(f Feature) {
 	m.features = append(m.features, f)
+	if m.featureNames == nil {
+		m.featureNames = map[string]bool{}
+	}
+	m.featureNames[f.Name()] = true
 	for _, ts := range f.Types() {
 		m.register(ts, f)
 	}

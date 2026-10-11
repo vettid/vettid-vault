@@ -92,6 +92,25 @@ jobs:
               echo "::error::tag says release $release, enclave/releasecfg/$channel.json says $file_release"; exit 1
             fi
             release="$file_release"
+            # A channel's feature list only grows (VAULT-MESSAGING 0.26.0
+            # §11.10.8, the release check's rule 2): on a release tag, the
+            # file is compared with the channel file of the channel's
+            # previous release, read from the highest release/<channel>/<m>
+            # tag below this one. Release 1 has no previous release. A dry
+            # run and a rebuild from the tag alone run rule 1 only.
+            if [ "$publish" = true ] && [ "$release" -gt 1 ]; then
+              git fetch --quiet --no-tags --depth=1 origin "+refs/tags/release/$channel/*:refs/tags/release/$channel/*"
+              prev="$(git tag --list "release/$channel/*" | sed "s|^release/$channel/||" | grep -E '^[1-9][0-9]*$' | awk -v n="$release" '$1 < n' | sort -n | tail -1)"
+              if [ -z "$prev" ]; then
+                echo "::error::no release/$channel/<m> tag below $release: the previous release's feature list cannot be read"; exit 1
+              fi
+              git show "release/$channel/$prev:enclave/releasecfg/$channel.json" >"$RUNNER_TEMP/previous-$channel.json"
+              if ! go run ./cmd/releasecfg check -previous "$RUNNER_TEMP/previous-$channel.json" "$channel"; then
+                echo "::error::enclave/releasecfg/$channel.json drops a feature that release $prev listed (docs/RELEASING.md, 'Features and the Android package')"
+                exit 1
+              fi
+              echo "feature list compared with release/$channel/$prev"
+            fi
           fi
           echo "channel=$channel" >>"$GITHUB_OUTPUT"
           echo "release=$release" >>"$GITHUB_OUTPUT"

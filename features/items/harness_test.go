@@ -45,7 +45,7 @@ type utk struct {
 }
 
 func newEnv(t *testing.T) *env {
-	e := &env{t: t, set: all.NewSet(all.Options{CredentialKDF: credential.MinKDF}), h: featuretest.NewHost(),
+	e := &env{t: t, set: all.NewSet(all.Options{CredentialKDF: credential.MinKDF, Optional: all.Optional()}), h: featuretest.NewHost(),
 		clk: featuretest.Clock{T: time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)}, owner: map[string]vault.Feature{}}
 	for _, f := range e.set.List() {
 		for _, ts := range f.Types() {

@@ -34,9 +34,18 @@ func platform() (supervisor.Config, error) {
 	devPolicy := flag.String("dev-device-policy", "", "JSON file extending the TEST device-attestation policy (DEVELOPMENT ONLY; enclavetest.DevDevicePolicy)")
 	pushURL := flag.String("push-url", "", "push gateway stand-in, https://host (its host is allowlisted; DEVELOPMENT ONLY); empty: push.register is unavailable")
 	recClock := flag.String("dev-recovery-clock", "", "file holding the recovery clock's offset from real time, e.g. 24h, re-read at every check (DEVELOPMENT ONLY; enclavetest.DevRecoveryClock)")
+	devFeatures := flag.String("dev-features", "all", "optional features the vaults register: all, none (production release 1's list) or a comma-separated list of actions,calls,intro,leash,location,presence,wallet (DEVELOPMENT ONLY; a release image's list is its embedded channel file's)")
 	flag.Parse()
 	if flag.NArg() != 0 {
 		return supervisor.Config{}, fmt.Errorf("unexpected arguments %q", flag.Args())
+	}
+	var features []string // nil: every optional feature
+	if *devFeatures != "all" {
+		var err error
+		if features, err = enclavetest.ParseDevFeatures(*devFeatures); err != nil {
+			return supervisor.Config{}, fmt.Errorf("-dev-features: %w", err)
+		}
+		fmt.Fprintf(os.Stderr, "vault-enclave: DEVELOPMENT feature list: optional features %q\n", features)
 	}
 	var dp *enclavetest.DevDevicePolicy
 	if *devPolicy != "" {
@@ -67,8 +76,8 @@ func platform() (supervisor.Config, error) {
 	}
 	cfg, err := enclavetest.DevSupervisor(enclavetest.DevOptions{Release: *release, Control: *control, Egress: *egress,
 		RelayURL: *relayURL, MaxVaults: *maxVaults, DownLock: *downLock, LogLevel: lvl, DevicePolicy: dp, RecoveryClock: *recClock, PushURL: *pushURL,
-		VaultExec: append(append(append(append([]string{exe, vaultproc.Arg}, enclavetest.DevVaultArgs(*release, *relayURL)...),
-			enclavetest.DevVaultPolicyArgs(dp)...), enclavetest.DevVaultRecoveryClockArgs(*recClock)...), enclavetest.DevVaultPushArgs(*pushURL)...)})
+		VaultExec: append(append(append(append(append([]string{exe, vaultproc.Arg}, enclavetest.DevVaultArgs(*release, *relayURL)...),
+			enclavetest.DevVaultPolicyArgs(dp)...), enclavetest.DevVaultRecoveryClockArgs(*recClock)...), enclavetest.DevVaultPushArgs(*pushURL)...), enclavetest.DevVaultFeatureArgs(features)...)})
 	cfg.Proc.UIDBase = *uidBase
 	cfg.Harden = true
 	return cfg, err

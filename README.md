@@ -212,6 +212,7 @@ binary. One stack per data directory.
 | `-api-port` | 18081 | the member API stand-in (`Authorization: Bearer <user_guid>`) |
 | `-ctl-port` | 18082 | dev control (below) |
 | `-dev-device-policy` | — | extends the dev enclave's device-attestation policy (below) |
+| `-features` | all | the optional features the dev enclave's vaults register (VAULT-MESSAGING 0.26.0 §11.10.8), passed to `vault-enclave` as `-dev-features`: `all`, `none` (production release 1's list) or a comma-separated list of `actions,calls,intro,leash,location,presence,wallet`. Run the app against `-features none` before a production release |
 | `-localstack` | — | an external LocalStack endpoint; without it, `integration/docker-compose.yml` is started (one container, 1.5 GiB cap) and stopped on exit, and an already running LocalStack on :4566 is refused rather than shared |
 | `-compose` | `podman compose`, else `docker compose` | compose command |
 | `-wait-free-mem` | 8 | refuse to start unless this many GB of memory are available (0: no check); `-mem-wait 10m` keeps re-checking |
@@ -317,7 +318,19 @@ no constants, the smoke-test image, which refuses every enrollment and
 unlock). Since 0.24.0 each file also pins its channel's push gateway
 (`push_url`: `https://push.vettid.org` or `https://push.staging.vettid.org`;
 any other value is malformed), which is on the image's egress allowlist;
-the parent allows both gateway hosts (`parent.PushHosts`). The build
+the parent allows both gateway hosts (`parent.PushHosts`). Since 0.26.0
+each file also carries `android_package`, the one Android package its
+images accept in key attestation (`com.vettid.app` in production,
+`com.vettid.app.staging` in staging; any other value is malformed), and
+`features`, the optional features its images register (zero or more of
+`actions`, `calls`, `intro`, `leash`, `location`, `presence`, `wallet`,
+ascending; staging lists all seven, production none). A feature that is
+not listed is not constructed: its types answer `unsupported_type` and
+it keeps no state. A channel's list only grows
+(`go run ./cmd/releasecfg check -previous <the previous release's file> <channel>`,
+which the release workflow runs against the previous release tag). The
+development enclave registers everything unless started with
+`-dev-features` (devenclave builds only). The build
 refuses a channel file with a `TODO-…` placeholder or a missing value (`go run ./cmd/releasecfg check prod`); the production
 values wait for owner decisions O1 (vault account), O3 (manifest keys) and
 O8 (Android signing digests).

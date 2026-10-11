@@ -48,15 +48,18 @@ type Config struct {
 
 // Release pins that are the same in every channel. The per-channel
 // constants (release number, manifest keys, sealing-key account and
-// region, retirement principal and window, Android signing digests, relay
-// URL) are the committed channel file the build embeds (package
-// releasecfg, §11.10.8). A build without a channel, or with an incomplete
-// channel file, pins none of them and refuses every enrollment and unlock
-// (fail closed).
-const (
-	androidPackage = "com.vettid.app"
-	iosAppID       = "3X25CJ86MV.com.vettid.app"
-)
+// region, retirement principal and window, Android package and signing
+// digests, relay and push URLs, the optional features) are the committed
+// channel file the build embeds (package releasecfg, §11.10.8). A build
+// without a channel, or with an incomplete channel file, pins none of
+// them and refuses every enrollment and unlock (fail closed): its device
+// policy has no Android package and no signer, and it registers no
+// optional feature.
+//
+// The Android package was a constant here until 0.26.0; it is the
+// channel's android_package now, so that a staging image accepts only the
+// staging app's package and a production image only production's.
+const iosAppID = "3X25CJ86MV.com.vettid.app"
 
 // DefaultRelayURL is the relay of a build without channel constants.
 const DefaultRelayURL = "https://relay.vettid.org"
@@ -92,6 +95,18 @@ func ReleasePushURL() string {
 	return ""
 }
 
+// ReleaseFeatures returns the optional features this image registers
+// (0.26.0, §11.10.8, "Feature allowlist"): the embedded channel file's
+// list, and none without complete channel constants (such an image
+// refuses every enrollment and unlock anyway). The list is part of the
+// embedded file, so it is measured; nothing at run time can change it.
+func ReleaseFeatures() []string {
+	if c := release(); c != nil {
+		return append([]string{}, c.Features...)
+	}
+	return []string{}
+}
+
 // ReleaseRegion returns the pinned sealing-key region ("" without
 // complete channel constants), which is also the region of the KMS
 // endpoint on the egress allowlist.
@@ -110,7 +125,7 @@ func ReleaseConfig(instanceID, relayURL string) Config {
 	cfg := Config{
 		InstanceID: instanceID, RelayURL: relayURL,
 		DeviceAttest: &devattest.Policy{
-			AndroidRoots: pins.GoogleAttestationRoots(), AndroidPackage: androidPackage,
+			AndroidRoots:              pins.GoogleAttestationRoots(),
 			AndroidSelfSignedBootKeys: pins.GrapheneOSVerifiedBootKeys(),
 			IOSRoots:                  apple, IOSAppID: iosAppID,
 		},
@@ -119,6 +134,11 @@ func ReleaseConfig(instanceID, relayURL string) Config {
 		cfg.ReleaseNumber, cfg.ManifestKeys = c.Release, c.ManifestKeys
 		cfg.SealAccount, cfg.SealRegion = c.SealAccount, c.SealRegion
 		cfg.RetirementPrincipal, cfg.RetirementWindowDays = c.RetirementPrincipal, c.RetirementWindowDays
+		// The package is checked where an attestation is verified
+		// (enrollment, a transfer's hs.init, a recovery's register,
+		// §11.7); an unlock and a release approval verify the stored
+		// key's signature and do not look at the package again.
+		cfg.DeviceAttest.AndroidPackage = c.AndroidPackage
 		cfg.DeviceAttest.AndroidSigners = c.AndroidSigners
 		cfg.PushURL = c.PushURL
 	}

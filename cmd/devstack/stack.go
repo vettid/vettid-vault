@@ -260,7 +260,8 @@ func (s *stack) info() map[string]any {
 		"device_policy":   nil,
 		"recovery_skew":   s.opts.recoverySkew.String(),
 		"push_url":        pushURL,
-		"push_tls":        s.pushTLS, // the push gateway stand-in's TLS front
+		"push_tls":        s.pushTLS,       // the push gateway stand-in's TLS front
+		"features":        s.opts.features, // "" = every optional feature
 	}
 	if s.policy != nil {
 		m["device_policy"] = s.policy.Summary()
@@ -495,6 +496,9 @@ func (s *stack) startInstance(ctx context.Context) error {
 	eargs := []string{"-release", strconv.Itoa(release), "-control", ctl, "-egress", egr, "-relay-url", relayURL, "-push-url", pushURL}
 	if s.opts.devicePolicy != "" {
 		eargs = append(eargs, "-dev-device-policy", s.opts.devicePolicy)
+	}
+	if s.opts.features != "" {
+		eargs = append(eargs, "-dev-features", s.opts.features)
 	}
 	if s.opts.recoverySkew > 0 {
 		abs, err := filepath.Abs(filepath.Join(s.runDir, "recovery-clock"))

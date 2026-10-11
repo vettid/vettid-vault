@@ -13,5 +13,15 @@
     "2fed27b72746797a931fd414ff3dac4cd969fa0c2ff36209ae05365f580014f2"
   ],
   "relay_url": "https://relay.vettid.org",
-  "push_url": "https://push.staging.vettid.org"
+  "push_url": "https://push.staging.vettid.org",
+  "android_package": "com.vettid.app.staging",
+  "features": [
+    "actions",
+    "calls",
+    "intro",
+    "leash",
+    "location",
+    "presence",
+    "wallet"
+  ]
 }

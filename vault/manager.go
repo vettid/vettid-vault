@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -151,6 +152,8 @@ type Manager struct {
 
 	registry map[string]*typeEntry
 	features []Feature
+	// featureNames are the registered features' names (0.26.0, §11.10.8).
+	featureNames map[string]bool
 
 	ephemeralSeen map[string]time.Time
 	rates         map[string]*rateWindow
@@ -795,6 +798,24 @@ func (m *Manager) Audit() []AuditEntry {
 		return nil
 	}
 	return append([]AuditEntry(nil), m.st.Audit...)
+}
+
+// FeatureEntries returns the names of the features.<name> entries in the
+// vault's state, ascending (tests and tools; 0.26.0, §11.10.8: an image
+// creates no entry for a feature it does not register and carries one it
+// meets unchanged).
+func (m *Manager) FeatureEntries() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.st == nil {
+		return nil
+	}
+	out := make([]string, 0, len(m.st.Features))
+	for n := range m.st.Features {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // VaultID returns the vault id.

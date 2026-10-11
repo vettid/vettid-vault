@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -182,6 +183,39 @@ func DevVaultPushArgs(pushURL string) []string {
 	return []string{"-push-url", pushURL}
 }
 
+// ParseDevFeatures parses a development feature list (-dev-features,
+// VAULT-MESSAGING 0.26.0 §11.10.8, "The development build"): "all" (the
+// default: every optional feature), "none" (production release 1's
+// list), or a comma-separated list of optional feature names. The result
+// is never nil.
+func ParseDevFeatures(s string) ([]string, error) {
+	switch s {
+	case "all":
+		return all.Optional(), nil
+	case "none":
+		return []string{}, nil
+	}
+	names := strings.Split(s, ",")
+	if err := all.CheckOptional(names); err != nil {
+		return nil, err
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+// DevVaultFeatureArgs pass a development feature list on to a dev vault
+// process (none for nil: every optional feature). The supervisor runs no
+// feature code, so only the vault processes need it.
+func DevVaultFeatureArgs(features []string) []string {
+	if features == nil {
+		return nil
+	}
+	if len(features) == 0 {
+		return []string{"-features", "none"}
+	}
+	return []string{"-features", strings.Join(features, ",")}
+}
+
 // MaxRecoveryClockFile bounds the recovery clock file.
 const MaxRecoveryClockFile = 64
 
@@ -222,7 +256,12 @@ func DevVaultPlatform(args []string) (vaultproc.Platform, error) {
 	policy := fs.String("device-policy", "", "dev device policy (base64)")
 	clock := fs.String("recovery-clock", "", "recovery clock file (DevRecoveryClock)")
 	push := fs.String("push-url", "", "push gateway stand-in URL (DevVaultPushArgs)")
+	feats := fs.String("features", "all", "optional features (DevVaultFeatureArgs)")
 	if err := fs.Parse(args); err != nil || *n == 0 || *n > 15 || *relay == "" || fs.NArg() != 0 {
+		return vaultproc.Platform{}, errors.New("enclavetest: bad vault process arguments")
+	}
+	optional, err := ParseDevFeatures(*feats)
+	if err != nil {
 		return vaultproc.Platform{}, errors.New("enclavetest: bad vault process arguments")
 	}
 	var dp *DevDevicePolicy
@@ -244,7 +283,7 @@ func DevVaultPlatform(args []string) (vaultproc.Platform, error) {
 			}
 			return c
 		},
-		Features:       func() []vault.Feature { return all.Dev() },
+		Features:       func() []vault.Feature { return all.New(all.DevOptionsWith(optional)) },
 		RequireSeccomp: true,
 	}, nil
 }

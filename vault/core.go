@@ -122,6 +122,12 @@ func (m *Manager) hPairCreate(ctx context.Context, s *Session, in *envelope.Inne
 	if err != nil || (role != KindApp && role != KindDesktop && role != KindAgent) {
 		return nil, errBadRequest
 	}
+	if role == KindAgent && !m.hasFeature(featureLeash) {
+		// 0.26.0, §11.10.8: an agent acts only through LEASH grants, so
+		// an image that does not register leash knows no agent role and
+		// answers as for any unknown role.
+		return nil, errBadRequest
+	}
 	if role == KindApp {
 		// One app per vault (§6.7, 0.9.0): a new phone takes over by a
 		// direct transfer (§6.7.1), never as a second app.

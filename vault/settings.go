@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"regexp"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/vettid/vettid-vault/internal/strictjson"
@@ -211,6 +212,13 @@ func (m *Manager) hSettingsSet(_ context.Context, s *Session, in *envelope.Inner
 	if s.from.Kind != KindApp && namesOwnerCheck(in.Body) {
 		return nil, errForbiddenH // holder only (§3.6.2, §3.6.7), never held for approval
 	}
+	if !m.hasFeature(featureLocation) && namesLocationHistory(in.Body) {
+		// 0.26.0, §11.10.8: the location log's settings belong to the
+		// location feature; an image that does not register it refuses
+		// them instead of keeping a setting nothing reads. settings.get
+		// is unchanged.
+		return nil, errBadRequest
+	}
 	prev := s.Settings()
 	next, err := ApplySettings(prev, in.Body)
 	if err != nil {
@@ -230,6 +238,25 @@ func (m *Manager) hSettingsSet(_ context.Context, s *Session, in *envelope.Inner
 		m.settingsOwnerCheck(prev, next, s.now)
 	}
 	return strictjson.NewBuilder().Uint("version", next.Version).Bytes(), nil
+}
+
+// namesLocationHistory reports whether a settings.set body names a
+// location.history.* member (§10.16).
+func namesLocationHistory(body []byte) bool {
+	o, err := strictjson.ParseObject(body)
+	if err != nil {
+		return false
+	}
+	set, err := o.Object("set")
+	if err != nil {
+		return false
+	}
+	for k := range set {
+		if strings.HasPrefix(k, "location.history.") {
+			return true
+		}
+	}
+	return false
 }
 
 var errOwnerCheckRequired = &HandlerError{Code: "owner_check_required"}

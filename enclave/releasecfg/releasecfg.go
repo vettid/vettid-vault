@@ -2,7 +2,7 @@
 // one channel (VAULT-MESSAGING §11.10.8, VAULT-RELEASES §5.2): the
 // release number, the pinned manifest keys, the sealing-key account and
 // region, the retirement principal and window, the Android
-// signing-certificate digests, the relay URL, (VAULT-MESSAGING 0.24.0)
+// signing certificates with their classes (0.27.0), the relay URL, (VAULT-MESSAGING 0.24.0)
 // the push gateway URL and (0.26.0) the Android package and the optional
 // features the image registers.
 //
@@ -35,6 +35,7 @@ import (
 	"strings"
 
 	"github.com/vettid/vettid-vault/internal/strictjson"
+	"github.com/vettid/vettid-vault/vms/devattest"
 	"github.com/vettid/vettid-vault/vms/manifest"
 )
 
@@ -94,8 +95,10 @@ type Config struct {
 	SealRegion           string
 	RetirementPrincipal  string
 	RetirementWindowDays int
-	AndroidSigners       [][]byte
-	RelayURL             string
+	// AndroidSigners are the pinned Android signing certificates, each
+	// with its class (0.27.0, §11.7.1, §11.10.8): 1 to 4, distinct.
+	AndroidSigners []Signer
+	RelayURL       string
 	// PushURL is the channel's push gateway (0.24.0, §11.10.8).
 	PushURL string
 	// AndroidPackage is the Android package accepted in key attestation
@@ -187,20 +190,8 @@ func Parse(b []byte) (*File, error) {
 		return nil, ErrFormat
 	}
 	c.RetirementWindowDays = int(w)
-	signers, err := strings2(o, "android_signers", 1, 4)
-	if err != nil {
+	if c.AndroidSigners, err = parseSigners(o, c.Channel, missing); err != nil {
 		return nil, err
-	}
-	for _, s := range signers {
-		if isPlaceholder(s) {
-			missing("android_signers")
-			continue
-		}
-		d, err := hex.DecodeString(s)
-		if err != nil || len(d) != 32 || hex.EncodeToString(d) != s {
-			return nil, ErrFormat
-		}
-		c.AndroidSigners = append(c.AndroidSigners, d)
 	}
 	if c.RelayURL, err = value(o, "relay_url", validRelayURL, missing); err != nil {
 		return nil, err
@@ -220,6 +211,74 @@ func Parse(b []byte) (*File, error) {
 	}
 	f.Missing = dedupe(f.Missing)
 	return f, nil
+}
+
+// Signer is a pinned Android signing certificate (0.27.0, §11.7.1): the
+// SHA-256 of the certificate and the class the vault reports for a vault
+// bound to it.
+type Signer struct {
+	Digest []byte
+	Class  string
+}
+
+// StagingUnboundThrough is the last staging release that lets a vault
+// enrolled before 0.27.0 unlock without binding its signer (§11.7.1,
+// "Vaults enrolled before 0.27.0"; owner decision 2026-10-11): S10, the
+// first staging release with the rule. Staging releases after it refuse
+// such a vault (signer_refused), and so does every production release.
+const StagingUnboundThrough = 10
+
+// AcceptsUnbound reports whether this release's images let an Android key
+// without a recorded signer unlock unbound. It is a function of the
+// measured channel and release number, never a member of the file: true
+// only in the staging channel up to StagingUnboundThrough, so no
+// production channel file can express it.
+func (c *Config) AcceptsUnbound() bool {
+	return c != nil && c.Channel == ChannelStaging && c.Release <= StagingUnboundThrough
+}
+
+// parseSigners reads "android_signers" (0.27.0, §11.10.8): 1 to 4
+// objects {"digest": "<64 lowercase hex>", "class": "vettid" |
+// "google_play" | "development"} with distinct digests. Malformed: an
+// entry without a class or with an unknown one, a member besides the two,
+// a repeated digest, the bare list of digest strings used before 0.27.0,
+// and class development in the production file. A placeholder digest is
+// reported missing, as any placeholder.
+func parseSigners(o strictjson.Object, channel string, missing func(string)) ([]Signer, error) {
+	arr, err := o.Array("android_signers")
+	if err != nil || len(arr) < 1 || len(arr) > 4 {
+		return nil, ErrFormat
+	}
+	var out []Signer
+	seen := map[string]bool{}
+	for _, raw := range arr {
+		e, err := strictjson.AsObject(raw)
+		if err != nil || len(e) != 2 || !e.Has("digest") || !e.Has("class") {
+			return nil, ErrFormat // the bare-string form included
+		}
+		class, err := e.String("class")
+		if err != nil || !devattest.ValidClass(class) {
+			return nil, ErrFormat
+		}
+		if channel == ChannelProd && class == devattest.ClassDevelopment {
+			return nil, ErrFormat // a development key is never pinned in production
+		}
+		s, err := e.String("digest")
+		if err != nil {
+			return nil, ErrFormat
+		}
+		if isPlaceholder(s) {
+			missing("android_signers")
+			continue
+		}
+		d, err := hex.DecodeString(s)
+		if err != nil || len(d) != 32 || hex.EncodeToString(d) != s || seen[s] {
+			return nil, ErrFormat
+		}
+		seen[s] = true
+		out = append(out, Signer{Digest: d, Class: class})
+	}
+	return out, nil
 }
 
 // parseFeatures reads a "features" array (0.26.0 §11.10.8, the release

@@ -12,7 +12,7 @@ func CheckKeyDescription(p *Policy, b []byte) error {
 	}
 	for _, l := range []authList{kd.sw, kd.hw} {
 		if aid, ok := l.elems[tagAttestationID]; ok {
-			_ = checkApplicationID(p, aid)
+			_, _ = checkApplicationID(p, aid)
 		}
 		_, _, _ = l.intSet(tagPurpose)
 		_, _, _ = l.int(tagAlgorithm)
@@ -34,7 +34,7 @@ func CheckKeyDescriptionStrict(p *Policy, b []byte) error {
 	}
 	for _, l := range []authList{kd.sw, kd.hw} {
 		if aid, ok := l.elems[tagAttestationID]; ok {
-			if err := checkApplicationID(p, aid); err != nil {
+			if _, err := checkApplicationID(p, aid); err != nil {
 				return err
 			}
 		}

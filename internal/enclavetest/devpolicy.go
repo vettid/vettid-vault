@@ -248,7 +248,12 @@ func (p *DevDevicePolicy) Apply(base *devattest.Policy) *devattest.Policy {
 	}
 	out.AndroidRoots = append(out.AndroidRoots, p.ExtraRoots...)
 	out.AndroidDevPackages = append(append([]string(nil), base.AndroidDevPackages...), p.Packages...)
-	out.AndroidSigners = append(append([][]byte(nil), base.AndroidSigners...), p.Signers...)
+	// The file's signers are development keys (0.27.0, §11.7.1): a
+	// vault bound to one reports class development.
+	out.AndroidSigners = append([]devattest.Signer(nil), base.AndroidSigners...)
+	for _, d := range p.Signers {
+		out.AndroidSigners = append(out.AndroidSigners, devattest.Signer{Digest: d, Class: devattest.ClassDevelopment})
+	}
 	out.AndroidSelfSignedBootKeys = append([][]byte(nil), base.AndroidSelfSignedBootKeys...)
 	if p.GrapheneOS {
 		out.AndroidSelfSignedBootKeys = append(out.AndroidSelfSignedBootKeys, pins.GrapheneOSVerifiedBootKeys()...)

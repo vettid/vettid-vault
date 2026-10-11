@@ -40,6 +40,13 @@ type Config struct {
 	// KDF returns the KDF parameters for new vaults (default
 	// vault.DefaultKDF: Argon2id t=3, m=64 MiB, p=1).
 	KDF func() (vault.KDFParams, error)
+	// Before027, if set, makes this instance behave as releases before
+	// 0.27.0 did (§11.7.1): device bindings are written without the
+	// signer, an unlock's `chain` is ignored and no signer rule is
+	// applied. Tests use it to make a vault "enrolled before 0.27.0" and
+	// to play the release such a vault comes from. Release
+	// configurations leave it false (ReleaseConfig never sets it).
+	Before027 bool
 	// RecoveryNow, if set, is the clock of the recovery's delay and expiry
 	// (§11.11): tests move it past the 24 h delay. Release configurations
 	// leave it nil (the enclave clock).
@@ -139,7 +146,13 @@ func ReleaseConfig(instanceID, relayURL string) Config {
 		// §11.7); an unlock and a release approval verify the stored
 		// key's signature and do not look at the package again.
 		cfg.DeviceAttest.AndroidPackage = c.AndroidPackage
-		cfg.DeviceAttest.AndroidSigners = c.AndroidSigners
+		// 0.27.0 (§11.7.1): the pinned signers with their classes, and
+		// whether a vault enrolled before the rule may still unlock
+		// unbound (staging, up to S10; never production).
+		for _, sg := range c.AndroidSigners {
+			cfg.DeviceAttest.AndroidSigners = append(cfg.DeviceAttest.AndroidSigners, devattest.Signer{Digest: sg.Digest, Class: sg.Class})
+		}
+		cfg.DeviceAttest.AndroidAcceptUnbound = c.AcceptsUnbound()
 		cfg.PushURL = c.PushURL
 	}
 	return cfg

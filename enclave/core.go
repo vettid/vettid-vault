@@ -155,9 +155,51 @@ func (c *Core) vaultOptions(sealer vault.Sealer) vault.Options {
 		if err != nil {
 			return nil, err
 		}
-		return json.Marshal(b)
+		return c.marshalBinding(b)
+	}
+	// 0.27.0 (§11.7.1): the pinned signers and their classes, for what
+	// the vault reports (device.list, the transfer's pending, audits).
+	o.AndroidSigners = nil
+	for _, sg := range pol.AndroidSigners {
+		o.AndroidSigners = append(o.AndroidSigners, vault.SignerPin{Digest: hex.EncodeToString(sg.Digest), Class: sg.Class})
 	}
 	return o
+}
+
+// marshalBinding encodes a device binding for the sealed header. With
+// Config.Before027 (tests only) the signer is left out, as releases
+// before 0.27.0 wrote it.
+func (c *Core) marshalBinding(b *devattest.Binding) (json.RawMessage, error) {
+	if c.cfg.Before027 {
+		nb := *b
+		nb.Signer, nb.SignerClass = "", ""
+		b = &nb
+	}
+	return json.Marshal(b)
+}
+
+// checkSigner applies §11.7.1 to an Android key whose signature has just
+// verified: a key without a recorded signer is bound from the request's
+// chain if it brought one (a chain that fails is an attestation failure);
+// then the recorded signer must be pinned by this release, or the key be
+// unbound where the release still accepts that (staging S10). chain is
+// nil for a release approval, which never binds.
+func (c *Core) checkSigner(b *devattest.Binding, chain [][]byte) (*devattest.Binding, error) {
+	if c.cfg.Before027 {
+		return b, nil // tests only: a release from before the rule
+	}
+	pol := c.cfg.DeviceAttest
+	if b.Platform == altchan.PlatformAndroid && b.Signer == "" && len(chain) > 0 {
+		nb, err := devattest.BindSigner(pol, b, chain)
+		if err != nil {
+			return nil, vault.ErrDeviceAttestation
+		}
+		b = nb
+	}
+	if reason := devattest.CheckSigner(pol, b); reason != "" {
+		return nil, &vault.SignerRefused{Reason: reason}
+	}
+	return b, nil
 }
 
 func (c *Core) emit(ev vault.LifecycleEvent) {
@@ -215,7 +257,7 @@ func (c *Core) enroll(ctx context.Context, q *Job, started **vault.Manager) []by
 	if err != nil {
 		return fail("attestation")
 	}
-	binding, err := json.Marshal(b)
+	binding, err := c.marshalBinding(b) // with the signer: the vault's binding from its first header (§11.7.1)
 	if err != nil {
 		return fail("retry")
 	}
@@ -388,6 +430,12 @@ func (c *Core) unlock(ctx context.Context, q *Job, started **vault.Manager) []by
 			return nil, vault.ErrDeviceAttestation
 		}
 		unlockCounter = nb.Counter
+		// 0.27.0 (§11.7.1): after the signature and the assertion
+		// verified, the key's recorded signer must be pinned by this
+		// release (signer_refused, decided before the PIN).
+		if nb, err = c.checkSigner(nb, r.Assertion.Chain); err != nil {
+			return nil, err
+		}
 		return json.Marshal(nb)
 	}
 	p.Manifest = func(seen uint64) (*vault.ManifestView, error) {
@@ -438,6 +486,12 @@ func (c *Core) unlock(ctx context.Context, q *Job, started **vault.Manager) []by
 			nb, err := devattest.VerifyAssertion(pol, &b, u.Approval, devattest.ForString(s), preCounter, now, list)
 			if err != nil || b.Platform == altchan.PlatformIOS && nb.Counter == unlockCounter {
 				return nil, vault.ErrDeviceAttestation
+			}
+			// 0.27.0 (§11.7.1): an approval is the other operation that
+			// verifies a device-key signature; the same rule. (The
+			// unlock that carries it has already applied it to this key.)
+			if nb, err = c.checkSigner(nb, nil); err != nil {
+				return nil, err
 			}
 			if nb.Counter < b.Counter {
 				nb.Counter = b.Counter

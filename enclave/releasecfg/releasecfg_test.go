@@ -6,8 +6,10 @@ import (
 	"crypto/elliptic"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -29,7 +31,7 @@ func complete(t *testing.T) string {
 	return `{"channel":"prod","release":1,"manifest_keys":["` + spki(t, 0x21) + `","` + spki(t, 0x23) + `"],` +
 		`"seal_account":"111122223333","seal_region":"us-east-1",` +
 		`"retirement_principal":"arn:aws:iam::111122223333:role/vettid-org-vault-key-retirement","retirement_window_days":30,` +
-		`"android_signers":["` + strings.Repeat("ab", 32) + `"],"relay_url":"https://relay.vettid.org","push_url":"https://push.vettid.org",` +
+		`"android_signers":[{"digest":"` + strings.Repeat("ab", 32) + `","class":"vettid"}],"relay_url":"https://relay.vettid.org","push_url":"https://push.vettid.org",` +
 		`"android_package":"com.vettid.app","features":[]}`
 }
 
@@ -122,7 +124,7 @@ func TestCompletePasses(t *testing.T) {
 		t.Fatal(err)
 	}
 	if c.Release != 1 || len(c.ManifestKeys) != 2 || c.SealAccount != "111122223333" || c.RetirementWindowDays != 30 ||
-		len(c.AndroidSigners) != 1 || len(c.AndroidSigners[0]) != 32 {
+		len(c.AndroidSigners) != 1 || len(c.AndroidSigners[0].Digest) != 32 || c.AndroidSigners[0].Class != "vettid" {
 		t.Fatalf("%+v", c)
 	}
 	if c.AndroidPackage != "com.vettid.app" || c.Features == nil || len(c.Features) != 0 {
@@ -145,6 +147,9 @@ func TestRefusals(t *testing.T) {
 			return strings.Replace(s, `"seal_account":"111122223333"`, `"seal_account":"TODO-O1"`, 1)
 		}, ErrIncomplete},
 		"placeholder signer": {func(s string) string { return strings.Replace(s, strings.Repeat("ab", 32), "TODO-O8", 1) }, ErrIncomplete},
+		"bare signer list (before 0.27.0)": {func(s string) string {
+			return strings.Replace(s, `[{"digest":"`+strings.Repeat("ab", 32)+`","class":"vettid"}]`, `["`+strings.Repeat("ab", 32)+`"]`, 1)
+		}, ErrFormat},
 		"placeholder principal": {func(s string) string {
 			return strings.Replace(s, "arn:aws:iam::111122223333:role/vettid-org-vault-key-retirement", "TODO-O1", 1)
 		}, ErrIncomplete},
@@ -269,6 +274,7 @@ func TestFeatureNames(t *testing.T) {
 // android_package, no features, bare signer digests.
 func pre026(t *testing.T, channel string) string {
 	s := strings.Replace(complete(t), `,"android_package":"com.vettid.app","features":[]`, ``, 1)
+	s = strings.Replace(s, `[{"digest":"`+strings.Repeat("ab", 32)+`","class":"vettid"}]`, `["`+strings.Repeat("ab", 32)+`"]`, 1)
 	if channel == ChannelStaging {
 		s = staging(s)
 	}
@@ -354,6 +360,176 @@ func TestFeaturesOnlyGrow(t *testing.T) {
 	}
 }
 
+// withSigners replaces the test file's signer list.
+func withSigners(s, list string) string {
+	return strings.Replace(s, `[{"digest":"`+strings.Repeat("ab", 32)+`","class":"vettid"}]`, list, 1)
+}
+
+func signer(hexByte, class string) string {
+	return `{"digest":"` + strings.Repeat(hexByte, 32) + `","class":"` + class + `"}`
+}
+
+// VAULT-MESSAGING 0.27.0 §11.10.8, VAULT-RELEASES 0.1.12 §5.2:
+// android_signers is 1 to 4 entries {digest, class} with distinct
+// digests. The release build refuses an entry without a class, an unknown
+// class, a duplicate digest, the bare-string form and, in the production
+// file, class development.
+func TestAndroidSigners(t *testing.T) {
+	prod, stg := complete(t), staging(complete(t))
+	ok := func(channel, file string, classes ...string) {
+		t.Helper()
+		c, err := Check(channel, []byte(file))
+		if err != nil {
+			t.Fatalf("%v", err)
+		}
+		if len(c.AndroidSigners) != len(classes) {
+			t.Fatalf("signers %+v", c.AndroidSigners)
+		}
+		for i, cl := range classes {
+			if c.AndroidSigners[i].Class != cl || len(c.AndroidSigners[i].Digest) != 32 {
+				t.Fatalf("signer %d: %+v", i, c.AndroidSigners[i])
+			}
+		}
+	}
+	ok(ChannelProd, prod, "vettid")
+	ok(ChannelProd, withSigners(prod, `[`+signer("ab", "vettid")+`,`+signer("cd", "google_play")+`]`), "vettid", "google_play")
+	ok(ChannelStaging, withSigners(stg, `[`+signer("ab", "vettid")+`,`+signer("cd", "development")+`]`), "vettid", "development")
+	ok(ChannelStaging, withSigners(stg, `[`+signer("a1", "vettid")+`,`+signer("a2", "google_play")+`,`+signer("a3", "development")+`,`+signer("a4", "development")+`]`),
+		"vettid", "google_play", "development", "development")
+	for name, tc := range map[string]struct {
+		channel, list string
+		want          error
+	}{
+		"bare string":             {ChannelProd, `["` + strings.Repeat("ab", 32) + `"]`, ErrFormat},
+		"bare string beside one":  {ChannelProd, `[` + signer("ab", "vettid") + `,"` + strings.Repeat("cd", 32) + `"]`, ErrFormat},
+		"no class":                {ChannelProd, `[{"digest":"` + strings.Repeat("ab", 32) + `"}]`, ErrFormat},
+		"no digest":               {ChannelProd, `[{"class":"vettid"}]`, ErrFormat},
+		"unknown class":           {ChannelProd, `[` + signer("ab", "play") + `]`, ErrFormat},
+		"empty class":             {ChannelProd, `[` + signer("ab", "") + `]`, ErrFormat},
+		"class upper case":        {ChannelProd, `[` + signer("ab", "Vettid") + `]`, ErrFormat},
+		"class not a string":      {ChannelProd, `[{"digest":"` + strings.Repeat("ab", 32) + `","class":1}]`, ErrFormat},
+		"extra member":            {ChannelProd, `[{"digest":"` + strings.Repeat("ab", 32) + `","class":"vettid","note":"x"}]`, ErrFormat},
+		"duplicate digest":        {ChannelProd, `[` + signer("ab", "vettid") + `,` + signer("ab", "google_play") + `]`, ErrFormat},
+		"duplicate entry":         {ChannelProd, `[` + signer("ab", "vettid") + `,` + signer("ab", "vettid") + `]`, ErrFormat},
+		"development in prod":     {ChannelProd, `[` + signer("ab", "development") + `]`, ErrFormat},
+		"development beside prod": {ChannelProd, `[` + signer("ab", "vettid") + `,` + signer("cd", "development") + `]`, ErrFormat},
+		"no entries":              {ChannelProd, `[]`, ErrFormat},
+		"five entries":            {ChannelStaging, `[` + signer("a1", "vettid") + `,` + signer("a2", "vettid") + `,` + signer("a3", "vettid") + `,` + signer("a4", "vettid") + `,` + signer("a5", "vettid") + `]`, ErrFormat},
+		"digest upper hex":        {ChannelProd, `[` + signer("AB", "vettid") + `]`, ErrFormat},
+		"digest short":            {ChannelProd, `[{"digest":"` + strings.Repeat("ab", 31) + `","class":"vettid"}]`, ErrFormat},
+		"not an array":            {ChannelProd, signer("ab", "vettid"), ErrFormat},
+		"entry an array":          {ChannelProd, `[["` + strings.Repeat("ab", 32) + `","vettid"]]`, ErrFormat},
+		"placeholder digest":      {ChannelProd, `[{"digest":"TODO-O8","class":"google_play"}]`, ErrIncomplete},
+		"placeholder entry":       {ChannelProd, `["TODO-O8: the Play app signing certificate",` + signer("ab", "vettid") + `]`, ErrFormat},
+	} {
+		file := withSigners(prod, tc.list)
+		if tc.channel == ChannelStaging {
+			file = withSigners(stg, tc.list)
+		}
+		if _, err := Check(tc.channel, []byte(file)); !errors.Is(err, tc.want) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	// development is a staging class: the same entry passes there.
+	ok(ChannelStaging, withSigners(stg, `[`+signer("ab", "development")+`]`), "development")
+}
+
+// The committed files (0.27.0 §11.10.8; VAULT-RELEASES 0.1.12 §5.2;
+// W10-READINESS 0.1.7): production pins exactly VettID's own release
+// certificate, class vettid, with no placeholder left for the Play
+// certificate (O8 as amended), so the gate refuses production only for
+// its release number; staging pins its signing certificate (vettid) and
+// the automation certificate (development).
+func TestCommittedSigners(t *testing.T) {
+	read := func(ch string) (*File, []byte) {
+		t.Helper()
+		b, err := os.ReadFile(ch + ".json")
+		if err != nil {
+			t.Fatal(err)
+		}
+		f, err := Parse(b)
+		if err != nil {
+			t.Fatalf("%s: %v", ch, err)
+		}
+		return f, b
+	}
+	hexOf := func(s Signer) string { return hex.EncodeToString(s.Digest) }
+	p, pb := read(ChannelProd)
+	if len(p.Config.AndroidSigners) != 1 || p.Config.AndroidSigners[0].Class != "vettid" ||
+		hexOf(p.Config.AndroidSigners[0]) != "31a19613aa10f209e08945f947f94f7ce3e6e5ac342457ff9969a67986928e65" {
+		t.Fatalf("prod signers %+v", p.Config.AndroidSigners)
+	}
+	if bytes.Contains(pb, []byte(Placeholder)) {
+		t.Fatal("prod.json still holds a placeholder")
+	}
+	for _, m := range p.Missing {
+		if m != "release" {
+			t.Fatalf("prod.json is refused for %q; only the release number may be open", m)
+		}
+	}
+	// With its release number set, production's file passes the gate.
+	one := bytes.Replace(pb, []byte(`"release": 0`), []byte(`"release": 1`), 1)
+	c, err := Check(ChannelProd, one)
+	if err != nil {
+		t.Fatalf("prod.json with release 1: %v", err)
+	}
+	if c.AcceptsUnbound() {
+		t.Fatal("production accepts unbound vaults")
+	}
+	s, _ := read(ChannelStaging)
+	if len(s.Config.AndroidSigners) != 2 ||
+		hexOf(s.Config.AndroidSigners[0]) != "bd83a0753faa6af6f8d81b9f76a04ac1a499ea6c7f46c6f1113d4b5787ecb2c4" || s.Config.AndroidSigners[0].Class != "vettid" ||
+		hexOf(s.Config.AndroidSigners[1]) != "2fed27b72746797a931fd414ff3dac4cd969fa0c2ff36209ae05365f580014f2" || s.Config.AndroidSigners[1].Class != "development" {
+		t.Fatalf("staging signers %+v", s.Config.AndroidSigners)
+	}
+}
+
+// §11.7.1, "Vaults enrolled before 0.27.0": a key without a recorded
+// signer unlocks unbound only in the staging channel and only up to S10
+// (StagingUnboundThrough); from the staging release after it, and in
+// every production release whatever its number, it is refused. The
+// exception is a function of the measured channel and release number: no
+// member of a channel file can turn it on.
+func TestAcceptsUnbound(t *testing.T) {
+	at := func(file string, channel string, release uint64) bool {
+		t.Helper()
+		c, err := Check(channel, []byte(strings.Replace(file, `"release":1`, `"release":`+strconv.FormatUint(release, 10), 1)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c.AcceptsUnbound()
+	}
+	if StagingUnboundThrough != 10 {
+		t.Fatalf("the staging exception ends at release %d, the spec says S10", StagingUnboundThrough)
+	}
+	for _, n := range []uint64{1, 9, 10} {
+		if !at(staging(complete(t)), ChannelStaging, n) {
+			t.Errorf("staging release %d refuses unbound vaults", n)
+		}
+	}
+	for _, n := range []uint64{11, 12, 100} {
+		if at(staging(complete(t)), ChannelStaging, n) {
+			t.Errorf("staging release %d accepts unbound vaults", n)
+		}
+	}
+	for _, n := range []uint64{1, 2, 9, 10, 11} {
+		if at(complete(t), ChannelProd, n) {
+			t.Errorf("production release %d accepts unbound vaults", n)
+		}
+	}
+	var none *Config
+	if none.AcceptsUnbound() {
+		t.Fatal("no configuration accepts unbound vaults")
+	}
+	// No member of the file expresses it.
+	for _, member := range []string{`"accept_unbound":true`, `"android_accept_unbound":true`, `"unbound":true`} {
+		file := strings.Replace(complete(t), `"release":1`, `"release":1,`+member, 1)
+		if _, err := Check(ChannelProd, []byte(file)); !errors.Is(err, ErrFormat) {
+			t.Errorf("%s accepted in a production file: %v", member, err)
+		}
+	}
+}
+
 func FuzzParse(f *testing.F) {
 	for _, ch := range []string{ChannelProd, ChannelStaging} {
 		if b, err := os.ReadFile(ch + ".json"); err == nil {
@@ -366,8 +542,19 @@ func FuzzParse(f *testing.F) {
 			return
 		}
 		if c, err := p.Complete(); err == nil && (c.Release == 0 || len(c.ManifestKeys) == 0 || c.SealAccount == "" ||
-			c.AndroidPackage != AndroidPackages[c.Channel] || c.Features == nil) {
+			c.AndroidPackage != AndroidPackages[c.Channel] || c.Features == nil || len(c.AndroidSigners) == 0) {
 			t.Fatal("complete without values")
+		}
+		seen := map[string]bool{}
+		for _, sg := range p.Config.AndroidSigners {
+			if len(sg.Digest) != 32 || seen[string(sg.Digest)] || sg.Class != "vettid" && sg.Class != "google_play" && sg.Class != "development" ||
+				p.Config.Channel == ChannelProd && sg.Class == "development" {
+				t.Fatalf("signers %+v", p.Config.AndroidSigners)
+			}
+			seen[string(sg.Digest)] = true
+		}
+		if p.Config.Channel == ChannelProd && p.Config.AcceptsUnbound() {
+			t.Fatal("a production file accepts unbound vaults")
 		}
 		for i, n := range p.Config.Features {
 			if !isOptional(n) || i > 0 && p.Config.Features[i-1] >= n {

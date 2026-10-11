@@ -1,12 +1,14 @@
 package client
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/x509"
 	"errors"
 	"time"
 
+	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/altchan"
 	"github.com/vettid/vettid-vault/vms/devattest"
 	"github.com/vettid/vettid-vault/vms/envelope"
@@ -193,6 +195,7 @@ func (d *Device) BuildEnroll(userGUID, pin string, e *Enclave, m *manifest.Manif
 	if err != nil {
 		return nil, err
 	}
+	d.keepChain(da)
 	open, err := d.own.MintOpenToken(d.st.RelayURL, 10*time.Minute, "")
 	if err != nil {
 		return nil, err
@@ -249,6 +252,86 @@ type UnlockOptions struct {
 	// CancelRecovery cancels a recovery in progress with this unlock
 	// (§11.11.4).
 	CancelRecovery bool
+	// Chain overrides the certificate chain sent in device_assertion
+	// (0.27.0, §11.7.1); NoChain sends none. By default an Android app
+	// sends the chain of its last attestation until it has seen its
+	// signer in device.list (Signer).
+	Chain   [][]byte
+	NoChain bool
+}
+
+// keepChain remembers the chain of an Android attestation (the caller
+// holds d.mu). A new attestation is a new key: the vault has not recorded
+// its signer through this app's eyes yet.
+func (d *Device) keepChain(da *altchan.DeviceAttest) {
+	if da == nil || da.Platform != altchan.PlatformAndroid {
+		d.st.AttestChain, d.st.SignerBound = nil, false
+		return
+	}
+	d.st.AttestChain = nil
+	for _, c := range da.Chain {
+		d.st.AttestChain = append(d.st.AttestChain, append([]byte(nil), c...))
+	}
+	d.st.SignerBound = false
+}
+
+// AttestChain returns the certificate chain of this app's last Android
+// attestation (nil for none) and whether the app has seen its signer in
+// device.list, after which it sends the chain no more.
+func (d *Device) AttestChain() (chain [][]byte, signerSeen bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for _, c := range d.st.AttestChain {
+		chain = append(chain, append([]byte(nil), c...))
+	}
+	return chain, d.st.SignerBound
+}
+
+// DeviceSigner is the `signer` member of an app's device.list entry
+// (0.27.0, §10.3): the vault's signer binding.
+type DeviceSigner struct {
+	Class  string // vettid, google_play or development
+	Digest string // 64 lowercase hex digits: the signing certificate's SHA-256
+}
+
+// Signer returns this app's signer as the vault reports it in device.list
+// (nil when the vault has recorded none: iOS, or a vault enrolled before
+// 0.27.0 that has not bound yet). Once it is reported, the app stops
+// sending its chain with unlocks.
+func (d *Device) Signer(ctx context.Context) (*DeviceSigner, error) {
+	o, err := d.Op(ctx, "device.list", nil)
+	if err != nil {
+		return nil, err
+	}
+	arr, err := o.Array("devices")
+	if err != nil {
+		return nil, ErrProtocol
+	}
+	for _, raw := range arr {
+		e, err := strictjson.AsObject(raw)
+		if err != nil {
+			return nil, ErrProtocol
+		}
+		if id, _ := e.String("id"); id != d.DeviceID() || !e.Has("signer") {
+			continue
+		}
+		so, err := e.Object("signer")
+		if err != nil {
+			return nil, ErrProtocol
+		}
+		sg := &DeviceSigner{}
+		if sg.Class, err = so.String("class"); err != nil {
+			return nil, ErrProtocol
+		}
+		if sg.Digest, err = so.String("digest"); err != nil {
+			return nil, ErrProtocol
+		}
+		d.mu.Lock()
+		d.st.SignerBound = true
+		d.mu.Unlock()
+		return sg, nil
+	}
+	return nil, nil
 }
 
 // pendingUnlock is kept between BuildUnlock and OpenUnlockResult.
@@ -310,6 +393,17 @@ func (d *Device) BuildUnlock(userGUID, pin string, e *Enclave, m *manifest.Manif
 	as, err := att.Assert(devattest.ForChallenge(ch))
 	if err != nil {
 		return nil, err
+	}
+	if as.Platform == altchan.PlatformAndroid && !o.NoChain {
+		// 0.27.0 (§11.7.1): the chain of the bound key, while the vault
+		// has not recorded this app's signer. Not part of any signing
+		// string; a bound key ignores it. Never on a release approval.
+		switch {
+		case o.Chain != nil:
+			as.Chain = o.Chain
+		case !d.st.SignerBound && len(d.st.AttestChain) > 0:
+			as.Chain = d.st.AttestChain
+		}
 	}
 	var upd *altchan.ReleaseUpdate
 	switch {

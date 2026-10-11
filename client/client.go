@@ -92,6 +92,12 @@ type State struct {
 	// (0.15.0), or a transfer's device.paired (0.17.0): the sealed
 	// requests carry it.
 	UserGUID string `json:"user_guid,omitempty"`
+	// AttestChain is the certificate chain of this app's Android device
+	// key, as sent at its last attestation (Android Keystore keeps it
+	// with the key). 0.27.0 (§11.7.1): it is sent again with each unlock
+	// until the vault has recorded this app's signer (SignerBound).
+	AttestChain [][]byte `json:"attest_chain,omitempty"`
+	SignerBound bool     `json:"signer_bound,omitempty"`
 }
 
 // VaultRecord is what the device knows about its vault.
@@ -435,6 +441,7 @@ func (d *Device) startPairing(ctx context.Context, link string, att Attester) er
 		if da, err = att.Attest(ch); err != nil {
 			return err
 		}
+		d.keepChain(da)
 	}
 	d.sas, d.hsFailed = "", false
 	var apiKey []byte

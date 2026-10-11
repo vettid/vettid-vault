@@ -1,11 +1,13 @@
 package enclave_test
 
 import (
+	"bytes"
 	"reflect"
 	"testing"
 
 	"github.com/vettid/vettid-vault/enclave"
 	"github.com/vettid/vettid-vault/enclave/releasecfg"
+	"github.com/vettid/vettid-vault/vms/devattest"
 )
 
 // The release device policy never carries development packages (the dev
@@ -41,5 +43,33 @@ func TestReleaseConfigAndroidPackage(t *testing.T) {
 		if want != "com.vettid.app.staging" || len(features) != 7 {
 			t.Fatalf("staging: %q %v", want, features)
 		}
+	} // 0.27.0 (§11.7.1): the pinned signers reach the device policy with
+	// their classes; unbound keys are accepted only by a staging image up
+	// to S10, never by a production one; and no release configuration
+	// behaves as a release from before the rule.
+	if cfg.Before027 {
+		t.Fatal("a release configuration with Before027")
+	}
+	pol := cfg.DeviceAttest
+	if c == nil {
+		if len(pol.AndroidSigners) != 0 || pol.AndroidAcceptUnbound {
+			t.Fatalf("without complete constants: %d signers, unbound accepted %v", len(pol.AndroidSigners), pol.AndroidAcceptUnbound)
+		}
+		return
+	}
+	if len(pol.AndroidSigners) != len(c.AndroidSigners) {
+		t.Fatalf("signers %d, the channel file pins %d", len(pol.AndroidSigners), len(c.AndroidSigners))
+	}
+	for i, sg := range c.AndroidSigners {
+		if !bytes.Equal(pol.AndroidSigners[i].Digest, sg.Digest) || pol.AndroidSigners[i].Class != sg.Class || !devattest.ValidClass(sg.Class) {
+			t.Fatalf("signer %d: %+v, the channel file says %+v", i, pol.AndroidSigners[i], sg)
+		}
+		if ch == releasecfg.ChannelProd && sg.Class == devattest.ClassDevelopment {
+			t.Fatal("a development signer in a production image")
+		}
+	}
+	wantUnbound := ch == releasecfg.ChannelStaging && c.Release <= 10
+	if pol.AndroidAcceptUnbound != wantUnbound || ch == releasecfg.ChannelProd && pol.AndroidAcceptUnbound {
+		t.Fatalf("channel %q release %d: unbound keys accepted %v, want %v", ch, c.Release, pol.AndroidAcceptUnbound, wantUnbound)
 	}
 }

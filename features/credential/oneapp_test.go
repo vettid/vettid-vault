@@ -265,6 +265,70 @@ func TestTransfer(t *testing.T) {
 	e.ok(e.call("app2", "credential.unlock", latest, map[string]any{"password": pw}))
 }
 
+// §6.7.1 step 3, §11.7.1 (0.27.0): a transfer to an app of another signer
+// needs the holder's confirmation, the new app's class in `signer`.
+// Without it, or with another class, the answer is signer_unconfirmed
+// before the UTK is spent and before the PIN is tried: nothing is spent
+// or counted, no owner check fails, and the transfer stays open. To the
+// same signer no `signer` is needed.
+func TestTransferSignerConfirmation(t *testing.T) {
+	e := newEnv(t)
+	e.h.PIN = "246810"
+	blob := e.create()
+	o := e.ok(e.raw("app", "device.transfer.create", `{}`)).Obj(t)
+	id, _ := o.String("transfer_id")
+	e.h.Xfer.Scanned = true
+	e.h.XferSigner, e.h.XferSignerChanged = "google_play", true
+	appr := func(pin, extra string) featuretest.Result {
+		return e.callBody("app", "device.transfer.approve", blob, map[string]any{"password": pw, "pin": pin}, `"transfer_id":"`+id+`"`+extra)
+	}
+	pool, version := e.f.PoolSizeOf("dev-app"), e.f.CredentialVersion()
+	// Even with a wrong PIN and password the answer is signer_unconfirmed:
+	// it is decided first.
+	for name, extra := range map[string]string{"no signer": ``, "the old class": `,"signer":"vettid"`, "another class": `,"signer":"development"`,
+		"an empty class": `,"signer":""`} {
+		for _, pin := range []string{"246810", "135791"} {
+			if r := appr(pin, extra); r.Code != "signer_unconfirmed" {
+				t.Fatalf("%s: %q", name, r.Code)
+			}
+		}
+	}
+	if r := appr("246810", `,"signer":1`); r.Code != "bad_request" {
+		t.Fatalf("signer not a string: %q", r.Code)
+	}
+	if got := e.f.PoolSizeOf("dev-app"); got != pool {
+		t.Fatalf("a refused approval spent UTKs: pool %d, was %d", got, pool)
+	}
+	if e.h.PINTries != 0 || len(e.h.CheckFailed) != 0 || e.f.CredentialVersion() != version {
+		t.Fatalf("a refused approval tried the PIN %d times, failed checks %v", e.h.PINTries, e.h.CheckFailed)
+	}
+	if e.h.Xfer == nil || e.h.Xfer.State != vault.TransferOpen {
+		t.Fatal("the transfer did not stay open")
+	}
+	// With the confirmation the approval runs as always: the PIN is tried.
+	if r := appr("135791", `,"signer":"google_play"`); r.Code != "bad_pin" || e.h.PINTries != 1 {
+		t.Fatalf("confirmed, wrong PIN: %q", r.Code)
+	}
+	e.ok(appr("246810", `,"signer":"google_play"`))
+	if e.h.Xfer.State != vault.TransferApproved {
+		t.Fatal("not approved")
+	}
+
+	// The same signer: no `signer` needed; naming the class is fine,
+	// naming another is refused.
+	e2 := newEnv(t)
+	e2.h.PIN = "246810"
+	blob2 := e2.create()
+	o = e2.ok(e2.raw("app", "device.transfer.create", `{}`)).Obj(t)
+	id2, _ := o.String("transfer_id")
+	e2.h.Xfer.Scanned = true
+	e2.h.XferSigner, e2.h.XferSignerChanged = "vettid", false
+	if r := e2.callBody("app", "device.transfer.approve", blob2, map[string]any{"password": pw, "pin": "246810"}, `"transfer_id":"`+id2+`","signer":"google_play"`); r.Code != "signer_unconfirmed" {
+		t.Fatalf("same signer, another class named: %q", r.Code)
+	}
+	e2.ok(e2.callBody("app", "device.transfer.approve", blob2, map[string]any{"password": pw, "pin": "246810"}, `"transfer_id":"`+id2+`"`))
+}
+
 func TestTransferAbortKeepsHolder(t *testing.T) {
 	e := newEnv(t)
 	e.h.PIN = "246810"

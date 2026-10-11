@@ -136,6 +136,13 @@ func (d *Device) CredentialRaw(ctx context.Context, typ string, u UTK, blob []by
 	return o, err
 }
 
+// CredentialRawExtra is CredentialRaw with extra outer members (a
+// transfer approval's transfer_id and signer).
+func (d *Device) CredentialRawExtra(ctx context.Context, typ string, u UTK, blob []byte, payload, extra map[string]any) (strictjson.Object, error) {
+	o, _, _, err := d.sealedWith(ctx, typ, u, blob, blob != nil, payload, false, extra)
+	return o, err
+}
+
 // LastUTK returns the UTK the last credential operation spent (tests).
 func (d *Device) LastUTK() UTK {
 	d.mu.Lock()
@@ -340,7 +347,20 @@ func (d *Device) TransferCreate(ctx context.Context) (id, link string, err error
 // password (§6.7.1). The vault rotates the CEK: this app's copy is dead
 // and the new app fetches the credential.
 func (d *Device) TransferApprove(ctx context.Context, id, pin, password string) error {
-	_, _, _, err := d.credOpWith(ctx, "device.transfer.approve", map[string]any{"transfer_id": id},
+	return d.TransferApproveSigner(ctx, id, pin, password, "")
+}
+
+// TransferApproveSigner is TransferApprove naming the new app's signer
+// class (0.27.0, §6.7.1 step 3, §11.7.1): the holder's confirmation,
+// required when device.transfer.pending said signer_changed. "" sends no
+// `signer`. Without the confirmation the vault answers
+// signer_unconfirmed, before it spends the UTK or tries the PIN.
+func (d *Device) TransferApproveSigner(ctx context.Context, id, pin, password, signer string) error {
+	extra := map[string]any{"transfer_id": id}
+	if signer != "" {
+		extra["signer"] = signer
+	}
+	_, _, _, err := d.credOpWith(ctx, "device.transfer.approve", extra,
 		func() map[string]any { return map[string]any{"password": password, "pin": pin} }, false)
 	return err
 }

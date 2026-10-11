@@ -26,8 +26,36 @@ const (
 	IOSAppID       = "TESTTEAM00.com.vettid.app"
 )
 
-// AndroidSigner is the test app-signing certificate digest.
+// AndroidSigner is the test app-signing certificate digest, pinned by the
+// test policy with class vettid.
 var AndroidSigner = sha256.Sum256([]byte("VettID TEST ONLY app signing certificate"))
+
+// AndroidSignerPlay and AndroidSignerDev are further test signing
+// certificate digests (0.27.0, §11.7.1). The test policy does not pin
+// them; a test that needs a second signer adds one with PinSigner.
+var (
+	AndroidSignerPlay = sha256.Sum256([]byte("VettID TEST ONLY Play app-signing certificate"))
+	AndroidSignerDev  = sha256.Sum256([]byte("VettID TEST ONLY development signing certificate"))
+)
+
+// PinSigner returns a copy of p that also pins digest with class.
+func PinSigner(p *devattest.Policy, digest [32]byte, class string) *devattest.Policy {
+	out := *p
+	out.AndroidSigners = append(append([]devattest.Signer(nil), p.AndroidSigners...), devattest.Signer{Digest: digest[:], Class: class})
+	return &out
+}
+
+// UnpinSigner returns a copy of p without digest.
+func UnpinSigner(p *devattest.Policy, digest [32]byte) *devattest.Policy {
+	out := *p
+	out.AndroidSigners = nil
+	for _, s := range p.AndroidSigners {
+		if string(s.Digest) != string(digest[:]) {
+			out.AndroidSigners = append(out.AndroidSigners, s)
+		}
+	}
+	return &out
+}
 
 // --- minimal DER writer for the attestation extension ---
 
@@ -355,7 +383,7 @@ func Policy() *devattest.Policy {
 	return &devattest.Policy{
 		AndroidRoots:   []*x509.Certificate{TestAndroidCA().Root.Cert},
 		AndroidPackage: AndroidPackage,
-		AndroidSigners: [][]byte{AndroidSigner[:]},
+		AndroidSigners: []devattest.Signer{{Digest: AndroidSigner[:], Class: devattest.ClassVettID}},
 		// The test allowlist for SelfSigned boot (GrapheneOS, §11.7).
 		AndroidSelfSignedBootKeys: [][]byte{TestGrapheneOSBootKey[:]},
 		IOSRoots:                  nitro.Pool(TestAppleCA().Root.Cert),

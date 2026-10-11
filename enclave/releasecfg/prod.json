@@ -10,8 +10,10 @@
   "retirement_principal": "arn:aws:iam::369484479783:role/vettid-org-vault-key-retirement",
   "retirement_window_days": 30,
   "android_signers": [
-    "TODO-O8: SHA-256 (64 lowercase hex) of the Play app signing certificate",
-    "31a19613aa10f209e08945f947f94f7ce3e6e5ac342457ff9969a67986928e65"
+    {
+      "digest": "31a19613aa10f209e08945f947f94f7ce3e6e5ac342457ff9969a67986928e65",
+      "class": "vettid"
+    }
   ],
   "relay_url": "https://relay.vettid.org",
   "push_url": "https://push.vettid.org",

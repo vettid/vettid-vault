@@ -670,6 +670,22 @@ func (f *Feature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner
 	case "device.transfer.reject":
 		return f.transferReject(s, in.Body)
 	}
+	if in.Type == "device.transfer.approve" {
+		// §6.7.1 step 3 (0.27.0, §11.7.1): a transfer to an app of
+		// another signer needs the holder's explicit confirmation, the
+		// new app's class in `signer`. Checked before the UTK is spent
+		// and before the PIN is tried: nothing is spent or counted, and
+		// the transfer stays open.
+		o, _ := strictjson.ParseObject(in.Body)
+		id, _ := o.String("transfer_id")
+		signer, present, err := o.OptString("signer")
+		if err != nil {
+			return nil, errBad
+		}
+		if err := s.ConfirmTransferSigner(id, signer, present); err != nil {
+			return nil, err
+		}
+	}
 	// Everything else spends a UTK first (§3.5.4).
 	need := needs[in.Type]
 	if holderReset {

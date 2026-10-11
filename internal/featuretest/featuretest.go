@@ -63,10 +63,15 @@ type Host struct {
 	// One app per vault (vault.CredentialHost, §6.7.1, §3.5.9): the PIN
 	// VerifyPIN accepts, the transfer in progress, the transfers ended
 	// (id:reason) and the host alarms reported.
-	PIN       string
-	Xfer      *vault.TransferInfo
-	XferEnded []string
-	Alarms    []string
+	PIN      string
+	PINTries int // VerifyPIN calls
+	Xfer     *vault.TransferInfo
+	// The transfer's new app (0.27.0, §11.7.1): the class of its signer
+	// ("" for none) and whether it differs from the vault's binding.
+	XferSigner        string
+	XferSignerChanged bool
+	XferEnded         []string
+	Alarms            []string
 	// Deletions are the vault deletions started (vault.DeleteHost), by via.
 	Deletions []string
 	// The daily owner check (vault.OwnerCheckHost, §3.6): the state
@@ -223,6 +228,7 @@ func (h *Host) DeleteVault(via string, _ time.Time) error {
 
 // VerifyPIN implements vault.CredentialHost.
 func (h *Host) VerifyPIN(pin string, _ time.Time) error {
+	h.PINTries++
 	if h.PIN == "" || pin != h.PIN {
 		return vault.NewError("bad_pin", "")
 	}
@@ -265,6 +271,19 @@ func (h *Host) EndTransfer(id, reason string, _ time.Time) error {
 	}
 	h.Xfer = nil
 	h.XferEnded = append(h.XferEnded, id+":"+reason)
+	return nil
+}
+
+// ConfirmTransferSigner implements vault.TransferSignerHost with the
+// runtime's rule (§6.7.1 step 3): a changed signer needs the new app's
+// class in the approval, and a named class must be the new app's.
+func (h *Host) ConfirmTransferSigner(id, signer string, present bool) error {
+	if h.Xfer == nil || h.Xfer.ID != id || !h.Xfer.Scanned {
+		return nil
+	}
+	if present && (h.XferSigner == "" || signer != h.XferSigner) || h.XferSignerChanged && !present {
+		return vault.NewError("signer_unconfirmed", "")
+	}
 	return nil
 }
 

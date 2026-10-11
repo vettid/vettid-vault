@@ -41,6 +41,12 @@ type DeviceAssertion struct {
 	Platform  string
 	Sig       []byte // Android: DER ECDSA P-256 signature over the challenge
 	Assertion []byte // iOS: CBOR assertion
+	// Chain (Android, optional; 0.27.0, §11.7.1) is the certificate chain
+	// of the bound device key, the certificates the app sent at
+	// attestation: an app sends it with an unlock while the vault has not
+	// recorded its signer. It is not part of any signing string. Nil when
+	// absent.
+	Chain [][]byte
 }
 
 func blobMember(o strictjson.Object, name string) ([]byte, error) {
@@ -64,20 +70,8 @@ func ParseDeviceAttest(raw json.RawMessage) (*DeviceAttest, error) {
 	d := &DeviceAttest{Platform: p}
 	switch p {
 	case PlatformAndroid:
-		arr, err := o.Array("chain")
-		if err != nil || len(arr) == 0 || len(arr) > MaxChain {
-			return nil, ErrDeviceAttest
-		}
-		for _, r := range arr {
-			var s string
-			if len(r) == 0 || r[0] != '"' || json.Unmarshal(r, &s) != nil {
-				return nil, ErrDeviceAttest
-			}
-			c, err := strictjson.DecodeStd(s, -1)
-			if err != nil || len(c) == 0 || len(c) > maxBlob {
-				return nil, ErrDeviceAttest
-			}
-			d.Chain = append(d.Chain, c)
+		if d.Chain, err = chainMember(o); err != nil {
+			return nil, err
 		}
 	case PlatformIOS:
 		if d.KeyID, err = blobMember(o, "key_id"); err != nil {
@@ -92,6 +86,39 @@ func ParseDeviceAttest(raw json.RawMessage) (*DeviceAttest, error) {
 	return d, nil
 }
 
+// chainMember reads `chain`: 1 to MaxChain certificates, base64 DER,
+// leaf first.
+func chainMember(o strictjson.Object) ([][]byte, error) {
+	arr, err := o.Array("chain")
+	if err != nil || len(arr) == 0 || len(arr) > MaxChain {
+		return nil, ErrDeviceAttest
+	}
+	var chain [][]byte
+	for _, r := range arr {
+		var s string
+		if len(r) == 0 || r[0] != '"' || json.Unmarshal(r, &s) != nil {
+			return nil, ErrDeviceAttest
+		}
+		c, err := strictjson.DecodeStd(s, -1)
+		if err != nil || len(c) == 0 || len(c) > maxBlob {
+			return nil, ErrDeviceAttest
+		}
+		chain = append(chain, c)
+	}
+	return chain, nil
+}
+
+func chainJSON(chain [][]byte) []byte {
+	arr := []byte{'['}
+	for i, c := range chain {
+		if i > 0 {
+			arr = append(arr, ',')
+		}
+		arr = append(arr, strictjson.MarshalString(b64(c))...)
+	}
+	return append(arr, ']')
+}
+
 // Marshal encodes the object.
 func (d *DeviceAttest) Marshal() ([]byte, error) {
 	b := strictjson.NewBuilder().String("platform", d.Platform)
@@ -100,14 +127,7 @@ func (d *DeviceAttest) Marshal() ([]byte, error) {
 		if len(d.Chain) == 0 || len(d.Chain) > MaxChain {
 			return nil, ErrDeviceAttest
 		}
-		arr := []byte{'['}
-		for i, c := range d.Chain {
-			if i > 0 {
-				arr = append(arr, ',')
-			}
-			arr = append(arr, strictjson.MarshalString(b64(c))...)
-		}
-		b.Raw("chain", append(arr, ']'))
+		b.Raw("chain", chainJSON(d.Chain))
 	case PlatformIOS:
 		if len(d.KeyID) == 0 || len(d.Attestation) == 0 {
 			return nil, ErrDeviceAttest
@@ -137,6 +157,12 @@ func ParseDeviceAssertion(raw json.RawMessage) (*DeviceAssertion, error) {
 		if a.Sig, err = blobMember(o, "sig"); err != nil {
 			return nil, err
 		}
+		if o.Has("chain") {
+			// Present: well-formed, or the object is rejected (§11.7).
+			if a.Chain, err = chainMember(o); err != nil {
+				return nil, err
+			}
+		}
 	case PlatformIOS:
 		if a.Assertion, err = blobMember(o, "assertion"); err != nil {
 			return nil, err
@@ -156,6 +182,12 @@ func (a *DeviceAssertion) Marshal() ([]byte, error) {
 			return nil, ErrDeviceAttest
 		}
 		b.Base64("sig", a.Sig)
+		if a.Chain != nil {
+			if len(a.Chain) == 0 || len(a.Chain) > MaxChain {
+				return nil, ErrDeviceAttest
+			}
+			b.Raw("chain", chainJSON(a.Chain))
+		}
 	case PlatformIOS:
 		if len(a.Assertion) == 0 {
 			return nil, ErrDeviceAttest

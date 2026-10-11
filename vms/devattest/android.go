@@ -7,6 +7,7 @@ import (
 	"crypto/subtle"
 	"crypto/x509"
 	"encoding/asn1"
+	"encoding/hex"
 	"time"
 
 	"github.com/vettid/vettid-vault/internal/der"
@@ -223,95 +224,100 @@ func checkRootOfTrust(p *Policy, e der.Element) error {
 }
 
 // checkApplicationID parses AttestationApplicationId and requires every
-// package to be the VettID app and every signing digest to be pinned.
-func checkApplicationID(p *Policy, e der.Element) error {
+// package to be the VettID app and (0.27.0, §11.7.1) exactly one signing
+// digest, pinned by the release. It returns that digest: the app's
+// signer. An attestation that reports several digests is refused even if
+// all are pinned (VettID's builds have one signer).
+func checkApplicationID(p *Policy, e der.Element) ([]byte, error) {
 	oct, err := der.OctetString(e)
 	if err != nil {
-		return ErrFormat
+		return nil, ErrFormat
 	}
 	r := der.NewReader(oct)
 	seq, err := r.Expect(der.ClassUniversal, der.TagSequence, true)
 	if err != nil || !r.Empty() {
-		return ErrFormat
+		return nil, ErrFormat
 	}
 	c, err := seq.Children()
 	if err != nil {
-		return ErrFormat
+		return nil, ErrFormat
 	}
 	infos, err := c.Expect(der.ClassUniversal, der.TagSet, true)
 	if err != nil {
-		return ErrFormat
+		return nil, ErrFormat
 	}
 	digests, err := c.Expect(der.ClassUniversal, der.TagSet, true)
 	if err != nil || !c.Empty() {
-		return ErrFormat
+		return nil, ErrFormat
 	}
 	ir, err := infos.Children()
 	if err != nil {
-		return ErrFormat
+		return nil, ErrFormat
 	}
 	n := 0
 	for !ir.Empty() {
 		pi, err := ir.Expect(der.ClassUniversal, der.TagSequence, true)
 		if err != nil {
-			return ErrFormat
+			return nil, ErrFormat
 		}
 		pr, err := pi.Children()
 		if err != nil {
-			return ErrFormat
+			return nil, ErrFormat
 		}
 		ne, err := pr.Next()
 		if err != nil {
-			return ErrFormat
+			return nil, ErrFormat
 		}
 		name, err := der.OctetString(ne)
 		if err != nil {
-			return ErrFormat
+			return nil, ErrFormat
 		}
 		ve, err := pr.Next()
 		if err != nil || !pr.Empty() {
-			return ErrFormat
+			return nil, ErrFormat
 		}
 		if _, err := der.Int(ve); err != nil {
-			return ErrFormat
+			return nil, ErrFormat
 		}
 		if !p.androidPackageAllowed(name) {
-			return ErrApplication
+			return nil, ErrApplication
 		}
 		n++
 	}
 	if n == 0 {
-		return ErrApplication
+		return nil, ErrApplication
 	}
 	dr, err := digests.Children()
 	if err != nil {
-		return ErrFormat
+		return nil, ErrFormat
 	}
+	var signer []byte
 	n = 0
 	for !dr.Empty() {
 		de, err := dr.Next()
 		if err != nil {
-			return ErrFormat
+			return nil, ErrFormat
 		}
 		d, err := der.OctetString(de)
 		if err != nil {
-			return ErrFormat
+			return nil, ErrFormat
 		}
 		ok := false
 		for _, s := range p.AndroidSigners {
-			if len(s) == sha256.Size && suite.Equal(d, s) {
+			if len(s.Digest) == sha256.Size && suite.Equal(d, s.Digest) {
 				ok = true
 			}
 		}
 		if !ok {
-			return ErrApplication
+			return nil, ErrApplication
 		}
+		signer = d
 		n++
 	}
-	if n == 0 {
-		return ErrApplication
+	if n != 1 {
+		return nil, ErrApplication // none, or more than one (0.27.0)
 	}
-	return nil
+	return append([]byte(nil), signer...), nil
 }
 
 // androidPackageAllowed reports whether name is the app's package or one
@@ -332,7 +338,11 @@ func validAt(c *x509.Certificate, now time.Time) bool {
 	return !now.Before(c.NotBefore) && !now.After(c.NotAfter)
 }
 
-func verifyAndroid(p *Policy, chainDER [][]byte, challenge [32]byte, now time.Time) (*Binding, error) {
+// verifyAndroid verifies a key attestation chain against the policy and
+// returns its binding. challenge and now are nil when a chain that was
+// accepted before is verified again to bind its signer (BindSigner): the
+// challenge and the certificates' validity periods are then not checked.
+func verifyAndroid(p *Policy, chainDER [][]byte, challenge *[32]byte, now *time.Time) (*Binding, error) {
 	if p.AndroidPackage == "" || len(p.AndroidSigners) == 0 || len(p.AndroidRoots) == 0 {
 		return nil, ErrPlatform
 	}
@@ -364,9 +374,11 @@ func verifyAndroid(p *Policy, chainDER [][]byte, challenge [32]byte, now time.Ti
 	if !pinned || last.CheckSignature(last.SignatureAlgorithm, last.RawTBSCertificate, last.Signature) != nil {
 		return nil, ErrRoot
 	}
-	for _, c := range chain {
-		if !validAt(c, now) {
-			return nil, ErrChain
+	if now != nil {
+		for _, c := range chain {
+			if !validAt(c, *now) {
+				return nil, ErrChain
+			}
 		}
 	}
 	leaf := chain[0]
@@ -397,7 +409,7 @@ func verifyAndroid(p *Policy, chainDER [][]byte, challenge [32]byte, now time.Ti
 	if !hwLevel(kd.attestSecurity) || !hwLevel(kd.keymintSecurity) {
 		return nil, ErrSecurityLevel
 	}
-	if !suite.Equal(kd.challenge, challenge[:]) {
+	if challenge != nil && !suite.Equal(kd.challenge, challenge[:]) {
 		return nil, ErrChallenge
 	}
 	// Key properties, all hardware-enforced: a generated (non-imported,
@@ -448,14 +460,16 @@ func verifyAndroid(p *Policy, chainDER [][]byte, challenge [32]byte, now time.Ti
 			return nil, ErrApplication
 		}
 	}
-	if err := checkApplicationID(p, aid); err != nil {
+	signer, err := checkApplicationID(p, aid)
+	if err != nil {
 		return nil, err
 	}
 	pub, ok := leaf.PublicKey.(*ecdsa.PublicKey)
 	if !ok || pub.Curve != elliptic.P256() {
 		return nil, ErrKeyProperties
 	}
-	b := &Binding{Platform: "android", PublicKey: append([]byte(nil), leaf.RawSubjectPublicKeyInfo...)}
+	b := &Binding{Platform: "android", PublicKey: append([]byte(nil), leaf.RawSubjectPublicKeyInfo...), Signer: hex.EncodeToString(signer)}
+	b.SignerClass, _ = p.SignerClass(b.Signer)
 	for _, c := range chain {
 		b.Serials = append(b.Serials, c.SerialNumber.Text(16))
 	}

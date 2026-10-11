@@ -23,9 +23,11 @@ formats are VAULT-MESSAGING 0.10.0 §11.10.
 and staging releases 1 and 2 were built, compared and published for
 real (`release/staging/1` and `release/staging/2`; release 1 has since
 been removed in the retirement drill). **Production** has no release
-yet: `enclave/releasecfg/prod.json` still has `"release": 0` and one
-`TODO-…` placeholder, so the release gate refuses every `prod` build, in
-the workflow, in `Dockerfile.enclave` and in `scripts/build-eif.sh`.
+yet: `enclave/releasecfg/prod.json` still has `"release": 0`, the only
+value the gate reports missing (the `TODO-O8` placeholder for the Play
+certificate was removed on 2026-10-11, below), so the release gate
+refuses every `prod` build, in the workflow, in `Dockerfile.enclave` and
+in `scripts/build-eif.sh`, until the release commit sets the number.
 
 The **dry run** with channel `none` (the constant-free image of the
 hardware smoke test, which refuses every enrollment and unlock) still
@@ -40,7 +42,7 @@ hand from the Actions tab (`release` → *Run workflow*, channel `none`).
 |---|---|
 | `seal_account`, `retirement_principal` | done: vettid-vault-prod 369484479783 and its `vettid-org-vault-key-retirement` role (fixed name, VAULT-RELEASES §6.3) |
 | `manifest_keys` | done: key A (KMS `ECC_NIST_P256`) and key B (offline token), both SubjectPublicKeyInfo, base64 DER |
-| `android_signers` | **open**: the upload certificate is pinned; the Play app signing certificate waits for O8 (SHA-256, lowercase hex) |
+| `android_signers` | done (O8 as amended 2026-10-11, VAULT-RELEASES 0.1.12 §5.2): one entry, VettID's own release certificate `31a19613…8e65`, class `vettid`. It signs the F-Droid and direct builds and is never given to Google. The Play app-signing certificate is **not** pinned by release 1: a later production release adds it, class `google_play`, before the Play listing goes live |
 | `android_package` | done: `com.vettid.app` (VAULT-MESSAGING 0.26.0; the file's value now, no longer a constant in code) |
 | `features` | done: `[]`, no optional feature in release 1 (VAULT-MESSAGING 0.26.0, STAGING-DEVELOPMENT-PLAN D4) |
 | `release` | the release commit sets it to 1 |
@@ -50,6 +52,72 @@ show as *Verified*; the workflow refuses an unsigned, lightweight or
 unverified tag), and the retirement and manifest-signer roles exist in the
 vettid.org stacks. No workflow change is needed: the gate passes once
 the file is complete.
+
+### Android signers and the signer binding
+
+(VAULT-MESSAGING 0.27.0 §11.7.1, §11.10.8; VAULT-RELEASES 0.1.12 §5.2.)
+`android_signers` is a list of 1 to 4 entries, each a certificate and
+its class:
+
+```json
+"android_signers": [
+  {"digest": "<SHA-256 of the signing certificate, 64 lowercase hex>", "class": "vettid"}
+]
+```
+
+| Class | Meaning | Where |
+|---|---|---|
+| `vettid` | a key only VettID holds: the F-Droid and direct builds | production and staging |
+| `google_play` | the Play app-signing key, which Google generates and holds | production, from the release that precedes the Play listing |
+| `development` | a development or automation key | staging only: the gate refuses it in `prod.json` |
+
+The gate (`releasecfg check`) refuses an entry without a class, an
+unknown class, a member besides the two, a repeated digest, the bare
+list of digest strings used before 0.27.0, and `development` in the
+production file. The classes are in the embedded file, so they are
+measured with the digests; the vault labels a member's app from them and
+never from anything the app says.
+
+| File | Signers |
+|---|---|
+| `prod.json` | `31a19613…8e65` `vettid` (VettID's release certificate) |
+| `staging.json` | `bd83a075…b2c4` `vettid` (the staging signing certificate, pinned by #20) and `2fed27b7…14f2` `development` (the automation certificate, pinned by #28) |
+
+**Each vault is bound to the signer of its app.** The digest is recorded
+with the attested device key at enrollment, at a transfer and at a
+recovery's register. An unlock and a release approval need the recorded
+signer to be pinned by the running release, or answer `signer_refused`
+(sealed like every result, before the PIN, no backoff, no alarm, audited
+as `device.signer_refused` at the next unlock that succeeds). So:
+
+- **Adding a signer** changes nothing for existing vaults.
+- **Removing a signer strands the vaults bound to it** at that release,
+  from the confirming unlock of the move into it, until the member
+  transfers or recovers to an app with a pinned signer. It is a decision
+  of the same weight as retiring a release, with the same notice
+  (VAULT-RELEASES §3.4 C6). A release that still pins the signer keeps
+  unlocking such a vault as long as it lives.
+- **The Play certificate.** An app installed from Google Play cannot
+  enroll, receive a transfer or register for a recovery on a release
+  that does not pin the Play app-signing certificate, so the Play
+  listing does not go live, on any track members can install from,
+  before a release that pins it is `active`. The Play *upload*
+  certificate is never pinned.
+
+**Vaults enrolled before 0.27.0** (staging only; production release 1
+has the rule, so no production vault is ever unbound) have no recorded
+signer. An app of 0.27.0 or later re-sends its key's certificate chain
+with each unlock (`device_assertion.chain`) until `device.list` shows
+its `signer`, and the vault binds from it. Without a chain such a vault
+is answered `signer_refused`, **except on staging up to release 10
+(S10)**, where it unlocks unbound: `releasecfg.StagingUnboundThrough`,
+a constant in code that the channel file cannot change, read with the
+measured channel and release number (`Config.AcceptsUnbound`). The
+staging release after S10 refuses a vault that is still unbound, so move
+each staging vault to the `com.vettid.app.staging` build (a transfer, a
+recovery or a new enrollment, each of which binds) while S10 is live.
+`releasecfg check staging` says so while it applies:
+"vaults enrolled before 0.27.0 unlock unbound".
 
 ### Features and the Android package
 

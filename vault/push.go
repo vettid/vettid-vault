@@ -382,6 +382,11 @@ func (m *Manager) devicesJSON(now time.Time) json.RawMessage {
 		if cur := m.st.Push; cur != nil && cur.DeviceID == p.ID && p.Kind == KindApp {
 			e = append(append(append(e[:len(e)-1], `,"push":`...), cur.stateJSON()...), '}')
 		}
+		if sg := m.signerJSON(p); sg != nil {
+			// 0.27.0 (§10.3, §11.7.1): the vault's signer binding, on
+			// the app's entry only.
+			e = append(append(append(e[:len(e)-1], `,"signer":`...), sg...), '}')
+		}
 		arr = append(arr, e...)
 	}
 	arr = append(arr, ']')

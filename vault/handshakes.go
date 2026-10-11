@@ -869,6 +869,12 @@ func (m *Manager) enrollApp(ctx context.Context, app *EnrollApp, now time.Time) 
 	m.st.Invites[m.st.VaultID] = &Invite{ID: m.st.VaultID, Kind: KindApp, Exp: now.Add(EnrollWindow),
 		EnrollIK: app.IK, EnrollRelayPK: app.Relay.PK, EnrollKEM: app.KEM.Bytes(), EnrollAttest: app.Attestation,
 		CreatedBy: "enroll"}
+	if d, c := signerOf(app.Attestation); d != "" {
+		// §11.3, §11.7.1 (0.27.0): enrollment binds the vault to the
+		// enrolling app's signer, from the first header on.
+		class, _ := m.opt.signerClass(d, c)
+		m.record(Activity{Kind: kindSignerBound, Ref: class, Audit: true}, now)
+	}
 	reqID := app.RequestID
 	if reqID == "" {
 		reqID = m.newID(now)

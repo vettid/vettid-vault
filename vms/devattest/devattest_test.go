@@ -3,6 +3,7 @@ package devattest_test
 import (
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/hex"
 	"errors"
 	"testing"
 	"time"
@@ -326,4 +327,196 @@ func TestAndroidDevPackages(t *testing.T) {
 	if _, err := devattest.VerifyAttest(p, da, ch, now, fresh()); !errors.Is(err, devattest.ErrPlatform) {
 		t.Fatalf("no package: %v", err)
 	}
+}
+
+// VAULT-MESSAGING 0.27.0 §11.7.1, "The signer of an attestation": exactly
+// one signing digest, pinned by the release, recorded in the binding with
+// the class the release gives it. Two digests are refused even when both
+// are pinned; an unpinned digest is refused; each configured signer has
+// its class.
+func TestAndroidSigner(t *testing.T) {
+	ch := challenge("enroll")
+	p := enclavetest.PinSigner(enclavetest.PinSigner(enclavetest.Policy(), enclavetest.AndroidSignerPlay, devattest.ClassGooglePlay),
+		enclavetest.AndroidSignerDev, devattest.ClassDevelopment)
+	for name, tc := range map[string]struct {
+		signer [32]byte
+		class  string
+	}{
+		"vettid":      {enclavetest.AndroidSigner, devattest.ClassVettID},
+		"google_play": {enclavetest.AndroidSignerPlay, devattest.ClassGooglePlay},
+		"development": {enclavetest.AndroidSignerDev, devattest.ClassDevelopment},
+	} {
+		a := enclavetest.NewAndroidAttester(0x61, enclavetest.AndroidOptions{Signers: [][]byte{tc.signer[:]}})
+		da, _ := a.Attest(ch)
+		b, err := devattest.VerifyAttest(p, da, ch, now, fresh())
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if b.Signer != hex.EncodeToString(tc.signer[:]) || b.SignerClass != tc.class {
+			t.Fatalf("%s: recorded %q %q", name, b.Signer, b.SignerClass)
+		}
+		if c, pinned := p.SignerClass(b.Signer); !pinned || c != tc.class {
+			t.Fatalf("%s: class %q pinned %v", name, c, pinned)
+		}
+		if r := devattest.CheckSigner(p, b); r != "" {
+			t.Fatalf("%s: a pinned signer refused: %s", name, r)
+		}
+		// The same key on a release that does not pin its signer.
+		if r := devattest.CheckSigner(enclavetest.UnpinSigner(p, tc.signer), b); r != devattest.RefusedUnpinned {
+			t.Fatalf("%s: unpinned signer: %q", name, r)
+		}
+	}
+	// Two digests, both pinned: refused (before 0.27.0: accepted).
+	two := enclavetest.NewAndroidAttester(0x62, enclavetest.AndroidOptions{Signers: [][]byte{enclavetest.AndroidSigner[:], enclavetest.AndroidSignerPlay[:]}})
+	da, _ := two.Attest(ch)
+	if _, err := devattest.VerifyAttest(p, da, ch, now, fresh()); !errors.Is(err, devattest.ErrApplication) {
+		t.Fatalf("two pinned digests: %v", err)
+	}
+	same := enclavetest.NewAndroidAttester(0x62, enclavetest.AndroidOptions{Signers: [][]byte{enclavetest.AndroidSigner[:], enclavetest.AndroidSigner[:]}})
+	da, _ = same.Attest(ch)
+	if _, err := devattest.VerifyAttest(p, da, ch, now, fresh()); !errors.Is(err, devattest.ErrApplication) {
+		t.Fatalf("one pinned digest twice: %v", err)
+	}
+	// An unpinned digest: refused (the test policy alone pins one).
+	play := enclavetest.NewAndroidAttester(0x63, enclavetest.AndroidOptions{Signers: [][]byte{enclavetest.AndroidSignerPlay[:]}})
+	da, _ = play.Attest(ch)
+	if _, err := devattest.VerifyAttest(enclavetest.Policy(), da, ch, now, fresh()); !errors.Is(err, devattest.ErrApplication) {
+		t.Fatalf("unpinned digest: %v", err)
+	}
+	// Class helpers.
+	for _, c := range []string{"vettid", "google_play", "development"} {
+		if !devattest.ValidClass(c) {
+			t.Errorf("%s not a class", c)
+		}
+	}
+	for _, c := range []string{"", "play", "Vettid", "unknown"} {
+		if devattest.ValidClass(c) {
+			t.Errorf("%q accepted as a class", c)
+		}
+	}
+	if _, pinned := p.SignerClass("zz"); pinned {
+		t.Fatal("a malformed digest is pinned")
+	}
+	// iOS has no signer and always passes the rule.
+	ia := enclavetest.NewIOSAttester(0x71, enclavetest.IOSOptions{})
+	ida, _ := ia.Attest(ch)
+	ib, err := devattest.VerifyAttest(p, ida, ch, now, fresh())
+	if err != nil || ib.Signer != "" || devattest.CheckSigner(p, ib) != "" {
+		t.Fatalf("ios: %+v %v", ib, err)
+	}
+}
+
+// §11.7.1, "Vaults enrolled before 0.27.0": a key with no recorded signer
+// is bound from the chain it was attested with. The chain is verified as
+// at attestation except that the leaf must be the bound key and the
+// serials the stored ones, and that the challenge and the validity
+// periods are not checked again.
+func TestBindSigner(t *testing.T) {
+	p := enclavetest.Policy()
+	ch := challenge("enrolled long ago")
+	a := enclavetest.NewAndroidAttester(0x65, enclavetest.AndroidOptions{})
+	da, _ := a.Attest(ch)
+	full, err := devattest.VerifyAttest(p, da, ch, now, fresh())
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := *full // a binding as releases before 0.27.0 wrote it
+	old.Signer, old.SignerClass = "", ""
+	// Unbound: refused, except where the release accepts unbound keys.
+	if r := devattest.CheckSigner(p, &old); r != devattest.RefusedUnbound {
+		t.Fatalf("unbound: %q", r)
+	}
+	staging := *p
+	staging.AndroidAcceptUnbound = true
+	if r := devattest.CheckSigner(&staging, &old); r != "" {
+		t.Fatalf("unbound on staging S10: %q", r)
+	}
+	// With the chain: bound, long after the attestation (no challenge, no
+	// validity check), the rest of the binding unchanged.
+	later := *p
+	b, err := devattest.BindSigner(&later, &old, da.Chain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Signer != full.Signer || b.SignerClass != devattest.ClassVettID || string(b.PublicKey) != string(old.PublicKey) ||
+		len(b.Serials) != len(old.Serials) || devattest.CheckSigner(p, b) != "" {
+		t.Fatalf("bound %+v", b)
+	}
+	// Bound once: BindSigner refuses a key that has a signer (the caller
+	// ignores `chain` for it).
+	if _, err := devattest.BindSigner(p, b, da.Chain); err == nil {
+		t.Fatal("a bound key was bound again")
+	}
+	// A chain for another key (same app, another device key).
+	other := enclavetest.NewAndroidAttester(0x66, enclavetest.AndroidOptions{})
+	oda, _ := other.Attest(ch)
+	if _, err := devattest.BindSigner(p, &old, oda.Chain); !errors.Is(err, devattest.ErrChain) {
+		t.Fatalf("another key's chain: %v", err)
+	}
+	// The same key attested again: other serials.
+	again, _ := a.Attest(ch)
+	if _, err := devattest.BindSigner(p, &old, again.Chain); !errors.Is(err, devattest.ErrChain) {
+		t.Fatalf("other serials: %v", err)
+	}
+	// A chain naming another package than the policy's (the staging
+	// move: a vault enrolled under the old package cannot bind by chain).
+	moved := *p
+	moved.AndroidPackage = "com.vettid.app.staging"
+	if _, err := devattest.BindSigner(&moved, &old, da.Chain); !errors.Is(err, devattest.ErrApplication) {
+		t.Fatalf("another package: %v", err)
+	}
+	// Two digests, and an unpinned digest, in the chain of the bound key.
+	for name, signers := range map[string][][]byte{
+		"two digests": {enclavetest.AndroidSigner[:], enclavetest.AndroidSignerPlay[:]},
+		"unpinned":    {enclavetest.AndroidSignerPlay[:]},
+	} {
+		x := enclavetest.NewAndroidAttester(0x67, enclavetest.AndroidOptions{Signers: signers})
+		xda, _ := x.Attest(ch)
+		// What a release before 0.27.0 with both pinned would have stored.
+		both := enclavetest.PinSigner(p, enclavetest.AndroidSignerPlay, devattest.ClassGooglePlay)
+		xb := bindingOf(t, both, xda.Chain)
+		pol := p
+		if name == "two digests" {
+			pol = both
+		}
+		if _, err := devattest.BindSigner(pol, xb, xda.Chain); !errors.Is(err, devattest.ErrApplication) {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	// A broken chain, a missing root, no chain.
+	if _, err := devattest.BindSigner(p, &old, da.Chain[:2]); !errors.Is(err, devattest.ErrRoot) {
+		t.Fatalf("no root: %v", err)
+	}
+	if _, err := devattest.BindSigner(p, &old, nil); err == nil {
+		t.Fatal("no chain")
+	}
+	if _, err := devattest.BindSigner(p, &old, [][]byte{{0x30, 0x00}}); err == nil {
+		t.Fatal("garbage chain")
+	}
+	// The other attestation checks still apply to the re-sent chain: a
+	// software-level key is not bound.
+	sw := enclavetest.NewAndroidAttester(0x68, enclavetest.AndroidOptions{SoftwareLevel: true})
+	swda, _ := sw.Attest(ch)
+	if _, err := devattest.BindSigner(p, bindingOf(t, nil, swda.Chain), swda.Chain); !errors.Is(err, devattest.ErrSecurityLevel) {
+		t.Fatalf("software level: %v", err)
+	}
+}
+
+// bindingOf builds the signer-less binding of a chain's key without
+// verifying it (pol nil), or after checking that pol would have accepted
+// something like it before 0.27.0: the public key and the serials.
+func bindingOf(t *testing.T, _ *devattest.Policy, chain [][]byte) *devattest.Binding {
+	t.Helper()
+	b := &devattest.Binding{Platform: "android"}
+	for i, der := range chain {
+		c, err := x509.ParseCertificate(der)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i == 0 {
+			b.PublicKey = c.RawSubjectPublicKeyInfo
+		}
+		b.Serials = append(b.Serials, c.SerialNumber.Text(16))
+	}
+	return b
 }

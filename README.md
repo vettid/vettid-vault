@@ -284,7 +284,13 @@ verified boot keys (`pins.GrapheneOSVerifiedBootKeys`) for
 `verifiedBootState` SelfSigned. Parsing is strict (no unknown or duplicate
 members, at most 32 KiB, bounded lists) and the policy must add
 something; it never removes the TEST entries, so TEST attesters keep
-working. The status list stays the stack's empty one.
+working. The status list stays the stack's empty one. Since 0.27.0 a
+vault is bound to its app's signer (§11.7.1): the TEST signer has class
+`vettid`, the file's signers class `development`, an attestation must
+report exactly one signing digest, and the dev enclave refuses a key
+without a recorded signer as a production image does (`signer_refused`;
+an app re-sends its key's chain in `device_assertion.chain` until
+`device.list` shows its `signer`).
 
 The stack's own test runs with `make integration`.
 
@@ -332,8 +338,14 @@ which the release workflow runs against the previous release tag). The
 development enclave registers everything unless started with
 `-dev-features` (devenclave builds only). The build
 refuses a channel file with a `TODO-…` placeholder or a missing value (`go run ./cmd/releasecfg check prod`); the production
-values wait for owner decisions O1 (vault account), O3 (manifest keys) and
-O8 (Android signing digests).
+file lacks only its release number. Since 0.27.0 `android_signers` is a
+list of `{digest, class}` entries (`vettid`, `google_play`,
+`development`; the last never in production), and each vault is bound to
+the signer of its app: the digest is recorded with the attested device
+key, an unlock needs it to be pinned by the running release
+(`signer_refused`), and it changes only by a transfer the holder
+confirms or a completed recovery (VAULT-MESSAGING §11.7.1,
+[`docs/RELEASING.md`](docs/RELEASING.md)).
 
 ```sh
 make test      # go test ./..., the vector regeneration check, `make channels`

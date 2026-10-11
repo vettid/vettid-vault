@@ -2,8 +2,9 @@
 // one channel (VAULT-MESSAGING §11.10.8, VAULT-RELEASES §5.2): the
 // release number, the pinned manifest keys, the sealing-key account and
 // region, the retirement principal and window, the Android
-// signing-certificate digests, the relay URL and (VAULT-MESSAGING
-// 0.24.0) the push gateway URL.
+// signing-certificate digests, the relay URL, (VAULT-MESSAGING 0.24.0)
+// the push gateway URL and (0.26.0) the Android package and the optional
+// features the image registers.
 //
 // Each channel's constants are a committed file (prod.json, staging.json)
 // that the build embeds, selected by the build tag vettid_channel_prod or
@@ -27,6 +28,7 @@ import (
 	"crypto/elliptic"
 	"crypto/x509"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -54,8 +56,30 @@ var windowDays = map[string]uint64{ChannelProd: 30, ChannelStaging: 7}
 // reverse. The hosts are the ones vettid.org's DNS firewall allows.
 var PushURLs = map[string]string{ChannelProd: "https://push.vettid.org", ChannelStaging: "https://push.staging.vettid.org"}
 
+// AndroidPackages are the channels' Android packages (VAULT-MESSAGING
+// 0.26.0 §11.10.8, "Android package"): a channel file must name its own,
+// so a production image can never accept the staging app's package in key
+// attestation, nor the reverse. One value, not a list.
+var AndroidPackages = map[string]string{ChannelProd: "com.vettid.app", ChannelStaging: "com.vettid.app.staging"}
+
+// optionalFeatures are the names a channel file's "features" may list
+// (0.26.0 §11.10.8, "Feature allowlist"), in ascending byte order: the
+// feature packages' own names (features/<name>). The always-registered
+// features (audit, feed, messaging, credential, items, grants, critical,
+// connauth) are not names of the list, so no file can switch them off.
+// features/all keeps the same list (it cannot import this package);
+// TestOptionalFeaturesMatchTheCode holds the two together.
+var optionalFeatures = []string{"actions", "calls", "intro", "leash", "location", "presence", "wallet"}
+
+// OptionalFeatures returns the names "features" may list, ascending.
+func OptionalFeatures() []string { return append([]string(nil), optionalFeatures...) }
+
 // Errors.
 var (
+	// ErrFeatureRemoved: the file's feature list lacks a name the
+	// channel's previous release listed (a list only grows, 0.26.0).
+	ErrFeatureRemoved = errors.New("releasecfg: a feature of the previous release is not listed")
+
 	ErrFormat     = errors.New("releasecfg: malformed channel file")
 	ErrIncomplete = errors.New("releasecfg: placeholder or missing value")
 	ErrChannel    = errors.New("releasecfg: wrong channel")
@@ -74,6 +98,12 @@ type Config struct {
 	RelayURL             string
 	// PushURL is the channel's push gateway (0.24.0, §11.10.8).
 	PushURL string
+	// AndroidPackage is the Android package accepted in key attestation
+	// (0.26.0, §11.7, §11.10.8): the channel's own.
+	AndroidPackage string
+	// Features are the optional features the image registers (0.26.0,
+	// §11.10.8), ascending; empty: none (never nil in a parsed file).
+	Features []string
 }
 
 // File is a parsed channel file: the complete constants and the names of
@@ -97,7 +127,7 @@ func Parse(b []byte) (*File, error) {
 		return nil, ErrFormat
 	}
 	members := []string{"channel", "release", "manifest_keys", "seal_account", "seal_region",
-		"retirement_principal", "retirement_window_days", "android_signers", "relay_url", "push_url"}
+		"retirement_principal", "retirement_window_days", "android_signers", "relay_url", "push_url", "android_package", "features"}
 	if len(o) != len(members) {
 		return nil, ErrFormat
 	}
@@ -178,8 +208,97 @@ func Parse(b []byte) (*File, error) {
 	if c.PushURL, err = value(o, "push_url", func(s string) bool { return s == PushURLs[c.Channel] }, missing); err != nil {
 		return nil, err
 	}
+	if c.AndroidPackage, err = value(o, "android_package", func(s string) bool { return s == AndroidPackages[c.Channel] }, missing); err != nil {
+		return nil, err
+	}
+	raw, err := o.Array("features")
+	if err != nil {
+		return nil, ErrFormat
+	}
+	if c.Features, err = parseFeatures(raw); err != nil {
+		return nil, err
+	}
 	f.Missing = dedupe(f.Missing)
 	return f, nil
+}
+
+// parseFeatures reads a "features" array (0.26.0 §11.10.8, the release
+// check's rule 1): zero or more of the seven optional names, each at most
+// once, in ascending byte order. Anything else is malformed: a value that
+// is not a string, a placeholder, a name that is not one of the seven (an
+// always-registered feature's included), a repeated name, names out of
+// order.
+func parseFeatures(arr []json.RawMessage) ([]string, error) {
+	out := make([]string, 0, len(arr))
+	for _, raw := range arr {
+		s, err := strictjson.AsString(raw)
+		if err != nil || !isOptional(s) {
+			return nil, ErrFormat
+		}
+		if n := len(out); n > 0 && out[n-1] >= s {
+			return nil, ErrFormat // repeated or out of order
+		}
+		out = append(out, s)
+	}
+	return out, nil
+}
+
+func isOptional(name string) bool {
+	for _, n := range optionalFeatures {
+		if n == name {
+			return true
+		}
+	}
+	return false
+}
+
+// PreviousFeatures reads the feature list of the channel file of a
+// channel's previous release (the release check's rule 2). Only
+// "channel" and "features" are read, because the file is whatever format
+// its own release had: a file from before 0.26.0 has no "features" and
+// counts as listing all seven, which is what those releases registered.
+func PreviousFeatures(channel string, b []byte) ([]string, error) {
+	if len(b) == 0 || len(b) > maxFile {
+		return nil, ErrFormat
+	}
+	o, err := strictjson.ParseObject(b)
+	if err != nil {
+		return nil, ErrFormat
+	}
+	if ch, err := o.String("channel"); err != nil || windowDays[ch] == 0 {
+		return nil, ErrFormat
+	} else if ch != channel {
+		return nil, ErrChannel
+	}
+	if !o.Has("features") {
+		return OptionalFeatures(), nil
+	}
+	arr, err := o.Array("features")
+	if err != nil {
+		return nil, ErrFormat
+	}
+	return parseFeatures(arr)
+}
+
+// CheckGrows is the release check's rule 2 (0.26.0 §11.10.8, "Never
+// off"): every feature the channel's previous release listed is still
+// listed, because members may hold that feature's state. A name added
+// passes.
+func CheckGrows(c *Config, previous []string) error {
+	var gone []string
+	for _, p := range previous {
+		found := false
+		for _, n := range c.Features {
+			found = found || n == p
+		}
+		if !found {
+			gone = append(gone, p)
+		}
+	}
+	if len(gone) > 0 {
+		return fmt.Errorf("%w: %s", ErrFeatureRemoved, strings.Join(gone, ", "))
+	}
+	return nil
 }
 
 // Complete returns the constants, or ErrIncomplete naming what is missing.

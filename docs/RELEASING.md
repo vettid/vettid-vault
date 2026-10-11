@@ -12,7 +12,7 @@ formats are VAULT-MESSAGING 0.10.0 §11.10.
 | Pinned EIF toolchain (Amazon Linux 2023 by digest, `aws-nitro-enclaves-cli` RPMs and blobs by SHA-256) | [`release/Dockerfile.eif-builder`](../release/Dockerfile.eif-builder), [`release/eif-toolchain.lock`](../release/eif-toolchain.lock) |
 | One clean build with that toolchain (CI and independent rebuilds) | [`release/rebuild.sh`](../release/rebuild.sh) → [`scripts/build-eif.sh`](../scripts/build-eif.sh) |
 | EIF inspection: PCRs recomputed from the file, build comparison, measurement matching | [`cmd/eifinfo`](../cmd/eifinfo), [`internal/eif`](../internal/eif) |
-| Per-channel release constants and the placeholder gate | [`enclave/releasecfg/`](../enclave/releasecfg), `go run ./cmd/releasecfg check <channel>` |
+| Per-channel release constants, the placeholder gate and the only-grow check of the feature list | [`enclave/releasecfg/`](../enclave/releasecfg), `go run ./cmd/releasecfg check [-previous <file>] <channel>` |
 | Release-key check against a live KMS key | `vaultctl keycheck` ([`internal/keycheck`](../internal/keycheck)) |
 | Manifest rendering, checking and signing | `vaultctl manifest` ([`internal/manifesttool`](../internal/manifesttool)) |
 | Compatibility matrix and frozen vectors | [`.github/workflows/compat.yml`](../.github/workflows/compat.yml), [`scripts/compat-matrix.sh`](../scripts/compat-matrix.sh), [`compat/live-releases.txt`](../compat/live-releases.txt), [`testdata/releases/`](../testdata/releases) |
@@ -41,6 +41,8 @@ hand from the Actions tab (`release` → *Run workflow*, channel `none`).
 | `seal_account`, `retirement_principal` | done: vettid-vault-prod 369484479783 and its `vettid-org-vault-key-retirement` role (fixed name, VAULT-RELEASES §6.3) |
 | `manifest_keys` | done: key A (KMS `ECC_NIST_P256`) and key B (offline token), both SubjectPublicKeyInfo, base64 DER |
 | `android_signers` | **open**: the upload certificate is pinned; the Play app signing certificate waits for O8 (SHA-256, lowercase hex) |
+| `android_package` | done: `com.vettid.app` (VAULT-MESSAGING 0.26.0; the file's value now, no longer a constant in code) |
+| `features` | done: `[]`, no optional feature in release 1 (VAULT-MESSAGING 0.26.0, STAGING-DEVELOPMENT-PLAN D4) |
 | `release` | the release commit sets it to 1 |
 
 The owner's tag-signing key is on their GitHub account (the staging tags
@@ -48,6 +50,54 @@ show as *Verified*; the workflow refuses an unsigned, lightweight or
 unverified tag), and the retirement and manifest-signer roles exist in the
 vettid.org stacks. No workflow change is needed: the gate passes once
 the file is complete.
+
+### Features and the Android package
+
+(VAULT-MESSAGING 0.26.0 §11.10.8; VAULT-RELEASES 0.1.11 §5.2.) Two
+constants of the channel file decide what an image does beyond its keys:
+
+| Member | Staging | Production | Rule |
+|---|---|---|---|
+| `android_package` | `com.vettid.app.staging` | `com.vettid.app` | exactly the channel's value; any other is malformed. Checked where an attestation is verified (enrollment, a transfer, a recovery's register); an unlock and a release approval do not check it again |
+| `features` | all seven | `[]` | zero or more of `actions`, `calls`, `intro`, `leash`, `location`, `presence`, `wallet`, each once, in ascending byte order; anything else is malformed (an always-registered feature's name included) |
+
+Both are in the embedded file, so they are in `releasecfg_sha256` and in
+PCR0. An image registers exactly the listed optional features: a type of
+a feature that is not listed is answered `unsupported_type`, the feature
+keeps no state, and a `features.<name>` entry a vault already holds for
+it is carried unchanged.
+
+**A channel's list only grows.** `releasecfg check` runs two rules:
+
+1. the file alone (every build: the workflow's gate, `Dockerfile.enclave`,
+   `scripts/build-eif.sh`, and a rebuild from the tag);
+2. with `-previous <file>`, against the channel file of the channel's
+   previous release: a name that file lists and this one lacks is
+   refused. A previous file from before 0.26.0 (staging 1 to 9) has no
+   list and counts as listing all seven. The release workflow runs this
+   on a release tag, reading the previous file from the highest
+   `release/<channel>/<m>` tag below the new number; release 1 has no
+   previous release.
+
+By hand, before tagging release N:
+
+```sh
+git show release/staging/<N-1>:enclave/releasecfg/staging.json > /tmp/previous.json
+go run ./cmd/releasecfg check -previous /tmp/previous.json staging
+```
+
+**Turning a feature on** is a release whose file adds the name (and whose
+log entry names it). **Production's list is tested** in the development
+enclave: `vault-enclave -dev-features none` (devenclave builds), or
+`devstack -features none`; `e2e.TestNoOptionalFeatures` and
+`e2e.TestHostStackProductionFeatures` run it in CI.
+
+**Moving a staging vault to the new package** (S10): the old build keeps
+unlocking on S10 and approves the move to it, but can no longer enroll,
+receive a transfer or register for a recovery there; attach the vault to
+the `com.vettid.app.staging` build by a transfer, a recovery, or a new
+enrollment (VAULT-MESSAGING §11.10.8, "Moving the existing staging
+vaults"; `e2e.TestAndroidPackagePerChannel`).
 
 ## A release, step by step
 
@@ -70,7 +120,8 @@ git push origin release/prod/N
 
 1. `gate`: the tag is `release/<prod|staging>/<n>`, GitHub verifies its
    signature, the channel file passes the release gate and says
-   `"release": n`.
+   `"release": n`, and (n > 1) its feature list lacks no name of the
+   previous release's file (*Features and the Android package*).
 2. `build` ×2: two `ubuntu-26.04-arm` runners, two checkout paths, each
    runs `release/rebuild.sh` (the pinned toolchain image, then
    `scripts/build-eif.sh` with no docker build cache).

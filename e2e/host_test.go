@@ -63,6 +63,10 @@ type hostStack struct {
 	// pushURL, if set, is the push gateway stand-in (https://push.vettid.test)
 	// for instances started after it is set.
 	pushURL string
+	// features, if not nil, is the dev enclave's optional feature list
+	// (-dev-features; 0.26.0, §11.10.8), for instances started after it
+	// is set. Nil: every optional feature.
+	features []string
 }
 
 type hostInstance struct {
@@ -81,6 +85,7 @@ type hostInstance struct {
 	release  uint64
 	recClock string
 	pushURL  string
+	features []string
 }
 
 func tlsFront(t *testing.T, h http.Handler, h2 bool, name string) string {
@@ -134,7 +139,7 @@ func listenTCP(t *testing.T) net.Listener {
 func (hs *hostStack) start(id string, n uint64, maxVaults int) *hostInstance {
 	t := hs.t
 	cl, el := listenTCP(t), listenTCP(t)
-	hi := &hostInstance{encBin: hs.encBin, id: id, ctl: cl.Addr().String(), egr: el.Addr().String(), release: n, recClock: hs.recClock, pushURL: hs.pushURL,
+	hi := &hostInstance{encBin: hs.encBin, id: id, ctl: cl.Addr().String(), egr: el.Addr().String(), release: n, recClock: hs.recClock, pushURL: hs.pushURL, features: hs.features,
 		queue: "http://sqs.test/000000000000/test-vault-control-" + id, in: make(chan *enclave.Instance, 4)}
 	p, err := parent.New(parent.Config{InstanceID: id, QueuePrefix: "test-vault-control-", ControlListener: cl, EgressListener: el,
 		Allow: append(parent.DefaultAllow("relay.vettid.test", "us-east-1"), "push.vettid.test"), Resolve: hs.resolve,
@@ -162,8 +167,8 @@ func (hs *hostStack) start(id string, n uint64, maxVaults int) *hostInstance {
 
 func (hi *hostInstance) startEnclave(t *testing.T, maxVaults int) {
 	cfg, err := enclavetest.DevSupervisor(enclavetest.DevOptions{Release: hi.release, Control: hi.ctl, Egress: hi.egr, RelayURL: hostRelay,
-		VaultExec: append(append(append([]string{hi.encBin, vaultproc.Arg}, enclavetest.DevVaultArgs(hi.release, hostRelay)...),
-			enclavetest.DevVaultRecoveryClockArgs(hi.recClock)...), enclavetest.DevVaultPushArgs(hi.pushURL)...),
+		VaultExec: append(append(append(append([]string{hi.encBin, vaultproc.Arg}, enclavetest.DevVaultArgs(hi.release, hostRelay)...),
+			enclavetest.DevVaultRecoveryClockArgs(hi.recClock)...), enclavetest.DevVaultPushArgs(hi.pushURL)...), enclavetest.DevVaultFeatureArgs(hi.features)...),
 		RecoveryClock: hi.recClock, PushURL: hi.pushURL, MaxVaults: maxVaults, LogLevel: slog.LevelError, OnReady: func(in *enclave.Instance) { hi.in <- in }})
 	if err != nil {
 		t.Fatal(err)

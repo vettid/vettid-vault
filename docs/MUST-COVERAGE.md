@@ -20,7 +20,8 @@ History export, `audit.export`; and for 0.23.0: a connection's asks
 (no approval fatigue), rate limits on connection rules, overlapping
 rules (ask wins), the 0.22.0 errata and the month hint; for 0.23.1: the
 0.23.0 errata; for 0.23.2: the device on `vault.unlocked` and
-`vault.locked`.)
+`vault.locked`; for 0.26.0: the feature allowlist and the per-channel
+Android package.)
 
 Every MUST / MUST NOT in VAULT-MESSAGING 0.2.3 §4–§6 (plus the §13.4 and
 §13.6 rules they rely on), and the named test that covers it. Normative
@@ -784,3 +785,27 @@ grammar.
 | 14.3, 12.2 | The enclave reaches only its channel's gateway (egress allowlist, pinned URL); the parent allows the gateway hosts | `supervisor.TestPushChannel`, `e2e.TestHostPush` |
 | PG 4, 5.2 | Wake blobs are opaque to the vault (base64url, ≤ 6,144 bytes); a wake is `{wake_blob, class: notify}` signed by the wake key | `pushwire.TestBlobsAndAnswers`, `pushtest.TestRegisterAndWake` |
 | PG 15 | The registration request vector (key, body hash, canonical string, signature) | `pushwire.TestVector` |
+
+## Feature allowlist and the per-channel Android package (§5.3, §10, §11.7, §11.10.8, §15 item 34; 0.26.0)
+
+| § | Requirement | Test(s) |
+|---|---|---|
+| 11.10.8 | `features` in the channel file: zero or more of the seven optional names, each once, ascending. Missing, not an array of strings, a placeholder, an unknown name, an always-registered feature's name, a repeated name, names out of order: malformed (rule 1) | `releasecfg.TestRefusals` (the `features …` rows), `releasecfg.TestFeatureNames`, `releasecfg.FuzzParse`, `cmd/releasecfg.TestCheckCommand` |
+| 11.10.8 | A channel's list only grows (rule 2): a name the previous release's file lists and this file lacks is refused; a name added passes; a previous file from before 0.26.0 counts as all seven; the previous file must be the channel's | `releasecfg.TestFeaturesOnlyGrow`, `cmd/releasecfg.TestCheckCommand`; the release workflow's `gate` job runs it against the previous release tag |
+| 11.10.8 | The committed files: staging lists all seven and `com.vettid.app.staging`; production lists none and `com.vettid.app` | `releasecfg.TestCommittedFiles`, `releasecfg.TestFeaturesOnlyGrow` (staging after a pre-0.26.0 release), `enclave.TestReleaseConfigAndroidPackage` (per channel build, `make channels`) |
+| 11.10.8 | The list is embedded with the rest of the channel file (measured); the image's features come from it and from nothing at run time; an incomplete configuration registers no optional feature | `releasecfg.TestEmbedded`, `enclave.TestReleaseConfigAndroidPackage`, `all.TestSetFollowsTheList` (zero options) |
+| 11.10.8 | The names a file may list are exactly the optional features the code registers, each the feature package's own name | `releasecfg_test.TestOptionalFeaturesMatchTheCode`, `all.TestSetFollowsTheList` |
+| 11.10.8, 5.3 | Not listed means not registered: the feature is not constructed and none of its types is registered | `all.TestSetFollowsTheList` (per feature: listed alone, and left out of the full list) |
+| 11.10.8, 5.3 | Each type of an unregistered feature is an unknown type: `unsupported_type` to an app and to a connection, and a response of such a type is dropped | `vault.TestUnregisteredTypeIsUnknown` (app and connection, request and response), `e2e.TestOptionalFeatureNotRegistered` (every type of each of the seven, real features), `e2e.TestConnectionSendsUnregisteredType`, `e2e.TestHostStackProductionFeatures` |
+| 11.10.8 | No `features.<name>` entry is created for an unregistered feature: after enrollment, requests (flushes), a lock and an unlock | `e2e.TestOptionalFeatureNotRegistered`, `e2e.TestNoOptionalFeatures`, `vault.TestUnregisteredFeatureStateCarried` |
+| 11.10.8 | With no optional feature at all, the flows the v1 app uses pass | `e2e.TestNoOptionalFeatures`, `e2e.TestHostStackProductionFeatures` |
+| 11.10.8 | An entry of an unregistered feature is carried unchanged through load, flush, lock and unlock, and is never read, migrated or deleted | `vault.TestUnregisteredFeatureStateCarried` |
+| 11.10.8 | Turning a feature on: a vault without the entry starts the feature empty and gains the entry with a later flush | `vault.TestUnregisteredFeatureStateCarried`, `e2e.TestOptionalFeatureNotRegistered` (the same vault unlocked by an image with the feature) |
+| 11.10.8 | Without `leash`: `device.pair.create{role: "agent"}` is `bad_request` as an unknown role is; an agent share rule is `not_found`; desktop pairing stays answered | `vault.TestPairCreateAgentNeedsLeash`, `e2e.TestNoOptionalFeatures`, `e2e.TestHostStackProductionFeatures` |
+| 11.10.8 | Without `location`: `settings.set` of a `location.history.*` member is `bad_request` and changes nothing; `settings.get` is unchanged | `vault.TestLocationHistorySettingsNeedLocation`, `e2e.TestNoOptionalFeatures` |
+| 11.10.8 | `actions` without `wallet`: the wallet actions answer `unavailable` | `e2e.TestActionsWithoutWallet` |
+| 11.10.8 | The development build registers everything unless its test configuration names a list (production's list is run before a production release) | `enclavetest.TestDevFeatures`, `e2e.TestHostStackProductionFeatures`, `devstack.TestParseFlags` |
+| 11.10.8, 11.7 | `android_package` is the channel's one value: missing, a placeholder, another channel's value or any other is refused | `releasecfg.TestRefusals` (the `package …` rows), `releasecfg.TestCommittedFiles` |
+| 11.7, 11.10.8 | The package of key attestation is the release constant, not a constant in code; a build without complete constants has none (Android attestation fails closed) | `enclave.TestReleaseConfigAndroidPackage` |
+| 11.7, 11.10.8 | An attestation naming the other channel's package is refused at enrollment, at a transfer's `hs.init` and at a recovery's register; an unlock and a release approval by a binding made under another package pass | `e2e.TestAndroidPackagePerChannel`, `devattest.TestAndroid*` (the package check itself) |
+| 11.10.8 | Build: the two channels' images of one commit differ in `releasecfg_sha256` and PCR0, and each rebuilds to the same PCR0 | the `release` workflow (two clean builds per channel, `eifinfo compare` / `match`); not run in `go test` |

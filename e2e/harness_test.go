@@ -39,6 +39,9 @@ type testVault struct {
 	opts    vault.Options
 	vaultID string
 	app     *client.Device
+	// optional are the optional features the vault's image registers
+	// (0.26.0, §11.10.8); nil: all of them.
+	optional []string
 
 	mu       sync.Mutex
 	m        *vault.Manager
@@ -57,6 +60,13 @@ func ctxT(t *testing.T, d time.Duration) context.Context {
 
 func newTestVault(t *testing.T, relayURL, name string, tweak func(*vault.Options)) *testVault {
 	t.Helper()
+	return newTestVaultWith(t, relayURL, name, nil, tweak)
+}
+
+// newTestVaultWith is newTestVault for an image that registers exactly
+// the named optional features (nil: all of them).
+func newTestVaultWith(t *testing.T, relayURL, name string, optional []string, tweak func(*vault.Options)) *testVault {
+	t.Helper()
 	ctx := ctxT(t, 60*time.Second)
 	st, err := store.NewDir(t.TempDir())
 	if err != nil {
@@ -66,7 +76,7 @@ func newTestVault(t *testing.T, relayURL, name string, tweak func(*vault.Options
 	if err != nil {
 		t.Fatal(err)
 	}
-	tv := &testVault{t: t, name: name, relay: relayURL, store: st, sealer: sealer}
+	tv := &testVault{t: t, name: name, relay: relayURL, store: st, sealer: sealer, optional: optional}
 	tv.opts = vault.Options{Store: st, Sealer: sealer, PollWait: time.Second, Release: devenclave.Release}
 	if tweak != nil {
 		tweak(&tv.opts)
@@ -81,7 +91,7 @@ func newTestVault(t *testing.T, relayURL, name string, tweak func(*vault.Options
 		t.Fatal(err)
 	}
 	ra := app.RelayAddr()
-	tv.fs = newSet()
+	tv.fs = tv.newSet()
 	tv.msg = tv.fs.Messaging
 	o := tv.opts
 	o.Features = tv.fs.List()
@@ -164,7 +174,7 @@ func (tv *testVault) manager() *vault.Manager {
 
 // unlock opens a new manager for this vault from the store.
 func (tv *testVault) unlock(ctx context.Context, tweak func(*vault.Options)) (*vault.Manager, *messaging.Feature, error) {
-	fs := newSet()
+	fs := tv.newSet()
 	tv.mu.Lock()
 	tv.fs = fs
 	tv.mu.Unlock()
@@ -306,6 +316,15 @@ func sendText(t *testing.T, tv *testVault, d *client.Device, conn, text string) 
 // newSet returns the full feature set with test-strength KDF parameters
 // (the memory rules: minimum Argon2id in tests).
 func newSet() *all.Set { return all.NewSet(all.DevOptions()) }
+
+// newSet returns the vault's feature set: every optional feature, or the
+// ones tv.optional names.
+func (tv *testVault) newSet() *all.Set {
+	if tv.optional == nil {
+		return newSet()
+	}
+	return all.NewSet(all.DevOptionsWith(tv.optional))
+}
 
 // credPW is the credential password of the test vaults' first apps.
 const credPW = "correct horse battery staple"

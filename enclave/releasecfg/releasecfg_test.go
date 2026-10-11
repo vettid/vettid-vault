@@ -567,3 +567,60 @@ func FuzzParse(f *testing.F) {
 		}
 	})
 }
+
+// FuzzPreviousFeatures fuzzes the reader of a previous release's channel
+// file, which reads files this release's parser would refuse: whatever it
+// returns is a list of optional feature names, each once, ascending, for
+// the channel asked for; and a file the strict parser accepts is read.
+func FuzzPreviousFeatures(f *testing.F) {
+	for _, ch := range []string{ChannelProd, ChannelStaging} {
+		if b, err := os.ReadFile(ch + ".json"); err == nil {
+			f.Add(b, ch == ChannelStaging)
+		}
+	}
+	for _, s := range []string{
+		`{"channel":"staging"}`,
+		`{"channel":"prod","features":[]}`,
+		`{"channel":"staging","features":["calls","wallet"]}`,
+		`{"channel":"staging","features":["wallet","calls"]}`,
+		`{"channel":"staging","features":["calls","calls"]}`,
+		`{"channel":"staging","features":["messaging"]}`,
+		`{"channel":"staging","features":"calls"}`,
+		`{"channel":"staging","features":[1]}`,
+		`{"channel":"dev","features":[]}`,
+		`{"channel":"staging","channel":"prod"}`,
+		`{"features":[]}`,
+		`[]`,
+	} {
+		f.Add([]byte(s), true)
+		f.Add([]byte(s), false)
+	}
+	f.Fuzz(func(t *testing.T, b []byte, stagingChannel bool) {
+		channel := ChannelProd
+		if stagingChannel {
+			channel = ChannelStaging
+		}
+		got, err := PreviousFeatures(channel, b)
+		if p, perr := Parse(b); perr == nil && p.Config.Channel == channel && err != nil {
+			t.Fatalf("a file the parser accepts is not read: %v", err)
+		}
+		if err != nil {
+			if got != nil || !errors.Is(err, ErrFormat) && !errors.Is(err, ErrChannel) {
+				t.Fatalf("%v with %v", err, got)
+			}
+			return
+		}
+		if got == nil {
+			t.Fatal("no list and no error")
+		}
+		for i, n := range got {
+			if !isOptional(n) || i > 0 && got[i-1] >= n {
+				t.Fatalf("features %v", got)
+			}
+		}
+		// The list read back is one this release's rule 2 can compare.
+		if err := CheckGrows(&Config{Channel: channel, Features: got}, got); err != nil {
+			t.Fatalf("a list does not contain itself: %v", err)
+		}
+	})
+}

@@ -88,6 +88,56 @@ func altUnlock(d *devFixture, opts Options, pin string, verify func(k *UnlockKey
 		}})
 }
 
+// A signer refusal on a rolled-back header (stored header_seq below the
+// app's min_header_seq) is still answered signer_refused (the answer is
+// decided before the rollback check, §11.7.1), but the header is not
+// written: the refusal's log entry would store the rolled-back header one
+// seq further on. With an up-to-date header the entry is written as
+// before.
+func TestSignerRefusedRolledBackHeader(t *testing.T) {
+	d := newDevFixture(t)
+	d.devPeer.Attestation = androidBinding(sigOther, "development")
+	if err := d.m.Lock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	opts := d.opts
+	opts.AndroidSigners = testPins
+	refuse := func(*UnlockKey) (json.RawMessage, error) { return nil, &SignerRefused{Reason: SignerUnpinned} }
+	own := ReleaseEntry{PCR0: testRelease.PCR0, Number: testRelease.Number, Status: "active"}
+	unlock := func(minHeader uint64) *AltUnlockOutcome {
+		_, out := UnlockAlt(context.Background(), AltUnlockParams{Options: opts, VaultID: d.vid, UserGUID: "u1", DeviceIK: d.devPeer.IK, PIN: testPIN,
+			MinHeaderSeq: minHeader, VerifyDevice: refuse,
+			Manifest: func(seen uint64) (*ManifestView, error) {
+				return &ManifestView{Serial: seen + 1, Own: own, Lookup: func(string) (ReleaseEntry, bool) { return own, true }}, nil
+			}})
+		return out
+	}
+	key := store.HeaderKey(d.vid, testRelease.PCR0)
+	blob, ver, err := d.store.Get(context.Background(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := storedHeader(t, d)
+	for i := 0; i < 2; i++ {
+		out := unlock(before.HeaderSeq + 5)
+		if out.OK || out.Drop || out.Code != CodeSignerRefused || out.HeaderSeq != before.HeaderSeq {
+			t.Fatalf("rolled-back header, attempt %d: code %q, header_seq %d (stored %d)", i, out.Code, out.HeaderSeq, before.HeaderSeq)
+		}
+		b2, v2, err := d.store.Get(context.Background(), key)
+		if err != nil || v2 != ver || string(b2) != string(blob) {
+			t.Fatalf("rolled-back header, attempt %d: the header was written (version %v, was %v; %v)", i, v2, ver, err)
+		}
+	}
+	// The app has seen exactly this header: logged, one write.
+	if out := unlock(before.HeaderSeq); out.Code != CodeSignerRefused || out.HeaderSeq != before.HeaderSeq+1 {
+		t.Fatalf("current header: code %q, header_seq %d", out.Code, out.HeaderSeq)
+	}
+	h := storedHeader(t, d)
+	if n, ref := logged(h, kindSignerRefused); n != 1 || ref != SignerUnpinned || h.HeaderSeq != before.HeaderSeq+1 {
+		t.Fatalf("current header: %d entries, ref %q, header_seq %d (was %d)", n, ref, h.HeaderSeq, before.HeaderSeq)
+	}
+}
+
 func storedHeader(t *testing.T, d *devFixture) *Header {
 	t.Helper()
 	blob, _, err := d.store.Get(context.Background(), store.HeaderKey(d.vid, testRelease.PCR0))

@@ -338,14 +338,34 @@ func validAt(c *x509.Certificate, now time.Time) bool {
 	return !now.Before(c.NotBefore) && !now.After(c.NotAfter)
 }
 
-// verifyAndroid verifies a key attestation chain against the policy and
-// returns its binding. challenge and now are nil when a chain that was
-// accepted before is verified again to bind its signer (BindSigner): the
-// challenge and the certificates' validity periods are then not checked.
-func verifyAndroid(p *Policy, chainDER [][]byte, challenge *[32]byte, now *time.Time) (*Binding, error) {
-	if p.AndroidPackage == "" || len(p.AndroidSigners) == 0 || len(p.AndroidRoots) == 0 {
-		return nil, ErrPlatform
-	}
+// checkAndroidChain parses a key attestation chain (leaf first) and
+// applies the chain rules, the same for every caller:
+//
+//   - each certificate is signed by the next, and the last is a pinned
+//     root (compared by public key, as Google recommends), self-signed;
+//   - with now, every certificate is within its validity period;
+//   - only the leaf carries the attestation extension. The certificate
+//     above the leaf is the device's attestation certificate, whose key
+//     signs nothing but attestations; a certificate with the attestation
+//     extension is an app's Keystore key, and what that key signs says
+//     nothing about a device. (The VettID app generates its key without
+//     an attest key, so a second attestation certificate is never part of
+//     its chain.) Other extensions, such as the provisioning information
+//     of a remotely provisioned attestation certificate, are no concern
+//     of this rule;
+//   - every certificate above the attestation certificate (chain[2] and
+//     up) is a CA: basicConstraints with cA, and keyCertSign where it has
+//     a keyUsage;
+//   - no CA certificate has more certificates between it and the leaf
+//     than its pathLenConstraint allows.
+//
+// The attestation certificate itself (chain[1]) is not required to be a
+// CA: the factory-provisioned attestation certificates of older devices
+// (issued 2016, on a Pixel 2 and a Sony Xperia 10 III among others) say
+// cA FALSE and digitalSignature only, and sign their leaves all the same.
+// That is also why the standard library's path validation is not used
+// here (it refuses such a chain, and cannot leave validity periods out).
+func checkAndroidChain(p *Policy, chainDER [][]byte, now *time.Time) ([]*x509.Certificate, error) {
 	if len(chainDER) == 0 || len(chainDER) > 10 {
 		return nil, ErrFormat
 	}
@@ -380,6 +400,37 @@ func verifyAndroid(p *Policy, chainDER [][]byte, challenge *[32]byte, now *time.
 				return nil, ErrChain
 			}
 		}
+	}
+	for i := 1; i < len(chain); i++ {
+		c := chain[i]
+		for _, e := range c.Extensions {
+			if e.Id.Equal(OIDKeyDescription) {
+				return nil, ErrChain
+			}
+		}
+		ca := c.BasicConstraintsValid && c.IsCA
+		if i >= 2 && (!ca || c.KeyUsage != 0 && c.KeyUsage&x509.KeyUsageCertSign == 0) {
+			return nil, ErrChain
+		}
+		// i-1 certificates lie between c and the leaf.
+		if ca && (c.MaxPathLen > 0 || c.MaxPathLen == 0 && c.MaxPathLenZero) && i-1 > c.MaxPathLen {
+			return nil, ErrChain
+		}
+	}
+	return chain, nil
+}
+
+// verifyAndroid verifies a key attestation chain against the policy and
+// returns its binding. challenge and now are nil when a chain that was
+// accepted before is verified again to bind its signer (BindSigner): the
+// challenge and the certificates' validity periods are then not checked.
+func verifyAndroid(p *Policy, chainDER [][]byte, challenge *[32]byte, now *time.Time) (*Binding, error) {
+	if p.AndroidPackage == "" || len(p.AndroidSigners) == 0 || len(p.AndroidRoots) == 0 {
+		return nil, ErrPlatform
+	}
+	chain, err := checkAndroidChain(p, chainDER, now)
+	if err != nil {
+		return nil, err
 	}
 	leaf := chain[0]
 	var ext []byte

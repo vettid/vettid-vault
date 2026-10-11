@@ -247,8 +247,11 @@ func UnlockAlt(ctx context.Context, p AltUnlockParams) (*Manager, *AltUnlockOutc
 			// the uniform sealed result. Decided before the PIN: the
 			// backoff is neither counted nor reset. No alarm, nothing
 			// reported to the host. One header-log entry per 24 hours,
-			// audited at the next unlock that succeeds.
-			if hdr.logSignerRefused(now, refused.Reason) {
+			// audited at the next unlock that succeeds. A header older
+			// than the app has seen (the rollback check below, which this
+			// answer comes before) is never written forward: the entry
+			// is then not logged.
+			if hdr.HeaderSeq >= p.MinHeaderSeq && hdr.logSignerRefused(now, refused.Reason) {
 				hdr.HeaderSeq++
 				if b, err := sealHeader(ctx, p.Sealer, hdr); err == nil {
 					if _, err := p.Store.Put(ctx, hkey, b, hver); err == nil {

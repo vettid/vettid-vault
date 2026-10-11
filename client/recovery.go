@@ -59,6 +59,7 @@ func (d *Device) BuildRecoveryRegister(userGUID string, qr *altchan.RecoveryCode
 	if err != nil {
 		return nil, err
 	}
+	d.keepChain(da)
 	_, apiKey, err := d.appKeyLocked()
 	if err != nil {
 		return nil, err

@@ -21,7 +21,7 @@ import (
 func init() {
 	commands["credential"] = command{"credential create|fetch|version|unlock|lock|rotate|password|recover|reset | credential confirm ALARM_ID mine|not-mine", cmdCredential}
 	commands["delete-vault"] = command{"delete-vault CONFIRMATION   (CONFIRMATION must be \"delete my vault\"; reads VAULTCTL_PIN and VAULTCTL_PASSWORD, the password empty when the credential is lost)", cmdDeleteVault}
-	commands["transfer"] = command{"transfer create | transfer approve ID | transfer reject ID   (move the app to a new phone; approve reads VAULTCTL_PIN and VAULTCTL_PASSWORD)", cmdTransfer}
+	commands["transfer"] = command{"transfer create | transfer approve ID [SIGNER] | transfer reject ID   (move the app to a new phone; approve reads VAULTCTL_PIN and VAULTCTL_PASSWORD; SIGNER is the new app's signer class, needed when it changes)", cmdTransfer}
 	commands["owner-check"] = command{"owner-check [-hold on|off] [-until RFC3339] | owner-check status   (the daily owner check, §3.6; reads VAULTCTL_PIN and VAULTCTL_PASSWORD)", cmdOwnerCheck}
 	commands["profile"] = command{"profile get | profile set JSON   (the display name and photo; @profile items are items)", cmdProfile}
 	commands["settings"] = command{"settings get | settings set VERSION JSON", cmdSettings}
@@ -112,6 +112,10 @@ func cmdTransfer(ctx context.Context, g *globals, args []string) error {
 			return map[string]string{"transfer_id": id, "link": link}, err
 		case op == "approve" && len(rest) == 1:
 			return nil, d.TransferApprove(ctx, rest[0], pin, pw)
+		case op == "approve" && len(rest) == 2:
+			// 0.27.0 (§11.7.1): the new app's signer class, when the
+			// pending transfer said signer_changed.
+			return nil, d.TransferApproveSigner(ctx, rest[0], pin, pw, rest[1])
 		case op == "reject" && len(rest) == 1:
 			return nil, d.TransferReject(ctx, rest[0])
 		}

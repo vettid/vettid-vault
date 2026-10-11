@@ -236,8 +236,14 @@ func (m *Manager) transferScanned(r *Request, now time.Time) {
 		m.abortTransfer("expired", now)
 		return
 	}
-	m.sendTo(old, "device.transfer.pending", strictjson.NewBuilder().String("transfer_id", t.ID).
-		String("name", r.Peer.Name).String("sas", r.SAS).Bytes(), now)
+	b := strictjson.NewBuilder().String("transfer_id", t.ID).String("name", r.Peer.Name).String("sas", r.SAS)
+	if class, changed, ok := m.transferSigner(r); ok {
+		// 0.27.0 (§11.7.1): the attested class of the new app's signer,
+		// and whether it differs from the vault's binding; the holder's
+		// app says so before it asks for the PIN.
+		b.String("signer", class).Bool("signer_changed", changed)
+	}
+	m.sendTo(old, "device.transfer.pending", b.Bytes(), now)
 }
 
 // approveTransfer approves the new app (§6.7.1, step 3). The credential
@@ -328,6 +334,10 @@ func (m *Manager) completeTransfer(p *Peer, now time.Time) {
 	if inv := m.st.Invites[t.ID]; inv != nil {
 		delete(m.st.Invites, t.ID)
 	}
+	// 0.27.0 (§11.7.1): the vault's signer binding moves to the new
+	// app's signer in this flush.
+	wasDigest, wasClass := m.vaultSigner(p.ID)
+	m.signerMoved(wasDigest, wasClass, p, now)
 	if old := m.st.Devices[t.OldDevice]; old != nil {
 		// What is queued for the old app (the approval's response) still
 		// goes out, before device.unlinked, on its token.

@@ -80,6 +80,11 @@ type Options struct {
 	// AskRand, if set, draws the delay of a suppressed ask's neutral
 	// answer (§10.4.1): a uniform value in [0, n). Nil: crypto/rand.
 	AskRand func(n int64) int64
+	// AndroidSigners are the Android signers the running release pins,
+	// with their classes (0.27.0, §11.7.1): what the vault reports for
+	// its signer binding. The enclave decides what is pinned; this is
+	// for naming.
+	AndroidSigners []SignerPin
 	// Push is the channel's push gateway (0.24.0, §14); nil: the release
 	// has none and push.register is answered unavailable.
 	Push PushGateway

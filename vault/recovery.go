@@ -370,7 +370,12 @@ func (m *Manager) completeRecovery(deviceID string, now time.Time) error {
 	if p == nil || !p.Recovering {
 		return errNotFound
 	}
+	// 0.27.0 (§11.7.1, §11.11.5): the vault's signer binding becomes the
+	// signer recorded for this key at register; until here it was the old
+	// app's (p is still recovering, so vaultSigner does not count it).
+	wasDigest, wasClass := m.vaultSigner(deviceID)
 	p.Recovering = false
+	m.signerMoved(wasDigest, wasClass, p, now)
 	m.replaceAfter = deviceID // the other apps go (§11.11.5), after the handler
 	if r := m.hdr.Recovery; r != nil && r.App != nil && len(r.App.APIKey) > 0 {
 		m.setAppKey(r.App.APIKey) // §11.11.5 step 3 (0.15.0)

@@ -238,7 +238,26 @@ func UnlockAlt(ctx context.Context, p AltUnlockParams) (*Manager, *AltUnlockOutc
 			return nil, out.drop(ErrHeader)
 		}
 		out.DeviceKEM = key.KEM
+		before, _ := signerOf(key.Attestation)
 		nb, err := p.VerifyDevice(key)
+		var refused *SignerRefused
+		if errors.As(err, &refused) {
+			// §11.7.1 (0.27.0): the signature and the assertion verified,
+			// so this is the bound app itself, and it is answered inside
+			// the uniform sealed result. Decided before the PIN: the
+			// backoff is neither counted nor reset. No alarm, nothing
+			// reported to the host. One header-log entry per 24 hours,
+			// audited at the next unlock that succeeds.
+			if hdr.logSignerRefused(now, refused.Reason) {
+				hdr.HeaderSeq++
+				if b, err := sealHeader(ctx, p.Sealer, hdr); err == nil {
+					if _, err := p.Store.Put(ctx, hkey, b, hver); err == nil {
+						out.HeaderSeq = hdr.HeaderSeq
+					}
+				}
+			}
+			return nil, out.fail(CodeSignerRefused, nil)
+		}
 		if errors.Is(err, ErrDeviceSig) || err != nil && !errors.Is(err, ErrDeviceAttestation) {
 			return nil, out.drop(err)
 		}
@@ -246,6 +265,12 @@ func UnlockAlt(ctx context.Context, p AltUnlockParams) (*Manager, *AltUnlockOutc
 			return nil, out.fail(CodeAttestation, err)
 		}
 		key.Attestation = nb // persisted with the next header write
+		if after, class := signerOf(nb); before == "" && after != "" {
+			// A key enrolled before 0.27.0 was bound from its chain
+			// (§11.7.1): audited with the header log's entries.
+			c, _ := p.Options.signerClass(after, class)
+			hdr.logRecovery(now, kindSignerBound, c)
+		}
 		if hdr.Recovery != nil && !hdr.isRecoveryKey(key.IK) && !p.CancelRecovery {
 			return nil, out.fail(CodeRecoveryPending, nil) // not a PIN attempt
 		}

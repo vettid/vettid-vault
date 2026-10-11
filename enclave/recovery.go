@@ -127,7 +127,10 @@ func (c *Core) recoveryRegister(ctx context.Context, q *Job) (res []byte, ok boo
 		if err != nil {
 			return nil, err
 		}
-		return json.Marshal(b)
+		// 0.27.0 (§11.11.3 check 6): the signer is recorded with the
+		// registered key; it becomes the vault's binding only when the
+		// recovery completes (§11.7.1).
+		return c.marshalBinding(b)
 	})
 	return answer(vault.RecoveryCodeResult(err))
 }

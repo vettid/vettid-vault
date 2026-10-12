@@ -285,7 +285,7 @@ func TestStoppedVaultsAreTold(t *testing.T) {
 	// Without a connection at the ping they are kept for the next.
 	l := &link{}
 	l.stop("aaaa", hostproto.StopLocked)
-	l.ping(time.Unix(1_800_000_000, 0))
+	l.ping(time.Unix(1_800_000_000, 0), nil)
 	if len(l.stopped) != 1 {
 		t.Fatalf("kept: %v", l.stopped)
 	}
@@ -860,7 +860,7 @@ func TestPingOrder(t *testing.T) {
 	}
 	w.clk.add(100 * time.Second)
 	done := make(chan struct{})
-	go func() { defer close(done); w.s.link.ping(w.clk.now()) }()
+	go func() { defer close(done); w.s.link.ping(w.clk.now(), nil) }()
 	// Counted, though the report still waits for the queue...
 	for deadline := time.Now().Add(10 * time.Second); w.s.link.silent(w.clk.now(), window) != 0; time.Sleep(time.Millisecond) {
 		if time.Now().After(deadline) {
@@ -900,5 +900,124 @@ func TestPingOrder(t *testing.T) {
 	case <-stopped:
 	case <-time.After(10 * time.Second):
 		t.Fatal("the report did not arrive")
+	}
+}
+
+// A Ping handled as its connection ends. The report of a stopped vault
+// must not go onto the dead connection and be forgotten (the parent would
+// renew that vault's lease until it restarts), and the parent must not be
+// reachable again while a report is still to be told (an unlock could
+// open the vault before the report of its earlier run, and the parent
+// would give up the lease of the running vault). The report is kept, the
+// parent stays gone, and the next connection's Ping tells it.
+func TestPingOnDyingConnection(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	for _, when := range []string{"before the ping", "during the ping"} {
+		l := &link{}
+		l.hear(now)
+		a, b := net.Pipe()
+		c := hostproto.NewConn(a, nil, nil)
+		l.set(c)
+		l.lost()
+		l.stop("vault-x", hostproto.StopError)
+		if when == "before the ping" {
+			c.Close()
+			b.Close()
+			<-c.Done()
+			l.ping(now.Add(time.Second), nil)
+		} else {
+			// Nobody reads b: the report is queued and taken by the
+			// writer, and the connection ends under it.
+			done := make(chan struct{})
+			go func() { defer close(done); l.ping(now.Add(time.Second), nil) }()
+			time.Sleep(time.Millisecond)
+			c.Close()
+			b.Close()
+			<-done
+		}
+		if got := l.silent(now.Add(time.Second), window); got != 0 {
+			t.Fatalf("%s: the ping was not counted: %v", when, got)
+		}
+		// Run dials again; the parent reads on the new connection.
+		a2, b2 := net.Pipe()
+		got := make(chan string, 4)
+		c2 := hostproto.NewConn(a2, nil, nil)
+		p2 := hostproto.NewConn(b2, nil, func(f *hostproto.Frame) {
+			if f.Kind == hostproto.KindStopped && len(f.Fields) == 2 {
+				got <- string(f.Fields[0]) + " " + string(f.Fields[1])
+			}
+		})
+		l.set(c2)
+		l.mu.Lock()
+		kept := len(l.stopped)
+		l.mu.Unlock()
+		if kept != 1 {
+			t.Fatalf("%s: the report went onto the connection that ended and is forgotten", when)
+		}
+		if l.up() != nil {
+			t.Fatalf("%s: calls are let through while a report waits to be told", when)
+		}
+		select {
+		case r := <-got:
+			t.Fatalf("%s: %q told without a ping", when, r)
+		case <-time.After(20 * time.Millisecond):
+		}
+		l.ping(now.Add(2*time.Second), nil)
+		select {
+		case r := <-got:
+			if r != "vault-x error" {
+				t.Fatalf("%s: told %q", when, r)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("%s: the report was not told on the next connection", when)
+		}
+		l.mu.Lock()
+		kept = len(l.stopped)
+		l.mu.Unlock()
+		if kept != 0 || l.up() != c2 {
+			t.Fatalf("%s: after the report was written: %d kept, reachable %v", when, kept, l.up() != nil)
+		}
+		c2.Close()
+		p2.Close()
+	}
+}
+
+// A report is of a run that ended. If its vault runs again when the
+// report could be told, it is dropped: told now, the parent would take it
+// for the running vault.
+func TestReportOfAVaultThatRunsAgain(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	l := &link{}
+	l.hear(now)
+	a, b := net.Pipe()
+	c := hostproto.NewConn(a, nil, nil)
+	defer c.Close()
+	got := make(chan string, 4)
+	p := hostproto.NewConn(b, nil, func(f *hostproto.Frame) {
+		if f.Kind == hostproto.KindStopped && len(f.Fields) == 2 {
+			got <- string(f.Fields[0])
+		}
+	})
+	defer p.Close()
+	l.set(c)
+	l.lost()
+	l.stop("runs-again", hostproto.StopLocked)
+	l.stop("stopped", hostproto.StopLocked)
+	l.ping(now.Add(time.Second), func(id string) bool { return id == "runs-again" })
+	select {
+	case id := <-got:
+		if id != "stopped" {
+			t.Fatalf("a report was sent for %q", id)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("no report")
+	}
+	select {
+	case id := <-got:
+		t.Fatalf("a second report: %q", id)
+	case <-time.After(20 * time.Millisecond):
+	}
+	if len(l.stopped) != 0 || l.up() == nil {
+		t.Fatalf("%d reports kept, reachable %v", len(l.stopped), l.up() != nil)
 	}
 }

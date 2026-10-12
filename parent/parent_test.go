@@ -126,6 +126,7 @@ type fakeEnclave struct {
 	lost   []string
 	answer func(msg []byte) []byte
 	shut   int
+	stats  []string // the Stats reply
 }
 
 func (h *harness) connect(boot string, answer func([]byte) []byte) *fakeEnclave {
@@ -152,6 +153,8 @@ func (h *harness) connect(boot string, answer func([]byte) []byte) *fakeEnclave 
 			return hostproto.Strings(hostproto.StatusOK)
 		case hostproto.KindPing:
 			return hostproto.Strings(hostproto.StatusOK, "1")
+		case hostproto.KindStats:
+			return hostproto.Strings(e.stats...)
 		case hostproto.KindShutdown:
 			e.shut++
 			return hostproto.Strings(hostproto.StatusOK)

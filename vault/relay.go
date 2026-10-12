@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"errors"
+	"math/rand/v2"
 	"net/http"
 	"strings"
 	"sync"
@@ -57,6 +58,7 @@ const (
 	CodeTokenUsed      = "token_used"
 	CodeMailboxUnknown = "mailbox_unknown"
 	CodeClaimUnknown   = "claim_unknown"
+	CodeTimestampStale = "timestamp_stale"
 )
 
 // RelayCode returns the relay error code of err, or "".
@@ -147,13 +149,20 @@ func (r *ClientRelay) MintOpenToken(ttl time.Duration, jti string) (string, erro
 // MaxBatch is the collect batch size (§8.3).
 const MaxBatch = 32
 
-// LongPollWait is the long-poll wait (§12.2).
-const LongPollWait = 25 * time.Second
+// LongPollWait is the longest long-poll wait (§12.2). Each poll asks for a
+// random whole number of seconds from LongPollWait - LongPollSpread up to
+// it: vaults the relay answered in the same instant (it does when a relay
+// task stops) would otherwise poll in step from then on
+// (VAULT-RELAY-SCALING §4.2).
+const (
+	LongPollWait   = 25 * time.Second
+	LongPollSpread = 5 * time.Second
+)
 
 func (r *ClientRelay) Collector(ctx context.Context, websocket bool) (Collector, error) {
 	c := r.client(r.base)
 	if !websocket {
-		return &pollCollector{c: c, wait: LongPollWait}, nil
+		return &pollCollector{c: c, wait: LongPollWait, spread: LongPollSpread}, nil
 	}
 	s, err := c.OpenStream(ctx)
 	if err != nil {
@@ -169,12 +178,22 @@ func (r *ClientRelay) NewPollCollector(wait time.Duration) Collector {
 }
 
 type pollCollector struct {
-	c    *relayclient.Client
-	wait time.Duration
+	c      *relayclient.Client
+	wait   time.Duration
+	spread time.Duration // 0: every poll waits the same
 }
 
 func (p *pollCollector) Next(ctx context.Context) ([]Message, error) {
-	return p.c.Collect(ctx, p.wait, MaxBatch)
+	return p.c.Collect(ctx, pollWait(p.wait, p.spread), MaxBatch)
+}
+
+// pollWait is one poll's wait: whole seconds, evenly from wait - spread
+// to wait (not secret: math/rand).
+func pollWait(wait, spread time.Duration) time.Duration {
+	if spread < time.Second {
+		return wait
+	}
+	return wait - time.Duration(rand.Int64N(int64(spread/time.Second)+1))*time.Second
 }
 func (p *pollCollector) Ack(ctx context.Context, id string) error { return p.c.Ack(ctx, id) }
 func (p *pollCollector) Close() error                             { return nil }

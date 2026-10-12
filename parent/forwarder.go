@@ -4,7 +4,9 @@ import (
 	"context"
 	"io"
 	"net"
+	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,13 +23,40 @@ type forwarder struct {
 	log     func(msg string, kv ...any)
 	dial    func(ctx context.Context, network, addr string) (net.Conn, error)
 
+	relay string // the relay's host name (its class in the counts)
+
 	mu    sync.Mutex
-	open  int
-	total int
+	open  map[string]int // by destination class
+	total map[string]int
+}
+
+// Destination classes of egress connections (metrics; VAULT-RELAY-SCALING
+// §6): the relay, the KMS endpoint, a push gateway, anything else (the
+// attestation status list).
+const (
+	egressRelay = "relay"
+	egressKMS   = "kms"
+	egressPush  = "push"
+	egressOther = "other"
+)
+
+var egressClasses = []string{egressRelay, egressKMS, egressPush, egressOther}
+
+func (f *forwarder) class(host string) string {
+	switch {
+	case host == f.relay:
+		return egressRelay
+	case strings.HasPrefix(host, "kms.") && strings.HasSuffix(host, ".amazonaws.com"):
+		return egressKMS
+	case slices.Contains(PushHosts, host):
+		return egressPush
+	}
+	return egressOther
 }
 
 func newForwarder(cfg *Config) *forwarder {
-	f := &forwarder{l: cfg.EgressListener, allow: map[string]bool{}, resolve: cfg.Resolve,
+	f := &forwarder{l: cfg.EgressListener, allow: map[string]bool{}, resolve: cfg.Resolve, relay: cfg.RelayHost,
+		open: map[string]int{}, total: map[string]int{},
 		log: func(msg string, kv ...any) { cfg.Logger.Info(msg, kv...) }}
 	for _, h := range cfg.Allow {
 		f.allow[h] = true
@@ -81,13 +110,14 @@ func (f *forwarder) handle(ctx context.Context, c net.Conn) {
 	if _, err := c.Write([]byte{hostproto.EgressOK}); err != nil {
 		return
 	}
+	cl := f.class(host)
 	f.mu.Lock()
-	f.open++
-	f.total++
+	f.open[cl]++
+	f.total[cl]++
 	f.mu.Unlock()
 	defer func() {
 		f.mu.Lock()
-		f.open--
+		f.open[cl]--
 		f.mu.Unlock()
 	}()
 	splice(c, up)
@@ -121,8 +151,19 @@ func splice(enclave, up net.Conn) {
 	wg.Wait()
 }
 
+// stats returns the connections open now and opened since the start.
 func (f *forwarder) stats() (open, total int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.open, f.total
+	for _, cl := range egressClasses {
+		open, total = open+f.open[cl], total+f.total[cl]
+	}
+	return open, total
+}
+
+// classStats is stats for one destination class.
+func (f *forwarder) classStats(cl string) (open, total int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.open[cl], f.total[cl]
 }

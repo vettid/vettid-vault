@@ -117,6 +117,15 @@ type Supervisor struct {
 	encCfg    enclave.Config
 	relayHTTP *http.Client
 	relays    map[string]bool
+	relayErrs atomic.Uint64 // relay requests that got no answer
+	// vaultLimit counts the vault processes that reached their limit of
+	// relay requests in flight, each once. A count for the instance
+	// only: which vault it was is told to nobody outside the enclave.
+	vaultLimit atomic.Uint64
+
+	statsMu    sync.Mutex
+	statsAt    time.Time
+	statsReply [][]byte
 }
 
 // Errors.
@@ -332,6 +341,8 @@ func (s *Supervisor) handle(ctx context.Context, f *hostproto.Frame) [][]byte {
 		return hostproto.Strings(hostproto.StatusOK)
 	case hostproto.KindPing:
 		return hostproto.Strings(hostproto.StatusOK, strconv.Itoa(len(s.inst.Load().Vaults())))
+	case hostproto.KindStats:
+		return s.stats()
 	case hostproto.KindShutdown:
 		ids := s.inst.Load().Vaults()
 		s.log.Info("shutdown requested: locking every vault", "vaults", len(ids))
@@ -518,6 +529,54 @@ func (s *Supervisor) HTTPClient() *http.Client { return s.cfg.Egress.Client(60 *
 func (s *Supervisor) store() *hostStore { return s.st }
 
 func (s *Supervisor) relayHost(h string) bool { return s.relays[h] }
+
+// stats answers the parent's Stats request (VAULT-RELAY-SCALING §6): the
+// shared relay connections, summed over the relay hosts (one, in a
+// release), and the relay requests that failed. The parent is not
+// trusted and may ask as often as it likes: the answer is at most
+// statsEvery old and no fresher, and asking changes nothing.
+func (s *Supervisor) stats() [][]byte {
+	s.statsMu.Lock()
+	defer s.statsMu.Unlock()
+	if now := time.Now(); s.statsReply == nil || now.Sub(s.statsAt) >= statsEvery {
+		s.statsAt, s.statsReply = now, s.readStats()
+	}
+	return s.statsReply
+}
+
+// statsEvery is the finest resolution at which the parent can watch the
+// relay counts.
+const statsEvery = time.Second
+
+func (s *Supervisor) readStats() [][]byte {
+	var t egress.Stats
+	for h := range s.relays {
+		st := s.cfg.Egress.Stats(h)
+		t.Conns += st.Conns
+		t.Dialed += st.Dialed
+		t.InFlight += st.InFlight
+		t.Waiting += st.Waiting
+		t.RefusedMaxConns += st.RefusedMaxConns
+		t.RefusedMinStreams += st.RefusedMinStreams
+		t.WaitMax = max(t.WaitMax, st.WaitMax)
+		if st.Streams > 0 && (t.Streams == 0 || st.Streams < t.Streams) {
+			t.Streams = st.Streams
+		}
+	}
+	out := hostproto.Strings(hostproto.StatusOK)
+	add := func(name string, v uint64) { out = append(out, []byte(name), []byte(strconv.FormatUint(v, 10))) }
+	add(hostproto.StatRelayConns, uint64(t.Conns))
+	add(hostproto.StatRelayDialed, t.Dialed)
+	add(hostproto.StatRelayStreams, uint64(t.Streams))
+	add(hostproto.StatRelayInFlight, uint64(t.InFlight+t.Waiting))
+	add(hostproto.StatRelayWaiting, uint64(t.Waiting))
+	add(hostproto.StatRelayWaitMaxMS, uint64(t.WaitMax.Milliseconds()))
+	add(hostproto.StatRelayErrors, s.relayErrs.Load())
+	add(hostproto.StatRelayRefusedMax, t.RefusedMaxConns)
+	add(hostproto.StatRelayRefusedMin, t.RefusedMinStreams)
+	add(hostproto.StatRelayVaultLimit, s.vaultLimit.Load())
+	return out
+}
 
 // VaultPid returns the pid of a vault's process (tests).
 func (s *Supervisor) VaultPid(vaultID string) int {

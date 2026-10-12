@@ -199,9 +199,10 @@ func main() {
 	p, err := parent.New(parent.Config{
 		InstanceID: *instanceID, QueuePrefix: *queuePrefix, DLQARN: *dlq,
 		ControlListener: cl, EgressListener: el,
-		Allow:   append(parent.DefaultAllow(*relayHost, *region), extraAllowed...),
-		Resolve: res,
-		Objects: backend, Queues: backend, Tables: backend, Creds: parent.ProviderCredentials{P: cp},
+		Allow:     append(parent.DefaultAllow(*relayHost, *region), extraAllowed...),
+		RelayHost: strings.ToLower(*relayHost),
+		Resolve:   res,
+		Objects:   backend, Queues: backend, Tables: backend, Creds: parent.ProviderCredentials{P: cp},
 		HealthAddr: *health, Heartbeat: *heartbeat, LeaseLength: *leaseLength, LeaseRenew: *leaseRenew, SweepInterval: *sweepEvery,
 		Logger: log,
 	})

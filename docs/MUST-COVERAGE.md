@@ -21,7 +21,8 @@ History export, `audit.export`; and for 0.23.0: a connection's asks
 rules (ask wins), the 0.22.0 errata and the month hint; for 0.23.1: the
 0.23.0 errata; for 0.23.2: the device on `vault.unlocked` and
 `vault.locked`; for 0.26.0: the feature allowlist and the per-channel
-Android package; for 0.27.0: the per-vault signer binding.)
+Android package; for 0.27.0: the per-vault signer binding; and for 0.27.2: the collect
+loop's waits and the shared HTTP/2 connections (§12.2, §12.2.1).)
 
 Every MUST / MUST NOT in VAULT-MESSAGING 0.2.3 §4–§6 (plus the §13.4 and
 §13.6 rules they rely on), and the named test that covers it. Normative
@@ -870,3 +871,44 @@ of the test phones, when they are put in `vms/devattest/testdata/real`.
 | 11.7 | iOS: the App Attest chain is validated by the standard library from the credential certificate (CA flags, path length), and the nonce is read from that certificate: a credential certificate issued by another attested credential key is refused | `devattest.TestIOSChainExtendedBelowAttestedKey` |
 | 11.4, 11.7.1 | `signer_refused` on a header older than the app's `min_header_seq`: still answered `signer_refused` (decided before the rollback check), but the header is not written, so the refusal's log entry cannot store a rolled-back header forward; with a current header the entry is written as before | `vault.TestSignerRefusedRolledBackHeader`, `vault.TestSignerRefusedAtUnlock` |
 | 13.6 | Fuzzed: the chain verifier with certificates replaced, inserted and appended at every position (whatever is accepted has the extension on the leaf only, the leaf's key bound, CAs above the attestation certificate); `BindSigner`; the previous-release channel file reader | `devattest.FuzzAndroidChain`, `devattest.FuzzBindSigner`, `releasecfg.FuzzPreviousFeatures` |
+
+## Waits of the collect loop and the shared connections (§12.2, §12.2.1; 0.27.2)
+
+VAULT-MESSAGING 0.27.2 wrote down, as built, phase 1 of
+VAULT-RELAY-SCALING (this repository's #66). Package paths:
+`enclave/egress` (the pool), `enclave/supervisor`, `parent`, `vault`.
+The pool's tests shorten the times they wait for (the drain time, the
+stall time, the ping) where the spec's values would make a test take
+minutes; where a row says "the value itself", the number in the spec is
+a constant in the code that no test asserts.
+
+| § | Requirement | Test(s) |
+|---|---|---|
+| 12.2 | Vaults on one host MUST NOT poll in step: each long-poll asks for a random whole number of seconds from 20 to 25 | `vault.TestPollWaitSpread` (every value from 20 to 25 occurs, none outside; a collector with its own wait does not vary it). That the release's collector is built with the spread (`vault/relay.go`, `ClientRelay.Collector`) is not asserted by a test |
+| 12.2 | The first poll after an unlock is sent after a random 0 to 1 s | **not covered by a test** (`vault.Manager.Run`, `firstPollSpread`; tests set `PollWait` and poll at once) |
+| 12.2 | After a failed poll the next is sent after a random 0.5 to 1.5 s | `vault.TestRetryWait` (0 and 1 refusals: 0.5 to 1.5 s, at least 100 different waits in 200) |
+| 12.2 | While the relay refuses the poll, the wait doubles from 1 s to 15 s, each spread by half either way (at most about 22 s) | `vault.TestRetryWait` (2, 4, 6 and 1,000 refusals in a row) |
+| 12.2 | Only `mailbox_unknown` and `timestamp_stale` count as a refusal; a poll that succeeds, or fails for any other reason, starts the wait again at 1 s | **not covered by a test** (the counting in `vault.Manager.Run`; `TestRetryWait` tests the wait for a given count only) |
+| 12.2.1 | Fill first: a request takes a stream on the first connection that has one free, not the newest or the emptiest | `egress.TestFillFirst` |
+| 12.2.1 | Another connection is opened only when every stream of every connection is in use; one connection carries every vault until its streams are in use (128 at the relay's load balancer) | `egress.TestGrowthAtStreamLimit` (900 held long-polls at 128 streams on exactly 8 connections, none waiting; quick requests beside them open none), `egress.TestSharedHTTP2` |
+| 12.2.1 | Connections are opened one at a time | `egress.TestDialFails` (one dial for 200 requests waiting together; never two dials at once), `egress.TestSharedHTTP2` |
+| 12.2.1 | The enclave MUST NOT let the host or the relay choose the number of connections: at most 16 per host | `egress.TestMaxConns` (a bound of 3: no further connection, the rest wait), `egress.TestMassReconnect` (the default bound: 900 long-polls on 8, none refused). The value itself (`egress.DefaultMaxConns` = 16) is not asserted |
+| 12.2.1 | No further connection while a connection of that host announces fewer than 32 concurrent streams | `egress.TestMinStreams` (a host announcing 8 gets one connection for 30 requests, with the default of 32), `egress.TestOneStream` |
+| 12.2.1 | …or has not announced a limit yet: a new connection carries one request until its limit is known, fewer than 32 after one second | `egress.TestLateSettings` (a limit of 1 announced after the wait: one connection, fewer than 32 requests on it), `egress.TestLateSettingsBelowAssumed` (the waiting requests are woken), `egress.TestStreamLimitIsRead` (the limit is read at 1, 31, 32, 100, 128 and 250; two requests on a new connection do not wait) |
+| 12.2.1 | Connections are opened at no more than 2 a second after a burst of 32 (twice the bound), failed dials included | `egress.TestDialRate` (a host that closes every connection: twice the bound, then 2 a second), `egress.TestDialFails` (failed dials draw on the rate), `egress.TestMassReconnect` (three losses of every connection in a row recover within the rate) |
+| 12.2.1 | At a bound a request waits for a stream until its own deadline and then fails; waits and refusals are counted | `egress.TestMaxConns` (the waiting requests, the request whose deadline ends, `RefusedMaxConns`, `WaitMax`), `egress.TestMinStreams` (`RefusedMinStreams`), `egress.TestTick` (a waiting request looks again every second) |
+| 12.2.1 | …the oldest first | **not covered by a test** (the pool's queue of waiting requests; no test asserts the order) |
+| 12.2.1 | …75 s for a relay request, 15 s for a push request | **the values are not covered by a test** (`enclave/supervisor/prochost.go`, `vproc.http` and `vproc.push`); that a request whose time ends is answered an error is `supervisor.TestVaultEgressLimit` |
+| 12.2.1 | A dial that fails fails the request that started it and every request that was waiting when it started; later ones dial again | `egress.TestDialFails` |
+| 12.2.1 | A connection the host is closing (GOAWAY) does not count toward the bound while its requests end; at most as many again; requests on it still end | `egress.TestDrainingDoesNotCount` |
+| 12.2.1 | It is closed after 30 s; only 16 (the bound) are let off the count in any 5 minutes, further ones count while they close | `egress.TestDrainingIsBounded` (with a drain time of 500 ms: twice the bound once, the bound from then on, each closed after the drain time). The values themselves (30 s, 5 minutes) are not asserted |
+| 12.2.1 | A connection is pinged after 15 s without a frame and closed if the ping is not answered within 10 s | `egress.TestSilentConnections` (asserts the configured 15 s and 10 s, then runs with 300 ms: the silent connections are closed, their requests fail, the pool serves again) |
+| 12.2.1 | A connection that holds requests and has answered none for 90 s is closed whatever else it does | `egress.TestStalledConnections` (with a stall time of 1 s; requests beside the stalled connections are answered). The value itself (90 s) is not asserted |
+| 12.2.1 | One re-send of a request the host did not process: the connection stopped taking requests before it was sent, the GOAWAY names it, or the stream was refused; only when its body can be sent again; any other failure goes back to the vault process | `egress.TestUnprocessedIsResent` (all three cases, twice refused is an error, a body that cannot be sent again is not re-sent), `egress.TestReconnect` (requests on a lost connection fail) |
+| 12.2.1 | Per vault: at most 8 relay and push requests in flight, further ones wait within their own deadline; one vault process cannot take the shared streams from the others | `supervisor.TestVaultEgressLimit` (relay requests: 8 in flight of 20, the rest answered as the first end, one whose time ends is refused and not counted as the relay's failure, another vault is not held up). Push requests take the same places (`vproc.push`) but no test sends one at the limit |
+| 12.2.1 | Counts, for the whole instance only: connections (open, opened), the announced stream limit, requests in flight and waiting, the longest wait, requests without an answer, requests that waited at a bound; nothing in it names a vault, a mailbox or an address | `supervisor.TestRelayStats` (the reply is exactly the nine named counts; a failed request is counted, one its vault process gave up is not), `egress.TestMaxConns`, `egress.TestGrowthAtStreamLimit` (the pool's own counts) |
+| 12.2.1 | The parent may ask for them; the answer is a snapshot at most one second old, and asking changes nothing | `supervisor.TestRelayStats` (asked again at once: the same answer; a second later: the new count), `egress.TestMaxConns` (reading the counts twice changes nothing) |
+| 12.2.1 | The parent publishes them as metrics (VAULT-RELEASES §8.7): by instance only, counters as their increase, a name the parent does not know never reaches the record | `parent.TestMetrics` |
+| 12.2.1 | A front end that announces exactly 100 streams is trusted only once it has answered a request | `egress.TestStreamLimitIsRead` (100 announced: read as 100 after an answer, and the first requests do not wait). That such a connection carries 1, then fewer than 32, requests until its first answer is not asserted for a host whose first requests are all held |
+| 12.2.1 | The relay's front end MUST NOT be changed to one that announces exactly 100 | not in CI: a requirement on the relay's deployment (VAULT-RELAY-SCALING §10.4), not on this repository |
+| 12.2.1 | The rules hold for each HTTP/2 host of the allowlist separately; KMS connections (HTTP/1.1) are not shared this way | **not covered by a test of its own** (one pool per host by construction, `egress.New`; every pool test uses one host, and none runs an HTTP/1.1 host beside an HTTP/2 one) |

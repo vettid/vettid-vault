@@ -105,9 +105,9 @@ func TestSharedHTTP2(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	// 40 concurrent requests share at most one connection per pool (2),
-	// plus at most one racing dial per pool.
-	if n := dials.Load(); n > 4 {
+	// 40 concurrent first requests wait for one connection instead of
+	// each dialing their own.
+	if n := dials.Load(); n != 1 {
 		t.Fatalf("%d connections for 40 requests", n)
 	}
 }

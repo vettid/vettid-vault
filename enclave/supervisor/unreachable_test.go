@@ -7,12 +7,16 @@ import (
 	"log/slog"
 	"net"
 	"os/exec"
+	"reflect"
+	"sort"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/vettid/vettid-vault/internal/hostproto"
 	"github.com/vettid/vettid-vault/internal/vaultipc"
+	"github.com/vettid/vettid-vault/vault"
 )
 
 // The "parent unreachable" rule (§12.3; VAULT-HOST-PROTOCOL §13 point 1):
@@ -45,6 +49,8 @@ type fakeVaults struct {
 	mu     sync.Mutex
 	ids    []string
 	locked int // LockAllWithin calls that found a vault
+	// fail is the error LockAllWithin reports for a vault (none: locked).
+	fail map[string]error
 }
 
 func (v *fakeVaults) Vaults() []string {
@@ -53,13 +59,18 @@ func (v *fakeVaults) Vaults() []string {
 	return append([]string(nil), v.ids...)
 }
 
-func (v *fakeVaults) LockAllWithin(context.Context, time.Duration) {
+func (v *fakeVaults) LockAllWithin(context.Context, time.Duration) map[string]error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if len(v.ids) > 0 {
 		v.locked++
 	}
+	ended := map[string]error{}
+	for _, id := range v.ids {
+		ended[id] = v.fail[id]
+	}
 	v.ids = nil
+	return ended
 }
 
 func (v *fakeVaults) unlock(id string) {
@@ -84,8 +95,17 @@ type watched struct {
 	conn   *hostproto.Conn
 	parent *hostproto.Conn
 
-	logMu sync.Mutex
-	logs  []string // the messages of the log records the parent got
+	logMu   sync.Mutex
+	logs    []string // the messages of the log records the parent got
+	stopped []string // "vault_id reason" of each Stopped the parent got
+}
+
+func (w *watched) stoppedSeen() []string {
+	w.logMu.Lock()
+	defer w.logMu.Unlock()
+	out := append([]string(nil), w.stopped...)
+	sort.Strings(out)
+	return out
 }
 
 func (w *watched) logged(msg string) int {
@@ -115,10 +135,13 @@ func (w *watched) connect() {
 	a, b := net.Pipe()
 	w.conn = hostproto.NewConnOptions(a, w.s.handle, nil, w.s.connOptions())
 	w.parent = hostproto.NewConn(b, nil, func(f *hostproto.Frame) {
-		if f.Kind == hostproto.KindLog && len(f.Fields) >= 2 {
-			w.logMu.Lock()
+		w.logMu.Lock()
+		defer w.logMu.Unlock()
+		switch {
+		case f.Kind == hostproto.KindLog && len(f.Fields) >= 2:
 			w.logs = append(w.logs, string(f.Fields[1]))
-			w.logMu.Unlock()
+		case f.Kind == hostproto.KindStopped && len(f.Fields) == 2:
+			w.stopped = append(w.stopped, string(f.Fields[0])+" "+string(f.Fields[1]))
 		}
 	})
 	w.s.link.set(w.conn)
@@ -186,15 +209,86 @@ func TestSilentParentLocks(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the silent connection was kept")
 	}
-	// Nothing runs: nothing more happens, and a vault unlocked later has
-	// the whole time again.
+	// Nothing runs and nothing more happens. The parent stays unreachable
+	// until it pings: checks that find no vault do not change that, no
+	// call is made to it, and a vault that turns up under it (an unlock
+	// that was half way when the others were locked) is locked by the
+	// next check, not 120 s later.
 	w.run(600*time.Second, nil)
 	w.want(1, "no vault running")
+	w.connect()
+	if _, err := w.s.link.call(context.Background(), hostproto.KindStoreGet, []byte("vaults/v/state")); !errors.Is(err, errDown) {
+		t.Fatalf("a call to a parent that has not pinged, after checks with no vault running: %v", err)
+	}
 	w.vaults.unlock("bbbb")
-	w.run(720*time.Second, nil)
-	w.want(1, "120 s after the vault started")
+	w.run(610*time.Second, nil)
+	w.want(2, "a vault that turned up under an unreachable parent")
+	// It pings (on a new connection: that check ended the last one too):
+	// reachable, and a vault has the whole time again.
+	w.connect()
+	w.ping()
+	if _, err := w.s.link.call(context.Background(), hostproto.KindStoreGet, []byte("vaults/v/state")); err != nil {
+		t.Fatalf("a call after the parent's ping: %v", err)
+	}
+	w.vaults.unlock("cccc")
 	w.run(730*time.Second, nil)
-	w.want(2, "a vault unlocked under a silent parent")
+	w.want(2, "120 s after the ping")
+	w.run(740*time.Second, nil)
+	w.want(3, "no further ping")
+}
+
+// The parent counts a vault as running, and renews its lease, until it is
+// told otherwise. The vaults that were locked or killed while it was
+// unreachable are told to it when its next Ping is read (their own events
+// found no connection; a killed process sends none), before it is
+// reachable again, and kept if they cannot be told then.
+func TestStoppedVaultsAreTold(t *testing.T) {
+	w := newWatched(t)
+	w.connect()
+	w.ping()
+	w.vaults.fail = map[string]error{"killed": context.DeadlineExceeded, "split": vault.ErrSplitBrain}
+	for _, id := range []string{"locked", "killed", "split"} {
+		w.vaults.unlock(id)
+	}
+	w.run(130*time.Second, nil)
+	w.want(1, "no ping")
+	<-w.conn.Done()
+	w.s.link.set(nil) // as Run does
+	if got := w.stoppedSeen(); len(got) != 0 {
+		t.Fatalf("told to a parent that is gone: %v", got)
+	}
+	// A new connection alone tells nothing; the ping on it does.
+	w.connect()
+	w.run(200*time.Second, nil)
+	if got := w.stoppedSeen(); len(got) != 0 {
+		t.Fatalf("told before the ping: %v", got)
+	}
+	w.ping()
+	if err := w.conn.Flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"killed error", "locked locked", "split split_brain"}
+	deadline := time.Now().Add(10 * time.Second)
+	for len(w.stoppedSeen()) < len(want) && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := w.stoppedSeen(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("stopped vaults told: %v, want %v", got, want)
+	}
+	// Once only.
+	w.ping()
+	_ = w.conn.Flush(context.Background())
+	time.Sleep(20 * time.Millisecond)
+	if got := w.stoppedSeen(); len(got) != len(want) {
+		t.Fatalf("told again: %v", got)
+	}
+	// Without a connection at the ping they are kept for the next.
+	l := &link{}
+	l.stop("aaaa", hostproto.StopLocked)
+	l.ping(time.Unix(1_800_000_000, 0))
+	if len(l.stopped) != 1 {
+		t.Fatalf("kept: %v", l.stopped)
+	}
 }
 
 // Pings arriving: nothing is ever locked, over a day of them, and with
@@ -634,6 +728,7 @@ func TestSilentParentThatReconnects(t *testing.T) {
 	// parent that reads and answers nothing but its hello (here: the link
 	// is set).
 	stop := make(chan struct{})
+	var told atomic.Int64 // vaults the parent was told have stopped
 	reconnected := make(chan *hostproto.Conn, 16)
 	go func() {
 		conn := w.conn
@@ -646,7 +741,11 @@ func TestSilentParentThatReconnects(t *testing.T) {
 			w.s.link.set(nil)
 			a, b := net.Pipe()
 			conn = hostproto.NewConnOptions(a, w.s.handle, nil, w.s.connOptions())
-			peer := hostproto.NewConn(b, func(ctx context.Context, f *hostproto.Frame) [][]byte { <-ctx.Done(); return nil }, nil)
+			peer := hostproto.NewConn(b, func(ctx context.Context, f *hostproto.Frame) [][]byte { <-ctx.Done(); return nil }, func(f *hostproto.Frame) {
+				if f.Kind == hostproto.KindStopped && len(f.Fields) == 2 && string(f.Fields[1]) == hostproto.StopLocked {
+					told.Add(1)
+				}
+			})
 			t.Cleanup(conn.Close)
 			t.Cleanup(peer.Close)
 			w.s.link.set(conn)
@@ -681,7 +780,15 @@ func TestSilentParentThatReconnects(t *testing.T) {
 	if _, err := w.s.link.call(context.Background(), hostproto.KindStoreGet, []byte("vaults/v/state")); !errors.Is(err, errDown) {
 		t.Fatalf("a call to a parent that has not pinged: %v", err)
 	}
+	if told.Load() != 0 {
+		t.Fatalf("%d stopped vaults told before the ping", told.Load())
+	}
 	w.ping()
+	for deadline := time.Now().Add(10 * time.Second); told.Load() != vaults; time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("the parent was told of %d of %d stopped vaults", told.Load(), vaults)
+		}
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 	if _, err := w.s.link.call(ctx, hostproto.KindStoreGet, []byte("vaults/v/state")); !errors.Is(err, context.DeadlineExceeded) {
@@ -702,8 +809,17 @@ func TestLockAllWithinKills(t *testing.T) {
 	}
 	const within = 500 * time.Millisecond
 	t0 := time.Now()
-	h.LockAllWithin(context.Background(), within)
+	ended := h.LockAllWithin(context.Background(), within)
 	took := time.Since(t0)
+	killed := 0
+	for _, err := range ended {
+		if err != nil {
+			killed++
+		}
+	}
+	if len(ended) != 20 || killed != 10 {
+		t.Fatalf("%d vaults ended, %d of them killed; want 20 and 10", len(ended), killed)
+	}
 	if took < within || took > within+5*time.Second {
 		t.Fatalf("took %v with a limit of %v", took, within)
 	}

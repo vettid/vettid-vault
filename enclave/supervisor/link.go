@@ -42,6 +42,11 @@ type link struct {
 	// connection (its process lives, its path to the store does not)
 	// would otherwise hold each vault's final flush for callTimeout.
 	gone bool
+	// stopped are the vaults that were locked or killed because the
+	// parent was unreachable, each with its Stopped reason: told to the
+	// parent when its next Ping is read (their own events found no
+	// connection, or a process that was killed sent none).
+	stopped [][2]string
 	// logDropped counts the log records that were not sent because the
 	// parent was not reading.
 	logDropped atomic.Uint64
@@ -71,8 +76,22 @@ func (l *link) up() *hostproto.Conn {
 	return l.conn
 }
 
-// ping notes the parent's Ping: it is heard, and no longer gone.
+// ping notes the parent's Ping: it is heard, and no longer gone. First it
+// is told which vaults stopped while it was (before any call can open one
+// of them again); those that cannot be queued are kept for its next Ping.
 func (l *link) ping(now time.Time) {
+	l.mu.Lock()
+	c, stopped := l.conn, l.stopped
+	l.stopped = nil
+	l.mu.Unlock()
+	for i, v := range stopped {
+		if c == nil || c.Notify(hostproto.KindStopped, hostproto.Strings(v[0], v[1])...) != nil {
+			l.mu.Lock()
+			l.stopped = append(stopped[i:len(stopped):len(stopped)], l.stopped...)
+			l.mu.Unlock()
+			break
+		}
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.gone = false
@@ -80,11 +99,16 @@ func (l *link) ping(now time.Time) {
 }
 
 // hear starts the count of the parent's silence again without a Ping
-// (no vault runs: Supervisor.checkParent). A parent that is gone stays so.
+// (no vault runs: Supervisor.checkParent). Not for a parent that is gone:
+// it stays unreachable until it pings, and a vault that turns up under it
+// (an unlock that was half way when the others were locked) is locked by
+// the next check.
 func (l *link) hear(now time.Time) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.hearLocked(now)
+	if !l.gone {
+		l.hearLocked(now)
+	}
 }
 
 func (l *link) hearLocked(now time.Time) {
@@ -99,6 +123,13 @@ func (l *link) lost() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.gone = true
+}
+
+// stop notes a vault that stopped while the parent was gone.
+func (l *link) stop(id, reason string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.stopped = append(l.stopped, [2]string{id, reason})
 }
 
 // heardAt returns when the count of the parent's silence last started.

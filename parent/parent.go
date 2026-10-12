@@ -687,7 +687,7 @@ func (p *Parent) sweep(ctx context.Context) {
 // --- leases (§11.1) ---
 
 func (p *Parent) renewLeases(ctx context.Context) {
-	t := time.NewTicker(p.cfg.LeaseRenew)
+	t := time.NewTimer(p.cfg.LeaseRenew)
 	defer t.Stop()
 	for {
 		select {
@@ -695,32 +695,89 @@ func (p *Parent) renewLeases(ctx context.Context) {
 			return
 		case <-t.C:
 		}
+		start := time.Now()
 		p.mu.Lock()
 		ids := make([]string, 0, len(p.running))
 		for id := range p.running {
 			ids = append(ids, id)
 		}
 		p.mu.Unlock()
-		for _, id := range ids {
-			p.renew(ctx, id)
+		// No renewal waits past the moment the first lease is declared
+		// lost (15 s before it ends), so that a table that does not
+		// answer is found out in time; and once one renewal was given up
+		// the rest of the pass makes no call: every vault's lease is
+		// judged by its age alone, however many run.
+		var first time.Time
+		p.mu.Lock()
+		for _, l := range p.running {
+			if first.IsZero() || l.expires.Before(first) {
+				first = l.expires
+			}
 		}
+		p.mu.Unlock()
+		wait, failed, down := leaseRenewTimeout, false, false
+		if !first.IsZero() {
+			wait = max(min(wait, first.Add(-leaseMargin).Sub(p.now())), leaseRenewTimeout/10)
+		}
+		for _, id := range ids {
+			err := p.renew(ctx, id, wait, down)
+			failed = failed || err != nil
+			down = down || errors.Is(err, context.DeadlineExceeded)
+		}
+		// While renewals fail, try again soon: the lease-lost rule is only
+		// looked at when a renewal has failed.
+		next := max(p.cfg.LeaseRenew-time.Since(start), time.Millisecond)
+		if failed {
+			next = min(p.cfg.LeaseRenew, leaseRetry)
+		}
+		t.Reset(next)
 	}
 }
 
-func (p *Parent) renew(ctx context.Context, id string) {
+// A lease renewal is given up after leaseRenewTimeout (the SDK's client
+// has no response timeout); after a failed pass the next comes after
+// leaseRetry; a lease whose renewals fail is lost leaseMargin before it
+// ends (§11.1). Variables for tests.
+var (
+	leaseRenewTimeout = 10 * time.Second
+	leaseRetry        = 5 * time.Second
+	leaseMargin       = 15 * time.Second
+)
+
+// errLeaseTableDown: a renewal was given up (it is a
+// context.DeadlineExceeded to errors.Is).
+var errLeaseTableDown error = leaseTableDown{}
+
+type leaseTableDown struct{}
+
+func (leaseTableDown) Error() string { return "lease table did not answer in time" }
+func (leaseTableDown) Unwrap() error { return context.DeadlineExceeded }
+
+// renew renews one lease, waiting at most wait for the table (skip: not
+// at all, the table did not answer earlier in this pass), and tells the
+// enclave when the lease is lost. It returns the renewal's error.
+func (p *Parent) renew(ctx context.Context, id string, wait time.Duration, skip bool) error {
+	exp := p.now().Add(p.cfg.LeaseLength)
+	err := errLeaseTableDown
+	if !skip {
+		rctx, cancel := context.WithTimeout(ctx, wait)
+		err = p.cfg.Tables.RenewLease(rctx, id, p.cfg.InstanceID, exp.Unix())
+		if err != nil && rctx.Err() != nil && ctx.Err() == nil {
+			err = errLeaseTableDown
+		}
+		cancel()
+	}
 	now := p.now()
-	exp := now.Add(p.cfg.LeaseLength)
-	err := p.cfg.Tables.RenewLease(ctx, id, p.cfg.InstanceID, exp.Unix())
 	p.mu.Lock()
 	l := p.running[id]
 	if l == nil {
 		p.mu.Unlock()
-		return
+		return err
 	}
 	lost := errors.Is(err, ErrLeaseHeld)
 	if err == nil {
 		l.expires = exp
-	} else if !lost && now.After(l.expires.Add(-15*time.Second)) {
+	} else if !lost && !now.Before(l.expires.Add(-leaseMargin)) {
 		lost = true // renewals kept failing until the lease is about to lapse
 	}
 	if lost {
@@ -729,7 +786,7 @@ func (p *Parent) renew(ctx context.Context, id string) {
 	}
 	s := p.sess
 	p.mu.Unlock()
-	if err != nil && !lost {
+	if err != nil && !lost && !skip {
 		p.log.Warn("lease renewal failed; will retry", "vault_id", id, "error", err.Error())
 	}
 	if lost {
@@ -741,6 +798,7 @@ func (p *Parent) renew(ctx context.Context, id string) {
 			cancel()
 		}
 	}
+	return err
 }
 
 // beginTake and endTake bracket an enroll or unlock that holds the lease

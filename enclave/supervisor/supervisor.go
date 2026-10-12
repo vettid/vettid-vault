@@ -531,7 +531,7 @@ func (s *Supervisor) maintain(ctx context.Context) {
 // vaultSet is what checkParent needs of the vault processes (procHost).
 type vaultSet interface {
 	Vaults() []string
-	LockAllWithin(ctx context.Context, d time.Duration)
+	LockAllWithin(ctx context.Context, d time.Duration) map[string]error
 }
 
 // lockAllWithin is the time every vault has to lock once the parent is
@@ -582,8 +582,24 @@ func (s *Supervisor) checkParent(ctx context.Context, in vaultSet) {
 	// may itself wait for the parent's egress): no vault runs longer than
 	// lockAllWithin from here. One that a request opens meanwhile is
 	// locked by the next check.
-	in.LockAllWithin(ctx, lockAllWithin)
-	s.log.Warn("parent unreachable: every vault locked", "vaults", len(ids))
+	ended := in.LockAllWithin(ctx, lockAllWithin)
+	killed := 0
+	for id, err := range ended {
+		// The parent still counts each of them as running and renews its
+		// lease: a vault's own "locked" found no connection, and a killed
+		// process reports nothing. It is told at its next Ping.
+		reason := hostproto.StopLocked
+		switch {
+		case errors.Is(err, vault.ErrSplitBrain):
+			reason = hostproto.StopSplitBrain
+		case err != nil:
+			reason = hostproto.StopError
+			killed++
+		}
+		s.forget(id)
+		s.link.stop(id, reason)
+	}
+	s.log.Warn("parent unreachable: every vault locked", "vaults", len(ended), "killed", killed)
 }
 
 // reportDropped logs how many log records were dropped because the parent

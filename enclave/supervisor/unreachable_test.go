@@ -2,13 +2,17 @@ package supervisor
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net"
+	"os/exec"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/vettid/vettid-vault/internal/hostproto"
+	"github.com/vettid/vettid-vault/internal/vaultipc"
 )
 
 // The "parent unreachable" rule (§12.3; VAULT-HOST-PROTOCOL §13 point 1):
@@ -35,11 +39,12 @@ func (c *testClock) add(d time.Duration) {
 	c.mu.Unlock()
 }
 
-// fakeVaults stands for the instance: the vaults running, and LockAll.
+// fakeVaults stands for the vault processes: the vaults running, and
+// LockAllWithin.
 type fakeVaults struct {
 	mu     sync.Mutex
 	ids    []string
-	locked int // LockAll calls that found a vault
+	locked int // LockAllWithin calls that found a vault
 }
 
 func (v *fakeVaults) Vaults() []string {
@@ -48,7 +53,7 @@ func (v *fakeVaults) Vaults() []string {
 	return append([]string(nil), v.ids...)
 }
 
-func (v *fakeVaults) LockAll(context.Context) {
+func (v *fakeVaults) LockAllWithin(context.Context, time.Duration) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if len(v.ids) > 0 {
@@ -78,6 +83,21 @@ type watched struct {
 	at     time.Duration // since the start
 	conn   *hostproto.Conn
 	parent *hostproto.Conn
+
+	logMu sync.Mutex
+	logs  []string // the messages of the log records the parent got
+}
+
+func (w *watched) logged(msg string) int {
+	w.logMu.Lock()
+	defer w.logMu.Unlock()
+	n := 0
+	for _, m := range w.logs {
+		if m == msg {
+			n++
+		}
+	}
+	return n
 }
 
 func newWatched(t *testing.T) *watched {
@@ -94,7 +114,13 @@ func newWatched(t *testing.T) *watched {
 func (w *watched) connect() {
 	a, b := net.Pipe()
 	w.conn = hostproto.NewConnOptions(a, w.s.handle, nil, w.s.connOptions())
-	w.parent = hostproto.NewConn(b, nil, nil)
+	w.parent = hostproto.NewConn(b, nil, func(f *hostproto.Frame) {
+		if f.Kind == hostproto.KindLog && len(f.Fields) >= 2 {
+			w.logMu.Lock()
+			w.logs = append(w.logs, string(f.Fields[1]))
+			w.logMu.Unlock()
+		}
+	})
 	w.s.link.set(w.conn)
 	w.t.Cleanup(w.conn.Close)
 	w.t.Cleanup(w.parent.Close)
@@ -361,24 +387,31 @@ func TestReaderAtLimitIsNotSilence(t *testing.T) {
 }
 
 // A parent that stops reading. Logging never waits for it: records that
-// do not fit are dropped and counted. A lifecycle event waits, but only
-// until the write timeout ends the connection, and from then the parent
-// is on the 120 s clock like any other that is gone.
-func TestParentStopsReading(t *testing.T) {
+// do not fit are dropped and counted, and the count is told once there is
+// somebody to tell.
+func TestLoggingNeverWaits(t *testing.T) {
 	w := newWatched(t)
 	a, b := net.Pipe() // nobody reads b
 	defer b.Close()
-	opt := w.s.connOptions()
-	if opt.WriteTimeout != 60*time.Second {
-		t.Fatalf("write timeout %v", opt.WriteTimeout)
-	}
-	opt.WriteTimeout = 500 * time.Millisecond
-	start := time.Now()
-	conn := hostproto.NewConnOptions(a, w.s.handle, nil, opt)
+	// No write timeout on this one: nothing but the logger's own rule
+	// can let it return.
+	conn := hostproto.NewConn(a, w.s.handle, nil)
 	defer conn.Close()
 	w.s.link.set(conn)
-	w.vaults.unlock("aaaa")
-	log := slog.New(&logHandler{l: w.s.link, level: slog.LevelError}) // as the supervisor's, without the console lines of lower levels
+	// The connection holds 256 frames, and one more once the writer has
+	// taken its first: fill it.
+	held := 0
+	for tries := 0; held < 257; tries++ {
+		if w.s.link.logRecord(hostproto.Strings("INFO", "record")...) {
+			held++
+		} else if tries > 10000 {
+			t.Fatalf("the connection took %d records", held)
+		} else {
+			time.Sleep(100 * time.Microsecond)
+		}
+	}
+	before := w.s.link.logDropped.Load()
+	log := slog.New(&logHandler{l: w.s.link, level: slog.LevelError})
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -389,18 +422,68 @@ func TestParentStopsReading(t *testing.T) {
 	}()
 	select {
 	case <-done:
-	case <-conn.Done():
-		t.Skip("too slow to tell: the write timeout came first")
 	case <-time.After(10 * time.Second):
 		t.Fatal("logging waits for a parent that does not read")
 	}
-	// The connection holds 256 frames, and one more once the writer has
-	// taken its first.
 	dropped := w.s.link.logDropped.Load()
-	if dropped != 1001-257 && dropped != 1001-256 {
-		t.Fatalf("%d records dropped, want all but the 257 the connection holds", dropped)
+	if dropped-before != 1001 {
+		t.Fatalf("%d of 1,001 records dropped", dropped-before)
 	}
-	// A lifecycle event is not dropped: it waits for the connection.
+	// The report is a record too: dropped here, kept while there is no
+	// connection, told to the next parent that reads.
+	w.s.reportDropped()
+	dropped++
+	if w.s.droppedTold != 0 || w.s.link.logDropped.Load() != dropped {
+		t.Fatalf("report on a full queue: told %d, dropped %d", w.s.droppedTold, w.s.link.logDropped.Load())
+	}
+	conn.Close()
+	w.s.link.set(nil)
+	w.s.reportDropped()
+	if w.s.droppedTold != 0 {
+		t.Fatal("the count was told to nobody")
+	}
+	w.connect()
+	w.s.reportDropped()
+	if w.s.droppedTold != dropped {
+		t.Fatalf("told %d of %d", w.s.droppedTold, dropped)
+	}
+	if err := w.conn.Flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for n := 0; w.logged("log records dropped: the parent was not reading") != 1; n++ {
+		if n > 5000 {
+			t.Fatal("the parent did not get the count")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// A parent that stops reading: a lifecycle event is not dropped, it
+// waits, but only until the write timeout ends the connection; from then
+// the parent is on the 120 s clock like any other that is gone.
+func TestParentStopsReading(t *testing.T) {
+	w := newWatched(t)
+	a, b := net.Pipe() // nobody reads b
+	defer b.Close()
+	opt := w.s.connOptions()
+	if opt.WriteTimeout != 60*time.Second {
+		t.Fatalf("write timeout %v", opt.WriteTimeout)
+	}
+	opt.WriteTimeout = 2 * time.Second
+	start := time.Now()
+	conn := hostproto.NewConnOptions(a, w.s.handle, nil, opt)
+	defer conn.Close()
+	w.s.link.set(conn)
+	w.vaults.unlock("aaaa")
+	for held, tries := 0, 0; held < 257; tries++ { // as in TestLoggingNeverWaits
+		if w.s.link.logRecord(hostproto.Strings("INFO", "record")...) {
+			held++
+		} else if tries > 10000 {
+			t.Fatalf("the connection took %d records", held)
+		} else {
+			time.Sleep(100 * time.Microsecond)
+		}
+	}
 	sent := make(chan struct{})
 	go func() {
 		defer close(sent)
@@ -410,15 +493,15 @@ func TestParentStopsReading(t *testing.T) {
 	case <-sent:
 		select {
 		case <-conn.Done():
-			t.Skip("too slow to tell: the write timeout came first")
+			t.Fatalf("the connection ended %v after its start, before the event could be seen to wait", time.Since(start))
 		default:
 			t.Fatal("a lifecycle event was dropped while the connection lived")
 		}
-	case <-time.After(50 * time.Millisecond):
+	case <-time.After(100 * time.Millisecond):
 	}
 	select {
 	case <-sent:
-	case <-time.After(10 * time.Second):
+	case <-time.After(20 * time.Second):
 		t.Fatal("the supervisor waits for a parent that does not read")
 	}
 	<-conn.Done()
@@ -431,9 +514,207 @@ func TestParentStopsReading(t *testing.T) {
 	w.want(0, "120 s")
 	w.run(130*time.Second, nil)
 	w.want(1, "a parent that stopped reading")
-	// The count of dropped records is logged once it changed.
-	w.s.reportDropped()
-	if w.s.droppedTold != dropped {
-		t.Fatalf("dropped records reported: %d of %d", w.s.droppedTold, dropped)
+}
+
+// Half way to the lock the supervisor says so, once for each time the
+// count started, and names no vault.
+func TestWarnsBeforeTheLock(t *testing.T) {
+	const warning = "no ping from the parent: every vault is locked if none comes"
+	w := newWatched(t)
+	w.s.log = slog.New(&logHandler{l: w.s.link, level: slog.LevelWarn})
+	w.connect()
+	w.vaults.unlock("aaaa")
+	got := func(want int, what string) {
+		t.Helper()
+		if err := w.conn.Flush(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		deadline := time.Now().Add(10 * time.Second)
+		for w.logged(warning) < want && time.Now().Before(deadline) {
+			time.Sleep(time.Millisecond)
+		}
+		time.Sleep(20 * time.Millisecond) // one too many would arrive now
+		if n := w.logged(warning); n != want {
+			t.Fatalf("at %v, %s: %d warnings, want %d", w.at, what, n, want)
+		}
+	}
+	w.ping()
+	w.run(60*time.Second, nil)
+	got(0, "60 s without a ping")
+	w.run(110*time.Second, nil)
+	got(1, "over 60 s without a ping, five checks")
+	w.ping()
+	w.run(170*time.Second, nil)
+	got(1, "60 s after another ping")
+	w.run(230*time.Second, nil)
+	got(2, "over 60 s after it")
+	w.want(0, "120 s after the last ping")
+	w.run(240*time.Second, nil)
+	w.want(1, "no further ping")
+	w.logMu.Lock()
+	defer w.logMu.Unlock()
+	for _, m := range w.logs {
+		if m != warning && m != "parent unreachable: locking every vault" && m != "parent unreachable: every vault locked" {
+			t.Errorf("unexpected record %q", m)
+		}
+	}
+}
+
+// lockProc starts a process that stands for a vault's (it only sleeps)
+// and gives it to h as that vault's, with a channel on which the test
+// answers the supervisor's Lock as a vault process does: the final flush
+// (a store write through the supervisor's link), then the answer. With
+// hang it never answers. Like a vault process, it ends when its channel
+// closes.
+func lockProc(t *testing.T, h *procHost, id string, hang bool, flushed func(error, time.Duration)) *vproc {
+	t.Helper()
+	cmd := exec.Command("sleep", "600")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	a, b := net.Pipe()
+	p := &vproc{h: h, vaultID: id, cmd: cmd, exited: make(chan struct{})}
+	p.conn = hostproto.NewConn(a, nil, nil)
+	child := hostproto.NewConn(b, func(ctx context.Context, f *hostproto.Frame) [][]byte {
+		if f.Kind != vaultipc.KindLock {
+			return nil
+		}
+		if hang {
+			<-ctx.Done()
+			return nil
+		}
+		t0 := time.Now()
+		_, err := h.s.link.call(context.WithoutCancel(ctx), hostproto.KindStorePut, []byte("vaults/"+id+"/state"), []byte("x"), nil)
+		flushed(err, time.Since(t0))
+		return hostproto.Strings(hostproto.StatusOK)
+	}, nil)
+	go func() { <-child.Done(); _ = cmd.Process.Kill() }()
+	go func() {
+		_ = cmd.Wait()
+		p.conn.Close()
+		close(p.exited)
+		h.exited(p)
+	}()
+	t.Cleanup(func() { _ = cmd.Process.Kill(); <-p.exited })
+	h.mu.Lock()
+	h.procs[id] = p
+	h.mu.Unlock()
+	return p
+}
+
+// The case the rule is for: the host has lost its path to the store and
+// the tables, and the parent's process lives. Its pings stop; it still
+// accepts the supervisor's new connection and answers the hello; a store
+// request gets no answer. Every vault is locked at once all the same: no
+// call is made to a parent that is gone until it pings again, whatever
+// connection there is, and the vaults lock side by side. (Before: the
+// connection was closed, Run dialled again, and from the second vault on
+// each final flush waited 60 s, one vault after another.)
+func TestSilentParentThatReconnects(t *testing.T) {
+	const vaults = 60
+	w := newWatched(t)
+	h := &procHost{s: w.s, procs: map[string]*vproc{}}
+	h.cfg.defaults()
+	w.connect()
+	w.ping()
+	var mu sync.Mutex
+	var slowest time.Duration
+	failed := 0
+	for i := 0; i < vaults; i++ {
+		lockProc(t, h, fmt.Sprintf("vault-%02d", i), false, func(err error, took time.Duration) {
+			mu.Lock()
+			defer mu.Unlock()
+			if errors.Is(err, errDown) {
+				failed++
+			}
+			slowest = max(slowest, took)
+		})
+	}
+	// Run's loop, reduced: whenever the connection ends, a new one, to a
+	// parent that reads and answers nothing but its hello (here: the link
+	// is set).
+	stop := make(chan struct{})
+	reconnected := make(chan *hostproto.Conn, 16)
+	go func() {
+		conn := w.conn
+		for {
+			select {
+			case <-stop:
+				return
+			case <-conn.Done():
+			}
+			w.s.link.set(nil)
+			a, b := net.Pipe()
+			conn = hostproto.NewConnOptions(a, w.s.handle, nil, w.s.connOptions())
+			peer := hostproto.NewConn(b, func(ctx context.Context, f *hostproto.Frame) [][]byte { <-ctx.Done(); return nil }, nil)
+			t.Cleanup(conn.Close)
+			t.Cleanup(peer.Close)
+			w.s.link.set(conn)
+			reconnected <- peer
+		}
+	}()
+	defer close(stop)
+	w.clk.add(130 * time.Second)
+	t0 := time.Now()
+	w.s.checkParent(context.Background(), h)
+	took := time.Since(t0)
+	mu.Lock()
+	t.Logf("%d vaults locked in %v; %d final flushes failed at once, the slowest after %v (a store call waits %v)",
+		vaults, took.Round(time.Millisecond), failed, slowest.Round(time.Microsecond), callTimeout)
+	if failed != vaults || slowest > time.Second {
+		t.Fatalf("%d of %d final flushes failed at once; the slowest took %v", failed, vaults, slowest)
+	}
+	mu.Unlock()
+	if n := len(h.Vaults()); n != 0 || took > lockAllWithin {
+		t.Fatalf("%d vaults still run after %v", n, took)
+	}
+	// The new connection is there, and still no call is made on it: only
+	// a Ping makes the parent reachable again.
+	select {
+	case w.parent = <-reconnected:
+	case <-time.After(10 * time.Second):
+		t.Fatal("no new connection")
+	}
+	if w.s.link.get() == nil {
+		t.Fatal("no connection")
+	}
+	if _, err := w.s.link.call(context.Background(), hostproto.KindStoreGet, []byte("vaults/v/state")); !errors.Is(err, errDown) {
+		t.Fatalf("a call to a parent that has not pinged: %v", err)
+	}
+	w.ping()
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	if _, err := w.s.link.call(ctx, hostproto.KindStoreGet, []byte("vaults/v/state")); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("a call after the parent's ping was not sent: %v", err)
+	}
+}
+
+// A vault process that does not answer the lock is killed when the time
+// is up: every vault is gone by then, however many there are and whatever
+// they wait for.
+func TestLockAllWithinKills(t *testing.T) {
+	w := newWatched(t)
+	h := &procHost{s: w.s, procs: map[string]*vproc{}}
+	h.cfg.defaults()
+	var ps []*vproc
+	for i := 0; i < 20; i++ {
+		ps = append(ps, lockProc(t, h, fmt.Sprintf("vault-%02d", i), i%2 == 0, func(error, time.Duration) {}))
+	}
+	const within = 500 * time.Millisecond
+	t0 := time.Now()
+	h.LockAllWithin(context.Background(), within)
+	took := time.Since(t0)
+	if took < within || took > within+5*time.Second {
+		t.Fatalf("took %v with a limit of %v", took, within)
+	}
+	if n := len(h.Vaults()); n != 0 {
+		t.Fatalf("%d vaults still run", n)
+	}
+	for _, p := range ps {
+		select {
+		case <-p.exited:
+		default:
+			t.Fatalf("the process of %s still runs", p.vaultID)
+		}
 	}
 }

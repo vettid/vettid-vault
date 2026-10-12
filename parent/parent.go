@@ -588,6 +588,10 @@ func (p *Parent) flushEvents(ctx context.Context) {
 
 // --- instance registry (§11.1) ---
 
+// registryWriteTimeout bounds the write of the registry row (a variable
+// for tests).
+var registryWriteTimeout = 10 * time.Second
+
 // publish writes the registry row if the enclave answers.
 func (p *Parent) publish(ctx context.Context) {
 	p.mu.Lock()
@@ -596,6 +600,15 @@ func (p *Parent) publish(ctx context.Context) {
 	if s == nil || d == nil {
 		return
 	}
+	// Ping and row together, in at most 15 s: the enclave locks every
+	// vault after 120 s without a Ping, so one write that hangs (a table
+	// that does not answer) must not hold the pings that follow it.
+	start := time.Now()
+	defer func() {
+		if took := time.Since(start); took > p.cfg.Heartbeat {
+			p.log.Warn("heartbeat took longer than its interval", "ms", took.Milliseconds(), "interval_ms", p.cfg.Heartbeat.Milliseconds())
+		}
+	}()
 	pctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	r, err := s.conn.Call(pctx, hostproto.KindPing)
 	cancel()
@@ -610,7 +623,9 @@ func (p *Parent) publish(ctx context.Context) {
 		}
 	}
 	now := p.now()
-	err = p.cfg.Tables.PutInstance(ctx, InstanceRow{InstanceID: p.cfg.InstanceID, Release: d.release, QueueURL: p.queueURL,
+	wctx, cancel := context.WithTimeout(ctx, registryWriteTimeout)
+	defer cancel()
+	err = p.cfg.Tables.PutInstance(wctx, InstanceRow{InstanceID: p.cfg.InstanceID, Release: d.release, QueueURL: p.queueURL,
 		Descriptor: d.descriptor, Attestation: d.attestation, HeartbeatAt: now.Unix(), ExpiresAt: now.Add(10 * time.Minute).Unix(), Load: load})
 	p.mu.Lock()
 	p.stats.heartbeatErr = err != nil

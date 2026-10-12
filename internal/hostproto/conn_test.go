@@ -16,7 +16,7 @@ import (
 func TestWriteTimeout(t *testing.T) {
 	a, b := net.Pipe() // nobody reads b
 	defer b.Close()
-	const timeout = 300 * time.Millisecond
+	const timeout = time.Second
 	start := time.Now()
 	x := NewConnOptions(a, nil, nil, Options{WriteTimeout: timeout})
 	defer x.Close()
@@ -36,12 +36,11 @@ func TestWriteTimeout(t *testing.T) {
 	if err := x.TryNotify(KindLog, Strings("info", "x")...); n != 257 || !errors.Is(err, ErrFull) {
 		t.Fatalf("%d frames queued, then %v", n, err)
 	}
-	if filled := time.Since(start); filled >= timeout {
-		t.Skipf("too slow to tell: the queue took %v to fill", filled)
-	}
 	select {
 	case <-x.Done():
-		t.Fatal("connection ended before the write timeout")
+		if d := time.Since(start); d < timeout {
+			t.Fatalf("connection ended after %v, before the write timeout", d)
+		}
 	default:
 	}
 	// Senders that wait are held until the connection ends, no longer.
@@ -200,5 +199,44 @@ func TestReaderAtLimitClosed(t *testing.T) {
 			t.Fatalf("no OnWait(%v)", want)
 		}
 		server.Close()
+	}
+}
+
+// noDeadlineConn is a connection that takes no write deadline.
+type noDeadlineConn struct{ net.Conn }
+
+func (noDeadlineConn) SetWriteDeadline(time.Time) error { return os.ErrNoDeadline }
+
+// A connection that refuses the write deadline is used all the same, and
+// says so once.
+func TestWriteTimeoutRefused(t *testing.T) {
+	a, b := net.Pipe()
+	got := make(chan struct{}, 8)
+	server := NewConn(b, nil, func(*Frame) { got <- struct{}{} })
+	defer server.Close()
+	var mu sync.Mutex
+	var told []error
+	x := NewConnOptions(noDeadlineConn{a}, nil, nil, Options{WriteTimeout: time.Second, OnNoDeadline: func(err error) {
+		mu.Lock()
+		told = append(told, err)
+		mu.Unlock()
+	}})
+	defer x.Close()
+	for i := 0; i < 5; i++ {
+		if err := x.Notify(KindLog, Strings("info", "x")...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 5; i++ {
+		select {
+		case <-got:
+		case <-time.After(10 * time.Second):
+			t.Fatal("frames not delivered")
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(told) != 1 || !errors.Is(told[0], os.ErrNoDeadline) {
+		t.Fatalf("OnNoDeadline: %v", told)
 	}
 }

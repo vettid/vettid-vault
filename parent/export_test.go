@@ -18,3 +18,11 @@ func SetQueueRetryForTest(base, max, wait time.Duration) func() {
 
 // QueueDeletedRecentlyForTest exposes the SQS error classification.
 var QueueDeletedRecentlyForTest = queueDeletedRecently
+
+// SetRegistryWriteTimeoutForTest shortens the bound on the registry row's
+// write; the returned function restores it.
+func SetRegistryWriteTimeoutForTest(d time.Duration) func() {
+	old := registryWriteTimeout
+	registryWriteTimeout = d
+	return func() { registryWriteTimeout = old }
+}

@@ -925,8 +925,11 @@ here, to be matched against the spec text when it is written
 (docs/V3-NOTES.md, "Enclave ↔ parent", lists the edits). Package paths:
 `enclave/supervisor`, `internal/hostproto`. The supervisor's tests run
 the check that `maintain` makes every 10 s (`checkParent`) on a clock of
-their own, against a stand-in for the instance; no test runs it with a
-real vault process and a real parent that goes silent.
+their own, against a stand-in for the vault processes, or against
+`procHost` with processes that stand for vault processes (they answer
+the lock as one does: a store write through the link, then the answer);
+no test runs it with a real vault process and a real parent that goes
+silent.
 
 | § | Requirement | Test(s) |
 |---|---|---|
@@ -934,9 +937,14 @@ real vault process and a real parent that goes silent.
 | 12.3 | A `Ping` is counted when the enclave reads it, whatever it answers; with pings arriving nothing is locked | `supervisor.TestPingsKeepVaults` (every 20 s for a day, then every 110 s for an hour; the stand-in's instance has not started, so each ping is answered `error` and counts) |
 | 12.3 | A new connection does not start the count again: only a `Ping` does | `supervisor.TestReconnectWithoutPings` (a connection every 30 s, no ping: locked 120 s after the last ping), `supervisor.TestReconnectWithPings` |
 | 12.3 | The time counts only while a vault runs: a vault unlocked before the parent's first `Ping` (after the enclave's start, a new session, or a lock of every vault) has the whole 120 s | `supervisor.TestBeforeTheFirstPing` (five minutes without a parent, an unlock before the first ping; a parent that never pings: locked 120 s after the unlock), `supervisor.TestSilentParentLocks` (a vault unlocked after every vault was locked) |
-| 12.3 | A connected parent that is found silent loses the connection before the vaults are locked, so that their final flushes fail at once instead of each waiting 60 s | `supervisor.TestSilentParentLocks` (the connection has ended). That the flushes then fail at once is `supervisor.TestHostStoreMapping` ("a link that is down fails fast") |
+| 12.3 | Once the parent is found unreachable no call is made to it until its next `Ping`, whatever connection there is; a connection it has is closed; a hello changes nothing | `supervisor.TestSilentParentThatReconnects` (60 vault processes, a parent that takes every new connection and answers no store request: every final flush fails at once, a call on the new connection fails until a ping, and is sent after it), `supervisor.TestSilentParentLocks` (the connection has ended) |
+| 12.3 | Every vault has locked or been killed within 10 s of that check, however many run | `supervisor.TestSilentParentThatReconnects` (60 in well under 10 s), `supervisor.TestLockAllWithinKills` (20 processes, half of which never answer the lock, with a limit of 500 ms: all gone at the limit). The value itself (10 s) is asserted only as the bound of the first |
+| 12.3 | A failed final flush loses nothing stored and is not a split brain | by construction (`link.call` fails before anything is sent; `vault.persist` returns `ErrSplitBrain` for a conflict only); `vault.TestSplitBrainZeroizes` is the conflict. **No test locks a real vault with a failing store** |
+| 12.3 | A warning at half the time, once for each time the count started, naming no vault | `supervisor.TestWarnsBeforeTheLock` (also: no other record is sent) |
 | VAULT-HOST-PROTOCOL 3.4 | Time in which the enclave's own reader waits at 128 requests in flight is not counted as the parent's silence, up to 120 s of it; a `Ping` that waited in the socket is read when the reader goes on | `supervisor.TestReaderAtLimitIsNotSilence`, `hostproto.TestReaderAtLimit` (nothing is read while the reader waits), `hostproto.TestReaderAtLimitClosed` |
 | VAULT-HOST-PROTOCOL 3.4 | A frame to the parent that is not written within 60 s ends the connection; senders that waited are released | `hostproto.TestWriteTimeout` (with 300 ms), `hostproto.TestWriteTimeoutSlowReader` (a slow reader is not cut off: the time is per frame), `supervisor.TestParentStopsReading` (asserts the 60 s of the control connection, then runs with 500 ms) |
-| VAULT-HOST-PROTOCOL 3.4, 7.4 | A log record never waits for the parent: one that does not fit the outgoing queue is dropped and counted, and the count is logged | `supervisor.TestParentStopsReading` (1,001 records against a parent that does not read: all but the 257 the connection holds are dropped, at once) |
+| VAULT-HOST-PROTOCOL 3.4, 7.4 | A log record never waits for the parent: one that does not fit the outgoing queue is dropped and counted, and the count is logged | `supervisor.TestLoggingNeverWaits` (a connection without a write timeout to a parent that does not read: once it holds its 257 frames, 1,001 records return at once and are counted; the count is kept while its own record is dropped or there is no connection, and told to the next parent) |
 | VAULT-HOST-PROTOCOL 3.4, 7.1–7.3 | A descriptor, a lifecycle event and a stopped vault are not dropped while the connection lives: they wait for the queue, at most until the write time ends the connection | `supervisor.TestParentStopsReading` (a lifecycle event waits, then returns when the connection ends); `Stopped` and `Descriptor` go the same way (`link.notify`) and have no test of their own |
+| 12.3 | A registry write that hangs does not stop the parent's pings: it is given up after 10 s; the parent warns when its heartbeat is late | `parent.TestPingsGoOnWhenTheRegistryHangs` (with 150 ms: a ping at every tick past a table that never answers, each still followed by its write). The value itself (10 s) is not asserted |
+| VAULT-HOST-PROTOCOL 3.4 | A connection that takes no write deadline is used all the same and says so once | `hostproto.TestWriteTimeoutRefused` |
 | 12.3 | The parent sends `Ping` every 20 s (the S10 parent too) | **not covered by a test of the interval**: `parent.Config.Heartbeat` defaults to 20 s, and neither it nor `cmd/vault-parent -heartbeat` refuses a larger value; `parent.TestRegistryAndStore` runs the heartbeat at 100 ms |

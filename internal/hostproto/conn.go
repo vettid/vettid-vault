@@ -64,6 +64,10 @@ type Options struct {
 	// handled: in between, nothing the peer sends is read. It runs on the
 	// reader and must not block.
 	OnWait func(waiting bool)
+	// OnNoDeadline, if set, is told once when the connection refuses a
+	// write deadline: WriteTimeout then bounds nothing. It runs on the
+	// writer and must not block.
+	OnNoDeadline func(err error)
 }
 
 // NewConn starts the reader and writer goroutines.
@@ -159,11 +163,17 @@ func (x *Conn) send(f *Frame, wait bool) error {
 }
 
 func (x *Conn) writeLoop() {
+	noDeadline := false
 	for {
 		select {
 		case b := <-x.out:
-			if x.opt.WriteTimeout > 0 {
-				_ = x.c.SetWriteDeadline(time.Now().Add(x.opt.WriteTimeout))
+			if x.opt.WriteTimeout > 0 && !noDeadline {
+				if err := x.c.SetWriteDeadline(time.Now().Add(x.opt.WriteTimeout)); err != nil {
+					noDeadline = true
+					if x.opt.OnNoDeadline != nil {
+						x.opt.OnNoDeadline(err)
+					}
+				}
 			}
 			err := WriteChunked(x.c, b)
 			x.unwritten.Add(-1)

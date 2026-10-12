@@ -36,6 +36,12 @@ type link struct {
 	// silence.
 	waited    time.Duration
 	waitSince time.Time
+	// gone is set when the parent was found unreachable and stays set
+	// until its next Ping is read: meanwhile every call fails at once,
+	// connection or not. A parent that is silent and still accepts a new
+	// connection (its process lives, its path to the store does not)
+	// would otherwise hold each vault's final flush for callTimeout.
+	gone bool
 	// logDropped counts the log records that were not sent because the
 	// parent was not reading.
 	logDropped atomic.Uint64
@@ -55,14 +61,51 @@ func (l *link) get() *hostproto.Conn {
 	return l.conn
 }
 
-// hear notes that the parent was heard now.
+// up returns the connection calls may use: none while the parent is gone.
+func (l *link) up() *hostproto.Conn {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.gone {
+		return nil
+	}
+	return l.conn
+}
+
+// ping notes the parent's Ping: it is heard, and no longer gone.
+func (l *link) ping(now time.Time) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.gone = false
+	l.hearLocked(now)
+}
+
+// hear starts the count of the parent's silence again without a Ping
+// (no vault runs: Supervisor.checkParent). A parent that is gone stays so.
 func (l *link) hear(now time.Time) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.hearLocked(now)
+}
+
+func (l *link) hearLocked(now time.Time) {
 	l.heard, l.waited = now, 0
 	if !l.waitSince.IsZero() {
 		l.waitSince = now
 	}
+}
+
+// lost marks the parent gone (unreachable) until its next Ping.
+func (l *link) lost() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.gone = true
+}
+
+// heardAt returns when the count of the parent's silence last started.
+func (l *link) heardAt() time.Time {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.heard
 }
 
 // waiting notes that the connection's reader starts or stops waiting at
@@ -104,7 +147,7 @@ const callTimeout = 60 * time.Second
 const writeTimeout = callTimeout
 
 func (l *link) call(ctx context.Context, k hostproto.Kind, fields ...[]byte) ([][]byte, error) {
-	c := l.get()
+	c := l.up()
 	if c == nil {
 		return nil, errDown
 	}
@@ -124,12 +167,20 @@ func (l *link) notify(k hostproto.Kind, fields ...[]byte) {
 }
 
 // logRecord sends a log record if the connection takes it at once and
-// drops it otherwise: logging never waits for the parent. Dropped records
-// are counted (Supervisor.reportDropped).
-func (l *link) logRecord(fields ...[]byte) {
-	if c := l.get(); c != nil && errors.Is(c.TryNotify(hostproto.KindLog, fields...), hostproto.ErrFull) {
+// drops it otherwise: logging never waits for the parent. It says whether
+// the record was queued. Records dropped because the queue was full are
+// counted (Supervisor.reportDropped); without a connection there is
+// nobody to log to, as before, and nothing is counted.
+func (l *link) logRecord(fields ...[]byte) bool {
+	c := l.get()
+	if c == nil {
+		return false
+	}
+	err := c.TryNotify(hostproto.KindLog, fields...)
+	if errors.Is(err, hostproto.ErrFull) {
 		l.logDropped.Add(1)
 	}
+	return err == nil
 }
 
 // hostStore is the vault object store through the parent (S3 with

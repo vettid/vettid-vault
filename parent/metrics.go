@@ -79,7 +79,7 @@ func (p *Parent) writeMetrics(ctx context.Context, last map[string]uint64) {
 		// Which bound it was is in the record, not in a metric.
 		counter(MetricRelayRefused, st[hostproto.StatRelayRefusedMax]+st[hostproto.StatRelayRefusedMin])
 		for _, k := range []string{hostproto.StatRelayConns, hostproto.StatRelayDialed, hostproto.StatRelayStreams, hostproto.StatRelayWaiting,
-			hostproto.StatRelayRefusedMax, hostproto.StatRelayRefusedMin} {
+			hostproto.StatRelayRefusedMax, hostproto.StatRelayRefusedMin, hostproto.StatRelayVaultLimit} {
 			kv = append(kv, k, st[k])
 		}
 	}
@@ -109,7 +109,8 @@ func enclaveStats(ctx context.Context, s *session) map[string]uint64 {
 	for i := 1; i+1 < len(r); i += 2 {
 		switch k := string(r[i]); k {
 		case hostproto.StatRelayConns, hostproto.StatRelayDialed, hostproto.StatRelayStreams, hostproto.StatRelayInFlight, hostproto.StatRelayWaiting,
-			hostproto.StatRelayWaitMaxMS, hostproto.StatRelayErrors, hostproto.StatRelayRefusedMax, hostproto.StatRelayRefusedMin:
+			hostproto.StatRelayWaitMaxMS, hostproto.StatRelayErrors, hostproto.StatRelayRefusedMax, hostproto.StatRelayRefusedMin,
+			hostproto.StatRelayVaultLimit:
 			if v, err := strconv.ParseUint(string(r[i+1]), 10, 63); err == nil {
 				out[k] = v
 			}

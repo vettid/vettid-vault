@@ -295,6 +295,10 @@ Fetched with `openssl s_client -showcerts` and verified with Go's
     request of its run loop and a push wake. Without the limit 16
     processes could hold all 2,048 streams. KMS requests are not limited
     this way (HTTP/1.1, as before).
+    A process that reaches its limit is counted once, for the instance
+    (`relay_vault_limit` in the Stats reply and in the parent's metrics
+    record, not a metric); it is not logged, because the supervisor's log
+    goes to the parent and would say which vault it was.
 - **Metrics** (VAULT-RELAY-SCALING §6). Every minute the parent asks the
   enclave for its relay counts (`hostproto.KindStats`; the enclave
   answers from a snapshot at most a second old, and asking changes

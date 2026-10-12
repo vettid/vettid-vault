@@ -99,7 +99,7 @@ type vproc struct {
 	relayKey ed25519.PublicKey
 	stopping bool          // locked or killed by the supervisor
 	egress   chan struct{} // one place per relay or push request in flight
-	egressAt bool          // the limit was reached (logged once)
+	egressAt bool          // the limit was reached (counted once)
 }
 
 var _ enclave.Host = (*procHost)(nil)
@@ -641,7 +641,8 @@ const maxVaultEgress = 8
 // egressSlot takes one of the vault's places for a request in flight. At
 // the limit the request waits, as long as its own time allows (a burst is
 // then late, not lost; a process that floods delays only itself), and is
-// answered StatusError if that ends first.
+// answered StatusError if that ends first. The first time a process is at
+// its limit is counted (Supervisor.vaultLimit), once per process.
 func (p *vproc) egressSlot(ctx context.Context) (release func(), ok bool) {
 	p.mu.Lock()
 	if p.egress == nil {
@@ -653,8 +654,11 @@ func (p *vproc) egressSlot(ctx context.Context) (release func(), ok bool) {
 		p.egressAt = true
 	}
 	p.mu.Unlock()
-	if full && p.h.s.log != nil {
-		p.h.s.log.Warn("vault at its limit of concurrent relay requests; further ones wait", "vault_id", p.vaultID, "limit", maxVaultEgress)
+	if full {
+		// Counted for the instance, not logged: the supervisor's log goes
+		// to the parent, which learns nothing per vault about relay
+		// requests (VAULT-MESSAGING §2.2, §12.2.1).
+		p.h.s.vaultLimit.Add(1)
 	}
 	select {
 	case ch <- struct{}{}:

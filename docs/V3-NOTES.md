@@ -204,6 +204,98 @@ unprivileged ids, and Yama (optional).
 - **Large writes**: every write on a vsock connection, in both
   directions and on both ends, is at most 16 KiB (`hostproto.ChunkSize`),
   for the Nitro vsock large-write bug vettid.dev hit.
+- **Parent unreachable** (§12.3; owner decision H3 of 2026-10-12, S11;
+  VAULT-HOST-PROTOCOL §13 point 1). Until S10 the 120 s ran from the loss
+  of the control connection, so a parent that stayed connected and did
+  nothing (hung, stopped, dishonest) was never unreachable. Now:
+  - *The rule.* One clock: the time since the parent's last `Ping`
+    (`link.heard`). `maintain` checks it every 10 s (`checkParent`), and
+    at more than 120 s (`Config.DownLock`) with a vault running it locks
+    every vault. Whether there is a connection does not enter into it,
+    and a new connection does not start the count again: only a `Ping`
+    does, counted when it is read, whatever the answer. Without a
+    connection there are no pings, so the old rule is contained in this
+    one: a lost parent has its vaults locked 120 s after its last ping,
+    which is up to 20 s (one ping interval) sooner than before.
+  - *Only while a vault runs.* With no vault running the count starts
+    again at every check: there is nothing to lock. A vault that is
+    unlocked before the parent's first ping (after the enclave's start,
+    after a new session: the parent pings when the descriptor arrives,
+    behind whatever table writes it has queued, and then every 20 s, and
+    it forwards queue messages meanwhile) then has the whole 120 s, to within the 10 s of the check, instead of being locked
+    at once. A parent cannot turn this into a way round the rule: the
+    count only starts again when every vault is locked.
+  - *What a ping proves.* That the peer of the socket is alive and reads
+    and writes. Not that it renews leases: the enclave cannot see the
+    lease table. A dishonest parent can ping and renew nothing, as it
+    could keep the connection open before; what stops two instances
+    writing one vault is still the conditional state write, not this
+    rule. The rule is for the parent that has hung or been stopped.
+  - *Connected and silent: the connection is ended first.* On a
+    connection that does not answer, every vault's final flush would
+    wait 60 s (`callTimeout`), one vault after another. `checkParent`
+    closes it (after one second for the log record to leave), so the
+    flushes fail at once, as they do with no connection. `Run` then dials
+    again as after any loss.
+  - *Clock.* `Config.Now` is `time.Now` in the release build, and both
+    readings carry Go's monotonic clock: a step of the wall clock does
+    not move the count.
+  - *The reader at its limit.* At 128 of the parent's requests in flight
+    the reader stops reading (`hostproto.MaxInflight`; VAULT-HOST-PROTOCOL
+    §13 point 6, not changed here), so a ping the parent did send would
+    wait in the socket. The parent of this repository has about a dozen
+    in flight at most. The connection tells the link when its reader
+    waits (`hostproto.Options.OnWait`), and that time is not counted as
+    silence, up to 120 s of it between two pings: a reader that never
+    goes on delays the lock to 240 s and no further.
+  - *Write timeout.* A frame to the parent that is not written within
+    60 s (`writeTimeout`, per frame) ends the connection, like any write
+    error; the clock above then runs as for any lost connection. 60 s is
+    the time a call waits for its answer: a parent that is only slow (its
+    own reader waits while it handles 128 store requests, or while its
+    table writes are 1,024 behind) is not cut off before the calls it is
+    slow with have failed anyway. The parent's own connection, and the
+    supervisor's connections to its vault processes, are as before (no
+    timeout).
+  - *Notifications when the outgoing queue (256 frames) is full.* `Log`
+    is dropped and counted (`link.logRecord`; "log records dropped: the
+    parent was not reading" with the count since the start, logged by
+    `maintain` when it grew): logging never waits for the parent, and a
+    lost record loses an operator a line. `Lifecycle`, `Stopped` and
+    `Descriptor` wait as before (`link.notify`), because the parent acts
+    on them: its set of running vaults and so its lease renewals and
+    releases, the vault table (app key, backup bit, name requests, the
+    clone alarm's email), the split-brain count, the registry row. The
+    wait is now bounded by the write timeout: either a frame leaves and
+    there is room, or the connection ends. What was queued on a
+    connection that ends is lost, as it always was; the parent keeps its
+    running set over a `resume`, so a `locked` lost that way leaves it
+    renewing a lease for a vault that is not running until it restarts
+    (not new, and not changed here: a report of the running set at the
+    hello would close it).
+  - *Versions.* No wire change. The S10 parent (`release/staging/10`)
+    sends `Ping` every 20 s exactly as this one does (`Parent.publish`,
+    from the heartbeat ticker and once when a descriptor arrives), so a
+    new enclave with an old parent behaves as with a new one. The parent
+    pings before it writes the registry row, on one ticker: a parent
+    whose table write hangs for 120 s stops pinging and has its vaults
+    locked. Its lease renewals hang on the same table, so those vaults
+    were about to lose their leases. A parent that is restarted answers
+    the next hello `fresh`, and the enclave locks every vault then, as
+    before. The development enclave's `-down-lock` defaults to 30 s:
+    with it the parent's `-heartbeat` has to be well under 30 s (devstack
+    10 s, the integration test 2 s).
+  - *Spec edits this needs* (vettid.org, not made here): VAULT-MESSAGING
+    §12.3, the row "Parent unreachable for 120 s" in its final wording
+    (the rule above; "only while a vault runs"; the 10 s check);
+    VAULT-HOST-PROTOCOL §3.4 (the write timeout; `Log` dropped when the
+    queue is full, the others wait), §4.3 (the rule; the connection
+    closed first), §6.3 (a ping is counted when read), §7.4 (the dropped
+    count's record), §9 (120 s without a `Ping`; 60 s per frame), §11.3
+    (`Ping`: not asking now locks every vault; the control connection
+    kept open and silent), §12 (new: the parent MUST send `Ping` at least
+    every 30 s; the enclave MUST lock every vault after 120 s without
+    one, and MUST NOT count a connection as a ping), §13 point 1 closed.
 - Not carried over from vettid.dev: the baked vsock shared secret (the
   parent is untrusted; authenticating it would add nothing), NATS, the
   seed/vote/invite/LEASH proxies, parent-side envelope parsing,

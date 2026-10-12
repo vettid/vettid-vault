@@ -22,7 +22,9 @@ rules (ask wins), the 0.22.0 errata and the month hint; for 0.23.1: the
 0.23.0 errata; for 0.23.2: the device on `vault.unlocked` and
 `vault.locked`; for 0.26.0: the feature allowlist and the per-channel
 Android package; for 0.27.0: the per-vault signer binding; and for 0.27.2: the collect
-loop's waits and the shared HTTP/2 connections (§12.2, §12.2.1).)
+loop's waits and the shared HTTP/2 connections (§12.2, §12.2.1); and,
+ahead of its spec text, a connected but silent parent (§12.3,
+VAULT-HOST-PROTOCOL §13 point 1).)
 
 Every MUST / MUST NOT in VAULT-MESSAGING 0.2.3 §4–§6 (plus the §13.4 and
 §13.6 rules they rely on), and the named test that covers it. Normative
@@ -912,3 +914,29 @@ a constant in the code that no test asserts.
 | 12.2.1 | A front end that announces exactly 100 streams is trusted only once it has answered a request | `egress.TestStreamLimitIsRead` (100 announced: read as 100 after an answer, and the first requests do not wait). That such a connection carries 1, then fewer than 32, requests until its first answer is not asserted for a host whose first requests are all held |
 | 12.2.1 | The relay's front end MUST NOT be changed to one that announces exactly 100 | not in CI: a requirement on the relay's deployment (VAULT-RELAY-SCALING §10.4), not on this repository |
 | 12.2.1 | The rules hold for each HTTP/2 host of the allowlist separately; KMS connections (HTTP/1.1) are not shared this way | **not covered by a test of its own** (one pool per host by construction, `egress.New`; every pool test uses one host, and none runs an HTTP/1.1 host beside an HTTP/2 one) |
+
+## A connected but silent parent (§12.3 "Parent unreachable"; VAULT-HOST-PROTOCOL §3.4, §4.3, §13 point 1; spec text pending)
+
+Owner decision of 2026-10-12 (H3 of vettid.org #236), for staging
+release S11. VAULT-MESSAGING 0.27.4 §12.3 and VAULT-HOST-PROTOCOL 0.1.2
+§4.3 still describe the rule as it was built before (120 s without a
+connection) and announce this one; the rows below are the rule as built
+here, to be matched against the spec text when it is written
+(docs/V3-NOTES.md, "Enclave ↔ parent", lists the edits). Package paths:
+`enclave/supervisor`, `internal/hostproto`. The supervisor's tests run
+the check that `maintain` makes every 10 s (`checkParent`) on a clock of
+their own, against a stand-in for the instance; no test runs it with a
+real vault process and a real parent that goes silent.
+
+| § | Requirement | Test(s) |
+|---|---|---|
+| 12.3 | Every vault is locked once 120 s have passed without a `Ping` from the parent, whether the control connection is open or not; not before | `supervisor.TestSilentParentLocks` (connected and silent: nothing at 120 s, locked at the first check after it, 130 s), `supervisor.TestLostConnectionLocks` (no connection: locked within 120 s of the loss) |
+| 12.3 | A `Ping` is counted when the enclave reads it, whatever it answers; with pings arriving nothing is locked | `supervisor.TestPingsKeepVaults` (every 20 s for a day, then every 110 s for an hour; the stand-in's instance has not started, so each ping is answered `error` and counts) |
+| 12.3 | A new connection does not start the count again: only a `Ping` does | `supervisor.TestReconnectWithoutPings` (a connection every 30 s, no ping: locked 120 s after the last ping), `supervisor.TestReconnectWithPings` |
+| 12.3 | The time counts only while a vault runs: a vault unlocked before the parent's first `Ping` (after the enclave's start, a new session, or a lock of every vault) has the whole 120 s | `supervisor.TestBeforeTheFirstPing` (five minutes without a parent, an unlock before the first ping; a parent that never pings: locked 120 s after the unlock), `supervisor.TestSilentParentLocks` (a vault unlocked after every vault was locked) |
+| 12.3 | A connected parent that is found silent loses the connection before the vaults are locked, so that their final flushes fail at once instead of each waiting 60 s | `supervisor.TestSilentParentLocks` (the connection has ended). That the flushes then fail at once is `supervisor.TestHostStoreMapping` ("a link that is down fails fast") |
+| VAULT-HOST-PROTOCOL 3.4 | Time in which the enclave's own reader waits at 128 requests in flight is not counted as the parent's silence, up to 120 s of it; a `Ping` that waited in the socket is read when the reader goes on | `supervisor.TestReaderAtLimitIsNotSilence`, `hostproto.TestReaderAtLimit` (nothing is read while the reader waits), `hostproto.TestReaderAtLimitClosed` |
+| VAULT-HOST-PROTOCOL 3.4 | A frame to the parent that is not written within 60 s ends the connection; senders that waited are released | `hostproto.TestWriteTimeout` (with 300 ms), `hostproto.TestWriteTimeoutSlowReader` (a slow reader is not cut off: the time is per frame), `supervisor.TestParentStopsReading` (asserts the 60 s of the control connection, then runs with 500 ms) |
+| VAULT-HOST-PROTOCOL 3.4, 7.4 | A log record never waits for the parent: one that does not fit the outgoing queue is dropped and counted, and the count is logged | `supervisor.TestParentStopsReading` (1,001 records against a parent that does not read: all but the 257 the connection holds are dropped, at once) |
+| VAULT-HOST-PROTOCOL 3.4, 7.1–7.3 | A descriptor, a lifecycle event and a stopped vault are not dropped while the connection lives: they wait for the queue, at most until the write time ends the connection | `supervisor.TestParentStopsReading` (a lifecycle event waits, then returns when the connection ends); `Stopped` and `Descriptor` go the same way (`link.notify`) and have no test of their own |
+| 12.3 | The parent sends `Ping` every 20 s (the S10 parent too) | **not covered by a test of the interval**: `parent.Config.Heartbeat` defaults to 20 s, and neither it nor `cmd/vault-parent -heartbeat` refuses a larger value; `parent.TestRegistryAndStore` runs the heartbeat at 100 ms |

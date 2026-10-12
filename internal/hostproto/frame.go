@@ -66,7 +66,9 @@ const (
 	// LeaseLost: [vault_id]; reply [status]. The enclave locks the vault
 	// (§12.3 "Lease lost").
 	KindLeaseLost Kind = 0x11
-	// Ping: []; reply [status, running vault count].
+	// Ping: []; reply [status, running vault count]. The enclave also
+	// times it: without one for 120 s it locks every vault (§12.3 "Parent
+	// unreachable").
 	KindPing Kind = 0x12
 	// Shutdown: []; reply [status] once every vault is locked (§12.3
 	// "Enclave release or restart ... if signalled").

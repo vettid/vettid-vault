@@ -6,7 +6,6 @@ import (
 	"net"
 	"os"
 	"testing"
-	"time"
 
 	"github.com/vettid/vettid-vault/internal/hostproto"
 	"github.com/vettid/vettid-vault/vault/store"
@@ -19,7 +18,7 @@ func fakeParent(t *testing.T, answer func(f *hostproto.Frame) [][]byte) *link {
 	c := hostproto.NewConn(a, nil, nil)
 	t.Cleanup(func() { c.Close(); p.Close() })
 	l := &link{}
-	l.set(c, time.Now())
+	l.set(c)
 	return l
 }
 
@@ -73,7 +72,7 @@ func TestHostStoreMapping(t *testing.T) {
 		t.Fatalf("put under a cancelled context: %v", err)
 	}
 	// A link that is down fails fast.
-	l.set(nil, time.Now())
+	l.set(nil)
 	if _, _, err := h.Get(ctx, "vaults/v/state"); !errors.Is(err, errHost) {
 		t.Fatalf("down: %v", err)
 	}

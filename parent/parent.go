@@ -382,8 +382,14 @@ func (p *Parent) notify(s *session, f *hostproto.Frame) {
 		if reason == hostproto.StopSplitBrain {
 			p.stats.splitBrain++
 		}
+		// The lease stays while an enroll or unlock that took it is under
+		// way (as for "locked", Lifecycle.KeepLease): a report of a run
+		// that ended earlier (the enclave sends those when the parent is
+		// reachable again) must not release the lease of the run that is
+		// starting. If that one does not open, it gives the lease back.
+		taking := p.taking[id] > 0
 		p.mu.Unlock()
-		if was {
+		if was && !taking {
 			p.enqueueRelease(id)
 		}
 	case hostproto.KindLog:

@@ -834,3 +834,71 @@ func TestLockAllWithinKills(t *testing.T) {
 		}
 	}
 }
+
+// The order when the parent's Ping is read after it was unreachable: the
+// Ping is counted at once; the reports of the vaults that stopped are
+// queued; only then is the parent reachable again. So no call can open a
+// vault before the report of its earlier run is on its way, and a queue
+// that is full delays the reports and the calls, not the count.
+func TestPingOrder(t *testing.T) {
+	w := newWatched(t)
+	a, b := net.Pipe() // nobody reads b yet
+	defer b.Close()
+	conn := hostproto.NewConn(a, w.s.handle, nil)
+	defer conn.Close()
+	w.s.link.set(conn)
+	w.s.link.lost()
+	w.s.link.stop("aaaa", hostproto.StopLocked)
+	for held, tries := 0, 0; held < 257; tries++ { // the queue is full
+		if w.s.link.logRecord(hostproto.Strings("INFO", "record")...) {
+			held++
+		} else if tries > 10000 {
+			t.Fatalf("the connection took %d records", held)
+		} else {
+			time.Sleep(100 * time.Microsecond)
+		}
+	}
+	w.clk.add(100 * time.Second)
+	done := make(chan struct{})
+	go func() { defer close(done); w.s.link.ping(w.clk.now()) }()
+	// Counted, though the report still waits for the queue...
+	for deadline := time.Now().Add(10 * time.Second); w.s.link.silent(w.clk.now(), window) != 0; time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the ping is not counted while its reports wait")
+		}
+	}
+	// ...and while it waits the parent is not reachable.
+	time.Sleep(50 * time.Millisecond)
+	select {
+	case <-done:
+		t.Fatal("the report did not wait for the queue")
+	default:
+	}
+	if w.s.link.up() != nil {
+		t.Fatal("the parent is reachable before the reports are queued")
+	}
+	if _, err := w.s.link.call(context.Background(), hostproto.KindStoreGet, []byte("vaults/aaaa/state")); !errors.Is(err, errDown) {
+		t.Fatalf("a call before the reports are queued: %v", err)
+	}
+	// The parent reads: the report goes, then the parent is reachable.
+	stopped := make(chan struct{})
+	peer := hostproto.NewConn(b, nil, func(f *hostproto.Frame) {
+		if f.Kind == hostproto.KindStopped {
+			close(stopped)
+		}
+	})
+	defer peer.Close()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the ping did not finish")
+	}
+	if w.s.link.up() == nil {
+		t.Fatal("the parent is not reachable after its ping")
+	}
+	select {
+	case <-stopped:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the report did not arrive")
+	}
+}

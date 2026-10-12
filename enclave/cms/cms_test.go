@@ -51,10 +51,23 @@ func TestUnwrap(t *testing.T) {
 	if _, err := cms.Unwrap(append(env, 0), k); err == nil {
 		t.Error("trailing data")
 	}
-	bad := append([]byte(nil), env...)
-	bad[len(bad)-1] ^= 1 // last ciphertext block: padding breaks
-	if _, err := cms.Unwrap(bad, k); err == nil {
-		t.Error("modified ciphertext accepted")
+	// A changed ciphertext never gives the content. That is all this
+	// layer can say: AES-256-CBC, as KMS sends it, is not authenticated,
+	// so a change is refused only when it breaks the padding (the last
+	// block, 255 times in 256) and gives other bytes otherwise. What
+	// keeps the document from being changed is the TLS the enclave ends,
+	// inside which KMS sends it (§11.10.7); the callers refuse anything
+	// but 32 bytes.
+	for _, back := range []int{1, 17, 33} { // each of the three ciphertext blocks
+		bad := append([]byte(nil), env...)
+		bad[len(bad)-back] ^= 1
+		if got, err := cms.Unwrap(bad, k); err == nil && bytes.Equal(got, content) {
+			t.Errorf("ciphertext changed %d bytes from its end: the content came out unchanged", back)
+		}
+	}
+	// A ciphertext that is not whole blocks is refused always.
+	if _, err := cms.Unwrap(enclavetest.WrapCMS(&k.PublicKey, content, enclavetest.CMSOptions{})[:len(env)-1], k); err == nil {
+		t.Error("truncated document accepted")
 	}
 }
 

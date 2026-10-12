@@ -47,6 +47,8 @@ type link struct {
 	// parent when its next Ping is read (their own events found no
 	// connection, or a process that was killed sent none).
 	stopped [][2]string
+	// reportMu serializes the telling of them (ping).
+	reportMu sync.Mutex
 	// logDropped counts the log records that were not sent because the
 	// parent was not reading.
 	logDropped atomic.Uint64
@@ -76,29 +78,55 @@ func (l *link) up() *hostproto.Conn {
 	return l.conn
 }
 
-// ping notes the parent's Ping: it is heard, and no longer gone. The Ping
-// is counted at once. Before the parent is reachable again it is told
-// which vaults stopped while it was not (so that no call can open one of
-// them before its report is on its way); those that cannot be queued are
-// kept for its next Ping. Telling may wait for the outgoing queue (for
-// writeTimeout at most): the count does not wait with it.
-func (l *link) ping(now time.Time) {
+// ping notes the parent's Ping. It is counted at once. A parent that was
+// gone is reachable again only once it has been told which vaults stopped
+// while it was (Stopped): otherwise a call could open one of them before
+// the report of its earlier run, and the parent would take that report
+// for the new run and give up its lease. "Told" is: written to the
+// connection that is the link's, which is still the link's afterwards. A
+// report that was only queued proves nothing: a connection that ends
+// drops its queue, and may take a frame after it has ended. Until then
+// the reports are kept and the parent stays gone; its next Ping, on the
+// next connection, tries again (a report may so be written twice, which
+// the parent takes as one, no vault having opened in between).
+//
+// running says whether a vault runs now (nil: none): a report is of a run
+// that ended, and is dropped, not sent, if its vault runs again.
+//
+// Writing may wait for the outgoing queue (for writeTimeout a frame at
+// most): the count does not wait with it.
+func (l *link) ping(now time.Time, running func(vaultID string) bool) {
 	l.mu.Lock()
 	l.hearLocked(now)
-	c, stopped := l.conn, l.stopped
-	l.stopped = nil
 	l.mu.Unlock()
-	for i, v := range stopped {
-		if c == nil || c.Notify(hostproto.KindStopped, hostproto.Strings(v[0], v[1])...) != nil {
-			l.mu.Lock()
-			l.stopped = append(stopped[i:len(stopped):len(stopped)], l.stopped...)
-			l.mu.Unlock()
-			break
+	// One Ping's reports at a time: a second Ping is counted above and
+	// then finds them written, or tries itself.
+	l.reportMu.Lock()
+	defer l.reportMu.Unlock()
+	l.mu.Lock()
+	c, stopped := l.conn, l.stopped
+	l.mu.Unlock()
+	told := len(stopped) == 0
+	if c != nil && !told {
+		told = true
+		for _, v := range stopped {
+			if running != nil && running(v[0]) {
+				continue
+			}
+			if c.Notify(hostproto.KindStopped, hostproto.Strings(v[0], v[1])...) != nil {
+				told = false
+				break
+			}
 		}
+		told = told && c.Flush(context.Background()) == nil
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.gone = false
+	if !told || l.conn != c {
+		return
+	}
+	l.stopped = l.stopped[len(stopped):] // those added meanwhile wait for the next Ping
+	l.gone = len(l.stopped) > 0
 }
 
 // hear starts the count of the parent's silence again without a Ping

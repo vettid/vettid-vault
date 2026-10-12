@@ -337,7 +337,7 @@ func (s *Supervisor) start() error {
 func (s *Supervisor) handle(ctx context.Context, f *hostproto.Frame) [][]byte {
 	if f.Kind == hostproto.KindPing {
 		// Counted when it is read, whatever the answer will be.
-		s.link.ping(s.now())
+		s.link.ping(s.now(), func(id string) bool { return s.host != nil && s.host.Pid(id) != 0 })
 	}
 	if f.Kind == hostproto.KindSelftest {
 		return s.handleSelftest(ctx, f)

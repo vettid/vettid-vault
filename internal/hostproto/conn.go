@@ -114,7 +114,14 @@ func (x *Conn) Flush(ctx context.Context) error {
 		case <-t.C:
 		}
 	}
-	return nil
+	// Nothing is waiting: written, unless the connection ended (its queue
+	// is dropped, and a write that failed is not counted as waiting).
+	select {
+	case <-x.done:
+		return ErrClosed
+	default:
+		return nil
+	}
 }
 
 func (x *Conn) fail(err error) {
@@ -139,6 +146,13 @@ func (x *Conn) send(f *Frame, wait bool) error {
 	b, err := f.Marshal()
 	if err != nil {
 		return err
+	}
+	// An ended connection takes nothing, also when its queue has room
+	// (the select below would take either).
+	select {
+	case <-x.done:
+		return ErrClosed
+	default:
 	}
 	x.unwritten.Add(1)
 	if !wait {
@@ -176,11 +190,12 @@ func (x *Conn) writeLoop() {
 				}
 			}
 			err := WriteChunked(x.c, b)
-			x.unwritten.Add(-1)
 			if err != nil {
-				x.fail(err)
+				x.fail(err) // before the count: Flush must not take the frame for written
+				x.unwritten.Add(-1)
 				return
 			}
+			x.unwritten.Add(-1)
 		case <-x.done:
 			return
 		}

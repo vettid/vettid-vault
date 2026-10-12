@@ -240,3 +240,33 @@ func TestWriteTimeoutRefused(t *testing.T) {
 		t.Fatalf("OnNoDeadline: %v", told)
 	}
 }
+
+// A connection that has ended takes no frame, though its queue has room,
+// and Flush does not say "written" of it.
+func TestEndedConnectionTakesNothing(t *testing.T) {
+	for i := 0; i < 200; i++ {
+		a, b := net.Pipe()
+		x := NewConn(a, nil, nil)
+		x.Close()
+		b.Close()
+		if err := x.Notify(KindStopped, Strings("v", StopLocked)...); !errors.Is(err, ErrClosed) {
+			t.Fatalf("Notify on an ended connection: %v", err)
+		}
+		if err := x.TryNotify(KindLog, Strings("info", "x")...); !errors.Is(err, ErrClosed) {
+			t.Fatalf("TryNotify on an ended connection: %v", err)
+		}
+		if err := x.Flush(context.Background()); !errors.Is(err, ErrClosed) {
+			t.Fatalf("Flush on an ended connection: %v", err)
+		}
+	}
+	// A frame whose write fails is not flushed.
+	a, b := net.Pipe()
+	x := NewConn(a, nil, nil)
+	if err := x.Notify(KindStopped, Strings("v", StopLocked)...); err != nil {
+		t.Fatal(err)
+	}
+	b.Close() // the write under way fails
+	if err := x.Flush(context.Background()); !errors.Is(err, ErrClosed) {
+		t.Fatalf("Flush after a failed write: %v", err)
+	}
+}

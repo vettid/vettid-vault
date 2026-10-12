@@ -271,7 +271,16 @@ unprivileged ids, and Yama (optional).
     of that vault is under way and has taken the lease (as for `locked`):
     the report is of the run before. The `Ping` itself is counted before
     the reports are queued, so a full queue delays the reports and the
-    calls, not the count. They are kept in memory: an
+    calls, not the count. A report counts as told only when it has been
+    written to the connection and that connection is still the link's
+    (`Conn.Flush`): one that was merely queued may sit on a connection
+    that has ended. Until every report is told they are kept and the
+    parent stays unreachable; the next connection's `Ping` tries again,
+    so a report may be written twice, which is the same to the parent as
+    once because no vault can open in between. A report whose vault runs
+    again when it could be told is dropped. Written is not read: a
+    connection that ends after the write and before the parent has read
+    it still loses the report (the open point below). They are kept in memory: an
     enclave restart loses them, and the parent then drops everything
     anyway (a new boot id).
   - *What a vault loses.* Nothing that was stored. The final flush fails

@@ -102,15 +102,17 @@ func (m *Manager) Run(ctx context.Context) error {
 const (
 	firstPollSpread = time.Second
 	retryBase       = time.Second
-	retryMax        = time.Minute
+	retryMax        = 15 * time.Second
 )
 
 // retryWait is the wait before the next poll after a failed one: about a
 // second after a transient relay error, as before. refused counts the
 // polls in a row that the relay refused for a reason another poll will
 // not change by itself (the mailbox is unknown to it, or the vault's
-// clock is off): the wait then doubles each time, up to about a minute.
-// Every wait is spread by half either way.
+// clock is off): the wait then doubles each time, up to about 15 s. Not
+// further: nothing but the next poll tells the vault that the mailbox is
+// back or the clock right, and until then it is deaf. Every wait is
+// spread by half either way.
 func retryWait(refused int) time.Duration {
 	d := retryBase
 	if refused > 1 {

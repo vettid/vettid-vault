@@ -74,7 +74,8 @@ const (
 	// Stats: []; reply [status, name, value, ...]: counts of the shared
 	// relay connections and of relay requests (the Stat names below;
 	// decimal values). Nothing in it names a vault, a mailbox or an
-	// address. The longest wait is the longest since the previous Stats.
+	// address. The enclave answers from a snapshot it renews at most
+	// once a second, and asking changes nothing.
 	KindStats Kind = 0x15
 )
 
@@ -86,7 +87,7 @@ const (
 	StatRelayStreams    = "relay_streams"             // streams per connection, as the relay announced
 	StatRelayInFlight   = "relay_in_flight"           // requests on a stream or waiting for one
 	StatRelayWaiting    = "relay_waiting"             // of those, waiting for a stream
-	StatRelayWaitMaxMS  = "relay_wait_max_ms"         // longest wait for a stream, milliseconds
+	StatRelayWaitMaxMS  = "relay_wait_max_ms"         // longest wait for a stream in this minute and the one before, milliseconds
 	StatRelayErrors     = "relay_errors"              // counter: requests the relay did not answer
 	StatRelayRefusedMax = "relay_refused_max_conns"   // counter: requests that waited at the connection bound
 	StatRelayRefusedMin = "relay_refused_min_streams" // counter: ... because the relay announced too few streams

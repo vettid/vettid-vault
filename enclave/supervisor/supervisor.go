@@ -118,6 +118,10 @@ type Supervisor struct {
 	relayHTTP *http.Client
 	relays    map[string]bool
 	relayErrs atomic.Uint64 // relay requests that got no answer
+
+	statsMu    sync.Mutex
+	statsAt    time.Time
+	statsReply [][]byte
 }
 
 // Errors.
@@ -524,8 +528,23 @@ func (s *Supervisor) relayHost(h string) bool { return s.relays[h] }
 
 // stats answers the parent's Stats request (VAULT-RELAY-SCALING §6): the
 // shared relay connections, summed over the relay hosts (one, in a
-// release), and the relay requests that failed.
+// release), and the relay requests that failed. The parent is not
+// trusted and may ask as often as it likes: the answer is at most
+// statsEvery old and no fresher, and asking changes nothing.
 func (s *Supervisor) stats() [][]byte {
+	s.statsMu.Lock()
+	defer s.statsMu.Unlock()
+	if now := time.Now(); s.statsReply == nil || now.Sub(s.statsAt) >= statsEvery {
+		s.statsAt, s.statsReply = now, s.readStats()
+	}
+	return s.statsReply
+}
+
+// statsEvery is the finest resolution at which the parent can watch the
+// relay counts.
+const statsEvery = time.Second
+
+func (s *Supervisor) readStats() [][]byte {
 	var t egress.Stats
 	for h := range s.relays {
 		st := s.cfg.Egress.Stats(h)

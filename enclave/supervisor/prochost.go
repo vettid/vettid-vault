@@ -97,7 +97,9 @@ type vproc struct {
 	mu       sync.Mutex
 	opening  bool
 	relayKey ed25519.PublicKey
-	stopping bool // locked or killed by the supervisor
+	stopping bool          // locked or killed by the supervisor
+	egress   chan struct{} // one place per relay or push request in flight
+	egressAt bool          // the limit was reached (logged once)
 }
 
 var _ enclave.Host = (*procHost)(nil)
@@ -598,6 +600,11 @@ func (p *vproc) http(ctx context.Context, f [][]byte) [][]byte {
 		return deny()
 	}
 	req.Header = hdr
+	release, ok := p.egressSlot(rctx)
+	if !ok {
+		return hostproto.Strings(hostproto.StatusError)
+	}
+	defer release()
 	resp, err := s.relayHTTP.Do(req)
 	if err != nil {
 		s.relayFailed(ctx)
@@ -618,6 +625,43 @@ func (p *vproc) http(ctx context.Context, f [][]byte) [][]byte {
 		}
 	}
 	return [][]byte{[]byte(hostproto.StatusOK), []byte(strconv.Itoa(resp.StatusCode)), vaultipc.EncodeHeaders(rh), b}
+}
+
+// maxVaultEgress is how many relay and push requests one vault process
+// may have in flight. The shared connections have a bounded number of
+// streams (egress.DefaultMaxConns), and a vault process may send 128
+// requests at a time over its channel, each for up to 75 s: without a
+// limit of its own, a few faulty or compromised processes could hold
+// every stream and make the other vaults wait. A vault needs few: its
+// long-poll, and what its one run loop does besides, one request at a
+// time (acks, deposits, claims, a registration), and a push wake. Eight
+// leaves room for more than that.
+const maxVaultEgress = 8
+
+// egressSlot takes one of the vault's places for a request in flight. At
+// the limit the request waits, as long as its own time allows (a burst is
+// then late, not lost; a process that floods delays only itself), and is
+// answered StatusError if that ends first.
+func (p *vproc) egressSlot(ctx context.Context) (release func(), ok bool) {
+	p.mu.Lock()
+	if p.egress == nil {
+		p.egress = make(chan struct{}, maxVaultEgress)
+	}
+	ch := p.egress
+	full := len(ch) == cap(ch) && !p.egressAt
+	if full {
+		p.egressAt = true
+	}
+	p.mu.Unlock()
+	if full && p.h.s.log != nil {
+		p.h.s.log.Warn("vault at its limit of concurrent relay requests; further ones wait", "vault_id", p.vaultID, "limit", maxVaultEgress)
+	}
+	select {
+	case ch <- struct{}{}:
+		return func() { <-ch }, true
+	case <-ctx.Done():
+		return nil, false
+	}
 }
 
 // relayFailed counts a relay request that got no answer (a connection
@@ -685,6 +729,11 @@ func (p *vproc) push(ctx context.Context, f [][]byte) [][]byte {
 		return deny()
 	}
 	req.Header = hdr
+	release, ok := p.egressSlot(rctx)
+	if !ok {
+		return hostproto.Strings(hostproto.StatusError)
+	}
+	defer release()
 	resp, err := s.relayHTTP.Do(req)
 	if err != nil {
 		return hostproto.Strings(hostproto.StatusError)

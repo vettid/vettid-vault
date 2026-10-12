@@ -62,7 +62,8 @@ type Config struct {
 	Conns int
 	// MaxConns is the most connections to one HTTP/2 host (default
 	// DefaultMaxConns). When all are open and their streams in use,
-	// requests wait.
+	// requests wait. A connection the host is closing does not count
+	// while its last requests end (at most MaxConns of those).
 	MaxConns int
 	// MinStreams is the fewest concurrent streams a host must announce
 	// for a second connection to be opened (default DefaultMinStreams).

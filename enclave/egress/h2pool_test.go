@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"io"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -83,7 +84,7 @@ func park(t *testing.T, c *http.Client, n int) (wait func()) {
 
 func eventually(t *testing.T, what string, ok func() bool) {
 	t.Helper()
-	for end := time.Now().Add(30 * time.Second); !ok(); time.Sleep(5 * time.Millisecond) {
+	for end := time.Now().Add(20 * time.Second); !ok(); time.Sleep(5 * time.Millisecond) {
 		if time.Now().After(end) {
 			t.Fatalf("timed out waiting for %s", what)
 		}
@@ -140,7 +141,8 @@ func TestGrowthAtStreamLimit(t *testing.T) {
 
 // TestMaxConns: at the bound, with every stream in use, requests wait
 // (and are counted) until a stream is free or their context ends; no
-// further connection opens.
+// further connection opens. (The rate at which connections are opened
+// would allow six here: it is the bound that holds.)
 func TestMaxConns(t *testing.T) {
 	const streams, conns, extra = 32, 3, 10
 	ca := newCA(t, "test root")
@@ -172,8 +174,9 @@ func TestMaxConns(t *testing.T) {
 	if st.Dialed != conns || st.Waiting != 0 || st.InFlight != 0 {
 		t.Errorf("stats afterwards: %+v", st)
 	}
-	if st = tr.Stats("relay.example"); st.WaitMax != 0 {
-		t.Errorf("the longest wait was not reset: %v", st.WaitMax)
+	// Reading the stats changes nothing (the parent may ask at any rate).
+	if again := tr.Stats("relay.example"); again != st || st.WaitMax < 100*time.Millisecond {
+		t.Errorf("stats read twice: %+v, then %+v", st, again)
 	}
 }
 
@@ -201,17 +204,25 @@ func TestMinStreams(t *testing.T) {
 	wait()
 }
 
-// TestStreamLimitIsRead holds the library to what settle assumes: before
-// a new connection is used, the limit the host announced can be read from
-// it, also when the host announces none (the library then allows 1000) or
-// exactly the library's own first assumption.
+// TestStreamLimitIsRead holds the library to what the pool assumes: the
+// limit the host announced can be read from a connection with a free
+// stream, also when the host announces exactly the library's own first
+// assumption (then it is trusted once the host has answered a request,
+// and that first request does not wait for it: android.googleapis.com
+// announces 100).
 func TestStreamLimitIsRead(t *testing.T) {
 	ca := newCA(t, "test root")
-	for _, tc := range []struct{ announce, want int }{{1, 1}, {31, 31}, {h2Unsettled, h2Unsettled}, {128, 128}, {250, 250}} {
+	for _, tc := range []struct{ announce, want int }{{1, 1}, {31, 31}, {32, 32}, {h2Unsettled, h2Unsettled}, {128, 128}, {250, 250}} {
 		s := newParkServer(t, ca, tc.announce)
 		tr := s.pool(t, ca, 0, 0)
-		if p, err := get(tr.Client(10*time.Second), "https://relay.example/quick"); err != nil || p != "HTTP/2.0" {
-			t.Fatalf("announce %d: %q %v", tc.announce, p, err)
+		t0 := time.Now()
+		for i := 0; i < 2; i++ {
+			if p, err := get(tr.Client(10*time.Second), "https://relay.example/quick"); err != nil || p != "HTTP/2.0" {
+				t.Fatalf("announce %d: %q %v", tc.announce, p, err)
+			}
+		}
+		if d := time.Since(t0); d > h2Settle/2 {
+			t.Errorf("announce %d: two requests on a new connection took %v", tc.announce, d)
 		}
 		if st := tr.Stats("relay.example"); st.Streams != tc.want || st.Conns != 1 {
 			t.Errorf("announce %d: stats %+v", tc.announce, st)
@@ -258,16 +269,19 @@ func TestReconnect(t *testing.T) {
 	}
 }
 
-// TestDialFails: when no connection can be opened, every request that
-// waited for it fails with the dial's error instead of dialing again.
+// TestDialFails: when no connection can be opened, a failed dial fails
+// the request that started it and no other; the others dial in turn, one
+// at a time, within their own time.
 func TestDialFails(t *testing.T) {
 	ca := newCA(t, "test root")
 	errDown := errors.New("forwarder down")
-	var dials atomic.Int32
+	var dials, now, most atomic.Int32
 	gate := make(chan struct{})
 	tr, err := New(Config{Hosts: []Host{{Name: "relay.example", Roots: ca.pool, HTTP2: true}},
 		Dialer: DialerFunc(func(context.Context, string, uint16) (net.Conn, error) {
 			dials.Add(1)
+			most.Store(max(most.Load(), now.Add(1)))
+			defer now.Add(-1)
 			<-gate
 			return nil, errDown
 		})})
@@ -286,9 +300,343 @@ func TestDialFails(t *testing.T) {
 		}()
 	}
 	eventually(t, "the requests to wait for the dial", func() bool { return tr.Stats("relay.example").Waiting == 20 })
-	close(gate)
-	wg.Wait()
 	if n := dials.Load(); n != 1 {
 		t.Errorf("%d dials for 20 requests waiting together", n)
+	}
+	close(gate)
+	wg.Wait()
+	if dials.Load() != 20 || most.Load() != 1 {
+		t.Errorf("%d dials for 20 requests, %d at a time", dials.Load(), most.Load())
+	}
+}
+
+// TestFillFirst: a request goes to the first connection with a free
+// stream, not to the newest or the emptiest, so the connections stay as
+// full, and as few, as they can be.
+func TestFillFirst(t *testing.T) {
+	ca := newCA(t, "test root")
+	s := newRawSrv(t, ca, 32)
+	tr := s.pool(t, ca, 0, 0)
+	c := tr.Client(30 * time.Second)
+	wait := fire(c, 40, 20*time.Second)
+	eventually(t, "40 requests on two connections", func() bool { return s.parked() == 40 && len(s.all()) == 2 })
+	first, second := s.all()[0], s.all()[1]
+	if first.nOpen() != 32 || second.nOpen() != 8 {
+		t.Fatalf("%d and %d requests on the two connections", first.nOpen(), second.nOpen())
+	}
+	// Five streams of the first connection end; the next five requests
+	// take them.
+	first.mu.Lock()
+	var ids []uint32
+	for id := range first.open {
+		if len(ids) < 5 {
+			ids = append(ids, id)
+		}
+	}
+	first.mu.Unlock()
+	for _, id := range ids {
+		first.respond(id)
+	}
+	eventually(t, "five answers", func() bool { return tr.Stats("relay.example").InFlight == 35 })
+	wait2 := fire(c, 5, 20*time.Second)
+	eventually(t, "five more requests", func() bool { return s.parked() == 40 })
+	if first.nOpen() != 32 || second.nOpen() != 8 {
+		t.Errorf("after five more: %d and %d requests on the two connections; want 32 and 8", first.nOpen(), second.nOpen())
+	}
+	s.respondAll()
+	if ok, bad, sample := wait(); ok != 40 || bad != 0 {
+		t.Errorf("first requests: %d ok, %d failed (%s)", ok, bad, sample)
+	}
+	if ok, bad, sample := wait2(); ok != 5 || bad != 0 {
+		t.Errorf("later requests: %d ok, %d failed (%s)", ok, bad, sample)
+	}
+}
+
+// fastPing makes a pool notice a silent connection within a second.
+func fastPing(tr *Transport) *h2Pool {
+	p := tr.hosts["relay.example"].h2
+	p.tr.HTTP2.SendPingTimeout, p.tr.HTTP2.PingTimeout = 300*time.Millisecond, 300*time.Millisecond
+	return p
+}
+
+// TestSilentConnections: connections that stay open but send nothing
+// more (the host is gone without closing them; the peer's TCP may still
+// acknowledge) must not keep their place: requests that time out on them
+// hold their streams until a ping is answered, so without the HTTP/2 ping
+// the pool was full of them for good. With it they are closed, and the
+// pool serves again.
+func TestSilentConnections(t *testing.T) {
+	const conns, streams = 3, 32
+	ca := newCA(t, "test root")
+	s := newRawSrv(t, ca, streams)
+	tr := s.pool(t, ca, conns, 0)
+	if h2 := tr.hosts["relay.example"].h2.tr.HTTP2; h2 == nil || h2.SendPingTimeout != h2PingIdle || h2.PingTimeout != h2PingTimeout {
+		t.Fatalf("the pool's connections are not pinged: %+v", h2)
+	}
+	fastPing(tr)
+	c := tr.Client(30 * time.Second)
+	wait := fire(c, conns*streams, 5*time.Second)
+	eventually(t, "every stream in use", func() bool { return s.parked() == conns*streams })
+	for _, rc := range s.all() {
+		rc.silent.Store(true)
+	}
+	s.park.Store(false) // new connections answer at once
+	t0 := time.Now()
+	if ok, bad, _ := wait(); ok != 0 || bad != conns*streams {
+		t.Errorf("requests on connections that went silent: %d ok, %d failed", ok, bad)
+	}
+	t.Logf("silent connections closed, their %d requests failed, after %v", conns*streams, time.Since(t0).Round(time.Millisecond))
+	if d := time.Since(t0); d > 3*time.Second {
+		t.Errorf("silent connections were found after %v, not by the ping", d)
+	}
+	if ok, bad, sample := fire(c, conns*streams, 3*time.Second)(); bad != 0 {
+		t.Errorf("next requests: %d ok, %d failed (%s)", ok, bad, sample)
+	}
+	if st := tr.Stats("relay.example"); st.InFlight != 0 || st.Waiting != 0 || st.Conns > conns {
+		t.Errorf("stats afterwards: %+v", st)
+	}
+}
+
+// TestStalledConnections: connections that answer pings but no request
+// are closed once they have held requests for longer than a request
+// lives without answering any, whatever else happens.
+func TestStalledConnections(t *testing.T) {
+	const conns, streams = 3, 32
+	ca := newCA(t, "test root")
+	s := newRawSrv(t, ca, streams)
+	tr := s.pool(t, ca, conns, 0)
+	fastPing(tr).stall = time.Second
+	c := tr.Client(30 * time.Second)
+	wait := fire(c, conns*streams, 20*time.Second)
+	eventually(t, "every stream in use", func() bool { return s.parked() == conns*streams })
+	for _, rc := range s.all() {
+		rc.stuck.Store(true)
+	}
+	s.park.Store(false)
+	time.Sleep(1200 * time.Millisecond) // pinged and answered meanwhile: the connections stay
+	if st := tr.Stats("relay.example"); st.Conns != conns || st.InFlight != conns*streams {
+		t.Fatalf("stalled connections: %+v", st)
+	}
+	t0 := time.Now()
+	if ok, bad, sample := fire(c, 10, 3*time.Second)(); ok != 10 {
+		t.Errorf("requests beside stalled connections: %d ok, %d failed (%s)", ok, bad, sample)
+	}
+	t.Logf("10 requests beside %d stalled connections answered after %v", conns, time.Since(t0).Round(time.Millisecond))
+	if ok, bad, _ := wait(); ok != 0 || bad != conns*streams {
+		t.Errorf("requests on the stalled connections: %d ok, %d failed", ok, bad)
+	}
+}
+
+// TestDrainingDoesNotCount: connections the host is closing (GOAWAY)
+// take no new requests and do not count toward the bound while their
+// requests end, so new requests do not wait for them.
+func TestDrainingDoesNotCount(t *testing.T) {
+	const conns, streams = 2, 32
+	ca := newCA(t, "test root")
+	s := newRawSrv(t, ca, streams)
+	tr := s.pool(t, ca, conns, 0)
+	c := tr.Client(30 * time.Second)
+	wait := fire(c, conns*streams-2, 20*time.Second)
+	eventually(t, "the requests", func() bool { return s.parked() == conns*streams-2 })
+	// A full connection that is closing cannot be told from a full one
+	// until one of its requests has ended (the library does not say).
+	closing := func(conns []*rawConn) {
+		for _, rc := range conns {
+			rc.mu.Lock()
+			last := rc.lastID
+			rc.mu.Unlock()
+			rc.goAway(last, 0)
+			rc.respond(last)
+		}
+	}
+	closing(s.all())
+	wait2 := fire(c, conns*streams, 20*time.Second)
+	eventually(t, "the next requests on new connections", func() bool { return s.parked() == 2*conns*streams-4 })
+	if st := tr.Stats("relay.example"); st.Conns != 2*conns || st.Draining != conns || st.Waiting != 0 {
+		t.Errorf("stats while draining: %+v", st)
+	}
+	// Not without end: at twice the bound requests wait.
+	closing(s.all()[conns:])
+	refused := tr.Stats("relay.example").RefusedMaxConns
+	wait3 := fire(c, 3, time.Second)
+	eventually(t, "requests waiting at twice the bound", func() bool { return tr.Stats("relay.example").RefusedMaxConns == refused+3 })
+	if ok, bad, _ := wait3(); ok != 0 || bad != 3 || len(s.all()) != 2*conns {
+		t.Errorf("at twice the bound: %d ok, %d failed, %d connections", ok, bad, len(s.all()))
+	}
+	s.respondAll()
+	if ok, bad, sample := wait(); bad != 0 {
+		t.Errorf("requests on the closing connections: %d ok, %d failed (%s)", ok, bad, sample)
+	}
+	if ok, bad, sample := wait2(); bad != 0 {
+		t.Errorf("requests on the new connections: %d ok, %d failed (%s)", ok, bad, sample)
+	}
+}
+
+// TestDialRate, one side: a host that closes every connection at its
+// first request does not get a connection per request: after a burst of
+// twice MaxConns, two a second.
+func TestDialRate(t *testing.T) {
+	const conns = 3
+	ca := newCA(t, "test root")
+	s := newRawSrv(t, ca, 128)
+	s.closeAtOnce.Store(true)
+	tr := s.pool(t, ca, conns, 0)
+	c := tr.Client(30 * time.Second)
+	t0 := time.Now()
+	requests := 0
+	for time.Since(t0) < 2*time.Second {
+		_, _, _ = fire(c, 20, 200*time.Millisecond)()
+		requests += 20
+	}
+	el := time.Since(t0).Seconds()
+	n := int(s.accepted.Load())
+	t.Logf("%d requests in %.1f s to a host that closes at once: %d connections", requests, el, n)
+	if most := 2*conns + int(el*h2DialRate) + 1; n > most || n < 2*conns {
+		t.Errorf("%d connections in %.1f s; want %d to %d", n, el, 2*conns, most)
+	}
+	if st := tr.Stats("relay.example"); st.RefusedMaxConns == 0 {
+		t.Errorf("no request was counted as waiting for the rate: %+v", st)
+	}
+}
+
+// TestDialRate, the other side: when the host closes every connection
+// while 900 vaults hold a long-poll, and again as soon as they are back,
+// all of them hold a poll again within about a second each time (each
+// polls again 250 to 500 ms after its failure, as the relay client does).
+func TestMassReconnect(t *testing.T) {
+	const vaults = 900
+	ca := newCA(t, "test root")
+	s := newParkServer(t, ca, 128)
+	tr := s.pool(t, ca, 0, 0)
+	c := tr.Client(80 * time.Second)
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < vaults; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				_, _ = get(c, "https://relay.example/park")
+				select {
+				case <-stop:
+					return
+				case <-time.After(250*time.Millisecond + time.Duration(rand.IntN(250))*time.Millisecond):
+				}
+			}
+		}()
+	}
+	eventually(t, "every long-poll", func() bool { return s.parked.Load() == vaults })
+	for round := 1; round <= 3; round++ {
+		before := tr.Stats("relay.example")
+		s.CloseClientConnections()
+		t0 := time.Now()
+		eventually(t, "the loss", func() bool { return s.parked.Load() < vaults })
+		eventually(t, "every long-poll again", func() bool { return s.parked.Load() == vaults })
+		d, st := time.Since(t0), tr.Stats("relay.example")
+		t.Logf("loss %d of every connection: %d long-polls held again after %v on %d connections (%d opened)", round, vaults, d.Round(10*time.Millisecond), st.Conns, st.Dialed-before.Dialed)
+		if d > 3*time.Second || st.RefusedMaxConns != 0 || st.Conns != 8 {
+			t.Errorf("loss %d: recovered after %v, stats %+v", round, d, st)
+		}
+	}
+	close(stop)
+	close(s.release)
+	wg.Wait()
+}
+
+// TestUnprocessedIsResent: a request the host says it did not process is
+// sent once more instead of failing (the library's pool did the same).
+// It also holds the library to the error texts the pool knows these by.
+func TestUnprocessedIsResent(t *testing.T) {
+	ca := newCA(t, "test root")
+	s := newRawSrv(t, ca, 128)
+	tr := s.pool(t, ca, 0, 0)
+	c := tr.Client(30 * time.Second)
+	// A GOAWAY that names 50 held requests as not processed.
+	wait := fire(c, 50, 10*time.Second)
+	eventually(t, "the requests", func() bool { return s.parked() == 50 })
+	cur := s.all()[0]
+	cur.goAway(0, 0)
+	cur.mu.Lock()
+	cur.open = map[uint32]bool{}
+	cur.mu.Unlock()
+	eventually(t, "the requests again, on a new connection", func() bool { return s.parked() == 50 && len(s.all()) == 2 })
+	s.respondAll()
+	if ok, bad, sample := wait(); ok != 50 {
+		t.Errorf("GOAWAY naming 50 requests as not processed: %d ok, %d failed (%s)", ok, bad, sample)
+	}
+	// Refused streams, with a body to send again.
+	s.park.Store(false)
+	for i := 0; i < 3; i++ {
+		s.all()[1].refuse.Store(1)
+		r, err := c.Post("https://relay.example/x", "text/plain", strings.NewReader("body"))
+		if err != nil {
+			t.Fatalf("refused stream %d: %v", i, err)
+		}
+		r.Body.Close()
+	}
+	// Twice refused is an error: one more try, not more.
+	s.all()[1].refuse.Store(2)
+	if _, err := c.Get("https://relay.example/x"); err == nil || !unprocessed(errors.Unwrap(err)) {
+		t.Errorf("request refused twice: %v", err)
+	}
+	// A body that cannot be sent again is not.
+	s.all()[1].refuse.Store(1)
+	req, _ := http.NewRequest(http.MethodPost, "https://relay.example/x", io.NopCloser(strings.NewReader("body")))
+	if _, err := c.Do(req); err == nil {
+		t.Error("a request whose body cannot be sent again was sent again")
+	}
+	if st := tr.Stats("relay.example"); st.InFlight != 0 || st.Waiting != 0 {
+		t.Errorf("stats afterwards: %+v", st)
+	}
+}
+
+// TestLateSettings: a host that announces its stream limit late (after
+// the pool stopped expecting it) and then allows one stream gets one
+// connection all the same: a connection that has not announced a limit
+// carries fewer than MinStreams requests and justifies no other.
+func TestLateSettings(t *testing.T) {
+	ca := newCA(t, "test root")
+	s := newRawSrv(t, ca, 1)
+	s.settingsDelay.Store(int64(h2Settle + 300*time.Millisecond))
+	tr := s.pool(t, ca, 0, 0)
+	c := tr.Client(30 * time.Second)
+	wait := fire(c, 200, 3*time.Second)
+	time.Sleep(h2Settle + time.Second)
+	st := tr.Stats("relay.example")
+	if st.Conns != 1 || s.accepted.Load() != 1 || s.parked() >= DefaultMinStreams || st.RefusedMinStreams == 0 {
+		t.Errorf("late SETTINGS announcing 1: %d connections, %d requests at the host, stats %+v", s.accepted.Load(), s.parked(), st)
+	}
+	_, _, _ = wait()
+	if s.accepted.Load() != 1 {
+		t.Errorf("%d connections in the end", s.accepted.Load())
+	}
+}
+
+// TestOneStream: at a limit of one stream the connection is busy and
+// free in turn; it must not be taken for dead between the two readings
+// (it was, and a new one opened each time).
+func TestOneStream(t *testing.T) {
+	ca := newCA(t, "test root")
+	s := newRawSrv(t, ca, 1)
+	s.park.Store(false)
+	tr := s.pool(t, ca, 0, 0)
+	c := tr.Client(30 * time.Second)
+	var wg sync.WaitGroup
+	for g := 0; g < 20; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 150; i++ {
+				if r, err := c.Get("https://relay.example/q"); err != nil {
+					t.Errorf("request: %v", err)
+				} else {
+					r.Body.Close()
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	if st := tr.Stats("relay.example"); s.accepted.Load() != 1 || st.Streams != 1 {
+		t.Errorf("%d connections for a host with one stream; stats %+v", s.accepted.Load(), st)
 	}
 }

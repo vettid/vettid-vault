@@ -29,14 +29,14 @@ func TestPollWaitSpread(t *testing.T) {
 
 // The retry after a failed poll is never a fixed interval; it grows only
 // while the relay keeps refusing the vault's polls (mailbox_unknown,
-// timestamp_stale), up to about a minute.
+// timestamp_stale), up to about 15 s.
 func TestRetryWait(t *testing.T) {
 	for _, c := range []struct {
 		refused  int
 		min, max time.Duration
 	}{{0, 500 * time.Millisecond, 1500 * time.Millisecond}, {1, 500 * time.Millisecond, 1500 * time.Millisecond},
-		{2, time.Second, 3 * time.Second}, {4, 4 * time.Second, 12 * time.Second}, {7, 30 * time.Second, 90 * time.Second},
-		{1000, 30 * time.Second, 90 * time.Second}} {
+		{2, time.Second, 3 * time.Second}, {4, 4 * time.Second, 12 * time.Second}, {6, 7500 * time.Millisecond, 22500 * time.Millisecond},
+		{1000, 7500 * time.Millisecond, 22500 * time.Millisecond}} {
 		seen := map[time.Duration]bool{}
 		for i := 0; i < 200; i++ {
 			d := retryWait(c.refused)

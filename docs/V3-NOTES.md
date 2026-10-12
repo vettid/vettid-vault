@@ -239,26 +239,51 @@ Fetched with `openssl s_client -showcerts` and verified with Go's
   are in use (128 at the relay's load balancer); only then is another
   opened, one at a time (concurrent first requests wait for it instead of
   each dialing, which would briefly give every vault its own connection:
-  `egress.TestSharedHTTP2`). Bounds: at most 16 connections per host
-  (2,048 streams at 128, above the 1,024 vault processes) and at most 16
-  opened in ten seconds; no second connection when the host announces
-  fewer than 32 streams. At a bound, requests wait for a stream until
-  their own deadline (75 s for a relay request), and the wait is counted.
-  900 held long-polls use 8 connections, and a quick request beside them
-  does not wait (`egress.TestGrowthAtStreamLimit`, to be run on every Go
-  update). The pool is built on `net/http`'s `ClientConn` (Go 1.26), not
-  on `http.Transport`'s own pool, which opens as many connections as the
-  host's announced limit makes it and does not report that limit. A
-  request that fails with its connection is not re-sent by the pool; the
-  relay client signs and sends it again.
+  `egress.TestSharedHTTP2`). The pool is built on `net/http`'s
+  `ClientConn` (Go 1.26), not on `http.Transport`'s own pool, which opens
+  as many connections as the host's announced limit makes it and does not
+  report that limit. 900 held long-polls use 8 connections, and a quick
+  request beside them does not wait (`egress.TestGrowthAtStreamLimit`,
+  to be run on every Go update).
+  - *Bounds.* At most 16 connections per host (2,048 streams at 128,
+    above the 1,024 vault processes). No second connection when the host
+    announces fewer than 32 streams, or has not announced any: a new
+    connection carries one request until its limit can be read (the
+    library does not say when SETTINGS arrived), fewer than 32 after a
+    second. New connections at 2 a second after a burst of 32. A
+    connection the host is closing (GOAWAY) takes no new requests and
+    does not count toward the 16 while its requests end; at most 16 such
+    are kept (32 connections in all). A full connection that is closing
+    cannot be told from a full one until one of its requests ends.
+  - *At a bound* requests wait for a stream, oldest first, until their
+    own deadline (75 s for a relay request), and are counted.
+  - *Connections that stop answering.* Every connection is pinged after
+    15 s without a frame from the host and closed if the ping is not
+    answered in 10 s (`http.HTTP2Config`); a busy connection is never
+    pinged. Without it a connection whose host was gone kept its
+    timed-out requests' streams for good (the library holds a cancelled
+    stream until a ping is answered) and its place among the 16. A
+    connection that answers pings but no request for 90 s is closed too.
+  - *Re-sending.* A request the host did not process (a GOAWAY that
+    names it, REFUSED_STREAM, a connection that stopped taking requests)
+    is sent once more, as the library's pool did. Any other failure goes
+    back to the vault; its relay client signs and sends again.
+  - *Per vault.* A vault process has at most 8 relay and push requests
+    in flight (`maxVaultEgress`); further ones wait within their own 75 s
+    and are then answered an error. A vault needs its long-poll, one
+    request of its run loop and a push wake. Without the limit 16
+    processes could hold all 2,048 streams. KMS requests are not limited
+    this way (HTTP/1.1, as before).
 - **Metrics** (VAULT-RELAY-SCALING §6). Every minute the parent asks the
-  enclave for its relay counts (`hostproto.KindStats`) and logs one
-  record in CloudWatch's embedded metric format, namespace
-  `VettID/Vault`, dimension `InstanceId` only: `UnlockedVaults`,
+  enclave for its relay counts (`hostproto.KindStats`; the enclave
+  answers from a snapshot at most a second old, and asking changes
+  nothing) and logs one record in CloudWatch's embedded metric format,
+  namespace `VettID/Vault`, dimension `InstanceId` only: `UnlockedVaults`,
   `EgressOpen<Class>` and `EgressOpened<Class>` (`Relay`, `KMS`, `Push`,
-  `Other`), `RelayRequestsInFlight`, `RelayStreamWaitMax` (ms),
-  `RelayRequestErrors`, `RelayGrowthRefused`. Counters are the increase
-  since the record before.
+  `Other`), `RelayRequestsInFlight`, `RelayStreamWaitMax` (ms; the
+  longest in the current minute and the one before), `RelayRequestErrors`,
+  `RelayGrowthRefused`. Counters are the increase since the record
+  before.
 
 ## KMS client
 

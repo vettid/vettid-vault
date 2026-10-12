@@ -21,7 +21,7 @@ const (
 	MetricEgressOpen     = "EgressOpen"            // egress connections open, by class
 	MetricEgressOpened   = "EgressOpened"          // egress connections opened since the last record, by class
 	MetricRelayInFlight  = "RelayRequestsInFlight" // relay requests on a stream or waiting for one
-	MetricRelayWaitMax   = "RelayStreamWaitMax"    // longest wait for a stream since the last record
+	MetricRelayWaitMax   = "RelayStreamWaitMax"    // longest wait for a stream in this minute and the one before
 	MetricRelayErrors    = "RelayRequestErrors"    // relay requests without an answer since the last record
 	MetricRelayRefused   = "RelayGrowthRefused"    // requests that waited at a connection bound since the last record
 )

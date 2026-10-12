@@ -49,6 +49,15 @@ const (
 	SeedKCode    byte = 0x43 // the member API's k_code (HMAC key)
 	SeedQRSecret byte = 0x2a // the QR secret, 16 bytes
 
+	// §10.10 calls (calls.json; not in §16: generated here for the apps to
+	// reproduce).
+	SeedCallCallerDeviceIK byte = 0x50 // the calling device's ik
+	SeedCallCallerVaultIK  byte = 0x51 // its vault's ik
+	SeedCallCalleeDeviceIK byte = 0x52 // the answering device's ik
+	SeedCallCalleeVaultIK  byte = 0x53 // its vault's ik
+	SeedCallOfferKEM       byte = 0x54 // the caller's ephemeral KEM key
+	RandCallAnswer         byte = 0x55 // the answerer's encapsulation randomness
+
 	SessionSenderKid    byte = 0x02
 	SessionRecipientKid byte = 0x01
 
@@ -91,6 +100,10 @@ const (
 	// ACApprovalRequestID is the unlock that carries a release approval
 	// (spec §16).
 	ACApprovalRequestID = "01JB2Z6V9K3M4N5P6Q7R8S9T22"
+	// §10.10 call vectors.
+	CallID     = "01JB2Z6V9K3M4N5P6Q7R8S9T50"
+	CallMedia  = "audio"
+	CallICEExp = 1800000000
 	// RecRecoveryID is the recovery's id (the queue message's request_id,
 	// §11.11.1) for ACVaultID.
 	RecRecoveryID = "01JB2Z6V9K3M4N5P6Q7R8S9T30"

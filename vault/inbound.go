@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
+	"math/rand/v2"
 	"time"
 
 	"github.com/vettid/vettid-relay/relayauth"
@@ -68,17 +69,65 @@ func (m *Manager) Run(ctx context.Context) error {
 	if err := m.Start(ctx); err != nil {
 		return err
 	}
+	// Vaults that start together do not send their first poll together
+	// (tests set PollWait and poll at once).
+	if m.opt.PollWait == 0 && !sleep(ctx, rand.N(firstPollSpread)) {
+		return ctx.Err()
+	}
+	refused := 0
 	for {
-		if _, err := m.Step(ctx); err != nil {
-			if errors.Is(err, ErrLocked) || errors.Is(err, ErrSplitBrain) || errors.Is(err, ErrCrash) || ctx.Err() != nil {
-				return err
-			}
-			select { // transient relay error: back off a little
-			case <-time.After(time.Second):
-			case <-ctx.Done():
-				return ctx.Err()
-			}
+		_, err := m.Step(ctx)
+		if err == nil {
+			refused = 0
+			continue
 		}
+		if errors.Is(err, ErrLocked) || errors.Is(err, ErrSplitBrain) || errors.Is(err, ErrCrash) || ctx.Err() != nil {
+			return err
+		}
+		switch RelayCode(err) {
+		case CodeMailboxUnknown, CodeTimestampStale:
+			refused++
+		default:
+			refused = 0
+		}
+		if !sleep(ctx, retryWait(refused)) {
+			return ctx.Err()
+		}
+	}
+}
+
+// Waits of the collect loop (VAULT-RELAY-SCALING §4 G): no vault retries
+// at a fixed interval, or every vault of a host would ask again in the
+// same instant after a relay error.
+const (
+	firstPollSpread = time.Second
+	retryBase       = time.Second
+	retryMax        = time.Minute
+)
+
+// retryWait is the wait before the next poll after a failed one: about a
+// second after a transient relay error, as before. refused counts the
+// polls in a row that the relay refused for a reason another poll will
+// not change by itself (the mailbox is unknown to it, or the vault's
+// clock is off): the wait then doubles each time, up to about a minute.
+// Every wait is spread by half either way.
+func retryWait(refused int) time.Duration {
+	d := retryBase
+	if refused > 1 {
+		d = min(retryBase<<min(refused-1, 16), retryMax)
+	}
+	return jitter(d, 0.5)
+}
+
+// sleep waits d; false if ctx ended first.
+func sleep(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }
 

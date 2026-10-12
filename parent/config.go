@@ -27,6 +27,9 @@ type Config struct {
 
 	// Allow is the egress allowlist: exact host names, port 443 only.
 	Allow []string
+	// RelayHost is the relay's name on the allowlist: its connections
+	// are counted apart in the metrics.
+	RelayHost string
 	// Resolve, if set, maps an allowed host to the address actually
 	// dialed (development and tests only: e.g. "relay.vettid.test" to a
 	// local TLS front end). Release enclaves still verify the real name
@@ -51,6 +54,9 @@ type Config struct {
 	// SweepInterval runs the stale-queue sweeper (0 = default 10 min;
 	// negative = never).
 	SweepInterval time.Duration
+	// MetricsInterval is how often the metrics are written (0 = default
+	// 1 min; negative = never).
+	MetricsInterval time.Duration
 
 	Logger *slog.Logger
 	Now    func() time.Time
@@ -90,6 +96,9 @@ func (c *Config) defaults() error {
 	}
 	if c.SweepInterval == 0 {
 		c.SweepInterval = 10 * time.Minute
+	}
+	if c.MetricsInterval == 0 {
+		c.MetricsInterval = time.Minute
 	}
 	if c.Logger == nil {
 		c.Logger = slog.Default()

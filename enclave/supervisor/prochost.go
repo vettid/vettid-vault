@@ -600,11 +600,15 @@ func (p *vproc) http(ctx context.Context, f [][]byte) [][]byte {
 	req.Header = hdr
 	resp, err := s.relayHTTP.Do(req)
 	if err != nil {
+		s.relayFailed(ctx)
 		return hostproto.Strings(hostproto.StatusError)
 	}
 	defer resp.Body.Close()
 	b, err := io.ReadAll(io.LimitReader(resp.Body, vaultipc.MaxBody+1))
 	if err != nil || len(b) > vaultipc.MaxBody {
+		if err != nil {
+			s.relayFailed(ctx)
+		}
 		return hostproto.Strings(hostproto.StatusError)
 	}
 	rh := http.Header{}
@@ -614,6 +618,15 @@ func (p *vproc) http(ctx context.Context, f [][]byte) [][]byte {
 		}
 	}
 	return [][]byte{[]byte(hostproto.StatusOK), []byte(strconv.Itoa(resp.StatusCode)), vaultipc.EncodeHeaders(rh), b}
+}
+
+// relayFailed counts a relay request that got no answer (a connection
+// lost, no stream in time, a timeout), unless its vault process gave it
+// up.
+func (s *Supervisor) relayFailed(ctx context.Context) {
+	if ctx.Err() == nil {
+		s.relayErrs.Add(1)
+	}
 }
 
 // maxPushBody bounds a push gateway request (a registration: a 4 KiB

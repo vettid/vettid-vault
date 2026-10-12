@@ -1,7 +1,9 @@
 // Package egress is the enclave's only way out (VAULT-MESSAGING §12.2,
 // VAULT-PLAN §5.2 decision D5): HTTPS to an allowlist of hosts, with TLS
-// terminated inside the enclave against pinned roots, over a few
-// connections per host that every vault shares.
+// terminated inside the enclave against pinned roots, over connections
+// that every vault shares. For an HTTP/2 host the enclave decides how many
+// there are (h2pool.go): one until its streams are in use, then more, up
+// to MaxConns.
 //
 // The parent forwards TCP bytes only, to the same allowlist on port 443
 // (its own check). Here, a request is refused unless its URL is https, its
@@ -54,16 +56,35 @@ type Host struct {
 type Config struct {
 	Dialer Dialer
 	Hosts  []Host
-	// Conns is the number of shared connection pools per host (default
-	// 2). An HTTP/2 pool normally holds one connection; requests are
-	// spread over the pools in turn.
+	// Conns is the number of connection pools per HTTP/1.1 host (default
+	// 2), of at most 4 connections each; requests are spread over the
+	// pools in turn. HTTP/2 hosts do not use it.
 	Conns int
+	// MaxConns is the most connections to one HTTP/2 host (default
+	// DefaultMaxConns). When all are open and their streams in use,
+	// requests wait.
+	MaxConns int
+	// MinStreams is the fewest concurrent streams a host must announce
+	// for a second connection to be opened (default DefaultMinStreams).
+	// Below it requests wait for a stream instead: a host that announced
+	// a limit of 1 would otherwise get a connection per request, and
+	// could tell the vaults apart.
+	MinStreams int
 	// Now is the time certificates are verified at (default time.Now).
 	Now func() time.Time
 }
 
 // Port is the only destination port.
 const Port = 443
+
+// The enclave's bounds on the connections to an HTTP/2 host
+// (VAULT-RELAY-SCALING D3). 16 connections of 128 streams (the relay's
+// load balancer) carry 2,048 requests, above the 1,024 vault processes a
+// host runs at most.
+const (
+	DefaultMaxConns   = 16
+	DefaultMinStreams = 32
+)
 
 // Errors.
 var (
@@ -77,7 +98,10 @@ type Transport struct {
 	hosts map[string]*hostPool
 }
 
+// hostPool is one host's connections: h2 for an HTTP/2 host, otherwise
+// the HTTP/1.1 pools.
 type hostPool struct {
+	h2    *h2Pool
 	next  atomic.Uint64
 	pools []*http.Transport
 }
@@ -90,6 +114,12 @@ func New(cfg Config) (*Transport, error) {
 	if cfg.Conns <= 0 {
 		cfg.Conns = 2
 	}
+	if cfg.MaxConns <= 0 {
+		cfg.MaxConns = DefaultMaxConns
+	}
+	if cfg.MinStreams <= 0 {
+		cfg.MinStreams = DefaultMinStreams
+	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
@@ -99,7 +129,10 @@ func New(cfg Config) (*Transport, error) {
 			return nil, ErrConfig
 		}
 		hp := &hostPool{}
-		for i := 0; i < cfg.Conns; i++ {
+		if h.HTTP2 {
+			hp.h2 = newH2Pool(newPool(cfg, h), h.Name, cfg.MaxConns, cfg.MinStreams)
+		}
+		for i := 0; i < cfg.Conns && !h.HTTP2; i++ {
 			hp.pools = append(hp.pools, newPool(cfg, h))
 		}
 		t.hosts[h.Name] = hp
@@ -149,12 +182,7 @@ func newPool(cfg Config, h Host) *http.Transport {
 		ResponseHeaderTimeout: 0, // long-polls hold the response for up to 25 s
 		ExpectContinueTimeout: time.Second,
 	}
-	if host.HTTP2 {
-		// One connection per pool: concurrent first requests wait for it
-		// instead of each dialing their own (which would briefly give
-		// every vault its own connection).
-		tr.MaxConnsPerHost = 1
-	} else {
+	if !host.HTTP2 {
 		tr.MaxConnsPerHost = 4
 		tr.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{} // never h2
 	}
@@ -186,6 +214,9 @@ func (t *Transport) RoundTrip(r *http.Request) (*http.Response, error) {
 		}
 		return nil, err
 	}
+	if hp.h2 != nil {
+		return hp.h2.RoundTrip(r)
+	}
 	i := hp.next.Add(1) % uint64(len(hp.pools))
 	return hp.pools[i].RoundTrip(r)
 }
@@ -201,6 +232,9 @@ func (t *Transport) Client(timeout time.Duration) *http.Client {
 // CloseIdle closes idle connections.
 func (t *Transport) CloseIdle() {
 	for _, hp := range t.hosts {
+		if hp.h2 != nil {
+			hp.h2.closeIdle()
+		}
 		for _, p := range hp.pools {
 			p.CloseIdleConnections()
 		}
@@ -209,3 +243,12 @@ func (t *Transport) CloseIdle() {
 
 // Allowed reports whether host is on the allowlist.
 func (t *Transport) Allowed(host string) bool { return t.hosts[host] != nil }
+
+// Stats returns the state of the shared HTTP/2 connections to host (the
+// zero value for an HTTP/1.1 host or one not on the allowlist).
+func (t *Transport) Stats(host string) Stats {
+	if hp := t.hosts[host]; hp != nil && hp.h2 != nil {
+		return hp.h2.stats()
+	}
+	return Stats{}
+}

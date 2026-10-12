@@ -79,7 +79,7 @@ settled in VAULT-MESSAGING **0.3.1**, which this code follows.
 | `cmd/vault-enclave` | enclave (PID 1) | Release build: vsock, `/dev/nsm`, pinned roots, `enclave.ReleaseConfig`. `-tags devenclave` (`vault_dev.go`): TCP, fake NSM, test roots (`enclavetest.DevSupervisor`) |
 | `enclave/supervisor` | enclave | Control connection, instance (ETKs, outer decryption), vault processes and their scoped channels, lease-lost and memory-pressure locks, descriptor push, status-list fetch, sanitized logs to the parent |
 | `enclave/nsm` | enclave | `NSM_IOCTL_REQUEST` (`_IOWR(0x0A, 0, 32)`) with `Attestation` and `DescribePCR` CBOR requests |
-| `enclave/egress` | enclave | The only way out: HTTPS to an allowlist, TLS 1.3 only, per-host pinned roots, host-name verification, ALPN h2 required for HTTP/2 hosts, no redirects, a few shared connection pools per host |
+| `enclave/egress` | enclave | The only way out: HTTPS to an allowlist, TLS 1.3 only, per-host pinned roots, host-name verification, ALPN h2 required for HTTP/2 hosts, no redirects, shared connections per host, as many as the enclave allows (below) |
 | `enclave/awskms` | enclave | KMS `GenerateDataKey`/`Decrypt` (Recipient, `RSAES_OAEP_SHA_256`) and `DescribeKey`/`GetKeyPolicy`/`ListGrants`, SigV4 signing, credentials from the parent |
 | `internal/hostproto` | both | Frames (kind, id, length-prefixed fields; ≤ 64 MiB), request/reply/notification multiplexing, 16 KiB chunked writes, the egress connection header |
 | `internal/vsock` | both | `AF_VSOCK` dial/listen with `golang.org/x/sys/unix` and the runtime poller; every write chunked to 16 KiB |
@@ -231,13 +231,34 @@ Fetched with `openssl s_client -showcerts` and verified with Go's
   R2 is not pinned.
 - **KMS does not offer HTTP/2.** KMS requests use HTTP/1.1 keep-alive
   connections (4 pools of at most 4 connections each); relay and Google
-  traffic use shared HTTP/2 connections (relay: 4 pools of one connection
-  each in release builds). A vault's long-poll holds one stream; at the
-  ALB's 128 streams per connection the relay pools carry about 500 unlocked
-  vaults before requests queue.
-- Each HTTP/2 pool allows exactly one connection (`MaxConnsPerHost` 1):
-  otherwise concurrent first requests each dial, briefly giving every
-  vault its own connection (`egress.TestSharedHTTP2`).
+  traffic use shared HTTP/2 connections.
+- **The enclave decides how many HTTP/2 connections a host gets**
+  (VAULT-RELAY-SCALING 0.1.1, D3; `enclave/egress/h2pool.go`). A vault's
+  long-poll holds one stream. Requests fill the first connection that has
+  a free stream, so one connection carries every vault until its streams
+  are in use (128 at the relay's load balancer); only then is another
+  opened, one at a time (concurrent first requests wait for it instead of
+  each dialing, which would briefly give every vault its own connection:
+  `egress.TestSharedHTTP2`). Bounds: at most 16 connections per host
+  (2,048 streams at 128, above the 1,024 vault processes) and at most 16
+  opened in ten seconds; no second connection when the host announces
+  fewer than 32 streams. At a bound, requests wait for a stream until
+  their own deadline (75 s for a relay request), and the wait is counted.
+  900 held long-polls use 8 connections, and a quick request beside them
+  does not wait (`egress.TestGrowthAtStreamLimit`, to be run on every Go
+  update). The pool is built on `net/http`'s `ClientConn` (Go 1.26), not
+  on `http.Transport`'s own pool, which opens as many connections as the
+  host's announced limit makes it and does not report that limit. A
+  request that fails with its connection is not re-sent by the pool; the
+  relay client signs and sends it again.
+- **Metrics** (VAULT-RELAY-SCALING §6). Every minute the parent asks the
+  enclave for its relay counts (`hostproto.KindStats`) and logs one
+  record in CloudWatch's embedded metric format, namespace
+  `VettID/Vault`, dimension `InstanceId` only: `UnlockedVaults`,
+  `EgressOpen<Class>` and `EgressOpened<Class>` (`Relay`, `KMS`, `Push`,
+  `Other`), `RelayRequestsInFlight`, `RelayStreamWaitMax` (ms),
+  `RelayRequestErrors`, `RelayGrowthRefused`. Counters are the increase
+  since the record before.
 
 ## KMS client
 

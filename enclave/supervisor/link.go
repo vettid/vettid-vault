@@ -76,11 +76,15 @@ func (l *link) up() *hostproto.Conn {
 	return l.conn
 }
 
-// ping notes the parent's Ping: it is heard, and no longer gone. First it
-// is told which vaults stopped while it was (before any call can open one
-// of them again); those that cannot be queued are kept for its next Ping.
+// ping notes the parent's Ping: it is heard, and no longer gone. The Ping
+// is counted at once. Before the parent is reachable again it is told
+// which vaults stopped while it was not (so that no call can open one of
+// them before its report is on its way); those that cannot be queued are
+// kept for its next Ping. Telling may wait for the outgoing queue (for
+// writeTimeout at most): the count does not wait with it.
 func (l *link) ping(now time.Time) {
 	l.mu.Lock()
+	l.hearLocked(now)
 	c, stopped := l.conn, l.stopped
 	l.stopped = nil
 	l.mu.Unlock()
@@ -95,7 +99,6 @@ func (l *link) ping(now time.Time) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.gone = false
-	l.hearLocked(now)
 }
 
 // hear starts the count of the parent's silence again without a Ping

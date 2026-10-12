@@ -267,7 +267,11 @@ unprivileged ids, and Yama (optional).
     `Stopped` for each when the parent's next `Ping` is read, before any
     call is let through again: `locked`, `split_brain`, or `error` for a
     killed one. The parent drops the vault from its running set and
-    releases the lease if it still held it. They are kept in memory: an
+    releases the lease if it still held it, unless an enroll or unlock
+    of that vault is under way and has taken the lease (as for `locked`):
+    the report is of the run before. The `Ping` itself is counted before
+    the reports are queued, so a full queue delays the reports and the
+    calls, not the count. They are kept in memory: an
     enclave restart loses them, and the parent then drops everything
     anyway (a new boot id).
   - *What a vault loses.* Nothing that was stored. The final flush fails

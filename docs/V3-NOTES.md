@@ -204,6 +204,203 @@ unprivileged ids, and Yama (optional).
 - **Large writes**: every write on a vsock connection, in both
   directions and on both ends, is at most 16 KiB (`hostproto.ChunkSize`),
   for the Nitro vsock large-write bug vettid.dev hit.
+- **Parent unreachable** (§12.3; owner decision H3 of 2026-10-12, S11;
+  VAULT-HOST-PROTOCOL §13 point 1). Until S10 the 120 s ran from the loss
+  of the control connection, so a parent that stayed connected and did
+  nothing (hung, stopped, dishonest) was never unreachable. Now:
+  - *The rule.* One clock: the time since the parent's last `Ping`
+    (`link.heard`). `maintain` checks it every 10 s (`checkParent`), and
+    at more than 120 s (`Config.DownLock`) with a vault running it locks
+    every vault. Whether there is a connection does not enter into it,
+    and a new connection does not start the count again: only a `Ping`
+    does, counted when it is read, whatever the answer. Without a
+    connection there are no pings, so the old rule is contained in this
+    one: a lost parent has its vaults locked 120 s after its last ping,
+    which is up to 20 s (one ping interval) sooner than before.
+  - *Only while a vault runs.* With no vault running the count starts
+    again at every check: there is nothing to lock. A vault that is
+    unlocked before the parent's first ping (after the enclave's start,
+    after a new session: the parent pings when the descriptor arrives,
+    behind whatever table writes it has queued, and then every 20 s, and
+    it forwards queue messages meanwhile) then has the whole 120 s, to within the 10 s of the check, instead of being locked
+    at once. A parent cannot turn this into a way round the rule: the
+    count only starts again when every vault is locked. And not under a
+    parent that was found unreachable: it stays so until it pings, so a
+    vault that turns up under it (an unlock that was half way when the
+    others were locked) is locked by the next check, within 10 s.
+  - *What a ping proves.* That the peer of the socket is alive and reads
+    and writes. Not that it renews leases: the enclave cannot see the
+    lease table. A dishonest parent can ping and renew nothing, as it
+    could keep the connection open before; what stops two instances
+    writing one vault is still the conditional state write, not this
+    rule. The rule is for the parent that has hung or been stopped.
+  - *Locking, once the parent is found unreachable* (`checkParent`).
+    Three things, so that it takes seconds whatever the parent does and
+    however many vaults run. (1) The parent is marked gone
+    (`link.gone`): until its next `Ping` is read, every call to it fails
+    at once (`errDown`), connection or not. Without that, a parent whose
+    process lives and whose path to the store does not (it stops pinging
+    because its registry write hangs, answers the hello of a new
+    connection, and answers no store request) held each vault's final
+    flush for 60 s. (2) The connection is closed, which frees the calls
+    that wait on it; `Run` dials again as after any loss, and a hello
+    does not make the parent reachable. (3) The vaults lock all at once
+    (`procHost.LockAllWithin`), not one after another and not behind a
+    queue request that is being processed, and a process that has not
+    locked after 10 s (`lockAllWithin`) is killed. So **every vault has
+    locked or been killed within 10 s of the check that found the parent
+    unreachable**: 120 to 130 s after the last ping for the check, 140 s
+    at most for the last vault. A vault's lock still does what a lock
+    does (flush, `vault.locking`, exit); the 10 s are for the relay
+    requests in it. With the relay reachable a lock is a few round trips
+    (what is left in the outbox, then one `vault.locking` deposit for
+    each of the owner's devices) and vaults lock. With the relay path
+    out as well, each of those requests waits for the egress (10 s for
+    the parent's connect, or 15 s + 10 s until a silent shared connection
+    is given up, 75 s at most), so the vault is killed at 10 s instead:
+    its state write had already failed and its devices could not have
+    been told. The order inside a vault's lock is not changed here.
+  - *The parent is told.* It counts a vault as running, and renews its
+    lease, until it hears otherwise, and here it would not: a vault's own
+    `locked` finds no connection and a killed process sends nothing. The
+    supervisor keeps the vaults it ended (`link.stopped`) and sends a
+    `Stopped` for each when the parent's next `Ping` is read, before any
+    call is let through again: `locked`, `split_brain`, or `error` for a
+    killed one. The parent drops the vault from its running set and
+    releases the lease if it still held it. They are kept in memory: an
+    enclave restart loses them, and the parent then drops everything
+    anyway (a new boot id).
+  - *What a vault loses.* Nothing that was stored. The final flush fails
+    before anything is sent, so the last durable state is the last
+    successful state write, and what the vault had taken from the relay
+    since then was not acked and is still there (§8.3). A failed flush is
+    not a conflict: nothing is zeroized as a split brain (`persist`
+    returns `ErrSplitBrain` only for `store.ErrConflict`), and the next
+    unlock reads the state anew. A killed process is the same without
+    `vault.locking` to its devices.
+  - *Warnings.* The enclave logs "no ping from the parent: every vault
+    is locked if none comes" at half the time (60 s) while a vault runs,
+    once for each time the count started, with the seconds and the number
+    of vaults and no vault's name. The parent logs "heartbeat took longer
+    than its interval" when a ping and its registry write take more than
+    20 s.
+  - *Clock.* `Config.Now` is `time.Now` in the release build, and both
+    readings carry Go's monotonic clock: a step of the wall clock does
+    not move the count.
+  - *The reader at its limit.* At 128 of the parent's requests in flight
+    the reader stops reading (`hostproto.MaxInflight`; VAULT-HOST-PROTOCOL
+    §13 point 6, not changed here), so a ping the parent did send would
+    wait in the socket. The parent of this repository has about a dozen
+    in flight at most. The connection tells the link when its reader
+    waits (`hostproto.Options.OnWait`), and that time is not counted as
+    silence, up to 120 s of it between two pings: a reader that never
+    goes on delays the lock to 240 s and no further.
+  - *Write timeout.* A frame to the parent that is not written within
+    60 s (`writeTimeout`, per frame) ends the connection, like any write
+    error; the clock above then runs as for any lost connection. 60 s is
+    the time a call waits for its answer: a parent that is only slow (its
+    own reader waits while it handles 128 store requests, or while its
+    table writes are 1,024 behind) is not cut off before the calls it is
+    slow with have failed anyway. The parent's own connection, and the
+    supervisor's connections to its vault processes, are as before (no
+    timeout).
+  - *Notifications when the outgoing queue (256 frames) is full.* `Log`
+    is dropped and counted (`link.logRecord`; "log records dropped: the
+    parent was not reading" with the count since the start, logged by
+    `maintain` when it grew): logging never waits for the parent, and a
+    lost record loses an operator a line. `Lifecycle`, `Stopped` and
+    `Descriptor` wait as before (`link.notify`), because the parent acts
+    on them: its set of running vaults and so its lease renewals and
+    releases, the vault table (app key, backup bit, name requests, the
+    clone alarm's email), the split-brain count, the registry row. The
+    wait is now bounded by the write timeout: either a frame leaves and
+    there is room, or the connection ends. What was queued on a
+    connection that ends is lost, as it always was; the parent keeps its
+    running set over a `resume`, so a `locked` lost that way leaves it
+    renewing a lease for a vault that is not running until it restarts
+    (not new, and not changed here: a report of the running set at the
+    hello would close it).
+  - *The parent's side.* The parent pings before it writes the registry
+    row, on one ticker (`Parent.publish`): that is what ties a ping to
+    the registry, and it stays. The row's write now has 10 s
+    (`registryWriteTimeout`): a table that does not answer (the SDK's
+    client has no response timeout) no longer holds the ticker, and the
+    next tick pings again, so a parent whose registry is unreachable
+    keeps its vaults unlocked as it did before this rule.
+  - *Leases, when the table does not answer.* With the pings going on,
+    locking is then the parent's to do, by "lease lost" (§11.1): a
+    renewal that got no answer used to wait for ever, on the first vault,
+    and nobody was told while the leases ran out. Now a renewal is given
+    up after 10 s (`leaseRenewTimeout`), and never later than the moment
+    the first lease is lost (15 s before it ends); once one was given up,
+    the rest of that pass calls nothing and judges every lease by its age,
+    so a pass is one wait however many vaults run; after a failed pass
+    the next comes in 5 s, not 60. The enclave is told `LeaseLost` for
+    each vault from 15 s before its lease ends. **Limit:** it is told one
+    vault at a time and waits for each lock (up to 60 s), as before, so
+    with hundreds of vaults the last ones are told after their leases
+    ended; the conditional state write still guards those. A follow-up:
+    one request that locks them together.
+  - *Other calls of the parent that have no time limit of their own*
+    (not changed; none of them decides a lock): the queue's long poll,
+    message delete, manifest read, slot write and lease acquire, read and
+    take-over on the request path (a hang holds one of the 8 request
+    workers; the message comes back after its visibility time); the
+    store get, put and delete and the credentials the enclave asks for
+    (the enclave gives up after 60 s; the parent's handler stays, one of
+    128); the sweeper's list, heartbeat read and queue delete (the sweep
+    stops); the queue's creation at start. With a limit already: the
+    lifecycle and lease-release writes (30 s), the registry row's delete
+    (10 s; 60 s at shutdown). The parent calls no KMS.
+  - *Versions.* No wire change. The S10 parent (`release/staging/10`)
+    sends `Ping` every 20 s exactly as this one does (from the heartbeat
+    ticker, and once when a descriptor arrives), so a new enclave with
+    an old parent behaves as with a new one, less the 10 s on the
+    registry write: an S10 parent whose table hangs stops pinging and has
+    its vaults locked. A new parent with an S10 enclave: the parent's
+    changes are a timeout on its own table write and a log record;
+    nothing the enclave sees differs. A parent that is restarted answers
+    the next hello `fresh`, and the enclave locks every vault then, as
+    before. `deploy/host/` is not touched. The development enclave's
+    `-down-lock` defaults to 30 s: with it the parent's `-heartbeat` has
+    to be well under 30 s (devstack 10 s, the integration test 2 s).
+  - *Open: events lost with a connection.* What was queued on a
+    connection that ends is lost, and so is a lifecycle event raised
+    while there is none; the parent keeps its set of running vaults over
+    a `resume`. A `locked` lost that way leaves the parent renewing the
+    lease of a vault that does not run until the parent restarts. The
+    vaults ended by the lock above are told (`Stopped`, above), so the
+    running set and the leases come right; what the `locked` event
+    carries besides (app key, backup bit) is not sent again, and any
+    other event lost with a connection is still lost. For the member:
+    nothing while unlock requests route to the instance that holds the
+    lease, which opens the vault again; if that parent's heartbeat is
+    also stale for over 90 s, another instance may take the lease. To
+    close it: the enclave reports its running set at the hello (a wire
+    change, for a later release).
+  - *Spec edits this needs* (vettid.org, not made here): VAULT-MESSAGING
+    §12.3, the row "Parent unreachable for 120 s" in its final wording
+    (the rule; "only while a vault runs"; the 10 s check; every vault
+    locked or killed within 10 s more; what a vault loses), and §11.1
+    (a renewal without an answer counts as failed after 10 s);
+    VAULT-HOST-PROTOCOL §3.4 (the write timeout; `Log` dropped when the
+    queue is full, the others wait; the reader's wait not counted), §4.3
+    (the rule; no call until the next `Ping`; the connection closed; the
+    hello changes nothing; unreachable until a `Ping` even with no vault
+    running), §6.2 (`LeaseLost` also when renewals get no answer), §6.3
+    (a ping is counted when read; the row's write has 10 s), §7.3
+    (`Stopped` also for the vaults ended while the parent was
+    unreachable, sent at its next `Ping`; `error` for a killed one), §7.4
+    (the new records), §9 (120 s without a `Ping`; 60 s per frame; 10 s
+    to lock; 10 s registry write; 10 s lease renewal, 5 s retry), §11.3
+    (`Ping`: not asking now locks every vault; the control connection
+    kept open and silent), §12 (new: the parent MUST send `Ping` at least
+    every 30 s and MUST NOT let a table write delay the next; the parent
+    MUST treat a lease renewal without an answer as failed; the enclave
+    MUST lock every vault after 120 s without one, MUST NOT count a
+    connection or a hello as a ping, and MUST NOT call a parent it found
+    unreachable before its next `Ping`), §13 point 1 closed and a new
+    point for the lost events and for `LeaseLost` one vault at a time.
 - Not carried over from vettid.dev: the baked vsock shared secret (the
   parent is untrusted; authenticating it would add nothing), NATS, the
   seed/vote/invite/LEASH proxies, parent-side envelope parsing,

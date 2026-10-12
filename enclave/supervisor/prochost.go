@@ -396,6 +396,34 @@ func (h *procHost) Close(ctx context.Context) {
 	}
 }
 
+// LockAllWithin locks every vault at once (the parent is unreachable,
+// §12.3). Lock by lock it is Lock: the flush, vault.locking, the exit.
+// After d a process that has not answered is killed, so every vault has
+// locked or is gone by then; the call returns once the processes have
+// ended (one that locked gets 5 s more to exit before it is killed too).
+// It returns the vaults it ended, each with Lock's error (nil: locked;
+// vault.ErrSplitBrain; any other: killed).
+func (h *procHost) LockAllWithin(ctx context.Context, d time.Duration) map[string]error {
+	ctx, cancel := context.WithTimeout(ctx, d)
+	defer cancel()
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	ended := map[string]error{}
+	for _, id := range h.Vaults() {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if ran, err := h.Lock(ctx, id); ran {
+				mu.Lock()
+				ended[id] = err
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	return ended
+}
+
 // Kill kills a vault's process without a flush (tests, and a process that
 // misbehaves).
 func (h *procHost) Kill(id string) bool {

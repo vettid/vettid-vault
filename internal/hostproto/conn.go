@@ -12,6 +12,10 @@ import (
 // ErrClosed is returned once the connection has failed or been closed.
 var ErrClosed = errors.New("hostproto: connection closed")
 
+// ErrFull is returned by TryNotify when the frame would have to wait for
+// the writer.
+var ErrFull = errors.New("hostproto: outgoing queue full")
+
 // Handler answers a request frame with the reply's fields (the first being
 // a status). It runs on its own goroutine.
 type Handler func(ctx context.Context, f *Frame) [][]byte
@@ -25,6 +29,7 @@ type Notifier func(f *Frame)
 // whole, in order, in chunks of at most ChunkSize bytes.
 type Conn struct {
 	c        net.Conn
+	opt      Options
 	onReq    Handler
 	onNotify Notifier
 	out      chan []byte
@@ -46,10 +51,34 @@ type Conn struct {
 // MaxInflight bounds concurrently handled peer requests.
 const MaxInflight = 128
 
+// Options are what a side asks of its connection beyond the protocol. The
+// zero value asks nothing (NewConn).
+type Options struct {
+	// WriteTimeout bounds the writing of one frame. A frame that is not
+	// written in that time ends the connection, as any write error does:
+	// a peer that has stopped reading cannot hold the senders for ever.
+	// 0: no bound.
+	WriteTimeout time.Duration
+	// OnWait, if set, is told when the reader starts (true) and stops
+	// (false) waiting because MaxInflight requests of the peer are being
+	// handled: in between, nothing the peer sends is read. It runs on the
+	// reader and must not block.
+	OnWait func(waiting bool)
+	// OnNoDeadline, if set, is told once when the connection refuses a
+	// write deadline: WriteTimeout then bounds nothing. It runs on the
+	// writer and must not block.
+	OnNoDeadline func(err error)
+}
+
 // NewConn starts the reader and writer goroutines.
 func NewConn(c net.Conn, onReq Handler, onNotify Notifier) *Conn {
+	return NewConnOptions(c, onReq, onNotify, Options{})
+}
+
+// NewConnOptions is NewConn with options.
+func NewConnOptions(c net.Conn, onReq Handler, onNotify Notifier, opt Options) *Conn {
 	ctx, cancel := context.WithCancel(context.Background())
-	x := &Conn{c: c, onReq: onReq, onNotify: onNotify, out: make(chan []byte, 256), done: make(chan struct{}),
+	x := &Conn{c: c, opt: opt, onReq: onReq, onNotify: onNotify, out: make(chan []byte, 256), done: make(chan struct{}),
 		ctx: ctx, cancel: cancel, sem: make(chan struct{}, MaxInflight), pending: map[uint64]chan *Frame{}}
 	go x.readLoop()
 	go x.writeLoop()
@@ -103,12 +132,27 @@ func (x *Conn) fail(err error) {
 	})
 }
 
-func (x *Conn) send(f *Frame) error {
+// send queues a frame for the writer. With wait it blocks while the queue
+// is full (for at most WriteTimeout, if one is set: the writer then gets a
+// frame out or ends the connection); without, it returns ErrFull.
+func (x *Conn) send(f *Frame, wait bool) error {
 	b, err := f.Marshal()
 	if err != nil {
 		return err
 	}
 	x.unwritten.Add(1)
+	if !wait {
+		select {
+		case x.out <- b:
+			return nil
+		case <-x.done:
+			x.unwritten.Add(-1)
+			return ErrClosed
+		default:
+			x.unwritten.Add(-1)
+			return ErrFull
+		}
+	}
 	select {
 	case x.out <- b:
 		return nil
@@ -119,9 +163,18 @@ func (x *Conn) send(f *Frame) error {
 }
 
 func (x *Conn) writeLoop() {
+	noDeadline := false
 	for {
 		select {
 		case b := <-x.out:
+			if x.opt.WriteTimeout > 0 && !noDeadline {
+				if err := x.c.SetWriteDeadline(time.Now().Add(x.opt.WriteTimeout)); err != nil {
+					noDeadline = true
+					if x.opt.OnNoDeadline != nil {
+						x.opt.OnNoDeadline(err)
+					}
+				}
+			}
 			err := WriteChunked(x.c, b)
 			x.unwritten.Add(-1)
 			if err != nil {
@@ -155,9 +208,7 @@ func (x *Conn) readLoop() {
 				x.onNotify(f)
 			}
 		default:
-			select {
-			case x.sem <- struct{}{}:
-			case <-x.done:
+			if !x.slot() {
 				return
 			}
 			go func(f *Frame) {
@@ -169,9 +220,29 @@ func (x *Conn) readLoop() {
 				if len(fields) == 0 {
 					fields = Strings(StatusInvalid)
 				}
-				_ = x.send(&Frame{Kind: KindReply, ID: f.ID, Fields: fields})
+				_ = x.send(&Frame{Kind: KindReply, ID: f.ID, Fields: fields}, true)
 			}(f)
 		}
+	}
+}
+
+// slot takes one of the MaxInflight places for a request of the peer,
+// waiting for one if all are taken (false: the connection ended first).
+func (x *Conn) slot() bool {
+	select {
+	case x.sem <- struct{}{}:
+		return true
+	default:
+	}
+	if x.opt.OnWait != nil {
+		x.opt.OnWait(true)
+		defer x.opt.OnWait(false)
+	}
+	select {
+	case x.sem <- struct{}{}:
+		return true
+	case <-x.done:
+		return false
 	}
 }
 
@@ -186,7 +257,7 @@ func (x *Conn) Call(ctx context.Context, kind Kind, fields ...[]byte) ([][]byte,
 	}
 	x.pending[id] = ch
 	x.mu.Unlock()
-	if err := x.send(&Frame{Kind: kind, ID: id, Fields: fields}); err != nil {
+	if err := x.send(&Frame{Kind: kind, ID: id, Fields: fields}, true); err != nil {
 		x.mu.Lock()
 		delete(x.pending, id)
 		x.mu.Unlock()
@@ -208,7 +279,13 @@ func (x *Conn) Call(ctx context.Context, kind Kind, fields ...[]byte) ([][]byte,
 	}
 }
 
-// Notify sends a notification.
+// Notify sends a notification. It waits while the outgoing queue is full.
 func (x *Conn) Notify(kind Kind, fields ...[]byte) error {
-	return x.send(&Frame{Kind: kind, Fields: fields})
+	return x.send(&Frame{Kind: kind, Fields: fields}, true)
+}
+
+// TryNotify sends a notification if the outgoing queue has room for it now
+// and returns ErrFull otherwise: it never waits for the peer.
+func (x *Conn) TryNotify(kind Kind, fields ...[]byte) error {
+	return x.send(&Frame{Kind: kind, Fields: fields}, false)
 }

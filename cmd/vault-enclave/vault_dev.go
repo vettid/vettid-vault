@@ -28,7 +28,7 @@ func platform() (supervisor.Config, error) {
 	egress := flag.String("egress", "127.0.0.1:5001", "parent egress address (TCP)")
 	relayURL := flag.String("relay-url", "https://relay.vettid.test", "relay base URL (its host is allowlisted)")
 	maxVaults := flag.Int("max-vaults", 0, "vault cap (0 = none)")
-	downLock := flag.Duration("down-lock", 30*time.Second, "lock every vault after the parent is gone this long")
+	downLock := flag.Duration("down-lock", 30*time.Second, "lock every vault after this long without a ping from the parent (the parent's -heartbeat must be well under it)")
 	uidBase := flag.Int("vault-uid-base", 0, "run vault processes under uid/gid base+i (needs root; 0: keep ids)")
 	debug := flag.Bool("debug", false, "debug logging")
 	devPolicy := flag.String("dev-device-policy", "", "JSON file extending the TEST device-attestation policy (DEVELOPMENT ONLY; enclavetest.DevDevicePolicy)")

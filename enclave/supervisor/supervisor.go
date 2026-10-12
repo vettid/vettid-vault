@@ -72,7 +72,9 @@ type Config struct {
 	// 0 = no limit.
 	MemoryReserve uint64
 	// DownLock is how long the parent may be unreachable before every
-	// vault is locked (its leases are no longer renewed). Default 120 s.
+	// vault is locked (its leases are no longer renewed): the time
+	// without a Ping from it, connected or not. Default 120 s; the parent
+	// pings every 20 s.
 	DownLock time.Duration
 	LogLevel slog.Level
 	Now      func() time.Time
@@ -123,6 +125,13 @@ type Supervisor struct {
 	// only: which vault it was is told to nobody outside the enclave.
 	vaultLimit atomic.Uint64
 
+	// droppedTold is the count of dropped log records last logged, and
+	// warnedAt the start of the parent's silence last warned about
+	// (maintain only).
+	droppedTold uint64
+	warnedAt    time.Time
+	noDeadline  sync.Once
+
 	statsMu    sync.Mutex
 	statsAt    time.Time
 	statsReply [][]byte
@@ -149,7 +158,7 @@ func New(cfg Config) (*Supervisor, error) {
 		cfg.StatusListURL = StatusListURL
 	}
 	l := &link{}
-	l.set(nil, cfg.Now())
+	l.hear(cfg.Now())
 	boot := make([]byte, 16)
 	if _, err := rand.Read(boot); err != nil {
 		return nil, err
@@ -219,7 +228,7 @@ func (s *Supervisor) Run(ctx context.Context) error {
 			return nil
 		case <-conn.Done():
 		}
-		s.link.set(nil, s.now())
+		s.link.set(nil)
 		s.log.Warn("parent connection lost")
 		if conn, err = s.connect(ctx, m.PCR0); err != nil {
 			if ctx.Err() != nil {
@@ -254,7 +263,7 @@ func (s *Supervisor) dial(ctx context.Context, release string) (*hostproto.Conn,
 	if err != nil {
 		return nil, err
 	}
-	conn := hostproto.NewConn(nc, s.handle, nil)
+	conn := hostproto.NewConnOptions(nc, s.handle, nil, s.connOptions())
 	hctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	r, err := conn.Call(hctx, hostproto.KindHello, []byte(release), []byte(s.bootID))
@@ -277,8 +286,18 @@ func (s *Supervisor) dial(ctx context.Context, release string) (*hostproto.Conn,
 		return nil, ErrInstanceChanged
 	}
 	s.instID = id
-	s.link.set(conn, s.now())
+	s.link.set(conn)
 	return conn, nil
+}
+
+// connOptions are the control connection's: a parent that stops reading
+// loses it, and the time the reader waits at the request limit is told to
+// the link.
+func (s *Supervisor) connOptions() hostproto.Options {
+	return hostproto.Options{WriteTimeout: writeTimeout, OnWait: func(on bool) { s.link.waiting(s.now(), on) },
+		OnNoDeadline: func(err error) {
+			s.noDeadline.Do(func() { s.log.Error("control connection takes no write timeout", "error", errText(err)) })
+		}}
 }
 
 // start creates the enclave instance.
@@ -316,6 +335,10 @@ func (s *Supervisor) start() error {
 
 // handle answers the parent's requests.
 func (s *Supervisor) handle(ctx context.Context, f *hostproto.Frame) [][]byte {
+	if f.Kind == hostproto.KindPing {
+		// Counted when it is read, whatever the answer will be.
+		s.link.ping(s.now())
+	}
 	if f.Kind == hostproto.KindSelftest {
 		return s.handleSelftest(ctx, f)
 	}
@@ -482,8 +505,8 @@ func (s *Supervisor) relieve(ctx context.Context) {
 	}
 }
 
-// maintain rotates ETKs, republishes descriptors, relieves memory pressure
-// and locks every vault when the parent has been gone for too long.
+// maintain rotates ETKs, republishes descriptors, locks every vault when
+// the parent has been silent for too long and relieves memory pressure.
 func (s *Supervisor) maintain(ctx context.Context) {
 	t := time.NewTicker(10 * time.Second)
 	defer t.Stop()
@@ -493,15 +516,104 @@ func (s *Supervisor) maintain(ctx context.Context) {
 			return
 		case <-t.C:
 		}
+		// First: every other step may wait for a parent that does not
+		// answer (a descriptor or a lock's events on a full queue).
+		s.checkParent(ctx, s.host)
 		if err := s.inst.Load().Maintain(); err != nil {
 			s.log.Error("ETK rotation failed", "error", errText(err))
 		}
 		s.pushDescriptor(false)
+		s.reportDropped()
 		s.relieve(ctx)
-		if d := s.link.down(); !d.IsZero() && s.now().Sub(d) > s.cfg.DownLock && len(s.inst.Load().Vaults()) > 0 {
-			s.log.Warn("parent unreachable: locking every vault")
-			s.inst.Load().LockAll(ctx)
+	}
+}
+
+// vaultSet is what checkParent needs of the vault processes (procHost).
+type vaultSet interface {
+	Vaults() []string
+	LockAllWithin(ctx context.Context, d time.Duration) map[string]error
+}
+
+// lockAllWithin is the time every vault has to lock once the parent is
+// found unreachable; a process that has not locked by then is killed.
+const lockAllWithin = 10 * time.Second
+
+// checkParent locks every vault when the parent has not been heard for
+// DownLock (§12.3 "Parent unreachable"): no Ping in that time, whether
+// there is a connection or not, and a new connection changes nothing.
+//
+// The time counts only while a vault runs. With none there is nothing to
+// lock, and the count starts again: a vault unlocked later has the whole
+// of DownLock for the parent's next Ping (after the supervisor's start, or
+// a new session, the parent may forward an unlock before its first Ping).
+// A parent cannot use that to keep a vault unlocked: the count starts
+// again only when no vault runs.
+func (s *Supervisor) checkParent(ctx context.Context, in vaultSet) {
+	now := s.now()
+	ids := in.Vaults()
+	if len(ids) == 0 {
+		s.link.hear(now)
+		return
+	}
+	silent := s.link.silent(now, s.cfg.DownLock)
+	if silent <= s.cfg.DownLock {
+		// Half way there, once for each time the count started: nothing
+		// else says so before every vault on the host is locked. For the
+		// instance: no vault is named.
+		if h := s.link.heardAt(); silent > s.cfg.DownLock/2 && !h.Equal(s.warnedAt) {
+			s.warnedAt = h
+			s.log.Warn("no ping from the parent: every vault is locked if none comes",
+				"silent_s", int(silent.Seconds()), "limit_s", int(s.cfg.DownLock.Seconds()), "vaults", len(ids))
 		}
+		return
+	}
+	s.log.Warn("parent unreachable: locking every vault", "vaults", len(ids))
+	// From here until the parent's next Ping no call to it is made: each
+	// vault's final flush fails at once, as it does without a connection,
+	// instead of waiting callTimeout for an answer. Ending the connection
+	// alone does not do that: Run dials again at once, and a parent whose
+	// process lives answers the hello. It is ended all the same, to free
+	// the calls that wait on it now.
+	s.link.lost()
+	if c := s.link.get(); c != nil {
+		c.Close()
+	}
+	// All at once, and not behind a request that is being processed (it
+	// may itself wait for the parent's egress): no vault runs longer than
+	// lockAllWithin from here. One that a request opens meanwhile is
+	// locked by the next check.
+	ended := in.LockAllWithin(ctx, lockAllWithin)
+	killed := 0
+	for id, err := range ended {
+		// The parent still counts each of them as running and renews its
+		// lease: a vault's own "locked" found no connection, and a killed
+		// process reports nothing. It is told at its next Ping.
+		reason := hostproto.StopLocked
+		switch {
+		case errors.Is(err, vault.ErrSplitBrain):
+			reason = hostproto.StopSplitBrain
+		case err != nil:
+			reason = hostproto.StopError
+			killed++
+		}
+		s.forget(id)
+		s.link.stop(id, reason)
+	}
+	s.log.Warn("parent unreachable: every vault locked", "vaults", len(ended), "killed", killed)
+}
+
+// reportDropped logs how many log records were dropped because the parent
+// was not reading (a count from the supervisor's start), when it grew. The
+// report is a log record like any other and can be dropped or find no
+// connection: the count is then told at a later check.
+func (s *Supervisor) reportDropped() {
+	n := s.link.logDropped.Load()
+	if n == s.droppedTold {
+		return
+	}
+	if s.link.logRecord(hostproto.Strings(slog.LevelWarn.String(), "log records dropped: the parent was not reading",
+		"count", strconv.FormatUint(n, 10))...) {
+		s.droppedTold = n
 	}
 }
 

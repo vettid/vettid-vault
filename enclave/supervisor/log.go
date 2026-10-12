@@ -37,7 +37,7 @@ func (h *logHandler) Handle(_ context.Context, r slog.Record) error {
 		add(a)
 	}
 	r.Attrs(add)
-	h.l.notify(hostproto.KindLog, fields...)
+	h.l.logRecord(fields...)
 	line := r.Level.String() + " " + r.Message
 	for i := 2; i+1 < len(fields); i += 2 {
 		line += " " + string(fields[i]) + "=" + string(fields[i+1])

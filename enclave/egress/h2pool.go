@@ -21,9 +21,10 @@ import (
 // context ends.
 //
 // A connection the host is closing (GOAWAY) takes no new requests and
-// does not count toward max while its last requests end; at most max of
-// those are kept, and new connections are opened at a bounded rate, so
-// the host does not choose the number of connections either way. A
+// does not count toward max for h2Drain, while its last requests end;
+// then it is closed. At most max are let off the count in any
+// h2DrainWindow, and new connections are opened at a bounded rate, so the
+// host does not choose the number of connections either way. A
 // connection that answers nothing is closed: by the HTTP/2 ping when the
 // host is gone, and after h2Stall without an answer in any case.
 //
@@ -37,11 +38,13 @@ type h2Pool struct {
 	max        int
 	minStreams int
 	stall      time.Duration
+	drainFor   time.Duration
 
 	mu      sync.Mutex
 	conns   []*h2Conn
-	dial    *h2Dial // the dial in progress, if any
-	tokens  float64 // connections that may be opened now
+	dial    *h2Dial     // the dial in progress, if any
+	drained []time.Time // when connections last stopped counting as closing
+	tokens  float64     // connections that may be opened now
 	tokenAt time.Time
 	dialed  uint64
 	waited  uint64
@@ -52,8 +55,17 @@ type h2Pool struct {
 	waitCur, waitPrev time.Duration
 
 	wakeMu  sync.Mutex
-	waiters []chan struct{} // requests waiting for a stream, oldest first
-	counted int             // the first so many are counted as refused a connection
+	waiters []*h2Waiter // requests waiting for a stream, oldest first
+	counted int         // the first so many are counted as refused a connection
+	seq     uint64      // the last waiter's number
+	failSeq uint64      // waiters up to this number waited for a dial that failed,
+	failErr error       // with this error
+	ticking bool
+}
+
+type h2Waiter struct {
+	ch  chan struct{}
+	seq uint64
 }
 
 type h2Conn struct {
@@ -70,18 +82,24 @@ type h2Conn struct {
 	// since is when the connection last answered a request, or was given
 	// one while it had none (Unix nanoseconds).
 	since atomic.Int64
+	// closing is when the connection was first seen to take no more
+	// requests below its limit; exempt if it does not count toward max
+	// for h2Drain from then.
+	closing time.Time
+	exempt  bool
 }
 
 type h2Dial struct {
 	done chan struct{}
 	err  error
+	seq  uint64 // the last request waiting when the dial started
 }
 
 // Stats describes the shared HTTP/2 connections to one host.
 type Stats struct {
 	// Conns is the number of open connections, Draining those of them
-	// that the host is closing; Dialed counts every connection opened
-	// since the start.
+	// that the host is closing and that do not count toward MaxConns
+	// yet; Dialed counts every connection opened since the start.
 	Conns    int
 	Draining int
 	Dialed   uint64
@@ -114,6 +132,22 @@ const (
 	// request by closing them, and the loss of every connection twice
 	// over is still replaced at once.
 	h2DialRate = 2.0
+	// h2Drain is how long a connection the host is closing (it takes
+	// no more requests below its limit) may take to end its requests,
+	// and does not count toward max meanwhile: long-polls end within
+	// 25 s. After that it is closed, which fails what it still holds
+	// (requests older than h2Drain, to be sent again by the vault).
+	// Only max connections are let off the count in any h2DrainWindow;
+	// further ones count while they close. So a host that closes its
+	// connections, or lowers their stream limit once they are full, to
+	// be given more of them, has max more for h2Drain once in
+	// h2DrainWindow, and max otherwise.
+	h2Drain       = 30 * time.Second
+	h2DrainWindow = 5 * time.Minute
+	// h2Tick is how often the longest-waiting request looks again
+	// without being woken: the library does not report every change (a
+	// stream limit announced late and below its assumption).
+	h2Tick = time.Second
 	// h2Stall is how long a connection may hold requests without
 	// answering any before it is closed: longer than any request lives
 	// (80 s, the relay client of the supervisor).
@@ -143,7 +177,7 @@ const (
 
 func newH2Pool(tr *http.Transport, host string, max, minStreams int) *h2Pool {
 	tr.HTTP2 = &http.HTTP2Config{SendPingTimeout: h2PingIdle, PingTimeout: h2PingTimeout}
-	return &h2Pool{tr: tr, addr: net.JoinHostPort(host, "443"), max: max, minStreams: minStreams, stall: h2Stall,
+	return &h2Pool{tr: tr, addr: net.JoinHostPort(host, "443"), max: max, minStreams: minStreams, stall: h2Stall, drainFor: h2Drain,
 		tokens: float64(2 * max), tokenAt: time.Now()}
 }
 
@@ -202,7 +236,7 @@ func unprocessed(err error) bool {
 // the one RoundTrip that follows).
 func (p *h2Pool) acquire(ctx context.Context) (*h2Conn, error) {
 	var since time.Time
-	var me chan struct{}
+	var me *h2Waiter
 	var mine *h2Dial // the dial this request started
 	// leave ends the wait: this request's place in the queue goes, and
 	// the next one is woken in its stead, as a stream it was woken for
@@ -215,7 +249,16 @@ func (p *h2Pool) acquire(ctx context.Context) (*h2Conn, error) {
 		p.wakeOne()
 	}
 	for {
+		// A failed dial fails the request that started it and those
+		// that were waiting then; later ones dial again. Looked at
+		// before anything else: a request woken for a stream as well
+		// must not miss it and dial once more.
 		p.mu.Lock()
+		if err := p.dialFailed(me, mine); err != nil {
+			p.mu.Unlock()
+			leave()
+			return nil, err
+		}
 		k := p.pickLocked(time.Now())
 		if k.c == nil && me == nil {
 			p.waited++
@@ -248,7 +291,9 @@ func (p *h2Pool) acquire(ctx context.Context) (*h2Conn, error) {
 		}
 		var later <-chan time.Time
 		var t *time.Timer
-		if k.after > 0 {
+		if k.after > 0 && p.first(me) {
+			// The rate allows a connection again after k.after: the
+			// longest-waiting request opens it, and wakes the next.
 			t = time.NewTimer(k.after)
 			later = t.C
 		}
@@ -256,12 +301,9 @@ func (p *h2Pool) acquire(ctx context.Context) (*h2Conn, error) {
 		select {
 		case <-ctx.Done():
 			err = ctx.Err()
-		case <-me:
+		case <-me.ch:
 		case <-later:
 		case <-done:
-			// A failed dial fails the request that started it; the
-			// others try again within their own time.
-			err, mine = mine.err, nil
 		}
 		if t != nil {
 			t.Stop()
@@ -271,6 +313,29 @@ func (p *h2Pool) acquire(ctx context.Context) (*h2Conn, error) {
 			return nil, err
 		}
 	}
+}
+
+// dialFailed returns the error of a failed dial that this request waited
+// for: its own, or one that started after it was queued.
+func (p *h2Pool) dialFailed(me *h2Waiter, mine *h2Dial) error {
+	if mine != nil {
+		select {
+		case <-mine.done:
+			if mine.err != nil {
+				return mine.err
+			}
+		default:
+		}
+	}
+	if me == nil {
+		return nil
+	}
+	p.wakeMu.Lock()
+	defer p.wakeMu.Unlock()
+	if me.seq <= p.failSeq {
+		return p.failErr
+	}
+	return nil
 }
 
 // picked is what pickLocked found: the connection c with a stream
@@ -317,6 +382,13 @@ func (p *h2Pool) pickLocked(now time.Time) (k picked) {
 			// frees the place.
 			k.dead = append(k.dead, x.cc)
 			continue
+		case !x.closing.IsZero() && now.Sub(x.closing) > p.drainFor:
+			// It stopped taking requests h2Drain ago and still holds
+			// some: none of them is younger than that, and a
+			// long-poll ends in 25 s. This is no connection being
+			// closed, but one kept open to be given another.
+			k.dead = append(k.dead, x.cc)
+			continue
 		}
 		live = append(live, x)
 		settled := steady && (free+used != h2Unsettled || x.answered.Load())
@@ -339,9 +411,21 @@ func (p *h2Pool) pickLocked(now time.Time) (k picked) {
 			}
 			k.c = x
 		}
+		if free > 0 {
+			x.closing, x.exempt = time.Time{}, false
+		} else if x.exact && steady && used < x.limit && x.closing.IsZero() {
+			// It takes no more requests below its limit: the host
+			// is closing it (or has lowered the limit).
+			for len(p.drained) > 0 && now.Sub(p.drained[0]) > h2DrainWindow {
+				p.drained = p.drained[1:]
+			}
+			x.closing, x.exempt = now, len(p.drained) < p.max
+			if x.exempt {
+				p.drained = append(p.drained, now)
+			}
+		}
 		switch {
-		case x.exact && steady && free == 0 && used < x.limit:
-			// Draining: the host is closing it.
+		case x.draining(now, p.drainFor):
 		case x.exact:
 			small = small || x.limit < p.minStreams
 			counted++
@@ -366,18 +450,26 @@ func (p *h2Pool) pickLocked(now time.Time) (k picked) {
 	case unsettled && !late:
 		// A new connection that has not announced its streams yet (a
 		// moment, as a rule): wait for that, as for a dial.
-	case counted >= p.max, len(p.conns) >= 2*p.max:
+	case counted >= p.max:
 		k.refused = &p.atMax
 	case small, unsettled:
 		k.refused = &p.atMin
 	case p.tokens < 1:
 		k.refused, k.after = &p.atMax, time.Duration((1-p.tokens)/h2DialRate*float64(time.Second))+time.Millisecond
 	default:
-		p.dial = &h2Dial{done: make(chan struct{})}
+		p.wakeMu.Lock()
+		p.dial = &h2Dial{done: make(chan struct{}), seq: p.seq}
+		p.wakeMu.Unlock()
 		go p.open(p.dial)
 		k.dial, k.mine = p.dial, true
 	}
 	return k
+}
+
+// draining reports whether the connection is being closed by the host
+// and does not count toward max yet.
+func (x *h2Conn) draining(now time.Time, d time.Duration) bool {
+	return x.exempt && now.Sub(x.closing) <= d
 }
 
 // open dials one connection. It does not use a request's context: other
@@ -396,26 +488,39 @@ func (p *h2Pool) open(d *h2Dial) {
 	if err == nil {
 		p.conns = append(p.conns, x)
 		p.dialed++
-		p.tokens--
 	}
+	p.tokens-- // a failed dial counts too: a host that is down is not dialed for every request
 	d.err = err
 	p.dial = nil
+	if err != nil {
+		// Every request that was waiting when the dial started fails
+		// with it (they would wait for the next dial as long, and the
+		// next); those that came later try again.
+		p.wakeMu.Lock()
+		p.failSeq, p.failErr = d.seq, err
+		for _, w := range p.waiters {
+			wake(w)
+		}
+		p.wakeMu.Unlock()
+	}
 	p.mu.Unlock()
 	close(d.done)
-	p.wakeOne()
 	if err != nil {
 		return
 	}
+	p.wakeOne()
 	// The requests waiting for the host's stream limit are woken when
 	// it shows; the library does not tell (unless the limit is above
-	// its assumption).
-	for end := time.Now().Add(h2Settle); cc.Err() == nil; time.Sleep(time.Millisecond) {
+	// its assumption). After h2Settle it is looked for less often.
+	every := time.Millisecond
+	for end := time.Now().Add(h2Settle); cc.Err() == nil; time.Sleep(every) {
 		if used, free, steady := x.state(); steady && used+free != h2Unsettled || x.answered.Load() {
 			break
 		}
-		if time.Now().After(end) {
+		if every == time.Millisecond && time.Now().After(end) {
 			x.late.Store(true)
-			break
+			every = 20 * time.Millisecond
+			p.wakeOne()
 		}
 	}
 	p.wakeOne()
@@ -432,23 +537,56 @@ func (p *h2Pool) changed(*http.ClientConn) { p.wakeOne() }
 func (p *h2Pool) wakeOne() {
 	p.wakeMu.Lock()
 	if len(p.waiters) > 0 {
-		select {
-		case p.waiters[0] <- struct{}{}:
-		default:
-		}
+		wake(p.waiters[0])
 	}
 	p.wakeMu.Unlock()
 }
 
-func (p *h2Pool) queue() chan struct{} {
-	me := make(chan struct{}, 1)
+func wake(w *h2Waiter) {
+	select {
+	case w.ch <- struct{}{}:
+	default:
+	}
+}
+
+func (p *h2Pool) queue() *h2Waiter {
 	p.wakeMu.Lock()
+	defer p.wakeMu.Unlock()
+	p.seq++
+	me := &h2Waiter{ch: make(chan struct{}, 1), seq: p.seq}
 	p.waiters = append(p.waiters, me)
-	p.wakeMu.Unlock()
+	if !p.ticking {
+		p.ticking = true
+		go p.tick()
+	}
 	return me
 }
 
-func (p *h2Pool) unqueue(me chan struct{}) {
+// tick wakes the longest-waiting request every h2Tick while there is one
+// (one timer for all of them), so that a change the library did not
+// report is found all the same; it gets a stream and wakes the next, or
+// goes on waiting.
+func (p *h2Pool) tick() {
+	for {
+		time.Sleep(h2Tick)
+		p.wakeMu.Lock()
+		if len(p.waiters) == 0 {
+			p.ticking = false
+			p.wakeMu.Unlock()
+			return
+		}
+		wake(p.waiters[0])
+		p.wakeMu.Unlock()
+	}
+}
+
+func (p *h2Pool) first(me *h2Waiter) bool {
+	p.wakeMu.Lock()
+	defer p.wakeMu.Unlock()
+	return len(p.waiters) > 0 && p.waiters[0] == me
+}
+
+func (p *h2Pool) unqueue(me *h2Waiter) {
 	p.wakeMu.Lock()
 	for i, w := range p.waiters {
 		if w == me {
@@ -504,7 +642,7 @@ func (p *h2Pool) stats() Stats {
 	s := Stats{Dialed: p.dialed, Waiting: waiting, Waited: p.waited, WaitMax: max(p.waitCur, p.waitPrev),
 		RefusedMaxConns: p.atMax, RefusedMinStreams: p.atMin}
 	for _, x := range p.conns {
-		used, free, _ := x.state()
+		used, _, _ := x.state()
 		if x.cc.Err() != nil {
 			continue
 		}
@@ -513,7 +651,7 @@ func (p *h2Pool) stats() Stats {
 		if !x.exact {
 			continue
 		}
-		if free == 0 && used < x.limit {
+		if x.draining(time.Now(), p.drainFor) {
 			s.Draining++
 		}
 		if s.Streams == 0 || x.limit < s.Streams {

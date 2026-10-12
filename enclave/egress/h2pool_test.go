@@ -270,14 +270,15 @@ func TestReconnect(t *testing.T) {
 }
 
 // TestDialFails: when no connection can be opened, a failed dial fails
-// the request that started it and no other; the others dial in turn, one
-// at a time, within their own time.
+// the request that started it and every request that was waiting when it
+// started; they do not each dial in turn (and wait as long each time).
+// Dials are one at a time, and count toward the rate like any other.
 func TestDialFails(t *testing.T) {
 	ca := newCA(t, "test root")
 	errDown := errors.New("forwarder down")
 	var dials, now, most atomic.Int32
 	gate := make(chan struct{})
-	tr, err := New(Config{Hosts: []Host{{Name: "relay.example", Roots: ca.pool, HTTP2: true}},
+	tr, err := New(Config{Hosts: []Host{{Name: "relay.example", Roots: ca.pool, HTTP2: true}}, MaxConns: 2,
 		Dialer: DialerFunc(func(context.Context, string, uint16) (net.Conn, error) {
 			dials.Add(1)
 			most.Store(max(most.Load(), now.Add(1)))
@@ -289,24 +290,38 @@ func TestDialFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := tr.Client(10 * time.Second)
-	var wg sync.WaitGroup
-	for i := 0; i < 20; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if _, err := get(c, "https://relay.example/x"); !errors.Is(err, errDown) {
-				t.Errorf("request: %v", err)
-			}
-		}()
+	burst := func(n int) func() {
+		var wg sync.WaitGroup
+		for i := 0; i < n; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if _, err := get(c, "https://relay.example/x"); !errors.Is(err, errDown) {
+					t.Errorf("request: %v", err)
+				}
+			}()
+		}
+		return wg.Wait
 	}
-	eventually(t, "the requests to wait for the dial", func() bool { return tr.Stats("relay.example").Waiting == 20 })
+	wait := burst(200)
+	eventually(t, "the requests to wait for the dial", func() bool { return tr.Stats("relay.example").Waiting == 200 })
 	if n := dials.Load(); n != 1 {
-		t.Errorf("%d dials for 20 requests waiting together", n)
+		t.Errorf("%d dials for 200 requests waiting together", n)
 	}
 	close(gate)
-	wg.Wait()
-	if dials.Load() != 20 || most.Load() != 1 {
-		t.Errorf("%d dials for 20 requests, %d at a time", dials.Load(), most.Load())
+	wait()
+	// The first dial was started by the first request, before the
+	// others were waiting; the second fails all of them.
+	if n := dials.Load(); n > 3 || most.Load() != 1 {
+		t.Errorf("%d dials for 200 requests, %d at a time", n, most.Load())
+	}
+	// Failed dials draw on the rate: four are allowed at once here.
+	t0 := time.Now()
+	for dials.Load() < 6 {
+		burst(1)()
+	}
+	if d := time.Since(t0); d < 500*time.Millisecond {
+		t.Errorf("6 failed dials within %v of each other", d)
 	}
 }
 
@@ -579,6 +594,26 @@ func TestUnprocessedIsResent(t *testing.T) {
 	if _, err := c.Get("https://relay.example/x"); err == nil || !unprocessed(errors.Unwrap(err)) {
 		t.Errorf("request refused twice: %v", err)
 	}
+	// A connection that stopped taking requests between a request's
+	// taking a stream and its being sent (the pool's connections are
+	// picked under a lock, so this is made by hand).
+	p := tr.hosts["relay.example"].h2
+	cc, err := p.tr.NewClientConn(context.Background(), "https", p.addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cc.Close()
+	eventually(t, "the stream limit", func() bool { return cc.Available() == 128 })
+	if err := cc.Reserve(); err != nil {
+		t.Fatal(err)
+	}
+	last := s.all()[len(s.all())-1]
+	last.goAway(0, 0)
+	eventually(t, "the GOAWAY", func() bool { return cc.Available() == 0 })
+	req0, _ := http.NewRequest(http.MethodGet, "https://relay.example/x", nil)
+	if _, err := cc.RoundTrip(req0); err == nil || err.Error() != "http2: client conn not usable" || !unprocessed(err) {
+		t.Errorf("request on a connection that stopped taking requests: %v", err)
+	}
 	// A body that cannot be sent again is not.
 	s.all()[1].refuse.Store(1)
 	req, _ := http.NewRequest(http.MethodPost, "https://relay.example/x", io.NopCloser(strings.NewReader("body")))
@@ -610,6 +645,116 @@ func TestLateSettings(t *testing.T) {
 	if s.accepted.Load() != 1 {
 		t.Errorf("%d connections in the end", s.accepted.Load())
 	}
+}
+
+// TestLateSettingsBelowAssumed: a limit announced late and below the
+// library's assumption is reported by no hook (availability falls). The
+// requests waiting for it must still be woken.
+func TestLateSettingsBelowAssumed(t *testing.T) {
+	ca := newCA(t, "test root")
+	s := newRawSrv(t, ca, 50)
+	s.settingsDelay.Store(int64(h2Settle + 300*time.Millisecond))
+	tr := s.pool(t, ca, 0, 0)
+	c := tr.Client(30 * time.Second)
+	wait := fire(c, 120, 20*time.Second)
+	eventually(t, "every request at the host", func() bool { return s.parked() == 120 })
+	if st := tr.Stats("relay.example"); st.Streams != 50 || st.Conns != 3 || st.Waiting != 0 {
+		t.Errorf("stats %+v", st)
+	}
+	s.respondAll()
+	if ok, bad, sample := wait(); bad != 0 {
+		t.Errorf("%d ok, %d failed (%s)", ok, bad, sample)
+	}
+}
+
+// TestTick: a waiting request looks again every h2Tick even if nothing
+// wakes it.
+func TestTick(t *testing.T) {
+	ca := newCA(t, "test root")
+	s := newRawSrv(t, ca, 32)
+	tr := s.pool(t, ca, 1, 0)
+	p := tr.hosts["relay.example"].h2
+	c := tr.Client(30 * time.Second)
+	wait := fire(c, 33, 20*time.Second)
+	eventually(t, "one request waiting at the bound", func() bool { return s.parked() == 32 && tr.Stats("relay.example").Waiting == 1 })
+	p.mu.Lock()
+	p.max = 2 // nothing tells the waiting request
+	p.mu.Unlock()
+	t0 := time.Now()
+	eventually(t, "the waiting request", func() bool { return s.parked() == 33 })
+	if d := time.Since(t0); d > 2*h2Tick {
+		t.Errorf("woken after %v", d)
+	}
+	s.respondAll()
+	_, _, _ = wait()
+	eventually(t, "the ticker to stop", func() bool {
+		p.wakeMu.Lock()
+		defer p.wakeMu.Unlock()
+		return !p.ticking
+	})
+}
+
+// TestDrainingIsBounded: a host that lowers the stream limit of every
+// connection once it is full, and keeps one request on each (it then
+// looks as if it were closing: no free stream, below its limit), is let
+// off the count for max connections once; each is closed after h2Drain.
+// It is not given twice the bound for as long as it likes.
+func TestDrainingIsBounded(t *testing.T) {
+	const conns, streams = 2, 32
+	ca := newCA(t, "test root")
+	s := newRawSrv(t, ca, streams)
+	tr := s.pool(t, ca, conns, 0)
+	p := tr.hosts["relay.example"].h2
+	p.drainFor = 500 * time.Millisecond
+	c := tr.Client(30 * time.Second)
+	wait := fire(c, 600, 6*time.Second)
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() { // the host: a full connection is told 1, and all but one of its requests answered
+		defer close(done)
+		told := map[*rawConn]bool{}
+		for {
+			select {
+			case <-stop:
+				return
+			case <-time.After(5 * time.Millisecond):
+			}
+			for _, rc := range s.all() {
+				if !told[rc] && rc.nOpen() == streams {
+					told[rc] = true
+					rc.settings(1)
+					rc.mu.Lock()
+					var ids []uint32
+					for id := range rc.open {
+						ids = append(ids, id)
+					}
+					rc.mu.Unlock()
+					for _, id := range ids[1:] {
+						rc.respond(id)
+					}
+				}
+			}
+		}
+	}()
+	eventually(t, "twice the bound, while the first connections are let off", func() bool { return tr.Stats("relay.example").Conns == 2*conns })
+	// From then on: the bound.
+	time.Sleep(p.drainFor + 2*h2Tick)
+	most := 0
+	for end := time.Now().Add(2 * time.Second); time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
+		st := tr.Stats("relay.example")
+		most = max(most, st.Conns)
+		if st.Draining != 0 {
+			t.Fatalf("a connection is let off again: %+v", st)
+		}
+	}
+	if most > conns || s.accepted.Load() <= 2*conns {
+		t.Errorf("up to %d connections open at a time after the first were let off (%d accepted in all); want %d at most, and new ones for those closed", most, s.accepted.Load(), conns)
+	}
+	close(stop)
+	<-done
+	s.park.Store(false)
+	s.respondAll()
+	_, _, _ = wait()
 }
 
 // TestOneStream: at a limit of one stream the connection is busy and

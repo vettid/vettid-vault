@@ -250,13 +250,24 @@ Fetched with `openssl s_client -showcerts` and verified with Go's
     announces fewer than 32 streams, or has not announced any: a new
     connection carries one request until its limit can be read (the
     library does not say when SETTINGS arrived), fewer than 32 after a
-    second. New connections at 2 a second after a burst of 32. A
-    connection the host is closing (GOAWAY) takes no new requests and
-    does not count toward the 16 while its requests end; at most 16 such
-    are kept (32 connections in all). A full connection that is closing
-    cannot be told from a full one until one of its requests ends.
+    second. Connections are opened at 2 a second after a burst of 32,
+    failed dials included.
+  - *Connections the host is closing* (GOAWAY: no new requests, below
+    its limit) do not count toward the 16 for 30 s, while their requests
+    end, and are then closed (a long-poll ends in 25 s; a request still
+    on one fails and is sent again by the vault). Only 16 connections are
+    let off the count in any 5 minutes; further ones count while they
+    close. So there can be up to 32 connections for 30 s, once in 5
+    minutes, and 16 otherwise, also against a host that closes its
+    connections, or lowers their stream limit once they are full, in
+    order to be given more. A full connection that is closing cannot be
+    told from a full one until one of its requests ends.
   - *At a bound* requests wait for a stream, oldest first, until their
-    own deadline (75 s for a relay request), and are counted.
+    own deadline (75 s for a relay request), and are counted. The
+    longest-waiting request looks again every second even if nothing
+    woke it (the library does not report every change).
+  - *A dial that fails* fails the request that started it and every
+    request that was waiting when it started; later ones dial again.
   - *Connections that stop answering.* Every connection is pinged after
     15 s without a frame from the host and closed if the ping is not
     answered in 10 s (`http.HTTP2Config`); a busy connection is never
@@ -264,6 +275,16 @@ Fetched with `openssl s_client -showcerts` and verified with Go's
     timed-out requests' streams for good (the library holds a cancelled
     stream until a ping is answered) and its place among the 16. A
     connection that answers pings but no request for 90 s is closed too.
+  - *A host that announces exactly 100 streams.* 100 is what the library
+    assumes before SETTINGS arrive, and it does not say when they did
+    (neither `ClientConn` nor its state hook), so such a connection is
+    trusted only once it has answered a request. If its first requests
+    are all long-polls it carries 1, after a second 31, until one is
+    answered (up to 25 s), and no other connection is opened meanwhile.
+    The relay's and the push gateway's load balancers announce 128;
+    android.googleapis.com announces 100 and its first request is quick.
+    A relay front end that announced 100 would show as `relay_streams`
+    0 or 100 with `relay_waiting` above 0 in the metrics record.
   - *Re-sending.* A request the host did not process (a GOAWAY that
     names it, REFUSED_STREAM, a connection that stopped taking requests)
     is sent once more, as the library's pool did. Any other failure goes

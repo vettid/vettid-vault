@@ -40,7 +40,7 @@ func TestMetrics(t *testing.T) {
 	e.mu.Lock()
 	e.stats = []string{hostproto.StatusOK, hostproto.StatRelayConns, "8", hostproto.StatRelayDialed, "11", hostproto.StatRelayStreams, "128",
 		hostproto.StatRelayInFlight, "900", hostproto.StatRelayWaiting, "2", hostproto.StatRelayWaitMaxMS, "37", hostproto.StatRelayErrors, "5",
-		hostproto.StatRelayRefusedMax, "3", hostproto.StatRelayRefusedMin, "1", "vault_id", "7", hostproto.StatRelayConns + "x", "9"}
+		hostproto.StatRelayRefusedMax, "3", hostproto.StatRelayRefusedMin, "1", hostproto.StatRelayVaultLimit, "2", "vault_id", "7", hostproto.StatRelayConns + "x", "9"}
 	e.mu.Unlock()
 	c, err := net.Dial("tcp", h.egress)
 	if err != nil {
@@ -62,7 +62,8 @@ func TestMetrics(t *testing.T) {
 	})
 	for k, want := range map[string]float64{parent.MetricRelayInFlight: 900, parent.MetricRelayWaitMax: 37, parent.MetricRelayRefused: 4,
 		parent.MetricEgressOpen + "KMS": 0, parent.MetricEgressOpen + "Push": 0, parent.MetricEgressOpen + "Other": 0,
-		hostproto.StatRelayConns: 8, hostproto.StatRelayStreams: 128, hostproto.StatRelayWaiting: 2, hostproto.StatRelayRefusedMin: 1} {
+		hostproto.StatRelayConns: 8, hostproto.StatRelayStreams: 128, hostproto.StatRelayWaiting: 2, hostproto.StatRelayRefusedMin: 1,
+		hostproto.StatRelayVaultLimit: 2} {
 		if rec[k] != want {
 			t.Errorf("%s = %v, want %v", k, rec[k], want)
 		}

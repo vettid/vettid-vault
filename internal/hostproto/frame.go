@@ -38,7 +38,10 @@ type Kind uint8
 
 // Frame kinds. Requests from the enclave to the parent:
 const (
-	// Hello: [release]; reply [status, instance_id].
+	// Hello: [release (PCR0), boot_id]; reply [status, instance_id, mode]
+	// (mode: "fresh" from a parent that has seen no enclave since it
+	// started, "resume" otherwise, "selftest" for the hardware smoke
+	// test).
 	KindHello Kind = 0x01
 	// StoreGet: [key]; reply [status, data, version].
 	KindStoreGet Kind = 0x02
@@ -91,6 +94,7 @@ const (
 	StatRelayErrors     = "relay_errors"              // counter: requests the relay did not answer
 	StatRelayRefusedMax = "relay_refused_max_conns"   // counter: requests that waited at the connection bound
 	StatRelayRefusedMin = "relay_refused_min_streams" // counter: ... because the relay announced too few streams
+	StatRelayVaultLimit = "relay_vault_limit"         // counter: vault processes that reached their own limit of requests in flight (each once)
 )
 
 // Notifications from the enclave to the parent:

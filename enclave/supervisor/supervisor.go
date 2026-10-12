@@ -118,6 +118,10 @@ type Supervisor struct {
 	relayHTTP *http.Client
 	relays    map[string]bool
 	relayErrs atomic.Uint64 // relay requests that got no answer
+	// vaultLimit counts the vault processes that reached their limit of
+	// relay requests in flight, each once. A count for the instance
+	// only: which vault it was is told to nobody outside the enclave.
+	vaultLimit atomic.Uint64
 
 	statsMu    sync.Mutex
 	statsAt    time.Time
@@ -570,6 +574,7 @@ func (s *Supervisor) readStats() [][]byte {
 	add(hostproto.StatRelayErrors, s.relayErrs.Load())
 	add(hostproto.StatRelayRefusedMax, t.RefusedMaxConns)
 	add(hostproto.StatRelayRefusedMin, t.RefusedMinStreams)
+	add(hostproto.StatRelayVaultLimit, s.vaultLimit.Load())
 	return out
 }
 

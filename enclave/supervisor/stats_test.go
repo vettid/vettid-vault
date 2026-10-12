@@ -1,6 +1,7 @@
 package supervisor
 
 import (
+	"bytes"
 	"context"
 	"crypto/x509"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -54,7 +56,7 @@ func TestRelayStats(t *testing.T) {
 	}
 	want := map[string]string{hostproto.StatRelayConns: "0", hostproto.StatRelayDialed: "0", hostproto.StatRelayStreams: "0",
 		hostproto.StatRelayInFlight: "0", hostproto.StatRelayWaiting: "0", hostproto.StatRelayErrors: "1",
-		hostproto.StatRelayRefusedMax: "0", hostproto.StatRelayRefusedMin: "0"}
+		hostproto.StatRelayRefusedMax: "0", hostproto.StatRelayRefusedMin: "0", hostproto.StatRelayVaultLimit: "0"}
 	for k, v := range want {
 		if got[k] != v {
 			t.Errorf("%s = %q, want %s", k, got[k], v)
@@ -72,7 +74,7 @@ func TestRelayStats(t *testing.T) {
 		t.Errorf("stats asked again at once: %q", again)
 	}
 	s.statsAt = s.statsAt.Add(-statsEvery)
-	if again := s.stats(); string(again[len(again)-5]) != "2" {
+	if again := s.stats(); string(again[len(again)-7]) != "2" {
 		t.Errorf("stats a second later: %q", again)
 	}
 }
@@ -93,8 +95,12 @@ func TestVaultEgressLimit(t *testing.T) {
 			return nil, r.Context().Err()
 		}
 	})
+	// The supervisor's log as the parent gets it (the Log notification
+	// carries exactly these records).
+	var logMu sync.Mutex
+	var logged bytes.Buffer
 	s := &Supervisor{relays: map[string]bool{"relay.example": true}, relayHTTP: &http.Client{Transport: rt}, activity: map[string]time.Time{},
-		log: slog.New(slog.DiscardHandler)}
+		log: slog.New(slog.NewTextHandler(lockedWriter{&logMu, &logged}, &slog.HandlerOptions{Level: slog.LevelDebug}))}
 	h := &procHost{s: s}
 	mine, other := &vproc{h: h, vaultID: "aaaa"}, &vproc{h: h, vaultID: "bbbb"}
 	get := func(ctx context.Context, p *vproc) string {
@@ -142,6 +148,45 @@ func TestVaultEgressLimit(t *testing.T) {
 	if ok.Load() != maxVaultEgress+12 {
 		t.Errorf("%d of %d requests answered once the first ended", ok.Load(), maxVaultEgress+12)
 	}
+	// The parent learns nothing per vault about relay requests
+	// (VAULT-MESSAGING §2.2, §12.2.1): a vault at its limit is counted,
+	// once, for the instance, and no log record says which vault it was
+	// (or anything at all about it).
+	logMu.Lock()
+	out := logged.String()
+	logMu.Unlock()
+	if strings.Contains(out, "aaaa") || strings.Contains(out, "bbbb") || strings.Contains(out, "vault_id") || strings.Contains(out, "limit") {
+		t.Errorf("the log names a vault at its limit: %q", out)
+	}
+	if n := s.vaultLimit.Load(); n != 1 {
+		t.Errorf("%d vault processes counted at their limit; want 1 (once per process, and not the other vault)", n)
+	}
+	s.cfg.Egress, _ = egress.New(egress.Config{Hosts: []egress.Host{{Name: "relay.example", Roots: x509.NewCertPool(), HTTP2: true}},
+		Dialer: egress.DialerFunc(func(context.Context, string, uint16) (net.Conn, error) { return nil, errors.New("down") })})
+	r := s.stats()
+	found := false
+	for i := 1; i+1 < len(r); i += 2 {
+		if strings.Contains(string(r[i]), "aaaa") || strings.Contains(string(r[i+1]), "aaaa") {
+			t.Errorf("the stats name a vault: %q", r)
+		}
+		if string(r[i]) == hostproto.StatRelayVaultLimit {
+			found = string(r[i+1]) == "1"
+		}
+	}
+	if !found {
+		t.Errorf("stats without %s = 1: %q", hostproto.StatRelayVaultLimit, r)
+	}
+}
+
+type lockedWriter struct {
+	mu *sync.Mutex
+	b  *bytes.Buffer
+}
+
+func (w lockedWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.b.Write(p)
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)

@@ -71,6 +71,26 @@ const (
 	// Selftest: [request JSON]; reply [status, report JSON]. Only after a
 	// Hello answered "selftest" (the hardware smoke test, docs/SMOKE.md).
 	KindSelftest Kind = 0x14
+	// Stats: []; reply [status, name, value, ...]: counts of the shared
+	// relay connections and of relay requests (the Stat names below;
+	// decimal values). Nothing in it names a vault, a mailbox or an
+	// address. The enclave answers from a snapshot it renews at most
+	// once a second, and asking changes nothing.
+	KindStats Kind = 0x15
+)
+
+// Stat names of a Stats reply (VAULT-RELAY-SCALING §6). Counters count
+// from the enclave's start.
+const (
+	StatRelayConns      = "relay_conns"               // open connections to the relay
+	StatRelayDialed     = "relay_dialed"              // counter: connections opened
+	StatRelayStreams    = "relay_streams"             // streams per connection, as the relay announced
+	StatRelayInFlight   = "relay_in_flight"           // requests on a stream or waiting for one
+	StatRelayWaiting    = "relay_waiting"             // of those, waiting for a stream
+	StatRelayWaitMaxMS  = "relay_wait_max_ms"         // longest wait for a stream in this minute and the one before, milliseconds
+	StatRelayErrors     = "relay_errors"              // counter: requests the relay did not answer
+	StatRelayRefusedMax = "relay_refused_max_conns"   // counter: requests that waited at the connection bound
+	StatRelayRefusedMin = "relay_refused_min_streams" // counter: ... because the relay announced too few streams
 )
 
 // Notifications from the enclave to the parent:

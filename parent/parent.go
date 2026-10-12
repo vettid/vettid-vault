@@ -134,6 +134,9 @@ func (p *Parent) Run(ctx context.Context) error {
 	if p.cfg.SweepInterval > 0 {
 		run(p.sweep)
 	}
+	if p.cfg.MetricsInterval > 0 {
+		run(p.metrics)
+	}
 	if p.cfg.HealthAddr != "" {
 		run(p.serveHealth)
 	}

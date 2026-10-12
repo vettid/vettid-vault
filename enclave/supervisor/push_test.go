@@ -79,6 +79,12 @@ func TestPushChannel(t *testing.T) {
 		}
 	}
 	r := call([]byte(pushwire.PathRegister), signed(wake, pushwire.PathRegister, body, now), body)
+	// A push request takes one of the vault's places for requests in
+	// flight, like a relay request (TestVaultEgressLimit), and gives it
+	// back.
+	if cap(p.egress) != maxVaultEgress || len(p.egress) != 0 {
+		t.Errorf("push request and the vault's limit: %d of %d places taken", len(p.egress), cap(p.egress))
+	}
 	if len(r) != 4 || string(r[0]) != "ok" || string(r[1]) != "201" || string(r[3]) != `{"wake_blob":"QUJD"}` {
 		t.Fatalf("register: %q", r)
 	}

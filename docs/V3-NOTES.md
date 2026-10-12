@@ -79,7 +79,7 @@ settled in VAULT-MESSAGING **0.3.1**, which this code follows.
 | `cmd/vault-enclave` | enclave (PID 1) | Release build: vsock, `/dev/nsm`, pinned roots, `enclave.ReleaseConfig`. `-tags devenclave` (`vault_dev.go`): TCP, fake NSM, test roots (`enclavetest.DevSupervisor`) |
 | `enclave/supervisor` | enclave | Control connection, instance (ETKs, outer decryption), vault processes and their scoped channels, lease-lost and memory-pressure locks, descriptor push, status-list fetch, sanitized logs to the parent |
 | `enclave/nsm` | enclave | `NSM_IOCTL_REQUEST` (`_IOWR(0x0A, 0, 32)`) with `Attestation` and `DescribePCR` CBOR requests |
-| `enclave/egress` | enclave | The only way out: HTTPS to an allowlist, TLS 1.3 only, per-host pinned roots, host-name verification, ALPN h2 required for HTTP/2 hosts, no redirects, a few shared connection pools per host |
+| `enclave/egress` | enclave | The only way out: HTTPS to an allowlist, TLS 1.3 only, per-host pinned roots, host-name verification, ALPN h2 required for HTTP/2 hosts, no redirects, shared connections per host, as many as the enclave allows (below) |
 | `enclave/awskms` | enclave | KMS `GenerateDataKey`/`Decrypt` (Recipient, `RSAES_OAEP_SHA_256`) and `DescribeKey`/`GetKeyPolicy`/`ListGrants`, SigV4 signing, credentials from the parent |
 | `internal/hostproto` | both | Frames (kind, id, length-prefixed fields; ≤ 64 MiB), request/reply/notification multiplexing, 16 KiB chunked writes, the egress connection header |
 | `internal/vsock` | both | `AF_VSOCK` dial/listen with `golang.org/x/sys/unix` and the runtime poller; every write chunked to 16 KiB |
@@ -231,13 +231,80 @@ Fetched with `openssl s_client -showcerts` and verified with Go's
   R2 is not pinned.
 - **KMS does not offer HTTP/2.** KMS requests use HTTP/1.1 keep-alive
   connections (4 pools of at most 4 connections each); relay and Google
-  traffic use shared HTTP/2 connections (relay: 4 pools of one connection
-  each in release builds). A vault's long-poll holds one stream; at the
-  ALB's 128 streams per connection the relay pools carry about 500 unlocked
-  vaults before requests queue.
-- Each HTTP/2 pool allows exactly one connection (`MaxConnsPerHost` 1):
-  otherwise concurrent first requests each dial, briefly giving every
-  vault its own connection (`egress.TestSharedHTTP2`).
+  traffic use shared HTTP/2 connections.
+- **The enclave decides how many HTTP/2 connections a host gets**
+  (VAULT-RELAY-SCALING 0.1.1, D3; `enclave/egress/h2pool.go`). A vault's
+  long-poll holds one stream. Requests fill the first connection that has
+  a free stream, so one connection carries every vault until its streams
+  are in use (128 at the relay's load balancer); only then is another
+  opened, one at a time (concurrent first requests wait for it instead of
+  each dialing, which would briefly give every vault its own connection:
+  `egress.TestSharedHTTP2`). The pool is built on `net/http`'s
+  `ClientConn` (Go 1.26), not on `http.Transport`'s own pool, which opens
+  as many connections as the host's announced limit makes it and does not
+  report that limit. 900 held long-polls use 8 connections, and a quick
+  request beside them does not wait (`egress.TestGrowthAtStreamLimit`,
+  to be run on every Go update).
+  - *Bounds.* At most 16 connections per host (2,048 streams at 128,
+    above the 1,024 vault processes). No second connection when the host
+    announces fewer than 32 streams, or has not announced any: a new
+    connection carries one request until its limit can be read (the
+    library does not say when SETTINGS arrived), fewer than 32 after a
+    second. Connections are opened at 2 a second after a burst of 32,
+    failed dials included.
+  - *Connections the host is closing* (GOAWAY: no new requests, below
+    its limit) do not count toward the 16 for 30 s, while their requests
+    end, and are then closed (a long-poll ends in 25 s; a request still
+    on one fails and is sent again by the vault). Only 16 connections are
+    let off the count in any 5 minutes; further ones count while they
+    close. So there can be up to 32 connections for 30 s, once in 5
+    minutes, and 16 otherwise, also against a host that closes its
+    connections, or lowers their stream limit once they are full, in
+    order to be given more. A full connection that is closing cannot be
+    told from a full one until one of its requests ends.
+  - *At a bound* requests wait for a stream, oldest first, until their
+    own deadline (75 s for a relay request), and are counted. The
+    longest-waiting request looks again every second even if nothing
+    woke it (the library does not report every change).
+  - *A dial that fails* fails the request that started it and every
+    request that was waiting when it started; later ones dial again.
+  - *Connections that stop answering.* Every connection is pinged after
+    15 s without a frame from the host and closed if the ping is not
+    answered in 10 s (`http.HTTP2Config`); a busy connection is never
+    pinged. Without it a connection whose host was gone kept its
+    timed-out requests' streams for good (the library holds a cancelled
+    stream until a ping is answered) and its place among the 16. A
+    connection that answers pings but no request for 90 s is closed too.
+  - *A host that announces exactly 100 streams.* 100 is what the library
+    assumes before SETTINGS arrive, and it does not say when they did
+    (neither `ClientConn` nor its state hook), so such a connection is
+    trusted only once it has answered a request. If its first requests
+    are all long-polls it carries 1, after a second 31, until one is
+    answered (up to 25 s), and no other connection is opened meanwhile.
+    The relay's and the push gateway's load balancers announce 128;
+    android.googleapis.com announces 100 and its first request is quick.
+    A relay front end that announced 100 would show as `relay_streams`
+    0 or 100 with `relay_waiting` above 0 in the metrics record.
+  - *Re-sending.* A request the host did not process (a GOAWAY that
+    names it, REFUSED_STREAM, a connection that stopped taking requests)
+    is sent once more, as the library's pool did. Any other failure goes
+    back to the vault; its relay client signs and sends again.
+  - *Per vault.* A vault process has at most 8 relay and push requests
+    in flight (`maxVaultEgress`); further ones wait within their own 75 s
+    and are then answered an error. A vault needs its long-poll, one
+    request of its run loop and a push wake. Without the limit 16
+    processes could hold all 2,048 streams. KMS requests are not limited
+    this way (HTTP/1.1, as before).
+- **Metrics** (VAULT-RELAY-SCALING §6). Every minute the parent asks the
+  enclave for its relay counts (`hostproto.KindStats`; the enclave
+  answers from a snapshot at most a second old, and asking changes
+  nothing) and logs one record in CloudWatch's embedded metric format,
+  namespace `VettID/Vault`, dimension `InstanceId` only: `UnlockedVaults`,
+  `EgressOpen<Class>` and `EgressOpened<Class>` (`Relay`, `KMS`, `Push`,
+  `Other`), `RelayRequestsInFlight`, `RelayStreamWaitMax` (ms; the
+  longest in the current minute and the one before), `RelayRequestErrors`,
+  `RelayGrowthRefused`. Counters are the increase since the record
+  before.
 
 ## KMS client
 

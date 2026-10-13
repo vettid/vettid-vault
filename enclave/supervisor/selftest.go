@@ -149,6 +149,8 @@ func (s *Supervisor) selftestProcess(r *selftest.Report) {
 	r.Add("proc.mounted", err == nil, true, errStr(err))
 	exe, err := os.Executable()
 	r.Add("proc.self_exe", err == nil && exe != "", true, exe)
+	k, err := os.ReadFile("/proc/sys/kernel/osrelease")
+	r.Add("kernel.release", err == nil, false, strings.TrimSpace(string(k))+errStr(err))
 	y, err := os.ReadFile("/proc/sys/kernel/yama/ptrace_scope")
 	r.Add("kernel.yama_ptrace_scope", err == nil && strings.TrimSpace(string(y)) == "3", false, strings.TrimSpace(string(y))+errStr(err))
 	d, err := supervisorDumpable()

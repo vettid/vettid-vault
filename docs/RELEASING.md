@@ -361,10 +361,12 @@ PCR0 with the release's entry in the signed manifest at
 the attestation or the GitHub release, is what members' apps and the
 release keys rely on.
 
-Building on a Graviton host with nitro-cli installed from the Amazon
-Linux repository (`scripts/smoke/run-on-host.sh build`) gives the same
-PCRs if its `aws-nitro-enclaves-cli` version and blobs equal the lock's;
-VAULT-RELEASES §5.1 asks for that comparison once on real hardware.
+`scripts/smoke/run-on-host.sh build` on a Graviton host builds the same
+toolchain image and so gives the same PCRs; VAULT-RELEASES §5.1 asks for
+that comparison once on real hardware. A nitro-cli installed from the
+Amazon Linux repository does not: its blobs are a different enclave
+kernel (Linux 4.14) from the lock's (Linux 6.6.79, the blob set of
+`aws-nitro-enclaves-sdk-bootstrap` release `v6.6.79`).
 
 ## The compatibility matrix
 

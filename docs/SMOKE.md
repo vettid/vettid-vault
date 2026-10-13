@@ -59,6 +59,7 @@ Required checks (any FAIL fails the run):
 
 Informational checks (reported, never fail the run):
 
+- `kernel.release`: the enclave kernel's version (`/proc/sys/kernel/osrelease`). With the pinned blob set it is `6.6.79`.
 - `kernel.yama_ptrace_scope`: whether the enclave kernel has Yama.
 - `kms.policy_check_passes_without_admin`: the same check with the administrator statement removed. It passes when the rest of the test key's policy has the §11.10.7 shape, which shows the refusal is for the right reason.
 - `vault_process.open_fds`
@@ -261,9 +262,11 @@ document"), and it is fixed.**
 - **CPUs.** An m7g.large has 2 vCPUs, and the parent keeps at least one,
   so the enclave gets 1 vCPU (`SMOKE_CPUS=1`). Two vCPUs need an
   m7g.xlarge.
-- **PCR0 and nitro-cli.** PCR0 also depends on the nitro-cli package's
-  kernel and init blobs. `build` prints the nitro-cli version; record it
-  with the PCRs.
+- **PCR0 and the toolchain.** PCR0 also depends on the kernel, command
+  line, init and NSM module blobs. `build` builds the EIF with the pinned
+  toolchain image (`release/eif-toolchain.lock`), not with the host's
+  nitro-cli package, whose blobs are a different kernel; the
+  measurements name the lock's SHA-256.
 - **To confirm on this hardware:**
   - `CONFIG_SECCOMP_FILTER` in the Nitro enclave kernel. Release vault
     processes refuse to run without the filter.

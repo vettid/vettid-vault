@@ -51,8 +51,9 @@ type fakeVaults struct {
 	locked int // LockAllWithin calls that found a vault
 	// fail is the error LockAllWithin reports for a vault (none: locked).
 	fail map[string]error
-	// during runs while LockAllWithin locks them (if set).
-	during func()
+	// during runs while LockAllWithin locks them (if set), after when
+	// it has ended them and is about to return.
+	during, after func()
 }
 
 func (v *fakeVaults) Vaults() []string {
@@ -75,6 +76,9 @@ func (v *fakeVaults) LockAllWithin(context.Context, time.Duration) map[string]er
 		ended[id] = v.fail[id]
 	}
 	v.ids = nil
+	if v.after != nil {
+		v.after()
+	}
 	return ended
 }
 
@@ -218,7 +222,9 @@ func TestSilentParentLocks(t *testing.T) {
 	// until it pings: checks that find no vault do not change that, no
 	// call is made to it, and a vault that turns up under it (an unlock
 	// that was half way when the others were locked) is locked by the
-	// next check, not 120 s later.
+	// next check, not 120 s later. That is so here because no Ping was
+	// read since the parent was found unreachable: one that is read and
+	// leaves it unreachable starts the count again (TestPingWhileLocking).
 	w.run(600*time.Second, nil)
 	w.want(1, "no vault running")
 	w.connect()
@@ -377,6 +383,78 @@ func TestPingWhileLocking(t *testing.T) {
 	}
 	if _, err := w.s.link.call(ctx, hostproto.KindStoreGet, []byte("vaults/locked/state")); err != nil {
 		t.Fatalf("a store call after that ping: %v", err)
+	}
+}
+
+// A Ping read after the vaults have ended and before they have all been
+// noted as stopped. It must not find "nothing to tell" and make the parent
+// reachable: the parent stays unreachable until the last of them is
+// noted, and the Ping after that tells them all.
+func TestPingBeforeStoppedVaultsAreNoted(t *testing.T) {
+	w := newWatched(t)
+	w.connect()
+	w.ping()
+	w.vaults.fail = map[string]error{"killed": context.DeadlineExceeded}
+	w.vaults.unlock("locked")
+	w.vaults.unlock("killed")
+	ended := make(chan struct{})
+	w.vaults.after = func() { close(ended) }
+	// checkParent notes each vault after s.forget, which takes actMu:
+	// holding it stops the check there, the vaults ended and none noted.
+	w.s.actMu.Lock()
+	held := true
+	defer func() {
+		if held {
+			w.s.actMu.Unlock()
+		}
+	}()
+	w.clk.add(130 * time.Second)
+	checked := make(chan struct{})
+	go func() { defer close(checked); w.s.checkParent(context.Background(), w.vaults) }()
+	select {
+	case <-ended:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the vaults were not locked")
+	}
+	time.Sleep(50 * time.Millisecond) // the check has reached s.forget
+	select {
+	case <-checked:
+		t.Fatal("the check did not wait for actMu: this test no longer stops it before the vaults are noted")
+	default:
+	}
+	<-w.conn.Done()
+	w.s.link.set(nil) // as Run does
+	w.connect()
+	w.ping()
+	if w.s.link.up() != nil {
+		t.Fatal("reachable after a ping read before the stopped vaults were noted")
+	}
+	if _, err := w.s.link.call(context.Background(), hostproto.KindStoreGet, []byte("vaults/locked/state")); !errors.Is(err, errDown) {
+		t.Fatalf("a call after a ping read before the stopped vaults were noted: %v", err)
+	}
+	if got := w.stoppedSeen(); len(got) != 0 {
+		t.Fatalf("told before they were noted: %v", got)
+	}
+	w.s.actMu.Unlock()
+	held = false
+	<-checked
+	if w.s.link.up() != nil {
+		t.Fatal("reachable without a ping")
+	}
+	w.ping()
+	if err := w.conn.Flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"killed error", "locked locked"}
+	deadline := time.Now().Add(10 * time.Second)
+	for len(w.stoppedSeen()) < len(want) && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := w.stoppedSeen(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("stopped vaults told: %v, want %v", got, want)
+	}
+	if w.s.link.up() != w.conn {
+		t.Fatal("the parent is not reachable after the ping that told the stopped vaults")
 	}
 }
 

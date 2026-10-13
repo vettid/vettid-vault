@@ -586,13 +586,18 @@ func (s *Supervisor) checkParent(ctx context.Context, in vaultSet) {
 	// All at once, and not behind a request that is being processed (it
 	// may itself wait for the parent's egress): no vault runs longer than
 	// lockAllWithin from here. One that a request opens meanwhile is
-	// locked by the next check.
+	// locked by a later check: the next, unless a Ping was read meanwhile
+	// (link.hear).
 	ended := in.LockAllWithin(ctx, lockAllWithin)
 	killed := 0
 	for id, err := range ended {
-		// The parent still counts each of them as running and renews its
-		// lease: a vault's own "locked" found no connection, and a killed
-		// process reports nothing. It is told at its next Ping.
+		// The parent may still count each of them as running and renew
+		// its lease: a killed process reports nothing, and a vault's own
+		// "locked" found no connection, unless Run had a new one by then
+		// (events are sent on whatever connection there is, gone or not).
+		// Each is told at the parent's next Ping all the same; a parent
+		// that had the "locked" no longer counts the vault as running and
+		// does nothing more with the report.
 		reason := hostproto.StopLocked
 		switch {
 		case errors.Is(err, vault.ErrSplitBrain):

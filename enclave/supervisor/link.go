@@ -142,9 +142,15 @@ func (l *link) ping(now time.Time, running func(vaultID string) bool) {
 
 // hear starts the count of the parent's silence again without a Ping
 // (no vault runs: Supervisor.checkParent). Not for a parent that is gone:
-// it stays unreachable until it pings, and a vault that turns up under it
-// (an unlock that was half way when the others were locked) is locked by
-// the next check.
+// it stays unreachable until it pings and is told, and a vault that turns
+// up under it (an unlock that was half way when the others were locked)
+// is locked by the next check, if no Ping was read since the parent was
+// found unreachable. A Ping that was read and left it gone (read while
+// the vaults were being locked, or its reports could not be written)
+// started the count again all the same: such a vault is then locked once
+// DownLock has passed since that Ping, unless a later Ping makes the
+// parent reachable first. Until then every call it makes to the parent
+// fails.
 func (l *link) hear(now time.Time) {
 	l.mu.Lock()
 	defer l.mu.Unlock()

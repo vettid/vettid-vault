@@ -35,3 +35,15 @@ func SetLeaseTimesForTest(timeout, retry, margin time.Duration) func() {
 	leaseRenewTimeout, leaseRetry, leaseMargin = timeout, retry, margin
 	return func() { leaseRenewTimeout, leaseRetry, leaseMargin = a, b, c }
 }
+
+// QueueNotFoundForTest exposes the SQS error classification of a queue
+// that does not exist.
+var QueueNotFoundForTest = queueNotFound
+
+// SetQueueLostWaitForTest shortens the wait after a receive that found no
+// queue; the returned function restores the defaults.
+func SetQueueLostWaitForTest(first, max time.Duration) func() {
+	a, b := queueLostWait, queueLostWaitMax
+	queueLostWait, queueLostWaitMax = first, max
+	return func() { queueLostWait, queueLostWaitMax = a, b }
+}

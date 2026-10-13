@@ -66,7 +66,8 @@ func Main(p Platform) {
 		os.Exit(ExitChannel)
 	}
 	// From here on the process can create no sockets (no vsock to the
-	// parent), trace nothing and read no other process's memory.
+	// parent), by the socket calls or through io_uring, trace nothing and
+	// read no other process's memory or descriptors (internal/seccomp).
 	if err := seccomp.Install(); err != nil && p.RequireSeccomp {
 		os.Exit(ExitError)
 	}

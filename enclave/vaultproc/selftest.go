@@ -8,10 +8,11 @@ import (
 	"crypto/subtle"
 	"crypto/x509"
 	"encoding/json"
-	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -95,8 +96,11 @@ func runSelftest(ctx context.Context, ch channel, keyARN string, seccompErr erro
 	d, err := Dumpable()
 	add("vault_process.not_dumpable", err == nil && d == 0, true, fmt.Sprintf("dumpable=%d", d))
 	add("vault_process.seccomp_installed", seccompErr == nil, true, errString(seccompErr))
-	for name, err := range forbidden() {
-		add("vault_process.seccomp_refuses_"+name, errors.Is(err, errEPERM), true, errString(err))
+	// Every call the filter denies is tried (harmlessly): each must be
+	// refused by the filter, whatever the kernel would have answered.
+	probes := seccomp.Probe()
+	for _, name := range slices.Sorted(maps.Keys(probes)) {
+		add("vault_process.seccomp_refuses_"+name, seccomp.Refused(probes[name]), true, errString(probes[name]))
 	}
 	for name, v := range limits() {
 		add("vault_process.rlimit_"+name, v.ok, true, v.detail)

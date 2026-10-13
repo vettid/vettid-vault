@@ -150,7 +150,18 @@ supervisor's count does not move while vaults are unlocked.
   namespaced, so without it a vault process could open its own connection
   to the parent's control port; the process needs no socket beyond its
   inherited channel. Release builds exit if the filter cannot be
-  installed;
+  installed. The filter also refuses
+  `io_uring_setup/enter/register` (io_uring creates sockets without
+  `socket`; the pinned 4.14 kernel has no io_uring, so this guards a
+  later kernel), `pidfd_getfd`, `bpf`, `userfaultfd` and
+  `perf_event_open`, none of which the Go runtime or the vault's code
+  calls, and on amd64 every x32 syscall number (an x32 call reports the
+  native architecture but has its own numbers, so the list would not
+  match it) and the x32-only numbers 512 to 547, which kernels before
+  5.4 ran for 64-bit processes too. Refusing `bpf` does not remove
+  classic BPF: `seccomp` and `SO_ATTACH_FILTER` on the channel still
+  take such filters. `Install` fails when the kernel could not put the
+  filter on every thread;
 - no inherited descriptor but the channel (fd 3; Go opens everything
   close-on-exec), stdin/stdout/stderr on `/dev/null`, working directory
   `/`, environment `GOMEMLIMIT`, `GOMAXPROCS=2`, `GOTRACEBACK=none` only;

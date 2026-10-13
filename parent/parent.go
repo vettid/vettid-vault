@@ -21,12 +21,15 @@ type Parent struct {
 	now func() time.Time
 	fwd *forwarder
 
-	queueURL string
-
-	mu      sync.Mutex
-	sess    *session
-	bootID  string // the connected enclave's boot id
-	running map[string]*lease
+	mu       sync.Mutex
+	queueURL string // set by Run; again by recreateQueue and ensureQueue
+	// disconnects counts the enclave's disconnections; queueSeenAt is its
+	// value when the queue was last known to exist (publish checks once
+	// after every disconnection, ensureQueue).
+	disconnects, queueSeenAt int
+	sess                     *session
+	bootID                   string // the connected enclave's boot id
+	running                  map[string]*lease
 	// taking counts the enroll and unlock requests of each vault between
 	// taking the lease and the decision to keep or give it back.
 	taking map[string]int
@@ -116,7 +119,7 @@ func (p *Parent) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	p.queueURL = url
+	p.setQueue(url)
 	p.log.Info("queue ready", "queue", p.cfg.QueueName())
 
 	wctx, wcancel := context.WithCancel(context.Background())
@@ -156,7 +159,7 @@ func (p *Parent) Run(ctx context.Context) error {
 	if err := p.cfg.Tables.DeleteInstance(sctx, p.cfg.InstanceID); err != nil {
 		p.log.Warn("instance row not deleted", "error", err.Error())
 	}
-	if err := p.cfg.Queues.Destroy(sctx, p.queueURL); err != nil {
+	if err := p.cfg.Queues.Destroy(sctx, p.queue()); err != nil {
 		p.log.Warn("queue not deleted", "error", err.Error())
 	}
 	if s := p.session(); s != nil {
@@ -166,6 +169,88 @@ func (p *Parent) Run(ctx context.Context) error {
 	wcancel()
 	p.log.Info("parent stopped")
 	return nil
+}
+
+// queue returns the instance queue's URL.
+func (p *Parent) queue() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.queueURL
+}
+
+func (p *Parent) setQueue(url string) {
+	p.mu.Lock()
+	p.queueURL = url
+	p.mu.Unlock()
+}
+
+// recreateQueue creates the instance queue again after a receive found it
+// gone. The queue is otherwise created once, when Run starts; it can go
+// while the parent runs when another instance's sweeper takes this
+// instance for gone (its registry row is deleted while its enclave is
+// disconnected, and a queue without a row that is 15 minutes old is
+// swept), or when someone deletes it by hand. Without this the parent
+// would publish a row that names a queue which does not exist, and every
+// request routed to the instance would fail until the parent restarts.
+//
+// Create gives the new queue the same name, access policy and redrive
+// policy as the first (Queues.Create), so the URL in the registry row
+// stays right; SQS refuses the name for 60 s after the deletion, which
+// createQueue waits out.
+func (p *Parent) recreateQueue(ctx context.Context) error {
+	p.log.Warn("instance queue is missing; creating it again", "queue", p.cfg.QueueName())
+	url, err := p.createQueue(ctx)
+	if err != nil {
+		if ctx.Err() == nil {
+			p.log.Warn("instance queue not created again", "queue", p.cfg.QueueName(), "error", err.Error())
+		}
+		return err
+	}
+	p.setQueue(url)
+	p.log.Info("instance queue created again", "queue", p.cfg.QueueName())
+	return nil
+}
+
+// queueEnsureTimeout bounds ensureQueue's create (a variable for tests).
+var queueEnsureTimeout = 10 * time.Second
+
+// ensureQueue makes sure the instance queue exists before the registry
+// row of a newly connected enclave is written, and reports whether the
+// row may be written now. While the enclave was disconnected the row was
+// gone, and another instance's sweeper may have deleted the queue: the
+// row must not send requests to a queue that is not there.
+//
+// It is one Create after each disconnection (creating a queue that exists, with the
+// same attributes, returns its URL). If SQS still refuses the name (60 s
+// after a deletion) the row waits for a later heartbeat; the Ping has
+// been sent all the same. Any other failure does not hold the row back:
+// the parent then behaves as it did before this check, and the consumer
+// creates the queue if a receive finds it gone.
+func (p *Parent) ensureQueue(ctx context.Context) bool {
+	p.mu.Lock()
+	at := p.disconnects
+	seen := p.queueSeenAt == at
+	p.mu.Unlock()
+	if seen {
+		return true
+	}
+	cctx, cancel := context.WithTimeout(ctx, queueEnsureTimeout)
+	url, err := p.cfg.Queues.Create(cctx, p.cfg.QueueName())
+	cancel()
+	if errors.Is(err, ErrQueueDeletedRecently) {
+		p.log.Info("registry row withheld: the instance queue cannot be created yet", "queue", p.cfg.QueueName())
+		return false
+	}
+	if err != nil {
+		p.log.Warn("instance queue not checked before the registry row", "queue", p.cfg.QueueName(), "error", err.Error())
+	}
+	p.mu.Lock()
+	if err == nil {
+		p.queueURL = url
+	}
+	p.queueSeenAt = at
+	p.mu.Unlock()
+	return true
 }
 
 func (p *Parent) session() *session {
@@ -234,6 +319,7 @@ func (p *Parent) detach(s *session) {
 	}
 	p.sess = nil
 	p.desc = nil
+	p.disconnects++
 	p.mu.Unlock()
 	p.log.Warn("enclave disconnected")
 	// Stop routing to this instance at once.
@@ -275,6 +361,28 @@ func storeErr(err error) [][]byte {
 	return reply(hostproto.StatusError)
 }
 
+// storeGetReply is the reply to a StoreGet that found the object. An
+// object or a version that no reply frame can carry is answered "error"
+// at once: the frame could not be written, and the enclave would wait out
+// its 60 s for an answer that never comes.
+func storeGetReply(log *slog.Logger, b []byte, version string) [][]byte {
+	if len(b) > MaxObject || len(version) > MaxVersion {
+		log.Warn("stored object too large for a reply", "bytes", len(b), "version_bytes", len(version), "max_bytes", MaxObject)
+		return reply(hostproto.StatusError)
+	}
+	return [][]byte{[]byte(hostproto.StatusOK), b, []byte(version)}
+}
+
+// storePutOK refuses to write an object that could not be read back
+// (MaxObject).
+func storePutOK(log *slog.Logger, b []byte) bool {
+	if len(b) > MaxObject {
+		log.Warn("object too large to store", "bytes", len(b), "max_bytes", MaxObject)
+		return false
+	}
+	return true
+}
+
 // handle answers the enclave's requests.
 func (p *Parent) handle(ctx context.Context, s *session, f *hostproto.Frame) [][]byte {
 	switch f.Kind {
@@ -302,10 +410,13 @@ func (p *Parent) handle(ctx context.Context, s *session, f *hostproto.Frame) [][
 		if err != nil {
 			return storeErr(err)
 		}
-		return [][]byte{[]byte(hostproto.StatusOK), b, []byte(v)}
+		return storeGetReply(p.log, b, v)
 	case hostproto.KindStorePut:
 		if len(f.Fields) != 3 || !storeKeyOK(string(f.Fields[0])) {
 			return reply(hostproto.StatusInvalid)
+		}
+		if !storePutOK(p.log, f.Fields[1]) {
+			return reply(hostproto.StatusError)
 		}
 		v, err := p.cfg.Objects.Put(ctx, string(f.Fields[0]), f.Fields[1], string(f.Fields[2]))
 		if err != nil {
@@ -606,9 +717,11 @@ func (p *Parent) publish(ctx context.Context) {
 	if s == nil || d == nil {
 		return
 	}
-	// Ping and row together, in at most 15 s: the enclave locks every
-	// vault after 120 s without a Ping, so one write that hangs (a table
-	// that does not answer) must not hold the pings that follow it.
+	// Ping and row together, in at most 15 s (25 s for the first publish
+	// after a disconnection, which checks for the queue in between, at
+	// most 10 s, ensureQueue): the enclave locks every vault after 120 s
+	// without a Ping, so one write that hangs (a table that does not
+	// answer) must not hold the pings that follow it.
 	start := time.Now()
 	defer func() {
 		if took := time.Since(start); took > p.cfg.Heartbeat {
@@ -628,10 +741,13 @@ func (p *Parent) publish(ctx context.Context) {
 			load = load*10 + int(c-'0')
 		}
 	}
+	if !p.ensureQueue(ctx) {
+		return
+	}
 	now := p.now()
 	wctx, cancel := context.WithTimeout(ctx, registryWriteTimeout)
 	defer cancel()
-	err = p.cfg.Tables.PutInstance(wctx, InstanceRow{InstanceID: p.cfg.InstanceID, Release: d.release, QueueURL: p.queueURL,
+	err = p.cfg.Tables.PutInstance(wctx, InstanceRow{InstanceID: p.cfg.InstanceID, Release: d.release, QueueURL: p.queue(),
 		Descriptor: d.descriptor, Attestation: d.attestation, HeartbeatAt: now.Unix(), ExpiresAt: now.Add(10 * time.Minute).Unix(), Load: load})
 	p.mu.Lock()
 	p.stats.heartbeatErr = err != nil

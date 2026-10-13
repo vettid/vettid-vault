@@ -41,6 +41,9 @@ var (
 	// less than 60 s ago and SQS refuses to create it yet (a restart right
 	// after a clean stop). Queues.Create returns it wrapped.
 	ErrQueueDeletedRecently = errors.New("parent: queue deleted recently")
+	// ErrQueueNotFound means the queue a receive named does not exist
+	// (any more): the parent creates its queue again.
+	ErrQueueNotFound = errors.New("parent: queue not found")
 )
 
 // Objects is the vault data bucket.
@@ -64,6 +67,8 @@ type QueueMessage struct {
 type Queues interface {
 	// Create creates the queue (idempotent) and returns its URL.
 	Create(ctx context.Context, name string) (string, error)
+	// Receive returns ErrQueueNotFound (to errors.Is) if the queue does
+	// not exist.
 	Receive(ctx context.Context, url string) ([]QueueMessage, error)
 	DeleteMessage(ctx context.Context, url, receipt string) error
 	Destroy(ctx context.Context, url string) error

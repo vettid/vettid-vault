@@ -9,6 +9,9 @@ Wants=vault-enclave.service network-online.target
 # instance row and the queue) runs while the enclave is still up.
 After=vault-host-config.service vault-enclave.service network-online.target
 
+# -enclave-cid is the context id vault-enclave.service starts the enclave
+# with (--enclave-cid): the parent answers no other peer on its two ports.
+# Change both together (on one host: a drop-in for each unit).
 [Service]
 Type=simple
 EnvironmentFile=/run/vettid/parent.env
@@ -25,6 +28,7 @@ ExecStart=/opt/vettid/bin/vault-parent \
     -queue-policy-param ${VAULT_QUEUE_POLICY_PARAM} \
     -control-port 5000 \
     -egress-port 5001 \
+    -enclave-cid 16 \
     -health 127.0.0.1:8081
 Restart=on-failure
 RestartSec=5

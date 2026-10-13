@@ -35,3 +35,6 @@ func SetLeaseTimesForTest(timeout, retry, margin time.Duration) func() {
 	leaseRenewTimeout, leaseRetry, leaseMargin = timeout, retry, margin
 	return func() { leaseRenewTimeout, leaseRetry, leaseMargin = a, b, c }
 }
+
+// PeerIsEnclaveForTest exposes the rule for accepted connections.
+var PeerIsEnclaveForTest = peerIsEnclave

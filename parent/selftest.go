@@ -37,6 +37,9 @@ func RunSelftest(ctx context.Context, c SelftestConfig) (*selftest.Report, error
 	if c.Logger == nil {
 		c.Logger = slog.Default()
 	}
+	// Only the enclave is answered, as by New (peer.go).
+	c.ControlListener = EnclaveOnly(c.ControlListener, DefaultEnclaveCID, "control", c.Logger)
+	c.EgressListener = EnclaveOnly(c.EgressListener, DefaultEnclaveCID, "egress", c.Logger)
 	reqJSON, err := json.Marshal(c.Request)
 	if err != nil {
 		return nil, err

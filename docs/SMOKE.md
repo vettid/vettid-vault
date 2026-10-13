@@ -202,7 +202,7 @@ proxy.golang.org, sum.golang.org, Docker Hub, the AL2023 repositories.
 COMMIT=<40-hex commit of vettid-vault>
 curl -fsSLo /root/run-on-host.sh https://raw.githubusercontent.com/vettid/vettid-vault/$COMMIT/scripts/smoke/run-on-host.sh
 chmod +x /root/run-on-host.sh
-/root/run-on-host.sh prepare           # nitro-cli, docker, allocator (1 vCPU, 3072 MiB), Go 1.26.8 by checksum
+/root/run-on-host.sh prepare           # nitro-cli, docker, allocator (1 vCPU, 3072 MiB), Go 1.26.9 by checksum
 /root/run-on-host.sh build $COMMIT     # vault-parent + EIF; prints commit, binary_sha256, pcr0, pcr1, pcr2
 ```
 

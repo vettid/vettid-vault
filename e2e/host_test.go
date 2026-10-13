@@ -34,6 +34,7 @@ import (
 	"github.com/vettid/vettid-vault/internal/enclavetest"
 	"github.com/vettid/vettid-vault/internal/parenttest"
 	"github.com/vettid/vettid-vault/internal/relaytest"
+	"github.com/vettid/vettid-vault/internal/seccomp"
 	"github.com/vettid/vettid-vault/internal/selftest"
 	"github.com/vettid/vettid-vault/parent"
 	"github.com/vettid/vettid-vault/vault"
@@ -653,10 +654,30 @@ func TestSelftest(t *testing.T) {
 	}
 	for _, n := range []string{"nsm.attestation_verifies", "egress.relay_healthz", "egress.relay_http2", "egress.google_status_list",
 		"kms.policy_check_rejects_test_key", "kms.policy_check_passes_without_admin", "vault_process.kms_recipient_round_trip",
-		"vault_process.seccomp_refuses_socket_vsock", "vault_process.not_dumpable", "s3.stale_if_match_refused", "vault_process.argon2id_default"} {
+		"vault_process.seccomp_installed", "vault_process.not_dumpable", "s3.stale_if_match_refused", "vault_process.argon2id_default"} {
 		if !want[n] {
 			t.Errorf("%s not OK", n)
 		}
+	}
+	// One check for every call the filter denies, each refused, and no
+	// other check of that kind.
+	const refuses = "vault_process.seccomp_refuses_"
+	for _, n := range seccomp.Names() {
+		if !want[refuses+n] {
+			t.Errorf("%s%s not OK", refuses, n)
+		}
+	}
+	nRefuses := 0
+	for _, c := range rep.Checks {
+		if strings.HasPrefix(c.Name, refuses) {
+			nRefuses++
+			if !c.Required {
+				t.Errorf("%s is not required", c.Name)
+			}
+		}
+	}
+	if nRefuses != len(seccomp.Names()) || nRefuses < 13 {
+		t.Errorf("%d seccomp_refuses checks for %d denied calls", nRefuses, len(seccomp.Names()))
 	}
 	if rep.PCR0 != enclavetest.Spec(3, "").PCR0Hex() || rep.VaultPeakRSS < 64<<20 {
 		t.Fatalf("pcr0 %s, vault peak RSS %d", rep.PCR0, rep.VaultPeakRSS)

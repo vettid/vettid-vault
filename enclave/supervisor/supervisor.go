@@ -574,6 +574,11 @@ func (s *Supervisor) checkParent(ctx context.Context, in vaultSet) {
 	// alone does not do that: Run dials again at once, and a parent whose
 	// process lives answers the hello. It is ended all the same, to free
 	// the calls that wait on it now.
+	//
+	// Nor does a Ping read while the vaults are being locked make the
+	// parent reachable (a parent that lives pings on the new connection
+	// at once): it is reachable again only once it has been told which
+	// vaults ended, and those are known when the lock has ended.
 	s.link.lost()
 	if c := s.link.get(); c != nil {
 		c.Close()
@@ -599,6 +604,7 @@ func (s *Supervisor) checkParent(ctx context.Context, in vaultSet) {
 		s.forget(id)
 		s.link.stop(id, reason)
 	}
+	s.link.locked()
 	s.log.Warn("parent unreachable: every vault locked", "vaults", len(ended), "killed", killed)
 }
 

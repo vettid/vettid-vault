@@ -51,6 +51,8 @@ type fakeVaults struct {
 	locked int // LockAllWithin calls that found a vault
 	// fail is the error LockAllWithin reports for a vault (none: locked).
 	fail map[string]error
+	// during runs while LockAllWithin locks them (if set).
+	during func()
 }
 
 func (v *fakeVaults) Vaults() []string {
@@ -60,6 +62,9 @@ func (v *fakeVaults) Vaults() []string {
 }
 
 func (v *fakeVaults) LockAllWithin(context.Context, time.Duration) map[string]error {
+	if v.during != nil {
+		v.during()
+	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if len(v.ids) > 0 {
@@ -288,6 +293,90 @@ func TestStoppedVaultsAreTold(t *testing.T) {
 	l.ping(time.Unix(1_800_000_000, 0), nil)
 	if len(l.stopped) != 1 {
 		t.Fatalf("kept: %v", l.stopped)
+	}
+}
+
+// A Ping read while the vaults are being locked. The connection was ended
+// when the parent was found unreachable, Run dials again at once, and a
+// parent that lives pings on the new connection straight away: long
+// before the vaults have locked (they have 10 s), so before there is a
+// stopped vault to tell. That Ping is counted and the parent stays
+// unreachable: no call is made to it (a store or credentials request
+// would let an unlock open a vault that is just being locked, before the
+// report of the run that is ending). The first Ping after the lock has
+// ended tells the vaults that stopped, and only then are calls let
+// through.
+func TestPingWhileLocking(t *testing.T) {
+	w := newWatched(t)
+	w.connect()
+	w.ping()
+	w.vaults.fail = map[string]error{"killed": context.DeadlineExceeded}
+	w.vaults.unlock("locked")
+	w.vaults.unlock("killed")
+	ctx := context.Background()
+	unreachable := func(when string) {
+		t.Helper()
+		if w.s.link.up() != nil {
+			t.Fatalf("%s: the parent is reachable", when)
+		}
+		if _, err := w.s.link.call(ctx, hostproto.KindCredentials); !errors.Is(err, errDown) {
+			t.Fatalf("%s: a credentials call: %v", when, err)
+		}
+		st := &hostStore{l: w.s.link}
+		if _, _, err := st.Get(ctx, "vaults/locked/state"); !errors.Is(err, errHost) {
+			t.Fatalf("%s: a store read: %v", when, err)
+		}
+		if _, err := st.Put(ctx, "vaults/locked/state", []byte("x"), "v"); !errors.Is(err, errHost) {
+			t.Fatalf("%s: a store write: %v", when, err)
+		}
+		if got := w.stoppedSeen(); len(got) != 0 {
+			t.Fatalf("%s: told %v", when, got)
+		}
+	}
+	during := 0
+	w.vaults.during = func() {
+		during++
+		// A Ping that was on its way when the connection was ended, handled
+		// as it ends (the link still has that connection).
+		<-w.conn.Done()
+		w.s.link.ping(w.clk.now(), nil)
+		unreachable("a ping on the ended connection while the vaults lock")
+		// Run dials again, and the parent pings on the new connection.
+		w.s.link.set(nil)
+		w.connect()
+		w.ping()
+		if got := w.s.link.silent(w.clk.now(), window); got != 0 {
+			t.Fatalf("the ping read while the vaults lock was not counted: %v", got)
+		}
+		unreachable("a ping on the new connection while the vaults lock")
+	}
+	w.run(130*time.Second, nil)
+	w.want(1, "no ping")
+	if during != 1 {
+		t.Fatalf("%d pings while the vaults locked", during)
+	}
+	// The lock has ended, and nothing has changed without a Ping.
+	unreachable("after the lock, before the next ping")
+	w.ping()
+	if err := w.conn.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"killed error", "locked locked"}
+	deadline := time.Now().Add(10 * time.Second)
+	for len(w.stoppedSeen()) < len(want) && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := w.stoppedSeen(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("stopped vaults told: %v, want %v", got, want)
+	}
+	if w.s.link.up() != w.conn {
+		t.Fatal("the parent is not reachable after the ping that told the stopped vaults")
+	}
+	if _, err := w.s.link.call(ctx, hostproto.KindCredentials); err != nil {
+		t.Fatalf("a credentials call after that ping: %v", err)
+	}
+	if _, err := w.s.link.call(ctx, hostproto.KindStoreGet, []byte("vaults/locked/state")); err != nil {
+		t.Fatalf("a store call after that ping: %v", err)
 	}
 }
 
@@ -849,6 +938,7 @@ func TestPingOrder(t *testing.T) {
 	w.s.link.set(conn)
 	w.s.link.lost()
 	w.s.link.stop("aaaa", hostproto.StopLocked)
+	w.s.link.locked()
 	for held, tries := 0, 0; held < 257; tries++ { // the queue is full
 		if w.s.link.logRecord(hostproto.Strings("INFO", "record")...) {
 			held++
@@ -920,6 +1010,7 @@ func TestPingOnDyingConnection(t *testing.T) {
 		l.set(c)
 		l.lost()
 		l.stop("vault-x", hostproto.StopError)
+		l.locked()
 		if when == "before the ping" {
 			c.Close()
 			b.Close()
@@ -1003,6 +1094,7 @@ func TestReportOfAVaultThatRunsAgain(t *testing.T) {
 	l.lost()
 	l.stop("runs-again", hostproto.StopLocked)
 	l.stop("stopped", hostproto.StopLocked)
+	l.locked()
 	l.ping(now.Add(time.Second), func(id string) bool { return id == "runs-again" })
 	select {
 	case id := <-got:

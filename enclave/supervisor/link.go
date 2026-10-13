@@ -47,6 +47,11 @@ type link struct {
 	// parent when its next Ping is read (their own events found no
 	// connection, or a process that was killed sent none).
 	stopped [][2]string
+	// locking is set from the moment the parent was found unreachable
+	// until every vault that was locked or killed for it is in stopped
+	// (lost to locked). A Ping read in that time is counted and leaves
+	// the parent gone: it cannot yet be told which vaults ended.
+	locking bool
 	// reportMu serializes the telling of them (ping).
 	reportMu sync.Mutex
 	// logDropped counts the log records that were not sent because the
@@ -90,6 +95,12 @@ func (l *link) up() *hostproto.Conn {
 // next connection, tries again (a report may so be written twice, which
 // the parent takes as one, no vault having opened in between).
 //
+// While the vaults are still being locked (locking) there is nothing to
+// tell yet, and the parent stays gone whatever is written: the connection
+// is ended when the parent is found unreachable, a parent that lives
+// pings on the next one at once, and that Ping is read before the vaults
+// have locked. The first Ping after they have is the one that tells.
+//
 // running says whether a vault runs now (nil: none): a report is of a run
 // that ended, and is dropped, not sent, if its vault runs again.
 //
@@ -126,7 +137,7 @@ func (l *link) ping(now time.Time, running func(vaultID string) bool) {
 		return
 	}
 	l.stopped = l.stopped[len(stopped):] // those added meanwhile wait for the next Ping
-	l.gone = len(l.stopped) > 0
+	l.gone = len(l.stopped) > 0 || l.locking
 }
 
 // hear starts the count of the parent's silence again without a Ping
@@ -149,11 +160,21 @@ func (l *link) hearLocked(now time.Time) {
 	}
 }
 
-// lost marks the parent gone (unreachable) until its next Ping.
+// lost marks the parent gone (unreachable): until locked is called
+// whatever it sends, and from then until its next Ping.
 func (l *link) lost() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.gone = true
+	l.gone, l.locking = true, true
+}
+
+// locked notes that every vault was locked or killed after lost, and
+// that each of them has been noted (stop): the parent's next Ping tells
+// them and makes it reachable again.
+func (l *link) locked() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.locking = false
 }
 
 // stop notes a vault that stopped while the parent was gone.

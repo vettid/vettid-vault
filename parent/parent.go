@@ -717,9 +717,11 @@ func (p *Parent) publish(ctx context.Context) {
 	if s == nil || d == nil {
 		return
 	}
-	// Ping and row together, in at most 15 s: the enclave locks every
-	// vault after 120 s without a Ping, so one write that hangs (a table
-	// that does not answer) must not hold the pings that follow it.
+	// Ping and row together, in at most 15 s (25 s for the first publish
+	// after a disconnection, which checks for the queue in between, at
+	// most 10 s, ensureQueue): the enclave locks every vault after 120 s
+	// without a Ping, so one write that hangs (a table that does not
+	// answer) must not hold the pings that follow it.
 	start := time.Now()
 	defer func() {
 		if took := time.Since(start); took > p.cfg.Heartbeat {

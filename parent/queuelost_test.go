@@ -91,6 +91,21 @@ func (h *harness) logged() string {
 	return h.logs.String()
 }
 
+// refusingQueues is a queue service that refuses to create a queue, as
+// SQS does for a name deleted less than 60 s ago, for as long as the test
+// says (not for a length of time: the test does not depend on the clock).
+type refusingQueues struct {
+	*parenttest.Queues
+	refuse atomic.Bool
+}
+
+func (r *refusingQueues) Create(ctx context.Context, name string) (string, error) {
+	if r.refuse.Load() {
+		return "", fmt.Errorf("%w: sqs create: AWS.SimpleQueueService.QueueDeletedRecently", parent.ErrQueueDeletedRecently)
+	}
+	return r.Queues.Create(ctx, name)
+}
+
 // The case with two instances: while one instance's enclave is
 // disconnected its registry row is gone, so another instance's sweeper
 // takes its queue for a gone instance's and deletes it. When the enclave
@@ -99,12 +114,15 @@ func (h *harness) logged() string {
 // refuses the deleted queue's name.
 func TestQueueSweptWhileEnclaveDisconnectedIsRecreated(t *testing.T) {
 	defer parent.SetQueueRetryForTest(20*time.Millisecond, 50*time.Millisecond, 10*time.Second)()
-	var ct *checkedTables
+	var (
+		ct *checkedTables
+		rq *refusingQueues
+	)
 	h := newHarness(t, func(c *parent.Config) {
 		ct = &checkedTables{Tables: c.Tables.(*parenttest.Tables), queues: c.Queues.(*parenttest.Queues)}
-		c.Tables = ct
+		rq = &refusingQueues{Queues: c.Queues.(*parenttest.Queues)}
+		c.Tables, c.Queues = ct, rq
 	})
-	h.queues.DeletedRecently = 700 * time.Millisecond
 	e := h.connect("boot-1", answerDone)
 	e.descriptor()
 	waitFor(t, "ready", func() bool { return h.p.Health().OK })
@@ -130,18 +148,65 @@ func TestQueueSweptWhileEnclaveDisconnectedIsRecreated(t *testing.T) {
 	ostop()
 	<-odone
 
-	// The enclave is back.
+	// The enclave is back while SQS still refuses the deleted queue's
+	// name: the row is withheld, for as long as that lasts.
+	rq.refuse.Store(true)
 	e = h.connect("boot-2", answerDone)
 	e.descriptor()
+	waitFor(t, "the row to be withheld", func() bool {
+		return strings.Count(h.logged(), `"msg":"registry row withheld: the instance queue cannot be created yet","queue":"test-vault-control-i-test"`) >= 2
+	})
+	if _, ok := h.tables.Instance("i-test"); ok || h.queues.Exists(h.queue) {
+		t.Fatal("a registry row or a queue while SQS refuses the name")
+	}
+	// SQS allows the name again.
+	rq.refuse.Store(false)
 	waitFor(t, "queue created again", func() bool { return h.queues.Exists(h.queue) })
 	h.request("01JBBBBBBBBBBBBBBBBBBBBBBB")
 	waitFor(t, "registry row", func() bool { row, ok := h.tables.Instance("i-test"); return ok && row.QueueURL == h.queue })
 	if n := ct.orphans.Load(); n != 0 {
 		t.Fatalf("%d registry rows written while their queue did not exist", n)
 	}
-	if !strings.Contains(h.logged(), `"msg":"registry row withheld: the instance queue cannot be created yet","queue":"test-vault-control-i-test"`) {
-		t.Fatalf("the row was not withheld while SQS refused the name:\n%s", h.logged())
+}
+
+// movedQueues is a queue service whose Create, from some moment on,
+// answers with another URL than before.
+type movedQueues struct {
+	*parenttest.Queues
+	moved atomic.Bool
+}
+
+func (m *movedQueues) Create(ctx context.Context, name string) (string, error) {
+	if m.moved.Load() {
+		name = "moved-" + name
 	}
+	return m.Queues.Create(ctx, name)
+}
+
+// The check of the queue after a disconnection takes the URL that the
+// create returns: the registry row carries it, and requests sent to it
+// are received.
+func TestQueueCheckTakesTheReturnedURL(t *testing.T) {
+	var q *movedQueues
+	h := newHarness(t, func(c *parent.Config) { q = &movedQueues{Queues: c.Queues.(*parenttest.Queues)}; c.Queues = q })
+	e := h.connect("boot-1", answerDone)
+	e.descriptor()
+	waitFor(t, "ready", func() bool { return h.p.Health().OK })
+	if row, _ := h.tables.Instance("i-test"); row.QueueURL != h.queue {
+		t.Fatalf("registry row %+v", row)
+	}
+	e.conn.Close()
+	waitFor(t, "row deleted", func() bool { _, ok := h.tables.Instance("i-test"); return !ok })
+	q.moved.Store(true)
+	e = h.connect("boot-2", answerDone)
+	e.descriptor()
+	waitFor(t, "registry row", func() bool { _, ok := h.tables.Instance("i-test"); return ok })
+	moved := "http://sqs.test/000000000000/moved-test-vault-control-i-test"
+	if row, _ := h.tables.Instance("i-test"); row.QueueURL != moved {
+		t.Fatalf("the row names %q; the create returned %q", row.QueueURL, moved)
+	}
+	h.queue = moved
+	h.request("01JAAAAAAAAAAAAAAAAAAAAAAA")
 }
 
 // createFails is a queue service whose Create fails on demand.
@@ -216,21 +281,22 @@ func TestQueueStillMissingAfterRecreateBacksOff(t *testing.T) {
 	q.creates = nil
 	q.mu.Unlock()
 	q.gone.Store(true)
-	time.Sleep(1200 * time.Millisecond)
+	var creates []time.Time
+	waitFor(t, "five recreations", func() bool {
+		q.mu.Lock()
+		defer q.mu.Unlock()
+		creates = append(creates[:0], q.creates...)
+		return len(creates) >= 5
+	})
 	q.gone.Store(false)
-	q.mu.Lock()
-	creates := append([]time.Time(nil), q.creates...)
-	q.mu.Unlock()
-	// Waits of 40, 80, 160, 320, 320 ms: five or six creates in 1.2 s. A
-	// loop without a wait makes thousands; a fixed 40 ms wait, about 30.
-	if len(creates) < 3 || len(creates) > 8 {
-		t.Fatalf("%d creates in 1.2 s of a missing queue", len(creates))
-	}
-	if first, third := creates[1].Sub(creates[0]), creates[2].Sub(creates[1]); third < first {
-		t.Fatalf("the wait does not grow: %v then %v", first, third)
-	}
-	if n := strings.Count(h.logged(), `"msg":"queue receive failed"`); n > 8 {
-		t.Fatalf("%d receive failures logged", n)
+	// Between two recreations lies at least the configured wait: 40, 80,
+	// 160 and 320 ms (the last is the maximum). A wait is never shorter
+	// than asked for, so a slow machine only lengthens the gaps; a loop
+	// without a wait, or with one that does not grow, has shorter ones.
+	for i, least := range []time.Duration{40 * time.Millisecond, 80 * time.Millisecond, 160 * time.Millisecond, 320 * time.Millisecond} {
+		if gap := creates[i+1].Sub(creates[i]); gap < least {
+			t.Fatalf("recreation %d came %v after the one before; the wait there is %v", i+2, gap, least)
+		}
 	}
 	h.request("01JAAAAAAAAAAAAAAAAAAAAAAA")
 }

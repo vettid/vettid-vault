@@ -157,7 +157,11 @@ supervisor's count does not move while vaults are unlocked.
   `perf_event_open`, none of which the Go runtime or the vault's code
   calls, and on amd64 every x32 syscall number (an x32 call reports the
   native architecture but has its own numbers, so the list would not
-  match it);
+  match it) and the x32-only numbers 512 to 547, which kernels before
+  5.4 ran for 64-bit processes too. Refusing `bpf` does not remove
+  classic BPF: `seccomp` and `SO_ATTACH_FILTER` on the channel still
+  take such filters. `Install` fails when the kernel could not put the
+  filter on every thread;
 - no inherited descriptor but the channel (fd 3; Go opens everything
   close-on-exec), stdin/stdout/stderr on `/dev/null`, working directory
   `/`, environment `GOMEMLIMIT`, `GOMAXPROCS=2`, `GOTRACEBACK=none` only;

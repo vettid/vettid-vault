@@ -73,6 +73,26 @@ jobs:
           VAULT_IT_LOCALSTACK: http://127.0.0.1:4566
         run: go test -count=1 -p 1 -tags 'devenclave integration' ./parent/ ./integration/ ./cmd/devstack/
 
+  filter-arm64:
+    # The vault process's system-call filter is a program per
+    # architecture and the release image is arm64, while the jobs above
+    # run on amd64: install the real filter on an arm64 kernel and run
+    # the self-test's vault process under it. -v prints what this kernel
+    # answers each probe without the filter.
+    runs-on: ubuntu-26.04-arm
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: the filter, the vault process and the self-test on arm64
+        run: |
+          test "$(go env GOARCH)" = arm64
+          go test -count=1 -p 1 -v ./internal/seccomp/...
+          go test -count=1 -p 1 ./enclave/vaultproc/... ./internal/selftest/...
+          go test -count=1 -p 1 -tags 'devenclave e2e' -run '^TestSelftest$' -v ./e2e/
+
   enclave-image:
     # Dockerfile.enclave is reproducible: two clean builds give the same
     # binary (and the same image). The arm64 build's hash is what the

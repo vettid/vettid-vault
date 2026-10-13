@@ -22,6 +22,7 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unsafe"
 
 	"golang.org/x/crypto/argon2"
 	"golang.org/x/sys/unix"
@@ -38,6 +39,8 @@ func TestMain(m *testing.M) {
 		os.Exit(m.Run())
 	case "probe":
 		childProbe()
+	case "tsync":
+		childTsync()
 	case "exec":
 		childExec()
 	case "after-exec":
@@ -70,16 +73,6 @@ func child(t *testing.T, mode string, extra ...*os.File) (*exec.Cmd, *bytes.Buff
 	return cmd, &out
 }
 
-// names are the probes' names: what the filter must refuse.
-func names() []string {
-	var n []string
-	for _, p := range slices.Concat(probes, archProbes) {
-		n = append(n, p.name)
-	}
-	slices.Sort(n)
-	return n
-}
-
 // result is one Probe run as a child reports it.
 type result map[string]string
 
@@ -98,13 +91,13 @@ func report(p map[string]error) result {
 
 func (r result) notRefused() []string {
 	var bad []string
-	for _, n := range names() {
+	for _, n := range Names() {
 		if r[n] != "refused" {
 			bad = append(bad, fmt.Sprintf("%s: %q", n, r[n]))
 		}
 	}
-	if len(r) != len(names()) {
-		bad = append(bad, fmt.Sprintf("%d results for %d probes", len(r), len(names())))
+	if len(r) != len(Names()) {
+		bad = append(bad, fmt.Sprintf("%d results for %d probes", len(r), len(Names())))
 	}
 	return bad
 }
@@ -163,10 +156,16 @@ func TestFilter(t *testing.T) {
 			t.Errorf("%s: not refused: %s", where, strings.Join(bad, "; "))
 		}
 	}
-	// What this kernel answers without the filter (the test proves the
-	// most where that is not "refused").
-	for _, n := range names() {
-		t.Logf("without the filter: %-18s %s", n, got["before"][n])
+	// Without the filter this kernel must answer every probe with
+	// something else than EPERM: only then does "refused" show the filter.
+	// (A machine whose kernel refuses one of the calls by itself, io_uring
+	// switched off by sysctl for one, fails here: the probes prove nothing
+	// on it.)
+	for _, n := range Names() {
+		t.Logf("without the filter: %-26s %s", n, got["before"][n])
+		if a, ok := got["before"][n]; !ok || a == "refused" {
+			t.Errorf("without the filter %s answers %q", n, a)
+		}
 	}
 }
 
@@ -206,6 +205,73 @@ func TestFilterSurvivesExec(t *testing.T) {
 	}
 	if got.NoNewPrivs != 1 || got.SeccompMode != unix.SECCOMP_MODE_FILTER {
 		t.Errorf("after exec: no_new_privs %d, seccomp mode %d", got.NoNewPrivs, got.SeccompMode)
+	}
+}
+
+// childTsync gives one thread a filter of its own; the process's filter
+// can then not be put on all threads.
+func childTsync() {
+	ready := make(chan struct{})
+	go func() {
+		runtime.LockOSThread()
+		if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
+			os.Exit(exitWork)
+		}
+		f := []unix.SockFilter{stmt(unix.BPF_RET|unix.BPF_K, unix.SECCOMP_RET_ALLOW)}
+		prog := unix.SockFprog{Len: 1, Filter: &f[0]}
+		if _, _, errno := unix.Syscall(unix.SYS_SECCOMP, unix.SECCOMP_SET_MODE_FILTER, 0, uintptr(unsafe.Pointer(&prog))); errno != 0 {
+			os.Exit(exitWork)
+		}
+		close(ready)
+		select {} // the thread stays, with its filter
+	}()
+	<-ready
+	out := map[string]any{}
+	onNewThread(func() {
+		err := Install()
+		out["install"] = fmt.Sprint(err)
+		out["after"] = report(Probe())
+	})
+	emit(out)
+	os.Exit(0)
+}
+
+// TestInstallFailsWithoutAllThreads: when the kernel cannot put the
+// filter on every thread it installs none and answers a thread id, not
+// an error. Install must report that, or a release build would run a
+// vault process without its filter.
+func TestInstallFailsWithoutAllThreads(t *testing.T) {
+	cmd, out := child(t, "tsync")
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("child: %v\n%s", err, out)
+	}
+	var got struct {
+		Install string `json:"install"`
+		After   result `json:"after"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	if !strings.Contains(got.Install, "no filter installed") {
+		t.Errorf("Install: %s", got.Install)
+	}
+	// The premise: nothing was installed.
+	if got.After["socket_inet"] == "refused" {
+		t.Errorf("a filter is in place after all: %v", got.After)
+	}
+}
+
+// TestRefused: only EPERM counts as the filter's answer.
+func TestRefused(t *testing.T) {
+	for _, err := range []error{unix.EPERM, fmt.Errorf("probe: %w", unix.EPERM)} {
+		if !Refused(err) {
+			t.Errorf("%v not refused", err)
+		}
+	}
+	for _, err := range []error{nil, ErrNotRefused, ErrUnsupported, unix.ENOSYS, unix.EACCES, unix.ESRCH, unix.EBADF, unix.EINVAL, unix.EFAULT, errors.New("operation not permitted")} {
+		if Refused(err) {
+			t.Errorf("%v refused", err)
+		}
 	}
 }
 
@@ -410,6 +476,12 @@ func run(t *testing.T, p []unix.SockFilter, arch, nr uint32) uint32 {
 			} else {
 				pc += int(in.Jf)
 			}
+		case unix.BPF_JMP | unix.BPF_JGT | unix.BPF_K:
+			if a > in.K {
+				pc += int(in.Jt)
+			} else {
+				pc += int(in.Jf)
+			}
 		case unix.BPF_JMP | unix.BPF_JGE | unix.BPF_K:
 			if a >= in.K {
 				pc += int(in.Jt)
@@ -463,6 +535,13 @@ func TestProgram(t *testing.T) {
 	if runtime.GOARCH == "arm64" {
 		other, compat = unix.AUDIT_ARCH_X86_64, unix.AUDIT_ARCH_ARM
 	}
+	amd64 := runtime.GOARCH == "amd64"
+	// The program's size is part of what is pinned: the arm64 program
+	// has the architecture check, one pair per entry and the final
+	// allow; amd64 adds the two x32 ranges.
+	if n, w := len(p), 4+2*len(denied)+1; (amd64 && n != w+5) || (!amd64 && n != w) {
+		t.Errorf("%d instructions", n)
+	}
 	for nr := range uint32(1024) {
 		for _, a := range []uint32{other, compat} {
 			if got := run(t, p, a, nr); got != unix.SECCOMP_RET_KILL_PROCESS {
@@ -470,7 +549,7 @@ func TestProgram(t *testing.T) {
 			}
 		}
 		w := uint32(unix.SECCOMP_RET_ALLOW)
-		if slices.Contains(denied, nr) {
+		if slices.Contains(denied, nr) || (amd64 && nr >= 512 && nr <= 547) {
 			w = eperm
 		}
 		if got := run(t, p, arch(), nr); got != w {

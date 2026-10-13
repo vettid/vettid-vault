@@ -4,6 +4,7 @@ package seccomp
 
 import (
 	"errors"
+	"fmt"
 	"runtime"
 	"slices"
 	"unsafe"
@@ -22,7 +23,10 @@ var denied = []uint32{
 	unix.SYS_IO_URING_SETUP, unix.SYS_IO_URING_ENTER, unix.SYS_IO_URING_REGISTER,
 	// No other process's execution, memory or descriptors.
 	unix.SYS_PTRACE, unix.SYS_PROCESS_VM_READV, unix.SYS_PROCESS_VM_WRITEV, unix.SYS_PIDFD_GETFD,
-	// Kernel interfaces a vault never uses.
+	// Kernel interfaces a vault never uses. Refusing bpf closes the
+	// bpf call (maps and programs of the extended kind); classic filters
+	// are still accepted where they always were, by seccomp itself and
+	// by SO_ATTACH_FILTER on the inherited channel.
 	unix.SYS_BPF, unix.SYS_USERFAULTFD, unix.SYS_PERF_EVENT_OPEN,
 }
 
@@ -30,7 +34,18 @@ var denied = []uint32{
 // reports the same architecture as a native one but has its own number
 // (socket is x32Bit|41), so the list above would not match it. Nothing
 // here is built for x32: every number from x32Bit up is refused.
-const x32Bit = 0x40000000
+//
+// The calls that exist only for x32 have the numbers x32First to x32Last
+// (rt_sigaction to pwritev2 in the kernel's syscall_64.tbl; ptrace is
+// 521, process_vm_readv 539, process_vm_writev 540). Before Linux 5.4 a
+// kernel with x32 ran them for a 64-bit process that called them without
+// the bit, so that range is refused too. No 64-bit call has a number in
+// it.
+const (
+	x32Bit   = 0x40000000
+	x32First = 512
+	x32Last  = 547
+)
 
 func arch() uint32 {
 	if runtime.GOARCH == "arm64" {
@@ -61,6 +76,7 @@ func program(deny uint32) []unix.SockFilter {
 		ldW = unix.BPF_LD | unix.BPF_W | unix.BPF_ABS
 		jeq = unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K
 		jge = unix.BPF_JMP | unix.BPF_JGE | unix.BPF_K
+		jgt = unix.BPF_JMP | unix.BPF_JGT | unix.BPF_K
 		ret = unix.BPF_RET | unix.BPF_K
 	)
 	p := []unix.SockFilter{
@@ -71,6 +87,8 @@ func program(deny uint32) []unix.SockFilter {
 	}
 	if runtime.GOARCH == "amd64" {
 		p = append(p, jump(jge, x32Bit, 0, 1), stmt(ret, deny))
+		// x32First <= number <= x32Last.
+		p = append(p, jump(jge, x32First, 0, 2), jump(jgt, x32Last, 1, 0), stmt(ret, deny))
 	}
 	for _, nr := range denied {
 		p = append(p, jump(jeq, nr, 0, 1), stmt(ret, deny))
@@ -88,10 +106,16 @@ func install(f []unix.SockFilter) error {
 		return err
 	}
 	prog := unix.SockFprog{Len: uint16(len(f)), Filter: &f[0]}
-	_, _, errno := unix.Syscall(unix.SYS_SECCOMP, unix.SECCOMP_SET_MODE_FILTER, unix.SECCOMP_FILTER_FLAG_TSYNC, uintptr(unsafe.Pointer(&prog)))
+	r, _, errno := unix.Syscall(unix.SYS_SECCOMP, unix.SECCOMP_SET_MODE_FILTER, unix.SECCOMP_FILTER_FLAG_TSYNC, uintptr(unsafe.Pointer(&prog)))
 	runtime.KeepAlive(f)
 	if errno != 0 {
 		return errno
+	}
+	// With TSYNC the call answers the id of a thread it could not bring
+	// under the filter (one that has a filter of another origin), without
+	// an error, and has then installed nothing.
+	if r != 0 {
+		return fmt.Errorf("seccomp: no filter installed: thread %d cannot take it", r)
 	}
 	return nil
 }
@@ -131,6 +155,16 @@ var probes = []probe{
 	{name: "userfaultfd", nr: unix.SYS_USERFAULTFD, fd: true, a: [3]uintptr{none}},
 	// No attributes.
 	{name: "perf_event_open", nr: unix.SYS_PERF_EVENT_OPEN, fd: true},
+}
+
+// Names are the names of Probe's results, sorted.
+func Names() []string {
+	var n []string
+	for _, p := range slices.Concat(probes, archProbes) {
+		n = append(n, p.name)
+	}
+	slices.Sort(n)
+	return n
 }
 
 // Probe makes every call the filter denies, harmlessly, and returns each

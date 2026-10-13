@@ -653,7 +653,8 @@ func TestSelftest(t *testing.T) {
 	}
 	for _, n := range []string{"nsm.attestation_verifies", "egress.relay_healthz", "egress.relay_http2", "egress.google_status_list",
 		"kms.policy_check_rejects_test_key", "kms.policy_check_passes_without_admin", "vault_process.kms_recipient_round_trip",
-		"vault_process.seccomp_refuses_socket_vsock", "vault_process.not_dumpable", "s3.stale_if_match_refused", "vault_process.argon2id_default"} {
+		"vault_process.seccomp_refuses_socket_vsock", "vault_process.seccomp_refuses_io_uring_setup", "vault_process.seccomp_refuses_pidfd_getfd",
+		"vault_process.seccomp_refuses_bpf", "vault_process.not_dumpable", "s3.stale_if_match_refused", "vault_process.argon2id_default"} {
 		if !want[n] {
 			t.Errorf("%s not OK", n)
 		}

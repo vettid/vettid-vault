@@ -156,6 +156,26 @@ func (s *Supervisor) selftestProcess(r *selftest.Report) {
 	for _, n := range s.hardenNotes {
 		r.Add("supervisor.hardening_note", false, false, n)
 	}
+	// Required on the enclave's own kernel, where the supervisor makes
+	// both settings; reported elsewhere.
+	err = userNamespacesClosed()
+	r.Add("kernel.user_namespaces_off", err == nil, s.cfg.OwnKernel, "max_user_namespaces: "+orZero(err))
+	err = unprivilegedBPFDisabled()
+	r.Add("kernel.unprivileged_bpf_off", err == nil, s.cfg.OwnKernel, "unprivileged_bpf_disabled: "+orSet(err))
+}
+
+func orZero(err error) string {
+	if err == nil {
+		return "0"
+	}
+	return err.Error()
+}
+
+func orSet(err error) string {
+	if err == nil {
+		return "set"
+	}
+	return err.Error()
 }
 
 func (s *Supervisor) selftestRelay(ctx context.Context, r *selftest.Report, hc *http.Client) {
@@ -299,6 +319,9 @@ func (s *Supervisor) selftestVaultProcess(ctx context.Context, r *selftest.Repor
 	}
 	r.Checks = append(r.Checks, vr.Checks...)
 	r.VaultPeakRSS = vr.PeakRSS
+	// From inside the vault process: starting a process in a new user
+	// namespace is refused (required where the supervisor closed them).
+	r.Add("vault_process.user_namespace_refused", vr.UserNamespace == selftest.UserNamespaceRefused, s.cfg.OwnKernel, vr.UserNamespace)
 	want := s.cfg.Proc.UIDBase
 	if want > 0 {
 		r.Add("vault_process.own_uid_gid", vr.UID == want+p.slot && vr.GID == want+p.slot, true, fmt.Sprintf("uid=%d gid=%d", vr.UID, vr.GID))

@@ -39,6 +39,8 @@ Required checks (any FAIL fails the run):
 | `nsm.attestation_verifies` | document with nonce and the self-test user_data verifies against the pinned AWS Nitro root, is fresh, PCRs match |
 | `proc.mounted`, `proc.self_exe` | `/proc` mounted; `/proc/self/exe` resolves (vault processes are re-executions of it) |
 | `supervisor.not_dumpable` | `PR_SET_DUMPABLE` 0 |
+| `kernel.user_namespaces_off` | `/proc/sys/user/max_user_namespaces` reads `0`: the supervisor wrote it before it reached the parent (release builds only; it needs root in the enclave). No process can then create a user namespace, and a release build starts no vault process while it is not 0 |
+| `kernel.unprivileged_bpf_off` | `/proc/sys/kernel/unprivileged_bpf_disabled` is not `0` (the supervisor wrote `1`) |
 | `egress.relay_healthz` | `GET https://relay.vettid.org/healthz` through the parent's forwarder, TLS against the pinned Amazon roots: 200, `status ok`, protocol `0.4.0` or a later `0.x` (0.5.0 adds mailbox deletion) |
 | `egress.relay_http2` | the relay connection is HTTP/2 |
 | `egress.google_status_list` | the attestation status list from `android.googleapis.com` (GTS roots) parses |
@@ -47,6 +49,7 @@ Required checks (any FAIL fails the run):
 | `vault_process.spawn` | a vault process is started by re-executing the enclave binary |
 | `vault_process.own_uid_gid` | it runs as uid = gid = 200000 + slot |
 | `vault_process.not_dumpable` | `PR_SET_DUMPABLE` 0 in the child |
+| `vault_process.user_namespace_refused` | the vault process tries to start a process in a new user namespace (`clone` with `CLONE_NEWUSER`, of a program that does not exist): the kernel answers ENOSPC and creates nothing. Detail `refused: no user namespace may be created (ENOSPC)`; `a user namespace was created` is the failure |
 | `vault_process.seccomp_installed` | the filter installs (needs `CONFIG_SECCOMP_FILTER`) |
 | `vault_process.seccomp_refuses_<call>`, one for every call the filter denies: `socket_vsock`, `socket_inet`, `socketpair`, `io_uring_setup`, `io_uring_enter`, `io_uring_register`, `ptrace`, `process_vm_readv`, `process_vm_writev`, `pidfd_getfd`, `bpf`, `userfaultfd`, `perf_event_open` (13 in the arm64 release image; an amd64 build adds `x32_socket`, `x32_only_ptrace`, `x32_only_process_vm_readv` and `x32_only_process_vm_writev`) | EPERM. Each call is made with arguments that do nothing (`internal/seccomp` `Probe`: process 0, a descriptor that is not open, no attributes), so that without the filter the kernel answers something else: "no such call" for io_uring and `pidfd_getfd` on the pinned 4.14 kernel, which has neither. EPERM therefore shows the filter, not the kernel's own permission checks |
 | `vault_process.rlimit_as`, `…_nofile`, `…_core` | 4 GiB, 64, 0 |
@@ -60,6 +63,7 @@ Required checks (any FAIL fails the run):
 Informational checks (reported, never fail the run):
 
 - `kernel.yama_ptrace_scope`: whether the enclave kernel has Yama.
+- `supervisor.hardening_note`: one line for each setting the supervisor could not make. A line that begins "user namespaces are not closed" goes with a failed `kernel.user_namespaces_off` and `vault_process.spawn`.
 - `kms.policy_check_passes_without_admin`: the same check with the administrator statement removed. It passes when the rest of the test key's policy has the §11.10.7 shape, which shows the refusal is for the right reason.
 - `vault_process.open_fds`
 - `s3.conditional_delete`

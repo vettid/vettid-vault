@@ -17,6 +17,11 @@ func setLimits(int, ProcConfig) {}
 
 func hardenSelf() []string { return []string{"not Linux"} }
 
+func closeUserNamespaces() error     { return errors.New("not Linux") }
+func userNamespacesClosed() error    { return errors.New("not Linux") }
+func disableUnprivilegedBPF() error  { return errors.New("not Linux") }
+func unprivilegedBPFDisabled() error { return errors.New("not Linux") }
+
 func supervisorDumpable() (int, error) { return -1, errors.New("not Linux") }
 
 func selfCPUMicros() int64 { return 0 }

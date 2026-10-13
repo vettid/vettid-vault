@@ -64,6 +64,14 @@ type Config struct {
 	// Harden makes the supervisor non-dumpable and tightens ptrace
 	// (release and development binaries; not tests).
 	Harden bool
+	// OwnKernel says that the kernel is this enclave's alone (release
+	// builds only; development binaries and tests run on a machine they
+	// share). The supervisor then closes, for the whole machine and
+	// before any vault process exists, what a vault process must never
+	// reach: user namespaces (the limit is set to 0) and bpf for
+	// unprivileged processes. If user namespaces cannot be closed, no
+	// vault process is started.
+	OwnKernel bool
 	// MaxVaults caps the vaults running at once (least recently active
 	// is locked first, §12.3); 0 = no cap.
 	MaxVaults int
@@ -111,6 +119,8 @@ type Supervisor struct {
 	selftestOnce  sync.Once
 	selftestDone  chan struct{}
 	hardenNotes   []string
+	// userNSClosed: the limit of user namespaces is 0 (OwnKernel).
+	userNSClosed atomic.Bool
 
 	// Set by start: what the supervisor brokers for vault processes.
 	host      *procHost
@@ -184,6 +194,14 @@ func (s *Supervisor) Run(ctx context.Context) error {
 	m, err := s.cfg.NSM.Measurements()
 	if err != nil {
 		return err
+	}
+	// Before the parent is reached, and so before any request that could
+	// start a vault process.
+	if s.cfg.OwnKernel {
+		for _, n := range s.closeKernel() {
+			s.hardenNotes = append(s.hardenNotes, n)
+			s.log.Error("hardening: " + n)
+		}
 	}
 	conn, err := s.connect(ctx, m.PCR0)
 	if err != nil {
@@ -715,4 +733,19 @@ func (s *Supervisor) KillVault(vaultID string) bool {
 		return false
 	}
 	return s.host.Kill(vaultID)
+}
+
+// closeKernel makes the settings of Config.OwnKernel and returns what
+// could not be made.
+func (s *Supervisor) closeKernel() []string {
+	var notes []string
+	if err := closeUserNamespaces(); err != nil {
+		notes = append(notes, "user namespaces are not closed, no vault process will be started: "+err.Error())
+	} else {
+		s.userNSClosed.Store(true)
+	}
+	if err := disableUnprivilegedBPF(); err != nil {
+		notes = append(notes, "bpf is not closed to unprivileged processes: "+err.Error())
+	}
+	return notes
 }

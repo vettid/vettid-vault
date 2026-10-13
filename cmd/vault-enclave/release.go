@@ -48,6 +48,7 @@ func platform() (supervisor.Config, error) {
 		Proc:       supervisor.ProcConfig{Exec: []string{exe, vaultproc.Arg}, UIDBase: vaultUIDBase},
 		RelayHosts: []string{relayHost()},
 		Harden:     true,
+		OwnKernel:  true,
 		NitroRoots: enclave.NitroRoots(),
 		// The hardware smoke test (docs/SMOKE.md) reaches the KMS endpoint
 		// of the test key's region; same roots, same forwarder.

@@ -647,6 +647,23 @@ func TestSelftest(t *testing.T) {
 	if rep.Capacity != nil {
 		t.Fatal("capacity measured without being asked")
 	}
+	// The kernel checks of a release build are reported here, not
+	// required: a development supervisor leaves the machine's settings
+	// alone.
+	kernel := map[string]bool{"kernel.user_namespaces_off": false, "kernel.unprivileged_bpf_off": false, "vault_process.user_namespace_refused": false}
+	for _, c := range rep.Checks {
+		if _, ok := kernel[c.Name]; ok {
+			kernel[c.Name] = true
+			if c.Required || c.Detail == "" {
+				t.Errorf("%s: required %v, detail %q", c.Name, c.Required, c.Detail)
+			}
+		}
+	}
+	for n, seen := range kernel {
+		if !seen {
+			t.Errorf("no check %s", n)
+		}
+	}
 	want := map[string]bool{}
 	for _, c := range rep.Checks {
 		want[c.Name] = c.OK

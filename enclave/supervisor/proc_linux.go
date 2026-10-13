@@ -3,7 +3,9 @@
 package supervisor
 
 import (
+	"fmt"
 	"os"
+	"strings"
 	"syscall"
 
 	"golang.org/x/sys/unix"
@@ -50,6 +52,66 @@ func hardenSelf() []string {
 		notes = append(notes, "Yama ptrace_scope unavailable")
 	}
 	return notes
+}
+
+// Kernel settings of the whole machine (variables for the tests, which
+// must not write the real ones).
+var (
+	// The number of user namespaces that may exist below the initial
+	// one. Only a process with CAP_SYS_RESOURCE in the initial user
+	// namespace may write it, so no vault process can raise it again.
+	userNSLimitPath = "/proc/sys/user/max_user_namespaces"
+	// Not 0: only privileged processes may call bpf. The kernel does not
+	// let it be set back to 0.
+	bpfDisabledPath = "/proc/sys/kernel/unprivileged_bpf_disabled"
+)
+
+func readSetting(path string) (string, error) {
+	b, err := os.ReadFile(path)
+	return strings.TrimSpace(string(b)), err
+}
+
+// closeUserNamespaces sets the limit of user namespaces to 0 and reads
+// it back. No process, root included, can then create a user namespace
+// (clone and unshare with CLONE_NEWUSER answer ENOSPC), and with it none
+// of the namespaces, mounts and capabilities that an unprivileged process
+// gets only inside one.
+func closeUserNamespaces() error {
+	if err := os.WriteFile(userNSLimitPath, []byte("0\n"), 0); err != nil {
+		return err
+	}
+	return userNamespacesClosed()
+}
+
+func userNamespacesClosed() error {
+	v, err := readSetting(userNSLimitPath)
+	if err != nil {
+		return err
+	}
+	if v != "0" {
+		return fmt.Errorf("the limit of user namespaces is %q", v)
+	}
+	return nil
+}
+
+// disableUnprivilegedBPF closes the bpf call to unprivileged processes
+// and reads the setting back.
+func disableUnprivilegedBPF() error {
+	if err := os.WriteFile(bpfDisabledPath, []byte("1\n"), 0); err != nil {
+		return err
+	}
+	return unprivilegedBPFDisabled()
+}
+
+func unprivilegedBPFDisabled() error {
+	v, err := readSetting(bpfDisabledPath)
+	if err != nil {
+		return err
+	}
+	if v != "1" && v != "2" {
+		return fmt.Errorf("unprivileged_bpf_disabled is %q", v)
+	}
+	return nil
 }
 
 func supervisorDumpable() (int, error) { return unix.PrctlRetInt(unix.PR_GET_DUMPABLE, 0, 0, 0, 0) }

@@ -3,9 +3,13 @@
 package vaultproc
 
 import (
+	"errors"
 	"fmt"
+	"syscall"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/vettid/vettid-vault/internal/selftest"
 )
 
 var errEPERM error = unix.EPERM
@@ -63,4 +67,30 @@ func cpuMicros() int64 {
 		return 0
 	}
 	return (int64(ru.Utime.Sec)+int64(ru.Stime.Sec))*1e6 + int64(ru.Utime.Usec) + int64(ru.Stime.Usec)
+}
+
+// TryUserNamespace tries to start a process in a new user namespace and
+// says what happened (selftest.UserNamespaceRefused where the supervisor
+// has set the limit of user namespaces to 0). The program it names does
+// not exist, so nothing ever runs: where the namespace is refused the
+// kernel creates no process (ENOSPC), and where it is not, the new
+// process ends when the program is not found (ENOENT).
+//
+// unshare is not tried: it refuses CLONE_NEWUSER in any process with
+// more than one thread (EINVAL), which a Go process always is, whatever
+// the limit.
+func TryUserNamespace() string {
+	pid, err := syscall.ForkExec("/proc/self/no-such-program", []string{"no-such-program"},
+		&syscall.ProcAttr{Sys: &syscall.SysProcAttr{Cloneflags: syscall.CLONE_NEWUSER}})
+	switch {
+	case errors.Is(err, syscall.ENOSPC):
+		return selftest.UserNamespaceRefused
+	case errors.Is(err, syscall.ENOENT):
+		return selftest.UserNamespaceCreated
+	case err == nil:
+		var ws syscall.WaitStatus
+		_, _ = syscall.Wait4(pid, &ws, 0, nil)
+		return selftest.UserNamespaceCreated
+	}
+	return err.Error()
 }

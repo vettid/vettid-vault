@@ -139,6 +139,11 @@ func (h *procHost) spawn(vaultID, userGUID string, enroll bool, extra ...string)
 	if len(h.cfg.Exec) == 0 {
 		return nil, errSpawn
 	}
+	// On its own kernel the supervisor closes user namespaces before the
+	// first vault process; one that could open them is not started.
+	if h.s.cfg.OwnKernel && !h.s.userNSClosed.Load() {
+		return nil, errSpawn
+	}
 	slot := h.takeSlot()
 	if slot < 0 {
 		return nil, errNoSlot

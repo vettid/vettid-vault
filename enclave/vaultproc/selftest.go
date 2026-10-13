@@ -92,6 +92,7 @@ func runSelftest(ctx context.Context, ch channel, keyARN string, seccompErr erro
 		res.Checks = append(res.Checks, selftest.Check{Name: name, OK: ok, Required: req, Detail: detail})
 	}
 	res.UID, res.GID = os.Getuid(), os.Getgid()
+	res.UserNamespace = TryUserNamespace()
 	d, err := Dumpable()
 	add("vault_process.not_dumpable", err == nil && d == 0, true, fmt.Sprintf("dumpable=%d", d))
 	add("vault_process.seccomp_installed", seccompErr == nil, true, errString(seccompErr))

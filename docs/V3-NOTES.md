@@ -162,6 +162,39 @@ supervisor's count does not move while vaults are unlocked.
 **Supervisor:** `PR_SET_DUMPABLE 0`; `/dev/nsm` chmod 0600 (only root,
 the supervisor, opens it); Yama `ptrace_scope` 3 where the kernel has it.
 
+**The enclave's kernel (release builds only, `Config.OwnKernel`):**
+before it reaches the parent the supervisor writes `0` to
+`/proc/sys/user/max_user_namespaces` and `1` to
+`/proc/sys/kernel/unprivileged_bpf_disabled`, and reads both back.
+
+- The pinned kernel (4.14.256) is built with user namespaces. In one, an
+  unprivileged process is root with every capability over the
+  namespaces it creates with it: it can mount file systems, cgroup
+  hierarchies among them. That is a large part of the kernel that a
+  vault process has no use for, and it is where flaws of this kernel
+  generation sit that let such a process run a program as real root (the
+  cgroup v1 `release_agent` file was writable from such a namespace until
+  4.14.266). A program run that way is outside the vault processes' uid,
+  limits and system-call filter.
+- With the limit at 0 nobody, root included, can create a user
+  namespace: `clone` and `unshare` with `CLONE_NEWUSER` answer ENOSPC.
+  The limit belongs to the initial user namespace and only a process
+  with `CAP_SYS_RESOURCE` there may write it; a vault process has no
+  capability. Nothing in the enclave uses a user namespace: the
+  supervisor starts vault processes with a uid, a gid and a process
+  group, and neither the Go runtime nor `os/exec` creates namespaces
+  unless asked to.
+- If the limit cannot be set or does not read back as 0, the supervisor
+  logs an error and starts no vault process (every enroll and unlock
+  fails). A failed bpf setting is logged and reported only: the calls it
+  closes are also none a vault process makes.
+- Development binaries and tests never write either file (they run on
+  a machine they share). The self-test checks both settings from the
+  supervisor and the refusal from inside a vault process
+  (docs/SMOKE.md).
+- `perf_event_paranoid` is left alone: its default, 2, is the strictest
+  value this kernel knows.
+
 **Locks:** owner request, memory pressure (least recently active vault
 while available memory is under 15 %), the vault cap, a lost lease, a lost
 parent and shutdown send `Lock` (flush, `vault.locking`, exit); a process

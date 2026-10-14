@@ -164,6 +164,7 @@ func (s *Supervisor) selftestProcess(r *selftest.Report) {
 	r.Add("kernel.unprivileged_bpf_off", err == nil, s.cfg.OwnKernel, "unprivileged_bpf_disabled: "+orSet(err))
 	err = nsmClosedCheck()
 	r.Add("supervisor.nsm_closed", err == nil, s.cfg.OwnKernel, "root only: "+orYes(err))
+	r.Add("supervisor.pid1", true, false, pid1())
 }
 
 func orYes(err error) string {
@@ -312,7 +313,13 @@ func (s *Supervisor) selftestVaultProcess(ctx context.Context, r *selftest.Repor
 		r.Add("vault_process.spawn", false, true, errStr(err))
 		return
 	}
-	defer h.stop(p)
+	defer func() {
+		h.stop(p)
+		// After the vault process and the sweep: orphans are reaped by
+		// PID 1, so none is left as the supervisor's zombie.
+		all, ours, err := zombies()
+		r.Add("supervisor.zombies", err == nil && ours == 0, false, fmt.Sprintf("zombies=%d of the supervisor=%d %s", all, ours, errStr(err)))
+	}()
 	r.Add("vault_process.spawn", true, true, fmt.Sprintf("re-executed %s", h.cfg.Exec[0]))
 	cctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer cancel()

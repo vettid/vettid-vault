@@ -25,7 +25,7 @@ LocalStack, the real relay and a stand-in for the member API
 
 | Package / command | What it does |
 |---|---|
-| `cmd/vault-enclave`, `enclave/supervisor` | PID 1 in the enclave: control connection to the parent, ETKs and the outer decryption of the alternate channel, the vault processes and their scoped channels, lease-lost and memory-pressure locks, status-list fetch, sanitized logs |
+| `cmd/vault-enclave`, `enclave/supervisor` | the enclave's first program (root, started by the EIF's init, which is PID 1): control connection to the parent, ETKs and the outer decryption of the alternate channel, the vault processes and their scoped channels, lease-lost and memory-pressure locks, status-list fetch, sanitized logs |
 | `enclave/vaultproc`, `internal/vaultipc`, `internal/seccomp` | One vault's process (the same binary re-executed): unseals with its own KMS Recipient key, runs the manager and features, signs its relay requests; its channel to the supervisor; its syscall filter |
 | `enclave/nsm` | `/dev/nsm`: attestation documents and PCRs (CBOR over the NSM ioctl) |
 | `enclave/egress` | The enclave's only egress: HTTPS to an allowlist, TLS 1.3 against per-host pinned roots, shared HTTP/2 connections |

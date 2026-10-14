@@ -40,7 +40,7 @@ type ProcConfig struct {
 	// UIDBase, if not 0, runs each vault process under its own uid = gid,
 	// UIDBase plus a counter that only grows for the life of the
 	// supervisor: no id is ever given to a second process (needs root,
-	// as PID 1 in the enclave is). When such a process ends, everything
+	// as the supervisor is in the enclave). When such a process ends, everything
 	// still running under its id is killed before it is reported ended.
 	// 0 keeps the supervisor's ids (development and tests), and none of
 	// that applies.
@@ -132,6 +132,46 @@ var (
 // not a uid).
 const maxVaultUID = 1<<32 - 2
 
+// sweepAfter sweeps the uid of a vault process that ended. If the sweep
+// fails (/proc unreadable, processes still running after its last
+// round), the uid is kept as unswept for the vault: it is never given to
+// another process anyway, the failure is logged at WARN, and
+// the vault's next process is not started until a sweep of every such
+// uid succeeds (sweepPending). Other vaults are not affected.
+func (s *Supervisor) sweepAfter(vaultID string, uid int) {
+	err := sweepUID(uid)
+	if err == nil {
+		return
+	}
+	s.log.Warn("vault process left processes that could not be ended; its vault starts no new process until they are",
+		"vault_id", vaultID, "uid", uid, "error", err.Error())
+	s.unsweptMu.Lock()
+	if s.unswept == nil {
+		s.unswept = map[string][]int{}
+	}
+	s.unswept[vaultID] = append(s.unswept[vaultID], uid)
+	s.unsweptMu.Unlock()
+}
+
+// sweepPending sweeps again the uids a vault's earlier processes left
+// unswept and reports whether none is left.
+func (s *Supervisor) sweepPending(vaultID string) bool {
+	s.unsweptMu.Lock()
+	defer s.unsweptMu.Unlock()
+	var left []int
+	for _, uid := range s.unswept[vaultID] {
+		if err := sweepUID(uid); err != nil {
+			left = append(left, uid)
+		}
+	}
+	if len(left) == 0 {
+		delete(s.unswept, vaultID)
+		return true
+	}
+	s.unswept[vaultID] = left
+	return false
+}
+
 // takeUID returns the next unused uid at or above base: one more than the
 // last, for the life of the supervisor (the self-test's and the capacity
 // test's process hosts draw from the same counter as the instance's).
@@ -179,6 +219,11 @@ func (h *procHost) spawn(vaultID, userGUID string, enroll bool, extra ...string)
 	if h.s.cfg.OwnKernel && !h.s.nsmClosed.Load() {
 		return nil, errSpawn
 	}
+	// Nor while a previous process of the same vault left processes that
+	// the sweep could not end (sweepAfter): they are tried again first.
+	if !h.s.sweepPending(vaultID) {
+		return nil, errSpawn
+	}
 	uid := 0
 	if h.cfg.UIDBase > 0 {
 		var err error
@@ -209,6 +254,10 @@ func (h *procHost) spawn(vaultID, userGUID string, enroll bool, extra ...string)
 		return nil, errSpawn
 	}
 	childEnd.Close()
+	// The limits are set right after the start (Go cannot set rlimits
+	// between fork and exec, and setting them on the supervisor would
+	// apply to it too). Nothing reaches the process before they are set:
+	// its first input, the job, comes only after spawn returns.
 	setLimits(cmd.Process.Pid, h.cfg, uid > 0)
 	c, err := net.FileConn(parentEnd)
 	parentEnd.Close()
@@ -227,9 +276,7 @@ func (h *procHost) spawn(vaultID, userGUID string, enroll bool, extra ...string)
 		if uid > 0 {
 			// Whatever the process left running under its uid (a child it
 			// started) ends before the process counts as ended.
-			if err := sweepUID(uid); err != nil {
-				h.s.log.Error("vault process left processes that could not be ended", "vault_id", p.vaultID, "error", err.Error())
-			}
+			h.s.sweepAfter(p.vaultID, uid)
 		}
 		h.freeSlot(slot)
 		close(p.exited)

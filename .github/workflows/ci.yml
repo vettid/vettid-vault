@@ -111,8 +111,10 @@ jobs:
           chmod 755 "$d"
           go test -c -o "$d/supervisor.test" ./enclave/supervisor/
           chmod 755 "$d/supervisor.test"
-          sudo "$d/supervisor.test" -test.run '^TestVaultProcessUIDs$' -test.count=1 -test.v | tee "$d/out"
-          grep -q -- '--- PASS: TestVaultProcessUIDs' "$d/out"
+          sudo "$d/supervisor.test" -test.run '^(TestVaultProcessUIDs|TestKillUID|TestKillUIDRefuses)$' -test.count=1 -test.v | tee "$d/out"
+          for t in TestVaultProcessUIDs TestKillUID TestKillUIDRefuses; do
+            grep -q -- "--- PASS: $t " "$d/out" || { echo "$t did not pass"; exit 1; }
+          done
 
   enclave-image:
     # Dockerfile.enclave is reproducible: two clean builds give the same

@@ -1,4 +1,5 @@
-// Package supervisor is PID 1's work inside the enclave (VAULT-PLAN V3,
+// Package supervisor is the enclave's first program, started as root by
+// the EIF's init, which is PID 1 and reaps orphans (VAULT-PLAN V3,
 // decision D4): it owns the NSM, the ETKs and the alternate channel
 // (package enclave), the egress transport and the KMS client, and runs one
 // vault manager per unlocked vault.
@@ -125,6 +126,10 @@ type Supervisor struct {
 	nsmClosed atomic.Bool
 	// uidNext counts the uids given to vault processes (takeUID).
 	uidNext atomic.Uint64
+	// unswept are the uids of ended vault processes whose sweep failed,
+	// by vault (sweepAfter).
+	unsweptMu sync.Mutex
+	unswept   map[string][]int
 
 	// Set by start: what the supervisor brokers for vault processes.
 	host      *procHost

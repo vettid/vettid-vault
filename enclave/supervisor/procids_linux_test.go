@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -91,64 +92,84 @@ func fakeProcEntry(t *testing.T, root string, pid int, uids string, states ...by
 	}
 }
 
-func fakeSweep(t *testing.T, rounds int, kill func(pid, uid int) error) string {
+func fakeSweep(t *testing.T, rounds int, kill func(uid int) error) string {
 	t.Helper()
 	root := t.TempDir()
-	oldRoot, oldKill, oldPause, oldRounds := procRoot, killProcess, sweepPause, sweepRounds
-	t.Cleanup(func() { procRoot, killProcess, sweepPause, sweepRounds = oldRoot, oldKill, oldPause, oldRounds })
-	procRoot, killProcess, sweepPause, sweepRounds = root, kill, 0, rounds
+	oldRoot, oldKill, oldPause, oldRounds := procRoot, killAll, sweepPause, sweepRounds
+	t.Cleanup(func() { procRoot, killAll, sweepPause, sweepRounds = oldRoot, oldKill, oldPause, oldRounds })
+	procRoot, killAll, sweepPause, sweepRounds = root, kill, 0, rounds
+	// The supervisor's own entry, as in a real /proc.
+	if err := os.MkdirAll(filepath.Join(root, "self"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	return root
 }
 
-// The sweep kills every process that runs under the uid, by any of its
-// four uids, looks again, and kills what appeared meanwhile, until none
-// is left; zombies and other uids' processes are left alone.
-func TestSweepUID(t *testing.T) {
-	var killed []int
-	var root string
-	respawned := false
-	root = fakeSweep(t, 50, func(pid, uid int) error {
-		if uid != 200001 {
-			t.Errorf("kill %d for uid %d", pid, uid)
+// removeUID plays kill(-1) under uid in a fake /proc: every process with
+// uid among its uids goes.
+func removeUID(t *testing.T, root string, uid int) {
+	t.Helper()
+	ents, _ := os.ReadDir(root)
+	for _, e := range ents {
+		if pid, err := strconv.Atoi(e.Name()); err == nil && hasUID(pid, uid) {
+			_ = os.RemoveAll(filepath.Join(root, e.Name()))
 		}
-		killed = append(killed, pid)
-		_ = os.RemoveAll(filepath.Join(root, strconv.Itoa(pid)))
-		if pid == 100 && !respawned {
-			// It started a child just before it died.
-			respawned = true
+	}
+}
+
+// The sweep kills the uid as a whole until /proc shows none of its
+// processes running (by any of the four uids), including one that
+// appeared meanwhile; zombies do not count, and other uids are never
+// named.
+func TestSweepUID(t *testing.T) {
+	var root string
+	kills := 0
+	root = fakeSweep(t, 50, func(uid int) error {
+		if uid != 200001 {
+			t.Errorf("kill for uid %d", uid)
+		}
+		kills++
+		removeUID(t, root, uid)
+		if kills == 1 {
+			// A child started just before the kill.
 			fakeProcEntry(t, root, 300, "200001\t200001\t200001\t200001", 'R')
 		}
 		return nil
 	})
 	fakeProcEntry(t, root, 100, "200001\t200001\t200001\t200001", 'S')
 	fakeProcEntry(t, root, 101, "5\t5\t200001\t5", 'Z', 'R') // first thread gone, another runs
-	fakeProcEntry(t, root, 103, "200001\t200001\t200001\t200001", 'Z')
 	fakeProcEntry(t, root, 104, "200002\t200002\t200002\t200002", 'S')
 	fakeProcEntry(t, root, 105, "2000010\t2000010\t2000010\t2000010", 'S')
 	_ = os.WriteFile(filepath.Join(root, "106"), nil, 0o644)
-	_ = os.MkdirAll(filepath.Join(root, "self"), 0o755)
 
+	if got, err := liveProcessesOf(200001); err != nil || !slices.Equal(got, []int{100, 101}) {
+		t.Fatalf("live %v %v", got, err)
+	}
 	if err := sweepUID(200001); err != nil {
 		t.Fatal(err)
 	}
-	slices.Sort(killed)
-	if !slices.Equal(killed, []int{100, 101, 300}) {
-		t.Fatalf("killed %v", killed)
+	if kills != 2 {
+		t.Fatalf("%d kills", kills)
 	}
-	for _, pid := range []int{103, 104, 105} {
+	for _, pid := range []int{104, 105} {
 		if _, err := os.Stat(filepath.Join(root, strconv.Itoa(pid))); err != nil {
 			t.Errorf("%d: %v", pid, err)
 		}
 	}
-	if got := liveProcessesOf(200001); len(got) != 0 {
-		t.Fatalf("left %v", got)
+	// Only zombies of the uid left: nothing to do.
+	fakeProcEntry(t, root, 103, "200001\t200001\t200001\t200001", 'Z')
+	kills = 0
+	if err := sweepUID(200001); err != nil || kills != 0 {
+		t.Fatalf("zombie: %v, %d kills", err, kills)
 	}
 }
 
-// A process that does not go is reported after the last round.
-func TestSweepUIDGivesUp(t *testing.T) {
+// The sweep fails secure: processes that do not go, a kill that fails,
+// and a /proc that cannot be read or lists nothing are errors, never
+// "none left".
+func TestSweepUIDFails(t *testing.T) {
 	kills := 0
-	root := fakeSweep(t, 3, func(int, int) error { kills++; return nil })
+	root := fakeSweep(t, 3, func(int) error { kills++; return nil })
 	fakeProcEntry(t, root, 100, "200001\t200001\t200001\t200001", 'D')
 	if err := sweepUID(200001); err == nil || !strings.Contains(err.Error(), "1 processes of uid 200001") {
 		t.Fatalf("err %v", err)
@@ -156,29 +177,115 @@ func TestSweepUIDGivesUp(t *testing.T) {
 	if kills != 3 {
 		t.Fatalf("%d kills", kills)
 	}
+	killAll = func(int) error { return errors.New("kill failed") }
+	if err := sweepUID(200001); err == nil {
+		t.Fatal("a failed kill counts as swept")
+	}
+	procRoot = filepath.Join(root, "absent")
+	if err := sweepUID(200001); err == nil {
+		t.Fatal("an unreadable /proc counts as swept")
+	}
+	procRoot = t.TempDir() // not a /proc: no entry of the supervisor's
+	if err := sweepUID(200001); err == nil {
+		t.Fatal("an empty /proc counts as swept")
+	}
 }
 
-// The real kill checks the uid first: a process of another uid (this
-// test's own child) is not signalled.
-func TestKillIfUIDChecksUID(t *testing.T) {
-	cmd := exec.Command("sleep", "30")
-	if err := cmd.Start(); err != nil {
-		t.Skip(err)
+// A failed sweep holds back only that vault's next process, until a
+// sweep of the uid succeeds.
+func TestSweepPendingHoldsTheVault(t *testing.T) {
+	var root string
+	stuck := true
+	root = fakeSweep(t, 2, func(uid int) error {
+		if !stuck {
+			removeUID(t, root, uid)
+		}
+		return nil
+	})
+	fakeProcEntry(t, root, 100, "200001\t200001\t200001\t200001", 'S')
+	s := &Supervisor{log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	s.sweepAfter("vault-a", 200001)
+	if s.sweepPending("vault-a") {
+		t.Fatal("vault-a may start while its last process's child runs")
 	}
-	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
-	other := os.Getuid() + 1
-	if err := killIfUID(cmd.Process.Pid, other); err != nil {
-		t.Fatal(err)
+	if !s.sweepPending("vault-b") {
+		t.Fatal("another vault is held back")
 	}
-	time.Sleep(50 * time.Millisecond)
-	if !running(cmd.Process.Pid) || !hasUID(cmd.Process.Pid, os.Getuid()) {
-		t.Fatal("a process of another uid was killed")
+	h := newProcHost(s, ProcConfig{Exec: []string{filepath.Join(t.TempDir(), "no-such-program")}, MaxProcs: 1})
+	if _, err := h.spawn("vault-a", "user", false); !errors.Is(err, errSpawn) {
+		t.Fatalf("spawn of the held vault: %v", err)
 	}
-	if err := killIfUID(cmd.Process.Pid, os.Getuid()); err != nil {
-		t.Fatal(err)
+	stuck = false
+	if !s.sweepPending("vault-a") || len(s.unswept) != 0 {
+		t.Fatalf("not released after a successful sweep: %v", s.unswept)
 	}
-	if err := cmd.Wait(); err == nil {
-		t.Fatal("not killed")
+}
+
+// killUID refuses without root, for uid 0 and for the caller's own uid
+// (kill(-1) as itself would signal all its processes).
+func TestKillUIDRefuses(t *testing.T) {
+	if err := killUID(0); err == nil {
+		t.Fatal("uid 0")
+	}
+	if err := killUID(os.Getuid()); err == nil {
+		t.Fatal("own uid")
+	}
+	if os.Geteuid() != 0 {
+		if err := killUID(os.Getuid() + 12345); err == nil {
+			t.Fatal("without root")
+		}
+	}
+}
+
+// TestKillUID (root only; CI job root): two processes under two uids;
+// killing one uid ends its process only, the supervisor's threads keep
+// root, and the thread that switched uid is not reused.
+func TestKillUID(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root (CI job root)")
+	}
+	start := func(uid uint32) *exec.Cmd {
+		c := exec.Command("/bin/sleep", "60")
+		c.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: uid, Gid: uid, Groups: []uint32{}}}
+		if err := c.Start(); err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	a, b := start(320000), start(320001)
+	defer func() { _ = b.Process.Kill(); _ = b.Wait() }()
+	for range 20 {
+		if err := killUID(320000); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := a.Wait(); err == nil {
+		t.Fatal("the process of uid 320000 was not killed")
+	}
+	if !running(b.Process.Pid) {
+		t.Fatal("the process of another uid was killed")
+	}
+	// Nothing left of uid 320000; the switched threads are gone: every
+	// thread a goroutine gets is still root.
+	if left, err := liveProcessesOf(320000); err != nil || len(left) != 0 {
+		t.Fatalf("left %v %v", left, err)
+	}
+	errs := make(chan error, 64)
+	for range 64 {
+		go func() {
+			runtime.LockOSThread()
+			defer runtime.UnlockOSThread()
+			if u := syscall.Geteuid(); u != 0 {
+				errs <- fmt.Errorf("a thread runs as uid %d", u)
+				return
+			}
+			errs <- nil
+		}()
+	}
+	for range 64 {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -293,7 +400,8 @@ func TestVaultProcessUIDs(t *testing.T) {
 		}
 	}
 	waitFor("the first process's child", func() bool {
-		for _, pid := range liveProcessesOf(base) {
+		pids, _ := liveProcessesOf(base)
+		for _, pid := range pids {
 			if pid != p1.cmd.Process.Pid {
 				child = pid
 				return true
@@ -315,7 +423,7 @@ func TestVaultProcessUIDs(t *testing.T) {
 		_ = syscall.Kill(child, syscall.SIGKILL)
 		t.Fatalf("the child %d of the first process outlived it", child)
 	}
-	if left := liveProcessesOf(base); len(left) != 0 {
+	if left, err := liveProcessesOf(base); err != nil || len(left) != 0 {
 		t.Fatalf("processes of uid %d left: %v", base, left)
 	}
 

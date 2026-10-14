@@ -67,6 +67,8 @@ Informational checks (reported, never fail the run):
 - `supervisor.hardening_note`: one line for each setting the supervisor could not make. A line that begins "user namespaces are not closed" goes with a failed `kernel.user_namespaces_off` and `vault_process.spawn`.
 - `kms.policy_check_passes_without_admin`: the same check with the administrator statement removed. It passes when the rest of the test key's policy has the §11.10.7 shape, which shows the refusal is for the right reason.
 - `vault_process.open_fds`
+- `supervisor.pid1`: the supervisor's pid and parent, and PID 1's name (expected: the EIF's init is PID 1 and the supervisor's parent).
+- `supervisor.zombies`: zombies in the enclave after the vault process ended, and how many are the supervisor's (expected 0: orphans go to PID 1, which reaps them).
 - `vault_process.threads`: the vault process's threads after the KMS round trip and the Argon2id (evidence for the process limit).
 - `vault_process.rlimit_nproc`: `RLIMIT_NPROC` (256), set only where the process runs under a uid of its own.
 - `s3.conditional_delete`

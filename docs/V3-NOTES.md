@@ -76,7 +76,7 @@ settled in VAULT-MESSAGING **0.3.1**, which this code follows.
 | Package / command | Runs | What it does |
 |---|---|---|
 | `enclave/vaultproc`, `internal/vaultipc`, `internal/seccomp` | enclave (one process per vault) | The vault process, its channel to the supervisor, and its syscall filter |
-| `cmd/vault-enclave` | enclave (PID 1) | Release build: vsock, `/dev/nsm`, pinned roots, `enclave.ReleaseConfig`. `-tags devenclave` (`vault_dev.go`): TCP, fake NSM, test roots (`enclavetest.DevSupervisor`) |
+| `cmd/vault-enclave` | enclave (root; child of the EIF's init, PID 1) | Release build: vsock, `/dev/nsm`, pinned roots, `enclave.ReleaseConfig`. `-tags devenclave` (`vault_dev.go`): TCP, fake NSM, test roots (`enclavetest.DevSupervisor`) |
 | `enclave/supervisor` | enclave | Control connection, instance (ETKs, outer decryption), vault processes and their scoped channels, lease-lost and memory-pressure locks, descriptor push, status-list fetch, sanitized logs to the parent |
 | `enclave/nsm` | enclave | `NSM_IOCTL_REQUEST` (`_IOWR(0x0A, 0, 32)`) with `Attestation` and `DescribePCR` CBOR requests |
 | `enclave/egress` | enclave | The only way out: HTTPS to an allowlist, TLS 1.3 only, per-host pinned roots, host-name verification, ALPN h2 required for HTTP/2 hosts, no redirects, shared connections per host, as many as the enclave allows (below) |
@@ -93,7 +93,7 @@ settled in VAULT-MESSAGING **0.3.1**, which this code follows.
 Owner decision after the first V3b review: "one process per vault, no
 chance of leakage" (VAULT-PLAN D4 and §5.3, VAULT-MESSAGING 0.3.2 §12.4).
 
-**Supervisor** (PID 1, `enclave/supervisor`): the NSM broker, the ETKs and
+**Supervisor** (root, `enclave/supervisor`; the EIF's init (AWS's `init` blob, pinned in `release/eif-toolchain.lock`; source `aws-nitro-enclaves-sdk-bootstrap` `init/init.c`) is PID 1: it starts the enclave binary in a session of its own and reaps every child, orphans included, until the binary ends, then reboots. Orphans of vault processes are therefore reparented to init and reaped there, never left as zombies of the supervisor; the self-test's `supervisor.pid1` and `supervisor.zombies` report it on hardware): the NSM broker, the ETKs and
 the outer decryption, binding and replay check of alternate-channel
 requests (`enclave.Instance`), the egress (TLS, shared HTTP/2 pool), the
 parent link, and the vault processes' lifecycle (`procHost`). It holds no
@@ -141,11 +141,16 @@ supervisor's count does not move while vaults are unlocked.
 
 - own uid and gid (`UIDBase` plus a counter that only grows for the life
   of the supervisor, release base 200000; no id is ever given to a
-  second process), no supplementary groups (needs root: PID 1 in the
-  enclave is). When the process ends, the supervisor kills everything
-  still running under its uid (a sweep of `/proc` by owner, repeated
+  second process), no supplementary groups (needs root, which the
+  supervisor is). When the process ends, the supervisor kills everything
+  still running under its uid (`kill(-1, SIGKILL)` from a thread of
+  its own switched to that uid, so no pid is ever named; `/proc` is
+  read only to see whether any is left; repeated
   until none is left) before it counts as ended, so a child it left
-  cannot wait for the next process under the same id;
+  cannot wait for the next process under the same id. If the sweep
+  fails (`/proc` unreadable, processes left after about 5 s), it logs a
+  WARN and starts no new process for that vault until a sweep of that
+  uid succeeds; other vaults are unaffected;
 - `PR_SET_DUMPABLE 0` (set in the process before it reads anything) and
   `RLIMIT_CORE 0`; non-dumpable processes cannot be traced or have their
   `/proc/<pid>/mem`/`environ` read, even by their own uid (tested);

@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -57,26 +58,37 @@ var (
 	sweepRounds = 500
 )
 
-// killProcess is how the sweep ends a process (a variable for the tests).
-var killProcess = killIfUID
+// killAll is how the sweep ends a uid's processes (a variable for the
+// tests).
+var killAll = killUID
 
-// sweepUID kills every process still running under uid and looks again,
-// until none is left: a vault process's children, which outlive it.
-// Each round kills all it finds, and RLIMIT_NPROC bounds how many there
-// can be, so a process that keeps starting new ones cannot outrun it.
+// sweepUID ends every process still running under uid: it kills the
+// whole uid at once (killUID: no pid is involved, so a pid reused by
+// another process can never be hit), then looks in /proc whether any is
+// left, and repeats until none is. RLIMIT_NPROC bounds how many there can
+// be, so a process that keeps starting new ones cannot outrun it. It
+// fails, and the caller must not count the uid as clean, when /proc
+// cannot be read or processes are still there after the last round.
 func sweepUID(uid int) error {
 	for round := 0; round < sweepRounds; round++ {
-		pids := liveProcessesOf(uid)
+		pids, err := liveProcessesOf(uid)
+		if err != nil {
+			return err
+		}
 		if len(pids) == 0 {
 			return nil
 		}
-		for _, pid := range pids {
-			_ = killProcess(pid, uid)
+		if err := killAll(uid); err != nil {
+			return err
 		}
 		time.Sleep(sweepPause)
 	}
-	if n := len(liveProcessesOf(uid)); n > 0 {
-		return fmt.Errorf("%d processes of uid %d still running", n, uid)
+	pids, err := liveProcessesOf(uid)
+	if err != nil {
+		return err
+	}
+	if len(pids) > 0 {
+		return fmt.Errorf("%d processes of uid %d still running", len(pids), uid)
 	}
 	return nil
 }
@@ -84,10 +96,10 @@ func sweepUID(uid int) error {
 // liveProcessesOf lists the processes of uid (any of its real,
 // effective, saved and file-system uids) that still run: at least one
 // of their threads is not a zombie.
-func liveProcessesOf(uid int) []int {
+func liveProcessesOf(uid int) ([]int, error) {
 	ents, err := os.ReadDir(procRoot)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	var pids []int
 	for _, e := range ents {
@@ -99,7 +111,22 @@ func liveProcessesOf(uid int) []int {
 			pids = append(pids, pid)
 		}
 	}
-	return pids
+	if len(pids) == 0 && !hasSelf(ents) {
+		// Not /proc at all (nothing mounted there): no answer.
+		return nil, errors.New("no processes listed in " + procRoot)
+	}
+	return pids, nil
+}
+
+// hasSelf reports whether a /proc listing has the supervisor's own entry.
+func hasSelf(ents []os.DirEntry) bool {
+	self := strconv.Itoa(os.Getpid())
+	for _, e := range ents {
+		if e.Name() == self || e.Name() == "self" {
+			return true
+		}
+	}
+	return false
 }
 
 // hasUID reports whether a process's status names uid among its uids.
@@ -148,26 +175,44 @@ func running(pid int) bool {
 	return false
 }
 
-// killIfUID sends SIGKILL to pid if it is still a process of uid. With a
-// pidfd the check and the signal are about the same process even if pid
-// is reused meanwhile; a kernel without pidfds gets a plain kill after
-// the check.
-func killIfUID(pid, uid int) error {
-	fd, err := unix.PidfdOpen(pid, 0)
-	if errors.Is(err, unix.ENOSYS) {
-		if !hasUID(pid, uid) {
-			return nil
+// killUID sends SIGKILL to every process of uid, without naming any:
+// on a thread of its own, locked to this goroutine, the supervisor sets
+// that thread's real, effective and saved uid to uid (the raw system
+// call changes only the calling thread; Go's Setresuid would change
+// every thread) and calls kill(-1, SIGKILL). kill(-1) signals every
+// process the caller may signal, except PID 1 and the caller's own
+// thread group: with all its uids set to uid and, having left uid 0, no
+// capabilities (CAP_KILL included), the thread may signal exactly the
+// processes whose real or saved uid is uid, which is only what that
+// vault process and its children run, since a uid is never given to a
+// second process. The supervisor's other threads keep root and are not
+// signalled (its own thread group is skipped). The goroutine then ends
+// still locked, so the Go runtime ends that thread instead of reusing
+// it. The kernel walks its process list for kill(-1) itself, so no pid
+// read from /proc is ever used, and a pid reused meanwhile by another
+// process cannot be hit.
+func killUID(uid int) error {
+	if uid <= 0 || os.Geteuid() != 0 || uid == os.Getuid() {
+		// Only root, and never for its own or root's uid: kill(-1) as the
+		// caller's own uid would signal all of its processes.
+		return errors.New("killUID: needs root and another uid")
+	}
+	done := make(chan error, 1)
+	go func() {
+		runtime.LockOSThread()
+		// Never unlocked: the thread ends with the goroutine.
+		if _, _, e := unix.RawSyscall(unix.SYS_SETRESUID, uintptr(uid), uintptr(uid), uintptr(uid)); e != 0 {
+			done <- e
+			return
 		}
-		return unix.Kill(pid, unix.SIGKILL)
-	}
-	if err != nil {
-		return err
-	}
-	defer unix.Close(fd)
-	if !hasUID(pid, uid) {
-		return nil
-	}
-	return unix.PidfdSendSignal(fd, unix.SIGKILL, nil, 0)
+		_, _, e := unix.RawSyscall(unix.SYS_KILL, ^uintptr(0), uintptr(unix.SIGKILL), 0) // kill(-1, SIGKILL)
+		if e != 0 && e != unix.ESRCH {                                                   // ESRCH: nothing left
+			done <- e
+			return
+		}
+		done <- nil
+	}()
+	return <-done
 }
 
 // hardenSelf makes the supervisor non-dumpable and, where the kernel has
@@ -245,6 +290,44 @@ func unprivilegedBPFDisabled() error {
 		return fmt.Errorf("unprivileged_bpf_disabled is %q", v)
 	}
 	return nil
+}
+
+// pid1 describes the enclave's process tree for the self-test: this
+// process's pid and parent, and PID 1's name.
+func pid1() string {
+	comm, err := os.ReadFile(filepath.Join(procRoot, "1", "comm"))
+	name := strings.TrimSpace(string(comm))
+	if err != nil {
+		name = err.Error()
+	}
+	return fmt.Sprintf("supervisor pid=%d ppid=%d; pid 1 is %q", os.Getpid(), os.Getppid(), name)
+}
+
+// zombies counts the processes that have ended and not been reaped, and
+// those whose parent is the supervisor.
+func zombies() (all, ours int, err error) {
+	ents, err := os.ReadDir(procRoot)
+	if err != nil {
+		return 0, 0, err
+	}
+	for _, e := range ents {
+		if _, err := strconv.Atoi(e.Name()); err != nil {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(procRoot, e.Name(), "stat"))
+		if err != nil {
+			continue
+		}
+		i := strings.LastIndexByte(string(b), ')')
+		if i < 0 || i+2 >= len(b) || b[i+2] != 'Z' {
+			continue
+		}
+		all++
+		if f := strings.Fields(string(b[i+2:])); len(f) > 1 && f[1] == strconv.Itoa(os.Getpid()) {
+			ours++
+		}
+	}
+	return all, ours, nil
 }
 
 // closeNSM sets the NSM device to mode 0600 and checks that it is now

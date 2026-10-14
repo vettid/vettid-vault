@@ -8,10 +8,11 @@ import (
 	"crypto/subtle"
 	"crypto/x509"
 	"encoding/json"
-	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -92,11 +93,15 @@ func runSelftest(ctx context.Context, ch channel, keyARN string, seccompErr erro
 		res.Checks = append(res.Checks, selftest.Check{Name: name, OK: ok, Required: req, Detail: detail})
 	}
 	res.UID, res.GID = os.Getuid(), os.Getgid()
+	res.UserNamespace = TryUserNamespace()
 	d, err := Dumpable()
 	add("vault_process.not_dumpable", err == nil && d == 0, true, fmt.Sprintf("dumpable=%d", d))
 	add("vault_process.seccomp_installed", seccompErr == nil, true, errString(seccompErr))
-	for name, err := range forbidden() {
-		add("vault_process.seccomp_refuses_"+name, errors.Is(err, errEPERM), true, errString(err))
+	// Every call the filter denies is tried (harmlessly): each must be
+	// refused by the filter, whatever the kernel would have answered.
+	probes := seccomp.Probe()
+	for _, name := range slices.Sorted(maps.Keys(probes)) {
+		add("vault_process.seccomp_refuses_"+name, seccomp.Refused(probes[name]), true, errString(probes[name]))
 	}
 	for name, v := range limits() {
 		add("vault_process.rlimit_"+name, v.ok, true, v.detail)
@@ -119,6 +124,15 @@ func runSelftest(ctx context.Context, ch channel, keyARN string, seccompErr erro
 	}
 	res.PeakRSS = procStatus("VmHWM")
 	add("vault_process.argon2id_default", err == nil, true, fmt.Sprintf("t=%d m=%dKiB peak_rss=%d", kdf.Time, kdf.MemoryKiB, res.PeakRSS))
+	// Reported for the process limit (RLIMIT_NPROC), after the KDF and the
+	// KMS round trip: the threads this process runs, and the limit, which
+	// the supervisor sets only under a uid of the process's own.
+	if tasks, err := os.ReadDir("/proc/self/task"); err == nil {
+		add("vault_process.threads", true, false, fmt.Sprintf("%d", len(tasks)))
+	}
+	if l, ok := nprocLimit(); ok {
+		add("vault_process.rlimit_nproc", l.ok, false, l.detail)
+	}
 	return res
 }
 

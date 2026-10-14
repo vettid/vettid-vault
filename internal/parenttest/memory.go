@@ -163,7 +163,7 @@ func (q *Queues) Receive(ctx context.Context, url string) ([]parent.QueueMessage
 		qq := q.queues[url]
 		if qq == nil {
 			q.mu.Unlock()
-			return nil, parent.ErrNotFound
+			return nil, fmt.Errorf("%w: sqs receive: AWS.SimpleQueueService.NonExistentQueue", parent.ErrQueueNotFound)
 		}
 		var out []parent.QueueMessage
 		now := time.Now()

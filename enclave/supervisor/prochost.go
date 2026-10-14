@@ -37,9 +37,13 @@ type ProcConfig struct {
 	// Exec is the vault process's argv (the enclave binary re-executed
 	// with vaultproc.Arg first).
 	Exec []string
-	// UIDBase, if not 0, runs vault process i as uid = gid = UIDBase+i
-	// (needs root, as PID 1 in the enclave is). 0 keeps the supervisor's
-	// ids (development and tests).
+	// UIDBase, if not 0, runs each vault process under its own uid = gid,
+	// UIDBase plus a counter that only grows for the life of the
+	// supervisor: no id is ever given to a second process (needs root,
+	// as the supervisor is in the enclave). When such a process ends, everything
+	// still running under its id is killed before it is reported ended.
+	// 0 keeps the supervisor's ids (development and tests), and none of
+	// that applies.
 	UIDBase int
 	// MaxProcs bounds concurrent vault processes (default 1024).
 	MaxProcs int
@@ -47,6 +51,11 @@ type ProcConfig struct {
 	AddressSpace uint64
 	// OpenFiles is RLIMIT_NOFILE (default 64).
 	OpenFiles uint64
+	// Tasks is RLIMIT_NPROC: the processes and threads that may run under
+	// a vault process's uid at once (default 256). Applied only with
+	// UIDBase, where the uid is the process's alone; RLIMIT_FSIZE is
+	// always 0 (a vault process writes no file).
+	Tasks uint64
 	// MemoryLimit is the process's GOMEMLIMIT (default 512 MiB).
 	MemoryLimit uint64
 	// LockTimeout bounds a lock before the process is killed (60 s).
@@ -62,6 +71,9 @@ func (c *ProcConfig) defaults() {
 	}
 	if c.OpenFiles == 0 {
 		c.OpenFiles = 64
+	}
+	if c.Tasks == 0 {
+		c.Tasks = 256
 	}
 	if c.MemoryLimit == 0 {
 		c.MemoryLimit = 512 << 20
@@ -87,15 +99,19 @@ type vproc struct {
 	vaultID  string
 	userGUID string
 	enroll   bool
-	prevRead string // read-only prefix of the member's previous vault (re-enrollment, §11.3)
 	slot     int
+	uid      int // its own uid and gid (UIDBase); 0 without
 	cmd      *exec.Cmd
 	conn     *hostproto.Conn
 	exited   chan struct{}
 	exitCode int
 
-	mu       sync.Mutex
-	opening  bool
+	mu      sync.Mutex
+	opening bool
+	// prevRead are the two objects of the member's previous vault that an
+	// enrollment may read while it opens (re-enrollment, §11.3): its state
+	// and its header sealed to this release. Cleared when the open returns.
+	prevRead []string
 	relayKey ed25519.PublicKey
 	stopping bool          // locked or killed by the supervisor
 	egress   chan struct{} // one place per relay or push request in flight
@@ -112,7 +128,79 @@ func newProcHost(s *Supervisor, cfg ProcConfig) *procHost {
 var (
 	errNoSlot = errors.New("supervisor: too many vault processes")
 	errSpawn  = errors.New("supervisor: vault process failed to start")
+	errNoUID  = errors.New("supervisor: no unused uid left for a vault process")
 )
+
+// maxVaultUID is the highest uid given to a vault process ((uid_t)-1 is
+// not a uid).
+const maxVaultUID = 1<<32 - 2
+
+// sweepAfter sweeps the uid of a vault process that ended. If the sweep
+// fails (/proc unreadable, processes still running after its last
+// round), the uid is kept as unswept for the vault: it is never given to
+// another process anyway, the failure is logged at WARN, and
+// the vault's next process is not started until a sweep of every such
+// uid succeeds (sweepPending). Other vaults are not affected.
+func (s *Supervisor) sweepAfter(vaultID string, uid int) {
+	err := sweepUID(uid)
+	if err == nil {
+		return
+	}
+	s.log.Warn("vault process left processes that could not be ended; its vault starts no new process until they are",
+		"vault_id", vaultID, "uid", uid, "error", err.Error())
+	s.unsweptMu.Lock()
+	if s.unswept == nil {
+		s.unswept = map[string][]int{}
+	}
+	s.unswept[vaultID] = append(s.unswept[vaultID], uid)
+	s.unsweptMu.Unlock()
+}
+
+// sweepPending sweeps again the uids a vault's earlier processes left
+// unswept and reports whether none is left.
+// The sweeps run without the lock, so other vaults' starts never wait
+// for them.
+func (s *Supervisor) sweepPending(vaultID string) bool {
+	s.unsweptMu.Lock()
+	pending := append([]int(nil), s.unswept[vaultID]...)
+	s.unsweptMu.Unlock()
+	if len(pending) == 0 {
+		return true
+	}
+	done := map[int]bool{}
+	for _, uid := range pending {
+		if sweepUID(uid) == nil {
+			done[uid] = true
+		}
+	}
+	s.unsweptMu.Lock()
+	defer s.unsweptMu.Unlock()
+	var left []int
+	for _, uid := range s.unswept[vaultID] { // as it is now (a failure may have been added)
+		if !done[uid] {
+			left = append(left, uid)
+		}
+	}
+	if len(left) == 0 {
+		delete(s.unswept, vaultID)
+		return true
+	}
+	s.unswept[vaultID] = left
+	return false
+}
+
+// takeUID returns the next unused uid at or above base: one more than the
+// last, for the life of the supervisor (the self-test's and the capacity
+// test's process hosts draw from the same counter as the instance's).
+// After about four thousand million starts there is none left, and no
+// process is started.
+func (s *Supervisor) takeUID(base int) (int, error) {
+	n := s.uidNext.Add(1) - 1
+	if base <= 0 || uint64(base) > maxVaultUID || n > maxVaultUID-uint64(base) {
+		return 0, errNoUID
+	}
+	return base + int(n), nil
+}
 
 func (h *procHost) takeSlot() int {
 	h.mu.Lock()
@@ -139,6 +227,27 @@ func (h *procHost) spawn(vaultID, userGUID string, enroll bool, extra ...string)
 	if len(h.cfg.Exec) == 0 {
 		return nil, errSpawn
 	}
+	// On its own kernel the supervisor closes user namespaces before the
+	// first vault process; one that could open them is not started.
+	if h.s.cfg.OwnKernel && !h.s.userNSClosed.Load() {
+		return nil, errSpawn
+	}
+	// Nor while the NSM is open to processes other than root.
+	if h.s.cfg.OwnKernel && !h.s.nsmClosed.Load() {
+		return nil, errSpawn
+	}
+	// Nor while a previous process of the same vault left processes that
+	// the sweep could not end (sweepAfter): they are tried again first.
+	if !h.s.sweepPending(vaultID) {
+		return nil, errSpawn
+	}
+	uid := 0
+	if h.cfg.UIDBase > 0 {
+		var err error
+		if uid, err = h.s.takeUID(h.cfg.UIDBase); err != nil {
+			return nil, err
+		}
+	}
 	slot := h.takeSlot()
 	if slot < 0 {
 		return nil, errNoSlot
@@ -154,15 +263,23 @@ func (h *procHost) spawn(vaultID, userGUID string, enroll bool, extra ...string)
 	cmd.Env = []string{"GOMEMLIMIT=" + strconv.FormatUint(h.cfg.MemoryLimit, 10), "GOMAXPROCS=2", "GOTRACEBACK=none"}
 	cmd.Dir = "/"
 	cmd.ExtraFiles = []*os.File{childEnd} // fd 3; everything else is close-on-exec
-	cmd.SysProcAttr = procAttr(h.cfg.UIDBase, slot)
-	if err := cmd.Start(); err != nil {
+	cmd.SysProcAttr = procAttr(uid)
+	// Started from the spawner thread, which never ends: the kernel sends
+	// a child's parent-death signal (Pdeathsig) when the thread that
+	// forked it ends, not the process, and the sweep ends threads.
+	onSpawnerThread(func() { err = cmd.Start() })
+	if err != nil {
 		childEnd.Close()
 		parentEnd.Close()
 		h.freeSlot(slot)
 		return nil, errSpawn
 	}
 	childEnd.Close()
-	setLimits(cmd.Process.Pid, h.cfg)
+	// The limits are set right after the start (Go cannot set rlimits
+	// between fork and exec, and setting them on the supervisor would
+	// apply to it too). Nothing reaches the process before they are set:
+	// its first input, the job, comes only after spawn returns.
+	setLimits(cmd.Process.Pid, h.cfg, uid > 0)
 	c, err := net.FileConn(parentEnd)
 	parentEnd.Close()
 	if err != nil {
@@ -171,12 +288,17 @@ func (h *procHost) spawn(vaultID, userGUID string, enroll bool, extra ...string)
 		h.freeSlot(slot)
 		return nil, errSpawn
 	}
-	p := &vproc{h: h, vaultID: vaultID, userGUID: userGUID, enroll: enroll, slot: slot, cmd: cmd, exited: make(chan struct{})}
+	p := &vproc{h: h, vaultID: vaultID, userGUID: userGUID, enroll: enroll, slot: slot, uid: uid, cmd: cmd, exited: make(chan struct{})}
 	p.conn = hostproto.NewConn(c, p.handle, p.notify)
 	go func() {
 		err := cmd.Wait()
 		p.exitCode = exitCode(err)
 		p.conn.Close()
+		if uid > 0 {
+			// Whatever the process left running under its uid (a child it
+			// started) ends before the process counts as ended.
+			h.s.sweepAfter(p.vaultID, uid)
+		}
 		h.freeSlot(slot)
 		close(p.exited)
 		h.exited(p)
@@ -239,30 +361,30 @@ func stopReason(exitCode int) (string, slog.Level) {
 // a new one, hand it the job, and keep it if the vault opened.
 func (h *procHost) Open(ctx context.Context, j *enclave.Job) ([]byte, bool, error) {
 	_, _ = h.Lock(ctx, j.VaultID)
-	prev := ""
+	m := h.s.inst.Load().Measurements()
+	var prev []string
 	if j.Op == enclave.OpEnroll {
-		// Re-enrollment may read the member's previous vault (§11.3).
+		// Re-enrollment may read the member's previous vault (§11.3): only
+		// the two objects that decide whether it may be replaced.
 		if b, _, err := h.s.store().Get(ctx, enclave.UserIndexKey(j.UserGUID)); err == nil {
-			if id := string(b); id != j.VaultID && store.ValidKey("vaults/"+id) && !strings.Contains(id, "/") {
-				prev = "vaults/" + id + "/"
-			}
+			prev = previousVaultKeys(string(b), j.VaultID, m.PCR0)
 		}
 	}
 	p, err := h.spawn(j.VaultID, j.UserGUID, j.Op == enclave.OpEnroll)
 	if err != nil {
 		return nil, false, err
 	}
-	p.prevRead = prev
 	p.mu.Lock()
+	p.prevRead = prev
 	p.opening = true
 	p.mu.Unlock()
-	m := h.s.inst.Load().Measurements()
 	fields := append(hostproto.Strings(vaultipc.Version, h.s.instID, m.PCR0, m.PCR1, m.PCR2), j.Fields()...)
 	octx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	r, err := p.conn.Call(octx, vaultipc.KindOpen, fields...)
 	cancel()
 	p.mu.Lock()
 	p.opening = false
+	p.prevRead = nil
 	p.mu.Unlock()
 	if err != nil || len(r) != 4 || string(r[0]) != hostproto.StatusOK {
 		h.kill(p)
@@ -452,13 +574,85 @@ func (h *procHost) Pid(id string) int {
 
 func deny() [][]byte { return hostproto.Strings(vaultipc.StatusDenied) }
 
-// mayRead and mayWrite scope the object store.
-func (p *vproc) mayWrite(key string) bool {
-	return store.ValidKey(key) && (strings.HasPrefix(key, "vaults/"+p.vaultID+"/") || key == enclave.UserIndexKey(p.userGUID))
+// previousVaultKeys returns the objects of the vault named by the member's
+// index that an enrollment of vaultID may read (§11.3): its state and its
+// header sealed to release pcr0. None if the index names vaultID itself or
+// no valid vault.
+func previousVaultKeys(prev, vaultID, pcr0 string) []string {
+	if prev == "" || prev == vaultID || strings.Contains(prev, "/") || !store.ValidKey("vaults/"+prev) {
+		return nil
+	}
+	keys := []string{store.StateKey(prev), store.HeaderKey(prev, pcr0)}
+	for _, k := range keys {
+		if !store.ValidKey(k) {
+			return nil
+		}
+	}
+	return keys
 }
 
+// ownKey reports whether key is one of the process's own vault's objects.
+func (p *vproc) ownKey(key string) bool {
+	return store.ValidKey(key) && strings.HasPrefix(key, "vaults/"+p.vaultID+"/")
+}
+
+// indexKey reports whether key is the process's member's index object.
+func (p *vproc) indexKey(key string) bool {
+	return key == enclave.UserIndexKey(p.userGUID)
+}
+
+// mayRead scopes store reads: the own vault's objects, the own member's
+// index, and the member's previous vault's state and header while an
+// enrollment opens.
 func (p *vproc) mayRead(key string) bool {
-	return p.mayWrite(key) || p.prevRead != "" && store.ValidKey(key) && strings.HasPrefix(key, p.prevRead)
+	if p.ownKey(key) || p.indexKey(key) {
+		return true
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.opening {
+		return false
+	}
+	for _, k := range p.prevRead {
+		if key == k {
+			return true
+		}
+	}
+	return false
+}
+
+// mayPut scopes store writes: the own vault's objects; the member's index
+// only with the process's own vault id as its content, and only from an
+// enrollment that is still opening (the one write of §11.3).
+func (p *vproc) mayPut(key string, data []byte) bool {
+	if p.ownKey(key) {
+		return true
+	}
+	if !p.indexKey(key) || string(data) != p.vaultID {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.enroll && p.opening
+}
+
+// deleteIndex deletes the member's index object only if it names the
+// process's own vault: the supervisor reads it itself, and deletes the
+// version it read, which must be the one the process named.
+func (p *vproc) deleteIndex(ctx context.Context, key string, ver store.Version) [][]byte {
+	st := p.h.s.store()
+	b, v, err := st.Get(ctx, key)
+	if err != nil {
+		return storeReply(err, nil)
+	}
+	if string(b) != p.vaultID {
+		return deny()
+	}
+	if v != ver {
+		return hostproto.Strings(hostproto.StatusConflict)
+	}
+	err = st.Delete(ctx, key, v)
+	return storeReply(err, func() [][]byte { return hostproto.Strings(hostproto.StatusOK) })
 }
 
 func (p *vproc) handle(ctx context.Context, f *hostproto.Frame) [][]byte {
@@ -471,13 +665,19 @@ func (p *vproc) handle(ctx context.Context, f *hostproto.Frame) [][]byte {
 		b, v, err := s.store().Get(ctx, string(f.Fields[0]))
 		return storeReply(err, func() [][]byte { return [][]byte{[]byte(hostproto.StatusOK), b, []byte(v)} })
 	case vaultipc.KindStorePut:
-		if len(f.Fields) != 3 || !p.mayWrite(string(f.Fields[0])) {
+		if len(f.Fields) != 3 || !p.mayPut(string(f.Fields[0]), f.Fields[1]) {
 			return deny()
 		}
 		v, err := s.store().Put(ctx, string(f.Fields[0]), f.Fields[1], store.Version(f.Fields[2]))
 		return storeReply(err, func() [][]byte { return hostproto.Strings(hostproto.StatusOK, string(v)) })
 	case vaultipc.KindStoreDelete:
-		if len(f.Fields) != 2 || !p.mayWrite(string(f.Fields[0])) {
+		if len(f.Fields) != 2 {
+			return deny()
+		}
+		if key := string(f.Fields[0]); p.indexKey(key) {
+			return p.deleteIndex(ctx, key, store.Version(f.Fields[1]))
+		}
+		if !p.ownKey(string(f.Fields[0])) {
 			return deny()
 		}
 		err := s.store().Delete(ctx, string(f.Fields[0]), store.Version(f.Fields[1]))
@@ -710,12 +910,13 @@ func (s *Supervisor) relayFailed(ctx context.Context) {
 const maxPushBody = 16 << 10
 
 // push carries a request to the channel's push gateway (0.24.0, §14.3):
-// POST to /v1/register or /v1/wake of the pinned gateway URL only, signed
-// (Relay Protocol §4.1) by a key that is not this process's relay key
-// (PUSH-GATEWAY §3). For a registration the supervisor attaches the NSM
+// POST to /v1/register, /v1/confirm or /v1/wake of the pinned gateway URL
+// only, signed (Relay Protocol §4.1) by a key that is not this process's
+// relay key (PUSH-GATEWAY §3). For a registration the supervisor attaches the NSM
 // attestation itself, with public_key = the signing key and user_data =
 // the request's digest, which it computes: a vault process never obtains
-// an attestation over user_data of its choosing (PUSH-GATEWAY §5.1).
+// an attestation over user_data of its choosing (PUSH-GATEWAY §5.1). A
+// confirmation (PUSH-GATEWAY 0.5.0 §5.1) and a wake carry none.
 func (p *vproc) push(ctx context.Context, f [][]byte) [][]byte {
 	s := p.h.s
 	base := s.encCfg.PushURL
@@ -723,7 +924,9 @@ func (p *vproc) push(ctx context.Context, f [][]byte) [][]byte {
 		return deny()
 	}
 	path := string(f[0])
-	if path != pushwire.PathRegister && path != pushwire.PathWake {
+	switch path {
+	case pushwire.PathRegister, pushwire.PathConfirm, pushwire.PathWake:
+	default:
 		return deny()
 	}
 	in, err := vaultipc.DecodeHeaders(f[1])

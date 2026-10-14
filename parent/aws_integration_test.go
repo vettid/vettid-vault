@@ -115,6 +115,11 @@ func TestAWSBackend(t *testing.T) {
 	if err := a.Destroy(ctx, url); err != nil {
 		t.Fatal(err)
 	}
+	// A receive from a queue that is gone says so: the parent then creates
+	// its queue again.
+	if _, err := a.Receive(ctx, url); !errors.Is(err, ErrQueueNotFound) {
+		t.Fatalf("receive from a deleted queue: %v", err)
+	}
 
 	// DynamoDB: leases need the vault row.
 	if err := a.AcquireLease(ctx, "v1", "i1", 100, 280); !errors.Is(err, ErrLeaseHeld) {

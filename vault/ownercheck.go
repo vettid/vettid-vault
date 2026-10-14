@@ -504,7 +504,7 @@ func (m *Manager) holdAllows(p *Peer, typ, state string) bool {
 		switch typ {
 		case TypeOwnerCheck, "vault.status", "vault.lock", "credential.utk.get", "credential.get", "credential.ack",
 			"credential.version", "credential.lock", "call.end",
-			"push.register", "push.unregister": // 0.24.0: the held wakes need a current token
+			"push.register", "push.confirm", "push.unregister": // 0.24.0: the held wakes need a current token
 			return true
 		case "credential.alarm.confirm":
 			return m.alarmState() != ""

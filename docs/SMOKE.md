@@ -39,17 +39,21 @@ Required checks (any FAIL fails the run):
 | `nsm.attestation_verifies` | document with nonce and the self-test user_data verifies against the pinned AWS Nitro root, is fresh, PCRs match |
 | `proc.mounted`, `proc.self_exe` | `/proc` mounted; `/proc/self/exe` resolves (vault processes are re-executions of it) |
 | `supervisor.not_dumpable` | `PR_SET_DUMPABLE` 0 |
+| `kernel.user_namespaces_off` | `/proc/sys/user/max_user_namespaces` reads `0`: the supervisor wrote it before it reached the parent (release builds only; it needs root in the enclave). No process can then create a user namespace, and a release build starts no vault process while it is not 0 |
+| `kernel.unprivileged_bpf_off` | `/proc/sys/kernel/unprivileged_bpf_disabled` is not `0` (the supervisor wrote `1`) |
+| `supervisor.nsm_closed` | `/dev/nsm` is a device owned by root with no access for group or others (the supervisor set it to 0600 and read it back; release builds only). A release supervisor that cannot do so serves no vault: outside the self-test it stops, and it starts no vault process |
 | `egress.relay_healthz` | `GET https://relay.vettid.org/healthz` through the parent's forwarder, TLS against the pinned Amazon roots: 200, `status ok`, protocol `0.4.0` or a later `0.x` (0.5.0 adds mailbox deletion) |
 | `egress.relay_http2` | the relay connection is HTTP/2 |
 | `egress.google_status_list` | the attestation status list from `android.googleapis.com` (GTS roots) parses |
 | `kms.read_key` | DescribeKey, GetKeyPolicy, ListGrants on the test key over enclave TLS to `kms.<region>.amazonaws.com` (HTTP/1.1), SigV4 with the instance role's credentials passed by the parent |
 | `kms.policy_check_rejects_test_key` | the §11.10.7 check **refuses** the deletable key; `key_policy_check` = **6** (actions: the administrator statement's `kms:*`) unless `-expect-key-check` says otherwise |
 | `vault_process.spawn` | a vault process is started by re-executing the enclave binary |
-| `vault_process.own_uid_gid` | it runs as uid = gid = 200000 + slot |
+| `vault_process.own_uid_gid` | it runs as uid = gid = the id the supervisor assigned: 200000 plus a counter that only grows, so no id is given to a second process |
 | `vault_process.not_dumpable` | `PR_SET_DUMPABLE` 0 in the child |
+| `vault_process.user_namespace_refused` | the vault process tries to start a process in a new user namespace (`clone` with `CLONE_NEWUSER`, of a program that does not exist): the kernel answers ENOSPC and creates nothing. Detail `refused: no user namespace may be created (ENOSPC)`; `a user namespace was created` is the failure |
 | `vault_process.seccomp_installed` | the filter installs (needs `CONFIG_SECCOMP_FILTER`) |
-| `vault_process.seccomp_refuses_socket_vsock`, `…_socket_inet`, `…_ptrace` | EPERM |
-| `vault_process.rlimit_as`, `…_nofile`, `…_core` | 4 GiB, 64, 0 |
+| `vault_process.seccomp_refuses_<call>`, one for every call the filter denies: `socket_vsock`, `socket_inet`, `socketpair`, `io_uring_setup`, `io_uring_enter`, `io_uring_register`, `ptrace`, `process_vm_readv`, `process_vm_writev`, `pidfd_getfd`, `bpf`, `userfaultfd`, `perf_event_open` (13 in the arm64 release image; an amd64 build adds `x32_socket`, `x32_only_ptrace`, `x32_only_process_vm_readv` and `x32_only_process_vm_writev`) | EPERM. Each call is made with arguments that do nothing (`internal/seccomp` `Probe`: process 0, a descriptor that is not open, no attributes), so that without the filter the kernel answers something else: "no such call" for io_uring and `pidfd_getfd` on the pinned 4.14 kernel, which has neither. EPERM therefore shows the filter, not the kernel's own permission checks |
+| `vault_process.rlimit_as`, `…_nofile`, `…_core`, `…_fsize` | 4 GiB, 64, 0, 0 |
 | `vault_process.minimal_environment` | ≤ 3 variables |
 | `vault_process.kms_recipient_round_trip` | `GenerateDataKey` with `Recipient` (the child's own RSA key, attested by the supervisor) → unwrapped in the child → `Decrypt` with `Recipient` → unwrapped → **equal** (only equal/not-equal is reported) |
 | `vault_process.argon2id_default` | one Argon2id with the production parameters (t=3, 64 MiB); the child's peak RSS is reported |
@@ -60,8 +64,13 @@ Required checks (any FAIL fails the run):
 Informational checks (reported, never fail the run):
 
 - `kernel.yama_ptrace_scope`: whether the enclave kernel has Yama.
+- `supervisor.hardening_note`: one line for each setting the supervisor could not make. A line that begins "user namespaces are not closed" goes with a failed `kernel.user_namespaces_off` and `vault_process.spawn`.
 - `kms.policy_check_passes_without_admin`: the same check with the administrator statement removed. It passes when the rest of the test key's policy has the §11.10.7 shape, which shows the refusal is for the right reason.
 - `vault_process.open_fds`
+- `supervisor.pid1`: the supervisor's pid and parent, and PID 1's name (expected: the EIF's init is PID 1 and the supervisor's parent).
+- `supervisor.zombies`: zombies in the enclave after the vault process ended, and how many are the supervisor's (expected 0: orphans go to PID 1, which reaps them).
+- `vault_process.threads`: the vault process's threads after the KMS round trip and the Argon2id (evidence for the process limit).
+- `vault_process.rlimit_nproc`: `RLIMIT_NPROC` (256), set only where the process runs under a uid of its own.
 - `s3.conditional_delete`
 
 ## Capacity measurement (W9)
@@ -74,7 +83,7 @@ and only a vault process started in self-test mode answers its requests.
 The release image is unchanged; the same EIF and PCR0 run it.
 
 **What runs.** Synthetic vault processes, spawned exactly like real ones
-(re-executed enclave binary, own uid 200000+slot, rlimits including
+(re-executed enclave binary, own uid never used before, rlimits including
 `RLIMIT_AS` 4 GiB, seccomp, minimal environment, `GOMEMLIMIT` 512 MiB).
 Each one does what an unlocking vault does to its memory, one Argon2id at
 the release's parameters (t=3, 64 MiB) from a fixed test PIN and a fresh
@@ -270,6 +279,7 @@ document"), and it is fixed.**
   - Yama (optional).
   - `/proc` mounted by the enclave's init.
   - setuid/setgid to 200000+ from the root supervisor.
+  - `RLIMIT_NPROC` and `RLIMIT_FSIZE` on a vault process.
   - `RLIMIT_AS` 4 GiB with Go's arenas.
   - `/dev/nsm` chmod (devtmpfs).
   - The NSM ioctl on arm64 (same `_IOWR(0x0A, 0, 32)`).

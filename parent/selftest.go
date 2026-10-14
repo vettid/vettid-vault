@@ -129,11 +129,14 @@ func selftestHandle(ctx context.Context, c SelftestConfig, prefix string, conn *
 		if err != nil {
 			return storeErr(err)
 		}
-		return [][]byte{[]byte(hostproto.StatusOK), b, []byte(v)}
+		return storeGetReply(selftestLog(c), b, v)
 	case hostproto.KindStorePut:
 		k, ok := key(0)
 		if !ok || len(f.Fields) != 3 {
 			return reply(hostproto.StatusInvalid)
+		}
+		if !storePutOK(selftestLog(c), f.Fields[1]) {
+			return reply(hostproto.StatusError)
 		}
 		v, err := c.Objects.Put(ctx, k, f.Fields[1], string(f.Fields[2]))
 		if err != nil {
@@ -151,6 +154,13 @@ func selftestHandle(ctx context.Context, c SelftestConfig, prefix string, conn *
 		return reply(hostproto.StatusOK)
 	}
 	return reply(hostproto.StatusInvalid)
+}
+
+func selftestLog(c SelftestConfig) *slog.Logger {
+	if c.Logger == nil {
+		return slog.Default()
+	}
+	return c.Logger
 }
 
 // SelftestVerdict lists the unexpected results of a report: required

@@ -98,4 +98,14 @@ type VaultResult struct {
 	PeakRSS uint64  `json:"peak_rss_bytes"`
 	UID     int     `json:"uid"`
 	GID     int     `json:"gid"`
+	// UserNamespace is what happened when the process tried to start a
+	// process in a new user namespace: UserNamespaceRefused,
+	// UserNamespaceCreated or another error's text.
+	UserNamespace string `json:"user_namespace"`
 }
+
+// What a vault process's attempt at a user namespace came to.
+const (
+	UserNamespaceRefused = "refused: no user namespace may be created (ENOSPC)"
+	UserNamespaceCreated = "a user namespace was created"
+)

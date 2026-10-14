@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -314,7 +315,7 @@ func TestModes(t *testing.T) {
 	if len(a.h.SentOfType("action.result")) != 0 {
 		t.Fatal("answered before approval")
 	}
-	o := a.ok(t, vault.KindDesktop, "action.respond", `{"invocation_id":"`+id+`","approve":true}`)
+	o := a.ok(t, vault.KindApp, "action.respond", `{"invocation_id":"`+id+`","approve":true}`)
 	if st, _ := o.String("status"); st != StatusOK {
 		t.Fatalf("approved: %s", st)
 	}
@@ -334,6 +335,76 @@ func TestModes(t *testing.T) {
 	invoke(t, a, b, AuditRecent, `{}`)
 	if res := answer(t, a, b); str(t, res, "status") != StatusOK {
 		t.Fatalf("default-allow: %s", res)
+	}
+}
+
+// agentRespond delivers action.respond from an agent straight to the
+// handler, as the runtime does when a LEASH grant allows or an app's
+// approval releases the agent's request (§6.8): the type spec lists only
+// apps and desktops, so featuretest.Call would refuse it before the
+// handler.
+func (x *side) agentRespond(body string) featuretest.Result {
+	x.now = x.now.Add(time.Millisecond)
+	id, _ := envelope.NewULID(x.now)
+	in := &envelope.Inner{ID: id, Type: "action.respond", TS: x.now, Body: json.RawMessage(body)}
+	from := vault.PeerInfo{ID: "dev-agent", Kind: vault.KindAgent, State: vault.PeerActive}
+	out, err := x.f.Handle(context.Background(), vault.NewSession(context.Background(), x.h, from, x.now, in), in)
+	if err != nil {
+		var he *vault.HandlerError
+		if errors.As(err, &he) {
+			return featuretest.Result{Code: he.Code}
+		}
+		return featuretest.Result{Code: "internal"}
+	}
+	return featuretest.Result{Body: out}
+}
+
+// Only the member's app approves a pending invocation; a desktop or an
+// agent may deny one, and its approval is refused with the invocation
+// left pending for the app (owner decision 2026-10-13; §6.8, §10.14).
+func TestOnlyAppApproves(t *testing.T) {
+	a, b := pair()
+	configure(t, a, b, `{"action_id":"audit.recent","mode":"prompt-each-time"}`)
+	id := invoke(t, a, b, AuditRecent, `{}`)
+	approve := `{"invocation_id":"` + id + `","approve":true}`
+	if r := a.call(vault.KindDesktop, "action.respond", approve); r.Code != "forbidden" {
+		t.Fatalf("desktop approved: %q", r.Code)
+	}
+	if r := a.agentRespond(approve); r.Code != "forbidden" {
+		t.Fatalf("agent approved: %q", r.Code)
+	}
+	// Refused regardless of whether the invocation exists.
+	if r := a.call(vault.KindDesktop, "action.respond", `{"invocation_id":"01JB2Z6V9K3M4N5P6Q7R8S9T0Z","approve":true}`); r.Code != "forbidden" {
+		t.Fatalf("desktop approved an unknown invocation: %q", r.Code)
+	}
+	if got := a.f.PendingInvocations(); len(got) != 1 || len(a.h.SentOfType("action.result")) != 0 ||
+		a.h.HasActivity("action.approved") {
+		t.Fatal("a refused approval changed the invocation")
+	}
+	// The app's approval still runs it.
+	o := a.ok(t, vault.KindApp, "action.respond", approve)
+	if st, _ := o.String("status"); st != StatusOK {
+		t.Fatalf("app approved: %s", st)
+	}
+	if res := answer(t, a, b); str(t, res, "status") != StatusOK || !a.h.HasActivity("action.approved") {
+		t.Fatalf("app approved result: %s", res)
+	}
+	// A desktop's denial passes.
+	id = invoke(t, a, b, AuditRecent, `{}`)
+	o = a.ok(t, vault.KindDesktop, "action.respond", `{"invocation_id":"`+id+`","approve":false}`)
+	if st, _ := o.String("status"); st != StatusDenied {
+		t.Fatalf("desktop denied: %s", st)
+	}
+	if res := answer(t, a, b); str(t, res, "status") != StatusDenied || !a.h.HasActivity("action.denied") {
+		t.Fatalf("desktop denied result: %s", res)
+	}
+	// So does an agent's.
+	id = invoke(t, a, b, AuditRecent, `{}`)
+	if r := a.agentRespond(`{"invocation_id":"` + id + `","approve":false}`); !r.OK() {
+		t.Fatalf("agent denied: %q", r.Code)
+	}
+	if res := answer(t, a, b); str(t, res, "status") != StatusDenied {
+		t.Fatalf("agent denied result: %s", res)
 	}
 }
 

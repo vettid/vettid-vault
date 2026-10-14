@@ -25,8 +25,7 @@ var tagRE = regexp.MustCompile(`^[a-z0-9_.-]{1,32}$`)
 
 // desktopApproval are the core types a desktop sends only with an app's
 // approval (§6.8 step-up).
-var desktopApproval = []string{"settings.set", "connection.remove", "connection.invite.create",
-	"connection.invite.accept", "block.remove"}
+var desktopApproval = []string{"settings.set", "connection.remove", "block.remove"}
 
 func (m *Manager) registerConnections() {
 	r := func(t string, h HandlerFunc) {

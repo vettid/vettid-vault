@@ -74,10 +74,19 @@ const codeRecoveryUnavailable = "recovery_unavailable"
 // maxConcurrent bounds queue messages in flight to the enclave.
 const maxConcurrent = 8
 
+// After a receive that found no queue the next comes after queueLostWait,
+// doubled for every further one in a row up to queueLostWaitMax
+// (variables for tests).
+var (
+	queueLostWait    = time.Second
+	queueLostWaitMax = 30 * time.Second
+)
+
 // consume receives queue messages while an enclave with a descriptor is
 // connected and forwards them.
 func (p *Parent) consume(ctx context.Context) {
 	sem := make(chan struct{}, maxConcurrent)
+	lost := 0 // receives in a row that found no queue
 	for ctx.Err() == nil {
 		p.mu.Lock()
 		ready := p.sess != nil && p.desc != nil
@@ -90,14 +99,33 @@ func (p *Parent) consume(ctx context.Context) {
 			}
 			continue
 		}
-		msgs, err := p.cfg.Queues.Receive(ctx, p.queueURL)
+		msgs, err := p.cfg.Queues.Receive(ctx, p.queue())
 		if err != nil {
 			if ctx.Err() == nil {
 				p.log.Warn("queue receive failed", "error", err.Error())
+				if errors.Is(err, ErrQueueNotFound) {
+					// The queue is gone (another instance's sweeper, or
+					// by hand): make it again, then wait before the next
+					// receive whether that worked or not. SQS wants a
+					// second before a new queue is used and may go on
+					// saying "no such queue" for a while; each receive
+					// that says so again doubles the wait, so that this
+					// never becomes a loop at the speed of the calls.
+					_ = p.recreateQueue(ctx)
+					wait := min(queueLostWait<<min(lost, 16), queueLostWaitMax)
+					lost++
+					select {
+					case <-ctx.Done():
+					case <-time.After(wait):
+					}
+					continue
+				}
+				lost = 0
 				time.Sleep(time.Second)
 			}
 			continue
 		}
+		lost = 0
 		for _, m := range msgs {
 			sem <- struct{}{}
 			go func(m QueueMessage) {
@@ -259,7 +287,7 @@ func (p *Parent) writeSlot(ctx context.Context, requestID string, s Slot) {
 }
 
 func (p *Parent) deleteMsg(ctx context.Context, m QueueMessage) {
-	if err := p.cfg.Queues.DeleteMessage(ctx, p.queueURL, m.Receipt); err != nil {
+	if err := p.cfg.Queues.DeleteMessage(ctx, p.queue(), m.Receipt); err != nil {
 		p.log.Warn("queue delete failed", "message_id", m.ID, "error", err.Error())
 	}
 }

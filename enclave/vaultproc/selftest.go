@@ -49,8 +49,12 @@ func SelftestMain() {
 func serveSelftest(c net.Conn, seccompErr error) int {
 	done := make(chan struct{})
 	var conn *hostproto.Conn
+	// conn is set before any frame is handled: the reader starts inside
+	// NewConn, and the supervisor's first request may already be waiting.
+	ready := make(chan struct{})
 	cv := &capacityVault{}
 	conn = hostproto.NewConn(c, func(ctx context.Context, f *hostproto.Frame) [][]byte {
+		<-ready
 		switch {
 		case f.Kind == vaultipc.KindSelftestCapacity:
 			return cv.handle(channel{c: conn}, conn.Done(), f.Fields)
@@ -61,6 +65,7 @@ func serveSelftest(c net.Conn, seccompErr error) int {
 		b, _ := json.Marshal(r)
 		return [][]byte{[]byte(hostproto.StatusOK), b}
 	}, nil)
+	close(ready)
 	go func() { <-conn.Done(); close(done) }()
 	<-done
 	return ExitLocked

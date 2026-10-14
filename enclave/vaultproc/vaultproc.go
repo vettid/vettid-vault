@@ -92,9 +92,17 @@ type proc struct {
 // code.
 func Serve(c net.Conn, p Platform) int {
 	pr := &proc{p: p, exit: make(chan int, 2)}
-	pr.conn = hostproto.NewConn(c, pr.handle, nil)
+	// pr.conn, pr.ch and pr.log are set before any frame is handled: the
+	// reader starts inside NewConn, and the supervisor's open may already
+	// be waiting.
+	ready := make(chan struct{})
+	pr.conn = hostproto.NewConn(c, func(ctx context.Context, f *hostproto.Frame) [][]byte {
+		<-ready
+		return pr.handle(ctx, f)
+	}, nil)
 	pr.ch = channel{c: pr.conn}
 	pr.log = slog.New(&logHandler{conn: pr.conn})
+	close(ready)
 	select {
 	case code := <-pr.exit:
 		// The vault ended on its own (the member's lock, split brain, an

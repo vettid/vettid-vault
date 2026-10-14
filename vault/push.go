@@ -17,17 +17,21 @@ import (
 )
 
 // Push (VAULT-MESSAGING 0.24.0 §14): the holder registers its FCM or APNs
-// token with push.register; the vault keeps the gateway's sealed wake
-// blob, a fresh wake key and a hash of the token (never the token), and
+// token with push.register and returns the gateway's challenge code with
+// push.confirm (PUSH-GATEWAY 0.5.0); the vault keeps the gateway's sealed
+// wake blob, a fresh wake key and a hash of the token (never the token), and
 // wakes the app through the gateway after the relay accepted certain
 // deposits to it, debounced and capped (§14.2). A wake carries nothing of
 // the vault's.
 
-// PushGateway is the channel's push gateway (PUSH-GATEWAY 0.4.0 §5) as the
+// PushGateway is the channel's push gateway (PUSH-GATEWAY 0.5.0 §5) as the
 // vault calls it: one attempt per call. *pushwire.Client implements it.
-// Gateway error answers are *pushwire.Error.
+// Gateway error answers are *pushwire.Error. Register answers a pending
+// registration (the gateway sent a challenge code to the token); Confirm,
+// with the code the app returned, answers the wake blob.
 type PushGateway interface {
-	Register(ctx context.Context, wakeKey ed25519.PrivateKey, r pushwire.Registration) (blob string, err error)
+	Register(ctx context.Context, wakeKey ed25519.PrivateKey, r pushwire.Registration) (pending string, err error)
+	Confirm(ctx context.Context, wakeKey ed25519.PrivateKey, pending, code string) (blob string, err error)
 	Wake(ctx context.Context, wakeKey ed25519.PrivateKey, blob string) (reseal string, err error)
 }
 
@@ -41,6 +45,21 @@ const TypePushTokenNeeded = "push.token-needed"
 const (
 	MaxPushRegistrations = 20
 	PushRegistrationsWin = 24 * time.Hour
+	// PushChallengeLife is how long a pending registration can be
+	// confirmed (PUSH-GATEWAY 0.5.0 §5.1: 10 minutes from the gateway's
+	// registration; the vault counts from before its request, so it gives
+	// up no later than the gateway).
+	PushChallengeLife = 10 * time.Minute
+	// PushRenewAfter is the age at which push.register with the same token
+	// registers again instead of answering from state: wake blobs are
+	// honoured for 90 days from their confirmation (PUSH-GATEWAY 0.5.0 §4).
+	PushRenewAfter = 30 * 24 * time.Hour
+)
+
+// Push states (§14.1).
+const (
+	PushStateActive  = "active"
+	PushStatePending = "pending"
 )
 
 // Push results in the push state (§14.1).
@@ -85,6 +104,31 @@ func (r *PushRegistration) stateJSON() []byte {
 	return b.Bytes()
 }
 
+// PushPending is the latest pending registration (PUSH-GATEWAY 0.5.0
+// §5.1) in DEK state: the gateway's sealed pending registration and the
+// wake key that signed it, waiting for push.confirm with the challenge
+// code the app received. A newer push.register replaces it, key included.
+type PushPending struct {
+	DeviceID    string    `json:"device_id"`
+	WakeSeed    []byte    `json:"wake_sk"`
+	Pending     string    `json:"pending"`
+	TokenHash   []byte    `json:"token_hash"`
+	Platform    string    `json:"platform"`
+	Environment string    `json:"environment,omitempty"`
+	AppID       string    `json:"app_id"`
+	StartedAt   time.Time `json:"started_at"`
+}
+
+// stateJSON is the push state of a pending registration: state pending,
+// registered_at the time the vault sent it to the gateway.
+func (r *PushPending) stateJSON() []byte {
+	b := strictjson.NewBuilder().String("platform", r.Platform)
+	if r.Environment != "" {
+		b.String("environment", r.Environment)
+	}
+	return b.String("app_id", r.AppID).String("state", PushStatePending).String("registered_at", envelope.FormatTS(r.StartedAt)).Bytes()
+}
+
 func (m *Manager) pushTiming() PushTiming {
 	if m.opt.PushTiming != nil {
 		return m.opt.PushTiming.withDefaults()
@@ -94,14 +138,18 @@ func (m *Manager) pushTiming() PushTiming {
 
 func (m *Manager) registerPush() {
 	m.register(TypeSpec{Type: "push.register", Request: true, From: apps}, HandlerFunc(m.hPushRegister))
+	m.register(TypeSpec{Type: "push.confirm", Request: true, From: apps}, HandlerFunc(m.hPushConfirm))
 	m.register(TypeSpec{Type: "push.unregister", Request: true, From: apps}, HandlerFunc(m.hPushUnregister))
 }
 
 var errPushUnavailable = &HandlerError{Code: "unavailable"}
 
 // hPushRegister is §14.1: the checks in order (each failure changing
-// nothing), then a fresh wake key, the gateway's registration with the
-// enclave's attestation, and the new registration in the batch's flush.
+// nothing), then a fresh wake key and the gateway's registration with the
+// enclave's attestation. The gateway answers a pending registration and
+// sends a challenge code to the token (PUSH-GATEWAY 0.5.0); the vault
+// keeps it, replacing any earlier pending one, and answers push state
+// pending. The registration in force, if any, stays until push.confirm.
 func (m *Manager) hPushRegister(ctx context.Context, s *Session, in *envelope.Inner) (json.RawMessage, error) {
 	p := s.peer
 	// 1. The holder only (the framework already refuses desktops, agents
@@ -118,13 +166,23 @@ func (m *Manager) hPushRegister(ctx context.Context, s *Session, in *envelope.In
 	if m.opt.Push == nil {
 		return nil, errPushUnavailable
 	}
-	// 4. Idempotence.
+	// 4. Idempotence, while the registration is under 30 days old; an
+	// older one is renewed through the gateway (a new challenge), so that
+	// its blob never reaches the gateway's 90-day limit in normal use.
+	now := s.now
 	th := r.TokenHash()
-	if cur := m.st.Push; cur != nil && cur.DeviceID == p.ID && pushwire.EqualHash(cur.TokenHash, th[:]) {
+	if cur := m.st.Push; cur != nil && cur.DeviceID == p.ID && pushwire.EqualHash(cur.TokenHash, th[:]) &&
+		now.Sub(cur.RegisteredAt) < PushRenewAfter {
 		return strictjson.NewBuilder().Raw("push", cur.stateJSON()).Bytes(), nil
 	}
+	// A pending registration of the same token, still within its
+	// challenge's life, is answered as it stands: no new challenge, so two
+	// quick opens never cross codes and repeated opens spend nothing.
+	if pp := m.st.PushPending; pp != nil && pp.DeviceID == p.ID && pushwire.EqualHash(pp.TokenHash, th[:]) &&
+		now.Sub(pp.StartedAt) < PushChallengeLife {
+		return strictjson.NewBuilder().Raw("push", pp.stateJSON()).Bytes(), nil
+	}
 	// 5. 20 registrations that reached the gateway in 24 hours.
-	now := s.now
 	m.prunePushRegs(now)
 	if len(m.st.PushRegs) >= MaxPushRegistrations {
 		return nil, LimitError("push_registrations", MaxPushRegistrations)
@@ -134,8 +192,9 @@ func (m *Manager) hPushRegister(ctx context.Context, s *Session, in *envelope.In
 		return nil, NewError("internal", "")
 	}
 	defer suite.Wipe(sk)
+	started := now.UTC().Truncate(time.Millisecond)
 	rctx, cancel := context.WithTimeout(ctx, m.pushTiming().RegisterTimeout)
-	blob, err := m.opt.Push.Register(rctx, sk, r)
+	pending, err := m.opt.Push.Register(rctx, sk, r)
 	cancel()
 	if pushwire.Answered(err) {
 		// It reached the gateway: counted, whatever the answer, an
@@ -146,15 +205,108 @@ func (m *Manager) hPushRegister(ctx context.Context, s *Session, in *envelope.In
 	if err != nil {
 		return nil, pushRegisterError(err)
 	}
+	// Only the latest pending registration is kept: a code is always
+	// tried against the newest challenge.
+	m.clearPushPending()
+	m.st.PushPending = &PushPending{DeviceID: p.ID, WakeSeed: append([]byte(nil), sk.Seed()...), Pending: pending,
+		TokenHash: append([]byte(nil), th[:]...), Platform: r.Platform, Environment: r.Environment, AppID: r.AppID,
+		StartedAt: started}
+	m.dirty = true
+	return strictjson.NewBuilder().Raw("push", m.st.PushPending.stateJSON()).Bytes(), nil
+}
+
+// hPushConfirm is push.confirm{code} (PUSH-GATEWAY 0.5.0 §5.1): the app
+// returns the challenge code it received by push, and the vault confirms
+// its pending registration with it, signed by the pending registration's
+// wake key. On the gateway's 201 the blob becomes the registration,
+// replacing and wiping the previous one, in one flush.
+func (m *Manager) hPushConfirm(ctx context.Context, s *Session, in *envelope.Inner) (json.RawMessage, error) {
+	p := s.peer
+	if p == nil || p.Kind != KindApp || p.Recovering {
+		return nil, errForbiddenH
+	}
+	o, err := obj(in)
+	if err != nil || len(o) != 1 {
+		return nil, errBadRequest
+	}
+	code, err := o.String("code")
+	if err != nil || !pushwire.ValidChallengeCode(code) {
+		return nil, errBadRequest
+	}
+	if m.opt.Push == nil {
+		return nil, errPushUnavailable
+	}
+	now := s.now
+	pend := m.st.PushPending
+	if pend == nil || pend.DeviceID != p.ID {
+		return nil, &HandlerError{Code: "bad_request", Message: "no_pending_registration"}
+	}
+	if now.Sub(pend.StartedAt) >= PushChallengeLife {
+		m.clearPushPending()
+		return nil, &HandlerError{Code: "gateway_error", Message: "challenge_expired", Body: json.RawMessage(`{}`)}
+	}
+	sk := ed25519.NewKeyFromSeed(pend.WakeSeed)
+	defer suite.Wipe(sk)
+	rctx, cancel := context.WithTimeout(ctx, m.pushTiming().RegisterTimeout)
+	blob, err := m.opt.Push.Confirm(rctx, sk, pend.Pending, code)
+	cancel()
+	if err != nil {
+		if pushRefused(err) {
+			// The gateway refused it for good (challenge_invalid: a
+			// wrong code, or one for another challenge): the app
+			// registers again.
+			m.clearPushPending()
+		}
+		return nil, pushConfirmError(err)
+	}
 	m.clearPush()
 	m.pushGen++
-	m.st.Push = &PushRegistration{DeviceID: p.ID, WakeSeed: append([]byte(nil), sk.Seed()...), WakeBlob: blob,
-		TokenHash: append([]byte(nil), th[:]...), Platform: r.Platform, Environment: r.Environment, AppID: r.AppID,
-		RegisteredAt: now.UTC().Truncate(time.Millisecond), State: "active"}
+	m.st.Push = &PushRegistration{DeviceID: p.ID, WakeSeed: append([]byte(nil), pend.WakeSeed...), WakeBlob: blob,
+		TokenHash: append([]byte(nil), pend.TokenHash...), Platform: pend.Platform, Environment: pend.Environment, AppID: pend.AppID,
+		RegisteredAt: now.UTC().Truncate(time.Millisecond), State: PushStateActive}
+	m.clearPushPending()
 	m.dirty = true
-	m.record(Activity{Kind: "push.registered", DeviceID: p.ID, Ref: r.Platform, Audit: true}, now)
+	m.record(Activity{Kind: "push.registered", DeviceID: p.ID, Ref: m.st.Push.Platform, Audit: true}, now)
 	m.pushSync()
 	return strictjson.NewBuilder().Raw("push", m.st.Push.stateJSON()).Bytes(), nil
+}
+
+// pushRefused reports whether a confirmation's failure ends its pending
+// registration: the gateway answered, and not with 429 or 5xx (which may
+// pass; the same code can be tried again within the 10 minutes).
+func pushRefused(err error) bool {
+	var ge *pushwire.Error
+	if errors.As(err, &ge) {
+		return ge.Status != 429 && ge.Status < 500
+	}
+	return errors.Is(err, pushwire.ErrResponse) || errors.Is(err, pushwire.ErrOversized)
+}
+
+// pushConfirmError maps a failed confirmation: always gateway_error (the
+// app registers again, or retries after retry_after), with the gateway's
+// challenge_invalid as message when it gave it.
+func pushConfirmError(err error) error {
+	var ge *pushwire.Error
+	e := &HandlerError{Code: "gateway_error"}
+	errors.As(err, &ge)
+	if ge != nil && ge.Status == 403 && ge.Code == pushwire.CodeChallengeInvalid {
+		e.Message = pushwire.CodeChallengeInvalid
+	}
+	b := strictjson.NewBuilder()
+	if ge != nil && (ge.Status == 429 || ge.Status == 502) && ge.RetryAfter > 0 {
+		b.Uint("retry_after", uint64(ge.RetryAfter))
+	}
+	e.Body = b.Bytes()
+	return e
+}
+
+// clearPushPending wipes and drops the pending registration.
+func (m *Manager) clearPushPending() {
+	if pp := m.st.PushPending; pp != nil {
+		suite.Wipe(pp.WakeSeed)
+		m.st.PushPending = nil
+		m.dirty = true
+	}
 }
 
 // pushRegisterError maps a failed registration (§14.1): the gateway's
@@ -188,12 +340,16 @@ func (m *Manager) prunePushRegs(now time.Time) {
 	}
 }
 
-// hPushUnregister erases the registration in one flush (§14.1); without
-// one it answers {} and writes nothing. No gateway call.
+// hPushUnregister erases the registration, and a pending one, in one
+// flush (§14.1); without either it answers {} and writes nothing. No
+// gateway call.
 func (m *Manager) hPushUnregister(_ context.Context, s *Session, in *envelope.Inner) (json.RawMessage, error) {
 	o, err := obj(in)
 	if err != nil || len(o) != 0 {
 		return nil, errBadRequest
+	}
+	if pp := m.st.PushPending; pp != nil && pp.DeviceID == s.from.ID {
+		m.clearPushPending()
 	}
 	if cur := m.st.Push; cur != nil && cur.DeviceID == s.from.ID {
 		m.erasePush("app", s.now)
@@ -229,6 +385,9 @@ func (m *Manager) clearPush() {
 // pushRemoved erases the registration of an app that a transfer or a
 // recovery removed (§6.7.1, §11.11.5): ref transferred or replaced.
 func (m *Manager) pushRemoved(deviceID, reason string, now time.Time) {
+	if pp := m.st.PushPending; pp != nil && pp.DeviceID == deviceID {
+		m.clearPushPending()
+	}
 	if cur := m.st.Push; cur != nil && cur.DeviceID == deviceID {
 		m.erasePush(reason, now)
 	}

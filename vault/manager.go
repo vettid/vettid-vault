@@ -775,6 +775,9 @@ func (m *Manager) zeroize() {
 		if m.st.Push != nil {
 			suite.Wipe(m.st.Push.WakeSeed)
 		}
+		if m.st.PushPending != nil {
+			suite.Wipe(m.st.PushPending.WakeSeed)
+		}
 		for _, r := range m.st.RetiredKEMs {
 			suite.Wipe(r.Seed)
 		}

@@ -79,9 +79,13 @@ type State struct {
 
 	// Push is the app's push registration (0.24.0, §14.1), at most one;
 	// PushRegs are when registrations reached the gateway (the rolling
-	// 24 h window of push_registrations).
-	Push     *PushRegistration `json:"push,omitempty"`
-	PushRegs []time.Time       `json:"push_regs,omitempty"`
+	// 24 h window of push_registrations). PushPending is the latest
+	// registration the gateway answered with a pending registration and a
+	// challenge to the token (PUSH-GATEWAY 0.5.0), at most one, waiting
+	// for push.confirm; the registration in Push stays in force meanwhile.
+	Push        *PushRegistration `json:"push,omitempty"`
+	PushPending *PushPending      `json:"push_pending,omitempty"`
+	PushRegs    []time.Time       `json:"push_regs,omitempty"`
 }
 
 // ReleaseMove is a recorded, not yet confirmed move to another release

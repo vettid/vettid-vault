@@ -11,7 +11,8 @@ import (
 )
 
 // VAULT-MESSAGING 0.24.0 §14 from the app's side: push.register,
-// push.unregister, the push state in device.list and push.token-needed.
+// push.confirm (PUSH-GATEWAY 0.5.0), push.unregister, the push state in
+// device.list and push.token-needed.
 
 // EventPushTokenNeeded asks the app for a fresh push.register (§14.2;
 // the grammar's form of the spec's push.token_needed).
@@ -63,14 +64,35 @@ func ParsePushState(raw json.RawMessage) (*PushState, error) {
 }
 
 // PushRegister registers the app's platform token (§14.1); the vault
-// answers its push state. Errors are *OpError (bad_request, forbidden,
-// unavailable, gateway_error {retry_after?}, limit).
+// answers its push state: pending while the gateway's challenge code is
+// on its way to the token by push (send it with PushConfirm within 10
+// minutes), active when the token's registration is current. Errors are
+// *OpError (bad_request, forbidden, unavailable, gateway_error
+// {retry_after?}, limit).
 func (d *Device) PushRegister(ctx context.Context, r pushwire.Registration) (*PushState, error) {
 	body := map[string]any{"platform": r.Platform, "token": r.Token, "app_id": r.AppID}
 	if r.Environment != "" {
 		body["environment"] = r.Environment
 	}
 	o, err := d.Op(ctx, "push.register", body)
+	if err != nil {
+		return nil, err
+	}
+	raw, ok := o["push"]
+	if !ok {
+		return nil, ErrProtocol
+	}
+	return ParsePushState(raw)
+}
+
+// PushConfirm returns the challenge code the app received by push for
+// the vault's pending registration (PUSH-GATEWAY 0.5.0); the vault answers
+// its push state, active. Errors are *OpError: bad_request (a malformed
+// code, or no_pending_registration), gateway_error (challenge_invalid,
+// challenge_expired, or the gateway unreachable; register again),
+// forbidden, unavailable.
+func (d *Device) PushConfirm(ctx context.Context, code string) (*PushState, error) {
+	o, err := d.Op(ctx, "push.confirm", map[string]any{"code": code})
 	if err != nil {
 		return nil, err
 	}

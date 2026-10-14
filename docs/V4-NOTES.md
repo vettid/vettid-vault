@@ -1025,3 +1025,50 @@ real gateway (`vettid/vettid-push`, FCM and APNs) is N4.
   answers `push.register` with `gateway_error`.
 - `vaultipc.Version` 7 (the supervisor and its vault processes are one
   binary).
+
+### Two-step registration (PUSH-GATEWAY 0.5.0)
+
+The push gateway now verifies that a registration's push token belongs to
+the caller (vettid-push #4): `POST /v1/register` (attested, as before)
+answers `202 {pending}` and sends a silent push with a random code to the
+token; the vault confirms with `POST /v1/confirm {pending, code}`, signed
+by the same wake key, within 10 minutes, and gets `201 {wake_blob}`. Wake
+blobs are honoured for 90 days from the confirmation. There is no
+one-step registration.
+
+- `pushwire`: `PathConfirm`, `CodeChallengeInvalid`, `ParsePending`,
+  `ConfirmBody`/`ParseConfirm`, `ValidChallengeCode` (1–64 base64url);
+  `Client.Register` returns the pending registration, `Client.Confirm`
+  the blob.
+- The supervisor forwards `/v1/confirm` like `/v1/wake` (signature,
+  relay-key refusal, size bound, no attestation).
+- `push.register` keeps the pending registration and its fresh wake key
+  in DEK state (`State.PushPending`, at most one: a newer one replaces it
+  and wipes its key) and answers push state `pending` (`registered_at` =
+  when the vault sent it). The registration in force, if any, stays until
+  the confirmation. Idempotence answers from state only while the
+  registration is under 30 days old; from 30 days the same token
+  registers again (the renewal), at the app's next `push.register`.
+  A `push.register` of the same token while its pending registration is
+  under 10 minutes old answers that pending registration (no new
+  challenge, nothing counted), so two quick opens never cross codes.
+- `push.confirm {code}` (new, the holder only, allowed while held):
+  `bad_request` for a malformed body or `no_pending_registration`;
+  `gateway_error` `challenge_expired` 10 minutes after the registration
+  (no gateway call); `gateway_error` `challenge_invalid` when the gateway
+  refuses it; both drop the pending registration. 429, 5xx and no
+  connection keep it (`gateway_error`, `retry_after` from 429/502), so the
+  same code may be tried again. On 201 the blob becomes the registration
+  (audited `push.registered`, as before), replacing and wiping the
+  previous one. A confirmation does not count toward
+  `push_registrations`.
+- `push.unregister` and the app's removal also drop a pending
+  registration. `blob_invalid` (now also a blob past 90 days) keeps
+  working as before and leaves a pending registration alone.
+- `device.list` shows only the registration in force, not a pending one.
+- `internal/pushtest` answers `202 {pending}`, records challenges with
+  their codes (`Challenges`, `LastCode`; `/dev/push` → `challenges`), and
+  serves `/v1/confirm` with the gateway's rules; `Registrations` counts
+  confirmed ones. `client.Device.PushConfirm`, `vaultctl push confirm
+  -code C`.
+- State gains `push_pending`, ignored by older code.

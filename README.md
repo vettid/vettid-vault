@@ -231,15 +231,20 @@ Everything listens on 127.0.0.1. Child processes run with
 | `POST /dev/peer/event` | `{"type": T, "match": {k: v}, "timeout_s": N}`: waits (default 90 s, at most 300) for a peer event of type T whose body matches; others are kept for later calls |
 | `POST /dev/recovery/code` | `{"guid": G, "timeout_s": N}` (needs `-recovery-skew`): plays the account portal's recovery for member G (VAULT-MESSAGING §11.11): a fresh browser P-256 key, `POST /api/vault/recovery`, the recovery clock moved past the delay, the sealed code fetched and opened. Answers `{vault_id, recovery_id, code, qr, not_before, expires_at, available_at}`, `qr` being the QR payload the app scans and registers with (`POST /api/vault/recovery/register`); `422 {"error": "no_credential"}` for a vault without a credential (that recovery is cancelled); member API refusals (`404`, `409 recovery_active`) as they come |
 
-**Push.** `GET /dev/push` lists the stand-in's registrations count,
-recorded wakes (`{at, platform, environment?, app_id, token_sha256,
-class}`: the token only as its SHA-256) and refusals; `POST /dev/push/fail
-{status, code, retry_after?, count?}` answers the next wakes with an error
-(410 `token_gone`, 400 `token_invalid`, 410 `blob_invalid`, 429, 502);
-`POST /dev/push/reseal {count?}` answers with a reseal; `POST
-/dev/push/reset` forgets everything but the blob key; `POST /dev/push/wait
-{wakes, timeout_s}` waits for N wakes. `vaultctl push register|unregister|status`
-drives an app's registration.
+**Push.** Registration has two steps (PUSH-GATEWAY 0.5.0): `push.register`
+answers push state `pending` and the stand-in records the challenge it
+would push to the token; the app returns its code with `push.confirm
+{code}` within 10 minutes. `GET /dev/push` lists the stand-in's count of
+completed registrations, recorded challenges (`{at, platform,
+environment?, app_id, token_sha256, code}`: play the app with the latest
+`code`), recorded wakes (`{at, platform, environment?, app_id,
+token_sha256, class}`: the token only as its SHA-256) and refusals; `POST
+/dev/push/fail {status, code, retry_after?, count?}` answers the next
+wakes with an error (410 `token_gone`, 400 `token_invalid`, 410
+`blob_invalid`, 429, 502); `POST /dev/push/reseal {count?}` answers with a
+reseal; `POST /dev/push/reset` forgets everything but the blob key; `POST
+/dev/push/wait {wakes, timeout_s}` waits for N wakes. `vaultctl push
+register|confirm|unregister|status` drives an app's registration.
 
 **Recovery.** The member API stand-in serves `POST`/`GET
 /api/vault/recovery`, `POST /api/vault/recovery/cancel` and `POST

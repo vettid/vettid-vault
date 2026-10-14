@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/tls"
+	"encoding/json"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -40,7 +41,26 @@ func TestPushControl(t *testing.T) {
 	c := &pushwire.Client{BaseURL: pushURL, HTTP: hc,
 		Attest: func(pub ed25519.PublicKey, d [32]byte) ([]byte, error) { return nsm.Attest(d[:], nil, pub) }}
 	_, k, _ := ed25519.GenerateKey(nil)
-	blob, err := c.Register(context.Background(), k, pushwire.Registration{Platform: "fcm", Token: "t", AppID: "com.vettid.app"})
+	pending, err := c.Register(context.Background(), k, pushwire.Registration{Platform: "fcm", Token: "t", AppID: "com.vettid.app"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// PUSH-GATEWAY 0.5.0: the challenge's code, as the app would get it.
+	r0, err := http.Get(srv.URL + "/dev/push")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var st struct {
+		Challenges []struct {
+			Code string `json:"code"`
+		} `json:"challenges"`
+	}
+	_ = json.NewDecoder(r0.Body).Decode(&st)
+	r0.Body.Close()
+	if len(st.Challenges) != 1 || st.Challenges[0].Code != s.push.LastCode() {
+		t.Fatalf("challenges %+v", st)
+	}
+	blob, err := c.Confirm(context.Background(), k, pending, st.Challenges[0].Code)
 	if err != nil {
 		t.Fatal(err)
 	}

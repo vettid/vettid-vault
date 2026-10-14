@@ -162,6 +162,16 @@ func (s *Supervisor) selftestProcess(r *selftest.Report) {
 	r.Add("kernel.user_namespaces_off", err == nil, s.cfg.OwnKernel, "max_user_namespaces: "+orZero(err))
 	err = unprivilegedBPFDisabled()
 	r.Add("kernel.unprivileged_bpf_off", err == nil, s.cfg.OwnKernel, "unprivileged_bpf_disabled: "+orSet(err))
+	err = nsmClosedCheck()
+	r.Add("supervisor.nsm_closed", err == nil, s.cfg.OwnKernel, "root only: "+orYes(err))
+	r.Add("supervisor.pid1", true, false, pid1())
+}
+
+func orYes(err error) string {
+	if err == nil {
+		return "yes"
+	}
+	return err.Error()
 }
 
 func orZero(err error) string {
@@ -303,7 +313,13 @@ func (s *Supervisor) selftestVaultProcess(ctx context.Context, r *selftest.Repor
 		r.Add("vault_process.spawn", false, true, errStr(err))
 		return
 	}
-	defer h.stop(p)
+	defer func() {
+		h.stop(p)
+		// After the vault process and the sweep: orphans are reaped by
+		// PID 1, so none is left as the supervisor's zombie.
+		all, ours, err := zombies()
+		r.Add("supervisor.zombies", err == nil && ours == 0, false, fmt.Sprintf("zombies=%d of the supervisor=%d %s", all, ours, errStr(err)))
+	}()
 	r.Add("vault_process.spawn", true, true, fmt.Sprintf("re-executed %s", h.cfg.Exec[0]))
 	cctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer cancel()
@@ -324,7 +340,7 @@ func (s *Supervisor) selftestVaultProcess(ctx context.Context, r *selftest.Repor
 	r.Add("vault_process.user_namespace_refused", vr.UserNamespace == selftest.UserNamespaceRefused, s.cfg.OwnKernel, vr.UserNamespace)
 	want := s.cfg.Proc.UIDBase
 	if want > 0 {
-		r.Add("vault_process.own_uid_gid", vr.UID == want+p.slot && vr.GID == want+p.slot, true, fmt.Sprintf("uid=%d gid=%d", vr.UID, vr.GID))
+		r.Add("vault_process.own_uid_gid", p.uid >= want && vr.UID == p.uid && vr.GID == p.uid, true, fmt.Sprintf("uid=%d gid=%d", vr.UID, vr.GID))
 	} else {
 		r.Add("vault_process.own_uid_gid", false, false, fmt.Sprintf("uid switching off (uid=%d)", vr.UID))
 	}

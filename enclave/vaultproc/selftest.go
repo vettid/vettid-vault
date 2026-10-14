@@ -124,6 +124,15 @@ func runSelftest(ctx context.Context, ch channel, keyARN string, seccompErr erro
 	}
 	res.PeakRSS = procStatus("VmHWM")
 	add("vault_process.argon2id_default", err == nil, true, fmt.Sprintf("t=%d m=%dKiB peak_rss=%d", kdf.Time, kdf.MemoryKiB, res.PeakRSS))
+	// Reported for the process limit (RLIMIT_NPROC), after the KDF and the
+	// KMS round trip: the threads this process runs, and the limit, which
+	// the supervisor sets only under a uid of the process's own.
+	if tasks, err := os.ReadDir("/proc/self/task"); err == nil {
+		add("vault_process.threads", true, false, fmt.Sprintf("%d", len(tasks)))
+	}
+	if l, ok := nprocLimit(); ok {
+		add("vault_process.rlimit_nproc", l.ok, false, l.detail)
+	}
 	return res
 }
 

@@ -11,9 +11,19 @@ func socketpair() ([2]int, error) {
 	return [2]int{}, errors.New("supervisor: vault processes need Linux")
 }
 
-func procAttr(int, int) *syscall.SysProcAttr { return nil }
+func procAttr(int) *syscall.SysProcAttr { return nil }
 
-func setLimits(int, ProcConfig) {}
+func onSpawnerThread(f func()) { f() }
+
+func setLimits(int, ProcConfig, bool) {}
+
+func sweepUID(int) error { return errors.New("not Linux") }
+
+func closeNSM() error { return errors.New("not Linux") }
+
+func pid1() string                        { return "not Linux" }
+func zombies() (all, ours int, err error) { return 0, 0, errors.New("not Linux") }
+func nsmClosedCheck() error               { return errors.New("not Linux") }
 
 func hardenSelf() []string { return []string{"not Linux"} }
 

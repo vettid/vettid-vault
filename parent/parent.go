@@ -68,6 +68,9 @@ func New(cfg Config) (*Parent, error) {
 	if err := cfg.defaults(); err != nil {
 		return nil, err
 	}
+	// Only the enclave is answered on either channel (peer.go).
+	cfg.ControlListener = EnclaveOnly(cfg.ControlListener, DefaultEnclaveCID, "control", cfg.Logger)
+	cfg.EgressListener = EnclaveOnly(cfg.EgressListener, DefaultEnclaveCID, "egress", cfg.Logger)
 	p := &Parent{cfg: cfg, log: cfg.Logger, now: cfg.Now, running: map[string]*lease{}, taking: map[string]int{}, events: make(chan func(context.Context), 1024)}
 	p.fwd = newForwarder(&p.cfg)
 	return p, nil

@@ -21,7 +21,10 @@ type Config struct {
 
 	// ControlListener accepts the enclave's control connection;
 	// EgressListener its outbound connections (vsock, or TCP in
-	// development).
+	// development). A connection on either whose peer is not the enclave
+	// is closed unanswered: on vsock, a peer whose context id is not
+	// DefaultEnclaveCID (or the one a listener was given by EnclaveOnly);
+	// on TCP, a peer that is not on the loopback interface.
 	ControlListener net.Listener
 	EgressListener  net.Listener
 

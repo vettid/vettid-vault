@@ -13,9 +13,13 @@
 // SSM parameter; without a valid one the parent exits before creating
 // anything (fail closed). deploy/host runs it under systemd.
 //
+// The parent answers only the enclave on its two vsock ports: a
+// connection whose peer context id is not -enclave-cid is closed.
+//
 // Development and integration tests use -control-tcp/-egress-tcp instead
-// of vsock, -aws-endpoint for LocalStack, -static-credentials and
-// -resolve to map allowlisted hosts to local test servers.
+// of vsock (only peers on the loopback interface are answered then),
+// -aws-endpoint for LocalStack, -static-credentials and -resolve to map
+// allowlisted hosts to local test servers.
 package main
 
 import (
@@ -63,6 +67,7 @@ func main() {
 		relayHost    = flag.String("relay-host", "relay.vettid.org", "relay host on the egress allowlist")
 		controlPort  = flag.Uint("control-port", 5000, "vsock control port")
 		egressPort   = flag.Uint("egress-port", 5001, "vsock egress port")
+		enclaveCID   = flag.Uint("enclave-cid", parent.DefaultEnclaveCID, "the enclave's vsock context id (nitro-cli run-enclave --enclave-cid): control and egress connections from any other context id are refused")
 		controlTCP   = flag.String("control-tcp", "", "development: control listen address (TCP instead of vsock)")
 		egressTCP    = flag.String("egress-tcp", "", "development: egress listen address (TCP instead of vsock)")
 		endpoint     = flag.String("aws-endpoint", "", "development: endpoint for every AWS service (LocalStack)")
@@ -155,17 +160,11 @@ func main() {
 		fail("configuration", err)
 	}
 
-	listen := func(tcp string, port uint) (net.Listener, error) {
-		if tcp != "" {
-			return net.Listen("tcp", tcp)
-		}
-		return vsock.Listen(uint32(port))
-	}
-	cl, err := listen(*controlTCP, *controlPort)
+	cl, err := listen(*controlTCP, *controlPort, *enclaveCID, "control", log, listenVsock)
 	if err != nil {
 		fail("control listener", err)
 	}
-	el, err := listen(*egressTCP, *egressPort)
+	el, err := listen(*egressTCP, *egressPort, *enclaveCID, "egress", log, listenVsock)
 	if err != nil {
 		fail("egress listener", err)
 	}
@@ -215,6 +214,36 @@ func main() {
 	if err := p.Run(ctx); err != nil {
 		fail("parent stopped", err)
 	}
+}
+
+func listenVsock(port uint32) (net.Listener, error) { return vsock.Listen(port) }
+
+// listen opens the control or the egress listener (channel): TCP on tcp
+// if that is set (development), vsock on port otherwise. The listener
+// answers only the enclave: on vsock the peer with context id enclaveCID
+// (-enclave-cid), on TCP a peer on the loopback interface
+// (parent.EnclaveOnly). Both of the parent's listeners, for the ordinary
+// run and for -selftest, are made here.
+func listen(tcp string, port, enclaveCID uint, channel string, log *slog.Logger, vsockListen func(uint32) (net.Listener, error)) (net.Listener, error) {
+	// 0 to 2 are reserved and 3 is the parent instance itself: an enclave
+	// has a context id from 4 up. A lower one would let a process on the
+	// host pass for the enclave.
+	if enclaveCID < 4 || enclaveCID >= vsock.CIDAny {
+		return nil, errors.New("-enclave-cid must be the enclave's context id (4 or more)")
+	}
+	var (
+		l   net.Listener
+		err error
+	)
+	if tcp != "" {
+		l, err = net.Listen("tcp", tcp)
+	} else {
+		l, err = vsockListen(uint32(port))
+	}
+	if err != nil {
+		return nil, err
+	}
+	return parent.EnclaveOnly(l, uint32(enclaveCID), channel, log), nil
 }
 
 // runSelftest runs the hardware smoke test and prints the report.

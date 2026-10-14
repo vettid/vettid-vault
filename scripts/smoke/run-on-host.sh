@@ -112,7 +112,7 @@ run() {
   step "vault-parent -selftest (run $run_id)"
   "$WORK/bin/vault-parent" -selftest -region "$SMOKE_REGION" -bucket "$SMOKE_BUCKET" \
     -smoke-key-arn "$SMOKE_KEY_ARN" -smoke-account "$SMOKE_ACCOUNT" -run-id "$run_id" \
-    -expect-key-check "${SMOKE_EXPECT_KEY_CHECK:-6}" -health "" -capacity "${SMOKE_CAPACITY:-0}" \
+    -expect-key-check "${SMOKE_EXPECT_KEY_CHECK:-6}" -enclave-cid "$CID" -health "" -capacity "${SMOKE_CAPACITY:-0}" \
     >"$logs/report.json" 2>"$logs/parent.log" &
   parent_pid=$!
 

@@ -80,7 +80,12 @@ There are no secrets on the host.
    backoff.
 4. `vault-parent` (after the enclave, so systemd stops it first) creates
    the instance queue with the policy, serves the enclave and registers
-   the instance. Health: `127.0.0.1:8081/healthz`. On SIGTERM it locks
+   the instance. It answers only the enclave on its two vsock ports: a
+   connection whose peer context id is not its `-enclave-cid` (16, the
+   enclave unit's `--enclave-cid`) is closed and logged ("connection
+   refused: the peer is not the enclave", with the context id seen).
+   The two values must agree; to try another on one host, override both
+   units' `ExecStart` with drop-ins. Health: `127.0.0.1:8081/healthz`. On SIGTERM it locks
    every vault through the enclave, flushes lifecycle events, deletes the
    instance row and the queue (≤ 60 s; `TimeoutStopSec=90`). The enclave
    is `PartOf` the parent: stopping the parent then stops the enclave.

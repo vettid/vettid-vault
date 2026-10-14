@@ -320,6 +320,15 @@ func exitCode(err error) int {
 	return 0
 }
 
+// exitDetail describes an exit code as exitCode reports it: "exit N",
+// or "signal N" for a process ended by a signal.
+func exitDetail(code int) string {
+	if code < 0 {
+		return "signal " + strconv.Itoa(-code)
+	}
+	return "exit " + strconv.Itoa(code)
+}
+
 // exited handles a process that ended: a vault that stopped on its own
 // (split brain, internal lock, error) is reported to the parent.
 func (h *procHost) exited(p *vproc) {
@@ -333,6 +342,13 @@ func (h *procHost) exited(p *vproc) {
 	p.mu.Unlock()
 	h.s.forget(p.vaultID)
 	if stopping {
+		// Stopped by the supervisor: a clean exit or the supervisor's own
+		// SIGKILL is expected. Anything else (a Go panic exits 2, another
+		// signal) is logged, since a stop that follows a failed request
+		// would otherwise hide the crash that caused the failure.
+		if p.exitCode != 0 && p.exitCode != -int(syscall.SIGKILL) {
+			h.s.log.Warn("vault process ended abnormally while being stopped", "vault_id", p.vaultID, "exit", exitDetail(p.exitCode))
+		}
 		return
 	}
 	reason, lvl := stopReason(p.exitCode)

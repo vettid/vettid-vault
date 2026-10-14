@@ -28,3 +28,12 @@ func TestStopReason(t *testing.T) {
 		}
 	}
 }
+
+// How a process ended, as the capacity report and the stop log name it.
+func TestExitDetail(t *testing.T) {
+	for code, want := range map[int]string{0: "exit 0", 2: "exit 2", vaultproc.ExitChannel: "exit 5", -9: "signal 9", -11: "signal 11"} {
+		if got := exitDetail(code); got != want {
+			t.Errorf("exitDetail(%d) = %q, want %q", code, got, want)
+		}
+	}
+}

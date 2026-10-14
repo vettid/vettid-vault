@@ -155,12 +155,26 @@ func (s *Supervisor) sweepAfter(vaultID string, uid int) {
 
 // sweepPending sweeps again the uids a vault's earlier processes left
 // unswept and reports whether none is left.
+// The sweeps run without the lock, so other vaults' starts never wait
+// for them.
 func (s *Supervisor) sweepPending(vaultID string) bool {
+	s.unsweptMu.Lock()
+	pending := append([]int(nil), s.unswept[vaultID]...)
+	s.unsweptMu.Unlock()
+	if len(pending) == 0 {
+		return true
+	}
+	done := map[int]bool{}
+	for _, uid := range pending {
+		if sweepUID(uid) == nil {
+			done[uid] = true
+		}
+	}
 	s.unsweptMu.Lock()
 	defer s.unsweptMu.Unlock()
 	var left []int
-	for _, uid := range s.unswept[vaultID] {
-		if err := sweepUID(uid); err != nil {
+	for _, uid := range s.unswept[vaultID] { // as it is now (a failure may have been added)
+		if !done[uid] {
 			left = append(left, uid)
 		}
 	}
@@ -247,7 +261,11 @@ func (h *procHost) spawn(vaultID, userGUID string, enroll bool, extra ...string)
 	cmd.Dir = "/"
 	cmd.ExtraFiles = []*os.File{childEnd} // fd 3; everything else is close-on-exec
 	cmd.SysProcAttr = procAttr(uid)
-	if err := cmd.Start(); err != nil {
+	// Started from the spawner thread, which never ends: the kernel sends
+	// a child's parent-death signal (Pdeathsig) when the thread that
+	// forked it ends, not the process, and the sweep ends threads.
+	onSpawnerThread(func() { err = cmd.Start() })
+	if err != nil {
 		childEnd.Close()
 		parentEnd.Close()
 		h.freeSlot(slot)

@@ -13,6 +13,8 @@ func socketpair() ([2]int, error) {
 
 func procAttr(int) *syscall.SysProcAttr { return nil }
 
+func onSpawnerThread(f func()) { f() }
+
 func setLimits(int, ProcConfig, bool) {}
 
 func sweepUID(int) error { return errors.New("not Linux") }

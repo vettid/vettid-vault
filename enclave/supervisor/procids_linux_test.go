@@ -439,3 +439,84 @@ func TestVaultProcessUIDs(t *testing.T) {
 	p2.conn.Close()
 	<-p2.exited
 }
+
+// endThreadAfter runs f on a goroutine locked to its thread and lets the
+// goroutine end still locked, so the runtime ends that thread (as the
+// sweep's goroutine does).
+func endThreadAfter(f func()) {
+	done := make(chan struct{})
+	go func() {
+		runtime.LockOSThread()
+		f()
+		close(done)
+	}()
+	<-done
+}
+
+// The kernel sends a child's parent-death signal when the thread that
+// forked it ends. Vault processes, which have Pdeathsig SIGKILL, are
+// forked on the spawner thread, which never ends: started from threads
+// that then end, and with sweeps of another uid ending more threads, they
+// keep running. The first part shows the hazard is real on this kernel.
+func TestSpawnSurvivesThreadExit(t *testing.T) {
+	// The hazard: a process forked on a thread that ends gets SIGKILL.
+	var direct *exec.Cmd
+	endThreadAfter(func() {
+		direct = exec.Command("/bin/sleep", "60")
+		direct.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
+		if err := direct.Start(); err != nil {
+			direct = nil
+		}
+	})
+	if direct == nil {
+		t.Skip("no /bin/sleep")
+	}
+	if err := direct.Wait(); err == nil {
+		t.Fatal("this kernel did not kill a child whose forking thread ended: the test shows nothing")
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := 0
+	if os.Geteuid() == 0 {
+		base = 330000 // as root, also under their own uids, with sweeps
+	}
+	s := &Supervisor{log: slog.New(slog.NewTextHandler(io.Discard, nil)), link: &link{}, activity: map[string]time.Time{}}
+	h := newProcHost(s, ProcConfig{Exec: []string{exe, "-test.run=^TestSweepHelper$", "--", sweepHelperArg}, UIDBase: base, MaxProcs: 8})
+	var procs []*vproc
+	for i := range 4 {
+		var p *vproc
+		var err error
+		endThreadAfter(func() { p, err = h.spawn("vault-"+strconv.Itoa(i), "user", false, "plain") })
+		if err != nil {
+			t.Fatalf("spawn %d: %v", i, err)
+		}
+		p.mu.Lock()
+		p.stopping = true // ended by the test: nothing to report
+		p.mu.Unlock()
+		procs = append(procs, p)
+	}
+	defer func() {
+		for _, p := range procs {
+			p.conn.Close()
+			<-p.exited
+		}
+	}()
+	if base > 0 {
+		for range 20 {
+			if err := killUID(base + 1000); err != nil { // another uid: ends a thread each time
+				t.Fatal(err)
+			}
+		}
+	}
+	time.Sleep(200 * time.Millisecond)
+	for i, p := range procs {
+		select {
+		case <-p.exited:
+			t.Fatalf("vault process %d ended (code %d) when a thread ended", i, p.exitCode)
+		default:
+		}
+	}
+}

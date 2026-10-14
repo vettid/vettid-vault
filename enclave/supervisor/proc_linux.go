@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -179,6 +180,36 @@ func init() {
 	// The main goroutine keeps the main thread to itself, so killUID's
 	// goroutine always runs on another thread (see there).
 	runtime.LockOSThread()
+}
+
+// spawnerReq carries work to the spawner thread.
+var (
+	spawnerOnce sync.Once
+	spawnerReq  chan func()
+)
+
+// onSpawnerThread runs f on the spawner thread: one OS thread, locked to
+// one goroutine that never returns, for the life of the process. Every
+// vault process is forked there. Linux sends a child's parent-death
+// signal (Pdeathsig, SIGKILL for vault processes) when the thread that
+// forked it ends, not when the process does; the Go runtime ends threads
+// (killUID's, any goroutine that exits locked), so forking on an
+// arbitrary thread could kill running vaults when that thread ends. The
+// spawner thread runs nothing else, so no other goroutine (killUID's
+// included) can end it.
+func onSpawnerThread(f func()) {
+	spawnerOnce.Do(func() {
+		spawnerReq = make(chan func())
+		go func() {
+			runtime.LockOSThread() // never unlocked; the goroutine never returns
+			for g := range spawnerReq {
+				g()
+			}
+		}()
+	})
+	done := make(chan struct{})
+	spawnerReq <- func() { defer close(done); f() }
+	<-done
 }
 
 // killUID sends SIGKILL to every process of uid, without naming any:

@@ -175,6 +175,13 @@ func (m *Manager) hPushRegister(ctx context.Context, s *Session, in *envelope.In
 		now.Sub(cur.RegisteredAt) < PushRenewAfter {
 		return strictjson.NewBuilder().Raw("push", cur.stateJSON()).Bytes(), nil
 	}
+	// A pending registration of the same token, still within its
+	// challenge's life, is answered as it stands: no new challenge, so two
+	// quick opens never cross codes and repeated opens spend nothing.
+	if pp := m.st.PushPending; pp != nil && pp.DeviceID == p.ID && pushwire.EqualHash(pp.TokenHash, th[:]) &&
+		now.Sub(pp.StartedAt) < PushChallengeLife {
+		return strictjson.NewBuilder().Raw("push", pp.stateJSON()).Bytes(), nil
+	}
 	// 5. 20 registrations that reached the gateway in 24 hours.
 	m.prunePushRegs(now)
 	if len(m.st.PushRegs) >= MaxPushRegistrations {

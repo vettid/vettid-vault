@@ -1049,6 +1049,9 @@ one-step registration.
   the confirmation. Idempotence answers from state only while the
   registration is under 30 days old; from 30 days the same token
   registers again (the renewal), at the app's next `push.register`.
+  A `push.register` of the same token while its pending registration is
+  under 10 minutes old answers that pending registration (no new
+  challenge, nothing counted), so two quick opens never cross codes.
 - `push.confirm {code}` (new, the holder only, allowed while held):
   `bad_request` for a malformed body or `no_pending_registration`;
   `gateway_error` `challenge_expired` 10 minutes after the registration

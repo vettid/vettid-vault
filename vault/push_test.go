@@ -808,6 +808,12 @@ func TestPushConfirm(t *testing.T) {
 	if r := find(d.inbox(desk)["desk1"], reply(id)); r == nil || r.Error == nil || r.Error.Code != "forbidden" {
 		t.Fatalf("desktop: %+v", r)
 	}
+	// A recovering app is forbidden too.
+	d.devPeer.Recovering = true
+	if c := d.errorCode(t, "push.confirm", `{"code":"Q09ERQ"}`); c != "forbidden" {
+		t.Fatalf("recovering: %s", c)
+	}
+	d.devPeer.Recovering = false
 	d.m.opt.Push = nil
 	if c := d.errorCode(t, "push.confirm", `{"code":"Q09ERQ"}`); c != "unavailable" {
 		t.Fatalf("no gateway: %s", c)
@@ -886,5 +892,51 @@ func TestPushBlobExpiredKeepsPending(t *testing.T) {
 	}
 	if r, _ := d.request(t, "push.confirm", `{"code":"`+g.lastCode()+`"}`); r.Error != nil {
 		t.Fatalf("confirm after blob_invalid: %+v", r.Error)
+	}
+}
+
+// A push.register of the same token while its pending registration is
+// within the challenge's life answers that pending registration: no new
+// challenge, no replacement, its code still confirms. After the window a
+// new challenge is made.
+func TestPushPendingReused(t *testing.T) {
+	d, g := pushFixture(t)
+	r, _ := d.request(t, "push.register", fcmReg)
+	if st, _ := pushState(t, r).String("state"); st != PushStatePending {
+		t.Fatal(st)
+	}
+	first, code := d.m.st.PushPending.Pending, g.lastCode()
+	d.m.st.PushPending.StartedAt = d.m.st.PushPending.StartedAt.Add(-PushChallengeLife + time.Minute)
+	r, _ = d.request(t, "push.register", fcmReg)
+	if st, _ := pushState(t, r).String("state"); st != PushStatePending || len(g.regs) != 1 || len(d.m.st.PushRegs) != 1 ||
+		d.m.st.PushPending.Pending != first {
+		t.Fatalf("within the window: state %s, %d gateway registrations, replaced %v", st, len(g.regs), d.m.st.PushPending.Pending != first)
+	}
+	// Another token is a new registration, replacing the pending one.
+	d.request(t, "push.register", `{"platform":"fcm","token":"other","app_id":"com.vettid.app"}`)
+	if len(g.regs) != 2 {
+		t.Fatal("another token did not reach the gateway")
+	}
+	d.request(t, "push.register", fcmReg)
+	code = g.lastCode()
+	d.request(t, "push.register", fcmReg)
+	if len(g.regs) != 3 {
+		t.Fatalf("%d gateway registrations", len(g.regs))
+	}
+	if r, _ := d.request(t, "push.confirm", `{"code":"`+code+`"}`); r.Error != nil {
+		t.Fatalf("the kept pending registration's code: %+v", r.Error)
+	}
+
+	// After the window: a new challenge.
+	d2, g2 := pushFixture(t)
+	d2.request(t, "push.register", fcmReg)
+	old := d2.m.st.PushPending.Pending
+	d2.m.st.PushPending.StartedAt = d2.m.st.PushPending.StartedAt.Add(-PushChallengeLife)
+	r, _ = d2.request(t, "push.register", fcmReg)
+	if st, _ := pushState(t, r).String("state"); st != PushStatePending || len(g2.regs) != 2 || d2.m.st.PushPending.Pending == old {
+		t.Fatalf("after the window: state %s, %d gateway registrations", st, len(g2.regs))
+	}
+	if r, _ := d2.request(t, "push.confirm", `{"code":"`+g2.lastCode()+`"}`); r.Error != nil {
+		t.Fatalf("new challenge's code: %+v", r.Error)
 	}
 }

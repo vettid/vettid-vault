@@ -909,7 +909,7 @@ func TestPushPendingReused(t *testing.T) {
 	d.m.st.PushPending.StartedAt = d.m.st.PushPending.StartedAt.Add(-PushChallengeLife + time.Minute)
 	r, _ = d.request(t, "push.register", fcmReg)
 	if st, _ := pushState(t, r).String("state"); st != PushStatePending || len(g.regs) != 1 || len(d.m.st.PushRegs) != 1 ||
-		d.m.st.PushPending.Pending != first {
+		d.m.st.PushPending.Pending != first || g.lastCode() != code {
 		t.Fatalf("within the window: state %s, %d gateway registrations, replaced %v", st, len(g.regs), d.m.st.PushPending.Pending != first)
 	}
 	// Another token is a new registration, replacing the pending one.

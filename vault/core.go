@@ -44,11 +44,16 @@ func (m *Manager) registerCore() {
 	r("device.pair.reject", true, apps, m.hPairReject)
 	r("device.list", true, owners, m.hDeviceList)
 	r("device.unlink", true, apps, m.hDeviceUnlink)
-	r("connection.invite.create", true, owners, m.hInviteCreate)
+	// Only the member's phone creates or accepts connections (owner
+	// decision 2026-10-13, §6.8): inviting, accepting an invitation and
+	// approving an incoming request are app-only, refused to a desktop or
+	// an agent at once with forbidden. Declining, cancelling and listing
+	// stay open to desktops.
+	r("connection.invite.create", true, apps, m.hInviteCreate)
 	r("connection.invite.list", true, owners, m.hInviteList)
 	r("connection.invite.cancel", true, owners, m.hInviteCancel)
-	r("connection.invite.accept", true, owners, m.hInviteAccept)
-	r("connection.approve", true, owners, m.hConnApprove)
+	r("connection.invite.accept", true, apps, m.hInviteAccept)
+	r("connection.approve", true, apps, m.hConnApprove)
 	r("connection.decline", true, owners, m.hConnDecline)
 	r("connection.request.list", true, owners, m.hRequestList)
 	// connection.approved is handled before activation (requests.go); a

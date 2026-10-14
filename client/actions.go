@@ -58,8 +58,9 @@ func (d *Device) ActionInvoke(ctx context.Context, connectionID, actionID string
 }
 
 // ActionRespond approves or denies an invocation waiting for the member
-// and returns the status sent. A critical action is approved only by an
-// app within the credential's unlock window (credential_locked).
+// and returns the status sent. Only an app approves (forbidden from a
+// desktop or an agent, which may deny); a critical action only within the
+// credential's unlock window (credential_locked).
 func (d *Device) ActionRespond(ctx context.Context, invocationID string, approve bool) (string, error) {
 	o, err := d.Op(ctx, "action.respond", map[string]any{"invocation_id": invocationID, "approve": approve})
 	if err != nil {

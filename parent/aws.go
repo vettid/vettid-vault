@@ -20,6 +20,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	"github.com/aws/smithy-go"
+
+	"github.com/vettid/vettid-vault/internal/hostproto"
 )
 
 // AWSConfig configures the AWS backends.
@@ -112,8 +114,23 @@ func errClass(op string, err error) error {
 
 // --- S3 ---
 
-// MaxObject bounds an object read for the enclave.
-const MaxObject = 48 << 20
+// MaxVersion is the longest version (the S3 ETag) of a stored object that
+// the enclave accepts in a StoreGet reply (VAULT-HOST-PROTOCOL §5.2).
+const MaxVersion = 256
+
+// storeGetReplyOverhead is what a StoreGet reply [status, data, version]
+// adds to the object it carries: the frame's kind, id and field count,
+// the three fields' lengths, the status "ok" and a version of up to
+// MaxVersion bytes (hostproto's frame layout; a test compares it with
+// what Frame.Marshal accepts).
+const storeGetReplyOverhead = (1 + 8 + 2) + 3*4 + len(hostproto.StatusOK) + MaxVersion
+
+// MaxObject is the largest stored object: the largest that a StoreGet
+// reply can carry to the enclave, whatever its version. The parent
+// neither reads nor writes a larger one (a StorePut frame could carry a
+// few more bytes than a reply can), so every object it has written can
+// be read back, and what no reply could carry is not read into memory.
+const MaxObject = hostproto.MaxFrame - storeGetReplyOverhead
 
 // Get implements Objects.
 func (a *AWS) Get(ctx context.Context, key string) ([]byte, string, error) {
@@ -126,7 +143,7 @@ func (a *AWS) Get(ctx context.Context, key string) ([]byte, string, error) {
 		return nil, "", errClass("s3 get", err)
 	}
 	defer out.Body.Close()
-	b, err := io.ReadAll(io.LimitReader(out.Body, MaxObject+1))
+	b, err := io.ReadAll(io.LimitReader(out.Body, int64(MaxObject)+1))
 	if err != nil || len(b) > MaxObject || out.ETag == nil {
 		return nil, "", errors.New("s3 get: bad body")
 	}
@@ -245,10 +262,34 @@ func queueDeletedRecently(err error) bool {
 	return false
 }
 
+// queueNotFound reports SQS's answer for a queue that does not exist
+// (the JSON protocol's code, or the query-compatible one).
+func queueNotFound(err error) bool {
+	var qn *sqstypes.QueueDoesNotExist
+	if errors.As(err, &qn) {
+		return true
+	}
+	switch apiCode(err) {
+	case "QueueDoesNotExist", "AWS.SimpleQueueService.NonExistentQueue":
+		return true
+	}
+	return false
+}
+
+// queueNotFoundError is ErrQueueNotFound to errors.Is, with the text of
+// the error it wraps (the log line of a failed receive keeps its form).
+type queueNotFoundError struct{ err error }
+
+func (e queueNotFoundError) Error() string { return e.err.Error() }
+func (queueNotFoundError) Is(t error) bool { return t == ErrQueueNotFound }
+
 // Receive implements Queues (long poll, up to 10 messages).
 func (a *AWS) Receive(ctx context.Context, url string) ([]QueueMessage, error) {
 	out, err := a.sqs.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{QueueUrl: &url, MaxNumberOfMessages: 10, WaitTimeSeconds: 20})
 	if err != nil {
+		if queueNotFound(err) {
+			return nil, queueNotFoundError{errClass("sqs receive", err)}
+		}
 		return nil, errClass("sqs receive", err)
 	}
 	msgs := make([]QueueMessage, 0, len(out.Messages))

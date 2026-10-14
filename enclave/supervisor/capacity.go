@@ -335,7 +335,7 @@ func (c *capVProc) call(ctx context.Context, op string, arg int) (*selftest.Capa
 	defer cancel()
 	rep, err := c.p.conn.Call(cctx, vaultipc.KindSelftestCapacity, []byte(op), []byte(strconv.Itoa(arg)))
 	if err != nil {
-		return nil, err
+		return nil, c.why(err)
 	}
 	if len(rep) != 2 || string(rep[0]) != hostproto.StatusOK {
 		return nil, errCapacity
@@ -345,6 +345,25 @@ func (c *capVProc) call(ctx context.Context, op string, arg int) (*selftest.Capa
 		return nil, errCapacity
 	}
 	return &st, nil
+}
+
+// capExitWait is how long a failed call waits for its process to end, to
+// report how it ended.
+var capExitWait = 2 * time.Second
+
+// why adds to a call's error how the process ended, when the channel
+// closed because it did: its exit code or signal and the channel's own
+// error (the report's Skipped and notes; no member data in either).
+func (c *capVProc) why(err error) error {
+	if !errors.Is(err, hostproto.ErrClosed) {
+		return err
+	}
+	select {
+	case <-c.p.exited:
+	case <-time.After(capExitWait):
+		return fmt.Errorf("%w (vault process still running; channel: %s)", err, errText(c.p.conn.Err()))
+	}
+	return fmt.Errorf("%w (vault process %s; channel: %s)", err, exitDetail(c.p.exitCode), errText(c.p.conn.Err()))
 }
 
 func (c *capVProc) stop() bool {

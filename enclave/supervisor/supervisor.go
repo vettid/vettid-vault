@@ -1,4 +1,5 @@
-// Package supervisor is PID 1's work inside the enclave (VAULT-PLAN V3,
+// Package supervisor is the enclave's first program, started as root by
+// the EIF's init, which is PID 1 and reaps orphans (VAULT-PLAN V3,
 // decision D4): it owns the NSM, the ETKs and the alternate channel
 // (package enclave), the egress transport and the KMS client, and runs one
 // vault manager per unlocked vault.
@@ -64,6 +65,14 @@ type Config struct {
 	// Harden makes the supervisor non-dumpable and tightens ptrace
 	// (release and development binaries; not tests).
 	Harden bool
+	// OwnKernel says that the kernel is this enclave's alone (release
+	// builds only; development binaries and tests run on a machine they
+	// share). The supervisor then closes, for the whole machine and
+	// before any vault process exists, what a vault process must never
+	// reach: user namespaces (the limit is set to 0) and bpf for
+	// unprivileged processes. If user namespaces cannot be closed, no
+	// vault process is started.
+	OwnKernel bool
 	// MaxVaults caps the vaults running at once (least recently active
 	// is locked first, §12.3); 0 = no cap.
 	MaxVaults int
@@ -111,6 +120,16 @@ type Supervisor struct {
 	selftestOnce  sync.Once
 	selftestDone  chan struct{}
 	hardenNotes   []string
+	// userNSClosed: the limit of user namespaces is 0 (OwnKernel).
+	userNSClosed atomic.Bool
+	// nsmClosed: the NSM device is root's alone (OwnKernel).
+	nsmClosed atomic.Bool
+	// uidNext counts the uids given to vault processes (takeUID).
+	uidNext atomic.Uint64
+	// unswept are the uids of ended vault processes whose sweep failed,
+	// by vault (sweepAfter).
+	unsweptMu sync.Mutex
+	unswept   map[string][]int
 
 	// Set by start: what the supervisor brokers for vault processes.
 	host      *procHost
@@ -185,9 +204,25 @@ func (s *Supervisor) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// Before the parent is reached, and so before any request that could
+	// start a vault process.
+	if s.cfg.OwnKernel {
+		for _, n := range s.closeKernel() {
+			s.hardenNotes = append(s.hardenNotes, n)
+			s.log.Error("hardening: " + n)
+		}
+	}
 	conn, err := s.connect(ctx, m.PCR0)
 	if err != nil {
 		return err
+	}
+	if s.cfg.OwnKernel && !s.selftestMode && !s.nsmClosed.Load() {
+		// A vault process could ask the NSM for attestations of its own:
+		// the enclave does not serve vaults (the self-test still runs and
+		// reports it).
+		s.log.Error("hardening: the NSM is not closed to vault processes: stopping")
+		conn.Close()
+		return errNSMOpen
 	}
 	if s.selftestMode {
 		// The hardware smoke test (docs/SMOKE.md): no instance, no vault;
@@ -716,3 +751,27 @@ func (s *Supervisor) KillVault(vaultID string) bool {
 	}
 	return s.host.Kill(vaultID)
 }
+
+// closeKernel makes the settings of Config.OwnKernel and returns what
+// could not be made.
+func (s *Supervisor) closeKernel() []string {
+	var notes []string
+	if err := closeUserNamespaces(); err != nil {
+		notes = append(notes, "user namespaces are not closed, no vault process will be started: "+err.Error())
+	} else {
+		s.userNSClosed.Store(true)
+	}
+	if err := disableUnprivilegedBPF(); err != nil {
+		notes = append(notes, "bpf is not closed to unprivileged processes: "+err.Error())
+	}
+	if err := closeNSM(); err != nil {
+		notes = append(notes, "the NSM is not closed to vault processes, the enclave will not serve vaults: "+err.Error())
+	} else {
+		s.nsmClosed.Store(true)
+	}
+	return notes
+}
+
+// errNSMOpen stops a supervisor on its own kernel that could not close
+// the NSM device to everyone but root.
+var errNSMOpen = errors.New("supervisor: the NSM device could not be closed to vault processes")

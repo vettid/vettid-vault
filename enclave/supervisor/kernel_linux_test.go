@@ -1,0 +1,235 @@
+//go:build linux
+
+package supervisor
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/vettid/vettid-vault/enclave/vaultproc"
+	"github.com/vettid/vettid-vault/internal/selftest"
+)
+
+// settings points the kernel settings at files of the test. The real
+// ones belong to the whole machine and are never written by a test,
+// except by TestUserNamespaceLimit's child in a user namespace of its
+// own.
+func settings(t *testing.T, userNS, bpf string) {
+	t.Helper()
+	oldNS, oldBPF, oldNSM := userNSLimitPath, bpfDisabledPath, nsmPath
+	t.Cleanup(func() { userNSLimitPath, bpfDisabledPath, nsmPath = oldNS, oldBPF, oldNSM })
+	userNSLimitPath, bpfDisabledPath = userNS, bpf
+	// No NSM device here: closing it fails and adds its note.
+	nsmPath = filepath.Join(t.TempDir(), "absent", "nsm")
+}
+
+// withNSMNote reports whether notes are kernel notes followed by the NSM's.
+func withNSMNote(notes []string, kernel int) bool {
+	if len(notes) != kernel+1 {
+		return false
+	}
+	return strings.Contains(notes[kernel], "the NSM is not closed to vault processes, the enclave will not serve vaults")
+}
+
+func setting(t *testing.T, value string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "setting")
+	if err := os.WriteFile(p, []byte(value), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// TestCloseKernel: the supervisor writes 0 and 1, believes only what it
+// reads back, and starts no vault process while user namespaces are
+// open.
+func TestCloseKernel(t *testing.T) {
+	spawn := func(s *Supervisor) error {
+		h := newProcHost(s, ProcConfig{Exec: []string{filepath.Join(t.TempDir(), "no-such-program")}, MaxProcs: 2})
+		_, err := h.spawn("vault", "user", false)
+		for i, used := range h.slots {
+			if used {
+				t.Errorf("slot %d is still taken", i)
+			}
+		}
+		return err
+	}
+
+	// Both settings can be made.
+	ns, bpf := setting(t, "15000\n"), setting(t, "0\n")
+	settings(t, ns, bpf)
+	s := &Supervisor{cfg: Config{OwnKernel: true}}
+	if notes := s.closeKernel(); !withNSMNote(notes, 0) || !s.userNSClosed.Load() || s.nsmClosed.Load() {
+		t.Fatalf("notes %v, closed %v", notes, s.userNSClosed.Load())
+	}
+	if v, _ := readSetting(ns); v != "0" {
+		t.Errorf("limit %q", v)
+	}
+	if v, _ := readSetting(bpf); v != "1" {
+		t.Errorf("unprivileged_bpf_disabled %q", v)
+	}
+	if userNamespacesClosed() != nil || unprivilegedBPFDisabled() != nil {
+		t.Error("not read back as closed")
+	}
+
+	// The limit cannot be written (the file's directory does not exist):
+	// a note, and no vault process.
+	settings(t, filepath.Join(t.TempDir(), "absent", "max_user_namespaces"), bpf)
+	s = &Supervisor{cfg: Config{OwnKernel: true}}
+	if notes := s.closeKernel(); !withNSMNote(notes, 1) || !strings.Contains(notes[0], "no vault process will be started") || s.userNSClosed.Load() {
+		t.Fatalf("notes %v, closed %v", notes, s.userNSClosed.Load())
+	}
+	s.nsmClosed.Store(true) // the refusal is the user namespaces'
+	if err := spawn(s); !errors.Is(err, errSpawn) {
+		t.Fatalf("spawn: %v", err)
+	}
+
+	// The write is accepted but the value is not 0 afterwards (/dev/null
+	// takes the write and reads back empty): not closed.
+	settings(t, os.DevNull, os.DevNull)
+	s = &Supervisor{cfg: Config{OwnKernel: true}}
+	if notes := s.closeKernel(); !withNSMNote(notes, 2) || s.userNSClosed.Load() {
+		t.Fatalf("notes %v, closed %v", notes, s.userNSClosed.Load())
+	}
+	for _, v := range []string{"1\n", "15000\n", "", "00x"} {
+		settings(t, setting(t, v), setting(t, "0\n"))
+		if userNamespacesClosed() == nil {
+			t.Errorf("limit %q counts as closed", v)
+		}
+		if unprivilegedBPFDisabled() == nil {
+			t.Error("unprivileged_bpf_disabled 0 counts as closed")
+		}
+	}
+	settings(t, setting(t, "0\n"), setting(t, "2\n"))
+	if userNamespacesClosed() != nil || unprivilegedBPFDisabled() != nil {
+		t.Error("0 and 2 do not count as closed")
+	}
+
+}
+
+// TestSpawnNeedsClosedUserNamespaces: with OwnKernel the refusal comes
+// before anything is started, and goes away once the limit is 0.
+func TestSpawnNeedsClosedUserNamespaces(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "started")
+	script := filepath.Join(t.TempDir(), "program")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho started > "+marker+"\nexec sleep 30\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	s := &Supervisor{cfg: Config{OwnKernel: true}}
+	h := newProcHost(s, ProcConfig{Exec: []string{script}, MaxProcs: 1})
+	if _, err := h.spawn("vault", "user", false); !errors.Is(err, errSpawn) {
+		t.Fatalf("spawn: %v", err)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("the program was started")
+	}
+	s.userNSClosed.Store(true)
+	// Nor while the NSM is open.
+	if _, err := h.spawn("vault", "user", false); !errors.Is(err, errSpawn) {
+		t.Fatalf("spawn with the NSM open: %v", err)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("the program was started with the NSM open")
+	}
+	s.nsmClosed.Store(true)
+	p, err := h.spawn("vault", "user", false)
+	if err != nil {
+		t.Fatalf("spawn with user namespaces and the NSM closed: %v", err)
+	}
+	p.mu.Lock()
+	p.stopping = true // ended by the test: nothing to report
+	p.mu.Unlock()
+	for i := 0; ; i++ {
+		if _, err := os.Stat(marker); err == nil {
+			break
+		}
+		if i == 500 {
+			t.Error("the program was not started")
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	_ = p.cmd.Process.Kill()
+	<-p.exited
+}
+
+const userNSChildEnv = "SUPERVISOR_USERNS_CHILD"
+
+// Exit codes of TestUserNamespaceLimit's child.
+const (
+	childRefused    = 0
+	childCannotTest = 77
+	childNotRefused = 3
+)
+
+// The child runs as root of a user namespace of its own. The setting it
+// writes is that namespace's (each user namespace has its own limit for
+// the namespaces below it) and is gone with the child.
+func TestUserNamespaceLimitChild(t *testing.T) {
+	if os.Getenv(userNSChildEnv) != "1" {
+		t.Skip("the child of TestUserNamespaceLimit")
+	}
+	// Never in the initial user namespace: there the identity mapping
+	// covers every id.
+	m, err := os.ReadFile("/proc/self/uid_map")
+	if f := strings.Fields(string(m)); err != nil || len(f) != 3 || f[2] != "1" || os.Getuid() != 0 {
+		fmt.Printf("not in a user namespace of its own: %q %v\n", m, err)
+		os.Exit(childCannotTest)
+	}
+	if got := vaultproc.TryUserNamespace(); got != selftest.UserNamespaceCreated {
+		fmt.Printf("before the limit: %s\n", got)
+		os.Exit(childCannotTest)
+	}
+	if err := closeUserNamespaces(); err != nil {
+		fmt.Printf("the limit cannot be written here: %v\n", err)
+		os.Exit(childCannotTest)
+	}
+	if got := vaultproc.TryUserNamespace(); got != selftest.UserNamespaceRefused {
+		fmt.Printf("after the limit: %s\n", got)
+		os.Exit(childNotRefused)
+	}
+	os.Exit(childRefused)
+}
+
+// TestUserNamespaceLimit: on a real kernel, once the limit is 0 a
+// process cannot start a process in a new user namespace, and the
+// self-test's attempt says so. It runs in a child that is root of its
+// own user namespace, where the limit it writes is its own; the
+// machine's is not touched, which the test checks. Skipped where this
+// machine does not let an unprivileged process have such a namespace.
+func TestUserNamespaceLimit(t *testing.T) {
+	const real = "/proc/sys/user/max_user_namespaces"
+	before, err := os.ReadFile(real)
+	if err != nil {
+		t.Skip(err)
+	}
+	cmd := exec.Command(os.Args[0], "-test.run", "^TestUserNamespaceLimitChild$")
+	cmd.Env = append(os.Environ(), userNSChildEnv+"=1")
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Cloneflags:  syscall.CLONE_NEWUSER,
+		UidMappings: []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getuid(), Size: 1}},
+		GidMappings: []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getgid(), Size: 1}},
+	}
+	out, err := cmd.CombinedOutput()
+	after, _ := os.ReadFile(real)
+	if string(after) != string(before) {
+		t.Fatalf("the machine's limit changed from %q to %q", before, after)
+	}
+	var ee *exec.ExitError
+	switch {
+	case err == nil:
+	case errors.As(err, &ee) && ee.ExitCode() == childCannotTest:
+		t.Skipf("cannot be tested on this machine: %s", out)
+	case errors.As(err, &ee):
+		t.Fatalf("child: %v\n%s", err, out)
+	default:
+		t.Skipf("no user namespace for the child: %v", err)
+	}
+}

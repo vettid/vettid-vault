@@ -76,7 +76,7 @@ settled in VAULT-MESSAGING **0.3.1**, which this code follows.
 | Package / command | Runs | What it does |
 |---|---|---|
 | `enclave/vaultproc`, `internal/vaultipc`, `internal/seccomp` | enclave (one process per vault) | The vault process, its channel to the supervisor, and its syscall filter |
-| `cmd/vault-enclave` | enclave (PID 1) | Release build: vsock, `/dev/nsm`, pinned roots, `enclave.ReleaseConfig`. `-tags devenclave` (`vault_dev.go`): TCP, fake NSM, test roots (`enclavetest.DevSupervisor`) |
+| `cmd/vault-enclave` | enclave (root; child of the EIF's init, PID 1) | Release build: vsock, `/dev/nsm`, pinned roots, `enclave.ReleaseConfig`. `-tags devenclave` (`vault_dev.go`): TCP, fake NSM, test roots (`enclavetest.DevSupervisor`) |
 | `enclave/supervisor` | enclave | Control connection, instance (ETKs, outer decryption), vault processes and their scoped channels, lease-lost and memory-pressure locks, descriptor push, status-list fetch, sanitized logs to the parent |
 | `enclave/nsm` | enclave | `NSM_IOCTL_REQUEST` (`_IOWR(0x0A, 0, 32)`) with `Attestation` and `DescribePCR` CBOR requests |
 | `enclave/egress` | enclave | The only way out: HTTPS to an allowlist, TLS 1.3 only, per-host pinned roots, host-name verification, ALPN h2 required for HTTP/2 hosts, no redirects, shared connections per host, as many as the enclave allows (below) |
@@ -93,7 +93,7 @@ settled in VAULT-MESSAGING **0.3.1**, which this code follows.
 Owner decision after the first V3b review: "one process per vault, no
 chance of leakage" (VAULT-PLAN D4 and §5.3, VAULT-MESSAGING 0.3.2 §12.4).
 
-**Supervisor** (PID 1, `enclave/supervisor`): the NSM broker, the ETKs and
+**Supervisor** (root, `enclave/supervisor`; the EIF's init (AWS's `init` blob, pinned in `release/eif-toolchain.lock`; source `aws-nitro-enclaves-sdk-bootstrap` `init/init.c`) is PID 1: it starts the enclave binary in a session of its own and reaps every child, orphans included, until the binary ends, then reboots. Orphans of vault processes are therefore reparented to init and reaped there, never left as zombies of the supervisor; the self-test's `supervisor.pid1` and `supervisor.zombies` report it on hardware): the NSM broker, the ETKs and
 the outer decryption, binding and replay check of alternate-channel
 requests (`enclave.Instance`), the egress (TLS, shared HTTP/2 pool), the
 parent link, and the vault processes' lifecycle (`procHost`). It holds no
@@ -124,7 +124,7 @@ version "1"):
 |---|---|---|---|
 | sup → vault | `Open` | version, instance_id, PCR0–2, job (9 fields) → ok, result, running | once per process |
 | sup → vault | `Lock` | → ok \| split_brain | |
-| vault → sup | `StoreGet` / `StorePut` / `StoreDelete` | key, data, if_match | `vaults/<own id>/…` and the member's own index object read/write; the member's previous vault (from the index, at enrollment) read-only |
+| vault → sup | `StoreGet` / `StorePut` / `StoreDelete` | key, data, if_match | `vaults/<own id>/…`; the member's own index object: read; written only with the process's own vault id and only by an enrollment while it opens; deleted only while it names the process's own vault (the supervisor reads it and deletes the version it read); the member's previous vault (from the index): its state and its header of this release, read-only, only while an enrollment opens |
 | vault → sup | `AttestRecipient` | RSA public key (DER) | RSA 2048–4096 only, no user_data or nonce (a vault cannot obtain an attestation that could forge an ETK descriptor) |
 | vault → sup | `AttestVault` | vault bundle, nonce | only while an enrollment is being opened; the supervisor computes user_data |
 | vault → sup | `KMS` | op, key ARN, a, b | ops GenerateDataKey, Decrypt, DescribeKey, GetKeyPolicy, ListGrants; ARN in the pinned namespace |
@@ -139,8 +139,18 @@ supervisor's count does not move while vaults are unlocked.
 
 **Hardening applied per vault process:**
 
-- own uid and gid (`UIDBase` + slot, release base 200000), no
-  supplementary groups (needs root: PID 1 in the enclave is);
+- own uid and gid (`UIDBase` plus a counter that only grows for the life
+  of the supervisor, release base 200000; no id is ever given to a
+  second process), no supplementary groups (needs root, which the
+  supervisor is). When the process ends, the supervisor kills everything
+  still running under its uid (`kill(-1, SIGKILL)` from a thread of
+  its own switched to that uid, so no pid is ever named; `/proc` is
+  read only to see whether any is left; repeated
+  until none is left) before it counts as ended, so a child it left
+  cannot wait for the next process under the same id. If the sweep
+  fails (`/proc` unreadable, processes left after about 5 s), it logs a
+  WARN and starts no new process for that vault until a sweep of that
+  uid succeeds; other vaults are unaffected;
 - `PR_SET_DUMPABLE 0` (set in the process before it reads anything) and
   `RLIMIT_CORE 0`; non-dumpable processes cannot be traced or have their
   `/proc/<pid>/mem`/`environ` read, even by their own uid (tested);
@@ -150,17 +160,66 @@ supervisor's count does not move while vaults are unlocked.
   namespaced, so without it a vault process could open its own connection
   to the parent's control port; the process needs no socket beyond its
   inherited channel. Release builds exit if the filter cannot be
-  installed;
+  installed. The filter also refuses
+  `io_uring_setup/enter/register` (io_uring creates sockets without
+  `socket`; the pinned 4.14 kernel has no io_uring, so this guards a
+  later kernel), `pidfd_getfd`, `bpf`, `userfaultfd` and
+  `perf_event_open`, none of which the Go runtime or the vault's code
+  calls, and on amd64 every x32 syscall number (an x32 call reports the
+  native architecture but has its own numbers, so the list would not
+  match it) and the x32-only numbers 512 to 547, which kernels before
+  5.4 ran for 64-bit processes too. Refusing `bpf` does not remove
+  classic BPF: `seccomp` and `SO_ATTACH_FILTER` on the channel still
+  take such filters. `Install` fails when the kernel could not put the
+  filter on every thread;
 - no inherited descriptor but the channel (fd 3; Go opens everything
   close-on-exec), stdin/stdout/stderr on `/dev/null`, working directory
   `/`, environment `GOMEMLIMIT`, `GOMAXPROCS=2`, `GOTRACEBACK=none` only;
 - rlimits: `RLIMIT_AS` 4 GiB (Go needs headroom for its arenas),
-  `RLIMIT_NOFILE` 64, no core files; `GOMEMLIMIT` 512 MiB;
+  `RLIMIT_NOFILE` 64, no core files, `RLIMIT_FSIZE` 0 (a vault process
+  writes no file; this also closes memory file systems as a way around
+  the address-space limit), `RLIMIT_NPROC` 256 for its uid (with
+  `UIDBase` only; so the sweep cannot be outrun); `GOMEMLIMIT` 512 MiB;
 - `PDEATHSIG SIGKILL` and its own process group; a closed channel also
   ends it.
 
 **Supervisor:** `PR_SET_DUMPABLE 0`; `/dev/nsm` chmod 0600 (only root,
-the supervisor, opens it); Yama `ptrace_scope` 3 where the kernel has it.
+the supervisor, opens it; with `Config.OwnKernel` the mode is read back
+and a supervisor that cannot close the device stops instead of serving
+vaults); Yama `ptrace_scope` 3 where the kernel has it.
+
+**The enclave's kernel (release builds only, `Config.OwnKernel`):**
+before it reaches the parent the supervisor writes `0` to
+`/proc/sys/user/max_user_namespaces` and `1` to
+`/proc/sys/kernel/unprivileged_bpf_disabled`, and reads both back.
+
+- The pinned kernel (4.14.256) is built with user namespaces. In one, an
+  unprivileged process is root with every capability over the
+  namespaces it creates with it: it can mount file systems, cgroup
+  hierarchies among them. That is a large part of the kernel that a
+  vault process has no use for, and it is where flaws of this kernel
+  generation sit that let such a process run a program as real root (the
+  cgroup v1 `release_agent` file was writable from such a namespace until
+  4.14.266). A program run that way is outside the vault processes' uid,
+  limits and system-call filter.
+- With the limit at 0 nobody, root included, can create a user
+  namespace: `clone` and `unshare` with `CLONE_NEWUSER` answer ENOSPC.
+  The limit belongs to the initial user namespace and only a process
+  with `CAP_SYS_RESOURCE` there may write it; a vault process has no
+  capability. Nothing in the enclave uses a user namespace: the
+  supervisor starts vault processes with a uid, a gid and a process
+  group, and neither the Go runtime nor `os/exec` creates namespaces
+  unless asked to.
+- If the limit cannot be set or does not read back as 0, the supervisor
+  logs an error and starts no vault process (every enroll and unlock
+  fails). A failed bpf setting is logged and reported only: the calls it
+  closes are also none a vault process makes.
+- Development binaries and tests never write either file (they run on
+  a machine they share). The self-test checks both settings from the
+  supervisor and the refusal from inside a vault process
+  (docs/SMOKE.md).
+- `perf_event_paranoid` is left alone: its default, 2, is the strictest
+  value this kernel knows.
 
 **Locks:** owner request, memory pressure (least recently active vault
 while available memory is under 15 %), the vault cap, a lost lease, a lost

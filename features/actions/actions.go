@@ -1093,13 +1093,20 @@ func (f *Feature) execute(s *vault.Session, conn, invocationID string, def Def, 
 	return StatusOK, out
 }
 
-// respond is the member's decision on a pending invocation. A critical
-// action is approved only by an app within the credential's unlock
-// window (§10.14).
+// respond is the member's decision on a pending invocation. Only the
+// member's app approves one; a desktop (or an agent a LEASH grant lets
+// send action.respond) may deny it, but its approval is refused with
+// forbidden, whether or not the invocation exists, and a pending one
+// stays pending for the app (§6.8, §10.14).
+// A critical action is approved only by an app within the credential's
+// unlock window.
 func (f *Feature) respond(s *vault.Session, in *envelope.Inner) (json.RawMessage, error) {
 	r, err := ParseRespond(in.Body)
 	if err != nil {
 		return nil, err
+	}
+	if r.Approve && s.From().Kind != vault.KindApp {
+		return nil, errForbidden
 	}
 	p := f.d.Pending[r.InvocationID]
 	if p == nil {
@@ -1107,9 +1114,6 @@ func (f *Feature) respond(s *vault.Session, in *envelope.Inner) (json.RawMessage
 	}
 	def, _ := Lookup(p.ActionID)
 	if r.Approve && def.Sensitivity == Critical {
-		if s.From().Kind != vault.KindApp {
-			return nil, errForbidden
-		}
 		if f.deps.Keys == nil {
 			return nil, errLocked
 		}

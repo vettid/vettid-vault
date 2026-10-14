@@ -129,13 +129,24 @@ func TestAuthorization(t *testing.T) {
 			t.Errorf("%s allowed for agents", ts.Type)
 		}
 	}
-	if !specs["intro.create"].DesktopApproval || !specs["intro.accept"].DesktopApproval || specs["intro.decline"].DesktopApproval {
-		t.Fatal("desktop step-up flags")
+	// Only the phone creates or accepts connections (owner decision
+	// 2026-10-13): intro.create and intro.accept are app-only, never
+	// held; a desktop may still decline, cancel and list.
+	for _, typ := range []string{"intro.create", "intro.accept"} {
+		if specs[typ].Allows(vault.KindDesktop) || !specs[typ].Allows(vault.KindApp) || specs[typ].DesktopApproval {
+			t.Errorf("%s must be app-only", typ)
+		}
+	}
+	for _, typ := range []string{"intro.decline", "intro.cancel", "intro.list"} {
+		if !specs[typ].Allows(vault.KindDesktop) || specs[typ].DesktopApproval {
+			t.Errorf("%s must stay open to desktops", typ)
+		}
 	}
 	for _, c := range []struct{ kind, typ string }{
 		{"connection:" + bA, "intro.create"}, {"connection:" + bA, "intro.list"}, {"connection:" + bA, "intro.accept"},
 		{"connection:" + bA, "intro.cancel"}, {vault.KindAgent, "intro.create"}, {vault.KindAgent, "intro.list"},
 		{vault.KindApp, "intro.offer"}, {vault.KindApp, "intro.answer"}, {vault.KindDesktop, "intro.link"},
+		{vault.KindDesktop, "intro.create"}, {vault.KindDesktop, "intro.accept"}, {vault.KindAgent, "intro.accept"},
 	} {
 		if r := b.call(c.kind, c.typ, `{}`); r.Code != "forbidden" {
 			t.Errorf("%s %s: %q", c.kind, c.typ, r.Code)
@@ -172,7 +183,11 @@ func TestBothAccept(t *testing.T) {
 	if len(b.h.SentOfType("intro.connect")) != 0 {
 		t.Fatal("connect before both accepted")
 	}
-	c.ok(t, vault.KindDesktop, "intro.accept", `{"intro_id":"`+id+`"}`)
+	// A desktop cannot accept for the member; nothing changes.
+	if r := c.call(vault.KindDesktop, "intro.accept", `{"intro_id":"`+id+`"}`); r.Code != "forbidden" || len(c.h.SentOfType("intro.answer")) != 0 {
+		t.Fatalf("desktop intro.accept: %q", r.Code)
+	}
+	c.ok(t, vault.KindApp, "intro.accept", `{"intro_id":"`+id+`"}`)
 	deliver(t, c, cB, b, bC)
 	conn := deliver(t, b, bA, a, aB)
 	if len(conn) != 1 || conn[0].Type != "intro.connect" {
@@ -224,7 +239,7 @@ func TestDecline(t *testing.T) {
 	id := start(t, a, b, c)
 	a.ok(t, vault.KindApp, "intro.accept", `{"intro_id":"`+id+`"}`)
 	deliver(t, a, aB, b, bA)
-	c.ok(t, vault.KindApp, "intro.decline", `{"intro_id":"`+id+`"}`)
+	c.ok(t, vault.KindDesktop, "intro.decline", `{"intro_id":"`+id+`"}`) // a desktop may decline
 	deliver(t, c, cB, b, bC)
 	if ev := b.h.SentOfType("intro.event"); !strings.Contains(string(ev[len(ev)-2].Body), "declined") {
 		t.Fatalf("B's events: %+v", ev)

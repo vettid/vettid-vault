@@ -283,6 +283,11 @@ func (m *Manager) runHeld(ctx context.Context, h *HeldRequest, now time.Time) st
 	switch {
 	case te == nil:
 		code = "unsupported_type"
+	case p.Kind == KindDesktop && !te.allows(KindDesktop):
+		// The type became app-only while the request was held (a held
+		// connection.invite.create from before the owner decision of
+		// 2026-10-13, for instance): never run it for a desktop.
+		code = "forbidden"
 	case !m.hasAccess(p, now):
 		code = "session_required"
 	case !m.credentialReady():

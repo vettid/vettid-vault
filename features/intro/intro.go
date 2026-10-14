@@ -100,6 +100,7 @@ func New() *Feature {
 
 var (
 	owners = []string{vault.KindApp, vault.KindDesktop}
+	apps   = []string{vault.KindApp}
 	conns  = []string{vault.KindConnection}
 )
 
@@ -110,11 +111,13 @@ func (f *Feature) Name() string { return "intro" }
 func (f *Feature) Types() []vault.TypeSpec {
 	return []vault.TypeSpec{
 		// Starting an introduction and accepting one open new connection
-		// paths: desktops only with an app's approval (§6.8).
-		{Type: "intro.create", Request: true, From: owners, DesktopApproval: true},
+		// paths: only the member's phone creates connections (owner
+		// decision 2026-10-13, §6.8), so both are app-only; a desktop
+		// may still decline or cancel.
+		{Type: "intro.create", Request: true, From: apps},
 		{Type: "intro.cancel", Request: true, From: owners},
 		{Type: "intro.list", Request: true, From: owners},
-		{Type: "intro.accept", Request: true, From: owners, DesktopApproval: true},
+		{Type: "intro.accept", Request: true, From: apps},
 		{Type: "intro.decline", Request: true, From: owners},
 		{Type: "intro.offer", From: conns},
 		{Type: "intro.answer", From: conns},

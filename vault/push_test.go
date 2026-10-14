@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -15,26 +16,39 @@ import (
 	"github.com/vettid/vettid-vault/vms/pushwire"
 )
 
-// VAULT-MESSAGING 0.24.0 §14: push.register, push.unregister,
-// push.token-needed, the wake rules and their outcomes, against a fake
-// gateway.
+// VAULT-MESSAGING 0.24.0 §14: push.register, push.confirm (PUSH-GATEWAY
+// 0.5.0), push.unregister, push.token-needed, the wake rules and their
+// outcomes, against a fake gateway.
 
 type fakeGW struct {
-	mu        sync.Mutex
-	regs      []pushwire.Registration
-	regKeys   []ed25519.PublicKey
-	regErr    error
-	wakes     []string // blobs
-	wakeKeys  []ed25519.PublicKey
-	wakeErrs  []error // answers of the next wakes
-	reseal    string
-	n         int
-	wakeDelay time.Duration
-	woke      chan struct{}
+	mu         sync.Mutex
+	regs       []pushwire.Registration
+	regKeys    []ed25519.PublicKey
+	regErr     error
+	pendings   map[string]fakePending // pending registration -> its challenge
+	codes      []string               // the challenges' codes, in order
+	confirms   int                    // confirmations that reached the gateway
+	confirmErr error
+	wakes      []string // blobs
+	wakeKeys   []ed25519.PublicKey
+	wakeErrs   []error // answers of the next wakes
+	reseal     string
+	n          int
+	wakeDelay  time.Duration
+	woke       chan struct{}
 }
 
-func newFakeGW() *fakeGW { return &fakeGW{woke: make(chan struct{}, 64)} }
+type fakePending struct {
+	code string
+	key  ed25519.PublicKey
+}
 
+func newFakeGW() *fakeGW {
+	return &fakeGW{woke: make(chan struct{}, 64), pendings: map[string]fakePending{}}
+}
+
+// Register answers a pending registration and records the challenge code
+// it "sent" to the token (PUSH-GATEWAY 0.5.0 §5.1).
 func (g *fakeGW) Register(_ context.Context, k ed25519.PrivateKey, r pushwire.Registration) (string, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -42,9 +56,56 @@ func (g *fakeGW) Register(_ context.Context, k ed25519.PrivateKey, r pushwire.Re
 		return "", g.regErr
 	}
 	g.regs = append(g.regs, r)
-	g.regKeys = append(g.regKeys, append(ed25519.PublicKey(nil), k.Public().(ed25519.PublicKey)...))
+	pub := append(ed25519.PublicKey(nil), k.Public().(ed25519.PublicKey)...)
+	g.regKeys = append(g.regKeys, pub)
 	g.n++
-	return "QkxPQi" + strings.Repeat("A", g.n), nil
+	pending, code := "UEVORElORy"+strings.Repeat("A", g.n), "Q09ERS"+strings.Repeat("B", g.n)
+	g.pendings[pending] = fakePending{code: code, key: pub}
+	g.codes = append(g.codes, code)
+	return pending, nil
+}
+
+// Confirm issues the blob for the pending registration's code and key;
+// anything else is 403 challenge_invalid.
+func (g *fakeGW) Confirm(_ context.Context, k ed25519.PrivateKey, pending, code string) (string, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.confirms++
+	if g.confirmErr != nil {
+		return "", g.confirmErr
+	}
+	fp, ok := g.pendings[pending]
+	if !ok || fp.code != code || !fp.key.Equal(k.Public()) {
+		return "", &pushwire.Error{Status: 403, Code: pushwire.CodeChallengeInvalid}
+	}
+	return "QkxPQi" + strings.Repeat("A", g.n) + strings.Repeat("C", g.confirms), nil
+}
+
+// lastCode is the latest challenge's code: what the app would receive.
+func (g *fakeGW) lastCode() string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if len(g.codes) == 0 {
+		return ""
+	}
+	return g.codes[len(g.codes)-1]
+}
+
+// registerPush registers in both steps, playing the app: push.register
+// (answered pending), then push.confirm with the challenge's code.
+func (d *devFixture) registerPush(t *testing.T, g *fakeGW, body string) *envelope.Inner {
+	t.Helper()
+	r, _ := d.request(t, "push.register", body)
+	if st, _ := pushState(t, r).String("state"); st == PushStateActive {
+		return r // idempotent: nothing to confirm
+	} else if st != PushStatePending {
+		t.Fatalf("push.register state %q", st)
+	}
+	r, _ = d.request(t, "push.confirm", `{"code":"`+g.lastCode()+`"}`)
+	if st, _ := pushState(t, r).String("state"); st != PushStateActive {
+		t.Fatalf("push.confirm state %q", st)
+	}
+	return r
 }
 
 func (g *fakeGW) Wake(ctx context.Context, k ed25519.PrivateKey, blob string) (string, error) {
@@ -147,8 +208,29 @@ func (d *devFixture) audits(kind string) []Activity {
 func TestPushRegister(t *testing.T) {
 	d, g := pushFixture(t)
 	d.m.addFeature(&recSink{})
+	// PUSH-GATEWAY 0.5.0: the gateway answers a pending registration and
+	// sends a challenge to the token; the vault answers state pending and
+	// keeps it, with its wake key, until push.confirm.
 	r, _ := d.request(t, "push.register", fcmReg)
+	pp := pushState(t, r)
+	if st, _ := pp.String("state"); st != PushStatePending || !pp.Has("registered_at") {
+		t.Fatalf("pending push state %v", pp)
+	}
+	if d.m.st.Push != nil || d.m.st.PushPending == nil || len(d.m.st.PushPending.WakeSeed) != 32 || d.m.st.PushPending.DeviceID != d.devPeer.ID {
+		t.Fatalf("pending %+v, registration %+v", d.m.st.PushPending, d.m.st.Push)
+	}
+	if len(d.audits("push.registered")) != 0 || len(d.m.st.PushRegs) != 1 {
+		t.Fatal("a pending registration was audited, or not counted")
+	}
+	r, _ = d.request(t, "device.list", `{}`)
+	if strings.Contains(string(r.Body), `"push"`) {
+		t.Fatalf("device.list shows a pending registration: %s", r.Body)
+	}
+	r, _ = d.request(t, "push.confirm", `{"code":"`+g.lastCode()+`"}`)
 	ps := pushState(t, r)
+	if d.m.st.PushPending != nil || len(d.m.st.PushRegs) != 1 || g.confirms != 1 {
+		t.Fatal("pending kept after confirmation, or the confirmation counted")
+	}
 	for k, want := range map[string]string{"platform": "fcm", "app_id": "com.vettid.app", "state": "active"} {
 		if v, _ := ps.String(k); v != want {
 			t.Fatalf("%s = %q", k, v)
@@ -187,15 +269,19 @@ func TestPushRegister(t *testing.T) {
 	if len(g.regs) != 1 || len(d.audits("push.registered")) != 1 {
 		t.Fatal("a repeated registration reached the gateway")
 	}
-	// A token rotation: a new key and blob replace the old ones.
+	// A token rotation: a new key and blob replace the old ones, once
+	// confirmed; until then the old registration stays in force.
 	old := d.m.st.Push.WakeBlob
 	r, _ = d.request(t, "push.register", `{"platform":"fcm","token":"rotated","app_id":"com.vettid.app"}`)
-	pushState(t, r)
+	if st, _ := pushState(t, r).String("state"); st != PushStatePending || d.m.st.Push.WakeBlob != old {
+		t.Fatal("rotation: the registration in force changed before the confirmation")
+	}
+	d.request(t, "push.confirm", `{"code":"`+g.lastCode()+`"}`)
 	if len(g.regs) != 2 || g.regKeys[0].Equal(g.regKeys[1]) || d.m.st.Push.WakeBlob == old {
 		t.Fatal("rotation did not replace key and blob")
 	}
 	// APNs needs its environment.
-	r, _ = d.request(t, "push.register", `{"platform":"apns","token":"`+strings.Repeat("0a", 32)+`","app_id":"com.vettid.app","environment":"sandbox"}`)
+	r = d.registerPush(t, g, `{"platform":"apns","token":"`+strings.Repeat("0a", 32)+`","app_id":"com.vettid.app","environment":"sandbox"}`)
 	if e, _ := pushState(t, r).String("environment"); e != "sandbox" {
 		t.Fatal("environment")
 	}
@@ -233,9 +319,7 @@ func TestPushRegisterChecks(t *testing.T) {
 	d.m.opt.Push = g
 
 	// Gateway answers: the previous registration stays.
-	if c := d.errorCode(t, "push.register", fcmReg); c != "" {
-		t.Fatal(c)
-	}
+	d.registerPush(t, g, fcmReg)
 	prev := d.m.st.Push.WakeBlob
 	for _, c := range []struct {
 		err  error
@@ -257,7 +341,7 @@ func TestPushRegisterChecks(t *testing.T) {
 		if r.Error == nil || r.Error.Code != c.code || r.Error.Message != c.msg || c.body != "" && string(r.Body) != c.body {
 			t.Fatalf("%v: %+v %s", c.err, r.Error, r.Body)
 		}
-		if d.m.st.Push == nil || d.m.st.Push.WakeBlob != prev {
+		if d.m.st.Push == nil || d.m.st.Push.WakeBlob != prev || d.m.st.PushPending != nil {
 			t.Fatal("a failed registration changed the registration")
 		}
 	}
@@ -299,6 +383,10 @@ func TestPushRegistrationLimit(t *testing.T) {
 			t.Fatalf("%d: %s", i, c)
 		}
 	}
+	// The last one is confirmed (the confirmation does not count).
+	if c := d.errorCode(t, "push.confirm", `{"code":"`+g.lastCode()+`"}`); c != "" || len(d.m.st.PushRegs) != MaxPushRegistrations {
+		t.Fatal(c, len(d.m.st.PushRegs))
+	}
 	r, _ := d.request(t, "push.register", `{"platform":"fcm","token":"one-more","app_id":"a"}`)
 	if r.Error == nil || r.Error.Code != "limit" || LimitName(&HandlerError{Code: "limit", Body: r.Body}) != "push_registrations" {
 		t.Fatalf("21st: %+v %s", r.Error, r.Body)
@@ -317,7 +405,7 @@ func TestPushRegistrationLimit(t *testing.T) {
 }
 
 func TestPushUnregister(t *testing.T) {
-	d, _ := pushFixture(t)
+	d, g := pushFixture(t)
 	d.m.addFeature(&recSink{})
 	r, _ := d.request(t, "push.unregister", `{}`)
 	if r.Error != nil || string(r.Body) != `{}` || len(d.audits("push.unregistered")) != 0 {
@@ -326,7 +414,7 @@ func TestPushUnregister(t *testing.T) {
 	if c := d.errorCode(t, "push.unregister", `{"x":1}`); c != "bad_request" {
 		t.Fatal(c)
 	}
-	d.request(t, "push.register", fcmReg)
+	d.registerPush(t, g, fcmReg)
 	seed := d.m.st.Push.WakeSeed
 	r, _ = d.request(t, "push.unregister", `{}`)
 	if r.Error != nil || d.m.st.Push != nil || !bytes.Equal(seed, make([]byte, 32)) {
@@ -345,9 +433,9 @@ func TestPushUnregister(t *testing.T) {
 // (ref transferred or replaced).
 func TestPushErasedWithApp(t *testing.T) {
 	for _, reason := range []string{"transferred", "replaced"} {
-		d, _ := pushFixture(t)
+		d, g := pushFixture(t)
 		d.m.addFeature(&recSink{})
-		d.request(t, "push.register", fcmReg)
+		d.registerPush(t, g, fcmReg)
 		d.withLock(func(m *Manager) { m.removeApp(d.devPeer, reason, time.Now()) })
 		if d.m.st.Push != nil {
 			t.Fatal("registration kept")
@@ -369,7 +457,7 @@ func (d *devFixture) deliver(typ, body string) {
 // §14.2: what wakes and what does not.
 func TestPushWakeTriggers(t *testing.T) {
 	d, g := pushFixture(t)
-	d.request(t, "push.register", fcmReg)
+	d.registerPush(t, g, fcmReg)
 	n := 0
 	for _, c := range []struct {
 		typ, body string
@@ -417,7 +505,7 @@ func TestPushWakeTriggers(t *testing.T) {
 // A wake follows the relay's acceptance of the deposit only.
 func TestPushWakeAfterDepositOnly(t *testing.T) {
 	d, g := pushFixture(t)
-	d.request(t, "push.register", fcmReg)
+	d.registerPush(t, g, fcmReg)
 	d.relay.mu.Lock()
 	d.relay.failWith = &pushwire.Error{Status: 503} // any error: the deposit is not accepted
 	d.relay.mu.Unlock()
@@ -439,7 +527,7 @@ func TestPushWakeAfterDepositOnly(t *testing.T) {
 func TestPushDebounceMerges(t *testing.T) {
 	d, g := pushFixture(t)
 	d.m.opt.PushTiming = &PushTiming{Debounce: 300 * time.Millisecond}
-	d.request(t, "push.register", fcmReg)
+	d.registerPush(t, g, fcmReg)
 	d.deliver("vault.held", `{}`)
 	g.waitWakes(t, 1)
 	for i := 0; i < 5; i++ {
@@ -453,7 +541,7 @@ func TestPushDebounceMerges(t *testing.T) {
 func TestPushOutcomes(t *testing.T) {
 	d, g := pushFixture(t)
 	d.m.addFeature(&recSink{})
-	d.request(t, "push.register", fcmReg)
+	d.registerPush(t, g, fcmReg)
 	d.appInbox()
 
 	// 202 with a reseal: the blob is replaced (at the next flush) and the
@@ -504,7 +592,7 @@ func TestPushOutcomes(t *testing.T) {
 		code   string
 	}{{410, "token_gone"}, {400, "token_invalid"}, {410, "blob_invalid"}} {
 		if d.m.st.Push == nil {
-			d.request(t, "push.register", `{"platform":"fcm","token":"`+code.code+`","app_id":"com.vettid.app"}`)
+			d.registerPush(t, g, `{"platform":"fcm","token":"`+code.code+`","app_id":"com.vettid.app"}`)
 		}
 		d.appInbox()
 		time.Sleep(50 * time.Millisecond)
@@ -544,7 +632,7 @@ func waitFor(t *testing.T, cond func() bool) {
 // for the app's own vault.lock.
 func TestPushLockWake(t *testing.T) {
 	d, g := pushFixture(t)
-	d.request(t, "push.register", fcmReg)
+	d.registerPush(t, g, fcmReg)
 	if err := d.m.Lock(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -553,7 +641,7 @@ func TestPushLockWake(t *testing.T) {
 	}
 
 	d, g = pushFixture(t)
-	d.request(t, "push.register", fcmReg)
+	d.registerPush(t, g, fcmReg)
 	if err := d.send("vault.lock", []byte(`{}`)); err != nil {
 		t.Fatal(err)
 	}
@@ -564,7 +652,7 @@ func TestPushLockWake(t *testing.T) {
 
 	// A lock never waits longer than the budget for a slow gateway.
 	d, g = pushFixture(t)
-	d.request(t, "push.register", fcmReg)
+	d.registerPush(t, g, fcmReg)
 	g.wakeDelay = 5 * time.Second
 	start := time.Now()
 	_ = d.m.Lock(context.Background())
@@ -573,8 +661,9 @@ func TestPushLockWake(t *testing.T) {
 	}
 }
 
-// §3.6.3: push.register and push.unregister are on the holder's allow
-// list while held, and push.token-needed still reaches the app.
+// §3.6.3: push.register, push.confirm and push.unregister are on the
+// holder's allow list while held, and push.token-needed still reaches the
+// app.
 func TestPushWhileHeld(t *testing.T) {
 	f := newOCFixture(t)
 	g := newFakeGW()
@@ -586,6 +675,10 @@ func TestPushWhileHeld(t *testing.T) {
 	}
 	r := f.req(t, f.app, "push.register", fcmReg)
 	pushState(t, r)
+	r = f.req(t, f.app, "push.confirm", `{"code":"`+g.lastCode()+`"}`)
+	if st, _ := pushState(t, r).String("state"); st != PushStateActive {
+		t.Fatalf("confirm while held: %s", st)
+	}
 	r = f.req(t, f.app, "device.list", `{}`)
 	if r.Error == nil || r.Error.Code != "owner_check_required" {
 		t.Fatalf("device.list while held: %+v", r.Error)
@@ -599,5 +692,199 @@ func TestPushWhileHeld(t *testing.T) {
 	r = f.req(t, f.app, "push.unregister", `{}`)
 	if r.Error != nil {
 		t.Fatalf("unregister while held: %+v", r.Error)
+	}
+}
+
+// PUSH-GATEWAY 0.5.0 §5.1: push.confirm{code} confirms the latest pending
+// registration with the challenge code the app received; its refusals.
+func TestPushConfirm(t *testing.T) {
+	d, g := pushFixture(t)
+	d.m.addFeature(&recSink{})
+	noPending := func(body string) {
+		t.Helper()
+		r, _ := d.request(t, "push.confirm", body)
+		if r.Error == nil || r.Error.Code != "bad_request" || r.Error.Message != "no_pending_registration" {
+			t.Fatalf("no pending: %+v", r.Error)
+		}
+	}
+	// No pending registration: bad_request, nothing sent.
+	noPending(`{"code":"Q09ERQ"}`)
+	// Bodies.
+	for _, b := range []string{`{}`, `{"code":""}`, `{"code":"a b"}`, `{"code":"a="}`, `{"code":1}`,
+		`{"code":"Q09ERQ","x":1}`, `{"code":"` + strings.Repeat("a", 65) + `"}`} {
+		if c := d.errorCode(t, "push.confirm", b); c != "bad_request" {
+			t.Fatalf("%s: %s", b, c)
+		}
+	}
+	if g.confirms != 0 {
+		t.Fatal("a refused confirmation reached the gateway")
+	}
+
+	// A registration in force, then a renewal pending: a wrong code is
+	// gateway_error challenge_invalid, the pending registration is dropped
+	// (wiped) and the registration in force stays.
+	d.registerPush(t, g, fcmReg)
+	prev := d.m.st.Push.WakeBlob
+	d.request(t, "push.register", `{"platform":"fcm","token":"next","app_id":"com.vettid.app"}`)
+	seed := d.m.st.PushPending.WakeSeed
+	r, _ := d.request(t, "push.confirm", `{"code":"V1JPTkc"}`)
+	if r.Error == nil || r.Error.Code != "gateway_error" || r.Error.Message != pushwire.CodeChallengeInvalid {
+		t.Fatalf("wrong code: %+v", r.Error)
+	}
+	if d.m.st.PushPending != nil || !bytes.Equal(seed, make([]byte, 32)) || d.m.st.Push == nil || d.m.st.Push.WakeBlob != prev {
+		t.Fatal("wrong code: pending kept, or the registration in force changed")
+	}
+	noPending(`{"code":"` + g.lastCode() + `"}`)
+
+	// Expired: 10 minutes after the registration the vault refuses
+	// without calling the gateway, and drops the pending registration.
+	d.request(t, "push.register", `{"platform":"fcm","token":"next","app_id":"com.vettid.app"}`)
+	d.m.st.PushPending.StartedAt = d.m.st.PushPending.StartedAt.Add(-PushChallengeLife)
+	n := g.confirms
+	r, _ = d.request(t, "push.confirm", `{"code":"`+g.lastCode()+`"}`)
+	if r.Error == nil || r.Error.Code != "gateway_error" || r.Error.Message != "challenge_expired" || g.confirms != n || d.m.st.PushPending != nil {
+		t.Fatalf("expired: %+v (gateway calls %d)", r.Error, g.confirms-n)
+	}
+
+	// A replaced pending registration: a second push.register replaces
+	// the first (its key wiped); the first challenge's code is refused,
+	// the second's confirms.
+	d.request(t, "push.register", `{"platform":"fcm","token":"first","app_id":"com.vettid.app"}`)
+	first, firstSeed := g.lastCode(), d.m.st.PushPending.WakeSeed
+	d.request(t, "push.register", `{"platform":"fcm","token":"second","app_id":"com.vettid.app"}`)
+	if !bytes.Equal(firstSeed, make([]byte, 32)) {
+		t.Fatal("replaced pending registration not wiped")
+	}
+	if c := d.errorCode(t, "push.confirm", `{"code":"`+first+`"}`); c != "gateway_error" {
+		t.Fatalf("older code: %s", c)
+	}
+	d.request(t, "push.register", `{"platform":"fcm","token":"second","app_id":"com.vettid.app"}`)
+
+	// A gateway that may recover (5xx, 429, no connection) keeps the
+	// pending registration: the same code can be tried again.
+	for _, e := range []error{&pushwire.Error{Status: 502, Code: "provider_unavailable", RetryAfter: 4},
+		&pushwire.Error{Status: 429, Code: "rate_limited", RetryAfter: 9}, pushwire.ErrTransport} {
+		g.confirmErr = e
+		r, _ := d.request(t, "push.confirm", `{"code":"`+g.lastCode()+`"}`)
+		if r.Error == nil || r.Error.Code != "gateway_error" || r.Error.Message != "" || d.m.st.PushPending == nil {
+			t.Fatalf("%v: %+v, pending %v", e, r.Error, d.m.st.PushPending != nil)
+		}
+		if ge, ok := e.(*pushwire.Error); ok && string(r.Body) != fmt.Sprintf(`{"retry_after":%d}`, ge.RetryAfter) {
+			t.Fatalf("%v: body %s", e, r.Body)
+		}
+	}
+	// An answer that does not parse ends it.
+	g.confirmErr = pushwire.ErrResponse
+	if c := d.errorCode(t, "push.confirm", `{"code":"`+g.lastCode()+`"}`); c != "gateway_error" || d.m.st.PushPending != nil {
+		t.Fatalf("unparsable: %s", c)
+	}
+	g.confirmErr = nil
+	d.request(t, "push.register", `{"platform":"fcm","token":"second","app_id":"com.vettid.app"}`)
+	pend := *d.m.st.PushPending
+	pendKey := ed25519.NewKeyFromSeed(pend.WakeSeed).Public().(ed25519.PublicKey)
+	r, _ = d.request(t, "push.confirm", `{"code":"`+g.lastCode()+`"}`)
+	if st, _ := pushState(t, r).String("state"); st != PushStateActive {
+		t.Fatal(st)
+	}
+	cur := d.m.st.Push
+	if cur.WakeBlob == prev || !ed25519.NewKeyFromSeed(cur.WakeSeed).Public().(ed25519.PublicKey).Equal(pendKey) ||
+		!bytes.Equal(cur.TokenHash, pend.TokenHash) || d.m.st.PushPending != nil {
+		t.Fatal("the confirmed registration is not the pending one")
+	}
+	if a := d.audits("push.registered"); len(a) != 2 {
+		t.Fatalf("push.registered audits %d", len(a))
+	}
+	// Wakes use the new key and blob.
+	d.deliver("vault.held", `{}`)
+	g.waitWakes(t, 1)
+	if g.wakes[0] != cur.WakeBlob || !g.wakeKeys[0].Equal(pendKey) {
+		t.Fatal("wake not with the confirmed registration")
+	}
+
+	// Only the holder; a release without a gateway.
+	desk := d.addDevice(t, "desk1", KindDesktop, 0x60)
+	desk.peer.Access = &AccessSession{ID: "s1", Expires: time.Now().Add(time.Hour)}
+	id := d.sendAs(desk, "push.confirm", `{"code":"Q09ERQ"}`)
+	if r := find(d.inbox(desk)["desk1"], reply(id)); r == nil || r.Error == nil || r.Error.Code != "forbidden" {
+		t.Fatalf("desktop: %+v", r)
+	}
+	d.m.opt.Push = nil
+	if c := d.errorCode(t, "push.confirm", `{"code":"Q09ERQ"}`); c != "unavailable" {
+		t.Fatalf("no gateway: %s", c)
+	}
+	d.m.opt.Push = g
+
+	// push.unregister drops a pending registration too.
+	d.request(t, "push.register", `{"platform":"fcm","token":"third","app_id":"com.vettid.app"}`)
+	d.request(t, "push.unregister", `{}`)
+	if d.m.st.PushPending != nil || d.m.st.Push != nil {
+		t.Fatal("unregister kept a registration")
+	}
+	// So does removing the app.
+	d.request(t, "push.register", `{"platform":"fcm","token":"fourth","app_id":"com.vettid.app"}`)
+	d.withLock(func(m *Manager) { m.removeApp(d.devPeer, "replaced", time.Now()) })
+	if d.m.st.PushPending != nil {
+		t.Fatal("pending registration kept with the app removed")
+	}
+}
+
+// PUSH-GATEWAY 0.5.0 §4: a blob is honoured 90 days from its confirmation,
+// so push.register with the same token renews through the gateway once the
+// registration is 30 days old, instead of answering from state; until the
+// renewal is confirmed the registration in force stays.
+func TestPushRenewal(t *testing.T) {
+	d, g := pushFixture(t)
+	d.registerPush(t, g, fcmReg)
+	old := *d.m.st.Push
+	// Under 30 days: answered from state.
+	d.m.st.Push.RegisteredAt = old.RegisteredAt.Add(-PushRenewAfter + time.Minute)
+	r, _ := d.request(t, "push.register", fcmReg)
+	if st, _ := pushState(t, r).String("state"); st != PushStateActive || len(g.regs) != 1 || d.m.st.PushPending != nil {
+		t.Fatalf("under 30 days: state %s, %d gateway registrations", st, len(g.regs))
+	}
+	// At 30 days: a new registration and challenge.
+	d.m.st.Push.RegisteredAt = old.RegisteredAt.Add(-PushRenewAfter)
+	r, _ = d.request(t, "push.register", fcmReg)
+	if st, _ := pushState(t, r).String("state"); st != PushStatePending || len(g.regs) != 2 || len(d.m.st.PushRegs) != 2 {
+		t.Fatalf("at 30 days: state %s, %d gateway registrations", st, len(g.regs))
+	}
+	if d.m.st.Push == nil || d.m.st.Push.WakeBlob != old.WakeBlob {
+		t.Fatal("the registration in force changed before the renewal was confirmed")
+	}
+	r, _ = d.request(t, "push.confirm", `{"code":"`+g.lastCode()+`"}`)
+	pushState(t, r)
+	cur := d.m.st.Push
+	if cur.WakeBlob == old.WakeBlob || bytes.Equal(cur.WakeSeed, old.WakeSeed) || time.Since(cur.RegisteredAt) > time.Minute {
+		t.Fatal("renewal did not replace key, blob and registered_at")
+	}
+	// Renewed: answered from state again.
+	if r, _ := d.request(t, "push.register", fcmReg); r.Error != nil || len(g.regs) != 2 {
+		t.Fatal("renewed registration not idempotent")
+	}
+}
+
+// A blob the gateway refuses as invalid or expired (410 blob_invalid, also
+// past its 90 days) drops the registration and asks the app for a fresh
+// push.register; a pending registration is not affected.
+func TestPushBlobExpiredKeepsPending(t *testing.T) {
+	d, g := pushFixture(t)
+	d.registerPush(t, g, fcmReg)
+	d.request(t, "push.register", `{"platform":"fcm","token":"rotated","app_id":"com.vettid.app"}`)
+	d.appInbox()
+	g.wakeErrs = []error{&pushwire.Error{Status: 410, Code: pushwire.CodeBlobInvalid}}
+	d.deliver("vault.held", `{}`)
+	g.waitWakes(t, 1)
+	var ev *envelope.Inner
+	waitFor(t, func() bool { ev = find(d.appInbox(), ofType(TypePushTokenNeeded)); return ev != nil })
+	if string(ev.Body) != `{"reason":"blob_invalid"}` {
+		t.Fatal(string(ev.Body))
+	}
+	var pending bool
+	d.withLock(func(m *Manager) { pending = m.st.Push == nil && m.st.PushPending != nil })
+	if !pending {
+		t.Fatal("registration kept or pending dropped")
+	}
+	if r, _ := d.request(t, "push.confirm", `{"code":"`+g.lastCode()+`"}`); r.Error != nil {
+		t.Fatalf("confirm after blob_invalid: %+v", r.Error)
 	}
 }

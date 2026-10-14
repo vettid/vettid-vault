@@ -73,6 +73,14 @@ func TestPushChannel(t *testing.T) {
 		"stale":        {[]byte(pushwire.PathRegister), signed(wake, pushwire.PathRegister, body, now.Add(-time.Hour)), body},
 		"relay key":    {[]byte(pushwire.PathRegister), signed(relay, pushwire.PathRegister, body, now), body},
 		"other path 2": {[]byte("/v1/register/../wake"), signed(wake, "/v1/register/../wake", body, now), body},
+		"other path 3": {[]byte("/v1/confirm/"), signed(wake, "/v1/confirm/", body, now), body},
+		// PUSH-GATEWAY 0.5.0: a confirmation gets the same checks.
+		"confirm unsigned":            {[]byte(pushwire.PathConfirm), vaultipc.EncodeHeaders(http.Header{}), body},
+		"confirm wrong body":          {[]byte(pushwire.PathConfirm), signed(wake, pushwire.PathConfirm, body, now), []byte(`{}`)},
+		"confirm signed for register": {[]byte(pushwire.PathConfirm), signed(wake, pushwire.PathRegister, body, now), body},
+		"confirm stale":               {[]byte(pushwire.PathConfirm), signed(wake, pushwire.PathConfirm, body, now.Add(-time.Hour)), body},
+		"confirm relay key":           {[]byte(pushwire.PathConfirm), signed(relay, pushwire.PathConfirm, body, now), body},
+		"confirm too large":           {[]byte(pushwire.PathConfirm), signed(wake, pushwire.PathConfirm, make([]byte, maxPushBody+1), now), make([]byte, maxPushBody+1)},
 	} {
 		if r := call(f...); string(r[0]) != vaultipc.StatusDenied {
 			t.Errorf("%s: %s", name, r[0])
@@ -111,6 +119,18 @@ func TestPushChannel(t *testing.T) {
 	mu.Lock()
 	if got[1].Header.Get(pushwire.HeaderAttestation) != "" || nsm.ud != nil {
 		t.Fatal("wake attested")
+	}
+	mu.Unlock()
+	// PUSH-GATEWAY 0.5.0: a confirmation is forwarded, without an
+	// attestation (the NSM document is for /v1/register only).
+	cb := pushwire.ConfirmBody("cGVuZGluZw", "Y29kZQ")
+	if r := call([]byte(pushwire.PathConfirm), signed(wake, pushwire.PathConfirm, cb, now), cb); string(r[0]) != "ok" || string(r[1]) != "201" {
+		t.Fatalf("confirm: %q", r)
+	}
+	mu.Lock()
+	if c := got[2]; c.URL.Path != pushwire.PathConfirm || c.Header.Get(pushwire.HeaderAttestation) != "" || nsm.ud != nil ||
+		c.Header.Get(relayauth.HeaderKey) == "" {
+		t.Fatalf("confirm forwarded %s %v (attested: %v)", c.URL.Path, c.Header, nsm.ud != nil)
 	}
 	mu.Unlock()
 	// Without a gateway in the release, nothing.

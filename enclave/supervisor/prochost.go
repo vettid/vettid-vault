@@ -796,12 +796,13 @@ func (s *Supervisor) relayFailed(ctx context.Context) {
 const maxPushBody = 16 << 10
 
 // push carries a request to the channel's push gateway (0.24.0, §14.3):
-// POST to /v1/register or /v1/wake of the pinned gateway URL only, signed
-// (Relay Protocol §4.1) by a key that is not this process's relay key
-// (PUSH-GATEWAY §3). For a registration the supervisor attaches the NSM
+// POST to /v1/register, /v1/confirm or /v1/wake of the pinned gateway URL
+// only, signed (Relay Protocol §4.1) by a key that is not this process's
+// relay key (PUSH-GATEWAY §3). For a registration the supervisor attaches the NSM
 // attestation itself, with public_key = the signing key and user_data =
 // the request's digest, which it computes: a vault process never obtains
-// an attestation over user_data of its choosing (PUSH-GATEWAY §5.1).
+// an attestation over user_data of its choosing (PUSH-GATEWAY §5.1). A
+// confirmation (PUSH-GATEWAY 0.5.0 §5.1) and a wake carry none.
 func (p *vproc) push(ctx context.Context, f [][]byte) [][]byte {
 	s := p.h.s
 	base := s.encCfg.PushURL
@@ -809,7 +810,9 @@ func (p *vproc) push(ctx context.Context, f [][]byte) [][]byte {
 		return deny()
 	}
 	path := string(f[0])
-	if path != pushwire.PathRegister && path != pushwire.PathWake {
+	switch path {
+	case pushwire.PathRegister, pushwire.PathConfirm, pushwire.PathWake:
+	default:
 		return deny()
 	}
 	in, err := vaultipc.DecodeHeaders(f[1])

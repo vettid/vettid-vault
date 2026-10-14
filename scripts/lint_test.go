@@ -185,7 +185,7 @@ func TestEIFToolchain(t *testing.T) {
 	}
 	ver := val("nitro_cli_version")
 	for _, f := range []string{
-		"/toolchain/aws-nitro-enclaves-cli-" + ver + ".aarch64.rpm", "/toolchain/aws-nitro-enclaves-cli-devel-" + ver + ".aarch64.rpm",
+		"/toolchain/aws-nitro-enclaves-cli-" + ver + ".aarch64.rpm", "/toolchain/aws-nitro-enclaves-cli-devel-" + ver + ".aarch64.rpm", "/toolchain/enclaves-blobs.txz",
 		"/usr/share/nitro_enclaves/blobs/Image", "/usr/share/nitro_enclaves/blobs/Image.config", "/usr/share/nitro_enclaves/blobs/cmdline",
 		"/usr/share/nitro_enclaves/blobs/init", "/usr/share/nitro_enclaves/blobs/linuxkit", "/usr/share/nitro_enclaves/blobs/nsm.ko",
 	} {

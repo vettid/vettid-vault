@@ -9,7 +9,7 @@ formats are VAULT-MESSAGING 0.10.0 §11.10.
 | Piece | Where |
 |---|---|
 | Release workflow (two clean arm64 builds, comparison, attestations, draft release) | [`.github/workflows/release.yml`](../.github/workflows/release.yml) |
-| Pinned EIF toolchain (Amazon Linux 2023 by digest, `aws-nitro-enclaves-cli` RPMs and blobs by SHA-256) | [`release/Dockerfile.eif-builder`](../release/Dockerfile.eif-builder), [`release/eif-toolchain.lock`](../release/eif-toolchain.lock) |
+| Pinned EIF toolchain (Amazon Linux 2023 by digest, `aws-nitro-enclaves-cli` RPMs by SHA-256, the enclave kernel blob set from an `aws-nitro-enclaves-sdk-bootstrap` release by SHA-256 of the archive and of each blob) | [`release/Dockerfile.eif-builder`](../release/Dockerfile.eif-builder), [`release/eif-toolchain.lock`](../release/eif-toolchain.lock) |
 | One clean build with that toolchain (CI and independent rebuilds) | [`release/rebuild.sh`](../release/rebuild.sh) → [`scripts/build-eif.sh`](../scripts/build-eif.sh) |
 | EIF inspection: PCRs recomputed from the file, build comparison, measurement matching | [`cmd/eifinfo`](../cmd/eifinfo), [`internal/eif`](../internal/eif) |
 | Per-channel release constants, the placeholder gate and the only-grow check of the feature list | [`enclave/releasecfg/`](../enclave/releasecfg), `go run ./cmd/releasecfg check [-previous <file>] <channel>` |
@@ -215,6 +215,7 @@ git push origin release/prod/N
 | `eif_measured_sha256` | every EIF section except the metadata, with their headers: equal between builds |
 | `pcr0`, `pcr1`, `pcr2` | recomputed from the EIF and checked against nitro-cli's |
 | `nitro_cli_version`, `toolchain_lock_sha256` | the toolchain |
+| `blobs_version` | the enclave kernel blob set's release from the lock (`v6.6.79`; pinned already by `toolchain_lock_sha256`; empty for a build without the pinned toolchain). Added after staging release 12: earlier releases' files do not have it and keep their own hashes; `eifinfo match` prints it when it differs but does not require it to match |
 
 **Why the EIF file hash differs between builds.** nitro-cli 1.5.0 writes a
 metadata section into every EIF: the build time (to the nanosecond) and
@@ -418,12 +419,49 @@ old flag set for older tags.
 
 ## Changing the toolchain
 
-A new nitro-cli version or a new Amazon Linux base changes the blobs and
-therefore every PCR0: it is a release like any other. Update
-`release/eif-toolchain.lock` (base image digest, `releasever`,
-`nitro_cli_version`, then the RPM and blob hashes, from `dnf download`
-in the new base image and `rpm2cpio … | cpio -idm` of the devel
-package), and `release/Dockerfile.eif-builder`'s `FROM` to the same
-digest (`scripts/lint_test.go` checks they agree). The workflow's dry
-run on the pull request shows whether the new toolchain still builds and
-reproduces.
+Everything in `release/eif-toolchain.lock` goes into PCR0, so changing
+any of it is a release like any other. The lock has two parts:
+
+- **nitro-cli.** `base_image` (digest), `releasever` and
+  `nitro_cli_version` select the `aws-nitro-enclaves-cli` and `-devel`
+  RPMs, pinned by their two SHA-256 lines. Update them from
+  `dnf download` in the new base image, and
+  `release/Dockerfile.eif-builder`'s `FROM` to the same digest
+  (`scripts/lint_test.go` checks they agree). The blobs inside the devel
+  RPM are not used: the builder removes them.
+- **The enclave kernel blobs.** `blobs_version` names the
+  [aws-nitro-enclaves-sdk-bootstrap](https://github.com/aws/aws-nitro-enclaves-sdk-bootstrap)
+  release, `blobs_url` its `enclaves-blobs.txz` asset and `blobs_dir`
+  the directory of the arm64 set inside it. The builder downloads the
+  archive, checks its SHA-256, and installs `Image`, `Image.config`,
+  `cmdline`, `init`, `linuxkit` and `nsm.ko` from `blobs_dir` in place
+  of the RPM's, then checks each one's SHA-256. A new kernel is a new
+  `blobs_version`, `blobs_url` and those seven hash lines.
+
+To check the seven hashes by hand (the same check the builder makes):
+
+```sh
+lock=release/eif-toolchain.lock
+d="$(mktemp -d)"; dir="$(sed -n 's/^blobs_dir=//p' "$lock")"
+curl -fsSL -o "$d/enclaves-blobs.txz" "$(sed -n 's/^blobs_url=//p' "$lock")"
+tar -C "$d" --no-same-owner -xJf "$d/enclaves-blobs.txz" "$dir"
+sha256sum "$d/enclaves-blobs.txz"
+(cd "$d/$dir" && sha256sum Image Image.config cmdline init linuxkit nsm.ko)
+grep -E '/(enclaves-blobs\.txz|blobs/)' "$lock"
+```
+
+The archive's hash must equal the `/toolchain/enclaves-blobs.txz` line
+and each blob's the `/usr/share/nitro_enclaves/blobs/<name>` line.
+`grep '^CONFIG_' "$d/$dir/Image.config"` shows the kernel's
+configuration. The workflow's dry run on the pull request shows whether
+the new toolchain still builds and reproduces.
+
+**One source for the blobs.** The archive exists in one place, a release
+asset of AWS's repository. The hashes make a changed archive fail the
+build, but a removed one would stop every rebuild of a release that uses
+it. Proposed, not done: keep a copy of the archive as an asset on
+vettid-vault's own release for each release that uses it (the owner
+decides), so a rebuild can take it from there and check the same hash;
+and later rebuild the blob set independently from
+aws-nitro-enclaves-sdk-bootstrap's sources with its Nix build, so the
+seven hashes are reproduced rather than only trusted.

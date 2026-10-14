@@ -36,6 +36,9 @@ func SetLeaseTimesForTest(timeout, retry, margin time.Duration) func() {
 	return func() { leaseRenewTimeout, leaseRetry, leaseMargin = a, b, c }
 }
 
+// PeerIsEnclaveForTest exposes the rule for accepted connections.
+var PeerIsEnclaveForTest = peerIsEnclave
+
 // QueueNotFoundForTest exposes the SQS error classification of a queue
 // that does not exist.
 var QueueNotFoundForTest = queueNotFound

@@ -139,8 +139,13 @@ supervisor's count does not move while vaults are unlocked.
 
 **Hardening applied per vault process:**
 
-- own uid and gid (`UIDBase` + slot, release base 200000), no
-  supplementary groups (needs root: PID 1 in the enclave is);
+- own uid and gid (`UIDBase` plus a counter that only grows for the life
+  of the supervisor, release base 200000; no id is ever given to a
+  second process), no supplementary groups (needs root: PID 1 in the
+  enclave is). When the process ends, the supervisor kills everything
+  still running under its uid (a sweep of `/proc` by owner, repeated
+  until none is left) before it counts as ended, so a child it left
+  cannot wait for the next process under the same id;
 - `PR_SET_DUMPABLE 0` (set in the process before it reads anything) and
   `RLIMIT_CORE 0`; non-dumpable processes cannot be traced or have their
   `/proc/<pid>/mem`/`environ` read, even by their own uid (tested);
@@ -166,12 +171,17 @@ supervisor's count does not move while vaults are unlocked.
   close-on-exec), stdin/stdout/stderr on `/dev/null`, working directory
   `/`, environment `GOMEMLIMIT`, `GOMAXPROCS=2`, `GOTRACEBACK=none` only;
 - rlimits: `RLIMIT_AS` 4 GiB (Go needs headroom for its arenas),
-  `RLIMIT_NOFILE` 64, no core files; `GOMEMLIMIT` 512 MiB;
+  `RLIMIT_NOFILE` 64, no core files, `RLIMIT_FSIZE` 0 (a vault process
+  writes no file; this also closes memory file systems as a way around
+  the address-space limit), `RLIMIT_NPROC` 256 for its uid (with
+  `UIDBase` only; so the sweep cannot be outrun); `GOMEMLIMIT` 512 MiB;
 - `PDEATHSIG SIGKILL` and its own process group; a closed channel also
   ends it.
 
 **Supervisor:** `PR_SET_DUMPABLE 0`; `/dev/nsm` chmod 0600 (only root,
-the supervisor, opens it); Yama `ptrace_scope` 3 where the kernel has it.
+the supervisor, opens it; with `Config.OwnKernel` the mode is read back
+and a supervisor that cannot close the device stops instead of serving
+vaults); Yama `ptrace_scope` 3 where the kernel has it.
 
 **The enclave's kernel (release builds only, `Config.OwnKernel`):**
 before it reaches the parent the supervisor writes `0` to

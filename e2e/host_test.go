@@ -651,7 +651,8 @@ func TestSelftest(t *testing.T) {
 	// The kernel checks of a release build are reported here, not
 	// required: a development supervisor leaves the machine's settings
 	// alone.
-	kernel := map[string]bool{"kernel.user_namespaces_off": false, "kernel.unprivileged_bpf_off": false, "vault_process.user_namespace_refused": false}
+	kernel := map[string]bool{"kernel.user_namespaces_off": false, "kernel.unprivileged_bpf_off": false, "vault_process.user_namespace_refused": false,
+		"supervisor.nsm_closed": false}
 	for _, c := range rep.Checks {
 		if _, ok := kernel[c.Name]; ok {
 			kernel[c.Name] = true

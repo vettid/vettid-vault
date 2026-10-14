@@ -121,6 +121,10 @@ type Supervisor struct {
 	hardenNotes   []string
 	// userNSClosed: the limit of user namespaces is 0 (OwnKernel).
 	userNSClosed atomic.Bool
+	// nsmClosed: the NSM device is root's alone (OwnKernel).
+	nsmClosed atomic.Bool
+	// uidNext counts the uids given to vault processes (takeUID).
+	uidNext atomic.Uint64
 
 	// Set by start: what the supervisor brokers for vault processes.
 	host      *procHost
@@ -206,6 +210,14 @@ func (s *Supervisor) Run(ctx context.Context) error {
 	conn, err := s.connect(ctx, m.PCR0)
 	if err != nil {
 		return err
+	}
+	if s.cfg.OwnKernel && !s.selftestMode && !s.nsmClosed.Load() {
+		// A vault process could ask the NSM for attestations of its own:
+		// the enclave does not serve vaults (the self-test still runs and
+		// reports it).
+		s.log.Error("hardening: the NSM is not closed to vault processes: stopping")
+		conn.Close()
+		return errNSMOpen
 	}
 	if s.selftestMode {
 		// The hardware smoke test (docs/SMOKE.md): no instance, no vault;
@@ -747,5 +759,14 @@ func (s *Supervisor) closeKernel() []string {
 	if err := disableUnprivilegedBPF(); err != nil {
 		notes = append(notes, "bpf is not closed to unprivileged processes: "+err.Error())
 	}
+	if err := closeNSM(); err != nil {
+		notes = append(notes, "the NSM is not closed to vault processes, the enclave will not serve vaults: "+err.Error())
+	} else {
+		s.nsmClosed.Store(true)
+	}
 	return notes
 }
+
+// errNSMOpen stops a supervisor on its own kernel that could not close
+// the NSM device to everyone but root.
+var errNSMOpen = errors.New("supervisor: the NSM device could not be closed to vault processes")

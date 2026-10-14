@@ -162,6 +162,15 @@ func (s *Supervisor) selftestProcess(r *selftest.Report) {
 	r.Add("kernel.user_namespaces_off", err == nil, s.cfg.OwnKernel, "max_user_namespaces: "+orZero(err))
 	err = unprivilegedBPFDisabled()
 	r.Add("kernel.unprivileged_bpf_off", err == nil, s.cfg.OwnKernel, "unprivileged_bpf_disabled: "+orSet(err))
+	err = nsmClosedCheck()
+	r.Add("supervisor.nsm_closed", err == nil, s.cfg.OwnKernel, "root only: "+orYes(err))
+}
+
+func orYes(err error) string {
+	if err == nil {
+		return "yes"
+	}
+	return err.Error()
 }
 
 func orZero(err error) string {
@@ -324,7 +333,7 @@ func (s *Supervisor) selftestVaultProcess(ctx context.Context, r *selftest.Repor
 	r.Add("vault_process.user_namespace_refused", vr.UserNamespace == selftest.UserNamespaceRefused, s.cfg.OwnKernel, vr.UserNamespace)
 	want := s.cfg.Proc.UIDBase
 	if want > 0 {
-		r.Add("vault_process.own_uid_gid", vr.UID == want+p.slot && vr.GID == want+p.slot, true, fmt.Sprintf("uid=%d gid=%d", vr.UID, vr.GID))
+		r.Add("vault_process.own_uid_gid", p.uid >= want && vr.UID == p.uid && vr.GID == p.uid, true, fmt.Sprintf("uid=%d gid=%d", vr.UID, vr.GID))
 	} else {
 		r.Add("vault_process.own_uid_gid", false, false, fmt.Sprintf("uid switching off (uid=%d)", vr.UID))
 	}

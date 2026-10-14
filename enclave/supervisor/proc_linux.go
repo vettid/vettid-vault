@@ -3,10 +3,15 @@
 package supervisor
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -16,22 +21,153 @@ func socketpair() ([2]int, error) {
 }
 
 // procAttr: a new process group, SIGKILL when the supervisor dies, and,
-// with uidBase, the vault's own uid and gid without supplementary groups.
-func procAttr(uidBase, slot int) *syscall.SysProcAttr {
+// with a uid, that uid as uid and gid without supplementary groups.
+func procAttr(uid int) *syscall.SysProcAttr {
 	a := &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
-	if uidBase > 0 {
-		id := uint32(uidBase + slot)
+	if uid > 0 {
+		id := uint32(uid)
 		a.Credential = &syscall.Credential{Uid: id, Gid: id, Groups: []uint32{}}
 	}
 	return a
 }
 
 // setLimits applies the vault process's rlimits: address space, open
-// files, no core files.
-func setLimits(pid int, c ProcConfig) {
+// files, no core files, no file of any size; and, when it runs under a
+// uid of its own (ownUID), the number of processes and threads of that
+// uid, so that what it starts stays countable and the sweep at its end
+// cannot be outrun. (RLIMIT_NPROC counts every task of the real uid on
+// the machine: under a shared uid it would count unrelated processes.)
+func setLimits(pid int, c ProcConfig, ownUID bool) {
 	_ = unix.Prlimit(pid, unix.RLIMIT_AS, &unix.Rlimit{Cur: c.AddressSpace, Max: c.AddressSpace}, nil)
 	_ = unix.Prlimit(pid, unix.RLIMIT_NOFILE, &unix.Rlimit{Cur: c.OpenFiles, Max: c.OpenFiles}, nil)
 	_ = unix.Prlimit(pid, unix.RLIMIT_CORE, &unix.Rlimit{Cur: 0, Max: 0}, nil)
+	_ = unix.Prlimit(pid, unix.RLIMIT_FSIZE, &unix.Rlimit{Cur: 0, Max: 0}, nil)
+	if ownUID {
+		_ = unix.Prlimit(pid, unix.RLIMIT_NPROC, &unix.Rlimit{Cur: c.Tasks, Max: c.Tasks}, nil)
+	}
+}
+
+// procRoot is where the sweep reads processes (a variable for the tests).
+var procRoot = "/proc"
+
+// Sweep pacing: a killed process takes a moment to go; the sweep looks
+// again every sweepPause, sweepRounds times at most.
+var (
+	sweepPause  = 10 * time.Millisecond
+	sweepRounds = 500
+)
+
+// killProcess is how the sweep ends a process (a variable for the tests).
+var killProcess = killIfUID
+
+// sweepUID kills every process still running under uid and looks again,
+// until none is left: a vault process's children, which outlive it.
+// Each round kills all it finds, and RLIMIT_NPROC bounds how many there
+// can be, so a process that keeps starting new ones cannot outrun it.
+func sweepUID(uid int) error {
+	for round := 0; round < sweepRounds; round++ {
+		pids := liveProcessesOf(uid)
+		if len(pids) == 0 {
+			return nil
+		}
+		for _, pid := range pids {
+			_ = killProcess(pid, uid)
+		}
+		time.Sleep(sweepPause)
+	}
+	if n := len(liveProcessesOf(uid)); n > 0 {
+		return fmt.Errorf("%d processes of uid %d still running", n, uid)
+	}
+	return nil
+}
+
+// liveProcessesOf lists the processes of uid (any of its real,
+// effective, saved and file-system uids) that still run: at least one
+// of their threads is not a zombie.
+func liveProcessesOf(uid int) []int {
+	ents, err := os.ReadDir(procRoot)
+	if err != nil {
+		return nil
+	}
+	var pids []int
+	for _, e := range ents {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil || pid <= 0 || !e.IsDir() {
+			continue
+		}
+		if hasUID(pid, uid) && running(pid) {
+			pids = append(pids, pid)
+		}
+	}
+	return pids
+}
+
+// hasUID reports whether a process's status names uid among its uids.
+func hasUID(pid, uid int) bool {
+	b, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(pid), "status"))
+	if err != nil {
+		return false
+	}
+	want := strconv.Itoa(uid)
+	for _, line := range strings.Split(string(b), "\n") {
+		if rest, ok := strings.CutPrefix(line, "Uid:"); ok {
+			for _, f := range strings.Fields(rest) {
+				if f == want {
+					return true
+				}
+			}
+			return false
+		}
+	}
+	return false
+}
+
+// running reports whether any thread of a process is alive (its state is
+// not Z or X). A process whose first thread has ended shows that thread
+// as a zombie while its other threads run.
+func running(pid int) bool {
+	dir := filepath.Join(procRoot, strconv.Itoa(pid), "task")
+	tasks, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, t := range tasks {
+		b, err := os.ReadFile(filepath.Join(dir, t.Name(), "stat"))
+		if err != nil {
+			continue
+		}
+		// "tid (comm) S ...": comm may hold spaces and parentheses.
+		i := strings.LastIndexByte(string(b), ')')
+		if i < 0 || i+2 >= len(b) {
+			continue
+		}
+		if st := b[i+2]; st != 'Z' && st != 'X' {
+			return true
+		}
+	}
+	return false
+}
+
+// killIfUID sends SIGKILL to pid if it is still a process of uid. With a
+// pidfd the check and the signal are about the same process even if pid
+// is reused meanwhile; a kernel without pidfds gets a plain kill after
+// the check.
+func killIfUID(pid, uid int) error {
+	fd, err := unix.PidfdOpen(pid, 0)
+	if errors.Is(err, unix.ENOSYS) {
+		if !hasUID(pid, uid) {
+			return nil
+		}
+		return unix.Kill(pid, unix.SIGKILL)
+	}
+	if err != nil {
+		return err
+	}
+	defer unix.Close(fd)
+	if !hasUID(pid, uid) {
+		return nil
+	}
+	return unix.PidfdSendSignal(fd, unix.SIGKILL, nil, 0)
 }
 
 // hardenSelf makes the supervisor non-dumpable and, where the kernel has
@@ -40,13 +176,6 @@ func hardenSelf() []string {
 	var notes []string
 	if err := unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
 		notes = append(notes, "PR_SET_DUMPABLE failed")
-	}
-	// Only root (the supervisor) may open the NSM: vault processes run
-	// under their own uids and get attestations through the supervisor.
-	if _, err := os.Stat("/dev/nsm"); err == nil {
-		if err := os.Chmod("/dev/nsm", 0o600); err != nil {
-			notes = append(notes, "chmod /dev/nsm failed")
-		}
 	}
 	if err := os.WriteFile("/proc/sys/kernel/yama/ptrace_scope", []byte("3"), 0); err != nil {
 		notes = append(notes, "Yama ptrace_scope unavailable")
@@ -57,6 +186,10 @@ func hardenSelf() []string {
 // Kernel settings of the whole machine (variables for the tests, which
 // must not write the real ones).
 var (
+	// The NSM device: only root (the supervisor) may open it. Vault
+	// processes run under their own uids and get attestations through
+	// the supervisor.
+	nsmPath = "/dev/nsm"
 	// The number of user namespaces that may exist below the initial
 	// one. Only a process with CAP_SYS_RESOURCE in the initial user
 	// namespace may write it, so no vault process can raise it again.
@@ -110,6 +243,33 @@ func unprivilegedBPFDisabled() error {
 	}
 	if v != "1" && v != "2" {
 		return fmt.Errorf("unprivileged_bpf_disabled is %q", v)
+	}
+	return nil
+}
+
+// closeNSM sets the NSM device to mode 0600 and checks that it is now
+// root's alone: owned by uid 0, no access for group or others.
+func closeNSM() error {
+	if err := os.Chmod(nsmPath, 0o600); err != nil {
+		return err
+	}
+	return nsmClosedCheck()
+}
+
+func nsmClosedCheck() error {
+	fi, err := os.Stat(nsmPath)
+	if err != nil {
+		return err
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return errors.New("no owner")
+	}
+	if perm := fi.Mode().Perm(); perm&0o077 != 0 || st.Uid != 0 {
+		return fmt.Errorf("mode %v owner %d", perm, st.Uid)
+	}
+	if fi.Mode().Type()&fs.ModeDevice == 0 {
+		return fmt.Errorf("not a device: %v", fi.Mode().Type())
 	}
 	return nil
 }

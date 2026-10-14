@@ -37,9 +37,13 @@ type ProcConfig struct {
 	// Exec is the vault process's argv (the enclave binary re-executed
 	// with vaultproc.Arg first).
 	Exec []string
-	// UIDBase, if not 0, runs vault process i as uid = gid = UIDBase+i
-	// (needs root, as PID 1 in the enclave is). 0 keeps the supervisor's
-	// ids (development and tests).
+	// UIDBase, if not 0, runs each vault process under its own uid = gid,
+	// UIDBase plus a counter that only grows for the life of the
+	// supervisor: no id is ever given to a second process (needs root,
+	// as PID 1 in the enclave is). When such a process ends, everything
+	// still running under its id is killed before it is reported ended.
+	// 0 keeps the supervisor's ids (development and tests), and none of
+	// that applies.
 	UIDBase int
 	// MaxProcs bounds concurrent vault processes (default 1024).
 	MaxProcs int
@@ -47,6 +51,11 @@ type ProcConfig struct {
 	AddressSpace uint64
 	// OpenFiles is RLIMIT_NOFILE (default 64).
 	OpenFiles uint64
+	// Tasks is RLIMIT_NPROC: the processes and threads that may run under
+	// a vault process's uid at once (default 256). Applied only with
+	// UIDBase, where the uid is the process's alone; RLIMIT_FSIZE is
+	// always 0 (a vault process writes no file).
+	Tasks uint64
 	// MemoryLimit is the process's GOMEMLIMIT (default 512 MiB).
 	MemoryLimit uint64
 	// LockTimeout bounds a lock before the process is killed (60 s).
@@ -62,6 +71,9 @@ func (c *ProcConfig) defaults() {
 	}
 	if c.OpenFiles == 0 {
 		c.OpenFiles = 64
+	}
+	if c.Tasks == 0 {
+		c.Tasks = 256
 	}
 	if c.MemoryLimit == 0 {
 		c.MemoryLimit = 512 << 20
@@ -89,6 +101,7 @@ type vproc struct {
 	enroll   bool
 	prevRead string // read-only prefix of the member's previous vault (re-enrollment, §11.3)
 	slot     int
+	uid      int // its own uid and gid (UIDBase); 0 without
 	cmd      *exec.Cmd
 	conn     *hostproto.Conn
 	exited   chan struct{}
@@ -112,7 +125,25 @@ func newProcHost(s *Supervisor, cfg ProcConfig) *procHost {
 var (
 	errNoSlot = errors.New("supervisor: too many vault processes")
 	errSpawn  = errors.New("supervisor: vault process failed to start")
+	errNoUID  = errors.New("supervisor: no unused uid left for a vault process")
 )
+
+// maxVaultUID is the highest uid given to a vault process ((uid_t)-1 is
+// not a uid).
+const maxVaultUID = 1<<32 - 2
+
+// takeUID returns the next unused uid at or above base: one more than the
+// last, for the life of the supervisor (the self-test's and the capacity
+// test's process hosts draw from the same counter as the instance's).
+// After about four thousand million starts there is none left, and no
+// process is started.
+func (s *Supervisor) takeUID(base int) (int, error) {
+	n := s.uidNext.Add(1) - 1
+	if base <= 0 || uint64(base) > maxVaultUID || n > maxVaultUID-uint64(base) {
+		return 0, errNoUID
+	}
+	return base + int(n), nil
+}
 
 func (h *procHost) takeSlot() int {
 	h.mu.Lock()
@@ -144,6 +175,17 @@ func (h *procHost) spawn(vaultID, userGUID string, enroll bool, extra ...string)
 	if h.s.cfg.OwnKernel && !h.s.userNSClosed.Load() {
 		return nil, errSpawn
 	}
+	// Nor while the NSM is open to processes other than root.
+	if h.s.cfg.OwnKernel && !h.s.nsmClosed.Load() {
+		return nil, errSpawn
+	}
+	uid := 0
+	if h.cfg.UIDBase > 0 {
+		var err error
+		if uid, err = h.s.takeUID(h.cfg.UIDBase); err != nil {
+			return nil, err
+		}
+	}
 	slot := h.takeSlot()
 	if slot < 0 {
 		return nil, errNoSlot
@@ -159,7 +201,7 @@ func (h *procHost) spawn(vaultID, userGUID string, enroll bool, extra ...string)
 	cmd.Env = []string{"GOMEMLIMIT=" + strconv.FormatUint(h.cfg.MemoryLimit, 10), "GOMAXPROCS=2", "GOTRACEBACK=none"}
 	cmd.Dir = "/"
 	cmd.ExtraFiles = []*os.File{childEnd} // fd 3; everything else is close-on-exec
-	cmd.SysProcAttr = procAttr(h.cfg.UIDBase, slot)
+	cmd.SysProcAttr = procAttr(uid)
 	if err := cmd.Start(); err != nil {
 		childEnd.Close()
 		parentEnd.Close()
@@ -167,7 +209,7 @@ func (h *procHost) spawn(vaultID, userGUID string, enroll bool, extra ...string)
 		return nil, errSpawn
 	}
 	childEnd.Close()
-	setLimits(cmd.Process.Pid, h.cfg)
+	setLimits(cmd.Process.Pid, h.cfg, uid > 0)
 	c, err := net.FileConn(parentEnd)
 	parentEnd.Close()
 	if err != nil {
@@ -176,12 +218,19 @@ func (h *procHost) spawn(vaultID, userGUID string, enroll bool, extra ...string)
 		h.freeSlot(slot)
 		return nil, errSpawn
 	}
-	p := &vproc{h: h, vaultID: vaultID, userGUID: userGUID, enroll: enroll, slot: slot, cmd: cmd, exited: make(chan struct{})}
+	p := &vproc{h: h, vaultID: vaultID, userGUID: userGUID, enroll: enroll, slot: slot, uid: uid, cmd: cmd, exited: make(chan struct{})}
 	p.conn = hostproto.NewConn(c, p.handle, p.notify)
 	go func() {
 		err := cmd.Wait()
 		p.exitCode = exitCode(err)
 		p.conn.Close()
+		if uid > 0 {
+			// Whatever the process left running under its uid (a child it
+			// started) ends before the process counts as ended.
+			if err := sweepUID(uid); err != nil {
+				h.s.log.Error("vault process left processes that could not be ended", "vault_id", p.vaultID, "error", err.Error())
+			}
+		}
 		h.freeSlot(slot)
 		close(p.exited)
 		h.exited(p)

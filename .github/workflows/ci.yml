@@ -93,6 +93,27 @@ jobs:
           go test -count=1 -p 1 ./enclave/vaultproc/... ./internal/selftest/...
           go test -count=1 -p 1 -tags 'devenclave e2e' -run '^TestSelftest$' -v ./e2e/
 
+  root:
+    # The vault processes' uid rules need root (the supervisor switches
+    # uids): ids never reused, children ended when their process ends.
+    # The test binary is built as the runner's user, placed where the
+    # vault uids can execute it, and only that test runs as root.
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: vault processes under their own uids (as root)
+        run: |
+          d=$(mktemp -d /tmp/vault-root.XXXXXX)
+          chmod 755 "$d"
+          go test -c -o "$d/supervisor.test" ./enclave/supervisor/
+          chmod 755 "$d/supervisor.test"
+          sudo "$d/supervisor.test" -test.run '^TestVaultProcessUIDs$' -test.count=1 -test.v | tee "$d/out"
+          grep -q -- '--- PASS: TestVaultProcessUIDs' "$d/out"
+
   enclave-image:
     # Dockerfile.enclave is reproducible: two clean builds give the same
     # binary (and the same image). The arm64 build's hash is what the

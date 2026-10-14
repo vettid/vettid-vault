@@ -43,7 +43,7 @@ var ErrOversized = errors.New("pushwire: gateway answer too large")
 // recognised behind it.
 const MaxAnswer = 16 << 10
 
-// Answered reports whether err, from Register or Wake, means the gateway
+// Answered reports whether err, from Register, Confirm or Wake, means the gateway
 // answered over HTTP: an error answer (*Error), an answer that does not
 // parse (ErrResponse) or one that is too large (ErrOversized). Such a
 // registration counts toward push_registrations whatever the answer; a
@@ -54,12 +54,30 @@ func Answered(err error) bool {
 	return err == nil || errors.As(err, &ge) || errors.Is(err, ErrResponse) || errors.Is(err, ErrOversized)
 }
 
-// Register sends POST /v1/register and returns the wake blob. A gateway
-// error is an *Error; anything else that fails is ErrTransport (or
-// ErrResponse for a 201 that does not parse).
+// Register sends POST /v1/register, attested, and returns the pending
+// registration of the gateway's 202 (PUSH-GATEWAY 0.5.0 §5.1); the gateway
+// has sent the challenge code to the token. A gateway error is an *Error;
+// anything else that fails is ErrTransport (or ErrResponse for a 202 that
+// does not parse).
 func (c *Client) Register(ctx context.Context, key ed25519.PrivateKey, r Registration) (string, error) {
 	body := r.Body()
 	status, ans, err := c.do(ctx, key, PathRegister, body, true)
+	if err != nil {
+		return "", err
+	}
+	if status != http.StatusAccepted {
+		return "", ParseError(status, ans)
+	}
+	return ParsePending(ans)
+}
+
+// Confirm sends POST /v1/confirm {pending, code}, signed by the same wake
+// key as the registration and without an attestation, and returns the
+// wake blob of the gateway's 201 (PUSH-GATEWAY 0.5.0 §5.1). A wrong code,
+// another key or a pending registration over 10 minutes old is 403
+// challenge_invalid (*Error).
+func (c *Client) Confirm(ctx context.Context, key ed25519.PrivateKey, pending, code string) (string, error) {
+	status, ans, err := c.do(ctx, key, PathConfirm, ConfirmBody(pending, code), false)
 	if err != nil {
 		return "", err
 	}

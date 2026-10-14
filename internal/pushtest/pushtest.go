@@ -1,9 +1,11 @@
 // Package pushtest is a TEST-ONLY stand-in for the VettID push gateway
-// (PUSH-GATEWAY 0.4.0, VAULT-MESSAGING 0.24.0 §14; N3): POST /v1/register
-// and POST /v1/wake with the gateway's signature, attestation, body and
-// blob rules, but it accepts the dev enclave's TEST attestation (the test
-// Nitro root and the test releases' PCR0s), and it records wakes instead
-// of sending them to FCM or APNs. Failures can be injected for the next
+// (PUSH-GATEWAY 0.5.0, VAULT-MESSAGING 0.24.0 §14; N3): POST /v1/register,
+// POST /v1/confirm and POST /v1/wake with the gateway's signature,
+// attestation, body, challenge and blob rules, but it accepts the dev
+// enclave's TEST attestation (the test Nitro root and the test releases'
+// PCR0s), and it records registration challenges (with their codes, so
+// that a test or the dev stack can play the app) and wakes instead of
+// sending them to FCM or APNs. Failures can be injected for the next
 // wakes. It never links into a release package (make check-tcb).
 package pushtest
 
@@ -11,6 +13,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/binary"
@@ -58,6 +61,22 @@ type Wake struct {
 	Class       string    `json:"class"`
 }
 
+// Challenge is one recorded registration challenge: what the gateway
+// would have sent to the token by push (PUSH-GATEWAY 0.5.0 §6), with its
+// code. The token is kept as its SHA-256 (hex).
+type Challenge struct {
+	At          time.Time `json:"at"`
+	Platform    string    `json:"platform"`
+	Environment string    `json:"environment,omitempty"`
+	AppID       string    `json:"app_id"`
+	TokenSHA256 string    `json:"token_sha256"`
+	Code        string    `json:"code"`
+}
+
+// ChallengeLife is how long a pending registration can be confirmed
+// (PUSH-GATEWAY 0.5.0 §5.1).
+const ChallengeLife = 10 * time.Minute
+
 // Failure is an injected answer for the next wake(s).
 type Failure struct {
 	Status     int    `json:"status"`
@@ -74,14 +93,15 @@ type Server struct {
 	keyID  [4]byte
 	replay *relayauth.ReplayCache
 
-	mu        sync.Mutex
-	wakes     []Wake
-	regs      int
-	failures  []Failure
-	reseal    int
-	refusals  map[string]int
-	changed   chan struct{}
-	lastBlobs []string
+	mu         sync.Mutex
+	wakes      []Wake
+	challenges []Challenge
+	regs       int
+	failures   []Failure
+	reseal     int
+	refusals   map[string]int
+	changed    chan struct{}
+	lastBlobs  []string
 }
 
 // New returns a stand-in with a fresh random blob key.
@@ -109,6 +129,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, []byte(`{}`))
 	case r.URL.Path == pushwire.PathRegister && r.Method == http.MethodPost:
 		s.register(w, r)
+	case r.URL.Path == pushwire.PathConfirm && r.Method == http.MethodPost:
+		s.confirm(w, r)
 	case r.URL.Path == pushwire.PathWake && r.Method == http.MethodPost:
 		s.wake(w, r)
 	default:
@@ -141,6 +163,24 @@ func (s *Server) bump() {
 // auth reads the body and checks the signature, freshness and replay
 // cache (Relay Protocol §4.1).
 func (s *Server) auth(w http.ResponseWriter, r *http.Request, op string) (relayauth.SignedRequest, []byte, bool) {
+	sr, body, ok := s.signed(w, r, op)
+	if !ok || !s.fresh(w, sr, op) {
+		return sr, nil, false
+	}
+	return sr, body, true
+}
+
+// fresh checks and records the replay cache.
+func (s *Server) fresh(w http.ResponseWriter, sr relayauth.SignedRequest, op string) bool {
+	if err := s.replay.Check(sr, s.cfg.Now()); err != nil {
+		s.fail(w, 401, pushwire.CodeReplayDetected, op, 0)
+		return false
+	}
+	return true
+}
+
+// signed reads the body and checks the signature and freshness.
+func (s *Server) signed(w http.ResponseWriter, r *http.Request, op string) (relayauth.SignedRequest, []byte, bool) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, 16<<10+1))
 	if err != nil || len(body) > 16<<10 {
 		s.fail(w, 400, pushwire.CodeBadRequest, op, 0)
@@ -160,14 +200,12 @@ func (s *Server) auth(w http.ResponseWriter, r *http.Request, op string) (relaya
 		s.fail(w, 401, code, op, 0)
 		return sr, nil, false
 	}
-	if err := s.replay.Check(sr, now); err != nil {
-		s.fail(w, 401, pushwire.CodeReplayDetected, op, 0)
-		return sr, nil, false
-	}
 	return sr, body, true
 }
 
-// register is PUSH-GATEWAY §5.1 with the TEST trust anchors.
+// register is PUSH-GATEWAY 0.5.0 §5.1 with the TEST trust anchors: it
+// records the challenge it would send to the token and answers 202
+// {pending}.
 func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	sr, body, ok := s.auth(w, r, "register")
 	if !ok {
@@ -185,7 +223,48 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, 400, code, "register", 0)
 		return
 	}
-	blob := s.seal(reg, sr.Key)
+	var c [16]byte
+	if _, err := rand.Read(c[:]); err != nil {
+		panic(err)
+	}
+	code = base64.RawURLEncoding.EncodeToString(c[:])
+	pending := s.sealRecord(newRecord(reg, sr.Key, s.cfg.Now(), code), pendingLabel)
+	th := sha256.Sum256([]byte(reg.Token))
+	s.mu.Lock()
+	s.challenges = append(s.challenges, Challenge{At: s.cfg.Now().UTC(), Platform: reg.Platform, Environment: reg.Environment,
+		AppID: reg.AppID, TokenSHA256: hex.EncodeToString(th[:]), Code: code})
+	s.bump()
+	s.mu.Unlock()
+	writeJSON(w, 202, strictjson.NewBuilder().String("pending", pending).Bytes())
+}
+
+// confirm is PUSH-GATEWAY 0.5.0 §5.1's second step: the pending
+// registration must open, be the signer's, be at most 10 minutes old and
+// carry the code; every failure is the same 403 challenge_invalid and
+// leaves no replay record. Then the wake blob, issued now.
+func (s *Server) confirm(w http.ResponseWriter, r *http.Request) {
+	sr, body, ok := s.signed(w, r, "confirm")
+	if !ok {
+		return
+	}
+	pending, code, err := pushwire.ParseConfirm(body)
+	if err != nil {
+		s.fail(w, 400, pushwire.CodeBadRequest, "confirm", 0)
+		return
+	}
+	rec, ok := s.openRecord(pending, pendingLabel)
+	now := s.cfg.Now()
+	if !ok || rec.K != base64.StdEncoding.EncodeToString(sr.Key) || now.Unix()-rec.I < 0 ||
+		now.Unix()-rec.I > int64(ChallengeLife/time.Second) || subtle.ConstantTimeCompare([]byte(rec.C), []byte(code)) != 1 ||
+		s.cfg.AppIDs != nil && !contains(s.cfg.AppIDs[rec.P], rec.A) {
+		s.fail(w, 403, pushwire.CodeChallengeInvalid, "confirm", 0)
+		return
+	}
+	if !s.fresh(w, sr, "confirm") {
+		return
+	}
+	rec.C, rec.I = "", now.Unix()
+	blob := s.sealRecord(*rec, aadLabel)
 	s.mu.Lock()
 	s.regs++
 	s.bump()
@@ -249,7 +328,12 @@ func classify(body []byte) (pushwire.Registration, string) {
 	return pushwire.Registration{}, pushwire.CodeTokenInvalid
 }
 
-const aadLabel = "vettid/push/1/blob"
+// The associated data's labels: a wake blob, and (0.5.0) a pending
+// registration, which never opens as the other.
+const (
+	aadLabel     = "vettid/push/1/blob"
+	pendingLabel = "vettid/push/1/pending"
+)
 
 type record struct {
 	P string `json:"p"`
@@ -258,12 +342,22 @@ type record struct {
 	T string `json:"t"`
 	K string `json:"k"`
 	I int64  `json:"i"`
+	C string `json:"c,omitempty"` // a pending registration's challenge code
 }
 
-// seal makes a wake blob (PUSH-GATEWAY §4).
+func newRecord(r pushwire.Registration, key ed25519.PublicKey, at time.Time, code string) record {
+	return record{P: r.Platform, E: r.Environment, A: r.AppID, T: r.Token,
+		K: base64.StdEncoding.EncodeToString(key), I: at.Unix(), C: code}
+}
+
+// seal makes a wake blob (PUSH-GATEWAY §4), issued now.
 func (s *Server) seal(r pushwire.Registration, key ed25519.PublicKey) string {
-	pt, _ := json.Marshal(record{P: r.Platform, E: r.Environment, A: r.AppID, T: r.Token,
-		K: base64.StdEncoding.EncodeToString(key), I: s.cfg.Now().Unix()})
+	return s.sealRecord(newRecord(r, key, s.cfg.Now(), ""), aadLabel)
+}
+
+// sealRecord seals rec under label (§4).
+func (s *Server) sealRecord(rec record, label string) string {
+	pt, _ := json.Marshal(rec)
 	aead, _ := chacha20poly1305.NewX(s.key[:])
 	nonce := make([]byte, chacha20poly1305.NonceSizeX)
 	if _, err := rand.Read(nonce); err != nil {
@@ -271,11 +365,13 @@ func (s *Server) seal(r pushwire.Registration, key ed25519.PublicKey) string {
 	}
 	out := append([]byte{0x01}, s.keyID[:]...)
 	out = append(out, nonce...)
-	out = aead.Seal(out, nonce, pt, []byte(aadLabel+"\x00"+s.cfg.Channel))
+	out = aead.Seal(out, nonce, pt, []byte(label+"\x00"+s.cfg.Channel))
 	return base64.RawURLEncoding.EncodeToString(out)
 }
 
-func (s *Server) open(blob string) (*record, bool) {
+func (s *Server) open(blob string) (*record, bool) { return s.openRecord(blob, aadLabel) }
+
+func (s *Server) openRecord(blob, label string) (*record, bool) {
 	b, err := base64.RawURLEncoding.Strict().DecodeString(blob)
 	if err != nil || len(blob) > pushwire.MaxBlob || len(b) < 1+4+chacha20poly1305.NonceSizeX+16 || b[0] != 0x01 ||
 		binary.BigEndian.Uint32(b[1:5]) != binary.BigEndian.Uint32(s.keyID[:]) {
@@ -283,12 +379,12 @@ func (s *Server) open(blob string) (*record, bool) {
 	}
 	aead, _ := chacha20poly1305.NewX(s.key[:])
 	n := b[5 : 5+chacha20poly1305.NonceSizeX]
-	pt, err := aead.Open(nil, n, b[5+chacha20poly1305.NonceSizeX:], []byte(aadLabel+"\x00"+s.cfg.Channel))
+	pt, err := aead.Open(nil, n, b[5+chacha20poly1305.NonceSizeX:], []byte(label+"\x00"+s.cfg.Channel))
 	if err != nil {
 		return nil, false
 	}
 	var rec record
-	if json.Unmarshal(pt, &rec) != nil {
+	if json.Unmarshal(pt, &rec) != nil || (label == pendingLabel) != (rec.C != "") {
 		return nil, false
 	}
 	return &rec, true
@@ -345,7 +441,26 @@ func (s *Server) Wakes() []Wake {
 	return append([]Wake(nil), s.wakes...)
 }
 
-// Registrations returns how many registrations succeeded.
+// Challenges returns the recorded registration challenges, oldest first.
+func (s *Server) Challenges() []Challenge {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]Challenge(nil), s.challenges...)
+}
+
+// LastCode returns the latest challenge's code ("" without one): what
+// the app would pass to its vault in push.confirm.
+func (s *Server) LastCode() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.challenges) == 0 {
+		return ""
+	}
+	return s.challenges[len(s.challenges)-1].Code
+}
+
+// Registrations returns how many registrations completed (a wake blob
+// issued by a confirmation).
 func (s *Server) Registrations() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -387,11 +502,11 @@ func (s *Server) Resealed() []string {
 	return append([]string(nil), s.lastBlobs...)
 }
 
-// Reset forgets the recorded wakes, counts and injected answers (the
+// Reset forgets the recorded challenges, wakes, counts and injected answers (the
 // blob key stays, so registered vaults keep working).
 func (s *Server) Reset() {
 	s.mu.Lock()
-	s.wakes, s.regs, s.failures, s.reseal, s.lastBlobs = nil, 0, nil, 0, nil
+	s.wakes, s.challenges, s.regs, s.failures, s.reseal, s.lastBlobs = nil, nil, 0, nil, 0, nil
 	s.refusals = map[string]int{}
 	s.bump()
 	s.mu.Unlock()

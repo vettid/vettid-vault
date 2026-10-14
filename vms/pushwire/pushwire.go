@@ -1,7 +1,11 @@
 // Package pushwire is the wire format of push (VAULT-MESSAGING 0.24.0 §14,
-// PUSH-GATEWAY 0.4.0): the app's registration as `push.register` carries
+// PUSH-GATEWAY 0.5.0): the app's registration as `push.register` carries
 // it and the gateway's `POST /v1/register` takes it, its checks, the
 // vault's token hash, the gateway's paths, bodies and error codes.
+// Registration is two requests (PUSH-GATEWAY 0.5.0 §5.1): /v1/register
+// answers a pending registration and sends a challenge code to the token
+// by push; /v1/confirm, with the code the app returned, answers the wake
+// blob.
 //
 // The vault never sees inside a wake blob (PUSH-GATEWAY §4): it is an
 // opaque string here, bounded in size.
@@ -33,6 +37,7 @@ const (
 // Gateway paths (PUSH-GATEWAY §5) and the attestation header (§5.1).
 const (
 	PathRegister      = "/v1/register"
+	PathConfirm       = "/v1/confirm" // PUSH-GATEWAY 0.5.0 §5.1
 	PathWake          = "/v1/wake"
 	PathHealth        = "/v1/health"
 	HeaderAttestation = "X-VettID-Attestation"
@@ -52,6 +57,7 @@ const (
 	CodeBlobInvalid         = "blob_invalid"
 	CodeRateLimited         = "rate_limited"
 	CodeProviderUnavailable = "provider_unavailable"
+	CodeChallengeInvalid    = "challenge_invalid" // 0.5.0: /v1/confirm only (403)
 	CodeInternal            = "internal"
 )
 
@@ -65,6 +71,10 @@ const (
 	MaxBlob = 6144
 	// MaxRetryAfter is the longest retry_after the vault waits (§14.2).
 	MaxRetryAfter = 3600
+	// MaxChallengeCode bounds a challenge code as the app passes it on
+	// (PUSH-GATEWAY 0.5.0: the gateway makes 22 characters and takes at
+	// most 64).
+	MaxChallengeCode = 64
 )
 
 // ErrInvalid is a registration that fails §14.1 check 2.
@@ -215,7 +225,51 @@ func ValidBlob(s string) bool {
 	return true
 }
 
-// ParseRegistered parses the gateway's 201 body: {wake_blob}.
+// ValidPending reports whether s can be a pending registration
+// (PUSH-GATEWAY 0.5.0 §4): sealed like a wake blob and bounded alike.
+func ValidPending(s string) bool { return ValidBlob(s) }
+
+// ValidChallengeCode reports whether s can be a challenge code: 1-64
+// base64url characters without padding (PUSH-GATEWAY 0.5.0 §5.1).
+func ValidChallengeCode(s string) bool { return len(s) <= MaxChallengeCode && ValidBlob(s) }
+
+// ParsePending parses the gateway's 202 answer to a registration
+// (PUSH-GATEWAY 0.5.0 §5.1): {pending}.
+func ParsePending(body []byte) (string, error) {
+	o, err := strictjson.ParseObject(body)
+	if err != nil {
+		return "", ErrResponse
+	}
+	p, err := o.String("pending")
+	if err != nil || !ValidPending(p) {
+		return "", ErrResponse
+	}
+	return p, nil
+}
+
+// ConfirmBody is the confirmation's body (PUSH-GATEWAY 0.5.0 §5.1).
+func ConfirmBody(pending, code string) []byte {
+	return strictjson.NewBuilder().String("pending", pending).String("code", code).Bytes()
+}
+
+// ParseConfirm parses a confirmation body strictly (the gateway's side):
+// exactly pending and code, both strings.
+func ParseConfirm(body []byte) (pending, code string, err error) {
+	o, err := strictjson.ParseObject(body)
+	if err != nil || len(o) != 2 {
+		return "", "", ErrInvalid
+	}
+	if pending, err = o.String("pending"); err != nil || pending == "" {
+		return "", "", ErrInvalid
+	}
+	if code, err = o.String("code"); err != nil || code == "" || len(code) > MaxChallengeCode {
+		return "", "", ErrInvalid
+	}
+	return pending, code, nil
+}
+
+// ParseRegistered parses the gateway's 201 body: {wake_blob} (the answer
+// to a confirmation since PUSH-GATEWAY 0.5.0).
 func ParseRegistered(body []byte) (string, error) {
 	o, err := strictjson.ParseObject(body)
 	if err != nil {

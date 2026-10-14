@@ -124,7 +124,7 @@ version "1"):
 |---|---|---|---|
 | sup → vault | `Open` | version, instance_id, PCR0–2, job (9 fields) → ok, result, running | once per process |
 | sup → vault | `Lock` | → ok \| split_brain | |
-| vault → sup | `StoreGet` / `StorePut` / `StoreDelete` | key, data, if_match | `vaults/<own id>/…` and the member's own index object read/write; the member's previous vault (from the index, at enrollment) read-only |
+| vault → sup | `StoreGet` / `StorePut` / `StoreDelete` | key, data, if_match | `vaults/<own id>/…`; the member's own index object: read; written only with the process's own vault id and only by an enrollment while it opens; deleted only while it names the process's own vault (the supervisor reads it and deletes the version it read); the member's previous vault (from the index): its state and its header of this release, read-only, only while an enrollment opens |
 | vault → sup | `AttestRecipient` | RSA public key (DER) | RSA 2048–4096 only, no user_data or nonce (a vault cannot obtain an attestation that could forge an ETK descriptor) |
 | vault → sup | `AttestVault` | vault bundle, nonce | only while an enrollment is being opened; the supervisor computes user_data |
 | vault → sup | `KMS` | op, key ARN, a, b | ops GenerateDataKey, Decrypt, DescribeKey, GetKeyPolicy, ListGrants; ARN in the pinned namespace |

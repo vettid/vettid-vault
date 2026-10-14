@@ -13,7 +13,8 @@ import (
 
 // VAULT-MESSAGING 0.24.0 §14 through the host stack: a vault process
 // registers with the push gateway stand-in through the supervisor (which
-// attaches the dev enclave's TEST attestation), the registration survives
+// attaches the dev enclave's TEST attestation) and confirms with the
+// challenge's code (PUSH-GATEWAY 0.5.0), the registration survives
 // a lock, and a host lock wakes the app through the enclave's egress.
 func TestHostPush(t *testing.T) {
 	hs := newHostStack(t)
@@ -25,8 +26,17 @@ func TestHostPush(t *testing.T) {
 	m.enroll(a, "77777777777777777777777777777777")
 
 	ps, err := m.dev.PushRegister(ctxT(t, 30*time.Second), pushwire.Registration{Platform: "fcm", Token: "e2e-token", AppID: "com.vettid.app"})
-	if err != nil || ps.State != "active" || ps.Platform != "fcm" {
+	if err != nil || ps.State != "pending" || ps.Platform != "fcm" {
 		t.Fatalf("push.register: %+v %v", ps, err)
+	}
+	// PUSH-GATEWAY 0.5.0: the app returns the challenge's code; the
+	// confirmation goes through the supervisor without an attestation.
+	if gw.Registrations() != 0 || len(gw.Challenges()) != 1 {
+		t.Fatalf("before confirm: %d registrations, %d challenges", gw.Registrations(), len(gw.Challenges()))
+	}
+	ps, err = m.dev.PushConfirm(ctxT(t, 30*time.Second), gw.LastCode())
+	if err != nil || ps.State != "active" || ps.Platform != "fcm" {
+		t.Fatalf("push.confirm: %+v %v", ps, err)
 	}
 	if gw.Registrations() != 1 {
 		t.Fatalf("stand-in registrations %d, refusals %v", gw.Registrations(), gw.Refusals())

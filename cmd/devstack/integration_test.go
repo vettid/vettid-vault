@@ -337,8 +337,28 @@ func testPush(t *testing.T, info map[string]any) {
 		return r.StatusCode, m
 	}
 	code, m := post(ctl+"/dev/peer/request", "", `{"type":"push.register","body":{"platform":"fcm","token":"devstack-token","app_id":"com.vettid.app"}}`)
-	if code != 200 || !strings.Contains(fmt.Sprint(m), "active") {
+	if code != 200 || !strings.Contains(fmt.Sprint(m), "pending") {
 		t.Fatalf("push.register: %d %v", code, m)
+	}
+	// PUSH-GATEWAY 0.5.0: the stand-in's challenge code, returned as the
+	// app would.
+	rc, err := http.Get(ctl + "/dev/push")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cs struct {
+		Challenges []struct {
+			Code string `json:"code"`
+		} `json:"challenges"`
+	}
+	_ = json.NewDecoder(rc.Body).Decode(&cs)
+	rc.Body.Close()
+	if len(cs.Challenges) == 0 {
+		t.Fatal("no challenge recorded")
+	}
+	code, m = post(ctl+"/dev/peer/request", "", `{"type":"push.confirm","body":{"code":"`+cs.Challenges[len(cs.Challenges)-1].Code+`"}}`)
+	if code != 200 || !strings.Contains(fmt.Sprint(m), "active") {
+		t.Fatalf("push.confirm: %d %v", code, m)
 	}
 	code, m = post(ctl+"/dev/peer/request", "", `{"type":"device.list"}`)
 	if code != 200 || !strings.Contains(fmt.Sprint(m), "push:map[app_id:com.vettid.app") {

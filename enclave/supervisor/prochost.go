@@ -99,7 +99,6 @@ type vproc struct {
 	vaultID  string
 	userGUID string
 	enroll   bool
-	prevRead string // read-only prefix of the member's previous vault (re-enrollment, §11.3)
 	slot     int
 	uid      int // its own uid and gid (UIDBase); 0 without
 	cmd      *exec.Cmd
@@ -107,8 +106,12 @@ type vproc struct {
 	exited   chan struct{}
 	exitCode int
 
-	mu       sync.Mutex
-	opening  bool
+	mu      sync.Mutex
+	opening bool
+	// prevRead are the two objects of the member's previous vault that an
+	// enrollment may read while it opens (re-enrollment, §11.3): its state
+	// and its header sealed to this release. Cleared when the open returns.
+	prevRead []string
 	relayKey ed25519.PublicKey
 	stopping bool          // locked or killed by the supervisor
 	egress   chan struct{} // one place per relay or push request in flight
@@ -358,30 +361,30 @@ func stopReason(exitCode int) (string, slog.Level) {
 // a new one, hand it the job, and keep it if the vault opened.
 func (h *procHost) Open(ctx context.Context, j *enclave.Job) ([]byte, bool, error) {
 	_, _ = h.Lock(ctx, j.VaultID)
-	prev := ""
+	m := h.s.inst.Load().Measurements()
+	var prev []string
 	if j.Op == enclave.OpEnroll {
-		// Re-enrollment may read the member's previous vault (§11.3).
+		// Re-enrollment may read the member's previous vault (§11.3): only
+		// the two objects that decide whether it may be replaced.
 		if b, _, err := h.s.store().Get(ctx, enclave.UserIndexKey(j.UserGUID)); err == nil {
-			if id := string(b); id != j.VaultID && store.ValidKey("vaults/"+id) && !strings.Contains(id, "/") {
-				prev = "vaults/" + id + "/"
-			}
+			prev = previousVaultKeys(string(b), j.VaultID, m.PCR0)
 		}
 	}
 	p, err := h.spawn(j.VaultID, j.UserGUID, j.Op == enclave.OpEnroll)
 	if err != nil {
 		return nil, false, err
 	}
-	p.prevRead = prev
 	p.mu.Lock()
+	p.prevRead = prev
 	p.opening = true
 	p.mu.Unlock()
-	m := h.s.inst.Load().Measurements()
 	fields := append(hostproto.Strings(vaultipc.Version, h.s.instID, m.PCR0, m.PCR1, m.PCR2), j.Fields()...)
 	octx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	r, err := p.conn.Call(octx, vaultipc.KindOpen, fields...)
 	cancel()
 	p.mu.Lock()
 	p.opening = false
+	p.prevRead = nil
 	p.mu.Unlock()
 	if err != nil || len(r) != 4 || string(r[0]) != hostproto.StatusOK {
 		h.kill(p)
@@ -571,13 +574,85 @@ func (h *procHost) Pid(id string) int {
 
 func deny() [][]byte { return hostproto.Strings(vaultipc.StatusDenied) }
 
-// mayRead and mayWrite scope the object store.
-func (p *vproc) mayWrite(key string) bool {
-	return store.ValidKey(key) && (strings.HasPrefix(key, "vaults/"+p.vaultID+"/") || key == enclave.UserIndexKey(p.userGUID))
+// previousVaultKeys returns the objects of the vault named by the member's
+// index that an enrollment of vaultID may read (§11.3): its state and its
+// header sealed to release pcr0. None if the index names vaultID itself or
+// no valid vault.
+func previousVaultKeys(prev, vaultID, pcr0 string) []string {
+	if prev == "" || prev == vaultID || strings.Contains(prev, "/") || !store.ValidKey("vaults/"+prev) {
+		return nil
+	}
+	keys := []string{store.StateKey(prev), store.HeaderKey(prev, pcr0)}
+	for _, k := range keys {
+		if !store.ValidKey(k) {
+			return nil
+		}
+	}
+	return keys
 }
 
+// ownKey reports whether key is one of the process's own vault's objects.
+func (p *vproc) ownKey(key string) bool {
+	return store.ValidKey(key) && strings.HasPrefix(key, "vaults/"+p.vaultID+"/")
+}
+
+// indexKey reports whether key is the process's member's index object.
+func (p *vproc) indexKey(key string) bool {
+	return key == enclave.UserIndexKey(p.userGUID)
+}
+
+// mayRead scopes store reads: the own vault's objects, the own member's
+// index, and the member's previous vault's state and header while an
+// enrollment opens.
 func (p *vproc) mayRead(key string) bool {
-	return p.mayWrite(key) || p.prevRead != "" && store.ValidKey(key) && strings.HasPrefix(key, p.prevRead)
+	if p.ownKey(key) || p.indexKey(key) {
+		return true
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.opening {
+		return false
+	}
+	for _, k := range p.prevRead {
+		if key == k {
+			return true
+		}
+	}
+	return false
+}
+
+// mayPut scopes store writes: the own vault's objects; the member's index
+// only with the process's own vault id as its content, and only from an
+// enrollment that is still opening (the one write of §11.3).
+func (p *vproc) mayPut(key string, data []byte) bool {
+	if p.ownKey(key) {
+		return true
+	}
+	if !p.indexKey(key) || string(data) != p.vaultID {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.enroll && p.opening
+}
+
+// deleteIndex deletes the member's index object only if it names the
+// process's own vault: the supervisor reads it itself, and deletes the
+// version it read, which must be the one the process named.
+func (p *vproc) deleteIndex(ctx context.Context, key string, ver store.Version) [][]byte {
+	st := p.h.s.store()
+	b, v, err := st.Get(ctx, key)
+	if err != nil {
+		return storeReply(err, nil)
+	}
+	if string(b) != p.vaultID {
+		return deny()
+	}
+	if v != ver {
+		return hostproto.Strings(hostproto.StatusConflict)
+	}
+	err = st.Delete(ctx, key, v)
+	return storeReply(err, func() [][]byte { return hostproto.Strings(hostproto.StatusOK) })
 }
 
 func (p *vproc) handle(ctx context.Context, f *hostproto.Frame) [][]byte {
@@ -590,13 +665,19 @@ func (p *vproc) handle(ctx context.Context, f *hostproto.Frame) [][]byte {
 		b, v, err := s.store().Get(ctx, string(f.Fields[0]))
 		return storeReply(err, func() [][]byte { return [][]byte{[]byte(hostproto.StatusOK), b, []byte(v)} })
 	case vaultipc.KindStorePut:
-		if len(f.Fields) != 3 || !p.mayWrite(string(f.Fields[0])) {
+		if len(f.Fields) != 3 || !p.mayPut(string(f.Fields[0]), f.Fields[1]) {
 			return deny()
 		}
 		v, err := s.store().Put(ctx, string(f.Fields[0]), f.Fields[1], store.Version(f.Fields[2]))
 		return storeReply(err, func() [][]byte { return hostproto.Strings(hostproto.StatusOK, string(v)) })
 	case vaultipc.KindStoreDelete:
-		if len(f.Fields) != 2 || !p.mayWrite(string(f.Fields[0])) {
+		if len(f.Fields) != 2 {
+			return deny()
+		}
+		if key := string(f.Fields[0]); p.indexKey(key) {
+			return p.deleteIndex(ctx, key, store.Version(f.Fields[1]))
+		}
+		if !p.ownKey(string(f.Fields[0])) {
 			return deny()
 		}
 		err := s.store().Delete(ctx, string(f.Fields[0]), store.Version(f.Fields[1]))
@@ -829,12 +910,13 @@ func (s *Supervisor) relayFailed(ctx context.Context) {
 const maxPushBody = 16 << 10
 
 // push carries a request to the channel's push gateway (0.24.0, §14.3):
-// POST to /v1/register or /v1/wake of the pinned gateway URL only, signed
-// (Relay Protocol §4.1) by a key that is not this process's relay key
-// (PUSH-GATEWAY §3). For a registration the supervisor attaches the NSM
+// POST to /v1/register, /v1/confirm or /v1/wake of the pinned gateway URL
+// only, signed (Relay Protocol §4.1) by a key that is not this process's
+// relay key (PUSH-GATEWAY §3). For a registration the supervisor attaches the NSM
 // attestation itself, with public_key = the signing key and user_data =
 // the request's digest, which it computes: a vault process never obtains
-// an attestation over user_data of its choosing (PUSH-GATEWAY §5.1).
+// an attestation over user_data of its choosing (PUSH-GATEWAY §5.1). A
+// confirmation (PUSH-GATEWAY 0.5.0 §5.1) and a wake carry none.
 func (p *vproc) push(ctx context.Context, f [][]byte) [][]byte {
 	s := p.h.s
 	base := s.encCfg.PushURL
@@ -842,7 +924,9 @@ func (p *vproc) push(ctx context.Context, f [][]byte) [][]byte {
 		return deny()
 	}
 	path := string(f[0])
-	if path != pushwire.PathRegister && path != pushwire.PathWake {
+	switch path {
+	case pushwire.PathRegister, pushwire.PathConfirm, pushwire.PathWake:
+	default:
 		return deny()
 	}
 	in, err := vaultipc.DecodeHeaders(f[1])

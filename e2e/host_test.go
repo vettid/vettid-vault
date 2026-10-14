@@ -550,6 +550,66 @@ func TestVaultProcessIsolation(t *testing.T) {
 	}
 }
 
+// The member's index object through real vault processes: the enrollment
+// writes it with its own vault id; a second enrollment of the member
+// reads the first vault's state and header and is refused; the vault's
+// deletion removes the index; a new enrollment writes it again.
+func TestHostMemberIndex(t *testing.T) {
+	hs := newHostStack(t)
+	a := hs.start("i-a", 3, 0)
+	const v1, v2 = "11111111111111111111111111111111", "22222222222222222222222222222222"
+	index := func() string {
+		b, _, err := hs.objs.Get(context.Background(), enclave.UserIndexKey("member-1"))
+		if err != nil {
+			return ""
+		}
+		return string(b)
+	}
+	m1 := hs.newApp("member-1", 0x61)
+	m1.enroll(a, v1)
+	if got := index(); got != v1 {
+		t.Fatalf("index after enrollment: %q", got)
+	}
+
+	// A second vault for the member: the enrollment looks at the confirmed
+	// first vault and refuses (§11.3).
+	m1b := hs.newApp("member-1", 0x63)
+	hs.tables.PutVault(parenttest.VaultRow{VaultID: v2, UserGUID: "member-1", State: "enrolling"})
+	e, raw := hs.enclaveOf(a, m1b.dev, true)
+	_, m, err := m1b.dev.VerifyManifest(raw, hs.w.Trust())
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := m1b.dev.BuildEnroll("member-1", pin, e, m, m1b.att)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := hs.post(a, enclave.OpEnroll, v2, "member-1", req)
+	if r, err := m1b.dev.OpenEnrollResult(s.Envelope, req.RequestID); err != nil || r.OK || r.Code != "vault_exists" {
+		t.Fatalf("second enrollment: %v %+v", err, r)
+	}
+	if got := index(); got != v1 {
+		t.Fatalf("index after the refused enrollment: %q", got)
+	}
+
+	// The vault's deletion erases the index that names it.
+	if err := m1.dev.VaultDelete(ctxT(t, 60*time.Second), pin, credPW); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	waitUntil(t, "index erased", func() bool { return index() == "" })
+	waitUntil(t, "state erased", func() bool {
+		_, _, err := hs.objs.Get(context.Background(), "vaults/"+v1+"/state")
+		return err != nil
+	})
+
+	// The member enrolls afresh: the index names the new vault.
+	m1c := hs.newApp("member-1", 0x64)
+	m1c.enroll(a, v2)
+	if got := index(); got != v2 {
+		t.Fatalf("index after the new enrollment: %q", got)
+	}
+}
+
 type selftestResult struct {
 	rep *selftest.Report
 	err error

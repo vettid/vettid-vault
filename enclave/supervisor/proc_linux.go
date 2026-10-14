@@ -175,6 +175,12 @@ func running(pid int) bool {
 	return false
 }
 
+func init() {
+	// The main goroutine keeps the main thread to itself, so killUID's
+	// goroutine always runs on another thread (see there).
+	runtime.LockOSThread()
+}
+
 // killUID sends SIGKILL to every process of uid, without naming any:
 // on a thread of its own, locked to this goroutine, the supervisor sets
 // that thread's real, effective and saved uid to uid (the raw system
@@ -200,7 +206,15 @@ func killUID(uid int) error {
 	done := make(chan error, 1)
 	go func() {
 		runtime.LockOSThread()
-		// Never unlocked: the thread ends with the goroutine.
+		// Never unlocked: the thread ends with the goroutine. Never the
+		// process's main thread, whose ids /proc shows for the whole
+		// process and which the runtime would keep (parked) instead of
+		// ending: init pins the main goroutine to it, and this checks.
+		if unix.Gettid() == os.Getpid() {
+			runtime.UnlockOSThread()
+			done <- errors.New("killUID: on the main thread")
+			return
+		}
 		if _, _, e := unix.RawSyscall(unix.SYS_SETRESUID, uintptr(uid), uintptr(uid), uintptr(uid)); e != 0 {
 			done <- e
 			return

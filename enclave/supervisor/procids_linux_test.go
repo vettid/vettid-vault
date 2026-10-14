@@ -270,6 +270,10 @@ func TestKillUID(t *testing.T) {
 	if left, err := liveProcessesOf(320000); err != nil || len(left) != 0 {
 		t.Fatalf("left %v %v", left, err)
 	}
+	// The process as /proc shows it (its main thread) is still root's.
+	if hasUID(os.Getpid(), 320000) {
+		t.Fatal("the supervisor shows uid 320000")
+	}
 	errs := make(chan error, 64)
 	for range 64 {
 		go func() {

@@ -20,19 +20,29 @@ type limitResult struct {
 // limits reports the rlimits the supervisor applied.
 func limits() map[string]limitResult {
 	out := map[string]limitResult{}
-	for name, r := range map[string]int{"as": unix.RLIMIT_AS, "nofile": unix.RLIMIT_NOFILE, "core": unix.RLIMIT_CORE} {
+	for name, r := range map[string]int{"as": unix.RLIMIT_AS, "nofile": unix.RLIMIT_NOFILE, "core": unix.RLIMIT_CORE, "fsize": unix.RLIMIT_FSIZE} {
 		var l unix.Rlimit
 		if err := unix.Getrlimit(r, &l); err != nil {
 			out[name] = limitResult{detail: err.Error()}
 			continue
 		}
 		ok := l.Cur != unix.RLIM_INFINITY
-		if name == "core" {
+		if name == "core" || name == "fsize" {
 			ok = l.Cur == 0
 		}
 		out[name] = limitResult{ok: ok, detail: fmt.Sprintf("cur=%d max=%d", l.Cur, l.Max)}
 	}
 	return out
+}
+
+// nprocLimit reports RLIMIT_NPROC (set only where the process has a uid
+// of its own).
+func nprocLimit() (limitResult, bool) {
+	var l unix.Rlimit
+	if err := unix.Getrlimit(unix.RLIMIT_NPROC, &l); err != nil {
+		return limitResult{detail: err.Error()}, false
+	}
+	return limitResult{ok: l.Cur != unix.RLIM_INFINITY, detail: fmt.Sprintf("cur=%d max=%d", l.Cur, l.Max)}, true
 }
 
 // cpuMicros is this process's user and system CPU time.

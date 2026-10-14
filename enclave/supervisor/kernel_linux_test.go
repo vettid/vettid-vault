@@ -23,9 +23,19 @@ import (
 // own.
 func settings(t *testing.T, userNS, bpf string) {
 	t.Helper()
-	oldNS, oldBPF := userNSLimitPath, bpfDisabledPath
-	t.Cleanup(func() { userNSLimitPath, bpfDisabledPath = oldNS, oldBPF })
+	oldNS, oldBPF, oldNSM := userNSLimitPath, bpfDisabledPath, nsmPath
+	t.Cleanup(func() { userNSLimitPath, bpfDisabledPath, nsmPath = oldNS, oldBPF, oldNSM })
 	userNSLimitPath, bpfDisabledPath = userNS, bpf
+	// No NSM device here: closing it fails and adds its note.
+	nsmPath = filepath.Join(t.TempDir(), "absent", "nsm")
+}
+
+// withNSMNote reports whether notes are kernel notes followed by the NSM's.
+func withNSMNote(notes []string, kernel int) bool {
+	if len(notes) != kernel+1 {
+		return false
+	}
+	return strings.Contains(notes[kernel], "the NSM is not closed to vault processes, the enclave will not serve vaults")
 }
 
 func setting(t *testing.T, value string) string {
@@ -56,7 +66,7 @@ func TestCloseKernel(t *testing.T) {
 	ns, bpf := setting(t, "15000\n"), setting(t, "0\n")
 	settings(t, ns, bpf)
 	s := &Supervisor{cfg: Config{OwnKernel: true}}
-	if notes := s.closeKernel(); len(notes) != 0 || !s.userNSClosed.Load() {
+	if notes := s.closeKernel(); !withNSMNote(notes, 0) || !s.userNSClosed.Load() || s.nsmClosed.Load() {
 		t.Fatalf("notes %v, closed %v", notes, s.userNSClosed.Load())
 	}
 	if v, _ := readSetting(ns); v != "0" {
@@ -73,9 +83,10 @@ func TestCloseKernel(t *testing.T) {
 	// a note, and no vault process.
 	settings(t, filepath.Join(t.TempDir(), "absent", "max_user_namespaces"), bpf)
 	s = &Supervisor{cfg: Config{OwnKernel: true}}
-	if notes := s.closeKernel(); len(notes) != 1 || !strings.Contains(notes[0], "no vault process will be started") || s.userNSClosed.Load() {
+	if notes := s.closeKernel(); !withNSMNote(notes, 1) || !strings.Contains(notes[0], "no vault process will be started") || s.userNSClosed.Load() {
 		t.Fatalf("notes %v, closed %v", notes, s.userNSClosed.Load())
 	}
+	s.nsmClosed.Store(true) // the refusal is the user namespaces'
 	if err := spawn(s); !errors.Is(err, errSpawn) {
 		t.Fatalf("spawn: %v", err)
 	}
@@ -84,7 +95,7 @@ func TestCloseKernel(t *testing.T) {
 	// takes the write and reads back empty): not closed.
 	settings(t, os.DevNull, os.DevNull)
 	s = &Supervisor{cfg: Config{OwnKernel: true}}
-	if notes := s.closeKernel(); len(notes) != 2 || s.userNSClosed.Load() {
+	if notes := s.closeKernel(); !withNSMNote(notes, 2) || s.userNSClosed.Load() {
 		t.Fatalf("notes %v, closed %v", notes, s.userNSClosed.Load())
 	}
 	for _, v := range []string{"1\n", "15000\n", "", "00x"} {
@@ -120,9 +131,17 @@ func TestSpawnNeedsClosedUserNamespaces(t *testing.T) {
 		t.Fatal("the program was started")
 	}
 	s.userNSClosed.Store(true)
+	// Nor while the NSM is open.
+	if _, err := h.spawn("vault", "user", false); !errors.Is(err, errSpawn) {
+		t.Fatalf("spawn with the NSM open: %v", err)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("the program was started with the NSM open")
+	}
+	s.nsmClosed.Store(true)
 	p, err := h.spawn("vault", "user", false)
 	if err != nil {
-		t.Fatalf("spawn with user namespaces closed: %v", err)
+		t.Fatalf("spawn with user namespaces and the NSM closed: %v", err)
 	}
 	p.mu.Lock()
 	p.stopping = true // ended by the test: nothing to report

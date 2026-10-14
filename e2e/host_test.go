@@ -757,6 +757,20 @@ func TestSelftest(t *testing.T) {
 	if nRefuses != len(seccomp.Names()) || nRefuses < 13 {
 		t.Errorf("%d seccomp_refuses checks for %d denied calls", nRefuses, len(seccomp.Names()))
 	}
+	// The same calls' answers before the filter, informational only.
+	const unfiltered = "vault_process.seccomp_unfiltered_"
+	nUnfiltered := 0
+	for _, c := range rep.Checks {
+		if strings.HasPrefix(c.Name, unfiltered) {
+			nUnfiltered++
+			if c.Required || c.Detail == "" {
+				t.Errorf("%s: required %v, detail %q", c.Name, c.Required, c.Detail)
+			}
+		}
+	}
+	if nUnfiltered != len(seccomp.Names()) {
+		t.Errorf("%d seccomp_unfiltered checks for %d denied calls", nUnfiltered, len(seccomp.Names()))
+	}
 	if rep.PCR0 != enclavetest.Spec(3, "").PCR0Hex() || rep.VaultPeakRSS < 64<<20 {
 		t.Fatalf("pcr0 %s, vault peak RSS %d", rep.PCR0, rep.VaultPeakRSS)
 	}

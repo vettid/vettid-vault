@@ -137,7 +137,7 @@ func match(pa, pb string) error {
 			bad = append(bad, fmt.Sprintf("%s: %v != %v", k, va, vb))
 		}
 	}
-	for _, k := range []string{"eif_sha256", "nitro_cli_version", "toolchain_lock_sha256"} {
+	for _, k := range []string{"eif_sha256", "nitro_cli_version", "blobs_version", "toolchain_lock_sha256"} {
 		if fmt.Sprint(a[k]) != fmt.Sprint(b[k]) {
 			fmt.Printf("eifinfo: %s differs (not required to match): %v / %v\n", k, a[k], b[k])
 		}

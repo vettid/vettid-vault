@@ -42,11 +42,15 @@ func SelftestMain() {
 	if err != nil {
 		os.Exit(ExitChannel)
 	}
+	// The kernel's own answers to the denied calls, before the filter is
+	// installed: reported (informational) so that a run shows each refusal
+	// below is the filter's and not the kernel's.
+	unfiltered := seccomp.Probe()
 	serr := seccomp.Install()
-	os.Exit(serveSelftest(c, serr))
+	os.Exit(serveSelftest(c, serr, unfiltered))
 }
 
-func serveSelftest(c net.Conn, seccompErr error) int {
+func serveSelftest(c net.Conn, seccompErr error, unfiltered map[string]error) int {
 	done := make(chan struct{})
 	var conn *hostproto.Conn
 	// conn is set before any frame is handled: the reader starts inside
@@ -61,7 +65,7 @@ func serveSelftest(c net.Conn, seccompErr error) int {
 		case f.Kind != vaultipc.KindSelftest || len(f.Fields) != 1:
 			return hostproto.Strings(hostproto.StatusInvalid)
 		}
-		r := runSelftest(ctx, channel{c: conn}, string(f.Fields[0]), seccompErr)
+		r := runSelftest(ctx, channel{c: conn}, string(f.Fields[0]), seccompErr, unfiltered)
 		b, _ := json.Marshal(r)
 		return [][]byte{[]byte(hostproto.StatusOK), b}
 	}, nil)
@@ -92,7 +96,7 @@ func procField(path, field string) uint64 {
 	return 0
 }
 
-func runSelftest(ctx context.Context, ch channel, keyARN string, seccompErr error) *selftest.VaultResult {
+func runSelftest(ctx context.Context, ch channel, keyARN string, seccompErr error, unfiltered map[string]error) *selftest.VaultResult {
 	res := &selftest.VaultResult{}
 	add := func(name string, ok, req bool, detail string) {
 		res.Checks = append(res.Checks, selftest.Check{Name: name, OK: ok, Required: req, Detail: detail})
@@ -107,6 +111,11 @@ func runSelftest(ctx context.Context, ch channel, keyARN string, seccompErr erro
 	probes := seccomp.Probe()
 	for _, name := range slices.Sorted(maps.Keys(probes)) {
 		add("vault_process.seccomp_refuses_"+name, seccomp.Refused(probes[name]), true, errString(probes[name]))
+	}
+	// What the kernel answered the same calls before the filter: OK when
+	// that was not EPERM.
+	for _, name := range slices.Sorted(maps.Keys(unfiltered)) {
+		add("vault_process.seccomp_unfiltered_"+name, !seccomp.Refused(unfiltered[name]), false, errString(unfiltered[name]))
 	}
 	for name, v := range limits() {
 		add("vault_process.rlimit_"+name, v.ok, true, v.detail)

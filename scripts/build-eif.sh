@@ -110,10 +110,16 @@ fi
 "$go" run ./cmd/eifinfo pcrs "$out/vault-enclave.eif" "$out/build-enclave.json" >&2
 "$go" run ./cmd/eifinfo describe "$out/vault-enclave.eif" >"$out/eif.json"
 
+# With the pinned toolchain: the lock's SHA-256 and the kernel blob set's
+# release (blobs_version, for the reader; the lock's hash already pins it).
 locksum=""
-if [ -n "${EIF_BUILDER:-}" ]; then locksum="$(sha256sum release/eif-toolchain.lock | cut -d' ' -f1)"; fi
+blobsver=""
+if [ -n "${EIF_BUILDER:-}" ]; then
+  locksum="$(sha256sum release/eif-toolchain.lock | cut -d' ' -f1)"
+  blobsver="$(sed -n 's/^blobs_version=//p' release/eif-toolchain.lock)"
+fi
 
-python3 - "$out/eif.json" "$commit" "$binsum" "$channel" "$cfgsum" "$release" "$parentsum" "$nitro_version" "$locksum" "$SOURCE_DATE_EPOCH" <<'PY' | tee "$out/measurements.json"
+python3 - "$out/eif.json" "$commit" "$binsum" "$channel" "$cfgsum" "$release" "$parentsum" "$nitro_version" "$locksum" "$SOURCE_DATE_EPOCH" "$blobsver" <<'PY' | tee "$out/measurements.json"
 import json, sys
 e = json.load(open(sys.argv[1]))
 print(json.dumps({
@@ -128,6 +134,7 @@ print(json.dumps({
     "eif_measured_sha256": e["eif_measured_sha256"],
     "pcr0": e["pcr0"], "pcr1": e["pcr1"], "pcr2": e["pcr2"],
     "nitro_cli_version": sys.argv[8],
+    "blobs_version": sys.argv[11],
     "toolchain_lock_sha256": sys.argv[9],
 }, indent=2))
 PY

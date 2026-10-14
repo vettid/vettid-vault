@@ -86,8 +86,16 @@ build() {
   (cd "$WORK/src" && CGO_ENABLED=0 GOTOOLCHAIN=local GOFLAGS=-mod=readonly "$(go_bin)" build -trimpath -buildvcs=false \
      -o "$WORK/bin/vault-parent" ./cmd/vault-parent) || fail "vault-parent build"
 
-  step "EIF (reproducible image, nitro-cli $(rpm -q --qf '%{VERSION}' aws-nitro-enclaves-cli))"
-  (cd "$WORK/src" && GO="$(go_bin)" GOTOOLCHAIN=local scripts/build-eif.sh "$WORK/out") || fail "EIF build"
+  # The EIF is built with the pinned toolchain (release/eif-toolchain.lock),
+  # as a release is: the host's own nitro-cli package carries a different
+  # enclave kernel, so an EIF built with it would not be the release's.
+  local lock builder
+  lock="$(sha256sum "$WORK/src/release/eif-toolchain.lock" | cut -d' ' -f1)"
+  builder="vettid-eif-builder:${lock:0:16}"
+  step "EIF toolchain image $builder"
+  docker build --pull=false -q -f "$WORK/src/release/Dockerfile.eif-builder" -t "$builder" "$WORK/src/release" >/dev/null || fail "EIF toolchain image"
+  step "EIF (reproducible image, pinned toolchain)"
+  (cd "$WORK/src" && EIF_BUILDER="$builder" GO="$(go_bin)" GOTOOLCHAIN=local scripts/build-eif.sh "$WORK/out") || fail "EIF build"
   cp "$WORK/out/measurements.json" "$WORK/measurements.json"
   echo "measurements:"
   cat "$WORK/measurements.json"

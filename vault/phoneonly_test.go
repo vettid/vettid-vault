@@ -104,7 +104,7 @@ func TestHeldRequestOfAppOnlyTypeNotRun(t *testing.T) {
 	rid, _ := envelope.NewULID(time.Now())
 	d.m.mu.Lock()
 	d.m.hold(desk.peer, &envelope.Inner{ID: rid, Type: "connection.invite.create", TS: time.Now(), Body: []byte(`{"ttl_seconds":600}`)},
-		"desk1/"+rid, time.Now())
+		"desk1/"+rid, false, time.Now())
 	d.m.mu.Unlock()
 	aid := ""
 	for id := range d.m.st.Held {

@@ -22,7 +22,9 @@ rules (ask wins), the 0.22.0 errata and the month hint; for 0.23.1: the
 0.23.0 errata; for 0.23.2: the device on `vault.unlocked` and
 `vault.locked`; for 0.26.0: the feature allowlist and the per-channel
 Android package; for 0.27.0: the per-vault signer binding; and for 0.27.2: the collect
-loop's waits and the shared HTTP/2 connections (§12.2, §12.2.1); and,
+loop's waits and the shared HTTP/2 connections (§12.2, §12.2.1); for
+0.32.0 (the rules for every message, not release A): `response_too_large`,
+volatile `message.list` and `message.get`, and `message.list` pages; and,
 ahead of its spec text, a connected but silent parent (§12.3,
 VAULT-HOST-PROTOCOL §13 point 1).)
 
@@ -252,7 +254,7 @@ in `e2e.TestCredentialFlow`, `e2e.TestProfileItemsAuditFeed` and
 | 3.5.3 | A lost response never loses the credential: the latest blob is kept until `credential.ack` (even with backup off) and fetched with `credential.get`; responses are cached | `credential.TestLatestBlobKeptUntilAck` |
 | 3.5.4 | UTK pool of 20, refill by 10 under 10, expiry, single use (`utk_invalid` on reuse), bound to the device, the type and the request id | `credential.TestUTKPool`, `credwire.TestPayloadBinding`, `credwire.FuzzOpenPayload`, `e2e.TestCredentialFlow` (reuse refused, replenishment through the relay) |
 | 3.5.4 | Critical values return sealed to a one-time reply key carried in the UTK payload; nothing secret in the clear in the response | `credential.TestOperateAndReplyKey`, `items.TestCriticalItems`, `credwire.TestValue` |
-| 8.2 | A volatile response is neither cached nor written to state; a retransmission is executed again (runtime rule; no type of 0.4.1 needs it) | `vault.TestVolatileResponses` |
+| 8.2 | A volatile response is neither cached nor written to state; a retransmission is executed again (runtime rule; used since 0.32.0 by `message.list` and `message.get`) | `vault.TestVolatileResponses` |
 | 3.5.7 | A vault without a credential answers `credential_required` except to the listed types, stays provisional, records `has_credential` | `vault.TestCredentialGate`, `e2e.TestNoCredentialNoRecovery`, `e2e.TestVaultctlSmoke` |
 | 3.5.3 | Unlock window: memory only; ends at expiry, `credential.lock`, rotation, delete and vault lock | `credential.TestUnlockWindow` |
 | 3.5.5, 3.4 | Rotation: new credential key, `ik`/`kem` rotated in the same flush; nothing changes if the identity rotation fails | `credential.TestRotateRotatesIdentity`, `e2e.TestCredentialFlow` |
@@ -961,3 +963,17 @@ silent.
 | 12.3 | A registry write that hangs does not stop the parent's pings: it is given up after 10 s; the parent warns when its heartbeat is late | `parent.TestPingsGoOnWhenTheRegistryHangs` (with 150 ms: a ping at every tick past a table that never answers, each still followed by its write). The value itself (10 s) is not asserted |
 | VAULT-HOST-PROTOCOL 3.4 | A connection that takes no write deadline is used all the same and says so once | `hostproto.TestWriteTimeoutRefused` |
 | 12.3 | The parent sends `Ping` every 20 s (the S10 parent too) | **not covered by a test of the interval**: `parent.Config.Heartbeat` defaults to 20 s, and neither it nor `cmd/vault-parent -heartbeat` refuses a larger value; `parent.TestRegistryAndStore` runs the heartbeat at 100 ms |
+
+## Responses are never silence; `message.list` pages; volatile reads (§8.1, §8.2, §10.1, §10.5.2, §15 item 38; 0.32.0)
+
+The rules of 0.32.0 that apply to every message ("0.32.0", not
+"0.32.0, release A"), for staging release 13. The attachments of
+release A (§10.5.1, `message.attachment.*`) are not built here.
+
+| § | Requirement | Test(s) |
+|---|---|---|
+| 8.1, 10.1 | A response that cannot be sealed within §5.5's bound (padded inner plaintext > 245,760 bytes, checked with the widest `seq` so that a retransmission fits too) is replaced by the error `response_too_large` (no body), cached and sent instead, never silence; on every response path: cached answers, volatile answers (sent, not cached), and a cached answer of an older release resent on a retransmission | `vault.TestResponseTooLarge`, `vault.TestResponseTooLargeAtMaxSeq`, `vault.TestResendCachedTooLarge` |
+| 8.2, 10.5.2 | `message.list` and `message.get` are volatile: never cached, never in vault state, a retransmission executed again; an agent's answer (a LEASH grant) is volatile too | `messaging.TestListGetVolatile`, `vault.TestVolatileHeldAndAgents`, `e2e.TestMessageListPages` |
+| 8.2 | No answer to a volatile request is cached, errors included (a refusal, the held-approvals limit, `denied`, `approval_timeout`), so no retransmission is answered from a cache. A volatile request referred for an app's approval is held: a retransmission while it waits is a duplicate, and once answered its id is forgotten. `message.list` and `message.get` have no desktop step-up, so in practice only an agent's LEASH referral holds them; the desktop path is exercised with a test type | `vault.TestVolatileErrorsNotCached` (refused, then held under the same id: one answer, after the approval; denied; timed out; the limit), `vault.TestVolatileHeldAndAgents` (`test.bigv`: a desktop's step-up and an agent's referral) |
+| 10.5.2 | `message.list{before?}`: newest first from the position `before` (arrival order, exclusive) or the newest, at most `limit` and at most 131,072 bytes of `body`, at least one message when one is older; oldest first; `next_before` = its oldest message's id, only when older messages remain; a cursor not held (unknown, deleted, another conversation's) is `not_found` | `messaging.TestListPagesByBytes`, `messaging.TestListAtLeastOne`, `messaging.TestListCursor`, `e2e.TestMessageListPages` |
+| 8.1, 15 item 38 | The other lists against §5.5: `item.list` pages by bytes (0.21.0); `audit.list` fits (about 216 KB at most); `feed.list` (guide items) and `connection.list` (stored profiles) can exceed it and are answered `response_too_large` until the specification pages them | `vault.TestResponseTooLarge` (the rule); no paging test, by design |

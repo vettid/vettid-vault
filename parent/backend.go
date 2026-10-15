@@ -42,6 +42,9 @@ var (
 	// there is no row). The parent does not sweep the vault's attachment
 	// objects then (VAULT-HOST-PROTOCOL 0.1.9 P15).
 	ErrNotMarked = errors.New("parent: vault row not marked deleted")
+	// ErrAlarmNotWritten: a `deleted` event marked the row but its
+	// vault_deleted notice was not written; the sweep goes ahead.
+	ErrAlarmNotWritten = errors.New("parent: vault_deleted notice not written")
 	// ErrQueueDeletedRecently means a queue of the same name was deleted
 	// less than 60 s ago and SQS refuses to create it yet (a restart right
 	// after a clean stop). Queues.Create returns it wrapped.
@@ -70,6 +73,15 @@ type ObjectRef struct {
 // role may list vaults/*/att/* only).
 type ObjectLister interface {
 	ListObjects(ctx context.Context, prefix string) ([]ObjectRef, error)
+}
+
+// SweepTables is what P15's sweep needs of the vault table: the row's
+// state before each pass, the sweeps left pending by an earlier parent,
+// and the end of one.
+type SweepTables interface {
+	VaultState(ctx context.Context, vaultID string) (state string, exists bool, err error)
+	PendingSweeps(ctx context.Context) ([]string, error)
+	SweepDone(ctx context.Context, vaultID string, now time.Time) error
 }
 
 // QueueMessage is one received SQS message.

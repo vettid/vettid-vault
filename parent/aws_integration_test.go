@@ -286,6 +286,23 @@ func TestAWSBackend(t *testing.T) {
 	if it["state"].(*ddbS).Value != "deleted" || it["alarm"].(*ddbtypes.AttributeValueMemberM).Value["kind"].(*ddbS).Value != "vault_deleted" {
 		t.Fatalf("deleted: %v", it)
 	}
+	// P15: the sweep is recorded pending with the deletion and resumed
+	// from it; its end removes the record.
+	if ids, err := a.PendingSweeps(ctx); err != nil || len(ids) != 1 || ids[0] != "v1" {
+		t.Fatalf("pending sweeps %v %v", ids, err)
+	}
+	if st, ok, err := a.VaultState(ctx, "v1"); err != nil || !ok || st != "deleted" {
+		t.Fatalf("vault state %q %v %v", st, ok, err)
+	}
+	if _, ok, err := a.VaultState(ctx, "nope"); err != nil || ok {
+		t.Fatalf("missing row: %v %v", ok, err)
+	}
+	if err := a.SweepDone(ctx, "v1", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if ids, err := a.PendingSweeps(ctx); err != nil || len(ids) != 0 {
+		t.Fatalf("pending sweeps after done %v %v", ids, err)
+	}
 
 	// Slots: only queued slots are answered.
 	if _, err := db.PutItem(ctx, &dynamodb.PutItemInput{TableName: &tn.Requests, Item: map[string]ddbAttr{"request_id": s("r1"), "status": s("queued")}}); err != nil {

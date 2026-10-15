@@ -178,7 +178,7 @@ func TestTransferAdmissionOrder(t *testing.T) {
 // The channel request: a vault process's Transfer is admitted, answered
 // busy after its wait, and ended by TransferDone or by its exit.
 func TestTransferThroughChannel(t *testing.T) {
-	s := &Supervisor{xfers: newAdmission(func() uint64 { return 0 }, 0)}
+	s := &Supervisor{xfers: newAdmission(func() uint64 { return 4 << 30 }, 0)}
 	h := &procHost{s: s, procs: map[string]*vproc{}}
 	p := &vproc{h: h, vaultID: "aaaa"}
 	call := func(ticket, prio, ms string) string {
@@ -203,5 +203,129 @@ func TestTransferThroughChannel(t *testing.T) {
 	s.xfers.releaseAll(p) // as procHost.exited does
 	if in, _ := s.xfers.counts(); in != 0 {
 		t.Fatalf("%d transfers left after the process ended", in)
+	}
+}
+
+// A vault process is not trusted with its transfers (§10.5.1): an
+// admitted transfer it never ends is reclaimed after the lease; an end that
+// arrives before its request (a lost or reordered TransferDone) refuses
+// that request; it has at most 2 requests waiting; its declared owner-fetch
+// priority is honoured for one transfer at a time; unknown memory admits
+// nothing.
+func TestTransferAdmissionUntrusted(t *testing.T) {
+	var clock atomic.Int64
+	clock.Store(time.Now().UnixNano())
+	now := func() time.Time { return time.Unix(0, clock.Load()) }
+	a := newAdmission(func() uint64 { return 4 << 30 }, 0)
+	a.now = now
+	bg := context.Background()
+	short := func() context.Context {
+		ctx, cancel := context.WithTimeout(bg, 100*time.Millisecond)
+		t.Cleanup(cancel)
+		return ctx
+	}
+	// A process holding two tickets and never ending them: reclaimed.
+	if _, err := a.admit(bg, "greedy", "1", vault.PrioTransfer); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.admit(bg, "greedy", "2", vault.PrioTransfer); err != nil {
+		t.Fatal(err)
+	}
+	if !a.holds("greedy") {
+		t.Fatal("holds")
+	}
+	if _, err := a.admit(short(), "greedy", "3", vault.PrioTransfer); err == nil {
+		t.Fatal("a third transfer")
+	}
+	clock.Add(int64(transferLease))
+	if a.holds("greedy") {
+		t.Fatal("tickets kept past the lease")
+	}
+	if _, err := a.admit(short(), "greedy", "4", vault.PrioTransfer); err != nil {
+		t.Fatal("not admitted after the lease")
+	}
+	a.releaseAll("greedy")
+
+	// TransferDone before Transfer: the request is refused, not admitted
+	// for ever.
+	a.release("late", "x")
+	if _, err := a.admit(short(), "late", "x", vault.PrioTransfer); err == nil {
+		t.Fatal("a request ended before it came was admitted")
+	}
+	if in, _ := a.counts(); in != 0 {
+		t.Fatalf("%d in flight", in)
+	}
+	if _, err := a.admit(short(), "late", "y", vault.PrioTransfer); err != nil {
+		t.Fatal("another request of the process")
+	}
+	a.releaseAll("late")
+
+	// At most 2 waiting per process.
+	full := newAdmission(func() uint64 { return 4 << 30 }, 0)
+	full.max = 0
+	for i, want := range []bool{true, true, false} {
+		ctx, cancel := context.WithTimeout(bg, 300*time.Millisecond)
+		started := time.Now()
+		_, err := full.admit(ctx, "w", strconv.Itoa(i), vault.PrioTransfer)
+		cancel()
+		_ = err
+		waited := time.Since(started) > 200*time.Millisecond
+		if waited != want {
+			t.Fatalf("request %d waited %v", i, waited)
+		}
+		if i < 2 {
+			// keep it waiting: start it again in the background
+			go func() { _, _ = full.admit(context.Background(), "w", "bg"+strconv.Itoa(i), vault.PrioTransfer) }()
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	full.releaseAll("w")
+
+	// The owner fetch's priority is honoured once at a time per process.
+	b := newAdmission(func() uint64 { return 4 << 30 }, 0)
+	b.mu.Lock()
+	b.max = 0 // queue everything
+	b.mu.Unlock()
+	go func() { _, _ = b.admit(bg, "p", "f1", vault.PrioOwnerFetch) }()
+	go func() { _, _ = b.admit(bg, "q", "t1", vault.PrioTransfer) }()
+	time.Sleep(30 * time.Millisecond)
+	go func() { _, _ = b.admit(bg, "p", "f2", vault.PrioOwnerFetch) }()
+	time.Sleep(30 * time.Millisecond)
+	b.mu.Lock()
+	prios := map[string]int{}
+	for _, w := range b.waiters {
+		prios[w.t.id] = w.prio
+	}
+	b.mu.Unlock()
+	if prios["f1"] != vault.PrioOwnerFetch || prios["f2"] != vault.PrioTransfer {
+		t.Fatalf("priorities %v", prios)
+	}
+	b.releaseAll("p")
+	b.releaseAll("q")
+
+	// Unknown memory: nothing is admitted.
+	z := newAdmission(func() uint64 { return 0 }, 0)
+	if _, err := z.admit(short(), "v", "1", vault.PrioOwnerFetch); err == nil {
+		t.Fatal("admitted with unknown memory")
+	}
+}
+
+// The relay proxy carries blob bodies (downloads, uploads over 1 MiB) only
+// for a process holding an admitted transfer.
+func TestBlobBodiesNeedAdmission(t *testing.T) {
+	s := &Supervisor{xfers: newAdmission(func() uint64 { return 4 << 30 }, 0)}
+	p := &vproc{h: &procHost{s: s}, vaultID: "aaaa"}
+	if p.blobBodyAllowed("GET", "/v1/blob/01JB2Z6V9K3M4N5P6Q7R8S9T60", 0) || p.blobBodyAllowed("PUT", "/v1/blob/mbx", blobBodyThreshold+1) {
+		t.Fatal("a blob body without an admitted transfer")
+	}
+	if !p.blobBodyAllowed("PUT", "/v1/blob/mbx", 1000) || !p.blobBodyAllowed("DELETE", "/v1/blob/x", 0) || !p.blobBodyAllowed("POST", "/v1/blobs", 10) ||
+		!p.blobBodyAllowed("GET", "/v1/mailbox", 0) {
+		t.Fatal("refused a request that is no blob body")
+	}
+	if _, err := s.xfers.admit(context.Background(), p, "t", vault.PrioTransfer); err != nil {
+		t.Fatal(err)
+	}
+	if !p.blobBodyAllowed("GET", "/v1/blob/01JB2Z6V9K3M4N5P6Q7R8S9T60", 0) || !p.blobBodyAllowed("PUT", "/v1/blob/mbx", 8<<20) {
+		t.Fatal("refused with an admitted transfer")
 	}
 }

@@ -843,6 +843,9 @@ func (p *vproc) http(ctx context.Context, f [][]byte) [][]byte {
 	if err != nil {
 		return deny()
 	}
+	if !p.blobBodyAllowed(method, u.EscapedPath(), len(f[3])) {
+		return deny()
+	}
 	if hdr.Get(relayauth.HeaderKey) != "" {
 		sr, err := relayauth.ParseHeaders(hdr)
 		if err != nil || sr.Verify(method, u.EscapedPath(), relayauth.BodyHash(f[3]), time.Now()) != nil {
@@ -1112,6 +1115,24 @@ func validTicket(b []byte) bool {
 		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'z') {
 			return false
 		}
+	}
+	return true
+}
+
+// blobBodyThreshold is the largest blob upload a vault process may make
+// without an admitted transfer.
+const blobBodyThreshold = 1 << 20
+
+// blobBodyAllowed: the relay proxy carries a blob's body (a download, or an
+// upload over 1 MiB) only for a process holding an admitted transfer
+// (§10.5.1), so that admission by memory cannot be bypassed.
+func (p *vproc) blobBodyAllowed(method, path string, n int) bool {
+	if !strings.HasPrefix(path, "/v1/blob/") {
+		return true
+	}
+	if method == http.MethodGet || method == http.MethodPut && n > blobBodyThreshold {
+		x := p.h.s.xfers
+		return x != nil && x.holds(p)
 	}
 	return true
 }

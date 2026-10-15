@@ -268,7 +268,9 @@ func (q *Queues) Pending(url string) int {
 
 // VaultRow is a vault-table item.
 type VaultRow struct {
-	VaultID, UserGUID, State                  string
+	VaultID, UserGUID, State string
+	// SweepPending: att_sweep_pending (P15).
+	SweepPending                              bool
 	LeaseInstance                             string
 	LeaseExpires                              int64
 	SealedRelease, VaultVersion, StateVersion string
@@ -529,9 +531,45 @@ func (t *Tables) Lifecycle(_ context.Context, ev parent.Lifecycle, me string, no
 		}
 	}
 	if ev.Event == "deleted" {
+		r.SweepPending = true
 		t.ids++
 		r.AlarmKind, r.AlarmID, r.AlarmAt, r.AlarmPending = "vault_deleted", strconv.Itoa(t.ids), now.Unix(), true
 		r.Alarms++
+	}
+	return nil
+}
+
+// VaultState implements parent.SweepTables.
+func (t *Tables) VaultState(_ context.Context, id string) (string, bool, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	r := t.vaults[id]
+	if r == nil {
+		return "", false, nil
+	}
+	return r.State, true, nil
+}
+
+// PendingSweeps implements parent.SweepTables.
+func (t *Tables) PendingSweeps(context.Context) ([]string, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	var out []string
+	for id, r := range t.vaults {
+		if r.SweepPending {
+			out = append(out, id)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// SweepDone implements parent.SweepTables.
+func (t *Tables) SweepDone(_ context.Context, id string, _ time.Time) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if r := t.vaults[id]; r != nil && r.State == "deleted" {
+		r.SweepPending = false
 	}
 	return nil
 }

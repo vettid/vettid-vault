@@ -2,6 +2,7 @@ package parent
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"sort"
@@ -20,7 +21,9 @@ type listObjects struct {
 	deletes  []string
 }
 
-func (o *listObjects) Get(context.Context, string) ([]byte, string, error) { return nil, "", ErrNotFound }
+func (o *listObjects) Get(context.Context, string) ([]byte, string, error) {
+	return nil, "", ErrNotFound
+}
 func (o *listObjects) Put(context.Context, string, []byte, string) (string, error) {
 	return "", ErrConflict
 }
@@ -66,58 +69,98 @@ func (o *listObjects) keys() []string {
 	return ks
 }
 
-// lifeTables answers Lifecycle as the vault row would: marked, or refused
-// because another instance holds the lease.
+// lifeTables answers Lifecycle as the vault row would (marked; refused
+// because another instance holds the lease; marked but the notice not
+// written), and the sweep's reads of the row.
 type lifeTables struct {
 	Tables
-	held bool
+	result  error
+	mu      sync.Mutex
+	state   string // the row's state; "" for no row
+	pending []string
+	done    []string
 }
 
-func (t lifeTables) Lifecycle(context.Context, Lifecycle, string, time.Time) error {
-	if t.held {
-		return ErrNotMarked
-	}
+func (t *lifeTables) Lifecycle(context.Context, Lifecycle, string, time.Time) error { return t.result }
+func (t *lifeTables) VaultState(context.Context, string) (string, bool, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.state, t.state != "", nil
+}
+func (t *lifeTables) PendingSweeps(context.Context) ([]string, error) { return t.pending, nil }
+func (t *lifeTables) SweepDone(_ context.Context, id string, _ time.Time) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.done = append(t.done, id)
 	return nil
 }
 
 // VAULT-HOST-PROTOCOL 0.1.9 P15: after the parent's own conditional update
-// marked a vault's row deleted, it deletes every object under
-// vaults/<vault_id>/att/ (retrying until the prefix is empty), and nothing
-// else; when the update was refused (another instance holds the lease) it
-// sweeps nothing.
+// marked a vault's row deleted (whether or not the vault_deleted notice
+// was written), it deletes every object under vaults/<vault_id>/att/,
+// retrying until the prefix is empty, and nothing else, then removes the
+// row's record of the pending sweep; when the update was refused it sweeps
+// nothing; a row that is no longer deleted (the vault id enrolled again)
+// stops the sweep; sweeps an earlier parent left pending resume at start.
 func TestAttachmentSweepAfterDeleted(t *testing.T) {
 	const vid = "0123456789abcdef0123456789abcdef"
-	for _, held := range []bool{false, true} {
-		objs := &listObjects{failList: 1, objs: map[string]string{
-			"vaults/" + vid + "/att/01jb2z6v9k3m4n5p6q7r8s9t60":   `"1"`,
-			"vaults/" + vid + "/att/01jb2z6v9k3m4n5p6q7r8s9t60.t": `"2"`,
-			"vaults/" + vid + "/att/01jb2z6v9k3m4n5p6q7r8s9t61":   `"3"`,
-			"vaults/" + vid + "/state":                            `"4"`,
-			"vaults/" + vid + "x/att/01jb2z6v9k3m4n5p6q7r8s9t60":  `"5"`,
-			"vaults/other/att/01jb2z6v9k3m4n5p6q7r8s9t60":         `"6"`,
-		}}
-		ctx, cancel := context.WithCancel(context.Background())
-		p := &Parent{cfg: Config{Objects: objs, Tables: lifeTables{held: held}, SweepRetry: 10 * time.Millisecond},
-			log: slog.New(slog.NewTextHandler(io.Discard, nil)), now: time.Now, running: map[string]*lease{}, taking: map[string]int{},
-			events: make(chan func(context.Context), 8), runCtx: ctx}
-		go p.eventWorker(ctx)
-		p.onLifecycle(Lifecycle{Event: "deleted", VaultID: vid})
-		want := []string{"vaults/" + vid + "/state", "vaults/" + vid + "x/att/01jb2z6v9k3m4n5p6q7r8s9t60", "vaults/other/att/01jb2z6v9k3m4n5p6q7r8s9t60"}
-		if held {
-			want = nil
-			for k := range objs.objs {
-				want = append(want, k)
+	for _, c := range []struct {
+		name   string
+		result error
+		state  string
+		resume bool
+		swept  bool
+	}{
+		{"marked", nil, "deleted", false, true},
+		{"marked, rows gone", nil, "", false, true},
+		{"marked, notice not written", errors.Join(ErrAlarmNotWritten, errors.New("ddb")), "deleted", false, true},
+		{"lease held elsewhere", ErrNotMarked, "deleted", false, false},
+		{"enrolled again", nil, "enrolling", false, false},
+		{"resumed after a restart", ErrNotMarked, "deleted", true, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			objs := &listObjects{failList: 1, objs: map[string]string{
+				"vaults/" + vid + "/att/01jb2z6v9k3m4n5p6q7r8s9t60":   `"1"`,
+				"vaults/" + vid + "/att/01jb2z6v9k3m4n5p6q7r8s9t60.t": `"2"`,
+				"vaults/" + vid + "/att/01jb2z6v9k3m4n5p6q7r8s9t61":   `"3"`,
+				"vaults/" + vid + "/state":                            `"4"`,
+				"vaults/" + vid + "x/att/01jb2z6v9k3m4n5p6q7r8s9t60":  `"5"`,
+				"vaults/other/att/01jb2z6v9k3m4n5p6q7r8s9t60":         `"6"`,
+			}}
+			all := objs.keys()
+			tb := &lifeTables{result: c.result, state: c.state}
+			if c.resume {
+				tb.pending = []string{vid}
 			}
-			sort.Strings(want)
-		}
-		deadline := time.Now().Add(5 * time.Second)
-		for strings.Join(objs.keys(), ",") != strings.Join(want, ",") && time.Now().Before(deadline) {
-			time.Sleep(10 * time.Millisecond)
-		}
-		time.Sleep(50 * time.Millisecond)
-		if got := objs.keys(); strings.Join(got, ",") != strings.Join(want, ",") {
-			t.Fatalf("held=%v: left %v", held, got)
-		}
-		cancel()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			p := &Parent{cfg: Config{Objects: objs, Tables: tb, SweepRetry: 10 * time.Millisecond},
+				log: slog.New(slog.NewTextHandler(io.Discard, nil)), now: time.Now, running: map[string]*lease{}, taking: map[string]int{},
+				events: make(chan func(context.Context), 8), runCtx: ctx}
+			go p.eventWorker(ctx)
+			if c.resume {
+				p.resumeSweeps(ctx)
+			} else {
+				p.onLifecycle(Lifecycle{Event: "deleted", VaultID: vid})
+			}
+			want := all
+			if c.swept {
+				want = []string{"vaults/" + vid + "/state", "vaults/" + vid + "x/att/01jb2z6v9k3m4n5p6q7r8s9t60", "vaults/other/att/01jb2z6v9k3m4n5p6q7r8s9t60"}
+			}
+			deadline := time.Now().Add(5 * time.Second)
+			for strings.Join(objs.keys(), ",") != strings.Join(want, ",") && time.Now().Before(deadline) {
+				time.Sleep(10 * time.Millisecond)
+			}
+			time.Sleep(100 * time.Millisecond)
+			if got := objs.keys(); strings.Join(got, ",") != strings.Join(want, ",") {
+				t.Fatalf("left %v", got)
+			}
+			tb.mu.Lock()
+			done := len(tb.done)
+			tb.mu.Unlock()
+			if c.swept != (done == 1) {
+				t.Fatalf("sweep records removed: %d", done)
+			}
+		})
 	}
 }

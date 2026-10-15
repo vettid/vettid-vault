@@ -304,6 +304,12 @@ func (m *Manager) runHeld(ctx context.Context, h *HeldRequest, now time.Time) st
 	body, herr := te.handler.Handle(ctx, s, in)
 	var he *HandlerError
 	switch {
+	case herr == nil && te.spec.Volatile:
+		// §8.2: never cached. Forgetting the id lets a retransmission
+		// be executed again, as for any volatile request.
+		delete(m.st.SeenInner, h.Key)
+		m.respondVolatile(p, in, body, now)
+		return "ok"
 	case herr == nil:
 		m.respond(p, in, h.Key, body, now)
 		return "ok"

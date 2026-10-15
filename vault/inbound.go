@@ -10,6 +10,7 @@ import (
 
 	"github.com/vettid/vettid-relay/relayauth"
 
+	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/handshake"
 	"github.com/vettid/vettid-vault/vms/suite"
@@ -387,17 +388,22 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 		return ackAfterFlush
 	}
 	key := p.ID + "|" + in.ID
-	volatile := te != nil && te.spec.Volatile && te.spec.Request && in.Re == "" && te.allows(p.Kind)
-	if !eph && !volatile {
+	// Volatile responses (§8.2) also to an agent whose grant covers the
+	// type (LEASH decides below): an agent's answer is never cached either.
+	volatile := te != nil && te.spec.Volatile && te.spec.Request && in.Re == "" && (te.allows(p.Kind) || p.Kind == KindAgent)
+	if !eph {
 		if _, dup := m.st.SeenInner[key]; dup {
 			// §8.2 layer 2: a retransmission. Re-send a cached response, in a
-			// new envelope; never re-execute.
+			// new envelope; never re-execute. A volatile request is seen
+			// only while it is held for an approval.
 			if cr, ok := m.st.Responses[key]; ok {
 				m.resendCached(p, cr.Inner)
 			}
 			return ackAfterFlush
 		}
-		m.st.SeenInner[key] = now
+		if !volatile {
+			m.st.SeenInner[key] = now
+		}
 	}
 	if !eph {
 		p.LastActiveAt = now.UTC().Truncate(time.Minute) // listings (§10.3, §10.4)
@@ -482,7 +488,13 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 		}
 	}
 	if ask {
-		if te.spec.Request && !eph && !volatile {
+		if te.spec.Request && !eph {
+			if volatile {
+				// Held like any request: a retransmission while it waits
+				// is a duplicate. Approved, it is answered volatile and
+				// forgotten (runHeld), so a later one is executed again.
+				m.st.SeenInner[key] = now
+			}
 			m.hold(p, in, key, now)
 		} else {
 			m.audit(now, "approval_required", p.ID)
@@ -524,9 +536,14 @@ func (m *Manager) respond(p *Peer, req *envelope.Inner, key string, body json.Ra
 	m.sendResponse(p, req, key, &envelope.Inner{Type: req.Type, Re: req.ID, Status: envelope.StatusOK, Body: body}, now)
 }
 
-// respondVolatile sends a response that carries secret values: never
-// cached, never in vault state (§8.2, §3.5.3).
+// respondVolatile sends a response that is never cached and never in
+// vault state (§8.2): one carrying secret values, or a large read. A
+// response that cannot be sealed within §5.5's bound is replaced by the
+// error response_too_large (§8.1), sent the same way.
 func (m *Manager) respondVolatile(p *Peer, req *envelope.Inner, body json.RawMessage, now time.Time) {
+	if body == nil {
+		body = json.RawMessage(`{}`)
+	}
 	id, err := envelope.NewULID(now)
 	if err != nil {
 		return
@@ -537,11 +554,25 @@ func (m *Manager) respondVolatile(p *Peer, req *envelope.Inner, body json.RawMes
 		return
 	}
 	raw, err := kr.Current().Seal(out)
+	if errors.Is(err, envelope.ErrTooLarge) {
+		raw, err = kr.Current().Seal(tooLarge(out))
+	}
 	if err != nil {
 		return
 	}
 	m.volatile = append(m.volatile, &OutboxEntry{ID: id, Op: OpDeposit, PeerID: p.ID, RelayURL: p.Relay.URL,
 		Mailbox: p.Relay.Mailbox, Payload: raw, BestEffort: true, Created: now})
+}
+
+// ErrResponseTooLarge is the error code of a response that could not be
+// sealed within §5.5's bound (§8.1, §10.1; 0.32.0).
+const ErrResponseTooLarge = "response_too_large"
+
+// tooLarge is the response_too_large answer that replaces out (§8.1): the
+// same id, type and re, no body.
+func tooLarge(out *envelope.Inner) *envelope.Inner {
+	return &envelope.Inner{ID: out.ID, TS: out.TS, Type: out.Type, Re: out.Re, Status: envelope.StatusError,
+		Error: &envelope.Error{Code: ErrResponseTooLarge}}
 }
 
 func (m *Manager) respondError(p *Peer, req *envelope.Inner, key, code, msg string, now time.Time) {
@@ -562,16 +593,40 @@ func (m *Manager) sendResponse(p *Peer, req *envelope.Inner, key string, out *en
 		return
 	}
 	out.ID, out.TS = id, now
+	// §8.1 (0.32.0): a response is never silence. One that cannot be
+	// sealed within §5.5's bound is replaced by response_too_large, which
+	// is cached and sent instead.
+	if !m.fits(out) {
+		out = tooLarge(out)
+	}
 	if j, err := out.Marshal(envelope.ModeSealed); err == nil { // cached without seq
 		m.st.Responses[key] = CachedResponse{Inner: j, Expires: now.Add(ResponseRetention)}
 	}
 	m.sealAndQueue(p, out)
 }
 
+// fits reports whether in, sealed in session mode, stays within §5.5's
+// bound (its padded inner plaintext at most MaxPadded bytes). The seq is
+// counted at its widest, so that a response which fits now also fits
+// when it is sealed again for a retransmission.
+func (m *Manager) fits(in *envelope.Inner) bool {
+	c := *in
+	c.Seq = strictjson.MaxSafeInteger
+	j, err := c.Marshal(envelope.ModeSession)
+	if err != nil {
+		return true // not a size problem: sealing reports it as before
+	}
+	_, err = envelope.PaddedLen(len(j))
+	return err == nil
+}
+
 func (m *Manager) resendCached(p *Peer, raw []byte) {
 	in, err := envelope.ParseInner(raw, envelope.ModeSealed)
 	if err != nil {
 		return
+	}
+	if !m.fits(in) {
+		in = tooLarge(in) // cached by a release before §8.1's rule
 	}
 	m.sealAndQueue(p, in)
 }

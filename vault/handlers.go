@@ -39,12 +39,14 @@ type TypeSpec struct {
 	// From lists the principal kinds allowed to send this type: "app",
 	// "desktop", "agent", "connection".
 	From []string
-	// Volatile requests have responses that carry secret values in the
-	// clear (§8.2; no type needs it today: critical values are sealed to a
-	// reply key, §3.5.4): the response is never cached
-	// or written to vault state, it is deposited from memory only (lost on
-	// a crash), and a retransmission is executed again. Only for types
-	// whose sole side effects are audit and feed entries.
+	// Volatile requests have responses that are never cached or written
+	// to vault state (§8.2): responses that would carry secret values in
+	// the clear, and (0.32.0) large reads that change no state, such as
+	// message.list and message.get. The response is deposited from memory
+	// only (lost on a crash), and a retransmission is executed again. A
+	// request held for an approval is kept, and its answer after the
+	// approval is volatile too. Only for types whose sole side effects are
+	// audit and feed entries.
 	Volatile bool
 	// DesktopApproval requests from a desktop are held until an owner app
 	// approves them (§6.8 step-up). Apps are never held.

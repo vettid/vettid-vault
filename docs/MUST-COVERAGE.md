@@ -22,7 +22,9 @@ rules (ask wins), the 0.22.0 errata and the month hint; for 0.23.1: the
 0.23.0 errata; for 0.23.2: the device on `vault.unlocked` and
 `vault.locked`; for 0.26.0: the feature allowlist and the per-channel
 Android package; for 0.27.0: the per-vault signer binding; and for 0.27.2: the collect
-loop's waits and the shared HTTP/2 connections (§12.2, §12.2.1); and,
+loop's waits and the shared HTTP/2 connections (§12.2, §12.2.1); for
+0.32.0 (the rules for every message, not release A): `response_too_large`,
+volatile `message.list` and `message.get`, and `message.list` pages; and,
 ahead of its spec text, a connected but silent parent (§12.3,
 VAULT-HOST-PROTOCOL §13 point 1).)
 
@@ -134,6 +136,9 @@ end covers §7, §8, §11.8, §12 and §13.2.
 | 7.4 | Invite or pairing cancelled or expired: denylist jti, delete claim | `vault.TestInviteCancelled`, `vault.TestInviteExpiry` |
 | 8.1 | Response: same type, `re`, `status`, to the requester only; unmatched `re` dropped | `vault.TestRequestResponseAndDedupe`, `vault.TestUnmatchedResponseDropped` |
 | 8.2 | Dedupe by relay msg_id and by inner id per principal; cached responses for 24 h | `vault.TestRequestResponseAndDedupe`, `e2e.TestRestartDedupe` |
+| 8.1, 10.1 | 0.32.0: a response that cannot be sealed within §5.5's bound (padded inner plaintext > 245,760 bytes) is replaced by the error `response_too_large` (no body), cached and sent instead, never silence; every response path, volatile ones included (not cached) | `vault.TestResponseTooLarge` |
+| 8.2, 10.5.2 | 0.32.0: `message.list` and `message.get` are volatile: never cached, never in vault state, a retransmission executed again; a volatile request held for an approval (a desktop's step-up, an agent's referral) is kept and answered volatile; an agent's answer is volatile too | `messaging.TestListGetVolatile`, `vault.TestVolatileHeldAndAgents`, `e2e.TestMessageListPages` |
+| 10.5.2 | 0.32.0: `message.list{before?}`: newest first from the position `before` (arrival order, exclusive) or the newest, at most `limit` and at most 131,072 bytes of `body`, at least one message when one is older; oldest first; `next_before` = its oldest message's id, only when older messages remain; a cursor not held (unknown, deleted, another conversation's) is `not_found` | `messaging.TestListPagesByBytes`, `messaging.TestListAtLeastOne`, `messaging.TestListCursor`, `e2e.TestMessageListPages` |
 | 8.3 | Ack only after the durable flush; outbox deposited after the ack | `vault.TestAckOnlyAfterFlush`, `e2e.TestRestartDedupe` |
 | 8.4 | Reject `ts` > 5 min ahead and, for durable types, > 16 d old | `vault.TestTimestampWindow`, `envelope.TestInnerCheckTime` |
 | 8.5 | Ephemeral types: `exp` required, acked after handling, in-memory dedupe | `vault.TestEphemeralClass` |
@@ -252,7 +257,7 @@ in `e2e.TestCredentialFlow`, `e2e.TestProfileItemsAuditFeed` and
 | 3.5.3 | A lost response never loses the credential: the latest blob is kept until `credential.ack` (even with backup off) and fetched with `credential.get`; responses are cached | `credential.TestLatestBlobKeptUntilAck` |
 | 3.5.4 | UTK pool of 20, refill by 10 under 10, expiry, single use (`utk_invalid` on reuse), bound to the device, the type and the request id | `credential.TestUTKPool`, `credwire.TestPayloadBinding`, `credwire.FuzzOpenPayload`, `e2e.TestCredentialFlow` (reuse refused, replenishment through the relay) |
 | 3.5.4 | Critical values return sealed to a one-time reply key carried in the UTK payload; nothing secret in the clear in the response | `credential.TestOperateAndReplyKey`, `items.TestCriticalItems`, `credwire.TestValue` |
-| 8.2 | A volatile response is neither cached nor written to state; a retransmission is executed again (runtime rule; no type of 0.4.1 needs it) | `vault.TestVolatileResponses` |
+| 8.2 | A volatile response is neither cached nor written to state; a retransmission is executed again (runtime rule; used since 0.32.0 by `message.list` and `message.get`) | `vault.TestVolatileResponses` |
 | 3.5.7 | A vault without a credential answers `credential_required` except to the listed types, stays provisional, records `has_credential` | `vault.TestCredentialGate`, `e2e.TestNoCredentialNoRecovery`, `e2e.TestVaultctlSmoke` |
 | 3.5.3 | Unlock window: memory only; ends at expiry, `credential.lock`, rotation, delete and vault lock | `credential.TestUnlockWindow` |
 | 3.5.5, 3.4 | Rotation: new credential key, `ik`/`kem` rotated in the same flush; nothing changes if the identity rotation fails | `credential.TestRotateRotatesIdentity`, `e2e.TestCredentialFlow` |

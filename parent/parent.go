@@ -39,6 +39,10 @@ type Parent struct {
 	manifests map[string][]byte
 
 	events chan func(context.Context)
+	// runCtx lives while Run runs (P15's sweeps); sweeping are the vaults
+	// being swept.
+	runCtx   context.Context
+	sweeping map[string]bool
 }
 
 type session struct {
@@ -126,12 +130,16 @@ func (p *Parent) Run(ctx context.Context) error {
 	p.log.Info("queue ready", "queue", p.cfg.QueueName())
 
 	wctx, wcancel := context.WithCancel(context.Background())
+	p.mu.Lock()
+	p.runCtx = wctx
+	p.mu.Unlock()
 	var wg sync.WaitGroup
 	run := func(f func(context.Context)) {
 		wg.Add(1)
 		go func() { defer wg.Done(); f(ctx) }()
 	}
 	go p.eventWorker(wctx)
+	go p.resumeSweeps(wctx)
 	run(p.fwd.serve)
 	run(p.acceptControl)
 	run(p.consume)
@@ -664,8 +672,148 @@ func (p *Parent) onLifecycle(ev Lifecycle) {
 	p.mu.Unlock()
 	p.log.Info("lifecycle", "event", ev.Event, "vault_id", ev.VaultID)
 	p.events <- func(ctx context.Context) {
-		if err := p.cfg.Tables.Lifecycle(ctx, ev, p.cfg.InstanceID, p.now()); err != nil {
+		err := p.cfg.Tables.Lifecycle(ctx, ev, p.cfg.InstanceID, p.now())
+		switch {
+		case errors.Is(err, ErrAlarmNotWritten):
+			// The row is marked deleted: the sweep goes ahead (P15).
 			p.log.Warn("lifecycle write failed", "event", ev.Event, "vault_id", ev.VaultID, "error", err.Error())
+			p.startSweep(ev.VaultID)
+		case errors.Is(err, ErrNotMarked):
+			// Not ours to sweep: another instance holds the vault (P15).
+			p.log.Info("vault deleted elsewhere; no attachment sweep", "vault_id", ev.VaultID)
+		case err != nil:
+			p.log.Warn("lifecycle write failed", "event", ev.Event, "vault_id", ev.VaultID, "error", err.Error())
+		case ev.Event == "deleted":
+			p.startSweep(ev.VaultID)
+		}
+	}
+}
+
+// startSweep starts P15's sweep of a deleted vault's attachment objects
+// (VAULT-HOST-PROTOCOL 0.1.9): only after this parent's own conditional
+// update marked the row deleted.
+func (p *Parent) startSweep(vaultID string) {
+	p.mu.Lock()
+	ctx := p.runCtx
+	p.mu.Unlock()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	go p.sweepAttachments(ctx, vaultID)
+}
+
+// sweepAttachments deletes every object under vaults/<vault_id>/att/,
+// listing the prefix (a missing object counting as deleted), and retries
+// until the prefix is empty or the parent stops (P15). Before each pass it
+// reads the vault's row and stops if the row says the vault is no longer
+// deleted (a vault id enrolled again); a row that is gone (the member API
+// deletes the rows of a deleted vault) does not stop it. Done, it removes
+// the row's record of the pending sweep.
+func (p *Parent) sweepAttachments(ctx context.Context, vaultID string) {
+	l, ok := p.cfg.Objects.(ObjectLister)
+	if !ok || !vaultIDOK(vaultID) {
+		return
+	}
+	p.mu.Lock()
+	if p.sweeping == nil {
+		p.sweeping = map[string]bool{}
+	}
+	if p.sweeping[vaultID] {
+		p.mu.Unlock()
+		return // one sweep per vault at a time
+	}
+	p.sweeping[vaultID] = true
+	p.mu.Unlock()
+	defer func() {
+		p.mu.Lock()
+		delete(p.sweeping, vaultID)
+		p.mu.Unlock()
+	}()
+	st, _ := p.cfg.Tables.(SweepTables)
+	prefix := "vaults/" + vaultID + "/att/"
+	wait := p.cfg.SweepRetry
+	if wait <= 0 {
+		wait = 5 * time.Second
+	}
+	for attempt := 0; ; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(min(wait<<min(attempt-1, 6), 5*time.Minute)):
+			}
+		}
+		if st != nil {
+			state, exists, err := st.VaultState(ctx, vaultID)
+			if err != nil {
+				p.log.Warn("attachment sweep: row not read", "vault_id", vaultID, "error", err.Error())
+				continue
+			}
+			if exists && state != "deleted" {
+				p.log.Info("attachment sweep stopped: the vault is no longer deleted", "vault_id", vaultID)
+				return
+			}
+		}
+		objs, err := l.ListObjects(ctx, prefix)
+		if err == nil && len(objs) == 0 {
+			if st != nil {
+				if err := st.SweepDone(ctx, vaultID, p.now()); err != nil {
+					p.log.Warn("attachment sweep: record not removed", "vault_id", vaultID, "error", err.Error())
+					continue
+				}
+			}
+			if attempt > 0 {
+				p.log.Info("attachment sweep done", "vault_id", vaultID)
+			}
+			return
+		}
+		deleted := 0
+		for _, o := range objs {
+			if !strings.HasPrefix(o.Key, prefix) {
+				continue
+			}
+			derr := p.cfg.Objects.Delete(ctx, o.Key, o.ETag)
+			switch {
+			case derr == nil:
+				deleted++
+			case errors.Is(derr, ErrNotFound), errors.Is(derr, ErrConflict):
+				// already gone, or rewritten: the next listing has it
+			default:
+				err = derr
+			}
+		}
+		if err != nil {
+			p.log.Warn("attachment sweep incomplete", "vault_id", vaultID, "error", err.Error())
+		} else {
+			p.log.Info("attachment sweep", "vault_id", vaultID, "deleted", deleted)
+		}
+	}
+}
+
+// resumeSweeps starts the sweeps an earlier parent left pending (their
+// rows record att_sweep_pending), at the parent's start.
+func (p *Parent) resumeSweeps(ctx context.Context) {
+	st, ok := p.cfg.Tables.(SweepTables)
+	if !ok {
+		return
+	}
+	wait := p.cfg.SweepRetry
+	if wait <= 0 {
+		wait = 5 * time.Second
+	}
+	for attempt := 0; ; attempt++ {
+		ids, err := st.PendingSweeps(ctx)
+		for _, id := range ids {
+			p.startSweep(id)
+		}
+		if err == nil {
+			return
+		}
+		p.log.Warn("pending attachment sweeps not read", "error", err.Error())
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(min(wait<<min(attempt, 6), 5*time.Minute)):
 		}
 	}
 }

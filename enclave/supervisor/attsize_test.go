@@ -41,6 +41,10 @@ func TestAttachmentSizesThroughChannel(t *testing.T) {
 	s := &Supervisor{st: &hostStore{l: memParent(t, m)}, relays: map[string]bool{"relay.example": true},
 		relayHTTP: &http.Client{Transport: rt}, activity: map[string]time.Time{}}
 	p := &vproc{h: &procHost{s: s}, vaultID: "aaaa", userGUID: "u1"}
+	s.xfers = newAdmission(func() uint64 { return 4 << 30 }, 0)
+	if _, err := s.xfers.admit(ctx, p, "t1", 1); err != nil { // blob bodies need an admitted transfer
+		t.Fatal(err)
+	}
 
 	r := p.handle(ctx, &hostproto.Frame{Kind: vaultipc.KindHTTP, ID: 1, Fields: [][]byte{[]byte(http.MethodPut),
 		[]byte("https://relay.example/v1/blob/mbx"), vaultipc.EncodeHeaders(http.Header{}), blob}})

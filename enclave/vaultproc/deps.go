@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/vettid/vettid-vault/internal/hostproto"
@@ -273,4 +274,28 @@ func (s *statusLists) get() *devattest.StatusList {
 	}
 	s.list, s.at = l, time.Now()
 	return l
+}
+
+// chanGate is the instance's admission of blob transfers through the
+// supervisor (vaultipc.KindTransfer, §10.5.1).
+type chanGate struct{ ch channel }
+
+var gateTicket atomic.Uint64
+
+func (g chanGate) Admit(ctx context.Context, prio int) (func(), error) {
+	t := strconv.FormatUint(gateTicket.Add(1), 36)
+	wait := 80 * time.Second
+	if d, ok := ctx.Deadline(); ok {
+		wait = min(wait, time.Until(d))
+	}
+	if wait <= 0 {
+		return nil, errChan
+	}
+	done := func() { _ = g.ch.c.Notify(vaultipc.KindTransferDone, []byte(t)) }
+	r, err := g.ch.call(ctx, vaultipc.KindTransfer, []byte(t), []byte(strconv.Itoa(prio)), []byte(strconv.FormatInt(wait.Milliseconds(), 10)))
+	if err != nil || !ok(r, 1) {
+		done() // an admission that came too late is ended at once
+		return nil, errChan
+	}
+	return done, nil
 }

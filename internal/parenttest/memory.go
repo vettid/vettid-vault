@@ -9,7 +9,9 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -76,6 +78,20 @@ func (o *Objects) Delete(_ context.Context, key, ifMatch string) error {
 	}
 	delete(o.objs, key)
 	return nil
+}
+
+// ListObjects implements parent.ObjectLister.
+func (o *Objects) ListObjects(_ context.Context, prefix string) ([]parent.ObjectRef, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	var out []parent.ObjectRef
+	for k, x := range o.objs {
+		if strings.HasPrefix(k, prefix) {
+			out = append(out, parent.ObjectRef{Key: k, ETag: x.etag})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	return out, nil
 }
 
 // Keys returns the stored keys.
@@ -252,7 +268,9 @@ func (q *Queues) Pending(url string) int {
 
 // VaultRow is a vault-table item.
 type VaultRow struct {
-	VaultID, UserGUID, State                  string
+	VaultID, UserGUID, State string
+	// SweepPending: att_sweep_pending (P15).
+	SweepPending                              bool
 	LeaseInstance                             string
 	LeaseExpires                              int64
 	SealedRelease, VaultVersion, StateVersion string
@@ -488,6 +506,9 @@ func (t *Tables) Lifecycle(_ context.Context, ev parent.Lifecycle, me string, no
 		return nil
 	}
 	if r == nil || !(r.LeaseInstance == "" || r.LeaseInstance == me) {
+		if ev.Event == "deleted" {
+			return parent.ErrNotMarked // as parent.AWS: no attachment sweep (P15)
+		}
 		return nil
 	}
 	if ev.CredentialBackup != nil {
@@ -501,6 +522,9 @@ func (t *Tables) Lifecycle(_ context.Context, ev parent.Lifecycle, me string, no
 	switch ev.Event {
 	case "enrolled", "moved":
 		r.SealedRelease = ev.Release
+		if ev.Event == "enrolled" {
+			r.SweepPending = false
+		}
 	case "unlocked":
 		r.State = "unlocked"
 	case "locked", "deleted":
@@ -510,9 +534,45 @@ func (t *Tables) Lifecycle(_ context.Context, ev parent.Lifecycle, me string, no
 		}
 	}
 	if ev.Event == "deleted" {
+		r.SweepPending = true
 		t.ids++
 		r.AlarmKind, r.AlarmID, r.AlarmAt, r.AlarmPending = "vault_deleted", strconv.Itoa(t.ids), now.Unix(), true
 		r.Alarms++
+	}
+	return nil
+}
+
+// VaultState implements parent.SweepTables.
+func (t *Tables) VaultState(_ context.Context, id string) (string, bool, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	r := t.vaults[id]
+	if r == nil {
+		return "", false, nil
+	}
+	return r.State, true, nil
+}
+
+// PendingSweeps implements parent.SweepTables.
+func (t *Tables) PendingSweeps(context.Context) ([]string, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	var out []string
+	for id, r := range t.vaults {
+		if r.SweepPending {
+			out = append(out, id)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// SweepDone implements parent.SweepTables.
+func (t *Tables) SweepDone(_ context.Context, id string, _ time.Time) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if r := t.vaults[id]; r != nil && r.State == "deleted" {
+		r.SweepPending = false
 	}
 	return nil
 }

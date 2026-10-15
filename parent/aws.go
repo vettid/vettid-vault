@@ -528,6 +528,12 @@ func (a *AWS) Lifecycle(ctx context.Context, ev Lifecycle, instanceID string, no
 		nm["#sr"] = "sealed_release"
 		vals[":sr"] = s(ev.Release)
 		update = "SET #sr = :sr, #vv = :vv, #sv = :sv, #u = :u"
+		if ev.Event == "enrolled" {
+			// A vault id enrolled again: no sweep of its old attachments
+			// is pending for it any more (P15; the sweep stops too).
+			nm["#asp"] = AttrSweepPending
+			update += " REMOVE #asp"
+		}
 	case "unlocked":
 		nm["#st"] = "state"
 		vals[":st"] = s("unlocked")
@@ -536,6 +542,13 @@ func (a *AWS) Lifecycle(ctx context.Context, ev Lifecycle, instanceID string, no
 		nm["#st"] = "state"
 		vals[":st"] = s(ev.Event)
 		update = "SET #st = :st, #vv = :vv, #sv = :sv, #u = :u REMOVE #lease"
+		if ev.Event == "deleted" {
+			// P15: the sweep is pending until done, in the same update that
+			// marks the row (resumed after a restart from it).
+			nm["#asp"] = AttrSweepPending
+			vals[":t"] = &ddbtypes.AttributeValueMemberBOOL{Value: true}
+			update = "SET #st = :st, #vv = :vv, #sv = :sv, #u = :u, #asp = :t REMOVE #lease"
+		}
 		if ev.Event == "locked" && ev.KeepLease {
 			update = "SET #st = :st, #vv = :vv, #sv = :sv, #u = :u"
 		}
@@ -548,14 +561,105 @@ func (a *AWS) Lifecycle(ctx context.Context, ev Lifecycle, instanceID string, no
 		update = strings.Replace(update, "SET ", "SET #cb = :cb, ", 1)
 	}
 	err := a.updateVault(ctx, ev.VaultID, update, cond, nm, vals)
-	if errors.Is(err, ErrLeaseHeld) {
+	held := errors.Is(err, ErrLeaseHeld)
+	if held {
 		err = nil // another instance holds the vault now
 	}
 	if err == nil && ev.Event == "deleted" {
 		// The member is told (§12.5): the vault's own audit log is gone.
-		err = a.alarm(ctx, ev.VaultID, "vault_deleted", now)
+		if aerr := a.alarm(ctx, ev.VaultID, "vault_deleted", now); aerr != nil {
+			if held {
+				return aerr
+			}
+			// The row is marked: the sweep goes ahead whatever the alarm.
+			return errors.Join(ErrAlarmNotWritten, aerr)
+		}
+		if held {
+			err = ErrNotMarked // no attachment sweep (P15)
+		}
 	}
 	return err
+}
+
+// AttrSweepPending is the vault row attribute that records a P15 sweep not
+// yet finished (VAULT-HOST-PROTOCOL 0.1.9): set with state deleted,
+// removed once vaults/<vault_id>/att/ is empty.
+const AttrSweepPending = "att_sweep_pending"
+
+// VaultState implements SweepTables: the row's state ("" with exists
+// false for no row).
+func (a *AWS) VaultState(ctx context.Context, vaultID string) (string, bool, error) {
+	out, err := a.ddb.GetItem(ctx, &dynamodb.GetItemInput{TableName: &a.cfg.VaultsTable, ConsistentRead: aws.Bool(true),
+		Key: map[string]ddbtypes.AttributeValue{"vault_id": s(vaultID)}, ProjectionExpression: aws.String("#st"),
+		ExpressionAttributeNames: map[string]string{"#st": "state"}})
+	if err != nil {
+		return "", false, errClass("ddb get vault", err)
+	}
+	if out.Item == nil {
+		return "", false, nil
+	}
+	st, _ := out.Item["state"].(*ddbtypes.AttributeValueMemberS)
+	if st == nil {
+		return "", true, nil
+	}
+	return st.Value, true, nil
+}
+
+// PendingSweeps implements SweepTables: the vault ids whose row records a
+// sweep not yet finished (a Scan with a filter, at the parent's start).
+func (a *AWS) PendingSweeps(ctx context.Context) ([]string, error) {
+	var out []string
+	var start map[string]ddbtypes.AttributeValue
+	for {
+		r, err := a.ddb.Scan(ctx, &dynamodb.ScanInput{TableName: &a.cfg.VaultsTable, ExclusiveStartKey: start,
+			FilterExpression: aws.String("attribute_exists(#asp)"), ProjectionExpression: aws.String("vault_id"),
+			ExpressionAttributeNames: map[string]string{"#asp": AttrSweepPending}})
+		if err != nil {
+			return out, errClass("ddb scan vaults", err)
+		}
+		for _, it := range r.Items {
+			if id, ok := it["vault_id"].(*ddbtypes.AttributeValueMemberS); ok {
+				out = append(out, id.Value)
+			}
+		}
+		if len(r.LastEvaluatedKey) == 0 {
+			return out, nil
+		}
+		start = r.LastEvaluatedKey
+	}
+}
+
+// SweepDone implements SweepTables: the sweep's record goes (a row that is
+// gone, or no longer deleted, is left alone).
+func (a *AWS) SweepDone(ctx context.Context, vaultID string, now time.Time) error {
+	err := a.updateVault(ctx, vaultID, "REMOVE #asp SET #u = :u", "attribute_exists(vault_id) AND #st = :del",
+		map[string]string{"#asp": AttrSweepPending, "#u": "updated_at", "#st": "state"},
+		map[string]ddbtypes.AttributeValue{":u": s(isoNow(now)), ":del": s("deleted")})
+	if errors.Is(err, ErrLeaseHeld) {
+		return nil
+	}
+	return err
+}
+
+// ListObjects implements ObjectLister: every object under prefix, with its ETag.
+func (a *AWS) ListObjects(ctx context.Context, prefix string) ([]ObjectRef, error) {
+	var out []ObjectRef
+	var token *string
+	for {
+		r, err := a.s3.ListObjectsV2(ctx, &s3.ListObjectsV2Input{Bucket: &a.cfg.Bucket, Prefix: &prefix, ContinuationToken: token})
+		if err != nil {
+			return out, errClass("s3 list", err)
+		}
+		for _, o := range r.Contents {
+			if o.Key != nil && o.ETag != nil {
+				out = append(out, ObjectRef{Key: *o.Key, ETag: *o.ETag})
+			}
+		}
+		if r.IsTruncated == nil || !*r.IsTruncated || r.NextContinuationToken == nil {
+			return out, nil
+		}
+		token = r.NextContinuationToken
+	}
 }
 
 // appKey writes the reported app key (0.15.0, §11.5): app_key = {key,

@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -105,12 +106,15 @@ type vproc struct {
 	vaultID  string
 	userGUID string
 	enroll   bool
-	slot     int
-	uid      int // its own uid and gid (UIDBase); 0 without
-	cmd      *exec.Cmd
-	conn     *hostproto.Conn
-	exited   chan struct{}
-	exitCode int
+	// blobBodies are the blob bodies the relay proxy carries for it now
+	// (at most one per admitted transfer, §10.5.1).
+	blobBodies int
+	slot       int
+	uid        int // its own uid and gid (UIDBase); 0 without
+	cmd        *exec.Cmd
+	conn       *hostproto.Conn
+	exited     chan struct{}
+	exitCode   int
 
 	mu      sync.Mutex
 	opening bool
@@ -357,6 +361,9 @@ func (h *procHost) exited(p *vproc) {
 		delete(h.procs, p.vaultID)
 	}
 	h.mu.Unlock()
+	if h.s.xfers != nil {
+		h.s.xfers.releaseAll(p) // its transfers ended with it
+	}
 	p.mu.Lock()
 	stopping := p.stopping
 	p.mu.Unlock()
@@ -750,6 +757,8 @@ func (p *vproc) handle(ctx context.Context, f *hostproto.Frame) [][]byte {
 		return p.http(ctx, f.Fields)
 	case vaultipc.KindPush:
 		return p.push(ctx, f.Fields)
+	case vaultipc.KindTransfer:
+		return p.transfer(ctx, f.Fields)
 	case vaultipc.KindStatusList:
 		b, at, ok := s.status.rawList()
 		if !ok {
@@ -838,6 +847,17 @@ func (p *vproc) http(ctx context.Context, f [][]byte) [][]byte {
 	if err != nil {
 		return deny()
 	}
+	if strings.Contains(u.EscapedPath(), "%") || u.Path == "" || path.Clean(u.Path) != u.Path {
+		// Only plain, clean paths: an escaped or uncleaned form of a path
+		// (/v1/%62lob/, /v1//blob/, /v1/./blob/) would pass the checks
+		// below and reach, or redirect to, another route.
+		return deny()
+	}
+	endBody, ok := p.blobBody(method, u.Path, len(f[3]))
+	if !ok {
+		return deny()
+	}
+	defer endBody()
 	if hdr.Get(relayauth.HeaderKey) != "" {
 		sr, err := relayauth.ParseHeaders(hdr)
 		if err != nil || sr.Verify(method, u.EscapedPath(), relayauth.BodyHash(f[3]), time.Now()) != nil {
@@ -1055,6 +1075,10 @@ func (p *vproc) notify(f *hostproto.Frame) {
 		s.lifecycle(vault.LifecycleEvent{Event: string(f.Fields[0]), VaultID: p.vaultID, Release: string(f.Fields[2]),
 			VaultVersion: string(f.Fields[3]), StateVersion: sv, AppKey: append([]byte(nil), f.Fields[5]...), AppKeySeq: seq,
 			CredentialBackup: backup, Name: name})
+	case vaultipc.KindTransferDone:
+		if len(f.Fields) == 1 && validTicket(f.Fields[0]) && s.xfers != nil {
+			s.xfers.release(p, string(f.Fields[0]))
+		}
 	case vaultipc.KindLog:
 		if len(f.Fields) < 2 {
 			return
@@ -1072,4 +1096,85 @@ func truncate(s string, n int) string {
 		return s[:n]
 	}
 	return s
+}
+
+// transfer admits one blob transfer of this process (§10.5.1): at most
+// its vault's 2 at once, and the instance's admission by memory.
+func (p *vproc) transfer(ctx context.Context, f [][]byte) [][]byte {
+	s := p.h.s
+	if len(f) != 3 || !validTicket(f[0]) || s.xfers == nil {
+		return deny()
+	}
+	prio, err1 := strconv.Atoi(string(f[1]))
+	ms, err2 := strconv.Atoi(string(f[2]))
+	if err1 != nil || err2 != nil || prio < 0 || prio > 2 || ms < 0 {
+		return deny()
+	}
+	wait := min(time.Duration(ms)*time.Millisecond, maxTransferWait)
+	wctx, cancel := context.WithTimeout(ctx, wait)
+	defer cancel()
+	if _, err := s.xfers.admit(wctx, p, string(f[0]), prio); err != nil {
+		return hostproto.Strings(vaultipc.StatusBusy)
+	}
+	return hostproto.Strings(hostproto.StatusOK)
+}
+
+func validTicket(b []byte) bool {
+	if len(b) == 0 || len(b) > 32 {
+		return false
+	}
+	for _, c := range b {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'z') {
+			return false
+		}
+	}
+	return true
+}
+
+// blobBodyThreshold is the largest blob upload a vault process may make
+// without an admitted transfer.
+const blobBodyThreshold = 1 << 20
+
+// blobBody: the relay proxy carries a blob's body (a download, or an
+// upload over 1 MiB) only within the transfers a process has been admitted
+// (§10.5.1), one body per admitted transfer at a time, so that admission
+// by memory cannot be bypassed. It returns the function that ends the
+// body's request.
+func (p *vproc) blobBody(method, urlPath string, n int) (func(), bool) {
+	none := func() {}
+	if !blobRoute(urlPath) {
+		return none, true
+	}
+	if !(method == http.MethodGet || method == http.MethodPut && n > blobBodyThreshold) {
+		return none, true
+	}
+	x := p.h.s.xfers
+	if x == nil {
+		return none, false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.blobBodies >= x.held(p) {
+		return none, false
+	}
+	p.blobBodies++
+	return func() {
+		p.mu.Lock()
+		p.blobBodies--
+		p.mu.Unlock()
+	}, true
+}
+
+// blobRoute reports whether a (decoded, clean) path names the relay's blob
+// routes: a "v1" segment followed by "blob" or "blobs" anywhere in it, so
+// that a relay URL with a path prefix (https://host/x/v1/blob/...) is
+// gated as well.
+func blobRoute(urlPath string) bool {
+	segs := strings.Split(urlPath, "/")
+	for i := 0; i+1 < len(segs); i++ {
+		if segs[i] == "v1" && (segs[i+1] == "blob" || segs[i+1] == "blobs") {
+			return true
+		}
+	}
+	return false
 }

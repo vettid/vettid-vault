@@ -22,12 +22,14 @@
 //	HTTP            [method, url, headers, body]  → [status, code, headers, body]
 //	StatusList      []                            → [status, list, fetched_at]
 //	Push            [path, headers, body]         → [status, code, headers, body]
+//	Transfer        [ticket, priority, wait_ms]   → [status]   (ok: admitted; busy: not within wait_ms)
 //
 // Vault → supervisor (notifications): Lifecycle [event, vault_id,
 // release, vault_version, state_version, app_key (SPKI DER or empty),
 // app_key_seq, credential_backup ("1", "0" or "" when not reported),
 // name_seq, first_name, last_name ("0", "", "" except for account_name)], Log
-// [level, message, k, v ...].
+// [level, message, k, v ...], TransferDone [ticket] (a transfer the
+// supervisor admitted, or asked for, ended).
 //
 // No message from the vault to the supervisor carries a DEK, pepper, key
 // or plaintext state: stored objects are DEK-encrypted, relay requests are
@@ -55,7 +57,9 @@ import (
 // 6: Lifecycle carries a name request (name_seq, first_name, last_name;
 // the event account_name, 0.18.0).
 // 7: Push (0.24.0).
-const Version = "7"
+// 8: Transfer and TransferDone (0.32.0, release A: the instance's
+// admission of blob transfers by memory, §10.5.1).
+const Version = "8"
 
 // Supervisor → vault.
 const (
@@ -98,16 +102,23 @@ const (
 	// the NSM attestation itself (public_key = the wake key, user_data =
 	// the request's digest, PUSH-GATEWAY §5.1).
 	KindPush hostproto.Kind = 0x58
+	// KindTransfer [ticket, priority, wait_ms] → [ok | busy]: admits one
+	// blob transfer of this vault process (§10.5.1 "Transfers and memory");
+	// the reply comes once it may start, or busy after wait_ms. ticket is
+	// 1-32 characters of [0-9a-z] chosen by the process, ended by
+	// TransferDone.
+	KindTransfer hostproto.Kind = 0x59
 )
 
 // Vault → supervisor notifications.
 const (
-	KindLifecycle hostproto.Kind = 0x60
-	KindLog       hostproto.Kind = 0x61
+	KindLifecycle    hostproto.Kind = 0x60
+	KindLog          hostproto.Kind = 0x61
+	KindTransferDone hostproto.Kind = 0x62
 )
 
 // VaultRequests is every request kind a vault process may send.
-var VaultRequests = []hostproto.Kind{KindStoreGet, KindStorePut, KindStoreDelete, KindAttestRecipient, KindAttestVault, KindKMS, KindHTTP, KindStatusList, KindPush}
+var VaultRequests = []hostproto.Kind{KindStoreGet, KindStorePut, KindStoreDelete, KindAttestRecipient, KindAttestVault, KindKMS, KindHTTP, KindStatusList, KindPush, KindTransfer}
 
 // KMS operations.
 const (
@@ -122,6 +133,7 @@ const (
 const (
 	StatusSplitBrain = "split_brain"
 	StatusDenied     = "denied"
+	StatusBusy       = "busy"
 )
 
 // Limits.

@@ -22,13 +22,16 @@ func tokenClaims(t *testing.T, m *Manager, tok string) relayauth.Claims {
 	return c
 }
 
-// §7.1 (0.32.0, release A): every standing token the vault mints for one
-// of its own devices carries owner_device; no other token does. A vault
-// from before release A re-mints its devices' standing tokens once, at
-// its first unlock under it (§7.2).
+// §7.1 (0.32.0, release A): every standing token the vault mints for its
+// app carries owner_device; no other token does (a desktop's, an agent's,
+// a connection's; reconnect and request tokens). A vault from before
+// release A re-mints its app's standing token once, at its first unlock
+// under it (§7.2).
 func TestDeviceTokensOwnerDevice(t *testing.T) {
 	d := newDevFixture(t)
 	conn := d.asConnection(t, "c1", 0x51)
+	desk := d.addDevice(t, "dk1", KindDesktop, 0x5a)
+	agent := d.addDevice(t, "ag1", KindAgent, 0x5b)
 	now := time.Now()
 	d.withLock(func(m *Manager) {
 		dt, _, err := m.mintStanding(d.devPeer, now, nil)
@@ -36,9 +39,11 @@ func TestDeviceTokensOwnerDevice(t *testing.T) {
 			t.Fatalf("device standing token without owner_device: %v", err)
 		}
 		ct, _, _ := m.mintStanding(conn.peer, now, nil)
+		kt, _, _ := m.mintStanding(desk.peer, now, nil)
+		at, _, _ := m.mintStanding(agent.peer, now, nil)
 		rt, _, _ := m.mintReconnect(conn.peer, now, nil)
 		qt, _, _ := m.mint(d.devPeer, TokRequest, time.Minute, nil, now, nil)
-		for name, tok := range map[string]string{"connection standing": ct, "reconnect": rt, "request": qt} {
+		for name, tok := range map[string]string{"connection standing": ct, "desktop standing": kt, "agent standing": at, "reconnect": rt, "request": qt} {
 			if tokenClaims(t, m, tok).OwnerDevice {
 				t.Errorf("%s token carries owner_device", name)
 			}

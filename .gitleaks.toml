@@ -16,7 +16,7 @@
 [extend]
 useDefault = true
 
-[allowlist]
+[[allowlists]]
 description = "VAULT-MESSAGING §16 test vectors (test-only, public)"
 regexTarget = "match"
 regexes = [
@@ -30,4 +30,30 @@ regexes = [
   '''01JB2Z6V9K3M4N5P6Q7R8S9T0V''',
   '''MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEZpI3VGYrivhlu/KoncHtr3sZZHVE''',
   '''740f4707bebcf74f9b7c25d48e3358945f6aa01da5ddb387462c7eaf61bb78ad''',
+]
+
+# Release R test vectors (VAULT-MESSAGING 0.33.0 §16, vettid-vault #96):
+# deterministic values derived from fixed, public, TEST-ONLY inputs
+# (pepper 32 x 0x32, unlock secrets 32 x 0x42 and 32 x 0x45, PIN 123456,
+# password "correct horse battery staple") and two example passwords of
+# the shared verdict file. Not secrets. Scoped to the generic-api-key
+# rule, to these three files and to these exact values together.
+[[allowlists]]
+description = "Release R test vectors (test-only, deterministic)"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = [
+  '''^testdata/vectors/unlock\.json$''',
+  '''^testdata/vectors/recovery\.json$''',
+  '''^testdata/passwords/verdicts\.json$''',
+]
+regexTarget = "match"
+regexes = [
+  '''f01975109b4575d994ade44aeae5d667eb56f14b610d1004694a707e9702e624''',
+  '''89f9fa1389f2e7ecfd0521ab27b39207d867a8acd3f99cd23ba19b3c357ccfde''',
+  '''dd657b8c27f970d60c271e531e9477aeef25da911a5e5041be3fc7b886044802''',
+  '''c12589e53da8326b90b0e362e09f83d1ec315e22936c6069decaa686d7a01ef3''',
+  '''6286862e0e08397dc6b79b2b39f3e37ea03fd8a21ca6c1d09bf33fe9d89e5452''',
+  '''QWERTY123456''',
+  '''violet-Kestrel-91-moss''',
 ]

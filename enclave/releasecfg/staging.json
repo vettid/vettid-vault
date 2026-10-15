@@ -29,5 +29,20 @@
     "location",
     "presence",
     "wallet"
-  ]
+  ],
+  "recovery_counter": {
+    "bucket": "vettid-org-vault-recovery-347272280361",
+    "account": "347272280361",
+    "region": "us-east-1"
+  },
+  "recovery_request_keys": [
+    {
+      "key_id": "TODO-recovery-request-key-id",
+      "spki": "TODO-recovery-request-key-spki"
+    }
+  ],
+  "recovery_wait_unit_seconds": 600,
+  "recovery_quiet_seconds": 259200,
+  "recovery_offered": true,
+  "android_min_version_code": 0
 }

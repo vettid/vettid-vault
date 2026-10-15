@@ -107,7 +107,48 @@ type Config struct {
 	// Features are the optional features the image registers (0.26.0,
 	// §11.10.8), ascending; empty: none (never nil in a parsed file).
 	Features []string
+	// Release R (VAULT-MESSAGING 0.33.0 §11.10.8, §11.14; VAULT-RELEASES
+	// 0.1.28 §5.2): the attempt counter's bucket, the member API's
+	// recovery request keys, the wait unit and quiet period, whether the
+	// release offers recovery, and the minimum Android version code.
+	RecoveryCounter         Counter
+	RecoveryRequestKeys     []RequestKey
+	RecoveryWaitUnitSeconds uint64
+	RecoveryQuietSeconds    uint64
+	RecoveryOffered         bool
+	AndroidMinVersionCode   uint64
 }
+
+// Counter is the recovery attempt counter's S3 bucket (§11.14.4,
+// VAULT-HOST-PROTOCOL §8.1): one per channel, in the channel's vault
+// account, named vettid-org-vault-recovery-<account>.
+type Counter struct {
+	Bucket, Account, Region string
+}
+
+// Host is the bucket's virtual-hosted name, the only name the enclave
+// reaches it by.
+func (c Counter) Host() string { return c.Bucket + ".s3." + c.Region + ".amazonaws.com" }
+
+// RequestKey is a pinned public key of the member API's recovery request
+// key (§11.14.8): ECDSA P-256, with the key id the queue message names.
+type RequestKey struct {
+	KeyID string
+	Key   *ecdsa.PublicKey
+}
+
+// The build rules of §11.14.14 (VAULT-RELEASES §5.2): a production file
+// whose wait unit is below a day or whose quiet period is below 72 hours
+// is malformed, so a production image can never carry staging's short
+// unit. A staging file may shorten the unit (600 s), never the quiet
+// period.
+const (
+	ProdMinWaitUnitSeconds = 86400
+	MinQuietSeconds        = 259200
+	StagingMinWaitUnit     = 60
+	maxRecoverySeconds     = 30 * 86400
+	CounterBucketPrefix    = "vettid-org-vault-recovery-"
+)
 
 // File is a parsed channel file: the complete constants and the names of
 // those still missing (placeholders, or release 0).
@@ -130,7 +171,9 @@ func Parse(b []byte) (*File, error) {
 		return nil, ErrFormat
 	}
 	members := []string{"channel", "release", "manifest_keys", "seal_account", "seal_region",
-		"retirement_principal", "retirement_window_days", "android_signers", "relay_url", "push_url", "android_package", "features"}
+		"retirement_principal", "retirement_window_days", "android_signers", "relay_url", "push_url", "android_package", "features",
+		"recovery_counter", "recovery_request_keys", "recovery_wait_unit_seconds", "recovery_quiet_seconds", "recovery_offered",
+		"android_min_version_code"}
 	if len(o) != len(members) {
 		return nil, ErrFormat
 	}
@@ -207,6 +250,9 @@ func Parse(b []byte) (*File, error) {
 		return nil, ErrFormat
 	}
 	if c.Features, err = parseFeatures(raw); err != nil {
+		return nil, err
+	}
+	if err := parseRecovery(o, c, missing); err != nil {
 		return nil, err
 	}
 	f.Missing = dedupe(f.Missing)
@@ -513,4 +559,92 @@ func dedupe(s []string) []string {
 		}
 	}
 	return out
+}
+
+// parseRecovery reads release R's members (§11.10.8) and applies the
+// build rules of §11.14.14: the counter bucket is the channel's own (in
+// the sealing account, under the pinned name), the production wait unit
+// is at least a day, the quiet period at least 72 hours in both channels.
+func parseRecovery(o strictjson.Object, c *Config, missing func(string)) error {
+	co, err := o.Object("recovery_counter")
+	if err != nil || len(co) != 3 || !co.Has("bucket") || !co.Has("account") || !co.Has("region") {
+		return ErrFormat
+	}
+	if c.RecoveryCounter.Account, err = value(co, "account", validAccount, missing); err != nil {
+		return err
+	}
+	if c.RecoveryCounter.Region, err = value(co, "region", validRegion, missing); err != nil {
+		return err
+	}
+	if c.RecoveryCounter.Bucket, err = value(co, "bucket", func(s string) bool { return strings.HasPrefix(s, CounterBucketPrefix) }, missing); err != nil {
+		return err
+	}
+	rc := c.RecoveryCounter
+	if rc.Account != "" && (rc.Account != c.SealAccount && c.SealAccount != "" || rc.Bucket != "" && rc.Bucket != CounterBucketPrefix+rc.Account) {
+		return ErrFormat // another channel's bucket or account
+	}
+	arr, err := o.Array("recovery_request_keys")
+	if err != nil || len(arr) < 1 || len(arr) > 2 {
+		return ErrFormat
+	}
+	seen := map[string]bool{}
+	for _, raw := range arr {
+		e, err := strictjson.AsObject(raw)
+		if err != nil || len(e) != 2 || !e.Has("key_id") || !e.Has("spki") {
+			return ErrFormat
+		}
+		id, err1 := e.String("key_id")
+		sp, err2 := e.String("spki")
+		if err1 != nil || err2 != nil {
+			return ErrFormat
+		}
+		if isPlaceholder(id) || isPlaceholder(sp) {
+			missing("recovery_request_keys")
+			continue
+		}
+		if !validKeyID(id) || seen[id] {
+			return ErrFormat
+		}
+		seen[id] = true
+		pub, err := parseKey(sp)
+		if err != nil {
+			return err
+		}
+		c.RecoveryRequestKeys = append(c.RecoveryRequestKeys, RequestKey{KeyID: id, Key: pub})
+	}
+	if c.RecoveryWaitUnitSeconds, err = o.Uint("recovery_wait_unit_seconds", 1, maxRecoverySeconds); err != nil {
+		return ErrFormat
+	}
+	min := uint64(StagingMinWaitUnit)
+	if c.Channel == ChannelProd {
+		min = ProdMinWaitUnitSeconds
+	}
+	if c.RecoveryWaitUnitSeconds < min {
+		return ErrFormat
+	}
+	if c.RecoveryQuietSeconds, err = o.Uint("recovery_quiet_seconds", MinQuietSeconds, maxRecoverySeconds); err != nil {
+		return ErrFormat
+	}
+	if c.RecoveryOffered, err = o.Bool("recovery_offered"); err != nil {
+		return ErrFormat
+	}
+	if c.AndroidMinVersionCode, err = o.Uint("android_min_version_code", 0, 1<<31-1); err != nil {
+		return ErrFormat
+	}
+	if c.AndroidMinVersionCode == 0 {
+		missing("android_min_version_code")
+	}
+	return nil
+}
+
+func validKeyID(s string) bool {
+	if s == "" || len(s) > 128 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || strings.IndexByte("-_:/", c) >= 0) {
+			return false
+		}
+	}
+	return true
 }

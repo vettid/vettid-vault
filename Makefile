@@ -6,7 +6,7 @@ FUZZFLAGS ?=
 # Packages that ship. They must never link the vector-only code, the dev
 # enclave (dev sealer, PIN constructors) or test harnesses.
 LIBPKGS   := ./vms/suite ./vms/envelope ./vms/handshake ./vms/invite ./vms/altchan ./vms/credwire ./vms/callwire \
-             ./vms/pins ./vms/nitro ./vms/manifest ./vms/devattest ./vms/btc \
+             ./vms/pins ./vms/nitro ./vms/manifest ./vms/devattest ./vms/btc ./vms/recovery \
              ./enclave/... ./vault/... ./client/... ./features/... ./cmd/...
 E2ETAGS   := devenclave e2e
 # What runs inside the enclave (the release image's binary and everything it
@@ -115,6 +115,17 @@ check-tcb:
 	    echo "the $$ch enclave binary links the AWS SDK, the parent, or dev/test code"; exit 1; fi; \
 	  GOOS=linux $(GO) list -tags vettid_channel_$$ch -deps $(ENCLAVEPKGS) | grep -q 'enclave/releasecfg$$' || { echo "the $$ch enclave binary does not embed releasecfg"; exit 1; }; \
 	done
+	@# Release R (VAULT-MESSAGING 0.33.0 §11.14.14, VAULT-RELEASES 0.1.28
+	@# §5.2): the recovery derivation's test cost is a test-only build
+	@# tag that no release build names; a release enclave binary has no
+	@# settable recovery clock; and the production channel's rules hold on
+	@# the production image (TestProductionImageRecoveryRules, make channels).
+	@if grep -nE 'vettid_testcost' Dockerfile.enclave scripts/build-eif.sh release/rebuild.sh; then \
+	  echo "a release build names the test-only tag vettid_testcost"; exit 1; fi
+	@head -1 vms/recovery/testcost.go | grep -qx '//go:build vettid_testcost' || { echo "vms/recovery/testcost.go lacks //go:build vettid_testcost"; exit 1; }
+	@head -1 vms/recovery/prodcost.go | grep -qx '//go:build !vettid_testcost' || { echo "vms/recovery/prodcost.go lacks //go:build !vettid_testcost"; exit 1; }
+	@for ch in prod staging; do tmp=$$(mktemp -d) && GOOS=linux $(GO) build -tags vettid_channel_$$ch -o $$tmp/ve ./cmd/vault-enclave && \
+	  if $(GO) tool nm $$tmp/ve | grep -E 'RecoveryNow|recovery\.testCost'; then echo "the $$ch enclave binary has a recovery test clock or test cost"; rm -rf $$tmp; exit 1; fi; rm -rf $$tmp; done
 	@echo "check-tcb: ok"
 
 # End-to-end tests against the real vettid-relay binary (built at the

@@ -18,5 +18,20 @@
   "relay_url": "https://relay.vettid.org",
   "push_url": "https://push.vettid.org",
   "android_package": "com.vettid.app",
-  "features": []
+  "features": [],
+  "recovery_counter": {
+    "bucket": "vettid-org-vault-recovery-369484479783",
+    "account": "369484479783",
+    "region": "us-east-1"
+  },
+  "recovery_request_keys": [
+    {
+      "key_id": "TODO-recovery-request-key-id",
+      "spki": "TODO-recovery-request-key-spki"
+    }
+  ],
+  "recovery_wait_unit_seconds": 86400,
+  "recovery_quiet_seconds": 259200,
+  "recovery_offered": false,
+  "android_min_version_code": 0
 }

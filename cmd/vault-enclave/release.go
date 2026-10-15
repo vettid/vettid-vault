@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/url"
 	"os"
@@ -19,7 +20,12 @@ import (
 	toolchain "github.com/vettid/vettid-vault/release"
 	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vms/pins"
+	"github.com/vettid/vettid-vault/vms/recovery"
 )
+
+// errTestCost: a release binary built with the test-only tag
+// vettid_testcost (VAULT-MESSAGING 0.33.0 §11.14.14) refuses to start.
+var errTestCost = errors.New("vault-enclave: built with vettid_testcost")
 
 // vsock ports on the parent (CID 3).
 const (
@@ -28,6 +34,9 @@ const (
 )
 
 func platform() (supervisor.Config, error) {
+	if recovery.TestCost {
+		return supervisor.Config{}, errTestCost
+	}
 	kernelRelease, kernelHardened := toolchain.Kernel()
 	dev, err := nsm.Open()
 	if err != nil {
@@ -101,6 +110,9 @@ const vaultUIDBase = 200000
 
 // vaultPlatform is a vault process's pinned configuration.
 func vaultPlatform([]string) (vaultproc.Platform, error) {
+	if recovery.TestCost {
+		return vaultproc.Platform{}, errTestCost
+	}
 	return vaultproc.Platform{
 		Config: func(id string) enclave.Config { return enclave.ReleaseConfig(id, enclave.ReleaseRelayURL()) },
 		// The optional features are the embedded channel file's list

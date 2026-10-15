@@ -32,7 +32,27 @@ func complete(t *testing.T) string {
 		`"seal_account":"111122223333","seal_region":"us-east-1",` +
 		`"retirement_principal":"arn:aws:iam::111122223333:role/vettid-org-vault-key-retirement","retirement_window_days":30,` +
 		`"android_signers":[{"digest":"` + strings.Repeat("ab", 32) + `","class":"vettid"}],"relay_url":"https://relay.vettid.org","push_url":"https://push.vettid.org",` +
-		`"android_package":"com.vettid.app","features":[]}`
+		`"android_package":"com.vettid.app","features":[]` + recoveryMembers(t, "111122223333", 86400) + `}`
+}
+
+// recoveryMembers are release R's members (VAULT-MESSAGING 0.33.0
+// §11.10.8) of a test file: the account's counter bucket, one request key.
+func recoveryMembers(t *testing.T, account string, unit int) string {
+	return `,"recovery_counter":{"bucket":"vettid-org-vault-recovery-` + account + `","account":"` + account + `","region":"us-east-1"},` +
+		`"recovery_request_keys":[{"key_id":"test-key-1","spki":"` + spki(t, 0x25) + `"}],"recovery_wait_unit_seconds":` + strconv.Itoa(unit) +
+		`,"recovery_quiet_seconds":259200,"recovery_offered":true,"android_min_version_code":100`
+}
+
+// releaseROpen are release R's members still open in the committed files
+// until the member API's recovery request key exists and the first app
+// version of release R is known.
+var releaseROpen = map[string]bool{"recovery_request_keys": true, "android_min_version_code": true}
+
+// fillReleaseR replaces those placeholders with test values.
+func fillReleaseR(t *testing.T, b []byte) []byte {
+	b = bytes.Replace(b, []byte(`"TODO-recovery-request-key-id"`), []byte(`"test-key-1"`), 1)
+	b = bytes.Replace(b, []byte(`"TODO-recovery-request-key-spki"`), []byte(`"`+spki(t, 0x25)+`"`), 1)
+	return bytes.Replace(b, []byte(`"android_min_version_code": 0`), []byte(`"android_min_version_code": 100`), 1)
 }
 
 // staging turns a production test file into a staging one.
@@ -459,11 +479,12 @@ func TestCommittedSigners(t *testing.T) {
 		hexOf(p.Config.AndroidSigners[0]) != "31a19613aa10f209e08945f947f94f7ce3e6e5ac342457ff9969a67986928e65" {
 		t.Fatalf("prod signers %+v", p.Config.AndroidSigners)
 	}
-	if bytes.Contains(pb, []byte(Placeholder)) {
+	if bytes.Contains(fillReleaseR(t, pb), []byte(Placeholder)) {
 		t.Fatal("prod.json still holds a placeholder")
 	}
+	pb = fillReleaseR(t, pb)
 	for _, m := range p.Missing {
-		if m != "release" {
+		if m != "release" && !releaseROpen[m] {
 			t.Fatalf("prod.json is refused for %q; only the release number may be open", m)
 		}
 	}

@@ -797,12 +797,24 @@ func (p *Parent) resumeSweeps(ctx context.Context) {
 	if !ok {
 		return
 	}
-	ids, err := st.PendingSweeps(ctx)
-	if err != nil {
-		p.log.Warn("pending attachment sweeps not read", "error", err.Error())
+	wait := p.cfg.SweepRetry
+	if wait <= 0 {
+		wait = 5 * time.Second
 	}
-	for _, id := range ids {
-		p.startSweep(id)
+	for attempt := 0; ; attempt++ {
+		ids, err := st.PendingSweeps(ctx)
+		for _, id := range ids {
+			p.startSweep(id)
+		}
+		if err == nil {
+			return
+		}
+		p.log.Warn("pending attachment sweeps not read", "error", err.Error())
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(min(wait<<min(attempt, 6), 5*time.Minute)):
+		}
 	}
 }
 

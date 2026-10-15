@@ -33,8 +33,9 @@ import (
 //     so a process that declares every transfer an owner fetch gains one
 //     place in the queue, never more than its 2;
 //   - the relay proxy carries blob bodies (GET /v1/blob/..., and PUT
-//     /v1/blob/... over 1 MiB) only for a process holding an admitted
-//     transfer (blobBodyAllowed), so admission cannot be bypassed.
+//     /v1/blob/... over 1 MiB) only within a process's admitted
+//     transfers, one body each (vproc.blobBody), on plain clean paths,
+//     without following redirects, so admission cannot be bypassed.
 //
 // Unknown memory (MemAvailable reads 0) admits nothing: fail closed.
 
@@ -299,13 +300,13 @@ func (a *admission) releaseAll(owner any) {
 	a.pump()
 }
 
-// holds reports whether owner has an admitted transfer (the relay proxy
-// carries blob bodies only then).
-func (a *admission) holds(owner any) bool {
+// held is how many admitted transfers owner holds (the relay proxy
+// carries one blob body per admitted transfer).
+func (a *admission) held(owner any) int {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.reclaim()
-	return a.byOwner[owner] > 0
+	return a.byOwner[owner]
 }
 
 // counts returns the transfers in flight and waiting (Stats: instance

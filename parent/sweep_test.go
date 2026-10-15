@@ -74,11 +74,12 @@ func (o *listObjects) keys() []string {
 // written), and the sweep's reads of the row.
 type lifeTables struct {
 	Tables
-	result  error
-	mu      sync.Mutex
-	state   string // the row's state; "" for no row
-	pending []string
-	done    []string
+	result   error
+	mu       sync.Mutex
+	state    string // the row's state; "" for no row
+	pending  []string
+	done     []string
+	failScan int
 }
 
 func (t *lifeTables) Lifecycle(context.Context, Lifecycle, string, time.Time) error { return t.result }
@@ -87,7 +88,15 @@ func (t *lifeTables) VaultState(context.Context, string) (string, bool, error) {
 	defer t.mu.Unlock()
 	return t.state, t.state != "", nil
 }
-func (t *lifeTables) PendingSweeps(context.Context) ([]string, error) { return t.pending, nil }
+func (t *lifeTables) PendingSweeps(context.Context) ([]string, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.failScan > 0 {
+		t.failScan--
+		return nil, errors.New("scan")
+	}
+	return t.pending, nil
+}
 func (t *lifeTables) SweepDone(_ context.Context, id string, _ time.Time) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -110,13 +119,15 @@ func TestAttachmentSweepAfterDeleted(t *testing.T) {
 		state  string
 		resume bool
 		swept  bool
+		fail   int
 	}{
-		{"marked", nil, "deleted", false, true},
-		{"marked, rows gone", nil, "", false, true},
-		{"marked, notice not written", errors.Join(ErrAlarmNotWritten, errors.New("ddb")), "deleted", false, true},
-		{"lease held elsewhere", ErrNotMarked, "deleted", false, false},
-		{"enrolled again", nil, "enrolling", false, false},
-		{"resumed after a restart", ErrNotMarked, "deleted", true, true},
+		{"marked", nil, "deleted", false, true, 0},
+		{"marked, rows gone", nil, "", false, true, 0},
+		{"marked, notice not written", errors.Join(ErrAlarmNotWritten, errors.New("ddb")), "deleted", false, true, 0},
+		{"lease held elsewhere", ErrNotMarked, "deleted", false, false, 0},
+		{"enrolled again", nil, "enrolling", false, false, 0},
+		{"resumed after a restart", ErrNotMarked, "deleted", true, true, 0},
+		{"resumed after a failed scan", ErrNotMarked, "deleted", true, true, 2},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			objs := &listObjects{failList: 1, objs: map[string]string{
@@ -128,7 +139,7 @@ func TestAttachmentSweepAfterDeleted(t *testing.T) {
 				"vaults/other/att/01jb2z6v9k3m4n5p6q7r8s9t60":         `"6"`,
 			}}
 			all := objs.keys()
-			tb := &lifeTables{result: c.result, state: c.state}
+			tb := &lifeTables{result: c.result, state: c.state, failScan: c.fail}
 			if c.resume {
 				tb.pending = []string{vid}
 			}
@@ -139,7 +150,7 @@ func TestAttachmentSweepAfterDeleted(t *testing.T) {
 				events: make(chan func(context.Context), 8), runCtx: ctx}
 			go p.eventWorker(ctx)
 			if c.resume {
-				p.resumeSweeps(ctx)
+				go p.resumeSweeps(ctx)
 			} else {
 				p.onLifecycle(Lifecycle{Event: "deleted", VaultID: vid})
 			}

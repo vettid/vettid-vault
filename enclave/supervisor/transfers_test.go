@@ -2,12 +2,14 @@ package supervisor
 
 import (
 	"context"
+	"net/http"
 	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/vettid/vettid-vault/enclave/egress"
 	"github.com/vettid/vettid-vault/internal/hostproto"
 	"github.com/vettid/vettid-vault/internal/vaultipc"
 	"github.com/vettid/vettid-vault/vault"
@@ -231,14 +233,14 @@ func TestTransferAdmissionUntrusted(t *testing.T) {
 	if _, err := a.admit(bg, "greedy", "2", vault.PrioTransfer); err != nil {
 		t.Fatal(err)
 	}
-	if !a.holds("greedy") {
+	if a.held("greedy") != 2 {
 		t.Fatal("holds")
 	}
 	if _, err := a.admit(short(), "greedy", "3", vault.PrioTransfer); err == nil {
 		t.Fatal("a third transfer")
 	}
 	clock.Add(int64(transferLease))
-	if a.holds("greedy") {
+	if a.held("greedy") != 0 {
 		t.Fatal("tickets kept past the lease")
 	}
 	if _, err := a.admit(short(), "greedy", "4", vault.PrioTransfer); err != nil {
@@ -311,21 +313,63 @@ func TestTransferAdmissionUntrusted(t *testing.T) {
 }
 
 // The relay proxy carries blob bodies (downloads, uploads over 1 MiB) only
-// for a process holding an admitted transfer.
+// within a process's admitted transfers, one body per transfer at a time,
+// and only on plain clean paths: escaped or uncleaned forms of a blob path
+// are refused whatever the process holds.
 func TestBlobBodiesNeedAdmission(t *testing.T) {
-	s := &Supervisor{xfers: newAdmission(func() uint64 { return 4 << 30 }, 0)}
+	var seen []string
+	rt := rtFunc(func(r *http.Request) (*http.Response, error) {
+		seen = append(seen, r.URL.EscapedPath())
+		return &http.Response{StatusCode: 200, Header: http.Header{}, Body: http.NoBody, Request: r}, nil
+	})
+	s := &Supervisor{xfers: newAdmission(func() uint64 { return 4 << 30 }, 0), relays: map[string]bool{"relay.example": true},
+		relayHTTP: &http.Client{Transport: rt}, activity: map[string]time.Time{}}
 	p := &vproc{h: &procHost{s: s}, vaultID: "aaaa"}
-	if p.blobBodyAllowed("GET", "/v1/blob/01JB2Z6V9K3M4N5P6Q7R8S9T60", 0) || p.blobBodyAllowed("PUT", "/v1/blob/mbx", blobBodyThreshold+1) {
+	call := func(method, path string, body []byte) string {
+		r := p.handle(context.Background(), &hostproto.Frame{Kind: vaultipc.KindHTTP, ID: 1,
+			Fields: [][]byte{[]byte(method), []byte("https://relay.example" + path), vaultipc.EncodeHeaders(http.Header{}), body}})
+		return string(r[0])
+	}
+	const id = "/v1/blob/01JB2Z6V9K3M4N5P6Q7R8S9T60"
+	big := make([]byte, blobBodyThreshold+1)
+	if call("GET", id, nil) != "denied" || call("PUT", "/v1/blob/mbx", big) != "denied" {
 		t.Fatal("a blob body without an admitted transfer")
 	}
-	if !p.blobBodyAllowed("PUT", "/v1/blob/mbx", 1000) || !p.blobBodyAllowed("DELETE", "/v1/blob/x", 0) || !p.blobBodyAllowed("POST", "/v1/blobs", 10) ||
-		!p.blobBodyAllowed("GET", "/v1/mailbox", 0) {
-		t.Fatal("refused a request that is no blob body")
+	for _, c := range [][2]string{{"PUT", "/v1/blob/mbx"}, {"DELETE", id}, {"POST", "/v1/blobs"}, {"GET", "/v1/mailbox"}} {
+		if got := call(c[0], c[1], []byte("x")); got != "ok" {
+			t.Errorf("%s %s: %s", c[0], c[1], got)
+		}
 	}
 	if _, err := s.xfers.admit(context.Background(), p, "t", vault.PrioTransfer); err != nil {
 		t.Fatal(err)
 	}
-	if !p.blobBodyAllowed("GET", "/v1/blob/01JB2Z6V9K3M4N5P6Q7R8S9T60", 0) || !p.blobBodyAllowed("PUT", "/v1/blob/mbx", 8<<20) {
+	if call("GET", id, nil) != "ok" || call("PUT", "/v1/blob/mbx", big) != "ok" {
 		t.Fatal("refused with an admitted transfer")
+	}
+	// One body per admitted transfer at a time.
+	end, ok := p.blobBody("GET", id, 0)
+	if !ok {
+		t.Fatal("first body")
+	}
+	if _, ok := p.blobBody("GET", id, 0); ok {
+		t.Fatal("two bodies on one transfer")
+	}
+	end()
+	// Escaped and uncleaned forms, with a transfer held.
+	for _, bad := range []string{"/v1/%62lob/01JB2Z6V9K3M4N5P6Q7R8S9T60", "/v1//blob/01JB2Z6V9K3M4N5P6Q7R8S9T60",
+		"/v1/./blob/01JB2Z6V9K3M4N5P6Q7R8S9T60", "/v1/blob/../blob/01JB2Z6V9K3M4N5P6Q7R8S9T60", "/v1/mailbox/", "/v1/%2e%2e/x"} {
+		n := len(seen)
+		if got := call("GET", bad, nil); got != "denied" || len(seen) != n {
+			t.Errorf("%s: %s", bad, got)
+		}
+	}
+}
+
+// The relay proxy's client never follows a redirect (a redirect to a
+// blob route would otherwise skip the proxy's checks).
+func TestEgressClientNoRedirects(t *testing.T) {
+	c := (&egress.Transport{}).Client(time.Second)
+	if c.CheckRedirect == nil || c.CheckRedirect(nil, nil) != http.ErrUseLastResponse {
+		t.Fatal("the egress client follows redirects")
 	}
 }

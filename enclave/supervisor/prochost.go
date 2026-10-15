@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -105,12 +106,15 @@ type vproc struct {
 	vaultID  string
 	userGUID string
 	enroll   bool
-	slot     int
-	uid      int // its own uid and gid (UIDBase); 0 without
-	cmd      *exec.Cmd
-	conn     *hostproto.Conn
-	exited   chan struct{}
-	exitCode int
+	// blobBodies are the blob bodies the relay proxy carries for it now
+	// (at most one per admitted transfer, §10.5.1).
+	blobBodies int
+	slot       int
+	uid        int // its own uid and gid (UIDBase); 0 without
+	cmd        *exec.Cmd
+	conn       *hostproto.Conn
+	exited     chan struct{}
+	exitCode   int
 
 	mu      sync.Mutex
 	opening bool
@@ -843,9 +847,17 @@ func (p *vproc) http(ctx context.Context, f [][]byte) [][]byte {
 	if err != nil {
 		return deny()
 	}
-	if !p.blobBodyAllowed(method, u.EscapedPath(), len(f[3])) {
+	if strings.Contains(u.EscapedPath(), "%") || u.Path == "" || path.Clean(u.Path) != u.Path {
+		// Only plain, clean paths: an escaped or uncleaned form of a path
+		// (/v1/%62lob/, /v1//blob/, /v1/./blob/) would pass the checks
+		// below and reach, or redirect to, another route.
 		return deny()
 	}
+	endBody, ok := p.blobBody(method, u.Path, len(f[3]))
+	if !ok {
+		return deny()
+	}
+	defer endBody()
 	if hdr.Get(relayauth.HeaderKey) != "" {
 		sr, err := relayauth.ParseHeaders(hdr)
 		if err != nil || sr.Verify(method, u.EscapedPath(), relayauth.BodyHash(f[3]), time.Now()) != nil {
@@ -1123,16 +1135,32 @@ func validTicket(b []byte) bool {
 // without an admitted transfer.
 const blobBodyThreshold = 1 << 20
 
-// blobBodyAllowed: the relay proxy carries a blob's body (a download, or an
-// upload over 1 MiB) only for a process holding an admitted transfer
-// (§10.5.1), so that admission by memory cannot be bypassed.
-func (p *vproc) blobBodyAllowed(method, path string, n int) bool {
-	if !strings.HasPrefix(path, "/v1/blob/") {
-		return true
+// blobBody: the relay proxy carries a blob's body (a download, or an
+// upload over 1 MiB) only within the transfers a process has been admitted
+// (§10.5.1), one body per admitted transfer at a time, so that admission
+// by memory cannot be bypassed. It returns the function that ends the
+// body's request.
+func (p *vproc) blobBody(method, urlPath string, n int) (func(), bool) {
+	none := func() {}
+	if !strings.HasPrefix(urlPath, "/v1/blob/") {
+		return none, true
 	}
-	if method == http.MethodGet || method == http.MethodPut && n > blobBodyThreshold {
-		x := p.h.s.xfers
-		return x != nil && x.holds(p)
+	if !(method == http.MethodGet || method == http.MethodPut && n > blobBodyThreshold) {
+		return none, true
 	}
-	return true
+	x := p.h.s.xfers
+	if x == nil {
+		return none, false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.blobBodies >= x.held(p) {
+		return none, false
+	}
+	p.blobBodies++
+	return func() {
+		p.mu.Lock()
+		p.blobBodies--
+		p.mu.Unlock()
+	}, true
 }

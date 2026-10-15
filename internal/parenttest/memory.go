@@ -522,6 +522,9 @@ func (t *Tables) Lifecycle(_ context.Context, ev parent.Lifecycle, me string, no
 	switch ev.Event {
 	case "enrolled", "moved":
 		r.SealedRelease = ev.Release
+		if ev.Event == "enrolled" {
+			r.SweepPending = false
+		}
 	case "unlocked":
 		r.State = "unlocked"
 	case "locked", "deleted":

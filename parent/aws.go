@@ -528,6 +528,12 @@ func (a *AWS) Lifecycle(ctx context.Context, ev Lifecycle, instanceID string, no
 		nm["#sr"] = "sealed_release"
 		vals[":sr"] = s(ev.Release)
 		update = "SET #sr = :sr, #vv = :vv, #sv = :sv, #u = :u"
+		if ev.Event == "enrolled" {
+			// A vault id enrolled again: no sweep of its old attachments
+			// is pending for it any more (P15; the sweep stops too).
+			nm["#asp"] = AttrSweepPending
+			update += " REMOVE #asp"
+		}
 	case "unlocked":
 		nm["#st"] = "state"
 		vals[":st"] = s("unlocked")

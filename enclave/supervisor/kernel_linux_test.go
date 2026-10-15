@@ -37,10 +37,18 @@ func settings(t *testing.T, userNS, bpf string) {
 // directory.
 func fakeProcSys(t *testing.T) string {
 	t.Helper()
-	oldRoot, oldSetup := procSys, ioUringSetup
-	t.Cleanup(func() { procSys, ioUringSetup = oldRoot, oldSetup })
+	oldRoot, oldSetup, oldBPF, oldInfo, oldRemount := procSys, ioUringSetup, bpfCall, procMountinfo, remountProc
+	t.Cleanup(func() {
+		procSys, ioUringSetup, bpfCall, procMountinfo, remountProc = oldRoot, oldSetup, oldBPF, oldInfo, oldRemount
+	})
 	procSys = t.TempDir()
+	procMountinfo = filepath.Join(procSys, "mountinfo")
+	remountProc = func() error { return mountinfo(t, "rw,hidepid=invisible") }
+	if err := mountinfo(t, "rw"); err != nil {
+		t.Fatal(err)
+	}
 	ioUringSetup = func() error { return syscall.EPERM }
+	bpfCall = func() error { return syscall.EINVAL } // a kernel with bpf
 	for _, c := range sysctls {
 		p := filepath.Join(procSys, c.path)
 		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
@@ -191,6 +199,54 @@ func TestSpawnNeedsClosedUserNamespaces(t *testing.T) {
 	<-p.exited
 }
 
+// mountinfo writes procMountinfo with /proc mounted with super options opts.
+func mountinfo(t *testing.T, opts string) error {
+	t.Helper()
+	return os.WriteFile(procMountinfo, []byte("22 1 0:20 / /sys rw,nosuid - sysfs sysfs rw\n"+
+		"53 45 0:25 / /proc rw,nosuid,nodev,noexec,relatime shared:13 - proc proc "+opts+"\n"), 0o600)
+}
+
+// TestHideProcesses: the supervisor remounts /proc with hidepid=2 and
+// believes only the mount table; without it no vault process starts.
+func TestHideProcesses(t *testing.T) {
+	fakeProcSys(t)
+	for opts, ok := range map[string]bool{"rw,hidepid=2": true, "rw,hidepid=invisible": true, "rw": false, "rw,hidepid=1": false,
+		"rw,hidepid=noaccess": false, "rw,hidepid=2,gid=10": true} {
+		if err := mountinfo(t, opts); err != nil {
+			t.Fatal(err)
+		}
+		if err := processesHidden(); (err == nil) != ok {
+			t.Errorf("%s: %v", opts, err)
+		}
+	}
+	if err := os.WriteFile(procMountinfo, []byte("22 1 0:20 / /sys rw - sysfs sysfs rw\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if processesHidden() == nil {
+		t.Error("no /proc mount counts as hidden")
+	}
+
+	settings(t, setting(t, "15000\n"), setting(t, "0\n"))
+	s := &Supervisor{cfg: Config{OwnKernel: true}}
+	if notes := s.closeKernel(); !withNSMNote(notes, 0) || !s.kernelSet.Load() || processesHidden() != nil {
+		t.Fatalf("remounted: notes %v, set %v", notes, s.kernelSet.Load())
+	}
+	// The remount fails, or succeeds without the option taking.
+	for _, remount := range []func() error{
+		func() error { return syscall.EPERM },
+		func() error { return mountinfo(t, "rw") },
+	} {
+		if err := mountinfo(t, "rw"); err != nil {
+			t.Fatal(err)
+		}
+		remountProc = remount
+		s = &Supervisor{cfg: Config{OwnKernel: true}}
+		if notes := s.closeKernel(); !withNSMNote(notes, 1) || s.kernelSet.Load() || !strings.Contains(notes[0], "other processes are not hidden") {
+			t.Fatalf("not remounted: notes %v, set %v", notes, s.kernelSet.Load())
+		}
+	}
+}
+
 // TestSysctls: every setting is written and read back; a setting an
 // older kernel lacks is accepted (and reported as such), except where it
 // matters: a missing required file, a missing io_uring_disabled on a
@@ -311,10 +367,23 @@ func TestSysctls(t *testing.T) {
 	if notes := s.closeKernel(); !withNSMNote(notes, 1) || s.kernelSet.Load() || !s.userNSClosed.Load() {
 		t.Fatalf("one missing: notes %v, set %v", notes, s.kernelSet.Load())
 	}
+	// No unprivileged_bpf_disabled: refused where the kernel has bpf,
+	// accepted where it has none (built without the bpf call).
 	settings(t, setting(t, "15000\n"), filepath.Join(t.TempDir(), "absent", "bpf"))
 	s = &Supervisor{cfg: Config{OwnKernel: true}}
 	if notes := s.closeKernel(); !withNSMNote(notes, 1) || s.kernelSet.Load() || !strings.Contains(notes[0], "bpf is not closed") {
 		t.Fatalf("bpf: notes %v, set %v", notes, s.kernelSet.Load())
+	}
+	if unprivilegedBPFDisabled() == nil || !bpfSettingAbsent() {
+		t.Error("absent setting with bpf counts as closed")
+	}
+	bpfCall = func() error { return syscall.ENOSYS }
+	s = &Supervisor{cfg: Config{OwnKernel: true}}
+	if notes := s.closeKernel(); !withNSMNote(notes, 0) || !s.kernelSet.Load() {
+		t.Fatalf("no bpf in the kernel: notes %v, set %v", notes, s.kernelSet.Load())
+	}
+	if unprivilegedBPFDisabled() != nil {
+		t.Error("no bpf in the kernel does not count as closed")
 	}
 }
 

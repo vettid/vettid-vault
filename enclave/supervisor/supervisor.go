@@ -70,10 +70,11 @@ type Config struct {
 	// share). The supervisor then closes, for the whole machine and
 	// before any vault process exists, what a vault process must never
 	// reach: user namespaces (the limit is set to 0), bpf for
-	// unprivileged processes, and the kernel interfaces of sysctls
+	// unprivileged processes, the kernel interfaces of sysctls
 	// (io_uring, module loading, kexec, kernel pointers and log,
-	// performance events, SysRq, ...). If any of them cannot be made, no
-	// vault process is started.
+	// performance events, SysRq, ...), and other users' processes in
+	// /proc (hidepid=2). If any of them cannot be made, no vault process
+	// is started.
 	OwnKernel bool
 	// MaxVaults caps the vaults running at once (least recently active
 	// is locked first, §12.3); 0 = no cap.
@@ -126,8 +127,8 @@ type Supervisor struct {
 	userNSClosed atomic.Bool
 	// nsmClosed: the NSM device is root's alone (OwnKernel).
 	nsmClosed atomic.Bool
-	// kernelSet: unprivileged bpf is off and every kernel setting of
-	// sysctls is made (OwnKernel).
+	// kernelSet: unprivileged bpf is off, every kernel setting of
+	// sysctls is made and /proc hides other users' processes (OwnKernel).
 	kernelSet atomic.Bool
 	// uidNext counts the uids given to vault processes (takeUID).
 	uidNext atomic.Uint64
@@ -773,6 +774,10 @@ func (s *Supervisor) closeKernel() []string {
 	}
 	if n := makeSysctls(); len(n) != 0 {
 		notes = append(notes, n...)
+		set = false
+	}
+	if err := hideProcesses(); err != nil {
+		notes = append(notes, "other processes are not hidden in /proc, no vault process will be started: "+err.Error())
 		set = false
 	}
 	s.kernelSet.Store(set)

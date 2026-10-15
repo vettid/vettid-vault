@@ -163,13 +163,19 @@ func (s *Supervisor) selftestProcess(r *selftest.Report) {
 	err = userNamespacesClosed()
 	r.Add("kernel.user_namespaces_off", err == nil, s.cfg.OwnKernel, "max_user_namespaces: "+orZero(err))
 	err = unprivilegedBPFDisabled()
-	r.Add("kernel.unprivileged_bpf_off", err == nil, s.cfg.OwnKernel, "unprivileged_bpf_disabled: "+orSet(err))
+	detail := "unprivileged_bpf_disabled: " + orSet(err)
+	if err == nil && bpfSettingAbsent() {
+		detail = "absent: no bpf in this kernel (bpf: ENOSYS)"
+	}
+	r.Add("kernel.unprivileged_bpf_off", err == nil, s.cfg.OwnKernel, detail)
 	// The settings of sysctls: required on the enclave's own kernel where
 	// the kernel has the setting (or, for io_uring, where its absence is
 	// shown by the call); informational where an older kernel lacks it.
 	for _, st := range sysctlStatuses() {
 		r.Add(st.check, st.ok, s.cfg.OwnKernel && st.provable, st.detail)
 	}
+	err = processesHidden()
+	r.Add("kernel.proc_hidepid", err == nil, s.cfg.OwnKernel, "hidepid=2: "+orYes(err))
 	err = nsmClosedCheck()
 	r.Add("supervisor.nsm_closed", err == nil, s.cfg.OwnKernel, "root only: "+orYes(err))
 	r.Add("supervisor.pid1", true, false, pid1())
@@ -346,7 +352,21 @@ func (s *Supervisor) selftestVaultProcess(ctx context.Context, r *selftest.Repor
 	// From inside the vault process: starting a process in a new user
 	// namespace is refused (required where the supervisor closed them).
 	r.Add("vault_process.user_namespace_refused", vr.UserNamespace == selftest.UserNamespaceRefused, s.cfg.OwnKernel, vr.UserNamespace)
+	// From inside the vault process: no other process is visible in
+	// /proc (required where the supervisor remounted it with hidepid=2).
+	r.Add("vault_process.proc_others_hidden", vr.OtherProcesses == 0, s.cfg.OwnKernel, fmt.Sprintf("%d other processes visible", vr.OtherProcesses))
 	want := s.cfg.Proc.UIDBase
+	// Under a uid of its own the process's threads are limited
+	// (RLIMIT_NPROC, ProcConfig.Tasks): required there, so that a vault
+	// that starts threads without end fails (the Go runtime cannot create
+	// another thread and the process ends) instead of exhausting the
+	// enclave.
+	for i, c := range r.Checks {
+		if c.Name == "vault_process.rlimit_nproc" {
+			r.Checks[i].Required = want > 0
+			r.Checks[i].OK = c.OK && strings.HasPrefix(c.Detail, fmt.Sprintf("cur=%d ", h.cfg.Tasks))
+		}
+	}
 	if want > 0 {
 		r.Add("vault_process.own_uid_gid", p.uid >= want && vr.UID == p.uid && vr.GID == p.uid, true, fmt.Sprintf("uid=%d gid=%d", vr.UID, vr.GID))
 	} else {

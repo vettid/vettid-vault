@@ -3,8 +3,9 @@
 // may make the system calls the Go runtime and the vault's code need
 // (its memory, threads, signals, clocks, random bytes and its own
 // descriptors: the inherited channel and the /proc files it reads), some
-// only with certain arguments (threads but no new process, signals to
-// itself, no executable memory, rlimits read but not set). Every other
+// only with certain arguments (files opened for reading only, threads
+// but no new process, signals to itself, no executable memory, rlimits
+// read but not set). Every other
 // call is refused with EPERM, so that it fails visibly instead of
 // killing a member's vault; clone3, io_uring_setup and every number
 // above the last call of Linux 6.6 are answered ENOSYS, "no such call",

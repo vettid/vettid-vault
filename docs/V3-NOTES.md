@@ -156,7 +156,11 @@ supervisor's count does not move while vaults are unlocked.
   `/proc/<pid>/mem`/`environ` read, even by their own uid (tested);
 - seccomp filter (`internal/seccomp`, `PR_SET_NO_NEW_PRIVS`, TSYNC), an
   **allow list**: 49 system calls on arm64 and on amd64 (the same names;
-  arm64 has no legacy calls), 7 of them only with certain arguments:
+  arm64 has no legacy calls), 8 of them only with certain arguments:
+  `openat` only read-only, without `O_CREAT` or `O_TRUNC` (a vault
+  process writes no file; writing `/proc/self/mem` would patch its own
+  code whatever the page protections, and `O_TMPFILE` needs write
+  access; amd64's legacy `open`/`creat` and `openat2` are not allowed),
   `clone` only with `CLONE_THREAD` and no namespace flag (threads, no
   new process), `kill` and `tgkill` only to the process itself (its pid
   is in the filter), `mmap` and `mprotect` never with `PROT_EXEC`,
@@ -189,7 +193,7 @@ supervisor's count does not move while vaults are unlocked.
   appeared, among them io_uring, pidfds, the new mount API, landlock
   and memfd_secret). Release builds exit if the filter cannot be
   installed; `Install` fails when the kernel could not put the filter
-  on every thread. The self-test proves the filter on hardware with 46
+  on every thread. The self-test proves the filter on hardware with 47
   probes (`vault_process.seccomp_refuses_<call>`, docs/SMOKE.md), each
   also made before the filter so that the report shows the kernel's own
   answer differs;
@@ -229,6 +233,12 @@ before it reaches the parent the supervisor writes `0` to
 | `dev.tty.legacy_tiocsti` | 0 | 6.2+ (4.14: absent; no terminal, the filter refuses ioctl) |
 | `fs.protected_symlinks`, `fs.protected_hardlinks` | 1, 1 | always present |
 | `fs.protected_fifos`, `fs.protected_regular` | 2, 2 | 4.19+ (4.14: absent) |
+
+It also remounts `/proc` with `hidepid=2`, keeping its mount flags: a
+vault process then sees no other process's `/proc/<pid>` (other vaults'
+uids, command lines and CPU times), while the supervisor, root, still
+sees every process. A kernel without the bpf call (no
+`unprivileged_bpf_disabled`) is accepted where `bpf` answers ENOSYS.
 
 A missing file is accepted only as the table says (the self-test then
 reports the check as informational, `absent: <why>`); any other failure

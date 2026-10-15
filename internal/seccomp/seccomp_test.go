@@ -15,6 +15,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"runtime/debug"
 	"slices"
@@ -227,6 +228,12 @@ func childGoProbes() {
 	out["mmap_exec"] = fmt.Sprint(err)
 	_, _, errno := unix.Syscall(lastKnown+1, 0, 0, 0)
 	out["after_6_6"] = errno.Error()
+	_, err = os.ReadFile("/proc/self/status")
+	out["read_file"] = fmt.Sprint(err)
+	_, err = os.OpenFile("/proc/self/mem", os.O_RDWR, 0)
+	out["open_self_mem_rw"] = fmt.Sprint(err)
+	_, err = os.Create(filepath.Join(os.Getenv("SECCOMP_TMP"), "created"))
+	out["create_file"] = fmt.Sprint(err)
 	emit(out)
 	os.Exit(0)
 }
@@ -236,6 +243,8 @@ func childGoProbes() {
 // their arguments qualify.
 func TestGoProbes(t *testing.T) {
 	cmd, out := child(t, "goprobes")
+	dir := t.TempDir()
+	cmd.Env = append(cmd.Env, "SECCOMP_TMP="+dir)
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("child: %v\n%s", err, out)
 	}
@@ -249,11 +258,15 @@ func TestGoProbes(t *testing.T) {
 		"kill_other": unix.EPERM.Error(), "prctl_get_dumpable": ok, "getrlimit": ok, "prlimit_read": ok,
 		"prlimit_set": unix.EPERM.Error(), "mmap": ok, "mprotect_none": ok, "mprotect_exec": unix.EPERM.Error(),
 		"mmap_exec": unix.EPERM.Error(), "after_6_6": unix.ENOSYS.Error(),
+		"read_file": ok, "open_self_mem_rw": unix.EPERM.Error(), "create_file": unix.EPERM.Error(),
 	}
 	for k, w := range want {
 		if !strings.Contains(got[k], w) || (w == ok && got[k] != ok) {
 			t.Errorf("%s: %q, want %q", k, got[k], w)
 		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "created")); err == nil {
+		t.Error("a file was created under the filter")
 	}
 }
 
@@ -562,7 +575,7 @@ func run(t *testing.T, p []unix.SockFilter, arch, nr uint32, args ...uint64) uin
 var reviewed = map[string]uint32{
 	"futex": unix.SYS_FUTEX, "nanosleep": unix.SYS_NANOSLEEP, "epoll_pwait": unix.SYS_EPOLL_PWAIT, "read": unix.SYS_READ,
 	"write": unix.SYS_WRITE, "getpid": unix.SYS_GETPID, "rt_sigreturn": unix.SYS_RT_SIGRETURN, "fcntl": unix.SYS_FCNTL,
-	"sched_yield": unix.SYS_SCHED_YIELD, "close": unix.SYS_CLOSE, "openat": unix.SYS_OPENAT, "epoll_ctl": unix.SYS_EPOLL_CTL,
+	"sched_yield": unix.SYS_SCHED_YIELD, "close": unix.SYS_CLOSE, "epoll_ctl": unix.SYS_EPOLL_CTL,
 	"madvise": unix.SYS_MADVISE, "rt_sigprocmask": unix.SYS_RT_SIGPROCMASK, "rt_sigaction": unix.SYS_RT_SIGACTION,
 	"getrandom": unix.SYS_GETRANDOM, "gettid": unix.SYS_GETTID, "sigaltstack": unix.SYS_SIGALTSTACK,
 	"getrusage": unix.SYS_GETRUSAGE, "getdents64": unix.SYS_GETDENTS64, "getrlimit": unix.SYS_GETRLIMIT,
@@ -575,7 +588,7 @@ var reviewed = map[string]uint32{
 }
 
 var reviewedConditional = map[string]uint32{
-	"clone": unix.SYS_CLONE, "tgkill": unix.SYS_TGKILL, "kill": unix.SYS_KILL, "mmap": unix.SYS_MMAP,
+	"openat": unix.SYS_OPENAT, "clone": unix.SYS_CLONE, "tgkill": unix.SYS_TGKILL, "kill": unix.SYS_KILL, "mmap": unix.SYS_MMAP,
 	"mprotect": unix.SYS_MPROTECT, "prctl": unix.SYS_PRCTL, "prlimit64": unix.SYS_PRLIMIT64,
 }
 
@@ -615,11 +628,12 @@ func TestProgram(t *testing.T) {
 				t.Fatalf("architecture %#x, call %d: %#x", a, nr, got)
 			}
 		}
-		// No arguments: of the conditional calls, mmap, mprotect and
-		// prlimit64 (no PROT_EXEC; pid 0, no new limit) qualify.
+		// No arguments: of the conditional calls, openat (read-only),
+		// mmap, mprotect (no PROT_EXEC) and prlimit64 (pid 0, no new
+		// limit) qualify.
 		w := eperm
 		switch {
-		case slices.Contains(allowed, nr), nr == unix.SYS_MMAP, nr == unix.SYS_MPROTECT, nr == unix.SYS_PRLIMIT64:
+		case slices.Contains(allowed, nr), nr == unix.SYS_OPENAT, nr == unix.SYS_MMAP, nr == unix.SYS_MPROTECT, nr == unix.SYS_PRLIMIT64:
 			w = allow
 		case amd64 && nr >= x32First && nr <= x32Last:
 			w = eperm
@@ -641,6 +655,7 @@ func TestProgram(t *testing.T) {
 	}
 
 	// The argument conditions.
+	const at = 1<<32 - 100 // AT_FDCWD as the kernel reads an int
 	thread := uint64(unix.CLONE_VM | unix.CLONE_FS | unix.CLONE_FILES | unix.CLONE_SIGHAND | unix.CLONE_THREAD | unix.CLONE_SYSVSEM | unix.CLONE_SETTLS)
 	glibc := thread | unix.CLONE_PARENT_SETTID | unix.CLONE_CHILD_CLEARTID
 	for _, c := range []struct {
@@ -649,6 +664,15 @@ func TestProgram(t *testing.T) {
 		args []uint64
 		want uint32
 	}{
+		{"openat read", unix.SYS_OPENAT, []uint64{at, 1 << 20, unix.O_RDONLY | unix.O_CLOEXEC}, allow},
+		{"openat directory", unix.SYS_OPENAT, []uint64{at, 1 << 20, unix.O_RDONLY | unix.O_CLOEXEC | unix.O_DIRECTORY | unix.O_NONBLOCK}, allow},
+		{"openat write", unix.SYS_OPENAT, []uint64{at, 1 << 20, unix.O_WRONLY}, eperm},
+		{"openat read-write (/proc/self/mem)", unix.SYS_OPENAT, []uint64{at, 1 << 20, unix.O_RDWR | unix.O_CLOEXEC}, eperm},
+		{"openat create", unix.SYS_OPENAT, []uint64{at, 1 << 20, unix.O_RDONLY | unix.O_CREAT, 0o600}, eperm},
+		{"openat truncate", unix.SYS_OPENAT, []uint64{at, 1 << 20, unix.O_RDONLY | unix.O_TRUNC}, eperm},
+		{"openat tmpfile", unix.SYS_OPENAT, []uint64{at, 1 << 20, unix.O_TMPFILE | unix.O_RDWR, 0o600}, eperm},
+		{"openat invalid access mode 3", unix.SYS_OPENAT, []uint64{at, 1 << 20, 3}, eperm},
+		{"openat2", unix.SYS_OPENAT2, []uint64{at, 1 << 20, 1 << 21, 24}, eperm},
 		{"go thread", unix.SYS_CLONE, []uint64{thread}, allow},
 		{"glibc thread", unix.SYS_CLONE, []uint64{glibc}, allow},
 		{"thread, high bits", unix.SYS_CLONE, []uint64{thread | 1<<40}, allow},
@@ -679,6 +703,16 @@ func TestProgram(t *testing.T) {
 	} {
 		if got := run(t, p, arch(), c.nr, c.args...); got != c.want {
 			t.Errorf("%s: %#x, want %#x", c.name, got, c.want)
+		}
+	}
+
+	// amd64's legacy open and creat are not allowed (2 and 85; arm64 has
+	// neither).
+	if amd64 {
+		for _, nr := range []uint32{2, 85} {
+			if got := run(t, p, arch(), nr, 1<<20, unix.O_RDONLY); got != eperm {
+				t.Errorf("legacy call %d: %#x", nr, got)
+			}
 		}
 	}
 

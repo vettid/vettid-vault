@@ -54,7 +54,13 @@ type ProcConfig struct {
 	// Tasks is RLIMIT_NPROC: the processes and threads that may run under
 	// a vault process's uid at once (default 256). Applied only with
 	// UIDBase, where the uid is the process's alone; RLIMIT_FSIZE is
-	// always 0 (a vault process writes no file).
+	// always 0 (a vault process writes no file). A vault process makes
+	// no process (its filter refuses it) and few threads: at most 7 were
+	// measured, concurrent unlocks included, since its I/O is
+	// non-blocking and GOMAXPROCS is 2. 256 leaves ample room for threads
+	// blocked in system calls, and keeps the worst case of many runaway
+	// vaults well inside the kernel's pid space (pid_max is 32768 on a
+	// small enclave), which a higher limit such as 1024 would not.
 	Tasks uint64
 	// MemoryLimit is the process's GOMEMLIMIT (default 512 MiB).
 	MemoryLimit uint64

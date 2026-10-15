@@ -35,7 +35,7 @@ import (
 var allowed = []uint32{
 	unix.SYS_FUTEX, unix.SYS_NANOSLEEP, unix.SYS_EPOLL_PWAIT, unix.SYS_READ, unix.SYS_WRITE,
 	unix.SYS_GETPID, unix.SYS_RT_SIGRETURN, unix.SYS_FCNTL, unix.SYS_SCHED_YIELD, unix.SYS_CLOSE,
-	unix.SYS_OPENAT, unix.SYS_EPOLL_CTL, unix.SYS_MADVISE, unix.SYS_RT_SIGPROCMASK,
+	unix.SYS_EPOLL_CTL, unix.SYS_MADVISE, unix.SYS_RT_SIGPROCMASK,
 	unix.SYS_RT_SIGACTION, unix.SYS_GETRANDOM, unix.SYS_GETTID, unix.SYS_SIGALTSTACK,
 	unix.SYS_GETRUSAGE, unix.SYS_GETDENTS64, unix.SYS_GETRLIMIT, unix.SYS_MUNMAP,
 	unix.SYS_RESTART_SYSCALL, unix.SYS_CLOCK_GETTIME, unix.SYS_CLOCK_GETRES, unix.SYS_GETTIMEOFDAY,
@@ -50,10 +50,11 @@ var allowed = []uint32{
 }
 
 // conditional are the calls allowed only with certain arguments (see
-// program): new threads but no new processes, signals to itself only,
-// no executable memory, two prctl options, rlimits read but not set.
+// program): files opened for reading only, new threads but no new
+// processes, signals to itself only, no executable memory, two prctl
+// options, rlimits read but not set.
 var conditional = []uint32{
-	unix.SYS_CLONE, unix.SYS_TGKILL, unix.SYS_KILL, unix.SYS_MMAP, unix.SYS_MPROTECT,
+	unix.SYS_OPENAT, unix.SYS_CLONE, unix.SYS_TGKILL, unix.SYS_KILL, unix.SYS_MMAP, unix.SYS_MPROTECT,
 	unix.SYS_PRCTL, unix.SYS_PRLIMIT64,
 }
 
@@ -80,6 +81,14 @@ const (
 	// a new process. No namespace flag is accepted.
 	cloneNamespaces = unix.CLONE_NEWNS | unix.CLONE_NEWCGROUP | unix.CLONE_NEWUTS | unix.CLONE_NEWIPC |
 		unix.CLONE_NEWUSER | unix.CLONE_NEWPID | unix.CLONE_NEWNET
+	// A vault process reads files (/proc/self/..., /proc/meminfo) and
+	// writes none: openat only read-only, without creating or truncating.
+	// Writing /proc/self/mem would patch the process's own code whatever
+	// the page protections (the kernel writes it with FOLL_FORCE), which
+	// the PROT_EXEC rule below cannot stop. O_TMPFILE needs write access,
+	// so it is refused too. (The legacy open and creat of amd64, and
+	// openat2, are not allowed at all.)
+	openWrite = unix.O_ACCMODE | unix.O_CREAT | unix.O_TRUNC
 )
 
 // x32Bit marks a syscall number of the x32 ABI on amd64. Such a call
@@ -195,6 +204,7 @@ func program(pid, deny, notFound uint32) []unix.SockFilter {
 	for _, nr := range allowed {
 		a.jump(jeq, nr, "allow", "")
 	}
+	a.jump(jeq, unix.SYS_OPENAT, "readonly", "")
 	a.jump(jeq, unix.SYS_CLONE, "clone", "")
 	a.jump(jeq, unix.SYS_TGKILL, "self", "")
 	a.jump(jeq, unix.SYS_KILL, "self", "")
@@ -207,6 +217,11 @@ func program(pid, deny, notFound uint32) []unix.SockFilter {
 	}
 	a.jump(jgt, lastKnown, "nosys", "deny")
 
+	// openat: flags (the third argument) neither ask for write access
+	// nor create or truncate.
+	a.label("readonly")
+	a.stmt(ldW, argLo(2))
+	a.jump(jset, openWrite, "deny", "allow")
 	// clone: CLONE_THREAD and no namespace (flags are the first argument
 	// on both architectures; the kernel uses their low 32 bits).
 	a.label("clone")
@@ -385,6 +400,8 @@ var probes = []probe{
 	{name: "prctl_other", nr: unix.SYS_PRCTL, a: [6]uintptr{0xffff}},
 	{name: "prlimit_set", nr: unix.SYS_PRLIMIT64, a: [6]uintptr{0, unix.RLIMIT_NOFILE, bad}},
 	{name: "mprotect_exec", nr: unix.SYS_MPROTECT, a: [6]uintptr{bad, 0, unix.PROT_READ | unix.PROT_EXEC}},
+	// Opening for writing, at no path (EFAULT before anything is opened).
+	{name: "openat_write", nr: unix.SYS_OPENAT, fd: true, a: [6]uintptr{none, 0, unix.O_WRONLY | unix.O_CLOEXEC}},
 }
 
 // Names are the names of Probe's results, sorted.

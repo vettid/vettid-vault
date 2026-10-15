@@ -720,7 +720,7 @@ func TestSelftest(t *testing.T) {
 		"kernel.perf_event_paranoid": false, "kernel.sysrq_off": false, "kernel.kexec_load_disabled": false, "kernel.modules_disabled": false,
 		"kernel.randomize_va_space": false, "kernel.unprivileged_userfaultfd_off": false, "kernel.legacy_tiocsti_off": false,
 		"kernel.protected_symlinks": false, "kernel.protected_hardlinks": false, "kernel.protected_fifos": false, "kernel.protected_regular": false,
-		"vault_process.seccomp_allow_list": false}
+		"vault_process.seccomp_allow_list": false, "kernel.proc_hidepid": false, "vault_process.proc_others_hidden": false}
 	for _, c := range rep.Checks {
 		if _, ok := kernel[c.Name]; ok {
 			kernel[c.Name] = true

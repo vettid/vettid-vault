@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"golang.org/x/sys/unix"
 )
@@ -186,4 +187,54 @@ func sysctlStatuses() []sysctlStatus {
 		out = append(out, sysctlStatus{check: "kernel." + c.check, detail: detail, ok: ok, provable: provable})
 	}
 	return out
+}
+
+// The /proc mount (variables for the tests).
+var (
+	procMountinfo = "/proc/self/mountinfo"
+	// remountProc remounts /proc with hidepid=2, keeping its mount flags.
+	remountProc = func() error {
+		var st unix.Statfs_t
+		if err := unix.Statfs("/proc", &st); err != nil {
+			return err
+		}
+		keep := uintptr(st.Flags) & (unix.ST_RDONLY | unix.ST_NOSUID | unix.ST_NODEV | unix.ST_NOEXEC)
+		return unix.Mount("proc", "/proc", "proc", unix.MS_REMOUNT|keep, "hidepid=2")
+	}
+)
+
+// hideProcesses remounts /proc so that a process sees only its own
+// processes' entries (hidepid=2, "invisible" from 5.8): a vault process
+// then cannot read another vault's or the supervisor's /proc/<pid>
+// (uids, command lines, CPU times) or even learn their pids. The
+// supervisor, root, still sees every process (it sweeps them). Reads of
+// /proc/self and /proc/meminfo are unaffected.
+func hideProcesses() error {
+	if err := remountProc(); err != nil {
+		return err
+	}
+	return processesHidden()
+}
+
+// processesHidden reports whether /proc is mounted with hidepid=2.
+func processesHidden() error {
+	b, err := os.ReadFile(procMountinfo)
+	if err != nil {
+		return err
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		// id parent major:minor root mountpoint options [optional...] - type source super-options
+		pre, post, ok := strings.Cut(line, " - ")
+		f, g := strings.Fields(pre), strings.Fields(post)
+		if !ok || len(f) < 5 || len(g) < 3 || f[4] != "/proc" || g[0] != "proc" {
+			continue
+		}
+		for _, o := range strings.Split(g[2], ",") {
+			if o == "hidepid=2" || o == "hidepid=invisible" {
+				return nil
+			}
+		}
+		return fmt.Errorf("/proc is mounted with %s", g[2])
+	}
+	return errors.New("/proc is not mounted")
 }

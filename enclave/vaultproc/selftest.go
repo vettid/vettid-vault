@@ -116,6 +116,7 @@ func runSelftest(ctx context.Context, ch channel, keyARN string, seccompErr erro
 	if res.UserNamespace == "" { // a test without the pre-filter steps
 		res.UserNamespace = TryUserNamespace()
 	}
+	res.OtherProcesses = otherProcesses()
 	d, err := Dumpable()
 	add("vault_process.not_dumpable", err == nil && d == 0, true, fmt.Sprintf("dumpable=%d", d))
 	add("vault_process.seccomp_installed", seccompErr == nil, true, errString(seccompErr))
@@ -214,4 +215,20 @@ func kmsRoundTrip(ctx context.Context, ch channel, arn string) (bool, string) {
 		return false, "not equal"
 	}
 	return true, "equal"
+}
+
+// otherProcesses counts the /proc entries of processes other than this
+// one that this process can see (-1 if /proc cannot be read).
+func otherProcesses() int {
+	ents, err := os.ReadDir("/proc")
+	if err != nil {
+		return -1
+	}
+	n, self := 0, strconv.Itoa(os.Getpid())
+	for _, e := range ents {
+		if _, err := strconv.Atoi(e.Name()); err == nil && e.Name() != self {
+			n++
+		}
+	}
+	return n
 }

@@ -7,5 +7,5 @@
 #   kernel_hardened=true: the lock's blobs are vettid-vault's own build
 #     (a vettid-vault release URL, blobs_dir vettid-enclave-blobs/aarch64,
 #     kernel_release = release/kernel/kernel.lock's kernel_version).
-kernel_release=6.6.79
-kernel_hardened=false
+kernel_release=6.6.158
+kernel_hardened=true

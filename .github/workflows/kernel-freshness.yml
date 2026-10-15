@@ -1,0 +1,73 @@
+name: kernel-freshness
+
+# Weekly: is the enclave kernel pinned in release/kernel/kernel.lock the
+# newest point release of its longterm series, is the series still
+# maintained, and has AWS's recipe moved (docs/KERNEL.md, "Keeping it
+# current")? If not, open one issue (or update the open one) with the
+# exact kernel.lock lines to change. A warning, not a block: the job
+# fails only when the check itself cannot run. On pull requests that
+# touch the kernel inputs it only reports. The release workflow shows the
+# same check as a warning (release.yml, gate).
+
+on:
+  schedule:
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'release/kernel/kernel.lock'
+      - 'release/kernel/check-current.sh'
+      - '.github/workflows/kernel-freshness.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: check
+        id: check
+        run: |
+          set +e
+          release/kernel/check-current.sh "$RUNNER_TEMP/report.md"
+          rc=$?
+          set -e
+          cat "$RUNNER_TEMP/report.md" >>"$GITHUB_STEP_SUMMARY"
+          echo "rc=$rc" >>"$GITHUB_OUTPUT"
+          case "$rc" in 0 | 10 | 11 | 12 | 13) ;; *) exit "$rc" ;; esac
+      - name: open or update the issue
+        if: github.event_name != 'pull_request' && steps.check.outputs.rc != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RC: ${{ steps.check.outputs.rc }}
+        run: |
+          title="Enclave kernel: update needed"
+          case "$RC" in
+            11) title="Enclave kernel: the pinned series is end of life" ;;
+            12) title="Enclave kernel: more than ${MAX_DAYS_BEHIND:-30} days behind its series" ;;
+            13) title="Enclave kernel: AWS's bootstrap recipe changed" ;;
+          esac
+          {
+            cat "$RUNNER_TEMP/report.md"
+            echo
+            echo "Found by [run $GITHUB_RUN_ID]($GITHUB_SERVER_URL/$REPO/actions/runs/$GITHUB_RUN_ID)."
+          } >"$RUNNER_TEMP/body.md"
+          # Only an issue this workflow opened (author: the Actions bot).
+          n="$(gh issue list --repo "$REPO" --state open --author app/github-actions --search 'in:title "Enclave kernel:"' --json number --jq '.[0].number // empty')"
+          if [ -n "$n" ]; then
+            gh issue edit "$n" --repo "$REPO" --title "$title" --body-file "$RUNNER_TEMP/body.md"
+            echo "updated issue #$n"
+          else
+            gh issue create --repo "$REPO" --title "$title" --body-file "$RUNNER_TEMP/body.md"
+          fi
+      - name: warn when over the limit or end of life
+        if: steps.check.outputs.rc == '11' || steps.check.outputs.rc == '12'
+        run: echo "::warning::the enclave kernel is end of life or more than 30 days behind its series (see the summary)"

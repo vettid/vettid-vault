@@ -1,0 +1,321 @@
+name: enclave-kernel
+
+# The enclave kernel blob set built from source (docs/KERNEL.md;
+# release/kernel). Checks the toolchain's NAR hashes and resolves and
+# checks the config first; then builds the blob set twice from clean, on
+# two arm64 runners (different runner VMs, checkout paths and core
+# counts), requires every output file and the build-time closure to be
+# byte-for-byte identical and the blob set to equal the committed
+# release/kernel/SHA256SUMS (so the weekly run also compares a build on
+# a later date); then builds a channel-none EIF from each builder's blobs
+# through release/Dockerfile.eif-builder and requires identical measured
+# sections and PCR0/1/2.
+#
+# workflow_dispatch with source_toolchain=true builds once with the whole
+# toolchain from source (no cache.nixos.org binaries), which must give the
+# lock's toolchain NAR hashes and the same blob set. It takes hours.
+#
+# Nothing here publishes anything. Adopting a blob set is a separate change
+# to release/eif-toolchain.lock (docs/KERNEL.md, "Into the EIF").
+
+on:
+  schedule:
+    - cron: '41 5 * * 3'
+  workflow_dispatch:
+    inputs:
+      source_toolchain:
+        description: 'Also build once with the toolchain from source (no binary cache; hours)'
+        type: boolean
+        default: false
+  pull_request:
+    paths:
+      - 'release/kernel/**'
+      - '.github/workflows/enclave-kernel.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: enclave-kernel-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  config:
+    runs-on: ubuntu-26.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: toolchain NAR hashes; resolve and check the kernel config
+        run: KERNEL_TARGET=kernelConfig release/kernel/build.sh "$RUNNER_TEMP/config"
+      - name: changes against AWS's config
+        run: |
+          {
+            echo "### Enclave kernel config: changes against AWS's microvm-kernel-config-aarch64"
+            echo
+            echo '```diff'
+            diff -u release/kernel/aws/kernel/microvm-kernel-config-aarch64 "$RUNNER_TEMP/config/Image.config" | grep -E '^[-+]CONFIG_|^[-+]# CONFIG_' || true
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: kernel-config
+          path: |
+            ${{ runner.temp }}/config/Image.config
+            ${{ runner.temp }}/config/toolchain.lock-lines
+          if-no-files-found: warn
+          retention-days: 30
+
+  build:
+    needs: config
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - builder: a
+            path: vettid-vault
+            mount: /src
+            cores: '0'
+            umask: '0022'
+            tz: UTC
+            locale: C
+          - builder: b
+            path: elsewhere/build-b/vettid-vault
+            mount: /elsewhere/recipe
+            cores: '2'
+            umask: '0002'
+            tz: Pacific/Chatham
+            locale: C.UTF-8
+    runs-on: ubuntu-26.04-arm
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: ${{ matrix.path }}
+          persist-credentials: false
+      - name: build the blob set (pinned source and toolchain, no cache)
+        working-directory: ${{ matrix.path }}
+        env:
+          KERNEL_MOUNT: ${{ matrix.mount }}
+          KERNEL_CORES: ${{ matrix.cores }}
+          KERNEL_UMASK: ${{ matrix.umask }}
+          TZ: ${{ matrix.tz }}
+          LC_ALL: ${{ matrix.locale }}
+        run: |
+          uname -a
+          nproc
+          docker version --format 'docker {{.Server.Version}} ({{.Server.Arch}})'
+          echo "builder ${{ matrix.builder }}: mount $KERNEL_MOUNT, cores $KERNEL_CORES, umask $KERNEL_UMASK, TZ $TZ, LC_ALL $LC_ALL"
+          KERNEL_DOWNLOADS="$RUNNER_TEMP/dl-${{ matrix.builder }}" release/kernel/build.sh "$RUNNER_TEMP/blobs"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: blobs-${{ matrix.builder }}
+          path: |
+            ${{ runner.temp }}/blobs/Image
+            ${{ runner.temp }}/blobs/Image.config
+            ${{ runner.temp }}/blobs/cmdline
+            ${{ runner.temp }}/blobs/init
+            ${{ runner.temp }}/blobs/linuxkit
+            ${{ runner.temp }}/blobs/nsm.ko
+            ${{ runner.temp }}/blobs/SHA256SUMS
+            ${{ runner.temp }}/blobs/SHA256SUMS.extra
+            ${{ runner.temp }}/blobs/toolchain.lock-lines
+            ${{ runner.temp }}/blobs/toolchain-closure.txt
+            ${{ runner.temp }}/blobs/extra/
+            ${{ runner.temp }}/blobs/vettid-enclave-blobs.txz
+          if-no-files-found: error
+          retention-days: 30
+
+  compare:
+    needs: build
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: blobs-a
+          path: ${{ runner.temp }}/a
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: blobs-b
+          path: ${{ runner.temp }}/b
+      - name: the two builds are identical
+        env:
+          A: ${{ runner.temp }}/a
+          B: ${{ runner.temp }}/b
+        run: |
+          set -u
+          bad=0
+          for f in Image Image.config cmdline init linuxkit nsm.ko extra/System.map extra/vmlinux vettid-enclave-blobs.txz toolchain.lock-lines toolchain-closure.txt; do
+            if cmp "$A/$f" "$B/$f"; then
+              echo "same: $f $(sha256sum <"$A/$f" | cut -d' ' -f1)"
+            else
+              bad=1
+              echo "::error::differs: $f"
+              cmp -l "$A/$f" "$B/$f" | head -20 || true
+              echo "bytes differing: $(cmp -l "$A/$f" "$B/$f" | wc -l)"
+            fi
+          done
+          if ! cmp -s "$A/extra/System.map" "$B/extra/System.map"; then
+            diff "$A/extra/System.map" "$B/extra/System.map" | head -40 || true
+          fi
+          if ! cmp -s "$A/Image" "$B/Image"; then
+            diff <(strings -n 8 "$A/Image") <(strings -n 8 "$B/Image") | head -60 || true
+          fi
+          if ! cmp -s "$A/toolchain-closure.txt" "$B/toolchain-closure.txt"; then
+            diff "$A/toolchain-closure.txt" "$B/toolchain-closure.txt" | head -40 || true
+          fi
+          # The committed hashes: equal on any date (the weekly run).
+          if diff release/kernel/SHA256SUMS "$A/SHA256SUMS"; then
+            echo "same as the committed release/kernel/SHA256SUMS"
+          else
+            bad=1
+            echo "::error::the blob set differs from the committed release/kernel/SHA256SUMS (update it with a recipe change)"
+          fi
+          exit "$bad"
+      - name: summary
+        if: always()
+        env:
+          A: ${{ runner.temp }}/a
+          B: ${{ runner.temp }}/b
+        run: |
+          {
+            echo "### Enclave kernel blob set: two arm64 builds"
+            echo
+            if diff -q "$A/SHA256SUMS" "$B/SHA256SUMS" >/dev/null && diff -q "$A/SHA256SUMS.extra" "$B/SHA256SUMS.extra" >/dev/null; then
+              echo "Both builds are byte-for-byte identical."
+            else
+              echo "**The builds differ.**"
+            fi
+            echo
+            echo "Builder a:"
+            echo '```'
+            cat "$A/SHA256SUMS" "$A/SHA256SUMS.extra"
+            echo '```'
+            echo "Builder b:"
+            echo '```'
+            cat "$B/SHA256SUMS" "$B/SHA256SUMS.extra"
+            echo '```'
+            echo
+            echo "Kernel: $(strings "$A/Image" | grep -m1 '^Linux version ' || echo unknown)"
+          } >>"$GITHUB_STEP_SUMMARY"
+
+  eif:
+    # A channel-none EIF from each builder's blob set, through the normal
+    # toolchain image: shows that nitro-cli and linuxkit take the set
+    # (including the empty nsm.ko) and that the EIF is reproducible. Its
+    # artifact is what a hardware test boots before adoption.
+    needs: compare
+    strategy:
+      fail-fast: false
+      matrix:
+        builder: [a, b]
+    runs-on: ubuntu-26.04-arm
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: ${{ matrix.builder == 'a' && 'vettid-vault' || 'elsewhere/build-b/vettid-vault' }}
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: ${{ matrix.builder == 'a' && 'vettid-vault' || 'elsewhere/build-b/vettid-vault' }}/go.mod
+          cache: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: blobs-${{ matrix.builder }}
+          path: ${{ runner.temp }}/blobs
+      - name: EIF with this blob set (channel none)
+        working-directory: ${{ matrix.builder == 'a' && 'vettid-vault' || 'elsewhere/build-b/vettid-vault' }}
+        run: release/kernel/eif-with-blobs.sh "$RUNNER_TEMP/blobs" "$RUNNER_TEMP/out"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: eif-${{ matrix.builder }}
+          path: |
+            ${{ runner.temp }}/out/vault-enclave.eif
+            ${{ runner.temp }}/out/vault-enclave
+            ${{ runner.temp }}/out/vault-parent
+            ${{ runner.temp }}/out/measurements.json
+            ${{ runner.temp }}/out/build-enclave.json
+            ${{ runner.temp }}/out/eif.json
+          if-no-files-found: error
+          retention-days: 30
+
+  eif-compare:
+    needs: eif
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: eif-a
+          path: ${{ runner.temp }}/a
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: eif-b
+          path: ${{ runner.temp }}/b
+      - name: the two EIFs measure the same
+        env:
+          A: ${{ runner.temp }}/a
+          B: ${{ runner.temp }}/b
+        run: |
+          set -x
+          cmp "$A/vault-enclave" "$B/vault-enclave"
+          go run ./cmd/eifinfo compare "$A/vault-enclave.eif" "$B/vault-enclave.eif"
+          go run ./cmd/eifinfo match "$A/measurements.json" "$B/measurements.json"
+          for d in "$A" "$B"; do go run ./cmd/eifinfo pcrs "$d/vault-enclave.eif" "$d/build-enclave.json"; done
+      - name: summary
+        env:
+          A: ${{ runner.temp }}/a
+        run: |
+          {
+            echo "### Channel-none EIF with the source-built blob set (not a release)"
+            echo
+            echo '```json'
+            cat "$A/measurements.json"
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"
+
+  source-toolchain:
+    # Manual: the toolchain built from source instead of taken from
+    # cache.nixos.org. Its NAR hashes must equal the lock's (build.sh
+    # checks) and the blob set must equal the cached builds'.
+    if: github.event_name == 'workflow_dispatch' && inputs.source_toolchain
+    needs: compare
+    runs-on: ubuntu-26.04-arm
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: blobs-a
+          path: ${{ runner.temp }}/a
+      - name: build with the toolchain from source; compare with the cached build
+        env:
+          KERNEL_NO_SUBSTITUTE: '1'
+          # NAR differences of the source-built toolchain are reported, not
+          # fatal; the blob set must still equal builder a's.
+          KERNEL_TOOLCHAIN_UNPINNED: '1'
+        run: release/kernel/build.sh "$RUNNER_TEMP/src-built" "$RUNNER_TEMP/a/SHA256SUMS"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: source-toolchain
+          path: |
+            ${{ runner.temp }}/src-built/SHA256SUMS
+            ${{ runner.temp }}/src-built/toolchain.lock-lines
+            ${{ runner.temp }}/src-built/toolchain-closure.txt
+          if-no-files-found: warn
+          retention-days: 30

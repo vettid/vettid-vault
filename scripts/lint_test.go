@@ -70,7 +70,8 @@ func TestDockerfileEnclave(t *testing.T) {
 }
 
 func TestScripts(t *testing.T) {
-	for _, p := range []string{"build-eif.sh", "smoke/run-on-host.sh", "compat-matrix.sh", "../release/rebuild.sh"} {
+	for _, p := range []string{"build-eif.sh", "smoke/run-on-host.sh", "compat-matrix.sh", "../release/rebuild.sh",
+		"../release/kernel/build.sh", "../release/kernel/check-config.sh", "../release/kernel/check-current.sh", "../release/kernel/eif-with-blobs.sh"} {
 		s := read(t, p)
 		if !strings.HasPrefix(s, "#!/usr/bin/env bash\n") || !strings.Contains(s, "set -euo pipefail") {
 			t.Errorf("%s: missing shebang or set -euo pipefail", p)
@@ -183,6 +184,39 @@ func TestEIFToolchain(t *testing.T) {
 	if val("arch") != "aarch64" || !regexp.MustCompile(`^2023\.\d+\.\d{8}$`).MatchString(val("releasever")) {
 		t.Error("lock arch or releasever")
 	}
+	// The kernel the binary expects (release/enclave-kernel, embedded)
+	// matches the blobs the lock pins: AWS's release, or vettid-vault's
+	// own build of release/kernel/kernel.lock.
+	ek := read(t, "../release/enclave-kernel")
+	ekv := func(k string) string {
+		m := regexp.MustCompile(`(?m)^` + k + `=(\S+)$`).FindStringSubmatch(ek)
+		if m == nil {
+			t.Fatalf("release/enclave-kernel lacks %s", k)
+		}
+		return m[1]
+	}
+	krel, khard := ekv("kernel_release"), ekv("kernel_hardened")
+	if regexp.MustCompile(`(?m)^kernel_(release|hardened)=`).MatchString(lock) {
+		t.Error("the lock names the kernel itself; it belongs in release/enclave-kernel")
+	}
+	switch khard {
+	case "false":
+		if val("blobs_version") != "v"+krel {
+			t.Errorf("kernel_release %s does not match blobs_version %s", krel, val("blobs_version"))
+		}
+		if !strings.HasPrefix(val("blobs_url"), "https://github.com/aws/") {
+			t.Errorf("kernel_hardened=false but blobs_url %s is not AWS's", val("blobs_url"))
+		}
+	case "true":
+		if !strings.Contains(read(t, "../release/kernel/kernel.lock"), "\nkernel_version="+krel+"\n") {
+			t.Errorf("kernel_release %s is not release/kernel/kernel.lock's kernel_version", krel)
+		}
+		if !strings.HasPrefix(val("blobs_url"), "https://github.com/vettid/vettid-vault/releases/download/") || val("blobs_dir") != "vettid-enclave-blobs/aarch64" {
+			t.Errorf("kernel_hardened=true but blobs_url %s / blobs_dir %s are not vettid-vault's release", val("blobs_url"), val("blobs_dir"))
+		}
+	default:
+		t.Errorf("kernel_hardened %q is not true or false", khard)
+	}
 	ver := val("nitro_cli_version")
 	for _, f := range []string{
 		"/toolchain/aws-nitro-enclaves-cli-" + ver + ".aarch64.rpm", "/toolchain/aws-nitro-enclaves-cli-devel-" + ver + ".aarch64.rpm", "/toolchain/enclaves-blobs.txz",
@@ -198,12 +232,88 @@ func TestEIFToolchain(t *testing.T) {
 			t.Errorf("builder lacks %q", want)
 		}
 	}
-	for _, wf := range []string{"../.github/workflows/release.yml", "../.github/workflows/compat.yml", "../.github/workflows/ci.yml"} {
+	for _, wf := range []string{"../.github/workflows/release.yml", "../.github/workflows/compat.yml", "../.github/workflows/ci.yml",
+		"../.github/workflows/enclave-kernel.yml", "../.github/workflows/kernel-freshness.yml"} {
 		w := read(t, wf)
 		for _, m := range regexp.MustCompile(`(?m)^\s*-?\s*uses:\s*(\S+)`).FindAllStringSubmatch(w, -1) {
 			if !regexp.MustCompile(`@[0-9a-f]{40}$`).MatchString(m[1]) {
 				t.Errorf("%s: action not pinned by commit: %s", wf, m[1])
 			}
 		}
+	}
+}
+
+// The enclave kernel built from source (docs/KERNEL.md): every input is
+// pinned in release/kernel/kernel.lock (source by SHA-256 and signer
+// fingerprint, the Nix image by digest, nixpkgs by hash), the files
+// copied from AWS's recipe are unchanged (aws/SHA256SUMS), and the config
+// fragment keeps module loading off with the NSM driver built in.
+func TestEnclaveKernel(t *testing.T) {
+	const dir = "../release/kernel"
+	lock := read(t, dir+"/kernel.lock")
+	val := func(k string) string {
+		m := regexp.MustCompile(`(?m)^` + k + `=(\S+)$`).FindStringSubmatch(lock)
+		if m == nil {
+			t.Fatalf("kernel.lock lacks %s", k)
+		}
+		return m[1]
+	}
+	v := val("kernel_version")
+	if !regexp.MustCompile(`^6\.6\.\d+$`).MatchString(v) {
+		t.Errorf("kernel_version %s is not a 6.6.y release", v)
+	}
+	if want := "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-" + v + ".tar.xz"; val("kernel_url") != want {
+		t.Errorf("kernel_url %s, want %s", val("kernel_url"), want)
+	}
+	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(val("kernel_sha256")) {
+		t.Error("kernel_sha256")
+	}
+	if !regexp.MustCompile(`^[0-9A-F]{40}(,[0-9A-F]{40})*$`).MatchString(val("kernel_signers")) {
+		t.Error("kernel_signers: full fingerprints, comma separated")
+	}
+	if !regexp.MustCompile(`@sha256:[0-9a-f]{64}$`).MatchString(val("nix_image")) {
+		t.Errorf("nix_image %s is not pinned by digest", val("nix_image"))
+	}
+	if !regexp.MustCompile(`^[0-9a-z]{52}$`).MatchString(val("nixpkgs_sha256")) || !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(val("aws_bootstrap_commit")) {
+		t.Error("nixpkgs_sha256 or aws_bootstrap_commit")
+	}
+	if val("arch") != "aarch64" {
+		t.Error("arch")
+	}
+	tc := regexp.MustCompile(`(?m)^toolchain=(\w+) /nix/store/[0-9a-z]{32}-\S+ sha256:[0-9a-z]{52}$`).FindAllStringSubmatch(lock, -1)
+	if !regexp.MustCompile(`(?m)^toolchain_closure_sha256=[0-9a-f]{64}$`).MatchString(lock) {
+		t.Error("kernel.lock lacks toolchain_closure_sha256")
+	}
+	if names := len(tc); names != 5 {
+		t.Errorf("kernel.lock pins %d toolchain paths, want 5 (gcc, binutils, muslGcc, musl, go)", names)
+	}
+	sums := read(t, dir+"/aws/SHA256SUMS")
+	n := 0
+	for _, line := range strings.Split(strings.TrimSpace(sums), "\n") {
+		f := strings.Fields(line)
+		if len(f) != 2 {
+			t.Fatalf("aws/SHA256SUMS: %q", line)
+		}
+		b, err := os.ReadFile(filepath.Join(dir, "aws", f[1]))
+		if err != nil {
+			t.Error(err)
+			continue
+		}
+		if got := fmt.Sprintf("%x", sha256.Sum256(b)); got != f[0] {
+			t.Errorf("aws/%s changed: AWS's files stay as copied; changes go in patches/ or config/", f[1])
+		}
+		n++
+	}
+	if n < 9 {
+		t.Errorf("aws/SHA256SUMS lists %d files", n)
+	}
+	frag := read(t, dir+"/config/hardening.config")
+	for _, want := range []string{"# CONFIG_MODULES is not set\n", "CONFIG_NSM=y\n", "CONFIG_SECURITY_YAMA=y\n", "CONFIG_LOCK_DOWN_KERNEL_FORCE_CONFIDENTIALITY=y\n"} {
+		if !strings.Contains(frag, want) {
+			t.Errorf("hardening.config lacks %q", want)
+		}
+	}
+	if c := read(t, dir+"/cmdline"); strings.Contains(c, "\n") || strings.Contains(c, "nomodule") {
+		t.Errorf("cmdline %q: one line, no newline, no module options (the kernel has no modules)", c)
 	}
 }

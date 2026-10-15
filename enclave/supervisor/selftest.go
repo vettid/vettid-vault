@@ -150,9 +150,19 @@ func (s *Supervisor) selftestProcess(r *selftest.Report) {
 	exe, err := os.Executable()
 	r.Add("proc.self_exe", err == nil && exe != "", true, exe)
 	k, err := os.ReadFile("/proc/sys/kernel/osrelease")
-	r.Add("kernel.release", err == nil, false, strings.TrimSpace(string(k))+errStr(err))
+	rel := strings.TrimSpace(string(k))
+	want := s.cfg.KernelRelease
+	r.Add("kernel.release", err == nil && (want == "" || rel == want), s.cfg.OwnKernel && want != "", rel+errStr(err)+wantStr(want))
+	// The hardened kernel (docs/KERNEL.md) has Yama, lockdown and no
+	// modules; on another kernel these are reported only.
+	hard := s.cfg.OwnKernel && s.cfg.KernelHardened
 	y, err := os.ReadFile("/proc/sys/kernel/yama/ptrace_scope")
-	r.Add("kernel.yama_ptrace_scope", err == nil && strings.TrimSpace(string(y)) == "3", false, strings.TrimSpace(string(y))+errStr(err))
+	r.Add("kernel.yama_ptrace_scope", err == nil && strings.TrimSpace(string(y)) == "3", hard, strings.TrimSpace(string(y))+errStr(err))
+	mode, err := lockdownMode()
+	r.Add("kernel.lockdown", err == nil && lockdownConfidentiality(mode), hard, mode+errStr(err))
+	err = modulesAbsent()
+	r.Add("kernel.modules_absent", err == nil, hard, "no module support: "+orYes(err))
+	r.Add("kernel.kaslr", true, false, kaslrStatus())
 	d, err := supervisorDumpable()
 	r.Add("supervisor.not_dumpable", err == nil && d == 0, true, fmt.Sprintf("dumpable=%d", d))
 	for _, n := range s.hardenNotes {
@@ -179,6 +189,13 @@ func (s *Supervisor) selftestProcess(r *selftest.Report) {
 	err = nsmClosedCheck()
 	r.Add("supervisor.nsm_closed", err == nil, s.cfg.OwnKernel, "root only: "+orYes(err))
 	r.Add("supervisor.pid1", true, false, pid1())
+}
+
+func wantStr(want string) string {
+	if want == "" {
+		return ""
+	}
+	return " (want " + want + ")"
 }
 
 func orYes(err error) string {
@@ -351,7 +368,7 @@ func (s *Supervisor) selftestVaultProcess(ctx context.Context, r *selftest.Repor
 	r.VaultPeakRSS = vr.PeakRSS
 	// From inside the vault process: starting a process in a new user
 	// namespace is refused (required where the supervisor closed them).
-	r.Add("vault_process.user_namespace_refused", vr.UserNamespace == selftest.UserNamespaceRefused, s.cfg.OwnKernel, vr.UserNamespace)
+	r.Add("vault_process.user_namespace_refused", selftest.UserNamespaceClosed(vr.UserNamespace), s.cfg.OwnKernel, vr.UserNamespace)
 	// From inside the vault process: no other process is visible in
 	// /proc (required where the supervisor remounted it with hidepid=2).
 	r.Add("vault_process.proc_others_hidden", vr.OtherProcesses == 0, s.cfg.OwnKernel, fmt.Sprintf("%d other processes visible", vr.OtherProcesses))

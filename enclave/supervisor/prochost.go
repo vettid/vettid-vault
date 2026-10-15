@@ -246,6 +246,11 @@ func (h *procHost) spawn(vaultID, userGUID string, enroll bool, extra ...string)
 	if h.s.cfg.OwnKernel && !h.s.kernelSet.Load() {
 		return nil, errSpawn
 	}
+	// Nor, on the hardened kernel, unless it is locked down
+	// (confidentiality).
+	if h.s.cfg.KernelHardened && !h.s.lockedDown.Load() {
+		return nil, errSpawn
+	}
 	// Nor while a previous process of the same vault left processes that
 	// the sweep could not end (sweepAfter): they are tried again first.
 	if !h.s.sweepPending(vaultID) {
@@ -299,6 +304,11 @@ func (h *procHost) spawn(vaultID, userGUID string, enroll bool, extra ...string)
 		return nil, errSpawn
 	}
 	p := &vproc{h: h, vaultID: vaultID, userGUID: userGUID, enroll: enroll, slot: slot, uid: uid, cmd: cmd, exited: make(chan struct{})}
+	// The uid in the log shows, across a capacity run, that no uid is
+	// given twice.
+	if h.s.log != nil { // nil only in tests that build a bare Supervisor
+		h.s.log.Info("vault process started", "vault_id", vaultID, "uid", uid)
+	}
 	p.conn = hostproto.NewConn(c, p.handle, p.notify)
 	go func() {
 		err := cmd.Wait()
@@ -362,7 +372,7 @@ func (h *procHost) exited(p *vproc) {
 		return
 	}
 	reason, lvl := stopReason(p.exitCode)
-	h.s.log.Log(context.Background(), lvl, "vault process ended", "vault_id", p.vaultID, "reason", reason, "code", p.exitCode)
+	h.s.log.Log(context.Background(), lvl, "vault process ended", "vault_id", p.vaultID, "uid", p.uid, "reason", reason, "code", p.exitCode)
 	h.s.link.notify(hostproto.KindStopped, hostproto.Strings(p.vaultID, reason)...)
 }
 

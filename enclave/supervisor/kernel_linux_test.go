@@ -317,6 +317,18 @@ func TestSysctls(t *testing.T) {
 			t.Errorf("%s: %+v", n, st[n])
 		}
 	}
+	// Which of the two reasons for a missing userfaultfd setting holds is
+	// what the unfiltered call answers.
+	oldUFFD := userfaultfdCall
+	t.Cleanup(func() { userfaultfdCall = oldUFFD })
+	userfaultfdCall = func() error { return syscall.ENOSYS }
+	if st := statuses()["kernel.unprivileged_userfaultfd_off"]; !st.ok || !strings.Contains(st.detail, "no userfaultfd in this kernel") {
+		t.Errorf("no userfaultfd: %+v", st)
+	}
+	userfaultfdCall = func() error { return nil }
+	if st := statuses()["kernel.unprivileged_userfaultfd_off"]; !st.ok || !strings.Contains(st.detail, "before Linux 5.2") {
+		t.Errorf("userfaultfd without the setting: %+v", st)
+	}
 
 	// No io_uring_disabled: accepted only where the kernel has no
 	// io_uring (4.14), which is then a proof, not a note.

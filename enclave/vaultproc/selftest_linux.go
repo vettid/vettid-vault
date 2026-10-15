@@ -5,6 +5,7 @@ package vaultproc
 import (
 	"errors"
 	"fmt"
+	"os"
 	"syscall"
 
 	"golang.org/x/sys/unix"
@@ -70,6 +71,11 @@ func TryUserNamespace() string {
 	switch {
 	case errors.Is(err, syscall.ENOSPC):
 		return selftest.UserNamespaceRefused
+	case errors.Is(err, syscall.EINVAL) && !userNSFile():
+		// CONFIG_USER_NS=n: the kernel has no user namespaces, and so no
+		// /proc/self/ns/user either. With them built in, these clone
+		// flags are valid.
+		return selftest.UserNamespaceNotBuilt
 	case errors.Is(err, syscall.ENOENT):
 		return selftest.UserNamespaceCreated
 	case err == nil:
@@ -78,4 +84,11 @@ func TryUserNamespace() string {
 		return selftest.UserNamespaceCreated
 	}
 	return err.Error()
+}
+
+// userNSFile says whether /proc/self/ns/user exists (it does wherever the
+// kernel has user namespaces).
+func userNSFile() bool {
+	_, err := os.Lstat("/proc/self/ns/user")
+	return !errors.Is(err, os.ErrNotExist)
 }

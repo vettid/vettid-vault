@@ -31,6 +31,19 @@ var ioUringSetup = func() error {
 	return errno
 }
 
+// userfaultfdCall makes a userfaultfd call (no flags) and returns its
+// error (a variable for the tests): ENOSYS where the kernel has no
+// userfaultfd. In the supervisor, which has no filter, it shows what the
+// kernel itself answers.
+var userfaultfdCall = func() error {
+	r, _, errno := unix.Syscall(unix.SYS_USERFAULTFD, 0, 0, 0)
+	if errno == 0 {
+		unix.Close(int(r))
+		return nil
+	}
+	return errno
+}
+
 // A sysctl is one kernel setting the supervisor makes on its own kernel
 // (Config.OwnKernel), for the whole machine, before any vault process
 // starts. Each one closes an interface that a vault process (or a
@@ -82,8 +95,14 @@ var sysctls = []sysctl{
 	// userfaultfd lets a process stall the kernel at a chosen point of a
 	// copy; unprivileged use is off by default since 5.11 (the setting
 	// exists from 5.2). The vault filter refuses the call as well.
-	{check: "unprivileged_userfaultfd_off", path: "vm/unprivileged_userfaultfd", value: "0",
-		absent: notBuilt("before Linux 5.2 there is no such setting; the vault filter refuses userfaultfd")},
+	{check: "unprivileged_userfaultfd_off", path: "vm/unprivileged_userfaultfd", value: "0", absent: func() (bool, string) {
+		// The kernel built without userfaultfd (CONFIG_USERFAULTFD=n,
+		// docs/KERNEL.md) has no setting either; the call says which.
+		if errors.Is(userfaultfdCall(), unix.ENOSYS) {
+			return true, "no userfaultfd in this kernel (userfaultfd: ENOSYS)"
+		}
+		return true, "before Linux 5.2 there is no such setting; the vault filter refuses userfaultfd"
+	}},
 	// No input pushed into a terminal (6.2+). Vault processes have no
 	// terminal, and the filter refuses ioctl.
 	{check: "legacy_tiocsti_off", path: "dev/tty/legacy_tiocsti", value: "0",

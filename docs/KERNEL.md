@@ -1,11 +1,13 @@
 # The enclave kernel, built from source
 
-Status: **prototype**. Nothing here is used by a release yet. Releases
-use the blob set pinned in `release/eif-toolchain.lock` (today AWS's
-`aws-nitro-enclaves-sdk-bootstrap` release `v6.6.79`). This document
-describes how VettID builds its own blob set from kernel.org source with
-a hardened configuration, how two builders get the same bytes, how the
-result would enter the EIF, and how it is kept current.
+Status: **in use from staging release 13.** `release/eif-toolchain.lock`
+pins the blob set `vettid-6.6.158-1`, published as the vettid-vault
+release `kernel/6.6.158-1` (built by the `enclave-kernel` workflow from
+`a344277`; the source-built toolchain comparison and a hardware run
+passed). Releases before 13 used AWS's `aws-nitro-enclaves-sdk-bootstrap`
+`v6.6.79` set. This document describes how VettID builds its own blob set
+from kernel.org source with a hardened configuration, how two builders
+get the same bytes, how it enters the EIF, and how it is kept current.
 
 Why: AWS's packaged enclave kernel is Linux 4.14 in every
 `aws-nitro-enclaves-cli` release to date (v1.5.2, 2026-10-09: "No changes
@@ -275,12 +277,15 @@ recipe is the same: AWS cross-compiled it on x86_64, we build natively.
 
 ## 6. Into the EIF
 
-Not done in this change. When adopted:
+Done for `kernel/6.6.158-1` (staging release 13). The steps, for the next
+blob set:
 
-1. **Publishing.** A signed tag `kernel/<version>-<n>` (for example
-   `kernel/6.6.158-1`) runs the `enclave-kernel` workflow; after the two
-   builds match it attests the archive (GitHub build provenance) and
-   creates a draft vettid-vault release with these assets:
+1. **Publishing.** The `enclave-kernel` workflow on `main` builds the
+   set twice, compares, and checks it against `release/kernel/SHA256SUMS`.
+   Its `blobs-a` artifact, every hash checked again, becomes the
+   vettid-vault release `kernel/<version>-<n>` (tag on that commit; for
+   `kernel/6.6.158-1` made by hand, with the run linked in the notes; an
+   automated, attested publish job is still to do) with these assets:
    - `vettid-enclave-blobs-<version>-<n>.txz` and its `SHA256SUMS`;
    - **the corresponding source** (GPL-2.0 section 3): the exact
      `linux-<version>.tar.xz` and `linux-<version>.tar.sign` from
@@ -288,9 +293,8 @@ Not done in this change. When adopted:
      (patches, config, recipe). The release notes link to both, to
      kernel.org and to the tag. init (MIT) is in `aws/init` with our patch;
      linuxkit (Apache-2.0) is named by version and hash in the recipe.
-   The owner publishes it as for EIF releases. This is the same pattern
-   as the copy of AWS's `enclaves-blobs.txz` kept as a vettid-vault
-   release asset until this build replaces it.
+   The owner approves publishing it. Each vault release also attaches
+   its own copy of the archive (docs/RELEASING.md, "Copies of the blobs").
 2. **The lock.** `release/eif-toolchain.lock`: `blobs_version=vettid-<version>-<n>`,
    `blobs_url` = the vettid-vault asset, `blobs_dir=vettid-enclave-blobs/aarch64`,
    the archive's and the six files' SHA-256, and a new line
@@ -363,10 +367,10 @@ its series in kernel.org's `releases.json` and
   expected form): the job fails; it never reports "current" then.
 
 **At each release** the `release` workflow's gate runs the same check
-against the kernel `eif-toolchain.lock` pins (`kernel_release`) and shows
-a warning in the run when that kernel is more than 30 days behind its
-series' newest point release or its series is end of life. Today, with
-AWS's 6.6.79 pinned, it warns on every run.
+against the kernel the release uses (`kernel_release` in
+`release/enclave-kernel`) and shows a warning in the run when that kernel
+is more than 30 days behind its series' newest point release or its
+series is end of life.
 
 It does not open a pull request (the repository's Actions token may not be
 allowed to; and the bump needs a person anyway). **A new point release** is

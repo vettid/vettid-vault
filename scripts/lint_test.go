@@ -214,6 +214,21 @@ func TestEIFToolchain(t *testing.T) {
 		if !strings.HasPrefix(val("blobs_url"), "https://github.com/vettid/vettid-vault/releases/download/") || val("blobs_dir") != "vettid-enclave-blobs/aarch64" {
 			t.Errorf("kernel_hardened=true but blobs_url %s / blobs_dir %s are not vettid-vault's release", val("blobs_url"), val("blobs_dir"))
 		}
+		// The set was built from the committed kernel inputs, and its six
+		// files are the ones release/kernel/SHA256SUMS records.
+		kl, err := os.ReadFile("../release/kernel/kernel.lock")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := fmt.Sprintf("%x", sha256.Sum256(kl)); val("kernel_lock_sha256") != got {
+			t.Errorf("kernel_lock_sha256 %s, release/kernel/kernel.lock is %s", val("kernel_lock_sha256"), got)
+		}
+		for _, line := range strings.Split(strings.TrimSpace(read(t, "../release/kernel/SHA256SUMS")), "\n") {
+			f := strings.Fields(line)
+			if len(f) != 2 || !regexp.MustCompile(`(?m)^`+f[0]+`  /usr/share/nitro_enclaves/blobs/`+regexp.QuoteMeta(f[1])+`$`).MatchString(lock) {
+				t.Errorf("the lock does not pin %s as release/kernel/SHA256SUMS does", line)
+			}
+		}
 	default:
 		t.Errorf("kernel_hardened %q is not true or false", khard)
 	}

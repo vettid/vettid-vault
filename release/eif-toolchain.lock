@@ -7,10 +7,12 @@
 #
 # The blobs are not the ones in the aws-nitro-enclaves-cli-devel RPM
 # (Linux 4.14.256, built in January 2022; the 4.14 series is no longer
-# maintained). They are the set AWS builds from
-# aws-nitro-enclaves-sdk-bootstrap and publishes with that repository's
-# release blobs_version (Linux 6.6.79, with its config, command line,
-# init, linuxkit and the NSM module built for that kernel).
+# maintained). They are vettid-vault's own blob set blobs_version (Linux
+# 6.6.158 with a hardened config, command line, init, linuxkit and an
+# empty nsm.ko: the NSM driver is built in), built from kernel.org source
+# by release/kernel at kernel_lock_sha256 (docs/KERNEL.md) and published
+# with the kernel's corresponding source as the vettid-vault release
+# kernel/6.6.158-1. Releases before staging 13 used AWS's v6.6.79 set.
 # The builder downloads blobs_url, checks the archive's SHA-256 below,
 # removes the RPM's blobs and installs blobs_dir from the archive in
 # their place.
@@ -23,9 +25,10 @@ base_image=public.ecr.aws/docker/library/amazonlinux:2023@sha256:5b29412077a463b
 releasever=2023.12.20260918
 arch=aarch64
 nitro_cli_version=1.5.0-0.amzn2023
-blobs_version=v6.6.79
-blobs_url=https://github.com/aws/aws-nitro-enclaves-sdk-bootstrap/releases/download/v6.6.79/enclaves-blobs.txz
-blobs_dir=enclaves-blobs/build-ARM64/aarch64
+blobs_version=vettid-6.6.158-1
+blobs_url=https://github.com/vettid/vettid-vault/releases/download/kernel/6.6.158-1/vettid-enclave-blobs-6.6.158-1.txz
+blobs_dir=vettid-enclave-blobs/aarch64
+kernel_lock_sha256=1c088af2f4f147d98ec9a4a51cc60a83592e7e6cfbb2781f09f19f1266a31a93
 # The kernel these blobs carry is named in release/enclave-kernel, which
 # the enclave binary embeds (scripts/lint_test.go keeps the two in step).
 #
@@ -34,10 +37,10 @@ blobs_dir=enclaves-blobs/build-ARM64/aarch64
 # blobs_url):
 4c1f5c964787145415692df0814646d8ba46053bd61bea866f598adf9c36140f  /toolchain/aws-nitro-enclaves-cli-1.5.0-0.amzn2023.aarch64.rpm
 028013b5832dfef516ae25786a99465401ec7ad5e0a316f7bad0a792d6512284  /toolchain/aws-nitro-enclaves-cli-devel-1.5.0-0.amzn2023.aarch64.rpm
-179af075ea9fa33cd6dcbe08e32f716e082ec392cdda599b8904bc0f0ff8bf25  /toolchain/enclaves-blobs.txz
-fc794ac7e149be198538a06dddd3873592e3496b42dbc9a2eb5d7aef341dae46  /usr/share/nitro_enclaves/blobs/Image
-d24f77862f457aa83904551b899490df552fb606b4c7eec9ec0fe8075b789070  /usr/share/nitro_enclaves/blobs/Image.config
-b2863fac918fe57e9083ef434e8ac09a01ab97673f3d14c0afc1c017758ceb44  /usr/share/nitro_enclaves/blobs/cmdline
-95a121381b409fd5d55bbc9b63dcb69006a4d1a59e4ea804146c44bcb112433f  /usr/share/nitro_enclaves/blobs/init
-55788f344d5405e0b8db1e15bf3100141acb8434e25a5584fd2b86986d5d12aa  /usr/share/nitro_enclaves/blobs/linuxkit
-6a6c61627758d9aeed1e7f30b1e6b0c984cb9c70d3cda8a60a432441aa3ce393  /usr/share/nitro_enclaves/blobs/nsm.ko
+8858258d49bf7fb8482bac645e6a761b36a217183e63476f6ebbac713b40089c  /toolchain/enclaves-blobs.txz
+d1e6e6b3f89d470d4e50a7b930ca6b7befcd3167087ea1f5a3a9ee4b68cf0b01  /usr/share/nitro_enclaves/blobs/Image
+9c434fc386183fed62c463c644f63169b53ff24e13718548765e829b742392b9  /usr/share/nitro_enclaves/blobs/Image.config
+38ea71e15647d21f0b10e20c5799f0d41936d3bc792476927b48b0580655a4df  /usr/share/nitro_enclaves/blobs/cmdline
+7cc596d64fac34f78023a7454f972436f7537ad3a1e0d3ff4b0b5821c1ad950d  /usr/share/nitro_enclaves/blobs/init
+7f973bee46f90c14642a3d459bf4400e9d48a57f8571a252858ec29c71dc4d17  /usr/share/nitro_enclaves/blobs/linuxkit
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  /usr/share/nitro_enclaves/blobs/nsm.ko

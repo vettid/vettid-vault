@@ -120,7 +120,7 @@ jobs:
         continue-on-error: true
         run: |
           set +e
-          KERNEL_VERSION="$(sed -n 's/^kernel_release=//p' release/eif-toolchain.lock)" release/kernel/check-current.sh "$RUNNER_TEMP/kernel.md"
+          KERNEL_VERSION="$(sed -n 's/^kernel_release=//p' release/enclave-kernel)" release/kernel/check-current.sh "$RUNNER_TEMP/kernel.md"
           rc=$?
           cat "$RUNNER_TEMP/kernel.md" >>"$GITHUB_STEP_SUMMARY"
           case "$rc" in
@@ -273,10 +273,27 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: src
+          persist-credentials: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: release
           path: release
+      - name: the release's copy of the enclave kernel blob archive
+        # Each release carries the blob archive its EIF was built from, so
+        # a rebuild does not depend on the archive's original location
+        # (docs/RELEASING.md, "The enclave kernel blobs"). Checked against
+        # the lock's hash before it is attached.
+        run: |
+          lock=src/release/eif-toolchain.lock
+          url="$(sed -n 's/^blobs_url=//p' "$lock")"
+          ver="$(sed -n 's/^blobs_version=//p' "$lock")"
+          want="$(awk '$2 == "/toolchain/enclaves-blobs.txz" {print $1}' "$lock")"
+          curl -fsSL --retry 3 -o "release/enclave-kernel-blobs-$ver.txz" "$url"
+          echo "$want  release/enclave-kernel-blobs-$ver.txz" | sha256sum -c -
+          echo "BLOBS_ASSET=release/enclave-kernel-blobs-$ver.txz" >>"$GITHUB_ENV"
       - name: draft release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -293,7 +310,9 @@ jobs:
 
           Draft until the independent rebuild matches (docs/RELEASING.md). Verify the assets with
           \`gh attestation verify <file> --repo $REPO\` and rebuild with \`CHANNEL=$CHANNEL release/rebuild.sh out measurements.json\`.
+
+          \`$(basename "$BLOBS_ASSET")\` is this release's copy of the enclave kernel blob archive pinned in \`release/eif-toolchain.lock\` (same SHA-256); the kernel's corresponding source is linked from the blob set's own release (docs/KERNEL.md).
           EOF
           cp release/vault-parent release/vault-parent-arm64
           gh release create "$TAG" --repo "$REPO" --draft --verify-tag --title "Vault $CHANNEL release $RELEASE" --notes-file notes.md \
-            release/vault-enclave.eif release/vault-parent-arm64 release/measurements.json
+            release/vault-enclave.eif release/vault-parent-arm64 release/measurements.json "$BLOBS_ASSET"

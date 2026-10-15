@@ -281,11 +281,14 @@ jobs:
         with:
           name: release
           path: release
-      - name: the release's copy of the enclave kernel blob archive
+      - name: the release's copy of the enclave kernel blob archive and its source
         # Each release carries the blob archive its EIF was built from, so
         # a rebuild does not depend on the archive's original location
-        # (docs/RELEASING.md, "The enclave kernel blobs"). Checked against
-        # the lock's hash before it is attached.
+        # (docs/RELEASING.md, "Copies of the blobs"), checked against the
+        # lock's hash. A release that distributes the source-built kernel
+        # also carries the recipe's source archive from the blob set's
+        # release (checked against that release's SHA256SUMS) and names
+        # the kernel.org tarball (GPL-2.0 corresponding source).
         run: |
           lock=src/release/eif-toolchain.lock
           url="$(sed -n 's/^blobs_url=//p' "$lock")"
@@ -293,7 +296,28 @@ jobs:
           want="$(awk '$2 == "/toolchain/enclaves-blobs.txz" {print $1}' "$lock")"
           curl -fsSL --retry 3 -o "release/enclave-kernel-blobs-$ver.txz" "$url"
           echo "$want  release/enclave-kernel-blobs-$ver.txz" | sha256sum -c -
-          echo "BLOBS_ASSET=release/enclave-kernel-blobs-$ver.txz" >>"$GITHUB_ENV"
+          assets="release/enclave-kernel-blobs-$ver.txz"
+          kernel_release="$(dirname "$url")"
+          kernel_org=""
+          case "$url" in
+            https://github.com/vettid/vettid-vault/releases/download/*)
+              base="${ver#vettid-}"
+              src="vettid-vault-release-kernel-$base-source.tar.gz"
+              curl -fsSL --retry 3 -o release/kernel-blobs.SHA256SUMS "$kernel_release/SHA256SUMS"
+              # The published set is the one the lock pins.
+              grep -qx "$want  $(basename "$url")" release/kernel-blobs.SHA256SUMS
+              curl -fsSL --retry 3 -o "release/$src" "$kernel_release/$src"
+              (cd release && grep "  $src\$" kernel-blobs.SHA256SUMS | sha256sum -c -)
+              assets="$assets release/$src"
+              kernel_org="$(sed -n 's/^kernel_url=//p' src/release/kernel/kernel.lock)"
+              ;;
+          esac
+          {
+            echo "BLOBS_ASSETS=$assets"
+            echo "BLOBS_COPY=enclave-kernel-blobs-$ver.txz"
+            echo "KERNEL_RELEASE_URL=${kernel_release%/releases/download/*}/releases/tag/${kernel_release#*/releases/download/}"
+            echo "KERNEL_ORG_URL=$kernel_org"
+          } >>"$GITHUB_ENV"
       - name: draft release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -303,6 +327,10 @@ jobs:
           RELEASE: ${{ needs.gate.outputs.release }}
         run: |
           pcr0="$(python3 -c 'import json; print(json.load(open("release/measurements.json"))["pcr0"])')"
+          source_line="The enclave kernel blob set: $KERNEL_RELEASE_URL."
+          if [ -n "$KERNEL_ORG_URL" ]; then
+            source_line="The enclave kernel is built from source (GPL-2.0). Corresponding source: the kernel.org release $KERNEL_ORG_URL (and its .sign), and the recipe, attached here and at the blob set's release $KERNEL_RELEASE_URL."
+          fi
           cat >notes.md <<EOF
           Vault release $RELEASE ($CHANNEL channel), built from \`$GITHUB_SHA\` by [run $GITHUB_RUN_ID]($GITHUB_SERVER_URL/$REPO/actions/runs/$GITHUB_RUN_ID).
 
@@ -311,8 +339,19 @@ jobs:
           Draft until the independent rebuild matches (docs/RELEASING.md). Verify the assets with
           \`gh attestation verify <file> --repo $REPO\` and rebuild with \`CHANNEL=$CHANNEL release/rebuild.sh out measurements.json\`.
 
-          \`$(basename "$BLOBS_ASSET")\` is this release's copy of the enclave kernel blob archive pinned in \`release/eif-toolchain.lock\` (same SHA-256); the kernel's corresponding source is linked from the blob set's own release (docs/KERNEL.md).
+          \`$BLOBS_COPY\` is this release's copy of the enclave kernel blob archive pinned in \`release/eif-toolchain.lock\` (same SHA-256). $source_line
           EOF
           cp release/vault-parent release/vault-parent-arm64
-          gh release create "$TAG" --repo "$REPO" --draft --verify-tag --title "Vault $CHANNEL release $RELEASE" --notes-file notes.md \
-            release/vault-enclave.eif release/vault-parent-arm64 release/measurements.json "$BLOBS_ASSET"
+          # shellcheck disable=SC2086
+          files="release/vault-enclave.eif release/vault-parent-arm64 release/measurements.json $BLOBS_ASSETS"
+          # A rerun of this job finds the draft it made: replace its assets
+          # instead of failing; never touch a published release.
+          if draft="$(gh release view "$TAG" --repo "$REPO" --json isDraft --jq .isDraft 2>/dev/null)"; then
+            if [ "$draft" != true ]; then echo "::error::$TAG is already a published release"; exit 1; fi
+            gh release edit "$TAG" --repo "$REPO" --notes-file notes.md
+            # shellcheck disable=SC2086
+            gh release upload "$TAG" --repo "$REPO" --clobber $files
+          else
+            # shellcheck disable=SC2086
+            gh release create "$TAG" --repo "$REPO" --draft --verify-tag --title "Vault $CHANNEL release $RELEASE" --notes-file notes.md $files
+          fi

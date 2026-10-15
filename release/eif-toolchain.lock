@@ -10,7 +10,8 @@
 # maintained). They are vettid-vault's own blob set blobs_version (Linux
 # 6.6.158 with a hardened config, command line, init, linuxkit and an
 # empty nsm.ko: the NSM driver is built in), built from kernel.org source
-# by release/kernel at kernel_lock_sha256 (docs/KERNEL.md) and published
+# by release/kernel at kernel_commit (kernel.lock: kernel_lock_sha256;
+# docs/KERNEL.md) and published
 # with the kernel's corresponding source as the vettid-vault release
 # kernel/6.6.158-1. Releases before staging 13 used AWS's v6.6.79 set.
 # The builder downloads blobs_url, checks the archive's SHA-256 below,
@@ -29,6 +30,7 @@ blobs_version=vettid-6.6.158-1
 blobs_url=https://github.com/vettid/vettid-vault/releases/download/kernel/6.6.158-1/vettid-enclave-blobs-6.6.158-1.txz
 blobs_dir=vettid-enclave-blobs/aarch64
 kernel_lock_sha256=1c088af2f4f147d98ec9a4a51cc60a83592e7e6cfbb2781f09f19f1266a31a93
+kernel_commit=a3442770be214117cb373c042b07132fdb65d4e4
 # The kernel these blobs carry is named in release/enclave-kernel, which
 # the enclave binary embeds (scripts/lint_test.go keeps the two in step).
 #

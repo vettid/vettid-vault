@@ -371,7 +371,10 @@ vettid-vault from source; docs/KERNEL.md).
 
 The kernel blob set itself can be rebuilt from source as well, on the
 same kind of machine (arm64 Linux with docker), and compared with the
-hashes the lock pins: `release/kernel/build.sh out release/kernel/SHA256SUMS`
+hashes the lock pins: `release/kernel/build.sh out "$PWD/release/kernel/SHA256SUMS"`
+(an absolute path: `build.sh` at `a344277` checks it from inside `out`),
+or `release/kernel/rebuild-check.sh`, which also compares with the lock
+and the published set
 (docs/KERNEL.md, "How an auditor rebuilds and compares"). The independent
 rebuild of a release that changes the kernel does this too.
 
@@ -482,6 +485,13 @@ gh release download release/staging/N --repo vettid/vettid-vault --pattern 'encl
 # then serve it at blobs_url's place, or point blobs_url at the copy for the rebuild
 ```
 
-The blob set's own `kernel/<version>-<n>` release also carries the
-kernel's corresponding source (the kernel.org tarball and its signature,
-and the recipe at the commit it was built from).
+**Corresponding source.** A release with the source-built kernel
+distributes Linux (GPL-2.0) in its EIF and in that copy, so the same job
+also attaches the recipe's source archive
+(`vettid-vault-release-kernel-<version>-<n>-source.tar.gz`, taken from
+the blob set's release and checked against its `SHA256SUMS`) and the
+release notes name the blob set's release and the kernel.org tarball
+(from `release/kernel/kernel.lock`). The blob set's own
+`kernel/<version>-<n>` release carries the kernel.org tarball and its
+signature as well. A rerun of the `publish` job replaces the assets of
+its own draft and refuses to touch a published release.

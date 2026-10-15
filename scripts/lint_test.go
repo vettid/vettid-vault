@@ -71,7 +71,7 @@ func TestDockerfileEnclave(t *testing.T) {
 
 func TestScripts(t *testing.T) {
 	for _, p := range []string{"build-eif.sh", "smoke/run-on-host.sh", "compat-matrix.sh", "../release/rebuild.sh",
-		"../release/kernel/build.sh", "../release/kernel/check-config.sh", "../release/kernel/check-current.sh", "../release/kernel/eif-with-blobs.sh"} {
+		"../release/kernel/build.sh", "../release/kernel/check-config.sh", "../release/kernel/check-current.sh", "../release/kernel/eif-with-blobs.sh", "../release/kernel/rebuild-check.sh"} {
 		s := read(t, p)
 		if !strings.HasPrefix(s, "#!/usr/bin/env bash\n") || !strings.Contains(s, "set -euo pipefail") {
 			t.Errorf("%s: missing shebang or set -euo pipefail", p)
@@ -219,6 +219,9 @@ func TestEIFToolchain(t *testing.T) {
 		kl, err := os.ReadFile("../release/kernel/kernel.lock")
 		if err != nil {
 			t.Fatal(err)
+		}
+		if !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(val("kernel_commit")) {
+			t.Errorf("kernel_commit %q is not a full commit id", val("kernel_commit"))
 		}
 		if got := fmt.Sprintf("%x", sha256.Sum256(kl)); val("kernel_lock_sha256") != got {
 			t.Errorf("kernel_lock_sha256 %s, release/kernel/kernel.lock is %s", val("kernel_lock_sha256"), got)

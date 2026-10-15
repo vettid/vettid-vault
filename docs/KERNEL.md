@@ -134,7 +134,7 @@ debugging; they do not go into the EIF.
   GitHub runner's 6-hour job limit, the same command runs on any larger
   arm64 Linux machine with docker (the owner's, or a Graviton instance),
   with `KERNEL_NO_SUBSTITUTE=1 KERNEL_TOOLCHAIN_UNPINNED=1
-  release/kernel/build.sh out release/kernel/SHA256SUMS`. It is run once before the first blob
+  release/kernel/build.sh out "$PWD/release/kernel/SHA256SUMS"`. It is run once before the first blob
   set is adopted, preferably also off GitHub by the owner, and then
   occasionally (at least when nixpkgs or the Nix image changes). Not run
   yet.
@@ -333,20 +333,33 @@ artifact is what the hardware test boots.
 
 ### How an auditor rebuilds and compares
 
-On any arm64 Linux machine with docker, curl, xz, gpg and gpgv:
+On any arm64 Linux machine with docker, curl, xz, gpg, gpgv and git, at
+the commit of a vault release that uses the set:
 
 ```sh
-git checkout kernel/6.6.158-1        # or the release tag that uses it
-release/kernel/build.sh out          # verifies source + signature, builds
-grep -E '/usr/share/nitro_enclaves/blobs/' release/eif-toolchain.lock
-cat out/SHA256SUMS                   # the six hashes must be the lock's
+git checkout release/staging/13      # a release tag (or its commit)
+release/kernel/rebuild-check.sh /tmp/kblobs
 ```
 
-`release/kernel/build.sh out <published SHA256SUMS>` checks them
-directly. Then `release/rebuild.sh` rebuilds the EIF from those pinned
-hashes as today. The two-builder rule then covers the blob set (two
-runners identical, plus anyone's rebuild), the EIF (two runners identical
-PCRs) and the owner's own rebuild.
+`rebuild-check.sh` requires that the recipe's inputs under
+`release/kernel/` are unchanged since the commit the set was built from
+(`kernel_commit` in the lock) and that `kernel.lock` is the one
+`kernel_lock_sha256` names; builds the set (`build.sh` checks the
+tarball's SHA-256, kernel.org's signature, the toolchain's NAR hashes and
+the build-time closure); and then requires the six blob hashes to be the
+same in three places: the lock, the rebuild and the published set's
+`SHA256SUMS`. It exits non-zero on any difference. With
+`KERNEL_NO_SUBSTITUTE=1 KERNEL_TOOLCHAIN_UNPINNED=1` (the toolchain
+compiled from source) the NAR and closure checks only report, and the
+pass condition is the blob comparison alone.
+
+At the blob set's own tag (`kernel/6.6.158-1`, before the lock pinned it)
+the same build is `release/kernel/build.sh out "$PWD/release/kernel/SHA256SUMS"`
+(an absolute path: `build.sh` there checks it from inside `out`).
+`release/rebuild.sh` then rebuilds the EIF from the pinned hashes. The
+two-builder rule covers the blob set (two runners identical, plus
+anyone's rebuild), the EIF (two runners identical PCRs) and the owner's
+own rebuild.
 
 ## 7. Keeping it current
 

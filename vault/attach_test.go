@@ -224,7 +224,7 @@ func TestAttachmentUnsupportedPeer(t *testing.T) {
 	for _, a := range rec.got {
 		if a.Kind == "message.attachment_failed" {
 			feed = feed || a.Feed && a.Ref == e.Msg
-			audit = audit || a.Audit && a.Ref == e.Msg
+			audit = audit || a.Audit && a.Ref == e.Msg+":unsupported"
 		}
 	}
 	if !feed || !audit {
@@ -387,5 +387,66 @@ func TestConvergenceReportsDeleted(t *testing.T) {
 				t.Fatalf("events %v", events)
 			}
 		})
+	}
+}
+
+// lateStore performs an attachment object's Put in the background and,
+// like the channel to the parent, returns at once when the caller's context
+// ends, while the write still lands later.
+type lateStore struct {
+	store.Store
+	started chan struct{}
+	landed  chan struct{}
+}
+
+func (l *lateStore) Put(ctx context.Context, key string, data []byte, ifMatch store.Version) (store.Version, error) {
+	if !strings.Contains(key, "/att/") {
+		return l.Store.Put(ctx, key, data, ifMatch)
+	}
+	var v store.Version
+	var err error
+	done := make(chan struct{})
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		v, err = l.Store.Put(context.Background(), key, data, ifMatch)
+		close(l.landed)
+		close(done)
+	}()
+	close(l.started)
+	select {
+	case <-done:
+		return v, err
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+}
+
+// §12.5, P15: the lock that a deletion begins with does not cut a write of
+// the runner short: the write lands before the erase, which deletes it.
+func TestDeletionWaitsForLateWrite(t *testing.T) {
+	d := newDevFixture(t)
+	ctx := context.Background()
+	ls := &lateStore{Store: d.store, started: make(chan struct{}), landed: make(chan struct{})}
+	id := "01JB2Z6V9K3M4N5P6Q7R8S9T70"
+	var r *attRunner
+	d.withLock(func(m *Manager) {
+		m.opt.Store = ls
+		m.attStart(ctx)
+		r = m.att
+		m.st.attach().Entries[id] = &AttEntry{ID: id, Dir: DirIn, State: AttFetching, Key: make([]byte, 32)}
+	})
+	key := attwire.ContentKey(d.vid, id)
+	go func() { _, _ = d.m.putObject(r, key, []byte("object")) }()
+	<-ls.started
+	if err := d.m.Delete(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-ls.landed:
+	default:
+		t.Fatal("the erase ran before the write landed")
+	}
+	if _, _, err := d.store.Get(ctx, key); err == nil {
+		t.Fatal("an object written during the deletion was left")
 	}
 }

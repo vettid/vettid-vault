@@ -52,9 +52,13 @@ const AttachTick = 30 * time.Second
 // attMinGap is the least time between two transfers of one attachment.
 const attMinGap = time.Second
 
-// attWriteWait bounds how long a deletion waits for the runner's store
-// writes in flight (a store request is given 60 s, VAULT-HOST-PROTOCOL §9).
-const attWriteWait = 75 * time.Second
+// attWriteBound bounds one store write of the runner (a store request is
+// given 60 s, VAULT-HOST-PROTOCOL §9), and attWriteWait how long a deletion
+// waits for the writes in flight: longer than that.
+const (
+	attWriteBound = 60 * time.Second
+	attWriteWait  = 75 * time.Second
+)
 
 // attFetchBound is how long an owner's fetch may take from its request to
 // its answer (§10.5.1: within 120 s).
@@ -479,7 +483,11 @@ func (m *Manager) putObject(r *attRunner, key string, data []byte) (store.Versio
 	m.attWrites.Add(1)
 	m.mu.Unlock()
 	defer m.attWrites.Done()
-	ctx := r.ctx
+	// Not cancelled by a lock: a write that was sent completes (the channel
+	// would return at once while the parent still performs it), within
+	// attWriteBound; a deletion waits longer than that (attWriteWait).
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.ctx), attWriteBound)
+	defer cancel()
 	v, err := m.opt.Store.Put(ctx, key, data, "")
 	if errors.Is(err, store.ErrConflict) {
 		_, old, gerr := m.opt.Store.Get(ctx, key)
@@ -840,7 +848,7 @@ func (m *Manager) deliver(ctx context.Context, r *attRunner, id string, content 
 		e.DeliverID = inner
 		e.Caption, e.HasCaption = "", false
 		e.Attempts, e.NotBefore, e.TokenAsked, e.TokenTried, e.LatePending = 0, time.Time{}, time.Time{}, false, false
-		e.Owed = false
+		e.Owed, e.Corrupt = false, 0 // its objects opened
 		if reupload && blob != nil {
 			e.Reoffers++
 			a := m.st.attach()

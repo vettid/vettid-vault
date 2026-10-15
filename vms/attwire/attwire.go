@@ -312,6 +312,12 @@ func ParsePeerView(o strictjson.Object, maxContent int) (*PeerView, error) {
 		if w, h, err := dims(o); err == nil {
 			v.Width, v.Height = w, h
 		}
+		// A blob it names is deleted by the refusal: its id only.
+		if bo, err := o.Object("blob"); err == nil {
+			if id, err := bo.String("id"); err == nil && envelope.ValidULID(id) {
+				v.Blob = &Blob{ID: id}
+			}
+		}
 		return v, nil
 	}
 	size, err := o.Uint("size", 1, uint64(max(maxContent, 1)))

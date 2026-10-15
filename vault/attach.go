@@ -446,7 +446,7 @@ func (m *Manager) attSet(e *AttEntry, state, reason string, now time.Time) {
 }
 
 // attFail fails an entry: audited message.attachment_failed (ref
-// message_id, §10.5.1 "History and search"), and for an outgoing one that the member must know
+// message_id:reason, §10.9), and for an outgoing one that the member must know
 // about (unsupported, refused, missing, unconfirmed) the feed item.
 func (m *Manager) attFail(e *AttEntry, reason string, now time.Time) {
 	if e.State == AttFailed && e.Reason == reason {
@@ -454,7 +454,7 @@ func (m *Manager) attFail(e *AttEntry, reason string, now time.Time) {
 	}
 	m.attSet(e, AttFailed, reason, now)
 	rt := m.now()
-	m.record(Activity{Kind: "message.attachment_failed", ConnectionID: e.Conn, Ref: e.Msg, Direction: e.Dir, Audit: true}, rt)
+	m.record(Activity{Kind: "message.attachment_failed", ConnectionID: e.Conn, Ref: e.Msg + ":" + reason, Direction: e.Dir, Audit: true}, rt)
 	if e.Dir == DirOut {
 		switch reasonBase(reason) {
 		case ReasonUnsupported, ReasonRefused, ReasonMissing, ReasonUnconfirmed:
@@ -602,7 +602,7 @@ func (h managerHost) AttachReceive(s *Session, msgID string, v *attwire.PeerView
 		case ReasonRate:
 			m.record(Activity{Kind: "drop.attachment_rate", ConnectionID: conn, Ref: msgID, Audit: true}, rt)
 		default:
-			m.record(Activity{Kind: "message.attachment_refused", ConnectionID: conn, Ref: msgID, Direction: DirIn, Audit: true}, rt)
+			m.record(Activity{Kind: "message.attachment_refused", ConnectionID: conn, Ref: msgID + ":" + reason, Direction: DirIn, Audit: true}, rt)
 		}
 		if reason == ReasonFull {
 			// The member learns that the store is full; refusals of one
@@ -676,7 +676,7 @@ func (m *Manager) attRefuseFull(e *AttEntry, now time.Time) {
 	m.attFail(e, ReasonFull, now)
 	m.attSendStatus(e.Conn, strictjson.NewBuilder().String("message_id", e.Msg).String("status", StatusRefused), now)
 	rt := m.now()
-	m.record(Activity{Kind: "message.attachment_refused", ConnectionID: e.Conn, Ref: e.Msg, Direction: DirIn, Audit: true}, rt)
+	m.record(Activity{Kind: "message.attachment_refused", ConnectionID: e.Conn, Ref: e.Msg + ":" + ReasonFull, Direction: DirIn, Audit: true}, rt)
 	a := m.st.attach()
 	if t, ok := a.FullFed[e.Conn]; !ok || m.attNow().Sub(t) >= 24*time.Hour {
 		a.FullFed[e.Conn] = m.attNow()

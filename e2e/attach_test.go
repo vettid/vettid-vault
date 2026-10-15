@@ -262,7 +262,7 @@ func TestAttachmentLockedRecipientReoffer(t *testing.T) {
 		t.Fatal("photo differs")
 	}
 	// The sender's member was told when the window ended (feed and audit).
-	if !hasAudit(t, a, "message.attachment_failed", msg) {
+	if !hasAudit(t, a, "message.attachment_failed", msg+":unconfirmed") {
 		t.Fatal("no audit entry for the unconfirmed attachment")
 	}
 }

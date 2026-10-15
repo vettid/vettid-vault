@@ -171,7 +171,7 @@ func TestAttachmentMaliciousPeer(t *testing.T) {
 	if !hasAudit(t, b, "drop.attachment_malformed", "") {
 		t.Fatal("malformed attachments not audited")
 	}
-	if !hasAudit(t, b, "message.attachment_refused", svg) {
+	if !hasAudit(t, b, "message.attachment_refused", svg+":type") {
 		t.Fatal("refusal not audited")
 	}
 }
@@ -269,7 +269,7 @@ func TestAttachmentQuotas(t *testing.T) {
 	waitEvent(t, a.app, "sync.event", func(m json.RawMessage) bool {
 		return attState(aConn, m4, "failed")(m) && has("reason", "refused:rate")(m)
 	})
-	if !hasAudit(t, b, "drop.attachment_rate", "") || !hasAudit(t, b, "message.attachment_refused", m2) {
+	if !hasAudit(t, b, "drop.attachment_rate", "") || !hasAudit(t, b, "message.attachment_refused", m2+":full") {
 		t.Fatal("refusals not audited")
 	}
 	waitNoBlobs(t, b)

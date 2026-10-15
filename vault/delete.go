@@ -36,7 +36,8 @@ import (
 //     is delivered once, best effort (the notices go to the connections'
 //     and devices' mailboxes, not this one).
 //  3. zeroize: every key in memory is wiped and the vault is locked.
-//  4. erase: the state object, then the headers of every release the vault
+//  4. erase: every written attachment object (0.32.0, by its recorded
+//     version), the state object, then the headers of every release the vault
 //     knew (its own last: it is the deletion marker), then the enclave's
 //     member index, each by a conditional delete; a missing object is
 //     already deleted.
@@ -158,7 +159,22 @@ func (m *Manager) finishDelete(ctx context.Context) error {
 	}
 	own := m.hdr.SealedRelease
 	stateVer, headerVer := m.stateVer, m.headerVer
+	// §12.5 step 3 (0.32.0): the store key and recorded version of every
+	// attachment object, taken before the keys go (no key material).
+	atts := m.attObjects()
 	m.zeroize()
+	// A write of the runner already under way lands before the erase (it
+	// cannot land after it, nor after the parent's sweep saw the prefix
+	// empty); none starts once the vault is locked.
+	m.attWaitWrites(attWriteWait)
+	// Step 4: the attachment objects first, each at its recorded version,
+	// then the state and the headers. What an erase without the index
+	// misses, the parent sweeps after `deleted` (P15).
+	for _, o := range atts {
+		if err := deleteStored(ctx, m.opt.Store, o.Key, o.Ver); err != nil {
+			return err
+		}
+	}
 	err := EraseStored(ctx, m.opt.Store, vid, guid, releases, own, stateVer, headerVer)
 	if err != nil {
 		return err

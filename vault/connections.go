@@ -232,6 +232,7 @@ func (m *Manager) removeConnection(p *Peer, dir string, now time.Time) {
 		p.State = PeerStale // so removePeer sends no notice back
 		notice = ""
 	}
+	m.attConnectionRemoved(p.ID, now) // §10.5.1 "Connections"
 	m.removePeer(p, notice, now)
 	m.record(Activity{Kind: "connection.removed", ConnectionID: p.ID, Direction: dir, Audit: true, Feed: dir == "in"}, now)
 	m.notifyDevices("connection.event", connEvent(p.ID, "removed"), "", now)

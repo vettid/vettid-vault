@@ -1,6 +1,7 @@
 package messaging
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,8 +9,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vettid/vettid-vault/internal/featuretest"
 	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault"
+	"github.com/vettid/vettid-vault/vms/envelope"
 )
 
 func TestParseDeliver(t *testing.T) {
@@ -191,7 +194,7 @@ func TestListAtLeastOne(t *testing.T) {
 func TestListCursor(t *testing.T) {
 	f, ids := conv(5, 10)
 	o, _ := strictjson.ParseObject([]byte(`{"connection_id":"c1","message_id":"` + ids[2] + `"}`))
-	if _, err := f.del(o); err != nil {
+	if _, err := f.del(nil, o); err != nil {
 		t.Fatal(err)
 	}
 	for _, c := range []string{ids[2], "01JB2Z6V9K3M4N5P6Q7R8S9999", ""} {
@@ -218,7 +221,7 @@ func TestListCursor(t *testing.T) {
 // messaging types are not.
 func TestListGetVolatile(t *testing.T) {
 	for _, ts := range New().Types() {
-		want := ts.Type == "message.list" || ts.Type == "message.get"
+		want := ts.Type == "message.list" || ts.Type == "message.get" || ts.Type == "message.attachment.get"
 		if ts.Volatile != want {
 			t.Errorf("%s volatile %v", ts.Type, ts.Volatile)
 		}
@@ -231,4 +234,70 @@ func vaultCode(err error) string {
 		return he.Code
 	}
 	return ""
+}
+
+// agentCall runs a messaging request as an agent whose grant covers it.
+func agentCall(t *testing.T, f *Feature, typ, body string) (json.RawMessage, error) {
+	t.Helper()
+	in := &envelope.Inner{ID: "01JB2Z6V9K3M4N5P6Q7R8S9T0V", Type: typ, TS: time.Now(), Body: []byte(body)}
+	s := vault.NewSession(context.Background(), &featuretest.Host{}, vault.PeerInfo{ID: "ag1", Kind: vault.KindAgent}, time.Now(), in)
+	return f.Handle(context.Background(), s, in)
+}
+
+// §10.5.1 "Agents": to an agent a message with an attachment is its
+// caption alone, and one without a caption does not exist: list leaves
+// it out (paging counts only what the agent sees), get, read and a before
+// naming it are not_found.
+func TestAgentsDoNotSeeAttachments(t *testing.T) {
+	f := New()
+	at := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	f.convs["c1"] = []*Message{
+		{ID: "01JB2Z6V9K3M4N5P6Q7R8S0001", Dir: DirIn, Text: "plain", SentAt: at},
+		{ID: "01JB2Z6V9K3M4N5P6Q7R8S0002", Dir: DirIn, Text: "", SentAt: at, AttID: "01JB2Z6V9K3M4N5P6Q7R8SAAA1"},
+		{ID: "01JB2Z6V9K3M4N5P6Q7R8S0003", Dir: DirIn, Text: "caption", SentAt: at, AttID: "01JB2Z6V9K3M4N5P6Q7R8SAAA2"},
+		{ID: "01JB2Z6V9K3M4N5P6Q7R8S0004", Dir: DirIn, Text: "", SentAt: at, Refused: &RefusedAtt{AttID: "01JB2Z6V9K3M4N5P6Q7R8SAAA3", Kind: "photo", Size: 1, Width: 1, Height: 1, Reason: "full"}},
+	}
+	raw, err := agentCall(t, f, "message.list", `{"connection_id":"c1"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "0002") || strings.Contains(string(raw), "0004") || strings.Contains(string(raw), "attachment") ||
+		!strings.Contains(string(raw), "caption") || !strings.Contains(string(raw), "plain") {
+		t.Fatalf("agent's list: %s", raw)
+	}
+	raw, _ = agentCall(t, f, "message.list", `{"connection_id":"c1","limit":1}`)
+	var p page
+	_ = json.Unmarshal(raw, &p)
+	if len(p.Messages) != 1 || p.Messages[0].ID != "01JB2Z6V9K3M4N5P6Q7R8S0003" || p.NextBefore == nil || *p.NextBefore != "01JB2Z6V9K3M4N5P6Q7R8S0003" {
+		t.Fatalf("agent's page: %s", raw)
+	}
+	for _, c := range []struct{ typ, body string }{
+		{"message.get", `{"connection_id":"c1","message_id":"01JB2Z6V9K3M4N5P6Q7R8S0002"}`},
+		{"message.read", `{"connection_id":"c1","message_id":"01JB2Z6V9K3M4N5P6Q7R8S0002"}`},
+		{"message.list", `{"connection_id":"c1","before":"01JB2Z6V9K3M4N5P6Q7R8S0004"}`},
+	} {
+		if _, err := agentCall(t, f, c.typ, c.body); vaultCode(err) != "not_found" {
+			t.Errorf("%s: %v", c.typ, err)
+		}
+	}
+	raw, err = agentCall(t, f, "message.get", `{"connection_id":"c1","message_id":"01JB2Z6V9K3M4N5P6Q7R8S0003"}`)
+	if err != nil || strings.Contains(string(raw), "attachment") || !strings.Contains(string(raw), "caption") {
+		t.Fatalf("captioned message to an agent: %s %v", raw, err)
+	}
+	// message.send with an attachment is the app's alone (§10.5.1).
+	if !f.AppOnly("message.send", json.RawMessage(`{"connection_id":"c1","attachment":{}}`)) || f.AppOnly("message.send", json.RawMessage(`{"connection_id":"c1","text":"x"}`)) {
+		t.Fatal("AppOnly")
+	}
+}
+
+// §10.5.1 "Compatibility": message.attachment.get's shape is checked
+// before the hold: {} is bad_request.
+func TestAttachmentGetShape(t *testing.T) {
+	for body, ok := range map[string]bool{`{}`: false, `{"connection_id":"c","message_id":"m"}`: true,
+		`{"connection_id":"c","message_id":"m","part":"thumb"}`: true, `{"connection_id":"c","message_id":"m","part":"x"}`: false,
+		`{"connection_id":"c"}`: false, `{"connection_id":1,"message_id":"m"}`: false} {
+		if getShapeOK([]byte(body)) != ok {
+			t.Errorf("%s: %v", body, !ok)
+		}
+	}
 }

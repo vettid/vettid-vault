@@ -52,6 +52,9 @@ type TypeSpec struct {
 	// DesktopApproval requests from a desktop are held until an owner app
 	// approves them (§6.8 step-up). Apps are never held.
 	DesktopApproval bool
+	// Shape, if set, checks a request's shape before the credential and
+	// the hold (bad_request otherwise; §10.5.1 "Compatibility").
+	Shape func(body []byte) bool
 	// AgentPolicy types are decided by the AgentPolicy feature for every
 	// agent request, even though agents are listed in From (agent.request,
 	// §10.11): it allows, refers to an app or refuses each one.
@@ -258,6 +261,10 @@ type SendOptions struct {
 	// behind queued deposits to the same mailbox, once and best effort: it
 	// never reaches vault state (ephemeral types such as call.ice, §8.5).
 	MemoryOnly bool
+	// Kind limits a fan-out (NotifyDevicesWith) to owner devices of one
+	// kind ("" for all): a desktop's message.new leaves out what only the
+	// app gets (§10.5.1 "Desktops").
+	Kind string
 }
 
 // NewSession returns a session for a message from `from`, acting on h. It

@@ -90,6 +90,17 @@ type Options struct {
 	Push PushGateway
 	// PushTiming overrides the wake rules' numbers (tests).
 	PushTiming *PushTiming
+	// Transfers is the instance's admission of blob transfers (the
+	// supervisor's, by memory, §10.5.1); nil: only the vault's own limit
+	// of attwire.VaultTransfers.
+	Transfers TransferGate
+	// AttachTick overrides the attachment runner's period (tests).
+	AttachTick time.Duration
+	// AttachClock, if set, is the clock of the attachment windows and
+	// backoffs (§10.5.1; tests move it while messages keep the real time).
+	AttachClock func() time.Time
+	// AttachLimits, if set, replaces release A's attachment limits (tests).
+	AttachLimits *AttachLimits
 }
 
 // LifecycleEvent is reported to the parent, which writes it to the vault
@@ -130,6 +141,12 @@ type Hooks struct {
 	// DropDeposit, if it returns true for an outbox deposit, drops it as if
 	// it were lost (fault injection for best-effort notices).
 	DropDeposit func(e *OutboxEntry) bool
+	// AttachStep, if it returns an error at a step of the attachment
+	// runner ("thumb": an object written, its flush not yet made;
+	// "prepared", "stored": the content's flush made, the blob not yet
+	// deleted), crashes the vault there (fault injection, §10.5.1 write
+	// order).
+	AttachStep func(step string) error
 }
 
 // Manager is one unlocked vault.
@@ -214,6 +231,11 @@ type Manager struct {
 	// one are ignored.
 	push    *pusher
 	pushGen uint64
+	// att is the attachment runner while the vault runs (§10.5.1).
+	att *attRunner
+	// attWrites counts the runner's store writes in flight (finishDelete
+	// waits for them before it erases).
+	attWrites sync.WaitGroup
 }
 
 // unlocked counts the managers in this process that hold a DEK.
@@ -730,6 +752,7 @@ func (m *Manager) splitBrain() {
 // zeroize wipes the DEK and every key, and marks the manager locked.
 func (m *Manager) zeroize() {
 	m.locked = true
+	m.attStop()
 	if m.push != nil {
 		m.push.stop()
 		m.push = nil
@@ -768,6 +791,12 @@ func (m *Manager) zeroize() {
 		i.Abort()
 	}
 	m.reqEpochs, m.awaiting, m.outgoing = nil, nil, nil
+	if m.st != nil && m.st.Attach != nil {
+		// k_att, blob keys and held thumbnails (§10.5.1).
+		for _, e := range m.st.Attach.Entries {
+			e.wipe()
+		}
+	}
 	if m.st != nil {
 		suite.Wipe(m.st.Relay.Seed)
 		suite.Wipe(m.st.IdentitySeed)

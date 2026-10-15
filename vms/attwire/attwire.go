@@ -293,13 +293,32 @@ type PeerView struct {
 
 // ParsePeerView parses a peer vault's attachment (which may be malicious)
 // strictly. ErrMalformed is dropped and audited; a view of another kind
-// is returned with Kind set (refused with reason type), as is one whose
-// thumbnail has another type (ThumbBad).
+// is returned with Kind set and only its valid members (refused with
+// reason type), and a photo whose thumbnail has another type with
+// ThumbBad.
 func ParsePeerView(o strictjson.Object, maxContent int) (*PeerView, error) {
 	v := &PeerView{}
 	var err error
 	if v.Kind, err = o.String("kind"); err != nil || v.Kind == "" || len(v.Kind) > 32 {
 		return nil, errBad
+	}
+	if v.Kind != KindPhoto {
+		// Another kind (a later version's file) is refused with reason
+		// type, whatever members it has: only what is valid is kept for
+		// the device view (§10.5.1 "Kinds").
+		if n, err := o.Uint("size", 1, uint64(max(maxContent, 1))); err == nil {
+			v.Size = int(n)
+		}
+		if w, h, err := dims(o); err == nil {
+			v.Width, v.Height = w, h
+		}
+		// A blob it names is deleted by the refusal: its id only.
+		if bo, err := o.Object("blob"); err == nil {
+			if id, err := bo.String("id"); err == nil && envelope.ValidULID(id) {
+				v.Blob = &Blob{ID: id}
+			}
+		}
+		return v, nil
 	}
 	size, err := o.Uint("size", 1, uint64(max(maxContent, 1)))
 	if err != nil {

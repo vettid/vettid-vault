@@ -91,6 +91,10 @@ type State struct {
 	// owner_device (§7.1; 0.32.0, release A). A vault from before release
 	// A re-mints them at its first unlock under it (§7.2).
 	DeviceTokensMarked bool `json:"device_tokens_marked,omitempty"`
+
+	// Attach is the attachment index and its bookkeeping (§3.3, §10.5.1;
+	// 0.32.0, release A); nil until the first attachment.
+	Attach *AttachState `json:"attach,omitempty"`
 }
 
 // ReleaseMove is a recorded, not yet confirmed move to another release

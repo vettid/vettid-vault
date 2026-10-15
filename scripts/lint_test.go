@@ -196,6 +196,10 @@ func TestEIFToolchain(t *testing.T) {
 		return m[1]
 	}
 	krel, khard := ekv("kernel_release"), ekv("kernel_hardened")
+	// blobs_version names release assets and files: a plain name.
+	if !regexp.MustCompile(`^[A-Za-z0-9._-]+$`).MatchString(val("blobs_version")) {
+		t.Errorf("blobs_version %q", val("blobs_version"))
+	}
 	if regexp.MustCompile(`(?m)^kernel_(release|hardened)=`).MatchString(lock) {
 		t.Error("the lock names the kernel itself; it belongs in release/enclave-kernel")
 	}
@@ -219,6 +223,9 @@ func TestEIFToolchain(t *testing.T) {
 		kl, err := os.ReadFile("../release/kernel/kernel.lock")
 		if err != nil {
 			t.Fatal(err)
+		}
+		if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(val("kernel_source_sha256")) {
+			t.Error("kernel_source_sha256: the recipe source archive's SHA-256")
 		}
 		if !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(val("kernel_commit")) {
 			t.Errorf("kernel_commit %q is not a full commit id", val("kernel_commit"))

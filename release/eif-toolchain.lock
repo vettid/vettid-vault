@@ -31,6 +31,9 @@ blobs_url=https://github.com/vettid/vettid-vault/releases/download/kernel/6.6.15
 blobs_dir=vettid-enclave-blobs/aarch64
 kernel_lock_sha256=1c088af2f4f147d98ec9a4a51cc60a83592e7e6cfbb2781f09f19f1266a31a93
 kernel_commit=a3442770be214117cb373c042b07132fdb65d4e4
+# The recipe's source archive in the blob set's release (corresponding
+# source; the release workflow attaches it to each vault release).
+kernel_source_sha256=13eb3de2ef562b61fda4fcabe0feee96f6c76a8ccc7e3aaaab79a338d64804a5
 # The kernel these blobs carry is named in release/enclave-kernel, which
 # the enclave binary embeds (scripts/lint_test.go keeps the two in step).
 #

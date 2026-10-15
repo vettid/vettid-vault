@@ -307,6 +307,8 @@ jobs:
               # The published set is the one the lock pins.
               grep -qx "$want  $(basename "$url")" release/kernel-blobs.SHA256SUMS
               curl -fsSL --retry 3 -o "release/$src" "$kernel_release/$src"
+              # Pinned in the lock, not only listed by the release.
+              echo "$(sed -n 's/^kernel_source_sha256=//p' "$lock")  release/$src" | sha256sum -c -
               (cd release && grep "  $src\$" kernel-blobs.SHA256SUMS | sha256sum -c -)
               assets="$assets release/$src"
               kernel_org="$(sed -n 's/^kernel_url=//p' src/release/kernel/kernel.lock)"

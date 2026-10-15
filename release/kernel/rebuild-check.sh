@@ -26,13 +26,19 @@ if [ -z "$commit" ] || [ -z "$url" ]; then
   exit 1
 fi
 
-# 1. The recipe's inputs are the ones the set was built from. The scripts
-# that only drive or check a build (build.sh, check-current.sh,
+# 1. The recipe's inputs in this working tree are the ones the set was
+# built from. The build itself runs with build.sh as it was at that commit
+# (step 2), since build.sh holds the source, signature, NAR and closure
+# checks; the scripts that only drive a check (check-current.sh,
 # eif-with-blobs.sh, this one) may have changed since.
+if ! git cat-file -e "$commit^{commit}" 2>/dev/null; then
+  echo "rebuild-check: kernel_commit $commit is not in this clone: fetch full history (git fetch --unshallow, or clone without --depth)" >&2
+  exit 1
+fi
 inputs=(release/kernel/aws release/kernel/config release/kernel/patches release/kernel/keys
   release/kernel/default.nix release/kernel/kernel.nix release/kernel/init.nix release/kernel/linuxkit.nix
   release/kernel/cmdline release/kernel/check-config.sh release/kernel/kernel.lock release/kernel/SHA256SUMS)
-if ! git diff --exit-code --stat "$commit" HEAD -- "${inputs[@]}"; then
+if ! git diff --exit-code --stat "$commit" -- "${inputs[@]}"; then
   echo "rebuild-check: release/kernel's inputs differ from $commit, which the blob set was built from" >&2
   exit 1
 fi
@@ -44,8 +50,20 @@ if [ "$want" != "$have" ]; then
 fi
 echo "rebuild-check: recipe inputs as at $commit; kernel.lock $have"
 
-# 2. The build (source, signature, toolchain and closure checked by build.sh).
-release/kernel/build.sh "$out"
+# 2. The build, with build.sh exactly as at kernel_commit (it checks the
+# source's SHA-256, kernel.org's signature, the toolchain's NAR hashes and
+# the build-time closure). It sits next to the recipe for the run (it
+# reads its directory's files) and is removed afterwards. No expected-
+# hashes argument is passed (step 3 compares), which also avoids that
+# commit's relative-path bug.
+gated=release/kernel/.build-at-kernel-commit.sh
+git show "$commit:release/kernel/build.sh" >"$gated"
+chmod +x "$gated"
+trap 'rm -f "$gated"' EXIT
+echo "rebuild-check: build.sh from $commit ($(sha256sum "$gated" | cut -d' ' -f1))"
+"$gated" "$out"
+rm -f "$gated"
+trap - EXIT
 
 # 3. The six blob hashes: lock = rebuild = published.
 tmp="$(mktemp -d)"

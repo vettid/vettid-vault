@@ -489,7 +489,8 @@ gh release download release/staging/N --repo vettid/vettid-vault --pattern 'encl
 distributes Linux (GPL-2.0) in its EIF and in that copy, so the same job
 also attaches the recipe's source archive
 (`vettid-vault-release-kernel-<version>-<n>-source.tar.gz`, taken from
-the blob set's release and checked against its `SHA256SUMS`) and the
+the blob set's release and checked against the lock's
+`kernel_source_sha256` and the release's `SHA256SUMS`) and the
 release notes name the blob set's release and the kernel.org tarball
 (from `release/kernel/kernel.lock`). The blob set's own
 `kernel/<version>-<n>` release carries the kernel.org tarball and its

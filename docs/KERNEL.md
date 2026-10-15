@@ -342,11 +342,12 @@ release/kernel/rebuild-check.sh /tmp/kblobs
 ```
 
 `rebuild-check.sh` requires that the recipe's inputs under
-`release/kernel/` are unchanged since the commit the set was built from
-(`kernel_commit` in the lock) and that `kernel.lock` is the one
-`kernel_lock_sha256` names; builds the set (`build.sh` checks the
-tarball's SHA-256, kernel.org's signature, the toolchain's NAR hashes and
-the build-time closure); and then requires the six blob hashes to be the
+`release/kernel/` in the working tree are unchanged since the commit the
+set was built from (`kernel_commit` in the lock; the clone needs that
+history) and that `kernel.lock` is the one `kernel_lock_sha256` names;
+builds the set with `build.sh` exactly as it was at `kernel_commit`
+(which checks the tarball's SHA-256, kernel.org's signature, the
+toolchain's NAR hashes and the build-time closure); and then requires the six blob hashes to be the
 same in three places: the lock, the rebuild and the published set's
 `SHA256SUMS`. It exits non-zero on any difference. With
 `KERNEL_NO_SUBSTITUTE=1 KERNEL_TOOLCHAIN_UNPINNED=1` (the toolchain

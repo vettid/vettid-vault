@@ -335,6 +335,16 @@ func TestBlobBodiesNeedAdmission(t *testing.T) {
 	if call("GET", id, nil) != "denied" || call("PUT", "/v1/blob/mbx", big) != "denied" {
 		t.Fatal("a blob body without an admitted transfer")
 	}
+	// A relay URL with a path prefix is gated as well.
+	if call("GET", "/x"+id, nil) != "denied" || call("PUT", "/x/y/v1/blob/mbx", big) != "denied" || call("GET", "/x/v1/blobs", nil) != "denied" {
+		t.Fatal("a blob body under a path prefix without an admitted transfer")
+	}
+	for p, want := range map[string]bool{"/v1/blob/a": true, "/x/v1/blob/a": true, "/v1/blobs": true, "/x/v1/blobs": true,
+		"/v1/mailbox": false, "/x/blob/a": false, "/v1/blobx/a": false, "/v2/blob/a": false} {
+		if blobRoute(p) != want {
+			t.Errorf("blobRoute(%s) = %v", p, !want)
+		}
+	}
 	for _, c := range [][2]string{{"PUT", "/v1/blob/mbx"}, {"DELETE", id}, {"POST", "/v1/blobs"}, {"GET", "/v1/mailbox"}} {
 		if got := call(c[0], c[1], []byte("x")); got != "ok" {
 			t.Errorf("%s %s: %s", c[0], c[1], got)

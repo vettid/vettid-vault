@@ -1142,7 +1142,7 @@ const blobBodyThreshold = 1 << 20
 // body's request.
 func (p *vproc) blobBody(method, urlPath string, n int) (func(), bool) {
 	none := func() {}
-	if !strings.HasPrefix(urlPath, "/v1/blob/") {
+	if !blobRoute(urlPath) {
 		return none, true
 	}
 	if !(method == http.MethodGet || method == http.MethodPut && n > blobBodyThreshold) {
@@ -1163,4 +1163,18 @@ func (p *vproc) blobBody(method, urlPath string, n int) (func(), bool) {
 		p.blobBodies--
 		p.mu.Unlock()
 	}, true
+}
+
+// blobRoute reports whether a (decoded, clean) path names the relay's blob
+// routes: a "v1" segment followed by "blob" or "blobs" anywhere in it, so
+// that a relay URL with a path prefix (https://host/x/v1/blob/...) is
+// gated as well.
+func blobRoute(urlPath string) bool {
+	segs := strings.Split(urlPath, "/")
+	for i := 0; i+1 < len(segs); i++ {
+		if segs[i] == "v1" && (segs[i+1] == "blob" || segs[i+1] == "blobs") {
+			return true
+		}
+	}
+	return false
 }

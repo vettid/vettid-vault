@@ -39,6 +39,8 @@ type Parent struct {
 	manifests map[string][]byte
 
 	events chan func(context.Context)
+	// runCtx lives while Run runs (P15's sweeps).
+	runCtx context.Context
 }
 
 type session struct {
@@ -126,6 +128,9 @@ func (p *Parent) Run(ctx context.Context) error {
 	p.log.Info("queue ready", "queue", p.cfg.QueueName())
 
 	wctx, wcancel := context.WithCancel(context.Background())
+	p.mu.Lock()
+	p.runCtx = wctx
+	p.mu.Unlock()
 	var wg sync.WaitGroup
 	run := func(f func(context.Context)) {
 		wg.Add(1)
@@ -664,8 +669,77 @@ func (p *Parent) onLifecycle(ev Lifecycle) {
 	p.mu.Unlock()
 	p.log.Info("lifecycle", "event", ev.Event, "vault_id", ev.VaultID)
 	p.events <- func(ctx context.Context) {
-		if err := p.cfg.Tables.Lifecycle(ctx, ev, p.cfg.InstanceID, p.now()); err != nil {
+		err := p.cfg.Tables.Lifecycle(ctx, ev, p.cfg.InstanceID, p.now())
+		switch {
+		case errors.Is(err, ErrNotMarked):
+			// Not ours to sweep: another instance holds the vault (P15).
+			p.log.Info("vault deleted elsewhere; no attachment sweep", "vault_id", ev.VaultID)
+		case err != nil:
 			p.log.Warn("lifecycle write failed", "event", ev.Event, "vault_id", ev.VaultID, "error", err.Error())
+		case ev.Event == "deleted":
+			p.startSweep(ev.VaultID)
+		}
+	}
+}
+
+// startSweep starts P15's sweep of a deleted vault's attachment objects
+// (VAULT-HOST-PROTOCOL 0.1.9): only after this parent's own conditional
+// update marked the row deleted.
+func (p *Parent) startSweep(vaultID string) {
+	p.mu.Lock()
+	ctx := p.runCtx
+	p.mu.Unlock()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	go p.sweepAttachments(ctx, vaultID)
+}
+
+// sweepAttachments deletes every object under vaults/<vault_id>/att/,
+// listing the prefix (a missing object counts as deleted), and retries
+// until the prefix is empty or the parent stops (P15).
+func (p *Parent) sweepAttachments(ctx context.Context, vaultID string) {
+	l, ok := p.cfg.Objects.(ObjectLister)
+	if !ok || !vaultIDOK(vaultID) {
+		return
+	}
+	prefix := "vaults/" + vaultID + "/att/"
+	wait := p.cfg.SweepRetry
+	if wait <= 0 {
+		wait = 5 * time.Second
+	}
+	for attempt := 0; ; attempt++ {
+		objs, err := l.ListObjects(ctx, prefix)
+		if err == nil && len(objs) == 0 {
+			if attempt > 0 {
+				p.log.Info("attachment sweep done", "vault_id", vaultID)
+			}
+			return
+		}
+		deleted := 0
+		for _, o := range objs {
+			if !strings.HasPrefix(o.Key, prefix) {
+				continue
+			}
+			derr := p.cfg.Objects.Delete(ctx, o.Key, o.ETag)
+			switch {
+			case derr == nil:
+				deleted++
+			case errors.Is(derr, ErrNotFound), errors.Is(derr, ErrConflict):
+				// already gone, or rewritten: the next listing has it
+			default:
+				err = derr
+			}
+		}
+		if err != nil {
+			p.log.Warn("attachment sweep incomplete", "vault_id", vaultID, "error", err.Error())
+		} else {
+			p.log.Info("attachment sweep", "vault_id", vaultID, "deleted", deleted)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(min(wait<<min(attempt, 6), 5*time.Minute)):
 		}
 	}
 }

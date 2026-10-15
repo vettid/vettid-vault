@@ -40,9 +40,12 @@ type Config struct {
 	Resolve map[string]string
 
 	Objects Objects
-	Queues  Queues
-	Tables  Tables
-	Creds   CredentialSource
+	// SweepRetry is the first wait between two passes of a deleted
+	// vault's attachment sweep (P15; default 5 s, doubling to 5 min).
+	SweepRetry time.Duration
+	Queues     Queues
+	Tables     Tables
+	Creds      CredentialSource
 
 	// HealthAddr is the health endpoint's listen address ("" = none).
 	HealthAddr string

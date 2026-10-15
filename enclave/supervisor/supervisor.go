@@ -156,6 +156,8 @@ type Supervisor struct {
 	relayHTTP *http.Client
 	relays    map[string]bool
 	relayErrs atomic.Uint64 // relay requests that got no answer
+	// xfers admits blob transfers by memory (§10.5.1).
+	xfers *admission
 	// vaultLimit counts the vault processes that reached their limit of
 	// relay requests in flight, each once. A count for the instance
 	// only: which vault it was is told to nobody outside the enclave.
@@ -364,6 +366,7 @@ func (s *Supervisor) start() error {
 	s.st = &hostStore{l: s.link, onWrite: s.touchKey}
 	s.kms, s.encCfg = kms, cfg
 	s.relayHTTP = s.cfg.Egress.Client(80 * time.Second)
+	s.xfers = newAdmission(memAvailable, s.cfg.MemoryReserve)
 	s.relays = map[string]bool{}
 	hosts := s.cfg.RelayHosts
 	if len(hosts) == 0 {

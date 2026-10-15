@@ -203,7 +203,7 @@ func (pr *proc) open(ctx context.Context, f [][]byte) [][]byte {
 		// Long-poll only: the relay requests share the supervisor's
 		// HTTP/2 connections (§12.2).
 		Vault: vault.Options{HTTP: &http.Client{Transport: chanTransport{ch: pr.ch}, Timeout: 75 * time.Second}, WebSocket: false,
-			PollWait: pr.p.PollWait, Push: pushGateway(cfg.PushURL, pr.ch)},
+			PollWait: pr.p.PollWait, Push: pushGateway(cfg.PushURL, pr.ch), Transfers: chanGate{ch: pr.ch}},
 		Features: pr.p.Features,
 		Lifecycle: func(ev vault.LifecycleEvent) {
 			if ev.VaultID != vid {

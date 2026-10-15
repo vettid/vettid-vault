@@ -357,6 +357,9 @@ func (h *procHost) exited(p *vproc) {
 		delete(h.procs, p.vaultID)
 	}
 	h.mu.Unlock()
+	if h.s.xfers != nil {
+		h.s.xfers.releaseAll(p) // its transfers ended with it
+	}
 	p.mu.Lock()
 	stopping := p.stopping
 	p.mu.Unlock()
@@ -750,6 +753,8 @@ func (p *vproc) handle(ctx context.Context, f *hostproto.Frame) [][]byte {
 		return p.http(ctx, f.Fields)
 	case vaultipc.KindPush:
 		return p.push(ctx, f.Fields)
+	case vaultipc.KindTransfer:
+		return p.transfer(ctx, f.Fields)
 	case vaultipc.KindStatusList:
 		b, at, ok := s.status.rawList()
 		if !ok {
@@ -1055,6 +1060,10 @@ func (p *vproc) notify(f *hostproto.Frame) {
 		s.lifecycle(vault.LifecycleEvent{Event: string(f.Fields[0]), VaultID: p.vaultID, Release: string(f.Fields[2]),
 			VaultVersion: string(f.Fields[3]), StateVersion: sv, AppKey: append([]byte(nil), f.Fields[5]...), AppKeySeq: seq,
 			CredentialBackup: backup, Name: name})
+	case vaultipc.KindTransferDone:
+		if len(f.Fields) == 1 && validTicket(f.Fields[0]) && s.xfers != nil {
+			s.xfers.release(p, string(f.Fields[0]))
+		}
 	case vaultipc.KindLog:
 		if len(f.Fields) < 2 {
 			return
@@ -1072,4 +1081,37 @@ func truncate(s string, n int) string {
 		return s[:n]
 	}
 	return s
+}
+
+// transfer admits one blob transfer of this process (§10.5.1): at most
+// its vault's 2 at once, and the instance's admission by memory.
+func (p *vproc) transfer(ctx context.Context, f [][]byte) [][]byte {
+	s := p.h.s
+	if len(f) != 3 || !validTicket(f[0]) || s.xfers == nil {
+		return deny()
+	}
+	prio, err1 := strconv.Atoi(string(f[1]))
+	ms, err2 := strconv.Atoi(string(f[2]))
+	if err1 != nil || err2 != nil || prio < 0 || prio > 2 || ms < 0 {
+		return deny()
+	}
+	wait := min(time.Duration(ms)*time.Millisecond, maxTransferWait)
+	wctx, cancel := context.WithTimeout(ctx, wait)
+	defer cancel()
+	if _, err := s.xfers.admit(wctx, p, string(f[0]), prio); err != nil {
+		return hostproto.Strings(vaultipc.StatusBusy)
+	}
+	return hostproto.Strings(hostproto.StatusOK)
+}
+
+func validTicket(b []byte) bool {
+	if len(b) == 0 || len(b) > 32 {
+		return false
+	}
+	for _, c := range b {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'z') {
+			return false
+		}
+	}
+	return true
 }

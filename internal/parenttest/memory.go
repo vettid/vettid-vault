@@ -9,7 +9,9 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -76,6 +78,20 @@ func (o *Objects) Delete(_ context.Context, key, ifMatch string) error {
 	}
 	delete(o.objs, key)
 	return nil
+}
+
+// ListObjects implements parent.ObjectLister.
+func (o *Objects) ListObjects(_ context.Context, prefix string) ([]parent.ObjectRef, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	var out []parent.ObjectRef
+	for k, x := range o.objs {
+		if strings.HasPrefix(k, prefix) {
+			out = append(out, parent.ObjectRef{Key: k, ETag: x.etag})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	return out, nil
 }
 
 // Keys returns the stored keys.
@@ -488,6 +504,9 @@ func (t *Tables) Lifecycle(_ context.Context, ev parent.Lifecycle, me string, no
 		return nil
 	}
 	if r == nil || !(r.LeaseInstance == "" || r.LeaseInstance == me) {
+		if ev.Event == "deleted" {
+			return parent.ErrNotMarked // as parent.AWS: no attachment sweep (P15)
+		}
 		return nil
 	}
 	if ev.CredentialBackup != nil {

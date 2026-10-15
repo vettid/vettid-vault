@@ -37,6 +37,11 @@ var (
 	// ErrLeaseHeld means the vault's lease belongs to another instance
 	// (or the vault row does not exist).
 	ErrLeaseHeld = errors.New("parent: lease held elsewhere")
+	// ErrNotMarked: a `deleted` lifecycle event whose conditional update
+	// of the vault row was refused (another instance holds the lease, or
+	// there is no row). The parent does not sweep the vault's attachment
+	// objects then (VAULT-HOST-PROTOCOL 0.1.9 P15).
+	ErrNotMarked = errors.New("parent: vault row not marked deleted")
 	// ErrQueueDeletedRecently means a queue of the same name was deleted
 	// less than 60 s ago and SQS refuses to create it yet (a restart right
 	// after a clean stop). Queues.Create returns it wrapped.
@@ -54,6 +59,17 @@ type Objects interface {
 	Put(ctx context.Context, key string, data []byte, ifMatch string) (string, error)
 	// Delete deletes if the version matches.
 	Delete(ctx context.Context, key string, ifMatch string) error
+}
+
+// ObjectRef is a listed object: its key and version (ETag).
+type ObjectRef struct {
+	Key, ETag string
+}
+
+// ObjectLister lists the bucket's objects under a prefix (P15: the host
+// role may list vaults/*/att/* only).
+type ObjectLister interface {
+	ListObjects(ctx context.Context, prefix string) ([]ObjectRef, error)
 }
 
 // QueueMessage is one received SQS message.

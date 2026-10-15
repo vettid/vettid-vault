@@ -548,14 +548,39 @@ func (a *AWS) Lifecycle(ctx context.Context, ev Lifecycle, instanceID string, no
 		update = strings.Replace(update, "SET ", "SET #cb = :cb, ", 1)
 	}
 	err := a.updateVault(ctx, ev.VaultID, update, cond, nm, vals)
-	if errors.Is(err, ErrLeaseHeld) {
+	held := errors.Is(err, ErrLeaseHeld)
+	if held {
 		err = nil // another instance holds the vault now
 	}
 	if err == nil && ev.Event == "deleted" {
 		// The member is told (§12.5): the vault's own audit log is gone.
 		err = a.alarm(ctx, ev.VaultID, "vault_deleted", now)
+		if err == nil && held {
+			err = ErrNotMarked // no attachment sweep (P15)
+		}
 	}
 	return err
+}
+
+// ListObjects implements ObjectLister: every object under prefix, with its ETag.
+func (a *AWS) ListObjects(ctx context.Context, prefix string) ([]ObjectRef, error) {
+	var out []ObjectRef
+	var token *string
+	for {
+		r, err := a.s3.ListObjectsV2(ctx, &s3.ListObjectsV2Input{Bucket: &a.cfg.Bucket, Prefix: &prefix, ContinuationToken: token})
+		if err != nil {
+			return out, errClass("s3 list", err)
+		}
+		for _, o := range r.Contents {
+			if o.Key != nil && o.ETag != nil {
+				out = append(out, ObjectRef{Key: *o.Key, ETag: *o.ETag})
+			}
+		}
+		if r.IsTruncated == nil || !*r.IsTruncated || r.NextContinuationToken == nil {
+			return out, nil
+		}
+		token = r.NextContinuationToken
+	}
 }
 
 // appKey writes the reported app key (0.15.0, §11.5): app_key = {key,

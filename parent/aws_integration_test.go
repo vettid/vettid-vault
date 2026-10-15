@@ -217,7 +217,8 @@ func TestAWSBackend(t *testing.T) {
 		t.Fatal(err)
 	}
 	it, _ = memberapitest.VaultItem(ctx, db, tn.Vaults, "v1")
-	if err := a.Lifecycle(ctx, Lifecycle{Event: "deleted", VaultID: "v2-missing", Release: pcr, VaultVersion: pcr, StateVersion: 1}, "i9", time.Now()); err != nil {
+	// A deleted event without a row marks nothing: no attachment sweep (P15).
+	if err := a.Lifecycle(ctx, Lifecycle{Event: "deleted", VaultID: "v2-missing", Release: pcr, VaultVersion: pcr, StateVersion: 1}, "i9", time.Now()); !errors.Is(err, ErrNotMarked) {
 		t.Fatal(err)
 	}
 	al, ok := it["alarm"].(*ddbtypes.AttributeValueMemberM)

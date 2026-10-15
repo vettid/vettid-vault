@@ -225,6 +225,22 @@ func TestHideProcesses(t *testing.T) {
 	if processesHidden() == nil {
 		t.Error("no /proc mount counts as hidden")
 	}
+	// Two proc mounts on /proc: the last one is the visible one.
+	both := func(first, last string) []byte {
+		return []byte("53 45 0:25 / /proc rw - proc proc " + first + "\n90 53 0:40 / /proc rw - proc proc " + last + "\n")
+	}
+	if err := os.WriteFile(procMountinfo, both("rw,hidepid=2", "rw"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if processesHidden() == nil {
+		t.Error("a covered hidepid mount counts as hidden")
+	}
+	if err := os.WriteFile(procMountinfo, both("rw", "rw,hidepid=invisible"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := processesHidden(); err != nil {
+		t.Errorf("the visible mount hides: %v", err)
+	}
 
 	settings(t, setting(t, "15000\n"), setting(t, "0\n"))
 	s := &Supervisor{cfg: Config{OwnKernel: true}}

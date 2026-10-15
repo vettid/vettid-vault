@@ -222,19 +222,24 @@ func processesHidden() error {
 	if err != nil {
 		return err
 	}
+	// The last proc mount on /proc is the visible one (a later mount
+	// covers the earlier).
+	opts := ""
 	for _, line := range strings.Split(string(b), "\n") {
 		// id parent major:minor root mountpoint options [optional...] - type source super-options
 		pre, post, ok := strings.Cut(line, " - ")
 		f, g := strings.Fields(pre), strings.Fields(post)
-		if !ok || len(f) < 5 || len(g) < 3 || f[4] != "/proc" || g[0] != "proc" {
-			continue
+		if ok && len(f) >= 5 && len(g) >= 3 && f[4] == "/proc" && g[0] == "proc" {
+			opts = g[2]
 		}
-		for _, o := range strings.Split(g[2], ",") {
-			if o == "hidepid=2" || o == "hidepid=invisible" {
-				return nil
-			}
-		}
-		return fmt.Errorf("/proc is mounted with %s", g[2])
 	}
-	return errors.New("/proc is not mounted")
+	if opts == "" {
+		return errors.New("/proc is not mounted")
+	}
+	for _, o := range strings.Split(opts, ",") {
+		if o == "hidepid=2" || o == "hidepid=invisible" {
+			return nil
+		}
+	}
+	return fmt.Errorf("/proc is mounted with %s", opts)
 }

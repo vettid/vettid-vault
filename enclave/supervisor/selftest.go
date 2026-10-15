@@ -361,11 +361,16 @@ func (s *Supervisor) selftestVaultProcess(ctx context.Context, r *selftest.Repor
 	// that starts threads without end fails (the Go runtime cannot create
 	// another thread and the process ends) instead of exhausting the
 	// enclave.
+	nproc := false
 	for i, c := range r.Checks {
 		if c.Name == "vault_process.rlimit_nproc" {
+			nproc = true
 			r.Checks[i].Required = want > 0
 			r.Checks[i].OK = c.OK && strings.HasPrefix(c.Detail, fmt.Sprintf("cur=%d ", h.cfg.Tasks))
 		}
+	}
+	if !nproc && want > 0 {
+		r.Add("vault_process.rlimit_nproc", false, true, "not reported by the vault process")
 	}
 	if want > 0 {
 		r.Add("vault_process.own_uid_gid", p.uid >= want && vr.UID == p.uid && vr.GID == p.uid, true, fmt.Sprintf("uid=%d gid=%d", vr.UID, vr.GID))

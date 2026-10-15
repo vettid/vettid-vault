@@ -18,7 +18,14 @@ const (
 	MaxText      = 16 * 1024 // larger content travels as a claim-check blob (§5.5)
 	DefaultLimit = 100
 	MaxLimit     = 500
+	// PageBytes bounds a message.list response's body (§10.5.2, 0.32.0):
+	// room under §5.5's 245,760-byte padded inner plaintext for the
+	// members around it.
+	PageBytes = 131072
 )
+
+// pageBytes is PageBytes; tests lower it.
+var pageBytes = PageBytes
 
 // Directions.
 const (
@@ -57,8 +64,10 @@ func (f *Feature) Name() string { return "messaging" }
 func (f *Feature) Types() []vault.TypeSpec {
 	return []vault.TypeSpec{
 		{Type: "message.send", Request: true, From: owners},
-		{Type: "message.list", Request: true, From: owners},
-		{Type: "message.get", Request: true, From: owners},
+		// Reads whose answers are large: volatile, never cached in vault
+		// state (§8.2, §10.5.2; 0.32.0).
+		{Type: "message.list", Request: true, Volatile: true, From: owners},
+		{Type: "message.get", Request: true, Volatile: true, From: owners},
 		{Type: "message.read", Request: true, From: owners},
 		{Type: "message.delete", Request: true, From: owners},
 		{Type: "message.deliver", From: conns},
@@ -264,8 +273,13 @@ func (f *Feature) receipt(s *vault.Session, body []byte) error {
 	return nil
 }
 
-// list: {connection_id, limit?} → {messages: [...]}, oldest first, the
-// most recent `limit`.
+// list: {connection_id, limit?, before?} → {messages: [...], next_before?}
+// (§10.5, §10.5.2). The page ends before `before` (a position in arrival
+// order, exclusive) or with the newest message; it holds at most `limit`
+// messages and stops before the message whose addition would make the
+// body exceed PageBytes, but always holds one message when one is older.
+// It is returned oldest first; next_before, the id of its oldest message,
+// is present only when older messages remain.
 func (f *Feature) list(o strictjson.Object) (json.RawMessage, error) {
 	conn, err := o.String("connection_id")
 	if err != nil {
@@ -278,18 +292,64 @@ func (f *Feature) list(o strictjson.Object) (json.RawMessage, error) {
 	if !present {
 		limit = DefaultLimit
 	}
+	before, hasBefore, err := o.OptString("before")
+	if err != nil {
+		return nil, errBad
+	}
 	ms := f.convs[conn]
-	if len(ms) > int(limit) {
-		ms = ms[len(ms)-int(limit):]
+	end := len(ms)
+	if hasBefore {
+		end = -1
+		for i, m := range ms {
+			if m.ID == before {
+				end = i
+				break
+			}
+		}
+		if end < 0 {
+			return nil, errNotFound // unknown, or deleted since: the app starts again from the newest
+		}
+	}
+	// Newest first from end, within the limit and the byte budget.
+	size := len(`{"messages":[]}`)
+	var items [][]byte
+	start := end
+	for start > 0 && len(items) < int(limit) {
+		item := msgJSON(conn, ms[start-1])
+		n := size + len(item)
+		if len(items) > 0 {
+			n++ // the comma
+		}
+		if start-1 > 0 {
+			n += nextBeforeLen(ms[start-1].ID) // older messages would remain
+		}
+		if len(items) > 0 && n > pageBytes {
+			break
+		}
+		items = append(items, item)
+		size += len(item)
+		if len(items) > 1 {
+			size++
+		}
+		start--
 	}
 	arr := []byte{'['}
-	for i, m := range ms {
-		if i > 0 {
+	for i := len(items) - 1; i >= 0; i-- {
+		if i < len(items)-1 {
 			arr = append(arr, ',')
 		}
-		arr = append(arr, msgJSON(conn, m)...)
+		arr = append(arr, items[i]...)
 	}
-	return strictjson.NewBuilder().Raw("messages", append(arr, ']')).Bytes(), nil
+	b := strictjson.NewBuilder().Raw("messages", append(arr, ']'))
+	if start > 0 {
+		b.String("next_before", ms[start].ID)
+	}
+	return b.Bytes(), nil
+}
+
+// nextBeforeLen is the length that the next_before member adds to a body.
+func nextBeforeLen(id string) int {
+	return len(strictjson.NewBuilder().String("next_before", id).Bytes()) - len(`{}`) + len(`,`)
 }
 
 func (f *Feature) get(o strictjson.Object) (json.RawMessage, error) {

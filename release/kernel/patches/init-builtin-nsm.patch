@@ -1,0 +1,36 @@
+init: an empty nsm.ko means the NSM driver is built into the kernel
+
+The enclave kernel built by release/kernel has CONFIG_MODULES=n and
+CONFIG_NSM=y. nitro-cli build-enclave always puts the blobs directory's
+nsm.ko into the first ramdisk, so that set ships an empty nsm.ko. AWS's
+init would pass it to finit_module, which fails (ENOSYS) and stops the
+enclave; with this change init removes an empty nsm.ko and loads
+nothing. A non-empty nsm.ko is loaded as before.
+
+--- a/init.c
++++ b/init.c
+@@ -377,12 +377,24 @@
+ void init_nsm_driver() {
+     int fd;
+     int rc;
++    struct stat st;
+ 
+     fd = open(NSM_PATH, O_RDONLY | O_CLOEXEC);
+     if (fd < 0 && errno == ENOENT) {
+         return;
+     }
+     die_on(fd < 0, "failed to open nsm fd");
++
++    // An empty nsm.ko: the NSM driver is built into the kernel, which
++    // loads no modules. nitro-cli always puts an nsm.ko into the first
++    // ramdisk; this one is a placeholder and is only removed.
++    die_on(fstat(fd, &st) < 0, "failed to stat nsm fd");
++    if (st.st_size == 0) {
++        die_on(close(fd), "close nsm fd");
++        if (unlink(NSM_PATH) < 0)
++            warn("Could not unlink " NSM_PATH);
++        return;
++    }
+     rc = finit_module(fd, "", 0);
+     die_on(rc < 0, "failed to insert nsm driver");
+ 

@@ -130,7 +130,7 @@ jobs:
         with:
           go-version-file: go.mod
       - name: shellcheck
-        run: shellcheck scripts/build-eif.sh scripts/smoke/run-on-host.sh scripts/compat-matrix.sh release/rebuild.sh
+        run: shellcheck scripts/build-eif.sh scripts/smoke/run-on-host.sh scripts/compat-matrix.sh release/rebuild.sh release/kernel/build.sh release/kernel/check-config.sh release/kernel/check-current.sh release/kernel/eif-with-blobs.sh
       - name: two clean builds, one binary
         run: |
           export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)

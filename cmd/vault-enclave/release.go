@@ -16,6 +16,7 @@ import (
 	"github.com/vettid/vettid-vault/features/all"
 	"github.com/vettid/vettid-vault/internal/hostproto"
 	"github.com/vettid/vettid-vault/internal/vsock"
+	toolchain "github.com/vettid/vettid-vault/release"
 	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vms/pins"
 )
@@ -27,6 +28,7 @@ const (
 )
 
 func platform() (supervisor.Config, error) {
+	kernelRelease, kernelHardened := toolchain.Kernel()
 	dev, err := nsm.Open()
 	if err != nil {
 		return supervisor.Config{}, err
@@ -49,7 +51,10 @@ func platform() (supervisor.Config, error) {
 		RelayHosts: []string{relayHost()},
 		Harden:     true,
 		OwnKernel:  true,
-		NitroRoots: enclave.NitroRoots(),
+		// The enclave kernel release/eif-toolchain.lock pins (embedded).
+		KernelRelease:  kernelRelease,
+		KernelHardened: kernelHardened,
+		NitroRoots:     enclave.NitroRoots(),
 		// The hardware smoke test (docs/SMOKE.md) reaches the KMS endpoint
 		// of the test key's region; same roots, same forwarder.
 		SelftestEgress: func(region string) (*egress.Transport, error) {

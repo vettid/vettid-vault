@@ -76,6 +76,14 @@ type Config struct {
 	// /proc (hidepid=2). If any of them cannot be made, no vault process
 	// is started.
 	OwnKernel bool
+	// KernelRelease is the kernel release the build expects
+	// (/proc/sys/kernel/osrelease; the toolchain lock's kernel_release,
+	// embedded by package release). Empty: not checked.
+	KernelRelease string
+	// KernelHardened says that the build's kernel is the hardened one
+	// built from source (docs/KERNEL.md): the self-test then requires
+	// Yama, lockdown in confidentiality mode and no module support.
+	KernelHardened bool
 	// MaxVaults caps the vaults running at once (least recently active
 	// is locked first, §12.3); 0 = no cap.
 	MaxVaults int
@@ -130,6 +138,9 @@ type Supervisor struct {
 	// kernelSet: unprivileged bpf is off, every kernel setting of
 	// sysctls is made and /proc hides other users' processes (OwnKernel).
 	kernelSet atomic.Bool
+	// lockedDown: the kernel is locked down in confidentiality mode
+	// (checked with KernelHardened only).
+	lockedDown atomic.Bool
 	// uidNext counts the uids given to vault processes (takeUID).
 	uidNext atomic.Uint64
 	// unswept are the uids of ended vault processes whose sweep failed,
@@ -781,6 +792,15 @@ func (s *Supervisor) closeKernel() []string {
 		set = false
 	}
 	s.kernelSet.Store(set)
+	// The hardened kernel locks itself down at boot; if it reads
+	// otherwise, this is not the kernel the release pins.
+	if s.cfg.KernelHardened {
+		if err := checkLockdown(); err != nil {
+			notes = append(notes, "the kernel is not locked down, no vault process will be started: "+err.Error())
+		} else {
+			s.lockedDown.Store(true)
+		}
+	}
 	if err := closeNSM(); err != nil {
 		notes = append(notes, "the NSM is not closed to vault processes, the enclave will not serve vaults: "+err.Error())
 	} else {

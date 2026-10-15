@@ -1,0 +1,11 @@
+# The enclave kernel the EIF's blob set carries, for the enclave binary's
+# self-test (docs/KERNEL.md). The binary embeds this file (package
+# release), so it changes the binary only when the kernel changes.
+# scripts/lint_test.go ties it to release/eif-toolchain.lock:
+#   kernel_hardened=false: the lock's blobs come from AWS
+#     (blobs_url under https://github.com/aws/, blobs_version v<release>);
+#   kernel_hardened=true: the lock's blobs are vettid-vault's own build
+#     (a vettid-vault release URL, blobs_dir vettid-enclave-blobs/aarch64,
+#     kernel_release = release/kernel/kernel.lock's kernel_version).
+kernel_release=6.6.79
+kernel_hardened=false

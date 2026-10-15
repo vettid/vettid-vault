@@ -246,6 +246,11 @@ func (h *procHost) spawn(vaultID, userGUID string, enroll bool, extra ...string)
 	if h.s.cfg.OwnKernel && !h.s.kernelSet.Load() {
 		return nil, errSpawn
 	}
+	// Nor, on the hardened kernel, unless it is locked down
+	// (confidentiality).
+	if h.s.cfg.KernelHardened && !h.s.lockedDown.Load() {
+		return nil, errSpawn
+	}
 	// Nor while a previous process of the same vault left processes that
 	// the sweep could not end (sweepAfter): they are tried again first.
 	if !h.s.sweepPending(vaultID) {

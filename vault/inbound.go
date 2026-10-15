@@ -43,6 +43,7 @@ func (m *Manager) Start(ctx context.Context) error {
 		return ErrLocked
 	}
 	if m.started {
+		m.attStart(ctx) // a run loop after an earlier one ended
 		return nil
 	}
 	m.started = true
@@ -62,7 +63,7 @@ func (m *Manager) Start(ctx context.Context) error {
 	if err := m.persist(ctx, false); err != nil {
 		return err
 	}
-	m.attStart()     // finishes what a lock or crash interrupted, from the index (§10.5.1)
+	m.attStart(ctx)  // finishes what a lock or crash interrupted, from the index (§10.5.1)
 	m.reportAppKey() // a backup bit first recorded by this release (0.16.0)
 	m.drainOutbox(ctx)
 	return m.flushIfDirty(ctx)

@@ -118,12 +118,14 @@ func (m *Manager) attDropBlob(id string) {
 	}
 }
 
-// attStart starts the runner (Start, with the vault's lock held).
-func (m *Manager) attStart() {
+// attStart starts the runner (Start, with the vault's lock held). It
+// lives as long as ctx, the run loop's: a vault whose loop ended (a lock,
+// a shutdown) moves no blob.
+func (m *Manager) attStart(parent context.Context) {
 	if m.att != nil {
 		return
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(parent)
 	m.att = &attRunner{ctx: ctx, cancel: cancel, wake: make(chan struct{}, 1), running: map[string]bool{}, fetching: map[string]int{}}
 	go m.attLoop(m.att)
 }
@@ -147,6 +149,13 @@ func (m *Manager) attTick() time.Duration {
 func (m *Manager) attLoop(r *attRunner) {
 	t := time.NewTimer(0)
 	defer t.Stop()
+	defer func() {
+		m.mu.Lock()
+		if m.att == r {
+			m.att = nil // the run loop ended; a new one starts another runner
+		}
+		m.mu.Unlock()
+	}()
 	for {
 		select {
 		case <-r.ctx.Done():

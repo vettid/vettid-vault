@@ -225,7 +225,11 @@ func UnlockAlt(ctx context.Context, p AltUnlockParams) (*Manager, *AltUnlockOutc
 	if hdr.Deleting {
 		// A deletion was interrupted (§12.5): finish it, never open.
 		suite.Wipe(hdr.Pepper)
-		_ = EraseStored(ctx, p.Store, p.VaultID, hdr.UserGUID, nil, own.PCR0, "", "")
+		if EraseStored(ctx, p.Store, p.VaultID, hdr.UserGUID, nil, own.PCR0, "", "") == nil {
+			// §12.5 "Convergence" (0.32.0): reported deleted, so that the
+			// parent sweeps the attachment objects (VAULT-HOST-PROTOCOL P15).
+			out.Events = append(out.Events, lifecycle(p.Options, "deleted", p.VaultID, own.PCR0))
+		}
 		return nil, out.drop(ErrDeleted)
 	}
 	out.HeaderSeq = hdr.HeaderSeq

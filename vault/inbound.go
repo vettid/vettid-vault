@@ -58,9 +58,11 @@ func (m *Manager) Start(ctx context.Context) error {
 		}
 	}
 	m.ownerCheckTick(now) // past the deadline: held from the unlock on (§3.6.3)
+	m.attLateAtUnlock(m.attNow())
 	if err := m.persist(ctx, false); err != nil {
 		return err
 	}
+	m.attStart()     // finishes what a lock or crash interrupted, from the index (§10.5.1)
 	m.reportAppKey() // a backup bit first recorded by this release (0.16.0)
 	m.drainOutbox(ctx)
 	return m.flushIfDirty(ctx)
@@ -205,6 +207,9 @@ func (m *Manager) ProcessBatch(ctx context.Context, c Collector, msgs []Message)
 			return ErrSplitBrain
 		}
 	}
+	if len(msgs) < MaxBatch {
+		m.attDrained()
+	}
 	for _, id := range ephemeral {
 		_ = c.Ack(ctx, id)
 	}
@@ -249,6 +254,8 @@ func (m *Manager) handleMessage(ctx context.Context, msg Message, now time.Time)
 		return ackAfterFlush // relay msg_id dedupe (§8.2 layer 1)
 	}
 	m.st.SeenMsgIDs[msg.MsgID] = now
+	m.curJTI = msg.JTI // the deposit token of the message being handled
+	defer func() { m.curJTI = "" }()
 	sender, ok := relayauth.DecodeKey(msg.Sender)
 	if !ok {
 		m.audit(now, "bad_sender", "")
@@ -424,6 +431,23 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 		m.respondError(p, in, rkey, "unsupported_type", "", now)
 		return disp(eph)
 	}
+	if te.spec.Shape != nil && te.spec.Request && te.allows(p.Kind) && !te.spec.Shape(in.Body) {
+		// A shape checked before the credential and the hold (§10.5.1
+		// "Compatibility": message.attachment.get{} is bad_request whether
+		// or not the vault is held).
+		m.respondError(p, in, rkey, "bad_request", "", now)
+		return disp(eph)
+	}
+	handled := false
+	if in.Type == "message.send" {
+		// §10.5.1: every refusal of a message.send that names a blob deletes
+		// the blob, the refusals before its handler included.
+		defer func() {
+			if !handled {
+				m.attRefusedSendBody(in.Body)
+			}
+		}()
+	}
 	if !allowedWithoutCredential[in.Type] && !m.credentialReady() &&
 		!(p.Recovering && recoveryAllowed[in.Type] && m.credentialExists()) {
 		// §3.5.7: a vault without a credential is restricted.
@@ -450,6 +474,18 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 	}
 	s := &Session{m: m, peer: p, host: managerHost{m}, from: info(p), ctx: ctx, now: now, inner: in}
 	allowed := te.allows(p.Kind) && !(p.Recovering && !recoveryAllowed[in.Type])
+	if (p.Kind == KindAgent || p.Kind == KindDesktop) && !te.spec.DesktopApproval {
+		if af, ok := te.handler.(AppOnlyForms); ok && af.AppOnly(in.Type, in.Body) {
+			// A form only the app may send, whatever the sender's grants
+			// (message.send with an attachment, §10.5.1).
+			if te.spec.Request {
+				m.respondError(p, in, rkey, "forbidden", "", now)
+			} else {
+				m.audit(now, "forbidden_type", p.ID)
+			}
+			return disp(eph)
+		}
+	}
 	ask := false
 	if p.Kind == KindAgent && m.hasAccess(p, now) && (!allowed || te.spec.AgentPolicy) {
 		// LEASH hook (§6.8, §10.11): the agent's policy may allow an owner
@@ -503,11 +539,14 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 		}
 		return disp(eph)
 	}
+	handled = true
 	body, herr := te.handler.Handle(ctx, s, in)
 	m.afterHandle(now)
 	if te.spec.Request {
 		var he *HandlerError
 		switch {
+		case errors.Is(herr, ErrDeferred) && volatile:
+			// Answered later from memory (message.attachment.get, §10.5.1).
 		case herr == nil:
 			m.respond(p, in, rkey, body, now)
 		case errors.As(herr, &he):
@@ -624,6 +663,9 @@ func (m *Manager) resendCached(p *Peer, raw []byte) {
 
 // handleResponse matches a response to one of the vault's own requests.
 func (m *Manager) handleResponse(p *Peer, in *envelope.Inner, now time.Time) {
+	if p.Kind == KindConnection && m.attUnsupported(p, in, now) {
+		return // a peer without release A answered our attachment's deliver (§10.5.1)
+	}
 	peer, ok := m.requests[in.Re]
 	if !ok || peer != p.ID {
 		return // §8.1: a response matching no pending request is dropped

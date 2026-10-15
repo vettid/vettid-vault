@@ -107,7 +107,7 @@ func (m *Manager) notifyDevices(typ string, body json.RawMessage, except string,
 
 func (m *Manager) notifyDevicesWith(typ string, body json.RawMessage, except string, o SendOptions, now time.Time) {
 	for _, p := range m.ownerDevices() {
-		if p.ID != except {
+		if p.ID != except && (o.Kind == "" || o.Kind == p.Kind) {
 			m.sendWith(p, typ, body, o, now)
 		}
 	}
@@ -366,6 +366,7 @@ func (m *Manager) housekeeping(now time.Time) {
 	m.sendHeldAnswers(now) // §10.4.1: the neutral answers that are due
 	m.expireAccess(now)
 	m.ownerCheckTick(now)
+	m.attHousekeeping(m.attNow())
 	m.remintIssued(now)
 	m.pruneIssued(now)
 	m.pruneRetiredKEMs(now)

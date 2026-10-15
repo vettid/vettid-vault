@@ -10,6 +10,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"syscall"
 )
 
@@ -149,4 +151,26 @@ func (d *Dir) Delete(_ context.Context, key string, ifMatch Version) error {
 	}
 	op, _ := d.paths(key)
 	return os.Remove(op)
+}
+
+// List returns the keys of the objects whose key starts with prefix
+// (tests and tools; the enclave cannot list the store).
+func (d *Dir) List(prefix string) ([]string, error) {
+	var out []string
+	err := filepath.WalkDir(d.root, func(p string, e os.DirEntry, err error) error {
+		if err != nil || e.IsDir() || !strings.HasSuffix(p, ".obj") {
+			return err
+		}
+		rel, err := filepath.Rel(d.root, p)
+		if err != nil {
+			return err
+		}
+		k := strings.TrimSuffix(filepath.ToSlash(rel), ".obj")
+		if strings.HasPrefix(k, prefix) {
+			out = append(out, k)
+		}
+		return nil
+	})
+	sort.Strings(out)
+	return out, err
 }

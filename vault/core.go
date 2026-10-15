@@ -99,10 +99,14 @@ func (m *Manager) hStatus(_ context.Context, s *Session, _ *envelope.Inner) (jso
 		return strictjson.NewBuilder().String("vault_id", m.st.VaultID).Uint("state_seq", m.st.StateSeq).
 			Uint("header_seq", m.hdr.HeaderSeq).Bytes(), nil
 	}
-	return strictjson.NewBuilder().String("vault_id", m.st.VaultID).Uint("state_seq", m.st.StateSeq).
+	b := strictjson.NewBuilder().String("vault_id", m.st.VaultID).Uint("state_seq", m.st.StateSeq).
 		Uint("header_seq", m.hdr.HeaderSeq).Bool("provisional", m.hdr.Provisional).
 		Uint("devices", uint64(len(m.st.Devices))).Uint("connections", uint64(len(m.st.Connections))).
-		Raw("owner_check", m.ownerCheckStatus(s.peer, s.now)).Bytes(), nil
+		Raw("owner_check", m.ownerCheckStatus(s.peer, s.now))
+	if s.peer.Kind == KindApp || s.peer.Kind == KindDesktop {
+		b.Raw("attachments", m.attStatusJSON()) // §10.2 (0.32.0, release A)
+	}
+	return b.Bytes(), nil
 }
 
 func (m *Manager) hLock(_ context.Context, s *Session, _ *envelope.Inner) (json.RawMessage, error) {
@@ -449,9 +453,41 @@ func (m *Manager) hTokenIssued(_ context.Context, s *Session, in *envelope.Inner
 }
 
 func (m *Manager) hTokenRefresh(_ context.Context, s *Session, _ *envelope.Inner) (json.RawMessage, error) {
+	// §7.2 (0.32.0, release A): a connection whose standing token still
+	// has HolderRefreshBelow or more left asks after quota_exceeded. It is
+	// granted a fresh token at most once in 24 hours, and the old one is
+	// denylisted, so that a refresh never doubles what it may deposit.
+	// The token the request was deposited under (its collect jti) tells
+	// a quota refresh from one near the token's end.
+	quota := false
+	if s.peer.Kind == KindConnection && m.curJTI != "" {
+		for _, t := range m.st.Issued {
+			if t.JTI == m.curJTI && t.PeerID == s.peer.ID && t.Kind == TokStanding {
+				quota = t.Exp.Sub(s.now) >= HolderRefreshBelow
+			}
+		}
+	}
+	if quota {
+		a := m.st.attach()
+		if t, ok := a.Refreshed[s.peer.ID]; ok && s.now.Sub(t) < 24*time.Hour {
+			return nil, &HandlerError{Code: "too_soon", Body: strictjson.NewBuilder().
+				String("allowed_after", envelope.FormatTS(t.Add(24*time.Hour))).Bytes()}
+		}
+	}
 	tok, issued, err := m.mintStanding(s.peer, s.now, nil)
 	if err != nil {
 		return nil, NewError("relay_error", "")
+	}
+	if quota {
+		for i := range m.st.Issued {
+			t := &m.st.Issued[i]
+			if t.PeerID == s.peer.ID && t.Kind == TokStanding && !t.Denied {
+				t.Denied = true
+				m.queueRevoke("jti", t.JTI, s.now)
+			}
+		}
+		m.st.attach().Refreshed[s.peer.ID] = s.now
+		m.dirty = true
 	}
 	m.st.Issued = append(m.st.Issued, issued...)
 	return strictjson.NewBuilder().String("kind", TokStanding).String("token", tok).Bytes(), nil

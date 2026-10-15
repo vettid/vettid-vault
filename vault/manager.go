@@ -90,6 +90,17 @@ type Options struct {
 	Push PushGateway
 	// PushTiming overrides the wake rules' numbers (tests).
 	PushTiming *PushTiming
+	// Transfers is the instance's admission of blob transfers (the
+	// supervisor's, by memory, §10.5.1); nil: only the vault's own limit
+	// of attwire.VaultTransfers.
+	Transfers TransferGate
+	// AttachTick overrides the attachment runner's period (tests).
+	AttachTick time.Duration
+	// AttachClock, if set, is the clock of the attachment windows and
+	// backoffs (§10.5.1; tests move it while messages keep the real time).
+	AttachClock func() time.Time
+	// AttachLimits, if set, replaces release A's attachment limits (tests).
+	AttachLimits *AttachLimits
 }
 
 // LifecycleEvent is reported to the parent, which writes it to the vault
@@ -130,6 +141,12 @@ type Hooks struct {
 	// DropDeposit, if it returns true for an outbox deposit, drops it as if
 	// it were lost (fault injection for best-effort notices).
 	DropDeposit func(e *OutboxEntry) bool
+	// AttachStep, if it returns an error at a step of the attachment
+	// runner ("thumb": an object written, its flush not yet made;
+	// "prepared", "stored": the content's flush made, the blob not yet
+	// deleted), crashes the vault there (fault injection, §10.5.1 write
+	// order).
+	AttachStep func(step string) error
 }
 
 // Manager is one unlocked vault.
@@ -214,6 +231,10 @@ type Manager struct {
 	// one are ignored.
 	push    *pusher
 	pushGen uint64
+	// att is the attachment runner while the vault runs (§10.5.1).
+	att *attRunner
+	// curJTI is the deposit token's jti of the message being handled.
+	curJTI string
 }
 
 // unlocked counts the managers in this process that hold a DEK.
@@ -730,6 +751,7 @@ func (m *Manager) splitBrain() {
 // zeroize wipes the DEK and every key, and marks the manager locked.
 func (m *Manager) zeroize() {
 	m.locked = true
+	m.attStop()
 	if m.push != nil {
 		m.push.stop()
 		m.push = nil

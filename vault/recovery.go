@@ -160,7 +160,10 @@ func headerTx(ctx context.Context, p HeaderParams, fn func(h *Header, now time.T
 	}
 	if h.Deleting {
 		// A deletion was interrupted (§12.5): finish it.
-		_ = EraseStored(ctx, p.Store, p.VaultID, h.UserGUID, nil, p.Release.PCR0, "", "")
+		if EraseStored(ctx, p.Store, p.VaultID, h.UserGUID, nil, p.Release.PCR0, "", "") == nil && p.Lifecycle != nil {
+			// §12.5 "Convergence" (0.32.0): reported deleted (P15's sweep).
+			p.Lifecycle(lifecycle(p.Options, "deleted", p.VaultID, p.Release.PCR0))
+		}
 		return ErrMissing
 	}
 	keep, ferr := fn(h, now)

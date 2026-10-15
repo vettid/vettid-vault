@@ -116,6 +116,20 @@ jobs:
           echo "release=$release" >>"$GITHUB_OUTPUT"
           echo "publish=$publish" >>"$GITHUB_OUTPUT"
           echo "channel $channel, release $release, publish $publish"
+      - name: enclave kernel currency (a warning, not a block; docs/KERNEL.md)
+        continue-on-error: true
+        run: |
+          set +e
+          KERNEL_VERSION="$(sed -n 's/^kernel_release=//p' release/eif-toolchain.lock)" release/kernel/check-current.sh "$RUNNER_TEMP/kernel.md"
+          rc=$?
+          cat "$RUNNER_TEMP/kernel.md" >>"$GITHUB_STEP_SUMMARY"
+          case "$rc" in
+            11) echo "::warning::the enclave kernel's series is end of life" ;;
+            12) echo "::warning::the enclave kernel is more than 30 days behind its series' newest point release" ;;
+            0 | 10 | 13) ;;
+            *) echo "::warning::the enclave kernel check could not run" ;;
+          esac
+          exit 0
       - name: the release tag is signed (GitHub verified)
         if: github.event_name == 'push'
         env:

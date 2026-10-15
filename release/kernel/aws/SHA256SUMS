@@ -1,0 +1,10 @@
+72343e84be7058dd1bfaae4074afd53251f106046eabc94b82651b67d8bab62f  ./init/init.c
+5e08a6b2efb0621f5127aaf2fbf93ea94b63c28143cad5ccd50bce23477e8fca  ./kernel/0001-vsock-virtio-Remove-queued_replies-pushback-logic.patch
+b2863fac918fe57e9083ef434e8ac09a01ab97673f3d14c0afc1c017758ceb44  ./kernel/aarch64.cmdline
+30b77479d7fe4aa594eda1183b6a1194be546ed5a829de2672fa04957f656a8e  ./kernel/microvm-kernel-config-aarch64
+252525d367bf1d71824d35b8e125814f236ae22de64e3a88f1e56fabd06b488c  ./kernel/nsm.patch
+09e8a9bcec8067104652c168685ab0931e7868f9c8284b66f5ae6edae5f1130b  ./LICENSE
+98b567f7d28e0208550a9739db7eb5cc315fdde2760051eb3bb3edaf61f0bd76  ./linuxkit/0001-build-Allow-to-ad-a-directory-prefix-when-unpacking-.patch
+c6117b6496bbf2fe40db75595687ee3601e51d94ec3479320d4f7fb6dd5ad045  ./linuxkit/0002-output-Add-new-type-kernel-initrd-nogz.patch
+44d90716c98cd5b3542970a49666aa955fe0feb84a5caa76c9f169bd178fd52f  ./linuxkit/0003-Fix-output-image-duplicate-entries.patch
+d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287  ./NOTICE

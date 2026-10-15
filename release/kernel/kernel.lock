@@ -1,0 +1,53 @@
+# The inputs of the enclave kernel blob set built from source (docs/KERNEL.md).
+# release/kernel/build.sh reads every value from here; nothing else names a
+# version or a hash. Changing any line changes the blob set, and so every
+# PCR0 of an EIF built with it.
+#
+# KEY=VALUE lines:
+#
+# The kernel: the kernel.org tarball of a 6.6.y longterm point release.
+# build.sh checks the tarball's SHA-256 (also listed in kernel.org's
+# signed sha256sums.asc) and the developer's signature over the
+# uncompressed tar (linux-<version>.tar.sign) with gpgv against
+# keys/kernel-org-signers.asc, which must hold exactly the keys named in
+# kernel_signers (full fingerprints): the two stable release signers,
+# Greg Kroah-Hartman and Sasha Levin (both keys from kernel.org's Web Key
+# Directory and from its pgpkeys.git, same fingerprints).
+kernel_version=6.6.158
+kernel_url=https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.6.158.tar.xz
+kernel_sha256=9eb33173b0e04e898d431587c78c47ee6e19e3fdf2ea007323de82af14bb2a4f
+kernel_signers=647F28654894E3BD457199BE38DBBDC86092693E,E27E5D8A3403A2EF66873BBCDEA66FF797772CDC
+#
+# The toolchain: Nix in a container pinned by digest, evaluating nixpkgs
+# 24.05 pinned by hash (GCC 13.2.0, binutils 2.41, musl for init; the
+# same nixpkgs as aws-nitro-enclaves-sdk-bootstrap v6.6.79). Built
+# natively on aarch64 (not cross-compiled).
+nix_image=docker.io/nixos/nix:2.21.4@sha256:91b689f94a101aa67f95034dffd9a4858e85d0946f67c64dd65ed241644454b9
+nixpkgs_url=https://github.com/NixOS/nixpkgs/archive/refs/tags/24.05.tar.gz
+nixpkgs_sha256=1lr1h35prqkd1mkmzriwlpvxcb34kmhc9dnr48gkm8hh089hifmx
+#
+# The recipe's origin: the files under aws/ are copied unchanged from
+# aws-nitro-enclaves-sdk-bootstrap at this commit (aws/SHA256SUMS);
+# ours are config/, patches/ and the .nix files.
+aws_bootstrap_commit=f718dea60a9d9bb8b8682fd852ad793912f3c5db
+#
+# The toolchain closure's content: for each compiler, its Nix store path
+# and NAR hash (nix-store --query --hash). build.sh fetches these first
+# and stops if any differs; cache.nixos.org's signature is then not the
+# only thing vouching for the compiler. A source-built comparison
+# (KERNEL_NO_SUBSTITUTE=1) is compared with them, and its blob set must
+# equal the cached build's. toolchain_closure_sha256 covers the whole
+# build-time closure (build.sh, step 2): SHA-256 over the sorted
+# "path narHash" lines of every derivation output the blob set is built
+# with, except the blob set's own derivations.
+toolchain_closure_sha256=9c6abe4496ab6d7f907c6fcae28849457f829559460c8ef122c27e34ccfae5f0
+toolchain=gcc /nix/store/i9w3plvhpwk8x37i5dwqxlfp0knv2zcj-gcc-13.2.0 sha256:0mz7czj0zl6yvasp9mqvqkm52p74z3wmzp7jzh5df7hda0684sgq
+toolchain=binutils /nix/store/v71nlgkf8g6d36gac9r44pmlx54mdql3-binutils-2.41 sha256:1p1r2b5cym4k2bk391c61ld4d8v8m8w6h5sqbfx5r772m2br4ayz
+toolchain=muslGcc /nix/store/vp5iz0vfrybc20k1xnz160pl887qwvfg-aarch64-unknown-linux-musl-gcc-13.2.0 sha256:1jksg4r3nyf5438dshm81ladlf0jclkqrlqm42b4ah7s83g9wwyc
+toolchain=musl /nix/store/j0k9yx8yxnw5jhi6ckmbpra5mpdbf3v7-musl-static-aarch64-unknown-linux-musl-1.2.3 sha256:105953q8g2d7g800bap15d8zs5p28x3awsndyfs4aab1w9k9gg82
+toolchain=go /nix/store/c56g9s92qa47pq16zf9mqxr2xh0lq2wn-go-1.22.3 sha256:1l3l0vx2rs51l9hgyfwcb353f6c53hcnpbx4xmvzv27d75zpx4y7
+#
+# What the kernel says about its build (uname -v, /proc/version).
+build_user=vettid
+build_host=enclave-kernel
+arch=aarch64

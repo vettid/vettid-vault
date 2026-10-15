@@ -100,7 +100,7 @@ type VaultResult struct {
 	GID     int     `json:"gid"`
 	// UserNamespace is what happened when the process tried to start a
 	// process in a new user namespace: UserNamespaceRefused,
-	// UserNamespaceCreated or another error's text.
+	// UserNamespaceNotBuilt, UserNamespaceCreated or another error's text.
 	UserNamespace string `json:"user_namespace"`
 	// OtherProcesses counts the processes other than its own whose /proc
 	// entries the vault process can see (0 where /proc is mounted with
@@ -111,5 +111,14 @@ type VaultResult struct {
 // What a vault process's attempt at a user namespace came to.
 const (
 	UserNamespaceRefused = "refused: no user namespace may be created (ENOSPC)"
-	UserNamespaceCreated = "a user namespace was created"
+	// The enclave kernel built from source has no user namespaces at
+	// all (CONFIG_USER_NS=n, docs/KERNEL.md): clone answers EINVAL.
+	UserNamespaceNotBuilt = "refused: the kernel has no user namespaces (EINVAL)"
+	UserNamespaceCreated  = "a user namespace was created"
 )
+
+// UserNamespaceClosed says whether a vault process's attempt came to no
+// user namespace: refused by the limit, or not in the kernel at all.
+func UserNamespaceClosed(s string) bool {
+	return s == UserNamespaceRefused || s == UserNamespaceNotBuilt
+}

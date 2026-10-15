@@ -26,6 +26,8 @@ nitro_cli_version=1.5.0-0.amzn2023
 blobs_version=v6.6.79
 blobs_url=https://github.com/aws/aws-nitro-enclaves-sdk-bootstrap/releases/download/v6.6.79/enclaves-blobs.txz
 blobs_dir=enclaves-blobs/build-ARM64/aarch64
+# The kernel these blobs carry is named in release/enclave-kernel, which
+# the enclave binary embeds (scripts/lint_test.go keeps the two in step).
 #
 # sha256sum lines (paths inside the builder; the RPMs are fetched for
 # aarch64 from the pinned repository snapshot, the blobs archive from

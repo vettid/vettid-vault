@@ -28,6 +28,29 @@ func settings(t *testing.T, userNS, bpf string) {
 	userNSLimitPath, bpfDisabledPath = userNS, bpf
 	// No NSM device here: closing it fails and adds its note.
 	nsmPath = filepath.Join(t.TempDir(), "absent", "nsm")
+	fakeProcSys(t)
+}
+
+// fakeProcSys points the sysctls at a directory of the test holding
+// every setting with its kernel default, and io_uring_setup at a stub
+// that answers EPERM (as with io_uring_disabled 2). It returns the
+// directory.
+func fakeProcSys(t *testing.T) string {
+	t.Helper()
+	oldRoot, oldSetup := procSys, ioUringSetup
+	t.Cleanup(func() { procSys, ioUringSetup = oldRoot, oldSetup })
+	procSys = t.TempDir()
+	ioUringSetup = func() error { return syscall.EPERM }
+	for _, c := range sysctls {
+		p := filepath.Join(procSys, c.path)
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("1\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return procSys
 }
 
 // withNSMNote reports whether notes are kernel notes followed by the NSM's.
@@ -139,9 +162,17 @@ func TestSpawnNeedsClosedUserNamespaces(t *testing.T) {
 		t.Fatal("the program was started with the NSM open")
 	}
 	s.nsmClosed.Store(true)
+	// Nor while a kernel setting is not made.
+	if _, err := h.spawn("vault", "user", false); !errors.Is(err, errSpawn) {
+		t.Fatalf("spawn with a kernel setting not made: %v", err)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("the program was started with a kernel setting not made")
+	}
+	s.kernelSet.Store(true)
 	p, err := h.spawn("vault", "user", false)
 	if err != nil {
-		t.Fatalf("spawn with user namespaces and the NSM closed: %v", err)
+		t.Fatalf("spawn with user namespaces and the NSM closed and the settings made: %v", err)
 	}
 	p.mu.Lock()
 	p.stopping = true // ended by the test: nothing to report
@@ -158,6 +189,133 @@ func TestSpawnNeedsClosedUserNamespaces(t *testing.T) {
 	}
 	_ = p.cmd.Process.Kill()
 	<-p.exited
+}
+
+// TestSysctls: every setting is written and read back; a setting an
+// older kernel lacks is accepted (and reported as such), except where it
+// matters: a missing required file, a missing io_uring_disabled on a
+// kernel that has io_uring, a write that does not hold. Any failure
+// leaves kernelSet false, so that no vault process starts.
+func TestSysctls(t *testing.T) {
+	root := fakeProcSys(t)
+	statuses := func() map[string]sysctlStatus {
+		m := map[string]sysctlStatus{}
+		for _, st := range sysctlStatuses() {
+			m[st.check] = st
+		}
+		return m
+	}
+	if notes := makeSysctls(); len(notes) != 0 {
+		t.Fatalf("notes %v", notes)
+	}
+	want := map[string]string{
+		"kernel/io_uring_disabled": "2", "kernel/kptr_restrict": "2", "kernel/dmesg_restrict": "1", "kernel/perf_event_paranoid": "3",
+		"kernel/sysrq": "0", "kernel/kexec_load_disabled": "1", "kernel/modules_disabled": "1", "kernel/randomize_va_space": "2",
+		"vm/unprivileged_userfaultfd": "0", "dev/tty/legacy_tiocsti": "0", "fs/protected_symlinks": "1", "fs/protected_hardlinks": "1",
+		"fs/protected_fifos": "2", "fs/protected_regular": "2",
+	}
+	if len(sysctls) != len(want) {
+		t.Fatalf("%d settings, %d reviewed", len(sysctls), len(want))
+	}
+	for path, v := range want {
+		if got, _ := readSetting(filepath.Join(root, path)); got != v {
+			t.Errorf("%s: %q, want %s", path, got, v)
+		}
+	}
+	for name, st := range statuses() {
+		if !st.ok || !st.provable || st.detail == "" {
+			t.Errorf("%s: %+v", name, st)
+		}
+	}
+
+	// Settings an older kernel does not have: accepted, informational.
+	for _, path := range []string{"dev/tty/legacy_tiocsti", "vm/unprivileged_userfaultfd", "fs/protected_fifos", "fs/protected_regular",
+		"kernel/kexec_load_disabled", "kernel/modules_disabled", "kernel/sysrq", "kernel/perf_event_paranoid"} {
+		if err := os.Remove(filepath.Join(root, path)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if notes := makeSysctls(); len(notes) != 0 {
+		t.Fatalf("absent optional settings: notes %v", notes)
+	}
+	st := statuses()
+	for _, n := range []string{"kernel.legacy_tiocsti_off", "kernel.unprivileged_userfaultfd_off", "kernel.protected_fifos", "kernel.protected_regular",
+		"kernel.kexec_load_disabled", "kernel.modules_disabled", "kernel.sysrq_off", "kernel.perf_event_paranoid"} {
+		if !st[n].ok || st[n].provable || !strings.HasPrefix(st[n].detail, "absent: ") {
+			t.Errorf("%s: %+v", n, st[n])
+		}
+	}
+
+	// No io_uring_disabled: accepted only where the kernel has no
+	// io_uring (4.14), which is then a proof, not a note.
+	if err := os.Remove(filepath.Join(root, "kernel/io_uring_disabled")); err != nil {
+		t.Fatal(err)
+	}
+	ioUringSetup = func() error { return syscall.ENOSYS }
+	if notes := makeSysctls(); len(notes) != 0 {
+		t.Fatalf("no io_uring: notes %v", notes)
+	}
+	if st := statuses()["kernel.io_uring_off"]; !st.ok || !st.provable || !strings.Contains(st.detail, "no io_uring in this kernel") {
+		t.Errorf("no io_uring: %+v", st)
+	}
+	ioUringSetup = func() error { return syscall.EFAULT }
+	if notes := makeSysctls(); len(notes) != 1 || !strings.Contains(notes[0], "kernel.io_uring_off is not set, no vault process will be started") {
+		t.Fatalf("io_uring without the setting: notes %v", notes)
+	}
+	if st := statuses()["kernel.io_uring_off"]; st.ok || !st.provable {
+		t.Errorf("io_uring without the setting: %+v", st)
+	}
+
+	// io_uring_disabled reads 2 but the kernel still sets up a ring.
+	if err := os.WriteFile(filepath.Join(root, "kernel/io_uring_disabled"), []byte("2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if st := statuses()["kernel.io_uring_off"]; st.ok || !strings.Contains(st.detail, "io_uring_setup in the supervisor: bad address") {
+		t.Errorf("setting without effect: %+v", st)
+	}
+	ioUringSetup = func() error { return syscall.EPERM }
+
+	// A required setting that is missing, or does not hold when read
+	// back (/dev/null takes the write and reads back empty).
+	if err := os.Remove(filepath.Join(root, "kernel/kptr_restrict")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(os.DevNull, filepath.Join(root, "kernel/dmesg_restrict")+".tmp"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(root, "kernel/dmesg_restrict")+".tmp", filepath.Join(root, "kernel/dmesg_restrict")); err != nil {
+		t.Fatal(err)
+	}
+	notes := makeSysctls()
+	if len(notes) != 2 || !strings.Contains(notes[0], "kernel.kptr_restrict is not set") || !strings.Contains(notes[1], "kernel.dmesg_restrict is not set") {
+		t.Fatalf("notes %v", notes)
+	}
+	st = statuses()
+	for _, n := range []string{"kernel.kptr_restrict", "kernel.dmesg_restrict"} {
+		if st[n].ok || !st[n].provable {
+			t.Errorf("%s: %+v", n, st[n])
+		}
+	}
+
+	// closeKernel: kernelSet only when every setting and bpf are made.
+	ns, bpf := setting(t, "15000\n"), setting(t, "0\n")
+	settings(t, ns, bpf)
+	s := &Supervisor{cfg: Config{OwnKernel: true}}
+	if notes := s.closeKernel(); !withNSMNote(notes, 0) || !s.kernelSet.Load() {
+		t.Fatalf("all made: notes %v, set %v", notes, s.kernelSet.Load())
+	}
+	if err := os.Remove(filepath.Join(procSys, "kernel/randomize_va_space")); err != nil {
+		t.Fatal(err)
+	}
+	s = &Supervisor{cfg: Config{OwnKernel: true}}
+	if notes := s.closeKernel(); !withNSMNote(notes, 1) || s.kernelSet.Load() || !s.userNSClosed.Load() {
+		t.Fatalf("one missing: notes %v, set %v", notes, s.kernelSet.Load())
+	}
+	settings(t, setting(t, "15000\n"), filepath.Join(t.TempDir(), "absent", "bpf"))
+	s = &Supervisor{cfg: Config{OwnKernel: true}}
+	if notes := s.closeKernel(); !withNSMNote(notes, 1) || s.kernelSet.Load() || !strings.Contains(notes[0], "bpf is not closed") {
+		t.Fatalf("bpf: notes %v, set %v", notes, s.kernelSet.Load())
+	}
 }
 
 const userNSChildEnv = "SUPERVISOR_USERNS_CHILD"

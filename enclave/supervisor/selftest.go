@@ -164,6 +164,12 @@ func (s *Supervisor) selftestProcess(r *selftest.Report) {
 	r.Add("kernel.user_namespaces_off", err == nil, s.cfg.OwnKernel, "max_user_namespaces: "+orZero(err))
 	err = unprivilegedBPFDisabled()
 	r.Add("kernel.unprivileged_bpf_off", err == nil, s.cfg.OwnKernel, "unprivileged_bpf_disabled: "+orSet(err))
+	// The settings of sysctls: required on the enclave's own kernel where
+	// the kernel has the setting (or, for io_uring, where its absence is
+	// shown by the call); informational where an older kernel lacks it.
+	for _, st := range sysctlStatuses() {
+		r.Add(st.check, st.ok, s.cfg.OwnKernel && st.provable, st.detail)
+	}
 	err = nsmClosedCheck()
 	r.Add("supervisor.nsm_closed", err == nil, s.cfg.OwnKernel, "root only: "+orYes(err))
 	r.Add("supervisor.pid1", true, false, pid1())

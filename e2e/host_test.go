@@ -101,9 +101,13 @@ func tlsFront(t *testing.T, h http.Handler, h2 bool, name string) string {
 
 func newHostStack(t *testing.T) *hostStack {
 	hs := &hostStack{t: t, objs: parenttest.NewObjects(), queues: parenttest.NewQueues(), tables: parenttest.NewTables(), resolve: map[string]string{}}
-	// Vault processes are the dev enclave binary re-executed (D4).
+	// Vault processes are the dev enclave binary re-executed (D4), built
+	// static as a release is (CGO_ENABLED=0), so that they run under the
+	// release's system calls: no glibc thread start.
 	hs.encBin = filepath.Join(t.TempDir(), "vault-enclave")
-	if out, err := exec.Command("go", "build", "-tags", "devenclave", "-o", hs.encBin, "../cmd/vault-enclave").CombinedOutput(); err != nil {
+	build := exec.Command("go", "build", "-tags", "devenclave", "-o", hs.encBin, "../cmd/vault-enclave")
+	build.Env = append(os.Environ(), "CGO_ENABLED=0")
+	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build: %v\n%s", err, out)
 	}
 	hs.w = enclavetest.NewWorld(time.Now, hostRelay)
@@ -712,7 +716,11 @@ func TestSelftest(t *testing.T) {
 	// required: a development supervisor leaves the machine's settings
 	// alone.
 	kernel := map[string]bool{"kernel.user_namespaces_off": false, "kernel.unprivileged_bpf_off": false, "vault_process.user_namespace_refused": false,
-		"supervisor.nsm_closed": false}
+		"supervisor.nsm_closed": false, "kernel.io_uring_off": false, "kernel.kptr_restrict": false, "kernel.dmesg_restrict": false,
+		"kernel.perf_event_paranoid": false, "kernel.sysrq_off": false, "kernel.kexec_load_disabled": false, "kernel.modules_disabled": false,
+		"kernel.randomize_va_space": false, "kernel.unprivileged_userfaultfd_off": false, "kernel.legacy_tiocsti_off": false,
+		"kernel.protected_symlinks": false, "kernel.protected_hardlinks": false, "kernel.protected_fifos": false, "kernel.protected_regular": false,
+		"vault_process.seccomp_allow_list": false}
 	for _, c := range rep.Checks {
 		if _, ok := kernel[c.Name]; ok {
 			kernel[c.Name] = true

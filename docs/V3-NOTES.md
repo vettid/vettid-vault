@@ -154,34 +154,45 @@ supervisor's count does not move while vaults are unlocked.
 - `PR_SET_DUMPABLE 0` (set in the process before it reads anything) and
   `RLIMIT_CORE 0`; non-dumpable processes cannot be traced or have their
   `/proc/<pid>/mem`/`environ` read, even by their own uid (tested);
-- seccomp filter (`internal/seccomp`, ~60 lines, `PR_SET_NO_NEW_PRIVS`,
-  TSYNC): `socket`, `socketpair`, `ptrace`, `process_vm_readv/writev` →
-  EPERM, foreign architecture → kill. Justification: AF_VSOCK is not
-  namespaced, so without it a vault process could open its own connection
-  to the parent's control port; the process needs no socket beyond its
-  inherited channel. Release builds exit if the filter cannot be
-  installed. The filter also refuses
-  `io_uring_setup/enter/register` (io_uring creates sockets without
-  `socket`, and the pinned kernel, 6.6.79, has io_uring), `pidfd_getfd`,
-  `bpf`, `userfaultfd` and `perf_event_open`, none of which the Go
-  runtime or the vault's code calls, and on amd64 every x32 syscall number (an x32 call reports the
-  native architecture but has its own numbers, so the list would not
-  match it) and the x32-only numbers 512 to 547, which kernels before
-  5.4 ran for 64-bit processes too. Refusing `bpf` does not remove
-  classic BPF: `seccomp` and `SO_ATTACH_FILTER` on the channel still
-  take such filters. `Install` fails when the kernel could not put the
-  filter on every thread. The self-test proves each refusal with a
-  probe whose arguments do nothing: without the filter the pinned kernel
-  answers every probe with something other than EPERM (the sockets and
-  `process_vm_readv/writev` with zero vectors succeed; `io_uring_setup`
-  and `perf_event_open` with no parameters EFAULT; `io_uring_enter`,
-  `io_uring_register` and `pidfd_getfd` on a descriptor that is not
-  open EBADF; `ptrace` attaching to process 0 ESRCH; a `bpf` map lookup
-  and `userfaultfd` with every flag bit, `UFFD_USER_MODE_ONLY` among
-  them, EINVAL), so EPERM can only be the filter's (docs/SMOKE.md lists
-  the arguments; the vault process also reports what it got before the
-  filter). On this kernel `unprivileged_bpf_disabled` refuses only map
-  creation and program loading, not the lookup the probe makes;
+- seccomp filter (`internal/seccomp`, `PR_SET_NO_NEW_PRIVS`, TSYNC), an
+  **allow list**: 49 system calls on arm64 and on amd64 (the same names;
+  arm64 has no legacy calls), 7 of them only with certain arguments:
+  `clone` only with `CLONE_THREAD` and no namespace flag (threads, no
+  new process), `kill` and `tgkill` only to the process itself (its pid
+  is in the filter), `mmap` and `mprotect` never with `PROT_EXEC`,
+  `prctl` only `PR_GET_DUMPABLE` and `PR_SET_VMA` (the Go runtime names
+  its memory), `prlimit64` only reading its own limits. The list is
+  what vault processes were measured to make under their filter (the
+  e2e suite, the self-test and the capacity run with every vault
+  process under `strace -f`, a static build as in a release) plus the
+  calls the Go runtime makes only on rare paths (`restart_syscall`, the
+  vDSO clock's fallback, GOMAXPROCS updates, `munmap`, file `fstat`/
+  `lseek`) and the two glibc thread-start calls of cgo builds (`rseq`,
+  `set_robust_list`; tests and development binaries). Every other call
+  answers **EPERM**: a refused call fails visibly (an error the vault
+  reports, a failed self-test check), it does not kill a member's vault
+  as `SECCOMP_RET_KILL` would. `clone3`, `io_uring_setup` and every
+  number above Linux 6.6's last call (`map_shadow_stack`, 453) answer
+  **ENOSYS**: callers that probe a call fall back on ENOSYS (glibc
+  replaces `clone3` with `clone`), a kernel newer than 6.6 then looks
+  like 6.6 to a vault process, and for `io_uring_setup` the self-test
+  can tell the filter's answer from `kernel.io_uring_disabled`'s
+  (EPERM). The Go runtime's and standard library's probes are handled:
+  `pidfd_open` refused, `os` falls back to plain pids; `getrandom`,
+  `madvise` and the `PR_SET_VMA` naming are allowed; starting a program
+  fails with EPERM. Foreign architecture → kill; on amd64 every x32
+  number and the x32-only numbers 512 to 547 → EPERM. Justification:
+  AF_VSOCK is not namespaced, so without the filter a vault process
+  could open its own connection to the parent's control port; and a
+  list of what is allowed, unlike a list of what is refused, does not
+  grow with each kernel (between 4.14 and 6.6 more than twenty calls
+  appeared, among them io_uring, pidfds, the new mount API, landlock
+  and memfd_secret). Release builds exit if the filter cannot be
+  installed; `Install` fails when the kernel could not put the filter
+  on every thread. The self-test proves the filter on hardware with 46
+  probes (`vault_process.seccomp_refuses_<call>`, docs/SMOKE.md), each
+  also made before the filter so that the report shows the kernel's own
+  answer differs;
 - no inherited descriptor but the channel (fd 3; Go opens everything
   close-on-exec), stdin/stdout/stderr on `/dev/null`, working directory
   `/`, environment `GOMEMLIMIT`, `GOMAXPROCS=2`, `GOTRACEBACK=none` only;
@@ -201,7 +212,31 @@ vaults); Yama `ptrace_scope` 3 where the kernel has it.
 **The enclave's kernel (release builds only, `Config.OwnKernel`):**
 before it reaches the parent the supervisor writes `0` to
 `/proc/sys/user/max_user_namespaces` and `1` to
-`/proc/sys/kernel/unprivileged_bpf_disabled`, and reads both back.
+`/proc/sys/kernel/unprivileged_bpf_disabled`, then the settings of
+`enclave/supervisor/sysctl_linux.go`, and reads each back:
+
+| Setting | Value | Where a kernel lacks it |
+|---|---|---|
+| `kernel.io_uring_disabled` | 2 (no ring for anyone, root included) | 6.6+; accepted only where `io_uring_setup` answers ENOSYS (4.14: no io_uring at all) |
+| `kernel.kptr_restrict` | 2 | always present |
+| `kernel.dmesg_restrict` | 1 | always present |
+| `kernel.perf_event_paranoid` | 3 (2 upstream: the strictest it knows) | absent without perf events |
+| `kernel.sysrq` | 0 | absent without magic SysRq |
+| `kernel.kexec_load_disabled` | 1 (one-way) | absent without kexec |
+| `kernel.modules_disabled` | 1 (one-way; init loaded the NSM driver before) | absent without modules |
+| `kernel.randomize_va_space` | 2 | always present |
+| `vm.unprivileged_userfaultfd` | 0 | 5.2+ (4.14: absent; the filter refuses userfaultfd) |
+| `dev.tty.legacy_tiocsti` | 0 | 6.2+ (4.14: absent; no terminal, the filter refuses ioctl) |
+| `fs.protected_symlinks`, `fs.protected_hardlinks` | 1, 1 | always present |
+| `fs.protected_fifos`, `fs.protected_regular` | 2, 2 | 4.19+ (4.14: absent) |
+
+A missing file is accepted only as the table says (the self-test then
+reports the check as informational, `absent: <why>`); any other failure
+(the write refused, a different value read back, a required file
+missing, io_uring present without the setting) is fail-secure: the
+supervisor logs it, reports it as a hardening note and starts no vault
+process. `kernel.yama.ptrace_scope` stays best effort (3 where the
+kernel has Yama; AWS's arm64 config has none).
 
 - The pinned kernel (6.6.79) is built with user namespaces. In one, an
   unprivileged process is root with every capability over the
@@ -224,14 +259,11 @@ before it reaches the parent the supervisor writes `0` to
   unless asked to.
 - If the limit cannot be set or does not read back as 0, the supervisor
   logs an error and starts no vault process (every enroll and unlock
-  fails). A failed bpf setting is logged and reported only: the calls it
-  closes are also none a vault process makes.
-- Development binaries and tests never write either file (they run on
-  a machine they share). The self-test checks both settings from the
-  supervisor and the refusal from inside a vault process
-  (docs/SMOKE.md).
-- `perf_event_paranoid` is left alone: its default, 2, is the strictest
-  value this kernel knows.
+  fails). The same holds for the bpf setting and every setting above.
+- Development binaries and tests never write these files (they run on
+  a machine they share). The self-test checks every setting from the
+  supervisor (`kernel.<setting>`) and the user namespace refusal from
+  inside a vault process (docs/SMOKE.md).
 
 **Locks:** owner request, memory pressure (least recently active vault
 while available memory is under 15 %), the vault cap, a lost lease, a lost
@@ -242,7 +274,7 @@ reports it to the parent (`Stopped split_brain`), which releases the
 lease if it is still its own.
 
 **Not done (future):** a per-handler CPU-time limit (RLIMIT_CPU would
-count the whole process lifetime); a seccomp allow list; a read-only,
+count the whole process lifetime); a read-only,
 empty root for vault processes (the enclave's rootfs is already
 read-only in practice, and they own no files).
 

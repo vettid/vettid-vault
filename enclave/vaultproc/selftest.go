@@ -12,6 +12,7 @@ import (
 	"maps"
 	"net"
 	"os"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -42,15 +43,24 @@ func SelftestMain() {
 	if err != nil {
 		os.Exit(ExitChannel)
 	}
-	// The kernel's own answers to the denied calls, before the filter is
-	// installed: reported (informational) so that a run shows each refusal
-	// below is the filter's and not the kernel's.
-	unfiltered := seccomp.Probe()
+	// Before the filter: the user namespace attempt (the filter refuses
+	// clone without CLONE_THREAD, so it would hide the kernel's answer),
+	// and the kernel's own answers to the calls the filter refuses,
+	// reported (informational) so that a run shows each refusal below is
+	// the filter's and not the kernel's.
+	pre := preFilter{userNS: TryUserNamespace(), unfiltered: seccomp.Probe()}
 	serr := seccomp.Install()
-	os.Exit(serveSelftest(c, serr, unfiltered))
+	os.Exit(serveSelftest(c, serr, pre))
 }
 
-func serveSelftest(c net.Conn, seccompErr error, unfiltered map[string]error) int {
+// preFilter is what a self-test vault process observed before it
+// installed its filter.
+type preFilter struct {
+	userNS     string           // TryUserNamespace's result
+	unfiltered map[string]error // seccomp.Probe's results
+}
+
+func serveSelftest(c net.Conn, seccompErr error, pre preFilter) int {
 	done := make(chan struct{})
 	var conn *hostproto.Conn
 	// conn is set before any frame is handled: the reader starts inside
@@ -65,7 +75,7 @@ func serveSelftest(c net.Conn, seccompErr error, unfiltered map[string]error) in
 		case f.Kind != vaultipc.KindSelftest || len(f.Fields) != 1:
 			return hostproto.Strings(hostproto.StatusInvalid)
 		}
-		r := runSelftest(ctx, channel{c: conn}, string(f.Fields[0]), seccompErr, unfiltered)
+		r := runSelftest(ctx, channel{c: conn}, string(f.Fields[0]), seccompErr, pre)
 		b, _ := json.Marshal(r)
 		return [][]byte{[]byte(hostproto.StatusOK), b}
 	}, nil)
@@ -96,26 +106,37 @@ func procField(path, field string) uint64 {
 	return 0
 }
 
-func runSelftest(ctx context.Context, ch channel, keyARN string, seccompErr error, unfiltered map[string]error) *selftest.VaultResult {
+func runSelftest(ctx context.Context, ch channel, keyARN string, seccompErr error, pre preFilter) *selftest.VaultResult {
 	res := &selftest.VaultResult{}
 	add := func(name string, ok, req bool, detail string) {
 		res.Checks = append(res.Checks, selftest.Check{Name: name, OK: ok, Required: req, Detail: detail})
 	}
 	res.UID, res.GID = os.Getuid(), os.Getgid()
-	res.UserNamespace = TryUserNamespace()
+	res.UserNamespace = pre.userNS
+	if res.UserNamespace == "" { // a test without the pre-filter steps
+		res.UserNamespace = TryUserNamespace()
+	}
 	d, err := Dumpable()
 	add("vault_process.not_dumpable", err == nil && d == 0, true, fmt.Sprintf("dumpable=%d", d))
 	add("vault_process.seccomp_installed", seccompErr == nil, true, errString(seccompErr))
-	// Every call the filter denies is tried (harmlessly): each must be
-	// refused by the filter, whatever the kernel would have answered.
+	add("vault_process.seccomp_allow_list", seccompErr == nil, false,
+		fmt.Sprintf("%d system calls allowed (%s); every other call EPERM, ENOSYS for clone3, io_uring_setup and calls after Linux 6.6", seccomp.Allowed(), runtime.GOARCH))
+	// Calls the filter refuses are tried (harmlessly): each must get the
+	// filter's answer (EPERM; ENOSYS for clone3 and io_uring_setup),
+	// whatever the kernel would have answered.
 	probes := seccomp.Probe()
 	for _, name := range slices.Sorted(maps.Keys(probes)) {
-		add("vault_process.seccomp_refuses_"+name, seccomp.Refused(probes[name]), true, errString(probes[name]))
+		add("vault_process.seccomp_refuses_"+name, seccomp.Refused(name, probes[name]), true, errString(probes[name]))
 	}
 	// What the kernel answered the same calls before the filter: OK when
-	// that was not EPERM.
-	for _, name := range slices.Sorted(maps.Keys(unfiltered)) {
-		add("vault_process.seccomp_unfiltered_"+name, !seccomp.Refused(unfiltered[name]), false, errString(unfiltered[name]))
+	// that differs from the filter's answer, which shows that the answer
+	// above is the filter's. (For io_uring_setup the filter answers
+	// ENOSYS precisely so that this holds where kernel.io_uring_disabled
+	// is 2 and the kernel answers EPERM; on 4.14, which has neither
+	// io_uring nor clone3 nor the calls added since, the kernel's ENOSYS
+	// equals the filter's for io_uring_setup and clone3.)
+	for _, name := range slices.Sorted(maps.Keys(pre.unfiltered)) {
+		add("vault_process.seccomp_unfiltered_"+name, !seccomp.Refused(name, pre.unfiltered[name]), false, errString(pre.unfiltered[name]))
 	}
 	for name, v := range limits() {
 		add("vault_process.rlimit_"+name, v.ok, true, v.detail)

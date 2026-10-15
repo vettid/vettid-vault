@@ -16,7 +16,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
-	"fmt"
+	"strconv"
 	"strings"
 
 	"golang.org/x/crypto/argon2"
@@ -342,7 +342,10 @@ func (n *Names) mac(kind string, g, i uint64) string {
 }
 
 // GenPrefix is recovery/v1/<vault_tag>/g<g, 16 hex>/.
-func (n *Names) GenPrefix(g uint64) string { return fmt.Sprintf("%sg%016x/", n.Prefix(), g) }
+func (n *Names) GenPrefix(g uint64) string {
+	h := strconv.FormatUint(g, 16)
+	return n.Prefix() + "g" + strings.Repeat("0", 16-len(h)) + h + "/"
+}
 
 // Present is the present marker's one key.
 func (n *Names) Present() string { return n.Prefix() + "present-" + n.mac(KindPresent, 0, 0) }
@@ -360,7 +363,11 @@ func (n *Names) Success(g uint64, k int) string { return n.numbered(KindSuccess,
 func (n *Names) Close(g uint64) string { return n.GenPrefix(g) + "c-" + n.mac(KindClose, g, 0) }
 
 func (n *Names) numbered(kind string, g uint64, k int) string {
-	return fmt.Sprintf("%s%s%02d-%s", n.GenPrefix(g), kind, k, n.mac(kind, g, uint64(k)))
+	nn := strconv.Itoa(k)
+	if k < 10 {
+		nn = "0" + nn
+	}
+	return n.GenPrefix(g) + kind + nn + "-" + n.mac(kind, g, uint64(k))
 }
 
 // Wipe zeroizes the counter key copy.

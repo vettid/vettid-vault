@@ -26,9 +26,19 @@ func TestCheckCommand(t *testing.T) {
 		code := run(append([]string{"check"}, args...), &out, &errb)
 		return code, out.String() + errb.String()
 	}
-	stagingFile := "../../enclave/releasecfg/staging.json"
-	b, err := os.ReadFile(stagingFile)
+	b, err := os.ReadFile("../../enclave/releasecfg/staging.json")
 	if err != nil {
+		t.Fatal(err)
+	}
+	// Release R's request key and minimum app version are open until they
+	// exist (VAULT-RELEASES 0.1.28): the committed file with test values
+	// in their place.
+	b = bytes.Replace(b, []byte(`"TODO-recovery-request-key-id"`), []byte(`"test-key-1"`), 1)
+	b = bytes.Replace(b, []byte(`"TODO-recovery-request-key-spki"`),
+		[]byte(`"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEok8gqeC5VcGx4KL+B5fL7UgENBXf+59RigkR0TZ0NqjiWM2VK6V1+paNoqRTBx7nXXN3L/2ehjsTb31GGVkEAw=="`), 1)
+	b = bytes.Replace(b, []byte(`"android_min_version_code": 0`), []byte(`"android_min_version_code": 100`), 1)
+	stagingFile := filepath.Join(t.TempDir(), "staging.json")
+	if err := os.WriteFile(stagingFile, b, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	staging := string(b)
@@ -56,7 +66,8 @@ func TestCheckCommand(t *testing.T) {
 		t.Fatalf("staging after a pre-0.26.0 release: %d %s", code, out)
 	}
 	// A list that dropped a name is refused, with the name.
-	i, j := strings.Index(staging, `"features": [`), strings.LastIndex(staging, `]`)
+	i := strings.Index(staging, `"features": [`)
+	j := i + strings.Index(staging[i:], `]`)
 	dropped := write("dropped.json", staging[:i]+`"features": ["actions", "calls", "intro", "leash", "location", "presence"`+staging[j:])
 	if code, out := check("staging", dropped); code != 0 {
 		t.Fatalf("rule 1 alone refused a shorter list: %s", out)

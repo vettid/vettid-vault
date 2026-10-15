@@ -12,7 +12,12 @@
 # They are public by design and are regenerated deterministically by
 # `go generate ./vms/vectors`. Also allowlisted: the example ULID of
 # VAULT-MESSAGING §5.3, which tests use as a dummy id (for instance as a
-# `secret_id`, which the generic rule mistakes for a key).
+# `secret_id`, which the generic rule mistakes for a key). Release R
+# (VAULT-MESSAGING 0.33.0 §16): the unlock keys and secret checks of
+# unlock.json and the hash of recovery.json's test PIN and password, all
+# derived from the fixed test inputs 32 x 0x32 (pepper), 32 x 0x42 and
+# 32 x 0x45 (unlock secrets) and PIN 123456; and two test passwords of
+# testdata/passwords/verdicts.json.
 [extend]
 useDefault = true
 
@@ -30,6 +35,13 @@ regexes = [
   '''01JB2Z6V9K3M4N5P6Q7R8S9T0V''',
   '''MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEZpI3VGYrivhlu/KoncHtr3sZZHVE''',
   '''740f4707bebcf74f9b7c25d48e3358945f6aa01da5ddb387462c7eaf61bb78ad''',
+  '''f01975109b4575d994ade44aeae5d667eb56f14b610d1004694a707e9702e624''',
+  '''89f9fa1389f2e7ecfd0521ab27b39207d867a8acd3f99cd23ba19b3c357ccfde''',
+  '''dd657b8c27f970d60c271e531e9477aeef25da911a5e5041be3fc7b886044802''',
+  '''c12589e53da8326b90b0e362e09f83d1ec315e22936c6069decaa686d7a01ef3''',
+  '''6286862e0e08397dc6b79b2b39f3e37ea03fd8a21ca6c1d09bf33fe9d89e5452''',
+  '''QWERTY123456''',
+  '''violet-Kestrel-91-moss''',
 ]
 
 # Release R test vectors (VAULT-MESSAGING 0.33.0 §16, vettid-vault #96):

@@ -196,8 +196,16 @@ func (m *Manager) endAccess(ctx context.Context, p *Peer, notify bool, reason st
 	}
 }
 
-// hold keeps a request for an owner app's approval (§6.8).
-func (m *Manager) hold(p *Peer, in *envelope.Inner, key string, now time.Time) {
+// hold keeps a request for an owner app's approval (§6.8). A volatile
+// request (§8.2) is held like any other: its id is seen while it waits, so
+// a retransmission then is a duplicate, and forgotten when it is answered
+// (heldKey), so that a later one is executed again; no answer to it is
+// cached, errors included.
+func (m *Manager) hold(p *Peer, in *envelope.Inner, key string, volatile bool, now time.Time) {
+	rkey := key
+	if volatile {
+		rkey = volatileKey
+	}
 	n := 0
 	for _, h := range m.st.Held {
 		if h.DeviceID == p.ID {
@@ -205,15 +213,18 @@ func (m *Manager) hold(p *Peer, in *envelope.Inner, key string, now time.Time) {
 		}
 	}
 	if n >= MaxHeldPerDevice {
-		m.respondErrorBody(p, in, key, "limit", "", limitBody("held_approvals", MaxHeldPerDevice, -1), now)
+		m.respondErrorBody(p, in, rkey, "limit", "", limitBody("held_approvals", MaxHeldPerDevice, -1), now)
 		return
 	}
 	c := *in
 	c.Seq = 0 // kept without the session's seq, like cached responses
 	raw, err := c.Marshal(envelope.ModeSealed)
 	if err != nil {
-		m.respondError(p, in, key, "internal", "", now)
+		m.respondError(p, in, rkey, "internal", "", now)
 		return
+	}
+	if volatile {
+		m.st.SeenInner[key] = now
 	}
 	h := &HeldRequest{ID: m.newID(now), DeviceID: p.ID, Key: key, Inner: raw, Created: now, Expires: now.Add(ApprovalTTL)}
 	m.st.Held[h.ID] = h
@@ -233,7 +244,18 @@ func (m *Manager) answerHeld(h *HeldRequest, code string, now time.Time) {
 	if p == nil || err != nil {
 		return
 	}
-	m.respondError(p, in, h.Key, code, "", now)
+	m.respondError(p, in, m.heldKey(h, in), code, "", now)
+}
+
+// heldKey is the key a held request's answer is cached under: its own, or
+// for a volatile request (§8.2) none, and its id is forgotten so that a
+// retransmission is executed again.
+func (m *Manager) heldKey(h *HeldRequest, in *envelope.Inner) string {
+	if te := m.registry[in.Type]; te != nil && te.spec.Volatile && te.spec.Request {
+		delete(m.st.SeenInner, h.Key)
+		return volatileKey
+	}
+	return h.Key
 }
 
 // hApprovalDecide: an app approves or denies a held request. An approved
@@ -280,6 +302,7 @@ func (m *Manager) runHeld(ctx context.Context, h *HeldRequest, now time.Time) st
 	}
 	code := ""
 	te := m.registry[in.Type]
+	key := m.heldKey(h, in)
 	switch {
 	case te == nil:
 		code = "unsupported_type"
@@ -298,26 +321,20 @@ func (m *Manager) runHeld(ctx context.Context, h *HeldRequest, now time.Time) st
 		code = "forbidden" // no grant covers it any more (§6.8, §10.11)
 	}
 	if code != "" {
-		m.respondError(p, in, h.Key, code, "", now)
+		m.respondError(p, in, key, code, "", now)
 		return code
 	}
 	body, herr := te.handler.Handle(ctx, s, in)
 	var he *HandlerError
 	switch {
-	case herr == nil && te.spec.Volatile:
-		// §8.2: never cached. Forgetting the id lets a retransmission
-		// be executed again, as for any volatile request.
-		delete(m.st.SeenInner, h.Key)
-		m.respondVolatile(p, in, body, now)
-		return "ok"
 	case herr == nil:
-		m.respond(p, in, h.Key, body, now)
+		m.respond(p, in, key, body, now)
 		return "ok"
 	case errors.As(herr, &he):
-		m.respondErrorBody(p, in, h.Key, he.Code, he.Message, he.Body, now)
+		m.respondErrorBody(p, in, key, he.Code, he.Message, he.Body, now)
 		return he.Code
 	default:
-		m.respondError(p, in, h.Key, "internal", "", now)
+		m.respondError(p, in, key, "internal", "", now)
 		return "internal"
 	}
 }

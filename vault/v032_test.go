@@ -10,6 +10,7 @@ import (
 
 	"github.com/vettid/vettid-relay/relayauth"
 
+	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/envelope"
 )
 
@@ -151,5 +152,159 @@ func TestVolatileHeldAndAgents(t *testing.T) {
 	f.sendAs(f.app, "approval.decide", `{"approval_id":"`+bodyStr(t, ap, "approval_id")+`","approve":true}`)
 	if r := find(f.inbox(f.app, f.agent)["agent1"], reply(id)); r == nil || r.Status != envelope.StatusOK || f.cached(id) {
 		t.Fatalf("agent's approved answer: %+v", r)
+	}
+}
+
+// §8.2: no answer to a volatile request is cached, errors included. A
+// request refused once and then held under the same id (an agent's policy
+// changed from deny to ask) is never answered from a cache: one answer
+// while it waits would contradict the answer after the approval.
+func TestVolatileErrorsNotCached(t *testing.T) {
+	f := newOCFixture(t)
+	big := &bigFeature{}
+	f.m.addFeature(big)
+	pol := &policyType{decision: AgentDeny}
+	f.m.addFeature(pol)
+	id := f.sendAs(f.agent, "test.bigv", `{"n":10}`)
+	if r := find(f.inbox(f.agent)["agent1"], reply(id)); errCode(r) != "forbidden" || f.cached(id) {
+		t.Fatalf("refused: %+v cached %v", r, f.cached(id))
+	}
+	if _, seen := f.m.st.SeenInner["agent1|"+id]; seen {
+		t.Fatal("refused volatile request remembered")
+	}
+	pol.decision = AgentAsk
+	f.sendID(f.agent, id, "test.bigv", `{"n":10}`)
+	in := f.inbox(f.app, f.agent)
+	ap := find(in["dev1"], ofType("approval.pending"))
+	if ap == nil || find(in["agent1"], reply(id)) != nil {
+		t.Fatal("retransmission not held, or answered")
+	}
+	f.sendID(f.agent, id, "test.bigv", `{"n":10}`)
+	if r := find(f.inbox(f.agent)["agent1"], reply(id)); r != nil || len(f.m.st.Held) != 1 {
+		t.Fatalf("retransmission while held answered: %+v", r)
+	}
+	f.sendAs(f.app, "approval.decide", `{"approval_id":"`+bodyStr(t, ap, "approval_id")+`","approve":true}`)
+	var answers []*envelope.Inner
+	for _, r := range f.inbox(f.app, f.agent)["agent1"] {
+		if r.Re == id {
+			answers = append(answers, r)
+		}
+	}
+	if len(answers) != 1 || answers[0].Status != envelope.StatusOK || f.cached(id) {
+		t.Fatalf("answers after approval: %d", len(answers))
+	}
+
+	// Denied: answered denied, not cached, the id forgotten, so a
+	// retransmission is executed again (held again).
+	id = f.sendAs(f.agent, "test.bigv", `{"n":10}`)
+	ap = find(f.inbox(f.app, f.agent)["dev1"], ofType("approval.pending"))
+	f.sendAs(f.app, "approval.decide", `{"approval_id":"`+bodyStr(t, ap, "approval_id")+`","approve":false}`)
+	if r := find(f.inbox(f.app, f.agent)["agent1"], reply(id)); errCode(r) != "denied" || f.cached(id) {
+		t.Fatalf("denied: %+v cached %v", r, f.cached(id))
+	}
+	f.sendID(f.agent, id, "test.bigv", `{"n":10}`)
+	if ap = find(f.inbox(f.app, f.agent)["dev1"], ofType("approval.pending")); ap == nil {
+		t.Fatal("retransmission after a denial not executed again")
+	}
+
+	// Timed out: approval_timeout, not cached, the id forgotten.
+	for _, h := range f.m.st.Held {
+		h.Expires = time.Now().Add(-time.Second)
+	}
+	f.sendAs(f.app, "vault.status", `{}`) // housekeeping runs before the batch
+	if r := find(f.inbox(f.app, f.agent)["agent1"], reply(id)); errCode(r) != "approval_timeout" || f.cached(id) {
+		t.Fatalf("timed out: %+v cached %v", r, f.cached(id))
+	}
+	if _, seen := f.m.st.SeenInner["agent1|"+id]; seen || len(f.m.st.Held) != 0 {
+		t.Fatal("timed-out volatile request remembered")
+	}
+
+	// The held-approvals limit: answered, not cached, not remembered.
+	pol.decision = AgentAllow
+	for range MaxHeldPerDevice {
+		f.sendAs(f.desk, "test.bigv", `{"n":10}`)
+	}
+	f.inbox(f.app, f.desk)
+	id = f.sendAs(f.desk, "test.bigv", `{"n":10}`)
+	if r := find(f.inbox(f.desk)["desk1"], reply(id)); errCode(r) != "limit" || f.cached(id) {
+		t.Fatalf("limit: %+v cached %v", r, f.cached(id))
+	}
+	if _, seen := f.m.st.SeenInner["desk1|"+id]; seen {
+		t.Fatal("volatile request refused by the limit remembered")
+	}
+}
+
+// §8.1: a response cached by a release before 0.32.0 that cannot be sealed
+// (a message.list page of that release, cached for 24 hours) is answered
+// response_too_large when the request is retransmitted, not dropped again.
+func TestResendCachedTooLarge(t *testing.T) {
+	d := newDevFixture(t)
+	big := &bigFeature{}
+	d.m.addFeature(big)
+	app := d.self()
+	id, _ := envelope.NewULID(time.Now())
+	rid, _ := envelope.NewULID(time.Now())
+	old := &envelope.Inner{ID: rid, TS: time.Now(), Type: "test.bigv", Re: id, Status: envelope.StatusOK,
+		Body: json.RawMessage(`{"v":"` + strings.Repeat("a", 300000) + `"}`)}
+	raw, err := old.Marshal(envelope.ModeSealed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := "dev1|" + id
+	d.withLock(func(m *Manager) {
+		m.st.SeenInner[key] = time.Now()
+		m.st.Responses[key] = CachedResponse{Inner: raw, Expires: time.Now().Add(ResponseRetention)}
+	})
+	d.sendID(app, id, "test.bigv", `{"n":10}`)
+	if r := find(d.inbox(app)["dev1"], reply(id)); errCode(r) != ErrResponseTooLarge || big.calls != 0 {
+		t.Fatalf("old cached answer: %+v (calls %d)", r, big.calls)
+	}
+}
+
+// §8.1: the bound is checked with the widest seq, so that a response
+// that fits now also fits when sealed again for a retransmission later in
+// the epoch: one that would fit at seq 1 but not at the largest seq is
+// answered response_too_large.
+func TestResponseTooLargeAtMaxSeq(t *testing.T) {
+	d := newDevFixture(t)
+	big := &bigFeature{}
+	d.m.addFeature(big)
+	app := d.self()
+	// The largest body that fits at seq 1, with ids and ts of their fixed
+	// lengths, as the vault builds the answer.
+	id, _ := envelope.NewULID(time.Now())
+	size := func(n int, seq uint64) int {
+		in := &envelope.Inner{ID: id, TS: time.Now(), Seq: seq, Type: "test.big", Re: id, Status: envelope.StatusOK,
+			Body: json.RawMessage(`{"v":"` + strings.Repeat("a", n) + `"}`)}
+		j, err := in.Marshal(envelope.ModeSession)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(j)
+	}
+	fits1 := func(n int) bool { _, err := envelope.PaddedLen(size(n, 1)); return err == nil }
+	lo, hi := 200000, envelope.MaxPadded // fits1(lo), !fits1(hi)
+	for hi-lo > 1 {
+		if mid := (lo + hi) / 2; fits1(mid) {
+			lo = mid
+		} else {
+			hi = mid
+		}
+	}
+	n := lo
+	if _, err := envelope.PaddedLen(size(n, 1)); err != nil {
+		t.Fatal("search")
+	}
+	if _, err := envelope.PaddedLen(size(n, strictjson.MaxSafeInteger)); err == nil {
+		t.Fatal("fits at the largest seq too")
+	}
+	rid := d.sendAs(app, "test.big", `{"n":`+fmt.Sprint(n)+`}`)
+	if r := find(d.inbox(app)["dev1"], reply(rid)); errCode(r) != ErrResponseTooLarge {
+		t.Fatalf("fits at seq 1 only: %+v", errCode(r))
+	}
+	// 16 bytes fewer fit at every seq.
+	rid = d.sendAs(app, "test.big", `{"n":`+fmt.Sprint(n-16)+`}`)
+	if r := find(d.inbox(app)["dev1"], reply(rid)); r == nil || r.Status != envelope.StatusOK {
+		t.Fatalf("fits at every seq: %+v", errCode(r))
 	}
 }

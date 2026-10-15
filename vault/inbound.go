@@ -405,6 +405,13 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 			m.st.SeenInner[key] = now
 		}
 	}
+	// rkey is the key the answers below are cached under: none for a
+	// volatile request, errors included (§8.2), so that no answer to its id
+	// is ever resent from a cache.
+	rkey := key
+	if volatile {
+		rkey = volatileKey
+	}
 	if !eph {
 		p.LastActiveAt = now.UTC().Truncate(time.Minute) // listings (§10.3, §10.4)
 	}
@@ -413,14 +420,14 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 		return disp(eph)
 	}
 	if te == nil {
-		m.respondError(p, in, key, "unsupported_type", "", now)
+		m.respondError(p, in, rkey, "unsupported_type", "", now)
 		return disp(eph)
 	}
 	if !allowedWithoutCredential[in.Type] && !m.credentialReady() &&
 		!(p.Recovering && recoveryAllowed[in.Type] && m.credentialExists()) {
 		// §3.5.7: a vault without a credential is restricted.
 		if te.spec.Request {
-			m.respondError(p, in, key, "credential_required", "", now)
+			m.respondError(p, in, rkey, "credential_required", "", now)
 		} else {
 			m.audit(now, "credential_required", p.ID)
 		}
@@ -433,7 +440,7 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 		// allow list. A recovering app keeps its own set (§11.11.5).
 		if st := m.ownerCheckState(now); st != OwnerCheckOK && !m.holdAllows(p, in.Type, st) {
 			if te.spec.Request {
-				m.respondError(p, in, key, "owner_check_required", "", now)
+				m.respondError(p, in, rkey, "owner_check_required", "", now)
 			} else {
 				m.audit(now, "owner_check", p.ID)
 			}
@@ -458,7 +465,7 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 	}
 	if !allowed {
 		if te.spec.Request {
-			m.respondError(p, in, key, "forbidden", "", now)
+			m.respondError(p, in, rkey, "forbidden", "", now)
 		} else {
 			m.audit(now, "forbidden_type", p.ID)
 		}
@@ -467,7 +474,7 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 	if !accessExempt[in.Type] && !m.hasAccess(p, now) {
 		// §6.8: a desktop or agent acts only within an access session.
 		if te.spec.Request {
-			m.respondError(p, in, key, "session_required", "", now)
+			m.respondError(p, in, rkey, "session_required", "", now)
 		} else {
 			m.audit(now, "session_required", p.ID)
 		}
@@ -478,7 +485,7 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 			in.Type == "settings.set" && namesOwnerCheck(in.Body) { // §3.6.2, §3.6.7
 			// A form only an app may send (§10.7, §10.12): refused at once,
 			// never held for an approval it could not pass.
-			m.respondError(p, in, key, "forbidden", "", now)
+			m.respondError(p, in, rkey, "forbidden", "", now)
 			return disp(eph)
 		}
 		// A read-only form (a dry run, §10.7 0.21.0) changes nothing: no
@@ -489,13 +496,7 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 	}
 	if ask {
 		if te.spec.Request && !eph {
-			if volatile {
-				// Held like any request: a retransmission while it waits
-				// is a duplicate. Approved, it is answered volatile and
-				// forgotten (runHeld), so a later one is executed again.
-				m.st.SeenInner[key] = now
-			}
-			m.hold(p, in, key, now)
+			m.hold(p, in, key, volatile, now)
 		} else {
 			m.audit(now, "approval_required", p.ID)
 		}
@@ -506,14 +507,12 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 	if te.spec.Request {
 		var he *HandlerError
 		switch {
-		case herr == nil && volatile:
-			m.respondVolatile(p, in, body, now)
 		case herr == nil:
-			m.respond(p, in, key, body, now)
+			m.respond(p, in, rkey, body, now)
 		case errors.As(herr, &he):
-			m.respondErrorBody(p, in, key, he.Code, he.Message, he.Body, now)
+			m.respondErrorBody(p, in, rkey, he.Code, he.Message, he.Body, now)
 		default:
-			m.respondError(p, in, key, "internal", "", now)
+			m.respondError(p, in, rkey, "internal", "", now)
 		}
 	}
 	m.afterRespond(now)
@@ -536,33 +535,11 @@ func (m *Manager) respond(p *Peer, req *envelope.Inner, key string, body json.Ra
 	m.sendResponse(p, req, key, &envelope.Inner{Type: req.Type, Re: req.ID, Status: envelope.StatusOK, Body: body}, now)
 }
 
-// respondVolatile sends a response that is never cached and never in
-// vault state (§8.2): one carrying secret values, or a large read. A
-// response that cannot be sealed within §5.5's bound is replaced by the
-// error response_too_large (§8.1), sent the same way.
-func (m *Manager) respondVolatile(p *Peer, req *envelope.Inner, body json.RawMessage, now time.Time) {
-	if body == nil {
-		body = json.RawMessage(`{}`)
-	}
-	id, err := envelope.NewULID(now)
-	if err != nil {
-		return
-	}
-	out := &envelope.Inner{ID: id, TS: now, Type: req.Type, Re: req.ID, Status: envelope.StatusOK, Body: body}
-	kr := m.sessions[p.ID]
-	if kr == nil || kr.Current() == nil {
-		return
-	}
-	raw, err := kr.Current().Seal(out)
-	if errors.Is(err, envelope.ErrTooLarge) {
-		raw, err = kr.Current().Seal(tooLarge(out))
-	}
-	if err != nil {
-		return
-	}
-	m.volatile = append(m.volatile, &OutboxEntry{ID: id, Op: OpDeposit, PeerID: p.ID, RelayURL: p.Relay.URL,
-		Mailbox: p.Relay.Mailbox, Payload: raw, BestEffort: true, Created: now})
-}
+// volatileKey is the response key of an answer to a volatile request
+// (§8.2): every answer to it, an error too, is never cached and never in
+// vault state (not in the outbox either); it is deposited from memory
+// after the batch's flush, and lost if that deposit fails.
+const volatileKey = ""
 
 // ErrResponseTooLarge is the error code of a response that could not be
 // sealed within §5.5's bound (§8.1, §10.1; 0.32.0).
@@ -595,9 +572,22 @@ func (m *Manager) sendResponse(p *Peer, req *envelope.Inner, key string, out *en
 	out.ID, out.TS = id, now
 	// §8.1 (0.32.0): a response is never silence. One that cannot be
 	// sealed within §5.5's bound is replaced by response_too_large, which
-	// is cached and sent instead.
+	// is cached and sent instead (sent only, for a volatile request).
 	if !m.fits(out) {
 		out = tooLarge(out)
+	}
+	if key == volatileKey {
+		kr := m.sessions[p.ID]
+		if kr == nil || kr.Current() == nil {
+			return
+		}
+		raw, err := kr.Current().Seal(out)
+		if err != nil {
+			return
+		}
+		m.volatile = append(m.volatile, &OutboxEntry{ID: id, Op: OpDeposit, PeerID: p.ID, RelayURL: p.Relay.URL,
+			Mailbox: p.Relay.Mailbox, Payload: raw, BestEffort: true, Created: now})
+		return
 	}
 	if j, err := out.Marshal(envelope.ModeSealed); err == nil { // cached without seq
 		m.st.Responses[key] = CachedResponse{Inner: j, Expires: now.Add(ResponseRetention)}

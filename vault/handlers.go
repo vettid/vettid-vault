@@ -43,10 +43,11 @@ type TypeSpec struct {
 	// to vault state (§8.2): responses that would carry secret values in
 	// the clear, and (0.32.0) large reads that change no state, such as
 	// message.list and message.get. The response is deposited from memory
-	// only (lost on a crash), and a retransmission is executed again. A
-	// request held for an approval is kept, and its answer after the
-	// approval is volatile too. Only for types whose sole side effects are
-	// audit and feed entries.
+	// only (lost on a crash), and a retransmission is executed again. No
+	// answer to such a request is cached, errors included. A request held
+	// for an approval is kept (a retransmission while it waits is a
+	// duplicate), and its answer is volatile too. Only for types whose sole
+	// side effects are audit and feed entries.
 	Volatile bool
 	// DesktopApproval requests from a desktop are held until an owner app
 	// approves them (§6.8 step-up). Apps are never held.

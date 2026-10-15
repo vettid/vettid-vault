@@ -37,7 +37,7 @@ func TestSelftestRequestQueuedBeforeStart(t *testing.T) {
 		}
 		vc := &queuedConn{Conn: b, r: io.MultiReader(bytes.NewReader(req), b)}
 		done := make(chan int, 1)
-		go func() { done <- serveSelftest(vc, nil, nil) }()
+		go func() { done <- serveSelftest(vc, nil, preFilter{}) }()
 		a.SetDeadline(time.Now().Add(5 * time.Second))
 		f, err := hostproto.ReadFrame(a)
 		if err != nil || f.Kind != hostproto.KindReply || f.ID != 1 || len(f.Fields) != 2 || string(f.Fields[0]) != hostproto.StatusOK {

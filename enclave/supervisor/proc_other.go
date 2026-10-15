@@ -31,7 +31,20 @@ func closeUserNamespaces() error     { return errors.New("not Linux") }
 func userNamespacesClosed() error    { return errors.New("not Linux") }
 func disableUnprivilegedBPF() error  { return errors.New("not Linux") }
 func unprivilegedBPFDisabled() error { return errors.New("not Linux") }
+func bpfSettingAbsent() bool         { return false }
 
 func supervisorDumpable() (int, error) { return -1, errors.New("not Linux") }
 
 func selfCPUMicros() int64 { return 0 }
+
+func makeSysctls() []string { return []string{"kernel settings: not Linux"} }
+
+type sysctlStatus struct {
+	check, detail string
+	ok, provable  bool
+}
+
+func sysctlStatuses() []sysctlStatus { return nil }
+
+func hideProcesses() error   { return errors.New("not Linux") }
+func processesHidden() error { return errors.New("not Linux") }

@@ -12,4 +12,7 @@ func Probe() map[string]error { return map[string]error{"unsupported": ErrUnsupp
 func Names() []string { return []string{"unsupported"} }
 
 // Refused is always false here.
-func Refused(error) bool { return false }
+func Refused(string, error) bool { return false }
+
+// Allowed is 0 here: there is no filter.
+func Allowed() int { return 0 }

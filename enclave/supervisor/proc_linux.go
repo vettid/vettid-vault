@@ -317,9 +317,40 @@ func userNamespacesClosed() error {
 	return nil
 }
 
+// bpfCall makes a bpf call that does nothing (a lookup in no map) and
+// returns its error (a variable for the tests): ENOSYS where the kernel
+// is built without the bpf system call.
+var bpfCall = func() error {
+	_, _, errno := unix.Syscall(unix.SYS_BPF, unix.BPF_MAP_LOOKUP_ELEM, 0, 0)
+	if errno == 0 {
+		return nil
+	}
+	return errno
+}
+
+// bpfSettingAbsent reports whether the kernel has no
+// unprivileged_bpf_disabled (built without the bpf system call).
+func bpfSettingAbsent() bool {
+	_, err := os.Stat(bpfDisabledPath)
+	return errors.Is(err, fs.ErrNotExist)
+}
+
+// bpfAbsent accepts a missing setting only where the kernel has no bpf
+// call at all, which the call itself shows.
+func bpfAbsent() error {
+	if err := bpfCall(); !errors.Is(err, unix.ENOSYS) {
+		return fmt.Errorf("unprivileged_bpf_disabled is absent but bpf is there (bpf: %v)", err)
+	}
+	return nil
+}
+
 // disableUnprivilegedBPF closes the bpf call to unprivileged processes
-// and reads the setting back.
+// and reads the setting back. A kernel without the bpf call has no such
+// setting, and nothing to close.
 func disableUnprivilegedBPF() error {
+	if bpfSettingAbsent() {
+		return bpfAbsent()
+	}
 	if err := os.WriteFile(bpfDisabledPath, []byte("1\n"), 0); err != nil {
 		return err
 	}
@@ -327,6 +358,9 @@ func disableUnprivilegedBPF() error {
 }
 
 func unprivilegedBPFDisabled() error {
+	if bpfSettingAbsent() {
+		return bpfAbsent()
+	}
 	v, err := readSetting(bpfDisabledPath)
 	if err != nil {
 		return err

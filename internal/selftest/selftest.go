@@ -102,6 +102,10 @@ type VaultResult struct {
 	// process in a new user namespace: UserNamespaceRefused,
 	// UserNamespaceCreated or another error's text.
 	UserNamespace string `json:"user_namespace"`
+	// OtherProcesses counts the processes other than its own whose /proc
+	// entries the vault process can see (0 where /proc is mounted with
+	// hidepid=2); -1 if /proc could not be read.
+	OtherProcesses int `json:"other_processes"`
 }
 
 // What a vault process's attempt at a user namespace came to.

@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"runtime/debug"
 	"slices"
@@ -41,16 +43,14 @@ func TestMain(m *testing.M) {
 		childProbe()
 	case "tsync":
 		childTsync()
-	case "exec":
-		childExec()
-	case "after-exec":
-		childAfterExec()
+	case "goprobes":
+		childGoProbes()
 	case "work":
-		childWork(program(eperm), false)
+		childWork(eperm, enosys, false)
 	case "work-kill":
-		childWork(program(unix.SECCOMP_RET_KILL_PROCESS), false)
+		childWork(unix.SECCOMP_RET_KILL_PROCESS, enosys, false)
 	case "work-kill-denied":
-		childWork(program(unix.SECCOMP_RET_KILL_PROCESS), true)
+		childWork(unix.SECCOMP_RET_KILL_PROCESS, enosys, true)
 	}
 	os.Exit(90)
 }
@@ -80,7 +80,7 @@ func report(p map[string]error) result {
 	r := result{}
 	for name, err := range p {
 		switch {
-		case Refused(err):
+		case Refused(name, err):
 			r[name] = "refused"
 		default:
 			r[name] = err.Error()
@@ -135,8 +135,21 @@ func childProbe() {
 	close(start)
 	out["earlier_thread"] = report(<-old)
 	onNewThread(func() { out["later_thread"] = report(Probe()) })
+	// The filter's own prctl rule refuses PR_GET_NO_NEW_PRIVS and
+	// PR_GET_SECCOMP: /proc tells.
+	st, _ := os.ReadFile("/proc/self/status")
+	out["process"] = result{"no_new_privs": statusField(st, "NoNewPrivs"), "seccomp_mode": statusField(st, "Seccomp")}
 	emit(out)
 	os.Exit(0)
+}
+
+func statusField(st []byte, name string) string {
+	for _, l := range strings.Split(string(st), "\n") {
+		if v, ok := strings.CutPrefix(l, name+":"); ok {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
 }
 
 // TestFilter: under the filter every denied call is refused with EPERM,
@@ -157,54 +170,103 @@ func TestFilter(t *testing.T) {
 		}
 	}
 	// Without the filter this kernel must answer every probe with
-	// something else than EPERM: only then does "refused" show the filter.
-	// (A machine whose kernel refuses one of the calls by itself, io_uring
-	// switched off by sysctl for one, fails here: the probes prove nothing
-	// on it.)
+	// something else than the filter's answer: only then does "refused"
+	// show the filter. (io_uring_setup is answered ENOSYS by the filter,
+	// so that this holds also where kernel.io_uring_disabled is 2 and
+	// the kernel itself answers EPERM.)
 	for _, n := range Names() {
 		t.Logf("without the filter: %-26s %s", n, got["before"][n])
 		if a, ok := got["before"][n]; !ok || a == "refused" {
 			t.Errorf("without the filter %s answers %q", n, a)
 		}
 	}
+	// The filter is in filter mode with no_new_privs. (The filter's
+	// survival across execve is moot: execve is refused.)
+	if p := got["process"]; p["no_new_privs"] != "1" || p["seccomp_mode"] != fmt.Sprint(unix.SECCOMP_MODE_FILTER) {
+		t.Errorf("process: %v", p)
+	}
 }
 
-func childExec() {
+// childGoProbes: under the filter, what the Go runtime and the standard
+// library probe or try is answered in a way they handle: starting a
+// program fails with an error (pidfd_open refused, then clone without
+// CLONE_THREAD refused), finding this process works (os falls back from
+// pidfds), random bytes come, a process signal to itself (signal 0)
+// goes through; and the process lives on.
+func childGoProbes() {
 	if err := Install(); err != nil {
 		os.Exit(exitInstall)
 	}
-	env := append(slices.DeleteFunc(os.Environ(), func(s string) bool { return strings.HasPrefix(s, childEnv+"=") }), childEnv+"=after-exec")
-	_ = syscall.Exec("/proc/self/exe", os.Args[:1], env)
-	os.Exit(exitWork)
-}
-
-func childAfterExec() {
-	nnp, _ := unix.PrctlRetInt(unix.PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0)
-	mode, _ := unix.PrctlRetInt(unix.PR_GET_SECCOMP, 0, 0, 0, 0)
-	emit(map[string]any{"probes": report(Probe()), "no_new_privs": nnp, "seccomp_mode": mode})
+	out := map[string]string{}
+	err := exec.Command("/proc/self/exe").Run()
+	out["start_process"] = fmt.Sprint(err)
+	if p, err := os.FindProcess(os.Getpid()); err != nil {
+		out["find_process"] = err.Error()
+	} else {
+		out["find_process"] = fmt.Sprint(p.Signal(syscall.Signal(0)))
+	}
+	b := make([]byte, 32)
+	_, err = rand.Read(b)
+	out["random"] = fmt.Sprint(err)
+	out["kill_self"] = fmt.Sprint(unix.Kill(os.Getpid(), 0))
+	out["tgkill_self"] = fmt.Sprint(unix.Tgkill(os.Getpid(), unix.Gettid(), 0))
+	out["kill_other"] = fmt.Sprint(unix.Kill(os.Getppid(), 0))
+	_, err = unix.PrctlRetInt(unix.PR_GET_DUMPABLE, 0, 0, 0, 0)
+	out["prctl_get_dumpable"] = fmt.Sprint(err)
+	var l unix.Rlimit
+	out["getrlimit"] = fmt.Sprint(unix.Getrlimit(unix.RLIMIT_NOFILE, &l))
+	out["prlimit_read"] = fmt.Sprint(unix.Prlimit(0, unix.RLIMIT_NOFILE, nil, &l))
+	out["prlimit_set"] = fmt.Sprint(unix.Prlimit(0, unix.RLIMIT_NOFILE, &l, nil))
+	m, err := unix.Mmap(-1, 0, 4096, unix.PROT_READ|unix.PROT_WRITE, unix.MAP_PRIVATE|unix.MAP_ANON)
+	out["mmap"] = fmt.Sprint(err)
+	if err == nil {
+		out["mprotect_none"] = fmt.Sprint(unix.Mprotect(m, unix.PROT_NONE))
+		out["mprotect_exec"] = fmt.Sprint(unix.Mprotect(m, unix.PROT_READ|unix.PROT_EXEC))
+		_ = unix.Munmap(m)
+	}
+	_, err = unix.Mmap(-1, 0, 4096, unix.PROT_READ|unix.PROT_EXEC, unix.MAP_PRIVATE|unix.MAP_ANON)
+	out["mmap_exec"] = fmt.Sprint(err)
+	_, _, errno := unix.Syscall(lastKnown+1, 0, 0, 0)
+	out["after_6_6"] = errno.Error()
+	_, err = os.ReadFile("/proc/self/status")
+	out["read_file"] = fmt.Sprint(err)
+	_, err = os.OpenFile("/proc/self/mem", os.O_RDWR, 0)
+	out["open_self_mem_rw"] = fmt.Sprint(err)
+	_, err = os.Create(filepath.Join(os.Getenv("SECCOMP_TMP"), "created"))
+	out["create_file"] = fmt.Sprint(err)
+	emit(out)
 	os.Exit(0)
 }
 
-// TestFilterSurvivesExec: a program the process executes runs under the
-// same filter and with no_new_privs.
-func TestFilterSurvivesExec(t *testing.T) {
-	cmd, out := child(t, "exec")
+// TestGoProbes: refused calls fail visibly with errors the caller
+// handles, and the calls with argument conditions pass exactly when
+// their arguments qualify.
+func TestGoProbes(t *testing.T) {
+	cmd, out := child(t, "goprobes")
+	dir := t.TempDir()
+	cmd.Env = append(cmd.Env, "SECCOMP_TMP="+dir)
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("child: %v\n%s", err, out)
 	}
-	var got struct {
-		Probes      result `json:"probes"`
-		NoNewPrivs  int    `json:"no_new_privs"`
-		SeccompMode int    `json:"seccomp_mode"`
-	}
+	var got map[string]string
 	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
 		t.Fatalf("%v: %s", err, out)
 	}
-	if bad := got.Probes.notRefused(); len(bad) != 0 {
-		t.Errorf("after exec: not refused: %s", strings.Join(bad, "; "))
+	ok := "<nil>"
+	want := map[string]string{
+		"start_process": unix.EPERM.Error(), "find_process": ok, "random": ok, "kill_self": ok, "tgkill_self": ok,
+		"kill_other": unix.EPERM.Error(), "prctl_get_dumpable": ok, "getrlimit": ok, "prlimit_read": ok,
+		"prlimit_set": unix.EPERM.Error(), "mmap": ok, "mprotect_none": ok, "mprotect_exec": unix.EPERM.Error(),
+		"mmap_exec": unix.EPERM.Error(), "after_6_6": unix.ENOSYS.Error(),
+		"read_file": ok, "open_self_mem_rw": unix.EPERM.Error(), "create_file": unix.EPERM.Error(),
 	}
-	if got.NoNewPrivs != 1 || got.SeccompMode != unix.SECCOMP_MODE_FILTER {
-		t.Errorf("after exec: no_new_privs %d, seccomp mode %d", got.NoNewPrivs, got.SeccompMode)
+	for k, w := range want {
+		if !strings.Contains(got[k], w) || (w == ok && got[k] != ok) {
+			t.Errorf("%s: %q, want %q", k, got[k], w)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "created")); err == nil {
+		t.Error("a file was created under the filter")
 	}
 }
 
@@ -217,7 +279,7 @@ func childTsync() {
 		if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
 			os.Exit(exitWork)
 		}
-		f := []unix.SockFilter{stmt(unix.BPF_RET|unix.BPF_K, unix.SECCOMP_RET_ALLOW)}
+		f := []unix.SockFilter{{Code: ret, K: unix.SECCOMP_RET_ALLOW}}
 		prog := unix.SockFprog{Len: 1, Filter: &f[0]}
 		if _, _, errno := unix.Syscall(unix.SYS_SECCOMP, unix.SECCOMP_SET_MODE_FILTER, 0, uintptr(unsafe.Pointer(&prog))); errno != 0 {
 			os.Exit(exitWork)
@@ -261,17 +323,26 @@ func TestInstallFailsWithoutAllThreads(t *testing.T) {
 	}
 }
 
-// TestRefused: only EPERM counts as the filter's answer.
+// TestRefused: only the filter's answer for the probe counts: EPERM,
+// ENOSYS for clone3 and io_uring_setup.
 func TestRefused(t *testing.T) {
 	for _, err := range []error{unix.EPERM, fmt.Errorf("probe: %w", unix.EPERM)} {
-		if !Refused(err) {
+		if !Refused("socket_inet", err) {
 			t.Errorf("%v not refused", err)
 		}
 	}
+	for _, n := range []string{"clone3", "io_uring_setup"} {
+		if !Refused(n, unix.ENOSYS) || Refused(n, unix.EPERM) {
+			t.Errorf("%s: ENOSYS is the answer, EPERM is not", n)
+		}
+	}
 	for _, err := range []error{nil, ErrNotRefused, ErrUnsupported, unix.ENOSYS, unix.EACCES, unix.ESRCH, unix.EBADF, unix.EINVAL, unix.EFAULT, errors.New("operation not permitted")} {
-		if Refused(err) {
+		if Refused("socket_inet", err) {
 			t.Errorf("%v refused", err)
 		}
+	}
+	if Refused("no-such-probe", unix.EPERM) {
+		t.Error("an unknown probe refused")
 	}
 }
 
@@ -285,14 +356,14 @@ const workFD = 3
 // goroutines, runs timers, grows and returns memory (one Argon2id at the
 // release's 64 MiB), collects garbage, starts threads, draws random
 // bytes, and reads the /proc files and limits the process reads.
-func childWork(filter []unix.SockFilter, alsoDenied bool) {
+func childWork(deny, notFound uint32, alsoDenied bool) {
 	f := os.NewFile(workFD, "channel")
 	c, err := net.FileConn(f)
 	f.Close()
 	if err != nil {
 		os.Exit(exitWork)
 	}
-	if err := install(filter); err != nil {
+	if err := install(program(uint32(os.Getpid()), deny, notFound)); err != nil {
 		os.Exit(exitInstall)
 	}
 	fail := func(what string, err error) {
@@ -455,40 +526,41 @@ func TestWorkload(t *testing.T) {
 	}
 }
 
-// run interprets the filter for one call.
-func run(t *testing.T, p []unix.SockFilter, arch, nr uint32) uint32 {
+// run interprets the filter for one call with its arguments.
+func run(t *testing.T, p []unix.SockFilter, arch, nr uint32, args ...uint64) uint32 {
 	t.Helper()
+	var data [64]byte
+	binary.LittleEndian.PutUint32(data[offNR:], nr)
+	binary.LittleEndian.PutUint32(data[offArch:], arch)
+	for i, v := range args {
+		binary.LittleEndian.PutUint64(data[offArgs+8*i:], v)
+	}
 	var a uint32
 	for pc := 0; pc < len(p); pc++ {
 		switch in := p[pc]; in.Code {
-		case unix.BPF_LD | unix.BPF_W | unix.BPF_ABS:
-			switch in.K {
-			case offNR:
-				a = nr
-			case offArch:
-				a = arch
-			default:
+		case ldW:
+			if in.K%4 != 0 || in.K >= offArgs+48 || (in.K > offArch && in.K < offArgs) {
 				t.Fatalf("instruction %d loads offset %d", pc, in.K)
 			}
-		case unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K:
-			if a == in.K {
+			a = binary.LittleEndian.Uint32(data[in.K:])
+		case jeq, jgt, jge, jset:
+			var c bool
+			switch in.Code {
+			case jeq:
+				c = a == in.K
+			case jgt:
+				c = a > in.K
+			case jge:
+				c = a >= in.K
+			case jset:
+				c = a&in.K != 0
+			}
+			if c {
 				pc += int(in.Jt)
 			} else {
 				pc += int(in.Jf)
 			}
-		case unix.BPF_JMP | unix.BPF_JGT | unix.BPF_K:
-			if a > in.K {
-				pc += int(in.Jt)
-			} else {
-				pc += int(in.Jf)
-			}
-		case unix.BPF_JMP | unix.BPF_JGE | unix.BPF_K:
-			if a >= in.K {
-				pc += int(in.Jt)
-			} else {
-				pc += int(in.Jf)
-			}
-		case unix.BPF_RET | unix.BPF_K:
+		case ret:
 			return in.K
 		default:
 			t.Fatalf("instruction %d: code %#x", pc, in.Code)
@@ -498,36 +570,49 @@ func run(t *testing.T, p []unix.SockFilter, arch, nr uint32) uint32 {
 	return 0
 }
 
-// TestProgram: the filter, interpreted, kills on another architecture,
-// refuses exactly the denied numbers (and every x32 number on amd64) and
-// allows every other; and the deny list is the reviewed one, with a
-// probe for each entry.
-func TestProgram(t *testing.T) {
-	want := map[string]uint32{
-		"socket": unix.SYS_SOCKET, "socketpair": unix.SYS_SOCKETPAIR,
-		"io_uring_setup": unix.SYS_IO_URING_SETUP, "io_uring_enter": unix.SYS_IO_URING_ENTER, "io_uring_register": unix.SYS_IO_URING_REGISTER,
-		"ptrace": unix.SYS_PTRACE, "process_vm_readv": unix.SYS_PROCESS_VM_READV, "process_vm_writev": unix.SYS_PROCESS_VM_WRITEV,
-		"pidfd_getfd": unix.SYS_PIDFD_GETFD,
-		"bpf":         unix.SYS_BPF, "userfaultfd": unix.SYS_USERFAULTFD, "perf_event_open": unix.SYS_PERF_EVENT_OPEN,
-	}
-	if got, w := slices.Sorted(slices.Values(denied)), slices.Sorted(maps.Values(want)); !slices.Equal(got, w) {
-		t.Fatalf("denied %v, want %v", got, w)
-	}
-	probed := map[uint32]bool{}
-	for _, p := range probes {
-		probed[p.nr] = true
-	}
-	for name, nr := range want {
-		if !probed[nr] {
-			t.Errorf("no probe for %s", name)
-		}
-	}
-	if len(probed) != len(denied) {
-		t.Errorf("probes for %d numbers, %d denied", len(probed), len(denied))
-	}
+// reviewed is the allow list by name, as reviewed: a change to the list
+// must change this too.
+var reviewed = map[string]uint32{
+	"futex": unix.SYS_FUTEX, "nanosleep": unix.SYS_NANOSLEEP, "epoll_pwait": unix.SYS_EPOLL_PWAIT, "read": unix.SYS_READ,
+	"write": unix.SYS_WRITE, "getpid": unix.SYS_GETPID, "rt_sigreturn": unix.SYS_RT_SIGRETURN, "fcntl": unix.SYS_FCNTL,
+	"sched_yield": unix.SYS_SCHED_YIELD, "close": unix.SYS_CLOSE, "epoll_ctl": unix.SYS_EPOLL_CTL,
+	"madvise": unix.SYS_MADVISE, "rt_sigprocmask": unix.SYS_RT_SIGPROCMASK, "rt_sigaction": unix.SYS_RT_SIGACTION,
+	"getrandom": unix.SYS_GETRANDOM, "gettid": unix.SYS_GETTID, "sigaltstack": unix.SYS_SIGALTSTACK,
+	"getrusage": unix.SYS_GETRUSAGE, "getdents64": unix.SYS_GETDENTS64, "getrlimit": unix.SYS_GETRLIMIT,
+	"munmap": unix.SYS_MUNMAP, "restart_syscall": unix.SYS_RESTART_SYSCALL, "clock_gettime": unix.SYS_CLOCK_GETTIME,
+	"clock_getres": unix.SYS_CLOCK_GETRES, "gettimeofday": unix.SYS_GETTIMEOFDAY, "sched_getaffinity": unix.SYS_SCHED_GETAFFINITY,
+	"pread64": unix.SYS_PREAD64, "fstat": unix.SYS_FSTAT, "newfstatat": unix.SYS_NEWFSTATAT, "lseek": unix.SYS_LSEEK,
+	"getuid": unix.SYS_GETUID, "geteuid": unix.SYS_GETEUID, "getgid": unix.SYS_GETGID, "getegid": unix.SYS_GETEGID,
+	"getppid": unix.SYS_GETPPID, "epoll_create1": unix.SYS_EPOLL_CREATE1, "eventfd2": unix.SYS_EVENTFD2,
+	"exit": unix.SYS_EXIT, "exit_group": unix.SYS_EXIT_GROUP, "rseq": unix.SYS_RSEQ, "set_robust_list": unix.SYS_SET_ROBUST_LIST,
+}
 
-	p := program(eperm)
-	if len(p) > unix.BPF_MAXINSNS {
+var reviewedConditional = map[string]uint32{
+	"openat": unix.SYS_OPENAT, "clone": unix.SYS_CLONE, "tgkill": unix.SYS_TGKILL, "kill": unix.SYS_KILL, "mmap": unix.SYS_MMAP,
+	"mprotect": unix.SYS_MPROTECT, "prctl": unix.SYS_PRCTL, "prlimit64": unix.SYS_PRLIMIT64,
+}
+
+// TestProgram: the filter, interpreted, kills on another architecture;
+// passes exactly the reviewed calls, the conditional ones only with
+// qualifying arguments; answers ENOSYS for clone3, io_uring_setup and
+// every number above Linux 6.6's last; refuses every other number (and
+// every x32 number on amd64) with EPERM; and answers every probe as
+// Refused expects.
+func TestProgram(t *testing.T) {
+	if got, w := slices.Sorted(slices.Values(allowed)), slices.Sorted(maps.Values(reviewed)); !slices.Equal(got, w) {
+		t.Fatalf("allowed %v, want %v", got, w)
+	}
+	if got, w := slices.Sorted(slices.Values(conditional)), slices.Sorted(maps.Values(reviewedConditional)); !slices.Equal(got, w) {
+		t.Fatalf("conditional %v, want %v", got, w)
+	}
+	if n := Allowed(); n != len(reviewed)+len(reviewedConditional) || len(slices.Compact(slices.Sorted(slices.Values(slices.Concat(allowed, conditional))))) != n {
+		t.Fatalf("Allowed %d", n)
+	}
+	t.Logf("%s: %d calls allowed (%d with conditions on their arguments)", runtime.GOARCH, Allowed(), len(conditional))
+
+	const pid = 4242
+	p := program(pid, eperm, enosys)
+	if len(p) > 128 {
 		t.Fatalf("%d instructions", len(p))
 	}
 	other := uint32(unix.AUDIT_ARCH_AARCH64)
@@ -536,40 +621,119 @@ func TestProgram(t *testing.T) {
 		other, compat = unix.AUDIT_ARCH_X86_64, unix.AUDIT_ARCH_ARM
 	}
 	amd64 := runtime.GOARCH == "amd64"
-	// The program's size is part of what is pinned: the arm64 program
-	// has the architecture check, one pair per entry and the final
-	// allow; amd64 adds the two x32 ranges.
-	if n, w := len(p), 4+2*len(denied)+1; (amd64 && n != w+5) || (!amd64 && n != w) {
-		t.Errorf("%d instructions", n)
-	}
+	allow := uint32(unix.SECCOMP_RET_ALLOW)
 	for nr := range uint32(1024) {
 		for _, a := range []uint32{other, compat} {
 			if got := run(t, p, a, nr); got != unix.SECCOMP_RET_KILL_PROCESS {
 				t.Fatalf("architecture %#x, call %d: %#x", a, nr, got)
 			}
 		}
-		w := uint32(unix.SECCOMP_RET_ALLOW)
-		if slices.Contains(denied, nr) || (amd64 && nr >= 512 && nr <= 547) {
+		// No arguments: of the conditional calls, openat (read-only),
+		// mmap, mprotect (no PROT_EXEC) and prlimit64 (pid 0, no new
+		// limit) qualify.
+		w := eperm
+		switch {
+		case slices.Contains(allowed, nr), nr == unix.SYS_OPENAT, nr == unix.SYS_MMAP, nr == unix.SYS_MPROTECT, nr == unix.SYS_PRLIMIT64:
+			w = allow
+		case amd64 && nr >= x32First && nr <= x32Last:
 			w = eperm
+		case nr == unix.SYS_CLONE3, nr == unix.SYS_IO_URING_SETUP, nr > lastKnown:
+			w = enosys
 		}
 		if got := run(t, p, arch(), nr); got != w {
 			t.Errorf("call %d: %#x, want %#x", nr, got, w)
 		}
 	}
-	// What the Go runtime and standard library call near the denied
-	// numbers stays allowed: pidfd_send_signal, pidfd_open, openat2.
-	for _, nr := range []uint32{unix.SYS_PIDFD_SEND_SIGNAL, unix.SYS_PIDFD_OPEN, unix.SYS_OPENAT2, unix.SYS_CLONE, unix.SYS_CLONE3, unix.SYS_FUTEX, unix.SYS_MMAP, unix.SYS_SENDMSG, unix.SYS_RECVMSG} {
-		if got := run(t, p, arch(), nr); got != unix.SECCOMP_RET_ALLOW {
-			t.Errorf("call %d: %#x", nr, got)
-		}
-	}
 	for _, nr := range []uint32{x32Bit, x32Bit | unix.SYS_SOCKET, x32Bit | unix.SYS_READ, 1<<32 - 1} {
-		w := uint32(unix.SECCOMP_RET_ALLOW)
-		if runtime.GOARCH == "amd64" {
+		w := enosys
+		if amd64 {
 			w = eperm
 		}
 		if got := run(t, p, arch(), nr); got != w {
 			t.Errorf("call %#x: %#x, want %#x", nr, got, w)
 		}
+	}
+
+	// The argument conditions.
+	const at = 1<<32 - 100 // AT_FDCWD as the kernel reads an int
+	thread := uint64(unix.CLONE_VM | unix.CLONE_FS | unix.CLONE_FILES | unix.CLONE_SIGHAND | unix.CLONE_THREAD | unix.CLONE_SYSVSEM | unix.CLONE_SETTLS)
+	glibc := thread | unix.CLONE_PARENT_SETTID | unix.CLONE_CHILD_CLEARTID
+	for _, c := range []struct {
+		name string
+		nr   uint32
+		args []uint64
+		want uint32
+	}{
+		{"openat read", unix.SYS_OPENAT, []uint64{at, 1 << 20, unix.O_RDONLY | unix.O_CLOEXEC}, allow},
+		{"openat directory", unix.SYS_OPENAT, []uint64{at, 1 << 20, unix.O_RDONLY | unix.O_CLOEXEC | unix.O_DIRECTORY | unix.O_NONBLOCK}, allow},
+		{"openat write", unix.SYS_OPENAT, []uint64{at, 1 << 20, unix.O_WRONLY}, eperm},
+		{"openat read-write (/proc/self/mem)", unix.SYS_OPENAT, []uint64{at, 1 << 20, unix.O_RDWR | unix.O_CLOEXEC}, eperm},
+		{"openat create", unix.SYS_OPENAT, []uint64{at, 1 << 20, unix.O_RDONLY | unix.O_CREAT, 0o600}, eperm},
+		{"openat truncate", unix.SYS_OPENAT, []uint64{at, 1 << 20, unix.O_RDONLY | unix.O_TRUNC}, eperm},
+		{"openat tmpfile", unix.SYS_OPENAT, []uint64{at, 1 << 20, unix.O_TMPFILE | unix.O_RDWR, 0o600}, eperm},
+		{"openat invalid access mode 3", unix.SYS_OPENAT, []uint64{at, 1 << 20, 3}, eperm},
+		{"openat2", unix.SYS_OPENAT2, []uint64{at, 1 << 20, 1 << 21, 24}, eperm},
+		{"go thread", unix.SYS_CLONE, []uint64{thread}, allow},
+		{"glibc thread", unix.SYS_CLONE, []uint64{glibc}, allow},
+		{"thread, high bits", unix.SYS_CLONE, []uint64{thread | 1<<40}, allow},
+		{"fork", unix.SYS_CLONE, []uint64{uint64(unix.SIGCHLD)}, eperm},
+		{"vfork", unix.SYS_CLONE, []uint64{unix.CLONE_VM | unix.CLONE_VFORK | uint64(unix.SIGCHLD)}, eperm},
+		{"new user namespace", unix.SYS_CLONE, []uint64{unix.CLONE_NEWUSER | uint64(unix.SIGCHLD)}, eperm},
+		{"thread in a new network namespace", unix.SYS_CLONE, []uint64{thread | unix.CLONE_NEWNET}, eperm},
+		{"thread in a new pid namespace", unix.SYS_CLONE, []uint64{thread | unix.CLONE_NEWPID}, eperm},
+		{"kill self", unix.SYS_KILL, []uint64{pid, 9}, allow},
+		{"kill other", unix.SYS_KILL, []uint64{pid + 1, 9}, eperm},
+		{"kill group", unix.SYS_KILL, []uint64{0, 9}, eperm},
+		{"kill everyone", unix.SYS_KILL, []uint64{1<<64 - 1, 9}, eperm},
+		{"tgkill self", unix.SYS_TGKILL, []uint64{pid, pid + 3, 23}, allow},
+		{"tgkill other", unix.SYS_TGKILL, []uint64{pid + 1, pid + 1, 23}, eperm},
+		{"mmap rw", unix.SYS_MMAP, []uint64{0, 4096, unix.PROT_READ | unix.PROT_WRITE, unix.MAP_PRIVATE | unix.MAP_ANON}, allow},
+		{"mmap exec", unix.SYS_MMAP, []uint64{0, 4096, unix.PROT_READ | unix.PROT_EXEC, unix.MAP_PRIVATE | unix.MAP_ANON}, eperm},
+		{"mprotect none", unix.SYS_MPROTECT, []uint64{1 << 20, 4096, unix.PROT_NONE}, allow},
+		{"mprotect exec", unix.SYS_MPROTECT, []uint64{1 << 20, 4096, unix.PROT_EXEC}, eperm},
+		{"prctl get dumpable", unix.SYS_PRCTL, []uint64{unix.PR_GET_DUMPABLE}, allow},
+		{"prctl name memory", unix.SYS_PRCTL, []uint64{unix.PR_SET_VMA, unix.PR_SET_VMA_ANON_NAME, 1 << 20, 4096, 1 << 21}, allow},
+		{"prctl set dumpable", unix.SYS_PRCTL, []uint64{unix.PR_SET_DUMPABLE, 1}, eperm},
+		{"prctl seccomp", unix.SYS_PRCTL, []uint64{unix.PR_SET_SECCOMP, 2}, eperm},
+		{"prctl no_new_privs", unix.SYS_PRCTL, []uint64{unix.PR_SET_NO_NEW_PRIVS, 1}, eperm},
+		{"prlimit read", unix.SYS_PRLIMIT64, []uint64{0, unix.RLIMIT_NOFILE, 0, 1 << 20}, allow},
+		{"prlimit set", unix.SYS_PRLIMIT64, []uint64{0, unix.RLIMIT_NOFILE, 1 << 20, 0}, eperm},
+		{"prlimit set, high address", unix.SYS_PRLIMIT64, []uint64{0, unix.RLIMIT_NOFILE, 1 << 40, 0}, eperm},
+		{"prlimit of another", unix.SYS_PRLIMIT64, []uint64{pid + 1, unix.RLIMIT_NOFILE, 0, 1 << 20}, eperm},
+	} {
+		if got := run(t, p, arch(), c.nr, c.args...); got != c.want {
+			t.Errorf("%s: %#x, want %#x", c.name, got, c.want)
+		}
+	}
+
+	// amd64's legacy open and creat are not allowed (2 and 85; arm64 has
+	// neither).
+	if amd64 {
+		for _, nr := range []uint32{2, 85} {
+			if got := run(t, p, arch(), nr, 1<<20, unix.O_RDONLY); got != eperm {
+				t.Errorf("legacy call %d: %#x", nr, got)
+			}
+		}
+	}
+
+	// Every probe, with its arguments, gets the answer Refused expects;
+	// the 13 calls of the earlier deny list are among them.
+	for _, pr := range slices.Concat(probes, archProbes) {
+		args := make([]uint64, 6)
+		for i, v := range pr.a {
+			args[i] = uint64(v)
+		}
+		if got, w := run(t, p, arch(), pr.nr, args...), unix.SECCOMP_RET_ERRNO|uint32(pr.want()); got != w {
+			t.Errorf("probe %s: %#x, want %#x", pr.name, got, w)
+		}
+	}
+	for _, n := range []string{"socket_vsock", "socket_inet", "socketpair", "io_uring_setup", "io_uring_enter", "io_uring_register",
+		"ptrace", "process_vm_readv", "process_vm_writev", "pidfd_getfd", "bpf", "userfaultfd", "perf_event_open"} {
+		if !slices.Contains(Names(), n) {
+			t.Errorf("no probe %s", n)
+		}
+	}
+	if len(Names()) != len(slices.Compact(Names())) {
+		t.Error("two probes of one name")
 	}
 }

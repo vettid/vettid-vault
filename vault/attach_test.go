@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/vettid/vettid-relay/relayauth"
 
 	"github.com/vettid/vettid-vault/internal/strictjson"
+	"github.com/vettid/vettid-vault/vault/store"
 	"github.com/vettid/vettid-vault/vms/attwire"
 	"github.com/vettid/vettid-vault/vms/envelope"
 )
@@ -53,8 +55,9 @@ func TestTokenRefreshAfterQuota(t *testing.T) {
 	if errCode(r) != "too_soon" || bodyStr(t, r, "allowed_after") == "" {
 		t.Fatalf("second refresh within 24 h: %+v", r)
 	}
-	// A token near its end is refreshed as before (§7.2), whatever the
-	// quota refreshes.
+	// The classification is by the latest standing token issued to the
+	// peer, not by the one the request came under: an old token near its
+	// end (the deposit's jti) mints nothing more within the day.
 	d.withLock(func(m *Manager) {
 		for i := range m.st.Issued {
 			if m.st.Issued[i].JTI == "standing-c1" {
@@ -63,8 +66,138 @@ func TestTokenRefreshAfterQuota(t *testing.T) {
 		}
 	})
 	id = d.sendRaw(t, c, tokenRefreshType, "")
+	if r := find(d.inbox(c)["c1"], reply(id)); errCode(r) != "too_soon" {
+		t.Fatalf("refresh under an old token: %+v", r)
+	}
+	// When the latest token itself is near its end (here standing tokens
+	// are short, so none is re-minted), a refresh is answered as before
+	// (§7.2), at most once an hour.
+	d.withLock(func(m *Manager) {
+		m.opt.ConnectionStandingTTL = 48 * time.Hour
+		for i := range m.st.Issued {
+			if m.st.Issued[i].PeerID == "c1" && !m.st.Issued[i].Denied {
+				m.st.Issued[i].Exp = time.Now().Add(24 * time.Hour)
+			}
+		}
+	})
+	id = d.sendRaw(t, c, tokenRefreshType, "")
 	if r := find(d.inbox(c)["c1"], reply(id)); r == nil || r.Status != envelope.StatusOK {
 		t.Fatalf("refresh near the end: %+v", r)
+	}
+	d.withLock(func(m *Manager) {
+		for i := range m.st.Issued {
+			if m.st.Issued[i].PeerID == "c1" && !m.st.Issued[i].Denied {
+				m.st.Issued[i].Exp = time.Now().Add(24 * time.Hour)
+			}
+		}
+	})
+	id = d.sendRaw(t, c, tokenRefreshType, "")
+	if r := find(d.inbox(c)["c1"], reply(id)); errCode(r) != "too_soon" {
+		t.Fatalf("second refresh near the end within the hour: %+v", r)
+	}
+}
+
+// §10.5.1 (lock path): zeroize wipes every attachment secret the index
+// holds (k_att, a blob key, a held thumbnail), and a dropped blob
+// reference has its key wiped.
+func TestZeroizeWipesAttachmentKeys(t *testing.T) {
+	d := newDevFixture(t)
+	k, bk, th, dk := []byte{1, 2, 3}, []byte{4, 5, 6}, []byte{7, 8, 9}, []byte{9, 9, 9}
+	d.withLock(func(m *Manager) {
+		m.st.attach().Entries["01JB2Z6V9K3M4N5P6Q7R8S9T70"] = &AttEntry{ID: "01JB2Z6V9K3M4N5P6Q7R8S9T70", Key: k, Thumb: th,
+			Blob: &AttBlob{ID: "01JB2Z6V9K3M4N5P6Q7R8S9T71", Key: bk}, State: AttFetching, Dir: DirIn}
+		e := &AttEntry{ID: "01JB2Z6V9K3M4N5P6Q7R8S9T72", Key: []byte{1}, Blob: &AttBlob{ID: "01JB2Z6V9K3M4N5P6Q7R8S9T73", Key: dk}}
+		m.dropBlob(e)
+		if e.Blob != nil {
+			t.Fatal("blob kept")
+		}
+	})
+	if err := d.m.Lock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for name, b := range map[string][]byte{"k_att": k, "blob key": bk, "thumbnail": th, "dropped blob key": dk} {
+		for _, x := range b {
+			if x != 0 {
+				t.Fatalf("%s not wiped: %v", name, b)
+			}
+		}
+	}
+}
+
+// §10.5.1: an outgoing attachment owed a fresh upload is failed
+// (unconfirmed) and no longer owed when the peer's mailbox refused for
+// good, or when missing_window has passed (a connection stale since);
+// it is never left owed and unserved.
+func TestOwedAttachmentEnds(t *testing.T) {
+	d := newDevFixture(t)
+	now := time.Now()
+	d.withLock(func(m *Manager) {
+		a := m.st.attach()
+		a.Entries["01JB2Z6V9K3M4N5P6Q7R8S9T70"] = &AttEntry{ID: "01JB2Z6V9K3M4N5P6Q7R8S9T70", Conn: "c1", Msg: "01JB2Z6V9K3M4N5P6Q7R8S9T71", Dir: DirOut,
+			State: AttSending, CW: true, Owed: true, Stopped: true, SentAt: now.Add(-time.Hour)}
+		a.Entries["01JB2Z6V9K3M4N5P6Q7R8S9T72"] = &AttEntry{ID: "01JB2Z6V9K3M4N5P6Q7R8S9T72", Conn: "c2", Msg: "01JB2Z6V9K3M4N5P6Q7R8S9T73", Dir: DirOut,
+			State: AttSending, CW: true, Owed: true, SentAt: now.Add(-attwire.MissingWindow - time.Hour)}
+		a.Entries["01JB2Z6V9K3M4N5P6Q7R8S9T74"] = &AttEntry{ID: "01JB2Z6V9K3M4N5P6Q7R8S9T74", Conn: "c2", Msg: "01JB2Z6V9K3M4N5P6Q7R8S9T75", Dir: DirOut,
+			State: AttSending, CW: true, Owed: true, SentAt: now.Add(-time.Hour)}
+		m.attHousekeeping(now)
+		for id, want := range map[string]string{"01JB2Z6V9K3M4N5P6Q7R8S9T70": AttFailed, "01JB2Z6V9K3M4N5P6Q7R8S9T72": AttFailed, "01JB2Z6V9K3M4N5P6Q7R8S9T74": AttSending} {
+			e := a.Entries[id]
+			if e.State != want || want == AttFailed && (e.Reason != ReasonUnconfirmed || e.Owed) {
+				t.Errorf("%s: %s %s owed %v", id, e.State, e.Reason, e.Owed)
+			}
+		}
+	})
+}
+
+// blockingStore holds Puts of attachment objects until released.
+type blockingStore struct {
+	store.Store
+	started chan struct{}
+	release chan struct{}
+}
+
+func (b *blockingStore) Put(ctx context.Context, key string, data []byte, ifMatch store.Version) (store.Version, error) {
+	if strings.Contains(key, "/att/") {
+		close(b.started)
+		<-b.release
+	}
+	return b.Store.Put(ctx, key, data, ifMatch)
+}
+
+// §12.5, P15: a runner's object write under way when the vault is deleted
+// lands before the erase, which then deletes it: no object is left after
+// the deletion; and nothing is written once the vault is locked.
+func TestDeletionWaitsForWrites(t *testing.T) {
+	d := newDevFixture(t)
+	ctx := context.Background()
+	bs := &blockingStore{Store: d.store, started: make(chan struct{}), release: make(chan struct{})}
+	id := "01JB2Z6V9K3M4N5P6Q7R8S9T70"
+	var r *attRunner
+	d.withLock(func(m *Manager) {
+		m.opt.Store = bs
+		m.attStart(ctx)
+		r = m.att
+		m.st.attach().Entries[id] = &AttEntry{ID: id, Dir: DirIn, State: AttFetching, Key: make([]byte, 32)}
+	})
+	key := attwire.ContentKey(d.vid, id)
+	go func() { _, _ = d.m.putObject(r, key, []byte("object")) }()
+	<-bs.started
+	deleted := make(chan error, 1)
+	go func() { deleted <- d.m.Delete(ctx) }()
+	select {
+	case <-deleted:
+		t.Fatal("the deletion did not wait for the write")
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(bs.release)
+	if err := <-deleted; err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := d.store.Get(ctx, key); err == nil {
+		t.Fatal("an object written during the deletion was left")
+	}
+	if _, err := d.m.putObject(r, key, []byte("late")); err == nil {
+		t.Fatal("a write after the lock")
 	}
 }
 
@@ -91,7 +224,7 @@ func TestAttachmentUnsupportedPeer(t *testing.T) {
 	for _, a := range rec.got {
 		if a.Kind == "message.attachment_failed" {
 			feed = feed || a.Feed && a.Ref == e.Msg
-			audit = audit || a.Audit && a.Ref == e.Msg+":unsupported"
+			audit = audit || a.Audit && a.Ref == e.Msg
 		}
 	}
 	if !feed || !audit {

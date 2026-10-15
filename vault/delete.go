@@ -160,9 +160,13 @@ func (m *Manager) finishDelete(ctx context.Context) error {
 	own := m.hdr.SealedRelease
 	stateVer, headerVer := m.stateVer, m.headerVer
 	// §12.5 step 3 (0.32.0): the store key and recorded version of every
-	// written attachment object, taken before the keys go (no key material).
-	atts := m.attWrittenObjects()
+	// attachment object, taken before the keys go (no key material).
+	atts := m.attObjects()
 	m.zeroize()
+	// A write of the runner already under way lands before the erase (it
+	// cannot land after it, nor after the parent's sweep saw the prefix
+	// empty); none starts once the vault is locked.
+	m.attWaitWrites(attWriteWait)
 	// Step 4: the attachment objects first, each at its recorded version,
 	// then the state and the headers. What an erase without the index
 	// misses, the parent sweeps after `deleted` (P15).

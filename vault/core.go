@@ -452,27 +452,38 @@ func (m *Manager) hTokenIssued(_ context.Context, s *Session, in *envelope.Inner
 	return nil, nil
 }
 
+// RenewEvery bounds a connection's refreshes near its token's end (§7.2).
+const RenewEvery = time.Hour
+
 func (m *Manager) hTokenRefresh(_ context.Context, s *Session, _ *envelope.Inner) (json.RawMessage, error) {
 	// §7.2 (0.32.0, release A): a connection whose standing token still
 	// has HolderRefreshBelow or more left asks after quota_exceeded. It is
 	// granted a fresh token at most once in 24 hours, and the old one is
 	// denylisted, so that a refresh never doubles what it may deposit.
-	// The token the request was deposited under (its collect jti) tells
-	// a quota refresh from one near the token's end.
+	// Classified by the latest standing token issued to the peer, not by
+	// the one the request came under: a refresh while that one still has
+	// HolderRefreshBelow or more left is a quota refresh, so that no older
+	// token can mint fresh ones beyond the daily one.
 	quota := false
-	if s.peer.Kind == KindConnection && m.curJTI != "" {
-		for _, t := range m.st.Issued {
-			if t.JTI == m.curJTI && t.PeerID == s.peer.ID && t.Kind == TokStanding {
-				quota = t.Exp.Sub(s.now) >= HolderRefreshBelow
-			}
+	if s.peer.Kind == KindConnection {
+		if t := m.latestIssued(s.peer.ID, TokStanding); t != nil {
+			quota = t.Exp.Sub(s.now) >= HolderRefreshBelow
 		}
 	}
+	tooSoon := func(t time.Time) error {
+		return &HandlerError{Code: "too_soon", Body: strictjson.NewBuilder().String("allowed_after", envelope.FormatTS(t)).Bytes()}
+	}
 	if quota {
-		a := m.st.attach()
-		if t, ok := a.Refreshed[s.peer.ID]; ok && s.now.Sub(t) < 24*time.Hour {
-			return nil, &HandlerError{Code: "too_soon", Body: strictjson.NewBuilder().
-				String("allowed_after", envelope.FormatTS(t.Add(24*time.Hour))).Bytes()}
+		if t, ok := m.st.attach().Refreshed[s.peer.ID]; ok && s.now.Sub(t) < 24*time.Hour {
+			return nil, tooSoon(t.Add(24 * time.Hour))
 		}
+	} else if s.peer.Kind == KindConnection {
+		// A refresh near the token's end is bounded too: one an hour.
+		if t, ok := m.st.attach().Renewed[s.peer.ID]; ok && s.now.Sub(t) < RenewEvery {
+			return nil, tooSoon(t.Add(RenewEvery))
+		}
+		m.st.attach().Renewed[s.peer.ID] = s.now
+		m.dirty = true
 	}
 	tok, issued, err := m.mintStanding(s.peer, s.now, nil)
 	if err != nil {

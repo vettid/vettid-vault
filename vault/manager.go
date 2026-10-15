@@ -233,8 +233,9 @@ type Manager struct {
 	pushGen uint64
 	// att is the attachment runner while the vault runs (§10.5.1).
 	att *attRunner
-	// curJTI is the deposit token's jti of the message being handled.
-	curJTI string
+	// attWrites counts the runner's store writes in flight (finishDelete
+	// waits for them before it erases).
+	attWrites sync.WaitGroup
 }
 
 // unlocked counts the managers in this process that hold a DEK.
@@ -790,6 +791,12 @@ func (m *Manager) zeroize() {
 		i.Abort()
 	}
 	m.reqEpochs, m.awaiting, m.outgoing = nil, nil, nil
+	if m.st != nil && m.st.Attach != nil {
+		// k_att, blob keys and held thumbnails (§10.5.1).
+		for _, e := range m.st.Attach.Entries {
+			e.wipe()
+		}
+	}
 	if m.st != nil {
 		suite.Wipe(m.st.Relay.Seed)
 		suite.Wipe(m.st.IdentitySeed)

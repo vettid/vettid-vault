@@ -83,12 +83,18 @@ type AttachState struct {
 	// Refreshed is when each connection was last granted a fresh
 	// standing token after quota_exceeded (§7.2).
 	Refreshed map[string]time.Time `json:"refreshed,omitempty"`
+	// Renewed is when each connection last got a refresh near its token's
+	// end: at most one an hour (§7.2, owner decision of 2026-10-15).
+	Renewed map[string]time.Time `json:"renewed,omitempty"`
 	// Gone are outgoing attachments the member deleted, until their
 	// missing_window ends: a missing for one is answered withdrawn
 	// (deleted), not ignored (§10.5.1 "Delivery to the peer").
 	Gone []AttGone `json:"gone,omitempty"`
 	// PurgedAt is when the orphan purge last ran.
 	PurgedAt time.Time `json:"purged_at,omitempty"`
+	// FullFed is when each connection's last refusal for a full store made
+	// a feed item: at most one a day per connection (coalesced).
+	FullFed map[string]time.Time `json:"full_fed,omitempty"`
 }
 
 // AttStamp is one counted attachment or upload.
@@ -192,6 +198,37 @@ type AttEntry struct {
 	// Stopped: the peer's mailbox refused for good (token_revoked,
 	// mailbox_unknown): no more uploads; the window decides.
 	Stopped bool `json:"stopped,omitempty"`
+	// Corrupt counts reads of its objects that did not open (a damaged
+	// object); at attCorruptMax the attachment fails (bad).
+	Corrupt int `json:"corrupt,omitempty"`
+}
+
+// attCorruptMax is how many times an object that does not open is read
+// again (with the retry's backoff) before its attachment fails.
+const attCorruptMax = 3
+
+// GoneMax bounds the list of deleted outgoing attachments kept for
+// withdrawn{deleted} (as many as the index holds).
+const GoneMax = attwire.CountMax
+
+// dropBlob deletes the entry's blob of the own mailbox (best effort) and
+// wipes its key.
+func (m *Manager) dropBlob(e *AttEntry) {
+	if e.Blob == nil {
+		return
+	}
+	m.attDropBlob(e.Blob.ID)
+	suite.Wipe(e.Blob.Key)
+	e.Blob = nil
+}
+
+// wipeEntry wipes an entry's secrets: k_att, a blob key, a held thumbnail.
+func (e *AttEntry) wipe() {
+	suite.Wipe(e.Key)
+	suite.Wipe(e.Thumb)
+	if e.Blob != nil {
+		suite.Wipe(e.Blob.Key)
+	}
 }
 
 func (st *State) attach() *AttachState {
@@ -214,20 +251,29 @@ func (st *State) attach() *AttachState {
 	if a.Refreshed == nil {
 		a.Refreshed = map[string]time.Time{}
 	}
+	if a.FullFed == nil {
+		a.FullFed = map[string]time.Time{}
+	}
+	if a.Renewed == nil {
+		a.Renewed = map[string]time.Time{}
+	}
 	return a
 }
 
 // contentBytes is what an entry's content counts against the store: its
-// declared size while it is being fetched or prepared (reserved), its
-// size once stored, nothing once it failed without a stored content.
-func (e *AttEntry) contentBytes() int64 {
-	if e.CW || e.State == AttPreparing || e.State == AttFetching {
+// size once stored; its declared size while the own sending prepares it,
+// or while a received one's fetch is in progress (inFlight); nothing while
+// a received one waits for an upload (owner decision of 2026-10-15: a
+// waiting attachment holds no room), or once it failed without content.
+func (e *AttEntry) contentBytes(inFlight bool) int64 {
+	if e.CW || e.State == AttPreparing || e.State == AttFetching && inFlight {
 		return int64(e.Size)
 	}
 	return 0
 }
 
-func (e *AttEntry) bytes() int64 { return e.contentBytes() + int64(e.ThumbLen) }
+// attInFlight reports whether a transfer of the entry is in progress.
+func (m *Manager) attInFlight(e *AttEntry) bool { return m.att != nil && m.att.running[e.ID] }
 
 // attUsage is the store's use: count and bytes, and one connection's
 // received bytes (peer_storage) if conn is set.
@@ -237,7 +283,7 @@ func (m *Manager) attUsage(conn string) (count int, bytes, peer int64) {
 	}
 	for _, e := range m.st.Attach.Entries {
 		count++
-		b := e.bytes()
+		b := e.contentBytes(m.attInFlight(e)) + int64(e.ThumbLen)
 		bytes += b
 		if conn != "" && e.Conn == conn && e.Dir == DirIn {
 			peer += b
@@ -400,7 +446,7 @@ func (m *Manager) attSet(e *AttEntry, state, reason string, now time.Time) {
 }
 
 // attFail fails an entry: audited message.attachment_failed (ref
-// message_id:reason), and for an outgoing one that the member must know
+// message_id, §10.5.1 "History and search"), and for an outgoing one that the member must know
 // about (unsupported, refused, missing, unconfirmed) the feed item.
 func (m *Manager) attFail(e *AttEntry, reason string, now time.Time) {
 	if e.State == AttFailed && e.Reason == reason {
@@ -408,17 +454,14 @@ func (m *Manager) attFail(e *AttEntry, reason string, now time.Time) {
 	}
 	m.attSet(e, AttFailed, reason, now)
 	rt := m.now()
-	m.record(Activity{Kind: "message.attachment_failed", ConnectionID: e.Conn, Ref: e.Msg + ":" + reason, Direction: e.Dir, Audit: true}, rt)
+	m.record(Activity{Kind: "message.attachment_failed", ConnectionID: e.Conn, Ref: e.Msg, Direction: e.Dir, Audit: true}, rt)
 	if e.Dir == DirOut {
 		switch reasonBase(reason) {
 		case ReasonUnsupported, ReasonRefused, ReasonMissing, ReasonUnconfirmed:
 			m.record(Activity{Kind: "message.attachment_failed", ConnectionID: e.Conn, Ref: e.Msg, Direction: e.Dir, Feed: true}, rt)
 		}
 	}
-	if e.Blob != nil {
-		m.attDropBlob(e.Blob.ID)
-		e.Blob = nil
-	}
+	m.dropBlob(e)
 }
 
 func reasonBase(r string) string {
@@ -448,11 +491,15 @@ func (h managerHost) AttachSend(s *Session, conn, msgID string, sentAt time.Time
 	count, used, _ := m.attUsage("")
 	add := int64(d.Blob.Size) + int64(len(d.Thumb))
 	if used+add > lim.Storage {
-		m.attDropBlob(d.Blob.ID)
+		if !m.attBlobNamed(d.Blob.ID) {
+			m.attDropBlob(d.Blob.ID)
+		}
 		return "", LimitSizeError("attachment_storage", int(lim.Storage), int(used+add))
 	}
 	if count >= lim.Count {
-		m.attDropBlob(d.Blob.ID)
+		if !m.attBlobNamed(d.Blob.ID) {
+			m.attDropBlob(d.Blob.ID)
+		}
 		return "", LimitError("attachments", lim.Count)
 	}
 	if m.attBlobNamed(d.Blob.ID) {
@@ -541,7 +588,7 @@ func (h managerHost) AttachReceive(s *Session, msgID string, v *attwire.PeerView
 	lim := m.attLim()
 	refuse := func(reason string) (string, *AttView) {
 		rv := &AttView{Kind: v.Kind, Size: v.Size, Width: v.Width, Height: v.Height, State: AttFailed, Reason: reason}
-		if v.Blob != nil {
+		if v.Blob != nil && !m.attBlobNamed(v.Blob.ID) {
 			m.attDropBlob(v.Blob.ID)
 		}
 		body := strictjson.NewBuilder().String("message_id", msgID).String("status", StatusRefused)
@@ -555,10 +602,15 @@ func (h managerHost) AttachReceive(s *Session, msgID string, v *attwire.PeerView
 		case ReasonRate:
 			m.record(Activity{Kind: "drop.attachment_rate", ConnectionID: conn, Ref: msgID, Audit: true}, rt)
 		default:
-			m.record(Activity{Kind: "message.attachment_refused", ConnectionID: conn, Ref: msgID + ":" + reason, Direction: DirIn, Audit: true}, rt)
+			m.record(Activity{Kind: "message.attachment_refused", ConnectionID: conn, Ref: msgID, Direction: DirIn, Audit: true}, rt)
 		}
 		if reason == ReasonFull {
-			m.record(Activity{Kind: "message.attachment_refused", ConnectionID: conn, Ref: msgID, Direction: DirIn, Feed: true}, rt)
+			// The member learns that the store is full; refusals of one
+			// connection within a day make one feed item.
+			if t, ok := a.FullFed[conn]; !ok || now.Sub(t) >= 24*time.Hour {
+				a.FullFed[conn] = now
+				m.record(Activity{Kind: "message.attachment_refused", ConnectionID: conn, Ref: msgID, Direction: DirIn, Feed: true}, rt)
+			}
 		}
 		return "", rv
 	}
@@ -572,8 +624,14 @@ func (h managerHost) AttachReceive(s *Session, msgID string, v *attwire.PeerView
 	if n >= lim.PeerAccept || b+add > lim.PeerAcceptBytes {
 		return refuse(ReasonRate)
 	}
+	// The store limits: the thumbnail, and the content only when its blob
+	// arrives (now, if one is named; else when it is uploaded on missing).
+	need := int64(len(v.Thumb))
+	if v.Blob != nil {
+		need = add
+	}
 	count, used, peer := m.attUsage(conn)
-	if peer+add > lim.PeerStorage || used+add > lim.Storage || count >= lim.Count {
+	if peer+need > lim.PeerStorage || used+need > lim.Storage || count >= lim.Count {
 		return refuse(ReasonFull)
 	}
 	if v.Blob != nil && m.attBlobNamed(v.Blob.ID) {
@@ -597,6 +655,45 @@ func (h managerHost) AttachReceive(s *Session, msgID string, v *attwire.PeerView
 	m.dirty = true
 	m.attWake()
 	return e.ID, nil
+}
+
+// attFits reports whether a received entry's content fits the store limits
+// (attachment_storage, peer_storage) as they are now, its own reservation
+// left out.
+func (m *Manager) attFits(e *AttEntry) bool {
+	lim := m.attLim()
+	_, used, peer := m.attUsage(e.Conn)
+	if own := e.contentBytes(m.attInFlight(e)); own > 0 {
+		used, peer = used-own, peer-own
+	}
+	return used+int64(e.Size) <= lim.Storage && peer+int64(e.Size) <= lim.PeerStorage
+}
+
+// attRefuseFull refuses a received attachment whose upload does not fit:
+// failed (full), refused to the sender without a reason, audited, and the
+// member's feed item (one a day per connection).
+func (m *Manager) attRefuseFull(e *AttEntry, now time.Time) {
+	m.attFail(e, ReasonFull, now)
+	m.attSendStatus(e.Conn, strictjson.NewBuilder().String("message_id", e.Msg).String("status", StatusRefused), now)
+	rt := m.now()
+	m.record(Activity{Kind: "message.attachment_refused", ConnectionID: e.Conn, Ref: e.Msg, Direction: DirIn, Audit: true}, rt)
+	a := m.st.attach()
+	if t, ok := a.FullFed[e.Conn]; !ok || m.attNow().Sub(t) >= 24*time.Hour {
+		a.FullFed[e.Conn] = m.attNow()
+		m.record(Activity{Kind: "message.attachment_refused", ConnectionID: e.Conn, Ref: e.Msg, Direction: DirIn, Feed: true}, rt)
+	}
+}
+
+// attUncount takes an entry out of its connection's peer_attachments.
+func (m *Manager) attUncount(e *AttEntry) {
+	a := m.st.attach()
+	kept := a.Accepted[e.Conn][:0]
+	for _, x := range a.Accepted[e.Conn] {
+		if x.Att != e.ID {
+			kept = append(kept, x)
+		}
+	}
+	a.Accepted[e.Conn] = kept
 }
 
 // attByMsg finds the entry of a connection's message in a direction.
@@ -634,6 +731,15 @@ func (h managerHost) AttachRedeliver(s *Session, msgID string, v *attwire.PeerVi
 			m.attDropBlob(v.Blob.ID)
 		}
 		return
+	}
+	if !m.attFits(e) {
+		// The upload arrived: checked against the store limits now.
+		m.attDropBlob(v.Blob.ID)
+		m.attRefuseFull(e, s.now)
+		return
+	}
+	if e.Blob != nil {
+		suite.Wipe(e.Blob.Key)
 	}
 	e.Blob = &AttBlob{ID: v.Blob.ID, Key: append([]byte(nil), v.Blob.Key...), SHA256: append([]byte(nil), v.Blob.SHA256[:]...),
 		Size: v.Blob.Size, Expires: v.Expires}
@@ -731,16 +837,15 @@ func (m *Manager) attMissing(conn, msgID string, e *AttEntry, now time.Time) {
 		m.attSendStatus(conn, strictjson.NewBuilder().String("message_id", msgID).String("status", StatusWithdrawn).String("reason", reason), now)
 	}
 	if e == nil || e.Erasing {
+		// Deleted: withdrawn{deleted} until missing_window, unless it was
+		// delivered or refused before (then ignored, as for one never sent).
 		for _, g := range m.st.attach().Gone {
 			if g.Conn == conn && g.Msg == msgID {
 				withdraw("deleted")
 				return
 			}
 		}
-		if e != nil {
-			withdraw("deleted")
-		}
-		return // a message_id it never sent: ignored
+		return
 	}
 	switch {
 	case e.State == AttDelivered, e.State == AttFailed && reasonBase(e.Reason) == ReasonRefused:
@@ -868,13 +973,13 @@ func (h managerHost) AttachErase(_ *Session, attID string) {
 	}
 	e.Erasing = true
 	e.Owed = false
-	if e.Blob != nil {
-		m.attDropBlob(e.Blob.ID)
-		e.Blob = nil
-	}
+	m.dropBlob(e)
 	if e.Dir == DirOut && e.State != AttDelivered && !(e.State == AttFailed && e.Reason != ReasonUnconfirmed) {
 		a := m.st.attach()
 		a.Gone = append(a.Gone, AttGone{Conn: e.Conn, Msg: e.Msg, Until: e.SentAt.Add(attwire.MissingWindow)})
+		if n := len(a.Gone); n > GoneMax {
+			a.Gone = append([]AttGone(nil), a.Gone[n-GoneMax:]...)
+		}
 	}
 	m.dirty = true
 	m.attWake()
@@ -901,6 +1006,8 @@ func (m *Manager) attConnectionRemoved(conn string, now time.Time) {
 	delete(a.Reuploads, conn)
 	delete(a.Turns, conn)
 	delete(a.Refreshed, conn)
+	delete(a.FullFed, conn)
+	delete(a.Renewed, conn)
 	m.dirty = true
 }
 
@@ -925,6 +1032,11 @@ func (m *Manager) attHousekeeping(now time.Time) {
 			continue
 		}
 		switch {
+		case e.Dir == DirOut && e.State == AttSending && e.Owed && (e.Stopped || now.Sub(e.SentAt) > attwire.MissingWindow):
+			// A fresh upload owed to a peer whose mailbox refused for good,
+			// or past missing_window: it can never be made.
+			e.Owed = false
+			m.attFail(e, ReasonUnconfirmed, now)
 		case e.Dir == DirOut && e.State == AttSending && now.Sub(e.SentAt) >= attwire.Window && !e.Owed &&
 			(!e.LatePending || m.attPeerReady(e.Conn) == nil):
 			m.attFail(e, ReasonUnconfirmed, now)
@@ -954,6 +1066,16 @@ func (m *Manager) attHousekeeping(now time.Time) {
 			delete(a.Refreshed, c)
 		}
 	}
+	for c, t := range a.Renewed {
+		if now.Sub(t) > time.Hour {
+			delete(a.Renewed, c)
+		}
+	}
+	for c, t := range a.FullFed {
+		if now.Sub(t) > 24*time.Hour {
+			delete(a.FullFed, c)
+		}
+	}
 }
 
 // attLateAtUnlock marks outgoing attachments whose window ended while the
@@ -981,20 +1103,24 @@ func sortedEntries(a *AttachState) []*AttEntry {
 	return out
 }
 
-// attWrittenObjects lists the store keys and versions of every written
-// attachment object (§12.5 step 3): no key material.
-func (m *Manager) attWrittenObjects() []storedObject {
+// attObjects lists the store keys of every attachment object the index
+// names (§12.5 step 3): a written one with its recorded version, one not
+// marked written with "" (read, then deleted, a missing one counting as
+// deleted: an earlier attempt may have left it). No key material.
+func (m *Manager) attObjects() []storedObject {
 	if m.st == nil || m.st.Attach == nil {
 		return nil
 	}
 	var out []storedObject
 	for _, e := range sortedEntries(m.st.Attach) {
+		c, t := storedObject{Key: attwire.ContentKey(m.st.VaultID, e.ID)}, storedObject{Key: attwire.ThumbKey(m.st.VaultID, e.ID)}
 		if e.CW {
-			out = append(out, storedObject{attwire.ContentKey(m.st.VaultID, e.ID), e.CVer})
+			c.Ver = e.CVer
 		}
 		if e.TW {
-			out = append(out, storedObject{attwire.ThumbKey(m.st.VaultID, e.ID), e.TVer})
+			t.Ver = e.TVer
 		}
+		out = append(out, c, t)
 	}
 	return out
 }

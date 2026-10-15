@@ -4,11 +4,13 @@ package e2e
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -169,7 +171,7 @@ func TestAttachmentMaliciousPeer(t *testing.T) {
 	if !hasAudit(t, b, "drop.attachment_malformed", "") {
 		t.Fatal("malformed attachments not audited")
 	}
-	if !hasAudit(t, b, "message.attachment_refused", svg+":type") {
+	if !hasAudit(t, b, "message.attachment_refused", svg) {
 		t.Fatal("refusal not audited")
 	}
 }
@@ -267,7 +269,7 @@ func TestAttachmentQuotas(t *testing.T) {
 	waitEvent(t, a.app, "sync.event", func(m json.RawMessage) bool {
 		return attState(aConn, m4, "failed")(m) && has("reason", "refused:rate")(m)
 	})
-	if !hasAudit(t, b, "drop.attachment_rate", "") || !hasAudit(t, b, "message.attachment_refused", m2+":full") {
+	if !hasAudit(t, b, "drop.attachment_rate", "") || !hasAudit(t, b, "message.attachment_refused", m2) {
 		t.Fatal("refusals not audited")
 	}
 	waitNoBlobs(t, b)
@@ -524,4 +526,113 @@ func TestAttachmentHeldVault(t *testing.T) {
 			t.Fatalf("%s while held: %q", typ, rr.ErrorCode())
 		}
 	}
+}
+
+// Owner decision of 2026-10-15 (§10.5.1 limits): a received attachment's
+// declared size holds room only while its fetch is in progress. Four
+// connections that declare 8 MiB each and never upload do not block the
+// owner's own sending; an upload that arrives when it does not fit is
+// refused (full: a generic refusal to the sender).
+func TestAttachmentReservations(t *testing.T) {
+	r := relaytest.Start(t, nil)
+	lim := vault.DefaultAttachLimits
+	lim.Storage = 20 << 20 // less than the four declarations
+	b := newTestVault(t, r.URL, "b", func(o *vault.Options) { fastAttach(o); o.AttachLimits = &lim })
+	var ids []string
+	var evil *testVault
+	var evilConn string
+	for _, name := range []string{"e1", "e2", "e3", "e4"} {
+		e := newTestVault(t, r.URL, name, fastAttach)
+		ec, _ := connect(t, e, b, 3600)
+		id := ulid(t)
+		ids = append(ids, id)
+		rawSend(t, e, ec, vault.TypeAttDeliver, rawDeliver(id, "", peerView(nil, 8000000, testThumb, "")))
+		evil, evilConn = e, ec
+	}
+	for _, id := range ids {
+		waitEntry(t, b, id, func(e vault.AttEntry) bool { return e.State == vault.AttFetching })
+	}
+	c := newTestVault(t, r.URL, "c", fastAttach)
+	bc, _ := connect(t, b, c, 3600)
+	mine, _ := sendPhoto(t, b, bc, "mine", photo(t, 15<<20/2)) // 7.5 MiB of the 20
+	waitEvent(t, b.app, "sync.event", attState(bc, mine, "delivered"))
+
+	// e4's upload (8 MiB) arrives once b asked for it: 7.5 + 8 + thumbnails
+	// would fit, but first fill the store with a second photo of b's own.
+	more, _ := sendPhoto(t, b, bc, "", photo(t, 6<<20))
+	waitEvent(t, b.app, "sync.event", attState(bc, more, "delivered"))
+	last := ids[3]
+	waitEntry(t, b, last, func(e vault.AttEntry) bool { return e.Asked })
+	content := photo(t, 8000000)
+	up := uploadAsPeer(t, evil, evilConn, content)
+	rawSend(t, evil, evilConn, vault.TypeAttDeliver, rawDeliver(last, "", peerView(up, len(content), testThumb, "")))
+	waitEntry(t, b, last, func(e vault.AttEntry) bool { return e.State == vault.AttFailed && e.Reason == vault.ReasonFull })
+	waitNoBlobs(t, b)
+}
+
+// A damaged content object (the host can change what it stores) is read
+// again only with the retry's backoff, and after a few failed reads the
+// attachment fails (bad, audited): never a loop of reads.
+func TestAttachmentCorruptObject(t *testing.T) {
+	r := relaytest.Start(t, nil)
+	var gets atomicCount
+	a := newTestVault(t, r.URL, "a", func(o *vault.Options) {
+		fastAttach(o)
+		o.Store = &countingStore{Store: o.Store, n: &gets}
+	})
+	evil := newTestVault(t, r.URL, "evil", fastAttach)
+	aConn, eConn := connect(t, a, evil, 3600)
+	lockVault(t, evil)
+	msg, att := sendPhoto(t, a, aConn, "", photo(t, 4096))
+	waitEntry(t, a, msg, func(e vault.AttEntry) bool { return e.DeliverID != "" })
+	// The host damages the stored content.
+	key := attwire.ContentKey(a.vaultID, att)
+	_, v, err := a.store.Get(ctxT(t, 10*time.Second), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.store.Put(ctxT(t, 10*time.Second), key, make([]byte, 5000), v); err != nil {
+		t.Fatal(err)
+	}
+	m, _, err := evil.unlock(ctxT(t, 30*time.Second), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evil.mu.Lock()
+	evil.m = m
+	evil.mu.Unlock()
+	t.Cleanup(func() { _ = m.Lock(ctxT(t, 30*time.Second)) })
+	gets.reset()
+	rawSend(t, evil, eConn, vault.TypeAttStatus, []byte(`{"message_id":"`+msg+`","status":"missing","at":"`+envelope.FormatTS(time.Now())+`"}`))
+	waitEvent(t, a.app, "sync.event", func(b json.RawMessage) bool { return attState(aConn, msg, "failed")(b) && has("reason", "bad")(b) })
+	time.Sleep(2 * time.Second)
+	if n := gets.get(key); n < 3 || n > 4 {
+		t.Fatalf("%d reads of the damaged object", n)
+	}
+}
+
+type atomicCount struct {
+	mu sync.Mutex
+	m  map[string]int
+}
+
+func (c *atomicCount) add(k string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.m == nil {
+		c.m = map[string]int{}
+	}
+	c.m[k]++
+}
+func (c *atomicCount) get(k string) int { c.mu.Lock(); defer c.mu.Unlock(); return c.m[k] }
+func (c *atomicCount) reset()           { c.mu.Lock(); defer c.mu.Unlock(); c.m = nil }
+
+type countingStore struct {
+	store.Store
+	n *atomicCount
+}
+
+func (s *countingStore) Get(ctx context.Context, key string) ([]byte, store.Version, error) {
+	s.n.add(key)
+	return s.Store.Get(ctx, key)
 }

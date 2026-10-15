@@ -7,6 +7,7 @@ import (
 	"math/rand/v2"
 	"runtime/debug"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/vettid/vettid-relay/relayauth"
@@ -48,6 +49,17 @@ const OwnerFetchStart = 30 * time.Second
 // AttachTick is the runner's period when nothing wakes it.
 const AttachTick = 30 * time.Second
 
+// attMinGap is the least time between two transfers of one attachment.
+const attMinGap = time.Second
+
+// attWriteWait bounds how long a deletion waits for the runner's store
+// writes in flight (a store request is given 60 s, VAULT-HOST-PROTOCOL §9).
+const attWriteWait = 75 * time.Second
+
+// attFetchBound is how long an owner's fetch may take from its request to
+// its answer (§10.5.1: within 120 s).
+const attFetchBound = 120 * time.Second
+
 type attFetch struct {
 	device string
 	req    envelope.Inner // id and type of the request
@@ -70,6 +82,9 @@ type attRunner struct {
 	fetching map[string]int // device id -> content fetches in progress
 	discards []attDiscard
 	drops    []string // blob ids of the own mailbox to delete
+	// lastRun is when each entry's last transfer ended: none starts again
+	// within attMinGap, whatever path left it due (no hot loop).
+	lastRun map[string]time.Time
 	// drained: the collect loop drained the mailbox once since the
 	// unlock; purged: the orphan purge ran since then.
 	drained, purged bool
@@ -126,7 +141,7 @@ func (m *Manager) attStart(parent context.Context) {
 		return
 	}
 	ctx, cancel := context.WithCancel(parent)
-	m.att = &attRunner{ctx: ctx, cancel: cancel, wake: make(chan struct{}, 1), running: map[string]bool{}, fetching: map[string]int{}}
+	m.att = &attRunner{ctx: ctx, cancel: cancel, wake: make(chan struct{}, 1), running: map[string]bool{}, fetching: map[string]int{}, lastRun: map[string]time.Time{}}
 	go m.attLoop(m.att)
 }
 
@@ -184,6 +199,11 @@ func (m *Manager) attPass(r *attRunner) bool {
 		return false
 	}
 	now := m.attNow()
+	for id, t := range r.lastRun {
+		if time.Since(t) > time.Minute {
+			delete(r.lastRun, id)
+		}
+	}
 	m.attHousekeeping(now)
 	m.attBusyFetches(m.now())
 	starts := m.attSchedule(now)
@@ -262,7 +282,7 @@ func (m *Manager) attSchedule(now time.Time) []attJob {
 		if free <= 0 {
 			break
 		}
-		if e.Erasing || r.running[e.ID] || now.Before(e.NotBefore) && !m.attTokenArrived(e) {
+		if e.Erasing || r.running[e.ID] || now.Before(e.NotBefore) && !m.attTokenArrived(e) || time.Since(r.lastRun[e.ID]) < attMinGap {
 			continue
 		}
 		var j attJob
@@ -277,6 +297,10 @@ func (m *Manager) attSchedule(now time.Time) []attJob {
 			e.LatePending = false // the deliver went out before: the window decides now
 			m.dirty = true
 		case e.Dir == DirIn && e.State == AttFetching && e.Blob != nil:
+			if !m.attFits(e) {
+				m.attRefuseFull(e, now) // its reservation starts with the fetch: checked now
+				continue
+			}
 			j = m.inFetchJob(r, e)
 		case e.Dir == DirOut && e.Owed && e.State == AttSending && e.CW && !e.Stopped:
 			later = append(later, e)
@@ -343,6 +367,9 @@ func (m *Manager) transfer(r *attRunner, prio int, id string, deadline time.Time
 		if m.att == r {
 			r.slots--
 			delete(r.running, id)
+			if !strings.HasPrefix(id, "fetch:") {
+				r.lastRun[id] = time.Now()
+			}
 		}
 		m.mu.Unlock()
 		r.poke()
@@ -441,9 +468,18 @@ func (m *Manager) fetchBlob(ctx context.Context, b AttBlob, maxBlob int) ([]byte
 
 // putObject writes an attachment object: create-only, or, when an
 // earlier attempt whose flush never happened left one, over it at its
-// version (§10.5.1 write order).
-func (m *Manager) putObject(key string, data []byte) (store.Version, error) {
-	ctx := context.Background()
+// version (§10.5.1 write order). It writes nothing once the vault is
+// locked, and a deletion waits for a write under way (attWaitWrites).
+func (m *Manager) putObject(r *attRunner, key string, data []byte) (store.Version, error) {
+	m.mu.Lock()
+	if m.locked || m.att != r {
+		m.mu.Unlock()
+		return "", ErrLocked
+	}
+	m.attWrites.Add(1)
+	m.mu.Unlock()
+	defer m.attWrites.Done()
+	ctx := r.ctx
 	v, err := m.opt.Store.Put(ctx, key, data, "")
 	if errors.Is(err, store.ErrConflict) {
 		_, old, gerr := m.opt.Store.Get(ctx, key)
@@ -453,6 +489,46 @@ func (m *Manager) putObject(key string, data []byte) (store.Version, error) {
 		return m.opt.Store.Put(ctx, key, data, old)
 	}
 	return v, err
+}
+
+// attWaitWrites waits, at most d, for the runner's store writes in flight.
+func (m *Manager) attWaitWrites(d time.Duration) {
+	done := make(chan struct{})
+	go func() { m.attWrites.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(d):
+	}
+}
+
+// attRetryApply schedules the retry of an entry after an error of the
+// runner's own (a store request, sealing): every error path does, so that
+// none reschedules at once.
+func (m *Manager) attRetryApply(r *attRunner, id string) {
+	m.attApply(r, id, func(e *AttEntry, now time.Time) {
+		if e != nil {
+			attRetry(e, now, 0)
+			m.dirty = true
+		}
+	})
+}
+
+// attCorruptApply counts an object that did not open: retried with the
+// backoff, and after attCorruptMax the attachment fails (bad, audited).
+func (m *Manager) attCorruptApply(r *attRunner, id string) {
+	m.attApply(r, id, func(e *AttEntry, now time.Time) {
+		if e == nil || e.Erasing {
+			return
+		}
+		e.Corrupt++
+		m.dirty = true
+		if e.Corrupt >= attCorruptMax {
+			e.Owed = false
+			m.attFail(e, ReasonBad, now)
+			return
+		}
+		attRetry(e, now, 0)
+	})
 }
 
 // deleteObject deletes an attachment object at its recorded version (a
@@ -529,7 +605,10 @@ func (m *Manager) attDrain(r *attRunner) {
 // outPrepareJob: sending steps 5 and 6, then 7 with the content in hand.
 func (m *Manager) outPrepareJob(r *attRunner, e *AttEntry) attJob {
 	id, blob, key, vid, maxBlob := e.ID, *e.Blob, append([]byte(nil), e.Key...), m.st.VaultID, m.attMaxBlob()
+	blob.Key = append([]byte(nil), blob.Key...)
 	return func() {
+		defer suite.Wipe(key)
+		defer suite.Wipe(blob.Key)
 		m.transfer(r, PrioTransfer, id, time.Time{}, func(ctx context.Context) int {
 			if ctx == nil {
 				return 0
@@ -557,16 +636,12 @@ func (m *Manager) outPrepareJob(r *attRunner, e *AttEntry) attJob {
 			n := len(content)
 			obj, err := attwire.SealObject(key, vid, id, attwire.PartContent, content)
 			if err != nil {
+				m.attRetryApply(r, id)
 				return n
 			}
-			ver, err := m.putObject(attwire.ContentKey(vid, id), obj)
+			ver, err := m.putObject(r, attwire.ContentKey(vid, id), obj)
 			if err != nil {
-				m.attApply(r, id, func(e *AttEntry, now time.Time) {
-					if e != nil {
-						attRetry(e, now, 0)
-						m.dirty = true
-					}
-				})
+				m.attRetryApply(r, id)
 				return n
 			}
 			var deliver bool
@@ -578,6 +653,9 @@ func (m *Manager) outPrepareJob(r *attRunner, e *AttEntry) attJob {
 				e.CW, e.CVer = true, ver
 				if e.Erasing || e.State != AttPreparing {
 					return
+				}
+				if e.Blob != nil {
+					suite.Wipe(e.Blob.Key)
 				}
 				e.Mime, e.Blob, e.Attempts, e.NotBefore = mime, nil, 0, time.Time{}
 				m.attSet(e, AttSending, "", now)
@@ -605,12 +683,13 @@ func (m *Manager) outPrepareJob(r *attRunner, e *AttEntry) attJob {
 // outDeliverJob: sending step 7, or a fresh upload on missing (reupload).
 // noUpload sends the deliver without a blob.
 func (m *Manager) outDeliverJob(r *attRunner, e *AttEntry, reupload, noUpload bool) attJob {
-	id, cver, key, vid := e.ID, e.CVer, append([]byte(nil), e.Key...), m.st.VaultID
+	id, key, vid := e.ID, append([]byte(nil), e.Key...), m.st.VaultID
 	prio := PrioTransfer
 	if reupload {
 		prio = PrioReupload
 	}
 	return func() {
+		defer suite.Wipe(key)
 		m.transfer(r, prio, id, time.Time{}, func(ctx context.Context) int {
 			if ctx == nil {
 				return 0
@@ -619,17 +698,12 @@ func (m *Manager) outDeliverJob(r *attRunner, e *AttEntry, reupload, noUpload bo
 			if !noUpload {
 				obj, _, err := m.opt.Store.Get(ctx, attwire.ContentKey(vid, id))
 				if err != nil {
-					m.attApply(r, id, func(e *AttEntry, now time.Time) {
-						if e != nil {
-							attRetry(e, now, 0)
-							m.dirty = true
-						}
-					})
+					m.attRetryApply(r, id)
 					return 0
 				}
-				_ = cver
 				if content, err = attwire.OpenObject(key, vid, id, attwire.PartContent, obj); err != nil {
-					return 0
+					m.attCorruptApply(r, id) // a damaged object: retried, then failed
+					return len(obj)
 				}
 				defer suite.Wipe(content)
 			}
@@ -661,21 +735,22 @@ func (m *Manager) deliver(ctx context.Context, r *attRunner, id string, content 
 		vid, tw, thumbKey = m.st.VaultID, e.TW, append([]byte(nil), e.Key...)
 		thumb = append([]byte(nil), e.Thumb...)
 	})
-	if !ok || token == "" {
+	defer suite.Wipe(thumbKey)
+	if !ok {
+		return // locked
+	}
+	if token == "" {
+		m.attRetryApply(r, id) // not reachable now: retried later
 		return
 	}
 	if tw {
 		obj, _, err := m.opt.Store.Get(ctx, attwire.ThumbKey(vid, id))
-		if err == nil {
-			thumb, err = attwire.OpenObject(thumbKey, vid, id, attwire.PartThumb, obj)
-		}
 		if err != nil {
-			m.attApply(r, id, func(e *AttEntry, now time.Time) {
-				if e != nil {
-					attRetry(e, now, 0)
-					m.dirty = true
-				}
-			})
+			m.attRetryApply(r, id)
+			return
+		}
+		if thumb, err = attwire.OpenObject(thumbKey, vid, id, attwire.PartThumb, obj); err != nil {
+			m.attCorruptApply(r, id)
 			return
 		}
 	}
@@ -685,6 +760,8 @@ func (m *Manager) deliver(ctx context.Context, r *attRunner, id string, content 
 	if !noUpload {
 		data, bkey, sum, err := envelope.SealBlob(content)
 		if err != nil {
+			suite.Wipe(thumb)
+			m.attRetryApply(r, id)
 			return
 		}
 		bid, exp, err := m.relay.PutBlob(ctx, relayURL, mailbox, token, data)
@@ -772,6 +849,9 @@ func (m *Manager) deliver(ctx context.Context, r *attRunner, id string, content 
 		m.dirty = true
 	})
 	suite.Wipe(thumb)
+	if blob != nil {
+		suite.Wipe(blob.Key) // sealed into the deliver by now
+	}
 }
 
 // attAskToken asks the peer for a fresh standing token after a token
@@ -793,7 +873,10 @@ func (m *Manager) attAskToken(p *Peer, e *AttEntry, now time.Time) bool {
 // inFetchJob: receiving step 2.
 func (m *Manager) inFetchJob(r *attRunner, e *AttEntry) attJob {
 	id, blob, key, vid, maxBlob := e.ID, *e.Blob, append([]byte(nil), e.Key...), m.st.VaultID, m.attMaxBlob()
+	blob.Key = append([]byte(nil), blob.Key...)
 	return func() {
+		defer suite.Wipe(key)
+		defer suite.Wipe(blob.Key)
 		m.transfer(r, PrioTransfer, id, time.Time{}, func(ctx context.Context) int {
 			if ctx == nil {
 				return 0
@@ -808,15 +891,16 @@ func (m *Manager) inFetchJob(r *attRunner, e *AttEntry) attJob {
 					case "transient":
 						attRetry(e, now, relayRetryAfter(err))
 					case "unknown":
+						suite.Wipe(e.Blob.Key)
 						e.Blob = nil // expired or deleted: asked for with missing
 					case ReasonType:
+						m.attUncount(e)               // type refusals do not count against peer_attachments
 						m.attFail(e, ReasonType, now) // drops the blob
 						m.attSendStatus(e.Conn, strictjson.NewBuilder().String("message_id", e.Msg).String("status", StatusRefused).String("reason", ReasonType), now)
 						m.record(Activity{Kind: "message.attachment_refused", ConnectionID: e.Conn, Ref: e.Msg + ":" + ReasonType, Direction: DirIn, Audit: true}, m.now())
 					default:
 						e.Fetches++
-						m.attDropBlob(blob.ID)
-						e.Blob = nil
+						m.dropBlob(e)
 						if e.Fetches >= m.attLim().Reoffers+1 {
 							m.attFail(e, ReasonBad, now)
 						}
@@ -830,16 +914,12 @@ func (m *Manager) inFetchJob(r *attRunner, e *AttEntry) attJob {
 			n := len(content)
 			obj, err := attwire.SealObject(key, vid, id, attwire.PartContent, content)
 			if err != nil {
+				m.attRetryApply(r, id)
 				return n
 			}
-			ver, err := m.putObject(attwire.ContentKey(vid, id), obj)
+			ver, err := m.putObject(r, attwire.ContentKey(vid, id), obj)
 			if err != nil {
-				m.attApply(r, id, func(e *AttEntry, now time.Time) {
-					if e != nil {
-						attRetry(e, now, 0)
-						m.dirty = true
-					}
-				})
+				m.attRetryApply(r, id)
 				return n
 			}
 			ok := m.attApply(r, id, func(e *AttEntry, now time.Time) {
@@ -850,6 +930,9 @@ func (m *Manager) inFetchJob(r *attRunner, e *AttEntry) attJob {
 				e.CW, e.CVer = true, ver
 				if e.Erasing || e.State != AttFetching {
 					return
+				}
+				if e.Blob != nil {
+					suite.Wipe(e.Blob.Key)
 				}
 				e.Mime, e.Size, e.Blob, e.Attempts, e.NotBefore = mime, n, nil, 0, time.Time{}
 				m.attSet(e, AttStored, "", now)
@@ -924,9 +1007,18 @@ func (m *Manager) ownerFetchJob(r *attRunner, f *attFetch) attJob {
 				answer(nil, "unavailable")
 				return 0
 			}
+			defer suite.Wipe(key)
+			// §10.5.1: answered within 120 s of the request; what is left of
+			// them bounds the read and the upload (relay_error after).
+			ctx, cancel := context.WithDeadline(ctx, f.at.Add(attFetchBound))
+			defer cancel()
 			obj, _, err := m.opt.Store.Get(ctx, attwire.ContentKey(vid, f.att))
 			if err != nil {
-				answer(nil, "unavailable")
+				if ctx.Err() != nil {
+					answer(nil, "relay_error")
+				} else {
+					answer(nil, "unavailable")
+				}
 				return 0
 			}
 			content, err := attwire.OpenObject(key, vid, f.att, attwire.PartContent, obj)
@@ -1098,9 +1190,10 @@ func (m *Manager) attMaintain(r *attRunner, w *attWork) {
 	for _, t := range w.thumbs {
 		obj, err := attwire.SealObject(t.key, t.vid, t.id, attwire.PartThumb, t.thumb)
 		suite.Wipe(t.thumb)
+		suite.Wipe(t.key)
 		var ver store.Version
 		if err == nil {
-			ver, err = m.putObject(attwire.ThumbKey(t.vid, t.id), obj)
+			ver, err = m.putObject(r, attwire.ThumbKey(t.vid, t.id), obj)
 		}
 		if err == nil && m.attCrashAt("thumb") {
 			return

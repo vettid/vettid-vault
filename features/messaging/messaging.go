@@ -741,6 +741,9 @@ func (f *Feature) del(s *vault.Session, o strictjson.Object) (json.RawMessage, e
 	ms := f.convs[conn]
 	for i, m := range ms {
 		if m.ID == id {
+			if viewerOf(s) == viewAgent && m.hiddenFromAgents() {
+				return nil, errNotFound // not there for an agent (§10.5.1 "Agents")
+			}
 			f.convs[conn] = append(ms[:i:i], ms[i+1:]...)
 			if m.AttID != "" && s != nil {
 				// §10.5.1 "Deletion": its stored attachment is erased.

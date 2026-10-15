@@ -255,8 +255,6 @@ func (m *Manager) handleMessage(ctx context.Context, msg Message, now time.Time)
 		return ackAfterFlush // relay msg_id dedupe (§8.2 layer 1)
 	}
 	m.st.SeenMsgIDs[msg.MsgID] = now
-	m.curJTI = msg.JTI // the deposit token of the message being handled
-	defer func() { m.curJTI = "" }()
 	sender, ok := relayauth.DecodeKey(msg.Sender)
 	if !ok {
 		m.audit(now, "bad_sender", "")

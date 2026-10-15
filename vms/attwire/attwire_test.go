@@ -109,6 +109,11 @@ func TestParsePeerView(t *testing.T) {
 	if v, err := ParsePeerView(parse(t, `{"kind":"video","size":100,"width":1,"height":1,"thumb":"`+th+`"}`), ReferenceMaxContent); err != nil || v.Kind != "video" {
 		t.Fatal("other kind is returned for a refusal")
 	}
+	// Another kind needs neither dimensions nor a thumbnail: refused
+	// (type), not dropped as malformed.
+	if v, err := ParsePeerView(parse(t, `{"kind":"file","size":100}`), ReferenceMaxContent); err != nil || v.Kind != "file" || v.Size != 100 {
+		t.Fatalf("another kind without photo members: %v", err)
+	}
 	if v, err := ParsePeerView(parse(t, `{"kind":"photo","size":100,"width":1,"height":1,"thumb":"`+b64([]byte("<svg/>"))+`"}`), ReferenceMaxContent); err != nil || !v.ThumbBad {
 		t.Fatal("thumbnail type")
 	}
@@ -140,6 +145,12 @@ func FuzzParsePeerView(f *testing.F) {
 		}
 		v, err := ParsePeerView(o, ReferenceMaxContent)
 		if err != nil {
+			return
+		}
+		if v.Kind != KindPhoto {
+			if v.Blob != nil || len(v.Thumb) > 0 || v.Size > ReferenceMaxContent || v.Width > PhotoMaxSide {
+				t.Fatalf("another kind kept invalid members: %+v", v)
+			}
 			return
 		}
 		if v.Size < 1 || v.Size > ReferenceMaxContent || len(v.Thumb) > ThumbMaxBytes || v.Width < 1 || v.Width > PhotoMaxSide ||

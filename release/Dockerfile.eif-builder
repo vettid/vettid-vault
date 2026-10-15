@@ -3,7 +3,7 @@
 # version, every RPM and every blob that goes into an EIF checked against
 # release/eif-toolchain.lock (build context: release/). The kernel, its
 # command line, init, linuxkit and the NSM module are the lock's blob set
-# (aws-nitro-enclaves-sdk-bootstrap's release), which replaces the one in
+# (vettid-vault's own build, release/kernel), which replaces the one in
 # the devel RPM. scripts/build-eif.sh runs nitro-cli
 # build-enclave in this container (EIF_BUILDER) with the host's docker
 # socket mounted; building an EIF needs docker and the blobs, not the

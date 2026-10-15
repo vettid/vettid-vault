@@ -9,7 +9,7 @@ formats are VAULT-MESSAGING 0.10.0 §11.10.
 | Piece | Where |
 |---|---|
 | Release workflow (two clean arm64 builds, comparison, attestations, draft release) | [`.github/workflows/release.yml`](../.github/workflows/release.yml) |
-| Pinned EIF toolchain (Amazon Linux 2023 by digest, `aws-nitro-enclaves-cli` RPMs by SHA-256, the enclave kernel blob set from an `aws-nitro-enclaves-sdk-bootstrap` release by SHA-256 of the archive and of each blob) | [`release/Dockerfile.eif-builder`](../release/Dockerfile.eif-builder), [`release/eif-toolchain.lock`](../release/eif-toolchain.lock) |
+| Pinned EIF toolchain (Amazon Linux 2023 by digest, `aws-nitro-enclaves-cli` RPMs by SHA-256, the enclave kernel blob set that vettid-vault builds from kernel.org source and publishes as a `kernel/<version>-<n>` release, by SHA-256 of the archive and of each blob) | [`release/Dockerfile.eif-builder`](../release/Dockerfile.eif-builder), [`release/eif-toolchain.lock`](../release/eif-toolchain.lock) |
 | One clean build with that toolchain (CI and independent rebuilds) | [`release/rebuild.sh`](../release/rebuild.sh) → [`scripts/build-eif.sh`](../scripts/build-eif.sh) |
 | EIF inspection: PCRs recomputed from the file, build comparison, measurement matching | [`cmd/eifinfo`](../cmd/eifinfo), [`internal/eif`](../internal/eif) |
 | Per-channel release constants, the placeholder gate and the only-grow check of the feature list | [`enclave/releasecfg/`](../enclave/releasecfg), `go run ./cmd/releasecfg check [-previous <file>] <channel>` |
@@ -215,7 +215,7 @@ git push origin release/prod/N
 | `eif_measured_sha256` | every EIF section except the metadata, with their headers: equal between builds |
 | `pcr0`, `pcr1`, `pcr2` | recomputed from the EIF and checked against nitro-cli's |
 | `nitro_cli_version`, `toolchain_lock_sha256` | the toolchain |
-| `blobs_version` | the enclave kernel blob set's release from the lock (`v6.6.79`; pinned already by `toolchain_lock_sha256`; empty for a build without the pinned toolchain). Added after staging release 12: earlier releases' files do not have it and keep their own hashes; `eifinfo match` prints it when it differs but does not require it to match |
+| `blobs_version` | the enclave kernel blob set's release from the lock (`vettid-6.6.158-1` from staging release 13; `v6.6.79`, AWS's, before; pinned already by `toolchain_lock_sha256`; empty for a build without the pinned toolchain). Added after staging release 12: earlier releases' files do not have it and keep their own hashes; `eifinfo match` prints it when it differs but does not require it to match |
 
 **Why the EIF file hash differs between builds.** nitro-cli 1.5.0 writes a
 metadata section into every EIF: the build time (to the nanosecond) and
@@ -366,8 +366,17 @@ release keys rely on.
 toolchain image and so gives the same PCRs; VAULT-RELEASES §5.1 asks for
 that comparison once on real hardware. A nitro-cli installed from the
 Amazon Linux repository does not: its blobs are a different enclave
-kernel (Linux 4.14) from the lock's (Linux 6.6.79, the blob set of
-`aws-nitro-enclaves-sdk-bootstrap` release `v6.6.79`).
+kernel (Linux 4.14) from the lock's (Linux 6.6.158, built by
+vettid-vault from source; docs/KERNEL.md).
+
+The kernel blob set itself can be rebuilt from source as well, on the
+same kind of machine (arm64 Linux with docker), and compared with the
+hashes the lock pins: `release/kernel/build.sh out "$PWD/release/kernel/SHA256SUMS"`
+(an absolute path: `build.sh` at `a344277` checks it from inside `out`),
+or `release/kernel/rebuild-check.sh`, which also compares with the lock
+and the published set
+(docs/KERNEL.md, "How an auditor rebuilds and compares"). The independent
+rebuild of a release that changes the kernel does this too.
 
 ## The compatibility matrix
 
@@ -429,14 +438,22 @@ any of it is a release like any other. The lock has two parts:
   `release/Dockerfile.eif-builder`'s `FROM` to the same digest
   (`scripts/lint_test.go` checks they agree). The blobs inside the devel
   RPM are not used: the builder removes them.
-- **The enclave kernel blobs.** `blobs_version` names the
-  [aws-nitro-enclaves-sdk-bootstrap](https://github.com/aws/aws-nitro-enclaves-sdk-bootstrap)
-  release, `blobs_url` its `enclaves-blobs.txz` asset and `blobs_dir`
-  the directory of the arm64 set inside it. The builder downloads the
-  archive, checks its SHA-256, and installs `Image`, `Image.config`,
-  `cmdline`, `init`, `linuxkit` and `nsm.ko` from `blobs_dir` in place
-  of the RPM's, then checks each one's SHA-256. A new kernel is a new
-  `blobs_version`, `blobs_url` and those seven hash lines.
+- **The enclave kernel blobs.** `blobs_version` names the blob set's
+  release: `vettid-<version>-<n>` for vettid-vault's own build
+  (`kernel/<version>-<n>` releases of this repository, built by
+  `release/kernel` from kernel.org source; docs/KERNEL.md), or `v<version>`
+  for an [aws-nitro-enclaves-sdk-bootstrap](https://github.com/aws/aws-nitro-enclaves-sdk-bootstrap)
+  release. `blobs_url` is that release's archive and `blobs_dir` the
+  directory of the arm64 set inside it. `kernel_lock_sha256` is the
+  SHA-256 of the `release/kernel/kernel.lock` the set was built from.
+  The builder downloads the archive, checks its SHA-256, and installs
+  `Image`, `Image.config`, `cmdline`, `init`, `linuxkit` and `nsm.ko`
+  from `blobs_dir` in place of the RPM's, then checks each one's
+  SHA-256. A new kernel is a new blob set release, then a new
+  `blobs_version`, `blobs_url`, `kernel_lock_sha256` and those seven hash
+  lines, and `release/enclave-kernel` (`kernel_release`,
+  `kernel_hardened`), which the enclave binary embeds and its self-test
+  requires (`scripts/lint_test.go` checks they agree).
 
 To check the seven hashes by hand (the same check the builder makes):
 
@@ -456,12 +473,26 @@ and each blob's the `/usr/share/nitro_enclaves/blobs/<name>` line.
 configuration. The workflow's dry run on the pull request shows whether
 the new toolchain still builds and reproduces.
 
-**One source for the blobs.** The archive exists in one place, a release
-asset of AWS's repository. The hashes make a changed archive fail the
-build, but a removed one would stop every rebuild of a release that uses
-it. Proposed, not done: keep a copy of the archive as an asset on
-vettid-vault's own release for each release that uses it (the owner
-decides), so a rebuild can take it from there and check the same hash;
-and later rebuild the blob set independently from
-aws-nitro-enclaves-sdk-bootstrap's sources with its Nix build, so the
-seven hashes are reproduced rather than only trusted.
+**Copies of the blobs.** Every release carries its own copy of the blob
+archive its EIF was built from: the release workflow's `publish` job
+downloads `blobs_url`, checks the lock's SHA-256 and attaches it to the
+draft release as `enclave-kernel-blobs-<blobs_version>.txz`. If the
+archive's own release ever disappears, a rebuild takes the copy instead
+(the hash is the same):
+
+```sh
+gh release download release/staging/N --repo vettid/vettid-vault --pattern 'enclave-kernel-blobs-*.txz' --dir /tmp/blobs
+# then serve it at blobs_url's place, or point blobs_url at the copy for the rebuild
+```
+
+**Corresponding source.** A release with the source-built kernel
+distributes Linux (GPL-2.0) in its EIF and in that copy, so the same job
+also attaches the recipe's source archive
+(`vettid-vault-release-kernel-<version>-<n>-source.tar.gz`, taken from
+the blob set's release and checked against the lock's
+`kernel_source_sha256` and the release's `SHA256SUMS`) and the
+release notes name the blob set's release and the kernel.org tarball
+(from `release/kernel/kernel.lock`). The blob set's own
+`kernel/<version>-<n>` release carries the kernel.org tarball and its
+signature as well. A rerun of the `publish` job replaces the assets of
+its own draft and refuses to touch a published release.

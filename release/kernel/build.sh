@@ -33,6 +33,11 @@ here="$(cd "$(dirname "$0")" && pwd)"
 lock="$here/kernel.lock"
 out="${1:?usage: release/kernel/build.sh OUT_DIR [EXPECTED_SHA256SUMS]}"
 expected="${2:-}"
+if [ -n "$expected" ]; then
+  # Absolute, since the check runs from inside OUT_DIR.
+  if [ ! -f "$expected" ]; then echo "build: $expected not found" >&2; exit 1; fi
+  expected="$(cd "$(dirname "$expected")" && pwd)/$(basename "$expected")"
+fi
 target="${KERNEL_TARGET:-all}"
 
 val() {

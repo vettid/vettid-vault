@@ -29,6 +29,19 @@ func SealX(key, nonce, aad, plaintext []byte) ([]byte, error) {
 	return a.Seal(nil, nonce, plaintext, aad), nil
 }
 
+// SealXTo is SealX appending to dst (one allocation for a large blob when
+// dst has the room).
+func SealXTo(dst, key, nonce, aad, plaintext []byte) ([]byte, error) {
+	if len(key) != KeySize || len(nonce) != XNonceSize {
+		return nil, ErrKeySize
+	}
+	a, err := chacha20poly1305.NewX(key)
+	if err != nil {
+		return nil, ErrKeySize
+	}
+	return a.Seal(dst, nonce, plaintext, aad), nil
+}
+
 // OpenX decrypts with XChaCha20-Poly1305. The tag is checked in constant
 // time by the AEAD.
 func OpenX(key, nonce, aad, ciphertext []byte) ([]byte, error) {

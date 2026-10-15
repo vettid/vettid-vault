@@ -122,8 +122,26 @@ func (r *MemRelay) DeleteMailbox(context.Context) error { return nil }
 func (r *MemRelay) client() *relayclient.Client { return relayclient.New(r.base, r.key) }
 
 // MintToken implements vault.Relay.
-func (r *MemRelay) MintToken(sub ed25519.PublicKey, ttl time.Duration, jti string, q *relayauth.Quota) (string, error) {
-	return r.client().MintToken(relayauth.EncodeKey(sub), r.base, relayclient.TokenOptions{TTL: ttl, JTI: jti, Quota: q})
+func (r *MemRelay) MintToken(sub ed25519.PublicKey, ttl time.Duration, jti string, q *relayauth.Quota, ownerDevice bool) (string, error) {
+	return r.client().MintToken(relayauth.EncodeKey(sub), r.base, relayclient.TokenOptions{TTL: ttl, JTI: jti, Quota: q, OwnerDevice: ownerDevice})
+}
+
+var errNoBlobs = &relayclient.Error{Status: 404, Code: "not_found"}
+
+// PutBlob implements vault.Relay: this relay advertises no blobs.
+func (r *MemRelay) PutBlob(context.Context, string, string, string, []byte) (string, time.Time, error) {
+	return "", time.Time{}, errNoBlobs
+}
+
+// GetBlob implements vault.Relay.
+func (r *MemRelay) GetBlob(context.Context, string) ([]byte, error) { return nil, errNoBlobs }
+
+// DeleteBlob implements vault.Relay.
+func (r *MemRelay) DeleteBlob(context.Context, string) error { return errNoBlobs }
+
+// ListBlobs implements vault.Relay.
+func (r *MemRelay) ListBlobs(context.Context) (vault.BlobList, error) {
+	return vault.BlobList{}, errNoBlobs
 }
 
 // MintOpenToken implements vault.Relay.

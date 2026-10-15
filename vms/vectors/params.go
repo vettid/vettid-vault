@@ -58,6 +58,17 @@ const (
 	SeedCallOfferKEM       byte = 0x54 // the caller's ephemeral KEM key
 	RandCallAnswer         byte = 0x55 // the answerer's encapsulation randomness
 
+	// §5.5 blob and §10.5.1 at-rest object (blob.json, attachment.json;
+	// 0.32.0, release A).
+	KeyBlob        byte = 0x41                                                         // (spec) the blob key
+	NonceBlob      byte = 0x42                                                         // (spec)
+	KeyAtt         byte = 0x43                                                         // (spec) k_att
+	NonceAtt       byte = 0x44                                                         // (spec)
+	NonceAttT      byte = 0x45                                                         // the thumbnail object's nonce
+	BlobVaultID         = "test-vault-0001"                                            // (spec)
+	BlobAttID           = "01JB2Z6V9K3M4N5P6Q7R8S9T60"                                 // (spec)
+	BlobContentHex      = "ffd8ffe0566574744944206174746163686d656e7420766563746f7221" // (spec) 29 bytes
+
 	SessionSenderKid    byte = 0x02
 	SessionRecipientKid byte = 0x01
 

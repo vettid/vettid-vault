@@ -86,6 +86,11 @@ type State struct {
 	Push        *PushRegistration `json:"push,omitempty"`
 	PushPending *PushPending      `json:"push_pending,omitempty"`
 	PushRegs    []time.Time       `json:"push_regs,omitempty"`
+
+	// DeviceTokensMarked: every owner device's standing token carries
+	// owner_device (§7.1; 0.32.0, release A). A vault from before release
+	// A re-mints them at its first unlock under it (§7.2).
+	DeviceTokensMarked bool `json:"device_tokens_marked,omitempty"`
 }
 
 // ReleaseMove is a recorded, not yet confirmed move to another release

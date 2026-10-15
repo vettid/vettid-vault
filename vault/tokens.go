@@ -64,7 +64,13 @@ func (m *Manager) mintReconnect(p *Peer, now time.Time, acc []IssuedToken) (stri
 
 func (m *Manager) mint(p *Peer, kind string, ttl time.Duration, quota *relayauth.Quota, now time.Time, acc []IssuedToken) (string, []IssuedToken, error) {
 	jti := m.newID(now)
-	tok, err := m.relay.MintToken(p.Relay.PK, ttl, jti, quota)
+	// §7.1 (0.32.0, release A): the standing tokens of the vault's own
+	// app carry owner_device; no other token does (not a request,
+	// reconnect or open token, nor a desktop's, an agent's or a
+	// connection's: only the app sends attachments, §10.5.1, so only its
+	// uploads may use the room the relay keeps).
+	ownerDevice := kind == TokStanding && p.Kind == KindApp
+	tok, err := m.relay.MintToken(p.Relay.PK, ttl, jti, quota, ownerDevice)
 	if err != nil {
 		return "", acc, err
 	}
@@ -294,4 +300,20 @@ func (m *Manager) pruneIssued(now time.Time) {
 		}
 	}
 	m.st.Issued = kept
+}
+
+// markDeviceTokens re-mints the active app's standing token at
+// the first unlock under release A, whatever its remaining lifetime, so
+// that each carries owner_device (§7.1, §7.2; 0.32.0). It runs once.
+func (m *Manager) markDeviceTokens(now time.Time) {
+	if m.st.DeviceTokensMarked {
+		return
+	}
+	for _, p := range m.st.Devices {
+		if p.State == PeerActive && p.Kind == KindApp {
+			m.issueTo(p, TokStanding, now)
+		}
+	}
+	m.st.DeviceTokensMarked = true
+	m.dirty = true
 }

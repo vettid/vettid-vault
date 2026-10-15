@@ -307,6 +307,22 @@ func Generate() (map[string][]byte, error) {
 	if err := put("calls.json", cv); err != nil {
 		return nil, err
 	}
+
+	// blob.json (§5.5) and attachment.json (§10.5.1; 0.32.0, release A)
+	bv, err := genBlob()
+	if err != nil {
+		return nil, err
+	}
+	if err := put("blob.json", bv); err != nil {
+		return nil, err
+	}
+	atv, err := genAttachment()
+	if err != nil {
+		return nil, err
+	}
+	if err := put("attachment.json", atv); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 

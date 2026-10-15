@@ -50,6 +50,7 @@ func (m *Manager) Start(ctx context.Context) error {
 	m.record(Activity{Kind: "vault.unlocked", DeviceID: m.unlockedBy, Audit: true}, now)
 	m.ownerCheckInit(now)
 	m.remintIssued(now)
+	m.markDeviceTokens(now)
 	m.reconnectExpired(now)
 	for _, p := range m.st.Devices {
 		if p.State == PeerActive {

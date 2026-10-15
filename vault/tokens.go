@@ -64,7 +64,11 @@ func (m *Manager) mintReconnect(p *Peer, now time.Time, acc []IssuedToken) (stri
 
 func (m *Manager) mint(p *Peer, kind string, ttl time.Duration, quota *relayauth.Quota, now time.Time, acc []IssuedToken) (string, []IssuedToken, error) {
 	jti := m.newID(now)
-	tok, err := m.relay.MintToken(p.Relay.PK, ttl, jti, quota)
+	// §7.1 (0.32.0, release A): the standing tokens of the vault's own
+	// devices carry owner_device; no other token does (not a request,
+	// reconnect or open token, nor any token of a connection).
+	ownerDevice := kind == TokStanding && p.Kind != KindConnection
+	tok, err := m.relay.MintToken(p.Relay.PK, ttl, jti, quota, ownerDevice)
 	if err != nil {
 		return "", acc, err
 	}
@@ -294,4 +298,20 @@ func (m *Manager) pruneIssued(now time.Time) {
 		}
 	}
 	m.st.Issued = kept
+}
+
+// markDeviceTokens re-mints every active owner device's standing token at
+// the first unlock under release A, whatever its remaining lifetime, so
+// that each carries owner_device (§7.1, §7.2; 0.32.0). It runs once.
+func (m *Manager) markDeviceTokens(now time.Time) {
+	if m.st.DeviceTokensMarked {
+		return
+	}
+	for _, p := range m.st.Devices {
+		if p.State == PeerActive {
+			m.issueTo(p, TokStanding, now)
+		}
+	}
+	m.st.DeviceTokensMarked = true
+	m.dirty = true
 }

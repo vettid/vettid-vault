@@ -54,6 +54,21 @@ type stubRelay struct {
 	// claims holds claims put through this relay; two fixtures may share
 	// it (a connection between two vaults in process).
 	claims *map[string][]byte
+	// blobs is an in-memory blob store (RELAY-PROTOCOL §6.8) two fixtures
+	// may share; nil: the relay has no blobs.
+	blobs *stubBlobs
+}
+
+// stubBlobs is a test relay's blob storage, keyed by blob id.
+type stubBlobs struct {
+	mu   sync.Mutex
+	n    int
+	byID map[string]stubBlob
+}
+
+type stubBlob struct {
+	mailbox, sender string
+	data            []byte
 }
 
 type stubDeposit struct {
@@ -117,8 +132,68 @@ func (r *stubRelay) client() *relayclient.Client {
 	c := relayclient.New(r.base, r.key)
 	return c
 }
-func (r *stubRelay) MintToken(sub ed25519.PublicKey, ttl time.Duration, jti string, q *relayauth.Quota) (string, error) {
-	return r.client().MintToken(relayauth.EncodeKey(sub), r.base, relayclient.TokenOptions{TTL: ttl, JTI: jti, Quota: q})
+func (r *stubRelay) MintToken(sub ed25519.PublicKey, ttl time.Duration, jti string, q *relayauth.Quota, ownerDevice bool) (string, error) {
+	return r.client().MintToken(relayauth.EncodeKey(sub), r.base, relayclient.TokenOptions{TTL: ttl, JTI: jti, Quota: q, OwnerDevice: ownerDevice})
+}
+
+var errStubNoBlob = &relayclient.Error{Status: 404, Code: "blob_unknown"}
+
+func (r *stubRelay) PutBlob(_ context.Context, _, mailbox, _ string, data []byte) (string, time.Time, error) {
+	if r.blobs == nil {
+		return "", time.Time{}, &relayclient.Error{Status: 404, Code: "not_found"}
+	}
+	b := r.blobs
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.byID == nil {
+		b.byID = map[string]stubBlob{}
+	}
+	b.n++
+	id := fmt.Sprintf("01JB2Z6V9K3M4N5P6Q7R8S%04d", b.n)
+	b.byID[id] = stubBlob{mailbox: mailbox, sender: relayauth.EncodeKey(r.key.Public().(ed25519.PublicKey)), data: append([]byte(nil), data...)}
+	return id, time.Now().Add(7 * 24 * time.Hour), nil
+}
+
+func (r *stubRelay) GetBlob(_ context.Context, id string) ([]byte, error) {
+	if r.blobs == nil {
+		return nil, errStubNoBlob
+	}
+	r.blobs.mu.Lock()
+	defer r.blobs.mu.Unlock()
+	b, ok := r.blobs.byID[id]
+	if !ok || b.mailbox != mailboxOf(r.key) {
+		return nil, errStubNoBlob
+	}
+	return append([]byte(nil), b.data...), nil
+}
+
+func (r *stubRelay) DeleteBlob(_ context.Context, id string) error {
+	if r.blobs == nil {
+		return nil
+	}
+	r.blobs.mu.Lock()
+	defer r.blobs.mu.Unlock()
+	if b, ok := r.blobs.byID[id]; ok && b.mailbox == mailboxOf(r.key) {
+		delete(r.blobs.byID, id)
+	}
+	return nil
+}
+
+func (r *stubRelay) ListBlobs(context.Context) (BlobList, error) {
+	if r.blobs == nil {
+		return BlobList{}, &relayclient.Error{Status: 404, Code: "not_found"}
+	}
+	r.blobs.mu.Lock()
+	defer r.blobs.mu.Unlock()
+	var out BlobList
+	for id, b := range r.blobs.byID {
+		if b.mailbox == mailboxOf(r.key) {
+			out.Blobs = append(out.Blobs, BlobEntry{BlobID: id, Size: int64(len(b.data)), Sender: b.sender})
+			out.UsedBytes += int64(len(b.data))
+		}
+	}
+	out.MaxBytes = 64 << 20
+	return out, nil
 }
 func (r *stubRelay) MintOpenToken(ttl time.Duration, jti string) (string, error) {
 	return r.client().MintOpenToken(r.base, ttl, jti)

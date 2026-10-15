@@ -322,13 +322,19 @@ func TestBlobRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := OpenBlob(blob, key, sum)
+	got, err := OpenBlob(blob, key, sum, len(content))
 	if err != nil || !bytes.Equal(got, content) {
 		t.Fatal("blob round trip")
 	}
+	if len(blob) != BlobLen(len(content)) {
+		t.Fatalf("blob length %d, want %d", len(blob), BlobLen(len(content)))
+	}
+	if _, err := OpenBlob(blob, key, sum, len(content)-1); !errors.Is(err, ErrBlobSize) {
+		t.Fatalf("size mismatch: %v", err)
+	}
 	blob[30] ^= 1
-	if _, err := OpenBlob(blob, key, sum); err == nil {
-		t.Fatal("tampered blob accepted")
+	if _, err := OpenBlob(blob, key, sum, len(content)); !errors.Is(err, ErrBlobHash) {
+		t.Fatalf("tampered blob: %v", err)
 	}
 }
 

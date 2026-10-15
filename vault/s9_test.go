@@ -94,6 +94,7 @@ func TestVaultSealedByS9(t *testing.T) {
 	}
 	d.m.st.Settings.App = map[string]string{"app.theme": "dark"}
 	d.m.st.Settings.Version = 1
+	d.m.st.DeviceTokensMarked = false // an S9 vault's device tokens carry no owner_device (0.32.0, §7.1)
 	dek := append([]byte(nil), d.m.dek...)
 	d.m.mu.Unlock()
 	if err := d.m.Lock(ctx); err != nil {

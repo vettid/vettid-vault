@@ -338,6 +338,7 @@ func Create(ctx context.Context, p CreateParams) (*Manager, error) {
 		Relay:        RelayState{URL: p.RelayURL, Seed: seeds[0]},
 		IdentitySeed: seeds[1], KEMSeed: seeds[2], WakeSeed: seeds[3],
 		SealedRelease: p.Release.PCR0, AnnouncedRelease: p.Release.PCR0,
+		DeviceTokensMarked: true, // every device token is minted with owner_device (§7.1)
 	}
 	st.init()
 	hdr := &Header{V: 1, VaultID: p.VaultID, UserGUID: p.UserGUID, Provisional: p.Provisional, CreatedAt: now.UTC(),

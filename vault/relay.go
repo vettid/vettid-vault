@@ -38,8 +38,30 @@ type Relay interface {
 	// (RELAY-PROTOCOL 0.5.0 §6.10; idempotent). A relay before 0.5.0
 	// answers not_found.
 	DeleteMailbox(ctx context.Context) error
-	MintToken(sub ed25519.PublicKey, ttl time.Duration, jti string, quota *relayauth.Quota) (string, error)
+	// MintToken mints a deposit token for sub. ownerDevice sets the
+	// owner_device claim (RELAY-PROTOCOL 0.9.2 §5.2): only on the tokens
+	// the vault mints for its own devices (§7.1, 0.32.0).
+	MintToken(sub ed25519.PublicKey, ttl time.Duration, jti string, quota *relayauth.Quota, ownerDevice bool) (string, error)
 	MintOpenToken(ttl time.Duration, jti string) (string, error)
+	// Blob transfer (RELAY-PROTOCOL §6.8; VAULT-MESSAGING §5.5, §10.5.1).
+	// PutBlob uploads to a mailbox on any relay under a deposit token;
+	// GetBlob, DeleteBlob and ListBlobs act on the vault's own mailbox.
+	PutBlob(ctx context.Context, relayURL, mailbox, token string, data []byte) (id string, expires time.Time, err error)
+	GetBlob(ctx context.Context, id string) ([]byte, error)
+	DeleteBlob(ctx context.Context, id string) error
+	// ListBlobs lists the own mailbox's blobs (RELAY-PROTOCOL 0.9.2
+	// POST /v1/blobs); a relay without the list answers not_found.
+	ListBlobs(ctx context.Context) (BlobList, error)
+}
+
+// BlobEntry is one blob of the own mailbox's list.
+type BlobEntry = relayclient.BlobEntry
+
+// BlobList is the own mailbox's blob list and its storage use.
+type BlobList struct {
+	Blobs     []BlobEntry
+	UsedBytes int64
+	MaxBytes  int64
 }
 
 // Collector is a collect session: long-poll or WebSocket.
@@ -59,7 +81,14 @@ const (
 	CodeMailboxUnknown = "mailbox_unknown"
 	CodeClaimUnknown   = "claim_unknown"
 	CodeTimestampStale = "timestamp_stale"
+	CodeBlobUnknown    = "blob_unknown"
+	CodeQuotaExceeded  = "quota_exceeded"
+	CodeNotFound       = "not_found"
 )
+
+// RelayQuota returns the quota member of a quota_exceeded error (""
+// otherwise, or from a relay before 0.9.2).
+func RelayQuota(err error) string { return relayclient.QuotaOf(err) }
 
 // RelayCode returns the relay error code of err, or "".
 func RelayCode(err error) string {
@@ -138,8 +167,44 @@ func (r *ClientRelay) DeleteMailbox(ctx context.Context) error {
 	return r.client(r.base).DeleteMailbox(ctx)
 }
 
-func (r *ClientRelay) MintToken(sub ed25519.PublicKey, ttl time.Duration, jti string, quota *relayauth.Quota) (string, error) {
-	return r.client(r.base).MintToken(relayauth.EncodeKey(sub), r.base, relayclient.TokenOptions{TTL: ttl, JTI: jti, Quota: quota})
+func (r *ClientRelay) MintToken(sub ed25519.PublicKey, ttl time.Duration, jti string, quota *relayauth.Quota, ownerDevice bool) (string, error) {
+	return r.client(r.base).MintToken(relayauth.EncodeKey(sub), r.base, relayclient.TokenOptions{TTL: ttl, JTI: jti, Quota: quota, OwnerDevice: ownerDevice})
+}
+
+func (r *ClientRelay) PutBlob(ctx context.Context, relayURL, mailbox, token string, data []byte) (string, time.Time, error) {
+	return r.client(relayURL).PutBlob(ctx, mailbox, token, data)
+}
+
+func (r *ClientRelay) GetBlob(ctx context.Context, id string) ([]byte, error) {
+	return r.client(r.base).GetBlob(ctx, id)
+}
+
+func (r *ClientRelay) DeleteBlob(ctx context.Context, id string) error {
+	return r.client(r.base).DeleteBlob(ctx, id)
+}
+
+// maxBlobPages bounds a listing (500 a page): a mailbox's blobs are bounded
+// by the relay's per-sender counts; this only stops a relay that never
+// ends its list.
+const maxBlobPages = 64
+
+func (r *ClientRelay) ListBlobs(ctx context.Context) (BlobList, error) {
+	c := r.client(r.base)
+	var out BlobList
+	after := ""
+	for range maxBlobPages {
+		p, err := c.ListBlobs(ctx, after, 500)
+		if err != nil {
+			return BlobList{}, err
+		}
+		out.Blobs = append(out.Blobs, p.Blobs...)
+		out.UsedBytes, out.MaxBytes = p.UsedBytes, p.MaxBytes
+		if p.Next == "" || p.Next == after {
+			return out, nil
+		}
+		after = p.Next
+	}
+	return out, nil
 }
 
 func (r *ClientRelay) MintOpenToken(ttl time.Duration, jti string) (string, error) {

@@ -149,10 +149,10 @@ const (
 	// MaxQuietSeconds keeps the quiet period plus the 10-minute window of
 	// step 4b below the present records' 96-hour lock (§11.14.4 G5), so a
 	// timely confirming read always sees every present record that matters.
-	MaxQuietSeconds = recovery.PresentLockHours*3600 - recovery.ConfirmWindowSecs - 1
-	StagingMinWaitUnit     = 60
-	maxRecoverySeconds     = 30 * 86400
-	CounterBucketPrefix    = "vettid-org-vault-recovery-"
+	MaxQuietSeconds     = recovery.PresentLockHours*3600 - recovery.ConfirmWindowSecs - 1
+	StagingMinWaitUnit  = 60
+	maxRecoverySeconds  = 30 * 86400
+	CounterBucketPrefix = "vettid-org-vault-recovery-"
 )
 
 // File is a parsed channel file: the complete constants and the names of

@@ -140,7 +140,9 @@ jobs:
       - name: two clean builds, one binary
         run: |
           export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
-          mapfile -t frommirror < <(scripts/image-mirror.sh contexts Dockerfile.enclave)
+          ctx="$(scripts/image-mirror.sh contexts Dockerfile.enclave)"
+          frommirror=()
+          if [ -n "$ctx" ]; then mapfile -t frommirror <<<"$ctx"; fi
           for i in 1 2; do
             docker build --no-cache -q "${frommirror[@]}" -f Dockerfile.enclave --build-arg SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" -t "vve:$i" .
             c=$(docker create "vve:$i"); docker cp "$c:/vault-enclave" "ve$i"; docker rm "$c" >/dev/null
@@ -149,7 +151,9 @@ jobs:
           cmp ve1 ve2
       - name: release gate refuses placeholders (VAULT-MESSAGING §11.10.8)
         run: |
-          mapfile -t frommirror < <(scripts/image-mirror.sh contexts Dockerfile.enclave)
+          ctx="$(scripts/image-mirror.sh contexts Dockerfile.enclave)"
+          frommirror=()
+          if [ -n "$ctx" ]; then mapfile -t frommirror <<<"$ctx"; fi
           for ch in prod staging; do
             if ! go run ./cmd/releasecfg check "$ch" >/dev/null 2>&1; then
               msg=$(CHANNEL=$ch scripts/build-eif.sh "out-$ch" 2>&1 || true)

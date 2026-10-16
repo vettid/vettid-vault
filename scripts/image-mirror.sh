@@ -43,13 +43,27 @@ case "${1:-}" in
   contexts)
     f="${2:?usage: image-mirror.sh contexts DOCKERFILE}"
     [ -n "$mirror" ] || exit 0
-    grep -E '^FROM[[:space:]]' "$f" | while read -r _ a b _; do
-      ref="$a"
-      case "$a" in --platform=*) ref="$b" ;; esac
-      case "$ref" in *@sha256:*) ;; *) continue ;; esac
-      m="$(mirrored "$ref")"
-      printf -- '--build-context\n%s=docker-image://%s\n' "$ref" "$m"
-    done
+    [ -r "$f" ] || { echo "image-mirror: cannot read $f" >&2; exit 1; }
+    # Every FROM is an earlier stage, scratch or a digest-pinned image;
+    # anything else would silently come from upstream, so it is refused.
+    stages=" scratch "
+    while read -r _ a b c d _; do
+      ref="$a" as="$b" name="$c"
+      case "$a" in --platform=*) ref="$b" as="$c" name="$d" ;; esac
+      case "$stages" in *" $ref "*) ;; *)
+        case "$ref" in
+          *@sha256:*)
+            m="$(mirrored "$ref")"
+            printf -- '--build-context\n%s=docker-image://%s\n' "$ref" "$m"
+            ;;
+          *)
+            echo "image-mirror: $f: FROM $ref is neither an earlier stage nor pinned by digest" >&2
+            exit 1
+            ;;
+        esac
+      esac
+      case "$as" in [Aa][Ss]) stages="$stages$name " ;; esac
+    done < <(grep -E '^FROM[[:space:]]' "$f")
     ;;
   *)
     echo "usage: image-mirror.sh ref IMAGE | contexts DOCKERFILE" >&2

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"time"
 
 	"github.com/vettid/vettid-relay/relayauth"
@@ -94,6 +95,17 @@ func (m *Manager) Deleting() bool {
 func (m *Manager) beginDelete(via string, now time.Time) {
 	if m.st == nil || m.st.Deleting != nil {
 		return
+	}
+	// Release R (§11.14.3, §12.5): the recovery generation is closed at
+	// the counter before anything is erased; the deletion goes ahead
+	// whether or not the close was confirmed, and the audit says which.
+	if g := m.hdr.Rec.Generation; g > 0 {
+		ref := strconv.FormatUint(g, 10) + "/delete"
+		if c := m.counter(); c != nil && c.Close(context.Background(), g) == nil {
+			m.record(Activity{Kind: "recovery.generation_closed", Ref: ref, Audit: true}, now)
+		} else {
+			m.record(Activity{Kind: "recovery.generation_closed", Ref: ref + "/unconfirmed", Audit: true}, now)
+		}
 	}
 	m.st.Deleting = &Deletion{At: now.UTC(), Via: via}
 	m.hdr.Deleting = true

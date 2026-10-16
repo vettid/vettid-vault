@@ -170,12 +170,6 @@ func TestOwnerCheckClockStarters(t *testing.T) {
 	if e.h.Enrolled != 1 {
 		t.Fatalf("credential.create did not start the clock: %d", e.h.Enrolled)
 	}
-	e2 := newEnv(t)
-	e2.create()
-	e2.ok(e2.call("recovering-app", "credential.recover", "", map[string]any{"password": pw}))
-	if len(e2.h.Passed) != 1 || e2.h.Passed[0] != nil {
-		t.Fatalf("recovery did not start the clock: %v", e2.h.Passed)
-	}
 
 }
 

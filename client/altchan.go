@@ -209,8 +209,12 @@ func (d *Device) BuildEnroll(userGUID, pin string, e *Enclave, m *manifest.Manif
 		return nil, err
 	}
 	ra := d.RelayAddr()
+	if err := d.newPhoneKeyLocked(d.st.VaultID); err != nil { // release R: a new phone key (§11.14.1)
+		return nil, err
+	}
 	body, err := (&altchan.EnrollRequest{APIKey: apiKey, UserGUID: userGUID, RequestID: rid, Nonce: nonce, PIN: pin,
-		IK: d.IdentityKey(), KEM: d.kem.Public(), Relay: altchan.RelayAddr{URL: ra.URL, Mailbox: ra.Mailbox, PK: ra.PK},
+		UnlockSecret: d.unlockSecretLocked(d.st.Epoch),
+		IK:           d.IdentityKey(), KEM: d.kem.Public(), Relay: altchan.RelayAddr{URL: ra.URL, Mailbox: ra.Mailbox, PK: ra.PK},
 		OpenToken: open, Name: d.st.Name, Attest: da, ManifestSHA256: manifest.SHA256Hex(m.Bytes), ManifestSerial: m.Serial}).Marshal()
 	if err != nil {
 		return nil, err
@@ -258,6 +262,9 @@ type UnlockOptions struct {
 	// signer in device.list (Signer).
 	Chain   [][]byte
 	NoChain bool
+	// UnlockSecret overrides the phone's secret (tests of device_secret,
+	// release R).
+	UnlockSecret []byte
 }
 
 // keepChain remembers the chain of an Android attestation (the caller
@@ -425,10 +432,14 @@ func (d *Device) BuildUnlock(userGUID, pin string, e *Enclave, m *manifest.Manif
 	}
 	req := &altchan.UnlockRequest{UserGUID: userGUID, VaultID: d.st.VaultID, RequestID: rid, DeviceIK: d.IdentityKey(),
 		PIN: pin, MinStateSeq: a.StateSeq, MinHeaderSeq: a.HeaderSeq[e.Release.PCR0], Token: tok, Assertion: as,
-		ManifestSHA256: manifest.SHA256Hex(m.Bytes), ManifestSerial: m.Serial, Update: upd, CancelRecovery: o.CancelRecovery}
+		ManifestSHA256: manifest.SHA256Hex(m.Bytes), ManifestSerial: m.Serial, Update: upd, CancelRecovery: o.CancelRecovery,
+		UnlockSecret: d.unlockSecretLocked(d.st.Epoch)}
+	if o.UnlockSecret != nil {
+		req.UnlockSecret = o.UnlockSecret // tests: another secret
+	}
 	ss, err := altchan.UnlockSigningString(altchan.UnlockFields{UserGUID: userGUID, VaultID: d.st.VaultID, RequestID: rid,
 		TS: tss, ETKKid: e.Descriptor.Kid, MinStateSeq: req.MinStateSeq, MinHeaderSeq: req.MinHeaderSeq, PIN: pin,
-		Token: tok, ManifestSHA256: req.ManifestSHA256, ToPCR0: toPCR0, CancelRecovery: o.CancelRecovery})
+		Token: tok, ManifestSHA256: req.ManifestSHA256, ToPCR0: toPCR0, CancelRecovery: o.CancelRecovery, UnlockSecret: req.UnlockSecret})
 	if err != nil {
 		return nil, err
 	}

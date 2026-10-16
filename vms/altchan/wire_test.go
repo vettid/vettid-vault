@@ -26,7 +26,7 @@ func testKEM(t testing.TB) *suite.PrivateKey {
 func sampleEnroll(t testing.TB) *EnrollRequest {
 	_, ak := testAppKey(t, 0x41)
 	return &EnrollRequest{APIKey: ak, UserGUID: "user-1", RequestID: "01JB2Z6V9K3M4N5P6Q7R8S9T20", Nonce: bytes.Repeat([]byte{9}, 32),
-		PIN: "123456", IK: bytes.Repeat([]byte{1}, 32), KEM: testKEM(t).Public(),
+		PIN: "123456", UnlockSecret: bytes.Repeat([]byte{0x42}, 32), IK: bytes.Repeat([]byte{1}, 32), KEM: testKEM(t).Public(),
 		Relay:     RelayAddr{URL: "https://relay.example", Mailbox: "mb", PK: bytes.Repeat([]byte{2}, 32)},
 		OpenToken: "v4.public.x", Name: "phone",
 		Attest: &DeviceAttest{Platform: PlatformIOS, KeyID: []byte{1}, Attestation: []byte{2}}, ManifestSHA256: testManifestSHA256, ManifestSerial: 7}
@@ -147,7 +147,7 @@ func TestSealOpen(t *testing.T) {
 func TestDescriptor(t *testing.T) {
 	k := testKEM(t)
 	na := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
-	d := MarshalDescriptor("i-1", k.Public(), strings.Repeat("ab", 48), na)
+	d := MarshalDescriptor("i-1", k.Public(), strings.Repeat("ab", 48), na, nil)
 	p, err := ParseDescriptor(d)
 	if err != nil || !p.NotAfter.Equal(na) || !p.Kid.Equal(k.Public().Kid()) {
 		t.Fatal(err)
@@ -225,8 +225,8 @@ func TestValidInstanceID(t *testing.T) {
 
 func FuzzParseDescriptor(f *testing.F) {
 	k, _ := suite.NewPrivateKey(bytes.Repeat([]byte{5}, 32))
-	f.Add(MarshalDescriptor("i-1", k.Public(), strings.Repeat("ab", 48), time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)))
-	f.Add(MarshalDescriptor("i-0123456789abcdef_ENC", k.Public(), strings.Repeat("ab", 48), time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)))
+	f.Add(MarshalDescriptor("i-1", k.Public(), strings.Repeat("ab", 48), time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC), nil))
+	f.Add(MarshalDescriptor("i-0123456789abcdef_ENC", k.Public(), strings.Repeat("ab", 48), time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC), nil))
 	f.Fuzz(func(t *testing.T, b []byte) {
 		_, _ = ParseDescriptor(b)
 	})

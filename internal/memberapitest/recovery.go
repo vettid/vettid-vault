@@ -386,3 +386,53 @@ func (a *API) recoveryRegister(ctx context.Context, guid string, body map[string
 	a.recordRegisterID(ctx, v, recID, rid)
 	return map[string]any{"vault_id": v.VaultID, "request_id": rid}, nil
 }
+
+// recoveryOpen is POST /api/vault/recovery/open (MEMBER-API 2.7.0, release
+// R): forwarded only while the recovery is registered and before its
+// expires_at, enqueued as recovery_open with the recovering key as
+// app_key and the manifest it names.
+func (a *API) recoveryOpen(ctx context.Context, guid string, body map[string]any) (any, error) {
+	vid, err := field(body, "vault_id", vaultIDRE, "32 lowercase hex")
+	if err != nil {
+		return nil, err
+	}
+	rid, err := field(body, "request_id", ulidRE, "a ULID")
+	if err != nil {
+		return nil, err
+	}
+	iid, err := field(body, "instance_id", instanceIDRE, "an instance id")
+	if err != nil {
+		return nil, err
+	}
+	kid, err := field(body, "etk_kid", kidRE, "16 lowercase hex")
+	if err != nil {
+		return nil, err
+	}
+	ms, err := field(body, "manifest_sha256", sha256RE, "64 lowercase hex")
+	if err != nil {
+		return nil, err
+	}
+	env, err := checkEnvelope(body["envelope"], envelopeLarge, kid)
+	if err != nil {
+		return nil, err
+	}
+	_, cur, err := a.currentVault(ctx, guid)
+	if err != nil {
+		return nil, err
+	}
+	v := active(cur)
+	if v == nil || v.VaultID != vid {
+		return nil, notFound("No such vault")
+	}
+	if recoveryState(v.Recovery, a.recoveryNowS()) != "registered" {
+		return nil, vaultError(409, "recovery_not_available", "The recovery is not registered", nil)
+	}
+	inst, err := a.routeCheck(ctx, v, iid, a.nowS())
+	if err != nil {
+		return nil, err
+	}
+	if err := a.enqueueWith(ctx, "recovery_open", guid, v, rid, inst, kid, env, ms, "", requestTTLS, nil); err != nil {
+		return nil, err
+	}
+	return map[string]any{"vault_id": v.VaultID, "request_id": rid}, nil
+}

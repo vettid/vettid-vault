@@ -150,6 +150,13 @@ type Lifecycle struct {
 	// at} and name_change_pending = true on the vault row whatever the
 	// lease, when seq is higher than the row's.
 	Name *NameChange
+	// Release R (§11.5, §11.14.2): on unlocked and locked, whether the
+	// header has a `next` part (nil: not reported) and its header_seq; on
+	// app_key_next, the step-1 write's header_seq; NextCleared on an
+	// app_key that repeats the current key and only clears app_key_next.
+	Next        *bool
+	HeaderSeq   uint64
+	NextCleared bool
 	// KeepLease is set by the parent, never parsed from the enclave: a
 	// "locked" that the enclave reports while an enroll or unlock of the
 	// same vault is in flight here (the enclave locks a running vault
@@ -177,6 +184,10 @@ const EventCredentialBackup = "credential_backup"
 // a recovery, §11.5, 0.15.0).
 const EventAppKey = "app_key"
 
+// EventAppKeyNext is the next app key of a replacement of the app in
+// progress (release R, §11.5): written as app_key_next on the vault row.
+const EventAppKeyNext = "app_key_next"
+
 // AppKeyID is akid: the first 16 bytes of SHA-256(SPKI DER), 32 lowercase
 // hex (§11.12.2).
 func AppKeyID(der []byte) string {
@@ -190,6 +201,12 @@ type Slot struct {
 	Status   string
 	Envelope []byte
 	Code     string
+	// Release R's clear members (VAULT-HOST-PROTOCOL 0.1.10 §6.1,
+	// VAULT-MESSAGING §11.5): a recovery's not_before, expires and
+	// earliest; a counted open's retry_at and expires; a refusal's reason.
+	// RFC 3339 strings, "" when absent.
+	NotBefore, Expires, RetryAt, Reason string
+	Earliest                            bool
 }
 
 // Tables are the member API's DynamoDB tables.

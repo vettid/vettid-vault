@@ -65,7 +65,12 @@ type Host struct {
 	// (id:reason) and the host alarms reported.
 	PIN      string
 	PINTries int // VerifyPIN calls
-	Xfer     *vault.TransferInfo
+	// Release R: the changes of secret asked for, the error they answer,
+	// and the armings.
+	Changes   []vault.SecretChange
+	ChangeErr error
+	Arms      int
+	Xfer      *vault.TransferInfo
 	// The transfer's new app (0.27.0, §11.7.1): the class of its signer
 	// ("" for none) and whether it differs from the vault's binding.
 	XferSigner        string
@@ -227,6 +232,30 @@ func (h *Host) DeleteVault(via string, _ time.Time) error {
 }
 
 // VerifyPIN implements vault.CredentialHost.
+// ChangeSecrets implements vault.RecoveryHost (release R): it records the
+// change and answers ChangeErr.
+func (h *Host) ChangeSecrets(_ context.Context, c vault.SecretChange, _ time.Time) error {
+	if h.ChangeErr != nil {
+		return h.ChangeErr
+	}
+	cp := func(b []byte) []byte { return append([]byte(nil), b...) }
+	c.Password, c.NewPassword, c.NewUnlockSecret = cp(c.Password), cp(c.NewPassword), cp(c.NewUnlockSecret)
+	h.Changes = append(h.Changes, c)
+	return nil
+}
+
+// RecoveryArm implements vault.RecoveryHost: it records the arming.
+func (h *Host) RecoveryArm(_ context.Context, _ string, _ []byte, _ time.Duration, _ bool, _ time.Time) string {
+	h.Arms++
+	return vault.RecoveryArmed
+}
+
+// OwnerCheckRecovery implements vault.RecoveryHost.
+func (h *Host) OwnerCheckRecovery(_ context.Context, _ string, _ []byte, _ time.Duration, _ bool, _ time.Time) (string, bool) {
+	h.Arms++
+	return vault.RecoveryArmed, true
+}
+
 func (h *Host) VerifyPIN(pin string, _ time.Time) error {
 	h.PINTries++
 	if h.PIN == "" || pin != h.PIN {
@@ -256,7 +285,7 @@ func (h *Host) Transfer() (vault.TransferInfo, bool) {
 // ApproveTransfer implements vault.CredentialHost. The runtime completes
 // the transfer after the handler returns (0.10.3); the test calls
 // TransferCompleted itself.
-func (h *Host) ApproveTransfer(_ context.Context, id string, now time.Time) error {
+func (h *Host) ApproveTransfer(_ context.Context, id, _ string, _ []byte, _ bool, now time.Time) error {
 	if h.Xfer == nil || h.Xfer.ID != id || !h.Xfer.Scanned {
 		return vault.NewError("not_found", "")
 	}
@@ -295,7 +324,8 @@ func NewHost() *Host {
 	id := ed25519.NewKeyFromSeed(identitySeed())
 	ik := id.Public().(ed25519.PublicKey)
 	return &Host{Identity: id, ID: "test-vault", Conns: map[string]vault.PeerInfo{}, Profiles: map[string]json.RawMessage{}, DownConns: map[string]bool{},
-		Devices: map[string]vault.PeerInfo{}, IK: ik, FirstName: "Ada", LastName: "Lovelace"}
+		Devices: map[string]vault.PeerInfo{}, IK: ik, FirstName: "Ada", LastName: "Lovelace",
+		PIN: "135792"} // release R: credential.create verifies the PIN
 }
 
 // SetIdentity gives the fake vault the identity key of seed byte b.

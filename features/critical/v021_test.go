@@ -17,7 +17,7 @@ func (g guard) ItemInUse(id string) bool { return g[id] }
 // field of each kind given (f1, f2, ... in order).
 func (s *side) setupKinds(fields ...map[string]any) string {
 	s.t.Helper()
-	if r := s.sealed(s.cred, "app", "credential.create", map[string]any{"password": pw}, nil, false); !r.OK() {
+	if r := s.sealed(s.cred, "app", "credential.create", map[string]any{"password": pw, "pin": s.h.PIN}, nil, false); !r.OK() {
 		s.t.Fatalf("create: %s", r.Code)
 	}
 	item := map[string]any{"name": "Mixed", "fields": fields}

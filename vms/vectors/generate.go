@@ -759,7 +759,7 @@ func genRelease(app *principal, etk *suite.PrivateKey) (obj, error) {
 	// manifest and to_pcr0 (§11.4).
 	us, err := altchan.UnlockSigningString(altchan.UnlockFields{UserGUID: ACUserGUID, VaultID: ACVaultID,
 		RequestID: ACApprovalRequestID, TS: TS, ETKKid: etk.Public().Kid(), MinStateSeq: 1234, MinHeaderSeq: 1301,
-		PIN: ACPIN, Token: ACToken, ManifestSHA256: hx(mh[:]), ToPCR0: to})
+		PIN: ACPIN, Token: ACToken, ManifestSHA256: hx(mh[:]), ToPCR0: to, UnlockSecret: rep(0x42, 32)})
 	if err != nil {
 		return nil, err
 	}
@@ -851,7 +851,8 @@ func genAltchan(t0 time.Time, app *principal, etk *suite.PrivateKey) (obj, error
 		return nil, err
 	}
 	fields := altchan.UnlockFields{UserGUID: ACUserGUID, VaultID: ACVaultID, RequestID: ACUnlockRequestID, TS: TS,
-		ETKKid: etkKid, MinStateSeq: 1234, MinHeaderSeq: 1301, PIN: ACPIN, Token: ACToken, ManifestSHA256: manifest.SHA256Hex(served.Manifest)}
+		ETKKid: etkKid, MinStateSeq: 1234, MinHeaderSeq: 1301, PIN: ACPIN, Token: ACToken, ManifestSHA256: manifest.SHA256Hex(served.Manifest),
+		UnlockSecret: rep(0x42, 32)} // release R (§11.4, §11.14.1)
 	ss, err := altchan.UnlockSigningString(fields)
 	if err != nil {
 		return nil, err
@@ -868,6 +869,7 @@ func genAltchan(t0 time.Time, app *principal, etk *suite.PrivateKey) (obj, error
 		String("request_id", ACUnlockRequestID).
 		String("device_ik", b64(app.ikPub())).
 		String("pin", ACPIN).
+		String("unlock_secret", b64(rep(0x42, 32))).
 		Uint("min_state_seq", 1234).
 		Uint("min_header_seq", 1301).
 		String("token", ACToken).

@@ -57,7 +57,10 @@ func (in *Instance) newETK(now time.Time) (*etk, error) {
 		return nil, err
 	}
 	na := now.UTC().Truncate(time.Second).Add(ETKLifetime)
-	desc := altchan.MarshalDescriptor(in.cfg.InstanceID, k.Public(), in.meas.PCR0, na)
+	// The release's capabilities are constants of the image and of its
+	// measured release configuration (0.34.0, release R, §11.10.9), bound
+	// by the attestation with the rest.
+	desc := altchan.MarshalDescriptor(in.cfg.InstanceID, k.Public(), in.meas.PCR0, na, altchan.ReleaseCapabilities(in.cfg.Recovery.Offered))
 	ud := altchan.ETKUserData(desc)
 	att, err := in.nsm.Attest(ud[:], nil, nil)
 	if err != nil {

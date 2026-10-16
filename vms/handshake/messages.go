@@ -96,6 +96,10 @@ type Init struct {
 	// APIKey is the new app's app key, SPKI DER (0.15.0, §6.2, §11.12):
 	// purpose app only; the vault requires it in a transfer's hs.init.
 	APIKey []byte
+	// UnlockSecret is a transfer's new phone's unlock secret (0.33.0,
+	// release R, §6.2, §11.14.10): 32 bytes, purpose app only; the vault
+	// keeps it in memory only.
+	UnlockSecret []byte
 	// SASCommit is SHA-256("vettid/vms/2/sas-commit" || n_I), present
 	// exactly for purposes with a SAS (§6.2, §6.3, 0.10.3).
 	SASCommit []byte
@@ -390,6 +394,9 @@ func (in *Init) validate() error {
 			return ErrBody
 		}
 	}
+	if in.UnlockSecret != nil && (in.Purpose != PurposeApp || len(in.UnlockSecret) != altchan.UnlockSecretSize) {
+		return ErrBody
+	}
 	return checkSASField(in.Purpose, in.SASCommit)
 }
 
@@ -429,6 +436,9 @@ func (in *Init) Marshal() ([]byte, error) {
 	}
 	if in.APIKey != nil {
 		b.Base64("api_key", in.APIKey)
+	}
+	if in.UnlockSecret != nil {
+		b.Base64("unlock_secret", in.UnlockSecret)
 	}
 	if in.SASCommit != nil {
 		b.Base64("sas_commit", in.SASCommit)
@@ -509,6 +519,13 @@ func ParseInit(body []byte) (*Init, error) {
 		return nil, ErrBody
 	} else if ok {
 		if _, in.APIKey, err = altchan.ParseAppKey(s); err != nil {
+			return nil, ErrBody
+		}
+	}
+	if s, ok, err := o.OptString("unlock_secret"); err != nil {
+		return nil, ErrBody
+	} else if ok {
+		if in.UnlockSecret, err = strictjson.DecodeStd(s, altchan.UnlockSecretSize); err != nil {
 			return nil, ErrBody
 		}
 	}

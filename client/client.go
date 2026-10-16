@@ -98,6 +98,14 @@ type State struct {
 	// until the vault has recorded this app's signer (SignerBound).
 	AttestChain [][]byte `json:"attest_chain,omitempty"`
 	SignerBound bool     `json:"signer_bound,omitempty"`
+	// PhoneKey stands in for the phone key, the Android Keystore's
+	// non-exportable HMAC key (release R, §11.14.1; this reference client
+	// holds it in its state), with the vault id its secrets name and the
+	// epoch of the current secret (1 at enrollment, a transfer and a
+	// recovery; one higher at each pin.change and vault.secret.renew).
+	PhoneKey    []byte `json:"phone_key,omitempty"`
+	SecretVault string `json:"secret_vault,omitempty"`
+	Epoch       uint64 `json:"epoch,omitempty"`
 }
 
 // VaultRecord is what the device knows about its vault.
@@ -507,10 +515,19 @@ func (d *Device) startInitWith(purpose handshake.Purpose, ctxID, depositToken st
 	if err != nil {
 		return err
 	}
+	var secret []byte
+	if apiKey != nil && purpose == handshake.PurposeApp {
+		// A transfer's new phone (release R, §11.14.10): a new phone key,
+		// and its secret of epoch 1 in the hs.init.
+		if err := d.newPhoneKeyLocked(d.st.VaultID); err != nil {
+			return err
+		}
+		secret = d.unlockSecretLocked(1)
+	}
 	ini, err := handshake.NewInitiator(handshake.InitiatorConfig{
 		Purpose: purpose, Ctx: ctxID, Identity: d.ik, StaticKEM: d.kem.Public(), Relay: d.RelayAddr(),
 		Token: tok, Profile: profile, ResponderIK: v.IK, ResponderEK: ek, ResponderRelayKey: v.RelayPK,
-		Policy: d.policy(), Now: now, ID: id, DeviceAttest: da, APIKey: apiKey,
+		Policy: d.policy(), Now: now, ID: id, DeviceAttest: da, APIKey: apiKey, UnlockSecret: secret,
 	})
 	if err != nil {
 		return err

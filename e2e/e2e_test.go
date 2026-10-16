@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/vettid/vettid-vault/devenclave"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -309,11 +310,11 @@ func TestLockUnlockRollback(t *testing.T) {
 	}
 	ctx := ctxT(t, 60*time.Second)
 	o := a.opts
-	_, res, err := vault.Unlock(ctx, vault.UnlockParams{Options: o, VaultID: a.vaultID, PIN: "000000"})
+	_, res, err := vault.Unlock(ctx, vault.UnlockParams{Options: o, VaultID: a.vaultID, PIN: "000000", UnlockSecret: devenclave.DevUnlockSecret})
 	if !errors.Is(err, vault.ErrBadPIN) {
 		t.Fatalf("bad PIN: %v", err)
 	}
-	_, res2, err := vault.Unlock(ctx, vault.UnlockParams{Options: o, VaultID: a.vaultID, PIN: pin, MinStateSeq: 1 << 40})
+	_, res2, err := vault.Unlock(ctx, vault.UnlockParams{Options: o, VaultID: a.vaultID, PIN: pin, MinStateSeq: 1 << 40, UnlockSecret: devenclave.DevUnlockSecret})
 	if !errors.Is(err, vault.ErrRollback) || res2.HeaderSeq != res.HeaderSeq {
 		t.Fatalf("rollback: %v", err)
 	}

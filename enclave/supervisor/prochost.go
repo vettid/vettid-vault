@@ -405,7 +405,7 @@ func stopReason(exitCode int) (string, slog.Level) {
 
 // Open implements enclave.Host: lock a running process of the vault, start
 // a new one, hand it the job, and keep it if the vault opened.
-func (h *procHost) Open(ctx context.Context, j *enclave.Job) ([]byte, bool, error) {
+func (h *procHost) Open(ctx context.Context, j *enclave.Job) ([]byte, enclave.Marker, error) {
 	_, _ = h.Lock(ctx, j.VaultID)
 	m := h.s.inst.Load().Measurements()
 	var prev []string
@@ -418,7 +418,7 @@ func (h *procHost) Open(ctx context.Context, j *enclave.Job) ([]byte, bool, erro
 	}
 	p, err := h.spawn(j.VaultID, j.UserGUID, j.Op == enclave.OpEnroll)
 	if err != nil {
-		return nil, false, err
+		return nil, enclave.Marker{}, err
 	}
 	p.mu.Lock()
 	p.prevRead = prev
@@ -434,20 +434,23 @@ func (h *procHost) Open(ctx context.Context, j *enclave.Job) ([]byte, bool, erro
 	p.mu.Unlock()
 	if err != nil || len(r) != 4 || string(r[0]) != hostproto.StatusOK {
 		h.kill(p)
-		return nil, false, errSpawn
+		return nil, enclave.Marker{}, errSpawn
 	}
 	res := append([]byte(nil), r[1]...)
-	// Only a register can report success (the clear marker, 0.10.6).
-	registered := string(r[3]) == "1" && j.Op == enclave.OpRecoveryRegister
+	// Only the codes an op can carry (0.10.6, 0.16.0, release R).
+	marker, ok := enclave.DecodeMarker(j.Op, r[3])
+	if !ok {
+		marker = enclave.Marker{}
+	}
 	if string(r[2]) != "1" {
 		h.stop(p)
-		return res, registered, nil
+		return res, marker, nil
 	}
 	h.mu.Lock()
 	h.procs[j.VaultID] = p
 	h.mu.Unlock()
 	h.s.touch(j.VaultID)
-	return res, registered, nil
+	return res, marker, nil
 }
 
 // stop ends a process that holds no unlocked vault (closing its channel
@@ -1079,9 +1082,13 @@ func (p *vproc) notify(f *hostproto.Frame) {
 		if err != nil {
 			return
 		}
+		next, hseq, cleared, ok := enclave.ParseNextFields(f.Fields[11], f.Fields[12], f.Fields[13])
+		if !ok {
+			return
+		}
 		s.lifecycle(vault.LifecycleEvent{Event: string(f.Fields[0]), VaultID: p.vaultID, Release: string(f.Fields[2]),
 			VaultVersion: string(f.Fields[3]), StateVersion: sv, AppKey: append([]byte(nil), f.Fields[5]...), AppKeySeq: seq,
-			CredentialBackup: backup, Name: name})
+			CredentialBackup: backup, Name: name, Next: next, HeaderSeq: hseq, NextCleared: cleared})
 	case vaultipc.KindTransferDone:
 		if len(f.Fields) == 1 && validTicket(f.Fields[0]) && s.xfers != nil {
 			s.xfers.release(p, string(f.Fields[0]))

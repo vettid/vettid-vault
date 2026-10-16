@@ -8,7 +8,7 @@ FUZZFLAGS ?=
 LIBPKGS   := ./vms/suite ./vms/envelope ./vms/handshake ./vms/invite ./vms/altchan ./vms/credwire ./vms/callwire \
              ./vms/pins ./vms/nitro ./vms/manifest ./vms/devattest ./vms/btc ./vms/recovery \
              ./enclave/... ./vault/... ./client/... ./features/... ./cmd/...
-E2ETAGS   := devenclave e2e
+E2ETAGS   := devenclave e2e vettid_testcost
 # What runs inside the enclave (the release image's binary and everything it
 # links). It must never link the AWS SDK, the parent, or any dev/test code.
 ENCLAVEPKGS := ./cmd/vault-enclave
@@ -21,6 +21,7 @@ all: lint check-tcb test
 # sending code and compares them byte for byte with testdata/vectors.
 test:
 	$(GO) test ./...
+	$(GO) test -tags vettid_testcost ./vault/... ./features/... ./enclave/...
 	$(GO) test -tags vmsvectors ./vms/vectors
 	$(MAKE) channels
 
@@ -61,7 +62,7 @@ lint: vet staticcheck
 # test authorities (relaytest, enclavetest: fake NSM and KMS, test roots); and
 # the dev enclave must not compile at all without its build tag.
 check-tcb:
-	@if $(GO) list -deps $(LIBPKGS) | grep -E 'hpkederand|mlkemtest|/devenclave|relaytest|enclavetest|parenttest|memberapitest|featuretest|pushtest|countertest'; then \
+	@if $(GO) list -deps $(LIBPKGS) | grep -E 'hpkederand|mlkemtest|/devenclave|relaytest|enclavetest|parenttest|memberapitest|featuretest|pushtest|countertest|reckeytest'; then \
 	  echo "dev, test or vector-only code linked into release packages"; exit 1; fi
 	@if $(GO) list ./devenclave >/dev/null 2>&1; then \
 	  echo "devenclave compiles without the devenclave tag"; exit 1; fi
@@ -83,7 +84,7 @@ check-tcb:
 	  if grep -aqE 'dev-device-policy|DevDevicePolicy|device-policy|dev-features' $$tmp/ve; then \
 	    echo "the release enclave binary contains the dev device policy"; exit 1; fi
 	@for os in linux; do \
-	  if GOOS=$$os $(GO) list -deps $(ENCLAVEPKGS) | grep -E 'aws-sdk-go|smithy-go|vettid-vault/parent|hpkederand|mlkemtest|/devenclave|relaytest|enclavetest|memberapitest|parenttest|featuretest|pushtest|countertest'; then \
+	  if GOOS=$$os $(GO) list -deps $(ENCLAVEPKGS) | grep -E 'aws-sdk-go|smithy-go|vettid-vault/parent|hpkederand|mlkemtest|/devenclave|relaytest|enclavetest|memberapitest|parenttest|featuretest|pushtest|countertest|reckeytest'; then \
 	    echo "the enclave binary links the AWS SDK, the parent, or dev/test code"; exit 1; fi; done
 	@if GOOS=linux $(GO) list -deps $(ENCLAVEPKGS) | grep -q 'enclave/nsm' && GOOS=linux $(GO) list -deps $(ENCLAVEPKGS) | grep -q 'internal/vsock' && \
 	  GOOS=linux $(GO) list -deps $(ENCLAVEPKGS) | grep -q 'internal/seccomp'; then :; else \
@@ -111,7 +112,7 @@ check-tcb:
 	  echo "the prod and staging channels compile into one binary"; exit 1; fi
 	@if grep -nE 'ldflags.*-X' Dockerfile.enclave scripts/build-eif.sh; then echo "release constants set with -ldflags -X"; exit 1; fi
 	@for ch in prod staging; do \
-	  if GOOS=linux $(GO) list -tags vettid_channel_$$ch -deps $(ENCLAVEPKGS) | grep -E 'aws-sdk-go|smithy-go|vettid-vault/parent|hpkederand|mlkemtest|/devenclave|relaytest|enclavetest|memberapitest|parenttest|featuretest|pushtest|countertest'; then \
+	  if GOOS=linux $(GO) list -tags vettid_channel_$$ch -deps $(ENCLAVEPKGS) | grep -E 'aws-sdk-go|smithy-go|vettid-vault/parent|hpkederand|mlkemtest|/devenclave|relaytest|enclavetest|memberapitest|parenttest|featuretest|pushtest|countertest|reckeytest'; then \
 	    echo "the $$ch enclave binary links the AWS SDK, the parent, or dev/test code"; exit 1; fi; \
 	  GOOS=linux $(GO) list -tags vettid_channel_$$ch -deps $(ENCLAVEPKGS) | grep -q 'enclave/releasecfg$$' || { echo "the $$ch enclave binary does not embed releasecfg"; exit 1; }; \
 	done
@@ -123,9 +124,10 @@ check-tcb:
 	@if grep -nE 'vettid_testcost' Dockerfile.enclave scripts/build-eif.sh release/rebuild.sh; then \
 	  echo "a release build names the test-only tag vettid_testcost"; exit 1; fi
 	@head -1 vms/recovery/testcost.go | grep -qx '//go:build vettid_testcost' || { echo "vms/recovery/testcost.go lacks //go:build vettid_testcost"; exit 1; }
+	@head -1 enclave/recoveryclock_dev.go | grep -qx '//go:build !vettid_channel_prod && !vettid_channel_staging' || { echo "enclave/recoveryclock_dev.go build constraint"; exit 1; }
 	@head -1 vms/recovery/prodcost.go | grep -qx '//go:build !vettid_testcost' || { echo "vms/recovery/prodcost.go lacks //go:build !vettid_testcost"; exit 1; }
 	@for ch in prod staging; do tmp=$$(mktemp -d) && GOOS=linux $(GO) build -tags vettid_channel_$$ch -o $$tmp/ve ./cmd/vault-enclave && \
-	  if $(GO) tool nm $$tmp/ve | grep -E 'RecoveryNow'; then echo "the $$ch enclave binary has a recovery test clock"; rm -rf $$tmp; exit 1; fi; rm -rf $$tmp; \
+	  if $(GO) tool nm $$tmp/ve | grep -E 'RecoveryNow|devRecoveryNow'; then echo "the $$ch enclave binary has a recovery test clock"; rm -rf $$tmp; exit 1; fi; rm -rf $$tmp; \
 	  files=$$(GOOS=linux $(GO) list -tags vettid_channel_$$ch -f '{{join .GoFiles " "}}' ./vms/recovery); \
 	  echo " $$files " | grep -q ' prodcost.go ' && ! echo " $$files " | grep -q ' testcost.go ' || { echo "the $$ch build does not compile vms/recovery at release cost"; exit 1; }; done
 	@echo "check-tcb: ok"

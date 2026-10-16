@@ -19,6 +19,7 @@ import (
 	"github.com/vettid/vettid-vault/devenclave"
 	"github.com/vettid/vettid-vault/features/all"
 	"github.com/vettid/vettid-vault/features/messaging"
+	"github.com/vettid/vettid-vault/internal/countertest"
 	"github.com/vettid/vettid-vault/internal/enclavetest"
 	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault"
@@ -77,7 +78,8 @@ func newTestVaultWith(t *testing.T, relayURL, name string, optional []string, tw
 		t.Fatal(err)
 	}
 	tv := &testVault{t: t, name: name, relay: relayURL, store: st, sealer: sealer, optional: optional}
-	tv.opts = vault.Options{Store: st, Sealer: sealer, PollWait: time.Second, Release: devenclave.Release}
+	tv.opts = vault.Options{Store: st, Sealer: sealer, PollWait: time.Second, Release: devenclave.Release,
+		Counter: countertest.NewLive()} // release R: changes of secret close a generation at the counter
 	if tweak != nil {
 		tweak(&tv.opts)
 	}
@@ -114,7 +116,7 @@ func newTestVaultWith(t *testing.T, relayURL, name string, optional []string, tw
 		t.Fatalf("enroll handshake: %v", err)
 	}
 	// A vault is used only with a credential (§3.5.7).
-	if err := app.CredentialCreate(ctx, credPW); err != nil {
+	if err := app.CredentialCreate(ctx, pin, credPW); err != nil {
 		t.Fatalf("credential.create: %v", err)
 	}
 	r := tv.request(app, "vault.enroll.confirm", `{}`)

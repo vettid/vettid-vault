@@ -17,7 +17,10 @@ import (
 	"github.com/vettid/vettid-vault/vms/suite"
 )
 
-const pw = "correct horse battery"
+// pw meets the rules of release R (§11.14.7); testPIN is the host's PIN.
+const pw = "violet-Kestrel-91-moss"
+
+const testPIN = "135792"
 
 // testID is a fixed ULID for tests.
 const testID = "01JB2Z6V9K3M4N5P6Q7R8S9T0V"
@@ -43,6 +46,7 @@ func newEnv(t *testing.T) *env {
 	e := &env{t: t, f: New(Options{KDF: MinKDF}), h: featuretest.NewHost(),
 		clk: featuretest.Clock{T: time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)}, pools: map[string][]utk{}}
 	e.h.AddDevice("dev-app", vault.KindApp)
+	e.h.PIN = testPIN
 	return e
 }
 
@@ -100,6 +104,9 @@ func (e *env) callWith(kind, typ, blob string, payload map[string]any, u utk) fe
 	e.t.Helper()
 	if payload == nil {
 		payload = map[string]any{}
+	}
+	if _, ok := payload["pin"]; !ok && (typ == "credential.create" || typ == "credential.password.change") {
+		payload["pin"] = e.h.PIN // release R: both carry the PIN (§11.14.9)
 	}
 	if typ == "test.op" && e.op != nil && e.op.reply {
 		k, _ := suite.GeneratePrivateKey()
@@ -233,14 +240,6 @@ func TestUTKPool(t *testing.T) {
 		t.Fatalf("reused UTK: %q", r.Code)
 	}
 	// Another device cannot use this app's UTK.
-	other := e.take("app")
-	pt, _ := json.Marshal(map[string]any{"password": pw})
-	id, _ := envelope.NewULID(e.clk.T.Add(time.Hour))
-	sealed, _ := credwire.SealPayload(other.ek, e.h.VaultID(), other.id, "credential.recover", id, pt)
-	body, _ := json.Marshal(map[string]any{"utk_id": other.id, "sealed": base64.StdEncoding.EncodeToString(sealed)})
-	if r := featuretest.CallID(e.f, e.h, e.clk.T, "recovering-app", "credential.recover", id, string(body)); r.Code != "utk_invalid" {
-		t.Fatalf("foreign UTK: %q", r.Code)
-	}
 	// Spend down: refills arrive with responses.
 	for i := 0; i < 15; i++ {
 		blob = blobOf(t, e.ok(e.unlock(blob, pw)))
@@ -250,8 +249,9 @@ func TestUTKPool(t *testing.T) {
 	}
 	// A payload moved to another request does not open (bound to its id).
 	u = e.take("app")
-	sealed, _ = credwire.SealPayload(u.ek, e.h.VaultID(), u.id, "credential.unlock", testID, pt)
-	body, _ = json.Marshal(map[string]any{"credential": blob, "utk_id": u.id, "sealed": base64.StdEncoding.EncodeToString(sealed)})
+	pt, _ := json.Marshal(map[string]any{"password": pw})
+	sealed, _ := credwire.SealPayload(u.ek, e.h.VaultID(), u.id, "credential.unlock", testID, pt)
+	body, _ := json.Marshal(map[string]any{"credential": blob, "utk_id": u.id, "sealed": base64.StdEncoding.EncodeToString(sealed)})
 	if r := e.raw("app", "credential.unlock", string(body)); r.Code != "utk_invalid" {
 		t.Fatalf("payload under another inner id: %q", r.Code)
 	}
@@ -573,40 +573,6 @@ func TestHolderReset(t *testing.T) {
 	}
 }
 
-// §11.11.5: recover only from a recovering app, against the vault's copy;
-// no credential → refused. The recovered app becomes the holder: the old
-// app's copy is dead and, presented, a clone (§3.5.9).
-func TestRecover(t *testing.T) {
-	e := newEnv(t)
-	if r := e.call("recovering-app", "credential.recover", "", map[string]any{"password": pw}); r.Code != "credential_required" {
-		t.Fatalf("no credential: %q", r.Code)
-	}
-	blob := e.create()
-	if r := e.call("app", "credential.recover", "", map[string]any{"password": pw}); r.Code != "forbidden" {
-		t.Fatalf("ordinary app: %q", r.Code)
-	}
-	if r := e.call("recovering-app", "credential.unlock", blob, map[string]any{"password": pw}); r.Code != "forbidden" {
-		t.Fatalf("recovering app used the credential: %q", r.Code)
-	}
-	if r := e.call("recovering-app", "credential.recover", "", map[string]any{"password": "wrong password"}); r.Code != "bad_password" {
-		t.Fatalf("wrong password: %q", r.Code)
-	}
-	if len(e.h.Completed) != 0 {
-		t.Fatal("completed without the password")
-	}
-	got := blobOf(t, e.ok(e.call("recovering-app", "credential.recover", "", map[string]any{"password": pw})))
-	if got == blob || len(e.h.Completed) != 1 {
-		t.Fatal("recover did not rotate or complete")
-	}
-	if e.f.Holder() != "dev-recovering" || e.f.PoolSizeOf("dev-app") != 0 {
-		t.Fatal("the recovered app does not hold the credential alone")
-	}
-	e.pools["app"] = nil // its UTKs went with it
-	if r := e.unlock(blob, pw); r.Code != "credential_frozen" || len(e.h.Alarms) != 1 {
-		t.Fatalf("lost device's copy: %q %v", r.Code, e.h.Alarms)
-	}
-}
-
 // §3.5.6, §11.11.5 (0.16.0): the vault has a backup copy only while the
 // setting is on and the latest blob was sealed with it on; with it off a
 // recovering app gets nothing (no reset, no deletion, no credential_lost:
@@ -645,17 +611,6 @@ func TestBackupCopyAndRecoveringApp(t *testing.T) {
 	}
 	if len(e.h.Completed) != 0 {
 		t.Fatal("completed")
-	}
-}
-
-func TestRecoverBackoff(t *testing.T) {
-	e := newEnv(t)
-	e.create()
-	for i := 0; i < BackoffAfter; i++ {
-		e.call("recovering-app", "credential.recover", "", map[string]any{"password": "wrong password"})
-	}
-	if r := e.call("recovering-app", "credential.recover", "", map[string]any{"password": pw}); r.Code != "backoff" {
-		t.Fatalf("no backoff: %q", r.Code)
 	}
 }
 

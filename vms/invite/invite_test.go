@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vettid/vettid-vault/vms/altchan"
 	"github.com/vettid/vettid-vault/vms/handshake"
 	"github.com/vettid/vettid-vault/vms/suite"
 )
@@ -210,4 +211,57 @@ func FuzzParseBundle(f *testing.F) {
 			t.Fatal("re-marshalled bundle rejected")
 		}
 	})
+}
+
+// 0.34.0, release R (§6.4, §11.10.9): a transfer's bundle (kind app)
+// carries the vault's capabilities, which the QR's hash binds; no other
+// kind carries them; a bundle without them is a release before R.
+func TestBundleCapabilities(t *testing.T) {
+	b := testBundle(t, "app", false, TTLInPerson)
+	b.HintName = ""
+	b.Capabilities = altchan.ReleaseCapabilities(true)
+	j, err := b.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(j), `"exp":"2026-10-01T12:10:00Z","capabilities":["attachments","recovery_offered","recovery_r"]`) {
+		t.Fatalf("member order: %s", j)
+	}
+	blob, q := publish(t, b, KindApp)
+	got, err := OpenBundle(blob, q, t0)
+	if err != nil || !altchan.HasCapability(got.Capabilities, altchan.CapRecoveryR) || len(got.Capabilities) != 3 {
+		t.Fatalf("%v %q", err, got.Capabilities)
+	}
+	// Removing a name changes the blob, which the QR's hash refuses.
+	j2 := bytes.Replace(j, []byte(`,"recovery_r"`), nil, 1)
+	blob2, _, _, err := SealBundle(j2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenBundle(blob2, q, t0); !errors.Is(err, ErrHash) {
+		t.Fatalf("a bundle without recovery_r under the original QR: %v", err)
+	}
+	// Before R: no member, nil.
+	old := testBundle(t, "app", false, TTLInPerson)
+	blob, q = publish(t, old, KindApp)
+	if got, err := OpenBundle(blob, q, t0); err != nil || got.Capabilities != nil {
+		t.Fatalf("a bundle before R: %v %q", err, got.Capabilities)
+	}
+	// Only kind app; and a malformed list is refused.
+	for _, kind := range []string{"connection", "desktop", "agent"} {
+		c := testBundle(t, kind, false, TTLInPerson)
+		c.Capabilities = altchan.ReleaseCapabilities(true)
+		if _, err := c.Marshal(); err == nil {
+			t.Fatalf("%s bundle with capabilities accepted", kind)
+		}
+	}
+	bad := testBundle(t, "app", false, TTLInPerson)
+	bad.Capabilities = []string{"recovery_r", "attachments"}
+	if _, err := bad.Marshal(); err == nil {
+		t.Fatal("unsorted capabilities accepted")
+	}
+	raw := strings.Replace(string(j), `["attachments","recovery_offered","recovery_r"]`, `["Recovery"]`, 1)
+	if _, err := ParseBundle([]byte(raw)); err == nil {
+		t.Fatal("malformed capabilities parsed")
+	}
 }

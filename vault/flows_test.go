@@ -93,6 +93,7 @@ func (n *newcomer) hsInitAttest(t testing.TB, m *Manager, purpose handshake.Purp
 	}
 	if inv := m.st.Invites[ctxID]; inv != nil && inv.Transfer && !n.noAPIKey {
 		cfg.APIKey = testAppKeyDER(t, n.ik[0]) // a transfer's new app (0.15.0, §6.2)
+		cfg.UnlockSecret = testSecret2         // and its phone's secret (release R, §11.14.10)
 	}
 	ini, err := handshake.NewInitiator(cfg)
 	if err != nil {

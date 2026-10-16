@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
+	"github.com/vettid/vettid-vault/vms/recovery"
 	"time"
 
 	"github.com/vettid/vettid-vault/internal/strictjson"
@@ -162,6 +163,13 @@ func (m *Manager) handleInit(ctx context.Context, raw []byte, sender ed25519.Pub
 			return ackAfterFlush
 		}
 	}
+	if inv.Transfer && len(body.UnlockSecret) != recovery.SecretSize {
+		// Release R (§6.2, §11.14.10): a transfer's hs.init without the
+		// new phone's 32-byte secret is dropped like an invalid
+		// attestation.
+		m.record(Activity{Kind: "device.transfer.attestation_failed", Ref: inv.ID, Audit: true}, now)
+		return ackAfterFlush
+	}
 	if inv.Kind == KindConnection && !ValidHandshakeProfile(body.Profile) {
 		// §6.2 (0.18.0): a vault's connection hs.init carries the
 		// account's first and last name.
@@ -197,7 +205,9 @@ func (m *Manager) respondFirst(pi *handshake.PendingInit, inv *Invite, sender ed
 	p.Attestation = binding
 	p.APIKey = body.APIKey // a transfer's new app (0.15.0)
 	if inv.CreatedBy == inviteByRecovery {
-		p.Recovering = true // restricted until credential.recover (§11.11.5)
+		// Release R: the recovered phone's first handshake; it becomes
+		// the holder when it completes (§11.14.6).
+		p.Recovering = true
 	}
 	held, err := m.heldToken(body.Token, p)
 	if err != nil {
@@ -242,6 +252,9 @@ func (m *Manager) respondFirst(pi *handshake.PendingInit, inv *Invite, sender ed
 	m.queueDeposit(&OutboxEntry{Op: OpDeposit, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Token: body.Token, Payload: env}, now)
 	if inv.Transfer {
 		m.transferStarted(inv.ID, id, exp, now)
+		// Release R: the new phone's secret, in memory only until the
+		// approval; a lock before it ends the transfer (§11.14.10).
+		m.transferSecret = append([]byte(nil), body.UnlockSecret...)
 	}
 }
 
@@ -509,12 +522,13 @@ func (m *Manager) activate(p *Peer, ep *handshake.Epoch, purpose handshake.Purpo
 			m.sendTo(p, "device.paired", pb.Bytes(), now)
 			break
 		}
-		m.sendTo(p, "device.paired", pb.Bytes(), now)
 		if p.Recovering {
-			// Announced when the recovery completes (§11.11.5).
-			m.record(Activity{Kind: "recovery.device_paired", DeviceID: p.ID, Audit: true}, now)
-			break
+			// Release R (§11.14.6): the recovered phone's pairing hands
+			// it the credential and the signer binding.
+			m.recoveredPhonePaired(p, now)
+			m.transferPairedBody(pb)
 		}
+		m.sendTo(p, "device.paired", pb.Bytes(), now)
 		m.notifyDevices("sync.event", strictjson.NewBuilder().String("kind", "device.paired").String("device_id", p.ID).
 			String("role", p.Kind).Bytes(), p.ID, now)
 		m.record(Activity{Kind: "device.paired", DeviceID: p.ID, Audit: true, Feed: true}, now)
@@ -731,6 +745,11 @@ func (m *Manager) createInvite(ctx context.Context, kind string, ttl time.Durati
 		Token: tok, Exp: exp}
 	if kind == KindConnection {
 		b.HintName = truncateUTF8(m.displayName(), invite.MaxHintName)
+	}
+	if kind == KindApp {
+		// A transfer's new phone chooses its hs.init from these (0.34.0,
+		// release R, §6.4, §11.10.9); the QR's hash binds them.
+		b.Capabilities = altchan.ReleaseCapabilities(!m.opt.RecoveryNotOffered)
 	}
 	bj, err := b.Marshal()
 	if err != nil {

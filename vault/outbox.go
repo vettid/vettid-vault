@@ -63,6 +63,9 @@ func (m *Manager) sendTo(p *Peer, typ string, body json.RawMessage, now time.Tim
 // delivery (sealed now, deposited after the flush behind p's queued
 // deposits, never written to state). It returns the inner id, or "".
 func (m *Manager) sendWith(p *Peer, typ string, body json.RawMessage, o SendOptions, now time.Time) string {
+	if p.Kind == KindConnection && p.Conflict != nil {
+		return "" // suspended by a rotation conflict (release R, §3.4)
+	}
 	if !m.holdDelivers(p, typ, body, now) {
 		return "" // the owner check's hold (§3.6.3): no fan-out
 	}
@@ -326,6 +329,12 @@ func (m *Manager) flushIfDirty(ctx context.Context) error {
 // handshakes, rekey due sessions, refresh tokens.
 func (m *Manager) housekeeping(now time.Time) {
 	for id, inv := range m.st.Invites {
+		if inv.CreatedBy == inviteByRecovery {
+			// The recovered phone's: kept until it pairs or a later
+			// recovery replaces it; its unlock renews it (§11.14.6, a
+			// lost ok; owner decision of 2026-10-16).
+			continue
+		}
 		if !inv.Used && !now.Before(inv.Exp) {
 			if inv.OpenJTI != "" {
 				m.denyJTI(inv.OpenJTI, now)
@@ -339,6 +348,8 @@ func (m *Manager) housekeeping(now time.Time) {
 		}
 	}
 	m.expireTransfer(now)
+	m.recoveryHousekeeping(context.Background(), now)
+	m.expirePendingUnlink(now) // release R: the presence retry, the counter notice
 	m.expireRequests(now)
 	for id, aw := range m.st.Awaiting {
 		if aw.New == nil && now.Sub(aw.Created) > HandshakeTTL {

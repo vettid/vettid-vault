@@ -2,12 +2,16 @@ package client
 
 import (
 	"context"
+	"crypto/ed25519"
 	"time"
 
 	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/altchan"
+	"github.com/vettid/vettid-vault/vms/devattest"
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/handshake"
+	"github.com/vettid/vettid-vault/vms/manifest"
+	"github.com/vettid/vettid-vault/vms/recovery"
 )
 
 // Recovery (VAULT-MESSAGING §11.11) from the new app's side: register with
@@ -129,4 +133,106 @@ func (d *Device) CompleteRecoveryHandshake(ctx context.Context) error {
 		return err
 	}
 	return d.awaitPaired(ctx)
+}
+
+// BuildRecoveryOpen builds vault.recovery.open (0.33.0, release R,
+// §11.14.6) for the registered phone: the PIN and the password together,
+// the phone's unlock secret (a new phone key, epoch 1, made at the first
+// open of this recovery), an open token for its mailbox, a device
+// assertion, and the signature of the device key. m is the verified
+// manifest.
+func (d *Device) BuildRecoveryOpen(userGUID, pin, password string, e *Enclave, m *manifest.Manifest, att Attester) (*Request, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.st.Recovery == nil {
+		return nil, ErrNoPending
+	}
+	if d.st.PhoneKey == nil || d.st.SecretVault != d.st.VaultID {
+		if err := d.newPhoneKeyLocked(d.st.VaultID); err != nil {
+			return nil, err
+		}
+	}
+	now := d.cfg.Now()
+	rid, err := envelope.NewULID(now)
+	if err != nil {
+		return nil, err
+	}
+	ts := now.UTC().Truncate(time.Millisecond)
+	tss := envelope.FormatTS(ts)
+	ch, err := altchan.DevattChallenge(rid, d.st.VaultID, tss)
+	if err != nil {
+		return nil, err
+	}
+	as, err := att.Assert(devattest.ForChallenge(ch))
+	if err != nil {
+		return nil, err
+	}
+	tok, err := d.own.MintOpenToken(d.st.RelayURL, 10*time.Minute, "")
+	if err != nil {
+		return nil, err
+	}
+	_, apiKey, err := d.appKeyLocked()
+	if err != nil {
+		return nil, err
+	}
+	us := d.unlockSecretLocked(d.st.Epoch)
+	pw, ok := recovery.NormalizePassword([]byte(password))
+	if !ok {
+		return nil, ErrProtocol
+	}
+	secrets, err := recovery.Secrets(pin, pw)
+	if err != nil {
+		return nil, err
+	}
+	sig, err := recovery.OpenSigningString(recovery.OpenFields{UserGUID: userGUID, VaultID: d.st.VaultID, RequestID: rid,
+		RecoveryID: d.st.Recovery.RecoveryID, TS: tss, ETKKid: e.Descriptor.Kid.String(), Secrets: secrets, Token: []byte(tok),
+		Manifest: m.Bytes, UnlockSecret: us})
+	if err != nil {
+		return nil, err
+	}
+	req := &altchan.RecoveryOpenRequest{UserGUID: userGUID, VaultID: d.st.VaultID, RequestID: rid, RecoveryID: d.st.Recovery.RecoveryID,
+		DeviceIK: d.IdentityKey(), PIN: pin, Password: pw, UnlockSecret: us, Token: tok, Assertion: as,
+		ManifestSHA256: manifest.SHA256Hex(m.Bytes), ManifestSerial: m.Serial, Sig: ed25519.Sign(d.ik, []byte(sig))}
+	body, err := req.Marshal()
+	if err != nil {
+		return nil, err
+	}
+	env, err := altchan.SealRequest(e.Descriptor.ETK, altchan.TypeRecoveryOpen, rid, ts, body)
+	if err != nil {
+		return nil, err
+	}
+	d.st.Recovery.RequestID = rid
+	return &Request{RequestID: rid, ETKKid: e.Descriptor.Kid.String(), Envelope: env, ManifestSHA256: req.ManifestSHA256, AppKey: apiKey}, nil
+}
+
+// OpenRecoveryOpenResult reads vault.recovery.open.result; on ok it pins
+// the vault from the bundle and keeps the token, so that the phone can run
+// its first handshake (CompleteRecoveryHandshake).
+func (d *Device) OpenRecoveryOpenResult(raw []byte) (*altchan.RecoveryOpenResult, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.st.Recovery == nil || d.st.Recovery.RequestID == "" {
+		return nil, ErrNoPending
+	}
+	body, err := altchan.OpenResult(raw, d.kem, altchan.TypeRecoveryOpenResult, d.st.Recovery.RequestID)
+	if err != nil {
+		return nil, ErrResult
+	}
+	o, err := strictjson.ParseObject(body)
+	if err != nil {
+		return nil, ErrResult
+	}
+	r, err := altchan.ParseRecoveryOpenResult(o)
+	if err != nil {
+		return nil, ErrResult
+	}
+	if r.OK {
+		if err := d.adoptBundle(r.VaultBundle); err != nil {
+			return nil, err
+		}
+		d.st.Vault.Token = r.Token
+		a := d.alt()
+		a.StateSeq = r.StateSeq
+	}
+	return r, nil
 }

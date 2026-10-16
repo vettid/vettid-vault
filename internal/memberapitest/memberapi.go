@@ -19,6 +19,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"github.com/vettid/vettid-vault/internal/reckeytest"
 	"io"
 	"net/http"
 	"regexp"
@@ -244,6 +245,9 @@ func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		out, err = a.recoveryCancel(ctx, guid, body)
 	case r.Method == http.MethodPost && r.URL.Path == "/api/vault/recovery/register":
 		out, err = a.recoveryRegister(ctx, guid, body)
+		status = 202
+	case r.Method == http.MethodPost && r.URL.Path == "/api/vault/recovery/open":
+		out, err = a.recoveryOpen(ctx, guid, body)
 		status = 202
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, requestsPathPrefix):
 		out, err = a.request(ctx, guid, strings.TrimPrefix(r.URL.Path, requestsPathPrefix))
@@ -653,6 +657,19 @@ func (a *API) enqueueWith(ctx context.Context, op, guid string, v *vaultRow, req
 	}
 	if browserKey != "" {
 		b.WriteString(`,"browser_key":` + jsonString(browserKey)) // recovery (§11.11.1)
+	}
+	if op == "recovery_open" && c != nil && c.app != nil {
+		b.WriteString(`,"app_key":` + jsonString(base64.StdEncoding.EncodeToString(c.app.der))) // the recovering key (release R)
+	}
+	if op == "recovery" || op == "recovery_cancel" {
+		// Release R (§11.14.8): signed with the recovery request key.
+		var bk []byte
+		if browserKey != "" {
+			bk, _ = base64.StdEncoding.DecodeString(browserKey)
+		}
+		at := a.cfg.Now().UTC().Format(time.RFC3339)
+		b.WriteString(`,"signed_at":` + jsonString(at) + `,"key_id":` + jsonString(reckeytest.KeyID) +
+			`,"sig":` + jsonString(reckeytest.Sign(op, v.VaultID, guid, requestID, at, bk)))
 	}
 	if (op == "enroll" || op == "recovery_register") && c != nil && c.app != nil {
 		// The key the request was signed with (0.15.0, §11.5).

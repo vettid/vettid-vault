@@ -440,6 +440,47 @@ func (a *MemberAPI) RecoveryRegister(ctx context.Context, vaultID, instanceID st
 		"instance_id": instanceID, "etk_kid": r.ETKKid, "envelope": base64.StdEncoding.EncodeToString(r.Envelope)}, nil)
 }
 
+// RecoveryOpen posts a sealed recovery open (MEMBER-API 2.7.0, release R).
+func (a *MemberAPI) RecoveryOpen(ctx context.Context, vaultID, instanceID string, r *Request) error {
+	return a.do(ctx, http.MethodPost, "/api/vault/recovery/open", map[string]string{"vault_id": vaultID, "request_id": r.RequestID,
+		"instance_id": instanceID, "etk_kid": r.ETKKid, "envelope": base64.StdEncoding.EncodeToString(r.Envelope),
+		"manifest_sha256": r.ManifestSHA256}, nil)
+}
+
+// RecoveryOpenVia sends vault.recovery.open through the member API
+// (release R, §11.14.6) and opens the result; on ok the phone then runs
+// its first handshake (CompleteRecoveryHandshake).
+func (d *Device) RecoveryOpenVia(ctx context.Context, api *MemberAPI, userGUID, pin, password string, t Trust, att Attester) (*altchan.RecoveryOpenResult, *Slot, error) {
+	raw, err := api.Manifest(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	_, m, err := d.VerifyManifest(raw, t)
+	if err != nil {
+		return nil, nil, err
+	}
+	info, e, err := api.enclaveFor(ctx, "", m, false, t)
+	if err != nil {
+		return nil, nil, err
+	}
+	req, err := d.BuildRecoveryOpen(userGUID, pin, password, e, m, att)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := api.RecoveryOpen(ctx, d.VaultID(), info.InstanceID, req); err != nil {
+		return nil, nil, err
+	}
+	slot, err := api.Poll(ctx, req.RequestID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if slot.Status != "done" || len(slot.Envelope) == 0 {
+		return nil, slot, fmt.Errorf("client: recovery open not answered (%s %s)", slot.Status, slot.Code)
+	}
+	r, err := d.OpenRecoveryOpenResult(slot.Envelope)
+	return r, slot, err
+}
+
 // RecoveryRegisterVia registers this new app with the recovery code from
 // the portal's QR through the member API (§11.11.3): verify the manifest
 // and the routed enclave, seal the request, post it, poll the slot and

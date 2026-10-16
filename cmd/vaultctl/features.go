@@ -195,7 +195,11 @@ func cmdCredential(ctx context.Context, g *globals, args []string) error {
 	return withDevice(ctx, g, func(d *client.Device) (any, error) {
 		switch op {
 		case "create":
-			return nil, d.CredentialCreate(ctx, pw)
+			pin, err := password("VAULTCTL_PIN") // release R: create carries the PIN
+			if err != nil {
+				return nil, err
+			}
+			return nil, d.CredentialCreate(ctx, pin, pw)
 		case "fetch":
 			return nil, d.CredentialFetch(ctx)
 		case "version":
@@ -208,11 +212,15 @@ func cmdCredential(ctx context.Context, g *globals, args []string) error {
 		case "rotate":
 			return nil, d.CredentialRotate(ctx, pw)
 		case "password":
+			pin, err := password("VAULTCTL_PIN")
+			if err != nil {
+				return nil, err
+			}
 			np, err := password("VAULTCTL_NEW_PASSWORD")
 			if err != nil {
 				return nil, err
 			}
-			return nil, d.CredentialChangePassword(ctx, pw, np)
+			return nil, d.CredentialChangePassword(ctx, pin, pw, np)
 		case "recover":
 			return nil, d.CredentialRecover(ctx, pw)
 		case "reset":

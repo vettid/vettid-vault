@@ -255,7 +255,7 @@ func TestNameRequestReReportedOnUnlock(t *testing.T) {
 	}
 	unlock := func() []LifecycleEvent {
 		t.Helper()
-		m, out := UnlockAlt(context.Background(), AltUnlockParams{Options: f.opts, VaultID: f.vid, PIN: testPIN, pinOnly: true})
+		m, out := UnlockAlt(context.Background(), AltUnlockParams{Options: f.opts, VaultID: f.vid, PIN: testPIN, UnlockSecret: testSecret, pinOnly: true})
 		if m == nil || !out.OK {
 			t.Fatalf("unlock: %+v", out)
 		}

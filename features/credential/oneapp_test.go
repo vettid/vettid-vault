@@ -245,8 +245,8 @@ func TestTransfer(t *testing.T) {
 		t.Fatalf("wrong password: %q", r.Code)
 	}
 	r := e.ok(appr("246810", pw))
-	if b := string(r.Body); b != "" && b != "{}" && b != "null" {
-		t.Fatalf("approve response %s (0.10.3: {})", r.Body)
+	if b := string(r.Body); b != `{"unlink":"after_new_unlock"}` {
+		t.Fatalf("approve response %s (release R: unlink after the new phone's unlock)", r.Body)
 	}
 	if e.h.Xfer.State != vault.TransferApproved {
 		t.Fatal("not approved")
@@ -275,6 +275,7 @@ func TestTransferSignerConfirmation(t *testing.T) {
 	e := newEnv(t)
 	e.h.PIN = "246810"
 	blob := e.create()
+	e.h.PINTries = 0 // release R: credential.create verifies the PIN
 	o := e.ok(e.raw("app", "device.transfer.create", `{}`)).Obj(t)
 	id, _ := o.String("transfer_id")
 	e.h.Xfer.Scanned = true
@@ -356,22 +357,6 @@ func TestTransferAbortKeepsHolder(t *testing.T) {
 	e.ok(e.raw("app", "device.transfer.create", `{}`))
 	if r := e.unlock(blob, pw); r.Code != "credential_frozen" || len(e.h.XferEnded) != 2 || !strings.HasSuffix(e.h.XferEnded[1], ":alarm") {
 		t.Fatalf("alarm during a transfer: %q %v", r.Code, e.h.XferEnded)
-	}
-}
-
-// §3.5.9: a recovery during an alarm hands the credential to the new app,
-// which must still rotate.
-func TestRecoverDuringAlarm(t *testing.T) {
-	e := newEnv(t)
-	b1 := e.create()
-	e.ok(e.unlock(b1, pw))
-	e.ok(e.raw("app", "credential.ack", `{"version":2}`))
-	if r := e.unlock(b1, pw); r.Code != "credential_frozen" {
-		t.Fatal(r.Code)
-	}
-	e.ok(e.call("recovering-app", "credential.recover", "", map[string]any{"password": pw}))
-	if e.f.Holder() != "dev-recovering" || !strings.Contains(string(e.ok(e.raw("desktop", "credential.version", `{}`)).Body), `"rotation_required"`) {
-		t.Fatal("alarm not moved to rotation_required")
 	}
 }
 
@@ -478,8 +463,9 @@ func TestNoHolderNoAdoption(t *testing.T) {
 	if e.f.Holder() != "" {
 		t.Fatal("adopted")
 	}
-	e.ok(e.call("recovering-app", "credential.recover", "", map[string]any{"password": pw}))
-	if e.f.Holder() != "dev-recovering" {
-		t.Fatal("recovery did not set the holder")
+	// Release R: credential.recover is removed; the recovered phone
+	// becomes the holder at its pairing (TransferCompleted).
+	if r := e.call("recovering-app", "credential.recover", "", map[string]any{"password": pw}); r.Code != "forbidden" {
+		t.Fatalf("credential.recover: %q", r.Code)
 	}
 }

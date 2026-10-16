@@ -58,6 +58,10 @@ func (s *Sealer) Unseal(_ context.Context, b, aad []byte) ([]byte, error) {
 
 var _ vault.Sealer = (*Sealer)(nil)
 
+// DevUnlockSecret stands in for the phone's unlock secret of a vault
+// created or unlocked directly (release R, §11.14.1; dev only).
+var DevUnlockSecret = []byte("vettid-dev-unlock-secret-32bytes")
+
 // Release is the release name dev vaults are sealed to. It is not a PCR0:
 // dev vaults never run in a real enclave.
 var Release = vault.Release{PCR0: "dev", Number: 1}
@@ -68,6 +72,9 @@ var Release = vault.Release{PCR0: "dev", Number: 1}
 func Create(ctx context.Context, p vault.CreateParams) (*vault.Manager, error) {
 	if p.Release.PCR0 == "" {
 		p.Release = Release
+	}
+	if p.UnlockSecret == nil {
+		p.UnlockSecret = DevUnlockSecret
 	}
 	if p.KDF.Alg == "" {
 		k, err := vault.MinKDF()
@@ -83,6 +90,9 @@ func Create(ctx context.Context, p vault.CreateParams) (*vault.Manager, error) {
 func Unlock(ctx context.Context, p vault.UnlockParams) (*vault.Manager, vault.UnlockResult, error) {
 	if p.Release.PCR0 == "" {
 		p.Release = Release
+	}
+	if p.UnlockSecret == nil {
+		p.UnlockSecret = DevUnlockSecret
 	}
 	return vault.Unlock(ctx, p)
 }

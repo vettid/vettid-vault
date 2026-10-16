@@ -216,11 +216,7 @@ func (pr *proc) open(ctx context.Context, f [][]byte) [][]byte {
 	if err != nil {
 		return hostproto.Strings(hostproto.StatusError)
 	}
-	res, m, registered := core.Open(ctx, j)
-	reg := "0"
-	if registered {
-		reg = "1"
-	}
+	res, m, marker := core.Open(ctx, j)
 	running := "0"
 	if m != nil {
 		running = "1"
@@ -230,7 +226,7 @@ func (pr *proc) open(ctx context.Context, f [][]byte) [][]byte {
 		pr.mu.Unlock()
 		go pr.run(rctx, m)
 	}
-	return [][]byte{[]byte(hostproto.StatusOK), res, []byte(running), []byte(reg)}
+	return [][]byte{[]byte(hostproto.StatusOK), res, []byte(running), marker.Encode()}
 }
 
 // run runs the manager; a loop that ends on its own ends the process.

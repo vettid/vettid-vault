@@ -100,7 +100,7 @@ func TestV3Exit(t *testing.T) {
 	if err := m2.CompleteEnrollment(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := m2.CredentialCreate(ctx, "member two password"); err != nil {
+	if err := m2.CredentialCreate(ctx, "246801", "member two password"); err != nil {
 		t.Fatal(err)
 	}
 	// 0.16.0 (§11.5): the credential's first blob is a backup copy; the

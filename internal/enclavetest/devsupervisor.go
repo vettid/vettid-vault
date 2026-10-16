@@ -6,6 +6,8 @@ import (
 	"encoding/base64"
 	"errors"
 	"flag"
+	"github.com/vettid/vettid-vault/internal/countertest"
+	"github.com/vettid/vettid-vault/internal/reckeytest"
 	"io"
 	"log/slog"
 	"net"
@@ -133,6 +135,9 @@ func DevSupervisor(o DevOptions) (supervisor.Config, error) {
 		DownLock:  o.DownLock,
 		LogLevel:  o.LogLevel,
 		OnReady:   o.OnReady,
+		// Release R: an in-memory stand-in for the attempt counter's
+		// bucket (development only; its clock runs with the real time).
+		Counter: countertest.NewLive(),
 	}, nil
 }
 
@@ -147,7 +152,11 @@ func devConfig(instanceID string, n uint64, relayURL string, dp *DevDevicePolicy
 	mk := ManifestKey()
 	return enclave.Config{InstanceID: instanceID, ReleaseNumber: n, ManifestKeys: []*ecdsa.PublicKey{&mk.PublicKey},
 		SealAccount: KMSAccount, SealRegion: KMSRegion,
-		RetirementPrincipal: RetirementRole, RetirementWindowDays: RetirementWindow, DeviceAttest: dp.Apply(Policy()), RelayURL: relayURL, KDF: vault.MinKDF}
+		RetirementPrincipal: RetirementRole, RetirementWindowDays: RetirementWindow, DeviceAttest: dp.Apply(Policy()), RelayURL: relayURL, KDF: vault.MinKDF,
+		// Release R: the stand-in's recovery request key, recovery offered.
+		// The development stack has no attempt counter, so the quiet
+		// period is not simulated here (the code is valid after 24 h).
+		Recovery: enclave.RecoveryConfig{RequestKeys: reckeytest.Pinned(), Offered: true, WaitUnit: 10 * time.Minute, Quiet: time.Nanosecond}}
 }
 
 // DevVaultArgs are the arguments after vaultproc.Arg for a dev vault

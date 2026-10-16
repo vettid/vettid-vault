@@ -276,10 +276,16 @@ func checkApplicationID(p *Policy, e der.Element) ([]byte, error) {
 		if err != nil || !pr.Empty() {
 			return nil, ErrFormat
 		}
-		if _, err := der.Int(ve); err != nil {
+		vc, err := der.Int(ve)
+		if err != nil {
 			return nil, ErrFormat
 		}
 		if !p.androidPackageAllowed(name) {
+			return nil, ErrApplication
+		}
+		// Release R (§11.14.14): android_min_version_code; an older app
+		// is answered attestation. No security rule depends on it.
+		if p.AndroidMinVersionCode > 0 && (vc < 0 || uint64(vc) < p.AndroidMinVersionCode) {
 			return nil, ErrApplication
 		}
 		n++

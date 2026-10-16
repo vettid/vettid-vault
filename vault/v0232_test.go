@@ -31,7 +31,7 @@ func deviceUnlock(t *testing.T, d *devFixture, before func(*Manager)) *Manager {
 		t.Fatal(err)
 	}
 	own := ReleaseEntry{PCR0: testRelease.PCR0, Number: testRelease.Number, Status: "active"}
-	m, out := UnlockAlt(ctx, AltUnlockParams{Options: d.opts, VaultID: d.vid, UserGUID: "u1", DeviceIK: d.devPeer.IK, PIN: testPIN,
+	m, out := UnlockAlt(ctx, AltUnlockParams{Options: d.opts, VaultID: d.vid, UserGUID: "u1", DeviceIK: d.devPeer.IK, PIN: testPIN, UnlockSecret: testSecret,
 		VerifyDevice: func(k *UnlockKey) (json.RawMessage, error) { return k.Attestation, nil },
 		Manifest: func(seen uint64) (*ManifestView, error) {
 			return &ManifestView{Serial: seen + 1, Own: own, Lookup: func(string) (ReleaseEntry, bool) { return own, true }}, nil
@@ -85,7 +85,7 @@ func TestUnlockedPINOnlyNoDevice(t *testing.T) {
 	if err := f.m.Lock(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	m, out := UnlockAlt(context.Background(), AltUnlockParams{Options: f.opts, VaultID: f.vid, PIN: testPIN, pinOnly: true})
+	m, out := UnlockAlt(context.Background(), AltUnlockParams{Options: f.opts, VaultID: f.vid, PIN: testPIN, UnlockSecret: testSecret, pinOnly: true})
 	if m == nil || !out.OK {
 		t.Fatalf("unlock: %+v", out)
 	}

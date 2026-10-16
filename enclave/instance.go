@@ -57,7 +57,7 @@ type Host interface {
 	// instance of the vault first (one manager per vault, D4), and returns
 	// the sealed result (or random bytes of its size), and whether it is a
 	// recovery_register's {"ok": true} (the clear marker, 0.10.6).
-	Open(ctx context.Context, j *Job) ([]byte, bool, error)
+	Open(ctx context.Context, j *Job) ([]byte, Marker, error)
 	// Lock locks a running vault (§12.3); it reports whether it ran.
 	Lock(ctx context.Context, vaultID string) (bool, error)
 	// LockReason is Lock with a reason in vault.locking (§11.11.1).
@@ -91,6 +91,9 @@ type Instance struct {
 	mu    sync.Mutex // ETKs and replay sets
 	reqMu sync.Mutex // serializes alternate-channel requests
 	etks  []*etk
+	// recoverySeen are the signed recovery requests seen (release R,
+	// §11.14.8), by op and request_id.
+	recoverySeen map[string]time.Time
 }
 
 // Errors.
@@ -187,8 +190,23 @@ func (in *Instance) Process(ctx context.Context, q *QueueMessage, manifestDoc []
 	case OpAccount:
 		_, _ = in.host.Account(ctx, q.VaultID, q.Account) // no running vault: dropped (§11.5)
 	case OpRecovery, OpRecoveryCancel:
-		// No envelope: the job carries the browser key (not secret). A
-		// recovery locks a running vault first, telling its devices why
+		// Release R (§11.14.8): the member API's signature first; a
+		// recovery that fails is answered with random bytes of the sealed
+		// code's size, a cancel is ignored; nothing is locked or recorded.
+		if !in.verifyRecoverySig(q) {
+			if q.Op == OpRecovery {
+				resp.Envelope = opaque()
+			}
+			return resp
+		}
+		if q.Op == OpRecovery && !in.cfg.Recovery.Offered {
+			// §11.14.13: a release that refuses every recovery, without
+			// locking the vault.
+			res, _ := RefuseRecovery(q.BrowserKey, q.VaultID, q.RequestID, "not_offered")
+			resp.Envelope, resp.Code, resp.Clear.Reason = res, CodeRecoveryUnavailable, "not_offered"
+			return resp
+		}
+		// A recovery locks a running vault first, telling its devices why
 		// (§11.11.1); the vault process then works on the sealed header.
 		// 0.16.0: a running vault that cannot be recovered (no credential,
 		// no backup copy) refuses from its own state before anything is
@@ -196,7 +214,7 @@ func (in *Instance) Process(ctx context.Context, q *QueueMessage, manifestDoc []
 		if q.Op == OpRecovery {
 			if ran, why := in.host.RecoveryRefusal(ctx, q.VaultID); ran && why != "" {
 				res, _ := RefuseRecovery(q.BrowserKey, q.VaultID, q.RequestID, why)
-				resp.Envelope, resp.Code = res, CodeRecoveryUnavailable
+				resp.Envelope, resp.Code, resp.Clear.Reason = res, CodeRecoveryUnavailable, why
 				return resp
 			}
 			_, _ = in.host.LockReason(ctx, q.VaultID, "recovery")
@@ -207,17 +225,19 @@ func (in *Instance) Process(ctx context.Context, q *QueueMessage, manifestDoc []
 		}
 		j := &Job{Op: q.Op, VaultID: q.VaultID, UserGUID: q.UserGUID, RequestID: q.RequestID,
 			Inner: &envelope.Inner{Type: requestType[q.Op], ID: q.RequestID, TS: in.now(), Body: body}}
-		res, refused, err := in.host.Open(ctx, j)
+		res, mk, err := in.host.Open(ctx, j)
 		if q.Op == OpRecovery {
 			if err != nil || len(res) != altchan.SealedCodeSize {
-				res, refused = opaque(), false
+				res, mk = opaque(), Marker{}
 			}
 			resp.Envelope = res
-			if refused {
-				resp.Code = CodeRecoveryUnavailable // §11.11.2 (0.16.0)
+			if mk.Code == CodeRecoveryUnavailable {
+				resp.Code, resp.Clear.Reason = CodeRecoveryUnavailable, mk.Reason // §11.11.2 (0.16.0)
+			} else {
+				resp.Clear = Marker{NotBefore: mk.NotBefore, Expires: mk.Expires, Earliest: mk.Earliest} // §11.14.5
 			}
 		}
-	case OpEnroll, OpUnlock, OpRecoveryRegister:
+	case OpEnroll, OpUnlock, OpRecoveryRegister, OpRecoveryOpen:
 		inner, padded, err := in.openRequest(q)
 		if errors.Is(err, errETKUnknown) {
 			resp.Status = StatusETKUnknown
@@ -232,22 +252,28 @@ func (in *Instance) Process(ctx context.Context, q *QueueMessage, manifestDoc []
 		if q.Op == OpUnlock || q.Op == OpEnroll {
 			j.Account = q.Account // enroll: REQUIRED, checked by the job (0.18.0)
 		}
-		if (q.Op == OpEnroll || q.Op == OpUnlock) && len(manifestDoc) <= manifest.MaxServed {
+		if (q.Op == OpEnroll || q.Op == OpUnlock || q.Op == OpRecoveryOpen) && len(manifestDoc) <= manifest.MaxServed {
 			j.Manifest = manifestDoc
 		}
-		res, registered, err := in.host.Open(ctx, j)
+		res, mk, err := in.host.Open(ctx, j)
 		// The decrypted request (with the PIN) is wiped as soon as the
 		// vault has it (§12.4).
 		j.Wipe()
 		suite.Wipe(padded)
 		if err != nil || res == nil {
-			res, registered = opaque(), false
+			res, mk = opaque(), Marker{}
 		}
 		resp.Envelope = res
-		if registered && q.Op == OpRecoveryRegister {
+		switch {
+		case mk.Code == CodeRecoveryRegistered && q.Op == OpRecoveryRegister:
 			// §11.5, §11.11.3 (0.10.6): a successful register says so in
 			// the clear, so that the member API retires the spent code.
 			resp.Code = CodeRecoveryRegistered
+		case mk.Code == CodeRecoveryAttempt && q.Op == OpRecoveryOpen:
+			// Release R (§11.14.11): a counted attempt, with retry_at and
+			// expires when a wait began; never whether it was right.
+			resp.Code = CodeRecoveryAttempt
+			resp.Clear = Marker{RetryAt: mk.RetryAt, Expires: mk.Expires}
 		}
 	}
 	return resp

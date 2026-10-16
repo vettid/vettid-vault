@@ -390,6 +390,10 @@ func hexSHA(b []byte) string {
 type OpenFields struct {
 	UserGUID, VaultID, RequestID, RecoveryID, TS, ETKKid string
 	Secrets, Token, Manifest, UnlockSecret               []byte
+	// ManifestSHA256 is SHA-256(manifest bytes), used instead of hashing
+	// Manifest when set (the enclave has the hash the request names, which
+	// it verifies against the served document).
+	ManifestSHA256 []byte
 }
 
 // OpenSigningString is the string the registered phone's device key
@@ -401,8 +405,12 @@ func OpenSigningString(f OpenFields) (string, error) {
 			return "", ErrSize
 		}
 	}
+	mh := hexSHA(f.Manifest)
+	if len(f.ManifestSHA256) == sha256.Size {
+		mh = hex.EncodeToString(f.ManifestSHA256)
+	}
 	return strings.Join([]string{LabelRecoveryOpen, f.UserGUID, f.VaultID, f.RequestID, f.RecoveryID, f.TS, f.ETKKid,
-		hexSHA(f.Secrets), hexSHA(f.Token), hexSHA(f.Manifest), hexSHA(f.UnlockSecret)}, "\n"), nil
+		hexSHA(f.Secrets), hexSHA(f.Token), mh, hexSHA(f.UnlockSecret)}, "\n"), nil
 }
 
 // Recovery request operations (§11.14.8).

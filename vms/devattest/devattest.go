@@ -46,6 +46,10 @@ type Policy struct {
 	AndroidRoots []*x509.Certificate // compared by SubjectPublicKeyInfo
 	// AndroidPackage is the VettID app's package name.
 	AndroidPackage string
+	// AndroidMinVersionCode is the release constant
+	// android_min_version_code (0.33.0, release R, §11.14.14): an
+	// attestation of an older app version is refused; 0: no minimum.
+	AndroidMinVersionCode uint64
 	// AndroidDevPackages are further package names accepted in place of
 	// AndroidPackage. Development only: set by the dev enclave's device
 	// policy file (debug and dev-stack application ids);

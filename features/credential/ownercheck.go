@@ -81,8 +81,12 @@ func (f *Feature) ownerCheck(s *vault.Session, e *Envelope, p *Payload) (json.Ra
 	if err != nil {
 		return nil, err
 	}
+	// Release R (§11.14.5): presence at the counter, the counter's attempts
+	// in the audit log, arming (a busy permit leaves the check passed).
+	state, present := s.OwnerCheckRecovery(string(p.PIN), p.Password, 0, f.backupLocked())
 	b := strictjson.NewBuilder().Base64("credential", blob).Uint("version", f.st.Version).Raw("utks", f.replenish(s))
 	info.Members(b)
+	b.Raw("recovery", strictjson.NewBuilder().String("state", state).Bool("present_recorded", present).Bytes())
 	return b.Bytes(), nil
 }
 

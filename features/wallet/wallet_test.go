@@ -81,7 +81,7 @@ func newEnv(t *testing.T, chain wallet.ChainSource) *env {
 	e.h.AddDevice("dev-desktop", vault.KindDesktop)
 	e.h.AddConnection(cA)
 	e.h.AddConnection(cB)
-	e.sealed("app", "credential.create", nil, map[string]any{"password": pw}, false, false)
+	e.sealed("app", "credential.create", nil, map[string]any{"password": pw, "pin": e.h.PIN}, false, false)
 	return e
 }
 

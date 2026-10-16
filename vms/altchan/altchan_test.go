@@ -37,13 +37,14 @@ func TestUnlockSigningString(t *testing.T) {
 		t.Fatal(err)
 	}
 	lines := strings.Split(s, "\n")
-	if len(lines) != 12 || lines[0] != "vettid/vms/2/unlock" || lines[5] != "0102030405060708" || lines[6] != "1234" ||
+	// Release R: a last line, hex(SHA-256(unlock_secret)) (here of no secret).
+	if len(lines) != 13 || lines[12] != "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" || lines[0] != "vettid/vms/2/unlock" || lines[5] != "0102030405060708" || lines[6] != "1234" ||
 		lines[8] != "8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92" ||
 		lines[10] != "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a" || lines[11] != "" {
 		t.Fatalf("%q", lines)
 	}
 	f.ToPCR0 = strings.Repeat("cd", 48)
-	if s, _ := UnlockSigningString(f); !strings.HasSuffix(s, "\n"+f.ToPCR0) {
+	if s, _ := UnlockSigningString(f); !strings.Contains(s, "\n"+f.ToPCR0+"\n") {
 		t.Fatal("to_pcr0")
 	}
 	for name, g := range map[string]func(*UnlockFields){

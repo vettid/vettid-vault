@@ -155,6 +155,12 @@ func ReleaseRegion() string {
 // ReleaseConfig returns the configuration a release image runs with: the
 // vendor roots from package pins and the embedded channel constants.
 func ReleaseConfig(instanceID, relayURL string) Config {
+	return releaseConfigFor(release(), instanceID, relayURL)
+}
+
+// releaseConfigFor builds the configuration from channel constants c (the
+// embedded ones in ReleaseConfig; nil: none).
+func releaseConfigFor(c *releasecfg.Config, instanceID, relayURL string) Config {
 	apple := x509.NewCertPool()
 	apple.AddCert(pins.AppleAppAttestRoot())
 	cfg := Config{
@@ -165,7 +171,7 @@ func ReleaseConfig(instanceID, relayURL string) Config {
 			IOSRoots:                  apple, IOSAppID: iosAppID,
 		},
 	}
-	if c := release(); c != nil {
+	if c != nil {
 		cfg.ReleaseNumber, cfg.ManifestKeys = c.Release, c.ManifestKeys
 		cfg.SealAccount, cfg.SealRegion = c.SealAccount, c.SealRegion
 		cfg.RetirementPrincipal, cfg.RetirementWindowDays = c.RetirementPrincipal, c.RetirementWindowDays
@@ -185,6 +191,7 @@ func ReleaseConfig(instanceID, relayURL string) Config {
 		cfg.Recovery = RecoveryConfig{Counter: c.RecoveryCounter, RequestKeys: c.RecoveryRequestKeys,
 			WaitUnit: time.Duration(c.RecoveryWaitUnitSeconds) * time.Second, Quiet: time.Duration(c.RecoveryQuietSeconds) * time.Second,
 			CounterLock: c.CounterLock(), Offered: c.RecoveryOffered, AndroidMinVersionCode: c.AndroidMinVersionCode}
+		cfg.DeviceAttest.AndroidMinVersionCode = c.AndroidMinVersionCode
 	}
 	return cfg
 }

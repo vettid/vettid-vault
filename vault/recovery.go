@@ -7,6 +7,8 @@ import (
 	"encoding/base32"
 	"encoding/json"
 	"errors"
+	"github.com/vettid/vettid-vault/vault/counter"
+	"github.com/vettid/vettid-vault/vms/recovery"
 	"time"
 
 	"github.com/vettid/vettid-vault/internal/strictjson"
@@ -56,6 +58,10 @@ type RecoveryRecord struct {
 	CodeHash    []byte       `json:"code_hash,omitempty"`
 	Attempts    int          `json:"attempts,omitempty"`
 	App         *RecoveryApp `json:"app,omitempty"`
+	// Release R (§11.14.6): the tag of the last wrong pair this phone
+	// sent, and the wrong_again answers given in this recovery.
+	LastWrong  []byte `json:"last_wrong,omitempty"`
+	WrongAgain int    `json:"wrong_again,omitempty"`
 }
 
 // RecoveryEvent is a recovery step recorded while the vault was locked; it
@@ -195,10 +201,10 @@ func (h *Header) logRecovery(now time.Time, kind, ref string) {
 // records its hash, the delay and the expiry in the sealed header, and
 // returns the code (which the caller seals to the member's browser key and
 // never stores). A newer request replaces an older one.
-func RecoveryRequest(ctx context.Context, p HeaderParams, recoveryID string, delay time.Duration) (code string, rec RecoveryRecord, err error) {
+func RecoveryRequest(ctx context.Context, p HeaderParams, recoveryID string, delay time.Duration) (code string, rec RecoveryRecord, earliest bool, err error) {
 	raw, err := suite.RandomBytes(RecoveryCodeBytes)
 	if err != nil {
-		return "", rec, err
+		return "", rec, false, err
 	}
 	code = codeEnc.EncodeToString(raw)
 	suite.Wipe(raw)
@@ -213,16 +219,50 @@ func RecoveryRequest(ctx context.Context, p HeaderParams, recoveryID string, del
 			h.logRecovery(now, "recovery.replaced", h.Recovery.ID)
 			h.dropRecoveryKey()
 		}
-		rec = RecoveryRecord{ID: recoveryID, State: RecoveryPending, RequestedAt: now, NotBefore: now.Add(delay),
-			Expires: now.Add(delay + RecoveryValidity), CodeHash: RecoveryCodeHash(p.VaultID, recoveryID, code)}
+		// Release R (§11.14.5): not_before is the latest of now + 24 h, the
+		// end of the 72-hour quiet period and the end of a running wait,
+		// ages measured by the counter's clock; an estimate (earliest)
+		// when the counter cannot be read.
+		var nb time.Time
+		nb, earliest = recoveryNotBefore(ctx, p.Options, h, now, delay)
+		rec = RecoveryRecord{ID: recoveryID, State: RecoveryPending, RequestedAt: now, NotBefore: nb,
+			Expires: nb.Add(RecoveryValidity), CodeHash: RecoveryCodeHash(p.VaultID, recoveryID, code)}
 		h.Recovery = &rec
 		h.logRecovery(now, "recovery.requested", recoveryID)
 		return false, nil
 	})
 	if err != nil {
-		return "", rec, err
+		return "", rec, false, err
 	}
-	return code, rec, nil
+	return code, rec, earliest, nil
+}
+
+// recoveryNotBefore reads the counter for a recovery request (§11.14.5).
+func recoveryNotBefore(ctx context.Context, o Options, h *Header, now time.Time, delay time.Duration) (time.Time, bool) {
+	quiet := o.RecoveryQuiet
+	if quiet == 0 {
+		quiet = defaultQuiet
+	}
+	unit := o.RecoveryWaitUnit
+	if unit == 0 {
+		unit = defaultWaitUnit
+	}
+	if o.Counter == nil || len(h.Rec.CounterKey) != recovery.SecretSize {
+		return counter.NotBefore(now, nil, quiet, delay)
+	}
+	n, err := recovery.NewNames(h.Rec.CounterKey, h.VaultID)
+	if err != nil {
+		return counter.NotBefore(now, nil, quiet, delay)
+	}
+	g := h.Rec.Generation
+	if g == 0 {
+		g = 1
+	}
+	v, err := counter.New(o.Counter, n, unit).WithRecordLock(o.RecoveryCounterLock).Status(ctx, g)
+	if err != nil {
+		return counter.NotBefore(now, nil, quiet, delay)
+	}
+	return counter.NotBefore(now, v, quiet, delay)
 }
 
 // RecoveryCancel ends a recovery (§11.11.4): the record and any registered
@@ -300,9 +340,9 @@ func RecoveryRegister(ctx context.Context, p HeaderParams, recoveryID, code stri
 			return true, ErrDeviceAttestation
 		}
 		app.Attestation = b
+		// Release R (§11.11.3, §11.14.6): the phone is recorded in the
+		// recovery record only; it can send nothing but the recovery open.
 		r.State, r.CodeHash, r.App = RecoveryRegistered, nil, &app
-		h.UnlockKeys = append(h.UnlockKeys, UnlockKey{DeviceID: recoveryDeviceID, IK: app.IK, KEM: app.KEM, Attestation: b})
-		sortUnlockKeys(h.UnlockKeys)
 		h.logRecovery(now, "recovery.registered", r.ID)
 		return false, nil
 	})
@@ -354,14 +394,9 @@ func (m *Manager) applyRecovery(now time.Time) {
 			m.removePeer(p, "device.unlinked", now)
 		}
 	}
-	if r == nil || r.State != RecoveryRegistered || r.App == nil {
-		return
-	}
-	if inv := m.st.Invites[r.ID]; inv == nil {
-		m.st.Invites[r.ID] = &Invite{ID: r.ID, Kind: KindApp, Exp: r.Expires, EnrollIK: r.App.IK, EnrollRelayPK: r.App.RelayPK,
-			EnrollKEM: r.App.KEM, EnrollAttest: r.App.Attestation, CreatedBy: inviteByRecovery}
-		m.dirty = true
-	}
+	// Release R (§11.14.6): a registered phone gets its handshake only
+	// when its recovery open completes.
+	_ = r
 }
 
 const inviteByRecovery = "recovery"

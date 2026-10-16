@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
+	"github.com/vettid/vettid-vault/vms/recovery"
 	"time"
 
 	"github.com/vettid/vettid-vault/vault/store"
@@ -24,6 +25,10 @@ const (
 	CodeWrongRelease  = "wrong_release"
 	CodeReleaseKey    = "release_key"
 	CodeRetry         = "retry"
+	// Release R (§11.4, §11.14.1, §11.14.2).
+	CodeBadRequest         = "bad_request"
+	CodeDeviceSecret       = "device_secret"
+	CodeTransferIncomplete = "transfer_incomplete"
 )
 
 // Release update results and refusal codes (§11.4, §11.10.4).
@@ -83,10 +88,14 @@ type UpdateRequest struct {
 // decrypted the request and checked its binding, freshness and replay.
 type AltUnlockParams struct {
 	Options
-	VaultID      string
-	UserGUID     string
-	DeviceIK     ed25519.PublicKey
-	PIN          string
+	VaultID  string
+	UserGUID string
+	DeviceIK ed25519.PublicKey
+	PIN      string
+	// UnlockSecret is the phone's unlock secret (release R, §11.14.1): 32
+	// bytes, or the unlock is answered bad_request before any work on the
+	// PIN.
+	UnlockSecret []byte
 	MinStateSeq  uint64
 	MinHeaderSeq uint64
 	// DeviceToken is the fresh standing token for the device's mailbox
@@ -194,6 +203,11 @@ func findUnlockKey(h *Header, ik ed25519.PublicKey) *UnlockKey {
 			found = &h.UnlockKeys[i]
 		}
 	}
+	// Release R (§11.14.2): the new phone of a transfer or recovery whose
+	// step 3 is not stored is in the `next` part.
+	if found == nil && h.Next != nil && h.Next.App != nil && suite.EqualPublic(h.Next.App.IK, ik) {
+		found = h.Next.App
+	}
 	return found
 }
 
@@ -282,6 +296,9 @@ func UnlockAlt(ctx context.Context, p AltUnlockParams) (*Manager, *AltUnlockOutc
 			return nil, out.fail(CodeRecoveryPending, nil) // not a PIN attempt
 		}
 	}
+	if len(p.UnlockSecret) != recovery.SecretSize {
+		return nil, out.fail(CodeBadRequest, nil) // release R: no PIN-only path (§11.14.1)
+	}
 	if now.Before(hdr.Backoff.NotBefore) {
 		out.RetryAfter = hdr.Backoff.NotBefore.Sub(now)
 		return nil, out.fail(CodeBackoff, nil)
@@ -303,13 +320,14 @@ func UnlockAlt(ctx context.Context, p AltUnlockParams) (*Manager, *AltUnlockOutc
 	if err != nil {
 		return nil, out.fail(CodeMissing, err)
 	}
-	dek, err := deriveDEK(p.PIN, hdr.KDF, hdr.Pepper, p.VaultID)
-	if err != nil {
-		return nil, out.fail(CodeBadPIN, ErrBadPIN)
+	stateVer, ok := StateDEKVersion(sblob)
+	if !ok {
+		return nil, out.fail(CodeMissing, ErrState) // a 0x01 state is refused (§11.14.14)
 	}
-	pt, blobSeq, err := decryptState(dek, p.VaultID, sblob)
-	if err != nil {
-		suite.Wipe(dek)
+	op := openDEK(hdr, p.PIN, p.UnlockSecret, p.VaultID, stateVer)
+	switch op.code {
+	case "":
+	case CodeBadPIN:
 		hdr.Backoff.Failures++
 		hdr.Backoff.NotBefore = now.Add(backoffFor(hdr.Backoff.Failures))
 		hdr.HeaderSeq++
@@ -319,6 +337,14 @@ func UnlockAlt(ctx context.Context, p AltUnlockParams) (*Manager, *AltUnlockOutc
 			_, _ = p.Store.Put(ctx, hkey, b, hver)
 		}
 		return nil, out.fail(CodeBadPIN, ErrBadPIN)
+	default:
+		return nil, out.fail(op.code, nil) // decided before the PIN counts
+	}
+	dek := op.dek
+	pt, blobSeq, err := decryptState(dek, p.VaultID, sblob)
+	if err != nil {
+		op.wipe()
+		return nil, out.fail(CodeMissing, ErrState)
 	}
 	var st State
 	err = json.Unmarshal(pt, &st)
@@ -337,6 +363,19 @@ func UnlockAlt(ctx context.Context, p AltUnlockParams) (*Manager, *AltUnlockOutc
 	}
 	m := newManager(p.Options, &st, hdr, dek)
 	m.stateVer, m.headerVer = sver, hver
+	m.unlockKey, m.unlockSecret = op.uk, append([]byte(nil), p.UnlockSecret...)
+	switch op.mode {
+	case openCurrentDrop:
+		m.dropNext(now) // the old phone or PIN unlocked first (§11.14.2)
+	case openPromote, openComplete:
+		// The state is under DEK_1 (promote: step 3 is done at this
+		// unlock's flush), or a PIN change or a new secret whose step 2
+		// was not stored is completed from the `next` part.
+		m.repl = &replacement{next: hdr.Next, dek1: op.dek1, uk1: append([]byte(nil), op.uk...), secret1: append([]byte(nil), p.UnlockSecret...)}
+		if op.mode == openComplete || hdr.Next.AppKey != nil {
+			m.repl.promoteFn = m.replacementPromoteFn(hdr.Next)
+		}
+	}
 	m.hadFailures = hdr.Backoff.Failures > 0
 	hdr.Backoff = Backoff{} // a correct PIN resets the backoff (§11.8)
 	if p.CancelRecovery && key != nil && hdr.Recovery != nil && !hdr.isRecoveryKey(key.IK) {
@@ -561,6 +600,11 @@ func (m *Manager) resume(ctx context.Context, p AltUnlockParams, out *AltUnlockO
 		return fail(CodeMissing, err)
 	}
 	m.applyRecovery(now)
+	if t := m.st.Transfer; t != nil && t.State == TransferOpen && t.Inbound != "" {
+		// Release R (§11.14.10): the new phone's secret was in memory only;
+		// a transfer whose hs.init came before the lock starts again.
+		m.abortTransfer("locked", now)
+	}
 	var err error
 	m.relay = p.Relay(m.st.Relay.URL, m.keys.relay)
 	if m.limits, err = m.relay.Register(ctx); err != nil {
@@ -578,10 +622,17 @@ func (m *Manager) resume(ctx context.Context, p AltUnlockParams, out *AltUnlockO
 			out.VaultBundle = VaultBundle(handshake.Principal{IK: m.keys.ik.Public().(ed25519.PublicKey), KEM: m.keys.kem.Public(), Relay: m.ownAddr()})
 			backup := true // 0.16.0: always true here (no_backup refused above)
 			out.CredentialBackup = &backup
+		} else if inv := m.recoveredInvite(p.DeviceIK); inv != nil {
+			// Release R, a lost ok (owner decision of 2026-10-16,
+			// §11.14.6): the recovered phone's own unlock, before its
+			// first handshake, carries the bundle again.
+			out.VaultBundle = m.resumeLostOK(inv, now)
 		}
 		if len(p.Account) > 0 {
 			m.applyAccount(p.Account, now) // §11.13: with every unlock
 		}
+		m.pendingUnlinkAtUnlock(now) // release R: the new phone's first unlock from storage (§11.14.10)
+		m.retryPendingSucceed(ctx)
 		if m.st.AnnouncedRelease != p.Release.PCR0 {
 			m.st.AnnouncedRelease = p.Release.PCR0
 			m.notifyDevices("sync.event", releaseEvent(p.Release), "", now)
@@ -645,8 +696,10 @@ func (m *Manager) unlockTokens(k *UnlockKey, deviceToken string, now time.Time) 
 		// The first app before its enrollment handshake: the enrollment
 		// binding names its relay key.
 		inv := m.st.Invites[m.st.VaultID]
-		if r := m.hdr.Recovery; r != nil && m.hdr.isRecoveryKey(k.IK) {
-			inv = m.st.Invites[r.ID] // the recovered app before its handshake (§11.11.5)
+		for _, ri := range m.st.Invites {
+			if ri.CreatedBy == inviteByRecovery && ri.EnrollIK != nil && suite.EqualPublic(ri.EnrollIK, k.IK) {
+				inv = ri // the recovered phone before its handshake (§11.14.6)
+			}
 		}
 		if inv == nil || inv.EnrollIK == nil || !suite.EqualPublic(inv.EnrollIK, k.IK) {
 			return ""

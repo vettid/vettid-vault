@@ -95,6 +95,27 @@ type State struct {
 	// Attach is the attachment index and its bookkeeping (§3.3, §10.5.1;
 	// 0.32.0, release A); nil until the first attachment.
 	Attach *AttachState `json:"attach,omitempty"`
+
+	// Release R (§11.14.11): the counter's attempts the vault has recorded
+	// in the audit log ("<generation>/<n>" → "success" | "not_success"),
+	// the used count audited per generation, the generation of the last
+	// completed recovery, and when the 24-hour counter notice was raised.
+	RecoveryAttempts      map[string]string `json:"recovery_attempts,omitempty"`
+	RecoveryUsed          map[string]int    `json:"recovery_used,omitempty"`
+	RecoveredGeneration   uint64            `json:"recovered_generation,omitempty"`
+	RecoveryCounterNotice time.Time         `json:"recovery_counter_notice,omitempty"`
+	// PendingUnlink is a transfer's held notice to the old app (§11.14.10).
+	PendingUnlink *PendingUnlink `json:"pending_unlink,omitempty"`
+	// RecoveredSigner is the vault's signer binding before a completed
+	// recovery removed the old app, until the recovered phone pairs and
+	// the binding moves (§11.7.1, §11.14.6): digest and class.
+	RecoveredSigner []string `json:"recovered_signer,omitempty"`
+	// PendingSucceed is a completed recovery's attempt (generation, n)
+	// whose success the counter has not confirmed; PresentPending a
+	// presence (after a recovery or a transfer) not yet recorded. Both are
+	// sent again at every unlock and owner check (§11.14.6).
+	PendingSucceed []uint64 `json:"pending_succeed,omitempty"`
+	PresentPending bool     `json:"present_pending,omitempty"`
 }
 
 // ReleaseMove is a recorded, not yet confirmed move to another release
@@ -182,6 +203,17 @@ type Peer struct {
 	// Asks is a connection's §10.4.1 state (0.23.0): mute, pause,
 	// cooldowns, the ask-rate window and the held neutral answers.
 	Asks *AskState `json:"asks,omitempty"`
+	// Conflict is a connection's two successors of one identity key
+	// (release R, §3.4): the connection is suspended until the holder
+	// resolves it.
+	Conflict *RotationConflict `json:"rotation_conflict,omitempty"`
+}
+
+// RotationConflict holds both rotation statements with the same old_ik.
+type RotationConflict struct {
+	OldIK      []byte            `json:"old_ik"`
+	Statements []json.RawMessage `json:"statements"`
+	At         time.Time         `json:"at"`
 }
 
 // PeerMeta is the owner's own metadata about a connection: never sent to

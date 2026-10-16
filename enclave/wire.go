@@ -24,6 +24,9 @@ const (
 	OpRecovery         = "recovery"
 	OpRecoveryCancel   = "recovery_cancel"
 	OpRecoveryRegister = "recovery_register"
+	// OpRecoveryOpen is a recovery attempt (0.33.0, release R, §11.14.6):
+	// sealed like a register.
+	OpRecoveryOpen = "recovery_open"
 	// OpAccount carries the member's account snapshot to a running vault
 	// (0.15.0, §11.13): no envelope, no lease; dropped without a running
 	// vault.
@@ -65,13 +68,37 @@ func LifecycleFields(ev vault.LifecycleEvent) [][]byte {
 	if n := ev.Name; n != nil {
 		seq, first, last = strconv.FormatUint(n.Seq, 10), n.FirstName, n.LastName
 	}
+	cleared := ""
+	if ev.NextCleared {
+		cleared = "1"
+	}
 	return append(hostproto.Strings(ev.Event, ev.VaultID, ev.Release, ev.VaultVersion, strconv.Itoa(ev.StateVersion)),
 		ev.AppKey, []byte(strconv.FormatUint(ev.AppKeySeq, 10)), []byte(BackupField(ev.CredentialBackup)),
-		[]byte(seq), []byte(first), []byte(last))
+		[]byte(seq), []byte(first), []byte(last),
+		// Release R (§11.5): next ("1", "0" or ""), header_seq, next_cleared ("1" or "").
+		[]byte(BackupField(ev.Next)), []byte(strconv.FormatUint(ev.HeaderSeq, 10)), []byte(cleared))
 }
 
-// LifecycleFieldCount is the number of LifecycleFields.
-const LifecycleFieldCount = 11
+// LifecycleFieldCount is the number of LifecycleFields (release R: 14).
+const LifecycleFieldCount = 14
+
+// ParseNextFields decodes LifecycleFields' release R members.
+func ParseNextFields(next, hseq, cleared []byte) (*bool, uint64, bool, bool) {
+	n, ok := ParseBackupField(string(next))
+	if !ok {
+		return nil, 0, false, false
+	}
+	hs, err := strconv.ParseUint(string(hseq), 10, 53)
+	if err != nil || strconv.FormatUint(hs, 10) != string(hseq) {
+		return nil, 0, false, false
+	}
+	switch string(cleared) {
+	case "", "1":
+	default:
+		return nil, 0, false, false
+	}
+	return n, hs, string(cleared) == "1", true
+}
 
 // ParseNameFields decodes LifecycleFields' last three: nil for "0", "",
 // "" (no name request); a canonical seq ≥ 1 and two names
@@ -134,6 +161,12 @@ type QueueMessage struct {
 	// DER; enroll and recovery_register, 0.15.0): bound to the sealed
 	// app.api_key (§11.3, §11.11.3).
 	AppKey []byte
+	// SignedAt, KeyID and Sig are the member API's signature over a
+	// recovery or recovery_cancel (0.33.0, release R, §11.14.8),
+	// REQUIRED for both; the enclave verifies them before anything else.
+	SignedAt string
+	KeyID    string
+	Sig      []byte
 	// Account is the account snapshot (op account, REQUIRED; enroll,
 	// REQUIRED since 0.18.0, refused by the enclave with bad_request when
 	// absent or invalid; unlock, OPTIONAL; §11.5, §11.13): host data whose
@@ -223,12 +256,28 @@ func ParseQueueMessage(b []byte) (*QueueMessage, error) {
 		}
 	}
 	ms, msOK, err := o.OptString("manifest_sha256")
-	if err != nil || msOK != (q.Op == OpEnroll || q.Op == OpUnlock) || msOK && !manifest.ValidSHA256Hex(ms) {
+	if err != nil || msOK != (q.Op == OpEnroll || q.Op == OpUnlock || q.Op == OpRecoveryOpen) || msOK && !manifest.ValidSHA256Hex(ms) {
 		return nil, ErrMalformed
 	}
 	q.ManifestSHA256 = ms
+	signed := q.Op == OpRecovery || q.Op == OpRecoveryCancel
+	sa, saOK, err1 := o.OptString("signed_at")
+	kid2, kidOK2, err2 := o.OptString("key_id")
+	sg, sgOK, err3 := o.OptString("sig")
+	if err1 != nil || err2 != nil || err3 != nil || saOK != signed || kidOK2 != signed || sgOK != signed {
+		return nil, ErrMalformed
+	}
+	if signed {
+		if len(sa) > 64 || kid2 == "" || len(kid2) > 128 {
+			return nil, ErrMalformed
+		}
+		if q.Sig, err = strictjson.DecodeStd(sg, -1); err != nil || len(q.Sig) == 0 || len(q.Sig) > 80 {
+			return nil, ErrMalformed
+		}
+		q.SignedAt, q.KeyID = sa, kid2
+	}
 	ak, akOK, err := o.OptString("app_key")
-	if err != nil || akOK != (q.Op == OpEnroll || q.Op == OpRecoveryRegister) {
+	if err != nil || akOK != (q.Op == OpEnroll || q.Op == OpRecoveryRegister || q.Op == OpRecoveryOpen) {
 		return nil, ErrMalformed
 	}
 	if akOK {
@@ -247,7 +296,7 @@ func ParseQueueMessage(b []byte) (*QueueMessage, error) {
 		q.Account = append([]byte(nil), raw...)
 	}
 	switch q.Op {
-	case OpEnroll, OpUnlock, OpRecoveryRegister:
+	case OpEnroll, OpUnlock, OpRecoveryRegister, OpRecoveryOpen:
 		if !envOK || !kidOK {
 			return nil, ErrMalformed
 		}
@@ -271,14 +320,17 @@ func (q *QueueMessage) Marshal() []byte {
 	if hasEnvelope(q.Op) { // absent for lock, delete, recovery and its cancel (§11.5)
 		b.String("etk_kid", q.ETKKid.String()).Base64("envelope", q.Envelope)
 	}
-	if q.Op == OpEnroll || q.Op == OpUnlock {
+	if q.Op == OpEnroll || q.Op == OpUnlock || q.Op == OpRecoveryOpen {
 		b.String("manifest_sha256", q.ManifestSHA256)
 	}
 	if q.Op == OpRecovery {
 		b.Base64("browser_key", q.BrowserKey)
 	}
-	if q.Op == OpEnroll || q.Op == OpRecoveryRegister {
+	if q.Op == OpEnroll || q.Op == OpRecoveryRegister || q.Op == OpRecoveryOpen {
 		b.Base64("app_key", q.AppKey)
+	}
+	if q.Op == OpRecovery || q.Op == OpRecoveryCancel {
+		b.String("signed_at", q.SignedAt).String("key_id", q.KeyID).Base64("sig", q.Sig)
 	}
 	if len(q.Account) > 0 {
 		b.Raw("account", q.Account)
@@ -286,12 +338,14 @@ func (q *QueueMessage) Marshal() []byte {
 	return b.String("enqueued_at", q.EnqueuedAt.UTC().Format(time.RFC3339)).Bytes()
 }
 
-func hasEnvelope(op string) bool { return op == OpEnroll || op == OpUnlock || op == OpRecoveryRegister }
+func hasEnvelope(op string) bool {
+	return op == OpEnroll || op == OpUnlock || op == OpRecoveryRegister || op == OpRecoveryOpen
+}
 
 // requestType is the inner type of each op's request.
 var requestType = map[string]string{OpEnroll: altchan.TypeEnroll, OpUnlock: altchan.TypeUnlock,
 	OpRecovery: altchan.TypeRecoveryRequest, OpRecoveryCancel: altchan.TypeRecoveryCancel,
-	OpRecoveryRegister: altchan.TypeRecoveryRegister}
+	OpRecoveryRegister: altchan.TypeRecoveryRegister, OpRecoveryOpen: altchan.TypeRecoveryOpen}
 
 // Response is what the enclave returns for a queue message. The parent
 // writes Envelope to the response slot (§11.5); the API and parent see
@@ -301,8 +355,101 @@ type Response struct {
 	Status    string
 	Envelope  []byte
 	// Code is CodeRecoveryRegistered (0.10.6), CodeRecoveryUnavailable
-	// (0.16.0) or empty.
+	// (0.16.0), CodeRecoveryAttempt (0.33.0) or empty.
 	Code string
+	// The clear members of release R (§11.5, §11.14.5, §11.14.11): a
+	// recovery's not_before, expires and earliest; a counted open's
+	// retry_at and expires when a wait began; a refusal's reason.
+	Clear Marker
+}
+
+// Marker is an answer's clear marker and members (release R).
+type Marker struct {
+	Code      string
+	NotBefore time.Time
+	Expires   time.Time
+	Earliest  bool
+	RetryAt   time.Time
+	Reason    string
+}
+
+// CodeRecoveryAttempt marks the answer to a recovery_open that was counted
+// (0.33.0, §11.14.11); it never says whether the guess was right.
+const CodeRecoveryAttempt = "recovery_attempt"
+
+func ts(t time.Time) string { return t.UTC().Format(time.RFC3339) }
+
+// Encode encodes the marker for the vault process's Open answer (vaultipc
+// 8): "" for none, else compact JSON.
+func (m Marker) Encode() []byte {
+	if m == (Marker{}) {
+		return nil
+	}
+	b := strictjson.NewBuilder().String("code", m.Code)
+	for _, f := range []struct {
+		n string
+		t time.Time
+	}{{"not_before", m.NotBefore}, {"expires", m.Expires}, {"retry_at", m.RetryAt}} {
+		if !f.t.IsZero() {
+			b.String(f.n, f.t.UTC().Format(time.RFC3339Nano))
+		}
+	}
+	if m.Earliest {
+		b.Bool("earliest", true)
+	}
+	if m.Reason != "" {
+		b.String("reason", m.Reason)
+	}
+	return b.Bytes()
+}
+
+// markerCodes are the codes each op may carry (the supervisor drops any
+// other).
+var markerCodes = map[string]map[string]bool{
+	OpRecovery:         {CodeRecoveryUnavailable: true, "": true},
+	OpRecoveryRegister: {CodeRecoveryRegistered: true},
+	OpRecoveryOpen:     {CodeRecoveryAttempt: true},
+}
+
+var markerReasons = map[string]bool{"": true, "no_backup": true, "no_credential": true, "not_offered": true}
+
+// DecodeMarker decodes Encode for op; ok false for anything an op cannot
+// carry.
+func DecodeMarker(op string, b []byte) (Marker, bool) {
+	if len(b) == 0 {
+		return Marker{}, true
+	}
+	o, err := strictjson.ParseObject(b)
+	if err != nil {
+		return Marker{}, false
+	}
+	var m Marker
+	if m.Code, err = o.String("code"); err != nil || !markerCodes[op][m.Code] {
+		return Marker{}, false
+	}
+	for _, f := range []struct {
+		n string
+		t *time.Time
+	}{{"not_before", &m.NotBefore}, {"expires", &m.Expires}, {"retry_at", &m.RetryAt}} {
+		if s, ok, err := o.OptString(f.n); err != nil {
+			return Marker{}, false
+		} else if ok {
+			if *f.t, err = time.Parse(time.RFC3339Nano, s); err != nil {
+				return Marker{}, false
+			}
+		}
+	}
+	if o.Has("earliest") {
+		if m.Earliest, err = o.Bool("earliest"); err != nil {
+			return Marker{}, false
+		}
+	}
+	if s, ok, err := o.OptString("reason"); err != nil || ok && !markerReasons[s] {
+		return Marker{}, false
+	} else if ok {
+		m.Reason = s
+	}
+	return m, true
 }
 
 // Marshal encodes the response for the parent.
@@ -313,6 +460,21 @@ func (r *Response) Marshal() []byte {
 	}
 	if r.Code != "" {
 		b.String("code", r.Code)
+	}
+	if c := r.Clear; !c.NotBefore.IsZero() {
+		b.String("not_before", ts(c.NotBefore))
+		if c.Earliest {
+			b.Bool("earliest", true)
+		}
+	}
+	if c := r.Clear; !c.RetryAt.IsZero() {
+		b.String("retry_at", ts(c.RetryAt))
+	}
+	if c := r.Clear; !c.Expires.IsZero() {
+		b.String("expires", ts(c.Expires))
+	}
+	if r.Clear.Reason != "" {
+		b.String("reason", r.Clear.Reason)
 	}
 	return b.Bytes()
 }
@@ -348,10 +510,34 @@ func ParseResponse(b []byte) (*Response, error) {
 			return nil, ErrMalformed
 		}
 	}
-	if c, ok, err := o.OptString("code"); err != nil || ok && (c != CodeRecoveryRegistered && c != CodeRecoveryUnavailable || r.Envelope == nil) {
+	if c, ok, err := o.OptString("code"); err != nil || ok && (c != CodeRecoveryRegistered && c != CodeRecoveryUnavailable && c != CodeRecoveryAttempt || r.Envelope == nil) {
 		return nil, ErrMalformed
 	} else if ok {
 		r.Code = c
 	}
+	// Release R's clear members.
+	for _, f := range []struct {
+		n string
+		t *time.Time
+	}{{"not_before", &r.Clear.NotBefore}, {"expires", &r.Clear.Expires}, {"retry_at", &r.Clear.RetryAt}} {
+		if v, ok, err := o.OptString(f.n); err != nil {
+			return nil, ErrMalformed
+		} else if ok {
+			if *f.t, err = time.Parse(time.RFC3339, v); err != nil {
+				return nil, ErrMalformed
+			}
+		}
+	}
+	if o.Has("earliest") {
+		if r.Clear.Earliest, err = o.Bool("earliest"); err != nil {
+			return nil, ErrMalformed
+		}
+	}
+	if v, ok, err := o.OptString("reason"); err != nil {
+		return nil, ErrMalformed
+	} else if ok {
+		r.Clear.Reason = v
+	}
+	r.Clear.Code = r.Code
 	return r, nil
 }

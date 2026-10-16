@@ -43,9 +43,10 @@ func recoveryMembers(t *testing.T, account string, unit int) string {
 		`,"recovery_quiet_seconds":259200,"recovery_offered":true,"android_min_version_code":100`
 }
 
-// releaseROpen are release R's members still open in the committed files:
-// production's recovery request key until it exists, and (both files) the
-// minimum app version until the first app version of release R is known.
+// releaseROpen are release R's members still open in production's file:
+// its recovery request key until it exists, and its minimum app version
+// until production's first app version of release R is known (staging's
+// file has both: the staging key and app version 101).
 var releaseROpen = map[string]bool{"recovery_request_keys": true, "android_min_version_code": true}
 
 // fillReleaseR replaces those placeholders with test values.

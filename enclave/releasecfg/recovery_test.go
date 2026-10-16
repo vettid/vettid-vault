@@ -1,7 +1,6 @@
 package releasecfg
 
 import (
-	"bytes"
 	"crypto/elliptic"
 	"crypto/x509"
 	"encoding/base64"
@@ -54,9 +53,9 @@ func TestRecoveryConstants(t *testing.T) {
 
 // The committed staging file pins the member API's staging recovery
 // request key (VAULT-MESSAGING 0.33.0 §11.14.8): key_id is the KMS key's
-// id, spki its P-256 public key. Only android_min_version_code is still
-// open; with it set, the file passes the release gate and carries the key
-// and staging's counter lock period.
+// id, spki its P-256 public key. With the first app version of release R
+// (versionCode 101) as its minimum, the file passes the release gate and
+// carries the key, the minimum and staging's counter.
 func TestCommittedStagingRequestKey(t *testing.T) {
 	const (
 		keyID = "83d194b2-b474-429f-bed1-6eea4c80cede"
@@ -70,7 +69,7 @@ func TestCommittedStagingRequestKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(f.Missing) != 1 || f.Missing[0] != "android_min_version_code" {
+	if len(f.Missing) != 0 {
 		t.Fatalf("staging.json still open for %v", f.Missing)
 	}
 	check := func(c *Config) {
@@ -85,12 +84,14 @@ func TestCommittedStagingRequestKey(t *testing.T) {
 		}
 	}
 	check(&f.Config)
-	filled := bytes.Replace(b, []byte(`"android_min_version_code": 0`), []byte(`"android_min_version_code": 100`), 1)
-	c, err := Check(ChannelStaging, filled)
+	c, err := Check(ChannelStaging, b)
 	if err != nil {
-		t.Fatalf("staging.json with a minimum app version: %v", err)
+		t.Fatalf("staging.json: %v", err)
 	}
 	check(c)
+	if c.AndroidMinVersionCode != 101 {
+		t.Fatalf("staging minimum app version %d, want 101", c.AndroidMinVersionCode)
+	}
 	if c.RecoveryCounter.Account != "347272280361" || c.SealAccount != "347272280361" {
 		t.Fatalf("staging counter %+v", c.RecoveryCounter)
 	}

@@ -75,7 +75,10 @@ fi
 
 nocache=()
 if [ "${EIF_NO_CACHE:-}" = 1 ]; then nocache=(--no-cache); fi
-mapfile -t frommirror < <(scripts/image-mirror.sh contexts Dockerfile.enclave)
+# (a failure stops the build: never a silent fall back to upstream)
+ctx="$(scripts/image-mirror.sh contexts Dockerfile.enclave)"
+frommirror=()
+if [ -n "$ctx" ]; then mapfile -t frommirror <<<"$ctx"; fi
 
 log "building image $tag (SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH)"
 DOCKER_BUILDKIT=1 docker build --pull=false "${nocache[@]}" "${frommirror[@]}" -f Dockerfile.enclave \

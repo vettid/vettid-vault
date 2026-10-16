@@ -33,7 +33,10 @@ fi
 lock="$(sha256sum release/eif-toolchain.lock | cut -d' ' -f1)"
 builder="vettid-eif-builder:${lock:0:16}"
 echo "rebuild: toolchain image $builder (release/eif-toolchain.lock $lock)" >&2
-mapfile -t frommirror < <(scripts/image-mirror.sh contexts release/Dockerfile.eif-builder)
+# (a failure stops the build: never a silent fall back to upstream)
+ctx="$(scripts/image-mirror.sh contexts release/Dockerfile.eif-builder)"
+frommirror=()
+if [ -n "$ctx" ]; then mapfile -t frommirror <<<"$ctx"; fi
 docker build --pull=false -q "${frommirror[@]}" -f release/Dockerfile.eif-builder -t "$builder" release/ >&2
 
 EIF_BUILDER="$builder" EIF_NO_CACHE=1 GO="$go" scripts/build-eif.sh "$out" >/dev/null

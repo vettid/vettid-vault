@@ -13,6 +13,11 @@
 # against release/eif-toolchain.lock), then runs scripts/build-eif.sh with
 # nitro-cli inside it and without the docker build cache. The working tree
 # must be clean: the measurements name the commit.
+#
+# The base images come from their upstream registries, as the lock and
+# the Dockerfiles name them. CI sets VETTID_IMAGE_MIRROR to pull the same
+# digests from VettID's mirror instead (scripts/image-mirror.sh); the
+# content, and so every measurement, is the same either way.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -28,7 +33,8 @@ fi
 lock="$(sha256sum release/eif-toolchain.lock | cut -d' ' -f1)"
 builder="vettid-eif-builder:${lock:0:16}"
 echo "rebuild: toolchain image $builder (release/eif-toolchain.lock $lock)" >&2
-docker build --pull=false -q -f release/Dockerfile.eif-builder -t "$builder" release/ >&2
+mapfile -t frommirror < <(scripts/image-mirror.sh contexts release/Dockerfile.eif-builder)
+docker build --pull=false -q "${frommirror[@]}" -f release/Dockerfile.eif-builder -t "$builder" release/ >&2
 
 EIF_BUILDER="$builder" EIF_NO_CACHE=1 GO="$go" scripts/build-eif.sh "$out" >/dev/null
 cat "$out/measurements.json"

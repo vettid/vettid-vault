@@ -1,6 +1,11 @@
 package releasecfg
 
 import (
+	"bytes"
+	"crypto/elliptic"
+	"crypto/x509"
+	"encoding/base64"
+	"os"
 	"strings"
 	"testing"
 )
@@ -44,5 +49,49 @@ func TestRecoveryConstants(t *testing.T) {
 	}
 	if _, err := Parse([]byte(staging(strings.Replace(complete(t), `"recovery_wait_unit_seconds":86400`, `"recovery_wait_unit_seconds":59`, 1)))); err == nil {
 		t.Error("staging wait unit below a minute")
+	}
+}
+
+// The committed staging file pins the member API's staging recovery
+// request key (VAULT-MESSAGING 0.33.0 §11.14.8): key_id is the KMS key's
+// id, spki its P-256 public key. Only android_min_version_code is still
+// open; with it set, the file passes the release gate and carries the key
+// and staging's counter lock period.
+func TestCommittedStagingRequestKey(t *testing.T) {
+	const (
+		keyID = "83d194b2-b474-429f-bed1-6eea4c80cede"
+		spki  = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAELvsvbSUL7saSkMbPRy0EIf+qcVA5eONHj0UM85ZsH46b6ImdgswcJm1WDNflDes+mDhJiInJmYCukCnxpB30fw=="
+	)
+	b, err := os.ReadFile("staging.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := Parse(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f.Missing) != 1 || f.Missing[0] != "android_min_version_code" {
+		t.Fatalf("staging.json still open for %v", f.Missing)
+	}
+	check := func(c *Config) {
+		t.Helper()
+		if len(c.RecoveryRequestKeys) != 1 || c.RecoveryRequestKeys[0].KeyID != keyID {
+			t.Fatalf("request keys %+v", c.RecoveryRequestKeys)
+		}
+		k := c.RecoveryRequestKeys[0].Key
+		der, err := x509.MarshalPKIXPublicKey(k)
+		if err != nil || k.Curve != elliptic.P256() || len(der) != 91 || base64.StdEncoding.EncodeToString(der) != spki {
+			t.Fatalf("request key %v (%d bytes)", err, len(der))
+		}
+	}
+	check(&f.Config)
+	filled := bytes.Replace(b, []byte(`"android_min_version_code": 0`), []byte(`"android_min_version_code": 100`), 1)
+	c, err := Check(ChannelStaging, filled)
+	if err != nil {
+		t.Fatalf("staging.json with a minimum app version: %v", err)
+	}
+	check(c)
+	if c.RecoveryCounter.Account != "347272280361" || c.SealAccount != "347272280361" {
+		t.Fatalf("staging counter %+v", c.RecoveryCounter)
 	}
 }

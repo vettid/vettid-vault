@@ -30,12 +30,12 @@ func TestCheckCommand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Release R's request key and minimum app version are open until they
-	// exist (VAULT-RELEASES 0.1.28): the committed file with test values
-	// in their place.
-	b = bytes.Replace(b, []byte(`"TODO-recovery-request-key-id"`), []byte(`"test-key-1"`), 1)
-	b = bytes.Replace(b, []byte(`"TODO-recovery-request-key-spki"`),
-		[]byte(`"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEok8gqeC5VcGx4KL+B5fL7UgENBXf+59RigkR0TZ0NqjiWM2VK6V1+paNoqRTBx7nXXN3L/2ehjsTb31GGVkEAw=="`), 1)
+	// Release R's minimum app version is open until it is known
+	// (VAULT-RELEASES 0.1.28): the committed file with a test value in its
+	// place. The staging recovery request key is pinned.
+	if bytes.Contains(b, []byte("TODO-recovery-request-key")) {
+		t.Fatal("staging.json: the recovery request key is not pinned")
+	}
 	b = bytes.Replace(b, []byte(`"android_min_version_code": 0`), []byte(`"android_min_version_code": 100`), 1)
 	stagingFile := filepath.Join(t.TempDir(), "staging.json")
 	if err := os.WriteFile(stagingFile, b, 0o644); err != nil {

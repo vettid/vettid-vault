@@ -37,8 +37,8 @@
   },
   "recovery_request_keys": [
     {
-      "key_id": "TODO-recovery-request-key-id",
-      "spki": "TODO-recovery-request-key-spki"
+      "key_id": "83d194b2-b474-429f-bed1-6eea4c80cede",
+      "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAELvsvbSUL7saSkMbPRy0EIf+qcVA5eONHj0UM85ZsH46b6ImdgswcJm1WDNflDes+mDhJiInJmYCukCnxpB30fw=="
     }
   ],
   "recovery_wait_unit_seconds": 600,

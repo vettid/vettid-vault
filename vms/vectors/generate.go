@@ -277,6 +277,11 @@ func Generate() (map[string][]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	rr, err := genRecoveryR()
+	if err != nil {
+		return nil, err
+	}
+	rc = append(rc, member{"release_r", rr})
 	if err := put("recovery.json", rc); err != nil {
 		return nil, err
 	}
@@ -321,6 +326,15 @@ func Generate() (map[string][]byte, error) {
 		return nil, err
 	}
 	if err := put("attachment.json", atv); err != nil {
+		return nil, err
+	}
+
+	// unlock.json (0.33.0, release R, §11.14.1)
+	uv, err := genUnlockR()
+	if err != nil {
+		return nil, err
+	}
+	if err := put("unlock.json", uv); err != nil {
 		return nil, err
 	}
 	return out, nil

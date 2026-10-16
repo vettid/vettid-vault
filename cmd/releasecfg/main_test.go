@@ -26,9 +26,17 @@ func TestCheckCommand(t *testing.T) {
 		code := run(append([]string{"check"}, args...), &out, &errb)
 		return code, out.String() + errb.String()
 	}
-	stagingFile := "../../enclave/releasecfg/staging.json"
-	b, err := os.ReadFile(stagingFile)
+	b, err := os.ReadFile("../../enclave/releasecfg/staging.json")
 	if err != nil {
+		t.Fatal(err)
+	}
+	// The staging recovery request key and release R's minimum app
+	// version (101) are pinned: the committed file as it is.
+	if bytes.Contains(b, []byte("TODO-recovery-request-key")) || !bytes.Contains(b, []byte(`"android_min_version_code": 101`)) {
+		t.Fatal("staging.json: the recovery request key or the minimum app version is not pinned")
+	}
+	stagingFile := filepath.Join(t.TempDir(), "staging.json")
+	if err := os.WriteFile(stagingFile, b, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	staging := string(b)
@@ -56,7 +64,8 @@ func TestCheckCommand(t *testing.T) {
 		t.Fatalf("staging after a pre-0.26.0 release: %d %s", code, out)
 	}
 	// A list that dropped a name is refused, with the name.
-	i, j := strings.Index(staging, `"features": [`), strings.LastIndex(staging, `]`)
+	i := strings.Index(staging, `"features": [`)
+	j := i + strings.Index(staging[i:], `]`)
 	dropped := write("dropped.json", staging[:i]+`"features": ["actions", "calls", "intro", "leash", "location", "presence"`+staging[j:])
 	if code, out := check("staging", dropped); code != 0 {
 		t.Fatalf("rule 1 alone refused a shorter list: %s", out)

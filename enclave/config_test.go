@@ -73,3 +73,26 @@ func TestReleaseConfigAndroidPackage(t *testing.T) {
 		t.Fatalf("channel %q release %d: unbound keys accepted %v, want %v", ch, c.Release, pol.AndroidAcceptUnbound, wantUnbound)
 	}
 }
+
+// VAULT-MESSAGING 0.33.2 §11.14.4: the counter's record lock period comes
+// from the embedded (measured) channel: a day in a staging image, 100
+// years in a production one. Without complete channel constants it is
+// zero, which the counter treats as 100 years. Run with -tags
+// vettid_channel_prod / vettid_channel_staging by `make channels`.
+func TestReleaseConfigCounterLock(t *testing.T) {
+	cfg := enclave.ReleaseConfig("i-1", enclave.DefaultRelayURL)
+	ch, c := releasecfg.Embedded()
+	if c == nil {
+		if cfg.Recovery.CounterLock != 0 {
+			t.Fatalf("no channel constants, counter lock %v", cfg.Recovery.CounterLock)
+		}
+		return
+	}
+	want := releasecfg.ProdCounterLock
+	if ch == releasecfg.ChannelStaging {
+		want = releasecfg.StagingCounterLock
+	}
+	if cfg.Recovery.CounterLock != want {
+		t.Fatalf("channel %q: counter lock %v, want %v", ch, cfg.Recovery.CounterLock, want)
+	}
+}

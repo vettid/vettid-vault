@@ -5,6 +5,7 @@ package releasecfg
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/vettid/vettid-vault/vms/recovery"
 )
@@ -28,6 +29,9 @@ func TestProductionImageRecoveryRules(t *testing.T) {
 	}
 	if c.RecoveryCounter.Account != c.SealAccount || !strings.HasSuffix(c.RecoveryCounter.Bucket, c.SealAccount) {
 		t.Fatalf("production counter %+v", c.RecoveryCounter)
+	}
+	if c.CounterLock() != ProdCounterLock || ProdCounterLock != recovery.CounterLockYears*365*24*time.Hour {
+		t.Fatalf("production counter lock %v", c.CounterLock())
 	}
 	if recovery.TestCost {
 		t.Fatal("a production image built with vettid_testcost")

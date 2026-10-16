@@ -360,7 +360,7 @@ func condFailed(err error) bool { return apiCode(err) == "ConditionalCheckFailed
 
 // PutInstance implements Tables.
 func (a *AWS) PutInstance(ctx context.Context, r InstanceRow) error {
-	_, err := a.ddb.PutItem(ctx, &dynamodb.PutItemInput{TableName: &a.cfg.InstancesTable, Item: map[string]ddbtypes.AttributeValue{
+	item := map[string]ddbtypes.AttributeValue{
 		"instance_id":  s(r.InstanceID),
 		"release":      s(r.Release),
 		"queue_url":    s(r.QueueURL),
@@ -369,7 +369,11 @@ func (a *AWS) PutInstance(ctx context.Context, r InstanceRow) error {
 		"heartbeat_at": n(r.HeartbeatAt),
 		"expires_at":   n(r.ExpiresAt),
 		"load":         n(int64(r.Load)),
-	}})
+	}
+	if r.HeavyKDFFree != nil {
+		item["heavy_kdf_free"] = &ddbtypes.AttributeValueMemberBOOL{Value: *r.HeavyKDFFree}
+	}
+	_, err := a.ddb.PutItem(ctx, &dynamodb.PutItemInput{TableName: &a.cfg.InstancesTable, Item: item})
 	if err != nil {
 		return errClass("ddb put instance", err)
 	}

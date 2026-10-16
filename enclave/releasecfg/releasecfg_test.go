@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func spki(t *testing.T, seed byte) string {
@@ -548,6 +549,45 @@ func TestAcceptsUnbound(t *testing.T) {
 		file := strings.Replace(complete(t), `"release":1`, `"release":1,`+member, 1)
 		if _, err := Check(ChannelProd, []byte(file)); !errors.Is(err, ErrFormat) {
 			t.Errorf("%s accepted in a production file: %v", member, err)
+		}
+	}
+}
+
+// VAULT-MESSAGING 0.33.2 §11.14.4: the counter's token, success and
+// close records are locked for one day on staging and 100 years in
+// production. The period is a function of the measured channel alone: no
+// member of a channel file sets it, and anything but the staging channel
+// (no configuration included) gets the long one.
+func TestCounterLock(t *testing.T) {
+	year := 365 * 24 * time.Hour
+	if ProdCounterLock != 100*year || StagingCounterLock != 24*time.Hour {
+		t.Fatalf("periods %v / %v", ProdCounterLock, StagingCounterLock)
+	}
+	p, err := Check(ChannelProd, []byte(complete(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := Check(ChannelStaging, []byte(staging(complete(t))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.CounterLock() != ProdCounterLock || s.CounterLock() != StagingCounterLock {
+		t.Fatalf("production %v, staging %v", p.CounterLock(), s.CounterLock())
+	}
+	var none *Config
+	if none.CounterLock() != ProdCounterLock || (&Config{}).CounterLock() != ProdCounterLock {
+		t.Fatal("no channel: not the long lock")
+	}
+	for _, member := range []string{`"counter_lock_seconds":86400`, `"recovery_counter_lock_seconds":86400`, `"recovery_lock_days":1`} {
+		for _, ch := range []string{ChannelProd, ChannelStaging} {
+			file := complete(t)
+			if ch == ChannelStaging {
+				file = staging(file)
+			}
+			file = strings.Replace(file, `"release":1`, `"release":1,`+member, 1)
+			if _, err := Check(ch, []byte(file)); !errors.Is(err, ErrFormat) {
+				t.Errorf("%s accepted in a %s file: %v", member, ch, err)
+			}
 		}
 	}
 }

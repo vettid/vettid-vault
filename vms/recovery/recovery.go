@@ -55,6 +55,12 @@ const (
 	ProductionWaitUnit = 86400
 )
 
+// StagingCounterLockHours is the staging channel's lock period of the
+// counter's token, success and close records; production's is
+// CounterLockYears (VAULT-MESSAGING 0.33.2 §11.14.4). The channel is the
+// measured one (releasecfg.CounterLock).
+const StagingCounterLockHours = 24
+
 // Errors.
 var (
 	ErrSize   = errors.New("recovery: wrong size")

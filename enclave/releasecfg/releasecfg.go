@@ -33,6 +33,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/devattest"
@@ -286,6 +287,27 @@ const StagingUnboundThrough = 10
 // production channel file can express it.
 func (c *Config) AcceptsUnbound() bool {
 	return c != nil && c.Channel == ChannelStaging && c.Release <= StagingUnboundThrough
+}
+
+// Counter lock periods (VAULT-MESSAGING 0.33.2 §11.14.4,
+// VAULT-HOST-PROTOCOL 0.1.12 §8.1; owner decision 2026-10-16): how long
+// the recovery attempt counter's token, success and close records are
+// locked. Production 100 years, staging one day.
+const (
+	ProdCounterLock    = recovery.CounterLockYears * 365 * 24 * time.Hour
+	StagingCounterLock = recovery.StagingCounterLockHours * time.Hour
+)
+
+// CounterLock is this release's counter lock period. Like
+// AcceptsUnbound it is a function of the measured channel, never a member
+// of the file or anything the host supplies: staging's period only in
+// the staging channel, production's otherwise (no configuration, or any
+// other channel, gets the long one).
+func (c *Config) CounterLock() time.Duration {
+	if c != nil && c.Channel == ChannelStaging {
+		return StagingCounterLock
+	}
+	return ProdCounterLock
 }
 
 // parseSigners reads "android_signers" (0.27.0, §11.10.8): 1 to 4

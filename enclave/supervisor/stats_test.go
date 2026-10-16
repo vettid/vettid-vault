@@ -56,7 +56,8 @@ func TestRelayStats(t *testing.T) {
 	}
 	want := map[string]string{hostproto.StatRelayConns: "0", hostproto.StatRelayDialed: "0", hostproto.StatRelayStreams: "0",
 		hostproto.StatRelayInFlight: "0", hostproto.StatRelayWaiting: "0", hostproto.StatRelayErrors: "1",
-		hostproto.StatRelayRefusedMax: "0", hostproto.StatRelayRefusedMin: "0", hostproto.StatRelayVaultLimit: "0"}
+		hostproto.StatRelayRefusedMax: "0", hostproto.StatRelayRefusedMin: "0", hostproto.StatRelayVaultLimit: "0",
+		hostproto.StatHeavyKDFFree: "0"} // release R: no permit without the instance's start
 	for k, v := range want {
 		if got[k] != v {
 			t.Errorf("%s = %q, want %s", k, got[k], v)
@@ -74,7 +75,7 @@ func TestRelayStats(t *testing.T) {
 		t.Errorf("stats asked again at once: %q", again)
 	}
 	s.statsAt = s.statsAt.Add(-statsEvery)
-	if again := s.stats(); string(again[len(again)-7]) != "2" {
+	if again := s.stats(); string(again[len(again)-9]) != "2" {
 		t.Errorf("stats a second later: %q", again)
 	}
 }

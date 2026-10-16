@@ -36,8 +36,10 @@ import (
 	"github.com/vettid/vettid-vault/enclave"
 	"github.com/vettid/vettid-vault/enclave/awskms"
 	"github.com/vettid/vettid-vault/enclave/egress"
+	"github.com/vettid/vettid-vault/enclave/s3counter"
 	"github.com/vettid/vettid-vault/internal/hostproto"
 	"github.com/vettid/vettid-vault/vault"
+	"github.com/vettid/vettid-vault/vault/counter"
 	"github.com/vettid/vettid-vault/vms/altchan"
 	"github.com/vettid/vettid-vault/vms/devattest"
 )
@@ -55,6 +57,15 @@ type Config struct {
 	// KMSEndpoint overrides https://kms.<region>.amazonaws.com (never in
 	// release builds, whose egress allowlist has only the real host).
 	KMSEndpoint string
+	// CounterEndpoint overrides the recovery counter bucket's URL
+	// https://<bucket>.s3.<region>.amazonaws.com (never in a release;
+	// tests), keeping the virtual-hosted Host. Counter, if set, replaces
+	// the S3 client altogether (tests and the development stack).
+	CounterEndpoint string
+	Counter         counter.Bucket
+	// MemAvailable reads free memory for the heavy-derivation permit
+	// (default /proc/meminfo's MemAvailable; tests).
+	MemAvailable func() uint64
 	// StatusListURL overrides StatusListURL.
 	StatusListURL string
 	// Proc configures the vault processes (one per unlocked vault, D4).
@@ -111,7 +122,11 @@ type Config struct {
 
 // Supervisor runs one enclave instance.
 type Supervisor struct {
-	cfg    Config
+	cfg Config
+	// heavy is the recovery wrap's derivation permit and ctr the attempt
+	// counter's bucket (release R; nil ctr: the counter is unreachable).
+	heavy  *heavyPermit
+	ctr    counter.Bucket
 	link   *link
 	log    *slog.Logger
 	inst   atomic.Pointer[enclave.Instance]
@@ -365,6 +380,18 @@ func (s *Supervisor) start() error {
 	kms.Now = s.now
 	s.st = &hostStore{l: s.link, onWrite: s.touchKey}
 	s.kms, s.encCfg = kms, cfg
+	s.ctr = s.cfg.Counter
+	if rc := cfg.Recovery.Counter; s.ctr == nil && rc.Bucket != "" {
+		hc := s.cfg.Egress.Client(s3counter.RequestTimeout)
+		hc.CheckRedirect = s3counter.NoRedirect
+		s.ctr = &s3counter.Client{HTTP: hc, Bucket: rc.Bucket, Account: rc.Account, Region: rc.Region, Creds: creds, Now: s.now,
+			Endpoint: s.cfg.CounterEndpoint}
+	}
+	avail := s.cfg.MemAvailable
+	if avail == nil {
+		avail = memAvailable
+	}
+	s.heavy = &heavyPermit{avail: avail, floor: func() uint64 { return s.cfg.MemoryReserve }, now: s.now}
 	s.relayHTTP = s.cfg.Egress.Client(80 * time.Second)
 	s.xfers = newAdmission(memAvailable, s.cfg.MemoryReserve)
 	s.relays = map[string]bool{}
@@ -701,6 +728,9 @@ func (s *Supervisor) pushDescriptor(always bool) {
 // StatusList returns the cached attestation status list (tests).
 func (s *Supervisor) StatusList() *devattest.StatusList { return s.status.get() }
 
+// counterBucket is the recovery counter's bucket (nil: unreachable).
+func (s *Supervisor) counterBucket() counter.Bucket { return s.ctr }
+
 // HTTPClient returns a client over the egress transport (tests).
 func (s *Supervisor) HTTPClient() *http.Client { return s.cfg.Egress.Client(60 * time.Second) }
 
@@ -753,6 +783,11 @@ func (s *Supervisor) readStats() [][]byte {
 	add(hostproto.StatRelayRefusedMax, t.RefusedMaxConns)
 	add(hostproto.StatRelayRefusedMin, t.RefusedMinStreams)
 	add(hostproto.StatRelayVaultLimit, s.vaultLimit.Load())
+	free := uint64(0)
+	if s.heavy != nil && s.heavy.free() {
+		free = 1
+	}
+	add(hostproto.StatHeavyKDFFree, free)
 	return out
 }
 

@@ -35,6 +35,9 @@ func TestRecoveryConstants(t *testing.T) {
 			t.Errorf("%s: accepted", name)
 		}
 	}
+	if _, err := Parse([]byte(strings.Replace(complete(t), `"recovery_quiet_seconds":259200`, `"recovery_quiet_seconds":345000`, 1))); err == nil {
+		t.Error("a quiet period whose 10-minute window outlasts the present lock")
+	}
 	short := staging(strings.Replace(complete(t), `"recovery_quiet_seconds":259200`, `"recovery_quiet_seconds":600`, 1))
 	if _, err := Parse([]byte(short)); err == nil {
 		t.Error("staging quiet period shortened")

@@ -37,6 +37,7 @@ import (
 	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/devattest"
 	"github.com/vettid/vettid-vault/vms/manifest"
+	"github.com/vettid/vettid-vault/vms/recovery"
 )
 
 // Channels.
@@ -145,6 +146,10 @@ type RequestKey struct {
 const (
 	ProdMinWaitUnitSeconds = 86400
 	MinQuietSeconds        = 259200
+	// MaxQuietSeconds keeps the quiet period plus the 10-minute window of
+	// step 4b below the present records' 96-hour lock (§11.14.4 G5), so a
+	// timely confirming read always sees every present record that matters.
+	MaxQuietSeconds = recovery.PresentLockHours*3600 - recovery.ConfirmWindowSecs - 1
 	StagingMinWaitUnit     = 60
 	maxRecoverySeconds     = 30 * 86400
 	CounterBucketPrefix    = "vettid-org-vault-recovery-"
@@ -622,7 +627,7 @@ func parseRecovery(o strictjson.Object, c *Config, missing func(string)) error {
 	if c.RecoveryWaitUnitSeconds < min {
 		return ErrFormat
 	}
-	if c.RecoveryQuietSeconds, err = o.Uint("recovery_quiet_seconds", MinQuietSeconds, maxRecoverySeconds); err != nil {
+	if c.RecoveryQuietSeconds, err = o.Uint("recovery_quiet_seconds", MinQuietSeconds, MaxQuietSeconds); err != nil {
 		return ErrFormat
 	}
 	if c.RecoveryOffered, err = o.Bool("recovery_offered"); err != nil {

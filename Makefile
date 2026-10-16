@@ -125,7 +125,9 @@ check-tcb:
 	@head -1 vms/recovery/testcost.go | grep -qx '//go:build vettid_testcost' || { echo "vms/recovery/testcost.go lacks //go:build vettid_testcost"; exit 1; }
 	@head -1 vms/recovery/prodcost.go | grep -qx '//go:build !vettid_testcost' || { echo "vms/recovery/prodcost.go lacks //go:build !vettid_testcost"; exit 1; }
 	@for ch in prod staging; do tmp=$$(mktemp -d) && GOOS=linux $(GO) build -tags vettid_channel_$$ch -o $$tmp/ve ./cmd/vault-enclave && \
-	  if $(GO) tool nm $$tmp/ve | grep -E 'RecoveryNow|recovery\.testCost'; then echo "the $$ch enclave binary has a recovery test clock or test cost"; rm -rf $$tmp; exit 1; fi; rm -rf $$tmp; done
+	  if $(GO) tool nm $$tmp/ve | grep -E 'RecoveryNow'; then echo "the $$ch enclave binary has a recovery test clock"; rm -rf $$tmp; exit 1; fi; rm -rf $$tmp; \
+	  files=$$(GOOS=linux $(GO) list -tags vettid_channel_$$ch -f '{{join .GoFiles " "}}' ./vms/recovery); \
+	  echo " $$files " | grep -q ' prodcost.go ' && ! echo " $$files " | grep -q ' testcost.go ' || { echo "the $$ch build does not compile vms/recovery at release cost"; exit 1; }; done
 	@echo "check-tcb: ok"
 
 # End-to-end tests against the real vettid-relay binary (built at the

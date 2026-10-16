@@ -242,9 +242,11 @@ func (d *Device) credOpWith(ctx context.Context, typ string, extra map[string]an
 	return o, rk, id, err
 }
 
-// CredentialCreate creates the Protean Credential and keeps the blob.
-func (d *Device) CredentialCreate(ctx context.Context, password string) error {
-	_, _, _, err := d.sealedOp(ctx, "credential.create", false, map[string]any{"password": password}, false)
+// CredentialCreate creates the Protean Credential and keeps the blob. From
+// release R it carries the PIN too, so that the vault arms its recovery at
+// once (§11.14.9).
+func (d *Device) CredentialCreate(ctx context.Context, pin, password string) error {
+	_, _, _, err := d.sealedOp(ctx, "credential.create", false, map[string]any{"pin": pin, "password": password}, false)
 	return err
 }
 
@@ -283,11 +285,40 @@ func (d *Device) CredentialRotate(ctx context.Context, password string) error {
 	return err
 }
 
-// CredentialChangePassword re-seals the credential under a new password.
-func (d *Device) CredentialChangePassword(ctx context.Context, password, newPassword string) error {
+// CredentialChangePassword re-seals the credential under a new password;
+// from release R it carries the PIN, and the vault starts a new recovery
+// generation and replaces the DEK (§11.14.9).
+func (d *Device) CredentialChangePassword(ctx context.Context, pin, password, newPassword string) error {
 	_, _, _, err := d.credOp(ctx, "credential.password.change", func() map[string]any {
-		return map[string]any{"password": password, "new_password": newPassword}
+		return map[string]any{"pin": pin, "password": password, "new_password": newPassword}
 	}, false)
+	return err
+}
+
+// PINChange changes the vault PIN (release R, §11.14.9): a credential
+// operation carrying the phone's next unlock secret; the app moves to the
+// next epoch when the vault answers.
+func (d *Device) PINChange(ctx context.Context, pin, newPIN, password string) error {
+	next := base64.StdEncoding.EncodeToString(d.NextUnlockSecret())
+	_, _, _, err := d.credOp(ctx, "pin.change", func() map[string]any {
+		return map[string]any{"pin": pin, "new_pin": newPIN, "password": password, "new_unlock_secret": next}
+	}, false)
+	if err == nil {
+		d.AdvanceEpoch()
+	}
+	return err
+}
+
+// SecretRenew gives the phone a new unlock secret with the PIN unchanged
+// (vault.secret.renew, release R, §11.14.9).
+func (d *Device) SecretRenew(ctx context.Context, pin, password string) error {
+	next := base64.StdEncoding.EncodeToString(d.NextUnlockSecret())
+	_, _, _, err := d.credOp(ctx, "vault.secret.renew", func() map[string]any {
+		return map[string]any{"pin": pin, "password": password, "new_unlock_secret": next}
+	}, false)
+	if err == nil {
+		d.AdvanceEpoch()
+	}
 	return err
 }
 

@@ -81,6 +81,7 @@ func TestVaultctlSmoke(t *testing.T) {
 	}
 	// A vault is used only with a credential (§3.5.7).
 	t.Setenv("VAULTCTL_PASSWORD", "correct horse battery staple")
+	t.Setenv("VAULTCTL_PIN", "246802") // release R: credential create carries the PIN
 	if out = run("request", "vault.enroll.confirm"); !strings.Contains(out, "credential_required") {
 		t.Fatalf("confirm without a credential: %s", out)
 	}

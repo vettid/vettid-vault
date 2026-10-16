@@ -41,9 +41,12 @@ type version struct {
 
 // Bucket is the stand-in. The zero value is not usable; use New.
 type Bucket struct {
-	mu   sync.Mutex
-	now  time.Time
-	objs map[string][]*version
+	mu  sync.Mutex
+	now time.Time
+	// live: the clock follows the real time from now (plus Advance).
+	live    bool
+	started time.Time
+	objs    map[string][]*version
 	// faults
 	down      bool
 	failNext  map[string]int
@@ -59,10 +62,25 @@ func New(t0 time.Time) *Bucket {
 
 var _ counter.Bucket = (*Bucket)(nil)
 
+// NewLive returns an empty bucket whose clock runs with the real time
+// (end-to-end tests); Advance still moves it.
+func NewLive() *Bucket {
+	b := New(time.Now())
+	b.live, b.started = true, time.Now()
+	return b
+}
+
 // Now is the counter's clock.
 func (b *Bucket) Now() time.Time {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	return b.clock()
+}
+
+func (b *Bucket) clock() time.Time {
+	if b.live {
+		return b.now.Add(time.Since(b.started)).UTC()
+	}
 	return b.now
 }
 
@@ -146,7 +164,7 @@ func (b *Bucket) List(_ context.Context, prefix string) (counter.Listing, error)
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	l := counter.Listing{Date: b.now}
+	l := counter.Listing{Date: b.clock()}
 	keys := make([]string, 0, len(b.objs))
 	for k := range b.objs {
 		if strings.HasPrefix(k, prefix) {
@@ -163,7 +181,7 @@ func (b *Bucket) List(_ context.Context, prefix string) (counter.Listing, error)
 }
 
 func (b *Bucket) store(key string, body []byte, until time.Time) *version {
-	v := &version{id: newID(), body: append([]byte(nil), body...), lastModified: b.now, mode: counter.ModeCompliance, until: until}
+	v := &version{id: newID(), body: append([]byte(nil), body...), lastModified: b.clock(), mode: counter.ModeCompliance, until: until}
 	b.objs[key] = append(b.objs[key], v)
 	return v
 }
@@ -184,7 +202,7 @@ func (b *Bucket) PutCreate(_ context.Context, key string, body []byte, until tim
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if !until.After(b.now) {
+	if !until.After(b.clock()) {
 		return 0, "", counter.ErrUnknown // S3 refuses a retain-until date in the past (400)
 	}
 	if vs := b.objs[key]; len(vs) > 0 && !vs[len(vs)-1].deleteMarker {
@@ -204,7 +222,7 @@ func (b *Bucket) Put(_ context.Context, key string, body []byte, until time.Time
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if !until.After(b.now) {
+	if !until.After(b.clock()) {
 		return "", counter.ErrUnknown
 	}
 	v := b.store(key, body, until)
@@ -258,7 +276,7 @@ func (b *Bucket) GetVersion(_ context.Context, key, id string) ([]byte, error) {
 func (b *Bucket) AddDeleteMarker(key string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.objs[key] = append(b.objs[key], &version{id: newID(), lastModified: b.now, deleteMarker: true})
+	b.objs[key] = append(b.objs[key], &version{id: newID(), lastModified: b.clock(), deleteMarker: true})
 }
 
 // InsertVersion adds a version of key with a LastModified of the caller's
@@ -282,7 +300,7 @@ func (b *Bucket) DeleteUnlocked(prefix string) int {
 		}
 		kept := vs[:0]
 		for _, v := range vs {
-			if v.deleteMarker || !v.until.After(b.now) {
+			if v.deleteMarker || !v.until.After(b.clock()) {
 				n++
 				continue
 			}

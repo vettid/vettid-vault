@@ -61,8 +61,11 @@ type CredentialHost interface {
 	// Transfer returns the transfer in progress.
 	Transfer() (TransferInfo, bool)
 	// ApproveTransfer approves the new app, whose handshake is complete
-	// (Scanned): the transfer completes in the same flush (0.10.3).
-	ApproveTransfer(ctx context.Context, id string, now time.Time) error
+	// (Scanned): the transfer completes in the same flush (0.10.3). From
+	// release R it carries the approval's PIN and password (normalized)
+	// and whether the vault keeps a backup copy, and replaces the DEK in
+	// three writes (§11.14.10); busy and retry change nothing.
+	ApproveTransfer(ctx context.Context, id, pin string, pw []byte, backup bool, now time.Time) error
 	// EndTransfer aborts the transfer (rejected, alarm, ...).
 	EndTransfer(id, reason string, now time.Time) error
 	// ReportAlarm reports a content-free alarm to the host after the
@@ -117,12 +120,12 @@ func (s *Session) Transfer() (TransferInfo, bool) {
 }
 
 // ApproveTransfer approves the transfer's new app (§6.7.1).
-func (s *Session) ApproveTransfer(id string) error {
+func (s *Session) ApproveTransfer(id, pin string, pw []byte, backup bool) error {
 	h, ok := s.credHost()
 	if !ok {
 		return errUnavailable
 	}
-	return h.ApproveTransfer(s.Context(), id, s.now)
+	return h.ApproveTransfer(s.Context(), id, pin, pw, backup, s.now)
 }
 
 // EndTransfer aborts a transfer.
@@ -156,8 +159,8 @@ func (h managerHost) Transfer() (TransferInfo, bool) {
 	return TransferInfo{ID: t.ID, OldDevice: t.OldDevice, State: t.State, Exp: t.Exp, Scanned: h.m.st.Requests[t.Inbound] != nil}, true
 }
 
-func (h managerHost) ApproveTransfer(ctx context.Context, id string, now time.Time) error {
-	return h.m.approveTransfer(ctx, id, now)
+func (h managerHost) ApproveTransfer(ctx context.Context, id, pin string, pw []byte, backup bool, now time.Time) error {
+	return h.m.approveTransfer(ctx, id, pin, pw, backup, now)
 }
 
 func (h managerHost) EndTransfer(id, reason string, now time.Time) error {
@@ -175,8 +178,9 @@ func (h managerHost) ReportAlarm(kind string) {
 	}
 }
 
-// verifyPIN derives the DEK from pin with the header's KDF and pepper and
-// compares it with the running vault's DEK. Failures count in the unlock
+// verifyPIN derives the unlock key from pin, the pepper and the phone's
+// secret held since the unlock, and compares it in constant time with the
+// unlock key in memory (release R, §11.14.1). Failures count in the unlock
 // backoff (§11.8) and are written with the batch's header.
 func (m *Manager) verifyPIN(pin string, now time.Time) error {
 	if !altchan.ValidPIN(pin) {
@@ -185,9 +189,9 @@ func (m *Manager) verifyPIN(pin string, now time.Time) error {
 	if now.Before(m.hdr.Backoff.NotBefore) {
 		return BackoffError(m.hdr.Backoff.NotBefore.Sub(now))
 	}
-	dek, err := deriveDEK(pin, m.hdr.KDF, m.hdr.Pepper, m.st.VaultID)
-	ok := err == nil && subtle.ConstantTimeCompare(dek, m.dek) == 1
-	suite.Wipe(dek)
+	uk, err := deriveUnlockKey(pin, m.unlockSecret, m.hdr.KDF, m.hdr.Pepper, m.st.VaultID)
+	ok := err == nil && len(m.unlockKey) > 0 && subtle.ConstantTimeCompare(uk, m.unlockKey) == 1
+	suite.Wipe(uk)
 	m.dirty = true
 	if !ok {
 		m.hdr.Backoff.Failures++
@@ -250,7 +254,7 @@ func (m *Manager) transferScanned(r *Request, now time.Time) {
 // feature has checked the PIN and the password and rotated the CEK. The
 // new app's handshake is complete, so the approval completes the transfer
 // (step 4), after the handler returns (afterHandle), in the same flush.
-func (m *Manager) approveTransfer(_ context.Context, id string, now time.Time) error {
+func (m *Manager) approveTransfer(ctx context.Context, id, pin string, pw []byte, backup bool, now time.Time) error {
 	t := m.st.Transfer
 	if t == nil || t.ID != id || t.State != TransferOpen || t.Inbound == "" {
 		return errNotFound
@@ -258,6 +262,9 @@ func (m *Manager) approveTransfer(_ context.Context, id string, now time.Time) e
 	r := m.st.Requests[t.Inbound]
 	if r == nil {
 		return errNotFound
+	}
+	if err := m.approveTransferR(ctx, r, pin, pw, backup, now); err != nil {
+		return err
 	}
 	t.State, t.NewPeer = TransferApproved, r.Peer.ID
 	m.transferAfter = r.ID
@@ -340,12 +347,20 @@ func (m *Manager) completeTransfer(p *Peer, now time.Time) {
 	m.signerMoved(wasDigest, wasClass, p, now)
 	if old := m.st.Devices[t.OldDevice]; old != nil {
 		// What is queued for the old app (the approval's response) still
-		// goes out, before device.unlinked, on its token.
+		// goes out on its token.
 		for _, e := range m.st.Outbox {
 			if e.PeerID == old.ID && e.Op == OpDeposit && !e.Done && e.Token == "" {
 				e.PeerID, e.Token, e.BestEffort = "", old.Standing.Token, true
 			}
 		}
+		// Release R (§11.14.10): device.unlinked{transferred} is held until
+		// the new phone's first unlock from storage, for at most 7 days.
+		ver := m.hdr.DEKVersion
+		if m.repl != nil {
+			ver = m.repl.next.DEKVersion
+		}
+		m.holdUnlink(old, t.ID, ver, now)
+		old.Standing.Token = "" // removed without the notice now
 		m.removeApp(old, "transferred", now)
 	}
 	if len(p.APIKey) > 0 {
@@ -358,6 +373,7 @@ func (m *Manager) completeTransfer(p *Peer, now time.Time) {
 		}
 	}
 	m.record(Activity{Kind: "device.transferred", DeviceID: p.ID, Ref: t.ID, Audit: true, Feed: true}, now)
+	m.presentAfterFlush = true // §11.14.5: a completed transfer marks the member present after its state write
 	m.notifyDevices("sync.event", strictjson.NewBuilder().String("kind", "device.transferred").String("device_id", p.ID).
 		String("old_device_id", t.OldDevice).Bytes(), p.ID, now)
 }

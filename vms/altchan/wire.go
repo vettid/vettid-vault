@@ -75,6 +75,9 @@ type EnrollRequest struct {
 	// APIKey is the app key's SPKI DER (0.15.0, app.api_key, §11.12): the
 	// enclave binds it to the queue message's app_key and records it.
 	APIKey []byte
+	// UnlockSecret is the phone's unlock secret (0.33.0, release R,
+	// §11.14.1): 32 bytes, REQUIRED.
+	UnlockSecret []byte
 }
 
 // Marshal encodes the body in §11.3 member order.
@@ -86,7 +89,7 @@ func (r *EnrollRequest) Marshal() ([]byte, error) {
 	app := strictjson.NewBuilder().Base64("ik", r.IK).Base64("kem", r.KEM.Bytes()).Raw("relay", r.Relay.marshal()).
 		String("open_token", r.OpenToken).String("name", r.Name).Raw("device_attest", da).Base64("api_key", r.APIKey).Bytes()
 	return strictjson.NewBuilder().String("user_guid", r.UserGUID).String("request_id", r.RequestID).
-		Base64("nonce", r.Nonce).String("pin", r.PIN).Raw("app", app).
+		Base64("nonce", r.Nonce).String("pin", r.PIN).Base64("unlock_secret", r.UnlockSecret).Raw("app", app).
 		String("manifest_sha256", r.ManifestSHA256).Uint("manifest_serial", r.ManifestSerial).Bytes(), nil
 }
 
@@ -130,6 +133,9 @@ func ParseEnrollRequest(o strictjson.Object) (*EnrollRequest, error) {
 	}
 	if r.PIN, err = o.String("pin"); err != nil || !ValidPIN(r.PIN) {
 		return nil, ErrMalformed
+	}
+	if r.UnlockSecret, err = o.Base64("unlock_secret", UnlockSecretSize); err != nil {
+		return nil, ErrMalformed // release R: no PIN-only enrollment (§11.14.1)
 	}
 	if r.IK, err = app.Base64("ik", ed25519.PublicKeySize); err != nil {
 		return nil, ErrMalformed
@@ -215,7 +221,11 @@ type UnlockRequest struct {
 	ManifestSerial               uint64
 	Update                       *ReleaseUpdate
 	CancelRecovery               bool // §11.11.4
-	Sig                          []byte
+	// UnlockSecret is the phone's unlock secret (0.33.0, release R): 32
+	// bytes; a request without it is answered bad_request by the vault
+	// before any work on the PIN (§11.14.1).
+	UnlockSecret []byte
+	Sig          []byte
 }
 
 // Marshal encodes the body in §11.4 member order.
@@ -225,8 +235,11 @@ func (r *UnlockRequest) Marshal() ([]byte, error) {
 		return nil, err
 	}
 	b := strictjson.NewBuilder().String("user_guid", r.UserGUID).String("vault_id", r.VaultID).
-		String("request_id", r.RequestID).Base64("device_ik", r.DeviceIK).String("pin", r.PIN).
-		Uint("min_state_seq", r.MinStateSeq).Uint("min_header_seq", r.MinHeaderSeq).String("token", r.Token).
+		String("request_id", r.RequestID).Base64("device_ik", r.DeviceIK).String("pin", r.PIN)
+	if r.UnlockSecret != nil {
+		b.Base64("unlock_secret", r.UnlockSecret)
+	}
+	b.Uint("min_state_seq", r.MinStateSeq).Uint("min_header_seq", r.MinHeaderSeq).String("token", r.Token).
 		Raw("device_assertion", da).String("manifest_sha256", r.ManifestSHA256).Uint("manifest_serial", r.ManifestSerial)
 	if u := r.Update; u != nil {
 		ap, err := u.Approval.Marshal()
@@ -255,6 +268,13 @@ func ParseUnlockRequest(o strictjson.Object) (*UnlockRequest, error) {
 	}
 	if !ValidPIN(r.PIN) || r.Token == "" || len(r.Token) > 4096 {
 		return nil, ErrMalformed
+	}
+	if s, present, err := o.OptString("unlock_secret"); err != nil {
+		return nil, ErrMalformed
+	} else if present {
+		if r.UnlockSecret, err = strictjson.DecodeStd(s, -1); err != nil || len(r.UnlockSecret) > 64 {
+			return nil, ErrMalformed
+		}
 	}
 	if r.DeviceIK, err = o.Base64("device_ik", ed25519.PublicKeySize); err != nil {
 		return nil, ErrMalformed
@@ -575,19 +595,34 @@ type Descriptor struct {
 	ETK        *suite.PublicKey
 	Release    string
 	NotAfter   time.Time
+	// Capabilities are the release's capabilities (0.34.0, release R,
+	// §11.10.9); nil when the member is absent (a release before R).
+	Capabilities []string
 	// Bytes are the exact served bytes.
 	Bytes []byte
 }
 
-// MarshalDescriptor writes the descriptor in §11.2 member order.
-func MarshalDescriptor(instanceID string, etk *suite.PublicKey, release string, notAfter time.Time) []byte {
-	return strictjson.NewBuilder().Uint("v", 1).Uint("suite", uint64(suite.Suite2)).String("instance_id", instanceID).
+// MarshalDescriptor writes the descriptor in §11.2 member order. caps,
+// when not nil, is written as `capabilities` after not_after (0.34.0,
+// release R, §11.10.9); a nil caps omits the member, as releases before R
+// did. An invalid caps list is a programming error: it panics rather than
+// publish a descriptor that every app refuses.
+func MarshalDescriptor(instanceID string, etk *suite.PublicKey, release string, notAfter time.Time, caps []string) []byte {
+	if caps != nil && !ValidCapabilities(caps) {
+		panic("altchan: invalid release capabilities")
+	}
+	b := strictjson.NewBuilder().Uint("v", 1).Uint("suite", uint64(suite.Suite2)).String("instance_id", instanceID).
 		String("kid", etk.Kid().String()).String("etk", base64.StdEncoding.EncodeToString(etk.Bytes())).
-		String("release", release).String("not_after", notAfter.UTC().Format(time.RFC3339)).Bytes()
+		String("release", release).String("not_after", notAfter.UTC().Format(time.RFC3339))
+	if caps != nil {
+		b.Raw("capabilities", MarshalCapabilities(caps))
+	}
+	return b.Bytes()
 }
 
 // ParseDescriptor parses descriptor bytes strictly: v = 1, suite 2, kid =
-// the kid of etk, a non-debug PCR0 as release, and not_after.
+// the kid of etk, a non-debug PCR0 as release, not_after, and the
+// optional capabilities (absent: nil; present but malformed: refused).
 func ParseDescriptor(b []byte) (*Descriptor, error) {
 	if len(b) == 0 || len(b) > 4096 {
 		return nil, ErrMalformed
@@ -628,6 +663,9 @@ func ParseDescriptor(b []byte) (*Descriptor, error) {
 		return nil, ErrMalformed
 	}
 	if d.NotAfter, err = time.Parse(time.RFC3339, na); err != nil || d.NotAfter.UTC().Format(time.RFC3339) != na {
+		return nil, ErrMalformed
+	}
+	if d.Capabilities, err = ParseCapabilities(o, "capabilities"); err != nil {
 		return nil, ErrMalformed
 	}
 	return d, nil

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/vettid/vettid-vault/internal/strictjson"
+	"github.com/vettid/vettid-vault/vms/altchan"
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/handshake"
 	"github.com/vettid/vettid-vault/vms/suite"
@@ -190,6 +191,10 @@ type Bundle struct {
 	Token    string    // open token, exp = invite exp
 	Exp      time.Time // RFC 3339, second precision
 	HintName string    // optional
+	// Capabilities are the vault's release capabilities, carried only by
+	// a bundle of kind "app" (a transfer; 0.34.0, release R, §6.4,
+	// §11.10.9); nil when absent (a release before R).
+	Capabilities []string
 }
 
 const expLayout = "2006-01-02T15:04:05Z"
@@ -213,6 +218,9 @@ func (b *Bundle) validate() error {
 	if len(b.Vault.IK) != 32 || handshake.ValidateRelayAddr(b.Vault.Relay) != nil {
 		return ErrBundle
 	}
+	if b.Capabilities != nil && (b.Kind != "app" || !altchan.ValidCapabilities(b.Capabilities)) {
+		return ErrBundle
+	}
 	return nil
 }
 
@@ -230,6 +238,9 @@ func (b *Bundle) Marshal() ([]byte, error) {
 		Raw("vault", handshake.MarshalPrincipal(b.Vault)).
 		String("token", b.Token).
 		String("exp", b.Exp.UTC().Format(expLayout))
+	if b.Capabilities != nil {
+		bb.Raw("capabilities", altchan.MarshalCapabilities(b.Capabilities))
+	}
 	if b.HintName != "" {
 		bb.Raw("hint", strictjson.NewBuilder().String("name", b.HintName).Bytes())
 	}
@@ -277,6 +288,9 @@ func ParseBundle(raw []byte) (*Bundle, error) {
 		return nil, ErrBundle
 	}
 	if b.Exp, err = time.Parse(expLayout, es); err != nil || b.Exp.Format(expLayout) != es {
+		return nil, ErrBundle
+	}
+	if b.Capabilities, err = altchan.ParseCapabilities(o, "capabilities"); err != nil {
 		return nil, ErrBundle
 	}
 	if o.Has("hint") {

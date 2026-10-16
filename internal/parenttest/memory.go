@@ -285,6 +285,11 @@ type VaultRow struct {
 	AppKey    []byte
 	AppKeyID  string
 	AppKeySeq uint64
+	// AppKeyNext is release R's next app key of a replacement in progress
+	// (§11.14.2), with the header_seq of the write that carried it.
+	AppKeyNext     []byte
+	AppKeyNextSeq  uint64
+	AppKeyNextHSeq uint64
 	// CredentialBackup is the reported backup bit (0.16.0, §11.5).
 	CredentialBackup *bool
 	// NameChange and NameChangePending are the member's name request as
@@ -298,6 +303,9 @@ type VaultRow struct {
 type SlotRow struct {
 	Status, Code, InstanceID string
 	Envelope                 []byte
+	// Release R's clear members.
+	NotBefore, Expires, RetryAt, Reason string
+	Earliest                            bool
 }
 
 // Tables is in-memory DynamoDB with the parent's conditions.
@@ -498,6 +506,23 @@ func (t *Tables) Lifecycle(_ context.Context, ev parent.Lifecycle, me string, no
 		}
 		return nil
 	}
+	if r != nil {
+		// Release R's app_key_next, as parent.AWS.appKeyNext.
+		switch {
+		case ev.Event == parent.EventAppKeyNext:
+			if ev.AppKeySeq > r.AppKeySeq {
+				r.AppKeyNext, r.AppKeyNextSeq, r.AppKeyNextHSeq = append([]byte(nil), ev.AppKey...), ev.AppKeySeq, ev.HeaderSeq
+			}
+			return nil
+		case ev.Event == parent.EventAppKey && ev.NextCleared:
+			r.AppKeyNext, r.AppKeyNextSeq, r.AppKeyNextHSeq = nil, 0, 0
+			return nil
+		case ev.Event == parent.EventAppKey && len(ev.AppKey) > 0 && r.AppKeyNext != nil && r.AppKeyNextSeq <= ev.AppKeySeq,
+			(ev.Event == "unlocked" || ev.Event == "locked") && ev.Next != nil && !*ev.Next && r.AppKeyNext != nil &&
+				(r.AppKeyNextSeq <= ev.AppKeySeq || r.AppKeyNextHSeq <= ev.HeaderSeq):
+			r.AppKeyNext, r.AppKeyNextSeq, r.AppKeyNextHSeq = nil, 0, 0
+		}
+	}
 	if r != nil && len(ev.AppKey) > 0 && (ev.Event == "enrolled" || ev.AppKeySeq > r.AppKeySeq) {
 		// Not lease-conditioned: only by seq (enrolled: always), as parent.AWS.
 		r.AppKey, r.AppKeyID, r.AppKeySeq = append([]byte(nil), ev.AppKey...), parent.AppKeyID(ev.AppKey), ev.AppKeySeq
@@ -587,6 +612,7 @@ func (t *Tables) WriteSlot(_ context.Context, requestID string, s parent.Slot) e
 	}
 	r.Status, r.Code = s.Status, s.Code
 	r.Envelope = append([]byte(nil), s.Envelope...)
+	r.NotBefore, r.Expires, r.RetryAt, r.Reason, r.Earliest = s.NotBefore, s.Expires, s.RetryAt, s.Reason, s.Earliest
 	return nil
 }
 

@@ -215,6 +215,9 @@ func (c *fakeCollector) Close() error { return nil }
 
 const testPIN = "123456"
 
+// testSecret is the phone's unlock secret in tests (release R, §11.14.1).
+var testSecret = bytes.Repeat([]byte{0x42}, 32)
+
 var testRelease = Release{PCR0: "dev", Number: 1}
 
 type fixture struct {
@@ -238,7 +241,7 @@ func newFixture(t testing.TB) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, err := Create(context.Background(), CreateParams{Options: f.opts, UserGUID: "u1", PIN: testPIN, KDF: k, RelayURL: "https://relay.example.org"})
+	m, err := Create(context.Background(), CreateParams{Options: f.opts, UserGUID: "u1", PIN: testPIN, UnlockSecret: testSecret, KDF: k, RelayURL: "https://relay.example.org"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -248,7 +251,7 @@ func newFixture(t testing.TB) *fixture {
 }
 
 func (f *fixture) unlock(pin string, minState, minHeader uint64) (*Manager, UnlockResult, error) {
-	return Unlock(context.Background(), UnlockParams{Options: f.opts, VaultID: f.vid, PIN: pin, MinStateSeq: minState, MinHeaderSeq: minHeader})
+	return Unlock(context.Background(), UnlockParams{Options: f.opts, VaultID: f.vid, PIN: pin, UnlockSecret: testSecret, MinStateSeq: minState, MinHeaderSeq: minHeader})
 }
 
 func TestCreateUnlock(t *testing.T) {
@@ -359,7 +362,7 @@ func TestSplitBrainZeroizes(t *testing.T) {
 
 func TestStateBlobBinding(t *testing.T) {
 	dek := bytes.Repeat([]byte{1}, 32)
-	blob, err := encryptState(dek, "v1", 7, []byte(`{}`))
+	blob, err := encryptState(dek, 1, "v1", 7, []byte(`{}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -379,20 +382,24 @@ func TestStateBlobBinding(t *testing.T) {
 func TestKDF(t *testing.T) {
 	k, _ := MinKDF()
 	pep := bytes.Repeat([]byte{2}, 32)
-	a, err := deriveDEK("123456", k, pep, "v1")
+	a, err := deriveUnlockKey("123456", testSecret, k, pep, "v1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, _ := deriveDEK("123456", k, pep, "v1")
-	c, _ := deriveDEK("123457", k, pep, "v1")
-	d, _ := deriveDEK("123456", k, bytes.Repeat([]byte{3}, 32), "v1")
-	if !bytes.Equal(a, b) || bytes.Equal(a, c) || bytes.Equal(a, d) {
-		t.Fatal("DEK derivation")
+	b, _ := deriveUnlockKey("123456", testSecret, k, pep, "v1")
+	c, _ := deriveUnlockKey("123457", testSecret, k, pep, "v1")
+	d, _ := deriveUnlockKey("123456", testSecret, k, bytes.Repeat([]byte{3}, 32), "v1")
+	e, _ := deriveUnlockKey("123456", bytes.Repeat([]byte{0x43}, 32), k, pep, "v1")
+	if !bytes.Equal(a, b) || bytes.Equal(a, c) || bytes.Equal(a, d) || bytes.Equal(a, e) {
+		t.Fatal("unlock key derivation")
 	}
 	bad := k
 	bad.MemoryKiB = 1024
-	if _, err := deriveDEK("123456", bad, pep, "v1"); !errors.Is(err, ErrKDF) {
+	if _, err := deriveUnlockKey("123456", testSecret, bad, pep, "v1"); !errors.Is(err, ErrKDF) {
 		t.Fatal("weak params accepted")
+	}
+	if _, err := deriveUnlockKey("123456", testSecret[:31], k, pep, "v1"); !errors.Is(err, ErrKDF) {
+		t.Fatal("a short secret accepted")
 	}
 }
 
@@ -416,7 +423,10 @@ func TestHeaderContents(t *testing.T) {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	want := "[backoff created_at credential_backup header_seq kdf manifest_serial pepper provisional sealed_release state_seq unlock_keys user_guid v vault_id]"
+	if bytes.Contains(b, f.m.dek) || bytes.Contains(b, []byte(fmt.Sprintf("%q", f.m.dek))) || bytes.Contains(b, []byte(fmt.Sprintf("%q", f.m.unlockKey))) {
+		t.Fatal("header holds the DEK or the unlock key")
+	}
+	want := "[backoff created_at credential_backup dek_version dek_wrap header_seq kdf manifest_serial pepper provisional recovery_r sealed_release secret_check state_seq unlock_keys user_guid v vault_id]"
 	if fmt.Sprint(keys) != want {
 		t.Fatalf("header members %v", keys)
 	}

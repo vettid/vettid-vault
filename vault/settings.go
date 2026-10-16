@@ -224,6 +224,14 @@ func (m *Manager) hSettingsSet(_ context.Context, s *Session, in *envelope.Inner
 	if err != nil {
 		return nil, err
 	}
+	if prev.Backup() && !next.Backup() && s.m != nil {
+		// Release R (§11.14.3, §11.14.9): turning the backup off closes
+		// the recovery generation; refused while the counter cannot
+		// confirm it.
+		if err := s.m.closeForBackupOff(s.Context(), s.now); err != nil {
+			return nil, err
+		}
+	}
 	s.host.SetSettings(next)
 	s.Record(Activity{Kind: "settings.changed", DeviceID: s.from.ID, Ref: uitoa(next.Version), Audit: true})
 	if m := s.m; m != nil {

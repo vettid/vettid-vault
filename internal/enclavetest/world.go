@@ -5,8 +5,10 @@ import (
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"github.com/vettid/vettid-vault/internal/reckeytest"
 	"sync"
 	"time"
 
@@ -192,7 +194,9 @@ func (w *World) spec(n uint64) (ReleaseSpec, bool) {
 func (w *World) Config(n uint64, id string) enclave.Config {
 	return enclave.Config{InstanceID: id, ReleaseNumber: n, ManifestKeys: []*ecdsa.PublicKey{&w.Key.PublicKey},
 		SealAccount: KMSAccount, SealRegion: KMSRegion,
-		RetirementPrincipal: RetirementRole, RetirementWindowDays: RetirementWindow, DeviceAttest: Policy(), RelayURL: w.RelayURL, KDF: vault.MinKDF}
+		RetirementPrincipal: RetirementRole, RetirementWindowDays: RetirementWindow, DeviceAttest: Policy(), RelayURL: w.RelayURL, KDF: vault.MinKDF,
+		// Release R: the stand-in's recovery request key, recovery offered.
+		Recovery: enclave.RecoveryConfig{RequestKeys: reckeytest.Pinned(), Offered: true, WaitUnit: 10 * time.Minute, Quiet: 72 * time.Hour}}
 }
 
 // Start starts an instance of release n (one per release).
@@ -317,7 +321,7 @@ func (w *World) Post(ctx context.Context, in *enclave.Instance, op, vaultID, use
 	}
 	q := &enclave.QueueMessage{Op: op, VaultID: vaultID, UserGUID: userGUID, RequestID: r.RequestID, ETKKid: kid,
 		Envelope: r.Envelope, EnqueuedAt: w.Now()}
-	if op == enclave.OpEnroll || op == enclave.OpRecoveryRegister {
+	if op == enclave.OpEnroll || op == enclave.OpRecoveryRegister || op == enclave.OpRecoveryOpen {
 		q.AppKey = r.AppKey // the key the API checked the request's signature with (0.15.0)
 	}
 	switch {
@@ -327,7 +331,7 @@ func (w *World) Post(ctx context.Context, in *enclave.Instance, op, vaultID, use
 		q.Account = Snapshot(w.Now(), "Test", "Member") // §11.5 (0.18.0)
 	}
 	var doc []byte
-	if op == enclave.OpEnroll || op == enclave.OpUnlock {
+	if op == enclave.OpEnroll || op == enclave.OpUnlock || op == enclave.OpRecoveryOpen {
 		q.ManifestSHA256 = r.ManifestSHA256
 		doc = w.ManifestDoc(r.ManifestSHA256)
 	}
@@ -386,6 +390,7 @@ func (w *World) Recovery(ctx context.Context, in *enclave.Instance, vaultID, use
 	rid, _ := envelope.NewULID(w.Now())
 	q := &enclave.QueueMessage{Op: enclave.OpRecovery, VaultID: vaultID, UserGUID: userGUID, RequestID: rid, EnqueuedAt: w.Now(),
 		BrowserKey: browserKey}
+	w.signRecovery(q)
 	return rid, in.Process(ctx, q, nil)
 }
 
@@ -394,7 +399,19 @@ func (w *World) Recovery(ctx context.Context, in *enclave.Instance, vaultID, use
 func (w *World) RecoveryCancel(ctx context.Context, in *enclave.Instance, vaultID, userGUID string) {
 	rid, _ := envelope.NewULID(w.Now())
 	q := &enclave.QueueMessage{Op: enclave.OpRecoveryCancel, VaultID: vaultID, UserGUID: userGUID, RequestID: rid, EnqueuedAt: w.Now()}
+	w.signRecovery(q)
 	in.Process(ctx, q, nil)
+}
+
+// signRecovery signs a recovery or recovery_cancel as the member API does
+// (release R, §11.14.8), with the TEST-ONLY recovery request key.
+func (w *World) signRecovery(q *enclave.QueueMessage) {
+	q.SignedAt, q.KeyID = time.Now().UTC().Format(time.RFC3339), reckeytest.KeyID
+	var bk []byte
+	if q.Op == enclave.OpRecovery {
+		bk = q.BrowserKey
+	}
+	q.Sig, _ = base64.StdEncoding.DecodeString(reckeytest.Sign(q.Op, q.VaultID, q.UserGUID, q.RequestID, q.SignedAt, bk))
 }
 
 // Snapshot is a well-formed account snapshot (§11.13, 0.18.0, 0.20.0) as

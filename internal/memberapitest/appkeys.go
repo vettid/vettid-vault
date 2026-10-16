@@ -153,6 +153,8 @@ func route(method, path string) string {
 		return "claim"
 	case method == http.MethodPost && path == "/api/vault/recovery/register":
 		return "register"
+	case method == http.MethodPost && path == "/api/vault/recovery/open":
+		return "open" // release R (MEMBER-API 2.7.0)
 	case strings.HasPrefix(path, "/api/vault/recovery"):
 		return "recovery"
 	}
@@ -165,13 +167,16 @@ var sessionRoutes = map[string]bool{"enroll-code": true, "lock": true, "status":
 
 // appRoutes is the key matrix: which key kinds may call a route.
 var appRoutes = map[string][]string{
-	"enclave":  {"app_key", "pending", "claim", "recovering"},
-	"enroll":   {"pending"},
-	"unlock":   {"app_key", "recovering"},
-	"lock":     {"app_key", "recovering"},
+	"enclave": {"app_key", "pending", "claim", "recovering"},
+	"enroll":  {"pending"},
+	// Release R (MEMBER-API 2.7.0): the recovering key no longer unlocks
+	// or locks; it opens (below).
+	"unlock":   {"app_key"},
+	"lock":     {"app_key"},
 	"status":   {"app_key", "recovering"},
 	"requests": {"app_key", "pending", "claim", "recovering"},
 	"register": {"claim"},
+	"open":     {"recovering"},
 }
 
 var errUnauthorized = vaultError(401, "unauthorized", "unauthorized", nil)

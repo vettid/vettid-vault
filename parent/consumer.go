@@ -38,11 +38,13 @@ func parseRouting(b []byte) (routing, bool) {
 		return routing{}, false
 	}
 	switch r.Op {
-	case "enroll", "unlock", "lock", "delete", "recovery", "recovery_cancel", "recovery_register", "account":
+	case "enroll", "unlock", "lock", "delete", "recovery", "recovery_cancel", "recovery_register", "recovery_open", "account":
 	default:
 		return routing{}, false
 	}
-	if (r.Op == "enroll" || r.Op == "unlock") != (r.ManifestSHA256 != "") || r.ManifestSHA256 != "" && !sha256RE.MatchString(r.ManifestSHA256) {
+	// Release R: a recovery open names its manifest too (§11.14.6).
+	if (r.Op == "enroll" || r.Op == "unlock" || r.Op == "recovery_open") != (r.ManifestSHA256 != "") ||
+		r.ManifestSHA256 != "" && !sha256RE.MatchString(r.ManifestSHA256) {
 		return routing{}, false
 	}
 	return r, r.V == 1 && vaultIDOK(r.VaultID) && ulidRE.MatchString(r.RequestID)
@@ -57,8 +59,26 @@ type enclaveResponse struct {
 	Status    string `json:"status"`
 	Envelope  string `json:"envelope"`
 	// Code is the enclave's clear marker of a successful recovery
-	// register (0.10.6), the only code a "done" answer carries.
+	// register (0.10.6), a refused request (0.16.0) or a counted recovery
+	// open (release R).
 	Code string `json:"code"`
+	// Release R's clear members (§11.5).
+	NotBefore string `json:"not_before"`
+	Expires   string `json:"expires"`
+	RetryAt   string `json:"retry_at"`
+	Reason    string `json:"reason"`
+	Earliest  bool   `json:"earliest"`
+}
+
+// codeRecoveryAttempt is copied from a counted recovery open's answer
+// (release R, §11.14.11): the member API emails the member.
+const codeRecoveryAttempt = "recovery_attempt"
+
+func clearTime(s string) string {
+	if t, err := time.Parse(time.RFC3339, s); err == nil && len(s) <= 40 {
+		return t.UTC().Format(time.RFC3339)
+	}
+	return ""
 }
 
 // codeRecoveryRegistered is copied from a register's answer into its slot
@@ -144,7 +164,9 @@ func (p *Parent) handleMessage(ctx context.Context, m QueueMessage) {
 		return
 	}
 	log := p.log.With("request_id", r.RequestID, "op", r.Op, "vault_id", r.VaultID)
-	takes := r.Op == "enroll" || r.Op == "unlock"
+	// Release R: a successful recovery open runs the vault here, so it
+	// takes the lease like an unlock.
+	takes := r.Op == "enroll" || r.Op == "unlock" || r.Op == "recovery_open"
 	if takes {
 		// §11.1: the lease is taken when the enclave takes the vault. A
 		// lease held elsewhere means the request reached the wrong
@@ -206,8 +228,21 @@ func (p *Parent) handleMessage(ctx context.Context, m QueueMessage) {
 					} else {
 						slot.Envelope = env
 						if er.Code == codeRecoveryRegistered && r.Op == "recovery_register" ||
-							er.Code == codeRecoveryUnavailable && r.Op == "recovery" {
+							er.Code == codeRecoveryUnavailable && r.Op == "recovery" ||
+							er.Code == codeRecoveryAttempt && r.Op == "recovery_open" {
 							slot.Code = er.Code
+						}
+						// Release R: copied like the codes, op by op.
+						switch {
+						case r.Op == "recovery" && er.Code == codeRecoveryUnavailable:
+							switch er.Reason {
+							case "no_backup", "no_credential", "not_offered":
+								slot.Reason = er.Reason
+							}
+						case r.Op == "recovery":
+							slot.NotBefore, slot.Expires, slot.Earliest = clearTime(er.NotBefore), clearTime(er.Expires), er.Earliest
+						case r.Op == "recovery_open" && slot.Code == codeRecoveryAttempt:
+							slot.RetryAt, slot.Expires = clearTime(er.RetryAt), clearTime(er.Expires)
 						}
 					}
 				}

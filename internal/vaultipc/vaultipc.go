@@ -61,7 +61,9 @@ import (
 // 7: Push (0.24.0).
 // 8: Transfer and TransferDone (0.32.0, release A: the instance's
 // admission of blob transfers by memory, §10.5.1).
-// 9: Counter and HeavyPermit (0.33.0, release R).
+// 9: Counter and HeavyPermit; Lifecycle carries next, header_seq and
+// next_cleared; Open's last field is the clear marker as JSON (0.33.0,
+// release R).
 const Version = "9"
 
 // Supervisor → vault.

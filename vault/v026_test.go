@@ -216,7 +216,7 @@ func TestUnregisteredFeatureStateCarried(t *testing.T) {
 		other := &namedFeature{name: "presence"}
 		o := f.opts
 		o.Features = []Feature{other}
-		m, _, err := Unlock(context.Background(), UnlockParams{Options: o, VaultID: f.vid, PIN: testPIN})
+		m, _, err := Unlock(context.Background(), UnlockParams{Options: o, VaultID: f.vid, PIN: testPIN, UnlockSecret: testSecret})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -275,7 +275,7 @@ func TestUnregisteredFeatureStateCarried(t *testing.T) {
 	pres := &namedFeature{name: "presence", state: json.RawMessage(`{"v":1}`)}
 	o := g.opts
 	o.Features = []Feature{pres}
-	m, _, err = Unlock(context.Background(), UnlockParams{Options: o, VaultID: g.vid, PIN: testPIN})
+	m, _, err = Unlock(context.Background(), UnlockParams{Options: o, VaultID: g.vid, PIN: testPIN, UnlockSecret: testSecret})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -285,7 +285,7 @@ func TestUnregisteredFeatureStateCarried(t *testing.T) {
 	if err := m.Lock(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if m, _, err = Unlock(context.Background(), UnlockParams{Options: g.opts, VaultID: g.vid, PIN: testPIN}); err != nil {
+	if m, _, err = Unlock(context.Background(), UnlockParams{Options: g.opts, VaultID: g.vid, PIN: testPIN, UnlockSecret: testSecret}); err != nil {
 		t.Fatal(err)
 	}
 	if raw, ok := featureEntry(t, m, "presence"); !ok || string(raw) != `{"v":1}` {

@@ -94,7 +94,14 @@ type UnlockFields struct {
 	ToPCR0         string
 	// CancelRecovery adds a 13th line, "cancel_recovery" (§11.11.4).
 	CancelRecovery bool
+	// UnlockSecret adds the last line, hex(SHA-256(unlock_secret)) (0.33.0,
+	// release R, §11.4), so that a request cannot be replayed with another
+	// secret. Release R always adds it.
+	UnlockSecret []byte
 }
+
+// UnlockSecretSize is the phone's unlock secret's size (§11.14.1).
+const UnlockSecretSize = 32
 
 // UnlockSigningString returns the string `sig` covers in vault.unlock
 // (§11.4), fields separated by a literal newline, no trailing newline:
@@ -136,6 +143,8 @@ func UnlockSigningString(f UnlockFields) (string, error) {
 	if f.CancelRecovery {
 		lines = append(lines, "cancel_recovery")
 	}
+	us := sha256.Sum256(f.UnlockSecret)
+	lines = append(lines, hex.EncodeToString(us[:]))
 	return strings.Join(lines, "\n"), nil
 }
 

@@ -12,6 +12,7 @@ import (
 	"github.com/vettid/vettid-vault/client"
 	"github.com/vettid/vettid-vault/enclave"
 	"github.com/vettid/vettid-vault/features/all"
+	"github.com/vettid/vettid-vault/internal/countertest"
 	"github.com/vettid/vettid-vault/internal/enclavetest"
 	"github.com/vettid/vettid-vault/internal/relaytest"
 	"github.com/vettid/vettid-vault/vault"
@@ -41,7 +42,7 @@ func newACWorld(t *testing.T) *acWorld {
 	r := relaytest.Start(t, nil)
 	w := enclavetest.NewWorld(time.Now, r.URL)
 	aw := &acWorld{t: t, w: w, relay: r.URL, trust: w.Trust()}
-	w.VaultOptions = vault.Options{PollWait: time.Second,
+	w.VaultOptions = vault.Options{PollWait: time.Second, Counter: countertest.NewLive(), // release R
 		Relay: func(base string, key ed25519.PrivateKey) vault.Relay {
 			return vault.NewClientRelay(base, key, nil, time.Now)
 		}}
@@ -137,7 +138,7 @@ func (aw *acWorld) enroll(a *acApp, pin string) *altchan.EnrollResult {
 	if err := a.dev.CompleteEnrollment(ctx); err != nil {
 		t.Fatalf("first-app handshake: %v", err)
 	}
-	if err := a.dev.CredentialCreate(ctx, credPW); err != nil {
+	if err := a.dev.CredentialCreate(ctx, acPIN, credPW); err != nil {
 		t.Fatalf("credential.create: %v", err)
 	}
 	if rr, err := a.dev.Request(ctx, "vault.enroll.confirm", []byte(`{}`)); err != nil || !rr.OK() {

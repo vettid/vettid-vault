@@ -61,6 +61,7 @@ func TestVaultctlDecline(t *testing.T) {
 		return ""
 	}
 	t.Setenv("VAULTCTL_PASSWORD", "correct horse battery staple")
+	t.Setenv("VAULTCTL_PIN", "246802") // release R: credential create carries the PIN
 	newVault := func(name string) string {
 		t.Helper()
 		app, store := filepath.Join(dir, name+".json"), filepath.Join(dir, name+"-store")

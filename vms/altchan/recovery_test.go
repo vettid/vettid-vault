@@ -69,7 +69,8 @@ func TestUnlockSigningStringCancel(t *testing.T) {
 	plain, _ := UnlockSigningString(f)
 	f.CancelRecovery = true
 	s, _ := UnlockSigningString(f)
-	if s != plain+"\ncancel_recovery" {
+	const empty = "\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+	if s != strings.TrimSuffix(plain, empty)+"\ncancel_recovery"+empty {
 		t.Fatalf("%q", s)
 	}
 }

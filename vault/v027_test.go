@@ -78,7 +78,7 @@ func TestSignerOfBinding(t *testing.T) {
 // vault as d's app with the given device check.
 func altUnlock(d *devFixture, opts Options, pin string, verify func(k *UnlockKey) (json.RawMessage, error)) (*Manager, *AltUnlockOutcome) {
 	own := ReleaseEntry{PCR0: testRelease.PCR0, Number: testRelease.Number, Status: "active"}
-	return UnlockAlt(context.Background(), AltUnlockParams{Options: opts, VaultID: d.vid, UserGUID: "u1", DeviceIK: d.devPeer.IK, PIN: pin,
+	return UnlockAlt(context.Background(), AltUnlockParams{Options: opts, VaultID: d.vid, UserGUID: "u1", DeviceIK: d.devPeer.IK, PIN: pin, UnlockSecret: testSecret,
 		VerifyDevice: verify,
 		Manifest: func(seen uint64) (*ManifestView, error) {
 			return &ManifestView{Serial: seen + 1, Own: own, Lookup: func(string) (ReleaseEntry, bool) { return own, true }}, nil
@@ -105,7 +105,7 @@ func TestSignerRefusedRolledBackHeader(t *testing.T) {
 	refuse := func(*UnlockKey) (json.RawMessage, error) { return nil, &SignerRefused{Reason: SignerUnpinned} }
 	own := ReleaseEntry{PCR0: testRelease.PCR0, Number: testRelease.Number, Status: "active"}
 	unlock := func(minHeader uint64) *AltUnlockOutcome {
-		_, out := UnlockAlt(context.Background(), AltUnlockParams{Options: opts, VaultID: d.vid, UserGUID: "u1", DeviceIK: d.devPeer.IK, PIN: testPIN,
+		_, out := UnlockAlt(context.Background(), AltUnlockParams{Options: opts, VaultID: d.vid, UserGUID: "u1", DeviceIK: d.devPeer.IK, PIN: testPIN, UnlockSecret: testSecret,
 			MinHeaderSeq: minHeader, VerifyDevice: refuse,
 			Manifest: func(seen uint64) (*ManifestView, error) {
 				return &ManifestView{Serial: seen + 1, Own: own, Lookup: func(string) (ReleaseEntry, bool) { return own, true }}, nil
@@ -442,7 +442,7 @@ func transferTo(t *testing.T, d *devFixture, newBinding json.RawMessage, seed by
 func completeTransferNow(t *testing.T, d *devFixture, id string) {
 	t.Helper()
 	d.m.mu.Lock()
-	err := d.m.approveTransfer(context.Background(), id, d.m.now())
+	err := d.m.approveTransfer(context.Background(), id, testPIN, []byte(rPW), false, d.m.now())
 	if err == nil {
 		d.m.afterRespond(d.m.now())
 		d.m.syncUnlockKeys()

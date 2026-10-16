@@ -2,15 +2,11 @@ package vault
 
 import (
 	"context"
-	"crypto/hkdf"
-	"crypto/sha256"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"time"
 
-	"golang.org/x/crypto/argon2"
-
+	"github.com/vettid/vettid-vault/vms/recovery"
 	"github.com/vettid/vettid-vault/vms/suite"
 )
 
@@ -25,7 +21,6 @@ type Sealer interface {
 
 // Labels for the at-rest formats (VAULT-MESSAGING §3.3.1).
 const (
-	labelDEK    = "vettid/vms/2/dek"
 	labelState  = "vettid/vms/2/state"
 	labelHeader = "vettid/vms/2/header"
 )
@@ -39,9 +34,12 @@ type KDFParams struct {
 	Salt      []byte `json:"salt"` // 16 bytes
 }
 
-// DefaultKDF returns production parameters (Argon2id, t=3, m=64 MiB, p=1)
-// with a fresh salt.
-func DefaultKDF() (KDFParams, error) { return newKDF(3, 64*1024, 1) }
+// DefaultKDF returns the unlock key's parameters (§11.14.1: Argon2id,
+// t=3, m=64 MiB, p=1; lower in a vettid_testcost build) with a fresh salt.
+func DefaultKDF() (KDFParams, error) {
+	p, err := recovery.NewUnlockParams()
+	return fromParams(p), err
+}
 
 // MinKDF are the weakest parameters accepted (used by tests and dev runs).
 func MinKDF() (KDFParams, error) { return newKDF(1, 8*1024, 1) }
@@ -61,22 +59,6 @@ func (k KDFParams) valid() bool {
 
 // ErrKDF is returned for unacceptable KDF parameters.
 var ErrKDF = errors.New("vault: invalid KDF parameters")
-
-// deriveDEK computes the DEK:
-//
-//	x   = Argon2id(PIN, salt, t, m, p, 32)
-//	DEK = HKDF-SHA-256(ikm = x, salt = pepper, info = "vettid/vms/2/dek" || vault_id, 32)
-//
-// The pepper is a random 32-byte secret kept only in the sealed header, so
-// stolen state cannot be brute-forced against PINs outside the enclave.
-func deriveDEK(pin string, k KDFParams, pepper []byte, vaultID string) ([]byte, error) {
-	if !k.valid() || len(pepper) != 32 || pin == "" {
-		return nil, ErrKDF
-	}
-	x := argon2.IDKey([]byte(pin), k.Salt, k.Time, k.MemoryKiB, k.Threads, 32)
-	defer suite.Wipe(x)
-	return hkdf.Key(sha256.New, x, pepper, labelDEK+vaultID, 32)
-}
 
 // UnlockKey is an app allowed to unlock (§3.3): its keys and its
 // device-attestation binding (§11.7), which only the sealed header holds
@@ -148,6 +130,15 @@ type Header struct {
 	// its credential (0.16.0, §3.3, §3.5.6), so whether it can be
 	// recovered; nil in a header written before 0.16.0.
 	CredentialBackup *bool `json:"credential_backup,omitempty"`
+	// Release R (§11.14.1, §11.14.2, §11.14.3): the current DEK wrapped
+	// under the unlock key (KDF above is the unlock key's), its version,
+	// the phone's secret check, a DEK replacement in progress, and the
+	// recovery part.
+	DEKVersion  uint64         `json:"dek_version"`
+	DEKWrap     []byte         `json:"dek_wrap"`
+	SecretCheck []byte         `json:"secret_check"`
+	Next        *HeaderNext    `json:"next,omitempty"`
+	Rec         RecoveryHeader `json:"recovery_r"`
 }
 
 func headerAAD(vaultID string) []byte { return []byte(labelHeader + "\x00" + vaultID) }
@@ -168,47 +159,15 @@ func unsealHeader(ctx context.Context, s Sealer, blob []byte, vaultID, release s
 	}
 	defer suite.Wipe(b)
 	var h Header
-	if err := json.Unmarshal(b, &h); err != nil || h.V != 1 || h.VaultID != vaultID || h.SealedRelease != release {
+	if err := json.Unmarshal(b, &h); err != nil || h.V != HeaderVersion || h.VaultID != vaultID || h.SealedRelease != release {
 		return nil, ErrHeader
 	}
 	return &h, nil
 }
 
-// State blob layout:
-//
-//	blob = 0x01 || state_seq (8, big-endian) || nonce (24) || XChaCha20-Poly1305(DEK, nonce, aad, json)
-//	aad  = "vettid/vms/2/state" || 0x00 || vault_id || 0x00 || blob[0:9]
-const stateBlobVersion = 1
-
 func stateAAD(vaultID string, prefix []byte) []byte {
 	a := []byte(labelState + "\x00" + vaultID + "\x00")
 	return append(a, prefix...)
-}
-
-func encryptState(dek []byte, vaultID string, seq uint64, plaintext []byte) ([]byte, error) {
-	prefix := binary.BigEndian.AppendUint64([]byte{stateBlobVersion}, seq)
-	nonce, err := suite.NewNonce()
-	if err != nil {
-		return nil, err
-	}
-	ct, err := suite.SealX(dek, nonce, stateAAD(vaultID, prefix), plaintext)
-	if err != nil {
-		return nil, err
-	}
-	out := append(prefix, nonce...)
-	return append(out, ct...), nil
-}
-
-// decryptState returns the plaintext and the state_seq bound into the AAD.
-func decryptState(dek []byte, vaultID string, blob []byte) ([]byte, uint64, error) {
-	if len(blob) < 9+suite.XNonceSize+suite.TagSize || blob[0] != stateBlobVersion {
-		return nil, 0, ErrState
-	}
-	pt, err := suite.OpenX(dek, blob[9:9+suite.XNonceSize], stateAAD(vaultID, blob[:9]), blob[9+suite.XNonceSize:])
-	if err != nil {
-		return nil, 0, ErrState
-	}
-	return pt, binary.BigEndian.Uint64(blob[1:9]), nil
 }
 
 // PeekHeader unseals a header blob (the enclave's check for an existing

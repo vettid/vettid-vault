@@ -15,6 +15,7 @@ import (
 	"github.com/vettid/vettid-vault/client"
 	"github.com/vettid/vettid-vault/enclave"
 	"github.com/vettid/vettid-vault/features/all"
+	"github.com/vettid/vettid-vault/internal/countertest"
 	"github.com/vettid/vettid-vault/internal/enclavetest"
 	"github.com/vettid/vettid-vault/internal/relaytest"
 	"github.com/vettid/vettid-vault/vault"
@@ -64,7 +65,7 @@ func newSignerWorld(t *testing.T, tweak func(*enclave.Config)) *signerWorld {
 	r := relaytest.Start(t, nil)
 	w := enclavetest.NewWorld(time.Now, r.URL)
 	aw := &acWorld{t: t, w: w, relay: r.URL, trust: w.Trust()}
-	w.VaultOptions = vault.Options{PollWait: time.Second,
+	w.VaultOptions = vault.Options{PollWait: time.Second, Counter: countertest.NewLive(), // release R
 		Relay: func(base string, key ed25519.PrivateKey) vault.Relay {
 			return vault.NewClientRelay(base, key, nil, time.Now)
 		}}
@@ -86,6 +87,7 @@ func (sw *signerWorld) startRelease(r enclavetest.ReleaseSpec, tweak func(*encla
 	if _, err := sw.w.StartWith(r.Number, func(c *enclave.Config) {
 		bothPinned(c)
 		c.RecoveryNow = func() time.Time { return time.Now().Add(time.Duration(sw.off.Load())) }
+		c.Recovery.Quiet = time.Nanosecond // release R: these tests are about the code, not the quiet period
 		if tweak != nil {
 			tweak(c)
 		}
@@ -521,14 +523,13 @@ func TestRecoverySigner(t *testing.T) {
 	if res := register(t, sw.acWorld, c, qr); !res.OK {
 		t.Fatalf("register: %+v", res)
 	}
-	if r := sw.mustUnlock(c, acPIN, client.UnlockOptions{}, ""); !r.OK {
-		t.Fatalf("the registered app's unlock: %+v", r)
+	// Release R (§11.14.6): the open, then the phone's first handshake,
+	// which moves the signer binding.
+	if r := openRecovery(t, sw.acWorld, c, acPIN, credPW); !r.OK {
+		t.Fatalf("the registered phone's open: %+v", r)
 	}
 	if err := c.dev.CompleteRecoveryHandshake(ctx); err != nil {
 		t.Fatal(err)
-	}
-	if err := c.dev.CredentialRecover(ctx, credPW); err != nil {
-		t.Fatalf("recover: %v", err)
 	}
 	mustSigner(t, c.dev, "google_play", playDigest)
 	e := audited(t, c.dev, "device.signer_changed")

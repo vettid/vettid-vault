@@ -279,10 +279,13 @@ func testRecovery(t *testing.T, o *options, info map[string]any) {
 	// the unlock result carries credential_backup (§11.11.5 step 1).
 	state2 := filepath.Join(t.TempDir(), "new-phone.json")
 	vaultctlAs(state2, nil, "init", "-role", "app", "-name", "new phone", "-relay", relayURL)
-	out := vaultctlAs(state2, nil, "api-recover", "-api", api, "-guid", guid, "-pin", "13572468", "-qr", rc["qr"].(string), "-attest-seed", "98")
+	// Release R (§11.14.6): then the open with the PIN and the password,
+	// counted at the stack's stand-in counter (recovery_attempt).
+	out := vaultctlAs(state2, []string{"VAULTCTL_PASSWORD=development password"}, "api-recover", "-api", api, "-guid", guid, "-pin", "13572468",
+		"-qr", rc["qr"].(string), "-attest-seed", "98")
 	var rec2 map[string]any
 	if err := json.Unmarshal([]byte(out[strings.Index(out, "{"):]), &rec2); err != nil || rec2["slot_code"] != "recovery_registered" ||
-		rec2["credential_backup"] != true || rec2["vault_id"] != vid {
+		rec2["open_code"] != "recovery_attempt" || rec2["attempts_used"] != float64(1) || rec2["vault_id"] != vid {
 		t.Fatalf("api-recover: %v\n%s", err, out)
 	}
 	code, m = call("GET", api+"/api/vault/recovery", guid, nil)
@@ -296,7 +299,7 @@ func testRecovery(t *testing.T, o *options, info map[string]any) {
 	if code, m := reg(vid); code != 409 || m["error"] != "recovery_not_available" {
 		t.Fatalf("register after registered: %d %v", code, m)
 	}
-	vaultctlAs(state2, []string{"VAULTCTL_PASSWORD=development password"}, "credential", "recover")
+	vaultctlAs(state2, nil, "credential", "fetch") // the recovered phone holds the credential
 
 	// Cancel: the recovery ends ({cancelled: true}, then false), register
 	// is refused.

@@ -326,7 +326,7 @@ func cmdAltEnroll(ctx context.Context, g *globals, args []string) error {
 		return err
 	}
 	// A vault is used only with a credential (§3.5.7).
-	if err := d.CredentialCreate(ctx, devPassword()); err != nil {
+	if err := d.CredentialCreate(ctx, a.pin, devPassword()); err != nil {
 		return fmt.Errorf("credential.create: %w", err)
 	}
 	if rr, err := d.Request(ctx, "vault.enroll.confirm", json.RawMessage(`{}`)); err != nil || !rr.OK() {
@@ -428,7 +428,7 @@ func init() {
 	commands["api-enroll"] = command{"api-enroll -api URL -guid GUID -pin PIN [-platform android|ios]   (dev) enroll through the member API (test trust and device attestation), finish enrollment", cmdAPIEnroll}
 	commands["api-unlock"] = command{"api-unlock -api URL -guid GUID -pin PIN [-approve N] [-abandon -release N]   (dev) unlock through the member API", cmdAPIUnlock}
 	commands["api-lock"] = command{"api-lock -api URL -guid GUID   (dev) lock through the member API", cmdAPILock}
-	commands["api-recover"] = command{"api-recover -api URL -guid GUID -pin PIN -qr QR_PAYLOAD [-platform android|ios]   (dev) a new app recovers the vault (§11.11.3, §11.11.5 steps 1-2): register with the portal's code, unlock, first handshake; then `credential recover` (credential_backup true) or `credential reset`", cmdAPIRecover}
+	commands["api-recover"] = command{"api-recover -api URL -guid GUID -pin PIN -qr QR_PAYLOAD [-platform android|ios]   (dev) a new app recovers the vault (§11.11.3, release R §11.14.6): register with the portal's code, open with the PIN and VAULTCTL_PASSWORD, first handshake", cmdAPIRecover}
 	devHTTPFromEnv()
 }
 
@@ -568,7 +568,7 @@ func cmdAPIEnroll(ctx context.Context, g *globals, args []string) error {
 		return err
 	}
 	// A vault is used only with a credential (§3.5.7).
-	if err := d.CredentialCreate(ctx, devPassword()); err != nil {
+	if err := d.CredentialCreate(ctx, a.pin, devPassword()); err != nil {
 		return fmt.Errorf("credential.create: %w", err)
 	}
 	if rr, err := d.Request(ctx, "vault.enroll.confirm", json.RawMessage(`{}`)); err != nil || !rr.OK() {
@@ -672,23 +672,25 @@ func cmdAPIRecover(ctx context.Context, g *globals, args []string) error {
 	if !rr.OK {
 		return fmt.Errorf("register refused: %s", rr.Code)
 	}
-	u, err := d.UnlockVia(ctx, api, d.UserGUID(), a.pin, t, dev, client.UnlockOptions{}, "")
+	// Release R (§11.14.6): the PIN and the password together.
+	pw, err := password("VAULTCTL_PASSWORD")
+	if err != nil {
+		return err
+	}
+	o, oslot, err := d.RecoveryOpenVia(ctx, api, d.UserGUID(), a.pin, pw, t, dev)
 	if serr := save(g, d); err == nil {
 		err = serr
 	}
 	if err != nil {
 		return err
 	}
-	if !u.OK {
-		return fmt.Errorf("unlock refused: %s", u.Code)
+	if !o.OK {
+		return fmt.Errorf("recovery open refused: %s (attempts used %d)", o.Code, o.Used)
 	}
 	if err := d.CompleteRecoveryHandshake(ctx); err != nil {
 		return err
 	}
-	out := map[string]any{"registered": true, "slot_code": slot.Code, "vault_id": d.VaultID()}
-	if u.CredentialBackup != nil {
-		out["credential_backup"] = *u.CredentialBackup
-	}
+	out := map[string]any{"registered": true, "slot_code": slot.Code, "open_code": oslot.Code, "vault_id": d.VaultID(), "attempts_used": o.Used}
 	printJSON(out)
 	return save(g, d)
 }

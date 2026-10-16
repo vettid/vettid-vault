@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/vettid/vettid-vault/vault/counter"
+	"github.com/vettid/vettid-vault/vms/recovery"
 	"net/http"
 	"sort"
 	"strings"
@@ -108,6 +109,21 @@ type Options struct {
 	// release (§11.14.3); nil: always given (development, tests).
 	Counter     counter.Bucket
 	HeavyPermit func(ctx context.Context) (release func(), ok bool)
+	// RecoveryWaitUnit and RecoveryQuiet are the release constants
+	// recovery_wait_unit_seconds and recovery_quiet_seconds (§11.10.8);
+	// zero: 24 h and 72 h.
+	RecoveryWaitUnit time.Duration
+	RecoveryQuiet    time.Duration
+	// RecoveryCounterLock is the counter's lock period of token, success
+	// and close records, the measured channel's (releasecfg.CounterLock,
+	// VAULT-MESSAGING 0.33.2 §11.14.4: staging a day, production 100
+	// years); zero: 100 years.
+	RecoveryCounterLock time.Duration
+	// RecoveryNotOffered is the inverse of the measured release
+	// constant recovery_offered (§11.14.13); it only drops
+	// recovery_offered from a transfer bundle's capabilities (§11.10.9).
+	// Zero: offered (development, tests).
+	RecoveryNotOffered bool
 }
 
 // LifecycleEvent is reported to the parent, which writes it to the vault
@@ -130,7 +146,19 @@ type LifecycleEvent struct {
 	// Name is the name request of account_name (0.18.0, §11.5); nil on
 	// every other event.
 	Name *NameChange
+	// Release R (§11.5, §11.14.2): Next says on unlocked and locked whether
+	// the header has a `next` part (nil: not reported) and HeaderSeq is
+	// that header's header_seq (also the step-1 write's on app_key_next);
+	// NextCleared marks an app_key event that repeats the current key and
+	// only clears app_key_next.
+	Next        *bool
+	HeaderSeq   uint64
+	NextCleared bool
 }
+
+// EventAppKeyNext reports the next app key of a replacement in progress
+// with its first header write (release R, §11.5, §11.14.2).
+const EventAppKeyNext = "app_key_next"
 
 // EventCredentialBackup reports a changed backup bit (0.16.0, §11.5).
 const EventCredentialBackup = "credential_backup"
@@ -243,6 +271,28 @@ type Manager struct {
 	// attWrites counts the runner's store writes in flight (finishDelete
 	// waits for them before it erases).
 	attWrites sync.WaitGroup
+
+	// Release R (§11.14.1, §11.14.2): the unlock key and the phone's
+	// secret since the unlock (memory only, never written), a DEK
+	// replacement whose step 1 is stored, the reasons of those promoted in
+	// this batch, and the lifecycle news for the parent: app_key_next sent
+	// with a step 1, a `next` part with an app key dropped.
+	unlockKey    []byte
+	unlockSecret []byte
+	repl         *replacement
+	replaced     []string
+	nextCleared  bool
+	// rec is the recovery runtime: the counter, the last status read, the
+	// presence retry (§11.14.4, §11.14.5).
+	rec recoveryRuntime
+	// presentAfterFlush: an event that marks the member present (a
+	// completed transfer) waits for its state write (§11.14.5).
+	presentAfterFlush bool
+	// replInHandler: the current handler stored step 1 of a replacement.
+	replInHandler bool
+	// transferSecret is a transfer's new phone's unlock secret from its
+	// hs.init, in memory only until the approval (§11.14.10).
+	transferSecret []byte
 }
 
 // unlocked counts the managers in this process that hold a DEK.
@@ -288,12 +338,14 @@ func (o *Options) defaults() {
 // CreateParams create a new vault.
 type CreateParams struct {
 	Options
-	VaultID     string // "" = random 128-bit id
-	UserGUID    string
-	PIN         string
-	KDF         KDFParams
-	RelayURL    string
-	Provisional bool
+	VaultID  string // "" = random 128-bit id
+	UserGUID string
+	PIN      string
+	// UnlockSecret is the phone's unlock secret (release R, §11.14.1).
+	UnlockSecret []byte
+	KDF          KDFParams
+	RelayURL     string
+	Provisional  bool
 	// App is the first app, bound at enrollment (§11.3). Optional.
 	App *EnrollApp
 	// Account is the enroll queue message's account snapshot (0.18.0,
@@ -376,11 +428,28 @@ func Create(ctx context.Context, p CreateParams) (*Manager, error) {
 	if p.App != nil && len(p.App.APIKey) > 0 {
 		hdr.AppKey, hdr.AppKeySeq = append([]byte(nil), p.App.APIKey...), 1
 	}
-	dek, err := deriveDEK(p.PIN, p.KDF, pepper, p.VaultID)
+	// Release R (§11.14.1): a random DEK, wrapped under the unlock key of
+	// the PIN and the phone's secret, and the counter key (§11.14.3).
+	uk, err := deriveUnlockKey(p.PIN, p.UnlockSecret, p.KDF, pepper, p.VaultID)
 	if err != nil {
 		return nil, err
 	}
+	dek, err := suite.RandomBytes(recovery.SecretSize)
+	if err != nil {
+		return nil, err
+	}
+	hdr.V, hdr.DEKVersion = HeaderVersion, 1
+	if hdr.DEKWrap, err = recovery.WrapDEK(uk, dek, p.VaultID, 1); err != nil {
+		return nil, err
+	}
+	if hdr.SecretCheck, err = recovery.SecretCheck(pepper, p.VaultID, p.UnlockSecret); err != nil {
+		return nil, err
+	}
+	if hdr.Rec.CounterKey, err = suite.RandomBytes(recovery.SecretSize); err != nil {
+		return nil, err
+	}
 	m := newManager(p.Options, st, hdr, dek)
+	m.unlockKey, m.unlockSecret = uk, append([]byte(nil), p.UnlockSecret...)
 	if err := m.loadKeys(); err != nil {
 		return nil, err
 	}
@@ -423,8 +492,9 @@ func validRelease(r Release) bool {
 // and tests; the enclave uses UnlockAlt).
 type UnlockParams struct {
 	Options
-	VaultID string
-	PIN     string
+	VaultID      string
+	PIN          string
+	UnlockSecret []byte
 	// Client-anchored rollback minimums (§13.2).
 	MinStateSeq  uint64
 	MinHeaderSeq uint64
@@ -455,7 +525,7 @@ func backoffFor(failures int) time.Duration {
 // is counted in the header (header_seq increments); failures never wipe
 // the vault.
 func Unlock(ctx context.Context, p UnlockParams) (*Manager, UnlockResult, error) {
-	m, out := UnlockAlt(ctx, AltUnlockParams{Options: p.Options, VaultID: p.VaultID, PIN: p.PIN,
+	m, out := UnlockAlt(ctx, AltUnlockParams{Options: p.Options, VaultID: p.VaultID, PIN: p.PIN, UnlockSecret: p.UnlockSecret,
 		MinStateSeq: p.MinStateSeq, MinHeaderSeq: p.MinHeaderSeq, pinOnly: true})
 	res := UnlockResult{StateSeq: out.StateSeq, HeaderSeq: out.HeaderSeq}
 	if out.OK {
@@ -641,7 +711,12 @@ func (m *Manager) persist(ctx context.Context, create bool) error {
 		m.st.StateSeq--
 		return err
 	}
-	blob, err := encryptState(m.dek, m.st.VaultID, m.st.StateSeq, pt)
+	// Step 2 of a DEK replacement (§11.14.2): the state under DEK_1.
+	dek, ver := m.dek, m.hdr.DEKVersion
+	if r := m.repl; r != nil {
+		dek, ver = r.dek1, r.next.DEKVersion
+	}
+	blob, err := encryptState(dek, ver, m.st.VaultID, m.st.StateSeq, pt)
 	suite.Wipe(pt)
 	if err != nil {
 		m.st.StateSeq--
@@ -662,18 +737,38 @@ func (m *Manager) persist(ctx context.Context, create bool) error {
 	}
 	m.stateVer = v
 	m.dirty = false
+	if err := m.promote(); err != nil { // step 3, written below
+		return err
+	}
 	// The header follows the state to the same state_seq (§13.2). If this
 	// write fails the state leads the header by one write, which is allowed.
 	m.hdr.StateSeq = m.st.StateSeq
 	if create {
 		m.headerVer = ""
 	}
-	return m.writeHeader(ctx)
+	if err := m.writeHeader(ctx); err != nil {
+		return err
+	}
+	if m.presentAfterFlush {
+		// After the event's state write (§11.14.5); not recorded: sent
+		// again at the next unlock or owner check.
+		m.presentAfterFlush = false
+		if !m.markPresent(ctx, m.now()) {
+			m.st.PresentPending = true
+			m.dirty = true
+		}
+	}
+	return nil
 }
 
-func (m *Manager) writeHeader(ctx context.Context) error {
+func (m *Manager) writeHeader(ctx context.Context) error { return m.writeHeaderWith(ctx, true) }
+
+// writeHeaderWith writes the header; features false keeps the credential
+// bits as they are (a DEK replacement's step 1 runs inside the credential
+// feature's handler, which holds its lock).
+func (m *Manager) writeHeaderWith(ctx context.Context, features bool) error {
 	m.syncUnlockKeys()
-	if m.st != nil {
+	if m.st != nil && features {
 		m.hdr.HasCredential = m.credentialExists() && m.hasGate()
 		// §3.3, §11.5 (0.16.0): the backup bit, and an event when it
 		// changes on a running vault (reported after the write).
@@ -733,13 +828,22 @@ func (m *Manager) syncUnlockKeys() {
 	if inv := m.st.Invites[m.st.VaultID]; inv != nil && inv.EnrollIK != nil && !inv.Used && m.now().Before(inv.Exp) {
 		keys = append(keys, UnlockKey{DeviceID: enrollDeviceID, IK: inv.EnrollIK, KEM: inv.EnrollKEM, Attestation: binding(inv.EnrollIK, inv.EnrollAttest)})
 	}
-	if r := m.hdr.Recovery; r != nil && r.State == RecoveryRegistered && r.App != nil {
-		present := false
-		for _, k := range keys {
-			present = present || suite.EqualPublic(k.IK, r.App.IK)
-		}
-		if !present {
-			keys = append(keys, UnlockKey{DeviceID: recoveryDeviceID, IK: r.App.IK, KEM: r.App.KEM, Attestation: binding(r.App.IK, r.App.Attestation)})
+	// Release R (§11.14.6): a registered phone is no unlock key; a
+	// recovered phone is one from the completion until its pairing (its
+	// invite), and a transfer's or recovery's new phone is in the `next`
+	// part until step 3 (findUnlockKey).
+	for _, inv := range m.st.Invites {
+		// Kept until the phone pairs, past the invite's expiry: a lost
+		// ok is resumed by this phone's unlock (owner decision of
+		// 2026-10-16, §11.14.6).
+		if inv.CreatedBy == inviteByRecovery && inv.EnrollIK != nil {
+			present := false
+			for _, k := range keys {
+				present = present || suite.EqualPublic(k.IK, inv.EnrollIK)
+			}
+			if !present {
+				keys = append(keys, UnlockKey{DeviceID: recoveryDeviceID, IK: inv.EnrollIK, KEM: inv.EnrollKEM, Attestation: binding(inv.EnrollIK, inv.EnrollAttest)})
+			}
 		}
 	}
 	sortUnlockKeys(keys)
@@ -773,6 +877,13 @@ func (m *Manager) zeroize() {
 	}
 	suite.Wipe(m.dek)
 	m.dek = nil
+	suite.Wipe(m.unlockKey)
+	suite.Wipe(m.unlockSecret)
+	m.unlockKey, m.unlockSecret = nil, nil
+	m.repl.wipe()
+	m.repl = nil
+	suite.Wipe(m.transferSecret)
+	m.transferSecret = nil
 	for _, f := range m.features {
 		if z, ok := f.(Zeroizer); ok {
 			z.Zeroize()
@@ -947,6 +1058,10 @@ func (m *Manager) report(event, vaultID, release string) {
 		if event == "locked" || event == EventCredentialBackup || event == "unlocked" || event == "enrolled" {
 			ev.CredentialBackup = m.CredentialBackup()
 		}
+		if (event == "locked" || event == "unlocked") && m.hdr != nil {
+			next := m.hdr.Next != nil
+			ev.Next, ev.HeaderSeq = &next, m.hdr.HeaderSeq
+		}
 		m.opt.Lifecycle(ev)
 	}
 }
@@ -1004,7 +1119,21 @@ func (m *Manager) reportAppKey() {
 	}
 	if m.appKeyChanged {
 		m.appKeyChanged = false
+		m.nextCleared = false // app_key clears app_key_next by its seq
 		m.report(EventAppKey, m.st.VaultID, m.opt.Release.PCR0)
+	}
+	if m.nextCleared {
+		// A dropped replacement (§11.14.2): the current key again, with
+		// next_cleared.
+		m.nextCleared = false
+		if m.opt.Lifecycle != nil {
+			ev := lifecycle(m.opt, EventAppKey, m.st.VaultID, m.opt.Release.PCR0)
+			ev.AppKey, ev.AppKeySeq = m.AppKey()
+			ev.NextCleared, ev.HeaderSeq = true, m.hdr.HeaderSeq
+			if ev.AppKey != nil {
+				m.opt.Lifecycle(ev)
+			}
+		}
 	}
 	if m.backupChanged {
 		m.backupChanged = false
@@ -1015,7 +1144,7 @@ func (m *Manager) reportAppKey() {
 
 // StateVersion is the vault-state format version reported in lifecycle
 // events (§11.5).
-const StateVersion = 1
+const StateVersion = 2 // release R: format 0x02 (§11.14.1, §11.5)
 
 // Crash discards the in-memory vault without flushing (tests: process
 // death).

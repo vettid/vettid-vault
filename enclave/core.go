@@ -87,23 +87,24 @@ func (c *Core) release() vault.Release {
 // the answer: a recovery register whose sealed result is {"ok": true}
 // (recovery_registered, §11.11.3, 0.10.6), or a recovery request the
 // vault refused (recovery_unavailable, §11.11.2, 0.16.0).
-func (c *Core) Open(ctx context.Context, j *Job) (res []byte, m *vault.Manager, marker bool) {
-	var registered bool
+func (c *Core) Open(ctx context.Context, j *Job) (res []byte, m *vault.Manager, marker Marker) {
 	switch j.Op {
 	case OpEnroll:
 		res = c.enroll(ctx, j, &m)
 	case OpUnlock:
 		res = c.unlock(ctx, j, &m)
 	case OpRecovery:
-		res, registered = c.recoveryRequest(ctx, j)
+		res, marker = c.recoveryRequest(ctx, j)
 	case OpRecoveryCancel:
 		c.recoveryCancel(ctx, j)
 	case OpRecoveryRegister:
-		res, registered = c.recoveryRegister(ctx, j)
+		res, marker = c.recoveryRegister(ctx, j)
+	case OpRecoveryOpen:
+		res, marker = c.recoveryOpen(ctx, j, &m)
 	default:
 		res = opaque()
 	}
-	return res, m, registered
+	return res, m, marker
 }
 
 // UserIndexKey is the store key of the enclave's member index object.
@@ -149,6 +150,10 @@ func (c *Core) vaultOptions(sealer vault.Sealer) vault.Options {
 		o.Features = c.d.Features()
 	}
 	o.Lifecycle = c.emit
+	// Release R (§11.10.8): the recovery constants.
+	o.RecoveryWaitUnit, o.RecoveryQuiet = c.cfg.Recovery.WaitUnit, c.cfg.Recovery.Quiet
+	o.RecoveryCounterLock = c.cfg.Recovery.CounterLock
+	o.RecoveryNotOffered = !c.cfg.Recovery.Offered
 	pol := c.cfg.DeviceAttest
 	o.DeviceAttest = func(d *altchan.DeviceAttest, ch [32]byte, now time.Time) (json.RawMessage, error) {
 		b, err := devattest.VerifyAttest(pol, d, ch, now, c.statusList())
@@ -279,7 +284,7 @@ func (c *Core) enroll(ctx context.Context, q *Job, started **vault.Manager) []by
 	sealer := c.sealerFor(own.SealKey, c.meas.PCR0)
 	nonce := r.Nonce
 	mgr, err := vault.Create(ctx, vault.CreateParams{
-		Options: c.vaultOptions(sealer), VaultID: q.VaultID, UserGUID: q.UserGUID, PIN: r.PIN, KDF: kdf,
+		Options: c.vaultOptions(sealer), VaultID: q.VaultID, UserGUID: q.UserGUID, PIN: r.PIN, UnlockSecret: r.UnlockSecret, KDF: kdf,
 		RelayURL: c.cfg.RelayURL, Provisional: true, ManifestSerial: m.Serial, SealKeyVerified: rec, Replace: replace,
 		Account: q.Account,
 		App: &vault.EnrollApp{Name: r.Name, IK: r.IK, KEM: r.KEM, OpenToken: r.OpenToken, RequestID: q.RequestID,
@@ -402,7 +407,8 @@ func (c *Core) unlock(ctx context.Context, q *Job, started **vault.Manager) []by
 	}
 	signing, err := altchan.UnlockSigningString(altchan.UnlockFields{UserGUID: r.UserGUID, VaultID: r.VaultID,
 		RequestID: r.RequestID, TS: ts, ETKKid: q.ETKKid, MinStateSeq: r.MinStateSeq, MinHeaderSeq: r.MinHeaderSeq,
-		PIN: r.PIN, Token: r.Token, ManifestSHA256: r.ManifestSHA256, ToPCR0: toPCR0, CancelRecovery: r.CancelRecovery})
+		PIN: r.PIN, Token: r.Token, ManifestSHA256: r.ManifestSHA256, ToPCR0: toPCR0, CancelRecovery: r.CancelRecovery,
+		UnlockSecret: r.UnlockSecret})
 	if err != nil {
 		return opaque()
 	}
@@ -412,7 +418,7 @@ func (c *Core) unlock(ctx context.Context, q *Job, started **vault.Manager) []by
 	var preCounter, unlockCounter uint32
 	sealer := c.sealerFor("", c.meas.PCR0)
 	p := vault.AltUnlockParams{
-		Options: c.vaultOptions(sealer), VaultID: q.VaultID, UserGUID: q.UserGUID, DeviceIK: r.DeviceIK, PIN: r.PIN,
+		Options: c.vaultOptions(sealer), VaultID: q.VaultID, UserGUID: q.UserGUID, DeviceIK: r.DeviceIK, PIN: r.PIN, UnlockSecret: r.UnlockSecret,
 		MinStateSeq: r.MinStateSeq, MinHeaderSeq: r.MinHeaderSeq, DeviceToken: r.Token, CancelRecovery: r.CancelRecovery,
 		Account: q.Account,
 	}

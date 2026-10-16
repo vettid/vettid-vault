@@ -33,6 +33,7 @@ import (
 	"github.com/vettid/vettid-vault/enclave/vaultproc"
 	"github.com/vettid/vettid-vault/internal/enclavetest"
 	"github.com/vettid/vettid-vault/internal/parenttest"
+	"github.com/vettid/vettid-vault/internal/reckeytest"
 	"github.com/vettid/vettid-vault/internal/relaytest"
 	"github.com/vettid/vettid-vault/internal/seccomp"
 	"github.com/vettid/vettid-vault/internal/selftest"
@@ -309,7 +310,7 @@ func (a *hostApp) enroll(hi *hostInstance, vaultID string) {
 	if err := a.dev.CompleteEnrollment(ctx); err != nil {
 		hs.t.Fatal(err)
 	}
-	if err := a.dev.CredentialCreate(ctx, credPW); err != nil {
+	if err := a.dev.CredentialCreate(ctx, pin, credPW); err != nil {
 		hs.t.Fatalf("credential.create: %v", err)
 	}
 	if rr, err := a.dev.Request(ctx, "vault.enroll.confirm", json.RawMessage(`{}`)); err != nil || !rr.OK() {
@@ -822,6 +823,16 @@ func TestHostRecovery(t *testing.T) {
 			"enqueued_at": time.Now().UTC().Format(time.RFC3339Nano)}
 		for k, v := range extra {
 			msg[k] = v
+		}
+		if op == "recovery" || op == "recovery_cancel" {
+			// Release R (§11.14.8): signed by the member API's key.
+			at := time.Now().UTC().Format(time.RFC3339)
+			var bkb []byte
+			if op == "recovery" {
+				bkb = bk.PublicKey().Bytes()
+			}
+			msg["signed_at"], msg["key_id"] = at, reckeytest.KeyID
+			msg["sig"] = reckeytest.Sign(op, vid, m.guid, rid, at, bkb)
 		}
 		b, _ := json.Marshal(msg)
 		hs.queues.Send(a.queue, string(b))

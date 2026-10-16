@@ -459,7 +459,7 @@ func checkVectors(t *testing.T, dir string) {
 		eq(t, "unlock manifest hash", man[:], f.hex("manifest_sha256_hex"))
 		want := strings.Join([]string{"vettid/vms/2/unlock", f.str("user_guid"), f.str("vault_id"), f.str("request_id"),
 			f.str("ts"), f.str("etk_kid_hex"), "1234", "1301", hex.EncodeToString(pin[:]), hex.EncodeToString(tok[:]),
-			hex.EncodeToString(man[:]), f.str("to_pcr0_hex")}, "\n")
+			hex.EncodeToString(man[:]), f.str("to_pcr0_hex"), releaseRSecretLine()}, "\n")
 		if d.str("unlock_signing_string") != want {
 			t.Error("unlock signing string")
 		}
@@ -567,7 +567,7 @@ func checkReleaseVectors(t *testing.T, dir string) {
 		t.Error("approval signature")
 	}
 	u := d.sub("unlock_with_update")
-	if !strings.HasSuffix(u.str("signing_string"), "\n"+hex.EncodeToString(h[:])+"\n"+a.str("to_pcr0_hex")) {
+	if !strings.HasSuffix(u.str("signing_string"), "\n"+hex.EncodeToString(h[:])+"\n"+a.str("to_pcr0_hex")+"\n"+releaseRSecretLine()) {
 		t.Error("unlock signing string with update")
 	}
 	ik := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{SeedInitIK}, 32))
@@ -733,4 +733,12 @@ func mustSeed(t *testing.T, k *suite.PrivateKey) []byte {
 		t.Fatal(err)
 	}
 	return s
+}
+
+// releaseRSecretLine is the unlock signing string's last line from release
+// R (VAULT-MESSAGING 0.33.0 §11.4): hex(SHA-256(unlock_secret)), the
+// vectors' secret being 32 x 0x42.
+func releaseRSecretLine() string {
+	h := sha256.Sum256(bytes.Repeat([]byte{0x42}, 32))
+	return hex.EncodeToString(h[:])
 }

@@ -25,8 +25,8 @@
   "unlock_with_update": {
     "ts": "2026-10-01T12:00:00.000Z",
     "etk_kid_hex": "d6c9d114385e91df",
-    "signing_string": "vettid/vms/2/unlock\ntest-user-0001\ntest-vault-0001\n01JB2Z6V9K3M4N5P6Q7R8S9T22\n2026-10-01T12:00:00.000Z\nd6c9d114385e91df\n1234\n1301\n8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92\nddc90b68950fc7ecb383787d5a963c98940978679e2689441490d423c45ceac4\nd3fc1be2ce9358815863eeae15bebf5c755f168a7ab161c8e5c66500be1288f1\ncdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
-    "sig_b64": "dDYMfkYDxZBLjvELuBxKGN4YjqyODAG3kFqW6yso98ZF1LseRfvOsHTLBAIW9InT3D1o59nbstLl+rrgqmIMCQ=="
+    "signing_string": "vettid/vms/2/unlock\ntest-user-0001\ntest-vault-0001\n01JB2Z6V9K3M4N5P6Q7R8S9T22\n2026-10-01T12:00:00.000Z\nd6c9d114385e91df\n1234\n1301\n8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92\nddc90b68950fc7ecb383787d5a963c98940978679e2689441490d423c45ceac4\nd3fc1be2ce9358815863eeae15bebf5c755f168a7ab161c8e5c66500be1288f1\ncdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\n425ed4e4a36b30ea21b90e21c712c649e8214c29b7eaf68089d1039c6e55384c",
+    "sig_b64": "RUzLryFZTHBZjsCBGPmeZH0DyrBe4ggYuJpz073QoHnYpqCi5YYOVwN2Qa7ye+wd4wGQl222e+phHdOTL6cNDg=="
   },
   "manifest_0_10_0": {
     "description": "VAULT-MESSAGING 0.10.0: the removed status and ends_at (after published_at, before notes); same key and signature rules. object_key is the vault data bucket object the host supplies for a request whose manifest_sha256 is manifest_sha256_hex.",

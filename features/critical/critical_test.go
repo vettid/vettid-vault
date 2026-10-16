@@ -126,7 +126,7 @@ func (s *side) sealed(f vault.Feature, kind, typ string, payload, extra map[stri
 // connection (§10.12). It returns the item's id.
 func (s *side) setup(value []byte, usable bool) string {
 	s.t.Helper()
-	if r := s.sealed(s.cred, "app", "credential.create", map[string]any{"password": pw}, nil, false); !r.OK() {
+	if r := s.sealed(s.cred, "app", "credential.create", map[string]any{"password": pw, "pin": s.h.PIN}, nil, false); !r.OK() {
 		s.t.Fatalf("create: %s", r.Code)
 	}
 	item := map[string]any{"name": "Signer", "category": "crypto_wallet",

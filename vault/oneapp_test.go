@@ -104,7 +104,7 @@ func TestTransferRuntime(t *testing.T) {
 	p := r.Peer
 	// The approval completes the transfer after the handler (afterHandle).
 	d.m.mu.Lock()
-	err := d.m.approveTransfer(context.Background(), inv.ID, d.m.now())
+	err := d.m.approveTransfer(context.Background(), inv.ID, testPIN, []byte(rPW), false, d.m.now())
 	if err == nil {
 		d.m.afterRespond(d.m.now())
 		d.m.syncUnlockKeys()
@@ -113,6 +113,17 @@ func TestTransferRuntime(t *testing.T) {
 	d.m.mu.Unlock()
 	if err != nil {
 		t.Fatalf("approve: %v", err)
+	}
+	// Release R (§11.14.10): step 1 of the DEK replacement is stored with
+	// the new phone in the `next` part; the old app's notice is held.
+	if d.m.repl == nil || d.m.hdr.Next == nil || d.m.hdr.Next.Reason != ReplaceTransfer || !suite.EqualPublic(d.m.hdr.Next.App.IK, p.IK) {
+		t.Fatalf("step 1: %+v", d.m.hdr.Next)
+	}
+	if d.m.st.PendingUnlink == nil || d.m.st.PendingUnlink.DEKVersion != d.m.hdr.Next.DEKVersion || d.depositsTo(d.devPeer.Relay.Mailbox) != 0 {
+		t.Fatal("device.unlinked was not held")
+	}
+	if len(d.m.transferSecret) != 0 {
+		t.Fatal("the new phone's secret outlived the approval")
 	}
 	got := n.received(d)
 	if len(got) != 1 || got[0].Type != "device.paired" || !strings.Contains(string(got[0].Body), `"transfer":true`) || bodyStr(t, got[0], "token") == "" {
@@ -147,6 +158,21 @@ func TestTransferRuntime(t *testing.T) {
 	d.m.mu.Unlock()
 	if len(evs) != 1 || evs[0].Event != EventAppKey || evs[0].AppKeySeq != 1 || !bytes.Equal(evs[0].AppKey, d.m.hdr.AppKey) {
 		t.Fatalf("app_key event %+v", evs)
+	}
+	// Steps 2 and 3 at the flush; the held notice goes at the new phone's
+	// first unlock from storage at that DEK version.
+	d.m.mu.Lock()
+	if err := d.m.persist(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	if d.m.hdr.Next != nil || d.m.hdr.DEKVersion != 2 {
+		t.Fatal("not promoted")
+	}
+	d.m.pendingUnlinkAtUnlock(d.m.now())
+	d.m.drainOutbox(context.Background())
+	d.m.mu.Unlock()
+	if d.m.st.PendingUnlink != nil || d.depositsTo(d.devPeer.Relay.Mailbox) != 1 {
+		t.Fatal("the held notice was not sent at the new phone's unlock")
 	}
 }
 

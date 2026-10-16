@@ -69,6 +69,7 @@ func TestVaultctlBatch4(t *testing.T) {
 	}()
 	run("enroll-wait")
 	t.Setenv("VAULTCTL_PASSWORD", "correct horse battery staple")
+	t.Setenv("VAULTCTL_PIN", "246802") // release R: credential create carries the PIN
 	run("credential", "create")
 	run("request", "vault.enroll.confirm")
 

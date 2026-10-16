@@ -3,6 +3,7 @@ package vaultproc
 import (
 	"context"
 	"encoding/json"
+	"github.com/vettid/vettid-vault/vms/recovery"
 	"net"
 	"sync/atomic"
 	"testing"
@@ -19,6 +20,9 @@ import (
 func TestCapacityVault(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Argon2id at 64 MiB")
+	}
+	if recovery.TestCost {
+		t.Skip("a vettid_testcost build derives at test cost, not the release's parameters")
 	}
 	a, b := net.Pipe()
 	var lists atomic.Int32

@@ -363,18 +363,13 @@ func TestRecoveryReplacesApp(t *testing.T) {
 	if res := register(t, aw, b, qr); !res.OK {
 		t.Fatalf("register: %+v", res)
 	}
-	if r := aw.mustUnlock(b, acPIN, client.UnlockOptions{}, ""); !r.OK || r.CredentialBackup == nil || !*r.CredentialBackup {
-		t.Fatalf("unlock: %+v", r)
-	}
-	// §11.11.5 step 1 (0.10.6): the vault keeps a copy, so ask for the password.
-	if on, known := b.dev.RecoveryCredentialBackup(); !on || !known {
-		t.Fatalf("credential_backup %v %v", on, known)
+	// Release R (§11.14.6): the PIN and the password together, counted
+	// at the stand-in counter; then the phone's first handshake.
+	if r := openRecovery(t, aw, b, acPIN, credPW); !r.OK {
+		t.Fatalf("open: %+v", r)
 	}
 	if err := b.dev.CompleteRecoveryHandshake(ctx); err != nil {
 		t.Fatal(err)
-	}
-	if err := b.dev.CredentialRecover(ctx, credPW); err != nil {
-		t.Fatalf("recover: %v", err)
 	}
 	if n, body := appCount(t, b.dev); n != 1 || strings.Contains(body, a.dev.DeviceID()) || !strings.Contains(body, desk.DeviceID()) {
 		t.Fatalf("devices after the recovery: %s", body)

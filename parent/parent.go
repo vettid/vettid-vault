@@ -554,7 +554,7 @@ func parseLifecycle(f *hostproto.Frame) (Lifecycle, bool) {
 	// 0.15.0: [event, vault_id, release, vault_version, state_version,
 	// app_key (SPKI DER or empty), app_key_seq]; an enclave before it
 	// sends the first five.
-	if len(f.Fields) != 5 && len(f.Fields) != 7 && len(f.Fields) != 8 && len(f.Fields) != 11 {
+	if len(f.Fields) != 5 && len(f.Fields) != 7 && len(f.Fields) != 8 && len(f.Fields) != 11 && len(f.Fields) != 14 {
 		return Lifecycle{}, false
 	}
 	if len(f.Fields) >= 8 {
@@ -581,7 +581,30 @@ func parseLifecycle(f *hostproto.Frame) (Lifecycle, bool) {
 		b := string(f.Fields[7]) == "1"
 		ev.CredentialBackup = &b
 	}
-	if len(f.Fields) == 11 {
+	if len(f.Fields) == 14 {
+		// Release R: next ("1", "0", ""), header_seq, next_cleared ("1", "").
+		switch string(f.Fields[11]) {
+		case "1", "0":
+			b := string(f.Fields[11]) == "1"
+			ev.Next = &b
+		case "":
+		default:
+			return Lifecycle{}, false
+		}
+		hs, err := strconv.ParseUint(string(f.Fields[12]), 10, 53)
+		if err != nil || strconv.FormatUint(hs, 10) != string(f.Fields[12]) {
+			return Lifecycle{}, false
+		}
+		ev.HeaderSeq = hs
+		switch string(f.Fields[13]) {
+		case "1":
+			ev.NextCleared = true
+		case "":
+		default:
+			return Lifecycle{}, false
+		}
+	}
+	if len(f.Fields) >= 11 {
 		// 0.18.0: name_seq, first_name, last_name ("0", "", "" except for
 		// account_name).
 		n, ok := parseNameFields(f.Fields[8], f.Fields[9], f.Fields[10])
@@ -591,8 +614,8 @@ func parseLifecycle(f *hostproto.Frame) (Lifecycle, bool) {
 		ev.Name = n
 	}
 	switch ev.Event {
-	case EventAppKey:
-		if ev.AppKey == nil {
+	case EventAppKey, EventAppKeyNext:
+		if ev.AppKey == nil || ev.NextCleared && ev.Event != EventAppKey {
 			return Lifecycle{}, false
 		}
 	case EventCredentialBackup:

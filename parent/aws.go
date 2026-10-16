@@ -510,7 +510,7 @@ func (a *AWS) Lifecycle(ctx context.Context, ev Lifecycle, instanceID string, no
 	if ev.Event == EventAccountName {
 		return a.nameChange(ctx, ev, now)
 	}
-	if err := a.appKey(ctx, ev, now); err != nil || ev.Event == EventAppKey {
+	if err := a.appKey(ctx, ev, now); err != nil || ev.Event == EventAppKey || ev.Event == EventAppKeyNext {
 		return err
 	}
 	if ev.Event == EventCredentialBackup {
@@ -671,6 +671,9 @@ func (a *AWS) ListObjects(ctx context.Context, prefix string) ([]ObjectRef, erro
 // enrolled always replaces it (a replaced provisional vault starts at 1).
 // A failed condition (an older report, a missing row) is not an error.
 func (a *AWS) appKey(ctx context.Context, ev Lifecycle, now time.Time) error {
+	if err := a.appKeyNext(ctx, ev, now); err != nil || ev.Event == EventAppKeyNext || ev.NextCleared {
+		return err
+	}
 	if len(ev.AppKey) == 0 {
 		return nil
 	}
@@ -693,6 +696,46 @@ func (a *AWS) appKey(ctx context.Context, ev Lifecycle, now time.Time) error {
 		return nil
 	}
 	return err
+}
+
+// appKeyNext applies release R's app_key_next (VAULT-HOST-PROTOCOL 0.1.10
+// §6.1, VAULT-MESSAGING §11.5, §11.14.2): app_key_next is written from
+// its event when its seq is above app_key's; it is cleared when app_key
+// reaches its seq, when an app_key event carries next_cleared (whose own
+// write is skipped), or when an unlocked or locked report says next:
+// false with an app_key_seq at least the next key's seq or a header_seq
+// at least that of the write that carried it; never on time alone. A
+// failed condition is not an error.
+func (a *AWS) appKeyNext(ctx context.Context, ev Lifecycle, now time.Time) error {
+	ignore := func(err error) error {
+		if errors.Is(err, ErrLeaseHeld) {
+			return nil
+		}
+		return err
+	}
+	switch {
+	case ev.Event == EventAppKeyNext:
+		akn := &ddbtypes.AttributeValueMemberM{Value: map[string]ddbtypes.AttributeValue{
+			"key": s(base64.StdEncoding.EncodeToString(ev.AppKey)), "kid": s(AppKeyID(ev.AppKey)), "seq": n(int64(ev.AppKeySeq)),
+			"header_seq": n(int64(ev.HeaderSeq))}}
+		return ignore(a.updateVault(ctx, ev.VaultID, "SET #akn = :akn, #u = :u",
+			"attribute_exists(vault_id) AND (attribute_not_exists(#ak) OR #ak.#seq < :seq)",
+			map[string]string{"#akn": "app_key_next", "#ak": "app_key", "#seq": "seq", "#u": "updated_at"},
+			map[string]ddbtypes.AttributeValue{":akn": akn, ":seq": n(int64(ev.AppKeySeq)), ":u": s(isoNow(now))}))
+	case ev.Event == EventAppKey && ev.NextCleared:
+		return ignore(a.updateVault(ctx, ev.VaultID, "REMOVE #akn SET #u = :u", "attribute_exists(#akn)",
+			map[string]string{"#akn": "app_key_next", "#u": "updated_at"}, map[string]ddbtypes.AttributeValue{":u": s(isoNow(now))}))
+	case ev.Event == EventAppKey && len(ev.AppKey) > 0:
+		return ignore(a.updateVault(ctx, ev.VaultID, "REMOVE #akn SET #u = :u", "attribute_exists(#akn) AND #akn.#seq <= :seq",
+			map[string]string{"#akn": "app_key_next", "#seq": "seq", "#u": "updated_at"},
+			map[string]ddbtypes.AttributeValue{":seq": n(int64(ev.AppKeySeq)), ":u": s(isoNow(now))}))
+	case (ev.Event == "unlocked" || ev.Event == "locked") && ev.Next != nil && !*ev.Next:
+		return ignore(a.updateVault(ctx, ev.VaultID, "REMOVE #akn SET #u = :u",
+			"attribute_exists(#akn) AND (#akn.#seq <= :aks OR #akn.#hs <= :hs)",
+			map[string]string{"#akn": "app_key_next", "#seq": "seq", "#hs": "header_seq", "#u": "updated_at"},
+			map[string]ddbtypes.AttributeValue{":aks": n(int64(ev.AppKeySeq)), ":hs": n(int64(ev.HeaderSeq)), ":u": s(isoNow(now))}))
+	}
+	return nil
 }
 
 // nameChange writes the member's name request (0.18.0, §11.5, MEMBER-API
@@ -748,6 +791,16 @@ func (a *AWS) WriteSlot(ctx context.Context, requestID string, sl Slot) error {
 	if sl.Code != "" {
 		update += ", code = :c"
 		vals[":c"] = s(sl.Code)
+	}
+	for _, f := range []struct{ n, v string }{{"not_before", sl.NotBefore}, {"expires", sl.Expires}, {"retry_at", sl.RetryAt}, {"reason", sl.Reason}} {
+		if f.v != "" {
+			update += ", " + f.n + " = :" + f.n
+			vals[":"+f.n] = s(f.v)
+		}
+	}
+	if sl.Earliest {
+		update += ", earliest = :ea"
+		vals[":ea"] = &ddbtypes.AttributeValueMemberBOOL{Value: true}
 	}
 	cond := "attribute_exists(request_id) AND #s = :q"
 	_, err := a.ddb.UpdateItem(ctx, &dynamodb.UpdateItemInput{TableName: &a.cfg.RequestsTable,

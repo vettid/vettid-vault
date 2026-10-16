@@ -376,12 +376,12 @@ func TestConvergenceReportsDeleted(t *testing.T) {
 			}
 			switch path {
 			case "unlock":
-				_, out := UnlockAlt(context.Background(), AltUnlockParams{Options: o, VaultID: vid, PIN: testPIN, pinOnly: true})
+				_, out := UnlockAlt(context.Background(), AltUnlockParams{Options: o, VaultID: vid, PIN: testPIN, UnlockSecret: testSecret, pinOnly: true})
 				for _, ev := range out.Events {
 					events = append(events, ev.Event)
 				}
 			case "recovery":
-				_, _, _ = RecoveryRequest(context.Background(), HeaderParams{Options: o, VaultID: vid, UserGUID: "u1"}, "01JB2Z6V9K3M4N5P6Q7R8S9T0V", RecoveryDelay)
+				_, _, _, _ = RecoveryRequest(context.Background(), HeaderParams{Options: o, VaultID: vid, UserGUID: "u1"}, "01JB2Z6V9K3M4N5P6Q7R8S9T0V", RecoveryDelay)
 			}
 			if len(events) != 1 || events[0] != "deleted" {
 				t.Fatalf("events %v", events)

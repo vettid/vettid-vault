@@ -370,6 +370,12 @@ func (m *Manager) peerByRelayKey(pk ed25519.PublicKey) *Peer {
 
 // dispatch handles a decrypted session-mode message from principal p.
 func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep *handshake.Epoch, raw []byte, sender ed25519.PublicKey, now time.Time) disposition {
+	if p.Kind == KindConnection && p.Conflict != nil && in.Type != "identity.rotate" {
+		// Release R (§3.4): a connection with two successors of one key
+		// is suspended; nothing is accepted from either.
+		m.audit(now, "rotation_conflict_drop", p.ID)
+		return ackAfterFlush
+	}
 	if in.Type == handshake.TypeInit {
 		return m.handleRekeyInit(ctx, p, in, ep, raw, sender, now)
 	}
@@ -539,7 +545,24 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 		return disp(eph)
 	}
 	handled = true
+	m.replInHandler = false
 	body, herr := te.handler.Handle(ctx, s, in)
+	if herr != nil && !errors.Is(herr, ErrDeferred) {
+		// Release R (§11.14.2): a handler that failed after step 1 of a
+		// DEK replacement changes nothing more: the `next` part is dropped
+		// (a generation it closed stays closed), and a transfer it
+		// approved does not complete.
+		if m.replInHandler {
+			m.dropNext(now)
+		}
+		m.transferAfter = ""
+		if t := m.st.Transfer; t != nil && t.State == TransferApproved {
+			// The new phone's secret was spent by the approval: the transfer
+			// ends and is started again (§11.14.10).
+			m.abortTransfer("failed", now)
+		}
+	}
+	m.replInHandler = false
 	m.afterHandle(now)
 	if te.spec.Request {
 		var he *HandlerError

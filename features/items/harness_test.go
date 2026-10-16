@@ -174,7 +174,7 @@ func (e *env) sealedUTK(kind, typ string, outer, payload map[string]any, blob, r
 
 func (e *env) createCredential() {
 	e.t.Helper()
-	e.ok(e.sealed("app", "credential.create", nil, map[string]any{"password": pw}, false, false))
+	e.ok(e.sealed("app", "credential.create", nil, map[string]any{"password": pw, "pin": e.h.PIN}, false, false))
 }
 
 func (e *env) unlock() {

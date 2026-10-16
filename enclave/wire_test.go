@@ -134,7 +134,8 @@ func FuzzParseSealed(f *testing.F) {
 // the browser key (65 bytes); recovery_register carries an envelope.
 func TestQueueRecoveryOps(t *testing.T) {
 	bk := append([]byte{4}, bytes.Repeat([]byte{1}, 64)...)
-	base := QueueMessage{VaultID: "v1", UserGUID: "u1", RequestID: "01JB2Z6V9K3M4N5P6Q7R8S9T21", EnqueuedAt: time.Unix(1700000000, 0)}
+	base := QueueMessage{VaultID: "v1", UserGUID: "u1", RequestID: "01JB2Z6V9K3M4N5P6Q7R8S9T21", EnqueuedAt: time.Unix(1700000000, 0),
+		SignedAt: "2026-10-15T12:00:00Z", KeyID: "test-key-1", Sig: []byte{0x30, 1, 2}} // release R (§11.14.8)
 	rq := base
 	rq.Op, rq.BrowserKey = OpRecovery, bk
 	q, err := ParseQueueMessage(rq.Marshal())

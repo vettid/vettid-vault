@@ -66,6 +66,7 @@ func (m *Manager) registerCore() {
 	r(tokenIssuedType, false, all, m.hTokenIssued)
 	r(tokenRefreshType, true, all, m.hTokenRefresh)
 	r("identity.rotate", false, conns, m.hIdentityRotate)
+	r(TypeRotationResolve, true, []string{KindApp}, m.hRotationResolve) // release R (§3.4)
 	r("relay.address.update", false, all, m.hAddressUpdate)
 	r("settings.get", true, owners, m.hSettingsGet)
 	r("settings.set", true, owners, m.hSettingsSet)
@@ -105,6 +106,14 @@ func (m *Manager) hStatus(_ context.Context, s *Session, _ *envelope.Inner) (jso
 		Raw("owner_check", m.ownerCheckStatus(s.peer, s.now))
 	if s.peer.Kind == KindApp || s.peer.Kind == KindDesktop {
 		b.Raw("attachments", m.attStatusJSON()) // §10.2 (0.32.0, release A)
+	}
+	// Release R (§11.14.11): the app gets the recovery state, attempts,
+	// presence and counter; desktops the state alone; agents nothing.
+	switch s.peer.Kind {
+	case KindApp:
+		b.Raw("recovery", m.recoveryStatus(true))
+	case KindDesktop:
+		b.Raw("recovery", m.recoveryStatus(false))
 	}
 	return b.Bytes(), nil
 }
@@ -519,6 +528,12 @@ func (m *Manager) hIdentityRotate(_ context.Context, s *Session, in *envelope.In
 	r, err := handshake.ParseRotation(raw)
 	if err != nil {
 		return nil, errBadRequest
+	}
+	if c := m.rotationConflict(s.peer, r, s.now); c {
+		return nil, nil
+	}
+	if s.peer.Conflict != nil {
+		return nil, nil
 	}
 	final, kem, err := handshake.ResolveChain(s.peer.IK, []*handshake.Rotation{r})
 	if err != nil {

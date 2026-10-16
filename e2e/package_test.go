@@ -39,6 +39,7 @@ func startWithPackage(t *testing.T, aw *acWorld, r enclavetest.ReleaseSpec, pkg 
 		p.AndroidPackage = pkg
 		c.DeviceAttest = &p
 		c.RecoveryNow = recNow
+		c.Recovery.Quiet = time.Nanosecond // release R: about the code, not the quiet period
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +189,7 @@ func TestAndroidPackagePerChannel(t *testing.T) {
 	if res := register(t, aw, e, qr); !res.OK {
 		t.Fatalf("register under the new package: %+v", res)
 	}
-	if r := aw.mustUnlock(e, acPIN, client.UnlockOptions{}, ""); !r.OK {
-		t.Fatalf("the recovering app's unlock: %+v", r)
+	if r := openRecovery(t, aw, e, acPIN, credPW); !r.OK { // release R (§11.14.6)
+		t.Fatalf("the registered phone's open: %+v", r)
 	}
 }

@@ -110,7 +110,7 @@ func enclaveStats(ctx context.Context, s *session) map[string]uint64 {
 		switch k := string(r[i]); k {
 		case hostproto.StatRelayConns, hostproto.StatRelayDialed, hostproto.StatRelayStreams, hostproto.StatRelayInFlight, hostproto.StatRelayWaiting,
 			hostproto.StatRelayWaitMaxMS, hostproto.StatRelayErrors, hostproto.StatRelayRefusedMax, hostproto.StatRelayRefusedMin,
-			hostproto.StatRelayVaultLimit:
+			hostproto.StatRelayVaultLimit, hostproto.StatHeavyKDFFree:
 			if v, err := strconv.ParseUint(string(r[i+1]), 10, 63); err == nil {
 				out[k] = v
 			}

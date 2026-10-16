@@ -97,6 +97,7 @@ const (
 	StatRelayRefusedMax = "relay_refused_max_conns"   // counter: requests that waited at the connection bound
 	StatRelayRefusedMin = "relay_refused_min_streams" // counter: ... because the relay announced too few streams
 	StatRelayVaultLimit = "relay_vault_limit"         // counter: vault processes that reached their own limit of requests in flight (each once)
+	StatHeavyKDFFree    = "heavy_kdf_free"            // gauge (release R): 1 if a heavy-derivation permit could be given now
 )
 
 // Notifications from the enclave to the parent:

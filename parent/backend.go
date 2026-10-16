@@ -115,6 +115,10 @@ type InstanceRow struct {
 	HeartbeatAt int64
 	ExpiresAt   int64
 	Load        int
+	// HeavyKDFFree is the enclave's Stats heavy_kdf_free (release R,
+	// VAULT-HOST-PROTOCOL 0.1.10 §6.6): whether a recovery open's heavy
+	// derivation could run now; nil when the enclave did not say.
+	HeavyKDFFree *bool
 }
 
 // EventAlarmCredentialClone is the vault's content-free host alarm of a

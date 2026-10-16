@@ -23,6 +23,8 @@
 //	StatusList      []                            → [status, list, fetched_at]
 //	Push            [path, headers, body]         → [status, code, headers, body]
 //	Transfer        [ticket, priority, wait_ms]   → [status]   (ok: admitted; busy: not within wait_ms)
+//	Counter         [op, key, a, b]               → [status, ...] (release R)
+//	HeavyPermit     [acquire | release]           → [status, "1" | "0"] (release R)
 //
 // Vault → supervisor (notifications): Lifecycle [event, vault_id,
 // release, vault_version, state_version, app_key (SPKI DER or empty),
@@ -59,7 +61,8 @@ import (
 // 7: Push (0.24.0).
 // 8: Transfer and TransferDone (0.32.0, release A: the instance's
 // admission of blob transfers by memory, §10.5.1).
-const Version = "8"
+// 9: Counter and HeavyPermit (0.33.0, release R).
+const Version = "9"
 
 // Supervisor → vault.
 const (
@@ -108,6 +111,33 @@ const (
 	// 1-32 characters of [0-9a-z] chosen by the process, ended by
 	// TransferDone.
 	KindTransfer hostproto.Kind = 0x59
+	// KindCounter carries one call to the recovery attempt counter's
+	// bucket (VAULT-MESSAGING 0.33.0 §11.14.4, VAULT-HOST-PROTOCOL 0.1.10
+	// §8.1), which the supervisor signs and sends to the pinned bucket
+	// over its TLS: [op, key, a, b] with op one of the Counter* below. The
+	// supervisor admits only keys under recovery/v1/ and, once a process
+	// has named its vault's prefix, only that prefix.
+	KindCounter hostproto.Kind = 0x5b
+	// KindHeavyPermit [op] → [status, "1" | "0"]: op "acquire" asks for
+	// the one permit for the recovery wrap's heavy derivation (§11.14.3),
+	// given only while free memory is at least the memory-pressure floor
+	// plus the derivation's need; "release" returns it.
+	KindHeavyPermit hostproto.Kind = 0x5c
+)
+
+// Counter operations (KindCounter).
+const (
+	CounterList         = "list"          // [list, prefix] → [ok, listing JSON]
+	CounterPutCreate    = "put_create"    // [put_create, key, body, until] → [ok, status, version]
+	CounterPut          = "put"           // [put, key, body, until] → [ok, version]
+	CounterGetRetention = "get_retention" // [get_retention, key, version] → [ok, mode, until]
+	CounterGetVersion   = "get_version"   // [get_version, key, version] → [ok, body]
+)
+
+// Heavy permit operations.
+const (
+	HeavyAcquire = "acquire"
+	HeavyRelease = "release"
 )
 
 // Vault → supervisor notifications.
@@ -118,7 +148,7 @@ const (
 )
 
 // VaultRequests is every request kind a vault process may send.
-var VaultRequests = []hostproto.Kind{KindStoreGet, KindStorePut, KindStoreDelete, KindAttestRecipient, KindAttestVault, KindKMS, KindHTTP, KindStatusList, KindPush, KindTransfer}
+var VaultRequests = []hostproto.Kind{KindStoreGet, KindStorePut, KindStoreDelete, KindAttestRecipient, KindAttestVault, KindKMS, KindHTTP, KindStatusList, KindPush, KindTransfer, KindCounter, KindHeavyPermit}
 
 // KMS operations.
 const (

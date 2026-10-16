@@ -15,6 +15,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"github.com/vettid/vettid-vault/vault/counter"
 	"net/http"
 	"sort"
 	"strings"
@@ -101,6 +102,12 @@ type Options struct {
 	AttachClock func() time.Time
 	// AttachLimits, if set, replaces release A's attachment limits (tests).
 	AttachLimits *AttachLimits
+	// Counter is the recovery attempt counter's bucket (0.33.0, release
+	// R, §11.14.4); nil: unreachable. HeavyPermit takes the supervisor's
+	// permit for the recovery wrap's heavy derivation and returns its
+	// release (§11.14.3); nil: always given (development, tests).
+	Counter     counter.Bucket
+	HeavyPermit func(ctx context.Context) (release func(), ok bool)
 }
 
 // LifecycleEvent is reported to the parent, which writes it to the vault

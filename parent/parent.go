@@ -895,11 +895,19 @@ func (p *Parent) publish(ctx context.Context) {
 	if !p.ensureQueue(ctx) {
 		return
 	}
+	var heavy *bool
+	if st := enclaveStats(ctx, s); st != nil {
+		if v, ok := st[hostproto.StatHeavyKDFFree]; ok {
+			free := v == 1
+			heavy = &free
+		}
+	}
 	now := p.now()
 	wctx, cancel := context.WithTimeout(ctx, registryWriteTimeout)
 	defer cancel()
 	err = p.cfg.Tables.PutInstance(wctx, InstanceRow{InstanceID: p.cfg.InstanceID, Release: d.release, QueueURL: p.queue(),
-		Descriptor: d.descriptor, Attestation: d.attestation, HeartbeatAt: now.Unix(), ExpiresAt: now.Add(10 * time.Minute).Unix(), Load: load})
+		Descriptor: d.descriptor, Attestation: d.attestation, HeartbeatAt: now.Unix(), ExpiresAt: now.Add(10 * time.Minute).Unix(), Load: load,
+		HeavyKDFFree: heavy})
 	p.mu.Lock()
 	p.stats.heartbeatErr = err != nil
 	if err == nil {

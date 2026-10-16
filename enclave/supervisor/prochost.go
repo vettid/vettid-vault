@@ -126,6 +126,9 @@ type vproc struct {
 	stopping bool          // locked or killed by the supervisor
 	egress   chan struct{} // one place per relay or push request in flight
 	egressAt bool          // the limit was reached (counted once)
+	// counterPrefix is the recovery counter prefix this process named
+	// first, the only one it may use (release R).
+	counterPrefix string
 }
 
 var _ enclave.Host = (*procHost)(nil)
@@ -759,6 +762,10 @@ func (p *vproc) handle(ctx context.Context, f *hostproto.Frame) [][]byte {
 		return p.push(ctx, f.Fields)
 	case vaultipc.KindTransfer:
 		return p.transfer(ctx, f.Fields)
+	case vaultipc.KindCounter:
+		return p.counterCall(ctx, f.Fields)
+	case vaultipc.KindHeavyPermit:
+		return p.heavyCall(f.Fields)
 	case vaultipc.KindStatusList:
 		b, at, ok := s.status.rawList()
 		if !ok {

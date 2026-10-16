@@ -88,6 +88,11 @@ func releaseHosts(region string) []egress.Host {
 	if h := hostOf(enclave.ReleasePushURL()); h != "" {
 		hosts = append(hosts, egress.Host{Name: h, Roots: amazon, HTTP2: true})
 	}
+	// Release R (VAULT-HOST-PROTOCOL 0.1.10 §8.1): the recovery counter
+	// bucket's virtual-hosted name, under Amazon's roots.
+	if h := enclave.ReleaseCounterHost(); h != "" {
+		hosts = append(hosts, egress.Host{Name: h, Roots: amazon})
+	}
 	return hosts
 }
 

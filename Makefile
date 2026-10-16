@@ -61,7 +61,7 @@ lint: vet staticcheck
 # test authorities (relaytest, enclavetest: fake NSM and KMS, test roots); and
 # the dev enclave must not compile at all without its build tag.
 check-tcb:
-	@if $(GO) list -deps $(LIBPKGS) | grep -E 'hpkederand|mlkemtest|/devenclave|relaytest|enclavetest|parenttest|memberapitest|featuretest|pushtest'; then \
+	@if $(GO) list -deps $(LIBPKGS) | grep -E 'hpkederand|mlkemtest|/devenclave|relaytest|enclavetest|parenttest|memberapitest|featuretest|pushtest|countertest'; then \
 	  echo "dev, test or vector-only code linked into release packages"; exit 1; fi
 	@if $(GO) list ./devenclave >/dev/null 2>&1; then \
 	  echo "devenclave compiles without the devenclave tag"; exit 1; fi
@@ -83,7 +83,7 @@ check-tcb:
 	  if grep -aqE 'dev-device-policy|DevDevicePolicy|device-policy|dev-features' $$tmp/ve; then \
 	    echo "the release enclave binary contains the dev device policy"; exit 1; fi
 	@for os in linux; do \
-	  if GOOS=$$os $(GO) list -deps $(ENCLAVEPKGS) | grep -E 'aws-sdk-go|smithy-go|vettid-vault/parent|hpkederand|mlkemtest|/devenclave|relaytest|enclavetest|memberapitest|parenttest|featuretest|pushtest'; then \
+	  if GOOS=$$os $(GO) list -deps $(ENCLAVEPKGS) | grep -E 'aws-sdk-go|smithy-go|vettid-vault/parent|hpkederand|mlkemtest|/devenclave|relaytest|enclavetest|memberapitest|parenttest|featuretest|pushtest|countertest'; then \
 	    echo "the enclave binary links the AWS SDK, the parent, or dev/test code"; exit 1; fi; done
 	@if GOOS=linux $(GO) list -deps $(ENCLAVEPKGS) | grep -q 'enclave/nsm' && GOOS=linux $(GO) list -deps $(ENCLAVEPKGS) | grep -q 'internal/vsock' && \
 	  GOOS=linux $(GO) list -deps $(ENCLAVEPKGS) | grep -q 'internal/seccomp'; then :; else \
@@ -111,7 +111,7 @@ check-tcb:
 	  echo "the prod and staging channels compile into one binary"; exit 1; fi
 	@if grep -nE 'ldflags.*-X' Dockerfile.enclave scripts/build-eif.sh; then echo "release constants set with -ldflags -X"; exit 1; fi
 	@for ch in prod staging; do \
-	  if GOOS=linux $(GO) list -tags vettid_channel_$$ch -deps $(ENCLAVEPKGS) | grep -E 'aws-sdk-go|smithy-go|vettid-vault/parent|hpkederand|mlkemtest|/devenclave|relaytest|enclavetest|memberapitest|parenttest|featuretest|pushtest'; then \
+	  if GOOS=linux $(GO) list -tags vettid_channel_$$ch -deps $(ENCLAVEPKGS) | grep -E 'aws-sdk-go|smithy-go|vettid-vault/parent|hpkederand|mlkemtest|/devenclave|relaytest|enclavetest|memberapitest|parenttest|featuretest|pushtest|countertest'; then \
 	    echo "the $$ch enclave binary links the AWS SDK, the parent, or dev/test code"; exit 1; fi; \
 	  GOOS=linux $(GO) list -tags vettid_channel_$$ch -deps $(ENCLAVEPKGS) | grep -q 'enclave/releasecfg$$' || { echo "the $$ch enclave binary does not embed releasecfg"; exit 1; }; \
 	done

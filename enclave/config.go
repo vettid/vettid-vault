@@ -51,6 +51,24 @@ type Config struct {
 	// (§11.11): tests move it past the 24 h delay. Release configurations
 	// leave it nil (the enclave clock).
 	RecoveryNow func() time.Time
+	// Recovery holds release R's constants (VAULT-MESSAGING 0.33.0
+	// §11.10.8, §11.14): the attempt counter's bucket, the member API's
+	// recovery request keys, the wait unit and quiet period, whether the
+	// release offers recovery, and the minimum Android version code. A
+	// zero Counter: the counter is unreachable (every counted operation
+	// answers counter_unavailable).
+	Recovery RecoveryConfig
+}
+
+// RecoveryConfig are release R's recovery constants.
+type RecoveryConfig struct {
+	Counter               releasecfg.Counter
+	RequestKeys           []releasecfg.RequestKey
+	WaitUnit              time.Duration
+	Quiet                 time.Duration
+	CounterLock           time.Duration // releasecfg.CounterLock (the measured channel's); zero: production's
+	Offered               bool
+	AndroidMinVersionCode uint64
 }
 
 // Release pins that are the same in every channel. The per-channel
@@ -114,6 +132,16 @@ func ReleaseFeatures() []string {
 	return []string{}
 }
 
+// ReleaseCounterHost returns the recovery counter bucket's virtual-hosted
+// name ("" without complete channel constants), on the release egress
+// allowlist (VAULT-HOST-PROTOCOL 0.1.10 §8, §8.1).
+func ReleaseCounterHost() string {
+	if c := release(); c != nil && c.RecoveryCounter.Bucket != "" {
+		return c.RecoveryCounter.Host()
+	}
+	return ""
+}
+
 // ReleaseRegion returns the pinned sealing-key region ("" without
 // complete channel constants), which is also the region of the KMS
 // endpoint on the egress allowlist.
@@ -154,6 +182,9 @@ func ReleaseConfig(instanceID, relayURL string) Config {
 		}
 		cfg.DeviceAttest.AndroidAcceptUnbound = c.AcceptsUnbound()
 		cfg.PushURL = c.PushURL
+		cfg.Recovery = RecoveryConfig{Counter: c.RecoveryCounter, RequestKeys: c.RecoveryRequestKeys,
+			WaitUnit: time.Duration(c.RecoveryWaitUnitSeconds) * time.Second, Quiet: time.Duration(c.RecoveryQuietSeconds) * time.Second,
+			CounterLock: c.CounterLock(), Offered: c.RecoveryOffered, AndroidMinVersionCode: c.AndroidMinVersionCode}
 	}
 	return cfg
 }

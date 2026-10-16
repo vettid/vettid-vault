@@ -125,9 +125,20 @@ func (c *Config) QueueName() string { return c.QueuePrefix + c.InstanceID }
 // firewall answers only its stage's name.
 var PushHosts = []string{"push.vettid.org", "push.staging.vettid.org"}
 
+// CounterHosts are the recovery attempt counter buckets of the release
+// channels (VAULT-MESSAGING 0.33.0 §11.14.4, VAULT-HOST-PROTOCOL 0.1.10
+// §8.1), by their virtual-hosted names: like the push gateways, the
+// parent allows both and each image reaches only its own channel's.
+// TestCounterHostsMatchChannels holds them to the channel files.
+var CounterHosts = []string{
+	"vettid-org-vault-recovery-369484479783.s3.us-east-1.amazonaws.com",
+	"vettid-org-vault-recovery-347272280361.s3.us-east-1.amazonaws.com",
+}
+
 // DefaultAllow returns the release allowlist for a region (§12.2): the
-// relay, the regional KMS endpoint, Google's attestation status list and
-// the push gateways (0.24.0).
+// relay, the regional KMS endpoint, Google's attestation status list, the
+// push gateways (0.24.0) and (release R) the recovery counter buckets.
 func DefaultAllow(relayHost, region string) []string {
-	return append([]string{strings.ToLower(relayHost), "kms." + region + ".amazonaws.com", "android.googleapis.com"}, PushHosts...)
+	out := append([]string{strings.ToLower(relayHost), "kms." + region + ".amazonaws.com", "android.googleapis.com"}, PushHosts...)
+	return append(out, CounterHosts...)
 }

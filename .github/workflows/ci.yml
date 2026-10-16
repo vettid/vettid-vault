@@ -52,7 +52,9 @@ jobs:
     timeout-minutes: 15
     services:
       localstack:
-        image: public.ecr.aws/localstack/localstack:4.9@sha256:59373b4a27dba3ec15c4db0b7455f0cb68c8a42300e2cbbe362b440f9a131697
+        # public.ecr.aws/localstack/localstack:4.9@sha256:59373b4a27dba3ec15c4db0b7455f0cb68c8a42300e2cbbe362b440f9a131697
+        # from VettID's mirror of the same digest (vettid.org .github/mirror)
+        image: ghcr.io/vettid/mirror/localstack@sha256:59373b4a27dba3ec15c4db0b7455f0cb68c8a42300e2cbbe362b440f9a131697
         ports:
           - 4566:4566
         env:
@@ -124,34 +126,40 @@ jobs:
       matrix:
         runner: [ubuntu-26.04, ubuntu-26.04-arm]
     runs-on: ${{ matrix.runner }}
+    env:
+      # The Dockerfile's pinned base image, same digest, from VettID's
+      # mirror (scripts/image-mirror.sh).
+      VETTID_IMAGE_MIRROR: ghcr.io/vettid/mirror
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
       - name: shellcheck
-        run: shellcheck scripts/build-eif.sh scripts/smoke/run-on-host.sh scripts/compat-matrix.sh release/rebuild.sh release/kernel/build.sh release/kernel/check-config.sh release/kernel/check-current.sh release/kernel/eif-with-blobs.sh release/kernel/rebuild-check.sh
+        run: shellcheck scripts/image-mirror.sh scripts/build-eif.sh scripts/smoke/run-on-host.sh scripts/compat-matrix.sh release/rebuild.sh release/kernel/build.sh release/kernel/check-config.sh release/kernel/check-current.sh release/kernel/eif-with-blobs.sh release/kernel/rebuild-check.sh
       - name: two clean builds, one binary
         run: |
           export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
+          mapfile -t frommirror < <(scripts/image-mirror.sh contexts Dockerfile.enclave)
           for i in 1 2; do
-            docker build --no-cache -q -f Dockerfile.enclave --build-arg SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" -t "vve:$i" .
+            docker build --no-cache -q "${frommirror[@]}" -f Dockerfile.enclave --build-arg SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" -t "vve:$i" .
             c=$(docker create "vve:$i"); docker cp "$c:/vault-enclave" "ve$i"; docker rm "$c" >/dev/null
           done
           sha256sum ve1 ve2
           cmp ve1 ve2
       - name: release gate refuses placeholders (VAULT-MESSAGING §11.10.8)
         run: |
+          mapfile -t frommirror < <(scripts/image-mirror.sh contexts Dockerfile.enclave)
           for ch in prod staging; do
             if ! go run ./cmd/releasecfg check "$ch" >/dev/null 2>&1; then
               msg=$(CHANNEL=$ch scripts/build-eif.sh "out-$ch" 2>&1 || true)
               echo "$msg" | grep -q "still has placeholders" || { echo "build-eif.sh did not refuse $ch: $msg"; exit 1; }
-              if docker build -q -f Dockerfile.enclave --build-arg CHANNEL=$ch -t "vve-$ch" . >/dev/null 2>&1; then
+              if docker build -q "${frommirror[@]}" -f Dockerfile.enclave --build-arg CHANNEL=$ch -t "vve-$ch" . >/dev/null 2>&1; then
                 echo "Dockerfile.enclave built a $ch image with placeholders"; exit 1
               fi
               echo "$ch: refused while placeholders remain"
             else
-              docker build -q -f Dockerfile.enclave --build-arg CHANNEL=$ch --build-arg SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)" -t "vve-$ch" .
+              docker build -q "${frommirror[@]}" -f Dockerfile.enclave --build-arg CHANNEL=$ch --build-arg SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)" -t "vve-$ch" .
               # build-eif.sh for a complete channel gets as far as the two
               # binaries (no nitro-cli here: EIF_BUILDER names no image, so
               # the EIF step itself fails afterwards, as expected).

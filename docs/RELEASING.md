@@ -362,6 +362,18 @@ PCR0 with the release's entry in the signed manifest at
 the attestation or the GitHub release, is what members' apps and the
 release keys rely on.
 
+**Where the base images come from.** `release/eif-toolchain.lock`
+(`base_image`), `release/kernel/kernel.lock` (`nix_image`) and
+`Dockerfile.enclave` name their base images upstream (Amazon ECR Public,
+Docker Hub) by digest, and a rebuild like the one above pulls them from
+there. The project's CI (the release, enclave-kernel and ci workflows)
+sets `VETTID_IMAGE_MIRROR=ghcr.io/vettid/mirror` instead, and
+`scripts/image-mirror.sh` pulls the same digests from VettID's copy
+(vettid.org `.github/mirror`), because the upstream registries' anonymous
+limits fail shared CI runners. A digest names the content, so the images,
+and with them every binary hash and PCR, are the same either way; the
+lock files and Dockerfiles are not changed by it.
+
 `scripts/smoke/run-on-host.sh build` on a Graviton host builds the same
 toolchain image and so gives the same PCRs; VAULT-RELEASES §5.1 asks for
 that comparison once on real hardware. A nitro-cli installed from the

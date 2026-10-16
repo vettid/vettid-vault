@@ -23,6 +23,9 @@
 #                      "--security-opt label=disable" on an SELinux host)
 #   EIF_NO_CACHE=1     build the images without the docker build cache
 #   GO=PATH            the go command for cmd/eifinfo (default: go)
+#   VETTID_IMAGE_MIRROR=REGISTRY/PATH  pull the Dockerfile's digest-pinned
+#                      base image from this mirror of the same digests (CI:
+#                      ghcr.io/vettid/mirror; scripts/image-mirror.sh)
 #
 # Needs docker, go and python3, and nitro-cli unless EIF_BUILDER is set.
 # SOURCE_DATE_EPOCH defaults to the commit time of HEAD.
@@ -72,12 +75,13 @@ fi
 
 nocache=()
 if [ "${EIF_NO_CACHE:-}" = 1 ]; then nocache=(--no-cache); fi
+mapfile -t frommirror < <(scripts/image-mirror.sh contexts Dockerfile.enclave)
 
 log "building image $tag (SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH)"
-DOCKER_BUILDKIT=1 docker build --pull=false "${nocache[@]}" -f Dockerfile.enclave \
+DOCKER_BUILDKIT=1 docker build --pull=false "${nocache[@]}" "${frommirror[@]}" -f Dockerfile.enclave \
   --build-arg "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" --build-arg "CHANNEL=$channel" \
   -t "$tag" . >&2
-DOCKER_BUILDKIT=1 docker build --pull=false "${nocache[@]}" -f Dockerfile.enclave --target parent \
+DOCKER_BUILDKIT=1 docker build --pull=false "${nocache[@]}" "${frommirror[@]}" -f Dockerfile.enclave --target parent \
   --build-arg "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" --build-arg "CHANNEL=$channel" \
   -t "$tag-parent" . >&2
 

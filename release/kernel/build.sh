@@ -108,6 +108,10 @@ echo "build: $tarball: SHA-256 as pinned; signature by $signer"
 mount="${KERNEL_MOUNT:-/src}"
 substitute=true
 if [ "${KERNEL_NO_SUBSTITUTE:-}" = 1 ]; then substitute=false; fi
+# nix_image as the lock names it (upstream), or the same digest from
+# VETTID_IMAGE_MIRROR in CI (scripts/image-mirror.sh).
+nix_image="$("$here/../../scripts/image-mirror.sh" ref "$(val nix_image)")"
+echo "build: container $nix_image"
 rm -rf "$out/result.tmp"
 mkdir -p "$out/result.tmp"
 docker run --rm \
@@ -120,7 +124,7 @@ docker run --rm \
   -e EXPECTED_TOOLCHAIN="$(grep '^toolchain=' "$lock" || true)" -e UNPINNED="${KERNEL_TOOLCHAIN_UNPINNED:-}" \
   -e EXPECTED_CLOSURE="$(sed -n 's/^toolchain_closure_sha256=//p' "$lock")" \
   -e TZ="${TZ:-UTC}" -e LC_ALL="${LC_ALL:-C}" \
-  "$(val nix_image)" sh -euc '
+  "$nix_image" sh -euc '
     umask "$UMASK"
     nix --version
     nb() {

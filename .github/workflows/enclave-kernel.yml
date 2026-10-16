@@ -35,6 +35,13 @@ on:
 permissions:
   contents: read
 
+env:
+  # The locks' and Dockerfiles' pinned upstream images, same digests, from
+  # VettID's mirror (scripts/image-mirror.sh; vettid.org .github/mirror):
+  # the content and every measurement are the same as from upstream, which
+  # an independent rebuild uses (VETTID_IMAGE_MIRROR unset).
+  VETTID_IMAGE_MIRROR: ghcr.io/vettid/mirror
+
 concurrency:
   group: enclave-kernel-${{ github.ref }}
   cancel-in-progress: true

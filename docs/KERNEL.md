@@ -95,7 +95,10 @@ debugging; they do not go into the EIF.
 
 - `nix_image`: `nixos/nix:2.21.4` by its multi-arch index digest (AWS's
   Dockerfile uses that tag, unpinned). The Nix tool only fetches and
-  evaluates; the compiler comes from nixpkgs.
+  evaluates; the compiler comes from nixpkgs. The lock names it on Docker
+  Hub, where an auditor pulls it; CI pulls the same digest from
+  `ghcr.io/vettid/mirror/nix` (`VETTID_IMAGE_MIRROR`,
+  `scripts/image-mirror.sh`; docs/RELEASING.md).
 - `nixpkgs_url`/`nixpkgs_sha256`: nixpkgs `24.05`, the same pin as AWS's
   `nixpkgs.nix`, which fixes GCC 13.2.0, binutils 2.41 and musl (init).
   Binaries come from `cache.nixos.org`, checked by Nix against the cache's

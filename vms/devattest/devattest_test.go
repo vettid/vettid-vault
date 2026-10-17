@@ -520,3 +520,67 @@ func bindingOf(t *testing.T, _ *devattest.Policy, chain [][]byte) *devattest.Bin
 	}
 	return b
 }
+
+// The development members of the iOS policy (the dev enclave's device
+// policy file): further App IDs, at attestation and at each assertion,
+// and the development environment. A policy without them (every release
+// configuration) accepts only IOSAppID and production, and an empty
+// IOSAppID accepts nothing even with development App IDs.
+func TestIOSDevelopmentMembers(t *testing.T) {
+	const devApp = "3X25CJ86MV.com.vettid.app.dev"
+	ch := challenge("enroll")
+	base := enclavetest.Policy()
+	dev := *base
+	dev.IOSDevAppIDs = []string{devApp}
+	dev.IOSDevelopmentEnvironment = true
+
+	for _, tc := range []struct {
+		name    string
+		o       enclavetest.IOSOptions
+		baseErr error
+	}{
+		{"dev App ID", enclavetest.IOSOptions{AppID: devApp}, devattest.ErrApplication},
+		{"development environment", enclavetest.IOSOptions{Develop: true}, devattest.ErrEnvironment},
+		{"both", enclavetest.IOSOptions{AppID: devApp, Develop: true}, devattest.ErrApplication},
+	} {
+		a := enclavetest.NewIOSAttester(0x74, tc.o)
+		d, _ := a.Attest(ch)
+		if _, err := devattest.VerifyAttest(base, d, ch, now, nil); !errors.Is(err, tc.baseErr) {
+			t.Errorf("%s under the TEST policy: %v", tc.name, err)
+		}
+		b, err := devattest.VerifyAttest(&dev, d, ch, now, nil)
+		if err != nil {
+			t.Fatalf("%s under the dev members: %v", tc.name, err)
+		}
+		s := devattest.ForChallenge(challenge("unlock"))
+		as, _ := a.Assert(s)
+		if _, err := devattest.VerifyAssertion(&dev, b, as, s, b.Counter, now, nil); err != nil {
+			t.Fatalf("%s: assertion under the dev members: %v", tc.name, err)
+		}
+		if tc.o.AppID != "" {
+			if _, err := devattest.VerifyAssertion(base, b, as, s, b.Counter, now, nil); !errors.Is(err, devattest.ErrApplication) {
+				t.Errorf("%s: assertion of a dev App ID under the TEST policy: %v", tc.name, err)
+			}
+		}
+	}
+	// Development only adds: the TEST App ID still passes, another App ID
+	// still fails, and an unknown aaguid is still refused.
+	d, _ := enclavetest.NewIOSAttester(0x75, enclavetest.IOSOptions{}).Attest(ch)
+	if _, err := devattest.VerifyAttest(&dev, d, ch, now, nil); err != nil {
+		t.Fatalf("TEST App ID under the dev members: %v", err)
+	}
+	d, _ = enclavetest.NewIOSAttester(0x76, enclavetest.IOSOptions{AppID: "OTHERTEAM0.com.vettid.app.dev"}).Attest(ch)
+	if _, err := devattest.VerifyAttest(&dev, d, ch, now, nil); !errors.Is(err, devattest.ErrApplication) {
+		t.Fatalf("other App ID under the dev members: %v", err)
+	}
+	// Without IOSAppID nothing is accepted, development App IDs or not.
+	none := dev
+	none.IOSAppID = ""
+	d, _ = enclavetest.NewIOSAttester(0x77, enclavetest.IOSOptions{AppID: devApp}).Attest(ch)
+	if _, err := devattest.VerifyAttest(&none, d, ch, now, nil); !errors.Is(err, devattest.ErrPlatform) {
+		t.Fatalf("no IOSAppID: %v", err)
+	}
+	if string(devattest.AAGUIDDevelopment[:]) != "appattestdevelop" || string(devattest.AAGUIDProduction[:9]) != "appattest" {
+		t.Fatal("aaguids")
+	}
+}

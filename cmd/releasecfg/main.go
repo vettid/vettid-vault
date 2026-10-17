@@ -91,7 +91,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if c.AcceptsUnbound() {
 		unbound = "; vaults enrolled before 0.27.0 unlock unbound"
 	}
-	fmt.Fprintf(stdout, "releasecfg: %s release %d complete (%d manifest key(s), sealing account %s %s, retirement window %d days, android package %s, signers: %s%s, optional features: %s%s)\n",
-		c.Channel, c.Release, len(c.ManifestKeys), c.SealAccount, c.SealRegion, c.RetirementWindowDays, c.AndroidPackage, strings.Join(signers, ", "), unbound, features, grows)
+	fmt.Fprintf(stdout, "releasecfg: %s release %d complete (%d manifest key(s), sealing account %s %s, retirement window %d days, android package %s, iOS App ID %s, signers: %s%s, optional features: %s%s)\n",
+		c.Channel, c.Release, len(c.ManifestKeys), c.SealAccount, c.SealRegion, c.RetirementWindowDays, c.AndroidPackage, c.IOSAppID, strings.Join(signers, ", "), unbound, features, grows)
 	return 0
 }

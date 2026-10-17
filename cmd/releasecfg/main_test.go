@@ -42,7 +42,7 @@ func TestCheckCommand(t *testing.T) {
 	staging := string(b)
 	// The committed staging file passes rule 1 and names what it pins.
 	code, out := check("staging", stagingFile)
-	if code != 0 || !strings.Contains(out, "android package com.vettid.app.staging") ||
+	if code != 0 || !strings.Contains(out, "android package com.vettid.app.staging") || !strings.Contains(out, "iOS App ID 3X25CJ86MV.com.vettid.app.staging") ||
 		!strings.Contains(out, "optional features: actions calls intro leash location presence wallet") {
 		t.Fatalf("staging: %d %s", code, out)
 	}

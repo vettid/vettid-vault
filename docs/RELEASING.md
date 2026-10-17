@@ -44,6 +44,7 @@ hand from the Actions tab (`release` → *Run workflow*, channel `none`).
 | `manifest_keys` | done: key A (KMS `ECC_NIST_P256`) and key B (offline token), both SubjectPublicKeyInfo, base64 DER |
 | `android_signers` | done (O8 as amended 2026-10-11, VAULT-RELEASES 0.1.12 §5.2): one entry, VettID's own release certificate `31a19613…8e65`, class `vettid`. It signs the F-Droid and direct builds and is never given to Google. The Play app-signing certificate is **not** pinned by release 1: a later production release adds it, class `google_play`, before the Play listing goes live |
 | `android_package` | done: `com.vettid.app` (VAULT-MESSAGING 0.26.0; the file's value now, no longer a constant in code) |
+| `ios_app_id` | done: `3X25CJ86MV.com.vettid.app` (VAULT-MESSAGING 0.35.0; team ID confirmed by the owner 2026-10-17; the file's value now, no longer a constant in code) |
 | `features` | done: `[]`, no optional feature in release 1 (VAULT-MESSAGING 0.26.0, STAGING-DEVELOPMENT-PLAN D4) |
 | `release` | the release commit sets it to 1 |
 
@@ -127,6 +128,7 @@ constants of the channel file decide what an image does beyond its keys:
 | Member | Staging | Production | Rule |
 |---|---|---|---|
 | `android_package` | `com.vettid.app.staging` | `com.vettid.app` | exactly the channel's value; any other is malformed. Checked where an attestation is verified (enrollment, a transfer, a recovery's register); an unlock and a release approval do not check it again |
+| `ios_app_id` (0.35.0) | `3X25CJ86MV.com.vettid.app.staging` | `3X25CJ86MV.com.vettid.app` | exactly the channel's value; any other is malformed. Checked at an App Attest attestation (enrollment, a transfer, a recovery's register) and at every assertion (unlock, recovery open, release approval), whose authenticator data names the App ID. The first release of a channel that pins it, and any release that changes it, says so in its release log entry (VAULT-RELEASES §3.4, C6) |
 | `features` | all seven | `[]` | zero or more of `actions`, `calls`, `intro`, `leash`, `location`, `presence`, `wallet`, each once, in ascending byte order; anything else is malformed (an always-registered feature's name included) |
 
 Both are in the embedded file, so they are in `releasecfg_sha256` and in

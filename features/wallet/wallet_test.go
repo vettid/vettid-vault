@@ -63,11 +63,15 @@ func (c *fakeChain) Broadcast(_ context.Context, _ string, tx []byte) error {
 }
 
 func newEnv(t *testing.T, chain wallet.ChainSource) *env {
+	return newEnvWith(t, wallet.Options{Networks: []string{btc.Regtest, btc.Mainnet}, Chain: chain})
+}
+
+func newEnvWith(t *testing.T, o wallet.Options) *env {
 	cred := credential.New(credential.Options{KDF: credential.MinKDF})
 	it := items.New(cred)
 	cred.SetItemRekeyer(it)
 	cred.AddDeleteObserver(it)
-	wl := wallet.New(cred, it, wallet.Options{Networks: []string{btc.Regtest, btc.Mainnet}, Chain: chain})
+	wl := wallet.New(cred, it, o)
 	it.SetGuard(wl)
 	act := actions.New(actions.Deps{Keys: cred, Wallet: wl})
 	e := &env{t: t, h: featuretest.NewHost(), clk: featuretest.Clock{T: time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)},
@@ -568,5 +572,124 @@ func TestTaproot(t *testing.T) {
 
 func FuzzParseUpdate(f *testing.F) {
 	f.Add([]byte(`{"wallet_id":"01JB2Z6V9K3M4N5P6Q7R8S9TAA","version":3,"address_type":"p2wpkh"}`))
+	f.Add([]byte(`{"wallet_id":"01JB2Z6V9K3M4N5P6Q7R8S9TAA","version":3,"accounts":[{"type":"p2tr","next_receive":7},{"type":"p2wpkh","next_change":2}]}`))
 	f.Fuzz(func(t *testing.T, b []byte) { _, _ = wallet.ParseUpdate(b) })
+}
+
+// 0.35.0 (§10.18, "Networks"): testnet4 is a network name of its own. The
+// release default accepts it (and refuses regtest); its addresses and
+// account keys are testnet3's encodings with coin type 1, so a testnet4
+// wallet and a testnet wallet of one phrase have the same keys and
+// addresses and differ only in the name the vault reports.
+func TestTestnet4(t *testing.T) {
+	e := newEnvWith(t, wallet.Options{}) // the release default networks
+	mk := func(network string) strictjson.Object {
+		t.Helper()
+		return e.ok(e.sealed("app", "wallet.create", map[string]any{"name": network, "network": network},
+			map[string]any{"password": pw, "item": map[string]any{"mnemonic": abandon}}, true, false))
+	}
+	t4, t3 := mk("testnet4"), mk("testnet")
+	if n, _ := t4.String("network"); n != "testnet4" {
+		t.Fatalf("network %q", n)
+	}
+	a4, a3 := accountsOf(t, t4), accountsOf(t, t3)
+	if a4[btc.P2TR].XPub != a3[btc.P2TR].XPub || !strings.HasPrefix(a4[btc.P2TR].XPub, "tpub") {
+		t.Fatalf("testnet4 account key %s", a4[btc.P2TR].XPub)
+	}
+	id4, _ := t4.String("wallet_id")
+	o := e.ok(e.call("app", "wallet.address.new", js(map[string]any{"wallet_id": id4})))
+	addr, _ := o.String("address")
+	want, _, _ := a3[btc.P2TR].Address(0, 0)
+	if addr != want || !strings.HasPrefix(addr, "tb1p") {
+		t.Fatalf("testnet4 address %s, want %s", addr, want)
+	}
+	if p, _ := o.String("path"); p != "m/86'/1'/0'/0/0" {
+		t.Fatalf("path %s", p)
+	}
+	// The release default refuses regtest; an unknown name stays refused.
+	e.code(e.sealed("app", "wallet.create", map[string]any{"name": "R", "network": "regtest"}, map[string]any{"password": pw}, true, false), "bad_request")
+	e.code(e.sealed("app", "wallet.create", map[string]any{"name": "X", "network": "testnet3"}, map[string]any{"password": pw}, true, false), "bad_request")
+	// A vault configured without testnet4 refuses it.
+	e2 := newEnv(t, nil)
+	e2.code(e2.sealed("app", "wallet.create", map[string]any{"name": "T", "network": "testnet4"}, map[string]any{"password": pw}, true, false), "bad_request")
+}
+
+// 0.35.0 (§10.18, "Imported phrases"): wallet.update moves an account's
+// next receive and change indices forward, so that after an import the
+// vault does not issue an address the app found used. Only forward; the
+// same value changes nothing; the skipped addresses are not recorded.
+func TestUpdateNextIndices(t *testing.T) {
+	e := newEnv(t, nil)
+	id, accts := e.importAs(btc.P2TR)
+	ver := func() uint64 { return e.wl.Wallets()[0].Version }
+	upd := func(body map[string]any) featuretest.Result {
+		body["wallet_id"] = id
+		if _, ok := body["version"]; !ok {
+			body["version"] = ver()
+		}
+		return e.call("app", "wallet.update", js(body))
+	}
+	before := len(e.wl.Wallets()[0].Addrs)
+	v0 := ver()
+	o := e.ok(upd(map[string]any{"accounts": []any{map[string]any{"type": "p2tr", "next_receive": 7}, map[string]any{"type": "p2wpkh", "next_change": 3}}}))
+	if v, _ := o.Uint("version", 0, 1<<53); v != v0+1 {
+		t.Fatalf("version %d after %d", v, v0)
+	}
+	w := e.wl.Wallets()[0]
+	if w.Next[btc.P2TR] != [2]uint32{7, 0} || w.Next[btc.P2WPKH] != [2]uint32{0, 3} || len(w.Addrs) != before {
+		t.Fatalf("next %v, %d addresses", w.Next, len(w.Addrs))
+	}
+	g := e.ok(e.call("desktop", "wallet.get", js(map[string]any{"wallet_id": id})))
+	if !strings.Contains(js(g), `"next_receive":7`) {
+		t.Fatalf("wallet.get %s", js(g))
+	}
+	// The next issued address is index 7, of the receiving account.
+	a := e.ok(e.call("app", "wallet.address.new", js(map[string]any{"wallet_id": id})))
+	want, _, _ := accts[btc.P2TR].Address(0, 7)
+	if got, _ := a.String("address"); got != want {
+		t.Fatalf("address %s, want index 7 %s", got, want)
+	}
+	c := e.ok(e.call("app", "wallet.address.new", js(map[string]any{"wallet_id": id, "type": "p2wpkh", "change": true})))
+	if i, _ := c.Uint("index", 0, 1<<20); i != 3 {
+		t.Fatalf("change index %d", i)
+	}
+	// Only forward: below the current index is refused and changes nothing.
+	v1 := ver()
+	e.code(upd(map[string]any{"accounts": []any{map[string]any{"type": "p2tr", "next_receive": 2}}}), "bad_request")
+	if ver() != v1 || e.wl.Wallets()[0].Next[btc.P2TR][0] != 8 {
+		t.Fatal("a refused update changed the wallet")
+	}
+	// A refused entry leaves the other entries and address_type unapplied.
+	e.code(upd(map[string]any{"address_type": "p2wpkh", "accounts": []any{map[string]any{"type": "p2wpkh", "next_receive": 50}, map[string]any{"type": "p2tr", "next_change": 0, "next_receive": 1}}}), "bad_request")
+	if w := e.wl.Wallets()[0]; w.AddressType != btc.P2TR || w.Next[btc.P2WPKH][0] != 0 {
+		t.Fatal("a refused update applied in part")
+	}
+	// The same value passes; address_type and accounts together.
+	e.ok(upd(map[string]any{"address_type": "p2wpkh", "accounts": []any{map[string]any{"type": "p2tr", "next_receive": 8}, map[string]any{"type": "p2wpkh", "next_receive": 20}}}))
+	if w := e.wl.Wallets()[0]; w.AddressType != btc.P2WPKH || w.Next[btc.P2TR][0] != 8 || w.Next[btc.P2WPKH] != [2]uint32{20, 4} {
+		t.Fatalf("combined update %v %s", w.Next, w.AddressType)
+	}
+	// Malformed.
+	for name, body := range map[string]map[string]any{
+		"nothing":        {},
+		"empty accounts": {"accounts": []any{}},
+		"three entries":  {"accounts": []any{map[string]any{"type": "p2tr", "next_receive": 9}, map[string]any{"type": "p2wpkh", "next_receive": 21}, map[string]any{"type": "p2tr", "next_change": 1}}},
+		"same type":      {"accounts": []any{map[string]any{"type": "p2tr", "next_receive": 9}, map[string]any{"type": "p2tr", "next_change": 1}}},
+		"no index":       {"accounts": []any{map[string]any{"type": "p2tr"}}},
+		"unknown type":   {"accounts": []any{map[string]any{"type": "p2pkh", "next_receive": 9}}},
+		"no type":        {"accounts": []any{map[string]any{"next_receive": 9}}},
+		"beyond max":     {"accounts": []any{map[string]any{"type": "p2tr", "next_receive": btc.MaxIndex + 1}}},
+		"negative":       {"accounts": []any{map[string]any{"type": "p2tr", "next_receive": -1}}},
+		"not an object":  {"accounts": []any{"p2tr"}},
+		"index a string": {"accounts": []any{map[string]any{"type": "p2tr", "next_receive": "9"}}},
+	} {
+		if r := upd(body); r.Code != "bad_request" {
+			t.Errorf("%s: %q", name, r.Code)
+		}
+	}
+	// Versioned: a stale version is a conflict.
+	e.code(upd(map[string]any{"version": ver() - 1, "accounts": []any{map[string]any{"type": "p2tr", "next_receive": 30}}}), "conflict")
+	// Up to the maximum index.
+	e.ok(upd(map[string]any{"accounts": []any{map[string]any{"type": "p2tr", "next_change": btc.MaxIndex}}}))
+	e.code(e.call("app", "wallet.address.new", js(map[string]any{"wallet_id": id, "type": "p2tr", "change": true})), "limit")
 }

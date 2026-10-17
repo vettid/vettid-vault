@@ -85,7 +85,7 @@ type Options struct {
 	// nil means none (no calling service yet).
 	ICE calls.ICEIssuer
 	// WalletNetworks are the Bitcoin networks new wallets may use; nil
-	// means mainnet, testnet and signet (§10.18).
+	// means mainnet, testnet, testnet4 and signet (§10.18, 0.35.0).
 	WalletNetworks []string
 	// Optional names the optional features to register (0.26.0,
 	// §11.10.8): a release passes its channel file's list. Empty: none,
@@ -237,7 +237,7 @@ func Dev() []vault.Feature { return New(DevOptions()) }
 // parameters, regtest wallets besides the release networks, and every
 // optional feature (the development build has no channel file, §11.10.8).
 func DevOptions() Options {
-	return Options{CredentialKDF: credential.MinKDF, WalletNetworks: []string{"mainnet", "testnet", "signet", "regtest"}, Optional: Optional()}
+	return Options{CredentialKDF: credential.MinKDF, WalletNetworks: []string{"mainnet", "testnet", "testnet4", "signet", "regtest"}, Optional: Optional()}
 }
 
 // DevOptionsWith are DevOptions with exactly the named optional features:

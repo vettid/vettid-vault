@@ -342,3 +342,17 @@ func TestSignTaprootAndMixed(t *testing.T) {
 		}
 	}
 }
+
+// 0.35.0: testnet4 is its own name with testnet3's encodings and coin
+// type 1; the returned parameters are copies.
+func TestLookupTestnet4(t *testing.T) {
+	t4, ok := LookupNetwork(Testnet4)
+	t3, _ := LookupNetwork(Testnet)
+	if !ok || t4.Name != "testnet4" || t4.CoinType != 1 || t4.Params.Bech32HRPSegwit != "tb" ||
+		t4.Params.HDPublicKeyID != t3.Params.HDPublicKeyID || t4.Params == t3.Params {
+		t.Fatalf("%+v", t4)
+	}
+	if _, ok := LookupNetwork("testnet3"); ok {
+		t.Fatal("testnet3 is not a network name")
+	}
+}

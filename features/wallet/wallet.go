@@ -103,7 +103,7 @@ type ChainSource interface {
 // Options configure the feature.
 type Options struct {
 	// Networks the vault accepts for new wallets; nil means mainnet,
-	// testnet and signet (release); development adds regtest.
+	// testnet, testnet4 and signet (release); development adds regtest.
 	Networks []string
 	// Chain is vault-side chain access; nil in every release.
 	Chain ChainSource
@@ -188,7 +188,7 @@ type Feature struct {
 // New returns the feature.
 func New(cred Credential, it Items, o Options) *Feature {
 	if o.Networks == nil {
-		o.Networks = []string{btc.Mainnet, btc.Testnet, btc.Signet}
+		o.Networks = []string{btc.Mainnet, btc.Testnet, btc.Testnet4, btc.Signet}
 	}
 	return &Feature{opt: o, cred: cred, items: it, st: state{Wallets: map[string]*Wallet{}}, owned: map[string]bool{}}
 }
@@ -615,14 +615,21 @@ func (f *Feature) list(body []byte) (json.RawMessage, error) {
 	return strictjson.NewBuilder().Raw("wallets", append(arr, ']')).Bytes(), nil
 }
 
-// Update is a parsed wallet.update body.
+// Update is a parsed wallet.update body: the receiving account, the
+// accounts' next indices (0.35.0), or both.
 type Update struct {
 	WalletID    string
 	Version     uint64
-	AddressType string
+	AddressType string // "": unchanged
+	// Next are the new next indices by account type: [receive, change],
+	// each -1 when unchanged.
+	Next map[string][2]int64
 }
 
-// ParseUpdate parses wallet.update strictly.
+// ParseUpdate parses wallet.update strictly (unknown members ignored,
+// §10.1): `address_type`, `accounts` or both. `accounts` is 1–2 entries {type, next_receive?, next_change?},
+// one per account type, each naming at least one index (0 to
+// btc.MaxIndex).
 func ParseUpdate(body []byte) (*Update, error) {
 	o, err := strictjson.ParseObject(body)
 	if err != nil {
@@ -635,17 +642,68 @@ func ParseUpdate(body []byte) (*Update, error) {
 	if u.Version, err = o.Uint("version", 1, strictjson.MaxSafeInteger); err != nil {
 		return nil, errBad
 	}
-	if u.AddressType, err = o.String("address_type"); err != nil || !validType(u.AddressType) {
+	if t, present, err := o.OptString("address_type"); err != nil || present && !validType(t) {
 		return nil, errBad
+	} else if present {
+		u.AddressType = t
+	}
+	arr, present, err := o.OptArray("accounts")
+	if err != nil || present && (len(arr) == 0 || len(arr) > len(addressTypes)) {
+		return nil, errBad
+	}
+	if !present && u.AddressType == "" {
+		return nil, errBad // nothing to change
+	}
+	for _, raw := range arr {
+		a, err := strictjson.AsObject(raw)
+		if err != nil {
+			return nil, errBad
+		}
+		typ, err := a.String("type")
+		if err != nil || !validType(typ) {
+			return nil, errBad
+		}
+		if _, dup := u.Next[typ]; dup {
+			return nil, errBad
+		}
+		nx := [2]int64{-1, -1}
+		for chain, name := range [2]string{"next_receive", "next_change"} {
+			v, present, err := a.OptUint(name, 0, btc.MaxIndex)
+			if err != nil {
+				return nil, errBad
+			}
+			if present {
+				nx[chain] = int64(v)
+			}
+		}
+		if nx == [2]int64{-1, -1} {
+			return nil, errBad
+		}
+		if u.Next == nil {
+			u.Next = map[string][2]int64{}
+		}
+		u.Next[typ] = nx
 	}
 	return u, nil
 }
 
-// update sets the account that receives (address_type).
+// update sets the account that receives (address_type) and, from the app
+// only, moves the accounts' next indices forward (0.35.0): after an import, the app moves
+// them past the addresses its chain source shows used, so the vault never
+// issues one of them again. An index only moves forward: a value below
+// the account's current next index is bad_request, the same value changes
+// nothing. Moving an index records no address (the skipped addresses are
+// not the vault's issued ones and count against no limit).
 func (f *Feature) update(s *vault.Session, body []byte) (json.RawMessage, error) {
 	u, err := ParseUpdate(body)
 	if err != nil {
 		return nil, err
+	}
+	// Moving an index cannot be undone, and an index moved to the limit
+	// ends the account's addresses: only the app moves them; a desktop
+	// still chooses the receiving account.
+	if len(u.Next) > 0 && s.From().Kind != vault.KindApp {
+		return nil, errForbid
 	}
 	w := f.st.Wallets[u.WalletID]
 	if w == nil {
@@ -654,7 +712,27 @@ func (f *Feature) update(s *vault.Session, body []byte) (json.RawMessage, error)
 	if u.Version != w.Version {
 		return nil, vault.NewError("conflict", "")
 	}
-	w.AddressType = u.AddressType
+	next := map[string][2]uint32{}
+	for typ, nx := range w.Next {
+		next[typ] = nx
+	}
+	for typ, want := range u.Next {
+		cur := next[typ]
+		for chain := range want {
+			if want[chain] < 0 {
+				continue
+			}
+			if want[chain] < int64(cur[chain]) {
+				return nil, errBad // only forward
+			}
+			cur[chain] = uint32(want[chain])
+		}
+		next[typ] = cur
+	}
+	if u.AddressType != "" {
+		w.AddressType = u.AddressType
+	}
+	w.Next = next
 	w.Version++
 	s.SyncEvent("wallet.changed", strictjson.NewBuilder().String("wallet_id", w.ID).Uint("version", w.Version).Bytes())
 	return strictjson.NewBuilder().Uint("version", w.Version).Bytes(), nil

@@ -123,7 +123,7 @@ func Catalog() []Def {
 			ParamSchema: `{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","required":["asset"],` +
 				`"properties":{"asset":{"enum":["BTC"]}},"additionalProperties":false}`,
 			ResultSchema: `{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","required":["asset","network","address"],` +
-				`"properties":{"asset":{"type":"string"},"network":{"enum":["mainnet","testnet","signet","regtest"]},"address":{"type":"string"}}}`},
+				`"properties":{"asset":{"type":"string"},"network":{"enum":["mainnet","testnet","testnet4","signet","regtest"]},"address":{"type":"string"}}}`},
 		{ID: WalletPayment, Version: 1, Sensitivity: Critical, Available: true,
 			ParamSchema: `{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","required":["asset","amount_sats","address"],` +
 				`"properties":{"asset":{"enum":["BTC"]},"amount_sats":{"type":"integer","minimum":1,"maximum":2100000000000000},` +

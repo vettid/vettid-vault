@@ -17,9 +17,15 @@ import (
 // Networks.
 const (
 	Mainnet = "mainnet"
-	Testnet = "testnet" // testnet3 and testnet4 share their encodings
-	Signet  = "signet"
-	Regtest = "regtest"
+	// Testnet is testnet3 (and a testnet4 wallet created before
+	// VAULT-MESSAGING 0.35.0, when the name covered both).
+	Testnet = "testnet"
+	// Testnet4 is testnet4 (BIP94), by its own name since 0.35.0. Its
+	// encodings (addresses, extended keys) and coin type are testnet3's,
+	// so only the name tells the two apart.
+	Testnet4 = "testnet4"
+	Signet   = "signet"
+	Regtest  = "regtest"
 )
 
 // Network is one Bitcoin network's parameters.
@@ -37,7 +43,7 @@ func LookupNetwork(name string) (Network, bool) {
 	switch name {
 	case Mainnet:
 		p, coin = chaincfg.MainNetParams, 0
-	case Testnet:
+	case Testnet, Testnet4:
 		p = chaincfg.TestNet3Params
 	case Signet:
 		p = chaincfg.SigNetParams

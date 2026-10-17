@@ -421,7 +421,10 @@ func (f *Feature) pongReceived(s *vault.Session, body []byte) {
 }
 
 // ConnectionRemoved implements vault.ConnectionRemovedObserver (§7.4).
-func (f *Feature) ConnectionRemoved(_ *vault.Session, conn string) {
+// Removing the connection from `except` is a change of the policy like any
+// other (0.35.0, §10.1): a new version and presence.changed, so that an
+// app holding the old version gets `conflict` and reads the policy again.
+func (f *Feature) ConnectionRemoved(s *vault.Session, conn string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	kept := []string{}
@@ -432,6 +435,10 @@ func (f *Feature) ConnectionRemoved(_ *vault.Session, conn string) {
 	}
 	if len(kept) != len(f.policy.Except) {
 		f.policy.Except = kept
+		f.policy.Version++
+		if s != nil {
+			s.SyncEvent("presence.changed", strictjson.NewBuilder().Uint("version", f.policy.Version).Bytes())
+		}
 	}
 	delete(f.byConn, conn)
 	delete(f.ponged, conn)

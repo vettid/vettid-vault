@@ -504,7 +504,8 @@ func (m *Manager) holdAllows(p *Peer, typ, state string) bool {
 		switch typ {
 		case TypeOwnerCheck, "vault.status", "vault.lock", "credential.utk.get", "credential.get", "credential.ack",
 			"credential.version", "credential.lock", "call.end",
-			"push.register", "push.confirm", "push.unregister": // 0.24.0: the held wakes need a current token
+			"push.register", "push.confirm", "push.unregister", // 0.24.0: the held wakes need a current token
+			"location.share.stop": // 0.35.0: ending a disclosure is always possible, as locking is
 			return true
 		case "credential.alarm.confirm":
 			return m.alarmState() != ""
@@ -521,7 +522,7 @@ func (m *Manager) holdAllows(p *Peer, typ, state string) bool {
 			return true
 		}
 		switch typ {
-		case "vault.status", "vault.lock", "device.session.end":
+		case "vault.status", "vault.lock", "device.session.end", "location.share.stop":
 			return true
 		case "call.end", "call.ice":
 			return m.callAnsweredBefore(p.ID, deadline)

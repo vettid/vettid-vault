@@ -509,14 +509,16 @@ func TestHoldAllowList(t *testing.T) {
 	m := f.m
 	app, desk, agent := f.app.peer, f.desk.peer, f.agent.peer
 	for _, typ := range []string{TypeOwnerCheck, "vault.status", "vault.lock", "credential.utk.get", "credential.get",
-		"credential.ack", "credential.version", "credential.lock", "call.end", tokenIssuedType, tokenRefreshType, "relay.address.update"} {
+		"credential.ack", "credential.version", "credential.lock", "call.end", tokenIssuedType, tokenRefreshType, "relay.address.update",
+		"location.share.stop"} {
 		if !m.holdAllows(app, typ, OwnerCheckHeld) || !m.holdAllows(app, typ, OwnerCheckDue) {
 			t.Fatalf("app %s", typ)
 		}
 	}
 	for _, typ := range []string{"credential.alarm.confirm", "credential.rotate", "device.transfer.approve", "device.transfer.reject",
 		"call.ice", "call.answer", "credential.unlock", "credential.reset", "device.transfer.create", "settings.set", "vault.delete", "pin.change",
-		"approval.decide", "device.session.approve", "account.get", TypeAccountNameSet, "message.send", "location.update", "device.unlink"} {
+		"approval.decide", "device.session.approve", "account.get", TypeAccountNameSet, "message.send", "location.update", "device.unlink",
+		"location.share.start", "location.share.list", "location.get", "location.request", "location.history.share"} {
 		if m.holdAllows(app, typ, OwnerCheckHeld) {
 			t.Fatalf("app %s allowed", typ)
 		}
@@ -533,10 +535,18 @@ func TestHoldAllowList(t *testing.T) {
 	if !m.holdAllows(app, "device.transfer.approve", OwnerCheckHeld) || !m.holdAllows(app, "device.transfer.reject", OwnerCheckHeld) {
 		t.Fatal("open transfer")
 	}
-	for _, typ := range []string{"vault.status", "vault.lock", "device.session.end", tokenRefreshType} {
+	for _, typ := range []string{"vault.status", "vault.lock", "device.session.end", tokenRefreshType, "location.share.stop"} {
 		if !m.holdAllows(desk, typ, OwnerCheckHeld) {
 			t.Fatalf("desktop %s", typ)
 		}
+	}
+	for _, typ := range []string{"location.share.start", "location.update", "location.get"} {
+		if m.holdAllows(desk, typ, OwnerCheckHeld) {
+			t.Fatalf("desktop %s allowed while held", typ)
+		}
+	}
+	if m.holdAllows(agent, "location.share.stop", OwnerCheckHeld) {
+		t.Fatal("agent location.share.stop allowed while held")
 	}
 	if m.holdAllows(desk, "call.ice", OwnerCheckHeld) || m.holdAllows(desk, "call.end", OwnerCheckHeld) || !m.holdAllows(desk, "message.send", OwnerCheckDue) {
 		t.Fatal("desktop calls / due")

@@ -236,11 +236,50 @@ func TestRequests(t *testing.T) {
 	if !h.HasActivity("drop.location_rate") {
 		t.Fatal("incoming rate")
 	}
-	// Answering it with a share closes it.
+	// 0.35.0: a request of another connection is not answered by a share
+	// to c1, and says nothing.
+	h.Reset()
+	start(t, f, h, t0.Add(2*time.Minute), `{"connection_id":"c1","mode":"once","request_id":"01JB2Z6V9K3M4N5P6Q7R8S9T0V"}`)
+	if len(f.d.Requests) != 1 || closedEvents(h) != "" {
+		t.Fatalf("another connection's share closed the request: %q", closedEvents(h))
+	}
+	// Answering it with a share closes it, and (0.35.0) every owner
+	// device learns so.
+	h.Reset()
 	start(t, f, h, t0.Add(2*time.Minute), `{"connection_id":"c2","mode":"once","request_id":"01JB2Z6V9K3M4N5P6Q7R8S9T0V"}`)
 	if len(f.d.Requests) != 0 {
 		t.Fatal("request not closed")
 	}
+	if got := closedEvents(h); got != `{"kind":"location.request.closed","request_id":"01JB2Z6V9K3M4N5P6Q7R8S9T0V","reason":"answered"}` {
+		t.Fatalf("closed event %s", got)
+	}
+	// A request that expires unanswered closes with reason expired, when
+	// the vault next handles a message (the sweep).
+	ft.Call(f, h, t0.Add(20*time.Minute), "connection:c1", "location.requested", `{"request_id":"01JB2Z6V9K3M4N5P6Q7R8S9T2V"}`)
+	if len(f.d.Requests) != 1 {
+		t.Fatal("second request")
+	}
+	h.Reset()
+	ft.Call(f, h, t0.Add(20*time.Minute+RequestTTL-time.Second), "app", "location.share.list", `{}`)
+	if len(f.d.Requests) != 1 || closedEvents(h) != "" {
+		t.Fatal("closed before its expiry")
+	}
+	ft.Call(f, h, t0.Add(20*time.Minute+RequestTTL), "app", "location.share.list", `{}`)
+	if got := closedEvents(h); len(f.d.Requests) != 0 || got != `{"kind":"location.request.closed","request_id":"01JB2Z6V9K3M4N5P6Q7R8S9T2V","reason":"expired"}` {
+		t.Fatalf("expired: %d pending, event %s", len(f.d.Requests), got)
+	}
+}
+
+// closedEvents returns the location.request.closed sync events sent, one
+// per line.
+func closedEvents(h *ft.Host) string {
+	var out []string
+	for _, e := range h.SentOfType("sync.event") {
+		if strings.Contains(string(e.Body), `"location.request.closed"`) {
+			out = append(out, string(e.Body))
+		}
+	}
+	return strings.Join(out, "\n")
 }
 
 func TestConnectionRemoved(t *testing.T) {

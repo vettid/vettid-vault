@@ -1,12 +1,14 @@
 package presence
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
 
 	ft "github.com/vettid/vettid-vault/internal/featuretest"
 	"github.com/vettid/vettid-vault/internal/strictjson"
+	"github.com/vettid/vettid-vault/vault"
 )
 
 var t0 = time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
@@ -126,9 +128,24 @@ func TestPolicy(t *testing.T) {
 		t.Fatal(r.Code)
 	}
 	ft.Call(f, h, t0, "app", "presence.set", `{"version":3,"except":["c1"]}`)
-	f.ConnectionRemoved(nil, "c1")
+	h.Reset()
+	f.ConnectionRemoved(vault.NewSession(context.TODO(), h, vault.PeerInfo{}, t0, nil), "c1")
 	if len(f.policy.Except) != 0 {
 		t.Fatal("removed connection kept")
+	}
+	// 0.35.0: a change of the policy, so a new version and
+	// presence.changed; a set with the old version is a conflict.
+	if ev := h.SentOfType("sync.event"); f.policy.Version != 5 || len(ev) != 1 || string(ev[0].Body) != `{"kind":"presence.changed","version":5}` {
+		t.Fatalf("version %d, events %v", f.policy.Version, ev)
+	}
+	if r := ft.Call(f, h, t0, "app", "presence.set", `{"version":4,"state":"busy"}`); r.Code != "conflict" {
+		t.Fatalf("set with the version before the removal: %q", r.Code)
+	}
+	// A connection that is not in except changes nothing.
+	h.Reset()
+	f.ConnectionRemoved(vault.NewSession(context.TODO(), h, vault.PeerInfo{}, t0, nil), "c2")
+	if f.policy.Version != 5 || len(h.SentOfType("sync.event")) != 0 {
+		t.Fatal("removing a connection outside except changed the policy")
 	}
 }
 

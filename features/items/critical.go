@@ -674,6 +674,20 @@ func (f *Feature) CriticalExists(itemID string) bool {
 	return it != nil && it.Sensitivity == itemspec.Critical
 }
 
+// ItemTags returns an item's current tags (§10.7), sorted as stored,
+// whatever its sensitivity: a wallet shows its item's tags (§10.18).
+// ok is false for an item that does not exist. It calls nothing outside
+// this feature.
+func (f *Feature) ItemTags(itemID string) ([]string, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	it := f.st.Items[itemID]
+	if it == nil {
+		return nil, false
+	}
+	return append([]string{}, it.Tags...), true
+}
+
 // ItemName returns an item's current name (§10.7), whatever its
 // sensitivity (a critical item's name is DEK-state metadata here), for the
 // audit search (§10.9, 0.20.0); ok is false for an item that does not

@@ -80,6 +80,9 @@ type Items interface {
 		fields []items.NewField) (string, []string, func(), func(), error)
 	UseCriticalValues(s *vault.Session, inner *credential.Inner, itemID string) (map[string]json.RawMessage, func(), error)
 	CriticalExists(itemID string) bool
+	// ItemTags returns the item's current tags (a wallet shows its
+	// recovery phrase item's tags, §10.18).
+	ItemTags(itemID string) ([]string, bool)
 }
 
 // Unspent is an unspent output a ChainSource reports.
@@ -598,7 +601,14 @@ func (f *Feature) view(w *Wallet) *strictjson.Builder {
 			Raw("descriptors", strictjson.NewBuilder().String("receive", a.Descriptor(0)).String("change", a.Descriptor(1)).Bytes()).
 			Uint("next_receive", uint64(nx[0])).Uint("next_change", uint64(nx[1])).Bytes()...)
 	}
-	return b.Raw("accounts", append(arr, ']')).String("created_at", envelope.FormatTS(w.Created))
+	// The tags are the wallet's item's (0.35.0+): item.tag changes them,
+	// under the item rules, and the wallet keeps no copy.
+	tags, _ := f.items.ItemTags(w.ID)
+	tj, _ := json.Marshal(tags)
+	if tags == nil {
+		tj = []byte("[]")
+	}
+	return b.Raw("accounts", append(arr, ']')).Raw("tags", tj).String("created_at", envelope.FormatTS(w.Created))
 }
 
 func (f *Feature) list(body []byte) (json.RawMessage, error) {

@@ -585,6 +585,26 @@ func TestHoldAllowList(t *testing.T) {
 		!m.holdDelivers(app, "feed.event", []byte(`{"kind":"credential.alarm"}`), now) {
 		t.Fatal("sync/feed filter")
 	}
+	// The location feature's sync events (§10.16, 0.35.0) are withheld
+	// from the app, a desktop and an agent while held, as are its device
+	// events; a stop allowed while held changes nothing in that.
+	for _, body := range []string{
+		`{"kind":"location.share.changed","share_id":"01JB2Z6V9K3M4N5P6Q7R8S9T0V","state":"ended"}`,
+		`{"kind":"location.share.changed","share_id":"01JB2Z6V9K3M4N5P6Q7R8S9T0V","state":"active"}`,
+		`{"kind":"location.request.closed","request_id":"01JB2Z6V9K3M4N5P6Q7R8S9T0V","reason":"answered"}`,
+		`{"kind":"location.request.closed","request_id":"01JB2Z6V9K3M4N5P6Q7R8S9T0V","reason":"expired"}`,
+	} {
+		for _, p := range []*Peer{app, desk, agent} {
+			if m.holdDelivers(p, "sync.event", []byte(body), now) {
+				t.Fatalf("%s: %s delivered while held", p.ID, body)
+			}
+		}
+	}
+	for _, typ := range []string{"location.event", "location.update", "location.request.pending"} {
+		if m.holdDelivers(app, typ, []byte(`{}`), now) || m.holdDelivers(desk, typ, []byte(`{}`), now) {
+			t.Fatalf("%s delivered while held", typ)
+		}
+	}
 }
 
 type callGate struct {

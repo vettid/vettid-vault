@@ -267,25 +267,29 @@ func TestAccessSessions(t *testing.T) {
 	if r := find(d.inbox(desk)["desk1"], reply(id)); errCode(r) != "session_required" {
 		t.Fatal("session survived its end")
 	}
-	// Deny a request; expiry of a session.
+	// Deny a request; expiry of a session. Each request comes
+	// AccessRequestEvery after the last (0.40.0).
+	defer func() { d.m.now = time.Now }()
+	later := func(off time.Duration) { d.m.now = func() time.Time { return time.Now().Add(off) } }
+	later(AccessRequestEvery + time.Minute)
 	d.sendAs(desk, "device.session.request", `{}`)
 	rid = bodyStr(t, find(d.inbox(app, desk)["dev1"], ofType("device.session.pending")), "request_id")
 	d.sendAs(app, "device.session.deny", `{"request_id":"`+rid+`"}`)
 	if e := find(d.inbox(desk)["desk1"], ofType("device.session.ended")); e == nil || bodyStr(t, e, "reason") != "denied" {
 		t.Fatal("denial not sent")
 	}
+	later(2 * (AccessRequestEvery + time.Minute))
 	d.sendAs(desk, "device.session.request", `{"seconds":60}`)
 	rid = bodyStr(t, find(d.inbox(app, desk)["dev1"], ofType("device.session.pending")), "request_id")
 	d.sendAs(app, "device.session.approve", `{"request_id":"`+rid+`"}`)
 	d.inbox(app, desk)
-	d.m.now = func() time.Time { return time.Now().Add(61 * time.Second) }
-	defer func() { d.m.now = time.Now }()
+	later(2*(AccessRequestEvery+time.Minute) + 61*time.Second)
 	id = d.sendAs(desk, "connection.list", `{}`)
 	if r := find(d.inbox(desk)["desk1"], reply(id)); errCode(r) != "session_required" {
 		t.Fatal("expired session accepted")
 	}
 	// Unlinking ends everything of the device.
-	d.m.now = time.Now
+	later(3 * (AccessRequestEvery + time.Minute))
 	d.sendAs(desk, "device.session.request", `{}`)
 	d.sendAs(app, "device.unlink", `{"device_id":"desk1"}`)
 	if len(d.m.st.AccessRequests) != 0 {

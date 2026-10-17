@@ -27,7 +27,8 @@ loop's waits and the shared HTTP/2 connections (§12.2, §12.2.1); for
 volatile `message.list` and `message.get`, and `message.list` pages; for
 0.32.0 release A: message attachments (with VAULT-HOST-PROTOCOL 0.1.9
 P15 and RELAY-PROTOCOL 0.9.2–0.9.4's blob API); for 0.34.0 release R:
-`attempt_used` and the release capabilities; and,
+`attempt_used` and the release capabilities; for 0.40.0: the bound on
+`device.session.request`; and,
 ahead of its spec text, a connected but silent parent (§12.3,
 VAULT-HOST-PROTOCOL §13 point 1).)
 
@@ -316,6 +317,7 @@ relay in `e2e.TestBlockRefusesPeer`, `e2e.TestCallSignalling`,
 | 6.8 | A desktop or agent without an access session: `session_required` (requests) or dropped and audited (events), except the listed types | `vault.TestAccessSessions`, `e2e.TestDesktopSession`, `e2e.TestVaultctlSmoke` |
 | 6.8 | Only desktops and agents request sessions; only apps approve, deny or decide; lengths 60 s–24 h; a newer request replaces an older one; requests expire after 10 min | `vault.TestAccessSessions` |
 | 6.8 | Grant with the pairing approval (`session_seconds`); grant, end (by an app or the device itself), expiry; the device is told; `sync.event{device.session}` | `vault.TestAccessSessions`, `e2e.TestPairConnectMessage`, `e2e.TestDesktopSession` |
+| 6.8 | (0.40.0) At most one accepted `device.session.request` per desktop or agent every 10 minutes, counted from the last accepted one whether it was approved, denied, replaced or dropped; one within that time is answered `too_soon {allowed_after}`, reaches no app (no `device.session.pending`, no feed item), does not replace the pending request and does not move the window; per device; kept in the device's record across a lock and unlock | `vault.TestAccessRequestBound`, `vault.TestAccessRequestBoundPersists` |
 | 6.8 | Step-up types from a desktop are held for an app: `approval.pending` to apps, `approval.waiting` to the requester, executed on approval as the requester's, `denied`, `approval_timeout` after 5 min | `vault.TestAccessSessions`, `vault.TestBlocks` (`block.remove`), `e2e.TestDesktopSession` (`item.reveal`) |
 | 6.8 | Agents: nothing beyond their listed types without LEASH; the policy may allow or refer an owner type, never an app-only type | `vault.TestAgentPolicyHook`, `e2e.TestDesktopSession` |
 | 7.4, 6.8 | Unlinking ends the device's access session, held requests and pending request | `vault.TestAccessSessions` |

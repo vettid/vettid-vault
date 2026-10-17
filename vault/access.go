@@ -22,8 +22,12 @@ const (
 	MinAccessSeconds     = 60
 	MaxAccessSeconds     = 24 * 3600
 	AccessRequestTTL     = 10 * time.Minute
-	ApprovalTTL          = 5 * time.Minute
-	MaxHeldPerDevice     = 8
+	// AccessRequestEvery bounds a device's device.session.request (0.40.0):
+	// at most one accepted every 10 minutes, counted from the last one
+	// accepted whatever became of it since.
+	AccessRequestEvery = 10 * time.Minute
+	ApprovalTTL        = 5 * time.Minute
+	MaxHeldPerDevice   = 8
 )
 
 // accessExempt are the types a desktop or agent may send without an
@@ -72,6 +76,13 @@ func (m *Manager) hSessionRequest(_ context.Context, s *Session, in *envelope.In
 	if err != nil {
 		return nil, err
 	}
+	// §6.8 step 2 (0.40.0): one within AccessRequestEvery of the last
+	// accepted request is answered too_soon and reaches no app; it does
+	// not replace the pending request, and it does not move the window.
+	if t := s.peer.AccessRequestedAt; !t.IsZero() && s.now.Sub(t) < AccessRequestEvery {
+		return nil, &HandlerError{Code: "too_soon", Body: strictjson.NewBuilder().String("allowed_after", envelope.FormatTS(t.Add(AccessRequestEvery))).Bytes()}
+	}
+	s.peer.AccessRequestedAt = s.now.UTC().Truncate(time.Millisecond) // as allowed_after is written
 	for id, r := range m.st.AccessRequests {
 		if r.DeviceID == s.peer.ID {
 			delete(m.st.AccessRequests, id) // the newest request replaces an older one

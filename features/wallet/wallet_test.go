@@ -687,6 +687,13 @@ func TestUpdateNextIndices(t *testing.T) {
 			t.Errorf("%s: %q", name, r.Code)
 		}
 	}
+	// Only the app moves indices; a desktop still sets address_type.
+	db := js(map[string]any{"wallet_id": id, "version": ver(), "accounts": []any{map[string]any{"type": "p2tr", "next_receive": 40}}})
+	e.code(e.call("desktop", "wallet.update", db), "forbidden")
+	if e.wl.Wallets()[0].Next[btc.P2TR][0] != 8 {
+		t.Fatal("a desktop moved an index")
+	}
+	e.ok(e.call("desktop", "wallet.update", js(map[string]any{"wallet_id": id, "version": ver(), "address_type": "p2tr"})))
 	// Versioned: a stale version is a conflict.
 	e.code(upd(map[string]any{"version": ver() - 1, "accounts": []any{map[string]any{"type": "p2tr", "next_receive": 30}}}), "conflict")
 	// Up to the maximum index.

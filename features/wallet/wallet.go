@@ -687,8 +687,8 @@ func ParseUpdate(body []byte) (*Update, error) {
 	return u, nil
 }
 
-// update sets the account that receives (address_type) and moves the
-// accounts' next indices forward (0.35.0): after an import, the app moves
+// update sets the account that receives (address_type) and, from the app
+// only, moves the accounts' next indices forward (0.35.0): after an import, the app moves
 // them past the addresses its chain source shows used, so the vault never
 // issues one of them again. An index only moves forward: a value below
 // the account's current next index is bad_request, the same value changes
@@ -698,6 +698,12 @@ func (f *Feature) update(s *vault.Session, body []byte) (json.RawMessage, error)
 	u, err := ParseUpdate(body)
 	if err != nil {
 		return nil, err
+	}
+	// Moving an index cannot be undone, and an index moved to the limit
+	// ends the account's addresses: only the app moves them; a desktop
+	// still chooses the receiving account.
+	if len(u.Next) > 0 && s.From().Kind != vault.KindApp {
+		return nil, errForbid
 	}
 	w := f.st.Wallets[u.WalletID]
 	if w == nil {

@@ -59,7 +59,7 @@ func stagingConfig(t *testing.T, dir string, keys ...*ecdsa.PrivateKey) string {
 		`"seal_account":"111122223333","seal_region":"us-east-1",`+
 		`"retirement_principal":"arn:aws:iam::111122223333:role/vettid-org-vault-key-retirement","retirement_window_days":7,`+
 		`"android_signers":[{"digest":"`+strings.Repeat("5a", 32)+`","class":"vettid"}],"relay_url":"https://relay.vettid.test","push_url":"https://push.staging.vettid.org",`+
-		`"android_package":"com.vettid.app.staging","features":["actions","calls","intro","leash","location","presence","wallet"]`+`,"recovery_counter":{"bucket":"vettid-org-vault-recovery-111122223333","account":"111122223333","region":"us-east-1"},"recovery_request_keys":[{"key_id":"test-key-1","spki":`+ks[0]+`}],"recovery_wait_unit_seconds":600,"recovery_quiet_seconds":259200,"recovery_offered":true,"android_min_version_code":100}`))
+		`"android_package":"com.vettid.app.staging","ios_app_id":"3X25CJ86MV.com.vettid.app.staging","features":["actions","calls","intro","leash","location","presence","wallet"]`+`,"recovery_counter":{"bucket":"vettid-org-vault-recovery-111122223333","account":"111122223333","region":"us-east-1"},"recovery_request_keys":[{"key_id":"test-key-1","spki":`+ks[0]+`}],"recovery_wait_unit_seconds":600,"recovery_quiet_seconds":259200,"recovery_offered":true,"android_min_version_code":100}`))
 }
 
 const arn4 = "arn:aws:kms:us-east-1:111122223333:key/00000004-0000-4000-8000-000000000004"

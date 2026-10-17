@@ -74,8 +74,18 @@ type Policy struct {
 	AndroidSelfSignedBootKeys [][]byte
 
 	IOSRoots *x509.CertPool
-	// IOSAppID is "<team id>.<bundle id>".
+	// IOSAppID is "<team id>.<bundle id>": the channel's ios_app_id
+	// (0.35.0, §11.10.8) in a release configuration.
 	IOSAppID string
+	// IOSDevAppIDs are further App IDs accepted in place of IOSAppID, at
+	// an attestation and at each assertion. Development only: set by the
+	// dev enclave's device policy file (the debug and dev-stack bundle
+	// ids); release configurations leave it empty.
+	IOSDevAppIDs []string
+	// IOSDevelopmentEnvironment also accepts the development App Attest
+	// environment (aaguid "appattestdevelop"). Development only, like
+	// IOSDevAppIDs; a release configuration accepts production only.
+	IOSDevelopmentEnvironment bool
 }
 
 // Signer classes (§11.7.1): what the vault reports for a vault bound to

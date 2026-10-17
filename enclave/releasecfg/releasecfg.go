@@ -3,8 +3,8 @@
 // release number, the pinned manifest keys, the sealing-key account and
 // region, the retirement principal and window, the Android
 // signing certificates with their classes (0.27.0), the relay URL, (VAULT-MESSAGING 0.24.0)
-// the push gateway URL and (0.26.0) the Android package and the optional
-// features the image registers.
+// the push gateway URL, (0.26.0) the Android package and the optional
+// features the image registers, and (0.35.0) the iOS App ID.
 //
 // Each channel's constants are a committed file (prod.json, staging.json)
 // that the build embeds, selected by the build tag vettid_channel_prod or
@@ -65,6 +65,13 @@ var PushURLs = map[string]string{ChannelProd: "https://push.vettid.org", Channel
 // attestation, nor the reverse. One value, not a list.
 var AndroidPackages = map[string]string{ChannelProd: "com.vettid.app", ChannelStaging: "com.vettid.app.staging"}
 
+// IOSAppIDs are the channels' iOS App IDs, "<team id>.<bundle id>"
+// (VAULT-MESSAGING 0.35.0 §11.10.8, "iOS App ID"): as for the Android
+// package, a channel file must name its own, so a production image can
+// never accept the staging app's App Attest attestations, nor the
+// reverse. One value, not a list.
+var IOSAppIDs = map[string]string{ChannelProd: "3X25CJ86MV.com.vettid.app", ChannelStaging: "3X25CJ86MV.com.vettid.app.staging"}
+
 // optionalFeatures are the names a channel file's "features" may list
 // (0.26.0 §11.10.8, "Feature allowlist"), in ascending byte order: the
 // feature packages' own names (features/<name>). The always-registered
@@ -106,6 +113,9 @@ type Config struct {
 	// AndroidPackage is the Android package accepted in key attestation
 	// (0.26.0, §11.7, §11.10.8): the channel's own.
 	AndroidPackage string
+	// IOSAppID is the App ID accepted in App Attest (0.35.0, §11.7,
+	// §11.10.8): the channel's own.
+	IOSAppID string
 	// Features are the optional features the image registers (0.26.0,
 	// §11.10.8), ascending; empty: none (never nil in a parsed file).
 	Features []string
@@ -177,7 +187,7 @@ func Parse(b []byte) (*File, error) {
 		return nil, ErrFormat
 	}
 	members := []string{"channel", "release", "manifest_keys", "seal_account", "seal_region",
-		"retirement_principal", "retirement_window_days", "android_signers", "relay_url", "push_url", "android_package", "features",
+		"retirement_principal", "retirement_window_days", "android_signers", "relay_url", "push_url", "android_package", "ios_app_id", "features",
 		"recovery_counter", "recovery_request_keys", "recovery_wait_unit_seconds", "recovery_quiet_seconds", "recovery_offered",
 		"android_min_version_code"}
 	if len(o) != len(members) {
@@ -249,6 +259,9 @@ func Parse(b []byte) (*File, error) {
 		return nil, err
 	}
 	if c.AndroidPackage, err = value(o, "android_package", func(s string) bool { return s == AndroidPackages[c.Channel] }, missing); err != nil {
+		return nil, err
+	}
+	if c.IOSAppID, err = value(o, "ios_app_id", func(s string) bool { return s == IOSAppIDs[c.Channel] }, missing); err != nil {
 		return nil, err
 	}
 	raw, err := o.Array("features")

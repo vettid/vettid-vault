@@ -71,20 +71,19 @@ type RecoveryConfig struct {
 	AndroidMinVersionCode uint64
 }
 
-// Release pins that are the same in every channel. The per-channel
-// constants (release number, manifest keys, sealing-key account and
-// region, retirement principal and window, Android package and signing
-// digests, relay and push URLs, the optional features) are the committed
-// channel file the build embeds (package releasecfg, §11.10.8). A build
-// without a channel, or with an incomplete channel file, pins none of
-// them and refuses every enrollment and unlock (fail closed): its device
-// policy has no Android package and no signer, and it registers no
-// optional feature.
+// The per-channel constants (release number, manifest keys, sealing-key
+// account and region, retirement principal and window, Android package
+// and signing digests, iOS App ID, relay and push URLs, the optional
+// features) are the committed channel file the build embeds (package
+// releasecfg, §11.10.8). A build without a channel, or with an incomplete
+// channel file, pins none of them and refuses every enrollment and unlock
+// (fail closed): its device policy has no Android package, no signer and
+// no iOS App ID, and it registers no optional feature.
 //
-// The Android package was a constant here until 0.26.0; it is the
-// channel's android_package now, so that a staging image accepts only the
-// staging app's package and a production image only production's.
-const iosAppID = "3X25CJ86MV.com.vettid.app"
+// The Android package was a constant here until 0.26.0, the iOS App ID
+// until 0.35.0; both are the channel's now (android_package, ios_app_id),
+// so that a staging image accepts only the staging app and a production
+// image only production's.
 
 // DefaultRelayURL is the relay of a build without channel constants.
 const DefaultRelayURL = "https://relay.vettid.org"
@@ -168,7 +167,7 @@ func releaseConfigFor(c *releasecfg.Config, instanceID, relayURL string) Config 
 		DeviceAttest: &devattest.Policy{
 			AndroidRoots:              pins.GoogleAttestationRoots(),
 			AndroidSelfSignedBootKeys: pins.GrapheneOSVerifiedBootKeys(),
-			IOSRoots:                  apple, IOSAppID: iosAppID,
+			IOSRoots:                  apple,
 		},
 	}
 	if c != nil {
@@ -180,6 +179,9 @@ func releaseConfigFor(c *releasecfg.Config, instanceID, relayURL string) Config 
 		// §11.7); an unlock and a release approval verify the stored
 		// key's signature and do not look at the package again.
 		cfg.DeviceAttest.AndroidPackage = c.AndroidPackage
+		// 0.35.0: the iOS App ID likewise, at an App Attest attestation
+		// and at each assertion (whose rpIdHash names it).
+		cfg.DeviceAttest.IOSAppID = c.IOSAppID
 		// 0.27.0 (§11.7.1): the pinned signers with their classes, and
 		// whether a vault enrolled before the rule may still unlock
 		// unbound (staging, up to S10; never production).

@@ -21,6 +21,7 @@
   "relay_url": "https://relay.vettid.org",
   "push_url": "https://push.staging.vettid.org",
   "android_package": "com.vettid.app.staging",
+  "ios_app_id": "3X25CJ86MV.com.vettid.app.staging",
   "features": [
     "actions",
     "calls",

@@ -96,3 +96,38 @@ func TestReleaseConfigCounterLock(t *testing.T) {
 		t.Fatalf("channel %q: counter lock %v, want %v", ch, cfg.Recovery.CounterLock, want)
 	}
 }
+
+// 0.35.0 (§11.10.8, "iOS App ID"): the release device policy's iOS App ID
+// is the embedded channel file's, never a constant shared by the
+// channels, and it carries no development App ID and no development
+// environment (the dev enclave's device policy file is their only
+// setter). A build without complete channel constants has no App ID, so
+// App Attest fails closed. Run with -tags vettid_channel_prod /
+// vettid_channel_staging by `make channels`.
+func TestReleaseConfigIOSAppID(t *testing.T) {
+	cfg := enclave.ReleaseConfig("i-1", enclave.DefaultRelayURL)
+	pol := cfg.DeviceAttest
+	if pol == nil {
+		t.Fatal("no device policy")
+	}
+	if len(pol.IOSDevAppIDs) != 0 || pol.IOSDevelopmentEnvironment {
+		t.Fatalf("release policy has development iOS members: %v %v", pol.IOSDevAppIDs, pol.IOSDevelopmentEnvironment)
+	}
+	if pol.IOSRoots == nil {
+		t.Fatal("no Apple root")
+	}
+	ch, c := releasecfg.Embedded()
+	want := ""
+	if c != nil {
+		want = releasecfg.IOSAppIDs[ch]
+		if want == "" || c.IOSAppID != want {
+			t.Fatalf("%s: channel file iOS App ID %q", ch, c.IOSAppID)
+		}
+	}
+	if pol.IOSAppID != want {
+		t.Fatalf("channel %q: iOS App ID %q, want %q", ch, pol.IOSAppID, want)
+	}
+	if ch == releasecfg.ChannelStaging && c != nil && want != "3X25CJ86MV.com.vettid.app.staging" {
+		t.Fatalf("staging: %q", want)
+	}
+}

@@ -129,3 +129,36 @@ func TestOwnerCheckHeldVault(t *testing.T) {
 		t.Fatalf("after the check %+v", st)
 	}
 }
+
+// 0.35.0 (§3.6.3, §10.16): while the vault is held the member can still
+// end a location share (as they can lock): location.share.stop is on the
+// hold's allow list, starting a share is not, and the connection learns
+// that the share stopped.
+func TestOwnerCheckHeldStopsLocationShare(t *testing.T) {
+	r := relaytest.Start(t, nil)
+	clk := &ocClock{}
+	a := newTestVault(t, r.URL, "a", func(o *vault.Options) { o.OwnerCheckClock = clk.Now })
+	b := newTestVault(t, r.URL, "b", nil)
+	ctx := ctxT(t, 180*time.Second)
+	aConn, bConn := connect(t, a, b, 600)
+
+	sid, _, err := a.app.LocationShareStart(ctx, client.LocationShare{ConnectionID: aConn, Mode: "continuous", Precision: "approximate",
+		Duration: 3600, Interval: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.app.LocationEvent(ctx, bConn, "started"); err != nil {
+		t.Fatal(err)
+	}
+	clk.add(25 * time.Hour)
+	waitEvent(t, a.app, "vault.held", nil)
+	if _, _, err := a.app.LocationShareStart(ctx, client.LocationShare{ConnectionID: aConn, Mode: "once", Precision: "approximate", Duration: 600}); client.Code(err) != "owner_check_required" {
+		t.Fatalf("share start while held: %v", err)
+	}
+	if err := a.app.LocationShareStop(ctx, sid); err != nil {
+		t.Fatalf("share stop while held: %v", err)
+	}
+	if _, err := b.app.LocationEvent(ctx, bConn, "stopped"); err != nil {
+		t.Fatal(err)
+	}
+}

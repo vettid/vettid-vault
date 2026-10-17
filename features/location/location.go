@@ -228,6 +228,13 @@ func (f *Feature) syncShare(s *vault.Session, id, state string) {
 	s.SyncEvent("location.share.changed", strictjson.NewBuilder().String("share_id", id).String("state", state).Bytes())
 }
 
+// requestClosed tells the owner's devices that a pending request is no
+// longer pending (0.35.0): answered by a share (from any device) or
+// expired, so that every device can drop it.
+func requestClosed(s *vault.Session, id, reason string) {
+	s.SyncEvent("location.request.closed", strictjson.NewBuilder().String("request_id", id).String("reason", reason).Bytes())
+}
+
 func event(ev, dir, conn, id string) *strictjson.Builder {
 	return strictjson.NewBuilder().String("event", ev).String("direction", dir).String("connection_id", conn).String("share_id", id)
 }
@@ -246,9 +253,10 @@ func (f *Feature) sweep(s *vault.Session) {
 			f.endIncoming(s, sh)
 		}
 	}
-	for id, r := range f.d.Requests {
-		if !now.Before(r.Exp) {
+	for _, id := range sortedKeys(f.d.Requests) {
+		if r := f.d.Requests[id]; !now.Before(r.Exp) {
 			delete(f.d.Requests, id)
+			requestClosed(s, id, "expired")
 		}
 	}
 	for id, exp := range f.d.Ended {
@@ -316,6 +324,7 @@ func (f *Feature) start(s *vault.Session, body []byte) (json.RawMessage, error) 
 	f.d.Out[o.ID] = o
 	if r := f.d.Requests[st.RequestID]; r != nil && r.Conn == o.Conn {
 		delete(f.d.Requests, r.ID)
+		requestClosed(s, r.ID, "answered")
 	}
 	f.syncShare(s, o.ID, "active")
 	s.Record(vault.Activity{Kind: "location.share.started", ConnectionID: o.Conn, Ref: o.ID, Direction: "out", Audit: true})

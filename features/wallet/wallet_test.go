@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -699,4 +700,54 @@ func TestUpdateNextIndices(t *testing.T) {
 	// Up to the maximum index.
 	e.ok(upd(map[string]any{"accounts": []any{map[string]any{"type": "p2tr", "next_change": btc.MaxIndex}}}))
 	e.code(e.call("app", "wallet.address.new", js(map[string]any{"wallet_id": id, "type": "p2tr", "change": true})), "limit")
+}
+
+// <wallet> carries its item's tags (§10.18): those given at
+// wallet.create, normalised and checked by the item rules, and whatever
+// item.tag sets later; a wallet without tags shows an empty list. The
+// wallet keeps no copy, so its version does not change with them.
+func TestWalletTags(t *testing.T) {
+	e := newEnv(t, nil)
+	id, _ := e.importAs(btc.P2TR) // created with tags ["Money"]
+	tagsOf := func(o strictjson.Object) []string {
+		t.Helper()
+		var tags []string
+		if err := json.Unmarshal(o["tags"], &tags); err != nil || tags == nil {
+			t.Fatalf("tags %s: %v", o["tags"], err)
+		}
+		return tags
+	}
+	get := func() strictjson.Object {
+		return e.ok(e.call("desktop", "wallet.get", js(map[string]any{"wallet_id": id})))
+	}
+	item := e.ok(e.call("desktop", "item.get", js(map[string]any{"item_id": id})))
+	want := js(tagsOf(item))
+	if got := js(tagsOf(get())); got != want || !strings.Contains(strings.ToLower(got), "money") {
+		t.Fatalf("wallet tags %s, item tags %s", got, want)
+	}
+	v0 := e.wl.Wallets()[0].Version
+	iv, _ := item.Uint("version", 0, 1<<53)
+	e.ok(e.call("app", "item.tag", js(map[string]any{"item_id": id, "version": iv, "tags": []string{"btc", "savings"}})))
+	item = e.ok(e.call("desktop", "item.get", js(map[string]any{"item_id": id})))
+	if got := js(tagsOf(get())); got != js(tagsOf(item)) || !strings.Contains(got, "btc") || strings.Contains(strings.ToLower(got), "money") {
+		t.Fatalf("after item.tag: wallet %s, item %s", got, js(tagsOf(item)))
+	}
+	if e.wl.Wallets()[0].Version != v0 {
+		t.Fatal("item.tag changed the wallet's version")
+	}
+	l := e.ok(e.call("app", "wallet.list", `{}`))
+	if !strings.Contains(string(l["wallets"]), `"tags":`+js(tagsOf(item))) {
+		t.Fatalf("wallet.list %s", l["wallets"])
+	}
+	// A wallet created without tags shows [].
+	o := e.ok(e.sealed("app", "wallet.create", map[string]any{"name": "Plain", "network": "regtest"}, map[string]any{"password": pw}, true, false))
+	if string(o["tags"]) != "[]" {
+		t.Fatalf("untagged wallet tags %s", o["tags"])
+	}
+	// The item rules apply at create: too many tags are refused.
+	many := []string{}
+	for i := 0; i < 17; i++ {
+		many = append(many, "t"+strconv.Itoa(i))
+	}
+	e.code(e.sealed("app", "wallet.create", map[string]any{"name": "Many", "network": "regtest", "tags": many}, map[string]any{"password": pw}, true, false), "bad_request")
 }

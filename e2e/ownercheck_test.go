@@ -162,3 +162,58 @@ func TestOwnerCheckHeldStopsLocationShare(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// §3.6.3, §10.16 (0.35.0) through the real relay: while the vault is
+// held, the location feature's sync events are withheld from the owner's
+// other devices. The app stops a share (allowed while held); the
+// connection learns of it, the paired desktop gets no
+// sync.event{location.share.changed} for it. Before the hold the same
+// event reaches the desktop.
+func TestOwnerCheckHeldWithholdsLocationSyncEvents(t *testing.T) {
+	r := relaytest.Start(t, nil)
+	clk := &ocClock{}
+	a := newTestVault(t, r.URL, "a", func(o *vault.Options) { o.OwnerCheckClock = clk.Now })
+	b := newTestVault(t, r.URL, "b", nil)
+	desk := pairDesktop(t, a, r.URL)
+	ctx := ctxT(t, 180*time.Second)
+	aConn, bConn := connect(t, a, b, 600)
+
+	start := func() string {
+		t.Helper()
+		sid, _, err := a.app.LocationShareStart(ctx, client.LocationShare{ConnectionID: aConn, Mode: "continuous", Precision: "approximate",
+			Duration: 3600, Interval: 10})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := b.app.LocationEvent(ctx, bConn, "started"); err != nil {
+			t.Fatal(err)
+		}
+		return sid
+	}
+	changed := func(sid, state string) func(json.RawMessage) bool {
+		return func(body json.RawMessage) bool {
+			return syncKind("location.share.changed")(body) && has("share_id", sid)(body) && has("state", state)(body)
+		}
+	}
+	// Before the hold the desktop sees the share start.
+	sid := start()
+	waitEvent(t, desk, "sync.event", changed(sid, "active"))
+
+	clk.add(25 * time.Hour)
+	waitEvent(t, a.app, "vault.held", nil)
+	if err := a.app.LocationShareStop(ctx, sid); err != nil {
+		t.Fatalf("stop while held: %v", err)
+	}
+	if _, err := b.app.LocationEvent(ctx, bConn, "stopped"); err != nil {
+		t.Fatal(err)
+	}
+	// The desktop collects for a while past the stop and must not see it.
+	if _, err := desk.WaitEvent(ctxT(t, 5*time.Second), "sync.event", changed(sid, "ended")); err == nil {
+		t.Fatal("location.share.changed reached the desktop while held")
+	}
+	for _, ev := range desk.Events() {
+		if ev.Type == "location.event" {
+			t.Fatal("location.event reached the desktop while held")
+		}
+	}
+}

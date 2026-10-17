@@ -153,38 +153,52 @@ func TestDevDevicePolicyRejects(t *testing.T) {
 	root := pemOf(other.Root.Cert)
 	hex64 := hex.EncodeToString(debugSigner[:])
 	for name, in := range map[string]string{
-		"empty":            ``,
-		"not object":       `[]`,
-		"empty object":     `{}`,
-		"adds nothing":     `{"google_attestation_roots":false,"grapheneos_boot_keys":false,"android_packages":[]}`,
-		"unknown member":   `{"google_attestation_roots":true,"android_package":"com.x.y"}`,
-		"case variant":     `{"Google_attestation_roots":true}`,
-		"duplicate member": `{"google_attestation_roots":true,"google_attestation_roots":true}`,
-		"trailing data":    `{"google_attestation_roots":true} {}`,
-		"bool as string":   `{"google_attestation_roots":"true"}`,
-		"packages string":  `{"android_packages":"com.vettid.app.dev"}`,
-		"package number":   `{"android_packages":[1]}`,
-		"package one part": `{"android_packages":["vettid"]}`,
-		"package digit":    `{"android_packages":["com.1vettid.app"]}`,
-		"package dash":     `{"android_packages":["com.vettid-app.dev"]}`,
-		"package trailing": `{"android_packages":["com.vettid.app."]}`,
-		"package space":    `{"android_packages":["com.vettid.app "]}`,
-		"package dup":      `{"android_packages":["com.vettid.app.dev","com.vettid.app.dev"]}`,
-		"packages many":    `{"android_packages":["a.a","a.b","a.c","a.d","a.e","a.f","a.g","a.h","a.i","a.j","a.k","a.l","a.m","a.n","a.o","a.p","a.q"]}`,
-		"signer short":     `{"android_signers_sha256":["` + hex64[:62] + `"]}`,
-		"signer long":      `{"android_signers_sha256":["` + hex64 + `00"]}`,
-		"signer non-hex":   `{"android_signers_sha256":["` + strings.Repeat("g", 64) + `"]}`,
-		"signer colons":    `{"android_signers_sha256":["` + strings.Repeat("ab:", 31) + `a:b"]}`,
-		"signer dup":       `{"android_signers_sha256":["` + hex64 + `","` + strings.ToUpper(hex64) + `"]}`,
-		"root garbage":     `{"android_roots_pem":["hello"]}`,
-		"root not root":    string(policyJSON(t, map[string]any{"android_roots_pem": []string{inter}})),
-		"root not CA":      string(policyJSON(t, map[string]any{"android_roots_pem": []string{pemOf(leaf)}})),
-		"root two blocks":  string(policyJSON(t, map[string]any{"android_roots_pem": []string{root + root}})),
-		"root prefix":      string(policyJSON(t, map[string]any{"android_roots_pem": []string{"x\n" + root}})),
-		"root wrong type":  string(policyJSON(t, map[string]any{"android_roots_pem": []string{strings.ReplaceAll(root, "CERTIFICATE", "PUBLIC KEY")}})),
-		"root dup":         string(policyJSON(t, map[string]any{"android_roots_pem": []string{root, root}})),
-		"not utf-8":        "{\"android_packages\":[\"com.vettid.\xff\"]}",
-		"too large":        `{"android_packages":["com.vettid.app.dev"],"x":"` + strings.Repeat("a", enclavetest.MaxDevDevicePolicySize) + `"}`,
+		"empty":               ``,
+		"not object":          `[]`,
+		"empty object":        `{}`,
+		"adds nothing":        `{"google_attestation_roots":false,"grapheneos_boot_keys":false,"android_packages":[]}`,
+		"unknown member":      `{"google_attestation_roots":true,"android_package":"com.x.y"}`,
+		"case variant":        `{"Google_attestation_roots":true}`,
+		"duplicate member":    `{"google_attestation_roots":true,"google_attestation_roots":true}`,
+		"trailing data":       `{"google_attestation_roots":true} {}`,
+		"bool as string":      `{"google_attestation_roots":"true"}`,
+		"packages string":     `{"android_packages":"com.vettid.app.dev"}`,
+		"package number":      `{"android_packages":[1]}`,
+		"package one part":    `{"android_packages":["vettid"]}`,
+		"package digit":       `{"android_packages":["com.1vettid.app"]}`,
+		"package dash":        `{"android_packages":["com.vettid-app.dev"]}`,
+		"package trailing":    `{"android_packages":["com.vettid.app."]}`,
+		"package space":       `{"android_packages":["com.vettid.app "]}`,
+		"package dup":         `{"android_packages":["com.vettid.app.dev","com.vettid.app.dev"]}`,
+		"apple root string":   `{"apple_app_attest_root":"true"}`,
+		"ios env number":      `{"ios_development_environment":1}`,
+		"ios adds nothing":    `{"apple_app_attest_root":false,"ios_development_environment":false,"ios_app_ids":[]}`,
+		"ios app ids string":  `{"ios_app_ids":"3X25CJ86MV.com.vettid.app.dev"}`,
+		"ios app id number":   `{"ios_app_ids":[1]}`,
+		"ios no team":         `{"ios_app_ids":["com.vettid.app.dev"]}`,
+		"ios short team":      `{"ios_app_ids":["3X25CJ86M.com.vettid.app.dev"]}`,
+		"ios lower team":      `{"ios_app_ids":["3x25cj86mv.com.vettid.app.dev"]}`,
+		"ios one-part bundle": `{"ios_app_ids":["3X25CJ86MV.vettid"]}`,
+		"ios underscore":      `{"ios_app_ids":["3X25CJ86MV.com.vettid_app.dev"]}`,
+		"ios trailing dot":    `{"ios_app_ids":["3X25CJ86MV.com.vettid.app."]}`,
+		"ios space":           `{"ios_app_ids":["3X25CJ86MV.com.vettid.app.dev "]}`,
+		"ios dup":             `{"ios_app_ids":["3X25CJ86MV.com.vettid.app.dev","3X25CJ86MV.com.vettid.app.dev"]}`,
+		"ios unknown member":  `{"ios_app_id":"3X25CJ86MV.com.vettid.app.dev"}`,
+		"packages many":       `{"android_packages":["a.a","a.b","a.c","a.d","a.e","a.f","a.g","a.h","a.i","a.j","a.k","a.l","a.m","a.n","a.o","a.p","a.q"]}`,
+		"signer short":        `{"android_signers_sha256":["` + hex64[:62] + `"]}`,
+		"signer long":         `{"android_signers_sha256":["` + hex64 + `00"]}`,
+		"signer non-hex":      `{"android_signers_sha256":["` + strings.Repeat("g", 64) + `"]}`,
+		"signer colons":       `{"android_signers_sha256":["` + strings.Repeat("ab:", 31) + `a:b"]}`,
+		"signer dup":          `{"android_signers_sha256":["` + hex64 + `","` + strings.ToUpper(hex64) + `"]}`,
+		"root garbage":        `{"android_roots_pem":["hello"]}`,
+		"root not root":       string(policyJSON(t, map[string]any{"android_roots_pem": []string{inter}})),
+		"root not CA":         string(policyJSON(t, map[string]any{"android_roots_pem": []string{pemOf(leaf)}})),
+		"root two blocks":     string(policyJSON(t, map[string]any{"android_roots_pem": []string{root + root}})),
+		"root prefix":         string(policyJSON(t, map[string]any{"android_roots_pem": []string{"x\n" + root}})),
+		"root wrong type":     string(policyJSON(t, map[string]any{"android_roots_pem": []string{strings.ReplaceAll(root, "CERTIFICATE", "PUBLIC KEY")}})),
+		"root dup":            string(policyJSON(t, map[string]any{"android_roots_pem": []string{root, root}})),
+		"not utf-8":           "{\"android_packages\":[\"com.vettid.\xff\"]}",
+		"too large":           `{"android_packages":["com.vettid.app.dev"],"x":"` + strings.Repeat("a", enclavetest.MaxDevDevicePolicySize) + `"}`,
 	} {
 		if _, err := enclavetest.ParseDevDevicePolicy([]byte(in)); !errors.Is(err, enclavetest.ErrDevPolicy) {
 			t.Errorf("%s: %v", name, err)
@@ -237,6 +251,7 @@ func FuzzParseDevDevicePolicy(f *testing.F) {
 	f.Add([]byte(`{"android_signers_sha256":["` + hex.EncodeToString(debugSigner[:]) + `"]}`))
 	f.Add([]byte(`{"android_roots_pem":["-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"]}`))
 	f.Add([]byte(`{"android_packages":["a.b","a.b"]}`))
+	f.Add([]byte(`{"apple_app_attest_root":true,"ios_app_ids":["3X25CJ86MV.com.vettid.app.dev"],"ios_development_environment":true}`))
 	f.Add([]byte(`{}`))
 	base := enclavetest.Policy()
 	f.Fuzz(func(t *testing.T, b []byte) {
@@ -248,13 +263,94 @@ func FuzzParseDevDevicePolicy(f *testing.F) {
 			return
 		}
 		ext := p.Apply(base)
-		if len(ext.AndroidRoots) < len(base.AndroidRoots) || len(ext.AndroidSigners) < len(base.AndroidSigners) || ext.AndroidPackage != base.AndroidPackage {
+		if len(ext.AndroidRoots) < len(base.AndroidRoots) || len(ext.AndroidSigners) < len(base.AndroidSigners) || ext.AndroidPackage != base.AndroidPackage ||
+			ext.IOSAppID != base.IOSAppID || ext.IOSRoots == nil {
 			t.Fatal("the dev policy removed something")
 		}
 		p2, err := enclavetest.ParseDevDevicePolicy(p.Raw())
-		if err != nil || len(p2.Packages) != len(p.Packages) || len(p2.Signers) != len(p.Signers) || len(p2.ExtraRoots) != len(p.ExtraRoots) {
+		if err != nil || len(p2.Packages) != len(p.Packages) || len(p2.Signers) != len(p.Signers) || len(p2.ExtraRoots) != len(p.ExtraRoots) ||
+			len(p2.IOSAppIDs) != len(p.IOSAppIDs) || p2.AppleRoot != p.AppleRoot || p2.IOSDevEnv != p.IOSDevEnv {
 			t.Fatalf("raw does not reparse: %v", err)
 		}
 		_ = p.Summary()
 	})
+}
+
+// The iOS members (VA3): a development or dev-stack build on a real
+// iPhone. The Apple root is added beside the TEST Apple CA (the TEST
+// attester still passes), the dev App IDs are accepted at attestation and
+// assertion, and the development environment only with its member.
+func TestDevDevicePolicyIOS(t *testing.T) {
+	const devApp, stackApp = "3X25CJ86MV.com.vettid.app.dev", "3X25CJ86MV.com.vettid.app.devstack"
+	p, err := enclavetest.ParseDevDevicePolicy(policyJSON(t, map[string]any{
+		"apple_app_attest_root":       true,
+		"ios_app_ids":                 []string{devApp, stackApp},
+		"ios_development_environment": true,
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !p.AppleRoot || !p.IOSDevEnv || len(p.IOSAppIDs) != 2 {
+		t.Fatalf("%+v", p)
+	}
+	base := enclavetest.Policy()
+	ext := p.Apply(base)
+	if len(base.IOSDevAppIDs) != 0 || base.IOSDevelopmentEnvironment {
+		t.Fatalf("base modified: %+v", base)
+	}
+	if ext.IOSAppID != enclavetest.IOSAppID || len(ext.IOSDevAppIDs) != 2 || !ext.IOSDevelopmentEnvironment || ext.IOSRoots == base.IOSRoots {
+		t.Fatalf("%+v", ext)
+	}
+	// The pinned Apple root is in the extended pool, not in the base one.
+	apple := pins.AppleAppAttestRoot()
+	inPool := func(pool *x509.CertPool) bool {
+		_, err := apple.Verify(x509.VerifyOptions{Roots: pool, CurrentTime: apple.NotBefore.Add(time.Hour)})
+		return err == nil
+	}
+	if !inPool(ext.IOSRoots) || inPool(base.IOSRoots) {
+		t.Fatal("Apple App Attest root not added to the extended pool only")
+	}
+	now := time.Now()
+	ch := sha256.Sum256([]byte("enroll"))
+	for _, o := range []enclavetest.IOSOptions{{}, {AppID: devApp}, {AppID: stackApp, Develop: true}} {
+		a := enclavetest.NewIOSAttester(0x78, o)
+		d, _ := a.Attest(ch)
+		b, err := devattest.VerifyAttest(ext, d, ch, now, nil)
+		if err != nil {
+			t.Fatalf("%+v: %v", o, err)
+		}
+		s := devattest.ForChallenge(sha256.Sum256([]byte("unlock")))
+		as, _ := a.Assert(s)
+		if _, err := devattest.VerifyAssertion(ext, b, as, s, b.Counter, now, nil); err != nil {
+			t.Fatalf("%+v: assertion: %v", o, err)
+		}
+		if o.AppID != "" {
+			if _, err := devattest.VerifyAttest(base, d, ch, now, nil); err == nil {
+				t.Fatalf("%+v: accepted by the TEST policy", o)
+			}
+		}
+	}
+	// Without ios_development_environment the development aaguid stays
+	// refused.
+	q, err := enclavetest.ParseDevDevicePolicy(policyJSON(t, map[string]any{"ios_app_ids": []string{devApp}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, _ := enclavetest.NewIOSAttester(0x79, enclavetest.IOSOptions{AppID: devApp, Develop: true}).Attest(ch)
+	if _, err := devattest.VerifyAttest(q.Apply(base), d, ch, now, nil); !errors.Is(err, devattest.ErrEnvironment) {
+		t.Fatalf("development aaguid without the member: %v", err)
+	}
+	sum := p.Summary()
+	if sum["apple_app_attest_root"] != true || sum["ios_development_environment"] != true || sum["ios_app_ids"].([]string)[1] != stackApp {
+		t.Fatalf("%v", sum)
+	}
+	// The vault processes get the iOS members too.
+	args := append(enclavetest.DevVaultArgs(3, "https://relay.vettid.test"), enclavetest.DevVaultPolicyArgs(p)...)
+	pl, err := enclavetest.DevVaultPlatform(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if da := pl.Config("v").DeviceAttest; len(da.IOSDevAppIDs) != 2 || !da.IOSDevelopmentEnvironment {
+		t.Fatalf("vault process policy: %+v", da)
+	}
 }

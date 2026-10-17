@@ -274,7 +274,10 @@ a real phone's Keystore attestation can enroll against the dev stack:
   "google_attestation_roots": true,
   "android_packages": ["com.vettid.app.dev", "com.vettid.app.devstack"],
   "android_signers_sha256": ["<SHA-256 of the debug signing certificate>"],
-  "grapheneos_boot_keys": true
+  "grapheneos_boot_keys": true,
+  "apple_app_attest_root": true,
+  "ios_app_ids": ["3X25CJ86MV.com.vettid.app.dev", "3X25CJ86MV.com.vettid.app.devstack"],
+  "ios_development_environment": true
 }
 ```
 
@@ -286,7 +289,13 @@ strings); `android_packages` are accepted besides `com.vettid.app`;
 form (`keytool -list -v -keystore ~/.android/debug.keystore -storepass
 android | grep SHA256`); `grapheneos_boot_keys` adds the pinned GrapheneOS
 verified boot keys (`pins.GrapheneOSVerifiedBootKeys`) for
-`verifiedBootState` SelfSigned. Parsing is strict (no unknown or duplicate
+`verifiedBootState` SelfSigned. For an iPhone, `apple_app_attest_root`
+adds the pinned Apple App Attestation root (`pins.AppleAppAttestRoot`)
+beside the TEST Apple CA; `ios_app_ids` are App IDs (`<team id>.<bundle
+id>`) accepted besides the TEST App ID, at an attestation and at each
+assertion; `ios_development_environment` also accepts the development App
+Attest environment (aaguid `appattestdevelop`), which every release image
+refuses. Parsing is strict (no unknown or duplicate
 members, at most 32 KiB, bounded lists) and the policy must add
 something; it never removes the TEST entries, so TEST attesters keep
 working. The status list stays the stack's empty one. Since 0.27.0 a
@@ -335,7 +344,11 @@ images accept in key attestation (`com.vettid.app` in production,
 `com.vettid.app.staging` in staging; any other value is malformed), and
 `features`, the optional features its images register (zero or more of
 `actions`, `calls`, `intro`, `leash`, `location`, `presence`, `wallet`,
-ascending; staging lists all seven, production none). A feature that is
+ascending; staging lists all seven, production none). Since 0.35.0 each
+file also carries `ios_app_id`, the one iOS App ID its images accept in
+App Attest (`3X25CJ86MV.com.vettid.app` in production,
+`3X25CJ86MV.com.vettid.app.staging` in staging; any other value is
+malformed); it was a constant in code before. A feature that is
 not listed is not constructed: its types answer `unsupported_type` and
 it keeps no state. A channel's list only grows
 (`go run ./cmd/releasecfg check -previous <the previous release's file> <channel>`,

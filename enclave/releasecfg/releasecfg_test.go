@@ -33,7 +33,7 @@ func complete(t *testing.T) string {
 		`"seal_account":"111122223333","seal_region":"us-east-1",` +
 		`"retirement_principal":"arn:aws:iam::111122223333:role/vettid-org-vault-key-retirement","retirement_window_days":30,` +
 		`"android_signers":[{"digest":"` + strings.Repeat("ab", 32) + `","class":"vettid"}],"relay_url":"https://relay.vettid.org","push_url":"https://push.vettid.org",` +
-		`"android_package":"com.vettid.app","features":[]` + recoveryMembers(t, "111122223333", 86400) + `}`
+		`"android_package":"com.vettid.app","ios_app_id":"3X25CJ86MV.com.vettid.app","features":[]` + recoveryMembers(t, "111122223333", 86400) + `}`
 }
 
 // recoveryMembers are release R's members (VAULT-MESSAGING 0.33.0
@@ -61,7 +61,8 @@ func fillReleaseR(t *testing.T, b []byte) []byte {
 func staging(s string) string {
 	return strings.NewReplacer(`"channel":"prod"`, `"channel":"staging"`, `"retirement_window_days":30`, `"retirement_window_days":7`,
 		`"push_url":"https://push.vettid.org"`, `"push_url":"https://push.staging.vettid.org"`,
-		`"android_package":"com.vettid.app"`, `"android_package":"com.vettid.app.staging"`).Replace(s)
+		`"android_package":"com.vettid.app"`, `"android_package":"com.vettid.app.staging"`,
+		`"ios_app_id":"3X25CJ86MV.com.vettid.app"`, `"ios_app_id":"3X25CJ86MV.com.vettid.app.staging"`).Replace(s)
 }
 
 // withFeatures replaces the test file's (empty) feature list.
@@ -96,6 +97,15 @@ func TestCommittedFiles(t *testing.T) {
 		if f.Config.AndroidPackage != wantPkg || f.Config.AndroidPackage != AndroidPackages[ch] || f.Config.Features == nil ||
 			strings.Join(f.Config.Features, ",") != strings.Join(wantFeatures, ",") {
 			t.Fatalf("%s: package %q, features %v", ch, f.Config.AndroidPackage, f.Config.Features)
+		}
+		// 0.35.0 (§11.10.8): each channel accepts its own iOS App ID,
+		// under the team ID 3X25CJ86MV.
+		wantApp := "3X25CJ86MV.com.vettid.app"
+		if ch == ChannelStaging {
+			wantApp += ".staging"
+		}
+		if f.Config.IOSAppID != wantApp || IOSAppIDs[ch] != wantApp {
+			t.Fatalf("%s: iOS App ID %q", ch, f.Config.IOSAppID)
 		}
 		// A placeholder is always reported missing; a value can also be
 		// missing without one (release 0 before the first release).
@@ -149,12 +159,12 @@ func TestCompletePasses(t *testing.T) {
 		len(c.AndroidSigners) != 1 || len(c.AndroidSigners[0].Digest) != 32 || c.AndroidSigners[0].Class != "vettid" {
 		t.Fatalf("%+v", c)
 	}
-	if c.AndroidPackage != "com.vettid.app" || c.Features == nil || len(c.Features) != 0 {
+	if c.AndroidPackage != "com.vettid.app" || c.IOSAppID != "3X25CJ86MV.com.vettid.app" || c.Features == nil || len(c.Features) != 0 {
 		t.Fatalf("%+v", c)
 	}
 	st := staging(complete(t))
-	if _, err := Check(ChannelStaging, []byte(st)); err != nil {
-		t.Fatal(err)
+	if sc, err := Check(ChannelStaging, []byte(st)); err != nil || sc.IOSAppID != "3X25CJ86MV.com.vettid.app.staging" {
+		t.Fatal(sc, err)
 	}
 }
 
@@ -238,6 +248,35 @@ func TestRefusals(t *testing.T) {
 		"package as a list": {func(s string) string {
 			return strings.Replace(s, `"android_package":"com.vettid.app"`, `"android_package":["com.vettid.app"]`, 1)
 		}, ErrFormat},
+		// 0.35.0, ios_app_id: missing, a placeholder, another channel's
+		// value, anything else (another team, the dev builds' App IDs).
+		"iOS App ID missing": {func(s string) string {
+			return strings.Replace(s, `"ios_app_id":"3X25CJ86MV.com.vettid.app",`, ``, 1)
+		}, ErrFormat},
+		"iOS App ID placeholder": {func(s string) string {
+			return strings.Replace(s, `"ios_app_id":"3X25CJ86MV.com.vettid.app"`, `"ios_app_id":"TODO-ID3"`, 1)
+		}, ErrIncomplete},
+		"other channel's iOS App ID": {func(s string) string {
+			return strings.Replace(s, `"ios_app_id":"3X25CJ86MV.com.vettid.app"`, `"ios_app_id":"3X25CJ86MV.com.vettid.app.staging"`, 1)
+		}, ErrFormat},
+		"iOS App ID of another team": {func(s string) string {
+			return strings.Replace(s, `"ios_app_id":"3X25CJ86MV.com.vettid.app"`, `"ios_app_id":"TESTTEAM00.com.vettid.app"`, 1)
+		}, ErrFormat},
+		"iOS App ID of a dev build": {func(s string) string {
+			return strings.Replace(s, `"ios_app_id":"3X25CJ86MV.com.vettid.app"`, `"ios_app_id":"3X25CJ86MV.com.vettid.app.dev"`, 1)
+		}, ErrFormat},
+		"iOS bundle id without the team": {func(s string) string {
+			return strings.Replace(s, `"ios_app_id":"3X25CJ86MV.com.vettid.app"`, `"ios_app_id":"com.vettid.app"`, 1)
+		}, ErrFormat},
+		"iOS App ID lower-case team": {func(s string) string {
+			return strings.Replace(s, `"ios_app_id":"3X25CJ86MV.com.vettid.app"`, `"ios_app_id":"3x25cj86mv.com.vettid.app"`, 1)
+		}, ErrFormat},
+		"iOS App ID empty": {func(s string) string {
+			return strings.Replace(s, `"ios_app_id":"3X25CJ86MV.com.vettid.app"`, `"ios_app_id":""`, 1)
+		}, ErrFormat},
+		"iOS App ID as a list": {func(s string) string {
+			return strings.Replace(s, `"ios_app_id":"3X25CJ86MV.com.vettid.app"`, `"ios_app_id":["3X25CJ86MV.com.vettid.app"]`, 1)
+		}, ErrFormat},
 		// 0.26.0, features, the release check's rule 1.
 		"features missing":       {func(s string) string { return strings.Replace(s, `,"features":[]`, ``, 1) }, ErrFormat},
 		"features null":          {func(s string) string { return withFeatures(s, `null`) }, ErrFormat},
@@ -295,7 +334,7 @@ func TestFeatureNames(t *testing.T) {
 // pre026 is a channel file as releases before 0.26.0 had it: no
 // android_package, no features, bare signer digests.
 func pre026(t *testing.T, channel string) string {
-	s := strings.Replace(complete(t), `,"android_package":"com.vettid.app","features":[]`, ``, 1)
+	s := strings.Replace(complete(t), `,"android_package":"com.vettid.app","ios_app_id":"3X25CJ86MV.com.vettid.app","features":[]`, ``, 1)
 	s = strings.Replace(s, `[{"digest":"`+strings.Repeat("ab", 32)+`","class":"vettid"}]`, `["`+strings.Repeat("ab", 32)+`"]`, 1)
 	if channel == ChannelStaging {
 		s = staging(s)
@@ -604,7 +643,7 @@ func FuzzParse(f *testing.F) {
 			return
 		}
 		if c, err := p.Complete(); err == nil && (c.Release == 0 || len(c.ManifestKeys) == 0 || c.SealAccount == "" ||
-			c.AndroidPackage != AndroidPackages[c.Channel] || c.Features == nil || len(c.AndroidSigners) == 0) {
+			c.AndroidPackage != AndroidPackages[c.Channel] || c.IOSAppID != IOSAppIDs[c.Channel] || c.Features == nil || len(c.AndroidSigners) == 0) {
 			t.Fatal("complete without values")
 		}
 		seen := map[string]bool{}

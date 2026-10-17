@@ -20,8 +20,8 @@ import (
 // -dev-device-policy FILE) extends the TEST device-attestation policy
 // (Policy) so that a real phone running a debug or dev-stack build of the
 // app can enroll against a local dev stack with its real Keystore
-// attestation. It only adds to the TEST policy; it never removes the TEST
-// roots, package, signer or boot key. Release builds cannot load one: the
+// attestation or App Attest attestation. It only adds to the TEST policy;
+// it never removes the TEST roots, package, signer, boot key or App ID. Release builds cannot load one: the
 // flag exists only in the devenclave build of vault-enclave, and `make
 // check-tcb` proves it.
 //
@@ -33,7 +33,10 @@ import (
 //	  "android_roots_pem": ["-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----\n"],
 //	  "android_packages": ["com.vettid.app.dev", "com.vettid.app.devstack"],
 //	  "android_signers_sha256": ["<64 hex digits, or 32 colon-separated pairs>"],
-//	  "grapheneos_boot_keys": true
+//	  "grapheneos_boot_keys": true,
+//	  "apple_app_attest_root": true,
+//	  "ios_app_ids": ["3X25CJ86MV.com.vettid.app.dev", "3X25CJ86MV.com.vettid.app.devstack"],
+//	  "ios_development_environment": true
 //	}
 //
 // google_attestation_roots adds pins.GoogleAttestationRoots() (the Google
@@ -41,14 +44,23 @@ import (
 // adds further self-signed CA roots; android_packages are accepted besides
 // com.vettid.app; android_signers_sha256 are further signing-certificate
 // digests; grapheneos_boot_keys adds pins.GrapheneOSVerifiedBootKeys() for
-// verifiedBootState SelfSigned. Every member is optional, but the policy
-// must add something.
+// verifiedBootState SelfSigned. apple_app_attest_root adds
+// pins.AppleAppAttestRoot() (the Apple App Attestation root a release
+// pins) beside the TEST Apple CA; ios_app_ids are App IDs
+// ("<team id>.<bundle id>") accepted besides the TEST App ID, at an
+// attestation and at each assertion; ios_development_environment also
+// accepts the development App Attest environment (aaguid
+// "appattestdevelop"), which a release always refuses. Every member is
+// optional, but the policy must add something.
 type DevDevicePolicy struct {
 	GoogleRoots bool
 	ExtraRoots  []*x509.Certificate
 	Packages    []string
 	Signers     [][]byte
 	GrapheneOS  bool
+	AppleRoot   bool
+	IOSAppIDs   []string
+	IOSDevEnv   bool
 	raw         []byte
 }
 
@@ -61,6 +73,7 @@ const (
 	maxDevRoots    = 8
 	maxDevPackages = 16
 	maxDevSigners  = 16
+	maxDevAppIDs   = 16
 )
 
 var (
@@ -68,14 +81,21 @@ var (
 	// An Android application id: two or more dot-separated segments, each
 	// a letter followed by letters, digits or underscores.
 	androidPackageRE = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$`)
+	// An iOS App ID: a 10-character team id (upper-case letters and
+	// digits), a dot, and a bundle id of two or more dot-separated
+	// segments of letters, digits and hyphens.
+	iosAppIDRE = regexp.MustCompile(`^[A-Z0-9]{10}\.[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$`)
 )
 
 var devPolicyMembers = map[string]bool{
-	"google_attestation_roots": true,
-	"android_roots_pem":        true,
-	"android_packages":         true,
-	"android_signers_sha256":   true,
-	"grapheneos_boot_keys":     true,
+	"google_attestation_roots":    true,
+	"android_roots_pem":           true,
+	"android_packages":            true,
+	"android_signers_sha256":      true,
+	"grapheneos_boot_keys":        true,
+	"apple_app_attest_root":       true,
+	"ios_app_ids":                 true,
+	"ios_development_environment": true,
 }
 
 func devPolicyErr(format string, a ...any) error {
@@ -106,6 +126,31 @@ func ParseDevDevicePolicy(b []byte) (*DevDevicePolicy, error) {
 		if p.GrapheneOS, err = o.Bool("grapheneos_boot_keys"); err != nil {
 			return nil, devPolicyErr("grapheneos_boot_keys: %v", err)
 		}
+	}
+	if o.Has("apple_app_attest_root") {
+		if p.AppleRoot, err = o.Bool("apple_app_attest_root"); err != nil {
+			return nil, devPolicyErr("apple_app_attest_root: %v", err)
+		}
+	}
+	if o.Has("ios_development_environment") {
+		if p.IOSDevEnv, err = o.Bool("ios_development_environment"); err != nil {
+			return nil, devPolicyErr("ios_development_environment: %v", err)
+		}
+	}
+	appIDs, err := stringList(o, "ios_app_ids", maxDevAppIDs)
+	if err != nil {
+		return nil, err
+	}
+	seenApp := map[string]bool{}
+	for i, s := range appIDs {
+		if len(s) > 255 || !iosAppIDRE.MatchString(s) {
+			return nil, devPolicyErr("ios_app_ids[%d]: not an iOS App ID (<team id>.<bundle id>)", i)
+		}
+		if seenApp[s] {
+			return nil, devPolicyErr("ios_app_ids[%d]: duplicate", i)
+		}
+		seenApp[s] = true
+		p.IOSAppIDs = append(p.IOSAppIDs, s)
 	}
 	roots, err := stringList(o, "android_roots_pem", maxDevRoots)
 	if err != nil {
@@ -154,7 +199,8 @@ func ParseDevDevicePolicy(b []byte) (*DevDevicePolicy, error) {
 		seen[string(d)] = true
 		p.Signers = append(p.Signers, d)
 	}
-	if !p.GoogleRoots && !p.GrapheneOS && len(p.ExtraRoots) == 0 && len(p.Packages) == 0 && len(p.Signers) == 0 {
+	if !p.GoogleRoots && !p.GrapheneOS && len(p.ExtraRoots) == 0 && len(p.Packages) == 0 && len(p.Signers) == 0 &&
+		!p.AppleRoot && len(p.IOSAppIDs) == 0 && !p.IOSDevEnv {
 		return nil, devPolicyErr("the policy adds nothing")
 	}
 	return p, nil
@@ -258,6 +304,16 @@ func (p *DevDevicePolicy) Apply(base *devattest.Policy) *devattest.Policy {
 	if p.GrapheneOS {
 		out.AndroidSelfSignedBootKeys = append(out.AndroidSelfSignedBootKeys, pins.GrapheneOSVerifiedBootKeys()...)
 	}
+	if p.AppleRoot {
+		pool := x509.NewCertPool()
+		if base.IOSRoots != nil {
+			pool = base.IOSRoots.Clone()
+		}
+		pool.AddCert(pins.AppleAppAttestRoot())
+		out.IOSRoots = pool
+	}
+	out.IOSDevAppIDs = append(append([]string(nil), base.IOSDevAppIDs...), p.IOSAppIDs...)
+	out.IOSDevelopmentEnvironment = base.IOSDevelopmentEnvironment || p.IOSDevEnv
 	return &out
 }
 
@@ -266,7 +322,8 @@ func (p *DevDevicePolicy) Apply(base *devattest.Policy) *devattest.Policy {
 func (p *DevDevicePolicy) Raw() []byte { return bytes.Clone(p.raw) }
 
 // Summary describes the policy for logs and the dev stack's control port:
-// root subjects and SHA-256 fingerprints, packages, signer digests (hex).
+// root subjects and SHA-256 fingerprints, packages, signer digests (hex),
+// the iOS members.
 func (p *DevDevicePolicy) Summary() map[string]any {
 	roots := []string{}
 	for _, c := range p.ExtraRoots {
@@ -278,10 +335,13 @@ func (p *DevDevicePolicy) Summary() map[string]any {
 		signers = append(signers, hex.EncodeToString(s))
 	}
 	return map[string]any{
-		"google_attestation_roots": p.GoogleRoots,
-		"android_roots":            roots,
-		"android_packages":         append([]string{}, p.Packages...),
-		"android_signers_sha256":   signers,
-		"grapheneos_boot_keys":     p.GrapheneOS,
+		"google_attestation_roots":    p.GoogleRoots,
+		"android_roots":               roots,
+		"android_packages":            append([]string{}, p.Packages...),
+		"android_signers_sha256":      signers,
+		"grapheneos_boot_keys":        p.GrapheneOS,
+		"apple_app_attest_root":       p.AppleRoot,
+		"ios_app_ids":                 append([]string{}, p.IOSAppIDs...),
+		"ios_development_environment": p.IOSDevEnv,
 	}
 }

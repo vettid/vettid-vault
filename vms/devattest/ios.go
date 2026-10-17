@@ -23,6 +23,10 @@ var OIDAppAttestNonce = asn1.ObjectIdentifier{1, 2, 840, 113635, 100, 8, 2}
 // development environment uses "appattestdevelop".
 var AAGUIDProduction = [16]byte{'a', 'p', 'p', 'a', 't', 't', 'e', 's', 't'}
 
+// AAGUIDDevelopment is the development environment's aaguid, accepted only
+// under Policy.IOSDevelopmentEnvironment (dev enclaves).
+var AAGUIDDevelopment = [16]byte{'a', 'p', 'p', 'a', 't', 't', 'e', 's', 't', 'd', 'e', 'v', 'e', 'l', 'o', 'p'}
+
 const flagAttested = 0x40
 
 // authData is the parsed authenticator data.
@@ -60,9 +64,28 @@ func parseAuthData(b []byte, attested bool) (*authData, error) {
 	return a, nil
 }
 
-func appIDHash(p *Policy) []byte {
-	h := sha256.Sum256([]byte(p.IOSAppID))
-	return h[:]
+// appIDAccepted reports whether rpIDHash is SHA-256 of an App ID the
+// policy accepts: IOSAppID, or one of the development IOSDevAppIDs. A
+// release policy has exactly one (the channel's), and an empty IOSAppID
+// accepts nothing.
+func appIDAccepted(p *Policy, rpIDHash []byte) bool {
+	if p.IOSAppID == "" {
+		return false
+	}
+	ok := false
+	for _, id := range append([]string{p.IOSAppID}, p.IOSDevAppIDs...) {
+		h := sha256.Sum256([]byte(id))
+		if suite.Equal(rpIDHash, h[:]) {
+			ok = true
+		}
+	}
+	return ok
+}
+
+// environmentAccepted reports whether aaguid is the production App Attest
+// environment, or the development one under IOSDevelopmentEnvironment.
+func environmentAccepted(p *Policy, aaguid []byte) bool {
+	return suite.Equal(aaguid, AAGUIDProduction[:]) || p.IOSDevelopmentEnvironment && suite.Equal(aaguid, AAGUIDDevelopment[:])
 }
 
 func verifyIOS(p *Policy, keyID, att []byte, cdh [32]byte, now time.Time) (*Binding, error) {
@@ -150,13 +173,13 @@ func verifyIOS(p *Policy, keyID, att []byte, cdh [32]byte, now time.Time) (*Bind
 	if err != nil {
 		return nil, err
 	}
-	if !suite.Equal(a.rpIDHash, appIDHash(p)) {
+	if !appIDAccepted(p, a.rpIDHash) {
 		return nil, ErrApplication
 	}
 	if a.counter != 0 {
 		return nil, ErrCounter
 	}
-	if !suite.Equal(a.aaguid, AAGUIDProduction[:]) {
+	if !environmentAccepted(p, a.aaguid) {
 		return nil, ErrEnvironment
 	}
 	if !suite.Equal(a.credID, keyID) {
@@ -254,7 +277,7 @@ func verifyIOSAssertion(p *Policy, b *Binding, assertion []byte, cdh [32]byte, m
 	if !ecdsa.VerifyASN1(pub, digest[:], sig) {
 		return 0, ErrSignature
 	}
-	if !suite.Equal(a.rpIDHash, appIDHash(p)) {
+	if !appIDAccepted(p, a.rpIDHash) {
 		return 0, ErrApplication
 	}
 	if a.counter <= minCounter {

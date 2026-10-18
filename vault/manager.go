@@ -124,6 +124,12 @@ type Options struct {
 	// recovery_offered from a transfer bundle's capabilities (§11.10.9).
 	// Zero: offered (development, tests).
 	RecoveryNotOffered bool
+	// TimeScale is the running release's time scale (VAULT-MESSAGING
+	// 0.43.0 §11.10.8, STAGING-TIME-SCALE): the enclave's measured value,
+	// 1 outside staging and development (releasecfg.Config.TimeScale).
+	// It divides the waits of timescale.go when each starts, and is
+	// reported in vault.status and a transfer bundle. Zero: 1.
+	TimeScale uint64
 }
 
 // LifecycleEvent is reported to the parent, which writes it to the vault
@@ -425,6 +431,10 @@ func Create(ctx context.Context, p CreateParams) (*Manager, error) {
 	hdr := &Header{V: 1, VaultID: p.VaultID, UserGUID: p.UserGUID, Provisional: p.Provisional, CreatedAt: now.UTC(),
 		KDF: p.KDF, Pepper: pepper, SealedRelease: p.Release.PCR0, ManifestSerial: p.ManifestSerial,
 		SealKeyVerified: p.SealKeyVerified}
+	if p.Provisional {
+		// The enrollment window, divided by the time scale (0.43.0, S13).
+		hdr.EnrollUntil = hdr.CreatedAt.Add(p.Options.scale(EnrollWindow))
+	}
 	if p.App != nil && len(p.App.APIKey) > 0 {
 		hdr.AppKey, hdr.AppKeySeq = append([]byte(nil), p.App.APIKey...), 1
 	}

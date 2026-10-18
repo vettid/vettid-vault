@@ -266,7 +266,9 @@ func RecoveryOpen(ctx context.Context, p RecoveryOpenParams) (*Manager, *Recover
 		if sp.WaitUntil.After(v.Now) && recovery.WaitUnits(k) > 0 {
 			out.RetryAt = sp.WaitUntil
 			// The recovery stays open across the wait (§11.14.5).
-			r.Expires = recNow.Add(sp.WaitUntil.Sub(v.Now) + RecoveryValidity)
+			// The wait itself is W(k), whose unit is a release constant
+			// and is not scaled; the validity after it is (0.43.0, S6).
+			r.Expires = recNow.Add(sp.WaitUntil.Sub(v.Now) + p.Options.scale(RecoveryValidity))
 			out.Expires = r.Expires
 		}
 	case counter.Unavailable:

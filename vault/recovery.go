@@ -200,8 +200,13 @@ func (h *Header) logRecovery(now time.Time, kind, ref string) {
 // RecoveryRequest starts a recovery (§11.11.1): it mints the one-time code,
 // records its hash, the delay and the expiry in the sealed header, and
 // returns the code (which the caller seals to the member's browser key and
-// never stores). A newer request replaces an older one.
+// never stores). A newer request replaces an older one. The delay (24 h,
+// RecoveryDelay) and RecoveryValidity are real times, divided by the
+// release's time scale here (0.43.0, STAGING-TIME-SCALE S5, S6); the
+// record keeps the absolute not_before and expires.
 func RecoveryRequest(ctx context.Context, p HeaderParams, recoveryID string, delay time.Duration) (code string, rec RecoveryRecord, earliest bool, err error) {
+	delay = p.Options.scale(delay)
+	validity := p.Options.scale(RecoveryValidity)
 	raw, err := suite.RandomBytes(RecoveryCodeBytes)
 	if err != nil {
 		return "", rec, false, err
@@ -226,7 +231,7 @@ func RecoveryRequest(ctx context.Context, p HeaderParams, recoveryID string, del
 		var nb time.Time
 		nb, earliest = recoveryNotBefore(ctx, p.Options, h, now, delay)
 		rec = RecoveryRecord{ID: recoveryID, State: RecoveryPending, RequestedAt: now, NotBefore: nb,
-			Expires: nb.Add(RecoveryValidity), CodeHash: RecoveryCodeHash(p.VaultID, recoveryID, code)}
+			Expires: nb.Add(validity), CodeHash: RecoveryCodeHash(p.VaultID, recoveryID, code)}
 		h.Recovery = &rec
 		h.logRecovery(now, "recovery.requested", recoveryID)
 		return false, nil

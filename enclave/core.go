@@ -154,6 +154,8 @@ func (c *Core) vaultOptions(sealer vault.Sealer) vault.Options {
 	o.RecoveryWaitUnit, o.RecoveryQuiet = c.cfg.Recovery.WaitUnit, c.cfg.Recovery.Quiet
 	o.RecoveryCounterLock = c.cfg.Recovery.CounterLock
 	o.RecoveryNotOffered = !c.cfg.Recovery.Offered
+	// 0.43.0 (STAGING-TIME-SCALE): the time scale, 1 in production.
+	o.TimeScale = TimeScaleOf(c.cfg)
 	pol := c.cfg.DeviceAttest
 	o.DeviceAttest = func(d *altchan.DeviceAttest, ch [32]byte, now time.Time) (json.RawMessage, error) {
 		b, err := devattest.VerifyAttest(pol, d, ch, now, c.statusList())
@@ -339,7 +341,9 @@ func (c *Core) checkExisting(ctx context.Context, q *Job, ownKey string, now tim
 		s := c.sealerFor(ownKey, c.meas.PCR0)
 		defer s.Destroy()
 		h, err := vault.PeekHeader(ctx, s, hblob, id, c.meas.PCR0)
-		if err != nil || !h.Provisional || now.Sub(h.CreatedAt) < vault.EnrollWindow {
+		// The window as the header records it (0.43.0: scaled for a
+		// vault created by a scaled release, real time before).
+		if err != nil || !h.Provisional || now.Before(h.ProvisionalUntil()) {
 			return nil, false, nil
 		}
 		return &vault.Replace{State: sv, Header: hv}, true, nil

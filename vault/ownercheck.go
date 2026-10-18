@@ -271,9 +271,12 @@ func (m *Manager) ocTime(now time.Time) time.Time {
 	return now
 }
 
+// startClock starts the interval at now. The setting is in real units;
+// the deadline is now plus the interval divided by the time scale (0.43.0,
+// STAGING-TIME-SCALE S1), kept as an absolute time.
 func (m *Manager) startClock(rec *OwnerCheck, now time.Time) {
 	now = m.ocTime(now).UTC().Truncate(time.Millisecond)
-	rec.LastAt, rec.Deadline, rec.Failures = now, now.Add(m.st.Settings.OwnerCheckInterval()), 0
+	rec.LastAt, rec.Deadline, rec.Failures = now, now.Add(m.opt.scale(m.st.Settings.OwnerCheckInterval())), 0
 }
 
 // ownerCheckEnrolled starts the clock at the vault's first
@@ -625,7 +628,9 @@ func heldCountsJSON(w HeldCounts) []byte {
 // audited; the hold then applies at once if the deadline has passed.
 func (m *Manager) settingsOwnerCheck(prev, next Settings, now time.Time) {
 	if rec := m.st.OwnerCheck; rec != nil && !rec.Deadline.IsZero() && next.OwnerCheckInterval() < prev.OwnerCheckInterval() {
-		if d := rec.LastAt.Add(next.OwnerCheckInterval()); d.Before(rec.Deadline) {
+		// The settings compare in real units; the new deadline is scaled
+		// as startClock's (0.43.0, S1).
+		if d := rec.LastAt.Add(m.opt.scale(next.OwnerCheckInterval())); d.Before(rec.Deadline) {
 			rec.Deadline = d
 			m.dirty = true
 		}

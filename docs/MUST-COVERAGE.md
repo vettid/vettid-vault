@@ -28,7 +28,7 @@ volatile `message.list` and `message.get`, and `message.list` pages; for
 0.32.0 release A: message attachments (with VAULT-HOST-PROTOCOL 0.1.9
 P15 and RELAY-PROTOCOL 0.9.2–0.9.4's blob API); for 0.34.0 release R:
 `attempt_used` and the release capabilities; for 0.40.0: the bound on
-`device.session.request`; and,
+`device.session.request`; for 0.43.0: the staging time scale; and,
 ahead of its spec text, a connected but silent parent (§12.3,
 VAULT-HOST-PROTOCOL §13 point 1).)
 
@@ -1072,3 +1072,15 @@ Tests marked (tc) need `-tags vettid_testcost` (the recovery wrap at 8 MiB inste
 | 11.10.9 (0.34.0; owner decision 2026-10-16) | `recovery_offered` is listed exactly when the measured release constant offers recovery, in the descriptor and a transfer's bundle; it reaches the configuration and the vault options | `altchan.TestReleaseCapabilities`, `enclave.TestDescriptorCapabilities`, `enclave.TestRecoveryOfferedReachesCapabilities`, `vault.TestInviteBundleCapabilities` |
 | 11.14.6 (0.34.0; owner decision 2026-10-16) | a lost ok: the recovered phone's own unlock before its first handshake carries the bundle and a token, repeatably, with no counter call; the old phone's does not; none after the pairing; the recovered invite outlives its expiry, is renewed by that unlock and replaced by a later recovery | e2e `TestRecoveryRLostOK`, `vault.TestRecoveredInviteUntilPairing` |
 | 6.4, 6.7.1, 11.10.9 (0.34.0) | a transfer's bundle (kind app) carries the capabilities, bound by the QR's hash; no other kind carries them; absent is a release before R | `vault.TestInviteBundleCapabilities`, `invite.TestBundleCapabilities` |
+
+## The staging time scale (§10.2, §11.10.8, §11.10.9, §11.14.14; VAULT-RELEASES 0.1.32 §5.2; STAGING-TIME-SCALE 0.1.0; 0.43.0)
+
+| § | Requirement | Test |
+|---|---|---|
+| 11.10.8, 11.14.14 | `time_scale` in the channel file: production exactly 1 (missing, a placeholder or any other value refused by the release gate), staging 1 or 24; staging's quiet period exactly 259,200 / `time_scale`, production's at least 259,200; the committed files say 1 and 24 (10,800 s) | `releasecfg.TestTimeScaleRules`, `releasecfg.TestCommittedTimeScale`, `cmd/releasecfg.TestCheckCommand` |
+| 11.10.8, 11.14.14 | the accessor returns the file's value only in the staging channel, 1 otherwise (a production Config holding 24 included); a production image's file says 1 and its scale is 1 whatever the file says; the enclave returns 1 again in a production image | `releasecfg.TestTimeScaleAccessorIgnoresFileOutsideStaging`, `releasecfg.TestProductionImageRecoveryRules` (`make channels`, prod tag), `enclave.TestReleaseConfigTimeScale` |
+| STS 3, 5.5 | each scaled wait at 24 and at 1: owner check interval (S1; settings in real units, the shorter-interval move), recovery code delay and validity (S5, S6, also after a wait), counter notice (S8), pending unlink (S11), provisional window (S13, enclave and header); rounded up to a whole second | `vault.TestScale`, `vault.TestTimeScaleOwnerCheck`, `vault.TestTimeScaleRecoveryRequest`, `vault.TestTimeScaleRecoveryValidityAfterWait` (tc), `vault.TestTimeScaleCounterNotice`, `vault.TestTimeScalePendingUnlink`, `vault.TestTimeScaleEnrollWindow`, `enclave.TestTimeScaleDescriptorAndEnrollWindow` |
+| STS 5.5 | a timer started before the vault runs a scaled release keeps its time (owner-check deadline, recovery not_before/expires, a held notice without `until`, a header without `enroll_until`) | `vault.TestTimeScaleOwnerCheckTransition`, `vault.TestTimeScaleRecoveryRequest`, `vault.TestTimeScalePendingUnlink`, `vault.TestTimeScaleEnrollWindow` |
+| STS 2.2, 3 rule 4 | nothing in the not-scaled list changes: the constants keep their values, the wait unit is used as given, the owner-check bounds are unchanged | `vault.TestTimeScaleLeavesTheRestAlone` |
+| 10.2, 11.2, 11.10.9 | the descriptor carries `time_scale` after `capabilities`, bound by the attestation; a transfer bundle carries it (kind app only, bound by the QR's hash); `vault.status` to the app and desktops (not agents); absent is 0, malformed refused | `altchan.TestDescriptorTimeScale`, `invite.TestBundleTimeScale`, `enclave.TestTimeScaleDescriptorAndEnrollWindow`, `vault.TestTimeScaleReported` |
+| STS 5.1 | the dev stack's `-time-scale` reaches the dev enclave and the vault processes (1 to 86,400) | `cmd/devstack.TestParseFlags`, `enclavetest.TestDevVaultTimeScaleArgs` |

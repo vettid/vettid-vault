@@ -58,6 +58,34 @@ type Config struct {
 	// zero Counter: the counter is unreachable (every counted operation
 	// answers counter_unavailable).
 	Recovery RecoveryConfig
+	// TimeScale is the staging time scale (VAULT-MESSAGING 0.43.0
+	// §11.10.8, STAGING-TIME-SCALE): a release image's is
+	// releasecfg.Config.TimeScale (the staging file's value in the
+	// staging channel, 1 otherwise); a development configuration may set
+	// 1 to releasecfg.MaxDevTimeScale (devstack -time-scale). Zero: 1.
+	// Read through TimeScaleOf, which returns 1 in a production image
+	// whatever this says.
+	TimeScale uint64
+}
+
+// TimeScaleOf is the time scale an instance runs with: 1 in an image built
+// for the production channel whatever the configuration says (a second
+// guard beside releasecfg's, STAGING-TIME-SCALE §4 item 2), otherwise
+// cfg.TimeScale bounded to 1..releasecfg.MaxDevTimeScale.
+func TimeScaleOf(cfg Config) uint64 {
+	return timeScaleFor(ReleaseChannel(), cfg.TimeScale)
+}
+
+func timeScaleFor(channel string, n uint64) uint64 {
+	switch {
+	case channel == releasecfg.ChannelProd, n <= 1:
+		return 1
+	case channel == releasecfg.ChannelStaging && n != releasecfg.StagingTimeScale:
+		return 1
+	case n > releasecfg.MaxDevTimeScale:
+		return releasecfg.MaxDevTimeScale
+	}
+	return n
 }
 
 // RecoveryConfig are release R's recovery constants.
@@ -194,6 +222,8 @@ func releaseConfigFor(c *releasecfg.Config, instanceID, relayURL string) Config 
 			WaitUnit: time.Duration(c.RecoveryWaitUnitSeconds) * time.Second, Quiet: time.Duration(c.RecoveryQuietSeconds) * time.Second,
 			CounterLock: c.CounterLock(), Offered: c.RecoveryOffered, AndroidMinVersionCode: c.AndroidMinVersionCode}
 		cfg.DeviceAttest.AndroidMinVersionCode = c.AndroidMinVersionCode
+		// 0.43.0: the measured scale, 1 outside the staging channel.
+		cfg.TimeScale = c.TimeScale()
 	}
 	return cfg
 }

@@ -4,7 +4,8 @@
 // region, the retirement principal and window, the Android
 // signing certificates with their classes (0.27.0), the relay URL, (VAULT-MESSAGING 0.24.0)
 // the push gateway URL, (0.26.0) the Android package and the optional
-// features the image registers, and (0.35.0) the iOS App ID.
+// features the image registers, (0.35.0) the iOS App ID, and (0.43.0) the
+// staging time scale.
 //
 // Each channel's constants are a committed file (prod.json, staging.json)
 // that the build embeds, selected by the build tag vettid_channel_prod or
@@ -129,6 +130,10 @@ type Config struct {
 	RecoveryQuietSeconds    uint64
 	RecoveryOffered         bool
 	AndroidMinVersionCode   uint64
+	// FileTimeScale is the channel file's time_scale (VAULT-MESSAGING
+	// 0.43.0 §11.10.8, STAGING-TIME-SCALE): production exactly 1, staging
+	// 1 or 24. The vault reads it only through TimeScale, never directly.
+	FileTimeScale uint64
 }
 
 // Counter is the recovery attempt counter's S3 bucket (§11.14.4,
@@ -152,8 +157,12 @@ type RequestKey struct {
 // The build rules of §11.14.14 (VAULT-RELEASES §5.2): a production file
 // whose wait unit is below a day or whose quiet period is below 72 hours
 // is malformed, so a production image can never carry staging's short
-// unit. A staging file may shorten the unit (600 s), never the quiet
-// period.
+// unit. A staging file may shorten the unit (600 s); before 0.43.0 it
+// kept production's quiet period.
+//
+// From 0.43.0 (STAGING-TIME-SCALE §5.4) the quiet period's lower bound of
+// MinQuietSeconds is a production rule only: a staging file states the
+// quiet period as MinQuietSeconds / time_scale (10,800 s at 24), exactly.
 const (
 	ProdMinWaitUnitSeconds = 86400
 	MinQuietSeconds        = 259200
@@ -189,7 +198,7 @@ func Parse(b []byte) (*File, error) {
 	members := []string{"channel", "release", "manifest_keys", "seal_account", "seal_region",
 		"retirement_principal", "retirement_window_days", "android_signers", "relay_url", "push_url", "android_package", "ios_app_id", "features",
 		"recovery_counter", "recovery_request_keys", "recovery_wait_unit_seconds", "recovery_quiet_seconds", "recovery_offered",
-		"android_min_version_code"}
+		"android_min_version_code", "time_scale"}
 	if len(o) != len(members) {
 		return nil, ErrFormat
 	}
@@ -271,6 +280,9 @@ func Parse(b []byte) (*File, error) {
 	if c.Features, err = parseFeatures(raw); err != nil {
 		return nil, err
 	}
+	if c.FileTimeScale, err = parseTimeScale(o, c.Channel); err != nil {
+		return nil, err
+	}
 	if err := parseRecovery(o, c, missing); err != nil {
 		return nil, err
 	}
@@ -321,6 +333,53 @@ func (c *Config) CounterLock() time.Duration {
 		return StagingCounterLock
 	}
 	return ProdCounterLock
+}
+
+// The staging time scale (VAULT-MESSAGING 0.43.0 §11.10.8, VAULT-RELEASES
+// 0.1.32 §5.2, STAGING-TIME-SCALE; owner decision 2026-10-18): the number
+// by which the vault divides the waits of 1 hour or more that
+// STAGING-TIME-SCALE §2.1 lists. A production file must say exactly 1
+// (missing or a placeholder is malformed, as for every member), a staging
+// file 1 or 24; a development build has no file and takes its scale from
+// the dev stack (1 to MaxDevTimeScale).
+const (
+	ProdTimeScale    = 1
+	StagingTimeScale = 24
+	MaxDevTimeScale  = 86400
+)
+
+// parseTimeScale reads "time_scale": a positive integer, exactly 1 in the
+// production file and 1 or 24 in the staging file.
+func parseTimeScale(o strictjson.Object, channel string) (uint64, error) {
+	n, err := o.Uint("time_scale", 1, MaxDevTimeScale)
+	if err != nil {
+		return 0, ErrFormat
+	}
+	switch channel {
+	case ChannelProd:
+		if n != ProdTimeScale {
+			return 0, ErrFormat
+		}
+	case ChannelStaging:
+		if n != 1 && n != StagingTimeScale {
+			return 0, ErrFormat
+		}
+	default:
+		return 0, ErrFormat
+	}
+	return n, nil
+}
+
+// TimeScale is this release's time scale. Like CounterLock it is decided
+// by the measured channel: the file's value only in the staging channel
+// (where Parse allows 1 or 24), and 1 for any other channel or no
+// configuration, so a production image never scales whatever its file
+// says (STAGING-TIME-SCALE §4 item 2).
+func (c *Config) TimeScale() uint64 {
+	if c != nil && c.Channel == ChannelStaging && (c.FileTimeScale == 1 || c.FileTimeScale == StagingTimeScale) {
+		return c.FileTimeScale
+	}
+	return ProdTimeScale
 }
 
 // parseSigners reads "android_signers" (0.27.0, §11.10.8): 1 to 4
@@ -604,7 +663,9 @@ func dedupe(s []string) []string {
 // parseRecovery reads release R's members (§11.10.8) and applies the
 // build rules of §11.14.14: the counter bucket is the channel's own (in
 // the sealing account, under the pinned name), the production wait unit
-// is at least a day, the quiet period at least 72 hours in both channels.
+// is at least a day, the production quiet period at least 72 hours, and
+// (0.43.0) the staging quiet period exactly 72 hours / time_scale. It
+// runs after parseTimeScale.
 func parseRecovery(o strictjson.Object, c *Config, missing func(string)) error {
 	co, err := o.Object("recovery_counter")
 	if err != nil || len(co) != 3 || !co.Has("bucket") || !co.Has("account") || !co.Has("region") {
@@ -662,8 +723,18 @@ func parseRecovery(o strictjson.Object, c *Config, missing func(string)) error {
 	if c.RecoveryWaitUnitSeconds < min {
 		return ErrFormat
 	}
-	if c.RecoveryQuietSeconds, err = o.Uint("recovery_quiet_seconds", MinQuietSeconds, MaxQuietSeconds); err != nil {
+	if c.RecoveryQuietSeconds, err = o.Uint("recovery_quiet_seconds", 1, MaxQuietSeconds); err != nil {
 		return ErrFormat
+	}
+	switch c.Channel {
+	case ChannelProd:
+		if c.RecoveryQuietSeconds < MinQuietSeconds {
+			return ErrFormat
+		}
+	default: // staging: the production period divided by the file's scale
+		if c.FileTimeScale == 0 || c.RecoveryQuietSeconds != MinQuietSeconds/c.FileTimeScale {
+			return ErrFormat
+		}
 	}
 	if c.RecoveryOffered, err = o.Bool("recovery_offered"); err != nil {
 		return ErrFormat

@@ -40,11 +40,21 @@ func TestParseFlags(t *testing.T) {
 	if o, err = parseFlags([]string{"-features", "none"}); err != nil || o.features != "none" {
 		t.Fatalf("-features: %+v %v", o, err)
 	}
+	// 0.43.0 (STAGING-TIME-SCALE §5.1): the dev enclave's time scale.
+	if o.timeScale != 1 {
+		t.Fatalf("-time-scale default %d", o.timeScale)
+	}
+	if o, err = parseFlags([]string{"-time-scale", "3600"}); err != nil || o.timeScale != 3600 {
+		t.Fatalf("-time-scale: %+v %v", o, err)
+	}
 	for _, bad := range [][]string{
 		{"-relay-port", "18081"},
 		{"-ctl-port", "70000"},
 		{"-wait-free-mem", "-1"},
 		{"-recovery-skew", "-24h"},
+		{"-time-scale", "0"},
+		{"-time-scale", "86401"},
+		{"-time-scale", "-1"},
 		{"-localstack", "127.0.0.1:4566"},
 		{"extra"},
 		{"-unknown"},

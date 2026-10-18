@@ -213,6 +213,53 @@ func FuzzParseBundle(f *testing.F) {
 	})
 }
 
+// 0.43.0 (§11.10.9, STAGING-TIME-SCALE §5.2): a transfer's bundle
+// carries the vault's time scale after its capabilities, bound by the
+// QR's hash; no other kind carries it; absent is 0 (before the scale).
+func TestBundleTimeScale(t *testing.T) {
+	b := testBundle(t, "app", false, TTLInPerson)
+	b.HintName = ""
+	b.Capabilities = altchan.ReleaseCapabilities(true)
+	b.TimeScale = 24
+	j, err := b.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(j), `"recovery_r"],"time_scale":24`) {
+		t.Fatalf("member order: %s", j)
+	}
+	blob, q := publish(t, b, KindApp)
+	got, err := OpenBundle(blob, q, t0)
+	if err != nil || got.TimeScale != 24 {
+		t.Fatalf("%v %d", err, got.TimeScale)
+	}
+	j2 := bytes.Replace(j, []byte(`"time_scale":24`), []byte(`"time_scale":1`), 1)
+	blob2, _, _, err := SealBundle(j2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenBundle(blob2, q, t0); !errors.Is(err, ErrHash) {
+		t.Fatalf("a changed scale under the original QR: %v", err)
+	}
+	old := testBundle(t, "app", false, TTLInPerson)
+	blob, q = publish(t, old, KindApp)
+	if got, err := OpenBundle(blob, q, t0); err != nil || got.TimeScale != 0 {
+		t.Fatalf("a bundle before the scale: %v %d", err, got.TimeScale)
+	}
+	for _, kind := range []string{"connection", "desktop", "agent"} {
+		c := testBundle(t, kind, false, TTLInPerson)
+		c.TimeScale = 1
+		if _, err := c.Marshal(); err == nil {
+			t.Fatalf("%s bundle with time_scale accepted", kind)
+		}
+	}
+	for _, bad := range []string{`0`, `86401`, `"24"`} {
+		if _, err := ParseBundle(bytes.Replace(j, []byte(`"time_scale":24`), []byte(`"time_scale":`+bad), 1)); err == nil {
+			t.Errorf("time_scale %s parsed", bad)
+		}
+	}
+}
+
 // 0.34.0, release R (§6.4, §11.10.9): a transfer's bundle (kind app)
 // carries the vault's capabilities, which the QR's hash binds; no other
 // kind carries them; a bundle without them is a release before R.

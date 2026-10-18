@@ -120,6 +120,41 @@ recovery or a new enrollment, each of which binds) while S10 is live.
 `releasecfg check staging` says so while it applies:
 "vaults enrolled before 0.27.0 unlock unbound".
 
+### The staging time scale
+
+(VAULT-MESSAGING 0.43.0 §11.10.8, §11.14.14; VAULT-RELEASES 0.1.32 §5.2;
+STAGING-TIME-SCALE.) `time_scale` divides the vault's waits of 1 hour or
+more on staging, so that a day becomes an hour:
+
+| Member | Staging | Production | Rule |
+|---|---|---|---|
+| `time_scale` | `24` (or `1` for a real-time run) | `1` | production exactly 1; staging 1 or 24; missing, a placeholder or any other value is malformed |
+| `recovery_quiet_seconds` | `10800` (= 259,200 / `time_scale`) | at least `259200` | on staging exactly 259,200 / `time_scale`; the 72-hour lower bound is production's only |
+
+The image uses the file's value only when its measured channel is
+staging (`Config.TimeScale`, like `CounterLock`), and the enclave
+returns 1 again in a production image whatever its configuration says
+(`enclave.TimeScaleOf`), so no production vault scales whatever its
+file says. The value is in the embedded file (so in `releasecfg_sha256`
+and PCR0), in the ETK descriptor (`time_scale`, bound by the
+attestation), in a transfer bundle and in `vault.status`.
+
+What the vault divides, when each timer starts (`vault.Scale`, rounded
+up to a whole second; the absolute time is stored, so a timer started
+before a vault moved into the release keeps its time): the owner check's
+interval (S1; the setting stays in real units), the recovery code's
+delay and validity (S5, S6), the counter's 24-hour unavailable notice
+(S8), the old phone's held notice after a transfer (S11) and the
+provisional enrollment window (S13). The quiet period (S7) is the
+channel file's own number. Nothing else changes: rate limits, the
+backoff ladders, cryptographic freshness, token lifetimes, the recovery
+wait unit (600 s on staging, not divided again), timers between vaults,
+durations the member chooses, retention, and the counter's S3 locks.
+
+`releasecfg check` prints the release log's words for the scale; each
+release log entry from the release that ships it carries them: "Time
+scale: 1 day = 1 hour (staging)", or "Time scale: real time".
+
 ### Features and the Android package
 
 (VAULT-MESSAGING 0.26.0 §11.10.8; VAULT-RELEASES 0.1.11 §5.2.) Two

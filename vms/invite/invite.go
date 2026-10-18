@@ -195,6 +195,11 @@ type Bundle struct {
 	// a bundle of kind "app" (a transfer; 0.34.0, release R, §6.4,
 	// §11.10.9); nil when absent (a release before R).
 	Capabilities []string
+	// TimeScale is the vault's release time scale, carried, like
+	// Capabilities, only by a bundle of kind "app" (0.43.0, §11.10.9,
+	// STAGING-TIME-SCALE §5.2): written after capabilities; 0 when absent
+	// (a release before the scale, meaning 1).
+	TimeScale uint64
 }
 
 const expLayout = "2006-01-02T15:04:05Z"
@@ -221,6 +226,9 @@ func (b *Bundle) validate() error {
 	if b.Capabilities != nil && (b.Kind != "app" || !altchan.ValidCapabilities(b.Capabilities)) {
 		return ErrBundle
 	}
+	if b.TimeScale != 0 && (b.Kind != "app" || b.TimeScale > altchan.MaxTimeScale) {
+		return ErrBundle
+	}
 	return nil
 }
 
@@ -240,6 +248,9 @@ func (b *Bundle) Marshal() ([]byte, error) {
 		String("exp", b.Exp.UTC().Format(expLayout))
 	if b.Capabilities != nil {
 		bb.Raw("capabilities", altchan.MarshalCapabilities(b.Capabilities))
+	}
+	if b.TimeScale != 0 {
+		bb.Uint("time_scale", b.TimeScale)
 	}
 	if b.HintName != "" {
 		bb.Raw("hint", strictjson.NewBuilder().String("name", b.HintName).Bytes())
@@ -291,6 +302,9 @@ func ParseBundle(raw []byte) (*Bundle, error) {
 		return nil, ErrBundle
 	}
 	if b.Capabilities, err = altchan.ParseCapabilities(o, "capabilities"); err != nil {
+		return nil, ErrBundle
+	}
+	if b.TimeScale, err = altchan.ParseTimeScale(o, "time_scale"); err != nil {
 		return nil, ErrBundle
 	}
 	if o.Has("hint") {

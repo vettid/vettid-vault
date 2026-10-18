@@ -147,7 +147,7 @@ func TestSealOpen(t *testing.T) {
 func TestDescriptor(t *testing.T) {
 	k := testKEM(t)
 	na := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
-	d := MarshalDescriptor("i-1", k.Public(), strings.Repeat("ab", 48), na, nil)
+	d := MarshalDescriptor("i-1", k.Public(), strings.Repeat("ab", 48), na, nil, 0)
 	p, err := ParseDescriptor(d)
 	if err != nil || !p.NotAfter.Equal(na) || !p.Kid.Equal(k.Public().Kid()) {
 		t.Fatal(err)
@@ -225,8 +225,8 @@ func TestValidInstanceID(t *testing.T) {
 
 func FuzzParseDescriptor(f *testing.F) {
 	k, _ := suite.NewPrivateKey(bytes.Repeat([]byte{5}, 32))
-	f.Add(MarshalDescriptor("i-1", k.Public(), strings.Repeat("ab", 48), time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC), nil))
-	f.Add(MarshalDescriptor("i-0123456789abcdef_ENC", k.Public(), strings.Repeat("ab", 48), time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC), nil))
+	f.Add(MarshalDescriptor("i-1", k.Public(), strings.Repeat("ab", 48), time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC), nil, 0))
+	f.Add(MarshalDescriptor("i-0123456789abcdef_ENC", k.Public(), strings.Repeat("ab", 48), time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC), nil, 0))
 	f.Fuzz(func(t *testing.T, b []byte) {
 		_, _ = ParseDescriptor(b)
 	})

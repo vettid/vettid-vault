@@ -266,7 +266,9 @@ func RecoveryOpen(ctx context.Context, p RecoveryOpenParams) (*Manager, *Recover
 		if sp.WaitUntil.After(v.Now) && recovery.WaitUnits(k) > 0 {
 			out.RetryAt = sp.WaitUntil
 			// The recovery stays open across the wait (§11.14.5).
-			r.Expires = recNow.Add(sp.WaitUntil.Sub(v.Now) + RecoveryValidity)
+			// The wait itself is W(k), whose unit is a release constant
+			// and is not scaled; the validity after it is (0.43.0, S6).
+			r.Expires = recNow.Add(sp.WaitUntil.Sub(v.Now) + p.Options.scale(RecoveryValidity))
 			out.Expires = r.Expires
 		}
 	case counter.Unavailable:
@@ -440,7 +442,7 @@ func (m *Manager) completeRecoveryR(ctx context.Context, p RecoveryOpenParams, r
 	// The event in the state (step 2): the phone's first handshake
 	// (ctx = recovery_id, no approval), the other apps removed, the keys
 	// rotated, the attempt's success recorded.
-	m.setRecoveredInvite(&Invite{ID: r.ID, Kind: KindApp, Exp: now.Add(RecoveryValidity), EnrollIK: r.App.IK, EnrollRelayPK: r.App.RelayPK,
+	m.setRecoveredInvite(&Invite{ID: r.ID, Kind: KindApp, Exp: now.Add(RecoveredInviteWindow), EnrollIK: r.App.IK, EnrollRelayPK: r.App.RelayPK,
 		EnrollKEM: r.App.KEM, EnrollAttest: r.App.Attestation, CreatedBy: inviteByRecovery}, now)
 	if d, c := m.vaultSigner(""); d != "" {
 		m.st.RecoveredSigner = []string{d, c}
@@ -569,7 +571,7 @@ func resumeRecovery(ctx context.Context, p RecoveryOpenParams, hdr *Header, hver
 		}
 		r := hdr.Recovery
 		if r != nil && r.App != nil {
-			m.setRecoveredInvite(&Invite{ID: r.ID, Kind: KindApp, Exp: now.Add(RecoveryValidity), EnrollIK: r.App.IK, EnrollRelayPK: r.App.RelayPK,
+			m.setRecoveredInvite(&Invite{ID: r.ID, Kind: KindApp, Exp: now.Add(RecoveredInviteWindow), EnrollIK: r.App.IK, EnrollRelayPK: r.App.RelayPK,
 				EnrollKEM: r.App.KEM, EnrollAttest: r.App.Attestation, CreatedBy: inviteByRecovery}, now)
 			m.replaceApps("", now)
 		}
@@ -652,12 +654,12 @@ func (m *Manager) dropRecoveredHandshake(id string, now time.Time) {
 // handshake: the result carries the vault's bundle again (the token it
 // carries anyway), and the phone's pairing starts afresh: a handshake
 // begun and not completed is dropped, and the invite is usable for
-// another RecoveryValidity. It may repeat until the phone pairs; no
+// another RecoveredInviteWindow. It may repeat until the phone pairs; no
 // attempt is used and the counter is not called.
 func (m *Manager) resumeLostOK(inv *Invite, now time.Time) []byte {
 	m.dropRecoveredHandshake(inv.ID, now)
 	inv.Used = false
-	inv.Exp = now.Add(RecoveryValidity)
+	inv.Exp = now.Add(RecoveredInviteWindow)
 	m.dirty = true
 	return VaultBundle(handshake.Principal{IK: m.keys.ik.Public().(ed25519.PublicKey), KEM: m.keys.kem.Public(), Relay: m.ownAddr()})
 }

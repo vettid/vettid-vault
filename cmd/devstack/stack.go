@@ -262,6 +262,7 @@ func (s *stack) info() map[string]any {
 		"push_url":        pushURL,
 		"push_tls":        s.pushTLS,       // the push gateway stand-in's TLS front
 		"features":        s.opts.features, // "" = every optional feature
+		"time_scale":      max(s.opts.timeScale, 1),
 	}
 	if s.policy != nil {
 		m["device_policy"] = s.policy.Summary()
@@ -499,6 +500,9 @@ func (s *stack) startInstance(ctx context.Context) error {
 	}
 	if s.opts.features != "" {
 		eargs = append(eargs, "-dev-features", s.opts.features)
+	}
+	if s.opts.timeScale > 1 {
+		eargs = append(eargs, "-dev-time-scale", strconv.FormatUint(s.opts.timeScale, 10))
 	}
 	if s.opts.recoverySkew > 0 {
 		abs, err := filepath.Abs(filepath.Join(s.runDir, "recovery-clock"))

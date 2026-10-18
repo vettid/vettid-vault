@@ -55,6 +55,11 @@ type DevOptions struct {
 	// internal/pushtest; 0.24.0): its host is allowlisted with the test
 	// TLS root. The vault processes need it too: append DevVaultPushArgs.
 	PushURL string
+	// TimeScale, if above 1, is the development time scale (0.43.0,
+	// STAGING-TIME-SCALE §5.1; DEVELOPMENT ONLY, devstack -time-scale):
+	// 1 to vault.MaxTimeScale. The vault processes need it too: append
+	// DevVaultTimeScaleArgs.
+	TimeScale uint64
 }
 
 // DevSupervisor returns a supervisor configuration for development and
@@ -66,6 +71,9 @@ type DevOptions struct {
 func DevSupervisor(o DevOptions) (supervisor.Config, error) {
 	if o.Release == 0 || o.Release > 15 {
 		return supervisor.Config{}, errors.New("enclavetest: release must be 1-15")
+	}
+	if o.TimeScale > vault.MaxTimeScale {
+		return supervisor.Config{}, errors.New("enclavetest: time scale must be 1-86400")
 	}
 	u, err := url.Parse(o.RelayURL)
 	if err != nil || u.Scheme != "https" || u.Port() != "" || u.Path != "" || u.Hostname() == "" {
@@ -114,6 +122,7 @@ func DevSupervisor(o DevOptions) (supervisor.Config, error) {
 		Enclave: func(id string) enclave.Config {
 			c := devConfig(id, o.Release, o.RelayURL, o.DevicePolicy)
 			c.PushURL = o.PushURL
+			c.TimeScale = o.TimeScale
 			if o.RecoveryClock != "" {
 				c.RecoveryNow = DevRecoveryClock(o.RecoveryClock)
 			}
@@ -192,6 +201,15 @@ func DevVaultPushArgs(pushURL string) []string {
 	return []string{"-push-url", pushURL}
 }
 
+// DevVaultTimeScaleArgs pass a development time scale on to a dev vault
+// process (none for 0 or 1).
+func DevVaultTimeScaleArgs(n uint64) []string {
+	if n <= 1 {
+		return nil
+	}
+	return []string{"-time-scale", strconv.FormatUint(n, 10)}
+}
+
 // ParseDevFeatures parses a development feature list (-dev-features,
 // VAULT-MESSAGING 0.26.0 §11.10.8, "The development build"): "all" (the
 // default: every optional feature), "none" (production release 1's
@@ -266,7 +284,8 @@ func DevVaultPlatform(args []string) (vaultproc.Platform, error) {
 	clock := fs.String("recovery-clock", "", "recovery clock file (DevRecoveryClock)")
 	push := fs.String("push-url", "", "push gateway stand-in URL (DevVaultPushArgs)")
 	feats := fs.String("features", "all", "optional features (DevVaultFeatureArgs)")
-	if err := fs.Parse(args); err != nil || *n == 0 || *n > 15 || *relay == "" || fs.NArg() != 0 {
+	scale := fs.Uint64("time-scale", 1, "development time scale (DevVaultTimeScaleArgs)")
+	if err := fs.Parse(args); err != nil || *n == 0 || *n > 15 || *relay == "" || fs.NArg() != 0 || *scale == 0 || *scale > vault.MaxTimeScale {
 		return vaultproc.Platform{}, errors.New("enclavetest: bad vault process arguments")
 	}
 	optional, err := ParseDevFeatures(*feats)
@@ -287,6 +306,7 @@ func DevVaultPlatform(args []string) (vaultproc.Platform, error) {
 		Config: func(id string) enclave.Config {
 			c := devConfig(id, *n, *relay, dp)
 			c.PushURL = *push
+			c.TimeScale = *scale
 			if *clock != "" {
 				c.RecoveryNow = DevRecoveryClock(*clock)
 			}

@@ -75,6 +75,8 @@ type options struct {
 	minFreeGB    int
 	memWait      time.Duration
 	recoverySkew time.Duration
+	// timeScale is the dev enclave's time scale (-time-scale, 0.43.0).
+	timeScale uint64
 }
 
 func parseFlags(args []string) (*options, error) {
@@ -96,8 +98,12 @@ func parseFlags(args []string) (*options, error) {
 	fs.IntVar(&o.minFreeGB, "wait-free-mem", 8, "refuse to start unless this many GB of memory are available (0: no check)")
 	fs.DurationVar(&o.memWait, "mem-wait", 0, "with -wait-free-mem: keep re-checking (every 30 s) this long before refusing")
 	fs.DurationVar(&o.recoverySkew, "recovery-skew", 0, "POST /dev/recovery/code moves the recovery clock (enclave and member API) forward this much after each code is minted, e.g. 24h to skip the recovery delay (0: no recovery clock; DEVELOPMENT ONLY)")
+	fs.Uint64Var(&o.timeScale, "time-scale", 1, "the dev enclave's time scale (VAULT-MESSAGING 0.43.0, STAGING-TIME-SCALE): the waits of 1 hour or more of §2.1 are divided by it, e.g. 3600 makes the owner check's 24 h 24 s (1 to 86400; passed to vault-enclave as -dev-time-scale; DEVELOPMENT ONLY)")
 	if err := fs.Parse(args); err != nil {
 		return nil, err
+	}
+	if o.timeScale == 0 || o.timeScale > 86400 {
+		return nil, errors.New("-time-scale must be 1 to 86400")
 	}
 	if fs.NArg() != 0 {
 		return nil, fmt.Errorf("unexpected arguments %q", fs.Args())

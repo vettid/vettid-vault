@@ -246,6 +246,28 @@ func TestDevVaultPolicyArgs(t *testing.T) {
 	}
 }
 
+// The development time scale (0.43.0, STAGING-TIME-SCALE §5.1,
+// devstack -time-scale) reaches the vault processes' configuration
+// through DevVaultTimeScaleArgs; without it they run at 1.
+func TestDevVaultTimeScaleArgs(t *testing.T) {
+	base := enclavetest.DevVaultArgs(3, "https://relay.vettid.test")
+	if enclavetest.DevVaultTimeScaleArgs(0) != nil || enclavetest.DevVaultTimeScaleArgs(1) != nil {
+		t.Fatal("real time has arguments")
+	}
+	pl, err := enclavetest.DevVaultPlatform(append(base, enclavetest.DevVaultTimeScaleArgs(3600)...))
+	if err != nil || pl.Config("v").TimeScale != 3600 {
+		t.Fatalf("vault process scale: %v", err)
+	}
+	if pl, err := enclavetest.DevVaultPlatform(base); err != nil || pl.Config("v").TimeScale != 1 {
+		t.Fatalf("default scale: %v", err)
+	}
+	for _, bad := range []string{"0", "86401", "x"} {
+		if _, err := enclavetest.DevVaultPlatform(append(append([]string{}, base...), "-time-scale", bad)); err == nil {
+			t.Errorf("-time-scale %s accepted", bad)
+		}
+	}
+}
+
 func FuzzParseDevDevicePolicy(f *testing.F) {
 	f.Add([]byte(`{"google_attestation_roots":true,"android_packages":["com.vettid.app.dev"],"grapheneos_boot_keys":true}`))
 	f.Add([]byte(`{"android_signers_sha256":["` + hex.EncodeToString(debugSigner[:]) + `"]}`))

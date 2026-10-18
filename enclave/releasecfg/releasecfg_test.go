@@ -41,7 +41,7 @@ func complete(t *testing.T) string {
 func recoveryMembers(t *testing.T, account string, unit int) string {
 	return `,"recovery_counter":{"bucket":"vettid-org-vault-recovery-` + account + `","account":"` + account + `","region":"us-east-1"},` +
 		`"recovery_request_keys":[{"key_id":"test-key-1","spki":"` + spki(t, 0x25) + `"}],"recovery_wait_unit_seconds":` + strconv.Itoa(unit) +
-		`,"recovery_quiet_seconds":259200,"recovery_offered":true,"android_min_version_code":100`
+		`,"recovery_quiet_seconds":259200,"recovery_offered":true,"android_min_version_code":100,"time_scale":1`
 }
 
 // releaseROpen are release R's members still open in production's file:

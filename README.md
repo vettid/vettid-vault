@@ -217,6 +217,7 @@ binary. One stack per data directory.
 | `-compose` | `podman compose`, else `docker compose` | compose command |
 | `-wait-free-mem` | 8 | refuse to start unless this many GB of memory are available (0: no check); `-mem-wait 10m` keeps re-checking |
 | (push) | — | the push gateway stand-in (`internal/pushtest`) on `https://push.vettid.test` behind a TLS front with the test root: the dev enclave runs with `-push-url` (dev builds only) and the parent allows the host, so `push.register` works against the dev enclave's TEST attestation |
+| `-time-scale` | 1 | the dev enclave's time scale (VAULT-MESSAGING 0.43.0, STAGING-TIME-SCALE), passed to `vault-enclave` as `-dev-time-scale` (devenclave builds only): the vault's waits of 1 hour or more (the owner check's interval, the recovery code's delay and validity, the counter's 24 h notice, the old phone's held notice, the provisional enrollment window) are divided by it, 1 to 86,400; at 3600 the owner check's 24 h is 24 s |
 | `-recovery-skew` | 0 | e.g. `24h`: `POST /dev/recovery/code` moves the recovery clock of the enclave and the member API stand-in forward this much after minting each code, skipping the 24 h recovery delay (below) |
 
 Everything listens on 127.0.0.1. Child processes run with
@@ -402,12 +403,15 @@ reverse`. Unlike AGENT-PLAN §4.8's wording, nothing here rewrites origins
 for the connector: the dial mapping (or the fallback's rewrite) belongs
 only in a dev-stack build of the connector, never in a release build.
 
-**Not reachable quickly: a held vault.** The owner check (§3.6) holds a
-vault only after its deadline passes. The shortest interval is one hour
+**A held vault.** The owner check (§3.6) holds a vault only after its
+deadline passes. In real time the shortest interval is one hour
 (`$M settings set <version> '{"owner_check.interval_seconds":3600}'`;
-`settings get` gives the version), and the stack has no clock to move for
-it (only the recovery clock, `-recovery-skew`). So `owner_check_required`
-takes over an hour on the dev stack.
+`settings get` gives the version). Start the stack with `-time-scale
+3600` and the default 24 h interval is 24 seconds (the setting still
+reads 86,400: settings keep real units), so `owner_check_required`
+arrives within a minute. The deadline is set when the clock starts or a
+check passes, so the scale applies to vaults enrolled, or checked, on
+that stack.
 
 The stack's own test runs with `make integration`.
 
@@ -451,7 +455,12 @@ ascending; staging lists all seven, production none). Since 0.35.0 each
 file also carries `ios_app_id`, the one iOS App ID its images accept in
 App Attest (`3X25CJ86MV.com.vettid.app` in production,
 `3X25CJ86MV.com.vettid.app.staging` in staging; any other value is
-malformed); it was a constant in code before. A feature that is
+malformed); it was a constant in code before. Since 0.43.0 each file
+also carries `time_scale` (production exactly 1, staging 1 or 24;
+staging's file says 24), by which the vault divides its waits of 1 hour
+or more on staging, and staging's quiet period is 259,200 /
+`time_scale` (10,800 s); the image uses the value only in the staging
+channel and 1 otherwise ([`docs/RELEASING.md`](docs/RELEASING.md)). A feature that is
 not listed is not constructed: its types answer `unsupported_type` and
 it keeps no state. A channel's list only grows
 (`go run ./cmd/releasecfg check -previous <the previous release's file> <channel>`,

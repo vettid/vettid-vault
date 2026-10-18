@@ -93,5 +93,21 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintf(stdout, "releasecfg: %s release %d complete (%d manifest key(s), sealing account %s %s, retirement window %d days, android package %s, iOS App ID %s, signers: %s%s, optional features: %s%s)\n",
 		c.Channel, c.Release, len(c.ManifestKeys), c.SealAccount, c.SealRegion, c.RetirementWindowDays, c.AndroidPackage, c.IOSAppID, strings.Join(signers, ", "), unbound, features, grows)
+	// VAULT-RELEASES 0.1.32 §5.2: each release log entry says the scale in
+	// words; this is the line to copy.
+	fmt.Fprintf(stdout, "releasecfg: release log: %s\n", TimeScaleWords(c))
 	return 0
+}
+
+// TimeScaleWords is the release log's words for the image's time scale
+// (VAULT-RELEASES 0.1.32 §5.2, STAGING-TIME-SCALE §4 item 3).
+func TimeScaleWords(c *releasecfg.Config) string {
+	switch n := c.TimeScale(); {
+	case n == 1:
+		return "Time scale: real time"
+	case n == releasecfg.StagingTimeScale:
+		return "Time scale: 1 day = 1 hour (" + c.Channel + ")"
+	default:
+		return fmt.Sprintf("Time scale: divided by %d (%s)", n, c.Channel)
+	}
 }

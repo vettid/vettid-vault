@@ -34,7 +34,8 @@ func TestCounterLockReachesVaultOptions(t *testing.T) {
 
 // The committed staging file builds the enclave configuration a staging
 // image runs with: the pinned recovery request key, the counter bucket,
-// staging's counter lock period and the minimum app version (101) reach
+// staging's counter lock period, (0.43.0) its 3-hour quiet period and time
+// scale 24, and the minimum app version (101) reach
 // Config.Recovery, the device policy and the vault options.
 func TestCommittedStagingFileReachesTheConfig(t *testing.T) {
 	b, err := os.ReadFile("releasecfg/staging.json")
@@ -51,7 +52,7 @@ func TestCommittedStagingFileReachesTheConfig(t *testing.T) {
 		t.Fatalf("request keys %+v", r.RequestKeys)
 	}
 	if r.Counter.Host() != "vettid-org-vault-recovery-347272280361.s3.us-east-1.amazonaws.com" || r.WaitUnit != 600*time.Second ||
-		r.Quiet != 72*time.Hour || !r.Offered || r.CounterLock != 24*time.Hour {
+		r.Quiet != 3*time.Hour || !r.Offered || r.CounterLock != 24*time.Hour || cfg.TimeScale != 24 {
 		t.Fatalf("recovery config %+v", r)
 	}
 	if r.AndroidMinVersionCode != 101 || cfg.DeviceAttest == nil || cfg.DeviceAttest.AndroidMinVersionCode != 101 {

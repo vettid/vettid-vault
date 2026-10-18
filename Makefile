@@ -27,12 +27,14 @@ test:
 
 # The per-channel release constants (VAULT-MESSAGING §11.10.8): each
 # channel's build embeds its committed file, and the release gate refuses
-# placeholders (Dockerfile.enclave and scripts/build-eif.sh run it).
+# placeholders (Dockerfile.enclave and scripts/build-eif.sh run it). The
+# enclave's time-scale tests run per channel too: a production build is
+# at scale 1 whatever its configuration says (STAGING-TIME-SCALE §4).
 CHANNELS := prod staging
 channels:
 	@for ch in $(CHANNELS); do \
 	  $(GO) test -count=1 -tags vettid_channel_$$ch ./enclave/releasecfg || exit 1; \
-	  $(GO) test -count=1 -tags vettid_channel_$$ch -run 'TestReleaseConfig' ./enclave || exit 1; \
+	  $(GO) test -count=1 -tags vettid_channel_$$ch -run 'TestReleaseConfig|TimeScale' ./enclave || exit 1; \
 	  GOOS=linux $(GO) build -tags vettid_channel_$$ch -o /dev/null ./cmd/vault-enclave || exit 1; \
 	done
 

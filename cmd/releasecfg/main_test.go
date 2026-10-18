@@ -43,8 +43,26 @@ func TestCheckCommand(t *testing.T) {
 	// The committed staging file passes rule 1 and names what it pins.
 	code, out := check("staging", stagingFile)
 	if code != 0 || !strings.Contains(out, "android package com.vettid.app.staging") || !strings.Contains(out, "iOS App ID 3X25CJ86MV.com.vettid.app.staging") ||
-		!strings.Contains(out, "optional features: actions calls intro leash location presence wallet") {
+		!strings.Contains(out, "optional features: actions calls intro leash location presence wallet") ||
+		!strings.Contains(out, "release log: Time scale: 1 day = 1 hour (staging)") {
 		t.Fatalf("staging: %d %s", code, out)
+	}
+	// 0.43.0 (VAULT-RELEASES 0.1.32 §5.2): staging accepts only 1 or 24,
+	// with the quiet period tied to it; at 1 the log says real time.
+	realTime := strings.Replace(strings.Replace(staging, `"time_scale": 24`, `"time_scale": 1`, 1), `"recovery_quiet_seconds": 10800`, `"recovery_quiet_seconds": 259200`, 1)
+	if code, out := check("staging", write("s-real.json", realTime)); code != 0 || !strings.Contains(out, "release log: Time scale: real time") {
+		t.Fatalf("staging at 1: %d %s", code, out)
+	}
+	for name, bad := range map[string]string{
+		"scale 12":            strings.Replace(staging, `"time_scale": 24`, `"time_scale": 12`, 1),
+		"scale 0":             strings.Replace(staging, `"time_scale": 24`, `"time_scale": 0`, 1),
+		"scale 24, quiet 72h": strings.Replace(staging, `"recovery_quiet_seconds": 10800`, `"recovery_quiet_seconds": 259200`, 1),
+		"scale 1, quiet 3h":   strings.Replace(staging, `"time_scale": 24`, `"time_scale": 1`, 1),
+		"no scale":            strings.Replace(staging, ",\n  \"time_scale\": 24", "", 1),
+	} {
+		if code, out := check("staging", write("s-bad.json", bad)); code != 1 {
+			t.Errorf("staging %s: %d %s", name, code, out)
+		}
 	}
 	// Rule 2 against a previous file from before 0.26.0 (as tagged at
 	// release/staging/1 to 9: no features member): all seven are owed.

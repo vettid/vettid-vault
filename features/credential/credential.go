@@ -755,6 +755,11 @@ func (f *Feature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner
 			return nil, errExists
 		}
 		if err := s.VerifyPIN(string(p.PIN)); err != nil {
+			// Verified as in an owner check, and counted as one (owner
+			// decision 2026-10-18).
+			if vault.IsCode(err, "bad_pin") {
+				s.OwnerCheckFailed("pin")
+			}
 			return nil, err
 		}
 		if r := recovery.CheckNewPassword(p.Password, string(p.PIN)); r != "" {
@@ -1172,14 +1177,19 @@ func (f *Feature) transferApprove(s *vault.Session, body []byte, e *Envelope, p 
 		return nil, errNotFound
 	}
 	// The approval is an owner check (§3.6.1): its wrong entries are
-	// failed checks, and its success starts the new app's clock.
+	// failed checks, and its success starts the new app's clock. The blob
+	// is checked first, as in verifyPair, so an old or cloned blob is
+	// refused before any secret is tested and counts nothing.
+	if err := f.checkBlob(s, e.Blob); err != nil {
+		return nil, err
+	}
 	if err := s.VerifyPIN(string(p.PIN)); err != nil {
 		if vault.IsCode(err, "bad_pin") {
 			s.OwnerCheckFailed("pin")
 		}
 		return nil, err
 	}
-	cek, inner, err := f.open(s, e.Blob, p.Password)
+	cek, inner, err := f.openChecked(s, e.Blob, p.Password)
 	if err != nil {
 		if err == errPassword {
 			s.OwnerCheckFailed("password")
@@ -1214,22 +1224,32 @@ func (f *Feature) vaultDelete(s *vault.Session, body []byte, e *Envelope, p *Pay
 		return nil, errBad
 	}
 	via := "app"
-	if err := s.VerifyPIN(string(p.PIN)); err != nil {
-		return nil, err
-	}
 	var blob []byte
 	if f.st.CEKSeed != nil {
-		if e.Blob == nil {
+		if e.Blob == nil || p.Password == nil {
 			return nil, errBad
 		}
 		blob = e.Blob
+		// The blob first, as in verifyPair: an old or cloned blob is
+		// refused before any secret is tested and counts nothing.
+		if err := f.checkBlob(s, blob); err != nil {
+			return nil, err
+		}
+	}
+	// The PIN and the password are tested as in an owner check, and a
+	// wrong one is a failed check (owner decision 2026-10-18).
+	if err := s.VerifyPIN(string(p.PIN)); err != nil {
+		if vault.IsCode(err, "bad_pin") {
+			s.OwnerCheckFailed("pin")
+		}
+		return nil, err
 	}
 	if blob != nil {
-		if p.Password == nil {
-			return nil, errBad
-		}
-		cek, inner, err := f.open(s, blob, p.Password)
+		cek, inner, err := f.openChecked(s, blob, p.Password)
 		if err != nil {
+			if err == errPassword {
+				s.OwnerCheckFailed("password")
+			}
 			return nil, err
 		}
 		cek.Destroy()

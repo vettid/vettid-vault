@@ -80,7 +80,7 @@ func (f *Feature) changeSecret(s *vault.Session, typ string, e *Envelope, p *Pay
 // password opens the blob, in verifyPair's order (VAULT-MESSAGING 0.44.0
 // §11.14.9 "A lost answer": an old blob is stale_credential before any
 // secret is tested, so a retry after a lost answer counts nothing; a
-// wrong PIN with the current blob is a failed owner check); the
+// wrong PIN or password, really tested, is a failed owner check); the
 // new password must meet §11.14.7, the generation is closed and the next
 // armed, and the DEK replaced, before the content is sealed under the
 // new password.
@@ -99,6 +99,9 @@ func (f *Feature) passwordChange(s *vault.Session, e *Envelope, p *Payload) (jso
 	}
 	cek, inner, err := f.openChecked(s, e.Blob, p.Password)
 	if err != nil {
+		if err == errPassword {
+			s.OwnerCheckFailed("password") // tested after the blob and the PIN: a failed check
+		}
 		return nil, err
 	}
 	defer cek.Destroy()

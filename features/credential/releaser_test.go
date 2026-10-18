@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/vettid/vettid-vault/internal/featuretest"
 	"github.com/vettid/vettid-vault/vault"
 )
 
@@ -161,5 +162,88 @@ func TestPasswordChangePINBeforePassword(t *testing.T) {
 	}
 	if r := e.call("app", "credential.password.change", blob, map[string]any{"pin": testPIN, "password": "wrong password entirely", "new_password": "glacier mango tuesday piano"}); r.Code != "bad_password" {
 		t.Fatalf("wrong password: %s", r.Code)
+	}
+}
+
+// Owner decisions of 2026-10-18: every credential operation that tests the
+// PIN or the password as an owner check does counts a wrong one as a
+// failed owner check, only when it is really tested (the blob passed
+// first); an old blob counts nothing.
+
+// credential.password.change: a wrong password, after the blob and the
+// PIN passed, is a failed check.
+func TestPasswordChangeWrongPasswordIsAFailedCheck(t *testing.T) {
+	e := newEnv(t)
+	blob := e.create()
+	if r := e.call("app", "credential.password.change", blob, map[string]any{"pin": testPIN, "password": "wrong password entirely", "new_password": "glacier mango tuesday piano"}); r.Code != "bad_password" {
+		t.Fatal(r.Code)
+	}
+	if strings.Join(e.h.CheckFailed, ",") != "password" {
+		t.Fatalf("failed checks %v", e.h.CheckFailed)
+	}
+}
+
+// credential.create: the PIN is verified as in an owner check, and a
+// wrong one is a failed check.
+func TestCreateWrongPINIsAFailedCheck(t *testing.T) {
+	e := newEnv(t)
+	if r := e.call("app", "credential.create", "", map[string]any{"password": pw, "pin": "000000"}); r.Code != "bad_pin" {
+		t.Fatal(r.Code)
+	}
+	if strings.Join(e.h.CheckFailed, ",") != "pin" {
+		t.Fatalf("failed checks %v", e.h.CheckFailed)
+	}
+	// A weak password is refused after the PIN passed: not a guess.
+	if r := e.call("app", "credential.create", "", map[string]any{"password": "short-pass", "pin": testPIN}); r.Code != "weak_password" || len(e.h.CheckFailed) != 1 {
+		t.Fatalf("weak: %s %v", r.Code, e.h.CheckFailed)
+	}
+}
+
+// vault.delete: the blob first; then a wrong PIN or password is a failed
+// check; an old blob is stale_credential before the PIN, counting nothing.
+func TestVaultDeleteFailedChecksAndOrder(t *testing.T) {
+	e := newEnv(t)
+	e.h.PIN = "246810"
+	blob0 := e.create()
+	del := func(blob string, payload map[string]any) featuretest.Result {
+		return e.callBody("app", "vault.delete", blob, payload, `"confirm":"`+vault.DeleteConfirmation+`"`)
+	}
+	if r := del(blob0, map[string]any{"pin": "135791", "password": pw}); r.Code != "bad_pin" {
+		t.Fatal(r.Code)
+	}
+	if r := del(blob0, map[string]any{"pin": "246810", "password": "wrong password"}); r.Code != "bad_password" {
+		t.Fatal(r.Code)
+	}
+	if strings.Join(e.h.CheckFailed, ",") != "pin,password" {
+		t.Fatalf("failed checks %v", e.h.CheckFailed)
+	}
+	e.ok(e.unlock(blob0, pw)) // the blob moves on: blob0 is now the holder's old one
+	tries := e.h.PINTries
+	if r := del(blob0, map[string]any{"pin": "135791", "password": "wrong password"}); r.Code != "stale_credential" {
+		t.Fatalf("old blob: %s", r.Code)
+	}
+	if e.h.PINTries != tries || len(e.h.CheckFailed) != 2 || len(e.h.Deletions) != 0 {
+		t.Fatalf("old blob tested the PIN: tries %d (was %d), failed %v", e.h.PINTries, tries, e.h.CheckFailed)
+	}
+}
+
+// device.transfer.approve: the blob is checked before the PIN, so an old
+// blob with a wrong PIN counts nothing (it already counted real failures,
+// TestTransferApprovalIsCheck).
+func TestTransferApproveChecksBlobFirst(t *testing.T) {
+	e := newEnv(t)
+	e.h.PIN = "246810"
+	blob0 := e.create()
+	e.ok(e.unlock(blob0, pw)) // blob0 is now the holder's old one
+	o := e.ok(e.raw("app", "device.transfer.create", `{}`)).Obj(t)
+	id, _ := o.String("transfer_id")
+	e.h.Xfer.Scanned = true
+	tries := e.h.PINTries
+	r := e.callBody("app", "device.transfer.approve", blob0, map[string]any{"password": "wrong password", "pin": "135791"}, `"transfer_id":"`+id+`"`)
+	if r.Code != "stale_credential" {
+		t.Fatalf("old blob: %s", r.Code)
+	}
+	if e.h.PINTries != tries || len(e.h.CheckFailed) != 0 {
+		t.Fatalf("old blob tested the PIN: tries %d (was %d), failed %v", e.h.PINTries, tries, e.h.CheckFailed)
 	}
 }

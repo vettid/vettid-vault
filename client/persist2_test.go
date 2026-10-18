@@ -211,14 +211,18 @@ func TestOutboxRules(t *testing.T) {
 		{RelayURL: "http://127.0.0.2:1", Mailbox: v.mailbox(), Payload: []byte("y"), Created: now},
 		{RelayURL: r.url(), Mailbox: v.mailbox(), Payload: []byte("z"), Created: now.Add(-outboxMaxAge - time.Minute)},
 	}
-	d.outboxSaved = 3
+	for i := range d.st.Outbox {
+		d.nextSeq++
+		d.st.Outbox[i].seq = d.nextSeq
+	}
+	d.savedSeq = d.nextSeq
 	d.batching = false
 	d.mu.Unlock()
 	mark := len(r.entries())
 	if err := d.flushOutbox(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if len(r.entries()) != mark || d.st.Outbox != nil || d.outboxSaved != 0 {
+	if len(r.entries()) != mark || d.st.Outbox != nil {
 		t.Fatal("stale entries were deposited or kept")
 	}
 }

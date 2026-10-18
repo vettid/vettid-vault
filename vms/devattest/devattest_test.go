@@ -249,6 +249,9 @@ func FuzzVerifyAttest(f *testing.F) {
 	ia, _ := enclavetest.NewIOSAttester(0x71, enclavetest.IOSOptions{}).Attest(ch)
 	f.Add(da.Chain[0], []byte{}, false)
 	f.Add(ia.Attestation, ia.KeyID, true)
+	// The ED form iOS 27 sends (extensions map after the COSE key).
+	ie, _ := enclavetest.NewIOSAttester(0x71, enclavetest.IOSAppleExtensions(enclavetest.IOSOptions{})).Attest(ch)
+	f.Add(ie.Attestation, ie.KeyID, true)
 	list := fresh()
 	f.Fuzz(func(t *testing.T, blob, keyID []byte, ios bool) {
 		if ios {
@@ -267,6 +270,10 @@ func FuzzVerifyAssertion(f *testing.F) {
 	s := devattest.ForChallenge(challenge("u"))
 	as, _ := a.Assert(s)
 	f.Add(as.Assertion)
+	// The ED form iOS 27 sends (AT|ED, extensions map after the counter).
+	e := enclavetest.NewIOSAttester(0x71, enclavetest.IOSAppleExtensions(enclavetest.IOSOptions{}))
+	es, _ := e.Assert(s)
+	f.Add(es.Assertion)
 	f.Fuzz(func(t *testing.T, blob []byte) {
 		_, _ = devattest.VerifyAssertion(p, b, &altchan.DeviceAssertion{Platform: "ios", Assertion: blob}, s, 0, now, nil)
 	})

@@ -131,6 +131,31 @@ type State struct {
 	// Outbox holds the deposits to the vault made while a batch was
 	// handled with Config.Persist set, until the relay accepts them.
 	Outbox []OutboxEntry `json:"outbox,omitempty"`
+	// Paired is what device.paired told this device (Paired).
+	Paired *Paired `json:"paired,omitempty"`
+}
+
+// Paired is what device.paired told this device (VAULT-MESSAGING §6.7,
+// the §10.3 row), recorded when the message is handled and kept in the
+// state, so that a device restarted after a crash can still read it.
+// The standing token it carried is in the vault record.
+type Paired struct {
+	DeviceID      string `json:"device_id"`
+	Role          string `json:"role,omitempty"`
+	VaultID       string `json:"vault_id,omitempty"`
+	Release       string `json:"release,omitempty"`
+	ReleaseNumber uint64 `json:"release_number,omitempty"`
+	// SessionExpiresAt is the end of the first access session, when the
+	// owner approved the pairing of a desktop or agent with one (§6.8);
+	// zero without one.
+	SessionExpiresAt time.Time `json:"session_expires_at"`
+	// Transfer, CredentialVersion and UserGUID: a transfer's new app
+	// only (§6.7.1).
+	Transfer          bool   `json:"transfer,omitempty"`
+	CredentialVersion uint64 `json:"credential_version,omitempty"`
+	UserGUID          string `json:"user_guid,omitempty"`
+	// ReceivedAt is when the device handled device.paired (its clock).
+	ReceivedAt time.Time `json:"received_at"`
 }
 
 // OutboxEntry is one deposit to the vault waiting in State.Outbox: an
@@ -335,6 +360,18 @@ func (d *Device) VaultID() string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.st.VaultID
+}
+
+// Paired returns what device.paired told this device, and false before
+// it arrived. After AwaitPaired it holds that message's fields, e.g. the
+// first access session's end (Paired.SessionExpiresAt).
+func (d *Device) Paired() (Paired, bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.st.Paired == nil {
+		return Paired{}, false
+	}
+	return *d.st.Paired, true
 }
 
 // DeviceID returns the id the vault assigned (from device.paired).
@@ -933,6 +970,7 @@ func (d *Device) handle(ctx context.Context, m relayclient.Message) {
 					a.Release, a.ReleaseNumber = r, n
 				}
 			}
+			d.st.Paired = pairedFrom(o, now)
 		}
 	case "relay.token.issued":
 		d.storeVaultToken(in.Body)
@@ -1143,6 +1181,33 @@ func (d *Device) maintain(ctx context.Context, now time.Time) {
 	if v.TokenExp.Sub(now) < 3*24*time.Hour && now.Before(v.TokenExp) {
 		_, _ = d.sendLocked(ctx, "", "relay.token.refresh", json.RawMessage(`{}`), "", "")
 	}
+}
+
+// pairedFrom reads device.paired's fields (§10.3). A member that is
+// missing or malformed is left zero.
+func pairedFrom(o strictjson.Object, now time.Time) *Paired {
+	p := &Paired{ReceivedAt: now.UTC()}
+	p.DeviceID, _ = o.String("device_id")
+	p.Role, _, _ = o.OptString("role")
+	p.VaultID, _, _ = o.OptString("vault_id")
+	if r, ok, _ := o.OptString("release"); ok && len(r) == 96 {
+		if n, _, err := o.OptUint("release_number", 1, strictjson.MaxSafeInteger); err == nil {
+			p.Release, p.ReleaseNumber = r, n
+		}
+	}
+	if s, ok, _ := o.OptString("session_expires_at"); ok {
+		if t, err := envelope.ParseTS(s); err == nil {
+			p.SessionExpiresAt = t
+		}
+	}
+	if tr, err := o.Bool("transfer"); err == nil && tr {
+		p.Transfer = true
+		p.CredentialVersion, _, _ = o.OptUint("credential_version", 0, strictjson.MaxSafeInteger)
+		if g, ok, _ := o.OptString("user_guid"); ok && validUserGUID(g) {
+			p.UserGUID = g
+		}
+	}
+	return p
 }
 
 // validUserGUID checks a user_guid from device.paired (§6.7.1, 0.17.0):

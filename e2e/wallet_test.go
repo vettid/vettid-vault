@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/vettid/vettid-vault/client"
+	"github.com/vettid/vettid-vault/client/wallet"
 	"github.com/vettid/vettid-vault/internal/relaytest"
 	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/btc"
@@ -32,7 +33,7 @@ func TestWallet(t *testing.T) {
 
 	// A imports a phrase; its app scanned both accounts and found history
 	// on the BIP84 one, so A receives there.
-	o, err := a.app.WalletCreateType(ctx, credPW, "Savings", "regtest", "p2wpkh", bip84Phrase, "", []string{"money"})
+	o, err := wallet.CreateType(ctx, a.app, credPW, "Savings", "regtest", "p2wpkh", bip84Phrase, "", []string{"money"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +41,7 @@ func TestWallet(t *testing.T) {
 	if fp, _ := o.String("fingerprint"); fp != "73c5da0a" {
 		t.Fatalf("fingerprint %s", fp)
 	}
-	accts, recv, err := a.app.WalletAccounts(ctx, wid)
+	accts, recv, err := wallet.Accounts(ctx, a.app, wid)
 	if err != nil || recv != "p2wpkh" {
 		t.Fatal(recv, err)
 	}
@@ -55,7 +56,7 @@ func TestWallet(t *testing.T) {
 		t.Fatal(s)
 	}
 	addr0, _, _ := acct.Address(0, 0)
-	ad, err := a.app.WalletAddressNew(ctx, wid, false, "shop")
+	ad, err := wallet.AddressNew(ctx, a.app, wid, false, "shop")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,12 +65,12 @@ func TestWallet(t *testing.T) {
 	}
 
 	// B's wallet (a new one: taproot): the address B wants to be paid at.
-	bo, err := b.app.WalletCreate(ctx, credPW, "B", "regtest", "", "", nil)
+	bo, err := wallet.Create(ctx, b.app, credPW, "B", "regtest", "", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	bwid, _ := bo.String("wallet_id")
-	bad, err := b.app.WalletAddressNew(ctx, bwid, false, "from A")
+	bad, err := wallet.AddressNew(ctx, b.app, bwid, false, "from A")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,14 +138,14 @@ func TestWallet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sum, err := a.app.WalletInspect(ctx, wid, psbt)
+	sum, err := wallet.Inspect(ctx, a.app, wid, psbt)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if fee, _ := sum.Uint("fee_sats", 0, 1e9); fee != 1000 {
 		t.Fatalf("fee %d", fee)
 	}
-	if _, err := a.app.WalletPay(ctx, credPW, id, wid, psbt); client.Code(err) != "credential_locked" {
+	if _, err := wallet.Pay(ctx, a.app, credPW, id, wid, psbt); client.Code(err) != "credential_locked" {
 		t.Fatalf("outside the unlock window: %v", err)
 	}
 	if _, err := a.app.CredentialUnlock(ctx, credPW); err != nil {
@@ -152,10 +153,10 @@ func TestWallet(t *testing.T) {
 	}
 	wrong, _ := btc.BuildPSBT(acct, []btc.Coin{{PrevTx: coin, Vout: 0}},
 		[]btc.Payee{{Address: bAddr, Amount: 200000}, {Change: true, Chain: 1, Index: 0, Amount: 799000}})
-	if _, err := a.app.WalletPay(ctx, credPW, id, wid, wrong); client.Code(err) != "invalid_psbt" {
+	if _, err := wallet.Pay(ctx, a.app, credPW, id, wid, wrong); client.Code(err) != "invalid_psbt" {
 		t.Fatalf("wrong amount: %v", err)
 	}
-	po, err := a.app.WalletPay(ctx, credPW, id, wid, psbt)
+	po, err := wallet.Pay(ctx, a.app, credPW, id, wid, psbt)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,7 +178,7 @@ func TestWallet(t *testing.T) {
 	coin3, _ := btc.FundingTx(tr, 0, 0, 300000, 11)
 	psbt2, _ := btc.BuildPSBT(acct, []btc.Coin{{PrevTx: coin2, Vout: 0, Index: 1}, {PrevTx: coin3, Vout: 0, Acct: tr}},
 		[]btc.Payee{{Address: bAddr, Amount: 799000}})
-	so, err := a.app.WalletSign(ctx, credPW, wid, psbt2)
+	so, err := wallet.Sign(ctx, a.app, credPW, wid, psbt2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +190,7 @@ func TestWallet(t *testing.T) {
 	if len(tx2.TxIn[0].Witness) != 2 || len(tx2.TxIn[1].Witness) != 1 {
 		t.Fatal("mixed witnesses")
 	}
-	h, err := a.app.WalletHistory(ctx, wid, 0)
+	h, err := wallet.History(ctx, a.app, wid, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,17 +221,17 @@ func TestWalletTaproot(t *testing.T) {
 	b := newTestVault(t, r.URL, "b", nil)
 	ctx := ctxT(t, 180*time.Second)
 	aConn, bConn := connect(t, a, b, 600)
-	o, err := a.app.WalletCreate(ctx, credPW, "Taproot", "regtest", "", "", nil)
+	o, err := wallet.Create(ctx, a.app, credPW, "Taproot", "regtest", "", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	wid, _ := o.String("wallet_id")
-	accts, recv, err := a.app.WalletAccounts(ctx, wid)
+	accts, recv, err := wallet.Accounts(ctx, a.app, wid)
 	if err != nil || recv != "p2tr" {
 		t.Fatal(recv, err)
 	}
 	tr := accts["p2tr"]
-	ad, err := a.app.WalletAddressNew(ctx, wid, false, "")
+	ad, err := wallet.AddressNew(ctx, a.app, wid, false, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,7 +264,7 @@ func TestWalletTaproot(t *testing.T) {
 	coin, _ := btc.FundingTx(tr, 0, 0, 200000, 21)
 	psbt, _ := btc.BuildPSBT(tr, []btc.Coin{{PrevTx: coin, Vout: 0}},
 		[]btc.Payee{{Address: "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080", Amount: 150000}, {Change: true, Chain: 1, Index: 0, Amount: 49800}})
-	so, err := a.app.WalletSign(ctx, credPW, wid, psbt)
+	so, err := wallet.Sign(ctx, a.app, credPW, wid, psbt)
 	if err != nil {
 		t.Fatal(err)
 	}

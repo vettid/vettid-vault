@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/vettid/vettid-vault/client"
+	cwallet "github.com/vettid/vettid-vault/client/wallet"
 	"github.com/vettid/vettid-vault/vms/btc"
 )
 
@@ -74,42 +75,42 @@ func cmdWallet(ctx context.Context, g *globals, args []string) error {
 				}
 				pp = os.Getenv("VAULTCTL_PASSPHRASE")
 			}
-			return d.WalletCreateType(ctx, pw, *name, *network, *typ, m, pp, commaList(*tags))
+			return cwallet.CreateType(ctx, d, pw, *name, *network, *typ, m, pp, commaList(*tags))
 		case "list":
-			return d.WalletList(ctx)
+			return cwallet.List(ctx, d)
 		case "address":
-			return d.WalletAddressNewType(ctx, *wallet, *typ, *change, *label)
+			return cwallet.AddressNewType(ctx, d, *wallet, *typ, *change, *label)
 		case "addresses":
 			f := map[string]any{"change": *change}
 			if *typ != "" {
 				f["type"] = *typ
 			}
-			return d.WalletAddressList(ctx, *wallet, f)
+			return cwallet.AddressList(ctx, d, *wallet, f)
 		case "receive":
-			v, err := d.WalletUpdate(ctx, *wallet, *version, *typ)
+			v, err := cwallet.Update(ctx, d, *wallet, *version, *typ)
 			return map[string]uint64{"version": v}, err
 		case "used":
-			return d.WalletAddressUsed(ctx, *wallet, commaList(*addrs))
+			return cwallet.AddressUsed(ctx, d, *wallet, commaList(*addrs))
 		case "inspect", "sign", "pay":
 			raw, err := readPSBT(*psbtFile)
 			if err != nil {
 				return nil, err
 			}
 			if op == "inspect" {
-				return d.WalletInspect(ctx, *wallet, raw)
+				return cwallet.Inspect(ctx, d, *wallet, raw)
 			}
 			pw, err := password("VAULTCTL_PASSWORD")
 			if err != nil {
 				return nil, err
 			}
 			if op == "sign" {
-				return d.WalletSign(ctx, pw, *wallet, raw)
+				return cwallet.Sign(ctx, d, pw, *wallet, raw)
 			}
-			return d.WalletPay(ctx, pw, *inv, *wallet, raw)
+			return cwallet.Pay(ctx, d, pw, *inv, *wallet, raw)
 		case "history":
-			return d.WalletHistory(ctx, *wallet, 0)
+			return cwallet.History(ctx, d, *wallet, 0)
 		case "test-psbt":
-			accts, recv, err := d.WalletAccounts(ctx, *wallet)
+			accts, recv, err := cwallet.Accounts(ctx, d, *wallet)
 			if err != nil {
 				return nil, err
 			}

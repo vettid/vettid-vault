@@ -141,6 +141,7 @@ end covers §7, §8, §11.8, §12 and §13.2.
 | 8.1 | Response: same type, `re`, `status`, to the requester only; unmatched `re` dropped | `vault.TestRequestResponseAndDedupe`, `vault.TestUnmatchedResponseDropped` |
 | 8.2 | Dedupe by relay msg_id and by inner id per principal; cached responses for 24 h | `vault.TestRequestResponseAndDedupe`, `e2e.TestRestartDedupe` |
 | 8.3 | Ack only after the durable flush; outbox deposited after the ack | `vault.TestAckOnlyAfterFlush`, `e2e.TestRestartDedupe` |
+| 8.3 | "Devices apply the same rule to their local storage" (reference client, `client.Config.Persist`): a collected batch is saved after it is handled and before any of it is acknowledged; its deposits go out after the save; a save error leaves the batch unacknowledged; a crash before the save loses nothing, one after it replays without effect | `client.TestPersistBeforeAck`, `client.TestPersistErrorLeavesBatchUnacked`, `client.TestCrashBeforePersistLosesNothing`, `client.TestCrashAfterPersistReplaysHarmlessly`, `client.TestCrashBeforeAckDepositsAgain`, `client.TestPersistOutboxRetry`, `client.TestPersistNilUnchanged` |
 | 8.4 | Reject `ts` > 5 min ahead and, for durable types, > 16 d old | `vault.TestTimestampWindow`, `envelope.TestInnerCheckTime` |
 | 8.5 | Ephemeral types: `exp` required, acked after handling, in-memory dedupe | `vault.TestEphemeralClass` |
 | 8.6 | Error table: token_revoked / mailbox_unknown terminal, token_expired → reconnect | `vault.TestDepositErrors`, `e2e.TestRevokeConnection`, `e2e.TestReconnectAfterExpiry` |

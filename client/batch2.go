@@ -349,6 +349,15 @@ func (d *Device) SendExp(ctx context.Context, typ string, body json.RawMessage, 
 	return d.sendFull(ctx, "", typ, body, "", "", exp)
 }
 
+// SendWithIDExp is SendWithID with an `exp`: the request a lost answer
+// leaves undecided is resent with the same inner id, body and exp
+// (VAULT-MESSAGING 0.44.0 §11.14.9 "A lost answer"). Tests use it.
+func (d *Device) SendWithIDExp(ctx context.Context, id, typ string, body json.RawMessage, exp time.Time) (string, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.sendFull(ctx, id, typ, body, "", "", exp)
+}
+
 // verifyPeerShare checks a share from the other side of a call: its
 // device's signature and its vault's, under the connection's identity key
 // (`peer_ik`, as this device's own vault has it on record, §10.10).

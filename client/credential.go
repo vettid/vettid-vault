@@ -242,6 +242,16 @@ func (d *Device) credOpWith(ctx context.Context, typ string, extra map[string]an
 	return o, rk, id, err
 }
 
+// CredentialOp sends the credential operation typ: the payload (built
+// for each attempt) sealed to a fresh UTK, the blob, and the extra outer
+// members; on stale_credential it fetches the latest blob once and
+// retries (§3.5.3). It is for operations defined outside this package,
+// such as the wallet's (client/wallet).
+func (d *Device) CredentialOp(ctx context.Context, typ string, extra map[string]any, payload func() map[string]any) (strictjson.Object, error) {
+	o, _, _, err := d.credOpWith(ctx, typ, extra, payload, false)
+	return o, err
+}
+
 // CredentialCreate creates the Protean Credential and keeps the blob. From
 // release R it carries the PIN too, so that the vault arms its recovery at
 // once (§11.14.9).

@@ -21,13 +21,19 @@ import (
 // DEK) can be put into recovery, cancelled and given a new app; the
 // vault's DEK state is reached only by a later PIN unlock of that app.
 const (
-	RecoveryDelay       = 24 * time.Hour // the code becomes usable after it
-	RecoveryValidity    = 24 * time.Hour // ... and stays usable for this long
-	RecoveryMaxAttempts = 5              // wrong codes before the recovery is void
-	RecoveryCodeBytes   = 20             // 160 bits, 32 base32 characters
-	recoveryDeviceID    = "recovery"
-	labelRecoveryCode   = "vettid/vms/2/recovery-code"
-	maxRecoveryLog      = 64
+	RecoveryDelay    = 24 * time.Hour // the code becomes usable after it
+	RecoveryValidity = 24 * time.Hour // ... and stays usable for this long
+	// RecoveredInviteWindow is how long the recovered phone's
+	// first-handshake invite is usable after a successful recovery open
+	// (and again after each resumed unlock before it pairs, §11.14.6). It
+	// is not one of the waits STAGING-TIME-SCALE §2.1 lists, so it is
+	// never divided by the time scale: real time in every channel.
+	RecoveredInviteWindow = 24 * time.Hour
+	RecoveryMaxAttempts   = 5  // wrong codes before the recovery is void
+	RecoveryCodeBytes     = 20 // 160 bits, 32 base32 characters
+	recoveryDeviceID      = "recovery"
+	labelRecoveryCode     = "vettid/vms/2/recovery-code"
+	maxRecoveryLog        = 64
 )
 
 // Recovery states.

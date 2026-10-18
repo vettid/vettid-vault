@@ -355,6 +355,7 @@ func TestTimeScaleLeavesTheRestAlone(t *testing.T) {
 		"owner check default (setting)": {DefaultOwnerCheckInterval, 24 * time.Hour},
 		"recovery delay (real)":         {RecoveryDelay, 24 * time.Hour},
 		"recovery validity (real)":      {RecoveryValidity, 24 * time.Hour},
+		"recovered invite (not scaled)": {RecoveredInviteWindow, 24 * time.Hour},
 		"pending unlink (real)":         {PendingUnlinkTTL, 7 * 24 * time.Hour},
 		"enroll window (real)":          {EnrollWindow, 24 * time.Hour},
 		"counter notice (real)":         {CounterUnavailableNotice, 24 * time.Hour},
@@ -371,6 +372,29 @@ func TestTimeScaleLeavesTheRestAlone(t *testing.T) {
 	d.m.opt.RecoveryWaitUnit = 600 * time.Second
 	if d.m.waitUnit() != 600*time.Second {
 		t.Fatalf("wait unit %v at scale 24", d.m.waitUnit())
+	}
+	// At use sites: a request's cached answer is kept 24 h (retention),
+	// and the recovered phone's invite renewed by a resumed unlock is
+	// usable for 24 h (RecoveredInviteWindow), both at scale 24.
+	t0 := time.Now()
+	if err := d.send("vault.status", []byte(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	if len(d.m.st.Responses) == 0 {
+		t.Fatal("no cached answer")
+	}
+	for k, cr := range d.m.st.Responses {
+		if left := cr.Expires.Sub(t0); left < 24*time.Hour-time.Minute || left > 24*time.Hour+time.Minute {
+			t.Fatalf("cached answer %s kept %v at scale 24", k, left)
+		}
+	}
+	d.m.mu.Lock()
+	inv := &Invite{ID: "01JB2Z6V9K3M4N5P6Q7R8S9T0Z", Kind: KindApp, Used: true}
+	now := time.Now()
+	d.m.resumeLostOK(inv, now)
+	d.m.mu.Unlock()
+	if !inv.Exp.Equal(now.Add(24*time.Hour)) || inv.Used {
+		t.Fatalf("recovered invite renewed to %v at scale 24", inv.Exp.Sub(now))
 	}
 	// Bounds of the owner-check setting are unchanged (real units).
 	d.m.mu.Lock()

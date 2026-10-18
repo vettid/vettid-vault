@@ -65,13 +65,20 @@ func TestReleaseConfigTimeScale(t *testing.T) {
 
 // At scale 24 the descriptor says so, bound by the attestation, and the
 // provisional window (S13) is 1 hour: a second enrollment is refused for
-// the hour and accepted after it. At scale 1 the descriptor says 1.
+// the hour and accepted after it. At scale 1 the descriptor says 1. In a
+// build for the production channel (make channels) the instance runs at
+// 1 whatever its configuration says: the descriptor says 1 and the window
+// is 24 hours for both (STAGING-TIME-SCALE §4 item 2).
 func TestTimeScaleDescriptorAndEnrollWindow(t *testing.T) {
-	for _, scale := range []uint64{1, 24} {
+	for _, configured := range []uint64{1, 24} {
+		scale := configured
+		if enclave.ReleaseChannel() == releasecfg.ChannelProd {
+			scale = 1
+		}
 		clk := &clock{t: time.Now().UTC().Truncate(time.Millisecond)}
 		w := enclavetest.NewWorld(clk.Now, relayURL)
 		w.AddRelease(r3)
-		if _, err := w.StartWith(3, func(c *enclave.Config) { c.TimeScale = scale }); err != nil {
+		if _, err := w.StartWith(3, func(c *enclave.Config) { c.TimeScale = configured }); err != nil {
 			t.Fatal(err)
 		}
 		f := &fx{t: t, clk: clk, w: w, ctx: t.Context(), trust: w.Trust()}

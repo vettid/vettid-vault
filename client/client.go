@@ -69,6 +69,10 @@ type Config struct {
 	// the device's lock held and never twice at once; Persist may call
 	// the Device's methods, though not Poll or the waiting calls. The
 	// state slice is wiped when Persist returns: copy it to keep it.
+	// Persist covers what the client records while handling (keys and
+	// sessions, tokens, device.paired, the msg_ids seen); the responses
+	// and events it hands to the caller stay in memory as before, so
+	// what the caller makes of them is the caller's to save.
 	//
 	// Nil: each message is acknowledged right after it is handled, its
 	// deposits are made at once, and the state is saved only when the

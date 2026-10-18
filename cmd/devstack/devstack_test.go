@@ -5,8 +5,13 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -182,6 +187,7 @@ func TestControl(t *testing.T) {
 	if dp, _ := trust["device_policy"].(map[string]any); dp == nil || dp["grapheneos_boot_keys"] != true {
 		t.Fatalf("trust device policy: %v", trust["device_policy"])
 	}
+	checkTLSRoot(t, trust)
 	r, err = http.Get(srv.URL + "/dev/info")
 	if err != nil {
 		t.Fatal(err)
@@ -302,5 +308,45 @@ func TestLogged(t *testing.T) {
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/a", bytes.NewReader(nil)))
 	if rec.Code != 204 || !rec.Flushed {
 		t.Fatalf("%d %v", rec.Code, rec.Flushed)
+	}
+}
+
+// checkTLSRoot: /dev/trust's tls_root (DER and PEM) is a CA certificate,
+// alone, under which the relay front's server certificate verifies for
+// relay.vettid.test, and nothing in the answer is a private key.
+func checkTLSRoot(t *testing.T, trust map[string]any) {
+	t.Helper()
+	der, err := base64.StdEncoding.DecodeString(fmt.Sprint(trust["tls_root"]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := x509.ParseCertificate(der)
+	if err != nil || !root.IsCA {
+		t.Fatalf("tls_root: %v", err)
+	}
+	blk, rest := pem.Decode([]byte(fmt.Sprint(trust["tls_root_pem"])))
+	if blk == nil || blk.Type != "CERTIFICATE" || !bytes.Equal(blk.Bytes, der) || len(bytes.TrimSpace(rest)) != 0 {
+		t.Fatal("tls_root_pem is not the same single certificate")
+	}
+	pool := x509.NewCertPool()
+	pool.AddCert(root)
+	leaf := enclavetest.ServerCert(relayHost).Leaf
+	if _, err := leaf.Verify(x509.VerifyOptions{Roots: pool, DNSName: relayHost}); err != nil {
+		t.Fatalf("relay front certificate under tls_root: %v", err)
+	}
+	// A TLS handshake with a front as the stack builds one (stack.go
+	// tlsFront), trusting tls_root alone.
+	front := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	front.TLS = &tls.Config{Certificates: []tls.Certificate{enclavetest.ServerCert(relayHost)}}
+	front.StartTLS()
+	defer front.Close()
+	c, err := tls.Dial("tcp", front.Listener.Addr().String(), &tls.Config{RootCAs: pool, ServerName: relayHost, MinVersion: tls.VersionTLS13})
+	if err != nil {
+		t.Fatalf("TLS to the relay front under tls_root: %v", err)
+	}
+	c.Close()
+	all, _ := json.Marshal(trust)
+	if bytes.Contains(all, []byte("PRIVATE")) {
+		t.Fatal("/dev/trust carries a private key")
 	}
 }

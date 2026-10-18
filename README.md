@@ -226,7 +226,7 @@ Everything listens on 127.0.0.1. Child processes run with
 |---|---|
 | `GET /dev/health` | `{"ok": true}` |
 | `GET /dev/info` | what `ready.json` holds |
-| `GET /dev/trust` | the test Nitro root (DER, base64), the test manifest keys (SPKI DER, base64), the relay URL, and the dev device policy in force (`null`: TEST policy only) |
+| `GET /dev/trust` | the test Nitro root (DER, base64), the test manifest keys (SPKI DER, base64), `tls_root` and `tls_root_pem` (the TEST TLS root that the relay's and the push stand-in's TLS fronts chain to: the certificate only, DER base64 and PEM), the relay URL, and the dev device policy in force (`null`: TEST policy only) |
 | `POST /dev/peer/request` | `{"type": T, "body": {...}}`: `vaultctl request` on the peer; answers the vault's response. Events the peer received while the request ran are kept for `/dev/peer/event` |
 | `POST /dev/peer/event` | `{"type": T, "match": {k: v}, "timeout_s": N}`: waits (default 90 s, at most 300) for a peer event of type T whose body matches; others are kept for later calls |
 | `POST /dev/recovery/code` | `{"guid": G, "timeout_s": N}` (needs `-recovery-skew`): plays the account portal's recovery for member G (VAULT-MESSAGING §11.11): a fresh browser P-256 key, `POST /api/vault/recovery`, the recovery clock moved past the delay, the sealed code fetched and opened. Answers `{vault_id, recovery_id, code, qr, not_before, expires_at, available_at}`, `qr` being the QR payload the app scans and registers with (`POST /api/vault/recovery/register`); `422 {"error": "no_credential"}` for a vault without a credential (that recovery is cancelled); member API refusals (`404`, `409 recovery_active`) as they come |
@@ -316,7 +316,7 @@ reaches the relay through its TLS front:
 export VAULTCTL_DEV_RESOLVE="relay.vettid.test=$(jq -r .relay_tls <data>/run/ready.json)"
 export VAULTCTL_PASSWORD='development password' VAULTCTL_PIN=13572468   # TEST-ONLY
 API=$(jq -r .api <data>/run/ready.json)
-M="vaultctl -state member.json -timeout 150s"
+M="<data>/bin/vaultctl -state member.json -timeout 150s"
 
 $M init -role app -name member-phone -relay https://relay.vettid.test
 $M api-enroll -api $API -guid member-agent-1 -pin $VAULTCTL_PIN    # a fresh GUID per test vault
@@ -328,8 +328,13 @@ runs the first handshake, creates the credential (password
 `$VAULTCTL_PASSWORD`, `development password` when unset) and confirms the
 enrollment. `credential unlock` prints the window's `expires_at`. Every step
 below that signs a grant must run before that time; run `credential unlock`
-again when the window has passed. Pairing an
-agent (VAULT-MESSAGING §6.7):
+again when the window has passed. This differs from AGENT-PLAN §4.8 in one
+step: there is no separate `credential create`, because `api-enroll`
+already creates the credential. Pairing an agent (VAULT-MESSAGING §6.7)
+needs the `leash` feature: a stack started with `-features` that leaves out
+`leash` (`none`, or a list without it) answers `device.pair.create
+{"role":"agent"}` with `bad_request`, as a production image without
+`leash` does.
 
 ```sh
 $M request device.pair.create '{"role":"agent"}'   # body: {pairing_id, link, exp}
@@ -384,11 +389,18 @@ then `pair -link <link>`, `session request -seconds 600`, `agent request
 -grant <id>`. `e2e/vaultctl_batch3_test.go` runs that flow against a
 `vault-run` vault.
 
-A connector reaches the relay as `vaultctl` does (`https://relay.vettid.test`
-at `relay_tls`, which needs the stack's TEST TLS root, compiled into
-`vaultctl` but not served by the control port), or at `relay_transport`,
-the relay's plain HTTP port, by rewriting the origin as the phone's
-`devStack` build does over `adb reverse`.
+A connector reaches the relay as `vaultctl` does: `https://relay.vettid.test`,
+dialled at `relay_tls` (`ready.json`), trusting `tls_root` from `GET
+/dev/trust`, so it needs nothing from this module's internal packages.
+In Go, that is a client whose transport dials `relay_tls` for
+`relay.vettid.test:443` and whose `TLSClientConfig.RootCAs` holds
+`tls_root` alone. The test root is served only by `cmd/devstack`'s
+control port, which exists only in `devenclave` builds (`make
+check-tcb`). A fallback is `relay_transport`, the relay's plain HTTP port,
+with the origin rewritten, as the phone's `devStack` build does over `adb
+reverse`. Unlike AGENT-PLAN §4.8's wording, nothing here rewrites origins
+for the connector: the dial mapping (or the fallback's rewrite) belongs
+only in a dev-stack build of the connector, never in a release build.
 
 **Not reachable quickly: a held vault.** The owner check (§3.6) holds a
 vault only after its deadline passes. The shortest interval is one hour

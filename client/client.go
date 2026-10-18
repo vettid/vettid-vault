@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"net/http"
 	"strings"
 	"sync"
@@ -42,6 +43,18 @@ var (
 	// ErrPairRejected: the owner rejected this pairing or transfer on the
 	// phone (device.pair.rejected, VAULT-MESSAGING §6.7, 0.10.5).
 	ErrPairRejected = errors.New("client: pairing rejected on the phone")
+	// ErrRefused: the vault's mailbox answered a deposit of this device
+	// token_revoked, the refused relay key of §6.7.1. Terminal (§8.6):
+	// the device sends nothing more to that mailbox, keeps collecting
+	// its own (a device.unlinked may be waiting) and does not erase its
+	// state on this answer alone; it counts toward offering an erase.
+	ErrRefused = errors.New("client: refused by the vault's mailbox (token_revoked)")
+	// ErrOutboxDropped wraps a relay error that made Poll drop an
+	// outbox entry for good (a client error other than 429).
+	ErrOutboxDropped = errors.New("client: outbox deposit refused")
+	// ErrHandshakeUnsent: the hs.fin of this device's pairing could not
+	// be deposited, so the vault cannot complete the handshake.
+	ErrHandshakeUnsent = errors.New("client: hs.fin could not be deposited")
 )
 
 // Config configures a Device.
@@ -74,9 +87,20 @@ type Config struct {
 	// and events it hands to the caller stay in memory as before, so
 	// what the caller makes of them is the caller's to save.
 	//
+	// Nothing a batch brought reaches the caller before the batch is
+	// saved: its responses and events are held back from the waiting
+	// calls until a Persist succeeds, and a pairing's SAS is returned
+	// only once its hs.fin is saved and deposited. After a Persist
+	// error the next Poll calls Persist again before collecting.
+	// Terminal deposit errors from the outbox are returned by Poll
+	// (ErrRefused, ErrOutboxDropped); see flushOutbox for the outbox's
+	// rules.
+	//
 	// Nil: each message is acknowledged right after it is handled, its
 	// deposits are made at once, and the state is saved only when the
-	// caller calls Save.
+	// caller calls Save. In both modes a deposit to the vault's mailbox
+	// answered token_revoked makes the device refused (ErrRefused,
+	// Refused): it sends nothing more to that mailbox (§8.6).
 	Persist func(state []byte) error
 }
 
@@ -170,15 +194,27 @@ type Paired struct {
 // envelope already sealed, deposited on the vault token held when it
 // is sent.
 type OutboxEntry struct {
+	// Kind: "hs.fin", "hs.resp", "token" (a standing token for the
+	// vault: relay.token.issued or a relay.token.refresh reply),
+	// "refresh" (a relay.token.refresh request) or "".
+	Kind     string    `json:"kind,omitempty"`
 	RelayURL string    `json:"relay_url"`
 	Mailbox  string    `json:"mailbox"`
 	Payload  []byte    `json:"payload"`
 	Created  time.Time `json:"created"`
+
+	seq uint64 // in memory: the order it was queued in (Device.nextSeq)
 }
 
 // outboxMaxAge bounds how long an outbox entry is retried: a vault
 // refuses durable messages whose ts is more than 16 days old (§8.4).
-const outboxMaxAge = 16 * 24 * time.Hour
+// outboxCap bounds the outbox: past it, the oldest entry is dropped.
+const (
+	outboxMaxAge = 16 * 24 * time.Hour
+	outboxCap    = 64
+	// maxRetryAfter bounds a relay's retry_after (seconds).
+	maxRetryAfter = 3600
+)
 
 // VaultRecord is what the device knows about its vault.
 type VaultRecord struct {
@@ -224,10 +260,27 @@ type Device struct {
 	// batching is set (with mu held) while a batch is handled for
 	// Persist: deposits go to the outbox instead of the relay.
 	batching bool
-	// outboxSaved is how many leading outbox entries a successful
-	// Persist (or the loaded state) holds: only those are deposited, so
-	// that nothing leaves before it is saved. persistMu guards it.
-	outboxSaved int
+	// nextSeq numbers outbox entries as they are queued; savedSeq is the
+	// highest a successful Persist (or the loaded state) holds: only
+	// entries up to it are deposited, so that nothing leaves before it
+	// is saved. Entries are found by their number, never by position,
+	// so removing some (startPairing) cannot shift what a flush tried.
+	nextSeq, savedSeq uint64
+	// dirty: a handled batch is not saved yet (its Persist failed); the
+	// next Poll calls Persist again before collecting. held keeps the
+	// responses and events of unsaved batches from the waiting calls.
+	dirty bool
+	held  []*envelope.Inner
+	// outboxFails counts consecutive transient outbox failures;
+	// outboxNext is when the outbox may be tried again (§8.6 backoff).
+	outboxFails int
+	outboxNext  time.Time
+	// finErr: this pairing's hs.fin left the outbox without being
+	// deposited. refused: the vault's mailbox answered token_revoked.
+	finErr  error
+	refused error
+	// persistErr is the last Persist error while the device is dirty.
+	persistErr error
 }
 
 func (c *Config) defaults() {
@@ -297,7 +350,11 @@ func open(cfg Config, st *State) (*Device, error) {
 		return nil, err
 	}
 	d.own = d.relayClient(st.RelayURL)
-	d.outboxSaved = len(st.Outbox)
+	for i := range st.Outbox {
+		d.nextSeq++
+		st.Outbox[i].seq = d.nextSeq
+	}
+	d.savedSeq = d.nextSeq
 	d.keyring = &handshake.Keyring{}
 	if st.Vault != nil {
 		if d.keyring, err = handshake.ImportKeyring(st.Vault.Sessions); err != nil {
@@ -463,6 +520,11 @@ func (d *Device) CompleteEnrollment(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// The hs.fin first: if it is refused for good, the vault never sends
+	// device.paired (ErrHandshakeUnsent, ErrRefused).
+	if _, err := d.awaitHandshake(ctx); err != nil {
+		return err
+	}
 	return d.awaitPaired(ctx)
 }
 
@@ -490,15 +552,23 @@ func (d *Device) awaitHandshake(ctx context.Context) (string, error) {
 	for {
 		d.mu.Lock()
 		if d.ini == nil {
-			sas, failed := d.sas, d.hsFailed
+			sas, failed, finErr, finQueued := d.sas, d.hsFailed, d.finErr, d.queued("hs.fin")
 			d.mu.Unlock()
-			if failed || sas == "" {
+			switch {
+			case failed || sas == "":
 				return "", ErrProtocol
+			case finErr != nil:
+				return "", finErr
+			case !finQueued:
+				// The hs.fin is deposited (with Config.Persist: after the
+				// batch that made it was saved), so the vault can finish
+				// the handshake the SAS belongs to.
+				return sas, nil
 			}
-			return sas, nil
+		} else {
+			d.mu.Unlock()
 		}
-		d.mu.Unlock()
-		if err := ctx.Err(); err != nil {
+		if err := d.ctxErr(ctx); err != nil {
 			return "", err
 		}
 		if err := d.Poll(ctx); err != nil && ctx.Err() == nil {
@@ -513,6 +583,13 @@ func (d *Device) awaitHandshake(ctx context.Context) (string, error) {
 func (d *Device) startPairing(ctx context.Context, link string, att Attester) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if d.refused != nil {
+		// Before anything else: fetching the claim would spend the
+		// owner's single-use link, and opening it would replace the vault
+		// record, whose mailbox may still hold the device.unlinked a
+		// refused device acts on (§8.6). A re-pairing uses a new Device.
+		return d.refused
+	}
 	q, err := invite.ParseLink(link)
 	if err != nil {
 		return err
@@ -547,7 +624,6 @@ func (d *Device) startPairing(ctx context.Context, link string, att Attester) er
 		}
 		d.keepChain(da)
 	}
-	d.sas, d.hsFailed = "", false
 	var apiKey []byte
 	if d.st.Role == "app" {
 		// An app pairs only as a transfer's new app: its hs.init carries
@@ -589,6 +665,17 @@ func (d *Device) startInit(purpose handshake.Purpose, ctxID, depositToken string
 
 func (d *Device) startInitWith(purpose handshake.Purpose, ctxID, depositToken string, profile json.RawMessage, da *altchan.DeviceAttest, id string, now time.Time,
 	apiKey []byte) error {
+	if d.refused != nil {
+		// This device's relay key is refused by the vault's mailbox, and a
+		// re-pairing must use a new relay key (§6.7): a new Device.
+		return d.refused
+	}
+	// An earlier pairing's hs.fin still waiting must neither fail nor
+	// delay this one.
+	d.removeOutbox(func(o OutboxEntry) bool { return o.Kind == "hs.fin" })
+	// Nothing from an earlier handshake on this Device (an aborted hs.resp,
+	// its SAS, a dropped hs.fin) carries over to this one.
+	d.sas, d.hsFailed, d.finErr = "", false, nil
 	v := d.st.Vault
 	ek, err := suite.ParsePublicKey(v.KEM)
 	if err != nil {
@@ -677,7 +764,7 @@ func (d *Device) sendFull(ctx context.Context, id, typ string, body json.RawMess
 	if err != nil {
 		return "", err
 	}
-	if err := d.depositVault(ctx, v.RelayURL, v.Mailbox, v.Token, raw); err != nil {
+	if err := d.depositVault(ctx, outboxKind(typ, re), v.RelayURL, v.Mailbox, v.Token, raw); err != nil {
 		return "", err
 	}
 	return id, nil
@@ -731,7 +818,7 @@ func (d *Device) waitFor(ctx context.Context, match func(*envelope.Inner) bool) 
 			}
 		}
 		d.mu.Unlock()
-		if err := ctx.Err(); err != nil {
+		if err := d.ctxErr(ctx); err != nil {
 			return nil, err
 		}
 		if err := d.Poll(ctx); err != nil && ctx.Err() == nil {
@@ -752,18 +839,28 @@ func (d *Device) Poll(ctx context.Context) error {
 	if d.cfg.Persist != nil {
 		return d.pollPersist(ctx)
 	}
-	d.flushOutbox(ctx) // a state saved under Persist may still hold some
+	ferr := d.flushOutbox(ctx) // a state saved under Persist may still hold some
 	msgs, err := d.own.Collect(ctx, d.cfg.PollWait, 32)
 	if err != nil {
-		return err
+		return errors.Join(ferr, err)
 	}
+	d.mu.Lock()
+	before := d.refused
+	d.mu.Unlock()
 	for _, m := range msgs {
 		d.mu.Lock()
 		d.handle(ctx, m)
 		d.mu.Unlock()
 		_ = d.own.Ack(ctx, m.MsgID)
 	}
-	return nil
+	d.mu.Lock()
+	if before == nil && d.refused != nil {
+		// A deposit made while handling (a rekey's hs.resp, a token)
+		// was refused in this Poll.
+		ferr = errors.Join(ferr, d.refused)
+	}
+	d.mu.Unlock()
+	return ferr
 }
 
 // pollPersist is Poll with Config.Persist: save before acknowledging
@@ -771,115 +868,376 @@ func (d *Device) Poll(ctx context.Context) error {
 // Persist error or a crash between Persist and the acks, is skipped by
 // the msg_id dedupe (State.Seen, saved with the batch's effects) and
 // acknowledged after the next Persist.
+//
+// After a Persist error the device is dirty: the next Poll calls Persist
+// again first, before collecting, so the batch's deposits (a pairing's
+// hs.fin) need not wait for the relay to deliver the batch again. Until
+// a batch is saved, its responses and events are held back from the
+// waiting calls, so nothing is reported to the caller that a crash
+// could still undo.
+//
+// The returned error joins the Persist error, the collect error and the
+// outbox's terminal deposit errors (ErrRefused, ErrOutboxDropped);
+// transient deposit failures are retried later and not returned.
 func (d *Device) pollPersist(ctx context.Context) error {
 	d.persistMu.Lock()
 	defer d.persistMu.Unlock()
-	d.flushOutboxLocked(ctx)
+	d.mu.Lock()
+	dirty := d.dirty
+	d.mu.Unlock()
+	if dirty {
+		if err := d.saveLocked(); err != nil {
+			return err
+		}
+	}
+	ferr := d.flushOutboxLocked(ctx)
 	msgs, err := d.own.Collect(ctx, d.cfg.PollWait, 32)
 	if err != nil {
-		return err
+		return errors.Join(ferr, err)
 	}
 	if len(msgs) == 0 {
-		return nil
+		return ferr
 	}
 	d.mu.Lock()
-	d.batching = true
+	fresh := false
 	for _, m := range msgs {
-		d.handle(ctx, m)
+		_, seen := d.st.Seen[m.MsgID]
+		fresh = fresh || !seen
 	}
-	d.batching = false
+	if fresh {
+		d.batching, d.dirty = true, true
+		for _, m := range msgs {
+			d.handle(ctx, m)
+		}
+		d.batching = false
+	}
+	d.mu.Unlock()
+	// A batch of messages already handled and saved (a redelivery after
+	// a crash between Persist and the acks) changes nothing to save.
+	if fresh {
+		if err := d.saveLocked(); err != nil {
+			return errors.Join(ferr, err)
+		}
+		ferr = errors.Join(ferr, d.flushOutboxLocked(ctx))
+	}
+	for _, m := range msgs {
+		// Acked also when its answer was refused (§8.6 "A refused answer
+		// does not block the mailbox").
+		_ = d.own.Ack(ctx, m.MsgID)
+	}
+	return ferr
+}
+
+// saveLocked calls Persist with the state; persistMu is held. On success
+// the outbox entries it holds may be deposited and the held responses
+// and events reach the waiting calls; on failure the device stays dirty.
+func (d *Device) saveLocked() error {
+	d.mu.Lock()
 	d.export()
 	state, err := json.Marshal(d.st)
-	queued := len(d.st.Outbox)
+	queued := d.nextSeq
 	d.mu.Unlock()
 	if err != nil {
 		return err
 	}
 	err = d.cfg.Persist(state)
 	suite.Wipe(state)
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	if err != nil {
-		return fmt.Errorf("client: persist: %w", err)
+		d.dirty = true
+		d.persistErr = fmt.Errorf("client: persist: %w", err)
+		return d.persistErr
 	}
-	d.outboxSaved = queued
-	d.flushOutboxLocked(ctx)
-	for _, m := range msgs {
-		_ = d.own.Ack(ctx, m.MsgID)
-	}
+	d.dirty, d.persistErr = false, nil
+	d.savedSeq = queued
+	d.events = append(d.events, d.held...)
+	d.held = nil
 	return nil
 }
 
+// emit hands a handled message to the waiting calls, or holds it while
+// its batch is not saved. d.mu is held.
+func (d *Device) emit(in *envelope.Inner) {
+	if d.batching || d.dirty {
+		d.held = append(d.held, in)
+		return
+	}
+	d.events = append(d.events, in)
+}
+
+// PersistError returns the last Persist error while what the device has
+// handled is not saved (nil once a Persist succeeds). The waiting calls
+// also return it, joined to their context's error, when their context
+// ends while it is set.
+func (d *Device) PersistError() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.persistErr
+}
+
+// ctxErr is ctx's error, joined to the last Persist error if what the
+// device handled is not saved: a caller whose wait ended learns why
+// nothing arrived.
+func (d *Device) ctxErr(ctx context.Context) error {
+	err := ctx.Err()
+	if err == nil {
+		return nil
+	}
+	if perr := d.PersistError(); perr != nil {
+		return errors.Join(err, perr)
+	}
+	return err
+}
+
+// Refused returns the ErrRefused error once the vault's mailbox has
+// answered a deposit of this device token_revoked (nil before). It stays
+// set for the life of this Device.
+func (d *Device) Refused() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.refused
+}
+
+// outboxKind classifies a message for the outbox (OutboxEntry.Kind).
+func outboxKind(typ, re string) string {
+	switch {
+	case typ == "relay.token.issued", typ == "relay.token.refresh" && re != "":
+		return "token"
+	case typ == "relay.token.refresh":
+		return "refresh"
+	}
+	return ""
+}
+
 // depositVault deposits an envelope into the vault's mailbox, or, while
-// a batch is handled for Persist, puts it in the outbox. d.mu is held.
-func (d *Device) depositVault(ctx context.Context, relayURL, mailbox, token string, payload []byte) error {
+// a batch is handled for Persist, puts it in the outbox. After the
+// mailbox answered token_revoked it sends nothing and returns that
+// refusal (§8.6). d.mu is held.
+func (d *Device) depositVault(ctx context.Context, kind, relayURL, mailbox, token string, payload []byte) error {
+	if d.refused != nil {
+		return d.refused
+	}
 	if d.batching {
-		d.st.Outbox = append(d.st.Outbox, OutboxEntry{RelayURL: relayURL, Mailbox: mailbox,
+		d.queueLocked(OutboxEntry{Kind: kind, RelayURL: relayURL, Mailbox: mailbox,
 			Payload: append([]byte(nil), payload...), Created: d.cfg.Now()})
 		return nil
 	}
 	_, err := d.relayClient(relayURL).Deposit(ctx, mailbox, token, payload)
+	if relayclient.IsCode(err, "token_revoked") {
+		d.refused = fmt.Errorf("%w: %w", ErrRefused, err)
+		return d.refused
+	}
 	return err
+}
+
+// queueLocked appends an entry to the outbox. A "token" or "refresh"
+// entry replaces the waiting ones of its kind: only the newest standing
+// token for the vault, and one refresh request, are worth sending. Past
+// outboxCap entries the oldest is dropped. d.mu is held.
+func (d *Device) queueLocked(e OutboxEntry) {
+	if e.Kind == "token" || e.Kind == "refresh" {
+		d.removeOutbox(func(o OutboxEntry) bool { return o.Kind == e.Kind })
+	}
+	d.nextSeq++
+	e.seq = d.nextSeq
+	d.st.Outbox = append(d.st.Outbox, e)
+	for len(d.st.Outbox) > outboxCap {
+		if d.st.Outbox[0].Kind == "hs.fin" {
+			d.finErr = ErrHandshakeUnsent
+		}
+		d.st.Outbox = d.st.Outbox[1:]
+	}
+}
+
+// removeOutbox removes the entries drop selects. d.mu is held.
+func (d *Device) removeOutbox(drop func(OutboxEntry) bool) {
+	var kept []OutboxEntry
+	for _, o := range d.st.Outbox {
+		if !drop(o) {
+			kept = append(kept, o)
+		}
+	}
+	d.st.Outbox = kept
+}
+
+// dropOutboxLocked empties the outbox (the vault record is gone).
+func (d *Device) dropOutboxLocked() {
+	d.removeOutbox(func(OutboxEntry) bool { return true })
+}
+
+// queued reports whether an outbox entry of the kind waits. d.mu is held.
+func (d *Device) queued(kind string) bool {
+	for _, o := range d.st.Outbox {
+		if o.Kind == kind {
+			return true
+		}
+	}
+	return false
 }
 
 // flushOutbox deposits the saved outbox entries in order (an entry from
 // a batch whose Persist failed waits for the next successful one), on
-// the vault token held now. An entry the relay accepted, or refused with a client error
-// other than 429, leaves the outbox (without Persist a failed deposit is
-// not retried either); one older than outboxMaxAge, or left without a
-// vault, is dropped; at any other failure it and the rest stay for the
-// next Poll. A removal is saved with the next Persist, so an entry
+// the vault token held now, and returns the terminal errors.
+//
+//   - Accepted: the entry leaves the outbox.
+//   - Refused with token_revoked: the device is refused (ErrRefused,
+//     Refused) and every entry is dropped; nothing more is sent (§8.6).
+//   - Refused with another client error than 429: the entry is dropped,
+//     the error returned wrapped in ErrOutboxDropped.
+//   - 429, 5xx or a transport error: it and the rest stay, and the
+//     outbox is not tried again before a backoff (full jitter from
+//     0.25 s doubling, capped at 30 s, or the relay's retry_after if
+//     longer; §8.6).
+//   - Dropped without a deposit: an entry older than outboxMaxAge, or
+//     one whose relay URL or mailbox is no longer the vault record's
+//     (or with no vault record).
+//
+// A dropped hs.fin fails the pairing's awaitHandshake (ErrHandshakeUnsent
+// or the refusal). A removal is saved with the next Persist, so an entry
 // deposited just before a crash is deposited again: the vault drops the
 // second hs.resp or hs.fin of a handshake it has finished and dedupes
 // the rest by their inner id (§8.2).
-func (d *Device) flushOutbox(ctx context.Context) {
+func (d *Device) flushOutbox(ctx context.Context) error {
 	d.persistMu.Lock()
 	defer d.persistMu.Unlock()
-	d.flushOutboxLocked(ctx)
+	return d.flushOutboxLocked(ctx)
 }
 
 // flushOutboxLocked is flushOutbox with persistMu held.
-func (d *Device) flushOutboxLocked(ctx context.Context) {
-	d.mu.Lock()
-	out := d.st.Outbox[:d.outboxSaved]
-	tok := ""
-	if d.st.Vault != nil {
-		tok = d.st.Vault.Token
-	}
-	d.mu.Unlock()
-	if len(out) == 0 {
-		return
-	}
+func (d *Device) flushOutboxLocked(ctx context.Context) error {
 	now := d.cfg.Now()
-	i := 0
+	d.mu.Lock()
+	var out []OutboxEntry
+	for _, e := range d.st.Outbox {
+		if e.seq <= d.savedSeq {
+			out = append(out, e)
+		}
+	}
+	if len(out) == 0 || now.Before(d.outboxNext) {
+		d.mu.Unlock()
+		return nil
+	}
+	var url, mailbox, tok string
+	if v := d.st.Vault; v != nil {
+		url, mailbox, tok = v.RelayURL, v.Mailbox, v.Token
+	}
+	refused := d.refused
+	d.mu.Unlock()
+	var errs []error
+	// finErrs: why a tried hs.fin was dropped, by entry number.
+	finErrs := map[uint64]error{}
+	drop := func(e OutboxEntry, err error) {
+		if e.Kind == "hs.fin" {
+			finErrs[e.seq] = ErrHandshakeUnsent
+			if errors.Is(err, ErrRefused) {
+				finErrs[e.seq] = err
+			} else if err != nil {
+				finErrs[e.seq] = fmt.Errorf("%w: %w", ErrHandshakeUnsent, err)
+			}
+		}
+	}
+	i, sent, backoff := 0, false, time.Duration(0)
+loop:
 	for ; i < len(out); i++ {
 		e := out[i]
-		if tok == "" || now.Sub(e.Created) > outboxMaxAge {
+		if refused != nil || tok == "" || e.RelayURL != url || e.Mailbox != mailbox || now.Sub(e.Created) > outboxMaxAge {
+			drop(e, refused)
 			continue
 		}
-		if _, err := d.relayClient(e.RelayURL).Deposit(ctx, e.Mailbox, tok, e.Payload); err != nil {
-			var re *relayclient.Error
-			if errors.As(err, &re) && re.Status >= 400 && re.Status < 500 && re.Status != http.StatusTooManyRequests {
-				continue
-			}
-			break
+		_, err := d.relayClient(e.RelayURL).Deposit(ctx, e.Mailbox, tok, e.Payload)
+		var re *relayclient.Error
+		switch {
+		case err == nil:
+			sent = true
+		case relayclient.IsCode(err, "token_revoked"):
+			refused = fmt.Errorf("%w: %w", ErrRefused, err)
+			errs = append(errs, refused)
+			drop(e, refused)
+		case errors.As(err, &re) && re.Status >= 400 && re.Status < 500 && re.Status != http.StatusTooManyRequests:
+			errs = append(errs, fmt.Errorf("%w (%s): %w", ErrOutboxDropped, e.Kind, err))
+			drop(e, err)
+		default:
+			backoff = retryAfter(err)
+			break loop
 		}
 	}
 	d.mu.Lock()
-	// Only a batch handled under persistMu (held here) adds entries, so
-	// the first len(out) are still those just sent.
-	rest := d.st.Outbox[i:]
-	d.st.Outbox = nil
-	if len(rest) > 0 {
-		d.st.Outbox = append([]OutboxEntry(nil), rest...)
+	defer d.mu.Unlock()
+	// Remove the entries tried (sent or dropped), by number: the outbox
+	// may have changed meanwhile. A dropped hs.fin fails its pairing
+	// only if it is still waiting (a new pairing removes an older one).
+	tried := map[uint64]bool{}
+	for _, e := range out[:i] {
+		tried[e.seq] = true
 	}
-	d.outboxSaved -= i
-	d.mu.Unlock()
+	for _, e := range d.st.Outbox {
+		if err := finErrs[e.seq]; err != nil && tried[e.seq] {
+			d.finErr = err
+		}
+	}
+	d.removeOutbox(func(o OutboxEntry) bool { return tried[o.seq] })
+	if refused != nil {
+		if d.refused == nil {
+			d.refused = refused
+		}
+		d.dropOutboxLocked()
+	}
+	switch {
+	case i < len(out): // a transient failure
+		d.outboxFails++
+		wait := outboxBackoff(d.outboxFails)
+		if backoff > wait {
+			wait = backoff
+		}
+		d.outboxNext = now.Add(wait)
+	case sent:
+		d.outboxFails, d.outboxNext = 0, time.Time{}
+	}
+	return errors.Join(errs...)
+}
+
+// retryAfter is a relay error's retry_after, at most maxRetryAfter
+// seconds (0 without one).
+func retryAfter(err error) time.Duration {
+	var re *relayclient.Error
+	if !errors.As(err, &re) || re.RetryAfter <= 0 {
+		return 0
+	}
+	return time.Duration(min(re.RetryAfter, maxRetryAfter)) * time.Second
+}
+
+// outboxBackoff is the wait after n consecutive transient failures:
+// full jitter over 0.25 s × 2ⁿ⁻¹, capped at 30 s (§8.6).
+func outboxBackoff(n int) time.Duration {
+	c := 250 * time.Millisecond << min(n-1, 7)
+	if c > 30*time.Second {
+		c = 30 * time.Second
+	}
+	return rand.N(c) + 1
 }
 
 // Deliver processes one message as if collected (in-process tests).
+// With Config.Persist it is handled as a batch of one: saved (the error,
+// if any, is PersistError, and the next Poll saves again), then its
+// deposits are made.
 func (d *Device) Deliver(ctx context.Context, m relayclient.Message) {
+	if d.cfg.Persist == nil {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		d.handle(ctx, m)
+		return
+	}
+	d.persistMu.Lock()
+	defer d.persistMu.Unlock()
 	d.mu.Lock()
-	defer d.mu.Unlock()
+	d.batching, d.dirty = true, true
 	d.handle(ctx, m)
+	d.batching = false
+	d.mu.Unlock()
+	if d.saveLocked() == nil {
+		_ = d.flushOutboxLocked(ctx)
+	}
 }
 
 // handle processes one collected message. Classification is by sender and
@@ -948,6 +1306,7 @@ func (d *Device) handle(ctx context.Context, m relayclient.Message) {
 		}
 		d.keyring = &handshake.Keyring{}
 		d.st.Vault, d.sas, d.st.PairingPending = nil, "", false
+		d.dropOutboxLocked()
 	case "device.paired":
 		// §6.7 "Late and duplicate": the vault sends it once per pairing.
 		// Once this device has its id, one arriving without a handshake
@@ -1009,7 +1368,7 @@ func (d *Device) handle(ctx context.Context, m relayclient.Message) {
 			d.leashGrants = append(json.RawMessage(nil), in.Body...) // the agent's current grants (§10.11); d.mu is held
 		}
 	}
-	d.events = append(d.events, in)
+	d.emit(in)
 	d.maintain(ctx, now)
 }
 
@@ -1073,7 +1432,7 @@ func (d *Device) handleEnrolled(env *envelope.Envelope, sender ed25519.PublicKey
 		}
 		a.EnrollNonce, a.EnrollPCRs, a.EnrollNumber = nil, "", 0
 	}
-	d.events = append(d.events, in)
+	d.emit(in)
 }
 
 // checkEnrolledAttestation verifies vault.enrolled's attestation (§11.3):
@@ -1124,7 +1483,15 @@ func (d *Device) handleResp(ctx context.Context, raw []byte, sender ed25519.Publ
 	}
 	d.keyring.Activate(res.Epoch, now)
 	v := d.st.Vault
-	_ = d.depositVault(ctx, v.RelayURL, v.Mailbox, v.Token, res.Fin)
+	if err := d.depositVault(ctx, "hs.fin", v.RelayURL, v.Mailbox, v.Token, res.Fin); err != nil {
+		// The vault cannot finish this handshake: awaitHandshake fails
+		// instead of returning a SAS.
+		if errors.Is(err, ErrRefused) {
+			d.finErr = err
+		} else {
+			d.finErr = fmt.Errorf("%w: %w", ErrHandshakeUnsent, err)
+		}
+	}
 }
 
 // handleRekey answers a vault-initiated rekey (§6.5).
@@ -1144,7 +1511,7 @@ func (d *Device) handleRekey(ctx context.Context, raw []byte, in *envelope.Inner
 	if err != nil {
 		return
 	}
-	if err := d.depositVault(ctx, v.RelayURL, v.Mailbox, v.Token, env); err != nil {
+	if err := d.depositVault(ctx, "hs.resp", v.RelayURL, v.Mailbox, v.Token, env); err != nil {
 		resp.Abort()
 		return
 	}

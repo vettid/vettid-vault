@@ -145,6 +145,7 @@ end covers §7, §8, §11.8, §12 and §13.2.
 | 8.4 | Reject `ts` > 5 min ahead and, for durable types, > 16 d old | `vault.TestTimestampWindow`, `envelope.TestInnerCheckTime` |
 | 8.5 | Ephemeral types: `exp` required, acked after handling, in-memory dedupe | `vault.TestEphemeralClass` |
 | 8.6 | Error table: token_revoked / mailbox_unknown terminal, token_expired → reconnect | `vault.TestDepositErrors`, `e2e.TestRevokeConnection`, `e2e.TestReconnectAfterExpiry` |
+| 8.6 | "An owner device refused by its own vault" (reference client): `token_revoked` on a deposit to its vault's mailbox stops all sending to it (`client.ErrRefused`, `Refused`), erases nothing, keeps collecting (a `device.unlinked` is still read), and the batch is acknowledged anyway; the outbox backs off on 429 and transient errors (full jitter, 0.25 s doubling, 30 s cap, `retry_after` honoured) | `client.TestPersistTokenRevoked`, `client.TestNoPersistTokenRevoked`, `client.TestOutboxBackoff` |
 | 9.1 | One deposit per owner device; responses to the requester only | `e2e.TestPairConnectMessage` |
 | 11.8 | Backoff after 3 failures; failures counted in header_seq; never wipe | `vault.TestBadPINBackoff` |
 | 12.2 | Collect by long-poll and WebSocket; unlock order (re-mint, reconnect, rekey devices, drain, collect) | `e2e.TestPairConnectMessage` (WebSocket vault), `e2e.TestReconnectAfterExpiry`, `e2e.TestVaultctlSmoke` |

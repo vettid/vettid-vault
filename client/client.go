@@ -55,6 +55,9 @@ var (
 	// ErrHandshakeUnsent: the hs.fin of this device's pairing could not
 	// be deposited, so the vault cannot complete the handshake.
 	ErrHandshakeUnsent = errors.New("client: hs.fin could not be deposited")
+	// ErrRunning: Run was called while it already runs, or Poll while
+	// Run runs.
+	ErrRunning = errors.New("client: Run is already running")
 )
 
 // Config configures a Device.
@@ -93,8 +96,8 @@ type Config struct {
 	// only once its hs.fin is saved and deposited. After a Persist
 	// error the next Poll calls Persist again before collecting.
 	// Terminal deposit errors from the outbox are returned by Poll
-	// (ErrRefused, ErrOutboxDropped); see flushOutbox for the outbox's
-	// rules.
+	// (ErrRefused, ErrOutboxDropped); see flushOutboxLocked for the
+	// outbox's rules.
 	//
 	// Nil: each message is acknowledged right after it is handled, its
 	// deposits are made at once, and the state is saved only when the
@@ -102,6 +105,10 @@ type Config struct {
 	// answered token_revoked makes the device refused (ErrRefused,
 	// Refused): it sends nothing more to that mailbox (§8.6).
 	Persist func(state []byte) error
+	// RunError, if set, receives each error of a Poll that Run makes
+	// (a Persist error, a collect error, ErrRefused, ErrOutboxDropped).
+	// Run keeps collecting after it, with a backoff.
+	RunError func(error)
 }
 
 // State is the device's persistent state.
@@ -254,9 +261,16 @@ type Device struct {
 	pending  *pendingUnlock
 	lastUTK  UTK
 
-	// persistMu serializes Poll's collect, handle, Persist, deposit and
-	// ack steps when Config.Persist is set, and every outbox flush.
-	persistMu sync.Mutex
+	// sem (capacity 1) serializes every Poll (collect, handle, Persist,
+	// deposits, acks) and every outbox flush; taking it honours the
+	// caller's context.
+	sem chan struct{}
+	// wake is closed and replaced (mu held) at the end of every Poll and
+	// when Run stops: waiting calls wait on it while Run collects.
+	wake chan struct{}
+	// running: Run collects; runDone is closed when it stops.
+	running bool
+	runDone chan struct{}
 	// batching is set (with mu held) while a batch is handled for
 	// Persist: deposits go to the outbox instead of the relay.
 	batching bool
@@ -343,7 +357,7 @@ func open(cfg Config, st *State) (*Device, error) {
 	if st.Seen == nil {
 		st.Seen = map[string]time.Time{}
 	}
-	d := &Device{cfg: cfg, st: st,
+	d := &Device{cfg: cfg, st: st, sem: make(chan struct{}, 1), wake: make(chan struct{}),
 		ik: ed25519.NewKeyFromSeed(st.IKSeed), relayKey: ed25519.NewKeyFromSeed(st.RelaySeed)}
 	var err error
 	if d.kem, err = suite.NewPrivateKey(st.KEMSeed); err != nil {
@@ -546,38 +560,35 @@ func (d *Device) PairAttested(ctx context.Context, link string, att Attester) (s
 	return d.awaitHandshake(ctx)
 }
 
-// awaitHandshake polls until the vault's hs.resp completed the handshake
+// awaitHandshake waits until the vault's hs.resp completed the handshake
 // and returns its SAS.
 func (d *Device) awaitHandshake(ctx context.Context) (string, error) {
-	for {
-		d.mu.Lock()
-		if d.ini == nil {
-			sas, failed, finErr, finQueued := d.sas, d.hsFailed, d.finErr, d.queued("hs.fin")
-			d.mu.Unlock()
-			switch {
-			case failed || sas == "":
-				return "", ErrProtocol
-			case finErr != nil:
-				return "", finErr
-			case !finQueued:
-				// The hs.fin is deposited (with Config.Persist: after the
-				// batch that made it was saved), so the vault can finish
-				// the handshake the SAS belongs to.
-				return sas, nil
-			}
-		} else {
-			d.mu.Unlock()
+	var sas string
+	var err error
+	done := func() bool {
+		if d.ini != nil {
+			return false
 		}
-		if err := d.ctxErr(ctx); err != nil {
-			return "", err
+		finErr, finQueued := d.finErr, d.queued("hs.fin")
+		switch {
+		case d.hsFailed || d.sas == "":
+			err = ErrProtocol
+		case finErr != nil:
+			err = finErr
+		case finQueued:
+			return false
+		default:
+			// The hs.fin is deposited (with Config.Persist: after the
+			// batch that made it was saved), so the vault can finish the
+			// handshake the SAS belongs to.
+			sas = d.sas
 		}
-		if err := d.Poll(ctx); err != nil && ctx.Err() == nil {
-			var re *relayclient.Error
-			if !errors.As(err, &re) {
-				time.Sleep(100 * time.Millisecond)
-			}
-		}
+		return true
 	}
+	if werr := d.waitUntil(ctx, done); werr != nil {
+		return "", werr
+	}
+	return sas, err
 }
 
 func (d *Device) startPairing(ctx context.Context, link string, att Attester) error {
@@ -805,27 +816,143 @@ func (d *Device) Events() []*envelope.Inner {
 	return ev
 }
 
-// waitFor processes the mailbox until match accepts a received message,
-// which is removed from the buffer and returned.
+// waitFor waits until match accepts a received message, which is
+// removed from the buffer and returned.
 func (d *Device) waitFor(ctx context.Context, match func(*envelope.Inner) bool) (*envelope.Inner, error) {
-	for {
-		d.mu.Lock()
+	var got *envelope.Inner
+	err := d.waitUntil(ctx, func() bool {
 		for i, ev := range d.events {
 			if match(ev) {
 				d.events = append(d.events[:i:i], d.events[i+1:]...)
-				d.mu.Unlock()
-				return ev, nil
+				got = ev
+				return true
 			}
+		}
+		return false
+	})
+	return got, err
+}
+
+// waitUntil waits until done (called with mu held) reports true. While
+// Run collects, it waits for Run's Polls (VAULT-MESSAGING §8.1: one
+// collector, which dispatches); otherwise it collects itself, as before
+// Run existed. Either way done is checked again after every Poll, and a
+// waiter that had to wait for another's Poll checks it again before
+// collecting, so it never long-polls for a message already buffered.
+func (d *Device) waitUntil(ctx context.Context, done func() bool) error {
+	fails := 0
+	for {
+		d.mu.Lock()
+		if done() {
+			d.mu.Unlock()
+			return nil
+		}
+		if d.running {
+			wake, stopped := d.wake, d.runDone
+			d.mu.Unlock()
+			select {
+			case <-wake:
+			case <-stopped:
+			case <-ctx.Done():
+				return d.ctxErr(ctx)
+			}
+			continue
 		}
 		d.mu.Unlock()
 		if err := d.ctxErr(ctx); err != nil {
-			return nil, err
+			return err
 		}
-		if err := d.Poll(ctx); err != nil && ctx.Err() == nil {
-			var re *relayclient.Error
-			if !errors.As(err, &re) {
-				time.Sleep(100 * time.Millisecond)
-			}
+		hit := false
+		err := d.poll(ctx, func() bool {
+			hit = done()
+			return hit || d.running
+		})
+		if hit {
+			return nil
+		}
+		if err == nil || ctx.Err() != nil {
+			fails = 0
+			continue
+		}
+		// A failed Poll (relay or Persist error): back off as Run does.
+		fails++
+		t := time.NewTimer(outboxBackoff(fails))
+		select {
+		case <-t.C:
+		case <-ctx.Done():
+			t.Stop()
+			return d.ctxErr(ctx)
+		}
+	}
+}
+
+// acquire takes sem, or returns the context's error.
+func (d *Device) acquire(ctx context.Context) error {
+	select {
+	case d.sem <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (d *Device) release() { <-d.sem }
+
+// wakeLocked wakes the waiting calls. d.mu is held.
+func (d *Device) wakeLocked() {
+	close(d.wake)
+	d.wake = make(chan struct{})
+}
+
+// Run collects from the device's mailbox and dispatches what arrives
+// until ctx ends, and returns ctx's error (ErrRunning if it already
+// runs). While it runs, the waiting calls (Request, AwaitResponse,
+// WaitEvent, Op, LeashPresent, the pairing waits) wait for its Polls
+// instead of collecting themselves, so concurrent callers do not take
+// each other's messages (§8.1). Each Poll is a long poll of
+// Config.PollWait. A Poll error goes to Config.RunError, and Run polls
+// again after a backoff (full jitter from 0.25 s, doubling, capped at
+// 30 s), which a successful Poll resets: after a Persist error that is
+// the retry, and a refused device keeps collecting (§8.6). When Run
+// stops, waiting calls go back to collecting themselves.
+func (d *Device) Run(ctx context.Context) error {
+	d.mu.Lock()
+	if d.running {
+		d.mu.Unlock()
+		return ErrRunning
+	}
+	d.running, d.runDone = true, make(chan struct{})
+	d.mu.Unlock()
+	defer func() {
+		d.mu.Lock()
+		d.running = false
+		close(d.runDone)
+		d.wakeLocked()
+		d.mu.Unlock()
+	}()
+	fails := 0
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		err := d.poll(ctx, nil)
+		if err == nil {
+			fails = 0
+			continue
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if f := d.cfg.RunError; f != nil {
+			f(err)
+		}
+		fails++
+		t := time.NewTimer(outboxBackoff(fails))
+		select {
+		case <-t.C:
+		case <-ctx.Done():
+			t.Stop()
+			return ctx.Err()
 		}
 	}
 }
@@ -834,12 +961,44 @@ func (d *Device) waitFor(ctx context.Context, match func(*envelope.Inner) bool) 
 // With Config.Persist set, it first deposits what waits in the outbox,
 // then handles the batch, calls Persist, deposits the batch's outbox
 // entries and acknowledges the batch; a Persist error is returned and
-// leaves the batch unacknowledged.
+// leaves the batch unacknowledged. Polls never overlap: a Poll waits for
+// the one in progress (or for ctx to end).
+// While Run runs, Poll returns ErrRunning: Run is the one collector.
 func (d *Device) Poll(ctx context.Context) error {
+	d.mu.Lock()
+	running := d.running
+	d.mu.Unlock()
+	if running {
+		return ErrRunning
+	}
+	return d.poll(ctx, nil)
+}
+
+// poll is Poll; skip (called with mu held, once sem is taken) ends it
+// early without collecting, for a waiter whose message arrived during
+// the Poll it waited for.
+func (d *Device) poll(ctx context.Context, skip func() bool) error {
+	if err := d.acquire(ctx); err != nil {
+		return err
+	}
+	defer d.release()
+	if skip != nil {
+		d.mu.Lock()
+		ok := skip()
+		d.mu.Unlock()
+		if ok {
+			return nil
+		}
+	}
+	defer func() {
+		d.mu.Lock()
+		d.wakeLocked()
+		d.mu.Unlock()
+	}()
 	if d.cfg.Persist != nil {
 		return d.pollPersist(ctx)
 	}
-	ferr := d.flushOutbox(ctx) // a state saved under Persist may still hold some
+	ferr := d.flushOutboxLocked(ctx) // a state saved under Persist may still hold some
 	msgs, err := d.own.Collect(ctx, d.cfg.PollWait, 32)
 	if err != nil {
 		return errors.Join(ferr, err)
@@ -848,9 +1007,13 @@ func (d *Device) Poll(ctx context.Context) error {
 	before := d.refused
 	d.mu.Unlock()
 	for _, m := range msgs {
-		d.mu.Lock()
-		d.handle(ctx, m)
-		d.mu.Unlock()
+		// Unlocked by defer, so that a panic in handle unwinds through
+		// poll's deferred wake and release instead of deadlocking.
+		func() {
+			d.mu.Lock()
+			defer d.mu.Unlock()
+			d.handle(ctx, m)
+		}()
 		_ = d.own.Ack(ctx, m.MsgID)
 	}
 	d.mu.Lock()
@@ -880,8 +1043,6 @@ func (d *Device) Poll(ctx context.Context) error {
 // outbox's terminal deposit errors (ErrRefused, ErrOutboxDropped);
 // transient deposit failures are retried later and not returned.
 func (d *Device) pollPersist(ctx context.Context) error {
-	d.persistMu.Lock()
-	defer d.persistMu.Unlock()
 	d.mu.Lock()
 	dirty := d.dirty
 	d.mu.Unlock()
@@ -898,20 +1059,7 @@ func (d *Device) pollPersist(ctx context.Context) error {
 	if len(msgs) == 0 {
 		return ferr
 	}
-	d.mu.Lock()
-	fresh := false
-	for _, m := range msgs {
-		_, seen := d.st.Seen[m.MsgID]
-		fresh = fresh || !seen
-	}
-	if fresh {
-		d.batching, d.dirty = true, true
-		for _, m := range msgs {
-			d.handle(ctx, m)
-		}
-		d.batching = false
-	}
-	d.mu.Unlock()
+	fresh := d.handleBatch(ctx, msgs)
 	// A batch of messages already handled and saved (a redelivery after
 	// a crash between Persist and the acks) changes nothing to save.
 	if fresh {
@@ -928,7 +1076,30 @@ func (d *Device) pollPersist(ctx context.Context) error {
 	return ferr
 }
 
-// saveLocked calls Persist with the state; persistMu is held. On success
+// handleBatch handles a batch for Persist, unless all of it is already
+// handled and saved, and reports whether it handled any. The device
+// lock is released and batching reset by defer, so a panic in handle
+// unwinds cleanly. The caller holds sem.
+func (d *Device) handleBatch(ctx context.Context, msgs []relayclient.Message) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	fresh := false
+	for _, m := range msgs {
+		_, seen := d.st.Seen[m.MsgID]
+		fresh = fresh || !seen
+	}
+	if !fresh {
+		return false
+	}
+	d.batching, d.dirty = true, true
+	defer func() { d.batching = false }()
+	for _, m := range msgs {
+		d.handle(ctx, m)
+	}
+	return true
+}
+
+// saveLocked calls Persist with the state; sem is held. On success
 // the outbox entries it holds may be deposited and the held responses
 // and events reach the waiting calls; on failure the device stays dirty.
 func (d *Device) saveLocked() error {
@@ -1076,7 +1247,7 @@ func (d *Device) queued(kind string) bool {
 	return false
 }
 
-// flushOutbox deposits the saved outbox entries in order (an entry from
+// flushOutboxLocked deposits the saved outbox entries in order (an entry from
 // a batch whose Persist failed waits for the next successful one), on
 // the vault token held now, and returns the terminal errors.
 //
@@ -1097,14 +1268,7 @@ func (d *Device) queued(kind string) bool {
 // or the refusal). A removal is saved with the next Persist, so an entry
 // deposited just before a crash is deposited again: the vault drops the
 // second hs.resp or hs.fin of a handshake it has finished and dedupes
-// the rest by their inner id (§8.2).
-func (d *Device) flushOutbox(ctx context.Context) error {
-	d.persistMu.Lock()
-	defer d.persistMu.Unlock()
-	return d.flushOutboxLocked(ctx)
-}
-
-// flushOutboxLocked is flushOutbox with persistMu held.
+// the rest by their inner id (§8.2). sem is held.
 func (d *Device) flushOutboxLocked(ctx context.Context) error {
 	now := d.cfg.Now()
 	d.mu.Lock()
@@ -1228,21 +1392,31 @@ func (d *Device) Deliver(ctx context.Context, m relayclient.Message) {
 		d.handle(ctx, m)
 		return
 	}
-	d.persistMu.Lock()
-	defer d.persistMu.Unlock()
-	d.mu.Lock()
-	d.batching, d.dirty = true, true
-	d.handle(ctx, m)
-	d.batching = false
-	d.mu.Unlock()
+	if err := d.acquire(ctx); err != nil {
+		return
+	}
+	defer d.release()
+	func() {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		d.batching, d.dirty = true, true
+		defer func() { d.batching = false }()
+		d.handle(ctx, m)
+	}()
 	if d.saveLocked() == nil {
 		_ = d.flushOutboxLocked(ctx)
 	}
 }
 
+// testHandleHook, set only by tests, runs at the start of handle.
+var testHandleHook func(relayclient.Message)
+
 // handle processes one collected message. Classification is by sender and
 // recipient kid only (§13.6).
 func (d *Device) handle(ctx context.Context, m relayclient.Message) {
+	if testHandleHook != nil {
+		testHandleHook(m)
+	}
 	if _, seen := d.st.Seen[m.MsgID]; seen {
 		return
 	}

@@ -266,3 +266,12 @@ func TestOutboxBackoff(t *testing.T) {
 		}
 	}
 }
+
+// flushOutbox is flushOutboxLocked taking sem (tests).
+func (d *Device) flushOutbox(ctx context.Context) error {
+	if err := d.acquire(ctx); err != nil {
+		return err
+	}
+	defer d.release()
+	return d.flushOutboxLocked(ctx)
+}

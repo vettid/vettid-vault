@@ -50,6 +50,14 @@ type fakeRelay struct {
 	// (a relay's visibility timeout that has not passed) until release.
 	lease  bool
 	leased map[string]bool
+	// longPoll makes an empty collect wait (up to its wait parameter)
+	// for a deposit, as a relay does; changed is closed at each deposit.
+	longPoll bool
+	changed  chan struct{}
+	// collects in progress, and the most seen at once; collectCalls
+	// counts them; failCollect answers every collect 400.
+	collects, maxCollects, collectCalls int
+	failCollect                         bool
 }
 
 func newFakeRelay(t *testing.T) *fakeRelay {
@@ -84,6 +92,10 @@ func (r *fakeRelay) put(mailbox string, sender ed25519.PublicKey, payload []byte
 func (r *fakeRelay) putLocked(mailbox, sender string, payload []byte) string {
 	r.n++
 	id := "m" + strconv.Itoa(r.n)
+	if r.changed != nil {
+		close(r.changed)
+		r.changed = nil
+	}
 	r.boxes[mailbox] = append(r.boxes[mailbox], relayclient.Message{MsgID: id, Sender: sender,
 		Payload: append([]byte(nil), payload...), DepositedAt: time.Now().UTC().Format(time.RFC3339Nano)})
 	return id
@@ -144,7 +156,19 @@ func (r *fakeRelay) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(map[string]string{"msg_id": id})
 	case req.Method == http.MethodGet && req.URL.Path == "/v1/mailbox":
+		r.collectCalls++
+		if r.failCollect {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"code":"injected"}`))
+			return
+		}
+		r.collects++
+		r.maxCollects = max(r.maxCollects, r.collects)
+		defer func() { r.collects-- }()
+		wait, _ := strconv.Atoi(req.URL.Query().Get("wait"))
+		deadline := time.Now().Add(time.Duration(wait) * time.Second)
 		var msgs []relayclient.Message
+	collect:
 		for _, m := range r.boxes[relayauth.MailboxID(pk)] {
 			if len(msgs) == 32 {
 				break
@@ -159,6 +183,24 @@ func (r *fakeRelay) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 				r.leased[m.MsgID] = true
 			}
 			msgs = append(msgs, m)
+		}
+		if len(msgs) == 0 && r.longPoll && time.Now().Before(deadline) {
+			if r.changed == nil {
+				r.changed = make(chan struct{})
+			}
+			ch := r.changed
+			r.mu.Unlock()
+			t := time.NewTimer(time.Until(deadline))
+			select {
+			case <-ch:
+			case <-t.C:
+			case <-req.Context().Done():
+			}
+			t.Stop()
+			r.mu.Lock()
+			if req.Context().Err() == nil {
+				goto collect
+			}
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"messages": append([]relayclient.Message{}, msgs...)})
 	case req.Method == http.MethodDelete && strings.HasPrefix(req.URL.Path, "/v1/mailbox/"):

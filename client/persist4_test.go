@@ -143,3 +143,43 @@ func TestCompleteHandshakeFinRefused(t *testing.T) {
 		}
 	}
 }
+
+// device.pair.rejected ends the pending handshake (and empties the
+// outbox with the vault record).
+func TestPairRejectedClearsPending(t *testing.T) {
+	_, v, d := pair(t)
+	if !d.st.PairingPending {
+		t.Fatal("no pending handshake after startInit")
+	}
+	v.send(devicePairRejected, []byte(`{}`))
+	if err := d.Poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if d.st.PairingPending || d.st.Vault != nil || d.st.Outbox != nil {
+		t.Fatalf("after device.pair.rejected: pending %v, vault %v, outbox %d", d.st.PairingPending, d.st.Vault != nil, len(d.st.Outbox))
+	}
+}
+
+// Under Persist, a replayed device.paired (new msg_id) is dropped too:
+// the state saved after it still holds the first one's id and token.
+func TestPairedReplayDroppedPersist(t *testing.T) {
+	r, v, d := pair(t)
+	var saved []byte
+	d.cfg.Persist = keep(&saved, r)
+	v.send("device.paired", pairedWith(v, "dev-1", "", 0))
+	if err := d.Poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	first := loadState(t, saved)
+	if first.DeviceID != "dev-1" || first.PairingPending || len(d.Events()) != 1 {
+		t.Fatal("first device.paired not saved")
+	}
+	v.send("device.paired", pairedWith(v, "dev-other", "", 0))
+	if err := d.Poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	after := loadState(t, saved)
+	if after.DeviceID != "dev-1" || after.Vault.Token != first.Vault.Token || len(d.Events()) != 0 {
+		t.Fatal("a replayed device.paired changed the saved state or reached the caller")
+	}
+}

@@ -183,3 +183,97 @@ func TestPairedReplayDroppedPersist(t *testing.T) {
 		t.Fatal("a replayed device.paired changed the saved state or reached the caller")
 	}
 }
+
+// enrollFixture is a device with a vault record and token, before its
+// first handshake (CompleteEnrollment) or a recovery's.
+func enrollFixture(t *testing.T, recovery bool) (*fakeRelay, *fakeVault, *Device) {
+	t.Helper()
+	r := newFakeRelay(t)
+	v := newFakeVault(t, r)
+	d, err := Generate(Config{Role: "app", Name: "phone", RelayURL: r.url(), HTTP: r.srv.Client(), PollWait: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	v.dev, v.devIK = d.RelayAddr(), d.IdentityKey()
+	d.st.VaultID = testVaultID
+	d.st.Vault = &VaultRecord{IK: v.ik.Public().(ed25519.PublicKey), KEM: v.kem.Public().Bytes(), RelayURL: r.url(), Mailbox: v.mailbox(), RelayPK: v.relayPK()}
+	tok := v.token(30 * 24 * time.Hour)
+	if d.st.Vault.TokenExp, err = d.heldFromVault(tok); err != nil {
+		t.Fatal(err)
+	}
+	d.st.Vault.Token = tok
+	if recovery {
+		d.st.Recovery = &RecoveryState{RecoveryID: "rec-1"}
+	}
+	return r, v, d
+}
+
+// answerInit waits for the device's hs.init and answers it as identity.
+func answerInit(t *testing.T, r *fakeRelay, v *fakeVault, identity ed25519.PrivateKey) *handshake.Responder {
+	t.Helper()
+	var in []byte
+	for in == nil {
+		if m := r.take(v.mailbox()); len(m) > 0 {
+			in = m[0].Payload
+		}
+		time.Sleep(time.Millisecond)
+	}
+	now := time.Now()
+	pi, err := handshake.OpenInit(in, func(k suite.Kid) *suite.PrivateKey { return v.kem }, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, env, err := pi.Respond(handshake.ResponderConfig{Identity: identity, Policy: handshake.PolicyVaultToDevice,
+		CollectSender: v.dev.PK, Token: v.token(30 * 24 * time.Hour), Now: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.put(v.dev.Mailbox, v.relayPK(), env)
+	return resp
+}
+
+// A handshake whose hs.resp aborted (signed by another identity than the
+// pinned vault's) fails; a retry on the same Device then completes: the
+// earlier failure does not carry over (CompleteEnrollment and
+// CompleteRecoveryHandshake).
+func TestCompleteHandshakeRetryAfterAbort(t *testing.T) {
+	for _, recovery := range []bool{false, true} {
+		t.Run(map[bool]string{false: "enrollment", true: "recovery"}[recovery], func(t *testing.T) {
+			r, v, d := enrollFixture(t, recovery)
+			complete := func(ctx context.Context) error {
+				if recovery {
+					return d.CompleteRecoveryHandshake(ctx)
+				}
+				return d.CompleteEnrollment(ctx)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			res := make(chan error, 1)
+			go func() { res <- complete(ctx) }()
+			other := ed25519.NewKeyFromSeed(make([]byte, 32))
+			answerInit(t, r, v, other)
+			if err := <-res; !errors.Is(err, ErrProtocol) {
+				t.Fatalf("aborted handshake: %v, want ErrProtocol", err)
+			}
+
+			go func() { res <- complete(ctx) }()
+			v.resp = answerInit(t, r, v, v.ik)
+			for v.kr.Current() == nil { // the hs.fin
+				v.process()
+				time.Sleep(time.Millisecond)
+			}
+			v.send("device.paired", pairedWith(v, "dev-1", "", 0))
+			select {
+			case err := <-res:
+				if err != nil {
+					t.Fatalf("retry: %v", err)
+				}
+			case <-time.After(15 * time.Second):
+				t.Fatal("retry did not complete")
+			}
+			if d.DeviceID() != "dev-1" {
+				t.Fatal("no device id")
+			}
+		})
+	}
+}

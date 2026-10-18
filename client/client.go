@@ -624,7 +624,6 @@ func (d *Device) startPairing(ctx context.Context, link string, att Attester) er
 		}
 		d.keepChain(da)
 	}
-	d.sas, d.hsFailed, d.finErr = "", false, nil
 	var apiKey []byte
 	if d.st.Role == "app" {
 		// An app pairs only as a transfer's new app: its hs.init carries
@@ -674,7 +673,9 @@ func (d *Device) startInitWith(purpose handshake.Purpose, ctxID, depositToken st
 	// An earlier pairing's hs.fin still waiting must neither fail nor
 	// delay this one.
 	d.removeOutbox(func(o OutboxEntry) bool { return o.Kind == "hs.fin" })
-	d.finErr = nil
+	// Nothing from an earlier handshake on this Device (an aborted hs.resp,
+	// its SAS, a dropped hs.fin) carries over to this one.
+	d.sas, d.hsFailed, d.finErr = "", false, nil
 	v := d.st.Vault
 	ek, err := suite.ParsePublicKey(v.KEM)
 	if err != nil {

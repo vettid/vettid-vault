@@ -318,3 +318,54 @@ func TestLostAnswerHandledResentAfterExp(t *testing.T) {
 		})
 	}
 }
+
+// Owner decision 2026-10-18: a wrong PIN on credential.password.change,
+// tested after the blob passed, is a failed owner check (as for
+// pin.change and the owner check); with an old blob the PIN is not tested
+// and nothing is counted.
+func TestPasswordChangeWrongPINIsAFailedCheck(t *testing.T) {
+	r := relaytest.Start(t, nil)
+	tv := newTestVault(t, r.URL, "a", nil)
+	d := tv.app
+	const typ = "credential.password.change"
+	blob0 := append([]byte(nil), d.CredentialBlob()...)
+	wrong := map[string]any{"pin": "000000", "password": credPW, "new_password": lostNewPW}
+	id, body := changeRequest(t, d, typ, blob0, wrong)
+	if rr := send(t, d, id, typ, body, time.Now().Add(10*time.Minute)); rr.ErrorCode() != "bad_pin" {
+		t.Fatalf("wrong PIN with the current blob: %q", rr.ErrorCode())
+	}
+	if n := ownerCheckFailures(t, tv); n != 1 {
+		t.Fatalf("owner_check.failures %d after a wrong PIN, want 1", n)
+	}
+	if audits(tv, "owner_check.failed") != 1 || audits(tv, "vault.pin_failed") != 1 {
+		t.Fatalf("audits: owner_check.failed %d, vault.pin_failed %d", audits(tv, "owner_check.failed"), audits(tv, "vault.pin_failed"))
+	}
+	// The change applies with the right PIN (once the PIN backoff of
+	// §11.8 has run out); then an old blob with a wrong PIN counts
+	// nothing more.
+	deadline := time.Now().Add(2 * time.Minute)
+	for {
+		id, body = changeRequest(t, d, typ, d.CredentialBlob(), map[string]any{"pin": pin, "password": credPW, "new_password": lostNewPW})
+		rr := send(t, d, id, typ, body, time.Now().Add(10*time.Minute))
+		if rr.OK() {
+			break
+		}
+		if rr.ErrorCode() != "backoff" || time.Now().After(deadline) {
+			t.Fatalf("the change with the right PIN: %q", rr.ErrorCode())
+		}
+		time.Sleep(time.Second)
+	}
+	failed, pinFailed := audits(tv, "owner_check.failed"), audits(tv, "vault.pin_failed")
+	id, body = changeRequest(t, d, typ, blob0, wrong)
+	if rr := send(t, d, id, typ, body, time.Now().Add(10*time.Minute)); rr.ErrorCode() != "stale_credential" {
+		t.Fatalf("old blob, wrong PIN: %q", rr.ErrorCode())
+	}
+	if audits(tv, "owner_check.failed") != failed || audits(tv, "vault.pin_failed") != pinFailed {
+		t.Fatal("an old blob's wrong PIN was counted")
+	}
+	// The successful change was not an owner check (§3.6.1 lists what
+	// is), so failures stay where the wrong PIN left them.
+	if n := ownerCheckFailures(t, tv); n != 1 {
+		t.Fatalf("owner_check.failures %d after the old blob's wrong PIN, want 1", n)
+	}
+}

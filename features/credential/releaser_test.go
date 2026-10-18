@@ -154,6 +154,11 @@ func TestPasswordChangePINBeforePassword(t *testing.T) {
 			t.Fatal("the password was tried after a wrong PIN")
 		}
 	}
+	// Owner decision 2026-10-18: the wrong PIN, really tested, is a failed
+	// owner check (as in verifyPair).
+	if len(e.h.CheckFailed) != 1 || e.h.CheckFailed[0] != "pin" {
+		t.Fatalf("failed checks after a wrong PIN: %v", e.h.CheckFailed)
+	}
 	if r := e.call("app", "credential.password.change", blob, map[string]any{"pin": testPIN, "password": "wrong password entirely", "new_password": "glacier mango tuesday piano"}); r.Code != "bad_password" {
 		t.Fatalf("wrong password: %s", r.Code)
 	}

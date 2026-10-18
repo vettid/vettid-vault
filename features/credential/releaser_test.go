@@ -108,3 +108,53 @@ func TestPasswordNFC(t *testing.T) {
 		t.Fatalf("decomposed form refused: %s", r.Code)
 	}
 }
+
+// VAULT-MESSAGING 0.44.0 §11.14.9 "A lost answer": credential.password.change
+// checks the blob before any secret, in verifyPair's order (blob, PIN,
+// password). After an applied change whose answer was lost, a new request
+// with the old blob is stale_credential however wrong its PIN and
+// password: neither is tested and nothing is counted. With the current
+// blob the PIN comes before the password.
+func TestPasswordChangeChecksBlobFirst(t *testing.T) {
+	e := newEnv(t)
+	blob0 := e.create()
+	const newPW = "glacier mango tuesday piano"
+	e.ok(e.call("app", "credential.password.change", blob0, map[string]any{"pin": testPIN, "password": pw, "new_password": newPW}))
+	tries, failed := e.h.PINTries, len(e.h.CheckFailed)
+	for name, p := range map[string]map[string]any{
+		"typed secrets":             {"pin": testPIN, "password": pw, "new_password": newPW},
+		"wrong PIN":                 {"pin": "000000", "password": pw, "new_password": newPW},
+		"wrong PIN, wrong password": {"pin": "000000", "password": "wrong password entirely", "new_password": newPW},
+	} {
+		if r := e.call("app", "credential.password.change", blob0, p); r.Code != "stale_credential" {
+			t.Fatalf("old blob, %s: %s", name, r.Code)
+		}
+	}
+	if e.h.PINTries != tries || len(e.h.CheckFailed) != failed {
+		t.Fatalf("the old blob's requests tested the PIN: %d tries (was %d), failed checks %v", e.h.PINTries, tries, e.h.CheckFailed)
+	}
+	for _, a := range e.h.Activities {
+		if a.Kind == "credential.password_failed" {
+			t.Fatal("the old blob's requests tested the password")
+		}
+	}
+}
+
+// With the current blob: the PIN before the password, so a wrong PIN with
+// a wrong password is bad_pin and the password is not tried.
+func TestPasswordChangePINBeforePassword(t *testing.T) {
+	e := newEnv(t)
+	blob := e.create()
+	e.h.Reset()
+	if r := e.call("app", "credential.password.change", blob, map[string]any{"pin": "000000", "password": "wrong password entirely", "new_password": "glacier mango tuesday piano"}); r.Code != "bad_pin" {
+		t.Fatalf("wrong PIN and password: %s", r.Code)
+	}
+	for _, a := range e.h.Activities {
+		if a.Kind == "credential.password_failed" {
+			t.Fatal("the password was tried after a wrong PIN")
+		}
+	}
+	if r := e.call("app", "credential.password.change", blob, map[string]any{"pin": testPIN, "password": "wrong password entirely", "new_password": "glacier mango tuesday piano"}); r.Code != "bad_password" {
+		t.Fatalf("wrong password: %s", r.Code)
+	}
+}

@@ -20,12 +20,14 @@ import (
 
 // A lost answer to pin.change or credential.password.change
 // (VAULT-MESSAGING 0.44.0 §11.14.9 "A lost answer", §11.14.14), through
-// the real relay against the vault as built (no vault change): the same
-// request resent (same inner id, same body) is answered from the response
-// cache and tests no secret again; credential.version shows the change
-// applied (one higher); a new request with the old blob is answered
-// stale_credential before any PIN or password is tested; a copy that
-// reaches the vault after its exp is dropped unanswered and never applies.
+// the real relay: the same request resent (same inner id, same body) is
+// answered from the response cache and tests no secret again;
+// credential.version shows the change applied (one higher); a new request
+// with the old blob is answered stale_credential before any PIN or
+// password is tested, for both types (credential.password.change checks
+// the blob before the PIN since this rule); a copy that reaches the vault
+// after its exp is dropped unanswered and never applies; and a handled
+// request resent after its exp gets no cached answer.
 
 const lostNewPW = "violet-Kestrel-91-moss"
 
@@ -126,6 +128,15 @@ func nextSecret(d *client.Device) []byte {
 	return bytes.Repeat([]byte{0x5a}, 32)
 }
 
+// nothingTested reports that no secret was tested and failed: no failed
+// owner check or password, no PIN failure (vault.pin_failed, the §11.8
+// backoff), and vault.status shows no owner-check failures.
+func nothingTested(t *testing.T, tv *testVault) bool {
+	t.Helper()
+	return audits(tv, "owner_check.failed") == 0 && audits(tv, "credential.password_failed") == 0 &&
+		audits(tv, "vault.pin_failed") == 0 && ownerCheckFailures(t, tv) == 0
+}
+
 type lostCase struct {
 	typ     string
 	applied string // the audit event of an applied change
@@ -172,7 +183,7 @@ func TestLostAnswerResendAndVersion(t *testing.T) {
 			if n := audits(tv, c.applied); n != 1 {
 				t.Fatalf("%s audited %d times", c.applied, n)
 			}
-			if audits(tv, "owner_check.failed") != 0 || audits(tv, "credential.password_failed") != 0 || ownerCheckFailures(t, tv) != 0 {
+			if !nothingTested(t, tv) {
 				t.Fatal("an attempt was counted")
 			}
 			// credential.version: one above the version sent, so applied.
@@ -181,22 +192,17 @@ func TestLostAnswerResendAndVersion(t *testing.T) {
 			}
 			// A new request with the old blob, as a generic retry would
 			// send it with the typed secrets: stale_credential, nothing
-			// counted. A wrong password with it is not tested either; and
-			// pin.change checks the blob before the PIN, so a wrong PIN
-			// is answered stale_credential too. (credential.password.change
-			// verifies the PIN before it opens the blob, so its retry
-			// carries the right PIN, which is unchanged by the change.)
-			retries := []map[string]any{c.payload(d, pin, credPW), c.payload(d, pin, "wrong password entirely")}
-			if c.typ == "pin.change" {
-				retries = append(retries, c.payload(d, "000000", "wrong password entirely"))
-			}
+			// counted. Both types check the blob before any secret, so a
+			// wrong password or a wrong PIN with it is not tested either.
+			retries := []map[string]any{c.payload(d, pin, credPW), c.payload(d, pin, "wrong password entirely"),
+				c.payload(d, "000000", credPW), c.payload(d, "000000", "wrong password entirely")}
 			for _, p := range retries {
 				nid, nbody := changeRequest(t, d, c.typ, blob0, p)
 				if rr := send(t, d, nid, c.typ, nbody, time.Now().Add(10*time.Minute)); rr.ErrorCode() != "stale_credential" {
 					t.Fatalf("retry with the old blob: %q", rr.ErrorCode())
 				}
 			}
-			if audits(tv, "owner_check.failed") != 0 || audits(tv, "credential.password_failed") != 0 || ownerCheckFailures(t, tv) != 0 {
+			if !nothingTested(t, tv) {
 				t.Fatal("the old-blob retry tested a secret")
 			}
 			if n := audits(tv, c.applied); n != 1 {
@@ -263,13 +269,51 @@ func TestLostAnswerPastExpNeverApplies(t *testing.T) {
 			if v := credVersion(t, d); v != v0 {
 				t.Fatalf("credential.version %d, was %d: the expired change applied", v, v0)
 			}
-			if audits(tv, c.applied) != 0 || audits(tv, "owner_check.failed") != 0 || audits(tv, "credential.password_failed") != 0 {
+			if audits(tv, c.applied) != 0 || !nothingTested(t, tv) {
 				t.Fatal("the expired request reached its handler")
 			}
 			// Not applied and never will be: the current secrets still
 			// work, with the blob the app holds.
 			if _, err := d.CredentialUnlock(ctxT(t, 30*time.Second), credPW); err != nil {
 				t.Fatalf("the current password after the expired change: %v", err)
+			}
+		})
+	}
+}
+
+// A request the vault handled, resent after its exp, gets no answer: the
+// exp check comes before the dedupe and its response cache, so the
+// cached answer is never resent then, and nothing applies twice.
+func TestLostAnswerHandledResentAfterExp(t *testing.T) {
+	for _, c := range lostCases {
+		t.Run(c.typ, func(t *testing.T) {
+			r := relaytest.Start(t, nil)
+			tv := newTestVault(t, r.URL, "a", nil)
+			d := tv.app
+			v0 := credVersion(t, d)
+			id, body := changeRequest(t, d, c.typ, d.CredentialBlob(), c.payload(d, pin, credPW))
+			exp := time.Now().Add(3 * time.Second)
+			if first := send(t, d, id, c.typ, body, exp); !first.OK() {
+				t.Fatalf("first: %s", first.ErrorCode())
+			}
+			stale0 := audits(tv, "stale_or_future")
+			time.Sleep(time.Until(exp) + time.Second)
+			if _, err := d.SendWithIDExp(ctxT(t, 30*time.Second), id, c.typ, body, exp); err != nil {
+				t.Fatal(err)
+			}
+			wctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if rr, err := d.AwaitResponse(wctx, id); err == nil {
+				t.Fatalf("a cached answer after exp: %s %s", rr.ErrorCode(), rr.Body())
+			}
+			if audits(tv, "stale_or_future") == stale0 {
+				t.Fatal("the resend after exp was not dropped as expired")
+			}
+			if v := credVersion(t, d); v != v0+1 {
+				t.Fatalf("credential.version %d from %d", v, v0)
+			}
+			if n := audits(tv, c.applied); n != 1 || !nothingTested(t, tv) {
+				t.Fatalf("%s audited %d times", c.applied, n)
 			}
 		})
 	}

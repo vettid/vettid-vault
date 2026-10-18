@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"net/http"
@@ -19,8 +20,10 @@ import (
 //
 //	GET  /dev/health         {"ok": true}
 //	GET  /dev/info           what ready.json holds
-//	GET  /dev/trust          the stack's TEST trust anchors: the test Nitro root (DER, base64)
-//	                         and manifest keys (SPKI DER, base64), the relay URL, and the
+//	GET  /dev/trust          the stack's TEST trust anchors: the test Nitro root (DER, base64),
+//	                         the manifest keys (SPKI DER, base64), the TLS root of the
+//	                         relay's and push stand-in's TLS fronts (DER, base64, and PEM;
+//	                         the certificate only), the relay URL, and the
 //	                         dev device policy in force (null: the TEST policy only)
 //	POST /dev/peer/request   {"type": T, "body": {...}}: `vaultctl request T BODY` on the
 //	                         peer vault; answers the vault's response object. The events
@@ -52,9 +55,15 @@ func (s *stack) control() http.Handler {
 		if s.policy != nil {
 			dp = s.policy.Summary()
 		}
+		// tls_root: the TEST TLS root that the stack's TLS fronts
+		// (relay.vettid.test at relay_tls, push.vettid.test at push_tls)
+		// chain to; the certificate only, never a private key.
+		root := enclavetest.TestTLSCA().Cert.Raw
 		writeJSON(w, 200, map[string]any{
 			"nitro_root":    base64.StdEncoding.EncodeToString(enclavetest.TestNitroCA().Root.Cert.Raw),
 			"manifest_keys": []string{base64.StdEncoding.EncodeToString(spki)},
+			"tls_root":      base64.StdEncoding.EncodeToString(root),
+			"tls_root_pem":  string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: root})),
 			"relay_url":     relayURL,
 			"device_policy": dp,
 		})

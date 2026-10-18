@@ -133,6 +133,11 @@ type State struct {
 	Outbox []OutboxEntry `json:"outbox,omitempty"`
 	// Paired is what device.paired told this device (Paired).
 	Paired *Paired `json:"paired,omitempty"`
+	// PairingPending: this device started a handshake (pairing,
+	// enrollment, recovery) and has not had its device.paired or
+	// device.pair.rejected yet. A device.paired arriving otherwise, once
+	// the device has its id, is dropped (§6.7).
+	PairingPending bool `json:"pairing_pending,omitempty"`
 }
 
 // Paired is what device.paired told this device (VAULT-MESSAGING §6.7,
@@ -140,9 +145,12 @@ type State struct {
 // state, so that a device restarted after a crash can still read it.
 // The standing token it carried is in the vault record.
 type Paired struct {
-	DeviceID      string `json:"device_id"`
-	Role          string `json:"role,omitempty"`
-	VaultID       string `json:"vault_id,omitempty"`
+	DeviceID string `json:"device_id"`
+	Role     string `json:"role,omitempty"`
+	VaultID  string `json:"vault_id,omitempty"`
+	// Release and ReleaseNumber are what the message named. The floor
+	// for unlocks is Alt's Release and ReleaseNumber, which device.paired
+	// raises and never lowers: callers take the floor from Alt.
 	Release       string `json:"release,omitempty"`
 	ReleaseNumber uint64 `json:"release_number,omitempty"`
 	// SessionExpiresAt is the end of the first access session, when the
@@ -611,6 +619,7 @@ func (d *Device) startInitWith(purpose handshake.Purpose, ctxID, depositToken st
 		return err
 	}
 	d.ini = ini
+	d.st.PairingPending = true
 	return nil
 }
 
@@ -938,8 +947,16 @@ func (d *Device) handle(ctx context.Context, m relayclient.Message) {
 			return
 		}
 		d.keyring = &handshake.Keyring{}
-		d.st.Vault, d.sas = nil, ""
+		d.st.Vault, d.sas, d.st.PairingPending = nil, "", false
 	case "device.paired":
+		// §6.7 "Late and duplicate": the vault sends it once per pairing.
+		// Once this device has its id, one arriving without a handshake
+		// of this device waiting for it (a replay under a new msg_id, or a
+		// late one) is dropped: it changes no token, id or release.
+		if d.st.DeviceID != "" && !d.st.PairingPending {
+			return
+		}
+		d.st.PairingPending = false
 		// The device's standing token (§10.3, 0.10.3) replaces the request
 		// token of the pairing's hs.resp, before maintain() looks at it.
 		if o, err := strictjson.ParseObject(in.Body); err == nil {
@@ -963,11 +980,12 @@ func (d *Device) handle(ctx context.Context, m relayclient.Message) {
 				d.st.VaultID = v
 			}
 			// The release the vault runs under (§10.3), the floor for
-			// unlocks.
+			// unlocks (Alt): raised, never lowered.
 			if r, ok, _ := o.OptString("release"); ok && len(r) == 96 {
 				if n, _, err := o.OptUint("release_number", 1, strictjson.MaxSafeInteger); err == nil && n > 0 {
-					a := d.alt()
-					a.Release, a.ReleaseNumber = r, n
+					if a := d.alt(); n > a.ReleaseNumber {
+						a.Release, a.ReleaseNumber = r, n
+					}
 				}
 			}
 			d.st.Paired = pairedFrom(o, now)

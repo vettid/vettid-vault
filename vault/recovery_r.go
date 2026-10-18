@@ -59,6 +59,11 @@ const (
 	presentEvery    = time.Minute
 )
 
+// CounterUnavailableNotice is how long the counter may be unreadable
+// before the vault raises the urgent recovery.counter_unavailable
+// (§11.14.5, §11.14.11), in real time (divided by the time scale).
+const CounterUnavailableNotice = 24 * time.Hour
+
 func (m *Manager) waitUnit() time.Duration {
 	if m.opt.RecoveryWaitUnit > 0 {
 		return m.opt.RecoveryWaitUnit
@@ -493,7 +498,9 @@ func (m *Manager) recoveryHousekeeping(ctx context.Context, now time.Time) {
 			m.markPresent(ctx, now)
 		}
 	}
-	if s := m.rec.unavailableSince; !s.IsZero() && now.Sub(s) >= 24*time.Hour && m.st.RecoveryCounterNotice.IsZero() {
+	// The 24 h are divided by the time scale (0.43.0, S8); the start is
+	// in memory only, so it always began under the running release.
+	if s := m.rec.unavailableSince; !s.IsZero() && now.Sub(s) >= m.opt.scale(CounterUnavailableNotice) && m.st.RecoveryCounterNotice.IsZero() {
 		m.st.RecoveryCounterNotice = now
 		m.record(Activity{Kind: "recovery.counter_unavailable", Feed: true, Priority: "urgent"}, now)
 		m.dirty = true

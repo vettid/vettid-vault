@@ -1,6 +1,7 @@
 package altchan
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -53,7 +54,7 @@ func TestDescriptorCapabilities(t *testing.T) {
 	k := testKEM(t)
 	na := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
 	rel := strings.Repeat("ab", 48)
-	d := MarshalDescriptor("i-1", k.Public(), rel, na, ReleaseCapabilities(false))
+	d := MarshalDescriptor("i-1", k.Public(), rel, na, ReleaseCapabilities(false), 0)
 	if !strings.HasSuffix(string(d), `"not_after":"2026-10-16T12:00:00Z","capabilities":["attachments","recovery_r"]}`) {
 		t.Fatalf("member order: %s", d)
 	}
@@ -61,18 +62,18 @@ func TestDescriptorCapabilities(t *testing.T) {
 	if err != nil || len(p.Capabilities) != 2 || !HasCapability(p.Capabilities, CapRecoveryR) {
 		t.Fatalf("%v %q", err, p.Capabilities)
 	}
-	old := MarshalDescriptor("i-1", k.Public(), rel, na, nil)
+	old := MarshalDescriptor("i-1", k.Public(), rel, na, nil, 0)
 	if strings.Contains(string(old), "capabilities") {
 		t.Fatal("nil list written")
 	}
 	if p, err := ParseDescriptor(old); err != nil || p.Capabilities != nil {
 		t.Fatalf("a descriptor before R: %v %q", err, p.Capabilities)
 	}
-	if p, err := ParseDescriptor(MarshalDescriptor("i-1", k.Public(), rel, na, []string{})); err != nil || p.Capabilities == nil || len(p.Capabilities) != 0 {
+	if p, err := ParseDescriptor(MarshalDescriptor("i-1", k.Public(), rel, na, []string{}, 0)); err != nil || p.Capabilities == nil || len(p.Capabilities) != 0 {
 		t.Fatalf("empty list: %v", err)
 	}
 	// Unknown names are kept (apps ignore them).
-	if p, err := ParseDescriptor(MarshalDescriptor("i-1", k.Public(), rel, na, []string{"future_thing", "recovery_r"})); err != nil || len(p.Capabilities) != 2 {
+	if p, err := ParseDescriptor(MarshalDescriptor("i-1", k.Public(), rel, na, []string{"future_thing", "recovery_r"}, 0)); err != nil || len(p.Capabilities) != 2 {
 		t.Fatalf("unknown name: %v", err)
 	}
 	cut := strings.TrimSuffix(string(old), "}")
@@ -133,7 +134,47 @@ func TestMarshalDescriptorValidatesCapabilities(t *testing.T) {
 					t.Fatalf("%q written", bad)
 				}
 			}()
-			MarshalDescriptor("i-1", k.Public(), strings.Repeat("ab", 48), na, bad)
+			MarshalDescriptor("i-1", k.Public(), strings.Repeat("ab", 48), na, bad, 0)
 		}()
 	}
+}
+
+// 0.43.0 (§11.10.9, STAGING-TIME-SCALE §5.2): the descriptor's time_scale,
+// written after capabilities, read back; absent is 0 (a release before
+// the scale, meaning 1); present but not an integer 1..MaxTimeScale
+// refuses the descriptor.
+func TestDescriptorTimeScale(t *testing.T) {
+	k := testKEM(t)
+	na := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
+	rel := strings.Repeat("ab", 48)
+	for _, n := range []uint64{1, 24, 3600} {
+		d := MarshalDescriptor("i-1", k.Public(), rel, na, ReleaseCapabilities(true), n)
+		if !strings.HasSuffix(string(d), `"capabilities":["attachments","recovery_offered","recovery_r"],"time_scale":`+strconv.FormatUint(n, 10)+`}`) {
+			t.Fatalf("member order: %s", d)
+		}
+		if p, err := ParseDescriptor(d); err != nil || p.TimeScale != n {
+			t.Fatalf("%d: %v", n, err)
+		}
+	}
+	old := MarshalDescriptor("i-1", k.Public(), rel, na, ReleaseCapabilities(true), 0)
+	if strings.Contains(string(old), "time_scale") {
+		t.Fatal("0 written")
+	}
+	if p, err := ParseDescriptor(old); err != nil || p.TimeScale != 0 {
+		t.Fatalf("a descriptor before the scale: %v", err)
+	}
+	cut := strings.TrimSuffix(string(old), "}")
+	for _, bad := range []string{`0`, `-1`, `86401`, `1.5`, `"24"`, `null`, `true`} {
+		if _, err := ParseDescriptor([]byte(cut + `,"time_scale":` + bad + `}`)); err == nil {
+			t.Errorf("time_scale %s accepted", bad)
+		}
+	}
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("a scale above the bound written")
+			}
+		}()
+		MarshalDescriptor("i-1", k.Public(), rel, na, nil, MaxTimeScale+1)
+	}()
 }

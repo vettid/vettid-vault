@@ -43,7 +43,8 @@
     }
   ],
   "recovery_wait_unit_seconds": 600,
-  "recovery_quiet_seconds": 259200,
+  "recovery_quiet_seconds": 10800,
   "recovery_offered": true,
-  "android_min_version_code": 101
+  "android_min_version_code": 101,
+  "time_scale": 24
 }

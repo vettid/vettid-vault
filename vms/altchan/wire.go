@@ -598,6 +598,12 @@ type Descriptor struct {
 	// Capabilities are the release's capabilities (0.34.0, release R,
 	// §11.10.9); nil when the member is absent (a release before R).
 	Capabilities []string
+	// TimeScale is the image's measured time scale (0.43.0, §11.10.9,
+	// STAGING-TIME-SCALE §5.2); 0 when the member is absent (a release
+	// before the scale, which means 1). An app built for production
+	// refuses a descriptor whose scale is not 1; this parser accepts
+	// 1..MaxTimeScale and leaves that rule to the app.
+	TimeScale uint64
 	// Bytes are the exact served bytes.
 	Bytes []byte
 }
@@ -605,11 +611,16 @@ type Descriptor struct {
 // MarshalDescriptor writes the descriptor in §11.2 member order. caps,
 // when not nil, is written as `capabilities` after not_after (0.34.0,
 // release R, §11.10.9); a nil caps omits the member, as releases before R
-// did. An invalid caps list is a programming error: it panics rather than
+// did. timeScale, when not 0, is written as `time_scale` after it (0.43.0,
+// §11.10.9); 0 omits it, as releases before the scale did. An invalid
+// caps list or scale is a programming error: it panics rather than
 // publish a descriptor that every app refuses.
-func MarshalDescriptor(instanceID string, etk *suite.PublicKey, release string, notAfter time.Time, caps []string) []byte {
+func MarshalDescriptor(instanceID string, etk *suite.PublicKey, release string, notAfter time.Time, caps []string, timeScale uint64) []byte {
 	if caps != nil && !ValidCapabilities(caps) {
 		panic("altchan: invalid release capabilities")
+	}
+	if timeScale > MaxTimeScale {
+		panic("altchan: invalid time scale")
 	}
 	b := strictjson.NewBuilder().Uint("v", 1).Uint("suite", uint64(suite.Suite2)).String("instance_id", instanceID).
 		String("kid", etk.Kid().String()).String("etk", base64.StdEncoding.EncodeToString(etk.Bytes())).
@@ -617,12 +628,16 @@ func MarshalDescriptor(instanceID string, etk *suite.PublicKey, release string, 
 	if caps != nil {
 		b.Raw("capabilities", MarshalCapabilities(caps))
 	}
+	if timeScale != 0 {
+		b.Uint("time_scale", timeScale)
+	}
 	return b.Bytes()
 }
 
 // ParseDescriptor parses descriptor bytes strictly: v = 1, suite 2, kid =
 // the kid of etk, a non-debug PCR0 as release, not_after, and the
-// optional capabilities (absent: nil; present but malformed: refused).
+// optional capabilities (absent: nil; present but malformed: refused) and
+// the optional time_scale (absent: 0; present: 1..MaxTimeScale).
 func ParseDescriptor(b []byte) (*Descriptor, error) {
 	if len(b) == 0 || len(b) > 4096 {
 		return nil, ErrMalformed
@@ -666,6 +681,9 @@ func ParseDescriptor(b []byte) (*Descriptor, error) {
 		return nil, ErrMalformed
 	}
 	if d.Capabilities, err = ParseCapabilities(o, "capabilities"); err != nil {
+		return nil, ErrMalformed
+	}
+	if d.TimeScale, err = ParseTimeScale(o, "time_scale"); err != nil {
 		return nil, ErrMalformed
 	}
 	return d, nil

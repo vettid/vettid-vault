@@ -116,3 +116,21 @@ func ParseCapabilities(o strictjson.Object, name string) ([]string, error) {
 	}
 	return caps, nil
 }
+
+// MaxTimeScale bounds a descriptor's or bundle's time_scale (0.43.0,
+// §11.10.8: production 1, staging 1 or 24, development up to 86,400).
+const MaxTimeScale = 86400
+
+// ParseTimeScale reads the optional member name of o (0.43.0,
+// §11.10.9): absent is 0 (a release before the scale, meaning 1); present,
+// an integer 1..MaxTimeScale, anything else an error.
+func ParseTimeScale(o strictjson.Object, name string) (uint64, error) {
+	if !o.Has(name) {
+		return 0, nil
+	}
+	n, err := o.Uint(name, 1, MaxTimeScale)
+	if err != nil {
+		return 0, ErrMalformed
+	}
+	return n, nil
+}

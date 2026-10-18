@@ -92,6 +92,17 @@ type Backoff struct {
 	NotBefore time.Time `json:"not_before"`
 }
 
+// ProvisionalUntil is when a provisional vault's enrollment window ends
+// (§11.3): EnrollUntil, or CreatedAt + EnrollWindow for a header from a
+// release before the time scale, so a window started there keeps its
+// real time (STAGING-TIME-SCALE §5.5).
+func (h *Header) ProvisionalUntil() time.Time {
+	if !h.EnrollUntil.IsZero() {
+		return h.EnrollUntil
+	}
+	return h.CreatedAt.Add(EnrollWindow)
+}
+
 // Header is the sealed header (§3.3). It never holds the relay key,
 // session keys or feature data.
 type Header struct {
@@ -111,6 +122,11 @@ type Header struct {
 	SealedRelease   string         `json:"sealed_release"`
 	ManifestSerial  uint64         `json:"manifest_serial"`
 	SealKeyVerified *SealKeyRecord `json:"seal_key_verified,omitempty"`
+	// EnrollUntil is the end of a provisional vault's enrollment window
+	// (§11.3): CreatedAt plus EnrollWindow divided by the time scale
+	// (0.43.0, STAGING-TIME-SCALE S13). Zero in a header from a release
+	// before the scale, whose window is CreatedAt + EnrollWindow.
+	EnrollUntil time.Time `json:"enroll_until,omitzero"`
 	// Recovery (§11.11): the recovery in progress, and the steps taken
 	// while the vault was locked (moved to the audit log at unlock).
 	Recovery *RecoveryRecord `json:"recovery,omitempty"`

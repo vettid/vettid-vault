@@ -14,7 +14,8 @@ import (
 // that §11.14.14 and VAULT-RELEASES §5.2 require: the embedded wait unit
 // is at least a day, the quiet period at least 72 hours, the counter is
 // production's own bucket, and the recovery derivation cannot run at test
-// cost (no test clock exists in the image: the counter's clock is S3's).
+// cost (no test clock exists in the image: the counter's clock is S3's);
+// and (0.43.0) its time scale is 1.
 func TestProductionImageRecoveryRules(t *testing.T) {
 	if channel != ChannelProd {
 		t.Fatal("not the production channel")
@@ -32,6 +33,15 @@ func TestProductionImageRecoveryRules(t *testing.T) {
 	}
 	if c.CounterLock() != ProdCounterLock || ProdCounterLock != recovery.CounterLockYears*365*24*time.Hour {
 		t.Fatalf("production counter lock %v", c.CounterLock())
+	}
+	// 0.43.0 (§11.14.14, VAULT-RELEASES 0.1.32 §5.2): the file says
+	// exactly 1, and the image's scale is 1 whatever a file could say.
+	if c.FileTimeScale != 1 || c.TimeScale() != 1 {
+		t.Fatalf("production time scale %d/%d", c.FileTimeScale, c.TimeScale())
+	}
+	c.FileTimeScale = StagingTimeScale
+	if c.TimeScale() != 1 {
+		t.Fatal("a production image scales by its file")
 	}
 	if recovery.TestCost {
 		t.Fatal("a production image built with vettid_testcost")

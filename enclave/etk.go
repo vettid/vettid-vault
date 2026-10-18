@@ -60,7 +60,10 @@ func (in *Instance) newETK(now time.Time) (*etk, error) {
 	// The release's capabilities are constants of the image and of its
 	// measured release configuration (0.34.0, release R, §11.10.9), bound
 	// by the attestation with the rest.
-	desc := altchan.MarshalDescriptor(in.cfg.InstanceID, k.Public(), in.meas.PCR0, na, altchan.ReleaseCapabilities(in.cfg.Recovery.Offered))
+	// 0.43.0 (§11.10.9, STAGING-TIME-SCALE §5.2): the time scale, 1 in
+	// production, so apps know it before an unlock or a recovery.
+	desc := altchan.MarshalDescriptor(in.cfg.InstanceID, k.Public(), in.meas.PCR0, na, altchan.ReleaseCapabilities(in.cfg.Recovery.Offered),
+		TimeScaleOf(in.cfg))
 	ud := altchan.ETKUserData(desc)
 	att, err := in.nsm.Attest(ud[:], nil, nil)
 	if err != nil {

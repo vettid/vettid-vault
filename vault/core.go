@@ -106,6 +106,9 @@ func (m *Manager) hStatus(_ context.Context, s *Session, _ *envelope.Inner) (jso
 		Raw("owner_check", m.ownerCheckStatus(s.peer, s.now))
 	if s.peer.Kind == KindApp || s.peer.Kind == KindDesktop {
 		b.Raw("attachments", m.attStatusJSON()) // §10.2 (0.32.0, release A)
+		// 0.43.0 (§10.2, §11.10.8): the release's time scale, 1 in
+		// production.
+		b.Uint("time_scale", m.opt.timeScale())
 	}
 	// Release R (§11.14.11): the app gets the recovery state, attempts,
 	// presence and counter; desktops the state alone; agents nothing.

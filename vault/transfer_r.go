@@ -30,6 +30,20 @@ type PendingUnlink struct {
 	TransferID string    `json:"transfer_id"`
 	DEKVersion uint64    `json:"dek_version"`
 	At         time.Time `json:"at"`
+	// Until is when the notice is deleted unsent: At plus PendingUnlinkTTL
+	// divided by the time scale (0.43.0, STAGING-TIME-SCALE S11). Zero in
+	// a notice held by a release before the scale: At + PendingUnlinkTTL,
+	// so a notice held before the vault moved keeps its 7 days.
+	Until time.Time `json:"until,omitzero"`
+}
+
+// expired reports whether the held notice is past its deletion time.
+func (pu *PendingUnlink) expired(now time.Time) bool {
+	until := pu.Until
+	if until.IsZero() {
+		until = pu.At.Add(PendingUnlinkTTL)
+	}
+	return now.After(until)
 }
 
 // approveTransferR is the vault's part of an approval (§11.14.10 step 2):
@@ -104,7 +118,8 @@ func (m *Manager) holdUnlink(old *Peer, transferID string, dekVersion uint64, no
 		return
 	}
 	m.st.PendingUnlink = &PendingUnlink{RelayURL: old.Relay.URL, Mailbox: old.Relay.Mailbox, Token: old.Standing.Token,
-		TokenExp: old.Standing.Exp, Payload: raw, TransferID: transferID, DEKVersion: dekVersion, At: now.UTC()}
+		TokenExp: old.Standing.Exp, Payload: raw, TransferID: transferID, DEKVersion: dekVersion, At: now.UTC(),
+		Until: now.UTC().Add(m.opt.scale(PendingUnlinkTTL))}
 	m.dirty = true
 }
 
@@ -118,7 +133,7 @@ func (m *Manager) sendPendingUnlink(now time.Time) {
 	}
 	m.st.PendingUnlink = nil
 	m.dirty = true
-	if !now.Before(pu.TokenExp) && !pu.TokenExp.IsZero() || now.Sub(pu.At) > PendingUnlinkTTL {
+	if !now.Before(pu.TokenExp) && !pu.TokenExp.IsZero() || pu.expired(now) {
 		return // deleted unsent
 	}
 	m.queueDeposit(&OutboxEntry{Op: OpDeposit, RelayURL: pu.RelayURL, Mailbox: pu.Mailbox, Token: pu.Token, Payload: pu.Payload, BestEffort: true}, now)
@@ -142,10 +157,10 @@ func (m *Manager) pendingUnlinkAtUnlock(now time.Time) {
 	}
 }
 
-// expirePendingUnlink deletes a held notice older than 7 days or whose
+// expirePendingUnlink deletes a held notice older than 7 days (scaled) or whose
 // token has expired (housekeeping).
 func (m *Manager) expirePendingUnlink(now time.Time) {
-	if pu := m.st.PendingUnlink; pu != nil && (now.Sub(pu.At) > PendingUnlinkTTL || !pu.TokenExp.IsZero() && !now.Before(pu.TokenExp)) {
+	if pu := m.st.PendingUnlink; pu != nil && (pu.expired(now) || !pu.TokenExp.IsZero() && !now.Before(pu.TokenExp)) {
 		m.st.PendingUnlink = nil
 		m.dirty = true
 	}

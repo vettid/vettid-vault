@@ -750,6 +750,9 @@ func (m *Manager) createInvite(ctx context.Context, kind string, ttl time.Durati
 		// A transfer's new phone chooses its hs.init from these (0.34.0,
 		// release R, §6.4, §11.10.9); the QR's hash binds them.
 		b.Capabilities = altchan.ReleaseCapabilities(!m.opt.RecoveryNotOffered)
+		// 0.43.0 (§11.10.9): and the time scale, which the new phone
+		// takes its own timers from.
+		b.TimeScale = m.opt.timeScale()
 	}
 	bj, err := b.Marshal()
 	if err != nil {
@@ -885,7 +888,7 @@ func (m *Manager) enrollApp(ctx context.Context, app *EnrollApp, now time.Time) 
 		return err
 	}
 	m.st.Issued = append(m.st.Issued, issued...)
-	m.st.Invites[m.st.VaultID] = &Invite{ID: m.st.VaultID, Kind: KindApp, Exp: now.Add(EnrollWindow),
+	m.st.Invites[m.st.VaultID] = &Invite{ID: m.st.VaultID, Kind: KindApp, Exp: now.Add(m.opt.scale(EnrollWindow)), // 0.43.0, S13
 		EnrollIK: app.IK, EnrollRelayPK: app.Relay.PK, EnrollKEM: app.KEM.Bytes(), EnrollAttest: app.Attestation,
 		CreatedBy: "enroll"}
 	if d, c := signerOf(app.Attestation); d != "" {

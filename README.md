@@ -306,6 +306,97 @@ without a recorded signer as a production image does (`signer_refused`;
 an app re-sends its key's chain in `device_assertion.chain` until
 `device.list` shows its `signer`).
 
+**A member for an agent (vettid-agent's dev-stack tests).** The stack's
+peer has no credential, so an agent's tests play the member with their
+own `vaultctl` app on a second test vault. `vaultctl` is the dev build in
+`<data>/bin/vaultctl`. Every call takes `-state FILE` (the app's keys) and
+reaches the relay through its TLS front:
+
+```sh
+export VAULTCTL_DEV_RESOLVE="relay.vettid.test=$(jq -r .relay_tls <data>/run/ready.json)"
+export VAULTCTL_PASSWORD='development password' VAULTCTL_PIN=13572468   # TEST-ONLY
+API=$(jq -r .api <data>/run/ready.json)
+M="vaultctl -state member.json -timeout 150s"
+
+$M init -role app -name member-phone -relay https://relay.vettid.test
+$M api-enroll -api $API -guid member-agent-1 -pin $VAULTCTL_PIN    # a fresh GUID per test vault
+$M credential unlock                                               # the unlock window: grants are signed in it
+```
+
+`api-enroll` enrolls through the member API stand-in with TEST attestation,
+runs the first handshake, creates the credential (password
+`$VAULTCTL_PASSWORD`, `development password` when unset) and confirms the
+enrollment. `credential unlock` prints the window's `expires_at`. Every step
+below that signs a grant must run before that time; run `credential unlock`
+again when the window has passed. Pairing an
+agent (VAULT-MESSAGING §6.7):
+
+```sh
+$M request device.pair.create '{"role":"agent"}'   # body: {pairing_id, link, exp}
+# give `link` to the connector (`vettid-agent pair <link>`: the bare
+# pairing payload, §6.4); once its hs.fin arrives the app gets
+# device.pair.pending {pairing_id, pending_id, role, name, sas}:
+$M events -wait 30s
+# compare `sas` with the SAS the connector printed, then approve, with a
+# first access session (60-86,400 s, §6.8) and optional initial grants:
+$M request device.pair.approve '{"pairing_id":"<id>","session_seconds":600,"grants":[{"scope":"connection.list","approval":"auto"}]}'
+# or reject (the connector gets device.pair.rejected):
+$M request device.pair.reject '{"pairing_id":"<id>"}'
+$M request device.list                             # the agent's device_id
+```
+
+Grants (§10.11; each signed in the unlock window, `credential_locked`
+outside it):
+
+```sh
+# items.read is a share rule with the agent as subject (§10.12), never a
+# leash grant; tag the items first:
+$M item put -sensitivity secret -tags agent-ok -content '{"name":"api key","fields":[{"label":"Key","kind":"password","value":"TEST"}]}'
+$M share set -agent <device_id> -tags agent-ok -mode ask -per-hour 10 -per-day 100
+$M share pending -agent <device_id>                  # items waiting under an ask rule
+$M share decide -rule <rule_id> -items <item_id>     # include them (-decline to decline)
+# the delegable owner types (message.send, connection.list, ...):
+$M leash issue -agent <device_id> -scope message.send -approval auto -per-hour 5 -per-day 20 [-connections <id>]
+$M leash list -agent <device_id>
+$M leash revoke -id <grant_id>                       # a share rule's grant id is its rule_id
+```
+
+`per_hour` and `per_day` are for `auto` grants and agent share rules
+(default 60 and 1,000); an `ask` leash grant refuses them. Past a limit,
+requests are referred. The member side of the agent's access sessions,
+referrals and suspension (§6.8, §10.11):
+
+```sh
+$M events -wait 30s                  # device.session.pending {request_id, device_id, seconds, ...}
+                                     # approval.pending {approval_id, device_id, type, body, ...}
+$M session approve -id <request_id> -seconds 600    # or: session deny -id <request_id>
+$M session end -device <device_id>
+$M approval decide -id <approval_id> -approve=true  # or -approve=false
+$M leash resume -agent <device_id>                  # after a suspension (30 refusals within an hour); not_found if not suspended
+$M request device.unlink '{"device_id":"<device_id>"}'
+```
+
+To play the agent itself with `vaultctl` (a check of the member side
+before the connector exists), use a second state file:
+`vaultctl -state agent.json init -role agent -name helper -relay https://relay.vettid.test`,
+then `pair -link <link>`, `session request -seconds 600`, `agent request
+-op catalog|item.get|item.use ...`, `agent grants` and `agent present
+-grant <id>`. `e2e/vaultctl_batch3_test.go` runs that flow against a
+`vault-run` vault.
+
+A connector reaches the relay as `vaultctl` does (`https://relay.vettid.test`
+at `relay_tls`, which needs the stack's TEST TLS root, compiled into
+`vaultctl` but not served by the control port), or at `relay_transport`,
+the relay's plain HTTP port, by rewriting the origin as the phone's
+`devStack` build does over `adb reverse`.
+
+**Not reachable quickly: a held vault.** The owner check (§3.6) holds a
+vault only after its deadline passes. The shortest interval is one hour
+(`$M settings set <version> '{"owner_check.interval_seconds":3600}'`;
+`settings get` gives the version), and the stack has no clock to move for
+it (only the recovery clock, `-recovery-skew`). So `owner_check_required`
+takes over an hour on the dev stack.
+
 The stack's own test runs with `make integration`.
 
 The enclave image is built reproducibly from `Dockerfile.enclave`

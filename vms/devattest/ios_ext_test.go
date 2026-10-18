@@ -169,3 +169,125 @@ func TestIOSExtensions(t *testing.T) {
 		}
 	}
 }
+
+// mapOfSize returns a definite-length CBOR map {1: h'00..'} of exactly n
+// bytes (n >= 261: a two-byte byte-string length).
+func mapOfSize(t *testing.T, n int) []byte {
+	t.Helper()
+	var e cbor.Encoder
+	e.Map(1).Int(1).ByteString(make([]byte, n-5))
+	if b := e.Bytes(); len(b) == n {
+		return b
+	}
+	t.Fatalf("map of %d bytes", n)
+	return nil
+}
+
+// The AT flag in an assertion, the extensions size bound, empty and nested
+// maps.
+func TestIOSExtensionsEdges(t *testing.T) {
+	p := enclavetest.Policy()
+	ch := challenge("enroll")
+	key := enclavetest.TestKey(elliptic.P256(), 0x71)
+	plain, _ := enclavetest.NewIOSAttester(0x71, enclavetest.IOSOptions{}).Attest(ch)
+	b, err := devattest.VerifyAttest(p, plain, ch, now, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := devattest.ForChallenge(challenge("unlock"))
+	assert := func(o enclavetest.IOSOptions) error {
+		as := &altchan.DeviceAssertion{Platform: "ios", Assertion: enclavetest.IOSAssertWith(key, o, 5, s.ClientDataHash)}
+		_, err := devattest.VerifyAssertion(p, b, as, s, 0, now, nil)
+		return err
+	}
+	attest := func(o enclavetest.IOSOptions) error {
+		d, _ := enclavetest.NewIOSAttester(0x71, o).Attest(ch)
+		_, err := devattest.VerifyAttest(p, d, ch, now, nil)
+		return err
+	}
+
+	// An AT-only assertion (flags 0x40, nothing after the counter) is
+	// accepted: AT is not read in an assertion.
+	if err := assert(enclavetest.IOSOptions{Flags: 0x40}); err != nil {
+		t.Fatalf("AT-only assertion: %v", err)
+	}
+	// Well-formed attested credential data after an assertion's counter,
+	// with AT set, is refused by the parser whether or not ED is set. The
+	// bytes are an attestation's own (aaguid, credId, COSE key and, with ED,
+	// the extensions map), so they would parse as attested credential data:
+	// the refusal is because an assertion has none, not because the bytes
+	// are malformed. AT is set after signing, so a parser that accepted the
+	// bytes would fail ErrSignature instead of ErrFormat.
+	for _, ed := range []bool{false, true} {
+		o := enclavetest.IOSOptions{}
+		if ed {
+			o = enclavetest.IOSAppleExtensions(o)
+		}
+		d, _ := enclavetest.NewIOSAttester(0x71, o).Attest(ch)
+		ad := authDataOf(t, d.Attestation, "authData")
+		if err := devattest.ParseAuthData(ad, true); err != nil {
+			t.Fatalf("ED %v: attestation authData does not parse: %v", ed, err)
+		}
+		x := enclavetest.IOSOptions{ED: ed, ExtensionData: ad[37:], MutateAuthData: func(b []byte) []byte {
+			b = append([]byte(nil), b...)
+			b[32] |= 0x40
+			return b
+		}}
+		if err := assert(x); !errors.Is(err, devattest.ErrFormat) {
+			t.Errorf("assertion with AT and attested credential data (ED %v): %v", ed, err)
+		}
+		// The same bytes with AT set as an assertion's authData.
+		as := append([]byte(nil), ad...)
+		if err := devattest.ParseAuthData(as, false); !errors.Is(err, devattest.ErrFormat) {
+			t.Errorf("attestation authData parsed as an assertion's (ED %v): %v", ed, err)
+		}
+	}
+
+	// The size bound: a 1024-byte map is accepted, 1025 refused, in both.
+	for n, want := range map[int]error{1024: nil, 1025: devattest.ErrFormat} {
+		o := enclavetest.IOSOptions{ED: true, ExtensionData: mapOfSize(t, n)}
+		if err := attest(o); !errors.Is(err, want) {
+			t.Errorf("%d-byte map: attestation: %v", n, err)
+		}
+		if err := assert(o); !errors.Is(err, want) {
+			t.Errorf("%d-byte map: assertion: %v", n, err)
+		}
+	}
+	// More than the bound after the header is refused even when it is not
+	// a map at all (refused before decoding).
+	if err := devattest.ParseAuthData(append(append(make([]byte, 32), 0x80, 0, 0, 0, 1), make([]byte, 1025)...), false); !errors.Is(err, devattest.ErrFormat) {
+		t.Errorf("oversized rest: %v", err)
+	}
+
+	// An empty map with ED is accepted.
+	empty := enclavetest.IOSOptions{ED: true, ExtensionData: []byte{0xa0}}
+	if err := attest(empty); err != nil {
+		t.Errorf("empty map: attestation: %v", err)
+	}
+	if err := assert(empty); err != nil {
+		t.Errorf("empty map: assertion: %v", err)
+	}
+
+	// Nested definite-length items are accepted; an indefinite-length array
+	// or map anywhere inside the map is refused.
+	for name, tc := range map[string]struct {
+		ext  []byte
+		want error
+	}{
+		"nested definite":         {[]byte{0xa1, 0x01, 0xa1, 0x02, 0x82, 0x00, 0xc1, 0x00}, nil},
+		"indefinite array value":  {[]byte{0xa1, 0x01, 0x9f, 0x00, 0xff}, devattest.ErrFormat},
+		"indefinite map value":    {[]byte{0xa1, 0x01, 0xbf, 0x02, 0x00, 0xff}, devattest.ErrFormat},
+		"indefinite deeper":       {[]byte{0xa1, 0x01, 0x81, 0xa1, 0x02, 0x9f, 0xff}, devattest.ErrFormat},
+		"indefinite under a tag":  {[]byte{0xa1, 0x01, 0xc1, 0x9f, 0xff}, devattest.ErrFormat},
+		"indefinite outer map":    {[]byte{0xbf, 0x01, 0x00, 0xff}, devattest.ErrFormat},
+		"indefinite array as key": {[]byte{0xa1, 0x9f, 0xff, 0x00}, devattest.ErrFormat},
+	} {
+		o := enclavetest.IOSOptions{ED: true, ExtensionData: tc.ext}
+		if err := attest(o); !errors.Is(err, tc.want) {
+			t.Errorf("%s: attestation: %v", name, err)
+		}
+		if err := assert(o); !errors.Is(err, tc.want) {
+			t.Errorf("%s: assertion: %v", name, err)
+		}
+	}
+}

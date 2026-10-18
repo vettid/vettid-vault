@@ -304,6 +304,9 @@ type IOSOptions struct {
 	// nonce (attestation) or the signature (assertion) was computed over
 	// it (tamper tests).
 	MutateAuthData func([]byte) []byte
+	// Flags, if not zero, replaces the authenticator data flags (before
+	// the nonce or signature is computed).
+	Flags byte
 }
 
 // AppleExtensions returns a TEST extensions map shaped like the one iOS 27
@@ -324,6 +327,8 @@ func IOSAppleExtensions(o IOSOptions) IOSOptions {
 
 func iosFlags(o IOSOptions, attestation bool) byte {
 	switch {
+	case o.Flags != 0:
+		return o.Flags
 	case o.ED:
 		return 0x40 | 0x80
 	case attestation:

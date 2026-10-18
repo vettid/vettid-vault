@@ -52,7 +52,8 @@ type authData struct {
 // flags (1), counter (4); then, in an attestation (attested), the attested
 // credential data: aaguid (16), credentialId length (2), credentialId and
 // exactly one CBOR item, the COSE key; then, if the ED flag is set, exactly
-// one definite-length CBOR map of extensions. Nothing may follow, and
+// one CBOR map of extensions, at most maxExtensions bytes and with no
+// indefinite-length array or map anywhere in it. Nothing may follow, and
 // without ED nothing may follow the counter or the COSE key.
 //
 // An assertion never carries attested credential data, even with AT set
@@ -89,9 +90,14 @@ func parseAuthData(b []byte, attested bool) (*authData, error) {
 		a.coseKey, rest = k.Raw, r
 	}
 	if a.flags&flagExtensions != 0 {
+		// Nothing may follow the map, so the rest is the map: bound it
+		// before decoding.
+		if len(rest) > maxExtensions {
+			return nil, ErrFormat
+		}
 		x, r, err := cbor.DecodePrefix(rest)
-		if err != nil || x.Kind != cbor.KindMap || len(x.Raw) > maxExtensions || x.Raw[0]&0x1f == 31 {
-			return nil, ErrFormat // also: ED with nothing after it (truncated), or an indefinite-length map
+		if err != nil || x.Kind != cbor.KindMap || !definite(x) {
+			return nil, ErrFormat // also: ED with nothing after it (truncated)
 		}
 		rest = r
 	}
@@ -99,6 +105,30 @@ func parseAuthData(b []byte, attested bool) (*authData, error) {
 		return nil, ErrFormat
 	}
 	return a, nil
+}
+
+// definite reports whether v and every item nested in it have definite
+// length. The decoder already refuses indefinite-length strings, so only
+// arrays and maps are checked. Recursion is bounded by cbor.MaxDepth,
+// which the decoder enforced.
+func definite(v *cbor.Value) bool {
+	switch v.Kind {
+	case cbor.KindArray, cbor.KindMap:
+		if v.Raw[0]&0x1f == 31 {
+			return false
+		}
+	}
+	for i := range v.Array {
+		if !definite(&v.Array[i]) {
+			return false
+		}
+	}
+	for i := range v.Map {
+		if !definite(&v.Map[i].Key) || !definite(&v.Map[i].Value) {
+			return false
+		}
+	}
+	return v.Tag == nil || definite(v.Tag)
 }
 
 // appIDAccepted reports whether rpIDHash is SHA-256 of an App ID the

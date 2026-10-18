@@ -65,3 +65,10 @@ func ParseKeyDescription(b []byte) error {
 	_, err := parseKeyDescription(b)
 	return err
 }
+
+// ParseAuthData reports whether authenticator data parses as an
+// attestation's (attested) or an assertion's.
+func ParseAuthData(b []byte, attested bool) error {
+	_, err := parseAuthData(b, attested)
+	return err
+}

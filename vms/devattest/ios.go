@@ -27,7 +27,16 @@ var AAGUIDProduction = [16]byte{'a', 'p', 'p', 'a', 't', 't', 'e', 's', 't'}
 // under Policy.IOSDevelopmentEnvironment (dev enclaves).
 var AAGUIDDevelopment = [16]byte{'a', 'p', 'p', 'a', 't', 't', 'e', 's', 't', 'd', 'e', 'v', 'e', 'l', 'o', 'p'}
 
-const flagAttested = 0x40
+// Authenticator data flags (WebAuthn §6.1): AT, attested credential data
+// included; ED, extension data included.
+const (
+	flagAttested   = 0x40
+	flagExtensions = 0x80
+)
+
+// maxExtensions bounds the encoded extensions map. iOS 27 sends 62 bytes
+// (apple_bundle_version_01, apple_validation_category_01).
+const maxExtensions = 1024
 
 // authData is the parsed authenticator data.
 type authData struct {
@@ -39,28 +48,56 @@ type authData struct {
 	coseKey  []byte
 }
 
+// parseAuthData parses App Attest authenticator data: rpIdHash (32),
+// flags (1), counter (4); then, in an attestation (attested), the attested
+// credential data: aaguid (16), credentialId length (2), credentialId and
+// exactly one CBOR item, the COSE key; then, if the ED flag is set, exactly
+// one definite-length CBOR map of extensions. Nothing may follow, and
+// without ED nothing may follow the counter or the COSE key.
+//
+// An assertion never carries attested credential data, even with AT set
+// (iOS sets AT and ED in every assertion and appends only the extensions
+// map), so AT is not read in an assertion.
+//
+// The extensions are not interpreted: they never reach the key, counter,
+// App ID, environment or key id checks. That is safe because the
+// attestation nonce and the assertion signature both cover
+// SHA-256(authData || clientDataHash) over the full authData bytes as
+// received, extensions included, so they cannot be altered or added
+// without failing ErrChallenge or ErrSignature.
 func parseAuthData(b []byte, attested bool) (*authData, error) {
 	if len(b) < 37 {
 		return nil, ErrFormat
 	}
 	a := &authData{rpIDHash: b[:32], flags: b[32], counter: binary.BigEndian.Uint32(b[33:37])}
 	rest := b[37:]
-	if !attested {
-		if len(rest) != 0 {
+	if attested {
+		if a.flags&flagAttested == 0 || len(rest) < 18 {
 			return nil, ErrFormat
 		}
-		return a, nil
+		a.aaguid = rest[:16]
+		n := int(binary.BigEndian.Uint16(rest[16:18]))
+		rest = rest[18:]
+		if n == 0 || n > 64 || len(rest) < n {
+			return nil, ErrFormat
+		}
+		a.credID = rest[:n]
+		k, r, err := cbor.DecodePrefix(rest[n:])
+		if err != nil {
+			return nil, ErrFormat
+		}
+		a.coseKey, rest = k.Raw, r
 	}
-	if a.flags&flagAttested == 0 || len(rest) < 18 {
+	if a.flags&flagExtensions != 0 {
+		x, r, err := cbor.DecodePrefix(rest)
+		if err != nil || x.Kind != cbor.KindMap || len(x.Raw) > maxExtensions || x.Raw[0]&0x1f == 31 {
+			return nil, ErrFormat // also: ED with nothing after it (truncated), or an indefinite-length map
+		}
+		rest = r
+	}
+	if len(rest) != 0 {
 		return nil, ErrFormat
 	}
-	a.aaguid = rest[:16]
-	n := int(binary.BigEndian.Uint16(rest[16:18]))
-	rest = rest[18:]
-	if n == 0 || n > 64 || len(rest) < n {
-		return nil, ErrFormat
-	}
-	a.credID, a.coseKey = rest[:n], rest[n:]
 	return a, nil
 }
 

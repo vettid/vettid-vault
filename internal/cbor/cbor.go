@@ -86,6 +86,20 @@ func Decode(b []byte) (*Value, error) {
 	return &v, nil
 }
 
+// DecodePrefix decodes exactly one item from the start of b and returns it
+// with the bytes that follow it, for formats that concatenate CBOR items
+// with other data (App Attest authenticator data). The item is decoded
+// under the same rules as Decode; only the trailing-data check is left to
+// the caller. Empty input is ErrTruncated.
+func DecodePrefix(b []byte) (*Value, []byte, error) {
+	d := decoder{b: b}
+	v, err := d.item(0)
+	if err != nil {
+		return nil, nil, err
+	}
+	return &v, b[d.off:], nil
+}
+
 type decoder struct {
 	b   []byte
 	off int

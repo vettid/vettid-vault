@@ -291,6 +291,46 @@ type IOSOptions struct {
 	// CA, and that key's own genuine (non-CA) credential certificate
 	// follows it in x5c (a chain extended below an attested key).
 	Under *ecdsa.PrivateKey
+	// ED sets the authenticator data's extension-data flag (0x80) in the
+	// attestation and in every assertion, with flags 0xc0 (AT|ED) as iOS 27
+	// sends them: AT is set in assertions too, which carry no attested
+	// credential data.
+	ED bool
+	// ExtensionData is appended to the authenticator data after the COSE
+	// key (attestation) or the counter (assertion), whether or not ED is
+	// set. A real device sends AppleExtensions() with ED.
+	ExtensionData []byte
+	// MutateAuthData, if set, rewrites the authenticator data after the
+	// nonce (attestation) or the signature (assertion) was computed over
+	// it (tamper tests).
+	MutateAuthData func([]byte) []byte
+}
+
+// AppleExtensions returns a TEST extensions map shaped like the one iOS 27
+// appends to App Attest authenticator data: a 62-byte definite-length CBOR
+// map with Apple's two keys. The keys are Apple's; the values are made up.
+func AppleExtensions() []byte {
+	var e cbor.Encoder
+	e.Map(2).Text("apple_bundle_version_01").Text("1.0").Text("apple_validation_category_01").Text("01")
+	return e.Bytes()
+}
+
+// IOSAppleExtensions is IOSOptions for an attester that sends the
+// extensions as iOS 27 does: ED set, AppleExtensions() appended.
+func IOSAppleExtensions(o IOSOptions) IOSOptions {
+	o.ED, o.ExtensionData = true, AppleExtensions()
+	return o
+}
+
+func iosFlags(o IOSOptions, attestation bool) byte {
+	switch {
+	case o.ED:
+		return 0x40 | 0x80
+	case attestation:
+		return 0x40 | 0x01
+	default:
+		return 0x01
+	}
 }
 
 func point(key *ecdsa.PrivateKey) []byte {
@@ -323,12 +363,13 @@ func (ca *AppleCA) Attest(key *ecdsa.PrivateKey, cdh [32]byte, o IOSOptions) []b
 	var ck cbor.Encoder
 	ck.Map(5).Int(1).Int(2).Int(3).Int(-7).Int(-1).Int(1).Int(-2).ByteString(pt[1:33]).Int(-3).ByteString(pt[33:])
 	ad := append([]byte(nil), rp[:]...)
-	ad = append(ad, 0x40|0x01)
+	ad = append(ad, iosFlags(o, true))
 	ad = binary.BigEndian.AppendUint32(ad, o.Counter)
 	ad = append(ad, aaguid...)
 	ad = binary.BigEndian.AppendUint16(ad, uint16(len(keyID)))
 	ad = append(ad, keyID...)
 	ad = append(ad, ck.Bytes()...)
+	ad = append(ad, o.ExtensionData...)
 	h := sha256.New()
 	h.Write(ad)
 	h.Write(cdh[:])
@@ -339,6 +380,9 @@ func (ca *AppleCA) Attest(key *ecdsa.PrivateKey, cdh [32]byte, o IOSOptions) []b
 	ext := dSeq(dExp(1, dOct(nonce)))
 	if o.MutateNonceExt != nil {
 		ext = o.MutateNonceExt(ext)
+	}
+	if o.MutateAuthData != nil {
+		ad = o.MutateAuthData(ad)
 	}
 	ca.mu.Lock()
 	ca.serial++
@@ -369,13 +413,21 @@ func (ca *AppleCA) Attest(key *ecdsa.PrivateKey, cdh [32]byte, o IOSOptions) []b
 
 // IOSAssert returns an App Attest assertion with the given counter.
 func IOSAssert(key *ecdsa.PrivateKey, appID string, counter uint32, cdh [32]byte) []byte {
+	return IOSAssertWith(key, IOSOptions{AppID: appID}, counter, cdh)
+}
+
+// IOSAssertWith returns an App Attest assertion with the given counter,
+// shaped by o's AppID, ED, ExtensionData and MutateAuthData.
+func IOSAssertWith(key *ecdsa.PrivateKey, o IOSOptions, counter uint32, cdh [32]byte) []byte {
+	appID := o.AppID
 	if appID == "" {
 		appID = IOSAppID
 	}
 	rp := sha256.Sum256([]byte(appID))
 	ad := append([]byte(nil), rp[:]...)
-	ad = append(ad, 0x01)
+	ad = append(ad, iosFlags(o, false))
 	ad = binary.BigEndian.AppendUint32(ad, counter)
+	ad = append(ad, o.ExtensionData...)
 	h := sha256.New()
 	h.Write(ad)
 	h.Write(cdh[:])
@@ -384,6 +436,9 @@ func IOSAssert(key *ecdsa.PrivateKey, appID string, counter uint32, cdh [32]byte
 	sig, err := ecdsa.SignASN1(rand.Reader, key, d[:])
 	if err != nil {
 		panic(err)
+	}
+	if o.MutateAuthData != nil {
+		ad = o.MutateAuthData(ad)
 	}
 	var e cbor.Encoder
 	e.Map(2).Text("signature").ByteString(sig).Text("authenticatorData").ByteString(ad)
@@ -467,7 +522,7 @@ func (a *Attester) Assert(s devattest.Signed) (*altchan.DeviceAssertion, error) 
 		a.counter++
 		c := a.counter
 		a.mu.Unlock()
-		return &altchan.DeviceAssertion{Platform: a.platform, Assertion: IOSAssert(a.key, a.ios.AppID, c, s.ClientDataHash)}, nil
+		return &altchan.DeviceAssertion{Platform: a.platform, Assertion: IOSAssertWith(a.key, a.ios, c, s.ClientDataHash)}, nil
 	}
 }
 

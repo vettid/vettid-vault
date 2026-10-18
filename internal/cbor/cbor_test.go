@@ -108,6 +108,46 @@ func TestDecodeRejects(t *testing.T) {
 	}
 }
 
+func TestDecodePrefix(t *testing.T) {
+	for _, tc := range []struct{ in, item, rest string }{
+		{"00", "00", ""},
+		{"0000", "00", "00"},
+		{"a1616101a0", "a1616101", "a0"},
+		{"bf616101ff0102", "bf616101ff", "0102"},
+		{"4201020304", "420102", "0304"},
+	} {
+		v, rest, err := DecodePrefix(h(tc.in))
+		if err != nil {
+			t.Fatalf("%s: %v", tc.in, err)
+		}
+		if !bytes.Equal(v.Raw, h(tc.item)) || !bytes.Equal(rest, h(tc.rest)) {
+			t.Errorf("%s: item %x rest %x", tc.in, v.Raw, rest)
+		}
+	}
+	// Every Decode rule but the trailing-data one still applies to the item.
+	for name, in := range map[string]string{
+		"empty":            "",
+		"truncated":        "1a0000",
+		"truncated string": "45010203",
+		"unterminated map": "bf6161",
+		"indefinite bytes": "5f42010243030405ff",
+		"duplicate key":    "a2616101616102",
+		"float":            "f93c00",
+		"stray break":      "ff00",
+		"bad utf8":         "62c32800",
+		"map too long":     "ba00ffffff00",
+	} {
+		if _, _, err := DecodePrefix(h(in)); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	deep := bytes.Repeat([]byte{0xa1, 0x00}, MaxDepth+2)
+	deep = append(deep, 0, 0)
+	if _, _, err := DecodePrefix(deep); !errors.Is(err, ErrDepth) {
+		t.Errorf("deep: %v", err)
+	}
+}
+
 func TestEncodeRoundTrip(t *testing.T) {
 	var e Encoder
 	e.Map(4).Text("a").Int(-500).Text("b").ByteString([]byte{1, 2}).
@@ -136,7 +176,14 @@ func FuzzDecode(f *testing.F) {
 		f.Add(h(s))
 	}
 	f.Fuzz(func(t *testing.T, b []byte) {
+		p, rest, perr := DecodePrefix(b)
+		if perr == nil && !bytes.Equal(append(append([]byte(nil), p.Raw...), rest...), b) {
+			t.Fatal("prefix item and rest do not reassemble the input")
+		}
 		v, err := Decode(b)
+		if (err == nil) != (perr == nil && len(rest) == 0) {
+			t.Fatal("Decode and DecodePrefix disagree")
+		}
 		if err != nil {
 			return
 		}

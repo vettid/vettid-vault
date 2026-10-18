@@ -14,6 +14,7 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -56,6 +57,27 @@ type Config struct {
 	// channel (§11.2). With Trust set, vault.enrolled must carry a valid
 	// attestation for the pending enrollment.
 	Trust *Trust
+	// Persist, if set, saves the device state (what Save returns) after
+	// the messages of a collected batch are handled and before any of
+	// them is acknowledged, as VAULT-MESSAGING §8.3 has devices do with
+	// their local storage. If it returns an error, Poll returns that
+	// error and acknowledges none of the batch, so the relay delivers it
+	// again. The deposits that handling makes (a rekey's hs.resp, a
+	// pairing's hs.fin, relay.token.issued and relay.token.refresh)
+	// wait in the state's outbox until Persist has saved them and are
+	// deposited after it, before the acks. Poll calls Persist without
+	// the device's lock held and never twice at once; Persist may call
+	// the Device's methods, though not Poll or the waiting calls. The
+	// state slice is wiped when Persist returns: copy it to keep it.
+	// Persist covers what the client records while handling (keys and
+	// sessions, tokens, device.paired, the msg_ids seen); the responses
+	// and events it hands to the caller stay in memory as before, so
+	// what the caller makes of them is the caller's to save.
+	//
+	// Nil: each message is acknowledged right after it is handled, its
+	// deposits are made at once, and the state is saved only when the
+	// caller calls Save.
+	Persist func(state []byte) error
 }
 
 // State is the device's persistent state.
@@ -106,7 +128,24 @@ type State struct {
 	PhoneKey    []byte `json:"phone_key,omitempty"`
 	SecretVault string `json:"secret_vault,omitempty"`
 	Epoch       uint64 `json:"epoch,omitempty"`
+	// Outbox holds the deposits to the vault made while a batch was
+	// handled with Config.Persist set, until the relay accepts them.
+	Outbox []OutboxEntry `json:"outbox,omitempty"`
 }
+
+// OutboxEntry is one deposit to the vault waiting in State.Outbox: an
+// envelope already sealed, deposited on the vault token held when it
+// is sent.
+type OutboxEntry struct {
+	RelayURL string    `json:"relay_url"`
+	Mailbox  string    `json:"mailbox"`
+	Payload  []byte    `json:"payload"`
+	Created  time.Time `json:"created"`
+}
+
+// outboxMaxAge bounds how long an outbox entry is retried: a vault
+// refuses durable messages whose ts is more than 16 days old (§8.4).
+const outboxMaxAge = 16 * 24 * time.Hour
 
 // VaultRecord is what the device knows about its vault.
 type VaultRecord struct {
@@ -145,6 +184,17 @@ type Device struct {
 	events   []*envelope.Inner
 	pending  *pendingUnlock
 	lastUTK  UTK
+
+	// persistMu serializes Poll's collect, handle, Persist, deposit and
+	// ack steps when Config.Persist is set, and every outbox flush.
+	persistMu sync.Mutex
+	// batching is set (with mu held) while a batch is handled for
+	// Persist: deposits go to the outbox instead of the relay.
+	batching bool
+	// outboxSaved is how many leading outbox entries a successful
+	// Persist (or the loaded state) holds: only those are deposited, so
+	// that nothing leaves before it is saved. persistMu guards it.
+	outboxSaved int
 }
 
 func (c *Config) defaults() {
@@ -214,6 +264,7 @@ func open(cfg Config, st *State) (*Device, error) {
 		return nil, err
 	}
 	d.own = d.relayClient(st.RelayURL)
+	d.outboxSaved = len(st.Outbox)
 	d.keyring = &handshake.Keyring{}
 	if st.Vault != nil {
 		if d.keyring, err = handshake.ImportKeyring(st.Vault.Sessions); err != nil {
@@ -479,22 +530,9 @@ func (d *Device) awaitPaired(ctx context.Context) error {
 	if in.Type == devicePairRejected {
 		return ErrPairRejected
 	}
-	o, err := strictjson.ParseObject(in.Body)
-	if err != nil {
+	// handle recorded the device id, vault id and release.
+	if _, err := strictjson.ParseObject(in.Body); err != nil {
 		return ErrProtocol
-	}
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.st.DeviceID, _ = o.String("device_id")
-	if v, _ := o.String("vault_id"); v != "" {
-		d.st.VaultID = v
-	}
-	// The release the vault runs under (§10.3), the floor for unlocks.
-	if r, ok, _ := o.OptString("release"); ok && len(r) == 96 {
-		if n, _, err := o.OptUint("release_number", 1, strictjson.MaxSafeInteger); err == nil && n > 0 {
-			a := d.alt()
-			a.Release, a.ReleaseNumber = r, n
-		}
 	}
 	return nil
 }
@@ -593,7 +631,7 @@ func (d *Device) sendFull(ctx context.Context, id, typ string, body json.RawMess
 	if err != nil {
 		return "", err
 	}
-	if _, err := d.relayClient(v.RelayURL).Deposit(ctx, v.Mailbox, v.Token, raw); err != nil {
+	if err := d.depositVault(ctx, v.RelayURL, v.Mailbox, v.Token, raw); err != nil {
 		return "", err
 	}
 	return id, nil
@@ -660,7 +698,15 @@ func (d *Device) waitFor(ctx context.Context, match func(*envelope.Inner) bool) 
 }
 
 // Poll collects once from the device's mailbox and processes what arrived.
+// With Config.Persist set, it first deposits what waits in the outbox,
+// then handles the batch, calls Persist, deposits the batch's outbox
+// entries and acknowledges the batch; a Persist error is returned and
+// leaves the batch unacknowledged.
 func (d *Device) Poll(ctx context.Context) error {
+	if d.cfg.Persist != nil {
+		return d.pollPersist(ctx)
+	}
+	d.flushOutbox(ctx) // a state saved under Persist may still hold some
 	msgs, err := d.own.Collect(ctx, d.cfg.PollWait, 32)
 	if err != nil {
 		return err
@@ -672,6 +718,115 @@ func (d *Device) Poll(ctx context.Context) error {
 		_ = d.own.Ack(ctx, m.MsgID)
 	}
 	return nil
+}
+
+// pollPersist is Poll with Config.Persist: save before acknowledging
+// (§8.3). A message of the batch that is collected again, after a
+// Persist error or a crash between Persist and the acks, is skipped by
+// the msg_id dedupe (State.Seen, saved with the batch's effects) and
+// acknowledged after the next Persist.
+func (d *Device) pollPersist(ctx context.Context) error {
+	d.persistMu.Lock()
+	defer d.persistMu.Unlock()
+	d.flushOutboxLocked(ctx)
+	msgs, err := d.own.Collect(ctx, d.cfg.PollWait, 32)
+	if err != nil {
+		return err
+	}
+	if len(msgs) == 0 {
+		return nil
+	}
+	d.mu.Lock()
+	d.batching = true
+	for _, m := range msgs {
+		d.handle(ctx, m)
+	}
+	d.batching = false
+	d.export()
+	state, err := json.Marshal(d.st)
+	queued := len(d.st.Outbox)
+	d.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	err = d.cfg.Persist(state)
+	suite.Wipe(state)
+	if err != nil {
+		return fmt.Errorf("client: persist: %w", err)
+	}
+	d.outboxSaved = queued
+	d.flushOutboxLocked(ctx)
+	for _, m := range msgs {
+		_ = d.own.Ack(ctx, m.MsgID)
+	}
+	return nil
+}
+
+// depositVault deposits an envelope into the vault's mailbox, or, while
+// a batch is handled for Persist, puts it in the outbox. d.mu is held.
+func (d *Device) depositVault(ctx context.Context, relayURL, mailbox, token string, payload []byte) error {
+	if d.batching {
+		d.st.Outbox = append(d.st.Outbox, OutboxEntry{RelayURL: relayURL, Mailbox: mailbox,
+			Payload: append([]byte(nil), payload...), Created: d.cfg.Now()})
+		return nil
+	}
+	_, err := d.relayClient(relayURL).Deposit(ctx, mailbox, token, payload)
+	return err
+}
+
+// flushOutbox deposits the saved outbox entries in order (an entry from
+// a batch whose Persist failed waits for the next successful one), on
+// the vault token held now. An entry the relay accepted, or refused with a client error
+// other than 429, leaves the outbox (without Persist a failed deposit is
+// not retried either); one older than outboxMaxAge, or left without a
+// vault, is dropped; at any other failure it and the rest stay for the
+// next Poll. A removal is saved with the next Persist, so an entry
+// deposited just before a crash is deposited again: the vault drops the
+// second hs.resp or hs.fin of a handshake it has finished and dedupes
+// the rest by their inner id (§8.2).
+func (d *Device) flushOutbox(ctx context.Context) {
+	d.persistMu.Lock()
+	defer d.persistMu.Unlock()
+	d.flushOutboxLocked(ctx)
+}
+
+// flushOutboxLocked is flushOutbox with persistMu held.
+func (d *Device) flushOutboxLocked(ctx context.Context) {
+	d.mu.Lock()
+	out := d.st.Outbox[:d.outboxSaved]
+	tok := ""
+	if d.st.Vault != nil {
+		tok = d.st.Vault.Token
+	}
+	d.mu.Unlock()
+	if len(out) == 0 {
+		return
+	}
+	now := d.cfg.Now()
+	i := 0
+	for ; i < len(out); i++ {
+		e := out[i]
+		if tok == "" || now.Sub(e.Created) > outboxMaxAge {
+			continue
+		}
+		if _, err := d.relayClient(e.RelayURL).Deposit(ctx, e.Mailbox, tok, e.Payload); err != nil {
+			var re *relayclient.Error
+			if errors.As(err, &re) && re.Status >= 400 && re.Status < 500 && re.Status != http.StatusTooManyRequests {
+				continue
+			}
+			break
+		}
+	}
+	d.mu.Lock()
+	// Only a batch handled under persistMu (held here) adds entries, so
+	// the first len(out) are still those just sent.
+	rest := d.st.Outbox[i:]
+	d.st.Outbox = nil
+	if len(rest) > 0 {
+		d.st.Outbox = append([]OutboxEntry(nil), rest...)
+	}
+	d.outboxSaved -= i
+	d.mu.Unlock()
 }
 
 // Deliver processes one message as if collected (in-process tests).
@@ -761,6 +916,21 @@ func (d *Device) handle(ctx context.Context, m relayclient.Message) {
 			if tr, err := o.Bool("transfer"); err == nil && tr {
 				if g, ok, _ := o.OptString("user_guid"); ok && validUserGUID(g) {
 					d.st.UserGUID = g
+				}
+			}
+			// The device id, vault id and release are recorded here,
+			// not by AwaitPaired, so that Config.Persist saves them with
+			// the token before device.paired is acknowledged.
+			d.st.DeviceID, _ = o.String("device_id")
+			if v, _ := o.String("vault_id"); v != "" {
+				d.st.VaultID = v
+			}
+			// The release the vault runs under (§10.3), the floor for
+			// unlocks.
+			if r, ok, _ := o.OptString("release"); ok && len(r) == 96 {
+				if n, _, err := o.OptUint("release_number", 1, strictjson.MaxSafeInteger); err == nil && n > 0 {
+					a := d.alt()
+					a.Release, a.ReleaseNumber = r, n
 				}
 			}
 		}
@@ -898,7 +1068,7 @@ func (d *Device) handleResp(ctx context.Context, raw []byte, sender ed25519.Publ
 	}
 	d.keyring.Activate(res.Epoch, now)
 	v := d.st.Vault
-	_, _ = d.relayClient(v.RelayURL).Deposit(ctx, v.Mailbox, v.Token, res.Fin)
+	_ = d.depositVault(ctx, v.RelayURL, v.Mailbox, v.Token, res.Fin)
 }
 
 // handleRekey answers a vault-initiated rekey (§6.5).
@@ -918,7 +1088,7 @@ func (d *Device) handleRekey(ctx context.Context, raw []byte, in *envelope.Inner
 	if err != nil {
 		return
 	}
-	if _, err := d.relayClient(v.RelayURL).Deposit(ctx, v.Mailbox, v.Token, env); err != nil {
+	if err := d.depositVault(ctx, v.RelayURL, v.Mailbox, v.Token, env); err != nil {
 		resp.Abort()
 		return
 	}

@@ -45,6 +45,11 @@ type fakeRelay struct {
 	failAck       bool
 	failDeposit   int
 	depositStatus int
+	depositCode   string // "" : "injected"
+	// lease hides a collected, unacknowledged message from later collects
+	// (a relay's visibility timeout that has not passed) until release.
+	lease  bool
+	leased map[string]bool
 }
 
 func newFakeRelay(t *testing.T) *fakeRelay {
@@ -118,8 +123,12 @@ func (r *fakeRelay) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	case req.Method == http.MethodPost && strings.HasPrefix(req.URL.Path, "/v1/mailbox/"):
 		if r.failDeposit > 0 {
 			r.failDeposit--
+			code := r.depositCode
+			if code == "" {
+				code = "injected"
+			}
 			w.WriteHeader(r.depositStatus)
-			_, _ = w.Write([]byte(`{"code":"injected"}`))
+			_, _ = w.Write([]byte(`{"code":"` + code + `"}`))
 			return
 		}
 		var body struct {
@@ -135,9 +144,21 @@ func (r *fakeRelay) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(map[string]string{"msg_id": id})
 	case req.Method == http.MethodGet && req.URL.Path == "/v1/mailbox":
-		msgs := r.boxes[relayauth.MailboxID(pk)]
-		if len(msgs) > 32 {
-			msgs = msgs[:32]
+		var msgs []relayclient.Message
+		for _, m := range r.boxes[relayauth.MailboxID(pk)] {
+			if len(msgs) == 32 {
+				break
+			}
+			if r.lease {
+				if r.leased[m.MsgID] {
+					continue
+				}
+				if r.leased == nil {
+					r.leased = map[string]bool{}
+				}
+				r.leased[m.MsgID] = true
+			}
+			msgs = append(msgs, m)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"messages": append([]relayclient.Message{}, msgs...)})
 	case req.Method == http.MethodDelete && strings.HasPrefix(req.URL.Path, "/v1/mailbox/"):
@@ -299,6 +320,21 @@ func (v *fakeVault) process() {
 // the device with an active session, no device id yet.
 func pair(t *testing.T) (*fakeRelay, *fakeVault, *Device) {
 	t.Helper()
+	r, v, d := startPair(t)
+	if err := d.Poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	v.process()
+	if v.kr.Current() == nil || d.keyring.Current() == nil {
+		t.Fatal("no session")
+	}
+	return r, v, d
+}
+
+// startPair runs pair up to the vault's hs.resp waiting in the device's
+// mailbox.
+func startPair(t *testing.T) (*fakeRelay, *fakeVault, *Device) {
+	t.Helper()
 	r := newFakeRelay(t)
 	v := newFakeVault(t, r)
 	d, err := Generate(Config{Role: "app", Name: "phone", RelayURL: r.url(), HTTP: r.srv.Client(), PollWait: time.Second})
@@ -340,13 +376,6 @@ func pair(t *testing.T) (*fakeRelay, *fakeVault, *Device) {
 	}
 	v.resp = resp
 	r.put(v.dev.Mailbox, v.relayPK(), env)
-	if err := d.Poll(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	v.process()
-	if v.kr.Current() == nil || d.keyring.Current() == nil {
-		t.Fatal("no session")
-	}
 	return r, v, d
 }
 
@@ -641,15 +670,22 @@ func TestCrashAfterPersistReplaysHarmlessly(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := r.entries()[mark:]
-	want := []string{"deposit " + v.mailbox(), "persist", "ack " + ids[0], "ack " + ids[1], "ack " + ids[2]}
+	want := []string{"deposit " + v.mailbox(), "ack " + ids[0], "ack " + ids[1], "ack " + ids[2]}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Fatalf("relay calls %v, want %v (the outbox, then the replayed batch acknowledged with no deposit)", got, want)
+		t.Fatalf("relay calls %v, want %v (the outbox, then the replayed batch acknowledged with no deposit and nothing to save)", got, want)
 	}
 	if ev := d2.Events(); len(ev) != 0 {
 		t.Fatalf("replayed batch handled again: %d events", len(ev))
 	}
 	// The state after the replay is the state at the crash, outbox sent.
-	after := loadState(t, saved2)
+	if saved2 != nil {
+		t.Fatal("a batch of messages already saved was saved again")
+	}
+	now, err := d2.Save()
+	if err != nil {
+		t.Fatal(err)
+	}
+	after := loadState(t, now)
 	atCrash.Outbox = nil
 	a, _ := json.Marshal(atCrash)
 	b, _ := json.Marshal(after)
@@ -722,7 +758,8 @@ func TestPersistOutboxRetry(t *testing.T) {
 	if len(d.st.Outbox) != 1 || len(r.pending(v.mailbox())) != 0 {
 		t.Fatal("a transient failure dropped the entry")
 	}
-	if err := d.Poll(context.Background()); err != nil { // nothing to collect; the outbox goes out
+	d.cfg.Now = func() time.Time { return time.Now().Add(time.Minute) } // past the backoff
+	if err := d.Poll(context.Background()); err != nil {                // nothing to collect; the outbox goes out
 		t.Fatal(err)
 	}
 	if d.st.Outbox != nil {
@@ -734,8 +771,8 @@ func TestPersistOutboxRetry(t *testing.T) {
 	r.mu.Lock()
 	r.failDeposit, r.depositStatus = 1, http.StatusForbidden
 	r.mu.Unlock()
-	if err := d.Poll(context.Background()); err != nil {
-		t.Fatal(err)
+	if err := d.Poll(context.Background()); !errors.Is(err, ErrOutboxDropped) {
+		t.Fatalf("Poll: %v, want ErrOutboxDropped", err)
 	}
 	if d.st.Outbox != nil || len(r.pending(v.mailbox())) != 0 {
 		t.Fatal("a refused entry was kept")

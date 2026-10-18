@@ -316,7 +316,7 @@ reaches the relay through its TLS front:
 export VAULTCTL_DEV_RESOLVE="relay.vettid.test=$(jq -r .relay_tls <data>/run/ready.json)"
 export VAULTCTL_PASSWORD='development password' VAULTCTL_PIN=13572468   # TEST-ONLY
 API=$(jq -r .api <data>/run/ready.json)
-M="vaultctl -state member.json -timeout 150s"
+M="<data>/bin/vaultctl -state member.json -timeout 150s"
 
 $M init -role app -name member-phone -relay https://relay.vettid.test
 $M api-enroll -api $API -guid member-agent-1 -pin $VAULTCTL_PIN    # a fresh GUID per test vault
@@ -328,8 +328,13 @@ runs the first handshake, creates the credential (password
 `$VAULTCTL_PASSWORD`, `development password` when unset) and confirms the
 enrollment. `credential unlock` prints the window's `expires_at`. Every step
 below that signs a grant must run before that time; run `credential unlock`
-again when the window has passed. Pairing an
-agent (VAULT-MESSAGING §6.7):
+again when the window has passed. This differs from AGENT-PLAN §4.8 in one
+step: there is no separate `credential create`, because `api-enroll`
+already creates the credential. Pairing an agent (VAULT-MESSAGING §6.7)
+needs the `leash` feature: a stack started with `-features` that leaves out
+`leash` (`none`, or a list without it) answers `device.pair.create
+{"role":"agent"}` with `bad_request`, as a production image without
+`leash` does.
 
 ```sh
 $M request device.pair.create '{"role":"agent"}'   # body: {pairing_id, link, exp}
@@ -393,7 +398,9 @@ In Go, that is a client whose transport dials `relay_tls` for
 control port, which exists only in `devenclave` builds (`make
 check-tcb`). A fallback is `relay_transport`, the relay's plain HTTP port,
 with the origin rewritten, as the phone's `devStack` build does over `adb
-reverse`.
+reverse`. Unlike AGENT-PLAN §4.8's wording, nothing here rewrites origins
+for the connector: the dial mapping (or the fallback's rewrite) belongs
+only in a dev-stack build of the connector, never in a release build.
 
 **Not reachable quickly: a held vault.** The owner check (§3.6) holds a
 vault only after its deadline passes. The shortest interval is one hour

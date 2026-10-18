@@ -520,6 +520,11 @@ func (d *Device) CompleteEnrollment(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// The hs.fin first: if it is refused for good, the vault never sends
+	// device.paired (ErrHandshakeUnsent, ErrRefused).
+	if _, err := d.awaitHandshake(ctx); err != nil {
+		return err
+	}
 	return d.awaitPaired(ctx)
 }
 
@@ -578,6 +583,13 @@ func (d *Device) awaitHandshake(ctx context.Context) (string, error) {
 func (d *Device) startPairing(ctx context.Context, link string, att Attester) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if d.refused != nil {
+		// Before anything else: fetching the claim would spend the
+		// owner's single-use link, and opening it would replace the vault
+		// record, whose mailbox may still hold the device.unlinked a
+		// refused device acts on (§8.6). A re-pairing uses a new Device.
+		return d.refused
+	}
 	q, err := invite.ParseLink(link)
 	if err != nil {
 		return err

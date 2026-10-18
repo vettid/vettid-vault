@@ -132,6 +132,11 @@ func (d *Device) CompleteRecoveryHandshake(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// The hs.fin first: if it is refused for good, the vault never sends
+	// device.paired (ErrHandshakeUnsent, ErrRefused).
+	if _, err := d.awaitHandshake(ctx); err != nil {
+		return err
+	}
 	return d.awaitPaired(ctx)
 }
 

@@ -157,6 +157,12 @@ type Lifecycle struct {
 	Next        *bool
 	HeaderSeq   uint64
 	NextCleared bool
+	// CancelledRecoveryID (0.49.0, VAULT-HOST-PROTOCOL 0.1.13 §7.2) is the
+	// recovery that the unlock behind an unlocked or moved event ended, a
+	// ULID, or empty. The parent writes a non-empty one to the vault row
+	// as recovery_cancelled = {recovery_id, at (epoch s)} in the same
+	// update as the event.
+	CancelledRecoveryID string
 	// KeepLease is set by the parent, never parsed from the enclave: a
 	// "locked" that the enclave reports while an enroll or unlock of the
 	// same vault is in flight here (the enclave locks a running vault
@@ -207,6 +213,9 @@ type Slot struct {
 	// RFC 3339 strings, "" when absent.
 	NotBefore, Expires, RetryAt, Reason string
 	Earliest                            bool
+	// CancelledRecoveryID is an unlock slot's cancelled_recovery_id, with
+	// Code recovery_cancelled (0.49.0, VAULT-HOST-PROTOCOL 0.1.13 §6.1).
+	CancelledRecoveryID string
 }
 
 // Tables are the member API's DynamoDB tables.

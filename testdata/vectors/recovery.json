@@ -81,6 +81,7 @@
     "open_signing_string": "vettid/vms/2/recovery-open\ntest-user-guid\ntest-vault-0001\n01JB2Z6V9K3M4N5P6Q7R8S9T31\n01JB2Z6V9K3M4N5P6Q7R8S9T30\n2026-10-15T12:00:00.000Z\n40d6c2c8471844a9\n6286862e0e08397dc6b79b2b39f3e37ea03fd8a21ca6c1d09bf33fe9d89e5452\n4c5dc9b7708905f77f5e5d16316b5dfb425e68cb326dcd55a860e90a7707031e\n05b3abf2579a5eb66403cd78be557fd860633a1fe2103c7642030defe32c657f\n425ed4e4a36b30ea21b90e21c712c649e8214c29b7eaf68089d1039c6e55384c",
     "request_signing_string": "vettid/vms/2/recovery-request\nrecovery\ntest-vault-0001\ntest-user-guid\n01JB2Z6V9K3M4N5P6Q7R8S9T32\n2026-10-15T12:00:00Z\n70df3b62f5b39f1dc6d347b3835fc57a945b689e609500d9ba3f8a6e06cbafa7",
     "cancel_signing_string": "vettid/vms/2/recovery-request\nrecovery_cancel\ntest-vault-0001\ntest-user-guid\n01JB2Z6V9K3M4N5P6Q7R8S9T33\n2026-10-15T12:00:00Z\n",
+    "cancel_named_signing_string": "vettid/vms/2/recovery-request\nrecovery_cancel\ntest-vault-0001\ntest-user-guid\n01JB2Z6V9K3M4N5P6Q7R8S9T33\n2026-10-15T12:00:00Z\n\n01JB2Z6V9K3M4N5P6Q7R8S9T32",
     "counter": {
       "counter_key_hex": "5151515151515151515151515151515151515151515151515151515151515151",
       "generation": 1,

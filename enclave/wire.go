@@ -59,10 +59,13 @@ func BackupField(b *bool) string {
 }
 
 // LifecycleFields encodes a lifecycle event for the host channels
-// (vaultipc 6, hostproto): [event, vault_id, release, vault_version,
+// (vaultipc 10, hostproto): [event, vault_id, release, vault_version,
 // state_version, app_key (SPKI DER or empty), app_key_seq,
-// credential_backup, name_seq, first_name, last_name]; the last three
-// (0.18.0) are "0", "" and "" except for account_name.
+// credential_backup, name_seq, first_name, last_name, next, header_seq,
+// next_cleared, cancelled_recovery_id]; name_seq, first_name and
+// last_name (0.18.0) are "0", "" and "" except for account_name;
+// cancelled_recovery_id (0.49.0) is empty except on the unlocked or moved
+// event of an unlock that cancelled a recovery.
 func LifecycleFields(ev vault.LifecycleEvent) [][]byte {
 	seq, first, last := "0", "", ""
 	if n := ev.Name; n != nil {
@@ -76,11 +79,28 @@ func LifecycleFields(ev vault.LifecycleEvent) [][]byte {
 		ev.AppKey, []byte(strconv.FormatUint(ev.AppKeySeq, 10)), []byte(BackupField(ev.CredentialBackup)),
 		[]byte(seq), []byte(first), []byte(last),
 		// Release R (§11.5): next ("1", "0" or ""), header_seq, next_cleared ("1" or "").
-		[]byte(BackupField(ev.Next)), []byte(strconv.FormatUint(ev.HeaderSeq, 10)), []byte(cleared))
+		[]byte(BackupField(ev.Next)), []byte(strconv.FormatUint(ev.HeaderSeq, 10)), []byte(cleared),
+		// 0.49.0 (§11.5): the recovery the unlock behind the event ended.
+		[]byte(ev.CancelledRecoveryID))
 }
 
-// LifecycleFieldCount is the number of LifecycleFields (release R: 14).
-const LifecycleFieldCount = 14
+// LifecycleFieldCount is the number of LifecycleFields (release R: 14;
+// 0.49.0: 15).
+const LifecycleFieldCount = 15
+
+// ParseCancelledField decodes LifecycleFields' cancelled_recovery_id for
+// event: empty, or a ULID on unlocked or moved only (VAULT-MESSAGING
+// 0.49.0 §11.5, VAULT-HOST-PROTOCOL 0.1.13 §7.2).
+func ParseCancelledField(event string, f []byte) (string, bool) {
+	if len(f) == 0 {
+		return "", true
+	}
+	id := string(f)
+	if !envelope.ValidULID(id) || event != "unlocked" && event != "moved" {
+		return "", false
+	}
+	return id, true
+}
 
 // ParseNextFields decodes LifecycleFields' release R members.
 func ParseNextFields(next, hseq, cleared []byte) (*bool, uint64, bool, bool) {
@@ -167,6 +187,10 @@ type QueueMessage struct {
 	SignedAt string
 	KeyID    string
 	Sig      []byte
+	// RecoveryID is a recovery_cancel's optional recovery_id (0.49.0,
+	// §11.14.8): the recovery it means, covered by the signature (its
+	// eighth line). Empty: the cancel ends whatever is in progress.
+	RecoveryID string
 	// Account is the account snapshot (op account, REQUIRED; enroll,
 	// REQUIRED since 0.18.0, refused by the enclave with bad_request when
 	// absent or invalid; unlock, OPTIONAL; §11.5, §11.13): host data whose
@@ -276,6 +300,11 @@ func ParseQueueMessage(b []byte) (*QueueMessage, error) {
 		}
 		q.SignedAt, q.KeyID = sa, kid2
 	}
+	rid, ridOK, err := o.OptString("recovery_id")
+	if err != nil || ridOK && (q.Op != OpRecoveryCancel || !envelope.ValidULID(rid)) {
+		return nil, ErrMalformed
+	}
+	q.RecoveryID = rid
 	ak, akOK, err := o.OptString("app_key")
 	if err != nil || akOK != (q.Op == OpEnroll || q.Op == OpRecoveryRegister || q.Op == OpRecoveryOpen) {
 		return nil, ErrMalformed
@@ -332,6 +361,9 @@ func (q *QueueMessage) Marshal() []byte {
 	if q.Op == OpRecovery || q.Op == OpRecoveryCancel {
 		b.String("signed_at", q.SignedAt).String("key_id", q.KeyID).Base64("sig", q.Sig)
 	}
+	if q.Op == OpRecoveryCancel && q.RecoveryID != "" {
+		b.String("recovery_id", q.RecoveryID)
+	}
 	if len(q.Account) > 0 {
 		b.Raw("account", q.Account)
 	}
@@ -355,7 +387,8 @@ type Response struct {
 	Status    string
 	Envelope  []byte
 	// Code is CodeRecoveryRegistered (0.10.6), CodeRecoveryUnavailable
-	// (0.16.0), CodeRecoveryAttempt (0.33.0) or empty.
+	// (0.16.0), CodeRecoveryAttempt (0.33.0), CodeRecoveryCancelled or
+	// CodeRecoveryNotCurrent (0.49.0), or empty.
 	Code string
 	// The clear members of release R (§11.5, §11.14.5, §11.14.11): a
 	// recovery's not_before, expires and earliest; a counted open's
@@ -371,11 +404,26 @@ type Marker struct {
 	Earliest  bool
 	RetryAt   time.Time
 	Reason    string
+	// CancelledRecoveryID is the recovery an unlock ended, with
+	// CodeRecoveryCancelled (0.49.0, §11.5).
+	CancelledRecoveryID string
 }
 
 // CodeRecoveryAttempt marks the answer to a recovery_open that was counted
 // (0.33.0, §11.14.11); it never says whether the guess was right.
 const CodeRecoveryAttempt = "recovery_attempt"
+
+// CodeRecoveryCancelled marks the answer to an unlock whose sealed result
+// is {"ok": true, "recovery_cancelled": true}, with the clear
+// cancelled_recovery_id of the recovery it ended (0.49.0, §11.5,
+// §11.11.4).
+const CodeRecoveryCancelled = "recovery_cancelled"
+
+// CodeRecoveryNotCurrent marks the answer to a recovery_cancel that named
+// a recovery and cancelled nothing (another recovery, or none; 0.49.0,
+// §11.14.8). A cancel's answer has no envelope: it is the one code
+// without one.
+const CodeRecoveryNotCurrent = "recovery_not_current"
 
 func ts(t time.Time) string { return t.UTC().Format(time.RFC3339) }
 
@@ -400,6 +448,9 @@ func (m Marker) Encode() []byte {
 	if m.Reason != "" {
 		b.String("reason", m.Reason)
 	}
+	if m.CancelledRecoveryID != "" {
+		b.String("cancelled_recovery_id", m.CancelledRecoveryID)
+	}
 	return b.Bytes()
 }
 
@@ -409,6 +460,8 @@ var markerCodes = map[string]map[string]bool{
 	OpRecovery:         {CodeRecoveryUnavailable: true, "": true},
 	OpRecoveryRegister: {CodeRecoveryRegistered: true},
 	OpRecoveryOpen:     {CodeRecoveryAttempt: true},
+	OpUnlock:           {CodeRecoveryCancelled: true},  // 0.49.0
+	OpRecoveryCancel:   {CodeRecoveryNotCurrent: true}, // 0.49.0
 }
 
 var markerReasons = map[string]bool{"": true, "no_backup": true, "no_credential": true, "not_offered": true}
@@ -449,6 +502,13 @@ func DecodeMarker(op string, b []byte) (Marker, bool) {
 	} else if ok {
 		m.Reason = s
 	}
+	// 0.49.0: the cancelled recovery's id, a ULID, with recovery_cancelled
+	// only and always.
+	if s, ok, err := o.OptString("cancelled_recovery_id"); err != nil || ok != (m.Code == CodeRecoveryCancelled) || ok && !envelope.ValidULID(s) {
+		return Marker{}, false
+	} else if ok {
+		m.CancelledRecoveryID = s
+	}
 	return m, true
 }
 
@@ -475,6 +535,9 @@ func (r *Response) Marshal() []byte {
 	}
 	if r.Clear.Reason != "" {
 		b.String("reason", r.Clear.Reason)
+	}
+	if r.Clear.CancelledRecoveryID != "" {
+		b.String("cancelled_recovery_id", r.Clear.CancelledRecoveryID)
 	}
 	return b.Bytes()
 }
@@ -510,10 +573,31 @@ func ParseResponse(b []byte) (*Response, error) {
 			return nil, ErrMalformed
 		}
 	}
-	if c, ok, err := o.OptString("code"); err != nil || ok && (c != CodeRecoveryRegistered && c != CodeRecoveryUnavailable && c != CodeRecoveryAttempt || r.Envelope == nil) {
+	// A code comes with the envelope, except recovery_not_current (0.49.0,
+	// a named recovery_cancel's answer), which never has one.
+	if c, ok, err := o.OptString("code"); err != nil {
 		return nil, ErrMalformed
 	} else if ok {
+		switch c {
+		case CodeRecoveryRegistered, CodeRecoveryUnavailable, CodeRecoveryAttempt, CodeRecoveryCancelled:
+			if r.Envelope == nil {
+				return nil, ErrMalformed
+			}
+		case CodeRecoveryNotCurrent:
+			if r.Envelope != nil {
+				return nil, ErrMalformed
+			}
+		default:
+			return nil, ErrMalformed
+		}
 		r.Code = c
+	}
+	// 0.49.0: cancelled_recovery_id, a ULID, with recovery_cancelled only
+	// and always.
+	if v, ok, err := o.OptString("cancelled_recovery_id"); err != nil || ok != (r.Code == CodeRecoveryCancelled) || ok && !envelope.ValidULID(v) {
+		return nil, ErrMalformed
+	} else if ok {
+		r.Clear.CancelledRecoveryID = v
 	}
 	// Release R's clear members.
 	for _, f := range []struct {

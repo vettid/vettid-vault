@@ -1086,9 +1086,13 @@ func (p *vproc) notify(f *hostproto.Frame) {
 		if !ok {
 			return
 		}
+		cancelled, ok := enclave.ParseCancelledField(string(f.Fields[0]), f.Fields[14])
+		if !ok {
+			return
+		}
 		s.lifecycle(vault.LifecycleEvent{Event: string(f.Fields[0]), VaultID: p.vaultID, Release: string(f.Fields[2]),
 			VaultVersion: string(f.Fields[3]), StateVersion: sv, AppKey: append([]byte(nil), f.Fields[5]...), AppKeySeq: seq,
-			CredentialBackup: backup, Name: name, Next: next, HeaderSeq: hseq, NextCleared: cleared})
+			CredentialBackup: backup, Name: name, Next: next, HeaderSeq: hseq, NextCleared: cleared, CancelledRecoveryID: cancelled})
 	case vaultipc.KindTransferDone:
 		if len(f.Fields) == 1 && validTicket(f.Fields[0]) && s.xfers != nil {
 			s.xfers.release(p, string(f.Fields[0]))

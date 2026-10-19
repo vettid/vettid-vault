@@ -83,15 +83,43 @@ func TestStandInSigningStrings(t *testing.T) {
 	h := sha256.Sum256([]byte(s))
 	eq(t, "open signing string", h[:], "82ff1eb1b573f3976fce3f6a1095e03ddfc59e42ca18bbc5be1cd9e0a2c58240")
 	bk := append([]byte{4}, rep(0x61, 64)...)
-	r, err := RequestSigningString(OpRecovery, vid, "test-user-guid", "01JB2Z6V9K3M4N5P6Q7R8S9T32", "2026-10-15T12:00:00Z", bk)
+	r, err := RequestSigningString(OpRecovery, vid, "test-user-guid", "01JB2Z6V9K3M4N5P6Q7R8S9T32", "2026-10-15T12:00:00Z", bk, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	h = sha256.Sum256([]byte(r))
 	eq(t, "request signing string", h[:], "f2f13d600b7e4f438171e03451a91c0c1bd8d79a18342558a9f60b32297e89a1")
-	c, err := RequestSigningString(OpRecoveryCancel, vid, "u", "r", "2026-10-15T12:00:00Z", nil)
+	c, err := RequestSigningString(OpRecoveryCancel, vid, "u", "r", "2026-10-15T12:00:00Z", nil, "")
 	if err != nil || c[len(c)-1] != '\n' {
 		t.Errorf("cancel string must end with an empty last line: %q", c)
+	}
+	// VAULT-MESSAGING 0.49.0 §16: recovery_cancel in seven lines (no
+	// recovery_id, the last line empty) and in eight (recovery_id after
+	// the empty seventh).
+	c7, err := RequestSigningString(OpRecoveryCancel, vid, "test-user-guid", "01JB2Z6V9K3M4N5P6Q7R8S9T33", "2026-10-15T12:00:00Z", nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h = sha256.Sum256([]byte(c7))
+	eq(t, "seven-line cancel", h[:], "027c441758559d461017926a1bba3b56cb6fa320ead17987859236a1731ba2c1")
+	c8, err := RequestSigningString(OpRecoveryCancel, vid, "test-user-guid", "01JB2Z6V9K3M4N5P6Q7R8S9T33", "2026-10-15T12:00:00Z", nil, "01JB2Z6V9K3M4N5P6Q7R8S9T32")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := c7 + "\n01JB2Z6V9K3M4N5P6Q7R8S9T32"; c8 != want {
+		t.Fatalf("eight-line cancel %q, want %q", c8, want)
+	}
+	h = sha256.Sum256([]byte(c8))
+	eq(t, "eight-line cancel", h[:], "f62e0062d49f9459d738869c16bc04dbc7f65f5235099296384af9ce7a768ec5")
+	// A recovery never carries recovery_id, a cancel never a browser key.
+	if _, err := RequestSigningString(OpRecovery, vid, "u", "r", "2026-10-15T12:00:00Z", bk, "01JB2Z6V9K3M4N5P6Q7R8S9T32"); err == nil {
+		t.Error("a recovery with recovery_id")
+	}
+	if _, err := RequestSigningString(OpRecoveryCancel, vid, "u", "r", "2026-10-15T12:00:00Z", bk, ""); err == nil {
+		t.Error("a cancel with a browser key")
+	}
+	if _, err := RequestSigningString(OpRecoveryCancel, vid, "u", "r", "2026-10-15T12:00:00Z", nil, "a\nb"); err == nil {
+		t.Error("a recovery_id with a newline")
 	}
 }
 

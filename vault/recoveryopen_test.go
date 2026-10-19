@@ -404,3 +404,30 @@ func TestRecoveryOpenFailureKeepsTheOwnerCheckClock(t *testing.T) {
 		t.Fatalf("after the resume: %+v, want %v", rec, want)
 	}
 }
+
+// A completion whose step 2 (the state, with the clock) was stored and
+// whose step-3 header write failed: the repeat through the `next` wrap
+// proves only the PIN and the phone's secret (the password is not tested,
+// here a wrong one), so it leaves the clock as the stored completion set
+// it (§3.6.1: an unlock is not a check).
+func TestRecoveryOpenRepeatAfterStep2KeepsTheClock(t *testing.T) {
+	f := newOpenFixtureWith(t, heldBefore)
+	f.st.passHeader, f.st.failHeader = 1, 1 // step 1 written; step 3's header write fails
+	m, out := f.open(testPIN, rPW)
+	if m != nil || out.Code != OpenRetry || !out.Counted {
+		t.Fatalf("failed step 3: %+v", out)
+	}
+	first := f.clock.UTC().Truncate(time.Millisecond)
+	if h := f.storedHeader(); h.Next == nil || f.storedStateVersion() != h.Next.DEKVersion {
+		t.Fatal("not a completion stopped after step 2")
+	}
+	f.clock = f.clock.Add(time.Hour)
+	m, out = f.open(testPIN, "a wrong password here")
+	if m == nil || !out.OK || out.Counted {
+		t.Fatalf("repeat: %+v", out)
+	}
+	defer m.Crash()
+	if rec := m.st.OwnerCheck; !rec.LastAt.Equal(first) || !rec.Deadline.Equal(first.Add(DefaultOwnerCheckInterval)) || rec.Gate != "" {
+		t.Fatalf("after the repeat: %+v, want last_at %v", rec, first)
+	}
+}

@@ -1,10 +1,13 @@
 # The enclave kernel, built from source
 
 Status: **in use from staging release 13.** `release/eif-toolchain.lock`
-pins the blob set `vettid-6.6.158-1`, published as the vettid-vault
-release `kernel/6.6.158-1` (built by the `enclave-kernel` workflow from
-`a344277`; the source-built toolchain comparison and a hardware run
-passed). Releases before 13 used AWS's `aws-nitro-enclaves-sdk-bootstrap`
+pins the blob set `vettid-6.6.159-1`, published as the vettid-vault
+release `kernel/6.6.159-1` (built by the `enclave-kernel` workflow from
+`e489592`, the same toolchain as before); it rides the next vault release
+that includes it, with that release's hardware run. Staging releases 13
+to 18 used `vettid-6.6.158-1` (`kernel/6.6.158-1`, built from `a344277`;
+the source-built toolchain comparison and a hardware run passed).
+Releases before 13 used AWS's `aws-nitro-enclaves-sdk-bootstrap`
 `v6.6.79` set. This document describes how VettID builds its own blob set
 from kernel.org source with a hardened configuration, how two builders
 get the same bytes, how it enters the EIF, and how it is kept current.
@@ -280,15 +283,19 @@ recipe is the same: AWS cross-compiled it on x86_64, we build natively.
 
 ## 6. Into the EIF
 
-Done for `kernel/6.6.158-1` (staging release 13). The steps, for the next
-blob set:
+Done for `kernel/6.6.158-1` (staging release 13) and `kernel/6.6.159-1`.
+All of it happens in **one pull request**: `scripts/lint_test.go` requires
+`release/kernel/kernel.lock` and `release/kernel/SHA256SUMS` on `main` to
+be exactly what `release/eif-toolchain.lock` pins, so the recipe change
+cannot land ahead of the pin. The steps:
 
-1. **Publishing.** The `enclave-kernel` workflow on `main` builds the
-   set twice, compares, and checks it against `release/kernel/SHA256SUMS`.
-   Its `blobs-a` artifact, every hash checked again, becomes the
-   vettid-vault release `kernel/<version>-<n>` (tag on that commit; for
-   `kernel/6.6.158-1` made by hand, with the run linked in the notes; an
-   automated, attested publish job is still to do) with these assets:
+1. **Publishing.** The `enclave-kernel` workflow on the pull request
+   builds the set twice, compares, and checks it against the committed
+   `release/kernel/SHA256SUMS` (the recipe commit). Its `blobs-a` artifact,
+   every hash checked again, becomes the vettid-vault release
+   `kernel/<version>-<n>` (a tag on that recipe commit; made by hand, with
+   the run linked in the notes; an automated, attested publish job is
+   still to do) with these assets:
    - `vettid-enclave-blobs-<version>-<n>.txz` and its `SHA256SUMS`;
    - **the corresponding source** (GPL-2.0 section 3): the exact
      `linux-<version>.tar.xz` and `linux-<version>.tar.sign` from
@@ -298,12 +305,17 @@ blob set:
      linuxkit (Apache-2.0) is named by version and hash in the recipe.
    The owner approves publishing it. Each vault release also attaches
    its own copy of the archive (docs/RELEASING.md, "Copies of the blobs").
-2. **The lock.** `release/eif-toolchain.lock`: `blobs_version=vettid-<version>-<n>`,
+2. **The lock**, a further commit on the same pull request (it must not
+   touch `release/kernel/`, which `rebuild-check.sh` requires unchanged
+   since `kernel_commit`). `release/eif-toolchain.lock`: `blobs_version=vettid-<version>-<n>`,
    `blobs_url` = the vettid-vault asset, `blobs_dir=vettid-enclave-blobs/aarch64`,
    the archive's and the six files' SHA-256, and a new line
    `kernel_lock_sha256=` (the SHA-256 of `release/kernel/kernel.lock`
-   the set was built from), so the chain source → blob set → EIF is
-   explicit. `release/Dockerfile.eif-builder` does not change: it already
+   the set was built from), `kernel_commit` (the tagged recipe commit)
+   and `kernel_source_sha256`, so the chain source → blob set → EIF is
+   explicit. The pull request is merged with a **merge commit**, not
+   squashed, so that `kernel_commit` stays in `main`'s history.
+   `release/Dockerfile.eif-builder` does not change: it already
    downloads an archive, checks it and installs six files.
 3. **The enclave binary** knows the pinned kernel: `release/enclave-kernel`
    (`kernel_release=<version>`, `kernel_hardened=true`) is embedded by
@@ -357,7 +369,7 @@ same in three places: the lock, the rebuild and the published set's
 compiled from source) the NAR and closure checks only report, and the
 pass condition is the blob comparison alone.
 
-At the blob set's own tag (`kernel/6.6.158-1`, before the lock pinned it)
+At the blob set's own tag (`kernel/<version>-<n>`, before the lock pinned it)
 the same build is `release/kernel/build.sh out "$PWD/release/kernel/SHA256SUMS"`
 (an absolute path: `build.sh` there checks it from inside `out`).
 `release/rebuild.sh` then rebuilds the EIF from the pinned hashes. The
@@ -391,14 +403,18 @@ series is end of life.
 
 It does not open a pull request (the repository's Actions token may not be
 allowed to; and the bump needs a person anyway). **A new point release** is
-then: the three lock lines; push; the `enclave-kernel` workflow verifies
-the signature, checks the config and builds twice; check that the vsock
+then one pull request (§6): the three lock lines; push; the
+`enclave-kernel` workflow verifies the signature, checks the config and
+builds twice (its compare fails until `release/kernel/SHA256SUMS` holds
+the new hashes, which it prints; commit them); check that the vsock
 patch still applies and is still needed (`queued_replies` in
 `net/vmw_vsock/virtio_transport.c`); diff the system call table
 (`include/uapi/asm-generic/unistd.h`) against the vault's seccomp list
-(none is expected inside a stable series); tag and publish the blob set;
-run the source-built comparison if nixpkgs or the Nix image changed;
-change `eif-toolchain.lock`; it rides the next monthly release, with the
+(none is expected inside a stable series); with the owner's approval, tag
+that commit and publish the blob set; run the source-built comparison if
+nixpkgs or the Nix image changed; pin it in `eif-toolchain.lock` and
+`release/enclave-kernel` in a further commit (`ci` fails until then);
+merge with a merge commit; it rides the next monthly release, with the
 hardware run every release has.
 
 **Series:** 6.6 is maintained to December 2027 (kernel.org's projected

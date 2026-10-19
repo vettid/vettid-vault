@@ -56,13 +56,13 @@ debugging; they do not go into the EIF.
 
 ## 2. Source
 
-- **The kernel.org tarball** `linux-6.6.158.tar.xz`, not a git mirror:
+- **The kernel.org tarball** `linux-6.6.159.tar.xz`, not a git mirror:
   `kernel_url` and `kernel_sha256` in the lock. The SHA-256 is also in
   kernel.org's `sha256sums.asc`, signed by the kernel.org checksum
   autosigner (`B8868C80BA62A1FFFAF5FDA9632D3A06589DA6B1`), checked when the
   value was written.
 - **The developer's signature.** kernel.org signs the *uncompressed* tar
-  (`linux-6.6.158.tar.sign`; <https://www.kernel.org/signature.html>:
+  (`linux-6.6.159.tar.sign`; <https://www.kernel.org/signature.html>:
   "the signature is made against the uncompressed version of the
   archive"). `build.sh` runs `xz -dc | gpgv` against
   `keys/kernel-org-signers.asc` and requires the `VALIDSIG` primary
@@ -70,7 +70,7 @@ debugging; they do not go into the EIF.
   exactly the fingerprints the lock names.
 - **The signing keys** pinned: the two stable release signers, Greg
   Kroah-Hartman `647F28654894E3BD457199BE38DBBDC86092693E` (he signed
-  6.6.158) and Sasha Levin `E27E5D8A3403A2EF66873BBCDEA66FF797772CDC`.
+  6.6.158 and 6.6.159) and Sasha Levin `E27E5D8A3403A2EF66873BBCDEA66FF797772CDC`.
   Each key was taken from kernel.org's Web Key Directory
   (`gpg --locate-keys gregkh@kernel.org sashal@kernel.org`, the route
   kernel.org's page recommends) and from the kernel.org `pgpkeys.git`
@@ -84,8 +84,8 @@ debugging; they do not go into the EIF.
   - `patches/0001-vsock-virtio-Remove-queued_replies-pushback-logic.patch`:
     the parent/enclave virtio-vsock deadlock fix (Alexander Graf,
     2024-11-15). Not upstream: `queued_replies` is still in
-    `net/vmw_vsock/virtio_transport.c` in v6.6.158 and in mainline
-    (checked 2026-10-14). AWS's copy no longer applies to 6.6.158 (the rx
+    `net/vmw_vsock/virtio_transport.c` in v6.6.159 and in mainline
+    (checked 2026-10-19; 6.6.159 does not touch the file). AWS's copy no longer applies to 6.6.158 (the rx
     work's context changed: `out_nofill`), so this is the same removal
     rebased, plus dropping the label it leaves unused.
 

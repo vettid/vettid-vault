@@ -307,3 +307,100 @@ func TestRecoveryOpenUsesTheCounterLock(t *testing.T) {
 		t.Fatalf("staging period: token locked for %v, want %v", got, want)
 	}
 }
+
+// VAULT-MESSAGING §3.6.1 "What else starts the clock": the successful
+// recovery open (§11.14.6) starts the owner check's clock at the scaled
+// interval and ends a hold, written with the completion's state; a wrong
+// pair or a completion whose state write fails starts nothing, and the
+// repeat through the `next` wrap that completes starts it then.
+
+// heldBefore leaves the running vault held: its deadline passed a day ago.
+func heldBefore(f *openFixture) {
+	f.m.mu.Lock()
+	rec := f.m.ownerCheckRecord()
+	rec.LastAt, rec.Deadline, rec.Gate = f.clock.Add(-48*time.Hour), f.clock.Add(-24*time.Hour), OwnerCheckHeld
+	f.m.dirty = true
+	f.m.mu.Unlock()
+	f.flush()
+}
+
+// storedOwnerCheck is the owner check record of the stored state, read
+// with dek.
+func (f *openFixture) storedOwnerCheck(dek []byte) *OwnerCheck {
+	f.t.Helper()
+	b, _, err := f.st.Get(context.Background(), store.StateKey(f.vid))
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	pt, _, err := decryptState(dek, f.vid, b)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	var st State
+	if err := json.Unmarshal(pt, &st); err != nil {
+		f.t.Fatal(err)
+	}
+	return st.OwnerCheck
+}
+
+func TestRecoveryOpenStartsTheOwnerCheckClock(t *testing.T) {
+	var old time.Time
+	f := newOpenFixtureWith(t, func(f *openFixture) { heldBefore(f); old = f.m.st.OwnerCheck.Deadline })
+	f.opts.TimeScale = 24
+	m, out := f.open(testPIN, rPW)
+	if m == nil || !out.OK {
+		t.Fatalf("open: %+v", out)
+	}
+	at := f.clock.UTC().Truncate(time.Millisecond)
+	want := at.Add(DefaultOwnerCheckInterval / 24)
+	if rec := m.st.OwnerCheck; rec == nil || !rec.Deadline.Equal(want) || !rec.LastAt.Equal(at) || rec.Gate != "" || rec.Failures != 0 {
+		t.Fatalf("after the open: %+v, want deadline %v (old %v)", rec, want, old)
+	}
+	if err := m.Lock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// Stored: the recovered phone's unlock finds the new deadline, not held.
+	f.clock = f.clock.Add(time.Minute)
+	m2 := f.mustUnlock(testPIN, f.phoneUS)
+	defer m2.Crash()
+	if rec := m2.st.OwnerCheck; rec == nil || !rec.Deadline.Equal(want) || rec.Gate != "" {
+		t.Fatalf("stored: %+v, want deadline %v", rec, want)
+	}
+}
+
+func TestRecoveryOpenFailureKeepsTheOwnerCheckClock(t *testing.T) {
+	var old time.Time
+	var dek []byte
+	f := newOpenFixtureWith(t, func(f *openFixture) {
+		heldBefore(f)
+		old, dek = f.m.st.OwnerCheck.Deadline, bytes.Clone(f.m.dek)
+	})
+	// A wrong pair: nothing written to the state.
+	if m, out := f.open(testPIN, "wrong password one"); m != nil || out.Code != OpenWrong {
+		t.Fatalf("wrong: %+v", out)
+	}
+	if rec := f.storedOwnerCheck(dek); !rec.Deadline.Equal(old) || rec.Gate != OwnerCheckHeld {
+		t.Fatalf("after a wrong pair: %+v", rec)
+	}
+	// A right pair whose completion fails at its state write (step 2):
+	// the state, still under the old DEK, keeps the old deadline and the hold.
+	f.st.failState = 1
+	m, out := f.open(testPIN, rPW)
+	if m != nil || out.Code != OpenRetry || !out.Counted {
+		t.Fatalf("failed completion: %+v", out)
+	}
+	if rec := f.storedOwnerCheck(dek); !rec.Deadline.Equal(old) || rec.Gate != OwnerCheckHeld {
+		t.Fatalf("after a failed completion: %+v", rec)
+	}
+	// The repeat through the `next` wrap completes and starts the clock.
+	f.clock = f.clock.Add(time.Hour)
+	m, out = f.open(testPIN, rPW)
+	if m == nil || !out.OK || out.Counted {
+		t.Fatalf("resume: %+v", out)
+	}
+	defer m.Crash()
+	want := f.clock.UTC().Truncate(time.Millisecond).Add(DefaultOwnerCheckInterval)
+	if rec := m.st.OwnerCheck; !rec.Deadline.Equal(want) || rec.Gate != "" {
+		t.Fatalf("after the resume: %+v, want %v", rec, want)
+	}
+}

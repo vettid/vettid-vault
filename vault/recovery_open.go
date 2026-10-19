@@ -483,6 +483,15 @@ func (m *Manager) finishOpen(ctx context.Context, p RecoveryOpenParams, mv *Mani
 		m.hdr.ManifestSerial = mv.Serial
 	}
 	out.Token = m.unlockTokens(&UnlockKey{IK: p.DeviceIK}, p.DeviceToken, now)
+	// The successful recovery open proves the PIN and the password
+	// together and starts the owner check's clock like a check, ending a
+	// hold (§3.6.1 "What else starts the clock", §11.14.6), as
+	// credential.recover does before release R. It is written with the
+	// completion's state (step 2), so a run that does not store it starts
+	// nothing, and a repeat through the `next` wrap that completes starts
+	// it then. The recovered phone's later unlock after a lost ok does
+	// not restart it (an unlock is not a check, §3.6.1).
+	m.ownerCheckPassed(nil, false, "", now)
 	if err := m.persist(ctx, false); err != nil {
 		m.zeroize()
 		return nil, out.fail(OpenRetry)

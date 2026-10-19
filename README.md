@@ -177,6 +177,12 @@ API stand-in, and drives them with `vaultctl api-enroll`, `api-unlock`,
 make integration   # docker compose up LocalStack (1.5 GiB cap), run, tear down
 ```
 
+`make integration` and `cmd/devstack` need Linux: the dev enclave starts
+a vault process for every vault, and vault processes run only on Linux.
+Elsewhere (macOS) devstack refuses to start and the integration tests
+skip; run them in a Linux container or VM (only LocalStack runs in a
+container otherwise).
+
 ### Local dev stack for app development
 
 `cmd/devstack` runs the same stack as a long-lived service that a phone

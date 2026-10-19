@@ -65,6 +65,17 @@ func TestParseFlags(t *testing.T) {
 	}
 }
 
+func TestNeedLinux(t *testing.T) {
+	if err := needLinux("linux"); err != nil {
+		t.Fatal(err)
+	}
+	for _, goos := range []string{"darwin", "windows", "freebsd"} {
+		if err := needLinux(goos); err == nil || !strings.Contains(err.Error(), "need Linux") {
+			t.Errorf("%s: %v", goos, err)
+		}
+	}
+}
+
 func TestMemAvailable(t *testing.T) {
 	f := filepath.Join(t.TempDir(), "meminfo")
 	_ = os.WriteFile(f, []byte("MemTotal:       32000000 kB\nMemFree:  100 kB\nMemAvailable:   9437184 kB\n"), 0o600)

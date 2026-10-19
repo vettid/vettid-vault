@@ -33,6 +33,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -172,6 +173,12 @@ func newStack(t *testing.T) *stack {
 	ep := os.Getenv("VAULT_IT_LOCALSTACK")
 	if ep == "" {
 		t.Skip("VAULT_IT_LOCALSTACK not set (make integration)")
+	}
+	if runtime.GOOS != "linux" {
+		// The dev enclave's vault processes need Linux
+		// (enclave/supervisor/proc_other.go): every enrollment would be
+		// answered with random bytes.
+		t.Skip("the dev enclave's vault processes need Linux")
 	}
 	s := &stack{t: t, dir: t.TempDir(), ep: ep}
 	rb := make([]byte, 4)

@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -36,6 +37,9 @@ func TestDevStackLocalStack(t *testing.T) {
 	if ep == "" {
 		t.Skip("VAULT_IT_LOCALSTACK not set (make integration)")
 	}
+	if runtime.GOOS != "linux" {
+		t.Skip("devstack needs Linux (needLinux)")
+	}
 	dir := t.TempDir()
 	pol := filepath.Join(dir, "policy.json")
 	if err := os.WriteFile(pol, []byte(`{"google_attestation_roots":true,"android_packages":["com.vettid.app.dev","com.vettid.app.devstack"],`+
@@ -49,6 +53,17 @@ func TestDevStackLocalStack(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	// The logs are dumped on any failure, also one before the stack is
+	// ready (the run directory is under t.TempDir, removed afterwards).
+	logs := filepath.Join(o.dataDir, "run", "logs")
+	defer func() {
+		if t.Failed() {
+			for _, f := range []string{"parent.log", "enclave.log", "relay.log"} {
+				b, _ := os.ReadFile(filepath.Join(logs, f))
+				t.Logf("== %s\n%s", f, b)
+			}
+		}
+	}()
 	readyc := make(chan map[string]any, 1)
 	errc := make(chan error, 1)
 	go func() { errc <- run(ctx, o, func(m map[string]any) { readyc <- m }) }()
@@ -60,15 +75,9 @@ func TestDevStackLocalStack(t *testing.T) {
 	case <-time.After(8 * time.Minute):
 		t.Fatal("not ready")
 	}
-	logs := info["logs"].(string)
-	defer func() {
-		if t.Failed() {
-			for _, f := range []string{"parent.log", "enclave.log", "relay.log"} {
-				b, _ := os.ReadFile(filepath.Join(logs, f))
-				t.Logf("== %s\n%s", f, b)
-			}
-		}
-	}()
+	if l := info["logs"].(string); l != logs {
+		t.Fatalf("logs in %s, not %s", l, logs)
+	}
 	ctl, api := info["ctl"].(string), info["api"].(string)
 
 	get := func(url string, hdr ...string) (int, map[string]any) {

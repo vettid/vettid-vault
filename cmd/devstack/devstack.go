@@ -35,7 +35,8 @@
 // It stops on SIGINT or SIGTERM (to devstack itself; under `go run`, also
 // when the go command exits). Every key in the stack is TEST-ONLY
 // (fixed public seeds); nothing persists across restarts. The command
-// exists only in devenclave builds (release.go; `make check-tcb`).
+// exists only in devenclave builds (release.go; `make check-tcb`). It
+// runs only on Linux (needLinux).
 package main
 
 import (
@@ -144,9 +145,25 @@ func main() {
 	}
 }
 
+// needLinux refuses to start the stack anywhere but Linux: the dev
+// enclave starts a vault process for every vault, and vault processes
+// need Linux (enclave/supervisor/proc_other.go). Elsewhere the stack
+// would come up and then answer the first enrollment with random bytes,
+// which the app can only report as an unreadable result.
+func needLinux(goos string) error {
+	if goos != "linux" {
+		return fmt.Errorf("the dev enclave's vault processes need Linux, not %s (enclave/supervisor/proc_other.go); "+
+			"run devstack in a Linux container or VM", goos)
+	}
+	return nil
+}
+
 // run starts the stack, calls ready (if set) with its info once it is up,
 // and runs until ctx ends or a stack process exits.
 func run(ctx context.Context, o *options, ready func(map[string]any)) (err error) {
+	if err := needLinux(runtime.GOOS); err != nil {
+		return err
+	}
 	if err := memCheck(ctx, o.minFreeGB, o.memWait); err != nil {
 		return err
 	}

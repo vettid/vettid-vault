@@ -160,6 +160,11 @@ type LifecycleEvent struct {
 	Next        *bool
 	HeaderSeq   uint64
 	NextCleared bool
+	// CancelledRecoveryID (0.49.0, §11.5) is the recovery that the unlock
+	// behind the event ended: on that unlock's unlocked event, or on its
+	// moved event when it completed a release move (which emits no
+	// unlocked); empty on every other event.
+	CancelledRecoveryID string
 }
 
 // EventAppKeyNext reports the next app key of a replacement in progress

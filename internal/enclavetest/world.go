@@ -403,15 +403,31 @@ func (w *World) RecoveryCancel(ctx context.Context, in *enclave.Instance, vaultI
 	in.Process(ctx, q, nil)
 }
 
+// RecoveryCancelNamed plays a cancel that names its recovery (0.49.0,
+// §11.14.8: recovery_id, the eight-line signature; "" sends the
+// seven-line form) and returns the answer.
+func (w *World) RecoveryCancelNamed(ctx context.Context, in *enclave.Instance, vaultID, userGUID, recoveryID string) *enclave.Response {
+	rid, _ := envelope.NewULID(w.Now())
+	q := &enclave.QueueMessage{Op: enclave.OpRecoveryCancel, VaultID: vaultID, UserGUID: userGUID, RequestID: rid, EnqueuedAt: w.Now(),
+		RecoveryID: recoveryID}
+	w.signRecovery(q)
+	r, err := enclave.ParseResponse(in.ProcessRaw(ctx, q.Marshal(), nil))
+	if err != nil {
+		return nil
+	}
+	return r
+}
+
 // signRecovery signs a recovery or recovery_cancel as the member API does
-// (release R, §11.14.8), with the TEST-ONLY recovery request key.
+// (release R, §11.14.8), with the TEST-ONLY recovery request key; a
+// cancel's recovery_id (0.49.0) is signed as the eighth line.
 func (w *World) signRecovery(q *enclave.QueueMessage) {
 	q.SignedAt, q.KeyID = time.Now().UTC().Format(time.RFC3339), reckeytest.KeyID
 	var bk []byte
 	if q.Op == enclave.OpRecovery {
 		bk = q.BrowserKey
 	}
-	q.Sig, _ = base64.StdEncoding.DecodeString(reckeytest.Sign(q.Op, q.VaultID, q.UserGUID, q.RequestID, q.SignedAt, bk))
+	q.Sig, _ = base64.StdEncoding.DecodeString(reckeytest.SignNamed(q.Op, q.VaultID, q.UserGUID, q.RequestID, q.SignedAt, bk, q.RecoveryID))
 }
 
 // Snapshot is a well-formed account snapshot (§11.13, 0.18.0, 0.20.0) as

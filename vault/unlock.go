@@ -151,7 +151,12 @@ type AltUnlockOutcome struct {
 	Update     *UpdateOutcome
 	Events     []LifecycleEvent
 	// RecoveryCancelled: this unlock cancelled a recovery (§11.11.4).
+	// It is set as soon as the PIN matched; the cancel is stored only when
+	// OK is also set.
 	RecoveryCancelled bool
+	// CancelledRecoveryID is the id of the recovery it cancelled (0.49.0,
+	// §11.5), set with RecoveryCancelled.
+	CancelledRecoveryID string
 	// VaultBundle is set for the recovered app (§11.11.5).
 	VaultBundle []byte
 	// CredentialBackup is set with VaultBundle: the credential.backup
@@ -179,6 +184,22 @@ func (o *AltUnlockOutcome) err() error {
 	}
 	return ErrHeader
 }
+
+// cancelledID is the recovery this unlock cancelled, for a result that is
+// ok with recovery_cancelled (the cancel stored), and "" otherwise
+// (0.49.0, §11.5).
+func (o *AltUnlockOutcome) cancelledID() string {
+	if o.OK && o.RecoveryCancelled {
+		return o.CancelledRecoveryID
+	}
+	return ""
+}
+
+// CancelledMarker is the id for the answer's clear recovery_cancelled
+// marker (0.49.0, §11.5): set only for a result that is ok with
+// recovery_cancelled, which is when the write that ended the recovery is
+// stored.
+func (o *AltUnlockOutcome) CancelledMarker() string { return o.cancelledID() }
 
 func (o *AltUnlockOutcome) fail(code string, cause error) *AltUnlockOutcome {
 	o.OK, o.Code, o.cause = false, code, cause
@@ -379,6 +400,7 @@ func UnlockAlt(ctx context.Context, p AltUnlockParams) (*Manager, *AltUnlockOutc
 	m.hadFailures = hdr.Backoff.Failures > 0
 	hdr.Backoff = Backoff{} // a correct PIN resets the backoff (§11.8)
 	if p.CancelRecovery && key != nil && hdr.Recovery != nil && !hdr.isRecoveryKey(key.IK) {
+		out.CancelledRecoveryID = hdr.Recovery.ID
 		hdr.cancelRecovery(now, "recovery.cancelled")
 		out.RecoveryCancelled = true
 	}
@@ -533,7 +555,12 @@ func (m *Manager) completeMoveWith(ctx context.Context, p AltUnlockParams, entry
 	out.OK, out.Code = true, ""
 	out.HeaderSeq, out.StateSeq = nh.HeaderSeq, m.st.StateSeq
 	out.Update = &UpdateOutcome{To: entry.PCR0, Result: UpdateMoved}
-	out.Events = append(out.Events, lifecycle(p.Options, "moved", p.VaultID, entry.PCR0))
+	mv := lifecycle(p.Options, "moved", p.VaultID, entry.PCR0)
+	// 0.49.0 (§11.5): a completed move emits no unlocked; its moved event
+	// carries the recovery this unlock cancelled, now stored in the
+	// header sealed to the target release.
+	mv.CancelledRecoveryID = out.cancelledID()
+	out.Events = append(out.Events, mv)
 	return nil, out
 }
 
@@ -658,6 +685,10 @@ func (m *Manager) resume(ctx context.Context, p AltUnlockParams, out *AltUnlockO
 	out.StateSeq, out.HeaderSeq = m.st.StateSeq, m.hdr.HeaderSeq
 	ev := lifecycle(p.Options, "unlocked", p.VaultID, p.Release.PCR0)
 	ev.AppKey, ev.AppKeySeq = m.AppKey()
+	// 0.49.0 (§11.5): the recovery this unlock cancelled, stored by the
+	// flush above (an abandoned move's later moved event does not carry
+	// it).
+	ev.CancelledRecoveryID = out.cancelledID()
 	out.Events = append(out.Events, ev)
 	if n := m.pendingNameChange(); n != nil {
 		// §11.5 (0.19.0): a still-pending name request again with every

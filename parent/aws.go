@@ -564,6 +564,15 @@ func (a *AWS) Lifecycle(ctx context.Context, ev Lifecycle, instanceID string, no
 		vals[":cb"] = &ddbtypes.AttributeValueMemberBOOL{Value: *ev.CredentialBackup}
 		update = strings.Replace(update, "SET ", "SET #cb = :cb, ", 1)
 	}
+	if ev.CancelledRecoveryID != "" && (ev.Event == "unlocked" || ev.Event == "moved") {
+		// 0.49.0 (VAULT-HOST-PROTOCOL 0.1.13 §7.2, MEMBER-API 2.9.0): the
+		// recovery the unlock ended, in the same update as the event,
+		// overwritten by the next such unlock and never cleared here.
+		nm["#rc"] = "recovery_cancelled"
+		vals[":rc"] = &ddbtypes.AttributeValueMemberM{Value: map[string]ddbtypes.AttributeValue{
+			"recovery_id": s(ev.CancelledRecoveryID), "at": n(now.Unix())}}
+		update = strings.Replace(update, "SET ", "SET #rc = :rc, ", 1)
+	}
 	err := a.updateVault(ctx, ev.VaultID, update, cond, nm, vals)
 	held := errors.Is(err, ErrLeaseHeld)
 	if held {
@@ -801,6 +810,12 @@ func (a *AWS) WriteSlot(ctx context.Context, requestID string, sl Slot) error {
 	if sl.Earliest {
 		update += ", earliest = :ea"
 		vals[":ea"] = &ddbtypes.AttributeValueMemberBOOL{Value: true}
+	}
+	if sl.CancelledRecoveryID != "" {
+		// 0.49.0 (VAULT-HOST-PROTOCOL 0.1.13 §6.1): with the code
+		// recovery_cancelled on an unlock slot.
+		update += ", cancelled_recovery_id = :crid"
+		vals[":crid"] = s(sl.CancelledRecoveryID)
 	}
 	cond := "attribute_exists(request_id) AND #s = :q"
 	_, err := a.ddb.UpdateItem(ctx, &dynamodb.UpdateItemInput{TableName: &a.cfg.RequestsTable,

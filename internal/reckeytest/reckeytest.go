@@ -36,7 +36,13 @@ func Pinned() []releasecfg.RequestKey {
 // Sign signs a recovery or recovery_cancel queue message's members and
 // returns sig (base64 DER).
 func Sign(op, vaultID, userGUID, requestID, signedAt string, browserKey []byte) string {
-	s, err := recovery.RequestSigningString(op, vaultID, userGUID, requestID, signedAt, browserKey)
+	return SignNamed(op, vaultID, userGUID, requestID, signedAt, browserKey, "")
+}
+
+// SignNamed is Sign with a cancel's recovery_id (0.49.0, the eight-line
+// string; "" for the seven-line one).
+func SignNamed(op, vaultID, userGUID, requestID, signedAt string, browserKey []byte, recoveryID string) string {
+	s, err := recovery.RequestSigningString(op, vaultID, userGUID, requestID, signedAt, browserKey, recoveryID)
 	if err != nil {
 		return ""
 	}

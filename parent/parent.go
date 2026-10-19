@@ -554,7 +554,7 @@ func parseLifecycle(f *hostproto.Frame) (Lifecycle, bool) {
 	// 0.15.0: [event, vault_id, release, vault_version, state_version,
 	// app_key (SPKI DER or empty), app_key_seq]; an enclave before it
 	// sends the first five.
-	if len(f.Fields) != 5 && len(f.Fields) != 7 && len(f.Fields) != 8 && len(f.Fields) != 11 && len(f.Fields) != 14 {
+	if len(f.Fields) != 5 && len(f.Fields) != 7 && len(f.Fields) != 8 && len(f.Fields) != 11 && len(f.Fields) != 14 && len(f.Fields) != 15 {
 		return Lifecycle{}, false
 	}
 	if len(f.Fields) >= 8 {
@@ -581,7 +581,7 @@ func parseLifecycle(f *hostproto.Frame) (Lifecycle, bool) {
 		b := string(f.Fields[7]) == "1"
 		ev.CredentialBackup = &b
 	}
-	if len(f.Fields) == 14 {
+	if len(f.Fields) >= 14 {
 		// Release R: next ("1", "0", ""), header_seq, next_cleared ("1", "").
 		switch string(f.Fields[11]) {
 		case "1", "0":
@@ -603,6 +603,15 @@ func parseLifecycle(f *hostproto.Frame) (Lifecycle, bool) {
 		default:
 			return Lifecycle{}, false
 		}
+	}
+	if len(f.Fields) == 15 && len(f.Fields[14]) > 0 {
+		// 0.49.0 (VAULT-HOST-PROTOCOL 0.1.13 §7.2): cancelled_recovery_id,
+		// a ULID, on unlocked or moved only.
+		id := string(f.Fields[14])
+		if !ulidRE.MatchString(id) || ev.Event != "unlocked" && ev.Event != "moved" {
+			return Lifecycle{}, false
+		}
+		ev.CancelledRecoveryID = id
 	}
 	if len(f.Fields) >= 11 {
 		// 0.18.0: name_seq, first_name, last_name ("0", "", "" except for

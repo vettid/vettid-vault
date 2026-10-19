@@ -29,7 +29,10 @@
 // Vault → supervisor (notifications): Lifecycle [event, vault_id,
 // release, vault_version, state_version, app_key (SPKI DER or empty),
 // app_key_seq, credential_backup ("1", "0" or "" when not reported),
-// name_seq, first_name, last_name ("0", "", "" except for account_name)], Log
+// name_seq, first_name, last_name ("0", "", "" except for account_name),
+// next, header_seq, next_cleared, cancelled_recovery_id (a ULID on the
+// unlocked or moved event of an unlock that cancelled a recovery, else
+// "")], Log
 // [level, message, k, v ...], TransferDone [ticket] (a transfer the
 // supervisor admitted, or asked for, ended).
 //
@@ -64,7 +67,10 @@ import (
 // 9: Counter and HeavyPermit; Lifecycle carries next, header_seq and
 // next_cleared; Open's last field is the clear marker as JSON (0.33.0,
 // release R).
-const Version = "9"
+// 10: Lifecycle carries cancelled_recovery_id; the clear marker may be an
+// unlock's recovery_cancelled with cancelled_recovery_id or a cancel's
+// recovery_not_current (VAULT-MESSAGING 0.49.0).
+const Version = "10"
 
 // Supervisor → vault.
 const (

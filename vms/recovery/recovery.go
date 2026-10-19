@@ -420,22 +420,33 @@ const (
 )
 
 // RequestSigningString is what the member API's recovery request key
-// signs (§11.14.8). browserKey is nil for a cancel, whose last line is
-// empty.
-func RequestSigningString(op, vaultID, userGUID, requestID, signedAt string, browserKey []byte) (string, error) {
+// signs (§11.14.8). browserKey is nil for a cancel, whose seventh line is
+// empty. recoveryID (0.49.0) is a cancel's optional recovery_id: when it
+// is not empty the string has an eighth line, that id; it must be empty
+// for a recovery.
+func RequestSigningString(op, vaultID, userGUID, requestID, signedAt string, browserKey []byte, recoveryID string) (string, error) {
 	for _, s := range []string{op, vaultID, userGUID, requestID, signedAt} {
 		if s == "" || strings.ContainsAny(s, "\r\n") {
 			return "", ErrSize
 		}
 	}
+	if strings.ContainsAny(recoveryID, "\r\n") {
+		return "", ErrSize
+	}
 	last := ""
 	switch op {
 	case OpRecovery:
-		if len(browserKey) == 0 {
+		if len(browserKey) == 0 || recoveryID != "" {
 			return "", ErrSize
 		}
 		last = hexSHA(browserKey)
 	case OpRecoveryCancel:
+		if len(browserKey) != 0 {
+			return "", ErrSize
+		}
+		if recoveryID != "" {
+			return strings.Join([]string{LabelRecoveryReq, op, vaultID, userGUID, requestID, signedAt, "", recoveryID}, "\n"), nil
+		}
 	default:
 		return "", ErrSize
 	}

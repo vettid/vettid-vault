@@ -85,18 +85,20 @@ func (c *Core) release() vault.Release {
 // random bytes of its size) and the unlocked manager, if the vault is now
 // open. The caller runs the manager. marker reports the clear marker of
 // the answer: a recovery register whose sealed result is {"ok": true}
-// (recovery_registered, §11.11.3, 0.10.6), or a recovery request the
-// vault refused (recovery_unavailable, §11.11.2, 0.16.0).
+// (recovery_registered, §11.11.3, 0.10.6), a recovery request the vault
+// refused (recovery_unavailable, §11.11.2, 0.16.0), an unlock that
+// cancelled a recovery (recovery_cancelled with its id, 0.49.0), or a
+// named cancel that cancelled nothing (recovery_not_current, 0.49.0).
 func (c *Core) Open(ctx context.Context, j *Job) (res []byte, m *vault.Manager, marker Marker) {
 	switch j.Op {
 	case OpEnroll:
 		res = c.enroll(ctx, j, &m)
 	case OpUnlock:
-		res = c.unlock(ctx, j, &m)
+		res, marker = c.unlock(ctx, j, &m)
 	case OpRecovery:
 		res, marker = c.recoveryRequest(ctx, j)
 	case OpRecoveryCancel:
-		c.recoveryCancel(ctx, j)
+		marker = c.recoveryCancel(ctx, j)
 	case OpRecoveryRegister:
 		res, marker = c.recoveryRegister(ctx, j)
 	case OpRecoveryOpen:
@@ -386,24 +388,29 @@ func (c *Core) indexUser(ctx context.Context, guid, vaultID string) {
 	}
 }
 
-func (c *Core) unlock(ctx context.Context, q *Job, started **vault.Manager) []byte {
+// unlock runs an unlock job. The marker is recovery_cancelled with the
+// cancelled recovery's id only for a result that is ok with
+// recovery_cancelled (0.49.0, §11.5): the vault sets RecoveryCancelled
+// once the PIN matched, before the writes that store the cancel, so a
+// failed unlock that set it carries no marker.
+func (c *Core) unlock(ctx context.Context, q *Job, started **vault.Manager) ([]byte, Marker) {
 	inner := q.Inner
 	now := c.now()
 	o, err := strictjson.ParseObject(inner.Body)
 	if err != nil {
-		return opaque()
+		return opaque(), Marker{}
 	}
 	r, err := altchan.ParseUnlockRequest(o)
 	if err != nil {
-		return opaque()
+		return opaque(), Marker{}
 	}
 	if r.UserGUID != q.UserGUID || r.VaultID != q.VaultID || r.RequestID != q.RequestID {
-		return opaque() // redirected (§11.6)
+		return opaque(), Marker{} // redirected (§11.6)
 	}
 	ts := envelope.FormatTS(inner.TS)
 	ch, err := altchan.DevattChallenge(q.RequestID, q.VaultID, ts)
 	if err != nil {
-		return opaque()
+		return opaque(), Marker{}
 	}
 	toPCR0 := ""
 	if r.Update != nil {
@@ -414,7 +421,7 @@ func (c *Core) unlock(ctx context.Context, q *Job, started **vault.Manager) []by
 		PIN: r.PIN, Token: r.Token, ManifestSHA256: r.ManifestSHA256, ToPCR0: toPCR0, CancelRecovery: r.CancelRecovery,
 		UnlockSecret: r.UnlockSecret})
 	if err != nil {
-		return opaque()
+		return opaque(), Marker{}
 	}
 	pol := c.cfg.DeviceAttest
 	list := c.statusList()
@@ -515,7 +522,7 @@ func (c *Core) unlock(ctx context.Context, q *Job, started **vault.Manager) []by
 	}
 	if out.Drop {
 		sealer.Destroy()
-		return opaque()
+		return opaque(), Marker{}
 	}
 	kem, err := suite.ParsePublicKey(out.DeviceKEM)
 	if err != nil {
@@ -523,7 +530,7 @@ func (c *Core) unlock(ctx context.Context, q *Job, started **vault.Manager) []by
 		if mgr != nil {
 			_ = mgr.Lock(ctx)
 		}
-		return opaque()
+		return opaque(), Marker{}
 	}
 	res := &altchan.UnlockResult{OK: out.OK, Code: out.Code, StateSeq: out.StateSeq, HeaderSeq: out.HeaderSeq,
 		RetryAfter: uint64((out.RetryAfter + time.Second - 1) / time.Second), Token: out.Token,
@@ -539,7 +546,11 @@ func (c *Core) unlock(ctx context.Context, q *Job, started **vault.Manager) []by
 	}
 	env, err := altchan.SealResult(kem, altchan.TypeUnlockResult, q.RequestID, res.Marshal(), now)
 	if err != nil {
-		return opaque()
+		return opaque(), Marker{}
 	}
-	return env
+	var mk Marker
+	if id := out.CancelledMarker(); id != "" {
+		mk = Marker{Code: CodeRecoveryCancelled, CancelledRecoveryID: id}
+	}
+	return env, mk
 }

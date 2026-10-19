@@ -140,3 +140,33 @@ func TestParseLifecycleName(t *testing.T) {
 		}
 	}
 }
+
+// VAULT-HOST-PROTOCOL 0.1.13 §7.2: the fifteenth field,
+// cancelled_recovery_id, a ULID on unlocked or moved only; fourteen
+// fields (an enclave before 0.49.0) still parse.
+func TestParseLifecycleCancelledRecoveryID(t *testing.T) {
+	pcr := strings.Repeat("a", 96)
+	const rid = "01JB2Z6V9K3M4N5P6Q7R8S9T32"
+	frame := func(ev, id string) *hostproto.Frame {
+		return &hostproto.Frame{Fields: hostproto.Strings(ev, "v1", pcr, pcr, "1", "", "0", "", "0", "", "", "", "0", "", id)}
+	}
+	for _, e := range []string{"unlocked", "moved"} {
+		if ev, ok := parseLifecycle(frame(e, rid)); !ok || ev.CancelledRecoveryID != rid {
+			t.Fatalf("%s: %+v %v", e, ev, ok)
+		}
+	}
+	if ev, ok := parseLifecycle(frame("locked", "")); !ok || ev.CancelledRecoveryID != "" {
+		t.Fatalf("empty: %+v %v", ev, ok)
+	}
+	f14 := frame("unlocked", "")
+	f14.Fields = f14.Fields[:14]
+	if _, ok := parseLifecycle(f14); !ok {
+		t.Fatal("fourteen fields refused")
+	}
+	for _, f := range []*hostproto.Frame{frame("locked", rid), frame("enrolled", rid), frame("deleted", rid), frame("unlocked", "not-a-ulid"),
+		frame("unlocked", strings.ToLower(rid))} {
+		if _, ok := parseLifecycle(f); ok {
+			t.Errorf("accepted %q", f.Fields)
+		}
+	}
+}

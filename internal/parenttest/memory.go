@@ -297,6 +297,10 @@ type VaultRow struct {
 	NameChange        *parent.NameChange
 	NameChangeAt      int64
 	NameChangePending bool
+	// RecoveryCancelled is recovery_cancelled = {recovery_id, at} as the
+	// host wrote it from an unlocked or moved event (0.49.0).
+	RecoveryCancelledID string
+	RecoveryCancelledAt int64
 }
 
 // SlotRow is a response slot.
@@ -306,6 +310,8 @@ type SlotRow struct {
 	// Release R's clear members.
 	NotBefore, Expires, RetryAt, Reason string
 	Earliest                            bool
+	// CancelledRecoveryID is an unlock slot's cancelled_recovery_id (0.49.0).
+	CancelledRecoveryID string
 }
 
 // Tables is in-memory DynamoDB with the parent's conditions.
@@ -558,6 +564,10 @@ func (t *Tables) Lifecycle(_ context.Context, ev parent.Lifecycle, me string, no
 			r.LeaseInstance, r.LeaseExpires = "", 0
 		}
 	}
+	if ev.CancelledRecoveryID != "" && (ev.Event == "unlocked" || ev.Event == "moved") {
+		// 0.49.0: in the same update as the event, as parent.AWS.
+		r.RecoveryCancelledID, r.RecoveryCancelledAt = ev.CancelledRecoveryID, now.Unix()
+	}
 	if ev.Event == "deleted" {
 		r.SweepPending = true
 		t.ids++
@@ -613,6 +623,7 @@ func (t *Tables) WriteSlot(_ context.Context, requestID string, s parent.Slot) e
 	r.Status, r.Code = s.Status, s.Code
 	r.Envelope = append([]byte(nil), s.Envelope...)
 	r.NotBefore, r.Expires, r.RetryAt, r.Reason, r.Earliest = s.NotBefore, s.Expires, s.RetryAt, s.Reason, s.Earliest
+	r.CancelledRecoveryID = s.CancelledRecoveryID
 	return nil
 }
 

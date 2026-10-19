@@ -41,7 +41,10 @@ func (in *Instance) verifyRecoverySig(q *QueueMessage) bool {
 	if q.Op == OpRecovery {
 		bk = q.BrowserKey
 	}
-	s, err := recovery.RequestSigningString(q.Op, q.VaultID, q.UserGUID, q.RequestID, q.SignedAt, bk)
+	// 0.49.0: a cancel that names its recovery is signed in eight lines,
+	// one without the name in seven; a host that adds, removes or
+	// changes recovery_id breaks the signature.
+	s, err := recovery.RequestSigningString(q.Op, q.VaultID, q.UserGUID, q.RequestID, q.SignedAt, bk, q.RecoveryID)
 	if err != nil {
 		return false
 	}

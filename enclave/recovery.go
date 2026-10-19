@@ -86,11 +86,43 @@ func RefuseRecovery(browserKey []byte, vaultID, recoveryID, reason string) ([]by
 }
 
 // recoveryCancel ends whatever recovery is in progress (the API keeps at
-// most one per vault).
-func (c *Core) recoveryCancel(ctx context.Context, j *Job) {
+// most one per vault), or (0.49.0, §11.14.8) only the recovery the cancel
+// names in its job body ({"recovery_id"}, covered by the member API's
+// signature): a named cancel that finds another recovery or none answers
+// the clear recovery_not_current. A cancel without the name keeps the
+// earlier rule and never carries a code.
+func (c *Core) recoveryCancel(ctx context.Context, j *Job) Marker {
+	rid, ok := cancelRecoveryID(j.Inner.Body)
+	if !ok {
+		return Marker{}
+	}
 	p, sealer := c.headerParams(j, c.recoveryNow)
 	defer sealer.Destroy()
-	_ = vault.RecoveryCancel(ctx, p, "")
+	err := vault.RecoveryCancel(ctx, p, rid)
+	if rid != "" && errors.Is(err, vault.ErrRecoveryNone) {
+		return Marker{Code: CodeRecoveryNotCurrent}
+	}
+	return Marker{}
+}
+
+// cancelRecoveryID reads a cancel's job body: {} or {"recovery_id":
+// ULID}. ok is false for anything else (nothing is cancelled).
+func cancelRecoveryID(body []byte) (string, bool) {
+	o, err := strictjson.ParseObject(body)
+	if err != nil {
+		return "", false
+	}
+	switch len(o) {
+	case 0:
+		return "", true
+	case 1:
+		id, err := o.String("recovery_id")
+		if err != nil || !envelope.ValidULID(id) {
+			return "", false
+		}
+		return id, true
+	}
+	return "", false
 }
 
 // recoveryRegister checks the code and the new app's device attestation

@@ -98,11 +98,17 @@ func genRecoveryR() (obj, error) {
 		return nil, err
 	}
 	bk := append([]byte{4}, rep(0x61, 64)...)
-	req, err := recovery.RequestSigningString(recovery.OpRecovery, rVaultID, "test-user-guid", "01JB2Z6V9K3M4N5P6Q7R8S9T32", "2026-10-15T12:00:00Z", bk)
+	req, err := recovery.RequestSigningString(recovery.OpRecovery, rVaultID, "test-user-guid", "01JB2Z6V9K3M4N5P6Q7R8S9T32", "2026-10-15T12:00:00Z", bk, "")
 	if err != nil {
 		return nil, err
 	}
-	cancel, err := recovery.RequestSigningString(recovery.OpRecoveryCancel, rVaultID, "test-user-guid", "01JB2Z6V9K3M4N5P6Q7R8S9T33", "2026-10-15T12:00:00Z", nil)
+	cancel, err := recovery.RequestSigningString(recovery.OpRecoveryCancel, rVaultID, "test-user-guid", "01JB2Z6V9K3M4N5P6Q7R8S9T33", "2026-10-15T12:00:00Z", nil, "")
+	if err != nil {
+		return nil, err
+	}
+	// 0.49.0: a cancel that names its recovery (the eighth line).
+	cancelNamed, err := recovery.RequestSigningString(recovery.OpRecoveryCancel, rVaultID, "test-user-guid", "01JB2Z6V9K3M4N5P6Q7R8S9T33", "2026-10-15T12:00:00Z", nil,
+		"01JB2Z6V9K3M4N5P6Q7R8S9T32")
 	if err != nil {
 		return nil, err
 	}
@@ -131,6 +137,7 @@ func genRecoveryR() (obj, error) {
 		{"open_signing_string", open},
 		{"request_signing_string", req},
 		{"cancel_signing_string", cancel},
+		{"cancel_named_signing_string", cancelNamed},
 		{"counter", obj{
 			{"counter_key_hex", hx(rep(0x51, 32))},
 			{"generation", 1},

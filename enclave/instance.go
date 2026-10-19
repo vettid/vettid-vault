@@ -223,6 +223,11 @@ func (in *Instance) Process(ctx context.Context, q *QueueMessage, manifestDoc []
 		if q.Op == OpRecovery {
 			body = strictjson.NewBuilder().Base64("browser_key", q.BrowserKey).Bytes()
 		}
+		if q.Op == OpRecoveryCancel && q.RecoveryID != "" {
+			// 0.49.0 (§11.14.8): the signed recovery_id, to the vault
+			// process's vault.RecoveryCancel.
+			body = strictjson.NewBuilder().String("recovery_id", q.RecoveryID).Bytes()
+		}
 		j := &Job{Op: q.Op, VaultID: q.VaultID, UserGUID: q.UserGUID, RequestID: q.RequestID,
 			Inner: &envelope.Inner{Type: requestType[q.Op], ID: q.RequestID, TS: in.now(), Body: body}}
 		res, mk, err := in.host.Open(ctx, j)
@@ -236,6 +241,11 @@ func (in *Instance) Process(ctx context.Context, q *QueueMessage, manifestDoc []
 			} else {
 				resp.Clear = Marker{NotBefore: mk.NotBefore, Expires: mk.Expires, Earliest: mk.Earliest} // §11.14.5
 			}
+		}
+		if q.Op == OpRecoveryCancel && err == nil && mk.Code == CodeRecoveryNotCurrent && q.RecoveryID != "" {
+			// 0.49.0 (§11.14.8): a named cancel that cancelled nothing;
+			// the answer has no envelope, as for every cancel.
+			resp.Code, resp.Clear.Code = CodeRecoveryNotCurrent, CodeRecoveryNotCurrent
 		}
 	case OpEnroll, OpUnlock, OpRecoveryRegister, OpRecoveryOpen:
 		inner, padded, err := in.openRequest(q)
@@ -274,6 +284,11 @@ func (in *Instance) Process(ctx context.Context, q *QueueMessage, manifestDoc []
 			// expires when a wait began; never whether it was right.
 			resp.Code = CodeRecoveryAttempt
 			resp.Clear = Marker{RetryAt: mk.RetryAt, Expires: mk.Expires}
+		case mk.Code == CodeRecoveryCancelled && q.Op == OpUnlock && envelope.ValidULID(mk.CancelledRecoveryID):
+			// 0.49.0 (§11.5): the unlock's stored cancel, with the id of
+			// the recovery it ended.
+			resp.Code = CodeRecoveryCancelled
+			resp.Clear = Marker{Code: CodeRecoveryCancelled, CancelledRecoveryID: mk.CancelledRecoveryID}
 		}
 	}
 	return resp

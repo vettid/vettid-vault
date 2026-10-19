@@ -68,6 +68,8 @@ type enclaveResponse struct {
 	RetryAt   string `json:"retry_at"`
 	Reason    string `json:"reason"`
 	Earliest  bool   `json:"earliest"`
+	// CancelledRecoveryID comes with recovery_cancelled (0.49.0).
+	CancelledRecoveryID string `json:"cancelled_recovery_id"`
 }
 
 // codeRecoveryAttempt is copied from a counted recovery open's answer
@@ -90,6 +92,16 @@ const codeRecoveryRegistered = "recovery_registered"
 // answer into its slot (0.16.0, §11.5, §11.11.2): the member API ends the
 // recovery at once.
 const codeRecoveryUnavailable = "recovery_unavailable"
+
+// codeRecoveryCancelled is copied, with cancelled_recovery_id, from an
+// unlock's answer into its slot (0.49.0, VAULT-HOST-PROTOCOL 0.1.13 §6.1):
+// the member API ends that recovery and emails the member.
+const codeRecoveryCancelled = "recovery_cancelled"
+
+// codeRecoveryNotCurrent is copied from a named recovery_cancel's answer,
+// which has no envelope, into its slot (0.49.0): the cancel found another
+// recovery or none.
+const codeRecoveryNotCurrent = "recovery_not_current"
 
 // maxConcurrent bounds queue messages in flight to the enclave.
 const maxConcurrent = 8
@@ -243,8 +255,16 @@ func (p *Parent) handleMessage(ctx context.Context, m QueueMessage) {
 							slot.NotBefore, slot.Expires, slot.Earliest = clearTime(er.NotBefore), clearTime(er.Expires), er.Earliest
 						case r.Op == "recovery_open" && slot.Code == codeRecoveryAttempt:
 							slot.RetryAt, slot.Expires = clearTime(er.RetryAt), clearTime(er.Expires)
+						case r.Op == "unlock" && er.Code == codeRecoveryCancelled && ulidRE.MatchString(er.CancelledRecoveryID):
+							// 0.49.0: the code and the id together; a
+							// malformed id drops both.
+							slot.Code, slot.CancelledRecoveryID = er.Code, er.CancelledRecoveryID
 						}
 					}
+				} else if r.Op == "recovery_cancel" && er.Code == codeRecoveryNotCurrent {
+					// 0.49.0: the one code copied from an answer without an
+					// envelope, for a cancel only.
+					slot.Code = er.Code
 				}
 			case "etk_unknown":
 				slot = Slot{Status: "done", Code: "etk_unknown"}

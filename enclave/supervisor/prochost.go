@@ -276,6 +276,7 @@ func (h *procHost) spawn(vaultID, userGUID string, enroll bool, extra ...string)
 	}
 	fds, err := socketpair()
 	if err != nil {
+		h.spawnFailed(vaultID, "socketpair", err)
 		h.freeSlot(slot)
 		return nil, errSpawn
 	}
@@ -291,6 +292,7 @@ func (h *procHost) spawn(vaultID, userGUID string, enroll bool, extra ...string)
 	// forked it ends, not the process, and the sweep ends threads.
 	onSpawnerThread(func() { err = cmd.Start() })
 	if err != nil {
+		h.spawnFailed(vaultID, "start", err)
 		childEnd.Close()
 		parentEnd.Close()
 		h.freeSlot(slot)
@@ -331,6 +333,15 @@ func (h *procHost) spawn(vaultID, userGUID string, enroll bool, extra ...string)
 		h.exited(p)
 	}()
 	return p, nil
+}
+
+// spawnFailed logs why a vault process could not be started. The request
+// is still answered as any failure is (random bytes, §11.4); only the log
+// says why.
+func (h *procHost) spawnFailed(vaultID, step string, err error) {
+	if h.s.log != nil { // nil only in tests that build a bare Supervisor
+		h.s.log.Warn("vault process failed to start", "vault_id", vaultID, "step", step, "error", err.Error())
+	}
 }
 
 func exitCode(err error) int {

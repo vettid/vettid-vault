@@ -59,11 +59,19 @@ type faultStore struct {
 	failHeader, loseHeader int
 	// failState fails the next n state writes before storing.
 	failState int
+	// passHeader lets the next n header writes through before failHeader
+	// and loseHeader apply.
+	passHeader int
 }
 
 func (f *faultStore) Put(ctx context.Context, key string, data []byte, ifMatch store.Version) (store.Version, error) {
 	f.mu.Lock()
 	hdr := strings.Contains(key, "/header/")
+	if hdr && f.passHeader > 0 {
+		f.passHeader--
+		f.mu.Unlock()
+		return f.Store.Put(ctx, key, data, ifMatch)
+	}
 	fail, lose := hdr && f.failHeader > 0, hdr && f.loseHeader > 0
 	if !hdr && strings.HasSuffix(key, "/state") && f.failState > 0 {
 		f.failState--

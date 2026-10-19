@@ -467,12 +467,15 @@ func (m *Manager) completeRecoveryR(ctx context.Context, p RecoveryOpenParams, r
 	if err := m.beginReplace(ctx, rep); err != nil {
 		return fail(OpenRetry)
 	}
-	return m.finishOpen(ctx, p, mv, out, now)
+	return m.finishOpen(ctx, p, mv, out, true, now)
 }
 
 // finishOpen registers the relay, mints the phone's token, flushes (steps
-// 2 and 3), records the presence and answers ok.
-func (m *Manager) finishOpen(ctx context.Context, p RecoveryOpenParams, mv *ManifestView, out *RecoveryOpenOutcome, now time.Time) (*Manager, *RecoveryOpenOutcome) {
+// 2 and 3), records the presence and answers ok. passwordProved: this run
+// opened the credential's backup copy with the password, so it starts the
+// owner check's clock.
+func (m *Manager) finishOpen(ctx context.Context, p RecoveryOpenParams, mv *ManifestView, out *RecoveryOpenOutcome, passwordProved bool,
+	now time.Time) (*Manager, *RecoveryOpenOutcome) {
 	var err error
 	m.relay = p.Relay(m.st.Relay.URL, m.keys.relay)
 	if m.limits, err = m.relay.Register(ctx); err != nil {
@@ -483,6 +486,20 @@ func (m *Manager) finishOpen(ctx context.Context, p RecoveryOpenParams, mv *Mani
 		m.hdr.ManifestSerial = mv.Serial
 	}
 	out.Token = m.unlockTokens(&UnlockKey{IK: p.DeviceIK}, p.DeviceToken, now)
+	// The successful recovery open proves the PIN and the password
+	// together and starts the owner check's clock like a check, ending a
+	// hold (§3.6.1 "What else starts the clock", §11.14.6), as
+	// credential.recover does before release R. It is written with the
+	// completion's state (step 2), so a run that does not store it starts
+	// nothing, and a repeat through the `next` wrap whose step 2 was not
+	// stored (it opens the backup copy with the password) starts it then.
+	// A repeat after step 2 was stored proves only the PIN and the phone's
+	// secret: the clock stays as the stored completion set it. Nor does
+	// the recovered phone's later unlock after a lost ok restart it (an
+	// unlock is not a check, §3.6.1).
+	if passwordProved {
+		m.ownerCheckPassed(nil, false, "", now)
+	}
 	if err := m.persist(ctx, false); err != nil {
 		m.zeroize()
 		return nil, out.fail(OpenRetry)
@@ -602,7 +619,9 @@ func resumeRecovery(ctx context.Context, p RecoveryOpenParams, hdr *Header, hver
 	}
 	suite.Wipe(d0)
 	m.record(Activity{Kind: "recovery.completed", Ref: recID + "/resumed", Audit: true}, now)
-	return m.finishOpen(ctx, p, mv, out, now)
+	// Only the branch whose step 2 was not stored opened the backup copy
+	// with the password.
+	return m.finishOpen(ctx, p, mv, out, stateVer == hdr.DEKVersion, now)
 }
 
 // The recovered phone before its first handshake (owner decision of

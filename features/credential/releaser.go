@@ -76,15 +76,32 @@ func (f *Feature) changeSecret(s *vault.Session, typ string, e *Envelope, p *Pay
 }
 
 // passwordChange is credential.password.change from release R
-// (§11.14.9): the PIN is verified, the new password must meet §11.14.7,
-// the generation is closed and the next armed, and the DEK replaced,
-// before the content is sealed under the new password.
+// (§11.14.9): the blob is checked, then the PIN is verified and the
+// password opens the blob, in verifyPair's order (VAULT-MESSAGING 0.44.0
+// §11.14.9 "A lost answer": an old blob is stale_credential before any
+// secret is tested, so a retry after a lost answer counts nothing; a
+// wrong PIN or password, really tested, is a failed owner check); the
+// new password must meet §11.14.7, the generation is closed and the next
+// armed, and the DEK replaced, before the content is sealed under the
+// new password.
 func (f *Feature) passwordChange(s *vault.Session, e *Envelope, p *Payload) (json.RawMessage, error) {
-	if err := s.VerifyPIN(string(p.PIN)); err != nil {
+	if err := f.checkBlob(s, e.Blob); err != nil {
 		return nil, err
 	}
-	cek, inner, err := f.open(s, e.Blob, p.Password)
+	if err := s.VerifyPIN(string(p.PIN)); err != nil {
+		// A wrong PIN, tested after the blob passed, is a failed owner
+		// check, as in verifyPair (owner decision 2026-10-18); a stale or
+		// cloned blob never reaches this test and counts nothing.
+		if vault.IsCode(err, "bad_pin") {
+			s.OwnerCheckFailed("pin")
+		}
+		return nil, err
+	}
+	cek, inner, err := f.openChecked(s, e.Blob, p.Password)
 	if err != nil {
+		if err == errPassword {
+			s.OwnerCheckFailed("password") // tested after the blob and the PIN: a failed check
+		}
 		return nil, err
 	}
 	defer cek.Destroy()

@@ -67,6 +67,14 @@ func TestDockerfileEnclave(t *testing.T) {
 			t.Errorf("%s differs: Dockerfile %s, run-on-host %s", n, a, b)
 		}
 	}
+	// go.mod's toolchain line names the same release, so that CI's
+	// setup-go (go-version-file: go.mod) runs the tests on it too.
+	m := regexp.MustCompile(`(?m)^toolchain\s+go(\S+)\s*$`).FindStringSubmatch(read(t, "../go.mod"))
+	if m == nil {
+		t.Error("go.mod has no toolchain line")
+	} else if v := arg(t, d, "GO_VERSION"); m[1] != v {
+		t.Errorf("go.mod's toolchain is go%s, Dockerfile's GO_VERSION is %s", m[1], v)
+	}
 }
 
 func TestScripts(t *testing.T) {

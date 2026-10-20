@@ -401,14 +401,23 @@ func (m *Manager) changeSecrets(ctx context.Context, c SecretChange, now time.Ti
 		return errCounterUnavailable
 	} else if v.Closed || v.Used > 0 {
 		// Both are closed (idempotent) and the vault moves past them; the
-		// member sends the change again.
+		// member sends the change again. A next generation with used
+		// attempts can only come from an older copy of the recovery
+		// record a host served: its reason is `rollback`, an urgent feed
+		// item as well, since this is its attempts' only trace; the
+		// current one, and a next one that is only closed (a retry after
+		// a failed write), are `stale`, audit only (§11.14.11, 0.50.0).
 		r.wipe()
 		for _, cl := range []uint64{cg, ng} {
 			if ctr.Close(ctx, cl) != nil {
 				m.noteCounter(false)
 				return errCounterUnavailable
 			}
-			m.record(Activity{Kind: "recovery.generation_closed", Ref: strconv.FormatUint(cl, 10) + "/stale", Audit: true}, now)
+			a := Activity{Kind: "recovery.generation_closed", Ref: strconv.FormatUint(cl, 10) + "/stale", Audit: true}
+			if cl == ng && v.Used > 0 {
+				a.Ref, a.Feed, a.Priority = strconv.FormatUint(cl, 10)+"/rollback", true, "urgent"
+			}
+			m.record(a, now)
 		}
 		m.hdr.Rec.Generation, m.hdr.Rec.Wrap, m.hdr.Rec.ClosedUnchanged = ng+1, nil, true
 		m.dirty = true

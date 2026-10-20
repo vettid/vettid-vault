@@ -332,7 +332,11 @@ func (m *Manager) runHeld(ctx context.Context, h *HeldRequest, now time.Time) st
 		code = "forbidden" // no grant covers it any more (§6.8, §10.11)
 	}
 	if code != "" {
-		m.respondError(p, in, key, code, "", now)
+		var body json.RawMessage
+		if code == "credential_required" && m.credentialExists() {
+			body = NoHolderBody // a credential without a live holder (§3.5.9, 0.52.0)
+		}
+		m.respondErrorBody(p, in, key, code, "", body, now)
 		return code
 	}
 	body, herr := te.handler.Handle(ctx, s, in)

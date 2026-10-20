@@ -98,6 +98,9 @@ type data struct {
 type Credential interface {
 	Operate(s *vault.Session, in *envelope.Inner, need int, check func(*credential.Payload) error,
 		op func(*credential.Inner, *credential.Payload) error) (*credential.OpResult, error)
+	// SpendPresented spends the UTK the request presents before any
+	// check (§3.5.4 "Using a UTK", 0.52.0); idempotent within a request.
+	SpendPresented(s *vault.Session, in *envelope.Inner)
 }
 
 // Usable is the items feature: which critical items share rules make
@@ -303,6 +306,10 @@ func RequestID(body []byte) (string, error) {
 func (f *Feature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner) (json.RawMessage, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.cred != nil {
+		// An approval spends its UTK before any check (§3.5.4, 0.52.0).
+		f.cred.SpendPresented(s, in)
+	}
 	f.expire(s)
 	switch in.Type {
 	case "critical-secret-use.request":

@@ -436,6 +436,13 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 		m.respondError(p, in, rkey, "unsupported_type", "", now)
 		return disp(eph)
 	}
+	if te.spec.Request {
+		// §3.5.4 "Using a UTK" (0.52.0): the UTK the request presents is
+		// spent before any other check, so every refusal below leaves it
+		// spent too. A body without a readable utk_id spends nothing.
+		m.spendPresented(p, in, now)
+		defer m.endPresented()
+	}
 	if te.spec.Shape != nil && te.spec.Request && te.allows(p.Kind) && !te.spec.Shape(in.Body) {
 		// A shape checked before the credential and the hold (§10.5.1
 		// "Compatibility": message.attachment.get{} is bad_request whether
@@ -455,9 +462,15 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 	}
 	if !allowedWithoutCredential[in.Type] && !m.credentialReady() &&
 		!(p.Recovering && recoveryAllowed[in.Type] && m.credentialExists()) {
-		// §3.5.7: a vault without a credential is restricted.
+		// §3.5.7: a vault without a credential is restricted; so is one
+		// with a credential but no holder (§3.5.9, 0.52.0), which says so
+		// in the body. Never during enrollment: no credential, no body.
 		if te.spec.Request {
-			m.respondError(p, in, rkey, "credential_required", "", now)
+			var body json.RawMessage
+			if m.credentialExists() {
+				body = NoHolderBody
+			}
+			m.respondErrorBody(p, in, rkey, "credential_required", "", body, now)
 		} else {
 			m.audit(now, "credential_required", p.ID)
 		}

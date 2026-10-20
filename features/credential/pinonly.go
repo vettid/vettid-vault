@@ -12,21 +12,26 @@ import (
 // UTKs in the answer. The caller checks the PIN with vault.Session
 // .VerifyPIN under the §11.8 backoff.
 
-// HolderGate answers forbidden unless the sender is the holder's app
-// (not a recovering app, a desktop or an agent), then, while a clone alarm
-// is open, the alarm's freeze code, credential_frozen or
-// rotation_required (§3.5.9; owner decision of 2026-10-08). It spends
-// nothing.
-func (f *Feature) HolderGate(s *vault.Session) error {
+// HolderGate first spends the UTK that in presents (§3.5.4 "Using a UTK",
+// 0.52.0; SpendPIN opens its payload later in the request), then answers
+// forbidden unless the sender is the holder's app (not a recovering app,
+// a desktop or an agent), credential_required{reason: "no_holder"}
+// instead when the vault has a credential and no live holder, then,
+// while a clone alarm is open, the alarm's freeze code,
+// credential_frozen or rotation_required (§3.5.9; owner decision of
+// 2026-10-08).
+func (f *Feature) HolderGate(s *vault.Session, in *envelope.Inner) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.pruneUTKs(s.Now())
+	f.spendPresented(s.From().ID, in)
 	return f.holderGate(s)
 }
 
 func (f *Feature) holderGate(s *vault.Session) error {
 	from := s.From()
 	if from.Kind != vault.KindApp || from.Recovering || f.st.Holder == "" || from.ID != f.st.Holder {
-		return errForbidden
+		return f.notHolderErr(s)
 	}
 	if f.st.Alarm != nil {
 		return f.freezeErr()
@@ -34,16 +39,18 @@ func (f *Feature) holderGate(s *vault.Session) error {
 	return nil
 }
 
-// SpendPIN runs HolderGate (so that an alarm refuses the request before
-// the UTK is spent), then spends the UTK utkID issued to the sender and
-// opens sealed, bound to in's type and id, as {pin}: utk_invalid for an
-// unknown, expired or spent UTK or a payload that does not open,
-// bad_request for a PIN that is not 6–32 ASCII digits (the UTK stays
-// spent). The caller owns the returned PIN and must wipe it.
+// SpendPIN spends the UTK that in presents, if HolderGate has not (0.52.0:
+// before any check, §3.5.4), runs HolderGate's checks, then opens sealed
+// with the spent UTK utkID, bound to in's type and id, as {pin}:
+// utk_invalid for an unknown, expired or spent UTK or a payload that does
+// not open, bad_request for a PIN that is not 6–32 ASCII digits (the UTK
+// stays spent). The caller owns the returned PIN and must wipe it.
 func (f *Feature) SpendPIN(s *vault.Session, in *envelope.Inner, utkID string, sealed []byte) ([]byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.pruneUTKs(s.Now())
+	f.spendPresented(s.From().ID, in)
+	defer f.endPresented()
 	if err := f.holderGate(s); err != nil {
 		return nil, err
 	}

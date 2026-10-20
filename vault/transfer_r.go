@@ -168,7 +168,8 @@ func (m *Manager) expirePendingUnlink(now time.Time) {
 
 // recoveredPhonePaired completes the hand-over to a recovered phone at its
 // first handshake (§11.14.6): the credential's holder and the signer
-// binding move to it.
+// binding move to it, and (0.52.0, §3.5.9) the same flush removes every
+// other app, so that it is the vault's only app.
 func (m *Manager) recoveredPhonePaired(p *Peer, now time.Time) {
 	wasDigest, wasClass := m.vaultSigner(p.ID)
 	if rs := m.st.RecoveredSigner; len(rs) == 2 {
@@ -177,6 +178,7 @@ func (m *Manager) recoveredPhonePaired(p *Peer, now time.Time) {
 	}
 	p.Recovering = false
 	m.signerMoved(wasDigest, wasClass, p, now)
+	m.replaceApps(p.ID, now) // device.unlinked{reason: "replaced"}
 	sess := m.session(now)
 	for _, f := range m.features {
 		if o, ok := f.(TransferObserver); ok {

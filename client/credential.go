@@ -93,7 +93,7 @@ func (d *Device) keep(ctx context.Context, o strictjson.Object) error {
 
 // takeUTK returns an unexpired UTK, fetching a pool when empty.
 func (d *Device) takeUTK(ctx context.Context) (UTK, error) {
-	for attempt := 0; attempt < 2; attempt++ {
+	for attempt := 0; attempt < 3; attempt++ {
 		now := d.cfg.Now()
 		d.mu.Lock()
 		for len(d.st.UTKs) > 0 {
@@ -105,7 +105,17 @@ func (d *Device) takeUTK(ctx context.Context) (UTK, error) {
 			}
 		}
 		d.mu.Unlock()
-		o, err := d.Op(ctx, "credential.utk.get", nil)
+		if attempt == 2 {
+			break
+		}
+		// (0.52.0, §3.5.4) A top-up that returned no UTKs while this pool
+		// is empty means the vault's pool holds UTKs this device no longer
+		// has: resync once.
+		var body any
+		if attempt > 0 {
+			body = map[string]any{"resync": true}
+		}
+		o, err := d.Op(ctx, "credential.utk.get", body)
 		if err != nil {
 			return UTK{}, err
 		}
@@ -395,7 +405,7 @@ func (d *Device) TransferApprove(ctx context.Context, id, pin, password string) 
 // class (0.27.0, §6.7.1 step 3, §11.7.1): the holder's confirmation,
 // required when device.transfer.pending said signer_changed. "" sends no
 // `signer`. Without the confirmation the vault answers
-// signer_unconfirmed, before it spends the UTK or tries the PIN.
+// signer_unconfirmed before it tries the PIN; (0.52.0) the UTK is spent.
 func (d *Device) TransferApproveSigner(ctx context.Context, id, pin, password, signer string) error {
 	extra := map[string]any{"transfer_id": id}
 	if signer != "" {

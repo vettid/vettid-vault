@@ -336,7 +336,7 @@ func RecoveryOpen(ctx context.Context, p RecoveryOpenParams) (*Manager, *Recover
 		m.dropNext(now)
 	}
 	m.rec.ctr = ctr
-	m.st.RecoveredGeneration = g
+	m.st.RecoveredAttempt = []uint64{g, uint64(k)}
 	if serr != nil {
 		m.st.PendingSucceed = []uint64{g, uint64(k)}
 	}
@@ -435,6 +435,7 @@ func (m *Manager) completeRecoveryR(ctx context.Context, p RecoveryOpenParams, r
 		rep.wipe()
 		return fail(OpenRetry)
 	}
+	rep.next.RecoveryAttempt = append([]uint64(nil), m.st.RecoveredAttempt...)
 	rep.next.App = &UnlockKey{DeviceID: recoveryDeviceID, IK: r.App.IK, KEM: r.App.KEM, Attestation: r.App.Attestation}
 	if len(r.App.APIKey) > 0 {
 		rep.next.AppKey, rep.next.AppKeySeq = append([]byte(nil), r.App.APIKey...), m.hdr.AppKeySeq+1
@@ -469,6 +470,10 @@ func (m *Manager) completeRecoveryR(ctx context.Context, p RecoveryOpenParams, r
 	}
 	return m.finishOpen(ctx, p, mv, out, true, now)
 }
+
+// completionStatusTimeout bounds the counter's status read after a
+// completion: the ok never waits long on it; the next owner check reads it.
+const completionStatusTimeout = 10 * time.Second
 
 // finishOpen registers the relay, mints the phone's token, flushes (steps
 // 2 and 3), records the presence and answers ok. passwordProved: this run
@@ -517,7 +522,10 @@ func (m *Manager) finishOpen(ctx context.Context, p RecoveryOpenParams, mv *Mani
 	// Written with the next flush; if that never happens the next owner
 	// check writes them instead.
 	if g := m.hdr.Rec.Generation; g > 0 {
-		if v, err := m.status(ctx, g); err == nil {
+		sctx, cancel := context.WithTimeout(ctx, completionStatusTimeout)
+		v, err := m.status(sctx, g)
+		cancel()
+		if err == nil {
 			m.recordAttempts(v, now)
 		}
 	}
@@ -596,9 +604,13 @@ func resumeRecovery(ctx context.Context, p RecoveryOpenParams, hdr *Header, hver
 			m.zeroize()
 			return nil, out.fail(OpenWrong)
 		}
-		// The event's recovered generation, as the first run set it.
-		if nx.Wrap != nil {
-			m.st.RecoveredGeneration = nx.Wrap.Generation
+		// The event's attempt, as the first run set it, and its success
+		// sent again: the first run's PendingSucceed was in the state
+		// that was not stored. A `next` part from before the field has
+		// none: its attempts stay urgent.
+		if ra := nx.RecoveryAttempt; len(ra) == 2 {
+			m.st.RecoveredAttempt = []uint64{ra[0], ra[1]}
+			m.st.PendingSucceed = []uint64{ra[0], ra[1]}
 		}
 		r := hdr.Recovery
 		if r != nil && r.App != nil {

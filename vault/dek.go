@@ -76,6 +76,10 @@ type HeaderNext struct {
 	// (PIN, password, reset) or the current one with the opener for the
 	// next DEK; nil for a vault that is not armed.
 	Wrap *RecoveryWrap `json:"wrap,omitempty"`
+	// RecoveryAttempt is a recovery's counted attempt (generation, n), so
+	// a repeat whose step 2 was not stored knows it: the attempt's success
+	// is sent again and its urgency ends (§11.14.6, §11.14.11).
+	RecoveryAttempt []uint64 `json:"recovery_attempt,omitempty"`
 	// HeaderSeq is the header_seq of the write that carried this part.
 	HeaderSeq  uint64    `json:"header_seq"`
 	TransferID string    `json:"transfer_id,omitempty"`

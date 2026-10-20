@@ -124,6 +124,8 @@ func TestDeleteCrashConverges(t *testing.T) {
 			} else {
 				fs := &failingStore{Store: f.store, failKey: store.HeaderKey(vid, testRelease.PCR0)}
 				f.m.opt.Store = fs
+				// No retry of step 4 (0.51.0): the process ends there.
+				f.m.opt.DeleteRetry = &DeleteRetry{Erase: time.Nanosecond}
 			}
 			f.m.mu.Lock()
 			f.m.beginDelete("app", time.Now())

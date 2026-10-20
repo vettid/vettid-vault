@@ -38,7 +38,9 @@ func parseRouting(b []byte) (routing, bool) {
 		return routing{}, false
 	}
 	switch r.Op {
-	case "enroll", "unlock", "lock", "delete", "recovery", "recovery_cancel", "recovery_register", "recovery_open", "account":
+	// delete_resume (0.51.0, VAULT-HOST-PROTOCOL 0.1.14 §6.1) is routed as
+	// delete: no lease, no code copied, the message deleted on the answer.
+	case "enroll", "unlock", "lock", "delete", "delete_resume", "recovery", "recovery_cancel", "recovery_register", "recovery_open", "account":
 	default:
 		return routing{}, false
 	}

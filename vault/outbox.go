@@ -183,6 +183,9 @@ func (m *Manager) retryPeer(peer string) {
 // token of its own: the reconnect's hs.init that brings the fresh token
 // (§6.6) must not wait behind it.
 func (m *Manager) drainOutbox(ctx context.Context) {
+	if m.holdForMark() {
+		return
+	}
 	now := m.now()
 	blocked := map[string]bool{}
 	awaiting := map[string]bool{}

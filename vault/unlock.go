@@ -379,6 +379,19 @@ func UnlockAlt(ctx context.Context, p AltUnlockParams) (*Manager, *AltUnlockOutc
 		return nil, out.fail(CodeRollback, ErrRollback)
 	}
 	st.init()
+	if st.Deleting != nil {
+		// 0.51.0 (§12.5 "A state that records deleting never runs"): the
+		// marking flush stored the state and perhaps not the header. The
+		// vault is not started: the deletion is finished with the keys the
+		// state holds, answered as for a missing vault, and no unlocked
+		// is reported.
+		suite.Wipe(op.dek1)
+		suite.Wipe(op.uk)
+		m := newManager(p.Options, &st, hdr, dek)
+		m.stateVer, m.headerVer = sver, hver
+		m.finishMarked(ctx)
+		return nil, out.drop(ErrDeleted)
+	}
 	if st.SealedRelease == "" {
 		st.SealedRelease = hdr.SealedRelease
 	}

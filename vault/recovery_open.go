@@ -328,6 +328,9 @@ func RecoveryOpen(ctx context.Context, p RecoveryOpenParams) (*Manager, *Recover
 		return nil, out.fail(OpenStoredMismatch)
 	}
 	m, code := openState(ctx, p, hdr, hver, sblob, sver, dek)
+	if code == codeDeleted {
+		return drop()
+	}
 	if code != "" {
 		return nil, out.fail(code)
 	}
@@ -430,8 +433,19 @@ func openState(ctx context.Context, p RecoveryOpenParams, hdr *Header, hver stor
 	h.Pepper = append([]byte(nil), hdr.Pepper...)
 	m := newManager(p.Options, &st, &h, dek)
 	m.stateVer, m.headerVer = sver, hver
+	if st.Deleting != nil {
+		// 0.51.0 (§12.5): a state that records deleting never runs; the
+		// deletion is finished instead and the open is answered as for a
+		// missing vault.
+		m.finishMarked(ctx)
+		return nil, codeDeleted
+	}
 	return m, ""
 }
+
+// codeDeleted is openState's answer for a state that records Deleting
+// (0.51.0): the caller drops the request, as for a missing vault.
+const codeDeleted = "deleted"
 
 // completeRecoveryR is step 6 after the state is loaded: the credential
 // from its backup copy with the password, the phone as the vault's app
@@ -623,6 +637,13 @@ func resumeRecovery(ctx context.Context, p RecoveryOpenParams, hdr *Header, hver
 		return nil, out.fail(OpenStoredMismatch)
 	}
 	m, code := openState(ctx, p, hdr, hver, sblob, sver, append([]byte(nil), dek...))
+	if code == codeDeleted {
+		suite.Wipe(uk)
+		suite.Wipe(d0)
+		suite.Wipe(d1)
+		out.Drop = true
+		return nil, out.fail(OpenNoRecovery)
+	}
 	if code != "" {
 		return nil, out.fail(code)
 	}

@@ -539,9 +539,12 @@ func (a *AWS) Lifecycle(ctx context.Context, ev Lifecycle, instanceID string, no
 			update += " REMOVE #asp"
 		}
 	case "unlocked":
+		// 0.51.0 (VAULT-HOST-PROTOCOL 0.1.14 §6.1): a vault that runs is
+		// not being deleted, so a deletion mark there is stale or forged.
 		nm["#st"] = "state"
+		nm["#da"] = AttrDeletingAt
 		vals[":st"] = s("unlocked")
-		update = "SET #st = :st, #vv = :vv, #sv = :sv, #u = :u"
+		update = "SET #st = :st, #vv = :vv, #sv = :sv, #u = :u REMOVE #da"
 	case "locked", "deleted":
 		nm["#st"] = "state"
 		vals[":st"] = s(ev.Event)
@@ -592,6 +595,29 @@ func (a *AWS) Lifecycle(ctx context.Context, ev Lifecycle, instanceID string, no
 		}
 	}
 	return err
+}
+
+// AttrDeletingAt is the vault row attribute that records a deletion whose
+// marking flush is stored (VAULT-MESSAGING 0.51.0 §11.5): the parent's
+// Unix seconds, written by MarkDeleting and removed by an unlocked event.
+const AttrDeletingAt = "deleting_at"
+
+// MarkDeleting implements Tables (VAULT-HOST-PROTOCOL 0.1.14 §5.6): the
+// one attribute, whatever the lease, never moved once written.
+func (a *AWS) MarkDeleting(ctx context.Context, vaultID string, now time.Time) error {
+	const cond = "attribute_exists(vault_id) AND (attribute_not_exists(#st) OR #st <> :del) AND attribute_not_exists(#da)"
+	update := "SET #da = :at"
+	_, err := a.ddb.UpdateItem(ctx, &dynamodb.UpdateItemInput{TableName: &a.cfg.VaultsTable, Key: map[string]ddbtypes.AttributeValue{"vault_id": s(vaultID)},
+		UpdateExpression: &update, ConditionExpression: aws.String(cond),
+		ExpressionAttributeNames:  map[string]string{"#st": "state", "#da": AttrDeletingAt},
+		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{":del": s("deleted"), ":at": n(now.Unix())}})
+	if err != nil {
+		if condFailed(err) {
+			return ErrConflict
+		}
+		return errClass("ddb mark deleting", err)
+	}
+	return nil
 }
 
 // AttrSweepPending is the vault row attribute that records a P15 sweep not

@@ -53,6 +53,10 @@ const (
 	// Credentials: []; reply [status, access_key_id, secret_access_key,
 	// session_token, expiration (RFC 3339 or "")].
 	KindCredentials Kind = 0x05
+	// MarkDeleting: [vault_id]; reply [status] (ok, invalid or error).
+	// The parent records a deletion whose marking flush is stored on the
+	// vault row, conditionally (VAULT-HOST-PROTOCOL 0.1.14 §5.6).
+	KindMarkDeleting Kind = 0x06
 )
 
 // Requests from the parent to the enclave:

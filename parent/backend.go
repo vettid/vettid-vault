@@ -245,6 +245,12 @@ type Tables interface {
 	// ReleaseLease removes this instance's lease and marks the vault
 	// locked (a vault that stopped without a lifecycle "locked").
 	ReleaseLease(ctx context.Context, vaultID, instanceID string, now time.Time) error
+	// MarkDeleting writes deleting_at = now (Unix seconds) on the vault
+	// row, whatever the lease, conditional on the row existing, its state
+	// not being deleted and no deleting_at yet; nothing else is written
+	// (VAULT-MESSAGING 0.51.0 §11.5, VAULT-HOST-PROTOCOL 0.1.14 §5.6). A
+	// refused condition is ErrConflict.
+	MarkDeleting(ctx context.Context, vaultID string, now time.Time) error
 	// WriteSlot updates a queued response slot; a slot that is gone or
 	// no longer queued is left alone.
 	WriteSlot(ctx context.Context, requestID string, s Slot) error

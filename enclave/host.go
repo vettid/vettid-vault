@@ -32,6 +32,18 @@ func NewLocalHost(core *Core, stopped func(vaultID string, err error)) *LocalHos
 
 // Open implements Host.
 func (h *LocalHost) Open(ctx context.Context, j *Job) ([]byte, Marker, error) {
+	if j.Op == OpDeleteResume {
+		// A resume never runs beside its vault and locks nothing (P20).
+		// Opens here are serialized by the instance.
+		h.mu.Lock()
+		_, runs := h.vaults[j.VaultID]
+		h.mu.Unlock()
+		if runs {
+			return nil, Marker{}, nil
+		}
+		res, _, marker := h.core.Open(ctx, j)
+		return res, marker, nil
+	}
 	_, _ = h.Lock(ctx, j.VaultID)
 	res, m, marker := h.core.Open(ctx, j)
 	if m != nil {

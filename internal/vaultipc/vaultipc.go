@@ -7,7 +7,7 @@
 // Supervisor → vault (requests):
 //
 //	Open    [version, instance_id, pcr0, pcr1, pcr2, job (12 fields)] → [ok, result, running "1"|"0", registered "1"|"0"]
-//	Lock    []                                                          → [ok | split_brain]
+//	Lock    [reason]                                                    → [ok | split_brain | not_deleted]
 //	Account [snapshot]                                                  → [ok, running "1"|"0"]
 //	Recoverable []                                                      → [ok, "" | no_credential | no_backup]
 //
@@ -25,6 +25,7 @@
 //	Transfer        [ticket, priority, wait_ms]   → [status]   (ok: admitted; busy: not within wait_ms)
 //	Counter         [op, key, a, b]               → [status, ...] (release R)
 //	HeavyPermit     [acquire | release]           → [status, "1" | "0"] (release R)
+//	MarkDeleting    [vault_id]                    → [status] (0.51.0; the process's own vault only)
 //
 // Vault → supervisor (notifications): Lifecycle [event, vault_id,
 // release, vault_version, state_version, app_key (SPKI DER or empty),
@@ -47,6 +48,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/vettid/vettid-vault/internal/hostproto"
 )
@@ -70,7 +72,8 @@ import (
 // 10: Lifecycle carries cancelled_recovery_id; the clear marker may be an
 // unlock's recovery_cancelled with cancelled_recovery_id or a cancel's
 // recovery_not_current (VAULT-MESSAGING 0.49.0).
-const Version = "10"
+// 11: MarkDeleting; the job op delete_resume (VAULT-MESSAGING 0.51.0).
+const Version = "11"
 
 // Supervisor → vault.
 const (
@@ -131,6 +134,24 @@ const (
 	// given only while free memory is at least the memory-pressure floor
 	// plus the derivation's need; "release" returns it.
 	KindHeavyPermit hostproto.Kind = 0x5c
+	// KindMarkDeleting [vault_id] → [ok | error]: the deletion's mark at
+	// the host (VAULT-MESSAGING 0.51.0 §12.5, VAULT-HOST-PROTOCOL §5.6),
+	// sent once the marking flush is stored. The supervisor refuses any
+	// vault_id but the process's own and passes the request to the
+	// parent, one try per request: the process retries.
+	KindMarkDeleting hostproto.Kind = 0x5d
+)
+
+// Bounds the supervisor puts on a vault process's answers, after which it
+// kills the process: an Open, and a Lock with the reason delete (the
+// host's mark may take 2 minutes and step 4's retries 60 s more,
+// VAULT-MESSAGING 0.51.0 §12.5). The process works to a deadline
+// DeadlineMargin earlier, so that a deletion's step 2 is never cut by the
+// kill (it runs only with time left, or not at all).
+const (
+	OpenTimeout       = 3 * time.Minute
+	DeleteLockTimeout = 4 * time.Minute
+	DeadlineMargin    = 15 * time.Second
 )
 
 // Counter operations (KindCounter).
@@ -156,7 +177,7 @@ const (
 )
 
 // VaultRequests is every request kind a vault process may send.
-var VaultRequests = []hostproto.Kind{KindStoreGet, KindStorePut, KindStoreDelete, KindAttestRecipient, KindAttestVault, KindKMS, KindHTTP, KindStatusList, KindPush, KindTransfer, KindCounter, KindHeavyPermit}
+var VaultRequests = []hostproto.Kind{KindStoreGet, KindStorePut, KindStoreDelete, KindAttestRecipient, KindAttestVault, KindKMS, KindHTTP, KindStatusList, KindPush, KindTransfer, KindCounter, KindHeavyPermit, KindMarkDeleting}
 
 // KMS operations.
 const (
@@ -172,6 +193,11 @@ const (
 	StatusSplitBrain = "split_brain"
 	StatusDenied     = "denied"
 	StatusBusy       = "busy"
+	// StatusNotDeleted answers a Lock with the reason delete that did not
+	// delete the vault (no host mark, VAULT-MESSAGING 0.51.0 §12.5, or a
+	// failed erase): the vault is locked, its objects may remain, and the
+	// host's deletion falls back to the erase without the DEK.
+	StatusNotDeleted = "not_deleted"
 )
 
 // Limits.

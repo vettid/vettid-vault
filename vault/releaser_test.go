@@ -113,7 +113,7 @@ func newRFixture(t *testing.T) *rFixture {
 	requireTestCost(t)
 	f := &rFixture{t: t, st: &faultStore{Store: store.NewMemory()}, bucket: countertest.New(time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)),
 		backup: &rBackupFeature{on: true}, permit: true}
-	f.opts = Options{Store: f.st, Sealer: testSealer{key: bytes.Repeat([]byte{7}, 32)}, Release: testRelease,
+	f.opts = Options{Store: f.st, Sealer: testSealer{key: bytes.Repeat([]byte{7}, 32)}, Release: testRelease, MarkDeleting: NoHostMark,
 		Relay:   func(base string, key ed25519.PrivateKey) Relay { return &stubRelay{base: base, key: key} },
 		Counter: f.bucket, Features: []Feature{f.backup}, RecoveryWaitUnit: 10 * time.Minute,
 		HeavyPermit: func(context.Context) (func(), bool) { return func() {}, f.permit }}

@@ -453,6 +453,24 @@ func (p *Parent) handle(ctx context.Context, s *session, f *hostproto.Frame) [][
 			exp = c.Expires.UTC().Format(time.RFC3339)
 		}
 		return reply(hostproto.StatusOK, c.AccessKeyID, c.SecretAccessKey, c.SessionToken, exp)
+	case hostproto.KindMarkDeleting:
+		// 0.1.14 §5.6: ok once deleting_at is written or its condition
+		// refused (marked already, deleted, or no row: nothing is left to
+		// record); error for any other failure, which the enclave retries.
+		if len(f.Fields) != 1 || !vaultIDOK(string(f.Fields[0])) {
+			return reply(hostproto.StatusInvalid)
+		}
+		id := string(f.Fields[0])
+		// The vault's earlier lifecycle events are written first: an
+		// unlocked still queued would remove the mark (§6.1).
+		p.flushEvents(ctx)
+		err := p.cfg.Tables.MarkDeleting(ctx, id, p.now())
+		if err != nil && !errors.Is(err, ErrConflict) {
+			p.log.Warn("deletion mark not written", "vault_id", id, "error", err.Error())
+			return reply(hostproto.StatusError)
+		}
+		p.log.Info("deletion marked", "vault_id", id, "already", err != nil)
+		return reply(hostproto.StatusOK)
 	}
 	return nil
 }

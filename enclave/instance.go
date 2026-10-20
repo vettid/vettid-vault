@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"errors"
+	"slices"
 	"sync"
 	"time"
 
@@ -187,6 +188,8 @@ func (in *Instance) Process(ctx context.Context, q *QueueMessage, manifestDoc []
 		_, _ = in.host.Lock(ctx, q.VaultID)
 	case OpDelete:
 		in.deleteVault(ctx, q.VaultID, q.UserGUID)
+	case OpDeleteResume:
+		in.resumeDelete(ctx, q)
 	case OpAccount:
 		_, _ = in.host.Account(ctx, q.VaultID, q.Account) // no running vault: dropped (§11.5)
 	case OpRecovery, OpRecoveryCancel:
@@ -405,6 +408,24 @@ func (in *Instance) deleteVault(ctx context.Context, id, userGUID string) {
 		return // retried by the next delete request
 	}
 	in.emit(vault.LifecycleEvent{Event: "deleted", VaultID: id, Release: in.meas.PCR0, VaultVersion: in.meas.PCR0, StateVersion: vault.StateVersion})
+}
+
+// resumeDelete is the queue op delete_resume (0.51.0, §12.5 "Without the
+// app: the resume"; VAULT-HOST-PROTOCOL §6.1, P20). A vault that runs here
+// is not touched: one being deleted finishes its own deletion, and one
+// that is not must not be. The host checks again, with the opens under
+// way, in the same step as it starts the resume's process (procHost
+// reserve), and locks nothing for it. A vault process reads the vault's
+// header sealed to this release and decides alone (vault.ResumeDelete);
+// the message is never an authority to delete. The answer is done, with
+// no envelope and no code, whatever happened.
+func (in *Instance) resumeDelete(ctx context.Context, q *QueueMessage) {
+	if slices.Contains(in.host.Vaults(), q.VaultID) {
+		return
+	}
+	j := &Job{Op: OpDeleteResume, VaultID: q.VaultID, UserGUID: q.UserGUID, RequestID: q.RequestID,
+		Inner: &envelope.Inner{Type: typeDeleteResume, ID: q.RequestID, TS: in.now(), Body: []byte(`{}`)}}
+	_, _, _ = in.host.Open(ctx, j)
 }
 
 // Close locks every vault and destroys the ETKs.

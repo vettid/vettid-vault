@@ -134,7 +134,9 @@ type Options struct {
 	// flush is stored (0.51.0, §12.5 "Mark at the host",
 	// VAULT-HOST-PROTOCOL §5.6) and returns nil on its ok; the vault
 	// retries it for 2 minutes and delivers nothing of step 2 before.
-	// Nil: there is no host to ask (development, tests), taken as ok.
+	// Nil fails closed: the deletion is never recorded and the vault ends
+	// locked. NoHostMark is the explicit choice of a vault without a host
+	// (development, tests).
 	MarkDeleting func(ctx context.Context, vaultID string) error
 	// DeleteRetry overrides a deletion's retry schedules (tests).
 	DeleteRetry *DeleteRetry
@@ -266,6 +268,9 @@ type Manager struct {
 	// markStored: a header that records Deleting is stored (0.51.0,
 	// §12.5: the host's mark and step 2 wait for it).
 	markStored bool
+	// markOK: step 1 is complete, the host's ok included (completeMark);
+	// until then a marked vault delivers nothing (holdForMark).
+	markOK bool
 
 	locked      bool
 	lockPending bool

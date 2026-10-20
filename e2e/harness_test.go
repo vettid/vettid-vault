@@ -78,7 +78,7 @@ func newTestVaultWith(t *testing.T, relayURL, name string, optional []string, tw
 		t.Fatal(err)
 	}
 	tv := &testVault{t: t, name: name, relay: relayURL, store: st, sealer: sealer, optional: optional}
-	tv.opts = vault.Options{Store: st, Sealer: sealer, PollWait: time.Second, Release: devenclave.Release,
+	tv.opts = vault.Options{Store: st, Sealer: sealer, PollWait: time.Second, Release: devenclave.Release, MarkDeleting: vault.NoHostMark,
 		Counter: countertest.NewLive()} // release R: changes of secret close a generation at the counter
 	if tweak != nil {
 		tweak(&tv.opts)

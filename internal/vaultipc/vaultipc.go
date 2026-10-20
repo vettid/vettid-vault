@@ -7,7 +7,7 @@
 // Supervisor → vault (requests):
 //
 //	Open    [version, instance_id, pcr0, pcr1, pcr2, job (12 fields)] → [ok, result, running "1"|"0", registered "1"|"0"]
-//	Lock    []                                                          → [ok | split_brain]
+//	Lock    [reason]                                                    → [ok | split_brain | not_deleted]
 //	Account [snapshot]                                                  → [ok, running "1"|"0"]
 //	Recoverable []                                                      → [ok, "" | no_credential | no_backup]
 //
@@ -48,6 +48,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/vettid/vettid-vault/internal/hostproto"
 )
@@ -141,6 +142,18 @@ const (
 	KindMarkDeleting hostproto.Kind = 0x5d
 )
 
+// Bounds the supervisor puts on a vault process's answers, after which it
+// kills the process: an Open, and a Lock with the reason delete (the
+// host's mark may take 2 minutes and step 4's retries 60 s more,
+// VAULT-MESSAGING 0.51.0 §12.5). The process works to a deadline
+// DeadlineMargin earlier, so that a deletion's step 2 is never cut by the
+// kill (it runs only with time left, or not at all).
+const (
+	OpenTimeout       = 3 * time.Minute
+	DeleteLockTimeout = 4 * time.Minute
+	DeadlineMargin    = 15 * time.Second
+)
+
 // Counter operations (KindCounter).
 const (
 	CounterList         = "list"          // [list, prefix] → [ok, listing JSON]
@@ -180,6 +193,11 @@ const (
 	StatusSplitBrain = "split_brain"
 	StatusDenied     = "denied"
 	StatusBusy       = "busy"
+	// StatusNotDeleted answers a Lock with the reason delete that did not
+	// delete the vault (no host mark, VAULT-MESSAGING 0.51.0 §12.5, or a
+	// failed erase): the vault is locked, its objects may remain, and the
+	// host's deletion falls back to the erase without the DEK.
+	StatusNotDeleted = "not_deleted"
 )
 
 // Limits.

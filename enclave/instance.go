@@ -413,7 +413,9 @@ func (in *Instance) deleteVault(ctx context.Context, id, userGUID string) {
 // resumeDelete is the queue op delete_resume (0.51.0, §12.5 "Without the
 // app: the resume"; VAULT-HOST-PROTOCOL §6.1, P20). A vault that runs here
 // is not touched: one being deleted finishes its own deletion, and one
-// that is not must not be. Otherwise a vault process reads the vault's
+// that is not must not be. The host checks again, with the opens under
+// way, in the same step as it starts the resume's process (procHost
+// reserve), and locks nothing for it. A vault process reads the vault's
 // header sealed to this release and decides alone (vault.ResumeDelete);
 // the message is never an authority to delete. The answer is done, with
 // no envelope and no code, whatever happened.

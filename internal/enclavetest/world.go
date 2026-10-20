@@ -219,6 +219,11 @@ func (w *World) StartWith(n uint64, tweak func(*enclave.Config)) (*enclave.Insta
 		tweak(&cfg)
 	}
 	vo := w.VaultOptions
+	if vo.MarkDeleting == nil {
+		// The world's parent stand-in has no vault table: a deletion is
+		// recorded at once (0.51.0; a vault process asks its parent).
+		vo.MarkDeleting = vault.NoHostMark
+	}
 	if vo.Relay == nil {
 		vo.Relay = func(base string, key ed25519.PrivateKey) vault.Relay { return w.Relays.New(base, key) }
 	}

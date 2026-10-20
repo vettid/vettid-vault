@@ -98,6 +98,13 @@ type procHost struct {
 	mu    sync.Mutex
 	procs map[string]*vproc
 	slots []bool
+	// opening counts the opens of each vault under way (their processes
+	// are in procs only once the open returns), and resuming holds the
+	// delete_resume of a vault under way, closed when it ends
+	// (VAULT-HOST-PROTOCOL 0.1.14 P20: a resume never runs beside
+	// another process of its vault).
+	opening  map[string]int
+	resuming map[string]chan struct{}
 }
 
 // vproc is one vault process and what its channel may reach.
@@ -135,13 +142,18 @@ var _ enclave.Host = (*procHost)(nil)
 
 func newProcHost(s *Supervisor, cfg ProcConfig) *procHost {
 	cfg.defaults()
-	return &procHost{s: s, cfg: cfg, procs: map[string]*vproc{}, slots: make([]bool, cfg.MaxProcs)}
+	return &procHost{s: s, cfg: cfg, procs: map[string]*vproc{}, slots: make([]bool, cfg.MaxProcs),
+		opening: map[string]int{}, resuming: map[string]chan struct{}{}}
 }
 
 var (
-	errNoSlot = errors.New("supervisor: too many vault processes")
-	errSpawn  = errors.New("supervisor: vault process failed to start")
-	errNoUID  = errors.New("supervisor: no unused uid left for a vault process")
+	// errNotDeleted: a lock with the reason delete that left the vault
+	// locked without deleting it (enclave.Instance then erases it without
+	// the DEK, as for a vault that does not run).
+	errNotDeleted = errors.New("supervisor: vault locked, not deleted")
+	errNoSlot     = errors.New("supervisor: too many vault processes")
+	errSpawn      = errors.New("supervisor: vault process failed to start")
+	errNoUID      = errors.New("supervisor: no unused uid left for a vault process")
 )
 
 // maxVaultUID is the highest uid given to a vault process ((uid_t)-1 is
@@ -417,7 +429,18 @@ func stopReason(exitCode int) (string, slog.Level) {
 // Open implements enclave.Host: lock a running process of the vault, start
 // a new one, hand it the job, and keep it if the vault opened.
 func (h *procHost) Open(ctx context.Context, j *enclave.Job) ([]byte, enclave.Marker, error) {
-	_, _ = h.Lock(ctx, j.VaultID)
+	done, ok, err := h.reserve(ctx, j)
+	if err != nil {
+		return nil, enclave.Marker{}, err
+	}
+	if !ok {
+		return nil, enclave.Marker{}, nil // a resume of a vault that runs or opens here: nothing (P20)
+	}
+	defer done()
+	if j.Op != enclave.OpDeleteResume {
+		// A resume locks nothing: a vault that runs here was refused above.
+		_, _ = h.Lock(ctx, j.VaultID)
+	}
 	m := h.s.inst.Load().Measurements()
 	var prev []string
 	if j.Op == enclave.OpEnroll {
@@ -436,7 +459,7 @@ func (h *procHost) Open(ctx context.Context, j *enclave.Job) ([]byte, enclave.Ma
 	p.opening = true
 	p.mu.Unlock()
 	fields := append(hostproto.Strings(vaultipc.Version, h.s.instID, m.PCR0, m.PCR1, m.PCR2), j.Fields()...)
-	octx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+	octx, cancel := context.WithTimeout(ctx, vaultipc.OpenTimeout)
 	r, err := p.conn.Call(octx, vaultipc.KindOpen, fields...)
 	cancel()
 	p.mu.Lock()
@@ -462,6 +485,49 @@ func (h *procHost) Open(ctx context.Context, j *enclave.Job) ([]byte, enclave.Ma
 	h.mu.Unlock()
 	h.s.touch(j.VaultID)
 	return res, marker, nil
+}
+
+// reserve records an open of j's vault before its process starts, and
+// returns its end. A delete_resume is refused (ok false) while a process
+// of the vault runs or opens here, and every other open of the vault waits
+// for a resume under way: the check and the spawn are one step under h.mu
+// (VAULT-HOST-PROTOCOL 0.1.14 §6.1, P20).
+func (h *procHost) reserve(ctx context.Context, j *enclave.Job) (done func(), ok bool, err error) {
+	id := j.VaultID
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if j.Op == enclave.OpDeleteResume {
+		if h.procs[id] != nil || h.opening[id] > 0 || h.resuming[id] != nil {
+			return nil, false, nil
+		}
+		ch := make(chan struct{})
+		h.resuming[id] = ch
+		return func() {
+			h.mu.Lock()
+			delete(h.resuming, id)
+			h.mu.Unlock()
+			close(ch)
+		}, true, nil
+	}
+	for h.resuming[id] != nil {
+		ch := h.resuming[id]
+		h.mu.Unlock()
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			h.mu.Lock()
+			return nil, false, ctx.Err()
+		}
+		h.mu.Lock()
+	}
+	h.opening[id]++
+	return func() {
+		h.mu.Lock()
+		if h.opening[id]--; h.opening[id] <= 0 {
+			delete(h.opening, id)
+		}
+		h.mu.Unlock()
+	}, true, nil
 }
 
 // stop ends a process that holds no unlocked vault (closing its channel
@@ -494,10 +560,6 @@ func (h *procHost) Lock(ctx context.Context, id string) (bool, error) {
 	return h.LockReason(ctx, id, "")
 }
 
-// deleteLockExtra is the time a lock with the reason delete has beyond
-// LockTimeout: the host's mark (2 minutes) and step 4's retries (60 s).
-const deleteLockExtra = 3 * time.Minute
-
 // LockReason implements enclave.Host: Lock with a reason in vault.locking.
 func (h *procHost) LockReason(ctx context.Context, id, reason string) (bool, error) {
 	h.mu.Lock()
@@ -514,7 +576,7 @@ func (h *procHost) LockReason(ctx context.Context, id, reason string) (bool, err
 	if reason == vault.LockDelete {
 		// A deletion may wait 2 minutes for the host's mark and retry its
 		// erase for 60 s more (VAULT-MESSAGING 0.51.0 §12.5).
-		d += deleteLockExtra
+		d = max(d, vaultipc.DeleteLockTimeout)
 	}
 	lctx, cancel := context.WithTimeout(ctx, d)
 	r, err := p.conn.Call(lctx, vaultipc.KindLock, []byte(reason))
@@ -526,6 +588,9 @@ func (h *procHost) LockReason(ctx context.Context, id, reason string) (bool, err
 	h.stop(p)
 	if len(r) > 0 && string(r[0]) == vaultipc.StatusSplitBrain {
 		return true, vault.ErrSplitBrain
+	}
+	if len(r) > 0 && string(r[0]) == vaultipc.StatusNotDeleted && reason == vault.LockDelete {
+		return true, errNotDeleted
 	}
 	return true, nil
 }

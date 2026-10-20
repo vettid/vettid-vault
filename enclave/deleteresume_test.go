@@ -185,3 +185,49 @@ func TestDeleteResumeWire(t *testing.T) {
 		t.Fatal("a delete_resume with an envelope parsed")
 	}
 }
+
+// The host's delete of a running vault whose host mark gets no ok: the
+// vault ends locked without telling its devices, and the instance erases
+// what is left without the DEK (the host's authority is unconditional;
+// that erase sends nothing).
+func TestHostDeleteAfterRefusedMark(t *testing.T) {
+	f := newFx(t)
+	f.w.VaultOptions.MarkDeleting = func(context.Context, string) error { return errors.New("parent: error") }
+	f.w.VaultOptions.DeleteRetry = &vault.DeleteRetry{First: time.Millisecond, Cap: time.Millisecond, Mark: 20 * time.Millisecond}
+	if _, err := f.w.Start(3); err != nil {
+		t.Fatal(err)
+	}
+	a := f.newApp("user-hostdel", android(0x66))
+	f.enroll(a, pin)
+	told := len(f.w.Relays.DepositsTo(a.dev.RelayAddr().Mailbox))
+	rid, _ := envelope.NewULID(f.clk.Now())
+	in := f.w.Instance(3)
+	in.Process(f.ctx, &enclave.QueueMessage{Op: enclave.OpDelete, VaultID: a.vid, UserGUID: a.guid, RequestID: rid, EnqueuedAt: f.clk.Now()}, nil)
+	for _, k := range f.objects(a) {
+		if f.stored(k) {
+			t.Fatalf("%s left", k)
+		}
+	}
+	if f.deletedReports(a.vid) != 1 {
+		t.Fatalf("%d deleted reports", f.deletedReports(a.vid))
+	}
+	if got := len(f.w.Relays.DepositsTo(a.dev.RelayAddr().Mailbox)); got != told {
+		t.Fatalf("%d notices without the host's mark", got-told)
+	}
+}
+
+// LocalHost: a resume's open neither runs beside nor locks a running vault.
+func TestLocalHostResumeLocksNothing(t *testing.T) {
+	f := newFx(t)
+	a := f.newApp("user-localresume", android(0x67))
+	f.enroll(a, pin)
+	in := f.w.Instance(3)
+	// Past the instance's own check: straight to the host, as a resume
+	// that raced with the vault's open would be.
+	h := enclave.HostOf(in)
+	res, _, err := h.Open(f.ctx, &enclave.Job{Op: enclave.OpDeleteResume, VaultID: a.vid, UserGUID: a.guid})
+	if res != nil || err != nil || in.Manager(a.vid) == nil {
+		t.Fatal("the running vault was touched")
+	}
+	f.allThere(a)
+}

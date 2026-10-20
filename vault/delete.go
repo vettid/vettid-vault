@@ -226,6 +226,26 @@ func retryFor(ctx context.Context, budget, first, most time.Duration, fn func(ct
 	}
 }
 
+// holdForMark reports whether the outbox and the relay mailbox are held
+// (0.51.0, P19): a deletion is marked in the state and its step 1 has not
+// been completed (the header's mark and the host's ok, completeMark).
+// Every path that delivers checks it, not only the deletion's own: a
+// marking flush that failed leaves the notices and the requester's answer
+// queued in a vault that may still run (the queue op account, the
+// attachment runner, a push wake, a rotation).
+func (m *Manager) holdForMark() bool {
+	return m.st != nil && m.st.Deleting != nil && !m.markOK
+}
+
+// NoHostMark is Options.MarkDeleting for a vault that has no host to
+// record its deletion (development, tests): it answers ok at once. Without
+// any MarkDeleting a deletion is never recorded and the vault ends locked
+// (fail closed).
+func NoHostMark(context.Context, string) error { return nil }
+
+// errNoMarkDeleting: Options.MarkDeleting is not set.
+var errNoMarkDeleting = errors.New("vault: no MarkDeleting")
+
 // ErrNotMarked reports a deletion whose step 1 could not be completed: the
 // header's mark was not written, or the parent gave no ok to MarkDeleting
 // within its 2 minutes (0.51.0, §12.5). The vault is locked with the mark
@@ -255,14 +275,39 @@ func (m *Manager) completeMark(ctx context.Context) error {
 	}
 	mark := m.opt.MarkDeleting
 	if mark == nil {
-		return nil // no host to ask (development, tests)
+		mark = func(context.Context, string) error { return errNoMarkDeleting } // fail closed
 	}
 	r := m.deleteRetry()
 	vid := m.st.VaultID
 	if err := retryFor(ctx, r.Mark, r.First, r.Cap, func(ctx context.Context) error { return mark(ctx, vid) }); err != nil {
 		return ErrNotMarked
 	}
+	m.markOK = true
 	return nil
+}
+
+// Step 2's bounds (0.51.0): it gets at most step2For, and inside a caller's
+// deadline (a vault process's open or lock, which its supervisor bounds)
+// it runs only with step2Least left, so that the bound cannot end the
+// process in the middle of the notices. A step 2 that does not run is the
+// crash between steps 1 and 2 of §12.5: the deletion still converges.
+const (
+	step2For   = 60 * time.Second
+	step2Least = 10 * time.Second
+)
+
+// step2Context is step 2's context, or nil when step 2 is skipped.
+func step2Context(ctx context.Context) (context.Context, context.CancelFunc) {
+	end := time.Now().Add(step2For)
+	if d, ok := ctx.Deadline(); ok {
+		if time.Until(d) < step2Least {
+			return nil, nil
+		}
+		if d.Before(end) {
+			end = d
+		}
+	}
+	return context.WithDeadline(ctx, end)
 }
 
 // finishDelete completes step 1 (completeMark) and runs steps 2–5 after the
@@ -281,8 +326,11 @@ func (m *Manager) finishDelete(ctx context.Context) error {
 		return err
 	}
 	if m.relay != nil {
-		m.deleteMailbox(ctx)
-		m.drainOutbox(ctx)
+		if sctx, cancel := step2Context(ctx); sctx != nil {
+			m.deleteMailbox(sctx)
+			m.drainOutbox(sctx)
+			cancel()
+		}
 	}
 	vid, guid := m.st.VaultID, m.st.UserGUID
 	releases := []string{}
@@ -349,6 +397,9 @@ func (m *Manager) finishMarked(ctx context.Context) {
 // idempotent at the relay. On success every queued revocation and claim
 // deletion is done: they concerned this mailbox, which no longer exists.
 func (m *Manager) deleteMailbox(ctx context.Context) {
+	if m.holdForMark() {
+		return
+	}
 	if err := m.relay.DeleteMailbox(ctx); err != nil {
 		return // the revocations and claim deletions remain the fallback
 	}

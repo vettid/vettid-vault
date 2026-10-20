@@ -595,3 +595,110 @@ func TestRecoveryOpenStateMarked(t *testing.T) {
 		t.Fatalf("lifecycle %v", ev)
 	}
 }
+
+// P19 holds on every path that delivers, not only the deletion's own:
+// after a marking flush that failed, the queue op account, the attachment
+// runner and a rotation deliver nothing (no notice, no requester's
+// answer, no mailbox deletion) until step 1 is complete; then the
+// deletion runs as usual.
+func TestHeldUntilMarked(t *testing.T) {
+	d := newDevFixture(t)
+	c := d.addConnection("c1", 0x80)
+	d.m.opt.Store = &putFailStore{Store: d.store, key: store.HeaderKey(d.vid, testRelease.PCR0), n: 1}
+	marks := 0
+	d.m.opt.MarkDeleting = func(context.Context, string) error { marks++; return nil }
+	d.m.mu.Lock()
+	d.m.beginDelete("app", time.Now())
+	d.m.mu.Unlock()
+	if err := d.m.ProcessBatch(context.Background(), &fakeCollector{}, nil); err == nil {
+		t.Fatal("the header write did not fail")
+	}
+	sent := func() int {
+		d.relay.mu.Lock()
+		defer d.relay.mu.Unlock()
+		return len(d.relay.deposits) + d.relay.mailboxDeleted
+	}
+	before := sent()
+	// The queue op account (the host can send it at any time).
+	if err := d.m.SetAccount(context.Background(), snapshotAt(time.Now(), "")); err != nil {
+		t.Fatal(err)
+	}
+	// The attachment runner asking a connection for a missing blob.
+	const id = "01JB2Z6V9K3M4N5P6Q7R8S9T75"
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r := &attRunner{ctx: ctx, cancel: cancel, running: map[string]bool{}}
+	d.withLock(func(m *Manager) {
+		m.att = r
+		m.st.attach().Entries[id] = &AttEntry{ID: id, Dir: DirIn, Conn: c.ID, Msg: "m1", State: AttFetching}
+	})
+	d.m.attMaintain(r, &attWork{missing: []string{id}})
+	d.withLock(func(m *Manager) { m.att = nil })
+	if got := sent(); got != before || marks != 0 {
+		t.Fatalf("%d deliveries and %d marks before step 1 was complete", got-before, marks)
+	}
+	if d.depositsTo(d.devPeer.Relay.Mailbox) != 0 {
+		t.Fatal("the device was told")
+	}
+	// The next batch completes step 1, then step 2 delivers.
+	if err := d.m.ProcessBatch(context.Background(), &fakeCollector{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if marks != 1 || d.relay.mailboxDeleted != 1 || d.depositsTo(d.devPeer.Relay.Mailbox) == 0 {
+		t.Fatalf("not delivered after the mark: %d marks", marks)
+	}
+}
+
+// Without a MarkDeleting the deletion fails closed: never recorded, the
+// vault locked, nothing delivered. NoHostMark is the explicit opt-out.
+func TestNoMarkDeletingFailsClosed(t *testing.T) {
+	d := newDevFixture(t)
+	d.m.opt.MarkDeleting = nil
+	d.m.opt.DeleteRetry = fastRetry
+	d.m.mu.Lock()
+	d.m.beginDelete("app", time.Now())
+	d.m.mu.Unlock()
+	if err := d.m.ProcessBatch(context.Background(), &fakeCollector{}, nil); !errors.Is(err, ErrNotMarked) {
+		t.Fatalf("err %v", err)
+	}
+	if d.relay.mailboxDeleted != 0 || d.depositsTo(d.devPeer.Relay.Mailbox) != 0 || !exists(t, d.store, store.StateKey(d.vid)) {
+		t.Fatal("a deletion without a host mark went on")
+	}
+}
+
+// Step 2 runs inside a caller's deadline only with time left for it: with
+// less, it is skipped (the crash between steps 1 and 2) and step 4 still
+// runs; with enough, its context ends no later than the deadline.
+func TestStep2Deadline(t *testing.T) {
+	if c, _ := step2Context(context.Background()); c == nil {
+		t.Fatal("no deadline: skipped")
+	} else if d, ok := c.Deadline(); !ok || time.Until(d) > step2For {
+		t.Fatalf("deadline %v", d)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	c, _ := step2Context(ctx)
+	if d, _ := c.Deadline(); c == nil || time.Until(d) > 30*time.Second {
+		t.Fatal("not inside the caller's deadline")
+	}
+	short, cancel2 := context.WithTimeout(context.Background(), step2Least/2)
+	defer cancel2()
+	if c, _ := step2Context(short); c != nil {
+		t.Fatal("step 2 started without the time for it")
+	}
+	f := newDevFixture(t)
+	var events eventLog
+	f.m.opt.Lifecycle = events.add
+	f.m.mu.Lock()
+	f.m.beginDelete("app", time.Now())
+	f.m.mu.Unlock()
+	if err := f.m.ProcessBatch(short, &fakeCollector{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if f.relay.mailboxDeleted != 0 || f.depositsTo(f.devPeer.Relay.Mailbox) != 0 {
+		t.Fatal("step 2 ran")
+	}
+	if exists(t, f.store, store.StateKey(f.vid)) || !containsStr(events.all(), "deleted") {
+		t.Fatal("step 4 or 5 did not run")
+	}
+}

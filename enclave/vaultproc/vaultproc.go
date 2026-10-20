@@ -217,7 +217,11 @@ func (pr *proc) open(ctx context.Context, f [][]byte) [][]byte {
 	if err != nil {
 		return hostproto.Strings(hostproto.StatusError)
 	}
-	res, m, marker := core.Open(ctx, j)
+	// Inside the supervisor's bound (a converging unlock may finish a
+	// deletion, VAULT-MESSAGING 0.51.0 §12.5).
+	octx, ocancel := context.WithTimeout(ctx, vaultipc.OpenTimeout-vaultipc.DeadlineMargin)
+	res, m, marker := core.Open(octx, j)
+	ocancel()
 	running := "0"
 	if m != nil {
 		running = "1"
@@ -265,8 +269,19 @@ func (pr *proc) lock(ctx context.Context, reason string) [][]byte {
 	}
 	cancel()
 	<-done
-	if err := m.LockReason(ctx, reason); errors.Is(err, vault.ErrSplitBrain) {
+	if reason == vault.LockDelete {
+		var lcancel context.CancelFunc
+		ctx, lcancel = context.WithTimeout(ctx, vaultipc.DeleteLockTimeout-vaultipc.DeadlineMargin)
+		defer lcancel()
+	}
+	err := m.LockReason(ctx, reason)
+	switch {
+	case errors.Is(err, vault.ErrSplitBrain):
 		return hostproto.Strings(vaultipc.StatusSplitBrain)
+	case err != nil && reason == vault.LockDelete:
+		// 0.51.0: a deletion that ended locked (no host mark) or whose
+		// erase failed; the host's delete erases what is left.
+		return hostproto.Strings(vaultipc.StatusNotDeleted)
 	}
 	return hostproto.Strings(hostproto.StatusOK)
 }

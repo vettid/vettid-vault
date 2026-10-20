@@ -93,7 +93,7 @@ func (d *Device) keep(ctx context.Context, o strictjson.Object) error {
 
 // takeUTK returns an unexpired UTK, fetching a pool when empty.
 func (d *Device) takeUTK(ctx context.Context) (UTK, error) {
-	for attempt := 0; attempt < 2; attempt++ {
+	for attempt := 0; attempt < 3; attempt++ {
 		now := d.cfg.Now()
 		d.mu.Lock()
 		for len(d.st.UTKs) > 0 {
@@ -105,6 +105,9 @@ func (d *Device) takeUTK(ctx context.Context) (UTK, error) {
 			}
 		}
 		d.mu.Unlock()
+		if attempt == 2 {
+			break
+		}
 		// (0.52.0, §3.5.4) A top-up that returned no UTKs while this pool
 		// is empty means the vault's pool holds UTKs this device no longer
 		// has: resync once.

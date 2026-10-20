@@ -340,12 +340,23 @@ func TestNonHolderBlobIsClone(t *testing.T) {
 		{vault.TypeAccountNameSet, map[string]any{"password": pw, "pin": testPIN, "first_name": "Ada", "last_name": "King"}, ""},
 		{TypePINChange, map[string]any{"password": pw, "pin": testPIN, "new_pin": "246810", "new_unlock_secret": "AAAA"}, ""},
 		{"vault.delete", map[string]any{"password": pw, "pin": testPIN}, `"confirm":"` + vault.DeleteConfirmation + `"`},
+		{"credential.reset", map[string]any{"password": pw, "pin": testPIN, "new_password": pw}, ""},
+		{"device.transfer.approve", map[string]any{"password": pw, "pin": testPIN}, `"transfer_id":"` + testID + `"`},
+		{"device.transfer.approve", map[string]any{"password": pw, "pin": testPIN}, `"transfer_id":"` + testID + `","signer":"development"`},
 	} {
 		t.Run(tc.typ, func(t *testing.T) {
 			e := newEnv(t)
 			blob := e.create()
 			e.h.PINTries = 0 // credential.create verifies the PIN
 			e.h.AddDevice("dev-app2", vault.KindApp)
+			if tc.typ == "device.transfer.approve" {
+				// An open, scanned transfer of the holder's whose new app
+				// has another signer: the old-app check (not_found) and
+				// signer_unconfirmed would answer otherwise.
+				e.ok(e.raw("app", "device.transfer.create", `{}`))
+				e.h.Xfer.ID, e.h.Xfer.Scanned = testID, true
+				e.h.XferSigner, e.h.XferSignerChanged = "google_play", true
+			}
 			r := e.callBody("app2", tc.typ, blob, tc.payload, tc.extra)
 			if r.Code != "credential_frozen" || e.f.st.Alarm == nil || len(e.h.Alarms) != 1 || e.h.PINTries != 0 {
 				t.Fatalf("answer %q, alarm %v, host %v, PIN tries %d", r.Code, e.f.st.Alarm, e.h.Alarms, e.h.PINTries)
@@ -363,8 +374,11 @@ func TestNonHolderBlobIsClone(t *testing.T) {
 	}
 	// Without a live holder: no_holder, no alarm, no adoption.
 	e.f.st.Holder = ""
-	if r := e.call("app2", "credential.unlock", blob, map[string]any{"password": pw}); r.Code != "credential_required" || e.f.st.Alarm != nil || e.f.Holder() != "" {
-		t.Fatalf("no holder: %q", r.Code)
+	for _, typ := range []string{"credential.unlock", "credential.reset", "device.transfer.approve"} {
+		r := e.callBody("app2", typ, blob, map[string]any{"password": pw, "pin": testPIN, "new_password": pw}, `"transfer_id":"`+testID+`"`)
+		if r.Code != "credential_required" || string(r.Body) != string(vault.NoHolderBody) || e.f.st.Alarm != nil || e.f.Holder() != "" {
+			t.Fatalf("%s with no holder: %q %s", typ, r.Code, r.Body)
+		}
 	}
 	// The holder's unlock still works.
 	e = newEnv(t)

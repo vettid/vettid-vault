@@ -885,21 +885,25 @@ func (f *Feature) gate(s *vault.Session, typ string, blob []byte) error {
 	// vault.delete also comes from the enrolling app before any credential
 	// exists (§12.5); 0.16.0 removed the recovering app as an authority.
 	deleteAlt := typ == "vault.delete" && f.st.CEKSeed == nil
-	if holderOnly[typ] && from != f.st.Holder && !deleteAlt {
-		if blob != nil && f.st.CEKSeed != nil && f.holderLive(s) {
-			// §3.5.9 Detection before the holder-only rule (fail secure):
-			// a blob from an app that is not the live holder is a clone,
-			// whatever the type. Without a live holder there is no one to
-			// clone from: no_holder below.
-			return f.checkBlob(s, blob)
+	// credential.reset is the holder's only (0.15.2, 0.16.0), and so is a
+	// transfer's approval (§6.7.1: its own checks name the old app).
+	holderType := holderOnly[typ] || typ == "credential.reset"
+	if (holderType || typ == "device.transfer.approve") && from != f.st.Holder && !deleteAlt {
+		if blob != nil && f.st.CEKSeed != nil {
+			if f.holderLive(s) {
+				// §3.5.9 Detection before the holder-only rule (fail
+				// secure): a blob from an app that is not the live holder
+				// is a clone, whatever the type, before any other answer.
+				return f.checkBlob(s, blob)
+			}
+			return errNoHolder // no one to clone from
 		}
-		return f.notHolderErr(s)
+		if holderType {
+			return f.notHolderErr(s)
+		}
 	}
 	if typ == "credential.alarm.confirm" {
 		return nil
-	}
-	if typ == "credential.reset" && from != f.st.Holder {
-		return f.notHolderErr(s) // the holder's only (0.15.2, 0.16.0)
 	}
 	if a := f.st.Alarm; a != nil && !allowedFrozen[typ] {
 		if a.State == AlarmFrozen || !allowedRotation[typ] {

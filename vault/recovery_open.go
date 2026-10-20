@@ -3,9 +3,11 @@ package vault
 import (
 	"context"
 	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"time"
+	"unicode/utf8"
 
 	"github.com/vettid/vettid-vault/vault/counter"
 	"github.com/vettid/vettid-vault/vault/store"
@@ -210,7 +212,7 @@ func RecoveryOpen(ctx context.Context, p RecoveryOpenParams) (*Manager, *Recover
 	if p.HeavyPermit != nil {
 		var got bool
 		if rel, got = p.HeavyPermit(ctx); !got {
-			hdr.logRecovery(now, "recovery.open", r.ID+"/"+OpenBusy)
+			hdr.logRecovery(now, "recovery.open", openRef(r, OpenBusy))
 			return nil, out.fail(OpenBusy)
 		}
 	}
@@ -226,7 +228,7 @@ func RecoveryOpen(ctx context.Context, p RecoveryOpenParams) (*Manager, *Recover
 	}
 	if r.WrongAgain < recovery.MaxWrongAgain && len(r.LastWrong) > 0 && suite.Equal(tag, r.LastWrong) {
 		r.WrongAgain++
-		hdr.logRecovery(now, "recovery.open", r.ID+"/"+OpenWrongAgain)
+		hdr.logRecovery(now, "recovery.open", openRef(r, OpenWrongAgain))
 		w.write(ctx)
 		out.HeaderSeq = hdr.HeaderSeq
 		return nil, out.fail(OpenWrongAgain)
@@ -278,7 +280,7 @@ func RecoveryOpen(ctx context.Context, p RecoveryOpenParams) (*Manager, *Recover
 		return nil, out.fail(spendCode(sp.Outcome))
 	}
 	if sp.Outcome == counter.Lost {
-		hdr.logRecovery(now, "recovery.open", r.ID+"/"+OpenAttemptLost)
+		hdr.logRecovery(now, "recovery.open", openRef(r, OpenAttemptLost))
 		w.write(ctx)
 		out.HeaderSeq = hdr.HeaderSeq
 		return nil, out.fail(OpenAttemptLost)
@@ -286,7 +288,7 @@ func RecoveryOpen(ctx context.Context, p RecoveryOpenParams) (*Manager, *Recover
 	// Step 4b: decided against the attempt's own time.
 	cv, err := ctr.Confirm(ctx, g)
 	if err != nil {
-		hdr.logRecovery(now, "recovery.open", r.ID+"/"+OpenAttemptLost)
+		hdr.logRecovery(now, "recovery.open", openRef(r, OpenAttemptLost))
 		w.write(ctx)
 		return nil, out.fail(OpenAttemptLost)
 	}
@@ -295,7 +297,7 @@ func RecoveryOpen(ctx context.Context, p RecoveryOpenParams) (*Manager, *Recover
 		if !at.IsZero() {
 			out.RetryAt = at
 		}
-		hdr.logRecovery(now, "recovery.open", r.ID+"/"+verdictCode(vd))
+		hdr.logRecovery(now, "recovery.open", openRef(r, verdictCode(vd)))
 		w.write(ctx)
 		return nil, out.fail(verdictCode(vd))
 	}
@@ -308,7 +310,7 @@ func RecoveryOpen(ctx context.Context, p RecoveryOpenParams) (*Manager, *Recover
 	suite.Wipe(key)
 	if err != nil {
 		r.LastWrong, r.WrongAgain = tag, 0
-		hdr.logRecovery(now, "recovery.open", r.ID+"/"+OpenWrong)
+		hdr.logRecovery(now, "recovery.open", openRef(r, OpenWrong))
 		w.write(ctx)
 		out.HeaderSeq = hdr.HeaderSeq
 		return nil, out.fail(OpenWrong)
@@ -341,6 +343,47 @@ func RecoveryOpen(ctx context.Context, p RecoveryOpenParams) (*Manager, *Recover
 		m.st.PendingSucceed = []uint64{g, uint64(k)}
 	}
 	return m.completeRecoveryR(ctx, p, r, wrap, rk, pw, mv, out, now)
+}
+
+// maxOpenName is the most bytes of the attempting phone's name an open's
+// ref carries (§11.14.11, 0.50.0).
+const maxOpenName = 64
+
+// openRef is a noted open's ref (§11.14.11, 0.50.0):
+// `<recovery_id>/<outcome>`, with a third part, the attempting phone's
+// self-reported name (`app.name` of vault.recovery.register, §11.11.3),
+// when it has one after cleaning. The name is only recorded: nothing
+// reads it to decide anything.
+func openRef(r *RecoveryRecord, outcome string) string {
+	ref := r.ID + "/" + outcome
+	if r.App != nil {
+		if n := cleanOpenName(r.App.Name); n != "" {
+			ref += "/" + base64.RawURLEncoding.EncodeToString([]byte(n))
+		}
+	}
+	return ref
+}
+
+// cleanOpenName removes control characters (C0, DEL, C1) and any byte
+// that is not UTF-8 from a phone's name and cuts it to at most
+// maxOpenName bytes at a character boundary (§11.14.11, 0.50.0).
+func cleanOpenName(name string) string {
+	b := make([]byte, 0, maxOpenName)
+	for i := 0; i < len(name); {
+		c, size := utf8.DecodeRuneInString(name[i:])
+		i += size
+		if c == utf8.RuneError && size == 1 {
+			continue // not UTF-8
+		}
+		if c < 0x20 || (c >= 0x7f && c <= 0x9f) {
+			continue // C0, DEL, C1
+		}
+		if len(b)+size > maxOpenName {
+			break
+		}
+		b = utf8.AppendRune(b, c)
+	}
+	return string(b)
 }
 
 func verdictCode(vd string) string {

@@ -24,9 +24,7 @@ func TestAccountNameSet(t *testing.T) {
 	if r := e.raw("desktop", vault.TypeAccountNameSet, `{}`); r.Code != "forbidden" {
 		t.Fatalf("desktop: %q", r.Code)
 	}
-	if r := e.call("app2", vault.TypeAccountNameSet, blob, good); r.Code != "forbidden" {
-		t.Fatalf("another app: %q", r.Code)
-	}
+	// Another app's blob is a clone (0.52.0): TestNonHolderBlobIsClone.
 	// The 30 days, before the PIN: nothing counted.
 	e.h.AllowedAfter = e.clk.T.Add(48 * time.Hour)
 	r := e.call("app", vault.TypeAccountNameSet, blob, map[string]any{"pin": "000000", "password": "wrong password", "first_name": "Ada", "last_name": "King"})

@@ -513,14 +513,15 @@ func (m *Manager) hasGate() bool {
 	return false
 }
 
-// credentialReady reports whether no gate restricts the vault.
+// credentialReady reports whether no gate restricts the vault. A holder
+// that names no live app is no holder (§3.5.9, 0.52.0).
 func (m *Manager) credentialReady() bool {
 	for _, f := range m.features {
 		if g, ok := f.(CredentialGate); ok && !g.CredentialReady() {
 			return false
 		}
 	}
-	return true
+	return m.holderLive()
 }
 
 // backupCopy reports whether the vault keeps a backup copy of its

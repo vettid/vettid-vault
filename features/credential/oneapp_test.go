@@ -52,6 +52,8 @@ func TestOneHolder(t *testing.T) {
 	if r := e.unlock(blob, pw); !r.OK() {
 		t.Fatal(r.Code)
 	}
+	// (0.52.0) credential.unlock is holder-only, but another live app's
+	// blob is a clone first (§3.5.9 Detection).
 	if r := e.call("app2", "credential.unlock", blob, map[string]any{"password": pw}); r.Code != "credential_frozen" {
 		t.Fatalf("another app's blob: %q", r.Code)
 	}
@@ -268,8 +270,8 @@ func TestTransfer(t *testing.T) {
 // §6.7.1 step 3, §11.7.1 (0.27.0): a transfer to an app of another signer
 // needs the holder's confirmation, the new app's class in `signer`.
 // Without it, or with another class, the answer is signer_unconfirmed
-// before the UTK is spent and before the PIN is tried: nothing is spent
-// or counted, no owner check fails, and the transfer stays open. To the
+// before the PIN is tried: nothing is counted, no owner check fails, and
+// the transfer stays open. (0.52.0) The UTK is spent all the same. To the
 // same signer no `signer` is needed.
 func TestTransferSignerConfirmation(t *testing.T) {
 	e := newEnv(t)
@@ -297,8 +299,10 @@ func TestTransferSignerConfirmation(t *testing.T) {
 	if r := appr("246810", `,"signer":1`); r.Code != "bad_request" {
 		t.Fatalf("signer not a string: %q", r.Code)
 	}
-	if got := e.f.PoolSizeOf("dev-app"); got != pool {
-		t.Fatalf("a refused approval spent UTKs: pool %d, was %d", got, pool)
+	// (0.52.0, §3.5.4) Each refused approval spent its UTK: eight
+	// signer_unconfirmed and one bad_request.
+	if got := e.f.PoolSizeOf("dev-app"); got != pool-9 {
+		t.Fatalf("refused approvals: pool %d, was %d (each spends one)", got, pool)
 	}
 	if e.h.PINTries != 0 || len(e.h.CheckFailed) != 0 || e.f.CredentialVersion() != version {
 		t.Fatalf("a refused approval tried the PIN %d times, failed checks %v", e.h.PINTries, e.h.CheckFailed)
@@ -410,7 +414,9 @@ func TestVaultDelete(t *testing.T) {
 	if r := del("app", blob, map[string]any{"pin": "246810"}, vault.DeleteConfirmation); r.Code != "bad_request" {
 		t.Fatalf("no password: %q", r.Code)
 	}
-	if r := del("app2", blob, map[string]any{"pin": "246810", "password": pw}, vault.DeleteConfirmation); r.Code != "forbidden" {
+	// Another app: forbidden without a blob; with one, a clone (0.52.0,
+	// TestNonHolderBlobIsClone).
+	if r := del("app2", "", map[string]any{"pin": "246810", "password": pw}, vault.DeleteConfirmation); r.Code != "forbidden" {
 		t.Fatalf("another app: %q", r.Code)
 	}
 	if len(e.h.Deletions) != 0 {

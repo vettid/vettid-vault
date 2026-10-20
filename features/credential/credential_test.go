@@ -567,8 +567,9 @@ func TestHolderReset(t *testing.T) {
 			}
 		}
 	}
-	// Another app may not reset.
-	if r := e.call("app2", "credential.reset", nb, map[string]any{"pin": "246810", "password": "a brand new password", "new_password": pw}); r.Code != "forbidden" {
+	// Another app may not reset: its blob is a clone (0.52.0, §3.5.9
+	// Detection before the holder rule; TestNonHolderBlobIsClone).
+	if r := e.call("app2", "credential.reset", nb, map[string]any{"pin": "246810", "password": "a brand new password", "new_password": pw}); r.Code != "credential_frozen" || e.f.st.Alarm == nil {
 		t.Fatalf("another app: %q", r.Code)
 	}
 }

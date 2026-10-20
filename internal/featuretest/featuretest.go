@@ -60,6 +60,8 @@ type Host struct {
 	Chain     []json.RawMessage
 	// LastActive is OwnerLastActive's answer (§9.2 presence).
 	LastActive time.Time
+	// Scale is the release's time scale (vault.TimeScaleHost, §11.10.8).
+	Scale uint64
 	// One app per vault (vault.CredentialHost, §6.7.1, §3.5.9): the PIN
 	// VerifyPIN accepts, the transfer in progress, the transfers ended
 	// (id:reason) and the host alarms reported.
@@ -347,6 +349,9 @@ func (h *Host) AddDevice(id, kind string) {
 }
 
 func (h *Host) IdentityKey() ed25519.PublicKey { return h.IK }
+
+// TimeScale implements vault.TimeScaleHost: Scale, 1 when unset.
+func (h *Host) TimeScale() uint64 { return max(h.Scale, 1) }
 
 // identitySeed is the fake vault's identity key seed (all zero).
 func identitySeed() []byte { return make([]byte, 32) }

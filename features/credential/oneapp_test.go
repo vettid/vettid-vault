@@ -52,12 +52,9 @@ func TestOneHolder(t *testing.T) {
 	if r := e.unlock(blob, pw); !r.OK() {
 		t.Fatal(r.Code)
 	}
-	// (0.52.0) credential.unlock is holder-only: another live app's is
-	// forbidden; another app's blob to a credential operation is a clone.
-	if r := e.call("app2", "credential.unlock", blob, map[string]any{"password": pw}); r.Code != "forbidden" || len(e.h.Alarms) != 0 {
-		t.Fatalf("another app's unlock: %q %v", r.Code, e.h.Alarms)
-	}
-	if r := e.call("app2", "credential.rotate", blob, map[string]any{"password": pw}); r.Code != "credential_frozen" {
+	// (0.52.0) credential.unlock is holder-only, but another live app's
+	// blob is a clone first (§3.5.9 Detection).
+	if r := e.call("app2", "credential.unlock", blob, map[string]any{"password": pw}); r.Code != "credential_frozen" {
 		t.Fatalf("another app's blob: %q", r.Code)
 	}
 	if len(e.h.Alarms) != 1 || e.h.Alarms[0] != vault.AlarmCredentialClone {
@@ -417,7 +414,9 @@ func TestVaultDelete(t *testing.T) {
 	if r := del("app", blob, map[string]any{"pin": "246810"}, vault.DeleteConfirmation); r.Code != "bad_request" {
 		t.Fatalf("no password: %q", r.Code)
 	}
-	if r := del("app2", blob, map[string]any{"pin": "246810", "password": pw}, vault.DeleteConfirmation); r.Code != "forbidden" {
+	// Another app: forbidden without a blob; with one, a clone (0.52.0,
+	// TestNonHolderBlobIsClone).
+	if r := del("app2", "", map[string]any{"pin": "246810", "password": pw}, vault.DeleteConfirmation); r.Code != "forbidden" {
 		t.Fatalf("another app: %q", r.Code)
 	}
 	if len(e.h.Deletions) != 0 {

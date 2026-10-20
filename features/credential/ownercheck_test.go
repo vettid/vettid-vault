@@ -118,7 +118,7 @@ func TestOwnerCheckDuringAlarm(t *testing.T) {
 	e := newEnv(t)
 	e.h.PIN = "246810"
 	blob := e.create()
-	if r := e.call("app2", "credential.rotate", blob, map[string]any{"password": pw}); r.Code != "credential_frozen" {
+	if r := e.call("app2", "credential.unlock", blob, map[string]any{"password": pw}); r.Code != "credential_frozen" {
 		t.Fatalf("clone: %q", r.Code)
 	}
 	if e.f.AlarmState() != AlarmFrozen {

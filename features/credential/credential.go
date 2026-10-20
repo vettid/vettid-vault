@@ -711,7 +711,7 @@ func (f *Feature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner
 	if err != nil {
 		return nil, err
 	}
-	if err := f.gate(s, in.Type); err != nil {
+	if err := f.gate(s, in.Type, e.Blob); err != nil {
 		return nil, err
 	}
 	switch in.Type {
@@ -860,9 +860,10 @@ func (f *Feature) deleteAll(s *vault.Session) {
 
 // holderOnly are the types only the holder may send (§3.5.9): forbidden
 // when another live app holds the credential, credential_required
-// {reason: "no_holder"} when none does (0.52.0). A blob presented by
-// another app to the other credential operations is a clone (open).
-// (0.52.0) credential.unlock is among them, as §3.5.9 always said.
+// {reason: "no_holder"} when none does (0.52.0). A blob another app
+// presents, to these types or any other, is a clone (open): Detection
+// comes before forbidden (gate). (0.52.0) credential.unlock is among
+// them, as §3.5.9 always said.
 var holderOnly = map[string]bool{
 	"credential.get": true, "credential.ack": true, "credential.alarm.confirm": true, "credential.unlock": true,
 	"device.transfer.create": true, "device.transfer.reject": true, "vault.delete": true, vault.TypeOwnerCheck: true,
@@ -877,13 +878,21 @@ var (
 )
 
 // gate applies the holder, transfer and alarm rules of §3.5.9 and §6.7.1
-// before a type runs.
-func (f *Feature) gate(s *vault.Session, typ string) error {
+// before a type runs; blob is the blob the request presents (nil for
+// none).
+func (f *Feature) gate(s *vault.Session, typ string, blob []byte) error {
 	from := s.From().ID
 	// vault.delete also comes from the enrolling app before any credential
 	// exists (§12.5); 0.16.0 removed the recovering app as an authority.
 	deleteAlt := typ == "vault.delete" && f.st.CEKSeed == nil
 	if holderOnly[typ] && from != f.st.Holder && !deleteAlt {
+		if blob != nil && f.st.CEKSeed != nil && f.holderLive(s) {
+			// §3.5.9 Detection before the holder-only rule (fail secure):
+			// a blob from an app that is not the live holder is a clone,
+			// whatever the type. Without a live holder there is no one to
+			// clone from: no_holder below.
+			return f.checkBlob(s, blob)
+		}
 		return f.notHolderErr(s)
 	}
 	if typ == "credential.alarm.confirm" {

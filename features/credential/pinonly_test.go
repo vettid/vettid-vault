@@ -87,7 +87,7 @@ func TestSpendPINForExport(t *testing.T) {
 	}
 	// A clone alarm: the preview and the export get the freeze code;
 	// (0.52.0, §3.5.4) the export's UTK is spent first.
-	if r := e.call("app2", "credential.rotate", blob, map[string]any{"password": pw}); r.Code != "credential_frozen" {
+	if r := e.call("app2", "credential.unlock", blob, map[string]any{"password": pw}); r.Code != "credential_frozen" {
 		t.Fatalf("clone: %q", r.Code)
 	}
 	if r := featuretest.Call(a, e.h, e.clk.T, "app", "audit.export", `{"dry_run":true}`); r.Code != "credential_frozen" {

@@ -54,10 +54,10 @@ func TestRefusalsSpendTheUTK(t *testing.T) {
 			send: func(e *env, _ string, u utk) featuretest.Result {
 				return e.callWith("recovering-app", "credential.recover", "", map[string]any{"password": pw}, u)
 			}, code: "forbidden"},
-		{name: "holder-only unlock", kind: "app2",
+		{name: "another app's blob (clone)", kind: "app2",
 			send: func(e *env, blob string, u utk) featuretest.Result {
 				return e.callWith("app2", "credential.unlock", blob, map[string]any{"password": pw}, u)
-			}, code: "forbidden"},
+			}, code: "credential_frozen"},
 		{name: "holder-only type without a payload", kind: "app2",
 			send: func(e *env, _ string, u utk) featuretest.Result {
 				return e.raw("app2", "credential.get", `{"utk_id":"`+u.id+`"}`)
@@ -144,7 +144,7 @@ func TestUnreadableUTKSpendsNothing(t *testing.T) {
 		t.Fatal("an unreadable utk_id spent a UTK")
 	}
 	// Another app presents the holder's UTK: nothing leaves the holder's pool.
-	if r := e.raw("app2", "credential.unlock", `{"credential":"`+blob+`","utk_id":"`+u.id+`","sealed":"AAAA"}`); r.Code != "forbidden" {
+	if r := e.raw("app2", "credential.get", `{"utk_id":"`+u.id+`"}`); r.Code != "forbidden" {
 		t.Fatalf("another app: %q", r.Code)
 	}
 	if !e.inPool("dev-app", u.id) {
@@ -323,19 +323,52 @@ func TestHolderHardening(t *testing.T) {
 	}
 }
 
-// §3.5.9 (0.52.0): credential.unlock is holder-only: another live app's
-// is forbidden before its blob is opened (no clone alarm, nothing
-// counted); the holder's works.
-func TestUnlockHolderOnly(t *testing.T) {
+// §3.5.9 (0.52.0): Detection comes before the holder-only rule (fail
+// secure). A blob that another live app presents, to credential.unlock or
+// any other holder-only type that carries one, is a clone: the alarm
+// opens, the host is told and the answer is credential_frozen, with the
+// UTK spent first. The same app without a blob is forbidden; without a
+// live holder the answer is no_holder and nothing opens.
+func TestNonHolderBlobIsClone(t *testing.T) {
+	for _, tc := range []struct {
+		typ     string
+		payload map[string]any
+		extra   string
+	}{
+		{"credential.unlock", map[string]any{"password": pw}, ""},
+		{vault.TypeOwnerCheck, map[string]any{"password": pw, "pin": testPIN}, ""},
+		{vault.TypeAccountNameSet, map[string]any{"password": pw, "pin": testPIN, "first_name": "Ada", "last_name": "King"}, ""},
+		{TypePINChange, map[string]any{"password": pw, "pin": testPIN, "new_pin": "246810", "new_unlock_secret": "AAAA"}, ""},
+		{"vault.delete", map[string]any{"password": pw, "pin": testPIN}, `"confirm":"` + vault.DeleteConfirmation + `"`},
+	} {
+		t.Run(tc.typ, func(t *testing.T) {
+			e := newEnv(t)
+			blob := e.create()
+			e.h.PINTries = 0 // credential.create verifies the PIN
+			e.h.AddDevice("dev-app2", vault.KindApp)
+			r := e.callBody("app2", tc.typ, blob, tc.payload, tc.extra)
+			if r.Code != "credential_frozen" || e.f.st.Alarm == nil || len(e.h.Alarms) != 1 || e.h.PINTries != 0 {
+				t.Fatalf("answer %q, alarm %v, host %v, PIN tries %d", r.Code, e.f.st.Alarm, e.h.Alarms, e.h.PINTries)
+			}
+			if e.f.PoolSizeOf("dev-app2") != len(e.pools["app2"]) {
+				t.Fatalf("pool %d, the app holds %d: the UTK was not spent", e.f.PoolSizeOf("dev-app2"), len(e.pools["app2"]))
+			}
+		})
+	}
+	// Without a blob: forbidden, no alarm.
 	e := newEnv(t)
 	blob := e.create()
-	e.h.AddDevice("dev-app2", vault.KindApp)
-	if r := e.call("app2", "credential.unlock", blob, map[string]any{"password": "wrong password here"}); r.Code != "forbidden" {
-		t.Fatalf("another app: %q", r.Code)
+	if r := e.raw("app2", "credential.get", `{}`); r.Code != "forbidden" || e.f.st.Alarm != nil {
+		t.Fatalf("no blob: %q", r.Code)
 	}
-	if e.f.st.Alarm != nil || e.f.st.Failures != 0 {
-		t.Fatal("a forbidden unlock opened an alarm or counted a password")
+	// Without a live holder: no_holder, no alarm, no adoption.
+	e.f.st.Holder = ""
+	if r := e.call("app2", "credential.unlock", blob, map[string]any{"password": pw}); r.Code != "credential_required" || e.f.st.Alarm != nil || e.f.Holder() != "" {
+		t.Fatalf("no holder: %q", r.Code)
 	}
+	// The holder's unlock still works.
+	e = newEnv(t)
+	blob = e.create()
 	e.ok(e.unlock(blob, pw))
 }
 

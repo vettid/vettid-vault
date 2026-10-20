@@ -511,6 +511,16 @@ func (m *Manager) finishOpen(ctx context.Context, p RecoveryOpenParams, mv *Mani
 		m.dirty = true
 	}
 	m.retryPendingSucceed(ctx)
+	// After step 2, and after the success is sent again: the counter's
+	// record of this generation's attempts (§11.14.11, "a completed
+	// recovery"), once each; the next owner check adds only what is new.
+	// Written with the next flush; if that never happens the next owner
+	// check writes them instead.
+	if g := m.hdr.Rec.Generation; g > 0 {
+		if v, err := m.status(ctx, g); err == nil {
+			m.recordAttempts(v, now)
+		}
+	}
 	m.started = false
 	out.OK, out.Code = true, ""
 	out.StateSeq, out.HeaderSeq = m.st.StateSeq, m.hdr.HeaderSeq
@@ -585,6 +595,10 @@ func resumeRecovery(ctx context.Context, p RecoveryOpenParams, hdr *Header, hver
 		if cred == nil || cred.RecoverFromBackup(m.session(now), pw) != nil {
 			m.zeroize()
 			return nil, out.fail(OpenWrong)
+		}
+		// The event's recovered generation, as the first run set it.
+		if nx.Wrap != nil {
+			m.st.RecoveredGeneration = nx.Wrap.Generation
 		}
 		r := hdr.Recovery
 		if r != nil && r.App != nil {

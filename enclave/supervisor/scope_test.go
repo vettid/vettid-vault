@@ -308,3 +308,40 @@ func TestSelftestKeepsUnverifiedDocument(t *testing.T) {
 		t.Fatalf("document not kept: %q", r.AttestationDocument)
 	}
 }
+
+// VAULT-MESSAGING 0.51.0 §12.5, VAULT-HOST-PROTOCOL 0.1.14 §5.6: a vault
+// process's MarkDeleting reaches the parent only for its own vault, one
+// request per call; anything but the parent's ok is an error to it.
+func TestChannelMarkDeleting(t *testing.T) {
+	var asked []string
+	reply := hostproto.StatusOK
+	l := fakeParent(t, func(f *hostproto.Frame) [][]byte {
+		if f.Kind != hostproto.KindMarkDeleting {
+			return hostproto.Strings(hostproto.StatusInvalid)
+		}
+		asked = append(asked, string(f.Fields[0]))
+		return hostproto.Strings(reply)
+	})
+	s := &Supervisor{link: l, activity: map[string]time.Time{}}
+	p := &vproc{h: &procHost{s: s}, vaultID: "aaaa", userGUID: "u1"}
+	call := func(f ...string) string {
+		return string(p.handle(context.Background(), &hostproto.Frame{Kind: vaultipc.KindMarkDeleting, ID: 1, Fields: hostproto.Strings(f...)})[0])
+	}
+	if got := call("aaaa"); got != hostproto.StatusOK {
+		t.Fatalf("own vault: %s", got)
+	}
+	for _, f := range [][]string{{"bbbb"}, {}, {"aaaa", "x"}} {
+		if got := call(f...); got != vaultipc.StatusDenied {
+			t.Fatalf("%v: %s", f, got)
+		}
+	}
+	for _, r := range []string{hostproto.StatusError, hostproto.StatusInvalid, "other"} {
+		reply = r
+		if got := call("aaaa"); got != hostproto.StatusError {
+			t.Fatalf("parent %s: %s", r, got)
+		}
+	}
+	if len(asked) != 4 || asked[0] != "aaaa" {
+		t.Fatalf("the parent was asked %v", asked)
+	}
+}

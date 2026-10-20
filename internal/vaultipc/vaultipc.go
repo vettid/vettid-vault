@@ -25,6 +25,7 @@
 //	Transfer        [ticket, priority, wait_ms]   → [status]   (ok: admitted; busy: not within wait_ms)
 //	Counter         [op, key, a, b]               → [status, ...] (release R)
 //	HeavyPermit     [acquire | release]           → [status, "1" | "0"] (release R)
+//	MarkDeleting    [vault_id]                    → [status] (0.51.0; the process's own vault only)
 //
 // Vault → supervisor (notifications): Lifecycle [event, vault_id,
 // release, vault_version, state_version, app_key (SPKI DER or empty),
@@ -70,7 +71,8 @@ import (
 // 10: Lifecycle carries cancelled_recovery_id; the clear marker may be an
 // unlock's recovery_cancelled with cancelled_recovery_id or a cancel's
 // recovery_not_current (VAULT-MESSAGING 0.49.0).
-const Version = "10"
+// 11: MarkDeleting; the job op delete_resume (VAULT-MESSAGING 0.51.0).
+const Version = "11"
 
 // Supervisor → vault.
 const (
@@ -131,6 +133,12 @@ const (
 	// given only while free memory is at least the memory-pressure floor
 	// plus the derivation's need; "release" returns it.
 	KindHeavyPermit hostproto.Kind = 0x5c
+	// KindMarkDeleting [vault_id] → [ok | error]: the deletion's mark at
+	// the host (VAULT-MESSAGING 0.51.0 §12.5, VAULT-HOST-PROTOCOL §5.6),
+	// sent once the marking flush is stored. The supervisor refuses any
+	// vault_id but the process's own and passes the request to the
+	// parent, one try per request: the process retries.
+	KindMarkDeleting hostproto.Kind = 0x5d
 )
 
 // Counter operations (KindCounter).
@@ -156,7 +164,7 @@ const (
 )
 
 // VaultRequests is every request kind a vault process may send.
-var VaultRequests = []hostproto.Kind{KindStoreGet, KindStorePut, KindStoreDelete, KindAttestRecipient, KindAttestVault, KindKMS, KindHTTP, KindStatusList, KindPush, KindTransfer, KindCounter, KindHeavyPermit}
+var VaultRequests = []hostproto.Kind{KindStoreGet, KindStorePut, KindStoreDelete, KindAttestRecipient, KindAttestVault, KindKMS, KindHTTP, KindStatusList, KindPush, KindTransfer, KindCounter, KindHeavyPermit, KindMarkDeleting}
 
 // KMS operations.
 const (

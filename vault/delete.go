@@ -29,6 +29,10 @@ import (
 //     issued is revoked by jti and every peer's relay key by sub; open
 //     claims are deleted. A vault whose header says Deleting never runs
 //     again: any later unlock or recovery finishes the deletion instead.
+//     (0.51.0) Once the flush is stored the parent records the deletion on
+//     the vault row (MarkDeleting, "Mark at the host"); nothing of step 2
+//     leaves before its ok, and without one within 2 minutes the vault
+//     ends locked, still marked, with its outbox undelivered.
 //  2. relay and drain: the vault's own mailbox is deleted at the relay
 //     (RELAY-PROTOCOL 0.5.0 §6.10) with its messages, denylist, blobs and
 //     claims; the queued revocations and claim deletions concerned that
@@ -41,7 +45,9 @@ import (
 //     version), the state object, then the headers of every release the vault
 //     knew (its own last: it is the deletion marker), then the enclave's
 //     member index, each by a conditional delete; a missing object is
-//     already deleted.
+//     already deleted. (0.51.0) A store error is retried for 60 s; then
+//     the process ends without reporting, and the member API's resume
+//     (the queue op delete_resume) finishes the erase.
 //  5. report: the lifecycle event `deleted`, which the parent records and
 //     the member API turns into the member's email and the removal of the
 //     vault rows.
@@ -93,7 +99,17 @@ func (m *Manager) Deleting() bool {
 
 // beginDelete is step 1. It is idempotent.
 func (m *Manager) beginDelete(via string, now time.Time) {
-	if m.st == nil || m.st.Deleting != nil {
+	if m.st == nil {
+		return
+	}
+	if m.st.Deleting != nil {
+		// Already marked in the state (0.51.0, §12.5): a marking flush
+		// that stored the state and perhaps not the header. Step 1 is
+		// completed from here (the header, then the host's mark) and
+		// steps 2 to 5 follow; what the first run destroyed and queued is
+		// in the stored state.
+		m.hdr.Deleting = true
+		m.deletePending = true
 		return
 	}
 	// Release R (§11.14.3, §12.5): the recovery generation is closed at
@@ -156,11 +172,118 @@ func (m *Manager) denySubOnly(p *Peer, now time.Time) {
 	m.queueRevoke("sub", relayauth.EncodeKey(p.Relay.PK), now)
 }
 
-// finishDelete runs steps 2–5 after the marking flush. It returns nil
-// once the vault is gone (or another writer took it, ErrSplitBrain).
+// Retry schedules of a deletion (0.51.0, §12.5; VAULT-HOST-PROTOCOL §5.6,
+// §9): from 1 s, doubling to 15 s, for 2 minutes in all for the host's
+// mark and 60 s for a store error of step 4.
+const (
+	deleteRetryFirst = time.Second
+	deleteRetryCap   = 15 * time.Second
+	markDeletingFor  = 2 * time.Minute
+	eraseRetryFor    = 60 * time.Second
+)
+
+// DeleteRetry overrides a deletion's retry schedules (tests); a zero field
+// keeps its default.
+type DeleteRetry struct {
+	First, Cap  time.Duration
+	Mark, Erase time.Duration
+}
+
+func (m *Manager) deleteRetry() DeleteRetry {
+	r := DeleteRetry{First: deleteRetryFirst, Cap: deleteRetryCap, Mark: markDeletingFor, Erase: eraseRetryFor}
+	if o := m.opt.DeleteRetry; o != nil {
+		for _, f := range []struct{ to, from *time.Duration }{{&r.First, &o.First}, {&r.Cap, &o.Cap}, {&r.Mark, &o.Mark}, {&r.Erase, &o.Erase}} {
+			if *f.from != 0 {
+				*f.to = *f.from
+			}
+		}
+	}
+	return r
+}
+
+// retryFor calls fn until it succeeds or budget has passed since the first
+// call, waiting first, then twice as long each time up to most, between
+// calls. Every call's context ends with the budget. It returns the last
+// error.
+func retryFor(ctx context.Context, budget, first, most time.Duration, fn func(ctx context.Context) error) error {
+	deadline := time.Now().Add(budget)
+	wait := first
+	for {
+		cctx, cancel := context.WithDeadline(ctx, deadline)
+		err := fn(cctx)
+		cancel()
+		if err == nil {
+			return nil
+		}
+		left := time.Until(deadline)
+		if left <= 0 || ctx.Err() != nil {
+			return err
+		}
+		if !sleep(ctx, min(wait, left)) || time.Until(deadline) <= 0 {
+			return err
+		}
+		wait = min(2*wait, most)
+	}
+}
+
+// ErrNotMarked reports a deletion whose step 1 could not be completed: the
+// header's mark was not written, or the parent gave no ok to MarkDeleting
+// within its 2 minutes (0.51.0, §12.5). The vault is locked with the mark
+// stored where it was, and nothing of step 2 has left.
+var ErrNotMarked = errors.New("vault: deletion not recorded at the host; locked")
+
+// completeMark completes step 1 after the marking flush (0.51.0, §12.5):
+// the header records Deleting (the flush may have stored the state alone,
+// §13.2), then the parent records the deletion on the vault row
+// (MarkDeleting, VAULT-HOST-PROTOCOL §5.6), retried for 2 minutes. Only
+// then may step 2 begin: no device hears vault_deleted before the member
+// API can finish the deletion without it (P19).
+func (m *Manager) completeMark(ctx context.Context) error {
+	if !m.markStored {
+		if m.hdr.StateSeq < m.st.StateSeq {
+			m.hdr.StateSeq = m.st.StateSeq
+		}
+		if err := m.writeHeader(ctx); err != nil {
+			if errors.Is(err, ErrSplitBrain) {
+				return err
+			}
+			return ErrNotMarked
+		}
+		if !m.markStored {
+			return ErrNotMarked
+		}
+	}
+	mark := m.opt.MarkDeleting
+	if mark == nil {
+		return nil // no host to ask (development, tests)
+	}
+	r := m.deleteRetry()
+	vid := m.st.VaultID
+	if err := retryFor(ctx, r.Mark, r.First, r.Cap, func(ctx context.Context) error { return mark(ctx, vid) }); err != nil {
+		return ErrNotMarked
+	}
+	return nil
+}
+
+// finishDelete completes step 1 (completeMark) and runs steps 2–5 after the
+// marking flush. It returns nil once the vault is gone (or another writer
+// took it, ErrSplitBrain). Without the host's mark it locks the vault,
+// reports `locked` and returns ErrNotMarked; after a step 4 that failed
+// for 60 s it returns that error without reporting.
 func (m *Manager) finishDelete(ctx context.Context) error {
-	m.deleteMailbox(ctx)
-	m.drainOutbox(ctx)
+	if err := m.completeMark(ctx); err != nil {
+		if errors.Is(err, ErrSplitBrain) {
+			return err // zeroized by the conflicting write
+		}
+		vid := m.st.VaultID
+		m.zeroize()
+		m.report("locked", vid, m.opt.Release.PCR0)
+		return err
+	}
+	if m.relay != nil {
+		m.deleteMailbox(ctx)
+		m.drainOutbox(ctx)
+	}
 	vid, guid := m.st.VaultID, m.st.UserGUID
 	releases := []string{}
 	if mv := m.st.ReleaseMove; mv != nil {
@@ -181,18 +304,42 @@ func (m *Manager) finishDelete(ctx context.Context) error {
 	m.attWaitWrites(attWriteWait)
 	// Step 4: the attachment objects first, each at its recorded version,
 	// then the state and the headers. What an erase without the index
-	// misses, the parent sweeps after `deleted` (P15).
-	for _, o := range atts {
-		if err := deleteStored(ctx, m.opt.Store, o.Key, o.Ver); err != nil {
-			return err
+	// misses, the parent sweeps after `deleted` (P15). Every delete is
+	// idempotent, so a store error repeats the whole step (0.51.0: for up
+	// to 60 s; then the member API's resume finishes it).
+	r := m.deleteRetry()
+	err := retryFor(ctx, r.Erase, r.First, r.Cap, func(ctx context.Context) error {
+		for _, o := range atts {
+			if err := deleteStored(ctx, m.opt.Store, o.Key, o.Ver); err != nil {
+				return err
+			}
 		}
-	}
-	err := EraseStored(ctx, m.opt.Store, vid, guid, releases, own, stateVer, headerVer)
+		return EraseStored(ctx, m.opt.Store, vid, guid, releases, own, stateVer, headerVer)
+	})
 	if err != nil {
 		return err
 	}
 	m.report("deleted", vid, m.opt.Release.PCR0)
 	return nil
+}
+
+// finishMarked handles a stored state that records Deleting, found by an
+// unlock or a recovery's open (0.51.0, §12.5 "A state that records
+// deleting never runs"): the vault is not started. Step 1 is completed
+// (the header records Deleting, then the host's mark) and steps 2 to 5 run
+// with the keys the state holds, so the notices and the mailbox deletion
+// still happen. Nothing reports `unlocked`; the caller answers as for a
+// missing vault. The manager is locked afterwards.
+func (m *Manager) finishMarked(ctx context.Context) {
+	m.beginDelete("", m.now())
+	m.deletePending = false
+	if err := m.loadKeys(); err == nil && m.opt.Relay != nil {
+		m.relay = m.opt.Relay(m.st.Relay.URL, m.keys.relay)
+	}
+	_ = m.finishDelete(ctx)
+	if !m.locked {
+		m.zeroize()
+	}
 }
 
 // deleteMailbox deletes the vault's relay mailbox (step 2), once: the relay
@@ -289,3 +436,100 @@ func EraseStored(ctx context.Context, st store.Store, vaultID, userGUID string, 
 // ErrDeleted reports a vault whose header records a deletion: it was
 // finished instead of opened.
 var ErrDeleted = errors.New("vault: deleted")
+
+// Outcomes of ResumeDelete (0.51.0, §12.5 "Without the app: the resume"),
+// for the enclave's log. Only ResumeFinished and ResumeErased are
+// reported `deleted`.
+const (
+	// ResumeFinished: the release's own header records Deleting; step 4
+	// ran as for a header that records it.
+	ResumeFinished = "finished"
+	// ResumeErased: neither that header nor the state exists; the member
+	// index was erased if it still named the vault (an erase that ran and
+	// was not reported).
+	ResumeErased = "erased"
+	// ResumeLive: the header records no deletion. Nothing is touched.
+	ResumeLive = "live"
+	// ResumeState: no header for this release but a state object (the
+	// vault may live under another release). Nothing is touched.
+	ResumeState = "state"
+	// ResumeUnreadable: the header (or whether one exists) could not be
+	// read. Nothing is touched.
+	ResumeUnreadable = "unreadable"
+	// ResumeFailed: an erase that a resume may do failed; the next resume
+	// tries again. Not reported.
+	ResumeFailed = "erase_failed"
+)
+
+// ResumeDelete is the enclave's side of the queue operation delete_resume
+// (0.51.0, §12.5, VAULT-HOST-PROTOCOL §6.1) for a vault that does not run
+// on the instance (the caller checks that first). It decides from what it
+// can read alone: the message is not an authority to delete (P20). It
+// erases only a vault whose header sealed to release, unsealed here,
+// records Deleting (a deletion the vault itself authorised and began), or
+// whose header and state are both gone. userGUID is the queue message's,
+// used only where there is no header to name the member, and then only
+// for an index object that names this vault. The caller reports `deleted`
+// for ResumeFinished and ResumeErased.
+func ResumeDelete(ctx context.Context, st store.Store, s Sealer, release, vaultID, userGUID string) string {
+	hkey, skey := store.HeaderKey(vaultID, release), store.StateKey(vaultID)
+	if !store.ValidKey(hkey) || !store.ValidKey(skey) {
+		return ResumeUnreadable
+	}
+	blob, _, err := st.Get(ctx, hkey)
+	if errors.Is(err, store.ErrNotFound) {
+		switch _, _, serr := st.Get(ctx, skey); {
+		case serr == nil:
+			return ResumeState
+		case !errors.Is(serr, store.ErrNotFound):
+			return ResumeUnreadable
+		}
+		if eraseIndex(ctx, st, vaultID, userGUID) != nil {
+			return ResumeFailed
+		}
+		return ResumeErased
+	}
+	if err != nil {
+		return ResumeUnreadable
+	}
+	h, err := PeekHeader(ctx, s, blob, vaultID, release)
+	if err != nil {
+		return ResumeUnreadable
+	}
+	if !h.Deleting {
+		return ResumeLive
+	}
+	// As an unlock that finds the marker does (DEK-less: its own release's
+	// header, last; the parent sweeps the attachment objects after
+	// `deleted`, P15).
+	if EraseStored(ctx, st, vaultID, h.UserGUID, nil, release, "", "") != nil {
+		return ResumeFailed
+	}
+	return ResumeFinished
+}
+
+// eraseIndex deletes the member index object of userGUID if it names
+// vaultID; a missing object counts as deleted.
+func eraseIndex(ctx context.Context, st store.Store, vaultID, userGUID string) error {
+	if userGUID == "" {
+		return nil
+	}
+	k := store.UserKey(UserIndexHash(userGUID))
+	if !store.ValidKey(k) {
+		return nil
+	}
+	b, v, err := st.Get(ctx, k)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if string(b) != vaultID {
+		return nil
+	}
+	if err := st.Delete(ctx, k, v); err != nil && !errors.Is(err, store.ErrNotFound) {
+		return err // a conflict: written since; the next resume reads it again
+	}
+	return nil
+}

@@ -99,6 +99,20 @@ func (s chanStore) Delete(ctx context.Context, key string, ifMatch store.Version
 	return errChan
 }
 
+// markDeleting asks the supervisor, and through it the parent, to record
+// the vault's deletion (VAULT-MESSAGING 0.51.0 §12.5 "Mark at the host");
+// nil only on the parent's ok. The vault retries.
+func (ch channel) markDeleting(ctx context.Context, vaultID string) error {
+	r, err := ch.call(ctx, vaultipc.KindMarkDeleting, []byte(vaultID))
+	if err != nil {
+		return err
+	}
+	if !ok(r, 1) {
+		return errChan
+	}
+	return nil
+}
+
 // chanKMS forwards KMS calls; the data keys come back encrypted to this
 // process's own Recipient key.
 type chanKMS struct{ ch channel }

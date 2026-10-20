@@ -130,6 +130,14 @@ type Options struct {
 	// It divides the waits of timescale.go when each starts, and is
 	// reported in vault.status and a transfer bundle. Zero: 1.
 	TimeScale uint64
+	// MarkDeleting asks the parent to record a deletion whose marking
+	// flush is stored (0.51.0, §12.5 "Mark at the host",
+	// VAULT-HOST-PROTOCOL §5.6) and returns nil on its ok; the vault
+	// retries it for 2 minutes and delivers nothing of step 2 before.
+	// Nil: there is no host to ask (development, tests), taken as ok.
+	MarkDeleting func(ctx context.Context, vaultID string) error
+	// DeleteRetry overrides a deletion's retry schedules (tests).
+	DeleteRetry *DeleteRetry
 }
 
 // LifecycleEvent is reported to the parent, which writes it to the vault
@@ -255,6 +263,9 @@ type Manager struct {
 	// after the flush (§12.5).
 	deletePending bool
 	deleteRequest string
+	// markStored: a header that records Deleting is stored (0.51.0,
+	// §12.5: the host's mark and step 2 wait for it).
+	markStored bool
 
 	locked      bool
 	lockPending bool
@@ -809,6 +820,9 @@ func (m *Manager) writeHeaderWith(ctx context.Context, features bool) error {
 		return err
 	}
 	m.headerVer = v
+	if m.hdr.Deleting {
+		m.markStored = true
+	}
 	return nil
 }
 
@@ -1033,7 +1047,9 @@ func (m *Manager) deleteLocked(ctx context.Context, via string) error {
 		if errors.Is(err, ErrSplitBrain) {
 			return err
 		}
-		// Not marked: finish anyway; erasing needs no marker.
+		// The state may not be marked: finishDelete still writes the
+		// header's mark and asks the host before anything of step 2
+		// (0.51.0), and erasing needs no marker.
 	}
 	return m.finishDelete(ctx)
 }
@@ -1041,6 +1057,9 @@ func (m *Manager) deleteLocked(ctx context.Context, via string) error {
 func (m *Manager) lockLocked(ctx context.Context) error {
 	if m.locked {
 		return nil
+	}
+	if m.st != nil && m.st.Deleting != nil {
+		return m.lockDeleting(ctx)
 	}
 	// Deliver what is queued first (an interrupted batch may have left
 	// deposits, such as an hs.fin, in the outbox), then flush.
@@ -1057,6 +1076,25 @@ func (m *Manager) lockLocked(ctx context.Context) error {
 		return err
 	}
 	m.pushLockWake(m.sendLocking(ctx)) // §14.2 trigger 3, before zeroizing
+	vid := m.st.VaultID
+	m.zeroize()
+	m.report("locked", vid, m.opt.Release.PCR0)
+	return err
+}
+
+// lockDeleting locks a vault whose deletion is marked and whose step 2 has
+// not run (a marking flush that failed, a lock that came first; 0.51.0,
+// §12.5): nothing of the deletion leaves, neither the outbox (its notices)
+// nor vault.locking. The mark is flushed if it is not stored, and the
+// next unlock finishes the deletion.
+func (m *Manager) lockDeleting(ctx context.Context) error {
+	var err error
+	if m.dirty || !m.markStored {
+		err = m.persist(ctx, false)
+		if errors.Is(err, ErrSplitBrain) {
+			return err
+		}
+	}
 	vid := m.st.VaultID
 	m.zeroize()
 	m.report("locked", vid, m.opt.Release.PCR0)

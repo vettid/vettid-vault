@@ -4,6 +4,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strconv"
 	"testing"
 	"time"
 
@@ -19,7 +20,7 @@ import (
 // unlocked or moved event only, as a ULID.
 func TestLifecycleCancelledRecoveryIDCrossesVaultIPC(t *testing.T) {
 	const rid = "01JB2Z6V9K3M4N5P6Q7R8S9T32"
-	if vaultipc.Version != "10" {
+	if v, err := strconv.Atoi(vaultipc.Version); err != nil || v < 10 { // 10 brought the field (11: MarkDeleting)
 		t.Fatalf("vaultipc version %s", vaultipc.Version)
 	}
 	a, b := net.Pipe()

@@ -278,6 +278,28 @@ func TestAWSBackend(t *testing.T) {
 		nc.Value["first_name"].(*ddbS).Value != "Ada" || nc.Value["at"] == nil || !nit["name_change_pending"].(*ddbtypes.AttributeValueMemberBOOL).Value {
 		t.Fatalf("name_change %v %v", nit["name_change"], nit["name_change_pending"])
 	}
+	// 0.51.0 (VAULT-HOST-PROTOCOL 0.1.14 §5.6, §6.1): deleting_at alone,
+	// whatever the lease, never moved, refused on a missing row; an
+	// unlocked event removes it.
+	if err := a.MarkDeleting(ctx, "v1", time.Unix(1000, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.MarkDeleting(ctx, "v1", time.Unix(2000, 0)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("second mark: %v", err)
+	}
+	if err := a.MarkDeleting(ctx, "nope", time.Unix(2000, 0)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("missing row: %v", err)
+	}
+	it, _ = memberapitest.VaultItem(ctx, db, tn.Vaults, "v1")
+	if da, _ := it["deleting_at"].(*ddbtypes.AttributeValueMemberN); da == nil || da.Value != "1000" {
+		t.Fatalf("deleting_at %v", it["deleting_at"])
+	}
+	if err := a.Lifecycle(ctx, Lifecycle{Event: "unlocked", VaultID: "v1", Release: pcr, VaultVersion: pcr, StateVersion: 1}, "i9", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if it, _ = memberapitest.VaultItem(ctx, db, tn.Vaults, "v1"); it["deleting_at"] != nil {
+		t.Fatalf("deleting_at after unlocked: %v", it["deleting_at"])
+	}
 	// A deletion (§12.5): state deleted and the member's notice.
 	if err := a.Lifecycle(ctx, Lifecycle{Event: "deleted", VaultID: "v1", Release: pcr, VaultVersion: pcr, StateVersion: 1}, "i9", time.Now()); err != nil {
 		t.Fatal(err)
@@ -285,6 +307,9 @@ func TestAWSBackend(t *testing.T) {
 	it, _ = memberapitest.VaultItem(ctx, db, tn.Vaults, "v1")
 	if it["state"].(*ddbS).Value != "deleted" || it["alarm"].(*ddbtypes.AttributeValueMemberM).Value["kind"].(*ddbS).Value != "vault_deleted" {
 		t.Fatalf("deleted: %v", it)
+	}
+	if err := a.MarkDeleting(ctx, "v1", time.Unix(3000, 0)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("mark of a deleted row: %v", err)
 	}
 	// P15: the sweep is recorded pending with the deletion and resumed
 	// from it; its end removes the record.

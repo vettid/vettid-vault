@@ -31,7 +31,16 @@ const (
 	// (0.15.0, §11.13): no envelope, no lease; dropped without a running
 	// vault.
 	OpAccount = "account"
+	// OpDeleteResume finishes a deletion that the vault itself marked and
+	// that stopped before its `deleted` report (0.51.0, §11.5, §12.5): no
+	// envelope, no lease, answered done. It is never an authority to
+	// delete (VAULT-HOST-PROTOCOL P20).
+	OpDeleteResume = "delete_resume"
 )
+
+// typeDeleteResume is the job type of a delete_resume inside the enclave
+// (supervisor to vault process only; no app sends it).
+const typeDeleteResume = "vault.delete_resume"
 
 // Response statuses.
 const (
@@ -332,7 +341,7 @@ func ParseQueueMessage(b []byte) (*QueueMessage, error) {
 		if q.Envelope, err = strictjson.DecodeStd(env, -1); err != nil || len(q.Envelope) != envelope.OverheadSealed+altchan.RequestPaddedSize {
 			return nil, ErrMalformed
 		}
-	case OpLock, OpDelete, OpRecovery, OpRecoveryCancel, OpAccount:
+	case OpLock, OpDelete, OpDeleteResume, OpRecovery, OpRecoveryCancel, OpAccount:
 		if envOK || kidOK {
 			return nil, ErrMalformed
 		}
@@ -377,7 +386,8 @@ func hasEnvelope(op string) bool {
 // requestType is the inner type of each op's request.
 var requestType = map[string]string{OpEnroll: altchan.TypeEnroll, OpUnlock: altchan.TypeUnlock,
 	OpRecovery: altchan.TypeRecoveryRequest, OpRecoveryCancel: altchan.TypeRecoveryCancel,
-	OpRecoveryRegister: altchan.TypeRecoveryRegister, OpRecoveryOpen: altchan.TypeRecoveryOpen}
+	OpRecoveryRegister: altchan.TypeRecoveryRegister, OpRecoveryOpen: altchan.TypeRecoveryOpen,
+	OpDeleteResume: typeDeleteResume}
 
 // Response is what the enclave returns for a queue message. The parent
 // writes Envelope to the response slot (§11.5); the API and parent see

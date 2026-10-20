@@ -43,6 +43,9 @@ type CoreDeps struct {
 	Features  func() []vault.Feature
 	Lifecycle func(vault.LifecycleEvent)
 	Now       func() time.Time
+	// Log, if set, records what a job did where the answer does not say
+	// (a delete_resume's outcome, 0.51.0); values carry no secrets.
+	Log func(msg string, args ...any)
 }
 
 // Core runs enroll and unlock (§11.3, §11.4, §11.10.4) for requests the
@@ -103,6 +106,8 @@ func (c *Core) Open(ctx context.Context, j *Job) (res []byte, m *vault.Manager, 
 		res, marker = c.recoveryRegister(ctx, j)
 	case OpRecoveryOpen:
 		res, marker = c.recoveryOpen(ctx, j, &m)
+	case OpDeleteResume:
+		c.deleteResume(ctx, j)
 	default:
 		res = opaque()
 	}
@@ -209,6 +214,23 @@ func (c *Core) checkSigner(b *devattest.Binding, chain [][]byte) (*devattest.Bin
 		return nil, &vault.SignerRefused{Reason: reason}
 	}
 	return b, nil
+}
+
+// deleteResume runs a delete_resume for a vault that does not run on the
+// instance (0.51.0, §12.5): vault.ResumeDelete decides from the header
+// sealed to this release, unsealed here, and the store; `deleted` is
+// reported only when it erased. There is no answer to seal.
+func (c *Core) deleteResume(ctx context.Context, j *Job) {
+	sealer := c.sealerFor("", c.meas.PCR0)
+	defer sealer.Destroy()
+	what := vault.ResumeDelete(ctx, c.st, sealer, c.meas.PCR0, j.VaultID, j.UserGUID)
+	if c.d.Log != nil {
+		c.d.Log("delete_resume", "vault_id", j.VaultID, "outcome", what)
+	}
+	if what == vault.ResumeFinished || what == vault.ResumeErased {
+		c.emit(vault.LifecycleEvent{Event: "deleted", VaultID: j.VaultID, Release: c.meas.PCR0, VaultVersion: c.meas.PCR0,
+			StateVersion: vault.StateVersion})
+	}
 }
 
 func (c *Core) emit(ev vault.LifecycleEvent) {

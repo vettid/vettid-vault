@@ -494,6 +494,10 @@ func (h *procHost) Lock(ctx context.Context, id string) (bool, error) {
 	return h.LockReason(ctx, id, "")
 }
 
+// deleteLockExtra is the time a lock with the reason delete has beyond
+// LockTimeout: the host's mark (2 minutes) and step 4's retries (60 s).
+const deleteLockExtra = 3 * time.Minute
+
 // LockReason implements enclave.Host: Lock with a reason in vault.locking.
 func (h *procHost) LockReason(ctx context.Context, id, reason string) (bool, error) {
 	h.mu.Lock()
@@ -506,7 +510,13 @@ func (h *procHost) LockReason(ctx context.Context, id, reason string) (bool, err
 	p.mu.Lock()
 	p.stopping = true
 	p.mu.Unlock()
-	lctx, cancel := context.WithTimeout(ctx, h.cfg.LockTimeout)
+	d := h.cfg.LockTimeout
+	if reason == vault.LockDelete {
+		// A deletion may wait 2 minutes for the host's mark and retry its
+		// erase for 60 s more (VAULT-MESSAGING 0.51.0 §12.5).
+		d += deleteLockExtra
+	}
+	lctx, cancel := context.WithTimeout(ctx, d)
 	r, err := p.conn.Call(lctx, vaultipc.KindLock, []byte(reason))
 	cancel()
 	if err != nil {
@@ -780,6 +790,8 @@ func (p *vproc) handle(ctx context.Context, f *hostproto.Frame) [][]byte {
 		return p.counterCall(ctx, f.Fields)
 	case vaultipc.KindHeavyPermit:
 		return p.heavyCall(f.Fields)
+	case vaultipc.KindMarkDeleting:
+		return p.markDeleting(ctx, f.Fields)
 	case vaultipc.KindStatusList:
 		b, at, ok := s.status.rawList()
 		if !ok {
@@ -790,6 +802,21 @@ func (p *vproc) handle(ctx context.Context, f *hostproto.Frame) [][]byte {
 	// Every other kind (including Open and Lock, which only the
 	// supervisor sends) is refused.
 	return deny()
+}
+
+// markDeleting passes a vault process's MarkDeleting to the parent
+// (VAULT-MESSAGING 0.51.0 §12.5, VAULT-HOST-PROTOCOL §5.6): only for the
+// process's own vault, one request (60 s at most) per call; the process
+// retries anything but ok.
+func (p *vproc) markDeleting(ctx context.Context, f [][]byte) [][]byte {
+	if len(f) != 1 || string(f[0]) != p.vaultID {
+		return deny()
+	}
+	r, err := p.h.s.link.call(ctx, hostproto.KindMarkDeleting, []byte(p.vaultID))
+	if err != nil || len(r) != 1 || string(r[0]) != hostproto.StatusOK {
+		return hostproto.Strings(hostproto.StatusError)
+	}
+	return hostproto.Strings(hostproto.StatusOK)
 }
 
 func storeReply(err error, ok func() [][]byte) [][]byte {

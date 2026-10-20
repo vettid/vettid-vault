@@ -301,6 +301,8 @@ type VaultRow struct {
 	// host wrote it from an unlocked or moved event (0.49.0).
 	RecoveryCancelledID string
 	RecoveryCancelledAt int64
+	// DeletingAt is deleting_at, the deletion's mark (0.51.0); 0 absent.
+	DeletingAt int64
 }
 
 // SlotRow is a response slot.
@@ -322,6 +324,9 @@ type Tables struct {
 	slots     map[string]*SlotRow
 	ids       int
 	events    map[string][]string
+	// MarkDeletingErr, if set, fails MarkDeleting without writing
+	// (tests).
+	MarkDeletingErr error
 }
 
 // LifecycleEvents returns the lifecycle events the parent wrote for a
@@ -471,6 +476,22 @@ func (t *Tables) RenewLease(_ context.Context, vaultID, me string, expires int64
 	return nil
 }
 
+// MarkDeleting implements parent.Tables as parent.AWS: deleting_at alone,
+// whatever the lease, on a row that exists, is not deleted and has none.
+func (t *Tables) MarkDeleting(_ context.Context, vaultID string, now time.Time) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.MarkDeletingErr != nil {
+		return t.MarkDeletingErr
+	}
+	r := t.vaults[vaultID]
+	if r == nil || r.State == "deleted" || r.DeletingAt != 0 {
+		return parent.ErrConflict
+	}
+	r.DeletingAt = now.Unix()
+	return nil
+}
+
 // ReleaseLease implements parent.Tables.
 func (t *Tables) ReleaseLease(_ context.Context, vaultID, me string, now time.Time) error {
 	t.mu.Lock()
@@ -558,6 +579,7 @@ func (t *Tables) Lifecycle(_ context.Context, ev parent.Lifecycle, me string, no
 		}
 	case "unlocked":
 		r.State = "unlocked"
+		r.DeletingAt = 0 // 0.51.0: removed in the same update, as parent.AWS
 	case "locked", "deleted":
 		r.State = ev.Event
 		if !(ev.Event == "locked" && ev.KeepLease) {

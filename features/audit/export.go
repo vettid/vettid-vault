@@ -34,15 +34,16 @@ const KindExported = "audit.exported"
 var exportFormats = map[string]bool{"csv": true, "json": true}
 
 // Credential is the credential feature: audit.export is the holder's only,
-// refused during a clone alarm before the UTK is spent, and carries the
-// PIN alone sealed to a UTK (§3.5.4, §3.5.9). It must not call back into
-// this feature.
+// refused during a clone alarm, and carries the PIN alone sealed to a UTK
+// (§3.5.4, §3.5.9); (0.52.0) the UTK it presents is spent before any
+// check. It must not call back into this feature.
 type Credential interface {
-	// HolderGate: forbidden unless the sender is the holder's app; the
-	// freeze code while a clone alarm is open. It spends nothing.
-	HolderGate(s *vault.Session) error
-	// SpendPIN runs HolderGate, spends the UTK and opens the sealed
-	// {pin}; the caller wipes the PIN.
+	// HolderGate spends the UTK the request presents, then answers
+	// forbidden unless the sender is the holder's app (no_holder when
+	// none is), and the freeze code while a clone alarm is open.
+	HolderGate(s *vault.Session, in *envelope.Inner) error
+	// SpendPIN runs HolderGate's checks and opens the sealed {pin} with
+	// the spent UTK; the caller wipes the PIN.
 	SpendPIN(s *vault.Session, in *envelope.Inner, utkID string, sealed []byte) ([]byte, error)
 }
 
@@ -71,8 +72,9 @@ type exportReq struct {
 }
 
 // parseExport parses an audit.export body. A body whose envelope members
-// (dry_run, utk_id, sealed) cannot be read is bad_request at once (there is
-// no UTK to spend); any other shape error is kept in shape.
+// (dry_run, utk_id, sealed) cannot be read is bad_request at once (0.52.0:
+// a readable utk_id was spent before, §3.5.4); any other shape error is
+// kept in shape.
 func parseExport(body []byte) (*exportReq, error) {
 	o, err := strictjson.ParseObject(body)
 	if err != nil {
@@ -196,15 +198,16 @@ func (c *exportCount) members(b *strictjson.Builder) {
 }
 
 // export handles audit.export (§10.9, 0.22.0). The order is the spec's:
-// the clone alarm (before the UTK), the UTK, the request's shape,
-// not_found, the PIN backoff, the PIN.
+// (0.52.0) the spend of a presented UTK, the holder and the clone alarm,
+// the payload, the request's shape, not_found, the PIN backoff, the PIN.
 func (f *Feature) export(s *vault.Session, in *envelope.Inner) (json.RawMessage, error) {
 	if f.cred == nil {
 		return nil, errForbidden
 	}
-	// Holder only; the clone alarm refuses the preview and the export
-	// before anything else, the UTK unspent (§3.5.9).
-	if err := f.cred.HolderGate(s); err != nil {
+	// The UTK a request presents is spent first (§3.5.4, 0.52.0); then
+	// holder only, and the clone alarm refuses the preview and the export
+	// (§3.5.9).
+	if err := f.cred.HolderGate(s, in); err != nil {
 		return nil, err
 	}
 	r, err := parseExport(in.Body)
@@ -224,7 +227,7 @@ func (f *Feature) export(s *vault.Session, in *envelope.Inner) (json.RawMessage,
 		c.members(b)
 		return b.Bytes(), nil
 	}
-	// Step 1: the UTK, spent whatever happens next; the payload is {pin}.
+	// Step 1: the payload, {pin}, opened with the UTK spent above.
 	pin, err := f.cred.SpendPIN(s, in, r.utkID, r.sealed)
 	if err != nil {
 		return nil, err

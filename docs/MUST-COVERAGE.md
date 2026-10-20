@@ -28,7 +28,9 @@ volatile `message.list` and `message.get`, and `message.list` pages; for
 0.32.0 release A: message attachments (with VAULT-HOST-PROTOCOL 0.1.9
 P15 and RELAY-PROTOCOL 0.9.2–0.9.4's blob API); for 0.34.0 release R:
 `attempt_used` and the release capabilities; for 0.40.0: the bound on
-`device.session.request`; for 0.43.0: the staging time scale; and,
+`device.session.request`; for 0.43.0: the staging time scale; for
+0.52.0: spend first, the UTK resync, `no_holder` and the one live
+holder; and,
 ahead of its spec text, a connected but silent parent (§12.3,
 VAULT-HOST-PROTOCOL §13 point 1).)
 
@@ -1109,3 +1111,18 @@ Tests marked (tc) need `-tags vettid_testcost` (the recovery wrap at 8 MiB inste
 | 12.5, VHP 5.6, 6.1 | through the real parent, supervisor and vault processes: the holder's deletion marks the row before `deleted`; `delete_resume` of a running vault, a live one and an erased one (job on the channel, empty result, process stopped) | e2e `TestDeleteResumeHostStack` |
 | VHP 5.6 | the parent's conditional write: `deleting_at` alone, whatever the lease; `ok` on success or a refused condition (marked, deleted, no row); `error` on another failure; `invalid` for a malformed request; a queued `unlocked` is written first | `parent_test.TestMarkDeleting`, `parent_test.TestMarkDeletingAfterQueuedUnlocked`, `parent.TestAWSBackend` (LocalStack) |
 | VHP 6.1 | an `unlocked` event removes `deleting_at` in its own update, under its lease rule; `delete_resume` routed as `delete` (no lease, no code, the message deleted) | `parent_test.TestUnlockedClearsDeletingAt`, `parent_test.TestDeleteResumeRouted`, `parent.TestAWSBackend` (LocalStack) |
+
+## Spend first, UTK resync, `no_holder`, one live holder (§3.5.4, §3.5.7, §3.5.9, §6.7.1, §10.1, §10.2, §10.6, §10.9, §10.18, §11.10.8, §11.14.6; 0.52.0, release 20)
+
+| § | Requirement | Test |
+|---|---|---|
+| 3.5.4 "Using a UTK" | a request spends the UTK it presents as soon as its body parses and its `utk_id` reads, before every check of the runtime: the shape's `bad_request`, `credential_required` (with and without a holder), `owner_check_required`, `forbidden` (the role, an app-only form, a LEASH refusal) and `session_required`; a handled request spends it once and its key is wiped when the request ends | `vault.TestSpendBeforeEveryRuntimeRefusal` |
+| 3.5.4 "Using a UTK" | and before every check of the credential feature: a recovering app's limits, the removed `credential.recover`, the holder rule, the clone alarm (credential operations, the owner check and `Operate`), `Operate`'s app-only rule, no holder, and a `bad_request` whose `utk_id` still reads; the spent UTK opens nothing afterwards | `credential.TestRefusalsSpendTheUTK`, `credential.TestOwnerCheckDuringAlarm`, `credential.TestSpendPINForExport` |
+| 3.5.4, 6.7.1 step 3 | `signer_unconfirmed` leaves the UTK spent, counts nothing and keeps the transfer open; the confirmed approval with the spent UTK is `utk_invalid`, with a fresh one it completes | `credential.TestTransferSignerConfirmation`, e2e `TestTransferSigner` |
+| 3.5.4, 10.7, 10.13, 10.18, 10.9 | the features that check a request before the credential spend first: critical items (app-only, shape), wallet signing (`credential_locked`, `not_found`), History export (`HolderGate`: holder, alarm, the shape's `bad_request` with a readable `utk_id`) | `items.TestCriticalRefusalsSpendTheUTK`, `wallet.TestSignRefusalsSpendTheUTK`, `audit.TestExportErrataOrder`, `audit.TestExportCheckOrder` |
+| 3.5.4 | a body that does not parse, or whose `utk_id` is absent or not a UTK id, spends nothing; another device's `utk_id` removes nothing from the holder's pool; nor does an unsupported type, a cached retransmission, a rate-limited drop or an event | `credential.TestUnreadableUTKSpendsNothing`, `credential.TestPresentedUTKID`, `vault.TestNoSpendWhenNeverHandled` |
+| 3.5.4 Pool, 10.6, 10.9, 11.10.8 | `credential.utk.get{resync: true}`: drops the pool, wipes its keys, issues 20; once per 10 minutes per device, divided by `time_scale` (25 s at 24), kept across a flush; sooner `too_soon{allowed_after}` and nothing changed; audited `credential.utk_resync` (`device_id`, `ref` = the count dropped); without `resync` or with `false` a top-up; a non-boolean `resync` is `bad_request` | `credential.TestUTKResync`, e2e `TestUTKSpendFirstAndResync` |
+| 3.5.7, 3.5.9, 10.1 | a credential and no live holder (none, or one naming a removed device): `credential_required` with body `{"reason": "no_holder"}` from the runtime (dispatch and held requests) and from the feature (holder-only types, the blob check, `HolderGate`), no clone alarm, no adoption; `forbidden` only when another live app holds it; no body during enrollment | `credential.TestNoHolderVersusForbidden`, `vault.TestSpendBeforeEveryRuntimeRefusal` ("no holder", "dead holder"), `vault.TestNoSpendWhenNeverHandled` |
+| 3.5.9 | the holder is none or one live app: removing the holder's device clears it (a transfer then moves it); when the state is loaded a holder naming a removed device, a desktop or an unfinished pairing is cleared, a paired app's (also a stale mailbox's) kept | `credential.TestHolderHardening`, `vault.TestLoadClearsDeadHolder` |
+| 3.5.9, 11.14.6 | a recovered phone's first handshake makes it the holder and removes every other app in the same flush (`device.replaced`); desktops stay | `vault.TestRecoveredPhonePairingRemovesOtherApps` |
+| 3.5.9 | `credential.unlock` is holder-only: another live app's is `forbidden` before its blob is opened (no alarm, no password counted) | `credential.TestUnlockHolderOnly`, `credential.TestOneHolder` |

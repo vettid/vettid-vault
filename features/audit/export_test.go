@@ -15,15 +15,42 @@ import (
 )
 
 // fakeCred stands in for the credential feature: the holder, an open
-// alarm's freeze code, and UTKs whose sealed payload opens to a PIN.
+// alarm's freeze code, and the holder's UTKs whose sealed payload opens to
+// a PIN. As the credential does (0.52.0, §3.5.4), a request spends the UTK
+// its top-level utk_id names before any check.
 type fakeCred struct {
 	holder string
 	alarm  string
 	utks   map[string]string // utk_id → the PIN its payload carries
 	spent  []string
+	held   map[string]string // spent for the current request, not yet opened
 }
 
-func (c *fakeCred) HolderGate(s *vault.Session) error {
+func (c *fakeCred) spendPresented(s *vault.Session, in *envelope.Inner) {
+	o, err := strictjson.ParseObject(in.Body)
+	if err != nil || s.From().ID != c.holder {
+		return
+	}
+	id, err := o.String("utk_id")
+	if err != nil {
+		return
+	}
+	if pin, ok := c.utks[id]; ok {
+		delete(c.utks, id)
+		c.spent = append(c.spent, id)
+		if c.held == nil {
+			c.held = map[string]string{}
+		}
+		c.held[id] = pin
+	}
+}
+
+func (c *fakeCred) HolderGate(s *vault.Session, in *envelope.Inner) error {
+	c.spendPresented(s, in)
+	return c.gate(s)
+}
+
+func (c *fakeCred) gate(s *vault.Session) error {
 	if from := s.From(); from.Kind != vault.KindApp || from.Recovering || from.ID != c.holder {
 		return vault.NewError("forbidden", "")
 	}
@@ -33,16 +60,16 @@ func (c *fakeCred) HolderGate(s *vault.Session) error {
 	return nil
 }
 
-func (c *fakeCred) SpendPIN(s *vault.Session, _ *envelope.Inner, utkID string, _ []byte) ([]byte, error) {
-	if err := c.HolderGate(s); err != nil {
+func (c *fakeCred) SpendPIN(s *vault.Session, in *envelope.Inner, utkID string, _ []byte) ([]byte, error) {
+	c.spendPresented(s, in)
+	if err := c.gate(s); err != nil {
 		return nil, err
 	}
-	pin, ok := c.utks[utkID]
+	pin, ok := c.held[utkID]
 	if !ok {
 		return nil, vault.NewError("utk_invalid", "")
 	}
-	delete(c.utks, utkID)
-	c.spent = append(c.spent, utkID)
+	delete(c.held, utkID)
 	if len(pin) < 6 || len(pin) > 32 || strings.Trim(pin, "0123456789") != "" {
 		return nil, vault.NewError("bad_request", "")
 	}
@@ -238,15 +265,17 @@ func TestExportHolderOnly(t *testing.T) {
 	}
 }
 
-// §10.9 (0.22.0) steps 1–6 in order: the clone alarm (preview included,
-// the UTK unspent), the UTK, the shape, not_found, the PIN; a wrong PIN is
-// bad_pin and not a failed owner check; the right PIN appends exactly one
-// audit.exported and answers entry_seq.
+// §10.9 (0.22.0) steps 1–6 in order: the clone alarm (preview included;
+// 0.52.0: a presented UTK spent first), the UTK, the shape, not_found,
+// the PIN; a wrong PIN is bad_pin and not a failed owner check; the right
+// PIN appends exactly one audit.exported and answers entry_seq.
 func TestExportCheckOrder(t *testing.T) {
 	f, h, c := exportFixture(t)
 	all := `,"format":"json","upto_seq":13`
 	// 1. A clone alarm refuses the preview and the export with its freeze
-	// code before anything else: even a malformed body, the UTK unspent.
+	// code before anything about the body, even a malformed one. (0.52.0)
+	// An export's readable utk_id is spent all the same; one that does not
+	// read spends nothing.
 	for _, code := range []string{"credential_frozen", "rotation_required"} {
 		c.alarm = code
 		if p := dryRun(t, f, h, "app", ""); p.Code != code {
@@ -259,8 +288,8 @@ func TestExportCheckOrder(t *testing.T) {
 			t.Errorf("malformed export during %s: %q", code, r.Code)
 		}
 	}
-	if len(c.spent) != 0 || len(c.utks) != 2 {
-		t.Fatalf("a UTK was spent during the alarm: %v", c.spent)
+	if len(c.spent) != 2 || len(c.utks) != 0 {
+		t.Fatalf("the exports during the alarm did not spend their UTKs: %v", c.spent)
 	}
 	c.alarm, c.utks = "", map[string]string{}
 	// The UTK: unknown or spent is utk_invalid; without utk_id or sealed
@@ -437,10 +466,11 @@ func FuzzParseExport(f *testing.F) {
 // §10.9 Order of checks (0.23.0, errata to 0.22.0): the sender and the
 // holder (forbidden) before the clone alarm; the alarm before anything
 // about the body; then bad_request at once for a request without a
-// spendable UTK (not a JSON object, dry_run not a boolean, a preview with
-// utk_id, sealed or upto_seq, an export without a readable utk_id and
-// sealed) — the UTK unspent; only then the export's steps (the spend
-// first).
+// readable utk_id and sealed (not a JSON object, dry_run not a boolean,
+// a preview with utk_id, sealed or upto_seq, an export without a readable
+// utk_id and sealed); only then the export's steps. (0.52.0) Before all
+// of them a readable utk_id is spent, so each of these refusals leaves it
+// spent; a body without one spends nothing.
 func TestExportErrataOrder(t *testing.T) {
 	f, h, c := exportFixture(t)
 	c.alarm = "credential_frozen"
@@ -450,22 +480,37 @@ func TestExportErrataOrder(t *testing.T) {
 			t.Errorf("%s during an alarm: %q (the holder check comes first)", kind, r.Code)
 		}
 	}
+	if len(c.spent) != 0 {
+		t.Fatalf("another device spent the holder's UTK: %v", c.spent)
+	}
 	for _, b := range []string{`[]`, `{"dry_run":"yes"}`, `{"dry_run":true,"utk_id":"u1"}`} {
 		if r := featuretest.Call(f, h, t0, "app", "audit.export", b); r.Code != "credential_frozen" {
 			t.Errorf("%s during an alarm: %q", b, r.Code)
 		}
 	}
+	if len(c.spent) != 1 || c.spent[0] != "u1" {
+		t.Fatalf("the preview's readable utk_id during the alarm: spent %v", c.spent)
+	}
 	c.alarm = ""
-	for _, b := range []string{`[]`, `{"dry_run":"yes"}`, `{"dry_run":1}`, `{"dry_run":true,"utk_id":"u1"}`, `{"dry_run":true,"sealed":"AAAA"}`,
-		`{"dry_run":true,"upto_seq":3}`, `{"sealed":"AAAA","format":"json","upto_seq":13}`, `{"utk_id":"u1","format":"json","upto_seq":13}`,
-		`{"utk_id":"u1","sealed":7,"format":"json","upto_seq":13}`, `{"utk_id":"","sealed":"AAAA","format":"json","upto_seq":13}`} {
-		if r := featuretest.Call(f, h, t0, "app", "audit.export", b); r.Code != "bad_request" {
-			t.Errorf("%s: %q", b, r.Code)
+	for _, tc := range []struct {
+		body  string
+		spend bool
+	}{
+		{`[]`, false}, {`{"dry_run":"yes"}`, false}, {`{"dry_run":1}`, false}, {`{"dry_run":true,"utk_id":"u1"}`, true},
+		{`{"dry_run":true,"sealed":"AAAA"}`, false}, {`{"dry_run":true,"upto_seq":3}`, false},
+		{`{"sealed":"AAAA","format":"json","upto_seq":13}`, false}, {`{"utk_id":"u1","format":"json","upto_seq":13}`, true},
+		{`{"utk_id":"u1","sealed":7,"format":"json","upto_seq":13}`, true}, {`{"utk_id":"","sealed":"AAAA","format":"json","upto_seq":13}`, false},
+		{`{"utk_id":7,"sealed":"AAAA","format":"json","upto_seq":13}`, false},
+	} {
+		c.utks["u1"], c.spent = "246810", nil
+		if r := featuretest.Call(f, h, t0, "app", "audit.export", tc.body); r.Code != "bad_request" {
+			t.Errorf("%s: %q", tc.body, r.Code)
+		}
+		if spent := len(c.spent) == 1; spent != tc.spend {
+			t.Errorf("%s: spent %v, want %v", tc.body, spent, tc.spend)
 		}
 	}
-	if len(c.spent) != 0 || c.utks["u1"] == "" {
-		t.Fatalf("a UTK was spent before the export's steps: %v", c.spent)
-	}
+	c.spent = nil
 	// With a spendable UTK, a bad filter costs it (the export's step 2).
 	if r := featuretest.Call(f, h, t0, "app", "audit.export", `{"utk_id":"u1","sealed":"AAAA","format":"pdf","upto_seq":13}`); r.Code != "bad_request" || len(c.spent) != 1 {
 		t.Fatalf("shape after the spend: %q %v", r.Code, c.spent)

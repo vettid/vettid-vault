@@ -71,6 +71,9 @@ type Credential interface {
 	Operate(s *vault.Session, in *envelope.Inner, need int, check func(*credential.Payload) error,
 		op func(*credential.Inner, *credential.Payload) error) (*credential.OpResult, error)
 	UseKey(now time.Time, ttl time.Duration) (ed25519.PrivateKey, bool)
+	// SpendPresented spends the UTK the request presents before any
+	// check (§3.5.4 "Using a UTK", 0.52.0); idempotent within a request.
+	SpendPresented(s *vault.Session, in *envelope.Inner)
 }
 
 // Items is the items feature: a wallet's recovery phrase is a critical
@@ -317,6 +320,12 @@ func sortedKeys[V any](m map[string]V) []string {
 func (f *Feature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner) (json.RawMessage, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.cred != nil {
+		// A credential operation (wallet.create, wallet.sign) spends its
+		// UTK before any check, credential_locked's included (§3.5.4,
+		// §10.18, 0.52.0).
+		f.cred.SpendPresented(s, in)
+	}
 	f.prune(s)
 	switch in.Type {
 	case "wallet.create":
@@ -1308,6 +1317,9 @@ type PayParams struct {
 func (f *Feature) Pay(s *vault.Session, in *envelope.Inner, p PayParams) (string, func(*strictjson.Builder), error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.cred != nil {
+		f.cred.SpendPresented(s, in) // before any check (§3.5.4, 0.52.0)
+	}
 	f.prune(s)
 	w := f.st.Wallets[p.WalletID]
 	if w == nil {

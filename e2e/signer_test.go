@@ -347,8 +347,9 @@ func transferPending(t *testing.T, holder *client.Device, id string) (signer str
 
 // A transfer to the same signer needs no `signer` and audits no change.
 // To another pinned signer: signer_changed is true; an approval without
-// `signer`, or with the wrong class, is signer_unconfirmed with the UTK
-// unspent and the PIN backoff untouched; with it the transfer completes,
+// `signer`, or with the wrong class, is signer_unconfirmed with the PIN
+// backoff untouched (0.52.0: the UTK spent, §3.5.4); with it, and a fresh
+// UTK, the transfer completes,
 // the binding is the new signer, and device.signer_changed is audited
 // with both classes and in the feed. To an unpinned signer: dropped.
 func TestTransferSigner(t *testing.T) {
@@ -416,9 +417,11 @@ func TestTransferSigner(t *testing.T) {
 	if s, changed, ok := transferPending(t, b.dev, id); !ok || s != "google_play" || !changed {
 		t.Fatalf("pending to another signer: %q %v %v", s, changed, ok)
 	}
-	// Unconfirmed, with one and the same UTK each time: it is never
-	// spent. A wrong PIN comes with it: the answer is still
-	// signer_unconfirmed, and no PIN failure is counted.
+	// Unconfirmed, with one and the same UTK each time: (0.52.0) the
+	// first refusal spends it, and the later ones are still answered
+	// signer_unconfirmed, decided before the payload is opened. A wrong
+	// PIN comes with it: the answer is still signer_unconfirmed, and no
+	// PIN failure is counted.
 	utk := takeUTK(t, b.dev)
 	approve := func(pin string, extra map[string]any) error {
 		extra["transfer_id"] = id
@@ -436,9 +439,14 @@ func TestTransferSigner(t *testing.T) {
 		t.Fatal("a refused approval counted a PIN failure")
 	}
 	mustSigner(t, b.dev, "vettid", vettidDigest) // the binding has not moved
-	// Confirmed, with the UTK the refusals did not spend: completes.
+	// Confirmed, with the UTK the refusals spent: utk_invalid, and the
+	// transfer stays open; with a fresh one: completes, no backoff.
+	if err := approve(acPIN, map[string]any{"signer": "google_play"}); client.Code(err) != "utk_invalid" {
+		t.Fatalf("confirmed approval with the spent UTK: %v", err)
+	}
+	utk = takeUTK(t, b.dev)
 	if err := approve(acPIN, map[string]any{"signer": "google_play"}); err != nil {
-		t.Fatalf("confirmed approval with the unspent UTK and no backoff: %v", err)
+		t.Fatalf("confirmed approval with a fresh UTK and no backoff: %v", err)
 	}
 	if err := c.dev.AwaitPaired(ctx); err != nil {
 		t.Fatal(err)

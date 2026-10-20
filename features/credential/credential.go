@@ -25,6 +25,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"github.com/vettid/vettid-vault/vms/recovery"
+	"strconv"
 	"sync"
 	"time"
 
@@ -48,6 +49,9 @@ const (
 	PoolRefill     = 10
 	UTKLifetime    = 30 * 24 * time.Hour
 	maxPoolDevices = 64
+	// ResyncEvery is how often a device may resync its pool (0.52.0,
+	// §3.5.4), divided by the release's time scale (§11.10.8).
+	ResyncEvery = 10 * time.Minute
 )
 
 // LTK is the private half of an issued UTK.
@@ -77,6 +81,8 @@ type state struct {
 	// (0.16.0, §3.5.6), so the vault has no backup copy even if it still
 	// keeps the blob until the app's ack.
 	NoBackupCopy bool `json:"no_backup_copy,omitempty"`
+	// Resynced is each device's last pool resync (0.52.0, §3.5.4).
+	Resynced map[string]time.Time `json:"resynced,omitempty"`
 }
 
 // Alarm states (§3.5.9).
@@ -114,6 +120,12 @@ type Feature struct {
 	// The unlock window (§3.5.3): memory only, never saved.
 	key    ed25519.PrivateKey
 	keyExp time.Time
+
+	// pres is the UTK the current request presented, already removed
+	// from its pool (spent, §3.5.4 "Using a UTK", 0.52.0) and kept, in
+	// memory only, until the request's payload is opened or the request
+	// ends.
+	pres *presented
 
 	rotObs []KeyRotationObserver
 	delObs []DeleteObserver
@@ -207,13 +219,33 @@ func (f *Feature) Types() []vault.TypeSpec {
 }
 
 // CredentialReady implements vault.CredentialGate (§3.5.7, §3.5.9): a
-// credential and its holder. A credential without a holder (a state of an
-// earlier draft) restricts the vault to the recovery path and deletion; it
-// never adopts an app.
+// credential and its holder. A credential without a holder restricts the
+// vault to the recovery path and deletion; it never adopts an app. The
+// runtime also treats a holder that names no live app as none
+// (CredentialHolder; 0.52.0), which this feature cannot see.
 func (f *Feature) CredentialReady() bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.st.CEKSeed != nil && f.st.Holder != ""
+}
+
+// CredentialHolder implements vault.CredentialHolder.
+func (f *Feature) CredentialHolder() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.st.Holder
+}
+
+// ClearDeadHolder implements vault.HolderPruner: when the state is loaded,
+// a holder that names no live app is cleared (§3.5.9, 0.52.0).
+func (f *Feature) ClearDeadHolder(live func(string) bool) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.st.Holder == "" || live(f.st.Holder) {
+		return false
+	}
+	f.st.Holder = ""
+	return true
 }
 
 // CredentialExists implements vault.CredentialGate.
@@ -266,6 +298,7 @@ func (f *Feature) Zeroize() {
 }
 
 func (f *Feature) wipeKeys() {
+	f.endPresented()
 	suite.Wipe(f.st.CEKSeed)
 	for _, p := range f.st.Pools {
 		for _, l := range p {
@@ -328,6 +361,7 @@ var (
 	errForbidden    = vault.NewError("forbidden", "")
 	errUTK          = vault.NewError("utk_invalid", "")
 	errCredRequired = vault.NewError("credential_required", "")
+	errNoHolder     = vault.NoHolderError()
 	errFrozen       = vault.NewError("credential_frozen", "")
 	errRotation     = vault.NewError("rotation_required", "")
 	b64             = base64.StdEncoding
@@ -654,6 +688,10 @@ func (f *Feature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner
 	defer f.mu.Unlock()
 	f.pruneUTKs(s.Now())
 	from := s.From()
+	// §3.5.4 "Using a UTK" (0.52.0): the UTK the request presents is spent
+	// before anything else is checked; every refusal below leaves it spent.
+	f.spendPresented(from.ID, in)
+	defer f.endPresented()
 	if from.Recovering && in.Type != "credential.recover" && in.Type != "credential.utk.get" {
 		// 0.16.0: a recovering app proves the password with
 		// credential.recover before anything else (no reset, no deletion).
@@ -678,7 +716,7 @@ func (f *Feature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner
 	}
 	switch in.Type {
 	case "credential.utk.get":
-		return strictjson.NewBuilder().Raw("utks", f.issue(s, from.ID, PoolSize-len(f.st.Pools[from.ID]))).Bytes(), nil
+		return f.utkGet(s, in.Body)
 	case "credential.get":
 		if f.st.CEKSeed == nil || len(f.st.Blob) == 0 {
 			return nil, errNotFound
@@ -719,9 +757,10 @@ func (f *Feature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner
 	if in.Type == "device.transfer.approve" {
 		// §6.7.1 step 3 (0.27.0, §11.7.1): a transfer to an app of
 		// another signer needs the holder's explicit confirmation, the
-		// new app's class in `signer`. Checked before the UTK is spent
-		// and before the PIN is tried: nothing is spent or counted, and
-		// the transfer stays open.
+		// new app's class in `signer`. Checked before the PIN is tried:
+		// nothing is counted, and the transfer stays open. (0.52.0) The
+		// UTK is already spent; the holder approves again with a fresh
+		// one.
 		o, _ := strictjson.ParseObject(in.Body)
 		id, _ := o.String("transfer_id")
 		signer, present, err := o.OptString("signer")
@@ -732,7 +771,7 @@ func (f *Feature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner
 			return nil, err
 		}
 	}
-	// Everything else spends a UTK first (§3.5.4).
+	// Everything else opens its payload with the spent UTK (§3.5.4).
 	need := needs[in.Type]
 	if holderReset {
 		need = holderResetNeed
@@ -819,10 +858,13 @@ func (f *Feature) deleteAll(s *vault.Session) {
 	}
 }
 
-// holderOnly are the types only the holder may send (§3.5.9). A blob
-// presented by another app is a clone (open); the rest is forbidden.
+// holderOnly are the types only the holder may send (§3.5.9): forbidden
+// when another live app holds the credential, credential_required
+// {reason: "no_holder"} when none does (0.52.0). A blob presented by
+// another app to the other credential operations is a clone (open).
+// (0.52.0) credential.unlock is among them, as §3.5.9 always said.
 var holderOnly = map[string]bool{
-	"credential.get": true, "credential.ack": true, "credential.alarm.confirm": true,
+	"credential.get": true, "credential.ack": true, "credential.alarm.confirm": true, "credential.unlock": true,
 	"device.transfer.create": true, "device.transfer.reject": true, "vault.delete": true, vault.TypeOwnerCheck: true,
 	vault.TypeAccountNameSet: true, TypePINChange: true, TypeSecretRenew: true,
 }
@@ -842,13 +884,13 @@ func (f *Feature) gate(s *vault.Session, typ string) error {
 	// exists (§12.5); 0.16.0 removed the recovering app as an authority.
 	deleteAlt := typ == "vault.delete" && f.st.CEKSeed == nil
 	if holderOnly[typ] && from != f.st.Holder && !deleteAlt {
-		return errForbidden
+		return f.notHolderErr(s)
 	}
 	if typ == "credential.alarm.confirm" {
 		return nil
 	}
 	if typ == "credential.reset" && from != f.st.Holder {
-		return errForbidden // the holder's only (0.15.2, 0.16.0)
+		return f.notHolderErr(s) // the holder's only (0.15.2, 0.16.0)
 	}
 	if a := f.st.Alarm; a != nil && !allowedFrozen[typ] {
 		if a.State == AlarmFrozen || !allowedRotation[typ] {
@@ -856,6 +898,32 @@ func (f *Feature) gate(s *vault.Session, typ string) error {
 		}
 	}
 	return nil
+}
+
+// notHolderErr answers a holder-only request from an app that is not the
+// holder (§3.5.9, 0.52.0): forbidden only when another live app holds the
+// credential; credential_required{reason: "no_holder"} when the vault has
+// a credential and no live holder. Without a credential (enrollment) it
+// stays forbidden, with no body.
+func (f *Feature) notHolderErr(s *vault.Session) error {
+	if f.st.CEKSeed != nil && !f.holderLive(s) {
+		return errNoHolder
+	}
+	return errForbidden
+}
+
+// holderLive reports whether the holder names a live app (§3.5.9,
+// 0.52.0): the sender itself, or a paired device of role app.
+func (f *Feature) holderLive(s *vault.Session) bool {
+	h := f.st.Holder
+	if h == "" {
+		return false
+	}
+	if from := s.From(); from.ID == h {
+		return from.Kind == vault.KindApp && !from.Recovering
+	}
+	d, ok := s.ListedDevice(h)
+	return ok && d.Kind == vault.KindApp && d.State != vault.PeerPending
 }
 
 func (f *Feature) freezeErr() error {
@@ -926,22 +994,112 @@ func (f *Feature) pruneUTKs(now time.Time) {
 	}
 }
 
-// spendNeed finds the UTK among those issued to the sender, removes it
-// (it is spent whatever happens next) and opens the payload (need).
-func (f *Feature) spendNeed(s *vault.Session, in *envelope.Inner, e *Envelope, need int) (*Payload, error) {
-	device := s.From().ID
+// presented is a UTK a request (its sender and inner id) presented,
+// removed from the sender's pool.
+type presented struct {
+	device, msg string
+	ltk         LTK
+}
+
+// PresentedUTKID returns the request body's top-level utk_id when the body
+// parses as a JSON object and the id reads as a UTK id (§3.5.4 "Using a
+// UTK", 0.52.0); "" otherwise.
+func PresentedUTKID(body []byte) string {
+	o, err := strictjson.ParseObject(body)
+	if err != nil {
+		return ""
+	}
+	id, err := o.String("utk_id")
+	if err != nil || !ValidUTKID(id) {
+		return ""
+	}
+	return id
+}
+
+// spendPresented spends the UTK that body presents (§3.5.4 "Using a UTK",
+// 0.52.0): when the body parses and its utk_id reads, that UTK is removed
+// from device's pool, if it is there, and kept for the request (pres)
+// until its payload is opened or the request ends. The removal is part of
+// the batch's flush, so the UTK is spent whatever the answer. A UTK
+// already spent for this request is kept as it is; a body without a
+// readable utk_id spends nothing. It reports whether the pool changed.
+func (f *Feature) spendPresented(device string, in *envelope.Inner) bool {
+	id := PresentedUTKID(in.Body)
+	if p := f.pres; id != "" && p != nil && p.device == device && p.msg == in.ID && p.ltk.ID == id {
+		return false
+	}
+	f.endPresented() // never another request's
+	if id == "" {
+		return false
+	}
 	pool := f.st.Pools[device]
-	idx := -1
 	for i, l := range pool {
-		if l.ID == e.UTKID {
-			idx = i
+		if l.ID == id {
+			f.st.Pools[device] = append(pool[:i:i], pool[i+1:]...)
+			f.pres = &presented{device: device, msg: in.ID, ltk: l}
+			return true
 		}
 	}
-	if idx < 0 {
+	return false
+}
+
+// endPresented wipes the key of a UTK spent for the request and not used.
+func (f *Feature) endPresented() {
+	if f.pres != nil {
+		suite.Wipe(f.pres.ltk.Seed)
+		f.pres = nil
+	}
+}
+
+// takePresented hands over the UTK id spent for the request in by
+// device; the caller wipes its seed. ok is false for a UTK that was never
+// in the sender's pool (unknown, spent, expired or another device's).
+func (f *Feature) takePresented(device string, in *envelope.Inner, id string) (LTK, bool) {
+	p := f.pres
+	if p == nil || p.device != device || p.msg != in.ID || p.ltk.ID != id {
+		return LTK{}, false
+	}
+	f.pres = nil
+	return p.ltk, true
+}
+
+// SpendPresented spends the UTK that in presents (§3.5.4 "Using a UTK",
+// 0.52.0), for the features whose credential operations check the request
+// before Operate or SpendPIN (critical items, critical-item use, wallet
+// signing, History export): they call it before any check. The runtime
+// has already done it for a request it dispatched (SpendPresentedUTK), so
+// it is idempotent within a request.
+func (f *Feature) SpendPresented(s *vault.Session, in *envelope.Inner) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pruneUTKs(s.Now())
+	f.spendPresented(s.From().ID, in)
+}
+
+// SpendPresentedUTK implements vault.UTKSpender.
+func (f *Feature) SpendPresentedUTK(device, msgID string, body json.RawMessage, now time.Time) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pruneUTKs(now)
+	return f.spendPresented(device, &envelope.Inner{ID: msgID, Body: body})
+}
+
+// EndPresentedUTK implements vault.UTKSpender.
+func (f *Feature) EndPresentedUTK() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.endPresented()
+}
+
+// spendNeed opens the payload (need) with the UTK the request presented,
+// spent before anything was checked (spendPresented). A UTK that names
+// none of the sender's pool is utk_invalid.
+func (f *Feature) spendNeed(s *vault.Session, in *envelope.Inner, e *Envelope, need int) (*Payload, error) {
+	f.spendPresented(s.From().ID, in) // a no-op unless the caller has not spent yet
+	l, ok := f.takePresented(s.From().ID, in, e.UTKID)
+	if !ok {
 		return nil, errUTK
 	}
-	l := pool[idx]
-	f.st.Pools[device] = append(pool[:idx:idx], pool[idx+1:]...)
 	defer suite.Wipe(l.Seed)
 	ltk, err := suite.NewPrivateKey(l.Seed)
 	if err != nil {
@@ -954,6 +1112,48 @@ func (f *Feature) spendNeed(s *vault.Session, in *envelope.Inner, e *Envelope, n
 	}
 	defer suite.Wipe(pt)
 	return parsePayload(need, pt)
+}
+
+// utkGet is credential.utk.get (§3.5.4): it tops the sender's pool up to
+// PoolSize. (0.52.0) With "resync": true it drops the pool, wiping its
+// keys, and issues a full pool, at most once per ResyncEvery (scaled,
+// §11.10.8) per device; sooner is too_soon{allowed_after} and changes
+// nothing. A resync is audited credential.utk_resync (ref = the count
+// dropped).
+func (f *Feature) utkGet(s *vault.Session, body []byte) (json.RawMessage, error) {
+	o, err := strictjson.ParseObject(body)
+	if err != nil {
+		return nil, errBad
+	}
+	resync := false
+	if o.Has("resync") {
+		if resync, err = o.Bool("resync"); err != nil {
+			return nil, errBad
+		}
+	}
+	device := s.From().ID
+	if resync {
+		now := s.Now().UTC().Truncate(time.Millisecond)
+		if last, ok := f.st.Resynced[device]; ok {
+			if next := last.Add(vault.Scale(ResyncEvery, s.TimeScale())); now.Before(next) {
+				return nil, &vault.HandlerError{Code: "too_soon",
+					Body: strictjson.NewBuilder().String("allowed_after", envelope.FormatTS(next)).Bytes()}
+			}
+		}
+		dropped := len(f.st.Pools[device])
+		for _, l := range f.st.Pools[device] {
+			suite.Wipe(l.Seed)
+		}
+		if _, ok := f.st.Pools[device]; ok {
+			f.st.Pools[device] = []LTK{} // kept as a key: issue's device bound counts it
+		}
+		if f.st.Resynced == nil {
+			f.st.Resynced = map[string]time.Time{}
+		}
+		f.st.Resynced[device] = now
+		s.Record(vault.Activity{Kind: "credential.utk_resync", DeviceID: device, Ref: strconv.Itoa(dropped), Audit: true})
+	}
+	return strictjson.NewBuilder().Raw("utks", f.issue(s, device, PoolSize-len(f.st.Pools[device]))).Bytes(), nil
 }
 
 // replenish returns new UTKs when the sender's pool is low.
@@ -984,8 +1184,10 @@ func (f *Feature) checkBlob(s *vault.Session, blob []byte) error {
 		return errCredRequired
 	}
 	from := s.From().ID
-	if f.st.Holder == "" && !s.From().Recovering {
-		return errCredRequired // no holder: only the recovery path (§3.5.9)
+	if !s.From().Recovering && !f.holderLive(s) {
+		// No holder, or one that names no live app (0.52.0): only the
+		// recovery path; never an adoption (§3.5.9).
+		return errNoHolder
 	}
 	if from != f.st.Holder && !s.From().Recovering {
 		return f.clone(s, blob) // a blob from an app that is not the holder (§3.5.9)
@@ -1270,11 +1472,17 @@ func (f *Feature) TransferCompleted(_ *vault.Session, oldDevice, newDevice strin
 	f.st.Holder = newDevice
 }
 
-// DeviceRemoved implements vault.DeviceRemovedObserver.
+// DeviceRemoved implements vault.DeviceRemovedObserver. Removing the
+// holder's device clears the holder in the same flush (§3.5.9, 0.52.0); a
+// completed transfer then moves it to the new app (TransferCompleted).
 func (f *Feature) DeviceRemoved(_ *vault.Session, id string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.dropPool(id)
+	delete(f.st.Resynced, id)
+	if f.st.Holder == id {
+		f.st.Holder = ""
+	}
 }
 
 func (f *Feature) dropPool(id string) {
@@ -1282,6 +1490,9 @@ func (f *Feature) dropPool(id string) {
 		suite.Wipe(l.Seed)
 	}
 	delete(f.st.Pools, id)
+	if p := f.pres; p != nil && p.device == id {
+		f.endPresented()
+	}
 }
 
 // CredentialVersion implements vault.CredentialVersioner.
@@ -1581,7 +1792,7 @@ func (r *OpResult) Members(b *strictjson.Builder) {
 
 // Operate performs one credential operation for another feature (critical
 // items, §10.7; critical-item use, §10.13) as §3.5.3 says: it spends the
-// UTK named in the body (from an app only), parses the sealed payload
+// UTK named in the body before any check (0.52.0), parses the sealed payload
 // (the password and need), lets check verify the payload's bindings,
 // opens the credential with the password, lets op read or change the
 // plaintext, then rotates the CEK. An error from check or op is returned
@@ -1592,6 +1803,8 @@ func (f *Feature) Operate(s *vault.Session, in *envelope.Inner, need int, check 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.pruneUTKs(s.Now())
+	f.spendPresented(s.From().ID, in) // §3.5.4: before the checks below
+	defer f.endPresented()
 	if s.From().Kind != vault.KindApp || s.From().Recovering {
 		return nil, errForbidden
 	}

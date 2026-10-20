@@ -112,13 +112,13 @@ func TestOwnerCheck(t *testing.T) {
 	}
 }
 
-// §3.6.1 step 1, §3.5.9: during a clone alarm the check is refused before
-// the UTK is spent.
+// §3.6.1 step 1, §3.5.9: during a clone alarm the check is refused;
+// (0.52.0, §3.5.4) its UTK is spent first.
 func TestOwnerCheckDuringAlarm(t *testing.T) {
 	e := newEnv(t)
 	e.h.PIN = "246810"
 	blob := e.create()
-	if r := e.call("app2", "credential.unlock", blob, map[string]any{"password": pw}); r.Code != "credential_frozen" {
+	if r := e.call("app2", "credential.rotate", blob, map[string]any{"password": pw}); r.Code != "credential_frozen" {
 		t.Fatalf("clone: %q", r.Code)
 	}
 	if e.f.AlarmState() != AlarmFrozen {
@@ -128,9 +128,10 @@ func TestOwnerCheckDuringAlarm(t *testing.T) {
 	if r := e.callWith("app", vault.TypeOwnerCheck, blob, map[string]any{"pin": "246810", "password": pw}, u); r.Code != "credential_frozen" {
 		t.Fatalf("check during the alarm: %q", r.Code)
 	}
-	// The UTK was not spent: it still opens another operation.
-	if r := e.callWith("app", "credential.unlock", blob, map[string]any{"password": pw}, u); r.Code == "utk_invalid" {
-		t.Fatal("UTK spent by a refused check")
+	// The UTK was spent by the refusal: it opens nothing afterwards.
+	e.ok(e.raw("app", "credential.alarm.confirm", `{"alarm_id":"`+e.f.st.Alarm.ID+`","mine":true}`))
+	if r := e.callWith("app", "credential.rotate", blob, map[string]any{"password": pw}, u); r.Code != "utk_invalid" {
+		t.Fatalf("the refused check's UTK: %q", r.Code)
 	}
 }
 
@@ -221,12 +222,12 @@ func TestHoldChangeParse(t *testing.T) {
 }
 
 // §3.5.9 with §3.5.5 (0.15.2): the holder's reset is a credential
-// operation, refused during a clone alarm before the UTK is spent.
+// operation, refused during a clone alarm (0.52.0: its UTK spent first).
 func TestHolderResetDuringAlarm(t *testing.T) {
 	e := newEnv(t)
 	e.h.PIN = "246810"
 	blob := e.create()
-	if r := e.call("app2", "credential.unlock", blob, map[string]any{"password": pw}); r.Code != "credential_frozen" {
+	if r := e.call("app2", "credential.rotate", blob, map[string]any{"password": pw}); r.Code != "credential_frozen" {
 		t.Fatal(r.Code)
 	}
 	if r := e.call("app", "credential.reset", blob, map[string]any{"pin": "246810", "password": pw, "new_password": pw}); r.Code != "credential_frozen" {

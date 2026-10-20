@@ -52,7 +52,12 @@ func TestOneHolder(t *testing.T) {
 	if r := e.unlock(blob, pw); !r.OK() {
 		t.Fatal(r.Code)
 	}
-	if r := e.call("app2", "credential.unlock", blob, map[string]any{"password": pw}); r.Code != "credential_frozen" {
+	// (0.52.0) credential.unlock is holder-only: another live app's is
+	// forbidden; another app's blob to a credential operation is a clone.
+	if r := e.call("app2", "credential.unlock", blob, map[string]any{"password": pw}); r.Code != "forbidden" || len(e.h.Alarms) != 0 {
+		t.Fatalf("another app's unlock: %q %v", r.Code, e.h.Alarms)
+	}
+	if r := e.call("app2", "credential.rotate", blob, map[string]any{"password": pw}); r.Code != "credential_frozen" {
 		t.Fatalf("another app's blob: %q", r.Code)
 	}
 	if len(e.h.Alarms) != 1 || e.h.Alarms[0] != vault.AlarmCredentialClone {
@@ -268,8 +273,8 @@ func TestTransfer(t *testing.T) {
 // §6.7.1 step 3, §11.7.1 (0.27.0): a transfer to an app of another signer
 // needs the holder's confirmation, the new app's class in `signer`.
 // Without it, or with another class, the answer is signer_unconfirmed
-// before the UTK is spent and before the PIN is tried: nothing is spent
-// or counted, no owner check fails, and the transfer stays open. To the
+// before the PIN is tried: nothing is counted, no owner check fails, and
+// the transfer stays open. (0.52.0) The UTK is spent all the same. To the
 // same signer no `signer` is needed.
 func TestTransferSignerConfirmation(t *testing.T) {
 	e := newEnv(t)
@@ -297,8 +302,10 @@ func TestTransferSignerConfirmation(t *testing.T) {
 	if r := appr("246810", `,"signer":1`); r.Code != "bad_request" {
 		t.Fatalf("signer not a string: %q", r.Code)
 	}
-	if got := e.f.PoolSizeOf("dev-app"); got != pool {
-		t.Fatalf("a refused approval spent UTKs: pool %d, was %d", got, pool)
+	// (0.52.0, §3.5.4) Each refused approval spent its UTK: eight
+	// signer_unconfirmed and one bad_request.
+	if got := e.f.PoolSizeOf("dev-app"); got != pool-9 {
+		t.Fatalf("refused approvals: pool %d, was %d (each spends one)", got, pool)
 	}
 	if e.h.PINTries != 0 || len(e.h.CheckFailed) != 0 || e.f.CredentialVersion() != version {
 		t.Fatalf("a refused approval tried the PIN %d times, failed checks %v", e.h.PINTries, e.h.CheckFailed)

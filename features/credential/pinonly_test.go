@@ -33,7 +33,7 @@ func (e *env) exportWith(a *audit.Feature, kind string, u utk, payload map[strin
 // the PIN alone, sealed to a UTK of the holder's app and bound to the
 // request: no blob, no password, no CEK rotation, no UTKs answered. A
 // clone alarm refuses it, the preview included, with the freeze code
-// before the UTK is spent; only the holder may send it.
+// (0.52.0: after the presented UTK is spent); only the holder may send it.
 func TestSpendPINForExport(t *testing.T) {
 	e := newEnv(t)
 	e.h.PIN = "246810"
@@ -85,9 +85,9 @@ func TestSpendPINForExport(t *testing.T) {
 			t.Fatalf("%s: %q", k, r.Code)
 		}
 	}
-	// A clone alarm: the preview and the export get the freeze code, the
-	// UTK unspent.
-	if r := e.call("app2", "credential.unlock", blob, map[string]any{"password": pw}); r.Code != "credential_frozen" {
+	// A clone alarm: the preview and the export get the freeze code;
+	// (0.52.0, §3.5.4) the export's UTK is spent first.
+	if r := e.call("app2", "credential.rotate", blob, map[string]any{"password": pw}); r.Code != "credential_frozen" {
 		t.Fatalf("clone: %q", r.Code)
 	}
 	if r := featuretest.Call(a, e.h, e.clk.T, "app", "audit.export", `{"dry_run":true}`); r.Code != "credential_frozen" {
@@ -98,8 +98,8 @@ func TestSpendPINForExport(t *testing.T) {
 	if r := e.exportWith(a, "app", u, map[string]any{"pin": "246810"}, members); r.Code != "credential_frozen" {
 		t.Fatalf("export during the alarm: %q", r.Code)
 	}
-	if e.f.PoolSizeOf("dev-app") != pool {
-		t.Fatal("the UTK was spent during the alarm")
+	if e.f.PoolSizeOf("dev-app") != pool-1 {
+		t.Fatal("the export during the alarm did not spend its UTK")
 	}
 	// rotation_required once the holder confirms the alarm as not theirs.
 	alarm := e.f.st.Alarm.ID
@@ -110,7 +110,7 @@ func TestSpendPINForExport(t *testing.T) {
 	if r := e.exportWith(a, "app", u, map[string]any{"pin": "246810"}, members); r.Code != "rotation_required" {
 		t.Fatalf("export in rotation_required: %q", r.Code)
 	}
-	if e.f.PoolSizeOf("dev-app") != pool {
-		t.Fatal("the UTK was spent in rotation_required")
+	if e.f.PoolSizeOf("dev-app") != pool-1 {
+		t.Fatal("a spent UTK came back, or another was spent, in rotation_required")
 	}
 }

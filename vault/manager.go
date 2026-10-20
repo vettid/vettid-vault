@@ -583,6 +583,7 @@ func newManager(o Options, st *State, hdr *Header, dek []byte) *Manager {
 			_ = f.Load(raw)
 		}
 	}
+	m.clearDeadHolder() // §3.5.9 (0.52.0): a holder naming no live app is none
 	return m
 }
 

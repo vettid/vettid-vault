@@ -185,12 +185,12 @@ func (m *Manager) transferSigner(r *Request) (class string, changed, ok bool) {
 var errSignerUnconfirmed = &HandlerError{Code: "signer_unconfirmed"}
 
 // confirmTransferSigner is the approval's check of §6.7.1 step 3
-// (0.27.0), made before the UTK is spent or the PIN tried: when the new
-// app's signer differs from the vault's binding, the approval must name
-// the new app's class. A `signer` that names anything else than the new
-// app's class is refused too, changed or not: the holder confirmed
-// something the vault is not about to do. Nothing is spent or counted and
-// the transfer stays open. An unknown transfer is left to the approval
+// (0.27.0), made before the PIN is tried: when the new app's signer
+// differs from the vault's binding, the approval must name the new app's
+// class. A `signer` that names anything else than the new app's class is
+// refused too, changed or not: the holder confirmed something the vault
+// is not about to do. Nothing is counted and the transfer stays open;
+// (0.52.0) the approval's UTK is already spent (§3.5.4). An unknown transfer is left to the approval
 // itself (not_found).
 func (m *Manager) confirmTransferSigner(id, signer string, present bool) error {
 	t := m.st.Transfer

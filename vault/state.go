@@ -100,10 +100,17 @@ type State struct {
 	// in the audit log ("<generation>/<n>" → "success" | "not_success"),
 	// the used count audited per generation, the generation of the last
 	// completed recovery, and when the 24-hour counter notice was raised.
-	RecoveryAttempts      map[string]string `json:"recovery_attempts,omitempty"`
-	RecoveryUsed          map[string]int    `json:"recovery_used,omitempty"`
-	RecoveredGeneration   uint64            `json:"recovered_generation,omitempty"`
-	RecoveryCounterNotice time.Time         `json:"recovery_counter_notice,omitempty"`
+	RecoveryAttempts map[string]string `json:"recovery_attempts,omitempty"`
+	RecoveryUsed     map[string]int    `json:"recovery_used,omitempty"`
+	// RecoveredGeneration is from before RecoveredAttempt: no longer read
+	// (without the attempt it cannot say "since"; its attempts are urgent).
+	RecoveredGeneration uint64 `json:"recovered_generation,omitempty"`
+	// RecoveredAttempt is the last completed recovery's attempt
+	// (generation, n): attempts of that generation up to n are the
+	// member's and not urgent; every other attempt is (§11.14.11, "since").
+	// A state from before this field has none, so all are urgent.
+	RecoveredAttempt      []uint64  `json:"recovered_attempt,omitempty"`
+	RecoveryCounterNotice time.Time `json:"recovery_counter_notice,omitempty"`
 	// PendingUnlink is a transfer's held notice to the old app (§11.14.10).
 	PendingUnlink *PendingUnlink `json:"pending_unlink,omitempty"`
 	// RecoveredSigner is the vault's signer binding before a completed

@@ -540,7 +540,7 @@ func (m *Manager) recordAttempts(v *counter.View, now time.Time) {
 		first := m.st.RecoveryAttempts[ref] == ""
 		m.st.RecoveryAttempts[ref] = outcome
 		pri := "urgent"
-		if m.st.RecoveredGeneration == v.Generation {
+		if ra := m.st.RecoveredAttempt; len(ra) == 2 && ra[0] == v.Generation && a.N > 0 && uint64(a.N) <= ra[1] {
 			pri = ""
 		}
 		if first || outcome == "success" {

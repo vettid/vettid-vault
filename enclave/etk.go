@@ -9,11 +9,17 @@ import (
 
 // ETK lifetimes (§11.2, §11.6).
 const (
-	ETKLifetime = 24 * time.Hour // descriptor not_after
+	// ETKLifetime is the descriptor's not_after after the enclave's clock,
+	// truncated to the second (0.53.0, §11.2 "Lifetime and clock
+	// allowance"): 60 s short of the apps' 24 h limit, so that a correct
+	// vault never sits at it.
+	ETKLifetime = 24*time.Hour - 60*time.Second
 	// ETKRotate is when a new ETK replaces the current one, before its
 	// descriptor expires.
 	ETKRotate = 23 * time.Hour
-	// ETKGrace is how long the previous ETK stays valid after rotation.
+	// ETKGrace is how long the previous ETK stays valid after rotation,
+	// and never past its own not_after (usable): with a rotation at 23 h
+	// and a 24 h - 60 s lifetime, the not_after ends it first.
 	ETKGrace = time.Hour
 	// MaxSkew bounds a request's inner ts against enclave time.
 	MaxSkew = 5 * time.Minute

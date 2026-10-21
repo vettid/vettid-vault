@@ -45,6 +45,9 @@ type Trust struct {
 const (
 	MaxAttestationAge = 26 * time.Hour
 	attestationSkew   = 5 * time.Minute
+	// MaxDescriptorLifetime bounds not_after after the attestation's
+	// timestamp, inclusive (0.53.0, §11.2 "Lifetime and clock allowance").
+	MaxDescriptorLifetime = 24*time.Hour + 5*time.Minute
 )
 
 // Enclave is a verified enclave instance (§11.2).
@@ -81,7 +84,9 @@ func (d *Device) VerifyManifest(served []byte, t Trust) (*manifest.Served, *mani
 // (§11.2): the chain to the pinned Nitro root, PCR0-2 equal to a manifest
 // entry (an active one to enroll), no debug PCRs, user_data over the exact
 // descriptor bytes, release = PCR0, not_after in the future and at most
-// 24 h after the attestation, and an attestation less than 26 h old.
+// 24 h + 5 min after the attestation's timestamp (0.53.0, "Lifetime and
+// clock allowance": the only allowance between the descriptor's times and
+// the attestation's), and an attestation less than 26 h old.
 func VerifyEnclave(desc, att []byte, m *manifest.Manifest, enroll bool, t Trust, now time.Time) (*Enclave, error) {
 	ds, err := altchan.ParseDescriptor(desc)
 	if err != nil {
@@ -99,7 +104,7 @@ func VerifyEnclave(desc, att []byte, m *manifest.Manifest, enroll bool, t Trust,
 	if ms.IsDebug() || ms.PCR0 != ds.Release {
 		return nil, ErrEnclave
 	}
-	if !now.Before(ds.NotAfter) || ds.NotAfter.After(doc.Timestamp.Add(24*time.Hour+time.Second)) {
+	if !now.Before(ds.NotAfter) || ds.NotAfter.After(doc.Timestamp.Add(MaxDescriptorLifetime)) {
 		return nil, ErrEnclave
 	}
 	e, ok := m.ByPCR0(ms.PCR0)

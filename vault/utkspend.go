@@ -40,9 +40,9 @@ type CredentialHolder interface {
 
 // HolderPruner is implemented by the credential feature: ClearDeadHolder
 // clears a holder for which live reports false (§3.5.9, 0.52.0) and
-// reports whether it did.
+// returns the device id it cleared ("" when it cleared none).
 type HolderPruner interface {
-	ClearDeadHolder(live func(deviceID string) bool) bool
+	ClearDeadHolder(live func(deviceID string) bool) string
 }
 
 // NoHolderBody is the body of credential_required from a vault with a
@@ -95,14 +95,26 @@ func (m *Manager) holderLive() bool {
 // move to another release, a recovery's open): a holder that names no
 // live app is cleared, so that a vault an earlier release left with a
 // holder naming a removed device is a vault without a holder (§3.5.9,
-// 0.52.0).
+// 0.52.0). Since a removal clears the holder with its device, a hit
+// points to a fault or to tampering: it is audited
+// credential.holder_cleared (device_id = the cleared holder, no ref;
+// History only, no feed item; 0.54.0), in the same flush.
 func (m *Manager) clearDeadHolder() {
 	for _, f := range m.features {
-		if hp, ok := f.(HolderPruner); ok && hp.ClearDeadHolder(m.liveApp) {
+		hp, ok := f.(HolderPruner)
+		if !ok {
+			continue
+		}
+		if id := hp.ClearDeadHolder(m.liveApp); id != "" {
 			m.dirty = true
+			m.record(Activity{Kind: AuditHolderCleared, DeviceID: id, Audit: true}, m.now())
 		}
 	}
 }
+
+// AuditHolderCleared is the audit kind of a holder cleared at load
+// (§3.5.9, §10.9; 0.54.0).
+const AuditHolderCleared = "credential.holder_cleared"
 
 // TimeScaleHost is implemented by hosts that run under the staging time
 // scale (§11.10.8). The Manager implements it.

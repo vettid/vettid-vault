@@ -153,17 +153,20 @@ type pruneFeature struct {
 }
 
 func (f *pruneFeature) Name() string { return "prune" }
-func (f *pruneFeature) ClearDeadHolder(live func(string) bool) bool {
-	if f.holder == "" || live(f.holder) {
-		return false
+func (f *pruneFeature) ClearDeadHolder(live func(string) bool) string {
+	h := f.holder
+	if h == "" || live(h) {
+		return ""
 	}
 	f.holder = ""
-	return true
+	return h
 }
 
 // §3.5.9 (0.52.0): when the state is loaded, a holder that names no live
 // app is cleared: a removed device, a desktop, a pairing not completed. A
-// paired app keeps it, also one whose mailbox went stale.
+// paired app keeps it, also one whose mailbox went stale. (0.54.0) Each
+// clearing is audited credential.holder_cleared with the cleared holder's
+// device_id, no ref and no feed item; a kept holder writes nothing.
 func TestLoadClearsDeadHolder(t *testing.T) {
 	d := newDevFixture(t)
 	desk := d.addDevice(t, "desk1", KindDesktop, 0x60)
@@ -188,14 +191,40 @@ func TestLoadClearsDeadHolder(t *testing.T) {
 		if m.dirty != !tc.kept {
 			t.Errorf("holder %q: dirty %v", tc.holder, m.dirty)
 		}
+		checkHolderClearedAudit(t, pf.got, tc.holder, !tc.kept)
 	}
-	// newManager runs the pass itself.
+	// newManager runs the pass itself, and audits it.
 	pf := &pruneFeature{holder: "removed-app"}
 	o := d.m.opt
 	o.Features = []Feature{pf}
-	_ = newManager(o, d.m.st, d.m.hdr, nil)
+	m := newManager(o, d.m.st, d.m.hdr, nil)
 	if pf.holder != "" {
 		t.Fatal("newManager kept a dead holder")
+	}
+	if !m.dirty {
+		t.Fatal("newManager cleared a holder without marking the state for the flush")
+	}
+	checkHolderClearedAudit(t, pf.got, "removed-app", true)
+	// A second load finds nothing more to clear and writes nothing.
+	pf.got = nil
+	_ = newManager(o, d.m.st, d.m.hdr, nil)
+	checkHolderClearedAudit(t, pf.got, "", false)
+}
+
+// checkHolderClearedAudit checks the activities a load pass recorded: one
+// credential.holder_cleared audit entry naming holder when cleared, none
+// otherwise (§3.5.9, §10.9; 0.54.0).
+func checkHolderClearedAudit(t *testing.T, got []Activity, holder string, cleared bool) {
+	t.Helper()
+	if !cleared {
+		if len(got) != 0 {
+			t.Errorf("holder %q kept, but recorded %+v", holder, got)
+		}
+		return
+	}
+	want := Activity{Kind: "credential.holder_cleared", DeviceID: holder, Audit: true}
+	if len(got) != 1 || got[0] != want {
+		t.Errorf("holder %q cleared: recorded %+v, want [%+v]", holder, got, want)
 	}
 }
 

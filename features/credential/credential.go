@@ -220,7 +220,8 @@ func (f *Feature) Types() []vault.TypeSpec {
 
 // CredentialReady implements vault.CredentialGate (§3.5.7, §3.5.9): a
 // credential and its holder. A credential without a holder restricts the
-// vault to the recovery path and deletion; it never adopts an app. The
+// vault to the recovery path (deletion is the holder's: vault.delete then
+// answers no_holder, 0.54.0); it never adopts an app. The
 // runtime also treats a holder that names no live app as none
 // (CredentialHolder; 0.52.0), which this feature cannot see.
 func (f *Feature) CredentialReady() bool {
@@ -237,15 +238,17 @@ func (f *Feature) CredentialHolder() string {
 }
 
 // ClearDeadHolder implements vault.HolderPruner: when the state is loaded,
-// a holder that names no live app is cleared (§3.5.9, 0.52.0).
-func (f *Feature) ClearDeadHolder(live func(string) bool) bool {
+// a holder that names no live app is cleared (§3.5.9, 0.52.0). It returns
+// the cleared holder's device id, "" when it kept the holder or had none.
+func (f *Feature) ClearDeadHolder(live func(string) bool) string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.st.Holder == "" || live(f.st.Holder) {
-		return false
+	h := f.st.Holder
+	if h == "" || live(h) {
+		return ""
 	}
 	f.st.Holder = ""
-	return true
+	return h
 }
 
 // CredentialExists implements vault.CredentialGate.

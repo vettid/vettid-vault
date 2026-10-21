@@ -453,7 +453,8 @@ func TestVaultDeleteDuringAlarmAndRecovery(t *testing.T) {
 }
 
 // §3.5.9 (0.9.0): a credential without a holder never adopts an app: the
-// vault is restricted to the recovery path and deletion.
+// vault is restricted to the recovery path (0.54.0: deletion is the
+// holder's, TestVaultDeleteNoHolder).
 func TestNoHolderNoAdoption(t *testing.T) {
 	e := newEnv(t)
 	blob := e.create()
@@ -473,5 +474,31 @@ func TestNoHolderNoAdoption(t *testing.T) {
 	// becomes the holder at its pairing (TransferCompleted).
 	if r := e.call("recovering-app", "credential.recover", "", map[string]any{"password": pw}); r.Code != "forbidden" {
 		t.Fatalf("credential.recover: %q", r.Code)
+	}
+}
+
+// §3.5.7, §3.5.9, §10.2 (0.54.0, as built since 0.52.0): vault.delete
+// passes the restricted gate only for the enrolling app; once a
+// credential exists it is the holder's, so with no live holder the former
+// holder and any other app are answered credential_required{reason:
+// "no_holder"}, with or without a blob: no clone alarm, no PIN tried, no
+// deletion and no adoption.
+func TestVaultDeleteNoHolder(t *testing.T) {
+	e := newEnv(t)
+	e.h.PIN = "246810"
+	blob := e.create()
+	e.h.PINTries = 0
+	e.h.AddDevice("dev-app2", vault.KindApp)
+	e.f.mu.Lock()
+	e.f.st.Holder = ""
+	e.f.mu.Unlock()
+	for _, tc := range []struct{ kind, blob string }{{"app", blob}, {"app", ""}, {"app2", blob}, {"app2", ""}} {
+		r := e.callBody(tc.kind, "vault.delete", tc.blob, map[string]any{"pin": "246810", "password": pw}, `"confirm":"`+vault.DeleteConfirmation+`"`)
+		if r.Code != "credential_required" || string(r.Body) != string(vault.NoHolderBody) {
+			t.Fatalf("%s (blob %v): %q %s", tc.kind, tc.blob != "", r.Code, r.Body)
+		}
+	}
+	if len(e.h.Deletions) != 0 || e.f.st.Alarm != nil || len(e.h.Alarms) != 0 || e.h.PINTries != 0 || e.f.Holder() != "" {
+		t.Fatalf("deletions %v, alarm %v, host alarms %v, PIN tries %d, holder %q", e.h.Deletions, e.f.st.Alarm, e.h.Alarms, e.h.PINTries, e.f.Holder())
 	}
 }

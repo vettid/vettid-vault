@@ -1134,3 +1134,10 @@ Tests marked (tc) need `-tags vettid_testcost` (the recovery wrap at 8 MiB inste
 | 11.2 "Lifetime and clock allowance" | the enclave sets `not_after` to its clock truncated to the second + 24 h − 60 s (never rounded up), so at most its clock + 24 h − 60 s and at most the attestation's timestamp + 24 h − 60 s | `enclave.TestETKNotAfterMargin` |
 | 11.2 | the ETK still rotates at 23 h: the new descriptor is out 59 min (less the clock's fraction of a second) before the previous `not_after`; the previous ETK is usable up to its `not_after` and destroyed a second later, inside its 1 h grace | `enclave.TestETKRotationBeforeNotAfter`, `enclave.TestETKLifecycle` |
 | 11.2 | the app (reference client) refuses `not_after` not after its time, and `not_after` more than 24 h + 5 min after the attestation's timestamp (inclusive: exactly 24 h + 5 min accepted, + 1 ms or + 1 s refused, 25 h refused); descriptors of 24 h and 24 h − 60 s are both accepted, a 24 h one also with the attestation 61 s behind | `client.TestVerifyEnclaveLifetimeAllowance`, `client.TestVerifyEnclave` |
+
+## A holder cleared at load is audited (§3.5.9, §10.9; 0.54.0, release 21)
+
+| § | Requirement | Test |
+|---|---|---|
+| 3.5.9, 10.9 | the load pass that clears a holder naming no live app (a removed device, a desktop, an unfinished pairing) audits `credential.holder_cleared` with `device_id` = the cleared holder, no `ref`, no feed item, in the flush that clears it (newManager marks the state dirty); a kept holder (a paired app, also a stale mailbox's) or no holder writes nothing, and a second load nothing more; the credential feature returns the cleared id | `vault.TestLoadClearsDeadHolder`, `credential.TestHolderHardening` |
+| 3.5.7, 3.5.9, 10.2 | `vault.delete` with a credential and no live holder answers `credential_required{reason: "no_holder"}` (holder-only once a credential exists); before a credential exists the enrolling app's `vault.delete` passes the restricted gate (as built since 0.52.0; no code change in 0.54.0) | `credential.TestVaultDeleteNoHolder` |

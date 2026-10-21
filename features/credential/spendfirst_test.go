@@ -304,14 +304,15 @@ func TestHolderHardening(t *testing.T) {
 	if e.f.Holder() != "dev-app" {
 		t.Fatal("another device's removal cleared the holder")
 	}
-	if e.f.ClearDeadHolder(func(id string) bool { return id == "dev-app" }) || e.f.Holder() != "dev-app" {
+	if id := e.f.ClearDeadHolder(func(id string) bool { return id == "dev-app" }); id != "" || e.f.Holder() != "dev-app" {
 		t.Fatal("a live holder cleared")
 	}
-	if !e.f.ClearDeadHolder(func(string) bool { return false }) || e.f.Holder() != "" {
-		t.Fatal("a dead holder kept")
+	// (0.54.0) The cleared holder's id is returned, for the audit entry.
+	if id := e.f.ClearDeadHolder(func(string) bool { return false }); id != "dev-app" || e.f.Holder() != "" {
+		t.Fatalf("a dead holder kept, or the wrong id returned: %q", id)
 	}
-	if e.f.ClearDeadHolder(func(string) bool { return false }) {
-		t.Fatal("no holder reported cleared")
+	if id := e.f.ClearDeadHolder(func(string) bool { return false }); id != "" {
+		t.Fatalf("no holder reported cleared: %q", id)
 	}
 	// A transfer: the old app removed, then the holder moved.
 	e = newEnv(t)

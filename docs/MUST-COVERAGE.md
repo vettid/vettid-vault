@@ -167,8 +167,8 @@ covered by the reference client (`client.*`).
 | § | Requirement | Test(s) |
 |---|---|---|
 | 5.4 | enroll and unlock requests padded to exactly 12,288 bytes; results 4,096; every outcome the same size | `altchan.TestSealOpen`, `enclave.TestUniformSizes`, `vectors.TestVectors` (altchan, 13,444-byte envelope) |
-| 11.2 | ETK descriptor and attestation: user_data = SHA-256("vettid/vms/2/etk" ‖ descriptor), not_after ≤ issue + 24 h; ETK rotates (≤ 24 h, at start), previous valid 1 h | `enclave.TestETKLifecycle`, `altchan.TestDescriptor`, `vectors.TestVectors` (altchan) |
-| 11.2 | App MUST verify the chain to the Nitro root, PCR0-2 against the manifest (active to enroll), reject debug PCRs, check user_data, not_after, < 26 h | `client.TestVerifyEnclave`, `nitro.TestVerifyRoundTrip`, `nitro.TestVerifyRejects` |
+| 11.2 | ETK descriptor and attestation: user_data = SHA-256("vettid/vms/2/etk" ‖ descriptor), not_after ≤ issue + 24 h − 60 s (0.53.0; 24 h before); ETK rotates (≤ 24 h, at start), previous valid 1 h | `enclave.TestETKLifecycle`, `enclave.TestETKNotAfterMargin`, `altchan.TestDescriptor`, `vectors.TestVectors` (altchan) |
+| 11.2 | App MUST verify the chain to the Nitro root, PCR0-2 against the manifest (active to enroll), reject debug PCRs, check user_data, not_after (after now, ≤ attestation + 24 h + 5 min since 0.53.0), < 26 h | `client.TestVerifyEnclave`, `client.TestVerifyEnclaveLifetimeAllowance`, `nitro.TestVerifyRoundTrip`, `nitro.TestVerifyRejects` |
 | 11.2, 11.10.6 | Never send a PIN to an older release than the last unlocked into (except abandoning) | `enclave.TestAbandonMove` (`ErrRollbackRel`) |
 | 11.3 | Binding: user_guid / request_id must equal the queue message; inner ts within 5 min; inner id = request_id; sender_kid all-zero | `enclave.TestETKLifecycle` (stale ts), `enclave.TestReplayRefused`, `enclave.FuzzProcessBody` |
 | 11.3 | device_attest REQUIRED; manifest_sha256 and manifest_serial REQUIRED (0.10.0; the host-supplied document verified against them, own active entry, own key checked before the first seal, else release_key) | `enclave.TestDeviceAttestationRefused`, `enclave.TestSealKeyPolicyRefused`, `enclave.TestManifestByHash` (enrollment), `altchan.TestRequestRoundTrip` |
@@ -1126,3 +1126,11 @@ Tests marked (tc) need `-tags vettid_testcost` (the recovery wrap at 8 MiB inste
 | 3.5.9 | the holder is none or one live app: removing the holder's device clears it (a transfer then moves it); when the state is loaded a holder naming a removed device, a desktop or an unfinished pairing is cleared, a paired app's (also a stale mailbox's) kept | `credential.TestHolderHardening`, `vault.TestLoadClearsDeadHolder` |
 | 3.5.9, 11.14.6 | a recovered phone's first handshake makes it the holder and removes every other app in the same flush (`device.replaced`); desktops stay | `vault.TestRecoveredPhonePairingRemovesOtherApps` |
 | 3.5.9 | `credential.unlock` is holder-only; Detection comes first (fail secure): a blob another live app presents to it, or to any holder-only type that carries one (owner check, `account.name.set`, `pin.change`, `vault.delete`, `credential.reset`, `device.transfer.approve` before its signer and old-app checks), is a clone (alarm, host alarm, `credential_frozen`, no PIN tried, the UTK spent); without a blob `forbidden`; without a live holder `no_holder` and no alarm | `credential.TestNonHolderBlobIsClone`, `credential.TestOneHolder` |
+
+## Lifetime and clock allowance (§11.2; 0.53.0, release 21)
+
+| § | Requirement | Test |
+|---|---|---|
+| 11.2 "Lifetime and clock allowance" | the enclave sets `not_after` to its clock truncated to the second + 24 h − 60 s (never rounded up), so at most its clock + 24 h − 60 s and at most the attestation's timestamp + 24 h − 60 s | `enclave.TestETKNotAfterMargin` |
+| 11.2 | the ETK still rotates at 23 h: the new descriptor is out 59 min (less the clock's fraction of a second) before the previous `not_after`; the previous ETK is usable up to its `not_after` and destroyed a second later, inside its 1 h grace | `enclave.TestETKRotationBeforeNotAfter`, `enclave.TestETKLifecycle` |
+| 11.2 | the app (reference client) refuses `not_after` not after its time, and `not_after` more than 24 h + 5 min after the attestation's timestamp (inclusive: exactly 24 h + 5 min accepted, + 1 ms or + 1 s refused, 25 h refused); descriptors of 24 h and 24 h − 60 s are both accepted, a 24 h one also with the attestation 61 s behind | `client.TestVerifyEnclaveLifetimeAllowance`, `client.TestVerifyEnclave` |

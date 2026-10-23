@@ -99,6 +99,11 @@ func TestHolderClearedAtLoadAudited(t *testing.T) {
 	tv.msg = f
 	tv.mu.Unlock()
 	tv.start(m)
+	// The run loop's Start writes vault.unlocked; a request answered
+	// means Start has run.
+	if r := tv.request(tv.app, "vault.status", `{}`); !r.OK() {
+		t.Fatalf("vault.status: %s", r.ErrorCode())
+	}
 
 	check := func(when string) audit.Entry {
 		t.Helper()
@@ -171,15 +176,18 @@ func TestHolderClearedAtLoadAudited(t *testing.T) {
 	// In the flush that cleared it: a crash and a new load find the entry
 	// and the cleared holder, and add nothing.
 	tv.restart()
+	if r := tv.request(tv.app, "vault.status", `{}`); !r.OK() {
+		t.Fatalf("vault.status: %s", r.ErrorCode())
+	}
 	again := check("after a crash and a second load")
 	if again.Seq != first.Seq || string(again.Hash) != string(first.Hash) {
 		t.Fatalf("entry changed across the reload: %+v, then %+v", first, again)
 	}
-	// Nothing but the load's own vault.unlocked is new (the run loop writes
-	// it, so it may not be there yet).
+	var added []string
 	for _, e := range tv.fs.Audit.Entries()[entriesAfter:] {
-		if e.Kind != "vault.unlocked" {
-			t.Fatalf("entry added by the second load: %s %+v", e.Kind, e)
-		}
+		added = append(added, e.Kind)
+	}
+	if len(added) != 1 || added[0] != "vault.unlocked" {
+		t.Fatalf("entries added by the second load: %q", added)
 	}
 }

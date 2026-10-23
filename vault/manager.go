@@ -289,7 +289,13 @@ type Manager struct {
 	unlockedBy string
 	// lockBy: the owner device whose vault.lock is pending, audited on
 	// vault.locked (0.23.2); "" for every other lock.
-	lockBy      string
+	lockBy string
+	// The idle lock's look at this opening (§3.6.8 "After an unlock"):
+	// idleOpened once it was taken; idleGrace is one hour from an unlock
+	// that came when the idle lock's time had already passed (zero
+	// otherwise). Memory only: every opening has its own.
+	idleOpened  bool
+	idleGrace   time.Time
 	started     bool
 	hadFailures bool // the header recorded failures before this unlock
 	holdsDEK    bool // counted in unlocked
@@ -1097,7 +1103,11 @@ func (m *Manager) lockLocked(ctx context.Context) error {
 	if m.lockReason == "" {
 		by = m.lockBy
 	}
-	m.record(Activity{Kind: "vault.locked", DeviceID: by, Audit: true}, m.now())
+	ref := ""
+	if m.lockReason == LockIdle {
+		ref = LockIdle // §10.9 (0.29.0, release L): the idle lock, §3.6.8
+	}
+	m.record(Activity{Kind: "vault.locked", DeviceID: by, Ref: ref, Audit: true}, m.now())
 	err := m.persist(ctx, false)
 	if errors.Is(err, ErrSplitBrain) {
 		return err

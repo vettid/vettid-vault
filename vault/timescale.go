@@ -17,7 +17,8 @@ import "time"
 //   - S13 the provisional enrollment window (Create, enrollApp).
 //
 // S7 (the quiet period) is stated in the staging channel file itself;
-// S3 and S4 (the idle lock) are scaled where release L builds them.
+// S3 and S4, the idle lock past the deadline and the hour after an unlock
+// (0.29.0, release L), are scaled in idleLockAt.
 // Nothing else is scaled: rate limits, backoff ladders, cryptographic
 // freshness, token lifetimes, the recovery wait unit, timers between
 // vaults, durations the member chooses, retention (§2.2).

@@ -41,3 +41,13 @@ func (f *Feature) CallAnsweredBefore(device string, t time.Time) bool {
 	}
 	return false
 }
+
+// CallInProgress implements vault.CallActivity: a call is live (ringing or
+// answered, not ended or timed out). The idle lock waits for it to end
+// (VAULT-MESSAGING 0.29.0 §3.6.8, release L); a call ends within 12 hours
+// (§10.10).
+func (f *Feature) CallInProgress(now time.Time) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.busy(now)
+}

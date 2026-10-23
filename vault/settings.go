@@ -91,6 +91,7 @@ func (s Settings) json() []byte {
 	}
 	b := strictjson.NewBuilder().Bool("connections.auto_approve_in_person", s.AutoApproveInPerson).
 		Bool("credential.backup", s.Backup()).Uint("credential.unlock_ttl_seconds", ttl).Uint("feed.retention_days", feed).
+		Uint("idle_lock.after_seconds", uint64(s.IdleLockAfter()/time.Second)).
 		Bool("location.history.enabled", s.LocationHistory).
 		Uint("location.history.interval_seconds", uint64(s.LocationHistoryInterval()/time.Second)).
 		Uint("location.history.retention_days", uint64(s.LocationHistoryRetention()/(24*time.Hour))).
@@ -167,6 +168,12 @@ func ApplySettings(cur Settings, body []byte) (Settings, error) {
 			// §3.6.2: 1 h to 24 h; the check cannot be turned off.
 			if next.OwnerCheckSeconds, err = set.Uint(k, uint64(MinOwnerCheckInterval/time.Second),
 				uint64(DefaultOwnerCheckInterval/time.Second)); err != nil {
+				return cur, errBadRequest
+			}
+		case "idle_lock.after_seconds":
+			// §3.6.8 (0.29.0, release L): 1 h to 30 days; no "never".
+			if next.IdleLockSeconds, err = set.Uint(k, uint64(MinIdleLockAfter/time.Second),
+				uint64(MaxIdleLockAfter/time.Second)); err != nil {
 				return cur, errBadRequest
 			}
 		case "owner_check.hold":

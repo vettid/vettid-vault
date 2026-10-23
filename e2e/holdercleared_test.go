@@ -175,12 +175,11 @@ func TestHolderClearedAtLoadAudited(t *testing.T) {
 	if again.Seq != first.Seq || string(again.Hash) != string(first.Hash) {
 		t.Fatalf("entry changed across the reload: %+v, then %+v", first, again)
 	}
-	// Nothing but the load's own vault.unlocked is new.
-	var added []string
+	// Nothing but the load's own vault.unlocked is new (the run loop writes
+	// it, so it may not be there yet).
 	for _, e := range tv.fs.Audit.Entries()[entriesAfter:] {
-		added = append(added, e.Kind)
-	}
-	if len(added) != 1 || added[0] != "vault.unlocked" {
-		t.Fatalf("entries added by the second load: %q", added)
+		if e.Kind != "vault.unlocked" {
+			t.Fatalf("entry added by the second load: %s %+v", e.Kind, e)
+		}
 	}
 }

@@ -117,6 +117,16 @@ type State struct {
 	// recovery removed the old app, until the recovered phone pairs and
 	// the binding moves (§11.7.1, §11.14.6): digest and class.
 	RecoveredSigner []string `json:"recovered_signer,omitempty"`
+	// KeptSigner is the last recorded Android signer (digest, class)
+	// while the vault's app has none (an iOS app): the vault's signer
+	// binding across it, so that a later move to an Android app of another
+	// signer is a change (§11.7.1 "Across an iOS app", decided
+	// 2026-10-11; IOS-PLAN VA4). Set when the binding moves from a signer
+	// to an app without one, cleared when it moves to an app with one.
+	// A state written before VA4 has none: a vault moved to an iOS app
+	// before VA4 lost its binding at that move (no iOS app has been
+	// released, so none is known).
+	KeptSigner []string `json:"kept_signer,omitempty"`
 	// PendingSucceed is a completed recovery's attempt (generation, n)
 	// whose success the counter has not confirmed; PresentPending a
 	// presence (after a recovery or a transfer) not yet recorded. Both are

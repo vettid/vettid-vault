@@ -610,7 +610,8 @@ func TestTransferFromUnboundVault(t *testing.T) {
 }
 
 // A new app without a signer (iOS): the pending carries neither member,
-// and a `signer` in the approval names nothing the vault will do.
+// a `signer` in the approval names nothing the vault will do, and nothing
+// is audited; the vault keeps the old signer (VA4).
 func TestTransferToAppWithoutSigner(t *testing.T) {
 	d := boundFixture(t, sigVettID, "vettid")
 	p, id, _ := transferTo(t, d, json.RawMessage(`{"platform":"ios","pk":"AQ==","key_id":"AQ==","counter":0}`), 0x50)
@@ -627,7 +628,9 @@ func TestTransferToAppWithoutSigner(t *testing.T) {
 	if d.hasActivity(kindSignerChanged) || d.hasActivity(kindSignerBound) {
 		t.Fatal("audited")
 	}
-	if s, _ := d.m.vaultSigner(""); s != "" {
+	// VA4 (§11.7.1 "Across an iOS app"): the vault keeps the Android
+	// signer across the app without one (va4_test.go).
+	if s, _ := d.m.vaultSigner(""); s != sigVettID {
 		t.Fatalf("binding %q after a move to an app without one", s)
 	}
 }

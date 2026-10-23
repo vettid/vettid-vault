@@ -41,14 +41,22 @@ func TestETKNotAfterMargin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if d := ds.NotAfter.Sub(doc.Timestamp); d > 24*time.Hour-60*time.Second || d > client.MaxDescriptorLifetime {
-		t.Fatalf("not_after %v after the attestation", d)
+	// The attestation's timestamp is the same clock here, so the margin
+	// holds against it too, and far inside what the apps allow.
+	d := ds.NotAfter.Sub(doc.Timestamp)
+	if d > 24*time.Hour-60*time.Second {
+		t.Fatalf("not_after is %v after the attestation's timestamp, more than 24 h - 60 s", d)
+	}
+	if d > client.MaxDescriptorLifetime {
+		t.Fatalf("not_after is %v after the attestation's timestamp, past the apps' limit", d)
 	}
 }
 
-// §11.2: the ETK rotates at 23 h, so the new descriptor is out close to an
-// hour before the previous one's not_after; the previous ETK's 1 h grace
-// is cut at its not_after (24 h - 60 s), not at 24 h.
+// 0.53.0, §11.2 "Lifetime and clock allowance": the ETK rotates at 23 h, so
+// the new descriptor is out 59 min (less the clock's fraction of a second)
+// before the previous one's not_after; the previous ETK's 1 h grace is cut
+// at its not_after (24 h - 60 s after its clock), not at the end of the
+// hour.
 func TestETKRotationBeforeNotAfter(t *testing.T) {
 	f := newFx(t)
 	a := f.newApp("user-1", android(0x62))
@@ -63,8 +71,11 @@ func TestETKRotationBeforeNotAfter(t *testing.T) {
 	if e2.Descriptor.Kid.Equal(e.Descriptor.Kid) {
 		t.Fatal("not rotated at 23 h")
 	}
-	if left := e.Descriptor.NotAfter.Sub(f.clk.Now()); left < 58*time.Minute || left > time.Hour {
-		t.Fatalf("new descriptor %v before the previous not_after", left)
+	// 24 h - 60 s - 23 h = 59 min, less the clock's fraction of a second
+	// (not_after is truncated), and the supervisor's check interval, which
+	// the test's clock makes zero.
+	if left := e.Descriptor.NotAfter.Sub(f.clk.Now()); left <= 58*time.Minute+59*time.Second || left > 59*time.Minute {
+		t.Fatalf("new descriptor %v before the previous not_after, want just under 59 min", left)
 	}
 	_, m, _ := a.dev.VerifyManifest(f.w.Served(), f.trust)
 	unlock := func() *enclave.Response {

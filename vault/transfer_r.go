@@ -7,6 +7,7 @@ import (
 
 	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/envelope"
+	"github.com/vettid/vettid-vault/vms/handshake"
 	"github.com/vettid/vettid-vault/vms/recovery"
 	"github.com/vettid/vettid-vault/vms/suite"
 )
@@ -14,36 +15,65 @@ import (
 // Transfer from release R (VAULT-MESSAGING 0.33.0 §11.14.10): the new
 // phone's secret from its hs.init, the approval's DEK replacement in three
 // writes, and the old phone's notice held until the new phone's first
-// unlock from storage, for at most 7 days.
+// unlock from storage, while its deposit token lives.
 
-// PendingUnlinkTTL bounds how long the old phone's notice is kept.
-const PendingUnlinkTTL = 7 * 24 * time.Hour
-
-// PendingUnlink is the old app's device.unlinked{transferred}, sealed at
-// the approval to its session and kept in the state until it may be sent.
+// PendingUnlink is the old app's device.unlinked{transferred}, kept in
+// the state from the approval until it is delivered (§11.14.10).
+//
+// Owner decision 2026-10-23 (vettid.org #404): it is kept for as long as
+// its deposit token lives, not for a fixed 7 days, and it is sealed at
+// delivery, not at the approval. A notice sealed at the approval would be
+// refused by the old phone once its ts is more than 16 days old (§8.4,
+// durable types); one sealed at delivery has a fresh ts. For that the
+// vault keeps the sending half of the old app's session epoch (Epoch: the
+// send key and kids and the send counter; no receive key, no rekey
+// secret), under the DEK like every session key, and zeroizes it when the
+// notice is sent or deleted. The deposit token is the standing token the
+// old app issued to the vault; the old app renews it at the approval, so
+// it has up to the full 30 days (§7.2).
 type PendingUnlink struct {
 	RelayURL   string    `json:"relay_url"`
 	Mailbox    string    `json:"mailbox"`
 	Token      string    `json:"token"`
 	TokenExp   time.Time `json:"token_exp"`
-	Payload    []byte    `json:"payload"`
 	TransferID string    `json:"transfer_id"`
 	DEKVersion uint64    `json:"dek_version"`
 	At         time.Time `json:"at"`
-	// Until is when the notice is deleted unsent: At plus PendingUnlinkTTL
-	// divided by the time scale (0.43.0, STAGING-TIME-SCALE S11). Zero in
-	// a notice held by a release before the scale: At + PendingUnlinkTTL,
-	// so a notice held before the vault moved keeps its 7 days.
-	Until time.Time `json:"until,omitzero"`
+	// Epoch is the sending half of the old app's session epoch at the
+	// approval (handshake.ExportSendOnly). Absent in a notice held by a
+	// release before this one, which kept only Payload.
+	Epoch *handshake.EpochState `json:"epoch,omitempty"`
+	// Payload is the notice sealed at the approval. It is what a release
+	// before this one sends (and the only thing it can read), and what
+	// this release sends for a notice that has no Epoch.
+	Payload []byte `json:"payload"`
 }
 
-// expired reports whether the held notice is past its deletion time.
-func (pu *PendingUnlink) expired(now time.Time) bool {
-	until := pu.Until
-	if until.IsZero() {
-		until = pu.At.Add(PendingUnlinkTTL)
+// until is when a held notice is deleted unsent: when its
+// deposit token expires. A token without an expiry (never issued so, as
+// tokens carry exp) is bounded by the longest standing token, StandingMax
+// from the approval, so that the kept send key does not stay for ever.
+func (pu *PendingUnlink) until() time.Time {
+	if pu.TokenExp.IsZero() {
+		return pu.At.Add(StandingMax)
 	}
-	return now.After(until)
+	return pu.TokenExp
+}
+
+// expired reports whether the held notice can no longer be delivered: its
+// token has expired.
+func (pu *PendingUnlink) expired(now time.Time) bool {
+	return !now.Before(pu.until())
+}
+
+// wipe zeroizes the kept send key and the sealed payload.
+func (pu *PendingUnlink) wipe() {
+	if pu.Epoch != nil {
+		suite.Wipe(pu.Epoch.SendKey)
+		pu.Epoch.SendKey = nil
+	}
+	suite.Wipe(pu.Payload)
+	pu.Payload = nil
 }
 
 // approveTransferR is the vault's part of an approval (§11.14.10 step 2):
@@ -104,28 +134,44 @@ func (m *Manager) approveTransferR(ctx context.Context, r *Request, pin string, 
 	return nil
 }
 
-// holdUnlink seals the old app's device.unlinked{transferred, transfer_id}
-// to its session now and keeps it in the state (§11.14.10).
+// holdUnlink keeps the old app's device.unlinked{transferred,
+// transfer_id} in the state (§11.14.10): the sending half of its session
+// epoch, to seal the notice at delivery, and, for a release before this
+// one that reads the state, the notice sealed now.
 func (m *Manager) holdUnlink(old *Peer, transferID string, dekVersion uint64, now time.Time) {
 	kr := m.sessions[old.ID]
 	if kr == nil || kr.Current() == nil || old.Standing.Token == "" {
 		return
 	}
-	body := strictjson.NewBuilder().String("reason", "transferred").String("transfer_id", transferID).Bytes()
-	in := &envelope.Inner{ID: m.newID(now), Type: "device.unlinked", TS: now, Body: body}
-	raw, err := kr.Current().Seal(in)
+	cur := kr.Current()
+	raw, err := cur.Seal(m.unlinkInner(transferID, now))
 	if err != nil {
 		return
 	}
+	// Exported after that seal, so the notice sealed at delivery takes the
+	// next seq; nothing else is sealed in this epoch afterwards (the old
+	// app is removed in this flush, and its session destroyed).
+	ep, err := cur.ExportSendOnly()
+	if err != nil {
+		suite.Wipe(raw)
+		return
+	}
 	m.st.PendingUnlink = &PendingUnlink{RelayURL: old.Relay.URL, Mailbox: old.Relay.Mailbox, Token: old.Standing.Token,
-		TokenExp: old.Standing.Exp, Payload: raw, TransferID: transferID, DEKVersion: dekVersion, At: now.UTC(),
-		Until: now.UTC().Add(m.opt.scale(PendingUnlinkTTL))}
+		TokenExp: old.Standing.Exp, TransferID: transferID, DEKVersion: dekVersion, At: now.UTC(), Epoch: &ep, Payload: raw}
 	m.dirty = true
+}
+
+// unlinkInner is the notice's plaintext at now.
+func (m *Manager) unlinkInner(transferID string, now time.Time) *envelope.Inner {
+	body := strictjson.NewBuilder().String("reason", "transferred").String("transfer_id", transferID).Bytes()
+	return &envelope.Inner{ID: m.newID(now), Type: "device.unlinked", TS: now, Body: body}
 }
 
 // sendPendingUnlink deposits the held notice (the new phone has unlocked
 // from storage at the transfer's dek_version or later, or a recovery
-// completed) and deletes it.
+// completed) and deletes it, whatever its age, while its token lives. It
+// is sealed now, with a fresh ts, in the old app's epoch (a notice held
+// by an earlier release, without the epoch, goes as it was sealed).
 func (m *Manager) sendPendingUnlink(now time.Time) {
 	pu := m.st.PendingUnlink
 	if pu == nil {
@@ -133,10 +179,26 @@ func (m *Manager) sendPendingUnlink(now time.Time) {
 	}
 	m.st.PendingUnlink = nil
 	m.dirty = true
-	if !now.Before(pu.TokenExp) && !pu.TokenExp.IsZero() || pu.expired(now) {
-		return // deleted unsent
+	defer pu.wipe()
+	if pu.expired(now) {
+		return // deleted unsent: the token cannot deposit any more
 	}
-	m.queueDeposit(&OutboxEntry{Op: OpDeposit, RelayURL: pu.RelayURL, Mailbox: pu.Mailbox, Token: pu.Token, Payload: pu.Payload, BestEffort: true}, now)
+	payload := pu.Payload
+	if pu.Epoch != nil {
+		e, err := handshake.ImportSendOnly(*pu.Epoch)
+		if err != nil {
+			return // a damaged epoch: deleted unsent, as an expired one
+		}
+		raw, err := e.Seal(m.unlinkInner(pu.TransferID, now))
+		e.Destroy()
+		if err != nil {
+			return
+		}
+		payload = raw
+	} else {
+		payload = append([]byte(nil), payload...)
+	}
+	m.queueDeposit(&OutboxEntry{Op: OpDeposit, RelayURL: pu.RelayURL, Mailbox: pu.Mailbox, Token: pu.Token, Payload: payload, BestEffort: true}, now)
 	m.record(Activity{Kind: "device.unlinked_sent", Ref: pu.TransferID, Audit: true}, now)
 }
 
@@ -157,12 +219,13 @@ func (m *Manager) pendingUnlinkAtUnlock(now time.Time) {
 	}
 }
 
-// expirePendingUnlink deletes a held notice older than 7 days (scaled) or whose
-// token has expired (housekeeping).
+// expirePendingUnlink deletes a held notice whose token has expired
+// (housekeeping), and zeroizes its kept send key.
 func (m *Manager) expirePendingUnlink(now time.Time) {
-	if pu := m.st.PendingUnlink; pu != nil && (pu.expired(now) || !pu.TokenExp.IsZero() && !now.Before(pu.TokenExp)) {
+	if pu := m.st.PendingUnlink; pu != nil && pu.expired(now) {
 		m.st.PendingUnlink = nil
 		m.dirty = true
+		pu.wipe()
 	}
 }
 

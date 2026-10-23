@@ -1731,6 +1731,25 @@ func (d *Device) followRotation(body json.RawMessage) {
 	d.st.Vault.IK, d.st.Vault.KEM = final, kem.Bytes()
 }
 
+// RenewVaultToken mints a fresh standing token for the vault to deposit to
+// this device's mailbox and sends it as relay.token.issued (§7.2), now,
+// whatever the current token's age. The old app does this at a transfer's
+// approval (TransferApproveSigner).
+func (d *Device) RenewVaultToken(ctx context.Context) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.st.Vault == nil || d.keyring.Current() == nil {
+		return ErrNotPaired
+	}
+	tok, err := d.mintForVault()
+	if err != nil {
+		return err
+	}
+	body := strictjson.NewBuilder().String("kind", "standing").String("token", tok).Bytes()
+	_, err = d.sendLocked(ctx, "", "relay.token.issued", body, "", "")
+	return err
+}
+
 // maintain refreshes tokens in both directions (§7.2).
 func (d *Device) maintain(ctx context.Context, now time.Time) {
 	v := d.st.Vault

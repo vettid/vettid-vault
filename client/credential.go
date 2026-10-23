@@ -406,7 +406,15 @@ func (d *Device) TransferApprove(ctx context.Context, id, pin, password string) 
 // required when device.transfer.pending said signer_changed. "" sends no
 // `signer`. Without the confirmation the vault answers
 // signer_unconfirmed before it tries the PIN; (0.52.0) the UTK is spent.
+//
+// Before the approval the old app renews the vault's standing token to its
+// mailbox (owner decision 2026-10-23, vettid.org #404): the vault keeps the
+// old app's device.unlinked{transferred} until the new phone's first
+// unlock from storage, for as long as that token lives (§11.14.10), so a
+// fresh token gives it the full 30 days. A renewal that cannot be sent
+// does not stop the approval; the vault then keeps the token it has.
 func (d *Device) TransferApproveSigner(ctx context.Context, id, pin, password, signer string) error {
+	_ = d.RenewVaultToken(ctx)
 	extra := map[string]any{"transfer_id": id}
 	if signer != "" {
 		extra["signer"] = signer

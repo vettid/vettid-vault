@@ -41,7 +41,7 @@ func TestScale(t *testing.T) {
 	}
 	for _, n := range []uint64{0, 1} {
 		o := Options{TimeScale: n}
-		if o.timeScale() != 1 || o.scale(PendingUnlinkTTL) != PendingUnlinkTTL {
+		if o.timeScale() != 1 || o.scale(EnrollWindow) != EnrollWindow {
 			t.Fatalf("scale %d is not real time", n)
 		}
 	}
@@ -205,8 +205,9 @@ func TestTimeScaleCounterNotice(t *testing.T) {
 	}
 }
 
-// S11: the old phone's held notice is deleted 7 days after the approval,
-// 7 hours at 24; a notice held before the move (no Until) keeps 7 days.
+// S11 (until 0.55.10): the old phone's held notice is no longer kept a
+// scaled 7 days. It is kept while its deposit token lives (owner decision
+// 2026-10-23, vettid.org #404), a real-time lifetime, at any scale.
 func TestTimeScalePendingUnlink(t *testing.T) {
 	for _, scale := range []uint64{1, 24} {
 		d := newDevFixture(t)
@@ -214,37 +215,20 @@ func TestTimeScalePendingUnlink(t *testing.T) {
 		t0 := time.Now().UTC()
 		d.m.mu.Lock()
 		d.m.holdUnlink(d.devPeer, "t1", 2, t0)
-		d.m.mu.Unlock()
 		pu := d.m.st.PendingUnlink
 		if pu == nil {
+			d.m.mu.Unlock()
 			t.Fatal("not held")
 		}
-		pu.TokenExp = t0.Add(30 * 24 * time.Hour) // the token outlives the notice
-		ttl := 7 * 24 * time.Hour / time.Duration(scale)
-		if !pu.Until.Equal(pu.At.Add(ttl)) {
-			t.Fatalf("scale %d: until %v, at %v", scale, pu.Until, pu.At)
-		}
-		d.m.mu.Lock()
-		d.m.expirePendingUnlink(pu.At.Add(ttl))
+		pu.TokenExp = t0.Add(30 * 24 * time.Hour)
+		d.m.expirePendingUnlink(t0.Add(30*24*time.Hour - time.Second))
 		kept := d.m.st.PendingUnlink != nil
-		d.m.expirePendingUnlink(pu.At.Add(ttl + time.Second))
+		d.m.expirePendingUnlink(t0.Add(30 * 24 * time.Hour))
 		gone := d.m.st.PendingUnlink == nil
 		d.m.mu.Unlock()
 		if !kept || !gone {
-			t.Fatalf("scale %d: kept at its time %v, deleted after %v", scale, kept, gone)
+			t.Fatalf("scale %d: kept to the token's end %v, deleted at it %v", scale, kept, gone)
 		}
-	}
-	// Held by a release before the scale: no Until, 7 days from At.
-	d := newDevFixture(t)
-	d.m.opt.TimeScale = 24
-	t0 := time.Now().UTC()
-	d.m.st.PendingUnlink = &PendingUnlink{At: t0, TokenExp: t0.Add(30 * 24 * time.Hour), TransferID: "t0"}
-	d.m.mu.Lock()
-	d.m.expirePendingUnlink(t0.Add(7*24*time.Hour - time.Minute))
-	kept := d.m.st.PendingUnlink != nil
-	d.m.mu.Unlock()
-	if !kept {
-		t.Fatal("a notice held before the move lost its 7 days")
 	}
 }
 
@@ -356,7 +340,6 @@ func TestTimeScaleLeavesTheRestAlone(t *testing.T) {
 		"recovery delay (real)":         {RecoveryDelay, 24 * time.Hour},
 		"recovery validity (real)":      {RecoveryValidity, 24 * time.Hour},
 		"recovered invite (not scaled)": {RecoveredInviteWindow, 24 * time.Hour},
-		"pending unlink (real)":         {PendingUnlinkTTL, 7 * 24 * time.Hour},
 		"enroll window (real)":          {EnrollWindow, 24 * time.Hour},
 		"counter notice (real)":         {CounterUnavailableNotice, 24 * time.Hour},
 	}

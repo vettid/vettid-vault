@@ -170,10 +170,9 @@ func (m *Manager) signerMoved(oldDigest, oldClass string, newApp *Peer, now time
 	nd, nc := signerOf(m.bindingOf(newApp))
 	if nd == "" {
 		if oldDigest != "" {
+			// The running release's class, else the recorded one, else
+			// "unknown" (signerClass).
 			class, _ := m.opt.signerClass(oldDigest, oldClass)
-			if !validSignerClass(class) {
-				class = oldClass
-			}
 			m.st.KeptSigner = []string{oldDigest, class}
 			m.dirty = true
 		}

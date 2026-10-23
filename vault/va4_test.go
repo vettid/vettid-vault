@@ -299,3 +299,79 @@ func TestKeptSignerState(t *testing.T) {
 		t.Fatal("a short digest kept")
 	}
 }
+
+// The real recovery open (release R, §11.14.6), first run and resumed
+// after its step-2 state write failed: RecoveredSigner is the vault's
+// binding (an Android app's signer, or the signer kept across an iOS
+// app), and the recovered phone's first handshake compares with it.
+func TestRecoveryOpenRecordsSigner(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		app       json.RawMessage
+		kept      []string
+		to        json.RawMessage
+		kind, ref string
+		keptAfter string
+	}{
+		{"android to another signer", androidBinding(sigVettID, "vettid"), nil, androidBinding(sigPlay, "google_play"), kindSignerChanged, "vettid:google_play", ""},
+		{"android to iOS", androidBinding(sigVettID, "vettid"), nil, iosBinding, "", "", sigVettID},
+		{"iOS keeping a signer to another", iosBinding, []string{sigVettID, "vettid"}, androidBinding(sigPlay, "google_play"), kindSignerChanged, "vettid:google_play", ""},
+	} {
+		for _, resumed := range []bool{false, true} {
+			name := tc.name
+			if resumed {
+				name += ", resumed"
+			}
+			t.Run(name, func(t *testing.T) {
+				sink := &recSink{}
+				f := newOpenFixtureWith(t, func(f *openFixture) {
+					f.m.mu.Lock()
+					f.m.st.Devices["app1"] = &Peer{ID: "app1", Kind: KindApp, State: PeerActive, Attestation: tc.app}
+					f.m.st.KeptSigner = tc.kept
+					f.m.dirty = true
+					f.m.mu.Unlock()
+					f.flush()
+				})
+				f.opts.AndroidSigners = testPins
+				f.opts.Features = append(append([]Feature(nil), f.opts.Features...), sink)
+				if resumed {
+					f.st.failState = 1
+					if m, out := f.open(testPIN, rPW); m != nil || out.Code != OpenRetry {
+						t.Fatalf("failed completion: %+v", out)
+					}
+				}
+				m, out := f.open(testPIN, rPW)
+				if m == nil || !out.OK {
+					t.Fatalf("open: %+v", out)
+				}
+				m.mu.Lock()
+				defer m.mu.Unlock()
+				if rs := m.st.RecoveredSigner; len(rs) != 2 || rs[0] != sigVettID || rs[1] != "vettid" {
+					t.Fatalf("recovered signer %v", rs)
+				}
+				if m.st.Devices["app1"] != nil {
+					t.Fatal("the old app was not removed")
+				}
+				phone := &Peer{ID: "phone", Kind: KindApp, State: PeerActive, Recovering: true, Attestation: tc.to}
+				m.st.Devices[phone.ID] = phone
+				m.recoveredPhonePaired(phone, m.now())
+				got := 0
+				for _, a := range sink.got {
+					if a.Kind != kindSignerBound && a.Kind != kindSignerChanged {
+						continue
+					}
+					got++
+					if a.Kind != tc.kind || a.Ref != tc.ref || a.DeviceID != phone.ID || a.Feed != (tc.kind == kindSignerChanged) {
+						t.Fatalf("recorded %+v, want %s %s", a, tc.kind, tc.ref)
+					}
+				}
+				if want := map[bool]int{true: 1, false: 0}[tc.kind != ""]; got != want {
+					t.Fatalf("%d signer entries, want %d", got, want)
+				}
+				if k, _ := m.keptSigner(); k != tc.keptAfter {
+					t.Fatalf("kept %q, want %q", k, tc.keptAfter)
+				}
+			})
+		}
+	}
+}

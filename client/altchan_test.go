@@ -146,8 +146,12 @@ func TestVerifyEnclaveLifetimeAllowance(t *testing.T) {
 	}{
 		{"release 21: 24 h - 60 s", 24*time.Hour - 60*time.Second, 0, attT, true},
 		{"earlier releases: 24 h", 24 * time.Hour, 0, attT, true},
+		// The 1 s allowance of earlier apps failed this one (descriptor
+		// 24 h after the clock, the attestation 61 s behind it).
 		{"24 h, attestation 61 s behind the enclave's clock", 24 * time.Hour, -61 * time.Second, attT, true},
 		{"exactly 24 h + 5 min", 24*time.Hour + 5*time.Minute, 0, attT, true},
+		// The attestation 1 ms earlier makes not_after 24 h + 5 min + 1 ms
+		// after its timestamp: the smallest step the timestamp has.
 		{"24 h + 5 min + 1 ms", 24*time.Hour + 5*time.Minute, -time.Millisecond, attT, false},
 		{"24 h + 5 min + 1 s", 24*time.Hour + 5*time.Minute + time.Second, 0, attT, false},
 		{"25 h", 25 * time.Hour, 0, attT, false},

@@ -256,3 +256,23 @@ func TestCredentialGate(t *testing.T) {
 		t.Fatal("has_credential not recorded")
 	}
 }
+
+// §3.5.7 (stated in 0.54.0, as built): the types a restricted vault still
+// accepts include the enrolling app's vault.delete (§12.5), which the
+// credential feature then handles. The gate feature here has no such
+// handler, so the answer is its absence, not credential_required. Once the
+// vault has a credential and no holder, vault.delete is the holder's and
+// answered credential_required (credential.TestVaultDeleteNoHolder).
+func TestCredentialGateAllowsVaultDelete(t *testing.T) {
+	d := newDevFixture(t)
+	g := &gateFeature{}
+	d.m.addFeature(g)
+	_ = d.send("vault.delete", []byte(`{}`))
+	if r := one(t, d); r.Error == nil || r.Error.Code == "credential_required" {
+		t.Fatalf("vault.delete on a vault without a credential: %+v", r)
+	}
+	_ = d.send("settings.get", []byte(`{}`))
+	if r := one(t, d); r.Error == nil || r.Error.Code != "credential_required" {
+		t.Fatalf("control, settings.get: %+v", r)
+	}
+}

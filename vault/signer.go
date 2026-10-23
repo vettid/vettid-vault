@@ -132,7 +132,9 @@ func (m *Manager) bindingOf(p *Peer) json.RawMessage {
 // vaultSigner is the vault's signer binding (§11.7.1): the signer
 // recorded for its app's key. A recovering app is not the vault's app
 // until credential.recover succeeds, so its signer does not count; `not`
-// excludes a device (the new app of a completing transfer).
+// excludes a device (the new app of a completing transfer). When the
+// vault's app has no signer (an iOS app), the binding is the last
+// recorded Android signer, kept across it (keptSigner).
 func (m *Manager) vaultSigner(not string) (digest, class string) {
 	for _, p := range m.sortedDevices() {
 		if p.Kind != KindApp || p.State != PeerActive || p.Recovering || p.ID == not {
@@ -142,21 +144,54 @@ func (m *Manager) vaultSigner(not string) (digest, class string) {
 			return d, c
 		}
 	}
+	return m.keptSigner()
+}
+
+// keptSigner is the last recorded Android signer the vault keeps while
+// its app has none (§11.7.1 "Across an iOS app", decided 2026-10-11;
+// IOS-PLAN VA4): digest and class, or "" when none is kept.
+func (m *Manager) keptSigner() (digest, class string) {
+	if k := m.st.KeptSigner; len(k) == 2 && validDigest(k[0]) {
+		return k[0], k[1]
+	}
 	return "", ""
 }
 
 // signerMoved audits the binding's move to a new app's signer in the
 // flush that makes it the vault's app (a completed transfer or recovery):
-// device.signer_bound when the vault had no recorded signer,
+// device.signer_bound when the vault had no recorded signer, or when it
+// returns from an app without one (iOS) to the signer it kept;
 // device.signer_changed (audit and a feed item of priority high) when the
-// digest changed, nothing when it is the same or the new app has none.
+// digest changed, also from a kept signer; nothing when the new app has
+// the old app's signer. When the new app has no signer, the vault keeps
+// the old binding (VA4): nothing is audited and the binding is not shown
+// (device.list carries a signer only on an Android app's entry).
 func (m *Manager) signerMoved(oldDigest, oldClass string, newApp *Peer, now time.Time) {
 	nd, nc := signerOf(m.bindingOf(newApp))
-	if nd == "" || nd == oldDigest {
+	if nd == "" {
+		if oldDigest != "" {
+			// The running release's class, else the recorded one, else
+			// "unknown" (signerClass).
+			class, _ := m.opt.signerClass(oldDigest, oldClass)
+			m.st.KeptSigner = []string{oldDigest, class}
+			m.dirty = true
+		}
+		return
+	}
+	kept, _ := m.keptSigner()
+	if m.st.KeptSigner != nil {
+		m.st.KeptSigner = nil
+		m.dirty = true
+	}
+	fromKept := kept != "" && kept == oldDigest
+	if nd == oldDigest && !fromKept {
 		return
 	}
 	newClass, _ := m.opt.signerClass(nd, nc)
-	if oldDigest == "" {
+	if oldDigest == "" || nd == oldDigest {
+		// No signer before, or back from an app without one to the
+		// signer the vault kept: the transfer binds (§11.7.1, "Across
+		// platforms"), with no change of signer.
 		m.record(Activity{Kind: kindSignerBound, DeviceID: newApp.ID, Ref: newClass, Audit: true}, now)
 		return
 	}
@@ -169,6 +204,8 @@ func (m *Manager) signerMoved(oldDigest, oldClass string, newApp *Peer, now time
 // its digest differs from the vault's binding. ok is false when the new
 // app has no signer (iOS): the members are then absent. changed is false
 // when the vault has no recorded signer; the transfer then simply binds.
+// From an iOS app, the vault's binding is the Android signer it kept
+// (VA4), so a return to another signer is a change.
 func (m *Manager) transferSigner(r *Request) (class string, changed, ok bool) {
 	if r == nil || r.Peer == nil {
 		return "", false, false

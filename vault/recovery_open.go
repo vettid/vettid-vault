@@ -502,9 +502,7 @@ func (m *Manager) completeRecoveryR(ctx context.Context, p RecoveryOpenParams, r
 	// rotated, the attempt's success recorded.
 	m.setRecoveredInvite(&Invite{ID: r.ID, Kind: KindApp, Exp: now.Add(RecoveredInviteWindow), EnrollIK: r.App.IK, EnrollRelayPK: r.App.RelayPK,
 		EnrollKEM: r.App.KEM, EnrollAttest: r.App.Attestation, CreatedBy: inviteByRecovery}, now)
-	if d, c := m.vaultSigner(""); d != "" {
-		m.st.RecoveredSigner = []string{d, c}
-	}
+	m.keepRecoveredSigner()
 	m.replaceApps("", now)
 	m.sendPendingUnlink(now) // a transfer's old phone, before the keys rotate (§11.14.10)
 	if err := m.rotateIdentity(now); err != nil {
@@ -680,6 +678,9 @@ func resumeRecovery(ctx context.Context, p RecoveryOpenParams, hdr *Header, hver
 		if r != nil && r.App != nil {
 			m.setRecoveredInvite(&Invite{ID: r.ID, Kind: KindApp, Exp: now.Add(RecoveredInviteWindow), EnrollIK: r.App.IK, EnrollRelayPK: r.App.RelayPK,
 				EnrollKEM: r.App.KEM, EnrollAttest: r.App.Attestation, CreatedBy: inviteByRecovery}, now)
+			// The first run's RecoveredSigner was in the state that was
+			// not stored: recorded again before the apps go (§11.7.1).
+			m.keepRecoveredSigner()
 			m.replaceApps("", now)
 		}
 	} else {
@@ -771,4 +772,15 @@ func (m *Manager) resumeLostOK(inv *Invite, now time.Time) []byte {
 	inv.Exp = now.Add(RecoveredInviteWindow)
 	m.dirty = true
 	return VaultBundle(handshake.Principal{IK: m.keys.ik.Public().(ed25519.PublicKey), KEM: m.keys.kem.Public(), Relay: m.ownAddr()})
+}
+
+// keepRecoveredSigner records the vault's signer binding (the old app's
+// signer, or the signer kept across an iOS app, VA4) as RecoveredSigner,
+// before the recovery open removes the apps, so that the recovered
+// phone's first handshake compares its signer with it (§11.7.1,
+// §11.14.6). Both the first run and a resumed one call it.
+func (m *Manager) keepRecoveredSigner() {
+	if d, c := m.vaultSigner(""); d != "" {
+		m.st.RecoveredSigner = []string{d, c}
+	}
 }

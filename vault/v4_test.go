@@ -257,18 +257,31 @@ func TestCredentialGate(t *testing.T) {
 	}
 }
 
+// deleteStub handles vault.delete as the credential feature would, so that
+// a request that passes the credential gate is answered {} (otherwise it
+// would be refused unsupported_type before the gate is reached).
+type deleteStub struct{ gateFeature }
+
+func (d *deleteStub) Types() []TypeSpec {
+	return []TypeSpec{{Type: "vault.delete", Request: true, From: []string{KindApp}}}
+}
+func (d *deleteStub) Handle(context.Context, *Session, *envelope.Inner) (json.RawMessage, error) {
+	return json.RawMessage(`{}`), nil
+}
+
 // §3.5.7 (stated in 0.54.0, as built): the types a restricted vault still
 // accepts include the enrolling app's vault.delete (§12.5), which the
-// credential feature then handles. The gate feature here has no such
-// handler, so the answer is its absence, not credential_required. Once the
-// vault has a credential and no holder, vault.delete is the holder's and
-// answered credential_required (credential.TestVaultDeleteNoHolder).
+// credential feature then handles (here a stub that answers {}). Another
+// type with no credential is refused credential_required (the control).
+// Once the vault has a credential and no holder, vault.delete is the
+// holder's and answered credential_required
+// (credential.TestVaultDeleteNoHolder).
 func TestCredentialGateAllowsVaultDelete(t *testing.T) {
 	d := newDevFixture(t)
-	g := &gateFeature{}
+	g := &deleteStub{}
 	d.m.addFeature(g)
 	_ = d.send("vault.delete", []byte(`{}`))
-	if r := one(t, d); r.Error == nil || r.Error.Code == "credential_required" {
+	if r := one(t, d); r.Status != envelope.StatusOK {
 		t.Fatalf("vault.delete on a vault without a credential: %+v", r)
 	}
 	_ = d.send("settings.get", []byte(`{}`))

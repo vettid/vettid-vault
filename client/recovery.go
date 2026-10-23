@@ -238,6 +238,10 @@ func (d *Device) OpenRecoveryOpenResult(raw []byte) (*altchan.RecoveryOpenResult
 		d.st.Vault.Token = r.Token
 		a := d.alt()
 		a.StateSeq = r.StateSeq
+		d.unlockID = ""
+		if altchan.ValidUnlockID(r.UnlockID) { // "" from S21/S22 (release R without L)
+			d.unlockID = r.UnlockID
+		}
 	}
 	return r, nil
 }

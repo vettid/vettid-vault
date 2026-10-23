@@ -242,6 +242,12 @@ type Device struct {
 	cfg Config
 	st  *State
 
+	// unlockID is the vault's name for the unlock this device last made
+	// (0.29.0, release L, §10.2 "Locks"): from the enroll, unlock or
+	// recovery-open result, memory only. "" for a release before L, or
+	// before any unlock: the device then locks unbound (LockVault).
+	unlockID string
+
 	// leashStatus caches an agent's LEASH status statements by grant id
 	// (memory only; refreshed before they expire, §10.11).
 	leashStatus map[string]*cachedStatus
@@ -1782,4 +1788,42 @@ func validUserGUID(s string) bool {
 		}
 	}
 	return true
+}
+
+// UnlockID returns the vault's name for this device's latest unlock
+// (0.29.0, release L, §10.2 "Locks"), "" when the vault announced none.
+func (d *Device) UnlockID() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.unlockID
+}
+
+// LockVault sends vault.lock over the relay (§10.2): bound to this
+// device's unlock when the vault announced its unlock_id (release L), so
+// that a late copy cannot lock a newer unlock; unbound otherwise. The
+// vault answers {} and locks, or stale_lock: this device's unlock is
+// over and nothing was locked (Code(err) == "stale_lock").
+//
+// A desktop does not unlock: it locks with the value from vault.status
+// (§10.2 "Locks", "Other owner devices").
+func (d *Device) LockVault(ctx context.Context) error {
+	body := json.RawMessage(`{}`)
+	id := d.UnlockID()
+	d.mu.Lock()
+	desktop := d.st.Role == "desktop"
+	d.mu.Unlock()
+	if id == "" && desktop {
+		st, err := d.Op(ctx, "vault.status", nil)
+		if err != nil {
+			return err
+		}
+		if v, ok, err := st.OptString("unlock_id"); err == nil && ok && altchan.ValidUnlockID(v) {
+			id = v
+		}
+	}
+	if id != "" {
+		body = strictjson.NewBuilder().String("unlock_id", id).Bytes()
+	}
+	_, err := d.Op(ctx, "vault.lock", body)
+	return err
 }

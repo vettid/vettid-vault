@@ -415,6 +415,24 @@ type UnlockResult struct {
 	// it asks for the credential password only when the vault keeps a
 	// copy. nil when absent (another app, or a vault before 0.10.6).
 	CredentialBackup *bool
+	// UnlockID names this unlock (0.29.0, release L, §10.2 "Locks"):
+	// present whenever the vault resumed (with Token). Its absence tells
+	// the app that the release is from before L and locks are not bound.
+	UnlockID string
+}
+
+// ValidUnlockID reports whether s has the form of an unlock_id (0.29.0,
+// §10.2 "Locks"): 32 lowercase hex characters.
+func ValidUnlockID(s string) bool {
+	if len(s) != 32 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // UpdateResult is the result's `update` member.
@@ -451,6 +469,9 @@ func (r *UnlockResult) Marshal() []byte {
 	}
 	if r.CredentialBackup != nil {
 		b.Bool("credential_backup", *r.CredentialBackup)
+	}
+	if r.UnlockID != "" {
+		b.String("unlock_id", r.UnlockID)
 	}
 	return b.Bytes()
 }
@@ -531,7 +552,19 @@ func ParseUnlockResult(raw json.RawMessage) (*UnlockResult, error) {
 		}
 		r.CredentialBackup = &v
 	}
+	if r.UnlockID, err = optUnlockID(o); err != nil {
+		return nil, err
+	}
 	return r, nil
+}
+
+// optUnlockID reads an optional unlock_id, which must be well formed.
+func optUnlockID(o strictjson.Object) (string, error) {
+	id, present, err := o.OptString("unlock_id")
+	if err != nil || present && !ValidUnlockID(id) {
+		return "", ErrMalformed
+	}
+	return id, nil
 }
 
 // EnrollResult is the body of vault.enroll.result: the enclave's answer in
@@ -541,13 +574,20 @@ type EnrollResult struct {
 	OK      bool
 	Code    string
 	VaultID string
+	// UnlockID names the opening the enrollment made (0.29.0, release L,
+	// §10.2 "Locks"); empty from a release before L.
+	UnlockID string
 }
 
 // Marshal encodes the body.
 func (r *EnrollResult) Marshal() []byte {
 	b := strictjson.NewBuilder().Bool("ok", r.OK)
 	if r.OK {
-		return b.String("vault_id", r.VaultID).Bytes()
+		b.String("vault_id", r.VaultID)
+		if r.UnlockID != "" {
+			b.String("unlock_id", r.UnlockID)
+		}
+		return b.Bytes()
 	}
 	return b.String("code", r.Code).Bytes()
 }
@@ -563,11 +603,15 @@ func ParseEnrollResult(raw json.RawMessage) (*EnrollResult, error) {
 		return nil, ErrMalformed
 	}
 	if r.OK {
-		r.VaultID, err = o.String("vault_id")
-	} else {
-		r.Code, err = o.String("code")
+		if r.VaultID, err = o.String("vault_id"); err != nil {
+			return nil, ErrMalformed
+		}
+		if r.UnlockID, err = optUnlockID(o); err != nil {
+			return nil, err
+		}
+		return r, nil
 	}
-	if err != nil {
+	if r.Code, err = o.String("code"); err != nil {
 		return nil, ErrMalformed
 	}
 	return r, nil

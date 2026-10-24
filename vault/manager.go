@@ -972,6 +972,9 @@ func (m *Manager) zeroize() {
 		}
 	}
 	if m.st != nil {
+		if m.st.PendingUnlink != nil {
+			m.st.PendingUnlink.wipe() // the kept send key (§11.14.10); stored under the DEK
+		}
 		suite.Wipe(m.st.Relay.Seed)
 		suite.Wipe(m.st.IdentitySeed)
 		suite.Wipe(m.st.KEMSeed)

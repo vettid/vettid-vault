@@ -144,8 +144,10 @@ up to a whole second; the absolute time is stored, so a timer started
 before a vault moved into the release keeps its time): the owner check's
 interval (S1; the setting stays in real units), the recovery code's
 delay and validity (S5, S6), the counter's 24-hour unavailable notice
-(S8), the old phone's held notice after a transfer (S11) and the
-provisional enrollment window (S13). The quiet period (S7) is the
+(S8) and the provisional enrollment window (S13). The old phone's held
+notice after a transfer (S11) is no longer scaled: since VAULT-MESSAGING
+0.55.10 it is kept while its deposit token lives, at most 30 days after
+the approval, in real time. The quiet period (S7) is the
 channel file's own number. Nothing else changes: rate limits, the
 backoff ladders, cryptographic freshness, token lifetimes, the recovery
 wait unit (600 s on staging, not divided again), timers between vaults,

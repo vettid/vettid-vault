@@ -335,3 +335,49 @@ func AcceptRekey(raw []byte, in *envelope.Inner, e *Epoch, now time.Time) (*Pend
 
 // Purpose returns the handshake purpose of the initiator.
 func (i *Initiator) Purpose() Purpose { return i.cfg.Purpose }
+
+// ExportSendOnly returns the epoch's sending half only: the send key and
+// kids and the send counter, with no receive key and no rekey secret. It
+// is for a message the vault must still seal to a device that has been
+// removed (a transfer's pending unlink, VAULT-MESSAGING §11.14.10): such
+// a copy can seal one more message in the epoch, and nothing else.
+func (e *Epoch) ExportSendOnly() (EpochState, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.sendKey == nil {
+		return EpochState{}, ErrEpochRetired
+	}
+	return EpochState{
+		ID: cp(e.id[:]), Role: e.role, Suite: e.suiteID, Policy: e.policy, Created: e.created,
+		SendKey: cp(e.sendKey), SendSenderKid: cp(e.sendSenderKid[:]), SendRecipientKid: cp(e.sendRecipientKid[:]),
+		RecvKid: cp(e.recvKid[:]), RecvSenderKid: cp(e.recvSenderKid[:]), LastSeq: e.lastSeq, Sent: e.sent,
+	}, nil
+}
+
+// ImportSendOnly restores a sending half exported by ExportSendOnly. The
+// epoch can Seal; Open answers ErrEpochRetired. A state with a receive key
+// or a rekey secret is refused, so that a full epoch is never restored
+// through this path.
+func ImportSendOnly(s EpochState) (*Epoch, error) {
+	if len(s.ID) != suite.EpochIDSize || len(s.SendKey) != suite.KeySize || s.RecvKey != nil || s.RK != nil ||
+		(s.Role != RoleInitiator && s.Role != RoleResponder) || suite.Check(int(s.Suite), 0) != nil {
+		return nil, ErrConfig
+	}
+	e := &Epoch{role: s.Role, suiteID: s.Suite, policy: s.Policy, created: s.Created,
+		sendKey: cp(s.SendKey), lastSeq: s.LastSeq, sent: s.Sent}
+	copy(e.id[:], s.ID)
+	var err error
+	if e.sendSenderKid, err = kidOf(s.SendSenderKid); err != nil {
+		return nil, err
+	}
+	if e.sendRecipientKid, err = kidOf(s.SendRecipientKid); err != nil {
+		return nil, err
+	}
+	if e.recvKid, err = kidOf(s.RecvKid); err != nil {
+		return nil, err
+	}
+	if e.recvSenderKid, err = kidOf(s.RecvSenderKid); err != nil {
+		return nil, err
+	}
+	return e, nil
+}

@@ -233,6 +233,14 @@ func (d *Device) credOp(ctx context.Context, typ string, payload func() map[stri
 
 // credOpWith is credOp with extra outer members.
 func (d *Device) credOpWith(ctx context.Context, typ string, extra map[string]any, payload func() map[string]any, reply bool) (strictjson.Object, *suite.PrivateKey, string, error) {
+	return d.credOpBefore(ctx, typ, extra, payload, reply, nil)
+}
+
+// credOpBefore is credOpWith with before run right before each request is
+// sent (also the one sent again after stale_credential), after its UTK is
+// taken.
+func (d *Device) credOpBefore(ctx context.Context, typ string, extra map[string]any, payload func() map[string]any, reply bool,
+	before func()) (strictjson.Object, *suite.PrivateKey, string, error) {
 	op := func() (strictjson.Object, *suite.PrivateKey, string, error) {
 		u, err := d.takeUTK(ctx)
 		if err != nil {
@@ -241,6 +249,9 @@ func (d *Device) credOpWith(ctx context.Context, typ string, extra map[string]an
 		d.mu.Lock()
 		d.lastUTK = u
 		d.mu.Unlock()
+		if before != nil {
+			before()
+		}
 		return d.sealedWith(ctx, typ, u, nil, true, payload(), reply, extra)
 	}
 	o, rk, id, err := op()
@@ -406,13 +417,24 @@ func (d *Device) TransferApprove(ctx context.Context, id, pin, password string) 
 // required when device.transfer.pending said signer_changed. "" sends no
 // `signer`. Without the confirmation the vault answers
 // signer_unconfirmed before it tries the PIN; (0.52.0) the UTK is spent.
+//
+// Before each approval it sends (also the one sent again after
+// stale_credential, and every call after busy or retry) the old app renews
+// the vault's standing token to its mailbox (VAULT-MESSAGING 0.55.10
+// §11.14.10, owner decision 2026-10-23): relay.token.issued is deposited,
+// and answered 201, before the approval is, so the vault, which takes its
+// mailbox in arrival order, stores it first. The vault keeps the old app's
+// device.unlinked{transferred} for as long as that token lives, so a fresh
+// token gives it the full 30 days. A renewal that fails does not stop the
+// approval; the notice then has what the previous token has left.
 func (d *Device) TransferApproveSigner(ctx context.Context, id, pin, password, signer string) error {
 	extra := map[string]any{"transfer_id": id}
 	if signer != "" {
 		extra["signer"] = signer
 	}
-	_, _, _, err := d.credOpWith(ctx, "device.transfer.approve", extra,
-		func() map[string]any { return map[string]any{"password": password, "pin": pin} }, false)
+	_, _, _, err := d.credOpBefore(ctx, "device.transfer.approve", extra,
+		func() map[string]any { return map[string]any{"password": password, "pin": pin} }, false,
+		func() { _ = d.RenewVaultToken(ctx) })
 	return err
 }
 

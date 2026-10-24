@@ -354,7 +354,8 @@ func (m *Manager) completeTransfer(p *Peer, now time.Time) {
 			}
 		}
 		// Release R (§11.14.10): device.unlinked{transferred} is held until
-		// the new phone's first unlock from storage, for at most 7 days.
+		// the new phone's first unlock from storage, while its deposit
+		// token lives and at most 30 days (0.55.10).
 		ver := m.hdr.DEKVersion
 		if m.repl != nil {
 			ver = m.repl.next.DEKVersion

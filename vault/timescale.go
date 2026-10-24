@@ -13,9 +13,11 @@ import "time"
 //   - S6  the recovery code's validity (RecoveryRequest, and after a wait
 //     in RecoveryOpen);
 //   - S8  the counter unavailable for 24 h (recoveryHousekeeping);
-//   - S11 the pending unlink kept 7 days (holdUnlink);
 //   - S13 the provisional enrollment window (Create, enrollApp).
 //
+// S11 (the pending unlink kept 7 days) is gone: since the owner decision
+// of 2026-10-23 (vettid.org #404) the notice is kept while its deposit
+// token lives, a real-time lifetime (holdUnlink).
 // S7 (the quiet period) is stated in the staging channel file itself;
 // S3 and S4, the idle lock past the deadline and the hour after an unlock
 // (0.29.0, release L), are scaled in idleLockAt.

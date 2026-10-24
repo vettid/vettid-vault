@@ -227,7 +227,7 @@ func TestAWSBackend(t *testing.T) {
 		t.Fatalf("alarm: %v", it)
 	}
 	// The app key (0.15.0, §11.5): whatever the lease, by seq; enrolled
-	// always replaces it.
+	// enrolled only where the row is still enrolling or names the same key.
 	appKey := func(event, key string, seq uint64) map[string]ddbtypes.AttributeValue {
 		t.Helper()
 		if err := a.Lifecycle(ctx, Lifecycle{Event: event, VaultID: "v1", Release: pcr, VaultVersion: pcr, StateVersion: 1,
@@ -248,8 +248,10 @@ func TestAWSBackend(t *testing.T) {
 	if k := appKey("unlocked", "k1", 1); k["key"].(*ddbS).Value != "azI=" {
 		t.Fatalf("older key written: %v", k)
 	}
-	if k := appKey("enrolled", "k1", 1); k["key"].(*ddbS).Value != "azE=" || k["seq"].(*ddbtypes.AttributeValueMemberN).Value != "1" {
-		t.Fatalf("enrolled did not replace: %v", k)
+	// A late or repeated enrolled never rolls the key back (a row that is
+	// still enrolling, or the same key, is the exception).
+	if k := appKey("enrolled", "k1", 1); k["key"].(*ddbS).Value != "azI=" || k["seq"].(*ddbtypes.AttributeValueMemberN).Value != "2" {
+		t.Fatalf("enrolled rolled app_key back: %v", k)
 	}
 	// The backup bit (0.16.0, §11.5): on locked, and the event alone.
 	f, tr := false, true

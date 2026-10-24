@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/vettid/vettid-vault/internal/hostproto"
@@ -27,9 +28,14 @@ var ErrPermanent = errors.New("permanent write failure")
 // appKeyRetryFirst and appKeyRetryCap are the backoff of the retry; a
 // variable for tests.
 var (
-	appKeyRetryFirst = time.Second
-	appKeyRetryCap   = 30 * time.Second
+	appKeyRetryFirst = atomic.Int64{}
+	appKeyRetryCap   = atomic.Int64{}
 )
+
+func init() {
+	appKeyRetryFirst.Store(int64(time.Second))
+	appKeyRetryCap.Store(int64(30 * time.Second))
+}
 
 // maxKeyQ bounds the failed writes held for one vault. Every write is
 // conditional on seq, so a later one supersedes the earlier; if the bound
@@ -65,7 +71,8 @@ func (p *Parent) retryAppKeys(ev Lifecycle, cause error) {
 // drainAppKeys writes the vault's queued app key parts, oldest first,
 // until the queue is empty or the parent stops.
 func (p *Parent) drainAppKeys(ctx context.Context, vaultID string) {
-	wait := appKeyRetryFirst
+	first := time.Duration(appKeyRetryFirst.Load())
+	wait := first
 	for {
 		p.mu.Lock()
 		q := p.keyQ[vaultID]
@@ -91,11 +98,11 @@ func (p *Parent) drainAppKeys(ctx context.Context, vaultID string) {
 			err = nil
 		}
 		if err != nil {
-			wait = min(2*wait, appKeyRetryCap)
+			wait = min(2*wait, time.Duration(appKeyRetryCap.Load()))
 			p.log.Warn("app key write failed; trying again", "event", ev.Event, "vault_id", vaultID, "error", err.Error())
 			continue
 		}
-		wait = appKeyRetryFirst
+		wait = first
 		p.mu.Lock()
 		if q := p.keyQ[vaultID]; len(q) > 0 {
 			p.keyQ[vaultID] = q[1:]

@@ -2,6 +2,7 @@ package parent
 
 import (
 	"context"
+	"sync/atomic"
 	"time"
 )
 
@@ -15,7 +16,9 @@ import (
 
 // assertPace is the pause between two vaults' assertions (a variable for
 // tests).
-var assertPace = 5 * time.Millisecond
+var assertPace atomic.Int64
+
+func init() { assertPace.Store(int64(5 * time.Millisecond)) }
 
 // queueAssert holds ev for the worker; a later assertion of the same kind
 // for the vault replaces an earlier one.
@@ -77,7 +80,7 @@ func (p *Parent) assertLoop(ctx context.Context) {
 			p.assertWorker = false
 			p.mu.Unlock()
 			return
-		case <-time.After(assertPace):
+		case <-time.After(time.Duration(assertPace.Load())):
 		}
 	}
 }

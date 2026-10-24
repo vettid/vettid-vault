@@ -106,10 +106,36 @@ func apiCode(err error) string {
 // request ids and URLs, never our payloads, but the code is all the logs
 // need).
 func errClass(op string, err error) error {
-	if c := apiCode(err); c != "" {
-		return errors.New(op + ": " + c)
+	return &apiErr{op: op, code: apiCode(err)}
+}
+
+// apiErr is errClass's error: the same text as before, with the API code
+// kept so that a permanent failure can be told from a transient one.
+type apiErr struct{ op, code string }
+
+func (e *apiErr) Error() string {
+	if e.code != "" {
+		return e.op + ": " + e.code
 	}
-	return errors.New(op + ": request failed")
+	return e.op + ": request failed"
+}
+
+// Permanent reports an error that trying again cannot cure (a request the
+// service refuses as malformed, or the role not allowed it).
+func Permanent(err error) bool {
+	if errors.Is(err, ErrPermanent) {
+		return true
+	}
+	var e *apiErr
+	if !errors.As(err, &e) {
+		return false
+	}
+	switch e.code {
+	case "ValidationException", "AccessDeniedException", "ResourceNotFoundException", "UnrecognizedClientException",
+		"SerializationException", "InvalidSignatureException":
+		return true
+	}
+	return false
 }
 
 // --- S3 ---
@@ -510,9 +536,22 @@ func (a *AWS) Lifecycle(ctx context.Context, ev Lifecycle, instanceID string, no
 	if ev.Event == EventAccountName {
 		return a.nameChange(ctx, ev, now)
 	}
-	if err := a.appKey(ctx, ev, now); err != nil || ev.Event == EventAppKey || ev.Event == EventAppKeyNext {
-		return err
+	// app_key and app_key_next first, then the rest of the event; a failure
+	// of the first does not hold the second back, and is returned as an
+	// AppKeyWriteError so that the parent writes the keys again.
+	var keyErr error
+	if err := a.appKey(ctx, ev, now); err != nil {
+		keyErr = err
 	}
+	switch ev.Event {
+	case EventAppKey, EventAppKeyNext, EventAppKeyAssert, EventAppKeyNextClear:
+		return appKeyResult(keyErr, nil)
+	}
+	return appKeyResult(keyErr, a.lifecycleRest(ctx, ev, instanceID, now))
+}
+
+// lifecycleRest writes an event but its app keys.
+func (a *AWS) lifecycleRest(ctx context.Context, ev Lifecycle, instanceID string, now time.Time) error {
 	if ev.Event == EventCredentialBackup {
 		// 0.16.0 (§11.5): the bit alone, under the lease rule.
 		const cond = "attribute_exists(vault_id) AND (attribute_not_exists(#lease) OR #lease.#iid = :me)"
@@ -701,36 +740,176 @@ func (a *AWS) ListObjects(ctx context.Context, prefix string) ([]ObjectRef, erro
 	}
 }
 
+// AppKeys implements Tables: the app_key and app_key_next parts of an
+// event, and nothing else, so that they can be written again until they
+// are (the parent keeps trying; the enclave asserts them after a connect).
+func (a *AWS) AppKeys(ctx context.Context, ev Lifecycle, now time.Time) error {
+	return a.appKey(ctx, ev, now)
+}
+
+// How putAppKey applies.
+const (
+	keyBySeq    = iota // a report: only when seq is higher than the row's
+	keyEnrolled        // the enrolled event: also a replaced provisional vault's first key, the same key again, or a row still enrolling
+	keyConfirm         // the enrollment's acknowledged request: whatever the row has
+)
+
+// putAppKey writes app_key = {key, kid, seq} and removes app_key_next in
+// ONE UpdateItem, so that no failure between two writes can leave the row
+// without the key. The next key goes only if its seq is not above this
+// one (a replacement begun since stays); if it is, the key alone is
+// written in its own single update. A failed condition is ErrLeaseHeld.
+func (a *AWS) putAppKey(ctx context.Context, vaultID string, key []byte, seq uint64, mode int, now time.Time) error {
+	ak := &ddbtypes.AttributeValueMemberM{Value: map[string]ddbtypes.AttributeValue{
+		"key": s(base64.StdEncoding.EncodeToString(key)), "kid": s(AppKeyID(key)), "seq": n(int64(seq))}}
+	nm := map[string]string{"#ak": "app_key", "#akn": "app_key_next", "#u": "updated_at"}
+	vals := map[string]ddbtypes.AttributeValue{":ak": ak, ":u": s(isoNow(now))}
+	if mode == keyConfirm {
+		return a.updateVault(ctx, vaultID, "SET #ak = :ak, #u = :u REMOVE #akn", "attribute_exists(vault_id)", nm, vals)
+	}
+	nm["#seq"] = "seq"
+	vals[":seq"] = n(int64(seq))
+	cond := "attribute_exists(vault_id) AND (attribute_not_exists(#ak) OR #ak.#seq < :seq)"
+	if mode == keyEnrolled {
+		nm["#st"], nm["#kid"] = "state", "kid"
+		vals[":enr"], vals[":kid"] = s("enrolling"), s(AppKeyID(key))
+		cond = "attribute_exists(vault_id) AND (#st = :enr OR attribute_not_exists(#ak) OR #ak.#seq < :seq OR #ak.#kid = :kid)"
+	}
+	update := "SET #ak = :ak, #u = :u REMOVE #akn"
+	// Asked for the row on a failed condition: a stale report or a missing
+	// row is told from a next key above this seq without a second write.
+	in := &dynamodb.UpdateItemInput{TableName: &a.cfg.VaultsTable, Key: map[string]ddbtypes.AttributeValue{"vault_id": s(vaultID)},
+		UpdateExpression: &update, ConditionExpression: aws.String(cond + " AND (attribute_not_exists(#akn) OR #akn.#seq <= :seq)"),
+		ExpressionAttributeNames: nm, ExpressionAttributeValues: vals,
+		ReturnValuesOnConditionCheckFailure: ddbtypes.ReturnValuesOnConditionCheckFailureAllOld}
+	_, err := a.ddb.UpdateItem(ctx, in)
+	if err == nil {
+		return nil
+	}
+	var ccf *ddbtypes.ConditionalCheckFailedException
+	if !errors.As(err, &ccf) {
+		return errClass("ddb update vault", err)
+	}
+	if !nextAbove(ccf.Item, seq) {
+		return ErrLeaseHeld // a stale report, or no such row
+	}
+	delete(nm, "#akn")
+	update = "SET #ak = :ak, #u = :u"
+	in.ConditionExpression, in.ReturnValuesOnConditionCheckFailure = aws.String(cond), ""
+	if _, err := a.ddb.UpdateItem(ctx, in); err != nil {
+		if condFailed(err) {
+			return ErrLeaseHeld
+		}
+		return errClass("ddb update vault", err)
+	}
+	return nil
+}
+
+// nextAbove reports whether the row (as a failed update returned it) has
+// an app_key_next with a seq above seq and an app_key that this report
+// still moves: the one case in which the key alone is written.
+func nextAbove(item map[string]ddbtypes.AttributeValue, seq uint64) bool {
+	num := func(attr string) (uint64, bool) {
+		m, ok := item[attr].(*ddbtypes.AttributeValueMemberM)
+		if !ok {
+			return 0, false
+		}
+		sq, ok := m.Value["seq"].(*ddbtypes.AttributeValueMemberN)
+		if !ok {
+			return 0, false
+		}
+		v, err := strconv.ParseUint(sq.Value, 10, 64)
+		return v, err == nil
+	}
+	if len(item) == 0 {
+		return false
+	}
+	if cur, ok := num("app_key"); ok && cur >= seq {
+		return false
+	}
+	nx, ok := num("app_key_next")
+	return ok && nx > seq
+}
+
 // appKey writes the reported app key (0.15.0, §11.5): app_key = {key,
 // kid, seq} whatever the lease, when seq is higher than the row's;
 // enrolled always replaces it (a replaced provisional vault starts at 1).
-// A failed condition (an older report, a missing row) is not an error.
+// app_key and the removal of app_key_next are one update (putAppKey), and
+// app_key goes first: a failure leaves the row naming the key. A failed
+// condition (an older report, a missing row) is not an error. The
+// app_key_assert event is written as app_key.
 func (a *AWS) appKey(ctx context.Context, ev Lifecycle, now time.Time) error {
-	if err := a.appKeyNext(ctx, ev, now); err != nil || ev.Event == EventAppKeyNext || ev.NextCleared {
+	switch ev.Event {
+	case EventAppKeyAssert:
+		ev.Event = EventAppKey
+	}
+	if ev.Event == EventAppKeyNextClear {
+		// Exactly the attempted key at the attempted header_seq.
+		err := a.updateVault(ctx, ev.VaultID, "REMOVE #akn SET #u = :u", "attribute_exists(#akn) AND #akn.#kid = :kid AND #akn.#hs = :hs",
+			map[string]string{"#akn": "app_key_next", "#kid": "kid", "#hs": "header_seq", "#u": "updated_at"},
+			map[string]ddbtypes.AttributeValue{":kid": s(AppKeyID(ev.AppKey)), ":hs": n(int64(ev.HeaderSeq)), ":u": s(isoNow(now))})
+		if errors.Is(err, ErrLeaseHeld) {
+			return nil
+		}
 		return err
 	}
-	if len(ev.AppKey) == 0 {
+	if ev.Event == EventAppKeyNext || ev.NextCleared {
+		return a.appKeyNext(ctx, ev, now)
+	}
+	if len(ev.AppKey) > 0 {
+		mode := keyBySeq
+		if ev.Event == "enrolled" {
+			mode = keyEnrolled
+		}
+		err := a.putAppKey(ctx, ev.VaultID, ev.AppKey, ev.AppKeySeq, mode, now)
+		if err != nil && !errors.Is(err, ErrLeaseHeld) {
+			return err
+		}
+	}
+	return a.appKeyNext(ctx, ev, now)
+}
+
+// ConfirmAppKey implements Tables (hostproto.KindAppKeyNext): nil once the
+// row names the key, as app_key_next (mode next) or app_key (mode enroll)
+// or, in mode next, already as app_key at that seq or higher; ErrConflict
+// if the row names another key at that seq or higher, or is gone.
+func (a *AWS) ConfirmAppKey(ctx context.Context, vaultID, mode string, key []byte, seq, headerSeq uint64, attempt int64, now time.Time) error {
+	if mode == "enroll" {
+		err := a.putAppKey(ctx, vaultID, key, seq, keyConfirm, now)
+		if errors.Is(err, ErrLeaseHeld) {
+			return ErrConflict // no such vault row
+		}
+		return err
+	}
+	err := a.putNext(ctx, Lifecycle{Event: EventAppKeyNext, VaultID: vaultID, AppKey: key, AppKeySeq: seq, HeaderSeq: headerSeq}, now, attempt)
+	if err != nil && !errors.Is(err, ErrLeaseHeld) {
+		return err
+	}
+	// The write is conditional: read the row to tell "written" from "not
+	// needed" from "refused".
+	out, gerr := a.ddb.GetItem(ctx, &dynamodb.GetItemInput{TableName: &a.cfg.VaultsTable, ConsistentRead: aws.Bool(true),
+		Key: map[string]ddbtypes.AttributeValue{"vault_id": s(vaultID)}, ProjectionExpression: aws.String("app_key, app_key_next")})
+	if gerr != nil {
+		return errClass("ddb get vault", gerr)
+	}
+	kid := AppKeyID(key)
+	named := func(attr string, minSeq uint64) bool {
+		m, ok := out.Item[attr].(*ddbtypes.AttributeValueMemberM)
+		if !ok {
+			return false
+		}
+		k, _ := m.Value["kid"].(*ddbtypes.AttributeValueMemberS)
+		sq, _ := m.Value["seq"].(*ddbtypes.AttributeValueMemberN)
+		var have uint64
+		if sq != nil {
+			have, _ = strconv.ParseUint(sq.Value, 10, 64)
+		}
+		return k != nil && k.Value == kid && have >= minSeq
+	}
+	if out.Item != nil && (named("app_key", seq) || named("app_key_next", seq)) {
 		return nil
 	}
-	cond := "attribute_exists(vault_id) AND (attribute_not_exists(#ak) OR #ak.#seq < :seq)"
-	if ev.Event == "enrolled" {
-		cond = "attribute_exists(vault_id)"
-	}
-	nm := map[string]string{"#ak": "app_key", "#u": "updated_at"}
-	if ev.Event != "enrolled" {
-		nm["#seq"] = "seq"
-	}
-	ak := &ddbtypes.AttributeValueMemberM{Value: map[string]ddbtypes.AttributeValue{
-		"key": s(base64.StdEncoding.EncodeToString(ev.AppKey)), "kid": s(AppKeyID(ev.AppKey)), "seq": n(int64(ev.AppKeySeq))}}
-	vals := map[string]ddbtypes.AttributeValue{":ak": ak, ":u": s(isoNow(now))}
-	if ev.Event != "enrolled" {
-		vals[":seq"] = n(int64(ev.AppKeySeq))
-	}
-	err := a.updateVault(ctx, ev.VaultID, "SET #ak = :ak, #u = :u", cond, nm, vals)
-	if errors.Is(err, ErrLeaseHeld) {
-		return nil
-	}
-	return err
+	return ErrConflict
 }
 
 // appKeyNext applies release R's app_key_next (VAULT-HOST-PROTOCOL 0.1.10
@@ -750,20 +929,13 @@ func (a *AWS) appKeyNext(ctx context.Context, ev Lifecycle, now time.Time) error
 	}
 	switch {
 	case ev.Event == EventAppKeyNext:
-		akn := &ddbtypes.AttributeValueMemberM{Value: map[string]ddbtypes.AttributeValue{
-			"key": s(base64.StdEncoding.EncodeToString(ev.AppKey)), "kid": s(AppKeyID(ev.AppKey)), "seq": n(int64(ev.AppKeySeq)),
-			"header_seq": n(int64(ev.HeaderSeq))}}
-		return ignore(a.updateVault(ctx, ev.VaultID, "SET #akn = :akn, #u = :u",
-			"attribute_exists(vault_id) AND (attribute_not_exists(#ak) OR #ak.#seq < :seq)",
-			map[string]string{"#akn": "app_key_next", "#ak": "app_key", "#seq": "seq", "#u": "updated_at"},
-			map[string]ddbtypes.AttributeValue{":akn": akn, ":seq": n(int64(ev.AppKeySeq)), ":u": s(isoNow(now))}))
+		return ignore(a.putNext(ctx, ev, now, 0))
 	case ev.Event == EventAppKey && ev.NextCleared:
-		return ignore(a.updateVault(ctx, ev.VaultID, "REMOVE #akn SET #u = :u", "attribute_exists(#akn)",
-			map[string]string{"#akn": "app_key_next", "#u": "updated_at"}, map[string]ddbtypes.AttributeValue{":u": s(isoNow(now))}))
-	case ev.Event == EventAppKey && len(ev.AppKey) > 0:
-		return ignore(a.updateVault(ctx, ev.VaultID, "REMOVE #akn SET #u = :u", "attribute_exists(#akn) AND #akn.#seq <= :seq",
-			map[string]string{"#akn": "app_key_next", "#seq": "seq", "#u": "updated_at"},
-			map[string]ddbtypes.AttributeValue{":seq": n(int64(ev.AppKeySeq)), ":u": s(isoNow(now))}))
+		// Only a next key written by this header_seq or an earlier one: a
+		// late clear never removes a newer replacement's key.
+		return ignore(a.updateVault(ctx, ev.VaultID, "REMOVE #akn SET #u = :u", "attribute_exists(#akn) AND (attribute_not_exists(#akn.#hs) OR #akn.#hs <= :hs)",
+			map[string]string{"#akn": "app_key_next", "#hs": "header_seq", "#u": "updated_at"},
+			map[string]ddbtypes.AttributeValue{":hs": n(int64(ev.HeaderSeq)), ":u": s(isoNow(now))}))
 	case (ev.Event == "unlocked" || ev.Event == "locked") && ev.Next != nil && !*ev.Next:
 		return ignore(a.updateVault(ctx, ev.VaultID, "REMOVE #akn SET #u = :u",
 			"attribute_exists(#akn) AND (#akn.#seq <= :aks OR #akn.#hs <= :hs)",
@@ -771,6 +943,41 @@ func (a *AWS) appKeyNext(ctx context.Context, ev Lifecycle, now time.Time) error
 			map[string]ddbtypes.AttributeValue{":aks": n(int64(ev.AppKeySeq)), ":hs": n(int64(ev.HeaderSeq)), ":u": s(isoNow(now))}))
 	}
 	return nil
+}
+
+// putNext writes app_key_next = {key, kid, seq, header_seq}, ordered by
+// header_seq. A report (a retried or late write) never replaces a next key
+// written by a later header_seq, and replaces an equal one only for the
+// same key. The live request of the enclave (live) is the vault's own
+// current attempt: it replaces an equal header_seq whatever the key (an
+// earlier attempt's confirmation landed on the row but its header was
+// never stored, and the next attempt reuses that header_seq). Live
+// confirmations of a vault are serialized by the parent (confirmAppKey) and
+// stamped (attempt, increasing per vault), and at an equal header_seq only a
+// later stamp replaces, so one that lands late after a newer never replaces
+// it. A next key of a higher header_seq is never replaced. A failed
+// condition is ErrLeaseHeld.
+func (a *AWS) putNext(ctx context.Context, ev Lifecycle, now time.Time, attempt int64) error {
+	live := attempt != 0
+	akn := &ddbtypes.AttributeValueMemberM{Value: map[string]ddbtypes.AttributeValue{
+		"key": s(base64.StdEncoding.EncodeToString(ev.AppKey)), "kid": s(AppKeyID(ev.AppKey)), "seq": n(int64(ev.AppKeySeq)),
+		"header_seq": n(int64(ev.HeaderSeq))}}
+	ord := "" // a report never replaces an app_key_next of an equal header_seq
+	if live {
+		// At an equal header_seq only a later attempt of the parent's
+		// stamp replaces it: a write of an older attempt that lands late
+		// (a request the enclave gave up on) is refused.
+		ord = " OR (#akn.#hs = :hs AND (attribute_not_exists(#akn.#att) OR #akn.#att < :att))"
+		akn.Value["att"] = n(attempt)
+	}
+	nm := map[string]string{"#akn": "app_key_next", "#ak": "app_key", "#seq": "seq", "#hs": "header_seq", "#u": "updated_at"}
+	vals := map[string]ddbtypes.AttributeValue{":akn": akn, ":seq": n(int64(ev.AppKeySeq)), ":hs": n(int64(ev.HeaderSeq)), ":u": s(isoNow(now))}
+	if live { // DynamoDB refuses names and values the expressions do not use
+		nm["#att"], vals[":att"] = "att", n(attempt)
+	}
+	return a.updateVault(ctx, ev.VaultID, "SET #akn = :akn, #u = :u",
+		"attribute_exists(vault_id) AND (attribute_not_exists(#ak) OR #ak.#seq < :seq) AND "+
+			"(attribute_not_exists(#akn) OR attribute_not_exists(#akn.#hs) OR #akn.#hs < :hs"+ord+")", nm, vals)
 }
 
 // nameChange writes the member's name request (0.18.0, §11.5, MEMBER-API

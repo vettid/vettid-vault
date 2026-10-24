@@ -128,6 +128,7 @@ type Supervisor struct {
 	heavy  *heavyPermit
 	ctr    counter.Bucket
 	link   *link
+	keys   keyBook // app key state relayed, re-asserted on a connect (appkeys.go)
 	log    *slog.Logger
 	inst   atomic.Pointer[enclave.Instance]
 	status *statusFetcher
@@ -356,6 +357,7 @@ func (s *Supervisor) dial(ctx context.Context, release string) (*hostproto.Conn,
 	}
 	s.instID = id
 	s.link.set(conn)
+	go s.reassertAppKeys() // a parent that restarted lost what it had queued
 	return conn, nil
 }
 
@@ -475,6 +477,7 @@ func (s *Supervisor) process(ctx context.Context, raw, manifestDoc []byte) (resp
 }
 
 func (s *Supervisor) lifecycle(ev vault.LifecycleEvent) {
+	s.keys.note(ev, s.now())
 	switch ev.Event {
 	case "unlocked", "enrolled":
 		s.touch(ev.VaultID)

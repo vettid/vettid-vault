@@ -95,7 +95,7 @@ func cmdVaultCreate(ctx context.Context, _ *globals, args []string) error {
 	}
 	ra := app.RelayAddr()
 	m, err := devenclave.Create(ctx, vault.CreateParams{
-		Options: vault.Options{Store: st, Sealer: sealer, Features: all.Dev(), MarkDeleting: vault.NoHostMark},
+		Options: vault.Options{Store: st, Sealer: sealer, Features: all.Dev(), MarkDeleting: vault.NoHostMark, ConfirmAppKey: vault.NoHostAppKey},
 		PIN:     *pin, RelayURL: *relay, Provisional: true,
 		// §11.5 (0.18.0): every vault holds the account's names.
 		Account: enclavetest.Snapshot(time.Now(), *first, *last),
@@ -127,7 +127,7 @@ func cmdVaultRun(_ context.Context, _ *globals, args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 	m, res, err := devenclave.Unlock(ctx, vault.UnlockParams{
-		Options: vault.Options{Store: st, Sealer: sealer, WebSocket: *ws, Features: all.Dev(), MarkDeleting: vault.NoHostMark},
+		Options: vault.Options{Store: st, Sealer: sealer, WebSocket: *ws, Features: all.Dev(), MarkDeleting: vault.NoHostMark, ConfirmAppKey: vault.NoHostAppKey},
 		VaultID: *id, PIN: *pin,
 	})
 	if err != nil {

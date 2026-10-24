@@ -144,6 +144,16 @@ type Options struct {
 	MarkDeleting func(ctx context.Context, vaultID string) error
 	// DeleteRetry overrides a deletion's retry schedules (tests).
 	DeleteRetry *DeleteRetry
+	// ConfirmAppKey asks the parent to confirm that the vault row names an
+	// app key the vault is about to adopt (an enrollment, a transfer, a
+	// recovery, a key rotation) as app_key_next, or as app_key at
+	// enrollment; nil only on the parent's ok. The vault retries it with
+	// backoff and writes no header that names the key before it (see
+	// appkeyconfirm.go). Nil fails closed; NoHostAppKey is the explicit
+	// choice of a vault without a host (development, tests).
+	ConfirmAppKey func(ctx context.Context, c AppKeyConfirm) error
+	// AppKeyRetry overrides the confirmation's retry schedule (tests).
+	AppKeyRetry *AppKeyRetry
 }
 
 // LifecycleEvent is reported to the parent, which writes it to the vault
@@ -184,6 +194,17 @@ type LifecycleEvent struct {
 // EventAppKeyNext reports the next app key of a replacement in progress
 // with its first header write (release R, §11.5, §11.14.2).
 const EventAppKeyNext = "app_key_next"
+
+// EventAppKeyAssert tells a parent again the current app key the
+// supervisor last relayed for a vault (after a connect). The parent writes
+// it as app_key (conditional on seq). A key of a replacement in progress is
+// not asserted: the acknowledged request put it on the row.
+const EventAppKeyAssert = "app_key_assert"
+
+// EventAppKeyNextClear removes the row's app_key_next only if it is the
+// event's key at the event's header_seq (a failed step 1's orphan; the
+// ordinary next_cleared of an app_key event is the other rule).
+const EventAppKeyNextClear = "app_key_next_clear"
 
 // EventCredentialBackup reports a changed backup bit (0.16.0, §11.5).
 const EventCredentialBackup = "credential_backup"
@@ -259,6 +280,12 @@ type Manager struct {
 	// appKeyChanged: the header's app key changed in this batch; reported
 	// to the host after the flush (§11.5).
 	appKeyChanged bool
+	// acked is the app key (with ackedSeq) the stored header names or the
+	// host confirmed on the row; enrolling: the vault's first header is
+	// not written yet (appkeyconfirm.go).
+	acked     []ackedKey
+	pinned    ackedKey // the key the stored header names
+	enrolling bool
 	// nameReport: a name request stored in this batch; reported as
 	// account_name after the flush (0.18.0, §11.5).
 	nameReport *NameChange
@@ -326,6 +353,7 @@ type Manager struct {
 	repl         *replacement
 	replaced     []string
 	nextCleared  bool
+	orphans      []orphanClear // confirmed keys no stored header names, to clear again
 	// rec is the recovery runtime: the counter, the last status read, the
 	// presence retry (§11.14.4, §11.14.5).
 	rec recoveryRuntime
@@ -497,6 +525,9 @@ func Create(ctx context.Context, p CreateParams) (*Manager, error) {
 		return nil, err
 	}
 	m := newManager(p.Options, st, hdr, dek)
+	if len(hdr.AppKey) > 0 {
+		m.acked, m.pinned, m.enrolling = nil, ackedKey{}, true // the first header: the host confirms it
+	}
 	m.unlockKey, m.unlockSecret = uk, append([]byte(nil), p.UnlockSecret...)
 	if err := m.loadKeys(); err != nil {
 		return nil, err
@@ -605,6 +636,11 @@ func newManager(o Options, st *State, hdr *Header, dek []byte) *Manager {
 	if dek != nil {
 		m.holdsDEK = true
 		unlocked.Add(1)
+	}
+	if hdr != nil && len(hdr.AppKey) > 0 {
+		// The stored header names it already (a crash that lost the report
+		// is repaired by the unlocked report, the parent's re-assertion).
+		m.pin(hdr.AppKey, hdr.AppKeySeq)
 	}
 	m.registerCore()
 	for _, f := range o.Features {
@@ -765,6 +801,11 @@ func (m *Manager) allPeers() []*Peer {
 
 // persist flushes state. create = the first write (create-only objects).
 func (m *Manager) persist(ctx context.Context, create bool) error {
+	// An app key the stored header does not name is confirmed on the
+	// host's row before anything is stored (appkeyconfirm.go).
+	if err := m.confirmAppKey(ctx); err != nil {
+		return err
+	}
 	m.exportLive()
 	m.prune()
 	m.st.StateSeq++
@@ -829,6 +870,9 @@ func (m *Manager) writeHeader(ctx context.Context) error { return m.writeHeaderW
 // bits as they are (a DEK replacement's step 1 runs inside the credential
 // feature's handler, which holds its lock).
 func (m *Manager) writeHeaderWith(ctx context.Context, features bool) error {
+	if err := m.confirmAppKey(ctx); err != nil {
+		return err
+	}
 	m.syncUnlockKeys()
 	if m.st != nil && features {
 		m.hdr.HasCredential = m.credentialExists() && m.hasGate()
@@ -856,6 +900,9 @@ func (m *Manager) writeHeaderWith(ctx context.Context, features bool) error {
 		return err
 	}
 	m.headerVer = v
+	if len(m.hdr.AppKey) > 0 {
+		m.pin(m.hdr.AppKey, m.hdr.AppKeySeq) // the stored header names it now
+	}
 	if m.hdr.Deleting {
 		m.markStored = true
 	}
@@ -1231,6 +1278,7 @@ func (m *Manager) reportAppKey() {
 			}
 		}
 	}
+	m.resendOrphans()
 	if m.backupChanged {
 		m.backupChanged = false
 		m.report(EventCredentialBackup, m.st.VaultID, m.opt.Release.PCR0)

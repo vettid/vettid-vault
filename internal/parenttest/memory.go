@@ -290,6 +290,9 @@ type VaultRow struct {
 	AppKeyNext     []byte
 	AppKeyNextSeq  uint64
 	AppKeyNextHSeq uint64
+	// AppKeyNextAtt is the parent's stamp of the live confirmation that wrote
+	// app_key_next (0 for a report).
+	AppKeyNextAtt int64
 	// CredentialBackup is the reported backup bit (0.16.0, §11.5).
 	CredentialBackup *bool
 	// NameChange and NameChangePending are the member's name request as
@@ -327,6 +330,14 @@ type Tables struct {
 	// MarkDeletingErr, if set, fails MarkDeleting without writing
 	// (tests).
 	MarkDeletingErr error
+	// AppKeyErr, if set, fails the app key part of every event and AppKeys
+	// without writing it; ConfirmErr fails ConfirmAppKey (tests).
+	AppKeyErr, ConfirmErr error
+	// AppKeyDelay slows AppKeys (tests of the assertion worker).
+	AppKeyDelay time.Duration
+	confirms    []string
+	confirmHook func(key []byte)
+	confirmKeys []string
 }
 
 // LifecycleEvents returns the lifecycle events the parent wrote for a
@@ -533,30 +544,143 @@ func (t *Tables) Lifecycle(_ context.Context, ev parent.Lifecycle, me string, no
 		}
 		return nil
 	}
-	if r != nil {
-		// Release R's app_key_next, as parent.AWS.appKeyNext.
-		switch {
-		case ev.Event == parent.EventAppKeyNext:
-			if ev.AppKeySeq > r.AppKeySeq {
-				r.AppKeyNext, r.AppKeyNextSeq, r.AppKeyNextHSeq = append([]byte(nil), ev.AppKey...), ev.AppKeySeq, ev.HeaderSeq
-			}
-			return nil
-		case ev.Event == parent.EventAppKey && ev.NextCleared:
+	var keyErr error
+	if t.AppKeyErr != nil && hasAppKeyPart(ev) {
+		keyErr = t.AppKeyErr // injected: the app key part is not written
+	} else {
+		t.appKeysLocked(r, ev)
+	}
+	switch ev.Event {
+	case parent.EventAppKey, parent.EventAppKeyNext, parent.EventAppKeyAssert, parent.EventAppKeyNextClear:
+		return appKeyErr(keyErr, nil)
+	}
+	return appKeyErr(keyErr, t.lifecycleRest(r, ev, me, now))
+}
+
+func appKeyErr(keyErr, rest error) error {
+	if keyErr == nil {
+		return rest
+	}
+	return &parent.AppKeyWriteError{Err: keyErr, Rest: rest}
+}
+
+func hasAppKeyPart(ev parent.Lifecycle) bool {
+	switch ev.Event {
+	case parent.EventAppKey, parent.EventAppKeyNext, parent.EventAppKeyAssert, parent.EventAppKeyNextClear:
+		return true
+	}
+	return len(ev.AppKey) > 0 || ev.Next != nil
+}
+
+// AppKeys implements parent.Tables: the app key part of an event alone.
+func (t *Tables) AppKeys(_ context.Context, ev parent.Lifecycle, _ time.Time) error {
+	t.mu.Lock()
+	d := t.AppKeyDelay
+	t.mu.Unlock()
+	if d > 0 {
+		time.Sleep(d)
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.AppKeyErr != nil {
+		return t.AppKeyErr
+	}
+	t.appKeysLocked(t.vaults[ev.VaultID], ev)
+	return nil
+}
+
+// ConfirmAppKey implements parent.Tables as parent.AWS.
+func (t *Tables) ConfirmAppKey(ctx context.Context, vaultID, mode string, key []byte, seq, headerSeq uint64, attempt int64, _ time.Time) error {
+	t.mu.Lock()
+	hook := t.confirmHook
+	t.mu.Unlock()
+	if hook != nil {
+		hook(key)
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if err := ctx.Err(); err != nil { // a client that aborts: nothing is written
+		return err
+	}
+	t.confirmKeys = append(t.confirmKeys, string(key))
+	if t.ConfirmErr != nil {
+		return t.ConfirmErr
+	}
+	t.confirms = append(t.confirms, mode)
+	r := t.vaults[vaultID]
+	if r == nil {
+		return parent.ErrConflict
+	}
+	if mode == "enroll" {
+		r.AppKey, r.AppKeyID, r.AppKeySeq = append([]byte(nil), key...), parent.AppKeyID(key), seq
+		r.AppKeyNext, r.AppKeyNextSeq, r.AppKeyNextHSeq = nil, 0, 0
+		return nil
+	}
+	t.putNextLocked(r, key, seq, headerSeq, attempt)
+	// As parent.AWS: ok if the row now names the key as app_key_next, or
+	// as app_key, at that seq or higher.
+	kid := parent.AppKeyID(key)
+	if r.AppKeyNext != nil && parent.AppKeyID(r.AppKeyNext) == kid && r.AppKeyNextSeq >= seq ||
+		r.AppKeyID == kid && r.AppKeySeq >= seq {
+		return nil
+	}
+	return parent.ErrConflict
+}
+
+// Confirms returns the modes of the app key confirmations answered ok, in
+// order.
+func (t *Tables) Confirms() []string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([]string(nil), t.confirms...)
+}
+
+// appKeysLocked is the app_key and app_key_next part of an event, as
+// parent.AWS.appKey (one update for app_key and the removal of the next
+// key).
+func (t *Tables) appKeysLocked(r *VaultRow, ev parent.Lifecycle) {
+	switch ev.Event {
+	case parent.EventAppKeyAssert:
+		ev.Event = parent.EventAppKey
+	}
+	if r == nil {
+		return
+	}
+	if ev.Event == parent.EventAppKeyNextClear {
+		if r.AppKeyNext != nil && parent.AppKeyID(r.AppKeyNext) == parent.AppKeyID(ev.AppKey) && r.AppKeyNextHSeq == ev.HeaderSeq {
+			r.AppKeyNext, r.AppKeyNextSeq, r.AppKeyNextHSeq, r.AppKeyNextAtt = nil, 0, 0, 0
+		}
+		return
+	}
+	// Release R's app_key_next, as parent.AWS.appKeyNext.
+	switch {
+	case ev.Event == parent.EventAppKeyNext:
+		t.putNextLocked(r, ev.AppKey, ev.AppKeySeq, ev.HeaderSeq, 0)
+		return
+	case ev.Event == parent.EventAppKey && ev.NextCleared:
+		if r.AppKeyNext != nil && r.AppKeyNextHSeq <= ev.HeaderSeq {
 			r.AppKeyNext, r.AppKeyNextSeq, r.AppKeyNextHSeq = nil, 0, 0
-			return nil
-		case ev.Event == parent.EventAppKey && len(ev.AppKey) > 0 && r.AppKeyNext != nil && r.AppKeyNextSeq <= ev.AppKeySeq,
-			(ev.Event == "unlocked" || ev.Event == "locked") && ev.Next != nil && !*ev.Next && r.AppKeyNext != nil &&
-				(r.AppKeyNextSeq <= ev.AppKeySeq || r.AppKeyNextHSeq <= ev.HeaderSeq):
+		}
+		return
+	}
+	// As parent.AWS: enrolled also replaces a row still enrolling, the same
+	// key again, or a lower seq; it never rolls a key back.
+	if len(ev.AppKey) > 0 && (ev.AppKeySeq > r.AppKeySeq || ev.Event == "enrolled" &&
+		(len(r.AppKey) == 0 || r.State == "enrolling" || r.AppKeyID == parent.AppKeyID(ev.AppKey))) {
+		// Not lease-conditioned: only by seq (enrolled: always), as parent.AWS.
+		r.AppKey, r.AppKeyID, r.AppKeySeq = append([]byte(nil), ev.AppKey...), parent.AppKeyID(ev.AppKey), ev.AppKeySeq
+		if r.AppKeyNextSeq <= ev.AppKeySeq {
 			r.AppKeyNext, r.AppKeyNextSeq, r.AppKeyNextHSeq = nil, 0, 0
 		}
 	}
-	if r != nil && len(ev.AppKey) > 0 && (ev.Event == "enrolled" || ev.AppKeySeq > r.AppKeySeq) {
-		// Not lease-conditioned: only by seq (enrolled: always), as parent.AWS.
-		r.AppKey, r.AppKeyID, r.AppKeySeq = append([]byte(nil), ev.AppKey...), parent.AppKeyID(ev.AppKey), ev.AppKeySeq
+	if (ev.Event == "unlocked" || ev.Event == "locked") && ev.Next != nil && !*ev.Next && r.AppKeyNext != nil &&
+		(r.AppKeyNextSeq <= ev.AppKeySeq || r.AppKeyNextHSeq <= ev.HeaderSeq) {
+		r.AppKeyNext, r.AppKeyNextSeq, r.AppKeyNextHSeq = nil, 0, 0
 	}
-	if ev.Event == parent.EventAppKey {
-		return nil
-	}
+}
+
+// lifecycleRest is the rest of Lifecycle, but the app keys.
+func (t *Tables) lifecycleRest(r *VaultRow, ev parent.Lifecycle, me string, now time.Time) error {
 	if r == nil || !(r.LeaseInstance == "" || r.LeaseInstance == me) {
 		if ev.Event == "deleted" {
 			return parent.ErrNotMarked // as parent.AWS: no attachment sweep (P15)
@@ -655,4 +779,49 @@ type StaticCreds parent.Credentials
 // Retrieve implements parent.CredentialSource.
 func (c StaticCreds) Retrieve(context.Context) (parent.Credentials, error) {
 	return parent.Credentials(c), nil
+}
+
+// putNextLocked writes app_key_next as parent.AWS.putNext does.
+func (t *Tables) putNextLocked(r *VaultRow, key []byte, seq, hseq uint64, attempt int64) {
+	if len(r.AppKey) > 0 && seq <= r.AppKeySeq {
+		return
+	}
+	if r.AppKeyNext != nil {
+		ok := r.AppKeyNextHSeq < hseq ||
+			attempt != 0 && r.AppKeyNextHSeq == hseq && r.AppKeyNextAtt < attempt
+		if !ok {
+			return
+		}
+	}
+	r.AppKeyNext, r.AppKeyNextSeq, r.AppKeyNextHSeq, r.AppKeyNextAtt = append([]byte(nil), key...), seq, hseq, attempt
+}
+
+// SetAppKeyErr sets AppKeyErr while the parent runs.
+func (t *Tables) SetAppKeyErr(err error) {
+	t.mu.Lock()
+	t.AppKeyErr = err
+	t.mu.Unlock()
+}
+
+// SetAppKeyDelay sets AppKeyDelay while the parent runs.
+func (t *Tables) SetAppKeyDelay(d time.Duration) {
+	t.mu.Lock()
+	t.AppKeyDelay = d
+	t.mu.Unlock()
+}
+
+// SetConfirmHook sets a function that ConfirmAppKey calls first, before
+// it takes the table (tests: a slow handler).
+func (t *Tables) SetConfirmHook(f func(key []byte)) {
+	t.mu.Lock()
+	t.confirmHook = f
+	t.mu.Unlock()
+}
+
+// ConfirmedKeys returns the keys of the ConfirmAppKey calls that reached the
+// table, in order (whether or not they applied).
+func (t *Tables) ConfirmedKeys() []string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([]string(nil), t.confirmKeys...)
 }

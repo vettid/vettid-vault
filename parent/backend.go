@@ -242,6 +242,18 @@ type Tables interface {
 	// whoever holds the lease: alarm {kind, alarm_id, at} and
 	// alarm_pending true.
 	Lifecycle(ctx context.Context, ev Lifecycle, instanceID string, now time.Time) error
+	// AppKeys writes the app_key and app_key_next parts of an event and
+	// nothing else (the parent's retry of an AppKeyWriteError, and of the
+	// enclave's assertions): conditional on seq, whatever the lease,
+	// idempotent. app_key and the removal of app_key_next are one update.
+	AppKeys(ctx context.Context, ev Lifecycle, now time.Time) error
+	// ConfirmAppKey makes the row name a key the vault is about to adopt
+	// (hostproto.KindAppKeyNext), and returns nil only when it does:
+	// mode "next": as app_key_next {key, kid, seq, header_seq}, unless
+	// app_key already is that key at that seq or higher; mode "enroll":
+	// as app_key (the enrolled report's write, early). ErrConflict if the
+	// row names another key at that seq or higher, or is gone.
+	ConfirmAppKey(ctx context.Context, vaultID, mode string, key []byte, seq, headerSeq uint64, attempt int64, now time.Time) error
 	// ReleaseLease removes this instance's lease and marks the vault
 	// locked (a vault that stopped without a lifecycle "locked").
 	ReleaseLease(ctx context.Context, vaultID, instanceID string, now time.Time) error
@@ -265,4 +277,31 @@ type Credentials struct {
 // CredentialSource retrieves credentials for the enclave.
 type CredentialSource interface {
 	Retrieve(ctx context.Context) (Credentials, error)
+}
+
+// EventAppKeyAssert is the enclave's repeat of the current app key it last
+// reported for a vault, sent after every connect (a parent that restarted
+// lost what it had queued): written as app_key.
+const EventAppKeyAssert = "app_key_assert"
+
+// EventAppKeyNextClear is a failed step 1's orphan clear: the row's
+// app_key_next is removed only if it is the event's key (kid) at the
+// event's header_seq.
+const EventAppKeyNextClear = "app_key_next_clear"
+
+// AppKeyWriteError is the error of a Lifecycle whose app_key or
+// app_key_next write failed: Err is that failure and Rest the error of the
+// rest of the event's write (nil if it was written). The parent writes the
+// keys again until they are written (Tables.AppKeys).
+type AppKeyWriteError struct{ Err, Rest error }
+
+func (e *AppKeyWriteError) Error() string { return "app key not written: " + e.Err.Error() }
+func (e *AppKeyWriteError) Unwrap() error { return e.Err }
+
+// appKeyResult is Lifecycle's result for a key error and the rest's.
+func appKeyResult(keyErr, rest error) error {
+	if keyErr == nil {
+		return rest
+	}
+	return &AppKeyWriteError{Err: keyErr, Rest: rest}
 }

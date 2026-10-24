@@ -113,6 +113,25 @@ func (ch channel) markDeleting(ctx context.Context, vaultID string) error {
 	return nil
 }
 
+// confirmAppKey asks the supervisor, and through it the parent, to make
+// the vault row name an app key the vault is about to adopt; nil only on
+// the parent's ok, vault.ErrAppKeyRefused on its conflict. The vault
+// retries anything else.
+func (ch channel) confirmAppKey(ctx context.Context, c vault.AppKeyConfirm) error {
+	r, err := ch.call(ctx, vaultipc.KindAppKeyNext, []byte(c.VaultID), []byte(c.Mode), c.Key,
+		[]byte(strconv.FormatUint(c.Seq, 10)), []byte(strconv.FormatUint(c.HeaderSeq, 10)))
+	if err != nil {
+		return err
+	}
+	if len(r) == 1 && string(r[0]) == hostproto.StatusConflict {
+		return vault.ErrAppKeyRefused
+	}
+	if !ok(r, 1) {
+		return errChan
+	}
+	return nil
+}
+
 // chanKMS forwards KMS calls; the data keys come back encrypted to this
 // process's own Recipient key.
 type chanKMS struct{ ch channel }

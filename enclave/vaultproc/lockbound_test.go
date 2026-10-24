@@ -41,7 +41,7 @@ func runningProc(t *testing.T) (*proc, *vault.Manager) {
 		t.Fatal(err)
 	}
 	opts := vault.Options{Store: store.NewMemory(), Sealer: testSealer{key: bytes.Repeat([]byte{7}, 32)},
-		Release: vault.Release{PCR0: "dev", Number: 1}, MarkDeleting: vault.NoHostMark,
+		Release: vault.Release{PCR0: "dev", Number: 1}, MarkDeleting: vault.NoHostMark, ConfirmAppKey: vault.NoHostAppKey,
 		Relay: func(base string, key ed25519.PrivateKey) vault.Relay {
 			return vault.NewClientRelay(base, key, nil, time.Now)
 		}}

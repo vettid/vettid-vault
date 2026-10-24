@@ -261,6 +261,9 @@ func (w *World) StartWith(n uint64, tweak func(*enclave.Config)) (*enclave.Insta
 		// recorded at once (0.51.0; a vault process asks its parent).
 		vo.MarkDeleting = vault.NoHostMark
 	}
+	if vo.ConfirmAppKey == nil {
+		vo.ConfirmAppKey = vault.NoHostAppKey
+	}
 	if vo.Relay == nil {
 		vo.Relay = func(base string, key ed25519.PrivateKey) vault.Relay { return w.Relays.New(base, key) }
 	}

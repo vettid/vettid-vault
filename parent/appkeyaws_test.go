@@ -189,7 +189,7 @@ func TestAWSConfirmAppKey(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			f := &fakeDDB{script: c.script, item: c.item}
 			a := newFakeAWS(t, f)
-			err := a.ConfirmAppKey(context.Background(), "v1", "next", key, 2, 5, time.Now())
+			err := a.ConfirmAppKey(context.Background(), "v1", "next", key, 2, 5, att(), time.Now())
 			if !errors.Is(err, c.want) || (c.want == nil) != (err == nil) {
 				t.Fatalf("err %v, want %v", err, c.want)
 			}
@@ -197,7 +197,7 @@ func TestAWSConfirmAppKey(t *testing.T) {
 	}
 	// A failing write is an error, not a conflict.
 	f := &fakeDDB{script: func(int, string) string { return "fail" }}
-	if err := newFakeAWS(t, f).ConfirmAppKey(context.Background(), "v1", "next", key, 2, 5, time.Now()); err == nil || errors.Is(err, ErrConflict) {
+	if err := newFakeAWS(t, f).ConfirmAppKey(context.Background(), "v1", "next", key, 2, 5, att(), time.Now()); err == nil || errors.Is(err, ErrConflict) {
 		t.Fatalf("err %v", err)
 	}
 }
@@ -258,14 +258,14 @@ func TestPermanentErrors(t *testing.T) {
 func TestLiveConfirmCondition(t *testing.T) {
 	f := &fakeDDB{item: `{"Item":{"app_key_next":{"M":{"kid":{"S":"` + AppKeyID([]byte("k2")) + `"},"seq":{"N":"2"}}}}}`}
 	a := newFakeAWS(t, f)
-	if err := a.ConfirmAppKey(context.Background(), "v1", "next", []byte("k2"), 2, 5, time.Now()); err != nil {
+	if err := a.ConfirmAppKey(context.Background(), "v1", "next", []byte("k2"), 2, 5, att(), time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	_ = a.AppKeys(context.Background(), Lifecycle{Event: EventAppKeyNext, VaultID: "v1", AppKey: []byte("k2"), AppKeySeq: 2, HeaderSeq: 5}, time.Now())
 	u := f.updates()
 	live, _ := u[0]["ConditionExpression"].(string)
 	report, _ := u[1]["ConditionExpression"].(string)
-	if !strings.Contains(live, "OR #akn.#hs <= :hs") || strings.Contains(live, "#akn.#seq > :seq") || strings.Contains(report, "#akn.#seq > :seq") || strings.Contains(report, "OR #akn.#hs <= :hs OR") {
+	if !strings.Contains(live, "#akn.#hs = :hs AND (attribute_not_exists(#akn.#att) OR #akn.#att < :att)") || strings.Contains(live, "#akn.#seq > :seq") || strings.Contains(report, "#akn.#att") || strings.Contains(report, "#akn.#seq > :seq") || strings.Contains(report, "OR #akn.#hs <= :hs OR") {
 		t.Fatalf("live %q\nreport %q", live, report)
 	}
 }
@@ -289,3 +289,5 @@ func unusedPlaceholder(body map[string]any) bool {
 	}
 	return false
 }
+
+func att() int64 { return time.Now().UnixNano() }

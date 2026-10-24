@@ -130,30 +130,48 @@ func (p *Parent) confirmAppKey(ctx context.Context, f [][]byte) [][]byte {
 		num[i] = n
 	}
 	id := string(f[0])
-	// A request that outlives its enclave's wait must not write late: the
-	// writes below are ordered by header_seq, and this bounds them too.
+	// The deadline bounds the wait for the lock and the waits before the
+	// write; the vault has given up when it runs out.
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(confirmDeadline.Load()))
 	defer cancel()
-	// One live confirmation per vault at a time, held across the earlier
-	// writes, the table write and its read-back: a late handler (a request
-	// the enclave gave up on) can never write after the newer attempt's.
+	// One live confirmation per vault at a time. The lock is held until
+	// the table write has an outcome, also when the deadline answers the
+	// vault first: a write sent before the deadline is not left in flight
+	// behind a newer attempt's.
 	release, ok := p.lockConfirm(ctx, id)
 	if !ok {
 		p.log.Warn("app key not confirmed", "vault_id", id, "mode", mode, "error", "another confirmation of the vault is under way")
 		return reply(hostproto.StatusError)
 	}
-	defer release()
-	// The vault's earlier lifecycle events are written first, as for the
-	// deletion mark, and so are its app key writes that failed before.
-	p.flushEvents(ctx)
-	if !p.waitKeyQ(ctx, id) {
-		p.log.Warn("app key not confirmed", "vault_id", id, "mode", mode, "error", "earlier app key writes pending")
-		return reply(hostproto.StatusError)
+	key := clone(f[2])
+	attempt := p.nextAttempt()
+	result := make(chan error, 1)
+	go func() {
+		defer release()
+		// The vault's earlier lifecycle events are written first, as for
+		// the deletion mark, and so are its app key writes that failed
+		// before.
+		p.flushEvents(ctx)
+		if !p.waitKeyQ(ctx, id) {
+			result <- errKeyQPending
+			return
+		}
+		if ctx.Err() != nil { // past the deadline: nothing is written
+			result <- ctx.Err()
+			return
+		}
+		// The write and its read-back run to their outcome, bounded on
+		// their own, whatever becomes of the request.
+		wctx, wcancel := context.WithTimeout(context.WithoutCancel(ctx), confirmWriteBound)
+		defer wcancel()
+		result <- p.cfg.Tables.ConfirmAppKey(wctx, id, mode, key, num[0], num[1], attempt, p.now())
+	}()
+	var err error
+	select {
+	case err = <-result:
+	case <-ctx.Done():
+		err = ctx.Err() // the vault has given up; the lock stays with the write
 	}
-	if ctx.Err() != nil { // past the deadline: nothing is written
-		return reply(hostproto.StatusError)
-	}
-	err := p.cfg.Tables.ConfirmAppKey(ctx, id, mode, clone(f[2]), num[0], num[1], p.now())
 	switch {
 	case err == nil:
 		p.log.Info("app key confirmed", "vault_id", id, "mode", mode)
@@ -164,6 +182,26 @@ func (p *Parent) confirmAppKey(ctx context.Context, f [][]byte) [][]byte {
 	}
 	p.log.Warn("app key not confirmed", "vault_id", id, "mode", mode, "error", err.Error())
 	return reply(hostproto.StatusError)
+}
+
+var errKeyQPending = errors.New("earlier app key writes pending")
+
+// confirmWriteBound bounds a confirmation's table write and read-back once
+// it is sent (it is not cancelled by the request's deadline).
+const confirmWriteBound = 30 * time.Second
+
+// nextAttempt is the stamp of a live confirmation: unix nanoseconds,
+// increasing across this parent's requests. Across instances it is
+// clock-ordered.
+func (p *Parent) nextAttempt() int64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	t := p.now().UnixNano()
+	if t <= p.lastAttempt {
+		t = p.lastAttempt + 1
+	}
+	p.lastAttempt = t
+	return t
 }
 
 // confirmLock is a vault's confirmation lock; refs counts the handlers

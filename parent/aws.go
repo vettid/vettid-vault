@@ -863,7 +863,7 @@ func (a *AWS) appKey(ctx context.Context, ev Lifecycle, now time.Time) error {
 // row names the key, as app_key_next (mode next) or app_key (mode enroll)
 // or, in mode next, already as app_key at that seq or higher; ErrConflict
 // if the row names another key at that seq or higher, or is gone.
-func (a *AWS) ConfirmAppKey(ctx context.Context, vaultID, mode string, key []byte, seq, headerSeq uint64, now time.Time) error {
+func (a *AWS) ConfirmAppKey(ctx context.Context, vaultID, mode string, key []byte, seq, headerSeq uint64, attempt int64, now time.Time) error {
 	if mode == "enroll" {
 		err := a.putAppKey(ctx, vaultID, key, seq, keyConfirm, now)
 		if errors.Is(err, ErrLeaseHeld) {
@@ -871,7 +871,7 @@ func (a *AWS) ConfirmAppKey(ctx context.Context, vaultID, mode string, key []byt
 		}
 		return err
 	}
-	err := a.putNext(ctx, Lifecycle{Event: EventAppKeyNext, VaultID: vaultID, AppKey: key, AppKeySeq: seq, HeaderSeq: headerSeq}, now, true)
+	err := a.putNext(ctx, Lifecycle{Event: EventAppKeyNext, VaultID: vaultID, AppKey: key, AppKeySeq: seq, HeaderSeq: headerSeq}, now, attempt)
 	if err != nil && !errors.Is(err, ErrLeaseHeld) {
 		return err
 	}
@@ -919,7 +919,7 @@ func (a *AWS) appKeyNext(ctx context.Context, ev Lifecycle, now time.Time) error
 	}
 	switch {
 	case ev.Event == EventAppKeyNext:
-		return ignore(a.putNext(ctx, ev, now, false))
+		return ignore(a.putNext(ctx, ev, now, 0))
 	case ev.Event == EventAppKey && ev.NextCleared:
 		// Only a next key written by this header_seq or an earlier one: a
 		// late clear never removes a newer replacement's key.
@@ -942,20 +942,29 @@ func (a *AWS) appKeyNext(ctx context.Context, ev Lifecycle, now time.Time) error
 // current attempt: it replaces an equal header_seq whatever the key (an
 // earlier attempt's confirmation landed on the row but its header was
 // never stored, and the next attempt reuses that header_seq). Live
-// confirmations of a vault are serialized by the parent (confirmAppKey), so
-// a late one never lands after a newer. A next key of a higher seq or
-// header_seq is never replaced. A failed condition is ErrLeaseHeld.
-func (a *AWS) putNext(ctx context.Context, ev Lifecycle, now time.Time, live bool) error {
+// confirmations of a vault are serialized by the parent (confirmAppKey) and
+// stamped (attempt, increasing per vault), and at an equal header_seq only a
+// later stamp replaces, so one that lands late after a newer never replaces
+// it. A next key of a higher header_seq is never replaced. A failed
+// condition is ErrLeaseHeld.
+func (a *AWS) putNext(ctx context.Context, ev Lifecycle, now time.Time, attempt int64) error {
+	live := attempt != 0
 	akn := &ddbtypes.AttributeValueMemberM{Value: map[string]ddbtypes.AttributeValue{
 		"key": s(base64.StdEncoding.EncodeToString(ev.AppKey)), "kid": s(AppKeyID(ev.AppKey)), "seq": n(int64(ev.AppKeySeq)),
 		"header_seq": n(int64(ev.HeaderSeq))}}
 	ord := "(#akn.#kid = :kid AND #akn.#hs <= :hs)"
 	if live {
-		ord = "#akn.#hs <= :hs"
+		// At an equal header_seq only a later attempt of the parent's
+		// stamp replaces it: a write of an older attempt that lands late
+		// (a request the enclave gave up on) is refused.
+		ord = "(#akn.#hs = :hs AND (attribute_not_exists(#akn.#att) OR #akn.#att < :att))"
+		akn.Value["att"] = n(attempt)
 	}
 	nm := map[string]string{"#akn": "app_key_next", "#ak": "app_key", "#seq": "seq", "#hs": "header_seq", "#u": "updated_at"}
 	vals := map[string]ddbtypes.AttributeValue{":akn": akn, ":seq": n(int64(ev.AppKeySeq)), ":hs": n(int64(ev.HeaderSeq)), ":u": s(isoNow(now))}
-	if !live { // DynamoDB refuses names and values the expressions do not use
+	if live { // DynamoDB refuses names and values the expressions do not use
+		nm["#att"], vals[":att"] = "att", n(attempt)
+	} else {
 		nm["#kid"], vals[":kid"] = "kid", s(AppKeyID(ev.AppKey))
 	}
 	return a.updateVault(ctx, ev.VaultID, "SET #akn = :akn, #u = :u",

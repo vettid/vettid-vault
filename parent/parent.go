@@ -50,6 +50,7 @@ type Parent struct {
 	// yet written; a worker of their own writes them, slowly, so that they
 	// never hold up the connection or a confirmation (appkeyassert.go).
 	confirms     map[string]*confirmLock
+	lastAttempt  int64
 	asserts      map[string][]Lifecycle
 	assertWorker bool
 }

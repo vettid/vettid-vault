@@ -253,7 +253,7 @@ type Tables interface {
 	// app_key already is that key at that seq or higher; mode "enroll":
 	// as app_key (the enrolled report's write, early). ErrConflict if the
 	// row names another key at that seq or higher, or is gone.
-	ConfirmAppKey(ctx context.Context, vaultID, mode string, key []byte, seq, headerSeq uint64, now time.Time) error
+	ConfirmAppKey(ctx context.Context, vaultID, mode string, key []byte, seq, headerSeq uint64, attempt int64, now time.Time) error
 	// ReleaseLease removes this instance's lease and marks the vault
 	// locked (a vault that stopped without a lifecycle "locked").
 	ReleaseLease(ctx context.Context, vaultID, instanceID string, now time.Time) error

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -166,7 +167,7 @@ func TestLiveConfirmReplacesOwnEarlierAttempt(t *testing.T) {
 	ctx, now := context.Background(), time.Now()
 	row := func() parenttest.VaultRow { r, _ := tb.Vault("v1"); return r }
 	tb.PutVault(parenttest.VaultRow{VaultID: "v1", UserGUID: "u1", State: "locked", AppKey: []byte("k5"), AppKeyID: parent.AppKeyID([]byte("k5")), AppKeySeq: 5})
-	if err := tb.ConfirmAppKey(ctx, "v1", "next", []byte("K6"), 6, 4, now); err != nil {
+	if err := tb.ConfirmAppKey(ctx, "v1", "next", []byte("K6"), 6, 4, att(), now); err != nil {
 		t.Fatal(err)
 	}
 	// R2: another key, the same header_seq.
@@ -174,7 +175,7 @@ func TestLiveConfirmReplacesOwnEarlierAttempt(t *testing.T) {
 	if string(row().AppKeyNext) != "K6" {
 		t.Fatal("a report replaced the next key at an equal header_seq")
 	}
-	if err := tb.ConfirmAppKey(ctx, "v1", "next", []byte("K8"), 6, 4, now); err != nil || string(row().AppKeyNext) != "K8" {
+	if err := tb.ConfirmAppKey(ctx, "v1", "next", []byte("K8"), 6, 4, att(), now); err != nil || string(row().AppKeyNext) != "K8" {
 		t.Fatalf("R2: %v %+v", err, row())
 	}
 	// A next key of a higher seq or header_seq is never replaced by a live
@@ -182,11 +183,11 @@ func TestLiveConfirmReplacesOwnEarlierAttempt(t *testing.T) {
 	// availability-only residual).
 	tb.PutVault(parenttest.VaultRow{VaultID: "v1", UserGUID: "u1", State: "enrolling", AppKey: []byte("k1"), AppKeyID: parent.AppKeyID([]byte("k1")), AppKeySeq: 1,
 		AppKeyNext: []byte("old"), AppKeyNextSeq: 9, AppKeyNextHSeq: 40})
-	if err := tb.ConfirmAppKey(ctx, "v1", "next", []byte("K2"), 2, 3, now); !errors.Is(err, parent.ErrConflict) || string(row().AppKeyNext) != "old" {
+	if err := tb.ConfirmAppKey(ctx, "v1", "next", []byte("K2"), 2, 3, att(), now); !errors.Is(err, parent.ErrConflict) || string(row().AppKeyNext) != "old" {
 		t.Fatalf("a higher next was replaced: %v %+v", err, row())
 	}
 	// An enrollment's own confirmation clears it.
-	if err := tb.ConfirmAppKey(ctx, "v1", "enroll", []byte("k1"), 1, 1, now); err != nil || row().AppKeyNext != nil {
+	if err := tb.ConfirmAppKey(ctx, "v1", "enroll", []byte("k1"), 1, 1, att(), now); err != nil || row().AppKeyNext != nil {
 		t.Fatalf("enroll: %v %+v", err, row())
 	}
 }
@@ -296,7 +297,7 @@ func TestStaleAppKeyWritesDoNotRegress(t *testing.T) {
 	// assertion) does not replace the confirmed one; the same key again
 	// and a later header_seq do.
 	tb.PutVault(parenttest.VaultRow{VaultID: "v1", UserGUID: "u1", State: "locked", AppKey: []byte("k5"), AppKeyID: parent.AppKeyID([]byte("k5")), AppKeySeq: 5})
-	if err := tb.ConfirmAppKey(ctx, "v1", "next", []byte("K7"), 6, 7, now); err != nil {
+	if err := tb.ConfirmAppKey(ctx, "v1", "next", []byte("K7"), 6, 7, att(), now); err != nil {
 		t.Fatal(err)
 	}
 	_ = tb.AppKeys(ctx, parent.Lifecycle{Event: parent.EventAppKeyNext, VaultID: "v1", AppKey: []byte("K6"), AppKeySeq: 6, HeaderSeq: 5}, now)
@@ -304,7 +305,7 @@ func TestStaleAppKeyWritesDoNotRegress(t *testing.T) {
 	if r := row(); string(r.AppKeyNext) != "K7" || r.AppKeyNextHSeq != 7 {
 		t.Fatalf("a stale next replaced the confirmed one: %+v", r)
 	}
-	if err := tb.ConfirmAppKey(ctx, "v1", "next", []byte("K6"), 6, 5, now); !errors.Is(err, parent.ErrConflict) {
+	if err := tb.ConfirmAppKey(ctx, "v1", "next", []byte("K6"), 6, 5, att(), now); !errors.Is(err, parent.ErrConflict) {
 		t.Fatalf("a late confirm of the older attempt: %v", err)
 	}
 	_ = tb.AppKeys(ctx, parent.Lifecycle{Event: parent.EventAppKeyNext, VaultID: "v1", AppKey: []byte("K7"), AppKeySeq: 6, HeaderSeq: 7}, now)
@@ -403,5 +404,67 @@ func TestAssertionBurstDoesNotBlock(t *testing.T) {
 	}
 	if h.hasLog(`"level":"INFO","msg":"lifecycle","event":"app_key_assert"`) {
 		t.Fatal("assertions logged at info")
+	}
+}
+
+var attCounter atomic.Int64
+
+// att is an increasing attempt stamp for calls that go to the tables direct.
+func att() int64 { return attCounter.Add(1) }
+
+// The attempt stamp: at an equal header_seq a live confirmation of an older
+// attempt that lands late (after a newer one) is refused, whatever the key.
+func TestOlderAttemptStampRefused(t *testing.T) {
+	tb := parenttest.NewTables()
+	ctx, now := context.Background(), time.Now()
+	tb.PutVault(parenttest.VaultRow{VaultID: "v1", UserGUID: "u1", State: "locked", AppKey: []byte("k5"), AppKeyID: parent.AppKeyID([]byte("k5")), AppKeySeq: 5})
+	older, newer := att(), att()
+	if err := tb.ConfirmAppKey(ctx, "v1", "next", []byte("K8"), 6, 9, newer, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := tb.ConfirmAppKey(ctx, "v1", "next", []byte("K6"), 6, 9, older, now); !errors.Is(err, parent.ErrConflict) {
+		t.Fatalf("a late older attempt: %v", err)
+	}
+	if r, _ := tb.Vault("v1"); string(r.AppKeyNext) != "K8" {
+		t.Fatalf("row %+v", r)
+	}
+	// The same attempt again (a repeated request) and a later one are not older.
+	if err := tb.ConfirmAppKey(ctx, "v1", "next", []byte("K9"), 6, 9, att(), now); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A write sent before the deadline is not cancelled by it and keeps the
+// vault's lock until it has an outcome: the vault's next attempt waits for
+// it, so the older attempt cannot land after the newer one.
+func TestInFlightWriteHoldsTheLockPastTheDeadline(t *testing.T) {
+	defer parent.SetConfirmDeadlineForTest(300 * time.Millisecond)()
+	h, e := appKeyHarness(t)
+	h.tables.PutVault(parenttest.VaultRow{VaultID: vaultID, UserGUID: "u1", State: "locked", AppKey: []byte("k5"), AppKeyID: parent.AppKeyID([]byte("k5")), AppKeySeq: 5})
+	release := make(chan struct{})
+	h.tables.SetConfirmHook(func(key []byte) {
+		if string(key) == "K6" {
+			<-release // the write is in flight past the deadline
+		}
+	})
+	start := time.Now()
+	if got := e.confirmAppKey(t, vaultID, "next", "K6", "6", "9"); got != hostproto.StatusError {
+		t.Fatalf("past the deadline: %s", got)
+	}
+	if time.Since(start) > 2*time.Second {
+		t.Fatal("the vault waited for the write")
+	}
+	k8 := make(chan string, 1)
+	go func() { k8 <- e.confirmAppKey(t, vaultID, "next", "K8", "6", "9") }()
+	time.Sleep(100 * time.Millisecond)
+	close(release)
+	if got := <-k8; got != hostproto.StatusOK {
+		t.Fatalf("K8: %s", got)
+	}
+	if keys := h.tables.ConfirmedKeys(); len(keys) != 2 || keys[0] != "K6" || keys[1] != "K8" {
+		t.Fatalf("writes reached the table as %v (K6 must land, and before K8)", keys)
+	}
+	if r, _ := h.tables.Vault(vaultID); string(r.AppKeyNext) != "K8" {
+		t.Fatalf("row %+v", r)
 	}
 }

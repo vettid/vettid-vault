@@ -941,16 +941,17 @@ func (a *AWS) appKeyNext(ctx context.Context, ev Lifecycle, now time.Time) error
 // same key. The live request of the enclave (live) is the vault's own
 // current attempt: it replaces an equal header_seq whatever the key (an
 // earlier attempt's confirmation landed on the row but its header was
-// never stored, and the next attempt reuses that header_seq), and a next
-// key whose seq is above its own (left by a vault that was enrolled over).
-// A failed condition is ErrLeaseHeld.
+// never stored, and the next attempt reuses that header_seq). Live
+// confirmations of a vault are serialized by the parent (confirmAppKey), so
+// a late one never lands after a newer. A next key of a higher seq or
+// header_seq is never replaced. A failed condition is ErrLeaseHeld.
 func (a *AWS) putNext(ctx context.Context, ev Lifecycle, now time.Time, live bool) error {
 	akn := &ddbtypes.AttributeValueMemberM{Value: map[string]ddbtypes.AttributeValue{
 		"key": s(base64.StdEncoding.EncodeToString(ev.AppKey)), "kid": s(AppKeyID(ev.AppKey)), "seq": n(int64(ev.AppKeySeq)),
 		"header_seq": n(int64(ev.HeaderSeq))}}
 	ord := "(#akn.#kid = :kid AND #akn.#hs <= :hs)"
 	if live {
-		ord = "#akn.#hs <= :hs OR #akn.#seq > :seq"
+		ord = "#akn.#hs <= :hs"
 	}
 	nm := map[string]string{"#akn": "app_key_next", "#ak": "app_key", "#seq": "seq", "#hs": "header_seq", "#u": "updated_at"}
 	vals := map[string]ddbtypes.AttributeValue{":akn": akn, ":seq": n(int64(ev.AppKeySeq)), ":hs": n(int64(ev.HeaderSeq)), ":u": s(isoNow(now))}

@@ -254,7 +254,7 @@ func TestPermanentErrors(t *testing.T) {
 }
 
 // The live confirm may replace an equal header_seq of another key and a
-// next key above its own seq (R2, R3); a report may not.
+// equal header_seq of another key (R2); a report may not. Neither replaces a higher seq.
 func TestLiveConfirmCondition(t *testing.T) {
 	f := &fakeDDB{item: `{"Item":{"app_key_next":{"M":{"kid":{"S":"` + AppKeyID([]byte("k2")) + `"},"seq":{"N":"2"}}}}}`}
 	a := newFakeAWS(t, f)
@@ -265,7 +265,7 @@ func TestLiveConfirmCondition(t *testing.T) {
 	u := f.updates()
 	live, _ := u[0]["ConditionExpression"].(string)
 	report, _ := u[1]["ConditionExpression"].(string)
-	if !strings.Contains(live, "#akn.#hs <= :hs OR #akn.#seq > :seq") || strings.Contains(report, "#akn.#seq > :seq") || strings.Contains(report, "OR #akn.#hs <= :hs OR") {
+	if !strings.Contains(live, "OR #akn.#hs <= :hs") || strings.Contains(live, "#akn.#seq > :seq") || strings.Contains(report, "#akn.#seq > :seq") || strings.Contains(report, "OR #akn.#hs <= :hs OR") {
 		t.Fatalf("live %q\nreport %q", live, report)
 	}
 }

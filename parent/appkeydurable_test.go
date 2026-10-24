@@ -177,15 +177,90 @@ func TestLiveConfirmReplacesOwnEarlierAttempt(t *testing.T) {
 	if err := tb.ConfirmAppKey(ctx, "v1", "next", []byte("K8"), 6, 4, now); err != nil || string(row().AppKeyNext) != "K8" {
 		t.Fatalf("R2: %v %+v", err, row())
 	}
-	// R3: a next key of an earlier vault, above this one's seq and header_seq.
+	// A next key of a higher seq or header_seq is never replaced by a live
+	// confirm (R3 is not granted: a stale next of an earlier vault is an
+	// availability-only residual).
 	tb.PutVault(parenttest.VaultRow{VaultID: "v1", UserGUID: "u1", State: "enrolling", AppKey: []byte("k1"), AppKeyID: parent.AppKeyID([]byte("k1")), AppKeySeq: 1,
 		AppKeyNext: []byte("old"), AppKeyNextSeq: 9, AppKeyNextHSeq: 40})
-	if err := tb.ConfirmAppKey(ctx, "v1", "next", []byte("K2"), 2, 3, now); err != nil || string(row().AppKeyNext) != "K2" {
-		t.Fatalf("R3: %v %+v", err, row())
+	if err := tb.ConfirmAppKey(ctx, "v1", "next", []byte("K2"), 2, 3, now); !errors.Is(err, parent.ErrConflict) || string(row().AppKeyNext) != "old" {
+		t.Fatalf("a higher next was replaced: %v %+v", err, row())
 	}
-	// A newer attempt's key is still not replaced by an older live confirm.
-	if err := tb.ConfirmAppKey(ctx, "v1", "next", []byte("K1"), 2, 2, now); !errors.Is(err, parent.ErrConflict) {
-		t.Fatalf("an older confirm: %v", err)
+	// An enrollment's own confirmation clears it.
+	if err := tb.ConfirmAppKey(ctx, "v1", "enroll", []byte("k1"), 1, 1, now); err != nil || row().AppKeyNext != nil {
+		t.Fatalf("enroll: %v %+v", err, row())
+	}
+}
+
+// 4a: two live confirmations of one vault through the parent, the first
+// slow. They are serialized, so the older attempt cannot land after the
+// newer one: the newer key stays.
+func TestConfirmsAreSerializedPerVault(t *testing.T) {
+	h, e := appKeyHarness(t)
+	h.tables.PutVault(parenttest.VaultRow{VaultID: vaultID, UserGUID: "u1", State: "locked", AppKey: []byte("k5"), AppKeyID: parent.AppKeyID([]byte("k5")), AppKeySeq: 5})
+	release := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	h.tables.SetConfirmHook(func(key []byte) {
+		if string(key) == "K6" {
+			entered <- struct{}{}
+			<-release // the older attempt is slow
+		}
+	})
+	a := make(chan string, 1)
+	go func() { a <- e.confirmAppKey(t, vaultID, "next", "K6", "6", "9") }()
+	<-entered
+	b := make(chan string, 1)
+	go func() { b <- e.confirmAppKey(t, vaultID, "next", "K8", "6", "9") }()
+	select {
+	case got := <-b:
+		t.Fatalf("the newer attempt was answered (%s) while the older was in flight", got)
+	case <-time.After(150 * time.Millisecond):
+	}
+	close(release)
+	if got := <-a; got != hostproto.StatusOK {
+		t.Fatalf("older: %s", got)
+	}
+	if got := <-b; got != hostproto.StatusOK {
+		t.Fatalf("newer: %s", got)
+	}
+	if r, _ := h.tables.Vault(vaultID); string(r.AppKeyNext) != "K8" {
+		t.Fatalf("the older attempt landed last: %+v", r)
+	}
+}
+
+// A handler past its deadline writes nothing and gives the lock back.
+func TestLateConfirmWritesNothing(t *testing.T) {
+	defer parent.SetConfirmDeadlineForTest(300 * time.Millisecond)()
+	h, e := appKeyHarness(t)
+	h.tables.PutVault(parenttest.VaultRow{VaultID: vaultID, UserGUID: "u1", State: "locked", AppKey: []byte("k5"), AppKeyID: parent.AppKeyID([]byte("k5")), AppKeySeq: 5})
+	h.tables.SetAppKeyErr(errors.New("throttled"))
+	e.appKeyEvent(parent.EventAppKey, "k6", "6", "", "0") // queued: waitKeyQ cannot finish
+	waitFor(t, "queued", func() bool { return h.hasLog("app key write failed; trying again") })
+	if got := e.confirmAppKey(t, vaultID, "next", "K9", "9", "9"); got != hostproto.StatusError {
+		t.Fatalf("past its deadline: %s", got)
+	}
+	h.tables.SetAppKeyErr(nil)
+	waitFor(t, "queue drained", func() bool { r, _ := h.tables.Vault(vaultID); return string(r.AppKey) == "k6" })
+	if r, _ := h.tables.Vault(vaultID); r.AppKeyNext != nil {
+		t.Fatalf("a late handler wrote: %+v", r)
+	}
+	if got := e.confirmAppKey(t, vaultID, "next", "K7", "7", "10"); got != hostproto.StatusOK {
+		t.Fatalf("the lock was not given back: %s", got)
+	}
+}
+
+// 4b: the row's app_key lags (K5), K7 is confirmed at seq 7 / header_seq 15;
+// a late live K6 (seq 6, header_seq 9) must not replace it.
+func TestLateOlderConfirmDoesNotReplaceNewer(t *testing.T) {
+	h, e := appKeyHarness(t)
+	h.tables.PutVault(parenttest.VaultRow{VaultID: vaultID, UserGUID: "u1", State: "locked", AppKey: []byte("K5"), AppKeyID: parent.AppKeyID([]byte("K5")), AppKeySeq: 5})
+	if got := e.confirmAppKey(t, vaultID, "next", "K7", "7", "15"); got != hostproto.StatusOK {
+		t.Fatalf("K7: %s", got)
+	}
+	if got := e.confirmAppKey(t, vaultID, "next", "K6", "6", "9"); got != hostproto.StatusConflict {
+		t.Fatalf("late K6: %s", got)
+	}
+	if r, _ := h.tables.Vault(vaultID); string(r.AppKeyNext) != "K7" || r.AppKeyNextSeq != 7 {
+		t.Fatalf("the newer next key was replaced: %+v", r)
 	}
 }
 

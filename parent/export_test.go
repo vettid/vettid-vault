@@ -51,6 +51,13 @@ func SetQueueLostWaitForTest(first, max time.Duration) func() {
 	return func() { queueLostWait, queueLostWaitMax = a, b }
 }
 
+// SetConfirmDeadlineForTest sets the deadline of an AppKeyNext request at
+// the parent; the returned function restores it.
+func SetConfirmDeadlineForTest(d time.Duration) func() {
+	a := confirmDeadline.Swap(int64(d))
+	return func() { confirmDeadline.Store(a) }
+}
+
 // SetAssertPaceForTest sets the pause between the assertion worker's
 // vaults; the returned function restores it.
 func SetAssertPaceForTest(d time.Duration) func() {

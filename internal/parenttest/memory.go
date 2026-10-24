@@ -333,6 +333,7 @@ type Tables struct {
 	// AppKeyDelay slows AppKeys (tests of the assertion worker).
 	AppKeyDelay time.Duration
 	confirms    []string
+	confirmHook func(key []byte)
 }
 
 // LifecycleEvents returns the lifecycle events the parent wrote for a
@@ -587,6 +588,12 @@ func (t *Tables) AppKeys(_ context.Context, ev parent.Lifecycle, _ time.Time) er
 // ConfirmAppKey implements parent.Tables as parent.AWS.
 func (t *Tables) ConfirmAppKey(_ context.Context, vaultID, mode string, key []byte, seq, headerSeq uint64, _ time.Time) error {
 	t.mu.Lock()
+	hook := t.confirmHook
+	t.mu.Unlock()
+	if hook != nil {
+		hook(key)
+	}
+	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.ConfirmErr != nil {
 		return t.ConfirmErr
@@ -768,7 +775,7 @@ func (t *Tables) putNextLocked(r *VaultRow, key []byte, seq, hseq uint64, live b
 	if r.AppKeyNext != nil {
 		same := parent.AppKeyID(r.AppKeyNext) == parent.AppKeyID(key)
 		ok := r.AppKeyNextHSeq < hseq || same && r.AppKeyNextHSeq <= hseq ||
-			live && (r.AppKeyNextHSeq <= hseq || r.AppKeyNextSeq > seq)
+			live && r.AppKeyNextHSeq <= hseq
 		if !ok {
 			return
 		}
@@ -787,5 +794,13 @@ func (t *Tables) SetAppKeyErr(err error) {
 func (t *Tables) SetAppKeyDelay(d time.Duration) {
 	t.mu.Lock()
 	t.AppKeyDelay = d
+	t.mu.Unlock()
+}
+
+// SetConfirmHook sets a function that ConfirmAppKey calls first, before
+// it takes the table (tests: a slow handler).
+func (t *Tables) SetConfirmHook(f func(key []byte)) {
+	t.mu.Lock()
+	t.confirmHook = f
 	t.mu.Unlock()
 }

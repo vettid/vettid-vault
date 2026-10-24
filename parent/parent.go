@@ -49,6 +49,7 @@ type Parent struct {
 	// asserts are the enclave's assertions after a connect, by vault, not
 	// yet written; a worker of their own writes them, slowly, so that they
 	// never hold up the connection or a confirmation (appkeyassert.go).
+	confirms     map[string]*confirmLock
 	asserts      map[string][]Lifecycle
 	assertWorker bool
 }

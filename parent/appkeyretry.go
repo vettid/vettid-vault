@@ -132,13 +132,25 @@ func (p *Parent) confirmAppKey(ctx context.Context, f [][]byte) [][]byte {
 	id := string(f[0])
 	// A request that outlives its enclave's wait must not write late: the
 	// writes below are ordered by header_seq, and this bounds them too.
-	ctx, cancel := context.WithTimeout(ctx, confirmDeadline)
+	ctx, cancel := context.WithTimeout(ctx, time.Duration(confirmDeadline.Load()))
 	defer cancel()
+	// One live confirmation per vault at a time, held across the earlier
+	// writes, the table write and its read-back: a late handler (a request
+	// the enclave gave up on) can never write after the newer attempt's.
+	release, ok := p.lockConfirm(ctx, id)
+	if !ok {
+		p.log.Warn("app key not confirmed", "vault_id", id, "mode", mode, "error", "another confirmation of the vault is under way")
+		return reply(hostproto.StatusError)
+	}
+	defer release()
 	// The vault's earlier lifecycle events are written first, as for the
 	// deletion mark, and so are its app key writes that failed before.
 	p.flushEvents(ctx)
 	if !p.waitKeyQ(ctx, id) {
 		p.log.Warn("app key not confirmed", "vault_id", id, "mode", mode, "error", "earlier app key writes pending")
+		return reply(hostproto.StatusError)
+	}
+	if ctx.Err() != nil { // past the deadline: nothing is written
 		return reply(hostproto.StatusError)
 	}
 	err := p.cfg.Tables.ConfirmAppKey(ctx, id, mode, clone(f[2]), num[0], num[1], p.now())
@@ -154,8 +166,47 @@ func (p *Parent) confirmAppKey(ctx context.Context, f [][]byte) [][]byte {
 	return reply(hostproto.StatusError)
 }
 
+// confirmLock is a vault's confirmation lock; refs counts the handlers
+// that hold or wait for it.
+type confirmLock struct {
+	ch   chan struct{}
+	refs int
+}
+
+// lockConfirm takes the vault's confirmation lock, or gives up when ctx
+// ends. release gives it back (also for a handler past its deadline).
+func (p *Parent) lockConfirm(ctx context.Context, vaultID string) (release func(), ok bool) {
+	p.mu.Lock()
+	if p.confirms == nil {
+		p.confirms = map[string]*confirmLock{}
+	}
+	l := p.confirms[vaultID]
+	if l == nil {
+		l = &confirmLock{ch: make(chan struct{}, 1)}
+		p.confirms[vaultID] = l
+	}
+	l.refs++
+	p.mu.Unlock()
+	done := func() {
+		p.mu.Lock()
+		if l.refs--; l.refs == 0 {
+			delete(p.confirms, vaultID)
+		}
+		p.mu.Unlock()
+	}
+	select {
+	case l.ch <- struct{}{}:
+		return func() { <-l.ch; done() }, true
+	case <-ctx.Done():
+		done()
+		return nil, false
+	}
+}
+
 // confirmDeadline bounds one AppKeyNext request at the parent.
-const confirmDeadline = 8 * time.Second
+var confirmDeadline atomic.Int64
+
+func init() { confirmDeadline.Store(int64(8 * time.Second)) }
 
 // waitKeyQ waits until the vault's failed app key writes are written (or
 // given up); false if ctx ends first.

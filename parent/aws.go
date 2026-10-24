@@ -952,11 +952,14 @@ func (a *AWS) putNext(ctx context.Context, ev Lifecycle, now time.Time, live boo
 	if live {
 		ord = "#akn.#hs <= :hs OR #akn.#seq > :seq"
 	}
+	nm := map[string]string{"#akn": "app_key_next", "#ak": "app_key", "#seq": "seq", "#hs": "header_seq", "#u": "updated_at"}
+	vals := map[string]ddbtypes.AttributeValue{":akn": akn, ":seq": n(int64(ev.AppKeySeq)), ":hs": n(int64(ev.HeaderSeq)), ":u": s(isoNow(now))}
+	if !live { // DynamoDB refuses names and values the expressions do not use
+		nm["#kid"], vals[":kid"] = "kid", s(AppKeyID(ev.AppKey))
+	}
 	return a.updateVault(ctx, ev.VaultID, "SET #akn = :akn, #u = :u",
 		"attribute_exists(vault_id) AND (attribute_not_exists(#ak) OR #ak.#seq < :seq) AND "+
-			"(attribute_not_exists(#akn) OR attribute_not_exists(#akn.#hs) OR #akn.#hs < :hs OR "+ord+")",
-		map[string]string{"#akn": "app_key_next", "#ak": "app_key", "#seq": "seq", "#hs": "header_seq", "#kid": "kid", "#u": "updated_at"},
-		map[string]ddbtypes.AttributeValue{":akn": akn, ":seq": n(int64(ev.AppKeySeq)), ":hs": n(int64(ev.HeaderSeq)), ":kid": s(AppKeyID(ev.AppKey)), ":u": s(isoNow(now))})
+			"(attribute_not_exists(#akn) OR attribute_not_exists(#akn.#hs) OR #akn.#hs < :hs OR "+ord+")", nm, vals)
 }
 
 // nameChange writes the member's name request (0.18.0, §11.5, MEMBER-API

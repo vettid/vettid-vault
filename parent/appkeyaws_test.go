@@ -39,6 +39,9 @@ func (f *fakeDDB) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.mu.Unlock()
 	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
 	ans := ""
+	if target == "UpdateItem" && unusedPlaceholder(body) {
+		ans = "fail" // DynamoDB: ValidationException for an unused name or value
+	}
 	if f.script != nil {
 		ans = f.script(n, target)
 	}
@@ -265,4 +268,24 @@ func TestLiveConfirmCondition(t *testing.T) {
 	if !strings.Contains(live, "#akn.#hs <= :hs OR #akn.#seq > :seq") || strings.Contains(report, "#akn.#seq > :seq") || strings.Contains(report, "OR #akn.#hs <= :hs OR") {
 		t.Fatalf("live %q\nreport %q", live, report)
 	}
+}
+
+// unusedPlaceholder reports an expression attribute name or value that no
+// expression uses: DynamoDB refuses such a request (ValidationException).
+func unusedPlaceholder(body map[string]any) bool {
+	var text string
+	for _, k := range []string{"UpdateExpression", "ConditionExpression"} {
+		if e, ok := body[k].(string); ok {
+			text += " " + e
+		}
+	}
+	for _, k := range []string{"ExpressionAttributeNames", "ExpressionAttributeValues"} {
+		m, _ := body[k].(map[string]any)
+		for name := range m {
+			if !strings.Contains(text, name) {
+				return true
+			}
+		}
+	}
+	return false
 }

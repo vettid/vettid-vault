@@ -305,6 +305,7 @@ func TestTransfer(t *testing.T) {
 	if err := a.dev.TransferApprove(ctx, id, acPIN, credPW); err != nil {
 		t.Fatal(err)
 	}
+	approvedAt := time.Now() // the approval, and any notice sealed with it, are before this
 	if err := b.dev.AwaitPaired(ctx); err != nil {
 		t.Fatalf("new app: %v", err)
 	}
@@ -331,17 +332,16 @@ func TestTransfer(t *testing.T) {
 	if r, err := aw.unlock(a, acPIN, client.UnlockOptions{}, ""); err == nil && r.OK {
 		t.Fatal("the old app still unlocks")
 	}
-	unlockAt := time.Now()
 	if r := aw.mustUnlock(b, acPIN, client.UnlockOptions{}, ""); !r.OK {
 		t.Fatalf("new app unlock: %+v", r)
 	}
 	// §11.14.10 (owner decision 2026-10-23, vettid.org #404): the new app's
 	// first unlock from storage delivers the held device.unlinked to the old
 	// app, on the token it renewed at the approval, sealed at delivery (its
-	// ts is the delivery's, not the approval's).
+	// ts is the delivery's, later than the approval, not the approval's).
 	un := waitEvent(t, a.dev, "device.unlinked", has("reason", "transferred"))
-	if un.TS.Before(unlockAt.Add(-time.Second)) || !strings.Contains(string(un.Body), `"transfer_id":"`+id+`"`) {
-		t.Fatalf("device.unlinked to the old app: ts %v (unlock at %v), body %s", un.TS, unlockAt, un.Body)
+	if !un.TS.After(approvedAt.Truncate(time.Millisecond)) || !strings.Contains(string(un.Body), `"transfer_id":"`+id+`"`) {
+		t.Fatalf("device.unlinked to the old app: ts %v (approved before %v), body %s", un.TS, approvedAt, un.Body)
 	}
 	aw.status(b)
 	au, err := b.dev.AuditList(ctx, map[string]any{"kinds": []string{"device"}}, false)

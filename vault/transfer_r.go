@@ -49,15 +49,17 @@ type PendingUnlink struct {
 	Payload []byte `json:"payload"`
 }
 
-// until is when a held notice is deleted unsent: when its
-// deposit token expires. A token without an expiry (never issued so, as
-// tokens carry exp) is bounded by the longest standing token, StandingMax
-// from the approval, so that the kept send key does not stay for ever.
+// until is when a held notice is deleted unsent: when its deposit token
+// expires, and at most StandingMax (30 days) after the approval
+// (§11.14.10 "at most 30 days after the approval"). The cap holds against
+// a token with a longer or no expiry from a faulty or hostile old app
+// (heldToken does not bound exp), so the kept send key never outlives it.
 func (pu *PendingUnlink) until() time.Time {
-	if pu.TokenExp.IsZero() {
-		return pu.At.Add(StandingMax)
+	limit := pu.At.Add(StandingMax)
+	if !pu.TokenExp.IsZero() && pu.TokenExp.Before(limit) {
+		return pu.TokenExp
 	}
-	return pu.TokenExp
+	return limit
 }
 
 // expired reports whether the held notice can no longer be delivered: its
@@ -142,6 +144,14 @@ func (m *Manager) holdUnlink(old *Peer, transferID string, dekVersion uint64, no
 	kr := m.sessions[old.ID]
 	if kr == nil || kr.Current() == nil || old.Standing.Token == "" {
 		return
+	}
+	if prev := m.st.PendingUnlink; prev != nil {
+		// A second transfer before the first one's notice went out
+		// (§11.14.10 keeps one pending unlink): the earlier notice is
+		// dropped and its kept send key zeroized. No audit kind exists
+		// for a dropped notice (§10.9), so none is recorded.
+		m.st.PendingUnlink = nil
+		prev.wipe()
 	}
 	cur := kr.Current()
 	raw, err := cur.Seal(m.unlinkInner(transferID, now))

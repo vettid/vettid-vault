@@ -244,3 +244,53 @@ func TestPendingUnlinkTakesRenewedToken(t *testing.T) {
 		t.Fatalf("held notice token exp %v (was %v)", pu.TokenExp, before)
 	}
 }
+
+// F1: the held notice is deleted at most StandingMax after the approval,
+// even when its token claims a longer life.
+func TestPendingUnlinkCappedAt30Days(t *testing.T) {
+	d := newDevFixture(t)
+	t0 := time.Now().UTC()
+	pu := heldUnlink(t, d, t0, 400*24*time.Hour)
+	if !pu.until().Equal(pu.At.Add(StandingMax)) {
+		t.Fatalf("until %v, want the approval + 30 days", pu.until())
+	}
+	d.m.mu.Lock()
+	d.m.expirePendingUnlink(pu.At.Add(StandingMax - time.Second))
+	kept := d.m.st.PendingUnlink != nil
+	d.m.expirePendingUnlink(pu.At.Add(StandingMax))
+	gone := d.m.st.PendingUnlink == nil
+	d.m.mu.Unlock()
+	if !kept || !gone || pu.Epoch.SendKey != nil {
+		t.Fatalf("kept %v, gone %v at 30 days", kept, gone)
+	}
+	// Delivery after the cap: deleted unsent.
+	d2 := newDevFixture(t)
+	heldUnlink(t, d2, t0.Add(-StandingMax-time.Minute), 400*24*time.Hour)
+	if got := deliver(t, d2, time.Now().UTC()); len(got) != 0 {
+		t.Fatalf("sent past 30 days: %+v", got)
+	}
+}
+
+// F2: a lock zeroizes the kept send key in memory (the state was stored,
+// under the DEK, before).
+func TestPendingUnlinkWipedAtLock(t *testing.T) {
+	d := newDevFixture(t)
+	pu := heldUnlink(t, d, time.Now().UTC(), 30*24*time.Hour)
+	if err := d.m.Lock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if pu.Epoch.SendKey != nil || pu.Payload != nil {
+		t.Fatal("kept send key not zeroized at the lock")
+	}
+}
+
+// F3: a second transfer's notice replaces the first, whose kept send key
+// is zeroized.
+func TestPendingUnlinkReplacedWiped(t *testing.T) {
+	d := newDevFixture(t)
+	first := heldUnlink(t, d, time.Now().UTC(), 30*24*time.Hour)
+	second := heldUnlink(t, d, time.Now().UTC(), 30*24*time.Hour)
+	if first == second || first.Epoch.SendKey != nil || first.Payload != nil || second.Epoch.SendKey == nil {
+		t.Fatal("the earlier notice was not zeroized when replaced")
+	}
+}

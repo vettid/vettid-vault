@@ -585,13 +585,23 @@ func (s *stack) putObject(key string, b []byte) {
 // requeue makes a response slot queued again and re-sends a queue
 // message, as a dishonest host replaying a request would.
 func (s *stack) requeue(rid, queue, body, guid, appKID string) {
+	s.requeueOp(rid, queue, body, guid, appKID, "")
+}
+
+// requeueOp is requeue with the slot's op (a lock's codes are passed for
+// a lock's slot only, MEMBER-API 2.5.0).
+func (s *stack) requeueOp(rid, queue, body, guid, appKID, op string) {
 	s.t.Helper()
 	ctx := ctxT(s.t, 10*time.Second)
-	_, err := s.db.PutItem(ctx, &dynamodb.PutItemInput{TableName: aws.String(s.tables.Requests), Item: map[string]ddbtypes.AttributeValue{
+	item := map[string]ddbtypes.AttributeValue{
 		"request_id": &ddbtypes.AttributeValueMemberS{Value: rid}, "user_guid": &ddbtypes.AttributeValueMemberS{Value: guid},
 		"app_kid": &ddbtypes.AttributeValueMemberS{Value: appKID},
 		"status":  &ddbtypes.AttributeValueMemberS{Value: "queued"}, "created_at": &ddbtypes.AttributeValueMemberS{Value: time.Now().UTC().Format(time.RFC3339)},
-		"expires_at": &ddbtypes.AttributeValueMemberN{Value: fmt.Sprint(time.Now().Unix() + 900)}}})
+		"expires_at": &ddbtypes.AttributeValueMemberN{Value: fmt.Sprint(time.Now().Unix() + 900)}}
+	if op != "" {
+		item["op"] = &ddbtypes.AttributeValueMemberS{Value: op}
+	}
+	_, err := s.db.PutItem(ctx, &dynamodb.PutItemInput{TableName: aws.String(s.tables.Requests), Item: item})
 	if err != nil {
 		s.t.Fatal(err)
 	}

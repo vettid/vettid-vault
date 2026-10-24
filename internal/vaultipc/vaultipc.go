@@ -73,7 +73,8 @@ import (
 // unlock's recovery_cancelled with cancelled_recovery_id or a cancel's
 // recovery_not_current (VAULT-MESSAGING 0.49.0).
 // 11: MarkDeleting; the job op delete_resume (VAULT-MESSAGING 0.51.0).
-const Version = "11"
+// 12: LockBound (VAULT-MESSAGING 0.29.0, release L).
+const Version = "12"
 
 // Supervisor → vault.
 const (
@@ -97,6 +98,11 @@ const (
 	// the running vault refuse a recovery (0.16.0, §11.11.1)? Nothing is
 	// locked.
 	KindRecoverable hostproto.Kind = 0x45
+	// KindLockBound [unlock_id] → [ok] (locked, as KindLock) | [stale]
+	// (another unlock is current; nothing is done): the queue op lock with
+	// an unlock_id (0.29.0, release L, §11.5). The process compares the
+	// value with its vault's current unlock.
+	KindLockBound hostproto.Kind = 0x46
 )
 
 // Vault → supervisor requests.
@@ -198,6 +204,9 @@ const (
 	// failed erase): the vault is locked, its objects may remain, and the
 	// host's deletion falls back to the erase without the DEK.
 	StatusNotDeleted = "not_deleted"
+	// StatusStale answers a LockBound whose unlock_id is not the running
+	// vault's current one: nothing was locked (0.29.0, release L).
+	StatusStale = "stale"
 )
 
 // Limits.

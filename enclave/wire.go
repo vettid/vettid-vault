@@ -55,6 +55,22 @@ const (
 // that reflects a sealed outcome.
 const CodeRecoveryRegistered = "recovery_registered"
 
+// The lock operation's answers (0.29.0, release L, §11.5), written after
+// the lock: the vault ran here and is locked (also when its final flush
+// failed); no process for the vault here; the vault runs under a newer
+// unlock (another unlock_id, or an unlock queued at or after this lock)
+// and nothing was done.
+const (
+	CodeLocked     = "locked"
+	CodeNotRunning = "not_running"
+	CodeStale      = "stale"
+)
+
+// EnqueuedAtLayout is enqueued_at's form when the enclave writes a queue
+// message (tests, tools): RFC 3339 in UTC with milliseconds, as the member
+// API writes it.
+const EnqueuedAtLayout = "2006-01-02T15:04:05.000Z07:00"
+
 // BackupField encodes a lifecycle event's backup bit for the host
 // channels: "1", "0", or "" when not reported (0.16.0).
 func BackupField(b *bool) string {
@@ -200,6 +216,10 @@ type QueueMessage struct {
 	// §11.14.8): the recovery it means, covered by the signature (its
 	// eighth line). Empty: the cancel ends whatever is in progress.
 	RecoveryID string
+	// UnlockID is a lock's optional unlock_id (0.29.0, release L, §11.5
+	// "The lock operation"): with it the lock is bound to that unlock;
+	// without, it is unconditional and ordered by EnqueuedAt.
+	UnlockID string
 	// Account is the account snapshot (op account, REQUIRED; enroll,
 	// REQUIRED since 0.18.0, refused by the enclave with bad_request when
 	// absent or invalid; unlock, OPTIONAL; §11.5, §11.13): host data whose
@@ -309,6 +329,11 @@ func ParseQueueMessage(b []byte) (*QueueMessage, error) {
 		}
 		q.SignedAt, q.KeyID = sa, kid2
 	}
+	uid, uidOK, err := o.OptString("unlock_id")
+	if err != nil || uidOK && (q.Op != OpLock || !altchan.ValidUnlockID(uid)) {
+		return nil, ErrMalformed
+	}
+	q.UnlockID = uid
 	rid, ridOK, err := o.OptString("recovery_id")
 	if err != nil || ridOK && (q.Op != OpRecoveryCancel || !envelope.ValidULID(rid)) {
 		return nil, ErrMalformed
@@ -376,7 +401,14 @@ func (q *QueueMessage) Marshal() []byte {
 	if len(q.Account) > 0 {
 		b.Raw("account", q.Account)
 	}
-	return b.String("enqueued_at", q.EnqueuedAt.UTC().Format(time.RFC3339)).Bytes()
+	if q.Op == OpLock && q.UnlockID != "" {
+		b.String("unlock_id", q.UnlockID)
+	}
+	// Milliseconds, as the member API writes it (new Date().toISOString()):
+	// an unconditional lock is ordered by this time (0.29.0, §11.5), and a
+	// second-precision copy would make a lock and an unlock of the same
+	// second equal, and so stale.
+	return b.String("enqueued_at", q.EnqueuedAt.UTC().Format(EnqueuedAtLayout)).Bytes()
 }
 
 func hasEnvelope(op string) bool {
@@ -398,7 +430,8 @@ type Response struct {
 	Envelope  []byte
 	// Code is CodeRecoveryRegistered (0.10.6), CodeRecoveryUnavailable
 	// (0.16.0), CodeRecoveryAttempt (0.33.0), CodeRecoveryCancelled or
-	// CodeRecoveryNotCurrent (0.49.0), or empty.
+	// CodeRecoveryNotCurrent (0.49.0), a lock's CodeLocked, CodeNotRunning
+	// or CodeStale (0.29.0, release L), or empty.
 	Code string
 	// The clear members of release R (§11.5, §11.14.5, §11.14.11): a
 	// recovery's not_before, expires and earliest; a counted open's
@@ -593,7 +626,8 @@ func ParseResponse(b []byte) (*Response, error) {
 			if r.Envelope == nil {
 				return nil, ErrMalformed
 			}
-		case CodeRecoveryNotCurrent:
+		case CodeRecoveryNotCurrent, CodeLocked, CodeNotRunning, CodeStale:
+			// A lock's answers (0.29.0, release L) have no envelope.
 			if r.Envelope != nil {
 				return nil, ErrMalformed
 			}

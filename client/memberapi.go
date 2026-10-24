@@ -198,9 +198,15 @@ func (a *MemberAPI) Unlock(ctx context.Context, vaultID, instanceID string, r *R
 		"manifest_sha256": r.ManifestSHA256}, nil)
 }
 
-// Lock posts a lock request (no envelope).
-func (a *MemberAPI) Lock(ctx context.Context, vaultID, requestID string) error {
-	return a.do(ctx, http.MethodPost, "/api/vault/lock", map[string]string{"vault_id": vaultID, "request_id": requestID}, nil)
+// Lock posts a lock request (no envelope). With unlockID (release L,
+// MEMBER-API 2.5.0) the lock is bound to that unlock; "" sends an
+// unconditional lock.
+func (a *MemberAPI) Lock(ctx context.Context, vaultID, requestID, unlockID string) error {
+	body := map[string]string{"vault_id": vaultID, "request_id": requestID}
+	if unlockID != "" {
+		body["unlock_id"] = unlockID
+	}
+	return a.do(ctx, http.MethodPost, "/api/vault/lock", body, nil)
 }
 
 // Poll polls a response slot until it is no longer queued.
@@ -524,13 +530,16 @@ func (d *Device) RecoveryRegisterVia(ctx context.Context, api *MemberAPI, userGU
 	}
 }
 
-// LockVia asks the member API to lock the vault and waits for the slot.
+// LockVia asks the member API to lock the vault and waits for the slot:
+// bound to this device's unlock when the vault announced its unlock_id
+// (release L), unconditional otherwise. The slot's code (release L) says
+// what the lock did: locked, not_running or stale.
 func (d *Device) LockVia(ctx context.Context, api *MemberAPI) (*Slot, error) {
 	rid, err := envelope.NewULID(time.Now())
 	if err != nil {
 		return nil, err
 	}
-	if err := api.Lock(ctx, d.VaultID(), rid); err != nil {
+	if err := api.Lock(ctx, d.VaultID(), rid, d.UnlockID()); err != nil {
 		return nil, err
 	}
 	return api.Poll(ctx, rid)

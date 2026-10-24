@@ -105,6 +105,10 @@ const codeRecoveryCancelled = "recovery_cancelled"
 // recovery or none.
 const codeRecoveryNotCurrent = "recovery_not_current"
 
+// lockCodes are copied from a lock's answer into its slot (0.29.0, release
+// L, §11.5): locked, not_running, stale; for the op lock only.
+var lockCodes = map[string]bool{"locked": true, "not_running": true, "stale": true}
+
 // maxConcurrent bounds queue messages in flight to the enclave.
 const maxConcurrent = 8
 
@@ -264,8 +268,12 @@ func (p *Parent) handleMessage(ctx context.Context, m QueueMessage) {
 						}
 					}
 				} else if r.Op == "recovery_cancel" && er.Code == codeRecoveryNotCurrent {
-					// 0.49.0: the one code copied from an answer without an
+					// 0.49.0: a code copied from an answer without an
 					// envelope, for a cancel only.
+					slot.Code = er.Code
+				} else if r.Op == "lock" && lockCodes[er.Code] {
+					// 0.29.0, release L (§11.5): what the lock did, written
+					// by the enclave after the lock; for a lock only.
 					slot.Code = er.Code
 				}
 			case "etk_unknown":

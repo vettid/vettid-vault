@@ -242,7 +242,13 @@ func (d *Device) OpenEnrollResult(raw []byte, requestID string) (*altchan.Enroll
 	if err != nil {
 		return nil, ErrResult
 	}
-	return altchan.ParseEnrollResult(body)
+	r, err := altchan.ParseEnrollResult(body)
+	if err == nil && r.OK {
+		d.mu.Lock()
+		d.unlockID = r.UnlockID
+		d.mu.Unlock()
+	}
+	return r, err
 }
 
 // Approval is a member-approved release update (§11.10.3).
@@ -531,6 +537,9 @@ func (d *Device) OpenUnlockResult(raw []byte) (*altchan.UnlockResult, error) {
 		if exp, err := d.heldFromVault(r.Token); err == nil && exp.After(d.st.Vault.TokenExp) {
 			d.st.Vault.Token, d.st.Vault.TokenExp = r.Token, exp
 		}
+	}
+	if r.Token != "" {
+		d.unlockID = r.UnlockID // "" from a release before L
 	}
 	return r, nil
 }

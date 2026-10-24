@@ -12,6 +12,7 @@ package vault
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -275,6 +276,13 @@ type Manager struct {
 	locked      bool
 	lockPending bool
 	lockReason  string
+	// unlockID names this opening of the vault (VAULT-MESSAGING 0.29.0
+	// §10.2 "Locks", release L): 16 random bytes as 32 lowercase hex,
+	// made when the Manager is made (every enroll, unlock or recovery
+	// open makes one), kept in memory only, never in the state or the
+	// header. It ends with the Manager, so every earlier value is stale
+	// after any lock, restart or move. Not a secret.
+	unlockID string
 	// unlockedBy: the app whose unlock started this manager (its device
 	// id; "" for a PIN-only unlock or an app without a device record
 	// yet), audited on vault.unlocked (0.23.2, §10.9).
@@ -565,12 +573,25 @@ func Unlock(ctx context.Context, p UnlockParams) (*Manager, UnlockResult, error)
 	return nil, res, out.err()
 }
 
+// newUnlockID makes an unlock_id: 16 bytes from crypto/rand, as 32
+// lowercase hex characters (§10.2 "Locks").
+func newUnlockID() string {
+	var b [16]byte
+	_, _ = rand.Read(b[:]) // crypto/rand.Read never fails (Go 1.24)
+	return hex.EncodeToString(b[:])
+}
+
+// UnlockID returns the name of this opening of the vault (§10.2 "Locks"),
+// for the enroll, unlock and recovery-open results.
+func (m *Manager) UnlockID() string { return m.unlockID }
+
 func newManager(o Options, st *State, hdr *Header, dek []byte) *Manager {
 	m := &Manager{
 		opt: o, now: o.Now, st: st, hdr: hdr, dek: dek,
 		sessions: map[string]*handshake.Keyring{}, reqEpochs: map[string]*handshake.Epoch{},
 		awaiting: map[string]*handshake.Responder{}, outgoing: map[string]*handshake.Initiator{},
 		ephemeralSeen: map[string]time.Time{}, rates: map[string]*rateWindow{}, requests: map[string]string{}, requestTypes: map[string]string{},
+		unlockID: newUnlockID(),
 	}
 	if dek != nil {
 		m.holdsDEK = true

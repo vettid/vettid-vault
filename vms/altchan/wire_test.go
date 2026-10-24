@@ -144,6 +144,42 @@ func TestSealOpen(t *testing.T) {
 	}
 }
 
+// 0.29.0, release L (§10.2 "Locks", §11.3, §11.4): unlock_id in the
+// enroll and unlock results, optional (absent from a release before L),
+// and 32 lowercase hex when present.
+func TestResultUnlockID(t *testing.T) {
+	id := "0123456789abcdef0123456789abcdef"
+	u := &UnlockResult{OK: true, StateSeq: 5, HeaderSeq: 6, Token: "t", Release: strings.Repeat("ab", 48), ReleaseNumber: 3,
+		ReleaseStatus: "active", UnlockID: id}
+	b := u.Marshal()
+	if !strings.HasSuffix(string(b), `"unlock_id":"`+id+`"}`) {
+		t.Fatalf("unlock result %s", b)
+	}
+	if r, err := ParseUnlockResult(b); err != nil || r.UnlockID != id {
+		t.Fatalf("%v %+v", err, r)
+	}
+	u.UnlockID = ""
+	if b := u.Marshal(); strings.Contains(string(b), "unlock_id") {
+		t.Fatalf("empty unlock_id written: %s", b)
+	}
+	e := &EnrollResult{OK: true, VaultID: "v", UnlockID: id}
+	if r, err := ParseEnrollResult(e.Marshal()); err != nil || r.UnlockID != id || r.VaultID != "v" {
+		t.Fatalf("%v %+v", err, r)
+	}
+	if r, err := ParseEnrollResult((&EnrollResult{OK: true, VaultID: "v"}).Marshal()); err != nil || r.UnlockID != "" {
+		t.Fatalf("pre-L enroll result: %v %+v", err, r)
+	}
+	for _, bad := range []string{strings.ToUpper(id), id[:31], id + "0", `x` + id[1:]} {
+		if _, err := ParseUnlockResult([]byte(strings.Replace(string((&UnlockResult{OK: true, Release: strings.Repeat("ab", 48),
+			ReleaseNumber: 3, ReleaseStatus: "active", UnlockID: id}).Marshal()), id, bad, 1))); err == nil {
+			t.Fatalf("unlock_id %q accepted", bad)
+		}
+		if _, err := ParseEnrollResult([]byte(`{"ok":true,"vault_id":"v","unlock_id":"` + bad + `"}`)); err == nil {
+			t.Fatalf("enroll unlock_id %q accepted", bad)
+		}
+	}
+}
+
 func TestDescriptor(t *testing.T) {
 	k := testKEM(t)
 	na := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)

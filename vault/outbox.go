@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/vettid/vettid-relay/relayclient"
+	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/suite"
 )
@@ -138,10 +139,13 @@ func (m *Manager) sendLocking(ctx context.Context) map[string]bool {
 			// device has not activated yet).
 			continue
 		}
-		body := json.RawMessage(`{}`)
+		// 0.29.0, release L (§10.2 "Locks"): vault.locking names the
+		// unlock it ends, for a lock from any cause.
+		lb := strictjson.NewBuilder()
 		if m.lockReason != "" {
-			body = json.RawMessage(`{"reason":"` + m.lockReason + `"}`)
+			lb.String("reason", m.lockReason)
 		}
+		body := json.RawMessage(lb.String("unlock_id", m.unlockID).Bytes())
 		in := &envelope.Inner{ID: m.newID(now), Type: "vault.locking", TS: now, Exp: now.Add(time.Minute), Body: body}
 		if raw, err := kr.Current().Seal(in); err == nil {
 			if _, err := m.relay.Deposit(ctx, p.Relay.URL, p.Relay.Mailbox, p.Standing.Token, raw); err == nil {

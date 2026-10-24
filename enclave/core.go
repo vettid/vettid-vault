@@ -334,7 +334,8 @@ func (c *Core) enroll(ctx context.Context, q *Job, started **vault.Manager) []by
 	c.emit(vault.LifecycleEvent{Event: "unlocked", VaultID: q.VaultID, Release: c.meas.PCR0, VaultVersion: c.meas.PCR0, StateVersion: vault.StateVersion,
 		AppKey: ak, AppKeySeq: seq})
 	*started = mgr
-	return answer(&altchan.EnrollResult{OK: true, VaultID: q.VaultID})
+	// 0.29.0, release L (§10.2 "Locks", §11.3): the name of the opening.
+	return answer(&altchan.EnrollResult{OK: true, VaultID: q.VaultID, UnlockID: mgr.UnlockID()})
 }
 
 // checkExisting applies §11.3 "Provisional vaults" and "Re-enrollment".
@@ -563,6 +564,11 @@ func (c *Core) unlock(ctx context.Context, q *Job, started **vault.Manager) ([]b
 	}
 	if mgr != nil {
 		*started = mgr
+		if res.OK && res.Token != "" {
+			// 0.29.0, release L (§11.4): present whenever the vault
+			// resumed; the name of this unlock (§10.2 "Locks").
+			res.UnlockID = mgr.UnlockID()
+		}
 	} else {
 		sealer.Destroy()
 	}

@@ -277,6 +277,12 @@ func (c *Core) recoveryOpen(ctx context.Context, q *Job, started **vault.Manager
 		RetryAt: out.RetryAt, AttemptUsed: out.AttemptUsed()}
 	if mgr != nil {
 		*started = mgr
+		if res.OK {
+			// Owner decision 2026-10-23 (VAULT-LOCK Q1): a recovery open
+			// is an opening of the vault and names it, as an unlock does
+			// (0.29.0, release L, §10.2 "Locks").
+			res.UnlockID = mgr.UnlockID()
+		}
 	} else {
 		sealer.Destroy()
 	}

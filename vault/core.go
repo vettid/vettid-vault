@@ -3,12 +3,14 @@ package vault
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"sort"
 	"time"
 
 	"github.com/vettid/vettid-vault/internal/strictjson"
+	"github.com/vettid/vettid-vault/vms/altchan"
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/handshake"
 	"github.com/vettid/vettid-vault/vms/suite"
@@ -105,6 +107,9 @@ func (m *Manager) hStatus(_ context.Context, s *Session, _ *envelope.Inner) (jso
 		Uint("devices", uint64(len(m.st.Devices))).Uint("connections", uint64(len(m.st.Connections))).
 		Raw("owner_check", m.ownerCheckStatus(s.peer, s.now))
 	if s.peer.Kind == KindApp || s.peer.Kind == KindDesktop {
+		// 0.29.0, release L (§10.2 "Locks"): the name of this unlock, to
+		// the app and desktops (a desktop locks with it), not to agents.
+		b.String("unlock_id", m.unlockID)
 		b.Raw("attachments", m.attStatusJSON()) // §10.2 (0.32.0, release A)
 		// 0.43.0 (§10.2, §11.10.8): the release's time scale, 1 in
 		// production.
@@ -121,7 +126,24 @@ func (m *Manager) hStatus(_ context.Context, s *Session, _ *envelope.Inner) (jso
 	return b.Bytes(), nil
 }
 
-func (m *Manager) hLock(_ context.Context, s *Session, _ *envelope.Inner) (json.RawMessage, error) {
+// hLock is vault.lock (§10.2, §12.3). 0.29.0, release L (§10.2 "Locks"):
+// a lock that names an unlock is carried out only for the current one;
+// one that names another answers stale_lock and does nothing (that unlock
+// is over, the vault is open under a newer one); a malformed value is
+// bad_request. A lock without unlock_id (a device from before release L)
+// is carried out as before (VAULT-LOCK L2).
+func (m *Manager) hLock(_ context.Context, s *Session, in *envelope.Inner) (json.RawMessage, error) {
+	o, err := obj(in)
+	if err != nil {
+		return nil, err
+	}
+	id, named, err := o.OptString("unlock_id")
+	if err != nil || named && !altchan.ValidUnlockID(id) {
+		return nil, errBadRequest
+	}
+	if named && subtle.ConstantTimeCompare([]byte(id), []byte(m.unlockID)) != 1 {
+		return nil, NewError("stale_lock", "")
+	}
 	m.lockPending = true // after this batch: flush, vault.locking, zeroize (§12.3)
 	m.lockBy = s.from.ID // audited on vault.locked (0.23.2)
 	return nil, nil

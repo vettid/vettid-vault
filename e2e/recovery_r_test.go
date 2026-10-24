@@ -175,6 +175,11 @@ func TestRecoveryR(t *testing.T) {
 	if !r.OK || !r.AttemptUsed || r.Used != 3 || resp.Code != enclave.CodeRecoveryAttempt {
 		t.Fatalf("right pair: %+v %s", r, resp.Code)
 	}
+	// 0.29.0, release L (owner decision 2026-10-23, VAULT-LOCK Q1): a
+	// recovery open is an opening of the vault and names it.
+	if !altchan.ValidUnlockID(r.UnlockID) || r.UnlockID != b.dev.UnlockID() {
+		t.Fatalf("recovery open unlock_id %q (device %q)", r.UnlockID, b.dev.UnlockID())
+	}
 	ctx := ctxT(t, 20*time.Second)
 	if err := b.dev.CompleteRecoveryHandshake(ctx); err != nil {
 		if m := rr.instanceOf(a).Manager(a.vid); m != nil {

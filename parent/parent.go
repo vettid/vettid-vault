@@ -46,6 +46,11 @@ type Parent struct {
 	// keyQ are the app key writes that failed and are tried again until
 	// they are written, per vault (appkeyretry.go).
 	keyQ map[string][]Lifecycle
+	// asserts are the enclave's assertions after a connect, by vault, not
+	// yet written; a worker of their own writes them, slowly, so that they
+	// never hold up the connection or a confirmation (appkeyassert.go).
+	asserts      map[string][]Lifecycle
+	assertWorker bool
 }
 
 type session struct {
@@ -729,6 +734,11 @@ func (p *Parent) onLifecycle(ev Lifecycle) {
 		ev.KeepLease = ev.Event == "locked" && p.taking[ev.VaultID] > 0
 	}
 	p.mu.Unlock()
+	if ev.Event == EventAppKeyAssert || ev.Event == EventAppKeyNextAssert {
+		p.log.Debug("lifecycle", "event", ev.Event, "vault_id", ev.VaultID)
+		p.queueAssert(ev)
+		return
+	}
 	p.log.Info("lifecycle", "event", ev.Event, "vault_id", ev.VaultID)
 	p.events <- func(ctx context.Context) {
 		err := p.cfg.Tables.Lifecycle(ctx, ev, p.cfg.InstanceID, p.now())
@@ -737,6 +747,8 @@ func (p *Parent) onLifecycle(ev Lifecycle) {
 			// app_key / app_key_next were not written: tried again until
 			// they are; the rest of the event is judged on its own.
 			p.retryAppKeys(ev, ke.Err)
+			// The line an unwritten event always had.
+			p.log.Warn("lifecycle write failed", "event", ev.Event, "vault_id", ev.VaultID, "error", ke.Err.Error())
 			err = ke.Rest
 		}
 		switch {

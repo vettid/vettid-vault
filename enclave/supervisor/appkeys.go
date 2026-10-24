@@ -24,12 +24,24 @@ import (
 // goes first.
 const keyBookMax = 4096
 
+// keyLockedFor is how long a locked vault's keys are asserted.
+const keyLockedFor = 24 * time.Hour
+
+// keyAssertPace is the pause between two assertions sent: a few thousand
+// vaults must not fill the connection's queue (enclave log records are
+// dropped when it is full) or the parent's.
+const keyAssertPace = 2 * time.Millisecond
+
 type keyEntry struct {
 	key  []byte
 	seq  uint64
 	next *vault.LifecycleEvent // the app_key_next event, while pending
 	rel  string                // the release that reported
 	at   time.Time
+	// locked: the vault's last report was `locked`; such an entry is
+	// asserted for keyLockedFor only (a vault that locked here may run on
+	// another instance since, whose book and writes are the newer).
+	locked bool
 }
 
 type keyBook struct {
@@ -41,7 +53,7 @@ type keyBook struct {
 func (b *keyBook) note(ev vault.LifecycleEvent, now time.Time) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if ev.Event == "deleted" {
+	if ev.Event == "deleted" || ev.Event == "moved" {
 		delete(b.m, ev.VaultID)
 		return
 	}
@@ -65,7 +77,7 @@ func (b *keyBook) note(ev vault.LifecycleEvent, now time.Time) {
 		e = &keyEntry{}
 		b.m[ev.VaultID] = e
 	}
-	e.at, e.rel = now, ev.VaultVersion
+	e.at, e.rel, e.locked = now, ev.VaultVersion, ev.Event == "locked"
 	switch {
 	case ev.Event == vault.EventAppKeyNext:
 		c := ev
@@ -84,11 +96,15 @@ func (b *keyBook) note(ev vault.LifecycleEvent, now time.Time) {
 }
 
 // events are the assertions to send after a connect.
-func (b *keyBook) events() []vault.LifecycleEvent {
+func (b *keyBook) events(now time.Time) []vault.LifecycleEvent {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	var out []vault.LifecycleEvent
 	for id, e := range b.m {
+		if e.locked && now.Sub(e.at) > keyLockedFor {
+			delete(b.m, id) // long locked: whoever runs it now reports it
+			continue
+		}
 		if len(e.key) > 0 {
 			out = append(out, vault.LifecycleEvent{Event: vault.EventAppKeyAssert, VaultID: id, Release: e.rel, VaultVersion: e.rel,
 				StateVersion: vault.StateVersion, AppKey: append([]byte(nil), e.key...), AppKeySeq: e.seq})
@@ -104,7 +120,8 @@ func (b *keyBook) events() []vault.LifecycleEvent {
 
 // reassertAppKeys sends the book to the parent (on a connect).
 func (s *Supervisor) reassertAppKeys() {
-	for _, ev := range s.keys.events() {
+	for _, ev := range s.keys.events(s.now()) {
 		s.link.notify(hostproto.KindLifecycle, enclave.LifecycleFields(ev)...)
+		time.Sleep(keyAssertPace)
 	}
 }

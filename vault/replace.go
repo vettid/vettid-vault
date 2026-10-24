@@ -75,9 +75,24 @@ func (m *Manager) beginReplace(ctx context.Context, r *replacement) error {
 		m.dropNext(m.now())
 	}
 	r.next.HeaderSeq = m.hdr.HeaderSeq + 1
+	if r.next.AppKey != nil {
+		// §11.5: the host confirms that the row names the next app key
+		// BEFORE any header names it (appkeyconfirm.go): a header with
+		// the key is never stored without it. If it is not confirmed
+		// nothing is stored. An app_key_next the host did write stays on
+		// the row (an orphan that admits a key the member's phone sent
+		// through the replacement; it is cleared by the next_cleared that
+		// follows a later header write, or by the next unlock).
+		if err := m.confirmKey(ctx, AppKeyModeNext, r.next.AppKey, r.next.AppKeySeq, r.next.HeaderSeq); err != nil {
+			m.nextCleared = true
+			r.wipe()
+			return errRetry
+		}
+	}
 	m.hdr.Next = r.next
 	if err := m.writeHeaderWith(ctx, false); err != nil {
 		m.hdr.Next = nil
+		m.nextCleared = m.nextCleared || r.next.AppKey != nil // the confirmed key may be on the row
 		r.wipe()
 		if errors.Is(err, ErrSplitBrain) {
 			return err
@@ -96,26 +111,14 @@ func (m *Manager) beginReplace(ctx context.Context, r *replacement) error {
 	}
 	if !ok {
 		m.hdr.Next = nil
+		m.nextCleared = m.nextCleared || r.next.AppKey != nil
 		r.wipe()
 		return errRetry
 	}
-	if r.next.AppKey != nil {
-		// §11.5: app_key_next with this header write, confirmed by the host
-		// before the vault can adopt the key (appkeyconfirm.go). If it is
-		// not, nothing is adopted: the part is dropped as for a failed
-		// read-back, and the row is told to clear any app_key_next the
-		// host did write.
-		if err := m.confirmKey(ctx, AppKeyModeNext, r.next.AppKey, r.next.AppKeySeq, r.next.HeaderSeq); err != nil {
-			m.hdr.Next = nil
-			m.nextCleared = true
-			r.wipe()
-			return errRetry
-		}
-		if m.opt.Lifecycle != nil {
-			ev := lifecycle(m.opt, EventAppKeyNext, m.hdr.VaultID, m.opt.Release.PCR0)
-			ev.AppKey, ev.AppKeySeq, ev.HeaderSeq = append([]byte(nil), r.next.AppKey...), r.next.AppKeySeq, r.next.HeaderSeq
-			m.opt.Lifecycle(ev)
-		}
+	if r.next.AppKey != nil && m.opt.Lifecycle != nil {
+		ev := lifecycle(m.opt, EventAppKeyNext, m.hdr.VaultID, m.opt.Release.PCR0)
+		ev.AppKey, ev.AppKeySeq, ev.HeaderSeq = append([]byte(nil), r.next.AppKey...), r.next.AppKeySeq, r.next.HeaderSeq
+		m.opt.Lifecycle(ev)
 	}
 	m.repl = r
 	m.replInHandler = true

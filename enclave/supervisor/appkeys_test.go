@@ -33,7 +33,7 @@ func TestKeyBook(t *testing.T) {
 	n.HeaderSeq = 9
 	b.note(n, now)
 	got := map[string]vault.LifecycleEvent{}
-	for _, e := range b.events() {
+	for _, e := range b.events(now) {
 		got[e.Event+"/"+e.VaultID] = e
 	}
 	if len(got) != 3 || string(got[vault.EventAppKeyAssert+"/v1"].AppKey) != "k1" || string(got[vault.EventAppKeyAssert+"/v2"].AppKey) != "a1" ||
@@ -44,7 +44,7 @@ func TestKeyBook(t *testing.T) {
 	u := ev("unlocked", "v1", "k1", 1)
 	u.Next = &yes
 	b.note(u, now)
-	if len(b.events()) != 3 {
+	if len(b.events(now)) != 3 {
 		t.Fatal("the next key went with next: true")
 	}
 	// The app key reaching its seq, next_cleared, next: false and a new
@@ -59,7 +59,7 @@ func TestKeyBook(t *testing.T) {
 		c.note(ev("unlocked", "v1", "k1", 1), now)
 		c.note(n, now)
 		c.note(e, now)
-		for _, x := range c.events() {
+		for _, x := range c.events(now) {
 			if x.Event == vault.EventAppKeyNextAssert {
 				t.Fatalf("%s: the next key stayed", name)
 			}
@@ -67,7 +67,7 @@ func TestKeyBook(t *testing.T) {
 	}
 	// A deleted vault is forgotten.
 	b.note(ev("deleted", "v2", "", 0), now)
-	for _, e := range b.events() {
+	for _, e := range b.events(now) {
 		if e.VaultID == "v2" {
 			t.Fatal("deleted vault kept")
 		}
@@ -165,5 +165,23 @@ func TestChannelAppKeyNext(t *testing.T) {
 	}
 	if len(asked) != 6 || asked[0][4] != "7" {
 		t.Fatalf("the parent was asked %v", asked)
+	}
+}
+
+// A vault that locked here and has been locked for a day is no longer
+// asserted (it may run elsewhere now), and a moved vault is forgotten.
+func TestKeyBookPrunesLocked(t *testing.T) {
+	var b keyBook
+	t0 := time.Now()
+	b.note(ev("locked", "v1", "k1", 1), t0)
+	b.note(ev("unlocked", "v2", "k2", 1), t0)
+	b.note(ev("unlocked", "v3", "k3", 1), t0)
+	b.note(ev("moved", "v3", "", 0), t0)
+	if got := b.events(t0.Add(time.Hour)); len(got) != 2 {
+		t.Fatalf("within a day: %d", len(got))
+	}
+	got := b.events(t0.Add(25 * time.Hour))
+	if len(got) != 1 || got[0].VaultID != "v2" {
+		t.Fatalf("after a day: %+v", got)
 	}
 }

@@ -3,6 +3,7 @@ package parent_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -101,7 +102,7 @@ func TestAppKeyWriteRetried(t *testing.T) {
 	h, e := appKeyHarness(t)
 	h.tables.PutVault(parenttest.VaultRow{VaultID: vaultID, UserGUID: "u1", State: "locked", AppKey: []byte("k1"), AppKeyID: parent.AppKeyID([]byte("k1")), AppKeySeq: 1,
 		AppKeyNext: []byte("k2"), AppKeyNextSeq: 2})
-	h.tables.AppKeyErr = errors.New("throttled")
+	h.tables.SetAppKeyErr(errors.New("throttled"))
 	e.appKeyEvent("unlocked", "k2", "2", "0", "9")
 	waitFor(t, "rest of the event", func() bool { r, _ := h.tables.Vault(vaultID); return r.State == "unlocked" })
 	time.Sleep(50 * time.Millisecond) // several failed tries
@@ -114,7 +115,7 @@ func TestAppKeyWriteRetried(t *testing.T) {
 	if !logged {
 		t.Fatal("failure not logged")
 	}
-	h.tables.AppKeyErr = nil
+	h.tables.SetAppKeyErr(nil)
 	waitFor(t, "app_key written", func() bool {
 		r, _ := h.tables.Vault(vaultID)
 		return string(r.AppKey) == "k2" && r.AppKeySeq == 2 && r.AppKeyNext == nil
@@ -138,5 +139,131 @@ func TestAppKeyAssertionsWritten(t *testing.T) {
 	waitFor(t, "app_key moved on, next gone", func() bool { r, _ := h.tables.Vault(vaultID); return string(r.AppKey) == "k2" && r.AppKeyNext == nil })
 	if r, _ := h.tables.Vault(vaultID); r.State != "locked" {
 		t.Fatalf("state %q", r.State)
+	}
+}
+
+func (h *harness) hasLog(s string) bool {
+	h.logMu.Lock()
+	defer h.logMu.Unlock()
+	return strings.Contains(h.logs.String(), s)
+}
+
+// D1: the three regressions the review reproduced. A stale write that
+// arrives after a confirmation does not undo it.
+func TestStaleAppKeyWritesDoNotRegress(t *testing.T) {
+	tb := parenttest.NewTables()
+	ctx, now := context.Background(), time.Now()
+	row := func() parenttest.VaultRow { r, _ := tb.Vault("v1"); return r }
+	// 1. A stale next key at the same seq (an older attempt's retry or
+	// assertion) does not replace the confirmed one; the same key again
+	// and a later header_seq do.
+	tb.PutVault(parenttest.VaultRow{VaultID: "v1", UserGUID: "u1", State: "locked", AppKey: []byte("k5"), AppKeyID: parent.AppKeyID([]byte("k5")), AppKeySeq: 5})
+	if err := tb.ConfirmAppKey(ctx, "v1", "next", []byte("K7"), 6, 7, now); err != nil {
+		t.Fatal(err)
+	}
+	_ = tb.AppKeys(ctx, parent.Lifecycle{Event: parent.EventAppKeyNext, VaultID: "v1", AppKey: []byte("K6"), AppKeySeq: 6, HeaderSeq: 5}, now)
+	_ = tb.AppKeys(ctx, parent.Lifecycle{Event: parent.EventAppKeyNextAssert, VaultID: "v1", AppKey: []byte("K6"), AppKeySeq: 6, HeaderSeq: 5}, now)
+	if r := row(); string(r.AppKeyNext) != "K7" || r.AppKeyNextHSeq != 7 {
+		t.Fatalf("a stale next replaced the confirmed one: %+v", r)
+	}
+	if err := tb.ConfirmAppKey(ctx, "v1", "next", []byte("K6"), 6, 5, now); !errors.Is(err, parent.ErrConflict) {
+		t.Fatalf("a late confirm of the older attempt: %v", err)
+	}
+	_ = tb.AppKeys(ctx, parent.Lifecycle{Event: parent.EventAppKeyNext, VaultID: "v1", AppKey: []byte("K7"), AppKeySeq: 6, HeaderSeq: 7}, now)
+	if r := row(); string(r.AppKeyNext) != "K7" {
+		t.Fatalf("the same key again: %+v", r)
+	}
+	_ = tb.AppKeys(ctx, parent.Lifecycle{Event: parent.EventAppKeyNext, VaultID: "v1", AppKey: []byte("K8"), AppKeySeq: 6, HeaderSeq: 9}, now)
+	if r := row(); string(r.AppKeyNext) != "K8" {
+		t.Fatalf("a later attempt did not replace: %+v", r)
+	}
+	// 2. A late next_cleared of an older header_seq does not remove a newer
+	// replacement's key.
+	_ = tb.AppKeys(ctx, parent.Lifecycle{Event: parent.EventAppKey, VaultID: "v1", AppKey: []byte("k5"), AppKeySeq: 5, NextCleared: true, HeaderSeq: 6}, now)
+	if r := row(); string(r.AppKeyNext) != "K8" {
+		t.Fatalf("a late clear removed the next key: %+v", r)
+	}
+	_ = tb.AppKeys(ctx, parent.Lifecycle{Event: parent.EventAppKey, VaultID: "v1", AppKey: []byte("k5"), AppKeySeq: 5, NextCleared: true, HeaderSeq: 9}, now)
+	if r := row(); r.AppKeyNext != nil {
+		t.Fatalf("the clear of its own header_seq did not apply: %+v", r)
+	}
+	// 3. A retried enrolled does not roll app_key back to the seq-1 key,
+	// and still serves a replaced provisional vault (row enrolling).
+	tb.PutVault(parenttest.VaultRow{VaultID: "v1", UserGUID: "u1", State: "unlocked", AppKey: []byte("k2"), AppKeyID: parent.AppKeyID([]byte("k2")), AppKeySeq: 2})
+	_ = tb.AppKeys(ctx, parent.Lifecycle{Event: "enrolled", VaultID: "v1", AppKey: []byte("k1"), AppKeySeq: 1}, now)
+	_ = tb.Lifecycle(ctx, parent.Lifecycle{Event: "enrolled", VaultID: "v1", AppKey: []byte("k1"), AppKeySeq: 1}, "me", now)
+	if r := row(); string(r.AppKey) != "k2" || r.AppKeySeq != 2 {
+		t.Fatalf("enrolled rolled app_key back: %+v", r)
+	}
+	tb.PutVault(parenttest.VaultRow{VaultID: "v1", UserGUID: "u1", State: "enrolling", AppKey: []byte("k2"), AppKeyID: parent.AppKeyID([]byte("k2")), AppKeySeq: 2})
+	_ = tb.AppKeys(ctx, parent.Lifecycle{Event: "enrolled", VaultID: "v1", AppKey: []byte("k1"), AppKeySeq: 1}, now)
+	if r := row(); string(r.AppKey) != "k1" {
+		t.Fatalf("a replaced provisional vault's first key: %+v", r)
+	}
+}
+
+// The confirm waits for the vault's failed app key writes, so a retry
+// cannot land after it.
+func TestConfirmDrainsRetryQueue(t *testing.T) {
+	defer parent.SetAppKeyRetryForTest(5*time.Millisecond, 20*time.Millisecond)()
+	h, e := appKeyHarness(t)
+	h.tables.PutVault(parenttest.VaultRow{VaultID: vaultID, UserGUID: "u1", State: "locked", AppKey: []byte("k1"), AppKeyID: parent.AppKeyID([]byte("k1")), AppKeySeq: 1})
+	h.tables.SetAppKeyErr(errors.New("throttled"))
+	e.appKeyEvent(parent.EventAppKey, "k2", "2", "", "0")
+	waitFor(t, "queued", func() bool { return h.hasLog("app key write failed; trying again") })
+	done := make(chan string, 1)
+	go func() { done <- e.confirmAppKey(t, vaultID, "next", "k3", "3", "9") }()
+	select {
+	case got := <-done:
+		t.Fatalf("answered before the earlier write: %s", got)
+	case <-time.After(100 * time.Millisecond):
+	}
+	h.tables.SetAppKeyErr(nil)
+	if got := <-done; got != hostproto.StatusOK {
+		t.Fatalf("confirm: %s", got)
+	}
+	// The retry was written first, then the confirmation: not the other way.
+	if r, _ := h.tables.Vault(vaultID); string(r.AppKey) != "k2" || string(r.AppKeyNext) != "k3" {
+		t.Fatalf("row %+v", r)
+	}
+}
+
+// A permanent failure is logged and given up, not retried for ever; an
+// app-key-only failure still logs the line it always did.
+func TestPermanentAppKeyFailureGivenUp(t *testing.T) {
+	defer parent.SetAppKeyRetryForTest(5*time.Millisecond, 20*time.Millisecond)()
+	h, e := appKeyHarness(t)
+	h.tables.PutVault(parenttest.VaultRow{VaultID: vaultID, UserGUID: "u1", State: "locked"})
+	h.tables.SetAppKeyErr(fmt.Errorf("%w: refused", parent.ErrPermanent))
+	e.appKeyEvent(parent.EventAppKey, "k2", "2", "", "0")
+	waitFor(t, "the line an unwritten event always had", func() bool { return h.hasLog(`"msg":"lifecycle write failed","event":"app_key"`) })
+	waitFor(t, "given up", func() bool { return h.hasLog("app key write refused; not tried again") })
+	h.tables.SetAppKeyErr(nil)
+	time.Sleep(60 * time.Millisecond)
+	if r, _ := h.tables.Vault(vaultID); r.AppKey != nil {
+		t.Fatalf("written after it was given up: %+v", r)
+	}
+}
+
+// A burst of assertions never holds up a confirmation, and logs no
+// lifecycle line at info.
+func TestAssertionBurstDoesNotBlock(t *testing.T) {
+	defer parent.SetAssertPaceForTest(time.Millisecond)()
+	h, e := appKeyHarness(t)
+	h.tables.SetAppKeyDelay(10 * time.Millisecond)
+	h.tables.PutVault(parenttest.VaultRow{VaultID: vaultID, UserGUID: "u1", State: "locked", AppKey: []byte("k1"), AppKeyID: parent.AppKeyID([]byte("k1")), AppKeySeq: 1})
+	for i := 0; i < 300; i++ {
+		id := fmt.Sprintf("%032x", i+1)
+		_ = e.conn.Notify(hostproto.KindLifecycle, hostproto.Strings(parent.EventAppKeyAssert, id, pcr, pcr, "1", "kk", "1", "", "0", "", "", "", "0", "")...)
+	}
+	start := time.Now()
+	if got := e.confirmAppKey(t, vaultID, "next", "k2", "2", "4"); got != hostproto.StatusOK {
+		t.Fatalf("confirm: %s", got)
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("confirm waited %v behind the assertions", d)
+	}
+	if h.hasLog(`"level":"INFO","msg":"lifecycle","event":"app_key_assert"`) {
+		t.Fatal("assertions logged at info")
 	}
 }

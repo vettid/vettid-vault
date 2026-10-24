@@ -282,6 +282,7 @@ type Manager struct {
 	// host confirmed on the row; enrolling: the vault's first header is
 	// not written yet (appkeyconfirm.go).
 	acked     []ackedKey
+	pinned    ackedKey // the key the stored header names
 	enrolling bool
 	// nameReport: a name request stored in this batch; reported as
 	// account_name after the flush (0.18.0, §11.5).
@@ -522,7 +523,7 @@ func Create(ctx context.Context, p CreateParams) (*Manager, error) {
 	}
 	m := newManager(p.Options, st, hdr, dek)
 	if len(hdr.AppKey) > 0 {
-		m.acked, m.enrolling = nil, true // the first header: the host confirms it
+		m.acked, m.pinned, m.enrolling = nil, ackedKey{}, true // the first header: the host confirms it
 	}
 	m.unlockKey, m.unlockSecret = uk, append([]byte(nil), p.UnlockSecret...)
 	if err := m.loadKeys(); err != nil {
@@ -636,7 +637,7 @@ func newManager(o Options, st *State, hdr *Header, dek []byte) *Manager {
 	if hdr != nil && len(hdr.AppKey) > 0 {
 		// The stored header names it already (a crash that lost the report
 		// is repaired by the unlocked report, the parent's re-assertion).
-		m.ack(hdr.AppKey, hdr.AppKeySeq)
+		m.pin(hdr.AppKey, hdr.AppKeySeq)
 	}
 	m.registerCore()
 	for _, f := range o.Features {
@@ -896,6 +897,9 @@ func (m *Manager) writeHeaderWith(ctx context.Context, features bool) error {
 		return err
 	}
 	m.headerVer = v
+	if len(m.hdr.AppKey) > 0 {
+		m.pin(m.hdr.AppKey, m.hdr.AppKeySeq) // the stored header names it now
+	}
 	if m.hdr.Deleting {
 		m.markStored = true
 	}

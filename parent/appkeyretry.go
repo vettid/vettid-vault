@@ -20,6 +20,10 @@ import (
 //   - after a restart the enclave asserts the keys it last reported
 //     (EventAppKeyAssert, EventAppKeyNextAssert).
 
+// ErrPermanent marks an error as one that trying again cannot cure (fakes
+// in tests use it).
+var ErrPermanent = errors.New("permanent write failure")
+
 // appKeyRetryFirst and appKeyRetryCap are the backoff of the retry; a
 // variable for tests.
 var (
@@ -80,6 +84,12 @@ func (p *Parent) drainAppKeys(ctx context.Context, vaultID string) {
 		wctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		err := p.cfg.Tables.AppKeys(wctx, ev, p.now())
 		cancel()
+		if err != nil && Permanent(err) {
+			// Trying again cannot cure it (a refused request, a role that
+			// may not): logged, and the write is given up.
+			p.log.Error("app key write refused; not tried again", "event", ev.Event, "vault_id", vaultID, "error", err.Error())
+			err = nil
+		}
 		if err != nil {
 			wait = min(2*wait, appKeyRetryCap)
 			p.log.Warn("app key write failed; trying again", "event", ev.Event, "vault_id", vaultID, "error", err.Error())
@@ -113,9 +123,17 @@ func (p *Parent) confirmAppKey(ctx context.Context, f [][]byte) [][]byte {
 		num[i] = n
 	}
 	id := string(f[0])
+	// A request that outlives its enclave's wait must not write late: the
+	// writes below are ordered by header_seq, and this bounds them too.
+	ctx, cancel := context.WithTimeout(ctx, confirmDeadline)
+	defer cancel()
 	// The vault's earlier lifecycle events are written first, as for the
-	// deletion mark.
+	// deletion mark, and so are its app key writes that failed before.
 	p.flushEvents(ctx)
+	if !p.waitKeyQ(ctx, id) {
+		p.log.Warn("app key not confirmed", "vault_id", id, "mode", mode, "error", "earlier app key writes pending")
+		return reply(hostproto.StatusError)
+	}
 	err := p.cfg.Tables.ConfirmAppKey(ctx, id, mode, clone(f[2]), num[0], num[1], p.now())
 	switch {
 	case err == nil:
@@ -127,4 +145,25 @@ func (p *Parent) confirmAppKey(ctx context.Context, f [][]byte) [][]byte {
 	}
 	p.log.Warn("app key not confirmed", "vault_id", id, "mode", mode, "error", err.Error())
 	return reply(hostproto.StatusError)
+}
+
+// confirmDeadline bounds one AppKeyNext request at the parent.
+const confirmDeadline = 8 * time.Second
+
+// waitKeyQ waits until the vault's failed app key writes are written (or
+// given up); false if ctx ends first.
+func (p *Parent) waitKeyQ(ctx context.Context, vaultID string) bool {
+	for {
+		p.mu.Lock()
+		n := len(p.keyQ[vaultID])
+		p.mu.Unlock()
+		if n == 0 {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
 }

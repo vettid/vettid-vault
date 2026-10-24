@@ -34,17 +34,24 @@ func (c *confirmer) n() int { c.mu.Lock(); defer c.mu.Unlock(); return len(c.cal
 
 var quickKeyRetry = &AppKeyRetry{Budget: 200 * time.Millisecond, First: time.Millisecond, Cap: 5 * time.Millisecond}
 
+// storedHdr is the header object as stored.
+func storedHdr(t *testing.T, st store.Store, o Options, vid string) *Header {
+	t.Helper()
+	blob, _, err := st.Get(context.Background(), store.HeaderKey(vid, testRelease.PCR0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := unsealHeader(context.Background(), o.Sealer, blob, vid, testRelease.PCR0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return h
+}
+
 // storedAppKey is the app key and seq in the header object as stored.
 func storedAppKey(t *testing.T, f *fixture) ([]byte, uint64) {
 	t.Helper()
-	blob, _, err := f.store.Get(context.Background(), store.HeaderKey(f.vid, testRelease.PCR0))
-	if err != nil {
-		t.Fatal(err)
-	}
-	h, err := unsealHeader(context.Background(), f.opts.Sealer, blob, f.vid, testRelease.PCR0)
-	if err != nil {
-		t.Fatal(err)
-	}
+	h := storedHdr(t, f.store, f.opts, f.vid)
 	return h.AppKey, h.AppKeySeq
 }
 
@@ -78,6 +85,46 @@ func TestBeginReplaceConfirmsNextKey(t *testing.T) {
 	}
 	if len(order) != 1 {
 		t.Fatalf("event %v", order)
+	}
+}
+
+// The confirmation is made before the step-1 header is written (D2).
+func TestConfirmBeforeStepOne(t *testing.T) {
+	f := newFixture(t)
+	var storedAtConfirm *Header
+	c := &confirmer{}
+	f.m.opt.ConfirmAppKey = func(ctx context.Context, r AppKeyConfirm) error {
+		storedAtConfirm = storedHdr(t, f.store, f.opts, f.vid)
+		return c.confirm(ctx, r)
+	}
+	rep := nextWithKey(t, f.m, testAppKeyDER(t, 0x41))
+	f.m.mu.Lock()
+	err := f.m.beginReplace(context.Background(), rep)
+	f.m.mu.Unlock()
+	if err != nil || storedAtConfirm == nil || storedAtConfirm.Next != nil {
+		t.Fatalf("err %v, header at the confirmation %+v", err, storedAtConfirm)
+	}
+	if h := storedHdr(t, f.store, f.opts, f.vid); h.Next == nil {
+		t.Fatal("step 1 not stored after the confirmation")
+	}
+}
+
+// The header's own key stays known whatever abandoned replacements were
+// confirmed since: it is not confirmed again (a request that would write
+// the old key as app_key_next over a pending one).
+func TestHeaderKeyStaysPinned(t *testing.T) {
+	f := newFixture(t)
+	cur := testAppKeyDER(t, 0x40)
+	f.m.mu.Lock()
+	f.m.hdr.AppKey, f.m.hdr.AppKeySeq = cur, 1
+	f.m.pin(cur, 1)
+	for i := 0; i < 6; i++ {
+		f.m.ack(testAppKeyDER(t, byte(0x50+2*i)), uint64(2+i)) // abandoned replacements
+	}
+	got := f.m.ackedAppKey(cur, 1)
+	f.m.mu.Unlock()
+	if !got {
+		t.Fatal("the header's key was pushed out")
 	}
 }
 
@@ -130,6 +177,11 @@ func TestBeginReplaceNotConfirmed(t *testing.T) {
 			}
 			if k, _ := storedAppKey(t, f); bytes.Equal(k, key) {
 				t.Fatal("the header names the unconfirmed key")
+			}
+			// D2: the confirmation comes BEFORE step 1, so no stored header
+			// names the key as `next` either.
+			if h := storedHdr(t, f.store, f.opts, f.vid); h.Next != nil {
+				t.Fatalf("step 1 stored with an unconfirmed key: %+v", h.Next)
 			}
 		})
 	}
@@ -228,10 +280,15 @@ func TestPromotedKeyConfirmedBeforeHeader(t *testing.T) {
 	f.m.hdr.Next = rep.next
 	f.m.dirty = true
 	c.fail = func(int) error { return errors.New("host down") }
+	sv, seq := f.m.stateVer, f.m.st.StateSeq
 	err := f.m.persist(context.Background(), false)
+	same := f.m.stateVer == sv && f.m.st.StateSeq == seq
 	f.m.mu.Unlock()
 	if err == nil {
 		t.Fatal("persisted")
+	}
+	if !same || c.n() == 0 {
+		t.Fatalf("the state was written before the key was confirmed (same %v, %d confirmations)", same, c.n())
 	}
 	if k, _ := storedAppKey(t, f); bytes.Equal(k, key) {
 		t.Fatal("the header names the unconfirmed key")

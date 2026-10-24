@@ -23,6 +23,8 @@ type fakeDDB struct {
 	// "fail" another failure.
 	script func(n int, target string) string
 	item   string // the GetItem answer, DynamoDB JSON
+	// condItem is the Item of a failed condition (ReturnValuesOnConditionCheckFailure).
+	condItem string
 }
 
 func (f *fakeDDB) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -43,7 +45,11 @@ func (f *fakeDDB) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case ans == "cond":
 		w.WriteHeader(400)
-		_, _ = w.Write([]byte(`{"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"x"}`))
+		item := ""
+		if f.condItem != "" {
+			item = `,"Item":` + f.condItem
+		}
+		_, _ = w.Write([]byte(`{"__type":"com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException","message":"x"` + item + `}`))
 	case ans == "fail":
 		w.WriteHeader(400)
 		_, _ = w.Write([]byte(`{"__type":"com.amazon.coral.validate#ValidationException","message":"x"}`))
@@ -111,7 +117,7 @@ func TestAppKeyFallbackKeepsHigherNext(t *testing.T) {
 			return "cond"
 		}
 		return ""
-	}}
+	}, condItem: `{"app_key":{"M":{"seq":{"N":"1"}}},"app_key_next":{"M":{"seq":{"N":"3"}}}}`}
 	a := newFakeAWS(t, f)
 	ev := Lifecycle{Event: EventAppKey, VaultID: "v1", AppKey: []byte("k2"), AppKeySeq: 2}
 	if err := a.AppKeys(context.Background(), ev, time.Now()); err != nil {
@@ -190,5 +196,56 @@ func TestAWSConfirmAppKey(t *testing.T) {
 	f := &fakeDDB{script: func(int, string) string { return "fail" }}
 	if err := newFakeAWS(t, f).ConfirmAppKey(context.Background(), "v1", "next", key, 2, 5, time.Now()); err == nil || errors.Is(err, ErrConflict) {
 		t.Fatalf("err %v", err)
+	}
+}
+
+// A stale report (the row's app_key is at that seq or higher) or a missing
+// row costs one write, not two.
+func TestAppKeyStaleReportOneWrite(t *testing.T) {
+	for name, item := range map[string]string{
+		"stale":   `{"app_key":{"M":{"seq":{"N":"2"}}},"app_key_next":{"M":{"seq":{"N":"3"}}}}`,
+		"no row":  "",
+		"no next": `{"app_key":{"M":{"seq":{"N":"1"}}}}`,
+	} {
+		f := &fakeDDB{script: func(int, string) string { return "cond" }, condItem: item}
+		a := newFakeAWS(t, f)
+		ev := Lifecycle{Event: EventAppKeyAssert, VaultID: "v1", AppKey: []byte("k2"), AppKeySeq: 2}
+		if err := a.AppKeys(context.Background(), ev, time.Now()); err != nil || len(f.updates()) != 1 {
+			t.Fatalf("%s: %v, %d updates", name, err, len(f.updates()))
+		}
+	}
+}
+
+// Every app_key_next write is ordered by header_seq, a clear is bounded by
+// it, and the enrolled event is conditional.
+func TestAppKeyConditionsOrdered(t *testing.T) {
+	f := &fakeDDB{}
+	a := newFakeAWS(t, f)
+	ctx, now := context.Background(), time.Now()
+	_ = a.AppKeys(ctx, Lifecycle{Event: EventAppKeyNext, VaultID: "v1", AppKey: []byte("k2"), AppKeySeq: 2, HeaderSeq: 5}, now)
+	_ = a.AppKeys(ctx, Lifecycle{Event: EventAppKey, VaultID: "v1", AppKey: []byte("k1"), AppKeySeq: 1, NextCleared: true, HeaderSeq: 5}, now)
+	_ = a.AppKeys(ctx, Lifecycle{Event: "enrolled", VaultID: "v1", AppKey: []byte("k1"), AppKeySeq: 1}, now)
+	u := f.updates()
+	cond := func(i int) string { c, _ := u[i]["ConditionExpression"].(string); return c }
+	if len(u) != 3 || !strings.Contains(cond(0), "#akn.#hs < :hs") || !strings.Contains(cond(0), "#akn.#kid = :kid AND #akn.#hs <= :hs") {
+		t.Fatalf("next: %v", u)
+	}
+	if !strings.Contains(cond(1), "#akn.#hs <= :hs") {
+		t.Fatalf("clear: %q", cond(1))
+	}
+	if !strings.Contains(cond(2), "#ak.#seq < :seq") || !strings.Contains(cond(2), "#ak.#kid = :kid") {
+		t.Fatalf("enrolled: %q", cond(2))
+	}
+}
+
+// Permanent failures are told from transient ones.
+func TestPermanentErrors(t *testing.T) {
+	f := &fakeDDB{script: func(int, string) string { return "fail" }} // ValidationException
+	err := newFakeAWS(t, f).AppKeys(context.Background(), Lifecycle{Event: EventAppKey, VaultID: "v1", AppKey: []byte("k"), AppKeySeq: 1}, time.Now())
+	if err == nil || !Permanent(err) || Permanent(errors.New("ddb update vault: request failed")) || Permanent(nil) {
+		t.Fatalf("%v", err)
+	}
+	if err.Error() != "ddb update vault: ValidationException" {
+		t.Fatalf("text changed: %q", err)
 	}
 }

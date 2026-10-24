@@ -330,7 +330,9 @@ type Tables struct {
 	// AppKeyErr, if set, fails the app key part of every event and AppKeys
 	// without writing it; ConfirmErr fails ConfirmAppKey (tests).
 	AppKeyErr, ConfirmErr error
-	confirms              []string
+	// AppKeyDelay slows AppKeys (tests of the assertion worker).
+	AppKeyDelay time.Duration
+	confirms    []string
 }
 
 // LifecycleEvents returns the lifecycle events the parent wrote for a
@@ -568,6 +570,12 @@ func hasAppKeyPart(ev parent.Lifecycle) bool {
 // AppKeys implements parent.Tables: the app key part of an event alone.
 func (t *Tables) AppKeys(_ context.Context, ev parent.Lifecycle, _ time.Time) error {
 	t.mu.Lock()
+	d := t.AppKeyDelay
+	t.mu.Unlock()
+	if d > 0 {
+		time.Sleep(d)
+	}
+	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.AppKeyErr != nil {
 		return t.AppKeyErr
@@ -593,11 +601,12 @@ func (t *Tables) ConfirmAppKey(_ context.Context, vaultID, mode string, key []by
 		r.AppKeyNext, r.AppKeyNextSeq, r.AppKeyNextHSeq = nil, 0, 0
 		return nil
 	}
-	if r.AppKeySeq < seq || len(r.AppKey) == 0 {
-		r.AppKeyNext, r.AppKeyNextSeq, r.AppKeyNextHSeq = append([]byte(nil), key...), seq, headerSeq
-		return nil
-	}
-	if r.AppKeyID == parent.AppKeyID(key) && r.AppKeySeq >= seq {
+	t.putNextLocked(r, key, seq, headerSeq)
+	// As parent.AWS: ok if the row now names the key as app_key_next, or
+	// as app_key, at that seq or higher.
+	kid := parent.AppKeyID(key)
+	if r.AppKeyNext != nil && parent.AppKeyID(r.AppKeyNext) == kid && r.AppKeyNextSeq >= seq ||
+		r.AppKeyID == kid && r.AppKeySeq >= seq {
 		return nil
 	}
 	return parent.ErrConflict
@@ -627,18 +636,21 @@ func (t *Tables) appKeysLocked(r *VaultRow, ev parent.Lifecycle) {
 	// Release R's app_key_next, as parent.AWS.appKeyNext.
 	switch {
 	case ev.Event == parent.EventAppKeyNext:
-		if ev.AppKeySeq > r.AppKeySeq {
-			r.AppKeyNext, r.AppKeyNextSeq, r.AppKeyNextHSeq = append([]byte(nil), ev.AppKey...), ev.AppKeySeq, ev.HeaderSeq
-		}
+		t.putNextLocked(r, ev.AppKey, ev.AppKeySeq, ev.HeaderSeq)
 		return
 	case ev.Event == parent.EventAppKey && ev.NextCleared:
-		r.AppKeyNext, r.AppKeyNextSeq, r.AppKeyNextHSeq = nil, 0, 0
+		if r.AppKeyNext != nil && r.AppKeyNextHSeq <= ev.HeaderSeq {
+			r.AppKeyNext, r.AppKeyNextSeq, r.AppKeyNextHSeq = nil, 0, 0
+		}
 		return
 	}
-	if len(ev.AppKey) > 0 && (ev.Event == "enrolled" || ev.AppKeySeq > r.AppKeySeq) {
+	// As parent.AWS: enrolled also replaces a row still enrolling, the same
+	// key again, or a lower seq; it never rolls a key back.
+	if len(ev.AppKey) > 0 && (ev.AppKeySeq > r.AppKeySeq || ev.Event == "enrolled" &&
+		(len(r.AppKey) == 0 || r.State == "enrolling" || r.AppKeyID == parent.AppKeyID(ev.AppKey))) {
 		// Not lease-conditioned: only by seq (enrolled: always), as parent.AWS.
 		r.AppKey, r.AppKeyID, r.AppKeySeq = append([]byte(nil), ev.AppKey...), parent.AppKeyID(ev.AppKey), ev.AppKeySeq
-		if ev.Event == "enrolled" || r.AppKeyNextSeq <= ev.AppKeySeq {
+		if r.AppKeyNextSeq <= ev.AppKeySeq {
 			r.AppKeyNext, r.AppKeyNextSeq, r.AppKeyNextHSeq = nil, 0, 0
 		}
 	}
@@ -748,4 +760,31 @@ type StaticCreds parent.Credentials
 // Retrieve implements parent.CredentialSource.
 func (c StaticCreds) Retrieve(context.Context) (parent.Credentials, error) {
 	return parent.Credentials(c), nil
+}
+
+// putNextLocked writes app_key_next as parent.AWS.appKeyNext does: only
+// above app_key's seq, and not over a next key written by a later
+// header_seq (the same key again may be).
+func (t *Tables) putNextLocked(r *VaultRow, key []byte, seq, hseq uint64) {
+	if len(r.AppKey) > 0 && seq <= r.AppKeySeq {
+		return
+	}
+	if r.AppKeyNext != nil && !(r.AppKeyNextHSeq < hseq || parent.AppKeyID(r.AppKeyNext) == parent.AppKeyID(key) && r.AppKeyNextHSeq <= hseq) {
+		return
+	}
+	r.AppKeyNext, r.AppKeyNextSeq, r.AppKeyNextHSeq = append([]byte(nil), key...), seq, hseq
+}
+
+// SetAppKeyErr sets AppKeyErr while the parent runs.
+func (t *Tables) SetAppKeyErr(err error) {
+	t.mu.Lock()
+	t.AppKeyErr = err
+	t.mu.Unlock()
+}
+
+// SetAppKeyDelay sets AppKeyDelay while the parent runs.
+func (t *Tables) SetAppKeyDelay(d time.Duration) {
+	t.mu.Lock()
+	t.AppKeyDelay = d
+	t.mu.Unlock()
 }

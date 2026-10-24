@@ -56,9 +56,15 @@ type AppKeyRetry struct {
 }
 
 const (
-	appKeyConfirmFor   = 20 * time.Second
+	// appKeyConfirmFor is the whole wait for one confirmation. A phone
+	// waits 30 s for an answer, and a recovery open spends the unlock-key
+	// derivation and a status read of up to 10 s (completionStatusTimeout)
+	// before its flush, so the confirmation gets 10 s: an open that
+	// cannot be confirmed is answered `retry` in time for the phone to try
+	// again, not after it gave up.
+	appKeyConfirmFor   = 10 * time.Second
 	appKeyConfirmFirst = 500 * time.Millisecond
-	appKeyConfirmCap   = 4 * time.Second
+	appKeyConfirmCap   = 2 * time.Second
 )
 
 // appKeyToConfirm is the app key the next header write would adopt: the
@@ -77,6 +83,9 @@ func (m *Manager) appKeyToConfirm() (key []byte, seq, headerSeq uint64) {
 // ackedAppKey reports whether the header already stored names key (loaded
 // with it, or confirmed by the host).
 func (m *Manager) ackedAppKey(key []byte, seq uint64) bool {
+	if len(m.pinned.key) > 0 && m.pinned.seq == seq && bytes.Equal(m.pinned.key, key) {
+		return true
+	}
 	for _, a := range m.acked {
 		if a.seq == seq && bytes.Equal(a.key, key) {
 			return true
@@ -89,6 +98,12 @@ func (m *Manager) ackedAppKey(key []byte, seq uint64) bool {
 type ackedKey struct {
 	key []byte
 	seq uint64
+}
+
+// pin makes key the header's own: the key the stored header names is never
+// forgotten, whatever abandoned replacements were confirmed since.
+func (m *Manager) pin(key []byte, seq uint64) {
+	m.pinned = ackedKey{append([]byte(nil), key...), seq}
 }
 
 // ack records key as named; the last few are kept (a replacement confirms

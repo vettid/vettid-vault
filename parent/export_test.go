@@ -51,6 +51,14 @@ func SetQueueLostWaitForTest(first, max time.Duration) func() {
 	return func() { queueLostWait, queueLostWaitMax = a, b }
 }
 
+// SetAssertPaceForTest sets the pause between the assertion worker's
+// vaults; the returned function restores it.
+func SetAssertPaceForTest(d time.Duration) func() {
+	a := assertPace
+	assertPace = d
+	return func() { assertPace = a }
+}
+
 // SetAppKeyRetryForTest shortens the backoff of the app key retry; the
 // returned function restores it.
 func SetAppKeyRetryForTest(first, max time.Duration) func() {

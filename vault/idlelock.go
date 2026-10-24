@@ -41,9 +41,12 @@ const (
 	// IdleWatchDefault is the period of Run's idle-lock timer: at most 30 s,
 	// as the collect cycle (§3.6.8).
 	IdleWatchDefault = 30 * time.Second
-	// idleLockFlush bounds the idle lock's final flush and notices when
-	// the timer locks: a host that stalls them cannot keep the vault
-	// open; lockLocked zeroizes whatever the flush does.
+	// idleLockFlush is the context of the idle lock's final flush and
+	// notices when the timer locks: a host that stalls them cannot keep
+	// the vault open, and lockLocked zeroizes whatever the flush does.
+	// The keys are wiped after about 60 s plus the state and header
+	// writes, each bounded on its own (90 s in the vault process's
+	// channel, 60 s at the supervisor): roughly 4 minutes at worst.
 	idleLockFlush = 60 * time.Second
 )
 
@@ -155,7 +158,9 @@ func (m *Manager) idleWatchOnce() bool {
 	_ = m.lockLocked(lctx) // zeroizes whatever the flush does
 	cancel()
 	if m.collector != nil {
-		_ = m.collector.Close() // a collect the host holds open ends now
+		// A guard: zeroize closes and clears the collector already; a
+		// collect the host holds open ends now in any case.
+		_ = m.collector.Close()
 		m.collector = nil
 	}
 	return true

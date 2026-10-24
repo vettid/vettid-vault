@@ -67,6 +67,7 @@ func idleLockAtOf(t *testing.T, body []byte) time.Time {
 func TestIdleLockFires(t *testing.T) {
 	for _, holdOff := range []bool{false, true} {
 		f := newIdleFixture(t)
+		uid := f.m.UnlockID()
 		f.m.st.Settings.HoldOff = holdOff
 		at := f.deadline().Add(DefaultIdleLockAfter)
 		f.clk = at.Add(-time.Second)
@@ -79,7 +80,7 @@ func TestIdleLockFires(t *testing.T) {
 			t.Fatalf("hold off %v: not locked past its time", holdOff)
 		}
 		l := find(f.inbox(f.app)["dev1"], ofType("vault.locking"))
-		if l == nil || !strings.Contains(string(l.Body), `"reason":"idle"`) {
+		if l == nil || !strings.Contains(string(l.Body), `"reason":"idle"`) || !strings.Contains(string(l.Body), `"unlock_id":"`+uid+`"`) {
 			t.Fatalf("hold off %v: vault.locking %+v", holdOff, l)
 		}
 		found := false

@@ -80,6 +80,9 @@ type Options struct {
 	// (§3.6; tests move it past a deadline while messages keep the real
 	// time). Nil: Now.
 	OwnerCheckClock func() time.Time
+	// IdleWatchEvery is how often Run's own timer looks at the idle lock
+	// beside the collect loop (§3.6.8; 0: IdleWatchDefault). For tests.
+	IdleWatchEvery time.Duration
 	// AskRand, if set, draws the delay of a suppressed ask's neutral
 	// answer (§10.4.1): a uniform value in [0, n). Nil: crypto/rand.
 	AskRand func(n int64) int64

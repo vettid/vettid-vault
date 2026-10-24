@@ -1,6 +1,9 @@
 package vault
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 // The idle lock (VAULT-MESSAGING 0.29.0 §3.6.8, release L; VAULT-LOCK §4,
 // decisions L10–L14, approved by the owner 2026-10-12). The owner check is
@@ -30,6 +33,18 @@ const (
 	MaxIdleLockAfter     = 30 * 24 * time.Hour
 	IdleLockAfterUnlock  = time.Hour
 	LockIdle             = "idle" // vault.locking reason, vault.locked ref (§3.6.8, §10.9)
+	// IdleLockCallMax bounds the wait for a call in progress: a call ends
+	// within 12 hours (§10.10), so the idle lock waits at most that long
+	// past its time, however calls follow one another. Not scaled
+	// (STAGING-TIME-SCALE N14).
+	IdleLockCallMax = 12 * time.Hour
+	// IdleWatchDefault is the period of Run's idle-lock timer: at most 30 s,
+	// as the collect cycle (§3.6.8).
+	IdleWatchDefault = 30 * time.Second
+	// idleLockFlush bounds the idle lock's final flush and notices when
+	// the timer locks: a host that stalls them cannot keep the vault
+	// open; lockLocked zeroizes whatever the flush does.
+	idleLockFlush = 60 * time.Second
 )
 
 // IdleLockAfter is the setting idle_lock.after_seconds (§10.8).
@@ -87,10 +102,63 @@ func (m *Manager) idleLockAt(now time.Time) (time.Time, bool) {
 // ownerCheckTick.
 func (m *Manager) idleLockTick(now time.Time) {
 	at, ok := m.idleLockAt(now)
-	if !ok || m.lockPending || m.ocTime(now).Before(at) || m.callInProgress(now) {
+	t := m.ocTime(now)
+	if !ok || m.lockPending || t.Before(at) {
+		return
+	}
+	// A call in progress delays it, at most IdleLockCallMax past its time
+	// (a call ends within 12 hours, §10.10): calls one after another
+	// cannot keep the vault open.
+	if t.Before(at.Add(IdleLockCallMax)) && m.callInProgress(now) {
 		return
 	}
 	m.lockPending, m.lockReason = true, LockIdle
+}
+
+// idleWatch is Run's own idle-lock timer (§3.6.8): every IdleWatchEvery,
+// whatever the collect loop does (blocked in a collect, retrying after
+// relay errors), it looks at the idle lock and, when it is due, locks the
+// vault itself and ends a blocked collect. The idle lock is the one lock
+// a host cannot suppress (§13.3), so it must not depend on the relay.
+func (m *Manager) idleWatch(ctx context.Context) {
+	every := m.opt.IdleWatchEvery
+	if every <= 0 {
+		every = IdleWatchDefault
+	}
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		if m.idleWatchOnce() {
+			return
+		}
+	}
+}
+
+// idleWatchOnce runs one look; true once the vault is locked.
+func (m *Manager) idleWatchOnce() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.locked || m.st == nil {
+		return true
+	}
+	m.refreshOwnerCred()
+	m.idleLockTick(m.now())
+	if !m.lockPending || m.lockReason != LockIdle {
+		return false
+	}
+	lctx, cancel := context.WithTimeout(context.Background(), idleLockFlush)
+	_ = m.lockLocked(lctx) // zeroizes whatever the flush does
+	cancel()
+	if m.collector != nil {
+		_ = m.collector.Close() // a collect the host holds open ends now
+		m.collector = nil
+	}
+	return true
 }
 
 func (m *Manager) callInProgress(now time.Time) bool {

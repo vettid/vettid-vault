@@ -3,7 +3,9 @@ package vault
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -183,8 +185,9 @@ func (c *fakeCall) Handle(context.Context, *Session, *envelope.Inner) (json.RawM
 }
 
 // The setting: 3,600–2,592,000, no "never", the app only; a shorter value
-// applies at once; a longer one from the next check (until then the value
-// of the last one); a record from before release L counts as the default.
+// applies at once; a longer one from the next check (until then the lowest
+// value since the last one); a record from before release L counts as the
+// default.
 func TestIdleLockSetting(t *testing.T) {
 	f := newIdleFixture(t)
 	for _, v := range []string{"0", "3599", "2592001", "-1", `"never"`, "null"} {
@@ -209,10 +212,10 @@ func TestIdleLockSetting(t *testing.T) {
 	if !strings.Contains(string(f.req(t, f.app, "settings.get", `{}`).Body), `"idle_lock.after_seconds":3600`) {
 		t.Fatal("settings.get")
 	}
-	// A longer value waits for the next check: until then the vault uses
-	// the value it had at the last one (7 days), never the new 30.
+	// A longer value waits for the next check, and until then the lowest
+	// value since the last check stays (owner decision 2026-10-23).
 	set("2592000")
-	if got := status(); !got.Equal(f.deadline().Add(DefaultIdleLockAfter)) {
+	if got := status(); !got.Equal(f.deadline().Add(time.Hour)) {
 		t.Fatalf("longer value before a check: %v", got)
 	}
 	f.req(t, f.app, TypeOwnerCheck, `{"ok":true}`)
@@ -254,5 +257,148 @@ func TestTimeScaleIdleLock(t *testing.T) {
 	f.m.mu.Unlock()
 	if !at.Equal(opened.Add(150 * time.Second)) {
 		t.Fatalf("scaled hour after an unlock: %v", at.Sub(opened))
+	}
+}
+
+// A (review of #146): the idle lock does not depend on the collect loop.
+// With a relay whose collect always fails, or blocks until closed, the
+// vault still locks itself once the time has passed, by Run's own timer.
+func TestIdleLockWithoutRelay(t *testing.T) {
+	for _, blocking := range []bool{false, true} {
+		f := newIdleFixture(t)
+		f.m.opt.IdleWatchEvery = 10 * time.Millisecond
+		var bc *blockingCollector
+		if blocking {
+			bc = &blockingCollector{closed: make(chan struct{})}
+			f.m.relay = &collectRelay{stubRelay: f.relay, c: bc}
+		}
+		var mu sync.Mutex
+		clk := f.clk
+		f.m.opt.OwnerCheckClock = func() time.Time { mu.Lock(); defer mu.Unlock(); return clk }
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() { done <- f.m.Run(ctx) }()
+		time.Sleep(50 * time.Millisecond)
+		if f.m.Locked() {
+			cancel()
+			t.Fatalf("blocking %v: locked before its time", blocking)
+		}
+		mu.Lock()
+		clk = f.deadline().Add(DefaultIdleLockAfter + time.Second)
+		mu.Unlock()
+		deadline := time.Now().Add(10 * time.Second)
+		for !f.m.Locked() {
+			if time.Now().After(deadline) {
+				cancel()
+				t.Fatalf("blocking %v: the idle lock waited for the relay", blocking)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		if blocking {
+			select {
+			case <-bc.closed:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the blocked collect was not ended")
+			}
+		}
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("blocking %v: Run did not end after the lock", blocking)
+		}
+		cancel()
+	}
+}
+
+type collectRelay struct {
+	*stubRelay
+	c Collector
+}
+
+func (r *collectRelay) Collector(context.Context, bool) (Collector, error) { return r.c, nil }
+
+// blockingCollector's Next blocks until Close (a relay the host holds open).
+type blockingCollector struct {
+	once   sync.Once
+	closed chan struct{}
+}
+
+func (c *blockingCollector) Next(ctx context.Context) ([]Message, error) {
+	select {
+	case <-c.closed:
+		return nil, errors.New("closed")
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+func (c *blockingCollector) Ack(context.Context, string) error { return nil }
+func (c *blockingCollector) Close() error                      { c.once.Do(func() { close(c.closed) }); return nil }
+
+// B: calls one after another delay the idle lock at most IdleLockCallMax
+// past its time.
+func TestIdleLockCallBounded(t *testing.T) {
+	f := newIdleFixture(t)
+	f.m.addFeature(&fakeCall{on: true})
+	at := f.deadline().Add(DefaultIdleLockAfter)
+	f.clk = at.Add(IdleLockCallMax - time.Second)
+	if f.poke(t) {
+		t.Fatal("cut a call inside its 12 hours")
+	}
+	f.clk = at.Add(IdleLockCallMax)
+	if !f.poke(t) {
+		t.Fatal("calls kept the vault open past the 12 hours")
+	}
+}
+
+// C (owner decision 2026-10-23: keep the shorter): shortening and then
+// lengthening before a check ends at the shortened value; the check then
+// applies the longer one.
+func TestIdleLockKeepsShorter(t *testing.T) {
+	f := newIdleFixture(t)
+	set := func(secs string) {
+		t.Helper()
+		if r := f.req(t, f.app, "settings.set", `{"version":`+uitoa(f.m.st.Settings.Version)+`,"set":{"idle_lock.after_seconds":`+secs+`}}`); errCode(r) != "" {
+			t.Fatalf("set %s: %q", secs, errCode(r))
+		}
+	}
+	status := func() time.Time { return idleLockAtOf(t, f.req(t, f.app, "vault.status", `{}`).Body) }
+	set("3600")
+	set("2592000")
+	if got := status(); !got.Equal(f.deadline().Add(time.Hour)) {
+		t.Fatalf("after shorten then lengthen: %v, want the deadline + 1 h", got)
+	}
+	set("86400") // still above the lowest since the check
+	if got := status(); !got.Equal(f.deadline().Add(time.Hour)) {
+		t.Fatalf("a value between: %v", got)
+	}
+	f.req(t, f.app, TypeOwnerCheck, `{"ok":true}`)
+	if got := status(); !got.Equal(f.deadline().Add(24 * time.Hour)) {
+		t.Fatalf("after the check: %v, want the value set (1 day)", got)
+	}
+}
+
+// E (owner decision 2026-10-23): the hour after an unlock is given only
+// to an unlock at or after the idle lock's time; one just before it gets
+// no extra hour.
+func TestIdleLockGraceBoundary(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		opened time.Duration // from the idle lock's time
+		at     time.Duration // the lock's time, from the same
+	}{
+		{"just before", -time.Millisecond, 0},
+		{"half an hour before", -30 * time.Minute, 0},
+		{"at the time", 0, IdleLockAfterUnlock},
+	} {
+		f := newIdleFixture(t)
+		T := f.deadline().Add(DefaultIdleLockAfter)
+		f.clk = T.Add(c.opened)
+		f.m.mu.Lock()
+		f.m.idleOpened, f.m.idleGrace = false, time.Time{}
+		got, _ := f.m.idleLockAt(f.clk)
+		f.m.mu.Unlock()
+		if !got.Equal(T.Add(c.at)) {
+			t.Fatalf("%s: idle lock at %v, want %v", c.name, got.Sub(T), c.at)
+		}
 	}
 }

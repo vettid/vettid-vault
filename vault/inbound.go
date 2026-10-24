@@ -79,6 +79,12 @@ func (m *Manager) Run(ctx context.Context) error {
 	if m.opt.PollWait == 0 && !sleep(ctx, rand.N(firstPollSpread)) {
 		return ctx.Err()
 	}
+	// §3.6.8 (0.29.0, release L): the idle lock does not wait for the
+	// collect loop, which a host can stall (a relay that never answers,
+	// a collect that blocks); its own timer locks the vault.
+	wctx, stopWatch := context.WithCancel(ctx)
+	defer stopWatch()
+	go m.idleWatch(wctx)
 	refused := 0
 	for {
 		_, err := m.Step(ctx)

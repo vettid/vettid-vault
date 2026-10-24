@@ -644,6 +644,19 @@ func heldCountsJSON(w HeldCounts) []byte {
 // (a longer one waits for the next check), and turning the hold on is
 // audited; the hold then applies at once if the deadline has passed.
 func (m *Manager) settingsOwnerCheck(prev, next Settings, now time.Time) {
+	// §3.6.8 (owner decision 2026-10-23: keep the shorter): the lowest
+	// idle-lock value set since the last check stays in force until the
+	// next check, so a longer value set afterwards cannot buy time.
+	if rec := m.st.OwnerCheck; rec != nil {
+		inForce := DefaultIdleLockAfter // a record from before release L
+		if rec.IdleAfter != 0 {
+			inForce = time.Duration(rec.IdleAfter) * time.Second
+		}
+		if next.IdleLockAfter() < inForce {
+			rec.IdleAfter = uint64(next.IdleLockAfter() / time.Second)
+			m.dirty = true
+		}
+	}
 	if rec := m.st.OwnerCheck; rec != nil && !rec.Deadline.IsZero() && next.OwnerCheckInterval() < prev.OwnerCheckInterval() {
 		// The settings compare in real units; the new deadline is scaled
 		// as startClock's (0.43.0, S1).

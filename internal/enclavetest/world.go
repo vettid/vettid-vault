@@ -50,6 +50,9 @@ func (r ReleaseSpec) PCR0Hex() string { return PCRHex(r.PCR0) }
 func (w *World) enqueuedAt() time.Time {
 	w.enqMu.Lock()
 	defer w.enqMu.Unlock()
+	if w.ZeroEnqueuedAt {
+		return time.Time{} // an opening of unknown time (tests)
+	}
 	t := w.Now().UTC().Truncate(time.Millisecond)
 	if !t.After(w.lastEnq) {
 		t = w.lastEnq.Add(time.Millisecond)
@@ -72,6 +75,9 @@ func (w *World) EnqueuedAt() time.Time { return w.enqueuedAt() }
 type World struct {
 	enqMu   sync.Mutex
 	lastEnq time.Time
+	// ZeroEnqueuedAt makes the world's queue messages carry the zero time
+	// as enqueued_at (an opening of unknown time, for tests).
+	ZeroEnqueuedAt bool
 
 	// Account, if set, is the account snapshot the API puts in each
 	// unlock (0.15.0, §11.13) and enroll (0.18.0, REQUIRED there: nil

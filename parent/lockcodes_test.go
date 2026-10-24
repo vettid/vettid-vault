@@ -20,6 +20,8 @@ func TestLockCodesSlots(t *testing.T) {
 		"01JDDDDDDDDDDDDDDDDDDDDDDD": "locked",               // on an unlock: not copied
 		"01JEEEEEEEEEEEEEEEEEEEEEEE": "recovery_not_current", // another op's code on a lock: not copied
 		"01JFFFFFFFFFFFFFFFFFFFFFFF": "",                     // a release before L: no code
+		"01JGGGGGGGGGGGGGGGGGGGGGGG": "locked",               // on a delete (no envelope): not copied
+		"01JHHHHHHHHHHHHHHHHHHHHHHH": "stale",                // on a recovery_cancel (no envelope): not copied
 	}
 	e := h.connect("boot-1", func(msg []byte) []byte {
 		var m struct {
@@ -54,5 +56,15 @@ func TestLockCodesSlots(t *testing.T) {
 	}
 	if s := send("lock", "01JFFFFFFFFFFFFFFFFFFFFFFF"); s.Status != "done" || s.Code != "" {
 		t.Fatalf("pre-L lock %+v", s)
+	}
+	if s := send("delete", "01JGGGGGGGGGGGGGGGGGGGGGGG"); s.Code != "" {
+		t.Fatalf("locked on a delete %+v", s)
+	}
+	h.tables.PutSlot("01JHHHHHHHHHHHHHHHHHHHHHHH", "i-test")
+	h.queues.Send(h.queue, cancelQueueMsg("recovery_cancel", "01JHHHHHHHHHHHHHHHHHHHHHHH"))
+	var cs parenttest.SlotRow
+	waitFor(t, "cancel slot", func() bool { cs, _ = h.tables.Slot("01JHHHHHHHHHHHHHHHHHHHHHHH"); return cs.Status != "queued" })
+	if cs.Status != "done" || cs.Code != "" {
+		t.Fatalf("stale on a recovery_cancel %+v", cs)
 	}
 }

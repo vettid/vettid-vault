@@ -41,9 +41,11 @@ func TestLockOperation(t *testing.T) {
 	if c := code(f.w.LockWith(f.ctx, in, a.vid, a.guid, "0123456789abcdef0123456789abcdef", f.w.EnqueuedAt())); c != enclave.CodeStale || !running() {
 		t.Fatalf("bound to another unlock: %q", c)
 	}
-	// Queued after: locked, and the answer comes after the lock.
-	if c := code(f.w.LockWith(f.ctx, in, a.vid, a.guid, "", opened.Add(time.Millisecond))); c != enclave.CodeLocked || running() {
-		t.Fatalf("lock queued after the opening: %q, running %v", c, running())
+	// Queued after: locked, and the answer comes after the lock: when it
+	// returns, the vault's Manager is locked (zeroized) already.
+	m := in.Manager(a.vid)
+	if c := code(f.w.LockWith(f.ctx, in, a.vid, a.guid, "", opened.Add(time.Millisecond))); c != enclave.CodeLocked || running() || !m.Locked() {
+		t.Fatalf("lock queued after the opening: %q, running %v, manager locked %v", c, running(), m.Locked())
 	}
 	// Nothing runs: not_running, bound or not.
 	if c := code(f.w.LockWith(f.ctx, in, a.vid, a.guid, "", f.w.EnqueuedAt())); c != enclave.CodeNotRunning {
@@ -61,8 +63,9 @@ func TestLockOperation(t *testing.T) {
 	if c := code(f.w.LockWith(f.ctx, in, a.vid, a.guid, "", unlockedAt.Add(-time.Millisecond))); c != enclave.CodeStale || !running() {
 		t.Fatalf("a lock queued before the unlock: %q", c)
 	}
-	if c := code(f.w.LockWith(f.ctx, in, a.vid, a.guid, u.UnlockID, f.w.EnqueuedAt())); c != enclave.CodeLocked || running() {
-		t.Fatalf("bound to the current unlock: %q, running %v", c, running())
+	m = in.Manager(a.vid)
+	if c := code(f.w.LockWith(f.ctx, in, a.vid, a.guid, u.UnlockID, f.w.EnqueuedAt())); c != enclave.CodeLocked || running() || !m.Locked() {
+		t.Fatalf("bound to the current unlock: %q, running %v, manager locked %v", c, running(), m.Locked())
 	}
 	if c := code(f.w.LockWith(f.ctx, in, a.vid, a.guid, u.UnlockID, f.w.EnqueuedAt())); c != enclave.CodeNotRunning {
 		t.Fatalf("bound, nothing running: %q", c)
@@ -75,6 +78,15 @@ func TestLockOperation(t *testing.T) {
 	}
 	if c := code(f.w.LockWith(f.ctx, in, a.vid, a.guid, u2.UnlockID, unlockedAt)); c != enclave.CodeLocked {
 		t.Fatalf("bound to the current unlock, queued earlier: %q", c)
+	}
+
+	// An opening of unknown time (no enqueued_at): an unconditional lock
+	// locks, whatever its own time (locking only reduces exposure).
+	f.w.ZeroEnqueuedAt = true
+	f.mustUnlock(a, pin, client.UnlockOptions{}, "")
+	f.w.ZeroEnqueuedAt = false
+	if c := code(f.w.LockWith(f.ctx, in, a.vid, a.guid, "", time.Time{}.Add(time.Millisecond))); c != enclave.CodeLocked || running() {
+		t.Fatalf("opening of unknown time: %q, running %v", c, running())
 	}
 }
 

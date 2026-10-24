@@ -613,10 +613,13 @@ func (h *procHost) LockRequest(ctx context.Context, id, unlockID string, enqueue
 		return enclave.CodeNotRunning, nil
 	}
 	if unlockID == "" {
-		if !p.openedAt.IsZero() && !enqueuedAt.After(p.openedAt) {
+		if enclave.LockIsStale("", p.openedAt, "", enqueuedAt) {
 			return enclave.CodeStale, nil
 		}
-		_, err := h.LockReason(ctx, id, "")
+		ran, err := h.LockReason(ctx, id, "")
+		if !ran {
+			return enclave.CodeNotRunning, nil // gone meanwhile
+		}
 		return enclave.CodeLocked, err
 	}
 	lctx, cancel := context.WithTimeout(ctx, h.cfg.LockTimeout)

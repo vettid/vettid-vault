@@ -136,7 +136,7 @@ func (h *LocalHost) LockRequest(ctx context.Context, id, unlockID string, enqueu
 		h.mu.Unlock()
 		return CodeNotRunning, nil
 	}
-	if lockIsStale(r.m.UnlockID(), r.openedAt, unlockID, enqueuedAt) {
+	if LockIsStale(r.m.UnlockID(), r.openedAt, unlockID, enqueuedAt) {
 		h.mu.Unlock()
 		return CodeStale, nil
 	}
@@ -149,11 +149,13 @@ func (h *LocalHost) LockRequest(ctx context.Context, id, unlockID string, enqueu
 	return CodeLocked, r.m.LockReason(ctx, "")
 }
 
-// lockIsStale decides a lock request against the running vault (§11.5):
-// a bound one is stale when it names another unlock; an unconditional one
-// when it was queued at or before the message that opened the vault. An
-// opening of unknown time is not stale: locking only reduces exposure.
-func lockIsStale(current string, openedAt time.Time, unlockID string, enqueuedAt time.Time) bool {
+// LockIsStale decides a lock request against the running vault (§11.5):
+// a bound one is stale when it names another unlock (current is the
+// vault's; the process host has the vault's process compare it, and asks
+// here for the unconditional rule only); an unconditional one when it was
+// queued at or before the message that opened the vault. An opening of
+// unknown time is not stale: locking only reduces exposure.
+func LockIsStale(current string, openedAt time.Time, unlockID string, enqueuedAt time.Time) bool {
 	if unlockID != "" {
 		return subtle.ConstantTimeCompare([]byte(unlockID), []byte(current)) != 1
 	}

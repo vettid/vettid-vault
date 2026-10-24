@@ -551,7 +551,7 @@ func (t *Tables) Lifecycle(_ context.Context, ev parent.Lifecycle, me string, no
 		t.appKeysLocked(r, ev)
 	}
 	switch ev.Event {
-	case parent.EventAppKey, parent.EventAppKeyNext, parent.EventAppKeyAssert:
+	case parent.EventAppKey, parent.EventAppKeyNext, parent.EventAppKeyAssert, parent.EventAppKeyNextClear:
 		return appKeyErr(keyErr, nil)
 	}
 	return appKeyErr(keyErr, t.lifecycleRest(r, ev, me, now))
@@ -566,7 +566,7 @@ func appKeyErr(keyErr, rest error) error {
 
 func hasAppKeyPart(ev parent.Lifecycle) bool {
 	switch ev.Event {
-	case parent.EventAppKey, parent.EventAppKeyNext, parent.EventAppKeyAssert:
+	case parent.EventAppKey, parent.EventAppKeyNext, parent.EventAppKeyAssert, parent.EventAppKeyNextClear:
 		return true
 	}
 	return len(ev.AppKey) > 0 || ev.Next != nil
@@ -644,6 +644,12 @@ func (t *Tables) appKeysLocked(r *VaultRow, ev parent.Lifecycle) {
 		ev.Event = parent.EventAppKey
 	}
 	if r == nil {
+		return
+	}
+	if ev.Event == parent.EventAppKeyNextClear {
+		if r.AppKeyNext != nil && parent.AppKeyID(r.AppKeyNext) == parent.AppKeyID(ev.AppKey) && r.AppKeyNextHSeq == ev.HeaderSeq {
+			r.AppKeyNext, r.AppKeyNextSeq, r.AppKeyNextHSeq, r.AppKeyNextAtt = nil, 0, 0, 0
+		}
 		return
 	}
 	// Release R's app_key_next, as parent.AWS.appKeyNext.

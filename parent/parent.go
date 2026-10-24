@@ -657,7 +657,7 @@ func parseLifecycle(f *hostproto.Frame) (Lifecycle, bool) {
 		ev.Name = n
 	}
 	switch ev.Event {
-	case EventAppKey, EventAppKeyNext, EventAppKeyAssert:
+	case EventAppKey, EventAppKeyNext, EventAppKeyAssert, EventAppKeyNextClear:
 		if ev.AppKey == nil || ev.NextCleared && ev.Event != EventAppKey {
 			return Lifecycle{}, false
 		}

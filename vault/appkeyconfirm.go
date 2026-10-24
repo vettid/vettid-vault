@@ -175,6 +175,7 @@ func (m *Manager) confirmKey(ctx context.Context, mode string, key []byte, seq, 
 		return err
 	}
 	m.ack(key, seq)
+	m.forgetOrphan(key, seq) // confirmed again: an earlier attempt's clear must not remove it
 	m.enrolling = false
 	return nil
 }

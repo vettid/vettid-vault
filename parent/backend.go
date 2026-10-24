@@ -284,6 +284,11 @@ type CredentialSource interface {
 // lost what it had queued): written as app_key.
 const EventAppKeyAssert = "app_key_assert"
 
+// EventAppKeyNextClear is a failed step 1's orphan clear: the row's
+// app_key_next is removed only if it is the event's key (kid) at the
+// event's header_seq.
+const EventAppKeyNextClear = "app_key_next_clear"
+
 // AppKeyWriteError is the error of a Lifecycle whose app_key or
 // app_key_next write failed: Err is that failure and Rest the error of the
 // rest of the event's write (nil if it was written). The parent writes the

@@ -544,7 +544,7 @@ func (a *AWS) Lifecycle(ctx context.Context, ev Lifecycle, instanceID string, no
 		keyErr = err
 	}
 	switch ev.Event {
-	case EventAppKey, EventAppKeyNext, EventAppKeyAssert:
+	case EventAppKey, EventAppKeyNext, EventAppKeyAssert, EventAppKeyNextClear:
 		return appKeyResult(keyErr, nil)
 	}
 	return appKeyResult(keyErr, a.lifecycleRest(ctx, ev, instanceID, now))
@@ -842,6 +842,16 @@ func (a *AWS) appKey(ctx context.Context, ev Lifecycle, now time.Time) error {
 	switch ev.Event {
 	case EventAppKeyAssert:
 		ev.Event = EventAppKey
+	}
+	if ev.Event == EventAppKeyNextClear {
+		// Exactly the attempted key at the attempted header_seq.
+		err := a.updateVault(ctx, ev.VaultID, "REMOVE #akn SET #u = :u", "attribute_exists(#akn) AND #akn.#kid = :kid AND #akn.#hs = :hs",
+			map[string]string{"#akn": "app_key_next", "#kid": "kid", "#hs": "header_seq", "#u": "updated_at"},
+			map[string]ddbtypes.AttributeValue{":kid": s(AppKeyID(ev.AppKey)), ":hs": n(int64(ev.HeaderSeq)), ":u": s(isoNow(now))})
+		if errors.Is(err, ErrLeaseHeld) {
+			return nil
+		}
+		return err
 	}
 	if ev.Event == EventAppKeyNext || ev.NextCleared {
 		return a.appKeyNext(ctx, ev, now)

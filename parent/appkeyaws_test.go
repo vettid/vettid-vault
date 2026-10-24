@@ -293,3 +293,18 @@ func unusedPlaceholder(body map[string]any) bool {
 }
 
 func att() int64 { return time.Now().UnixNano() }
+
+// The orphan clear's condition names the key and the header_seq exactly;
+// it is one write, and a failed condition is no error.
+func TestOrphanClearCondition(t *testing.T) {
+	f := &fakeDDB{script: func(int, string) string { return "cond" }}
+	a := newFakeAWS(t, f)
+	if err := a.AppKeys(context.Background(), Lifecycle{Event: EventAppKeyNextClear, VaultID: "v1", AppKey: []byte("k8"), AppKeySeq: 6, HeaderSeq: 9}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	u := f.updates()
+	c, _ := u[0]["ConditionExpression"].(string)
+	if len(u) != 1 || !strings.Contains(c, "#akn.#kid = :kid") || !strings.Contains(c, "#akn.#hs = :hs") || strings.Contains(c, "<=") {
+		t.Fatalf("%v", u)
+	}
+}

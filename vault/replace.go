@@ -1,6 +1,7 @@
 package vault
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"time"
@@ -126,33 +127,59 @@ func (m *Manager) beginReplace(ctx context.Context, r *replacement) error {
 	return nil
 }
 
-// clearOrphanNext tells the parent, at once and best effort, to remove an
-// app_key_next that a failed step 1 left on the row: the key was confirmed
-// (or may have been) but no stored header names it. The event is the
-// current key with next_cleared and the attempted header_seq; the parent
-// removes a next written by that header_seq or an earlier one, and writes
-// the event again until it has (a report is not lost with the process,
-// which a failed open or approval ends without another report). The key is
-// no longer taken as confirmed.
+// clearOrphanNext tells the parent to remove an app_key_next that a failed
+// step 1 left on the row: the key was confirmed (or may have been) but no
+// stored header names it (or one may, if the failure was a Put that stored
+// or a read-back that failed: the key is then confirmed again before it is
+// adopted). The event, app_key_next_clear, names the attempted key and
+// header_seq, and the parent removes the row's next key only if it is that
+// key at that header_seq: never an older pending key, never another
+// vault's. It is sent at once and again at the next flush (a link to the
+// parent that is down drops it), and the parent writes it again until it
+// has. The key is no longer taken as confirmed.
 func (m *Manager) clearOrphanNext(nx *HeaderNext) {
 	if nx == nil || nx.AppKey == nil {
 		return
 	}
 	m.unack(nx.AppKey, nx.AppKeySeq)
+	c := orphanClear{key: append([]byte(nil), nx.AppKey...), seq: nx.AppKeySeq, hseq: nx.HeaderSeq}
+	m.orphans = append(m.orphans, c)
+	m.sendOrphan(c)
+}
+
+// orphanClear is a confirmed key that no stored header names.
+type orphanClear struct {
+	key       []byte
+	seq, hseq uint64
+}
+
+func (m *Manager) sendOrphan(c orphanClear) {
 	if m.opt.Lifecycle == nil {
-		m.nextCleared = true // the next flush reports it
 		return
 	}
-	// The event repeats the current key; a vault without one (a recovery
-	// that gives it its first) names the attempted key, which the parent
-	// does not write for a clear.
-	key, seq := m.AppKey()
-	if key == nil {
-		key, seq = nx.AppKey, nx.AppKeySeq
-	}
-	ev := lifecycle(m.opt, EventAppKey, m.hdr.VaultID, m.opt.Release.PCR0)
-	ev.AppKey, ev.AppKeySeq, ev.NextCleared, ev.HeaderSeq = key, seq, true, nx.HeaderSeq
+	ev := lifecycle(m.opt, EventAppKeyNextClear, m.hdr.VaultID, m.opt.Release.PCR0)
+	ev.AppKey, ev.AppKeySeq, ev.HeaderSeq = append([]byte(nil), c.key...), c.seq, c.hseq
 	m.opt.Lifecycle(ev)
+}
+
+// resendOrphans sends the clears again once (at the next flush) and forgets
+// them.
+func (m *Manager) resendOrphans() {
+	for _, c := range m.orphans {
+		m.sendOrphan(c)
+	}
+	m.orphans = nil
+}
+
+// forgetOrphan drops a pending clear of a key that is confirmed again.
+func (m *Manager) forgetOrphan(key []byte, seq uint64) {
+	out := m.orphans[:0]
+	for _, c := range m.orphans {
+		if !(c.seq == seq && bytes.Equal(c.key, key)) {
+			out = append(out, c)
+		}
+	}
+	m.orphans = out
 }
 
 // promote is step 3, applied in memory after step 2 is stored: `next`

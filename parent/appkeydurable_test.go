@@ -489,3 +489,50 @@ func TestInFlightWriteHoldsTheLockPastTheDeadline(t *testing.T) {
 		t.Fatalf("row %+v", r)
 	}
 }
+
+// The orphan clear is exact: it removes app_key_next only when it is the
+// attempted key at the attempted header_seq. An older pending key at a lower
+// header_seq survives it, and so does another key at the same header_seq
+// (a stale instance can only remove its own). The ordinary next_cleared keeps
+// its header_seq <= rule.
+func TestOrphanClearIsExact(t *testing.T) {
+	tb := parenttest.NewTables()
+	ctx, now := context.Background(), time.Now()
+	row := func() parenttest.VaultRow { r, _ := tb.Vault("v1"); return r }
+	clear := func(key string, hs uint64) {
+		t.Helper()
+		if err := tb.Lifecycle(ctx, parent.Lifecycle{Event: parent.EventAppKeyNextClear, VaultID: "v1", AppKey: []byte(key), AppKeySeq: 6, HeaderSeq: hs}, "me", now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	put := func(key string, hs uint64) {
+		tb.PutVault(parenttest.VaultRow{VaultID: "v1", UserGUID: "u1", State: "locked", AppKey: []byte("k5"), AppKeyID: parent.AppKeyID([]byte("k5")), AppKeySeq: 5,
+			AppKeyNext: []byte(key), AppKeyNextSeq: 6, AppKeyNextHSeq: hs})
+	}
+	put("K6", 4) // an older pending key at a lower header_seq
+	clear("K8", 9)
+	if string(row().AppKeyNext) != "K6" {
+		t.Fatal("an orphan clear removed an older pending key")
+	}
+	put("K8", 4) // the same key, written by an older attempt at a lower header_seq
+	clear("K8", 9)
+	if string(row().AppKeyNext) != "K8" || row().AppKeyNextHSeq != 4 {
+		t.Fatal("an orphan clear removed the same key's older entry")
+	}
+	put("K7", 9) // another key at the same header_seq
+	clear("K8", 9)
+	if string(row().AppKeyNext) != "K7" {
+		t.Fatal("an orphan clear removed another vault's key at the same header_seq")
+	}
+	put("K8", 9)
+	clear("K8", 9)
+	if row().AppKeyNext != nil {
+		t.Fatal("the exact clear did not apply")
+	}
+	// The ordinary next_cleared still removes any next of header_seq <= its own.
+	put("K6", 4)
+	_ = tb.Lifecycle(ctx, parent.Lifecycle{Event: parent.EventAppKey, VaultID: "v1", AppKey: []byte("k5"), AppKeySeq: 5, NextCleared: true, HeaderSeq: 9}, "me", now)
+	if row().AppKeyNext != nil {
+		t.Fatal("the ordinary clear changed")
+	}
+}

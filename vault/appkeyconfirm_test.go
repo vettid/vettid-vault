@@ -168,7 +168,7 @@ func TestBeginReplaceNotConfirmed(t *testing.T) {
 			}
 			// No app_key_next event; only the clear of a possible orphan.
 			for _, e := range evs {
-				if e != EventAppKey {
+				if e != EventAppKeyNextClear {
 					t.Fatalf("events %v", evs)
 				}
 			}
@@ -378,13 +378,42 @@ func TestFailedStepOneClearsTheOrphanNext(t *testing.T) {
 			if !errors.Is(err, errRetry) {
 				t.Fatalf("err %v", err)
 			}
-			if len(evs) != 1 || evs[0].Event != EventAppKey || !evs[0].NextCleared || evs[0].HeaderSeq != rep.next.HeaderSeq ||
-				!bytes.Equal(evs[0].AppKey, cur) || evs[0].AppKeySeq != 1 {
+			if len(evs) != 1 || evs[0].Event != EventAppKeyNextClear || evs[0].HeaderSeq != rep.next.HeaderSeq ||
+				!bytes.Equal(evs[0].AppKey, key) || evs[0].AppKeySeq != 2 {
 				t.Fatalf("events %+v", evs)
+			}
+			// The flush sends it once more (a link that was down dropped
+			// it), then forgets it.
+			f.m.mu.Lock()
+			f.m.reportAppKey()
+			f.m.reportAppKey()
+			f.m.mu.Unlock()
+			if len(evs) != 2 || evs[1].Event != EventAppKeyNextClear || evs[1].HeaderSeq != evs[0].HeaderSeq {
+				t.Fatalf("not sent again once: %+v", evs)
 			}
 			if acked {
 				t.Fatal("the key is still taken as confirmed")
 			}
 		})
+	}
+}
+
+// A key confirmed again (the phone retries the same replacement at the same
+// header_seq) is not removed by the earlier attempt's pending clear.
+func TestConfirmedAgainForgetsThePendingClear(t *testing.T) {
+	f := newFixture(t)
+	c := &confirmer{}
+	f.m.opt.ConfirmAppKey, f.m.opt.AppKeyRetry = c.confirm, quickKeyRetry
+	var evs []LifecycleEvent
+	f.m.opt.Lifecycle = func(ev LifecycleEvent) { evs = append(evs, ev) }
+	key := testAppKeyDER(t, 0x41)
+	rep := nextWithKey(t, f.m, key)
+	f.m.mu.Lock()
+	f.m.clearOrphanNext(rep.next) // an earlier attempt's orphan
+	err := f.m.confirmKey(context.Background(), AppKeyModeNext, key, rep.next.AppKeySeq, rep.next.HeaderSeq)
+	f.m.reportAppKey()
+	f.m.mu.Unlock()
+	if err != nil || len(evs) != 1 {
+		t.Fatalf("err %v events %+v (only the first send)", err, evs)
 	}
 }

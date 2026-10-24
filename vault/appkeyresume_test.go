@@ -148,7 +148,7 @@ func TestRecoveryOpenFailedStepOneClearsTheOrphan(t *testing.T) {
 	defer mu.Unlock()
 	var cleared []LifecycleEvent
 	for _, ev := range evs {
-		if ev.Event == EventAppKey && ev.NextCleared {
+		if ev.Event == EventAppKeyNextClear {
 			cleared = append(cleared, ev)
 		}
 	}

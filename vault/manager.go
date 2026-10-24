@@ -201,6 +201,11 @@ const EventAppKeyNext = "app_key_next"
 // not asserted: the acknowledged request put it on the row.
 const EventAppKeyAssert = "app_key_assert"
 
+// EventAppKeyNextClear removes the row's app_key_next only if it is the
+// event's key at the event's header_seq (a failed step 1's orphan; the
+// ordinary next_cleared of an app_key event is the other rule).
+const EventAppKeyNextClear = "app_key_next_clear"
+
 // EventCredentialBackup reports a changed backup bit (0.16.0, §11.5).
 const EventCredentialBackup = "credential_backup"
 
@@ -348,6 +353,7 @@ type Manager struct {
 	repl         *replacement
 	replaced     []string
 	nextCleared  bool
+	orphans      []orphanClear // confirmed keys no stored header names, to clear again
 	// rec is the recovery runtime: the counter, the last status read, the
 	// presence retry (§11.14.4, §11.14.5).
 	rec recoveryRuntime
@@ -1272,6 +1278,7 @@ func (m *Manager) reportAppKey() {
 			}
 		}
 	}
+	m.resendOrphans()
 	if m.backupChanged {
 		m.backupChanged = false
 		m.report(EventCredentialBackup, m.st.VaultID, m.opt.Release.PCR0)

@@ -742,6 +742,12 @@ func (p *Parent) onLifecycle(ev Lifecycle) {
 		return
 	}
 	p.log.Info("lifecycle", "event", ev.Event, "vault_id", ev.VaultID)
+	if ev.Event == EventAppKeyNext {
+		// A report only: the acknowledged request wrote app_key_next before
+		// the vault stored anything that names it. Writing it again would
+		// only replace the live entry (and drop its attempt stamp).
+		return
+	}
 	p.events <- func(ctx context.Context) {
 		err := p.cfg.Tables.Lifecycle(ctx, ev, p.cfg.InstanceID, p.now())
 		var ke *AppKeyWriteError

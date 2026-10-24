@@ -100,6 +100,17 @@ type ackedKey struct {
 	seq uint64
 }
 
+// unack forgets that key was confirmed.
+func (m *Manager) unack(key []byte, seq uint64) {
+	out := m.acked[:0]
+	for _, a := range m.acked {
+		if !(a.seq == seq && bytes.Equal(a.key, key)) {
+			out = append(out, a)
+		}
+	}
+	m.acked = out
+}
+
 // pin makes key the header's own: the key the stored header names is never
 // forgotten, whatever abandoned replacements were confirmed since.
 func (m *Manager) pin(key []byte, seq uint64) {

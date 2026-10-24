@@ -230,7 +230,9 @@ func TestAppKeyConditionsOrdered(t *testing.T) {
 	_ = a.AppKeys(ctx, Lifecycle{Event: "enrolled", VaultID: "v1", AppKey: []byte("k1"), AppKeySeq: 1}, now)
 	u := f.updates()
 	cond := func(i int) string { c, _ := u[i]["ConditionExpression"].(string); return c }
-	if len(u) != 3 || !strings.Contains(cond(0), "#akn.#hs < :hs") || !strings.Contains(cond(0), "#akn.#kid = :kid AND #akn.#hs <= :hs") {
+	// A report never replaces an app_key_next of an equal header_seq (it
+	// would drop the live entry's attempt stamp).
+	if len(u) != 3 || !strings.Contains(cond(0), "#akn.#hs < :hs)") || strings.Contains(cond(0), "<= :hs") || strings.Contains(cond(0), "#kid") {
 		t.Fatalf("next: %v", u)
 	}
 	if !strings.Contains(cond(1), "#akn.#hs <= :hs") {

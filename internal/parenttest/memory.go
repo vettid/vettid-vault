@@ -781,8 +781,7 @@ func (t *Tables) putNextLocked(r *VaultRow, key []byte, seq, hseq uint64, attemp
 		return
 	}
 	if r.AppKeyNext != nil {
-		same := parent.AppKeyID(r.AppKeyNext) == parent.AppKeyID(key)
-		ok := r.AppKeyNextHSeq < hseq || same && r.AppKeyNextHSeq <= hseq ||
+		ok := r.AppKeyNextHSeq < hseq ||
 			attempt != 0 && r.AppKeyNextHSeq == hseq && r.AppKeyNextAtt < attempt
 		if !ok {
 			return

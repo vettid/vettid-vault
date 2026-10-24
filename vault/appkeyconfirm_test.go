@@ -161,13 +161,16 @@ func TestBeginReplaceNotConfirmed(t *testing.T) {
 			rep := nextWithKey(t, f.m, key)
 			f.m.mu.Lock()
 			err := f.m.beginReplace(context.Background(), rep)
-			cleared, next, repl := f.m.nextCleared, f.m.hdr.Next, f.m.repl
+			next, repl := f.m.hdr.Next, f.m.repl
 			f.m.mu.Unlock()
-			if !errors.Is(err, errRetry) || next != nil || repl != nil || !cleared {
-				t.Fatalf("err %v next %v repl %v cleared %v", err, next, repl, cleared)
+			if !errors.Is(err, errRetry) || next != nil || repl != nil {
+				t.Fatalf("err %v next %v repl %v", err, next, repl)
 			}
-			if len(evs) != 0 {
-				t.Fatalf("events %v", evs)
+			// No app_key_next event; only the clear of a possible orphan.
+			for _, e := range evs {
+				if e != EventAppKey {
+					t.Fatalf("events %v", evs)
+				}
 			}
 			if name == "refused" && c.n() != 1 {
 				t.Fatalf("a refusal was retried: %d", c.n())
@@ -339,5 +342,49 @@ func TestEnrollConfirmsAppKey(t *testing.T) {
 			t.Fatalf("confirmations %+v", c.calls)
 		}
 		m.Crash()
+	}
+}
+
+// A step 1 that fails after the host's confirmation (or whose confirmation
+// is not known) leaves a confirmed key on the row that no stored header
+// names. The vault tells the parent at once, with the attempted
+// header_seq, to clear it, and does not take the key as confirmed. (A
+// failed open or approval ends without another report.)
+func TestFailedStepOneClearsTheOrphanNext(t *testing.T) {
+	for name, setup := range map[string]func(f *fixture, hs *headerFailStore, c *confirmer){
+		"confirm unanswered": func(f *fixture, hs *headerFailStore, c *confirmer) {
+			c.fail = func(int) error { return errors.New("answer lost") }
+		},
+		"header write fails": func(f *fixture, hs *headerFailStore, c *confirmer) { hs.fail.Store(true) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t)
+			hs := &headerFailStore{Store: f.store}
+			f.m.opt.Store = hs
+			c := &confirmer{}
+			f.m.opt.ConfirmAppKey, f.m.opt.AppKeyRetry = c.confirm, quickKeyRetry
+			cur := testAppKeyDER(t, 0x40)
+			f.m.hdr.AppKey, f.m.hdr.AppKeySeq = cur, 1
+			f.m.pin(cur, 1)
+			var evs []LifecycleEvent
+			f.m.opt.Lifecycle = func(ev LifecycleEvent) { evs = append(evs, ev) }
+			key := testAppKeyDER(t, 0x41)
+			rep := nextWithKey(t, f.m, key)
+			setup(f, hs, c)
+			f.m.mu.Lock()
+			err := f.m.beginReplace(context.Background(), rep)
+			acked := f.m.ackedAppKey(key, 2)
+			f.m.mu.Unlock()
+			if !errors.Is(err, errRetry) {
+				t.Fatalf("err %v", err)
+			}
+			if len(evs) != 1 || evs[0].Event != EventAppKey || !evs[0].NextCleared || evs[0].HeaderSeq != rep.next.HeaderSeq ||
+				!bytes.Equal(evs[0].AppKey, cur) || evs[0].AppKeySeq != 1 {
+				t.Fatalf("events %+v", evs)
+			}
+			if acked {
+				t.Fatal("the key is still taken as confirmed")
+			}
+		})
 	}
 }

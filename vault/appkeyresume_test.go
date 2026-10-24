@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -122,5 +123,36 @@ func TestRecoveryOpenResumeNeedsConfirmation(t *testing.T) {
 	defer m.Crash()
 	if h := f.storedHeader(); !bytes.Equal(h.AppKey, key) || h.Next != nil {
 		t.Fatalf("not completed: %+v", h)
+	}
+}
+
+// A recovery open whose step 1 fails after the confirmation ends with the
+// vault zeroized and no report: the orphan app_key_next is cleared by an
+// event sent at once.
+func TestRecoveryOpenFailedStepOneClearsTheOrphan(t *testing.T) {
+	f := newOpenFixture(t)
+	c := &confirmer{}
+	var mu sync.Mutex
+	var evs []LifecycleEvent
+	f.opts.ConfirmAppKey, f.opts.AppKeyRetry = c.confirm, quickKeyRetry
+	f.opts.Lifecycle = func(ev LifecycleEvent) { mu.Lock(); evs = append(evs, ev); mu.Unlock() }
+	f.st.failHeader = 1 // step 1's header write
+	m, out := f.open(testPIN, rPW)
+	if m != nil || out.Code != OpenRetry {
+		t.Fatalf("open: %+v", out)
+	}
+	if c.n() != 1 {
+		t.Fatalf("confirmations %d", c.n())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	var cleared []LifecycleEvent
+	for _, ev := range evs {
+		if ev.Event == EventAppKey && ev.NextCleared {
+			cleared = append(cleared, ev)
+		}
+	}
+	if len(cleared) != 1 || cleared[0].HeaderSeq == 0 {
+		t.Fatalf("events %+v", evs)
 	}
 }

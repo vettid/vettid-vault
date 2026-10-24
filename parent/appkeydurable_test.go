@@ -141,19 +141,40 @@ func TestAppKeyAssertionsWritten(t *testing.T) {
 	}
 }
 
-// The app_key_next report is not tried again (the acknowledged request
-// wrote the key); the failure is still logged as it always was.
-func TestAppKeyNextReportNotRetried(t *testing.T) {
+// The app_key_next report is not written to the table at all (the
+// acknowledged request wrote it): no failure, no retry, the row untouched.
+func TestAppKeyNextReportNotWritten(t *testing.T) {
 	defer parent.SetAppKeyRetryForTest(5*time.Millisecond, 20*time.Millisecond)()
 	h, e := appKeyHarness(t)
 	h.tables.PutVault(parenttest.VaultRow{VaultID: vaultID, UserGUID: "u1", State: "locked", AppKey: []byte("k1"), AppKeyID: parent.AppKeyID([]byte("k1")), AppKeySeq: 1})
 	h.tables.SetAppKeyErr(errors.New("throttled"))
 	e.appKeyEvent(parent.EventAppKeyNext, "k2", "2", "", "5")
-	waitFor(t, "logged", func() bool { return h.hasLog(`"msg":"lifecycle write failed","event":"app_key_next"`) })
+	waitFor(t, "logged as a lifecycle event", func() bool { return h.hasLog(`"msg":"lifecycle","event":"app_key_next"`) })
 	h.tables.SetAppKeyErr(nil)
 	time.Sleep(80 * time.Millisecond)
-	if r, _ := h.tables.Vault(vaultID); r.AppKeyNext != nil || h.hasLog("app key write failed; trying again") {
-		t.Fatalf("retried: %+v", r)
+	if r, _ := h.tables.Vault(vaultID); r.AppKeyNext != nil || h.hasLog("app key write failed") || h.hasLog("lifecycle write failed") {
+		t.Fatalf("written or retried: %+v", r)
+	}
+}
+
+// A report at the header_seq of a live entry does not replace it (it would
+// drop the attempt stamp, and a late older attempt would then pass).
+func TestReportKeepsTheLiveEntryStamp(t *testing.T) {
+	tb := parenttest.NewTables()
+	ctx, now := context.Background(), time.Now()
+	tb.PutVault(parenttest.VaultRow{VaultID: "v1", UserGUID: "u1", State: "locked", AppKey: []byte("k5"), AppKeyID: parent.AppKeyID([]byte("k5")), AppKeySeq: 5})
+	older, newer := att(), att()
+	if err := tb.ConfirmAppKey(ctx, "v1", "next", []byte("K8"), 6, 9, newer, now); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"K8", "K6"} { // the same key and another, at the same header_seq
+		_ = tb.AppKeys(ctx, parent.Lifecycle{Event: parent.EventAppKeyNext, VaultID: "v1", AppKey: []byte(k), AppKeySeq: 6, HeaderSeq: 9}, now)
+	}
+	if r, _ := tb.Vault("v1"); string(r.AppKeyNext) != "K8" || r.AppKeyNextAtt != newer {
+		t.Fatalf("report replaced the live entry: %+v", r)
+	}
+	if err := tb.ConfirmAppKey(ctx, "v1", "next", []byte("K6"), 6, 9, older, now); !errors.Is(err, parent.ErrConflict) {
+		t.Fatalf("a late older attempt: %v", err)
 	}
 }
 
@@ -308,9 +329,9 @@ func TestStaleAppKeyWritesDoNotRegress(t *testing.T) {
 	if err := tb.ConfirmAppKey(ctx, "v1", "next", []byte("K6"), 6, 5, att(), now); !errors.Is(err, parent.ErrConflict) {
 		t.Fatalf("a late confirm of the older attempt: %v", err)
 	}
-	_ = tb.AppKeys(ctx, parent.Lifecycle{Event: parent.EventAppKeyNext, VaultID: "v1", AppKey: []byte("K7"), AppKeySeq: 6, HeaderSeq: 7}, now)
+	_ = tb.AppKeys(ctx, parent.Lifecycle{Event: parent.EventAppKeyNext, VaultID: "v1", AppKey: []byte("K9"), AppKeySeq: 6, HeaderSeq: 7}, now)
 	if r := row(); string(r.AppKeyNext) != "K7" {
-		t.Fatalf("the same key again: %+v", r)
+		t.Fatalf("a report at an equal header_seq replaced: %+v", r)
 	}
 	_ = tb.AppKeys(ctx, parent.Lifecycle{Event: parent.EventAppKeyNext, VaultID: "v1", AppKey: []byte("K8"), AppKeySeq: 6, HeaderSeq: 9}, now)
 	if r := row(); string(r.AppKeyNext) != "K8" {

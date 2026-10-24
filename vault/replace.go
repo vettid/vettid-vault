@@ -84,7 +84,7 @@ func (m *Manager) beginReplace(ctx context.Context, r *replacement) error {
 		// through the replacement; it is cleared by the next_cleared that
 		// follows a later header write, or by the next unlock).
 		if err := m.confirmKey(ctx, AppKeyModeNext, r.next.AppKey, r.next.AppKeySeq, r.next.HeaderSeq); err != nil {
-			m.nextCleared = true
+			m.clearOrphanNext(r.next) // the host may have written it before the answer was lost
 			r.wipe()
 			return errRetry
 		}
@@ -92,7 +92,7 @@ func (m *Manager) beginReplace(ctx context.Context, r *replacement) error {
 	m.hdr.Next = r.next
 	if err := m.writeHeaderWith(ctx, false); err != nil {
 		m.hdr.Next = nil
-		m.nextCleared = m.nextCleared || r.next.AppKey != nil // the confirmed key may be on the row
+		m.clearOrphanNext(r.next) // the confirmed key is on the row, no header names it
 		r.wipe()
 		if errors.Is(err, ErrSplitBrain) {
 			return err
@@ -111,7 +111,7 @@ func (m *Manager) beginReplace(ctx context.Context, r *replacement) error {
 	}
 	if !ok {
 		m.hdr.Next = nil
-		m.nextCleared = m.nextCleared || r.next.AppKey != nil
+		m.clearOrphanNext(r.next)
 		r.wipe()
 		return errRetry
 	}
@@ -124,6 +124,35 @@ func (m *Manager) beginReplace(ctx context.Context, r *replacement) error {
 	m.replInHandler = true
 	m.dirty = true
 	return nil
+}
+
+// clearOrphanNext tells the parent, at once and best effort, to remove an
+// app_key_next that a failed step 1 left on the row: the key was confirmed
+// (or may have been) but no stored header names it. The event is the
+// current key with next_cleared and the attempted header_seq; the parent
+// removes a next written by that header_seq or an earlier one, and writes
+// the event again until it has (a report is not lost with the process,
+// which a failed open or approval ends without another report). The key is
+// no longer taken as confirmed.
+func (m *Manager) clearOrphanNext(nx *HeaderNext) {
+	if nx == nil || nx.AppKey == nil {
+		return
+	}
+	m.unack(nx.AppKey, nx.AppKeySeq)
+	if m.opt.Lifecycle == nil {
+		m.nextCleared = true // the next flush reports it
+		return
+	}
+	// The event repeats the current key; a vault without one (a recovery
+	// that gives it its first) names the attempted key, which the parent
+	// does not write for a clear.
+	key, seq := m.AppKey()
+	if key == nil {
+		key, seq = nx.AppKey, nx.AppKeySeq
+	}
+	ev := lifecycle(m.opt, EventAppKey, m.hdr.VaultID, m.opt.Release.PCR0)
+	ev.AppKey, ev.AppKeySeq, ev.NextCleared, ev.HeaderSeq = key, seq, true, nx.HeaderSeq
+	m.opt.Lifecycle(ev)
 }
 
 // promote is step 3, applied in memory after step 2 is stored: `next`

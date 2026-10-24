@@ -952,24 +952,22 @@ func (a *AWS) putNext(ctx context.Context, ev Lifecycle, now time.Time, attempt 
 	akn := &ddbtypes.AttributeValueMemberM{Value: map[string]ddbtypes.AttributeValue{
 		"key": s(base64.StdEncoding.EncodeToString(ev.AppKey)), "kid": s(AppKeyID(ev.AppKey)), "seq": n(int64(ev.AppKeySeq)),
 		"header_seq": n(int64(ev.HeaderSeq))}}
-	ord := "(#akn.#kid = :kid AND #akn.#hs <= :hs)"
+	ord := "" // a report never replaces an app_key_next of an equal header_seq
 	if live {
 		// At an equal header_seq only a later attempt of the parent's
 		// stamp replaces it: a write of an older attempt that lands late
 		// (a request the enclave gave up on) is refused.
-		ord = "(#akn.#hs = :hs AND (attribute_not_exists(#akn.#att) OR #akn.#att < :att))"
+		ord = " OR (#akn.#hs = :hs AND (attribute_not_exists(#akn.#att) OR #akn.#att < :att))"
 		akn.Value["att"] = n(attempt)
 	}
 	nm := map[string]string{"#akn": "app_key_next", "#ak": "app_key", "#seq": "seq", "#hs": "header_seq", "#u": "updated_at"}
 	vals := map[string]ddbtypes.AttributeValue{":akn": akn, ":seq": n(int64(ev.AppKeySeq)), ":hs": n(int64(ev.HeaderSeq)), ":u": s(isoNow(now))}
 	if live { // DynamoDB refuses names and values the expressions do not use
 		nm["#att"], vals[":att"] = "att", n(attempt)
-	} else {
-		nm["#kid"], vals[":kid"] = "kid", s(AppKeyID(ev.AppKey))
 	}
 	return a.updateVault(ctx, ev.VaultID, "SET #akn = :akn, #u = :u",
 		"attribute_exists(vault_id) AND (attribute_not_exists(#ak) OR #ak.#seq < :seq) AND "+
-			"(attribute_not_exists(#akn) OR attribute_not_exists(#akn.#hs) OR #akn.#hs < :hs OR "+ord+")", nm, vals)
+			"(attribute_not_exists(#akn) OR attribute_not_exists(#akn.#hs) OR #akn.#hs < :hs"+ord+")", nm, vals)
 }
 
 // nameChange writes the member's name request (0.18.0, §11.5, MEMBER-API

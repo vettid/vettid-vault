@@ -81,7 +81,7 @@ func (b *keyBook) note(ev vault.LifecycleEvent, now time.Time) {
 	// on the row before the vault stores anything that names it (the
 	// acknowledged request), so no assertion of it repairs anything, and a
 	// stale one could only bring back a key the vault dropped.
-	if ev.Event != vault.EventAppKeyNext && len(ev.AppKey) > 0 {
+	if ev.Event != vault.EventAppKeyNext && !ev.NextCleared && len(ev.AppKey) > 0 {
 		e.key, e.seq = append([]byte(nil), ev.AppKey...), ev.AppKeySeq
 	}
 }

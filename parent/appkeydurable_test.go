@@ -1,9 +1,9 @@
 package parent_test
 
 import (
-	"bytes"
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -108,7 +108,10 @@ func TestAppKeyWriteRetried(t *testing.T) {
 	if r, _ := h.tables.Vault(vaultID); string(r.AppKey) != "k1" {
 		t.Fatalf("written while failing: %+v", r)
 	}
-	if !bytes.Contains(h.logs.Bytes(), []byte("app key write failed; trying again")) {
+	h.logMu.Lock()
+	logged := strings.Contains(h.logs.String(), "app key write failed; trying again")
+	h.logMu.Unlock()
+	if !logged {
 		t.Fatal("failure not logged")
 	}
 	h.tables.AppKeyErr = nil

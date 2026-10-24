@@ -2,6 +2,7 @@ package supervisor
 
 import (
 	"context"
+	"fmt"
 	"github.com/vettid/vettid-vault/internal/vaultipc"
 	"net"
 	"strings"
@@ -20,12 +21,13 @@ func ev(event, vid, key string, seq uint64) vault.LifecycleEvent {
 	return vault.LifecycleEvent{Event: event, VaultID: vid, Release: keyRel, VaultVersion: keyRel, StateVersion: vault.StateVersion, AppKey: []byte(key), AppKeySeq: seq}
 }
 
-// The book keeps the last app key state relayed for each vault, and what
-// a later report supersedes goes.
+// The book keeps the current app key relayed for each vault, and nothing
+// of a replacement in progress (R1: its key is on the row before the vault
+// stores anything that names it, and a stale assertion of it could only
+// bring back a key the vault dropped).
 func TestKeyBook(t *testing.T) {
 	var b keyBook
 	now := time.Now()
-	yes, no := true, false
 	b.note(ev("enrolled", "v1", "k1", 1), now)
 	b.note(ev("locked", "v1", "k1", 1), now)
 	b.note(ev("unlocked", "v2", "a1", 3), now)
@@ -34,35 +36,19 @@ func TestKeyBook(t *testing.T) {
 	b.note(n, now)
 	got := map[string]vault.LifecycleEvent{}
 	for _, e := range b.events(now) {
-		got[e.Event+"/"+e.VaultID] = e
+		if e.Event != vault.EventAppKeyAssert {
+			t.Fatalf("event %s", e.Event)
+		}
+		got[e.VaultID] = e
 	}
-	if len(got) != 3 || string(got[vault.EventAppKeyAssert+"/v1"].AppKey) != "k1" || string(got[vault.EventAppKeyAssert+"/v2"].AppKey) != "a1" ||
-		got[vault.EventAppKeyNextAssert+"/v1"].HeaderSeq != 9 || string(got[vault.EventAppKeyNextAssert+"/v1"].AppKey) != "k2" {
+	if len(got) != 2 || string(got["v1"].AppKey) != "k1" || got["v1"].AppKeySeq != 1 || string(got["v2"].AppKey) != "a1" {
 		t.Fatalf("book %+v", got)
 	}
-	// A next the header still has stays through an unlocked that says so.
-	u := ev("unlocked", "v1", "k1", 1)
-	u.Next = &yes
-	b.note(u, now)
-	if len(b.events(now)) != 3 {
-		t.Fatal("the next key went with next: true")
-	}
-	// The app key reaching its seq, next_cleared, next: false and a new
-	// enrollment each end it.
-	for name, e := range map[string]vault.LifecycleEvent{
-		"app_key":      ev(vault.EventAppKey, "v1", "k2", 2),
-		"next_cleared": func() vault.LifecycleEvent { c := ev(vault.EventAppKey, "v1", "k1", 1); c.NextCleared = true; return c }(),
-		"next false":   func() vault.LifecycleEvent { c := ev("locked", "v1", "k1", 1); c.Next = &no; return c }(),
-		"enrolled":     ev("enrolled", "v1", "k0", 1),
-	} {
-		var c keyBook
-		c.note(ev("unlocked", "v1", "k1", 1), now)
-		c.note(n, now)
-		c.note(e, now)
-		for _, x := range c.events(now) {
-			if x.Event == vault.EventAppKeyNextAssert {
-				t.Fatalf("%s: the next key stayed", name)
-			}
+	// A transfer's app_key moves it on.
+	b.note(ev(vault.EventAppKey, "v1", "k2", 2), now)
+	for _, e := range b.events(now) {
+		if e.VaultID == "v1" && (string(e.AppKey) != "k2" || e.AppKeySeq != 2) {
+			t.Fatalf("not moved on: %+v", e)
 		}
 	}
 	// A deleted vault is forgotten.
@@ -71,6 +57,24 @@ func TestKeyBook(t *testing.T) {
 		if e.VaultID == "v2" {
 			t.Fatal("deleted vault kept")
 		}
+	}
+}
+
+// The book holds 4096 vaults; past that the one reported least recently
+// goes.
+func TestKeyBookCap(t *testing.T) {
+	var b keyBook
+	t0 := time.Now()
+	for i := 0; i < keyBookMax+10; i++ {
+		b.note(ev("unlocked", fmt.Sprintf("v%05d", i), "k", 1), t0.Add(time.Duration(i)*time.Millisecond))
+	}
+	got := b.events(t0.Add(time.Hour))
+	have := map[string]bool{}
+	for _, e := range got {
+		have[e.VaultID] = true
+	}
+	if len(got) != keyBookMax || have["v00000"] || have["v00009"] || !have["v00010"] || !have[fmt.Sprintf("v%05d", keyBookMax+9)] {
+		t.Fatalf("%d entries, oldest kept: %v", len(got), have["v00010"])
 	}
 }
 
@@ -100,7 +104,7 @@ func TestReassertAppKeysOnConnect(t *testing.T) {
 		mu.Lock()
 		n := len(got)
 		mu.Unlock()
-		if n >= 2 || time.Now().After(deadline) {
+		if n >= 1 || time.Now().After(deadline) {
 			break
 		}
 		time.Sleep(5 * time.Millisecond)
@@ -114,7 +118,7 @@ func TestReassertAppKeysOnConnect(t *testing.T) {
 		}
 		seen[string(f.Fields[0])] = string(f.Fields[5])
 	}
-	if len(got) != 2 || seen[vault.EventAppKeyAssert] != "k1" || seen[vault.EventAppKeyNextAssert] != "k2" {
+	if len(got) != 1 || seen[vault.EventAppKeyAssert] != "k1" {
 		t.Fatalf("frames %v", seen)
 	}
 }

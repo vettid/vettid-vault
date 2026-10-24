@@ -122,24 +122,87 @@ func TestAppKeyWriteRetried(t *testing.T) {
 	})
 }
 
-// The enclave's assertions are written as app_key and app_key_next.
+// The enclave's assertion is written as app_key. app_key_next_assert no
+// longer exists: a frame with that event is refused, and a stale one could
+// never bring back a next key (R1).
 func TestAppKeyAssertionsWritten(t *testing.T) {
 	h, e := appKeyHarness(t)
 	h.tables.PutVault(parenttest.VaultRow{VaultID: vaultID, UserGUID: "u1", State: "locked"})
 	e.appKeyEvent(parent.EventAppKeyAssert, "k1", "1", "", "0")
 	waitFor(t, "app_key", func() bool { r, _ := h.tables.Vault(vaultID); return string(r.AppKey) == "k1" && r.AppKeySeq == 1 })
-	e.appKeyEvent(parent.EventAppKeyNextAssert, "k2", "2", "", "6")
-	waitFor(t, "app_key_next", func() bool {
-		r, _ := h.tables.Vault(vaultID)
-		return string(r.AppKeyNext) == "k2" && r.AppKeyNextSeq == 2 && r.AppKeyNextHSeq == 6
-	})
+	e.appKeyEvent("app_key_next_assert", "k2", "2", "", "6")
 	// Older assertions change nothing, and an assertion never touches the state.
 	e.appKeyEvent(parent.EventAppKeyAssert, "k0", "1", "", "0")
 	e.appKeyEvent(parent.EventAppKeyAssert, "k2", "2", "", "0")
-	waitFor(t, "app_key moved on, next gone", func() bool { r, _ := h.tables.Vault(vaultID); return string(r.AppKey) == "k2" && r.AppKeyNext == nil })
-	if r, _ := h.tables.Vault(vaultID); r.State != "locked" {
-		t.Fatalf("state %q", r.State)
+	waitFor(t, "app_key moved on", func() bool { r, _ := h.tables.Vault(vaultID); return string(r.AppKey) == "k2" })
+	if r, _ := h.tables.Vault(vaultID); r.State != "locked" || r.AppKeyNext != nil {
+		t.Fatalf("row %+v", r)
 	}
+}
+
+// The app_key_next report is not tried again (the acknowledged request
+// wrote the key); the failure is still logged as it always was.
+func TestAppKeyNextReportNotRetried(t *testing.T) {
+	defer parent.SetAppKeyRetryForTest(5*time.Millisecond, 20*time.Millisecond)()
+	h, e := appKeyHarness(t)
+	h.tables.PutVault(parenttest.VaultRow{VaultID: vaultID, UserGUID: "u1", State: "locked", AppKey: []byte("k1"), AppKeyID: parent.AppKeyID([]byte("k1")), AppKeySeq: 1})
+	h.tables.SetAppKeyErr(errors.New("throttled"))
+	e.appKeyEvent(parent.EventAppKeyNext, "k2", "2", "", "5")
+	waitFor(t, "logged", func() bool { return h.hasLog(`"msg":"lifecycle write failed","event":"app_key_next"`) })
+	h.tables.SetAppKeyErr(nil)
+	time.Sleep(80 * time.Millisecond)
+	if r, _ := h.tables.Vault(vaultID); r.AppKeyNext != nil || h.hasLog("app key write failed; trying again") {
+		t.Fatalf("retried: %+v", r)
+	}
+}
+
+// R2: an earlier attempt's confirmation landed on the row but its header
+// was never stored; the next attempt reuses the header_seq with another
+// key, and its live confirm is not refused. R3: a stale next key of an
+// earlier vault (a higher seq and header_seq) does not refuse every later
+// confirm. Reports and retries stay strict.
+func TestLiveConfirmReplacesOwnEarlierAttempt(t *testing.T) {
+	tb := parenttest.NewTables()
+	ctx, now := context.Background(), time.Now()
+	row := func() parenttest.VaultRow { r, _ := tb.Vault("v1"); return r }
+	tb.PutVault(parenttest.VaultRow{VaultID: "v1", UserGUID: "u1", State: "locked", AppKey: []byte("k5"), AppKeyID: parent.AppKeyID([]byte("k5")), AppKeySeq: 5})
+	if err := tb.ConfirmAppKey(ctx, "v1", "next", []byte("K6"), 6, 4, now); err != nil {
+		t.Fatal(err)
+	}
+	// R2: another key, the same header_seq.
+	_ = tb.AppKeys(ctx, parent.Lifecycle{Event: parent.EventAppKeyNext, VaultID: "v1", AppKey: []byte("K8"), AppKeySeq: 6, HeaderSeq: 4}, now)
+	if string(row().AppKeyNext) != "K6" {
+		t.Fatal("a report replaced the next key at an equal header_seq")
+	}
+	if err := tb.ConfirmAppKey(ctx, "v1", "next", []byte("K8"), 6, 4, now); err != nil || string(row().AppKeyNext) != "K8" {
+		t.Fatalf("R2: %v %+v", err, row())
+	}
+	// R3: a next key of an earlier vault, above this one's seq and header_seq.
+	tb.PutVault(parenttest.VaultRow{VaultID: "v1", UserGUID: "u1", State: "enrolling", AppKey: []byte("k1"), AppKeyID: parent.AppKeyID([]byte("k1")), AppKeySeq: 1,
+		AppKeyNext: []byte("old"), AppKeyNextSeq: 9, AppKeyNextHSeq: 40})
+	if err := tb.ConfirmAppKey(ctx, "v1", "next", []byte("K2"), 2, 3, now); err != nil || string(row().AppKeyNext) != "K2" {
+		t.Fatalf("R3: %v %+v", err, row())
+	}
+	// A newer attempt's key is still not replaced by an older live confirm.
+	if err := tb.ConfirmAppKey(ctx, "v1", "next", []byte("K1"), 2, 2, now); !errors.Is(err, parent.ErrConflict) {
+		t.Fatalf("an older confirm: %v", err)
+	}
+}
+
+// The enrolled event never rolls app_key back: through the parent, as the
+// enclave's event arrives (also a retried or repeated one).
+func TestEnrolledEventNeverRollsBack(t *testing.T) {
+	h, e := appKeyHarness(t)
+	h.tables.PutVault(parenttest.VaultRow{VaultID: vaultID, UserGUID: "u1", State: "unlocked", AppKey: []byte("k2"), AppKeyID: parent.AppKeyID([]byte("k2")), AppKeySeq: 2})
+	e.appKeyEvent("enrolled", "k1", "1", "", "0")
+	waitFor(t, "written", func() bool { return len(h.tables.LifecycleEvents(vaultID)) == 1 })
+	if r, _ := h.tables.Vault(vaultID); string(r.AppKey) != "k2" || r.AppKeySeq != 2 {
+		t.Fatalf("enrolled rolled app_key back: %+v", r)
+	}
+	// A row still enrolling takes it (a replaced provisional vault).
+	h.tables.PutVault(parenttest.VaultRow{VaultID: vaultID, UserGUID: "u1", State: "enrolling", AppKey: []byte("k2"), AppKeyID: parent.AppKeyID([]byte("k2")), AppKeySeq: 2})
+	e.appKeyEvent("enrolled", "k1", "1", "", "0")
+	waitFor(t, "replaced", func() bool { r, _ := h.tables.Vault(vaultID); return string(r.AppKey) == "k1" })
 }
 
 func (h *harness) hasLog(s string) bool {
@@ -162,7 +225,7 @@ func TestStaleAppKeyWritesDoNotRegress(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = tb.AppKeys(ctx, parent.Lifecycle{Event: parent.EventAppKeyNext, VaultID: "v1", AppKey: []byte("K6"), AppKeySeq: 6, HeaderSeq: 5}, now)
-	_ = tb.AppKeys(ctx, parent.Lifecycle{Event: parent.EventAppKeyNextAssert, VaultID: "v1", AppKey: []byte("K6"), AppKeySeq: 6, HeaderSeq: 5}, now)
+	_ = tb.Lifecycle(ctx, parent.Lifecycle{Event: parent.EventAppKeyNext, VaultID: "v1", AppKey: []byte("K6"), AppKeySeq: 6, HeaderSeq: 5}, "me", now)
 	if r := row(); string(r.AppKeyNext) != "K7" || r.AppKeyNextHSeq != 7 {
 		t.Fatalf("a stale next replaced the confirmed one: %+v", r)
 	}

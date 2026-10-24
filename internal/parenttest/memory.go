@@ -546,7 +546,7 @@ func (t *Tables) Lifecycle(_ context.Context, ev parent.Lifecycle, me string, no
 		t.appKeysLocked(r, ev)
 	}
 	switch ev.Event {
-	case parent.EventAppKey, parent.EventAppKeyNext, parent.EventAppKeyAssert, parent.EventAppKeyNextAssert:
+	case parent.EventAppKey, parent.EventAppKeyNext, parent.EventAppKeyAssert:
 		return appKeyErr(keyErr, nil)
 	}
 	return appKeyErr(keyErr, t.lifecycleRest(r, ev, me, now))
@@ -561,7 +561,7 @@ func appKeyErr(keyErr, rest error) error {
 
 func hasAppKeyPart(ev parent.Lifecycle) bool {
 	switch ev.Event {
-	case parent.EventAppKey, parent.EventAppKeyNext, parent.EventAppKeyAssert, parent.EventAppKeyNextAssert:
+	case parent.EventAppKey, parent.EventAppKeyNext, parent.EventAppKeyAssert:
 		return true
 	}
 	return len(ev.AppKey) > 0 || ev.Next != nil
@@ -601,7 +601,7 @@ func (t *Tables) ConfirmAppKey(_ context.Context, vaultID, mode string, key []by
 		r.AppKeyNext, r.AppKeyNextSeq, r.AppKeyNextHSeq = nil, 0, 0
 		return nil
 	}
-	t.putNextLocked(r, key, seq, headerSeq)
+	t.putNextLocked(r, key, seq, headerSeq, true)
 	// As parent.AWS: ok if the row now names the key as app_key_next, or
 	// as app_key, at that seq or higher.
 	kid := parent.AppKeyID(key)
@@ -627,8 +627,6 @@ func (t *Tables) appKeysLocked(r *VaultRow, ev parent.Lifecycle) {
 	switch ev.Event {
 	case parent.EventAppKeyAssert:
 		ev.Event = parent.EventAppKey
-	case parent.EventAppKeyNextAssert:
-		ev.Event = parent.EventAppKeyNext
 	}
 	if r == nil {
 		return
@@ -636,7 +634,7 @@ func (t *Tables) appKeysLocked(r *VaultRow, ev parent.Lifecycle) {
 	// Release R's app_key_next, as parent.AWS.appKeyNext.
 	switch {
 	case ev.Event == parent.EventAppKeyNext:
-		t.putNextLocked(r, ev.AppKey, ev.AppKeySeq, ev.HeaderSeq)
+		t.putNextLocked(r, ev.AppKey, ev.AppKeySeq, ev.HeaderSeq, false)
 		return
 	case ev.Event == parent.EventAppKey && ev.NextCleared:
 		if r.AppKeyNext != nil && r.AppKeyNextHSeq <= ev.HeaderSeq {
@@ -762,15 +760,18 @@ func (c StaticCreds) Retrieve(context.Context) (parent.Credentials, error) {
 	return parent.Credentials(c), nil
 }
 
-// putNextLocked writes app_key_next as parent.AWS.appKeyNext does: only
-// above app_key's seq, and not over a next key written by a later
-// header_seq (the same key again may be).
-func (t *Tables) putNextLocked(r *VaultRow, key []byte, seq, hseq uint64) {
+// putNextLocked writes app_key_next as parent.AWS.putNext does.
+func (t *Tables) putNextLocked(r *VaultRow, key []byte, seq, hseq uint64, live bool) {
 	if len(r.AppKey) > 0 && seq <= r.AppKeySeq {
 		return
 	}
-	if r.AppKeyNext != nil && !(r.AppKeyNextHSeq < hseq || parent.AppKeyID(r.AppKeyNext) == parent.AppKeyID(key) && r.AppKeyNextHSeq <= hseq) {
-		return
+	if r.AppKeyNext != nil {
+		same := parent.AppKeyID(r.AppKeyNext) == parent.AppKeyID(key)
+		ok := r.AppKeyNextHSeq < hseq || same && r.AppKeyNextHSeq <= hseq ||
+			live && (r.AppKeyNextHSeq <= hseq || r.AppKeyNextSeq > seq)
+		if !ok {
+			return
+		}
 	}
 	r.AppKeyNext, r.AppKeyNextSeq, r.AppKeyNextHSeq = append([]byte(nil), key...), seq, hseq
 }

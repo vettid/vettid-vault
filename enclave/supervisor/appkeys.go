@@ -33,11 +33,10 @@ const keyLockedFor = 24 * time.Hour
 const keyAssertPace = 2 * time.Millisecond
 
 type keyEntry struct {
-	key  []byte
-	seq  uint64
-	next *vault.LifecycleEvent // the app_key_next event, while pending
-	rel  string                // the release that reported
-	at   time.Time
+	key []byte
+	seq uint64
+	rel string // the release that reported
+	at  time.Time
 	// locked: the vault's last report was `locked`; such an entry is
 	// asserted for keyLockedFor only (a vault that locked here may run on
 	// another instance since, whose book and writes are the newer).
@@ -78,20 +77,12 @@ func (b *keyBook) note(ev vault.LifecycleEvent, now time.Time) {
 		b.m[ev.VaultID] = e
 	}
 	e.at, e.rel, e.locked = now, ev.VaultVersion, ev.Event == "locked"
-	switch {
-	case ev.Event == vault.EventAppKeyNext:
-		c := ev
-		c.AppKey = append([]byte(nil), ev.AppKey...)
-		e.next = &c
-		return
-	case len(ev.AppKey) > 0:
+	// Only the current key is kept: a key of a replacement in progress is
+	// on the row before the vault stores anything that names it (the
+	// acknowledged request), so no assertion of it repairs anything, and a
+	// stale one could only bring back a key the vault dropped.
+	if ev.Event != vault.EventAppKeyNext && len(ev.AppKey) > 0 {
 		e.key, e.seq = append([]byte(nil), ev.AppKey...), ev.AppKeySeq
-	}
-	switch {
-	case ev.Event == "enrolled", ev.Event == vault.EventAppKey && ev.NextCleared,
-		(ev.Event == "unlocked" || ev.Event == "locked") && ev.Next != nil && !*ev.Next,
-		e.next != nil && e.next.AppKeySeq <= e.seq:
-		e.next = nil
 	}
 }
 
@@ -108,11 +99,6 @@ func (b *keyBook) events(now time.Time) []vault.LifecycleEvent {
 		if len(e.key) > 0 {
 			out = append(out, vault.LifecycleEvent{Event: vault.EventAppKeyAssert, VaultID: id, Release: e.rel, VaultVersion: e.rel,
 				StateVersion: vault.StateVersion, AppKey: append([]byte(nil), e.key...), AppKeySeq: e.seq})
-		}
-		if n := e.next; n != nil {
-			c := *n
-			c.Event = vault.EventAppKeyNextAssert
-			out = append(out, c)
 		}
 	}
 	return out

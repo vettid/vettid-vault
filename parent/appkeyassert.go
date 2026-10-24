@@ -6,8 +6,8 @@ import (
 	"time"
 )
 
-// The enclave's assertions after a connect (EventAppKeyAssert,
-// EventAppKeyNextAssert) can be thousands: they are written by a worker of
+// The enclave's assertions after a connect (EventAppKeyAssert) can be
+// thousands: they are written by a worker of
 // their own, one vault at a time with a pause between, never on the event
 // queue (which the connection's replies and the confirmations wait on).
 // They are conditional on seq and header_seq, so they can be late or stale

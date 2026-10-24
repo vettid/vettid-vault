@@ -655,7 +655,7 @@ func parseLifecycle(f *hostproto.Frame) (Lifecycle, bool) {
 		ev.Name = n
 	}
 	switch ev.Event {
-	case EventAppKey, EventAppKeyNext, EventAppKeyAssert, EventAppKeyNextAssert:
+	case EventAppKey, EventAppKeyNext, EventAppKeyAssert:
 		if ev.AppKey == nil || ev.NextCleared && ev.Event != EventAppKey {
 			return Lifecycle{}, false
 		}
@@ -734,7 +734,7 @@ func (p *Parent) onLifecycle(ev Lifecycle) {
 		ev.KeepLease = ev.Event == "locked" && p.taking[ev.VaultID] > 0
 	}
 	p.mu.Unlock()
-	if ev.Event == EventAppKeyAssert || ev.Event == EventAppKeyNextAssert {
+	if ev.Event == EventAppKeyAssert {
 		p.log.Debug("lifecycle", "event", ev.Event, "vault_id", ev.VaultID)
 		p.queueAssert(ev)
 		return
@@ -746,7 +746,12 @@ func (p *Parent) onLifecycle(ev Lifecycle) {
 		if errors.As(err, &ke) {
 			// app_key / app_key_next were not written: tried again until
 			// they are; the rest of the event is judged on its own.
-			p.retryAppKeys(ev, ke.Err)
+			if ev.Event != EventAppKeyNext {
+				// The app_key_next report is not tried again: the
+				// acknowledged request wrote the key before the vault
+				// stored anything that names it.
+				p.retryAppKeys(ev, ke.Err)
+			}
 			// The line an unwritten event always had.
 			p.log.Warn("lifecycle write failed", "event", ev.Event, "vault_id", ev.VaultID, "error", ke.Err.Error())
 			err = ke.Rest

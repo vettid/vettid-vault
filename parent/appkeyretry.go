@@ -19,7 +19,7 @@ import (
 //   - the enclave asks for the row to name a key before it adopts it, and
 //     is answered only after the table write (confirmAppKey);
 //   - after a restart the enclave asserts the keys it last reported
-//     (EventAppKeyAssert, EventAppKeyNextAssert).
+//     (EventAppKeyAssert).
 
 // ErrPermanent marks an error as one that trying again cannot cure (fakes
 // in tests use it).

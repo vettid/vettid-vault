@@ -195,14 +195,11 @@ type LifecycleEvent struct {
 // with its first header write (release R, §11.5, §11.14.2).
 const EventAppKeyNext = "app_key_next"
 
-// EventAppKeyAssert and EventAppKeyNextAssert tell a parent again the app
-// key state the supervisor last relayed for a vault (after a connect): the
-// current key, and a key of a replacement in progress. The parent writes
-// them as app_key and app_key_next (conditional on seq).
-const (
-	EventAppKeyAssert     = "app_key_assert"
-	EventAppKeyNextAssert = "app_key_next_assert"
-)
+// EventAppKeyAssert tells a parent again the current app key the
+// supervisor last relayed for a vault (after a connect). The parent writes
+// it as app_key (conditional on seq). A key of a replacement in progress is
+// not asserted: the acknowledged request put it on the row.
+const EventAppKeyAssert = "app_key_assert"
 
 // EventCredentialBackup reports a changed backup bit (0.16.0, §11.5).
 const EventCredentialBackup = "credential_backup"

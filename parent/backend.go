@@ -279,14 +279,10 @@ type CredentialSource interface {
 	Retrieve(ctx context.Context) (Credentials, error)
 }
 
-// EventAppKeyAssert and EventAppKeyNextAssert are the enclave's repeat of
-// the app key state it last reported for a vault, sent after every
-// connect (a parent that restarted lost what it had queued): written as
-// app_key and app_key_next.
-const (
-	EventAppKeyAssert     = "app_key_assert"
-	EventAppKeyNextAssert = "app_key_next_assert"
-)
+// EventAppKeyAssert is the enclave's repeat of the current app key it last
+// reported for a vault, sent after every connect (a parent that restarted
+// lost what it had queued): written as app_key.
+const EventAppKeyAssert = "app_key_assert"
 
 // AppKeyWriteError is the error of a Lifecycle whose app_key or
 // app_key_next write failed: Err is that failure and Rest the error of the

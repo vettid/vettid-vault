@@ -65,3 +65,32 @@ func TestCallsWhileHeld(t *testing.T) {
 	b.f.OwnerHoldStarted(vault.NewSession(context.Background(), b.h, vault.PeerInfo{}, t0.Add(3*time.Second), nil))
 	b.none(t, "call.end")
 }
+
+// §3.6.8 (0.29.0, release L): the idle lock waits for a call in progress,
+// ringing or answered, and not for an ended or timed-out one.
+func TestCallInProgress(t *testing.T) {
+	b := newSide("cA")
+	var _ vault.CallActivity = b.f
+	if b.f.CallInProgress(t0) {
+		t.Fatal("no call")
+	}
+	sk, _ := callwire.NewOfferKey()
+	id := newCallID("cA")
+	featuretest.CallExp(b.f, b.h, t0, t0.Add(OfferTTL), "connection:cA", "call.offer", peerOffer("cA", id, "audio", sk.Public().Bytes()))
+	if !b.f.CallInProgress(t0.Add(time.Second)) {
+		t.Fatal("a ringing call")
+	}
+	if b.f.CallInProgress(t0.Add(OfferTTL + time.Second)) {
+		t.Fatal("a timed-out offer")
+	}
+	enc, _, err := callwire.Answer(sk.Public().Bytes(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := featuretest.Call(b.f, b.h, t0.Add(2*time.Second), "desktop", "call.answer", answerBody("dev-desktop", id, enc)); !r.OK() {
+		t.Fatal(r.Code)
+	}
+	if !b.f.CallInProgress(t0.Add(time.Hour)) || b.f.CallInProgress(t0.Add(2*time.Second+MaxCallDuration)) {
+		t.Fatal("an answered call, and its 12 h bound")
+	}
+}

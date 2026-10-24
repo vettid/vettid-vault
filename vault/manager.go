@@ -80,6 +80,9 @@ type Options struct {
 	// (§3.6; tests move it past a deadline while messages keep the real
 	// time). Nil: Now.
 	OwnerCheckClock func() time.Time
+	// IdleWatchEvery is how often Run's own timer looks at the idle lock
+	// beside the collect loop (§3.6.8; 0: IdleWatchDefault). For tests.
+	IdleWatchEvery time.Duration
 	// AskRand, if set, draws the delay of a suppressed ask's neutral
 	// answer (§10.4.1): a uniform value in [0, n). Nil: crypto/rand.
 	AskRand func(n int64) int64
@@ -289,7 +292,13 @@ type Manager struct {
 	unlockedBy string
 	// lockBy: the owner device whose vault.lock is pending, audited on
 	// vault.locked (0.23.2); "" for every other lock.
-	lockBy      string
+	lockBy string
+	// The idle lock's look at this opening (§3.6.8 "After an unlock"):
+	// idleOpened once it was taken; idleGrace is one hour from an unlock
+	// that came when the idle lock's time had already passed (zero
+	// otherwise). Memory only: every opening has its own.
+	idleOpened  bool
+	idleGrace   time.Time
 	started     bool
 	hadFailures bool // the header recorded failures before this unlock
 	holdsDEK    bool // counted in unlocked
@@ -1100,7 +1109,11 @@ func (m *Manager) lockLocked(ctx context.Context) error {
 	if m.lockReason == "" {
 		by = m.lockBy
 	}
-	m.record(Activity{Kind: "vault.locked", DeviceID: by, Audit: true}, m.now())
+	ref := ""
+	if m.lockReason == LockIdle {
+		ref = LockIdle // §10.9 (0.29.0, release L): the idle lock, §3.6.8
+	}
+	m.record(Activity{Kind: "vault.locked", DeviceID: by, Ref: ref, Audit: true}, m.now())
 	err := m.persist(ctx, false)
 	if errors.Is(err, ErrSplitBrain) {
 		return err

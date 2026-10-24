@@ -493,4 +493,7 @@ type Settings struct {
 	OwnerCheckSeconds uint64     `json:"owner_check_interval,omitempty"`
 	HoldOff           bool       `json:"hold_off,omitempty"`
 	HoldOffUntil      *time.Time `json:"hold_off_until,omitempty"`
+	// The idle lock (§3.6.8, 0.29.0, release L): seconds past the
+	// owner-check deadline; 0 = the default, 7 days.
+	IdleLockSeconds uint64 `json:"idle_lock_after,omitempty"`
 }

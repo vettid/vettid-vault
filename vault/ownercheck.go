@@ -60,6 +60,10 @@ type OwnerCheck struct {
 	// vault.held per device (at most one per HeldNoticeEvery, §3.6.3).
 	Waiting HeldCounts            `json:"waiting"`
 	Notices map[string]HeldNotice `json:"notices,omitempty"`
+	// IdleAfter is idle_lock.after_seconds as it was at the last
+	// successful check (§3.6.8): a longer value applies only from the
+	// next one. 0 in a record from before release L.
+	IdleAfter uint64 `json:"idle_after,omitempty"`
 }
 
 // HeldCounts are vault.held's content-free counts (§3.6.3).
@@ -277,6 +281,8 @@ func (m *Manager) ocTime(now time.Time) time.Time {
 func (m *Manager) startClock(rec *OwnerCheck, now time.Time) {
 	now = m.ocTime(now).UTC().Truncate(time.Millisecond)
 	rec.LastAt, rec.Deadline, rec.Failures = now, now.Add(m.opt.scale(m.st.Settings.OwnerCheckInterval())), 0
+	// §3.6.8: the idle lock's setting as of this check.
+	rec.IdleAfter = uint64(m.st.Settings.IdleLockAfter() / time.Second)
 }
 
 // ownerCheckEnrolled starts the clock at the vault's first
@@ -410,6 +416,7 @@ func (m *Manager) ownerCheckTick(now time.Time) {
 	if rec.Gate != "" {
 		m.heldNotices(now, m.ocTime(now), force)
 	}
+	m.idleLockTick(now) // §3.6.8 (0.29.0, release L)
 }
 
 // enterHold runs once when the hold begins (§3.6.3), in the batch's flush.
@@ -452,8 +459,12 @@ func (m *Manager) heldNotices(now, oc time.Time, force bool) {
 	if rec.Notices == nil {
 		rec.Notices = map[string]HeldNotice{}
 	}
-	body := strictjson.NewBuilder().String("deadline", envelope.FormatTS(rec.Deadline)).
-		Raw("waiting", heldCountsJSON(rec.Waiting)).Bytes()
+	hb := strictjson.NewBuilder().String("deadline", envelope.FormatTS(rec.Deadline)).
+		Raw("waiting", heldCountsJSON(rec.Waiting))
+	if at, ok := m.idleLockAt(now); ok {
+		hb.String("idle_lock_at", envelope.FormatTS(at)) // §3.6.8 (0.29.0, release L)
+	}
+	body := hb.Bytes()
 	for _, p := range m.ownerDevices() {
 		if p.Kind != KindApp && rec.Gate != OwnerCheckHeld {
 			continue // with the hold off only the app is gated
@@ -608,6 +619,12 @@ func (m *Manager) ownerCheckStatus(p *Peer, now time.Time) []byte {
 	if rec := m.st.OwnerCheck; rec != nil && state != OwnerCheckOK && m.getsHeld(p, state, now) {
 		b.Raw("waiting", heldCountsJSON(rec.Waiting))
 	}
+	// §3.6.8 (0.29.0, release L): when the vault will lock itself if no
+	// check is passed, to the app and desktops; absent without a
+	// credential.
+	if at, ok := m.idleLockAt(now); ok && (p.Kind == KindApp || p.Kind == KindDesktop) {
+		b.String("idle_lock_at", envelope.FormatTS(at))
+	}
 	return b.Bytes()
 }
 
@@ -627,6 +644,19 @@ func heldCountsJSON(w HeldCounts) []byte {
 // (a longer one waits for the next check), and turning the hold on is
 // audited; the hold then applies at once if the deadline has passed.
 func (m *Manager) settingsOwnerCheck(prev, next Settings, now time.Time) {
+	// §3.6.8 (owner decision 2026-10-23: keep the shorter): the lowest
+	// idle-lock value set since the last check stays in force until the
+	// next check, so a longer value set afterwards cannot buy time.
+	if rec := m.st.OwnerCheck; rec != nil {
+		inForce := DefaultIdleLockAfter // a record from before release L
+		if rec.IdleAfter != 0 {
+			inForce = time.Duration(rec.IdleAfter) * time.Second
+		}
+		if next.IdleLockAfter() < inForce {
+			rec.IdleAfter = uint64(next.IdleLockAfter() / time.Second)
+			m.dirty = true
+		}
+	}
 	if rec := m.st.OwnerCheck; rec != nil && !rec.Deadline.IsZero() && next.OwnerCheckInterval() < prev.OwnerCheckInterval() {
 		// The settings compare in real units; the new deadline is scaled
 		// as startClock's (0.43.0, S1).
@@ -643,4 +673,5 @@ func (m *Manager) settingsOwnerCheck(prev, next Settings, now time.Time) {
 
 // ownerCheckKeys are the settings only the holder may change (§3.6.2,
 // §3.6.7): a desktop naming one is refused at once, never held.
-var ownerCheckKeys = []string{"owner_check.interval_seconds", "owner_check.hold", "owner_check.hold_off_until"}
+var ownerCheckKeys = []string{"owner_check.interval_seconds", "owner_check.hold", "owner_check.hold_off_until",
+	"idle_lock.after_seconds"} // §3.6.8 (0.29.0, release L): the app only

@@ -844,10 +844,17 @@ func (a *AWS) appKey(ctx context.Context, ev Lifecycle, now time.Time) error {
 		ev.Event = EventAppKey
 	}
 	if ev.Event == EventAppKeyNextClear {
-		// Exactly the attempted key at the attempted header_seq.
-		err := a.updateVault(ctx, ev.VaultID, "REMOVE #akn SET #u = :u", "attribute_exists(#akn) AND #akn.#kid = :kid AND #akn.#hs = :hs",
-			map[string]string{"#akn": "app_key_next", "#kid": "kid", "#hs": "header_seq", "#u": "updated_at"},
-			map[string]ddbtypes.AttributeValue{":kid": s(AppKeyID(ev.AppKey)), ":hs": n(int64(ev.HeaderSeq)), ":u": s(isoNow(now))})
+		// Exactly the attempted key at the attempted header_seq, made by
+		// the confirmation with the event's stamp: another instance's
+		// confirmation of the same key at the same header_seq (a split
+		// brain's winner) has another stamp and stays. Without a stamp
+		// nothing is cleared.
+		if ev.Att == 0 {
+			return nil
+		}
+		err := a.updateVault(ctx, ev.VaultID, "REMOVE #akn SET #u = :u", "attribute_exists(#akn) AND #akn.#kid = :kid AND #akn.#hs = :hs AND #akn.#att = :att",
+			map[string]string{"#akn": "app_key_next", "#kid": "kid", "#hs": "header_seq", "#att": "att", "#u": "updated_at"},
+			map[string]ddbtypes.AttributeValue{":kid": s(AppKeyID(ev.AppKey)), ":hs": n(int64(ev.HeaderSeq)), ":att": n(ev.Att), ":u": s(isoNow(now))})
 		if errors.Is(err, ErrLeaseHeld) {
 			return nil
 		}

@@ -170,6 +170,13 @@ type Lifecycle struct {
 	// took the lease for the vault it is opening; the parent gives it
 	// back afterwards if the vault did not open (§11.1).
 	KeepLease bool
+	// Att is set by the parent, never parsed from the enclave: on
+	// app_key_next_clear, the stamp this parent used for its live
+	// confirmation of the key at the event's header_seq. The clear removes
+	// the row's app_key_next only if it carries that stamp (an entry another
+	// instance confirmed for the same key and header_seq has another).
+	// Zero never clears.
+	Att int64
 }
 
 // NameChange is account_name's request (0.18.0, §10.8, §11.5).
@@ -286,7 +293,8 @@ const EventAppKeyAssert = "app_key_assert"
 
 // EventAppKeyNextClear is a failed step 1's orphan clear: the row's
 // app_key_next is removed only if it is the event's key (kid) at the
-// event's header_seq.
+// event's header_seq and carries the stamp (Lifecycle.Att) of the
+// confirmation that made the entry.
 const EventAppKeyNextClear = "app_key_next_clear"
 
 // AppKeyWriteError is the error of a Lifecycle whose app_key or

@@ -145,6 +145,10 @@ func (p *Parent) confirmAppKey(ctx context.Context, f [][]byte) [][]byte {
 	}
 	key := clone(f[2])
 	attempt := p.nextAttempt()
+	if mode == "next" {
+		// Before the write: a clear after a lost answer must know it.
+		p.noteStamp(id, AppKeyID(key), num[1], attempt)
+	}
 	result := make(chan error, 1)
 	go func() {
 		defer release()

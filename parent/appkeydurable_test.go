@@ -501,13 +501,13 @@ func TestOrphanClearIsExact(t *testing.T) {
 	row := func() parenttest.VaultRow { r, _ := tb.Vault("v1"); return r }
 	clear := func(key string, hs uint64) {
 		t.Helper()
-		if err := tb.Lifecycle(ctx, parent.Lifecycle{Event: parent.EventAppKeyNextClear, VaultID: "v1", AppKey: []byte(key), AppKeySeq: 6, HeaderSeq: hs}, "me", now); err != nil {
+		if err := tb.Lifecycle(ctx, parent.Lifecycle{Event: parent.EventAppKeyNextClear, VaultID: "v1", AppKey: []byte(key), AppKeySeq: 6, HeaderSeq: hs, Att: 77}, "me", now); err != nil {
 			t.Fatal(err)
 		}
 	}
 	put := func(key string, hs uint64) {
 		tb.PutVault(parenttest.VaultRow{VaultID: "v1", UserGUID: "u1", State: "locked", AppKey: []byte("k5"), AppKeyID: parent.AppKeyID([]byte("k5")), AppKeySeq: 5,
-			AppKeyNext: []byte(key), AppKeyNextSeq: 6, AppKeyNextHSeq: hs})
+			AppKeyNext: []byte(key), AppKeyNextSeq: 6, AppKeyNextHSeq: hs, AppKeyNextAtt: 77})
 	}
 	put("K6", 4) // an older pending key at a lower header_seq
 	clear("K8", 9)

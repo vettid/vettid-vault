@@ -647,7 +647,7 @@ func (t *Tables) appKeysLocked(r *VaultRow, ev parent.Lifecycle) {
 		return
 	}
 	if ev.Event == parent.EventAppKeyNextClear {
-		if r.AppKeyNext != nil && parent.AppKeyID(r.AppKeyNext) == parent.AppKeyID(ev.AppKey) && r.AppKeyNextHSeq == ev.HeaderSeq {
+		if ev.Att != 0 && r.AppKeyNext != nil && parent.AppKeyID(r.AppKeyNext) == parent.AppKeyID(ev.AppKey) && r.AppKeyNextHSeq == ev.HeaderSeq && r.AppKeyNextAtt == ev.Att {
 			r.AppKeyNext, r.AppKeyNextSeq, r.AppKeyNextHSeq, r.AppKeyNextAtt = nil, 0, 0, 0
 		}
 		return

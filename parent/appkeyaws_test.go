@@ -299,12 +299,24 @@ func att() int64 { return time.Now().UnixNano() }
 func TestOrphanClearCondition(t *testing.T) {
 	f := &fakeDDB{script: func(int, string) string { return "cond" }}
 	a := newFakeAWS(t, f)
-	if err := a.AppKeys(context.Background(), Lifecycle{Event: EventAppKeyNextClear, VaultID: "v1", AppKey: []byte("k8"), AppKeySeq: 6, HeaderSeq: 9}, time.Now()); err != nil {
+	if err := a.AppKeys(context.Background(), Lifecycle{Event: EventAppKeyNextClear, VaultID: "v1", AppKey: []byte("k8"), AppKeySeq: 6, HeaderSeq: 9, Att: 55}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	u := f.updates()
 	c, _ := u[0]["ConditionExpression"].(string)
-	if len(u) != 1 || !strings.Contains(c, "#akn.#kid = :kid") || !strings.Contains(c, "#akn.#hs = :hs") || strings.Contains(c, "<=") {
+	if len(u) != 1 || !strings.Contains(c, "#akn.#att = :att") || !strings.Contains(c, "#akn.#kid = :kid") || !strings.Contains(c, "#akn.#hs = :hs") || strings.Contains(c, "<=") {
+		t.Fatalf("%v", u)
+	}
+}
+
+// An orphan clear without a stamp is not written at all.
+func TestOrphanClearWithoutStampNotWritten(t *testing.T) {
+	f := &fakeDDB{script: func(int, string) string { return "" }}
+	a := newFakeAWS(t, f)
+	if err := a.AppKeys(context.Background(), Lifecycle{Event: EventAppKeyNextClear, VaultID: "v1", AppKey: []byte("k8"), AppKeySeq: 6, HeaderSeq: 9}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if u := f.updates(); len(u) != 0 {
 		t.Fatalf("%v", u)
 	}
 }

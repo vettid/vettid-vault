@@ -2,6 +2,7 @@ package enclave
 
 import (
 	"errors"
+	"time"
 
 	"github.com/vettid/vettid-vault/vms/altchan"
 	"github.com/vettid/vettid-vault/vms/envelope"
@@ -28,6 +29,10 @@ type Job struct {
 	// AppKey is the queue message's app_key (enroll, recovery_register;
 	// 0.15.0), bound to the sealed app.api_key.
 	AppKey []byte
+	// EnqueuedAt is the queue message's enqueued_at (0.29.0, release L):
+	// the host keeps it with the vault the job opens, to order an
+	// unconditional lock (§11.5). Not sent to the vault process.
+	EnqueuedAt time.Time
 	// Account is the queue message's account snapshot (unlock, 0.15.0;
 	// enroll, REQUIRED since 0.18.0; §11.13), applied after a successful
 	// unlock or with the enrollment's first flush.

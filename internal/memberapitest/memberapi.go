@@ -617,6 +617,10 @@ func (a *API) enqueue(ctx context.Context, op, guid string, v *vaultRow, request
 	return a.enqueueWith(ctx, op, guid, v, requestID, inst, kid, env, manifestSHA, "", requestTTLS, nil)
 }
 
+// lockUnlockID carries a lock's unlock_id from the lock route to
+// enqueueWith (MEMBER-API 2.5.0, release L).
+type lockUnlockIDKey struct{}
+
 // enqueueWith is enqueue with vault.ts's extra fields: the recovery's
 // browser_key (after manifest_sha256), the slot's TTL and extra slot
 // attributes (a register's recovery_id).
@@ -677,6 +681,9 @@ func (a *API) enqueueWith(ctx context.Context, op, guid string, v *vaultRow, req
 	}
 	if op == "enroll" || op == "unlock" || op == "account" {
 		b.WriteString(`,"account":` + string(a.Snapshot(guid))) // §11.13; enroll since 0.18.0 (§11.5)
+	}
+	if uid, _ := ctx.Value(lockUnlockIDKey{}).(string); op == "lock" && uid != "" {
+		b.WriteString(`,"unlock_id":` + jsonString(uid)) // a bound lock (MEMBER-API 2.5.0, release L)
 	}
 	b.WriteString(`,"enqueued_at":` + jsonString(created) + `}`)
 	body := b.String()
@@ -891,6 +898,15 @@ func (a *API) lock(ctx context.Context, guid string, body map[string]any) (any, 
 	if err != nil {
 		return nil, err
 	}
+	// MEMBER-API 2.5.0 (release L, "Locks"): an optional unlock_id makes
+	// the lock bound; it is copied into the queue message.
+	if _, ok := body["unlock_id"]; ok {
+		uid, err := field(body, "unlock_id", vaultIDRE, "32 lowercase hex")
+		if err != nil {
+			return nil, err
+		}
+		ctx = context.WithValue(ctx, lockUnlockIDKey{}, uid)
+	}
 	_, cur, err := a.currentVault(ctx, guid)
 	if err != nil {
 		return nil, err
@@ -908,8 +924,9 @@ func (a *API) lock(ctx context.Context, guid string, body map[string]any) (any, 
 			return nil, err
 		}
 	} else {
+		// No live lease: nothing runs; said as not_running (2.5.0).
 		item := map[string]ddbtypes.AttributeValue{"request_id": s(rid), "vault_id": s(v.VaultID), "user_guid": s(guid), "op": s("lock"),
-			"status": s("done"), "created_at": s(a.nowISO()), "expires_at": n(a.nowS() + requestTTLS)}
+			"status": s("done"), "code": s("not_running"), "created_at": s(a.nowISO()), "expires_at": n(a.nowS() + requestTTLS)}
 		if c := callerOf(ctx); c != nil && c.app != nil {
 			item["app_kid"] = s(c.app.kid)
 		}
@@ -959,7 +976,8 @@ func (a *API) request(ctx context.Context, guid, rid string) (any, error) {
 				out["envelope"] = e
 			}
 		}
-		if c := str(it, "code"); codeRE.MatchString(c) {
+		// 2.5.0: a lock's three codes for a lock's slot only.
+		if c := str(it, "code"); codeRE.MatchString(c) && (str(it, "op") == "lock" || c != "locked" && c != "not_running" && c != "stale") {
 			out["code"] = c
 		}
 		// The app polls its register result: the moment to retire the

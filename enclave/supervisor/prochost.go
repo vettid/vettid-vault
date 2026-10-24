@@ -123,6 +123,10 @@ type vproc struct {
 	exited     chan struct{}
 	exitCode   int
 
+	// openedAt is the enqueued_at of the message that opened the vault
+	// (0.29.0, release L, §11.5), set when the open started it.
+	openedAt time.Time
+
 	mu      sync.Mutex
 	opening bool
 	// prevRead are the two objects of the member's previous vault that an
@@ -480,6 +484,7 @@ func (h *procHost) Open(ctx context.Context, j *enclave.Job) ([]byte, enclave.Ma
 		h.stop(p)
 		return res, marker, nil
 	}
+	p.openedAt = j.EnqueuedAt
 	h.mu.Lock()
 	h.procs[j.VaultID] = p
 	h.mu.Unlock()
@@ -593,6 +598,55 @@ func (h *procHost) LockReason(ctx context.Context, id, reason string) (bool, err
 		return true, errNotDeleted
 	}
 	return true, nil
+}
+
+// LockRequest implements enclave.Host: the queue op lock (0.29.0, release
+// L, §11.5). Unconditional: stale when it was queued at or before the
+// message that opened the vault, otherwise locked as an owner request.
+// Bound: the vault's process compares the unlock_id and locks or answers
+// stale. A process that does not answer in time is killed: locked.
+func (h *procHost) LockRequest(ctx context.Context, id, unlockID string, enqueuedAt time.Time) (string, error) {
+	h.mu.Lock()
+	p := h.procs[id]
+	h.mu.Unlock()
+	if p == nil {
+		return enclave.CodeNotRunning, nil
+	}
+	if unlockID == "" {
+		if enclave.LockIsStale("", p.openedAt, "", enqueuedAt) {
+			return enclave.CodeStale, nil
+		}
+		ran, err := h.LockReason(ctx, id, "")
+		if !ran {
+			return enclave.CodeNotRunning, nil // gone meanwhile
+		}
+		return enclave.CodeLocked, err
+	}
+	lctx, cancel := context.WithTimeout(ctx, h.cfg.LockTimeout)
+	r, err := p.conn.Call(lctx, vaultipc.KindLockBound, []byte(unlockID))
+	cancel()
+	if err == nil && len(r) > 0 && string(r[0]) == vaultipc.StatusStale {
+		return enclave.CodeStale, nil
+	}
+	h.mu.Lock()
+	if h.procs[id] == p {
+		delete(h.procs, id)
+	}
+	h.mu.Unlock()
+	p.mu.Lock()
+	p.stopping = true
+	p.mu.Unlock()
+	if err != nil || len(r) == 0 || string(r[0]) != hostproto.StatusOK {
+		// No clear answer: the process is ended without its flush, as a
+		// lock that does not answer in time (§12.3); the vault is locked.
+		h.kill(p)
+		if err == nil {
+			err = errSpawn
+		}
+		return enclave.CodeLocked, err
+	}
+	h.stop(p)
+	return enclave.CodeLocked, nil
 }
 
 // RecoveryRefusal implements enclave.Host: the running vault's process

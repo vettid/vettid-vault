@@ -13,6 +13,7 @@ package vaultproc
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"log/slog"
 	"net"
@@ -141,6 +142,11 @@ func (pr *proc) handle(ctx context.Context, f *hostproto.Frame) [][]byte {
 			reason = string(f.Fields[0])
 		}
 		return pr.lock(ctx, reason)
+	case vaultipc.KindLockBound:
+		if len(f.Fields) != 1 || !altchan.ValidUnlockID(string(f.Fields[0])) {
+			return hostproto.Strings(hostproto.StatusInvalid)
+		}
+		return pr.lockBound(ctx, string(f.Fields[0]))
 	case vaultipc.KindRecoverable:
 		pr.mu.Lock()
 		m := pr.mgr
@@ -284,6 +290,21 @@ func (pr *proc) lock(ctx context.Context, reason string) [][]byte {
 		return hostproto.Strings(vaultipc.StatusNotDeleted)
 	}
 	return hostproto.Strings(hostproto.StatusOK)
+}
+
+// lockBound is the queue op lock with an unlock_id (0.29.0, release L,
+// §11.5): the vault locks as for an owner request only if the value names
+// its current unlock; otherwise it answers stale and nothing is done. With
+// no vault running it answers ok, as lock does (the supervisor reports
+// not_running before it asks).
+func (pr *proc) lockBound(ctx context.Context, unlockID string) [][]byte {
+	pr.mu.Lock()
+	m := pr.mgr
+	pr.mu.Unlock()
+	if m != nil && subtle.ConstantTimeCompare([]byte(unlockID), []byte(m.UnlockID())) != 1 {
+		return hostproto.Strings(vaultipc.StatusStale)
+	}
+	return pr.lock(ctx, "")
 }
 
 // logHandler sends sanitized records to the supervisor.

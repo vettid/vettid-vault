@@ -41,7 +41,44 @@ func (r ReleaseSpec) PCR0Hex() string { return PCRHex(r.PCR0) }
 // the per-instance queues and the parent, the vault data bucket, a fake
 // KMS with one sealing key per release, and the signed release manifest.
 // Instances of several releases run side by side (§11.10.5).
+// enqueuedAt is the member API's time for a queue message: the world's
+// clock in milliseconds (as the API writes it), and always later than the
+// world's previous message, as a real clock moves between two requests.
+// An unconditional lock is ordered by it (VAULT-MESSAGING 0.29.0 §11.5);
+// with a fixed test clock an unlock and the lock after it would be equal,
+// and so stale.
+func (w *World) enqueuedAt() time.Time {
+	w.enqMu.Lock()
+	defer w.enqMu.Unlock()
+	if w.ZeroEnqueuedAt {
+		return time.Time{} // an opening of unknown time (tests)
+	}
+	t := w.Now().UTC().Truncate(time.Millisecond)
+	if !t.After(w.lastEnq) {
+		t = w.lastEnq.Add(time.Millisecond)
+	}
+	w.lastEnq = t
+	return t
+}
+
+// LastEnqueuedAt is the enqueued_at of the world's latest queue message.
+func (w *World) LastEnqueuedAt() time.Time {
+	w.enqMu.Lock()
+	defer w.enqMu.Unlock()
+	return w.lastEnq
+}
+
+// EnqueuedAt is enqueuedAt for tests that build queue messages
+// themselves (an unconditional lock queued at a given point).
+func (w *World) EnqueuedAt() time.Time { return w.enqueuedAt() }
+
 type World struct {
+	enqMu   sync.Mutex
+	lastEnq time.Time
+	// ZeroEnqueuedAt makes the world's queue messages carry the zero time
+	// as enqueued_at (an opening of unknown time, for tests).
+	ZeroEnqueuedAt bool
+
 	// Account, if set, is the account snapshot the API puts in each
 	// unlock (0.15.0, §11.13) and enroll (0.18.0, REQUIRED there: nil
 	// puts Snapshot's in it, unless NoEnrollAccount).
@@ -325,7 +362,7 @@ func (w *World) Post(ctx context.Context, in *enclave.Instance, op, vaultID, use
 		return nil, err
 	}
 	q := &enclave.QueueMessage{Op: op, VaultID: vaultID, UserGUID: userGUID, RequestID: r.RequestID, ETKKid: kid,
-		Envelope: r.Envelope, EnqueuedAt: w.Now()}
+		Envelope: r.Envelope, EnqueuedAt: w.enqueuedAt()}
 	if op == enclave.OpEnroll || op == enclave.OpRecoveryRegister || op == enclave.OpRecoveryOpen {
 		q.AppKey = r.AppKey // the key the API checked the request's signature with (0.15.0)
 	}
@@ -347,11 +384,28 @@ func (w *World) Post(ctx context.Context, in *enclave.Instance, op, vaultID, use
 	return enclave.ParseResponse(raw)
 }
 
-// Lock plays POST /api/vault/lock.
-func (w *World) Lock(ctx context.Context, in *enclave.Instance, vaultID, userGUID string) {
+// Lock plays POST /api/vault/lock (unconditional, queued now) and returns
+// the enclave's answer.
+func (w *World) Lock(ctx context.Context, in *enclave.Instance, vaultID, userGUID string) *enclave.Response {
+	return w.LockWith(ctx, in, vaultID, userGUID, "", w.enqueuedAt())
+}
+
+// LockWith plays the queue op lock with an unlock_id ("" for an
+// unconditional lock) and the given enqueued_at (0.29.0, release L,
+// §11.5), through the wire format, and returns the enclave's answer (nil
+// when it gave none).
+func (w *World) LockWith(ctx context.Context, in *enclave.Instance, vaultID, userGUID, unlockID string, enqueuedAt time.Time) *enclave.Response {
 	rid, _ := envelope.NewULID(w.Now())
-	q := &enclave.QueueMessage{Op: enclave.OpLock, VaultID: vaultID, UserGUID: userGUID, RequestID: rid, EnqueuedAt: w.Now()}
-	in.Process(ctx, q, nil)
+	q := &enclave.QueueMessage{Op: enclave.OpLock, VaultID: vaultID, UserGUID: userGUID, RequestID: rid, EnqueuedAt: enqueuedAt, UnlockID: unlockID}
+	raw := in.ProcessRaw(ctx, q.Marshal(), nil)
+	if raw == nil {
+		return nil
+	}
+	r, err := enclave.ParseResponse(raw)
+	if err != nil {
+		return nil
+	}
+	return r
 }
 
 // Close stops every instance.
@@ -393,7 +447,7 @@ func Spec(n uint64, status string) ReleaseSpec {
 // recovery id; the response slot holds the code sealed to browserKey.
 func (w *World) Recovery(ctx context.Context, in *enclave.Instance, vaultID, userGUID string, browserKey []byte) (string, *enclave.Response) {
 	rid, _ := envelope.NewULID(w.Now())
-	q := &enclave.QueueMessage{Op: enclave.OpRecovery, VaultID: vaultID, UserGUID: userGUID, RequestID: rid, EnqueuedAt: w.Now(),
+	q := &enclave.QueueMessage{Op: enclave.OpRecovery, VaultID: vaultID, UserGUID: userGUID, RequestID: rid, EnqueuedAt: w.enqueuedAt(),
 		BrowserKey: browserKey}
 	w.signRecovery(q)
 	return rid, in.Process(ctx, q, nil)
@@ -403,7 +457,7 @@ func (w *World) Recovery(ctx context.Context, in *enclave.Instance, vaultID, use
 // whatever recovery is in progress.
 func (w *World) RecoveryCancel(ctx context.Context, in *enclave.Instance, vaultID, userGUID string) {
 	rid, _ := envelope.NewULID(w.Now())
-	q := &enclave.QueueMessage{Op: enclave.OpRecoveryCancel, VaultID: vaultID, UserGUID: userGUID, RequestID: rid, EnqueuedAt: w.Now()}
+	q := &enclave.QueueMessage{Op: enclave.OpRecoveryCancel, VaultID: vaultID, UserGUID: userGUID, RequestID: rid, EnqueuedAt: w.enqueuedAt()}
 	w.signRecovery(q)
 	in.Process(ctx, q, nil)
 }
@@ -413,7 +467,7 @@ func (w *World) RecoveryCancel(ctx context.Context, in *enclave.Instance, vaultI
 // seven-line form) and returns the answer.
 func (w *World) RecoveryCancelNamed(ctx context.Context, in *enclave.Instance, vaultID, userGUID, recoveryID string) *enclave.Response {
 	rid, _ := envelope.NewULID(w.Now())
-	q := &enclave.QueueMessage{Op: enclave.OpRecoveryCancel, VaultID: vaultID, UserGUID: userGUID, RequestID: rid, EnqueuedAt: w.Now(),
+	q := &enclave.QueueMessage{Op: enclave.OpRecoveryCancel, VaultID: vaultID, UserGUID: userGUID, RequestID: rid, EnqueuedAt: w.enqueuedAt(),
 		RecoveryID: recoveryID}
 	w.signRecovery(q)
 	r, err := enclave.ParseResponse(in.ProcessRaw(ctx, q.Marshal(), nil))

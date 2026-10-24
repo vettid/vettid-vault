@@ -63,6 +63,12 @@ type Host interface {
 	Lock(ctx context.Context, vaultID string) (bool, error)
 	// LockReason is Lock with a reason in vault.locking (§11.11.1).
 	LockReason(ctx context.Context, vaultID, reason string) (bool, error)
+	// LockRequest is the queue operation lock (0.29.0, release L, §11.5):
+	// with unlockID the vault's process locks only if it names its current
+	// unlock; without, the vault is locked only if enqueuedAt is later than
+	// the enqueued_at of the message that opened it. It returns
+	// CodeLocked, CodeNotRunning or CodeStale, after the lock.
+	LockRequest(ctx context.Context, vaultID, unlockID string, enqueuedAt time.Time) (string, error)
 	// RecoveryRefusal asks a running vault whether it refuses a recovery
 	// ("no_credential", "no_backup" or ""; 0.16.0, §11.11.1) without
 	// locking it; ran reports whether it runs here.
@@ -185,7 +191,9 @@ func (in *Instance) Process(ctx context.Context, q *QueueMessage, manifestDoc []
 	resp := &Response{RequestID: q.RequestID, Status: StatusDone}
 	switch q.Op {
 	case OpLock:
-		_, _ = in.host.Lock(ctx, q.VaultID)
+		// 0.29.0, release L (§11.5): bound or unconditional, answered
+		// after the lock with what it did.
+		resp.Code, _ = in.host.LockRequest(ctx, q.VaultID, q.UnlockID, q.EnqueuedAt)
 	case OpDelete:
 		in.deleteVault(ctx, q.VaultID, q.UserGUID)
 	case OpDeleteResume:
@@ -231,7 +239,7 @@ func (in *Instance) Process(ctx context.Context, q *QueueMessage, manifestDoc []
 			// process's vault.RecoveryCancel.
 			body = strictjson.NewBuilder().String("recovery_id", q.RecoveryID).Bytes()
 		}
-		j := &Job{Op: q.Op, VaultID: q.VaultID, UserGUID: q.UserGUID, RequestID: q.RequestID,
+		j := &Job{Op: q.Op, VaultID: q.VaultID, UserGUID: q.UserGUID, RequestID: q.RequestID, EnqueuedAt: q.EnqueuedAt,
 			Inner: &envelope.Inner{Type: requestType[q.Op], ID: q.RequestID, TS: in.now(), Body: body}}
 		res, mk, err := in.host.Open(ctx, j)
 		if q.Op == OpRecovery {
@@ -261,7 +269,7 @@ func (in *Instance) Process(ctx context.Context, q *QueueMessage, manifestDoc []
 			return resp
 		}
 		j := &Job{Op: q.Op, VaultID: q.VaultID, UserGUID: q.UserGUID, RequestID: q.RequestID, ETKKid: q.ETKKid, Inner: inner,
-			AppKey: q.AppKey}
+			AppKey: q.AppKey, EnqueuedAt: q.EnqueuedAt}
 		if q.Op == OpUnlock || q.Op == OpEnroll {
 			j.Account = q.Account // enroll: REQUIRED, checked by the job (0.18.0)
 		}

@@ -16,6 +16,7 @@ import (
 	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/parent"
 	"github.com/vettid/vettid-vault/vault"
+	"github.com/vettid/vettid-vault/vms/envelope"
 )
 
 const pin1 = "97531086"
@@ -199,8 +200,18 @@ func TestV3Exit(t *testing.T) {
 	}
 	// Member 2 locks and unlocks; the host replays that unlock: the
 	// enclave's replay set drops it (§11.6) and the vault is not reopened.
-	if sl, err := m2.LockVia(ctx, api2); err != nil || sl.Status != "done" {
+	// 0.29.0, release L (§11.5, MEMBER-API 2.5.0): the app's lock is bound
+	// to its unlock, and the answer, written after the lock by the
+	// enclave's process host and copied by the parent, says what it did.
+	if m2.UnlockID() == "" {
+		t.Fatal("member 2 holds no unlock_id")
+	}
+	if sl, err := m2.LockVia(ctx, api2); err != nil || sl.Status != "done" || sl.Code != "locked" {
 		t.Fatalf("member 2 lock: %v %+v", err, sl)
+	}
+	lockRID, lockQ, lockBody := s.lastSent("lock")
+	if !strings.Contains(lockBody, `"unlock_id":"`) {
+		t.Fatalf("the lock is not bound: %s", lockBody)
 	}
 	if u, err := m2.UnlockVia(ctx, api2, "member-2", "246801", trust, att2, client.UnlockOptions{}, ""); err != nil || !u.OK {
 		t.Fatalf("member 2 unlock: %v %+v", err, u)
@@ -248,6 +259,27 @@ func TestV3Exit(t *testing.T) {
 		t.Fatalf("replayed unlock reopened the vault: %+v -> %+v", before, after)
 	}
 	a.waitHealth(func(h parent.Health) bool { return h.Vaults == 2 }, "running both vaults after the replay")
+
+	// 0.29.0, release L (§11.5): the lock delivered again after the newer
+	// unlock (the queue is not ordered) is refused, bound (it names the
+	// previous unlock) and unconditional (queued before the unlock); the
+	// vault stays open.
+	unbound := regexp.MustCompile(`,"unlock_id":"[0-9a-f]{32}"`).ReplaceAllString(lockBody, "")
+	for i, body := range []string{lockBody, unbound} {
+		rid := lockRID
+		if i == 1 {
+			rid, _ = envelope.NewULID(time.Now())
+			body = strings.Replace(body, lockRID, rid, 1)
+		}
+		s.requeueOp(rid, lockQ, body, "member-2", parent.AppKeyID(akDER), "lock")
+		slot, err := api2.Poll(ctx, rid)
+		if err != nil || slot.Status != "done" || slot.Code != "stale" {
+			t.Fatalf("late lock %d: %v %+v", i, err, slot)
+		}
+		if r := s.vaultRow(vid2); r.State != "unlocked" || r.LeaseInstance != a.id {
+			t.Fatalf("late lock %d locked the vault: %+v", i, r)
+		}
+	}
 
 	// --- release move 3 -> 4 across two instances ---
 	s.addRelease(4)

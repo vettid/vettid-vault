@@ -99,11 +99,23 @@ func (m *Manager) beginReplace(ctx context.Context, r *replacement) error {
 		r.wipe()
 		return errRetry
 	}
-	if r.next.AppKey != nil && m.opt.Lifecycle != nil {
-		// §11.5: app_key_next with this header write.
-		ev := lifecycle(m.opt, EventAppKeyNext, m.hdr.VaultID, m.opt.Release.PCR0)
-		ev.AppKey, ev.AppKeySeq, ev.HeaderSeq = append([]byte(nil), r.next.AppKey...), r.next.AppKeySeq, r.next.HeaderSeq
-		m.opt.Lifecycle(ev)
+	if r.next.AppKey != nil {
+		// §11.5: app_key_next with this header write, confirmed by the host
+		// before the vault can adopt the key (appkeyconfirm.go). If it is
+		// not, nothing is adopted: the part is dropped as for a failed
+		// read-back, and the row is told to clear any app_key_next the
+		// host did write.
+		if err := m.confirmKey(ctx, AppKeyModeNext, r.next.AppKey, r.next.AppKeySeq, r.next.HeaderSeq); err != nil {
+			m.hdr.Next = nil
+			m.nextCleared = true
+			r.wipe()
+			return errRetry
+		}
+		if m.opt.Lifecycle != nil {
+			ev := lifecycle(m.opt, EventAppKeyNext, m.hdr.VaultID, m.opt.Release.PCR0)
+			ev.AppKey, ev.AppKeySeq, ev.HeaderSeq = append([]byte(nil), r.next.AppKey...), r.next.AppKeySeq, r.next.HeaderSeq
+			m.opt.Lifecycle(ev)
+		}
 	}
 	m.repl = r
 	m.replInHandler = true

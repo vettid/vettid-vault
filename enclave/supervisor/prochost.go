@@ -911,6 +911,8 @@ func (p *vproc) handle(ctx context.Context, f *hostproto.Frame) [][]byte {
 		return p.heavyCall(f.Fields)
 	case vaultipc.KindMarkDeleting:
 		return p.markDeleting(ctx, f.Fields)
+	case vaultipc.KindAppKeyNext:
+		return p.appKeyNext(ctx, f.Fields)
 	case vaultipc.KindStatusList:
 		b, at, ok := s.status.rawList()
 		if !ok {
@@ -936,6 +938,32 @@ func (p *vproc) markDeleting(ctx context.Context, f [][]byte) [][]byte {
 		return hostproto.Strings(hostproto.StatusError)
 	}
 	return hostproto.Strings(hostproto.StatusOK)
+}
+
+// appKeyNext passes a vault process's acknowledged app key to the parent
+// (hostproto.KindAppKeyNext): only for the process's own vault, one
+// request per call; the process retries anything but ok and conflict.
+func (p *vproc) appKeyNext(ctx context.Context, f [][]byte) [][]byte {
+	if len(f) != 5 || string(f[0]) != p.vaultID || len(f[2]) == 0 || len(f[2]) > 256 {
+		return deny()
+	}
+	if m := string(f[1]); m != vault.AppKeyModeNext && m != vault.AppKeyModeEnroll {
+		return deny()
+	}
+	for _, d := range f[3:] {
+		if n, err := strconv.ParseUint(string(d), 10, 53); err != nil || strconv.FormatUint(n, 10) != string(d) {
+			return deny()
+		}
+	}
+	r, err := p.h.s.link.call(ctx, hostproto.KindAppKeyNext, f...)
+	if err != nil || len(r) != 1 {
+		return hostproto.Strings(hostproto.StatusError)
+	}
+	switch string(r[0]) {
+	case hostproto.StatusOK, hostproto.StatusConflict:
+		return hostproto.Strings(string(r[0]))
+	}
+	return hostproto.Strings(hostproto.StatusError)
 }
 
 func storeReply(err error, ok func() [][]byte) [][]byte {

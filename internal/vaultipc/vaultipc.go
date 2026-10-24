@@ -146,6 +146,12 @@ const (
 	// vault_id but the process's own and passes the request to the
 	// parent, one try per request: the process retries.
 	KindMarkDeleting hostproto.Kind = 0x5d
+	// KindAppKeyNext [vault_id, mode, app_key, app_key_seq, header_seq] →
+	// [ok | conflict | error]: the acknowledged app key of
+	// hostproto.KindAppKeyNext. The supervisor refuses any vault_id but the
+	// process's own and passes the request to the parent, one try per
+	// request: the process retries.
+	KindAppKeyNext hostproto.Kind = 0x5e
 )
 
 // Bounds the supervisor puts on a vault process's answers, after which it
@@ -183,7 +189,7 @@ const (
 )
 
 // VaultRequests is every request kind a vault process may send.
-var VaultRequests = []hostproto.Kind{KindStoreGet, KindStorePut, KindStoreDelete, KindAttestRecipient, KindAttestVault, KindKMS, KindHTTP, KindStatusList, KindPush, KindTransfer, KindCounter, KindHeavyPermit, KindMarkDeleting}
+var VaultRequests = []hostproto.Kind{KindStoreGet, KindStorePut, KindStoreDelete, KindAttestRecipient, KindAttestVault, KindKMS, KindHTTP, KindStatusList, KindPush, KindTransfer, KindCounter, KindHeavyPermit, KindMarkDeleting, KindAppKeyNext}
 
 // KMS operations.
 const (

@@ -210,7 +210,7 @@ func (pr *proc) open(ctx context.Context, f [][]byte) [][]byte {
 		// HTTP/2 connections (§12.2).
 		Vault: vault.Options{HTTP: &http.Client{Transport: chanTransport{ch: pr.ch}, Timeout: 75 * time.Second}, WebSocket: false,
 			PollWait: pr.p.PollWait, Push: pushGateway(cfg.PushURL, pr.ch), Transfers: chanGate{ch: pr.ch},
-			Counter: chanCounter{ch: pr.ch}, HeavyPermit: heavyPermit(pr.ch), MarkDeleting: pr.ch.markDeleting},
+			Counter: chanCounter{ch: pr.ch}, HeavyPermit: heavyPermit(pr.ch), MarkDeleting: pr.ch.markDeleting, ConfirmAppKey: pr.ch.confirmAppKey},
 		Features: pr.p.Features,
 		Log:      func(msg string, args ...any) { pr.log.Info(msg, args...) },
 		Lifecycle: func(ev vault.LifecycleEvent) {

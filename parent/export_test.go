@@ -50,3 +50,11 @@ func SetQueueLostWaitForTest(first, max time.Duration) func() {
 	queueLostWait, queueLostWaitMax = first, max
 	return func() { queueLostWait, queueLostWaitMax = a, b }
 }
+
+// SetAppKeyRetryForTest shortens the backoff of the app key retry; the
+// returned function restores it.
+func SetAppKeyRetryForTest(first, max time.Duration) func() {
+	a, b := appKeyRetryFirst, appKeyRetryCap
+	appKeyRetryFirst, appKeyRetryCap = first, max
+	return func() { appKeyRetryFirst, appKeyRetryCap = a, b }
+}

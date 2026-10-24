@@ -232,7 +232,7 @@ type fixture struct {
 func newFixture(t testing.TB) *fixture {
 	t.Helper()
 	f := &fixture{t: t, store: store.NewMemory()}
-	f.opts = Options{Store: f.store, Sealer: testSealer{key: bytes.Repeat([]byte{7}, 32)}, Release: testRelease, MarkDeleting: NoHostMark,
+	f.opts = Options{Store: f.store, Sealer: testSealer{key: bytes.Repeat([]byte{7}, 32)}, Release: testRelease, MarkDeleting: NoHostMark, ConfirmAppKey: NoHostAppKey,
 		Relay: func(base string, key ed25519.PrivateKey) Relay {
 			f.relay = &stubRelay{base: base, key: key}
 			return f.relay

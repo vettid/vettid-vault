@@ -43,6 +43,9 @@ type Parent struct {
 	// being swept.
 	runCtx   context.Context
 	sweeping map[string]bool
+	// keyQ are the app key writes that failed and are tried again until
+	// they are written, per vault (appkeyretry.go).
+	keyQ map[string][]Lifecycle
 }
 
 type session struct {
@@ -453,6 +456,12 @@ func (p *Parent) handle(ctx context.Context, s *session, f *hostproto.Frame) [][
 			exp = c.Expires.UTC().Format(time.RFC3339)
 		}
 		return reply(hostproto.StatusOK, c.AccessKeyID, c.SecretAccessKey, c.SessionToken, exp)
+	case hostproto.KindAppKeyNext:
+		// The acknowledged app key: ok only once the row names the key
+		// (as app_key_next, or as app_key at enrollment) or already has
+		// it as app_key; conflict if it names another key at that seq or
+		// is gone; error for any other failure, which the enclave retries.
+		return p.confirmAppKey(ctx, f.Fields)
 	case hostproto.KindMarkDeleting:
 		// 0.1.14 §5.6: ok once deleting_at is written or its condition
 		// refused (marked already, deleted, or no row: nothing is left to
@@ -641,7 +650,7 @@ func parseLifecycle(f *hostproto.Frame) (Lifecycle, bool) {
 		ev.Name = n
 	}
 	switch ev.Event {
-	case EventAppKey, EventAppKeyNext:
+	case EventAppKey, EventAppKeyNext, EventAppKeyAssert, EventAppKeyNextAssert:
 		if ev.AppKey == nil || ev.NextCleared && ev.Event != EventAppKey {
 			return Lifecycle{}, false
 		}
@@ -723,6 +732,13 @@ func (p *Parent) onLifecycle(ev Lifecycle) {
 	p.log.Info("lifecycle", "event", ev.Event, "vault_id", ev.VaultID)
 	p.events <- func(ctx context.Context) {
 		err := p.cfg.Tables.Lifecycle(ctx, ev, p.cfg.InstanceID, p.now())
+		var ke *AppKeyWriteError
+		if errors.As(err, &ke) {
+			// app_key / app_key_next were not written: tried again until
+			// they are; the rest of the event is judged on its own.
+			p.retryAppKeys(ev, ke.Err)
+			err = ke.Rest
+		}
 		switch {
 		case errors.Is(err, ErrAlarmNotWritten):
 			// The row is marked deleted: the sweep goes ahead (P15).

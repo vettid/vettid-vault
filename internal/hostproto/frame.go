@@ -57,6 +57,15 @@ const (
 	// The parent records a deletion whose marking flush is stored on the
 	// vault row, conditionally (VAULT-HOST-PROTOCOL 0.1.14 §5.6).
 	KindMarkDeleting Kind = 0x06
+	// AppKeyNext: [vault_id, mode, app_key, app_key_seq, header_seq]; reply
+	// [status] (ok, conflict, invalid or error). mode "next": the parent
+	// makes the vault row name the key as app_key_next (or finds its
+	// app_key already is the key at that seq or higher) and answers ok
+	// only after the table write; "enroll": the row gets app_key (the
+	// vault's first header). The enclave writes no header that names the
+	// key before the ok (conflict: the row names another key at that seq
+	// or is gone; not retried). VAULT-HOST-PROTOCOL: acknowledged app key.
+	KindAppKeyNext Kind = 0x07
 )
 
 // Requests from the parent to the enclave:

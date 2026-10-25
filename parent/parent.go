@@ -52,6 +52,7 @@ type Parent struct {
 	confirms     map[string]*confirmLock
 	lastAttempt  int64
 	asserts      map[string][]Lifecycle
+	stamps       map[string][]nextStamp // orphanstamp.go
 	assertWorker bool
 }
 
@@ -741,7 +742,18 @@ func (p *Parent) onLifecycle(ev Lifecycle) {
 		p.queueAssert(ev)
 		return
 	}
+	p.dropStampsFor(ev)
 	p.log.Info("lifecycle", "event", ev.Event, "vault_id", ev.VaultID)
+	if ev.Event == EventAppKeyNextClear {
+		att, ok := p.stampFor(ev.VaultID, AppKeyID(ev.AppKey), ev.HeaderSeq)
+		if !ok {
+			// A restart (or an entry dropped) lost the stamp: the clear
+			// is not made unstamped. The orphan stays; availability only.
+			p.log.Debug("orphan clear skipped; stamp unknown", "vault_id", ev.VaultID, "header_seq", ev.HeaderSeq)
+			return
+		}
+		ev.Att, ev.Holder = att, p.cfg.InstanceID
+	}
 	if ev.Event == EventAppKeyNext {
 		// A report only: the acknowledged request wrote app_key_next before
 		// the vault stored anything that names it. Writing it again would
@@ -776,6 +788,9 @@ func (p *Parent) onLifecycle(ev Lifecycle) {
 			p.log.Warn("lifecycle write failed", "event", ev.Event, "vault_id", ev.VaultID, "error", err.Error())
 		case ev.Event == "deleted":
 			p.startSweep(ev.VaultID)
+		}
+		if err == nil && ev.Event == EventAppKeyNextClear {
+			p.dropStamp(ev.VaultID, AppKeyID(ev.AppKey), ev.HeaderSeq, ev.Att) // cleared
 		}
 	}
 }

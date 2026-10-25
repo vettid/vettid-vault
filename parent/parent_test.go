@@ -26,19 +26,20 @@ const (
 )
 
 type harness struct {
-	t      *testing.T
-	p      *parent.Parent
-	objs   *parenttest.Objects
-	queues *parenttest.Queues
-	tables *parenttest.Tables
-	ctl    string
-	egress string
-	cancel context.CancelFunc
-	done   chan struct{}
-	logs   *bytes.Buffer
-	logMu  sync.Mutex
-	queue  string
-	echo   string
+	instance string
+	t        *testing.T
+	p        *parent.Parent
+	objs     *parenttest.Objects
+	queues   *parenttest.Queues
+	tables   *parenttest.Tables
+	ctl      string
+	egress   string
+	cancel   context.CancelFunc
+	done     chan struct{}
+	logs     *bytes.Buffer
+	logMu    sync.Mutex
+	queue    string
+	echo     string
 }
 
 func listen(t *testing.T) net.Listener {
@@ -79,6 +80,7 @@ func newHarness(t *testing.T, tweak func(*parent.Config)) *harness {
 		t.Fatal(err)
 	}
 	h.p = p
+	h.instance = cfg.InstanceID
 	ctx, cancel := context.WithCancel(context.Background())
 	h.cancel, h.done = cancel, make(chan struct{})
 	go func() { defer close(h.done); _ = p.Run(ctx) }()
@@ -163,7 +165,7 @@ func (h *harness) connect(boot string, answer func([]byte) []byte) *fakeEnclave 
 	}, nil)
 	h.t.Cleanup(e.conn.Close)
 	r, err := e.conn.Call(context.Background(), hostproto.KindHello, []byte(pcr), []byte(boot))
-	if err != nil || string(r[0]) != hostproto.StatusOK || string(r[1]) != "i-test" {
+	if err != nil || string(r[0]) != hostproto.StatusOK || string(r[1]) != h.instance {
 		h.t.Fatalf("hello: %v %q", err, r)
 	}
 	return e

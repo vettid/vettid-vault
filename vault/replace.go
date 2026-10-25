@@ -93,11 +93,15 @@ func (m *Manager) beginReplace(ctx context.Context, r *replacement) error {
 	m.hdr.Next = r.next
 	if err := m.writeHeaderWith(ctx, false); err != nil {
 		m.hdr.Next = nil
-		m.clearOrphanNext(r.next) // the confirmed key is on the row, no header names it
 		r.wipe()
 		if errors.Is(err, ErrSplitBrain) {
+			// Another instance stored the header at that version: the
+			// row's entry may be that instance's (the same key at the
+			// same header_seq), so nothing is cleared.
+			m.unack(r.next.AppKey, r.next.AppKeySeq)
 			return err
 		}
+		m.clearOrphanNext(r.next) // the confirmed key is on the row, no header names it
 		return errRetry
 	}
 	// Read it back: a store that loses the write at once is caught here.
@@ -115,6 +119,21 @@ func (m *Manager) beginReplace(ctx context.Context, r *replacement) error {
 		m.clearOrphanNext(r.next)
 		r.wipe()
 		return errRetry
+	}
+	if r.next.AppKey != nil {
+		// Confirm again, live, before step 2 whether or not the key is
+		// acked: the entry on the row then carries this instance's latest
+		// stamp. In a split brain another instance may have confirmed the
+		// same key at the same header_seq after this one (its stamp then
+		// replaced ours), and its orphan clear, bound to its own stamp,
+		// would otherwise remove the entry although the header stored
+		// here names the key. Step 1 is stored, so a failure is not an
+		// orphan (no clear: the header names the key): stop and answer
+		// retry; the next attempt drops this `next` and begins again.
+		if err := m.confirmKey(ctx, AppKeyModeNext, r.next.AppKey, r.next.AppKeySeq, r.next.HeaderSeq); err != nil {
+			r.wipe()
+			return errRetry
+		}
 	}
 	if r.next.AppKey != nil && m.opt.Lifecycle != nil {
 		ev := lifecycle(m.opt, EventAppKeyNext, m.hdr.VaultID, m.opt.Release.PCR0)

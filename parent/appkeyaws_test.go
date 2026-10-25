@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -171,8 +172,13 @@ func TestAppKeyFailureDoesNotHoldBackEvent(t *testing.T) {
 func TestAWSConfirmAppKey(t *testing.T) {
 	key := []byte("k2")
 	kid := AppKeyID(key)
+	stamp := att()
 	named := func(attr string, seq string) string {
-		return `{"Item":{"` + attr + `":{"M":{"kid":{"S":"` + kid + `"},"seq":{"N":"` + seq + `"}}}}}`
+		a := ""
+		if attr == "app_key_next" { // the entry this request's own write made
+			a = `,"att":{"N":"` + strconv.FormatInt(stamp, 10) + `"}`
+		}
+		return `{"Item":{"` + attr + `":{"M":{"kid":{"S":"` + kid + `"},"seq":{"N":"` + seq + `"}` + a + `}}}}`
 	}
 	cases := []struct {
 		name   string
@@ -189,7 +195,7 @@ func TestAWSConfirmAppKey(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			f := &fakeDDB{script: c.script, item: c.item}
 			a := newFakeAWS(t, f)
-			err := a.ConfirmAppKey(context.Background(), "v1", "next", key, 2, 5, att(), time.Now())
+			err := a.ConfirmAppKey(context.Background(), "v1", "me", "next", key, 2, 5, stamp, time.Now())
 			if !errors.Is(err, c.want) || (c.want == nil) != (err == nil) {
 				t.Fatalf("err %v, want %v", err, c.want)
 			}
@@ -197,7 +203,7 @@ func TestAWSConfirmAppKey(t *testing.T) {
 	}
 	// A failing write is an error, not a conflict.
 	f := &fakeDDB{script: func(int, string) string { return "fail" }}
-	if err := newFakeAWS(t, f).ConfirmAppKey(context.Background(), "v1", "next", key, 2, 5, att(), time.Now()); err == nil || errors.Is(err, ErrConflict) {
+	if err := newFakeAWS(t, f).ConfirmAppKey(context.Background(), "v1", "me", "next", key, 2, 5, stamp, time.Now()); err == nil || errors.Is(err, ErrConflict) {
 		t.Fatalf("err %v", err)
 	}
 }
@@ -258,9 +264,9 @@ func TestPermanentErrors(t *testing.T) {
 // The live confirm may replace an equal header_seq of another key and a
 // equal header_seq of another key (R2); a report may not. Neither replaces a higher seq.
 func TestLiveConfirmCondition(t *testing.T) {
-	f := &fakeDDB{item: `{"Item":{"app_key_next":{"M":{"kid":{"S":"` + AppKeyID([]byte("k2")) + `"},"seq":{"N":"2"}}}}}`}
+	f := &fakeDDB{item: `{"Item":{"app_key_next":{"M":{"kid":{"S":"` + AppKeyID([]byte("k2")) + `"},"seq":{"N":"2"},"att":{"N":"777"}}}}}`}
 	a := newFakeAWS(t, f)
-	if err := a.ConfirmAppKey(context.Background(), "v1", "next", []byte("k2"), 2, 5, att(), time.Now()); err != nil {
+	if err := a.ConfirmAppKey(context.Background(), "v1", "me", "next", []byte("k2"), 2, 5, 777, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	_ = a.AppKeys(context.Background(), Lifecycle{Event: EventAppKeyNext, VaultID: "v1", AppKey: []byte("k2"), AppKeySeq: 2, HeaderSeq: 5}, time.Now())
@@ -299,12 +305,47 @@ func att() int64 { return time.Now().UnixNano() }
 func TestOrphanClearCondition(t *testing.T) {
 	f := &fakeDDB{script: func(int, string) string { return "cond" }}
 	a := newFakeAWS(t, f)
-	if err := a.AppKeys(context.Background(), Lifecycle{Event: EventAppKeyNextClear, VaultID: "v1", AppKey: []byte("k8"), AppKeySeq: 6, HeaderSeq: 9}, time.Now()); err != nil {
+	if err := a.AppKeys(context.Background(), Lifecycle{Event: EventAppKeyNextClear, VaultID: "v1", AppKey: []byte("k8"), AppKeySeq: 6, HeaderSeq: 9, Att: 55, Holder: "me"}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	u := f.updates()
 	c, _ := u[0]["ConditionExpression"].(string)
-	if len(u) != 1 || !strings.Contains(c, "#akn.#kid = :kid") || !strings.Contains(c, "#akn.#hs = :hs") || strings.Contains(c, "<=") {
+	if len(u) != 1 || !strings.Contains(c, "#akn.#att = :att") || !strings.Contains(c, "#akn.#kid = :kid") || !strings.Contains(c, "#akn.#hs = :hs") || strings.Contains(c, "<=") {
 		t.Fatalf("%v", u)
+	}
+}
+
+// An orphan clear without a stamp is not written at all.
+func TestOrphanClearWithoutStampNotWritten(t *testing.T) {
+	f := &fakeDDB{script: func(int, string) string { return "" }}
+	a := newFakeAWS(t, f)
+	if err := a.AppKeys(context.Background(), Lifecycle{Event: EventAppKeyNextClear, VaultID: "v1", AppKey: []byte("k8"), AppKeySeq: 6, HeaderSeq: 9}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if u := f.updates(); len(u) != 0 {
+		t.Fatalf("%v", u)
+	}
+}
+
+// Every live confirmation (both modes) and the orphan clear are conditional
+// on this instance holding the vault's unexpired lease, in the same update.
+func TestLiveWritesAreLeaseConditional(t *testing.T) {
+	f := &fakeDDB{item: `{"Item":{"app_key_next":{"M":{"kid":{"S":"` + AppKeyID([]byte("k2")) + `"},"seq":{"N":"2"},"att":{"N":"777"}}}}}`}
+	a := newFakeAWS(t, f)
+	ctx, now := context.Background(), time.Now()
+	_ = a.ConfirmAppKey(ctx, "v1", "me", "next", []byte("k2"), 2, 5, 777, now)
+	_ = a.ConfirmAppKey(ctx, "v1", "me", "enroll", []byte("k2"), 2, 1, 778, now)
+	_ = a.AppKeys(ctx, Lifecycle{Event: EventAppKeyNextClear, VaultID: "v1", AppKey: []byte("k2"), AppKeySeq: 2, HeaderSeq: 5, Att: 777, Holder: "me"}, now)
+	for i, u := range f.updates() {
+		c, _ := u["ConditionExpression"].(string)
+		if !strings.Contains(c, "#lease.#iid = :me") || !strings.Contains(c, "#lease.#exp > :now") {
+			t.Fatalf("update %d not lease-conditional: %q", i, c)
+		}
+		if unusedPlaceholder(u) {
+			t.Fatalf("update %d has an unused placeholder", i)
+		}
+	}
+	if n := len(f.updates()); n != 3 {
+		t.Fatalf("%d updates", n)
 	}
 }

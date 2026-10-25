@@ -145,6 +145,10 @@ func (p *Parent) confirmAppKey(ctx context.Context, f [][]byte) [][]byte {
 	}
 	key := clone(f[2])
 	attempt := p.nextAttempt()
+	if mode == "next" {
+		// Before the write: a clear after a lost answer must know it.
+		p.noteStamp(id, AppKeyID(key), num[1], attempt)
+	}
 	result := make(chan error, 1)
 	go func() {
 		defer release()
@@ -164,7 +168,7 @@ func (p *Parent) confirmAppKey(ctx context.Context, f [][]byte) [][]byte {
 		// their own, whatever becomes of the request.
 		wctx, wcancel := context.WithTimeout(context.WithoutCancel(ctx), confirmWriteBound)
 		defer wcancel()
-		result <- p.cfg.Tables.ConfirmAppKey(wctx, id, mode, key, num[0], num[1], attempt, p.now())
+		result <- p.cfg.Tables.ConfirmAppKey(wctx, id, p.cfg.InstanceID, mode, key, num[0], num[1], attempt, p.now())
 	}()
 	var err error
 	select {

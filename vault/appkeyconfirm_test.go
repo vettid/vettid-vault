@@ -76,7 +76,7 @@ func TestBeginReplaceConfirmsNextKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.n() != 1 {
+	if c.n() != 2 { // before step 1, and again after it is stored
 		t.Fatalf("%d confirmations", c.n())
 	}
 	got := c.calls[0]
@@ -94,7 +94,9 @@ func TestConfirmBeforeStepOne(t *testing.T) {
 	var storedAtConfirm *Header
 	c := &confirmer{}
 	f.m.opt.ConfirmAppKey = func(ctx context.Context, r AppKeyConfirm) error {
-		storedAtConfirm = storedHdr(t, f.store, f.opts, f.vid)
+		if storedAtConfirm == nil { // the first confirmation; the second follows step 1
+			storedAtConfirm = storedHdr(t, f.store, f.opts, f.vid)
+		}
 		return c.confirm(ctx, r)
 	}
 	rep := nextWithKey(t, f.m, testAppKeyDER(t, 0x41))
@@ -204,7 +206,7 @@ func TestConfirmRetries(t *testing.T) {
 	f.m.mu.Lock()
 	err := f.m.beginReplace(context.Background(), rep)
 	f.m.mu.Unlock()
-	if err != nil || c.n() != 3 {
+	if err != nil || c.n() != 4 { // 3 for the first confirmation, 1 after step 1
 		t.Fatalf("err %v after %d", err, c.n())
 	}
 }
@@ -415,5 +417,90 @@ func TestConfirmedAgainForgetsThePendingClear(t *testing.T) {
 	f.m.mu.Unlock()
 	if err != nil || len(evs) != 1 {
 		t.Fatalf("err %v events %+v (only the first send)", err, evs)
+	}
+}
+
+// stampHost models the row's app_key_next entry and its stamp for a split
+// brain: this instance (the winner) and another (the loser) confirm the same
+// key at the same header_seq; the loser's clear removes the entry only if it
+// carries the loser's stamp.
+type stampHost struct {
+	att, loserAtt, ctr int64
+	present            bool
+	calls              int
+	loserClearBefore   bool // the loser's clear lands before the winner's re-confirm
+}
+
+func (h *stampHost) confirm(_ context.Context, _ AppKeyConfirm) error {
+	h.calls++
+	if h.calls == 2 && h.loserClearBefore {
+		h.loserClear()
+	}
+	h.ctr++
+	h.att, h.present = h.ctr, true // a live confirm replaces or recreates with a later stamp
+	if h.calls == 1 {
+		// the loser confirms later: its stamp replaces ours
+		h.ctr++
+		h.loserAtt, h.att = h.ctr, h.ctr
+	}
+	return nil
+}
+
+func (h *stampHost) loserClear() {
+	if h.present && h.att == h.loserAtt {
+		h.present = false
+	}
+}
+
+// The split brain where the loser confirms after the winner: the winner
+// re-confirms after step 1 is stored, so the loser's clear, before or after
+// that, leaves the winner's entry with the winner's stamp.
+func TestReconfirmAfterStepOneKeepsEntryAgainstLoserClear(t *testing.T) {
+	for _, before := range []bool{false, true} {
+		f := newFixture(t)
+		h := &stampHost{loserClearBefore: before}
+		f.m.opt.ConfirmAppKey, f.m.opt.AppKeyRetry = h.confirm, quickKeyRetry
+		rep := nextWithKey(t, f.m, testAppKeyDER(t, 0x41))
+		f.m.mu.Lock()
+		err := f.m.beginReplace(context.Background(), rep)
+		f.m.mu.Unlock()
+		if err != nil {
+			t.Fatal(err)
+		}
+		h.loserClear() // the loser's header write failed; its clear
+		if !h.present || h.att == h.loserAtt || h.calls != 2 {
+			t.Fatalf("before=%v: present %v att %d loser %d calls %d", before, h.present, h.att, h.loserAtt, h.calls)
+		}
+	}
+}
+
+// A failed re-confirmation: no step 2 (the replacement is not held), the
+// answer is retry, and no orphan clear is sent (the stored header names the key).
+func TestReconfirmFailureStopsBeforeStepTwo(t *testing.T) {
+	f := newFixture(t)
+	c := &confirmer{fail: func(n int) error {
+		if n >= 2 {
+			return errors.New("host down")
+		}
+		return nil
+	}}
+	f.m.opt.ConfirmAppKey, f.m.opt.AppKeyRetry = c.confirm, quickKeyRetry
+	var evs []LifecycleEvent
+	f.m.opt.Lifecycle = func(ev LifecycleEvent) { evs = append(evs, ev) }
+	rep := nextWithKey(t, f.m, testAppKeyDER(t, 0x41))
+	f.m.mu.Lock()
+	err := f.m.beginReplace(context.Background(), rep)
+	held := f.m.repl
+	f.m.mu.Unlock()
+	if !errors.Is(err, errRetry) || held != nil {
+		t.Fatalf("err %v held %v", err, held)
+	}
+	for _, ev := range evs {
+		if ev.Event == EventAppKeyNextClear || ev.Event == EventAppKeyNext {
+			t.Fatalf("event %s after a failed re-confirmation", ev.Event)
+		}
+	}
+	if h := storedHdr(t, f.store, f.opts, f.vid); h.Next == nil {
+		t.Fatal("step 1 should be stored")
 	}
 }

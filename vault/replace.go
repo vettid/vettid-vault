@@ -116,6 +116,21 @@ func (m *Manager) beginReplace(ctx context.Context, r *replacement) error {
 		r.wipe()
 		return errRetry
 	}
+	if r.next.AppKey != nil {
+		// Confirm again, live, before step 2 whether or not the key is
+		// acked: the entry on the row then carries this instance's latest
+		// stamp. In a split brain another instance may have confirmed the
+		// same key at the same header_seq after this one (its stamp then
+		// replaced ours), and its orphan clear, bound to its own stamp,
+		// would otherwise remove the entry although the header stored
+		// here names the key. Step 1 is stored, so a failure is not an
+		// orphan (no clear: the header names the key): stop and answer
+		// retry; the next attempt drops this `next` and begins again.
+		if err := m.confirmKey(ctx, AppKeyModeNext, r.next.AppKey, r.next.AppKeySeq, r.next.HeaderSeq); err != nil {
+			r.wipe()
+			return errRetry
+		}
+	}
 	if r.next.AppKey != nil && m.opt.Lifecycle != nil {
 		ev := lifecycle(m.opt, EventAppKeyNext, m.hdr.VaultID, m.opt.Release.PCR0)
 		ev.AppKey, ev.AppKeySeq, ev.HeaderSeq = append([]byte(nil), r.next.AppKey...), r.next.AppKeySeq, r.next.HeaderSeq

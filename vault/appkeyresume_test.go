@@ -97,7 +97,8 @@ func TestRecoveryOpenResumeNeedsConfirmation(t *testing.T) {
 		t.Fatalf("failed step 3: %+v", out)
 	}
 	key := []byte("phone-app-key")
-	if c.n() != 1 || !bytes.Equal(c.calls[0].Key, key) || c.calls[0].Mode != AppKeyModeNext {
+	// two: before step 1, and again once it is stored
+	if c.n() != 2 || !bytes.Equal(c.calls[0].Key, key) || c.calls[0].Mode != AppKeyModeNext {
 		t.Fatalf("step 1 confirmations %+v", c.calls)
 	}
 	if h := f.storedHeader(); h.Next == nil || f.storedStateVersion() != h.Next.DEKVersion || bytes.Equal(h.AppKey, key) {

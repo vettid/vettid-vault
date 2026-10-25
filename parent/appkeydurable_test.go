@@ -44,7 +44,7 @@ func appKeyHarness(t *testing.T) (*harness, *fakeEnclave) {
 
 func TestConfirmAppKeyNext(t *testing.T) {
 	h, e := appKeyHarness(t)
-	h.tables.PutVault(parenttest.VaultRow{VaultID: vaultID, UserGUID: "u1", State: "locked", LeaseInstance: "i-other", LeaseExpires: time.Now().Add(time.Hour).Unix(),
+	h.tables.PutVault(parenttest.VaultRow{VaultID: vaultID, UserGUID: "u1", State: "locked", LeaseInstance: "i-test", LeaseExpires: leaseFar,
 		AppKey: []byte("k1"), AppKeyID: parent.AppKeyID([]byte("k1")), AppKeySeq: 1})
 	// ok only once the table names the key as app_key_next, whatever the lease.
 	if got := e.confirmAppKey(t, vaultID, "next", "k2", "2", "7"); got != hostproto.StatusOK {
@@ -80,7 +80,7 @@ func TestConfirmAppKeyNext(t *testing.T) {
 		t.Fatalf("no row: %s", got)
 	}
 	// Enrollment: the row gets app_key.
-	h.tables.PutVault(parenttest.VaultRow{VaultID: vaultID, UserGUID: "u1", State: "enrolling", AppKey: []byte("old"), AppKeySeq: 5, AppKeyNext: []byte("n"), AppKeyNextSeq: 6})
+	h.tables.PutVault(parenttest.VaultRow{VaultID: vaultID, UserGUID: "u1", State: "enrolling", LeaseInstance: "i-test", LeaseExpires: leaseFar, AppKey: []byte("old"), AppKeySeq: 5, AppKeyNext: []byte("n"), AppKeyNextSeq: 6})
 	if got := e.confirmAppKey(t, vaultID, "enroll", "k1", "1", "1"); got != hostproto.StatusOK {
 		t.Fatalf("enroll: %s", got)
 	}
@@ -101,7 +101,7 @@ func TestConfirmAppKeyNext(t *testing.T) {
 func TestAppKeyWriteRetried(t *testing.T) {
 	defer parent.SetAppKeyRetryForTest(5*time.Millisecond, 20*time.Millisecond)()
 	h, e := appKeyHarness(t)
-	h.tables.PutVault(parenttest.VaultRow{VaultID: vaultID, UserGUID: "u1", State: "locked", AppKey: []byte("k1"), AppKeyID: parent.AppKeyID([]byte("k1")), AppKeySeq: 1,
+	h.tables.PutVault(parenttest.VaultRow{VaultID: vaultID, UserGUID: "u1", State: "locked", LeaseInstance: "i-test", LeaseExpires: leaseFar, AppKey: []byte("k1"), AppKeyID: parent.AppKeyID([]byte("k1")), AppKeySeq: 1,
 		AppKeyNext: []byte("k2"), AppKeyNextSeq: 2})
 	h.tables.SetAppKeyErr(errors.New("throttled"))
 	e.appKeyEvent("unlocked", "k2", "2", "0", "9")
@@ -146,7 +146,7 @@ func TestAppKeyAssertionsWritten(t *testing.T) {
 func TestAppKeyNextReportNotWritten(t *testing.T) {
 	defer parent.SetAppKeyRetryForTest(5*time.Millisecond, 20*time.Millisecond)()
 	h, e := appKeyHarness(t)
-	h.tables.PutVault(parenttest.VaultRow{VaultID: vaultID, UserGUID: "u1", State: "locked", AppKey: []byte("k1"), AppKeyID: parent.AppKeyID([]byte("k1")), AppKeySeq: 1})
+	h.tables.PutVault(parenttest.VaultRow{VaultID: vaultID, UserGUID: "u1", State: "locked", LeaseInstance: "i-test", LeaseExpires: leaseFar, AppKey: []byte("k1"), AppKeyID: parent.AppKeyID([]byte("k1")), AppKeySeq: 1})
 	h.tables.SetAppKeyErr(errors.New("throttled"))
 	e.appKeyEvent(parent.EventAppKeyNext, "k2", "2", "", "5")
 	waitFor(t, "logged as a lifecycle event", func() bool { return h.hasLog(`"msg":"lifecycle","event":"app_key_next"`) })
@@ -162,9 +162,9 @@ func TestAppKeyNextReportNotWritten(t *testing.T) {
 func TestReportKeepsTheLiveEntryStamp(t *testing.T) {
 	tb := parenttest.NewTables()
 	ctx, now := context.Background(), time.Now()
-	tb.PutVault(parenttest.VaultRow{VaultID: "v1", UserGUID: "u1", State: "locked", AppKey: []byte("k5"), AppKeyID: parent.AppKeyID([]byte("k5")), AppKeySeq: 5})
+	tb.PutVault(parenttest.VaultRow{VaultID: "v1", LeaseInstance: "me", LeaseExpires: leaseFar, UserGUID: "u1", State: "locked", AppKey: []byte("k5"), AppKeyID: parent.AppKeyID([]byte("k5")), AppKeySeq: 5})
 	older, newer := att(), att()
-	if err := tb.ConfirmAppKey(ctx, "v1", "next", []byte("K8"), 6, 9, newer, now); err != nil {
+	if err := tb.ConfirmAppKey(ctx, "v1", "me", "next", []byte("K8"), 6, 9, newer, now); err != nil {
 		t.Fatal(err)
 	}
 	for _, k := range []string{"K8", "K6"} { // the same key and another, at the same header_seq
@@ -173,7 +173,7 @@ func TestReportKeepsTheLiveEntryStamp(t *testing.T) {
 	if r, _ := tb.Vault("v1"); string(r.AppKeyNext) != "K8" || r.AppKeyNextAtt != newer {
 		t.Fatalf("report replaced the live entry: %+v", r)
 	}
-	if err := tb.ConfirmAppKey(ctx, "v1", "next", []byte("K6"), 6, 9, older, now); !errors.Is(err, parent.ErrConflict) {
+	if err := tb.ConfirmAppKey(ctx, "v1", "me", "next", []byte("K6"), 6, 9, older, now); !errors.Is(err, parent.ErrConflict) {
 		t.Fatalf("a late older attempt: %v", err)
 	}
 }
@@ -187,8 +187,8 @@ func TestLiveConfirmReplacesOwnEarlierAttempt(t *testing.T) {
 	tb := parenttest.NewTables()
 	ctx, now := context.Background(), time.Now()
 	row := func() parenttest.VaultRow { r, _ := tb.Vault("v1"); return r }
-	tb.PutVault(parenttest.VaultRow{VaultID: "v1", UserGUID: "u1", State: "locked", AppKey: []byte("k5"), AppKeyID: parent.AppKeyID([]byte("k5")), AppKeySeq: 5})
-	if err := tb.ConfirmAppKey(ctx, "v1", "next", []byte("K6"), 6, 4, att(), now); err != nil {
+	tb.PutVault(parenttest.VaultRow{VaultID: "v1", LeaseInstance: "me", LeaseExpires: leaseFar, UserGUID: "u1", State: "locked", AppKey: []byte("k5"), AppKeyID: parent.AppKeyID([]byte("k5")), AppKeySeq: 5})
+	if err := tb.ConfirmAppKey(ctx, "v1", "me", "next", []byte("K6"), 6, 4, att(), now); err != nil {
 		t.Fatal(err)
 	}
 	// R2: another key, the same header_seq.
@@ -196,19 +196,19 @@ func TestLiveConfirmReplacesOwnEarlierAttempt(t *testing.T) {
 	if string(row().AppKeyNext) != "K6" {
 		t.Fatal("a report replaced the next key at an equal header_seq")
 	}
-	if err := tb.ConfirmAppKey(ctx, "v1", "next", []byte("K8"), 6, 4, att(), now); err != nil || string(row().AppKeyNext) != "K8" {
+	if err := tb.ConfirmAppKey(ctx, "v1", "me", "next", []byte("K8"), 6, 4, att(), now); err != nil || string(row().AppKeyNext) != "K8" {
 		t.Fatalf("R2: %v %+v", err, row())
 	}
 	// A next key of a higher seq or header_seq is never replaced by a live
 	// confirm (R3 is not granted: a stale next of an earlier vault is an
 	// availability-only residual).
-	tb.PutVault(parenttest.VaultRow{VaultID: "v1", UserGUID: "u1", State: "enrolling", AppKey: []byte("k1"), AppKeyID: parent.AppKeyID([]byte("k1")), AppKeySeq: 1,
+	tb.PutVault(parenttest.VaultRow{VaultID: "v1", LeaseInstance: "me", LeaseExpires: leaseFar, UserGUID: "u1", State: "enrolling", AppKey: []byte("k1"), AppKeyID: parent.AppKeyID([]byte("k1")), AppKeySeq: 1,
 		AppKeyNext: []byte("old"), AppKeyNextSeq: 9, AppKeyNextHSeq: 40})
-	if err := tb.ConfirmAppKey(ctx, "v1", "next", []byte("K2"), 2, 3, att(), now); !errors.Is(err, parent.ErrConflict) || string(row().AppKeyNext) != "old" {
+	if err := tb.ConfirmAppKey(ctx, "v1", "me", "next", []byte("K2"), 2, 3, att(), now); !errors.Is(err, parent.ErrConflict) || string(row().AppKeyNext) != "old" {
 		t.Fatalf("a higher next was replaced: %v %+v", err, row())
 	}
 	// An enrollment's own confirmation clears it.
-	if err := tb.ConfirmAppKey(ctx, "v1", "enroll", []byte("k1"), 1, 1, att(), now); err != nil || row().AppKeyNext != nil {
+	if err := tb.ConfirmAppKey(ctx, "v1", "me", "enroll", []byte("k1"), 1, 1, att(), now); err != nil || row().AppKeyNext != nil {
 		t.Fatalf("enroll: %v %+v", err, row())
 	}
 }
@@ -218,7 +218,7 @@ func TestLiveConfirmReplacesOwnEarlierAttempt(t *testing.T) {
 // newer one: the newer key stays.
 func TestConfirmsAreSerializedPerVault(t *testing.T) {
 	h, e := appKeyHarness(t)
-	h.tables.PutVault(parenttest.VaultRow{VaultID: vaultID, UserGUID: "u1", State: "locked", AppKey: []byte("k5"), AppKeyID: parent.AppKeyID([]byte("k5")), AppKeySeq: 5})
+	h.tables.PutVault(parenttest.VaultRow{VaultID: vaultID, UserGUID: "u1", State: "locked", LeaseInstance: "i-test", LeaseExpires: leaseFar, AppKey: []byte("k5"), AppKeyID: parent.AppKeyID([]byte("k5")), AppKeySeq: 5})
 	release := make(chan struct{})
 	entered := make(chan struct{}, 1)
 	h.tables.SetConfirmHook(func(key []byte) {
@@ -253,7 +253,7 @@ func TestConfirmsAreSerializedPerVault(t *testing.T) {
 func TestLateConfirmWritesNothing(t *testing.T) {
 	defer parent.SetConfirmDeadlineForTest(300 * time.Millisecond)()
 	h, e := appKeyHarness(t)
-	h.tables.PutVault(parenttest.VaultRow{VaultID: vaultID, UserGUID: "u1", State: "locked", AppKey: []byte("k5"), AppKeyID: parent.AppKeyID([]byte("k5")), AppKeySeq: 5})
+	h.tables.PutVault(parenttest.VaultRow{VaultID: vaultID, UserGUID: "u1", State: "locked", LeaseInstance: "i-test", LeaseExpires: leaseFar, AppKey: []byte("k5"), AppKeyID: parent.AppKeyID([]byte("k5")), AppKeySeq: 5})
 	h.tables.SetAppKeyErr(errors.New("throttled"))
 	e.appKeyEvent(parent.EventAppKey, "k6", "6", "", "0") // queued: waitKeyQ cannot finish
 	waitFor(t, "queued", func() bool { return h.hasLog("app key write failed; trying again") })
@@ -274,7 +274,7 @@ func TestLateConfirmWritesNothing(t *testing.T) {
 // a late live K6 (seq 6, header_seq 9) must not replace it.
 func TestLateOlderConfirmDoesNotReplaceNewer(t *testing.T) {
 	h, e := appKeyHarness(t)
-	h.tables.PutVault(parenttest.VaultRow{VaultID: vaultID, UserGUID: "u1", State: "locked", AppKey: []byte("K5"), AppKeyID: parent.AppKeyID([]byte("K5")), AppKeySeq: 5})
+	h.tables.PutVault(parenttest.VaultRow{VaultID: vaultID, UserGUID: "u1", State: "locked", LeaseInstance: "i-test", LeaseExpires: leaseFar, AppKey: []byte("K5"), AppKeyID: parent.AppKeyID([]byte("K5")), AppKeySeq: 5})
 	if got := e.confirmAppKey(t, vaultID, "next", "K7", "7", "15"); got != hostproto.StatusOK {
 		t.Fatalf("K7: %s", got)
 	}
@@ -317,8 +317,8 @@ func TestStaleAppKeyWritesDoNotRegress(t *testing.T) {
 	// 1. A stale next key at the same seq (an older attempt's retry or
 	// assertion) does not replace the confirmed one; the same key again
 	// and a later header_seq do.
-	tb.PutVault(parenttest.VaultRow{VaultID: "v1", UserGUID: "u1", State: "locked", AppKey: []byte("k5"), AppKeyID: parent.AppKeyID([]byte("k5")), AppKeySeq: 5})
-	if err := tb.ConfirmAppKey(ctx, "v1", "next", []byte("K7"), 6, 7, att(), now); err != nil {
+	tb.PutVault(parenttest.VaultRow{VaultID: "v1", LeaseInstance: "me", LeaseExpires: leaseFar, UserGUID: "u1", State: "locked", AppKey: []byte("k5"), AppKeyID: parent.AppKeyID([]byte("k5")), AppKeySeq: 5})
+	if err := tb.ConfirmAppKey(ctx, "v1", "me", "next", []byte("K7"), 6, 7, att(), now); err != nil {
 		t.Fatal(err)
 	}
 	_ = tb.AppKeys(ctx, parent.Lifecycle{Event: parent.EventAppKeyNext, VaultID: "v1", AppKey: []byte("K6"), AppKeySeq: 6, HeaderSeq: 5}, now)
@@ -326,7 +326,7 @@ func TestStaleAppKeyWritesDoNotRegress(t *testing.T) {
 	if r := row(); string(r.AppKeyNext) != "K7" || r.AppKeyNextHSeq != 7 {
 		t.Fatalf("a stale next replaced the confirmed one: %+v", r)
 	}
-	if err := tb.ConfirmAppKey(ctx, "v1", "next", []byte("K6"), 6, 5, att(), now); !errors.Is(err, parent.ErrConflict) {
+	if err := tb.ConfirmAppKey(ctx, "v1", "me", "next", []byte("K6"), 6, 5, att(), now); !errors.Is(err, parent.ErrConflict) {
 		t.Fatalf("a late confirm of the older attempt: %v", err)
 	}
 	_ = tb.AppKeys(ctx, parent.Lifecycle{Event: parent.EventAppKeyNext, VaultID: "v1", AppKey: []byte("K9"), AppKeySeq: 6, HeaderSeq: 7}, now)
@@ -349,13 +349,13 @@ func TestStaleAppKeyWritesDoNotRegress(t *testing.T) {
 	}
 	// 3. A retried enrolled does not roll app_key back to the seq-1 key,
 	// and still serves a replaced provisional vault (row enrolling).
-	tb.PutVault(parenttest.VaultRow{VaultID: "v1", UserGUID: "u1", State: "unlocked", AppKey: []byte("k2"), AppKeyID: parent.AppKeyID([]byte("k2")), AppKeySeq: 2})
+	tb.PutVault(parenttest.VaultRow{VaultID: "v1", LeaseInstance: "me", LeaseExpires: leaseFar, UserGUID: "u1", State: "unlocked", AppKey: []byte("k2"), AppKeyID: parent.AppKeyID([]byte("k2")), AppKeySeq: 2})
 	_ = tb.AppKeys(ctx, parent.Lifecycle{Event: "enrolled", VaultID: "v1", AppKey: []byte("k1"), AppKeySeq: 1}, now)
 	_ = tb.Lifecycle(ctx, parent.Lifecycle{Event: "enrolled", VaultID: "v1", AppKey: []byte("k1"), AppKeySeq: 1}, "me", now)
 	if r := row(); string(r.AppKey) != "k2" || r.AppKeySeq != 2 {
 		t.Fatalf("enrolled rolled app_key back: %+v", r)
 	}
-	tb.PutVault(parenttest.VaultRow{VaultID: "v1", UserGUID: "u1", State: "enrolling", AppKey: []byte("k2"), AppKeyID: parent.AppKeyID([]byte("k2")), AppKeySeq: 2})
+	tb.PutVault(parenttest.VaultRow{VaultID: "v1", LeaseInstance: "me", LeaseExpires: leaseFar, UserGUID: "u1", State: "enrolling", AppKey: []byte("k2"), AppKeyID: parent.AppKeyID([]byte("k2")), AppKeySeq: 2})
 	_ = tb.AppKeys(ctx, parent.Lifecycle{Event: "enrolled", VaultID: "v1", AppKey: []byte("k1"), AppKeySeq: 1}, now)
 	if r := row(); string(r.AppKey) != "k1" {
 		t.Fatalf("a replaced provisional vault's first key: %+v", r)
@@ -367,7 +367,7 @@ func TestStaleAppKeyWritesDoNotRegress(t *testing.T) {
 func TestConfirmDrainsRetryQueue(t *testing.T) {
 	defer parent.SetAppKeyRetryForTest(5*time.Millisecond, 20*time.Millisecond)()
 	h, e := appKeyHarness(t)
-	h.tables.PutVault(parenttest.VaultRow{VaultID: vaultID, UserGUID: "u1", State: "locked", AppKey: []byte("k1"), AppKeyID: parent.AppKeyID([]byte("k1")), AppKeySeq: 1})
+	h.tables.PutVault(parenttest.VaultRow{VaultID: vaultID, UserGUID: "u1", State: "locked", LeaseInstance: "i-test", LeaseExpires: leaseFar, AppKey: []byte("k1"), AppKeyID: parent.AppKeyID([]byte("k1")), AppKeySeq: 1})
 	h.tables.SetAppKeyErr(errors.New("throttled"))
 	e.appKeyEvent(parent.EventAppKey, "k2", "2", "", "0")
 	waitFor(t, "queued", func() bool { return h.hasLog("app key write failed; trying again") })
@@ -411,7 +411,7 @@ func TestAssertionBurstDoesNotBlock(t *testing.T) {
 	defer parent.SetAssertPaceForTest(time.Millisecond)()
 	h, e := appKeyHarness(t)
 	h.tables.SetAppKeyDelay(10 * time.Millisecond)
-	h.tables.PutVault(parenttest.VaultRow{VaultID: vaultID, UserGUID: "u1", State: "locked", AppKey: []byte("k1"), AppKeyID: parent.AppKeyID([]byte("k1")), AppKeySeq: 1})
+	h.tables.PutVault(parenttest.VaultRow{VaultID: vaultID, UserGUID: "u1", State: "locked", LeaseInstance: "i-test", LeaseExpires: leaseFar, AppKey: []byte("k1"), AppKeyID: parent.AppKeyID([]byte("k1")), AppKeySeq: 1})
 	for i := 0; i < 300; i++ {
 		id := fmt.Sprintf("%032x", i+1)
 		_ = e.conn.Notify(hostproto.KindLifecycle, hostproto.Strings(parent.EventAppKeyAssert, id, pcr, pcr, "1", "kk", "1", "", "0", "", "", "", "0", "")...)
@@ -438,19 +438,19 @@ func att() int64 { return attCounter.Add(1) }
 func TestOlderAttemptStampRefused(t *testing.T) {
 	tb := parenttest.NewTables()
 	ctx, now := context.Background(), time.Now()
-	tb.PutVault(parenttest.VaultRow{VaultID: "v1", UserGUID: "u1", State: "locked", AppKey: []byte("k5"), AppKeyID: parent.AppKeyID([]byte("k5")), AppKeySeq: 5})
+	tb.PutVault(parenttest.VaultRow{VaultID: "v1", LeaseInstance: "me", LeaseExpires: leaseFar, UserGUID: "u1", State: "locked", AppKey: []byte("k5"), AppKeyID: parent.AppKeyID([]byte("k5")), AppKeySeq: 5})
 	older, newer := att(), att()
-	if err := tb.ConfirmAppKey(ctx, "v1", "next", []byte("K8"), 6, 9, newer, now); err != nil {
+	if err := tb.ConfirmAppKey(ctx, "v1", "me", "next", []byte("K8"), 6, 9, newer, now); err != nil {
 		t.Fatal(err)
 	}
-	if err := tb.ConfirmAppKey(ctx, "v1", "next", []byte("K6"), 6, 9, older, now); !errors.Is(err, parent.ErrConflict) {
+	if err := tb.ConfirmAppKey(ctx, "v1", "me", "next", []byte("K6"), 6, 9, older, now); !errors.Is(err, parent.ErrConflict) {
 		t.Fatalf("a late older attempt: %v", err)
 	}
 	if r, _ := tb.Vault("v1"); string(r.AppKeyNext) != "K8" {
 		t.Fatalf("row %+v", r)
 	}
 	// The same attempt again (a repeated request) and a later one are not older.
-	if err := tb.ConfirmAppKey(ctx, "v1", "next", []byte("K9"), 6, 9, att(), now); err != nil {
+	if err := tb.ConfirmAppKey(ctx, "v1", "me", "next", []byte("K9"), 6, 9, att(), now); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -461,7 +461,7 @@ func TestOlderAttemptStampRefused(t *testing.T) {
 func TestInFlightWriteHoldsTheLockPastTheDeadline(t *testing.T) {
 	defer parent.SetConfirmDeadlineForTest(300 * time.Millisecond)()
 	h, e := appKeyHarness(t)
-	h.tables.PutVault(parenttest.VaultRow{VaultID: vaultID, UserGUID: "u1", State: "locked", AppKey: []byte("k5"), AppKeyID: parent.AppKeyID([]byte("k5")), AppKeySeq: 5})
+	h.tables.PutVault(parenttest.VaultRow{VaultID: vaultID, UserGUID: "u1", State: "locked", LeaseInstance: "i-test", LeaseExpires: leaseFar, AppKey: []byte("k5"), AppKeyID: parent.AppKeyID([]byte("k5")), AppKeySeq: 5})
 	release := make(chan struct{})
 	h.tables.SetConfirmHook(func(key []byte) {
 		if string(key) == "K6" {
@@ -501,12 +501,12 @@ func TestOrphanClearIsExact(t *testing.T) {
 	row := func() parenttest.VaultRow { r, _ := tb.Vault("v1"); return r }
 	clear := func(key string, hs uint64) {
 		t.Helper()
-		if err := tb.Lifecycle(ctx, parent.Lifecycle{Event: parent.EventAppKeyNextClear, VaultID: "v1", AppKey: []byte(key), AppKeySeq: 6, HeaderSeq: hs, Att: 77}, "me", now); err != nil {
+		if err := tb.Lifecycle(ctx, parent.Lifecycle{Event: parent.EventAppKeyNextClear, VaultID: "v1", AppKey: []byte(key), AppKeySeq: 6, HeaderSeq: hs, Att: 77, Holder: "me"}, "me", now); err != nil {
 			t.Fatal(err)
 		}
 	}
 	put := func(key string, hs uint64) {
-		tb.PutVault(parenttest.VaultRow{VaultID: "v1", UserGUID: "u1", State: "locked", AppKey: []byte("k5"), AppKeyID: parent.AppKeyID([]byte("k5")), AppKeySeq: 5,
+		tb.PutVault(parenttest.VaultRow{VaultID: "v1", LeaseInstance: "me", LeaseExpires: leaseFar, UserGUID: "u1", State: "locked", AppKey: []byte("k5"), AppKeyID: parent.AppKeyID([]byte("k5")), AppKeySeq: 5,
 			AppKeyNext: []byte(key), AppKeyNextSeq: 6, AppKeyNextHSeq: hs, AppKeyNextAtt: 77})
 	}
 	put("K6", 4) // an older pending key at a lower header_seq

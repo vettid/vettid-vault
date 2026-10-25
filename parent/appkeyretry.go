@@ -168,7 +168,7 @@ func (p *Parent) confirmAppKey(ctx context.Context, f [][]byte) [][]byte {
 		// their own, whatever becomes of the request.
 		wctx, wcancel := context.WithTimeout(context.WithoutCancel(ctx), confirmWriteBound)
 		defer wcancel()
-		result <- p.cfg.Tables.ConfirmAppKey(wctx, id, mode, key, num[0], num[1], attempt, p.now())
+		result <- p.cfg.Tables.ConfirmAppKey(wctx, id, p.cfg.InstanceID, mode, key, num[0], num[1], attempt, p.now())
 	}()
 	var err error
 	select {

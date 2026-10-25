@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -502,5 +503,40 @@ func TestReconfirmFailureStopsBeforeStepTwo(t *testing.T) {
 	}
 	if h := storedHdr(t, f.store, f.opts, f.vid); h.Next == nil {
 		t.Fatal("step 1 should be stored")
+	}
+}
+
+// conflictHeaderStore answers a header write with the store's version
+// conflict: another instance stored the header (a split brain).
+type conflictHeaderStore struct{ store.Store }
+
+func (s conflictHeaderStore) Put(ctx context.Context, key string, data []byte, ifMatch store.Version) (store.Version, error) {
+	if strings.Contains(key, "header") {
+		return "", store.ErrConflict
+	}
+	return s.Store.Put(ctx, key, data, ifMatch)
+}
+
+// A step 1 that loses to another instance's header (split brain) sends no
+// orphan clear: the row's entry for that key and header_seq may be the
+// winner's.
+func TestSplitBrainStepOneSendsNoClear(t *testing.T) {
+	f := newFixture(t)
+	f.m.opt.Store = conflictHeaderStore{f.store}
+	c := &confirmer{}
+	f.m.opt.ConfirmAppKey, f.m.opt.AppKeyRetry = c.confirm, quickKeyRetry
+	var evs []LifecycleEvent
+	f.m.opt.Lifecycle = func(ev LifecycleEvent) { evs = append(evs, ev) }
+	key := testAppKeyDER(t, 0x41)
+	rep := nextWithKey(t, f.m, key)
+	f.m.mu.Lock()
+	err := f.m.beginReplace(context.Background(), rep)
+	f.m.reportAppKey()
+	f.m.mu.Unlock()
+	if !errors.Is(err, ErrSplitBrain) {
+		t.Fatalf("err %v", err)
+	}
+	if len(evs) != 0 {
+		t.Fatalf("events after a split brain: %+v", evs)
 	}
 }

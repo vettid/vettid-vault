@@ -752,7 +752,7 @@ func (p *Parent) onLifecycle(ev Lifecycle) {
 			p.log.Debug("orphan clear skipped; stamp unknown", "vault_id", ev.VaultID, "header_seq", ev.HeaderSeq)
 			return
 		}
-		ev.Att = att
+		ev.Att, ev.Holder = att, p.cfg.InstanceID
 	}
 	if ev.Event == EventAppKeyNext {
 		// A report only: the acknowledged request wrote app_key_next before

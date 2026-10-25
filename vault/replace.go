@@ -93,11 +93,15 @@ func (m *Manager) beginReplace(ctx context.Context, r *replacement) error {
 	m.hdr.Next = r.next
 	if err := m.writeHeaderWith(ctx, false); err != nil {
 		m.hdr.Next = nil
-		m.clearOrphanNext(r.next) // the confirmed key is on the row, no header names it
 		r.wipe()
 		if errors.Is(err, ErrSplitBrain) {
+			// Another instance stored the header at that version: the
+			// row's entry may be that instance's (the same key at the
+			// same header_seq), so nothing is cleared.
+			m.unack(r.next.AppKey, r.next.AppKeySeq)
 			return err
 		}
+		m.clearOrphanNext(r.next) // the confirmed key is on the row, no header names it
 		return errRetry
 	}
 	// Read it back: a store that loses the write at once is caught here.

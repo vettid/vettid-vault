@@ -177,6 +177,10 @@ type Lifecycle struct {
 	// instance confirmed for the same key and header_seq has another).
 	// Zero never clears.
 	Att int64
+	// Holder is set by the parent on app_key_next_clear: its own instance
+	// id. The clear is conditional on the vault's unexpired lease being
+	// this instance's. Empty never clears.
+	Holder string
 }
 
 // NameChange is account_name's request (0.18.0, §10.8, §11.5).
@@ -259,8 +263,11 @@ type Tables interface {
 	// mode "next": as app_key_next {key, kid, seq, header_seq}, unless
 	// app_key already is that key at that seq or higher; mode "enroll":
 	// as app_key (the enrolled report's write, early). ErrConflict if the
-	// row names another key at that seq or higher, or is gone.
-	ConfirmAppKey(ctx context.Context, vaultID, mode string, key []byte, seq, headerSeq uint64, attempt int64, now time.Time) error
+	// row names another key at that seq or higher, or is gone, or the
+	// instance me does not hold the vault's unexpired lease (the write is
+	// conditional on it; in mode next a read-back counts only the entry
+	// this request's own write made, or an app_key at that seq).
+	ConfirmAppKey(ctx context.Context, vaultID, me, mode string, key []byte, seq, headerSeq uint64, attempt int64, now time.Time) error
 	// ReleaseLease removes this instance's lease and marks the vault
 	// locked (a vault that stopped without a lifecycle "locked").
 	ReleaseLease(ctx context.Context, vaultID, instanceID string, now time.Time) error

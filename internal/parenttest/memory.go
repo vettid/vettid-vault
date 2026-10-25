@@ -548,7 +548,7 @@ func (t *Tables) Lifecycle(_ context.Context, ev parent.Lifecycle, me string, no
 	if t.AppKeyErr != nil && hasAppKeyPart(ev) {
 		keyErr = t.AppKeyErr // injected: the app key part is not written
 	} else {
-		t.appKeysLocked(r, ev)
+		t.appKeysLocked(r, ev, now)
 	}
 	switch ev.Event {
 	case parent.EventAppKey, parent.EventAppKeyNext, parent.EventAppKeyAssert, parent.EventAppKeyNextClear:
@@ -573,7 +573,7 @@ func hasAppKeyPart(ev parent.Lifecycle) bool {
 }
 
 // AppKeys implements parent.Tables: the app key part of an event alone.
-func (t *Tables) AppKeys(_ context.Context, ev parent.Lifecycle, _ time.Time) error {
+func (t *Tables) AppKeys(_ context.Context, ev parent.Lifecycle, now time.Time) error {
 	t.mu.Lock()
 	d := t.AppKeyDelay
 	t.mu.Unlock()
@@ -585,12 +585,12 @@ func (t *Tables) AppKeys(_ context.Context, ev parent.Lifecycle, _ time.Time) er
 	if t.AppKeyErr != nil {
 		return t.AppKeyErr
 	}
-	t.appKeysLocked(t.vaults[ev.VaultID], ev)
+	t.appKeysLocked(t.vaults[ev.VaultID], ev, now)
 	return nil
 }
 
 // ConfirmAppKey implements parent.Tables as parent.AWS.
-func (t *Tables) ConfirmAppKey(ctx context.Context, vaultID, mode string, key []byte, seq, headerSeq uint64, attempt int64, _ time.Time) error {
+func (t *Tables) ConfirmAppKey(ctx context.Context, vaultID, me, mode string, key []byte, seq, headerSeq uint64, attempt int64, now time.Time) error {
 	t.mu.Lock()
 	hook := t.confirmHook
 	t.mu.Unlock()
@@ -611,16 +611,19 @@ func (t *Tables) ConfirmAppKey(ctx context.Context, vaultID, mode string, key []
 	if r == nil {
 		return parent.ErrConflict
 	}
+	if r.LeaseInstance != me || r.LeaseExpires <= now.Unix() {
+		return parent.ErrConflict // as parent.AWS: only the unexpired lease holder confirms
+	}
 	if mode == "enroll" {
 		r.AppKey, r.AppKeyID, r.AppKeySeq = append([]byte(nil), key...), parent.AppKeyID(key), seq
 		r.AppKeyNext, r.AppKeyNextSeq, r.AppKeyNextHSeq = nil, 0, 0
 		return nil
 	}
 	t.putNextLocked(r, key, seq, headerSeq, attempt)
-	// As parent.AWS: ok if the row now names the key as app_key_next, or
-	// as app_key, at that seq or higher.
+	// As parent.AWS: ok if the row now names the key as app_key_next made
+	// by this request (its stamp), or as app_key, at that seq or higher.
 	kid := parent.AppKeyID(key)
-	if r.AppKeyNext != nil && parent.AppKeyID(r.AppKeyNext) == kid && r.AppKeyNextSeq >= seq ||
+	if r.AppKeyNext != nil && parent.AppKeyID(r.AppKeyNext) == kid && r.AppKeyNextSeq >= seq && r.AppKeyNextAtt == attempt ||
 		r.AppKeyID == kid && r.AppKeySeq >= seq {
 		return nil
 	}
@@ -638,7 +641,7 @@ func (t *Tables) Confirms() []string {
 // appKeysLocked is the app_key and app_key_next part of an event, as
 // parent.AWS.appKey (one update for app_key and the removal of the next
 // key).
-func (t *Tables) appKeysLocked(r *VaultRow, ev parent.Lifecycle) {
+func (t *Tables) appKeysLocked(r *VaultRow, ev parent.Lifecycle, now time.Time) {
 	switch ev.Event {
 	case parent.EventAppKeyAssert:
 		ev.Event = parent.EventAppKey
@@ -647,7 +650,7 @@ func (t *Tables) appKeysLocked(r *VaultRow, ev parent.Lifecycle) {
 		return
 	}
 	if ev.Event == parent.EventAppKeyNextClear {
-		if ev.Att != 0 && r.AppKeyNext != nil && parent.AppKeyID(r.AppKeyNext) == parent.AppKeyID(ev.AppKey) && r.AppKeyNextHSeq == ev.HeaderSeq && r.AppKeyNextAtt == ev.Att {
+		if ev.Att != 0 && ev.Holder != "" && r.LeaseInstance == ev.Holder && r.LeaseExpires > now.Unix() && r.AppKeyNext != nil && parent.AppKeyID(r.AppKeyNext) == parent.AppKeyID(ev.AppKey) && r.AppKeyNextHSeq == ev.HeaderSeq && r.AppKeyNextAtt == ev.Att {
 			r.AppKeyNext, r.AppKeyNextSeq, r.AppKeyNextHSeq, r.AppKeyNextAtt = nil, 0, 0, 0
 		}
 		return

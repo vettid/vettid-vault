@@ -57,3 +57,20 @@ regexes = [
   '''QWERTY123456''',
   '''violet-Kestrel-91-moss''',
 ]
+
+# §10.4 member-authentication vector (connauth.json, vettid-vault #152):
+# the challenge's request_id, a fixed example ULID (not a secret) that the
+# generic rule mistakes for a key next to the name ConnAuthRequestID.
+# Scoped to the generic-api-key rule, to the vector parameters and to this
+# exact value together.
+[[allowlists]]
+description = "connauth vector request_id (test-only ULID)"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = [
+  '''^vms/vectors/params\.go$''',
+]
+regexTarget = "match"
+regexes = [
+  '''01JB2Z6V9K3M4N5P6Q7R8S9T70''',
+]

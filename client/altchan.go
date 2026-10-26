@@ -308,7 +308,7 @@ func (d *Device) AttestChain() (chain [][]byte, signerSeen bool) {
 // DeviceSigner is the `signer` member of an app's device.list entry
 // (0.27.0, §10.3): the vault's signer binding.
 type DeviceSigner struct {
-	Class  string // vettid, google_play or development
+	Class  string // vettid, google_play, development or (staging automation, 0.66.0) automation
 	Digest string // 64 lowercase hex digits: the signing certificate's SHA-256
 }
 

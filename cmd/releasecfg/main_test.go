@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
+	"encoding/hex"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -15,6 +16,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/vettid/vettid-vault/enclave/releasecfg"
 )
 
 // The release gate as the build runs it (VAULT-MESSAGING 0.26.0 §11.10.8,
@@ -158,7 +161,9 @@ func TestCheckAutomationEndDate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := strings.TrimSuffix(strings.TrimSpace(string(b)), "}")
+	// 0.66.0: the member comes with the automation signer.
+	signer := `"android_signers": [{"digest":"` + hex.EncodeToString(releasecfg.AutomationSignerDigest[:]) + `","class":"automation"},`
+	s := strings.TrimSuffix(strings.TrimSpace(strings.Replace(string(b), `"android_signers": [`, signer, 1)), "}")
 	s += `,"automation_attestation":{"android_roots":["` + base64.StdEncoding.EncodeToString(der) + `"],"until":"` + until.Format(time.DateOnly) + `"}}`
 	p := filepath.Join(t.TempDir(), "staging.json")
 	if err := os.WriteFile(p, []byte(s), 0o600); err != nil {
@@ -170,7 +175,8 @@ func TestCheckAutomationEndDate(t *testing.T) {
 		code := run([]string{"check", "staging", p}, &out, &errb)
 		return code, out.String() + errb.String()
 	}
-	if code, out := check(""); code != 0 || !strings.Contains(out, "staging automation attestation: 1 root(s), until "+until.Format(time.DateOnly)) {
+	if code, out := check(""); code != 0 || !strings.Contains(out, "staging automation attestation: 1 root(s), until "+until.Format(time.DateOnly)) ||
+		!strings.Contains(out, "1c9f3b0e… automation") {
 		t.Fatalf("today: %d %s", code, out)
 	}
 	if code, out := check("0"); code != 0 { // the Dockerfile's default: today

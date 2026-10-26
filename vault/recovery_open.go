@@ -692,6 +692,13 @@ func resumeRecovery(ctx context.Context, p RecoveryOpenParams, hdr *Header, hver
 			m.zeroize()
 			return nil, out.fail(CodeMissing)
 		}
+		// Step 2 was stored, by this recovery's open or by an earlier
+		// recovery's: the stored recovered invite is bound to the phone
+		// that ran it. The full proof is behind us here (the code and
+		// the attestation at register, the record's phone, its signature
+		// and current assertion in step 1, the PIN and the phone's
+		// secret through dek_wrap_next).
+		m.resumeRecoveredInvite(hdr.Recovery, p.DeviceIK, now)
 	}
 	m.unlockSecret = append([]byte(nil), p.UnlockSecret...)
 	m.repl = &replacement{next: nx, dek1: d1, uk1: uk, secret1: append([]byte(nil), p.UnlockSecret...)}
@@ -767,11 +774,62 @@ func (m *Manager) dropRecoveredHandshake(id string, now time.Time) {
 // another RecoveredInviteWindow. It may repeat until the phone pairs; no
 // attempt is used and the counter is not called.
 func (m *Manager) resumeLostOK(inv *Invite, now time.Time) []byte {
+	m.renewRecoveredInvite(inv, now)
+	return VaultBundle(handshake.Principal{IK: m.keys.ik.Public().(ed25519.PublicKey), KEM: m.keys.kem.Public(), Relay: m.ownAddr()})
+}
+
+// renewRecoveredInvite restarts a recovered phone's pairing: a first
+// handshake begun with the invite and not completed is dropped, and the
+// invite is usable for another RecoveredInviteWindow.
+func (m *Manager) renewRecoveredInvite(inv *Invite, now time.Time) {
 	m.dropRecoveredHandshake(inv.ID, now)
 	inv.Used = false
 	inv.Exp = now.Add(RecoveredInviteWindow)
 	m.dirty = true
-	return VaultBundle(handshake.Principal{IK: m.keys.ik.Public().(ed25519.PublicKey), KEM: m.keys.kem.Public(), Relay: m.ownAddr()})
+}
+
+// resumeRecoveredInvite is a repeated recovery open whose step 2 is
+// stored (§11.14.6 "A phone that could not tell"). r is the header's
+// current recovery record, whose registered phone (device) the open has
+// proved in full.
+//
+//   - The stored invite is this phone's identity (the same ik registered
+//     again for a later recovery, with a new attested key on iOS): it is
+//     set again from the current registration, as a run whose step 2 was
+//     not stored sets it: ctx = the current recovery_id, the current
+//     relay key, KEM and attestation binding. The earlier recovery's
+//     invite goes, with any first handshake begun with it. Without this
+//     the phone, which pairs with the current recovery_id and asserts
+//     with its current key, could neither pair nor unlock.
+//   - The stored invite is another identity's (the phone registered a
+//     new identity, and an earlier recovery's run with its earlier
+//     identity stored step 2): the repeat keeps that invitation (the
+//     earlier identity pairs with the earlier recovery_id).
+//
+// Either way the invite is renewed as a lost ok's unlock renews it. If
+// the phone has paired there is no recovered invite and nothing changes.
+//
+// Accepted gap: until step 3 is stored the header's `next` part still
+// names the phone as the run that stored step 1 registered it
+// (findUnlockKey), with that run's attestation binding. If this repeat
+// stores its state and its step-3 header write fails, the phone's lost-ok
+// unlock with its new attested key is refused until it opens again while
+// the current recovery is registered; that repeat is idempotent.
+func (m *Manager) resumeRecoveredInvite(r *RecoveryRecord, device ed25519.PublicKey, now time.Time) {
+	if r != nil && r.App != nil && r.App.IK != nil && suite.EqualPublic(r.App.IK, device) {
+		if inv := m.recoveredInvite(r.App.IK); inv != nil {
+			inv = &Invite{ID: r.ID, Kind: KindApp, Exp: now.Add(RecoveredInviteWindow), EnrollIK: r.App.IK, EnrollRelayPK: r.App.RelayPK,
+				EnrollKEM: r.App.KEM, EnrollAttest: r.App.Attestation, CreatedBy: inviteByRecovery}
+			m.setRecoveredInvite(inv, now)
+			m.renewRecoveredInvite(inv, now)
+			return
+		}
+	}
+	for _, inv := range m.st.Invites {
+		if inv.CreatedBy == inviteByRecovery {
+			m.renewRecoveredInvite(inv, now)
+		}
+	}
 }
 
 // keepRecoveredSigner records the vault's signer binding (the old app's

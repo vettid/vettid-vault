@@ -10,6 +10,7 @@
 package vault
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -954,12 +955,43 @@ func (m *Manager) syncUnlockKeys() {
 				present = present || suite.EqualPublic(k.IK, inv.EnrollIK)
 			}
 			if !present {
-				keys = append(keys, UnlockKey{DeviceID: recoveryDeviceID, IK: inv.EnrollIK, KEM: inv.EnrollKEM, Attestation: binding(inv.EnrollIK, inv.EnrollAttest)})
+				// The header's binding is kept only for the attested key
+				// the invite names (its iOS counter advances there). The
+				// same ik registered again for a later recovery may come
+				// with a new attested key: the invite's binding, set
+				// again from that registration, wins over an earlier
+				// key's (§11.14.6 "A phone that could not tell").
+				att := inv.EnrollAttest
+				if b, ok := prev[string(inv.EnrollIK)]; ok && sameAttestedKey(b, att) {
+					att = b
+				}
+				keys = append(keys, UnlockKey{DeviceID: recoveryDeviceID, IK: inv.EnrollIK, KEM: inv.EnrollKEM, Attestation: att})
 			}
 		}
 	}
 	sortUnlockKeys(keys)
 	m.hdr.UnlockKeys = keys
+}
+
+// attestedKey is the part of a device binding (devattest.Binding) that
+// names the attested key: the platform, the public key and, on iOS, the
+// App Attest key id.
+type attestedKey struct {
+	Platform  string `json:"platform"`
+	PublicKey []byte `json:"pk"`
+	KeyID     []byte `json:"key_id"`
+}
+
+// sameAttestedKey reports whether bindings a and b are for the same
+// attested key. A binding that cannot be read, or names no key, is never
+// the same as anything.
+func sameAttestedKey(a, b json.RawMessage) bool {
+	var ka, kb attestedKey
+	if len(a) == 0 || len(b) == 0 || json.Unmarshal(a, &ka) != nil || json.Unmarshal(b, &kb) != nil {
+		return false
+	}
+	return ka.Platform != "" && len(ka.PublicKey) > 0 && ka.Platform == kb.Platform &&
+		bytes.Equal(ka.PublicKey, kb.PublicKey) && bytes.Equal(ka.KeyID, kb.KeyID)
 }
 
 // enrollDeviceID names the first app's unlock key until its enrollment

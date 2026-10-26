@@ -16,6 +16,7 @@ import (
 	"github.com/vettid/vettid-vault/internal/enclavetest"
 	"github.com/vettid/vettid-vault/internal/relaytest"
 	"github.com/vettid/vettid-vault/vault"
+	"github.com/vettid/vettid-vault/vault/store"
 	"github.com/vettid/vettid-vault/vms/altchan"
 )
 
@@ -36,10 +37,17 @@ func newRecR(t *testing.T) *recR { return newRecRWith(t, 0) }
 
 // newRecRWith starts the world; quiet, if set, replaces the release's
 // quiet period (tests of the code and the register, not of the period).
-func newRecRWith(t *testing.T, quiet time.Duration) *recR {
+func newRecRWith(t *testing.T, quiet time.Duration) *recR { return newRecRStore(t, quiet, nil) }
+
+// newRecRStore is newRecRWith whose enclave stores through wrap(store),
+// if wrap is set (fault injection).
+func newRecRStore(t *testing.T, quiet time.Duration, wrap func(store.Store) store.Store) *recR {
 	t.Helper()
 	r := relaytest.Start(t, nil)
 	w := enclavetest.NewWorld(time.Now, r.URL)
+	if wrap != nil {
+		w.Store = wrap(w.Store)
+	}
 	aw := &acWorld{t: t, w: w, relay: r.URL, trust: w.Trust()}
 	b := countertest.NewLive()
 	w.VaultOptions = vault.Options{PollWait: time.Second, Counter: b,

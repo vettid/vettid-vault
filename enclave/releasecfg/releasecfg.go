@@ -28,6 +28,7 @@ package releasecfg
 import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
@@ -147,7 +148,7 @@ type Config struct {
 
 // Automation is the staging channel's automation attestation CA
 // (VAULT-RELEASES §3.1: staging accepts "test CA and the real vendor
-// roots"; owner decision 2026-10-27): Android key attestation roots
+// roots"; owner decision 2026-10-26): Android key attestation roots
 // accepted beside Google's, held by VettID's staging account, so that an
 // automated test without a phone can enroll a staging app device. Until is
 // the switch's end date (STAGING-DEVELOPMENT-PLAN §2.5.5): the last day,
@@ -159,6 +160,18 @@ type Automation struct {
 	AndroidRoots []*x509.Certificate
 	Until        time.Time // 00:00 UTC of the last day
 }
+
+// AutomationSignerDigest is the automation's signer (VAULT-MESSAGING
+// 0.66.0 §11.7.1, class automation): SHA-256 of the fixed string
+// AutomationSignerLabel, not of a certificate. No APK can report it (its
+// signing certificate's DER would have to hash to it), it does not change
+// when the CA certificate is renewed or its key rotated (so the vaults
+// bound to it keep unlocking), and anyone can recompute it.
+var AutomationSignerDigest = sha256.Sum256([]byte(AutomationSignerLabel))
+
+// AutomationSignerLabel is the string whose SHA-256 is the automation
+// signer's digest.
+const AutomationSignerLabel = "vettid-staging-automation-signer-v1"
 
 // The automation member's bounds: one or two roots (a rotation), and an
 // end date at most MaxAutomationDays after the newest root's notBefore,
@@ -359,6 +372,14 @@ func Parse(b []byte) (*File, error) {
 			return nil, err
 		}
 	}
+	// 0.66.0: the automation signer and the automation CA come together.
+	autoSigner := false
+	for _, sg := range c.AndroidSigners {
+		autoSigner = autoSigner || sg.Class == devattest.ClassAutomation
+	}
+	if autoSigner != o.Has("automation_attestation") {
+		return nil, ErrFormat
+	}
 	f.Missing = dedupe(f.Missing)
 	return f, nil
 }
@@ -457,10 +478,13 @@ func (c *Config) TimeScale() uint64 {
 
 // parseSigners reads "android_signers" (0.27.0, §11.10.8): 1 to 4
 // objects {"digest": "<64 lowercase hex>", "class": "vettid" |
-// "google_play" | "development"} with distinct digests. Malformed: an
-// entry without a class or with an unknown one, a member besides the two,
-// a repeated digest, the bare list of digest strings used before 0.27.0,
-// and class development in the production file. A placeholder digest is
+// "google_play" | "development" | "automation"} with distinct digests.
+// Malformed: an entry without a class or with an unknown one, a member
+// besides the two, a repeated digest, the bare list of digest strings
+// used before 0.27.0, class development or automation in the production
+// file, and (0.66.0) a class automation entry whose digest is not
+// AutomationSignerDigest (Parse also requires it to come with
+// automation_attestation, and the reverse). A placeholder digest is
 // reported missing, as any placeholder.
 func parseSigners(o strictjson.Object, channel string, missing func(string)) ([]Signer, error) {
 	arr, err := o.Array("android_signers")
@@ -478,19 +502,25 @@ func parseSigners(o strictjson.Object, channel string, missing func(string)) ([]
 		if err != nil || !devattest.ValidClass(class) {
 			return nil, ErrFormat
 		}
-		if channel == ChannelProd && class == devattest.ClassDevelopment {
-			return nil, ErrFormat // a development key is never pinned in production
+		if channel != ChannelStaging && (class == devattest.ClassDevelopment || class == devattest.ClassAutomation) {
+			return nil, ErrFormat // a development or automation signer is never pinned in production
 		}
 		s, err := e.String("digest")
 		if err != nil {
 			return nil, ErrFormat
 		}
 		if isPlaceholder(s) {
+			if class == devattest.ClassAutomation {
+				return nil, ErrFormat // its digest is a constant, never pending
+			}
 			missing("android_signers")
 			continue
 		}
 		d, err := hex.DecodeString(s)
 		if err != nil || len(d) != 32 || hex.EncodeToString(d) != s || seen[s] {
+			return nil, ErrFormat
+		}
+		if class == devattest.ClassAutomation && s != hex.EncodeToString(AutomationSignerDigest[:]) {
 			return nil, ErrFormat
 		}
 		seen[s] = true

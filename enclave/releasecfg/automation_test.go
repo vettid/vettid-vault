@@ -11,6 +11,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"math/big"
 	"os"
@@ -47,13 +48,36 @@ var (
 	autoEnd   = time.Date(2027, 6, 30, 23, 59, 59, 0, time.UTC)
 )
 
+// withAutomation adds the automation member and (0.66.0) the automation
+// signer it requires.
 func withAutomation(s, roots, until string) string {
-	return strings.TrimSuffix(s, "}") + `,"automation_attestation":{"android_roots":[` + roots + `],"until":"` + until + `"}}`
+	return withMember(withAutoSigner(s), roots, until)
+}
+
+// withMember adds the automation member alone.
+func withMember(s, roots, until string) string {
+	return strings.TrimSuffix(strings.TrimSpace(s), "}") + `,"automation_attestation":{"android_roots":[` + roots + `],"until":"` + until + `"}}`
+}
+
+// autoSignerEntry is the automation signer's entry.
+var autoSignerEntry = `{"digest":"` + hex.EncodeToString(AutomationSignerDigest[:]) + `","class":"automation"}`
+
+// withAutoSigner pins the automation signer (once) in a test file.
+func withAutoSigner(s string) string {
+	if strings.Contains(s, `"class":"automation"`) {
+		return s
+	}
+	for _, k := range []string{`"android_signers":[`, `"android_signers": [`} {
+		if i := strings.Index(s, k); i >= 0 {
+			return s[:i+len(k)] + autoSignerEntry + "," + s[i+len(k):]
+		}
+	}
+	panic("no android_signers")
 }
 
 func quoted(s ...string) string { return `"` + strings.Join(s, `","`) + `"` }
 
-// VAULT-RELEASES §3.1 (owner decision 2026-10-27): the staging file may
+// VAULT-RELEASES §3.1 (owner decision 2026-10-26): the staging file may
 // name automation attestation roots with an end date; the image accepts
 // them only in the staging channel, and a production file that names
 // them is malformed.
@@ -101,7 +125,7 @@ func TestAutomationAttestation(t *testing.T) {
 }
 
 func TestAutomationRefusals(t *testing.T) {
-	base := staging(complete(t))
+	base := withAutoSigner(staging(complete(t)))
 	good := caCert(t, 0x61, autoFrom, autoEnd, nil)
 	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -201,9 +225,15 @@ func TestCommittedProdHasNoAutomation(t *testing.T) {
 	if bytes.Contains(b, []byte("automation")) {
 		t.Fatal("prod.json names automation attestation")
 	}
-	added := withAutomation(strings.TrimSpace(string(b)), quoted(caCert(t, 0x61, autoFrom, autoEnd, nil)), autoUntil)
-	if _, err := Parse([]byte(added)); !errors.Is(err, ErrFormat) {
-		t.Fatalf("prod.json with an automation member: %v", err)
+	root := quoted(caCert(t, 0x61, autoFrom, autoEnd, nil))
+	for name, added := range map[string]string{
+		"member and signer": withAutomation(string(b), root, autoUntil),
+		"member":            withMember(string(b), root, autoUntil),
+		"signer":            withAutoSigner(string(b)),
+	} {
+		if _, err := Parse([]byte(added)); !errors.Is(err, ErrFormat) {
+			t.Fatalf("prod.json with the automation %s: %v", name, err)
+		}
 	}
 	f, err := Parse(b)
 	if err != nil {
@@ -211,5 +241,46 @@ func TestCommittedProdHasNoAutomation(t *testing.T) {
 	}
 	if f.Config.Automation != nil || f.Config.AutomationRoots() != nil {
 		t.Fatal("production automation roots")
+	}
+}
+
+// VAULT-MESSAGING 0.66.0 §11.7.1: the automation's own signer class. Its
+// digest is SHA-256 of a fixed string; it is pinned only in the staging
+// file and only together with automation_attestation (and the member only
+// with it).
+func TestAutomationSigner(t *testing.T) {
+	if hex.EncodeToString(AutomationSignerDigest[:]) != "1c9f3b0e19767df0f9e9833de5bd47c7f6f62092623199c7260a817ef1164e00" || AutomationSignerLabel != "vettid-staging-automation-signer-v1" {
+		t.Fatal("the automation signer's digest changed: every vault bound to it would be refused")
+	}
+	root := quoted(caCert(t, 0x61, autoFrom, autoEnd, nil))
+	c, err := Check(ChannelStaging, []byte(withAutomation(staging(complete(t)), root, autoUntil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, sg := range c.AndroidSigners {
+		if sg.Class == "automation" {
+			n++
+			if !bytes.Equal(sg.Digest, AutomationSignerDigest[:]) {
+				t.Fatal("digest")
+			}
+		}
+	}
+	if n != 1 {
+		t.Fatalf("%d automation signers", n)
+	}
+	other := `{"digest":"` + strings.Repeat("cd", 32) + `","class":"automation"}`
+	for name, file := range map[string]string{
+		"signer without the member":  withAutoSigner(staging(complete(t))),
+		"member without the signer":  withMember(staging(complete(t)), root, autoUntil),
+		"another digest":             withMember(strings.Replace(staging(complete(t)), `"android_signers":[`, `"android_signers":[`+other+`,`, 1), root, autoUntil),
+		"placeholder digest":         withMember(strings.Replace(staging(complete(t)), `"android_signers":[`, `"android_signers":[{"digest":"TODO-automation","class":"automation"},`, 1), root, autoUntil),
+		"production, signer alone":   withAutoSigner(complete(t)),
+		"production, signer, member": withAutomation(complete(t), root, autoUntil),
+		"production, member alone":   withMember(complete(t), root, autoUntil),
+	} {
+		if _, err := Parse([]byte(file)); !errors.Is(err, ErrFormat) {
+			t.Errorf("%s: %v", name, err)
+		}
 	}
 }

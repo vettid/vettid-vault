@@ -371,15 +371,18 @@ func validAt(c *x509.Certificate, now time.Time) bool {
 // cA FALSE and digitalSignature only, and sign their leaves all the same.
 // That is also why the standard library's path validation is not used
 // here (it refuses such a chain, and cannot leave validity periods out).
-func checkAndroidChain(p *Policy, chainDER [][]byte, now *time.Time) ([]*x509.Certificate, error) {
+//
+// The second result reports whether the root is one of the policy's automation
+// roots (staging, 0.66.0) rather than a vendor root.
+func checkAndroidChain(p *Policy, chainDER [][]byte, now *time.Time) ([]*x509.Certificate, bool, error) {
 	if len(chainDER) == 0 || len(chainDER) > 10 {
-		return nil, ErrFormat
+		return nil, false, ErrFormat
 	}
 	chain := make([]*x509.Certificate, len(chainDER))
 	for i, b := range chainDER {
 		c, err := x509.ParseCertificate(b)
 		if err != nil {
-			return nil, ErrFormat
+			return nil, false, ErrFormat
 		}
 		chain[i] = c
 	}
@@ -387,23 +390,28 @@ func checkAndroidChain(p *Policy, chainDER [][]byte, now *time.Time) ([]*x509.Ce
 	// (compared by public key, as Google recommends).
 	for i := 0; i+1 < len(chain); i++ {
 		if err := chain[i+1].CheckSignature(chain[i].SignatureAlgorithm, chain[i].RawTBSCertificate, chain[i].Signature); err != nil {
-			return nil, ErrChain
+			return nil, false, ErrChain
 		}
 	}
 	last := chain[len(chain)-1]
-	pinned := false
+	pinned, automation := false, false
 	for _, r := range p.AndroidRoots {
 		if suite.Equal(last.RawSubjectPublicKeyInfo, r.RawSubjectPublicKeyInfo) {
 			pinned = true
 		}
 	}
+	for _, r := range p.AndroidAutomationRoots {
+		if suite.Equal(last.RawSubjectPublicKeyInfo, r.RawSubjectPublicKeyInfo) {
+			pinned, automation = true, true
+		}
+	}
 	if !pinned || last.CheckSignature(last.SignatureAlgorithm, last.RawTBSCertificate, last.Signature) != nil {
-		return nil, ErrRoot
+		return nil, false, ErrRoot
 	}
 	if now != nil {
 		for _, c := range chain {
 			if !validAt(c, *now) {
-				return nil, ErrChain
+				return nil, false, ErrChain
 			}
 		}
 	}
@@ -411,19 +419,19 @@ func checkAndroidChain(p *Policy, chainDER [][]byte, now *time.Time) ([]*x509.Ce
 		c := chain[i]
 		for _, e := range c.Extensions {
 			if e.Id.Equal(OIDKeyDescription) {
-				return nil, ErrChain
+				return nil, false, ErrChain
 			}
 		}
 		ca := c.BasicConstraintsValid && c.IsCA
 		if i >= 2 && (!ca || c.KeyUsage != 0 && c.KeyUsage&x509.KeyUsageCertSign == 0) {
-			return nil, ErrChain
+			return nil, false, ErrChain
 		}
 		// i-1 certificates lie between c and the leaf.
 		if ca && (c.MaxPathLen > 0 || c.MaxPathLen == 0 && c.MaxPathLenZero) && i-1 > c.MaxPathLen {
-			return nil, ErrChain
+			return nil, false, ErrChain
 		}
 	}
-	return chain, nil
+	return chain, automation, nil
 }
 
 // verifyAndroid verifies a key attestation chain against the policy and
@@ -434,7 +442,7 @@ func verifyAndroid(p *Policy, chainDER [][]byte, challenge *[32]byte, now *time.
 	if p.AndroidPackage == "" || len(p.AndroidSigners) == 0 || len(p.AndroidRoots) == 0 {
 		return nil, ErrPlatform
 	}
-	chain, err := checkAndroidChain(p, chainDER, now)
+	chain, automation, err := checkAndroidChain(p, chainDER, now)
 	if err != nil {
 		return nil, err
 	}
@@ -527,6 +535,12 @@ func verifyAndroid(p *Policy, chainDER [][]byte, challenge *[32]byte, now *time.
 	}
 	b := &Binding{Platform: "android", PublicKey: append([]byte(nil), leaf.RawSubjectPublicKeyInfo...), Signer: hex.EncodeToString(signer)}
 	b.SignerClass, _ = p.SignerClass(b.Signer)
+	// 0.66.0: the automation signer and the automation CA go together, so
+	// an automation vault is always labelled as one and nothing else can
+	// claim the label.
+	if automation != (b.SignerClass == ClassAutomation) {
+		return nil, ErrApplication
+	}
 	for _, c := range chain {
 		b.Serials = append(b.Serials, c.SerialNumber.Text(16))
 	}

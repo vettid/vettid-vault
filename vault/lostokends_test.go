@@ -264,3 +264,28 @@ func TestEarlierIdentityUnlockWhileAnotherRecoveryIsRegistered(t *testing.T) {
 	}
 	m.Crash()
 }
+
+// The recovered phone whose unlock finishes step 3 while its record is
+// still registered is answered as its lost ok even when the vault shows
+// no credential with a backup copy (here a gate that is not ready): its
+// recovery completed at the open, so the registered phone's no_backup
+// refusal (§11.11.5 step 1), which would cancel the recovery, is not
+// applied. It gets the bundle and the record ends.
+func TestLostOKUnlockIsNotRefusedNoBackup(t *testing.T) {
+	f := newOpenFixture(t)
+	a1 := attBinding("attested-key-one")
+	phone := f.phone
+	f.reRegister(rebindR1, phone, a1)
+	f.stopAfterStep2(rebindR1, phone, a1)
+	f.opts.Features = append(f.opts.Features, &gateFeature{ready: false})
+	m, uo := f.unlockAs(phone, a1)
+	if m == nil || !uo.OK || uo.Code == CodeNoBackup || len(uo.VaultBundle) == 0 || uo.Token == "" || uo.CredentialBackup != nil {
+		t.Fatalf("lost-ok unlock without a ready credential: %+v", uo)
+	}
+	if err := m.Lock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if h := f.storedHeader(); h.Next != nil || h.Recovery != nil {
+		t.Fatalf("after the unlock: next %v, recovery %+v", h.Next != nil, h.Recovery)
+	}
+}

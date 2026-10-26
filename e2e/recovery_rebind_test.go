@@ -174,7 +174,10 @@ func TestRecoveryRLostOKUnlockEndsTheRecovery(t *testing.T) {
 // and opens nothing; its lost-ok unlock with the earlier key A1 finishes
 // R1's step 3 and ends R2. The answer carries the bundle and a token, the
 // invitation stays R1's, so a handshake with ctx = R2 gets no hs.resp and
-// the phone pairs with ctx = R1; the binding after it is A1.
+// the phone pairs with ctx = R1; the binding after it is A1. Only the
+// unit test (TestLostOKUnlockEndsTheCurrentRecovery) proves the
+// invitation's renewal: this harness's clock offset does not move the
+// vault's clock.
 func TestRecoveryRLostOKUnlockPairsWithTheEarlierRecovery(t *testing.T) {
 	hf := &headerFaults{}
 	rr := newRecRStore(t, 0, func(s store.Store) store.Store { hf.Store = s; return hf })

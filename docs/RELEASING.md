@@ -304,6 +304,41 @@ The policy's administration statement is the account's usual one; the
 staging account's administrators can therefore also grant `kms:Sign`.
 That is the same trust as every other staging key.
 
+**The automation as an app** (`vaultctl`, release build: no
+`devenclave` tag). The commands refuse anything but the staging channel:
+the channel file must be staging's (`-config`, default the checkout's
+`enclave/releasecfg/staging.json`), complete, with an automation CA
+whose end date has not passed and whose key is the KMS key given; every
+URL must be `https` on `staging.vettid.org` or a host under it; the trust
+is the AWS Nitro root (`enclave.NitroRoots`) and the staging manifest
+keys only, so a production manifest or enclave never verifies.
+
+```sh
+go build -o vaultctl ./cmd/vaultctl
+export AWS_PROFILE=<a profile that assumes vettid-org-staging-automation-attest>
+export VAULTCTL_ATTEST_KMS_KEY=alias/vettid-org-staging-automation-attestation-ca
+./vaultctl -state app.json init -role app -name automation -relay https://relay.vettid.org
+# a member session on account.staging.vettid.org (the browser's Cookie
+# header after the email sign-in: vid_id=...; vid_rt=...), the vault PIN
+# and the credential password:
+export VAULTCTL_PORTAL_COOKIE='vid_id=...; vid_rt=...' VAULTCTL_PIN=... VAULTCTL_PASSWORD=...
+./vaultctl -state app.json -timeout 5m staging-enroll    # prints the vault id
+./vaultctl -state app.json request vault.status
+./vaultctl -state app.json staging-unlock               # a later session (VAULTCTL_PIN)
+```
+
+`staging-enroll` issues a setup code with the member session (`POST
+/api/vault/enroll-code` with `X-VettID-CSRF: 1`), redeems it with the
+app key, enrolls with an attestation chain the KMS key issues for
+`com.vettid.app.staging`, the staging file's `development` signer and
+its `android_min_version_code` (`-version-code` to report a higher one),
+waits for `vault.enrolled`, runs the first handshake, creates the
+credential and confirms the enrollment, as `api-enroll` does on the dev
+stack. The device attestation key is a software P-256 key in
+`<state>.attest-key` (mode 0600) beside the state file; an unlock signs
+with it and needs no KMS call. Both files are the device: whoever holds
+them unlocks the vault with the PIN.
+
 **When the switch ends** (or the key is lost or leaked): remove the
 member from `staging.json` in the next staging release, schedule the
 key's deletion (`aws kms schedule-key-deletion --key-id "$KEY"

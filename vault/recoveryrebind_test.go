@@ -313,3 +313,89 @@ func TestSyncUnlockKeysRecoveredBindingSameKey(t *testing.T) {
 		t.Fatal("a binding without a key matched")
 	}
 }
+
+// The accepted gap (crash point b): the repeat for R2 stores its state
+// (the invite rebound to R2 and A2) and its step-3 header write fails.
+// The header's `next` part still names the phone with A1, so its A2
+// unlock is refused until it opens R2 again; that repeat is idempotent.
+func TestRecoveryRepeatStep3LostKeepsTheGap(t *testing.T) {
+	f := newOpenFixture(t)
+	a1, a2 := attBinding("attested-key-one"), attBinding("attested-key-two")
+	phone := f.phone
+	ik := phone.Public().(ed25519.PublicKey)
+	f.reRegister(rebindR1, phone, a1)
+	f.stopAfterStep2(rebindR1, phone, a1)
+	f.reRegister(rebindR2, phone, a2)
+	f.st.failHeader = 1
+	if m, out := f.openAttested(rebindR2, phone, a2); m != nil || out.Code != OpenRetry || out.Counted {
+		t.Fatalf("repeat whose step 3 fails: %+v", out)
+	}
+	if h := f.storedHeader(); h.Next == nil || h.Recovery == nil || h.Recovery.ID != rebindR2 || !sameAttestedKey(h.Next.App.Attestation, a1) {
+		t.Fatal("not the gap: the header should still hold R2 and the next part with A1")
+	}
+	if m, out := f.unlockAs(phone, a2); m != nil || out.OK || out.Code != CodeAttestation {
+		t.Fatalf("A2 unlock in the gap: %+v", out)
+	}
+	m, out := f.openAttested(rebindR2, phone, a2)
+	if m == nil || !out.OK || out.Counted {
+		t.Fatalf("the repeat again: %+v", out)
+	}
+	if inv := m.st.Invites[rebindR2]; inv == nil || !sameAttestedKey(inv.EnrollAttest, a2) || len(recoveryInvites(m)) != 1 {
+		t.Fatalf("invite after the repeat: %+v", inv)
+	}
+	if err := m.Lock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if k := findUnlockKey(f.storedHeader(), ik); k == nil || !sameAttestedKey(k.Attestation, a2) {
+		t.Fatal("the header does not bind A2")
+	}
+	m, uo := f.unlockAs(phone, a2)
+	if m == nil || !uo.OK || len(uo.VaultBundle) == 0 {
+		t.Fatalf("A2 unlock after the repeat: %+v", uo)
+	}
+	m.Crash()
+}
+
+// In the same gap the phone unlocks with its earlier key A1, which the
+// header's `next` part still names (it was proved for R1). That unlock
+// completes the replacement, and the header it writes binds the invite's
+// A2: the earlier key opens the vault no more.
+func TestRecoveryRepeatGapA1UnlockEndsWithA2(t *testing.T) {
+	f := newOpenFixture(t)
+	a1, a2 := attBinding("attested-key-one"), attBinding("attested-key-two")
+	phone := f.phone
+	ik := phone.Public().(ed25519.PublicKey)
+	f.reRegister(rebindR1, phone, a1)
+	f.stopAfterStep2(rebindR1, phone, a1)
+	f.reRegister(rebindR2, phone, a2)
+	f.st.failHeader = 1
+	if m, out := f.openAttested(rebindR2, phone, a2); m != nil || out.Code != OpenRetry || out.Counted {
+		t.Fatalf("repeat whose step 3 fails: %+v", out)
+	}
+	// The vault has a credential with its backup copy (else the unlock
+	// of the registered phone cancels the recovery, no_backup).
+	f.opts.Features = append(f.opts.Features, &gateFeature{ready: true})
+	m, uo := f.unlockAs(phone, a1)
+	if m == nil || !uo.OK {
+		t.Fatalf("A1 unlock in the gap: %+v", uo)
+	}
+	if err := m.Lock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	h := f.storedHeader()
+	if k := findUnlockKey(h, ik); k == nil || !sameAttestedKey(k.Attestation, a2) {
+		var got json.RawMessage
+		if k != nil {
+			got = k.Attestation
+		}
+		t.Fatalf("after the A1 unlock the header binds %s (next %v)", got, h.Next != nil)
+	}
+	if m, out := f.unlockAs(phone, a1); m != nil || out.OK {
+		t.Fatalf("A1 unlock after the header binds A2: %+v", out)
+	}
+	m, uo = f.unlockAs(phone, a2)
+	if m == nil || !uo.OK {
+		t.Fatalf("A2 unlock: %+v", uo)
+	}
+	m.Crash()
+}

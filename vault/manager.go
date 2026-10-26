@@ -956,11 +956,15 @@ func (m *Manager) syncUnlockKeys() {
 			}
 			if !present {
 				// The header's binding is kept only for the attested key
-				// the invite names (its iOS counter advances there). The
-				// same ik registered again for a later recovery may come
-				// with a new attested key: the invite's binding, set
-				// again from that registration, wins over an earlier
-				// key's (§11.14.6 "A phone that could not tell").
+				// the invite names (its iOS counter advances there);
+				// otherwise the invite's binding. Defence in depth: no
+				// known path leaves an earlier key's binding for this ik
+				// in the header when the invite is set again for a new
+				// attested key (§11.14.6 "A phone that could not tell"):
+				// a new recovery request drops the registered phone's
+				// key, and a completed recovery cannot be followed by a
+				// new request for the same phone. If one did, the
+				// earlier key's binding would not win over the invite's.
 				att := inv.EnrollAttest
 				if b, ok := prev[string(inv.EnrollIK)]; ok && sameAttestedKey(b, att) {
 					att = b

@@ -639,7 +639,11 @@ func (m *Manager) resume(ctx context.Context, p AltUnlockParams, out *AltUnlockO
 			m.hdr.SealKeyVerified = r
 		}
 	}
-	if !p.pinOnly && m.hdr.isRecoveryKey(p.DeviceIK) && !(m.hasGate() && m.credentialExists() && m.backupCopy()) {
+	// The registered phone's no_backup refusal (§11.11.5 step 1) is not
+	// for a recovered phone (its recovered invite is in the state): its
+	// recovery completed at the open, and this unlock is its lost ok
+	// (VAULT-MESSAGING 0.63.2).
+	if !p.pinOnly && m.hdr.isRecoveryKey(p.DeviceIK) && m.recoveredInvite(p.DeviceIK) == nil && !(m.hasGate() && m.credentialExists() && m.backupCopy()) {
 		// §11.11.5 step 1 (0.16.0): a vault without a backup copy is not
 		// recovered. The recovery and its unlock key go (as a cancel), the
 		// header is written and the vault locks again before it serves
@@ -676,15 +680,26 @@ func (m *Manager) resume(ctx context.Context, p AltUnlockParams, out *AltUnlockO
 				out.Token = m.unlockTokens(&m.hdr.UnlockKeys[i], p.DeviceToken, now)
 			}
 		}
-		if m.hdr.isRecoveryKey(p.DeviceIK) {
+		if out.Token == "" && m.hdr.Next != nil && m.hdr.Next.Reason == ReplaceRecovery {
+			// The recovered phone whose unlock finishes the recovery's
+			// step 3 is still only in the `next` part (VAULT-MESSAGING
+			// 0.63.2): its token as for any lost ok. A transfer's new
+			// phone is unchanged.
+			if k := findUnlockKey(m.hdr, p.DeviceIK); k != nil {
+				out.Token = m.unlockTokens(k, p.DeviceToken, now)
+			}
+		}
+		if inv := m.recoveredInvite(p.DeviceIK); inv != nil {
+			// Release R, a lost ok (owner decision of 2026-10-16,
+			// §11.14.6): the recovered phone's own unlock, before its
+			// first handshake, carries the bundle again; also the unlock
+			// that finishes its recovery's step 3 while the record is
+			// still registered (0.63.2).
+			out.VaultBundle = m.resumeLostOK(inv, now)
+		} else if m.hdr.isRecoveryKey(p.DeviceIK) {
 			out.VaultBundle = VaultBundle(handshake.Principal{IK: m.keys.ik.Public().(ed25519.PublicKey), KEM: m.keys.kem.Public(), Relay: m.ownAddr()})
 			backup := true // 0.16.0: always true here (no_backup refused above)
 			out.CredentialBackup = &backup
-		} else if inv := m.recoveredInvite(p.DeviceIK); inv != nil {
-			// Release R, a lost ok (owner decision of 2026-10-16,
-			// §11.14.6): the recovered phone's own unlock, before its
-			// first handshake, carries the bundle again.
-			out.VaultBundle = m.resumeLostOK(inv, now)
 		}
 		if len(p.Account) > 0 {
 			m.applyAccount(p.Account, now) // §11.13: with every unlock

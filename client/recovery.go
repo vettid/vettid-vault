@@ -122,12 +122,24 @@ func (d *Device) adoptBundle(bundle []byte) error {
 // (purpose app, ctx = recovery id) after its PIN unlock and waits for
 // device.paired.
 func (d *Device) CompleteRecoveryHandshake(ctx context.Context) error {
+	return d.CompleteRecoveryHandshakeAs(ctx, "")
+}
+
+// CompleteRecoveryHandshakeAs is CompleteRecoveryHandshake with ctx = an
+// earlier recovery_id this phone registered for ("": the current one):
+// after a lost ok whose unlock finished an earlier registration's open,
+// the invitation is that registration's (VAULT-MESSAGING 0.63.2 §11.14.6
+// "Pairing").
+func (d *Device) CompleteRecoveryHandshakeAs(ctx context.Context, recoveryID string) error {
 	d.mu.Lock()
 	if d.st.Vault == nil || d.st.Vault.Token == "" || d.st.Recovery == nil {
 		d.mu.Unlock()
 		return ErrNotPaired
 	}
-	err := d.startInit(handshake.PurposeApp, d.st.Recovery.RecoveryID, d.st.Vault.Token, nil)
+	if recoveryID == "" {
+		recoveryID = d.st.Recovery.RecoveryID
+	}
+	err := d.startInit(handshake.PurposeApp, recoveryID, d.st.Vault.Token, nil)
 	d.mu.Unlock()
 	if err != nil {
 		return err

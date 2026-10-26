@@ -167,3 +167,65 @@ func TestRecoveryRLostOKUnlockEndsTheRecovery(t *testing.T) {
 		t.Fatalf("an unlock after the pairing: %+v", u)
 	}
 }
+
+// The unlock that finishes an earlier registration's step 3 (VAULT-MESSAGING
+// 0.63.2 §11.14.6 "Pairing"): the phone's open of R1 stores steps 1 and 2
+// and not step 3; the same identity registers R2 with a new attested key
+// and opens nothing; its lost-ok unlock with the earlier key A1 finishes
+// R1's step 3 and ends R2. The answer carries the bundle and a token, the
+// invitation stays R1's, so a handshake with ctx = R2 gets no hs.resp and
+// the phone pairs with ctx = R1; the binding after it is A1.
+func TestRecoveryRLostOKUnlockPairsWithTheEarlierRecovery(t *testing.T) {
+	hf := &headerFaults{}
+	rr := newRecRStore(t, 0, func(s store.Store) store.Store { hf.Store = s; return hf })
+	a := rr.newApp("member-lost-r1", enclavetest.NewAndroidAttester(0x61, enclavetest.AndroidOptions{}))
+	if r := rr.enroll(a, acPIN); !r.OK {
+		t.Fatal(r.Code)
+	}
+	rr.advance(73 * time.Hour)
+	q1, _ := rr.request(a)
+	rr.advance(25 * time.Hour)
+	b := rr.newApp(a.guid, enclavetest.NewAndroidAttester(0x62, enclavetest.AndroidOptions{}))
+	b.vid = a.vid
+	rr.register(b, q1)
+	a1 := b.att
+	hf.set(1, 1) // step 1 stored; step 3's header write fails
+	if r, _ := rr.open(b, acPIN, recPW); r.OK || r.Code != vault.OpenRetry || !r.AttemptUsed {
+		t.Fatalf("open of R1 stopped after step 2: %+v", r)
+	}
+	hf.set(0, 0)
+	q2, _ := rr.request(a)
+	if q2.Error != "" {
+		t.Fatalf("R2 request: %s", q2.Error)
+	}
+	rr.advance(25 * time.Hour)
+	a2 := enclavetest.NewAndroidAttester(0x66, enclavetest.AndroidOptions{})
+	b.att = a2
+	rr.register(b, q2)
+	// The lost-ok unlock with A1 finishes R1's step 3.
+	b.att = a1
+	u := rr.mustUnlock(b, acPIN, client.UnlockOptions{}, "")
+	if !u.OK || len(u.VaultBundle) == 0 || u.Token == "" {
+		t.Fatalf("lost-ok unlock with A1: %+v", u)
+	}
+	// Newest first: ctx = R2 gets no hs.resp; ctx = R1 pairs.
+	if err := b.dev.CompleteRecoveryHandshakeAs(ctxT(t, 5*time.Second), q2.RecoveryID); err == nil {
+		t.Fatal("a handshake with ctx = R2 completed")
+	}
+	ctx := ctxT(t, 20*time.Second)
+	if err := b.dev.CompleteRecoveryHandshakeAs(ctx, q1.RecoveryID); err != nil {
+		t.Fatalf("handshake with ctx = R1: %v", err)
+	}
+	if err := b.dev.CredentialFetch(ctx); err != nil {
+		t.Fatalf("credential.get as the holder: %v", err)
+	}
+	rr.lock(b)
+	if u := rr.mustUnlock(b, acPIN, client.UnlockOptions{}, ""); !u.OK || len(u.VaultBundle) > 0 {
+		t.Fatalf("A1 unlock after the pairing: %+v", u)
+	}
+	rr.lock(b)
+	b.att = a2
+	if u, err := rr.unlock(b, acPIN, client.UnlockOptions{}, ""); err == nil && u.OK {
+		t.Fatal("A2 unlocked: the binding after the pairing is not A1")
+	}
+}

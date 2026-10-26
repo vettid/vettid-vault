@@ -180,10 +180,21 @@ func TestLostOKUnlockEndsTheCurrentRecovery(t *testing.T) {
 	}
 	f.opts.Features = append(f.opts.Features, &gateFeature{ready: true})
 	used := f.used()
+	ik := phone.Public().(ed25519.PublicKey)
+	// The completing unlock is the recovered phone's lost ok: the bundle,
+	// a token, no credential_backup, and its invitation (R1's, ctx = R1)
+	// renewed.
 	m, uo := f.unlockAs(phone, a1)
-	if m == nil || !uo.OK {
+	if m == nil || !uo.OK || len(uo.VaultBundle) == 0 || uo.Token == "" || uo.CredentialBackup != nil {
 		t.Fatalf("unlock: %+v", uo)
 	}
+	m.mu.Lock()
+	inv := m.recoveredInvite(ik)
+	if inv == nil || inv.ID != rebindR1 || inv.Used || !inv.Exp.Equal(f.clock.Add(RecoveredInviteWindow)) || !sameAttestedKey(inv.EnrollAttest, a1) {
+		m.mu.Unlock()
+		t.Fatalf("invite after the completing unlock: %+v", inv)
+	}
+	m.mu.Unlock()
 	if err := m.Lock(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -193,6 +204,30 @@ func TestLostOKUnlockEndsTheCurrentRecovery(t *testing.T) {
 	if m, out := f.openAttested(rebindR2, phone, a2); m != nil || out.Code != OpenNoRecovery || out.AttemptUsed() || f.used() != used {
 		t.Fatalf("open of R2 after the completion: %+v", out)
 	}
+	// The phone pairs with ctx = R1 (the invitation stays R1's), and the
+	// stored binding is the key whose unlock answered the ok, A1.
+	m, uo = f.unlockAs(phone, a1)
+	if m == nil || !uo.OK || len(uo.VaultBundle) == 0 || uo.Token == "" {
+		t.Fatalf("lost-ok unlock before the pairing: %+v", uo)
+	}
+	m.mu.Lock()
+	inv = m.recoveredInvite(ik)
+	m.mu.Unlock()
+	if inv == nil || inv.ID != rebindR1 {
+		t.Fatalf("pairing ctx: %+v", inv)
+	}
+	pairRecoveredPhone(t, m, phone)
+	if err := m.Lock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if k := findUnlockKey(f.storedHeader(), ik); k == nil || !sameAttestedKey(k.Attestation, a1) {
+		t.Fatal("the binding after the pairing is not A1")
+	}
+	m, uo = f.unlockAs(phone, a1)
+	if m == nil || !uo.OK || len(uo.VaultBundle) != 0 {
+		t.Fatalf("unlock after the pairing: %+v", uo)
+	}
+	m.Crash()
 }
 
 // An earlier identity (E) whose open stored step 2 cannot complete step 3

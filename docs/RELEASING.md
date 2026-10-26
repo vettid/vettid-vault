@@ -206,6 +206,112 @@ the `com.vettid.app.staging` build by a transfer, a recovery, or a new
 enrollment (VAULT-MESSAGING §11.10.8, "Moving the existing staging
 vaults"; `e2e.TestAndroidPackagePerChannel`).
 
+### Staging automation attestation
+
+(VAULT-RELEASES §3.1, "Device attestation" on staging: "test CA **and**
+the real vendor roots"; owner decision 2026-10-27; STAGING-DEVELOPMENT-PLAN
+§2.5.5 and §4.) Until now every staging image accepted Google's roots
+only, so nothing could enroll on staging without a phone. The staging
+channel file may now name an **automation attestation CA** that staging
+images accept beside the vendor roots, so that an automated test can
+enroll a member's app device on staging and act as the app
+(`vaultctl staging-enroll`, below). Production never accepts it.
+
+```json
+"automation_attestation": {
+  "android_roots": ["<base64 DER of the CA certificate>"],
+  "until": "2027-06-30"
+}
+```
+
+| Rule | Where it is enforced |
+|---|---|
+| The member is **optional** and **staging only**: in `prod.json` it is malformed, whatever it holds | `releasecfg.Parse` (and `releasecfg check prod`), as for a `development` signer |
+| 1 or 2 roots (a rotation), each a self-signed CA certificate (`cA`, `keyCertSign`) with an ECDSA P-256 or P-384 key, distinct keys; a `TODO-…` root is missing, so the gate refuses the file | `releasecfg.Parse` |
+| `until` is the switch's **end date** (STAGING-DEVELOPMENT-PLAN §2.5.5), `YYYY-MM-DD`, UTC, at most 400 days after the newest root's `notBefore`; **no root is valid after that day** | `releasecfg.Parse` |
+| `releasecfg check` refuses the file from the day after `until` | `cmd/releasecfg`: judged at `SOURCE_DATE_EPOCH` when set (an image build: `Dockerfile.enclave` and `scripts/build-eif.sh` set it to the commit time, so a rebuild of a tagged release gives the same answer on any day), at the current time otherwise (the release workflow's gate and CI). So no new staging release can be cut with an expired switch, and CI fails on `main` until the member is renewed or removed |
+| A running image stops accepting the CA at the end date without a new release | the roots' validity ends with the switch, and §11.7 chain rule 7 refuses an expired certificate at every attestation |
+| The roots reach the device policy **only in the staging channel** | `Config.AutomationRoots` is empty for any other channel or no configuration (like `TimeScale` and `CounterLock`); `enclave.releaseConfigFor` appends them to `pins.GoogleAttestationRoots()` only when non-empty |
+
+**Only the root differs.** A chain from the CA passes every other check
+of VAULT-MESSAGING §11.7 that a phone's chain does: the chain rules, the
+package (`com.vettid.app.staging`), exactly one signer digest pinned by
+the release (the automation uses the `development` signer, so the vault
+reports "Development build" for it, §11.7.1), the minimum version code
+(`android_min_version_code`, 101 on staging), the attestation and
+KeyMint security levels (TEE), `deviceLocked` with `verifiedBootState`
+Verified, and a generated, hardware-enforced EC P-256 signing key. The
+security levels and the root of trust are what the CA **asserts**: no
+hardware stands behind them. That is the point and the risk: **whoever
+can sign with the CA key can act as a staging device** (enroll with a
+member's setup code, receive a transfer, register for a recovery).
+That is acceptable on staging only, where vaults are disposable
+(STAGING-DEVELOPMENT-PLAN §2.1 rule 5), and it is why production cannot
+carry the member.
+
+**`check-tcb` is unaffected.** The CA certificate is a public
+certificate in the committed channel file, not test code; the enclave
+links no new package. The attester (`internal/autoattest`) is linked
+only by `vaultctl`, which has no test or vector-only dependency
+(`make check-tcb`); its tests use a local key.
+
+**Who holds the CA key.** Nobody: it is an AWS KMS key in the staging
+account (347272280361, us-east-1), `ECC_NIST_P256`, `SIGN_VERIFY`, so
+the private key never leaves KMS. The repository holds only the CA
+certificate. The key policy lets the account administer the key and
+lets one role sign with it; the automation (and the owner, to make the
+certificate) assume that role.
+
+The owner's one-time steps, with credentials for the staging account
+(the role name is a proposal):
+
+```sh
+export AWS_PROFILE=<staging admin profile> AWS_REGION=us-east-1
+# 1. The signer role. It needs no IAM policy: the key policy below
+#    grants it kms:Sign, kms:GetPublicKey and kms:DescribeKey on this key
+#    only. Its trust policy names whoever runs the automation (here the
+#    account's own principals; narrow it to the automation's identity).
+aws iam create-role --role-name vettid-org-staging-automation-attest --max-session-duration 3600 \
+  --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::347272280361:root"},"Action":"sts:AssumeRole"}]}'
+# 2. The key (deletable: a staging key) and its alias.
+cat > automation-ca-policy.json <<'JSON'
+{"Version": "2012-10-17", "Statement": [
+  {"Sid": "Administer", "Effect": "Allow",
+   "Principal": {"AWS": "arn:aws:iam::347272280361:root"},
+   "Action": "kms:*", "Resource": "*"},
+  {"Sid": "SignAsTheStagingAutomationCA", "Effect": "Allow",
+   "Principal": {"AWS": "arn:aws:iam::347272280361:role/vettid-org-staging-automation-attest"},
+   "Action": ["kms:Sign", "kms:GetPublicKey", "kms:DescribeKey"], "Resource": "*",
+   "Condition": {"StringEquals": {"kms:SigningAlgorithm": "ECDSA_SHA_256"}}}
+]}
+JSON
+KEY=$(aws kms create-key --key-spec ECC_NIST_P256 --key-usage SIGN_VERIFY \
+  --description "VettID staging automation attestation CA (staging only, VAULT-RELEASES 3.1)" \
+  --policy file://automation-ca-policy.json \
+  --tags TagKey=vettid:purpose,TagValue=staging-automation-attestation \
+  --query KeyMetadata.KeyId --output text)
+aws kms create-alias --alias-name alias/vettid-org-staging-automation-attestation-ca --target-key-id "$KEY"
+# 3. The CA certificate, self-signed by the key, valid to the end date;
+#    run as the signer role. It prints the PEM on stderr and the member
+#    on stdout.
+go run ./cmd/vaultctl staging-ca-cert -kms-key alias/vettid-org-staging-automation-attestation-ca -until 2027-06-30
+# 4. Add the printed member to enclave/releasecfg/staging.json, then
+go run ./cmd/releasecfg check staging
+#    and cut the next staging release from that commit (it changes PCR0).
+```
+
+The policy's administration statement is the account's usual one; the
+staging account's administrators can therefore also grant `kms:Sign`.
+That is the same trust as every other staging key.
+
+**When the switch ends** (or the key is lost or leaked): remove the
+member from `staging.json` in the next staging release, schedule the
+key's deletion (`aws kms schedule-key-deletion --key-id "$KEY"
+--pending-window-in-days 7`) once no live staging release pins the
+certificate, and remove the signer role. To renew instead, make a new
+certificate (the same key, or a new key as a second root while the two
+overlap) with a later `until`, at most 400 days ahead.
+
 ## A release, step by step
 
 The numbers are VAULT-RELEASES §10.1's. Production is shown; staging is

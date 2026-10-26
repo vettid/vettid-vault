@@ -410,7 +410,7 @@ func UnlockAlt(ctx context.Context, p AltUnlockParams) (*Manager, *AltUnlockOutc
 		if op.mode == openComplete || hdr.Next.AppKey != nil {
 			appKeyFn = m.replacementPromoteFn(hdr.Next)
 		}
-		// VAULT-MESSAGING 0.63.1 (§11.14.2, §11.14.6 "A lost ok"): an
+		// VAULT-MESSAGING 0.63.2 (§11.14.2, §11.14.6 "A lost ok"): an
 		// unlock that completes step 3 of a recovery's replacement ends
 		// the recovery record, whichever is current, as the repeated
 		// open's step 3 does: in the same sealed header write as step 3,

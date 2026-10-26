@@ -9,7 +9,7 @@ import (
 	"github.com/vettid/vettid-vault/vault/store"
 )
 
-// VAULT-MESSAGING 0.63.1 (§11.14.2, §11.14.6 "A lost ok"): an unlock
+// VAULT-MESSAGING 0.63.2 (§11.14.2, §11.14.6 "A lost ok"): an unlock
 // that completes step 3 of a recovery's replacement ends the recovery
 // record, whichever is current, in the same header write as step 3, as
 // the repeated open's step 3 does. A later open of that recovery is then

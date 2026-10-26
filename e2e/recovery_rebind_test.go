@@ -107,7 +107,7 @@ func TestRecoveryRSameIdentityNewKey(t *testing.T) {
 }
 
 // A lost ok whose completion is finished by the unlock (VAULT-MESSAGING
-// 0.63.1, §11.14.2, §11.14.6 "A lost ok"): the open stores steps 1 and 2
+// 0.63.2, §11.14.2, §11.14.6 "A lost ok"): the open stores steps 1 and 2
 // and its step-3 header write fails (retry, the answer the phone never
 // acts on); the phone's unlock completes step 3 and ends the recovery in
 // the same header write. A later open of that recovery is refused (no

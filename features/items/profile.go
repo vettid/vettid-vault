@@ -2,7 +2,6 @@ package items
 
 import (
 	"bytes"
-	"crypto/ed25519"
 	"encoding/json"
 	"strings"
 
@@ -10,6 +9,7 @@ import (
 	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vms/envelope"
+	"github.com/vettid/vettid-vault/vms/peerwire"
 )
 
 // The profile (§10.8): the shared profile every active connection
@@ -170,10 +170,7 @@ func (f *Feature) sharedBody() []byte {
 // bodyWith is a profile.update body with version v and core c:
 // {version, first_name, last_name, ik, name?, photo?, items} (§10.8).
 func (f *Feature) bodyWith(c *Core, v uint64) []byte {
-	rest := f.sharedBody()
-	b := strictjson.NewBuilder().Uint("version", v).String("first_name", c.FirstName).String("last_name", c.LastName).
-		Base64("ik", c.IK).Bytes()
-	return append(append(b[:len(b)-1], ','), rest[1:]...)
+	return peerwire.ProfileUpdateBody(v, c.FirstName, c.LastName, c.IK, f.sharedBody())
 }
 
 // updateBody is the profile.update body with version v and the current
@@ -190,8 +187,8 @@ func (f *Feature) updateBody(s *vault.Session, v uint64) ([]byte, bool) {
 // that each escape to two (`"`), 322 bytes as a JSON string with its
 // quotes. The encoder (strictjson.MarshalString) writes names as raw UTF-8
 // and escapes only `"` and `\` in them, since names have no control
-// characters, U+2028 or U+2029 (vault.ValidAccountName).
-var worstName = strings.Repeat(`"`, vault.MaxAccountName)
+// characters, U+2028 or U+2029 (peerwire.ValidAccountName).
+var worstName = strings.Repeat(`"`, peerwire.MaxAccountName)
 
 // checkProfile checks the shared profile's limits (§10.8) whenever the
 // display name, the photo or the @profile items change: at most 32 items,
@@ -321,38 +318,25 @@ type Update struct {
 	Items     []*itemspec.Item
 }
 
-// ParseUpdate parses a profile.update body strictly (§10.8): the field
-// rules of §10.7, at most 32 items. The core's members are checked too,
-// but reported in Malformed rather than as an error, since §10.8 drops
-// such an update only after the version check.
+// ParseUpdate parses a profile.update body strictly (§10.8): the version
+// and the core as peerwire.ParseProfileUpdate parses them, and the field
+// rules of §10.7 for the extras, at most 32 items. The core's members are
+// checked too, but reported in Malformed rather than as an error, since
+// §10.8 drops such an update only after the version check.
 func ParseUpdate(body []byte) (*Update, error) {
-	if len(body) > MaxProfileUpdate {
-		return nil, errBad
-	}
-	o, err := strictjson.ParseObject(body)
+	pu, err := peerwire.ParseProfileUpdate(body)
 	if err != nil {
 		return nil, errBad
 	}
-	u := &Update{}
-	if u.Version, err = o.Uint("version", 1, strictjson.MaxSafeInteger); err != nil {
-		return nil, errBad
-	}
-	u.FirstName, err = o.String("first_name")
-	u.Malformed = err != nil || !vault.ValidAccountName(u.FirstName)
-	u.LastName, err = o.String("last_name")
-	u.Malformed = u.Malformed || err != nil || !vault.ValidAccountName(u.LastName)
-	u.IK, err = o.Base64("ik", ed25519.PublicKeySize)
-	u.Malformed = u.Malformed || err != nil
+	o := strictjson.Object(pu.Members)
+	u := &Update{Version: pu.Version, FirstName: pu.FirstName, LastName: pu.LastName, IK: pu.IK, Malformed: pu.Malformed}
 	if u.Name, _, err = o.OptString("name"); err != nil || !itemspec.ValidText(u.Name, MaxDisplayName) {
 		return nil, errBad
 	}
 	if u.Photo, _, err = parsePhoto(o, false); err != nil {
 		return nil, err
 	}
-	arr, err := o.Array("items")
-	if err != nil || len(arr) > MaxProfileItems {
-		return nil, errBad
-	}
+	arr := pu.Items
 	seen := map[string]bool{}
 	for _, raw := range arr {
 		io, err := strictjson.AsObject(raw)
@@ -391,8 +375,7 @@ func ParseUpdate(body []byte) (*Update, error) {
 // as the connection's profile): {version, first_name, last_name, ik,
 // name?, photo?, items}.
 func (u *Update) Marshal() []byte {
-	b := strictjson.NewBuilder().Uint("version", u.Version).String("first_name", u.FirstName).String("last_name", u.LastName).
-		Base64("ik", u.IK)
+	b := strictjson.NewBuilder()
 	if u.Name != "" {
 		b.String("name", u.Name)
 	}
@@ -406,7 +389,7 @@ func (u *Update) Marshal() []byte {
 		}
 		arr = append(arr, profileItemJSON(it)...)
 	}
-	return b.Raw("items", append(arr, ']')).Bytes()
+	return peerwire.ProfileUpdateBody(u.Version, u.FirstName, u.LastName, u.IK, b.Raw("items", append(arr, ']')).Bytes())
 }
 
 // profileUpdate keeps a peer's profile.update (§10.8 "Receiving"): after

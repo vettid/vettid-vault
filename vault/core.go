@@ -13,6 +13,7 @@ import (
 	"github.com/vettid/vettid-vault/vms/altchan"
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/handshake"
+	"github.com/vettid/vettid-vault/vms/peerwire"
 	"github.com/vettid/vettid-vault/vms/suite"
 )
 
@@ -64,7 +65,7 @@ func (m *Manager) registerCore() {
 	r("connection.list", true, owners, m.hConnList)
 	r("connection.get", true, owners, m.hConnGet)
 	r("connection.remove", true, owners, m.hConnRemove)
-	r("connection.removed", false, conns, m.hConnRemoved)
+	r(peerwire.TypeConnectionRemoved, false, conns, m.hConnRemoved)
 	r(tokenIssuedType, false, all, m.hTokenIssued)
 	r(tokenRefreshType, true, all, m.hTokenRefresh)
 	r("identity.rotate", false, conns, m.hIdentityRotate)
@@ -487,7 +488,7 @@ func (m *Manager) hTokenIssued(_ context.Context, s *Session, in *envelope.Inner
 }
 
 // RenewEvery bounds a connection's refreshes near its token's end (§7.2).
-const RenewEvery = time.Hour
+const RenewEvery = peerwire.RenewEvery
 
 func (m *Manager) hTokenRefresh(_ context.Context, s *Session, _ *envelope.Inner) (json.RawMessage, error) {
 	// §7.2 (0.32.0, release A): a connection whose standing token still
@@ -505,11 +506,11 @@ func (m *Manager) hTokenRefresh(_ context.Context, s *Session, _ *envelope.Inner
 		}
 	}
 	tooSoon := func(t time.Time) error {
-		return &HandlerError{Code: "too_soon", Body: strictjson.NewBuilder().String("allowed_after", envelope.FormatTS(t)).Bytes()}
+		return &HandlerError{Code: peerwire.CodeTooSoon, Body: peerwire.TooSoonBody(t)}
 	}
 	if quota {
-		if t, ok := m.st.attach().Refreshed[s.peer.ID]; ok && s.now.Sub(t) < 24*time.Hour {
-			return nil, tooSoon(t.Add(24 * time.Hour))
+		if t, ok := m.st.attach().Refreshed[s.peer.ID]; ok && s.now.Sub(t) < peerwire.QuotaRefreshEvery {
+			return nil, tooSoon(t.Add(peerwire.QuotaRefreshEvery))
 		}
 	} else if s.peer.Kind == KindConnection {
 		// A refresh near the token's end is bounded too: one an hour.
@@ -535,7 +536,7 @@ func (m *Manager) hTokenRefresh(_ context.Context, s *Session, _ *envelope.Inner
 		m.dirty = true
 	}
 	m.st.Issued = append(m.st.Issued, issued...)
-	return strictjson.NewBuilder().String("kind", TokStanding).String("token", tok).Bytes(), nil
+	return peerwire.TokenIssuedBody(TokStanding, tok), nil
 }
 
 // --- rotation (§3.4) ---

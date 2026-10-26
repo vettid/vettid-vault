@@ -337,6 +337,15 @@ func Generate() (map[string][]byte, error) {
 	if err := put("unlock.json", uv); err != nil {
 		return nil, err
 	}
+
+	// connauth.json (§10.4)
+	cav, err := genConnAuth()
+	if err != nil {
+		return nil, err
+	}
+	if err := put("connauth.json", cav); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 

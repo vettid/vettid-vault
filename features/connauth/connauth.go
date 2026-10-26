@@ -30,23 +30,15 @@ import (
 	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vms/credwire"
 	"github.com/vettid/vettid-vault/vms/envelope"
+	"github.com/vettid/vettid-vault/vms/peerwire"
 	"github.com/vettid/vettid-vault/vms/suite"
 )
 
-// Label and limits.
+// Limits. The wire (the signed message, the bodies, the nonce and
+// context sizes, the challenge's lifetime) is vms/peerwire's.
 const (
-	Label         = "vettid/vms/2/conn-auth"
-	NonceSize     = 32
-	ChallengeTTL  = 10 * time.Minute
-	MaxContext    = 256
 	MaxPendingOut = 8 // per connection
 	MaxPendingIn  = 4 // per connection
-)
-
-// Response statuses.
-const (
-	StatusSigned = "signed"
-	StatusDenied = "denied"
 )
 
 // KeyUser gives access to the credential key during the unlock window
@@ -113,9 +105,9 @@ func (f *Feature) Types() []vault.TypeSpec {
 		{Type: "connection.authenticate.approve", Request: true, From: apps},
 		{Type: "connection.authenticate.deny", Request: true, From: owners},
 		{Type: "connection.authenticate.list", Request: true, From: owners},
-		{Type: "connection.authenticate.challenge", From: conns},
-		{Type: "connection.authenticate.response", From: conns},
-		{Type: "connection.authenticate.rotated", From: conns},
+		{Type: peerwire.TypeConnAuthChallenge, From: conns},
+		{Type: peerwire.TypeConnAuthResponse, From: conns},
+		{Type: peerwire.TypeConnAuthRotated, From: conns},
 	}
 }
 
@@ -157,15 +149,9 @@ var (
 	errConn     = vault.NewError("connection_unavailable", "")
 )
 
-// Message returns the signed bytes:
-//
-//	challenger_ik (32) || responder_ik (32) || nonce (32) || request_id (26) || context
-//
-// signed as Ed25519(credential key, "vettid/vms/2/conn-auth" || message).
-func Message(challengerIK, responderIK, nonce []byte, requestID, ctxt string) []byte {
-	m := make([]byte, 0, 32+32+NonceSize+len(requestID)+len(ctxt))
-	m = append(append(append(m, challengerIK...), responderIK...), nonce...)
-	return append(append(m, requestID...), ctxt...)
+// wire is the challenge's body.
+func (c *Challenge) wire() *peerwire.ConnAuthChallenge {
+	return &peerwire.ConnAuthChallenge{RequestID: c.ID, Nonce: c.Nonce, Context: c.Context}
 }
 
 // Handle implements vault.Handler.
@@ -176,17 +162,17 @@ func (f *Feature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner
 	switch in.Type {
 	case "connection.authenticate.request":
 		return f.request(s, in.Body)
-	case "connection.authenticate.challenge":
+	case peerwire.TypeConnAuthChallenge:
 		return nil, f.challenge(s, in)
 	case "connection.authenticate.approve":
 		return f.approve(s, in.Body)
 	case "connection.authenticate.deny":
 		return f.deny(s, in.Body)
-	case "connection.authenticate.response":
+	case peerwire.TypeConnAuthResponse:
 		return nil, f.response(s, in.Body)
 	case "connection.authenticate.list":
 		return f.list(), nil
-	case "connection.authenticate.rotated":
+	case peerwire.TypeConnAuthRotated:
 		return nil, f.rotated(s, in.Body)
 	}
 	return nil, vault.NewError("unsupported_type", "")
@@ -217,7 +203,7 @@ func count(m map[string]*Challenge, conn string) int {
 
 func optContext(o strictjson.Object) (string, error) {
 	v, _, err := o.OptString("context")
-	if err != nil || len(v) > MaxContext {
+	if err != nil || len(v) > peerwire.ConnAuthMaxContext {
 		return "", errBad
 	}
 	return v, nil
@@ -243,16 +229,13 @@ func (f *Feature) request(s *vault.Session, body []byte) (json.RawMessage, error
 	if count(f.d.Out, conn) >= MaxPendingOut {
 		return nil, vault.LimitError("auth_challenges", MaxPendingOut)
 	}
-	nonce, err := suite.RandomBytes(NonceSize)
+	wc, err := peerwire.NewConnAuthChallenge(s.NewID(), ctxt)
 	if err != nil {
 		return nil, vault.NewError("internal", "")
 	}
-	c := &Challenge{ID: s.NewID(), Conn: conn, Nonce: nonce, Context: ctxt, Exp: s.Now().Add(ChallengeTTL).UTC().Truncate(time.Millisecond)}
-	b := strictjson.NewBuilder().String("request_id", c.ID).Base64("nonce", nonce)
-	if ctxt != "" {
-		b.String("context", ctxt)
-	}
-	if err := s.Send(conn, "connection.authenticate.challenge", b.Bytes(), vault.SendOptions{Exp: c.Exp}); err != nil {
+	c := &Challenge{ID: wc.RequestID, Conn: conn, Nonce: wc.Nonce, Context: ctxt,
+		Exp: s.Now().Add(peerwire.ConnAuthChallengeTTL).UTC().Truncate(time.Millisecond)}
+	if err := s.Send(conn, peerwire.TypeConnAuthChallenge, wc.Marshal(), vault.SendOptions{Exp: c.Exp}); err != nil {
 		return nil, errConn
 	}
 	f.d.Out[c.ID] = c
@@ -260,32 +243,14 @@ func (f *Feature) request(s *vault.Session, body []byte) (json.RawMessage, error
 	return strictjson.NewBuilder().String("request_id", c.ID).String("exp", envelope.FormatTS(c.Exp)).Bytes(), nil
 }
 
-// ParseChallenge parses a challenge body (from a peer vault) strictly.
-func ParseChallenge(body []byte) (*Challenge, error) {
-	o, err := strictjson.ParseObject(body)
-	if err != nil {
-		return nil, errBad
-	}
-	c := &Challenge{}
-	if c.ID, err = o.String("request_id"); err != nil || !envelope.ValidULID(c.ID) {
-		return nil, errBad
-	}
-	if c.Nonce, err = o.Base64("nonce", NonceSize); err != nil {
-		return nil, errBad
-	}
-	if c.Context, err = optContext(o); err != nil {
-		return nil, err
-	}
-	return c, nil
-}
-
 // challenge: a connection asks our member to authenticate; the owner's
 // apps and desktops are told (only an app can approve).
 func (f *Feature) challenge(s *vault.Session, in *envelope.Inner) error {
-	c, err := ParseChallenge(in.Body)
+	wc, err := peerwire.ParseConnAuthChallenge(in.Body)
 	if err != nil {
-		return err
+		return errBad
 	}
+	c := &Challenge{ID: wc.RequestID, Nonce: wc.Nonce, Context: wc.Context}
 	conn := s.From().ID
 	now := s.Now()
 	if _, dup := f.d.In[c.ID]; dup {
@@ -296,7 +261,7 @@ func (f *Feature) challenge(s *vault.Session, in *envelope.Inner) error {
 		return nil
 	}
 	c.Conn = conn
-	c.Exp = now.Add(ChallengeTTL).UTC().Truncate(time.Millisecond)
+	c.Exp = now.Add(peerwire.ConnAuthChallengeTTL).UTC().Truncate(time.Millisecond)
 	if !in.Exp.IsZero() && in.Exp.Before(c.Exp) {
 		c.Exp = in.Exp
 	}
@@ -304,7 +269,7 @@ func (f *Feature) challenge(s *vault.Session, in *envelope.Inner) error {
 	// cooldown (any challenge), the pending cap and the ask rate. A
 	// suppressed one is answered `denied`, later, by the vault.
 	v := s.Ask(conn, vault.Ask{Source: f.Name(), Ref: c.ID, Idents: []string{AskIdent}, Pending: count(f.d.In, conn), Exp: c.Exp,
-		AnswerType: "connection.authenticate.response", Answer: deniedBody(c.ID)})
+		AnswerType: peerwire.TypeConnAuthResponse, Answer: peerwire.DeniedConnAuth(c.ID).Marshal()})
 	if !v.Passed() {
 		return nil
 	}
@@ -322,10 +287,6 @@ func (f *Feature) challenge(s *vault.Session, in *envelope.Inner) error {
 // AskIdent is a challenge's identity for the §10.4.1 cooldown: any
 // challenge from the connection.
 const AskIdent = "auth"
-
-func deniedBody(id string) []byte {
-	return strictjson.NewBuilder().String("request_id", id).String("status", StatusDenied).Bytes()
-}
 
 // PendingAsks implements vault.AskSource: the connection's challenges
 // waiting for the member.
@@ -376,19 +337,16 @@ func (f *Feature) approve(s *vault.Session, body []byte) (json.RawMessage, error
 	if !ok {
 		return nil, errLocked
 	}
-	sig, err := suite.Sign(key, Label, Message(peer.IK, s.IdentityKey(), c.Nonce, c.ID, c.Context))
+	pub := key.Public().(ed25519.PublicKey)
+	var seg []*credwire.KeyRotation
+	if prev := f.d.Shown[c.Conn]; len(prev) > 0 && !suite.EqualPublic(prev, pub) {
+		seg = f.segment(prev) // lets the requester follow rotations it missed
+	}
+	r, err := peerwire.SignConnAuth(key, peer.IK, s.IdentityKey(), c.wire(), s.Now(), seg)
 	if err != nil {
 		return nil, vault.NewError("internal", "")
 	}
-	pub := key.Public().(ed25519.PublicKey)
-	rb := strictjson.NewBuilder().String("request_id", id).String("status", StatusSigned).Base64("key", pub).
-		Base64("sig", sig).String("signed_at", envelope.FormatTS(s.Now()))
-	if prev := f.d.Shown[c.Conn]; len(prev) > 0 && !suite.EqualPublic(prev, pub) {
-		if seg := f.segment(prev); seg != nil {
-			rb.Raw("rotations", seg) // lets the requester follow rotations it missed
-		}
-	}
-	if err := s.SendToConnection(c.Conn, "connection.authenticate.response", rb.Bytes()); err != nil {
+	if err := s.SendToConnection(c.Conn, peerwire.TypeConnAuthResponse, r.Marshal()); err != nil {
 		return nil, errConn
 	}
 	f.d.Shown[c.Conn] = append([]byte(nil), pub...)
@@ -408,87 +366,20 @@ func (f *Feature) deny(s *vault.Session, body []byte) (json.RawMessage, error) {
 		return nil, errNotFound
 	}
 	delete(f.d.In, id)
-	_ = s.SendToConnection(c.Conn, "connection.authenticate.response", deniedBody(id))
+	_ = s.SendToConnection(c.Conn, peerwire.TypeConnAuthResponse, peerwire.DeniedConnAuth(id).Marshal())
 	s.Record(vault.Activity{Kind: "connection.authenticate.denied", ConnectionID: c.Conn, Ref: id, Direction: "out", Audit: true})
 	s.AskDeclined(c.Conn, []string{AskIdent}) // §10.4.1
 	s.SyncEvent("connection.authenticate.decided", strictjson.NewBuilder().String("request_id", id).Bool("approved", false).Bytes())
 	return nil, nil
 }
 
-// Response is a parsed connection.authenticate.response body.
-type Response struct {
-	RequestID string
-	Status    string
-	Key       []byte
-	Sig       []byte
-	Rotations []*credwire.KeyRotation
-}
-
-// ParseRotations parses a `rotations` array: 1–32 statements (signatures
-// unchecked).
-func ParseRotations(raw json.RawMessage) ([]*credwire.KeyRotation, error) {
-	arr, err := strictjson.AsArray(raw)
-	if err != nil || len(arr) == 0 || len(arr) > credwire.MaxKeyChain {
-		return nil, errBad
-	}
-	out := make([]*credwire.KeyRotation, 0, len(arr))
-	for _, r := range arr {
-		kr, err := credwire.ParseKeyRotation(r)
-		if err != nil {
-			return nil, errBad
-		}
-		out = append(out, kr)
-	}
-	return out, nil
-}
-
-// ParseResponse parses a response body (from a peer vault) strictly.
-func ParseResponse(body []byte) (*Response, error) {
-	o, err := strictjson.ParseObject(body)
-	if err != nil {
-		return nil, errBad
-	}
-	r := &Response{}
-	if r.RequestID, err = o.String("request_id"); err != nil || !envelope.ValidULID(r.RequestID) {
-		return nil, errBad
-	}
-	if r.Status, err = o.String("status"); err != nil {
-		return nil, errBad
-	}
-	switch r.Status {
-	case StatusSigned:
-		if r.Key, err = o.Base64("key", ed25519.PublicKeySize); err != nil {
-			return nil, errBad
-		}
-		if r.Sig, err = o.Base64("sig", ed25519.SignatureSize); err != nil {
-			return nil, errBad
-		}
-		sa, err := o.String("signed_at")
-		if err != nil {
-			return nil, errBad
-		}
-		if _, err := envelope.ParseTS(sa); err != nil {
-			return nil, errBad
-		}
-		if raw, ok := o["rotations"]; ok {
-			if r.Rotations, err = ParseRotations(raw); err != nil {
-				return nil, err
-			}
-		}
-	case StatusDenied:
-	default:
-		return nil, errBad
-	}
-	return r, nil
-}
-
 // response: the connection's answer to our challenge. The signature must
 // verify over the challenge under the key it names; the key is pinned at
 // the first success and a change is reported.
 func (f *Feature) response(s *vault.Session, body []byte) error {
-	r, err := ParseResponse(body)
+	r, err := peerwire.ParseConnAuthResponse(body)
 	if err != nil {
-		return err
+		return errBad
 	}
 	conn := s.From().ID
 	c := f.d.Out[r.RequestID]
@@ -505,20 +396,17 @@ func (f *Feature) response(s *vault.Session, body []byte) error {
 	st.LastAt = now
 	reason, changed := "", false
 	switch {
-	case r.Status == StatusDenied:
+	case r.Status == peerwire.ConnAuthDenied:
 		reason = "denied"
 	default:
 		peer, _ := s.Connection(conn)
-		if suite.Verify(r.Key, Label, Message(s.IdentityKey(), peer.IK, c.Nonce, c.ID, c.Context), r.Sig) != nil {
+		if peerwire.VerifyConnAuthResponse(r, s.IdentityKey(), peer.IK, c.wire()) != nil {
 			reason = "bad_signature"
 			break
 		}
 		// A key other than the pinned one is a change unless a valid chain of
 		// rotation statements leads from the pin to it (§10.4).
-		if len(st.Key) > 0 && !suite.EqualPublic(st.Key, r.Key) {
-			end, err := credwire.FollowChain(st.Key, r.Rotations)
-			changed = err != nil || !suite.EqualPublic(end, r.Key)
-		}
+		changed = peerwire.PinnedKeyChanged(st.Key, r.Key, r.Rotations)
 		st.Key, st.VerifiedAt = append([]byte(nil), r.Key...), now
 	}
 	st.LastResult = "authenticated"
@@ -593,21 +481,10 @@ func (f *Feature) chain() []*credwire.KeyRotation {
 	return out
 }
 
-// segment returns the JSON array of own statements from the key from to
-// the current key, or nil.
-func (f *Feature) segment(from []byte) []byte {
-	seg := credwire.ChainFrom(f.chain(), from)
-	if len(seg) == 0 {
-		return nil
-	}
-	arr := []byte{'['}
-	for i, r := range seg {
-		if i > 0 {
-			arr = append(arr, ',')
-		}
-		arr = append(arr, r.Marshal()...)
-	}
-	return append(arr, ']')
+// segment returns the own statements from the key from to the current
+// key (none if empty).
+func (f *Feature) segment(from []byte) []*credwire.KeyRotation {
+	return credwire.ChainFrom(f.chain(), from)
 }
 
 // CredentialKeyRotated implements credential.KeyRotationObserver: the
@@ -629,8 +506,8 @@ func (f *Feature) CredentialKeyRotated(s *vault.Session, r *credwire.KeyRotation
 		if p, ok := s.Connection(id); !ok || p.State != vault.PeerActive {
 			continue
 		}
-		if seg := f.segment(f.d.Shown[id]); seg != nil {
-			_ = s.SendToConnection(id, "connection.authenticate.rotated", strictjson.NewBuilder().Raw("rotations", seg).Bytes())
+		if seg := f.segment(f.d.Shown[id]); len(seg) > 0 {
+			_ = s.SendToConnection(id, peerwire.TypeConnAuthRotated, peerwire.ConnAuthRotatedBody(seg))
 		}
 	}
 }
@@ -640,17 +517,9 @@ func (f *Feature) CredentialKeyRotated(s *vault.Session, r *credwire.KeyRotation
 // unchanged (and the next authentication under the new key reports
 // key_changed).
 func (f *Feature) rotated(s *vault.Session, body []byte) error {
-	o, err := strictjson.ParseObject(body)
+	chain, err := peerwire.ParseConnAuthRotated(body)
 	if err != nil {
 		return errBad
-	}
-	raw, ok := o["rotations"]
-	if !ok {
-		return errBad
-	}
-	chain, err := ParseRotations(raw)
-	if err != nil {
-		return err
 	}
 	conn := s.From().ID
 	st := f.d.States[conn]

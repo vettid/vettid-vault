@@ -43,6 +43,7 @@ LocalStack, the real relay and a stand-in for the member API
 | `vms/handshake` | §6 | hs.init / hs.resp / hs.fin for pairing, connections, rekeys and reconnects; key schedule and SAS; epochs, keyrings and retention; rotation chains; reconnect-token rules |
 | `vms/invite` | §6.4, §6.7 | Claim bundles, their encryption and hash commitment, QR / link payloads, invite TTLs |
 | `vms/altchan` | §11 | ETK and vault `user_data`, device-attestation challenge, unlock and release-approval signing strings; requests, results and descriptors; `device_attest` / `device_assertion` wire shapes |
+| `vms/peerwire` | §6.4, §7.1, §7.2, §10.4, §10.8 | What a connection peer needs besides the envelope and handshake, shared with the vault: member authentication between connections (signed message, challenge and response bodies, verification, pinned-key rotations), the token kinds, lifetimes and quotas and the check of a token a peer issued, the `connection.approved` / `.declined` / `.removed` and `relay.token.issued` / `.refresh` bodies, and the shared profile's core (account names, `profile.update`). A connection peer outside the vault (a service vault, §1.1) is built on it |
 | `vms/vectors` | §16 | Generates and checks the test vectors |
 
 ### Alternate channel, attestation and release updates (V3a)
@@ -112,9 +113,11 @@ that cover them.
 `keys`, `hpke`, `envelope_sealed`, `envelope_session`, `handshake` (every
 key-schedule value, SAS and both signatures), `invite`, `altchan` (0.3.0
 unlock signing string and 12,288-byte requests), `release` (manifest
-signature and release approval, equal to §16) and `recovery` (§11.11.2:
+signature and release approval, equal to §16), `recovery` (§11.11.2:
 the recovery code and the `no_credential` refusal sealed to a fixed
-browser P-256 key, with every intermediate value, and the QR payload). All
+browser P-256 key, with every intermediate value, and the QR payload) and
+`connauth` (§10.4 member authentication: the signed message, the signature
+and every body, through `vms/peerwire`). All
 keys come from fixed, public, **test-only** seeds. Every file states its
 inputs, including the values §16 leaves open.
 

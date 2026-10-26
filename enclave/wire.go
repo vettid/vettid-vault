@@ -11,6 +11,7 @@ import (
 	"github.com/vettid/vettid-vault/vms/altchan"
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/manifest"
+	"github.com/vettid/vettid-vault/vms/peerwire"
 	"github.com/vettid/vettid-vault/vms/suite"
 )
 
@@ -147,7 +148,7 @@ func ParseNextFields(next, hseq, cleared []byte) (*bool, uint64, bool, bool) {
 
 // ParseNameFields decodes LifecycleFields' last three: nil for "0", "",
 // "" (no name request); a canonical seq ≥ 1 and two names
-// (vault.ValidAccountName) for account_name. ok is false for anything
+// (peerwire.ValidAccountName) for account_name. ok is false for anything
 // else.
 func ParseNameFields(seq, first, last []byte) (*vault.NameChange, bool) {
 	if string(seq) == "0" && len(first) == 0 && len(last) == 0 {
@@ -155,7 +156,7 @@ func ParseNameFields(seq, first, last []byte) (*vault.NameChange, bool) {
 	}
 	n, err := strconv.ParseUint(string(seq), 10, 53)
 	if err != nil || n == 0 || strconv.FormatUint(n, 10) != string(seq) ||
-		!vault.ValidAccountName(string(first)) || !vault.ValidAccountName(string(last)) {
+		!peerwire.ValidAccountName(string(first)) || !peerwire.ValidAccountName(string(last)) {
 		return nil, false
 	}
 	return &vault.NameChange{Seq: n, FirstName: string(first), LastName: string(last)}, true

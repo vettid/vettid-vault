@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/vettid/vettid-vault/vms/handshake"
+	"github.com/vettid/vettid-vault/vms/peerwire"
 )
 
 // State is the DEK-encrypted vault state (§3.3). It is serialized as JSON
@@ -302,14 +303,14 @@ type HeldToken struct {
 	Exp   time.Time `json:"exp,omitempty"`
 }
 
-// Token kinds (§7.1).
+// Token kinds (§7.1), as vms/peerwire defines them.
 const (
-	TokStanding  = "standing"
-	TokReconnect = "reconnect"
-	TokOpen      = "open"
+	TokStanding  = peerwire.TokenStanding
+	TokReconnect = peerwire.TokenReconnect
+	TokOpen      = peerwire.TokenOpen
 	// TokRequest covers only the rest of a handshake that awaits
 	// approval and connection.approved (§7.1, 0.10.3).
-	TokRequest = "request"
+	TokRequest = peerwire.TokenRequest
 )
 
 // IssuedToken is one entry of the issued-token registry (§7, §3.3).

@@ -13,6 +13,7 @@ import (
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/handshake"
 	"github.com/vettid/vettid-vault/vms/invite"
+	"github.com/vettid/vettid-vault/vms/peerwire"
 	"github.com/vettid/vettid-vault/vms/suite"
 )
 
@@ -170,7 +171,7 @@ func (m *Manager) handleInit(ctx context.Context, raw []byte, sender ed25519.Pub
 		m.record(Activity{Kind: "device.transfer.attestation_failed", Ref: inv.ID, Audit: true}, now)
 		return ackAfterFlush
 	}
-	if inv.Kind == KindConnection && !ValidHandshakeProfile(body.Profile) {
+	if inv.Kind == KindConnection && !peerwire.ValidHandshakeProfile(body.Profile) {
 		// §6.2 (0.18.0): a vault's connection hs.init carries the
 		// account's first and last name.
 		m.audit(now, "profile_malformed", "")

@@ -10,6 +10,7 @@ import (
 
 	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/envelope"
+	"github.com/vettid/vettid-vault/vms/peerwire"
 )
 
 // Account status through the vault (VAULT-MESSAGING 0.15.0, §11.13). The
@@ -71,31 +72,8 @@ type NameResult struct {
 }
 
 // MaxAccountName bounds an account name in the snapshot and the profile's
-// core (§10.8, §11.13: 1–160 bytes).
-const MaxAccountName = 160
-
-// ValidAccountName reports whether s is a name as the snapshot and the
-// shared profile's core carry it (§10.8, §11.13): a UTF-8 string of 1–160
-// bytes without control characters (C0, DEL, C1, U+2028, U+2029; DEL
-// since 0.21.0).
-func ValidAccountName(s string) bool {
-	if s == "" || len(s) > MaxAccountName || !utf8.ValidString(s) {
-		return false
-	}
-	return !hasAccountControl(s)
-}
-
-// hasAccountControl reports whether s holds a character of the set the
-// snapshot's names and email exclude (§10.8, §11.13, 0.21.0): C0
-// (U+0000–U+001F), DEL (U+007F), C1 (U+0080–U+009F), U+2028 and U+2029.
-func hasAccountControl(s string) bool {
-	for _, r := range s {
-		if r < 0x20 || r >= 0x7f && r <= 0x9f || r == 0x2028 || r == 0x2029 {
-			return true
-		}
-	}
-	return false
-}
+// core (§10.8, §11.13: 1–160 bytes; peerwire.ValidAccountName).
+const MaxAccountName = peerwire.MaxAccountName
 
 // MinAccountEmail and MaxAccountEmail bound the snapshot's email (§11.13,
 // 0.20.0: 3–1,016 bytes, the registration rule's 254 characters).
@@ -113,12 +91,12 @@ func ValidAccountEmail(s string) bool {
 	if len(s) < MinAccountEmail || len(s) > MaxAccountEmail || !utf8.ValidString(s) || !strings.Contains(s, "@") {
 		return false
 	}
-	return !hasAccountControl(s)
+	return !peerwire.HasNameControl(s)
 }
 
 // ParseAccountSnapshot parses a snapshot strictly (§11.13): an object of
 // at most 2 KiB, v = 1, as_of an RFC 3339 time, (0.18.0, required)
-// first_name and last_name (ValidAccountName) and name_change
+// first_name and last_name (peerwire.ValidAccountName) and name_change
 // {allowed_after: RFC 3339 | null, last: {seq, status, reason?} | null},
 // and (0.20.0, required) email (ValidAccountEmail); the other members the
 // spec names must have their types; unknown members, 0.15.0's email_hint
@@ -143,10 +121,10 @@ func ParseAccountSnapshot(raw []byte) (*AccountSnapshot, error) {
 		return nil, ErrAccount
 	}
 	a := &AccountSnapshot{AsOf: asOf.UTC()}
-	if a.FirstName, err = o.String("first_name"); err != nil || !ValidAccountName(a.FirstName) {
+	if a.FirstName, err = o.String("first_name"); err != nil || !peerwire.ValidAccountName(a.FirstName) {
 		return nil, ErrAccount
 	}
-	if a.LastName, err = o.String("last_name"); err != nil || !ValidAccountName(a.LastName) {
+	if a.LastName, err = o.String("last_name"); err != nil || !peerwire.ValidAccountName(a.LastName) {
 		return nil, ErrAccount
 	}
 	nc, err := o.Object("name_change")

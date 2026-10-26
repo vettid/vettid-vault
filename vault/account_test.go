@@ -9,6 +9,7 @@ import (
 
 	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/envelope"
+	"github.com/vettid/vettid-vault/vms/peerwire"
 )
 
 func snapshotAt(t time.Time, extra string) []byte {
@@ -181,7 +182,7 @@ func FuzzParseAccountSnapshot(f *testing.F) {
 		if err != nil {
 			return
 		}
-		if !ValidAccountName(a.FirstName) || !ValidAccountName(a.LastName) || !ValidAccountEmail(a.Email) || len(a.Raw) > MaxAccountSnapshot {
+		if !peerwire.ValidAccountName(a.FirstName) || !peerwire.ValidAccountName(a.LastName) || !ValidAccountEmail(a.Email) || len(a.Raw) > MaxAccountSnapshot {
 			t.Fatalf("accepted %+v", a)
 		}
 		if a.Last != nil && (a.Last.Seq == 0 || a.Last.Status != NameApplied && a.Last.Status != NameRefused) {

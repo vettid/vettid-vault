@@ -34,6 +34,7 @@ import (
 	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vms/envelope"
+	"github.com/vettid/vettid-vault/vms/peerwire"
 )
 
 // Limits (§10.8, §10.12).
@@ -42,8 +43,8 @@ const (
 	MaxRulesPerSubj  = 64
 	MaxRules         = 512
 	MaxPending       = 4096
-	MaxProfileItems  = 32
-	MaxProfileUpdate = 196608
+	MaxProfileItems  = peerwire.MaxProfileItems
+	MaxProfileUpdate = peerwire.MaxProfileUpdate
 	MaxListLimit     = 500
 	DefaultListLimit = 100
 	MaxListBytes     = 131072

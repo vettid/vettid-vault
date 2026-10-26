@@ -657,6 +657,10 @@ func FuzzParse(f *testing.F) {
 		if p.Config.Channel == ChannelProd && p.Config.AcceptsUnbound() {
 			t.Fatal("a production file accepts unbound vaults")
 		}
+		// VAULT-RELEASES §3.1: automation roots are staging's only.
+		if p.Config.Channel != ChannelStaging && (p.Config.Automation != nil || p.Config.AutomationRoots() != nil) {
+			t.Fatal("a production file with automation attestation roots")
+		}
 		for i, n := range p.Config.Features {
 			if !isOptional(n) || i > 0 && p.Config.Features[i-1] >= n {
 				t.Fatalf("features %v", p.Config.Features)

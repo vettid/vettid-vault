@@ -15,6 +15,14 @@
 // (0.26.0 §11.10.8: a channel's list only grows). A previous file from
 // before 0.26.0 has no list and counts as listing every optional
 // feature. A rebuild from the tag alone runs without -previous.
+//
+// It also refuses a staging-only switch past its end date
+// (STAGING-DEVELOPMENT-PLAN §2.5.5; the staging file's
+// automation_attestation, VAULT-RELEASES §3.1), judged at
+// SOURCE_DATE_EPOCH when that is set to a positive number (an image build:
+// Dockerfile.enclave and scripts/build-eif.sh set it to the commit time,
+// so a rebuild of a tagged release gives the same answer on any day) and
+// at the current time otherwise (the release workflow's gate, CI).
 package main
 
 import (
@@ -22,7 +30,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/vettid/vettid-vault/enclave/releasecfg"
 )
@@ -61,6 +71,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "releasecfg: %s: refusing to build a %s release image: %v\n", path, channel, err)
 		return 1
 	}
+	at, atWhat := gateTime()
+	if err := c.CheckEndDates(at); err != nil {
+		fmt.Fprintf(stderr, "releasecfg: %s: refusing to build a %s release image (%s): %v\n", path, channel, atWhat, err)
+		return 1
+	}
 	grows := ""
 	if *previous != "" {
 		pb, err := os.ReadFile(*previous)
@@ -96,7 +111,24 @@ func run(args []string, stdout, stderr io.Writer) int {
 	// VAULT-RELEASES 0.1.32 §5.2: each release log entry says the scale in
 	// words; this is the line to copy.
 	fmt.Fprintf(stdout, "releasecfg: release log: %s\n", TimeScaleWords(c))
+	if roots := c.AutomationRoots(); len(roots) > 0 {
+		fmt.Fprintf(stdout, "releasecfg: staging automation attestation: %d root(s), until %s (checked %s)\n",
+			len(roots), c.Automation.Until.Format(time.DateOnly), atWhat)
+	}
 	return 0
+}
+
+// gateTime is the time the date rule is judged at: SOURCE_DATE_EPOCH if
+// it is a positive number, else now.
+func gateTime() (time.Time, string) {
+	if v := os.Getenv("SOURCE_DATE_EPOCH"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			t := time.Unix(n, 0).UTC()
+			return t, "at SOURCE_DATE_EPOCH " + t.Format(time.DateOnly)
+		}
+	}
+	t := time.Now().UTC()
+	return t, "on " + t.Format(time.DateOnly)
 }
 
 // TimeScaleWords is the release log's words for the image's time scale

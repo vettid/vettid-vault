@@ -4,8 +4,9 @@
 // region, the retirement principal and window, the Android
 // signing certificates with their classes (0.27.0), the relay URL, (VAULT-MESSAGING 0.24.0)
 // the push gateway URL, (0.26.0) the Android package and the optional
-// features the image registers, (0.35.0) the iOS App ID, and (0.43.0) the
-// staging time scale.
+// features the image registers, (0.35.0) the iOS App ID, (0.43.0) the
+// staging time scale, and the staging channel's automation attestation
+// roots with their end date (VAULT-RELEASES §3.1, AutomationRoots).
 //
 // Each channel's constants are a committed file (prod.json, staging.json)
 // that the build embeds, selected by the build tag vettid_channel_prod or
@@ -91,6 +92,10 @@ var (
 	// channel's previous release listed (a list only grows, 0.26.0).
 	ErrFeatureRemoved = errors.New("releasecfg: a feature of the previous release is not listed")
 
+	// ErrExpired: a staging-only switch of the file is past its end date
+	// (STAGING-DEVELOPMENT-PLAN §2.5.5); the release gate refuses it.
+	ErrExpired = errors.New("releasecfg: a staging-only switch is past its end date")
+
 	ErrFormat     = errors.New("releasecfg: malformed channel file")
 	ErrIncomplete = errors.New("releasecfg: placeholder or missing value")
 	ErrChannel    = errors.New("releasecfg: wrong channel")
@@ -134,6 +139,61 @@ type Config struct {
 	// 0.43.0 §11.10.8, STAGING-TIME-SCALE): production exactly 1, staging
 	// 1 or 24. The vault reads it only through TimeScale, never directly.
 	FileTimeScale uint64
+	// Automation is the staging file's automation attestation member
+	// (VAULT-RELEASES §3.1), nil without one. The image reads its roots
+	// only through AutomationRoots, never directly.
+	Automation *Automation
+}
+
+// Automation is the staging channel's automation attestation CA
+// (VAULT-RELEASES §3.1: staging accepts "test CA and the real vendor
+// roots"; owner decision 2026-10-27): Android key attestation roots
+// accepted beside Google's, held by VettID's staging account, so that an
+// automated test without a phone can enroll a staging app device. Until is
+// the switch's end date (STAGING-DEVELOPMENT-PLAN §2.5.5): the last day,
+// UTC, on which the release gate accepts the file, and no root's validity
+// ends after that day, so the image itself stops accepting chains from it
+// then (§11.7 chain rule 7). A production file with the member is
+// malformed.
+type Automation struct {
+	AndroidRoots []*x509.Certificate
+	Until        time.Time // 00:00 UTC of the last day
+}
+
+// The automation member's bounds: one or two roots (a rotation), and an
+// end date at most MaxAutomationDays after the newest root's notBefore,
+// so the switch is renewed by a reviewed change at least once a year.
+const (
+	maxAutomationRoots = 2
+	MaxAutomationDays  = 400
+)
+
+// AutomationRoots returns the automation attestation roots this release
+// accepts beside the vendor roots. Like TimeScale it is decided by the
+// measured channel: the file's roots only in the staging channel, none
+// for any other channel or no configuration, so no production image
+// accepts them whatever its file says (Parse refuses the member there
+// too).
+func (c *Config) AutomationRoots() []*x509.Certificate {
+	if c == nil || c.Channel != ChannelStaging || c.Automation == nil {
+		return nil
+	}
+	return append([]*x509.Certificate(nil), c.Automation.AndroidRoots...)
+}
+
+// CheckEndDates is the release gate's date rule (STAGING-DEVELOPMENT-PLAN
+// §2.5.5): a staging-only switch with an end date is refused after that
+// day (UTC). It is separate from Check because it depends on the day the
+// gate runs: cmd/releasecfg runs it at the build's SOURCE_DATE_EPOCH when
+// one is set (an image build, so a rebuild of a tagged release stays
+// reproducible) and at the current time otherwise (the release workflow's
+// gate, CI). An image does not run it: its roots' validity periods end
+// with the switch.
+func (c *Config) CheckEndDates(now time.Time) error {
+	if c != nil && c.Automation != nil && !now.UTC().Before(c.Automation.Until.AddDate(0, 0, 1)) {
+		return fmt.Errorf("%w: automation_attestation ended %s", ErrExpired, c.Automation.Until.Format(time.DateOnly))
+	}
+	return nil
 }
 
 // Counter is the recovery attempt counter's S3 bucket (§11.14.4,
@@ -199,7 +259,12 @@ func Parse(b []byte) (*File, error) {
 		"retirement_principal", "retirement_window_days", "android_signers", "relay_url", "push_url", "android_package", "ios_app_id", "features",
 		"recovery_counter", "recovery_request_keys", "recovery_wait_unit_seconds", "recovery_quiet_seconds", "recovery_offered",
 		"android_min_version_code", "time_scale"}
-	if len(o) != len(members) {
+	// Optional members: automation_attestation (staging only).
+	optional := 0
+	if o.Has("automation_attestation") {
+		optional++
+	}
+	if len(o) != len(members)+optional {
 		return nil, ErrFormat
 	}
 	for _, m := range members {
@@ -285,6 +350,14 @@ func Parse(b []byte) (*File, error) {
 	}
 	if err := parseRecovery(o, c, missing); err != nil {
 		return nil, err
+	}
+	if o.Has("automation_attestation") {
+		if c.Channel != ChannelStaging {
+			return nil, ErrFormat // never in production (VAULT-RELEASES §3.1)
+		}
+		if c.Automation, err = parseAutomation(o, missing); err != nil {
+			return nil, err
+		}
 	}
 	f.Missing = dedupe(f.Missing)
 	return f, nil
@@ -758,4 +831,66 @@ func validKeyID(s string) bool {
 		}
 	}
 	return true
+}
+
+// parseAutomation reads the staging file's "automation_attestation":
+// {"android_roots": ["<b64 DER certificate>", ...], "until": "YYYY-MM-DD"}.
+// Each root is a self-signed CA certificate with an ECDSA P-256 or P-384
+// key whose validity ends no later than the end of the until day (UTC);
+// the roots' keys are distinct; until is at most MaxAutomationDays after
+// the newest root's notBefore. A placeholder root is reported missing.
+func parseAutomation(o strictjson.Object, missing func(string)) (*Automation, error) {
+	ao, err := o.Object("automation_attestation")
+	if err != nil || len(ao) != 2 || !ao.Has("android_roots") || !ao.Has("until") {
+		return nil, ErrFormat
+	}
+	us, err := ao.String("until")
+	if err != nil {
+		return nil, ErrFormat
+	}
+	until, err := time.Parse(time.DateOnly, us)
+	if err != nil || until.Format(time.DateOnly) != us {
+		return nil, ErrFormat
+	}
+	end := until.AddDate(0, 0, 1) // the first instant after the last day
+	roots, err := strings2(ao, "android_roots", 1, maxAutomationRoots)
+	if err != nil {
+		return nil, err
+	}
+	a := &Automation{Until: until}
+	seen := map[string]bool{}
+	var newest time.Time
+	for _, s := range roots {
+		if isPlaceholder(s) {
+			missing("automation_attestation")
+			continue
+		}
+		der, err := strictjson.DecodeStd(s, -1)
+		if err != nil {
+			return nil, ErrFormat
+		}
+		c, err := x509.ParseCertificate(der)
+		if err != nil || !c.BasicConstraintsValid || !c.IsCA || c.KeyUsage != 0 && c.KeyUsage&x509.KeyUsageCertSign == 0 {
+			return nil, ErrFormat
+		}
+		pub, ok := c.PublicKey.(*ecdsa.PublicKey)
+		if !ok || pub.Curve != elliptic.P256() && pub.Curve != elliptic.P384() {
+			return nil, ErrFormat
+		}
+		if c.CheckSignature(c.SignatureAlgorithm, c.RawTBSCertificate, c.Signature) != nil {
+			return nil, ErrFormat // not self-signed
+		}
+		if !c.NotBefore.Before(c.NotAfter) || !c.NotAfter.Before(end) || seen[string(c.RawSubjectPublicKeyInfo)] {
+			return nil, ErrFormat
+		}
+		seen[string(c.RawSubjectPublicKeyInfo)] = true
+		if c.NotBefore.After(newest) {
+			newest = c.NotBefore
+		}
+		a.AndroidRoots = append(a.AndroidRoots, c)
+	}
+	if !newest.IsZero() && until.After(newest.AddDate(0, 0, MaxAutomationDays)) {
+		return nil, ErrFormat
+	}
+	return a, nil
 }

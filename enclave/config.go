@@ -217,6 +217,14 @@ func releaseConfigFor(c *releasecfg.Config, instanceID, relayURL string) Config 
 			cfg.DeviceAttest.AndroidSigners = append(cfg.DeviceAttest.AndroidSigners, devattest.Signer{Digest: sg.Digest, Class: sg.Class})
 		}
 		cfg.DeviceAttest.AndroidAcceptUnbound = c.AcceptsUnbound()
+		// VAULT-RELEASES §3.1: a staging image accepts its automation
+		// attestation CA beside the vendor roots (owner decision
+		// 2026-10-27); AutomationRoots is empty outside the staging
+		// channel, and a production file cannot carry the member. Every
+		// other check of §11.7 applies to such a chain unchanged.
+		if auto := c.AutomationRoots(); len(auto) > 0 {
+			cfg.DeviceAttest.AndroidRoots = append(append([]*x509.Certificate(nil), cfg.DeviceAttest.AndroidRoots...), auto...)
+		}
 		cfg.PushURL = c.PushURL
 		cfg.Recovery = RecoveryConfig{Counter: c.RecoveryCounter, RequestKeys: c.RecoveryRequestKeys,
 			WaitUnit: time.Duration(c.RecoveryWaitUnitSeconds) * time.Second, Quiet: time.Duration(c.RecoveryQuietSeconds) * time.Second,

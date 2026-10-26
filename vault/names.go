@@ -293,22 +293,3 @@ func (m *Manager) connectionRotated(id string, now time.Time) {
 func (m *Manager) rotationPending(p *Peer) bool {
 	return p.Kind == KindConnection && p.OwnChainAtEpoch < len(m.st.Rotations)
 }
-
-// ValidHandshakeProfile reports whether a connection hs.init profile from
-// a vault carries both core names (§6.2, 0.18.0): {first_name, last_name,
-// name?}.
-func ValidHandshakeProfile(raw json.RawMessage) bool {
-	if len(raw) == 0 {
-		return false
-	}
-	o, err := strictjson.ParseObject(raw)
-	if err != nil {
-		return false
-	}
-	for _, k := range []string{"first_name", "last_name"} {
-		if s, err := o.String(k); err != nil || !ValidAccountName(s) {
-			return false
-		}
-	}
-	return true
-}

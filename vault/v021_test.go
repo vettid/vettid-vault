@@ -8,6 +8,7 @@ import (
 
 	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/envelope"
+	"github.com/vettid/vettid-vault/vms/peerwire"
 )
 
 // roFeature has a step-up type with a read-only form (a dry run).
@@ -85,7 +86,7 @@ func TestAccountControlSet(t *testing.T) {
 		}
 	}
 	for _, s := range []string{"Ada\u007f", "A\u2028", "A\u2029", "A\u0085", "A\u0000"} {
-		if ValidAccountName(s) {
+		if peerwire.ValidAccountName(s) {
 			t.Errorf("name %q accepted", s)
 		}
 	}
@@ -95,7 +96,7 @@ func TestAccountControlSet(t *testing.T) {
 		}
 	}
 	for _, s := range []string{"Ada", "Zoë O’Brien-Smith", " x", strings.Repeat("é", 80)} {
-		if !ValidAccountName(s) {
+		if !peerwire.ValidAccountName(s) {
 			t.Errorf("name %q refused", s)
 		}
 	}

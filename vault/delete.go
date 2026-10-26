@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"strconv"
 	"time"
@@ -13,6 +12,7 @@ import (
 
 	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault/store"
+	"github.com/vettid/vettid-vault/vms/peerwire"
 )
 
 // Vault deletion (VAULT-MESSAGING §12.5, 0.9.0). A deletion is authorized
@@ -137,7 +137,7 @@ func (m *Manager) beginDelete(via string, now time.Time) {
 	}
 	for _, p := range m.st.Connections {
 		if p.State == PeerActive {
-			m.sendTo(p, "connection.removed", json.RawMessage(`{}`), now)
+			m.sendTo(p, peerwire.TypeConnectionRemoved, peerwire.ConnectionRemovedBody(), now)
 		}
 	}
 	notice := strictjson.NewBuilder().String("reason", "vault_deleted").Bytes()

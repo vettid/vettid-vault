@@ -10,6 +10,7 @@ import (
 	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/handshake"
+	"github.com/vettid/vettid-vault/vms/peerwire"
 )
 
 // nameFeature stands in for the credential feature's account.name.set
@@ -208,8 +209,8 @@ func TestNormalizeRequestedName(t *testing.T) {
 			t.Errorf("%q accepted as %q", in, got)
 		}
 	}
-	if !ValidAccountName("Ada") || ValidAccountName("") || ValidAccountName("A ") || ValidAccountName("A\u009f") ||
-		ValidAccountName(strings.Repeat("x", 161)) || ValidAccountName("\xff") || !ValidAccountName(strings.Repeat("x", 160)) {
+	if !peerwire.ValidAccountName("Ada") || peerwire.ValidAccountName("") || peerwire.ValidAccountName("A ") || peerwire.ValidAccountName("A\u009f") ||
+		peerwire.ValidAccountName(strings.Repeat("x", 161)) || peerwire.ValidAccountName("\xff") || !peerwire.ValidAccountName(strings.Repeat("x", 160)) {
 		t.Fatal("ValidAccountName")
 	}
 }

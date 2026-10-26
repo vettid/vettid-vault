@@ -8,6 +8,7 @@ import (
 	"github.com/vettid/vettid-vault/features/itemspec"
 	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault"
+	"github.com/vettid/vettid-vault/vms/peerwire"
 )
 
 // §10.8 (0.19.0): the 196,608-byte limit is checked with each name
@@ -18,7 +19,7 @@ func TestProfileSizeWorstCaseNames(t *testing.T) {
 		t.Fatalf("worst-case name encodes to %d bytes", n)
 	}
 	for _, s := range []string{strings.Repeat(`\`, 160), strings.Repeat("é", 80), strings.Repeat("<&>", 53) + "x"} {
-		if !vault.ValidAccountName(s) || len(strictjson.MarshalString(s)) > 322 {
+		if !peerwire.ValidAccountName(s) || len(strictjson.MarshalString(s)) > 322 {
 			t.Fatalf("%q encodes to %d bytes", s, len(strictjson.MarshalString(s)))
 		}
 	}

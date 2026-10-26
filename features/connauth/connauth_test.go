@@ -12,6 +12,7 @@ import (
 	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vms/credwire"
+	"github.com/vettid/vettid-vault/vms/peerwire"
 )
 
 var t0 = time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
@@ -178,7 +179,7 @@ func TestLimitsAndRoles(t *testing.T) {
 	if r := featuretest.Call(a.f, a.h, t0, "app", "connection.authenticate.request", `{"connection_id":"cB"}`); r.Code != "limit" {
 		t.Fatalf("pending limit: %q", r.Code)
 	}
-	if r := featuretest.Call(a.f, a.h, t0.Add(ChallengeTTL+time.Second), "app", "connection.authenticate.request", `{"connection_id":"cB"}`); !r.OK() {
+	if r := featuretest.Call(a.f, a.h, t0.Add(peerwire.ConnAuthChallengeTTL+time.Second), "app", "connection.authenticate.request", `{"connection_id":"cB"}`); !r.OK() {
 		t.Fatal("expired challenges still counted")
 	}
 	chs := a.h.SentOfType("connection.authenticate.challenge")
@@ -197,7 +198,7 @@ func TestLimitsAndRoles(t *testing.T) {
 			t.Errorf("%s %s: %q", c.kind, c.typ, r.Code)
 		}
 	}
-	for _, body := range []string{`{}`, `{"connection_id":"cB","context":"` + strings.Repeat("x", MaxContext+1) + `"}`} {
+	for _, body := range []string{`{}`, `{"connection_id":"cB","context":"` + strings.Repeat("x", peerwire.ConnAuthMaxContext+1) + `"}`} {
 		if r := featuretest.Call(a.f, a.h, t0, "app", "connection.authenticate.request", body); r.Code != "bad_request" {
 			t.Errorf("%.40s: %q", body, r.Code)
 		}
@@ -208,27 +209,6 @@ func TestLimitsAndRoles(t *testing.T) {
 	if r := featuretest.Call(b.f, b.h, t0, "app", "connection.authenticate.approve", `{"request_id":"01JB2Z6V9K3M4N5P6Q7R8S9T0V"}`); r.Code != "not_found" {
 		t.Error("unknown request")
 	}
-}
-
-func FuzzParseChallenge(f *testing.F) {
-	f.Add([]byte(`{"request_id":"01JB2Z6V9K3M4N5P6Q7R8S9T0V","nonce":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","context":"x"}`))
-	f.Fuzz(func(t *testing.T, b []byte) {
-		if c, err := ParseChallenge(b); err == nil && (len(c.Nonce) != NonceSize || len(c.Context) > MaxContext) {
-			t.Fatal("invalid challenge accepted")
-		}
-	})
-}
-
-func FuzzParseResponse(f *testing.F) {
-	f.Add([]byte(`{"request_id":"01JB2Z6V9K3M4N5P6Q7R8S9T0V","status":"denied"}`))
-	f.Add([]byte(`{"request_id":"01JB2Z6V9K3M4N5P6Q7R8S9T0V","status":"signed","key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","sig":"` +
-		strings.Repeat("A", 86) + `==","signed_at":"2026-10-01T12:00:00.000Z"}`))
-	f.Fuzz(func(t *testing.T, b []byte) {
-		r, err := ParseResponse(b)
-		if err == nil && r.Status == StatusSigned && (len(r.Key) != ed25519.PublicKeySize || len(r.Sig) != ed25519.SignatureSize) {
-			t.Fatal("invalid response accepted")
-		}
-	})
 }
 
 func rotate(t *testing.T, b *side, seed byte) {
@@ -302,14 +282,4 @@ func TestKeyRotationFollowed(t *testing.T) {
 			t.Errorf("%s: %q", body, r.Code)
 		}
 	}
-}
-
-func FuzzParseRotations(f *testing.F) {
-	r, _ := credwire.NewKeyRotation(ed25519.NewKeyFromSeed(bytes.Repeat([]byte{1}, 32)), ed25519.NewKeyFromSeed(bytes.Repeat([]byte{2}, 32)))
-	f.Add([]byte(`[` + string(r.Marshal()) + `]`))
-	f.Fuzz(func(t *testing.T, b []byte) {
-		if c, err := ParseRotations(b); err == nil && (len(c) == 0 || len(c) > credwire.MaxKeyChain) {
-			t.Fatal("chain length")
-		}
-	})
 }

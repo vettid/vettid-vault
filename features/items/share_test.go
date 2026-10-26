@@ -17,6 +17,7 @@ import (
 	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/leashwire"
+	"github.com/vettid/vettid-vault/vms/peerwire"
 )
 
 // secretTag is a tag name that must never reach a connection.
@@ -786,7 +787,7 @@ func FuzzParseUpdate(f *testing.F) {
 		if err != nil || u.Malformed {
 			return
 		}
-		if !vault.ValidAccountName(u.FirstName) || !vault.ValidAccountName(u.LastName) || len(u.IK) != 32 {
+		if !peerwire.ValidAccountName(u.FirstName) || !peerwire.ValidAccountName(u.LastName) || len(u.IK) != 32 {
 			t.Fatalf("accepted core %+v", u)
 		}
 		v, err := items.ParseUpdate(u.Marshal())

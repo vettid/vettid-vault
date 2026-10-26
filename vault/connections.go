@@ -9,6 +9,7 @@ import (
 
 	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/envelope"
+	"github.com/vettid/vettid-vault/vms/peerwire"
 	"github.com/vettid/vettid-vault/vms/suite"
 )
 
@@ -227,7 +228,7 @@ func (m *Manager) hBlockAdd(_ context.Context, s *Session, in *envelope.Inner) (
 // removeConnection applies §7.4 "Connection removed" for p (dir "out": by
 // the owner; "in": the peer's notice).
 func (m *Manager) removeConnection(p *Peer, dir string, now time.Time) {
-	notice := "connection.removed"
+	notice := peerwire.TypeConnectionRemoved
 	if dir == "in" {
 		p.State = PeerStale // so removePeer sends no notice back
 		notice = ""

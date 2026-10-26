@@ -17,6 +17,7 @@ import (
 	"github.com/vettid/vettid-vault/vault/store"
 	"github.com/vettid/vettid-vault/vms/attwire"
 	"github.com/vettid/vettid-vault/vms/envelope"
+	"github.com/vettid/vettid-vault/vms/peerwire"
 	"github.com/vettid/vettid-vault/vms/suite"
 )
 
@@ -870,7 +871,7 @@ func (m *Manager) attAskToken(p *Peer, e *AttEntry, now time.Time) bool {
 	e.NotBefore = now.Add(time.Hour)
 	m.dirty = true
 	if !m.requestPending(p.ID, tokenRefreshType) {
-		if id := m.sendTo(p, tokenRefreshType, []byte(`{}`), m.now()); id != "" {
+		if id := m.sendTo(p, tokenRefreshType, peerwire.TokenRefreshBody(), m.now()); id != "" {
 			m.requests[id] = p.ID
 			m.requestTypes[id] = tokenRefreshType
 		}

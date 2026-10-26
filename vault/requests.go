@@ -13,6 +13,7 @@ import (
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/handshake"
 	"github.com/vettid/vettid-vault/vms/invite"
+	"github.com/vettid/vettid-vault/vms/peerwire"
 	"github.com/vettid/vettid-vault/vms/suite"
 )
 
@@ -27,14 +28,14 @@ import (
 // and reconnect tokens; a pairing or transfer, at the owner's approval.
 // Until then the peer holds only a request token (8 messages / 64 KiB).
 
-// Request token parameters (§7.1).
+// Request token parameters (§7.1), as vms/peerwire defines them.
 const (
-	RequestTokenQuotaMsgs   = 8
-	RequestTokenQuotaBytes  = 65536
-	RequestTokenConnection  = 16 * 24 * time.Hour // ≤ 16 d for a peer vault
-	RequestTokenDevice      = 10 * time.Minute    // ≤ 10 min for a new device
-	connectionApprovedType  = "connection.approved"
-	connectionDeclinedType  = "connection.declined"
+	RequestTokenQuotaMsgs   = peerwire.RequestTokenQuotaMsgs
+	RequestTokenQuotaBytes  = peerwire.RequestTokenQuotaBytes
+	RequestTokenConnection  = peerwire.RequestTokenConnection // ≤ 16 d for a peer vault
+	RequestTokenDevice      = peerwire.RequestTokenDevice     // ≤ 10 min for a new device
+	connectionApprovedType  = peerwire.TypeConnectionApproved
+	connectionDeclinedType  = peerwire.TypeConnectionDeclined
 	devicePairRejectedType  = "device.pair.rejected"
 	connectionRequestKind   = "connection.request"
 	requestStatePending     = "pending"
@@ -194,8 +195,7 @@ func (m *Manager) approveRequest(r *Request, now time.Time) error {
 	if err != nil {
 		return NewError("relay_error", "")
 	}
-	body := strictjson.NewBuilder().String("token", tok).String("reconnect_token", rt).Bytes()
-	raw, err := ep.Seal(&envelope.Inner{ID: m.newID(now), Type: connectionApprovedType, TS: now, Body: body})
+	raw, err := ep.Seal(&envelope.Inner{ID: m.newID(now), Type: connectionApprovedType, TS: now, Body: peerwire.ConnectionApprovedBody(tok, rt)})
 	if err != nil {
 		return NewError("internal", "")
 	}
@@ -219,14 +219,8 @@ func (m *Manager) peerApproved(r *Request, in *envelope.Inner, now time.Time) {
 	if r.PeerApproved {
 		return
 	}
-	o, err := strictjson.ParseObject(in.Body)
+	tok, rtok, err := peerwire.ParseConnectionApproved(in.Body)
 	if err != nil {
-		m.audit(now, "bad_connection_approved", "")
-		return
-	}
-	tok, err1 := o.String("token")
-	rtok, err2 := o.String("reconnect_token")
-	if err1 != nil || err2 != nil {
 		m.audit(now, "bad_connection_approved", "")
 		return
 	}

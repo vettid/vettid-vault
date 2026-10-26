@@ -3,29 +3,25 @@ package vault
 import (
 	"crypto/ed25519"
 	"encoding/json"
-	"errors"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/vettid/vettid-relay/relayauth"
 
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/handshake"
+	"github.com/vettid/vettid-vault/vms/peerwire"
 )
 
-// Token lifetimes and thresholds (§7).
+// Token lifetimes and thresholds (§7), as vms/peerwire defines them.
 const (
-	StandingMax         = 30 * 24 * time.Hour
-	StandingRemintBelow = 10 * 24 * time.Hour // issuer re-mints (§7.2)
-	HolderRefreshBelow  = 3 * 24 * time.Hour  // holder asks (§7.2)
-	PeerQuotaMsgs       = 20000
-	PeerQuotaBytes      = 512 << 20
-	tokenRefreshType    = "relay.token.refresh"
-	tokenIssuedType     = "relay.token.issued"
+	StandingMax         = peerwire.StandingMax
+	StandingRemintBelow = peerwire.StandingRemintBelow // issuer re-mints (§7.2)
+	HolderRefreshBelow  = peerwire.HolderRefreshBelow  // holder asks (§7.2)
+	PeerQuotaMsgs       = peerwire.PeerQuotaMsgs
+	PeerQuotaBytes      = peerwire.PeerQuotaBytes
+	tokenRefreshType    = peerwire.TypeTokenRefresh
+	tokenIssuedType     = peerwire.TypeTokenIssued
 )
-
-var errToken = errors.New("vault: token invalid")
 
 func mailboxOf(k ed25519.PrivateKey) string {
 	return relayauth.MailboxID(k.Public().(ed25519.PublicKey))
@@ -81,24 +77,19 @@ func (m *Manager) mint(p *Peer, kind string, ttl time.Duration, quota *relayauth
 
 // heldToken validates a token another principal issued to the vault: its
 // signature by the principal's relay key, iss = its mailbox, sub = the
-// vault's relay key, and a deposit scope.
+// vault's relay key, aud = its relay URL, and a deposit scope
+// (peerwire.VerifyHeldToken).
 func (m *Manager) heldToken(tok string, p *Peer) (HeldToken, error) {
-	msg, err := relayauth.VerifyToken(tok, p.Relay.PK)
+	c, err := peerwire.VerifyHeldToken(tok, p.Relay.PK, p.Relay.Mailbox, p.Relay.URL, m.keys.relay.Public().(ed25519.PublicKey))
 	if err != nil {
-		return HeldToken{}, errToken
-	}
-	c, err := relayauth.ParseClaims(msg)
-	if err != nil || c.Iss != p.Relay.Mailbox || c.Scope != relayauth.ScopeDeposit ||
-		c.Sub != relayauth.EncodeKey(m.keys.relay.Public().(ed25519.PublicKey)) ||
-		strings.TrimRight(c.Aud, "/") != strings.TrimRight(p.Relay.URL, "/") {
-		return HeldToken{}, errToken
+		return HeldToken{}, err
 	}
 	return HeldToken{Token: tok, Exp: c.Exp}, nil
 }
 
 // tokenBackdate is how far relayclient backdates iat (RELAY-PROTOCOL §5.2,
 // VAULT-MESSAGING §7.1).
-const tokenBackdate = 60 * time.Second
+const tokenBackdate = peerwire.TokenBackdate
 
 // reconnectClass reports whether a deposit was made on a reconnect token,
 // by its collect jti (§6.6): the jti is one of our reconnect tokens, or
@@ -174,7 +165,7 @@ func (m *Manager) issueTo(p *Peer, kind string, now time.Time) {
 		return
 	}
 	m.st.Issued = append(m.st.Issued, issued...)
-	m.sendTo(p, tokenIssuedType, strictjson.NewBuilder().String("kind", kind).String("token", tok).Bytes(), now)
+	m.sendTo(p, tokenIssuedType, peerwire.TokenIssuedBody(kind, tok), now)
 }
 
 // refreshHeld asks peers for fresh standing tokens when ours have < 3 days
@@ -191,7 +182,7 @@ func (m *Manager) refreshHeld(now time.Time) {
 			continue
 		}
 		if p.Standing.Exp.Sub(now) < HolderRefreshBelow && !m.requestPending(p.ID, tokenRefreshType) {
-			if id := m.sendTo(p, tokenRefreshType, json.RawMessage(`{}`), now); id != "" {
+			if id := m.sendTo(p, tokenRefreshType, peerwire.TokenRefreshBody(), now); id != "" {
 				m.requests[id] = p.ID
 				m.requestTypes[id] = tokenRefreshType
 			}
@@ -210,15 +201,10 @@ func (m *Manager) requestPending(peer, typ string) bool {
 
 // storeIssuedTo stores a token a peer issued to us ({kind, token}).
 func (m *Manager) storeIssuedTo(p *Peer, body json.RawMessage, now time.Time) {
-	o, err := strictjson.ParseObject(body)
+	kind, tok, err := peerwire.ParseTokenIssued(body)
 	if err != nil {
 		return
 	}
-	tok, err := o.String("token")
-	if err != nil {
-		return
-	}
-	kind, _, _ := o.OptString("kind")
 	ht, err := m.heldToken(tok, p)
 	if err != nil {
 		m.audit(now, "bad_issued_token", p.ID)

@@ -58,6 +58,14 @@ const (
 	SeedCallOfferKEM       byte = 0x54 // the caller's ephemeral KEM key
 	RandCallAnswer         byte = 0x55 // the answerer's encapsulation randomness
 
+	// §10.4 member authentication between connections (connauth.json;
+	// not in §16: generated here for connection peers to reproduce).
+	SeedConnAuthChallengerIK byte = 0x60 // the challenging vault's ik
+	SeedConnAuthResponderIK  byte = 0x61 // the responding vault's ik
+	SeedConnAuthCredOld      byte = 0x62 // the responder's member's credential key the challenger pinned
+	SeedConnAuthCredNew      byte = 0x63 // the credential key after one rotation, which signs
+	NonceConnAuth            byte = 0x64 // the challenge's nonce
+
 	// §5.5 blob and §10.5.1 at-rest object (blob.json, attachment.json;
 	// 0.32.0, release A).
 	KeyBlob        byte = 0x41                                                         // (spec) the blob key
@@ -115,6 +123,9 @@ const (
 	CallID     = "01JB2Z6V9K3M4N5P6Q7R8S9T50"
 	CallMedia  = "audio"
 	CallICEExp = 1800000000
+	// §10.4 connauth vectors.
+	ConnAuthRequestID = "01JB2Z6V9K3M4N5P6Q7R8S9T70"
+	ConnAuthContext   = "sign-in"
 	// RecRecoveryID is the recovery's id (the queue message's request_id,
 	// §11.11.1) for ACVaultID.
 	RecRecoveryID = "01JB2Z6V9K3M4N5P6Q7R8S9T30"

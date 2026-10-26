@@ -488,8 +488,9 @@ confirms or a completed recovery (VAULT-MESSAGING §11.7.1,
 [`docs/RELEASING.md`](docs/RELEASING.md)). The staging file may also carry
 `automation_attestation` (VAULT-RELEASES §3.1): an automation
 attestation CA that staging images accept beside Google's roots, with an
-end date after which `releasecfg check` refuses the file; a production
-file with it is malformed. `vaultctl staging-enroll` and
+end date after which `releasecfg check` refuses the file, and with it
+the automation's own signer class `automation` (VAULT-MESSAGING 0.66.0);
+a production file with either is malformed. `vaultctl staging-enroll` and
 `staging-unlock` (release builds) enroll and unlock a staging app device
 with it, the CA key being an AWS KMS key in the staging account
 ([`docs/RELEASING.md`](docs/RELEASING.md), "Staging automation

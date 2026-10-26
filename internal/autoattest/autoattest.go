@@ -1,5 +1,5 @@
 // Package autoattest is the staging automation attester (VAULT-RELEASES
-// §3.1; owner decision 2026-10-27): an app device without a phone, whose
+// §3.1; owner decision 2026-10-26): an app device without a phone, whose
 // Android key attestation chain is issued by the staging automation
 // attestation CA instead of a phone's Keystore. Staging images accept
 // that CA beside Google's roots (releasecfg.Config.AutomationRoots);
@@ -8,8 +8,8 @@
 // The chain is [leaf, CA certificate]. The leaf carries the key
 // attestation extension (VAULT-MESSAGING §11.7) for a software P-256 key
 // that the automation holds, with every value a staging image checks:
-// the channel's package, a pinned signer digest (the development signer
-// class), the version code, TEE security levels, a locked device with
+// the channel's package, the automation signer digest (class automation,
+// VAULT-MESSAGING 0.66.0 §11.7.1), the version code, TEE security levels, a locked device with
 // verifiedBootState Verified, and a generated EC P-256 signing key. The
 // CA asserts the hardware levels; nothing about them is true, which is
 // why only staging accepts it: whoever can sign with the CA key can act
@@ -82,9 +82,9 @@ type Attester struct {
 	CA    *x509.Certificate
 	CAKey crypto.Signer
 	// Package, Signer and VersionCode are the attestationApplicationId
-	// the leaf reports: the staging package, a signer digest the staging
-	// release pins, and a version code no lower than its
-	// android_min_version_code.
+	// the leaf reports: the staging package, the automation signer digest
+	// (a staging image refuses an automation chain with any other), and
+	// a version code no lower than its android_min_version_code.
 	Package     string
 	Signer      []byte
 	VersionCode int64

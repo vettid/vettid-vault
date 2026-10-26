@@ -1,12 +1,14 @@
 package main
 
-// Staging automation (VAULT-RELEASES §3.1; owner decision 2026-10-27):
+// Staging automation (VAULT-RELEASES §3.1; owner decision 2026-10-26):
 // an automated test enrolls and unlocks a staging app device without a
 // phone, with an Android key attestation chain issued by the staging
 // automation attestation CA, whose key is an AWS KMS key in the staging
 // account. Release builds of vaultctl have these commands (they need no
 // test code); they refuse anything but the staging channel, and a
-// production image refuses the CA in any case (releasecfg).
+// production image refuses the CA in any case (releasecfg). They run on
+// the operator's workstation, with a profile that assumes the CA's signer
+// role from the staging SSO administrator role (docs/RELEASING.md).
 //
 //	vaultctl staging-ca-cert -kms-key KEY -until YYYY-MM-DD       (once, by the owner)
 //	vaultctl -state app.json init -role app -name automation -relay https://relay.vettid.org
@@ -45,6 +47,7 @@ import (
 	"github.com/vettid/vettid-vault/internal/autoattest"
 	"github.com/vettid/vettid-vault/internal/manifesttool"
 	"github.com/vettid/vettid-vault/vms/altchan"
+	"github.com/vettid/vettid-vault/vms/devattest"
 )
 
 func init() {
@@ -235,15 +238,16 @@ func deviceKey(g *globals, create bool) (*ecdsa.PrivateKey, error) {
 	return k, nil
 }
 
-// developmentSigner is the staging file's development-class signer
-// digest: the automation reports the automation signing certificate.
-func developmentSigner(c *releasecfg.Config) ([]byte, error) {
+// automationSigner is the staging file's automation signer
+// (VAULT-MESSAGING 0.66.0 §11.7.1): the digest an automation chain must
+// report, which is releasecfg.AutomationSignerDigest.
+func automationSigner(c *releasecfg.Config) ([]byte, error) {
 	for _, s := range c.AndroidSigners {
-		if s.Class == "development" {
+		if s.Class == devattest.ClassAutomation {
 			return s.Digest, nil
 		}
 	}
-	return nil, errors.New("the staging file pins no development signer")
+	return nil, errors.New("the staging file pins no automation signer")
 }
 
 // automationCA returns the pinned automation root whose key is the KMS
@@ -313,7 +317,7 @@ func cmdStagingEnroll(ctx context.Context, g *globals, args []string) error {
 	if vc < int64(c.AndroidMinVersionCode) {
 		return fmt.Errorf("-version-code %d is below the staging minimum %d", vc, c.AndroidMinVersionCode)
 	}
-	signer, err := developmentSigner(c)
+	signer, err := automationSigner(c)
 	if err != nil {
 		return err
 	}

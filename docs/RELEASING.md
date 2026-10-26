@@ -343,17 +343,20 @@ staging account's administrators can therefore also grant `kms:Sign`.
 That is the same trust as every other staging key.
 
 **The automation as an app** (`vaultctl`, release build: no
-`devenclave` tag). The commands refuse anything but the staging channel:
+`devenclave` tag), run from the operator's workstation, the only place
+that can assume the signer role (the `vettid-staging-attest` profile
+above, sourced from `vettid-staging`). The commands refuse anything but the staging channel:
 the channel file must be staging's (`-config`, default the checkout's
 `enclave/releasecfg/staging.json`), complete, with an automation CA
-whose end date has not passed and whose key is the KMS key given; every
+whose end date has not passed and whose key is the KMS key given, and
+with the `automation` signer; every
 URL must be `https` on `staging.vettid.org` or a host under it; the trust
 is the AWS Nitro root (`enclave.NitroRoots`) and the staging manifest
 keys only, so a production manifest or enclave never verifies.
 
 ```sh
 go build -o vaultctl ./cmd/vaultctl
-export AWS_PROFILE=<a profile that assumes vettid-org-staging-automation-attest>
+export AWS_PROFILE=vettid-staging-attest   # assumes vettid-org-staging-automation-attest from vettid-staging
 export VAULTCTL_ATTEST_KMS_KEY=alias/vettid-org-staging-automation-attestation-ca
 ./vaultctl -state app.json init -role app -name automation -relay https://relay.vettid.org
 # a member session on account.staging.vettid.org (the browser's Cookie
@@ -368,7 +371,7 @@ export VAULTCTL_PORTAL_COOKIE='vid_id=...; vid_rt=...' VAULTCTL_PIN=... VAULTCTL
 `staging-enroll` issues a setup code with the member session (`POST
 /api/vault/enroll-code` with `X-VettID-CSRF: 1`), redeems it with the
 app key, enrolls with an attestation chain the KMS key issues for
-`com.vettid.app.staging`, the staging file's `development` signer and
+`com.vettid.app.staging`, the staging file's `automation` signer and
 its `android_min_version_code` (`-version-code` to report a higher one),
 waits for `vault.enrolled`, runs the first handshake, creates the
 credential and confirms the enrollment, as `api-enroll` does on the dev

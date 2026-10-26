@@ -4,6 +4,7 @@ import (
 	"crypto/elliptic"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"os"
 	"strings"
@@ -150,7 +151,10 @@ func TestAutomationAttesterAgainstChannelFiles(t *testing.T) {
 		if extra == "" {
 			return b
 		}
-		return []byte(strings.TrimSuffix(strings.TrimSpace(string(b)), "}") + extra + "}")
+		// 0.66.0: the member comes with the automation signer.
+		auto := releasecfg.AutomationSignerDigest
+		sg := `"android_signers": [{"digest":"` + hex.EncodeToString(auto[:]) + `","class":"automation"},`
+		return []byte(strings.TrimSuffix(strings.TrimSpace(strings.Replace(string(b), `"android_signers": [`, sg, 1)), "}") + extra + "}")
 	}
 	member := `,"automation_attestation":{"android_roots":["` + base64.StdEncoding.EncodeToString(caDER) + `"],"until":"` + until.Format(time.DateOnly) + `"}`
 	st, err := releasecfg.Check(releasecfg.ChannelStaging, read("staging", member))
@@ -160,17 +164,20 @@ func TestAutomationAttesterAgainstChannelFiles(t *testing.T) {
 	if err := st.CheckEndDates(now); err != nil {
 		t.Fatal(err)
 	}
-	var dev []byte
+	var dev, autoSigner []byte
 	for _, sg := range st.AndroidSigners {
-		if sg.Class == devattest.ClassDevelopment {
+		switch sg.Class {
+		case devattest.ClassDevelopment:
 			dev = sg.Digest
+		case devattest.ClassAutomation:
+			autoSigner = sg.Digest
 		}
 	}
-	if dev == nil {
-		t.Fatal("staging.json pins no development signer")
+	if dev == nil || autoSigner == nil {
+		t.Fatal("staging.json pins no development signer, or the test file no automation signer")
 	}
 	at := &autoattest.Attester{Key: enclavetest.TestKey(elliptic.P256(), 0x5b), CA: caCert, CAKey: caKey,
-		Package: st.AndroidPackage, Signer: dev, VersionCode: int64(st.AndroidMinVersionCode)}
+		Package: st.AndroidPackage, Signer: autoSigner, VersionCode: int64(st.AndroidMinVersionCode)}
 	var ch [32]byte
 	ch[1] = 9
 	att, err := at.Attest(ch)
@@ -183,7 +190,7 @@ func TestAutomationAttesterAgainstChannelFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the staging policy refused the automation chain: %v", err)
 	}
-	if b.SignerClass != devattest.ClassDevelopment {
+	if b.SignerClass != devattest.ClassAutomation {
 		t.Fatalf("signer class %q", b.SignerClass)
 	}
 	// The unlock's device_assertion verifies with the recorded key.
@@ -203,6 +210,7 @@ func TestAutomationAttesterAgainstChannelFiles(t *testing.T) {
 		"version code": func(a *autoattest.Attester) { a.VersionCode = int64(st.AndroidMinVersionCode) - 1 },
 		"package":      func(a *autoattest.Attester) { a.Package = "com.vettid.app" },
 		"signer":       func(a *autoattest.Attester) { a.Signer = make([]byte, 32) },
+		"development":  func(a *autoattest.Attester) { a.Signer = dev }, // pinned, but not the automation's
 	} {
 		a := *at
 		edit(&a)

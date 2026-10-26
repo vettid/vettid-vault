@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -79,7 +80,9 @@ func stagingWithCA(t *testing.T, dir string, ca *kmsCA, until time.Time) (string
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := strings.TrimSuffix(strings.TrimSpace(string(b)), "}") +
+	// 0.66.0: the member comes with the automation signer.
+	sg := `"android_signers": [{"digest":"` + hex.EncodeToString(releasecfg.AutomationSignerDigest[:]) + `","class":"automation"},`
+	s := strings.TrimSuffix(strings.TrimSpace(strings.Replace(string(b), `"android_signers": [`, sg, 1)), "}") +
 		`,"automation_attestation":{"android_roots":["` + base64.StdEncoding.EncodeToString(der) + `"],"until":"` + until.Format(time.DateOnly) + `"}}`
 	return writeFile(t, dir, "staging.json", []byte(s)), cert
 }
@@ -110,7 +113,7 @@ func TestStagingKMSAttester(t *testing.T) {
 	if _, err := automationCA(c, &other.PublicKey); err == nil {
 		t.Fatal("an unpinned KMS key was accepted")
 	}
-	signer, err := developmentSigner(c)
+	signer, err := automationSigner(c)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +146,7 @@ func TestStagingKMSAttester(t *testing.T) {
 		signers = append(signers, devattest.Signer{Digest: s.Digest, Class: s.Class})
 	}
 	google := []*x509.Certificate{enclavetest.TestAndroidCA().Root.Cert} // standing in for the vendor roots
-	pol := &devattest.Policy{AndroidRoots: append(google, c.AutomationRoots()...), AndroidPackage: c.AndroidPackage,
+	pol := &devattest.Policy{AndroidRoots: google, AndroidAutomationRoots: c.AutomationRoots(), AndroidPackage: c.AndroidPackage,
 		AndroidSigners: signers, AndroidMinVersionCode: c.AndroidMinVersionCode}
 	now := time.Now()
 	list := enclavetest.EmptyStatusList(now)
@@ -151,11 +154,11 @@ func TestStagingKMSAttester(t *testing.T) {
 	if err != nil {
 		t.Fatalf("staging policy: %v", err)
 	}
-	if b.SignerClass != devattest.ClassDevelopment {
+	if b.SignerClass != devattest.ClassAutomation {
 		t.Fatalf("class %q", b.SignerClass)
 	}
 	prod := *pol
-	prod.AndroidRoots = google
+	prod.AndroidAutomationRoots = nil
 	if _, err := devattest.VerifyAttest(&prod, att, ch, now, list); !errors.Is(err, devattest.ErrRoot) {
 		t.Fatalf("vendor roots alone: %v", err)
 	}
@@ -208,7 +211,7 @@ func TestPortalSession(t *testing.T) {
 		got = r.Clone(context.Background())
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		_, _ = w.Write([]byte(`{"secret":"AAAAAAAAAAAAAAAAAAAAAA","code":"ABCDEFGH","expires_at":"2026-10-27T00:05:00Z","api":"https://account.staging.vettid.org"}`))
+		_, _ = w.Write([]byte(`{"secret":"AAAAAAAAAAAAAAAAAAAAAA","code":"ABCDEFGH","expires_at":"2026-10-26T00:05:00Z","api":"https://account.staging.vettid.org"}`))
 	}))
 	defer srv.Close()
 	for _, bad := range []string{"", "token-without-name", "vid_id=x\r\nX: y"} {

@@ -406,8 +406,26 @@ func UnlockAlt(ctx context.Context, p AltUnlockParams) (*Manager, *AltUnlockOutc
 		// unlock's flush), or a PIN change or a new secret whose step 2
 		// was not stored is completed from the `next` part.
 		m.repl = &replacement{next: hdr.Next, dek1: op.dek1, uk1: append([]byte(nil), op.uk...), secret1: append([]byte(nil), p.UnlockSecret...)}
+		var appKeyFn func()
 		if op.mode == openComplete || hdr.Next.AppKey != nil {
-			m.repl.promoteFn = m.replacementPromoteFn(hdr.Next)
+			appKeyFn = m.replacementPromoteFn(hdr.Next)
+		}
+		// VAULT-MESSAGING 0.63.1 (§11.14.2, §11.14.6 "A lost ok"): an
+		// unlock that completes step 3 of a recovery's replacement ends
+		// the recovery record, whichever is current, as the repeated
+		// open's step 3 does: in the same sealed header write as step 3,
+		// which persist makes only after step 2 (the state under DEK_1)
+		// is stored. The completion's activity is already in that state.
+		endsRecovery := op.mode == openPromote && hdr.Next.Reason == ReplaceRecovery
+		if appKeyFn != nil || endsRecovery {
+			m.repl.promoteFn = func() {
+				if appKeyFn != nil {
+					appKeyFn()
+				}
+				if endsRecovery {
+					m.hdr.Recovery = nil
+				}
+			}
 		}
 	}
 	m.hadFailures = hdr.Backoff.Failures > 0

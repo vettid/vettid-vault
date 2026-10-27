@@ -77,6 +77,108 @@ func TestConnAuth(t *testing.T) {
 	}
 }
 
+// 0.65.0 §10.4 "Signed with the purpose": a challenge's purpose is signed
+// under its own label and echoed; a signature for one purpose never
+// verifies for another, nor as one without a purpose; a response without
+// a purpose (a vault before 0.65.0) verifies over the message alone; an
+// unknown purpose in a challenge is treated as absent.
+func TestConnAuthPurpose(t *testing.T) {
+	a, b, cred := pub(key(1)), pub(key(2)), key(3)
+	withPurpose := func(p string) *ConnAuthChallenge {
+		c, err := NewConnAuthChallenge(reqID, "example.org, Firefox on Linux")
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.Purpose = p
+		return c
+	}
+	signin := withPurpose(PurposeSignIn)
+	pc, err := ParseConnAuthChallenge(signin.Marshal())
+	if err != nil || pc.Purpose != PurposeSignIn || !strings.HasSuffix(string(signin.Marshal()), `,"purpose":"signin"}`) {
+		t.Fatalf("challenge %s: %+v %v", signin.Marshal(), pc, err)
+	}
+	r, err := SignConnAuth(cred, a, b, signin, t0, nil)
+	if err != nil || r.Purpose != PurposeSignIn {
+		t.Fatalf("%+v %v", r, err)
+	}
+	m := signin.Message(a, b)
+	want := append([]byte{6}, append([]byte("signin"), m...)...)
+	if !ed25519.Verify(pub(cred), append([]byte("vettid/vms/2/conn-auth-purpose"), want...), r.Sig) {
+		t.Fatal("not signed over len(purpose) || purpose || m under the purpose label")
+	}
+	pr, err := ParseConnAuthResponse(r.Marshal())
+	if err != nil || pr.Purpose != PurposeSignIn {
+		t.Fatalf("response %s: %+v %v", r.Marshal(), pr, err)
+	}
+	if err := VerifyConnAuthResponse(pr, a, b, signin); err != nil {
+		t.Fatal(err)
+	}
+
+	// The same signature presented for another purpose, or with the
+	// purpose taken off, does not verify.
+	approval := *signin
+	approval.Purpose = PurposeApproval
+	none := *signin
+	none.Purpose = ""
+	stripped := *pr
+	stripped.Purpose = ""
+	relabelled := *pr
+	relabelled.Purpose = PurposeApproval
+	for name, f := range map[string]func() error{
+		"for an approval":           func() error { return VerifyConnAuthResponse(pr, a, b, &approval) },
+		"for a challenge without":   func() error { return VerifyConnAuthResponse(pr, a, b, &none) },
+		"purpose stripped":          func() error { return VerifyConnAuthResponse(&stripped, a, b, signin) },
+		"purpose relabelled":        func() error { return VerifyConnAuthResponse(&relabelled, a, b, &approval) },
+		"unknown purpose in answer": func() error { x := *pr; x.Purpose = "vote"; return VerifyConnAuthResponse(&x, a, b, signin) },
+	} {
+		if f() == nil {
+			t.Errorf("%s verifies", name)
+		}
+	}
+
+	// A vault before 0.65.0 ignores the purpose: it signs m under the old
+	// label and sends no purpose; that verifies, committing to none.
+	old, err := SignConnAuth(cred, a, b, &none, t0, nil)
+	if err != nil || old.Purpose != "" {
+		t.Fatalf("%+v %v", old, err)
+	}
+	if err := VerifyConnAuthResponse(old, a, b, signin); err != nil || old.Purpose != "" {
+		t.Fatalf("a response without purpose to a signin challenge: %v", err)
+	}
+
+	// An unknown purpose is absent: not sent, not signed over.
+	for _, body := range []string{
+		`{"request_id":"` + reqID + `","nonce":"` + strings.Repeat("A", 43) + `=","purpose":"vote"}`,
+		`{"request_id":"` + reqID + `","nonce":"` + strings.Repeat("A", 43) + `=","purpose":""}`,
+	} {
+		c, err := ParseConnAuthChallenge([]byte(body))
+		if err != nil || c.Purpose != "" {
+			t.Fatalf("%s: %+v %v", body, c, err)
+		}
+	}
+	vote := withPurpose("vote")
+	if strings.Contains(string(vote.Marshal()), "purpose") {
+		t.Fatal("an unknown purpose was sent")
+	}
+	if l, _ := vote.Signed(a, b); l != ConnAuthLabel {
+		t.Fatal("an unknown purpose was signed over")
+	}
+	for _, body := range []string{
+		`{"request_id":"` + reqID + `","nonce":"` + strings.Repeat("A", 43) + `=","purpose":7}`,
+	} {
+		if _, err := ParseConnAuthChallenge([]byte(body)); err == nil {
+			t.Fatalf("%s parsed", body)
+		}
+	}
+	// A response's purpose is kept as sent, 1–255 bytes.
+	sb := string(r.Marshal())
+	for _, bad := range []string{`"purpose":""`, `"purpose":"` + strings.Repeat("p", 256) + `"`, `"purpose":true`} {
+		if _, err := ParseConnAuthResponse([]byte(strings.Replace(sb, `"purpose":"signin"`, bad, 1))); err == nil {
+			t.Errorf("response with %s parsed", bad)
+		}
+	}
+}
+
 func TestConnAuthBadBodies(t *testing.T) {
 	nonce := `"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="`
 	for _, b := range []string{`{}`, `[]`, `{"request_id":"x","nonce":` + nonce + `}`, `{"request_id":"` + reqID + `","nonce":"AAAA"}`,

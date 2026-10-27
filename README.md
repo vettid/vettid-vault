@@ -118,7 +118,9 @@ signature and release approval, equal to §16), `recovery` (§11.11.2:
 the recovery code and the `no_credential` refusal sealed to a fixed
 browser P-256 key, with every intermediate value, and the QR payload) and
 `connauth` (§10.4 member authentication: the signed message, the signature
-and every body, through `vms/peerwire`). All
+and every body, through `vms/peerwire`) and `connauth_purpose` (0.65.0: the
+same challenge with each purpose, signed over it under its own label, and
+the answer of a vault before 0.65.0). All
 keys come from fixed, public, **test-only** seeds. Every file states its
 inputs, including the values §16 leaves open.
 

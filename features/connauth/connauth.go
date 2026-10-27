@@ -54,6 +54,9 @@ type Challenge struct {
 	Nonce   []byte    `json:"nonce"`
 	Context string    `json:"context,omitempty"`
 	Exp     time.Time `json:"exp"`
+	// Purpose is peerwire.PurposeSignIn, peerwire.PurposeApproval or ""
+	// (0.65.0).
+	Purpose string `json:"purpose,omitempty"`
 }
 
 // State is the last outcome with one connection.
@@ -151,7 +154,7 @@ var (
 
 // wire is the challenge's body.
 func (c *Challenge) wire() *peerwire.ConnAuthChallenge {
-	return &peerwire.ConnAuthChallenge{RequestID: c.ID, Nonce: c.Nonce, Context: c.Context}
+	return &peerwire.ConnAuthChallenge{RequestID: c.ID, Nonce: c.Nonce, Context: c.Context, Purpose: c.Purpose}
 }
 
 // Handle implements vault.Handler.
@@ -223,6 +226,13 @@ func (f *Feature) request(s *vault.Session, body []byte) (json.RawMessage, error
 	if err != nil {
 		return nil, err
 	}
+	// An owner device names only a purpose this version knows (chosen:
+	// §10.4 says a receiver treats an unknown one as absent, and is
+	// silent on a request's).
+	purpose, ok, err := o.OptString("purpose")
+	if err != nil || ok && !peerwire.KnownPurpose(purpose) {
+		return nil, errBad
+	}
 	if p, ok := s.Connection(conn); !ok || p.State != vault.PeerActive {
 		return nil, errNotFound
 	}
@@ -233,7 +243,8 @@ func (f *Feature) request(s *vault.Session, body []byte) (json.RawMessage, error
 	if err != nil {
 		return nil, vault.NewError("internal", "")
 	}
-	c := &Challenge{ID: wc.RequestID, Conn: conn, Nonce: wc.Nonce, Context: ctxt,
+	wc.Purpose = purpose
+	c := &Challenge{ID: wc.RequestID, Conn: conn, Nonce: wc.Nonce, Context: ctxt, Purpose: purpose,
 		Exp: s.Now().Add(peerwire.ConnAuthChallengeTTL).UTC().Truncate(time.Millisecond)}
 	if err := s.Send(conn, peerwire.TypeConnAuthChallenge, wc.Marshal(), vault.SendOptions{Exp: c.Exp}); err != nil {
 		return nil, errConn
@@ -250,7 +261,7 @@ func (f *Feature) challenge(s *vault.Session, in *envelope.Inner) error {
 	if err != nil {
 		return errBad
 	}
-	c := &Challenge{ID: wc.RequestID, Nonce: wc.Nonce, Context: wc.Context}
+	c := &Challenge{ID: wc.RequestID, Nonce: wc.Nonce, Context: wc.Context, Purpose: wc.Purpose}
 	conn := s.From().ID
 	now := s.Now()
 	if _, dup := f.d.In[c.ID]; dup {
@@ -266,9 +277,11 @@ func (f *Feature) challenge(s *vault.Session, in *envelope.Inner) error {
 		c.Exp = in.Exp
 	}
 	// A received challenge is an ask (§10.4.1, 0.23.0): mute, pause, the
-	// cooldown (any challenge), the pending cap and the ask rate. A
-	// suppressed one is answered `denied`, later, by the vault.
-	v := s.Ask(conn, vault.Ask{Source: f.Name(), Ref: c.ID, Idents: []string{AskIdent}, Pending: count(f.d.In, conn), Exp: c.Exp,
+	// cooldown (any challenge with the same purpose, 0.65.0), the pending
+	// caps and the purpose's rate bucket. A suppressed one is answered
+	// `denied`, later, by the vault.
+	v := s.Ask(conn, vault.Ask{Source: f.Name(), Ref: c.ID, Idents: []string{askIdent(c.Purpose)}, Pending: count(f.d.In, conn),
+		Bucket: c.Purpose, BucketPending: f.countPurpose(conn, c.Purpose), Exp: c.Exp,
 		AnswerType: peerwire.TypeConnAuthResponse, Answer: peerwire.DeniedConnAuth(c.ID).Marshal()})
 	if !v.Passed() {
 		return nil
@@ -278,15 +291,40 @@ func (f *Feature) challenge(s *vault.Session, in *envelope.Inner) error {
 	if c.Context != "" {
 		b.String("context", c.Context)
 	}
+	if c.Purpose != "" {
+		b.String("purpose", c.Purpose)
+	}
 	s.NotifyDevicesWith("connection.authenticate.pending", b.Bytes(), "", vault.SendOptions{Exp: c.Exp})
 	s.Record(vault.Activity{Kind: "connection.authenticate.requested", ConnectionID: conn, Ref: c.ID, Direction: "in", Audit: true,
 		Feed: true, Priority: "high", AskBatch: true})
 	return nil
 }
 
-// AskIdent is a challenge's identity for the §10.4.1 cooldown: any
-// challenge from the connection.
+// AskIdent is the identity for the §10.4.1 cooldown of a challenge
+// without a purpose: any such challenge from the connection.
 const AskIdent = "auth"
+
+// askIdent is a challenge's cooldown identity (0.65.0): any challenge
+// with the same purpose. The buckets' names are the purposes
+// (vault.AskBucketSignIn, vault.AskBucketApproval, "" for none).
+func askIdent(purpose string) string {
+	if purpose == "" {
+		return AskIdent
+	}
+	return AskIdent + ":" + purpose
+}
+
+// countPurpose counts the connection's received challenges with purpose
+// that wait for the member.
+func (f *Feature) countPurpose(conn, purpose string) int {
+	n := 0
+	for _, c := range f.d.In {
+		if c.Conn == conn && c.Purpose == purpose {
+			n++
+		}
+	}
+	return n
+}
 
 // PendingAsks implements vault.AskSource: the connection's challenges
 // waiting for the member.
@@ -368,7 +406,7 @@ func (f *Feature) deny(s *vault.Session, body []byte) (json.RawMessage, error) {
 	delete(f.d.In, id)
 	_ = s.SendToConnection(c.Conn, peerwire.TypeConnAuthResponse, peerwire.DeniedConnAuth(id).Marshal())
 	s.Record(vault.Activity{Kind: "connection.authenticate.denied", ConnectionID: c.Conn, Ref: id, Direction: "out", Audit: true})
-	s.AskDeclined(c.Conn, []string{AskIdent}) // §10.4.1
+	s.AskDeclinedIn(c.Conn, c.Purpose, []string{askIdent(c.Purpose)}) // §10.4.1; a sign-in's: 1 hour, no pause (0.65.0)
 	s.SyncEvent("connection.authenticate.decided", strictjson.NewBuilder().String("request_id", id).Bool("approved", false).Bytes())
 	return nil, nil
 }
@@ -418,6 +456,10 @@ func (f *Feature) response(s *vault.Session, body []byte) error {
 		b.String("reason", reason)
 	} else {
 		b.Base64("key", r.Key).Bool("key_changed", changed)
+		// Exactly when the verified signature commits to it (0.65.0).
+		if r.Purpose != "" {
+			b.String("purpose", r.Purpose)
+		}
 	}
 	s.NotifyAllDevices("connection.authenticate.result", b.Bytes())
 	kind := "connection.authenticated"

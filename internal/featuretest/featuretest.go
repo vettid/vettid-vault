@@ -141,11 +141,11 @@ func (h *Host) Ask(conn string, a vault.Ask, now time.Time) vault.AskVerdict {
 }
 
 // AskDeclined implements vault.AskHost.
-func (h *Host) AskDeclined(conn string, idents []string, now time.Time) {
+func (h *Host) AskDeclined(conn, bucket string, idents []string, now time.Time) {
 	if !h.AsksOn {
 		return
 	}
-	if vault.DeclineAsk(h.askState(conn), idents, now) {
+	if vault.DeclineAskIn(h.askState(conn), bucket, idents, now) {
 		h.Record(vault.Activity{Kind: "connection.asks_paused", ConnectionID: conn, Audit: true, Feed: true, Priority: "high"}, now)
 	}
 }

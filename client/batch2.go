@@ -129,9 +129,18 @@ func (d *Device) ConnectionUpdate(ctx context.Context, connectionID string, vers
 // AuthRequest asks a connection's member to authenticate; it returns the
 // request id. The verdict arrives as connection.authenticate.result.
 func (d *Device) AuthRequest(ctx context.Context, connectionID, context string) (string, error) {
+	return d.AuthRequestFor(ctx, connectionID, context, "")
+}
+
+// AuthRequestFor is AuthRequest with a purpose (0.65.0): "signin",
+// "approval" or "" for none.
+func (d *Device) AuthRequestFor(ctx context.Context, connectionID, context, purpose string) (string, error) {
 	body := map[string]any{"connection_id": connectionID}
 	if context != "" {
 		body["context"] = context
+	}
+	if purpose != "" {
+		body["purpose"] = purpose
 	}
 	o, err := d.Op(ctx, "connection.authenticate.request", body)
 	if err != nil {

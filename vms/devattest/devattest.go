@@ -44,6 +44,13 @@ var (
 // App ID disables that platform: verification fails closed.
 type Policy struct {
 	AndroidRoots []*x509.Certificate // compared by SubjectPublicKeyInfo
+	// AndroidAutomationRoots are the staging automation attestation CA's
+	// roots (VAULT-RELEASES §3.1, VAULT-MESSAGING 0.66.0 §11.10.8),
+	// accepted beside AndroidRoots: a chain ending at one of them must
+	// report a signer of class automation, and a chain ending at any other
+	// root must not. Only a staging configuration sets it
+	// (releasecfg.Config.AutomationRoots).
+	AndroidAutomationRoots []*x509.Certificate
 	// AndroidPackage is the VettID app's package name.
 	AndroidPackage string
 	// AndroidMinVersionCode is the release constant
@@ -93,12 +100,16 @@ type Policy struct {
 const (
 	ClassVettID      = "vettid"      // a key only VettID holds: the F-Droid and direct builds
 	ClassGooglePlay  = "google_play" // the Play app-signing key, which Google holds
-	ClassDevelopment = "development" // a development or automation key; never in a production release
+	ClassDevelopment = "development" // a development key; never in a production release
+	// ClassAutomation is the staging automation's signer (0.66.0): a
+	// digest no APK can carry, reported only by chains of the staging
+	// automation attestation CA; never in a production release.
+	ClassAutomation = "automation"
 )
 
 // ValidClass reports whether c is a signer class.
 func ValidClass(c string) bool {
-	return c == ClassVettID || c == ClassGooglePlay || c == ClassDevelopment
+	return c == ClassVettID || c == ClassGooglePlay || c == ClassDevelopment || c == ClassAutomation
 }
 
 // Signer is a pinned Android signing certificate: the SHA-256 of the

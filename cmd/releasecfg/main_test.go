@@ -2,10 +2,22 @@ package main
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/base64"
+	"encoding/hex"
+	"math/big"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/vettid/vettid-vault/enclave/releasecfg"
 )
 
 // The release gate as the build runs it (VAULT-MESSAGING 0.26.0 §11.10.8,
@@ -124,5 +136,71 @@ func TestCheckCommand(t *testing.T) {
 	var out2, err2 bytes.Buffer
 	if code := run([]string{"build"}, &out2, &err2); code != 2 {
 		t.Fatal("unknown subcommand")
+	}
+}
+
+// STAGING-DEVELOPMENT-PLAN §2.5.5, VAULT-RELEASES §3.1: the staging
+// file's automation attestation switch has an end date; the gate refuses
+// the file after it, judged at SOURCE_DATE_EPOCH when set (an image build
+// and a rebuild from a tag) and at the current time otherwise.
+func TestCheckAutomationEndDate(t *testing.T) {
+	b, err := os.ReadFile("../../enclave/releasecfg/staging.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	until := now.AddDate(0, 0, 10)
+	end := time.Date(until.Year(), until.Month(), until.Day(), 23, 0, 0, 0, time.UTC)
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "TEST staging automation attestation CA"},
+		NotBefore: now.Add(-time.Hour), NotAfter: end, IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &k.PublicKey, k)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 0.66.0: the member comes with the automation signer.
+	signer := `"android_signers": [{"digest":"` + hex.EncodeToString(releasecfg.AutomationSignerDigest[:]) + `","class":"automation"},`
+	s := strings.TrimSuffix(strings.TrimSpace(strings.Replace(string(b), `"android_signers": [`, signer, 1)), "}")
+	s += `,"automation_attestation":{"android_roots":["` + base64.StdEncoding.EncodeToString(der) + `"],"until":"` + until.Format(time.DateOnly) + `"}}`
+	p := filepath.Join(t.TempDir(), "staging.json")
+	if err := os.WriteFile(p, []byte(s), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	check := func(epoch string) (int, string) {
+		t.Setenv("SOURCE_DATE_EPOCH", epoch)
+		var out, errb bytes.Buffer
+		code := run([]string{"check", "staging", p}, &out, &errb)
+		return code, out.String() + errb.String()
+	}
+	if code, out := check(""); code != 0 || !strings.Contains(out, "staging automation attestation: 1 root(s), until "+until.Format(time.DateOnly)) ||
+		!strings.Contains(out, "1c9f3b0e… automation") {
+		t.Fatalf("today: %d %s", code, out)
+	}
+	if code, out := check("0"); code != 0 { // the Dockerfile's default: today
+		t.Fatalf("epoch 0: %d %s", code, out)
+	}
+	last := time.Date(until.Year(), until.Month(), until.Day(), 23, 59, 59, 0, time.UTC)
+	if code, out := check(strconv.FormatInt(last.Unix(), 10)); code != 0 {
+		t.Fatalf("last day: %d %s", code, out)
+	}
+	if code, out := check(strconv.FormatInt(last.Unix()+1, 10)); code != 1 || !strings.Contains(out, "past its end date") {
+		t.Fatalf("the day after: %d %s", code, out)
+	}
+	// The same file for production is malformed.
+	pp := filepath.Join(t.TempDir(), "prod.json")
+	pb, err := os.ReadFile("../../enclave/releasecfg/prod.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ps := strings.TrimSuffix(strings.TrimSpace(string(pb)), "}") + `,"automation_attestation":{"android_roots":["` + base64.StdEncoding.EncodeToString(der) + `"],"until":"` + until.Format(time.DateOnly) + `"}}`
+	if err := os.WriteFile(pp, []byte(ps), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out, errb bytes.Buffer
+	if code := run([]string{"check", "prod", pp}, &out, &errb); code != 1 || !strings.Contains(errb.String(), "malformed") {
+		t.Fatalf("prod with automation: %d %s", code, errb.String())
 	}
 }

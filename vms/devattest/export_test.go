@@ -56,7 +56,7 @@ var ParseNonceExt = parseNonceExt
 // status list): the pinned root, the signatures, the CA and extension
 // placement rules and the path validation. now nil: as BindSigner.
 func CheckAndroidChain(p *Policy, chain [][]byte, now *time.Time) error {
-	_, err := checkAndroidChain(p, chain, now)
+	_, _, err := checkAndroidChain(p, chain, now)
 	return err
 }
 

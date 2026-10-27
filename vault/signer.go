@@ -95,7 +95,7 @@ func validDigest(s string) bool {
 }
 
 func validSignerClass(c string) bool {
-	return c == "vettid" || c == "google_play" || c == "development"
+	return c == "vettid" || c == "google_play" || c == "development" || c == "automation"
 }
 
 // signerClass names a signer's class: the running release's for a pinned

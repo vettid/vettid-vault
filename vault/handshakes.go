@@ -293,10 +293,23 @@ func profileName(raw json.RawMessage) string {
 // sub), from.ik must be the stored ik or reached through a valid chain, and
 // sig_I is verified in hs.fin.
 func (m *Manager) respondReconnect(pi *handshake.PendingInit, p *Peer, sender ed25519.PublicKey, now time.Time) {
+	// A suspended connection accepts nothing (§3.4); a valid second
+	// successor of a key already followed suspends it (one successor per
+	// key). Both are decided before the chain is followed.
+	if p.Conflict != nil {
+		m.audit(now, "reconnect_refused", p.ID)
+		return
+	}
+	for _, r := range pi.Init().Rotations {
+		if m.rotationConflict(p, r, now) {
+			return
+		}
+	}
 	cfg := handshake.ResponderConfig{
 		Identity: m.keys.ik, Policy: policyFor(p.Kind), PinnedSuite: p.Suite,
 		CollectSender: sender, RecordRelayKey: p.Relay.PK, KnownInitiatorIK: p.IK,
-		ExpectedCtx: handshake.EpochCtx(epochIDOf(p.LastEpochID)), Now: now,
+		KnownInitiatorChain: parseRotations(p.Chain),
+		ExpectedCtx:         handshake.EpochCtx(epochIDOf(p.LastEpochID)), Now: now,
 		Rotations: m.ownRotationsSince(p.OwnChainAtEpoch),
 	}
 	var issued []IssuedToken
@@ -314,10 +327,11 @@ func (m *Manager) respondReconnect(pi *handshake.PendingInit, p *Peer, sender ed
 	}
 	body := pi.Init()
 	// The peer's identity may have advanced through its chain.
-	if len(body.Rotations) > 0 {
+	// Links already followed (from identity.rotate) are not added again.
+	if fresh := body.Rotations[handshake.KnownPrefix(parseRotations(p.Chain), body.Rotations):]; len(fresh) > 0 {
 		p.IK = body.From.IK
 		p.KEM = body.From.KEM.Bytes()
-		for _, r := range body.Rotations {
+		for _, r := range fresh {
 			p.Chain = append(p.Chain, r.Marshal())
 		}
 	}
@@ -602,7 +616,8 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 		if res.ResponderKEM != nil {
 			p.KEM = res.ResponderKEM.Bytes()
 		}
-		for _, r := range res.Resp.Rotations {
+		known := parseRotations(p.Chain)
+		for _, r := range res.Resp.Rotations[handshake.KnownPrefix(known, res.Resp.Rotations):] {
 			p.Chain = append(p.Chain, r.Marshal())
 		}
 	}
@@ -681,7 +696,7 @@ func (m *Manager) startReconnect(p *Peer, now time.Time) {
 		Purpose: handshake.PurposeReconnect, Ctx: handshake.EpochCtx(epochIDOf(p.LastEpochID)),
 		Identity: m.keys.ik, StaticKEM: m.keys.kem.Public(), Relay: m.ownAddr(),
 		Rotations:   m.ownRotationsSince(p.OwnChainAtEpoch),
-		ResponderIK: p.IK, ResponderEK: kem, ResponderRelayKey: p.Relay.PK, PinnedSuite: p.Suite,
+		ResponderIK: p.IK, KnownResponderChain: parseRotations(p.Chain), ResponderEK: kem, ResponderRelayKey: p.Relay.PK, PinnedSuite: p.Suite,
 		Policy: policyFor(p.Kind), Now: now,
 	}
 	if cfg.Token, issued, err = m.mintStanding(p, now, issued); err != nil {
@@ -709,6 +724,18 @@ func (m *Manager) reconnectExpired(now time.Time) {
 			m.startReconnect(p, now)
 		}
 	}
+}
+
+// parseRotations parses a stored rotation chain; a statement that does not
+// parse is skipped.
+func parseRotations(raw []json.RawMessage) []*handshake.Rotation {
+	var out []*handshake.Rotation
+	for _, x := range raw {
+		if r, err := handshake.ParseRotation(x); err == nil {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 func (m *Manager) ownRotationsSince(n int) []*handshake.Rotation {

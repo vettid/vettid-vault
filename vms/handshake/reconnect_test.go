@@ -238,3 +238,85 @@ func TestRotationChain(t *testing.T) {
 		t.Fatal("overlong chain accepted")
 	}
 }
+
+// A reconnect carries every rotation since the last epoch; links the
+// receiver already followed are skipped, a known prefix must end at the
+// stored key (no rollback), and the rest is resolved as before.
+func TestResolveChainKnown(t *testing.T) {
+	p := newParty(t, 0x10)
+	k0 := p.pub()
+	r1 := rotateParty(t, p, 0x40)
+	k1 := p.pub()
+	r2 := rotateParty(t, p, 0x50)
+	k2, kem2 := p.pub(), p.kem.Public()
+	chain := []*Rotation{r1, r2}
+
+	if f, k, n, err := ResolveChainKnown(k0, nil, chain); err != nil || n != 0 || !suite.EqualPublic(f, k2) || !k.Equal(kem2) {
+		t.Fatalf("nothing known: %v", err)
+	}
+	if f, k, n, err := ResolveChainKnown(k1, []*Rotation{r1}, chain); err != nil || n != 1 || !suite.EqualPublic(f, k2) || !k.Equal(kem2) {
+		t.Fatalf("first known: n=%d %v", n, err)
+	}
+	if f, k, n, err := ResolveChainKnown(k2, chain, chain); err != nil || n != 2 || !suite.EqualPublic(f, k2) || !k.Equal(kem2) {
+		t.Fatalf("all known: n=%d %v", n, err)
+	}
+	if f, _, n, err := ResolveChainKnown(k1, []*Rotation{r1}, chain[:1]); err != nil || n != 1 || !suite.EqualPublic(f, k1) {
+		t.Fatalf("single known: %v", err)
+	}
+	// Rollback: both followed, only the first sent.
+	if _, _, _, err := ResolveChainKnown(k2, chain, chain[:1]); !errors.Is(err, ErrRotation) {
+		t.Fatalf("rollback accepted: %v", err)
+	}
+	// Known prefix, but the stored key is not where it ends.
+	if _, _, _, err := ResolveChainKnown(k0, []*Rotation{r1}, chain[:1]); !errors.Is(err, ErrRotation) {
+		t.Fatalf("stored key before the known link accepted: %v", err)
+	}
+	// Unknown links must start at the stored key.
+	if _, _, _, err := ResolveChainKnown(k1, []*Rotation{r1}, []*Rotation{r2}); err != nil {
+		t.Fatalf("only the unknown tail: %v", err)
+	}
+	if _, _, _, err := ResolveChainKnown(k0, []*Rotation{r1}, []*Rotation{r2}); !errors.Is(err, ErrRotation) {
+		t.Fatalf("tail not from the stored key accepted: %v", err)
+	}
+}
+
+// The responder of a reconnect that already followed the initiator's first
+// link answers it; the initiator likewise for the responder's chain.
+func TestReconnectKnownChain(t *testing.T) {
+	i, r := newParty(t, 0x10), newParty(t, 0x20)
+	ei, _ := runHandshake(t, i, r, PurposeConnection)
+	r1 := rotateParty(t, i, 0x40)
+	r2 := rotateParty(t, i, 0x50)
+	q1 := rotateParty(t, r, 0x60)
+
+	cfg := initCfg(i, r, PurposeReconnect)
+	cfg.Ctx = EpochCtx(ei.ID())
+	cfg.ResponderIK, cfg.ResponderEK = q1.NewIK, r.kem.Public()
+	cfg.Rotations = []*Rotation{r1, r2}
+	cfg.KnownResponderChain = []*Rotation{q1}
+	ini, err := NewInitiator(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := OpenInit(ini.Envelope(), r.lookup, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// R sends q1 again; the initiator already followed it, and R followed r1.
+	rcfg := respCfg(i, r, PurposeReconnect)
+	rcfg.RecordRelayKey, rcfg.KnownInitiatorIK = i.relayPK(), r1.NewIK
+	rcfg.KnownInitiatorChain = []*Rotation{r1}
+	rcfg.ExpectedCtx = EpochCtx(ei.ID())
+	rcfg.Rotations = []*Rotation{q1}
+	resp, env, err := p.Respond(rcfg)
+	if err != nil {
+		t.Fatalf("respond: %v", err)
+	}
+	res, err := ini.HandleResp(env, r.relayPK(), t0)
+	if err != nil {
+		t.Fatalf("initiator: %v", err)
+	}
+	if _, err := resp.HandleFin(res.Fin, i.relayPK(), t0); err != nil {
+		t.Fatal(err)
+	}
+}

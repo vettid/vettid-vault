@@ -161,6 +161,10 @@ type ResponderConfig struct {
 	// (from.ik must equal it) and reconnect (from.ik must be reached from it
 	// through a valid rotation chain, §6.6).
 	KnownInitiatorIK ed25519.PublicKey
+	// KnownInitiatorChain is the rotation chain already followed for the
+	// peer. A reconnect's leading links in it are not followed again
+	// (ResolveChainKnown).
+	KnownInitiatorChain []*Rotation
 	// ExpectedCtx, if set, must equal hs.init ctx. Required for reconnect:
 	// EpochCtx of the stored last epoch id (§6.6).
 	ExpectedCtx string
@@ -290,7 +294,7 @@ func (p *PendingInit) checkInitiator(cfg ResponderConfig) (ed25519.PublicKey, er
 		if !suite.EqualPublic(cfg.CollectSender, cfg.RecordRelayKey) {
 			return nil, ErrSender
 		}
-		final, kem, err := ResolveChain(cfg.KnownInitiatorIK, b.Rotations)
+		final, kem, _, err := ResolveChainKnown(cfg.KnownInitiatorIK, cfg.KnownInitiatorChain, b.Rotations)
 		if err != nil {
 			return nil, err
 		}

@@ -32,10 +32,13 @@ type InitiatorConfig struct {
 	ReconnectToken string
 	Suites         []int // default [2]
 	Profile        json.RawMessage
-	Rotations      []*Rotation           // reconnect: own rotations since the last epoch
-	DeviceAttest   *altchan.DeviceAttest // purpose app (§6.7)
-	APIKey         []byte                // a transfer's new app: its app key (0.15.0, §6.2)
-	UnlockSecret   []byte                // a transfer's new app: its unlock secret (0.33.0, release R)
+	Rotations      []*Rotation // reconnect: own rotations since the last epoch
+	// KnownResponderChain is the responder's rotation chain already
+	// followed; its leading links in the answer are not followed again.
+	KnownResponderChain []*Rotation
+	DeviceAttest        *altchan.DeviceAttest // purpose app (§6.7)
+	APIKey              []byte                // a transfer's new app: its app key (0.15.0, §6.2)
+	UnlockSecret        []byte                // a transfer's new app: its unlock secret (0.33.0, release R)
 
 	// AnonymousSender sets hs.init sender_kid to all-zero instead of the
 	// kid of StaticKEM (§6.2).
@@ -321,7 +324,7 @@ func (i *Initiator) completeResp(env *envelope.Envelope, padded []byte, exp suit
 	verifyIK := i.cfg.ResponderIK
 	var newKEM *suite.PublicKey
 	if i.cfg.Purpose == PurposeReconnect {
-		if verifyIK, newKEM, err = ResolveChain(i.cfg.ResponderIK, resp.Rotations); err != nil {
+		if verifyIK, newKEM, _, err = ResolveChainKnown(i.cfg.ResponderIK, i.cfg.KnownResponderChain, resp.Rotations); err != nil {
 			return nil, err
 		}
 	}

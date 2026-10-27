@@ -26,7 +26,12 @@ import (
 type MemberAPI struct {
 	// Base is the API origin, e.g. https://vettid.org.
 	Base string
-	HTTP *http.Client
+	// ManifestURL, if set, is where the release manifest is served
+	// (VAULT-RELEASES §3.1: the staging channel's is
+	// https://staging.vettid.org/.well-known/vettid/pcr-manifest.json);
+	// default: Base + /.well-known/vettid/pcr-manifest.json.
+	ManifestURL string
+	HTTP        *http.Client
 	// Authorize adds the member session to a request (the portal's
 	// routes; an app signs instead).
 	Authorize func(*http.Request)
@@ -243,10 +248,14 @@ func (a *MemberAPI) Poll(ctx context.Context, requestID string) (*Slot, error) {
 	}
 }
 
-// Manifest fetches the served release manifest
-// (/.well-known/vettid/pcr-manifest.json).
+// Manifest fetches the served release manifest (ManifestURL, or
+// /.well-known/vettid/pcr-manifest.json at Base).
 func (a *MemberAPI) Manifest(ctx context.Context) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(a.Base, "/")+"/.well-known/vettid/pcr-manifest.json", nil)
+	u := a.ManifestURL
+	if u == "" {
+		u = strings.TrimRight(a.Base, "/") + "/.well-known/vettid/pcr-manifest.json"
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, err
 	}

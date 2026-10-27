@@ -58,6 +58,7 @@ LocalStack, the real relay and a stand-in for the member API
 | `enclave/keypolicy` | §11.10.7 | The sealing-key policy check as a pure function over KMS responses |
 | `enclave/cms` | §11.10.2 | CMS EnvelopedData unwrap for KMS Recipient responses (RSA-OAEP-SHA-256 only) |
 | `internal/cbor`, `internal/der` | — | Small strict decoders for the trusted code base |
+| `internal/autoattest` | §11.7 | The staging automation attester (VAULT-RELEASES §3.1): an Android key attestation chain issued by the staging automation attestation CA, for `vaultctl staging-enroll`; release-buildable, linked only by `vaultctl` ([`docs/RELEASING.md`](docs/RELEASING.md), "Staging automation attestation") |
 | `internal/enclavetest` | — | TEST-ONLY fake NSM and KMS, test attestation authorities, and a `World` that plays the member API, queues and parent; never linked into release packages (`make check-tcb`) |
 
 ### Runtime (V2)
@@ -484,7 +485,16 @@ the signer of its app: the digest is recorded with the attested device
 key, an unlock needs it to be pinned by the running release
 (`signer_refused`), and it changes only by a transfer the holder
 confirms or a completed recovery (VAULT-MESSAGING §11.7.1,
-[`docs/RELEASING.md`](docs/RELEASING.md)).
+[`docs/RELEASING.md`](docs/RELEASING.md)). The staging file may also carry
+`automation_attestation` (VAULT-RELEASES §3.1): an automation
+attestation CA that staging images accept beside Google's roots, with an
+end date after which `releasecfg check` refuses the file, and with it
+the automation's own signer class `automation` (VAULT-MESSAGING 0.66.0);
+a production file with either is malformed. `vaultctl staging-enroll` and
+`staging-unlock` (release builds) enroll and unlock a staging app device
+with it, the CA key being an AWS KMS key in the staging account
+([`docs/RELEASING.md`](docs/RELEASING.md), "Staging automation
+attestation").
 
 ```sh
 make test      # go test ./..., the vector regeneration check, `make channels`

@@ -248,7 +248,8 @@ recompute it.
 | 1 or 2 roots (a rotation), each a self-signed CA certificate (`cA`, `keyCertSign`) with an ECDSA P-256 or P-384 key, distinct keys; a `TODO-…` root is missing, so the gate refuses the file | `releasecfg.Parse` |
 | `until` is the switch's **end date** (STAGING-DEVELOPMENT-PLAN §2.5.5), `YYYY-MM-DD`, UTC, at most 400 days after the newest root's `notBefore`; **no root is valid after that day** | `releasecfg.Parse` |
 | `releasecfg check` refuses the file from the day after `until` | `cmd/releasecfg`: judged at `SOURCE_DATE_EPOCH` when set (an image build: `Dockerfile.enclave` and `scripts/build-eif.sh` set it to the commit time, so a rebuild of a tagged release gives the same answer on any day), at the current time otherwise (the release workflow's gate and CI). So no new staging release can be cut with an expired switch, and CI fails on `main` until the member is renewed or removed |
-| A running image stops accepting the CA at the end date without a new release | the roots' validity ends with the switch, and §11.7 chain rule 7 refuses an expired certificate at every attestation |
+| A running image stops accepting **new attestations** from the CA at the end date without a new release | the roots' validity ends with the switch, and §11.7 chain rule 7 refuses an expired certificate at every attestation. An automation root is pinned as the **whole certificate** (`vms/devattest` `checkAndroidChain`), not by its key as a vendor root is, so a certificate re-issued with the same key and a later `notAfter` is not a pinned root; and `BindSigner`, which checks no validity periods, refuses an automation chain |
+| A device **already enrolled** through the CA keeps unlocking after the end date, on the same image | not enforced: an unlock checks the bound key's assertion and the pinned signer, not the chain's validity. Such devices stop when a release drops the `automation` signer (see "When the switch ends") |
 | The roots reach the device policy **only in the staging channel** | `Config.AutomationRoots` is empty for any other channel or no configuration (like `TimeScale` and `CounterLock`); `enclave.releaseConfigFor` sets them as `devattest.Policy.AndroidAutomationRoots`, beside the vendor roots, and drops an `automation` signer outside staging |
 | The `automation` signer class: staging only, its digest exactly `AutomationSignerDigest` (never a placeholder), and **present if and only if** `automation_attestation` is | `releasecfg.Parse` |
 | A chain ending at an automation root **must** report the `automation` signer, and a chain ending at a vendor root **must not** | `vms/devattest` (`ErrApplication`): an automation vault is always labelled as one, and nothing else can carry the label |
@@ -385,8 +386,13 @@ member from `staging.json` in the next staging release, schedule the
 key's deletion (`aws kms schedule-key-deletion --key-id "$KEY"
 --pending-window-in-days 7`) once no live staging release pins the
 certificate, and remove the signer role. To renew instead, make a new
-certificate (the same key, or a new key as a second root while the two
-overlap) with a later `until`, at most 400 days ahead.
+certificate with a later `until`, at most 400 days ahead. An automation
+root is pinned as the whole certificate and two roots cannot share a key,
+so a renewal with the **same key** is a cutover: once the file has the
+new certificate, `vaultctl staging-enroll` issues chains that only images
+built from it accept, and a running image with the old certificate
+refuses them (`ErrRoot`) until that release is live. For an overlap, add
+a **new key** as a second root and drop the old one in a later release.
 
 ## A release, step by step
 

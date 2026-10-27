@@ -256,3 +256,62 @@ func TestAutomationAttesterAgainstChannelFiles(t *testing.T) {
 		t.Fatalf("the production policy, production identity: %v", err)
 	}
 }
+
+// VAULT-MESSAGING 0.66.0 §11.10.8: an automation root ends at the channel
+// file's until inside a running image. The root is pinned as the whole
+// certificate, so a certificate re-issued with the same CA key and a
+// later notAfter is not a pinned root, before or after until; and a
+// signer is never bound to an automation chain (BindSigner checks no
+// validity periods).
+func TestAutomationRootUntil(t *testing.T) {
+	caKey := enclavetest.TestKey(elliptic.P256(), 0x41)
+	from := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	until := time.Date(2027, 6, 30, 0, 0, 0, 0, time.UTC)
+	root := func(until time.Time) *x509.Certificate {
+		der, err := autoattest.NewCA(caKey, from, until)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c, err := x509.ParseCertificate(der)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	pinned, reissued := root(until), root(until.AddDate(0, 0, 183))
+	auto := releasecfg.AutomationSignerDigest
+	c := &releasecfg.Config{Channel: releasecfg.ChannelStaging, AndroidPackage: releasecfg.AndroidPackages[releasecfg.ChannelStaging],
+		AndroidSigners: []releasecfg.Signer{{Digest: auto[:], Class: devattest.ClassAutomation}},
+		Automation:     &releasecfg.Automation{AndroidRoots: []*x509.Certificate{pinned}, Until: until}}
+	pol := enclave.ReleaseConfigFor(c, "i-1", enclave.DefaultRelayURL).DeviceAttest
+	var ch [32]byte
+	ch[0] = 9
+	attest := func(ca *x509.Certificate, at time.Time) *altchan.DeviceAttest {
+		a := &autoattest.Attester{Key: enclavetest.TestKey(elliptic.P256(), 0x42), CA: ca, CAKey: caKey,
+			Package: c.AndroidPackage, Signer: auto[:], VersionCode: 1, Now: func() time.Time { return at }}
+		att, err := a.Attest(ch)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return att
+	}
+	during, after := until.Add(-24*time.Hour), until.AddDate(0, 0, 183)
+	att := attest(pinned, during)
+	b, err := devattest.VerifyAttest(pol, att, ch, during, enclavetest.EmptyStatusList(during))
+	if err != nil || b.SignerClass != devattest.ClassAutomation {
+		t.Fatalf("the pinned root before until: %v", err)
+	}
+	if _, err := devattest.VerifyAttest(pol, att, ch, after, enclavetest.EmptyStatusList(after)); !errors.Is(err, devattest.ErrChain) {
+		t.Fatalf("the pinned root after until: %v", err)
+	}
+	for name, at := range map[string]time.Time{"before until": during, "after until": after} {
+		if _, err := devattest.VerifyAttest(pol, attest(reissued, at), ch, at, enclavetest.EmptyStatusList(at)); !errors.Is(err, devattest.ErrRoot) {
+			t.Errorf("a re-issued root, %s: %v", name, err)
+		}
+	}
+	unbound := *b
+	unbound.Signer, unbound.SignerClass = "", ""
+	if _, err := devattest.BindSigner(pol, &unbound, att.Chain); !errors.Is(err, devattest.ErrRoot) {
+		t.Fatalf("BindSigner bound an automation chain: %v", err)
+	}
+}

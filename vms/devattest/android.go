@@ -348,7 +348,8 @@ func validAt(c *x509.Certificate, now time.Time) bool {
 // applies the chain rules, the same for every caller:
 //
 //   - each certificate is signed by the next, and the last is a pinned
-//     root (compared by public key, as Google recommends), self-signed;
+//     root, self-signed: a vendor root compared by public key, as Google
+//     recommends; an automation root compared as the whole certificate;
 //   - with now, every certificate is within its validity period;
 //   - only the leaf carries the attestation extension. The certificate
 //     above the leaf is the device's attestation certificate, whose key
@@ -386,8 +387,12 @@ func checkAndroidChain(p *Policy, chainDER [][]byte, now *time.Time) ([]*x509.Ce
 		}
 		chain[i] = c
 	}
-	// Each certificate is signed by the next; the last is a pinned root
-	// (compared by public key, as Google recommends).
+	// Each certificate is signed by the next; the last is a pinned root:
+	// a vendor root compared by public key, as Google recommends, and an
+	// automation root compared byte for byte, so that its notAfter (the
+	// channel file's until) is the one checked below. Whoever can sign
+	// with an automation root's key could otherwise issue the same key
+	// again with a later notAfter.
 	for i := 0; i+1 < len(chain); i++ {
 		if err := chain[i+1].CheckSignature(chain[i].SignatureAlgorithm, chain[i].RawTBSCertificate, chain[i].Signature); err != nil {
 			return nil, false, ErrChain
@@ -401,7 +406,7 @@ func checkAndroidChain(p *Policy, chainDER [][]byte, now *time.Time) ([]*x509.Ce
 		}
 	}
 	for _, r := range p.AndroidAutomationRoots {
-		if suite.Equal(last.RawSubjectPublicKeyInfo, r.RawSubjectPublicKeyInfo) {
+		if suite.Equal(last.Raw, r.Raw) {
 			pinned, automation = true, true
 		}
 	}

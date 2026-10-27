@@ -386,8 +386,13 @@ member from `staging.json` in the next staging release, schedule the
 key's deletion (`aws kms schedule-key-deletion --key-id "$KEY"
 --pending-window-in-days 7`) once no live staging release pins the
 certificate, and remove the signer role. To renew instead, make a new
-certificate (the same key, or a new key as a second root while the two
-overlap) with a later `until`, at most 400 days ahead.
+certificate with a later `until`, at most 400 days ahead. An automation
+root is pinned as the whole certificate and two roots cannot share a key,
+so a renewal with the **same key** is a cutover: once the file has the
+new certificate, `vaultctl staging-enroll` issues chains that only images
+built from it accept, and a running image with the old certificate
+refuses them (`ErrRoot`) until that release is live. For an overlap, add
+a **new key** as a second root and drop the old one in a later release.
 
 ## A release, step by step
 

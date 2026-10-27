@@ -173,9 +173,9 @@ func cmdStagingCACert(ctx context.Context, _ *globals, args []string) error {
 	if *keyID == "" || err != nil {
 		return errors.New("-kms-key and -until YYYY-MM-DD are required")
 	}
-	now := time.Now().UTC()
-	if until.After(now.AddDate(0, 0, releasecfg.MaxAutomationDays)) || until.Before(now) {
-		return fmt.Errorf("-until must be between today and %d days from now", releasecfg.MaxAutomationDays)
+	notBefore := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	if err := checkCAUntil(until, notBefore); err != nil {
+		return err
 	}
 	api, err := kmsClient(ctx, *region)
 	if err != nil {
@@ -185,7 +185,7 @@ func cmdStagingCACert(ctx context.Context, _ *globals, args []string) error {
 	if err != nil {
 		return err
 	}
-	der, err := autoattest.NewCA(ca, now.Add(-time.Hour), until)
+	der, err := autoattest.NewCA(ca, notBefore, until)
 	if err != nil {
 		return err
 	}
@@ -197,45 +197,69 @@ func cmdStagingCACert(ctx context.Context, _ *globals, args []string) error {
 	return nil
 }
 
+// checkCAUntil applies releasecfg.Parse's rule to a certificate with this
+// notBefore: until is at most MaxAutomationDays after it. until may be
+// today (the certificate is valid to the end of the day) but not earlier.
+func checkCAUntil(until, notBefore time.Time) error {
+	if until.After(notBefore.AddDate(0, 0, releasecfg.MaxAutomationDays)) || until.Before(notBefore.Add(time.Hour).Truncate(24*time.Hour)) {
+		return fmt.Errorf("-until must be between today and %d days from now", releasecfg.MaxAutomationDays)
+	}
+	return nil
+}
+
 // attestKeyPath is the automation device key's file, next to the state.
 func attestKeyPath(g *globals) string { return g.state + ".attest-key" }
 
 // deviceKey loads the automation device attestation key, or (create)
 // makes one: a software P-256 key in a 0600 PEM file beside the state
-// file. It is the key the vault records; unlocks sign with it.
+// file. It is the key the vault records; unlocks sign with it. create
+// refuses a key file that already exists: an enrollment with a fresh
+// state file gets a fresh key, never one left by another device.
 func deviceKey(g *globals, create bool) (*ecdsa.PrivateKey, error) {
 	p := attestKeyPath(g)
-	b, err := os.ReadFile(p)
-	if err == nil {
-		blk, _ := pem.Decode(b)
-		if blk == nil || blk.Type != "PRIVATE KEY" {
-			return nil, fmt.Errorf("%s: not a PEM private key", p)
-		}
-		k, err := x509.ParsePKCS8PrivateKey(blk.Bytes)
+	if create {
+		k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w", p, err)
+			return nil, err
 		}
-		ek, ok := k.(*ecdsa.PrivateKey)
-		if !ok || ek.Curve != elliptic.P256() {
-			return nil, fmt.Errorf("%s: not a P-256 key", p)
+		der, err := x509.MarshalPKCS8PrivateKey(k)
+		if err != nil {
+			return nil, err
 		}
-		return ek, nil
+		f, err := os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if errors.Is(err, os.ErrExist) {
+			return nil, fmt.Errorf("%s already exists: use a fresh state file", p)
+		}
+		if err != nil {
+			return nil, err
+		}
+		_, err = f.Write(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}))
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+		if err != nil {
+			os.Remove(p)
+			return nil, err
+		}
+		return k, nil
 	}
-	if !errors.Is(err, os.ErrNotExist) || !create {
-		return nil, err
-	}
-	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	b, err := os.ReadFile(p)
 	if err != nil {
 		return nil, err
 	}
-	der, err := x509.MarshalPKCS8PrivateKey(k)
+	blk, _ := pem.Decode(b)
+	if blk == nil || blk.Type != "PRIVATE KEY" {
+		return nil, fmt.Errorf("%s: not a PEM private key", p)
+	}
+	k, err := x509.ParsePKCS8PrivateKey(blk.Bytes)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%s: %w", p, err)
 	}
-	if err := os.WriteFile(p, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), 0o600); err != nil {
-		return nil, err
+	ek, ok := k.(*ecdsa.PrivateKey)
+	if !ok || ek.Curve != elliptic.P256() {
+		return nil, fmt.Errorf("%s: not a P-256 key", p)
 	}
-	return k, nil
+	return ek, nil
 }
 
 // automationSigner is the staging file's automation signer

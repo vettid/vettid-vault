@@ -244,7 +244,9 @@ func CheckSigner(p *Policy, b *Binding) string {
 // must equal the bound key and the chain's serial numbers must equal the
 // stored ones, and the challenge and the certificates' validity periods
 // are not checked again (both were when the chain was first accepted, and
-// the equal serials tie this chain to that one). It returns the binding
+// the equal serials tie this chain to that one). A chain ending at an
+// automation root is refused (ErrRoot): no unbound key was enrolled
+// through one, and its until would go unchecked. It returns the binding
 // with the signer recorded. Any failure is ErrApplication, ErrChain or
 // the attestation error; the caller answers `attestation`. That includes
 // a chain an earlier release accepted and this one refuses (a chain
@@ -256,6 +258,12 @@ func BindSigner(p *Policy, b *Binding, chain [][]byte) (*Binding, error) {
 	nb, err := verifyAndroid(p, chain, nil, nil)
 	if err != nil {
 		return nil, err
+	}
+	// A binding without a signer predates the automation CA, and the
+	// validity periods are not checked here, so an automation chain is
+	// never bound this way.
+	if nb.SignerClass == ClassAutomation {
+		return nil, ErrRoot
 	}
 	if !suite.Equal(nb.PublicKey, b.PublicKey) || len(nb.Serials) != len(b.Serials) {
 		return nil, ErrChain

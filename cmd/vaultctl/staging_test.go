@@ -131,6 +131,12 @@ func TestStagingKMSAttester(t *testing.T) {
 	if again, err := deviceKey(g, false); err != nil || !again.Equal(key) {
 		t.Fatal("the device key did not round-trip", err)
 	}
+	if _, err := deviceKey(g, true); err == nil {
+		t.Fatal("an enrollment reused an existing device key")
+	}
+	if again, err := deviceKey(g, false); err != nil || !again.Equal(key) {
+		t.Fatal("a refused create replaced the device key", err)
+	}
 	at := &autoattest.Attester{Key: key, CA: caCert, CAKey: ca, Package: c.AndroidPackage, Signer: signer, VersionCode: int64(c.AndroidMinVersionCode)}
 	var ch [32]byte
 	ch[0] = 1
@@ -232,5 +238,28 @@ func TestPortalSession(t *testing.T) {
 	}
 	if _, err := stagingURL("api", code.API); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// staging-ca-cert's -until check is releasecfg.Parse's, from the
+// certificate's notBefore (an hour before now): just after midnight UTC,
+// now+400 days is a day later than notBefore+400 days.
+func TestCheckCAUntil(t *testing.T) {
+	day := func(s string) time.Time {
+		d, err := time.Parse(time.DateOnly, s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	nb := time.Date(2026, 10, 27, 0, 30, 0, 0, time.UTC).Add(-time.Hour) // now 00:30
+	last := nb.AddDate(0, 0, releasecfg.MaxAutomationDays)
+	for until, ok := range map[string]bool{
+		"2026-10-26": false, "2026-10-27": true, "2027-06-30": true,
+		last.Format(time.DateOnly): true, last.AddDate(0, 0, 1).Format(time.DateOnly): false,
+	} {
+		if err := checkCAUntil(day(until), nb); (err == nil) != ok {
+			t.Errorf("until %s: %v", until, err)
+		}
 	}
 }

@@ -19,8 +19,10 @@ import (
 // key (§3.5.1); connection.authenticate.rotated carries the credential-key
 // rotation statements (§3.5.5) to a connection that pinned an earlier key.
 const (
-	ConnAuthLabel     = "vettid/vms/2/conn-auth"
-	ConnAuthNonceSize = 32
+	ConnAuthLabel = "vettid/vms/2/conn-auth"
+	// ConnAuthPurposeLabel signs a challenge with a purpose (0.65.0).
+	ConnAuthPurposeLabel = "vettid/vms/2/conn-auth-purpose"
+	ConnAuthNonceSize    = 32
 	// ConnAuthChallengeTTL is how long a challenge stays answerable.
 	ConnAuthChallengeTTL = 10 * time.Minute
 	// ConnAuthMaxContext bounds a challenge's context, in bytes.
@@ -30,6 +32,17 @@ const (
 	TypeConnAuthResponse  = "connection.authenticate.response"
 	TypeConnAuthRotated   = "connection.authenticate.rotated"
 )
+
+// Purposes (0.65.0): why the member is asked. Any other value received
+// is treated as absent.
+const (
+	PurposeSignIn   = "signin"
+	PurposeApproval = "approval"
+)
+
+// KnownPurpose reports whether p is a purpose this version signs and
+// gates by: PurposeSignIn or PurposeApproval.
+func KnownPurpose(p string) bool { return p == PurposeSignIn || p == PurposeApproval }
 
 // Response statuses.
 const (
@@ -56,12 +69,26 @@ func ConnAuthMessage(challengerIK, responderIK, nonce []byte, requestID, ctxt st
 	return append(append(m, requestID...), ctxt...)
 }
 
+// ConnAuthPurposeMessage returns the bytes signed for a challenge with a
+// purpose (0.65.0):
+//
+//	len(purpose) (1) || purpose || m
+//
+// where m is ConnAuthMessage's, signed under ConnAuthPurposeLabel.
+func ConnAuthPurposeMessage(purpose string, m []byte) []byte {
+	out := make([]byte, 0, 1+len(purpose)+len(m))
+	return append(append(append(out, byte(len(purpose))), purpose...), m...)
+}
+
 // ConnAuthChallenge is a connection.authenticate.challenge body:
-// {request_id, nonce, context?}.
+// {request_id, nonce, context?, purpose?}.
 type ConnAuthChallenge struct {
 	RequestID string // a ULID
 	Nonce     []byte // ConnAuthNonceSize bytes
 	Context   string // "" when absent; at most ConnAuthMaxContext bytes
+	// Purpose is PurposeSignIn, PurposeApproval or "" (none). A parsed
+	// challenge holds "" for an unknown value (0.65.0).
+	Purpose string
 }
 
 // NewConnAuthChallenge returns a challenge with a fresh random nonce.
@@ -82,12 +109,37 @@ func (c *ConnAuthChallenge) Marshal() []byte {
 	if c.Context != "" {
 		b.String("context", c.Context)
 	}
+	if KnownPurpose(c.Purpose) {
+		b.String("purpose", c.Purpose)
+	}
 	return b.Bytes()
 }
 
-// Message returns the bytes the responder signs for this challenge.
+// Message returns the bytes the responder signs for this challenge
+// without a purpose (ConnAuthMessage).
 func (c *ConnAuthChallenge) Message(challengerIK, responderIK []byte) []byte {
 	return ConnAuthMessage(challengerIK, responderIK, c.Nonce, c.RequestID, c.Context)
+}
+
+// Signed returns the label and bytes the responder signs for this
+// challenge: with a known purpose, ConnAuthPurposeMessage under
+// ConnAuthPurposeLabel; without, Message under ConnAuthLabel (0.65.0).
+func (c *ConnAuthChallenge) Signed(challengerIK, responderIK []byte) (label string, m []byte) {
+	m = c.Message(challengerIK, responderIK)
+	if KnownPurpose(c.Purpose) {
+		return ConnAuthPurposeLabel, ConnAuthPurposeMessage(c.Purpose, m)
+	}
+	return ConnAuthLabel, m
+}
+
+// challengePurpose reads a challenge's optional `purpose`: a known
+// purpose, or "" for anything else (absent, unknown, or not a string),
+// which a receiver treats as absent (0.65.0).
+func challengePurpose(o strictjson.Object) string {
+	if v, _, err := o.OptString("purpose"); err == nil && KnownPurpose(v) {
+		return v
+	}
+	return ""
 }
 
 // connAuthContext parses an optional `context` member: a string of at most
@@ -116,12 +168,13 @@ func ParseConnAuthChallenge(body []byte) (*ConnAuthChallenge, error) {
 	if c.Context, err = connAuthContext(o); err != nil {
 		return nil, err
 	}
+	c.Purpose = challengePurpose(o)
 	return c, nil
 }
 
 // ConnAuthResponse is a connection.authenticate.response body:
-// {request_id, status: "signed", key, sig, signed_at, rotations?} or
-// {request_id, status: "denied"}.
+// {request_id, status: "signed", key, sig, signed_at, purpose?, rotations?}
+// or {request_id, status: "denied"}.
 type ConnAuthResponse struct {
 	RequestID string
 	Status    string // ConnAuthSigned or ConnAuthDenied
@@ -130,20 +183,33 @@ type ConnAuthResponse struct {
 	Sig       []byte                  // over the challenge's ConnAuthMessage
 	SignedAt  time.Time               // millisecond precision on the wire
 	Rotations []*credwire.KeyRotation // optional: from the key the challenger pinned to Key
+	// Purpose is the purpose the signature commits to (0.65.0): the
+	// challenge's, or "" when signed without one. A parsed response holds
+	// the value as sent, and HasPurpose whether the member was there at
+	// all (a non-string value: present, Purpose ""); a present one that is
+	// not the challenge's known purpose fails VerifyConnAuthResponse.
+	Purpose    string
+	HasPurpose bool
 }
 
 // SignConnAuth answers challenge c, sent by the vault whose identity key is
 // challengerIK to the vault whose identity key is responderIK, with the
-// member's credential key. rotations, if any, lead from the key that
-// challenger pinned to key (credwire.ChainFrom).
+// member's credential key: over the purpose too when c has a known one,
+// which the response then echoes (0.65.0). rotations, if any, lead from
+// the key that challenger pinned to key (credwire.ChainFrom).
 func SignConnAuth(key ed25519.PrivateKey, challengerIK, responderIK []byte, c *ConnAuthChallenge, signedAt time.Time,
 	rotations []*credwire.KeyRotation) (*ConnAuthResponse, error) {
-	sig, err := suite.Sign(key, ConnAuthLabel, c.Message(challengerIK, responderIK))
+	label, m := c.Signed(challengerIK, responderIK)
+	sig, err := suite.Sign(key, label, m)
 	if err != nil {
 		return nil, err
 	}
-	return &ConnAuthResponse{RequestID: c.RequestID, Status: ConnAuthSigned, Key: key.Public().(ed25519.PublicKey), Sig: sig,
-		SignedAt: signedAt, Rotations: rotations}, nil
+	r := &ConnAuthResponse{RequestID: c.RequestID, Status: ConnAuthSigned, Key: key.Public().(ed25519.PublicKey), Sig: sig,
+		SignedAt: signedAt, Rotations: rotations}
+	if KnownPurpose(c.Purpose) {
+		r.Purpose = c.Purpose
+	}
+	return r, nil
 }
 
 // DeniedConnAuth is the refusal of the challenge requestID.
@@ -158,6 +224,9 @@ func (r *ConnAuthResponse) Marshal() []byte {
 		return b.Bytes()
 	}
 	b.Base64("key", r.Key).Base64("sig", r.Sig).String("signed_at", envelope.FormatTS(r.SignedAt))
+	if r.Purpose != "" {
+		b.String("purpose", r.Purpose)
+	}
 	if len(r.Rotations) > 0 {
 		b.Raw("rotations", MarshalRotations(r.Rotations))
 	}
@@ -194,6 +263,9 @@ func ParseConnAuthResponse(body []byte) (*ConnAuthResponse, error) {
 		if r.SignedAt, err = envelope.ParseTS(sa); err != nil {
 			return nil, ErrBody
 		}
+		if _, r.HasPurpose = o["purpose"]; r.HasPurpose {
+			r.Purpose, _, _ = o.OptString("purpose")
+		}
 		if raw, ok := o["rotations"]; ok {
 			if r.Rotations, err = ParseRotations(raw); err != nil {
 				return nil, err
@@ -211,11 +283,26 @@ func ParseConnAuthResponse(body []byte) (*ConnAuthResponse, error) {
 // identity key is responderIK: the signature by the key the response
 // names over the challenge. Whether that key is the one pinned is
 // PinnedKeyChanged's question.
+//
+// With a purpose (0.65.0): a response that carries one must carry the
+// challenge's, and is verified over the purpose under
+// ConnAuthPurposeLabel; one that carries a purpose for a challenge
+// without one fails. A response without a purpose is verified over the
+// message alone, also for a challenge with one (a vault before 0.65.0
+// ignores the member): r.Purpose then stays "", and the caller decides
+// whether a signature that does not commit to the purpose is enough.
 func VerifyConnAuthResponse(r *ConnAuthResponse, challengerIK, responderIK []byte, c *ConnAuthChallenge) error {
 	if r.Status != ConnAuthSigned || r.RequestID != c.RequestID {
 		return ErrSignature
 	}
-	if suite.Verify(r.Key, ConnAuthLabel, c.Message(challengerIK, responderIK), r.Sig) != nil {
+	label, m := ConnAuthLabel, c.Message(challengerIK, responderIK)
+	if r.Purpose != "" || r.HasPurpose {
+		if !KnownPurpose(c.Purpose) || r.Purpose != c.Purpose {
+			return ErrSignature
+		}
+		label, m = ConnAuthPurposeLabel, ConnAuthPurposeMessage(r.Purpose, m)
+	}
+	if suite.Verify(r.Key, label, m, r.Sig) != nil {
 		return ErrSignature
 	}
 	return nil

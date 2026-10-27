@@ -39,7 +39,38 @@ const (
 	// askExpMargin: a held answer goes out at most until 1 minute before
 	// the ask's exp.
 	askExpMargin = time.Minute
+
+	// Sign-in challenges (0.65.0): their own cooldown, rate and pending
+	// cap, and their declines do not count toward a pause.
+	AskSignInCooldownTTL = time.Hour
+	AskSignInRate        = 10
+	AskSignInMaxPending  = 2
 )
+
+// Rate buckets (0.65.0, §10.4.1 "Sign-in and approval challenges"): a
+// challenge's purpose selects its bucket; every other ask is in the
+// general bucket ("").
+const (
+	AskBucketGeneral  = ""
+	AskBucketSignIn   = "signin"
+	AskBucketApproval = "approval"
+)
+
+// askRate is a bucket's limit per AskRateWindow.
+func askRate(bucket string) int {
+	if bucket == AskBucketSignIn {
+		return AskSignInRate
+	}
+	return AskRate
+}
+
+// askCooldownTTL is how long a decline in bucket cools its identities.
+func askCooldownTTL(bucket string) time.Duration {
+	if bucket == AskBucketSignIn {
+		return AskSignInCooldownTTL
+	}
+	return AskCooldownTTL
+}
 
 // Suppression reasons (the audit kinds are "drop.ask_<reason>").
 const (
@@ -59,12 +90,39 @@ type AskState struct {
 	Declines []time.Time `json:"declines,omitempty"`
 	// Cooldowns are the ask identities in cooldown, oldest first.
 	Cooldowns []AskCooldownEntry `json:"cooldowns,omitempty"`
-	// The current ask-rate window (fixed, from the first ask that reached
-	// the member).
+	// The current ask-rate window of the general bucket (fixed, from the
+	// first ask that reached the member).
 	WindowStart time.Time `json:"window_start,omitempty"`
 	WindowN     int       `json:"window_n,omitempty"`
+	// Windows are the other buckets' windows (0.65.0), by bucket.
+	Windows map[string]AskWindow `json:"windows,omitempty"`
 	// Held are the neutral answers of suppressed asks, sent when due.
 	Held []HeldAnswer `json:"held,omitempty"`
+}
+
+// AskWindow is one rate bucket's current window.
+type AskWindow struct {
+	Start time.Time `json:"start"`
+	N     int       `json:"n"`
+}
+
+// window returns bucket's window.
+func (st *AskState) window(bucket string) AskWindow {
+	if bucket == AskBucketGeneral {
+		return AskWindow{Start: st.WindowStart, N: st.WindowN}
+	}
+	return st.Windows[bucket]
+}
+
+func (st *AskState) setWindow(bucket string, w AskWindow) {
+	if bucket == AskBucketGeneral {
+		st.WindowStart, st.WindowN = w.Start, w.N
+		return
+	}
+	if st.Windows == nil {
+		st.Windows = map[string]AskWindow{}
+	}
+	st.Windows[bucket] = w
 }
 
 // AskCooldownEntry is one ask identity's cooldown.
@@ -148,6 +206,11 @@ type Ask struct {
 	// Pending is the number of this connection's asks the source already
 	// holds for the member.
 	Pending int
+	// Bucket is the ask's rate bucket (AskBucketSignIn, AskBucketApproval
+	// or AskBucketGeneral, 0.65.0); BucketPending, for AskBucketSignIn, is
+	// the number of the connection's sign-in challenges already waiting.
+	Bucket        string
+	BucketPending int
 	// Exp is the ask's exp (zero: none).
 	Exp time.Time
 	// AnswerType and Answer are the member's decline answer of this ask
@@ -183,7 +246,7 @@ type AskSource interface {
 // on a Host without it lets every ask pass.
 type AskHost interface {
 	Ask(conn string, a Ask, now time.Time) AskVerdict
-	AskDeclined(conn string, idents []string, now time.Time)
+	AskDeclined(conn, bucket string, idents []string, now time.Time)
 }
 
 // Ask runs the §10.4.1 checks for an ask from conn. On a suppression the
@@ -200,8 +263,15 @@ func (s *Session) Ask(conn string, a Ask) AskVerdict {
 // (§10.4.1 Declines): each identity starts its cooldown, and a third
 // decline within 30 days pauses the connection's asks.
 func (s *Session) AskDeclined(conn string, idents []string) {
+	s.AskDeclinedIn(conn, AskBucketGeneral, idents)
+}
+
+// AskDeclinedIn is AskDeclined for an ask in bucket (0.65.0): a sign-in
+// decline cools its identities for AskSignInCooldownTTL and does not
+// count toward a pause.
+func (s *Session) AskDeclinedIn(conn, bucket string, idents []string) {
 	if h, ok := s.host.(AskHost); ok {
-		h.AskDeclined(conn, idents, s.now)
+		h.AskDeclined(conn, bucket, idents, s.now)
 	}
 }
 
@@ -280,17 +350,19 @@ func CheckAsk(st *AskState, conn string, a Ask, others int, now time.Time, delay
 			}
 		}
 	}
-	if a.Pending+others >= AskMaxPending {
+	if a.Pending+others >= AskMaxPending || a.Bucket == AskBucketSignIn && a.BucketPending >= AskSignInMaxPending {
 		return drop(AskPending)
 	}
-	open := !st.WindowStart.IsZero() && now.Before(st.WindowStart.Add(AskRateWindow))
-	if open && st.WindowN >= AskRate {
+	w := st.window(a.Bucket)
+	open := !w.Start.IsZero() && now.Before(w.Start.Add(AskRateWindow))
+	if open && w.N >= askRate(a.Bucket) {
 		return drop(AskRated)
 	}
 	if !open {
-		st.WindowStart, st.WindowN = now.UTC().Truncate(time.Millisecond), 0
+		w = AskWindow{Start: now.UTC().Truncate(time.Millisecond)}
 	}
-	st.WindowN++
+	w.N++
+	st.setWindow(a.Bucket, w)
 	return v
 }
 
@@ -298,6 +370,13 @@ func CheckAsk(st *AskState, conn string, a Ask, others int, now time.Time, delay
 // 64, the oldest dropped first) and the decline time; it reports whether
 // this decline paused the connection's asks.
 func DeclineAsk(st *AskState, idents []string, now time.Time) (paused bool) {
+	return DeclineAskIn(st, AskBucketGeneral, idents, now)
+}
+
+// DeclineAskIn is DeclineAsk for an ask in bucket (0.65.0): a sign-in
+// decline cools its identities for AskSignInCooldownTTL only, and is not
+// a decline that counts toward a pause.
+func DeclineAskIn(st *AskState, bucket string, idents []string, now time.Time) (paused bool) {
 	st.prune(now)
 	t := now.UTC().Truncate(time.Millisecond)
 	for _, id := range idents {
@@ -307,10 +386,13 @@ func DeclineAsk(st *AskState, idents []string, now time.Time) (paused bool) {
 				kept = append(kept, c)
 			}
 		}
-		st.Cooldowns = append(kept, AskCooldownEntry{ID: id, Until: t.Add(AskCooldownTTL)})
+		st.Cooldowns = append(kept, AskCooldownEntry{ID: id, Until: t.Add(askCooldownTTL(bucket))})
 		if len(st.Cooldowns) > AskMaxCooldowns {
 			st.Cooldowns = append([]AskCooldownEntry(nil), st.Cooldowns[len(st.Cooldowns)-AskMaxCooldowns:]...)
 		}
+	}
+	if bucket == AskBucketSignIn {
+		return false
 	}
 	st.Declines = append(st.Declines, t)
 	if len(st.Declines) > AskPauseDeclines {
@@ -384,13 +466,17 @@ func (h managerHost) Ask(conn string, a Ask, now time.Time) AskVerdict {
 	return v
 }
 
-func (h managerHost) AskDeclined(conn string, idents []string, now time.Time) {
+// A host that keeps the §10.4.1 state but drifts from AskHost would let
+// every ask pass (Session.Ask); keep it a compile error.
+var _ AskHost = managerHost{}
+
+func (h managerHost) AskDeclined(conn, bucket string, idents []string, now time.Time) {
 	m := h.m
 	p := m.st.Connections[conn]
 	if p == nil {
 		return
 	}
-	if DeclineAsk(m.askState(p), idents, now) {
+	if DeclineAskIn(m.askState(p), bucket, idents, now) {
 		m.record(Activity{Kind: "connection.asks_paused", ConnectionID: conn, Audit: true, Feed: true, Priority: "high"}, now)
 	}
 	m.dirty = true

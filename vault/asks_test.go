@@ -3,6 +3,7 @@ package vault
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -307,7 +308,7 @@ func TestAsksTypes(t *testing.T) {
 	h := managerHost{d.m}
 	now := time.Now()
 	for i := 0; i < 3; i++ {
-		h.AskDeclined("c1", []string{"auth"}, now)
+		h.AskDeclined("c1", AskBucketGeneral, []string{"auth"}, now)
 	}
 	d.m.mu.Unlock()
 	d.inbox(app)
@@ -434,4 +435,110 @@ func (a *actSink) has(kind string) bool {
 		}
 	}
 	return false
+}
+
+func authAsk(ref, bucket string, bucketPending int) Ask {
+	ident := "auth"
+	if bucket != AskBucketGeneral {
+		ident = "auth:" + bucket
+	}
+	return Ask{Source: "connauth", Ref: ref, Idents: []string{ident}, Bucket: bucket, BucketPending: bucketPending,
+		AnswerType: "connection.authenticate.response", Answer: json.RawMessage(`{"request_id":"` + ref + `","status":"denied"}`)}
+}
+
+// 0.65.0 §10.4.1 "Sign-in and approval challenges": each bucket has its
+// own rate window (signin 10, approval and general 5 per 24 hours); a
+// signin decline cools only signin challenges, for 1 hour, and never
+// counts toward a pause; at most 2 signin challenges wait.
+func TestAskBuckets(t *testing.T) {
+	var r recorded
+	st := &AskState{}
+	now := askT0
+
+	// Rate: 10 sign-ins pass, the 11th is suppressed; the approval and
+	// general buckets are untouched and still have 5 each.
+	for i := 0; i < AskSignInRate; i++ {
+		if v := CheckAsk(st, "c1", authAsk(fmt.Sprint("s", i), AskBucketSignIn, 0), 0, now, time.Minute, r.rec); !v.Passed() {
+			t.Fatalf("sign-in %d: %+v", i, v)
+		}
+	}
+	if v := CheckAsk(st, "c1", authAsk("s10", AskBucketSignIn, 0), 0, now, time.Minute, r.rec); v.Reason != AskRated {
+		t.Fatalf("11th sign-in: %+v", v)
+	}
+	for _, b := range []string{AskBucketApproval, AskBucketGeneral} {
+		for i := 0; i < AskRate; i++ {
+			if v := CheckAsk(st, "c1", authAsk(fmt.Sprint(b, i), b, 0), 0, now, time.Minute, r.rec); !v.Passed() {
+				t.Fatalf("%q %d: %+v", b, i, v)
+			}
+		}
+		if v := CheckAsk(st, "c1", authAsk(b+"x", b, 0), 0, now, time.Minute, r.rec); v.Reason != AskRated {
+			t.Fatalf("%q 6th: %+v", b, v)
+		}
+	}
+
+	// Pending: a third waiting sign-in is suppressed; the overall cap of 8
+	// still counts every kind.
+	st = &AskState{}
+	if v := CheckAsk(st, "c1", authAsk("p", AskBucketSignIn, AskSignInMaxPending), 0, now, time.Minute, r.rec); v.Reason != AskPending {
+		t.Fatalf("third waiting sign-in: %+v", v)
+	}
+	if v := CheckAsk(st, "c1", authAsk("p2", AskBucketApproval, AskSignInMaxPending), 0, now, time.Minute, r.rec); !v.Passed() {
+		t.Fatalf("an approval with two sign-ins waiting: %+v", v)
+	}
+	a := authAsk("p3", AskBucketSignIn, 0)
+	a.Pending = 1
+	if v := CheckAsk(st, "c1", a, AskMaxPending-1, now, time.Minute, r.rec); v.Reason != AskPending {
+		t.Fatalf("sign-in over the overall cap: %+v", v)
+	}
+
+	// A sign-in decline: 1 hour, sign-ins only, no pause however many.
+	st = &AskState{}
+	for i := 0; i < 5; i++ {
+		if DeclineAskIn(st, AskBucketSignIn, []string{"auth:signin"}, now.Add(time.Duration(i)*time.Minute)) {
+			t.Fatal("sign-in declines paused the connection")
+		}
+	}
+	if st.Paused() || len(st.Declines) != 0 {
+		t.Fatalf("declines %v", st.Declines)
+	}
+	last := now.Add(4 * time.Minute)
+	if v := CheckAsk(st, "c1", authAsk("c", AskBucketSignIn, 0), 0, last.Add(AskSignInCooldownTTL-time.Millisecond), time.Minute, r.rec); v.Reason != AskCooldown {
+		t.Fatalf("sign-in within the hour: %+v", v)
+	}
+	for _, b := range []string{AskBucketApproval, AskBucketGeneral} {
+		if v := CheckAsk(st, "c1", authAsk("o"+b, b, 0), 0, last.Add(time.Minute), time.Minute, r.rec); !v.Passed() {
+			t.Fatalf("%q after a sign-in decline: %+v", b, v)
+		}
+	}
+	if v := CheckAsk(st, "c1", authAsk("c2", AskBucketSignIn, 0), 0, last.Add(AskSignInCooldownTTL), time.Minute, r.rec); !v.Passed() {
+		t.Fatalf("sign-in after the hour: %+v", v)
+	}
+
+	// An approval decline: 7 days, approvals only, and it counts.
+	st = &AskState{}
+	DeclineAskIn(st, AskBucketApproval, []string{"auth:approval"}, now)
+	if v := CheckAsk(st, "c1", authAsk("a", AskBucketApproval, 0), 0, now.Add(AskCooldownTTL-time.Millisecond), time.Minute, r.rec); v.Reason != AskCooldown {
+		t.Fatalf("approval within 7 days: %+v", v)
+	}
+	if v := CheckAsk(st, "c1", authAsk("s", AskBucketSignIn, 0), 0, now.Add(time.Minute), time.Minute, r.rec); !v.Passed() {
+		t.Fatalf("sign-in after an approval decline: %+v", v)
+	}
+	if len(st.Declines) != 1 {
+		t.Fatalf("declines %v", st.Declines)
+	}
+	DeclineAskIn(st, AskBucketGeneral, []string{"grant:item:x"}, now.Add(time.Hour))
+	if !DeclineAskIn(st, AskBucketApproval, []string{"auth:approval"}, now.Add(2*time.Hour)) {
+		t.Fatal("three counted declines did not pause")
+	}
+}
+
+// Mute and pause still cover sign-in challenges (0.65.0 §10.4.1).
+func TestAskSignInMutedPaused(t *testing.T) {
+	var r recorded
+	if v := CheckAsk(&AskState{Muted: true}, "c1", authAsk("m", AskBucketSignIn, 0), 0, askT0, time.Minute, r.rec); v.Reason != AskMuted {
+		t.Fatalf("muted: %+v", v)
+	}
+	if v := CheckAsk(&AskState{PausedAt: askT0}, "c1", authAsk("p", AskBucketSignIn, 0), 0, askT0, time.Minute, r.rec); v.Reason != AskPaused {
+		t.Fatalf("paused: %+v", v)
+	}
 }

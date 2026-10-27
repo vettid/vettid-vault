@@ -283,3 +283,173 @@ func TestKeyRotationFollowed(t *testing.T) {
 		}
 	}
 }
+
+// challengeWith has a request a challenge of b with purpose and delivers
+// it; it returns the challenge a sent.
+func challengeWith(t *testing.T, a, b *side, purpose string, at time.Time) featuretest.Sent {
+	t.Helper()
+	body := `{"connection_id":"cB","context":"example.org, Firefox on Linux"`
+	if purpose != "" {
+		body += `,"purpose":"` + purpose + `"`
+	}
+	if r := featuretest.Call(a.f, a.h, at, "app", "connection.authenticate.request", body+`}`); !r.OK() {
+		t.Fatalf("request %s: %s", purpose, r.Code)
+	}
+	ch := last(t, a.h, "connection.authenticate.challenge")
+	featuretest.CallExp(b.f, b.h, at, ch.Opt.Exp, "connection:cA", "connection.authenticate.challenge", string(ch.Body))
+	return ch
+}
+
+// 0.65.0 §10.4 and §10.4.1: the purpose travels to the member's devices,
+// is signed over and echoed, and reported in the result exactly when the
+// signature commits to it; a signin decline cools down only signin
+// challenges, for an hour, and never pauses; at most 2 signin challenges
+// wait; a response to the wrong purpose is bad_signature, and one from a
+// vault before 0.65.0 (no purpose) authenticates without it.
+func TestPurpose(t *testing.T) {
+	a, b := pair()
+	b.h.AsksOn = true
+	b.w.open = true
+	if r := featuretest.Call(a.f, a.h, t0, "app", "connection.authenticate.request", `{"connection_id":"cB","purpose":"vote"}`); r.Code != "bad_request" {
+		t.Fatalf("unknown purpose: %q", r.Code)
+	}
+
+	// Sign-in, approved: the purpose all the way through.
+	ch := challengeWith(t, a, b, peerwire.PurposeSignIn, t0)
+	if field(t, ch.Body, "purpose") != "signin" {
+		t.Fatalf("challenge %s", ch.Body)
+	}
+	pend := last(t, b.h, "connection.authenticate.pending")
+	if field(t, pend.Body, "purpose") != "signin" {
+		t.Fatalf("pending %s", pend.Body)
+	}
+	id := field(t, pend.Body, "request_id")
+	if r := featuretest.Call(b.f, b.h, t0, "app", "connection.authenticate.approve", `{"request_id":"`+id+`"}`); !r.OK() {
+		t.Fatal(r.Code)
+	}
+	resp := last(t, b.h, "connection.authenticate.response").Body
+	if field(t, resp, "purpose") != "signin" {
+		t.Fatalf("response %s", resp)
+	}
+	featuretest.Call(a.f, a.h, t0, "connection:cB", "connection.authenticate.response", string(resp))
+	if res := last(t, a.h, "connection.authenticate.result"); field(t, res.Body, "purpose") != "signin" ||
+		!strings.Contains(string(res.Body), `"authenticated":true`) {
+		t.Fatalf("result %s", res.Body)
+	}
+
+	// The same signature relabelled as an approval: bad_signature.
+	ch = challengeWith(t, a, b, peerwire.PurposeSignIn, t0)
+	id = field(t, last(t, b.h, "connection.authenticate.pending").Body, "request_id")
+	featuretest.Call(b.f, b.h, t0, "app", "connection.authenticate.approve", `{"request_id":"`+id+`"}`)
+	resp = last(t, b.h, "connection.authenticate.response").Body
+	forged := strings.Replace(string(resp), `"purpose":"signin"`, `"purpose":"approval"`, 1)
+	featuretest.Call(a.f, a.h, t0, "connection:cB", "connection.authenticate.response", forged)
+	if res := last(t, a.h, "connection.authenticate.result"); !strings.Contains(string(res.Body), `"reason":"bad_signature"`) {
+		t.Fatalf("relabelled: %s", res.Body)
+	}
+
+	// A vault before 0.65.0 answers a signin challenge without a purpose:
+	// authenticated, no purpose in the result.
+	ch = challengeWith(t, a, b, peerwire.PurposeSignIn, t0)
+	wc, err := peerwire.ParseConnAuthChallenge(ch.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wc.Purpose = ""
+	old, err := peerwire.SignConnAuth(b.w.key, a.h.IK, b.h.IK, wc, t0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	featuretest.Call(a.f, a.h, t0, "connection:cB", "connection.authenticate.response", string(old.Marshal()))
+	if res := last(t, a.h, "connection.authenticate.result"); strings.Contains(string(res.Body), "purpose") ||
+		!strings.Contains(string(res.Body), `"authenticated":true`) {
+		t.Fatalf("legacy result %s", res.Body)
+	}
+
+	// Pending: b holds one unanswered signin challenge (the legacy one);
+	// one more passes, a third waits too many.
+	b.h.Reset()
+	challengeWith(t, a, b, peerwire.PurposeSignIn, t0)
+	challengeWith(t, a, b, peerwire.PurposeSignIn, t0)
+	if n := len(b.h.SentOfType("connection.authenticate.pending")); n != 1 {
+		t.Fatalf("%d sign-ins reached the member with one already waiting", n)
+	}
+	if !b.h.HasActivity("drop.ask_pending") {
+		t.Fatal("the third waiting sign-in was not suppressed as pending")
+	}
+
+	// "Not me": deny a sign-in. Further sign-ins are cooled for an hour;
+	// approvals and challenges without a purpose still reach the member;
+	// no decline is counted toward a pause.
+	id = field(t, last(t, b.h, "connection.authenticate.pending").Body, "request_id")
+	if r := featuretest.Call(b.f, b.h, t0, "app", "connection.authenticate.deny", `{"request_id":"`+id+`"}`); !r.OK() {
+		t.Fatal(r.Code)
+	}
+	st := b.h.Asks["cA"]
+	if len(st.Declines) != 0 || st.Paused() {
+		t.Fatalf("a sign-in decline counted: %+v", st)
+	}
+	for k := range b.f.d.In {
+		delete(b.f.d.In, k) // the member answered the rest
+	}
+	b.h.Reset()
+	at := t0.Add(time.Minute)
+	challengeWith(t, a, b, peerwire.PurposeSignIn, at)
+	if len(b.h.SentOfType("connection.authenticate.pending")) != 0 || !b.h.HasActivity("drop.ask_cooldown") {
+		t.Fatal("a sign-in reached the member within the hour")
+	}
+	for _, p := range []string{peerwire.PurposeApproval, ""} {
+		b.h.Reset()
+		challengeWith(t, a, b, p, at)
+		if len(b.h.SentOfType("connection.authenticate.pending")) != 1 {
+			t.Fatalf("%q after a sign-in decline did not reach the member", p)
+		}
+	}
+	b.h.Reset()
+	challengeWith(t, a, b, peerwire.PurposeSignIn, t0.Add(time.Hour)) // the decline was at t0
+	if len(b.h.SentOfType("connection.authenticate.pending")) != 1 {
+		t.Fatal("a sign-in after the hour did not reach the member")
+	}
+
+	// Persistence keeps a received challenge's purpose (the earlier ones
+	// have expired by now).
+	g := New(nil)
+	featuretest.RoundTrip(t, b.f, g)
+	if len(g.d.In) != 1 {
+		t.Fatalf("%d challenges after a round trip", len(g.d.In))
+	}
+	for _, c := range g.d.In {
+		if c.Purpose != peerwire.PurposeSignIn {
+			t.Fatalf("purpose %q after a round trip", c.Purpose)
+		}
+	}
+}
+
+// The ask gate's bucket names are the purposes.
+func TestBucketsArePurposes(t *testing.T) {
+	if vault.AskBucketSignIn != peerwire.PurposeSignIn || vault.AskBucketApproval != peerwire.PurposeApproval || vault.AskBucketGeneral != "" {
+		t.Fatal("bucket names differ from the purposes")
+	}
+}
+
+// A signed response whose purpose member is not the challenge's known
+// purpose (here: on a challenge without one, and an empty one on a signin
+// challenge) is reported bad_signature, not dropped (0.65.0 §10.4).
+func TestPurposeMismatchReported(t *testing.T) {
+	a, b := pair()
+	b.w.open = true
+	for _, tc := range []struct{ purpose, from, to string }{
+		{"", `"signed_at"`, `"purpose":"signin","signed_at"`},
+		{peerwire.PurposeSignIn, `"purpose":"signin"`, `"purpose":""`},
+	} {
+		challengeWith(t, a, b, tc.purpose, t0)
+		id := field(t, last(t, b.h, "connection.authenticate.pending").Body, "request_id")
+		featuretest.Call(b.f, b.h, t0, "app", "connection.authenticate.approve", `{"request_id":"`+id+`"}`)
+		resp := strings.Replace(string(last(t, b.h, "connection.authenticate.response").Body), tc.from, tc.to, 1)
+		a.h.Reset()
+		featuretest.Call(a.f, a.h, t0, "connection:cB", "connection.authenticate.response", resp)
+		if res := last(t, a.h, "connection.authenticate.result"); !strings.Contains(string(res.Body), `"reason":"bad_signature"`) {
+			t.Fatalf("%q: %s", tc.purpose, res.Body)
+		}
+	}
+}

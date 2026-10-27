@@ -346,6 +346,15 @@ func Generate() (map[string][]byte, error) {
 	if err := put("connauth.json", cav); err != nil {
 		return nil, err
 	}
+
+	// connauth_purpose.json (0.65.0, §10.4)
+	cpv, err := genConnAuthPurpose()
+	if err != nil {
+		return nil, err
+	}
+	if err := put("connauth_purpose.json", cpv); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 

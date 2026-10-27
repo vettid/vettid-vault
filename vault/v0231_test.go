@@ -80,8 +80,8 @@ func TestResumeAlwaysClears(t *testing.T) {
 	d.m.mu.Lock()
 	h := managerHost{d.m}
 	now := time.Now()
-	h.AskDeclined("c1", []string{"auth"}, now)
-	h.AskDeclined("c1", []string{"intro:x"}, now)
+	h.AskDeclined("c1", AskBucketGeneral, []string{"auth"}, now)
+	h.AskDeclined("c1", AskBucketGeneral, []string{"intro:x"}, now)
 	st := d.m.st.Connections["c1"].Asks
 	if st.Paused() || len(st.Declines) != 2 || st.cooldownsInForce(now) != 2 {
 		d.m.mu.Unlock()
@@ -121,8 +121,8 @@ func TestResumeAlwaysClears(t *testing.T) {
 	}
 	// The cleared decline history: two more declines do not pause.
 	d.m.mu.Lock()
-	h.AskDeclined("c1", []string{"auth"}, now)
-	h.AskDeclined("c1", []string{"auth"}, now)
+	h.AskDeclined("c1", AskBucketGeneral, []string{"auth"}, now)
+	h.AskDeclined("c1", AskBucketGeneral, []string{"auth"}, now)
 	paused := d.m.st.Connections["c1"].Asks.Paused()
 	d.m.mu.Unlock()
 	if paused {

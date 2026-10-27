@@ -531,3 +531,14 @@ func TestAskBuckets(t *testing.T) {
 		t.Fatal("three counted declines did not pause")
 	}
 }
+
+// Mute and pause still cover sign-in challenges (0.65.0 §10.4.1).
+func TestAskSignInMutedPaused(t *testing.T) {
+	var r recorded
+	if v := CheckAsk(&AskState{Muted: true}, "c1", authAsk("m", AskBucketSignIn, 0), 0, askT0, time.Minute, r.rec); v.Reason != AskMuted {
+		t.Fatalf("muted: %+v", v)
+	}
+	if v := CheckAsk(&AskState{PausedAt: askT0}, "c1", authAsk("p", AskBucketSignIn, 0), 0, askT0, time.Minute, r.rec); v.Reason != AskPaused {
+		t.Fatalf("paused: %+v", v)
+	}
+}

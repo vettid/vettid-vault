@@ -163,19 +163,34 @@ func TestConnAuthPurpose(t *testing.T) {
 	if l, _ := vote.Signed(a, b); l != ConnAuthLabel {
 		t.Fatal("an unknown purpose was signed over")
 	}
-	for _, body := range []string{
-		`{"request_id":"` + reqID + `","nonce":"` + strings.Repeat("A", 43) + `=","purpose":7}`,
-	} {
-		if _, err := ParseConnAuthChallenge([]byte(body)); err == nil {
-			t.Fatalf("%s parsed", body)
+	// Any other value, a string or not, is absent too.
+	for _, v := range []string{`7`, `null`, `true`, `{"x":1}`} {
+		body := `{"request_id":"` + reqID + `","nonce":"` + strings.Repeat("A", 43) + `=","purpose":` + v + `}`
+		if c, err := ParseConnAuthChallenge([]byte(body)); err != nil || c.Purpose != "" {
+			t.Fatalf("%s: %+v %v", body, c, err)
 		}
 	}
-	// A response's purpose is kept as sent, 1–255 bytes.
+	// A response's purpose member that is present but not the challenge's
+	// known purpose (empty, unknown, long, not a string) parses and fails
+	// verification, also against a challenge without a purpose, so the
+	// challenger reports bad_signature.
 	sb := string(r.Marshal())
-	for _, bad := range []string{`"purpose":""`, `"purpose":"` + strings.Repeat("p", 256) + `"`, `"purpose":true`} {
-		if _, err := ParseConnAuthResponse([]byte(strings.Replace(sb, `"purpose":"signin"`, bad, 1))); err == nil {
-			t.Errorf("response with %s parsed", bad)
+	for _, bad := range []string{`"purpose":""`, `"purpose":"` + strings.Repeat("p", 300) + `"`, `"purpose":true`, `"purpose":null`} {
+		pr, err := ParseConnAuthResponse([]byte(strings.Replace(sb, `"purpose":"signin"`, bad, 1)))
+		if err != nil || !pr.HasPurpose {
+			t.Fatalf("response with %s: %+v %v", bad, pr, err)
 		}
+		for _, c := range []*ConnAuthChallenge{signin, &none} {
+			if VerifyConnAuthResponse(pr, a, b, c) == nil {
+				t.Errorf("response with %s verifies for purpose %q", bad, c.Purpose)
+			}
+		}
+	}
+	// Even over a plain signature: a legacy answer with an empty purpose
+	// member added does not pass as one without.
+	leg := strings.Replace(string(old.Marshal()), `"signed_at"`, `"purpose":"","signed_at"`, 1)
+	if pl, err := ParseConnAuthResponse([]byte(leg)); err != nil || VerifyConnAuthResponse(pl, a, b, &none) == nil {
+		t.Fatalf("a plain signature with an empty purpose member verifies: %v", err)
 	}
 }
 

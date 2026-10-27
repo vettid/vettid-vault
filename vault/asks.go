@@ -466,6 +466,10 @@ func (h managerHost) Ask(conn string, a Ask, now time.Time) AskVerdict {
 	return v
 }
 
+// A host that keeps the §10.4.1 state but drifts from AskHost would let
+// every ask pass (Session.Ask); keep it a compile error.
+var _ AskHost = managerHost{}
+
 func (h managerHost) AskDeclined(conn, bucket string, idents []string, now time.Time) {
 	m := h.m
 	p := m.st.Connections[conn]

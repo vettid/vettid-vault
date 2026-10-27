@@ -431,3 +431,25 @@ func TestBucketsArePurposes(t *testing.T) {
 		t.Fatal("bucket names differ from the purposes")
 	}
 }
+
+// A signed response whose purpose member is not the challenge's known
+// purpose (here: on a challenge without one, and an empty one on a signin
+// challenge) is reported bad_signature, not dropped (0.65.0 §10.4).
+func TestPurposeMismatchReported(t *testing.T) {
+	a, b := pair()
+	b.w.open = true
+	for _, tc := range []struct{ purpose, from, to string }{
+		{"", `"signed_at"`, `"purpose":"signin","signed_at"`},
+		{peerwire.PurposeSignIn, `"purpose":"signin"`, `"purpose":""`},
+	} {
+		challengeWith(t, a, b, tc.purpose, t0)
+		id := field(t, last(t, b.h, "connection.authenticate.pending").Body, "request_id")
+		featuretest.Call(b.f, b.h, t0, "app", "connection.authenticate.approve", `{"request_id":"`+id+`"}`)
+		resp := strings.Replace(string(last(t, b.h, "connection.authenticate.response").Body), tc.from, tc.to, 1)
+		a.h.Reset()
+		featuretest.Call(a.f, a.h, t0, "connection:cB", "connection.authenticate.response", resp)
+		if res := last(t, a.h, "connection.authenticate.result"); !strings.Contains(string(res.Body), `"reason":"bad_signature"`) {
+			t.Fatalf("%q: %s", tc.purpose, res.Body)
+		}
+	}
+}

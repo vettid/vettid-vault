@@ -140,6 +140,8 @@ func (h *Host) Ask(conn string, a vault.Ask, now time.Time) vault.AskVerdict {
 		func(x vault.Activity) { h.Record(x, now) })
 }
 
+var _ vault.AskHost = (*Host)(nil) // a drifted signature would let every ask pass
+
 // AskDeclined implements vault.AskHost.
 func (h *Host) AskDeclined(conn, bucket string, idents []string, now time.Time) {
 	if !h.AsksOn {

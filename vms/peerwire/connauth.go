@@ -132,25 +132,14 @@ func (c *ConnAuthChallenge) Signed(challengerIK, responderIK []byte) (label stri
 	return ConnAuthLabel, m
 }
 
-// optPurpose parses an optional `purpose` member, a string ("" when
-// absent). A challenge's (known) keeps only a known purpose: any other
-// value is treated as absent. A response's is kept as sent, 1–255 bytes,
-// for VerifyConnAuthResponse to compare with the challenge's.
-func optPurpose(o strictjson.Object, known bool) (string, error) {
-	v, ok, err := o.OptString("purpose")
-	if err != nil {
-		return "", ErrBody
+// challengePurpose reads a challenge's optional `purpose`: a known
+// purpose, or "" for anything else (absent, unknown, or not a string),
+// which a receiver treats as absent (0.65.0).
+func challengePurpose(o strictjson.Object) string {
+	if v, _, err := o.OptString("purpose"); err == nil && KnownPurpose(v) {
+		return v
 	}
-	if known {
-		if !KnownPurpose(v) {
-			return "", nil
-		}
-		return v, nil
-	}
-	if ok && (v == "" || len(v) > 255) {
-		return "", ErrBody
-	}
-	return v, nil
+	return ""
 }
 
 // connAuthContext parses an optional `context` member: a string of at most
@@ -179,9 +168,7 @@ func ParseConnAuthChallenge(body []byte) (*ConnAuthChallenge, error) {
 	if c.Context, err = connAuthContext(o); err != nil {
 		return nil, err
 	}
-	if c.Purpose, err = optPurpose(o, true); err != nil {
-		return nil, err
-	}
+	c.Purpose = challengePurpose(o)
 	return c, nil
 }
 
@@ -198,8 +185,11 @@ type ConnAuthResponse struct {
 	Rotations []*credwire.KeyRotation // optional: from the key the challenger pinned to Key
 	// Purpose is the purpose the signature commits to (0.65.0): the
 	// challenge's, or "" when signed without one. A parsed response holds
-	// the value as sent; VerifyConnAuthResponse checks it.
-	Purpose string
+	// the value as sent, and HasPurpose whether the member was there at
+	// all (a non-string value: present, Purpose ""); a present one that is
+	// not the challenge's known purpose fails VerifyConnAuthResponse.
+	Purpose    string
+	HasPurpose bool
 }
 
 // SignConnAuth answers challenge c, sent by the vault whose identity key is
@@ -273,8 +263,8 @@ func ParseConnAuthResponse(body []byte) (*ConnAuthResponse, error) {
 		if r.SignedAt, err = envelope.ParseTS(sa); err != nil {
 			return nil, ErrBody
 		}
-		if r.Purpose, err = optPurpose(o, false); err != nil {
-			return nil, err
+		if _, r.HasPurpose = o["purpose"]; r.HasPurpose {
+			r.Purpose, _, _ = o.OptString("purpose")
 		}
 		if raw, ok := o["rotations"]; ok {
 			if r.Rotations, err = ParseRotations(raw); err != nil {
@@ -306,7 +296,7 @@ func VerifyConnAuthResponse(r *ConnAuthResponse, challengerIK, responderIK []byt
 		return ErrSignature
 	}
 	label, m := ConnAuthLabel, c.Message(challengerIK, responderIK)
-	if r.Purpose != "" {
+	if r.Purpose != "" || r.HasPurpose {
 		if !KnownPurpose(c.Purpose) || r.Purpose != c.Purpose {
 			return ErrSignature
 		}

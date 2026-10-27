@@ -33,6 +33,14 @@ func (m *Manager) rotationConflict(p *Peer, r *handshake.Rotation, now time.Time
 	if p.Kind != KindConnection || r.Verify() != nil {
 		return false
 	}
+	for _, x := range p.Rejected {
+		if suite.EqualPublic(x.OldIK, r.OldIK) && suite.EqualPublic(x.NewIK, r.NewIK) {
+			// The copy the holder dropped at a resolution: refused, no
+			// new suspension.
+			m.audit(now, "rotation_rejected", p.ID)
+			return true
+		}
+	}
 	for _, raw := range p.Chain {
 		prev, err := handshake.ParseRotation(raw)
 		if err != nil || !suite.EqualPublic(prev.OldIK, r.OldIK) {
@@ -78,6 +86,11 @@ func (m *Manager) hRotationResolve(_ context.Context, s *Session, in *envelope.I
 		r, err := handshake.ParseRotation(raw)
 		if err != nil || !suite.EqualPublic(r.NewIK, want) {
 			continue
+		}
+		for _, c := range p.Conflict.Statements {
+			if o, err := handshake.ParseRotation(c); err == nil && !suite.EqualPublic(o.NewIK, want) {
+				p.Rejected = append(p.Rejected, RejectedSuccessor{OldIK: o.OldIK, NewIK: o.NewIK})
+			}
 		}
 		// Keep this successor: the chain's link for old_ik becomes it.
 		kept := p.Chain[:0]

@@ -143,3 +143,59 @@ func ResolveChain(start ed25519.PublicKey, chain []*Rotation) (ed25519.PublicKey
 	}
 	return cur, kem, nil
 }
+
+// KnownPrefix returns how many leading links of chain the receiver already
+// followed: the same old_ik, new_ik and new_kem as a link in known.
+func KnownPrefix(known, chain []*Rotation) int {
+	n := 0
+	for _, c := range chain {
+		found := false
+		for _, k := range known {
+			if suite.EqualPublic(k.OldIK, c.OldIK) && suite.EqualPublic(k.NewIK, c.NewIK) && k.NewKEM.Equal(c.NewKEM) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			break
+		}
+		n++
+	}
+	return n
+}
+
+// ResolveChainKnown is ResolveChain for a peer's chain when the receiver
+// may already have followed its first links, for example from
+// identity.rotate before the rekey that would have carried them (§3.4,
+// §6.6): a reconnect carries every rotation since the last epoch. The
+// leading links in known are not followed again; they must be contiguous,
+// valid, and the last of them must end at start, the stored key (else
+// accepting would roll the identity back). The rest is resolved from start
+// as ResolveChain does. With no known prefix it is exactly ResolveChain
+// from start. It also returns the number of links in the known prefix.
+func ResolveChainKnown(start ed25519.PublicKey, known, chain []*Rotation) (ed25519.PublicKey, *suite.PublicKey, int, error) {
+	if len(start) != ed25519.PublicKeySize || len(chain) > MaxRotations {
+		return nil, nil, 0, ErrRotation
+	}
+	n := KnownPrefix(known, chain)
+	if n == 0 {
+		final, kem, err := ResolveChain(start, chain)
+		return final, kem, 0, err
+	}
+	for i, r := range chain[:n] {
+		if r.Verify() != nil || i > 0 && !suite.EqualPublic(r.OldIK, chain[i-1].NewIK) {
+			return nil, nil, 0, ErrRotation
+		}
+	}
+	if !suite.EqualPublic(chain[n-1].NewIK, start) {
+		return nil, nil, 0, ErrRotation
+	}
+	final, kem := ed25519.PublicKey(start), chain[n-1].NewKEM
+	if n < len(chain) {
+		var err error
+		if final, kem, err = ResolveChain(start, chain[n:]); err != nil {
+			return nil, nil, 0, err
+		}
+	}
+	return final, kem, n, nil
+}

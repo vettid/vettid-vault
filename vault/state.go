@@ -229,6 +229,16 @@ type Peer struct {
 	// (release R, §3.4): the connection is suspended until the holder
 	// resolves it.
 	Conflict *RotationConflict `json:"rotation_conflict,omitempty"`
+	// Rejected holds the successors the holder dropped at a resolution.
+	Rejected []RejectedSuccessor `json:"rejected_successors,omitempty"`
+}
+
+// RejectedSuccessor is a successor of OldIK the holder dropped at
+// connection.rotation.resolve (§3.4): a later copy of it is refused, not a
+// new conflict.
+type RejectedSuccessor struct {
+	OldIK []byte `json:"old_ik"`
+	NewIK []byte `json:"new_ik"`
 }
 
 // RotationConflict holds both rotation statements with the same old_ik.

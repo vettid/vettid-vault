@@ -300,9 +300,15 @@ func (m *Manager) respondReconnect(pi *handshake.PendingInit, p *Peer, sender ed
 		m.audit(now, "reconnect_refused", p.ID)
 		return
 	}
-	for _, r := range pi.Init().Rotations {
-		if m.rotationConflict(p, r, now) {
-			return
+	// Only a well-formed reconnect for this connection can suspend it.
+	if b := pi.Init(); b.Ctx != handshake.EpochCtx(epochIDOf(p.LastEpochID)) || !suite.EqualPublic(sender, p.Relay.PK) {
+		m.audit(now, "reconnect_refused", p.ID)
+		return
+	} else {
+		for _, r := range b.Rotations {
+			if m.rotationConflict(p, r, now) {
+				return
+			}
 		}
 	}
 	cfg := handshake.ResponderConfig{
@@ -574,6 +580,15 @@ func connEvent(id, ev string) json.RawMessage {
 // handleResp processes hs.resp for a handshake the vault initiated.
 func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender ed25519.PublicKey, now time.Time) disposition {
 	og, ini := m.st.Outgoing[id], m.outgoing[id]
+	if og.New == nil {
+		// §3.4: a suspended connection sends and accepts nothing, so a
+		// reply cannot activate it.
+		if sp := m.peer(og.PeerID); sp != nil && sp.Conflict != nil {
+			m.audit(now, "hs_resp_dropped", og.PeerID)
+			m.dropOutgoing(id)
+			return ackAfterFlush
+		}
+	}
 	res, err := ini.HandleResp(raw, sender, now)
 	if err != nil {
 		if _, xerr := ini.Export(); errors.Is(xerr, handshake.ErrDone) {
@@ -683,7 +698,7 @@ func (m *Manager) startRekey(p *Peer, now time.Time) {
 // startReconnect initiates a reconnect to connection p with its reconnect
 // token (§6.6).
 func (m *Manager) startReconnect(p *Peer, now time.Time) {
-	if p.Kind != KindConnection || m.hasOutgoing(p.ID, handshake.PurposeReconnect) ||
+	if p.Kind != KindConnection || p.Conflict != nil || m.hasOutgoing(p.ID, handshake.PurposeReconnect) ||
 		p.Reconnect.Token == "" || !now.Before(p.Reconnect.Exp) || len(p.LastEpochID) == 0 {
 		return
 	}

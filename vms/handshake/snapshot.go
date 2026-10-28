@@ -2,6 +2,7 @@ package handshake
 
 import (
 	"crypto/ed25519"
+	"encoding/json"
 	"time"
 
 	"github.com/vettid/vettid-vault/vms/envelope"
@@ -151,6 +152,10 @@ type InitiatorState struct {
 	NI                []byte  `json:"n_i,omitempty"` // the SAS nonce (0.10.3)
 	Th1               []byte  `json:"th1"`
 	Body              []byte  `json:"body"`
+	// KnownResponderChain is the responder's rotation chain already
+	// followed (a reconnect, §6.6: the initiator keeps it across a
+	// restart), as identity.rotate statements.
+	KnownResponderChain []json.RawMessage `json:"known_responder_chain,omitempty"`
 }
 
 // Export returns the initiator's persistent state, or ErrDone after it
@@ -169,10 +174,15 @@ func (i *Initiator) Export() (InitiatorState, error) {
 	if err != nil {
 		return InitiatorState{}, err
 	}
+	var known []json.RawMessage
+	for _, r := range i.cfg.KnownResponderChain {
+		known = append(known, r.Marshal())
+	}
 	return InitiatorState{
 		Purpose: i.cfg.Purpose, Suites: append([]int(nil), i.cfg.Suites...), PinnedSuite: i.cfg.PinnedSuite,
 		Policy: i.cfg.Policy, ResponderIK: cp(i.cfg.ResponderIK), ResponderRelayKey: cp(i.cfg.ResponderRelayKey),
 		EphSeed: seed, Env: cp(i.env), Ks: cp(i.ks), NI: cp(i.nI), Th1: cp(i.th1[:]), Body: body,
+		KnownResponderChain: known,
 	}, nil
 }
 
@@ -191,9 +201,19 @@ func RestoreInitiator(s InitiatorState, identity ed25519.PrivateKey) (*Initiator
 		eph.Destroy()
 		return nil, ErrConfig
 	}
+	var known []*Rotation
+	for _, raw := range s.KnownResponderChain {
+		r, err := ParseRotation(raw)
+		if err != nil {
+			eph.Destroy()
+			return nil, ErrConfig
+		}
+		known = append(known, r)
+	}
 	i := &Initiator{
 		cfg: InitiatorConfig{Purpose: s.Purpose, Suites: s.Suites, PinnedSuite: s.PinnedSuite, Policy: s.Policy,
-			Identity: identity, ResponderIK: cp(s.ResponderIK), ResponderRelayKey: cp(s.ResponderRelayKey)},
+			Identity: identity, ResponderIK: cp(s.ResponderIK), ResponderRelayKey: cp(s.ResponderRelayKey),
+			KnownResponderChain: known},
 		body: body, eph: eph, env: cp(s.Env), ks: cp(s.Ks), nI: cp(s.NI),
 	}
 	copy(i.th1[:], s.Th1)

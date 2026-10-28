@@ -281,8 +281,15 @@ func TestResolveChainKnown(t *testing.T) {
 }
 
 // The responder of a reconnect that already followed the initiator's first
-// link answers it; the initiator likewise for the responder's chain.
+// link answers it; the initiator likewise for the responder's chain, also
+// after a restore of its state.
 func TestReconnectKnownChain(t *testing.T) {
+	for _, restored := range []bool{false, true} {
+		t.Run(map[bool]string{false: "live", true: "restored"}[restored], func(t *testing.T) { reconnectKnownChain(t, restored) })
+	}
+}
+
+func reconnectKnownChain(t *testing.T, restored bool) {
 	i, r := newParty(t, 0x10), newParty(t, 0x20)
 	ei, _ := runHandshake(t, i, r, PurposeConnection)
 	r1 := rotateParty(t, i, 0x40)
@@ -297,6 +304,17 @@ func TestReconnectKnownChain(t *testing.T) {
 	ini, err := NewInitiator(cfg)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if restored {
+		// The known chain survives the initiator's export and restore (a
+		// restart while the reconnect is open, §6.6).
+		st, err := ini.Export()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ini, err = RestoreInitiator(roundTrip(t, st), i.ik); err != nil {
+			t.Fatal(err)
+		}
 	}
 	p, err := OpenInit(ini.Envelope(), r.lookup, t0)
 	if err != nil {

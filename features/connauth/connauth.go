@@ -287,17 +287,38 @@ func (f *Feature) challenge(s *vault.Session, in *envelope.Inner) error {
 		return nil
 	}
 	f.d.In[c.ID] = c
-	b := strictjson.NewBuilder().String("connection_id", conn).String("request_id", c.ID).String("exp", envelope.FormatTS(c.Exp))
+	s.NotifyDevicesWith("connection.authenticate.pending", c.pendingBody(), "", vault.SendOptions{Exp: c.Exp})
+	s.Record(vault.Activity{Kind: "connection.authenticate.requested", ConnectionID: conn, Ref: c.ID, Direction: "in", Audit: true,
+		Feed: true, Priority: "high", AskBatch: true})
+	return nil
+}
+
+// pendingBody is the body of the connection.authenticate.pending event
+// (§10.4), and of the `authenticate` entry of pending.list (§10.4.2),
+// which repeats it exactly.
+func (c *Challenge) pendingBody() []byte {
+	b := strictjson.NewBuilder().String("connection_id", c.Conn).String("request_id", c.ID).String("exp", envelope.FormatTS(c.Exp))
 	if c.Context != "" {
 		b.String("context", c.Context)
 	}
 	if c.Purpose != "" {
 		b.String("purpose", c.Purpose)
 	}
-	s.NotifyDevicesWith("connection.authenticate.pending", b.Bytes(), "", vault.SendOptions{Exp: c.Exp})
-	s.Record(vault.Activity{Kind: "connection.authenticate.requested", ConnectionID: conn, Ref: c.ID, Direction: "in", Audit: true,
-		Feed: true, Priority: "high", AskBatch: true})
-	return nil
+	return b.Bytes()
+}
+
+// OpenAsks implements vault.PendingAskSource (§10.4.2): the received
+// challenges still open. It changes nothing.
+func (f *Feature) OpenAsks(now time.Time) []vault.PendingAsk {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []vault.PendingAsk
+	for _, c := range f.d.In {
+		if now.Before(c.Exp) {
+			out = append(out, vault.PendingAsk{Kind: vault.PendingAuthenticate, ID: c.ID, Exp: c.Exp, Body: c.pendingBody()})
+		}
+	}
+	return out
 }
 
 // AskIdent is the identity for the §10.4.1 cooldown of a challenge

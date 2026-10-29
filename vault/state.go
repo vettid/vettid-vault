@@ -468,6 +468,11 @@ type AwaitingHS struct {
 	// abandoned before it was deposited sends nothing (§6.6 "Crossing
 	// reconnects", 0.72.1).
 	RespOutbox string `json:"resp_outbox,omitempty"`
+	// Th1 is the transcript hash of the reconnect hs.init this answers: the
+	// crossing tie-break between two persons compares it with the th1 of the
+	// vault's own open reconnect (§6.6 "Between two persons", 0.74.0); nil
+	// in a record written before it.
+	Th1 []byte `json:"th1,omitempty"`
 	// Reconnect is what an answered reconnect applies once hs.fin
 	// verified: nothing changes before sig_I (§6.6 "Replay", 0.72.0).
 	Reconnect *PendingReconnect `json:"reconnect,omitempty"`

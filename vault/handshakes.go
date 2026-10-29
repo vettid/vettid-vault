@@ -1,6 +1,7 @@
 package vault
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
@@ -425,8 +426,61 @@ func (m *Manager) respondReconnect(pi *handshake.PendingInit, p *Peer, sender ed
 		Payload: env}
 	m.queueDeposit(oe, now)
 	m.st.Awaiting[id] = &AwaitingHS{ID: id, PeerID: p.ID, Purpose: handshake.PurposeReconnect, Created: now, Resp: rs, Issued: issued,
-		OwnChain: m.ownChainNow(), RespOutbox: oe.ID, Reconnect: pend}
+		OwnChain: m.ownChainNow(), RespOutbox: oe.ID, Reconnect: pend, Th1: th1[:]}
 	m.awaiting[id] = resp
+	// §6.6 "Between two persons" (0.74.0): with our own reconnect open as
+	// well, the lower th1 wins; a higher one of ours is abandoned now.
+	if !p.isService() {
+		m.crossingPersons(p, now)
+	}
+}
+
+// ownThHigher reports whether th1 of our own reconnect og is higher than
+// that of an answer aw (big-endian bytes, §6.6 "Between two persons"). A
+// record without a th1 (written before 0.74.0) compares as not higher.
+func ownThHigher(og *OutgoingHS, aw *AwaitingHS) bool {
+	return len(og.Th1) == 32 && len(aw.Th1) == 32 && bytes.Compare(og.Th1, aw.Th1) > 0
+}
+
+// answeredReconnects returns the ids of the reconnect answers p has
+// awaiting hs.fin.
+func (m *Manager) answeredReconnects(p *Peer) []string {
+	var ids []string
+	for id, aw := range m.st.Awaiting {
+		if aw.New == nil && aw.PeerID == p.ID && aw.Purpose == handshake.PurposeReconnect {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// crossingPersons compares our own open reconnect to p with the answers
+// awaiting hs.fin (§6.6 "Between two persons", 0.74.0). When our th1 is
+// higher than that of an answer, our own is abandoned: no hs.fin, the tokens
+// its hs.init carried revoked, a later hs.resp to it dropped and audited,
+// and the peer's reconnect is established at the peer's hs.fin. When it is
+// lower, nothing happens yet: our own completes at the peer's hs.resp. It
+// reports whether our own was abandoned.
+func (m *Manager) crossingPersons(p *Peer, now time.Time) bool {
+	ids := m.answeredReconnects(p)
+	if len(ids) == 0 {
+		return false
+	}
+	abandoned := false
+	for id, og := range m.st.Outgoing {
+		if og.New != nil || og.PeerID != p.ID || og.Purpose != handshake.PurposeReconnect || og.Replaced {
+			continue
+		}
+		for _, aid := range ids {
+			if ownThHigher(og, m.st.Awaiting[aid]) {
+				m.audit(now, "reconnect_crossing_abandoned", p.ID)
+				m.abandonOutgoing(id, now)
+				abandoned = true
+				break
+			}
+		}
+	}
+	return abandoned
 }
 
 func epochIDOf(b []byte) [suite.EpochIDSize]byte {
@@ -625,18 +679,16 @@ func (m *Manager) finishReconnect(p *Peer, aw *AwaitingHS, fr *handshake.FinResu
 		}
 	}
 	p.Standing, p.Reconnect = pend.Standing, pend.Reconnect
-	if p.isService() {
-		// Both ends of a service connection settle on this epoch: the
-		// service yields (§6.6 "Crossing reconnects", 0.72.1), so our own
-		// reconnect is abandoned, and any other answer with it. A person
-		// connection keeps the earlier behaviour (no tie-break is specified).
-		for id, o := range m.st.Awaiting {
-			if id != aw.ID && o.New == nil && o.PeerID == p.ID && o.Purpose == handshake.PurposeReconnect {
-				m.abandonAwaiting(id, now)
-			}
+	// Both ends settle on this epoch: a service yields (§6.6 "Crossing
+	// reconnects", 0.72.1) and between two persons a verified hs.fin
+	// comes first whatever the th1 (§6.6 "Between two persons", 0.74.0),
+	// so our own reconnect is abandoned, and any other answer with it.
+	for id, o := range m.st.Awaiting {
+		if id != aw.ID && o.New == nil && o.PeerID == p.ID && o.Purpose == handshake.PurposeReconnect {
+			m.abandonAwaiting(id, now)
 		}
-		m.abandonHandshakes(p, false, false, now)
 	}
+	m.abandonHandshakes(p, false, false, now)
 	if pend.Older {
 		// Rekeys open now were made on epochs of the line the restore
 		// replaced. They stay, marked, so that a hs.resp or hs.fin from a
@@ -781,6 +833,16 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 			return ackAfterFlush
 		}
 	}
+	if og.New == nil && og.Purpose == handshake.PurposeReconnect {
+		if sp := m.peer(og.PeerID); sp != nil && !sp.isService() && m.crossingPersons(sp, now) {
+			// §6.6 "Between two persons": our th1 is higher than that of an
+			// answer we hold, so our own was abandoned and this hs.resp is
+			// dropped, audited, before it takes tokens, the identity or
+			// rotations.
+			m.audit(now, "hs_resp_dropped", og.PeerID)
+			return ackAfterFlush
+		}
+	}
 	res, err := ini.HandleResp(raw, sender, now)
 	if err != nil {
 		if _, xerr := ini.Export(); errors.Is(xerr, handshake.ErrDone) {
@@ -839,13 +901,13 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 	// hs.fin goes first: what activation sends in the new epoch (the
 	// profile.update after an ik rotation, §10.8) follows it.
 	m.queueDeposit(&OutboxEntry{Op: OpDeposit, PeerID: p.ID, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Payload: res.Fin}, now)
-	if og.Purpose == handshake.PurposeReconnect && p.isService() {
-		// §6.6 "Crossing reconnects" (0.72.1, services only: the service
-		// yields; no tie-break between two persons is specified): our reconnect completed
-		// first (sig_R verified, hs.fin sent). A pending answer to the
-		// peer's own hs.init is dropped and its tokens revoked; a later
-		// hs.fin for it finds nothing, is acked and dropped, and is not
-		// evidence for fork detection.
+	if og.Purpose == handshake.PurposeReconnect {
+		// §6.6 "Crossing reconnects" (0.72.1; between two persons 0.74.0,
+		// where our th1 was the lower): our reconnect completed first
+		// (sig_R verified, hs.fin sent). A pending answer to the peer's own
+		// hs.init is dropped and its tokens revoked (not sent if not yet
+		// deposited); a later hs.fin for it finds nothing, is acked and
+		// dropped, and is not evidence for fork detection.
 		for id, o := range m.st.Awaiting {
 			if o.New == nil && o.PeerID == p.ID && o.Purpose == handshake.PurposeReconnect {
 				m.abandonAwaiting(id, now)
@@ -913,6 +975,11 @@ func (m *Manager) startRekey(p *Peer, now time.Time) {
 func (m *Manager) startReconnect(p *Peer, now time.Time) {
 	if p.Kind != KindConnection || p.suspended() || m.hasOutgoing(p.ID, handshake.PurposeReconnect) ||
 		p.Reconnect.Token == "" || !now.Before(p.Reconnect.Exp) || len(p.LastEpochID) == 0 {
+		return
+	}
+	if !p.isService() && len(m.answeredReconnects(p)) > 0 {
+		// §6.6 "Between two persons" (0.74.0): no reconnect of our own
+		// while an answer of ours awaits hs.fin.
 		return
 	}
 	kem, err := suite.ParsePublicKey(p.KEM)

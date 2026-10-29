@@ -219,8 +219,6 @@ func (f *svcFx) sendUnder(ep *handshake.Epoch, typ string, ts time.Time) string 
 	return id
 }
 
-func (f *svcFx) epochByID(id []byte) *handshake.Epoch { return f.epochs[string(id)] }
-
 func (f *svcFx) feedFor(kind string) *Activity {
 	for i := range f.sink.got {
 		if f.sink.got[i].Kind == kind {

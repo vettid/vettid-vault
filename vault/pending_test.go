@@ -232,3 +232,134 @@ func TestPendingListByteCap(t *testing.T) {
 		t.Fatalf("all pages: %v", all)
 	}
 }
+
+// The cap holds for every page whatever the kinds (their cursors differ in
+// length), both when the bytes end the page and when the limit does; a page
+// over the cap holds exactly one entry.
+func TestPendingListByteCapMixedKinds(t *testing.T) {
+	d := newDevFixture(t)
+	app := d.self()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	src := &askSource{}
+	kinds := []string{PendingAuthenticate, PendingAction, PendingLocation, PendingAuthenticate, PendingAction, PendingLocation}
+	for i, k := range kinds {
+		id := fmt.Sprintf("A%02d", i)
+		src.asks = append(src.asks, PendingAsk{Kind: k, ID: id, Exp: now.Add(time.Hour),
+			Body: []byte(`{"request_id":"` + id + `","params":"` + strings.Repeat("x", 30) + `"}`)})
+	}
+	d.m.addFeature(src)
+	old := pendingPageBytes
+	defer func() { pendingPageBytes = old }()
+	for _, limit := range []int{2, 100} {
+		for cap := 150; cap < 450; cap++ {
+			pendingPageBytes = cap
+			var got []string
+			after := ""
+			for pages := 0; ; pages++ {
+				body := `{"limit":` + fmt.Sprint(limit)
+				if after != "" {
+					body += `,"after":"` + after + `"`
+				}
+				r, pg := d.pendingList(t, app, body+`}`)
+				if len(pg.ids) == 0 || pages > 20 {
+					t.Fatalf("cap %d limit %d: page %d has %d entries", cap, limit, pages, len(pg.ids))
+				}
+				if len(r.Body) > cap && len(pg.ids) != 1 {
+					t.Fatalf("cap %d limit %d: %d bytes in %d entries", cap, limit, len(r.Body), len(pg.ids))
+				}
+				got = append(got, pg.ids...)
+				if pg.next == "" {
+					break
+				}
+				after = pg.next
+			}
+			if len(got) != len(kinds) {
+				t.Fatalf("cap %d limit %d: %v", cap, limit, got)
+			}
+		}
+	}
+}
+
+// The cursor names a position, not an entry: when the last ask of a page is
+// decided or expires before the next page, the list resumes after it.
+func TestPendingListCursorSurvivesItsEntryGoing(t *testing.T) {
+	d := newDevFixture(t)
+	app := d.self()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	src := &askSource{}
+	for i := 0; i < 5; i++ {
+		id := fmt.Sprintf("A%02d", i)
+		src.asks = append(src.asks, PendingAsk{Kind: PendingAuthenticate, ID: id, Exp: now.Add(time.Duration(i+1) * time.Hour),
+			Body: []byte(`{"request_id":"` + id + `"}`)})
+	}
+	d.m.addFeature(src)
+	_, pg := d.pendingList(t, app, `{"limit":2}`)
+	if strings.Join(pg.ids, ",") != "A00,A01" || pg.next == "" {
+		t.Fatalf("%+v", pg)
+	}
+	src.asks = src.asks[2:] // A00 and A01 were decided
+	_, pg = d.pendingList(t, app, `{"limit":2,"after":"`+pg.next+`"}`)
+	if strings.Join(pg.ids, ",") != "A02,A03" {
+		t.Fatalf("resumed at %v", pg.ids)
+	}
+	src.asks = src.asks[1:]
+	src.asks = src.asks[1:] // A02, A03 gone too
+	_, pg = d.pendingList(t, app, `{"limit":2,"after":"`+pg.next+`"}`)
+	if strings.Join(pg.ids, ",") != "A04" || pg.next != "" {
+		t.Fatalf("after the entry went: %+v", pg)
+	}
+}
+
+// Listing reads only: no audit entry, nothing for the asker's or any other
+// device's inbox, no cached response (volatile, §8.2).
+func TestPendingListChangesNothing(t *testing.T) {
+	d := newDevFixture(t)
+	app := d.self()
+	desk := d.addDevice(t, "desk1", KindDesktop, 0x60)
+	sink := &recSink{}
+	d.m.addFeature(sink)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	d.m.addFeature(&askSource{asks: []PendingAsk{{Kind: PendingAuthenticate, ID: "A1", Exp: now.Add(time.Hour), Body: []byte(`{"request_id":"A1"}`)}}})
+	d.inbox(app, desk)
+	nAudit, nCached := len(d.m.st.Audit), len(d.m.st.Responses)
+	sink.got = nil
+	id := d.sendAs(app, "pending.list", `{}`)
+	in := d.inbox(app, desk)
+	if r := find(in["dev1"], reply(id)); r == nil || r.Status != envelope.StatusOK {
+		t.Fatalf("%+v", r)
+	}
+	// (Housekeeping's token reissue is not the listing's.)
+	for _, ms := range in {
+		for _, m := range ms {
+			if m.Type != "pending.list" && m.Type != "relay.token.issued" {
+				t.Fatalf("listing sent %s", m.Type)
+			}
+		}
+	}
+	if len(sink.got) != 0 || len(d.m.st.Audit) != nAudit {
+		t.Fatalf("activity written: %+v", sink.got)
+	}
+	if d.cached(id) || len(d.m.st.Responses) != nCached {
+		t.Fatal("the response was cached")
+	}
+}
+
+// A desktop needs an access session; while the vault is held every owner
+// device is refused owner_check_required (§3.6.3), the desktop and an app
+// alike, at dispatch.
+func TestPendingListSessionAndHold(t *testing.T) {
+	d := newDevFixture(t)
+	desk := d.addDevice(t, "desk1", KindDesktop, 0x60)
+	if r, _ := d.pendingList(t, desk, `{}`); errCode(r) != "session_required" {
+		t.Fatalf("desktop without a session: %+v", r)
+	}
+
+	f := newOCFixture(t)
+	f.pastDeadline()
+	f.req(t, f.app, "settings.get", `{}`) // enters the hold
+	for _, td := range []*tdev{f.app, f.desk} {
+		if r := f.req(t, td, "pending.list", `{}`); errCode(r) != "owner_check_required" {
+			t.Fatalf("%s while held: %+v", td.peer.ID, r)
+		}
+	}
+}

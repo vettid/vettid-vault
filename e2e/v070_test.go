@@ -64,29 +64,37 @@ func TestPendingListSurvivesLockE2E(t *testing.T) {
 	}
 	locEv := waitEvent(t, b.app, "location.request.pending", has("request_id", lid))
 
+	checkListed := func() {
+		t.Helper()
+		got := pendingAll(t, b.app)
+		if len(got) != 2 {
+			t.Fatalf("listed: %+v", got)
+		}
+		want := map[string]string{"authenticate": string(authEv.Body), "location": string(locEv.Body)}
+		for _, e := range got {
+			if want[e.Kind] != e.Body {
+				t.Fatalf("%s: listed %s, event %s", e.Kind, e.Body, want[e.Kind])
+			}
+			delete(want, e.Kind)
+		}
+		if len(want) != 0 {
+			t.Fatalf("missing: %v", want)
+		}
+	}
 	lockVault(t, b)
 	unlockVault(t, b, nil)
-
-	got := pendingAll(t, b.app)
-	if len(got) != 2 {
-		t.Fatalf("after a lock and an unlock: %+v", got)
-	}
-	want := map[string]string{"authenticate": string(authEv.Body), "location": string(locEv.Body)}
-	for _, e := range got {
-		if want[e.Kind] != e.Body {
-			t.Fatalf("%s: listed %s, event %s", e.Kind, e.Body, want[e.Kind])
-		}
-		delete(want, e.Kind)
-	}
-	if len(want) != 0 {
-		t.Fatalf("missing: %v", want)
-	}
+	checkListed()
+	// A restart (a crash, no lock) keeps them too.
+	b.stop()
+	b.manager().Crash()
+	unlockVault(t, b, nil)
+	checkListed()
 
 	// Decided: no longer listed.
 	if err := b.app.AuthDeny(ctx, rid); err != nil {
 		t.Fatal(err)
 	}
-	got = pendingAll(t, b.app)
+	got := pendingAll(t, b.app)
 	if len(got) != 1 || got[0].Kind != "location" {
 		t.Fatalf("after a decision: %+v", got)
 	}

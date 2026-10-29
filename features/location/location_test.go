@@ -499,3 +499,24 @@ func TestDefaultPrecisionApproximate(t *testing.T) {
 		t.Fatalf("%+v %v", st, err)
 	}
 }
+
+// §10.4.2: a location request waiting for the member is listed as the body
+// of its location.request.pending event until it expires.
+func TestOpenAsksRepeatTheEvent(t *testing.T) {
+	f, h := setup()
+	if got := f.OpenAsks(t0); len(got) != 0 {
+		t.Fatalf("before a request: %+v", got)
+	}
+	ft.Call(f, h, t0, "connection:c2", "location.requested", `{"request_id":"01JB2Z6V9K3M4N5P6Q7R8S9T0V","note":"hi"}`)
+	ev := h.SentOfType("location.request.pending")
+	if len(ev) != 1 {
+		t.Fatal("no event")
+	}
+	got := f.OpenAsks(t0.Add(time.Minute))
+	if len(got) != 1 || got[0].Kind != vault.PendingLocation || got[0].ID != "01JB2Z6V9K3M4N5P6Q7R8S9T0V" || string(got[0].Body) != string(ev[0].Body) {
+		t.Fatalf("listed %+v, event %s", got, ev[0].Body)
+	}
+	if got := f.OpenAsks(t0.Add(RequestTTL + time.Second)); len(got) != 0 {
+		t.Fatalf("expired: %+v", got)
+	}
+}

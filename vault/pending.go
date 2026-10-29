@@ -5,6 +5,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/vettid/vettid-vault/internal/strictjson"
@@ -111,8 +113,37 @@ func (m *Manager) pendingAsks(kind string, now time.Time) []PendingAsk {
 	return out
 }
 
+// pendingCursor is the opaque cursor naming a's position in the order
+// (exp, id, kind): the next page resumes at the first entry after it, so
+// the entry it names may be decided or expire in between.
 func pendingCursor(a PendingAsk) string {
-	return base64.RawURLEncoding.EncodeToString([]byte(a.Kind + "\x00" + a.ID))
+	return base64.RawURLEncoding.EncodeToString([]byte(strconv.FormatInt(a.Exp.UnixNano(), 10) + "\x00" + a.ID + "\x00" + a.Kind))
+}
+
+// pendingAfter reports whether a sorts after the position the cursor names.
+// ok is false for a cursor that names no position (malformed).
+func pendingAfter(cursor string, a PendingAsk) (after, ok bool) {
+	raw, err := base64.RawURLEncoding.DecodeString(cursor)
+	if err != nil {
+		return false, false
+	}
+	parts := strings.Split(string(raw), "\x00")
+	if len(parts) != 3 {
+		return false, false
+	}
+	ns, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		return false, false
+	}
+	exp := time.Unix(0, ns)
+	switch {
+	case !a.Exp.Equal(exp):
+		return a.Exp.After(exp), true
+	case a.ID != parts[1]:
+		return a.ID > parts[1], true
+	default:
+		return a.Kind > parts[2], true
+	}
 }
 
 // hPendingList: `pending.list{after?, limit?}` answers
@@ -137,13 +168,10 @@ func (m *Manager) hPendingList(_ context.Context, s *Session, in *envelope.Inner
 	asks := m.pendingAsks(s.peer.Kind, s.now)
 	start := 0
 	if hasAfter {
-		// A cursor that no longer names a position starts again from the
-		// beginning.
-		for i, a := range asks {
-			if pendingCursor(a) == after {
-				start = i + 1
-				break
-			}
+		// A cursor that names no position starts again from the beginning;
+		// one whose entry is gone resumes at the first entry after it.
+		if _, ok := pendingAfter(after, PendingAsk{}); ok {
+			start = sort.Search(len(asks), func(i int) bool { a, _ := pendingAfter(after, asks[i]); return a })
 		}
 	}
 	const next = `,"next":""`
@@ -157,7 +185,7 @@ func (m *Manager) hPendingList(_ context.Context, s *Session, in *envelope.Inner
 		if n > 0 {
 			add++ // the comma
 		}
-		if n > 0 && size+add+len(next)+len(pendingCursor(asks[i-1])) > pendingPageBytes {
+		if n > 0 && size+add+len(next)+len(pendingCursor(asks[i])) > pendingPageBytes {
 			break // at least one entry, and never split or dropped
 		}
 		if n > 0 {

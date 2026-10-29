@@ -453,3 +453,30 @@ func TestPurposeMismatchReported(t *testing.T) {
 		}
 	}
 }
+
+// §10.4.2: a received challenge waiting for the member is listed as the
+// body of its connection.authenticate.pending event (purpose included),
+// until it is decided or expires.
+func TestOpenAsksRepeatTheEvent(t *testing.T) {
+	a, b := pair()
+	if got := b.f.OpenAsks(t0); len(got) != 0 {
+		t.Fatalf("before a challenge: %+v", got)
+	}
+	featuretest.Call(a.f, a.h, t0, "app", "connection.authenticate.request", `{"connection_id":"cB","context":"sign-in","purpose":"signin"}`)
+	ch := last(t, a.h, "connection.authenticate.challenge")
+	featuretest.CallExp(b.f, b.h, t0, ch.Opt.Exp, "connection:cA", "connection.authenticate.challenge", string(ch.Body))
+	ev := last(t, b.h, "connection.authenticate.pending")
+	id := field(t, ev.Body, "request_id")
+	got := b.f.OpenAsks(t0.Add(time.Minute))
+	if len(got) != 1 || got[0].Kind != vault.PendingAuthenticate || got[0].ID != id || string(got[0].Body) != string(ev.Body) ||
+		field(t, got[0].Body, "purpose") != "signin" {
+		t.Fatalf("listed %+v, event %s", got, ev.Body)
+	}
+	if got := b.f.OpenAsks(t0.Add(peerwire.ConnAuthChallengeTTL + time.Second)); len(got) != 0 {
+		t.Fatalf("expired: %+v", got)
+	}
+	featuretest.Call(b.f, b.h, t0, "app", "connection.authenticate.deny", `{"request_id":"`+id+`"}`)
+	if got := b.f.OpenAsks(t0.Add(time.Minute)); len(got) != 0 {
+		t.Fatalf("after a decision: %+v", got)
+	}
+}

@@ -705,3 +705,26 @@ func FuzzDescs(f *testing.F) {
 		`"category":"c","labels":[{"field_id":"f1","label":"L","kind":"text"}],"uses":1,"expires_at":"2026-10-03T12:00:00.000Z"}]}`))
 	f.Fuzz(func(t *testing.T, b []byte) { _, _ = Descs(b) })
 }
+
+// §10.4.2 (0.70.0): an invocation waiting for the member is listed as the
+// body of its action.pending event, until it is decided or expires.
+func TestOpenAsksRepeatTheEvent(t *testing.T) {
+	a, b := pair()
+	configure(t, a, b, `{"action_id":"audit.recent","mode":"prompt-each-time"}`)
+	if got := a.f.OpenAsks(a.now); len(got) != 0 {
+		t.Fatalf("before an invocation: %+v", got)
+	}
+	id := invoke(t, a, b, AuditRecent, `{}`)
+	ev := last(t, a.h, "action.pending")
+	got := a.f.OpenAsks(a.now)
+	if len(got) != 1 || got[0].Kind != vault.PendingAction || got[0].ID != id || string(got[0].Body) != string(ev.Body) {
+		t.Fatalf("listed %+v, event %s", got, ev.Body)
+	}
+	if got := a.f.OpenAsks(a.now.Add(PendingTTL + time.Second)); len(got) != 0 {
+		t.Fatalf("expired: %+v", got)
+	}
+	a.ok(t, vault.KindApp, "action.respond", `{"invocation_id":"`+id+`","approve":false}`)
+	if got := a.f.OpenAsks(a.now); len(got) != 0 {
+		t.Fatalf("after a decision: %+v", got)
+	}
+}

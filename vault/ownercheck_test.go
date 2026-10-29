@@ -518,7 +518,8 @@ func TestHoldAllowList(t *testing.T) {
 	for _, typ := range []string{"credential.alarm.confirm", "credential.rotate", "device.transfer.approve", "device.transfer.reject",
 		"call.ice", "call.answer", "credential.unlock", "credential.reset", "device.transfer.create", "settings.set", "vault.delete", "pin.change",
 		"approval.decide", "device.session.approve", "account.get", TypeAccountNameSet, "message.send", "location.update", "device.unlink",
-		"location.share.start", "location.share.list", "location.get", "location.request", "location.history.share"} {
+		"location.share.start", "location.share.list", "location.get", "location.request", "location.history.share",
+		"pending.list"} {
 		if m.holdAllows(app, typ, OwnerCheckHeld) {
 			t.Fatalf("app %s allowed", typ)
 		}

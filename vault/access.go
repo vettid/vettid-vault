@@ -91,11 +91,24 @@ func (m *Manager) hSessionRequest(_ context.Context, s *Session, in *envelope.In
 	r := &AccessRequest{ID: m.newID(s.now), DeviceID: s.peer.ID, Seconds: secs, Created: s.now, Expires: s.now.Add(AccessRequestTTL)}
 	m.st.AccessRequests[r.ID] = r
 	exp := envelope.FormatTS(r.Expires)
-	m.notifyApps("device.session.pending", strictjson.NewBuilder().String("request_id", r.ID).String("device_id", s.peer.ID).
-		String("role", s.peer.Kind).String("name", s.peer.Name).Uint("seconds", secs).String("exp", exp).Bytes(), s.now)
+	m.notifyApps("device.session.pending", sessionPendingBody(r, s.peer), s.now)
 	m.record(Activity{Kind: "device.session.pending", DeviceID: s.peer.ID, Ref: r.ID, Feed: true, Priority: "high"}, s.now)
 	m.dirty = true
 	return strictjson.NewBuilder().String("request_id", r.ID).String("exp", exp).Bytes(), nil
+}
+
+// sessionPendingBody is the body of the device.session.pending event
+// (§6.8) and of the `session` entry of pending.list (§10.4.2).
+func sessionPendingBody(r *AccessRequest, p *Peer) []byte {
+	return strictjson.NewBuilder().String("request_id", r.ID).String("device_id", p.ID).
+		String("role", p.Kind).String("name", p.Name).Uint("seconds", r.Seconds).String("exp", envelope.FormatTS(r.Expires)).Bytes()
+}
+
+// approvalPendingBody is the body of the approval.pending event (§6.8)
+// and of the `approval` entry of pending.list (§10.4.2).
+func approvalPendingBody(h *HeldRequest, p *Peer, in *envelope.Inner) []byte {
+	return strictjson.NewBuilder().String("approval_id", h.ID).String("device_id", p.ID).
+		String("role", p.Kind).String("name", p.Name).String("type", in.Type).Raw("body", in.Body).String("exp", envelope.FormatTS(h.Expires)).Bytes()
 }
 
 // grantAccess starts or extends p's access session.
@@ -240,8 +253,7 @@ func (m *Manager) hold(p *Peer, in *envelope.Inner, key string, volatile bool, n
 	h := &HeldRequest{ID: m.newID(now), DeviceID: p.ID, Key: key, Inner: raw, Created: now, Expires: now.Add(ApprovalTTL)}
 	m.st.Held[h.ID] = h
 	exp := envelope.FormatTS(h.Expires)
-	m.notifyApps("approval.pending", strictjson.NewBuilder().String("approval_id", h.ID).String("device_id", p.ID).
-		String("role", p.Kind).String("name", p.Name).String("type", in.Type).Raw("body", in.Body).String("exp", exp).Bytes(), now)
+	m.notifyApps("approval.pending", approvalPendingBody(h, p, in), now)
 	m.sendTo(p, "approval.waiting", strictjson.NewBuilder().String("approval_id", h.ID).String("request_id", in.ID).
 		String("exp", exp).Bytes(), now)
 	m.record(Activity{Kind: "approval.pending", DeviceID: p.ID, Ref: h.ID, Feed: true, Priority: "high"}, now)

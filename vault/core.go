@@ -75,6 +75,7 @@ func (m *Manager) registerCore() {
 	r("settings.set", true, owners, m.hSettingsSet)
 	r("account.get", true, owners, m.hAccountGet)
 	m.registerAccess()
+	m.registerPending()
 	m.registerConnections()
 	m.registerAsks()
 	m.registerPush()

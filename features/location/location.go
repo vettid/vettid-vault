@@ -560,13 +560,34 @@ func (f *Feature) requested(s *vault.Session, body []byte) {
 	}
 	f.d.Requests[q.ID] = q
 	f.d.RecvReq[conn] = ts(now)
-	b := strictjson.NewBuilder().String("request_id", q.ID).String("connection_id", conn)
+	s.NotifyAllDevices("location.request.pending", q.pendingBody())
+	s.Record(vault.Activity{Kind: "location.requested", ConnectionID: conn, Ref: q.ID, Direction: "in", Audit: true})
+	s.Record(vault.Activity{Kind: "location.request", ConnectionID: conn, Ref: q.ID, Feed: true, AskBatch: true})
+}
+
+// pendingBody is the body of the location.request.pending event (§10.16),
+// and of the `location` entry of pending.list (§10.4.2), which repeats it
+// exactly.
+func (q *InRequest) pendingBody() []byte {
+	b := strictjson.NewBuilder().String("request_id", q.ID).String("connection_id", q.Conn)
 	if q.Note != "" {
 		b.String("note", q.Note)
 	}
-	s.NotifyAllDevices("location.request.pending", b.String("exp", envelope.FormatTS(q.Exp)).Bytes())
-	s.Record(vault.Activity{Kind: "location.requested", ConnectionID: conn, Ref: q.ID, Direction: "in", Audit: true})
-	s.Record(vault.Activity{Kind: "location.request", ConnectionID: conn, Ref: q.ID, Feed: true, AskBatch: true})
+	return b.String("exp", envelope.FormatTS(q.Exp)).Bytes()
+}
+
+// OpenAsks implements vault.PendingAskSource (§10.4.2): the location
+// requests still open. It changes nothing.
+func (f *Feature) OpenAsks(now time.Time) []vault.PendingAsk {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []vault.PendingAsk
+	for _, q := range f.d.Requests {
+		if now.Before(q.Exp) {
+			out = append(out, vault.PendingAsk{Kind: vault.PendingLocation, ID: q.ID, Exp: q.Exp, Body: q.pendingBody()})
+		}
+	}
+	return out
 }
 
 func (f *Feature) pendingFrom(conn string, now time.Time) int {

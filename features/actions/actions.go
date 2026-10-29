@@ -1009,10 +1009,32 @@ func (f *Feature) invocation(s *vault.Session, body []byte) {
 	}
 	p := &Pending{ID: v.InvocationID, Conn: conn, ActionID: def.ID, Params: v.Params, Exp: exp}
 	f.d.Pending[p.ID] = p
-	s.NotifyAllDevices("action.pending", strictjson.NewBuilder().String("invocation_id", p.ID).String("connection_id", conn).
-		String("action_id", def.ID).String("sensitivity", def.Sensitivity).Raw("params", p.Params).
-		String("exp", envelope.FormatTS(p.Exp)).Bytes())
+	s.NotifyAllDevices("action.pending", p.pendingBody(def.Sensitivity))
 	s.Record(vault.Activity{Kind: "action.request", ConnectionID: conn, Ref: p.ID, Feed: true, Priority: "high", AskBatch: true})
+}
+
+// pendingBody is the body of the action.pending event (§10.14), and of
+// the `action` entry of pending.list (§10.4.2), which repeats it exactly.
+func (p *Pending) pendingBody(sensitivity string) []byte {
+	return strictjson.NewBuilder().String("invocation_id", p.ID).String("connection_id", p.Conn).
+		String("action_id", p.ActionID).String("sensitivity", sensitivity).Raw("params", p.Params).
+		String("exp", envelope.FormatTS(p.Exp)).Bytes()
+}
+
+// OpenAsks implements vault.PendingAskSource (§10.4.2): the
+// invocations still waiting for the member. It changes nothing.
+func (f *Feature) OpenAsks(now time.Time) []vault.PendingAsk {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []vault.PendingAsk
+	for _, p := range f.d.Pending {
+		def, ok := Lookup(p.ActionID)
+		if !ok || !now.Before(p.Exp) {
+			continue
+		}
+		out = append(out, vault.PendingAsk{Kind: vault.PendingAction, ID: p.ID, Exp: p.Exp, Body: p.pendingBody(def.Sensitivity)})
+	}
+	return out
 }
 
 // askIdent is an invocation's identity for the §10.4.1 cooldown: the

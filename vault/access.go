@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sort"
 	"time"
 
 	"github.com/vettid/vettid-vault/internal/strictjson"
@@ -161,14 +162,23 @@ func (m *Manager) hSessionDeny(_ context.Context, s *Session, in *envelope.Inner
 		return nil, err
 	}
 	r := m.st.AccessRequests[rid]
-	if r == nil {
-		return nil, errNotFound
+	if r == nil || !s.now.Before(r.Expires) {
+		return nil, errNotFound // expiry is not audited (§6.8)
 	}
 	delete(m.st.AccessRequests, rid)
-	if p := m.st.Devices[r.DeviceID]; p != nil && p.State == PeerActive {
-		m.sendTo(p, "device.session.ended", strictjson.NewBuilder().String("reason", "denied").Bytes(), s.now)
-	}
 	m.dirty = true
+	b := strictjson.NewBuilder().String("kind", "device.session").String("device_id", r.DeviceID)
+	if p := m.st.Devices[r.DeviceID]; p != nil {
+		if p.State == PeerActive {
+			m.sendTo(p, "device.session.ended", strictjson.NewBuilder().String("reason", "denied").Bytes(), s.now)
+		}
+		// A deny does not end a current session (§6.8, 0.77.0).
+		if p.Access != nil && s.now.Before(p.Access.Expires) {
+			b = b.String("expires_at", envelope.FormatTS(p.Access.Expires))
+		}
+	}
+	m.record(Activity{Kind: "device.session.denied", DeviceID: r.DeviceID, Ref: rid, Audit: true}, s.now)
+	m.notifyDevices("sync.event", b.Bytes(), s.peer.ID, s.now)
 	return nil, nil
 }
 
@@ -190,33 +200,46 @@ func (m *Manager) hSessionEnd(ctx context.Context, s *Session, in *envelope.Inne
 			return nil, errNotFound
 		}
 	}
-	m.endAccess(ctx, target, s.peer.ID != target.ID, "ended", s.now)
+	// The sender gets no sync.event: an app drops the asks itself (§6.8, §10.1).
+	m.endAccess(ctx, target, s.peer.ID != target.ID, "ended", s.peer.ID, s.now)
 	m.record(Activity{Kind: "device.session.ended", DeviceID: target.ID, Audit: true}, s.now)
 	return nil, nil
 }
 
 // endAccess ends p's access session, drops its pending request and answers
-// its held requests (notify: tell p).
-func (m *Manager) endAccess(ctx context.Context, p *Peer, notify bool, reason string, now time.Time) {
+// its held requests (notify: tell p). Each held request answered `denied`
+// is audited approval.denied and sent as sync.event approval.decided, and
+// device.session is sent when p had a session or a pending request, to the
+// owner's devices except `except` (§6.8, 0.77.0).
+func (m *Manager) endAccess(ctx context.Context, p *Peer, notify bool, reason, except string, now time.Time) {
 	had := p.Access != nil
 	p.Access = nil
 	for id, r := range m.st.AccessRequests {
 		if r.DeviceID == p.ID {
 			delete(m.st.AccessRequests, id)
+			had = true
 		}
 	}
+	var held []string
 	for id, h := range m.st.Held {
 		if h.DeviceID == p.ID {
 			m.answerHeld(h, "denied", now)
 			delete(m.st.Held, id)
+			held = append(held, id)
 		}
+	}
+	sort.Strings(held)
+	for _, id := range held {
+		m.record(Activity{Kind: "approval.denied", DeviceID: p.ID, Ref: id, Audit: true}, now)
+		m.notifyDevices("sync.event", strictjson.NewBuilder().String("kind", "approval.decided").String("approval_id", id).
+			Bool("approved", false).Bytes(), except, now)
 	}
 	m.dirty = true
 	if notify && p.State == PeerActive {
 		m.sendTo(p, "device.session.ended", strictjson.NewBuilder().String("reason", reason).Bytes(), now)
 	}
 	if had {
-		m.notifyDevices("sync.event", strictjson.NewBuilder().String("kind", "device.session").String("device_id", p.ID).Bytes(), "", now)
+		m.notifyDevices("sync.event", strictjson.NewBuilder().String("kind", "device.session").String("device_id", p.ID).Bytes(), except, now)
 	}
 }
 

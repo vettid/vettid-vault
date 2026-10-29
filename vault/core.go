@@ -241,6 +241,11 @@ func (m *Manager) hPairApprove(ctx context.Context, s *Session, in *envelope.Inn
 		p.PairGrants = append(json.RawMessage(nil), grants...)
 	}
 	m.activateRequest(r, s.now)
+	if present && needsAccess(p.Kind) {
+		m.record(Activity{Kind: "device.session.granted", DeviceID: p.ID, Ref: p.Access.ID, Audit: true}, s.now)
+		m.notifyDevices("sync.event", strictjson.NewBuilder().String("kind", "device.session").String("device_id", p.ID).
+			String("expires_at", envelope.FormatTS(p.Access.Expires)).Bytes(), s.peer.ID, s.now)
+	}
 	return nil, nil
 }
 
@@ -295,7 +300,7 @@ func (m *Manager) hDeviceUnlink(_ context.Context, s *Session, in *envelope.Inne
 		// The one app leaves only by a transfer or a recovery (§6.7).
 		return nil, errForbiddenH
 	}
-	m.endAccess(context.Background(), p, false, "", s.now) // its access session and held requests go with it
+	m.endAccess(context.Background(), p, false, "", s.peer.ID, s.now) // its access session and held requests go with it
 	m.removePeer(p, "device.unlinked", s.now)
 	for _, f := range m.features {
 		if ob, ok := f.(DeviceRemovedObserver); ok {
@@ -303,7 +308,7 @@ func (m *Manager) hDeviceUnlink(_ context.Context, s *Session, in *envelope.Inne
 		}
 	}
 	m.record(Activity{Kind: "device.unlinked", DeviceID: id, Audit: true, Feed: true}, s.now)
-	m.notifyDevices("sync.event", strictjson.NewBuilder().String("kind", "device.unlinked").String("device_id", id).Bytes(), "", s.now)
+	m.notifyDevices("sync.event", strictjson.NewBuilder().String("kind", "device.unlinked").String("device_id", id).Bytes(), s.peer.ID, s.now)
 	return nil, nil
 }
 

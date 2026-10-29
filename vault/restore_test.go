@@ -1119,9 +1119,30 @@ func TestPersonCrossingReconnectsReadable(t *testing.T) {
 	}{{a, pa}, {b, pb}} {
 		x.d.m.mu.Lock()
 		x.d.m.startReconnect(x.p, x.d.m.now())
+		x.d.m.drainOutbox(context.Background()) // both hs.init are on the relay
 		x.d.m.mu.Unlock()
 	}
-	for i := 0; i < 8; i++ {
+	// The interleaving of the review: each vault answers the other's
+	// hs.init in a batch of its own, so that the answer is on the wire;
+	// then each processes the other's hs.resp (its own reconnect completes
+	// while it holds that answer) before any hs.fin arrives.
+	toStatic := func(to *devFixture) func(*envelope.Envelope) bool {
+		return func(env *envelope.Envelope) bool {
+			return env.Mode() == envelope.ModeSealed && to.m.lookupKEM(env.RecipientKid()) != nil
+		}
+	}
+	notStatic := func(to *devFixture) func(*envelope.Envelope) bool {
+		return func(env *envelope.Envelope) bool {
+			return env.Mode() == envelope.ModeSealed && to.m.lookupKEM(env.RecipientKid()) == nil
+		}
+	}
+	if pumpOnly(t, b, a, toStatic(a)) != 1 || pumpOnly(t, a, b, toStatic(b)) != 1 { // the hs.init
+		t.Fatal("setup: the hs.init did not cross")
+	}
+	if pumpOnly(t, b, a, notStatic(a)) != 1 || pumpOnly(t, a, b, notStatic(b)) != 1 { // the hs.resp
+		t.Fatal("setup: the hs.resp did not cross")
+	}
+	for i := 0; i < 8; i++ { // the hs.fin and the rest
 		pump(t, a, b)
 		pump(t, b, a)
 	}
@@ -1235,4 +1256,36 @@ func TestPendingReconnectSurvivesRestart(t *testing.T) {
 	if !bytes.Equal(f.p.LastEpochID, nid[:]) || f.p.Watch == nil || len(f.p.Watch.Replaced) != 1 || !f.sink.has("connection.restored_reconnect") {
 		t.Fatal("the hs.fin after the restart did not apply the reconnect")
 	}
+}
+
+// pumpOnly is pump for the deposits of from to to's vault mailbox that match
+// pred; the others stay on the relay.
+func pumpOnly(t *testing.T, from, to *devFixture, pred func(*envelope.Envelope) bool) int {
+	t.Helper()
+	toPK := to.m.keys.relay.Public().(ed25519.PublicKey)
+	fromPK := from.m.keys.relay.Public().(ed25519.PublicKey)
+	var msgs []Message
+	from.relay.mu.Lock()
+	kept := from.relay.deposits[:0]
+	for _, dep := range from.relay.deposits {
+		env, err := envelope.Parse(dep.payload)
+		if dep.mailbox != to.m.st.Relay.Mailbox || err != nil || !pred(env) {
+			kept = append(kept, dep)
+			continue
+		}
+		jti := ""
+		if c, err := relayauth.ParseToken(dep.token, toPK); err == nil {
+			jti = c.Jti
+		}
+		pumped++
+		msgs = append(msgs, Message{MsgID: fmt.Sprintf("pump%d", pumped), Sender: relayauth.EncodeKey(fromPK), JTI: jti, Payload: dep.payload})
+	}
+	from.relay.deposits = kept
+	from.relay.mu.Unlock()
+	if len(msgs) > 0 {
+		if err := to.m.ProcessBatch(context.Background(), &fakeCollector{}, msgs); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return len(msgs)
 }

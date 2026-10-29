@@ -543,6 +543,7 @@ func (m *Manager) activate(p *Peer, ep *handshake.Epoch, purpose handshake.Purpo
 			m.sendTo(p, "device.paired", pb.Bytes(), now)
 			break
 		}
+		recovered := p.Recovering
 		if p.Recovering {
 			// Release R (§11.14.6): the recovered phone's pairing hands
 			// it the credential and the signer binding.
@@ -553,6 +554,11 @@ func (m *Manager) activate(p *Peer, ep *handshake.Epoch, purpose handshake.Purpo
 		m.notifyDevices("sync.event", strictjson.NewBuilder().String("kind", "device.paired").String("device_id", p.ID).
 			String("role", p.Kind).Bytes(), p.ID, now)
 		m.record(Activity{Kind: "device.paired", DeviceID: p.ID, Audit: true, Feed: true}, now)
+		if recovered {
+			// §11.14.10: a rotation owed since the recovery, now that the
+			// recovered phone has paired with the keys it was given.
+			m.retryOwedRotation(now)
+		}
 		if len(p.PairGrants) > 0 {
 			// The agent's initial LEASH grants take effect with the
 			// pairing (§6.7, §10.11), after device.paired.

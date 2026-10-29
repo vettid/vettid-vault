@@ -639,14 +639,44 @@ func (m *Manager) RotateIdentity(ctx context.Context) error {
 	return m.flushIfDirty(ctx)
 }
 
+// retryOwedRotation makes the rotation a recovery owes (§11.14.10 "Failure":
+// audited identity.rotation_failed, kept, tried again). It never fails what
+// calls it. While the recovered phone has not paired (its recovery invite is
+// pending) it waits: the phone's first handshake verifies the vault's
+// identity key as the open's vault_bundle gave it, and a key rotated in
+// between would fail the pairing (vms/handshake/initiator.go); the pairing
+// calls it (recoveredPhonePaired).
+func (m *Manager) retryOwedRotation(now time.Time) {
+	o := m.st.RotationOwed
+	if o == nil || (o.Recovery == "" && o.Transfer == "") {
+		return
+	}
+	for _, inv := range m.st.Invites {
+		if inv.CreatedBy == inviteByRecovery {
+			return
+		}
+	}
+	ref := "recovery"
+	if o.Transfer != "" {
+		ref = o.Transfer
+	}
+	if err := m.rotateIdentity(now); err != nil {
+		m.record(Activity{Kind: "identity.rotation_failed", Ref: ref, Audit: true, Feed: true, Priority: "high"}, now)
+	}
+}
+
 // rotateIdentity performs the rotation in memory; the caller persists it
 // (in a batch, the batch's flush does).
 func (m *Manager) rotateIdentity(now time.Time) error {
-	ikSeed, err := suite.RandomBytes(32)
+	draw := suite.RandomBytes
+	if m.opt.KeyRand != nil {
+		draw = m.opt.KeyRand
+	}
+	ikSeed, err := draw(32)
 	if err != nil {
 		return err
 	}
-	kemSeed, err := suite.RandomBytes(32)
+	kemSeed, err := draw(32)
 	if err != nil {
 		return err
 	}
@@ -672,7 +702,21 @@ func (m *Manager) rotateIdentity(now time.Time) error {
 		}
 	}
 	m.dirty = true
-	m.record(Activity{Kind: "identity.rotated", Audit: true}, now)
+	// One rotation clears every owed mark (§11.14.10); its audit entry
+	// says which: ref "recovery" when it cleared a recovery's, none when
+	// nothing was owed (0.69.2; a transfer's mark would carry its
+	// transfer_id).
+	ref := ""
+	if o := m.st.RotationOwed; o != nil {
+		switch {
+		case o.Transfer != "":
+			ref = o.Transfer // wins when one rotation clears both
+		case o.Recovery != "":
+			ref = "recovery"
+		}
+		m.st.RotationOwed = nil
+	}
+	m.record(Activity{Kind: "identity.rotated", Ref: ref, Audit: true}, now)
 	// §10.8 (0.18.0): the core's ik changed; each connection gets the
 	// update once its epoch under the new ik is active.
 	m.profileCoreChanged(now)

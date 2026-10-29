@@ -84,6 +84,9 @@ type Options struct {
 	// IdleWatchEvery is how often Run's own timer looks at the idle lock
 	// beside the collect loop (§3.6.8; 0: IdleWatchDefault). For tests.
 	IdleWatchEvery time.Duration
+	// KeyRand, if set, draws the seeds of a key rotation (tests: a draw that
+	// fails is a rotation that cannot be made, §11.14.10 "Failure").
+	KeyRand func(n int) ([]byte, error)
 	// AskRand, if set, draws the delay of a suppressed ask's neutral
 	// answer (§10.4.1): a uniform value in [0, n). Nil: crypto/rand.
 	AskRand func(n int64) int64

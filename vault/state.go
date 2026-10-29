@@ -22,6 +22,13 @@ type State struct {
 	RetiredKEMs  []RetiredKEM      `json:"retired_kems,omitempty"`
 	Rotations    []json.RawMessage `json:"rotations,omitempty"` // own identity.rotate chain (§3.4)
 	WakeSeed     []byte            `json:"wake_seed"`
+	// RotationOwed is the owed mark (§11.14.10 "The owed mark"): a rotation
+	// of the vault's keys that could not be made. Recovery is the
+	// recovery_id of a completed recovery (§11.14.6 step 6), written in its
+	// step-2 state write. Transfer is the transfer_id of §11.14.10's own
+	// mark; no release writes it yet. Retried when the recovered phone has
+	// paired and at each later unlock; any rotation clears both.
+	RotationOwed *RotationOwed `json:"rotation_owed,omitempty"`
 
 	Devices     map[string]*Peer `json:"devices"`
 	Connections map[string]*Peer `json:"connections"`
@@ -151,6 +158,12 @@ type RelayState struct {
 	URL     string `json:"url"`
 	Seed    []byte `json:"seed"`
 	Mailbox string `json:"mailbox"`
+}
+
+// RotationOwed holds the owed rotation marks (see State.RotationOwed).
+type RotationOwed struct {
+	Recovery string `json:"recovery,omitempty"`
+	Transfer string `json:"transfer,omitempty"`
 }
 
 // RetiredKEM is a retired static KEM key, kept 400 days for reconnects.

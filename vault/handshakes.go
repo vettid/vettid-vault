@@ -475,7 +475,7 @@ func (m *Manager) crossingPersons(p *Peer, now time.Time) bool {
 			if ownThHigher(og, m.st.Awaiting[aid]) {
 				m.audit(now, "reconnect_crossing_abandoned", p.ID)
 				m.abandonOutgoing(id, now)
-				abandoned = true
+				abandoned = abandoned || m.st.Outgoing[id] == nil
 				break
 			}
 		}
@@ -909,7 +909,11 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 		// deposited); a later hs.fin for it finds nothing, is acked and
 		// dropped, and is not evidence for fork detection.
 		for id, o := range m.st.Awaiting {
-			if o.New == nil && o.PeerID == p.ID && o.Purpose == handshake.PurposeReconnect {
+			// An answer stored before 0.74.0 has no th1 to compare: between
+			// persons it is kept, so that its hs.fin still establishes (the
+			// release-23 outcome, readable) instead of both sides dropping
+			// theirs and ending on different epochs.
+			if o.New == nil && o.PeerID == p.ID && o.Purpose == handshake.PurposeReconnect && (p.isService() || len(o.Th1) == 32) {
 				m.abandonAwaiting(id, now)
 			}
 		}

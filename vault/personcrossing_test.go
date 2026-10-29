@@ -1,6 +1,7 @@
 package vault
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"errors"
@@ -239,21 +240,7 @@ func (c *crossFx) settle(winner int) {
 			}
 		}
 	}
-	// Messages are readable both ways.
-	for from := 0; from < 2; from++ {
-		to := 1 - from
-		nAudit := len(c.d[to].m.Audit())
-		c.d[from].m.mu.Lock()
-		id := c.d[from].m.sendTo(c.peer(from), "x.test", []byte(`{}`), c.d[from].m.now())
-		c.d[from].m.mu.Unlock()
-		if id == "" {
-			c.t.Fatal("nothing sent")
-		}
-		pump(c.t, c.d[from], c.d[to])
-		if _, seen := c.d[to].m.st.SeenInner[c.id[to]+"|"+id]; !seen || len(c.d[to].m.Audit()) != nAudit {
-			c.t.Fatalf("side %d did not read side %d (audit: %v)", to, from, c.d[to].m.Audit()[nAudit:])
-		}
-	}
+	c.readableBothWays()
 }
 
 type crossStep struct {
@@ -379,6 +366,46 @@ func TestPersonCrossingDecisions(t *testing.T) {
 			}
 		}
 	})
+	t.Run("an answer stored without a th1 is kept: both sides end readable on one epoch", func(t *testing.T) {
+		// A record written before 0.74.0 has no th1. H's own reconnect is
+		// open across the upgrade; the answer is kept when H's own completes,
+		// so L's hs.fin still establishes and both end on L's epoch.
+		c := newCrossFx(t, true)
+		hm := c.d[1].m
+		hm.mu.Lock()
+		var hog *OutgoingHS
+		for _, og := range hm.st.Outgoing {
+			hog = og
+		}
+		real := hog.Th1
+		hog.Th1 = make([]byte, 32) // kept when H answers
+		hm.mu.Unlock()
+		c.step(0, 1, kInit)
+		hm.mu.Lock()
+		hog.Th1 = real
+		for _, aw := range hm.st.Awaiting {
+			aw.Th1 = nil // the record of an earlier release
+		}
+		hm.mu.Unlock()
+		c.step(1, 0, kInit)
+		c.step(1, 0, kResp) // L completes its own and drops its answer
+		c.step(0, 1, kResp)
+		c.step(0, 1, kFin)
+		for i := 0; i < 6; i++ {
+			pump(t, c.d[0], c.d[1])
+			pump(t, c.d[1], c.d[0])
+		}
+		for s := 0; s < 2; s++ {
+			p := c.peer(s)
+			if c.d[s].m.hasOutgoing(p.ID, handshake.PurposeReconnect) || len(c.d[s].m.answeredReconnects(p)) != 0 || p.State != PeerActive || p.Fork != nil {
+				t.Fatalf("side %d: reconnect left open or not active", s)
+			}
+		}
+		if string(c.peer(0).LastEpochID) != string(c.peer(1).LastEpochID) {
+			t.Fatal("the sides ended on different epochs")
+		}
+		c.readableBothWays()
+	})
 	t.Run("an hs.resp to an own reconnect abandoned for the peer's takes nothing", func(t *testing.T) {
 		// The defence in handleResp: our own was left open although an
 		// answer with a lower th1 exists (a record the answer path did not
@@ -400,6 +427,7 @@ func TestPersonCrossingDecisions(t *testing.T) {
 		hm.mu.Lock()
 		hog.Th1 = real
 		before := *c.peer(1)
+		beforeChain := len(before.Chain)
 		hm.mu.Unlock()
 		// L answered? L has not seen H's hs.init: H's own gets its hs.resp
 		// from L, which answers it.
@@ -409,7 +437,8 @@ func TestPersonCrossingDecisions(t *testing.T) {
 			t.Fatal("H kept its own")
 		}
 		after := c.peer(1)
-		if after.Standing != before.Standing || after.Reconnect != before.Reconnect || string(after.LastEpochID) != string(before.LastEpochID) {
+		if after.Standing != before.Standing || after.Reconnect != before.Reconnect || string(after.LastEpochID) != string(before.LastEpochID) ||
+			!bytes.Equal(after.IK, before.IK) || !bytes.Equal(after.KEM, before.KEM) || len(after.Chain) != beforeChain {
 			t.Fatal("the dropped hs.resp changed the connection")
 		}
 		if !c.d[1].audited("hs_resp_dropped") {
@@ -422,4 +451,23 @@ func TestPersonCrossingDecisions(t *testing.T) {
 			}
 		}
 	})
+}
+
+// readableBothWays checks that each side reads what the other sends.
+func (c *crossFx) readableBothWays() {
+	c.t.Helper()
+	for from := 0; from < 2; from++ {
+		to := 1 - from
+		nAudit := len(c.d[to].m.Audit())
+		c.d[from].m.mu.Lock()
+		id := c.d[from].m.sendTo(c.peer(from), "x.test", []byte(`{}`), c.d[from].m.now())
+		c.d[from].m.mu.Unlock()
+		if id == "" {
+			c.t.Fatal("nothing sent")
+		}
+		pump(c.t, c.d[from], c.d[to])
+		if _, seen := c.d[to].m.st.SeenInner[c.id[to]+"|"+id]; !seen || len(c.d[to].m.Audit()) != nAudit {
+			c.t.Fatalf("side %d did not read side %d (audit: %v)", to, from, c.d[to].m.Audit()[nAudit:])
+		}
+	}
 }

@@ -377,6 +377,19 @@ func (m *Manager) peerByRelayKey(pk ed25519.PublicKey) *Peer {
 
 // dispatch handles a decrypted session-mode message from principal p.
 func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep *handshake.Epoch, raw []byte, sender ed25519.PublicKey, now time.Time) disposition {
+	if p.Kind == KindConnection && p.Fork != nil {
+		// §6.6 (0.72.0): a connection suspended on fork evidence accepts
+		// nothing, identity.rotate included.
+		m.audit(now, "fork_suspended_drop", p.ID)
+		return ackAfterFlush
+	}
+	if forkEvidence(p, ep, in.TS, now) {
+		// §6.6 "Fork detection": authenticated traffic of a line a restore
+		// replaced, later than the accepted reconnect: two copies of the
+		// peer exist. Suspend; the message is not processed.
+		m.suspendFork(p, now)
+		return ackAfterFlush
+	}
 	if p.Kind == KindConnection && p.Conflict != nil && in.Type != "identity.rotate" {
 		// Release R (§3.4): a connection with two successors of one key
 		// is suspended; nothing is accepted from either.
@@ -764,6 +777,11 @@ func (m *Manager) prune() {
 	for k, t := range m.st.SeenInner {
 		if now.Sub(t) > DedupeRetention {
 			delete(m.st.SeenInner, k)
+		}
+	}
+	for k, t := range m.st.SeenInit {
+		if now.Sub(t) > InitMarkRetention { // §6.6 "Replay"
+			delete(m.st.SeenInit, k)
 		}
 	}
 	for k, r := range m.st.Responses {

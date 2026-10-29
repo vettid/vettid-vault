@@ -112,7 +112,7 @@ func (m *Manager) countRequests(dir string) int {
 func (m *Manager) newRequest(aw *AwaitingHS, fr *handshake.FinResult, now time.Time) {
 	p := aw.New
 	r := &Request{ID: aw.ID, Dir: ReqIn, Peer: p, SAS: fr.SAS, InviteID: aw.InviteID, Remote: aw.Remote,
-		IntroBy: aw.IntroBy, Created: aw.Created, Expires: aw.Expires}
+		IntroBy: aw.IntroBy, Created: aw.Created, Expires: aw.Expires, OwnChain: aw.OwnChain}
 	m.st.Requests[r.ID] = r
 	m.reqEpochs[r.ID] = fr.Epoch
 	m.dirty = true
@@ -156,7 +156,7 @@ func (m *Manager) outgoingEstablished(og *OutgoingHS, res *handshake.Result, now
 	}
 	p.Standing = held
 	r := &Request{ID: p.ID, Dir: ReqOut, Peer: p, SAS: res.SAS, Remote: og.Remote, Name: og.Name, IntroBy: og.IntroBy,
-		Created: og.Created, Expires: og.Expires}
+		Created: og.Created, Expires: og.Expires, OwnChain: og.OwnChain}
 	if r.Expires.IsZero() {
 		r.Expires = og.Created.Add(OutgoingRequestTTL)
 	}
@@ -167,6 +167,9 @@ func (m *Manager) outgoingEstablished(og *OutgoingHS, res *handshake.Result, now
 		String("exp", envelope.FormatTS(r.Expires))
 	if r.Name != "" {
 		b.String("name", r.Name)
+	}
+	if p.PeerKind != "" {
+		b.String("peer_kind", p.PeerKind) // §10.4 (0.69.0)
 	}
 	if r.IntroBy != "" {
 		b.String("introduced_by", r.IntroBy)
@@ -260,7 +263,7 @@ func (m *Manager) activateRequest(r *Request, now time.Time) {
 	if r.Peer.Kind == KindConnection && r.Dir == ReqIn {
 		pendingID = r.ID
 	}
-	m.activate(r.Peer, ep, purpose, nil, pendingID, now)
+	m.activate(r.Peer, ep, purpose, nil, pendingID, chainOr(r.OwnChain, len(m.st.Rotations)), now)
 }
 
 // dropRequest ends a request without activation (§6.4, §6.7, §7.4): the
@@ -649,6 +652,9 @@ func (m *Manager) hRequestList(_ context.Context, s *Session, in *envelope.Inner
 		if r.Name != "" {
 			b.String("name", r.Name)
 		}
+		if r.Peer.PeerKind != "" {
+			b.String("peer_kind", r.Peer.PeerKind) // §10.4 (0.69.0)
+		}
 		if r.IntroBy != "" {
 			b.String("introduced_by", r.IntroBy)
 		}
@@ -663,6 +669,9 @@ func (m *Manager) hRequestList(_ context.Context, s *Session, in *envelope.Inner
 			String("created_at", envelope.FormatTS(og.Created)).String("exp", envelope.FormatTS(og.Expires))
 		if og.Name != "" {
 			b.String("name", og.Name)
+		}
+		if og.New.PeerKind != "" {
+			b.String("peer_kind", og.New.PeerKind) // §10.4 (0.69.0)
 		}
 		if og.IntroBy != "" {
 			b.String("introduced_by", og.IntroBy)

@@ -200,7 +200,18 @@ type Bundle struct {
 	// STAGING-TIME-SCALE §5.2): written after capabilities; 0 when absent
 	// (a release before the scale, meaning 1).
 	TimeScale uint64
+	// PeerKind is what the inviter declares itself to be (0.69.0, §6.4
+	// "Service connections"): "service" for a service vault, "" for a
+	// person. Any other value is read as absent, so a vault that knows
+	// only "service" treats a future value as a person.
+	PeerKind string
 }
+
+// PeerKindService is the one peer_kind a vault knows (§6.4, 0.69.0).
+const PeerKindService = "service"
+
+// maxPeerKind bounds the peer_kind value read (§6.4).
+const maxPeerKind = 32
 
 const expLayout = "2006-01-02T15:04:05Z"
 
@@ -254,6 +265,9 @@ func (b *Bundle) Marshal() ([]byte, error) {
 	}
 	if b.HintName != "" {
 		bb.Raw("hint", strictjson.NewBuilder().String("name", b.HintName).Bytes())
+	}
+	if b.PeerKind == PeerKindService && b.Kind == "connection" {
+		bb.String("peer_kind", b.PeerKind)
 	}
 	return bb.Bytes(), nil
 }
@@ -316,6 +330,15 @@ func ParseBundle(raw []byte) (*Bundle, error) {
 			return nil, ErrBundle
 		} else {
 			b.HintName = n
+		}
+	}
+	// peer_kind (0.69.0, §6.4): read only from a bundle of kind connection,
+	// and only the value "service"; a value that is not a string, is longer
+	// than 32 bytes, or is any other string is ignored (the inviter is then
+	// a person), and so is the member in a bundle of another kind.
+	if b.Kind == "connection" && o.Has("peer_kind") {
+		if k, err := o.String("peer_kind"); err == nil && len(k) <= maxPeerKind && k == PeerKindService {
+			b.PeerKind = k
 		}
 	}
 	if err := b.validate(); err != nil {

@@ -312,3 +312,58 @@ func TestBundleCapabilities(t *testing.T) {
 		t.Fatal("malformed capabilities parsed")
 	}
 }
+
+// 0.69.0 (§6.4 "Service connections"): peer_kind is optional, in a bundle
+// of kind connection only, and only "service" counts; any other value, a
+// value that is not a string or is longer than 32 bytes, and the member in
+// another kind of bundle are ignored (the inviter is then a person). The QR's
+// hash binds it.
+func TestBundlePeerKind(t *testing.T) {
+	b := testBundle(t, "connection", false, TTLInPerson)
+	b.PeerKind = PeerKindService
+	j, err := b.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(j), `"hint":{"name":"Al"},"peer_kind":"service"`) {
+		t.Fatalf("member order: %s", j)
+	}
+	blob, q := publish(t, b, KindConnection)
+	if got, err := OpenBundle(blob, q, t0); err != nil || got.PeerKind != PeerKindService {
+		t.Fatalf("%v %q", err, got.PeerKind)
+	}
+	// Bound by the QR's hash: a bundle without it under the same QR.
+	plain := bytes.Replace(j, []byte(`,"peer_kind":"service"`), nil, 1)
+	blob2, _, _, err := SealBundle(plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenBundle(blob2, q, t0); !errors.Is(err, ErrHash) {
+		t.Fatalf("a bundle with the marker removed under the original QR: %v", err)
+	}
+	for name, v := range map[string]string{"another string": `"Service"`, "future value": `"bank"`, "a number": `1`,
+		"null": `null`, "an object": `{"a":1}`, "empty": `""`, "too long": `"` + strings.Repeat("s", 33) + `"`} {
+		raw := bytes.Replace(j, []byte(`"peer_kind":"service"`), []byte(`"peer_kind":`+v), 1)
+		got, err := ParseBundle(raw)
+		if err != nil || got.PeerKind != "" {
+			t.Errorf("%s: %v %q", name, err, got.PeerKind)
+		}
+	}
+	// A person's bundle carries none, and a bundle of another kind ignores it.
+	person := testBundle(t, "connection", false, TTLInPerson)
+	if pj, _ := person.Marshal(); strings.Contains(string(pj), "peer_kind") {
+		t.Fatal("a person's bundle carries peer_kind")
+	}
+	for _, kind := range []string{"app", "desktop", "agent"} {
+		o := testBundle(t, kind, false, TTLInPerson)
+		o.PeerKind = PeerKindService
+		oj, err := o.Marshal()
+		if err != nil || strings.Contains(string(oj), "peer_kind") {
+			t.Fatalf("%s: a pairing bundle wrote peer_kind: %v", kind, err)
+		}
+		withKind := bytes.Replace(oj, []byte(`"token"`), []byte(`"peer_kind":"service","token"`), 1)
+		if got, err := ParseBundle(withKind); err != nil || got.PeerKind != "" {
+			t.Fatalf("%s: %v %q", kind, err, got.PeerKind)
+		}
+	}
+}

@@ -43,11 +43,14 @@ type State struct {
 	// 0.10.3), by pending_id (incoming) or connection_id (outgoing).
 	Requests map[string]*Request `json:"requests,omitempty"`
 
-	SeenMsgIDs map[string]time.Time      `json:"seen_msg_ids"` // relay msg_id dedupe (16 d)
-	SeenInner  map[string]time.Time      `json:"seen_inner"`   // principal|inner id (16 d)
-	Responses  map[string]CachedResponse `json:"responses"`    // principal|inner id (24 h)
-	Outbox     []*OutboxEntry            `json:"outbox"`
-	Audit      []AuditEntry              `json:"audit"`
+	SeenMsgIDs map[string]time.Time `json:"seen_msg_ids"` // relay msg_id dedupe (16 d)
+	SeenInner  map[string]time.Time `json:"seen_inner"`   // principal|inner id (16 d)
+	// SeenInit are the transcript hashes th1 of the reconnect hs.init the
+	// vault answered (§6.6 "Replay", 0.72.0), hex, kept 16 days + 5 minutes.
+	SeenInit  map[string]time.Time      `json:"seen_init,omitempty"`
+	Responses map[string]CachedResponse `json:"responses"` // principal|inner id (24 h)
+	Outbox    []*OutboxEntry            `json:"outbox"`
+	Audit     []AuditEntry              `json:"audit"`
 
 	Settings Settings                   `json:"settings"`
 	Features map[string]json.RawMessage `json:"features"`
@@ -244,7 +247,71 @@ type Peer struct {
 	Conflict *RotationConflict `json:"rotation_conflict,omitempty"`
 	// Rejected holds the successors the holder dropped at a resolution.
 	Rejected []RejectedSuccessor `json:"rejected_successors,omitempty"`
+
+	// PeerKind is what the inviter declared in the invitation bundle
+	// ("service", 0.69.0, §6.4): read at connection.invite.accept, copied
+	// into the connection at activation and never changed afterwards. Only
+	// a connection that is a service keeps an epoch history (§6.6, 0.72.0).
+	PeerKind string `json:"peer_kind,omitempty"`
+	// History is the epochs a service connection activated whose successor
+	// took over less than 35 days ago (§6.6 "Epoch history", 0.72.0), the
+	// current one last. Person connections keep none.
+	History []EpochRecord `json:"epoch_history,omitempty"`
+	// Watch is the epoch line a restored service's reconnect replaced
+	// (§6.6 "Fork detection", 0.72.0): authenticated evidence of it means
+	// two copies of the peer exist.
+	Watch *ForkWatch `json:"fork_watch,omitempty"`
+	// Fork is set when the connection was suspended on that evidence
+	// (§6.6): it sends nothing and accepts nothing until a new invitation
+	// replaces it.
+	Fork *ForkSuspension `json:"fork_suspension,omitempty"`
 }
+
+// EpochRecord is one epoch of a service connection's history (§6.6, 0.72.0).
+type EpochRecord struct {
+	ID        []byte    `json:"id"`
+	Activated time.Time `json:"activated"`
+	// Superseded is when the epoch stopped being current; zero for the
+	// current epoch, which is always accepted. The 35-day window runs from
+	// it.
+	Superseded time.Time `json:"superseded,omitempty"`
+	// OwnChain is the own rotation-chain count whose key signed the
+	// epoch's handshake (not the count at activation): the responder's
+	// `rotations` for a reconnect naming this epoch run from it.
+	OwnChain int `json:"own_chain"`
+}
+
+// ForkWatch is the line a restored service's accepted reconnect replaced.
+type ForkWatch struct {
+	// Replaced are the ids of the epochs after the one the reconnect named.
+	Replaced [][]byte `json:"replaced"`
+	// TS is the inner ts of the accepted reconnect hs.init: only evidence
+	// with a later ts counts (the same sender's clock).
+	TS time.Time `json:"ts"`
+	// Until ends the watch with the records of the replaced line (the
+	// 35-day window from the accepted reconnect).
+	Until time.Time `json:"until"`
+}
+
+// ForkSuspension marks a connection suspended on fork evidence (§6.6).
+type ForkSuspension struct {
+	At time.Time `json:"at"`
+}
+
+// suspended reports whether p sends nothing and accepts nothing: two
+// successors of one identity key (§3.4) or fork evidence (§6.6, 0.72.0).
+func (p *Peer) suspended() bool {
+	return p.Kind == KindConnection && (p.Conflict != nil || p.Fork != nil)
+}
+
+// replaceable reports whether a new invitation may replace the connection:
+// a stale one (§7.4), or one suspended on fork evidence, whose only way out
+// is a new invitation (§6.6, 0.72.0).
+func (p *Peer) replaceable() bool { return p.State == PeerStale || p.Fork != nil }
+
+// isService reports whether p is a connection the inviter declared a
+// service (§6.4, 0.69.0).
+func (p *Peer) isService() bool { return p.Kind == KindConnection && p.PeerKind == "service" }
 
 // RejectedSuccessor is a successor of OldIK the holder dropped at
 // connection.rotation.resolve (§3.4): a later copy of it is refused, not a
@@ -393,6 +460,36 @@ type AwaitingHS struct {
 	IntroBy  string    `json:"intro_by,omitempty"` // §10.15
 	Expires  time.Time `json:"expires,omitempty"`
 	Direct   bool      `json:"direct,omitempty"`
+
+	// OwnChain is the own rotation-chain count whose key signed hs.resp
+	// (§6.6, 0.72.0); nil in a record written before it.
+	OwnChain *int `json:"own_chain,omitempty"`
+	// RespOutbox is the outbox entry holding hs.resp, so that a reconnect
+	// abandoned before it was deposited sends nothing (§6.6 "Crossing
+	// reconnects", 0.72.1).
+	RespOutbox string `json:"resp_outbox,omitempty"`
+	// Reconnect is what an answered reconnect applies once hs.fin
+	// verified: nothing changes before sig_I (§6.6 "Replay", 0.72.0).
+	Reconnect *PendingReconnect `json:"reconnect,omitempty"`
+}
+
+// PendingReconnect is a reconnect hs.init's effects, held until hs.fin.
+type PendingReconnect struct {
+	Standing  HeldToken `json:"standing"`
+	Reconnect HeldToken `json:"reconnect"`
+	// IK, KEM and Links are the initiator's new identity and the rotation
+	// statements not yet followed.
+	IK    []byte            `json:"ik,omitempty"`
+	KEM   []byte            `json:"kem,omitempty"`
+	Links []json.RawMessage `json:"links,omitempty"`
+	// Named is the epoch the hs.init's ctx named. Older: it was not the
+	// current one (a restore of a service, §6.6 "Accepting ctx"); Fork: it
+	// named an epoch of a replaced line (evidence of two copies).
+	Named []byte `json:"named,omitempty"`
+	Older bool   `json:"older,omitempty"`
+	Fork  bool   `json:"fork,omitempty"`
+	// TS is the hs.init's inner ts.
+	TS time.Time `json:"ts"`
 }
 
 // OutgoingHS is a handshake the vault initiated, awaiting hs.resp.
@@ -406,6 +503,12 @@ type OutgoingHS struct {
 	Created time.Time                `json:"created"`
 	Init    handshake.InitiatorState `json:"init"`
 	Issued  []IssuedToken            `json:"issued,omitempty"`
+	// OwnChain is the own rotation-chain count whose key signed hs.init
+	// (§6.6, 0.72.0); nil in a record written before it. InitOutbox is the
+	// outbox entry holding the hs.init, so that an abandoned reconnect
+	// sends nothing (0.72.1).
+	OwnChain   *int   `json:"own_chain,omitempty"`
+	InitOutbox string `json:"init_outbox,omitempty"`
 
 	// An outgoing connection request in state waiting (§6.4, §10.4):
 	// what the accept learned from the bundle, and when it ends.
@@ -446,6 +549,9 @@ type Request struct {
 	IntroBy     string     `json:"intro_by,omitempty"`
 	Created     time.Time  `json:"created"`
 	Expires     time.Time  `json:"expires"`
+	// OwnChain is the own rotation-chain count whose key signed the
+	// handshake (§6.6, 0.72.0); nil in a record written before it.
+	OwnChain *int `json:"own_chain,omitempty"`
 }
 
 // CachedResponse is a response kept for 24 h so a duplicate request gets

@@ -1142,10 +1142,11 @@ func TestOpenRekeysAtRestore(t *testing.T) {
 	t.Run("a late hs.fin from before the crash activates nothing", func(t *testing.T) { answered(t, 9*time.Hour+10*time.Minute, false) })
 }
 
-// Two person vaults reconnecting at once: no tie-break is specified for
-// persons, so the release-23 behaviour stays and neither side abandons its
-// own: both complete, and each can read what the other sends (receive keys
-// of earlier epochs are kept).
+// Two person vaults reconnecting at once, the interleaving of the review of
+// 0.72.1 (each answers the other's hs.init, then processes the other's
+// hs.resp before any hs.fin): since 0.74.0 the lower th1 wins and the other
+// is abandoned (see TestPersonCrossingEveryOrder); each side can read what
+// the other sends afterwards.
 func TestPersonCrossingReconnectsReadable(t *testing.T) {
 	a, b := newVaultPair(t)
 	_, link := a.linkFor(t, time.Hour)

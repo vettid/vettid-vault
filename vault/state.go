@@ -160,13 +160,13 @@ type RelayState struct {
 	Mailbox string `json:"mailbox"`
 }
 
-// RetiredKEM is a retired static KEM key, kept 400 days for reconnects.
 // RotationOwed holds the owed rotation marks (see State.RotationOwed).
 type RotationOwed struct {
 	Recovery string `json:"recovery,omitempty"`
 	Transfer string `json:"transfer,omitempty"`
 }
 
+// RetiredKEM is a retired static KEM key, kept 400 days for reconnects.
 type RetiredKEM struct {
 	Seed      []byte    `json:"seed"`
 	RetiredAt time.Time `json:"retired_at"`

@@ -262,6 +262,35 @@ func (m *Manager) abandonHandshakes(p *Peer, all, answers bool, now time.Time) {
 	}
 }
 
+// markRekeysReplaced marks the rekeys open for p, ours and answered, as made
+// on the replaced line (§6.6).
+func (m *Manager) markRekeysReplaced(p *Peer) {
+	for _, og := range m.st.Outgoing {
+		if og.New == nil && og.PeerID == p.ID && og.Purpose == handshake.PurposeRekey {
+			og.Replaced = true
+		}
+	}
+	for _, aw := range m.st.Awaiting {
+		if aw.New == nil && aw.PeerID == p.ID && aw.Purpose == handshake.PurposeRekey {
+			aw.Replaced = true
+		}
+	}
+	m.dirty = true
+}
+
+// replacedRekeyAnswered handles the verified hs.resp or hs.fin of a rekey
+// made on the replaced line: with an inner ts later than the accepted
+// reconnect's it is authenticated evidence of the other copy and suspends
+// the connection; an earlier one (the restored peer's, from before its
+// crash) activates nothing.
+func (m *Manager) replacedRekeyAnswered(p *Peer, ts, now time.Time) {
+	if w := p.Watch; w != nil && now.Before(w.Until) && ts.After(w.TS) {
+		m.suspendFork(p, now)
+		return
+	}
+	m.audit(now, "hs_replaced_line_dropped", p.ID)
+}
+
 // abandonAwaiting ends an answered handshake that did not complete: its
 // state is aborted, its tokens denylisted and its hs.resp unsent.
 func (m *Manager) abandonAwaiting(id string, now time.Time) {

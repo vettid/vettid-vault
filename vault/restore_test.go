@@ -982,3 +982,257 @@ func TestOpenReconnectKeptAcrossStart(t *testing.T) {
 		t.Fatalf("a second hs.init was made: %d outgoing, same outbox=%v", n, same)
 	}
 }
+
+// Rekeys open when a restore is accepted were made on the replaced line
+// (§6.6). They stay, marked, and block no new rekey; a verified hs.resp or
+// hs.fin of one with a ts later than the accepted reconnect's is evidence of
+// a second copy and suspends; an earlier one activates nothing.
+func TestOpenRekeysAtRestore(t *testing.T) {
+	restore := func(f *svcFx) {
+		f.at(10 * time.Hour)
+		ini := f.initiate(f.ids[1], f.now(), nil)
+		f.deliver(ini.Envelope(), "")
+		if f.complete(ini) == nil {
+			t.Fatal("restore not answered")
+		}
+	}
+	// The vault's own rekey, answered by the copy that kept running (e3).
+	own := func(t *testing.T, copyTS time.Duration, wantFork bool) {
+		f := newSvcFx(t, "service")
+		f.build(3)
+		e3 := f.cur
+		f.at(4 * time.Hour)
+		m := f.d.m
+		m.mu.Lock()
+		m.startRekey(f.p, f.now())
+		m.drainOutbox(context.Background())
+		m.mu.Unlock()
+		raw := f.takeFor(func(env *envelope.Envelope) bool { return env.Mode() == envelope.ModeSession })
+		if raw == nil {
+			t.Fatal("no rekey hs.init")
+		}
+		restore(f)
+		last := append([]byte(nil), f.p.LastEpochID...)
+		marked := 0
+		m.mu.Lock()
+		for _, og := range m.st.Outgoing {
+			if og.Purpose == handshake.PurposeRekey && og.Replaced {
+				marked++
+			}
+		}
+		blocked := m.hasOutgoing(f.p.ID, handshake.PurposeRekey)
+		m.mu.Unlock()
+		if marked != 1 || blocked {
+			t.Fatalf("open rekey after the restore: marked=%d blocks=%v", marked, blocked)
+		}
+		at := f.base.Add(copyTS)
+		pi, err := handshake.OpenRekeyInit(raw, e3, at)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, renv, err := pi.Respond(handshake.ResponderConfig{Identity: f.n.ik, Policy: policyFor(KindConnection),
+			CollectSender: f.vaultPK(), RecordRelayKey: f.vaultPK(), KnownInitiatorIK: m.keys.ik.Public().(ed25519.PublicKey), Now: at})
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.at(12 * time.Hour)
+		f.deliver(renv, f.stJTI)
+		if (f.p.Fork != nil) != wantFork || !bytes.Equal(f.p.LastEpochID, last) {
+			t.Fatalf("fork=%v last unchanged=%v", f.p.Fork != nil, bytes.Equal(f.p.LastEpochID, last))
+		}
+		if wantFork && f.feedFor("connection.fork_suspected") == nil {
+			t.Fatal("no feed item")
+		}
+	}
+	t.Run("hs.resp of the vault's rekey from the second copy suspends", func(t *testing.T) { own(t, 11*time.Hour, true) })
+	t.Run("an earlier hs.resp activates nothing", func(t *testing.T) { own(t, 9*time.Hour+30*time.Minute, false) })
+
+	// A rekey the vault answered; its hs.fin comes after the restore.
+	answered := func(t *testing.T, finTS time.Duration, wantFork bool) {
+		f := newSvcFx(t, "service")
+		f.build(3)
+		e3 := f.cur
+		f.at(9 * time.Hour)
+		ini, err := handshake.NewInitiator(handshake.InitiatorConfig{
+			Purpose: handshake.PurposeRekey, Identity: f.n.ik, StaticKEM: f.n.kem.Public(), Relay: f.n.addr,
+			ResponderIK: f.d.m.keys.ik.Public().(ed25519.PublicKey), ResponderRelayKey: f.vaultPK(), Current: e3,
+			Policy: policyFor(KindConnection), Now: f.now(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.deliver(ini.Envelope(), f.stJTI)
+		resp := f.takeFor(func(env *envelope.Envelope) bool {
+			return env.Mode() == envelope.ModeSealed && env.RecipientKid().Equal(ini.EphKid())
+		})
+		if resp == nil {
+			t.Fatal("rekey not answered")
+		}
+		res, err := ini.HandleResp(resp, f.vaultPK(), f.base.Add(finTS))
+		if err != nil {
+			t.Fatal(err)
+		}
+		restore(f)
+		last := append([]byte(nil), f.p.LastEpochID...)
+		f.at(12 * time.Hour)
+		f.deliver(res.Fin, f.stJTI)
+		if (f.p.Fork != nil) != wantFork || !bytes.Equal(f.p.LastEpochID, last) || f.awaiting() != 0 {
+			t.Fatalf("fork=%v last unchanged=%v awaiting=%d", f.p.Fork != nil, bytes.Equal(f.p.LastEpochID, last), f.awaiting())
+		}
+	}
+	t.Run("a late hs.fin from the second copy suspends", func(t *testing.T) { answered(t, 11*time.Hour, true) })
+	t.Run("a late hs.fin from before the crash activates nothing", func(t *testing.T) { answered(t, 9*time.Hour+10*time.Minute, false) })
+}
+
+// Two person vaults reconnecting at once: no tie-break is specified for
+// persons, so the release-23 behaviour stays and neither side abandons its
+// own: both complete, and each can read what the other sends (receive keys
+// of earlier epochs are kept).
+func TestPersonCrossingReconnectsReadable(t *testing.T) {
+	a, b := newVaultPair(t)
+	_, link := a.linkFor(t, time.Hour)
+	r, _ := b.request(t, "connection.invite.accept", `{"link":"`+link+`"}`)
+	cid := bodyStr(t, r, "connection_id")
+	pump(t, b, a)
+	pump(t, a, b)
+	b.appInbox()
+	pump(t, b, a)
+	aPend := event(a.appInbox(), "connection.request.pending")
+	a.request(t, "connection.approve", `{"pending_id":"`+bodyStr(t, aPend, "pending_id")+`"}`)
+	pump(t, a, b)
+	b.request(t, "connection.approve", `{"connection_id":"`+cid+`"}`)
+	pump(t, b, a)
+	pb := b.m.st.Connections[cid]
+	var pa *Peer
+	for _, p := range a.m.st.Connections {
+		pa = p
+	}
+	if pa == nil || pb == nil || pa.State != PeerActive || pb.State != PeerActive {
+		t.Fatal("not connected")
+	}
+	for _, d := range []*devFixture{a, b} {
+		d.appInbox()
+	}
+	for _, x := range []struct {
+		d *devFixture
+		p *Peer
+	}{{a, pa}, {b, pb}} {
+		x.d.m.mu.Lock()
+		x.d.m.startReconnect(x.p, x.d.m.now())
+		x.d.m.mu.Unlock()
+	}
+	for i := 0; i < 8; i++ {
+		pump(t, a, b)
+		pump(t, b, a)
+	}
+	if a.m.hasOutgoing(pa.ID, handshake.PurposeReconnect) || b.m.hasOutgoing(pb.ID, handshake.PurposeReconnect) {
+		t.Fatal("a reconnect is still open")
+	}
+	for _, x := range []struct {
+		from, to *devFixture
+		p, q     *Peer
+	}{{a, b, pa, pb}, {b, a, pb, pa}} {
+		nAudit := len(x.to.m.Audit())
+		x.from.m.mu.Lock()
+		id := x.from.m.sendTo(x.p, "x.test", []byte(`{}`), x.from.m.now())
+		x.from.m.mu.Unlock()
+		if id == "" {
+			t.Fatal("nothing sent")
+		}
+		pump(t, x.from, x.to)
+		_, seen := x.to.m.st.SeenInner[x.q.ID+"|"+id]
+		if !seen || len(x.to.m.Audit()) != nAudit {
+			t.Fatalf("a message after crossing reconnects was not read (audit: %v)", x.to.m.Audit()[nAudit:])
+		}
+	}
+}
+
+// An expired reconnect answer denylists the tokens it issued (§6.6).
+func TestExpiredReconnectAnswerRevokesTokens(t *testing.T) {
+	f := newSvcFx(t, "service")
+	f.build(1)
+	ini := f.initiate(f.p.LastEpochID, f.now(), nil)
+	f.deliver(ini.Envelope(), "")
+	var issued []IssuedToken
+	for _, a := range f.d.m.st.Awaiting {
+		issued = a.Issued
+	}
+	if len(issued) != 2 {
+		t.Fatal("setup")
+	}
+	f.at(f.off + HandshakeTTL + time.Hour)
+	f.d.m.mu.Lock()
+	f.d.m.housekeeping(f.now())
+	f.d.m.drainOutbox(context.Background())
+	f.d.m.mu.Unlock()
+	if f.awaiting() != 0 {
+		t.Fatal("answer kept")
+	}
+	for _, tk := range issued {
+		if !f.revoked(tk.JTI) {
+			t.Fatal("a token of the expired answer is still valid")
+		}
+	}
+}
+
+// A rotation the connection followed between hs.init and hs.fin (from
+// identity.rotate) does not refuse the reconnect: the links to follow are
+// worked out again at hs.fin and the followed one is skipped.
+func TestRotationFollowedBetweenInitAndFin(t *testing.T) {
+	k0, k1 := rcKey(t, 0x10), rcKey(t, 0x20)
+	r1 := rcLink(t, k0, k1)
+	f := newSvcFx(t, "service")
+	f.p.IK, f.p.KEM = k0.ik.Public().(ed25519.PublicKey), k0.kem.Public().Bytes()
+	f.n.ik, f.n.kem = k1.ik, k1.kem
+	ini := f.initiate(f.p.LastEpochID, f.now(), []*handshake.Rotation{r1})
+	f.deliver(ini.Envelope(), "")
+	if f.awaiting() != 1 {
+		t.Fatal("not answered")
+	}
+	f.d.m.mu.Lock() // identity.rotate arrives and is followed
+	f.p.IK, f.p.KEM, f.p.Chain = k1.ik.Public().(ed25519.PublicKey), k1.kem.Public().Bytes(), rawLinks(r1)
+	f.d.m.mu.Unlock()
+	last := append([]byte(nil), f.p.LastEpochID...)
+	if f.complete(ini) == nil || bytes.Equal(f.p.LastEpochID, last) || len(f.p.Chain) != 1 ||
+		!bytes.Equal(f.p.IK, k1.ik.Public().(ed25519.PublicKey)) || f.d.audited("reconnect_refused") {
+		t.Fatal("the reconnect was refused, or the link followed twice")
+	}
+}
+
+// The held reconnect survives a restart: the state is written, the vault
+// unlocked again, and the hs.fin that arrives applies it (§6.6 "Replay").
+func TestPendingReconnectSurvivesRestart(t *testing.T) {
+	f := newSvcFx(t, "service")
+	f.build(2)
+	f.at(10 * time.Hour)
+	ini := f.initiate(f.ids[1], f.now(), nil)
+	f.deliver(ini.Envelope(), "")
+	res := f.respOf(ini)
+	if res == nil {
+		t.Fatal("not answered")
+	}
+	if err := f.d.m.Lock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	m2, _, err := f.d.unlock(testPIN, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m2.now = f.now
+	m2.features = append(m2.features, f.sink)
+	f.d.m = m2
+	f.p = m2.st.Connections["c1"]
+	aw := (*AwaitingHS)(nil)
+	for _, a := range m2.st.Awaiting {
+		aw = a
+	}
+	if aw == nil || aw.Reconnect == nil || !aw.Reconnect.Older || aw.Reconnect.Standing.Token == "" || !m2.initAnswered(ini.Th1()) {
+		t.Fatalf("the held reconnect or the th1 mark did not survive: %+v", aw)
+	}
+	f.sink.got = nil
+	f.deliver(res.Fin, f.stJTI)
+	nid := res.Epoch.ID()
+	if !bytes.Equal(f.p.LastEpochID, nid[:]) || f.p.Watch == nil || len(f.p.Watch.Replaced) != 1 || !f.sink.has("connection.restored_reconnect") {
+		t.Fatal("the hs.fin after the restart did not apply the reconnect")
+	}
+}

@@ -360,11 +360,7 @@ func (m *Manager) housekeeping(now time.Time) {
 	m.expireRequests(now)
 	for id, aw := range m.st.Awaiting {
 		if aw.New == nil && now.Sub(aw.Created) > HandshakeTTL {
-			if r := m.awaiting[id]; r != nil {
-				r.Abort()
-			}
-			delete(m.awaiting, id)
-			delete(m.st.Awaiting, id)
+			m.abandonAwaiting(id, now) // its tokens are denylisted too (§6.6)
 		}
 	}
 	for id, og := range m.st.Outgoing {

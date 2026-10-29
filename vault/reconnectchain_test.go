@@ -125,7 +125,7 @@ func TestReconnectChainKnown(t *testing.T) {
 			t.Fatalf("answered=%v chain=%d", ok, len(p.Chain))
 		}
 		for _, aw := range d.m.st.Awaiting {
-			if aw.Reconnect == nil || len(aw.Reconnect.Links) != 1 {
+			if aw.Reconnect == nil || len(aw.Reconnect.Rotations) != 1 {
 				t.Fatal("the link to follow is not held for hs.fin")
 			}
 		}
@@ -142,7 +142,7 @@ func TestReconnectChainKnown(t *testing.T) {
 			t.Fatalf("answered=%v chain=%d", ok, len(p.Chain))
 		}
 		for _, aw := range d.m.st.Awaiting {
-			if aw.Reconnect == nil || len(aw.Reconnect.Links) != 1 { // only the link not yet followed
+			if aw.Reconnect == nil || len(aw.Reconnect.Rotations) != 2 { // every rotation sent; the links to follow are worked out at hs.fin
 				t.Fatal("the link to follow is not held for hs.fin")
 			}
 		}

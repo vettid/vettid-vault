@@ -412,10 +412,10 @@ func (m *Manager) respondReconnect(pi *handshake.PendingInit, p *Peer, sender ed
 		TS: pi.Inner().TS}
 	// Links already followed (from identity.rotate) are not added again;
 	// the rest are followed at hs.fin, once sig_I verified.
-	if fresh := body.Rotations[handshake.KnownPrefix(parseRotations(p.Chain), body.Rotations):]; len(fresh) > 0 {
-		pend.IK, pend.KEM = body.From.IK, body.From.KEM.Bytes()
-		for _, r := range fresh {
-			pend.Links = append(pend.Links, r.Marshal())
+	if len(body.Rotations) > 0 {
+		pend.IK = body.From.IK
+		for _, r := range body.Rotations {
+			pend.Rotations = append(pend.Rotations, r.Marshal())
 		}
 	}
 	m.markInit(th1, now)
@@ -550,6 +550,11 @@ func (m *Manager) handleFin(ctx context.Context, id string, raw []byte, sender e
 		m.finishReconnect(p, aw, fr, now)
 		return ackAfterFlush
 	}
+	if aw.Replaced {
+		fr.Epoch.Destroy() // a rekey answered on the replaced line (§6.6): see handleResp
+		m.replacedRekeyAnswered(p, fr.Inner.TS, now)
+		return ackAfterFlush
+	}
 	if p.suspended() {
 		// §3.4, §6.6: a suspended connection accepts nothing.
 		fr.Epoch.Destroy()
@@ -586,44 +591,59 @@ func (m *Manager) finishReconnect(p *Peer, aw *AwaitingHS, fr *handshake.FinResu
 		m.suspendFork(p, now)
 		return
 	}
-	// The chain is checked again against what the connection followed since
-	// the hs.init: an identity.rotate in between must not be rolled back or
-	// forked by a stale reconnect.
-	var links []*handshake.Rotation
-	if len(pend.Links) > 0 {
-		for _, raw := range pend.Links {
-			r, err := handshake.ParseRotation(raw)
-			if err != nil {
-				links = nil
-				break
-			}
-			links = append(links, r)
-		}
-		final, _, err := handshake.ResolveChain(p.IK, links)
-		if links == nil || err != nil || !suite.EqualPublic(final, pend.IK) {
+	// The chain is worked out again against what the connection followed
+	// since the hs.init (§3.4, §6.6): links followed meanwhile (from
+	// identity.rotate) are skipped, and a stale reconnect must not roll the
+	// identity back or fork it.
+	var fresh []*handshake.Rotation
+	var kem *suite.PublicKey
+	if len(pend.Rotations) > 0 {
+		all := parseRotations(pend.Rotations)
+		if len(all) != len(pend.Rotations) {
 			fr.Epoch.Destroy()
 			denyIssued()
 			m.audit(now, "reconnect_refused", p.ID)
 			return
 		}
+		final, k, n, err := handshake.ResolveChainKnown(p.IK, parseRotations(p.Chain), all)
+		if err != nil || !suite.EqualPublic(final, pend.IK) {
+			fr.Epoch.Destroy()
+			denyIssued()
+			m.audit(now, "reconnect_refused", p.ID)
+			return
+		}
+		fresh, kem = all[n:], k
 	}
 	if pend.Older {
 		m.setWatch(p, pend.Named, pend.TS, now)
 	}
 	ref := p.activatedAt(pend.Named)
-	if len(links) > 0 {
-		p.IK, p.KEM = append([]byte(nil), pend.IK...), append([]byte(nil), pend.KEM...)
-		p.Chain = append(p.Chain, pend.Links...)
-	}
-	p.Standing, p.Reconnect = pend.Standing, pend.Reconnect
-	// Both ends of the connection settle on this epoch: our own reconnect
-	// is abandoned, and any other answer (a crossing one) with it.
-	for id, o := range m.st.Awaiting {
-		if id != aw.ID && o.New == nil && o.PeerID == p.ID && o.Purpose == handshake.PurposeReconnect {
-			m.abandonAwaiting(id, now)
+	if len(fresh) > 0 && kem != nil {
+		p.IK, p.KEM = append([]byte(nil), pend.IK...), kem.Bytes()
+		for _, r := range fresh {
+			p.Chain = append(p.Chain, r.Marshal())
 		}
 	}
-	m.abandonHandshakes(p, false, false, now)
+	p.Standing, p.Reconnect = pend.Standing, pend.Reconnect
+	if p.isService() {
+		// Both ends of a service connection settle on this epoch: the
+		// service yields (§6.6 "Crossing reconnects", 0.72.1), so our own
+		// reconnect is abandoned, and any other answer with it. A person
+		// connection keeps the earlier behaviour (no tie-break is specified).
+		for id, o := range m.st.Awaiting {
+			if id != aw.ID && o.New == nil && o.PeerID == p.ID && o.Purpose == handshake.PurposeReconnect {
+				m.abandonAwaiting(id, now)
+			}
+		}
+		m.abandonHandshakes(p, false, false, now)
+	}
+	if pend.Older {
+		// Rekeys open now were made on epochs of the line the restore
+		// replaced. They stay, marked, so that a hs.resp or hs.fin from a
+		// second copy is caught as fork evidence and a late one from the
+		// restored peer activates nothing; they block no new rekey.
+		m.markRekeysReplaced(p)
+	}
 	m.restoring = pend.Older
 	m.activate(p, fr.Epoch, aw.Purpose, aw.Issued, "", chainOr(aw.OwnChain, len(m.st.Rotations)), now)
 	m.restoring = false
@@ -788,6 +808,14 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 		res.Epoch.Destroy()
 		return ackAfterFlush
 	}
+	if og.Replaced {
+		// A rekey made on the replaced line (§6.6): the answer verified, so
+		// it is authenticated. From a second copy (a later ts) it is fork
+		// evidence; otherwise it is dropped and nothing activates.
+		res.Epoch.Destroy()
+		m.replacedRekeyAnswered(p, res.Inner.TS, now)
+		return ackAfterFlush
+	}
 	if res.Resp.Token != "" {
 		if t, err := m.heldToken(res.Resp.Token, p); err == nil {
 			p.Standing = t
@@ -811,8 +839,9 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 	// hs.fin goes first: what activation sends in the new epoch (the
 	// profile.update after an ik rotation, §10.8) follows it.
 	m.queueDeposit(&OutboxEntry{Op: OpDeposit, PeerID: p.ID, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Payload: res.Fin}, now)
-	if og.Purpose == handshake.PurposeReconnect {
-		// §6.6 "Crossing reconnects" (0.72.1): our reconnect completed
+	if og.Purpose == handshake.PurposeReconnect && p.isService() {
+		// §6.6 "Crossing reconnects" (0.72.1, services only: the service
+		// yields; no tie-break between two persons is specified): our reconnect completed
 		// first (sig_R verified, hs.fin sent). A pending answer to the
 		// peer's own hs.init is dropped and its tokens revoked; a later
 		// hs.fin for it finds nothing, is acked and dropped, and is not
@@ -852,7 +881,7 @@ func (m *Manager) recordOutgoing(ini *handshake.Initiator, peerID string, newPee
 
 func (m *Manager) hasOutgoing(peerID string, purpose handshake.Purpose) bool {
 	for _, og := range m.st.Outgoing {
-		if og.PeerID == peerID && og.Purpose == purpose {
+		if og.PeerID == peerID && og.Purpose == purpose && !og.Replaced {
 			return true
 		}
 	}

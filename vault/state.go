@@ -471,17 +471,20 @@ type AwaitingHS struct {
 	// Reconnect is what an answered reconnect applies once hs.fin
 	// verified: nothing changes before sig_I (§6.6 "Replay", 0.72.0).
 	Reconnect *PendingReconnect `json:"reconnect,omitempty"`
+	// Replaced marks a rekey answer open when a restore was accepted: it
+	// was made on an epoch of the line the restore replaced (§6.6).
+	Replaced bool `json:"replaced,omitempty"`
 }
 
 // PendingReconnect is a reconnect hs.init's effects, held until hs.fin.
 type PendingReconnect struct {
 	Standing  HeldToken `json:"standing"`
 	Reconnect HeldToken `json:"reconnect"`
-	// IK, KEM and Links are the initiator's new identity and the rotation
-	// statements not yet followed.
-	IK    []byte            `json:"ik,omitempty"`
-	KEM   []byte            `json:"kem,omitempty"`
-	Links []json.RawMessage `json:"links,omitempty"`
+	// IK and Rotations are the initiator's identity and every rotation
+	// statement its hs.init carried; the links not yet followed are worked
+	// out again at hs.fin (§3.4, §6.6).
+	IK        []byte            `json:"ik,omitempty"`
+	Rotations []json.RawMessage `json:"rotations,omitempty"`
 	// Named is the epoch the hs.init's ctx named. Older: it was not the
 	// current one (a restore of a service, §6.6 "Accepting ctx"); Fork: it
 	// named an epoch of a replaced line (evidence of two copies).
@@ -509,6 +512,10 @@ type OutgoingHS struct {
 	// sends nothing (0.72.1).
 	OwnChain   *int   `json:"own_chain,omitempty"`
 	InitOutbox string `json:"init_outbox,omitempty"`
+	// Replaced marks a rekey open when a restore was accepted: it was made
+	// on an epoch of the replaced line (§6.6); it blocks nothing, and its
+	// hs.resp is fork evidence when it carries a later ts.
+	Replaced bool `json:"replaced,omitempty"`
 
 	// An outgoing connection request in state waiting (§6.4, §10.4):
 	// what the accept learned from the bundle, and when it ends.

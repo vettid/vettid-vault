@@ -1044,6 +1044,66 @@ func TestOpenRekeysAtRestore(t *testing.T) {
 			t.Fatal("no feed item")
 		}
 	}
+	// The restored service rekeys while a marked rekey of the dead line is
+	// open: its th1 is not compared with the marked one, so its rekey is
+	// answered every time and the marked one stays to catch the late answer.
+	t.Run("a rekey of the restored service is answered beside a marked one", func(t *testing.T) {
+		f := newSvcFx(t, "service")
+		f.build(3)
+		e3 := f.cur
+		f.at(4 * time.Hour)
+		m := f.d.m
+		m.mu.Lock()
+		m.startRekey(f.p, f.now())
+		m.drainOutbox(context.Background())
+		m.mu.Unlock()
+		raw := f.takeFor(func(env *envelope.Envelope) bool { return env.Mode() == envelope.ModeSession })
+		restore(f)
+		for i := 0; i < 10; i++ {
+			f.at(11*time.Hour + time.Duration(i)*time.Minute)
+			ini, err := handshake.NewInitiator(handshake.InitiatorConfig{
+				Purpose: handshake.PurposeRekey, Identity: f.n.ik, StaticKEM: f.n.kem.Public(), Relay: f.n.addr,
+				ResponderIK: m.keys.ik.Public().(ed25519.PublicKey), ResponderRelayKey: f.vaultPK(), Current: f.cur,
+				Policy: policyFor(KindConnection), Now: f.now(),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.deliver(ini.Envelope(), f.stJTI)
+			if f.takeFor(func(env *envelope.Envelope) bool {
+				return env.Mode() == envelope.ModeSealed && env.RecipientKid().Equal(ini.EphKid())
+			}) == nil {
+				t.Fatalf("rekey %d of the restored service was not answered", i)
+			}
+			m.mu.Lock()
+			marked := 0
+			for _, og := range m.st.Outgoing {
+				if og.Purpose == handshake.PurposeRekey && og.Replaced {
+					marked++
+				}
+			}
+			m.mu.Unlock()
+			if marked != 1 {
+				t.Fatalf("rekey %d: the marked rekey was dropped", i)
+			}
+		}
+		// The late answer of the second copy is still caught.
+		f.at(12 * time.Hour)
+		at := f.base.Add(12 * time.Hour)
+		pi, err := handshake.OpenRekeyInit(raw, e3, at)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, renv, err := pi.Respond(handshake.ResponderConfig{Identity: f.n.ik, Policy: policyFor(KindConnection),
+			CollectSender: f.vaultPK(), RecordRelayKey: f.vaultPK(), KnownInitiatorIK: m.keys.ik.Public().(ed25519.PublicKey), Now: at})
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.deliver(renv, f.stJTI)
+		if f.p.Fork == nil {
+			t.Fatal("the late answer of the second copy was not caught")
+		}
+	})
 	t.Run("hs.resp of the vault's rekey from the second copy suspends", func(t *testing.T) { own(t, 11*time.Hour, true) })
 	t.Run("an earlier hs.resp activates nothing", func(t *testing.T) { own(t, 9*time.Hour+30*time.Minute, false) })
 

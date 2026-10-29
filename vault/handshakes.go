@@ -450,7 +450,7 @@ func (m *Manager) handleRekeyInit(ctx context.Context, p *Peer, in *envelope.Inn
 	}
 	// Crossing rekeys: the lower th1 wins (§6.5).
 	for id, og := range m.st.Outgoing {
-		if og.PeerID == p.ID && og.Purpose == handshake.PurposeRekey {
+		if og.PeerID == p.ID && og.Purpose == handshake.PurposeRekey && !og.Replaced { // a marked one is of the replaced line (§6.6)
 			var ours [32]byte
 			copy(ours[:], og.Th1)
 			if handshake.SimultaneousRekeyWinner(ours, pi.Th1()) {

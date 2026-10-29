@@ -27,6 +27,11 @@ import (
 
 const recPW = credPW
 
+// recKeyRand, if set by a test before the world starts, draws the seeds of
+// the vault's key rotations (a draw that fails is a rotation that cannot
+// be made).
+var recKeyRand func(n int) ([]byte, error)
+
 type recR struct {
 	*acWorld
 	bucket *countertest.Bucket
@@ -50,7 +55,7 @@ func newRecRStore(t *testing.T, quiet time.Duration, wrap func(store.Store) stor
 	}
 	aw := &acWorld{t: t, w: w, relay: r.URL, trust: w.Trust()}
 	b := countertest.NewLive()
-	w.VaultOptions = vault.Options{PollWait: time.Second, Counter: b,
+	w.VaultOptions = vault.Options{PollWait: time.Second, Counter: b, KeyRand: recKeyRand,
 		Relay: func(base string, key ed25519.PrivateKey) vault.Relay {
 			return vault.NewClientRelay(base, key, nil, time.Now)
 		}}

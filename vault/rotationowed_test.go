@@ -35,27 +35,41 @@ func TestFailedRecoveryRotationIsRetriedAtTheNextUnlock(t *testing.T) {
 	if failed != 1 {
 		t.Fatalf("identity.rotation_failed audited %d times", failed)
 	}
-	if m.st.RotationOwed != recID {
-		t.Fatalf("no rotation owed after a failure: %q", m.st.RotationOwed)
+	if m.st.RotationOwed == nil || m.st.RotationOwed.Recovery != recID {
+		t.Fatalf("no rotation owed after a failure: %+v", m.st.RotationOwed)
 	}
 	if err := m.Lock(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 
-	// The owed mark is in the stored state: the next unlock, with keys that
-	// can be drawn again, makes the rotation.
+	// The owed mark is in the stored state. Until the recovered phone has
+	// paired (its recovery invite is pending) an unlock leaves it: the
+	// phone's first handshake verifies the identity key it was given.
 	f.opts.KeyRand = nil
 	sink.got = nil
 	m2 := f.mustUnlock(testPIN, f.phoneUS)
 	defer m2.Crash()
-	if m2.st.RotationOwed != recID || len(m2.st.Rotations) != 0 {
-		t.Fatalf("the stored state lost the mark: %q, %d rotations", m2.st.RotationOwed, len(m2.st.Rotations))
+	if m2.st.RotationOwed == nil || m2.st.RotationOwed.Recovery != recID || len(m2.st.Rotations) != 0 {
+		t.Fatalf("the stored state lost the mark: %+v, %d rotations", m2.st.RotationOwed, len(m2.st.Rotations))
 	}
 	if err := m2.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if len(m2.st.Rotations) != 1 || m2.st.RotationOwed != "" {
-		t.Fatalf("not retried at the unlock: %d rotations, owed %q", len(m2.st.Rotations), m2.st.RotationOwed)
+	if len(m2.st.Rotations) != 0 || m2.st.RotationOwed == nil || sink.has("identity.rotated") {
+		t.Fatal("rotated while the recovered phone has not paired")
+	}
+	// The phone has paired (recoveredPhonePaired deletes the invite): the
+	// next unlock, or the pairing itself, makes the rotation.
+	m2.mu.Lock()
+	for id, inv := range m2.st.Invites {
+		if inv.CreatedBy == inviteByRecovery {
+			delete(m2.st.Invites, id)
+		}
+	}
+	m2.retryOwedRotation(m2.now())
+	m2.mu.Unlock()
+	if len(m2.st.Rotations) != 1 || m2.st.RotationOwed != nil {
+		t.Fatalf("not retried after the pairing: %d rotations, owed %+v", len(m2.st.Rotations), m2.st.RotationOwed)
 	}
 	var rotated []Activity
 	for _, a := range sink.got {
@@ -100,11 +114,18 @@ func TestRotationOwedKeptOnRetryFailureAndClearedByAnyRotation(t *testing.T) {
 	m2 := f.mustUnlock(testPIN, f.phoneUS)
 	defer m2.Crash()
 	sink.got = nil
+	m2.mu.Lock()
+	for id, inv := range m2.st.Invites {
+		if inv.CreatedBy == inviteByRecovery {
+			delete(m2.st.Invites, id) // as the pairing does
+		}
+	}
+	m2.mu.Unlock()
 	if err := m2.Start(context.Background()); err != nil {
 		t.Fatalf("a failed retry failed the unlock: %v", err)
 	}
-	if m2.st.RotationOwed != recID {
-		t.Fatalf("mark lost by a failed retry: %q", m2.st.RotationOwed)
+	if m2.st.RotationOwed == nil || m2.st.RotationOwed.Recovery != recID {
+		t.Fatalf("mark lost by a failed retry: %+v", m2.st.RotationOwed)
 	}
 	if !sink.has("identity.rotation_failed") {
 		t.Fatal("a failed retry is not audited")
@@ -114,7 +135,7 @@ func TestRotationOwedKeptOnRetryFailureAndClearedByAnyRotation(t *testing.T) {
 	if err := m2.RotateIdentity(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if m2.st.RotationOwed != "" {
+	if m2.st.RotationOwed != nil {
 		t.Fatal("a rotation left the mark")
 	}
 	var ref string

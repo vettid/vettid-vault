@@ -640,14 +640,28 @@ func (m *Manager) RotateIdentity(ctx context.Context) error {
 }
 
 // retryOwedRotation makes the rotation a recovery owes (§11.14.10 "Failure":
-// audited identity.rotation_failed, kept, tried again at the next unlock).
-// It never fails the unlock.
+// audited identity.rotation_failed, kept, tried again). It never fails what
+// calls it. While the recovered phone has not paired (its recovery invite is
+// pending) it waits: the phone's first handshake verifies the vault's
+// identity key as the open's vault_bundle gave it, and a key rotated in
+// between would fail the pairing (vms/handshake/initiator.go); the pairing
+// calls it (recoveredPhonePaired).
 func (m *Manager) retryOwedRotation(now time.Time) {
-	if m.st.RotationOwed == "" {
+	o := m.st.RotationOwed
+	if o == nil || (o.Recovery == "" && o.Transfer == "") {
 		return
 	}
+	for _, inv := range m.st.Invites {
+		if inv.CreatedBy == inviteByRecovery {
+			return
+		}
+	}
+	ref := "recovery"
+	if o.Transfer != "" {
+		ref = o.Transfer
+	}
 	if err := m.rotateIdentity(now); err != nil {
-		m.record(Activity{Kind: "identity.rotation_failed", Ref: "recovery", Audit: true, Feed: true, Priority: "high"}, now)
+		m.record(Activity{Kind: "identity.rotation_failed", Ref: ref, Audit: true, Feed: true, Priority: "high"}, now)
 	}
 }
 
@@ -693,8 +707,14 @@ func (m *Manager) rotateIdentity(now time.Time) error {
 	// nothing was owed (0.69.2; a transfer's mark would carry its
 	// transfer_id).
 	ref := ""
-	if m.st.RotationOwed != "" {
-		ref, m.st.RotationOwed = "recovery", ""
+	if o := m.st.RotationOwed; o != nil {
+		switch {
+		case o.Transfer != "":
+			ref = o.Transfer // wins when one rotation clears both
+		case o.Recovery != "":
+			ref = "recovery"
+		}
+		m.st.RotationOwed = nil
 	}
 	m.record(Activity{Kind: "identity.rotated", Ref: ref, Audit: true}, now)
 	// §10.8 (0.18.0): the core's ik changed; each connection gets the

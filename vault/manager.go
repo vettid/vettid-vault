@@ -236,6 +236,11 @@ type Hooks struct {
 
 // Manager is one unlocked vault.
 type Manager struct {
+	// restoring is set while a reconnect that named an older epoch of a
+	// service activates (§6.6, 0.72.0): it is told as
+	// connection.restored_reconnect, not connection.reconnected.
+	restoring bool
+
 	mu   sync.Mutex
 	opt  Options
 	now  func() time.Time
@@ -681,6 +686,9 @@ func (st *State) init() {
 	}
 	if st.SeenInner == nil {
 		st.SeenInner = map[string]time.Time{}
+	}
+	if st.SeenInit == nil {
+		st.SeenInit = map[string]time.Time{}
 	}
 	if st.Responses == nil {
 		st.Responses = map[string]CachedResponse{}

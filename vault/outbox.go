@@ -44,8 +44,8 @@ func (m *Manager) sealAndQueue(p *Peer, in *envelope.Inner) string {
 // sealAndQueueWake is sealAndQueue with a push wake class (§14.2).
 func (m *Manager) sealAndQueueWake(p *Peer, in *envelope.Inner, wake string) string {
 	kr := m.sessions[p.ID]
-	if kr == nil || kr.Current() == nil {
-		return ""
+	if kr == nil || kr.Current() == nil || p.Fork != nil {
+		return "" // nothing is sent to a connection suspended on fork evidence (§6.6)
 	}
 	raw, err := kr.Current().Seal(in)
 	if err != nil {
@@ -64,8 +64,8 @@ func (m *Manager) sendTo(p *Peer, typ string, body json.RawMessage, now time.Tim
 // delivery (sealed now, deposited after the flush behind p's queued
 // deposits, never written to state). It returns the inner id, or "".
 func (m *Manager) sendWith(p *Peer, typ string, body json.RawMessage, o SendOptions, now time.Time) string {
-	if p.Kind == KindConnection && p.Conflict != nil {
-		return "" // suspended by a rotation conflict (release R, §3.4)
+	if p.suspended() {
+		return "" // suspended by a rotation conflict (release R, §3.4) or by fork evidence (§6.6, 0.72.0)
 	}
 	if !m.holdDelivers(p, typ, body, now) {
 		return "" // the owner check's hold (§3.6.3): no fan-out
@@ -360,11 +360,7 @@ func (m *Manager) housekeeping(now time.Time) {
 	m.expireRequests(now)
 	for id, aw := range m.st.Awaiting {
 		if aw.New == nil && now.Sub(aw.Created) > HandshakeTTL {
-			if r := m.awaiting[id]; r != nil {
-				r.Abort()
-			}
-			delete(m.awaiting, id)
-			delete(m.st.Awaiting, id)
+			m.abandonAwaiting(id, now) // its tokens are denylisted too (§6.6)
 		}
 	}
 	for id, og := range m.st.Outgoing {
@@ -386,6 +382,7 @@ func (m *Manager) housekeeping(now time.Time) {
 	m.ownerCheckTick(now)
 	m.attHousekeeping(m.attNow())
 	m.remintIssued(now)
+	m.pruneHistories(now)
 	m.pruneIssued(now)
 	m.pruneRetiredKEMs(now)
 }

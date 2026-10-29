@@ -118,9 +118,16 @@ func TestReconnectChainKnown(t *testing.T) {
 	r1, r2 := rcLink(t, k0, k1), rcLink(t, k1, k2)
 
 	t.Run("not yet followed", func(t *testing.T) {
-		ok, _, p := rcReconnect(t, k0, nil, k1, []*handshake.Rotation{r1})
-		if !ok || !bytes.Equal(p.IK, k1.ik.Public().(ed25519.PublicKey)) || len(p.Chain) != 1 {
+		// 0.72.0: answered, but nothing is followed before sig_I verifies at
+		// hs.fin (TestReconnectChangesNothingBeforeFin finishes it).
+		ok, d, p := rcReconnect(t, k0, nil, k1, []*handshake.Rotation{r1})
+		if !ok || !bytes.Equal(p.IK, k0.ik.Public().(ed25519.PublicKey)) || len(p.Chain) != 0 {
 			t.Fatalf("answered=%v chain=%d", ok, len(p.Chain))
+		}
+		for _, aw := range d.m.st.Awaiting {
+			if aw.Reconnect == nil || len(aw.Reconnect.Rotations) != 1 {
+				t.Fatal("the link to follow is not held for hs.fin")
+			}
 		}
 	})
 	t.Run("single link already followed", func(t *testing.T) {
@@ -130,10 +137,14 @@ func TestReconnectChainKnown(t *testing.T) {
 		}
 	})
 	t.Run("first of two links already followed", func(t *testing.T) {
-		ok, _, p := rcReconnect(t, k1, rawLinks(r1), k2, []*handshake.Rotation{r1, r2})
-		if !ok || !bytes.Equal(p.IK, k2.ik.Public().(ed25519.PublicKey)) || len(p.Chain) != 2 ||
-			!bytes.Equal(p.KEM, k2.kem.Public().Bytes()) {
+		ok, d, p := rcReconnect(t, k1, rawLinks(r1), k2, []*handshake.Rotation{r1, r2})
+		if !ok || !bytes.Equal(p.IK, k1.ik.Public().(ed25519.PublicKey)) || len(p.Chain) != 1 {
 			t.Fatalf("answered=%v chain=%d", ok, len(p.Chain))
+		}
+		for _, aw := range d.m.st.Awaiting {
+			if aw.Reconnect == nil || len(aw.Reconnect.Rotations) != 2 { // every rotation sent; the links to follow are worked out at hs.fin
+				t.Fatal("the link to follow is not held for hs.fin")
+			}
 		}
 	})
 	t.Run("both links already followed", func(t *testing.T) {
@@ -201,14 +212,25 @@ func TestReconnectChainKnown(t *testing.T) {
 			t.Fatal("answered a suspended connection")
 		}
 	})
-	t.Run("a malformed reconnect cannot suspend", func(t *testing.T) {
+	t.Run("a conflict suspends whatever the ctx (0.72.1)", func(t *testing.T) {
+		// §6.6 "Replay": a valid second successor in the rotations suspends
+		// at once and is not answered, though the ctx names another epoch.
 		kb := rcKey(t, 0x40)
 		d, p, n := rcSetup(t, k1, rawLinks(r1))
-		p.LastEpochID = bytes.Repeat([]byte{0xe2}, 16) // the sender's ctx is another epoch
 		p2 := *p
-		p2.LastEpochID = bytes.Repeat([]byte{0xe1}, 16)
-		if rcDeliver(t, d, &p2, n, kb, []*handshake.Rotation{rcLink(t, k0, kb)}, "rc1") || p.Conflict != nil {
-			t.Fatal("a reconnect for another epoch suspended the connection")
+		p2.LastEpochID = bytes.Repeat([]byte{0xe2}, 16) // the sender's ctx is another epoch
+		if rcDeliver(t, d, &p2, n, kb, []*handshake.Rotation{rcLink(t, k0, kb)}, "rc1") || p.Conflict == nil {
+			t.Fatal("a reconnect for another epoch with a second successor did not suspend")
+		}
+	})
+	t.Run("a reconnect from another relay key cannot suspend", func(t *testing.T) {
+		// The collect sender check comes before the conflict check.
+		kb := rcKey(t, 0x40)
+		d, p, n := rcSetup(t, k1, rawLinks(r1))
+		other := newNewcomer(t, 0x90)
+		p.Relay = PeerRelay{URL: other.addr.URL, Mailbox: other.addr.Mailbox, PK: other.addr.PK} // the record names another key
+		if rcDeliver(t, d, p, n, kb, []*handshake.Rotation{rcLink(t, k0, kb)}, "rc1") || p.Conflict != nil {
+			t.Fatal("a reconnect from a key that is not on record suspended the connection")
 		}
 	})
 	t.Run("a resolved-away successor does not suspend again", func(t *testing.T) {

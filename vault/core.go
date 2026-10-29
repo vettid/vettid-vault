@@ -435,6 +435,9 @@ func (m *Manager) hInviteAccept(ctx context.Context, s *Session, in *envelope.In
 	if og.Name != "" {
 		b.String("name", og.Name)
 	}
+	if og.New.PeerKind != "" {
+		b.String("peer_kind", og.New.PeerKind) // §10.4 (0.69.0): shown with the SAS before approval
+	}
 	return b.Bytes(), nil
 }
 
@@ -559,7 +562,7 @@ func (m *Manager) hIdentityRotate(_ context.Context, s *Session, in *envelope.In
 	if c := m.rotationConflict(s.peer, r, s.now); c {
 		return nil, nil
 	}
-	if s.peer.Conflict != nil {
+	if s.peer.suspended() {
 		return nil, nil
 	}
 	final, kem, err := handshake.ResolveChain(s.peer.IK, []*handshake.Rotation{r})

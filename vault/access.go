@@ -162,8 +162,8 @@ func (m *Manager) hSessionDeny(_ context.Context, s *Session, in *envelope.Inner
 		return nil, err
 	}
 	r := m.st.AccessRequests[rid]
-	if r == nil {
-		return nil, errNotFound
+	if r == nil || !s.now.Before(r.Expires) {
+		return nil, errNotFound // expiry is not audited (§6.8)
 	}
 	delete(m.st.AccessRequests, rid)
 	m.dirty = true
@@ -200,11 +200,8 @@ func (m *Manager) hSessionEnd(ctx context.Context, s *Session, in *envelope.Inne
 			return nil, errNotFound
 		}
 	}
-	except := ""
-	if s.peer.Kind == KindApp {
-		except = s.peer.ID // the app that ended it drops the asks itself (§6.8)
-	}
-	m.endAccess(ctx, target, s.peer.ID != target.ID, "ended", except, s.now)
+	// The sender gets no sync.event: an app drops the asks itself (§6.8, §10.1).
+	m.endAccess(ctx, target, s.peer.ID != target.ID, "ended", s.peer.ID, s.now)
 	m.record(Activity{Kind: "device.session.ended", DeviceID: target.ID, Audit: true}, s.now)
 	return nil, nil
 }

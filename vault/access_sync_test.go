@@ -1,6 +1,7 @@
 package vault
 
 import (
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -246,5 +247,102 @@ func TestAccessApproveUnchanged(t *testing.T) {
 	}
 	if len(r.d.audits("device.session.granted")) != 1 || len(r.d.audits("device.session.denied")) != 0 {
 		t.Fatal("audits")
+	}
+}
+
+func TestAccessDenyKeepsSessionUsable(t *testing.T) {
+	r := newAccessRig(t)
+	rid0 := r.request(t)
+	r.d.sendAs(r.a, "device.session.approve", `{"request_id":"`+rid0+`","seconds":7200}`)
+	r.d.inbox(r.a, r.b, r.desk)
+	r.d.m.now = func() time.Time { return time.Now().Add(AccessRequestEvery + time.Minute) }
+	defer func() { r.d.m.now = time.Now }()
+	rid := r.request(t)
+	r.d.sendAs(r.a, "device.session.deny", `{"request_id":"`+rid+`"}`)
+	if e := find(r.d.inbox(r.desk)["desk1"], ofType("device.session.ended")); e == nil || bodyStr(t, e, "reason") != "denied" {
+		t.Fatal("desktop not told")
+	}
+	id := r.d.sendAs(r.desk, "connection.list", `{}`)
+	if x := find(r.d.inbox(r.desk)["desk1"], reply(id)); x == nil || x.Status != envelope.StatusOK {
+		t.Fatalf("normal request after a deny: %+v", x)
+	}
+}
+
+func TestAccessDenyExpiredRequest(t *testing.T) {
+	r := newAccessRig(t)
+	rid := r.request(t)
+	r.d.m.now = func() time.Time { return time.Now().Add(11 * time.Minute) }
+	defer func() { r.d.m.now = time.Now }()
+	id := r.d.sendAs(r.a, "device.session.deny", `{"request_id":"`+rid+`"}`)
+	in := r.d.inbox(r.a, r.b, r.desk)
+	if x := find(in["dev1"], reply(id)); errCode(x) != "not_found" {
+		t.Fatalf("expired deny: %+v", x)
+	}
+	if len(r.d.audits("device.session.denied")) != 0 || len(syncEvents(t, in["dev2"], "device.session")) != 0 {
+		t.Fatal("expired deny audited or synced")
+	}
+}
+
+func TestAccessAgentEndsOwn(t *testing.T) {
+	d := newDevFixture(t)
+	a := d.self()
+	b := d.addDevice(t, "dev2", KindApp, 0x80)
+	ag := d.addDevice(t, "agent1", KindAgent, 0x70)
+	ag.peer.Access = &AccessSession{ID: "s", Expires: time.Now().Add(time.Hour)}
+	sinkOf(d)
+	d.sendAs(ag, "device.session.end", `{}`)
+	in := d.inbox(a, b, ag)
+	for _, app := range []string{"dev1", "dev2"} {
+		if len(syncEvents(t, in[app], "device.session")) != 1 {
+			t.Fatalf("%s: %+v", app, in[app])
+		}
+	}
+	if ag.peer.Access != nil || len(d.audits("device.session.ended")) != 1 {
+		t.Fatal("not ended")
+	}
+}
+
+func TestAccessUnlinkPendingRequestOnly(t *testing.T) {
+	r := newAccessRig(t)
+	r.request(t)
+	r.d.sendAs(r.a, "device.unlink", `{"device_id":"desk1"}`)
+	in := r.d.inbox(r.a, r.b)
+	if ev := syncEvents(t, in["dev2"], "device.session"); len(ev) != 1 || strings.Contains(ev[0], "expires_at") {
+		t.Fatalf("app B: %v", ev)
+	}
+	if len(syncEvents(t, in["dev2"], "device.unlinked")) != 1 || len(syncEvents(t, in["dev1"], "device.unlinked")) != 0 {
+		t.Fatal("device.unlinked sync.event")
+	}
+}
+
+func TestAccessApprovalDecidedSorted(t *testing.T) {
+	r := newAccessRig(t)
+	r.grant(t)
+	r.hold(t, 5)
+	r.d.sendAs(r.a, "device.session.end", `{"device_id":"desk1"}`)
+	var ids []string
+	for _, g := range syncEvents(t, r.d.inbox(r.b)["dev2"], "approval.decided") {
+		i := strings.Index(g, `"approval_id":"`) + len(`"approval_id":"`)
+		ids = append(ids, g[i:i+strings.Index(g[i:], `"`)])
+	}
+	if len(ids) != 5 || !sort.StringsAreSorted(ids) {
+		t.Fatalf("order: %v", ids)
+	}
+}
+
+func TestAccessEndWhileHeldSendsNoSync(t *testing.T) {
+	f := newOCFixture(t)
+	f.m.st.AccessRequests["r1"] = &AccessRequest{ID: "r1", DeviceID: "agent1", Seconds: 60, Created: time.Now(), Expires: time.Now().Add(time.Minute)}
+	f.pastDeadline()
+	f.sendAs(f.app, "test.req", `{}`) // the hold begins
+	f.inbox(f.app, f.desk, f.agent)
+	f.m.st.AccessRequests["r2"] = &AccessRequest{ID: "r2", DeviceID: "agent1", Seconds: 60, Created: time.Now(), Expires: time.Now().Add(time.Minute)}
+	f.sendAs(f.agent, "device.session.end", `{}`)
+	in := f.inbox(f.app, f.desk, f.agent)
+	if len(syncEvents(t, in["dev1"], "device.session"))+len(syncEvents(t, in["dev1"], "approval.decided")) != 0 {
+		t.Fatalf("sync.event while held: %+v", in["dev1"])
+	}
+	if len(f.m.st.AccessRequests) != 0 || f.agent.peer.Access != nil {
+		t.Fatal("not ended")
 	}
 }

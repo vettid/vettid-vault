@@ -22,6 +22,12 @@ type State struct {
 	RetiredKEMs  []RetiredKEM      `json:"retired_kems,omitempty"`
 	Rotations    []json.RawMessage `json:"rotations,omitempty"` // own identity.rotate chain (§3.4)
 	WakeSeed     []byte            `json:"wake_seed"`
+	// RotationOwed is the owed mark of a recovery (§11.14.6 step 6,
+	// §11.14.10 "The owed mark"): the recovery_id whose rotation of the
+	// vault's keys could not be made. It is written in the recovery's
+	// step-2 state, retried at each unlock, and cleared by the next
+	// rotation, whichever asked for it.
+	RotationOwed string `json:"rotation_owed,omitempty"`
 
 	Devices     map[string]*Peer `json:"devices"`
 	Connections map[string]*Peer `json:"connections"`

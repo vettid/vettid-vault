@@ -50,6 +50,7 @@ func (m *Manager) Start(ctx context.Context) error {
 	now := m.now()
 	m.record(Activity{Kind: "vault.unlocked", DeviceID: m.unlockedBy, Audit: true}, now)
 	m.ownerCheckInit(now)
+	m.retryOwedRotation(now) // §11.14.10: a rotation owed since a recovery
 	m.remintIssued(now)
 	m.markDeviceTokens(now)
 	m.reconnectExpired(now)

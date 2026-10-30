@@ -247,7 +247,7 @@ func (f *Feature) Types() []vault.TypeSpec {
 		r("profile.get", false), r("profile.set", true),
 		r("share.rule.set", true), r("share.rule.list", false), r("share.rule.delete", false), r("share.decide", true),
 		r("share.pending.list", false),
-		{Type: "profile.update", From: conns},
+		{Type: "profile.update", From: conns, Connections: vault.PeersBoth}, // reduced to a service (§10.8)
 	}
 }
 

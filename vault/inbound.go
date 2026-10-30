@@ -468,6 +468,9 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 		m.handleResponse(p, in, now)
 		return disp(eph)
 	}
+	if p.Kind == KindConnection && m.gateConnection(p, in, te, rkey, now) {
+		return disp(eph) // §6.4: a service's allow-list, the votes' kinds
+	}
 	if te == nil {
 		m.respondError(p, in, rkey, "unsupported_type", "", now)
 		return disp(eph)
@@ -495,6 +498,13 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 				m.attRefusedSendBody(in.Body)
 			}
 		}()
+	}
+	// After the blob cleanup above: the refusal deletes a named blob too.
+	if p.Kind != KindConnection && te.spec.Request && m.serviceDeviceRefused(in.Type, in.Body) {
+		// §6.4: a request naming a service connection for a type it never
+		// takes; nothing is sent.
+		m.respondError(p, in, rkey, "forbidden", "", now)
+		return disp(eph)
 	}
 	if !allowedWithoutCredential[in.Type] && !m.credentialReady() &&
 		!(p.Recovering && recoveryAllowed[in.Type] && m.credentialExists()) {
@@ -739,6 +749,10 @@ func (m *Manager) handleResponse(p *Peer, in *envelope.Inner, now time.Time) {
 	}
 	peer, ok := m.requests[in.Re]
 	if !ok || peer != p.ID {
+		if p.isService() {
+			// §6.4: a response from a service that matches no request.
+			m.record(Activity{Kind: auditServiceType, ConnectionID: p.ID, Ref: p.ID + " " + in.Type, Audit: true}, now)
+		}
 		return // §8.1: a response matching no pending request is dropped
 	}
 	delete(m.requests, in.Re)

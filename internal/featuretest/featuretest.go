@@ -629,6 +629,7 @@ func CallInner(f vault.Feature, h *Host, now time.Time, kind string, in *envelop
 		from = vault.PeerInfo{ID: kind[11:], Kind: vault.KindConnection, State: vault.PeerActive}
 		if c, ok := h.Conns[from.ID]; ok {
 			from.IK = c.IK // the pinned ik (§10.8 profile.update's check)
+			from.PeerKind = c.PeerKind
 		}
 	}
 	if !spec.Allows(from.Kind) {

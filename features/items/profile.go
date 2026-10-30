@@ -89,7 +89,7 @@ func (f *Feature) syncCore(s *vault.Session) bool {
 	}
 	f.st.Profile.Core = c
 	f.st.Profile.Shared++
-	f.sendAll(s)
+	f.sendAll(s, true)
 	return true
 }
 
@@ -103,23 +103,53 @@ func (f *Feature) sendTo(s *vault.Session, id string) {
 	if f.st.Profile.Shared == 0 {
 		return // not reached: syncCore counted the core
 	}
+	if c, ok := s.Connection(id); ok && c.IsService() {
+		body, _ = f.serviceBody(s, f.st.Profile.Shared)
+	}
 	_ = s.SendToConnection(id, "profile.update", body)
+}
+
+// serviceBody is the profile.update a service connection gets (§10.8, 0.69.0):
+// the core and name? only, photo absent and items [], with the shared
+// profile's version.
+func (f *Feature) serviceBody(s *vault.Session, v uint64) ([]byte, bool) {
+	c := currentCore(s)
+	if c == nil {
+		return nil, false
+	}
+	b := strictjson.NewBuilder()
+	if f.st.Profile.Name != "" {
+		b.String("name", f.st.Profile.Name)
+	}
+	return peerwire.ProfileUpdateBody(v, c.FirstName, c.LastName, c.IK, b.Raw("items", []byte("[]")).Bytes()), true
 }
 
 // sendAll sends the current shared profile to every active connection,
 // except those whose epoch predates the vault's latest ik rotation: they
 // get it in the epoch under the new ik (§10.8). Without the complete core
 // it sends none and audits profile.core_missing.
-func (f *Feature) sendAll(s *vault.Session) {
+//
+// A service connection is sent the reduced profile (serviceBody) and only
+// when toServices: a change of the photo or of the @profile items alone
+// sends a service nothing (§10.8).
+func (f *Feature) sendAll(s *vault.Session, toServices bool) {
 	body, ok := f.updateBody(s, f.st.Profile.Shared)
 	if !ok {
 		s.Record(vault.Activity{Kind: "profile.core_missing", Audit: true})
 		return
 	}
+	sbody, _ := f.serviceBody(s, f.st.Profile.Shared)
 	for _, c := range s.Connections() {
-		if c.State == vault.PeerActive && !c.RotationPending {
-			_ = s.SendToConnection(c.ID, "profile.update", body)
+		if c.State != vault.PeerActive || c.RotationPending {
+			continue
 		}
+		if c.IsService() {
+			if toServices {
+				_ = s.SendToConnection(c.ID, "profile.update", sbody)
+			}
+			continue
+		}
+		_ = s.SendToConnection(c.ID, "profile.update", body)
 	}
 }
 
@@ -209,13 +239,28 @@ func (f *Feature) checkProfile() error {
 // broadcastIfChanged sends profile.update to every active connection if
 // the shared profile (its extras or its core) differs from before (§9.3).
 func (f *Feature) broadcastIfChanged(s *vault.Session, before []byte) {
+	toServices := false
 	if c := currentCore(s); c != nil && !c.equal(f.st.Profile.Core) {
 		f.st.Profile.Core = c
+		toServices = true
 	} else if bytes.Equal(before, f.sharedBody()) {
 		return
 	}
+	if !toServices {
+		toServices = bodyName(before) != f.st.Profile.Name
+	}
 	f.st.Profile.Shared++
-	f.sendAll(s)
+	f.sendAll(s, toServices)
+}
+
+// bodyName is the name? member of a sharedBody.
+func bodyName(shared []byte) string {
+	o, err := strictjson.ParseObject(shared)
+	if err != nil {
+		return ""
+	}
+	n, _, _ := o.OptString("name")
+	return n
 }
 
 // profileGet answers {version, name?, photo?, first_name, last_name, ik}
@@ -416,6 +461,9 @@ func (f *Feature) profileUpdate(s *vault.Session, body []byte) error {
 			s.Record(vault.Activity{Kind: "drop.profile_ik_mismatch", ConnectionID: conn, Ref: conn, Audit: true})
 		}
 		return nil // sent before a rotation the vault has followed (§10.8 step 3)
+	}
+	if from.IsService() {
+		u.Items = nil // §10.8: a service's items are not kept; its names, ik and photo (a logo) are
 	}
 	if err := s.SetConnectionProfile(conn, u.Marshal()); err != nil {
 		return err

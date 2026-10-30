@@ -2,6 +2,7 @@ package items_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"strings"
 	"testing"
@@ -52,7 +53,7 @@ func TestProfileToAndFromService(t *testing.T) {
 	}
 	// The activation update (ConnectionAdded) is reduced too.
 	e.h.Reset()
-	e.set.Items.ConnectionAdded(vault.NewSession(nil, e.h, vault.PeerInfo{}, e.clk.T, nil), "cB")
+	e.set.Items.ConnectionAdded(vault.NewSession(context.Background(), e.h, vault.PeerInfo{}, e.clk.T, nil), "cB")
 	if ups := e.sentTo("cB", "profile.update"); len(ups) != 1 || !strings.HasSuffix(string(ups[0].Body), `"items":[]}`) || strings.Contains(string(ups[0].Body), "photo") {
 		t.Fatalf("activation: %v", ups)
 	}

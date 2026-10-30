@@ -40,7 +40,7 @@ func TestReleaseConfigAndroidPackage(t *testing.T) {
 		t.Fatalf("channel %q: features %v, want %v", ch, got, features)
 	}
 	if ch == releasecfg.ChannelStaging && c != nil {
-		if want != "com.vettid.app.staging" || len(features) != 7 {
+		if want != "com.vettid.app.staging" || len(features) != 8 { // vote joined in release 25 (0.81.0)
 			t.Fatalf("staging: %q %v", want, features)
 		}
 	} // 0.27.0 (§11.7.1): the pinned signers reach the device policy with
@@ -129,5 +129,26 @@ func TestReleaseConfigIOSAppID(t *testing.T) {
 	}
 	if ch == releasecfg.ChannelStaging && c != nil && want != "3X25CJ86MV.com.vettid.app.staging" {
 		t.Fatalf("staging: %q", want)
+	}
+}
+
+// The vote feature's constants reach the features of a staging image
+// (0.81.0, §11.10.8) and a production image has none.
+func TestReleaseVoteConstants(t *testing.T) {
+	key, roots := enclave.ReleaseVote()
+	_, c := releasecfg.Embedded()
+	switch {
+	case c == nil:
+		if key != nil || roots != nil {
+			t.Fatal("constants without a channel file")
+		}
+	case c.Channel == releasecfg.ChannelStaging:
+		if len(key) != 32 || len(roots) != 1 {
+			t.Fatalf("staging: %d %d", len(key), len(roots))
+		}
+	default:
+		if len(key) != 0 || len(roots) != 0 {
+			t.Fatal("production has vote constants")
+		}
 	}
 }

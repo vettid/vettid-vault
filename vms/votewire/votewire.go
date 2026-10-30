@@ -65,11 +65,20 @@ const (
 	// most 4 MiB. The size is checked first.
 	MaxServiceList = 4 << 20
 	MaxServiceName = 100
-	// MaxSyncBytes bounds one vote.site.sync (§10.19.8). A 4 MiB list does
-	// not fit 1 MiB: the spec will raise it (0.81.2: over 245,760 bytes it
-	// travels as one §5.5 blob, at most 8,257,532 bytes encoded; PR 4), and
-	// this is the one constant to change.
-	MaxSyncBytes = 1 << 20
+	// MaxSyncBytes bounds the encoded request body of one vote.site.sync
+	// (§10.19.8, 0.81.2): attachment_max_bytes at vettid.org's relay, the
+	// relay's max_blob_bytes less the 41-byte header and the Padmé padding
+	// (§10.5.1). The vault also holds it to the relay it is on
+	// (Session.BlobLimit). It is the one constant to change.
+	MaxSyncBytes = 8257532
+	// MaxSyncInline is §5.5's cap on an inline padded plaintext: a request
+	// over it travels as one claim-check blob.
+	MaxSyncInline = 245760
+	// A vote.site.sync carries at most this many lists (one when a list is
+	// over BigList bytes) and entries.
+	MaxSyncLists   = 8
+	MaxSyncEntries = 8
+	BigList        = 1 << 20
 	// Extension source: 1 to 1,024 bytes of UTF-8 (BALLOT-PROTOCOL 0.12.4).
 	MaxExtensionSource = 1024
 	MinChoices         = 3

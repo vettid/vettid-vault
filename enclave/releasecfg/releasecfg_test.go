@@ -93,11 +93,24 @@ func TestCommittedFiles(t *testing.T) {
 		// registers none and accepts com.vettid.app.
 		wantPkg, wantFeatures := "com.vettid.app", []string{}
 		if ch == ChannelStaging {
-			wantPkg, wantFeatures = "com.vettid.app.staging", legacyFeatures // `vote` joins in release 25 (0.81.0)
+			wantPkg, wantFeatures = "com.vettid.app.staging", OptionalFeatures() // eight names from release 25 (0.81.0): `vote` joined
 		}
 		if f.Config.AndroidPackage != wantPkg || f.Config.AndroidPackage != AndroidPackages[ch] || f.Config.Features == nil ||
 			strings.Join(f.Config.Features, ",") != strings.Join(wantFeatures, ",") {
 			t.Fatalf("%s: package %q, features %v", ch, f.Config.AndroidPackage, f.Config.Features)
+		}
+		// 0.81.0 (§11.10.8): staging carries the constants of its vote feature
+		// (the key votes.vettid.org signs its service list with, and Sigstore's
+		// staging TrustedRoot); production lists no vote and has neither.
+		if ch == ChannelStaging {
+			if len(f.Config.VoteSiteKey) != 32 || len(f.Config.VoteTrustRoots) != 1 || len(f.Config.VoteTrustRoots[0].Logs) == 0 || len(f.Config.VoteTrustRoots[0].TSAs) == 0 {
+				t.Fatalf("staging vote constants: %d %d", len(f.Config.VoteSiteKey), len(f.Config.VoteTrustRoots))
+			}
+			if base64.StdEncoding.EncodeToString(f.Config.VoteSiteKey) != "c4dqg2ssGVylbO9Xnpdv4zopmzx9S++4KgxMWOyhXJQ=" {
+				t.Fatal("staging vote_site_key")
+			}
+		} else if f.Config.VoteSiteKey != nil || f.Config.VoteTrustRoots != nil {
+			t.Fatal("production has vote constants")
 		}
 		// 0.35.0 (§11.10.8): each channel accepts its own iOS App ID,
 		// under the team ID 3X25CJ86MV.

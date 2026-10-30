@@ -494,7 +494,7 @@ func TestAnchorRejectionIsFinal(t *testing.T) {
 }
 
 func TestSyncBytesIsOneConstant(t *testing.T) {
-	if votewire.MaxSyncBytes != 1<<20 || votewire.MaxServiceList != 4<<20 {
+	if votewire.MaxSyncBytes != 8257532 || votewire.MaxServiceList != 4<<20 {
 		t.Errorf("%d %d", votewire.MaxSyncBytes, votewire.MaxServiceList)
 	}
 }

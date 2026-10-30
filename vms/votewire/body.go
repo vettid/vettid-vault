@@ -58,6 +58,9 @@ func parseRecordProof(raw json.RawMessage) (*RecordProof, error) {
 	return rp, nil
 }
 
+// ParseRecordProof parses a {index, tree_size, path} member as a body has it.
+func ParseRecordProof(raw json.RawMessage) (*RecordProof, error) { return parseRecordProof(raw) }
+
 // JSON returns the proof as it appears in a body.
 func (r *RecordProof) JSON() []byte {
 	b := strictjson.NewBuilder().Uint("index", r.Index).Uint("tree_size", r.TreeSize)

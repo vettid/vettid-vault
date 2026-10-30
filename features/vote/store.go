@@ -228,9 +228,17 @@ type record struct {
 	// evidence, verbatim, the last 8.
 	StatusAnswers [][]byte `json:"status_answers,omitempty"`
 	CheckAskMS    int64    `json:"check_ask_ms,omitempty"` // the last app-asked vote.status (rate limit)
-	CheckDueSent  bool     `json:"check_due_sent,omitempty"`
-	Results       *results `json:"results,omitempty"`
-	ResultsMatch  string   `json:"results_hash_match,omitempty"` // "", "yes" or "no": vote.closed's hash against the results (evidence only)
+	// EvidenceHash is the digest of the record when vote.evidence last
+	// returned it (EvidenceMS the time): vote.release needs the record
+	// unchanged since.
+	EvidenceHash []byte `json:"evidence_hash,omitempty"`
+	EvidenceMS   int64  `json:"evidence_ms,omitempty"`
+	ClosingFeed  bool   `json:"closing_feed,omitempty"` // vote.closing made, or none due (kept after its moment)
+	// OtherLatest is the latest foreign ballot beside the first (Other).
+	OtherLatest  *svcBallot `json:"other_latest,omitempty"`
+	CheckDueSent bool       `json:"check_due_sent,omitempty"`
+	Results      *results   `json:"results,omitempty"`
+	ResultsMatch string     `json:"results_hash_match,omitempty"` // "", "yes" or "no": vote.closed's hash against the results (evidence only)
 
 	// AbsentMS is the vault-clock time of the first `absent` answer after the
 	// close in force (a found document clears it); unpublished needs a second
@@ -268,11 +276,29 @@ type compact struct {
 	Refusals   [][]byte `json:"refusals,omitempty"`
 	Outcome    string   `json:"outcome"`
 	ClosedAt   int64    `json:"closed_at"` // unix s: the close in force
+
+	// A released problem record also holds every signed item that is not on
+	// the public site (§10.19.2): the held proposal, its signature and bundle
+	// when the site does not match, the site's copy of a mismatch, every
+	// status answer, the other ballot of a conflict or dispute, and the
+	// reason a proposal was rejected.
+	Released      bool            `json:"released,omitempty"`
+	Proposal      []byte          `json:"proposal,omitempty"`
+	ProposalSig   []byte          `json:"proposal_sig,omitempty"`
+	Bundle        json.RawMessage `json:"bundle,omitempty"`
+	Site          string          `json:"site,omitempty"`
+	SiteCopy      *evidence       `json:"site_copy,omitempty"`
+	StatusAnswers [][]byte        `json:"status_answers,omitempty"`
+	Other         *svcBallot      `json:"other,omitempty"`
+	RejectReason  string          `json:"reject_reason,omitempty"`
 }
 
 type droppedNote struct {
 	Count  int   `json:"count"`
 	LastMS int64 `json:"last_ms"`
+	// Shown: vote.list returned it; the next vote.list drops it ("until the
+	// member opens it", §10.19.2).
+	Shown bool `json:"shown,omitempty"`
 }
 
 type state struct {
@@ -390,6 +416,37 @@ func (r *record) evictable(now time.Time) bool {
 }
 
 // toCompact is what an evicted record leaves behind.
+// release is the compact record of a problem record released by the member
+// (§10.19.2): what an eviction keeps, and every signed item that is not on
+// the public site.
+func (r *record) release() *compact {
+	c := r.toCompact()
+	c.Released, c.Outcome = true, "released"
+	if r.Check != "" {
+		c.Outcome = "released:" + r.Check
+	}
+	if r.RejectReason != "" {
+		c.Outcome, c.RejectReason = "released:rejected", r.RejectReason
+	}
+	c.Site, c.SiteCopy, c.StatusAnswers, c.Other = r.Site, r.SiteCopy, r.StatusAnswers, r.Other
+	if r.Closes == 0 {
+		c.ClosedAt = r.KeptMS / 1000
+	}
+	if r.Site != SiteMatches || r.RejectReason != "" {
+		c.Proposal, c.ProposalSig, c.Bundle = r.Proposal, r.ProposalSig, r.Bundle
+	}
+	return c
+}
+
+// digest identifies the record's content apart from the fields that the
+// act of looking changes.
+func (r *record) digest() []byte {
+	c := *r
+	c.EvidenceHash, c.EvidenceMS, c.ChangedMS, c.CheckAskMS = nil, 0, 0, 0
+	b, _ := json.Marshal(&c)
+	return votewire.H(b)
+}
+
 func (r *record) toCompact() *compact {
 	c := &compact{Conn: r.Conn, ID: r.ID, Hash: r.Hash, Tag: r.Tag, ServiceIK: r.ServiceIK, ClosedAt: r.Closes, Outcome: "closed"}
 	if r.Check != "" {

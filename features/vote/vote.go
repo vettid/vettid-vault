@@ -58,6 +58,8 @@ type Auth interface {
 type Deps struct {
 	Keys Keys
 	Auth Auth
+	// Cred is the credential feature, for vote.release (the holder, the PIN).
+	Cred Credential
 }
 
 // Feature implements vault.Feature.
@@ -91,11 +93,11 @@ var conns = []string{vault.KindConnection}
 // (§6.4 "Votes"), from service connections only. The app's requests and
 // the two the vault sends (vote.cast, vote.status) come with the next PRs.
 func (f *Feature) Types() []vault.TypeSpec {
-	return []vault.TypeSpec{
+	return append(appTypes(), []vault.TypeSpec{
 		{Type: "vote.proposal", Request: true, From: conns, Connections: vault.PeersService},
 		{Type: "vote.extended", Request: true, From: conns, Connections: vault.PeersService},
 		{Type: "vote.closed", Request: true, From: conns, Connections: vault.PeersService},
-	}
+	}...)
 }
 
 // Load implements vault.Feature.
@@ -120,6 +122,12 @@ func (f *Feature) Save() (json.RawMessage, error) {
 
 // Handle implements vault.Handler.
 func (f *Feature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner) (json.RawMessage, error) {
+	if s.From().Kind == vault.KindApp {
+		f.mu.Lock()
+		f.prune(s)
+		f.mu.Unlock()
+		return f.handleApp(s, in) // each locks for itself
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if !s.From().IsService() {

@@ -60,15 +60,30 @@ func sameBallot(b *ballot, row *votewire.RowBallot) bool {
 	return row != nil && eq(row.VK, b.VK) && row.ChoiceID == b.ChoiceID && eq(row.BallotSig, b.BallotSig)
 }
 
+// conflictVerdict is what the results check says of a record with conflict
+// evidence or a disputed ballot, in one place: today `failed` (`conflict`,
+// `disputed`). An owner decision may change a recorded ballot with conflict
+// evidence to `verified` with a separate conflict flag; that is this
+// function and nothing else.
+func conflictVerdict(r *record) (state, reason string, ok bool) {
+	b := r.Ballot
+	switch {
+	case r.ConflictEv || b != nil && b.State == BallotConflict:
+		return CheckFailed, "conflict", true
+	case b != nil && b.State == BallotDisputed:
+		return CheckFailed, "disputed", true
+	}
+	return "", "", false
+}
+
 // verdict is the table of §10.19.6 step 3: what the vault holds against
 // the member's row.
 func verdict(r *record, row *votewire.RowBallot) (state, reason string) {
 	b := r.Ballot
+	if st, why, ok := conflictVerdict(r); ok {
+		return st, why
+	}
 	switch {
-	case r.ConflictEv || b != nil && b.State == BallotConflict:
-		return CheckFailed, "conflict"
-	case b != nil && b.State == BallotDisputed:
-		return CheckFailed, "disputed"
 	case b != nil && b.State == BallotRecorded: // a receipt: exactly that ballot
 		if sameBallot(b, row) {
 			return CheckVerified, ""

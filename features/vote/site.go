@@ -114,6 +114,10 @@ func (f *Feature) syncServices(s *vault.Session, doc, sig []byte) string {
 func (f *Feature) SyncCatchUp(s *vault.Session, lists []ServiceListDoc) []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	return f.syncCatchUp(s, lists)
+}
+
+func (f *Feature) syncCatchUp(s *vault.Session, lists []ServiceListDoc) []string {
 	out := make([]string, len(lists))
 	stopped := false
 	for i, l := range lists {
@@ -223,6 +227,10 @@ var ErrNoSuchVote = errors.New("vote: no such proposal")
 func (f *Feature) SiteDocument(s *vault.Session, conn, id string, d SiteDoc) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	return f.siteDocument(s, conn, id, d)
+}
+
+func (f *Feature) siteDocument(s *vault.Session, conn, id string, d SiteDoc) error {
 	r := f.st.Records[key(conn, id)]
 	if r == nil {
 		return ErrNoSuchVote

@@ -117,6 +117,12 @@ type Host struct {
 	// OwnPrior are the earlier identity keys of the fake vault's chain.
 	SentIDs  map[int]string
 	OwnPrior []ed25519.PublicKey
+	// Blobs are the blobs of the fake vault's mailbox by id (sealed), BlobMax
+	// the relay's attachment_max_bytes, BlobResults the answers of deferred
+	// blob calls.
+	Blobs       map[string][]byte
+	BlobMax     int
+	BlobResults []BlobResult
 }
 
 func (h *Host) askState(conn string) *vault.AskState {
@@ -507,6 +513,48 @@ func (h *Host) SendRequest(to, typ string, body json.RawMessage, now time.Time) 
 	return id, nil
 }
 
+// BlobResult is the answer of a deferred blob call.
+type BlobResult struct {
+	Body json.RawMessage
+	Code string
+}
+
+// BlobLimit implements vault.BlobHost: BlobMax (0: no relay blobs).
+func (h *Host) BlobLimit() int { return h.BlobMax }
+
+// DeferBlob implements vault.BlobHost: the sealed blob is taken from Blobs
+// by id, checked and opened as the runtime does, deleted whatever the
+// outcome, and the call run at once; its answer is appended to BlobResults.
+func (h *Host) DeferBlob(s *vault.Session, id string, key, sum []byte, size int, call vault.BlobCall) error {
+	if h.BlobMax <= 0 || size > h.BlobMax {
+		return vault.NewError("payload_too_large", "")
+	}
+	data, ok := h.Blobs[id]
+	delete(h.Blobs, id)
+	var want [32]byte
+	copy(want[:], sum)
+	if !ok {
+		h.BlobResults = append(h.BlobResults, BlobResult{Code: "bad_request"})
+		return nil
+	}
+	plain, err := envelope.OpenBlob(data, key, want, size)
+	if err != nil {
+		h.BlobResults = append(h.BlobResults, BlobResult{Code: "bad_request"})
+		return nil
+	}
+	body, herr := call(s, plain)
+	var he *vault.HandlerError
+	switch {
+	case herr == nil:
+		h.BlobResults = append(h.BlobResults, BlobResult{Body: body})
+	case errors.As(herr, &he):
+		h.BlobResults = append(h.BlobResults, BlobResult{Code: he.Code, Body: he.Body})
+	default:
+		h.BlobResults = append(h.BlobResults, BlobResult{Code: "internal"})
+	}
+	return nil
+}
+
 // OwnIdentityKeys implements vault.Host: the identity key, then OwnPrior.
 func (h *Host) OwnIdentityKeys() []ed25519.PublicKey {
 	return append([]ed25519.PublicKey{h.IK}, h.OwnPrior...)
@@ -667,6 +715,9 @@ func CallInner(f vault.Feature, h *Host, now time.Time, kind string, in *envelop
 		var he *vault.HandlerError
 		if errors.As(err, &he) {
 			return Result{Code: he.Code, Body: he.Body}
+		}
+		if errors.Is(err, vault.ErrDeferred) {
+			return Result{Code: "deferred"} // answered later: see BlobResults
 		}
 		return Result{Code: "internal"}
 	}

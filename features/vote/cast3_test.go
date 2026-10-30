@@ -183,7 +183,8 @@ func TestRestore(t *testing.T) {
 	}
 	// The service holds a ballot the vault has not (v): the member confirms.
 	sts := c.statuses()
-	_, vk2, _ := ed25519.GenerateKey(rand.Reader)
+	// (made with this record's own voting key, which the restore lost the ballot of)
+	vk2 := ed25519.NewKeyFromSeed(c.rec(v.ID).VKSeed)
 	svcBal := must(votewire.SignBallot(vk2, v.Hash, v.Tag, "no"))
 	// find v's ask: the one for v is the first of each pair (sorted by key)
 	c.answer(v, sts[len(sts)-2], svcBal, uint64(c.now.UnixMilli()), true)
@@ -231,8 +232,7 @@ func TestRestore(t *testing.T) {
 }
 
 func svcBal2(c *cenv, v *votetest.Vote) *votewire.Ballot {
-	_, vk, _ := ed25519.GenerateKey(rand.Reader)
-	return must(votewire.SignBallot(vk, v.Hash, v.Tag, "no"))
+	return must(votewire.SignBallot(ed25519.NewKeyFromSeed(c.rec(v.ID).VKSeed), v.Hash, v.Tag, "no"))
 }
 
 // A proposal on the site's index the vault was never sent: asked with

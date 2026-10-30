@@ -18,8 +18,9 @@ type resOpts struct {
 	extra     []votewire.Signed
 	badSig    bool
 	tamper    func(r *votewire.Results)
-	rowIndex  int // added to the member's index in the proof
-	tree      int // added to the tree size of the proof
+	dupAt     *int // a copy of the member's leaf also at this index, and the proof taken there
+	rowIndex  int  // added to the member's index in the proof
+	tree      int  // added to the tree size of the proof
 	otherBndl []byte
 }
 
@@ -31,6 +32,11 @@ func (c *cenv) resultsFor(v *votetest.Vote, o resOpts) ResultsSubmit {
 		if i == v.Index && o.mine != nil {
 			leaves[i] = must(o.mine.Leaf())
 		}
+	}
+	proofAt := v.Index
+	if o.dupAt != nil {
+		leaves[*o.dupAt] = leaves[v.Index] // the service published the member's row twice
+		proofAt = *o.dupAt
 	}
 	tally := map[string]int64{"yes": 0, "no": 0, "abstain": 0}
 	ballots := int64(0)
@@ -54,9 +60,9 @@ func (c *cenv) resultsFor(v *votetest.Vote, o resOpts) ResultsSubmit {
 	if o.badSig {
 		sig = make([]byte, 64)
 	}
-	path := must(votewire.Proof(leaves, v.Index))
+	path := must(votewire.Proof(leaves, proofAt))
 	in := ResultsSubmit{Results: doc, Sig: sig, Bundle: c.env.auth.Bundle(doc, c.svc.Anchor, c.now),
-		Proof: &votewire.RecordProof{Index: uint64(v.Index + o.rowIndex), TreeSize: uint64(len(v.Tags) + o.tree), Path: path}}
+		Proof: &votewire.RecordProof{Index: uint64(proofAt + o.rowIndex), TreeSize: uint64(len(v.Tags) + o.tree), Path: path}}
 	if o.otherBndl != nil {
 		in.Bundle = o.otherBndl
 	}
@@ -156,22 +162,22 @@ func TestResultsTable(t *testing.T) {
 	}
 }
 
+// Contradictions under the service's signature and the verified anchor
+// fail the check.
 func TestResultsFailures(t *testing.T) {
 	cases := map[string]func(c *cenv, v *votetest.Vote) resOpts{
-		"results_sig": func(c *cenv, v *votetest.Vote) resOpts { return resOpts{badSig: true} },
 		"a changed proposal": func(c *cenv, v *votetest.Vote) resOpts {
 			return resOpts{tamper: func(r *votewire.Results) { r.Proposal.Sig = make([]byte, 64) }}
 		},
 		"tally missing a choice": func(c *cenv, v *votetest.Vote) resOpts {
 			return resOpts{tamper: func(r *votewire.Results) { delete(r.Tally, "no") }}
 		},
-		"eligible differs": func(c *cenv, v *votetest.Vote) resOpts {
+		"eligible differs from the proposal's": func(c *cenv, v *votetest.Vote) resOpts {
 			return resOpts{tamper: func(r *votewire.Results) { r.Counts.Eligible++ }}
 		},
-		"row index": func(c *cenv, v *votetest.Vote) resOpts { return resOpts{rowIndex: 1} },
-		"tree size": func(c *cenv, v *votetest.Vote) resOpts { return resOpts{tree: 1} },
-		"rows_root": func(c *cenv, v *votetest.Vote) resOpts {
-			return resOpts{tamper: func(r *votewire.Results) { r.RowsRoot = make([]byte, 32) }}
+		"a verifying proof at another index": func(c *cenv, v *votetest.Vote) resOpts {
+			other := (v.Index + 1) % len(v.Tags)
+			return resOpts{dupAt: &other}
 		},
 	}
 	for name, mk := range cases {
@@ -181,16 +187,40 @@ func TestResultsFailures(t *testing.T) {
 			t.Errorf("%s: %+v %v", name, out, err)
 		}
 	}
-	// A row proof whose index differs from the record proof's, with a valid
-	// proof for that index, is still failed (results).
-	c, v := closedWith(t, nil)
-	in := c.resultsFor(v, resOpts{})
-	other := (v.Index + 1) % len(v.Tags)
-	leaves := make([][]byte, len(v.Tags))
-	copy(leaves, v.Tags)
-	in.Proof = &votewire.RecordProof{Index: uint64(other), TreeSize: uint64(len(v.Tags)), Path: must(votewire.Proof(leaves, other))}
-	if out, _ := c.f.SubmitResults(c.session(), "svc", v.ID, in); out.State != CheckFailed || out.Reason != "results" {
-		t.Errorf("another index: %+v", out)
+}
+
+// Input that does not verify is no answer: the check stays pending and a
+// later correct submission is judged (H2).
+func TestResultsNoAnswer(t *testing.T) {
+	cases := map[string]func(c *cenv, v *votetest.Vote) resOpts{
+		"results_sig": func(c *cenv, v *votetest.Vote) resOpts { return resOpts{badSig: true} },
+		"row index":   func(c *cenv, v *votetest.Vote) resOpts { return resOpts{rowIndex: 1} },
+		"tree size":   func(c *cenv, v *votetest.Vote) resOpts { return resOpts{tree: 1} },
+		"rows_root": func(c *cenv, v *votetest.Vote) resOpts {
+			return resOpts{tamper: func(r *votewire.Results) { r.RowsRoot = make([]byte, 32) }}
+		},
+		"a bundle for other results": func(c *cenv, v *votetest.Vote) resOpts {
+			return resOpts{otherBndl: c.env.auth.Bundle([]byte(`{"x":1}`), c.svc.Anchor, c.now)}
+		},
+	}
+	for name, mk := range cases {
+		c, v := closedWith(t, nil)
+		out, err := c.f.SubmitResults(c.session(), "svc", v.ID, c.resultsFor(v, mk(c, v)))
+		if err != nil || out.State != CheckPending {
+			t.Errorf("%s: %+v %v", name, out, err)
+			continue
+		}
+		if c.rec(v.ID).Check == CheckFailed || c.has("vote.check_failed", "") || c.has("vote.problem", v.ID) {
+			t.Errorf("%s: failed on input that does not verify", name)
+		}
+		// Unparseable bytes too; then the correct submission is judged.
+		if out, _ := c.f.SubmitResults(c.session(), "svc", v.ID, ResultsSubmit{Results: []byte("not json")}); out.State != CheckPending {
+			t.Errorf("%s: garbage: %+v", name, out)
+		}
+		out, _ = c.f.SubmitResults(c.session(), "svc", v.ID, c.resultsFor(v, resOpts{}))
+		if out.State != CheckVerified {
+			t.Errorf("%s: the correct submission after: %+v", name, out)
+		}
 	}
 }
 
@@ -224,8 +254,8 @@ func TestResultsBundleAndPreconditions(t *testing.T) {
 	c, v = closedWith(t, nil)
 	bad := c.env.auth.Bundle([]byte(`{"x":1}`), c.svc.Anchor, c.now)
 	out, _ := c.f.SubmitResults(c.session(), "svc", v.ID, c.resultsFor(v, resOpts{otherBndl: bad}))
-	if out.State != CheckFailed || out.Reason != "anchor" {
-		t.Errorf("anchor: %+v", out)
+	if out.State != CheckPending {
+		t.Errorf("a bundle for other bytes: %+v", out)
 	}
 	// Out-of-date roots: pending (trust_root), nothing changes; the check
 	// can be made later.

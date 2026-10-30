@@ -241,10 +241,20 @@ func (f *Feature) SiteDocument(s *vault.Session, conn, id string, d SiteDoc) err
 		status = StatusUnreachable
 	}
 	// A proposal kept from a status answer without a bundle waits for the
-	// site's (checking, site): the held bytes and the site's bundle.
+	// site's (checking, site). The site's bundle is taken only if it verifies
+	// for the held bytes; anything else (another proposal's, garbage) leaves
+	// the record as it is, never rejected and never under another reason.
 	if status == StatusFound && r.Reason == ReasonSite && eq(d.Proposal, r.Proposal) && len(d.Bundle) > 0 {
-		r.Bundle, r.Reason = d.Bundle, ReasonServiceList // checked now like any other
-		f.recheckOne(s, r)
+		var notAfter time.Time
+		if !r.NoRelay {
+			notAfter = time.UnixMilli(r.ReceivedMS).Add(AnchorAhead)
+		}
+		if f.anchor(s, r.Conn, r.signers(), r.Proposal, d.Bundle, notAfter) == anchorOK {
+			r.Bundle, r.Reason = d.Bundle, ""
+			r.ChangedMS = now.UnixMilli()
+			f.opened(s, r)
+			f.event(s, r, "proposal")
+		}
 	}
 	var next, alert string
 	switch status {

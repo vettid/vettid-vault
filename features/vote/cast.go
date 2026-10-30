@@ -23,6 +23,7 @@ const (
 	FinalAfter    = 24 * time.Hour // a signed answer without a ballot is final this long after the close
 	CheckGiveUp   = 7 * 24 * time.Hour
 	CheckAskEvery = 10 * time.Minute
+	pendTTL       = 25 * time.Hour // an unanswered request is forgotten (the Manager's featureReqTTL)
 )
 
 // The schedule of sending again (chosen): 1, 5 and 30 minutes after the
@@ -34,6 +35,8 @@ type pendRef struct {
 	conn, id string // the record
 	kind     string // "cast" or "status"
 	want     []byte // a status request for a proposal not held: the site's bytes it must equal
+	restore  bool   // the record was waiting for the answer to a restore when the request was sent
+	atMS     int64
 }
 
 // errs with the codes and bodies of §10.19.5.
@@ -170,7 +173,7 @@ func (f *Feature) sendBallot(s *vault.Session, r *record) {
 		b.NextSendMS = now.Add(time.Minute).UnixMilli()
 		return
 	}
-	f.pend[id] = pendRef{conn: r.Conn, id: r.ID, kind: "cast"}
+	f.pend[id] = pendRef{conn: r.Conn, id: r.ID, kind: "cast", atMS: now.UnixMilli()}
 	b.Sends = append(b.Sends, sendRec{ID: id, AtMS: now.UnixMilli(), Gen: b.Gen})
 	if len(b.Sends) > 64 {
 		if !b.Sends[0].Answered {
@@ -201,6 +204,10 @@ func (f *Feature) sendBallot(s *vault.Session, r *record) {
 
 // askStatus sends vote.status for a record.
 func (f *Feature) askStatus(s *vault.Session, conn, id string, want []byte) bool {
+	restore := false
+	if r := f.get(conn, id); r != nil {
+		restore = r.Restore
+	}
 	body, err := votewire.MarshalStatusRequest(id)
 	if err != nil {
 		return false
@@ -209,7 +216,7 @@ func (f *Feature) askStatus(s *vault.Session, conn, id string, want []byte) bool
 	if err != nil {
 		return false
 	}
-	f.pend[reqID] = pendRef{conn: conn, id: id, kind: "status", want: want}
+	f.pend[reqID] = pendRef{conn: conn, id: id, kind: "status", want: want, restore: restore, atMS: s.Now().UnixMilli()}
 	return true
 }
 
@@ -319,6 +326,9 @@ func (f *Feature) castAnswer(s *vault.Session, r *record, in *envelope.Inner) {
 	now := s.Now()
 	if b.State == BallotRecorded || b.State == BallotConflict || b.State == BallotDisputed {
 		return
+	}
+	if b.State == BallotRefused && in.Status == envelope.StatusError {
+		return // a late refusal after the ballot is refused: nothing to audit or tell again
 	}
 	leaf, err := r.ballotLeaf()
 	if err != nil {
@@ -432,6 +442,9 @@ func (f *Feature) statusAnswer(s *vault.Session, ref pendRef, in *envelope.Inner
 	if err != nil || !eq(tag, r.Tag) {
 		return
 	}
+	if a.Ballot != nil && !r.msgInWindow(int64(a.MsgMS)) {
+		return // a receipt outside the window is no answer, as for vote.cast
+	}
 	r.StatusAnswers = keepRefusal(r.StatusAnswers, in.Body)
 	r.Restore = false // the service answered: a cast is possible again
 	r.ChangedMS = now.UnixMilli()
@@ -453,27 +466,37 @@ func (f *Feature) statusAnswer(s *vault.Session, ref pendRef, in *envelope.Inner
 		return
 	}
 	sb := &svcBallot{VK: a.Ballot.VK, ChoiceID: a.Ballot.ChoiceID, BallotSig: a.Ballot.BallotSig, MsgMS: int64(a.MsgMS), ReceiptSig: a.ReceiptSig}
+	same := b != nil && eq(sb.VK, b.VK) && sb.ChoiceID == b.ChoiceID && eq(sb.BallotSig, b.BallotSig)
 	switch {
-	case b == nil || b.State == BallotRefused && b.Code == "connection_ended":
-		// After a restore the service holds a ballot the vault has not: the
-		// member confirms it (vote.confirm).
+	case same:
+		// The vault's own ballot (a refused connection_ended one included):
+		// the receipt, a lost answer recovered.
+		if b.State != BallotRecorded && b.State != BallotConflict && b.State != BallotDisputed {
+			f.receipt(s, r, sb.MsgMS, sb.ReceiptSig)
+		} else {
+			f.event(s, r, "ballot")
+		}
+	case b == nil && ref.restore && eq(sb.VK, r.VK):
+		// After a restore the service holds a ballot made with this record's
+		// own voting key that the vault lost: the member confirms it
+		// (vote.confirm).
 		r.ServiceBallot = sb
 		f.event(s, r, "ballot")
-	case b.State == BallotRecorded || b.State == BallotConflict || b.State == BallotDisputed:
-		if !(eq(sb.VK, b.VK) && sb.ChoiceID == b.ChoiceID && eq(sb.BallotSig, b.BallotSig)) && b.State == BallotRecorded {
-			r.Other = sb
-			b.State = BallotConflict
-			f.audit(s, "vote.conflict", r.Conn, r.ID)
-			f.feed(s, "vote.problem", r.Conn, r.ID, "high")
-		}
-		f.event(s, r, "ballot")
-	case eq(sb.VK, b.VK) && sb.ChoiceID == b.ChoiceID && eq(sb.BallotSig, b.BallotSig):
-		f.receipt(s, r, sb.MsgMS, sb.ReceiptSig) // a lost answer recovered
 	default:
+		// A ballot the vault never signed (another vk, or no restore), or
+		// another one than its own: a conflict, kept as evidence. Without a
+		// ballot of the vault's own it prompts nothing and does not change
+		// whether it can cast.
 		r.Other = sb
-		f.setFinal(s, r, BallotConflict, "")
+		switch {
+		case b != nil && (b.State == BallotRecorded || !b.final()):
+			f.setFinal(s, r, BallotConflict, "")
+		default:
+			r.ConflictEv = true
+		}
 		f.audit(s, "vote.conflict", r.Conn, r.ID)
 		f.feed(s, "vote.problem", r.Conn, r.ID, "high")
+		f.event(s, r, "problem")
 	}
 }
 
@@ -505,6 +528,12 @@ func (f *Feature) statusRefusal(s *vault.Session, r *record, ref pendRef, in *en
 // the vault was never sent"): steps 2 to 6 on the answer's members, a
 // missing bundle leaving it `checking` (site) until the site's arrives.
 func (f *Feature) intakeStatus(s *vault.Session, conn string, a *votewire.StatusAnswer) {
+	// The answer's signatures first: nothing is kept (not even a rejected
+	// record) from an answer that does not verify under the service's key.
+	p, err := votewire.ParseProposal(a.Proposal)
+	if err != nil || !isConnKey(s, conn, p.Service) || a.VerifySig(p.Service, votewire.H(a.Proposal)) != nil {
+		return
+	}
 	msg := &votewire.ProposalMsg{Proposal: a.Proposal, ProposalSig: a.ProposalSig, Bundle: a.Bundle, RecordSecret: a.RecordSecret, RecordProof: a.RecordProof}
 	_, _ = f.intake(s, conn, msg)
 }
@@ -518,7 +547,7 @@ func (f *Feature) RequestProposal(s *vault.Session, conn, id string, siteBytes [
 	defer f.mu.Unlock()
 	k := key(conn, id)
 	now := s.Now()
-	if f.st.Records[k] != nil || !votewire.ValidProposalID(id) {
+	if f.st.Records[k] != nil || !votewire.ValidProposalID(id) || len(siteBytes) == 0 {
 		return false
 	}
 	if at, ok := f.asked[k]; ok && now.Sub(time.UnixMilli(at)) < StatusEvery {
@@ -588,6 +617,11 @@ func (f *Feature) Tick(s *vault.Session) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	now := s.Now()
+	for id, p := range f.pend { // as the Manager forgets its own requests
+		if now.Sub(time.UnixMilli(p.atMS)) > pendTTL {
+			delete(f.pend, id)
+		}
+	}
 	keys := make([]string, 0, len(f.st.Records))
 	for k := range f.st.Records {
 		keys = append(keys, k)
@@ -770,14 +804,17 @@ func (f *Feature) CredentialKeysOpen(s *vault.Session, _, newKey ed25519.Private
 		if len(pin) == 0 || eq(pin, newPub) {
 			continue // pinned no key: only replaced
 		}
+		// Every re-sign for a connection that pinned a key is a new
+		// generation, sent or not: a bad_ballot answering an older send is
+		// answered by it, whether or not the connection was reachable now.
+		b.Gen++
 		if !now.Before(time.Unix(r.Closes, 0)) {
 			continue // after the close in force: only replaced
 		}
 		c, ok := s.Connection(r.Conn)
 		if !ok || c.State != vault.PeerActive {
-			continue
+			continue // sent at the next tick, by the schedule
 		}
-		b.Gen++
 		f.sendBallot(s, r)
 	}
 }

@@ -213,8 +213,12 @@ type record struct {
 	// Restore: the vault was restored (a recovery, a transfer) and asks the
 	// service what it recorded; no cast until it answers (§10.19.5). AskMS
 	// is the next ask.
-	Restore bool  `json:"restore,omitempty"`
-	AskMS   int64 `json:"ask_ms,omitempty"`
+	// ConflictEv: the service showed a ballot the vault never signed (or
+	// another than its own) with no ballot of the vault's own to change: a
+	// conflict kept as evidence (VAULT-MESSAGING §10.19.5).
+	ConflictEv bool  `json:"conflict_ev,omitempty"`
+	Restore    bool  `json:"restore,omitempty"`
+	AskMS      int64 `json:"ask_ms,omitempty"`
 	// ServiceBallot is the ballot a status answer carried that the vault
 	// has no receipt for: the member confirms it (vote.confirm).
 	ServiceBallot *svcBallot `json:"service_ballot,omitempty"`
@@ -361,7 +365,7 @@ func (r *record) checkPending(now time.Time) bool {
 
 // problem reports whether the record is in the problem set (§10.19.2).
 func (r *record) problem() bool {
-	if r.RejectReason != "" || r.Check == CheckFailed || r.RefusalProblem {
+	if r.RejectReason != "" || r.Check == CheckFailed || r.RefusalProblem || r.ConflictEv {
 		return true
 	}
 	if b := r.Ballot; b != nil && (b.State == BallotConflict || b.State == BallotDisputed) {

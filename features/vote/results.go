@@ -65,7 +65,7 @@ func sameBallot(b *ballot, row *votewire.RowBallot) bool {
 func verdict(r *record, row *votewire.RowBallot) (state, reason string) {
 	b := r.Ballot
 	switch {
-	case b != nil && b.State == BallotConflict:
+	case r.ConflictEv || b != nil && b.State == BallotConflict:
 		return CheckFailed, "conflict"
 	case b != nil && b.State == BallotDisputed:
 		return CheckFailed, "disputed"
@@ -96,7 +96,10 @@ func verdict(r *record, row *votewire.RowBallot) (state, reason string) {
 // and the extensions in it are the ones the vault holds, `tally` and
 // `counts.eligible`, and the row against the table. A check that cannot be
 // made yet (the list does not name the key, the roots are out of date, the
-// clock) stays pending with the reason; a check already final is answered
+// clock) stays pending with the reason; input that does not verify (the
+// signature, the bundle, the row's proof to the signed rows_root) is no
+// answer, also pending (reason "input"), and a later correct submission is
+// judged; a check already final is answered
 // with its state.
 func (f *Feature) SubmitResults(s *vault.Session, conn, id string, in ResultsSubmit) (CheckOutcome, error) {
 	f.mu.Lock()
@@ -117,20 +120,24 @@ func (f *Feature) SubmitResults(s *vault.Session, conn, id string, in ResultsSub
 	if err != nil {
 		return CheckOutcome{}, errBad
 	}
+	// What does not verify is no answer: the check stays pending and a later
+	// correct submission is judged. Only a contradiction under the service's
+	// signature and a verified anchor fails the check.
+	noAnswer := CheckOutcome{State: CheckPending, Reason: "input"}
 	res, err := votewire.ParseResults(in.Results)
 	if err != nil || votewire.VerifyResults(r.Signer, r.Hash, in.Results, in.Sig) != nil {
-		return f.failCheck(s, r, "results"), nil
+		return noAnswer, nil
 	}
 	switch f.anchor(s, conn, r.signers(), in.Results, in.Bundle, time.Time{}) {
 	case anchorOK:
-	case anchorRejected, anchorLate:
-		return f.failCheck(s, r, "anchor"), nil
 	case anchorServiceList:
 		return CheckOutcome{State: CheckPending, Reason: ReasonServiceList}, nil
 	case anchorClock:
 		return CheckOutcome{State: CheckPending, Reason: ReasonClock}, nil
-	default:
+	case anchorTrustRoot:
 		return CheckOutcome{State: CheckPending, Reason: ReasonTrustRoot}, nil
+	default: // a bundle that does not hold for these results
+		return noAnswer, nil
 	}
 	// The proposal in the results is, byte for byte, the one held with its
 	// signature; the extensions are the ones held, in order.
@@ -156,27 +163,35 @@ func (f *Feature) SubmitResults(s *vault.Session, conn, id string, in ResultsSub
 		adopt = append(adopt, &extRec{N: ext.N, Doc: x.Doc, Sig: x.Sig, Closes: ext.ClosesAt})
 		closes = ext.ClosesAt
 	}
-	if res.CheckProposal(p) != nil {
+	if res.CheckProposal(p) != nil || r.Proof == nil || res.Counts.Eligible != int64(r.Proof.TreeSize) {
 		return f.failCheck(s, r, "results"), nil
 	}
-	// The row: tree_size equal to counts.eligible and to the record proof's,
-	// row_proof.index equal to the record proof's, and the proof to rows_root.
-	if in.Proof == nil || r.Proof == nil || in.Proof.TreeSize != uint64(res.Counts.Eligible) || in.Proof.TreeSize != r.Proof.TreeSize ||
-		in.Proof.Index != r.Proof.Index || len(in.Proof.Path) > votewire.MaxRecordPath {
-		return f.failCheck(s, r, "results"), nil
+	// The row. The proof must verify to the signed rows_root before the row
+	// is judged; one that does not is no answer. A proof that verifies at
+	// another index or tree size than the record proof's is the service's
+	// own contradiction.
+	// The tree size is the signed counts.eligible (equal to the record
+	// proof's, checked above); a proof submitted for another size is the
+	// app's mistake, not evidence.
+	if in.Proof == nil || len(in.Proof.Path) > votewire.MaxRecordPath || in.Proof.TreeSize != uint64(res.Counts.Eligible) {
+		return noAnswer, nil
 	}
 	var leaf []byte
+	var rb *votewire.Ballot
 	if in.Row == nil {
 		leaf, err = votewire.EmptyRowLeaf(r.Tag)
 	} else {
-		rb := &votewire.Ballot{RecordTag: r.Tag, VK: in.Row.VK, ChoiceID: in.Row.ChoiceID, BallotSig: in.Row.BallotSig}
-		if !p.HasChoice(in.Row.ChoiceID) || votewire.VerifyBallot(r.Hash, rb) != nil {
-			return f.failCheck(s, r, "results"), nil
-		}
+		rb = &votewire.Ballot{RecordTag: r.Tag, VK: in.Row.VK, ChoiceID: in.Row.ChoiceID, BallotSig: in.Row.BallotSig}
 		leaf, err = rb.Leaf()
 	}
 	if err != nil || !votewire.VerifyProof(res.RowsRoot, leaf, in.Proof.Index, in.Proof.TreeSize, in.Proof.Path) {
-		return f.failCheck(s, r, "results"), nil
+		return noAnswer, nil
+	}
+	if in.Proof.Index != r.Proof.Index {
+		return f.failCheck(s, r, "results"), nil // the member's row is not at the member's index
+	}
+	if rb != nil && (!p.HasChoice(rb.ChoiceID) || votewire.VerifyBallot(r.Hash, rb) != nil) {
+		return f.failCheck(s, r, "results"), nil // the service published an invalid ballot under the member's code
 	}
 	r.Exts = append(r.Exts, adopt...)
 	if len(adopt) > 0 {

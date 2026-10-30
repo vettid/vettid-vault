@@ -463,6 +463,10 @@ func (f *Feature) applyExtension(s *vault.Session, r *record, e *extRec) string 
 	}
 	if b := r.Ballot; b != nil && !b.final() { // a verified extension restarts sending
 		b.Round, b.NextSendMS = 0, 0
+		if b.State == BallotWaiting && b.Reason == "closed" && s.Now().Before(time.Unix(r.Closes, 0)) {
+			// The close that refused the ballot has moved: it is sent again.
+			b.State, b.Reason, b.NextStatusMS = BallotSending, "", 0
+		}
 	}
 	r.ChangedMS = s.Now().UnixMilli()
 	f.audit(s, "vote.extended", r.Conn, r.ID+":"+strconv.FormatInt(e.N, 10))

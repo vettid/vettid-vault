@@ -256,7 +256,7 @@ func TestServiceDeviceRequestsForbidden(t *testing.T) {
 	svc := d.asConnection(t, "svc", 0x70)
 	d.asConnection(t, "per", 0x74)
 	d.m.st.Connections["svc"].PeerKind = "service"
-	bodies := []string{`{"connection_id":"svc"}`, `{"subject":{"connection_id":"svc"}}`, `{"a":"svc","c":"per"}`, `{"a":"per","c":"svc"}`}
+	bodies := []string{`{"connections":["per","svc"]}`, `{"connection_id":"svc"}`, `{"subject":{"connection_id":"svc"}}`, `{"a":"svc","c":"per"}`, `{"a":"per","c":"svc"}`}
 	types := []string{"message.attachment.get"}
 	for typ := range serviceForbidden {
 		types = append(types, typ)
@@ -270,15 +270,15 @@ func TestServiceDeviceRequestsForbidden(t *testing.T) {
 			}
 		}
 		// A person connection (and a missing one) is the handler's business.
-		for _, b := range []string{`{"connection_id":"per"}`, `{"subject":{"connection_id":"per"}}`, `{"a":"per","c":"none"}`} {
+		for _, b := range []string{`{"connection_id":"per"}`, `{"subject":{"connection_id":"per"}}`, `{"a":"per","c":"none"}`, `{"connections":["per"]}`} {
 			id := d.sendAs(app, typ, b)
 			if r := find(d.inbox(app)["dev1"], reply(id)); r == nil || r.Status != envelope.StatusOK {
 				t.Fatalf("%s %s: %+v", typ, b, r)
 			}
 		}
 	}
-	if len(st.got) != len(types)*3 {
-		t.Fatalf("handled %d, want %d", len(st.got), len(types)*3)
+	if len(st.got) != len(types)*4 {
+		t.Fatalf("handled %d, want %d", len(st.got), len(types)*4)
 	}
 	if in := d.inbox(svc)["svc"]; len(in) != 0 {
 		t.Fatalf("a forbidden request sent: %+v", in)
@@ -327,5 +327,39 @@ func TestNoAutomaticSenderReachesService(t *testing.T) {
 	}
 	if len(in["per"]) < len(auto)+len(allowed) {
 		t.Fatalf("a person got %d of %d", len(in["per"]), len(auto)+len(allowed))
+	}
+}
+
+// §10.5.1: a message.send refused as forbidden (it names a service) still
+// deletes the blob it names.
+func TestServiceForbiddenSendDropsBlob(t *testing.T) {
+	d := newDevFixture(t)
+	sinkOf(d)
+	d.m.addFeature(&gateStub{specs: []TypeSpec{{Type: "message.send", Request: true, From: owners}}})
+	d.asConnection(t, "svc", 0x70)
+	d.m.st.Connections["svc"].PeerKind = "service"
+	d.m.att = &attRunner{wake: make(chan struct{}, 1)}
+	blob := "01JB2Z6V9K3M4N5P6Q7R8S9T71"
+	id := d.sendAs(d.self(), "message.send", `{"connection_id":"svc","attachment":{"blob":{"id":"`+blob+`"}}}`)
+	if r := find(d.inbox(d.self())["dev1"], reply(id)); r == nil || errCode(r) != "forbidden" {
+		t.Fatalf("send: %+v", r)
+	}
+	if got := d.m.att.drops; len(got) != 1 || got[0] != blob {
+		t.Fatalf("blob drops: %v", got)
+	}
+}
+
+// A response from a service that matches no request is dropped and audited.
+func TestServiceUnmatchedResponseAudited(t *testing.T) {
+	d, _, svc, per := gateFixture(t)
+	for _, td := range []*tdev{svc, per} {
+		id, _ := envelope.NewULID(time.Now())
+		raw, _ := td.ep.Seal(&envelope.Inner{ID: id, Type: "profile.update", Re: "01JB2Z6V9K3M4N5P6Q7R8S9T00", Status: envelope.StatusOK, TS: time.Now(), Body: []byte(`{}`)})
+		d.seq++
+		_ = d.m.ProcessBatch(context.Background(), &fakeCollector{}, []Message{{MsgID: fmt.Sprintf("u%d", d.seq), Sender: relayauth.EncodeKey(td.peer.Relay.PK), JTI: "standing-" + td.peer.ID, Payload: raw}})
+	}
+	got := dropped(d, "drop.service_type")
+	if len(got) != 1 || got[0].ConnectionID != "svc" || got[0].Ref != "svc profile.update" {
+		t.Fatalf("audit %+v", got)
 	}
 }

@@ -100,6 +100,13 @@ func (m *Manager) serviceDeviceRefused(typ string, body []byte) bool {
 			names = append(names, v)
 		}
 	}
+	if arr, _, err := o.OptArray("connections"); err == nil { // action.configure
+		for _, r := range arr {
+			if v, err := strictjson.AsString(r); err == nil {
+				names = append(names, v)
+			}
+		}
+	}
 	if so, err := o.Object("subject"); err == nil {
 		if v, ok, err := so.OptString("connection_id"); err == nil && ok {
 			names = append(names, v)

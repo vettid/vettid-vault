@@ -584,7 +584,11 @@ func TestMatchCodeIgnored(t *testing.T) {
 // connection (the vault gate also demands a known purpose).
 func TestServiceConnectionTypes(t *testing.T) {
 	for _, ts := range New(nil).Types() {
-		want := ts.Type == peerwire.TypeConnAuthChallenge
+		// TODO(#168): withdraw is registered there without Connections;
+		// set vault.PeersBoth on it when main is merged. Until then this
+		// test knows no withdraw type and the line below must be updated
+		// to require it.
+		want := ts.Type == peerwire.TypeConnAuthChallenge || ts.Type == "connection.authenticate.withdraw"
 		if (ts.Connections != vault.PeersPerson) != want {
 			t.Errorf("%s: Connections %v", ts.Type, ts.Connections)
 		}

@@ -283,6 +283,9 @@ func (p *Proposal) HasChoice(id string) bool {
 // ParseExtension parses an extension's exact bytes: v is 1, proposal_id a
 // canonical ULID, n at least 1, outage.from < outage.to.
 func ParseExtension(data []byte) (*Extension, error) {
+	if len(data) > MaxExtensionDoc {
+		return nil, ErrDocument
+	}
 	var e Extension
 	if err := parseDoc(data, extensionSchema, &e); err != nil {
 		return nil, err
@@ -295,12 +298,15 @@ func ParseExtension(data []byte) (*Extension, error) {
 
 // ParseResults parses the results document's exact bytes.
 func ParseResults(data []byte) (*Results, error) {
+	if len(data) > MaxResultsDoc {
+		return nil, ErrDocument
+	}
 	var r Results
 	if err := parseDoc(data, resultsSchema, &r); err != nil {
 		return nil, err
 	}
 	if r.V != 1 || !ValidProposalID(r.ProposalID) || len(r.RowsHash) != HashLen || len(r.RowsRoot) != HashLen ||
-		len(r.Proposal.Sig) != SigLen || r.Tally == nil || r.Extensions == nil ||
+		len(r.Proposal.Sig) != SigLen || r.Tally == nil || r.Extensions == nil || len(r.Extensions) > MaxExtensions || len(r.Tally) > MaxChoices ||
 		r.Counts.Eligible < 1 || r.Counts.Ballots < 0 || r.Counts.Removed < 0 || r.Counts.Unhandled < 0 {
 		return nil, ErrDocument
 	}
@@ -344,7 +350,18 @@ func ParseServiceList(data []byte) (*ServiceList, error) {
 	if l.V != 1 || l.Version < 1 || len(l.Previous) != HashLen || l.Services == nil {
 		return nil, ErrDocument
 	}
+	ids, iks := map[string]bool{}, map[string]bool{}
 	for _, s := range l.Services {
+		if ids[s.ServiceID] {
+			return nil, ErrDocument
+		}
+		ids[s.ServiceID] = true
+		for _, k := range s.IKs {
+			if iks[string(k)] {
+				return nil, ErrDocument
+			}
+			iks[string(k)] = true
+		}
 		if len(s.IKs) == 0 || s.AnchorKeys == nil || s.ServiceID != hex.EncodeToString(H(s.IKs[0])[:16]) || !utf8.ValidString(s.Name) {
 			return nil, ErrDocument
 		}
@@ -354,7 +371,7 @@ func ParseServiceList(data []byte) (*ServiceList, error) {
 			}
 		}
 		for _, a := range s.AnchorKeys {
-			if len(a.Key) == 0 || len(a.AnchorCert) != SigLen || len(a.IK) != KeyLen {
+			if len(a.Key) == 0 || len(a.AnchorCert) != SigLen || len(a.IK) != KeyLen || !s.hasIK(a.IK) {
 				return nil, ErrDocument
 			}
 		}
@@ -372,4 +389,50 @@ func (l *ServiceList) Entry(ik []byte) *ServiceEntry {
 		}
 	}
 	return nil
+}
+
+func (s *ServiceEntry) hasIK(ik []byte) bool {
+	for _, k := range s.IKs {
+		if eq(k, ik) {
+			return true
+		}
+	}
+	return false
+}
+
+// Extends reports whether next is a valid next version of l, whose exact
+// bytes are data (BALLOT-PROTOCOL §3.3; vettid/votes site/services.go
+// Extends): a higher version, previous equal to the hash of l's bytes, and
+// every service of l still present under the same service_id with all its
+// identity keys and anchor keys (matched by key).
+func (l *ServiceList) Extends(data []byte, next *ServiceList) bool {
+	if next.Version <= l.Version || !eq(next.Previous, H(data)) {
+		return false
+	}
+	for _, ps := range l.Services {
+		var ns *ServiceEntry
+		for i := range next.Services {
+			if next.Services[i].ServiceID == ps.ServiceID {
+				ns = &next.Services[i]
+			}
+		}
+		if ns == nil {
+			return false
+		}
+		for _, k := range ps.IKs {
+			if !ns.hasIK(k) {
+				return false
+			}
+		}
+		for _, a := range ps.AnchorKeys {
+			found := false
+			for _, b := range ns.AnchorKeys {
+				found = found || eq(a.Key, b.Key)
+			}
+			if !found {
+				return false
+			}
+		}
+	}
+	return true
 }

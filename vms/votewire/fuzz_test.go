@@ -2,6 +2,7 @@ package votewire
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"testing"
@@ -38,6 +39,12 @@ func FuzzDocuments(f *testing.F) {
 // The message bodies never panic on any input.
 func FuzzBodies(f *testing.F) {
 	f.Add([]byte(`{"proposal":"AA==","proposal_sig":"","bundle":{},"record_secret":"","record_proof":{"index":0,"tree_size":1,"path":[]}}`))
+	v := loadFuzz()
+	id := v.ProposalID
+	f.Add([]byte(`{"proposal_id":"` + id + `","msg_ms":` + "1793606400123" + `,"receipt_sig":"` + e64(hxb(v.Service.ReceiptSig)) + `"}`))
+	f.Add([]byte(`{"refusal_sig":"` + e64(hxb(v.Service.Refusal.Sig)) + `","msg_ms":1,"connection":"` + e64(hxb(v.Service.Refusal.Connection)) + `","record_tag":"` + e64(hxb(v.RecordTag)) + `"}`))
+	f.Add([]byte(`{"proposal_id":"` + id + `","proposal":"` + e64([]byte(v.Documents.Proposal)) + `","proposal_sig":"` + e64(hxb(v.Documents.ProposalSig)) + `","record_secret":"` + e64(hxb(v.RecordSecret)) + `","record_proof":{"index":0,"tree_size":3,"path":[]},"ballot":{"vk":"` + e64(hxb(v.VK)) + `","choice_id":"yes","ballot_sig":"` + e64(hxb(v.BallotSig)) + `"},"msg_ms":1,"receipt_sig":"` + e64(hxb(v.Service.ReceiptSig)) + `","status_sig":"` + e64(hxb(v.Service.StatusSig)) + `"}`))
+	f.Add([]byte(`{"proposal_id":"` + id + `","results_hash":"` + e64(H([]byte(v.Documents.Results))) + `"}`))
 	f.Add([]byte(`{"refusal_sig":null,"msg_ms":1,"connection":"","record_tag":""}`))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		_, _ = ParseProposalMsg(data)
@@ -49,7 +56,7 @@ func FuzzBodies(f *testing.F) {
 	})
 }
 
-// A proof never verifies a leaf that is not in the tree.
+// A proof that verifies against the root of a, b, c is for the leaf at that index.
 func FuzzVerifyProof(f *testing.F) {
 	f.Add([]byte("a"), uint64(0), uint64(1), []byte{})
 	f.Fuzz(func(t *testing.T, leaf []byte, m, n uint64, flat []byte) {
@@ -60,14 +67,22 @@ func FuzzVerifyProof(f *testing.F) {
 		}
 		leaves := [][]byte{[]byte("a"), []byte("b"), []byte("c")}
 		root := Root(leaves)
+		// For every n: a proof that verifies against this root is the proof
+		// of a leaf of the tree at its index, for the tree's own size.
 		if VerifyProof(root, leaf, m, n, proof) {
-			ok := false
-			for _, l := range leaves {
-				ok = ok || bytes.Equal(l, leaf)
-			}
-			if !ok && n == 3 {
-				t.Fatalf("a leaf outside the tree verifies")
+			ok := m < uint64(len(leaves)) && bytes.Equal(leaves[m], leaf)
+			if !ok {
+				t.Fatalf("a leaf outside the tree verifies (m=%d n=%d)", m, n)
 			}
 		}
 	})
 }
+
+func loadFuzz() *vectors {
+	raw, _ := os.ReadFile(vectorsFile)
+	var v vectors
+	_ = json.Unmarshal(raw, &v)
+	return &v
+}
+
+func hxb(s string) []byte { b, _ := hex.DecodeString(s); return b }

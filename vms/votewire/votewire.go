@@ -45,20 +45,23 @@ const (
 
 // Bounds (VAULT-MESSAGING §10.19.2, §10.19.4; §10.1).
 const (
-	MaxBody       = 196608 // a vote.proposal body
-	MaxProposal   = 65536  // the decoded proposal document
-	MaxBundle     = 65536  // a Sigstore bundle
-	MaxRecordPath = 32     // entries of a record_proof path
-	MaxWindow     = 7 * 24 * 3600
-	MaxExtension  = 24 * 3600 // extensions move the close by at most this, in total
-	MaxTitle      = 200
-	MaxText       = 16384
-	MaxLabel      = 200
-	MaxQuorumText = 1024
-	MaxOutageRule = 1024
-	MinChoices    = 3
-	MaxChoices    = 17
-	AbstainID     = "abstain"
+	MaxBody         = 196608  // a vote.proposal body
+	MaxProposal     = 65536   // the decoded proposal document
+	MaxBundle       = 65536   // a Sigstore bundle
+	MaxRecordPath   = 32      // entries of a record_proof path
+	MaxExtensionDoc = 65536   // an extension document (chosen; the spec gives no bound)
+	MaxResultsDoc   = MaxBody // the results document (chosen)
+	MaxExtensions   = 24      // extensions total at most 24 h, in steps of an hour
+	MaxWindow       = 7 * 24 * 3600
+	MaxExtension    = 24 * 3600 // extensions move the close by at most this, in total
+	MaxTitle        = 200
+	MaxText         = 16384
+	MaxLabel        = 200
+	MaxQuorumText   = 1024
+	MaxOutageRule   = 1024
+	MinChoices      = 3
+	MaxChoices      = 17
+	AbstainID       = "abstain"
 )
 
 // Limits of what the vault keeps (§10.19.2).

@@ -84,6 +84,17 @@ regexes = [
 [[allowlists]]
 description = "vote vectors (test-only, public)"
 targetRules = ["generic-api-key"]
+condition = "AND"
 paths = [
   '''^testdata/vote/vectors\.json$''',
+]
+regexTarget = "match"
+regexes = [
+  '''05bcc4b66fad3a6fb7cd5b3e6567a56d4962d7680e1cba87bee0dc3aa2f85462''',
+  '''26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05''',
+  '''26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85''',
+  '''884b9988fa4ac36b9cbacf96c62fa3222ffc95e199f3ab3f49d4191687d0c9d1''',
+  '''9aa9db2fd2ea84364e930cd5d4e2543ab312bfdca4cc98d413b3300b3954557c''',
+  '''c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a''',
+  '''c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa''',
 ]

@@ -354,3 +354,115 @@ func TestServiceList(t *testing.T) {
 		t.Error("non-canonical list accepted")
 	}
 }
+
+func TestServiceListDuplicatesAndChaining(t *testing.T) {
+	mk := func(version int64, prev []byte, services ...map[string]any) []byte {
+		var ss []any
+		for _, s := range services {
+			ss = append(ss, s)
+		}
+		b, _ := json.Marshal(map[string]any{"v": 1, "version": version, "previous": e64(prev), "services": ss})
+		c, err := Canonicalize(b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	key := func(n byte) []byte { return bytes.Repeat([]byte{n}, 32) }
+	svc := func(ik []byte, extraIKs [][]byte, anchors ...map[string]any) map[string]any {
+		iks := []any{e64(ik)}
+		for _, k := range extraIKs {
+			iks = append(iks, e64(k))
+		}
+		as := []any{}
+		for _, a := range anchors {
+			as = append(as, a)
+		}
+		return map[string]any{"service_id": hex.EncodeToString(H(ik)[:16]), "name": "S", "iks": iks, "anchor_keys": as}
+	}
+	anchor := func(spki string, ik []byte) map[string]any {
+		return map[string]any{"key": e64([]byte(spki)), "anchor_cert": e64(make([]byte, 64)), "ik": e64(ik)}
+	}
+	zero := make([]byte, 32)
+	v1 := mk(1, zero, svc(key(1), nil, anchor("k1", key(1))))
+	l1, err := ParseServiceList(v1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Refusals.
+	if _, err := ParseServiceList(mk(1, zero, svc(key(1), nil), svc(key(1), nil))); err == nil {
+		t.Error("duplicate service_id")
+	}
+	if _, err := ParseServiceList(mk(1, zero, svc(key(1), nil), svc(key(2), [][]byte{key(1)}))); err == nil {
+		t.Error("an ik under two services")
+	}
+	if _, err := ParseServiceList(mk(1, zero, svc(key(1), nil, anchor("k", key(9))))); err == nil {
+		t.Error("an anchor key whose ik is not its service's")
+	}
+	// Chaining.
+	next := func(version int64, prev []byte, services ...map[string]any) *ServiceList {
+		l, err := ParseServiceList(mk(version, prev, services...))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return l
+	}
+	p := H(v1)
+	good := next(2, p, svc(key(1), [][]byte{key(5)}, anchor("k1", key(1)), anchor("k2", key(5))), svc(key(3), nil))
+	if !l1.Extends(v1, good) {
+		t.Error("a valid next version")
+	}
+	for name, n := range map[string]*ServiceList{
+		"same version":   next(1, p, svc(key(1), nil, anchor("k1", key(1)))),
+		"wrong previous": next(2, zero, svc(key(1), nil, anchor("k1", key(1)))),
+		"dropped":        next(2, p, svc(key(3), nil)),
+		"lost anchor":    next(2, p, svc(key(1), nil)),
+		"changed anchor": next(2, p, svc(key(1), nil, anchor("other", key(1)))),
+	} {
+		if l1.Extends(v1, n) {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	l2 := next(3, H(v1), svc(key(1), [][]byte{key(5)}, anchor("k1", key(1))))
+	_ = l2
+	// An ik lost.
+	withIK := mk(2, p, svc(key(1), [][]byte{key(5)}, anchor("k1", key(1))))
+	lw, _ := ParseServiceList(withIK)
+	if !l1.Extends(v1, lw) {
+		t.Fatal("adding an ik")
+	}
+	lost := next(3, H(withIK), svc(key(1), nil, anchor("k1", key(1))))
+	if lw.Extends(withIK, lost) {
+		t.Error("an ik lost")
+	}
+}
+
+func TestDocumentSizeBounds(t *testing.T) {
+	if _, err := ParseExtension(bytes.Repeat([]byte(" "), MaxExtensionDoc+1)); err == nil {
+		t.Error("oversized extension")
+	}
+	if _, err := ParseResults(bytes.Repeat([]byte(" "), MaxResultsDoc+1)); err == nil {
+		t.Error("oversized results")
+	}
+	v := load(t)
+	res, _ := ParseResults([]byte(v.Documents.Results))
+	res.Extensions = make([]Signed, MaxExtensions+1)
+	for i := range res.Extensions {
+		res.Extensions[i] = Signed{Doc: []byte("x"), Sig: make([]byte, 64)}
+	}
+	b, _ := encodeCanonical(res)
+	if _, err := ParseResults(b); err == nil {
+		t.Error("25 extensions in results")
+	}
+	res.Extensions = res.Extensions[:MaxExtensions]
+	b, _ = encodeCanonical(res)
+	if _, err := ParseResults(b); err != nil {
+		t.Errorf("24 extensions: %v", err)
+	}
+	if _, err := ParseCastAnswer(bytes.Repeat([]byte(" "), MaxBody+1)); err == nil {
+		t.Error("oversized cast answer")
+	}
+	if _, err := ParseRefusal(bytes.Repeat([]byte(" "), MaxBody+1)); err == nil {
+		t.Error("oversized refusal")
+	}
+}

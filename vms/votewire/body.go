@@ -270,6 +270,9 @@ type CastAnswer struct {
 
 // ParseCastAnswer parses the ok answer to vote.cast.
 func ParseCastAnswer(body []byte) (*CastAnswer, error) {
+	if len(body) > MaxBody {
+		return nil, ErrBody
+	}
 	o, err := strictjson.ParseObject(body)
 	if err != nil {
 		return nil, ErrBody
@@ -331,8 +334,8 @@ func (b *RowBallot) Ballot(tag []byte) *Ballot {
 // StatusAnswer is the ok answer to vote.status: {proposal_id, proposal,
 // proposal_sig, bundle?, record_secret, record_proof, ballot?, msg_ms?,
 // receipt_sig?, status_sig}. `bundle` is absent until the proposal is
-// anchored; `msg_ms` and `receipt_sig` are present together, and only with
-// a `ballot`.
+// anchored; `ballot`, `msg_ms` and `receipt_sig` are present together or
+// all absent.
 type StatusAnswer struct {
 	ProposalID   string
 	Proposal     []byte
@@ -393,8 +396,9 @@ func ParseStatusAnswer(body []byte) (*StatusAnswer, error) {
 			return nil, ErrBody
 		}
 	}
-	// A receipt is msg_ms and receipt_sig together, for a ballot.
-	if (a.ReceiptSig != nil) != hasMS || (a.ReceiptSig != nil && a.Ballot == nil) {
+	// A ballot, msg_ms and receipt_sig come together or not at all
+	// (BALLOT-PROTOCOL 0.12.1).
+	if (a.ReceiptSig != nil) != hasMS || (a.ReceiptSig != nil) != (a.Ballot != nil) {
 		return nil, ErrBody
 	}
 	if a.StatusSig, err = o.Base64("status_sig", SigLen); err != nil {
@@ -408,25 +412,34 @@ func ParseStatusAnswer(body []byte) (*StatusAnswer, error) {
 func (a *StatusAnswer) Tag() ([]byte, error) { return RecordTag(a.ProposalID, a.RecordSecret) }
 
 // VerifySig checks status_sig under the service's key over the answer's own
-// tag and ballot leaf (H("") when there is no ballot), and the receipt when
-// there is one (§10.19.5). The proposal, its signature, bundle and proof
-// are checked by the caller as in §10.19.4 steps 2 to 6.
-func (a *StatusAnswer) VerifySig(ik []byte) error {
+// tag and ballot leaf (H("") when there is no ballot); when there is a
+// ballot, its ballot_sig under its vk and the receipt, both for the HELD
+// proposal's hash (§10.19.5). The proposal, its signature, bundle and proof
+// are checked by the caller as in §10.19.4 steps 2 to 6, and the caller
+// passes the hash of the proposal it holds, not the answer's.
+func (a *StatusAnswer) VerifySig(ik, proposalHash []byte) error {
 	tag, err := a.Tag()
-	if err != nil {
+	if err != nil || len(proposalHash) != HashLen {
 		return ErrSignature
 	}
 	var leaf []byte
 	if a.Ballot != nil {
-		if leaf, err = a.Ballot.Ballot(tag).Leaf(); err != nil {
+		b := a.Ballot.Ballot(tag)
+		if leaf, err = b.Leaf(); err != nil {
 			return ErrSignature
+		}
+		if a.ReceiptSig == nil {
+			return ErrSignature
+		}
+		if err := VerifyBallot(proposalHash, b); err != nil {
+			return err
 		}
 	}
 	if err := VerifyStatus(ik, a.ProposalID, tag, leaf, a.StatusSig); err != nil {
 		return err
 	}
-	if a.ReceiptSig != nil {
-		return VerifyReceipt(ik, H(a.Proposal), leaf, a.MsgMS, a.ReceiptSig)
+	if a.Ballot != nil {
+		return VerifyReceipt(ik, proposalHash, leaf, a.MsgMS, a.ReceiptSig)
 	}
 	return nil
 }
@@ -458,6 +471,9 @@ func optB64(o strictjson.Object, name string, n int) ([]byte, error) {
 // ParseRefusal parses a refusal body. A refusal without a signature parses
 // with RefusalSig nil; Verify refuses it.
 func ParseRefusal(body []byte) (*Refusal, error) {
+	if len(body) > MaxBody {
+		return nil, ErrBody
+	}
 	o, err := strictjson.ParseObject(body)
 	if err != nil {
 		return nil, ErrBody

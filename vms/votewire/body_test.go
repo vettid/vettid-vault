@@ -275,12 +275,13 @@ func statusBody(t *testing.T, v *vectors, withBallot bool, mut func(m map[string
 func TestStatusAnswer(t *testing.T) {
 	v := load(t)
 	ik := ed25519.NewKeyFromSeed(hx(t, v.Documents.ServiceSeed)).Public().(ed25519.PublicKey)
+	php := H([]byte(v.Documents.Proposal))
 	for _, withBallot := range []bool{false, true} {
 		a, err := ParseStatusAnswer(statusBody(t, v, withBallot, nil))
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := a.VerifySig(ik); err != nil {
+		if err := a.VerifySig(ik, php); err != nil {
 			t.Errorf("ballot=%v: %v", withBallot, err)
 		}
 		if a.Bundle != nil {
@@ -296,14 +297,33 @@ func TestStatusAnswer(t *testing.T) {
 		} else {
 			c.Ballot = &RowBallot{VK: make([]byte, 32), ChoiceID: "yes", BallotSig: make([]byte, 64)}
 		}
-		if c.VerifySig(ik) == nil {
+		if c.VerifySig(ik, php) == nil {
 			t.Errorf("ballot=%v: the signature verifies for the other form", withBallot)
 		}
 	}
 	a, _ := ParseStatusAnswer(statusBody(t, v, true, nil))
 	a.MsgMS++
-	if a.VerifySig(ik) == nil {
+	if a.VerifySig(ik, php) == nil {
 		t.Error("a receipt for another msg_ms verifies")
+	}
+	a.MsgMS--
+	if a.VerifySig(ik, H([]byte("another proposal"))) == nil {
+		t.Error("verifies against another held proposal")
+	}
+	// The reviewer's input: a correctly signed status_sig and receipt over a
+	// ballot whose ballot_sig is 64 zero bytes.
+	sk := ed25519.NewKeyFromSeed(hx(t, v.Documents.ServiceSeed))
+	tag, _ := a.Tag()
+	zero := &RowBallot{VK: a.Ballot.VK, ChoiceID: "yes", BallotSig: make([]byte, 64)}
+	zl, _ := zero.Ballot(tag).Leaf()
+	sm, _ := StatusMsg(a.ProposalID, tag, zl)
+	rm, _ := ReceiptMsg(php, zl, a.MsgMS)
+	z := *a
+	z.Ballot = zero
+	z.StatusSig = ed25519.Sign(sk, append([]byte(LabelStatus), sm...))
+	z.ReceiptSig = ed25519.Sign(sk, append([]byte(LabelReceipt), rm...))
+	if z.VerifySig(ik, php) == nil {
+		t.Error("a status answer with a garbage ballot_sig verifies")
 	}
 	if _, err := ParseStatusAnswer(statusBody(t, v, false, func(m map[string]any) { m["bundle"] = map[string]any{"x": 1} })); err != nil {
 		t.Errorf("bundle: %v", err)
@@ -312,6 +332,7 @@ func TestStatusAnswer(t *testing.T) {
 		"receipt without msg_ms": func(m map[string]any) { delete(m, "msg_ms") },
 		"msg_ms without receipt": func(m map[string]any) { delete(m, "receipt_sig") },
 		"receipt without ballot": func(m map[string]any) { delete(m, "ballot") },
+		"ballot without receipt": func(m map[string]any) { delete(m, "msg_ms"); delete(m, "receipt_sig") },
 		"no status_sig":          func(m map[string]any) { delete(m, "status_sig") },
 		"no proposal":            func(m map[string]any) { delete(m, "proposal") },
 		"ballot null":            func(m map[string]any) { m["ballot"] = nil },

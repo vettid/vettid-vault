@@ -187,6 +187,11 @@ func (m *Manager) getCollector(ctx context.Context) (Collector, error) {
 	return c, nil
 }
 
+// HeldAnswerHoldBound is the longest the first batches after an unlock
+// hold back the due held neutral answers (0.80.0): the hold ends at the
+// first drain or this long after the unlock, whichever is first.
+const HeldAnswerHoldBound = 60 * time.Second
+
 // ProcessBatch handles one batch as §8.3 prescribes: for each message, in
 // order, dedupe, decrypt, authorize, apply and record; then flush state;
 // then ack; then deposit the outbox.
@@ -201,7 +206,7 @@ func (m *Manager) ProcessBatch(ctx context.Context, c Collector, msgs []Message)
 	// Held neutral answers that fell due while the vault was locked go out
 	// only after the first mailbox drain after the unlock, so that a
 	// withdraw collected in that drain still drops them (0.80.0, §10.4.1).
-	m.holdAnswers = !m.drainedOnce
+	m.holdAnswers = !m.drainedOnce && now.Sub(m.openedAt) < HeldAnswerHoldBound
 	m.housekeeping(now)
 	var durable, ephemeral []string
 	for _, msg := range msgs {
@@ -226,7 +231,7 @@ func (m *Manager) ProcessBatch(ctx context.Context, c Collector, msgs []Message)
 	if m.holdAnswers {
 		m.holdAnswers = false
 		if m.drainedOnce {
-			m.sendHeldAnswers(now)
+			m.sendHeldAnswers(now) // a bound that ended the hold sent them in housekeeping
 		}
 	}
 	for _, id := range ephemeral {

@@ -31,6 +31,9 @@ const (
 	TypeConnAuthChallenge = "connection.authenticate.challenge"
 	TypeConnAuthResponse  = "connection.authenticate.response"
 	TypeConnAuthRotated   = "connection.authenticate.rotated"
+	// TypeConnAuthWithdraw (0.80.0): the challenger will no longer accept
+	// the challenge named by request_id.
+	TypeConnAuthWithdraw = "connection.authenticate.withdraw"
 )
 
 // Purposes (0.65.0): why the member is asked. Any other value received
@@ -205,6 +208,28 @@ func ParseConnAuthChallenge(body []byte) (*ConnAuthChallenge, error) {
 	c.Purpose = challengePurpose(o)
 	c.MatchCode = OptMatchCode(o, c.Purpose)
 	return c, nil
+}
+
+// ParseConnAuthWithdraw reads a connection.authenticate.withdraw body,
+// {request_id} (0.80.0, §10.4): the request_id, and false for a body whose
+// request_id is missing or not a string. Further members are ignored. The
+// id is not checked further: an id that names no open challenge is
+// ignored by the receiver.
+func ParseConnAuthWithdraw(body []byte) (string, bool) {
+	o, err := strictjson.ParseObject(body)
+	if err != nil {
+		return "", false
+	}
+	id, err := o.String("request_id")
+	if err != nil || id == "" {
+		return "", false
+	}
+	return id, true
+}
+
+// ConnAuthWithdrawBody returns the body of a withdraw for requestID.
+func ConnAuthWithdrawBody(requestID string) []byte {
+	return strictjson.NewBuilder().String("request_id", requestID).Bytes()
 }
 
 // ConnAuthResponse is a connection.authenticate.response body:

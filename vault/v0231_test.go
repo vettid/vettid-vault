@@ -169,3 +169,60 @@ func TestHeldAnswerAfterUnlock(t *testing.T) {
 		t.Fatalf("still held after the first housekeeping: %+v", p.Asks.Held)
 	}
 }
+
+// 0.80.0 (§10.4.1): a held answer that fell due while the vault was
+// locked is not sent by the first batch's housekeeping, before the batch's
+// messages, but after the first drain (a batch of less than MaxBatch), so
+// that a withdraw collected in that drain still drops it.
+func TestHeldAnswersAfterFirstDrain(t *testing.T) {
+	d := newDevFixture(t)
+	d.addConnection("c9", 0x90)
+	d.m.mu.Lock()
+	d.m.opt.AskRand = func(int64) int64 { return 0 }
+	d.m.st.Connections["c9"].Asks = &AskState{Muted: true}
+	now := time.Now()
+	for _, ref := range []string{"01JB2Z6V9K3M4N5P6Q7R8S9T0V", "01JB2Z6V9K3M4N5P6Q7R8S9T0W"} {
+		(managerHost{d.m}).Ask("c9", grantAsk(ref, "x"), now.Add(-3*time.Hour))
+	}
+	d.m.mu.Unlock()
+	if err := d.m.Lock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	m, _, err := d.unlock(testPIN, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	held := func() int {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		return len(m.st.Connections["c9"].Asks.Held)
+	}
+	if held() != 2 {
+		t.Fatalf("%d held after the unlock", held())
+	}
+	// A full batch is not a drain: the answers stay held, whatever is due.
+	full := make([]Message, MaxBatch)
+	for i := range full {
+		full[i] = Message{MsgID: "full" + string(rune('A'+i)), Sender: "!"}
+	}
+	_ = m.ProcessBatch(context.Background(), &fakeCollector{}, full)
+	if held() != 2 {
+		t.Fatalf("%d held after a full batch", held())
+	}
+	// A withdraw handled in the batch drops one before the rest go out.
+	m.mu.Lock()
+	DropHeldAnswer(m.st.Connections["c9"].Asks, "data.decided", "01JB2Z6V9K3M4N5P6Q7R8S9T0V")
+	m.mu.Unlock()
+	_ = m.ProcessBatch(context.Background(), &fakeCollector{}, nil)
+	if held() != 0 {
+		t.Fatalf("%d held after the first drain", held())
+	}
+	// After that, housekeeping sends what is due as before.
+	m.mu.Lock()
+	m.st.Connections["c9"].Asks.Held = []HeldAnswer{{Due: now, Type: "data.decided", Ref: "x"}}
+	m.mu.Unlock()
+	_ = m.ProcessBatch(context.Background(), &fakeCollector{}, nil)
+	if held() != 0 {
+		t.Fatal("a later answer was held back")
+	}
+}

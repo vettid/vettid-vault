@@ -259,6 +259,39 @@ func (s *Session) Ask(conn string, a Ask) AskVerdict {
 	return AskVerdict{Cooled: make([]bool, len(a.Idents))}
 }
 
+// HeldDropper is implemented by Hosts that keep held neutral answers: it
+// drops, silently, the answer of type typ for the ask ref held for conn.
+type HeldDropper interface {
+	DropHeld(conn, typ, ref string) bool
+}
+
+// DropHeld drops, silently (no audit, no sync), the held neutral answer
+// of type typ for the suppressed ask ref of conn, and reports whether
+// there was one (VAULT-MESSAGING 0.80.0, §10.4 "Withdrawing a challenge").
+func (s *Session) DropHeld(conn, typ, ref string) bool {
+	if h, ok := s.host.(HeldDropper); ok {
+		return h.DropHeld(conn, typ, ref)
+	}
+	return false
+}
+
+// DropHeldAnswer removes from st the held answer of type typ for ref.
+func DropHeldAnswer(st *AskState, typ, ref string) bool {
+	if st == nil {
+		return false
+	}
+	for i, h := range st.Held {
+		if h.Type == typ && h.Ref == ref {
+			st.Held = append(append([]HeldAnswer(nil), st.Held[:i]...), st.Held[i+1:]...)
+			if len(st.Held) == 0 {
+				st.Held = nil
+			}
+			return true
+		}
+	}
+	return false
+}
+
 // AskDeclined records the member's decline of a whole ask from conn
 // (§10.4.1 Declines): each identity starts its cooldown, and a third
 // decline within 30 days pauses the connection's asks.
@@ -469,6 +502,16 @@ func (h managerHost) Ask(conn string, a Ask, now time.Time) AskVerdict {
 // A host that keeps the §10.4.1 state but drifts from AskHost would let
 // every ask pass (Session.Ask); keep it a compile error.
 var _ AskHost = managerHost{}
+var _ HeldDropper = managerHost{}
+
+func (h managerHost) DropHeld(conn, typ, ref string) bool {
+	p := h.m.st.Connections[conn]
+	if p == nil || !DropHeldAnswer(p.Asks, typ, ref) {
+		return false
+	}
+	h.m.dirty = true
+	return true
+}
 
 func (h managerHost) AskDeclined(conn, bucket string, idents []string, now time.Time) {
 	m := h.m

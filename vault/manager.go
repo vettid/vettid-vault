@@ -312,9 +312,13 @@ type Manager struct {
 	// until then a marked vault delivers nothing (holdForMark).
 	markOK bool
 
-	locked      bool
-	lockPending bool
-	lockReason  string
+	locked bool
+	// drainedOnce: a collect has returned less than a full batch since
+	// this unlock; holdAnswers: housekeeping keeps back the due held
+	// neutral answers until then (0.80.0, §10.4.1).
+	drainedOnce, holdAnswers bool
+	lockPending              bool
+	lockReason               string
 	// unlockID names this opening of the vault (VAULT-MESSAGING 0.29.0
 	// §10.2 "Locks", release L): 16 random bytes as 32 lowercase hex,
 	// made when the Manager is made (every enroll, unlock or recovery

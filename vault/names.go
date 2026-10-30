@@ -277,6 +277,27 @@ func (m *Manager) profileCoreChanged(now time.Time) {
 	}
 }
 
+// UnlockObserver is implemented by features that act once when the vault
+// is unlocked (the first batch of an opening): the items feature
+// advertises a newly added optional feature to the service connections
+// (§10.8 `features`).
+type UnlockObserver interface {
+	Unlocked(s *Session)
+}
+
+// notifyUnlocked tells UnlockObserver features, once per opening.
+func (m *Manager) notifyUnlocked(now time.Time) {
+	if m.unlockSeen {
+		return
+	}
+	m.unlockSeen = true
+	for _, f := range m.features {
+		if o, ok := f.(UnlockObserver); ok {
+			o.Unlocked(m.session(now))
+		}
+	}
+}
+
 // connectionRotated tells ProfileObserver features that a connection's
 // epoch caught up with the vault's current ik (§10.8).
 func (m *Manager) connectionRotated(id string, now time.Time) {

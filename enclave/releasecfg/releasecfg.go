@@ -27,6 +27,7 @@ package releasecfg
 
 import (
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/sha256"
 	"crypto/x509"
@@ -42,6 +43,7 @@ import (
 	"github.com/vettid/vettid-vault/vms/devattest"
 	"github.com/vettid/vettid-vault/vms/manifest"
 	"github.com/vettid/vettid-vault/vms/recovery"
+	"github.com/vettid/vettid-vault/vms/votewire"
 )
 
 // Channels.
@@ -82,7 +84,12 @@ var IOSAppIDs = map[string]string{ChannelProd: "3X25CJ86MV.com.vettid.app", Chan
 // connauth) are not names of the list, so no file can switch them off.
 // features/all keeps the same list (it cannot import this package);
 // TestOptionalFeaturesMatchTheCode holds the two together.
-var optionalFeatures = []string{"actions", "calls", "intro", "leash", "location", "presence", "wallet"}
+//
+// legacyFeatures are the seven optional features that existed before
+// 0.81.0, which a channel file from before 0.26.0 counts as listing.
+var legacyFeatures = []string{"actions", "calls", "intro", "leash", "location", "presence", "wallet"}
+
+var optionalFeatures = []string{"actions", "calls", "intro", "leash", "location", "presence", "vote", "wallet"}
 
 // OptionalFeatures returns the names "features" may list, ascending.
 func OptionalFeatures() []string { return append([]string(nil), optionalFeatures...) }
@@ -126,6 +133,12 @@ type Config struct {
 	// Features are the optional features the image registers (0.26.0,
 	// §11.10.8), ascending; empty: none (never nil in a parsed file).
 	Features []string
+	// VoteSiteKey and VoteTrustRoots (0.81.0, §10.19, §11.10.8) are present
+	// exactly when Features lists `vote`: the Ed25519 key with which
+	// votes.vettid.org signs its service list, and the pinned Sigstore
+	// trusted roots (newest last) against which a vote's anchors verify.
+	VoteSiteKey    ed25519.PublicKey
+	VoteTrustRoots []*votewire.TrustRoot
 	// Release R (VAULT-MESSAGING 0.33.0 §11.10.8, §11.14; VAULT-RELEASES
 	// 0.1.28 §5.2): the attempt counter's bucket, the member API's
 	// recovery request keys, the wait unit and quiet period, whether the
@@ -255,7 +268,9 @@ type File struct {
 	Missing []string
 }
 
-const maxFile = 16 << 10
+// maxFile bounds a channel file. 0.81.0: a file that lists `vote` carries
+// the pinned Sigstore trusted roots (vote_trust_roots), tens of kilobytes.
+const maxFile = 128 << 10
 
 // Parse parses a channel file strictly: exactly the members below, the
 // channel's own retirement window, and every value well-formed or a
@@ -276,6 +291,11 @@ func Parse(b []byte) (*File, error) {
 	optional := 0
 	if o.Has("automation_attestation") {
 		optional++
+	}
+	for _, m := range []string{"vote_site_key", "vote_trust_roots"} {
+		if o.Has(m) {
+			optional++
+		}
 	}
 	if len(o) != len(members)+optional {
 		return nil, ErrFormat
@@ -356,6 +376,9 @@ func Parse(b []byte) (*File, error) {
 		return nil, ErrFormat
 	}
 	if c.Features, err = parseFeatures(raw); err != nil {
+		return nil, err
+	}
+	if err := parseVote(o, c, missing); err != nil {
 		return nil, err
 	}
 	if c.FileTimeScale, err = parseTimeScale(o, c.Channel); err != nil {
@@ -529,6 +552,50 @@ func parseSigners(o strictjson.Object, channel string, missing func(string)) ([]
 	return out, nil
 }
 
+// parseVote reads vote_site_key and vote_trust_roots (0.81.0, §11.10.8):
+// present exactly when features lists `vote`, and a placeholder in
+// neither. The key is the base64 of an Ed25519 public key (32 bytes). The
+// roots are an array, newest last, of Sigstore TrustedRoot objects
+// (votewire.ParseTrustRoot); a placeholder string stands for the whole
+// array until the values exist. A value that cannot be parsed is malformed.
+func parseVote(o strictjson.Object, c *Config, missing func(string)) error {
+	listed := false
+	for _, n := range c.Features {
+		listed = listed || n == "vote"
+	}
+	if listed != o.Has("vote_site_key") || listed != o.Has("vote_trust_roots") {
+		return ErrFormat
+	}
+	if !listed {
+		return nil
+	}
+	k, err := o.String("vote_site_key")
+	if err != nil {
+		return ErrFormat
+	}
+	if isPlaceholder(k) {
+		missing("vote_site_key")
+	} else {
+		b, err := strictjson.DecodeStd(k, ed25519.PublicKeySize)
+		if err != nil {
+			return ErrFormat
+		}
+		c.VoteSiteKey = ed25519.PublicKey(b)
+	}
+	raw := o["vote_trust_roots"]
+	if s, err := strictjson.AsString(raw); err == nil {
+		if !isPlaceholder(s) {
+			return ErrFormat
+		}
+		missing("vote_trust_roots")
+		return nil
+	}
+	if c.VoteTrustRoots, err = votewire.ParseTrustRoots(raw); err != nil {
+		return ErrFormat
+	}
+	return nil
+}
+
 // parseFeatures reads a "features" array (0.26.0 §11.10.8, the release
 // check's rule 1): zero or more of the seven optional names, each at most
 // once, in ascending byte order. Anything else is malformed: a value that
@@ -578,7 +645,7 @@ func PreviousFeatures(channel string, b []byte) ([]string, error) {
 		return nil, ErrChannel
 	}
 	if !o.Has("features") {
-		return OptionalFeatures(), nil
+		return append([]string(nil), legacyFeatures...), nil
 	}
 	arr, err := o.Array("features")
 	if err != nil {

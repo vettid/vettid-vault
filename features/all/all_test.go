@@ -28,7 +28,7 @@ func typesOf(fs []vault.Feature) map[string]string {
 // then an unknown type to the vault, vault.TestUnregisteredTypeIsUnknown)
 // and none of its hooks exists to run.
 func TestSetFollowsTheList(t *testing.T) {
-	if got := all.Optional(); !reflect.DeepEqual(got, []string{"actions", "calls", "intro", "leash", "location", "presence", "wallet"}) || !sort.StringsAreSorted(got) {
+	if got := all.Optional(); !reflect.DeepEqual(got, []string{"actions", "calls", "intro", "leash", "location", "presence", "vote", "wallet"}) || !sort.StringsAreSorted(got) {
 		t.Fatalf("optional %v", got)
 	}
 	// The zero options register nothing optional (fail closed).
@@ -37,7 +37,7 @@ func TestSetFollowsTheList(t *testing.T) {
 		if got := s.Names(); !reflect.DeepEqual(got, always) {
 			t.Fatalf("no list: %v", got)
 		}
-		if s.Actions != nil || s.Calls != nil || s.Intro != nil || s.Leash != nil || s.Location != nil || s.Presence != nil || s.Wallet != nil {
+		if s.Actions != nil || s.Calls != nil || s.Intro != nil || s.Leash != nil || s.Location != nil || s.Presence != nil || s.Vote != nil || s.Wallet != nil {
 			t.Fatal("an optional feature was constructed without being listed")
 		}
 		for _, f := range s.List() {
@@ -47,7 +47,7 @@ func TestSetFollowsTheList(t *testing.T) {
 		}
 	}
 	full := all.NewSet(all.DevOptions())
-	if got := full.Names(); len(got) != len(always)+7 {
+	if got := full.Names(); len(got) != len(always)+8 {
 		t.Fatalf("development set: %v", got)
 	}
 	fullTypes := typesOf(full.List())

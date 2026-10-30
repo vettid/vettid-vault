@@ -15,6 +15,7 @@ import (
 	"github.com/vettid/vettid-vault/enclave/supervisor"
 	"github.com/vettid/vettid-vault/enclave/vaultproc"
 	"github.com/vettid/vettid-vault/features/all"
+	"github.com/vettid/vettid-vault/features/vote"
 	"github.com/vettid/vettid-vault/internal/hostproto"
 	"github.com/vettid/vettid-vault/internal/vsock"
 	toolchain "github.com/vettid/vettid-vault/release"
@@ -122,7 +123,10 @@ func vaultPlatform([]string) (vaultproc.Platform, error) {
 		Config: func(id string) enclave.Config { return enclave.ReleaseConfig(id, enclave.ReleaseRelayURL()) },
 		// The optional features are the embedded channel file's list
 		// (0.26.0, §11.10.8): measured, and nothing at run time adds one.
-		Features:       func() []vault.Feature { return all.New(all.Options{Optional: enclave.ReleaseFeatures()}) },
+		Features: func() []vault.Feature {
+			key, roots := enclave.ReleaseVote() // 0.81.0: the vote feature's pinned constants
+			return all.New(all.Options{Optional: enclave.ReleaseFeatures(), Vote: vote.Options{SiteKey: key, Roots: roots}})
+		},
 		RequireSeccomp: true,
 	}, nil
 }

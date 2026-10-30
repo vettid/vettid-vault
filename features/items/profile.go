@@ -105,8 +105,79 @@ func (f *Feature) sendTo(s *vault.Session, id string) {
 	}
 	if c, ok := s.Connection(id); ok && c.IsService() {
 		body, _ = f.serviceBody(s, f.st.Profile.Shared)
+		f.sendService(s, id, body)
+		return
 	}
 	_ = s.SendToConnection(id, "profile.update", body)
+}
+
+// sendService sends a service connection its profile.update and, when it
+// is queued, records the feature names it carried (§10.8 `features`).
+func (f *Feature) sendService(s *vault.Session, id string, body []byte) {
+	if s.SendToConnection(id, "profile.update", body) != nil {
+		return
+	}
+	f.setAdvertised(id)
+}
+
+func (f *Feature) setAdvertised(id string) {
+	if len(f.peerFeatures) == 0 {
+		delete(f.st.Profile.Advertised, id)
+		return
+	}
+	if f.st.Profile.Advertised == nil {
+		f.st.Profile.Advertised = map[string][]string{}
+	}
+	f.st.Profile.Advertised[id] = append([]string(nil), f.peerFeatures...)
+}
+
+func sameNames(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// Unlocked implements vault.UnlockObserver: at the first unlock under a
+// release whose image advertises a name the vault has not advertised to a
+// service connection, that connection gets one profile.update with the next
+// version (§10.8 `features`; a feature is only ever added, §11.10.8).
+func (f *Feature) Unlocked(s *vault.Session) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.advertise(s)
+}
+
+// advertise sends the active service connections whose last advertised set
+// differs from this image's their update, once, with the next version.
+func (f *Feature) advertise(s *vault.Session) {
+	bumped := false
+	for _, c := range s.Connections() {
+		if !c.IsService() || c.State != vault.PeerActive || c.RotationPending {
+			continue
+		}
+		if sameNames(f.st.Profile.Advertised[c.ID], f.peerFeatures) {
+			continue
+		}
+		if f.st.Profile.Core == nil {
+			return // no shared profile yet: the connection's first update carries them
+		}
+		if !bumped {
+			f.st.Profile.Shared++
+			bumped = true
+		}
+		body, ok := f.serviceBody(s, f.st.Profile.Shared)
+		if !ok {
+			s.Record(vault.Activity{Kind: "profile.core_missing", Audit: true})
+			return
+		}
+		f.sendService(s, c.ID, body)
+	}
 }
 
 // serviceBody is the profile.update a service connection gets (§10.8, 0.69.0):
@@ -121,7 +192,20 @@ func (f *Feature) serviceBody(s *vault.Session, v uint64) ([]byte, bool) {
 	if f.st.Profile.Name != "" {
 		b.String("name", f.st.Profile.Name)
 	}
-	return peerwire.ProfileUpdateBody(v, c.FirstName, c.LastName, c.IK, b.Raw("items", []byte("[]")).Bytes()), true
+	if len(f.peerFeatures) > 0 {
+		// §10.8 (0.81.0): the names of the optional features a service can
+		// use, sorted, each once; absent, never an empty array.
+		arr := []byte{'['}
+		for i, n := range f.peerFeatures {
+			if i > 0 {
+				arr = append(arr, ',')
+			}
+			arr = append(arr, strictjson.MarshalString(n)...)
+		}
+		b.Raw("features", append(arr, ']'))
+	}
+	b.Raw("items", []byte("[]"))
+	return peerwire.ProfileUpdateBody(v, c.FirstName, c.LastName, c.IK, b.Bytes()), true
 }
 
 // sendAll sends the current shared profile to every active connection,
@@ -145,7 +229,7 @@ func (f *Feature) sendAll(s *vault.Session, toServices bool) {
 		}
 		if c.IsService() {
 			if toServices {
-				_ = s.SendToConnection(c.ID, "profile.update", sbody)
+				f.sendService(s, c.ID, sbody)
 			}
 			continue
 		}

@@ -25,7 +25,7 @@ func TestDevFeatures(t *testing.T) {
 		}
 		return out
 	}
-	if got := names(nil); len(got) != 15 {
+	if got := names(nil); len(got) != 16 {
 		t.Fatalf("default: %v", got)
 	}
 	if got := enclavetest.DevVaultFeatureArgs(nil); got != nil {

@@ -242,6 +242,7 @@ func (p *Proposal) Validate() error {
 		len(p.Choices) < MinChoices || len(p.Choices) > MaxChoices,
 		p.Quorum.MinBallots < 0 || len(p.Quorum.Text) > MaxQuorumText,
 		len(p.OutageRule) > MaxOutageRule,
+		p.RecordAt > p.OpensAt, // as the service (spec erratum pending, finding 1)
 		p.OpensAt >= p.ClosesAt || p.ClosesAt-p.OpensAt > MaxWindow,
 		p.Eligible < 1,
 		len(p.RecordRoot) != HashLen:
@@ -290,10 +291,28 @@ func ParseExtension(data []byte) (*Extension, error) {
 	if err := parseDoc(data, extensionSchema, &e); err != nil {
 		return nil, err
 	}
-	if e.V != 1 || !ValidProposalID(e.ProposalID) || e.N < 1 || e.Outage.From >= e.Outage.To {
+	// 0.81.1: the shape, the size, an empty source and from after to are
+	// malformed; an outage that is too short (from == to included), outside
+	// the window or shorter than the new close needs is an order failure
+	// (OrderOK).
+	if e.V != 1 || !ValidProposalID(e.ProposalID) || e.N < 1 || e.Outage.From > e.Outage.To || len(e.Outage.Source) < 1 || len(e.Outage.Source) > MaxExtensionSource || !utf8.ValidString(e.Outage.Source) {
 		return nil, ErrDocument
 	}
 	return &e, nil
+}
+
+// OrderOK is the extension's outage rule (0.81.1; service-vault
+// internal/ballot/extend.go): the outage is longer than 3,600 s, starts at
+// or after opens_at and before the close in force, and the new close is at
+// most the close in force plus the outage's length rounded up to a whole
+// hour.
+func (e *Extension) OrderOK(opensAt, closesInForce int64) bool {
+	d := e.Outage.To - e.Outage.From
+	if d <= MinOutage || e.Outage.From < opensAt || e.Outage.From >= closesInForce {
+		return false
+	}
+	hours := (d + 3599) / 3600
+	return e.ClosesAt <= closesInForce+hours*3600
 }
 
 // ParseResults parses the results document's exact bytes.
@@ -338,11 +357,17 @@ func (r *Results) CheckProposal(p *Proposal) error {
 	return nil
 }
 
-// ParseServiceList parses services.json's exact bytes: v is 1, version at
-// least 1, previous 32 bytes, each service_id the lower-case hex of
-// H(first ik)[0:16], each ik 32 bytes, each anchor key's cert 64 bytes and
-// ik 32 bytes.
+// ParseServiceList parses services.json's exact bytes by the rules of
+// vettid/votes site/services.go (BALLOT-PROTOCOL 0.12.5): at most 4 MiB
+// (checked first), no limit on services or keys, a name of 1 to 100 bytes
+// of valid UTF-8; v 1, version at least 1, previous 32 bytes; each service_id the
+// lower-case hex of H(first ik)[0:16], no service_id twice, each ik 32
+// bytes and under one service only; each anchor key's ik one of its own
+// service's iks, and its anchor_cert verifying under that ik over H(key).
 func ParseServiceList(data []byte) (*ServiceList, error) {
+	if len(data) > MaxServiceList {
+		return nil, ErrDocument
+	}
 	var l ServiceList
 	if err := parseDoc(data, serviceListSchema, &l); err != nil {
 		return nil, err
@@ -352,26 +377,23 @@ func ParseServiceList(data []byte) (*ServiceList, error) {
 	}
 	ids, iks := map[string]bool{}, map[string]bool{}
 	for _, s := range l.Services {
+		if len(s.IKs) == 0 || s.AnchorKeys == nil ||
+			s.ServiceID != hex.EncodeToString(H(s.IKs[0])[:16]) || len(s.Name) < 1 || len(s.Name) > MaxServiceName || !utf8.ValidString(s.Name) {
+			return nil, ErrDocument
+		}
 		if ids[s.ServiceID] {
 			return nil, ErrDocument
 		}
 		ids[s.ServiceID] = true
-		for _, k := range s.IKs {
-			if iks[string(k)] {
-				return nil, ErrDocument
-			}
-			iks[string(k)] = true
-		}
-		if len(s.IKs) == 0 || s.AnchorKeys == nil || s.ServiceID != hex.EncodeToString(H(s.IKs[0])[:16]) || !utf8.ValidString(s.Name) {
-			return nil, ErrDocument
-		}
 		for _, ik := range s.IKs {
-			if len(ik) != KeyLen {
+			if len(ik) != KeyLen || iks[string(ik)] {
 				return nil, ErrDocument
 			}
+			iks[string(ik)] = true
 		}
 		for _, a := range s.AnchorKeys {
-			if len(a.Key) == 0 || len(a.AnchorCert) != SigLen || len(a.IK) != KeyLen || !s.hasIK(a.IK) {
+			if len(a.Key) == 0 || len(a.AnchorCert) != SigLen || len(a.IK) != KeyLen || !s.hasIK(a.IK) ||
+				VerifyAnchorCert(a.IK, a.Key, a.AnchorCert) != nil {
 				return nil, ErrDocument
 			}
 		}
@@ -409,30 +431,50 @@ func (l *ServiceList) Extends(data []byte, next *ServiceList) bool {
 	if next.Version <= l.Version || !eq(next.Previous, H(data)) {
 		return false
 	}
+	// O(n): the next list's services by id; each matched pair compared
+	// through sets of the next entry's keys.
+	byID := make(map[string]*ServiceEntry, len(next.Services))
+	for i := range next.Services {
+		byID[next.Services[i].ServiceID] = &next.Services[i]
+	}
 	for _, ps := range l.Services {
-		var ns *ServiceEntry
-		for i := range next.Services {
-			if next.Services[i].ServiceID == ps.ServiceID {
-				ns = &next.Services[i]
-			}
-		}
+		ns := byID[ps.ServiceID]
 		if ns == nil {
 			return false
 		}
+		iks := make(map[string]bool, len(ns.IKs))
+		for _, k := range ns.IKs {
+			iks[string(k)] = true
+		}
 		for _, k := range ps.IKs {
-			if !ns.hasIK(k) {
+			if !iks[string(k)] {
 				return false
 			}
 		}
+		keys := make(map[string]bool, len(ns.AnchorKeys))
+		for _, a := range ns.AnchorKeys {
+			keys[string(a.Key)] = true
+		}
 		for _, a := range ps.AnchorKeys {
-			found := false
-			for _, b := range ns.AnchorKeys {
-				found = found || eq(a.Key, b.Key)
-			}
-			if !found {
+			if !keys[string(a.Key)] {
 				return false
 			}
 		}
 	}
 	return true
 }
+
+// ByIK indexes the services by each of their identity keys.
+func (l *ServiceList) ByIK() map[string]*ServiceEntry {
+	m := make(map[string]*ServiceEntry, len(l.Services))
+	for i := range l.Services {
+		for _, k := range l.Services[i].IKs {
+			m[string(k)] = &l.Services[i]
+		}
+	}
+	return m
+}
+
+// EncodeDocument returns v's JCS form (the service's side, and tests): v is
+// a document struct of this package.
+func EncodeDocument(v any) ([]byte, error) { return encodeCanonical(v) }

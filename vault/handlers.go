@@ -200,6 +200,9 @@ type Session struct {
 	ctx   context.Context
 	now   time.Time
 	inner *envelope.Inner
+	// relayAt is the relay's time of the message being handled (its
+	// deposited_at); zero when unknown (tests, internal activity).
+	relayAt time.Time
 }
 
 // Host is what a Session acts on. The Manager implements it for the
@@ -328,6 +331,25 @@ func info(p *Peer) PeerInfo {
 
 // From returns the sending principal (zero for vault-internal activity).
 func (s *Session) From() PeerInfo { return s.from }
+
+// RelayTime returns the relay's time of the message being handled (when it
+// was deposited), or the processing time if the relay's is unknown. The
+// vote feature records it as received_ms and bounds a proposal's anchor
+// timestamp by it (VAULT-MESSAGING §10.19.4 step 6).
+func (s *Session) RelayTime() time.Time {
+	if s.relayAt.IsZero() {
+		return s.now
+	}
+	return s.relayAt
+}
+
+// RelayTimeKnown reports whether the relay's time of the message is known
+// (its deposited_at was present and valid). A rule that compares with the
+// relay's time is skipped when it is not (VAULT-MESSAGING 0.81.1).
+func (s *Session) RelayTimeKnown() bool { return !s.relayAt.IsZero() }
+
+// SetRelayTime sets RelayTime (the Manager, and tests of feature packages).
+func (s *Session) SetRelayTime(t time.Time) { s.relayAt = t }
 
 // Now returns the processing time.
 func (s *Session) Now() time.Time { return s.now }

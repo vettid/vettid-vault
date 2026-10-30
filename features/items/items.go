@@ -168,6 +168,10 @@ type Profile struct {
 	Core *Core `json:"core,omitempty"`
 	// Peers is the highest profile.update version seen per connection.
 	Peers map[string]uint64 `json:"peers,omitempty"`
+	// Advertised is the set of feature names last sent to each service
+	// connection in its profile.update (0.81.0, §10.8 `features`): vault
+	// state, so that a name added by a release is sent once.
+	Advertised map[string][]string `json:"advertised,omitempty"`
 }
 
 type state struct {
@@ -208,6 +212,8 @@ type Feature struct {
 	agents AgentRules
 	guard  ItemGuard
 	st     state
+	// peerFeatures are the names advertised to service connections.
+	peerFeatures []string
 }
 
 // New returns the feature. cred performs critical items' operations;
@@ -220,6 +226,15 @@ func New(cred Credential) *Feature {
 
 // SetGrants connects the grants feature (at construction).
 func (f *Feature) SetGrants(g RuleGrants) { f.grants = g }
+
+// SetPeerFeatures names the optional features this image registers that a
+// service can use (0.81.0, §10.8 `features`): the profile.update to a
+// service connection carries them, sorted, and is never sent to a person
+// connection. Empty: the member is absent. At construction.
+func (f *Feature) SetPeerFeatures(names []string) {
+	f.peerFeatures = append([]string(nil), names...)
+	sort.Strings(f.peerFeatures)
+}
 
 // SetAgents connects the leash feature (at construction).
 func (f *Feature) SetAgents(a AgentRules) { f.agents = a }

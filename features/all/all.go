@@ -3,7 +3,7 @@
 // package-level mutable state.
 //
 // Eight features are always registered: audit, feed, messaging,
-// credential, items, grants, critical and connauth. The other seven are
+// credential, items, grants, critical and connauth. The other eight are
 // optional (0.26.0, §11.10.8 "Feature allowlist"): an image registers
 // exactly those its release configuration lists. An optional feature that
 // is not listed is not constructed: its types are unknown types
@@ -32,6 +32,7 @@ import (
 	"github.com/vettid/vettid-vault/features/location"
 	"github.com/vettid/vettid-vault/features/messaging"
 	"github.com/vettid/vettid-vault/features/presence"
+	"github.com/vettid/vettid-vault/features/vote"
 	"github.com/vettid/vettid-vault/features/wallet"
 	"github.com/vettid/vettid-vault/vault"
 )
@@ -46,6 +47,7 @@ const (
 	Leash    = "leash"
 	Location = "location"
 	Presence = "presence"
+	Vote     = "vote"
 	Wallet   = "wallet"
 )
 
@@ -53,7 +55,7 @@ const (
 // order: what a release configuration's "features" may list
 // (enclave/releasecfg keeps the same list; a test holds them together).
 func Optional() []string {
-	return []string{Actions, Calls, Intro, Leash, Location, Presence, Wallet}
+	return []string{Actions, Calls, Intro, Leash, Location, Presence, Vote, Wallet}
 }
 
 // CheckOptional reports a name that is not an optional feature's (an
@@ -92,10 +94,15 @@ type Options struct {
 	// so a configuration that names nothing registers nothing optional.
 	// A name that is not an optional feature's registers nothing.
 	Optional []string
+	// Vote are the release constants the vote feature checks against
+	// (0.81.0, §11.10.8): present when the channel lists `vote`. In a
+	// development build without a channel file they are empty, so no
+	// service list verifies and every proposal stays `checking`.
+	Vote vote.Options
 }
 
 // Set is one vault's features, with typed access for tests and tools.
-// The seven optional features are nil when not registered.
+// The eight optional features are nil when not registered.
 type Set struct {
 	Messaging  *messaging.Feature
 	Credential *credential.Feature
@@ -112,6 +119,7 @@ type Set struct {
 	Wallet     *wallet.Feature
 	Location   *location.Feature
 	Presence   *presence.Feature
+	Vote       *vote.Feature
 }
 
 // NewSet returns fresh instances of the always-registered features and of
@@ -182,6 +190,11 @@ func NewSet(o Options) *Set {
 	if on[Presence] {
 		s.Presence = presence.New()
 	}
+	if on[Vote] {
+		s.Vote = vote.New(o.Vote)
+		// The profile.update to a service says so (§10.19.1).
+		it.SetPeerFeatures([]string{vote.Name})
+	}
 	return s
 }
 
@@ -212,6 +225,9 @@ func (s *Set) List() []vault.Feature {
 	}
 	if s.Presence != nil {
 		out = append(out, s.Presence)
+	}
+	if s.Vote != nil {
+		out = append(out, s.Vote)
 	}
 	return out
 }

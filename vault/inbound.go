@@ -208,6 +208,7 @@ func (m *Manager) ProcessBatch(ctx context.Context, c Collector, msgs []Message)
 	// withdraw collected in that drain still drops them (0.80.0, §10.4.1).
 	m.holdAnswers = !m.drainedOnce && now.Sub(m.openedAt) < HeldAnswerHoldBound
 	m.housekeeping(now)
+	m.notifyUnlocked(now)
 	var durable, ephemeral []string
 	for _, msg := range msgs {
 		switch m.handleMessage(ctx, msg, now) {
@@ -278,6 +279,10 @@ func (m *Manager) handleMessage(ctx context.Context, msg Message, now time.Time)
 		return ackAfterFlush // relay msg_id dedupe (§8.2 layer 1)
 	}
 	m.st.SeenMsgIDs[msg.MsgID] = now
+	m.relayAt = time.Time{}
+	if t, err := time.Parse(time.RFC3339Nano, msg.DepositedAt); err == nil {
+		m.relayAt = t.UTC()
+	}
 	sender, ok := relayauth.DecodeKey(msg.Sender)
 	if !ok {
 		m.audit(now, "bad_sender", "")
@@ -536,7 +541,7 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 			return disp(eph)
 		}
 	}
-	s := &Session{m: m, peer: p, host: managerHost{m}, from: info(p), ctx: ctx, now: now, inner: in}
+	s := &Session{m: m, peer: p, host: managerHost{m}, from: info(p), ctx: ctx, now: now, inner: in, relayAt: m.relayAt}
 	allowed := te.allows(p.Kind) && !(p.Recovering && !recoveryAllowed[in.Type])
 	if (p.Kind == KindAgent || p.Kind == KindDesktop) && !te.spec.DesktopApproval {
 		if af, ok := te.handler.(AppOnlyForms); ok && af.AppOnly(in.Type, in.Body) {

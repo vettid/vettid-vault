@@ -2,6 +2,7 @@ package enclave
 
 import (
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/x509"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/vettid/vettid-vault/vms/devattest"
 	"github.com/vettid/vettid-vault/vms/nitro"
 	"github.com/vettid/vettid-vault/vms/pins"
+	"github.com/vettid/vettid-vault/vms/votewire"
 )
 
 // Config is what a release image pins (§11.7, §11.10).
@@ -157,6 +159,17 @@ func ReleaseFeatures() []string {
 		return append([]string{}, c.Features...)
 	}
 	return []string{}
+}
+
+// ReleaseVote returns the vote feature's release constants (0.81.0,
+// §10.19, §11.10.8): the key votes.vettid.org signs its service list with
+// and the pinned Sigstore trusted roots. Both are part of the embedded
+// channel file, so measured; nil when the channel does not list `vote`.
+func ReleaseVote() (siteKey ed25519.PublicKey, roots []*votewire.TrustRoot) {
+	if c := release(); c != nil {
+		return append(ed25519.PublicKey(nil), c.VoteSiteKey...), append([]*votewire.TrustRoot(nil), c.VoteTrustRoots...)
+	}
+	return nil, nil
 }
 
 // ReleaseCounterHost returns the recovery counter bucket's virtual-hosted

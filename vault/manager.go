@@ -236,6 +236,11 @@ type Hooks struct {
 
 // Manager is one unlocked vault.
 type Manager struct {
+	// relayAt is the relay time of the message being handled (see
+	// Session.RelayTime); set by handleMessage.
+	relayAt time.Time
+	// unlockSeen: UnlockObserver features were told of this opening.
+	unlockSeen bool
 	// restoring is set while a reconnect that named an older epoch of a
 	// service activates (§6.6, 0.72.0): it is told as
 	// connection.restored_reconnect, not connection.reconnected.

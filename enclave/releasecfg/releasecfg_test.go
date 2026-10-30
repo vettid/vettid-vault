@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"os"
 	"strconv"
@@ -92,7 +93,7 @@ func TestCommittedFiles(t *testing.T) {
 		// registers none and accepts com.vettid.app.
 		wantPkg, wantFeatures := "com.vettid.app", []string{}
 		if ch == ChannelStaging {
-			wantPkg, wantFeatures = "com.vettid.app.staging", OptionalFeatures()
+			wantPkg, wantFeatures = "com.vettid.app.staging", legacyFeatures // `vote` joins in release 25 (0.81.0)
 		}
 		if f.Config.AndroidPackage != wantPkg || f.Config.AndroidPackage != AndroidPackages[ch] || f.Config.Features == nil ||
 			strings.Join(f.Config.Features, ",") != strings.Join(wantFeatures, ",") {
@@ -311,17 +312,20 @@ func TestFeatureNames(t *testing.T) {
 		}
 	}
 	opt := OptionalFeatures()
-	if strings.Join(opt, ",") != "actions,calls,intro,leash,location,presence,wallet" {
+	if strings.Join(opt, ",") != "actions,calls,intro,leash,location,presence,vote,wallet" {
 		t.Fatalf("optional features %v", opt)
 	}
 	for _, n := range opt {
+		if n == "vote" {
+			continue // needs vote_site_key and vote_trust_roots (TestVoteConstants)
+		}
 		c, err := Check(ChannelProd, []byte(withFeatures(complete(t), `["`+n+`"]`)))
 		if err != nil || len(c.Features) != 1 || c.Features[0] != n {
 			t.Errorf("%s: %v", n, err)
 		}
 	}
 	c, err := Check(ChannelStaging, []byte(withFeatures(staging(complete(t)), allSeven)))
-	if err != nil || strings.Join(c.Features, ",") != strings.Join(opt, ",") {
+	if err != nil || strings.Join(c.Features, ",") != strings.Join(legacyFeatures, ",") {
 		t.Fatalf("all seven: %v %v", c, err)
 	}
 	// The returned list is a copy: a caller cannot change the package's.
@@ -380,7 +384,7 @@ func TestFeaturesOnlyGrow(t *testing.T) {
 	// A previous file from before 0.26.0 counts as all seven: only the
 	// full list passes after it.
 	old, err := PreviousFeatures(ChannelStaging, []byte(pre026(t, ChannelStaging)))
-	if err != nil || strings.Join(old, ",") != strings.Join(OptionalFeatures(), ",") {
+	if err != nil || strings.Join(old, ",") != strings.Join(legacyFeatures, ",") {
 		t.Fatalf("previous file from before 0.26.0: %v %v", old, err)
 	}
 	if err := CheckGrows(cfg(allSeven), old); err != nil {
@@ -728,4 +732,70 @@ func FuzzPreviousFeatures(f *testing.F) {
 			t.Fatalf("a list does not contain itself: %v", err)
 		}
 	})
+}
+
+// 0.81.0 (§10.19, §11.10.8): vote_site_key and vote_trust_roots are
+// present exactly when features lists `vote`, and a placeholder in
+// neither; an unparseable value is malformed.
+func TestVoteConstants(t *testing.T) {
+	raw, err := os.ReadFile("../../testdata/vote/anchor-vector.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v struct {
+		TrustedRoot json.RawMessage `json:"trusted_root"`
+	}
+	if err := json.Unmarshal(raw, &v); err != nil {
+		t.Fatal(err)
+	}
+	roots := `[` + string(v.TrustedRoot) + `]`
+	key := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))
+	file := func(features, members string) string {
+		s := withFeatures(staging(complete(t)), features)
+		if members == "" {
+			return s
+		}
+		return strings.TrimSuffix(s, "}") + "," + members + "}"
+	}
+	withVote := `["presence","vote","wallet"]`
+	good := `"vote_site_key":"` + key + `","vote_trust_roots":` + roots
+	c, err := Check(ChannelStaging, []byte(file(withVote, good)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.VoteSiteKey) != 32 || len(c.VoteTrustRoots) != 1 || len(c.VoteTrustRoots[0].Logs) == 0 || len(c.VoteTrustRoots[0].TSAs) != 2 {
+		t.Errorf("%+v", c)
+	}
+	// Absent without `vote`: the files of every earlier release.
+	if _, err := Check(ChannelStaging, []byte(file(allSeven, ""))); err != nil {
+		t.Errorf("no vote: %v", err)
+	}
+	for name, in := range map[string]string{
+		"vote without constants":      file(withVote, ""),
+		"vote without roots":          file(withVote, `"vote_site_key":"`+key+`"`),
+		"vote without key":            file(withVote, `"vote_trust_roots":`+roots),
+		"constants without vote":      file(allSeven, good),
+		"short key":                   file(withVote, `"vote_site_key":"`+base64.StdEncoding.EncodeToString(make([]byte, 31))+`","vote_trust_roots":`+roots),
+		"key not base64":              file(withVote, `"vote_site_key":"!!","vote_trust_roots":`+roots),
+		"roots not an array":          file(withVote, `"vote_site_key":"`+key+`","vote_trust_roots":`+string(v.TrustedRoot)),
+		"roots empty":                 file(withVote, `"vote_site_key":"`+key+`","vote_trust_roots":[]`),
+		"roots without authorities":   file(withVote, `"vote_site_key":"`+key+`","vote_trust_roots":[{"tlogs":[]}]`),
+		"roots a non-placeholder str": file(withVote, `"vote_site_key":"`+key+`","vote_trust_roots":"x"`),
+	} {
+		if _, err := Check(ChannelStaging, []byte(in)); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	// A placeholder is accepted by Parse and refused by the release gate.
+	ph := file(withVote, `"vote_site_key":"TODO-vote-site-key","vote_trust_roots":"TODO-vote-trust-roots"`)
+	f, err := Parse([]byte(ph))
+	if err != nil {
+		t.Fatalf("placeholders: %v", err)
+	}
+	if len(f.Missing) < 2 || !strings.Contains(strings.Join(f.Missing, ","), "vote_site_key") || !strings.Contains(strings.Join(f.Missing, ","), "vote_trust_roots") {
+		t.Errorf("missing %v", f.Missing)
+	}
+	if _, err := f.Complete(); !errors.Is(err, ErrIncomplete) {
+		t.Errorf("complete: %v", err)
+	}
 }

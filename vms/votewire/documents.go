@@ -295,7 +295,7 @@ func ParseExtension(data []byte) (*Extension, error) {
 	// malformed; an outage that is too short (from == to included), outside
 	// the window or shorter than the new close needs is an order failure
 	// (OrderOK).
-	if e.V != 1 || !ValidProposalID(e.ProposalID) || e.N < 1 || e.Outage.From > e.Outage.To || e.Outage.Source == "" {
+	if e.V != 1 || !ValidProposalID(e.ProposalID) || e.N < 1 || e.Outage.From > e.Outage.To || len(e.Outage.Source) < 1 || len(e.Outage.Source) > MaxExtensionSource || !utf8.ValidString(e.Outage.Source) {
 		return nil, ErrDocument
 	}
 	return &e, nil
@@ -358,9 +358,9 @@ func (r *Results) CheckProposal(p *Proposal) error {
 }
 
 // ParseServiceList parses services.json's exact bytes by the rules of
-// vettid/votes site/services.go (0.81.1): at most 256 KiB, 64 services,
-// 16 iks and 16 anchor keys per service, a name of 1 to 100 bytes of valid
-// UTF-8; v 1, version at least 1, previous 32 bytes; each service_id the
+// vettid/votes site/services.go (BALLOT-PROTOCOL 0.12.5): at most 4 MiB
+// (checked first), no limit on services or keys, a name of 1 to 100 bytes
+// of valid UTF-8; v 1, version at least 1, previous 32 bytes; each service_id the
 // lower-case hex of H(first ik)[0:16], no service_id twice, each ik 32
 // bytes and under one service only; each anchor key's ik one of its own
 // service's iks, and its anchor_cert verifying under that ik over H(key).
@@ -372,12 +372,12 @@ func ParseServiceList(data []byte) (*ServiceList, error) {
 	if err := parseDoc(data, serviceListSchema, &l); err != nil {
 		return nil, err
 	}
-	if l.V != 1 || l.Version < 1 || len(l.Previous) != HashLen || l.Services == nil || len(l.Services) > MaxServices {
+	if l.V != 1 || l.Version < 1 || len(l.Previous) != HashLen || l.Services == nil {
 		return nil, ErrDocument
 	}
 	ids, iks := map[string]bool{}, map[string]bool{}
 	for _, s := range l.Services {
-		if len(s.IKs) == 0 || len(s.IKs) > MaxServiceKeys || s.AnchorKeys == nil || len(s.AnchorKeys) > MaxServiceKeys ||
+		if len(s.IKs) == 0 || s.AnchorKeys == nil ||
 			s.ServiceID != hex.EncodeToString(H(s.IKs[0])[:16]) || len(s.Name) < 1 || len(s.Name) > MaxServiceName || !utf8.ValidString(s.Name) {
 			return nil, ErrDocument
 		}

@@ -41,6 +41,13 @@ func (f *Feature) SyncServices(s *vault.Session, doc, sig []byte) string {
 
 func (f *Feature) syncServices(s *vault.Session, doc, sig []byte) string {
 	now := s.Now()
+	// The size first (BALLOT-PROTOCOL 0.12.5): a list over the cap, or one
+	// the vault cannot take, changes nothing; the vault keeps the last list
+	// it verified and goes on with the services that list names.
+	if len(doc) > votewire.MaxServiceList {
+		f.audit(s, "vote.list_rejected", "", "")
+		return ListRejected
+	}
 	if len(f.opt.SiteKey) == 0 || votewire.VerifyServiceList(f.opt.SiteKey, doc, sig) != nil {
 		f.audit(s, "vote.list_rejected", "", "")
 		return ListRejected

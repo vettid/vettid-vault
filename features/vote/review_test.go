@@ -319,11 +319,9 @@ func TestServiceListBounds(t *testing.T) {
 		}
 		return l
 	}
-	if parse(many(64)) != nil {
-		t.Error("64 services refused")
-	}
-	if parse(many(65)) == nil {
-		t.Error("65 services accepted")
+	// BALLOT-PROTOCOL 0.12.5: no limit on the number of services or keys.
+	if parse(many(65)) != nil || parse(many(200)) != nil {
+		t.Error("many services refused")
 	}
 	keys := func(nik, nak int) *votewire.ServiceList {
 		s := votetest.NewService(auth)
@@ -341,8 +339,8 @@ func TestServiceListBounds(t *testing.T) {
 		}
 		return &votewire.ServiceList{Services: []votewire.ServiceEntry{e}}
 	}
-	if parse(keys(16, 16)) != nil || parse(keys(17, 1)) == nil || parse(keys(1, 17)) == nil {
-		t.Error("16 iks / 16 anchor keys")
+	if parse(keys(16, 16)) != nil || parse(keys(17, 1)) != nil || parse(keys(1, 17)) != nil || parse(keys(40, 40)) != nil {
+		t.Error("many iks / anchor keys refused")
 	}
 	// anchor_cert is verified at parse.
 	bad := entry(svc, "s")
@@ -350,9 +348,9 @@ func TestServiceListBounds(t *testing.T) {
 	if parse(&votewire.ServiceList{Services: []votewire.ServiceEntry{bad}}) == nil {
 		t.Error("a bad anchor_cert accepted")
 	}
-	// A document over 256 KiB.
+	// A document over 4 MiB: refused on its size, before anything is parsed.
 	if _, err := votewire.ParseServiceList(bytes.Repeat([]byte(" "), votewire.MaxServiceList+1)); err == nil {
-		t.Error("over 256 KiB")
+		t.Error("over 4 MiB")
 	}
 }
 
@@ -395,7 +393,7 @@ func TestExtensionOutageRules(t *testing.T) {
 	try(2, closes.Add(24*time.Hour+time.Second), opens, opens+3*86400, false, "total")
 	// An empty source and a document over 4,096 bytes: malformed.
 	e.h.Reset()
-	for _, src := range []string{"", strings.Repeat("s", votewire.MaxExtensionDoc)} {
+	for _, src := range []string{"", strings.Repeat("s", votewire.MaxExtensionSource+1)} {
 		ext := &votewire.Extension{V: 1, ProposalID: v.ID, N: 2, ClosesAt: cur.Add(time.Hour).Unix(), Outage: votewire.Outage{From: opens, To: opens + 7200, Source: src}}
 		doc, _ := votewire.EncodeDocument(ext)
 		m := &votewire.ExtendedMsg{ProposalID: v.ID, Extension: doc, ExtensionSig: signExt(e.svc, v, doc), Bundle: e.auth.Bundle(doc, e.svc.Anchor, e.now)}
@@ -420,5 +418,31 @@ func TestTimestampEKUOnlyTimeStamping(t *testing.T) {
 		if _, err := votewire.VerifyBundle([]byte(`{"v":1}`), b, [][]byte{svc.Anchor.SPKI}, auth.Roots, now.Add(time.Minute), now); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
+	}
+}
+
+// A list over the cap (or one the vault cannot take) changes nothing: the
+// vault keeps the last list it verified and goes on (BALLOT-PROTOCOL
+// 0.12.5).
+func TestOversizeListKeepsTheHeldOne(t *testing.T) {
+	e := newEnv(t)
+	if e.publish(e.svc) != ListKept {
+		t.Fatal("list")
+	}
+	held := string(e.f.st.List.Doc)
+	big := bytes.Repeat([]byte(" "), votewire.MaxServiceList+1)
+	if got := e.f.SyncServices(e.session(), big, make([]byte, 64)); got != ListRejected || string(e.f.st.List.Doc) != held {
+		t.Errorf("%s", got)
+	}
+	// The held list still names the service: a proposal is verified by it.
+	v := e.svc.NewVote(e.spec(-time.Hour, time.Hour))
+	if r := e.send(v); !r.OK() || e.rec(v.ID).Reason != "" {
+		t.Errorf("%q %+v", r.Code, e.rec(v.ID))
+	}
+}
+
+func TestSyncBytesIsOneConstant(t *testing.T) {
+	if votewire.MaxSyncBytes != 1<<20 || votewire.MaxServiceList != 4<<20 {
+		t.Errorf("%d %d", votewire.MaxSyncBytes, votewire.MaxServiceList)
 	}
 }

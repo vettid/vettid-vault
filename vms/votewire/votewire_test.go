@@ -227,11 +227,15 @@ func TestExtensionBounds(t *testing.T) {
 	if _, err := ParseExtension([]byte(good)); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := ParseExtension([]byte(strings.Replace(good, `"source":"s"`, `"source":"`+strings.Repeat("s", MaxExtensionSource)+`"`, 1))); err != nil {
+		t.Errorf("source of 1,024: %v", err)
+	}
 	for name, doc := range map[string]string{
 		"n 0":          strings.Replace(good, `"n":1`, `"n":0`, 1),
 		"v 2":          strings.Replace(good, `"v":1`, `"v":2`, 1),
 		"from > to":    strings.Replace(good, `"from":1`, `"from":3`, 1),
 		"empty source": strings.Replace(good, `"source":"s"`, `"source":""`, 1),
+		"source 1,025": strings.Replace(good, `"source":"s"`, `"source":"`+strings.Repeat("s", MaxExtensionSource+1)+`"`, 1),
 		"over 4,096":   strings.Replace(good, `"source":"s"`, `"source":"`+strings.Repeat("s", MaxExtensionDoc)+`"`, 1),
 		"bad id":       strings.Replace(good, `01JBQZ`, `01jbqz`, 1),
 		"extra":        strings.Replace(good, `"v":1}`, `"v":1,"w":1}`, 1),

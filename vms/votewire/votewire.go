@@ -60,14 +60,20 @@ const (
 	MaxQuorumText   = 1024
 	MaxOutageRule   = 1024
 	MinOutage       = 3600 // an extension's outage is longer than this (0.81.1)
-	// The service list's bounds (0.81.1, the votes site's own).
-	MaxServiceList = 256 << 10
-	MaxServices    = 64
-	MaxServiceKeys = 16
+	// The service list's bounds (BALLOT-PROTOCOL 0.12.5): no limit on the
+	// number of services or keys, a name of 1 to 100 bytes, and the list at
+	// most 4 MiB. The size is checked first.
+	MaxServiceList = 4 << 20
 	MaxServiceName = 100
-	MinChoices     = 3
-	MaxChoices     = 17
-	AbstainID      = "abstain"
+	// MaxSyncBytes bounds one vote.site.sync (§10.19.8). A 4 MiB list does
+	// not fit 1 MiB: the spec will raise it, and this is the one constant to
+	// change.
+	MaxSyncBytes = 1 << 20
+	// Extension source: 1 to 1,024 bytes of UTF-8 (BALLOT-PROTOCOL 0.12.4).
+	MaxExtensionSource = 1024
+	MinChoices         = 3
+	MaxChoices         = 17
+	AbstainID          = "abstain"
 )
 
 // Limits of what the vault keeps (§10.19.2).

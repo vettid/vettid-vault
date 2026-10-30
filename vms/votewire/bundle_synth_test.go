@@ -38,9 +38,18 @@ func TestSyntheticBundle(t *testing.T) {
 		{"wrong key", doc, b, [][]byte{votetest.NewAnchorKey().SPKI}, now.Add(time.Minute), now, votewire.ErrAnchorKey},
 		{"other document", []byte(`{"v":2}`), b, key, now.Add(time.Minute), now, votewire.ErrAnchor},
 		{"late", doc, b, key, now.Add(-time.Second), now, votewire.ErrAnchorLate},
-		{"vault clock behind the stamp", doc, b, key, now.Add(time.Hour), now.Add(-time.Hour), votewire.ErrBundleClock},
-		{"stamp long before the log entry", doc, auth.BundleStamped(doc, svc.Anchor, now, now.Add(-votewire.StampBeforeLog-time.Minute)), key, now.Add(time.Minute), now, votewire.ErrBundleRoot},
-		{"stamp just before the log entry", doc, auth.BundleStamped(doc, svc.Anchor, now, now.Add(-time.Minute)), key, now.Add(time.Minute), now, nil},
+		{"t_int - t_tsa = 601 s", doc, auth.BundleStamped(doc, svc.Anchor, now, now.Add(-601*time.Second)), key, now.Add(time.Minute), now, votewire.ErrAnchor},
+		{"t_int - t_tsa = 600 s", doc, auth.BundleStamped(doc, svc.Anchor, now, now.Add(-600*time.Second)), key, now.Add(time.Minute), now, nil},
+		{"t_int - t_tsa = 0 s", doc, auth.BundleStamped(doc, svc.Anchor, now, now), key, now.Add(time.Minute), now, nil},
+		{"t_int - t_tsa = -60 s", doc, auth.BundleStamped(doc, svc.Anchor, now, now.Add(60*time.Second)), key, now.Add(2 * time.Minute), now, nil},
+		{"t_int - t_tsa = -61 s", doc, auth.BundleStamped(doc, svc.Anchor, now, now.Add(61*time.Second)), key, now.Add(2 * time.Minute), now, votewire.ErrAnchor},
+		{"no limit (relay time unknown)", doc, auth.Bundle(doc, svc.Anchor, now), key, time.Time{}, now, nil},
+		{"clock: stamp 301 s ahead", doc, b, key, now.Add(time.Hour), now.Add(-301 * time.Second), votewire.ErrBundleClock},
+		{"clock: stamp 300 s ahead", doc, b, key, now.Add(time.Hour), now.Add(-300 * time.Second), nil},
+		{"clock: t_int ahead, t_tsa not", doc, auth.BundleStamped(doc, svc.Anchor, now.Add(400*time.Second), now), key, now.Add(time.Hour), now.Add(99 * time.Second), votewire.ErrBundleClock},
+		{"clock: t_int 300 s ahead", doc, auth.BundleStamped(doc, svc.Anchor, now.Add(400*time.Second), now), key, now.Add(time.Hour), now.Add(100 * time.Second), nil},
+		// Certificate validity is judged at t_tsa and t_int, never at now.
+		{"certificates expired by now", doc, b, key, now.Add(time.Hour), now.Add(100 * 24 * time.Hour), nil},
 		{"another authority", doc, votetest.NewAuthority(now).Bundle(doc, svc.Anchor, now), key, now.Add(time.Minute), now, votewire.ErrBundleRoot},
 	}
 	for _, c := range cases {

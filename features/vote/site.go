@@ -52,10 +52,8 @@ func (f *Feature) syncServices(s *vault.Session, doc, sig []byte) string {
 	}
 	held := f.st.List
 	if held == nil {
-		if !allZero(l.Previous) {
-			f.audit(s, "vote.list_rejected", "", "")
-			return ListIgnored
-		}
+		// 0.81.1: a vault with no list takes any that verifies and parses,
+		// whatever its version or previous; chaining begins after it.
 	} else {
 		hl, err := votewire.ParseServiceList(held.Doc)
 		if err != nil {
@@ -81,14 +79,29 @@ func (f *Feature) syncServices(s *vault.Session, doc, sig []byte) string {
 	return ListKept
 }
 
-func allZero(b []byte) bool {
-	for _, c := range b {
-		if c != 0 {
-			return false
+// SyncCatchUp handles the service-list versions the app hands over in one
+// vote.site.sync, oldest first (0.81.1 "Catch-up"): each is applied in
+// turn as SyncServices does, and the first that is not kept or confirmed
+// stops the rest, which are answered "ignored". It returns one result per
+// list.
+func (f *Feature) SyncCatchUp(s *vault.Session, lists []ServiceListDoc) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, len(lists))
+	stopped := false
+	for i, l := range lists {
+		if stopped {
+			out[i] = ListIgnored
+			continue
 		}
+		out[i] = f.syncServices(s, l.Doc, l.Sig)
+		stopped = out[i] != ListKept && out[i] != ListConfirmed
 	}
-	return true
+	return out
 }
+
+// ServiceListDoc is a service list's bytes with its signature.
+type ServiceListDoc struct{ Doc, Sig []byte }
 
 // recheck looks again at the `checking` proposals whose reason is the
 // service list or the roots: information ends the state, never a lack of
@@ -96,10 +109,14 @@ func allZero(b []byte) bool {
 func (f *Feature) recheck(s *vault.Session) {
 	now := s.Now()
 	for _, r := range f.st.Records {
-		if r.RejectReason != "" || (r.Reason != ReasonServiceList && r.Reason != ReasonTrustRoot) {
+		if r.RejectReason != "" || (r.Reason != ReasonServiceList && r.Reason != ReasonTrustRoot && r.Reason != ReasonClock) {
 			continue
 		}
-		switch f.anchor(s, r.Conn, r.Proposal, r.Bundle, time.UnixMilli(r.ReceivedMS).Add(AnchorAhead)) {
+		var notAfter time.Time
+		if !r.NoRelay {
+			notAfter = time.UnixMilli(r.ReceivedMS).Add(AnchorAhead)
+		}
+		switch f.anchor(s, r.Conn, r.Proposal, r.Bundle, notAfter) {
 		case anchorOK:
 			r.Reason = ""
 			r.ChangedMS = now.UnixMilli()
@@ -115,8 +132,21 @@ func (f *Feature) recheck(s *vault.Session) {
 			r.Reason = ReasonServiceList
 		case anchorTrustRoot:
 			r.Reason = ReasonTrustRoot
+		case anchorClock:
+			r.Reason = ReasonClock
 		}
 	}
+}
+
+// Unlocked implements vault.UnlockObserver: at unlock the `checking`
+// proposals are looked at again (0.81.1): the roots of this release may be
+// newer than when they were kept, and a `clock` reason goes when the
+// vault's clock has caught up.
+func (f *Feature) Unlocked(s *vault.Session) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.last = s.Now().UnixMilli()
+	f.recheck(s)
 }
 
 // SiteDoc is what the app found at p/<proposal_id>/proposal.json on
@@ -154,7 +184,18 @@ func (f *Feature) SiteDocument(s *vault.Session, conn, id string, d SiteDoc) err
 	if r == nil {
 		return ErrNoSuchVote
 	}
+	// Once found, a mismatch and an unpublished proposal are permanent: the
+	// site is write-once and takes uploads only before the close, so a later
+	// answer changes neither.
+	if r.Site == SiteMismatch || r.Site == SiteUnpublished {
+		return nil
+	}
 	now := s.Now()
+	// A document that is not a valid proposal of this id signed under the
+	// service's key is not a split view, it is garbage: no answer.
+	if d.Answered && d.Found && !eq(d.Proposal, r.Proposal) && !f.siteDocValid(r, d) {
+		d = SiteDoc{}
+	}
 	var next, alert string
 	switch {
 	case !d.Answered:
@@ -184,4 +225,15 @@ func (f *Feature) SiteDocument(s *vault.Session, conn, id string, d SiteDoc) err
 		f.event(s, r, "problem")
 	}
 	return nil
+}
+
+// siteDocValid reports whether the site's document is a valid proposal
+// with the held proposal's id, signed under the service's key.
+func (f *Feature) siteDocValid(r *record, d SiteDoc) bool {
+	held, err := votewire.ParseProposal(r.Proposal)
+	if err != nil {
+		return false
+	}
+	p, err := votewire.ParseProposal(d.Proposal)
+	return err == nil && p.ProposalID == r.ID && votewire.VerifyProposal(held.Service, d.Proposal, d.Sig) == nil
 }

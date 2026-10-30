@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"testing"
+	"time"
 )
 
 // A document that parses is exactly its own canonical form, and parsing
@@ -87,3 +88,47 @@ func loadFuzz() *vectors {
 }
 
 func hxb(s string) []byte { b, _ := hex.DecodeString(s); return b }
+
+// A bundle never panics VerifyBundle, and nothing but the real bundle
+// verifies against the real roots.
+func FuzzVerifyBundle(f *testing.F) {
+	raw, err := os.ReadFile(anchorVector)
+	if err != nil {
+		f.Fatal(err)
+	}
+	var v anchorVec
+	if err := json.Unmarshal(raw, &v); err != nil {
+		f.Fatal(err)
+	}
+	roots, err := ParseTrustRoots([]byte("[" + string(v.TrustedRoot) + "]"))
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Add([]byte(v.Bundle))
+	f.Add([]byte(`{}`))
+	stamp := time.Unix(v.Timestamp, 0)
+	f.Fuzz(func(t *testing.T, bundle []byte) {
+		info, err := VerifyBundle([]byte(v.Proposal), bundle, [][]byte{v.AnchorKey}, roots, stamp.Add(time.Hour), stamp)
+		if err == nil && info == nil {
+			t.Fatal("no error and no info")
+		}
+	})
+}
+
+// A trusted root never panics the parser.
+func FuzzParseTrustRoot(f *testing.F) {
+	raw, err := os.ReadFile(anchorVector)
+	if err != nil {
+		f.Fatal(err)
+	}
+	var v anchorVec
+	if err := json.Unmarshal(raw, &v); err != nil {
+		f.Fatal(err)
+	}
+	f.Add([]byte(v.TrustedRoot))
+	f.Add([]byte(`{"tlogs":[],"timestampAuthorities":[]}`))
+	f.Fuzz(func(t *testing.T, data []byte) {
+		_, _ = ParseTrustRoot(data)
+		_, _ = ParseTrustRoots(data)
+	})
+}

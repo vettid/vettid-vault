@@ -30,11 +30,13 @@ import (
 // The errors map to the spec's outcomes:
 //
 //	ErrAnchorKey  the key is not among the accepted anchor keys   -> checking (service_list)
-//	ErrAnchor     the digest or signature contradicts the document,
-//	              or the bundle is malformed                       -> rejected (anchor)
-//	ErrAnchorLate the verified timestamp is after the time allowed -> rejected (anchor; late for an extension)
-//	ErrBundleRoot nothing verifies against the pinned roots       -> checking (trust_root)
-//	ErrBundleClock the stamp is ahead of the vault's own clock    -> checking (trust_root)
+//	ErrAnchor     the digest or signature contradicts the document under
+//	              an accepted key, or t_int - t_tsa is outside -60..600 s -> rejected (anchor)
+//	ErrAnchorLate the verified t_tsa is after the limit            -> rejected (anchor; late for an extension)
+//	ErrBundleRoot anything not recognised or not verified by the pinned
+//	              roots (another media type, Rekor v2, an unparseable
+//	              body, a key that is not P-256 ...)              -> checking (trust_root)
+//	ErrBundleClock max(t_tsa, t_int) > now + 300 s                 -> checking (clock)
 var (
 	ErrAnchorKey = errors.New("votewire: bundle key is not an accepted anchor key")
 	ErrAnchor    = errors.New("votewire: bundle contradicts the document")
@@ -44,11 +46,12 @@ var (
 	ErrBundleClock = errors.New("votewire: bundle timestamp is ahead of this vault's clock")
 )
 
-// Skews (VAULT-MESSAGING design, owner 2026-10-30): the timestamp may be
-// at most this long before the log's integratedTime and this long ahead of
-// the vault's clock.
+// The time rules of VAULT-MESSAGING 0.81.1 §10.19.4 step 6: t_int - t_tsa
+// within [-SkewBelow, SkewAbove] seconds, and max(t_tsa, t_int) at most
+// StampAhead ahead of the vault's own clock.
 const (
-	StampBeforeLog = 10 * time.Minute
+	SkewBelow      = 60
+	SkewAbove      = 600
 	StampAhead     = 5 * time.Minute
 	maxProofHashes = 64
 )
@@ -115,34 +118,34 @@ func atoi(s string) (int64, bool) {
 // the latest time the timestamp may carry; now the vault's clock.
 func VerifyBundle(doc, bundle []byte, accepted [][]byte, roots []*TrustRoot, notAfter, now time.Time) (*BundleInfo, error) {
 	if len(bundle) == 0 || len(bundle) > MaxBundle {
-		return nil, ErrAnchor
+		return nil, ErrBundleRoot
 	}
 	if _, err := strictjson.ParseObject(bundle); err != nil {
-		return nil, ErrAnchor
+		return nil, ErrBundleRoot
 	}
 	var b bundleDoc
 	if err := json.Unmarshal(bundle, &b); err != nil {
-		return nil, ErrAnchor
+		return nil, ErrBundleRoot
 	}
 	vm := &b.VerificationMaterial
 	if b.MediaType != "application/vnd.dev.sigstore.bundle.v0.3+json" || len(vm.TLogEntries) != 1 ||
 		len(vm.TimestampVerificationData.RFC3161) != 1 {
-		return nil, ErrAnchor
+		return nil, ErrBundleRoot
 	}
 	e := &vm.TLogEntries[0]
 	if e.KindVersion.Kind != "hashedrekord" || e.KindVersion.Version != "0.0.1" {
-		return nil, ErrAnchor
+		return nil, ErrBundleRoot
 	}
 	logIndex, ok1 := atoi(e.LogIndex)
 	integrated, ok2 := atoi(e.IntegratedTime)
 	if !ok1 || !ok2 || len(e.Body) == 0 || len(e.Body) > MaxBundle {
-		return nil, ErrAnchor
+		return nil, ErrBundleRoot
 	}
 
 	// The entry's own record of what was signed and by which key.
 	digest, sig, spki, err := parseRekorBody(e.Body)
 	if err != nil {
-		return nil, ErrAnchor
+		return nil, ErrBundleRoot
 	}
 	known := false
 	for _, k := range accepted {
@@ -155,35 +158,47 @@ func VerifyBundle(doc, bundle []byte, accepted [][]byte, roots []*TrustRoot, not
 	// Contradiction under a key the list names: ErrAnchor.
 	pub, err := x509.ParsePKIXPublicKey(spki)
 	if err != nil {
-		return nil, ErrAnchor
+		return nil, ErrBundleRoot // not a key this profile knows
 	}
 	ek, ok := pub.(*ecdsa.PublicKey)
 	if !ok || ek.Curve != elliptic.P256() {
-		return nil, ErrAnchor
+		return nil, ErrBundleRoot
+	}
+	if b.MessageSignature.MessageDigest.Algorithm != "SHA2_256" {
+		return nil, ErrBundleRoot
 	}
 	dh := H(doc)
-	if b.MessageSignature.MessageDigest.Algorithm != "SHA2_256" || !eq(b.MessageSignature.MessageDigest.Digest, dh) ||
+	if !eq(b.MessageSignature.MessageDigest.Digest, dh) ||
 		!eq(digest, dh) || !eq(sig, b.MessageSignature.Signature) || !ecdsa.VerifyASN1(ek, dh, sig) {
 		return nil, ErrAnchor
 	}
 
-	// Against the pinned roots: the newest first (a newer root is the
-	// likelier to hold the keys), older ones so that older bundles verify.
-	var lastErr error = ErrBundleRoot
+	// Against the pinned roots, newest first (a newer root is the likelier
+	// to hold the keys), older ones so that older bundles verify. What the
+	// roots verify is judged at t_tsa and t_int, never at now.
 	for i := len(roots) - 1; i >= 0; i-- {
-		gen, err := verifyAgainst(roots[i], &b, e.Body, logIndex, integrated, sig, now)
+		gen, err := verifyAgainst(roots[i], &b, e.Body, logIndex, integrated, sig)
 		if err != nil {
-			if errors.Is(err, ErrBundleClock) {
-				lastErr = err
-			}
 			continue
 		}
-		if gen.After(notAfter) {
+		tTSA := gen.Unix()
+		// 0.81.1: -60 s <= t_int - t_tsa <= 600 s, in whole seconds: evidence
+		// against evidence, no use of the vault's clock.
+		if d := integrated - tTSA; d < -SkewBelow || d > SkewAbove {
+			return nil, ErrAnchor
+		}
+		// t_tsa at or before the limit (the relay's time + 300 s, or the
+		// close an extension extends), on the truncated genTime.
+		if !notAfter.IsZero() && tTSA > notAfter.Unix() {
 			return nil, ErrAnchorLate
+		}
+		// Only now the vault's own clock: max(t_tsa, t_int) > now + 300 s.
+		if max(tTSA, integrated) > now.Unix()+int64(StampAhead/time.Second) {
+			return nil, ErrBundleClock
 		}
 		return &BundleInfo{LogIndex: logIndex, IntegratedTime: integrated, GenTime: gen, AnchorKey: append([]byte{}, spki...)}, nil
 	}
-	return nil, lastErr
+	return nil, ErrBundleRoot
 }
 
 // parseRekorBody reads the hashedrekord 0.0.1 body: the document digest,
@@ -191,54 +206,54 @@ func VerifyBundle(doc, bundle []byte, accepted [][]byte, roots []*TrustRoot, not
 func parseRekorBody(body []byte) (digest, sig, spki []byte, err error) {
 	o, err := strictjson.ParseObject(body)
 	if err != nil {
-		return nil, nil, nil, ErrAnchor
+		return nil, nil, nil, ErrBundleRoot
 	}
 	if v, err := o.String("apiVersion"); err != nil || v != "0.0.1" {
-		return nil, nil, nil, ErrAnchor
+		return nil, nil, nil, ErrBundleRoot
 	}
 	if v, err := o.String("kind"); err != nil || v != "hashedrekord" {
-		return nil, nil, nil, ErrAnchor
+		return nil, nil, nil, ErrBundleRoot
 	}
 	spec, err := o.Object("spec")
 	if err != nil {
-		return nil, nil, nil, ErrAnchor
+		return nil, nil, nil, ErrBundleRoot
 	}
 	data, err := spec.Object("data")
 	if err != nil {
-		return nil, nil, nil, ErrAnchor
+		return nil, nil, nil, ErrBundleRoot
 	}
 	hash, err := data.Object("hash")
 	if err != nil {
-		return nil, nil, nil, ErrAnchor
+		return nil, nil, nil, ErrBundleRoot
 	}
 	if a, err := hash.String("algorithm"); err != nil || a != "sha256" {
-		return nil, nil, nil, ErrAnchor
+		return nil, nil, nil, ErrBundleRoot
 	}
 	hv, err := hash.String("value")
 	if err != nil {
-		return nil, nil, nil, ErrAnchor
+		return nil, nil, nil, ErrBundleRoot
 	}
 	if digest, err = hex.DecodeString(hv); err != nil || len(digest) != HashLen || hex.EncodeToString(digest) != hv {
-		return nil, nil, nil, ErrAnchor
+		return nil, nil, nil, ErrBundleRoot
 	}
 	sg, err := spec.Object("signature")
 	if err != nil {
-		return nil, nil, nil, ErrAnchor
+		return nil, nil, nil, ErrBundleRoot
 	}
 	if sig, err = sg.Base64("content", -1); err != nil {
-		return nil, nil, nil, ErrAnchor
+		return nil, nil, nil, ErrBundleRoot
 	}
 	pk, err := sg.Object("publicKey")
 	if err != nil {
-		return nil, nil, nil, ErrAnchor
+		return nil, nil, nil, ErrBundleRoot
 	}
 	pemBytes, err := pk.Base64("content", -1)
 	if err != nil {
-		return nil, nil, nil, ErrAnchor
+		return nil, nil, nil, ErrBundleRoot
 	}
 	blk, rest := pem.Decode(pemBytes)
 	if blk == nil || blk.Type != "PUBLIC KEY" || len(strings.TrimSpace(string(rest))) != 0 {
-		return nil, nil, nil, ErrAnchor
+		return nil, nil, nil, ErrBundleRoot
 	}
 	return digest, sig, blk.Bytes, nil
 }
@@ -246,7 +261,7 @@ func parseRekorBody(body []byte) (digest, sig, spki []byte, err error) {
 // verifyAgainst checks the log entry (inclusion, checkpoint, signed entry
 // timestamp) and the RFC 3161 token against one trusted root, and returns
 // the token's time.
-func verifyAgainst(tr *TrustRoot, b *bundleDoc, body []byte, logIndex, integrated int64, sig []byte, now time.Time) (time.Time, error) {
+func verifyAgainst(tr *TrustRoot, b *bundleDoc, body []byte, logIndex, integrated int64, sig []byte) (time.Time, error) {
 	e := &b.VerificationMaterial.TLogEntries[0]
 	it := time.Unix(integrated, 0).UTC()
 	var lg *TLog
@@ -261,14 +276,7 @@ func verifyAgainst(tr *TrustRoot, b *bundleDoc, body []byte, logIndex, integrate
 	if err := verifyLog(lg, e, body, logIndex, integrated); err != nil {
 		return time.Time{}, err
 	}
-	gen, err := verifyTimestamp(tr, b.VerificationMaterial.TimestampVerificationData.RFC3161[0].Signed, H(sig), now)
-	if err != nil {
-		return time.Time{}, err
-	}
-	if gen.Before(it.Add(-StampBeforeLog)) {
-		return time.Time{}, ErrBundleRoot
-	}
-	return gen, nil
+	return verifyTimestamp(tr, b.VerificationMaterial.TimestampVerificationData.RFC3161[0].Signed, H(sig))
 }
 
 func verifyLog(lg *TLog, e *tlogEntry, body []byte, logIndex, integrated int64) error {
@@ -394,7 +402,7 @@ type algID struct {
 // verifyTimestamp checks a TimeStampResp holding a token over imprint (the
 // SHA-256 of the signature) against the root's timestamp authorities, and
 // returns its genTime.
-func verifyTimestamp(tr *TrustRoot, resp []byte, imprint []byte, now time.Time) (time.Time, error) {
+func verifyTimestamp(tr *TrustRoot, resp []byte, imprint []byte) (time.Time, error) {
 	bad := time.Time{}
 	if len(resp) == 0 || len(resp) > MaxBundle {
 		return bad, ErrBundleRoot
@@ -413,7 +421,7 @@ func verifyTimestamp(tr *TrustRoot, resp []byte, imprint []byte, now time.Time) 
 		return bad, ErrBundleRoot
 	}
 	var status int
-	if r, err := asn1.Unmarshal(st[0].FullBytes, &status); err != nil || len(r) != 0 || status > 1 {
+	if r, err := asn1.Unmarshal(st[0].FullBytes, &status); err != nil || len(r) != 0 || status < 0 || status > 1 {
 		return bad, ErrBundleRoot
 	}
 	// ContentInfo { signedData, [0] SignedData }
@@ -435,6 +443,10 @@ func verifyTimestamp(tr *TrustRoot, resp []byte, imprint []byte, now time.Time) 
 	sd, ok := children(sdv)
 	if !ok || len(sd) < 4 {
 		return bad, ErrBundleRoot
+	}
+	var sdVer int
+	if r, err := asn1.Unmarshal(sd[0].FullBytes, &sdVer); err != nil || len(r) != 0 || sdVer != 3 {
+		return bad, ErrBundleRoot // RFC 5652: version 3 when the content is not id-data
 	}
 	// sd: version, digestAlgorithms, encapContentInfo, [0] certificates?, [1] crls?, signerInfos
 	encap, ok := children(sd[2])
@@ -481,7 +493,7 @@ func verifyTimestamp(tr *TrustRoot, resp []byte, imprint []byte, now time.Time) 
 		return bad, ErrBundleRoot
 	}
 	var gen time.Time
-	if r, err := asn1.Unmarshal(tk[4].FullBytes, &gen); err != nil || len(r) != 0 || tk[4].Tag != asn1.TagGeneralizedTime {
+	if r, err := asn1.Unmarshal(tk[4].FullBytes, &gen); err != nil || len(r) != 0 || tk[4].Tag != asn1.TagGeneralizedTime || !derGeneralizedTime(tk[4].Bytes) {
 		return bad, ErrBundleRoot
 	}
 	gen = gen.UTC()
@@ -516,6 +528,7 @@ func verifyTimestamp(tr *TrustRoot, resp []byte, imprint []byte, now time.Time) 
 		return bad, ErrBundleRoot
 	}
 	var haveCT, haveMD bool
+	var nCT, nMD int
 	for _, a := range acs {
 		var at struct {
 			Type   asn1.ObjectIdentifier
@@ -530,18 +543,20 @@ func verifyTimestamp(tr *TrustRoot, resp []byte, imprint []byte, now time.Time) 
 		}
 		switch {
 		case at.Type.Equal(oidContentType):
+			nCT++
 			var v asn1.ObjectIdentifier
 			if r, err := asn1.Unmarshal(vals[0].FullBytes, &v); err == nil && len(r) == 0 && v.Equal(oidTSTInfo) {
 				haveCT = true
 			}
 		case at.Type.Equal(oidMsgDigest):
+			nMD++
 			var v []byte
 			if r, err := asn1.Unmarshal(vals[0].FullBytes, &v); err == nil && len(r) == 0 && eq(v, H(eContent)) {
 				haveMD = true
 			}
 		}
 	}
-	if !haveCT || !haveMD {
+	if !haveCT || !haveMD || nCT != 1 || nMD != 1 { // exactly one of each (RFC 5652 §11)
 		return bad, ErrBundleRoot
 	}
 	// The signature is over the attributes as a SET OF (tag 0x31).
@@ -572,9 +587,6 @@ func verifyTimestamp(tr *TrustRoot, resp []byte, imprint []byte, now time.Time) 
 		if !ok || !ecdsa.VerifyASN1(pk, H(signed), sigBytes) {
 			continue
 		}
-		if gen.After(now.Add(StampAhead)) {
-			return bad, ErrBundleClock
-		}
 		return gen, nil
 	}
 	return bad, ErrBundleRoot
@@ -597,7 +609,7 @@ func tsaChainOK(ta TSA, t time.Time) error {
 		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageTimeStamping}}); err != nil {
 		return ErrBundleRoot
 	}
-	if len(leaf.ExtKeyUsage) != 1 || leaf.ExtKeyUsage[0] != x509.ExtKeyUsageTimeStamping {
+	if len(leaf.ExtKeyUsage) != 1 || leaf.ExtKeyUsage[0] != x509.ExtKeyUsageTimeStamping || len(leaf.UnknownExtKeyUsage) != 0 {
 		return ErrBundleRoot
 	}
 	for _, ext := range leaf.Extensions {
@@ -609,4 +621,31 @@ func tsaChainOK(ta TSA, t time.Time) error {
 		}
 	}
 	return ErrBundleRoot
+}
+
+// derGeneralizedTime reports whether b is a GeneralizedTime in DER form:
+// YYYYMMDDHHMMSS, an optional fraction without trailing zeros, and Z (UTC),
+// no offset (X.690 §11.7).
+func derGeneralizedTime(b []byte) bool {
+	if len(b) < 15 || b[len(b)-1] != 'Z' {
+		return false
+	}
+	for _, c := range b[:14] {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	rest := b[14 : len(b)-1]
+	if len(rest) == 0 {
+		return true
+	}
+	if rest[0] != '.' || len(rest) < 2 || rest[len(rest)-1] == '0' {
+		return false
+	}
+	for _, c := range rest[1:] {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }

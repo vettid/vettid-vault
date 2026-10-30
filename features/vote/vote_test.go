@@ -468,9 +468,10 @@ func TestServiceListChaining(t *testing.T) {
 	if got := n.SyncServices(e.session(), held.Doc, held.Sig); got != ListRejected {
 		t.Errorf("no key: %s", got)
 	}
-	// A first list that claims a previous one: ignored.
+	// 0.81.1: a vault with no list takes any that verifies and parses,
+	// whatever its version or previous.
 	m := New(e.f.opt)
-	if got := m.SyncServices(e.session(), d1, s1); got != ListIgnored {
+	if got := m.SyncServices(e.session(), d1, s1); got != ListKept {
 		t.Errorf("first list with a previous: %s", got)
 	}
 }
@@ -630,12 +631,31 @@ func TestSiteComparison(t *testing.T) {
 	}
 	check(SiteDoc{Answered: true}, SiteNotListed, false) // not raised twice
 	// A mismatch: evidence, audit, feed; a problem record.
-	other := append([]byte{}, v.Doc...)
-	other[len(other)-3] ^= 1
-	check(SiteDoc{Answered: true, Found: true, Proposal: other, Sig: make([]byte, 64)}, SiteMismatch, true)
+	// Garbage is not a split view: a document that is not a valid proposal
+	// of this id signed by the service is as good as no answer.
+	garbage := append([]byte{}, v.Doc...)
+	garbage[len(garbage)-3] ^= 1
+	check(SiteDoc{Answered: true, Found: true, Proposal: garbage, Sig: make([]byte, 64)}, SiteUnreachable, false)
+	if e.rec(v.ID).SiteCopy != nil {
+		t.Error("garbage kept as evidence of a mismatch")
+	}
+	// A valid proposal of the same id, signed by the service, with other
+	// bytes: a mismatch.
+	other := e.svc.NewVote(votetest.VoteSpec{ID: v.ID, Opens: e.now.Add(-time.Hour), Closes: e.now.Add(5 * time.Hour)})
+	check(SiteDoc{Answered: true, Found: true, Proposal: other.Doc, Sig: other.Sig}, SiteMismatch, true)
 	rec := e.rec(v.ID)
 	if rec.SiteCopy == nil || !rec.problem() || !e.has("vote.proposal_conflict", v.ID+":mismatch") {
 		t.Errorf("%+v", rec)
+	}
+	// Permanent: a later unreachable, 404 or matching answer resets nothing.
+	e.h.Reset()
+	for _, d := range []SiteDoc{{}, {Answered: true}, {Answered: true, Found: true, Proposal: v.Doc}} {
+		if err := e.f.SiteDocument(e.session(), "svc", v.ID, d); err != nil {
+			t.Fatal(err)
+		}
+		if e.rec(v.ID).Site != SiteMismatch || e.rec(v.ID).SiteAlert != "mismatch" || len(e.h.Activities) != 0 {
+			t.Fatalf("mismatch reset by %+v: %q %v", d, e.rec(v.ID).Site, e.h.Activities)
+		}
 	}
 	// After the close, a 404 is unpublished: a positive problem.
 	e2 := newEnv(t)
@@ -648,6 +668,12 @@ func TestSiteComparison(t *testing.T) {
 	}
 	if r := e2.rec(v2.ID); r.Site != SiteUnpublished || !r.problem() || !e2.has("vote.proposal_conflict", v2.ID+":unpublished") {
 		t.Errorf("%+v", r)
+	}
+	for _, d := range []SiteDoc{{}, {Answered: true, Found: true, Proposal: v2.Doc}} {
+		_ = e2.f.SiteDocument(e2.session(), "svc", v2.ID, d)
+		if e2.rec(v2.ID).Site != SiteUnpublished {
+			t.Errorf("unpublished reset by %+v", d)
+		}
 	}
 	if err := e2.f.SiteDocument(e2.session(), "svc", "01JBQZ00000000000000000077", SiteDoc{}); err == nil {
 		t.Error("unknown proposal")

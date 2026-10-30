@@ -48,7 +48,11 @@ func must[T any](v T, err error) T {
 
 // NewAuthority returns an authority whose certificates are valid around
 // now.
-func NewAuthority(now time.Time) *Authority {
+func NewAuthority(now time.Time) *Authority { return NewAuthorityEKU(now, nil) }
+
+// NewAuthorityEKU is NewAuthority with extra extended key usages on the
+// timestamp authority's certificate (tests of the EKU rule).
+func NewAuthorityEKU(now time.Time, extra []asn1.ObjectIdentifier) *Authority {
 	a := &Authority{}
 	a.rekor = must(ecdsa.GenerateKey(elliptic.P256(), rand.Reader))
 	rekorDER := must(x509.MarshalPKIXPublicKey(&a.rekor.PublicKey))
@@ -60,7 +64,7 @@ func NewAuthority(now time.Time) *Authority {
 		IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign}
 	caDER := must(x509.CreateCertificate(rand.Reader, caTmpl, caTmpl, &caKey.PublicKey, caKey))
 	a.tsaCA = must(x509.ParseCertificate(caDER))
-	eku := must(asn1.Marshal([]asn1.ObjectIdentifier{{1, 3, 6, 1, 5, 5, 7, 3, 8}}))
+	eku := must(asn1.Marshal(append([]asn1.ObjectIdentifier{{1, 3, 6, 1, 5, 5, 7, 3, 8}}, extra...)))
 	leafTmpl := &x509.Certificate{SerialNumber: big.NewInt(0x1234abcd), Subject: pkix.Name{CommonName: "test-tsa"}, NotBefore: nb, NotAfter: na,
 		KeyUsage: x509.KeyUsageDigitalSignature, ExtraExtensions: []pkix.Extension{{Id: asn1.ObjectIdentifier{2, 5, 29, 37}, Critical: true, Value: eku}}}
 	leafDER := must(x509.CreateCertificate(rand.Reader, leafTmpl, a.tsaCA, &a.tsa.PublicKey, caKey))
@@ -295,8 +299,21 @@ func (s *Service) MsgWithBundle(v *Vote, bundle []byte) []byte {
 }
 
 // Extension builds the n-th extension of v to closes, with its message.
+//
+// Its outage starts at opens_at and lasts three days: valid for any new
+// close within the 24 h total (the service's rule, 0.81.1).
 func (s *Service) Extension(v *Vote, n int64, closes time.Time, at time.Time) (doc, msg []byte) {
-	e := &votewire.Extension{V: 1, ProposalID: v.ID, N: n, ClosesAt: closes.Unix(), Outage: votewire.Outage{From: closes.Unix() - 3600, To: closes.Unix() - 1800, Source: "https://status.test/"}}
+	return s.ExtensionOutage(v, n, closes, at, 0, 0)
+}
+
+// ExtensionOutage is Extension with a chosen outage (from, to as unix
+// seconds; zero: derived from the proposal's window and the new close).
+func (s *Service) ExtensionOutage(v *Vote, n int64, closes time.Time, at time.Time, from, to int64) (doc, msg []byte) {
+	if from == 0 {
+		from = v.Proposal.OpensAt
+		to = from + 3*86400 // long enough for any new close within the 24 h total
+	}
+	e := &votewire.Extension{V: 1, ProposalID: v.ID, N: n, ClosesAt: closes.Unix(), Outage: votewire.Outage{From: from, To: to, Source: "https://status.test/"}}
 	doc = must(votewire.EncodeDocument(e))
 	sig := must(suite.Sign(s.IK, votewire.LabelExtended, must(votewire.DocSigMsg(v.Hash, doc))))
 	m := &votewire.ExtendedMsg{ProposalID: v.ID, Extension: doc, ExtensionSig: sig, Bundle: s.Auth.Bundle(doc, s.Anchor, at)}

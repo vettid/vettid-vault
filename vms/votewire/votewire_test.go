@@ -230,8 +230,9 @@ func TestExtensionBounds(t *testing.T) {
 	for name, doc := range map[string]string{
 		"n 0":          strings.Replace(good, `"n":1`, `"n":0`, 1),
 		"v 2":          strings.Replace(good, `"v":1`, `"v":2`, 1),
-		"from = to":    strings.Replace(good, `"to":2`, `"to":1`, 1),
 		"from > to":    strings.Replace(good, `"from":1`, `"from":3`, 1),
+		"empty source": strings.Replace(good, `"source":"s"`, `"source":""`, 1),
+		"over 4,096":   strings.Replace(good, `"source":"s"`, `"source":"`+strings.Repeat("s", MaxExtensionDoc)+`"`, 1),
 		"bad id":       strings.Replace(good, `01JBQZ`, `01jbqz`, 1),
 		"extra":        strings.Replace(good, `"v":1}`, `"v":1,"w":1}`, 1),
 		"source int":   strings.Replace(good, `"source":"s"`, `"source":1`, 1),
@@ -370,7 +371,13 @@ func TestServiceListDuplicatesAndChaining(t *testing.T) {
 		}
 		return c
 	}
-	key := func(n byte) []byte { return bytes.Repeat([]byte{n}, 32) }
+	privs := map[string]ed25519.PrivateKey{}
+	key := func(n byte) []byte {
+		k := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{n}, 32))
+		pub := []byte(k.Public().(ed25519.PublicKey))
+		privs[string(pub)] = k
+		return pub
+	}
 	svc := func(ik []byte, extraIKs [][]byte, anchors ...map[string]any) map[string]any {
 		iks := []any{e64(ik)}
 		for _, k := range extraIKs {
@@ -383,7 +390,8 @@ func TestServiceListDuplicatesAndChaining(t *testing.T) {
 		return map[string]any{"service_id": hex.EncodeToString(H(ik)[:16]), "name": "S", "iks": iks, "anchor_keys": as}
 	}
 	anchor := func(spki string, ik []byte) map[string]any {
-		return map[string]any{"key": e64([]byte(spki)), "anchor_cert": e64(make([]byte, 64)), "ik": e64(ik)}
+		cert := ed25519.Sign(privs[string(ik)], append([]byte(LabelAnchorKey), H([]byte(spki))...))
+		return map[string]any{"key": e64([]byte(spki)), "anchor_cert": e64(cert), "ik": e64(ik)}
 	}
 	zero := make([]byte, 32)
 	v1 := mk(1, zero, svc(key(1), nil, anchor("k1", key(1))))
@@ -498,5 +506,41 @@ func TestProofDoesNotBindTreeSize(t *testing.T) {
 	}
 	if err := (&RecordProof{Index: 2, TreeSize: 3, Path: [][]byte{ab}}).Verify(p, c); err != nil {
 		t.Errorf("the right one: %v", err)
+	}
+}
+
+func TestDERGeneralizedTime(t *testing.T) {
+	for in, want := range map[string]bool{
+		"20261030145105Z": true, "20261030145105.5Z": true, "20261030145105.123Z": true,
+		"20261030145105.50Z": false, "20261030145105.Z": false, "20261030145105": false,
+		"20261030145105+0100": false, "20261030145105-0500": false, "2026103014510Z": false, "20261030145105z": false,
+	} {
+		if derGeneralizedTime([]byte(in)) != want {
+			t.Errorf("%q: %v", in, !want)
+		}
+	}
+}
+
+func TestExtensionOrderOK(t *testing.T) {
+	const opens, closes = 1000, 100000
+	e := func(from, to, newClose int64) *Extension {
+		return &Extension{V: 1, Outage: Outage{From: from, To: to, Source: "s"}, ClosesAt: newClose}
+	}
+	for name, tc := range map[string]struct {
+		e  *Extension
+		ok bool
+	}{
+		"3,600 s":                {e(opens, opens+3600, closes+3600), false},
+		"3,601 s, up to 7,200":   {e(opens, opens+3601, closes+7200), true},
+		"3,601 s, above 7,200":   {e(opens, opens+3601, closes+7201), false},
+		"from = to":              {e(opens, opens, closes+3600), false},
+		"from before opens":      {e(opens-1, opens+7200, closes+3600), false},
+		"from at the close":      {e(closes, closes+7200, closes+3600), false},
+		"from just before close": {e(closes-1, closes+7200, closes+3600), true},
+		"a close that goes back": {e(opens, opens+7200, closes-1), true}, // the order of closes is the caller's
+	} {
+		if tc.e.OrderOK(opens, closes) != tc.ok {
+			t.Errorf("%s: %v", name, !tc.ok)
+		}
 	}
 }

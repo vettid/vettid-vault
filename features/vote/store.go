@@ -22,6 +22,7 @@ const (
 const (
 	ReasonServiceList = "service_list"
 	ReasonTrustRoot   = "trust_root"
+	ReasonClock       = "clock" // 0.81.1: max(t_tsa, t_int) > now + 300 s
 	ReasonSite        = "site"
 	ReasonRestore     = "restore"
 )
@@ -121,6 +122,7 @@ type record struct {
 	Tag         []byte          `json:"record_tag"`
 	Proof       *proof          `json:"record_proof"`
 	ReceivedMS  int64           `json:"received_ms"`
+	NoRelay     bool            `json:"no_relay,omitempty"` // the relay's time was unknown
 	KeptMS      int64           `json:"kept_ms"`
 	ChangedMS   int64           `json:"changed_ms"`
 
@@ -405,7 +407,13 @@ func (f *Feature) prune(s *vault.Session) {
 		}
 	}
 	for k, r := range f.st.Records {
-		if r.problem() && r.closed(now) && now.Sub(time.Unix(r.Closes, 0)) >= keep {
+		// 365 days after the close; a record with no close (a malformed
+		// document's) from when it was kept.
+		base := time.Unix(r.Closes, 0)
+		if r.Closes == 0 {
+			base = time.UnixMilli(r.KeptMS)
+		}
+		if r.problem() && now.Sub(base) >= keep && (r.Closes == 0 || r.closed(now)) {
 			delete(f.st.Records, k)
 		}
 	}

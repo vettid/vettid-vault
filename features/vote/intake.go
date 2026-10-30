@@ -72,6 +72,7 @@ const (
 	anchorTrustRoot
 	anchorRejected
 	anchorLate
+	anchorClock
 )
 
 // acceptedKeys are the anchor keys the service list names for this
@@ -109,8 +110,10 @@ func (f *Feature) acceptedKeys(s *vault.Session, conn string) [][]byte {
 // anchor is §10.19.4 step 6 for one document and its bundle: no verified
 // list, or none naming an accepted key of this service, or a bundle whose
 // key is not among them, is service_list; a document the bundle
-// contradicts, or a stamp after notAfter, is rejected; roots that do not
-// verify it (or a stamp ahead of this vault's clock) is trust_root.
+// contradicts, a stamp after notAfter (zero: no limit) or t_int - t_tsa
+// outside -60..600 s is rejected; anything the roots do not verify or this
+// release does not recognise is trust_root; a stamp more than 300 s ahead
+// of this vault's clock is clock (0.81.1).
 func (f *Feature) anchor(s *vault.Session, conn string, doc []byte, bundle json.RawMessage, notAfter time.Time) anchorResult {
 	if f.st.List == nil {
 		return anchorServiceList
@@ -132,6 +135,8 @@ func (f *Feature) anchor(s *vault.Session, conn string, doc []byte, bundle json.
 		return anchorRejected
 	case errors.Is(err, votewire.ErrAnchorLate):
 		return anchorLate
+	case errors.Is(err, votewire.ErrBundleClock):
+		return anchorClock
 	}
 	return anchorTrustRoot
 }
@@ -152,7 +157,7 @@ func (f *Feature) reject(s *vault.Session, conn, id, reason string, msg *votewir
 	now := s.Now()
 	r := &record{Conn: conn, ID: id, ServiceIK: append([]byte{}, s.From().IK...), Proposal: msg.Proposal, ProposalSig: msg.ProposalSig,
 		Bundle: msg.Bundle, Hash: votewire.H(msg.Proposal), Secret: msg.RecordSecret, RejectReason: reason,
-		ReceivedMS: s.RelayTime().UnixMilli(), KeptMS: now.UnixMilli(), ChangedMS: now.UnixMilli()}
+		ReceivedMS: s.RelayTime().UnixMilli(), NoRelay: !s.RelayTimeKnown(), KeptMS: now.UnixMilli(), ChangedMS: now.UnixMilli()}
 	if tag, err := votewire.RecordTag(id, msg.RecordSecret); err == nil {
 		r.Tag = tag
 	}
@@ -234,8 +239,18 @@ func (f *Feature) onProposal(s *vault.Session, in *envelope.Inner) (json.RawMess
 		return nil, f.reject(s, conn, id, RejectRecord, msg, p)
 	}
 	// 5. Duplicates.
+	notAfter := time.Time{}
+	if s.RelayTimeKnown() {
+		notAfter = s.RelayTime().Add(AnchorAhead)
+	}
 	if old := f.st.Records[key(conn, id)]; old != nil {
 		if eq(old.Proposal, msg.Proposal) && eq(old.ProposalSig, msg.ProposalSig) && eq(old.Secret, msg.RecordSecret) && sameProof(old.Proof, msg.RecordProof) {
+			// A re-send. A record that is still being checked, or was
+			// refused only for its anchor, looks at the new bundle again
+			// (0.81.1): a bundle that now verifies completes it.
+			if old.RejectReason == RejectAnchor || old.RejectReason == "" && old.Reason != "" && old.Reason != ReasonSite && old.Reason != ReasonRestore {
+				return f.reevaluate(s, old, msg, notAfter)
+			}
 			if old.RejectReason != "" {
 				return nil, errBad // the same refusal again
 			}
@@ -250,11 +265,13 @@ func (f *Feature) onProposal(s *vault.Session, in *envelope.Inner) (json.RawMess
 	}
 	// 6. The anchor.
 	var reason, rejected string
-	switch f.anchor(s, conn, msg.Proposal, msg.Bundle, s.RelayTime().Add(AnchorAhead)) {
+	switch f.anchor(s, conn, msg.Proposal, msg.Bundle, notAfter) {
 	case anchorServiceList:
 		reason = ReasonServiceList
 	case anchorTrustRoot:
 		reason = ReasonTrustRoot
+	case anchorClock:
+		reason = ReasonClock
 	case anchorRejected, anchorLate:
 		rejected = RejectAnchor
 	}
@@ -266,7 +283,7 @@ func (f *Feature) onProposal(s *vault.Session, in *envelope.Inner) (json.RawMess
 	r := &record{Conn: conn, ID: id, ServiceIK: append([]byte{}, s.From().IK...), Proposal: msg.Proposal, ProposalSig: msg.ProposalSig,
 		Bundle: msg.Bundle, Hash: votewire.H(msg.Proposal), Secret: msg.RecordSecret, Tag: tag,
 		Proof:      &proof{Index: msg.RecordProof.Index, TreeSize: msg.RecordProof.TreeSize, Path: msg.RecordProof.Path},
-		ReceivedMS: s.RelayTime().UnixMilli(), KeptMS: now.UnixMilli(), ChangedMS: now.UnixMilli(),
+		ReceivedMS: s.RelayTime().UnixMilli(), NoRelay: !s.RelayTimeKnown(), KeptMS: now.UnixMilli(), ChangedMS: now.UnixMilli(),
 		Opens: p.OpensAt, Closes: p.ClosesAt, OrigClose: p.ClosesAt, Title: p.Title, Reason: reason}
 	if hit := f.admit(r, now); hit != nil {
 		return nil, f.limit(s, conn, hit)
@@ -281,6 +298,43 @@ func (f *Feature) onProposal(s *vault.Session, in *envelope.Inner) (json.RawMess
 	f.opened(s, r)
 	f.event(s, r, "proposal")
 	return okBody(id), nil
+}
+
+// reevaluate looks at a re-sent proposal's bundle for a record that is
+// `checking` or was rejected for its anchor (0.81.1 "Duplicates"): the
+// same proposal with a bundle that now verifies completes it; one that
+// still does not leaves the state as the new bundle says.
+func (f *Feature) reevaluate(s *vault.Session, r *record, msg *votewire.ProposalMsg, notAfter time.Time) (json.RawMessage, error) {
+	now := s.Now()
+	res := f.anchor(s, r.Conn, r.Proposal, msg.Bundle, notAfter)
+	was := r.state(now)
+	switch res {
+	case anchorOK:
+		r.RejectReason, r.Reason = "", ""
+	case anchorServiceList:
+		r.RejectReason, r.Reason = "", ReasonServiceList
+	case anchorTrustRoot:
+		r.RejectReason, r.Reason = "", ReasonTrustRoot
+	case anchorClock:
+		r.RejectReason, r.Reason = "", ReasonClock
+	default: // rejected again: the record stays as it is
+		f.audit(s, "vote.proposal_rejected", r.Conn, r.ID+":"+RejectAnchor)
+		if r.RejectReason == "" {
+			r.RejectReason, r.Reason = RejectAnchor, ""
+			r.ChangedMS = now.UnixMilli()
+			f.feed(s, "vote.problem", r.Conn, r.ID, "high")
+			f.event(s, r, "problem")
+		}
+		return nil, errBad
+	}
+	r.Bundle = msg.Bundle
+	r.ReceivedMS, r.NoRelay = s.RelayTime().UnixMilli(), !s.RelayTimeKnown()
+	r.ChangedMS = now.UnixMilli()
+	if r.state(now) != was {
+		f.opened(s, r)
+		f.event(s, r, "proposal")
+	}
+	return okBody(r.ID), nil
 }
 
 // opened makes the vote.open feed item when a record is upcoming or open
@@ -379,14 +433,23 @@ func (f *Feature) onExtended(s *vault.Session, in *envelope.Inner) (json.RawMess
 // extension and, if they hold, moves the close (§10.19.4). It returns the
 // reason of a refusal, or "".
 func (f *Feature) applyExtension(s *vault.Session, r *record, e *extRec) string {
-	if e.Closes <= r.Closes {
+	ext, err := votewire.ParseExtension(e.Doc)
+	p, perr := votewire.ParseProposal(r.Proposal)
+	if err != nil || perr != nil {
+		return "malformed"
+	}
+	// Order (0.81.1): a close above the one in force, an outage longer than
+	// 3,600 s that starts inside the voting window, and a new close within
+	// the outage rounded up to the hour. Then the total.
+	if e.Closes <= r.Closes || !ext.OrderOK(p.OpensAt, r.Closes) {
 		return "order"
 	}
 	if e.Closes-r.OrigClose > votewire.MaxExtension {
 		return "total"
 	}
-	// Anchored before the close it extends (the one in force).
-	switch f.anchor(s, r.Conn, e.Doc, e.Bundle, time.Unix(r.Closes, 0).Add(-time.Second)) {
+	// Anchored before the close it extends (the one in force), on the
+	// truncated genTime.
+	switch f.anchor(s, r.Conn, e.Doc, e.Bundle, time.Unix(r.Closes-1, 0)) {
 	case anchorOK:
 	case anchorLate:
 		return "late"

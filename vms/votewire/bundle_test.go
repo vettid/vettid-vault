@@ -103,8 +103,8 @@ func TestRealBundleFailures(t *testing.T) {
 	check("late", doc, v.Bundle, key, roots, stamp.Add(-time.Second), ok, ErrAnchorLate)
 	check("clock behind", doc, v.Bundle, key, roots, ok, stamp.Add(-StampAhead-time.Minute), ErrBundleClock)
 	check("no roots", doc, v.Bundle, key, nil, ok, ok, ErrBundleRoot)
-	check("empty", doc, nil, key, roots, ok, ok, ErrAnchor)
-	check("not json", doc, []byte(`x`), key, roots, ok, ok, ErrAnchor)
+	check("empty", doc, nil, key, roots, ok, ok, ErrBundleRoot)
+	check("not json", doc, []byte(`x`), key, roots, ok, ok, ErrBundleRoot)
 
 	// Edits of the bundle itself: each is caught by the right check.
 	edit := func(name string, want error, f func(m map[string]any)) {
@@ -125,17 +125,24 @@ func TestRealBundleFailures(t *testing.T) {
 		s[len(s)-1] ^= 1
 		m[k] = base64.StdEncoding.EncodeToString(s)
 	}
-	edit("media type", ErrAnchor, func(m map[string]any) { m["mediaType"] = "x" })
-	edit("two entries", ErrAnchor, func(m map[string]any) {
+	edit("media type", ErrBundleRoot, func(m map[string]any) { m["mediaType"] = "x" })
+	edit("two entries", ErrBundleRoot, func(m map[string]any) {
 		vm := m["verificationMaterial"].(map[string]any)
 		es := vm["tlogEntries"].([]any)
 		vm["tlogEntries"] = append(es, es[0])
+	})
+	edit("kind and version", ErrBundleRoot, func(m map[string]any) { entry(m)["kindVersion"].(map[string]any)["version"] = "0.0.2" })
+	edit("Rekor v2 entry", ErrBundleRoot, func(m map[string]any) {
+		entry(m)["kindVersion"] = map[string]any{"kind": "hashedrekord", "version": "0.0.2"}
+	})
+	edit("digest algorithm", ErrBundleRoot, func(m map[string]any) {
+		m["messageSignature"].(map[string]any)["messageDigest"].(map[string]any)["algorithm"] = "SHA2_512"
 	})
 	edit("digest", ErrAnchor, func(m map[string]any) {
 		flip(m["messageSignature"].(map[string]any)["messageDigest"].(map[string]any), "digest")
 	})
 	edit("signature", ErrAnchor, func(m map[string]any) { flip(m["messageSignature"].(map[string]any), "signature") })
-	edit("body", ErrAnchor, func(m map[string]any) { flip(entry(m), "canonicalizedBody") })
+	edit("body", ErrBundleRoot, func(m map[string]any) { flip(entry(m), "canonicalizedBody") })
 	edit("root hash", ErrBundleRoot, func(m map[string]any) { flip(entry(m)["inclusionProof"].(map[string]any), "rootHash") })
 	edit("proof hash", ErrBundleRoot, func(m map[string]any) {
 		h := entry(m)["inclusionProof"].(map[string]any)["hashes"].([]any)

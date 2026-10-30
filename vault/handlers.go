@@ -343,6 +343,11 @@ func (s *Session) RelayTime() time.Time {
 	return s.relayAt
 }
 
+// RelayTimeKnown reports whether the relay's time of the message is known
+// (its deposited_at was present and valid). A rule that compares with the
+// relay's time is skipped when it is not (VAULT-MESSAGING 0.81.1).
+func (s *Session) RelayTimeKnown() bool { return !s.relayAt.IsZero() }
+
 // SetRelayTime sets RelayTime (the Manager, and tests of feature packages).
 func (s *Session) SetRelayTime(t time.Time) { s.relayAt = t }
 

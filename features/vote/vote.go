@@ -114,3 +114,5 @@ var (
 	errBad      = vault.NewError("bad_request", "")
 	errNotFound = vault.NewError("not_found", "")
 )
+
+var _ vault.UnlockObserver = (*Feature)(nil)

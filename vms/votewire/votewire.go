@@ -49,7 +49,7 @@ const (
 	MaxProposal     = 65536   // the decoded proposal document
 	MaxBundle       = 65536   // a Sigstore bundle
 	MaxRecordPath   = 32      // entries of a record_proof path
-	MaxExtensionDoc = 65536   // an extension document (chosen; the spec gives no bound)
+	MaxExtensionDoc = 4096    // an extension document (0.81.1; the votes site's bound)
 	MaxResultsDoc   = MaxBody // the results document (chosen)
 	MaxExtensions   = 24      // extensions total at most 24 h, in steps of an hour
 	MaxWindow       = 7 * 24 * 3600
@@ -59,9 +59,15 @@ const (
 	MaxLabel        = 200
 	MaxQuorumText   = 1024
 	MaxOutageRule   = 1024
-	MinChoices      = 3
-	MaxChoices      = 17
-	AbstainID       = "abstain"
+	MinOutage       = 3600 // an extension's outage is longer than this (0.81.1)
+	// The service list's bounds (0.81.1, the votes site's own).
+	MaxServiceList = 256 << 10
+	MaxServices    = 64
+	MaxServiceKeys = 16
+	MaxServiceName = 100
+	MinChoices     = 3
+	MaxChoices     = 17
+	AbstainID      = "abstain"
 )
 
 // Limits of what the vault keeps (§10.19.2).

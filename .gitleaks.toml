@@ -98,3 +98,20 @@ regexes = [
   '''c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a''',
   '''c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa''',
 ]
+
+# service-vault's anchor vector (testdata/vote/anchor-vector.json, a copy of
+# vote/testdata/anchor-vector.json, BALLOT-PROTOCOL 0.12.3): a real staging
+# bundle. Its `anchor_key` is the PUBLIC key (SubjectPublicKeyInfo) of the
+# test service's anchor key, which the generic rule takes for a credential.
+# Scoped to the generic-api-key rule, to this file and to this exact value.
+[[allowlists]]
+description = "vote anchor vector (public key, test-only)"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = [
+  '''^testdata/vote/anchor-vector\.json$''',
+]
+regexTarget = "match"
+regexes = [
+  '''MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE5bG4J1Tt1\+OurhyU\+nKVp9NaFwRqbO0fgo1MqFRcf6sojaBGr4ToGANz5jv6nETgDxscLRZi4sphfgt3zQrndA==''',
+]

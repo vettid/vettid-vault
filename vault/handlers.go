@@ -59,7 +59,25 @@ type TypeSpec struct {
 	// agent request, even though agents are listed in From (agent.request,
 	// §10.11): it allows, refers to an app or refuses each one.
 	AgentPolicy bool
+	// Connections says which kinds of connection may send this type when
+	// "connection" is in From (§6.4 "Service connections", 0.69.0): the
+	// zero value is person connections only, so a type that says nothing is
+	// dropped from a service. Upkeep and profile.update are PeersBoth; a
+	// service-only type (vote.*, §10.19) is PeersService.
+	Connections PeerClass
 }
+
+// PeerClass is the kind of connection a type may arrive from (§6.4).
+type PeerClass uint8
+
+const (
+	// PeersPerson: connections that are not services (the default).
+	PeersPerson PeerClass = iota
+	// PeersBoth: person and service connections.
+	PeersBoth
+	// PeersService: service connections only.
+	PeersService
+)
 
 // HandlerError is an error response (§5.3 `error`). Body, if set, is the
 // response body (e.g. exists{connection_id}, §10.1).
@@ -290,13 +308,18 @@ type PeerInfo struct {
 	RotationPending bool
 	// Alias is a connection's owner alias (connection.update, §10.4).
 	Alias string
+	// PeerKind is a connection's stored peer_kind ("service" or "", §6.4).
+	PeerKind string
 }
+
+// IsService reports whether the peer is a service connection (§6.4).
+func (i PeerInfo) IsService() bool { return i.Kind == KindConnection && i.PeerKind == "service" }
 
 func info(p *Peer) PeerInfo {
 	if p == nil {
 		return PeerInfo{}
 	}
-	i := PeerInfo{ID: p.ID, Kind: p.Kind, Name: p.Name, State: p.State, IK: append([]byte(nil), p.IK...), Profile: p.Profile, Recovering: p.Recovering}
+	i := PeerInfo{ID: p.ID, Kind: p.Kind, Name: p.Name, State: p.State, IK: append([]byte(nil), p.IK...), Profile: p.Profile, Recovering: p.Recovering, PeerKind: p.PeerKind}
 	if p.Meta != nil {
 		i.Alias = p.Meta.Alias
 	}

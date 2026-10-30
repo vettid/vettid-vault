@@ -579,3 +579,14 @@ func TestMatchCodeIgnored(t *testing.T) {
 		}
 	}
 }
+
+// §6.4: of its peer types only the challenge is declared for a service
+// connection (the vault gate also demands a known purpose).
+func TestServiceConnectionTypes(t *testing.T) {
+	for _, ts := range New(nil).Types() {
+		want := ts.Type == peerwire.TypeConnAuthChallenge
+		if (ts.Connections != vault.PeersPerson) != want {
+			t.Errorf("%s: Connections %v", ts.Type, ts.Connections)
+		}
+	}
+}

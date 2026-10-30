@@ -111,7 +111,7 @@ func (f *Feature) Types() []vault.TypeSpec {
 		{Type: "connection.authenticate.approve", Request: true, From: apps},
 		{Type: "connection.authenticate.deny", Request: true, From: owners},
 		{Type: "connection.authenticate.list", Request: true, From: owners},
-		{Type: peerwire.TypeConnAuthChallenge, From: conns},
+		{Type: peerwire.TypeConnAuthChallenge, From: conns, Connections: vault.PeersBoth}, // a service's needs a known purpose (vault.dispatch)
 		{Type: peerwire.TypeConnAuthResponse, From: conns},
 		{Type: peerwire.TypeConnAuthRotated, From: conns},
 	}

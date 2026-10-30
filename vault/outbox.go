@@ -67,6 +67,9 @@ func (m *Manager) sendWith(p *Peer, typ string, body json.RawMessage, o SendOpti
 	if p.suspended() {
 		return "" // suspended by a rotation conflict (release R, §3.4) or by fork evidence (§6.6, 0.72.0)
 	}
+	if !serviceMayReceive(p, typ) {
+		return "" // §6.4: a service connection is sent upkeep, the profile, authentication answers and votes only
+	}
 	if !m.holdDelivers(p, typ, body, now) {
 		return "" // the owner check's hold (§3.6.3): no fan-out
 	}

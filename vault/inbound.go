@@ -452,6 +452,9 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 		m.handleResponse(p, in, now)
 		return disp(eph)
 	}
+	if p.Kind == KindConnection && m.gateConnection(p, in, te, rkey, now) {
+		return disp(eph) // §6.4: a service's allow-list, the votes' kinds
+	}
 	if te == nil {
 		m.respondError(p, in, rkey, "unsupported_type", "", now)
 		return disp(eph)
@@ -468,6 +471,12 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 		// "Compatibility": message.attachment.get{} is bad_request whether
 		// or not the vault is held).
 		m.respondError(p, in, rkey, "bad_request", "", now)
+		return disp(eph)
+	}
+	if p.Kind != KindConnection && te.spec.Request && m.serviceDeviceRefused(in.Type, in.Body) {
+		// §6.4: a request naming a service connection for a type it never
+		// takes; nothing is sent.
+		m.respondError(p, in, rkey, "forbidden", "", now)
 		return disp(eph)
 	}
 	handled := false

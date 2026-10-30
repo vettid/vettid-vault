@@ -74,6 +74,13 @@ func (m *Manager) registerCore() {
 	r("settings.get", true, owners, m.hSettingsGet)
 	r("settings.set", true, owners, m.hSettingsSet)
 	r("account.get", true, owners, m.hAccountGet)
+	// §6.4 "Service connections": the upkeep a service connection may send
+	// (hs.* rekey and reconnect are handled before the registry). Nothing
+	// else of the core is accepted from a service.
+	for _, t := range []string{connectionApprovedType, peerwire.TypeConnectionRemoved, tokenIssuedType, tokenRefreshType,
+		"identity.rotate", "relay.address.update"} {
+		m.registry[t].spec.Connections = PeersBoth
+	}
 	m.registerAccess()
 	m.registerPending()
 	m.registerConnections()

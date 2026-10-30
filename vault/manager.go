@@ -239,6 +239,10 @@ type Manager struct {
 	// relayAt is the relay time of the message being handled (see
 	// Session.RelayTime); set by handleMessage.
 	relayAt time.Time
+	// featureReqs are the requests features sent (Host.SendRequest) and
+	// await an answer to; memory only, so an answer after a restart is dropped
+	// like any that matches no request.
+	featureReqs map[string]featureReq
 	// unlockSeen: UnlockObserver features were told of this opening.
 	unlockSeen bool
 	// restoring is set while a reconnect that named an older epoch of a

@@ -191,7 +191,12 @@ func NewSet(o Options) *Set {
 		s.Presence = presence.New()
 	}
 	if on[Vote] {
-		s.Vote = vote.New(o.Vote)
+		// Signs ballots with the credential key in its unlock window, needs
+		// the key the connection pinned (§10.4), and re-signs its ballots
+		// when the credential key rotates (§3.5.5).
+		s.Vote = vote.New(o.Vote, vote.Deps{Keys: cred, Auth: auth})
+		cred.AddKeyRotationObserver(s.Vote)
+		auth.AddResponseObserver(s.Vote)
 		// The profile.update to a service says so (§10.19.1).
 		it.SetPeerFeatures([]string{vote.Name})
 	}

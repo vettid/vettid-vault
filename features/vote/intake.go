@@ -73,6 +73,7 @@ const (
 	anchorRejected
 	anchorLate
 	anchorClock
+	anchorSite // a status answer without a bundle: the site's arrives later
 )
 
 // listIndex is the held service list, parsed once when it is kept (the
@@ -148,7 +149,7 @@ func (f *Feature) anchor(s *vault.Session, conn string, signers [][]byte, doc []
 		return anchorServiceList
 	}
 	if len(bundle) == 0 {
-		return anchorServiceList // a status answer without a bundle waits for the site's
+		return anchorSite // a status answer without a bundle waits for the site's
 	}
 	_, err := votewire.VerifyBundle(doc, bundle, keys, f.opt.Roots, notAfter, s.Now())
 	switch {
@@ -238,13 +239,20 @@ func sameProof(a *proof, b *votewire.RecordProof) bool {
 // onProposal is §10.19.4 "On vote.proposal", steps 1 to 8.
 func (f *Feature) onProposal(s *vault.Session, in *envelope.Inner) (json.RawMessage, error) {
 	conn := s.From().ID
-	now := s.Now()
 	// 1. Shape.
 	msg, err := votewire.ParseProposalMsg(in.Body)
 	if err != nil {
 		f.audit(s, "drop.vote_malformed", conn, conn)
 		return nil, errBad
 	}
+	return f.intake(s, conn, msg)
+}
+
+// intake is steps 2 to 8, for the members of a vote.proposal, or of a
+// vote.status answer for a proposal the vault was never sent (whose bundle
+// may be absent: `checking` (site)).
+func (f *Feature) intake(s *vault.Session, conn string, msg *votewire.ProposalMsg) (json.RawMessage, error) {
+	now := s.Now()
 	// 2. The document.
 	p, err := votewire.ParseProposal(msg.Proposal)
 	if err != nil {
@@ -294,6 +302,8 @@ func (f *Feature) onProposal(s *vault.Session, in *envelope.Inner) (json.RawMess
 		reason = ReasonTrustRoot
 	case anchorClock:
 		reason = ReasonClock
+	case anchorSite:
+		reason = ReasonSite
 	case anchorRejected, anchorLate:
 		rejected = RejectAnchor
 	}
@@ -443,6 +453,21 @@ func (f *Feature) applyExtension(s *vault.Session, r *record, e *extRec) string 
 	}
 	r.Exts = append(r.Exts, e)
 	r.Closes = e.Closes
+	r.AbsentMS = 0 // the 404s counted were for the old close
+	if r.Ballot == nil && len(r.VKSeed) == 0 {
+		// A vote that was never cast and has reopened needs a voting key again.
+		if seed, err := suite.RandomBytes(ed25519.SeedSize); err == nil {
+			r.VKSeed = seed
+			r.VK = append([]byte{}, ed25519.NewKeyFromSeed(seed).Public().(ed25519.PublicKey)...)
+		}
+	}
+	if b := r.Ballot; b != nil && !b.final() { // a verified extension restarts sending
+		b.Round, b.NextSendMS = 0, 0
+		if b.State == BallotWaiting && b.Reason == "closed" && s.Now().Before(time.Unix(r.Closes, 0)) {
+			// The close that refused the ballot has moved: it is sent again.
+			b.State, b.Reason, b.NextStatusMS = BallotSending, "", 0
+		}
+	}
 	r.ChangedMS = s.Now().UnixMilli()
 	f.audit(s, "vote.extended", r.Conn, r.ID+":"+strconv.FormatInt(e.N, 10))
 	f.event(s, r, "extended")

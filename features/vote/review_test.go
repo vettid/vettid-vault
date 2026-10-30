@@ -447,15 +447,23 @@ func TestOversizeListKeepsTheHeldOne(t *testing.T) {
 	if e.count("vote.list_ignored") != 1 || !e.has("vote.list_ignored", "size:"+hex.EncodeToString(votewire.H(big(9))[:8])) || e.count("vote.list_rejected") != 0 || e.count("vote.problem") != 0 {
 		t.Errorf("one entry for the version, no feed item: %v", e.h.Activities)
 	}
-	// Another list is audited once more, by its hash; its bytes are not read.
+	// Another list within a day: the latest hash is kept, nothing more is
+	// audited; a day later a changed hash is audited again.
 	other := bytes.Repeat([]byte(" "), votewire.MaxServiceList+1)
 	for i := 0; i < 2; i++ {
 		if got := e.f.SyncServices(e.session(), other, nil); got != ListIgnored {
 			t.Errorf("other: %s", got)
 		}
 	}
-	if e.count("vote.list_ignored") != 2 || !e.has("vote.list_ignored", "size:"+hex.EncodeToString(votewire.H(other)[:8])) || e.count("vote.list_rejected") != 0 {
-		t.Errorf("%v", e.h.Activities)
+	if e.count("vote.list_ignored") != 1 || e.count("vote.list_rejected") != 0 || e.f.st.OversizeHash != hex.EncodeToString(votewire.H(other)[:8]) {
+		t.Errorf("within a day: %v", e.h.Activities)
+	}
+	e.now = e.now.Add(25 * time.Hour)
+	third := append(bytes.Repeat([]byte(" "), votewire.MaxServiceList), ' ', ' ')
+	e.f.SyncServices(e.session(), third, nil)
+	e.f.SyncServices(e.session(), third, nil)
+	if e.count("vote.list_ignored") != 2 || !e.has("vote.list_ignored", "size:"+hex.EncodeToString(votewire.H(third)[:8])) {
+		t.Errorf("a day later: %v", e.h.Activities)
 	}
 	// The held list still names the service: a proposal is verified by it.
 	v := e.svc.NewVote(e.spec(-time.Hour, time.Hour))

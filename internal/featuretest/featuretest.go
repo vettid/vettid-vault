@@ -113,6 +113,10 @@ type Host struct {
 	AskSources map[string]vault.AskSource
 	// RelayAt is the relay time Call gives a message (zero: the call time).
 	RelayAt time.Time
+	// SentIDs are the request ids SendRequest returned, by index in Sent;
+	// OwnPrior are the earlier identity keys of the fake vault's chain.
+	SentIDs  map[int]string
+	OwnPrior []ed25519.PublicKey
 }
 
 func (h *Host) askState(conn string) *vault.AskState {
@@ -489,6 +493,25 @@ func (h *Host) SendToConnection(id, typ string, body json.RawMessage, _ time.Tim
 	return nil
 }
 
+// SendRequest implements vault.Host: the request is recorded as Sent, with
+// the id it was given in SentIDs.
+func (h *Host) SendRequest(to, typ string, body json.RawMessage, now time.Time) (string, error) {
+	if err := h.SendToConnection(to, typ, body, now); err != nil {
+		return "", err
+	}
+	id := h.NewID(now)
+	if h.SentIDs == nil {
+		h.SentIDs = map[int]string{}
+	}
+	h.SentIDs[len(h.Sent)-1] = id
+	return id, nil
+}
+
+// OwnIdentityKeys implements vault.Host: the identity key, then OwnPrior.
+func (h *Host) OwnIdentityKeys() []ed25519.PublicKey {
+	return append([]ed25519.PublicKey{h.IK}, h.OwnPrior...)
+}
+
 func (h *Host) NotifyDevices(typ string, body json.RawMessage, except string, _ time.Time) {
 	to := "devices"
 	if except != "" {
@@ -535,7 +558,7 @@ func (h *Host) Settings() vault.Settings     { return h.Set }
 func (h *Host) SetSettings(s vault.Settings) { h.Set = s }
 
 // Reset forgets recorded messages and activities.
-func (h *Host) Reset() { h.Sent, h.Activities = nil, nil }
+func (h *Host) Reset() { h.Sent, h.Activities, h.SentIDs = nil, nil, nil }
 
 // SentOfType returns the recorded messages of a type.
 func (h *Host) SentOfType(typ string) []Sent {

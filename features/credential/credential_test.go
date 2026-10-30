@@ -3,6 +3,7 @@ package credential
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
 	"strings"
@@ -774,4 +775,58 @@ func TestInnerLimit(t *testing.T) {
 		t.Fatalf("over the limit: %q", r.Code)
 	}
 	e.ok(e.unlock(blob, pw))
+}
+
+// signerObs sees both keys of a rotation after the statement observers
+// (VAULT-MESSAGING 0.81.1 §3.5.5: the vote feature re-signs with them).
+type signerObs struct {
+	order     *[]string
+	old, nw   ed25519.PrivateKey
+	newPub    ed25519.PublicKey
+	statement *credwire.KeyRotation
+}
+
+func (o *signerObs) CredentialKeyRotated(_ *vault.Session, r *credwire.KeyRotation) {
+	*o.order = append(*o.order, "statement")
+	o.statement = r
+}
+
+func (o *signerObs) CredentialKeysOpen(_ *vault.Session, oldKey, newKey ed25519.PrivateKey) {
+	*o.order = append(*o.order, "keys")
+	o.old, o.nw = oldKey, newKey
+	o.newPub = append(ed25519.PublicKey(nil), newKey.Public().(ed25519.PublicKey)...)
+	// Both keys are usable now: the statement's signatures verify with them.
+	if o.statement != nil {
+		msg := append(append([]byte{}, o.statement.Old...), o.statement.New...)
+		if suite.Verify(oldKey.Public().(ed25519.PublicKey), credwire.LabelKeyRotate, msg, o.statement.SigOld) != nil ||
+			suite.Verify(newKey.Public().(ed25519.PublicKey), credwire.LabelKeyRotate, msg, o.statement.SigNew) != nil {
+			*o.order = append(*o.order, "bad keys")
+		}
+	}
+}
+
+func TestRotateHandsBothKeysToSigners(t *testing.T) {
+	e := newEnv(t)
+	var order []string
+	o := &signerObs{order: &order}
+	e.f.AddKeyRotationObserver(o)
+	blob := e.create()
+	r := e.ok(e.call("app", "credential.rotate", blob, map[string]any{"password": pw}))
+	if len(order) != 2 || order[0] != "statement" || order[1] != "keys" {
+		t.Fatalf("%v", order)
+	}
+	newPub, _ := r.Obj(t).Base64("key", 32)
+	if string(o.newPub) != string(newPub) {
+		t.Error("not the new key")
+	}
+	// The keys are wiped when the rotation ends.
+	for _, k := range []ed25519.PrivateKey{o.old, o.nw} {
+		zero := true
+		for _, b := range k {
+			zero = zero && b == 0
+		}
+		if !zero {
+			t.Error("a key outlived the rotation")
+		}
+	}
 }

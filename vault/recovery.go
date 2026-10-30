@@ -439,6 +439,12 @@ func (m *Manager) completeRecovery(deviceID string, now time.Time) error {
 	}
 	m.hdr.RecoveryLog = nil
 	m.dirty = true
+	sess := m.session(now)
+	for _, f := range m.features {
+		if o, ok := f.(RecoveryObserver); ok {
+			o.RecoveryCompleted(sess)
+		}
+	}
 	m.notifyDevices("sync.event", strictjson.NewBuilder().String("kind", "device.paired").String("device_id", p.ID).
 		String("role", p.Kind).Bytes(), p.ID, now)
 	return nil

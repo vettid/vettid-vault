@@ -87,6 +87,8 @@ type Feature struct {
 	mu   sync.Mutex
 	keys KeyUser
 	d    data
+	// respObs are told of every signed response.
+	respObs []ResponseObserver
 }
 
 // New returns the feature; keys is the credential feature.
@@ -445,6 +447,9 @@ func (f *Feature) approve(s *vault.Session, body []byte) (json.RawMessage, error
 		return nil, errConn
 	}
 	f.d.Shown[c.Conn] = append([]byte(nil), pub...)
+	for _, o := range f.respObs {
+		o.ResponseSigned(s, c.Conn)
+	}
 	delete(f.d.In, id)
 	s.Record(vault.Activity{Kind: "connection.authenticate.signed", ConnectionID: c.Conn, Ref: id, Direction: "out", Audit: true})
 	s.SyncEvent("connection.authenticate.decided", strictjson.NewBuilder().String("request_id", id).Bool("approved", true).Bytes())
@@ -568,6 +573,39 @@ func (f *Feature) ConnectionRemoved(_ *vault.Session, id string) {
 		}
 	}
 }
+
+// SignedInKey is the credential key this vault last signed a response with
+// for the connection: the key the connection pinned (nil: it never signed
+// in). It is what the vote feature needs before it signs a ballot
+// (VAULT-MESSAGING §10.19.5).
+func (f *Feature) SignedInKey(conn string) []byte {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]byte(nil), f.d.Shown[conn]...)
+}
+
+// RotatedBody is the connection.authenticate.rotated body still owed to the
+// connection (the chain from the key it pinned to the current one), or nil
+// (§10.4: a ballot's cast_sig is queued after it).
+func (f *Feature) RotatedBody(conn string) []byte {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if seg := f.segment(f.d.Shown[conn]); len(seg) > 0 {
+		return peerwire.ConnAuthRotatedBody(seg)
+	}
+	return nil
+}
+
+// ResponseObserver is told when the vault has signed an authentication
+// response for a connection (the vote feature sends a waiting ballot at
+// once). It runs inside the connauth handler and must not call back into
+// this feature.
+type ResponseObserver interface {
+	ResponseSigned(s *vault.Session, conn string)
+}
+
+// AddResponseObserver registers an observer (at construction).
+func (f *Feature) AddResponseObserver(o ResponseObserver) { f.respObs = append(f.respObs, o) }
 
 // chain parses the stored own statements.
 func (f *Feature) chain() []*credwire.KeyRotation {

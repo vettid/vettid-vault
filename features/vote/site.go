@@ -46,21 +46,18 @@ func (f *Feature) syncServices(s *vault.Session, doc, sig []byte) string {
 	// the vault cannot take, changes nothing; the vault keeps the last list
 	// it verified and goes on with the services that list names.
 	if len(doc) > votewire.MaxServiceList {
-		// VAULT-MESSAGING 0.81.2: ignored, not an error. One audit entry per
-		// distinct list (`vote.list_ignored`, ref size:<first 8 bytes of
-		// SHA-256, hex>), no feed item; the held list stays. The bytes are
-		// unverified, so nothing of them (a version) is read.
+		// VAULT-MESSAGING 0.81.2: ignored, not an error. The latest hash is
+		// kept; one audit entry (`vote.list_ignored`, ref size:<first 8 bytes
+		// of SHA-256, hex>) when it changes, at most once a day, and no feed
+		// item. The held list stays. The bytes are unverified, so nothing of
+		// them (a version) is read.
 		h := hex.EncodeToString(votewire.H(doc)[:8])
-		seen := false
-		for _, x := range f.st.Oversize {
-			seen = seen || x == h
-		}
-		if !seen {
-			f.st.Oversize = append(f.st.Oversize, h)
-			if len(f.st.Oversize) > 64 {
-				f.st.Oversize = f.st.Oversize[len(f.st.Oversize)-64:]
+		if h != f.st.OversizeHash {
+			f.st.OversizeHash = h
+			if f.st.OversizeAtMS == 0 || now.Sub(time.UnixMilli(f.st.OversizeAtMS)) >= 24*time.Hour {
+				f.st.OversizeAtMS = now.UnixMilli()
+				f.audit(s, "vote.list_ignored", "", "size:"+h)
 			}
-			f.audit(s, "vote.list_ignored", "", "size:"+h)
 		}
 		return ListIgnored
 	}
@@ -134,37 +131,42 @@ func (f *Feature) SyncCatchUp(s *vault.Session, lists []ServiceListDoc) []string
 type ServiceListDoc struct{ Doc, Sig []byte }
 
 // recheck looks again at the `checking` proposals whose reason is the
-// service list or the roots: information ends the state, never a lack of
-// it (§10.19.4): one whose key is still not named stays `checking`.
+// service list, the roots or the clock: information ends the state, never a
+// lack of it (§10.19.4): one whose anchor key is still not named stays
+// `checking` (`service_list`).
 func (f *Feature) recheck(s *vault.Session) {
-	now := s.Now()
 	for _, r := range f.st.Records {
-		if r.RejectReason != "" || (r.Reason != ReasonServiceList && r.Reason != ReasonTrustRoot && r.Reason != ReasonClock) {
-			continue
-		}
-		var notAfter time.Time
-		if !r.NoRelay {
-			notAfter = time.UnixMilli(r.ReceivedMS).Add(AnchorAhead)
-		}
-		switch f.anchor(s, r.Conn, r.signers(), r.Proposal, r.Bundle, notAfter) {
-		case anchorOK:
-			r.Reason = ""
-			r.ChangedMS = now.UnixMilli()
-			f.opened(s, r)
-			f.event(s, r, "proposal")
-		case anchorRejected, anchorLate:
-			r.RejectReason, r.Reason = RejectAnchor, ""
-			r.ChangedMS = now.UnixMilli()
-			f.audit(s, "vote.proposal_rejected", r.Conn, r.ID+":"+RejectAnchor)
-			f.feed(s, "vote.problem", r.Conn, r.ID, "high")
-			f.event(s, r, "problem")
-		case anchorServiceList:
-			r.Reason = ReasonServiceList
-		case anchorTrustRoot:
-			r.Reason = ReasonTrustRoot
-		case anchorClock:
-			r.Reason = ReasonClock
-		}
+		f.recheckOne(s, r)
+	}
+}
+
+func (f *Feature) recheckOne(s *vault.Session, r *record) {
+	now := s.Now()
+	if r.RejectReason != "" || (r.Reason != ReasonServiceList && r.Reason != ReasonTrustRoot && r.Reason != ReasonClock) {
+		return
+	}
+	var notAfter time.Time
+	if !r.NoRelay {
+		notAfter = time.UnixMilli(r.ReceivedMS).Add(AnchorAhead)
+	}
+	switch f.anchor(s, r.Conn, r.signers(), r.Proposal, r.Bundle, notAfter) {
+	case anchorOK:
+		r.Reason = ""
+		r.ChangedMS = now.UnixMilli()
+		f.opened(s, r)
+		f.event(s, r, "proposal")
+	case anchorRejected, anchorLate:
+		r.RejectReason, r.Reason = RejectAnchor, ""
+		r.ChangedMS = now.UnixMilli()
+		f.audit(s, "vote.proposal_rejected", r.Conn, r.ID+":"+RejectAnchor)
+		f.feed(s, "vote.problem", r.Conn, r.ID, "high")
+		f.event(s, r, "problem")
+	case anchorServiceList:
+		r.Reason = ReasonServiceList
+	case anchorTrustRoot:
+		r.Reason = ReasonTrustRoot
+	case anchorClock:
+		r.Reason = ReasonClock
 	}
 }
 
@@ -237,6 +239,22 @@ func (f *Feature) SiteDocument(s *vault.Session, conn, id string, d SiteDoc) err
 	// service's key is not a split view, it is garbage: no answer.
 	if status == StatusFound && !eq(d.Proposal, r.Proposal) && !f.siteDocValid(r, d) {
 		status = StatusUnreachable
+	}
+	// A proposal kept from a status answer without a bundle waits for the
+	// site's (checking, site). The site's bundle is taken only if it verifies
+	// for the held bytes; anything else (another proposal's, garbage) leaves
+	// the record as it is, never rejected and never under another reason.
+	if status == StatusFound && r.Reason == ReasonSite && eq(d.Proposal, r.Proposal) && len(d.Bundle) > 0 {
+		var notAfter time.Time
+		if !r.NoRelay {
+			notAfter = time.UnixMilli(r.ReceivedMS).Add(AnchorAhead)
+		}
+		if f.anchor(s, r.Conn, r.signers(), r.Proposal, d.Bundle, notAfter) == anchorOK {
+			r.Bundle, r.Reason = d.Bundle, ""
+			r.ChangedMS = now.UnixMilli()
+			f.opened(s, r)
+			f.event(s, r, "proposal")
+		}
 	}
 	var next, alert string
 	switch status {

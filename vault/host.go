@@ -60,6 +60,32 @@ func (h managerHost) SendToConnection(id, typ string, body json.RawMessage, now 
 	return nil
 }
 
+func (h managerHost) SendRequest(to, typ string, body json.RawMessage, now time.Time) (string, error) {
+	p, ok := h.m.st.Connections[to]
+	if !ok || p.State != PeerActive {
+		return "", ErrNoSession
+	}
+	id := h.m.sendTo(p, typ, body, now)
+	if id == "" {
+		return "", ErrNoSession
+	}
+	if h.m.featureReqs == nil {
+		h.m.featureReqs = map[string]featureReq{}
+	}
+	h.m.featureReqs[id] = featureReq{peer: p.ID, typ: typ, at: now}
+	return id, nil
+}
+
+func (h managerHost) OwnIdentityKeys() []ed25519.PublicKey {
+	out := []ed25519.PublicKey{h.IdentityKey()}
+	for i := len(h.m.st.Rotations) - 1; i >= 0; i-- {
+		if r, err := handshake.ParseRotation(h.m.st.Rotations[i]); err == nil {
+			out = append(out, append(ed25519.PublicKey(nil), r.OldIK...))
+		}
+	}
+	return out
+}
+
 func (h managerHost) NotifyDevices(typ string, body json.RawMessage, except string, now time.Time) {
 	h.m.notifyDevices(typ, body, except, now)
 }

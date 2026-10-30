@@ -111,6 +111,8 @@ type Host struct {
 	// AskSources are the features whose pending asks count, by name (the
 	// asking feature's own are skipped, as the vault does).
 	AskSources map[string]vault.AskSource
+	// RelayAt is the relay time Call gives a message (zero: the call time).
+	RelayAt time.Time
 }
 
 func (h *Host) askState(conn string) *vault.AskState {
@@ -636,6 +638,7 @@ func CallInner(f vault.Feature, h *Host, now time.Time, kind string, in *envelop
 		return Result{Code: "forbidden"}
 	}
 	s := vault.NewSession(context.Background(), h, from, now, in)
+	s.SetRelayTime(h.RelayAt)
 	out, err := f.Handle(context.Background(), s, in)
 	if err != nil {
 		var he *vault.HandlerError

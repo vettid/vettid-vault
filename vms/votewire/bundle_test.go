@@ -100,7 +100,7 @@ func TestRealBundleFailures(t *testing.T) {
 	other := append([]byte{}, doc...)
 	other[10] ^= 1
 	check("another document", other, v.Bundle, key, roots, ok, ok, ErrAnchor)
-	check("late", doc, v.Bundle, key, roots, stamp.Add(-time.Second), ok, ErrAnchor)
+	check("late", doc, v.Bundle, key, roots, stamp.Add(-time.Second), ok, ErrAnchorLate)
 	check("clock behind", doc, v.Bundle, key, roots, ok, stamp.Add(-StampAhead-time.Minute), ErrBundleClock)
 	check("no roots", doc, v.Bundle, key, nil, ok, ok, ErrBundleRoot)
 	check("empty", doc, nil, key, roots, ok, ok, ErrAnchor)

@@ -37,7 +37,7 @@ func TestSyntheticBundle(t *testing.T) {
 	}{
 		{"wrong key", doc, b, [][]byte{votetest.NewAnchorKey().SPKI}, now.Add(time.Minute), now, votewire.ErrAnchorKey},
 		{"other document", []byte(`{"v":2}`), b, key, now.Add(time.Minute), now, votewire.ErrAnchor},
-		{"late", doc, b, key, now.Add(-time.Second), now, votewire.ErrAnchor},
+		{"late", doc, b, key, now.Add(-time.Second), now, votewire.ErrAnchorLate},
 		{"vault clock behind the stamp", doc, b, key, now.Add(time.Hour), now.Add(-time.Hour), votewire.ErrBundleClock},
 		{"stamp long before the log entry", doc, auth.BundleStamped(doc, svc.Anchor, now, now.Add(-votewire.StampBeforeLog-time.Minute)), key, now.Add(time.Minute), now, votewire.ErrBundleRoot},
 		{"stamp just before the log entry", doc, auth.BundleStamped(doc, svc.Anchor, now, now.Add(-time.Minute)), key, now.Add(time.Minute), now, nil},

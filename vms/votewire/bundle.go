@@ -31,12 +31,15 @@ import (
 //
 //	ErrAnchorKey  the key is not among the accepted anchor keys   -> checking (service_list)
 //	ErrAnchor     the digest or signature contradicts the document,
-//	              the bundle is malformed, or the timestamp is late -> rejected (anchor)
+//	              or the bundle is malformed                       -> rejected (anchor)
+//	ErrAnchorLate the verified timestamp is after the time allowed -> rejected (anchor; late for an extension)
 //	ErrBundleRoot nothing verifies against the pinned roots       -> checking (trust_root)
 //	ErrBundleClock the stamp is ahead of the vault's own clock    -> checking (trust_root)
 var (
-	ErrAnchorKey   = errors.New("votewire: bundle key is not an accepted anchor key")
-	ErrAnchor      = errors.New("votewire: bundle contradicts the document")
+	ErrAnchorKey = errors.New("votewire: bundle key is not an accepted anchor key")
+	ErrAnchor    = errors.New("votewire: bundle contradicts the document")
+	// ErrAnchorLate: the stamp verifies but is after the time allowed.
+	ErrAnchorLate  = errors.New("votewire: bundle timestamp is too late")
 	ErrBundleRoot  = errors.New("votewire: bundle does not verify against the pinned roots")
 	ErrBundleClock = errors.New("votewire: bundle timestamp is ahead of this vault's clock")
 )
@@ -176,7 +179,7 @@ func VerifyBundle(doc, bundle []byte, accepted [][]byte, roots []*TrustRoot, not
 			continue
 		}
 		if gen.After(notAfter) {
-			return nil, ErrAnchor
+			return nil, ErrAnchorLate
 		}
 		return &BundleInfo{LogIndex: logIndex, IntegratedTime: integrated, GenTime: gen, AnchorKey: append([]byte{}, spki...)}, nil
 	}

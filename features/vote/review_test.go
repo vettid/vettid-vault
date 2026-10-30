@@ -7,6 +7,7 @@ import (
 	"encoding/asn1"
 	"encoding/base64"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -421,23 +422,62 @@ func TestTimestampEKUOnlyTimeStamping(t *testing.T) {
 	}
 }
 
-// A list over the cap (or one the vault cannot take) changes nothing: the
-// vault keeps the last list it verified and goes on (BALLOT-PROTOCOL
-// 0.12.5).
+// A list over the cap changes nothing (VAULT-MESSAGING 0.81.2): it is
+// answered `ignored`, audited once per version as `vote.list_ignored`
+// (`<version>:size`), makes no feed item, and the vault keeps the last list
+// it verified and goes on with its services. Other failures stay rejected.
 func TestOversizeListKeepsTheHeldOne(t *testing.T) {
 	e := newEnv(t)
 	if e.publish(e.svc) != ListKept {
 		t.Fatal("list")
 	}
 	held := string(e.f.st.List.Doc)
-	big := bytes.Repeat([]byte(" "), votewire.MaxServiceList+1)
-	if got := e.f.SyncServices(e.session(), big, make([]byte, 64)); got != ListRejected || string(e.f.st.List.Doc) != held {
-		t.Errorf("%s", got)
+	big := func(version int) []byte {
+		pad := bytes.Repeat([]byte("x"), votewire.MaxServiceList)
+		return []byte(`{"v":1,"version":` + strconv.Itoa(version) + `,"pad":"` + string(pad) + `"}`)
+	}
+	e.h.Reset()
+	for i := 0; i < 3; i++ {
+		if got := e.f.SyncServices(e.session(), big(9), make([]byte, 64)); got != ListIgnored || string(e.f.st.List.Doc) != held {
+			t.Fatalf("%s", got)
+		}
+	}
+	if e.count("vote.list_ignored") != 1 || !e.has("vote.list_ignored", "9:size") || e.count("vote.list_rejected") != 0 || e.count("vote.problem") != 0 {
+		t.Errorf("one entry for the version, no feed item: %v", e.h.Activities)
+	}
+	// Another version is audited once more; an unreadable one is a parse
+	// failure.
+	if got := e.f.SyncServices(e.session(), big(10), make([]byte, 64)); got != ListIgnored || !e.has("vote.list_ignored", "10:size") {
+		t.Errorf("v10: %s", got)
+	}
+	if got := e.f.SyncServices(e.session(), bytes.Repeat([]byte(" "), votewire.MaxServiceList+1), nil); got != ListRejected || !e.has("vote.list_rejected", "") {
+		t.Errorf("unreadable: %s", got)
 	}
 	// The held list still names the service: a proposal is verified by it.
 	v := e.svc.NewVote(e.spec(-time.Hour, time.Hour))
 	if r := e.send(v); !r.OK() || e.rec(v.ID).Reason != "" {
 		t.Errorf("%q %+v", r.Code, e.rec(v.ID))
+	}
+}
+
+// An `anchor` rejection is final: neither a recheck (list, unlock) nor the
+// site's documents revive it.
+func TestAnchorRejectionIsFinal(t *testing.T) {
+	e := newEnv(t)
+	e.publish(e.svc)
+	v := e.svc.NewVote(e.spec(-time.Hour, time.Hour))
+	wrong := e.auth.Bundle([]byte(`{"x":1}`), e.svc.Anchor, e.now)
+	if r := e.call("vote.proposal", e.svc.MsgWithBundle(v, wrong)); r.Code != "bad_request" {
+		t.Fatalf("%q", r.Code)
+	}
+	e.f.Unlocked(e.session())
+	e.f.SyncServices(e.session(), e.f.st.List.Doc, e.f.st.List.Sig) // confirm
+	if err := e.f.SiteDocument(e.session(), "svc", v.ID, SiteDoc{Answered: true, Found: true, Proposal: v.Doc, Sig: v.Sig, Bundle: e.auth.Bundle(v.Doc, e.svc.Anchor, e.now)}); err != nil {
+		t.Fatal(err)
+	}
+	rec := e.rec(v.ID)
+	if rec.RejectReason != RejectAnchor || rec.state(e.now) != StateRejected || len(rec.VK) != 0 {
+		t.Errorf("revived: %+v", rec)
 	}
 }
 

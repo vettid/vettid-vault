@@ -66,8 +66,9 @@ const (
 	MaxServiceList = 4 << 20
 	MaxServiceName = 100
 	// MaxSyncBytes bounds one vote.site.sync (§10.19.8). A 4 MiB list does
-	// not fit 1 MiB: the spec will raise it, and this is the one constant to
-	// change.
+	// not fit 1 MiB: the spec will raise it (0.81.2: over 245,760 bytes it
+	// travels as one §5.5 blob, at most 8,257,532 bytes encoded; PR 4), and
+	// this is the one constant to change.
 	MaxSyncBytes = 1 << 20
 	// Extension source: 1 to 1,024 bytes of UTF-8 (BALLOT-PROTOCOL 0.12.4).
 	MaxExtensionSource = 1024

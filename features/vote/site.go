@@ -3,8 +3,10 @@ package vote
 import (
 	"encoding/json"
 	"errors"
+	"strconv"
 	"time"
 
+	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vms/votewire"
 )
@@ -45,8 +47,36 @@ func (f *Feature) syncServices(s *vault.Session, doc, sig []byte) string {
 	// the vault cannot take, changes nothing; the vault keeps the last list
 	// it verified and goes on with the services that list names.
 	if len(doc) > votewire.MaxServiceList {
-		f.audit(s, "vote.list_rejected", "", "")
-		return ListRejected
+		// VAULT-MESSAGING 0.81.2: ignored, not an error. One audit entry per
+		// version (`vote.list_ignored`, ref <version>:size), no feed item;
+		// the held list stays. A document whose version cannot even be read
+		// is a parse failure, as any other.
+		o, err := strictjson.ParseObject(doc)
+		var ver uint64
+		if err == nil {
+			ver, err = o.Uint("version", 0, strictjson.MaxSafeInteger)
+		}
+		if err != nil {
+			f.audit(s, "vote.list_rejected", "", "")
+			return ListRejected
+		}
+		if !f.st.Oversize[int64(ver)] {
+			if f.st.Oversize == nil {
+				f.st.Oversize = map[int64]bool{}
+			}
+			f.st.Oversize[int64(ver)] = true
+			for len(f.st.Oversize) > 64 { // bounded: forget the lowest versions
+				lo := int64(-1)
+				for v := range f.st.Oversize {
+					if lo < 0 || v < lo {
+						lo = v
+					}
+				}
+				delete(f.st.Oversize, lo)
+			}
+			f.audit(s, "vote.list_ignored", "", strconv.FormatUint(ver, 10)+":size")
+		}
+		return ListIgnored
 	}
 	if len(f.opt.SiteKey) == 0 || votewire.VerifyServiceList(f.opt.SiteKey, doc, sig) != nil {
 		f.audit(s, "vote.list_rejected", "", "")

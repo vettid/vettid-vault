@@ -202,6 +202,9 @@ type state struct {
 	Dropped  map[string]*droppedNote `json:"dropped,omitempty"`  // votes dropped for the cap, by connection
 	Problems map[string]bool         `json:"problems,omitempty"` // the problem cap was hit, by connection
 	FeedAt   map[string]int64        `json:"feed_at,omitempty"`  // the last cap vote.problem feed item, by connection (ms)
+	// Oversize are the service-list versions already audited as over the
+	// cap (one vote.list_ignored entry per version).
+	Oversize map[int64]bool `json:"oversize,omitempty"`
 }
 
 func (st *state) init() {

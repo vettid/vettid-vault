@@ -115,3 +115,12 @@ regexTarget = "match"
 regexes = [
   '''MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE5bG4J1Tt1\+OurhyU\+nKVp9NaFwRqbO0fgo1MqFRcf6sojaBGr4ToGANz5jv6nETgDxscLRZi4sphfgt3zQrndA==''',
 ]
+
+# The staging vote site key (VAULT-MESSAGING 0.81.0): the PUBLIC Ed25519 key
+# that verifies votes.staging.vettid.org's service list. Public by design.
+[[allowlists]]
+description = "staging vote site public key"
+condition = "AND"
+paths = ['''enclave/releasecfg/staging\.json''']
+regexTarget = "match"
+regexes = ['''c4dqg2ssGVylbO9Xnpdv4zopmzx9S\+\+4KgxMWOyhXJQ=''']

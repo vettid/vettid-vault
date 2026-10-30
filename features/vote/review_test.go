@@ -102,50 +102,75 @@ func TestUnrecognisedBundleIsCheckingNotRejected(t *testing.T) {
 	}
 }
 
-// L5: a re-send with a different bundle for a record in `checking` (or one
-// refused for its anchor) is looked at again, not answered bad_request.
-func TestResendWithAnotherBundle(t *testing.T) {
+// §10.19.4 step 5: a re-send of the same proposal is answered with nothing
+// changed, whatever bundle it carries. A service cannot undo a refusal, turn
+// a late stamp into an open vote, complete a `checking` record with an
+// anchor made after delivery, or get around the caps; a `checking` record
+// recovers only through recheck.
+func TestResendChangesNothing(t *testing.T) {
 	e := newEnv(t)
 	e.publish(e.svc)
+	snapshot := func(r *record) string { b, _ := json.Marshal(r); return string(b) }
+
+	// A checking record (unrecognised bundle) re-sent with a valid bundle.
 	v := e.svc.NewVote(e.spec(-time.Hour, time.Hour))
-	// First an unrecognised bundle: checking (trust_root).
 	bad := editBundle(t, e.auth.Bundle(v.Doc, e.svc.Anchor, e.now), func(m map[string]any) { m["mediaType"] = "x" })
 	if r := e.call("vote.proposal", e.svc.MsgWithBundle(v, bad)); !r.OK() || e.rec(v.ID).Reason != ReasonTrustRoot {
 		t.Fatalf("%q %+v", r.Code, e.rec(v.ID))
 	}
+	before := snapshot(e.rec(v.ID))
 	e.h.Reset()
-	if r := e.send(v); !r.OK() { // the same proposal with the good bundle
+	if r := e.send(v); !r.OK() {
 		t.Fatalf("resend: %q", r.Code)
 	}
-	if rec := e.rec(v.ID); rec.Reason != "" || rec.state(e.now) != StateOpen || !e.has("vote.open", v.ID) {
-		t.Errorf("not completed: %+v %v", rec, e.h.Activities)
+	if snapshot(e.rec(v.ID)) != before || len(e.h.Activities) != 0 || len(e.h.Sent) != 0 {
+		t.Errorf("a re-send changed a checking record: %v %v", e.h.Activities, e.h.Sent)
 	}
-	// A verified record is not touched by another bundle.
-	e.h.Reset()
-	if r := e.call("vote.proposal", e.svc.MsgWithBundle(v, bad)); !r.OK() || e.rec(v.ID).Reason != "" || len(e.h.Activities) != 0 {
-		t.Errorf("verified record re-evaluated: %q %+v", r.Code, e.rec(v.ID))
+	// It recovers through recheck, from the bundle it holds: here it cannot
+	// (the held bundle is the unrecognised one).
+	e.f.Unlocked(e.session())
+	if e.rec(v.ID).Reason != ReasonTrustRoot {
+		t.Errorf("recheck of the held bundle: %+v", e.rec(v.ID))
 	}
 
-	// Rejected for its anchor (a bundle for another document), then the
-	// right bundle.
+	// A record rejected for its anchor (a bundle for another document)
+	// re-sent with the right bundle: still rejected, evidence kept, no key.
 	w := e.svc.NewVote(votetest.VoteSpec{ID: lid(2), Opens: e.now.Add(-time.Hour), Closes: e.now.Add(time.Hour)})
 	wrong := e.auth.Bundle([]byte(`{"x":1}`), e.svc.Anchor, e.now)
 	if r := e.call("vote.proposal", e.svc.MsgWithBundle(w, wrong)); r.Code != "bad_request" || e.rec(w.ID).RejectReason != RejectAnchor {
 		t.Fatalf("%q", r.Code)
 	}
-	if r := e.call("vote.proposal", e.svc.MsgWithBundle(w, wrong)); r.Code != "bad_request" {
-		t.Errorf("the same wrong bundle again: %q", r.Code)
+	before = snapshot(e.rec(w.ID))
+	e.h.Reset()
+	if r := e.send(w); r.Code != "bad_request" {
+		t.Errorf("resend of a rejected: %q", r.Code)
 	}
-	if r := e.send(w); !r.OK() || e.rec(w.ID).RejectReason != "" || e.rec(w.ID).state(e.now) != StateOpen {
-		t.Errorf("the right bundle: %q %+v", r.Code, e.rec(w.ID))
+	rec := e.rec(w.ID)
+	if snapshot(rec) != before || rec.RejectReason != RejectAnchor || len(rec.VK) != 0 || len(rec.VKSeed) != 0 || len(e.h.Sent) != 0 {
+		t.Errorf("a re-send changed a rejected record: %+v", rec)
 	}
-	// A refusal that no bundle changes stays: a bad signature.
-	x := e.svc.NewVote(votetest.VoteSpec{ID: lid(3), Opens: e.now.Add(-time.Hour), Closes: e.now.Add(time.Hour)})
-	m, _ := votewire.ParseProposalMsg(e.svc.Msg(x, e.now))
-	m.ProposalSig = make([]byte, 64)
-	e.call("vote.proposal", m.Marshal())
-	if r := e.call("vote.proposal", m.Marshal()); r.Code != "bad_request" || e.rec(x.ID).RejectReason != RejectSignature {
-		t.Errorf("%q", r.Code)
+
+	// A late stamp, re-sent later: not turned into an open vote.
+	l := e.svc.NewVote(votetest.VoteSpec{ID: lid(3), Opens: e.now.Add(-time.Hour), Closes: e.now.Add(time.Hour)})
+	e.h.RelayAt = e.now
+	late := e.auth.Bundle(l.Doc, e.svc.Anchor, e.now.Add(AnchorAhead+time.Minute))
+	e.now = e.now.Add(10 * time.Minute)
+	if r := e.call("vote.proposal", e.svc.MsgWithBundle(l, late)); r.Code != "bad_request" || e.rec(l.ID).RejectReason != RejectAnchor {
+		t.Fatalf("late: %q", r.Code)
+	}
+	e.h.RelayAt = e.now // the service re-sends later, when the stamp is within 5 minutes of the relay's time
+	if r := e.call("vote.proposal", e.svc.MsgWithBundle(l, late)); r.Code != "bad_request" || e.rec(l.ID).RejectReason != RejectAnchor || e.rec(l.ID).state(e.now) != StateRejected {
+		t.Errorf("a late stamp re-sent: %q %+v", r.Code, e.rec(l.ID))
+	}
+
+	// A verified record is untouched by another bundle too.
+	u := e.svc.NewVote(votetest.VoteSpec{ID: lid(4), Opens: e.now.Add(-time.Hour), Closes: e.now.Add(time.Hour)})
+	e.h.RelayAt = time.Time{}
+	e.send(u)
+	before = snapshot(e.rec(u.ID))
+	e.h.Reset()
+	if r := e.call("vote.proposal", e.svc.MsgWithBundle(u, bad)); !r.OK() || snapshot(e.rec(u.ID)) != before || len(e.h.Activities) != 0 {
+		t.Errorf("verified record changed: %q", r.Code)
 	}
 }
 

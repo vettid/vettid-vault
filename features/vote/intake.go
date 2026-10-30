@@ -245,12 +245,9 @@ func (f *Feature) onProposal(s *vault.Session, in *envelope.Inner) (json.RawMess
 	}
 	if old := f.st.Records[key(conn, id)]; old != nil {
 		if eq(old.Proposal, msg.Proposal) && eq(old.ProposalSig, msg.ProposalSig) && eq(old.Secret, msg.RecordSecret) && sameProof(old.Proof, msg.RecordProof) {
-			// A re-send. A record that is still being checked, or was
-			// refused only for its anchor, looks at the new bundle again
-			// (0.81.1): a bundle that now verifies completes it.
-			if old.RejectReason == RejectAnchor || old.RejectReason == "" && old.Reason != "" && old.Reason != ReasonSite && old.Reason != ReasonRestore {
-				return f.reevaluate(s, old, msg, notAfter)
-			}
+			// A re-send (step 5): nothing changes, whatever bundle it carries.
+			// A `checking` record recovers only through recheck (unlock, a
+			// service list, new roots, hourly), never by the service's say-so.
 			if old.RejectReason != "" {
 				return nil, errBad // the same refusal again
 			}
@@ -298,43 +295,6 @@ func (f *Feature) onProposal(s *vault.Session, in *envelope.Inner) (json.RawMess
 	f.opened(s, r)
 	f.event(s, r, "proposal")
 	return okBody(id), nil
-}
-
-// reevaluate looks at a re-sent proposal's bundle for a record that is
-// `checking` or was rejected for its anchor (0.81.1 "Duplicates"): the
-// same proposal with a bundle that now verifies completes it; one that
-// still does not leaves the state as the new bundle says.
-func (f *Feature) reevaluate(s *vault.Session, r *record, msg *votewire.ProposalMsg, notAfter time.Time) (json.RawMessage, error) {
-	now := s.Now()
-	res := f.anchor(s, r.Conn, r.Proposal, msg.Bundle, notAfter)
-	was := r.state(now)
-	switch res {
-	case anchorOK:
-		r.RejectReason, r.Reason = "", ""
-	case anchorServiceList:
-		r.RejectReason, r.Reason = "", ReasonServiceList
-	case anchorTrustRoot:
-		r.RejectReason, r.Reason = "", ReasonTrustRoot
-	case anchorClock:
-		r.RejectReason, r.Reason = "", ReasonClock
-	default: // rejected again: the record stays as it is
-		f.audit(s, "vote.proposal_rejected", r.Conn, r.ID+":"+RejectAnchor)
-		if r.RejectReason == "" {
-			r.RejectReason, r.Reason = RejectAnchor, ""
-			r.ChangedMS = now.UnixMilli()
-			f.feed(s, "vote.problem", r.Conn, r.ID, "high")
-			f.event(s, r, "problem")
-		}
-		return nil, errBad
-	}
-	r.Bundle = msg.Bundle
-	r.ReceivedMS, r.NoRelay = s.RelayTime().UnixMilli(), !s.RelayTimeKnown()
-	r.ChangedMS = now.UnixMilli()
-	if r.state(now) != was {
-		f.opened(s, r)
-		f.event(s, r, "proposal")
-	}
-	return okBody(r.ID), nil
 }
 
 // opened makes the vote.open feed item when a record is upcoming or open

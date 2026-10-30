@@ -619,37 +619,37 @@ func TestSiteComparison(t *testing.T) {
 			t.Fatalf("problem=%v: %v", !problem, e.h.Activities)
 		}
 	}
-	check(SiteDoc{}, SiteUnreachable, false)
-	check(SiteDoc{Answered: true, Found: true, Proposal: v.Doc}, SiteMatches, false)
+	check(SiteDoc{Status: StatusUnreachable}, SiteUnreachable, false)
+	check(SiteDoc{Status: StatusFound, Proposal: v.Doc}, SiteMatches, false)
 	// A 404 within ten minutes of arrival: not_listed, nothing raised.
-	check(SiteDoc{Answered: true}, SiteNotListed, false)
+	check(SiteDoc{Status: StatusAbsent}, SiteNotListed, false)
 	// After ten minutes: raised once, and the member can still vote.
 	e.now = e.now.Add(11 * time.Minute)
-	check(SiteDoc{Answered: true}, SiteNotListed, true)
+	check(SiteDoc{Status: StatusAbsent}, SiteNotListed, true)
 	if !e.has("vote.proposal_conflict", v.ID+":not_listed") || e.rec(v.ID).problem() {
 		t.Error("not_listed is a warning, not a problem record")
 	}
-	check(SiteDoc{Answered: true}, SiteNotListed, false) // not raised twice
+	check(SiteDoc{Status: StatusAbsent}, SiteNotListed, false) // not raised twice
 	// A mismatch: evidence, audit, feed; a problem record.
 	// Garbage is not a split view: a document that is not a valid proposal
 	// of this id signed by the service is as good as no answer.
 	garbage := append([]byte{}, v.Doc...)
 	garbage[len(garbage)-3] ^= 1
-	check(SiteDoc{Answered: true, Found: true, Proposal: garbage, Sig: make([]byte, 64)}, SiteUnreachable, false)
+	check(SiteDoc{Status: StatusFound, Proposal: garbage, Sig: make([]byte, 64)}, SiteUnreachable, false)
 	if e.rec(v.ID).SiteCopy != nil {
 		t.Error("garbage kept as evidence of a mismatch")
 	}
 	// A valid proposal of the same id, signed by the service, with other
 	// bytes: a mismatch.
 	other := e.svc.NewVote(votetest.VoteSpec{ID: v.ID, Opens: e.now.Add(-time.Hour), Closes: e.now.Add(5 * time.Hour)})
-	check(SiteDoc{Answered: true, Found: true, Proposal: other.Doc, Sig: other.Sig}, SiteMismatch, true)
+	check(SiteDoc{Status: StatusFound, Proposal: other.Doc, Sig: other.Sig}, SiteMismatch, true)
 	rec := e.rec(v.ID)
 	if rec.SiteCopy == nil || !rec.problem() || !e.has("vote.proposal_conflict", v.ID+":mismatch") {
 		t.Errorf("%+v", rec)
 	}
 	// Permanent: a later unreachable, 404 or matching answer resets nothing.
 	e.h.Reset()
-	for _, d := range []SiteDoc{{}, {Answered: true}, {Answered: true, Found: true, Proposal: v.Doc}} {
+	for _, d := range []SiteDoc{{Status: StatusUnreachable}, {Status: StatusAbsent}, {Status: StatusFound, Proposal: v.Doc}} {
 		if err := e.f.SiteDocument(e.session(), "svc", v.ID, d); err != nil {
 			t.Fatal(err)
 		}
@@ -657,25 +657,67 @@ func TestSiteComparison(t *testing.T) {
 			t.Fatalf("mismatch reset by %+v: %q %v", d, e.rec(v.ID).Site, e.h.Activities)
 		}
 	}
-	// After the close, a 404 is unpublished: a positive problem.
+	// After the close, one 404 is only not_listed; a second at least ten
+	// minutes later, also after the close, is unpublished: a positive
+	// problem. Both are timed on the vault's clock.
 	e2 := newEnv(t)
 	e2.publish(e2.svc)
 	v2 := e2.svc.NewVote(e2.spec(-2*time.Hour, time.Hour))
 	e2.send(v2)
+	absent := func() {
+		t.Helper()
+		if err := e2.f.SiteDocument(e2.session(), "svc", v2.ID, SiteDoc{Status: StatusAbsent}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	e2.now = e2.now.Add(2 * time.Hour)
-	if err := e2.f.SiteDocument(e2.session(), "svc", v2.ID, SiteDoc{Answered: true}); err != nil {
+	absent()
+	if r := e2.rec(v2.ID); r.Site != SiteNotListed || r.problem() || r.AbsentMS == 0 || e2.has("vote.proposal_conflict", v2.ID+":unpublished") {
+		t.Fatalf("one 404: %+v", r)
+	}
+	e2.now = e2.now.Add(9 * time.Minute) // too soon: does not count
+	absent()
+	if e2.rec(v2.ID).Site != SiteNotListed {
+		t.Fatal("a second 404 within ten minutes")
+	}
+	// A found document in between clears the first.
+	if err := e2.f.SiteDocument(e2.session(), "svc", v2.ID, SiteDoc{Status: StatusFound, Proposal: v2.Doc}); err != nil {
 		t.Fatal(err)
 	}
-	if r := e2.rec(v2.ID); r.Site != SiteUnpublished || !r.problem() || !e2.has("vote.proposal_conflict", v2.ID+":unpublished") {
-		t.Errorf("%+v", r)
+	if e2.rec(v2.ID).AbsentMS != 0 || e2.rec(v2.ID).Site != SiteMatches {
+		t.Fatalf("found did not clear: %+v", e2.rec(v2.ID))
 	}
-	for _, d := range []SiteDoc{{}, {Answered: true, Found: true, Proposal: v2.Doc}} {
+	e2.now = e2.now.Add(11 * time.Minute)
+	absent() // the first again
+	if e2.rec(v2.ID).Site != SiteNotListed {
+		t.Fatal("unpublished after a cleared first")
+	}
+	// Unreachable counts for nothing, and does not clear.
+	e2.now = e2.now.Add(5 * time.Minute)
+	_ = e2.f.SiteDocument(e2.session(), "svc", v2.ID, SiteDoc{Status: StatusUnreachable})
+	e2.now = e2.now.Add(6 * time.Minute)
+	absent() // 11 minutes after the first
+	if r := e2.rec(v2.ID); r.Site != SiteUnpublished || !r.problem() || !e2.has("vote.proposal_conflict", v2.ID+":unpublished") {
+		t.Errorf("second 404: %+v", r)
+	}
+	for _, d := range []SiteDoc{{Status: StatusUnreachable}, {Status: StatusFound, Proposal: v2.Doc}} {
 		_ = e2.f.SiteDocument(e2.session(), "svc", v2.ID, d)
 		if e2.rec(v2.ID).Site != SiteUnpublished {
 			t.Errorf("unpublished reset by %+v", d)
 		}
 	}
-	if err := e2.f.SiteDocument(e2.session(), "svc", "01JBQZ00000000000000000077", SiteDoc{}); err == nil {
+	// Two 404s, the first before the close: only the one after counts.
+	e3 := newEnv(t)
+	e3.publish(e3.svc)
+	v3 := e3.svc.NewVote(e3.spec(-time.Hour, time.Hour))
+	e3.send(v3)
+	_ = e3.f.SiteDocument(e3.session(), "svc", v3.ID, SiteDoc{Status: StatusAbsent})
+	e3.now = e3.now.Add(time.Hour + time.Second)
+	_ = e3.f.SiteDocument(e3.session(), "svc", v3.ID, SiteDoc{Status: StatusAbsent})
+	if e3.rec(v3.ID).Site == SiteUnpublished || e3.rec(v3.ID).AbsentMS == 0 {
+		t.Errorf("a 404 before the close counted: %+v", e3.rec(v3.ID))
+	}
+	if err := e2.f.SiteDocument(e2.session(), "svc", "01JBQZ00000000000000000077", SiteDoc{Status: StatusUnreachable}); err == nil {
 		t.Error("unknown proposal")
 	}
 }

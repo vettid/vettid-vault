@@ -131,6 +131,9 @@ type record struct {
 	Closes    int64  `json:"closes_at"`
 	OrigClose int64  `json:"orig_closes_at"`
 	Title     string `json:"title,omitempty"`
+	// Signer is the service key the proposal was signed with (equal to the
+	// connection's ik or an earlier one on its chain).
+	Signer []byte `json:"signer,omitempty"`
 
 	Exts  []*extRec `json:"extensions,omitempty"`
 	Aside *extRec   `json:"aside,omitempty"`
@@ -156,6 +159,10 @@ type record struct {
 	Ballot         *ballot `json:"ballot,omitempty"`
 	RefusalProblem bool    `json:"refusal_problem,omitempty"` // a refusal raised a vote.problem
 
+	// AbsentMS is the vault-clock time of the first `absent` answer after the
+	// close in force (a found document clears it); unpublished needs a second
+	// at least ten minutes later.
+	AbsentMS  int64     `json:"absent_ms,omitempty"`
 	Site      string    `json:"site,omitempty"`
 	SiteCopy  *evidence `json:"site_copy,omitempty"` // the site's copy of a mismatch
 	SiteSince int64     `json:"site_since_ms,omitempty"`
@@ -202,9 +209,10 @@ type state struct {
 	Dropped  map[string]*droppedNote `json:"dropped,omitempty"`  // votes dropped for the cap, by connection
 	Problems map[string]bool         `json:"problems,omitempty"` // the problem cap was hit, by connection
 	FeedAt   map[string]int64        `json:"feed_at,omitempty"`  // the last cap vote.problem feed item, by connection (ms)
-	// Oversize are the service-list versions already audited as over the
-	// cap (one vote.list_ignored entry per version).
-	Oversize map[int64]bool `json:"oversize,omitempty"`
+	// Oversize are the hashes (first 8 bytes, hex) of the over-cap service
+	// lists already audited (one vote.list_ignored entry per hash), oldest
+	// first, at most 64.
+	Oversize []string `json:"oversize,omitempty"`
 }
 
 func (st *state) init() {
@@ -241,6 +249,9 @@ func (r *record) state(now time.Time) string {
 	}
 	return StateOpen
 }
+
+// signers are the service keys to look the record's service up by.
+func (r *record) signers() [][]byte { return [][]byte{r.ServiceIK, r.Signer} }
 
 func (r *record) closed(now time.Time) bool { return now.Unix() >= r.Closes }
 

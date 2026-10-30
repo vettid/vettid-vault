@@ -75,36 +75,61 @@ const (
 	anchorClock
 )
 
-// acceptedKeys are the anchor keys the service list names for this
-// connection's service and the connection's own key certifies: the entry
-// whose iks include a key of the connection, and each of its anchor keys
-// whose anchor_cert verifies over H(SPKI) under an ik that is a key of the
-// connection (not merely the ik the entry names, §10.19.4 step 6).
-func (f *Feature) acceptedKeys(s *vault.Session, conn string) [][]byte {
+// listIndex is the held service list, parsed once when it is kept (the
+// parse of a list near its 4 MiB cap takes about a second), with its
+// services indexed by identity key. It is memory only and rebuilt when the
+// held list changes.
+type listIndex struct {
+	src  *listState
+	list *votewire.ServiceList
+	byIK map[string]*votewire.ServiceEntry
+}
+
+func (f *Feature) index() *listIndex {
 	if f.st.List == nil {
 		return nil
 	}
-	l, err := votewire.ParseServiceList(f.st.List.Doc)
-	if err != nil {
+	if f.idx != nil && f.idx.src == f.st.List {
+		return f.idx
+	}
+	ix := &listIndex{src: f.st.List}
+	if l, err := votewire.ParseServiceList(f.st.List.Doc); err == nil {
+		ix.list, ix.byIK = l, l.ByIK()
+	}
+	f.idx = ix
+	return ix
+}
+
+// acceptedKeys are the anchor keys the service list names for this
+// connection's service and the connection's own key certifies: the entry
+// that lists a key of the connection (its current key, or one of keys: the
+// ones the proposal was signed with and kept under), and each of its anchor
+// keys whose anchor_cert verifies over H(SPKI) under an ik that is a key
+// of the connection (not merely the ik the entry names, §10.19.4 step 6).
+func (f *Feature) acceptedKeys(s *vault.Session, conn string, keys ...[]byte) [][]byte {
+	ix := f.index()
+	if ix == nil || ix.list == nil {
 		return nil
 	}
-	var keys [][]byte
-	for i := range l.Services {
-		e := &l.Services[i]
-		mine := false
-		for _, k := range e.IKs {
-			mine = mine || isConnKey(s, conn, k)
-		}
-		if !mine {
+	cands := keys
+	if c, ok := s.Connection(conn); ok {
+		cands = append(append([][]byte{}, keys...), c.IK)
+	}
+	var out [][]byte
+	seen := map[*votewire.ServiceEntry]bool{}
+	for _, k := range cands {
+		e := ix.byIK[string(k)]
+		if e == nil || seen[e] || !isConnKey(s, conn, k) {
 			continue
 		}
+		seen[e] = true
 		for _, a := range e.AnchorKeys {
 			if isConnKey(s, conn, a.IK) && votewire.VerifyAnchorCert(a.IK, a.Key, a.AnchorCert) == nil {
-				keys = append(keys, a.Key)
+				out = append(out, a.Key)
 			}
 		}
 	}
-	return keys
+	return out
 }
 
 // anchor is §10.19.4 step 6 for one document and its bundle: no verified
@@ -114,11 +139,11 @@ func (f *Feature) acceptedKeys(s *vault.Session, conn string) [][]byte {
 // outside -60..600 s is rejected; anything the roots do not verify or this
 // release does not recognise is trust_root; a stamp more than 300 s ahead
 // of this vault's clock is clock (0.81.1).
-func (f *Feature) anchor(s *vault.Session, conn string, doc []byte, bundle json.RawMessage, notAfter time.Time) anchorResult {
+func (f *Feature) anchor(s *vault.Session, conn string, signers [][]byte, doc []byte, bundle json.RawMessage, notAfter time.Time) anchorResult {
 	if f.st.List == nil {
 		return anchorServiceList
 	}
-	keys := f.acceptedKeys(s, conn)
+	keys := f.acceptedKeys(s, conn, signers...)
 	if len(keys) == 0 {
 		return anchorServiceList
 	}
@@ -262,7 +287,7 @@ func (f *Feature) onProposal(s *vault.Session, in *envelope.Inner) (json.RawMess
 	}
 	// 6. The anchor.
 	var reason, rejected string
-	switch f.anchor(s, conn, msg.Proposal, msg.Bundle, notAfter) {
+	switch f.anchor(s, conn, [][]byte{p.Service, s.From().IK}, msg.Proposal, msg.Bundle, notAfter) {
 	case anchorServiceList:
 		reason = ReasonServiceList
 	case anchorTrustRoot:
@@ -281,7 +306,7 @@ func (f *Feature) onProposal(s *vault.Session, in *envelope.Inner) (json.RawMess
 		Bundle: msg.Bundle, Hash: votewire.H(msg.Proposal), Secret: msg.RecordSecret, Tag: tag,
 		Proof:      &proof{Index: msg.RecordProof.Index, TreeSize: msg.RecordProof.TreeSize, Path: msg.RecordProof.Path},
 		ReceivedMS: s.RelayTime().UnixMilli(), NoRelay: !s.RelayTimeKnown(), KeptMS: now.UnixMilli(), ChangedMS: now.UnixMilli(),
-		Opens: p.OpensAt, Closes: p.ClosesAt, OrigClose: p.ClosesAt, Title: p.Title, Reason: reason}
+		Opens: p.OpensAt, Closes: p.ClosesAt, OrigClose: p.ClosesAt, Title: p.Title, Reason: reason, Signer: p.Service}
 	if hit := f.admit(r, now); hit != nil {
 		return nil, f.limit(s, conn, hit)
 	}
@@ -409,7 +434,7 @@ func (f *Feature) applyExtension(s *vault.Session, r *record, e *extRec) string 
 	}
 	// Anchored before the close it extends (the one in force), on the
 	// truncated genTime.
-	switch f.anchor(s, r.Conn, e.Doc, e.Bundle, time.Unix(r.Closes-1, 0)) {
+	switch f.anchor(s, r.Conn, r.signers(), e.Doc, e.Bundle, time.Unix(r.Closes-1, 0)) {
 	case anchorOK:
 	case anchorLate:
 		return "late"

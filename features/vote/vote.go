@@ -43,7 +43,8 @@ type Feature struct {
 	mu   sync.Mutex
 	opt  Options
 	st   state
-	last int64 // unix ms of the last recheck (memory only)
+	last int64      // unix ms of the last recheck (memory only)
+	idx  *listIndex // the held list, parsed (memory only)
 }
 
 // New returns the feature.

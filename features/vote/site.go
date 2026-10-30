@@ -1,12 +1,11 @@
 package vote
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"strconv"
 	"time"
 
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vms/votewire"
 )
@@ -48,33 +47,20 @@ func (f *Feature) syncServices(s *vault.Session, doc, sig []byte) string {
 	// it verified and goes on with the services that list names.
 	if len(doc) > votewire.MaxServiceList {
 		// VAULT-MESSAGING 0.81.2: ignored, not an error. One audit entry per
-		// version (`vote.list_ignored`, ref <version>:size), no feed item;
-		// the held list stays. A document whose version cannot even be read
-		// is a parse failure, as any other.
-		o, err := strictjson.ParseObject(doc)
-		var ver uint64
-		if err == nil {
-			ver, err = o.Uint("version", 0, strictjson.MaxSafeInteger)
+		// distinct list (`vote.list_ignored`, ref size:<first 8 bytes of
+		// SHA-256, hex>), no feed item; the held list stays. The bytes are
+		// unverified, so nothing of them (a version) is read.
+		h := hex.EncodeToString(votewire.H(doc)[:8])
+		seen := false
+		for _, x := range f.st.Oversize {
+			seen = seen || x == h
 		}
-		if err != nil {
-			f.audit(s, "vote.list_rejected", "", "")
-			return ListRejected
-		}
-		if !f.st.Oversize[int64(ver)] {
-			if f.st.Oversize == nil {
-				f.st.Oversize = map[int64]bool{}
+		if !seen {
+			f.st.Oversize = append(f.st.Oversize, h)
+			if len(f.st.Oversize) > 64 {
+				f.st.Oversize = f.st.Oversize[len(f.st.Oversize)-64:]
 			}
-			f.st.Oversize[int64(ver)] = true
-			for len(f.st.Oversize) > 64 { // bounded: forget the lowest versions
-				lo := int64(-1)
-				for v := range f.st.Oversize {
-					if lo < 0 || v < lo {
-						lo = v
-					}
-				}
-				delete(f.st.Oversize, lo)
-			}
-			f.audit(s, "vote.list_ignored", "", strconv.FormatUint(ver, 10)+":size")
+			f.audit(s, "vote.list_ignored", "", "size:"+h)
 		}
 		return ListIgnored
 	}
@@ -82,28 +68,34 @@ func (f *Feature) syncServices(s *vault.Session, doc, sig []byte) string {
 		f.audit(s, "vote.list_rejected", "", "")
 		return ListRejected
 	}
+	held := f.st.List
+	if held != nil && eq(doc, held.Doc) {
+		// The same bytes again (the signature was just verified): it only
+		// refreshes the time the list was last confirmed.
+		held.ConfirmedMS = now.UnixMilli()
+		f.recheck(s)
+		return ListConfirmed
+	}
 	l, err := votewire.ParseServiceList(doc)
 	if err != nil {
 		f.audit(s, "vote.list_rejected", "", "")
 		return ListRejected
 	}
-	held := f.st.List
 	if held == nil {
 		// 0.81.1: a vault with no list takes any that verifies and parses,
 		// whatever its version or previous; chaining begins after it.
 	} else {
-		hl, err := votewire.ParseServiceList(held.Doc)
-		if err != nil {
+		var hl *votewire.ServiceList
+		if ix := f.index(); ix != nil {
+			hl = ix.list
+		}
+		if hl == nil {
 			// Cannot happen for a list this vault verified; a list that
 			// replaces an unreadable one is not trusted blindly.
 			f.audit(s, "vote.list_rejected", "", "")
 			return ListIgnored
 		}
 		switch {
-		case l.Version == held.Version && eq(doc, held.Doc):
-			held.ConfirmedMS = now.UnixMilli()
-			f.recheck(s)
-			return ListConfirmed
 		case l.Version < held.Version:
 			return ListIgnored // an older copy (a cache); nothing to say
 		case !hl.Extends(held.Doc, l):
@@ -112,6 +104,7 @@ func (f *Feature) syncServices(s *vault.Session, doc, sig []byte) string {
 		}
 	}
 	f.st.List = &listState{Doc: append([]byte{}, doc...), Sig: append([]byte{}, sig...), Version: l.Version, ConfirmedMS: now.UnixMilli()}
+	f.idx = &listIndex{src: f.st.List, list: l, byIK: l.ByIK()} // parsed once, here
 	f.recheck(s)
 	return ListKept
 }
@@ -153,7 +146,7 @@ func (f *Feature) recheck(s *vault.Session) {
 		if !r.NoRelay {
 			notAfter = time.UnixMilli(r.ReceivedMS).Add(AnchorAhead)
 		}
-		switch f.anchor(s, r.Conn, r.Proposal, r.Bundle, notAfter) {
+		switch f.anchor(s, r.Conn, r.signers(), r.Proposal, r.Bundle, notAfter) {
 		case anchorOK:
 			r.Reason = ""
 			r.ChangedMS = now.UnixMilli()
@@ -186,12 +179,20 @@ func (f *Feature) Unlocked(s *vault.Session) {
 	f.recheck(s)
 }
 
-// SiteDoc is what the app found at p/<proposal_id>/proposal.json on
-// votes.vettid.org (VOTES-SITE §3): the document, not the index.
+// The answers for the site's p/<proposal_id>/proposal.json (VOTES-SITE §3),
+// as the app reports them (0.81.2): the app gives no time; the vault's own
+// clock times every answer.
+const (
+	StatusFound       = "found"       // the document exists
+	StatusAbsent      = "absent"      // the site answered 404
+	StatusUnreachable = "unreachable" // no answer
+)
+
+// SiteDoc is the app's report on one proposal's document: its status and,
+// when found, the exact bytes, `.sig` and bundle.
 type SiteDoc struct {
-	Answered bool            // the site answered at all
-	Found    bool            // a document exists (false: a 404)
-	Proposal []byte          // its exact bytes
+	Status   string
+	Proposal []byte          // its exact bytes (found)
 	Sig      []byte          // proposal.json.sig
 	Bundle   json.RawMessage // proposal.json.sigstore.json
 }
@@ -209,9 +210,12 @@ var ErrNoSuchVote = errors.New("vote: no such proposal")
 //   - not_listed: an answering site has no document. More than ten minutes
 //     after the proposal arrived it is audited (`<id>:not_listed`) and
 //     made a vote.problem feed item; the member can still vote;
-//   - unpublished: no document after the close in force: a positive
+//   - unpublished: no document after the close in force, **twice**: a
+//     second `absent` at least ten minutes after the first, both after the
+//     close and both timed on the vault's clock; a found document in
+//     between clears the first. One 404 is only not_listed. A positive
 //     problem (`<id>:unpublished`);
-//   - unreachable: no answer; blocks nothing.
+//   - unreachable: no answer; blocks nothing and counts for nothing.
 //
 // Each finding is raised once.
 func (f *Feature) SiteDocument(s *vault.Session, conn, id string, d SiteDoc) error {
@@ -228,26 +232,36 @@ func (f *Feature) SiteDocument(s *vault.Session, conn, id string, d SiteDoc) err
 		return nil
 	}
 	now := s.Now()
+	status := d.Status
 	// A document that is not a valid proposal of this id signed under the
 	// service's key is not a split view, it is garbage: no answer.
-	if d.Answered && d.Found && !eq(d.Proposal, r.Proposal) && !f.siteDocValid(r, d) {
-		d = SiteDoc{}
+	if status == StatusFound && !eq(d.Proposal, r.Proposal) && !f.siteDocValid(r, d) {
+		status = StatusUnreachable
 	}
 	var next, alert string
-	switch {
-	case !d.Answered:
-		next = SiteUnreachable
-	case d.Found && eq(d.Proposal, r.Proposal):
-		next = SiteMatches
-	case d.Found:
-		next, alert = SiteMismatch, "mismatch"
-	case r.closed(now):
-		next, alert = SiteUnpublished, "unpublished"
-	default:
+	switch status {
+	case StatusFound:
+		r.AbsentMS = 0 // a found document in between clears the first 404
+		if eq(d.Proposal, r.Proposal) {
+			next = SiteMatches
+		} else {
+			next, alert = SiteMismatch, "mismatch"
+		}
+	case StatusAbsent:
 		next = SiteNotListed
 		if now.Sub(time.UnixMilli(r.ReceivedMS)) > NotListedAfter {
 			alert = "not_listed"
 		}
+		if r.closed(now) {
+			switch {
+			case r.AbsentMS == 0:
+				r.AbsentMS = now.UnixMilli()
+			case now.Sub(time.UnixMilli(r.AbsentMS)) >= NotListedAfter:
+				next, alert = SiteUnpublished, "unpublished"
+			}
+		}
+	default: // unreachable, or anything the vault does not know
+		next = SiteUnreachable
 	}
 	if next != r.Site {
 		r.Site, r.SiteSince, r.ChangedMS = next, now.UnixMilli(), now.UnixMilli()

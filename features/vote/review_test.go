@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/asn1"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"strconv"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/vettid/vettid-vault/internal/votetest"
+	"github.com/vettid/vettid-vault/vms/suite"
 	"github.com/vettid/vettid-vault/vms/votewire"
 )
 
@@ -423,8 +425,8 @@ func TestTimestampEKUOnlyTimeStamping(t *testing.T) {
 }
 
 // A list over the cap changes nothing (VAULT-MESSAGING 0.81.2): it is
-// answered `ignored`, audited once per version as `vote.list_ignored`
-// (`<version>:size`), makes no feed item, and the vault keeps the last list
+// answered `ignored`, audited once per list as `vote.list_ignored`
+// (`size:<hash>`), makes no feed item, and the vault keeps the last list
 // it verified and goes on with its services. Other failures stay rejected.
 func TestOversizeListKeepsTheHeldOne(t *testing.T) {
 	e := newEnv(t)
@@ -442,16 +444,18 @@ func TestOversizeListKeepsTheHeldOne(t *testing.T) {
 			t.Fatalf("%s", got)
 		}
 	}
-	if e.count("vote.list_ignored") != 1 || !e.has("vote.list_ignored", "9:size") || e.count("vote.list_rejected") != 0 || e.count("vote.problem") != 0 {
+	if e.count("vote.list_ignored") != 1 || !e.has("vote.list_ignored", "size:"+hex.EncodeToString(votewire.H(big(9))[:8])) || e.count("vote.list_rejected") != 0 || e.count("vote.problem") != 0 {
 		t.Errorf("one entry for the version, no feed item: %v", e.h.Activities)
 	}
-	// Another version is audited once more; an unreadable one is a parse
-	// failure.
-	if got := e.f.SyncServices(e.session(), big(10), make([]byte, 64)); got != ListIgnored || !e.has("vote.list_ignored", "10:size") {
-		t.Errorf("v10: %s", got)
+	// Another list is audited once more, by its hash; its bytes are not read.
+	other := bytes.Repeat([]byte(" "), votewire.MaxServiceList+1)
+	for i := 0; i < 2; i++ {
+		if got := e.f.SyncServices(e.session(), other, nil); got != ListIgnored {
+			t.Errorf("other: %s", got)
+		}
 	}
-	if got := e.f.SyncServices(e.session(), bytes.Repeat([]byte(" "), votewire.MaxServiceList+1), nil); got != ListRejected || !e.has("vote.list_rejected", "") {
-		t.Errorf("unreadable: %s", got)
+	if e.count("vote.list_ignored") != 2 || !e.has("vote.list_ignored", "size:"+hex.EncodeToString(votewire.H(other)[:8])) || e.count("vote.list_rejected") != 0 {
+		t.Errorf("%v", e.h.Activities)
 	}
 	// The held list still names the service: a proposal is verified by it.
 	v := e.svc.NewVote(e.spec(-time.Hour, time.Hour))
@@ -472,7 +476,7 @@ func TestAnchorRejectionIsFinal(t *testing.T) {
 	}
 	e.f.Unlocked(e.session())
 	e.f.SyncServices(e.session(), e.f.st.List.Doc, e.f.st.List.Sig) // confirm
-	if err := e.f.SiteDocument(e.session(), "svc", v.ID, SiteDoc{Answered: true, Found: true, Proposal: v.Doc, Sig: v.Sig, Bundle: e.auth.Bundle(v.Doc, e.svc.Anchor, e.now)}); err != nil {
+	if err := e.f.SiteDocument(e.session(), "svc", v.ID, SiteDoc{Status: StatusFound, Proposal: v.Doc, Sig: v.Sig, Bundle: e.auth.Bundle(v.Doc, e.svc.Anchor, e.now)}); err != nil {
 		t.Fatal(err)
 	}
 	rec := e.rec(v.ID)
@@ -484,5 +488,102 @@ func TestAnchorRejectionIsFinal(t *testing.T) {
 func TestSyncBytesIsOneConstant(t *testing.T) {
 	if votewire.MaxSyncBytes != 1<<20 || votewire.MaxServiceList != 4<<20 {
 		t.Errorf("%d %d", votewire.MaxSyncBytes, votewire.MaxServiceList)
+	}
+}
+
+// A list near the 4 MiB cap (about 9,000 services with one anchor key each)
+// is parsed once when it is kept, not at every check: a proposal's check
+// and a recheck of 128 `checking` records find their keys in the held,
+// indexed list, and Extends is linear.
+func TestLargeServiceListIsParsedOnce(t *testing.T) {
+	e := newEnv(t)
+	auth := e.auth
+	mk := func(version int64, previous []byte, n int, extra *votetest.Service) ([]byte, []byte) {
+		l := &votewire.ServiceList{V: 1, Version: version, Previous: previous, Services: make([]votewire.ServiceEntry, 0, n+1)}
+		for i := 0; i < n; i++ {
+			_, ik, _ := ed25519.GenerateKey(bytes.NewReader(bytes.Repeat([]byte{byte(i), byte(i >> 8), 7}, 32)))
+			pub := ik.Public().(ed25519.PublicKey)
+			spki := make([]byte, 91)
+			copy(spki, auth.Roots[0].Logs[0].LogID) // any bytes: the cert is over H(key)
+			spki[90] = byte(i)
+			spki[89] = byte(i >> 8)
+			cert := ed25519.Sign(ik, append([]byte(votewire.LabelAnchorKey), votewire.H(spki)...))
+			l.Services = append(l.Services, votewire.ServiceEntry{ServiceID: serviceID(pub), Name: "Org", IKs: [][]byte{pub},
+				AnchorKeys: []votewire.AnchorKey{{Key: spki, AnchorCert: cert, IK: pub}}})
+		}
+		if extra != nil {
+			l.Services = append(l.Services, votewire.ServiceEntry{ServiceID: serviceID(extra.Pub()), Name: "Us", IKs: [][]byte{extra.Pub()},
+				AnchorKeys: []votewire.AnchorKey{{Key: extra.Anchor.SPKI, AnchorCert: extra.Anchor.Cert(extra.IK), IK: extra.Pub()}}})
+		}
+		doc, err := votewire.EncodeDocument(l)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sig, _ := suite.Sign(e.site, votewire.LabelServiceList, votewire.H(doc))
+		return doc, sig
+	}
+	const n = 9000
+	d1, s1 := mk(1, make([]byte, 32), n, e.svc)
+	if len(d1) < 3<<20 || len(d1) > votewire.MaxServiceList {
+		t.Fatalf("list of %d bytes", len(d1))
+	}
+	start := time.Now()
+	if got := e.f.SyncServices(e.session(), d1, s1); got != ListKept {
+		t.Fatalf("%s", got)
+	}
+	t.Logf("kept a list of %d bytes in %v", len(d1), time.Since(start))
+	// A proposal is checked, and 128 checking records are rechecked: the
+	// list is not parsed again for each.
+	start = time.Now()
+	v := e.svc.NewVote(votetest.VoteSpec{ID: lid(500), Opens: e.now.Add(-time.Hour), Closes: e.now.Add(time.Hour)})
+	if r := e.send(v); !r.OK() || e.rec(v.ID).Reason != "" {
+		t.Fatalf("%q %+v", r.Code, e.rec(v.ID))
+	}
+	for i := 0; i < 128; i++ {
+		e.f.st.Records[key("svc", lid(i))] = &record{Conn: "svc", ID: lid(i), Reason: ReasonServiceList, ServiceIK: e.svc.Pub(), Signer: e.svc.Pub(),
+			Proposal: []byte(`{}`), Opens: e.now.Unix() - 10, Closes: e.now.Unix() + 3600, KeptMS: 1}
+	}
+	e.f.recheck(e.session())
+	if d := time.Since(start); d > 5*time.Second {
+		t.Errorf("a proposal and a recheck of 128 records took %v", d)
+	}
+	// Extends is linear: the next version, all services again plus one.
+	d2, s2 := mk(2, votewire.H(d1), n, e.svc)
+	l1, err := votewire.ParseServiceList(d1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l2, err := votewire.ParseServiceList(d2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start = time.Now()
+	for i := 0; i < 20; i++ {
+		if !l1.Extends(d1, l2) {
+			t.Fatal("does not extend")
+		}
+	}
+	if d := time.Since(start); d > 3*time.Second {
+		t.Errorf("20 x Extends of %d services took %v", n, d)
+	}
+	_ = s2
+}
+
+func BenchmarkExtendsLargeList(b *testing.B) {
+	const n = 9000
+	l1 := &votewire.ServiceList{Services: make([]votewire.ServiceEntry, n)}
+	l2 := &votewire.ServiceList{Version: 2, Services: make([]votewire.ServiceEntry, n)}
+	for i := 0; i < n; i++ {
+		id := strconv.Itoa(i)
+		e := votewire.ServiceEntry{ServiceID: id, IKs: [][]byte{[]byte(id)}, AnchorKeys: []votewire.AnchorKey{{Key: []byte(id)}}}
+		l1.Services[i], l2.Services[i] = e, e
+	}
+	data := []byte("held")
+	l2.Previous = votewire.H(data)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if !l1.Extends(data, l2) {
+			b.Fatal("no")
+		}
 	}
 }

@@ -431,32 +431,48 @@ func (l *ServiceList) Extends(data []byte, next *ServiceList) bool {
 	if next.Version <= l.Version || !eq(next.Previous, H(data)) {
 		return false
 	}
+	// O(n): the next list's services by id; each matched pair compared
+	// through sets of the next entry's keys.
+	byID := make(map[string]*ServiceEntry, len(next.Services))
+	for i := range next.Services {
+		byID[next.Services[i].ServiceID] = &next.Services[i]
+	}
 	for _, ps := range l.Services {
-		var ns *ServiceEntry
-		for i := range next.Services {
-			if next.Services[i].ServiceID == ps.ServiceID {
-				ns = &next.Services[i]
-			}
-		}
+		ns := byID[ps.ServiceID]
 		if ns == nil {
 			return false
 		}
+		iks := make(map[string]bool, len(ns.IKs))
+		for _, k := range ns.IKs {
+			iks[string(k)] = true
+		}
 		for _, k := range ps.IKs {
-			if !ns.hasIK(k) {
+			if !iks[string(k)] {
 				return false
 			}
 		}
+		keys := make(map[string]bool, len(ns.AnchorKeys))
+		for _, a := range ns.AnchorKeys {
+			keys[string(a.Key)] = true
+		}
 		for _, a := range ps.AnchorKeys {
-			found := false
-			for _, b := range ns.AnchorKeys {
-				found = found || eq(a.Key, b.Key)
-			}
-			if !found {
+			if !keys[string(a.Key)] {
 				return false
 			}
 		}
 	}
 	return true
+}
+
+// ByIK indexes the services by each of their identity keys.
+func (l *ServiceList) ByIK() map[string]*ServiceEntry {
+	m := make(map[string]*ServiceEntry, len(l.Services))
+	for i := range l.Services {
+		for _, k := range l.Services[i].IKs {
+			m[string(k)] = &l.Services[i]
+		}
+	}
+	return m
 }
 
 // EncodeDocument returns v's JCS form (the service's side, and tests): v is

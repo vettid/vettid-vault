@@ -74,3 +74,16 @@ regexTarget = "match"
 regexes = [
   '''01JB2Z6V9K3M4N5P6Q7R8S9T70''',
 ]
+
+# §10.19 vote vectors (VAULT-MESSAGING 0.81.0 §16; testdata/vote/vectors.json,
+# a byte-for-byte copy of vettid/service-vault vote/testdata/vectors.json).
+# Every value is a fixed TEST-ONLY seed, key, secret or hash printed in the
+# public spec ("The values are for test use only"); the generic rule takes
+# `record_secret`, `seed` and `key` for credentials. Scoped to the
+# generic-api-key rule and to this one file.
+[[allowlists]]
+description = "vote vectors (test-only, public)"
+targetRules = ["generic-api-key"]
+paths = [
+  '''^testdata/vote/vectors\.json$''',
+]

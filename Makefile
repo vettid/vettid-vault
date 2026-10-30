@@ -6,7 +6,7 @@ FUZZFLAGS ?=
 # Packages that ship. They must never link the vector-only code, the dev
 # enclave (dev sealer, PIN constructors) or test harnesses.
 LIBPKGS   := ./vms/suite ./vms/envelope ./vms/handshake ./vms/invite ./vms/altchan ./vms/credwire ./vms/callwire ./vms/peerwire \
-             ./vms/pins ./vms/nitro ./vms/manifest ./vms/devattest ./vms/btc ./vms/recovery \
+             ./vms/pins ./vms/votewire ./vms/nitro ./vms/manifest ./vms/devattest ./vms/btc ./vms/recovery \
              ./enclave/... ./vault/... ./client/... ./features/... ./cmd/...
 E2ETAGS   := devenclave e2e vettid_testcost
 # What runs inside the enclave (the release image's binary and everything it

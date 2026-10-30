@@ -191,6 +191,8 @@ func TestProposalBounds(t *testing.T) {
 		{"outage rule 1025", func(m map[string]any) { m["outage_rule"] = big(1025) }, false},
 		{"window 7 days", func(m map[string]any) { m["closes_at"] = 1793520000 + MaxWindow }, true},
 		{"window past 7 days", func(m map[string]any) { m["closes_at"] = 1793520000 + MaxWindow + 1 }, false},
+		{"record_at = opens_at", func(m map[string]any) { m["record_at"] = 1793520000 }, true},
+		{"record_at after opens_at", func(m map[string]any) { m["record_at"] = 1793520001 }, false},
 		{"opens = closes", func(m map[string]any) { m["closes_at"] = 1793520000 }, false},
 		{"opens > closes", func(m map[string]any) { m["closes_at"] = 1793519999 }, false},
 		{"eligible 1", func(m map[string]any) { m["eligible"] = 1 }, true},
@@ -464,5 +466,37 @@ func TestDocumentSizeBounds(t *testing.T) {
 	}
 	if _, err := ParseRefusal(bytes.Repeat([]byte(" "), MaxBody+1)); err == nil {
 		t.Error("oversized refusal")
+	}
+}
+
+// An RFC 9162 audit path does not bind the tree size: the path of "c" in a
+// tree of 3 also verifies "c" at index 1 of a tree of 2, because only the
+// shape of the path is used. The record proof is therefore held to
+// tree_size = eligible (§10.19.4 step 4), and a row proof to
+// counts.eligible (§10.19.6).
+func TestProofDoesNotBindTreeSize(t *testing.T) {
+	a, b, c := []byte("a"), []byte("b"), []byte("c")
+	root3 := Root([][]byte{a, b, c})
+	ab := Root([][]byte{a, b})
+	if !VerifyProof(root3, c, 2, 3, [][]byte{ab}) {
+		t.Fatal("the real proof")
+	}
+	if !VerifyProof(root3, c, 1, 2, [][]byte{ab}) {
+		t.Fatal("the counterexample no longer verifies; update the note on RecordProof")
+	}
+	// RecordProof refuses it for a proposal of 3 whose tree has that root
+	// (tags are 32 bytes).
+	a, b, c = H(a), H(b), H(c)
+	root3 = Root([][]byte{a, b, c})
+	ab = Root([][]byte{a, b})
+	p := &Proposal{Eligible: 3, RecordRoot: root3}
+	if !VerifyProof(root3, c, 1, 2, [][]byte{ab}) {
+		t.Fatal("the counterexample with 32-byte leaves")
+	}
+	if (&RecordProof{Index: 1, TreeSize: 2, Path: [][]byte{ab}}).Verify(p, c) == nil {
+		t.Error("tree_size 2 for eligible 3 verifies")
+	}
+	if err := (&RecordProof{Index: 2, TreeSize: 3, Path: [][]byte{ab}}).Verify(p, c); err != nil {
+		t.Errorf("the right one: %v", err)
 	}
 }

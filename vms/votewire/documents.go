@@ -242,6 +242,7 @@ func (p *Proposal) Validate() error {
 		len(p.Choices) < MinChoices || len(p.Choices) > MaxChoices,
 		p.Quorum.MinBallots < 0 || len(p.Quorum.Text) > MaxQuorumText,
 		len(p.OutageRule) > MaxOutageRule,
+		p.RecordAt > p.OpensAt, // as the service (spec erratum pending, finding 1)
 		p.OpensAt >= p.ClosesAt || p.ClosesAt-p.OpensAt > MaxWindow,
 		p.Eligible < 1,
 		len(p.RecordRoot) != HashLen:
@@ -436,3 +437,7 @@ func (l *ServiceList) Extends(data []byte, next *ServiceList) bool {
 	}
 	return true
 }
+
+// EncodeDocument returns v's JCS form (the service's side, and tests): v is
+// a document struct of this package.
+func EncodeDocument(v any) ([]byte, error) { return encodeCanonical(v) }

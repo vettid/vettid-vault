@@ -56,7 +56,7 @@ func FuzzBodies(f *testing.F) {
 	})
 }
 
-// A proof that verifies against the root of a, b, c is for the leaf at that index.
+// A proof that verifies against the root of a, b, c at size 3 is for the leaf at that index.
 func FuzzVerifyProof(f *testing.F) {
 	f.Add([]byte("a"), uint64(0), uint64(1), []byte{})
 	f.Fuzz(func(t *testing.T, leaf []byte, m, n uint64, flat []byte) {
@@ -67,12 +67,13 @@ func FuzzVerifyProof(f *testing.F) {
 		}
 		leaves := [][]byte{[]byte("a"), []byte("b"), []byte("c")}
 		root := Root(leaves)
-		// For every n: a proof that verifies against this root is the proof
-		// of a leaf of the tree at its index, for the tree's own size.
-		if VerifyProof(root, leaf, m, n, proof) {
-			ok := m < uint64(len(leaves)) && bytes.Equal(leaves[m], leaf)
-			if !ok {
-				t.Fatalf("a leaf outside the tree verifies (m=%d n=%d)", m, n)
+		// Only for the tree's own size: a proof of a leaf at an index of a
+		// tree of 3 is for the leaf there. At another size the same path
+		// can verify (TestProofDoesNotBindTreeSize), which is why a record
+		// proof's tree_size must equal `eligible`.
+		if n == 3 && VerifyProof(root, leaf, m, n, proof) {
+			if ok := m < uint64(len(leaves)) && bytes.Equal(leaves[m], leaf); !ok {
+				t.Fatalf("a leaf outside the tree verifies (m=%d)", m)
 			}
 		}
 	})

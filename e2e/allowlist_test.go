@@ -79,7 +79,10 @@ func TestOptionalFeatureNotRegistered(t *testing.T) {
 					}
 				}
 			}
-			if len(types) == 0 || appRequest == "" {
+			// The vote feature (0.81.0) has only the service's requests until
+			// the app's API (vote series PR 4): its types are checked
+			// below, the part that needs an app request is skipped.
+			if len(types) == 0 || appRequest == "" && name != "vote" {
 				t.Fatalf("feature %s: types %v, app request %q", name, types, appRequest)
 			}
 			tv := newTestVaultWith(t, r.URL, "no"+name, without(name), nil)
@@ -114,6 +117,9 @@ func TestOptionalFeatureNotRegistered(t *testing.T) {
 				if !slices.Contains(tv.manager().FeatureEntries(), n) {
 					t.Fatalf("no features.%s entry: %v", n, tv.manager().FeatureEntries())
 				}
+			}
+			if appRequest == "" {
+				return
 			}
 			// A later image that lists the feature: the vault has no entry
 			// for it, so it starts empty; a request of its is answered

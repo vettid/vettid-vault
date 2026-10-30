@@ -480,3 +480,102 @@ func TestOpenAsksRepeatTheEvent(t *testing.T) {
 		t.Fatalf("after a decision: %+v", got)
 	}
 }
+
+// matchReq makes a request with a raw extra member, delivers the
+// challenge to b and returns the challenge sent and b's pending event.
+func matchReq(t *testing.T, a, b *side, extra string) (featuretest.Sent, featuretest.Sent) {
+	t.Helper()
+	body := `{"connection_id":"cB","context":"sign in"` + extra + `}`
+	if r := featuretest.Call(a.f, a.h, t0, "app", "connection.authenticate.request", body); !r.OK() {
+		t.Fatalf("request %s: %s", extra, r.Code)
+	}
+	ch := last(t, a.h, "connection.authenticate.challenge")
+	featuretest.CallExp(b.f, b.h, t0, ch.Opt.Exp, "connection:cA", "connection.authenticate.challenge", string(ch.Body))
+	return ch, last(t, b.h, "connection.authenticate.pending")
+}
+
+func hasMatch(raw []byte) bool { return strings.Contains(string(raw), "match_code") }
+
+// 0.79.0 §10.4: a valid code on a sign-in reaches .pending and
+// pending.list, survives a restart, "07" stays "07", and the response is
+// signed as without it and carries no code.
+func TestMatchCode(t *testing.T) {
+	a, b := pair()
+	b.w.open = true
+	ch, pend := matchReq(t, a, b, `,"purpose":"signin","match_code":"07"`)
+	if field(t, ch.Body, "match_code") != "07" || field(t, pend.Body, "match_code") != "07" {
+		t.Fatalf("challenge %s pending %s", ch.Body, pend.Body)
+	}
+	if got := b.f.OpenAsks(t0.Add(time.Minute)); len(got) != 1 || field(t, got[0].Body, "match_code") != "07" || string(got[0].Body) != string(pend.Body) {
+		t.Fatalf("list %+v", got)
+	}
+	// Restart.
+	b2 := New(b.w)
+	featuretest.RoundTrip(t, b.f, b2)
+	if got := b2.OpenAsks(t0.Add(time.Minute)); len(got) != 1 || field(t, got[0].Body, "match_code") != "07" || string(got[0].Body) != string(pend.Body) {
+		t.Fatalf("after restart %+v", got)
+	}
+	// Approve; signature verifies at a, and the response has no code.
+	id := field(t, pend.Body, "request_id")
+	if r := featuretest.Call(b.f, b.h, t0, "app", "connection.authenticate.approve", `{"request_id":"`+id+`"}`); !r.OK() {
+		t.Fatal(r.Code)
+	}
+	resp := last(t, b.h, "connection.authenticate.response").Body
+	if hasMatch(resp) {
+		t.Fatalf("response %s", resp)
+	}
+	featuretest.Call(a.f, a.h, t0, "connection:cB", "connection.authenticate.response", string(resp))
+	if res := last(t, a.h, "connection.authenticate.result"); hasMatch(res.Body) || !strings.Contains(string(res.Body), `"authenticated":true`) {
+		t.Fatalf("result %s", res.Body)
+	}
+}
+
+// A malformed code is dropped and the challenge still handled; a code
+// without a sign-in purpose is ignored. Both on the wire from a peer
+// (a hand-made challenge) and in an owner device's request.
+func TestMatchCodeIgnored(t *testing.T) {
+	for _, extra := range []string{
+		`"match_code":42`, `"match_code":null`, `"match_code":"4"`, `"match_code":"1234"`,
+		`"match_code":"٤٢"`, `"match_code":"4a"`, `"match_code":""`,
+	} {
+		a, b := pair()
+		_, pend := matchReq(t, a, b, `,"purpose":"signin",`+extra)
+		if hasMatch(pend.Body) || field(t, pend.Body, "purpose") != "signin" {
+			t.Errorf("%s: pending %s", extra, pend.Body)
+		}
+		if got := b.f.OpenAsks(t0); len(got) != 1 || hasMatch(got[0].Body) {
+			t.Errorf("%s: list %+v", extra, got)
+		}
+	}
+	for _, extra := range []string{`,"purpose":"approval","match_code":"42"`, `,"match_code":"42"`} {
+		a, b := pair()
+		ch, pend := matchReq(t, a, b, extra)
+		if hasMatch(ch.Body) || hasMatch(pend.Body) {
+			t.Errorf("%s: challenge %s pending %s", extra, ch.Body, pend.Body)
+		}
+		if got := b.f.OpenAsks(t0); len(got) != 1 || hasMatch(got[0].Body) {
+			t.Errorf("%s: list %+v", extra, got)
+		}
+	}
+
+	// From a peer: hand-made challenges, malformed or on the wrong purpose.
+	for _, extra := range []string{
+		`,"purpose":"signin","match_code":42`, `,"purpose":"signin","match_code":null`, `,"purpose":"signin","match_code":"123456"`,
+		`,"purpose":"approval","match_code":"42"`, `,"match_code":"42"`, `,"purpose":"vote","match_code":"42"`,
+	} {
+		a, b := pair()
+		a.w.open = true
+		featuretest.Call(a.f, a.h, t0, "app", "connection.authenticate.request", `{"connection_id":"cB","purpose":"signin"}`)
+		ch := last(t, a.h, "connection.authenticate.challenge")
+		body := strings.TrimSuffix(string(ch.Body), `,"purpose":"signin"}`)
+		body = strings.TrimSuffix(body, `}`) + extra + `}`
+		featuretest.CallExp(b.f, b.h, t0, ch.Opt.Exp, "connection:cA", "connection.authenticate.challenge", body)
+		pend := last(t, b.h, "connection.authenticate.pending")
+		if hasMatch(pend.Body) {
+			t.Errorf("%s: pending %s", extra, pend.Body)
+		}
+		if got := b.f.OpenAsks(t0); len(got) != 1 {
+			t.Errorf("%s: challenge not handled: %+v", extra, got)
+		}
+	}
+}

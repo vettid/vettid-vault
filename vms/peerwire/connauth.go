@@ -81,7 +81,7 @@ func ConnAuthPurposeMessage(purpose string, m []byte) []byte {
 }
 
 // ConnAuthChallenge is a connection.authenticate.challenge body:
-// {request_id, nonce, context?, purpose?}.
+// {request_id, nonce, context?, purpose?, match_code?}.
 type ConnAuthChallenge struct {
 	RequestID string // a ULID
 	Nonce     []byte // ConnAuthNonceSize bytes
@@ -89,6 +89,37 @@ type ConnAuthChallenge struct {
 	// Purpose is PurposeSignIn, PurposeApproval or "" (none). A parsed
 	// challenge holds "" for an unknown value (0.65.0).
 	Purpose string
+	// MatchCode (0.79.0) is display only and not signed: exactly 2 or 3
+	// ASCII digits, and only with PurposeSignIn. A parsed challenge holds
+	// "" for anything else (malformed, or no sign-in purpose).
+	MatchCode string
+}
+
+// ValidMatchCode reports whether s is a match code: [0-9]{2,3}.
+func ValidMatchCode(s string) bool {
+	if len(s) < 2 || len(s) > 3 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// OptMatchCode reads an optional `match_code` for a challenge with the
+// given purpose: the code when it is valid and the purpose is signin,
+// "" otherwise (absent, not a string, malformed, or another purpose).
+// Never an error: a bad code is ignored (0.79.0).
+func OptMatchCode(o strictjson.Object, purpose string) string {
+	if purpose != PurposeSignIn {
+		return ""
+	}
+	if v, _, err := o.OptString("match_code"); err == nil && ValidMatchCode(v) {
+		return v
+	}
+	return ""
 }
 
 // NewConnAuthChallenge returns a challenge with a fresh random nonce.
@@ -111,6 +142,9 @@ func (c *ConnAuthChallenge) Marshal() []byte {
 	}
 	if KnownPurpose(c.Purpose) {
 		b.String("purpose", c.Purpose)
+	}
+	if c.Purpose == PurposeSignIn && ValidMatchCode(c.MatchCode) {
+		b.String("match_code", c.MatchCode)
 	}
 	return b.Bytes()
 }
@@ -169,6 +203,7 @@ func ParseConnAuthChallenge(body []byte) (*ConnAuthChallenge, error) {
 		return nil, err
 	}
 	c.Purpose = challengePurpose(o)
+	c.MatchCode = OptMatchCode(o, c.Purpose)
 	return c, nil
 }
 

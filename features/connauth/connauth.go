@@ -57,6 +57,9 @@ type Challenge struct {
 	// Purpose is peerwire.PurposeSignIn, peerwire.PurposeApproval or ""
 	// (0.65.0).
 	Purpose string `json:"purpose,omitempty"`
+	// MatchCode (0.79.0) is display only, never signed: a valid code of a
+	// sign-in challenge, "" otherwise.
+	MatchCode string `json:"match_code,omitempty"`
 }
 
 // State is the last outcome with one connection.
@@ -154,7 +157,7 @@ var (
 
 // wire is the challenge's body.
 func (c *Challenge) wire() *peerwire.ConnAuthChallenge {
-	return &peerwire.ConnAuthChallenge{RequestID: c.ID, Nonce: c.Nonce, Context: c.Context, Purpose: c.Purpose}
+	return &peerwire.ConnAuthChallenge{RequestID: c.ID, Nonce: c.Nonce, Context: c.Context, Purpose: c.Purpose, MatchCode: c.MatchCode}
 }
 
 // Handle implements vault.Handler.
@@ -244,7 +247,9 @@ func (f *Feature) request(s *vault.Session, body []byte) (json.RawMessage, error
 		return nil, vault.NewError("internal", "")
 	}
 	wc.Purpose = purpose
-	c := &Challenge{ID: wc.RequestID, Conn: conn, Nonce: wc.Nonce, Context: ctxt, Purpose: purpose,
+	// A malformed code, or one without a sign-in purpose, is ignored (0.79.0).
+	wc.MatchCode = peerwire.OptMatchCode(o, purpose)
+	c := &Challenge{ID: wc.RequestID, Conn: conn, Nonce: wc.Nonce, Context: ctxt, Purpose: purpose, MatchCode: wc.MatchCode,
 		Exp: s.Now().Add(peerwire.ConnAuthChallengeTTL).UTC().Truncate(time.Millisecond)}
 	if err := s.Send(conn, peerwire.TypeConnAuthChallenge, wc.Marshal(), vault.SendOptions{Exp: c.Exp}); err != nil {
 		return nil, errConn
@@ -261,7 +266,7 @@ func (f *Feature) challenge(s *vault.Session, in *envelope.Inner) error {
 	if err != nil {
 		return errBad
 	}
-	c := &Challenge{ID: wc.RequestID, Nonce: wc.Nonce, Context: wc.Context, Purpose: wc.Purpose}
+	c := &Challenge{ID: wc.RequestID, Nonce: wc.Nonce, Context: wc.Context, Purpose: wc.Purpose, MatchCode: wc.MatchCode}
 	conn := s.From().ID
 	now := s.Now()
 	if _, dup := f.d.In[c.ID]; dup {
@@ -303,6 +308,9 @@ func (c *Challenge) pendingBody() []byte {
 	}
 	if c.Purpose != "" {
 		b.String("purpose", c.Purpose)
+	}
+	if c.MatchCode != "" {
+		b.String("match_code", c.MatchCode)
 	}
 	return b.Bytes()
 }

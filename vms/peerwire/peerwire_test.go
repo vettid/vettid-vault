@@ -3,6 +3,7 @@ package peerwire
 import (
 	"bytes"
 	"crypto/ed25519"
+	"encoding/base64"
 	"strings"
 	"testing"
 	"time"
@@ -359,5 +360,68 @@ func TestProfile(t *testing.T) {
 	if !ValidHandshakeProfile([]byte(`{"first_name":"A","last_name":"B","name":"N"}`)) || ValidHandshakeProfile(nil) ||
 		ValidHandshakeProfile([]byte(`{"first_name":"A"}`)) {
 		t.Fatal("ValidHandshakeProfile")
+	}
+}
+
+// 0.79.0 §10.4 "Match code": 2-3 ASCII digits as a string, signin only,
+// dropped when malformed, and never part of what is signed.
+func TestConnAuthMatchCode(t *testing.T) {
+	a, b, cred := pub(key(1)), pub(key(2)), key(3)
+	base := `{"request_id":"` + reqID + `","nonce":"` + base64.StdEncoding.EncodeToString(make([]byte, ConnAuthNonceSize)) + `"`
+	parse := func(extra string) *ConnAuthChallenge {
+		t.Helper()
+		c, err := ParseConnAuthChallenge([]byte(base + extra + `}`))
+		if err != nil {
+			t.Fatalf("%s: challenge refused: %v", extra, err)
+		}
+		return c
+	}
+	for in, want := range map[string]string{
+		`,"purpose":"signin","match_code":"42"`:   "42",
+		`,"purpose":"signin","match_code":"07"`:   "07",
+		`,"purpose":"signin","match_code":"123"`:  "123",
+		`,"purpose":"signin","match_code":42`:     "",
+		`,"purpose":"signin","match_code":null`:   "",
+		`,"purpose":"signin","match_code":"4"`:    "",
+		`,"purpose":"signin","match_code":"1234"`: "",
+		`,"purpose":"signin","match_code":"٤٢"`:   "",
+		`,"purpose":"signin","match_code":"+4"`:   "",
+		`,"purpose":"signin","match_code":" 42"`:  "",
+		`,"purpose":"signin","match_code":""`:     "",
+		`,"purpose":"approval","match_code":"42"`: "",
+		`,"match_code":"42"`:                      "",
+		`,"purpose":"vote","match_code":"42"`:     "",
+	} {
+		if got := parse(in).MatchCode; got != want {
+			t.Errorf("%s: MatchCode %q, want %q", in, got, want)
+		}
+	}
+	// Marshal repeats a valid code on a sign-in and nothing else.
+	c := parse(`,"purpose":"signin","match_code":"07"`)
+	if !strings.Contains(string(c.Marshal()), `"match_code":"07"`) {
+		t.Fatalf("%s", c.Marshal())
+	}
+	c.Purpose = PurposeApproval
+	if strings.Contains(string(c.Marshal()), "match_code") {
+		t.Fatalf("%s", c.Marshal())
+	}
+	// Not signed: same signature input and a response verifies with or
+	// without the code.
+	with := parse(`,"purpose":"signin","match_code":"42"`)
+	without := parse(`,"purpose":"signin"`)
+	l1, m1 := with.Signed(a, b)
+	l2, m2 := without.Signed(a, b)
+	if l1 != l2 || !bytes.Equal(m1, m2) {
+		t.Fatal("match_code changed the signed bytes")
+	}
+	r, err := SignConnAuth(cred, a, b, with, t0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(r.Marshal()), "match_code") {
+		t.Fatalf("response carries the code: %s", r.Marshal())
+	}
+	if err := VerifyConnAuthResponse(r, a, b, without); err != nil {
+		t.Fatal(err)
 	}
 }

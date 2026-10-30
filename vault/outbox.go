@@ -390,6 +390,12 @@ func (m *Manager) housekeeping(now time.Time) {
 	m.pruneHistories(now)
 	m.pruneIssued(now)
 	m.pruneRetiredKEMs(now)
+	for id, fr := range m.featureReqs {
+		if now.Sub(fr.at) > featureReqTTL {
+			delete(m.featureReqs, id)
+		}
+	}
+	m.tickFeatures(now)
 }
 
 // unlockKey ordering keeps the sealed header deterministic.
@@ -403,4 +409,13 @@ func statusOf(err error) (int, bool) {
 		return e.Status, true
 	}
 	return 0, false
+}
+
+// tickFeatures runs the work features have due by the clock (TickObserver).
+func (m *Manager) tickFeatures(now time.Time) {
+	for _, f := range m.features {
+		if o, ok := f.(TickObserver); ok {
+			o.Tick(m.session(now))
+		}
+	}
 }

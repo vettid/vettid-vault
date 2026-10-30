@@ -177,6 +177,16 @@ type KeyRotationObserver interface {
 	CredentialKeyRotated(s *vault.Session, r *credwire.KeyRotation)
 }
 
+// KeyRotationSigner is implemented by an observer that must sign with both
+// credential keys while they are open (0.81.1 §3.5.5: the vote feature
+// re-signs the cast_sig of every ballot that is not final). The keys are
+// valid only during the call; they are wiped when the rotation ends. It is
+// called after every KeyRotationObserver has seen the statement, so what
+// it sends is queued after the statement.
+type KeyRotationSigner interface {
+	CredentialKeysOpen(s *vault.Session, oldKey, newKey ed25519.PrivateKey)
+}
+
 // AddKeyRotationObserver registers an observer (at construction).
 func (f *Feature) AddKeyRotationObserver(o KeyRotationObserver) {
 	f.mu.Lock()
@@ -1642,8 +1652,9 @@ func (f *Feature) rotate(s *vault.Session, inner *Inner, p *Payload) (json.RawMe
 	// and by itself (§3.5.5).
 	oldPriv, newPriv := ed25519.NewKeyFromSeed(inner.Key), ed25519.NewKeyFromSeed(ks)
 	stmt, err := credwire.NewKeyRotation(oldPriv, newPriv)
-	suite.Wipe(oldPriv)
-	suite.Wipe(newPriv)
+	// Both keys stay open to the signers below, and are wiped at the end.
+	defer suite.Wipe(oldPriv)
+	defer suite.Wipe(newPriv)
 	if err != nil {
 		suite.Wipe(ks)
 		return nil, errInternal
@@ -1671,6 +1682,11 @@ func (f *Feature) rotate(s *vault.Session, inner *Inner, p *Payload) (json.RawMe
 	f.resolveAlarm(s) // the forced rotation (§3.5.9)
 	for _, o := range f.rotObs {
 		o.CredentialKeyRotated(s, stmt)
+	}
+	for _, o := range f.rotObs {
+		if so, ok := o.(KeyRotationSigner); ok {
+			so.CredentialKeysOpen(s, oldPriv, newPriv)
+		}
 	}
 	return out, nil
 }

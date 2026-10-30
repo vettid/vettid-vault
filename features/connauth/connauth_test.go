@@ -862,3 +862,37 @@ func TestWithdrawRegistered(t *testing.T) {
 		t.Fatal("name")
 	}
 }
+
+type respSpy struct{ conns []string }
+
+func (r *respSpy) ResponseSigned(_ *vault.Session, conn string) { r.conns = append(r.conns, conn) }
+
+// What the vote feature needs (VAULT-MESSAGING §10.19.5): the key a
+// connection pinned from a signed response, the rotation statement still
+// owed to it, and a notice that a response was signed.
+func TestSignedInKeyAndOwedRotation(t *testing.T) {
+	a, b := pair()
+	b.w.open = true
+	spy := &respSpy{}
+	b.f.AddResponseObserver(spy)
+	if len(b.f.SignedInKey("cA")) != 0 || b.f.RotatedBody("cA") != nil {
+		t.Fatal("pinned before a response")
+	}
+	run(t, a, b, true) // b signs a response for a
+	pub := b.w.key.Public().(ed25519.PublicKey)
+	if string(b.f.SignedInKey("cA")) != string(pub) || b.f.RotatedBody("cA") != nil {
+		t.Fatalf("after a response: %x", b.f.SignedInKey("cA"))
+	}
+	if len(spy.conns) != 1 || spy.conns[0] != "cA" {
+		t.Errorf("observer %v", spy.conns)
+	}
+	// A rotation whose statement was not delivered stays owed.
+	b.h.Conns["cA"] = vault.PeerInfo{ID: "cA", Kind: vault.KindConnection, State: "closed", IK: a.h.IK}
+	rotate(t, b, 0xd1)
+	if body := b.f.RotatedBody("cA"); body == nil {
+		t.Error("no owed statement")
+	}
+	if string(b.f.SignedInKey("cA")) != string(pub) {
+		t.Error("the pin moved without a response")
+	}
+}

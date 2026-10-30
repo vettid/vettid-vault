@@ -89,12 +89,42 @@ type extRec struct {
 	Closes int64           `json:"closes_at"`
 }
 
-// ballot is the member's ballot and what came back (PR 3 fills it).
+// sendRec is one send of the ballot (vote.cast), kept to tell which earlier
+// sends are unanswered and which body a refusal answers.
+type sendRec struct {
+	ID       string `json:"id"`
+	AtMS     int64  `json:"at_ms"`
+	Gen      int    `json:"gen"` // the body generation sent (b.Gen at the time)
+	Answered bool   `json:"answered,omitempty"`
+}
+
+// ballot is the member's ballot and what came back (VAULT-MESSAGING
+// §10.19.3, §10.19.5).
 type ballot struct {
-	State      string   `json:"state"`
-	Code       string   `json:"code,omitempty"`
-	ChoiceID   string   `json:"choice_id,omitempty"`
-	BallotSig  []byte   `json:"ballot_sig,omitempty"`
+	State  string `json:"state"`
+	Reason string `json:"reason,omitempty"` // waiting: not_open, not_signed_in, closed, bad_ballot
+	Code   string `json:"code,omitempty"`   // refused: the signed refusal's code, or connection_ended
+
+	ChoiceID  string `json:"choice_id"`
+	VK        []byte `json:"vk,omitempty"` // the voting key the ballot was signed with
+	BallotSig []byte `json:"ballot_sig"`
+	CastSig   []byte `json:"cast_sig,omitempty"`
+	Body      []byte `json:"body,omitempty"` // the exact vote.cast body, re-signed at a credential rotation
+
+	// Gen counts the re-signed bodies sent to the connection after a
+	// rotation statement; SentGen is the generation last sent.
+	Gen     int       `json:"gen,omitempty"`
+	SentGen int       `json:"sent_gen,omitempty"`
+	Sends   []sendRec `json:"sends,omitempty"`    // the last 64
+	LostOld bool      `json:"lost_old,omitempty"` // an unanswered send fell out of Sends
+
+	FirstSendMS  int64 `json:"first_send_ms,omitempty"`
+	LastAnswerMS int64 `json:"last_answer_ms,omitempty"` // a verified answer
+	RoundStartMS int64 `json:"round_start_ms,omitempty"`
+	Round        int   `json:"round,omitempty"` // sends in the current round of the schedule
+	NextSendMS   int64 `json:"next_send_ms,omitempty"`
+	NextStatusMS int64 `json:"next_status_ms,omitempty"`
+
 	MsgMS      int64    `json:"msg_ms,omitempty"`
 	ReceiptSig []byte   `json:"receipt_sig,omitempty"`
 	Refusals   [][]byte `json:"refusals,omitempty"` // signed refusals, verbatim, the last 8
@@ -106,6 +136,27 @@ func (b *ballot) final() bool {
 		return true
 	}
 	return false
+}
+
+// svcBallot is the ballot the service holds for the member's code, which the
+// member is asked to confirm (after a restore, §10.19.5), or the other
+// ballot of a conflict or a dispute (evidence).
+type svcBallot struct {
+	VK         []byte `json:"vk"`
+	ChoiceID   string `json:"choice_id"`
+	BallotSig  []byte `json:"ballot_sig"`
+	MsgMS      int64  `json:"msg_ms,omitempty"`
+	ReceiptSig []byte `json:"receipt_sig,omitempty"`
+}
+
+// results is what the vault keeps of a checked result (§10.19.6).
+type results struct {
+	Doc    []byte          `json:"doc"`
+	Sig    []byte          `json:"sig"`
+	Bundle json.RawMessage `json:"bundle,omitempty"`
+	Row    *svcBallot      `json:"row,omitempty"` // nil: an empty row
+	Proof  *proof          `json:"proof,omitempty"`
+	AtMS   int64           `json:"at_ms"`
 }
 
 // record is one proposal kept (§10.19.2).
@@ -159,6 +210,24 @@ type record struct {
 	Ballot         *ballot `json:"ballot,omitempty"`
 	RefusalProblem bool    `json:"refusal_problem,omitempty"` // a refusal raised a vote.problem
 
+	// Restore: the vault was restored (a recovery, a transfer) and asks the
+	// service what it recorded; no cast until it answers (§10.19.5). AskMS
+	// is the next ask.
+	Restore bool  `json:"restore,omitempty"`
+	AskMS   int64 `json:"ask_ms,omitempty"`
+	// ServiceBallot is the ballot a status answer carried that the vault
+	// has no receipt for: the member confirms it (vote.confirm).
+	ServiceBallot *svcBallot `json:"service_ballot,omitempty"`
+	// Other is the other ballot of a conflict or a dispute (evidence).
+	Other *svcBallot `json:"other,omitempty"`
+	// StatusAnswers are the signed status answers and refusals kept as
+	// evidence, verbatim, the last 8.
+	StatusAnswers [][]byte `json:"status_answers,omitempty"`
+	CheckAskMS    int64    `json:"check_ask_ms,omitempty"` // the last app-asked vote.status (rate limit)
+	CheckDueSent  bool     `json:"check_due_sent,omitempty"`
+	Results       *results `json:"results,omitempty"`
+	ResultsMatch  string   `json:"results_hash_match,omitempty"` // "", "yes" or "no": vote.closed's hash against the results (evidence only)
+
 	// AbsentMS is the vault-clock time of the first `absent` answer after the
 	// close in force (a found document clears it); unpublished needs a second
 	// at least ten minutes later.
@@ -209,10 +278,11 @@ type state struct {
 	Dropped  map[string]*droppedNote `json:"dropped,omitempty"`  // votes dropped for the cap, by connection
 	Problems map[string]bool         `json:"problems,omitempty"` // the problem cap was hit, by connection
 	FeedAt   map[string]int64        `json:"feed_at,omitempty"`  // the last cap vote.problem feed item, by connection (ms)
-	// Oversize are the hashes (first 8 bytes, hex) of the over-cap service
-	// lists already audited (one vote.list_ignored entry per hash), oldest
-	// first, at most 64.
-	Oversize []string `json:"oversize,omitempty"`
+	// OversizeHash is the latest over-cap service list's hash (first 8 bytes,
+	// hex) and OversizeAtMS when vote.list_ignored was last audited (at most
+	// once a day).
+	OversizeHash string `json:"oversize_hash,omitempty"`
+	OversizeAtMS int64  `json:"oversize_at_ms,omitempty"`
 }
 
 func (st *state) init() {
@@ -240,7 +310,7 @@ func (r *record) state(now time.Time) string {
 	switch {
 	case r.RejectReason != "":
 		return StateRejected
-	case r.Reason != "":
+	case r.Reason != "" || r.Restore:
 		return StateChecking
 	case now.Unix() >= r.Closes:
 		return StateClosed
@@ -252,6 +322,17 @@ func (r *record) state(now time.Time) string {
 
 // signers are the service keys to look the record's service up by.
 func (r *record) signers() [][]byte { return [][]byte{r.ServiceIK, r.Signer} }
+
+// checkingReason is the reason shown for a `checking` record.
+func (r *record) checkingReason() string {
+	if r.Reason != "" {
+		return r.Reason
+	}
+	if r.Restore {
+		return ReasonRestore
+	}
+	return ""
+}
 
 func (r *record) closed(now time.Time) bool { return now.Unix() >= r.Closes }
 
@@ -272,7 +353,7 @@ func (r *record) dueAt() time.Time {
 
 // checkPending reports a check that is due and not yet settled.
 func (r *record) checkPending(now time.Time) bool {
-	if r.RejectReason != "" || r.Reason != "" {
+	if r.RejectReason != "" || r.Reason != "" || r.Restore {
 		return false
 	}
 	return r.Check == CheckPending || r.Check == "" && !now.Before(r.dueAt()) && r.closed(now)
@@ -294,7 +375,7 @@ func (r *record) problem() bool {
 // closed without a ballot and its check is not due. In-progress records
 // (checking, upcoming, open, a pending check, a ballot not final) never.
 func (r *record) evictable(now time.Time) bool {
-	if r.problem() || r.Reason != "" || !r.closed(now) || r.checkPending(now) {
+	if r.problem() || r.Reason != "" || r.Restore || !r.closed(now) || r.checkPending(now) {
 		return false
 	}
 	clean := r.Check == CheckVerified || r.Check == CheckUnconfirmed || r.Check == CheckGaveUp
@@ -311,7 +392,10 @@ func (r *record) toCompact() *compact {
 		c.Outcome = r.Check
 	}
 	if b := r.Ballot; b != nil {
-		c.VK, c.ChoiceID, c.BallotSig, c.MsgMS, c.ReceiptSig, c.Refusals = r.VK, b.ChoiceID, b.BallotSig, b.MsgMS, b.ReceiptSig, b.Refusals
+		c.VK, c.ChoiceID, c.BallotSig, c.MsgMS, c.ReceiptSig, c.Refusals = b.VK, b.ChoiceID, b.BallotSig, b.MsgMS, b.ReceiptSig, b.Refusals
+		if len(c.VK) == 0 {
+			c.VK = r.VK
+		}
 	}
 	return c
 }

@@ -19,6 +19,7 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"sync"
+	"time"
 
 	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vms/envelope"
@@ -38,18 +39,45 @@ type Options struct {
 	Roots   []*votewire.TrustRoot
 }
 
+// Keys gives access to the credential key during the unlock window
+// (credential.Feature.UseKey, §3.5.3).
+type Keys interface {
+	UseKey(now time.Time, ttl time.Duration) (ed25519.PrivateKey, bool)
+}
+
+// Auth is what the vote feature asks of member authentication (§10.4):
+// the credential key a connection pinned (from a signed response the vault
+// sent it), and the rotation statement still owed to it.
+type Auth interface {
+	SignedInKey(conn string) []byte
+	RotatedBody(conn string) []byte
+}
+
+// Deps are the features the vote feature works with. Without Keys nothing
+// can be cast.
+type Deps struct {
+	Keys Keys
+	Auth Auth
+}
+
 // Feature implements vault.Feature.
 type Feature struct {
-	mu   sync.Mutex
-	opt  Options
-	st   state
-	last int64      // unix ms of the last recheck (memory only)
-	idx  *listIndex // the held list, parsed (memory only)
+	mu    sync.Mutex
+	dep   Deps
+	pend  map[string]pendRef // our outstanding requests by inner id (memory only)
+	asked map[string]int64   // the last RequestProposal by connection|id, ms (memory only)
+	opt   Options
+	st    state
+	last  int64      // unix ms of the last recheck (memory only)
+	idx   *listIndex // the held list, parsed (memory only)
 }
 
 // New returns the feature.
-func New(o Options) *Feature {
-	f := &Feature{opt: o}
+func New(o Options, d ...Deps) *Feature {
+	f := &Feature{opt: o, pend: map[string]pendRef{}, asked: map[string]int64{}}
+	if len(d) > 0 {
+		f.dep = d[0]
+	}
 	f.st.init()
 	return f
 }

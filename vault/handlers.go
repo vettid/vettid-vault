@@ -241,6 +241,14 @@ type Host interface {
 	// Send sends a message to one principal (an active connection or owner
 	// device) with options (an `exp`, or memory-only delivery).
 	Send(to, typ string, body json.RawMessage, o SendOptions, now time.Time) error
+	// SendRequest sends a request to an active connection and registers it,
+	// so that its response reaches the feature as a ResponseObserver
+	// (0.81.2, the vote feature's vote.cast and vote.status). It returns the
+	// request's inner id.
+	SendRequest(to, typ string, body json.RawMessage, now time.Time) (string, error)
+	// OwnIdentityKeys are the vault's identity key and the earlier ones of
+	// its rotation chain (§3.4), current first.
+	OwnIdentityKeys() []ed25519.PublicKey
 	// NotifyDevicesWith is NotifyDevices with options.
 	NotifyDevicesWith(typ string, body json.RawMessage, except string, o SendOptions, now time.Time)
 	// SignICEConfig signs a call's ICE configuration with the vault's
@@ -404,6 +412,17 @@ func (s *Session) Send(to, typ string, body json.RawMessage, o SendOptions) erro
 	return s.host.Send(to, typ, body, o, s.now)
 }
 
+// SendRequest sends a request to an active connection; its response is
+// handed to the features that implement ResponseObserver. It returns the
+// request's inner id.
+func (s *Session) SendRequest(to, typ string, body json.RawMessage) (string, error) {
+	return s.host.SendRequest(to, typ, body, s.now)
+}
+
+// OwnIdentityKeys are the vault's identity key and the earlier ones of its
+// rotation chain, current first.
+func (s *Session) OwnIdentityKeys() []ed25519.PublicKey { return s.host.OwnIdentityKeys() }
+
 // Device returns an active owner device that may receive messages now.
 func (s *Session) Device(id string) (PeerInfo, bool) { return s.host.Device(id) }
 
@@ -517,6 +536,29 @@ type Activity struct {
 // log and the feed).
 type ActivitySink interface {
 	RecordActivity(s *Session, a Activity)
+}
+
+// ResponseObserver is implemented by a feature that sends requests to a
+// connection (Session.SendRequest) and handles the answers. Response is
+// called with the answering connection as the session's sender and the
+// response as `in` (Status ok or error, Re the request's id, Body); it
+// reports whether it took the response. A response to a request the vault
+// no longer knows (after a restart) is dropped, as any response that
+// matches no request (§8.1).
+type ResponseObserver interface {
+	Response(s *Session, in *envelope.Inner) bool
+}
+
+// TickObserver is implemented by features with work that is due by the
+// clock (the vote feature's sending schedule, its checks). Tick is called
+// each time the vault processes a batch, held included, locked never.
+type TickObserver interface {
+	Tick(s *Session)
+}
+
+// RecoveryObserver is told when a recovery completes (§11.11.5).
+type RecoveryObserver interface {
+	RecoveryCompleted(s *Session)
 }
 
 // ConnectionObserver is implemented by features that act when a
@@ -688,3 +730,12 @@ func (t TypeSpec) Allows(kind string) bool {
 	}
 	return false
 }
+
+// featureReq is a request a feature sent and awaits the answer to.
+type featureReq struct {
+	peer, typ string
+	at        time.Time
+}
+
+// featureReqTTL is how long an unanswered feature request is remembered.
+const featureReqTTL = 25 * time.Hour

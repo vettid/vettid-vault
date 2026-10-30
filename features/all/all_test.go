@@ -6,6 +6,9 @@ import (
 	"testing"
 
 	"github.com/vettid/vettid-vault/features/all"
+	"github.com/vettid/vettid-vault/features/connauth"
+	"github.com/vettid/vettid-vault/features/credential"
+	"github.com/vettid/vettid-vault/features/vote"
 	"github.com/vettid/vettid-vault/vault"
 )
 
@@ -118,5 +121,32 @@ func TestSetFollowsTheList(t *testing.T) {
 	}
 	if err := all.CheckOptional(nil); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// The vote feature (0.81.0, 0.81.1) is wired to the features it works with:
+// the credential's rotation (both keys open), member authentication's signed
+// responses, and the vault's hooks for responses, ticks and restores.
+func TestVoteFeatureHooks(t *testing.T) {
+	s := all.NewSet(all.DevOptionsWith([]string{"vote"}))
+	if s.Vote == nil {
+		t.Fatal("vote not registered")
+	}
+	var f any = s.Vote
+	for name, ok := range map[string]bool{
+		"credential.KeyRotationObserver":  func() bool { _, ok := f.(credential.KeyRotationObserver); return ok }(),
+		"credential.KeyRotationSigner":    func() bool { _, ok := f.(credential.KeyRotationSigner); return ok }(),
+		"connauth.ResponseObserver":       func() bool { _, ok := f.(connauth.ResponseObserver); return ok }(),
+		"vault.ResponseObserver":          func() bool { _, ok := f.(vault.ResponseObserver); return ok }(),
+		"vault.TickObserver":              func() bool { _, ok := f.(vault.TickObserver); return ok }(),
+		"vault.TransferObserver":          func() bool { _, ok := f.(vault.TransferObserver); return ok }(),
+		"vault.RecoveryObserver":          func() bool { _, ok := f.(vault.RecoveryObserver); return ok }(),
+		"vault.ConnectionRemovedObserver": func() bool { _, ok := f.(vault.ConnectionRemovedObserver); return ok }(),
+		"vote.Auth":                       func() bool { _, ok := any(s.ConnAuth).(vote.Auth); return ok }(),
+		"vote.Keys":                       func() bool { _, ok := any(s.Credential).(vote.Keys); return ok }(),
+	} {
+		if !ok {
+			t.Errorf("%s", name)
+		}
 	}
 }

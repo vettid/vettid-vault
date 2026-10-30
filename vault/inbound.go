@@ -752,6 +752,16 @@ func (m *Manager) handleResponse(p *Peer, in *envelope.Inner, now time.Time) {
 	if p.Kind == KindConnection && m.attUnsupported(p, in, now) {
 		return // a peer without release A answered our attachment's deliver (§10.5.1)
 	}
+	if fr, ok := m.featureReqs[in.Re]; ok && fr.peer == p.ID {
+		delete(m.featureReqs, in.Re)
+		s := &Session{m: m, peer: p, host: managerHost{m}, from: info(p), now: now, inner: in, relayAt: m.relayAt}
+		for _, f := range m.features {
+			if o, ok := f.(ResponseObserver); ok && o.Response(s, in) {
+				return
+			}
+		}
+		return
+	}
 	peer, ok := m.requests[in.Re]
 	if !ok || peer != p.ID {
 		if p.isService() {

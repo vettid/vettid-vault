@@ -312,7 +312,15 @@ type Manager struct {
 	// until then a marked vault delivers nothing (holdForMark).
 	markOK bool
 
-	locked      bool
+	locked bool
+	// drainedOnce: a collect has returned less than a full batch since
+	// this unlock; holdAnswers: housekeeping keeps back the due held
+	// neutral answers until then (0.80.0, §10.4.1).
+	drainedOnce, holdAnswers bool
+	// openedAt is when this Manager was made (the unlock): the hold ends
+	// at the first drain or HeldAnswerHoldBound after it, whichever is
+	// first, so a mailbox that stays full cannot hold the answers forever.
+	openedAt    time.Time
 	lockPending bool
 	lockReason  string
 	// unlockID names this opening of the vault (VAULT-MESSAGING 0.29.0
@@ -641,6 +649,9 @@ func newManager(o Options, st *State, hdr *Header, dek []byte) *Manager {
 		awaiting: map[string]*handshake.Responder{}, outgoing: map[string]*handshake.Initiator{},
 		ephemeralSeen: map[string]time.Time{}, rates: map[string]*rateWindow{}, requests: map[string]string{}, requestTypes: map[string]string{},
 		unlockID: newUnlockID(),
+	}
+	if o.Now != nil {
+		m.openedAt = o.Now()
 	}
 	if dek != nil {
 		m.holdsDEK = true

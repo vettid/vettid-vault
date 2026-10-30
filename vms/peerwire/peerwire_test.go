@@ -425,3 +425,20 @@ func TestConnAuthMatchCode(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// 0.80.0: the withdraw body is {request_id}; a missing or non-string id is
+// no withdraw, extra members are ignored.
+func TestConnAuthWithdraw(t *testing.T) {
+	id := "01JB2Z6V9K3M4N5P6Q7R8S9T0V"
+	if got, ok := ParseConnAuthWithdraw(ConnAuthWithdrawBody(id)); !ok || got != id {
+		t.Fatalf("%q %v", got, ok)
+	}
+	if got, ok := ParseConnAuthWithdraw([]byte(`{"request_id":"` + id + `","x":1}`)); !ok || got != id {
+		t.Fatalf("extra member: %q %v", got, ok)
+	}
+	for _, bad := range []string{``, `{}`, `{"request_id":7}`, `{"request_id":""}`, `[]`, `nope`} {
+		if _, ok := ParseConnAuthWithdraw([]byte(bad)); ok {
+			t.Fatalf("%q accepted", bad)
+		}
+	}
+}

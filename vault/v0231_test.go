@@ -3,11 +3,16 @@ package vault
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"sort"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/vettid/vettid-relay/relayauth"
+	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/envelope"
+	"github.com/vettid/vettid-vault/vms/peerwire"
 )
 
 // VAULT-MESSAGING 0.23.1: errata to 0.23.0 from its implementation
@@ -167,5 +172,193 @@ func TestHeldAnswerAfterUnlock(t *testing.T) {
 	m.housekeeping(later)
 	if len(p.Asks.Held) != 0 {
 		t.Fatalf("still held after the first housekeeping: %+v", p.Asks.Held)
+	}
+}
+
+// 0.80.0 (§10.4.1): a held answer that fell due while the vault was
+// locked is not sent by the first batch's housekeeping, before the batch's
+// messages, but after the first drain (a batch of less than MaxBatch), so
+// that a withdraw collected in that drain still drops it.
+func TestHeldAnswersAfterFirstDrain(t *testing.T) {
+	d := newDevFixture(t)
+	d.addConnection("c9", 0x90)
+	d.m.mu.Lock()
+	d.m.opt.AskRand = func(int64) int64 { return 0 }
+	d.m.st.Connections["c9"].Asks = &AskState{Muted: true}
+	now := time.Now()
+	for _, ref := range []string{"01JB2Z6V9K3M4N5P6Q7R8S9T0V", "01JB2Z6V9K3M4N5P6Q7R8S9T0W"} {
+		(managerHost{d.m}).Ask("c9", grantAsk(ref, "x"), now.Add(-3*time.Hour))
+	}
+	d.m.mu.Unlock()
+	if err := d.m.Lock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	m, _, err := d.unlock(testPIN, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	held := func() int {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		return len(m.st.Connections["c9"].Asks.Held)
+	}
+	if held() != 2 {
+		t.Fatalf("%d held after the unlock", held())
+	}
+	// A full batch is not a drain: the answers stay held, whatever is due.
+	full := make([]Message, MaxBatch)
+	for i := range full {
+		full[i] = Message{MsgID: "full" + string(rune('A'+i)), Sender: "!"}
+	}
+	_ = m.ProcessBatch(context.Background(), &fakeCollector{}, full)
+	if held() != 2 {
+		t.Fatalf("%d held after a full batch", held())
+	}
+	// A withdraw handled in the batch drops one before the rest go out.
+	m.mu.Lock()
+	DropHeldAnswer(m.st.Connections["c9"].Asks, "data.decided", "01JB2Z6V9K3M4N5P6Q7R8S9T0V")
+	m.mu.Unlock()
+	_ = m.ProcessBatch(context.Background(), &fakeCollector{}, nil)
+	if held() != 0 {
+		t.Fatalf("%d held after the first drain", held())
+	}
+	// After that, housekeeping sends what is due as before.
+	m.mu.Lock()
+	m.st.Connections["c9"].Asks.Held = []HeldAnswer{{Due: now, Type: "data.decided", Ref: "x"}}
+	m.mu.Unlock()
+	_ = m.ProcessBatch(context.Background(), &fakeCollector{}, nil)
+	if held() != 0 {
+		t.Fatal("a later answer was held back")
+	}
+}
+
+// withdrawStub stands for features/connauth in this package (which cannot
+// import it): it registers connection.authenticate.withdraw for
+// connections and does what connauth does with a held answer.
+type withdrawStub struct{}
+
+func (withdrawStub) Name() string { return "connauth" }
+func (withdrawStub) Types() []TypeSpec {
+	return []TypeSpec{{Type: peerwire.TypeConnAuthWithdraw, From: []string{KindConnection}}}
+}
+func (withdrawStub) Load(json.RawMessage) error     { return nil }
+func (withdrawStub) Save() (json.RawMessage, error) { return json.RawMessage(`{}`), nil }
+func (withdrawStub) Handle(_ context.Context, s *Session, in *envelope.Inner) (json.RawMessage, error) {
+	if id, ok := peerwire.ParseConnAuthWithdraw(in.Body); ok {
+		s.DropHeld(s.From().ID, peerwire.TypeConnAuthResponse, id)
+	}
+	return nil, nil
+}
+
+// connMsg seals a message from the connection td, as it is collected.
+func (d *devFixture) connMsg(t testing.TB, td *tdev, typ, body string) Message {
+	t.Helper()
+	d.seq++
+	id, _ := envelope.NewULID(time.Now())
+	raw, err := td.ep.Seal(&envelope.Inner{ID: id, Type: typ, TS: time.Now(), Body: []byte(body)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return Message{MsgID: fmt.Sprintf("w%d", d.seq), Sender: relayauth.EncodeKey(td.peer.Relay.PK), JTI: "standing-" + td.peer.ID, Payload: raw}
+}
+
+// heldFixture is a vault just "unlocked" (its first drain still to come)
+// with a connection that has held neutral answers for the given refs, all
+// long due.
+func heldFixture(t *testing.T, refs ...string) (*devFixture, *tdev) {
+	t.Helper()
+	d := newDevFixture(t)
+	td := d.asConnection(t, "c1", 0x70)
+	d.m.mu.Lock()
+	d.m.addFeature(withdrawStub{})
+	d.m.drainedOnce = false
+	d.m.openedAt = time.Now()
+	st := &AskState{}
+	for _, r := range refs {
+		st.Held = append(st.Held, HeldAnswer{Due: time.Now().Add(-time.Hour), Type: peerwire.TypeConnAuthResponse, Ref: r,
+			Body: peerwire.DeniedConnAuth(r).Marshal()})
+	}
+	d.m.st.Connections["c1"].Asks = st
+	d.m.mu.Unlock()
+	d.inbox(td)
+	return d, td
+}
+
+func sentRefs(ins []*envelope.Inner) []string {
+	var out []string
+	for _, in := range ins {
+		if in.Type == peerwire.TypeConnAuthResponse {
+			o, _ := strictjson.ParseObject(in.Body)
+			r, _ := o.String("request_id")
+			out = append(out, r)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+const (
+	refA = "01JB2Z6V9K3M4N5P6Q7R8S9T0A"
+	refB = "01JB2Z6V9K3M4N5P6Q7R8S9T0B"
+	refC = "01JB2Z6V9K3M4N5P6Q7R8S9T0C"
+	refX = "01JB2Z6V9K3M4N5P6Q7R8S9T0X"
+)
+
+// 0.80.0: a withdraw collected in the first drain after an unlock drops
+// the due held answer of its challenge before anything goes to the peer
+// (the peer gets nothing at all); with several held, only the named one is
+// dropped and an unknown id drops nothing. Fails if DropHeld does nothing,
+// matches without the ref, or if the answers are sent before the batch's
+// messages are handled.
+func TestWithdrawInFirstDrainDropsHeldAnswer(t *testing.T) {
+	d, td := heldFixture(t, refB)
+	msg := d.connMsg(t, td, peerwire.TypeConnAuthWithdraw, string(peerwire.ConnAuthWithdrawBody(refB)))
+	if err := d.m.ProcessBatch(context.Background(), &fakeCollector{}, []Message{msg}); err != nil {
+		t.Fatal(err)
+	}
+	// (relay.token.issued and other upkeep may go out; no answer may.)
+	if got := sentRefs(d.inbox(td)["c1"]); len(got) != 0 {
+		t.Fatalf("the peer got an answer after a withdraw of its only held challenge: %v", got)
+	}
+	d.m.mu.Lock()
+	if n := len(d.m.st.Connections["c1"].Asks.Held); n != 0 {
+		t.Fatalf("%d still held", n)
+	}
+	d.m.mu.Unlock()
+
+	d, td = heldFixture(t, refA, refB, refC)
+	batch := []Message{
+		d.connMsg(t, td, peerwire.TypeConnAuthWithdraw, string(peerwire.ConnAuthWithdrawBody(refB))), // the second, not the first
+		d.connMsg(t, td, peerwire.TypeConnAuthWithdraw, string(peerwire.ConnAuthWithdrawBody(refX))), // unknown: nothing
+	}
+	if err := d.m.ProcessBatch(context.Background(), &fakeCollector{}, batch); err != nil {
+		t.Fatal(err)
+	}
+	if got := sentRefs(d.inbox(td)["c1"]); len(got) != 2 || got[0] != refA || got[1] != refC {
+		t.Fatalf("answers sent %v, want [%s %s]", got, refA, refC)
+	}
+}
+
+// A mailbox that stays full cannot hold the answers forever: the hold
+// ends HeldAnswerHoldBound after the unlock even without a drain.
+func TestHeldAnswersHoldBound(t *testing.T) {
+	full := func(d *devFixture) []Message {
+		b := make([]Message, MaxBatch)
+		for i := range b {
+			b[i] = Message{MsgID: fmt.Sprintf("full%d", i), Sender: "!"}
+		}
+		return b
+	}
+	d, td := heldFixture(t, refA)
+	_ = d.m.ProcessBatch(context.Background(), &fakeCollector{}, full(d))
+	if got := sentRefs(d.inbox(td)["c1"]); len(got) != 0 {
+		t.Fatalf("sent within the bound: %v", got)
+	}
+	d.m.mu.Lock()
+	d.m.openedAt = time.Now().Add(-HeldAnswerHoldBound - time.Second)
+	d.m.mu.Unlock()
+	_ = d.m.ProcessBatch(context.Background(), &fakeCollector{}, full(d))
+	if got := sentRefs(d.inbox(td)["c1"]); len(got) != 1 || got[0] != refA {
+		t.Fatalf("not sent after the bound: %v", got)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -288,6 +289,9 @@ func TestKeyRotationFollowed(t *testing.T) {
 // it; it returns the challenge a sent.
 func challengeWith(t *testing.T, a, b *side, purpose string, at time.Time) featuretest.Sent {
 	t.Helper()
+	if len(a.f.d.Out) >= MaxPendingOut-1 {
+		a.f.d.Out = map[string]*Challenge{} // the challenger's own cap is not under test
+	}
 	body := `{"connection_id":"cB","context":"example.org, Firefox on Linux"`
 	if purpose != "" {
 		body += `,"purpose":"` + purpose + `"`
@@ -577,5 +581,273 @@ func TestMatchCodeIgnored(t *testing.T) {
 		if got := b.f.OpenAsks(t0); len(got) != 1 {
 			t.Errorf("%s: challenge not handled: %+v", extra, got)
 		}
+	}
+}
+
+// --- connection.authenticate.withdraw (0.80.0, §10.4 "Withdrawing a challenge") ---
+
+func withdraw(b *side, from string, at time.Time, body string) featuretest.Result {
+	return featuretest.Call(b.f, b.h, at, "connection:"+from, "connection.authenticate.withdraw", body)
+}
+
+func withdrawBody(id string) string { return `{"request_id":"` + id + `"}` }
+
+// quiet: nothing was sent to anyone but the owner's devices (no message
+// to the connection) and nothing was audited.
+func quiet(t *testing.T, b *side, what string) {
+	t.Helper()
+	for _, s := range b.h.Sent {
+		if s.To == "cA" || s.To == "cZ" {
+			t.Fatalf("%s: sent to the peer: %+v", what, s)
+		}
+	}
+	if len(b.h.SentOfType("connection.authenticate.response")) != 0 || b.h.HasActivity("connection.authenticate.withdrawn") ||
+		len(b.h.SentOfType("sync.event")) != 0 {
+		t.Fatalf("%s: not silent: %+v %+v", what, b.h.Sent, b.h.Activities)
+	}
+}
+
+// A match on the same connection closes the ask as withdrawn: the sync
+// event with the flag, the audit entry, the ask leaves pending.list and
+// the slot, nothing goes back to the challenger, and a later decision is
+// not_found.
+func TestWithdrawMatch(t *testing.T) {
+	a, b := pair()
+	b.h.AsksOn = true
+	b.w.open = true
+	challengeWith(t, a, b, peerwire.PurposeSignIn, t0)
+	id := field(t, last(t, b.h, "connection.authenticate.pending").Body, "request_id")
+	b.h.Reset()
+	if r := withdraw(b, "cA", t0.Add(time.Second), withdrawBody(id)); !r.OK() {
+		t.Fatalf("withdraw: %q", r.Code)
+	}
+	se := b.h.SentOfType("sync.event")
+	if len(se) != 1 || string(se[0].Body) != `{"kind":"connection.authenticate.decided","request_id":"`+id+`","approved":false,"withdrawn":true}` {
+		t.Fatalf("sync: %+v", se)
+	}
+	var aud *vault.Activity
+	for i := range b.h.Activities {
+		if b.h.Activities[i].Kind == "connection.authenticate.withdrawn" {
+			aud = &b.h.Activities[i]
+		}
+	}
+	if aud == nil || aud.Ref != id || aud.ConnectionID != "cA" || !aud.Audit {
+		t.Fatalf("audit: %+v", b.h.Activities)
+	}
+	for _, s := range b.h.Sent {
+		if s.To == "cA" {
+			t.Fatalf("sent to the challenger: %+v", s)
+		}
+	}
+	if got := b.f.OpenAsks(t0.Add(2 * time.Second)); len(got) != 0 {
+		t.Fatalf("pending.list: %+v", got)
+	}
+	if n := b.f.PendingAsks("cA", t0.Add(2*time.Second)); n != 0 {
+		t.Fatalf("pending count %d", n)
+	}
+	for _, typ := range []string{"connection.authenticate.approve", "connection.authenticate.deny"} {
+		if r := featuretest.Call(b.f, b.h, t0, "app", typ, withdrawBody(id)); r.Code != "not_found" {
+			t.Fatalf("%s after a withdraw: %q", typ, r.Code)
+		}
+	}
+	// Repeated: nothing changes, nothing is sent.
+	b.h.Reset()
+	withdraw(b, "cA", t0.Add(time.Minute), withdrawBody(id))
+	quiet(t, b, "repeat")
+}
+
+// Every other case is ignored in silence: another connection's id, an
+// unknown id, a decided one, an expired one, a malformed body.
+func TestWithdrawNoMatchIsSilent(t *testing.T) {
+	a, b := pair()
+	b.h.AsksOn = true
+	b.w.open = true
+	b.h.Conns["cZ"] = vault.PeerInfo{ID: "cZ", Kind: vault.KindConnection, State: vault.PeerActive}
+	challengeWith(t, a, b, "", t0)
+	open := field(t, last(t, b.h, "connection.authenticate.pending").Body, "request_id")
+	challengeWith(t, a, b, "", t0)
+	decided := field(t, last(t, b.h, "connection.authenticate.pending").Body, "request_id")
+	if r := featuretest.Call(b.f, b.h, t0, "app", "connection.authenticate.deny", withdrawBody(decided)); !r.OK() {
+		t.Fatal(r.Code)
+	}
+	challengeWith(t, a, b, "", t0)
+	expiring := field(t, last(t, b.h, "connection.authenticate.pending").Body, "request_id")
+	late := t0.Add(peerwire.ConnAuthChallengeTTL + time.Second)
+	for name, tc := range map[string]struct {
+		from, body string
+		at         time.Time
+	}{
+		"other connection": {"cZ", withdrawBody(open), t0},
+		"unknown":          {"cA", withdrawBody("01JB2Z6V9K3M4N5P6Q7R8S9T0V"), t0},
+		"decided":          {"cA", withdrawBody(decided), t0},
+		"no id":            {"cA", `{}`, t0},
+		"not a string":     {"cA", `{"request_id":7}`, t0},
+		"not json":         {"cA", `nope`, t0},
+	} {
+		b.h.Reset()
+		withdraw(b, tc.from, tc.at, tc.body)
+		quiet(t, b, name)
+	}
+	// The open one is untouched by all of it.
+	if got := b.f.OpenAsks(t0.Add(time.Second)); len(got) != 1 || got[0].ID != open {
+		t.Fatalf("open asks: %+v", got)
+	}
+	// A withdrawn id is "already withdrawn" the second time.
+	withdraw(b, "cA", t0, withdrawBody(open))
+	b.h.Reset()
+	withdraw(b, "cA", t0, withdrawBody(open))
+	quiet(t, b, "already withdrawn")
+	// Expired: ignored (this also expires the rest).
+	b.h.Reset()
+	withdraw(b, "cA", late, withdrawBody(expiring))
+	quiet(t, b, "expired")
+}
+
+// A withdrawn sign-in frees its slot at once but still counts toward the
+// rate; no cooldown starts and no decline is counted.
+func TestWithdrawSlotRateCooldown(t *testing.T) {
+	a, b := pair()
+	b.h.AsksOn = true
+	ids := func() []string {
+		var out []string
+		for _, c := range b.f.d.In {
+			out = append(out, c.ID)
+		}
+		return out
+	}
+	// Two sign-ins wait (the cap); a third is suppressed as pending.
+	challengeWith(t, a, b, peerwire.PurposeSignIn, t0)
+	challengeWith(t, a, b, peerwire.PurposeSignIn, t0)
+	b.h.Reset()
+	challengeWith(t, a, b, peerwire.PurposeSignIn, t0)
+	if !b.h.HasActivity("drop.ask_pending") {
+		t.Fatal("third sign-in not suppressed")
+	}
+	// Withdraw one: the slot is free for the next, with no cooldown.
+	withdraw(b, "cA", t0, withdrawBody(ids()[0]))
+	st := b.h.Asks["cA"]
+	if len(st.Cooldowns) != 0 || len(st.Declines) != 0 || st.Paused() {
+		t.Fatalf("a withdraw counted as a decline: %+v", st)
+	}
+	b.h.Reset()
+	challengeWith(t, a, b, peerwire.PurposeSignIn, t0)
+	if len(b.h.SentOfType("connection.authenticate.pending")) != 1 {
+		t.Fatalf("slot not freed: %+v", b.h.Activities)
+	}
+	// The rate: 10 sign-ins reached the member in the window (the 4th
+	// counted, and the dropped third did not); withdrawn ones still count.
+	if w := st.Windows[vault.AskBucketSignIn]; w.N != 3 {
+		t.Fatalf("window count %d, want 3", w.N)
+	}
+	for n := 3; n < vault.AskSignInRate; n++ {
+		for _, id := range ids() {
+			withdraw(b, "cA", t0, withdrawBody(id))
+		}
+		b.h.Reset()
+		challengeWith(t, a, b, peerwire.PurposeSignIn, t0)
+		if len(b.h.SentOfType("connection.authenticate.pending")) != 1 {
+			t.Fatalf("sign-in %d did not reach the member", n+1)
+		}
+	}
+	for _, id := range ids() {
+		withdraw(b, "cA", t0, withdrawBody(id))
+	}
+	b.h.Reset()
+	challengeWith(t, a, b, peerwire.PurposeSignIn, t0)
+	if !b.h.HasActivity("drop.ask_rate") {
+		t.Fatalf("the 11th sign-in was not rate-suppressed: %+v", b.h.Activities)
+	}
+}
+
+// A withdraw drops the held neutral answer of a suppressed challenge of
+// the same connection and id, silently; another id or connection keeps
+// its answer. Order: a withdraw collected in the drain after an unlock
+// comes before the answer that fell due while locked (the vault holds
+// due answers back until that drain, vault.TestHeldAnswersAfterFirstDrain).
+func TestWithdrawDropsHeldAnswer(t *testing.T) {
+	a, b := pair()
+	b.h.AsksOn = true
+	b.h.AskRand = func(int64) int64 { return 0 }
+	b.h.Asks = map[string]*vault.AskState{"cA": {Muted: true}}
+	b.h.Conns["cZ"] = vault.PeerInfo{ID: "cZ", Kind: vault.KindConnection, State: vault.PeerActive}
+	challengeWith(t, a, b, "", t0)
+	challengeWith(t, a, b, "", t0)
+	if n := len(b.h.Asks["cA"].Held); n != 2 {
+		t.Fatalf("%d held", n)
+	}
+	first, second := a.f.sortedOut()[0], a.f.sortedOut()[1]
+	if !b.h.HasActivity("drop.ask_muted") {
+		t.Fatal("not suppressed")
+	}
+	b.h.Reset()
+	withdraw(b, "cZ", t0, withdrawBody(first)) // another connection: nothing
+	quiet(t, b, "held, other connection")
+	if len(b.h.Asks["cA"].Held) != 2 {
+		t.Fatal("another connection's withdraw dropped an answer")
+	}
+	withdraw(b, "cA", t0, withdrawBody(first))
+	quiet(t, b, "held answer dropped") // no sync, no audit visible, nothing sent
+	held := b.h.Asks["cA"].Held
+	if len(held) != 1 || held[0].Ref != second {
+		t.Fatalf("held after the withdraw: %+v", held)
+	}
+	// Due later: only the other answer goes out.
+	b.h.Reset()
+	rel := b.h.ReleaseAsks(t0.Add(time.Hour))
+	if len(rel) != 1 || rel[0].Ref != second || len(b.h.SentOfType("connection.authenticate.response")) != 1 {
+		t.Fatalf("released %+v", rel)
+	}
+}
+
+// sortedOut lists the ids of this vault's own outstanding challenges.
+func (f *Feature) sortedOut() []string {
+	var ids []string
+	for id := range f.d.Out {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// A withdrawn ask stays withdrawn across a restart (it is in no list),
+// and the rate window it counted in is the vault's own state.
+func TestWithdrawPersists(t *testing.T) {
+	a, b := pair()
+	b.h.AsksOn = true
+	challengeWith(t, a, b, peerwire.PurposeSignIn, t0)
+	id := field(t, last(t, b.h, "connection.authenticate.pending").Body, "request_id")
+	challengeWith(t, a, b, peerwire.PurposeSignIn, t0)
+	withdraw(b, "cA", t0, withdrawBody(id))
+	g := New(nil)
+	featuretest.RoundTrip(t, b.f, g)
+	if len(g.d.In) != 1 || g.d.In[id] != nil {
+		t.Fatalf("after a restart: %+v", g.d.In)
+	}
+	if got := g.OpenAsks(t0.Add(time.Second)); len(got) != 1 || got[0].ID == id {
+		t.Fatalf("pending.list after a restart: %+v", got)
+	}
+	if r := featuretest.Call(g, b.h, t0, "app", "connection.authenticate.approve", withdrawBody(id)); r.Code != "not_found" {
+		t.Fatalf("approve after a restart: %q", r.Code)
+	}
+}
+
+// §6.4: a connection whose peer_kind is "service" may send the withdraw
+// (it names a challenge by request_id and needs no purpose); the type is
+// registered for connections and for no one else.
+func TestWithdrawRegistered(t *testing.T) {
+	var found bool
+	for _, ts := range New(nil).Types() {
+		if ts.Type == peerwire.TypeConnAuthWithdraw {
+			found = true
+			if ts.Request || len(ts.From) != 1 || ts.From[0] != vault.KindConnection {
+				t.Fatalf("spec: %+v", ts)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("not registered")
+	}
+	if peerwire.TypeConnAuthWithdraw != "connection.authenticate.withdraw" {
+		t.Fatal("name")
 	}
 }

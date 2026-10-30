@@ -114,6 +114,7 @@ func (f *Feature) Types() []vault.TypeSpec {
 		{Type: peerwire.TypeConnAuthChallenge, From: conns, Connections: vault.PeersBoth}, // a service's needs a known purpose (vault.dispatch)
 		{Type: peerwire.TypeConnAuthResponse, From: conns},
 		{Type: peerwire.TypeConnAuthRotated, From: conns},
+		{Type: peerwire.TypeConnAuthWithdraw, From: conns, Connections: vault.PeersBoth},
 	}
 }
 
@@ -180,6 +181,9 @@ func (f *Feature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner
 		return f.list(), nil
 	case peerwire.TypeConnAuthRotated:
 		return nil, f.rotated(s, in.Body)
+	case peerwire.TypeConnAuthWithdraw:
+		f.withdraw(s, in.Body)
+		return nil, nil
 	}
 	return nil, vault.NewError("unsupported_type", "")
 }
@@ -296,6 +300,30 @@ func (f *Feature) challenge(s *vault.Session, in *envelope.Inner) error {
 	s.Record(vault.Activity{Kind: "connection.authenticate.requested", ConnectionID: conn, Ref: c.ID, Direction: "in", Audit: true,
 		Feed: true, Priority: "high", AskBatch: true})
 	return nil
+}
+
+// withdraw: the challenger will no longer accept a challenge (0.80.0,
+// §10.4 "Withdrawing a challenge"). The id is matched only against the
+// open challenges received on the connection the message arrived on. An
+// id that is unknown, decided, expired, withdrawn or never opened is
+// ignored in silence, and nothing is ever sent back. A match closes the ask
+// as withdrawn: it frees its pending slot, still counts toward the rate,
+// starts no cooldown and counts toward no pause. A held neutral answer of
+// a suppressed challenge with that id is dropped silently.
+func (f *Feature) withdraw(s *vault.Session, body []byte) {
+	id, ok := peerwire.ParseConnAuthWithdraw(body)
+	if !ok {
+		return
+	}
+	conn := s.From().ID
+	s.DropHeld(conn, peerwire.TypeConnAuthResponse, id)
+	c := f.d.In[id]
+	if c == nil || c.Conn != conn {
+		return
+	}
+	delete(f.d.In, id)
+	s.Record(vault.Activity{Kind: "connection.authenticate.withdrawn", ConnectionID: conn, Ref: id, Direction: "in", Audit: true})
+	s.SyncEvent("connection.authenticate.decided", strictjson.NewBuilder().String("request_id", id).Bool("approved", false).Bool("withdrawn", true).Bytes())
 }
 
 // pendingBody is the body of the connection.authenticate.pending event

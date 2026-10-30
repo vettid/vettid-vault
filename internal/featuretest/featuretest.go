@@ -152,6 +152,13 @@ func (h *Host) AskDeclined(conn, bucket string, idents []string, now time.Time) 
 	}
 }
 
+// DropHeld implements vault.HeldDropper.
+func (h *Host) DropHeld(conn, typ, ref string) bool {
+	return vault.DropHeldAnswer(h.Asks[conn], typ, ref)
+}
+
+var _ vault.HeldDropper = (*Host)(nil)
+
 // ReleaseAsks sends the held neutral answers due at now, as the vault's
 // housekeeping does, and returns them.
 func (h *Host) ReleaseAsks(now time.Time) []vault.HeldAnswer {

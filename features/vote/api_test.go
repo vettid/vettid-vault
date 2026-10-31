@@ -265,9 +265,30 @@ func TestAPIConfirm(t *testing.T) {
 	c.f.Tick(c.session())
 	own := ed25519.NewKeyFromSeed(c.rec(v.ID).VKSeed)
 	c.answer(v, c.statuses()[0], must(votewire.SignBallot(own, v.Hash, v.Tag, "no")), uint64(c.now.UnixMilli()), true)
+	// While the confirmation is pending: service_ballot {choice_id, msg_ms}
+	// in vote.get and confirm_pending in the list summary; never after.
+	g := obj(t, c.app("vote.get", pairBody("svc", v.ID)))
+	sbo, _ := g.Object("service_ballot")
+	if cid, _ := sbo.String("choice_id"); cid != "no" || !sbo.Has("msg_ms") || len(sbo) != 2 {
+		t.Errorf("service_ballot: %v", g)
+	}
+	lo := obj(t, c.app("vote.list", `{}`))
+	vs, _ := lo.Array("votes")
+	if eo, _ := strictjson.AsObject(vs[0]); eo == nil || !boolOf(eo, "confirm_pending") || eo.Has("service_ballot") {
+		t.Errorf("vote.list: %s", vs[0])
+	}
 	r := c.app("vote.confirm", pairBody("svc", v.ID, `"mine":true`))
 	if !r.OK() || string(r.Body) != `{"ballot":{"state":"recorded"}}` {
 		t.Errorf("%q %s", r.Code, r.Body)
+	}
+	g = obj(t, c.app("vote.get", pairBody("svc", v.ID)))
+	lo = obj(t, c.app("vote.list", `{}`))
+	vs, _ = lo.Array("votes")
+	if g.Has("service_ballot") || g.Has("confirm_pending") {
+		t.Errorf("after the confirmation: %v", g)
+	}
+	if eo, _ := strictjson.AsObject(vs[0]); boolOf(eo, "confirm_pending") {
+		t.Error("confirm_pending after the confirmation")
 	}
 }
 

@@ -492,8 +492,9 @@ func (f *Feature) statusAnswer(s *vault.Session, ref pendRef, in *envelope.Inner
 // own): the first is kept as the evidence (the latest beside it), and the
 // audit entry and the feed item are made once per record. It is a flag on
 // the record (conflict_evidence, 0.81.3), not a ballot state: the member's
-// own ballot goes to `conflict` only when the service's already_voted
-// answer to its cast shows the foreign ballot (answer true).
+// own ballot goes to `conflict` only when it has no receipt (it is not
+// final) and the service's already_voted answer to its cast shows the
+// foreign ballot (answer true); a recorded ballot stays recorded.
 func (f *Feature) foreign(s *vault.Session, r *record, b *ballot, sb *svcBallot, answer bool) {
 	seen := r.Other != nil // raised by the first one, whatever came since
 	if !seen {
@@ -501,7 +502,7 @@ func (f *Feature) foreign(s *vault.Session, r *record, b *ballot, sb *svcBallot,
 	} else {
 		r.OtherLatest = sb
 	}
-	if answer && b != nil && (b.State == BallotRecorded || !b.final()) {
+	if answer && b != nil && !b.final() {
 		f.setFinal(s, r, BallotConflict, "")
 	} else if b == nil || b.State != BallotConflict {
 		r.ConflictEv = true
@@ -641,6 +642,7 @@ func (f *Feature) Tick(s *vault.Session) {
 			delete(f.pend, id)
 		}
 	}
+	f.auditOversize(s)
 	keys := make([]string, 0, len(f.st.Records))
 	for k := range f.st.Records {
 		keys = append(keys, k)

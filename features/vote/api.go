@@ -153,6 +153,9 @@ func (f *Feature) summary(s *vault.Session, r *record, pinned []byte) *strictjso
 	if r.conflictEvidence() {
 		b.Bool("conflict_evidence", true) // the service showed another ballot under the member's code
 	}
+	if r.ServiceBallot != nil {
+		b.Bool("confirm_pending", true) // vote.confirm is waiting for the member
+	}
 	block := f.castBlock(s, r, pinned)
 	b.Bool("can_cast", block == "")
 	if block != "" {
@@ -415,6 +418,11 @@ func (f *Feature) apiGet(s *vault.Session, body []byte) (json.RawMessage, error)
 		b.String("choice_id", r.Ballot.ChoiceID)
 	}
 	b.Uint("extensions", uint64(len(r.Exts)))
+	if sb := r.ServiceBallot; sb != nil {
+		// While a vote.confirm is pending: the ballot the service holds
+		// under the record's own voting key ("Is this your vote?").
+		b.Raw("service_ballot", strictjson.NewBuilder().String("choice_id", sb.ChoiceID).Uint("msg_ms", uint64(sb.MsgMS)).Bytes())
+	}
 	// tally and counts come only from verified results.
 	if r.Results != nil && (r.Check == CheckVerified || r.Check == CheckUnconfirmed) {
 		if res, err := votewire.ParseResults(r.Results.Doc); err == nil {

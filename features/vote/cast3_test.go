@@ -293,3 +293,26 @@ func TestStatusForAProposalNotHeld(t *testing.T) {
 		t.Errorf("%+v", r)
 	}
 }
+
+// A recorded ballot stays recorded when the service shows a foreign ballot
+// (owner decision, 0.81.3): the flag, the problem, once; only a ballot
+// without a receipt goes to `conflict`.
+func TestRecordedStaysRecordedWithConflictEvidence(t *testing.T) {
+	c := newCastEnv(t)
+	v := c.open(1)
+	c.cast(v, "yes")
+	_, ids := c.casts()
+	c.okReceipt(v, ids[0], c.leafOf(v), uint64(c.now.UnixMilli()))
+	c.f.Check(c.session(), "svc", v.ID)
+	_, vk2, _ := ed25519.GenerateKey(rand.Reader)
+	other := must(votewire.SignBallot(vk2, v.Hash, v.Tag, "no"))
+	c.answer(v, c.statuses()[0], other, uint64(c.now.UnixMilli()), true)
+	r := c.rec(v.ID)
+	if r.Ballot.State != BallotRecorded || !r.ConflictEv || !r.problem() || c.count("vote.problem") != 1 || c.count("vote.conflict") != 1 {
+		t.Errorf("%s %v", r.Ballot.State, r.ConflictEv)
+	}
+	g := obj(t, c.app("vote.get", pairBody("svc", v.ID)))
+	if !boolOf(g, "conflict_evidence") {
+		t.Errorf("%v", g)
+	}
+}

@@ -309,7 +309,10 @@ type state struct {
 	// hex) and OversizeAtMS when vote.list_ignored was last audited (at most
 	// once a day).
 	OversizeHash string `json:"oversize_hash,omitempty"`
-	OversizeAtMS int64  `json:"oversize_at_ms,omitempty"`
+	// OversizeAudited is the hash last audited; a latest hash that differs
+	// is pending until a day has passed since OversizeAtMS.
+	OversizeAudited string `json:"oversize_audited,omitempty"`
+	OversizeAtMS    int64  `json:"oversize_at_ms,omitempty"`
 }
 
 func (st *state) init() {

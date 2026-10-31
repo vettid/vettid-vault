@@ -221,8 +221,12 @@ func TestSyncCallLevelRefusalsStay(t *testing.T) {
 		"confirm not an object":  `{"services_confirm":5}`,
 		"list not an object":     `{"services":[5]}`,
 		"list without sig":       `{"services":[{"doc":"` + b64([]byte("x")) + `"}]}`,
-		"duplicate name":         `{"entries":[],"entries":[]}`,
-		"over the body limit":    `{"entries":[],"pad":"` + strings.Repeat("a", votewire.MaxSyncBytes) + `"}`,
+		// VAULT-MESSAGING 0.81.6: the strict parse refuses a duplicate member
+		// name anywhere in the body, a proposal bundle included, so the whole
+		// call fails; the app guards against sending one.
+		"duplicate name in a bundle": `{"entries":[{"proposal_id":"` + v.ID + `","document":` + c.foundDoc(v, `{"a":1,"a":2}`, "") + `}]}`,
+		"duplicate name":             `{"entries":[],"entries":[]}`,
+		"over the body limit":        `{"entries":[],"pad":"` + strings.Repeat("a", votewire.MaxSyncBytes) + `"}`,
 	} {
 		if r := c.app("vote.site.sync", body); r.Code != "bad_request" {
 			t.Errorf("%s: %q", name, r.Code)

@@ -40,6 +40,24 @@ func (f *Feature) SyncServices(s *vault.Session, doc, sig []byte) string {
 	return f.syncServices(s, doc, sig)
 }
 
+// auditOversize audits the latest over-cap list's hash (vote.list_ignored,
+// ref size:<hash8>) if it is not the one last audited and a day has passed
+// since that audit; a hash that arrives within the day stays pending and is
+// audited when the window passes (0.81.3), so a list B within a day of A is
+// still audited later.
+func (f *Feature) auditOversize(s *vault.Session) {
+	st := &f.st
+	if st.OversizeHash == "" || st.OversizeHash == st.OversizeAudited {
+		return
+	}
+	now := s.Now()
+	if st.OversizeAtMS != 0 && now.Sub(time.UnixMilli(st.OversizeAtMS)) < 24*time.Hour {
+		return
+	}
+	st.OversizeAudited, st.OversizeAtMS = st.OversizeHash, now.UnixMilli()
+	f.audit(s, "vote.list_ignored", "", "size:"+st.OversizeHash)
+}
+
 func (f *Feature) syncServices(s *vault.Session, doc, sig []byte) string {
 	now := s.Now()
 	// The size first (BALLOT-PROTOCOL 0.12.5): a list over the cap, or one
@@ -51,14 +69,8 @@ func (f *Feature) syncServices(s *vault.Session, doc, sig []byte) string {
 		// of SHA-256, hex>) when it changes, at most once a day, and no feed
 		// item. The held list stays. The bytes are unverified, so nothing of
 		// them (a version) is read.
-		h := hex.EncodeToString(votewire.H(doc)[:8])
-		if h != f.st.OversizeHash {
-			f.st.OversizeHash = h
-			if f.st.OversizeAtMS == 0 || now.Sub(time.UnixMilli(f.st.OversizeAtMS)) >= 24*time.Hour {
-				f.st.OversizeAtMS = now.UnixMilli()
-				f.audit(s, "vote.list_ignored", "", "size:"+h)
-			}
-		}
+		f.st.OversizeHash = hex.EncodeToString(votewire.H(doc)[:8])
+		f.auditOversize(s) // else pending: audited when the day has passed (Tick)
 		return ListIgnored
 	}
 	if len(f.opt.SiteKey) == 0 || votewire.VerifyServiceList(f.opt.SiteKey, doc, sig) != nil {
@@ -114,6 +126,10 @@ func (f *Feature) syncServices(s *vault.Session, doc, sig []byte) string {
 func (f *Feature) SyncCatchUp(s *vault.Session, lists []ServiceListDoc) []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	return f.syncCatchUp(s, lists)
+}
+
+func (f *Feature) syncCatchUp(s *vault.Session, lists []ServiceListDoc) []string {
 	out := make([]string, len(lists))
 	stopped := false
 	for i, l := range lists {
@@ -223,6 +239,10 @@ var ErrNoSuchVote = errors.New("vote: no such proposal")
 func (f *Feature) SiteDocument(s *vault.Session, conn, id string, d SiteDoc) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	return f.siteDocument(s, conn, id, d)
+}
+
+func (f *Feature) siteDocument(s *vault.Session, conn, id string, d SiteDoc) error {
 	r := f.st.Records[key(conn, id)]
 	if r == nil {
 		return ErrNoSuchVote

@@ -55,7 +55,7 @@ func TestCheckCommand(t *testing.T) {
 	// The committed staging file passes rule 1 and names what it pins.
 	code, out := check("staging", stagingFile)
 	if code != 0 || !strings.Contains(out, "android package com.vettid.app.staging") || !strings.Contains(out, "iOS App ID 3X25CJ86MV.com.vettid.app.staging") ||
-		!strings.Contains(out, "optional features: actions calls intro leash location presence wallet") ||
+		!strings.Contains(out, "optional features: actions calls intro leash location presence vote wallet") ||
 		!strings.Contains(out, "release log: Time scale: 1 day = 1 hour (staging)") {
 		t.Fatalf("staging: %d %s", code, out)
 	}
@@ -96,7 +96,7 @@ func TestCheckCommand(t *testing.T) {
 	// A list that dropped a name is refused, with the name.
 	i := strings.Index(staging, `"features": [`)
 	j := i + strings.Index(staging[i:], `]`)
-	dropped := write("dropped.json", staging[:i]+`"features": ["actions", "calls", "intro", "leash", "location", "presence"`+staging[j:])
+	dropped := write("dropped.json", staging[:i]+`"features": ["actions", "calls", "intro", "leash", "location", "presence", "vote"`+staging[j:])
 	if code, out := check("staging", dropped); code != 0 {
 		t.Fatalf("rule 1 alone refused a shorter list: %s", out)
 	}

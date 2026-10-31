@@ -35,7 +35,9 @@ func (f *Feature) feed(s *vault.Session, kind, conn, ref, priority string) {
 func (f *Feature) event(s *vault.Session, r *record, event string) {
 	b := strictjson.NewBuilder().String("proposal_id", r.ID).String("connection_id", r.Conn).String("event", event).
 		String("state", r.state(s.Now()))
-	s.NotifyAllDevices("vote.event", b.Bytes())
+	// The app only: desktops and agents have no vote access, and an event
+	// such as "ballot" would tell them the owner took part.
+	s.NotifyDevicesWith("vote.event", b.Bytes(), "", vault.SendOptions{Kind: vault.KindApp})
 }
 
 // idOf reads a proposal_id from document bytes that failed the document
@@ -326,6 +328,10 @@ func (f *Feature) intake(s *vault.Session, conn string, msg *votewire.ProposalMs
 	}
 	r.VKSeed = seed
 	r.VK = append([]byte{}, ed25519.NewKeyFromSeed(seed).Public().(ed25519.PublicKey)...)
+	// vote.closing (§10.19.7): a proposal kept after its moment gets none.
+	if !now.Before(closingAt(r)) {
+		r.ClosingFeed = true
+	}
 	f.st.Records[key(conn, id)] = r
 	f.opened(s, r)
 	f.event(s, r, "proposal")
@@ -374,6 +380,13 @@ func (f *Feature) onExtended(s *vault.Session, in *envelope.Inner) (json.RawMess
 		f.audit(s, "drop.vote_malformed", conn, conn)
 		return nil, errBad
 	}
+	return f.extend(s, conn, m)
+}
+
+// extend is the checks of §10.19.4 "On vote.extended" for a message from the
+// service or an extension learned from the site (vote.site.sync): the same
+// checks either way.
+func (f *Feature) extend(s *vault.Session, conn string, m *votewire.ExtendedMsg) (json.RawMessage, error) {
 	r := f.st.Records[key(conn, m.ProposalID)]
 	if r == nil || r.RejectReason != "" {
 		return nil, errNotFound

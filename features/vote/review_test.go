@@ -494,7 +494,7 @@ func TestAnchorRejectionIsFinal(t *testing.T) {
 }
 
 func TestSyncBytesIsOneConstant(t *testing.T) {
-	if votewire.MaxSyncBytes != 1<<20 || votewire.MaxServiceList != 4<<20 {
+	if votewire.MaxSyncBytes != 8257532 || votewire.MaxServiceList != 4<<20 {
 		t.Errorf("%d %d", votewire.MaxSyncBytes, votewire.MaxServiceList)
 	}
 }
@@ -593,5 +593,41 @@ func BenchmarkExtendsLargeList(b *testing.B) {
 		if !l1.Extends(data, l2) {
 			b.Fatal("no")
 		}
+	}
+}
+
+// A list B within a day of list A is still audited, when the day has passed
+// (0.81.3): the hash stays pending and Tick audits it.
+func TestOversizePendingIsAuditedLater(t *testing.T) {
+	e := newEnv(t)
+	a := bytes.Repeat([]byte(" "), votewire.MaxServiceList+1)
+	b := bytes.Repeat([]byte(" "), votewire.MaxServiceList+2)
+	e.h.Reset()
+	e.f.SyncServices(e.session(), a, nil)
+	e.now = e.now.Add(time.Hour)
+	e.f.SyncServices(e.session(), b, nil)
+	if e.count("vote.list_ignored") != 1 {
+		t.Fatalf("within the day: %v", e.h.Activities)
+	}
+	e.now = e.now.Add(2 * time.Hour)
+	e.f.Tick(e.session())
+	if e.count("vote.list_ignored") != 1 {
+		t.Fatal("audited before the day passed")
+	}
+	e.now = e.now.Add(22 * time.Hour)
+	e.f.Tick(e.session())
+	if e.count("vote.list_ignored") != 2 || !e.has("vote.list_ignored", "size:"+hex.EncodeToString(votewire.H(b)[:8])) {
+		t.Fatalf("pending not audited: %v", e.h.Activities)
+	}
+	e.f.Tick(e.session())
+	if e.count("vote.list_ignored") != 2 {
+		t.Error("audited twice")
+	}
+	// The same list A again after B: nothing pending when it is the one last audited.
+	e.now = e.now.Add(25 * time.Hour)
+	e.f.SyncServices(e.session(), b, nil)
+	e.f.Tick(e.session())
+	if e.count("vote.list_ignored") != 2 {
+		t.Error("the audited hash audited again")
 	}
 }

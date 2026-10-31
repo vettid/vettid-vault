@@ -23,7 +23,12 @@ type ResultsSubmit struct {
 // CheckOutcome is the state of the results check: pending (also when the
 // check cannot be made yet, with a reason), verified, unconfirmed, failed
 // (with its reason) or gave_up.
-type CheckOutcome struct{ State, Reason string }
+type CheckOutcome struct {
+	State, Reason string
+	// ConflictEvidence: the service showed a ballot under the member's code
+	// that is not the member's (carried beside a `verified` state).
+	ConflictEvidence bool
+}
 
 // tickCheck marks the results check pending when it is due and gives up
 // seven days after (§10.19.6).
@@ -53,22 +58,53 @@ func (f *Feature) failCheck(s *vault.Session, r *record, reason string) CheckOut
 	f.audit(s, "vote.check_failed", r.Conn, r.ID+":"+reason)
 	f.feed(s, "vote.problem", r.Conn, r.ID, "high")
 	f.event(s, r, "check")
-	return CheckOutcome{State: CheckFailed, Reason: reason}
+	return CheckOutcome{State: CheckFailed, Reason: reason, ConflictEvidence: r.conflictEvidence()}
 }
 
 func sameBallot(b *ballot, row *votewire.RowBallot) bool {
 	return row != nil && eq(row.VK, b.VK) && row.ChoiceID == b.ChoiceID && eq(row.BallotSig, b.BallotSig)
 }
 
+// conflictEvidence reports whether the service showed a ballot under the
+// member's code that is not the member's.
+func (r *record) conflictEvidence() bool {
+	return r.ConflictEv || r.Ballot != nil && r.Ballot.State == BallotConflict
+}
+
+// conflictVerdict is what the results check says of a record with conflict
+// evidence or a disputed ballot, in one place (0.81.3, owner decision
+// 2026-10-30): a ballot with a receipt (`recorded`) whose row is exactly that
+// ballot is `verified` with the flag conflict_evidence beside it (the
+// record stays in the problem set); another row is `failed` (`row_mismatch`); a ballot
+// in `conflict`, none, or one without a receipt, with conflict evidence, is
+// `failed` (`conflict`).
+func conflictVerdict(r *record, row *votewire.RowBallot) (state, reason string, ok bool) {
+	b := r.Ballot
+	switch {
+	case b != nil && b.State == BallotConflict:
+		return CheckFailed, "conflict", true
+	case r.ConflictEv:
+		if b != nil && b.State == BallotRecorded {
+			if sameBallot(b, row) {
+				return CheckVerified, "", true
+			}
+			return CheckFailed, "row_mismatch", true
+		}
+		return CheckFailed, "conflict", true
+	case b != nil && b.State == BallotDisputed:
+		return CheckFailed, "disputed", true
+	}
+	return "", "", false
+}
+
 // verdict is the table of §10.19.6 step 3: what the vault holds against
 // the member's row.
 func verdict(r *record, row *votewire.RowBallot) (state, reason string) {
 	b := r.Ballot
+	if st, why, ok := conflictVerdict(r, row); ok {
+		return st, why
+	}
 	switch {
-	case r.ConflictEv || b != nil && b.State == BallotConflict:
-		return CheckFailed, "conflict"
-	case b != nil && b.State == BallotDisputed:
-		return CheckFailed, "disputed"
 	case b != nil && b.State == BallotRecorded: // a receipt: exactly that ballot
 		if sameBallot(b, row) {
 			return CheckVerified, ""
@@ -111,7 +147,7 @@ func (f *Feature) SubmitResults(s *vault.Session, conn, id string, in ResultsSub
 	now := s.Now()
 	switch r.Check {
 	case CheckVerified, CheckUnconfirmed, CheckFailed, CheckGaveUp:
-		return CheckOutcome{State: r.Check, Reason: r.CheckReason}, nil
+		return CheckOutcome{State: r.Check, Reason: r.CheckReason, ConflictEvidence: r.conflictEvidence()}, nil
 	}
 	if r.checkingReason() != "" || !r.closed(now) {
 		return CheckOutcome{}, errBad
@@ -222,5 +258,5 @@ func (f *Feature) SubmitResults(s *vault.Session, conn, id string, in ResultsSub
 	}
 	f.feed(s, "vote.result", r.Conn, r.ID, "")
 	f.event(s, r, "check")
-	return CheckOutcome{State: state}, nil
+	return CheckOutcome{State: state, ConflictEvidence: r.conflictEvidence()}, nil
 }

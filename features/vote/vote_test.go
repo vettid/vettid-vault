@@ -108,8 +108,12 @@ func (e *env) count(kind string) int {
 
 func TestTypesAreServiceOnly(t *testing.T) {
 	for _, ts := range New(Options{}).Types() {
-		if ts.Connections != vault.PeersService || !ts.Request || !ts.Allows(vault.KindConnection) || ts.Allows(vault.KindApp) {
+		service := map[string]bool{"vote.proposal": true, "vote.extended": true, "vote.closed": true}[ts.Type]
+		switch {
+		case service && (ts.Connections != vault.PeersService || !ts.Request || !ts.Allows(vault.KindConnection) || ts.Allows(vault.KindApp)):
 			t.Errorf("%s: %+v", ts.Type, ts)
+		case !service && (!ts.Request || ts.Allows(vault.KindConnection) || ts.Allows(vault.KindDesktop) || ts.Allows(vault.KindAgent) || !ts.Allows(vault.KindApp)):
+			t.Errorf("%s is not the app's alone: %+v", ts.Type, ts)
 		}
 	}
 	e := newEnv(t)
@@ -145,6 +149,11 @@ func TestProposalKept(t *testing.T) {
 	}
 	if len(e.h.SentOfType("vote.event")) == 0 {
 		t.Error("no vote.event")
+	}
+	for _, sent := range e.h.SentOfType("vote.event") {
+		if sent.Opt.Kind != vault.KindApp {
+			t.Errorf("vote.event not for the app only: %q", sent.Opt.Kind)
+		}
 	}
 	// A re-send: ok, nothing changes (no new key, feed item or event).
 	seed := string(rec.VKSeed)

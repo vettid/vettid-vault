@@ -194,7 +194,7 @@ func NewSet(o Options) *Set {
 		// Signs ballots with the credential key in its unlock window, needs
 		// the key the connection pinned (§10.4), and re-signs its ballots
 		// when the credential key rotates (§3.5.5).
-		s.Vote = vote.New(o.Vote, vote.Deps{Keys: cred, Auth: auth})
+		s.Vote = vote.New(o.Vote, vote.Deps{Keys: cred, Auth: auth, Cred: cred})
 		cred.AddKeyRotationObserver(s.Vote)
 		auth.AddResponseObserver(s.Vote)
 		// The profile.update to a service says so (§10.19.1).

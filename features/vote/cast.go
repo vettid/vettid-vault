@@ -117,6 +117,9 @@ func (f *Feature) Cast(s *vault.Session, conn, id, choice string) (CastResult, e
 	if len(pinned) == 0 {
 		return CastResult{}, codeErr("not_signed_in", strictjson.NewBuilder().String("connection_id", conn).Bytes())
 	}
+	if r.ServiceBallot != nil { // a vote.confirm is pending: no second ballot under the same key
+		return CastResult{}, codeErr("checking", nil)
+	}
 	if r.Restore { // not reachable while state() says checking; kept as the spec's own row
 		return CastResult{}, codeErr("checking", nil)
 	}
@@ -396,10 +399,7 @@ func (f *Feature) castAnswer(s *vault.Session, r *record, in *envelope.Inner) {
 			f.receipt(s, r, int64(rf.BallotMsgMS), rf.ReceiptSig) // exactly this vault's ballot: it is the receipt
 			return
 		}
-		r.Other = &svcBallot{VK: eb.VK, ChoiceID: eb.ChoiceID, BallotSig: eb.BallotSig, MsgMS: int64(rf.BallotMsgMS), ReceiptSig: rf.ReceiptSig}
-		f.setFinal(s, r, BallotConflict, "")
-		f.audit(s, "vote.conflict", r.Conn, r.ID)
-		f.feed(s, "vote.problem", r.Conn, r.ID, "high")
+		f.foreign(s, r, b, &svcBallot{VK: eb.VK, ChoiceID: eb.ChoiceID, BallotSig: eb.BallotSig, MsgMS: int64(rf.BallotMsgMS), ReceiptSig: rf.ReceiptSig}, true)
 	}
 }
 
@@ -487,17 +487,36 @@ func (f *Feature) statusAnswer(s *vault.Session, ref pendRef, in *envelope.Inner
 		// another one than its own: a conflict, kept as evidence. Without a
 		// ballot of the vault's own it prompts nothing and does not change
 		// whether it can cast.
-		r.Other = sb
-		switch {
-		case b != nil && (b.State == BallotRecorded || !b.final()):
-			f.setFinal(s, r, BallotConflict, "")
-		default:
-			r.ConflictEv = true
-		}
-		f.audit(s, "vote.conflict", r.Conn, r.ID)
-		f.feed(s, "vote.problem", r.Conn, r.ID, "high")
-		f.event(s, r, "problem")
+		f.foreign(s, r, b, sb, false)
 	}
+}
+
+// foreign records a ballot the vault did not sign (or another than its
+// own): the first is kept as the evidence (the latest beside it), and the
+// audit entry and the feed item are made once per record. It is a flag on
+// the record (conflict_evidence, 0.81.3), not a ballot state: the member's
+// own ballot goes to `conflict` only when it has no receipt (it is not
+// final) and the service's already_voted answer to its cast shows the
+// foreign ballot (answer true); a recorded ballot stays recorded.
+func (f *Feature) foreign(s *vault.Session, r *record, b *ballot, sb *svcBallot, answer bool) {
+	seen := r.Other != nil // raised by the first one, whatever came since
+	if !seen {
+		r.Other = sb
+	} else {
+		r.OtherLatest = sb
+	}
+	if answer && b != nil && !b.final() {
+		f.setFinal(s, r, BallotConflict, "")
+	} else if b == nil || b.State != BallotConflict {
+		r.ConflictEv = true
+	}
+	r.ChangedMS = s.Now().UnixMilli()
+	if seen {
+		return // raised by the first
+	}
+	f.audit(s, "vote.conflict", r.Conn, r.ID)
+	f.feed(s, "vote.problem", r.Conn, r.ID, "high")
+	f.event(s, r, "problem")
 }
 
 // statusRefusal: a signed not_eligible or unknown_proposal is kept as
@@ -545,6 +564,10 @@ func (f *Feature) intakeStatus(s *vault.Session, conn string, a *votewire.Status
 func (f *Feature) RequestProposal(s *vault.Session, conn, id string, siteBytes []byte) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	return f.requestProposal(s, conn, id, siteBytes)
+}
+
+func (f *Feature) requestProposal(s *vault.Session, conn, id string, siteBytes []byte) bool {
 	k := key(conn, id)
 	now := s.Now()
 	if f.st.Records[k] != nil || !votewire.ValidProposalID(id) || len(siteBytes) == 0 {
@@ -622,6 +645,7 @@ func (f *Feature) Tick(s *vault.Session) {
 			delete(f.pend, id)
 		}
 	}
+	f.auditOversize(s)
 	keys := make([]string, 0, len(f.st.Records))
 	for k := range f.st.Records {
 		keys = append(keys, k)
@@ -634,8 +658,42 @@ func (f *Feature) Tick(s *vault.Session) {
 	}
 }
 
+// closingAt is when vote.closing is due (§10.19.7): the close in force minus
+// the lesser of 24 hours and half the voting window (the proposal's own).
+func closingAt(r *record) time.Time {
+	lead := 24 * time.Hour
+	if half := time.Duration(r.OrigClose-r.Opens) * time.Second / 2; half < lead {
+		lead = half
+	}
+	return time.Unix(r.Closes, 0).Add(-lead)
+}
+
+// closingFeed makes the vote.closing item once, if the vote is open and the
+// member has not voted. A vault that was locked at the moment makes it at
+// the next unlock if more than an hour remains; a held vault makes it
+// without a wake. An extension makes no second one.
+func (f *Feature) closingFeed(s *vault.Session, r *record, now time.Time) {
+	if r.ClosingFeed || r.Ballot != nil || r.state(now) != StateOpen {
+		return
+	}
+	at := closingAt(r)
+	if now.Before(at) {
+		return
+	}
+	r.ClosingFeed = true
+	if now.Sub(at) > closingLate && time.Unix(r.Closes, 0).Sub(now) <= time.Hour {
+		return // missed while locked, and too late to be of use
+	}
+	f.feed(s, "vote.closing", r.Conn, r.ID, "")
+}
+
+// closingLate is how late a tick may be and still count as "at the moment"
+// (the vault was unlocked).
+const closingLate = 10 * time.Minute
+
 func (f *Feature) tickRecord(s *vault.Session, r *record, now time.Time) {
 	closed := r.closed(now)
+	f.closingFeed(s, r, now)
 	// A vote never cast has no use for its voting key once it closes.
 	if r.Ballot == nil && closed && len(r.VKSeed) > 0 {
 		suite.Wipe(r.VKSeed)

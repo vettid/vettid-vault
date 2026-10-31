@@ -631,8 +631,10 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 	if te.spec.Request {
 		var he *HandlerError
 		switch {
-		case errors.Is(herr, ErrDeferred) && volatile:
-			// Answered later from memory (message.attachment.get, §10.5.1).
+		case errors.Is(herr, ErrDeferred):
+			// Answered later: from memory for a volatile request
+			// (message.attachment.get, §10.5.1), or when a blob call has run
+			// (BlobHost, vote.site.sync).
 		case herr == nil:
 			m.respond(p, in, rkey, body, now)
 		case errors.As(herr, &he):

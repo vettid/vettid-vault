@@ -117,7 +117,8 @@ func TestStatusConflictWithADifferentVK(t *testing.T) {
 	other := must(votewire.SignBallot(vk2, v.Hash, v.Tag, "no"))
 	c.answer(v, c.statuses()[0], other, uint64(c.now.UnixMilli()), true)
 	r := c.rec(v.ID)
-	if r.Ballot.State != BallotConflict || r.Other == nil || !c.has("vote.conflict", v.ID) {
+	// A flag on the record (0.81.3), not a ballot state: the ballot goes on.
+	if r.Ballot.State != BallotSending || !r.ConflictEv || r.Other == nil || !c.has("vote.conflict", v.ID) || !r.problem() {
 		t.Errorf("%s", r.Ballot.State)
 	}
 }
@@ -290,5 +291,28 @@ func TestStatusForAProposalNotHeld(t *testing.T) {
 	c.respond(ids[len(ids)-1], "vote.status", &envelope.Inner{Status: envelope.StatusOK, Body: c.statusBody(v3, nil, 0, nil, ssig3)})
 	if r := c.rec(v3.ID); r == nil || r.state(c.now) != StateOpen {
 		t.Errorf("%+v", r)
+	}
+}
+
+// A recorded ballot stays recorded when the service shows a foreign ballot
+// (owner decision, 0.81.3): the flag, the problem, once; only a ballot
+// without a receipt goes to `conflict`.
+func TestRecordedStaysRecordedWithConflictEvidence(t *testing.T) {
+	c := newCastEnv(t)
+	v := c.open(1)
+	c.cast(v, "yes")
+	_, ids := c.casts()
+	c.okReceipt(v, ids[0], c.leafOf(v), uint64(c.now.UnixMilli()))
+	c.f.Check(c.session(), "svc", v.ID)
+	_, vk2, _ := ed25519.GenerateKey(rand.Reader)
+	other := must(votewire.SignBallot(vk2, v.Hash, v.Tag, "no"))
+	c.answer(v, c.statuses()[0], other, uint64(c.now.UnixMilli()), true)
+	r := c.rec(v.ID)
+	if r.Ballot.State != BallotRecorded || !r.ConflictEv || !r.problem() || c.count("vote.problem") != 1 || c.count("vote.conflict") != 1 {
+		t.Errorf("%s %v", r.Ballot.State, r.ConflictEv)
+	}
+	g := obj(t, c.app("vote.get", pairBody("svc", v.ID)))
+	if !boolOf(g, "conflict_evidence") {
+		t.Errorf("%v", g)
 	}
 }

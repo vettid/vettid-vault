@@ -135,6 +135,31 @@ func TestEvidenceAndRelease(t *testing.T) {
 
 // Rejected is a problem record; closed or rejected may be released, and its
 // compact record holds the rejected proposal with its reason.
+// The schedule moving on (an hourly status ask) is no change of the evidence.
+func TestDigestIgnoresSchedule(t *testing.T) {
+	c := newCastEnv(t)
+	v := c.open(1)
+	c.cast(v, "yes")
+	r := c.rec(v.ID)
+	before := r.digest()
+	r.Ballot.NextStatusMS += 3600_000
+	r.Ballot.NextSendMS += 5000
+	r.Ballot.Round++
+	r.Ballot.RoundStartMS++
+	r.Ballot.LastAnswerMS++
+	r.AskMS++
+	if !bytes.Equal(before, r.digest()) {
+		t.Error("the schedule changes the digest")
+	}
+	r.Ballot.ChoiceID = "no"
+	if bytes.Equal(before, r.digest()) {
+		t.Error("the choice does not")
+	}
+	if r.Ballot.NextStatusMS == 0 {
+		t.Error("digest changed the record")
+	}
+}
+
 func TestReleaseRejected(t *testing.T) {
 	c := newCastEnv(t)
 	c.f.dep.Cred = &fakeCred{pin: "135792"}

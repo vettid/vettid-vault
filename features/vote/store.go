@@ -442,7 +442,14 @@ func (r *record) release() *compact {
 // act of looking changes.
 func (r *record) digest() []byte {
 	c := *r
-	c.EvidenceHash, c.EvidenceMS, c.ChangedMS, c.CheckAskMS = nil, 0, 0, 0
+	c.EvidenceHash, c.EvidenceMS, c.ChangedMS, c.CheckAskMS, c.AskMS = nil, 0, 0, 0, 0
+	if b := c.Ballot; b != nil {
+		// The schedule moves on by itself (an hourly status ask); it is not
+		// evidence, and must not force a fresh export.
+		cb := *b
+		cb.NextSendMS, cb.NextStatusMS, cb.Round, cb.RoundStartMS, cb.LastAnswerMS = 0, 0, 0, 0, 0
+		c.Ballot = &cb
+	}
 	b, _ := json.Marshal(&c)
 	return votewire.H(b)
 }

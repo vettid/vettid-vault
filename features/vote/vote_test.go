@@ -150,6 +150,11 @@ func TestProposalKept(t *testing.T) {
 	if len(e.h.SentOfType("vote.event")) == 0 {
 		t.Error("no vote.event")
 	}
+	for _, sent := range e.h.SentOfType("vote.event") {
+		if sent.Opt.Kind != vault.KindApp {
+			t.Errorf("vote.event not for the app only: %q", sent.Opt.Kind)
+		}
+	}
 	// A re-send: ok, nothing changes (no new key, feed item or event).
 	seed := string(rec.VKSeed)
 	e.h.Reset()

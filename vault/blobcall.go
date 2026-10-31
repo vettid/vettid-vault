@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"runtime/debug"
 	"time"
 
+	"github.com/vettid/vettid-vault/vms/attwire"
 	"github.com/vettid/vettid-vault/vms/envelope"
 )
 
@@ -55,6 +57,10 @@ func (s *Session) DeferBlob(id string, key, sha256 []byte, size int, call BlobCa
 // blobCallBound is how long a blob call may take from its request.
 const blobCallBound = 120 * time.Second
 
+// blobCallID names a blob call in the attachment runner's books; the
+// "fetch:" prefix keeps it from the per-entry minimum gap.
+func blobCallID(device string) string { return "fetch:blobcall|" + device }
+
 func (h managerHost) BlobLimit() int { return h.m.attMaxContent() }
 
 func (h managerHost) DeferBlob(s *Session, id string, key, sum []byte, size int, call BlobCall) error {
@@ -65,41 +71,100 @@ func (h managerHost) DeferBlob(s *Session, id string, key, sum []byte, size int,
 	}
 	p, req := s.peer, *s.inner
 	rkey := p.ID + "|" + req.ID
+	// At most one blob call in flight per device; the same request again
+	// (a retransmission) reuses the one running.
+	if cur, ok := m.blobBusy[p.ID]; ok {
+		if cur == req.ID {
+			return nil
+		}
+		return NewError("busy", "")
+	}
+	r := m.att
+	if r != nil {
+		// A blob call is a transfer of the vault's: it takes one of its
+		// attwire.VaultTransfers slots.
+		if attwire.VaultTransfers-r.slots <= 0 {
+			return NewError("busy", "")
+		}
+		r.slots++
+		r.running[blobCallID(p.ID)] = true
+	}
+	if m.blobBusy == nil {
+		m.blobBusy = map[string]string{}
+	}
+	m.blobBusy[p.ID] = req.ID
 	key = append([]byte(nil), key...)
 	var want [32]byte
 	copy(want[:], sum)
 	maxBlob := m.attMaxBlob()
-	go m.runBlobCall(p.ID, req, rkey, id, key, want, size, maxBlob, call)
+	go m.runBlobCall(r, p.ID, req, rkey, id, key, want, size, maxBlob, call)
 	return nil
 }
 
 // runBlobCall fetches and opens the blob without the vault's lock, then
-// takes it to run the call and answer.
-func (m *Manager) runBlobCall(deviceID string, req envelope.Inner, rkey, blobID string, key []byte, sum [32]byte, size, maxBlob int, call BlobCall) {
-	ctx, cancel := context.WithTimeout(context.Background(), blobCallBound)
-	defer cancel()
+// takes it to run the call and answer. The fetch is a transfer: the
+// instance's admission at the owner-fetch priority first, memory returned
+// afterwards when it was large.
+func (m *Manager) runBlobCall(r *attRunner, deviceID string, req envelope.Inner, rkey, blobID string, key []byte, sum [32]byte, size, maxBlob int, call BlobCall) {
 	var plain []byte
 	var code string
-	data, err := m.relay.GetBlob(ctx, blobID)
-	switch {
-	case err != nil && (transient(err) || ctx.Err() != nil):
-		code = "relay_error"
-	case err != nil:
-		code = "bad_request" // blob_unknown and anything else the relay refuses
-	default:
-		if maxBlob > 0 && len(data) > maxBlob {
-			code = "bad_request"
-		} else if plain, err = envelope.OpenBlob(data, key, sum, size); err != nil {
-			code = "bad_request"
+	fetch := func(ctx context.Context) int {
+		if ctx == nil {
+			code = "busy" // not admitted in time
+			return 0
 		}
+		ctx, cancel := context.WithTimeout(ctx, blobCallBound)
+		defer cancel()
+		data, err := m.relay.GetBlob(ctx, blobID)
+		switch {
+		case err != nil && (transient(err) || ctx.Err() != nil):
+			code = "relay_error"
+		case err != nil:
+			code = "bad_request" // blob_unknown and anything else the relay refuses
+		default:
+			if maxBlob > 0 && len(data) > maxBlob {
+				code = "bad_request"
+			} else if plain, err = envelope.OpenBlob(data, key, sum, size); err != nil {
+				code = "bad_request"
+			}
+		}
+		n := len(data)
 		wipe(data)
-		// The blob is deleted once fetched, and also when it fails (§5.5).
-		_ = m.relay.DeleteBlob(ctx, blobID)
+		return n
 	}
+	if r != nil {
+		m.transfer(r, PrioOwnerFetch, blobCallID(deviceID), time.Now().Add(OwnerFetchStart), fetch)
+	} else {
+		var n int
+		if g := m.opt.Transfers; g != nil {
+			actx, cancel := context.WithTimeout(context.Background(), OwnerFetchStart)
+			release, err := g.Admit(actx, PrioOwnerFetch)
+			cancel()
+			if err != nil {
+				fetch(nil)
+			} else {
+				n = fetch(context.Background())
+				release()
+			}
+		} else {
+			n = fetch(context.Background())
+		}
+		if n > 1<<20 {
+			debug.FreeOSMemory()
+		}
+	}
+	// The blob is deleted on every path (§5.5): after a failed or timed out
+	// fetch too, with a context of its own.
+	dctx, dcancel := context.WithTimeout(context.Background(), 15*time.Second)
+	_ = m.relay.DeleteBlob(dctx, blobID)
+	dcancel()
 	wipe(key)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	defer wipe(plain)
+	if m.blobBusy[deviceID] == req.ID {
+		delete(m.blobBusy, deviceID)
+	}
 	if m.locked || m.st == nil {
 		return
 	}
@@ -108,6 +173,22 @@ func (m *Manager) runBlobCall(deviceID string, req envelope.Inner, rkey, blobID 
 		return
 	}
 	now := m.now()
+	ctx := context.Background()
+	if code == "" {
+		// The hold and recovery are checked again as dispatch does: the
+		// vault may have gone overdue or into recovery during the fetch.
+		m.refreshOwnerCred()
+		switch {
+		case !m.credentialReady() && !(p.Recovering && m.credentialExists()):
+			code = "credential_required"
+		case !p.Recovering:
+			if st := m.ownerCheckState(now); st != OwnerCheckOK && !m.holdAllows(p, req.Type, st) {
+				code = "owner_check_required"
+			}
+		case !recoveryAllowed[req.Type]:
+			code = "forbidden"
+		}
+	}
 	if code != "" {
 		m.respondError(p, &req, rkey, code, "", now)
 	} else {
@@ -124,7 +205,7 @@ func (m *Manager) runBlobCall(deviceID string, req envelope.Inner, rkey, blobID 
 		}
 	}
 	m.dirty = true
-	_ = m.flushIfDirty(context.Background())
+	_ = m.flushIfDirty(ctx)
 	m.drainOutbox(ctx)
 }
 

@@ -365,6 +365,9 @@ type Manager struct {
 	pushGen uint64
 	// att is the attachment runner while the vault runs (§10.5.1).
 	att *attRunner
+	// blobBusy is the request id of the blob call in flight, by device
+	// (vote.site.sync's blob form): at most one per device.
+	blobBusy map[string]string
 	// attWrites counts the runner's store writes in flight (finishDelete
 	// waits for them before it erases).
 	attWrites sync.WaitGroup

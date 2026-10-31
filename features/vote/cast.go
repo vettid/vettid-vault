@@ -492,20 +492,24 @@ func (f *Feature) statusAnswer(s *vault.Session, ref pendRef, in *envelope.Inner
 // own): the first is kept as the evidence (the latest beside it), and the
 // audit entry and the feed item are made once per record.
 func (f *Feature) foreign(s *vault.Session, r *record, b *ballot, sb *svcBallot) {
-	first := r.Other == nil
-	if first {
+	seen := r.Other != nil // raised by the first one, whatever came since
+	if !seen {
 		r.Other = sb
 	} else {
 		r.OtherLatest = sb
 	}
-	if !first || r.ConflictEv || b != nil && b.State == BallotConflict {
-		return // raised already
-	}
+	// The member's own ballot, unless it is final already, is in conflict
+	// with the service's: also when the first foreign ballot was seen before
+	// it was cast (already_voted answering it is the conflict, §10.19.3).
+	own := b != nil && (b.State == BallotRecorded || !b.final())
 	switch {
-	case b != nil && (b.State == BallotRecorded || !b.final()):
+	case own:
 		f.setFinal(s, r, BallotConflict, "")
-	default:
+	case b == nil || b.State != BallotConflict:
 		r.ConflictEv = true
+	}
+	if seen {
+		return // raised by the first
 	}
 	f.audit(s, "vote.conflict", r.Conn, r.ID)
 	f.feed(s, "vote.problem", r.Conn, r.ID, "high")

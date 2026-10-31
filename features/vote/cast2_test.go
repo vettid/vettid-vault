@@ -399,3 +399,39 @@ func TestResultsCheckLifecycle(t *testing.T) {
 	}
 	_ = vault.KindApp
 }
+
+// A foreign ballot seen before the cast does not keep the member's own
+// ballot from becoming final when already_voted shows another one.
+func TestAlreadyVotedAfterEarlierForeign(t *testing.T) {
+	c := newCastEnv(t)
+	w := c.open(1)
+	c.cast(w, "yes")
+	_, ids := c.casts()
+	r := c.rec(w.ID)
+	_, early, _ := ed25519.GenerateKey(rand.Reader)
+	eb := must(votewire.SignBallot(early, w.Hash, w.Tag, "abstain"))
+	r.Other, r.ConflictEv = &svcBallot{VK: eb.VK, ChoiceID: "abstain", BallotSig: eb.BallotSig}, true
+	_, vk2, _ := ed25519.GenerateKey(rand.Reader)
+	other := must(votewire.SignBallot(vk2, w.Hash, w.Tag, "no"))
+	msgMS := uint64(c.now.UnixMilli())
+	orsig, _ := suite.Sign(c.svc.IK, votewire.LabelReceipt, must(votewire.ReceiptMsg(w.Hash, must(other.Leaf()), msgMS)))
+	own := r.Ballot
+	ownLeaf := must((&votewire.Ballot{RecordTag: w.Tag, VK: own.VK, ChoiceID: own.ChoiceID, BallotSig: own.BallotSig}).Leaf())
+	msg := must(votewire.RefusalMsg(w.ID, votewire.H(c.h.IK), w.Tag, "vote.cast", "already_voted", msgMS, votewire.H(ownLeaf)))
+	sig, _ := suite.Sign(c.svc.IK, votewire.LabelRefusal, msg)
+	body := strictjson.NewBuilder().Base64("refusal_sig", sig).Uint("msg_ms", msgMS).Base64("connection", votewire.H(c.h.IK)).Base64("record_tag", w.Tag).
+		Raw("ballot", strictjson.NewBuilder().Base64("vk", other.VK).String("choice_id", "no").Base64("ballot_sig", other.BallotSig).Bytes()).
+		Uint("ballot_msg_ms", msgMS).Base64("receipt_sig", orsig).Bytes()
+	c.h.Reset()
+	c.respond(ids[0], "vote.cast", &envelope.Inner{Status: envelope.StatusError, Error: &envelope.Error{Code: "already_voted"}, Body: body})
+	r = c.rec(w.ID)
+	if r.Ballot.State != BallotConflict || len(r.VKSeed) != 0 || r.Other == nil || r.Other.ChoiceID != "abstain" || r.OtherLatest == nil || r.OtherLatest.ChoiceID != "no" {
+		t.Errorf("%s seed %d other %+v latest %+v", r.Ballot.State, len(r.VKSeed), r.Other, r.OtherLatest)
+	}
+	if c.count("vote.conflict") != 0 {
+		t.Error("raised twice")
+	}
+	if len(c.h.SentOfType("vote.cast")) != 0 {
+		t.Error("kept sending")
+	}
+}

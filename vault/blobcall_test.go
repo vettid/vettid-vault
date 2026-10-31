@@ -134,3 +134,70 @@ func TestBlobCallAnswersLater(t *testing.T) {
 		t.Errorf("no blobs: %+v", r)
 	}
 }
+
+// Many blob requests at once: one call in flight per device, the others
+// answered busy (or the retransmission of the running one reused), and the
+// relay is asked for one blob at a time.
+func TestBlobCallOnePerDevice(t *testing.T) {
+	d := newDevFixture(t)
+	d.m.addFeature(&blobStub{})
+	max := int64(1 << 24)
+	ttl := int64(3600)
+	d.m.limits.MaxBlobBytes, d.m.limits.BlobTTLSeconds = &max, &ttl
+	d.relay.blobs = &stubBlobs{byID: map[string]stubBlob{}}
+	var mu sync.Mutex
+	inflight, peak, gets := 0, 0, 0
+	gate := make(chan struct{})
+	d.relay.getHook = func() {
+		mu.Lock()
+		inflight++
+		gets++
+		peak = max2(peak, inflight)
+		mu.Unlock()
+		<-gate
+		mu.Lock()
+		inflight--
+		mu.Unlock()
+	}
+	data, k, s, err := envelope.SealBlob([]byte("hello blob"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := "01JB2Z6V9K3M4N5P6Q7R8S0010"
+	d.relay.blobs.byID[id] = stubBlob{mailbox: mailboxOf(d.relay.key), data: data}
+	body := `{"id":"` + id + `","key":"` + base64.StdEncoding.EncodeToString(k) + `","sha256":"` + base64.StdEncoding.EncodeToString(s[:]) + `","size":10}`
+	var reqs []string
+	for i := 0; i < 12; i++ {
+		reqs = append(reqs, d.sendAs(d.self(), "test.blobcall", body))
+	}
+	time.Sleep(300 * time.Millisecond)
+	close(gate)
+	ok, busy := 0, 0
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && ok+busy < len(reqs) {
+		for _, x := range d.appInbox() {
+			for _, r := range reqs {
+				if x.Re == r {
+					if x.Status == envelope.StatusOK {
+						ok++
+					} else if errCode(x) == "busy" {
+						busy++
+					}
+				}
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if peak != 1 || gets != 1 || ok != 1 || busy != len(reqs)-1 {
+		t.Fatalf("peak %d gets %d ok %d busy %d", peak, gets, ok, busy)
+	}
+}
+
+func max2(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}

@@ -35,7 +35,9 @@ func (f *Feature) feed(s *vault.Session, kind, conn, ref, priority string) {
 func (f *Feature) event(s *vault.Session, r *record, event string) {
 	b := strictjson.NewBuilder().String("proposal_id", r.ID).String("connection_id", r.Conn).String("event", event).
 		String("state", r.state(s.Now()))
-	s.NotifyAllDevices("vote.event", b.Bytes())
+	// The app only: desktops and agents have no vote access, and an event
+	// such as "ballot" would tell them the owner took part.
+	s.NotifyDevicesWith("vote.event", b.Bytes(), "", vault.SendOptions{Kind: vault.KindApp})
 }
 
 // idOf reads a proposal_id from document bytes that failed the document

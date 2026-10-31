@@ -43,6 +43,7 @@ func (s testSealer) Unseal(_ context.Context, b, aad []byte) ([]byte, error) {
 // network.
 type stubRelay struct {
 	mu       sync.Mutex
+	getHook  func() // called by every GetBlob (tests)
 	base     string
 	key      ed25519.PrivateKey
 	deposits []stubDeposit
@@ -155,6 +156,9 @@ func (r *stubRelay) PutBlob(_ context.Context, _, mailbox, _ string, data []byte
 }
 
 func (r *stubRelay) GetBlob(_ context.Context, id string) ([]byte, error) {
+	if h := r.getHook; h != nil {
+		h()
+	}
 	if r.blobs == nil {
 		return nil, errStubNoBlob
 	}

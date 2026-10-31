@@ -75,7 +75,7 @@ func (r *record) conflictEvidence() bool {
 // evidence or a disputed ballot, in one place (0.81.3, owner decision
 // 2026-10-30): a ballot with a receipt (`recorded`) whose row is exactly that
 // ballot is `verified` with the flag conflict_evidence beside it (the
-// record stays in the problem set); another row is `failed` (`conflict`); a ballot
+// record stays in the problem set); another row is `failed` (`row_mismatch`); a ballot
 // in `conflict`, none, or one without a receipt, with conflict evidence, is
 // `failed` (`conflict`).
 func conflictVerdict(r *record, row *votewire.RowBallot) (state, reason string, ok bool) {
@@ -88,6 +88,7 @@ func conflictVerdict(r *record, row *votewire.RowBallot) (state, reason string, 
 			if sameBallot(b, row) {
 				return CheckVerified, "", true
 			}
+			return CheckFailed, "row_mismatch", true
 		}
 		return CheckFailed, "conflict", true
 	case b != nil && b.State == BallotDisputed:

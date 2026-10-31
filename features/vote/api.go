@@ -96,6 +96,9 @@ func (f *Feature) castBlock(s *vault.Session, r *record, pinned []byte) string {
 	if r.Ballot != nil {
 		return "already_voted"
 	}
+	if r.ServiceBallot != nil {
+		return "checking" // vote.confirm is pending
+	}
 	if r.Site == SiteMismatch {
 		return "site_mismatch"
 	}

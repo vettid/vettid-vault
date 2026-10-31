@@ -117,6 +117,9 @@ func (f *Feature) Cast(s *vault.Session, conn, id, choice string) (CastResult, e
 	if len(pinned) == 0 {
 		return CastResult{}, codeErr("not_signed_in", strictjson.NewBuilder().String("connection_id", conn).Bytes())
 	}
+	if r.ServiceBallot != nil { // a vote.confirm is pending: no second ballot under the same key
+		return CastResult{}, codeErr("checking", nil)
+	}
 	if r.Restore { // not reachable while state() says checking; kept as the spec's own row
 		return CastResult{}, codeErr("checking", nil)
 	}

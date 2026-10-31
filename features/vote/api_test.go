@@ -371,3 +371,27 @@ func TestAPINotices(t *testing.T) {
 		t.Error("list_version without a list")
 	}
 }
+
+// While a vote.confirm is pending, no cast: `checking`, nothing is sent.
+func TestNoCastWhileConfirmPending(t *testing.T) {
+	c := newCastEnv(t)
+	v := c.open(1)
+	c.rec(v.ID).Restore = true
+	c.f.Tick(c.session())
+	own := ed25519.NewKeyFromSeed(c.rec(v.ID).VKSeed)
+	c.answer(v, c.statuses()[0], must(votewire.SignBallot(own, v.Hash, v.Tag, "no")), uint64(c.now.UnixMilli()), true)
+	g := obj(t, c.app("vote.get", pairBody("svc", v.ID)))
+	if cc, _ := g.String("cannot_cast"); cc != "checking" {
+		t.Errorf("cannot_cast %q", cc)
+	}
+	if b, _ := g.Bool("can_cast"); b {
+		t.Error("can_cast")
+	}
+	c.h.Reset()
+	if r := c.app("vote.cast", pairBody("svc", v.ID, `"choice_id":"yes"`)); r.Code != "checking" {
+		t.Errorf("cast: %q", r.Code)
+	}
+	if len(c.h.SentOfType("vote.cast")) != 0 || c.rec(v.ID).Ballot != nil || c.rec(v.ID).ServiceBallot == nil {
+		t.Error("a ballot was made or the pending confirmation lost")
+	}
+}

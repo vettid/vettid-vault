@@ -111,6 +111,11 @@ func TestResultsTable(t *testing.T) {
 		c.refusal(v, ids[0], "vote.cast", "not_active", votewire.H(c.leafOf(v)))
 	}
 	sending := func(c *cenv, v *votetest.Vote) { c.cast(v, "yes") }
+	conflictAfterReceipt := func(c *cenv, v *votetest.Vote) {
+		receipted(c, v)
+		r := c.rec(v.ID)
+		c.f.foreign(c.session(), r, r.Ballot, &svcBallot{VK: vkOther[32:], ChoiceID: "no", BallotSig: make([]byte, 64)})
+	}
 	for _, x := range []tc{
 		{"receipt, exactly that ballot", receipted, own, CheckVerified, ""},
 		{"receipt, row empty", receipted, empty, CheckFailed, "row_mismatch"},
@@ -123,6 +128,10 @@ func TestResultsTable(t *testing.T) {
 		{"verified refusal, exactly the ballot", refused, own, CheckVerified, ""},
 		{"verified refusal, another ballot", refused, other, CheckFailed, "row_mismatch"},
 		{"conflict", func(c *cenv, v *votetest.Vote) { sending(c, v); c.rec(v.ID).Ballot.State = BallotConflict }, empty, CheckFailed, "conflict"},
+		{"receipt, then a foreign ballot, row is the member's", conflictAfterReceipt, own, CheckVerified, ""},
+		{"receipt, then a foreign ballot, row empty", conflictAfterReceipt, empty, CheckFailed, "conflict"},
+		{"receipt, then a foreign ballot, row another", conflictAfterReceipt, other, CheckFailed, "conflict"},
+		{"no receipt, a foreign ballot, row is the member's", func(c *cenv, v *votetest.Vote) { sending(c, v); c.rec(v.ID).Ballot.State = BallotConflict }, own, CheckFailed, "conflict"},
 		{"disputed", func(c *cenv, v *votetest.Vote) { sending(c, v); c.rec(v.ID).Ballot.State = BallotDisputed }, own, CheckFailed, "disputed"},
 		{"connection ended is no refusal", func(c *cenv, v *votetest.Vote) {
 			sending(c, v)
@@ -307,5 +316,45 @@ func TestResultsHashIsEvidenceOnly(t *testing.T) {
 	out, _ := c.f.SubmitResults(c.session(), "svc", v.ID, c.resultsFor(v, resOpts{}))
 	if out.State != CheckVerified || c.rec(v.ID).ResultsMatch != "no" {
 		t.Errorf("%+v %q", out, c.rec(v.ID).ResultsMatch)
+	}
+}
+
+// A recorded ballot with conflict evidence whose row verifies is `verified`
+// with the conflict carried beside it: the flag in vote.get and in the
+// outcome, the record in the problem set, vote.problem raised once.
+func TestVerifiedWithConflictEvidence(t *testing.T) {
+	_, vkOther, _ := ed25519.GenerateKey(rand.Reader)
+	c, v := closedWith(t, func(c *cenv, v *votetest.Vote) {
+		receipted(c, v)
+		r := c.rec(v.ID)
+		sb := &svcBallot{VK: vkOther[32:], ChoiceID: "no", BallotSig: make([]byte, 64)}
+		c.f.foreign(c.session(), r, r.Ballot, sb)
+		c.f.foreign(c.session(), r, r.Ballot, sb)
+	})
+	if c.count("vote.problem") != 1 || c.count("vote.conflict") != 1 {
+		t.Errorf("raised %d %d", c.count("vote.problem"), c.count("vote.conflict"))
+	}
+	out, err := c.f.SubmitResults(c.session(), "svc", v.ID, c.resultsFor(v, resOpts{mine: c.ownBallot(v)}))
+	if err != nil || out.State != CheckVerified || !out.ConflictEvidence {
+		t.Fatalf("%+v %v", out, err)
+	}
+	r := c.rec(v.ID)
+	if !r.problem() || r.Other == nil {
+		t.Error("not in the problem set, or the foreign ballot dropped")
+	}
+	if c.count("vote.problem") != 1 {
+		t.Errorf("vote.problem again: %d", c.count("vote.problem"))
+	}
+	o := obj(t, c.app("vote.get", pairBody("svc", v.ID)))
+	rec, _ := o.Object("proposal")
+	if rec == nil {
+		rec = o
+	}
+	if cv, _ := rec.Bool("conflict_evidence"); !cv {
+		t.Errorf("vote.get: %v", o)
+	}
+	ev := obj(t, c.app("vote.evidence", pairBody("svc", v.ID)))
+	if e, _ := ev.Object("evidence"); e == nil || !e.Has("other_ballot") || !e.Has("other_ballot_latest") {
+		t.Errorf("the evidence lacks the foreign ballots: %v", ev)
 	}
 }

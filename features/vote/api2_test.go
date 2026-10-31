@@ -646,7 +646,7 @@ func TestConflictOncePerRecord(t *testing.T) {
 		t.Error("first and latest not kept")
 	}
 	// The verdict is one function.
-	if st, why, ok := conflictVerdict(r); !ok || st != CheckFailed || why != "conflict" {
+	if st, why, ok := conflictVerdict(r, nil); !ok || st != CheckFailed || why != "conflict" {
 		t.Errorf("%s %s", st, why)
 	}
 }

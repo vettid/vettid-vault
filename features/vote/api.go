@@ -150,6 +150,9 @@ func (f *Feature) summary(s *vault.Session, r *record, pinned []byte) *strictjso
 		}
 		b.Raw("check", c.Bytes())
 	}
+	if r.conflictEvidence() {
+		b.Bool("conflict_evidence", true) // the service showed another ballot under the member's code
+	}
 	block := f.castBlock(s, r, pinned)
 	b.Bool("can_cast", block == "")
 	if block != "" {
@@ -540,6 +543,9 @@ func (f *Feature) apiResults(s *vault.Session, body []byte) (json.RawMessage, er
 	c := strictjson.NewBuilder().String("state", out.State)
 	if out.Reason != "" {
 		c.String("reason", out.Reason)
+	}
+	if out.ConflictEvidence {
+		c.Bool("conflict_evidence", true)
 	}
 	return strictjson.NewBuilder().String("proposal_id", id).Raw("check", c.Bytes()).Bytes(), nil
 }

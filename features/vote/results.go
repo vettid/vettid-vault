@@ -72,18 +72,23 @@ func (r *record) conflictEvidence() bool {
 }
 
 // conflictVerdict is what the results check says of a record with conflict
-// evidence or a disputed ballot, in one place. Owner decision 2026-10-30: a
-// ballot with a receipt (recorded) whose row in the results is that same
-// ballot judges `verified`, the conflict carried beside it (the flag
-// conflict_evidence, the record staying in the problem set); a ballot that
-// does not verify in the results, or one without a receipt, stays
-// `failed(conflict)`.
+// evidence or a disputed ballot, in one place (0.81.3, owner decision
+// 2026-10-30): a ballot with a receipt (`recorded`) whose row is exactly that
+// ballot is `verified` with the flag conflict_evidence beside it (the
+// record stays in the problem set); another row is `row_mismatch`; a ballot
+// in `conflict`, none, or one without a receipt, with conflict evidence, is
+// `failed` (`conflict`).
 func conflictVerdict(r *record, row *votewire.RowBallot) (state, reason string, ok bool) {
 	b := r.Ballot
 	switch {
-	case r.conflictEvidence():
-		if b != nil && len(b.ReceiptSig) > 0 && sameBallot(b, row) {
-			return CheckVerified, "", true
+	case b != nil && b.State == BallotConflict:
+		return CheckFailed, "conflict", true
+	case r.ConflictEv:
+		if b != nil && b.State == BallotRecorded {
+			if sameBallot(b, row) {
+				return CheckVerified, "", true
+			}
+			return CheckFailed, "row_mismatch", true
 		}
 		return CheckFailed, "conflict", true
 	case b != nil && b.State == BallotDisputed:

@@ -229,6 +229,18 @@ func (f *Feature) apiList(s *vault.Session, body []byte) (json.RawMessage, error
 	} else if ok {
 		limit = v
 	}
+	var ack []string
+	if raw, ok, err := o.OptArray("ack_dropped"); err != nil || len(raw) > 128 {
+		return nil, errBad
+	} else if ok {
+		for _, x := range raw {
+			c, err := strictjson.AsString(x)
+			if err != nil || len(c) > 256 {
+				return nil, errBad
+			}
+			ack = append(ack, c)
+		}
+	}
 	pin := f.pins()
 	f.mu.Lock()
 	seen := map[string]bool{}
@@ -241,6 +253,11 @@ func (f *Feature) apiList(s *vault.Session, body []byte) (json.RawMessage, error
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	// 0.81.3: a dropped notice goes only when the app acknowledges it (after
+	// showing it); an unknown connection is ignored.
+	for _, c := range ack {
+		delete(f.st.Dropped, c)
+	}
 	now := s.Now()
 	var rs []*record
 	for _, r := range f.st.Records {
@@ -290,22 +307,17 @@ func (f *Feature) apiList(s *vault.Session, body []byte) (json.RawMessage, error
 func cursor(r *record) string { return base64.RawURLEncoding.EncodeToString([]byte(key(r.Conn, r.ID))) }
 
 // droppedJSON is the notice of proposals the vault dropped for its caps
-// (§10.19.2): until the member opens it, that is until the vote.list after
-// the one that returned it.
+// (§10.19.2): it returns until the app acknowledges it with ack_dropped
+// (0.81.3).
 func (f *Feature) droppedJSON() []byte {
 	conns := make([]string, 0, len(f.st.Dropped))
-	for c, d := range f.st.Dropped {
-		if d.Shown {
-			delete(f.st.Dropped, c)
-			continue
-		}
+	for c := range f.st.Dropped {
 		conns = append(conns, c)
 	}
 	sort.Strings(conns)
 	arr := []byte{'['}
 	for i, c := range conns {
 		d := f.st.Dropped[c]
-		d.Shown = true
 		if i > 0 {
 			arr = append(arr, ',')
 		}

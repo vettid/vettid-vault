@@ -117,7 +117,8 @@ func TestStatusConflictWithADifferentVK(t *testing.T) {
 	other := must(votewire.SignBallot(vk2, v.Hash, v.Tag, "no"))
 	c.answer(v, c.statuses()[0], other, uint64(c.now.UnixMilli()), true)
 	r := c.rec(v.ID)
-	if r.Ballot.State != BallotConflict || r.Other == nil || !c.has("vote.conflict", v.ID) {
+	// A flag on the record (0.81.3), not a ballot state: the ballot goes on.
+	if r.Ballot.State != BallotSending || !r.ConflictEv || r.Other == nil || !c.has("vote.conflict", v.ID) || !r.problem() {
 		t.Errorf("%s", r.Ballot.State)
 	}
 }

@@ -291,10 +291,27 @@ func TestAPINotices(t *testing.T) {
 	if n, _ := do.Uint("count", 0, 100); n != 1 {
 		t.Errorf("count %d", n)
 	}
-	// Until the member opens it: the next list drops it.
-	o = obj(t, c.app("vote.list", `{"limit":1}`))
+	// Only an acknowledgement removes it (0.81.3): the next list returns it
+	// again; an unknown connection and another are ignored; bad members are
+	// bad_request.
+	for _, body := range []string{`{"limit":1}`, `{"ack_dropped":["other"]}`, `{"ack_dropped":[]}`} {
+		o = obj(t, c.app("vote.list", body))
+		if dr, _ := o.Array("dropped"); len(dr) != 1 {
+			t.Errorf("%s: the notice went without an acknowledgement", body)
+		}
+	}
+	for _, bad := range []string{`{"ack_dropped":"svc"}`, `{"ack_dropped":[1]}`, `{"ack_dropped":{}}`} {
+		if r := c.app("vote.list", bad); r.Code != "bad_request" {
+			t.Errorf("%s: %q", bad, r.Code)
+		}
+	}
+	o = obj(t, c.app("vote.list", `{"ack_dropped":["svc"]}`))
 	if dr, _ := o.Array("dropped"); len(dr) != 0 {
-		t.Error("dropped notice stayed")
+		t.Error("dropped notice stayed after the acknowledgement")
+	}
+	o = obj(t, c.app("vote.list", `{}`))
+	if dr, _ := o.Array("dropped"); len(dr) != 0 {
+		t.Error("dropped notice came back")
 	}
 	// The problem cap: an entry until a record is released.
 	c.f.st.Problems["svc"] = true

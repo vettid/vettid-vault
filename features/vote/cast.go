@@ -396,7 +396,7 @@ func (f *Feature) castAnswer(s *vault.Session, r *record, in *envelope.Inner) {
 			f.receipt(s, r, int64(rf.BallotMsgMS), rf.ReceiptSig) // exactly this vault's ballot: it is the receipt
 			return
 		}
-		f.foreign(s, r, b, &svcBallot{VK: eb.VK, ChoiceID: eb.ChoiceID, BallotSig: eb.BallotSig, MsgMS: int64(rf.BallotMsgMS), ReceiptSig: rf.ReceiptSig})
+		f.foreign(s, r, b, &svcBallot{VK: eb.VK, ChoiceID: eb.ChoiceID, BallotSig: eb.BallotSig, MsgMS: int64(rf.BallotMsgMS), ReceiptSig: rf.ReceiptSig}, true)
 	}
 }
 
@@ -484,30 +484,29 @@ func (f *Feature) statusAnswer(s *vault.Session, ref pendRef, in *envelope.Inner
 		// another one than its own: a conflict, kept as evidence. Without a
 		// ballot of the vault's own it prompts nothing and does not change
 		// whether it can cast.
-		f.foreign(s, r, b, sb)
+		f.foreign(s, r, b, sb, false)
 	}
 }
 
 // foreign records a ballot the vault did not sign (or another than its
 // own): the first is kept as the evidence (the latest beside it), and the
-// audit entry and the feed item are made once per record.
-func (f *Feature) foreign(s *vault.Session, r *record, b *ballot, sb *svcBallot) {
+// audit entry and the feed item are made once per record. It is a flag on
+// the record (conflict_evidence, 0.81.3), not a ballot state: the member's
+// own ballot goes to `conflict` only when the service's already_voted
+// answer to its cast shows the foreign ballot (answer true).
+func (f *Feature) foreign(s *vault.Session, r *record, b *ballot, sb *svcBallot, answer bool) {
 	seen := r.Other != nil // raised by the first one, whatever came since
 	if !seen {
 		r.Other = sb
 	} else {
 		r.OtherLatest = sb
 	}
-	// The member's own ballot, unless it is final already, is in conflict
-	// with the service's: also when the first foreign ballot was seen before
-	// it was cast (already_voted answering it is the conflict, §10.19.3).
-	own := b != nil && (b.State == BallotRecorded || !b.final())
-	switch {
-	case own:
+	if answer && b != nil && (b.State == BallotRecorded || !b.final()) {
 		f.setFinal(s, r, BallotConflict, "")
-	case b == nil || b.State != BallotConflict:
+	} else if b == nil || b.State != BallotConflict {
 		r.ConflictEv = true
 	}
+	r.ChangedMS = s.Now().UnixMilli()
 	if seen {
 		return // raised by the first
 	}

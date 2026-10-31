@@ -296,9 +296,6 @@ type compact struct {
 type droppedNote struct {
 	Count  int   `json:"count"`
 	LastMS int64 `json:"last_ms"`
-	// Shown: vote.list returned it; the next vote.list drops it ("until the
-	// member opens it", §10.19.2).
-	Shown bool `json:"shown,omitempty"`
 }
 
 type state struct {

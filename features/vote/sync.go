@@ -9,7 +9,7 @@ import (
 	"github.com/vettid/vettid-vault/vms/votewire"
 )
 
-// vote.site.sync (VAULT-MESSAGING 0.81.2 §10.19.8): what the app did with the
+// vote.site.sync (VAULT-MESSAGING 0.81.6 §10.19.8): what the app did with the
 // public site for the vault. A request over 245,760 bytes travels as one
 // §5.5 claim-check blob, {blob: {id, key, sha256, size}}: the runtime
 // fetches it, checks sha256 in constant time and then the size, decrypts,
@@ -63,59 +63,50 @@ func (f *Feature) apiSync(s *vault.Session, in *envelope.Inner) (json.RawMessage
 
 // listsOf reads `services`: at most 8 lists, and 1 when one is over 1 MiB.
 //
-// Shape checks are per item (VAULT-MESSAGING 0.81.5 §10.19.8): a list whose
-// `doc` is empty or whose `sig` does not decode to exactly SigLen bytes is
-// refused alone, not the call. Versions apply in order, oldest first
-// (§10.19.4 "Catch-up"), so a bad version ENDS the catch-up at that point:
-// the lists before it are returned to be applied, the bad one is answered
-// `rejected` and every later list in the call is answered `ignored` and not
-// applied (the app sends it again on the next sync). total is the number of
-// lists in the request, so the answer has one result per list.
-func listsOf(o strictjson.Object) (lists []ServiceListDoc, total int, err error) {
+// A list is never refused by shape here (VAULT-MESSAGING 0.81.6 §10.19.8):
+// an empty `doc` or a `sig` that is not SigLen bytes goes to syncServices
+// like any other, which keeps §10.19.4's size-first rule and its audit
+// entries (`vote.list_ignored` over the cap, `vote.list_rejected` when the
+// signature or the parse fails; votewire.Verify refuses a signature of
+// another length). Versions apply in order, oldest first (§10.19.4
+// "Catch-up"), so a bad version ENDS the catch-up at that point: it is
+// answered `rejected` and every later list in the call `ignored` and not
+// applied (syncCatchUp; the app sends them again on the next sync). The
+// answer has one result per list. Only undecodable base64 or a wrong
+// member type is still call-level.
+func listsOf(o strictjson.Object) ([]ServiceListDoc, error) {
 	arr, present, err := o.OptArray("services")
 	if err != nil {
-		return nil, 0, errBad
+		return nil, errBad
 	}
 	if !present {
-		return nil, 0, nil
+		return nil, nil
 	}
 	if len(arr) > votewire.MaxSyncLists {
-		return nil, 0, errBad
+		return nil, errBad
 	}
 	var out []ServiceListDoc
-	bad := false
 	for _, raw := range arr {
 		lo, err := strictjson.AsObject(raw)
 		if err != nil {
-			return nil, 0, errBad
+			return nil, errBad
 		}
 		doc, err := lo.Base64("doc", -1)
 		if err != nil {
-			return nil, 0, errBad
+			return nil, errBad
 		}
-		sg, err := lo.String("sig")
+		sig, err := lo.Base64("sig", -1)
 		if err != nil {
-			return nil, 0, errBad
-		}
-		sig, sigErr := strictjson.DecodeStd(sg, -1)
-		if sigErr != nil {
-			return nil, 0, errBad
-		}
-		if bad {
-			continue // after a bad version: not applied
-		}
-		if len(doc) == 0 || len(sig) != votewire.SigLen {
-			bad = true
-			continue
+			return nil, errBad
 		}
 		out = append(out, ServiceListDoc{Doc: doc, Sig: sig})
 	}
 	for _, l := range out {
-		if len(l.Doc) > votewire.BigList && len(arr) > 1 {
-			return nil, 0, errBad
+		if len(l.Doc) > votewire.BigList && len(out) > 1 {
+			return nil, errBad
 		}
 	}
-	return out, len(arr), nil
+	return out, nil
 }
 
 // syncDocument is an entry's document: found with the proposal, its
@@ -219,7 +210,7 @@ func (f *Feature) syncBody(s *vault.Session, body []byte) (json.RawMessage, erro
 	if err != nil {
 		return nil, errBad
 	}
-	lists, nLists, err := listsOf(o)
+	lists, err := listsOf(o)
 	if err != nil {
 		return nil, err
 	}
@@ -282,17 +273,8 @@ func (f *Feature) syncBody(s *vault.Session, body []byte) (json.RawMessage, erro
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	out := strictjson.NewBuilder()
-	if nLists > 0 {
+	if len(lists) > 0 {
 		res := f.syncCatchUp(s, lists)
-		// A list refused by shape ended the catch-up (see listsOf): it is
-		// `rejected` and the lists after it `ignored`, one result per list.
-		for len(res) < nLists {
-			r := ListIgnored
-			if len(res) == len(lists) && (len(res) == 0 || res[len(res)-1] == ListKept || res[len(res)-1] == ListConfirmed) {
-				r = ListRejected
-			}
-			res = append(res, r)
-		}
 		arr := []byte{'['}
 		for i, r := range res {
 			if i > 0 {

@@ -65,6 +65,9 @@ func TestSyncBadListEndsCatchUp(t *testing.T) {
 	if got := c.syncResults(t, "services", body); strings.Join(got, ",") != "kept,rejected,ignored" || c.f.st.List.Version != held.Version+1 {
 		t.Errorf("bad sig: %v v%d", got, c.f.st.List.Version)
 	}
+	if !c.hasKind("vote.list_rejected") {
+		t.Error("no vote.list_rejected for the bad list")
+	}
 	// The entry in the same call is still processed.
 	c.h.Reset()
 	good2 := c.unheld(6)
@@ -78,6 +81,9 @@ func TestSyncBadListEndsCatchUp(t *testing.T) {
 	body = `{"services":[{"doc":"","sig":"` + b64(make([]byte, 64)) + `"},` + c2.listJSON(l2b) + `]}`
 	if got := c2.syncResults(t, "services", body); strings.Join(got, ",") != "rejected,ignored" || c2.f.st.List.Version != l2b.versionOf(t)-1 {
 		t.Errorf("empty doc: %v v%d", got, c2.f.st.List.Version)
+	}
+	if !c2.hasKind("vote.list_rejected") {
+		t.Error("empty doc: no vote.list_rejected")
 	}
 	// Malformed base64 of a list member stays a call-level refusal.
 	if r := c2.app("vote.site.sync", `{"services":[{"doc":"!!","sig":"`+b64(make([]byte, 64))+`"}]}`); r.Code != "bad_request" {
@@ -122,10 +128,6 @@ func TestSyncBadBundleIgnored(t *testing.T) {
 func TestSyncBadExtensionsTruncated(t *testing.T) {
 	c := newCastEnv(t)
 	v := c.open(1)
-	closes := time.Unix(c.rec(v.ID).Closes, 0)
-	doc, msg := c.svc.Extension(v, 1, closes.Add(time.Hour), c.now)
-	m, _ := votewire.ParseExtendedMsg(msg)
-	ext := `{"extension":"` + b64(doc) + `","extension_sig":"` + b64(m.ExtensionSig) + `","bundle":` + string(m.Bundle) + `}`
 	junk := func(doc []byte, sig []byte, bundle string) string {
 		return `{"extension":"` + b64(doc) + `","extension_sig":"` + b64(sig) + `","bundle":` + bundle + `}`
 	}
@@ -173,15 +175,18 @@ func TestSyncBadExtensionsTruncated(t *testing.T) {
 		}
 	}
 	_ = prop
-	_ = ext
 
 	// More than 24: the first 24 are looked at, the rest dropped; the call succeeds.
 	many := make([]string, votewire.MaxExtensions+1)
 	for i := range many {
 		many[i] = two
 	}
+	c.h.Reset()
 	if r := c.app("vote.site.sync", `{"entries":[{"proposal_id":"`+v.ID+`","document":`+prop(v.ID, many...)+`}]}`); !r.OK() {
 		t.Errorf("25 extensions: %q", r.Code)
+	}
+	if n := c.countKind("vote.extension_rejected"); n != votewire.MaxExtensions {
+		t.Errorf("%d extensions processed, want %d", n, votewire.MaxExtensions)
 	}
 }
 
@@ -222,5 +227,54 @@ func TestSyncCallLevelRefusalsStay(t *testing.T) {
 		if r := c.app("vote.site.sync", body); r.Code != "bad_request" {
 			t.Errorf("%s: %q", name, r.Code)
 		}
+	}
+}
+
+func (c *cenv) countKind(kind string) int {
+	n := 0
+	for _, a := range c.h.Activities {
+		if a.Kind == kind {
+			n++
+		}
+	}
+	return n
+}
+
+func (c *cenv) hasKind(kind string) bool { return c.countKind(kind) > 0 }
+
+// A list over 4 MiB with a bad signature: the size rule comes first, so it
+// is `ignored` with vote.list_ignored, not `rejected` (§10.19.4).
+func TestSyncOversizeListWithBadSigIgnored(t *testing.T) {
+	c := newCastEnv(t)
+	held := c.f.st.List
+	huge := ServiceListDoc{Doc: bytes.Repeat([]byte(" "), votewire.MaxServiceList+1), Sig: make([]byte, 7)}
+	c.h.Reset()
+	if got := c.syncResults(t, "services", `{"services":[`+c.listJSON(huge)+`]}`); strings.Join(got, ",") != "ignored" {
+		t.Errorf("%v", got)
+	}
+	if !c.hasKind("vote.list_ignored") || c.hasKind("vote.list_rejected") || c.f.st.List.Version != held.Version {
+		t.Errorf("audits: %v", c.h.Activities)
+	}
+	// The 1 MiB rule still covers a bad-shaped list beside another.
+	big := ServiceListDoc{Doc: bytes.Repeat([]byte(" "), votewire.BigList+1), Sig: nil}
+	l2 := c.nextList(held.Version+1, c.svc)
+	if r := c.app("vote.site.sync", `{"services":[`+c.listJSON(l2)+`,`+c.listJSON(big)+`]}`); r.Code != "bad_request" {
+		t.Errorf("1 MiB rule: %q", r.Code)
+	}
+}
+
+// A held record in checking (site): a bad bundle leaves it there and records
+// no evidence.
+func TestSyncBadBundleLeavesCheckingSite(t *testing.T) {
+	c := newCastEnv(t)
+	v := c.checkingSite(1)
+	c.h.Reset()
+	got := c.syncResults(t, "entries", `{"entries":[{"proposal_id":"`+v.ID+`","document":`+c.foundDoc(v, `"not an object"`, "")+`}]}`)
+	r := c.rec(v.ID)
+	if got[0] != "1:known" || r.Reason != ReasonSite || r.RejectReason != "" || r.state(c.now) != StateChecking {
+		t.Errorf("%v %+v", got, r)
+	}
+	if r.Conflict != nil || r.ConflictEv || len(r.EvidenceHash) != 0 || c.hasKind("vote.proposal_conflict") {
+		t.Errorf("evidence recorded: %+v", r)
 	}
 }

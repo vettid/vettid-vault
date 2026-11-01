@@ -400,6 +400,7 @@ const (
 	needNames
 	needNewPIN
 	needNewSecret
+	optPIN
 )
 
 // Release R's credential operations (§11.14.9).
@@ -418,6 +419,8 @@ const (
 	NeedRequest   = needRequest // request_id and payload_sha256 (§10.13)
 	NeedOptItem   = optItem     // item, optional (a wallet's imported phrase, §10.18)
 	NeedHash      = needHash    // payload_sha256 alone (a PSBT's hash, §10.18)
+	NeedPIN       = needPIN     // pin, checked as an owner check checks it (OpSpec)
+	NeedOptPIN    = optPIN      // pin, optional; checked the same way when present
 )
 
 var needs = map[string]int{
@@ -640,6 +643,13 @@ func parsePayload(n int, pt []byte) (*Payload, error) {
 		}
 	}
 	if n&needPIN != 0 {
+		pin, err := o.String("pin")
+		if err != nil || !validPIN(pin) {
+			return fail()
+		}
+		p.PIN = []byte(pin)
+	}
+	if n&optPIN != 0 && n&needPIN == 0 && o.Has("pin") {
 		pin, err := o.String("pin")
 		if err != nil || !validPIN(pin) {
 			return fail()
@@ -1235,9 +1245,22 @@ func (f *Feature) checkBlob(s *vault.Session, blob []byte) error {
 // openChecked performs steps 4–5 of §3.5.3 on a checked blob: the
 // password backoff, then the password.
 func (f *Feature) openChecked(s *vault.Session, blob, pw []byte) (*suite.PrivateKey, *Inner, error) {
+	return f.openGated(s, blob, pw, nil)
+}
+
+// openGated is openChecked with a gate between step 4 and step 5 of
+// §3.5.3: gate runs once the password backoff has passed and before the
+// password is tried, so a refusal from it tests no guess and counts
+// nothing (the wallet's spend caps, §10.18).
+func (f *Feature) openGated(s *vault.Session, blob, pw []byte, gate func() error) (*suite.PrivateKey, *Inner, error) {
 	now := s.Now()
 	if now.Before(f.st.NotBefore) {
 		return nil, nil, vault.BackoffError(f.st.NotBefore.Sub(now))
+	}
+	if gate != nil {
+		if err := gate(); err != nil {
+			return nil, nil, err
+		}
 	}
 	cek, err := suite.NewPrivateKey(f.st.CEKSeed)
 	if err != nil {
@@ -1822,6 +1845,25 @@ func (r *OpResult) Members(b *strictjson.Builder) {
 	b.Base64("credential", r.Credential).Uint("credential_version", r.Version).Raw("utks", r.UTKs)
 }
 
+// OpSpec describes a credential operation of another feature.
+type OpSpec struct {
+	// Need are the payload members besides the password (NeedItemID, ...).
+	// With NeedPIN, or NeedOptPIN and a pin in the payload, the vault PIN
+	// is verified and the password opened as an owner check does
+	// (§3.6.1 steps 3-7): the blob, the PIN under the §11.8 backoff, the
+	// password under its backoff, a bad_pin or bad_password a failed
+	// check. The operation is not itself an owner check: the deadline does
+	// not move.
+	Need int
+	// Check verifies the payload's bindings, before the blob is checked; a
+	// refusal tests no secret.
+	Check func(*Payload) error
+	// Gate runs after the blob is checked and the backoff has passed
+	// (§3.5.3 steps 3-4) and before the password is tried (step 5); an
+	// error from it tests no guess, counts nothing and rotates no CEK.
+	Gate func(*Payload) error
+}
+
 // Operate performs one credential operation for another feature (critical
 // items, §10.7; critical-item use, §10.13) as §3.5.3 says: it spends the
 // UTK named in the body before any check (0.52.0), parses the sealed payload
@@ -1831,6 +1873,13 @@ func (r *OpResult) Members(b *strictjson.Builder) {
 // as is and leaves the credential unchanged (the UTK stays spent). op
 // must not keep references into the plaintext, which is wiped.
 func (f *Feature) Operate(s *vault.Session, in *envelope.Inner, need int, check func(*Payload) error,
+	op func(*Inner, *Payload) error) (*OpResult, error) {
+	return f.OperateSpec(s, in, OpSpec{Need: need, Check: check}, op)
+}
+
+// OperateSpec is Operate with an OpSpec: a gate before the password and
+// the PIN checked as an owner check (spend caps, §10.18).
+func (f *Feature) OperateSpec(s *vault.Session, in *envelope.Inner, spec OpSpec,
 	op func(*Inner, *Payload) error) (*OpResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -1847,18 +1896,39 @@ func (f *Feature) Operate(s *vault.Session, in *envelope.Inner, need int, check 
 	if err != nil {
 		return nil, err
 	}
-	p, err := f.spendNeed(s, in, e, opNeed|need)
+	p, err := f.spendNeed(s, in, e, opNeed|spec.Need)
 	if err != nil {
 		return nil, err
 	}
 	defer p.Wipe()
-	if check != nil {
-		if err := check(p); err != nil {
+	if spec.Check != nil {
+		if err := spec.Check(p); err != nil {
 			return nil, err
 		}
 	}
-	cek, inner, err := f.open(s, e.Blob, p.Password)
+	var gate func() error
+	if spec.Gate != nil {
+		gate = func() error { return spec.Gate(p) }
+	}
+	if err := f.checkBlob(s, e.Blob); err != nil {
+		return nil, err
+	}
+	withPIN := p.PIN != nil
+	if withPIN {
+		// As an owner check (§3.6.1 steps 4-5): a wrong PIN is a failed
+		// check; the other refusals are not.
+		if err := s.VerifyPIN(string(p.PIN)); err != nil {
+			if vault.IsCode(err, "bad_pin") {
+				s.OwnerCheckFailed("pin")
+			}
+			return nil, err
+		}
+	}
+	cek, inner, err := f.openGated(s, e.Blob, p.Password, gate)
 	if err != nil {
+		if withPIN && err == errPassword {
+			s.OwnerCheckFailed("password")
+		}
 		return nil, err
 	}
 	defer cek.Destroy()

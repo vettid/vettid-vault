@@ -9,7 +9,7 @@ import (
 	"github.com/vettid/vettid-vault/vms/votewire"
 )
 
-// vote.site.sync (VAULT-MESSAGING 0.81.2 §10.19.8): what the app did with the
+// vote.site.sync (VAULT-MESSAGING 0.81.6 §10.19.8): what the app did with the
 // public site for the vault. A request over 245,760 bytes travels as one
 // §5.5 claim-check blob, {blob: {id, key, sha256, size}}: the runtime
 // fetches it, checks sha256 in constant time and then the size, decrypts,
@@ -62,6 +62,18 @@ func (f *Feature) apiSync(s *vault.Session, in *envelope.Inner) (json.RawMessage
 }
 
 // listsOf reads `services`: at most 8 lists, and 1 when one is over 1 MiB.
+//
+// A list is never refused by shape here (VAULT-MESSAGING 0.81.6 §10.19.8):
+// an empty `doc` or a `sig` that is not SigLen bytes goes to syncServices
+// like any other, which keeps §10.19.4's size-first rule and its audit
+// entries (`vote.list_ignored` over the cap, `vote.list_rejected` when the
+// signature or the parse fails; votewire.Verify refuses a signature of
+// another length). Versions apply in order, oldest first (§10.19.4
+// "Catch-up"), so a bad version ENDS the catch-up at that point: it is
+// answered `rejected` and every later list in the call `ignored` and not
+// applied (syncCatchUp; the app sends them again on the next sync). The
+// answer has one result per list. Only undecodable base64 or a wrong
+// member type is still call-level.
 func listsOf(o strictjson.Object) ([]ServiceListDoc, error) {
 	arr, present, err := o.OptArray("services")
 	if err != nil {
@@ -80,10 +92,10 @@ func listsOf(o strictjson.Object) ([]ServiceListDoc, error) {
 			return nil, errBad
 		}
 		doc, err := lo.Base64("doc", -1)
-		if err != nil || len(doc) == 0 {
+		if err != nil {
 			return nil, errBad
 		}
-		sig, err := lo.Base64("sig", votewire.SigLen)
+		sig, err := lo.Base64("sig", -1)
 		if err != nil {
 			return nil, errBad
 		}
@@ -130,8 +142,15 @@ func parseDocument(proposalID string, raw json.RawMessage) (*syncDocument, error
 		return nil, errBad
 	}
 	d.doc.Status = StatusFound
-	if d.doc.Proposal, err = do.Base64("proposal", -1); err != nil || len(d.doc.Proposal) > votewire.MaxProposal {
+	if d.doc.Proposal, err = do.Base64("proposal", -1); err != nil {
 		return nil, errBad
+	}
+	if len(d.doc.Proposal) > votewire.MaxProposal {
+		// Per item (0.81.5 §10.19.8): a proposal over the limit is what the
+		// app sends for it, `unreachable`. The entry is judged as that.
+		d.status = "unreachable"
+		d.doc = SiteDoc{Status: StatusUnreachable}
+		return d, nil
 	}
 	// proposal_sig is the base64 of the raw 64 bytes; a missing or failing
 	// one is judged by the vault (the site's copy is then no mismatch).
@@ -141,36 +160,43 @@ func parseDocument(proposalID string, raw json.RawMessage) (*syncDocument, error
 		}
 	}
 	if raw, ok := do["bundle"]; ok && string(raw) != "null" {
-		if _, err := strictjson.AsObject(raw); err != nil || len(raw) > votewire.MaxBundle {
+		// Per item: a bundle that is not an object or is over the limit is
+		// ignored; the entry is processed without it.
+		if _, err := strictjson.AsObject(raw); err == nil && len(raw) <= votewire.MaxBundle {
+			d.doc.Bundle = append(json.RawMessage{}, raw...)
+		}
+	}
+	arr, _, err := do.OptArray("extensions")
+	if err != nil {
+		return nil, errBad
+	}
+	// Per item (0.81.5 §10.19.8): the extensions before the first bad one
+	// are kept; it and the rest are dropped (extensions apply in order). More
+	// than MaxExtensions keeps the first MaxExtensions.
+	if len(arr) > votewire.MaxExtensions {
+		arr = arr[:votewire.MaxExtensions]
+	}
+	for _, e := range arr {
+		eo, err := strictjson.AsObject(e)
+		if err != nil {
 			return nil, errBad
 		}
-		d.doc.Bundle = append(json.RawMessage{}, raw...)
-	}
-	if arr, ok, err := do.OptArray("extensions"); err != nil || ok && len(arr) > votewire.MaxExtensions {
-		return nil, errBad
-	} else {
-		for _, e := range arr {
-			eo, err := strictjson.AsObject(e)
-			if err != nil {
-				return nil, errBad
-			}
-			m := &votewire.ExtendedMsg{ProposalID: proposalID}
-			if m.Extension, err = eo.Base64("extension", -1); err != nil || len(m.Extension) > votewire.MaxExtensionDoc {
-				return nil, errBad
-			}
-			if m.ExtensionSig, err = eo.Base64("extension_sig", votewire.SigLen); err != nil {
-				return nil, errBad
-			}
-			braw, ok := eo["bundle"]
-			if !ok || len(braw) > votewire.MaxBundle {
-				return nil, errBad
-			}
-			if _, err := strictjson.AsObject(braw); err != nil {
-				return nil, errBad
-			}
-			m.Bundle = append(json.RawMessage{}, braw...)
-			d.exts = append(d.exts, m)
+		m := &votewire.ExtendedMsg{ProposalID: proposalID}
+		if m.Extension, err = eo.Base64("extension", -1); err != nil {
+			return nil, errBad
 		}
+		if m.ExtensionSig, err = eo.Base64("extension_sig", -1); err != nil {
+			return nil, errBad
+		}
+		braw, ok := eo["bundle"]
+		if len(m.Extension) > votewire.MaxExtensionDoc || len(m.ExtensionSig) != votewire.SigLen || !ok || len(braw) > votewire.MaxBundle {
+			break
+		}
+		if _, err := strictjson.AsObject(braw); err != nil {
+			break
+		}
+		m.Bundle = append(json.RawMessage{}, braw...)
+		d.exts = append(d.exts, m)
 	}
 	return d, nil
 }
@@ -228,8 +254,10 @@ func (f *Feature) syncBody(s *vault.Session, body []byte) (json.RawMessage, erro
 			if err != nil {
 				return nil, errBad
 			}
-			if e.serviceID, _, err = io.OptString("service_id"); err != nil {
-				return nil, errBad
+			// Per item: a service_id that is present but not a string drops
+			// the index; the entry is processed without it.
+			if sid, _, err := io.OptString("service_id"); err == nil {
+				e.serviceID = sid
 			}
 		}
 		draw, ok := eo["document"]

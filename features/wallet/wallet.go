@@ -197,7 +197,7 @@ type Feature struct {
 
 	gmu    sync.Mutex // guards owned and capped only (a leaf lock: ItemInUse is called with the items feature's lock held)
 	owned  map[string]bool
-	capped map[string]bool // wallets that have a cap (RevealNeedsPIN)
+	capped map[string]bool // wallets whose reveal takes the PIN: a cap or a twin (RevealNeedsPIN)
 }
 
 // New returns the feature.
@@ -288,7 +288,8 @@ func (f *Feature) syncOwned() {
 	f.owned, f.capped = map[string]bool{}, map[string]bool{}
 	for id, w := range f.st.Wallets {
 		f.owned[id] = true
-		f.capped[id] = w.Caps.PerTx > 0 || w.Caps.PerPeriod > 0
+		// The reveal takes the PIN for a wallet that has a cap or a twin.
+		f.capped[id] = w.Caps.PerTx > 0 || w.Caps.PerPeriod > 0 || f.twin(w)
 	}
 }
 

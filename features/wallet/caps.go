@@ -280,6 +280,9 @@ func (f *Feature) capsSet(s *vault.Session, body []byte) (json.RawMessage, error
 	if !tx.present && !per.present {
 		return nil, errBad // nothing to set
 	}
+	if f.twin(w) {
+		return nil, errDuplicate
+	}
 	if version != w.Version {
 		return nil, vault.NewError("conflict", "")
 	}
@@ -342,6 +345,9 @@ func (f *Feature) capsRaise(s *vault.Session, in *envelope.Inner) (json.RawMessa
 	}
 	next := w.Caps.with(tx, per)
 	check := func(p *credential.Payload) error {
+		if f.twin(w) {
+			return errDuplicate // before any secret is tried
+		}
 		if version != w.Version {
 			return vault.NewError("conflict", "")
 		}
@@ -393,6 +399,27 @@ func (f *Feature) capRefused(s *vault.Session, w *Wallet, conn string) {
 }
 
 var _ items.RevealGuard = (*Feature)(nil)
+
+// errDuplicate refuses caps on a wallet that shares an account key with
+// another wallet of the vault (a twin made before an import of equal keys
+// was refused with exists, §10.18 "A second wallet with the same keys").
+var errDuplicate = vault.NewError("duplicate_wallet", "delete the other wallet with the same recovery phrase first")
+
+// twin reports whether another wallet of the vault shares any account
+// xpub with w.
+func (f *Feature) twin(w *Wallet) bool {
+	for id, o := range f.st.Wallets {
+		if id == w.ID {
+			continue
+		}
+		for t, x := range w.XPubs {
+			if o.XPubs[t] == x {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 // RevealNeedsPIN implements items.RevealGuard: the reveal of the phrase of
 // a wallet that has a cap carries the PIN as well (§10.18).

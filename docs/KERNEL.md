@@ -1,11 +1,12 @@
 # The enclave kernel, built from source
 
 Status: **in use from staging release 13.** `release/eif-toolchain.lock`
-pins the blob set `vettid-6.6.159-1`, published as the vettid-vault
-release `kernel/6.6.159-1` (built by the `enclave-kernel` workflow from
-`e489592`, the same toolchain as before); it rides the next vault release
-that includes it, with that release's hardware run. Staging releases 13
-to 18 used `vettid-6.6.158-1` (`kernel/6.6.158-1`, built from `a344277`;
+pins the blob set `vettid-6.6.161-1`, published as the vettid-vault
+release `kernel/6.6.161-1` (built by the `enclave-kernel` workflow from
+`72fd45b`, the same toolchain as before); it rides the next vault release
+that includes it, with that release's hardware run. Staging releases 19
+to 25 used `vettid-6.6.159-1` (`kernel/6.6.159-1`, built from `e489592`).
+Staging releases 13 to 18 used `vettid-6.6.158-1` (`kernel/6.6.158-1`, built from `a344277`;
 the source-built toolchain comparison and a hardware run passed).
 Releases before 13 used AWS's `aws-nitro-enclaves-sdk-bootstrap`
 `v6.6.79` set. This document describes how VettID builds its own blob set
@@ -284,7 +285,8 @@ recipe is the same: AWS cross-compiled it on x86_64, we build natively.
 
 ## 6. Into the EIF
 
-Done for `kernel/6.6.158-1` (staging release 13) and `kernel/6.6.159-1`.
+Done for `kernel/6.6.158-1` (staging release 13), `kernel/6.6.159-1`
+(staging release 19) and `kernel/6.6.161-1`.
 All of it happens in **one pull request**: `scripts/lint_test.go` requires
 `release/kernel/kernel.lock` and `release/kernel/SHA256SUMS` on `main` to
 be exactly what `release/eif-toolchain.lock` pins, so the recipe change

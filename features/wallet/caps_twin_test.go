@@ -75,6 +75,17 @@ func TestTwinWallets(t *testing.T) {
 			t.Fatal("a refusal changed the wallet")
 		}
 	}
+	// conflict comes first (0.82.3): a stale version on a twin is conflict.
+	e.code(e.call("app", "wallet.caps.set", js(map[string]any{"wallet_id": idA, "version": a.w().Version + 1, "per_tx_sats": 1000})), "conflict")
+	{
+		v := a.w().Version + 1
+		e.code(e.sealed("app", "wallet.caps.raise", map[string]any{"wallet_id": idA, "version": v, "per_tx_sats": 2000},
+			map[string]any{"pin": "000000", "password": "not the password 91", "item_id": idA, "payload_sha256": bind(idA, v, "2000", "none")}, true, false), "conflict")
+	}
+	// An invalid request on a twin is duplicate_wallet before the value rules.
+	if r := a.set(map[string]any{"per_tx_sats": nil}); r.Code != "duplicate_wallet" {
+		t.Fatalf("value rules after the twin check: %q", r.Code)
+	}
 	if e.h.PINTries != tries || len(e.h.CheckFailed) != 0 {
 		t.Fatalf("a refusal tried a secret: %v", e.h.CheckFailed)
 	}

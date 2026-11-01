@@ -286,10 +286,19 @@ func (f *Feature) syncOwned() {
 	f.gmu.Lock()
 	defer f.gmu.Unlock()
 	f.owned, f.capped = map[string]bool{}, map[string]bool{}
+	// Derived from the current wallets, never stored (0.82.3): the reveal
+	// of a wallet takes the PIN if its master fingerprint is that of any
+	// capped wallet or twin. Rebuilt on every load, create, delete and
+	// change of caps.
+	guarded := map[string]bool{}
+	for _, w := range f.st.Wallets {
+		if w.Caps.PerTx > 0 || w.Caps.PerPeriod > 0 || f.twin(w) {
+			guarded[w.Fingerprint] = true
+		}
+	}
 	for id, w := range f.st.Wallets {
 		f.owned[id] = true
-		// The reveal takes the PIN for a wallet that has a cap or a twin.
-		f.capped[id] = w.Caps.PerTx > 0 || w.Caps.PerPeriod > 0 || f.twin(w)
+		f.capped[id] = guarded[w.Fingerprint]
 	}
 }
 

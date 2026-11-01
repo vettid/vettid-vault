@@ -280,11 +280,11 @@ func (f *Feature) capsSet(s *vault.Session, body []byte) (json.RawMessage, error
 	if !tx.present && !per.present {
 		return nil, errBad // nothing to set
 	}
-	if f.twin(w) {
-		return nil, errDuplicate
-	}
 	if version != w.Version {
 		return nil, vault.NewError("conflict", "")
+	}
+	if f.twin(w) {
+		return nil, errDuplicate // after conflict, before the value rules (0.82.3)
 	}
 	changed := false
 	for _, m := range []struct {
@@ -345,11 +345,11 @@ func (f *Feature) capsRaise(s *vault.Session, in *envelope.Inner) (json.RawMessa
 	}
 	next := w.Caps.with(tx, per)
 	check := func(p *credential.Payload) error {
-		if f.twin(w) {
-			return errDuplicate // before any secret is tried
-		}
 		if version != w.Version {
 			return vault.NewError("conflict", "")
+		}
+		if f.twin(w) {
+			return errDuplicate // after conflict, before the value rules and any secret (0.82.3)
 		}
 		// The values the wallet will have obey the model's rule; at least
 		// one cap must be raised or removed.

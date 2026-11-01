@@ -1,0 +1,39 @@
+{
+  "description": "VAULT-MESSAGING 0.56.0 §10.18 \"Spend caps\" and §16 \"wallet.caps.raise binding\" (features/wallet, vms/credwire): payload_sha256 of wallet.caps.raise = SHA-256(preimage), preimage = label || 0x00 || wallet_id || 0x00 || version || 0x00 || per_tx || 0x00 || per_period (the label in ASCII, each field in UTF-8, 0x00 between them and none after the last). version, per_tx and per_period are decimal ASCII without leading zeros; per_tx and per_period are the values the wallet will have after the request, or the literal none. The cases 'both' and 'per_tx_none' are the two values printed in §16. Standard base64 of payload_sha256 is what the sealed payload carries. TEST ONLY.",
+  "label": "vettid/wallet.caps/1",
+  "wallet_id": "01HXZ3N5Q8R2T4V6W9Y0B1C2D3",
+  "cases": {
+    "both": {
+      "version": 7,
+      "per_tx": "500000",
+      "per_period": "2000000",
+      "preimage_hex": "7665747469642f77616c6c65742e636170732f3100303148585a334e355138523254345636573959304231433244330037003530303030300032303030303030",
+      "payload_sha256_hex": "9479e8f7e06134aab2e7fcfec8dc1ba7fd2ed5cde4be3553ccaf4e6cf9aa1259",
+      "payload_sha256_b64": "lHno9+BhNKqy5/z+yNwbp/0u1c3kvjVTzK9ObPmqElk="
+    },
+    "per_tx_none": {
+      "version": 7,
+      "per_tx": "none",
+      "per_period": "2000000",
+      "preimage_hex": "7665747469642f77616c6c65742e636170732f3100303148585a334e355138523254345636573959304231433244330037006e6f6e650032303030303030",
+      "payload_sha256_hex": "7bcbbf3d027952bb1a7cbafba930b385732185b8f61d4b15218a8ee7a32d58ae",
+      "payload_sha256_b64": "e8u/PQJ5UrsafLr7qTCzhXMhhbj2HUsVIYqO56MtWK4="
+    },
+    "both_none": {
+      "version": 1,
+      "per_tx": "none",
+      "per_period": "none",
+      "preimage_hex": "7665747469642f77616c6c65742e636170732f3100303148585a334e355138523254345636573959304231433244330031006e6f6e65006e6f6e65",
+      "payload_sha256_hex": "98098d357596c77a8d34565e9143a532cfd8e8eb6a45b79b69eeed17b509ab9c",
+      "payload_sha256_b64": "mAmNNXWWx3qNNFZekUOlMs/Y6OtqRbebae7tF7UJq5w="
+    },
+    "largest": {
+      "version": 12,
+      "per_tx": "2100000000000000",
+      "per_period": "2100000000000000",
+      "preimage_hex": "7665747469642f77616c6c65742e636170732f3100303148585a334e3551385232543456365739593042314332443300313200323130303030303030303030303030300032313030303030303030303030303030",
+      "payload_sha256_hex": "349be18c59ca939af7c12ea600c39a34448a6efd487bf99664c2ecd1772fdff0",
+      "payload_sha256_b64": "NJvhjFnKk5r3wS6mAMOaNESKbv1Ie/mWZMLs0Xcv3/A="
+    }
+  }
+}

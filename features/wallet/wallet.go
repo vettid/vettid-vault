@@ -70,6 +70,10 @@ const (
 type Credential interface {
 	Operate(s *vault.Session, in *envelope.Inner, need int, check func(*credential.Payload) error,
 		op func(*credential.Inner, *credential.Payload) error) (*credential.OpResult, error)
+	// OperateSpec is Operate with a gate before the password is tried and
+	// the PIN checked as an owner check (spend caps, §10.18).
+	OperateSpec(s *vault.Session, in *envelope.Inner, spec credential.OpSpec,
+		op func(*credential.Inner, *credential.Payload) error) (*credential.OpResult, error)
 	UseKey(now time.Time, ttl time.Duration) (ed25519.PrivateKey, bool)
 	// SpendPresented spends the UTK the request presents before any
 	// check (§3.5.4 "Using a UTK", 0.52.0); idempotent within a request.
@@ -172,6 +176,10 @@ type Wallet struct {
 	ConnAddr    map[string]ConnAddr  `json:"conn_addr,omitempty"`
 	History     []Tx                 `json:"history,omitempty"`
 	Created     time.Time            `json:"created"`
+	// Caps and Ledger are the wallet's spend caps and the period's ledger
+	// (§10.18 "Spend caps"); a wallet from before them has none.
+	Caps   Caps          `json:"caps"`
+	Ledger []LedgerEntry `json:"ledger,omitempty"`
 }
 
 type state struct {
@@ -187,8 +195,10 @@ type Feature struct {
 	items Items
 	st    state
 
-	gmu   sync.Mutex // guards owned only (a leaf lock: ItemInUse is called with the items feature's lock held)
-	owned map[string]bool
+	gmu    sync.Mutex // guards owned and capped only (a leaf lock: ItemInUse is called with the items feature's lock held)
+	owned  map[string]bool
+	capped map[string]bool // wallets whose reveal takes the PIN (RevealNeedsPIN), derived from snap
+	snap   map[string]walletSnap
 }
 
 // New returns the feature.
@@ -196,7 +206,7 @@ func New(cred Credential, it Items, o Options) *Feature {
 	if o.Networks == nil {
 		o.Networks = []string{btc.Mainnet, btc.Testnet, btc.Testnet4, btc.Signet}
 	}
-	return &Feature{opt: o, cred: cred, items: it, st: state{Wallets: map[string]*Wallet{}}, owned: map[string]bool{}}
+	return &Feature{opt: o, cred: cred, items: it, st: state{Wallets: map[string]*Wallet{}}, owned: map[string]bool{}, capped: map[string]bool{}, snap: map[string]walletSnap{}}
 }
 
 var (
@@ -241,6 +251,10 @@ func (f *Feature) Types() []vault.TypeSpec {
 		{Type: "wallet.address.used", Request: true, From: owners},
 		{Type: "wallet.psbt.inspect", Request: true, From: owners},
 		{Type: "wallet.sign", Request: true, From: apps},
+		// Spend caps (0.56.0, §10.18): lowering is a versioned change, raising
+		// a credential operation with the PIN and the password.
+		{Type: "wallet.caps.set", Request: true, From: apps},
+		{Type: "wallet.caps.raise", Request: true, From: apps},
 		{Type: "wallet.history", Request: true, From: owners},
 		{Type: "wallet.balance", Request: true, From: owners},
 	}
@@ -269,13 +283,21 @@ func (f *Feature) Save() (json.RawMessage, error) {
 	return json.Marshal(f.st)
 }
 
+// syncOwned rebuilds the guard's view from the wallets (gmu is a leaf lock
+// the items feature takes with its own held): who owns an item, and a
+// snapshot of each wallet's fingerprint, account keys and whether it has
+// caps, from which RevealNeedsPIN's answers are derived. It runs on every
+// load, create, delete and change of caps; ItemDeleted drops a wallet
+// from the snapshot as soon as its item is deleted.
 func (f *Feature) syncOwned() {
 	f.gmu.Lock()
 	defer f.gmu.Unlock()
-	f.owned = map[string]bool{}
-	for id := range f.st.Wallets {
+	f.owned, f.snap = map[string]bool{}, map[string]walletSnap{}
+	for id, w := range f.st.Wallets {
 		f.owned[id] = true
+		f.snap[id] = walletSnap{fingerprint: w.Fingerprint, xpubs: w.XPubs, capped: w.Caps.PerTx > 0 || w.Caps.PerPeriod > 0}
 	}
+	f.rebuildCappedLocked()
 }
 
 // ItemInUse implements items.ItemGuard: a wallet's item changes only
@@ -331,13 +353,13 @@ func (f *Feature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner
 	case "wallet.create":
 		return f.create(s, in)
 	case "wallet.list":
-		return f.list(in.Body)
+		return f.list(s, in.Body)
 	case "wallet.get":
 		w, err := f.wallet(in.Body)
 		if err != nil {
 			return nil, err
 		}
-		return f.view(w).Bytes(), nil
+		return f.view(s, w).Bytes(), nil
 	case "wallet.update":
 		return f.update(s, in.Body)
 	case "wallet.address.new":
@@ -347,7 +369,11 @@ func (f *Feature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner
 	case "wallet.address.used":
 		return f.addressUsed(s, in.Body)
 	case "wallet.psbt.inspect":
-		return f.inspect(in.Body)
+		return f.inspect(s, in.Body)
+	case "wallet.caps.set":
+		return f.capsSet(s, in.Body)
+	case "wallet.caps.raise":
+		return f.capsRaise(s, in)
 	case "wallet.sign":
 		return f.sign(s, in)
 	case "wallet.history":
@@ -424,6 +450,7 @@ type CreateRequest struct {
 	Network     string
 	AddressType string
 	Tags        json.RawMessage
+	Caps        Caps // 0.56.0: the spend caps a new wallet starts with
 }
 
 // ParseCreate parses wallet.create's outer members strictly.
@@ -451,6 +478,9 @@ func ParseCreate(body []byte) (*CreateRequest, error) {
 	}
 	if o.Has("item_id") || o.Has("fields") {
 		return nil, errBad
+	}
+	if r.Caps, err = parseNewCaps(o); err != nil {
+		return nil, err
 	}
 	return r, nil
 }
@@ -557,6 +587,15 @@ func (f *Feature) create(s *vault.Session, in *envelope.Inner) (json.RawMessage,
 			xpubs[t], fp = acct.XPub, acct.FingerprintHex()
 		}
 		suite.Wipe(seed)
+		// A wallet without caps must not be made from a capped wallet's
+		// phrase inside the vault (§10.18): equal account keys are `exists`.
+		for _, ow := range f.st.Wallets {
+			for t, x := range xpubs {
+				if ow.XPubs[t] == x {
+					return vault.NewError("exists", "")
+				}
+			}
+		}
 		id, fids, c, a, err := f.items.NewCriticalItem(s, inner, r.Name, Category, Template, tags,
 			[]items.NewField{{Label: LabelPhrase, Kind: "password", Value: mnemonic}, {Label: LabelPassword, Kind: "password", Value: pass}})
 		if err != nil {
@@ -569,7 +608,7 @@ func (f *Feature) create(s *vault.Session, in *envelope.Inner) (json.RawMessage,
 		commit, abort = c, a
 		w = &Wallet{ID: id, Version: 1, Name: r.Name, Network: r.Network, Fingerprint: fp, XPubs: xpubs, AddressType: r.AddressType,
 			PhraseField: fids[0], PassField: fids[1], Next: map[string][2]uint32{}, ConnAddr: map[string]ConnAddr{},
-			Created: s.Now().UTC().Truncate(time.Millisecond)}
+			Created: s.Now().UTC().Truncate(time.Millisecond), Caps: r.Caps}
 		return nil
 	}
 	res, err := f.cred.Operate(s, in, credential.NeedOptItem, nil, op)
@@ -584,7 +623,7 @@ func (f *Feature) create(s *vault.Session, in *envelope.Inner) (json.RawMessage,
 	f.syncOwned()
 	s.SyncEvent("wallet.changed", strictjson.NewBuilder().String("wallet_id", w.ID).Uint("version", w.Version).Bytes())
 	s.Record(vault.Activity{Kind: "wallet.created", Ref: w.ID, Audit: true})
-	b := f.view(w)
+	b := f.view(s, w)
 	res.Members(b)
 	return b.Bytes(), nil
 }
@@ -595,7 +634,7 @@ func pathOf(n btc.Network, typ string, chain, index uint32) string {
 	return btc.PathString([]uint32{0x80000000 + btc.PurposeOf(typ), 0x80000000 + n.CoinType, 0x80000000, chain, index})
 }
 
-func (f *Feature) view(w *Wallet) *strictjson.Builder {
+func (f *Feature) view(s *vault.Session, w *Wallet) *strictjson.Builder {
 	b := strictjson.NewBuilder().String("wallet_id", w.ID).Uint("version", w.Version).String("name", w.Name).
 		String("network", w.Network).String("fingerprint", w.Fingerprint).String("address_type", w.AddressType)
 	arr := []byte{'['}
@@ -617,10 +656,12 @@ func (f *Feature) view(w *Wallet) *strictjson.Builder {
 	if tags == nil {
 		tj = []byte("[]")
 	}
-	return b.Raw("accounts", append(arr, ']')).Raw("tags", tj).String("created_at", envelope.FormatTS(w.Created))
+	// caps (0.56.0) is always there in a vault that implements them.
+	return b.Raw("accounts", append(arr, ']')).Raw("caps", w.capsView(s.Now().UnixMilli(), periodOf(s))).Raw("tags", tj).
+		String("created_at", envelope.FormatTS(w.Created))
 }
 
-func (f *Feature) list(body []byte) (json.RawMessage, error) {
+func (f *Feature) list(s *vault.Session, body []byte) (json.RawMessage, error) {
 	if _, err := strictjson.ParseObject(body); err != nil {
 		return nil, errBad
 	}
@@ -629,7 +670,7 @@ func (f *Feature) list(body []byte) (json.RawMessage, error) {
 		if i > 0 {
 			arr = append(arr, ',')
 		}
-		arr = append(arr, f.view(f.st.Wallets[id]).Bytes()...)
+		arr = append(arr, f.view(s, f.st.Wallets[id]).Bytes()...)
 	}
 	return strictjson.NewBuilder().Raw("wallets", append(arr, ']')).Bytes(), nil
 }
@@ -994,7 +1035,7 @@ func summaryJSON(n btc.Network, sum *btc.Summary) *strictjson.Builder {
 		Uint("fee_sats", uint64(sum.Fee)).Uint("vsize", uint64(sum.VSize))
 }
 
-func (f *Feature) inspect(body []byte) (json.RawMessage, error) {
+func (f *Feature) inspect(s *vault.Session, body []byte) (json.RawMessage, error) {
 	o, err := strictjson.ParseObject(body)
 	if err != nil {
 		return nil, errBad
@@ -1016,7 +1057,16 @@ func (f *Feature) inspect(body []byte) (json.RawMessage, error) {
 		return nil, psbtError(err)
 	}
 	n, _ := btc.LookupNetwork(w.Network)
-	return summaryJSON(n, sum).Bytes(), nil
+	// Whether wallet.sign would pass the caps now (0.56.0): the same check,
+	// changing nothing and writing nothing.
+	capB := strictjson.NewBuilder()
+	if r := w.capCheck(sum.Sending+sum.Fee, s.Now().UnixMilli(), periodOf(s)); r != nil {
+		capB.Bool("ok", false)
+		r.members(capB)
+	} else {
+		capB.Bool("ok", true)
+	}
+	return summaryJSON(n, sum).Raw("cap", capB.Bytes()).Bytes(), nil
 }
 
 // signed is what a successful spend produced.
@@ -1031,7 +1081,7 @@ type signed struct {
 // payload bound to the wallet and the PSBT's hash (and, for a payment
 // request, to the invocation), the item re-keyed with the use and the
 // CEK rotated.
-func (f *Feature) spend(s *vault.Session, in *envelope.Inner, w *Wallet, raw []byte, payTo string, amount int64, invocation string) (*signed, error) {
+func (f *Feature) spend(s *vault.Session, in *envelope.Inner, w *Wallet, raw []byte, payTo string, amount int64, conn, invocation string) (*signed, error) {
 	if s.From().Kind != vault.KindApp || s.From().Recovering {
 		return nil, errForbid
 	}
@@ -1053,6 +1103,20 @@ func (f *Feature) spend(s *vault.Session, in *envelope.Inner, w *Wallet, raw []b
 		if err := sum.PayCheck(payTo, amount); err != nil {
 			return nil, psbtError(err)
 		}
+	}
+	// The caps (0.56.0, §10.18): what leaves the wallet in this transaction.
+	// The check runs once the blob is checked and the backoff has passed
+	// and before the password is tried (§3.5.3 steps 3-5), so a refusal
+	// tests no guess, counts nothing and rotates no CEK. It and the ledger
+	// append below are atomic per wallet: this feature's lock is held
+	// throughout, so another signing for the wallet sees the entry.
+	outflow, nowMS, periodMS := sum.Sending+sum.Fee, s.Now().UnixMilli(), periodOf(s)
+	gate := func(*credential.Payload) error {
+		if r := w.capCheck(outflow, nowMS, periodMS); r != nil {
+			f.capRefused(s, w, conn)
+			return r.err()
+		}
+		return nil
 	}
 	h := sha256.Sum256(raw)
 	need := credential.NeedItemID | credential.NeedHash
@@ -1096,12 +1160,12 @@ func (f *Feature) spend(s *vault.Session, in *envelope.Inner, w *Wallet, raw []b
 		commit = c
 		return nil
 	}
-	res, err := f.cred.Operate(s, in, need, check, op)
+	res, err := f.cred.OperateSpec(s, in, credential.OpSpec{Need: need, Check: check, Gate: gate}, op)
 	if err != nil {
 		return nil, err
 	}
 	commit() // the item's new ciphertext (the item key rotated with the use)
-	f.recordSpend(s, w, sum, "", invocation)
+	f.recordSpend(s, w, sum, conn, invocation)
 	return &signed{tx: tx, sum: sum, res: res}, nil
 }
 
@@ -1131,6 +1195,9 @@ func (f *Feature) recordSpend(s *vault.Session, w *Wallet, sum *btc.Summary, con
 			a.Used = true
 		}
 	}
+	// The ledger entry is written in the flush that records the signing, so
+	// a crash cannot sign without counting.
+	w.record(now.UnixMilli(), periodOf(s), sum.Sending+sum.Fee)
 	w.History = append(w.History, tx)
 	if len(w.History) > MaxHistory {
 		w.History = append([]Tx(nil), w.History[len(w.History)-MaxHistory:]...)
@@ -1162,7 +1229,7 @@ func (f *Feature) sign(s *vault.Session, in *envelope.Inner) (json.RawMessage, e
 	if broadcast && f.opt.Chain == nil {
 		return nil, errUnavail // the app broadcasts (§10.18)
 	}
-	out, err := f.spend(s, in, w, raw, "", 0, "")
+	out, err := f.spend(s, in, w, raw, "", 0, "", "")
 	if err != nil {
 		return nil, err
 	}
@@ -1338,11 +1405,10 @@ func (f *Feature) Pay(s *vault.Session, in *envelope.Inner, p PayParams) (string
 	if err != nil {
 		return "", nil, err
 	}
-	out, err := f.spend(s, in, w, raw, addr, p.Amount, p.Invocation)
+	out, err := f.spend(s, in, w, raw, addr, p.Amount, p.Conn, p.Invocation)
 	if err != nil {
 		return "", nil, err
 	}
-	w.History[len(w.History)-1].Conn = p.Conn
 	return out.sum.TxID, func(b *strictjson.Builder) {
 		b.Raw("summary", summaryJSON(n, out.sum).Bytes()).String("tx", hex.EncodeToString(out.tx))
 		out.res.Members(b)

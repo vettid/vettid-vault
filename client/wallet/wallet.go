@@ -11,6 +11,7 @@ import (
 	"github.com/vettid/vettid-vault/client"
 	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/btc"
+	"github.com/vettid/vettid-vault/vms/credwire"
 )
 
 // The wallet (VAULT-MESSAGING §10.18). The app is the chain source: it
@@ -171,5 +172,43 @@ func Pay(ctx context.Context, d *client.Device, password, invocationID, walletID
 		func() map[string]any {
 			return map[string]any{"password": password, "item_id": walletID, "request_id": invocationID,
 				"payload_sha256": base64.StdEncoding.EncodeToString(h[:])}
+		})
+}
+
+// CapsSet sets or lowers a wallet's spend caps (wallet.caps.set,
+// §10.18, 0.56.0): a versioned change that may only lower; a nil member
+// is not sent (unchanged). It returns the wallet's version.
+func CapsSet(ctx context.Context, d *client.Device, walletID string, version uint64, perTxSats, perPeriodSats *int64) (uint64, error) {
+	body := map[string]any{"wallet_id": walletID, "version": version}
+	if perTxSats != nil {
+		body["per_tx_sats"] = *perTxSats
+	}
+	if perPeriodSats != nil {
+		body["per_period_sats"] = *perPeriodSats
+	}
+	o, err := d.Op(ctx, "wallet.caps.set", body)
+	if err != nil {
+		return 0, err
+	}
+	return o.Uint("version", 1, strictjson.MaxSafeInteger)
+}
+
+// CapsRaise raises or removes a wallet's spend caps (wallet.caps.raise,
+// §10.18, 0.56.0): one credential operation with the PIN and the
+// password, bound to the values the wallet will have after the request.
+// perTxSats and perPeriodSats are those values, both always sent; nil is
+// no limit. The response holds the wallet's new version.
+func CapsRaise(ctx context.Context, d *client.Device, pin, password, walletID string, version uint64, perTxSats, perPeriodSats *int64) (strictjson.Object, error) {
+	h := credwire.WalletCapsBinding(walletID, version, perTxSats, perPeriodSats)
+	member := func(v *int64) any {
+		if v == nil {
+			return nil // JSON null: no limit
+		}
+		return *v
+	}
+	return d.CredentialOp(ctx, "wallet.caps.raise", map[string]any{"wallet_id": walletID, "version": version,
+		"per_tx_sats": member(perTxSats), "per_period_sats": member(perPeriodSats)},
+		func() map[string]any {
+			return map[string]any{"pin": pin, "password": password, "item_id": walletID, "payload_sha256": base64.StdEncoding.EncodeToString(h[:])}
 		})
 }

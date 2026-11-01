@@ -77,6 +77,10 @@ const (
 type Credential interface {
 	Operate(s *vault.Session, in *envelope.Inner, need int, check func(*credential.Payload) error,
 		op func(*credential.Inner, *credential.Payload) error) (*credential.OpResult, error)
+	// OperateSpec is Operate with the PIN checked as an owner check
+	// (the reveal of a capped wallet's phrase, §10.18).
+	OperateSpec(s *vault.Session, in *envelope.Inner, spec credential.OpSpec,
+		op func(*credential.Inner, *credential.Payload) error) (*credential.OpResult, error)
 	// SpendPresented spends the UTK the request presents before any
 	// check (§3.5.4 "Using a UTK", 0.52.0); idempotent within a request.
 	SpendPresented(s *vault.Session, in *envelope.Inner)
@@ -834,6 +838,7 @@ func (f *Feature) finish(s *vault.Session, ch *change, kind string) {
 		}
 		s.SyncEvent("item.deleted", strictjson.NewBuilder().String("item_id", id).Bytes())
 		s.Record(vault.Activity{Kind: kind, Ref: id, Audit: true})
+		f.itemDeleted(id)
 	}
 	f.broadcastIfChanged(s, ch.viewBefore)
 }

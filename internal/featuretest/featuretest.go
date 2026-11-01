@@ -633,6 +633,8 @@ func (h *Host) HasActivity(kind string) bool {
 type Result struct {
 	Body json.RawMessage
 	Code string // "" for success
+	// Message is the error's message (0.56.0: the reason of cap_exceeded, pin_required).
+	Message string
 }
 
 // OK reports success.
@@ -714,7 +716,7 @@ func CallInner(f vault.Feature, h *Host, now time.Time, kind string, in *envelop
 	if err != nil {
 		var he *vault.HandlerError
 		if errors.As(err, &he) {
-			return Result{Code: he.Code, Body: he.Body}
+			return Result{Code: he.Code, Body: he.Body, Message: he.Message}
 		}
 		if errors.Is(err, vault.ErrDeferred) {
 			return Result{Code: "deferred"} // answered later: see BlobResults

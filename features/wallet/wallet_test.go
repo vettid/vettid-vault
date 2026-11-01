@@ -38,6 +38,9 @@ type utk struct {
 }
 
 type env struct {
+	cred  *credential.Feature
+	it    *items.Feature
+	opt   wallet.Options
 	t     *testing.T
 	h     *featuretest.Host
 	clk   featuretest.Clock
@@ -75,7 +78,7 @@ func newEnvWith(t *testing.T, o wallet.Options) *env {
 	wl := wallet.New(cred, it, o)
 	it.SetGuard(wl)
 	act := actions.New(actions.Deps{Keys: cred, Wallet: wl})
-	e := &env{t: t, h: featuretest.NewHost(), clk: featuretest.Clock{T: time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)},
+	e := &env{cred: cred, it: it, opt: o, t: t, h: featuretest.NewHost(), clk: featuretest.Clock{T: time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)},
 		owner: map[string]vault.Feature{}, wl: wl, act: act}
 	for _, f := range []vault.Feature{cred, it, wl, act} {
 		for _, ts := range f.Types() {
@@ -508,6 +511,8 @@ func TestPayAddressNetwork(t *testing.T) {
 
 func FuzzParseCreate(f *testing.F) {
 	f.Add([]byte(`{"name":"x","network":"regtest","tags":["a"],"address_type":"p2tr"}`))
+	f.Add([]byte(`{"name":"x","caps":{"per_tx_sats":500000,"per_period_sats":2000000}}`))
+	f.Add([]byte(`{"name":"x","caps":{"per_tx_sats":null}}`))
 	f.Fuzz(func(t *testing.T, b []byte) { _, _ = wallet.ParseCreate(b) })
 }
 
@@ -584,12 +589,16 @@ func FuzzParseUpdate(f *testing.F) {
 // addresses and differ only in the name the vault reports.
 func TestTestnet4(t *testing.T) {
 	e := newEnvWith(t, wallet.Options{}) // the release default networks
-	mk := func(network string) strictjson.Object {
+	mk := func(e *env, network string) strictjson.Object {
 		t.Helper()
 		return e.ok(e.sealed("app", "wallet.create", map[string]any{"name": network, "network": network},
 			map[string]any{"password": pw, "item": map[string]any{"mnemonic": abandon}}, true, false))
 	}
-	t4, t3 := mk("testnet4"), mk("testnet")
+	// (0.56.0, §10.18 "A second wallet with the same keys": one vault holds
+	// the keys once, so the testnet wallet is made in another vault.)
+	t4, t3 := mk(e, "testnet4"), mk(newEnvWith(t, wallet.Options{}), "testnet")
+	e.code(e.sealed("app", "wallet.create", map[string]any{"name": "again", "network": "testnet"},
+		map[string]any{"password": pw, "item": map[string]any{"mnemonic": abandon}}, true, false), "exists")
 	if n, _ := t4.String("network"); n != "testnet4" {
 		t.Fatalf("network %q", n)
 	}

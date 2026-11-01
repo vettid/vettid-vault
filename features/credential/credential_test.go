@@ -146,6 +146,7 @@ type opFeature struct {
 	need  int
 	reply bool
 	check func(*Payload) error
+	gate  func(*Payload) error
 	op    func(*Inner, *Payload) error
 }
 
@@ -156,7 +157,7 @@ func (o *opFeature) Types() []vault.TypeSpec {
 func (o *opFeature) Load(json.RawMessage) error     { return nil }
 func (o *opFeature) Save() (json.RawMessage, error) { return json.RawMessage(`{}`), nil }
 func (o *opFeature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner) (json.RawMessage, error) {
-	r, err := o.cred.Operate(s, in, o.need, o.check, o.op)
+	r, err := o.cred.OperateSpec(s, in, OpSpec{Need: o.need, Check: o.check, Gate: o.gate}, o.op)
 	if err != nil {
 		return nil, err
 	}

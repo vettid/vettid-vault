@@ -25,6 +25,10 @@ const (
 	ConnAuthNonceSize    = 32
 	// ConnAuthChallengeTTL is how long a challenge stays answerable.
 	ConnAuthChallengeTTL = 10 * time.Minute
+	// ApprovalChallengeMaxTTL (0.82.0, §10.4) is how long a receiver keeps
+	// an approval challenge from a service connection: the envelope's exp
+	// clamped to 24 h after arrival. It is not scaled by time_scale.
+	ApprovalChallengeMaxTTL = 24 * time.Hour
 	// ConnAuthMaxContext bounds a challenge's context, in bytes.
 	ConnAuthMaxContext = 256
 

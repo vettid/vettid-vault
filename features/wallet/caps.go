@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/vettid/vettid-vault/features/credential"
+	"github.com/vettid/vettid-vault/features/items"
 	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vms/credwire"
@@ -52,13 +53,20 @@ func periodOf(s *vault.Session) int64 {
 	return vault.Scale(Period, s.TimeScale()).Milliseconds()
 }
 
+// satCeil is where sums of satoshis saturate: one above the largest cap,
+// so a saturated total is over every cap and never wraps.
+const satCeil = MaxCapSats + 1
+
+// sat adds two amounts, each at most satCeil, saturating at satCeil.
+func sat(a, b int64) int64 { return min(a+b, satCeil) }
+
 // spent is the ledger's total within the period: an entry counts while
 // now < at + period.
 func (w *Wallet) spent(nowMS, periodMS int64) int64 {
 	var n int64
 	for _, e := range w.Ledger {
 		if nowMS < e.AtMS+periodMS {
-			n += e.Sats
+			n = sat(n, e.Sats)
 		}
 	}
 	return n
@@ -75,7 +83,7 @@ func (w *Wallet) record(nowMS, periodMS, sats int64) {
 		}
 	}
 	if len(kept) >= MaxLedger {
-		kept[1] = LedgerEntry{AtMS: kept[1].AtMS, Sats: kept[0].Sats + kept[1].Sats}
+		kept[1] = LedgerEntry{AtMS: kept[1].AtMS, Sats: sat(kept[0].Sats, kept[1].Sats)}
 		kept = kept[1:]
 	}
 	i := len(kept)
@@ -84,7 +92,7 @@ func (w *Wallet) record(nowMS, periodMS, sats int64) {
 	}
 	kept = append(kept, LedgerEntry{})
 	copy(kept[i+1:], kept[i:])
-	kept[i] = LedgerEntry{AtMS: nowMS, Sats: sats}
+	kept[i] = LedgerEntry{AtMS: nowMS, Sats: min(sats, satCeil)}
 	w.Ledger = kept
 }
 
@@ -107,7 +115,7 @@ func (w *Wallet) capCheck(outflow, nowMS, periodMS int64) *capRefusal {
 		return nil
 	}
 	spent := w.spent(nowMS, periodMS)
-	if outflow+spent <= w.Caps.PerPeriod {
+	if sat(outflow, spent) <= w.Caps.PerPeriod {
 		return nil
 	}
 	r := &capRefusal{reason: "per_period", limit: w.Caps.PerPeriod, remaining: max(w.Caps.PerPeriod-spent, 0)}
@@ -117,12 +125,20 @@ func (w *Wallet) capCheck(outflow, nowMS, periodMS int64) *capRefusal {
 	// The earliest time it fits: when enough of the oldest entries have
 	// left the period (entries are sorted, so they leave in order).
 	room := w.Caps.PerPeriod - outflow
+	var in []LedgerEntry
 	for _, e := range w.Ledger {
-		if nowMS >= e.AtMS+periodMS {
-			continue
+		if nowMS < e.AtMS+periodMS {
+			in = append(in, e)
 		}
-		spent -= e.Sats
-		if spent <= room {
+	}
+	// rest[i] is the total of in[i:], saturating (the total spent may be
+	// saturated, so it is not reduced entry by entry).
+	rest := make([]int64, len(in)+1)
+	for i := len(in) - 1; i >= 0; i-- {
+		rest[i] = sat(rest[i+1], in[i].Sats)
+	}
+	for i, e := range in {
+		if rest[i+1] <= room {
 			r.afterMS = e.AtMS + periodMS
 			break
 		}
@@ -375,6 +391,8 @@ func optCap(v int64) *int64 {
 func (f *Feature) capRefused(s *vault.Session, w *Wallet, conn string) {
 	s.Record(vault.Activity{Kind: "wallet.cap_refused", ConnectionID: conn, Ref: w.ID, Audit: true, Feed: true, Priority: "high"})
 }
+
+var _ items.RevealGuard = (*Feature)(nil)
 
 // RevealNeedsPIN implements items.RevealGuard: the reveal of the phrase of
 // a wallet that has a cap carries the PIN as well (§10.18).

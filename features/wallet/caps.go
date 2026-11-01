@@ -277,14 +277,14 @@ func (f *Feature) capsSet(s *vault.Session, body []byte) (json.RawMessage, error
 	if err != nil {
 		return nil, err
 	}
-	if !tx.present && !per.present {
-		return nil, errBad // nothing to set
-	}
 	if version != w.Version {
 		return nil, vault.NewError("conflict", "")
 	}
 	if f.twin(w) {
 		return nil, errDuplicate // after conflict, before the value rules (0.82.3)
+	}
+	if !tx.present && !per.present {
+		return nil, errBad // a request that names neither member: a value rule (0.82.2)
 	}
 	changed := false
 	for _, m := range []struct {
@@ -419,6 +419,56 @@ func (f *Feature) twin(w *Wallet) bool {
 		}
 	}
 	return false
+}
+
+// walletSnap is what the reveal guard keeps of a wallet, under gmu: the
+// items feature asks it with its own lock held and must never wait for
+// the wallet's.
+type walletSnap struct {
+	fingerprint string
+	xpubs       map[string]string
+	capped      bool
+}
+
+// rebuildCappedLocked derives which wallets' reveal takes the PIN from the
+// snapshot (gmu held): the master fingerprint of any capped wallet or of a
+// twin (a wallet sharing an account xpub with another) makes every wallet
+// of that fingerprint need it (0.82.3). Nothing is stored beyond the
+// snapshot of the wallets that exist.
+func (f *Feature) rebuildCappedLocked() {
+	guarded := map[string]bool{}
+	for id, w := range f.snap {
+		if w.capped {
+			guarded[w.fingerprint] = true
+		}
+		for oid, o := range f.snap {
+			if oid == id {
+				continue
+			}
+			for t, x := range w.xpubs {
+				if o.xpubs[t] == x {
+					guarded[w.fingerprint] = true
+				}
+			}
+		}
+	}
+	f.capped = map[string]bool{}
+	for id, w := range f.snap {
+		f.capped[id] = guarded[w.fingerprint]
+	}
+}
+
+// ItemDeleted implements items.RevealGuard: a critical item was deleted
+// (item.delete, or credential.reset for each); its wallet leaves the
+// snapshot at once, so a twin or capped sibling no longer asks for the
+// PIN because of it, before the wallet feature next runs.
+func (f *Feature) ItemDeleted(id string) {
+	f.gmu.Lock()
+	defer f.gmu.Unlock()
+	if _, ok := f.snap[id]; ok {
+		delete(f.snap, id)
+		f.rebuildCappedLocked()
+	}
 }
 
 // RevealNeedsPIN implements items.RevealGuard: the reveal of the phrase of

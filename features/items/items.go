@@ -838,6 +838,7 @@ func (f *Feature) finish(s *vault.Session, ch *change, kind string) {
 		}
 		s.SyncEvent("item.deleted", strictjson.NewBuilder().String("item_id", id).Bytes())
 		s.Record(vault.Activity{Kind: kind, Ref: id, Audit: true})
+		f.itemDeleted(id)
 	}
 	f.broadcastIfChanged(s, ch.viewBefore)
 }

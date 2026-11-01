@@ -197,7 +197,8 @@ type Feature struct {
 
 	gmu    sync.Mutex // guards owned and capped only (a leaf lock: ItemInUse is called with the items feature's lock held)
 	owned  map[string]bool
-	capped map[string]bool // wallets whose reveal takes the PIN: a cap or a twin (RevealNeedsPIN)
+	capped map[string]bool // wallets whose reveal takes the PIN (RevealNeedsPIN), derived from snap
+	snap   map[string]walletSnap
 }
 
 // New returns the feature.
@@ -205,7 +206,7 @@ func New(cred Credential, it Items, o Options) *Feature {
 	if o.Networks == nil {
 		o.Networks = []string{btc.Mainnet, btc.Testnet, btc.Testnet4, btc.Signet}
 	}
-	return &Feature{opt: o, cred: cred, items: it, st: state{Wallets: map[string]*Wallet{}}, owned: map[string]bool{}, capped: map[string]bool{}}
+	return &Feature{opt: o, cred: cred, items: it, st: state{Wallets: map[string]*Wallet{}}, owned: map[string]bool{}, capped: map[string]bool{}, snap: map[string]walletSnap{}}
 }
 
 var (
@@ -282,24 +283,21 @@ func (f *Feature) Save() (json.RawMessage, error) {
 	return json.Marshal(f.st)
 }
 
+// syncOwned rebuilds the guard's view from the wallets (gmu is a leaf lock
+// the items feature takes with its own held): who owns an item, and a
+// snapshot of each wallet's fingerprint, account keys and whether it has
+// caps, from which RevealNeedsPIN's answers are derived. It runs on every
+// load, create, delete and change of caps; ItemDeleted drops a wallet
+// from the snapshot as soon as its item is deleted.
 func (f *Feature) syncOwned() {
 	f.gmu.Lock()
 	defer f.gmu.Unlock()
-	f.owned, f.capped = map[string]bool{}, map[string]bool{}
-	// Derived from the current wallets, never stored (0.82.3): the reveal
-	// of a wallet takes the PIN if its master fingerprint is that of any
-	// capped wallet or twin. Rebuilt on every load, create, delete and
-	// change of caps.
-	guarded := map[string]bool{}
-	for _, w := range f.st.Wallets {
-		if w.Caps.PerTx > 0 || w.Caps.PerPeriod > 0 || f.twin(w) {
-			guarded[w.Fingerprint] = true
-		}
-	}
+	f.owned, f.snap = map[string]bool{}, map[string]walletSnap{}
 	for id, w := range f.st.Wallets {
 		f.owned[id] = true
-		f.capped[id] = guarded[w.Fingerprint]
+		f.snap[id] = walletSnap{fingerprint: w.Fingerprint, xpubs: w.XPubs, capped: w.Caps.PerTx > 0 || w.Caps.PerPeriod > 0}
 	}
+	f.rebuildCappedLocked()
 }
 
 // ItemInUse implements items.ItemGuard: a wallet's item changes only

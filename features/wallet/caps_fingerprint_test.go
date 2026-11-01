@@ -53,7 +53,7 @@ func TestRevealPINByFingerprint(t *testing.T) {
 	}
 	// Deleting the capped wallet ends the requirement.
 	e.ok(e.sealed("app", "item.delete", map[string]any{"item_id": main}, map[string]any{"password": pw, "item_id": main}, true, false))
-	e.ok(e.call("app", "wallet.list", `{}`))
+	// No wallet request in between: the requirement ends at once.
 	if got := reveal(test, false); got != "" {
 		t.Fatalf("after the capped wallet was deleted: %q", got)
 	}

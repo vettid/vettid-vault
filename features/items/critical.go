@@ -560,9 +560,18 @@ type ItemGuard interface {
 func (f *Feature) SetGuard(g ItemGuard) { f.guard = g }
 
 // RevealGuard is an ItemGuard that can also require the PIN to reveal the
-// item: the wallet, for a wallet that has a cap (§10.18, 0.56.0).
+// item: the wallet, for a wallet that has a cap or a twin (§10.18).
 type RevealGuard interface {
 	RevealNeedsPIN(itemID string) bool
+	// ItemDeleted is told when a critical item is deleted, with the items
+	// feature's lock held: it must not wait for any other lock.
+	ItemDeleted(itemID string)
+}
+
+func (f *Feature) itemDeleted(id string) {
+	if g, ok := f.guard.(RevealGuard); ok {
+		g.ItemDeleted(id)
+	}
 }
 
 func (f *Feature) revealNeedsPIN(id string) bool {

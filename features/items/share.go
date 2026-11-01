@@ -1159,5 +1159,6 @@ func (f *Feature) CredentialDeleted(s *vault.Session) {
 		}
 		s.SyncEvent("item.deleted", strictjson.NewBuilder().String("item_id", id).Bytes())
 		s.Record(vault.Activity{Kind: "item.deleted", Ref: id, Audit: true})
+		f.itemDeleted(id)
 	}
 }

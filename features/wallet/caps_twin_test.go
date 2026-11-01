@@ -65,7 +65,7 @@ func TestTwinWallets(t *testing.T) {
 		if r := c.set(map[string]any{"per_tx_sats": 1000}); r.Code != "duplicate_wallet" {
 			t.Fatalf("caps.set: %q", r.Code)
 		}
-		// With a wrong PIN, a wrong password and a stale version: still
+		// With a wrong PIN, a wrong password and a binding over another version: still
 		// duplicate_wallet, before any of them is looked at.
 		r := c.raiseWith(map[string]any{"per_tx_sats": 2000}, "000000", "not the password 91", bind(c.id, was.Version+5, "2000", "none"))
 		if r.Code != "duplicate_wallet" {
@@ -82,6 +82,10 @@ func TestTwinWallets(t *testing.T) {
 		e.code(e.sealed("app", "wallet.caps.raise", map[string]any{"wallet_id": idA, "version": v, "per_tx_sats": 2000},
 			map[string]any{"pin": "000000", "password": "not the password 91", "item_id": idA, "payload_sha256": bind(idA, v, "2000", "none")}, true, false), "conflict")
 	}
+	// A request naming neither member is a value rule: conflict first, then
+	// duplicate_wallet, then bad_request.
+	e.code(e.call("app", "wallet.caps.set", js(map[string]any{"wallet_id": idA, "version": a.w().Version + 1})), "conflict")
+	e.code(e.call("app", "wallet.caps.set", js(map[string]any{"wallet_id": idA, "version": a.w().Version})), "duplicate_wallet")
 	// An invalid request on a twin is duplicate_wallet before the value rules.
 	if r := a.set(map[string]any{"per_tx_sats": nil}); r.Code != "duplicate_wallet" {
 		t.Fatalf("value rules after the twin check: %q", r.Code)
@@ -116,10 +120,11 @@ func TestTwinWallets(t *testing.T) {
 	// Deleting one twin frees the other: it reveals with the password
 	// alone, and can be capped.
 	e.ok(e.sealed("app", "item.delete", map[string]any{"item_id": idB}, map[string]any{"password": pw, "item_id": idB}, true, false))
-	e.ok(e.call("app", "wallet.list", `{}`))
+	// No wallet request in between: the requirement ends at once.
 	if got := reveal(idA, nil); got != "" {
 		t.Fatalf("reveal after the twin was deleted: %q", got)
 	}
+	e.code(e.call("app", "wallet.caps.set", js(map[string]any{"wallet_id": idA, "version": a.w().Version})), "bad_request")
 	a.mustSet(map[string]any{"per_tx_sats": 1000})
 	if got := reveal(idA, nil); got != "pin_required" {
 		t.Fatalf("capped: %q", got)

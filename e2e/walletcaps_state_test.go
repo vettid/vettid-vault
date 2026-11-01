@@ -156,6 +156,19 @@ func TestWalletCapsRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	sameAllowance(t, ctx, b.dev, wid, psbt)
+	// The recovered phone spends against the same allowance.
+	if err := b.dev.CredentialFetch(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.dev.CredentialUnlock(ctx, credPW); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wallet.Sign(ctx, b.dev, credPW, wid, psbt(40000)); client.Code(err) != "cap_exceeded" {
+		t.Fatalf("over the remaining allowance after the recovery: %v", err)
+	}
+	if _, err := wallet.Sign(ctx, b.dev, credPW, wid, psbt(39000)); err != nil {
+		t.Fatalf("within it: %v", err)
+	}
 }
 
 // credential.reset deletes the wallets and so their caps and ledgers: the

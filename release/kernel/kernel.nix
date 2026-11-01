@@ -25,7 +25,7 @@ pkgs.stdenv.mkDerivation {
     # NSM driver, from AWS: upstream in Linux 6.8, not in 6.6.y.
     ./aws/kernel/nsm.patch
     # virtio-vsock parent/enclave deadlock, from AWS (Alexander Graf,
-    # 2024-11), rebased onto 6.6.y; not upstream as of 6.6.158.
+    # 2024-11), rebased onto 6.6.y; not upstream as of 6.6.161.
     ./patches/0001-vsock-virtio-Remove-queued_replies-pushback-logic.patch
   ];
 

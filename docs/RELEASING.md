@@ -442,7 +442,7 @@ git push origin release/prod/N
 | `eif_measured_sha256` | every EIF section except the metadata, with their headers: equal between builds |
 | `pcr0`, `pcr1`, `pcr2` | recomputed from the EIF and checked against nitro-cli's |
 | `nitro_cli_version`, `toolchain_lock_sha256` | the toolchain |
-| `blobs_version` | the enclave kernel blob set's release from the lock (`vettid-6.6.159-1` once adopted; `vettid-6.6.158-1` from staging release 13; `v6.6.79`, AWS's, before; pinned already by `toolchain_lock_sha256`; empty for a build without the pinned toolchain). Added after staging release 12: earlier releases' files do not have it and keep their own hashes; `eifinfo match` prints it when it differs but does not require it to match |
+| `blobs_version` | the enclave kernel blob set's release from the lock (`vettid-6.6.161-1` once adopted; `vettid-6.6.159-1` in staging releases 19 to 25; `vettid-6.6.158-1` from staging release 13; `v6.6.79`, AWS's, before; pinned already by `toolchain_lock_sha256`; empty for a build without the pinned toolchain). Added after staging release 12: earlier releases' files do not have it and keep their own hashes; `eifinfo match` prints it when it differs but does not require it to match |
 
 **Why the EIF file hash differs between builds.** nitro-cli 1.5.0 writes a
 metadata section into every EIF: the build time (to the nanosecond) and
@@ -605,7 +605,7 @@ lock files and Dockerfiles are not changed by it.
 toolchain image and so gives the same PCRs; VAULT-RELEASES §5.1 asks for
 that comparison once on real hardware. A nitro-cli installed from the
 Amazon Linux repository does not: its blobs are a different enclave
-kernel (Linux 4.14) from the lock's (Linux 6.6.159, built by
+kernel (Linux 4.14) from the lock's (Linux 6.6.161, built by
 vettid-vault from source; docs/KERNEL.md).
 
 The kernel blob set itself can be rebuilt from source as well, on the

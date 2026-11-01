@@ -107,6 +107,28 @@ func TestVaultctlBatch4(t *testing.T) {
 		t.Fatalf("item: %s", out)
 	}
 
+	// Spend caps (§10.18, 0.56.0): set, refused, inspected, raised.
+	if out = run("wallet", "caps-set", "-wallet", wid, "-per-tx", "400000"); !strings.Contains(out, `"version"`) {
+		t.Fatalf("caps-set: %s", out)
+	}
+	if out, err := runErr(app, "wallet", "caps-set", "-wallet", wid, "-per-tx", "none"); err == nil {
+		t.Fatalf("caps-set only lowers: %s", out)
+	}
+	big := filepath.Join(dir, "big.psbt")
+	run("wallet", "test-psbt", "-wallet", wid, "-to", "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080", "-amount", "450000", "-out", big)
+	if out = run("wallet", "inspect", "-wallet", wid, "-psbt", big); !strings.Contains(out, `"ok": false`) || !strings.Contains(out, `"reason": "per_tx"`) {
+		t.Fatalf("inspect cap: %s", out)
+	}
+	if out, err := runErr(app, "wallet", "sign", "-wallet", wid, "-psbt", big); err == nil || !strings.Contains(out, "cap_exceeded") {
+		t.Fatalf("sign over the cap: %v %s", err, out)
+	}
+	if out = run("wallet", "caps-raise", "-wallet", wid, "-per-tx", "500000"); !strings.Contains(out, `"credential_version"`) {
+		t.Fatalf("caps-raise: %s", out)
+	}
+	if out = run("wallet", "sign", "-wallet", wid, "-psbt", big); !strings.Contains(out, `"tx": "02000000`) {
+		t.Fatalf("sign under the raised cap: %s", out)
+	}
+
 	// Location and presence without connections: listings and policy.
 	if out = run("location", "list"); !strings.Contains(out, `"outgoing"`) {
 		t.Fatalf("location list: %s", out)

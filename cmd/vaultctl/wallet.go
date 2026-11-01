@@ -6,10 +6,12 @@ import (
 	"errors"
 	"flag"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/vettid/vettid-vault/client"
 	cwallet "github.com/vettid/vettid-vault/client/wallet"
+	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/btc"
 )
 
@@ -24,6 +26,8 @@ func init() {
 		"address -wallet ID [-type p2tr|p2wpkh] [-change] [-label L] | addresses -wallet ID [-type T] [-change] | " +
 		"receive -wallet ID -version N -type p2tr|p2wpkh | used -wallet ID -addresses a,b | " +
 		"inspect -wallet ID -psbt FILE | sign -wallet ID -psbt FILE | pay -wallet ID -invocation ID -psbt FILE | history -wallet ID | " +
+		"caps-set -wallet ID [-version N] [-per-tx SATS] [-per-period SATS] (lowers only) | " +
+		"caps-raise -wallet ID [-version N] [-per-tx SATS|none] [-per-period SATS|none] (raises or removes; a member left out stays; PIN in VAULTCTL_PIN, password in VAULTCTL_PASSWORD) | " +
 		"test-psbt -wallet ID -to ADDR -amount SATS -out FILE (regtest only: spends a synthetic coin)", cmdWallet}
 }
 
@@ -60,6 +64,8 @@ func cmdWallet(ctx context.Context, g *globals, args []string) error {
 	to := fs.String("to", "", "payee address (test-psbt)")
 	amount := fs.Int64("amount", 0, "amount in satoshis (test-psbt)")
 	out := fs.String("out", "", "output file (test-psbt)")
+	perTx := fs.String("per-tx", "", "per-transaction cap in satoshis (caps-set, caps-raise; none: no limit)")
+	perPeriod := fs.String("per-period", "", "per-period cap in satoshis (caps-set, caps-raise; none: no limit)")
 	_ = fs.Parse(rest)
 	return withDevice(ctx, g, func(d *client.Device) (any, error) {
 		switch op {
@@ -109,6 +115,8 @@ func cmdWallet(ctx context.Context, g *globals, args []string) error {
 			return cwallet.Pay(ctx, d, pw, *inv, *wallet, raw)
 		case "history":
 			return cwallet.History(ctx, d, *wallet, 0)
+		case "caps-set", "caps-raise":
+			return walletCaps(ctx, d, op == "caps-raise", *wallet, *version, *perTx, *perPeriod)
 		case "test-psbt":
 			accts, recv, err := cwallet.Accounts(ctx, d, *wallet)
 			if err != nil {
@@ -126,6 +134,71 @@ func cmdWallet(ctx context.Context, g *globals, args []string) error {
 		}
 		return nil, errors.New(commands["wallet"].usage)
 	})
+}
+
+// capValue parses a cap flag: "" is absent, "none" no limit, else sats.
+func capValue(s string) (v *int64, none bool, err error) {
+	switch s {
+	case "":
+		return nil, false, nil
+	case "none":
+		return nil, true, nil
+	}
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil || n < 1 {
+		return nil, false, errors.New("a cap is a whole number of satoshis, or none")
+	}
+	return &n, false, nil
+}
+
+// walletCaps is caps-set and caps-raise. The wallet's version defaults to
+// the current one; for a raise a member left out keeps its current value
+// (the request carries the values the wallet will have).
+func walletCaps(ctx context.Context, d *client.Device, raise bool, id string, version uint64, perTx, perPeriod string) (any, error) {
+	tx, txNone, err := capValue(perTx)
+	if err != nil {
+		return nil, err
+	}
+	per, perNone, err := capValue(perPeriod)
+	if err != nil {
+		return nil, err
+	}
+	cur, err := d.Op(ctx, "wallet.get", map[string]any{"wallet_id": id})
+	if err != nil {
+		return nil, err
+	}
+	if version == 0 {
+		if version, err = cur.Uint("version", 1, strictjson.MaxSafeInteger); err != nil {
+			return nil, client.ErrProtocol
+		}
+	}
+	if !raise {
+		if txNone || perNone {
+			return nil, errors.New("caps-set only lowers: use caps-raise to remove a limit")
+		}
+		v, err := cwallet.CapsSet(ctx, d, id, version, tx, per)
+		return map[string]uint64{"version": v}, err
+	}
+	caps, _ := cur.Object("caps")
+	keep := func(given *int64, none bool, k string) *int64 {
+		if given != nil || none {
+			return given
+		}
+		if v, err := caps.Uint(k, 1, strictjson.MaxSafeInteger); err == nil {
+			n := int64(v)
+			return &n
+		}
+		return nil
+	}
+	pin, err := password("VAULTCTL_PIN")
+	if err != nil {
+		return nil, err
+	}
+	pw, err := password("VAULTCTL_PASSWORD")
+	if err != nil {
+		return nil, err
+	}
+	return cwallet.CapsRaise(ctx, d, pin, pw, id, version, keep(tx, txNone, "per_tx_sats"), keep(per, perNone, "per_period_sats"))
 }
 
 // TestPSBT spends one synthetic coin of 1,000,000 sats at the receiving

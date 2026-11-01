@@ -134,8 +134,19 @@ func (d *Device) ItemReveal(ctx context.Context, id string, fields []string) (st
 // values, {"fields":[{field_id,value}],"notes"?}, which the vault sealed
 // to a one-time reply key (§3.5.4).
 func (d *Device) ItemRevealCritical(ctx context.Context, password, id string) (json.RawMessage, error) {
+	return d.ItemRevealCriticalPIN(ctx, password, "", id)
+}
+
+// ItemRevealCriticalPIN is ItemRevealCritical with the vault PIN, which
+// the reveal of a capped wallet's phrase needs as well (§10.18, 0.56.0;
+// "": not sent).
+func (d *Device) ItemRevealCriticalPIN(ctx context.Context, password, pin, id string) (json.RawMessage, error) {
 	o, rk, rid, err := d.credOpWith(ctx, "item.reveal", map[string]any{"item_id": id}, func() map[string]any {
-		return map[string]any{"password": password, "item_id": id}
+		p := map[string]any{"password": password, "item_id": id}
+		if pin != "" {
+			p["pin"] = pin
+		}
+		return p
 	}, true)
 	if err != nil {
 		return nil, err

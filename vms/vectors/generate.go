@@ -355,6 +355,15 @@ func Generate() (map[string][]byte, error) {
 	if err := put("connauth_purpose.json", cpv); err != nil {
 		return nil, err
 	}
+
+	// wallet_caps.json (0.56.0, §10.18, §16)
+	wcv, err := genWalletCaps()
+	if err != nil {
+		return nil, err
+	}
+	if err := put("wallet_caps.json", wcv); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 

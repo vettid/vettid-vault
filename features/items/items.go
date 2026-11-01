@@ -77,6 +77,10 @@ const (
 type Credential interface {
 	Operate(s *vault.Session, in *envelope.Inner, need int, check func(*credential.Payload) error,
 		op func(*credential.Inner, *credential.Payload) error) (*credential.OpResult, error)
+	// OperateSpec is Operate with the PIN checked as an owner check
+	// (the reveal of a capped wallet's phrase, §10.18).
+	OperateSpec(s *vault.Session, in *envelope.Inner, spec credential.OpSpec,
+		op func(*credential.Inner, *credential.Payload) error) (*credential.OpResult, error)
 	// SpendPresented spends the UTK the request presents before any
 	// check (§3.5.4 "Using a UTK", 0.52.0); idempotent within a request.
 	SpendPresented(s *vault.Session, in *envelope.Inner)

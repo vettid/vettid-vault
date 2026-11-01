@@ -277,6 +277,12 @@ func (f *Feature) revealCritical(s *vault.Session, in *envelope.Inner, o strictj
 		if p.ItemID != it.ID {
 			return errBad // consent bound to this item
 		}
+		// (0.56.0) The phrase of a wallet that has a cap is revealed with
+		// the PIN as well (§10.18); a pin that is present is checked
+		// whatever the wallet's caps (credential.OpSpec).
+		if p.PIN == nil && f.revealNeedsPIN(it.ID) {
+			return vault.NewError("bad_request", "pin_required")
+		}
 		return nil
 	}
 	op := func(inner *credential.Inner, p *credential.Payload) error {
@@ -297,7 +303,10 @@ func (f *Feature) revealCritical(s *vault.Session, in *envelope.Inner, o strictj
 		}
 		return nil
 	}
-	res, err := f.operate(s, in, credential.NeedItemID|credential.NeedReply, check, op)
+	if f.cred == nil {
+		return nil, vault.NewError("credential_required", "")
+	}
+	res, err := f.cred.OperateSpec(s, in, credential.OpSpec{Need: credential.NeedItemID | credential.NeedReply | credential.NeedOptPIN, Check: check}, op)
 	if err != nil {
 		return nil, err
 	}
@@ -549,6 +558,17 @@ type ItemGuard interface {
 
 // SetGuard connects the wallet feature (at construction).
 func (f *Feature) SetGuard(g ItemGuard) { f.guard = g }
+
+// RevealGuard is an ItemGuard that can also require the PIN to reveal the
+// item: the wallet, for a wallet that has a cap (§10.18, 0.56.0).
+type RevealGuard interface {
+	RevealNeedsPIN(itemID string) bool
+}
+
+func (f *Feature) revealNeedsPIN(id string) bool {
+	g, ok := f.guard.(RevealGuard)
+	return ok && g.RevealNeedsPIN(id)
+}
 
 func (f *Feature) guarded(id string) bool { return id != "" && f.guard != nil && f.guard.ItemInUse(id) }
 

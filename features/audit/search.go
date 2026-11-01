@@ -21,6 +21,7 @@ var itemRefKinds = map[string]bool{
 	"item.added": true, "item.updated": true, "item.deleted": true, "item.sensitivity_changed": true, "item.revealed": true,
 	"share.included": true, "share.declined": true, "share.withdrawn": true,
 	"wallet.created": true, "wallet.deleted": true, "wallet.address_issued": true,
+	"wallet.cap_refused": true, "wallet.caps_lowered": true, "wallet.caps_raised": true,
 }
 
 var kindSpaces = strings.NewReplacer(".", " ", "_", " ", "-", " ")

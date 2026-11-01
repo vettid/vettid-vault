@@ -341,3 +341,19 @@ func TestSearchBudgetEdge(t *testing.T) {
 		t.Fatalf("connection.audit.list after_seq: %+v", p)
 	}
 }
+
+// §10.9 (0.56.0): the spend-cap entries' ref is the wallet's item id, so q
+// finds them by the wallet's current name.
+func TestSearchWalletCapKinds(t *testing.T) {
+	f, h := New(), featuretest.NewHost()
+	f.SetItems(fakeItems{"w1": "Cold Storage"})
+	for i, k := range []string{"wallet.cap_refused", "wallet.caps_lowered", "wallet.caps_raised"} {
+		rec(f, h, t0.Add(time.Duration(i)*time.Second), vault.Activity{Kind: k, Ref: "w1", Audit: true})
+	}
+	if got := seqs(list(t, f, h, "audit.list", `{"q":"cold"}`)); got != "3,2,1" {
+		t.Errorf("q by wallet name: %s", got)
+	}
+	if got := seqs(list(t, f, h, "audit.list", `{"q":"caps raised"}`)); got != "3" {
+		t.Errorf("q by kind: %s", got)
+	}
+}

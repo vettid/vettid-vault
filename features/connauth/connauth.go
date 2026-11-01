@@ -39,6 +39,10 @@ import (
 const (
 	MaxPendingOut = 8 // per connection
 	MaxPendingIn  = 4 // per connection
+	// MaxLongLivedIn (0.82.0, §10.4.1) is how many received challenges per
+	// connection may live longer than peerwire.ConnAuthChallengeTTL after
+	// arrival, within MaxPendingIn.
+	MaxLongLivedIn = 2
 )
 
 // KeyUser gives access to the credential key during the unlock window
@@ -60,6 +64,10 @@ type Challenge struct {
 	// MatchCode (0.79.0) is display only, never signed: a valid code of a
 	// sign-in challenge, "" otherwise.
 	MatchCode string `json:"match_code,omitempty"`
+	// Long (0.82.0) marks a received challenge kept for more than
+	// peerwire.ConnAuthChallengeTTL after it arrived; it counts toward
+	// MaxLongLivedIn for as long as it is held.
+	Long bool `json:"long,omitempty"`
 }
 
 // State is the last outcome with one connection.
@@ -283,10 +291,20 @@ func (f *Feature) challenge(s *vault.Session, in *envelope.Inner) error {
 		return nil
 	}
 	c.Conn = conn
-	c.Exp = now.Add(peerwire.ConnAuthChallengeTTL).UTC().Truncate(time.Millisecond)
+	// The lifetime (0.82.0, §10.4): the envelope's exp, at most 10 minutes
+	// after arrival, or 24 hours for an approval from a service connection
+	// (§6.4), of which at most MaxLongLivedIn are held per connection (a
+	// further one is clamped to 10 minutes, not dropped). A longer exp is
+	// clamped, never dropped; there is no allowance for clock skew.
+	limit := peerwire.ConnAuthChallengeTTL
+	if c.Purpose == peerwire.PurposeApproval && s.From().IsService() && f.countLong(conn) < MaxLongLivedIn {
+		limit = peerwire.ApprovalChallengeMaxTTL
+	}
+	c.Exp = now.Add(limit).UTC().Truncate(time.Millisecond)
 	if !in.Exp.IsZero() && in.Exp.Before(c.Exp) {
 		c.Exp = in.Exp
 	}
+	c.Long = c.Exp.After(now.Add(peerwire.ConnAuthChallengeTTL))
 	// A received challenge is an ask (§10.4.1, 0.23.0): mute, pause, the
 	// cooldown (any challenge with the same purpose, 0.65.0), the pending
 	// caps and the purpose's rate bucket. A suppressed one is answered
@@ -371,6 +389,18 @@ func askIdent(purpose string) string {
 		return AskIdent
 	}
 	return AskIdent + ":" + purpose
+}
+
+// countLong counts the long-lived challenges held from conn (expired and
+// withdrawn ones are gone from the map).
+func (f *Feature) countLong(conn string) int {
+	n := 0
+	for _, c := range f.d.In {
+		if c.Conn == conn && c.Long {
+			n++
+		}
+	}
+	return n
 }
 
 // countPurpose counts the connection's received challenges with purpose

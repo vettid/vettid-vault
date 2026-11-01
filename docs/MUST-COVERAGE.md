@@ -1229,3 +1229,12 @@ The member vault's side. The service vault's side is vettid/service-vault. `svcF
 | 6.6 (0.72.0) | The held reconnect (tokens, rotations, th1 mark) is part of the state: after a restart the `hs.fin` applies it | `vault.TestPendingReconnectSurvivesRestart` |
 | 6.6 (0.72.0) | An answer to a reconnect that expires (16 days) denylists the tokens it issued | `vault.TestExpiredReconnectAnswerRevokesTokens` |
 | 3.4, 6.6 (0.72.0) | A rotation followed between `hs.init` and `hs.fin` does not refuse the reconnect: the links to follow are worked out again at `hs.fin` and the followed one is skipped | `vault.TestRotationFollowedBetweenInitAndFin` |
+
+## Long-lived approval challenges (§3.6.3, §10.4, §10.4.1, §10.4.2; 0.82.0)
+
+| § | MUST | Test |
+|---|------|------|
+| 10.4 (0.82.0) | A received challenge's lifetime is the envelope's `exp` clamped (never dropped) to 24 h after arrival for an `approval` challenge on a connection whose `peer_kind` is `service`, and to 10 minutes after arrival for everything else (`signin`, no purpose, an unknown purpose, any person connection); a shorter `exp` is kept; no allowance for clock skew; the 24 h is not scaled by `time_scale` | `connauth.TestChallengeLifetime` |
+| 10.4, 10.4.1 (0.82.0) | At most 2 long-lived challenges (kept longer than 10 minutes after arrival) are held per connection, within the 4 received; a third is clamped to 10 minutes, not dropped; an expired or withdrawn one frees its place; a short one takes none; each connection counts apart; the mark is part of the saved state | `connauth.TestLongLivedSubCap`, `connauth.TestLongFlagPersists` |
+| 10.4, 10.4.1 (0.82.0) | The ask, the `connection.authenticate.pending` event and `pending.list` carry the clamped `exp`; a long challenge is listed while unexpired; the neutral answer of a suppressed long challenge is still due within 20 minutes of arrival, not near its `exp` | `connauth.TestLongChallengeAskAndPendingList`, `connauth.TestLongSuppressedAnswerStaysSoon` |
+| 3.6.3, 10.4.2 (0.82.0) | A held vault keeps a long approval challenge it received; after the owner check passes more than 10 minutes later it is in `pending.list` and the member can approve it (signed response to the service) | `connauth.TestLongChallengeSurvivesHold`, `vault.TestPendingListSessionAndHold` (the hold's gating) |

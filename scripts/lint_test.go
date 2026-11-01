@@ -5,6 +5,7 @@ package scripts
 
 import (
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -237,6 +238,12 @@ func TestEIFToolchain(t *testing.T) {
 		}
 		if !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(val("kernel_commit")) {
 			t.Errorf("kernel_commit %q is not a full commit id", val("kernel_commit"))
+		} else if err := kernelCommitInHistory("..", val("kernel_commit")); err != nil {
+			if os.Getenv("GITHUB_ACTIONS") != "true" && errors.Is(err, errNoHistory) {
+				t.Logf("kernel_commit ancestry not checked: %v", err)
+			} else {
+				t.Error(err)
+			}
 		}
 		if got := fmt.Sprintf("%x", sha256.Sum256(kl)); val("kernel_lock_sha256") != got {
 			t.Errorf("kernel_lock_sha256 %s, release/kernel/kernel.lock is %s", val("kernel_lock_sha256"), got)
@@ -348,5 +355,122 @@ func TestEnclaveKernel(t *testing.T) {
 	}
 	if c := read(t, dir+"/cmdline"); strings.Contains(c, "\n") || strings.Contains(c, "nomodule") {
 		t.Errorf("cmdline %q: one line, no newline, no module options (the kernel has no modules)", c)
+	}
+}
+
+// errNoHistory: the checkout cannot answer whether a commit is in HEAD's
+// history (not a git work tree, or a shallow clone). CI fails on it; a
+// local run without the history only logs it.
+var errNoHistory = errors.New("no full git history")
+
+// kernelCommitInHistory reports whether commit, the recipe commit the
+// pinned blob set was built and tagged at (release/eif-toolchain.lock
+// kernel_commit), is an ancestor of HEAD in the repository at dir. The
+// kernel pull request is merged with a merge commit (docs/KERNEL.md §6) so
+// that it is; a squash would leave it reachable only from its tag.
+func kernelCommitInHistory(dir, commit string) error {
+	git := func(args ...string) (string, error) {
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		cmd.Env = gitFreeEnv()
+		out, err := cmd.CombinedOutput()
+		return strings.TrimSpace(string(out)), err
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		return fmt.Errorf("%w: %v", errNoHistory, err)
+	}
+	if out, err := git("rev-parse", "--is-shallow-repository"); err != nil {
+		return fmt.Errorf("%w: %v: %s", errNoHistory, err, out)
+	} else if out == "true" {
+		return fmt.Errorf("%w: a shallow clone (fetch-depth: 0 is needed)", errNoHistory)
+	}
+	if _, err := git("cat-file", "-e", commit+"^{commit}"); err != nil {
+		return fmt.Errorf("kernel_commit %s is not in this repository (was the kernel pull request squashed or rebased, or its kernel/<version>-<n> tag not fetched?)", commit)
+	}
+	if _, err := git("merge-base", "--is-ancestor", commit, "HEAD"); err != nil {
+		return fmt.Errorf("kernel_commit %s is not in HEAD's history: merge the kernel pull request with a merge commit, not a squash or a rebase (docs/KERNEL.md §6)", commit)
+	}
+	return nil
+}
+
+// gitFreeEnv is the environment without the GIT_ variables a git hook
+// exports (GIT_DIR, GIT_INDEX_FILE, GIT_WORK_TREE, ...), so that a git run
+// here acts on the directory it is given and never on the repository of a
+// hook that runs the tests.
+func gitFreeEnv() []string {
+	var env []string
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "GIT_") {
+			env = append(env, kv)
+		}
+	}
+	return env
+}
+
+// A merge commit keeps the recipe commit in the history; a squash of the
+// same pull request does not, though a tag still holds it.
+func TestKernelCommitInHistory(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("no git")
+	}
+	// No user or system git config, and none of a hook's GIT_ variables.
+	gitEnv := func() []string {
+		return append(gitFreeEnv(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_CONFIG_NOSYSTEM=1")
+	}
+	dir := t.TempDir()
+	git := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		cmd.Env = append(gitEnv(), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.org", "GIT_COMMITTER_NAME=t",
+			"GIT_COMMITTER_EMAIL=t@example.org")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	commit := func(file, msg string) string {
+		if err := os.WriteFile(filepath.Join(dir, file), []byte(msg), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		git("add", file)
+		git("commit", "-q", "-m", msg)
+		return git("rev-parse", "HEAD")
+	}
+	git("init", "-q", "-b", "main")
+	// A GIT_DIR or GIT_INDEX_FILE from a hook running the tests is not used.
+	t.Setenv("GIT_DIR", filepath.Join(t.TempDir(), "not-this"))
+	t.Setenv("GIT_INDEX_FILE", filepath.Join(t.TempDir(), "not-this-index"))
+	commit("a", "base")
+	git("checkout", "-q", "-b", "kernel")
+	recipe := commit("kernel.lock", "recipe")
+	commit("eif-toolchain.lock", "pin")
+	git("tag", "kernel/x-1", recipe)
+	git("checkout", "-q", "main")
+	commit("b", "another change on main")
+
+	git("checkout", "-q", "-b", "merged", "main")
+	git("merge", "-q", "--no-ff", "-m", "merge", "kernel")
+	if err := kernelCommitInHistory(dir, recipe); err != nil {
+		t.Errorf("merge commit: %v", err)
+	}
+
+	git("checkout", "-q", "-b", "squashed", "main")
+	git("merge", "-q", "--squash", "kernel")
+	git("commit", "-q", "-m", "squash")
+	if err := kernelCommitInHistory(dir, recipe); err == nil || errors.Is(err, errNoHistory) {
+		t.Errorf("squash: %v, want not in history", err)
+	}
+	if err := kernelCommitInHistory(dir, strings.Repeat("0", 40)); err == nil {
+		t.Error("an unknown commit passed")
+	}
+
+	shallow := t.TempDir()
+	clone := exec.Command("git", "clone", "-q", "--depth", "1", "--branch", "merged", "file://"+dir, shallow)
+	clone.Env = gitEnv()
+	if out, err := clone.CombinedOutput(); err != nil {
+		t.Fatalf("shallow clone: %v\n%s", err, out)
+	}
+	if err := kernelCommitInHistory(shallow, recipe); !errors.Is(err, errNoHistory) {
+		t.Errorf("shallow clone: %v, want errNoHistory", err)
 	}
 }

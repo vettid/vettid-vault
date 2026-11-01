@@ -125,7 +125,9 @@ func cmdItem(ctx context.Context, g *globals, args []string) error {
 				if err != nil {
 					return nil, err
 				}
-				v, err := d.ItemRevealCritical(ctx, pw, *id)
+				// The phrase of a wallet that has a cap needs the PIN too
+				// (VAULT-MESSAGING §10.18): VAULTCTL_PIN, when set.
+				v, err := d.ItemRevealCriticalPIN(ctx, pw, os.Getenv("VAULTCTL_PIN"), *id)
 				if err != nil {
 					return nil, err
 				}

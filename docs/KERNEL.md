@@ -317,7 +317,14 @@ cannot land ahead of the pin. The steps:
    the set was built from), `kernel_commit` (the tagged recipe commit)
    and `kernel_source_sha256`, so the chain source → blob set → EIF is
    explicit. The pull request is merged with a **merge commit**, not
-   squashed, so that `kernel_commit` stays in `main`'s history.
+   squashed, so that `kernel_commit` stays in `main`'s history;
+   `scripts/lint_test.go` fails `ci` on `main` when it is not (a squash
+   leaves it reachable only from its tag), which is why `ci`'s test job
+   checks out the full history. If one was squashed anyway, bring the
+   tagged commit back into the history with `git merge -s ours
+   kernel/<version>-<n>` in a pull request that is itself merged with a
+   merge commit (pinning the squash commit instead is not the same: its
+   tree holds the pin, so the source archive differs).
    `release/Dockerfile.eif-builder` does not change: it already
    downloads an archive, checks it and installs six files.
 3. **The enclave binary** knows the pinned kernel: `release/enclave-kernel`

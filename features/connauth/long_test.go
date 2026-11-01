@@ -95,6 +95,18 @@ func TestChallengeLifetime(t *testing.T) {
 	if got := heldExp(b, recv(t, b, "z", "signin", t0, time.Time{})); !got.Equal(t0.Add(peerwire.ConnAuthChallengeTTL)) {
 		t.Fatalf("zero exp signin: +%v", got.Sub(t0))
 	}
+	// Neither cap is scaled by the release's time scale (STAGING-TIME-SCALE
+	// N16): a staging vault keeps the same 24 h and 10 minutes.
+	_, b = serviceSide()
+	b.h.Scale = 60
+	if got := heldExp(b, recv(t, b, "s", "approval", t0, t0.Add(30*time.Hour))); !got.Equal(t0.Add(24 * time.Hour)) {
+		t.Fatalf("scaled approval: +%v", got.Sub(t0))
+	}
+	_, b = serviceSide()
+	b.h.Scale = 60
+	if got := heldExp(b, recv(t, b, "s", "signin", t0, t0.Add(time.Hour))); !got.Equal(t0.Add(10 * time.Minute)) {
+		t.Fatalf("scaled signin: +%v", got.Sub(t0))
+	}
 }
 
 // The ask, the pending event and pending.list carry the clamped exp; a
@@ -192,7 +204,10 @@ func TestLongSuppressedAnswerStaysSoon(t *testing.T) {
 // A held vault (§3.6.3, the owner check past its deadline) takes a long
 // approval challenge like any other; when the member passes the check
 // more than 10 minutes later, it is still in pending.list and the member
-// can approve it, with a signed response to the service.
+// can approve it, with a signed response to the service. The hold's own
+// gating of device requests is the vault's, covered by
+// vault.TestPendingListSessionAndHold; this test covers the challenge's
+// life across it.
 func TestLongChallengeSurvivesHold(t *testing.T) {
 	_, b := serviceSide()
 	b.w.open = true

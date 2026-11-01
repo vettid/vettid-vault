@@ -391,8 +391,6 @@ func askIdent(purpose string) string {
 	return AskIdent + ":" + purpose
 }
 
-// countPurpose counts the connection's received challenges with purpose
-// that wait for the member.
 // countLong counts the long-lived challenges held from conn (expired and
 // withdrawn ones are gone from the map).
 func (f *Feature) countLong(conn string) int {
@@ -405,6 +403,8 @@ func (f *Feature) countLong(conn string) int {
 	return n
 }
 
+// countPurpose counts the connection's received challenges with purpose
+// that wait for the member.
 func (f *Feature) countPurpose(conn, purpose string) int {
 	n := 0
 	for _, c := range f.d.In {

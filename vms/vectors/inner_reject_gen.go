@@ -348,6 +348,8 @@ func genInnerReject(sessEnv []byte) (obj, error) {
 		"leading_zero_member", S(`"x":01`), "plus_sign_member", S(`"x":+1`), "lone_decimal_point_member", S(`"x":1.`),
 		"raw_newline_in_string", S(`"x":"a`+"\n"+`b"`), "raw_tab_in_string", S(`"x":"a`+"\t"+`b"`),
 		"invalid_escape", S(`"x":"\q"`), "short_unicode_escape", S(`"x":"\u12"`))
+	inner("§5.3 / RFC 8259 §7: the four characters after \\u are ASCII hex digits", "session",
+		"unicode_escape_non_ascii_hex_digits", S(`"x":"\u００41"`))
 	rawInner("§5.3: the inner plaintext (including its body) MUST be valid UTF-8", "invalid_utf8_in_body_string", []byte(S(`"body":{"a":"`+"\xff"+`"}`)))
 	rawInner("§5.3: the inner plaintext (including its body) MUST be valid UTF-8", "invalid_utf8_in_unknown_member", []byte(S(`"x":"`+"\xc3\x28"+`"`)))
 	rawInner("§5.3: the inner plaintext (including its body) MUST be valid UTF-8 (overlong encoding of '/')", "overlong_utf8", []byte(S(`"x":"`+"\xc0\xaf"+`"`)))

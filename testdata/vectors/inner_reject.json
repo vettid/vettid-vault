@@ -1045,6 +1045,14 @@
       "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{},\"x\":\"\\u12\"}"
     },
     {
+      "case": "unicode_escape_non_ascii_hex_digits",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3 / RFC 8259 §7: the four characters after \\u are ASCII hex digits",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{},\"x\":\"\\u００41\"}"
+    },
+    {
       "case": "invalid_utf8_in_body_string",
       "layer": "inner",
       "mode": "session",

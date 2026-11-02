@@ -786,7 +786,7 @@ func (d *Device) sendLocked(ctx context.Context, id, typ string, body json.RawMe
 	return d.sendFull(ctx, id, typ, body, re, status, time.Time{})
 }
 
-func (d *Device) sendFull(ctx context.Context, id, typ string, body json.RawMessage, re, status string, exp time.Time) (string, error) {
+func (d *Device) sendFull(ctx context.Context, id, typ string, body json.RawMessage, re, status string, exp time.Time) (_ string, err error) {
 	v := d.st.Vault
 	if v == nil || v.Token == "" || d.keyring.Current() == nil {
 		return "", ErrNotPaired
@@ -806,20 +806,32 @@ func (d *Device) sendFull(ctx context.Context, id, typ string, body json.RawMess
 	if re == "" {
 		// §8.2: the vault answers a retransmission with its cached
 		// response, which has the same inner id as the first answer; the
-		// resend arms the id so that this answer reaches the caller. The id
-		// stays armed until the earlier of its exp and askedKeep, so that
+		// resend arms the id so that this answer reaches the caller. After
+		// a restart the caller must resend, not only wait: a replay
+		// collected before the resend is dropped. The id stays armed until
+		// the earlier of exp plus the clock skew and askedKeep, so that
 		// events sent with an exp do not pile up.
 		if d.asked == nil {
 			d.asked = map[string]time.Time{}
 		}
 		until := now.Add(askedKeep)
-		if !exp.IsZero() && exp.Before(until) {
-			until = exp
+		if u := exp.Add(envelope.MaxClockSkewFuture); !exp.IsZero() && u.Before(until) {
+			until = u
 		}
+		prev, had := d.asked[id]
 		d.asked[id] = until
+		defer func() {
+			// A failed send leaves the arm of an earlier send of this id.
+			if err != nil {
+				if had {
+					d.asked[id] = prev
+				} else {
+					delete(d.asked, id)
+				}
+			}
+		}()
 	}
-	if err := d.depositVault(ctx, outboxKind(typ, re), v.RelayURL, v.Mailbox, v.Token, raw); err != nil {
-		delete(d.asked, id)
+	if err = d.depositVault(ctx, outboxKind(typ, re), v.RelayURL, v.Mailbox, v.Token, raw); err != nil {
 		return "", err
 	}
 	return id, nil
@@ -851,7 +863,8 @@ func (d *Device) WaitEvent(ctx context.Context, typ string, pred func(json.RawMe
 	})
 }
 
-// Events returns and clears the buffered events.
+// Events returns and clears the buffered events. A response may be queued
+// twice (the first answer and a replay of it, §8.2): key on Re.
 func (d *Device) Events() []*envelope.Inner {
 	d.mu.Lock()
 	defer d.mu.Unlock()

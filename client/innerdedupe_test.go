@@ -533,19 +533,98 @@ func TestAskedBounded(t *testing.T) {
 	if _, err := d.Send(ctx, "vault.status", []byte(`{}`)); err != nil {
 		t.Fatal(err)
 	}
-	if len(d.asked) != 6 {
-		t.Fatalf("%d armed, want 6", len(d.asked))
+	armed := func() int {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		return len(d.asked)
 	}
-	d.mu.Lock()
-	d.pruneSeen(time.Now().Add(2 * time.Minute))
-	d.mu.Unlock()
-	if len(d.asked) != 1 {
-		t.Fatalf("%d armed after the events' exp, want 1", len(d.asked))
+	prune := func(at time.Time) {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		d.pruneSeen(at)
 	}
-	d.mu.Lock()
-	d.pruneSeen(time.Now().Add(25 * time.Hour))
-	d.mu.Unlock()
-	if len(d.asked) != 0 {
+	if armed() != 6 {
+		t.Fatalf("%d armed, want 6", armed())
+	}
+	prune(time.Now().Add(7 * time.Minute)) // past exp plus the clock skew
+	if armed() != 1 {
+		t.Fatalf("%d armed after the events' exp, want 1", armed())
+	}
+	prune(time.Now().Add(25 * time.Hour))
+	if armed() != 0 {
 		t.Fatal("armed entry kept past 24 hours")
+	}
+}
+
+// Two copies of the replayed answer after one resend give one delivery.
+func TestReplayDeliveredOnce(t *testing.T) {
+	ctx := context.Background()
+	r, v, d := pair(t)
+	d.cfg.Persist = keep(new([]byte), r)
+	reqID, err := d.Send(ctx, "vault.status", []byte(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ans := &envelope.Inner{ID: "01HZZZZZZZZZZZZZZZZZZZZZZP", Type: "vault.status", TS: time.Now(),
+		Re: reqID, Status: envelope.StatusOK, Body: []byte(`{}`)}
+	answer := func() {
+		raw, err := v.kr.Current().Seal(ans)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.put(v.dev.Mailbox, v.relayPK(), raw)
+	}
+	answer()
+	if err := d.Poll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	_ = d.Events()
+	if _, err := d.SendWithID(ctx, reqID, "vault.status", []byte(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	answer()
+	answer()
+	if err := d.Poll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, e := range d.Events() {
+		if e.Re == reqID {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("%d deliveries, want 1", n)
+	}
+}
+
+// A failed resend keeps the arm of the earlier send of the id; a failed
+// first send leaves none.
+func TestFailedResendKeepsArm(t *testing.T) {
+	ctx := context.Background()
+	r, _, d := pair(t) // no Persist: the deposit is made at once
+	fail := func(n int) {
+		r.mu.Lock()
+		r.failDeposit, r.depositStatus = n, 503
+		r.mu.Unlock()
+	}
+	fail(1000)
+	if _, err := d.SendWithID(ctx, "01HZZZZZZZZZZZZZZZZZZZZZZR", "vault.status", []byte(`{}`)); err == nil {
+		t.Fatal("deposit did not fail")
+	}
+	if len(d.asked) != 0 {
+		t.Fatal("a failed first send left an arm")
+	}
+	fail(0)
+	id, err := d.Send(ctx, "vault.status", []byte(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fail(1000)
+	if _, err := d.SendWithID(ctx, id, "vault.status", []byte(`{}`)); err == nil {
+		t.Fatal("deposit did not fail")
+	}
+	if _, ok := d.asked[id]; !ok {
+		t.Fatal("a failed resend dropped the earlier arm")
 	}
 }

@@ -87,7 +87,7 @@ func checkDesktopVectors(t *testing.T, dir string) {
 		t.Error("hs.init body")
 	}
 	if body.Purpose != "desktop" || body.Ctx != b.InviteID ||
-		body.Token != DesktopTokenInit || body.ReconnectToken != "" || body.DeviceAttest != nil || body.APIKey != nil ||
+		body.Token != DesktopTokenStanding || body.ReconnectToken != "" || body.DeviceAttest != nil || body.APIKey != nil ||
 		body.UnlockSecret != nil || body.Rotations != nil || string(body.Profile) != `{"name":"`+DesktopName+`"}` {
 		t.Error("hs.init members")
 	}
@@ -194,13 +194,12 @@ func checkDesktopVectors(t *testing.T, dir string) {
 	// The epoch policy of a device: 7 days, no message bound.
 	var pol struct {
 		MaxAge int `json:"max_age_seconds"`
-		MaxMsg int `json:"max_messages"`
 	}
 	if err := json.Unmarshal(d.m["epoch_policy"], &pol); err != nil {
 		t.Fatal(err)
 	}
 	if time.Duration(pol.MaxAge)*time.Second != handshake.PolicyVaultToDevice.MaxAge || pol.MaxAge != 7*24*3600 ||
-		uint64(pol.MaxMsg) != handshake.PolicyVaultToDevice.MaxMessages {
+		handshake.PolicyVaultToDevice.MaxMessages != 0 {
 		t.Error("epoch policy")
 	}
 

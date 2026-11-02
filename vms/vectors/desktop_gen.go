@@ -22,10 +22,12 @@ const DesktopOpenToken = "v4.public.VEVTVC1ERVNLVE9QLW9wZW4"
 // with the vault of keys.json. What differs from a connection handshake
 // (handshake.json): the purpose is "desktop"; ctx is the pairing id of
 // the claim bundle (kind "desktop", QR t "d"); hs.init is deposited on the
-// bundle's open token and carries the desktop's request token and a
+// bundle's open token and carries the desktop's standing token and a
 // self-asserted profile; there is no device attestation (that is for the
 // app) and no api_key or unlock_secret; the epoch policy is the
-// vault-to-device one (7 days).
+// vault-to-device one (7 days); and hs.init's token is the desktop's
+// standing token (the one device.pair.rejected is deposited on, §6.7), not
+// a request token, which only a connection's hs.init carries.
 func genDesktop(t0 time.Time, vault *principal) (obj, error) {
 	dev, err := newPrincipal(SeedDesktopIK, SeedDesktopKEM, SeedDesktopRelay)
 	if err != nil {
@@ -84,7 +86,7 @@ func genDesktop(t0 time.Time, vault *principal) (obj, error) {
 		in, err = handshake.NewInitiator(handshake.InitiatorConfig{
 			Purpose: handshake.PurposeDesktop, Ctx: DesktopPairingID,
 			Identity: dev.ik, StaticKEM: dev.kem.Public(), Relay: dev.addr,
-			Token: DesktopTokenInit, Suites: []int{2}, Profile: profile,
+			Token: DesktopTokenStanding, Suites: []int{2}, Profile: profile,
 			ResponderIK: vault.ikPub(), ResponderEK: vault.kem.Public(), ResponderRelayKey: vault.relayPub(),
 			Policy: handshake.PolicyVaultToDevice, ID: DesktopInitID, FinID: DesktopFinID, Now: t0,
 		})
@@ -165,7 +167,7 @@ func genDesktop(t0 time.Time, vault *principal) (obj, error) {
 
 	// hs.init bodies a vault MUST refuse for a desktop: each is the body
 	// above with one change.
-	tokenMember := `"token":"` + DesktopTokenInit + `",`
+	tokenMember := `"token":"` + DesktopTokenStanding + `",`
 	commitMember := `,"sas_commit":"` + base64.StdEncoding.EncodeToString(commit[:]) + `"`
 	if !strings.Contains(body, tokenMember) || !strings.HasSuffix(body, commitMember+"}") {
 		return nil, errors.New("vectors: unexpected hs.init body layout")
@@ -176,7 +178,7 @@ func genDesktop(t0 time.Time, vault *principal) (obj, error) {
 		{{"case", "sas_commit_missing"}, {"reason", "hs.init of purpose desktop requires sas_commit (§6.2, 0.10.3)"},
 			{"body", strings.Replace(body, commitMember, "", 1)}},
 		{{"case", "reconnect_token_present"}, {"reason", "reconnect_token MUST be absent for desktop (§6.2)"},
-			{"body", strings.Replace(body, tokenMember, tokenMember+`"reconnect_token":"`+DesktopTokenInit+`",`, 1)}},
+			{"body", strings.Replace(body, tokenMember, tokenMember+`"reconnect_token":"`+DesktopTokenStanding+`",`, 1)}},
 		{{"case", "unlock_secret_present"}, {"reason", "unlock_secret is for a transfer's app only (§6.2): MUST be absent for desktop"},
 			{"body", strings.Replace(body, commitMember, `,"unlock_secret":"`+base64.StdEncoding.EncodeToString(rep(0x00, 32))+`"`+commitMember, 1)}},
 	}
@@ -186,7 +188,7 @@ func genDesktop(t0 time.Time, vault *principal) (obj, error) {
 	}
 
 	return obj{
-		{"description", "VAULT-MESSAGING 0.10.3 §6.1-§6.3, §6.4, §6.7 handshake, purpose desktop: a desktop (keys below) pairs with the vault of keys.json. The vault shows a pairing QR (kind desktop, QR t = \"d\", TTL 10 min, remote false) whose bundle's invite_id is the pairing id and whose token is the open token; the desktop sends hs.init (purpose desktop, ctx = the pairing id) sealed to the vault ek with sender_kid = kid(desktop ek), deposited on the open token. It carries its request token, a self-asserted profile {name}, suites [2] and sas_commit; it has no device_attest (an app's only), api_key or unlock_secret, and no reconnect_token. hs.resp (sealed to eph, sender_kid all zero) carries the vault's request token and n_R; hs.fin (session, direction i2r) reveals n_I. The vault does not activate the epoch until its owner approves the SAS (§6.7); the epoch policy is the vault-to-device one: 7 days, no message bound. The mechanics are those of handshake.json: encapsulation randomness, th and every key follow §6.3. Tokens are dummy strings, not real PASETO tokens. Fixed test-only inputs."},
+		{"description", "VAULT-MESSAGING 0.10.3 §6.1-§6.3, §6.4, §6.7 handshake, purpose desktop: a desktop (keys below) pairs with the vault of keys.json. The vault shows a pairing QR (kind desktop, QR t = \"d\", TTL 10 min, remote false) whose bundle's invite_id is the pairing id and whose token is the open token; the desktop sends hs.init (purpose desktop, ctx = the pairing id) sealed to the vault ek with sender_kid = kid(desktop ek), deposited on the open token. It carries its standing token (the one device.pair.rejected is deposited on, §6.7; only a connection's hs.init carries a request token), a self-asserted profile {name}, suites [2] and sas_commit; it has no device_attest (an app's only), api_key or unlock_secret, and no reconnect_token. hs.resp (sealed to eph, sender_kid all zero) carries the vault's request token and n_R; hs.fin (session, direction i2r) reveals n_I. The vault does not activate the epoch until its owner approves the SAS (§6.7); the epoch policy is the vault-to-device one: 7 days, no message bound (so no max_messages member). The mechanics are those of handshake.json: encapsulation randomness, th and every key follow §6.3. Tokens are dummy strings, not real PASETO tokens. Fixed test-only inputs."},
 		{"desktop", dev.keysObj()},
 		{"pairing", obj{
 			{"bundle_json", string(bj)},
@@ -208,7 +210,7 @@ func genDesktop(t0 time.Time, vault *principal) (obj, error) {
 			{"ts", TS},
 			{"init_id", DesktopInitID}, {"resp_id", DesktopRespID}, {"fin_id", DesktopFinID},
 		}},
-		{"epoch_policy", obj{{"max_age_seconds", int(handshake.PolicyVaultToDevice.MaxAge / time.Second)}, {"max_messages", 0}}},
+		{"epoch_policy", obj{{"max_age_seconds", int(handshake.PolicyVaultToDevice.MaxAge / time.Second)}}},
 		{"hs_init_body", body},
 		{"hs_init_envelope_b64", b64(envInit)},
 		{"hs_resp_inner", mustInner(rin)},

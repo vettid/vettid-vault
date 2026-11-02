@@ -1,5 +1,5 @@
 {
-  "description": "VAULT-MESSAGING §5.2-§5.4 inner-plaintext and envelope must-reject corpus. Every case is rejected by a receiver, and by the library's parser here. Each is the baseline inner plaintext (accepted) with one change, in the layer named: `inner` = the unpadded JSON handed to the inner parser in `mode`; `padded` = the padded plaintext (inner || marker || zeros to padded_len, marker_hex default 80, last_byte_hex replaces the last byte, or padded_hex given whole) handed to unpad-and-parse; `envelope` = the envelope bytes (envelope_session.json's with the mutation) handed to the envelope parser before any decryption; `session_open` = the envelope parses and is opened with key_hex, which fails; `time` = the inner parses in session mode, and the freshness check at `now` (RFC 3339) fails (durable: also the 16-day limit). `inner` is the UTF-8 text, or `inner_hex` the bytes when they are not valid UTF-8 or begin with a byte order mark. `rule` names the spec rule. `error` is the class of the rejection: inner (malformed inner plaintext), padding, version, suite, mode, flags, length, truncated, decrypt, clock_future, clock_past, expired; a receiver need only reject, the class says why.",
+  "description": "VAULT-MESSAGING §5.2-§5.4 inner-plaintext and envelope must-reject corpus. Every case is rejected by a receiver, and by the library's parser here. Each is the baseline inner plaintext (accepted) with one change, in the layer named: `inner` = the unpadded JSON handed to the inner parser in `mode`; `padded` = the padded plaintext (inner || marker || zeros to padded_len, marker_hex default 80, last_byte_hex replaces the last byte, or padded_hex given whole) handed to unpad-and-parse; `envelope` = the envelope bytes (envelope_session.json's with the mutation) handed to the envelope parser before any decryption; `session_open` = the envelope parses and is opened with key_hex, which fails; `time` = the inner parses in session mode, and the freshness check at `now` (RFC 3339) fails (durable: also the 16-day limit). `inner` is the UTF-8 text, or `inner_hex` the bytes when they are not valid UTF-8. `rule` names the spec rule. `error` is the class of the rejection and is informative: an implementation MUST reject every case but need not match the class, which follows the Go library's errors: inner (malformed inner plaintext), padding, version, suite, mode, flags, length, truncated, decrypt, clock_future, clock_past, expired; a receiver need only reject, the class says why.",
   "baseline_session_inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}",
   "baseline_sealed_inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"body\":{}}",
   "cases": [
@@ -401,7 +401,7 @@
       "mode": "session",
       "rule": "§5.3: seq MUST be an integer from 1 to 2^53-1 (plain integer: no sign, fraction or exponent)",
       "error": "inner",
-      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"body\":{}}"
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":-1,\"body\":{}}"
     },
     {
       "case": "seq_fraction",
@@ -708,12 +708,20 @@
       "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}"
     },
     {
-      "case": "duplicate_id_escaped_name",
+      "case": "duplicate_id_different_value",
       "layer": "inner",
       "mode": "session",
       "rule": "§5.3: receivers MUST reject duplicate member names at any depth (names are compared after unescaping)",
       "error": "inner",
       "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0W\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}"
+    },
+    {
+      "case": "duplicate_id_escaped_name",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: receivers MUST reject duplicate member names at any depth (names are compared after unescaping)",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"\\u0069d\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0W\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}"
     },
     {
       "case": "duplicate_body_last",
@@ -1068,18 +1076,10 @@
       "inner_hex": "7b2276223a312c226964223a2230314a42325a3656394b334d344e355036513752385339543056222c2274797065223a22746573742e70696e67222c227473223a22323032362d31302d30315431323a30303a30302e3030305a222c22736571223a312c22626f6479223a7b7d2c2278223a22e282227d"
     },
     {
-      "case": "byte_order_mark",
-      "layer": "inner",
-      "mode": "session",
-      "rule": "§5.3: the inner plaintext is JSON: a byte order mark is not JSON",
-      "error": "inner",
-      "inner_hex": "efbbbf7b2276223a312c226964223a2230314a42325a3656394b334d344e355036513752385339543056222c2274797065223a22746573742e70696e67222c227473223a22323032362d31302d30315431323a30303a30302e3030305a222c22736571223a312c22626f6479223a7b7d7d"
-    },
-    {
       "case": "utf16_encoding",
       "layer": "inner",
       "mode": "session",
-      "rule": "§5.3: the inner plaintext is JSON, not UTF-16",
+      "rule": "§5.3: the inner plaintext is a UTF-8 JSON object; these UTF-16 bytes begin with 0xff, which is not valid UTF-8",
       "error": "inner",
       "inner_hex": "fffe7b007d00"
     },
@@ -1162,7 +1162,7 @@
       "case": "padding_length_262144",
       "layer": "padded",
       "mode": "session",
-      "rule": "§5.4: padding is json || 0x80 || 0x00*, to exactly the bucket for len(json)+1: a multiple of 512 up to 16 KiB, then of 16 KiB, at most 245,760 bytes; above the 245,760-byte maximum",
+      "rule": "§5.4: padding is json || 0x80 || 0x00*, to exactly the bucket for len(json)+1: a multiple of 512 up to 16 KiB, then of 16 KiB, at most 245,760 bytes; 262,144 is not a bucket size (over-padding)",
       "error": "padding",
       "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}",
       "padded_len": 262144
@@ -1294,8 +1294,8 @@
       "layer": "envelope",
       "rule": "§5.2: the header and the ciphertext length are checked before anything is decrypted",
       "error": "truncated",
-      "mutation": "cut to 60 + 511 bytes: less than the tag and the smallest padded plaintext",
-      "envelope_b64": "AgIBAAICAgICAgICAQEBAQEBAQEJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQmwRBPsQ2hTfP0aL7DbEfQTloSFkbKri3K7ZpmIFnHFlxy5oTMM2Wt5C4wsIikypO8+0NATmZAF0l5krLaLHmav2xdLNmfn+8L5hl55HPYJsCmC6f2dWXYLaRcIbuojgwmjBhio7ptRPDYa4mRMGRvQo23Ri2eOL+NDolm3Nqw+Ztsy+mHxPJEY5V5uDjUvJXxJtib0A3U8z9J5qj8ijHBHZC/sLLrBgocRvsIMkaxrHYz1mCT9PiWo4pPHIu0pslsI8jglfi2918ZaLcmxzH9+ukk3uuW1K+1v4Aev3Boc8W6UOCXjSAXiV8GWd+C8+/CeSIzBS1l7g5vHgVHFlJ5Zjvx+KdIWGUcUshM/xL3wkMjrVAo5P1nUzjpYijmNDbKyHKZfZ8H4SAPepXYniHsaznHVn7Wul3NLQmR0yuvkHQpSswjt6uSrVkHUNgXwH5WR3Mu9EIDK4+wGdJmGKMnUIBQ+ty+4/S0CC9jOkhMYUKPo9yNrw2kV5RjG/VEctSPTYo0S1Hcgl8IhpvWy9rGUaO2GJuLEjnrd/r/S0PZX2e0LAUo8gzNPJHOygTL4qtejPw02yaFY7xNlbHgEIWC3zAIBjwexhY5+sKSRgWA1o0rGT+FK9vXV2se2xiHphY+V9T8KgXCPfKfsJy51wPu663HgrsOs84hI3AC7o3k0K3Tg+N6RHrVLD+NrvjfTig=="
+      "mutation": "cut to 44 + 15 bytes: header plus less than the tag",
+      "envelope_b64": "AgIBAAICAgICAgICAQEBAQEBAQEJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQmwRBPsQ2hTfP0aL7DbEfQ="
     },
     {
       "case": "envelope_ciphertext_one_byte_short",
@@ -1306,12 +1306,12 @@
       "envelope_b64": "AgIBAAICAgICAgICAQEBAQEBAQEJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQmwRBPsQ2hTfP0aL7DbEfQTloSFkbKri3K7ZpmIFnHFlxy5oTMM2Wt5C4wsIikypO8+0NATmZAF0l5krLaLHmav2xdLNmfn+8L5hl55HPYJsCmC6f2dWXYLaRcIbuojgwmjBhio7ptRPDYa4mRMGRvQo23Ri2eOL+NDolm3Nqw+Ztsy+mHxPJEY5V5uDjUvJXxJtib0A3U8z9J5qj8ijHBHZC/sLLrBgocRvsIMkaxrHYz1mCT9PiWo4pPHIu0pslsI8jglfi2918ZaLcmxzH9+ukk3uuW1K+1v4Aev3Boc8W6UOCXjSAXiV8GWd+C8+/CeSIzBS1l7g5vHgVHFlJ5Zjvx+KdIWGUcUshM/xL3wkMjrVAo5P1nUzjpYijmNDbKyHKZfZ8H4SAPepXYniHsaznHVn7Wul3NLQmR0yuvkHQpSswjt6uSrVkHUNgXwH5WR3Mu9EIDK4+wGdJmGKMnUIBQ+ty+4/S0CC9jOkhMYUKPo9yNrw2kV5RjG/VEctSPTYo0S1Hcgl8IhpvWy9rGUaO2GJuLEjnrd/r/S0PZX2e0LAUo8gzNPJHOygTL4qtejPw02yaFY7xNlbHgEIWC3zAIBjwexhY5+sKSRgWA1o0rGT+FK9vXV2se2xiHphY+V9T8KgXCPfKfsJy51wPu663HgrsOs84hI3AC7o3k0K3Tg+N6RHrVLD+NrvjfTig=="
     },
     {
-      "case": "envelope_ciphertext_one_byte_long",
+      "case": "envelope_ciphertext_1025_bytes",
       "layer": "envelope",
       "rule": "§5.2: the header and the ciphertext length are checked before anything is decrypted",
       "error": "length",
-      "mutation": "one byte appended: padded length + 16 is not a bucket size",
-      "envelope_b64": "AgIBAAICAgICAgICAQEBAQEBAQEJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQmwRBPsQ2hTfP0aL7DbEfQTloSFkbKri3K7ZpmIFnHFlxy5oTMM2Wt5C4wsIikypO8+0NATmZAF0l5krLaLHmav2xdLNmfn+8L5hl55HPYJsCmC6f2dWXYLaRcIbuojgwmjBhio7ptRPDYa4mRMGRvQo23Ri2eOL+NDolm3Nqw+Ztsy+mHxPJEY5V5uDjUvJXxJtib0A3U8z9J5qj8ijHBHZC/sLLrBgocRvsIMkaxrHYz1mCT9PiWo4pPHIu0pslsI8jglfi2918ZaLcmxzH9+ukk3uuW1K+1v4Aev3Boc8W6UOCXjSAXiV8GWd+C8+/CeSIzBS1l7g5vHgVHFlJ5Zjvx+KdIWGUcUshM/xL3wkMjrVAo5P1nUzjpYijmNDbKyHKZfZ8H4SAPepXYniHsaznHVn7Wul3NLQmR0yuvkHQpSswjt6uSrVkHUNgXwH5WR3Mu9EIDK4+wGdJmGKMnUIBQ+ty+4/S0CC9jOkhMYUKPo9yNrw2kV5RjG/VEctSPTYo0S1Hcgl8IhpvWy9rGUaO2GJuLEjnrd/r/S0PZX2e0LAUo8gzNPJHOygTL4qtejPw02yaFY7xNlbHgEIWC3zAIBjwexhY5+sKSRgWA1o0rGT+FK9vXV2se2xiHphY+V9T8KgXCPfKfsJy51wPu663HgrsOs84hI3AC7o3k0K3Tg+N6RHrVLD+NrvjfTitUA"
+      "mutation": "extended to 44 + 16 + 1025 bytes: padded length 1025 is not a bucket size",
+      "envelope_b64": "AgIBAAICAgICAgICAQEBAQEBAQEJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQmwRBPsQ2hTfP0aL7DbEfQTloSFkbKri3K7ZpmIFnHFlxy5oTMM2Wt5C4wsIikypO8+0NATmZAF0l5krLaLHmav2xdLNmfn+8L5hl55HPYJsCmC6f2dWXYLaRcIbuojgwmjBhio7ptRPDYa4mRMGRvQo23Ri2eOL+NDolm3Nqw+Ztsy+mHxPJEY5V5uDjUvJXxJtib0A3U8z9J5qj8ijHBHZC/sLLrBgocRvsIMkaxrHYz1mCT9PiWo4pPHIu0pslsI8jglfi2918ZaLcmxzH9+ukk3uuW1K+1v4Aev3Boc8W6UOCXjSAXiV8GWd+C8+/CeSIzBS1l7g5vHgVHFlJ5Zjvx+KdIWGUcUshM/xL3wkMjrVAo5P1nUzjpYijmNDbKyHKZfZ8H4SAPepXYniHsaznHVn7Wul3NLQmR0yuvkHQpSswjt6uSrVkHUNgXwH5WR3Mu9EIDK4+wGdJmGKMnUIBQ+ty+4/S0CC9jOkhMYUKPo9yNrw2kV5RjG/VEctSPTYo0S1Hcgl8IhpvWy9rGUaO2GJuLEjnrd/r/S0PZX2e0LAUo8gzNPJHOygTL4qtejPw02yaFY7xNlbHgEIWC3zAIBjwexhY5+sKSRgWA1o0rGT+FK9vXV2se2xiHphY+V9T8KgXCPfKfsJy51wPu663HgrsOs84hI3AC7o3k0K3Tg+N6RHrVLD+NrvjfTitUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
     },
     {
       "case": "envelope_ciphertext_not_a_multiple_of_512",

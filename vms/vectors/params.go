@@ -130,9 +130,11 @@ const (
 	DesktopFinID     = "01JB2Z6V9K3M4N5P6Q7R8S9T93"
 	DesktopClaimID   = "testclaimidbbbbbbbbbbbbbbb"
 	DesktopName      = "Test Desktop"
-	// Dummy request tokens, as for the connection handshake.
-	DesktopTokenInit = "v4.public.VEVTVC1ERVNLVE9QLWluaXQtcmVxdWVzdA"
-	DesktopTokenResp = "v4.public.VEVTVC1ERVNLVE9QLXJlc3AtcmVxdWVzdA"
+	// Dummy tokens: the desktop's standing token in hs.init (the one
+	// device.pair.rejected is deposited on, §6.7), and the vault's request
+	// token in hs.resp.
+	DesktopTokenStanding = "v4.public.VEVTVC1ERVNLVE9QLXN0YW5kaW5n"
+	DesktopTokenResp     = "v4.public.VEVTVC1ERVNLVE9QLXJlc3AtcmVxdWVzdA"
 
 	InviteOpenToken = "v4.public.VEVTVC1PTkxZLW9wZW4"
 	InviteClaimID   = "testclaimidaaaaaaaaaaaaaaa"

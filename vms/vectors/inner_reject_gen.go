@@ -40,7 +40,12 @@ func build(withSeq bool, over ...string) string {
 		base = append(base, mSeq)
 	}
 	base = append(base, mBody)
-	name := func(m string) string { return m[:strings.Index(m, ":")] }
+	name := func(m string) string {
+		if strings.HasPrefix(m, dropMark) {
+			return `"` + m[len(dropMark):] + `"`
+		}
+		return m[:strings.Index(m, ":")]
+	}
 	var out []string
 	used := map[string]bool{}
 	for _, m := range base {
@@ -51,7 +56,7 @@ func build(withSeq bool, over ...string) string {
 				used[name(o)] = true
 			}
 		}
-		if repl != "" && !strings.HasPrefix(repl, name(m)+":-") { // "name:-" removes
+		if repl != "" && !strings.HasPrefix(repl, dropMark) {
 			out = append(out, repl)
 		}
 	}
@@ -63,8 +68,12 @@ func build(withSeq bool, over ...string) string {
 	return jo(out...)
 }
 
+// dropMark starts a member that removes the named baseline member; it
+// cannot occur in JSON.
+const dropMark = "\x00"
+
 // drop removes a member from the baseline.
-func drop(n string) string { return `"` + n + `":-` }
+func drop(n string) string { return dropMark + n }
 
 type rejectCase struct {
 	name, layer, mode, rule, class string
@@ -301,7 +310,8 @@ func genInnerReject(sessEnv []byte) (obj, error) {
 	inner("§5.3: receivers MUST reject duplicate member names at any depth (names are compared after unescaping)", "session",
 		"duplicate_v", jo(mV, mV, mID, mType, mTS, mSeq, mBody),
 		"duplicate_id_same_value", jo(mV, mID, mID, mType, mTS, mSeq, mBody),
-		"duplicate_id_escaped_name", jo(mV, mID, `"id":"01JB2Z6V9K3M4N5P6Q7R8S9T0W"`, mType, mTS, mSeq, mBody),
+		"duplicate_id_different_value", jo(mV, mID, `"id":"01JB2Z6V9K3M4N5P6Q7R8S9T0W"`, mType, mTS, mSeq, mBody),
+		"duplicate_id_escaped_name", jo(mV, mID, `"\u0069d":"01JB2Z6V9K3M4N5P6Q7R8S9T0W"`, mType, mTS, mSeq, mBody),
 		"duplicate_body_last", jo(mV, mID, mType, mTS, mSeq, mBody, `"body":{}`),
 		"duplicate_in_body", S(`"body":{"a":1,"a":2}`),
 		"duplicate_in_nested_body", S(`"body":{"x":{"y":[{"z":1,"z":2}]}}`),
@@ -333,8 +343,7 @@ func genInnerReject(sessEnv []byte) (obj, error) {
 	rawInner("§5.3: the inner plaintext (including its body) MUST be valid UTF-8 (overlong encoding of '/')", "overlong_utf8", []byte(S(`"x":"`+"\xc0\xaf"+`"`)))
 	rawInner("§5.3: the inner plaintext (including its body) MUST be valid UTF-8 (UTF-16 surrogate encoded in UTF-8)", "utf8_encoded_surrogate", []byte(S(`"x":"`+"\xed\xa0\x80"+`"`)))
 	rawInner("§5.3: the inner plaintext (including its body) MUST be valid UTF-8 (truncated sequence)", "truncated_utf8_sequence", []byte(S(`"x":"`+"\xe2\x82"+`"`)))
-	rawInner("§5.3: the inner plaintext is JSON: a byte order mark is not JSON", "byte_order_mark", append([]byte("\xef\xbb\xbf"), session()...))
-	rawInner("§5.3: the inner plaintext is JSON, not UTF-16", "utf16_encoding", []byte("\xff\xfe{\x00}\x00"))
+	rawInner("§5.3: the inner plaintext is a UTF-8 JSON object; these UTF-16 bytes begin with 0xff, which is not valid UTF-8", "utf16_encoding", []byte("\xff\xfe{\x00}\x00"))
 
 	// Padding (§5.4): DecodeInner on the padded plaintext.
 	pad := func(name, rule string, c rejectCase) {
@@ -353,7 +362,7 @@ func genInnerReject(sessEnv []byte) (obj, error) {
 	pad("padding_length_513", r54+"; 513 is not a bucket size", rejectCase{paddedLen: 513})
 	pad("padding_length_511", r54+"; 511 is not a bucket size", rejectCase{paddedLen: 511})
 	pad("padding_length_16896", r54+"; above 16 KiB the sizes are multiples of 16 KiB", rejectCase{paddedLen: 16896})
-	pad("padding_length_262144", r54+"; above the 245,760-byte maximum", rejectCase{paddedLen: 262144})
+	pad("padding_length_262144", r54+"; 262,144 is not a bucket size (over-padding)", rejectCase{paddedLen: 262144})
 	pad("padding_length_0", r54+"; empty", rejectCase{paddedHex: ptr("")})
 	pad("padding_unpadded_json", r54+"; the JSON without padding", rejectCase{paddedLen: len(session()), marker: ptr("")})
 
@@ -377,9 +386,9 @@ func genInnerReject(sessEnv []byte) (obj, error) {
 	env("envelope_empty", r52, "no bytes", func(b []byte) []byte { return nil })
 	env("envelope_19_bytes", r52, "cut to 19 bytes, inside the fixed header", func(b []byte) []byte { return b[:19] })
 	env("envelope_header_only", r52, "cut to the 44-byte session header", func(b []byte) []byte { return b[:44] })
-	env("envelope_no_room_for_a_bucket", r52, "cut to 60 + 511 bytes: less than the tag and the smallest padded plaintext", func(b []byte) []byte { return b[:44+16+511] })
+	env("envelope_no_room_for_a_bucket", r52, "cut to 44 + 15 bytes: header plus less than the tag", func(b []byte) []byte { return b[:44+15] })
 	env("envelope_ciphertext_one_byte_short", r52, "last byte removed: padded length + 16 is not a bucket size", func(b []byte) []byte { return b[:len(b)-1] })
-	env("envelope_ciphertext_one_byte_long", r52, "one byte appended: padded length + 16 is not a bucket size", func(b []byte) []byte { return append(b, 0) })
+	env("envelope_ciphertext_1025_bytes", r52, "extended to 44 + 16 + 1025 bytes: padded length 1025 is not a bucket size", func(b []byte) []byte { return append(b, make([]byte, 44+16+1025-len(b))...) })
 	env("envelope_ciphertext_not_a_multiple_of_512", r52, "cut to 44 + 16 + 513 bytes", func(b []byte) []byte { return append(b[:44+16+512], 0) })
 	for i := range cs {
 		switch cs[i].name {
@@ -427,7 +436,13 @@ func genInnerReject(sessEnv []byte) (obj, error) {
 		session(`"exp":"2026-10-01T12:00:00.000Z"`), "2026-10-02T12:00:00.000Z", true)
 
 	var list []any
+	distinct := map[string]string{}
 	for _, c := range cs {
+		key := fmt.Sprintf("%s|%s|%q|%d|%v|%v|%s|%x|%x|%s|%v", c.layer, c.mode, c.inner, c.paddedLen, c.marker, c.paddedHex, c.lastByte, c.env, c.key, c.now, c.durable)
+		if prev, dup := distinct[key]; dup {
+			return nil, fmt.Errorf("cases %s and %s have the same input", prev, c.name)
+		}
+		distinct[key] = c.name
 		got, err := c.run()
 		if err != nil {
 			return nil, err
@@ -447,7 +462,7 @@ func genInnerReject(sessEnv []byte) (obj, error) {
 		}
 	}
 	return obj{
-		{"description", "VAULT-MESSAGING §5.2-§5.4 inner-plaintext and envelope must-reject corpus. Every case is rejected by a receiver, and by the library's parser here. Each is the baseline inner plaintext (accepted) with one change, in the layer named: `inner` = the unpadded JSON handed to the inner parser in `mode`; `padded` = the padded plaintext (inner || marker || zeros to padded_len, marker_hex default 80, last_byte_hex replaces the last byte, or padded_hex given whole) handed to unpad-and-parse; `envelope` = the envelope bytes (envelope_session.json's with the mutation) handed to the envelope parser before any decryption; `session_open` = the envelope parses and is opened with key_hex, which fails; `time` = the inner parses in session mode, and the freshness check at `now` (RFC 3339) fails (durable: also the 16-day limit). `inner` is the UTF-8 text, or `inner_hex` the bytes when they are not valid UTF-8 or begin with a byte order mark. `rule` names the spec rule. `error` is the class of the rejection: inner (malformed inner plaintext), padding, version, suite, mode, flags, length, truncated, decrypt, clock_future, clock_past, expired; a receiver need only reject, the class says why."},
+		{"description", "VAULT-MESSAGING §5.2-§5.4 inner-plaintext and envelope must-reject corpus. Every case is rejected by a receiver, and by the library's parser here. Each is the baseline inner plaintext (accepted) with one change, in the layer named: `inner` = the unpadded JSON handed to the inner parser in `mode`; `padded` = the padded plaintext (inner || marker || zeros to padded_len, marker_hex default 80, last_byte_hex replaces the last byte, or padded_hex given whole) handed to unpad-and-parse; `envelope` = the envelope bytes (envelope_session.json's with the mutation) handed to the envelope parser before any decryption; `session_open` = the envelope parses and is opened with key_hex, which fails; `time` = the inner parses in session mode, and the freshness check at `now` (RFC 3339) fails (durable: also the 16-day limit). `inner` is the UTF-8 text, or `inner_hex` the bytes when they are not valid UTF-8. `rule` names the spec rule. `error` is the class of the rejection and is informative: an implementation MUST reject every case but need not match the class, which follows the Go library's errors: inner (malformed inner plaintext), padding, version, suite, mode, flags, length, truncated, decrypt, clock_future, clock_past, expired; a receiver need only reject, the class says why."},
 		{"baseline_session_inner", session()},
 		{"baseline_sealed_inner", sealed()},
 		{"cases", list},

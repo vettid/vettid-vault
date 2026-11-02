@@ -146,7 +146,12 @@ func kemFrom(t *testing.T, d doc) *suite.PrivateKey {
 
 // TestVectors checks every vector file from the receiving side, deriving
 // each value independently of the generator.
-func TestVectors(t *testing.T) { checkVectors(t, Dir) }
+func TestVectors(t *testing.T) {
+	checkVectors(t, Dir)
+	// Not replayed against frozen releases (TestFrozenReleaseVectors): a
+	// later release may accept what an earlier one rejected.
+	t.Run("inner_reject", func(t *testing.T) { checkInnerRejectVectors(t, Dir) })
+}
 
 // checkVectors checks the vector files in dir: HEAD's code must derive
 // every value of them, whether they are HEAD's own vectors or a published
@@ -509,15 +514,14 @@ func checkVectors(t *testing.T, dir string) {
 		eq(t, "unlock envelope", append(bytes.Clone(raw[:1140]), ct...), raw)
 	})
 
-	// Vector files added after the first releases: a frozen directory may
-	// lack them.
+	// Vector files added after the first releases (inner_reject.json is
+	// checked by TestVectors only): a frozen directory may lack them.
 	for _, v := range []struct {
 		file  string
 		check func(*testing.T, string)
 	}{
 		{"rekey.json", checkRekeyVectors},
 		{"handshake_desktop.json", checkDesktopVectors},
-		{"inner_reject.json", checkInnerRejectVectors},
 		{"relay.json", checkRelayVectors},
 	} {
 		if _, err := os.Stat(filepath.Join(dir, v.file)); err == nil {

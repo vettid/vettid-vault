@@ -47,6 +47,7 @@ func checkInnerRejectVectors(t *testing.T, dir string) {
 		t.Fatalf("cases: %v (%d)", err, len(cases))
 	}
 	seen := map[string]bool{}
+	inputs := map[string]string{}
 	for _, raw := range cases {
 		c := doc{t, raw}
 		name := c.str("case")
@@ -54,6 +55,19 @@ func checkInnerRejectVectors(t *testing.T, dir string) {
 			t.Errorf("%s: duplicate case name", name)
 		}
 		seen[name] = true
+		// Every case's input is distinct: the case object without its
+		// name, rule and error.
+		in := map[string]json.RawMessage{}
+		for k, v := range raw {
+			if k != "case" && k != "rule" && k != "error" && k != "mutation" {
+				in[k] = v
+			}
+		}
+		kb, _ := json.Marshal(in) // map keys are sorted
+		if prev, dup := inputs[string(kb)]; dup {
+			t.Errorf("%s: same input as %s", name, prev)
+		}
+		inputs[string(kb)] = name
 		if c.str("rule") == "" || c.str("error") == "" {
 			t.Errorf("%s: no rule or error", name)
 		}

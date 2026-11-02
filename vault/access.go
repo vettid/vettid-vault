@@ -184,7 +184,9 @@ func (m *Manager) hSessionDeny(_ context.Context, s *Session, in *envelope.Inner
 
 // hSessionEnd ends an access session: an app names the device, a desktop
 // or agent ends its own. Requests it has held for approval are answered
-// `denied`.
+// `denied`. Either form may name the session it ends (`session_id`,
+// VAULT-MESSAGING 0.82.5 §6.8 "Ending"): unless it is the target's
+// current, unexpired session the answer is `{}` and nothing changes.
 func (m *Manager) hSessionEnd(ctx context.Context, s *Session, in *envelope.Inner) (json.RawMessage, error) {
 	o, err := obj(in)
 	if err != nil {
@@ -198,6 +200,17 @@ func (m *Manager) hSessionEnd(ctx context.Context, s *Session, in *envelope.Inne
 		}
 		if target = m.st.Devices[id]; target == nil || !needsAccess(target.Kind) {
 			return nil, errNotFound
+		}
+	}
+	// Absent or null: the end applies to all of the device's access. A
+	// value must be a non-empty string.
+	if raw, ok := o["session_id"]; ok && string(raw) != "null" {
+		sid, err := str(o, "session_id")
+		if err != nil {
+			return nil, err
+		}
+		if target.Access == nil || target.Access.ID != sid || !s.now.Before(target.Access.Expires) {
+			return nil, nil
 		}
 	}
 	// The sender gets no sync.event: an app drops the asks itself (§6.8, §10.1).

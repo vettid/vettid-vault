@@ -124,6 +124,17 @@ func (m *Manager) hStatus(_ context.Context, s *Session, _ *envelope.Inner) (jso
 		// production.
 		b.Uint("time_scale", m.opt.timeScale())
 	}
+	// 0.41.0 (§6.8, §10.2): a desktop or agent gets its own current,
+	// unexpired access session, or null; never another device's, and the
+	// app gets no member.
+	if needsAccess(s.peer.Kind) {
+		if a := s.peer.Access; a != nil && s.now.Before(a.Expires) {
+			b.Raw("session", strictjson.NewBuilder().String("session_id", a.ID).
+				String("expires_at", envelope.FormatTS(a.Expires)).Bytes())
+		} else {
+			b.Raw("session", []byte("null"))
+		}
+	}
 	// Release R (§11.14.11): the app gets the recovery state, attempts,
 	// presence and counter; desktops the state alone; agents nothing.
 	switch s.peer.Kind {

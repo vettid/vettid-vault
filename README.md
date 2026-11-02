@@ -120,7 +120,13 @@ browser P-256 key, with every intermediate value, and the QR payload) and
 `connauth` (§10.4 member authentication: the signed message, the signature
 and every body, through `vms/peerwire`) and `connauth_purpose` (0.65.0: the
 same challenge with each purpose, signed over it under its own label, and
-the answer of a vault before 0.65.0). All
+the answer of a vault before 0.65.0). Also `rekey` (§6.5: a vault-initiated
+rekey of the `handshake` session, with the new epoch's keys and a message in
+each direction), `handshake_desktop` (a desktop pairing: purpose `desktop`,
+the pairing bundle and QR, the hs.init bodies a vault refuses),
+`inner_reject` (inner plaintexts, paddings and envelopes a receiver MUST
+reject, each fed to the parser) and `relay` (the RELAY-PROTOCOL §9 keys,
+deposit token and signed request, recomputed with `relayauth`). All
 keys come from fixed, public, **test-only** seeds. Every file states its
 inputs, including the values §16 leaves open.
 

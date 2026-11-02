@@ -124,3 +124,23 @@ condition = "AND"
 paths = ['''enclave/releasecfg/staging\.json''']
 regexTarget = "match"
 regexes = ['''c4dqg2ssGVylbO9Xnpdv4zopmzx9S\+\+4KgxMWOyhXJQ=''']
+
+# Rekey, desktop and relay vectors (vettid-vault #186): the rekey.json
+# message ids, fixed example ULIDs (not secrets) that the generic rule
+# mistakes for keys next to names ending in ID, and the PUBLIC sender key
+# of RELAY-PROTOCOL §9.1 (seed 32 x 0x02, relay.json), which the rule takes
+# for a credential under the name x_vettid_key. Scoped to the
+# generic-api-key rule, to these two files and to these exact values.
+[[allowlists]]
+description = "rekey ids and relay §9 public key (test-only)"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = [
+  '''^vms/vectors/params\.go$''',
+  '''^testdata/vectors/relay\.json$''',
+]
+regexTarget = "match"
+regexes = [
+  '''01JB2Z6V9K3M4N5P6Q7R8S9T8[0-4]''',
+  '''gTl3Dqh9F19Wo1Rmw0x\+zMuNipG07jeiXfYPW4/Js5Q=''',
+]

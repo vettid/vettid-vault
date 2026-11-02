@@ -19,7 +19,7 @@ import (
 	"github.com/vettid/vettid-vault/vms/envelope"
 )
 
-// Spend caps (VAULT-MESSAGING 0.82.0 §10.18 "Spend caps", first specified
+// Spend caps (VAULT-MESSAGING 0.82.3 §10.18 "Spend caps", first specified
 // in 0.56.0) and the tests that section requires.
 
 const day = 24 * time.Hour

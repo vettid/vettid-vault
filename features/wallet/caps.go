@@ -13,7 +13,7 @@ import (
 	"github.com/vettid/vettid-vault/vms/suite"
 )
 
-// Spend caps (VAULT-MESSAGING 0.82.0 §10.18 "Spend caps"; first specified
+// Spend caps (VAULT-MESSAGING 0.82.3 §10.18 "Spend caps"; first specified
 // in 0.56.0). A wallet has two optional limits on what leaves it in
 // transactions the vault signs: per transaction and per period (a rolling
 // 24 hours, divided by the release's time scale, STAGING-TIME-SCALE S17).

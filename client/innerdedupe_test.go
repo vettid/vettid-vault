@@ -140,6 +140,7 @@ func TestSeenInnerRoundTripAndPrune(t *testing.T) {
 	var saved []byte
 	d.cfg.Persist = keep(&saved, r)
 	d.mu.Lock()
+	d.pruned = time.Time{} // pruning runs at most once a minute
 	d.st.SeenInner["old"] = time.Now().Add(-17 * 24 * time.Hour)
 	d.st.SeenInner["recent"] = time.Now().Add(-15 * 24 * time.Hour)
 	d.mu.Unlock()
@@ -296,5 +297,171 @@ func TestAwaitingSinceDefaultsToLoadTime(t *testing.T) {
 	}
 	if len(d2.awaitingSince) != 1 || !d2.awaitingSince[0].Equal(load) {
 		t.Fatalf("awaiting times %v, want the load time", d2.awaitingSince)
+	}
+}
+
+// A failed deposit of hs.resp does not record the hs.init's inner id: the
+// vault's retransmission of it is answered.
+func TestRekeyInitRetransmittedAfterFailedDeposit(t *testing.T) {
+	ctx := context.Background()
+	r, v, d := pair(t) // no Persist: the deposit is made while handling
+	v.startRekey()
+	r.mu.Lock()
+	r.failDeposit, r.depositStatus = 1000, 503 // the client retries a transient error
+	r.mu.Unlock()
+	if err := d.Poll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(d.awaiting) != 0 {
+		t.Fatal("responder kept after a failed deposit")
+	}
+	r.mu.Lock()
+	r.failDeposit = 0
+	r.mu.Unlock()
+	r.put(v.dev.Mailbox, v.relayPK(), v.rekey.Envelope())
+	if err := d.Poll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(d.awaiting) != 1 || len(r.pending(v.mailbox())) != 1 {
+		t.Fatalf("retransmitted hs.init not answered: %d responders", len(d.awaiting))
+	}
+}
+
+// An ephemeral message (one with an exp, §8.5) is kept in the inner-id set
+// for 10 minutes, a durable one for 16 days.
+func TestEphemeralInnerIDKeptTenMinutes(t *testing.T) {
+	ctx := context.Background()
+	r, v, d := pair(t)
+	d.cfg.Persist = keep(new([]byte), r)
+	now := time.Now()
+	for _, in := range []*envelope.Inner{
+		{ID: "01HZZZZZZZZZZZZZZZZZZZZZZE", Type: "test.ping", TS: now, Exp: now.Add(30 * time.Second), Body: []byte(`{}`)},
+		{ID: "01HZZZZZZZZZZZZZZZZZZZZZZD", Type: "test.ping", TS: now, Body: []byte(`{}`)},
+	} {
+		raw, err := v.kr.Current().Seal(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.put(v.dev.Mailbox, v.relayPK(), raw)
+	}
+	if err := d.Poll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(d.st.SeenInner) != 2 {
+		t.Fatalf("inner ids %v", d.st.SeenInner)
+	}
+	d.mu.Lock()
+	d.pruneSeen(now.Add(11 * time.Minute))
+	d.mu.Unlock()
+	if _, ok := d.st.SeenInner["01HZZZZZZZZZZZZZZZZZZZZZZE"]; ok {
+		t.Fatal("ephemeral id kept past 10 minutes")
+	}
+	if _, ok := d.st.SeenInner["01HZZZZZZZZZZZZZZZZZZZZZZD"]; !ok {
+		t.Fatal("durable id dropped after 11 minutes")
+	}
+}
+
+// A restart between the unacked new-epoch message and hs.fin: the state
+// is saved and loaded, the responder restored, and the redelivery is
+// handled once.
+func TestNewEpochMessageAcrossRestart(t *testing.T) {
+	ctx := context.Background()
+	r, v, d := pair(t)
+	var saved []byte
+	d.cfg.Persist = keep(&saved, r)
+	devBox := relayauth.MailboxID(v.dev.PK)
+	v.startRekey()
+	if err := d.Poll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	v.process()
+	fin := r.take(devBox)
+	early := v.send("test.ping", []byte(`{}`))
+	if err := d.Poll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(r.pending(devBox), early) {
+		t.Fatal("message not left unacked")
+	}
+	d2 := reload(t, r, saved, keep(&saved, r))
+	if len(d2.awaiting) != 1 {
+		t.Fatal("responder not restored")
+	}
+	r.put(devBox, v.relayPK(), fin[0].Payload)
+	for range 2 {
+		if err := d2.Poll(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := pingCount(d2); n != 1 {
+		t.Fatalf("redelivered message handled %d times, want 1", n)
+	}
+	if len(r.pending(devBox)) != 0 {
+		t.Fatal("not acknowledged")
+	}
+}
+
+// A retransmission (same inner id, new msg_id) that arrives after the
+// epoch changed is handled once: the inner id does not depend on the epoch.
+func TestRetransmissionAcrossEpochHandledOnce(t *testing.T) {
+	ctx := context.Background()
+	r, v, d := pair(t)
+	d.cfg.Persist = keep(new([]byte), r)
+	in := &envelope.Inner{ID: "01HZZZZZZZZZZZZZZZZZZZZZZX", Type: "test.ping", TS: time.Now(), Body: []byte(`{}`)}
+	send := func() {
+		raw, err := v.kr.Current().Seal(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.put(v.dev.Mailbox, v.relayPK(), raw)
+	}
+	poll := func() {
+		if err := d.Poll(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	send()
+	poll()
+	v.startRekey()
+	poll()
+	v.process()
+	poll() // hs.fin
+	if d.keyring.Current().ID() != v.kr.Current().ID() {
+		t.Fatal("epoch not changed")
+	}
+	send() // the retransmission, in the new epoch
+	poll()
+	if n := pingCount(d); n != 1 {
+		t.Fatalf("handled %d times, want 1", n)
+	}
+}
+
+// A message with a long `exp` retransmitted after the ephemeral window,
+// before its exp, is handled once.
+func TestLongExpInnerIDKeptUntilExp(t *testing.T) {
+	ctx := context.Background()
+	r, v, d := pair(t)
+	d.cfg.Persist = keep(new([]byte), r)
+	now := time.Now()
+	in := &envelope.Inner{ID: "01HZZZZZZZZZZZZZZZZZZZZZZM", Type: "test.ping", TS: now, Exp: now.Add(time.Hour), Body: []byte(`{}`)}
+	send := func() {
+		raw, err := v.kr.Current().Seal(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.put(v.dev.Mailbox, v.relayPK(), raw)
+	}
+	send()
+	if err := d.Poll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	later := now.Add(15 * time.Minute)
+	d.cfg.Now = func() time.Time { return later }
+	send()
+	if err := d.Poll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if n := pingCount(d); n != 1 {
+		t.Fatalf("handled %d times, want 1", n)
 	}
 }

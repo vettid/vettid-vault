@@ -270,6 +270,7 @@ type Device struct {
 	sas      string // the SAS of the last pairing handshake (0.10.3)
 	hsFailed bool   // the last hs.resp aborted the handshake
 	awaiting []*handshake.Responder
+	pruned   time.Time // the last pruneSeen
 	// awaitingSince is when each awaiting responder was created.
 	awaitingSince []time.Time
 	events        []*envelope.Inner
@@ -1472,16 +1473,7 @@ func (d *Device) handle(ctx context.Context, m relayclient.Message) (unacked boo
 	}
 	now := d.cfg.Now()
 	d.st.Seen[m.MsgID] = now
-	for k, t := range d.st.Seen {
-		if now.Sub(t) > 16*24*time.Hour {
-			delete(d.st.Seen, k)
-		}
-	}
-	for k, t := range d.st.SeenInner {
-		if now.Sub(t) > 16*24*time.Hour {
-			delete(d.st.SeenInner, k)
-		}
-	}
+	d.pruneSeen(now)
 	sender, ok := relayauth.DecodeKey(m.Sender)
 	if !ok {
 		return false
@@ -1543,9 +1535,7 @@ func (d *Device) handle(ctx context.Context, m relayclient.Message) (unacked boo
 	}
 	// Recorded only once the time check has passed, so that a message
 	// refused for the clock is handled when delivered again.
-	if in.ID != "" {
-		d.st.SeenInner[in.ID] = now
-	}
+	d.recordInner(in, now)
 	switch in.Type {
 	case devicePairRejected:
 		// §6.7 (0.10.5): only while pairing, under the handshake's epoch.
@@ -1754,9 +1744,6 @@ func (d *Device) handleRekey(ctx context.Context, raw []byte, in *envelope.Inner
 	if err != nil {
 		return
 	}
-	if in.ID != "" {
-		d.st.SeenInner[in.ID] = now // accepted: see handle
-	}
 	v := d.st.Vault
 	resp, env, err := pi.Respond(handshake.ResponderConfig{
 		Identity: d.ik, Policy: d.policy(), PinnedSuite: v.Suite, CollectSender: sender,
@@ -1769,8 +1756,55 @@ func (d *Device) handleRekey(ctx context.Context, raw []byte, in *envelope.Inner
 		resp.Abort()
 		return
 	}
+	// Recorded once hs.resp is deposited (or queued), so that a failed
+	// deposit leaves the vault's retransmission to be answered.
+	d.recordInner(in, now)
 	d.awaiting = append(d.awaiting, resp)
 	d.awaitingSince = append(d.awaitingSince, now)
+}
+
+// seenKeep is how long the dedupe sets are kept (§8.2); ephemeral
+// messages (§8.5) are kept for ephemeralKeep only.
+const (
+	seenKeep      = 16 * 24 * time.Hour
+	ephemeralKeep = 10 * time.Minute
+)
+
+// pruneSeen drops expired entries of the two dedupe sets. It runs at most
+// once a minute, so a batch does not scan them for each message.
+func (d *Device) pruneSeen(now time.Time) {
+	if !d.pruned.IsZero() && !now.Before(d.pruned) && now.Sub(d.pruned) < time.Minute {
+		return
+	}
+	d.pruned = now
+	for k, t := range d.st.Seen {
+		if now.Sub(t) > seenKeep {
+			delete(d.st.Seen, k)
+		}
+	}
+	for k, t := range d.st.SeenInner {
+		if now.Sub(t) > seenKeep {
+			delete(d.st.SeenInner, k)
+		}
+	}
+}
+
+// recordInner records a handled message's inner id (§8.2). One with an
+// `exp` is kept until the later of ephemeralKeep (§8.5) and the time
+// after which CheckTime refuses it, since a retransmission after that is
+// refused anyway; the entry is dated so that pruneSeen drops it then.
+func (d *Device) recordInner(in *envelope.Inner, now time.Time) {
+	if in.ID == "" {
+		return
+	}
+	if !in.Exp.IsZero() {
+		until := now.Add(ephemeralKeep)
+		if u := in.Exp.Add(envelope.MaxClockSkewFuture); u.After(until) {
+			until = u
+		}
+		now = until.Add(-seenKeep)
+	}
+	d.st.SeenInner[in.ID] = now
 }
 
 // dropAwaiting removes the i-th responder awaiting hs.fin.

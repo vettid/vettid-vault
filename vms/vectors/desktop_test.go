@@ -215,6 +215,25 @@ func checkDesktopVectors(t *testing.T, dir string) {
 		if r["body"] == d.str("hs_init_body") {
 			t.Errorf("%s: unchanged", r["case"])
 		}
+		// Exactly one top-level member differs from the valid body.
+		var base, mut map[string]json.RawMessage
+		if json.Unmarshal([]byte(d.str("hs_init_body")), &base) != nil || json.Unmarshal([]byte(r["body"]), &mut) != nil {
+			t.Fatalf("%s: JSON", r["case"])
+		}
+		diff := 0
+		for k, v := range base {
+			if mv, ok := mut[k]; !ok || !bytes.Equal(mv, v) {
+				diff++
+			}
+		}
+		for k := range mut {
+			if _, ok := base[k]; !ok {
+				diff++
+			}
+		}
+		if diff != 1 {
+			t.Errorf("%s: %d members differ from the valid body, want 1", r["case"], diff)
+		}
 		if _, err := handshake.ParseInit([]byte(r["body"])); err == nil {
 			t.Errorf("%s: hs.init accepted", r["case"])
 		}

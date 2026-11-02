@@ -42,6 +42,9 @@ func checkInnerRejectVectors(t *testing.T, dir string) {
 	if _, err := envelope.ParseInner([]byte(d.str("baseline_sealed_inner")), envelope.ModeSealed); err != nil {
 		t.Fatalf("sealed baseline: %v", err)
 	}
+	if _, err := envelope.ParseInner([]byte(d.str("baseline_depth_32_inner")), envelope.ModeSession); err != nil {
+		t.Fatalf("depth 32 baseline: %v", err)
+	}
 	var cases []map[string]json.RawMessage
 	if err := json.Unmarshal(d.m["cases"], &cases); err != nil || len(cases) < 100 {
 		t.Fatalf("cases: %v (%d)", err, len(cases))

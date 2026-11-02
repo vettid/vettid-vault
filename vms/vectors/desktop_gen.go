@@ -3,6 +3,7 @@
 package vectors
 
 import (
+	"crypto/x509"
 	"encoding/base64"
 	"errors"
 	"strings"
@@ -172,6 +173,14 @@ func genDesktop(t0 time.Time, vault *principal) (obj, error) {
 	if !strings.Contains(body, tokenMember) || !strings.HasSuffix(body, commitMember+"}") {
 		return nil, errors.New("vectors: unexpected hs.init body layout")
 	}
+	ak, err := p256(SeedAppKey)
+	if err != nil {
+		return nil, err
+	}
+	akDER, err := x509.MarshalPKIXPublicKey(&ak.PublicKey)
+	if err != nil {
+		return nil, err
+	}
 	rejects := []obj{
 		{{"case", "token_missing"}, {"reason", "a desktop's hs.init requires a token (§6.2)"},
 			{"body", strings.Replace(body, tokenMember, "", 1)}},
@@ -181,6 +190,10 @@ func genDesktop(t0 time.Time, vault *principal) (obj, error) {
 			{"body", strings.Replace(body, tokenMember, tokenMember+`"reconnect_token":"`+DesktopTokenStanding+`",`, 1)}},
 		{{"case", "unlock_secret_present"}, {"reason", "unlock_secret is for a transfer's app only (§6.2): MUST be absent for desktop"},
 			{"body", strings.Replace(body, commitMember, `,"unlock_secret":"`+base64.StdEncoding.EncodeToString(rep(0x00, 32))+`"`+commitMember, 1)}},
+		{{"case", "device_attest_present"}, {"reason", "device_attest is for purpose app only (§6.2): MUST be absent for desktop"},
+			{"body", strings.Replace(body, commitMember, `,"device_attest":{"platform":"ios","key_id":"AA==","attestation":"AA=="}`+commitMember, 1)}},
+		{{"case", "api_key_present"}, {"reason", "api_key is for a transfer's app only (§6.2): MUST be absent for desktop"},
+			{"body", strings.Replace(body, commitMember, `,"api_key":"`+b64(akDER)+`"`+commitMember, 1)}},
 	}
 	rj := make([]any, len(rejects))
 	for i, r := range rejects {

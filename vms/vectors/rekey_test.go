@@ -224,6 +224,37 @@ func checkRekeyVectors(t *testing.T, dir string) {
 	}
 	eq(t, "hs.fin sig", fb.Sig, d.b64("sig_I_b64"))
 
+	// message_i2r given to the peer before hs.fin: the pending responder
+	// decrypts it as a message other than hs.fin (the no-ack path), and hs.fin
+	// then establishes the epoch.
+	var th1b, thb [32]byte
+	copy(th1b[:], th1[:])
+	copy(thb[:], th[:])
+	pending := func() *handshake.Responder {
+		r, err := handshake.RestoreResponder(handshake.ResponderState{
+			Ks: ks, Ke: ke, PRK: prk, KI2R: ne.hex("k_i2r_hex"), KR2I: ne.hex("k_r2i_hex"), RK: ne.hex("rk_hex"),
+			Th1: th1b[:], Th: thb[:], KidI2R: ne.hex("kid_i2r_hex"), KidR2I: ne.hex("kid_r2i_hex"), EpochID: ne.hex("epoch_id_hex"),
+			VerifyIK: vault.ik.Public().(ed25519.PublicKey), Sender: vault.relay.Public().(ed25519.PublicKey),
+			Suite: 2, Policy: handshake.PolicyVaultToVault, Purpose: handshake.PurposeRekey,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	early := d.sub("message_i2r").b64("envelope_b64")
+	rs := pending()
+	if _, err := rs.HandleFin(early, vault.relay.Public().(ed25519.PublicKey), t1); !errors.Is(err, handshake.ErrType) {
+		t.Errorf("message_i2r before hs.fin: %v", err)
+	}
+	fres, err := rs.HandleFin(envFin, vault.relay.Public().(ed25519.PublicKey), t1)
+	if err != nil {
+		t.Fatalf("hs.fin after the early message: %v", err)
+	}
+	if got, err := fres.Epoch.Open(mustParse(t, early)); err != nil || got.Seq != 2 {
+		t.Errorf("message_i2r after hs.fin: %v", err)
+	}
+
 	// One message in each direction of the new epoch: the vault is I, so
 	// its messages go i2r (seq 2 after hs.fin) and the peer's r2i (seq 1).
 	vaultNew := epochFrom(t, ne, true, handshake.PolicyVaultToVault, t1)
@@ -255,4 +286,13 @@ func checkRekeyVectors(t *testing.T, dir string) {
 			t.Errorf("%s opens under the old epoch", c.name)
 		}
 	}
+}
+
+func mustParse(t *testing.T, b []byte) *envelope.Envelope {
+	t.Helper()
+	e, err := envelope.Parse(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return e
 }

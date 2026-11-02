@@ -4,6 +4,7 @@ package vectors
 
 import (
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/vettid/vettid-vault/vms/envelope"
@@ -95,6 +96,33 @@ func genRekey(t0 time.Time, vault, peer *principal, peerEpoch, vaultEpoch *hands
 	}); err != nil {
 		return nil, err
 	}
+	// One message in each direction of the new epoch. The initiator's hs.fin
+	// was its first message (seq 1), so its next is seq 2; it is sealed
+	// before the peer receives hs.fin.
+	msg := func(id string, send *handshake.Epoch, nonce byte) (string, []byte, error) {
+		m := &envelope.Inner{ID: id, Type: "test.ping", TS: t1}
+		var env []byte
+		if err := with(newScript(rep(nonce, 24)), func() error {
+			var err error
+			env, err = send.Seal(m)
+			return err
+		}); err != nil {
+			return "", nil, err
+		}
+		j, err := m.Marshal(envelope.ModeSession)
+		return string(j), env, err
+	}
+	msgI, envI, err := msg(RekeyMsgIID, res.Epoch, NonceRekeyMsgI)
+	if err != nil {
+		return nil, err
+	}
+	// It can reach the peer before hs.fin: the peer then decrypts it under
+	// the pending epoch as a message other than hs.fin and leaves it
+	// unacked (§6.3, 0.23.0).
+	if _, err := resp.HandleFin(envI, vault.relayPub(), t1); !errors.Is(err, handshake.ErrType) {
+		return nil, fmt.Errorf("vectors: hs.fin given the first message: %v", err)
+	}
+
 	fr, err := resp.HandleFin(res.Fin, vault.relayPub(), t1)
 	if err != nil {
 		return nil, err
@@ -124,31 +152,12 @@ func genRekey(t0 time.Time, vault, peer *principal, peerEpoch, vaultEpoch *hands
 	sigR, _ := handshake.SignResp(peer.ik, th)
 	sigI, _ := handshake.SignFin(vault.ik, th)
 
-	// One message in each direction of the new epoch. The initiator's hs.fin
-	// was its first message (seq 1).
-	msg := func(id string, send *handshake.Epoch, nonce byte) (string, []byte, error) {
-		m := &envelope.Inner{ID: id, Type: "test.ping", TS: t1}
-		var env []byte
-		if err := with(newScript(rep(nonce, 24)), func() error {
-			var err error
-			env, err = send.Seal(m)
-			return err
-		}); err != nil {
-			return "", nil, err
-		}
-		j, err := m.Marshal(envelope.ModeSession)
-		return string(j), env, err
-	}
-	msgI, envI, err := msg(RekeyMsgIID, res.Epoch, NonceRekeyMsgI)
-	if err != nil {
-		return nil, err
-	}
 	msgR, envR, err := msg(RekeyMsgRID, fr.Epoch, NonceRekeyMsgR)
 	if err != nil {
 		return nil, err
 	}
 	return obj{
-		{"description", "VAULT-MESSAGING §6.2, §6.3, §6.5 rekey of the session of handshake.json, 24 h after it (the vault-to-vault limit): the vault (keys.json vault) initiates and the peer (keys.json initiator) answers. hs.init (purpose rekey) is a session-mode envelope of the old epoch, sent by the vault in direction r2i (the vault answered the first handshake), with ctx = the standard base64 of the old epoch_id, a fresh ephemeral key (seed 32 x 0x70), no token, no sas_commit and no SAS; K_s is the old epoch's rk. hs.resp is sealed to that ephemeral key with encapsulation randomness 64 x 0x72 and sender_kid all zero; hs.fin is a session envelope of the new epoch, direction i2r, seq 1, nonce 24 x 0x73. In the new epoch the vault is the initiator I (its direction is i2r) and the peer is R. th, prk and every key follow §6.3 with K_s = old rk. The last two messages are the first of the new epoch after hs.fin, one per direction. Fixed test-only inputs; the old epoch's values are copied from handshake.json."},
+		{"description", "VAULT-MESSAGING §6.2, §6.3, §6.5 rekey of the session of handshake.json, 24 h after it (the vault-to-vault limit): the vault (keys.json vault) initiates and the peer (keys.json initiator) answers. hs.init (purpose rekey) is a session-mode envelope of the old epoch, sent by the vault in direction r2i (the vault answered the first handshake), with ctx = the standard base64 of the old epoch_id, a fresh ephemeral key (seed 32 x 0x70), no token, no sas_commit and no SAS; K_s is the old epoch's rk. hs.resp is sealed to that ephemeral key with encapsulation randomness 64 x 0x72 and sender_kid all zero; hs.fin is a session envelope of the new epoch, direction i2r, seq 1, nonce 24 x 0x73. In the new epoch the vault is the initiator I (its direction is i2r) and the peer is R. th, prk and every key follow §6.3 with K_s = old rk. The last two messages are the first of the new epoch after hs.fin, one per direction. message_i2r may reach the peer before hs_fin_envelope_b64; the peer MUST leave it unacked (not processed, dropped or audited) until hs.fin establishes the epoch, then it opens with seq 2. Fixed test-only inputs; the old epoch's values are copied from handshake.json."},
 		{"old_epoch", old},
 		{"initiator", "keys.json vault"},
 		{"responder", "keys.json initiator"},

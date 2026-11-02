@@ -321,6 +321,16 @@ func genInnerReject(sessEnv []byte) (obj, error) {
 		"member_name_V", jo(`"V":1`, mID, mType, mTS, mSeq, mBody), "member_name_Id", jo(mV, `"Id":"01JB2Z6V9K3M4N5P6Q7R8S9T0V"`, mType, mTS, mSeq, mBody),
 		"member_name_Body", jo(mV, mID, mType, mTS, mSeq, `"Body":{}`), "member_name_SEQ", jo(mV, mID, mType, mTS, `"SEQ":1`, mBody))
 
+	// Nesting depth (§10.19.8, 0.81.6): at most 32 levels, the inner
+	// message being level 1 and its body level 2.
+	nest := func(levels int) string { // body nested to a total depth of `levels`
+		return session(`"body":` + strings.Repeat(`{"a":`, levels-2) + `{}` + strings.Repeat(`}`, levels-2))
+	}
+	inner("§10.19.8 / 0.81.6: nesting depth at most 32, the inner message is level 1", "session", "depth_33", nest(33))
+	if _, err := envelope.ParseInner([]byte(nest(32)), envelope.ModeSession); err != nil {
+		return nil, fmt.Errorf("depth 32 must be accepted: %w", err)
+	}
+
 	// Not strict JSON, or not a single object.
 	ok := session()
 	inner("§5.3: the inner plaintext MUST be one JSON object, and nothing may follow it", "session",
@@ -362,7 +372,6 @@ func genInnerReject(sessEnv []byte) (obj, error) {
 	pad("padding_length_513", r54+"; 513 is not a bucket size", rejectCase{paddedLen: 513})
 	pad("padding_length_511", r54+"; 511 is not a bucket size", rejectCase{paddedLen: 511})
 	pad("padding_length_16896", r54+"; above 16 KiB the sizes are multiples of 16 KiB", rejectCase{paddedLen: 16896})
-	pad("padding_length_262144", r54+"; 262,144 is not a bucket size (over-padding)", rejectCase{paddedLen: 262144})
 	pad("padding_length_0", r54+"; empty", rejectCase{paddedHex: ptr("")})
 	pad("padding_unpadded_json", r54+"; the JSON without padding", rejectCase{paddedLen: len(session()), marker: ptr("")})
 
@@ -462,9 +471,10 @@ func genInnerReject(sessEnv []byte) (obj, error) {
 		}
 	}
 	return obj{
-		{"description", "VAULT-MESSAGING §5.2-§5.4 inner-plaintext and envelope must-reject corpus. Every case is rejected by a receiver, and by the library's parser here. Each is the baseline inner plaintext (accepted) with one change, in the layer named: `inner` = the unpadded JSON handed to the inner parser in `mode`; `padded` = the padded plaintext (inner || marker || zeros to padded_len, marker_hex default 80, last_byte_hex replaces the last byte, or padded_hex given whole) handed to unpad-and-parse; `envelope` = the envelope bytes (envelope_session.json's with the mutation) handed to the envelope parser before any decryption; `session_open` = the envelope parses and is opened with key_hex, which fails; `time` = the inner parses in session mode, and the freshness check at `now` (RFC 3339) fails (durable: also the 16-day limit). `inner` is the UTF-8 text, or `inner_hex` the bytes when they are not valid UTF-8. `rule` names the spec rule. `error` is the class of the rejection and is informative: an implementation MUST reject every case but need not match the class, which follows the Go library's errors: inner (malformed inner plaintext), padding, version, suite, mode, flags, length, truncated, decrypt, clock_future, clock_past, expired; a receiver need only reject, the class says why."},
+		{"description", "VAULT-MESSAGING §5.2-§5.4 inner-plaintext and envelope must-reject corpus. Every case is rejected by a receiver, and by the library's parser here. Each is the baseline inner plaintext (accepted) with one change, in the layer named: `inner` = the unpadded JSON handed to the inner parser in `mode`; `padded` = the padded plaintext (inner || marker || zeros to padded_len, marker_hex default 80, last_byte_hex replaces the last byte, or padded_hex given whole) handed to unpad-and-parse; `envelope` = the envelope bytes (envelope_session.json's with the mutation) handed to the envelope parser before any decryption; `session_open` = the envelope parses and is opened with key_hex, which fails; `time` = the inner parses in session mode, and the freshness check at `now` (RFC 3339) fails (durable: also the 16-day limit). `inner` is the UTF-8 text, or `inner_hex` the bytes when they are not valid UTF-8. `rule` names the spec rule. `error` is the class of the rejection and is informative: an implementation MUST reject every case but need not match the class, which follows the Go library's errors: inner (malformed inner plaintext), padding, version, suite, mode, flags, length, truncated, decrypt, clock_future, clock_past, expired; a receiver need only reject, the class says why. Not yet covered (VAULT-MESSAGING 0.83.1): escaped unpaired surrogates and a UTF-8 byte order mark."},
 		{"baseline_session_inner", session()},
 		{"baseline_sealed_inner", sealed()},
+		{"baseline_depth_32_inner", nest(32)},
 		{"cases", list},
 	}, nil
 }

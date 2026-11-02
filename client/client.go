@@ -126,7 +126,14 @@ type State struct {
 
 	Outgoing *handshake.InitiatorState  `json:"outgoing,omitempty"`
 	Awaiting []handshake.ResponderState `json:"awaiting,omitempty"`
-	Seen     map[string]time.Time       `json:"seen,omitempty"`
+	// AwaitingSince is when each Awaiting responder was created, in the
+	// same order, so that one whose hs.fin never comes can be dropped.
+	AwaitingSince []time.Time          `json:"awaiting_since,omitempty"`
+	Seen          map[string]time.Time `json:"seen,omitempty"`
+	// SeenInner is the second dedupe layer (§8.2): the inner id of each
+	// message handled, so that the vault's retransmission, stored under a
+	// new msg_id, is handled once. Kept 16 days, saved with the batch.
+	SeenInner map[string]time.Time `json:"seen_inner,omitempty"`
 	// IssuedExp is the expiry of the standing token we last gave the vault.
 	IssuedExp time.Time `json:"issued_exp,omitempty"`
 	// Alt is the alternate-channel state (§11.10.6, §13.2).
@@ -263,9 +270,11 @@ type Device struct {
 	sas      string // the SAS of the last pairing handshake (0.10.3)
 	hsFailed bool   // the last hs.resp aborted the handshake
 	awaiting []*handshake.Responder
-	events   []*envelope.Inner
-	pending  *pendingUnlock
-	lastUTK  UTK
+	// awaitingSince is when each awaiting responder was created.
+	awaitingSince []time.Time
+	events        []*envelope.Inner
+	pending       *pendingUnlock
+	lastUTK       UTK
 
 	// sem (capacity 1) serializes every Poll (collect, handle, Persist,
 	// deposits, acks) and every outbox flush; taking it honours the
@@ -363,6 +372,9 @@ func open(cfg Config, st *State) (*Device, error) {
 	if st.Seen == nil {
 		st.Seen = map[string]time.Time{}
 	}
+	if st.SeenInner == nil {
+		st.SeenInner = map[string]time.Time{}
+	}
 	d := &Device{cfg: cfg, st: st, sem: make(chan struct{}, 1), wake: make(chan struct{}),
 		ik: ed25519.NewKeyFromSeed(st.IKSeed), relayKey: ed25519.NewKeyFromSeed(st.RelaySeed)}
 	var err error
@@ -392,6 +404,11 @@ func open(cfg Config, st *State) (*Device, error) {
 			return nil, err
 		}
 		d.awaiting = append(d.awaiting, r)
+		since := cfg.Now()
+		if i := len(d.awaiting) - 1; i < len(st.AwaitingSince) {
+			since = st.AwaitingSince[i]
+		}
+		d.awaitingSince = append(d.awaitingSince, since)
 	}
 	return d, nil
 }
@@ -420,10 +437,11 @@ func (d *Device) export() {
 			d.st.Outgoing = &s
 		}
 	}
-	d.st.Awaiting = nil
-	for _, r := range d.awaiting {
+	d.st.Awaiting, d.st.AwaitingSince = nil, nil
+	for i, r := range d.awaiting {
 		if s, err := r.Export(); err == nil {
 			d.st.Awaiting = append(d.st.Awaiting, s)
+			d.st.AwaitingSince = append(d.st.AwaitingSince, d.awaitingSince[i])
 		}
 	}
 }
@@ -1015,11 +1033,15 @@ func (d *Device) poll(ctx context.Context, skip func() bool) error {
 	for _, m := range msgs {
 		// Unlocked by defer, so that a panic in handle unwinds through
 		// poll's deferred wake and release instead of deadlocking.
+		unacked := false
 		func() {
 			d.mu.Lock()
 			defer d.mu.Unlock()
-			d.handle(ctx, m)
+			unacked = d.handle(ctx, m)
 		}()
+		if unacked {
+			continue // §6.5: redelivered once the epoch is established
+		}
 		_ = d.own.Ack(ctx, m.MsgID)
 	}
 	d.mu.Lock()
@@ -1065,7 +1087,7 @@ func (d *Device) pollPersist(ctx context.Context) error {
 	if len(msgs) == 0 {
 		return ferr
 	}
-	fresh := d.handleBatch(ctx, msgs)
+	fresh, unacked := d.handleBatch(ctx, msgs)
 	// A batch of messages already handled and saved (a redelivery after
 	// a crash between Persist and the acks) changes nothing to save.
 	if fresh {
@@ -1075,6 +1097,9 @@ func (d *Device) pollPersist(ctx context.Context) error {
 		ferr = errors.Join(ferr, d.flushOutboxLocked(ctx))
 	}
 	for _, m := range msgs {
+		if unacked[m.MsgID] {
+			continue // §6.5: redelivered once the epoch is established
+		}
 		// Acked also when its answer was refused (§8.6 "A refused answer
 		// does not block the mailbox").
 		_ = d.own.Ack(ctx, m.MsgID)
@@ -1083,10 +1108,11 @@ func (d *Device) pollPersist(ctx context.Context) error {
 }
 
 // handleBatch handles a batch for Persist, unless all of it is already
-// handled and saved, and reports whether it handled any. The device
+// handled and saved, and reports whether it handled any and which of
+// them were left unacked (§6.5). The device
 // lock is released and batching reset by defer, so a panic in handle
 // unwinds cleanly. The caller holds sem.
-func (d *Device) handleBatch(ctx context.Context, msgs []relayclient.Message) bool {
+func (d *Device) handleBatch(ctx context.Context, msgs []relayclient.Message) (bool, map[string]bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	fresh := false
@@ -1095,14 +1121,30 @@ func (d *Device) handleBatch(ctx context.Context, msgs []relayclient.Message) bo
 		fresh = fresh || !seen
 	}
 	if !fresh {
-		return false
+		return false, nil
 	}
+	wasDirty := d.dirty
 	d.batching, d.dirty = true, true
 	defer func() { d.batching = false }()
+	var unacked map[string]bool
+	handled := false
 	for _, m := range msgs {
-		d.handle(ctx, m)
+		_, seen := d.st.Seen[m.MsgID]
+		if d.handle(ctx, m) {
+			if unacked == nil {
+				unacked = map[string]bool{}
+			}
+			unacked[m.MsgID] = true
+		} else if !seen {
+			handled = true
+		}
 	}
-	return true
+	if !handled {
+		// Only messages left unacked for redelivery (§6.5): nothing of
+		// the batch to save.
+		d.dirty = wasDirty
+	}
+	return handled, unacked
 }
 
 // saveLocked calls Persist with the state; sem is held. On success
@@ -1418,13 +1460,15 @@ func (d *Device) Deliver(ctx context.Context, m relayclient.Message) {
 var testHandleHook func(relayclient.Message)
 
 // handle processes one collected message. Classification is by sender and
-// recipient kid only (§13.6).
-func (d *Device) handle(ctx context.Context, m relayclient.Message) {
+// recipient kid only (§13.6). It reports whether the message is to be left
+// unacked and not marked seen: one of a new epoch that arrived before its
+// hs.fin (§6.5), which the relay delivers again.
+func (d *Device) handle(ctx context.Context, m relayclient.Message) (unacked bool) {
 	if testHandleHook != nil {
 		testHandleHook(m)
 	}
 	if _, seen := d.st.Seen[m.MsgID]; seen {
-		return
+		return false
 	}
 	now := d.cfg.Now()
 	d.st.Seen[m.MsgID] = now
@@ -1433,13 +1477,18 @@ func (d *Device) handle(ctx context.Context, m relayclient.Message) {
 			delete(d.st.Seen, k)
 		}
 	}
+	for k, t := range d.st.SeenInner {
+		if now.Sub(t) > 16*24*time.Hour {
+			delete(d.st.SeenInner, k)
+		}
+	}
 	sender, ok := relayauth.DecodeKey(m.Sender)
 	if !ok {
-		return
+		return false
 	}
 	env, err := envelope.Parse(m.Payload)
 	if err != nil {
-		return
+		return false
 	}
 	v := d.st.Vault
 	if env.Mode() == envelope.ModeSealed {
@@ -1449,11 +1498,12 @@ func (d *Device) handle(ctx context.Context, m relayclient.Message) {
 		case d.ini != nil && env.RecipientKid().Equal(d.ini.EphKid()):
 			d.handleResp(ctx, m.Payload, sender)
 		}
-		return
+		return false
 	}
 	if v == nil || !suite.EqualPublic(sender, v.RelayPK) {
 		return // §6.3: only the vault's relay key may send to a device
 	}
+	d.pruneAwaiting(now)
 	in, ep, err := d.keyring.Open(env, now)
 	if err != nil {
 		for i, r := range d.awaiting {
@@ -1462,19 +1512,39 @@ func (d *Device) handle(ctx context.Context, m relayclient.Message) {
 				fr, err := r.HandleFin(m.Payload, sender, now)
 				if err == nil {
 					d.keyring.Activate(fr.Epoch, now)
-					d.awaiting = append(d.awaiting[:i:i], d.awaiting[i+1:]...)
+					d.dropAwaiting(i)
 				}
-				return
+				if errors.Is(err, handshake.ErrType) {
+					// A message of the new epoch before hs.fin: the epoch
+					// is not established, so it is neither handled nor
+					// acknowledged (§6.5, §8.3).
+					delete(d.st.Seen, m.MsgID)
+					return true
+				}
+				return false
 			}
 		}
-		return
+		return false
+	}
+	if in.ID != "" {
+		// §8.2: the inner id, per principal (here the vault only). A
+		// duplicate, a retransmitted hs.init included, is skipped, and its
+		// msg_id is acked as usual.
+		if _, dup := d.st.SeenInner[in.ID]; dup {
+			return false
+		}
 	}
 	if in.Type == handshake.TypeInit {
 		d.handleRekey(ctx, m.Payload, in, ep, sender, now)
-		return
+		return false
 	}
 	if err := in.CheckTime(now, in.Exp.IsZero()); err != nil {
-		return
+		return false
+	}
+	// Recorded only once the time check has passed, so that a message
+	// refused for the clock is handled when delivered again.
+	if in.ID != "" {
+		d.st.SeenInner[in.ID] = now
 	}
 	switch in.Type {
 	case devicePairRejected:
@@ -1482,7 +1552,7 @@ func (d *Device) handle(ctx context.Context, m relayclient.Message) {
 		// The device stops waiting and drops the handshake state and the
 		// request token; it sends nothing back (the token is denylisted).
 		if in.Re != "" || d.st.DeviceID != "" {
-			return
+			return false
 		}
 		d.keyring = &handshake.Keyring{}
 		d.st.Vault, d.sas, d.st.PairingPending = nil, "", false
@@ -1493,7 +1563,7 @@ func (d *Device) handle(ctx context.Context, m relayclient.Message) {
 		// of this device waiting for it (a replay under a new msg_id, or a
 		// late one) is dropped: it changes no token, id or release.
 		if d.st.DeviceID != "" && !d.st.PairingPending {
-			return
+			return false
 		}
 		d.st.PairingPending = false
 		// The device's standing token (§10.3, 0.10.3) replaces the request
@@ -1538,7 +1608,7 @@ func (d *Device) handle(ctx context.Context, m relayclient.Message) {
 				body := strictjson.NewBuilder().String("kind", "standing").String("token", tok).Bytes()
 				_, _ = d.sendLocked(ctx, "", in.Type, body, in.ID, envelope.StatusOK)
 			}
-			return
+			return false
 		}
 		d.storeVaultToken(in.Body)
 	case "identity.rotate":
@@ -1550,6 +1620,7 @@ func (d *Device) handle(ctx context.Context, m relayclient.Message) {
 	}
 	d.emit(in)
 	d.maintain(ctx, now)
+	return false
 }
 
 func (d *Device) handleEnrolled(env *envelope.Envelope, sender ed25519.PublicKey) {
@@ -1683,6 +1754,9 @@ func (d *Device) handleRekey(ctx context.Context, raw []byte, in *envelope.Inner
 	if err != nil {
 		return
 	}
+	if in.ID != "" {
+		d.st.SeenInner[in.ID] = now // accepted: see handle
+	}
 	v := d.st.Vault
 	resp, env, err := pi.Respond(handshake.ResponderConfig{
 		Identity: d.ik, Policy: d.policy(), PinnedSuite: v.Suite, CollectSender: sender,
@@ -1696,6 +1770,25 @@ func (d *Device) handleRekey(ctx context.Context, raw []byte, in *envelope.Inner
 		return
 	}
 	d.awaiting = append(d.awaiting, resp)
+	d.awaitingSince = append(d.awaitingSince, now)
+}
+
+// dropAwaiting removes the i-th responder awaiting hs.fin.
+func (d *Device) dropAwaiting(i int) {
+	d.awaiting = append(d.awaiting[:i:i], d.awaiting[i+1:]...)
+	d.awaitingSince = append(d.awaitingSince[:i:i], d.awaitingSince[i+1:]...)
+}
+
+// pruneAwaiting aborts the responders whose hs.fin has not come within
+// the durable lifetime: hs.fin would fail the time check (§8.4), and
+// their epoch's messages must not stay unacked for it (§6.5).
+func (d *Device) pruneAwaiting(now time.Time) {
+	for i := len(d.awaiting) - 1; i >= 0; i-- {
+		if now.Sub(d.awaitingSince[i]) > envelope.MaxDurableAge {
+			d.awaiting[i].Abort()
+			d.dropAwaiting(i)
+		}
+	}
 }
 
 func (d *Device) storeVaultToken(body json.RawMessage) {

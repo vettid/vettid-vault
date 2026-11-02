@@ -237,11 +237,28 @@ func Generate() (map[string][]byte, error) {
 	}
 
 	// handshake.json (§6)
-	hs, err := genHandshake(t0, vault, ini, eph)
+	hs, iniEpoch, vaultEpoch, err := genHandshake(t0, vault, ini, eph)
 	if err != nil {
 		return nil, err
 	}
 	if err := put("handshake.json", hs); err != nil {
+		return nil, err
+	}
+
+	// rekey.json (§6.5) and handshake_desktop.json (§6.7): both follow
+	// handshake.json.
+	rk, err := genRekey(t0, vault, ini, iniEpoch, vaultEpoch)
+	if err != nil {
+		return nil, err
+	}
+	if err := put("rekey.json", rk); err != nil {
+		return nil, err
+	}
+	dh, err := genDesktop(t0, vault)
+	if err != nil {
+		return nil, err
+	}
+	if err := put("handshake_desktop.json", dh); err != nil {
 		return nil, err
 	}
 
@@ -362,6 +379,24 @@ func Generate() (map[string][]byte, error) {
 		return nil, err
 	}
 	if err := put("wallet_caps.json", wcv); err != nil {
+		return nil, err
+	}
+
+	// inner_reject.json (§5.3, §5.4)
+	irv, err := genInnerReject(sessEnv)
+	if err != nil {
+		return nil, err
+	}
+	if err := put("inner_reject.json", irv); err != nil {
+		return nil, err
+	}
+
+	// relay.json (RELAY-PROTOCOL §9)
+	rlv, err := genRelay()
+	if err != nil {
+		return nil, err
+	}
+	if err := put("relay.json", rlv); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -548,7 +583,9 @@ func genRecovery(t0 time.Time) (obj, error) {
 	}, nil
 }
 
-func genHandshake(t0 time.Time, vault, ini *principal, eph *suite.PrivateKey) (obj, error) {
+// genHandshake also returns the established epoch of each side (the
+// initiator's, then the responder's), which rekey.json rekeys.
+func genHandshake(t0 time.Time, vault, ini *principal, eph *suite.PrivateKey) (obj, *handshake.Epoch, *handshake.Epoch, error) {
 	lookup := func(kid suite.Kid) *suite.PrivateKey {
 		if kid.Equal(vault.kem.Public().Kid()) {
 			return vault.kem
@@ -577,11 +614,11 @@ func genHandshake(t0 time.Time, vault, ini *principal, eph *suite.PrivateKey) (o
 		in, err = handshake.NewInitiator(icfg)
 		return err
 	}); err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 	var err error
 	if pend, err = handshake.OpenInit(in.Envelope(), lookup, t0); err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 	if err := with(newScript(rep(NonceSASR, 32), rep(RandResp, 64)), func() error {
 		var err error
@@ -591,21 +628,21 @@ func genHandshake(t0 time.Time, vault, ini *principal, eph *suite.PrivateKey) (o
 		})
 		return err
 	}); err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 	if err := with(newScript(rep(NonceFin, 24)), func() error {
 		var err error
 		res, err = in.HandleResp(renv, vault.relayPub(), t0)
 		return err
 	}); err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 	fr, err := resp.HandleFin(res.Fin, ini.relayPub(), t0)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 	if fr.Epoch.ID() != res.Epoch.ID() || fr.SAS != res.SAS {
-		return nil, errors.New("vectors: epoch or SAS mismatch")
+		return nil, nil, nil, errors.New("vectors: epoch or SAS mismatch")
 	}
 
 	// Intermediate values, recomputed from the receiving side.
@@ -613,32 +650,32 @@ func genHandshake(t0 time.Time, vault, ini *principal, eph *suite.PrivateKey) (o
 	ie, _ := envelope.Parse(envInit)
 	_, iexp, err := envelope.OpenSealed(ie, vault.kem)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 	ks, _ := iexp.Export(suite.LabelHsKs, 32)
 	re, _ := envelope.Parse(renv)
 	rpad, rexp, err := envelope.OpenSealed(re, eph)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 	ke, _ := rexp.Export(suite.LabelHsKe, 32)
 	th1 := handshake.Th1(envInit)
 	th := handshake.Th(envInit, renv[:envelope.HeaderSealed])
 	s, err := handshake.DeriveSchedule(ks, ke, th1, th)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 	nI, nR := rep(NonceSASI, 32), rep(NonceSASR, 32)
 	commit := handshake.SASCommit(nI)
 	sas, err := handshake.SAS(s.PRK, th, nI, nR)
 	if err != nil || sas != res.SAS {
-		return nil, errors.New("vectors: SAS mismatch")
+		return nil, nil, nil, errors.New("vectors: SAS mismatch")
 	}
 	sigR, _ := handshake.SignResp(vault.ik, th)
 	sigI, _ := handshake.SignFin(ini.ik, th)
 	rin, err := envelope.DecodeInner(rpad, envelope.ModeSealed)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 	initBody := in.Body()
 	ib, _ := initBody.Marshal()
@@ -674,7 +711,7 @@ func genHandshake(t0 time.Time, vault, ini *principal, eph *suite.PrivateKey) (o
 		{"sas", sas},
 		{"sig_R_b64", b64(sigR)},
 		{"sig_I_b64", b64(sigI)},
-	}, nil
+	}, res.Epoch, fr.Epoch, nil
 }
 
 func mustInner(in *envelope.Inner) string {

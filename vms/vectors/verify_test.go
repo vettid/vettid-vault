@@ -508,6 +508,24 @@ func checkVectors(t *testing.T, dir string) {
 		ct, _ := s.Seal(raw[:1140], pt)
 		eq(t, "unlock envelope", append(bytes.Clone(raw[:1140]), ct...), raw)
 	})
+
+	// Vector files added after the first releases: a frozen directory may
+	// lack them.
+	for _, v := range []struct {
+		file  string
+		check func(*testing.T, string)
+	}{
+		{"rekey.json", checkRekeyVectors},
+		{"handshake_desktop.json", checkDesktopVectors},
+		{"inner_reject.json", checkInnerRejectVectors},
+		{"relay.json", checkRelayVectors},
+	} {
+		if _, err := os.Stat(filepath.Join(dir, v.file)); err == nil {
+			t.Run(strings.TrimSuffix(v.file, ".json"), func(t *testing.T) { v.check(t, dir) })
+		} else if !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+	}
 }
 
 // §11.10 release vectors, checked from the receiving side.

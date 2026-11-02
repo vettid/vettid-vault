@@ -77,6 +77,29 @@ const (
 	BlobAttID           = "01JB2Z6V9K3M4N5P6Q7R8S9T60"                                 // (spec)
 	BlobContentHex      = "ffd8ffe0566574744944206174746163686d656e7420766563746f7221" // (spec) 29 bytes
 
+	// §6.5 rekey (rekey.json): the vault rekeys the session of handshake.json
+	// after 24 h. Test-only seeds, distinct from every other vector's.
+	SeedRekeyEph   byte = 0x70 // the rekey initiator's ephemeral KEM key
+	NonceRekeyInit byte = 0x71 // hs.init, a session envelope of the old epoch
+	RandRekeyResp  byte = 0x72 // hs.resp encapsulation randomness
+	NonceRekeyFin  byte = 0x73 // hs.fin, in the new epoch
+	NonceRekeyMsgI byte = 0x74 // the first message of the new epoch, i2r
+	NonceRekeyMsgR byte = 0x75 // the first message of the new epoch, r2i
+
+	// §6.3, §6.7 desktop pairing (handshake_desktop.json): a desktop that
+	// pairs with the vault of keys.json. Test-only seeds.
+	SeedDesktopIK      byte = 0x80
+	SeedDesktopKEM     byte = 0x81
+	SeedDesktopRelay   byte = 0x82
+	SeedDesktopEph     byte = 0x83
+	RandDesktopInit    byte = 0x84
+	RandDesktopResp    byte = 0x85
+	NonceDesktopSASI   byte = 0x86 // n_I
+	NonceDesktopSASR   byte = 0x87 // n_R
+	NonceDesktopFin    byte = 0x88
+	KeyDesktopBundle   byte = 0x89
+	NonceDesktopBundle byte = 0x8a
+
 	SessionSenderKid    byte = 0x02
 	SessionRecipientKid byte = 0x01
 
@@ -91,6 +114,25 @@ const (
 	// tokens), and it carries no reconnect tokens.
 	HSTokenInit = "v4.public.VEVTVC1PTkxZLWluaXQtc3RhbmRpbmc"
 	HSTokenResp = "v4.public.VEVTVC1PTkxZLXJlc3Atc3RhbmRpbmc"
+
+	// Rekey (rekey.json) message ids.
+	RekeyInitID = "01JB2Z6V9K3M4N5P6Q7R8S9T80"
+	RekeyRespID = "01JB2Z6V9K3M4N5P6Q7R8S9T81"
+	RekeyFinID  = "01JB2Z6V9K3M4N5P6Q7R8S9T82"
+	RekeyMsgIID = "01JB2Z6V9K3M4N5P6Q7R8S9T83"
+	RekeyMsgRID = "01JB2Z6V9K3M4N5P6Q7R8S9T84"
+
+	// Desktop pairing (handshake_desktop.json): the pairing id (the
+	// bundle's invite_id) and the message ids.
+	DesktopPairingID = "01JB2Z6V9K3M4N5P6Q7R8S9T90"
+	DesktopInitID    = "01JB2Z6V9K3M4N5P6Q7R8S9T91"
+	DesktopRespID    = "01JB2Z6V9K3M4N5P6Q7R8S9T92"
+	DesktopFinID     = "01JB2Z6V9K3M4N5P6Q7R8S9T93"
+	DesktopClaimID   = "testclaimidbbbbbbbbbbbbbbb"
+	DesktopName      = "Test Desktop"
+	// Dummy request tokens, as for the connection handshake.
+	DesktopTokenInit = "v4.public.VEVTVC1ERVNLVE9QLWluaXQtcmVxdWVzdA"
+	DesktopTokenResp = "v4.public.VEVTVC1ERVNLVE9QLXJlc3AtcmVxdWVzdA"
 
 	InviteOpenToken = "v4.public.VEVTVC1PTkxZLW9wZW4"
 	InviteClaimID   = "testclaimidaaaaaaaaaaaaaaa"

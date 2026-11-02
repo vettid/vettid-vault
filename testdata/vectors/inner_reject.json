@@ -1,0 +1,1420 @@
+{
+  "description": "VAULT-MESSAGING §5.2-§5.4 inner-plaintext and envelope must-reject corpus. Every case is rejected by a receiver, and by the library's parser here. Each is the baseline inner plaintext (accepted) with one change, in the layer named: `inner` = the unpadded JSON handed to the inner parser in `mode`; `padded` = the padded plaintext (inner || marker || zeros to padded_len, marker_hex default 80, last_byte_hex replaces the last byte, or padded_hex given whole) handed to unpad-and-parse; `envelope` = the envelope bytes (envelope_session.json's with the mutation) handed to the envelope parser before any decryption; `session_open` = the envelope parses and is opened with key_hex, which fails; `time` = the inner parses in session mode, and the freshness check at `now` (RFC 3339) fails (durable: also the 16-day limit). `inner` is the UTF-8 text, or `inner_hex` the bytes when they are not valid UTF-8 or begin with a byte order mark. `rule` names the spec rule. `error` is the class of the rejection: inner (malformed inner plaintext), padding, version, suite, mode, flags, length, truncated, decrypt, clock_future, clock_past, expired; a receiver need only reject, the class says why.",
+  "baseline_session_inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}",
+  "baseline_sealed_inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"body\":{}}",
+  "cases": [
+    {
+      "case": "missing_v",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: v, id, type, ts and body are required; seq in session mode",
+      "error": "inner",
+      "inner": "{\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}"
+    },
+    {
+      "case": "missing_id",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: v, id, type, ts and body are required; seq in session mode",
+      "error": "inner",
+      "inner": "{\"v\":1,\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}"
+    },
+    {
+      "case": "missing_type",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: v, id, type, ts and body are required; seq in session mode",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}"
+    },
+    {
+      "case": "missing_ts",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: v, id, type, ts and body are required; seq in session mode",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"seq\":1,\"body\":{}}"
+    },
+    {
+      "case": "missing_body",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: v, id, type, ts and body are required; seq in session mode",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1}"
+    },
+    {
+      "case": "missing_seq_in_session_mode",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: v, id, type, ts and body are required; seq in session mode",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"body\":{}}"
+    },
+    {
+      "case": "seq_in_sealed_mode",
+      "layer": "inner",
+      "mode": "sealed",
+      "rule": "§5.3: seq MUST be absent in sealed mode",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"body\":{},\"seq\":1}"
+    },
+    {
+      "case": "v_2",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: v MUST be the integer 1 (plain integer: no fraction, exponent or sign, no leading zero)",
+      "error": "inner",
+      "inner": "{\"v\":2,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}"
+    },
+    {
+      "case": "v_0",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: v MUST be the integer 1 (plain integer: no fraction, exponent or sign, no leading zero)",
+      "error": "inner",
+      "inner": "{\"v\":0,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}"
+    },
+    {
+      "case": "v_string",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: v MUST be the integer 1 (plain integer: no fraction, exponent or sign, no leading zero)",
+      "error": "inner",
+      "inner": "{\"v\":\"1\",\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}"
+    },
+    {
+      "case": "v_fraction",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: v MUST be the integer 1 (plain integer: no fraction, exponent or sign, no leading zero)",
+      "error": "inner",
+      "inner": "{\"v\":1.0,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}"
+    },
+    {
+      "case": "v_exponent",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: v MUST be the integer 1 (plain integer: no fraction, exponent or sign, no leading zero)",
+      "error": "inner",
+      "inner": "{\"v\":1e0,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}"
+    },
+    {
+      "case": "v_true",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: v MUST be the integer 1 (plain integer: no fraction, exponent or sign, no leading zero)",
+      "error": "inner",
+      "inner": "{\"v\":true,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}"
+    },
+    {
+      "case": "v_null",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: v MUST be the integer 1 (plain integer: no fraction, exponent or sign, no leading zero)",
+      "error": "inner",
+      "inner": "{\"v\":null,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}"
+    },
+    {
+      "case": "v_leading_zero",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: v MUST be the integer 1 (plain integer: no fraction, exponent or sign, no leading zero)",
+      "error": "inner",
+      "inner": "{\"v\":01,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}"
+    },
+    {
+      "case": "id_lowercase",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: id MUST be a canonical ULID: 26 upper-case Crockford base32 characters, the first in 0-7",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01jb2z6v9k3m4n5p6q7r8s9t0v\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}"
+    },
+    {
+      "case": "id_25_characters",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: id MUST be a canonical ULID: 26 upper-case Crockford base32 characters, the first in 0-7",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}"
+    },
+    {
+      "case": "id_27_characters",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: id MUST be a canonical ULID: 26 upper-case Crockford base32 characters, the first in 0-7",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0VV\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}"
+    },
+    {
+      "case": "id_first_character_8",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: id MUST be a canonical ULID: 26 upper-case Crockford base32 characters, the first in 0-7",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"81JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}"
+    },
+    {
+      "case": "id_letter_U",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: id MUST be a canonical ULID: 26 upper-case Crockford base32 characters, the first in 0-7",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0U\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}"
+    },
+    {
+      "case": "id_letter_I",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: id MUST be a canonical ULID: 26 upper-case Crockford base32 characters, the first in 0-7",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0I\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}"
+    },
+    {
+      "case": "id_letter_L",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: id MUST be a canonical ULID: 26 upper-case Crockford base32 characters, the first in 0-7",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0L\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}"
+    },
+    {
+      "case": "id_letter_O",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: id MUST be a canonical ULID: 26 upper-case Crockford base32 characters, the first in 0-7",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0O\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}"
+    },
+    {
+      "case": "id_empty",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: id MUST be a canonical ULID: 26 upper-case Crockford base32 characters, the first in 0-7",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}"
+    },
+    {
+      "case": "id_number",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: id MUST be a canonical ULID: 26 upper-case Crockford base32 characters, the first in 0-7",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":1,\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}"
+    },
+    {
+      "case": "id_null",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: id MUST be a canonical ULID: 26 upper-case Crockford base32 characters, the first in 0-7",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":null,\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}"
+    },
+    {
+      "case": "type_uppercase",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: type MUST match [a-z][a-z0-9-]*(\\.[a-z][a-z0-9-]*)* and be at most 64 bytes",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"Test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}"
+    },
+    {
+      "case": "type_empty",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: type MUST match [a-z][a-z0-9-]*(\\.[a-z][a-z0-9-]*)* and be at most 64 bytes",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}"
+    },
+    {
+      "case": "type_empty_segment",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: type MUST match [a-z][a-z0-9-]*(\\.[a-z][a-z0-9-]*)* and be at most 64 bytes",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"a..b\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}"
+    },
+    {
+      "case": "type_leading_dot",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: type MUST match [a-z][a-z0-9-]*(\\.[a-z][a-z0-9-]*)* and be at most 64 bytes",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\".a\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}"
+    },
+    {
+      "case": "type_trailing_dot",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: type MUST match [a-z][a-z0-9-]*(\\.[a-z][a-z0-9-]*)* and be at most 64 bytes",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"a.\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}"
+    },
+    {
+      "case": "type_segment_starts_with_digit",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: type MUST match [a-z][a-z0-9-]*(\\.[a-z][a-z0-9-]*)* and be at most 64 bytes",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"a.1b\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}"
+    },
+    {
+      "case": "type_segment_starts_with_hyphen",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: type MUST match [a-z][a-z0-9-]*(\\.[a-z][a-z0-9-]*)* and be at most 64 bytes",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"a.-b\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}"
+    },
+    {
+      "case": "type_underscore",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: type MUST match [a-z][a-z0-9-]*(\\.[a-z][a-z0-9-]*)* and be at most 64 bytes",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"a_b\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}"
+    },
+    {
+      "case": "type_65_bytes",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: type MUST match [a-z][a-z0-9-]*(\\.[a-z][a-z0-9-]*)* and be at most 64 bytes",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}"
+    },
+    {
+      "case": "type_number",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: type MUST match [a-z][a-z0-9-]*(\\.[a-z][a-z0-9-]*)* and be at most 64 bytes",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":1,\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}"
+    },
+    {
+      "case": "type_null",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: type MUST match [a-z][a-z0-9-]*(\\.[a-z][a-z0-9-]*)* and be at most 64 bytes",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":null,\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}"
+    },
+    {
+      "case": "ts_no_fraction",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: ts MUST be YYYY-MM-DDTHH:MM:SS.mmmZ: RFC 3339, UTC, exactly three fractional digits, a literal Z, and a real date and time",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00Z\",\"seq\":1,\"body\":{}}"
+    },
+    {
+      "case": "ts_two_fraction_digits",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: ts MUST be YYYY-MM-DDTHH:MM:SS.mmmZ: RFC 3339, UTC, exactly three fractional digits, a literal Z, and a real date and time",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.00Z\",\"seq\":1,\"body\":{}}"
+    },
+    {
+      "case": "ts_six_fraction_digits",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: ts MUST be YYYY-MM-DDTHH:MM:SS.mmmZ: RFC 3339, UTC, exactly three fractional digits, a literal Z, and a real date and time",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000000Z\",\"seq\":1,\"body\":{}}"
+    },
+    {
+      "case": "ts_numeric_offset",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: ts MUST be YYYY-MM-DDTHH:MM:SS.mmmZ: RFC 3339, UTC, exactly three fractional digits, a literal Z, and a real date and time",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000+00:00\",\"seq\":1,\"body\":{}}"
+    },
+    {
+      "case": "ts_lowercase_z",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: ts MUST be YYYY-MM-DDTHH:MM:SS.mmmZ: RFC 3339, UTC, exactly three fractional digits, a literal Z, and a real date and time",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000z\",\"seq\":1,\"body\":{}}"
+    },
+    {
+      "case": "ts_space_for_T",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: ts MUST be YYYY-MM-DDTHH:MM:SS.mmmZ: RFC 3339, UTC, exactly three fractional digits, a literal Z, and a real date and time",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01 12:00:00.000Z\",\"seq\":1,\"body\":{}}"
+    },
+    {
+      "case": "ts_not_a_date",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: ts MUST be YYYY-MM-DDTHH:MM:SS.mmmZ: RFC 3339, UTC, exactly three fractional digits, a literal Z, and a real date and time",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-02-30T12:00:00.000Z\",\"seq\":1,\"body\":{}}"
+    },
+    {
+      "case": "ts_hour_24",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: ts MUST be YYYY-MM-DDTHH:MM:SS.mmmZ: RFC 3339, UTC, exactly three fractional digits, a literal Z, and a real date and time",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T24:00:00.000Z\",\"seq\":1,\"body\":{}}"
+    },
+    {
+      "case": "ts_date_only",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: ts MUST be YYYY-MM-DDTHH:MM:SS.mmmZ: RFC 3339, UTC, exactly three fractional digits, a literal Z, and a real date and time",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01\",\"seq\":1,\"body\":{}}"
+    },
+    {
+      "case": "ts_unix_number",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: ts MUST be YYYY-MM-DDTHH:MM:SS.mmmZ: RFC 3339, UTC, exactly three fractional digits, a literal Z, and a real date and time",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":1790856000,\"seq\":1,\"body\":{}}"
+    },
+    {
+      "case": "ts_null",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: ts MUST be YYYY-MM-DDTHH:MM:SS.mmmZ: RFC 3339, UTC, exactly three fractional digits, a literal Z, and a real date and time",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":null,\"seq\":1,\"body\":{}}"
+    },
+    {
+      "case": "seq_zero",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: seq MUST be an integer from 1 to 2^53-1 (plain integer: no sign, fraction or exponent)",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":0,\"body\":{}}"
+    },
+    {
+      "case": "seq_negative",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: seq MUST be an integer from 1 to 2^53-1 (plain integer: no sign, fraction or exponent)",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"body\":{}}"
+    },
+    {
+      "case": "seq_fraction",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: seq MUST be an integer from 1 to 2^53-1 (plain integer: no sign, fraction or exponent)",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1.5,\"body\":{}}"
+    },
+    {
+      "case": "seq_exponent",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: seq MUST be an integer from 1 to 2^53-1 (plain integer: no sign, fraction or exponent)",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1e2,\"body\":{}}"
+    },
+    {
+      "case": "seq_string",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: seq MUST be an integer from 1 to 2^53-1 (plain integer: no sign, fraction or exponent)",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":\"1\",\"body\":{}}"
+    },
+    {
+      "case": "seq_2_pow_53",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: seq MUST be an integer from 1 to 2^53-1 (plain integer: no sign, fraction or exponent)",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":9007199254740992,\"body\":{}}"
+    },
+    {
+      "case": "seq_null",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: seq MUST be an integer from 1 to 2^53-1 (plain integer: no sign, fraction or exponent)",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":null,\"body\":{}}"
+    },
+    {
+      "case": "re_without_status",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: re and status appear together or not at all; status is ok or error; error is present if and only if status is error",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{},\"re\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0W\"}"
+    },
+    {
+      "case": "status_without_re",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: re and status appear together or not at all; status is ok or error; error is present if and only if status is error",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{},\"status\":\"ok\"}"
+    },
+    {
+      "case": "status_unknown_value",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: re and status appear together or not at all; status is ok or error; error is present if and only if status is error",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{},\"re\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0W\",\"status\":\"done\"}"
+    },
+    {
+      "case": "status_empty",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: re and status appear together or not at all; status is ok or error; error is present if and only if status is error",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{},\"re\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0W\",\"status\":\"\"}"
+    },
+    {
+      "case": "status_not_a_string",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: re and status appear together or not at all; status is ok or error; error is present if and only if status is error",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{},\"re\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0W\",\"status\":1}"
+    },
+    {
+      "case": "status_error_without_error",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: re and status appear together or not at all; status is ok or error; error is present if and only if status is error",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{},\"re\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0W\",\"status\":\"error\"}"
+    },
+    {
+      "case": "status_ok_with_error",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: re and status appear together or not at all; status is ok or error; error is present if and only if status is error",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{},\"re\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0W\",\"status\":\"ok\",\"error\":{\"code\":\"not_found\"}}"
+    },
+    {
+      "case": "error_without_status",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: re and status appear together or not at all; status is ok or error; error is present if and only if status is error",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{},\"error\":{\"code\":\"not_found\"}}"
+    },
+    {
+      "case": "error_null",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: re and status appear together or not at all; status is ok or error; error is present if and only if status is error",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{},\"re\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0W\",\"status\":\"error\",\"error\":null}"
+    },
+    {
+      "case": "re_lowercase",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: re MUST be a canonical ULID",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{},\"re\":\"01jb2z6v9k3m4n5p6q7r8s9t0w\",\"status\":\"ok\"}"
+    },
+    {
+      "case": "re_empty",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: re MUST be a canonical ULID",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{},\"re\":\"\",\"status\":\"ok\"}"
+    },
+    {
+      "case": "re_short",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: re MUST be a canonical ULID",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{},\"re\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0\",\"status\":\"ok\"}"
+    },
+    {
+      "case": "re_number",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: re MUST be a canonical ULID",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{},\"re\":1,\"status\":\"ok\"}"
+    },
+    {
+      "case": "error_code_uppercase",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: error.code MUST match [a-z_][a-z0-9_]* and be at most 64 bytes; error.message, if present, is a string; error is an object",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{},\"re\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0W\",\"status\":\"error\",\"error\":{\"code\":\"Not_Found\"}}"
+    },
+    {
+      "case": "error_code_empty",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: error.code MUST match [a-z_][a-z0-9_]* and be at most 64 bytes; error.message, if present, is a string; error is an object",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{},\"re\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0W\",\"status\":\"error\",\"error\":{\"code\":\"\"}}"
+    },
+    {
+      "case": "error_code_leading_digit",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: error.code MUST match [a-z_][a-z0-9_]* and be at most 64 bytes; error.message, if present, is a string; error is an object",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{},\"re\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0W\",\"status\":\"error\",\"error\":{\"code\":\"1abc\"}}"
+    },
+    {
+      "case": "error_code_hyphen",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: error.code MUST match [a-z_][a-z0-9_]* and be at most 64 bytes; error.message, if present, is a string; error is an object",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{},\"re\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0W\",\"status\":\"error\",\"error\":{\"code\":\"not-found\"}}"
+    },
+    {
+      "case": "error_code_65_bytes",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: error.code MUST match [a-z_][a-z0-9_]* and be at most 64 bytes; error.message, if present, is a string; error is an object",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{},\"re\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0W\",\"status\":\"error\",\"error\":{\"code\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}"
+    },
+    {
+      "case": "error_code_missing",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: error.code MUST match [a-z_][a-z0-9_]* and be at most 64 bytes; error.message, if present, is a string; error is an object",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{},\"re\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0W\",\"status\":\"error\",\"error\":{\"message\":\"x\"}}"
+    },
+    {
+      "case": "error_code_number",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: error.code MUST match [a-z_][a-z0-9_]* and be at most 64 bytes; error.message, if present, is a string; error is an object",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{},\"re\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0W\",\"status\":\"error\",\"error\":{\"code\":1}}"
+    },
+    {
+      "case": "error_message_number",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: error.code MUST match [a-z_][a-z0-9_]* and be at most 64 bytes; error.message, if present, is a string; error is an object",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{},\"re\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0W\",\"status\":\"error\",\"error\":{\"code\":\"a\",\"message\":1}}"
+    },
+    {
+      "case": "error_not_an_object",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: error.code MUST match [a-z_][a-z0-9_]* and be at most 64 bytes; error.message, if present, is a string; error is an object",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{},\"re\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0W\",\"status\":\"error\",\"error\":\"not_found\"}"
+    },
+    {
+      "case": "exp_no_fraction",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: exp, if present, MUST use the same format as ts",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{},\"exp\":\"2026-10-01T13:00:00Z\"}"
+    },
+    {
+      "case": "exp_number",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: exp, if present, MUST use the same format as ts",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{},\"exp\":1790859600}"
+    },
+    {
+      "case": "exp_numeric_offset",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: exp, if present, MUST use the same format as ts",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{},\"exp\":\"2026-10-01T13:00:00.000+00:00\"}"
+    },
+    {
+      "case": "exp_null",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: exp, if present, MUST use the same format as ts",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{},\"exp\":null}"
+    },
+    {
+      "case": "body_array",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: body MUST be a JSON object ({} when empty)",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":[]}"
+    },
+    {
+      "case": "body_string",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: body MUST be a JSON object ({} when empty)",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":\"x\"}"
+    },
+    {
+      "case": "body_null",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: body MUST be a JSON object ({} when empty)",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":null}"
+    },
+    {
+      "case": "body_number",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: body MUST be a JSON object ({} when empty)",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":0}"
+    },
+    {
+      "case": "body_true",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: body MUST be a JSON object ({} when empty)",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":true}"
+    },
+    {
+      "case": "duplicate_v",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: receivers MUST reject duplicate member names at any depth (names are compared after unescaping)",
+      "error": "inner",
+      "inner": "{\"v\":1,\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}"
+    },
+    {
+      "case": "duplicate_id_same_value",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: receivers MUST reject duplicate member names at any depth (names are compared after unescaping)",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}"
+    },
+    {
+      "case": "duplicate_id_escaped_name",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: receivers MUST reject duplicate member names at any depth (names are compared after unescaping)",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0W\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}"
+    },
+    {
+      "case": "duplicate_body_last",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: receivers MUST reject duplicate member names at any depth (names are compared after unescaping)",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{},\"body\":{}}"
+    },
+    {
+      "case": "duplicate_in_body",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: receivers MUST reject duplicate member names at any depth (names are compared after unescaping)",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{\"a\":1,\"a\":2}}"
+    },
+    {
+      "case": "duplicate_in_nested_body",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: receivers MUST reject duplicate member names at any depth (names are compared after unescaping)",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{\"x\":{\"y\":[{\"z\":1,\"z\":2}]}}}"
+    },
+    {
+      "case": "duplicate_in_error",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: receivers MUST reject duplicate member names at any depth (names are compared after unescaping)",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{},\"re\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0W\",\"status\":\"error\",\"error\":{\"code\":\"a\",\"code\":\"b\"}}"
+    },
+    {
+      "case": "duplicate_unknown_member",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: receivers MUST reject duplicate member names at any depth (names are compared after unescaping)",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{},\"x\":1,\"x\":2}"
+    },
+    {
+      "case": "member_name_V",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: member names are case-sensitive: a member under another case is not the member",
+      "error": "inner",
+      "inner": "{\"V\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}"
+    },
+    {
+      "case": "member_name_Id",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: member names are case-sensitive: a member under another case is not the member",
+      "error": "inner",
+      "inner": "{\"v\":1,\"Id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}"
+    },
+    {
+      "case": "member_name_Body",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: member names are case-sensitive: a member under another case is not the member",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"Body\":{}}"
+    },
+    {
+      "case": "member_name_SEQ",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: member names are case-sensitive: a member under another case is not the member",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"SEQ\":1,\"body\":{}}"
+    },
+    {
+      "case": "data_after_object_object",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: the inner plaintext MUST be one JSON object, and nothing may follow it",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}{}"
+    },
+    {
+      "case": "data_after_object_text",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: the inner plaintext MUST be one JSON object, and nothing may follow it",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}x"
+    },
+    {
+      "case": "data_after_object_second_copy",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: the inner plaintext MUST be one JSON object, and nothing may follow it",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}"
+    },
+    {
+      "case": "data_after_object_comma",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: the inner plaintext MUST be one JSON object, and nothing may follow it",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}},"
+    },
+    {
+      "case": "data_after_object_null",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: the inner plaintext MUST be one JSON object, and nothing may follow it",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}} null"
+    },
+    {
+      "case": "top_level_array",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: the inner plaintext MUST be a JSON object (strict JSON: RFC 8259)",
+      "error": "inner",
+      "inner": "[{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}]"
+    },
+    {
+      "case": "top_level_string",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: the inner plaintext MUST be a JSON object (strict JSON: RFC 8259)",
+      "error": "inner",
+      "inner": "\"x\""
+    },
+    {
+      "case": "top_level_number",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: the inner plaintext MUST be a JSON object (strict JSON: RFC 8259)",
+      "error": "inner",
+      "inner": "1"
+    },
+    {
+      "case": "top_level_null",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: the inner plaintext MUST be a JSON object (strict JSON: RFC 8259)",
+      "error": "inner",
+      "inner": "null"
+    },
+    {
+      "case": "empty_input",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: the inner plaintext MUST be a JSON object (strict JSON: RFC 8259)",
+      "error": "inner",
+      "inner": ""
+    },
+    {
+      "case": "whitespace_only",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: the inner plaintext MUST be a JSON object (strict JSON: RFC 8259)",
+      "error": "inner",
+      "inner": " \n"
+    },
+    {
+      "case": "truncated_object",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: the inner plaintext MUST be a JSON object (strict JSON: RFC 8259)",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}"
+    },
+    {
+      "case": "unterminated_string",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: the inner plaintext MUST be a JSON object (strict JSON: RFC 8259)",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\""
+    },
+    {
+      "case": "trailing_comma",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: the inner plaintext MUST be a JSON object (strict JSON: RFC 8259)",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{},}"
+    },
+    {
+      "case": "leading_comma",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: the inner plaintext MUST be a JSON object (strict JSON: RFC 8259)",
+      "error": "inner",
+      "inner": "{,\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}"
+    },
+    {
+      "case": "single_quoted_names",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: the inner plaintext MUST be a JSON object (strict JSON: RFC 8259)",
+      "error": "inner",
+      "inner": "{'v':1,'id':'01JB2Z6V9K3M4N5P6Q7R8S9T0V','type':'test.ping','ts':'2026-10-01T12:00:00.000Z','seq':1,'body':{}}"
+    },
+    {
+      "case": "unquoted_names",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: the inner plaintext MUST be a JSON object (strict JSON: RFC 8259)",
+      "error": "inner",
+      "inner": "{v:1,id:\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",type:\"test.ping\",ts:\"2026-10-01T12:00:00.000Z\",seq:1,body:{}}"
+    },
+    {
+      "case": "comment_before",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: the inner plaintext MUST be a JSON object (strict JSON: RFC 8259)",
+      "error": "inner",
+      "inner": "/*x*/{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}"
+    },
+    {
+      "case": "comment_inside",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: the inner plaintext MUST be a JSON object (strict JSON: RFC 8259)",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{/*x*/}}"
+    },
+    {
+      "case": "line_comment",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: the inner plaintext MUST be a JSON object (strict JSON: RFC 8259)",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}//x"
+    },
+    {
+      "case": "nan_member",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: the inner plaintext MUST be a JSON object (strict JSON: RFC 8259)",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{},\"x\":NaN}"
+    },
+    {
+      "case": "infinity_member",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: the inner plaintext MUST be a JSON object (strict JSON: RFC 8259)",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{},\"x\":Infinity}"
+    },
+    {
+      "case": "hex_number_member",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: the inner plaintext MUST be a JSON object (strict JSON: RFC 8259)",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{},\"x\":0x10}"
+    },
+    {
+      "case": "leading_zero_member",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: the inner plaintext MUST be a JSON object (strict JSON: RFC 8259)",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{},\"x\":01}"
+    },
+    {
+      "case": "plus_sign_member",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: the inner plaintext MUST be a JSON object (strict JSON: RFC 8259)",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{},\"x\":+1}"
+    },
+    {
+      "case": "lone_decimal_point_member",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: the inner plaintext MUST be a JSON object (strict JSON: RFC 8259)",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{},\"x\":1.}"
+    },
+    {
+      "case": "raw_newline_in_string",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: the inner plaintext MUST be a JSON object (strict JSON: RFC 8259)",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{},\"x\":\"a\nb\"}"
+    },
+    {
+      "case": "raw_tab_in_string",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: the inner plaintext MUST be a JSON object (strict JSON: RFC 8259)",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{},\"x\":\"a\tb\"}"
+    },
+    {
+      "case": "invalid_escape",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: the inner plaintext MUST be a JSON object (strict JSON: RFC 8259)",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{},\"x\":\"\\q\"}"
+    },
+    {
+      "case": "short_unicode_escape",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: the inner plaintext MUST be a JSON object (strict JSON: RFC 8259)",
+      "error": "inner",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{},\"x\":\"\\u12\"}"
+    },
+    {
+      "case": "invalid_utf8_in_body_string",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: the inner plaintext (including its body) MUST be valid UTF-8",
+      "error": "inner",
+      "inner_hex": "7b2276223a312c226964223a2230314a42325a3656394b334d344e355036513752385339543056222c2274797065223a22746573742e70696e67222c227473223a22323032362d31302d30315431323a30303a30302e3030305a222c22736571223a312c22626f6479223a7b2261223a22ff227d7d"
+    },
+    {
+      "case": "invalid_utf8_in_unknown_member",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: the inner plaintext (including its body) MUST be valid UTF-8",
+      "error": "inner",
+      "inner_hex": "7b2276223a312c226964223a2230314a42325a3656394b334d344e355036513752385339543056222c2274797065223a22746573742e70696e67222c227473223a22323032362d31302d30315431323a30303a30302e3030305a222c22736571223a312c22626f6479223a7b7d2c2278223a22c328227d"
+    },
+    {
+      "case": "overlong_utf8",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: the inner plaintext (including its body) MUST be valid UTF-8 (overlong encoding of '/')",
+      "error": "inner",
+      "inner_hex": "7b2276223a312c226964223a2230314a42325a3656394b334d344e355036513752385339543056222c2274797065223a22746573742e70696e67222c227473223a22323032362d31302d30315431323a30303a30302e3030305a222c22736571223a312c22626f6479223a7b7d2c2278223a22c0af227d"
+    },
+    {
+      "case": "utf8_encoded_surrogate",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: the inner plaintext (including its body) MUST be valid UTF-8 (UTF-16 surrogate encoded in UTF-8)",
+      "error": "inner",
+      "inner_hex": "7b2276223a312c226964223a2230314a42325a3656394b334d344e355036513752385339543056222c2274797065223a22746573742e70696e67222c227473223a22323032362d31302d30315431323a30303a30302e3030305a222c22736571223a312c22626f6479223a7b7d2c2278223a22eda080227d"
+    },
+    {
+      "case": "truncated_utf8_sequence",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: the inner plaintext (including its body) MUST be valid UTF-8 (truncated sequence)",
+      "error": "inner",
+      "inner_hex": "7b2276223a312c226964223a2230314a42325a3656394b334d344e355036513752385339543056222c2274797065223a22746573742e70696e67222c227473223a22323032362d31302d30315431323a30303a30302e3030305a222c22736571223a312c22626f6479223a7b7d2c2278223a22e282227d"
+    },
+    {
+      "case": "byte_order_mark",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: the inner plaintext is JSON: a byte order mark is not JSON",
+      "error": "inner",
+      "inner_hex": "efbbbf7b2276223a312c226964223a2230314a42325a3656394b334d344e355036513752385339543056222c2274797065223a22746573742e70696e67222c227473223a22323032362d31302d30315431323a30303a30302e3030305a222c22736571223a312c22626f6479223a7b7d7d"
+    },
+    {
+      "case": "utf16_encoding",
+      "layer": "inner",
+      "mode": "session",
+      "rule": "§5.3: the inner plaintext is JSON, not UTF-16",
+      "error": "inner",
+      "inner_hex": "fffe7b007d00"
+    },
+    {
+      "case": "padding_no_marker",
+      "layer": "padded",
+      "mode": "session",
+      "rule": "§5.4: padding is json || 0x80 || 0x00*, to exactly the bucket for len(json)+1: a multiple of 512 up to 16 KiB, then of 16 KiB, at most 245,760 bytes; no marker at all",
+      "error": "padding",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}",
+      "padded_len": 512,
+      "marker_hex": ""
+    },
+    {
+      "case": "padding_marker_0x81",
+      "layer": "padded",
+      "mode": "session",
+      "rule": "§5.4: padding is json || 0x80 || 0x00*, to exactly the bucket for len(json)+1: a multiple of 512 up to 16 KiB, then of 16 KiB, at most 245,760 bytes; the last non-zero byte MUST be 0x80",
+      "error": "padding",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}",
+      "padded_len": 512,
+      "marker_hex": "81"
+    },
+    {
+      "case": "padding_non_zero_after_marker",
+      "layer": "padded",
+      "mode": "session",
+      "rule": "§5.4: padding is json || 0x80 || 0x00*, to exactly the bucket for len(json)+1: a multiple of 512 up to 16 KiB, then of 16 KiB, at most 245,760 bytes; only zeros may follow the marker",
+      "error": "padding",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}",
+      "padded_len": 512,
+      "last_byte_hex": "01"
+    },
+    {
+      "case": "padding_over_padded_1024",
+      "layer": "padded",
+      "mode": "session",
+      "rule": "§5.4: padding is json || 0x80 || 0x00*, to exactly the bucket for len(json)+1: a multiple of 512 up to 16 KiB, then of 16 KiB, at most 245,760 bytes; over-padding to a larger bucket is malformed",
+      "error": "padding",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}",
+      "padded_len": 1024
+    },
+    {
+      "case": "padding_over_padded_16384",
+      "layer": "padded",
+      "mode": "session",
+      "rule": "§5.4: padding is json || 0x80 || 0x00*, to exactly the bucket for len(json)+1: a multiple of 512 up to 16 KiB, then of 16 KiB, at most 245,760 bytes; over-padding to a larger bucket is malformed",
+      "error": "padding",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}",
+      "padded_len": 16384
+    },
+    {
+      "case": "padding_length_513",
+      "layer": "padded",
+      "mode": "session",
+      "rule": "§5.4: padding is json || 0x80 || 0x00*, to exactly the bucket for len(json)+1: a multiple of 512 up to 16 KiB, then of 16 KiB, at most 245,760 bytes; 513 is not a bucket size",
+      "error": "padding",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}",
+      "padded_len": 513
+    },
+    {
+      "case": "padding_length_511",
+      "layer": "padded",
+      "mode": "session",
+      "rule": "§5.4: padding is json || 0x80 || 0x00*, to exactly the bucket for len(json)+1: a multiple of 512 up to 16 KiB, then of 16 KiB, at most 245,760 bytes; 511 is not a bucket size",
+      "error": "padding",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}",
+      "padded_len": 511
+    },
+    {
+      "case": "padding_length_16896",
+      "layer": "padded",
+      "mode": "session",
+      "rule": "§5.4: padding is json || 0x80 || 0x00*, to exactly the bucket for len(json)+1: a multiple of 512 up to 16 KiB, then of 16 KiB, at most 245,760 bytes; above 16 KiB the sizes are multiples of 16 KiB",
+      "error": "padding",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}",
+      "padded_len": 16896
+    },
+    {
+      "case": "padding_length_262144",
+      "layer": "padded",
+      "mode": "session",
+      "rule": "§5.4: padding is json || 0x80 || 0x00*, to exactly the bucket for len(json)+1: a multiple of 512 up to 16 KiB, then of 16 KiB, at most 245,760 bytes; above the 245,760-byte maximum",
+      "error": "padding",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}",
+      "padded_len": 262144
+    },
+    {
+      "case": "padding_length_0",
+      "layer": "padded",
+      "mode": "session",
+      "rule": "§5.4: padding is json || 0x80 || 0x00*, to exactly the bucket for len(json)+1: a multiple of 512 up to 16 KiB, then of 16 KiB, at most 245,760 bytes; empty",
+      "error": "padding",
+      "padded_hex": ""
+    },
+    {
+      "case": "padding_unpadded_json",
+      "layer": "padded",
+      "mode": "session",
+      "rule": "§5.4: padding is json || 0x80 || 0x00*, to exactly the bucket for len(json)+1: a multiple of 512 up to 16 KiB, then of 16 KiB, at most 245,760 bytes; the JSON without padding",
+      "error": "padding",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}",
+      "padded_len": 110,
+      "marker_hex": ""
+    },
+    {
+      "case": "envelope_version_3",
+      "layer": "envelope",
+      "rule": "§5.2: ver MUST be 0x02",
+      "error": "version",
+      "mutation": "byte 0 = 0x03",
+      "envelope_b64": "AwIBAAICAgICAgICAQEBAQEBAQEJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQmwRBPsQ2hTfP0aL7DbEfQTloSFkbKri3K7ZpmIFnHFlxy5oTMM2Wt5C4wsIikypO8+0NATmZAF0l5krLaLHmav2xdLNmfn+8L5hl55HPYJsCmC6f2dWXYLaRcIbuojgwmjBhio7ptRPDYa4mRMGRvQo23Ri2eOL+NDolm3Nqw+Ztsy+mHxPJEY5V5uDjUvJXxJtib0A3U8z9J5qj8ijHBHZC/sLLrBgocRvsIMkaxrHYz1mCT9PiWo4pPHIu0pslsI8jglfi2918ZaLcmxzH9+ukk3uuW1K+1v4Aev3Boc8W6UOCXjSAXiV8GWd+C8+/CeSIzBS1l7g5vHgVHFlJ5Zjvx+KdIWGUcUshM/xL3wkMjrVAo5P1nUzjpYijmNDbKyHKZfZ8H4SAPepXYniHsaznHVn7Wul3NLQmR0yuvkHQpSswjt6uSrVkHUNgXwH5WR3Mu9EIDK4+wGdJmGKMnUIBQ+ty+4/S0CC9jOkhMYUKPo9yNrw2kV5RjG/VEctSPTYo0S1Hcgl8IhpvWy9rGUaO2GJuLEjnrd/r/S0PZX2e0LAUo8gzNPJHOygTL4qtejPw02yaFY7xNlbHgEIWC3zAIBjwexhY5+sKSRgWA1o0rGT+FK9vXV2se2xiHphY+V9T8KgXCPfKfsJy51wPu663HgrsOs84hI3AC7o3k0K3Tg+N6RHrVLD+NrvjfTitU="
+    },
+    {
+      "case": "envelope_version_1",
+      "layer": "envelope",
+      "rule": "§5.2: ver MUST be 0x02",
+      "error": "version",
+      "mutation": "byte 0 = 0x01",
+      "envelope_b64": "AQIBAAICAgICAgICAQEBAQEBAQEJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQmwRBPsQ2hTfP0aL7DbEfQTloSFkbKri3K7ZpmIFnHFlxy5oTMM2Wt5C4wsIikypO8+0NATmZAF0l5krLaLHmav2xdLNmfn+8L5hl55HPYJsCmC6f2dWXYLaRcIbuojgwmjBhio7ptRPDYa4mRMGRvQo23Ri2eOL+NDolm3Nqw+Ztsy+mHxPJEY5V5uDjUvJXxJtib0A3U8z9J5qj8ijHBHZC/sLLrBgocRvsIMkaxrHYz1mCT9PiWo4pPHIu0pslsI8jglfi2918ZaLcmxzH9+ukk3uuW1K+1v4Aev3Boc8W6UOCXjSAXiV8GWd+C8+/CeSIzBS1l7g5vHgVHFlJ5Zjvx+KdIWGUcUshM/xL3wkMjrVAo5P1nUzjpYijmNDbKyHKZfZ8H4SAPepXYniHsaznHVn7Wul3NLQmR0yuvkHQpSswjt6uSrVkHUNgXwH5WR3Mu9EIDK4+wGdJmGKMnUIBQ+ty+4/S0CC9jOkhMYUKPo9yNrw2kV5RjG/VEctSPTYo0S1Hcgl8IhpvWy9rGUaO2GJuLEjnrd/r/S0PZX2e0LAUo8gzNPJHOygTL4qtejPw02yaFY7xNlbHgEIWC3zAIBjwexhY5+sKSRgWA1o0rGT+FK9vXV2se2xiHphY+V9T8KgXCPfKfsJy51wPu663HgrsOs84hI3AC7o3k0K3Tg+N6RHrVLD+NrvjfTitU="
+    },
+    {
+      "case": "envelope_version_0",
+      "layer": "envelope",
+      "rule": "§5.2: ver MUST be 0x02",
+      "error": "version",
+      "mutation": "byte 0 = 0x00",
+      "envelope_b64": "AAIBAAICAgICAgICAQEBAQEBAQEJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQmwRBPsQ2hTfP0aL7DbEfQTloSFkbKri3K7ZpmIFnHFlxy5oTMM2Wt5C4wsIikypO8+0NATmZAF0l5krLaLHmav2xdLNmfn+8L5hl55HPYJsCmC6f2dWXYLaRcIbuojgwmjBhio7ptRPDYa4mRMGRvQo23Ri2eOL+NDolm3Nqw+Ztsy+mHxPJEY5V5uDjUvJXxJtib0A3U8z9J5qj8ijHBHZC/sLLrBgocRvsIMkaxrHYz1mCT9PiWo4pPHIu0pslsI8jglfi2918ZaLcmxzH9+ukk3uuW1K+1v4Aev3Boc8W6UOCXjSAXiV8GWd+C8+/CeSIzBS1l7g5vHgVHFlJ5Zjvx+KdIWGUcUshM/xL3wkMjrVAo5P1nUzjpYijmNDbKyHKZfZ8H4SAPepXYniHsaznHVn7Wul3NLQmR0yuvkHQpSswjt6uSrVkHUNgXwH5WR3Mu9EIDK4+wGdJmGKMnUIBQ+ty+4/S0CC9jOkhMYUKPo9yNrw2kV5RjG/VEctSPTYo0S1Hcgl8IhpvWy9rGUaO2GJuLEjnrd/r/S0PZX2e0LAUo8gzNPJHOygTL4qtejPw02yaFY7xNlbHgEIWC3zAIBjwexhY5+sKSRgWA1o0rGT+FK9vXV2se2xiHphY+V9T8KgXCPfKfsJy51wPu663HgrsOs84hI3AC7o3k0K3Tg+N6RHrVLD+NrvjfTitU="
+    },
+    {
+      "case": "envelope_suite_1",
+      "layer": "envelope",
+      "rule": "§5.2, §13.4: suite 1 is never accepted",
+      "error": "suite",
+      "mutation": "byte 1 = 0x01",
+      "envelope_b64": "AgEBAAICAgICAgICAQEBAQEBAQEJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQmwRBPsQ2hTfP0aL7DbEfQTloSFkbKri3K7ZpmIFnHFlxy5oTMM2Wt5C4wsIikypO8+0NATmZAF0l5krLaLHmav2xdLNmfn+8L5hl55HPYJsCmC6f2dWXYLaRcIbuojgwmjBhio7ptRPDYa4mRMGRvQo23Ri2eOL+NDolm3Nqw+Ztsy+mHxPJEY5V5uDjUvJXxJtib0A3U8z9J5qj8ijHBHZC/sLLrBgocRvsIMkaxrHYz1mCT9PiWo4pPHIu0pslsI8jglfi2918ZaLcmxzH9+ukk3uuW1K+1v4Aev3Boc8W6UOCXjSAXiV8GWd+C8+/CeSIzBS1l7g5vHgVHFlJ5Zjvx+KdIWGUcUshM/xL3wkMjrVAo5P1nUzjpYijmNDbKyHKZfZ8H4SAPepXYniHsaznHVn7Wul3NLQmR0yuvkHQpSswjt6uSrVkHUNgXwH5WR3Mu9EIDK4+wGdJmGKMnUIBQ+ty+4/S0CC9jOkhMYUKPo9yNrw2kV5RjG/VEctSPTYo0S1Hcgl8IhpvWy9rGUaO2GJuLEjnrd/r/S0PZX2e0LAUo8gzNPJHOygTL4qtejPw02yaFY7xNlbHgEIWC3zAIBjwexhY5+sKSRgWA1o0rGT+FK9vXV2se2xiHphY+V9T8KgXCPfKfsJy51wPu663HgrsOs84hI3AC7o3k0K3Tg+N6RHrVLD+NrvjfTitU="
+    },
+    {
+      "case": "envelope_suite_0",
+      "layer": "envelope",
+      "rule": "§5.2: suite MUST be 0x02",
+      "error": "suite",
+      "mutation": "byte 1 = 0x00",
+      "envelope_b64": "AgABAAICAgICAgICAQEBAQEBAQEJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQmwRBPsQ2hTfP0aL7DbEfQTloSFkbKri3K7ZpmIFnHFlxy5oTMM2Wt5C4wsIikypO8+0NATmZAF0l5krLaLHmav2xdLNmfn+8L5hl55HPYJsCmC6f2dWXYLaRcIbuojgwmjBhio7ptRPDYa4mRMGRvQo23Ri2eOL+NDolm3Nqw+Ztsy+mHxPJEY5V5uDjUvJXxJtib0A3U8z9J5qj8ijHBHZC/sLLrBgocRvsIMkaxrHYz1mCT9PiWo4pPHIu0pslsI8jglfi2918ZaLcmxzH9+ukk3uuW1K+1v4Aev3Boc8W6UOCXjSAXiV8GWd+C8+/CeSIzBS1l7g5vHgVHFlJ5Zjvx+KdIWGUcUshM/xL3wkMjrVAo5P1nUzjpYijmNDbKyHKZfZ8H4SAPepXYniHsaznHVn7Wul3NLQmR0yuvkHQpSswjt6uSrVkHUNgXwH5WR3Mu9EIDK4+wGdJmGKMnUIBQ+ty+4/S0CC9jOkhMYUKPo9yNrw2kV5RjG/VEctSPTYo0S1Hcgl8IhpvWy9rGUaO2GJuLEjnrd/r/S0PZX2e0LAUo8gzNPJHOygTL4qtejPw02yaFY7xNlbHgEIWC3zAIBjwexhY5+sKSRgWA1o0rGT+FK9vXV2se2xiHphY+V9T8KgXCPfKfsJy51wPu663HgrsOs84hI3AC7o3k0K3Tg+N6RHrVLD+NrvjfTitU="
+    },
+    {
+      "case": "envelope_suite_3",
+      "layer": "envelope",
+      "rule": "§5.2: suite MUST be 0x02 (an unknown suite)",
+      "error": "suite",
+      "mutation": "byte 1 = 0x03",
+      "envelope_b64": "AgMBAAICAgICAgICAQEBAQEBAQEJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQmwRBPsQ2hTfP0aL7DbEfQTloSFkbKri3K7ZpmIFnHFlxy5oTMM2Wt5C4wsIikypO8+0NATmZAF0l5krLaLHmav2xdLNmfn+8L5hl55HPYJsCmC6f2dWXYLaRcIbuojgwmjBhio7ptRPDYa4mRMGRvQo23Ri2eOL+NDolm3Nqw+Ztsy+mHxPJEY5V5uDjUvJXxJtib0A3U8z9J5qj8ijHBHZC/sLLrBgocRvsIMkaxrHYz1mCT9PiWo4pPHIu0pslsI8jglfi2918ZaLcmxzH9+ukk3uuW1K+1v4Aev3Boc8W6UOCXjSAXiV8GWd+C8+/CeSIzBS1l7g5vHgVHFlJ5Zjvx+KdIWGUcUshM/xL3wkMjrVAo5P1nUzjpYijmNDbKyHKZfZ8H4SAPepXYniHsaznHVn7Wul3NLQmR0yuvkHQpSswjt6uSrVkHUNgXwH5WR3Mu9EIDK4+wGdJmGKMnUIBQ+ty+4/S0CC9jOkhMYUKPo9yNrw2kV5RjG/VEctSPTYo0S1Hcgl8IhpvWy9rGUaO2GJuLEjnrd/r/S0PZX2e0LAUo8gzNPJHOygTL4qtejPw02yaFY7xNlbHgEIWC3zAIBjwexhY5+sKSRgWA1o0rGT+FK9vXV2se2xiHphY+V9T8KgXCPfKfsJy51wPu663HgrsOs84hI3AC7o3k0K3Tg+N6RHrVLD+NrvjfTitU="
+    },
+    {
+      "case": "envelope_mode_0",
+      "layer": "envelope",
+      "rule": "§5.2: mode is 0x01 session or 0x02 sealed",
+      "error": "mode",
+      "mutation": "byte 2 = 0x00",
+      "envelope_b64": "AgIAAAICAgICAgICAQEBAQEBAQEJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQmwRBPsQ2hTfP0aL7DbEfQTloSFkbKri3K7ZpmIFnHFlxy5oTMM2Wt5C4wsIikypO8+0NATmZAF0l5krLaLHmav2xdLNmfn+8L5hl55HPYJsCmC6f2dWXYLaRcIbuojgwmjBhio7ptRPDYa4mRMGRvQo23Ri2eOL+NDolm3Nqw+Ztsy+mHxPJEY5V5uDjUvJXxJtib0A3U8z9J5qj8ijHBHZC/sLLrBgocRvsIMkaxrHYz1mCT9PiWo4pPHIu0pslsI8jglfi2918ZaLcmxzH9+ukk3uuW1K+1v4Aev3Boc8W6UOCXjSAXiV8GWd+C8+/CeSIzBS1l7g5vHgVHFlJ5Zjvx+KdIWGUcUshM/xL3wkMjrVAo5P1nUzjpYijmNDbKyHKZfZ8H4SAPepXYniHsaznHVn7Wul3NLQmR0yuvkHQpSswjt6uSrVkHUNgXwH5WR3Mu9EIDK4+wGdJmGKMnUIBQ+ty+4/S0CC9jOkhMYUKPo9yNrw2kV5RjG/VEctSPTYo0S1Hcgl8IhpvWy9rGUaO2GJuLEjnrd/r/S0PZX2e0LAUo8gzNPJHOygTL4qtejPw02yaFY7xNlbHgEIWC3zAIBjwexhY5+sKSRgWA1o0rGT+FK9vXV2se2xiHphY+V9T8KgXCPfKfsJy51wPu663HgrsOs84hI3AC7o3k0K3Tg+N6RHrVLD+NrvjfTitU="
+    },
+    {
+      "case": "envelope_mode_3",
+      "layer": "envelope",
+      "rule": "§5.2: mode is 0x01 session or 0x02 sealed",
+      "error": "mode",
+      "mutation": "byte 2 = 0x03",
+      "envelope_b64": "AgIDAAICAgICAgICAQEBAQEBAQEJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQmwRBPsQ2hTfP0aL7DbEfQTloSFkbKri3K7ZpmIFnHFlxy5oTMM2Wt5C4wsIikypO8+0NATmZAF0l5krLaLHmav2xdLNmfn+8L5hl55HPYJsCmC6f2dWXYLaRcIbuojgwmjBhio7ptRPDYa4mRMGRvQo23Ri2eOL+NDolm3Nqw+Ztsy+mHxPJEY5V5uDjUvJXxJtib0A3U8z9J5qj8ijHBHZC/sLLrBgocRvsIMkaxrHYz1mCT9PiWo4pPHIu0pslsI8jglfi2918ZaLcmxzH9+ukk3uuW1K+1v4Aev3Boc8W6UOCXjSAXiV8GWd+C8+/CeSIzBS1l7g5vHgVHFlJ5Zjvx+KdIWGUcUshM/xL3wkMjrVAo5P1nUzjpYijmNDbKyHKZfZ8H4SAPepXYniHsaznHVn7Wul3NLQmR0yuvkHQpSswjt6uSrVkHUNgXwH5WR3Mu9EIDK4+wGdJmGKMnUIBQ+ty+4/S0CC9jOkhMYUKPo9yNrw2kV5RjG/VEctSPTYo0S1Hcgl8IhpvWy9rGUaO2GJuLEjnrd/r/S0PZX2e0LAUo8gzNPJHOygTL4qtejPw02yaFY7xNlbHgEIWC3zAIBjwexhY5+sKSRgWA1o0rGT+FK9vXV2se2xiHphY+V9T8KgXCPfKfsJy51wPu663HgrsOs84hI3AC7o3k0K3Tg+N6RHrVLD+NrvjfTitU="
+    },
+    {
+      "case": "envelope_flags_1",
+      "layer": "envelope",
+      "rule": "§5.2: flags are reserved; non-zero MUST be rejected",
+      "error": "flags",
+      "mutation": "byte 3 = 0x01",
+      "envelope_b64": "AgIBAQICAgICAgICAQEBAQEBAQEJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQmwRBPsQ2hTfP0aL7DbEfQTloSFkbKri3K7ZpmIFnHFlxy5oTMM2Wt5C4wsIikypO8+0NATmZAF0l5krLaLHmav2xdLNmfn+8L5hl55HPYJsCmC6f2dWXYLaRcIbuojgwmjBhio7ptRPDYa4mRMGRvQo23Ri2eOL+NDolm3Nqw+Ztsy+mHxPJEY5V5uDjUvJXxJtib0A3U8z9J5qj8ijHBHZC/sLLrBgocRvsIMkaxrHYz1mCT9PiWo4pPHIu0pslsI8jglfi2918ZaLcmxzH9+ukk3uuW1K+1v4Aev3Boc8W6UOCXjSAXiV8GWd+C8+/CeSIzBS1l7g5vHgVHFlJ5Zjvx+KdIWGUcUshM/xL3wkMjrVAo5P1nUzjpYijmNDbKyHKZfZ8H4SAPepXYniHsaznHVn7Wul3NLQmR0yuvkHQpSswjt6uSrVkHUNgXwH5WR3Mu9EIDK4+wGdJmGKMnUIBQ+ty+4/S0CC9jOkhMYUKPo9yNrw2kV5RjG/VEctSPTYo0S1Hcgl8IhpvWy9rGUaO2GJuLEjnrd/r/S0PZX2e0LAUo8gzNPJHOygTL4qtejPw02yaFY7xNlbHgEIWC3zAIBjwexhY5+sKSRgWA1o0rGT+FK9vXV2se2xiHphY+V9T8KgXCPfKfsJy51wPu663HgrsOs84hI3AC7o3k0K3Tg+N6RHrVLD+NrvjfTitU="
+    },
+    {
+      "case": "envelope_flags_0x80",
+      "layer": "envelope",
+      "rule": "§5.2: flags are reserved; non-zero MUST be rejected",
+      "error": "flags",
+      "mutation": "byte 3 = 0x80",
+      "envelope_b64": "AgIBgAICAgICAgICAQEBAQEBAQEJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQmwRBPsQ2hTfP0aL7DbEfQTloSFkbKri3K7ZpmIFnHFlxy5oTMM2Wt5C4wsIikypO8+0NATmZAF0l5krLaLHmav2xdLNmfn+8L5hl55HPYJsCmC6f2dWXYLaRcIbuojgwmjBhio7ptRPDYa4mRMGRvQo23Ri2eOL+NDolm3Nqw+Ztsy+mHxPJEY5V5uDjUvJXxJtib0A3U8z9J5qj8ijHBHZC/sLLrBgocRvsIMkaxrHYz1mCT9PiWo4pPHIu0pslsI8jglfi2918ZaLcmxzH9+ukk3uuW1K+1v4Aev3Boc8W6UOCXjSAXiV8GWd+C8+/CeSIzBS1l7g5vHgVHFlJ5Zjvx+KdIWGUcUshM/xL3wkMjrVAo5P1nUzjpYijmNDbKyHKZfZ8H4SAPepXYniHsaznHVn7Wul3NLQmR0yuvkHQpSswjt6uSrVkHUNgXwH5WR3Mu9EIDK4+wGdJmGKMnUIBQ+ty+4/S0CC9jOkhMYUKPo9yNrw2kV5RjG/VEctSPTYo0S1Hcgl8IhpvWy9rGUaO2GJuLEjnrd/r/S0PZX2e0LAUo8gzNPJHOygTL4qtejPw02yaFY7xNlbHgEIWC3zAIBjwexhY5+sKSRgWA1o0rGT+FK9vXV2se2xiHphY+V9T8KgXCPfKfsJy51wPu663HgrsOs84hI3AC7o3k0K3Tg+N6RHrVLD+NrvjfTitU="
+    },
+    {
+      "case": "envelope_empty",
+      "layer": "envelope",
+      "rule": "§5.2: the header and the ciphertext length are checked before anything is decrypted",
+      "error": "truncated",
+      "mutation": "no bytes",
+      "envelope_b64": ""
+    },
+    {
+      "case": "envelope_19_bytes",
+      "layer": "envelope",
+      "rule": "§5.2: the header and the ciphertext length are checked before anything is decrypted",
+      "error": "truncated",
+      "mutation": "cut to 19 bytes, inside the fixed header",
+      "envelope_b64": "AgIBAAICAgICAgICAQEBAQEBAQ=="
+    },
+    {
+      "case": "envelope_header_only",
+      "layer": "envelope",
+      "rule": "§5.2: the header and the ciphertext length are checked before anything is decrypted",
+      "error": "truncated",
+      "mutation": "cut to the 44-byte session header",
+      "envelope_b64": "AgIBAAICAgICAgICAQEBAQEBAQEJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk="
+    },
+    {
+      "case": "envelope_no_room_for_a_bucket",
+      "layer": "envelope",
+      "rule": "§5.2: the header and the ciphertext length are checked before anything is decrypted",
+      "error": "truncated",
+      "mutation": "cut to 60 + 511 bytes: less than the tag and the smallest padded plaintext",
+      "envelope_b64": "AgIBAAICAgICAgICAQEBAQEBAQEJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQmwRBPsQ2hTfP0aL7DbEfQTloSFkbKri3K7ZpmIFnHFlxy5oTMM2Wt5C4wsIikypO8+0NATmZAF0l5krLaLHmav2xdLNmfn+8L5hl55HPYJsCmC6f2dWXYLaRcIbuojgwmjBhio7ptRPDYa4mRMGRvQo23Ri2eOL+NDolm3Nqw+Ztsy+mHxPJEY5V5uDjUvJXxJtib0A3U8z9J5qj8ijHBHZC/sLLrBgocRvsIMkaxrHYz1mCT9PiWo4pPHIu0pslsI8jglfi2918ZaLcmxzH9+ukk3uuW1K+1v4Aev3Boc8W6UOCXjSAXiV8GWd+C8+/CeSIzBS1l7g5vHgVHFlJ5Zjvx+KdIWGUcUshM/xL3wkMjrVAo5P1nUzjpYijmNDbKyHKZfZ8H4SAPepXYniHsaznHVn7Wul3NLQmR0yuvkHQpSswjt6uSrVkHUNgXwH5WR3Mu9EIDK4+wGdJmGKMnUIBQ+ty+4/S0CC9jOkhMYUKPo9yNrw2kV5RjG/VEctSPTYo0S1Hcgl8IhpvWy9rGUaO2GJuLEjnrd/r/S0PZX2e0LAUo8gzNPJHOygTL4qtejPw02yaFY7xNlbHgEIWC3zAIBjwexhY5+sKSRgWA1o0rGT+FK9vXV2se2xiHphY+V9T8KgXCPfKfsJy51wPu663HgrsOs84hI3AC7o3k0K3Tg+N6RHrVLD+NrvjfTig=="
+    },
+    {
+      "case": "envelope_ciphertext_one_byte_short",
+      "layer": "envelope",
+      "rule": "§5.2: the header and the ciphertext length are checked before anything is decrypted",
+      "error": "truncated",
+      "mutation": "last byte removed: padded length + 16 is not a bucket size",
+      "envelope_b64": "AgIBAAICAgICAgICAQEBAQEBAQEJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQmwRBPsQ2hTfP0aL7DbEfQTloSFkbKri3K7ZpmIFnHFlxy5oTMM2Wt5C4wsIikypO8+0NATmZAF0l5krLaLHmav2xdLNmfn+8L5hl55HPYJsCmC6f2dWXYLaRcIbuojgwmjBhio7ptRPDYa4mRMGRvQo23Ri2eOL+NDolm3Nqw+Ztsy+mHxPJEY5V5uDjUvJXxJtib0A3U8z9J5qj8ijHBHZC/sLLrBgocRvsIMkaxrHYz1mCT9PiWo4pPHIu0pslsI8jglfi2918ZaLcmxzH9+ukk3uuW1K+1v4Aev3Boc8W6UOCXjSAXiV8GWd+C8+/CeSIzBS1l7g5vHgVHFlJ5Zjvx+KdIWGUcUshM/xL3wkMjrVAo5P1nUzjpYijmNDbKyHKZfZ8H4SAPepXYniHsaznHVn7Wul3NLQmR0yuvkHQpSswjt6uSrVkHUNgXwH5WR3Mu9EIDK4+wGdJmGKMnUIBQ+ty+4/S0CC9jOkhMYUKPo9yNrw2kV5RjG/VEctSPTYo0S1Hcgl8IhpvWy9rGUaO2GJuLEjnrd/r/S0PZX2e0LAUo8gzNPJHOygTL4qtejPw02yaFY7xNlbHgEIWC3zAIBjwexhY5+sKSRgWA1o0rGT+FK9vXV2se2xiHphY+V9T8KgXCPfKfsJy51wPu663HgrsOs84hI3AC7o3k0K3Tg+N6RHrVLD+NrvjfTig=="
+    },
+    {
+      "case": "envelope_ciphertext_one_byte_long",
+      "layer": "envelope",
+      "rule": "§5.2: the header and the ciphertext length are checked before anything is decrypted",
+      "error": "length",
+      "mutation": "one byte appended: padded length + 16 is not a bucket size",
+      "envelope_b64": "AgIBAAICAgICAgICAQEBAQEBAQEJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQmwRBPsQ2hTfP0aL7DbEfQTloSFkbKri3K7ZpmIFnHFlxy5oTMM2Wt5C4wsIikypO8+0NATmZAF0l5krLaLHmav2xdLNmfn+8L5hl55HPYJsCmC6f2dWXYLaRcIbuojgwmjBhio7ptRPDYa4mRMGRvQo23Ri2eOL+NDolm3Nqw+Ztsy+mHxPJEY5V5uDjUvJXxJtib0A3U8z9J5qj8ijHBHZC/sLLrBgocRvsIMkaxrHYz1mCT9PiWo4pPHIu0pslsI8jglfi2918ZaLcmxzH9+ukk3uuW1K+1v4Aev3Boc8W6UOCXjSAXiV8GWd+C8+/CeSIzBS1l7g5vHgVHFlJ5Zjvx+KdIWGUcUshM/xL3wkMjrVAo5P1nUzjpYijmNDbKyHKZfZ8H4SAPepXYniHsaznHVn7Wul3NLQmR0yuvkHQpSswjt6uSrVkHUNgXwH5WR3Mu9EIDK4+wGdJmGKMnUIBQ+ty+4/S0CC9jOkhMYUKPo9yNrw2kV5RjG/VEctSPTYo0S1Hcgl8IhpvWy9rGUaO2GJuLEjnrd/r/S0PZX2e0LAUo8gzNPJHOygTL4qtejPw02yaFY7xNlbHgEIWC3zAIBjwexhY5+sKSRgWA1o0rGT+FK9vXV2se2xiHphY+V9T8KgXCPfKfsJy51wPu663HgrsOs84hI3AC7o3k0K3Tg+N6RHrVLD+NrvjfTitUA"
+    },
+    {
+      "case": "envelope_ciphertext_not_a_multiple_of_512",
+      "layer": "envelope",
+      "rule": "§5.2: the header and the ciphertext length are checked before anything is decrypted",
+      "error": "length",
+      "mutation": "cut to 44 + 16 + 513 bytes",
+      "envelope_b64": "AgIBAAICAgICAgICAQEBAQEBAQEJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQmwRBPsQ2hTfP0aL7DbEfQTloSFkbKri3K7ZpmIFnHFlxy5oTMM2Wt5C4wsIikypO8+0NATmZAF0l5krLaLHmav2xdLNmfn+8L5hl55HPYJsCmC6f2dWXYLaRcIbuojgwmjBhio7ptRPDYa4mRMGRvQo23Ri2eOL+NDolm3Nqw+Ztsy+mHxPJEY5V5uDjUvJXxJtib0A3U8z9J5qj8ijHBHZC/sLLrBgocRvsIMkaxrHYz1mCT9PiWo4pPHIu0pslsI8jglfi2918ZaLcmxzH9+ukk3uuW1K+1v4Aev3Boc8W6UOCXjSAXiV8GWd+C8+/CeSIzBS1l7g5vHgVHFlJ5Zjvx+KdIWGUcUshM/xL3wkMjrVAo5P1nUzjpYijmNDbKyHKZfZ8H4SAPepXYniHsaznHVn7Wul3NLQmR0yuvkHQpSswjt6uSrVkHUNgXwH5WR3Mu9EIDK4+wGdJmGKMnUIBQ+ty+4/S0CC9jOkhMYUKPo9yNrw2kV5RjG/VEctSPTYo0S1Hcgl8IhpvWy9rGUaO2GJuLEjnrd/r/S0PZX2e0LAUo8gzNPJHOygTL4qtejPw02yaFY7xNlbHgEIWC3zAIBjwexhY5+sKSRgWA1o0rGT+FK9vXV2se2xiHphY+V9T8KgXCPfKfsJy51wPu663HgrsOs84hI3AC7o3k0K3Tg+N6RHrVLD+NrvjfTitUA"
+    },
+    {
+      "case": "session_ciphertext_bit_flipped",
+      "layer": "session_open",
+      "rule": "§5.2: the AEAD authenticates the header (aad = bytes[0:44]) and the ciphertext; a receiver MUST reject what does not verify",
+      "error": "decrypt",
+      "mutation": "bit 0 of byte 44 flipped",
+      "key_hex": "0808080808080808080808080808080808080808080808080808080808080808",
+      "envelope_b64": "AgIBAAICAgICAgICAQEBAQEBAQEJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQmxRBPsQ2hTfP0aL7DbEfQTloSFkbKri3K7ZpmIFnHFlxy5oTMM2Wt5C4wsIikypO8+0NATmZAF0l5krLaLHmav2xdLNmfn+8L5hl55HPYJsCmC6f2dWXYLaRcIbuojgwmjBhio7ptRPDYa4mRMGRvQo23Ri2eOL+NDolm3Nqw+Ztsy+mHxPJEY5V5uDjUvJXxJtib0A3U8z9J5qj8ijHBHZC/sLLrBgocRvsIMkaxrHYz1mCT9PiWo4pPHIu0pslsI8jglfi2918ZaLcmxzH9+ukk3uuW1K+1v4Aev3Boc8W6UOCXjSAXiV8GWd+C8+/CeSIzBS1l7g5vHgVHFlJ5Zjvx+KdIWGUcUshM/xL3wkMjrVAo5P1nUzjpYijmNDbKyHKZfZ8H4SAPepXYniHsaznHVn7Wul3NLQmR0yuvkHQpSswjt6uSrVkHUNgXwH5WR3Mu9EIDK4+wGdJmGKMnUIBQ+ty+4/S0CC9jOkhMYUKPo9yNrw2kV5RjG/VEctSPTYo0S1Hcgl8IhpvWy9rGUaO2GJuLEjnrd/r/S0PZX2e0LAUo8gzNPJHOygTL4qtejPw02yaFY7xNlbHgEIWC3zAIBjwexhY5+sKSRgWA1o0rGT+FK9vXV2se2xiHphY+V9T8KgXCPfKfsJy51wPu663HgrsOs84hI3AC7o3k0K3Tg+N6RHrVLD+NrvjfTitU="
+    },
+    {
+      "case": "session_tag_bit_flipped",
+      "layer": "session_open",
+      "rule": "§5.2: the AEAD authenticates the header (aad = bytes[0:44]) and the ciphertext; a receiver MUST reject what does not verify",
+      "error": "decrypt",
+      "mutation": "bit 0 of the last byte flipped",
+      "key_hex": "0808080808080808080808080808080808080808080808080808080808080808",
+      "envelope_b64": "AgIBAAICAgICAgICAQEBAQEBAQEJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQmwRBPsQ2hTfP0aL7DbEfQTloSFkbKri3K7ZpmIFnHFlxy5oTMM2Wt5C4wsIikypO8+0NATmZAF0l5krLaLHmav2xdLNmfn+8L5hl55HPYJsCmC6f2dWXYLaRcIbuojgwmjBhio7ptRPDYa4mRMGRvQo23Ri2eOL+NDolm3Nqw+Ztsy+mHxPJEY5V5uDjUvJXxJtib0A3U8z9J5qj8ijHBHZC/sLLrBgocRvsIMkaxrHYz1mCT9PiWo4pPHIu0pslsI8jglfi2918ZaLcmxzH9+ukk3uuW1K+1v4Aev3Boc8W6UOCXjSAXiV8GWd+C8+/CeSIzBS1l7g5vHgVHFlJ5Zjvx+KdIWGUcUshM/xL3wkMjrVAo5P1nUzjpYijmNDbKyHKZfZ8H4SAPepXYniHsaznHVn7Wul3NLQmR0yuvkHQpSswjt6uSrVkHUNgXwH5WR3Mu9EIDK4+wGdJmGKMnUIBQ+ty+4/S0CC9jOkhMYUKPo9yNrw2kV5RjG/VEctSPTYo0S1Hcgl8IhpvWy9rGUaO2GJuLEjnrd/r/S0PZX2e0LAUo8gzNPJHOygTL4qtejPw02yaFY7xNlbHgEIWC3zAIBjwexhY5+sKSRgWA1o0rGT+FK9vXV2se2xiHphY+V9T8KgXCPfKfsJy51wPu663HgrsOs84hI3AC7o3k0K3Tg+N6RHrVLD+NrvjfTitQ="
+    },
+    {
+      "case": "session_nonce_bit_flipped",
+      "layer": "session_open",
+      "rule": "§5.2: the AEAD authenticates the header (aad = bytes[0:44]) and the ciphertext; a receiver MUST reject what does not verify",
+      "error": "decrypt",
+      "mutation": "bit 0 of byte 20 flipped",
+      "key_hex": "0808080808080808080808080808080808080808080808080808080808080808",
+      "envelope_b64": "AgIBAAICAgICAgICAQEBAQEBAQEICQkJCQkJCQkJCQkJCQkJCQkJCQkJCQmwRBPsQ2hTfP0aL7DbEfQTloSFkbKri3K7ZpmIFnHFlxy5oTMM2Wt5C4wsIikypO8+0NATmZAF0l5krLaLHmav2xdLNmfn+8L5hl55HPYJsCmC6f2dWXYLaRcIbuojgwmjBhio7ptRPDYa4mRMGRvQo23Ri2eOL+NDolm3Nqw+Ztsy+mHxPJEY5V5uDjUvJXxJtib0A3U8z9J5qj8ijHBHZC/sLLrBgocRvsIMkaxrHYz1mCT9PiWo4pPHIu0pslsI8jglfi2918ZaLcmxzH9+ukk3uuW1K+1v4Aev3Boc8W6UOCXjSAXiV8GWd+C8+/CeSIzBS1l7g5vHgVHFlJ5Zjvx+KdIWGUcUshM/xL3wkMjrVAo5P1nUzjpYijmNDbKyHKZfZ8H4SAPepXYniHsaznHVn7Wul3NLQmR0yuvkHQpSswjt6uSrVkHUNgXwH5WR3Mu9EIDK4+wGdJmGKMnUIBQ+ty+4/S0CC9jOkhMYUKPo9yNrw2kV5RjG/VEctSPTYo0S1Hcgl8IhpvWy9rGUaO2GJuLEjnrd/r/S0PZX2e0LAUo8gzNPJHOygTL4qtejPw02yaFY7xNlbHgEIWC3zAIBjwexhY5+sKSRgWA1o0rGT+FK9vXV2se2xiHphY+V9T8KgXCPfKfsJy51wPu663HgrsOs84hI3AC7o3k0K3Tg+N6RHrVLD+NrvjfTitU="
+    },
+    {
+      "case": "session_sender_kid_changed",
+      "layer": "session_open",
+      "rule": "§5.2: the AEAD authenticates the header (aad = bytes[0:44]) and the ciphertext; a receiver MUST reject what does not verify",
+      "error": "decrypt",
+      "mutation": "bit 0 of byte 4 flipped (the header is the AAD)",
+      "key_hex": "0808080808080808080808080808080808080808080808080808080808080808",
+      "envelope_b64": "AgIBAAMCAgICAgICAQEBAQEBAQEJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQmwRBPsQ2hTfP0aL7DbEfQTloSFkbKri3K7ZpmIFnHFlxy5oTMM2Wt5C4wsIikypO8+0NATmZAF0l5krLaLHmav2xdLNmfn+8L5hl55HPYJsCmC6f2dWXYLaRcIbuojgwmjBhio7ptRPDYa4mRMGRvQo23Ri2eOL+NDolm3Nqw+Ztsy+mHxPJEY5V5uDjUvJXxJtib0A3U8z9J5qj8ijHBHZC/sLLrBgocRvsIMkaxrHYz1mCT9PiWo4pPHIu0pslsI8jglfi2918ZaLcmxzH9+ukk3uuW1K+1v4Aev3Boc8W6UOCXjSAXiV8GWd+C8+/CeSIzBS1l7g5vHgVHFlJ5Zjvx+KdIWGUcUshM/xL3wkMjrVAo5P1nUzjpYijmNDbKyHKZfZ8H4SAPepXYniHsaznHVn7Wul3NLQmR0yuvkHQpSswjt6uSrVkHUNgXwH5WR3Mu9EIDK4+wGdJmGKMnUIBQ+ty+4/S0CC9jOkhMYUKPo9yNrw2kV5RjG/VEctSPTYo0S1Hcgl8IhpvWy9rGUaO2GJuLEjnrd/r/S0PZX2e0LAUo8gzNPJHOygTL4qtejPw02yaFY7xNlbHgEIWC3zAIBjwexhY5+sKSRgWA1o0rGT+FK9vXV2se2xiHphY+V9T8KgXCPfKfsJy51wPu663HgrsOs84hI3AC7o3k0K3Tg+N6RHrVLD+NrvjfTitU="
+    },
+    {
+      "case": "session_recipient_kid_changed",
+      "layer": "session_open",
+      "rule": "§5.2: the AEAD authenticates the header (aad = bytes[0:44]) and the ciphertext; a receiver MUST reject what does not verify",
+      "error": "decrypt",
+      "mutation": "bit 0 of byte 12 flipped (the header is the AAD)",
+      "key_hex": "0808080808080808080808080808080808080808080808080808080808080808",
+      "envelope_b64": "AgIBAAICAgICAgICAAEBAQEBAQEJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQmwRBPsQ2hTfP0aL7DbEfQTloSFkbKri3K7ZpmIFnHFlxy5oTMM2Wt5C4wsIikypO8+0NATmZAF0l5krLaLHmav2xdLNmfn+8L5hl55HPYJsCmC6f2dWXYLaRcIbuojgwmjBhio7ptRPDYa4mRMGRvQo23Ri2eOL+NDolm3Nqw+Ztsy+mHxPJEY5V5uDjUvJXxJtib0A3U8z9J5qj8ijHBHZC/sLLrBgocRvsIMkaxrHYz1mCT9PiWo4pPHIu0pslsI8jglfi2918ZaLcmxzH9+ukk3uuW1K+1v4Aev3Boc8W6UOCXjSAXiV8GWd+C8+/CeSIzBS1l7g5vHgVHFlJ5Zjvx+KdIWGUcUshM/xL3wkMjrVAo5P1nUzjpYijmNDbKyHKZfZ8H4SAPepXYniHsaznHVn7Wul3NLQmR0yuvkHQpSswjt6uSrVkHUNgXwH5WR3Mu9EIDK4+wGdJmGKMnUIBQ+ty+4/S0CC9jOkhMYUKPo9yNrw2kV5RjG/VEctSPTYo0S1Hcgl8IhpvWy9rGUaO2GJuLEjnrd/r/S0PZX2e0LAUo8gzNPJHOygTL4qtejPw02yaFY7xNlbHgEIWC3zAIBjwexhY5+sKSRgWA1o0rGT+FK9vXV2se2xiHphY+V9T8KgXCPfKfsJy51wPu663HgrsOs84hI3AC7o3k0K3Tg+N6RHrVLD+NrvjfTitU="
+    },
+    {
+      "case": "ts_more_than_5_minutes_in_the_future",
+      "layer": "time",
+      "mode": "session",
+      "rule": "§8.4: reject a ts more than 5 minutes in the future",
+      "error": "clock_future",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}",
+      "now": "2026-10-01T11:54:59.999Z",
+      "durable": false
+    },
+    {
+      "case": "ts_more_than_5_minutes_in_the_future_durable",
+      "layer": "time",
+      "mode": "session",
+      "rule": "§8.4: reject a ts more than 5 minutes in the future",
+      "error": "clock_future",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}",
+      "now": "2026-10-01T11:54:59.999Z",
+      "durable": true
+    },
+    {
+      "case": "ts_more_than_16_days_old_durable",
+      "layer": "time",
+      "mode": "session",
+      "rule": "§8.4: reject a durable message whose ts is more than 16 days in the past",
+      "error": "clock_past",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{}}",
+      "now": "2026-10-17T12:00:00.001Z",
+      "durable": true
+    },
+    {
+      "case": "exp_passed",
+      "layer": "time",
+      "mode": "session",
+      "rule": "§5.3: discard a message whose exp has passed",
+      "error": "expired",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{},\"exp\":\"2026-10-01T12:30:00.000Z\"}",
+      "now": "2026-10-01T12:30:00.001Z",
+      "durable": false
+    },
+    {
+      "case": "exp_passed_durable",
+      "layer": "time",
+      "mode": "session",
+      "rule": "§5.3: discard a message whose exp has passed",
+      "error": "expired",
+      "inner": "{\"v\":1,\"id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T0V\",\"type\":\"test.ping\",\"ts\":\"2026-10-01T12:00:00.000Z\",\"seq\":1,\"body\":{},\"exp\":\"2026-10-01T12:00:00.000Z\"}",
+      "now": "2026-10-02T12:00:00.000Z",
+      "durable": true
+    }
+  ]
+}

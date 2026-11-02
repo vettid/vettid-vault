@@ -1,0 +1,30 @@
+{
+  "description": "RELAY-PROTOCOL §9 test vectors, copied from the spec and recomputed with the relay's relayauth package: the keys and mailbox ids (§9.1), the deposit token (§9.2) and the signed deposit request (§9.3). Seeds are 32 x 0x01 (recipient) and 32 x 0x02 (sender); all keys are fixed, public and TEST-ONLY. Standard base64 with padding throughout; mailbox_id = lowercase base32 (no padding) of SHA-256(pubkey), first 26 characters. The token is PASETO v4.public: the claims are the exact signed bytes (compact JSON, this key order), the signature is Ed25519 over the PASETO pre-authentication encoding of the header \"v4.public.\" and the claims, and is deterministic. The request signature is Ed25519 over SHA-256(canonical), canonical = METHOD \\n path \\n timestamp \\n lowercase hex SHA-256(body).",
+  "recipient": {
+    "seed_b64": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+    "pubkey_b64": "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w=",
+    "mailbox_id": "gr2q7gf5lh6pzfdnurnkvputhp"
+  },
+  "sender": {
+    "seed_b64": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+    "pubkey_b64": "gTl3Dqh9F19Wo1Rmw0x+zMuNipG07jeiXfYPW4/Js5Q=",
+    "mailbox_id": "ni4ahvpqlgicuhdnv66jxjdssi"
+  },
+  "token": {
+    "signed_by": "recipient",
+    "claims": "{\"iss\":\"gr2q7gf5lh6pzfdnurnkvputhp\",\"sub\":\"gTl3Dqh9F19Wo1Rmw0x+zMuNipG07jeiXfYPW4/Js5Q=\",\"aud\":\"https://relay.example.vettid.org\",\"iat\":\"2026-06-10T00:00:00Z\",\"exp\":\"2026-07-10T00:00:00Z\",\"jti\":\"01JXAMPLE0000000000000000\",\"scope\":\"deposit\"}",
+    "token": "v4.public.eyJpc3MiOiJncjJxN2dmNWxoNnB6ZmRudXJua3ZwdXRocCIsInN1YiI6ImdUbDNEcWg5RjE5V28xUm13MHgrek11TmlwRzA3amVpWGZZUFc0L0pzNVE9IiwiYXVkIjoiaHR0cHM6Ly9yZWxheS5leGFtcGxlLnZldHRpZC5vcmciLCJpYXQiOiIyMDI2LTA2LTEwVDAwOjAwOjAwWiIsImV4cCI6IjIwMjYtMDctMTBUMDA6MDA6MDBaIiwianRpIjoiMDFKWEFNUExFMDAwMDAwMDAwMDAwMDAwMCIsInNjb3BlIjoiZGVwb3NpdCJ9rWQjEmgif2o_c9SNTUXzHPPLWKZCPMAPUk3VPpbWkTIY0pfihNHpVZeX-YDM35FN_u1FVYPHj4BrO4sGJQj6BA"
+  },
+  "request": {
+    "signed_by": "sender",
+    "method": "POST",
+    "path": "/v1/mailbox/gr2q7gf5lh6pzfdnurnkvputhp",
+    "body": "{\"payload\":\"b3BhcXVlLWNpcGhlcnRleHQtYnl0ZXM=\"}",
+    "body_sha256_hex": "0237514b3df17b219036f1b8fa6ca70d4ca597eb630933841707380055d7e12a",
+    "canonical": "POST\n/v1/mailbox/gr2q7gf5lh6pzfdnurnkvputhp\n2026-06-10T12:00:00Z\n0237514b3df17b219036f1b8fa6ca70d4ca597eb630933841707380055d7e12a",
+    "canonical_sha256_b64": "l+mc5XMNElCBLC49xJH4Lc8LHEAlAK1HunqaS+LZ33k=",
+    "x_vettid_key": "gTl3Dqh9F19Wo1Rmw0x+zMuNipG07jeiXfYPW4/Js5Q=",
+    "x_vettid_timestamp": "2026-06-10T12:00:00Z",
+    "x_vettid_sig": "pOZT7Pb981+3K4wWv6Zryb43miSLBfKdCZ4Wc/qNzQyxFtOPrsSSkK1Gj5mF+Zb3z3yC4Bi7AyjIyVkeN+nsDA=="
+  }
+}

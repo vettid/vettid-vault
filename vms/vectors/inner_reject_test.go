@@ -3,6 +3,7 @@ package vectors
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -44,6 +45,13 @@ func checkInnerRejectVectors(t *testing.T, dir string) {
 	}
 	if _, err := envelope.ParseInner([]byte(d.str("baseline_depth_32_inner")), envelope.ModeSession); err != nil {
 		t.Fatalf("depth 32 baseline: %v", err)
+	}
+	pair := d.str("baseline_surrogate_pair_inner")
+	if !strings.Contains(pair, `\ud83d\ude00`) || !strings.Contains(pair, `\ufdd0`) || !strings.Contains(pair, `\ufffe`) || !strings.Contains(pair, `\\ud800`) {
+		t.Fatal("surrogate pair baseline lost its escapes")
+	}
+	if _, err := envelope.ParseInner([]byte(pair), envelope.ModeSession); err != nil {
+		t.Fatalf("surrogate pair baseline: %v", err)
 	}
 	var cases []map[string]json.RawMessage
 	if err := json.Unmarshal(d.m["cases"], &cases); err != nil || len(cases) < 100 {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseObject(t *testing.T) {
@@ -112,4 +113,90 @@ func FuzzParseObject(f *testing.F) {
 			_ = o.Has(k)
 		}
 	})
+}
+
+// VAULT-MESSAGING 0.83.1 §5.3: an unpaired surrogate escape is refused, a
+// BOM is refused, a valid pair and noncharacters are accepted.
+func TestSurrogateEscapes(t *testing.T) {
+	reject := map[string]string{
+		"high then non-low escape":   `{"a":"\ud800A"}`,
+		"high then ASCII":            `{"a":"\ud800A"}`,
+		"high at end of string":      `{"a":"x\udbff"}`,
+		"high then raw character":    `{"a":"\ud800é"}`,
+		"high then other escape":     `{"a":"\ud800\n"}`,
+		"high then high":             `{"a":"\ud800𐀀"}`,
+		"lone low":                   `{"a":"\udc00"}`,
+		"low after complete pair":    `{"a":"😀\udc00"}`,
+		"low then high":              `{"a":"\udc00\ud800"}`,
+		"upper-case hex":             `{"a":"\uD800"}`,
+		"in member name":             `{"\ud800":1}`,
+		"low in member name":         `{"x\udfff":1}`,
+		"nested object value":        `{"a":{"b":{"c":"\ud800"}}}`,
+		"nested name":                `{"a":{"b\udc00":1}}`,
+		"in array":                   `{"a":[1,"ok",["\udc00"]]}`,
+		"after an escaped backslash": `{"a":"\\\ud800"}`,
+		"after a pair and a quote":   `{"a":"😀","b":"\ud800"}`,
+		"escaped quote before it":    `{"a":"\"\ud800"}`,
+		"leading BOM":                "\xef\xbb\xbf{}",
+	}
+	for name, in := range reject {
+		if _, err := ParseObject([]byte(in)); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	if _, err := ParseObject([]byte(`{"a":"\ud800"}`)); !errors.Is(err, ErrSurrogate) {
+		t.Errorf("error = %v, want ErrSurrogate", err)
+	}
+	accept := map[string]string{
+		"valid pair":             `{"a":"😀"}`,
+		"valid pair upper-case":  `{"a":"😀"}`,
+		"pair in name":           `{"😀":1}`,
+		"pair in nested array":   `{"a":[{"b":["😀"]}]}`,
+		"back to back pairs":     `{"a":"😀😁"}`,
+		"noncharacter FDD0":      `{"a":"﷐"}`,
+		"noncharacter FDEF":      `{"a":"﷯"}`,
+		"noncharacter FFFE":      `{"a":"￾￿"}`,
+		"noncharacter 10FFFF":    `{"a":"🿿􏿿"}`,
+		"escaped backslash u":    `{"a":"\\ud800"}`,
+		"raw emoji":              `{"a":"😀"}`,
+		"surrogate text outside": `{"a":1}`,
+		"just below and above":   `{"a":"퟿"}`,
+	}
+	for name, in := range accept {
+		if _, err := ParseObject([]byte(in)); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	o, err := ParseObject([]byte(`{"a":"😀﷐"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s, _ := o.String("a"); s != "😀﷐" {
+		t.Errorf("decoded %q", s)
+	}
+}
+
+func TestSurrogateScanLinear(t *testing.T) {
+	// A long run of escapes and of backslashes must scan in linear time.
+	big := `{"a":"` + strings.Repeat(`😀`, 1<<20) + `"}`
+	small := `{"a":"` + strings.Repeat(`😀`, 1<<10) + `"}`
+	for _, in := range []string{big, small, `{"a":"` + strings.Repeat(`\\`, 4<<20) + `"}`, `{"a":"` + strings.Repeat(`\ud800`, 1) + strings.Repeat(`😀`, 1<<20) + `"}`} {
+		start := time.Now()
+		_, err := ParseObject([]byte(in))
+		if d := time.Since(start); d > 10*time.Second {
+			t.Errorf("slow: %v", d)
+		}
+		if len(in) > 100 && strings.Contains(in, `\ud800`) != (err != nil) {
+			t.Errorf("err = %v", err)
+		}
+	}
+	start := time.Now()
+	for i := 0; i < 20; i++ {
+		if err := checkSurrogates([]byte(big)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if per := time.Since(start) / 20; per > 500*time.Millisecond {
+		t.Errorf("scan of %d bytes took %v", len(big), per)
+	}
 }

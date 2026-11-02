@@ -203,7 +203,7 @@ func (m *Manager) hSessionEnd(ctx context.Context, s *Session, in *envelope.Inne
 		}
 	}
 	// Absent or null: the end applies to all of the device's access. A
-	// value must be a non-empty string.
+	// value must be a non-empty string of at most 4096 bytes (str).
 	if raw, ok := o["session_id"]; ok && string(raw) != "null" {
 		sid, err := str(o, "session_id")
 		if err != nil {

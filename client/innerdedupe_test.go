@@ -465,3 +465,87 @@ func TestLongExpInnerIDKeptUntilExp(t *testing.T) {
 		t.Fatalf("handled %d times, want 1", n)
 	}
 }
+
+// §8.2: the vault answers a retransmission with its cached response, which
+// has the same inner id as the first answer. It reaches the caller that
+// sent (or resent) the request, also after a restart; a copy nobody waits
+// for is dropped.
+func TestReplayedAnswerDeliveredToWaitingRequest(t *testing.T) {
+	for _, restart := range []bool{false, true} {
+		ctx := context.Background()
+		r, v, d := pair(t)
+		var saved []byte
+		d.cfg.Persist = keep(&saved, r)
+		reqID, err := d.Send(ctx, "vault.status", []byte(`{}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		ans := &envelope.Inner{ID: "01HZZZZZZZZZZZZZZZZZZZZZZN", Type: "vault.status", TS: time.Now(),
+			Re: reqID, Status: envelope.StatusOK, Body: []byte(`{}`)}
+		answer := func() {
+			raw, err := v.kr.Current().Seal(ans)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r.put(v.dev.Mailbox, v.relayPK(), raw)
+		}
+		await := func(d *Device) error {
+			c, cancel := context.WithTimeout(ctx, 3*time.Second)
+			defer cancel()
+			if err := d.Poll(c); err != nil {
+				return err
+			}
+			_, err := d.AwaitResponse(c, reqID)
+			return err
+		}
+		answer()
+		if err := await(d); err != nil {
+			t.Fatalf("first answer: %v", err)
+		}
+		// A copy nobody waits for is dropped.
+		answer()
+		if err := await(d); err == nil {
+			t.Fatal("an unwaited duplicate answer was delivered")
+		}
+		if restart {
+			d = reload(t, r, saved, keep(&saved, r))
+		}
+		// The answer was lost to the caller: it resends with the same id.
+		if _, err := d.SendWithID(ctx, reqID, "vault.status", []byte(`{}`)); err != nil {
+			t.Fatal(err)
+		}
+		answer()
+		if err := await(d); err != nil {
+			t.Fatalf("replayed answer (restart %v): %v", restart, err)
+		}
+	}
+}
+
+// An armed id is dropped at its exp, or after 24 hours without one.
+func TestAskedBounded(t *testing.T) {
+	ctx := context.Background()
+	_, _, d := pair(t)
+	for range 5 {
+		if _, err := d.SendExp(ctx, "location.update", []byte(`{}`), time.Now().Add(time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := d.Send(ctx, "vault.status", []byte(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	if len(d.asked) != 6 {
+		t.Fatalf("%d armed, want 6", len(d.asked))
+	}
+	d.mu.Lock()
+	d.pruneSeen(time.Now().Add(2 * time.Minute))
+	d.mu.Unlock()
+	if len(d.asked) != 1 {
+		t.Fatalf("%d armed after the events' exp, want 1", len(d.asked))
+	}
+	d.mu.Lock()
+	d.pruneSeen(time.Now().Add(25 * time.Hour))
+	d.mu.Unlock()
+	if len(d.asked) != 0 {
+		t.Fatal("armed entry kept past 24 hours")
+	}
+}

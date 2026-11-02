@@ -271,6 +271,9 @@ type Device struct {
 	hsFailed bool   // the last hs.resp aborted the handshake
 	awaiting []*handshake.Responder
 	pruned   time.Time // the last pruneSeen
+	// asked holds the ids of the requests sent and not yet answered, in
+	// memory: a send or resend of an id arms it, the vault's answer disarms it.
+	asked map[string]time.Time // id -> when it is disarmed
 	// awaitingSince is when each awaiting responder was created.
 	awaitingSince []time.Time
 	events        []*envelope.Inner
@@ -800,7 +803,23 @@ func (d *Device) sendFull(ctx context.Context, id, typ string, body json.RawMess
 	if err != nil {
 		return "", err
 	}
+	if re == "" {
+		// §8.2: the vault answers a retransmission with its cached
+		// response, which has the same inner id as the first answer; the
+		// resend arms the id so that this answer reaches the caller. The id
+		// stays armed until the earlier of its exp and askedKeep, so that
+		// events sent with an exp do not pile up.
+		if d.asked == nil {
+			d.asked = map[string]time.Time{}
+		}
+		until := now.Add(askedKeep)
+		if !exp.IsZero() && exp.Before(until) {
+			until = exp
+		}
+		d.asked[id] = until
+	}
 	if err := d.depositVault(ctx, outboxKind(typ, re), v.RelayURL, v.Mailbox, v.Token, raw); err != nil {
+		delete(d.asked, id)
 		return "", err
 	}
 	return id, nil
@@ -1523,7 +1542,12 @@ func (d *Device) handle(ctx context.Context, m relayclient.Message) (unacked boo
 		// duplicate, a retransmitted hs.init included, is skipped, and its
 		// msg_id is acked as usual.
 		if _, dup := d.st.SeenInner[in.ID]; dup {
-			return false
+			// A response to a request sent (or resent) and not yet
+			// answered is delivered to its caller; any other duplicate is
+			// skipped.
+			if _, waiting := d.asked[in.Re]; in.Re == "" || !waiting {
+				return false
+			}
 		}
 	}
 	if in.Type == handshake.TypeInit {
@@ -1536,6 +1560,9 @@ func (d *Device) handle(ctx context.Context, m relayclient.Message) (unacked boo
 	// Recorded only once the time check has passed, so that a message
 	// refused for the clock is handled when delivered again.
 	d.recordInner(in, now)
+	if in.Re != "" {
+		delete(d.asked, in.Re)
+	}
 	switch in.Type {
 	case devicePairRejected:
 		// §6.7 (0.10.5): only while pairing, under the handshake's epoch.
@@ -1768,6 +1795,9 @@ func (d *Device) handleRekey(ctx context.Context, raw []byte, in *envelope.Inner
 const (
 	seenKeep      = 16 * 24 * time.Hour
 	ephemeralKeep = 10 * time.Minute
+	// askedKeep is how long the vault caches a response for a resend
+	// (its ResponseRetention, §8.2).
+	askedKeep = 24 * time.Hour
 )
 
 // pruneSeen drops expired entries of the two dedupe sets. It runs at most
@@ -1785,6 +1815,11 @@ func (d *Device) pruneSeen(now time.Time) {
 	for k, t := range d.st.SeenInner {
 		if now.Sub(t) > seenKeep {
 			delete(d.st.SeenInner, k)
+		}
+	}
+	for k, t := range d.asked {
+		if now.After(t) {
+			delete(d.asked, k)
 		}
 	}
 }

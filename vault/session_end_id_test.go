@@ -30,8 +30,9 @@ func endReply(t *testing.T, r *accessRig, td *tdev, body string) (*envelope.Inne
 }
 
 // assertNoEnd fails if the batch sent anything but the answer (no
-// device.session.ended, no sync.event, nothing else) or audited an end.
-func assertNoEnd(t *testing.T, r *accessRig, all map[string][]*envelope.Inner) {
+// device.session.ended, no sync.event, nothing else) or recorded any
+// audit entry since before (the count of entries then).
+func assertNoEnd(t *testing.T, r *accessRig, all map[string][]*envelope.Inner, before int) {
 	t.Helper()
 	for dev, ins := range all {
 		for _, e := range ins {
@@ -40,12 +41,13 @@ func assertNoEnd(t *testing.T, r *accessRig, all map[string][]*envelope.Inner) {
 			}
 		}
 	}
-	for _, k := range []string{"device.session.ended", "approval.denied"} {
-		if n := len(r.d.audits(k)); n != 0 {
-			t.Fatalf("%d %s audits after a no-op end", n, k)
-		}
+	if n := len(sinkOf(r.d).got); n != before {
+		t.Fatalf("%d audit entries after a no-op end, %d before", n, before)
 	}
 }
+
+// acts is the number of audit entries the rig has recorded.
+func acts(r *accessRig) int { return len(sinkOf(r.d).got) }
 
 // sessionRig is a granted desktop with one pending renewal request and two
 // held requests.
@@ -107,6 +109,7 @@ func TestSessionEndIDMismatchChangesNothing(t *testing.T) {
 		r, sid := sessionRig(t)
 		var resp *envelope.Inner
 		var all map[string][]*envelope.Inner
+		before := acts(r)
 		if app {
 			resp, all = endReply(t, r, r.a, `{"device_id":"desk1","session_id":"other"}`)
 		} else {
@@ -118,7 +121,45 @@ func TestSessionEndIDMismatchChangesNothing(t *testing.T) {
 		if r.desk.peer.Access == nil || r.desk.peer.Access.ID != sid || len(r.d.m.st.AccessRequests) != 1 || len(r.d.m.st.Held) != 2 {
 			t.Fatalf("app=%v: state changed", app)
 		}
-		assertNoEnd(t, r, all)
+		assertNoEnd(t, r, all, before)
+	}
+}
+
+// The race the id is for: a delayed end of session A arrives after a
+// renewal replaced it with B; B stays.
+func TestSessionEndIDDelayedEndOfReplacedSession(t *testing.T) {
+	for _, app := range []bool{true, false} {
+		r := newAccessRig(t)
+		r.grant(t)
+		a := r.desk.peer.Access.ID
+		r.d.m.st.AccessRequests["r0"] = &AccessRequest{ID: "r0", DeviceID: "desk1", Seconds: 600, Created: time.Now(), Expires: time.Now().Add(time.Minute)}
+		r.d.sendAs(r.a, "device.session.approve", `{"request_id":"r0"}`) // the renewal: a new grant
+		r.d.inbox(r.a, r.b, r.desk)
+		b := r.desk.peer.Access.ID
+		if b == "" || b == a {
+			t.Fatalf("renewal kept session id %q", b)
+		}
+		r.d.m.st.AccessRequests["r1"] = &AccessRequest{ID: "r1", DeviceID: "desk1", Seconds: 60, Created: time.Now(), Expires: time.Now().Add(time.Minute)}
+		r.hold(t, 2)
+		before := acts(r)
+		var resp *envelope.Inner
+		var all map[string][]*envelope.Inner
+		if app {
+			resp, all = endReply(t, r, r.a, `{"device_id":"desk1","session_id":"`+a+`"}`)
+		} else {
+			resp, all = endReply(t, r, r.desk, `{"session_id":"`+a+`"}`)
+		}
+		if resp.Status != envelope.StatusOK || string(resp.Body) != "{}" {
+			t.Fatalf("app=%v: %+v", app, resp)
+		}
+		if r.desk.peer.Access == nil || r.desk.peer.Access.ID != b || len(r.d.m.st.AccessRequests) != 1 || len(r.d.m.st.Held) != 2 {
+			t.Fatalf("app=%v: the newer session or the requests were touched", app)
+		}
+		assertNoEnd(t, r, all, before)
+		// The newer session ends by its own id.
+		if resp, _ := endReply(t, r, r.a, `{"device_id":"desk1","session_id":"`+b+`"}`); resp.Status != envelope.StatusOK || r.desk.peer.Access != nil {
+			t.Fatalf("app=%v: B did not end by its id", app)
+		}
 	}
 }
 
@@ -130,6 +171,7 @@ func TestSessionEndIDNoSessionKeepsRequest(t *testing.T) {
 		td   *tdev
 		body string
 	}{{r.a, `{"device_id":"desk1","session_id":"s1"}`}, {r.desk, `{"session_id":"s1"}`}} {
+		before := acts(r)
 		resp, all := endReply(t, r, c.td, c.body)
 		if resp.Status != envelope.StatusOK || string(resp.Body) != "{}" {
 			t.Fatalf("%+v", resp)
@@ -137,7 +179,7 @@ func TestSessionEndIDNoSessionKeepsRequest(t *testing.T) {
 		if len(r.d.m.st.AccessRequests) != 1 {
 			t.Fatal("the pending request was dropped")
 		}
-		assertNoEnd(t, r, all)
+		assertNoEnd(t, r, all, before)
 	}
 	// Without an id the request is dropped, as before.
 	endReply(t, r, r.a, `{"device_id":"desk1"}`)
@@ -154,6 +196,7 @@ func TestSessionEndIDExpiredNoop(t *testing.T) {
 	exp := r.desk.peer.Access.Expires
 	s := &Session{peer: r.desk.peer, from: info(r.desk.peer), now: exp}
 	in := &envelope.Inner{Type: "device.session.end", Body: []byte(`{"session_id":"` + sid + `"}`)}
+	before := acts(r)
 	out, err := r.d.m.hSessionEnd(context.Background(), s, in)
 	if err != nil || len(out) != 0 {
 		t.Fatalf("%s %v", out, err)
@@ -161,7 +204,7 @@ func TestSessionEndIDExpiredNoop(t *testing.T) {
 	if r.desk.peer.Access == nil || len(r.d.m.st.AccessRequests) != 1 || len(r.d.m.st.Held) != 2 {
 		t.Fatal("an expired session's end changed state")
 	}
-	assertNoEnd(t, r, r.d.inbox(r.a, r.b, r.desk))
+	assertNoEnd(t, r, r.d.inbox(r.a, r.b, r.desk), before)
 	// One instant earlier it ends.
 	s.now = exp.Add(-time.Nanosecond)
 	if _, err := r.d.m.hSessionEnd(context.Background(), s, in); err != nil || r.desk.peer.Access != nil {
@@ -171,11 +214,12 @@ func TestSessionEndIDExpiredNoop(t *testing.T) {
 	// leaves the pending request and the held requests.
 	r, sid = sessionRig(t)
 	r.desk.peer.Access.Expires = time.Now().Add(-time.Second)
+	before = acts(r)
 	_, all := endReply(t, r, r.a, `{"device_id":"desk1","session_id":"`+sid+`"}`)
 	if len(r.d.m.st.AccessRequests) != 1 || len(r.d.m.st.Held) != 2 {
 		t.Fatal("a named end of an expired session dropped requests")
 	}
-	assertNoEnd(t, r, all)
+	assertNoEnd(t, r, all, before)
 }
 
 func TestSessionEndIDAppUnknownDevice(t *testing.T) {
@@ -253,11 +297,31 @@ func TestSessionEndIDWhileHeld(t *testing.T) {
 			t.Fatalf("mismatch while held, %s: %+v", td.peer.ID, r)
 		}
 	}
-	if r := f.req(t, f.agent, "device.session.end", `{"session_id":"s2"}`); r.Status != envelope.StatusOK || f.agent.peer.Access != nil {
-		t.Fatalf("match while held: %+v", r)
-	}
-	if r := f.req(t, f.desk, "device.session.end", `{"session_id":"s1"}`); r.Status != envelope.StatusOK || f.desk.peer.Access != nil {
-		t.Fatalf("desktop match while held: %+v", r)
+	// A match ends, audited once per end; while held no sync.event goes
+	// out (§6.8, as for an end without an id).
+	for i, c := range []struct {
+		td  *tdev
+		sid string
+	}{{f.agent, "s2"}, {f.desk, "s1"}} {
+		id := f.sendAs(c.td, "device.session.end", `{"session_id":"`+c.sid+`"}`)
+		all := f.inbox(f.app, f.desk, f.agent)
+		if r := find(all[c.td.peer.ID], reply(id)); r == nil || r.Status != envelope.StatusOK || c.td.peer.Access != nil {
+			t.Fatalf("match while held, %s: %+v", c.td.peer.ID, r)
+		}
+		n := 0
+		for _, a := range f.oc.got {
+			if a.Kind == "device.session.ended" && a.DeviceID == c.td.peer.ID && a.Audit {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Fatalf("%s: %d device.session.ended audits", c.td.peer.ID, n)
+		}
+		for dev, ins := range all {
+			if len(syncEvents(t, ins, "device.session"))+len(syncEvents(t, ins, "approval.decided")) != 0 {
+				t.Fatalf("%s got sync.event while held (end %d)", dev, i)
+			}
+		}
 	}
 	if len(f.m.st.AccessRequests) != 0 {
 		t.Fatal("the pending requests stayed after the ends")

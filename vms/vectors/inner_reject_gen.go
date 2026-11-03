@@ -357,6 +357,25 @@ func genInnerReject(sessEnv []byte) (obj, error) {
 	rawInner("§5.3: the inner plaintext (including its body) MUST be valid UTF-8 (truncated sequence)", "truncated_utf8_sequence", []byte(S(`"x":"`+"\xe2\x82"+`"`)))
 	rawInner("§5.3: the inner plaintext is a UTF-8 JSON object; these UTF-16 bytes begin with 0xff, which is not valid UTF-8", "utf16_encoding", []byte("\xff\xfe{\x00}\x00"))
 
+	// 0.83.1: a byte order mark, and a \u escape of a surrogate that is not
+	// half of a pair (member names included), are refused, never repaired.
+	const r831 = "§5.3 (0.83.1): the inner plaintext MUST NOT "
+	rawInner(r831+"begin with a byte order mark (EF BB BF); RFC 8259 §8.1 lets a parser ignore one, here it is an error", "bom", []byte("\xef\xbb\xbf"+session()))
+	inner(r831+"contain a \\u escape of a surrogate that is not part of a pair: a high one (D800-DBFF) must be followed at once by a \\u escape of a low one (DC00-DFFF)", "session",
+		"surrogate_high_then_non_low_escape", S(`"x":"\ud800\u0041"`),
+		"surrogate_high_then_ascii", S(`"x":"\ud800A"`),
+		"surrogate_high_at_end_of_string", S(`"x":"a\udbff"`),
+		"surrogate_high_then_raw_character", S(`"x":"\ud800`+"\u00e9"+`"`),
+		"surrogate_high_then_high", S(`"x":"\ud800\udbff"`),
+		"surrogate_unpaired_uppercase", S(`"x":"\uD800"`),
+		"surrogate_high_in_body", S(`"body":{"a":["\ud83d"]}`))
+	inner(r831+"contain a \\u escape of a surrogate that is not part of a pair: a low one (DC00-DFFF) must be preceded at once by a high one", "session",
+		"surrogate_lone_low", S(`"x":"\udc00"`),
+		"surrogate_low_after_complete_pair", S(`"x":"\ud83d\ude00\udc00"`))
+	inner(r831+"contain a \\u escape of an unpaired surrogate in a member name", "session",
+		"surrogate_unpaired_in_member_name", S(`"\ud800":1`),
+		"surrogate_unpaired_in_body_member_name", S(`"body":{"a\udc00":1}`))
+
 	// Padding (§5.4): DecodeInner on the padded plaintext.
 	pad := func(name, rule string, c rejectCase) {
 		c.name, c.layer, c.mode, c.rule, c.class = name, "padded", "session", rule, "padding"
@@ -472,11 +491,20 @@ func genInnerReject(sessEnv []byte) (obj, error) {
 			return nil, err
 		}
 	}
+	// A valid escaped pair (U+1F600) and noncharacters (U+FDD0, U+FFFF as
+	// escapes) are accepted, in a value and in a member name.
+	pairInner := session(`"body":{"\ud83d\ude00":"\ud83d\ude00\ufdd0\ufffe\uffff","decoy":"\\ud800"}`)
+	if in, err := envelope.ParseInner([]byte(pairInner), envelope.ModeSession); err != nil {
+		return nil, fmt.Errorf("the surrogate pair baseline must be accepted: %w", err)
+	} else if !bytes.Contains(in.Body, []byte(`\ud83d\ude00`)) {
+		return nil, errors.New("the surrogate pair baseline lost its body")
+	}
 	return obj{
-		{"description", "VAULT-MESSAGING §5.2-§5.4 inner-plaintext and envelope must-reject corpus. Every case is rejected by a receiver, and by the library's parser here. Each is the baseline inner plaintext (accepted) with one change, in the layer named: `inner` = the unpadded JSON handed to the inner parser in `mode`; `padded` = the padded plaintext (inner || marker || zeros to padded_len, marker_hex default 80, last_byte_hex replaces the last byte, or padded_hex given whole) handed to unpad-and-parse; `envelope` = the envelope bytes (envelope_session.json's with the mutation) handed to the envelope parser before any decryption; `session_open` = the envelope parses and is opened with key_hex, which fails; `time` = the inner parses in session mode, and the freshness check at `now` (RFC 3339) fails (durable: also the 16-day limit). `inner` is the UTF-8 text, or `inner_hex` the bytes when they are not valid UTF-8. `rule` names the spec rule. `error` is the class of the rejection and is informative: an implementation MUST reject every case but need not match the class, which follows the Go library's errors: inner (malformed inner plaintext), padding, version, suite, mode, flags, length, truncated, decrypt, clock_future, clock_past, expired; a receiver need only reject, the class says why. Not yet covered (VAULT-MESSAGING 0.83.1): escaped unpaired surrogates and a UTF-8 byte order mark."},
+		{"description", "VAULT-MESSAGING §5.2-§5.4 inner-plaintext and envelope must-reject corpus. Every case is rejected by a receiver, and by the library's parser here. Each is the baseline inner plaintext (accepted) with one change, in the layer named: `inner` = the unpadded JSON handed to the inner parser in `mode`; `padded` = the padded plaintext (inner || marker || zeros to padded_len, marker_hex default 80, last_byte_hex replaces the last byte, or padded_hex given whole) handed to unpad-and-parse; `envelope` = the envelope bytes (envelope_session.json's with the mutation) handed to the envelope parser before any decryption; `session_open` = the envelope parses and is opened with key_hex, which fails; `time` = the inner parses in session mode, and the freshness check at `now` (RFC 3339) fails (durable: also the 16-day limit). `inner` is the UTF-8 text, or `inner_hex` the bytes when they are not valid UTF-8. `rule` names the spec rule. `error` is the class of the rejection and is informative: an implementation MUST reject every case but need not match the class, which follows the Go library's errors: inner (malformed inner plaintext), padding, version, suite, mode, flags, length, truncated, decrypt, clock_future, clock_past, expired; a receiver need only reject, the class says why. The `bom` case is given as `inner_hex`. The baseline_surrogate_pair_inner is the opposite: it is ACCEPTED and carries a valid escaped surrogate pair and escaped noncharacters (including U+FFFE) and an escaped-backslash decoy (the JSON string \\\\ud800 is the literal text \\ud800), which a receiver MUST NOT refuse."},
 		{"baseline_session_inner", session()},
 		{"baseline_sealed_inner", sealed()},
 		{"baseline_depth_32_inner", nest(32)},
+		{"baseline_surrogate_pair_inner", pairInner},
 		{"cases", list},
 	}, nil
 }

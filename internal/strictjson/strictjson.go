@@ -28,6 +28,7 @@ const MaxSafeInteger = 1<<53 - 1
 var (
 	ErrSyntax    = errors.New("strictjson: malformed JSON")
 	ErrUTF8      = errors.New("strictjson: invalid UTF-8")
+	ErrSurrogate = errors.New("strictjson: unpaired surrogate escape")
 	ErrNotObject = errors.New("strictjson: not a JSON object")
 	ErrDuplicate = errors.New("strictjson: duplicate member name")
 	ErrDepth     = errors.New("strictjson: nesting too deep")
@@ -41,11 +42,15 @@ var (
 type Object map[string]json.RawMessage
 
 // ParseObject parses b as exactly one JSON object, rejecting invalid UTF-8,
+// an unpaired surrogate \u escape, a leading byte order mark,
 // duplicate member names at any depth, nesting deeper than MaxDepth, and
 // any non-whitespace data after the object.
 func ParseObject(b []byte) (Object, error) {
 	if !utf8.Valid(b) {
 		return nil, ErrUTF8
+	}
+	if err := checkSurrogates(b); err != nil {
+		return nil, err
 	}
 	if err := checkTree(b); err != nil {
 		return nil, err
@@ -55,6 +60,81 @@ func ParseObject(b []byte) (Object, error) {
 		return nil, ErrNotObject
 	}
 	return Object(m), nil
+}
+
+// checkSurrogates scans the raw bytes once, in linear time, and refuses a
+// \u escape of a surrogate that is not half of a pair, in any string
+// literal (member names included): a high surrogate (D800-DBFF) not
+// followed at once by a \u escape of a low one (DC00-DFFF), or a low one not
+// preceded at once by a high one (VAULT-MESSAGING 0.83.1 §5.3). encoding/
+// json would silently turn it into U+FFFD, so this must look at the raw
+// text. Anything else malformed (bad escapes, bad syntax) is left to the
+// decoder that follows.
+func checkSurrogates(b []byte) error {
+	inStr := false
+	for i := 0; i < len(b); {
+		c := b[i]
+		if !inStr {
+			inStr = c == '"'
+			i++
+			continue
+		}
+		switch c {
+		case '"':
+			inStr = false
+			i++
+		case '\\':
+			if i+1 >= len(b) {
+				return nil
+			}
+			if b[i+1] != 'u' {
+				i += 2 // any other escape is two bytes
+				continue
+			}
+			v, ok := hex4(b, i+2)
+			if !ok {
+				return nil // the decoder refuses it
+			}
+			i += 6
+			switch {
+			case v >= 0xD800 && v <= 0xDBFF:
+				if i+1 < len(b) && b[i] == '\\' && b[i+1] == 'u' {
+					if lo, ok := hex4(b, i+2); ok && lo >= 0xDC00 && lo <= 0xDFFF {
+						i += 6 // a complete pair, consumed once
+						continue
+					}
+				}
+				return ErrSurrogate
+			case v >= 0xDC00 && v <= 0xDFFF:
+				return ErrSurrogate
+			}
+		default:
+			i++
+		}
+	}
+	return nil
+}
+
+// hex4 reads four ASCII hex digits at b[i:].
+func hex4(b []byte, i int) (rune, bool) {
+	if i+4 > len(b) {
+		return 0, false
+	}
+	var v rune
+	for _, c := range b[i : i+4] {
+		switch {
+		case c >= '0' && c <= '9':
+			c -= '0'
+		case c >= 'a' && c <= 'f':
+			c = c - 'a' + 10
+		case c >= 'A' && c <= 'F':
+			c = c - 'A' + 10
+		default:
+			return 0, false
+		}
+		v = v<<4 | rune(c)
+	}
+	return v, true
 }
 
 // checkTree walks the token stream once, verifying syntax, depth, a single

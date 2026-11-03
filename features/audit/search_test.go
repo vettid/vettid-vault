@@ -272,7 +272,7 @@ func TestSearchErrors(t *testing.T) {
 	for _, b := range []string{
 		`{"q":""}`, `{"q":"` + strings.Repeat("x", MaxQ+1) + `"}`, `{"q":"` + strings.Repeat("é", 64) + `x"}`,
 		`{"q":" "}`, `{"q":"   "}`, `{"q":" 　"}`, `{"q":"a\tb"}`, `{"q":"a\nb"}`, `{"q":"a\u0000"}`, `{"q":"a\u007f"}`,
-		`{"q":"a\u0085"}`, `{"q":"a\u009f"}`, `{"q":5}`, `{"q":null}`, `{"q":["a"]}`,
+		`{"q":"a\u0085"}`, `{"q":"a\u009f"}`, `{"q":"\ud800"}`, `{"q":5}`, `{"q":null}`, `{"q":["a"]}`,
 		`{"since":"yesterday"}`, `{"since":5}`, `{"until":"2026-10-02"}`, `{"until":"2026-10-02 12:00:00Z"}`, `{"since":null}`,
 		`{"since":"2026-10-02T12:00:00Z","until":"2026-10-02T12:00:00Z"}`,
 		`{"since":"2026-10-02T12:00:01Z","until":"2026-10-02T12:00:00Z"}`,
@@ -289,7 +289,7 @@ func TestSearchErrors(t *testing.T) {
 		}
 	}
 	for _, b := range []string{`{"q":"a"}`, `{"q":"` + strings.Repeat("x", MaxQ) + `"}`, `{"q":"` + strings.Repeat("é", 64) + `"}`,
-		`{"q":" a "}`, `{"q":"\ud800"}`, `{"since":"2026-10-02T12:00:00Z","until":"2026-10-02T12:00:00.001Z"}`, kinds(MaxKinds)} {
+		`{"q":" a "}`, `{"q":"\ud83d\ude00"}`, `{"since":"2026-10-02T12:00:00Z","until":"2026-10-02T12:00:00.001Z"}`, kinds(MaxKinds)} {
 		if r := featuretest.Call(f, h, t0, "app", "audit.list", b); !r.OK() {
 			t.Errorf("audit.list %s: %q", b, r.Code)
 		}

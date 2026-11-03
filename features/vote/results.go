@@ -241,6 +241,7 @@ func (f *Feature) SubmitResults(s *vault.Session, conn, id string, in ResultsSub
 		r.Exts = append(r.Exts, adopt...)
 		if len(adopt) > 0 {
 			r.Closes = closes
+			r.ChangedMS = now.UnixMilli() // an earlier evidence export is no longer current
 		}
 		return f.rowsUnavailable(s, r, now), nil
 	}
@@ -284,6 +285,7 @@ func (f *Feature) SubmitResults(s *vault.Session, conn, id string, in ResultsSub
 			r.Closes = closes
 		}
 		r.Results = rs
+		r.setResultsMatch(in.Results)
 		return f.failCheck(s, r, "row_duplicate"), nil
 	}
 	if in.Proof.Index != r.Proof.Index {
@@ -299,12 +301,7 @@ func (f *Feature) SubmitResults(s *vault.Session, conn, id string, in ResultsSub
 	// The vault keeps the results with its row; vote.closed's hash against
 	// them is evidence only.
 	r.Results = rs
-	if r.ResultsHash != nil {
-		r.ResultsMatch = "no"
-		if eq(r.ResultsHash, votewire.H(in.Results)) {
-			r.ResultsMatch = "yes"
-		}
-	}
+	r.setResultsMatch(in.Results)
 	state, reason := verdict(r, in.Row)
 	if state == CheckFailed {
 		return f.failCheck(s, r, reason), nil
@@ -371,4 +368,14 @@ func (f *Feature) rowsUnavailable(s *vault.Session, r *record, now time.Time) Ch
 		f.event(s, r, "problem")
 	}
 	return CheckOutcome{State: r.Check, Reason: CheckRowsUnavailable, ConflictEvidence: r.conflictEvidence()}
+}
+
+// setResultsMatch compares vote.closed's hash with the results (evidence only).
+func (r *record) setResultsMatch(doc []byte) {
+	if r.ResultsHash != nil {
+		r.ResultsMatch = "no"
+		if eq(r.ResultsHash, votewire.H(doc)) {
+			r.ResultsMatch = "yes"
+		}
+	}
 }

@@ -264,29 +264,53 @@ func TestAPIOtherRows(t *testing.T) {
 	if c.rec(v.ID).Check == CheckFailed {
 		t.Error("failed")
 	}
-	// Shapes: not an array, an entry that is not an object, members missing
-	// or added, a row without its ballot.
+	// Only a value that is not an array is a bad request.
 	in = mk(1)
 	good := otherJSON(in.Others[0], "")
 	for name, m := range map[string]string{
-		"not an array":      `"other_rows":{}`,
-		"null":              `"other_rows":null`,
-		"entry not object":  `"other_rows":[1]`,
-		"no proof":          `"other_rows":[{"row":{"ballot":null}}]`,
-		"no row":            `"other_rows":[{"proof":` + string(in.Others[0].Proof.JSON()) + `}]`,
-		"entry members":     `"other_rows":[` + good[:len(good)-1] + `,"x":1}]`,
-		"row without":       `"other_rows":[{"row":{},"proof":` + string(in.Others[0].Proof.JSON()) + `}]`,
-		"ballot not object": `"other_rows":[{"row":{"ballot":3},"proof":` + string(in.Others[0].Proof.JSON()) + `}]`,
+		"not an array": `"other_rows":{}`,
+		"null":         `"other_rows":null`,
 	} {
 		if r := c.app("vote.results.submit", submitBody(v, in, rowMember(in), m)); r.Code != "bad_request" {
 			t.Errorf("%s: %q", name, r.Code)
 		}
 	}
-	// A member that does not decode is input for that entry, not a bad request.
-	bad := strings.Replace(good, `"vk":"`, `"vk":"!`, 1)
-	r := c.app("vote.results.submit", submitBody(v, in, rowMember(in), `"other_rows":[`+bad+`]`))
-	if ck, _ := obj(t, r).Object("check"); func() string { s, _ := ck.String("reason"); return s }() != "input" {
-		t.Errorf("undecodable: %s", r.Body)
+	// A bad entry (shape or members) is input for that entry: pending, input.
+	pj := string(in.Others[0].Proof.JSON())
+	for name, m := range map[string]string{
+		"entry not object":  `"other_rows":[1]`,
+		"no proof":          `"other_rows":[{"row":{"ballot":null}}]`,
+		"no row":            `"other_rows":[{"proof":` + pj + `}]`,
+		"row without":       `"other_rows":[{"row":{},"proof":` + pj + `}]`,
+		"ballot not object": `"other_rows":[{"row":{"ballot":3},"proof":` + pj + `}]`,
+		"bad vk":            `"other_rows":[` + strings.Replace(good, `"vk":"`, `"vk":"!`, 1) + `]`,
+		"bad proof":         `"other_rows":[{"row":{"ballot":null},"proof":{"index":"x"}}]`,
+	} {
+		r := c.app("vote.results.submit", submitBody(v, in, rowMember(in), m))
+		if !r.OK() {
+			t.Errorf("%s: %q", name, r.Code)
+			continue
+		}
+		ck, _ := obj(t, r).Object("check")
+		if st, _ := ck.String("state"); st != CheckPending {
+			t.Errorf("%s: %s", name, r.Body)
+		}
+		if why, _ := ck.String("reason"); why != "input" {
+			t.Errorf("%s: %s", name, r.Body)
+		}
+	}
+	// Unknown members of an entry and of its row are ignored: a verifying
+	// second row is judged.
+	for name, m := range map[string]string{
+		"entry member": `"other_rows":[` + good[:len(good)-1] + `,"x":1}]`,
+		"row member":   `"other_rows":[` + strings.Replace(good, `"row":{`, `"row":{"x":1,`, 1) + `]`,
+	} {
+		r := c.app("vote.results.submit", submitBody(v, in, rowMember(in), m))
+		ck, _ := obj(t, r).Object("check")
+		if st, _ := ck.String("state"); st != CheckFailed {
+			t.Errorf("%s: %s", name, r.Body)
+		}
+		c.rec(v.ID).Check, c.rec(v.ID).CheckReason = CheckPending, ""
 	}
 	// Four entries, each with pad of any form, are accepted and judged.
 	in = mk(4)
@@ -302,7 +326,7 @@ func TestAPIOtherRows(t *testing.T) {
 		c.rec(v.ID).Check, c.rec(v.ID).CheckReason = CheckPending, "" // judge it again
 	}
 	// A duplicate pad is refused by the strict parse.
-	r = c.app("vote.results.submit", submitBody(v, in, rowMember(in), otherRowsMember(in, `,"pad":"","pad":""`)))
+	r := c.app("vote.results.submit", submitBody(v, in, rowMember(in), otherRowsMember(in, `,"pad":"","pad":""`)))
 	if r.Code != "bad_request" {
 		t.Errorf("duplicate pad: %q", r.Code)
 	}
@@ -318,8 +342,6 @@ func TestAPIRowsUnavailableShape(t *testing.T) {
 		"with row_proof":  {`"rows_unavailable":true`, `"row_proof":` + string(in.Proof.JSON())},
 		"with other_rows": {`"rows_unavailable":true`, `"other_rows":[]`},
 		"with all":        {`"rows_unavailable":true`, rowMember(in), `"other_rows":[]`},
-		"false":           {`"rows_unavailable":false`},
-		"false with row":  {`"rows_unavailable":false`, rowMember(in)},
 		"a string":        {`"rows_unavailable":"true"`},
 		"null":            {`"rows_unavailable":null`},
 	} {
@@ -330,6 +352,17 @@ func TestAPIRowsUnavailableShape(t *testing.T) {
 	if k := c.rec(v.ID).Check; k == CheckFailed || c.rec(v.ID).CheckReason != "" {
 		t.Errorf("a bad request changed the check: %q", k)
 	}
+	// false is as absent: a normal submission with a row is judged.
+	if r := c.app("vote.results.submit", submitBody(v, in, `"rows_unavailable":false`)); r.Code != "bad_request" {
+		t.Errorf("false without a row: %q", r.Code)
+	}
+	if r := c.app("vote.results.submit", submitBody(v, in, `"rows_unavailable":false`, rowMember(in))); !r.OK() {
+		t.Errorf("false with a row: %q", r.Code)
+	} else if ck, _ := obj(t, r).Object("check"); func() string { s, _ := ck.String("state"); return s }() != CheckVerified {
+		t.Errorf("false with a row: %s", r.Body)
+	}
+	c, v = closedWith(t, nil)
+	in = c.resultsFor(v, resOpts{})
 	r := c.app("vote.results.submit", submitBody(v, in, `"rows_unavailable":true`))
 	ck, _ := obj(t, r).Object("check")
 	if st, _ := ck.String("state"); st != CheckPending {
@@ -384,10 +417,6 @@ func TestRowsUnavailable(t *testing.T) {
 		return s, w
 	}(); st != CheckPending || why != "rows_unavailable" {
 		t.Errorf("vote.evidence check %q %q", st, why)
-	}
-	// The check survives a restart.
-	if c.rec(v.ID).CheckReason != "rows_unavailable" {
-		t.Error("reason not kept")
 	}
 	// Contradictions in the results themselves are judged as usual.
 	bad := c.resultsFor(v, resOpts{tamper: func(r *votewire.Results) { r.Counts.Eligible++ }})
@@ -488,10 +517,6 @@ func TestRowsUnavailableAfterGaveUp(t *testing.T) {
 			t.Fatalf("%d: %+v problems=%d", i, out, c.problems(v.ID))
 		}
 	}
-	// A restart of the vault keeps the once.
-	if !r.RowsProblem {
-		t.Error("not remembered")
-	}
 }
 
 // A check pending with rows_unavailable is a problem record: not "in
@@ -588,5 +613,102 @@ func TestServiceBallotsMayCarryPad(t *testing.T) {
 		if c.state(v) != BallotRecorded {
 			t.Errorf("already_voted, pad %q: %s", pad, c.state(v))
 		}
+	}
+}
+
+// reload makes the feature again from its saved state, as a restart does.
+func (c *cenv) reload() {
+	c.t.Helper()
+	raw, err := c.f.Save()
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	f := New(Options{SiteKey: c.site.Public().(ed25519.PublicKey), Roots: c.env.auth.Roots})
+	f.dep = c.f.dep
+	if err := f.Load(raw); err != nil {
+		c.t.Fatal(err)
+	}
+	c.f = f
+}
+
+// The reason, the once-flag and the extra rows survive a save and a load.
+func TestRowsStateSurvivesARestart(t *testing.T) {
+	c, v := closedWith(t, nil)
+	ru := c.resultsFor(v, resOpts{})
+	ru.Row, ru.Proof, ru.RowsUnavailable = nil, nil, true
+	c.f.SubmitResults(c.session(), "svc", v.ID, ru)
+	c.reload()
+	r := c.rec(v.ID)
+	if r.Check != CheckPending || r.CheckReason != "rows_unavailable" || !r.RowsProblem || !r.problem() {
+		t.Fatalf("%q %q %v", r.Check, r.CheckReason, r.RowsProblem)
+	}
+	if st, why := checkOf(t, c, v.ID); st != CheckPending || why != "rows_unavailable" {
+		t.Errorf("vote.get %q %q", st, why)
+	}
+	n := c.problems(v.ID)
+	c.f.SubmitResults(c.session(), "svc", v.ID, ru)
+	if c.problems(v.ID) != n {
+		t.Error("a second vote.problem after a restart")
+	}
+	// Extra rows.
+	c, v = closedWith(t, receipted)
+	c.f.SubmitResults(c.session(), "svc", v.ID, c.resultsFor(v, resOpts{mine: c.ownBallot(v), others: []otherOpt{{at: notMine(v, 0), choice: "No!"}}}))
+	c.reload()
+	if rs := c.rec(v.ID).Results; rs == nil || len(rs.Others) != 1 || rs.Others[0].Row.ChoiceID != "No!" {
+		t.Fatalf("%+v", rs)
+	}
+	res, _ := c.evidence(t, v.ID).Object("results")
+	if arr, _ := res.Array("other_rows"); len(arr) != 1 {
+		t.Errorf("evidence after a restart: %v", res)
+	}
+	if r := c.rec(v.ID); r.Check != CheckFailed || r.CheckReason != "row_duplicate" {
+		t.Errorf("%q %q", r.Check, r.CheckReason)
+	}
+	// Gave up with the reason, and the once, after a restart.
+	c, v = closedWith(t, nil)
+	ru = c.resultsFor(v, resOpts{})
+	ru.Row, ru.Proof, ru.RowsUnavailable = nil, nil, true
+	c.f.SubmitResults(c.session(), "svc", v.ID, ru)
+	c.now = c.rec(v.ID).dueAt().Add(CheckGiveUp + time.Second)
+	c.reload()
+	c.f.Tick(c.session())
+	if r := c.rec(v.ID); r.Check != CheckGaveUp || r.CheckReason != "rows_unavailable" || !r.RowsProblem {
+		t.Fatalf("%q %q %v", r.Check, r.CheckReason, r.RowsProblem)
+	}
+}
+
+// A rows_unavailable submission that adopts an extension changes the
+// record, so an earlier evidence export is no longer current.
+func TestRowsUnavailableAdoptingAnExtensionIsAChange(t *testing.T) {
+	c := newCastEnv(t)
+	v := c.open(1)
+	closes := time.Unix(c.rec(v.ID).Closes, 0)
+	doc, _ := c.svc.Extension(v, 1, closes.Add(time.Hour), c.now)
+	extra := votewire.Signed{Doc: doc, Sig: signExt(c.svc, v, doc)}
+	c.now = closes.Add(time.Hour + CheckDelay + time.Minute)
+	c.f.Tick(c.session())
+	before := c.rec(v.ID).digest()
+	c.evidence(t, v.ID)
+	c.now = c.now.Add(time.Minute)
+	ru := c.resultsFor(v, resOpts{extra: []votewire.Signed{extra}})
+	ru.Row, ru.Proof, ru.RowsUnavailable = nil, nil, true
+	out, _ := c.f.SubmitResults(c.session(), "svc", v.ID, ru)
+	r := c.rec(v.ID)
+	if out.State != CheckPending || len(r.Exts) != 1 || r.ChangedMS != c.now.UnixMilli() || bytes.Equal(before, r.digest()) {
+		t.Fatalf("%+v exts=%d changed=%d", out, len(r.Exts), r.ChangedMS)
+	}
+	if r.ChangedMS <= r.EvidenceMS {
+		t.Error("the export is still current")
+	}
+}
+
+// vote.closed's results_hash is compared on a row_duplicate too.
+func TestRowDuplicateSetsResultsMatch(t *testing.T) {
+	c, v := closedWith(t, receipted)
+	in := c.resultsFor(v, resOpts{mine: c.ownBallot(v), others: []otherOpt{{at: notMine(v, 0), choice: "no"}}})
+	c.rec(v.ID).ResultsHash = votewire.H(in.Results)
+	c.f.SubmitResults(c.session(), "svc", v.ID, in)
+	if r := c.rec(v.ID); r.Check != CheckFailed || r.ResultsMatch != "yes" {
+		t.Errorf("%q match=%q", r.Check, r.ResultsMatch)
 	}
 }

@@ -231,7 +231,7 @@ func ParseProposal(data []byte) (*Proposal, error) {
 // unique ids matching [a-z0-9-]{1,32} and `abstain` among them, each label
 // 1 to 200 bytes, quorum.text at most 1,024 bytes and min_ballots at least
 // 0, outage_rule at most 1,024 bytes, opens_at < closes_at with a window of
-// at most 604,800 s, eligible at least 1, and every string valid UTF-8.
+// at most 604,800 s, eligible 1 to 100,000, and every string valid UTF-8.
 func (p *Proposal) Validate() error {
 	switch {
 	case p.V != 1,
@@ -244,7 +244,7 @@ func (p *Proposal) Validate() error {
 		len(p.OutageRule) > MaxOutageRule,
 		p.RecordAt > p.OpensAt, // as the service (spec erratum pending, finding 1)
 		p.OpensAt >= p.ClosesAt || p.ClosesAt-p.OpensAt > MaxWindow,
-		p.Eligible < 1,
+		p.Eligible < 1 || p.Eligible > MaxEligible,
 		len(p.RecordRoot) != HashLen:
 		return ErrDocument
 	}

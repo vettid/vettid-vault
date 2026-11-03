@@ -196,6 +196,8 @@ func TestProposalBounds(t *testing.T) {
 		{"opens = closes", func(m map[string]any) { m["closes_at"] = 1793520000 }, false},
 		{"opens > closes", func(m map[string]any) { m["closes_at"] = 1793519999 }, false},
 		{"eligible 1", func(m map[string]any) { m["eligible"] = 1 }, true},
+		{"eligible 100000", func(m map[string]any) { m["eligible"] = 100000 }, true},
+		{"eligible 100001", func(m map[string]any) { m["eligible"] = 100001 }, false},
 		{"eligible 0", func(m map[string]any) { m["eligible"] = 0 }, false},
 		{"short service", func(m map[string]any) { m["service"] = "AAAA" }, false},
 		{"short record_root", func(m map[string]any) { m["record_root"] = "AAAA" }, false},

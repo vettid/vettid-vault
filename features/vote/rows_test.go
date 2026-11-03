@@ -687,18 +687,28 @@ func TestRowsUnavailableAdoptingAnExtensionIsAChange(t *testing.T) {
 	extra := votewire.Signed{Doc: doc, Sig: signExt(c.svc, v, doc)}
 	c.now = closes.Add(time.Hour + CheckDelay + time.Minute)
 	c.f.Tick(c.session())
-	before := c.rec(v.ID).digest()
-	c.evidence(t, v.ID)
-	c.now = c.now.Add(time.Minute)
-	ru := c.resultsFor(v, resOpts{extra: []votewire.Signed{extra}})
-	ru.Row, ru.Proof, ru.RowsUnavailable = nil, nil, true
-	out, _ := c.f.SubmitResults(c.session(), "svc", v.ID, ru)
-	r := c.rec(v.ID)
-	if out.State != CheckPending || len(r.Exts) != 1 || r.ChangedMS != c.now.UnixMilli() || bytes.Equal(before, r.digest()) {
-		t.Fatalf("%+v exts=%d changed=%d", out, len(r.Exts), r.ChangedMS)
+	// The first submission (no extension) is the one that sets the reason.
+	first := c.resultsFor(v, resOpts{})
+	first.Row, first.Proof, first.RowsUnavailable = nil, nil, true
+	if out, _ := c.f.SubmitResults(c.session(), "svc", v.ID, first); out.State != CheckPending {
+		t.Fatalf("%+v", out)
 	}
-	if r.ChangedMS <= r.EvidenceMS {
-		t.Error("the export is still current")
+	c.now = c.now.Add(time.Minute)
+	c.evidence(t, v.ID) // the export is current now
+	r := c.rec(v.ID)
+	exported := r.EvidenceMS
+	if r.ChangedMS > exported {
+		t.Fatalf("changed %d after the export %d", r.ChangedMS, exported)
+	}
+	c.now = c.now.Add(time.Minute)
+	again := c.resultsFor(v, resOpts{extra: []votewire.Signed{extra}})
+	again.Row, again.Proof, again.RowsUnavailable = nil, nil, true
+	out, _ := c.f.SubmitResults(c.session(), "svc", v.ID, again)
+	if out.State != CheckPending || len(r.Exts) != 1 {
+		t.Fatalf("%+v exts=%d", out, len(r.Exts))
+	}
+	if r.ChangedMS != c.now.UnixMilli() || r.ChangedMS <= exported {
+		t.Errorf("changed %d, exported %d", r.ChangedMS, exported)
 	}
 }
 

@@ -334,7 +334,8 @@ func (f *Feature) droppedJSON() []byte {
 }
 
 // problemsJSON is the notice that a connection is at its cap of problem
-// records (§10.19.2): until a record is released.
+// records (§10.19.2): until the count is below the cap again, by a release
+// or (0.83.6) a late check that settles a gave_up record.
 func (f *Feature) problemsJSON() []byte {
 	count := map[string]int{}
 	for _, r := range f.st.Records {
@@ -344,7 +345,7 @@ func (f *Feature) problemsJSON() []byte {
 	}
 	conns := make([]string, 0, len(f.st.Problems))
 	for c, on := range f.st.Problems {
-		if on {
+		if on && count[c] >= votewire.MaxProblemsPerConnection {
 			conns = append(conns, c)
 		}
 	}
@@ -418,13 +419,13 @@ func (f *Feature) apiGet(s *vault.Session, body []byte) (json.RawMessage, error)
 	b.Base64("record_tag", r.Tag)
 	// choice_id: only here, and only after the member cast.
 	if r.Ballot != nil && r.Ballot.ChoiceID != "" {
-		b.String("choice_id", r.Ballot.ChoiceID)
+		b.String("choice_id", r.Ballot.ChoiceID).String("pad", votewire.Pad(r.Ballot.ChoiceID))
 	}
 	b.Uint("extensions", uint64(len(r.Exts)))
 	if sb := r.ServiceBallot; sb != nil {
 		// While a vote.confirm is pending: the ballot the service holds
 		// under the record's own voting key ("Is this your vote?").
-		b.Raw("service_ballot", strictjson.NewBuilder().String("choice_id", sb.ChoiceID).Uint("msg_ms", uint64(sb.MsgMS)).Bytes())
+		b.Raw("service_ballot", strictjson.NewBuilder().String("choice_id", sb.ChoiceID).String("pad", votewire.Pad(sb.ChoiceID)).Uint("msg_ms", uint64(sb.MsgMS)).Bytes())
 	}
 	// tally and counts come only from verified results.
 	if r.Results != nil && (r.Check == CheckVerified || r.Check == CheckUnconfirmed) {

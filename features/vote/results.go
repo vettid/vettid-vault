@@ -48,6 +48,9 @@ func (f *Feature) tickCheck(s *vault.Session, r *record, now time.Time) {
 		r.Check = CheckGaveUp
 		r.ChangedMS = now.UnixMilli()
 		f.audit(s, "vote.check_gave_up", r.Conn, r.ID)
+		// One normal item; the app says the check runs again by itself
+		// and asks nothing of the member (0.83.6).
+		f.feed(s, "vote.result", r.Conn, r.ID, "")
 		f.event(s, r, "check")
 	}
 }
@@ -146,8 +149,14 @@ func (f *Feature) SubmitResults(s *vault.Session, conn, id string, in ResultsSub
 	}
 	now := s.Now()
 	switch r.Check {
-	case CheckVerified, CheckUnconfirmed, CheckFailed, CheckGaveUp:
+	case CheckVerified, CheckUnconfirmed, CheckFailed:
 		return CheckOutcome{State: r.Check, Reason: r.CheckReason, ConflictEvidence: r.conflictEvidence()}, nil
+	}
+	// A gave_up check is not final (0.83.6): a later submission is judged
+	// as for a pending one, and one that is no answer leaves it gave_up.
+	unsettled := CheckPending
+	if r.Check == CheckGaveUp {
+		unsettled = CheckGaveUp
 	}
 	if r.checkingReason() != "" || !r.closed(now) {
 		return CheckOutcome{}, errBad
@@ -159,7 +168,7 @@ func (f *Feature) SubmitResults(s *vault.Session, conn, id string, in ResultsSub
 	// What does not verify is no answer: the check stays pending and a later
 	// correct submission is judged. Only a contradiction under the service's
 	// signature and a verified anchor fails the check.
-	noAnswer := CheckOutcome{State: CheckPending, Reason: "input"}
+	noAnswer := CheckOutcome{State: unsettled, Reason: "input"}
 	res, err := votewire.ParseResults(in.Results)
 	if err != nil || votewire.VerifyResults(r.Signer, r.Hash, in.Results, in.Sig) != nil {
 		return noAnswer, nil
@@ -167,11 +176,11 @@ func (f *Feature) SubmitResults(s *vault.Session, conn, id string, in ResultsSub
 	switch f.anchor(s, conn, r.signers(), in.Results, in.Bundle, time.Time{}) {
 	case anchorOK:
 	case anchorServiceList:
-		return CheckOutcome{State: CheckPending, Reason: ReasonServiceList}, nil
+		return CheckOutcome{State: unsettled, Reason: ReasonServiceList}, nil
 	case anchorClock:
-		return CheckOutcome{State: CheckPending, Reason: ReasonClock}, nil
+		return CheckOutcome{State: unsettled, Reason: ReasonClock}, nil
 	case anchorTrustRoot:
-		return CheckOutcome{State: CheckPending, Reason: ReasonTrustRoot}, nil
+		return CheckOutcome{State: unsettled, Reason: ReasonTrustRoot}, nil
 	default: // a bundle that does not hold for these results
 		return noAnswer, nil
 	}

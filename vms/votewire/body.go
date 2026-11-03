@@ -2,6 +2,7 @@ package votewire
 
 import (
 	"encoding/json"
+	"strings"
 
 	"github.com/vettid/vettid-vault/internal/strictjson"
 )
@@ -242,8 +243,20 @@ func (m *ClosedMsg) Marshal() []byte {
 	return strictjson.NewBuilder().String("proposal_id", m.ProposalID).Base64("results_hash", m.ResultsHash).Bytes()
 }
 
+// Pad returns the `pad` member's value that goes beside a member's
+// choice_id in a vote message's JSON object (VAULT-MESSAGING 0.83.6
+// §10.19.5): ASCII "0" characters, 32 minus len(choiceID) of them, so the
+// object's encoded size does not depend on the choice. No signature covers
+// it; receivers ignore it and do not require it.
+func Pad(choiceID string) string {
+	if len(choiceID) >= 32 {
+		return ""
+	}
+	return strings.Repeat("0", 32-len(choiceID))
+}
+
 // MarshalCast is the vote.cast body the vault sends: {proposal_id,
-// record_tag, vk, choice_id, ballot_sig, cast_sig}.
+// record_tag, vk, choice_id, ballot_sig, cast_sig, pad}.
 func MarshalCast(proposalID string, b *Ballot, castSig []byte) ([]byte, error) {
 	if !ValidProposalID(proposalID) || len(b.RecordTag) != HashLen || len(b.VK) != KeyLen || !ValidChoiceID(b.ChoiceID) ||
 		len(b.BallotSig) != SigLen || len(castSig) != SigLen {
@@ -251,7 +264,7 @@ func MarshalCast(proposalID string, b *Ballot, castSig []byte) ([]byte, error) {
 	}
 	return strictjson.NewBuilder().String("proposal_id", proposalID).Base64("record_tag", b.RecordTag).
 		Base64("vk", b.VK).String("choice_id", b.ChoiceID).Base64("ballot_sig", b.BallotSig).
-		Base64("cast_sig", castSig).Bytes(), nil
+		Base64("cast_sig", castSig).String("pad", Pad(b.ChoiceID)).Bytes(), nil
 }
 
 // MarshalStatusRequest is the vote.status body the vault sends:

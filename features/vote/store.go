@@ -391,7 +391,9 @@ func (r *record) checkPending(now time.Time) bool {
 
 // problem reports whether the record is in the problem set (§10.19.2).
 func (r *record) problem() bool {
-	if r.RejectReason != "" || r.Check == CheckFailed || r.RefusalProblem || r.ConflictEv {
+	// A gave_up check never saw results that verify, so it is never clean
+	// (0.83.6): a service must not withhold its results and then evict it.
+	if r.RejectReason != "" || r.Check == CheckFailed || r.Check == CheckGaveUp || r.RefusalProblem || r.ConflictEv {
 		return true
 	}
 	if b := r.Ballot; b != nil && (b.State == BallotConflict || b.State == BallotDisputed) {
@@ -401,16 +403,18 @@ func (r *record) problem() bool {
 }
 
 // evictable reports whether the record may be evicted for room (§10.19.2):
-// not a problem, closed, and either its check is final and clean, or it
-// closed without a ballot and its check is not due. In-progress records
-// (checking, upcoming, open, a pending check, a ballot not final) never.
+// not a problem, closed, and its check final and clean: verified, or
+// unconfirmed with a ballot. Not before (the row check is what shows a
+// ballot cast under the member's tag by someone else), and never gave_up,
+// which is a problem record. In-progress records (checking, upcoming,
+// open, a pending check, a ballot not final) never.
 func (r *record) evictable(now time.Time) bool {
 	if r.problem() || r.Reason != "" || r.Restore || !r.closed(now) || r.checkPending(now) {
 		return false
 	}
-	clean := r.Check == CheckVerified || r.Check == CheckUnconfirmed || r.Check == CheckGaveUp
+	clean := r.Check == CheckVerified || r.Check == CheckUnconfirmed
 	if r.Ballot == nil {
-		return clean || r.Check == ""
+		return r.Check == CheckVerified
 	}
 	return r.Ballot.final() && clean
 }
@@ -499,16 +503,24 @@ func (f *Feature) admit(rec *record, now time.Time) *limitHit {
 		return &limitHit{max: votewire.MaxProblemsPerConnection, problems: true}
 	}
 	newProblem := rec.problem()
-	newClosed := rec.closed(now)
+	// A record in `checking` (a check reason, or a restore not yet
+	// confirmed) may never verify: it counts toward the 32 and the 128 but
+	// not toward the 16 not yet closed (§10.19.2).
+	newClosed := rec.closed(now) || rec.Reason != "" || rec.Restore
 	for {
 		nonProblem, open := 0, 0
 		for _, r := range f.forConn(conn) {
 			if !r.problem() {
 				nonProblem++
-				if !r.closed(now) {
+				if !r.closed(now) && r.Reason == "" && !r.Restore {
 					open++
 				}
 			}
+		}
+		// Only closed records are evictable, so evicting cannot lower the
+		// count not yet closed: at that cap, refuse before evicting anything.
+		if !newProblem && !newClosed && open >= votewire.MaxOpenPerConnection {
+			return &limitHit{max: votewire.MaxOpenPerConnection}
 		}
 		var hit *limitHit
 		switch {
@@ -516,8 +528,6 @@ func (f *Feature) admit(rec *record, now time.Time) *limitHit {
 			hit = &limitHit{max: votewire.MaxProposals}
 		case !newProblem && nonProblem >= votewire.MaxPerConnection:
 			hit = &limitHit{max: votewire.MaxPerConnection}
-		case !newProblem && !newClosed && open >= votewire.MaxOpenPerConnection:
-			hit = &limitHit{max: votewire.MaxOpenPerConnection}
 		}
 		if hit == nil {
 			return nil

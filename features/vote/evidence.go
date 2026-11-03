@@ -15,7 +15,7 @@ import (
 // §10.19.2).
 
 func ballotEvidence(vk []byte, choice string, sig []byte, msgMS int64, receipt []byte) []byte {
-	b := strictjson.NewBuilder().Base64("vk", vk).String("choice_id", choice).Base64("ballot_sig", sig)
+	b := strictjson.NewBuilder().Base64("vk", vk).String("choice_id", choice).String("pad", votewire.Pad(choice)).Base64("ballot_sig", sig)
 	if len(receipt) > 0 {
 		b.Uint("msg_ms", uint64(msgMS)).Base64("receipt_sig", receipt)
 	}
@@ -123,7 +123,7 @@ func (f *Feature) recordEvidence(s *vault.Session, r *record) []byte {
 			rb.Raw("bundle", rs.Bundle)
 		}
 		if rs.Row != nil {
-			rb.Raw("row", strictjson.NewBuilder().Raw("ballot", strictjson.NewBuilder().Base64("vk", rs.Row.VK).String("choice_id", rs.Row.ChoiceID).Base64("ballot_sig", rs.Row.BallotSig).Bytes()).Bytes())
+			rb.Raw("row", strictjson.NewBuilder().Raw("ballot", strictjson.NewBuilder().Base64("vk", rs.Row.VK).String("choice_id", rs.Row.ChoiceID).String("pad", votewire.Pad(rs.Row.ChoiceID)).Base64("ballot_sig", rs.Row.BallotSig).Bytes()).Bytes())
 		} else {
 			rb.Raw("row", []byte(`{"ballot":null}`))
 		}

@@ -27,6 +27,9 @@ const (
 	// recovery_r, every recovery request is refused not_offered and the
 	// app hides recovery (owner decision of 2026-10-16).
 	CapRecoveryOffered = "recovery_offered"
+	// CapVoteRows: other_rows and rows_unavailable of vote.results.submit
+	// (§10.19.6 step 3).
+	CapVoteRows = "vote_rows"
 )
 
 // Bounds on a capability list (§11.10.9).
@@ -41,9 +44,9 @@ const (
 // recovery_offered, compiled into the image like every release constant).
 func ReleaseCapabilities(offered bool) []string {
 	if offered {
-		return []string{CapAttachments, CapRecoveryOffered, CapRecoveryR}
+		return []string{CapAttachments, CapRecoveryOffered, CapRecoveryR, CapVoteRows}
 	}
-	return []string{CapAttachments, CapRecoveryR}
+	return []string{CapAttachments, CapRecoveryR, CapVoteRows}
 }
 
 // HasCapability reports whether caps names c.

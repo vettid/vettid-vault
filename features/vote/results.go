@@ -18,6 +18,27 @@ type ResultsSubmit struct {
 	Bundle  json.RawMessage
 	Row     *votewire.RowBallot // nil: an empty row
 	Proof   *votewire.RecordProof
+	// Others are the other rows of rows.json under the member's tag, with
+	// their proofs (at most MaxOtherRows); RowsUnavailable says the app
+	// could not get the member's row (then there is no row, proof or
+	// Others).
+	Others          []OtherRow
+	RowsUnavailable bool
+}
+
+// MaxOtherRows bounds other_rows of vote.results.submit (0.83.3).
+const MaxOtherRows = 4
+
+// OtherRow is an entry of other_rows: a row of any choice id (or an empty
+// one) and its proof. Bad is an entry whose members do not decode (base64,
+// types): input that does not verify, not a bad request.
+type OtherRow struct {
+	Empty     bool // {ballot: null}
+	VK        []byte
+	ChoiceID  string
+	BallotSig []byte
+	Proof     *votewire.RecordProof
+	Bad       bool
 }
 
 // CheckOutcome is the state of the results check: pending (also when the
@@ -45,6 +66,7 @@ func (f *Feature) tickCheck(s *vault.Session, r *record, now time.Time) {
 		}
 	}
 	if r.Check == CheckPending && now.Sub(r.dueAt()) >= CheckGiveUp {
+		// The reason rows_unavailable carries over (0.83.3).
 		r.Check = CheckGaveUp
 		r.ChangedMS = now.UnixMilli()
 		f.audit(s, "vote.check_gave_up", r.Conn, r.ID)
@@ -211,6 +233,18 @@ func (f *Feature) SubmitResults(s *vault.Session, conn, id string, in ResultsSub
 	if res.CheckProposal(p) != nil || r.Proof == nil || res.Counts.Eligible != int64(r.Proof.TreeSize) {
 		return f.failCheck(s, r, "results"), nil
 	}
+	if in.RowsUnavailable {
+		// The app could not get the member's row (0.83.3). The results are
+		// verified; the vault cannot check the claim, so the check waits:
+		// pending with the reason (a gave_up one stays gave_up), and one
+		// vote.problem for the record.
+		r.Exts = append(r.Exts, adopt...)
+		if len(adopt) > 0 {
+			r.Closes = closes
+			r.ChangedMS = now.UnixMilli() // an earlier evidence export is no longer current
+		}
+		return f.rowsUnavailable(s, r, now), nil
+	}
 	// The row. The proof must verify to the signed rows_root before the row
 	// is judged; one that does not is no answer. A proof that verifies at
 	// another index or tree size than the record proof's is the service's
@@ -232,6 +266,28 @@ func (f *Feature) SubmitResults(s *vault.Session, conn, id string, in ResultsSub
 	if err != nil || !votewire.VerifyProof(res.RowsRoot, leaf, in.Proof.Index, in.Proof.TreeSize, in.Proof.Path) {
 		return noAnswer, nil
 	}
+	// Extra rows (0.83.3): a second row under the member's tag that
+	// verifies to the signed rows_root at another index is a signed
+	// contradiction, whatever its choice id, and takes precedence over
+	// every other row outcome. An entry that does not verify, repeats an
+	// index or sits at the main row's index is input that does not verify.
+	dups, badInput := f.judgeOthers(r, in, res.RowsRoot)
+	if len(dups) == 0 && badInput {
+		return noAnswer, nil
+	}
+	rs := &results{Doc: in.Results, Sig: in.Sig, Bundle: in.Bundle, AtMS: now.UnixMilli(), Proof: &proof{Index: in.Proof.Index, TreeSize: in.Proof.TreeSize, Path: in.Proof.Path}, Others: dups}
+	if in.Row != nil {
+		rs.Row = &svcBallot{VK: in.Row.VK, ChoiceID: in.Row.ChoiceID, BallotSig: in.Row.BallotSig}
+	}
+	if len(dups) > 0 {
+		r.Exts = append(r.Exts, adopt...)
+		if len(adopt) > 0 {
+			r.Closes = closes
+		}
+		r.Results = rs
+		r.setResultsMatch(in.Results)
+		return f.failCheck(s, r, "row_duplicate"), nil
+	}
 	if in.Proof.Index != r.Proof.Index {
 		return f.failCheck(s, r, "results"), nil // the member's row is not at the member's index
 	}
@@ -244,17 +300,8 @@ func (f *Feature) SubmitResults(s *vault.Session, conn, id string, in ResultsSub
 	}
 	// The vault keeps the results with its row; vote.closed's hash against
 	// them is evidence only.
-	rs := &results{Doc: in.Results, Sig: in.Sig, Bundle: in.Bundle, AtMS: now.UnixMilli(), Proof: &proof{Index: in.Proof.Index, TreeSize: in.Proof.TreeSize, Path: in.Proof.Path}}
-	if in.Row != nil {
-		rs.Row = &svcBallot{VK: in.Row.VK, ChoiceID: in.Row.ChoiceID, BallotSig: in.Row.BallotSig}
-	}
 	r.Results = rs
-	if r.ResultsHash != nil {
-		r.ResultsMatch = "no"
-		if eq(r.ResultsHash, votewire.H(in.Results)) {
-			r.ResultsMatch = "yes"
-		}
-	}
+	r.setResultsMatch(in.Results)
 	state, reason := verdict(r, in.Row)
 	if state == CheckFailed {
 		return f.failCheck(s, r, reason), nil
@@ -268,4 +315,67 @@ func (f *Feature) SubmitResults(s *vault.Session, conn, id string, in ResultsSub
 	f.feed(s, "vote.result", r.Conn, r.ID, "")
 	f.event(s, r, "check")
 	return CheckOutcome{State: state, ConflictEvidence: r.conflictEvidence()}, nil
+}
+
+// judgeOthers sorts the entries of other_rows: dups are the rows that
+// verify to rowsRoot at an index other than the main row's, each index
+// once, as they are kept and shown in vote.evidence; badInput says some
+// entry is input that does not verify.
+func (f *Feature) judgeOthers(r *record, in ResultsSubmit, rowsRoot []byte) (dups []*otherRow, badInput bool) {
+	seen := map[uint64]bool{in.Proof.Index: true}
+	for _, e := range in.Others {
+		if e.Bad || e.Proof == nil || len(e.Proof.Path) > votewire.MaxRecordPath || e.Proof.TreeSize != in.Proof.TreeSize || seen[e.Proof.Index] {
+			badInput = true
+			continue
+		}
+		var leaf []byte
+		var err error
+		if e.Empty {
+			leaf, err = votewire.EmptyRowLeaf(r.Tag)
+		} else {
+			leaf, err = votewire.RowLeaf(r.Tag, e.VK, e.ChoiceID, e.BallotSig)
+		}
+		if err != nil || !votewire.VerifyProof(rowsRoot, leaf, e.Proof.Index, e.Proof.TreeSize, e.Proof.Path) {
+			badInput = true
+			continue
+		}
+		seen[e.Proof.Index] = true
+		o := &otherRow{Proof: &proof{Index: e.Proof.Index, TreeSize: e.Proof.TreeSize, Path: e.Proof.Path}}
+		if !e.Empty {
+			o.Row = &svcBallot{VK: e.VK, ChoiceID: e.ChoiceID, BallotSig: e.BallotSig}
+		}
+		dups = append(dups, o)
+	}
+	return dups, badInput
+}
+
+// rowsUnavailable records a submission of which the app says it could not
+// get the member's row (0.83.3): the check stays pending (a gave_up one
+// stays gave_up) with the reason rows_unavailable, and the member is told
+// once per record.
+func (f *Feature) rowsUnavailable(s *vault.Session, r *record, now time.Time) CheckOutcome {
+	if r.Check == "" {
+		r.Check = CheckPending
+	}
+	if r.CheckReason != CheckRowsUnavailable {
+		r.CheckReason = CheckRowsUnavailable
+		r.ChangedMS = now.UnixMilli()
+	}
+	if !r.RowsProblem {
+		r.RowsProblem = true
+		r.ChangedMS = now.UnixMilli()
+		f.feed(s, "vote.problem", r.Conn, r.ID, "high")
+		f.event(s, r, "problem")
+	}
+	return CheckOutcome{State: r.Check, Reason: CheckRowsUnavailable, ConflictEvidence: r.conflictEvidence()}
+}
+
+// setResultsMatch compares vote.closed's hash with the results (evidence only).
+func (r *record) setResultsMatch(doc []byte) {
+	if r.ResultsHash != nil {
+		r.ResultsMatch = "no"
+		if eq(r.ResultsHash, votewire.H(doc)) {
+			r.ResultsMatch = "yes"
+		}
+	}
 }

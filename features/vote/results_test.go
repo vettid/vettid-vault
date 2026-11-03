@@ -1,6 +1,7 @@
 package vote
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"testing"
@@ -23,6 +24,17 @@ type resOpts struct {
 	rowIndex  int  // added to the member's index in the proof
 	tree      int  // added to the tree size of the proof
 	otherBndl []byte
+	others    []otherOpt // entries of other_rows
+}
+
+// otherOpt is an entry of other_rows: the member's row published again at
+// index at (choice "" with empty false: not placed in the tree, so its
+// proof does not verify).
+type otherOpt struct {
+	at        int
+	choice    string // any string, valid choice id or not
+	empty     bool   // the entry is an empty row
+	notInTree bool   // the tree keeps the other tag at that index
 }
 
 func (c *cenv) resultsFor(v *votetest.Vote, o resOpts) ResultsSubmit {
@@ -38,6 +50,18 @@ func (c *cenv) resultsFor(v *votetest.Vote, o resOpts) ResultsSubmit {
 	if o.dupAt != nil {
 		leaves[*o.dupAt] = leaves[v.Index] // the service published the member's row twice
 		proofAt = *o.dupAt
+	}
+	otherVK, otherSig := bytes.Repeat([]byte{1}, 32), bytes.Repeat([]byte{2}, 64)
+	otherLeaf := func(oo otherOpt) []byte {
+		if oo.empty {
+			return v.Tag
+		}
+		return must(votewire.RowLeaf(v.Tag, otherVK, oo.choice, otherSig))
+	}
+	for _, oo := range o.others {
+		if !oo.notInTree {
+			leaves[oo.at] = otherLeaf(oo)
+		}
 	}
 	tally := map[string]int64{"yes": 0, "no": 0, "abstain": 0}
 	ballots := int64(0)
@@ -69,6 +93,10 @@ func (c *cenv) resultsFor(v *votetest.Vote, o resOpts) ResultsSubmit {
 	}
 	if o.mine != nil {
 		in.Row = &votewire.RowBallot{VK: o.mine.VK, ChoiceID: o.mine.ChoiceID, BallotSig: o.mine.BallotSig}
+	}
+	for _, oo := range o.others {
+		in.Others = append(in.Others, OtherRow{Empty: oo.empty, VK: otherVK, ChoiceID: oo.choice, BallotSig: otherSig,
+			Proof: &votewire.RecordProof{Index: uint64(oo.at), TreeSize: uint64(len(v.Tags)), Path: must(votewire.Proof(leaves, oo.at))}})
 	}
 	return in
 }

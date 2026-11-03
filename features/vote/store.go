@@ -517,16 +517,17 @@ func (f *Feature) admit(rec *record, now time.Time) *limitHit {
 				}
 			}
 		}
+		// Only closed records are evictable, so evicting cannot lower the
+		// count not yet closed: at that cap, refuse before evicting anything.
+		if !newProblem && !newClosed && open >= votewire.MaxOpenPerConnection {
+			return &limitHit{max: votewire.MaxOpenPerConnection}
+		}
 		var hit *limitHit
 		switch {
 		case len(f.st.Records) >= votewire.MaxProposals:
 			hit = &limitHit{max: votewire.MaxProposals}
 		case !newProblem && nonProblem >= votewire.MaxPerConnection:
 			hit = &limitHit{max: votewire.MaxPerConnection}
-		case !newProblem && !newClosed && open >= votewire.MaxOpenPerConnection:
-			// Only closed records are evictable, so evicting cannot lower
-			// the count not yet closed: refuse without evicting anything.
-			return &limitHit{max: votewire.MaxOpenPerConnection}
 		}
 		if hit == nil {
 			return nil

@@ -414,9 +414,17 @@ func TestCheckingDoesNotCountAsOpen(t *testing.T) {
 // At the 16 not yet closed alone, nothing is evicted: evicting closed
 // records cannot make room for an open one (§10.19.2).
 func TestOpenCapEvictsNothing(t *testing.T) {
+	for _, closed := range []int{5, votewire.MaxPerConnection - votewire.MaxOpenPerConnection} {
+		openCapEvictsNothing(t, closed)
+	}
+}
+
+// closed evictable records plus 16 open; with 16 closed the connection is
+// also at its 32.
+func openCapEvictsNothing(t *testing.T, closed int) {
 	e := newEnv(t)
 	e.publish(e.svc)
-	for i := 1; i <= 5; i++ {
+	for i := 1; i <= closed; i++ {
 		e.closedVote(i)
 		e.rec(lid(i)).Check = CheckVerified // evictable
 	}
@@ -428,9 +436,9 @@ func TestOpenCapEvictsNothing(t *testing.T) {
 	if _, code := e.openVote(200); code != "limit" {
 		t.Fatalf("17th open: %q", code)
 	}
-	for i := 1; i <= 5; i++ {
+	for i := 1; i <= closed; i++ {
 		if e.rec(lid(i)) == nil {
-			t.Fatalf("closed record %d evicted", i)
+			t.Fatalf("%d closed: record %d evicted", closed, i)
 		}
 	}
 	if n := len(e.f.st.Compact["svc"]); n != 0 {

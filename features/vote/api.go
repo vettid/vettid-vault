@@ -418,13 +418,13 @@ func (f *Feature) apiGet(s *vault.Session, body []byte) (json.RawMessage, error)
 	b.Base64("record_tag", r.Tag)
 	// choice_id: only here, and only after the member cast.
 	if r.Ballot != nil && r.Ballot.ChoiceID != "" {
-		b.String("choice_id", r.Ballot.ChoiceID)
+		b.String("choice_id", r.Ballot.ChoiceID).String("pad", votewire.Pad(r.Ballot.ChoiceID))
 	}
 	b.Uint("extensions", uint64(len(r.Exts)))
 	if sb := r.ServiceBallot; sb != nil {
 		// While a vote.confirm is pending: the ballot the service holds
 		// under the record's own voting key ("Is this your vote?").
-		b.Raw("service_ballot", strictjson.NewBuilder().String("choice_id", sb.ChoiceID).Uint("msg_ms", uint64(sb.MsgMS)).Bytes())
+		b.Raw("service_ballot", strictjson.NewBuilder().String("choice_id", sb.ChoiceID).String("pad", votewire.Pad(sb.ChoiceID)).Uint("msg_ms", uint64(sb.MsgMS)).Bytes())
 	}
 	// tally and counts come only from verified results.
 	if r.Results != nil && (r.Check == CheckVerified || r.Check == CheckUnconfirmed) {

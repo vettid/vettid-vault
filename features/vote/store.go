@@ -402,15 +402,17 @@ func (r *record) problem() bool {
 
 // evictable reports whether the record may be evicted for room (§10.19.2):
 // not a problem, closed, and either its check is final and clean, or it
-// closed without a ballot and its check is not due. In-progress records
-// (checking, upcoming, open, a pending check, a ballot not final) never.
+// closed without a ballot and its check is final (verified or gave_up; not
+// before, because the row check is what shows a ballot cast under the
+// member's tag by someone else). In-progress records (checking, upcoming,
+// open, a pending check, a ballot not final) never.
 func (r *record) evictable(now time.Time) bool {
 	if r.problem() || r.Reason != "" || r.Restore || !r.closed(now) || r.checkPending(now) {
 		return false
 	}
 	clean := r.Check == CheckVerified || r.Check == CheckUnconfirmed || r.Check == CheckGaveUp
 	if r.Ballot == nil {
-		return clean || r.Check == ""
+		return r.Check == CheckVerified || r.Check == CheckGaveUp
 	}
 	return r.Ballot.final() && clean
 }
@@ -499,13 +501,15 @@ func (f *Feature) admit(rec *record, now time.Time) *limitHit {
 		return &limitHit{max: votewire.MaxProblemsPerConnection, problems: true}
 	}
 	newProblem := rec.problem()
-	newClosed := rec.closed(now)
+	// A record in `checking` may never verify: it counts toward the 32 and
+	// the 128 but not toward the 16 not yet closed (§10.19.2).
+	newClosed := rec.closed(now) || rec.Reason != ""
 	for {
 		nonProblem, open := 0, 0
 		for _, r := range f.forConn(conn) {
 			if !r.problem() {
 				nonProblem++
-				if !r.closed(now) {
+				if !r.closed(now) && r.Reason == "" {
 					open++
 				}
 			}

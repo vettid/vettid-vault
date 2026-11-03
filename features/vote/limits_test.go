@@ -113,15 +113,21 @@ func TestInProgressIsNeverEvicted(t *testing.T) {
 	}
 	// Each reason an unfinished closed record cannot go, and each way one can.
 	r := &record{Closes: e.now.Add(-time.Hour).Unix()}
-	if !r.evictable(e.now) {
-		t.Error("closed, no ballot, check not due: evictable")
+	if r.evictable(e.now) {
+		t.Error("closed, no ballot, check not yet run: not evictable (0.83.6)")
 	}
 	r.Opens = r.Closes - 100
 	r.Closes = e.now.Add(-3 * time.Hour).Unix()
 	if r.evictable(e.now) { // check due (2 h passed) but not settled
 		t.Error("check due and unsettled: not evictable")
 	}
-	for _, c := range []string{CheckVerified, CheckUnconfirmed, CheckGaveUp} {
+	for _, c := range []string{"", CheckPending, CheckUnconfirmed} {
+		r.Check = c // not final for a record without a ballot
+		if r.evictable(e.now) {
+			t.Errorf("no ballot, check %q: not evictable", c)
+		}
+	}
+	for _, c := range []string{CheckVerified, CheckGaveUp} {
 		r.Check = c
 		if !r.evictable(e.now) {
 			t.Errorf("check %s: evictable", c)
@@ -318,5 +324,78 @@ func TestVaultCapOf128(t *testing.T) {
 	v2 := e.svc.NewVote(votetest.VoteSpec{ID: lid(501), Opens: e.now.Add(-time.Hour), Closes: e.now.Add(time.Hour)})
 	if r := e.send(v2); !r.OK() {
 		t.Errorf("with room: %q", r.Code)
+	}
+}
+
+// A record that closed without a ballot is kept until its check is final
+// (verified or gave_up), so a burst of junk proposals cannot push it out
+// before the row check (VAULT-MESSAGING 0.83.6 §10.19.2).
+func TestClosedWithoutBallotStaysUntilCheckFinal(t *testing.T) {
+	for _, check := range []string{"", CheckPending} {
+		e := newEnv(t)
+		e.publish(e.svc)
+		e.closedVote(1)
+		e.rec(lid(1)).Check = check
+		for i := 2; i <= votewire.MaxPerConnection; i++ {
+			e.closedVote(i) // junk: closed, never checked
+		}
+		for i := 100; i < 100+votewire.MaxOpenPerConnection; i++ {
+			v := e.svc.NewVote(votetest.VoteSpec{ID: lid(i), Opens: e.now.Add(-3 * time.Hour), Closes: e.now.Add(-2 * time.Hour)})
+			if r := e.send(v); r.Code != "limit" {
+				t.Fatalf("check %q junk %d: %q", check, i, r.Code)
+			}
+		}
+		if e.rec(lid(1)) == nil || len(e.f.st.Compact["svc"]) != 0 {
+			t.Fatalf("check %q: the record was evicted", check)
+		}
+		for _, final := range []string{CheckVerified, CheckGaveUp} {
+			e.rec(lid(1)).Check = final
+			if !e.rec(lid(1)).evictable(e.now) {
+				t.Errorf("check %q then %s: not evictable", check, final)
+			}
+		}
+		e.closedVote(200)
+		if e.rec(lid(1)) != nil || e.rec(lid(200)) == nil || len(e.f.st.Compact["svc"]) != 1 {
+			t.Error("a final check: the record should have made room")
+		}
+	}
+}
+
+// A `checking` record does not count toward the 16 not yet closed, but
+// counts toward the 32 (§10.19.2).
+func TestCheckingDoesNotCountAsOpen(t *testing.T) {
+	e := newEnv(t)
+	e.publish(e.svc)
+	addChecking := func(n int) {
+		e.f.st.Records[key("svc", lid(n))] = &record{Conn: "svc", ID: lid(n), Reason: ReasonTrustRoot,
+			Opens: e.now.Unix() - 10, Closes: e.now.Unix() + 3600, KeptMS: e.now.UnixMilli()}
+	}
+	for i := 1; i <= votewire.MaxOpenPerConnection; i++ {
+		addChecking(i)
+	}
+	for i := 101; i <= 100+votewire.MaxOpenPerConnection; i++ {
+		if _, code := e.openVote(i); code != "" {
+			t.Fatalf("open %d with 16 checking: %q", i, code)
+		}
+	}
+	// 16 checking + 16 open = 32: full, and nothing is evictable.
+	if _, code := e.openVote(300); code != "limit" {
+		t.Fatalf("33rd: %q", code)
+	}
+	if o := len(e.f.st.Records); o != votewire.MaxPerConnection {
+		t.Fatalf("%d records", o)
+	}
+	// The 16 open ones are the cap for open; checking records fill the 32.
+	e2 := newEnv(t)
+	e2.publish(e2.svc)
+	e = e2
+	for i := 1; i <= votewire.MaxPerConnection-1; i++ {
+		addChecking(i)
+	}
+	if _, code := e.openVote(400); code != "" {
+		t.Fatalf("32nd record: %q", code)
+	}
+	if _, code := e.openVote(401); code != "limit" {
+		t.Fatalf("checking records do not count toward 32: %q", code)
 	}
 }

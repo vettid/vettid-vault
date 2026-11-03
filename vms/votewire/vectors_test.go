@@ -3,6 +3,7 @@ package votewire
 import (
 	"bytes"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"os"
@@ -32,6 +33,10 @@ type vectors struct {
 		Key     string `json:"key"`
 		CastMsg string `json:"cast_msg"`
 		CastSig string `json:"cast_sig"`
+		// The vote.cast body for choice_id, with pad (0.83.6 §10.19.5):
+		// 418 bytes.
+		CastBody       string `json:"cast_body"`
+		CastBodySHA256 string `json:"cast_body_sha256"`
 	} `json:"credential"`
 	Service struct {
 		Seed       string `json:"seed"`
@@ -149,6 +154,14 @@ func TestBallotVectors(t *testing.T) {
 	same(t, "cast_sig", cs, v.Credential.CastSig)
 	if err := VerifyCast(cred.Public().(ed25519.PublicKey), ph, leaf, cs); err != nil {
 		t.Errorf("cast_sig does not verify: %v", err)
+	}
+	body, err := MarshalCast(v.ProposalID, b, cs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	same(t, "cast_body", body, v.Credential.CastBody)
+	if sum := sha256.Sum256(body); len(body) != 418 || hex.EncodeToString(sum[:]) != v.Credential.CastBodySHA256 {
+		t.Errorf("cast_body_sha256 / length %d", len(body))
 	}
 
 	// The service's signatures: derived, byte for byte, and verified by

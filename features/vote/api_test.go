@@ -266,10 +266,10 @@ func TestAPIConfirm(t *testing.T) {
 	own := ed25519.NewKeyFromSeed(c.rec(v.ID).VKSeed)
 	c.answer(v, c.statuses()[0], must(votewire.SignBallot(own, v.Hash, v.Tag, "no")), uint64(c.now.UnixMilli()), true)
 	// While the confirmation is pending: service_ballot {choice_id, msg_ms}
-	// in vote.get and confirm_pending in the list summary; never after.
+	// (and pad) in vote.get and confirm_pending in the list summary; never after.
 	g := obj(t, c.app("vote.get", pairBody("svc", v.ID)))
 	sbo, _ := g.Object("service_ballot")
-	if cid, _ := sbo.String("choice_id"); cid != "no" || !sbo.Has("msg_ms") || len(sbo) != 2 {
+	if cid, _ := sbo.String("choice_id"); cid != "no" || !sbo.Has("msg_ms") || !sbo.Has("pad") || len(sbo) != 3 {
 		t.Errorf("service_ballot: %v", g)
 	}
 	lo := obj(t, c.app("vote.list", `{}`))

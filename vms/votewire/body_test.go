@@ -8,8 +8,10 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/vettid/vettid-vault/internal/strictjson"
+	"github.com/vettid/vettid-vault/vms/envelope"
 )
 
 func e64(b []byte) string { return base64.StdEncoding.EncodeToString(b) }
@@ -186,12 +188,12 @@ func TestCastBody(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, n := range []string{"proposal_id", "record_tag", "vk", "choice_id", "ballot_sig", "cast_sig"} {
+	for _, n := range []string{"proposal_id", "record_tag", "vk", "choice_id", "ballot_sig", "cast_sig", "pad"} {
 		if !o.Has(n) {
 			t.Errorf("no %s", n)
 		}
 	}
-	if len(o) != 6 {
+	if len(o) != 7 {
 		t.Errorf("%d members", len(o))
 	}
 	if got, _ := o.Base64("cast_sig", 64); !bytes.Equal(got, hx(t, v.Credential.CastSig)) {
@@ -415,5 +417,116 @@ func TestRefusalExisting(t *testing.T) {
 	r.Ballot = nil
 	if _, err := r.VerifyExisting(ik, ph, tag); err == nil {
 		t.Error("no ballot")
+	}
+}
+
+func TestPad(t *testing.T) {
+	for n := 1; n <= 32; n++ {
+		id := strings.Repeat("a", n)
+		p := Pad(id)
+		if len(p) != 32-n || strings.Trim(p, "0") != "" {
+			t.Fatalf("len %d: %q", n, p)
+		}
+	}
+	if Pad(strings.Repeat("a", 40)) != "" || Pad("") != strings.Repeat("0", 32) {
+		t.Error("out of range")
+	}
+}
+
+func castBall(t *testing.T, v *vectors, choice string) *Ballot {
+	return &Ballot{RecordTag: hx(t, v.RecordTag), VK: hx(t, v.VK), ChoiceID: choice, BallotSig: hx(t, v.BallotSig)}
+}
+
+// The vote.cast body is 418 bytes for every choice id, and its padded inner
+// plaintext 1,024 (VAULT-MESSAGING 0.83.6 §10.19.5).
+func TestCastBodyFixedSize(t *testing.T) {
+	v := load(t)
+	cs := hx(t, v.Credential.CastSig)
+	seqs := []uint64{1, 9, 10, 99, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000, 1000000000, 1<<53 - 1}
+	ts := time.Date(2026, 11, 3, 12, 0, 0, 123_000_000, time.UTC)
+	for n := 1; n <= 32; n++ {
+		choice := strings.Repeat("c", n)
+		body, err := MarshalCast(v.ProposalID, castBall(t, v, choice), cs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(body) != 418 {
+			t.Fatalf("choice len %d: body %d bytes", n, len(body))
+		}
+		for _, seq := range seqs {
+			in := &envelope.Inner{ID: "01JBQZ0000000000000000000B", Type: "vote.cast", TS: ts, Seq: seq, Body: body}
+			j, err := in.Marshal(envelope.ModeSession)
+			if err != nil {
+				t.Fatal(err)
+			}
+			p, err := envelope.Pad(j)
+			if err != nil || len(p) != 1024 {
+				t.Fatalf("choice len %d seq %d: json %d padded %d %v", n, seq, len(j), len(p), err)
+			}
+		}
+	}
+}
+
+// Receivers ignore pad: present, absent or of any length is accepted alike,
+// and a duplicate member is still refused.
+func TestPadIsIgnored(t *testing.T) {
+	v := load(t)
+	b := castBall(t, v, "yes")
+	row := func(extra string) json.RawMessage {
+		return json.RawMessage(`{"vk":"` + e64(b.VK) + `","choice_id":"yes","ballot_sig":"` + e64(b.BallotSig) + `"` + extra + `}`)
+	}
+	for _, extra := range []string{``, `,"pad":"` + Pad("yes") + `"`, `,"pad":""`, `,"pad":"` + strings.Repeat("0", 500) + `"`, `,"pad":"xyz"`, `,"pad":7`} {
+		r, err := parseRowBallot(row(extra))
+		if err != nil || r.ChoiceID != "yes" {
+			t.Errorf("%q: %v", extra, err)
+		}
+	}
+	// The outer parse refuses a duplicate member, in a nested object too.
+	sb := statusBody(t, v, true, nil)
+	dupBody := bytes.Replace(sb, []byte(`"choice_id":"yes"`), []byte(`"choice_id":"yes","pad":"0","pad":"0"`), 1)
+	if bytes.Equal(dupBody, sb) {
+		t.Fatal("no choice_id to extend")
+	}
+	if _, err := ParseStatusAnswer(dupBody); err == nil {
+		t.Error("duplicate pad accepted")
+	}
+	// the status answer and the already_voted refusal, through their parsers
+	for _, mut := range []func(m map[string]any){
+		nil,
+		func(m map[string]any) { setPad(m, "") },
+		func(m map[string]any) { setPad(m, Pad("yes")) },
+		func(m map[string]any) { setPad(m, strings.Repeat("0", 99)) },
+	} {
+		if _, err := ParseStatusAnswer(statusBody(t, v, true, mut)); err != nil {
+			t.Errorf("status answer: %v", err)
+		}
+	}
+	// the already_voted refusal's ballot, with each form of pad
+	for _, pad := range []string{"", `,"pad":"0"`, `,"pad":"` + Pad("yes") + `"`, `,"pad":"` + strings.Repeat("0", 99) + `"`} {
+		raw := `{"refusal_sig":"` + e64(bytes.Repeat([]byte{2}, 64)) + `","msg_ms":9,"connection":"` + e64(hx(t, v.Service.Refusal.Connection)) +
+			`","record_tag":"` + e64(b.RecordTag) + `","ballot":{"vk":"` + e64(b.VK) + `","choice_id":"yes","ballot_sig":"` + e64(b.BallotSig) + `"` + pad +
+			`},"ballot_msg_ms":` + "1" + `,"receipt_sig":"` + e64(hx(t, v.Service.ReceiptSig)) + `"}`
+		if r, err := ParseRefusal([]byte(raw)); err != nil || r.Ballot == nil {
+			t.Errorf("refusal %q: %v", pad, err)
+		}
+	}
+	// the cast body itself, as a service parses it
+	body, _ := MarshalCast(v.ProposalID, b, hx(t, v.Credential.CastSig))
+	o, err := strictjson.ParseObject(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p, err := o.String("pad"); err != nil || p != Pad("yes") {
+		t.Errorf("pad %q %v", p, err)
+	}
+	dup := bytes.Replace(body, []byte(`"pad":`), []byte(`"pad":"","pad":`), 1)
+	if _, err := strictjson.ParseObject(dup); err == nil {
+		t.Error("duplicate pad member accepted")
+	}
+}
+
+func setPad(m map[string]any, p string) {
+	if b, ok := m["ballot"].(map[string]any); ok {
+		b["pad"] = p
 	}
 }

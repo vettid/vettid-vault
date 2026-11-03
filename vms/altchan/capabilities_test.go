@@ -13,11 +13,11 @@ import (
 // the release offers recovery; recovery_r is listed either way.
 func TestReleaseCapabilities(t *testing.T) {
 	c := ReleaseCapabilities(true)
-	if !ValidCapabilities(c) || !HasCapability(c, CapRecoveryR) || !HasCapability(c, CapAttachments) || !HasCapability(c, CapRecoveryOffered) || len(c) != 3 {
+	if !ValidCapabilities(c) || !HasCapability(c, CapRecoveryR) || !HasCapability(c, CapAttachments) || !HasCapability(c, CapRecoveryOffered) || !HasCapability(c, CapVoteRows) || len(c) != 4 {
 		t.Fatalf("%q", c)
 	}
 	c = ReleaseCapabilities(false)
-	if !ValidCapabilities(c) || !HasCapability(c, CapRecoveryR) || HasCapability(c, CapRecoveryOffered) || len(c) != 2 {
+	if !ValidCapabilities(c) || !HasCapability(c, CapRecoveryR) || HasCapability(c, CapRecoveryOffered) || !HasCapability(c, CapVoteRows) || len(c) != 3 {
 		t.Fatalf("not offered: %q", c)
 	}
 	c[0] = "changed"
@@ -55,11 +55,11 @@ func TestDescriptorCapabilities(t *testing.T) {
 	na := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
 	rel := strings.Repeat("ab", 48)
 	d := MarshalDescriptor("i-1", k.Public(), rel, na, ReleaseCapabilities(false), 0)
-	if !strings.HasSuffix(string(d), `"not_after":"2026-10-16T12:00:00Z","capabilities":["attachments","recovery_r"]}`) {
+	if !strings.HasSuffix(string(d), `"not_after":"2026-10-16T12:00:00Z","capabilities":["attachments","recovery_r","vote_rows"]}`) {
 		t.Fatalf("member order: %s", d)
 	}
 	p, err := ParseDescriptor(d)
-	if err != nil || len(p.Capabilities) != 2 || !HasCapability(p.Capabilities, CapRecoveryR) {
+	if err != nil || len(p.Capabilities) != 3 || !HasCapability(p.Capabilities, CapRecoveryR) {
 		t.Fatalf("%v %q", err, p.Capabilities)
 	}
 	old := MarshalDescriptor("i-1", k.Public(), rel, na, nil, 0)
@@ -149,7 +149,7 @@ func TestDescriptorTimeScale(t *testing.T) {
 	rel := strings.Repeat("ab", 48)
 	for _, n := range []uint64{1, 24, 3600} {
 		d := MarshalDescriptor("i-1", k.Public(), rel, na, ReleaseCapabilities(true), n)
-		if !strings.HasSuffix(string(d), `"capabilities":["attachments","recovery_offered","recovery_r"],"time_scale":`+strconv.FormatUint(n, 10)+`}`) {
+		if !strings.HasSuffix(string(d), `"capabilities":["attachments","recovery_offered","recovery_r","vote_rows"],"time_scale":`+strconv.FormatUint(n, 10)+`}`) {
 			t.Fatalf("member order: %s", d)
 		}
 		if p, err := ParseDescriptor(d); err != nil || p.TimeScale != n {

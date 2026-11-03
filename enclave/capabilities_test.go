@@ -51,9 +51,9 @@ func descriptorCapabilities(t *testing.T, offered bool) {
 			t.Fatalf("round %d: %v", round, err)
 		}
 		got := e.Descriptor.Capabilities
-		want := []string{altchan.CapAttachments, altchan.CapRecoveryR}
+		want := []string{altchan.CapAttachments, altchan.CapRecoveryR, altchan.CapVoteRows}
 		if offered {
-			want = []string{altchan.CapAttachments, altchan.CapRecoveryOffered, altchan.CapRecoveryR}
+			want = []string{altchan.CapAttachments, altchan.CapRecoveryOffered, altchan.CapRecoveryR, altchan.CapVoteRows}
 		}
 		if strings.Join(got, ",") != strings.Join(want, ",") {
 			t.Fatalf("round %d: capabilities %q", round, got)

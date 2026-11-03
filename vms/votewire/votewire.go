@@ -53,6 +53,7 @@ const (
 	MaxResultsDoc   = MaxBody // the results document (chosen)
 	MaxExtensions   = 24      // extensions total at most 24 h, in steps of an hour
 	MaxWindow       = 7 * 24 * 3600
+	MaxEligible     = 100000    // eligible: the apps download no rows.json for more (0.83.3)
 	MaxExtension    = 24 * 3600 // extensions move the close by at most this, in total
 	MaxTitle        = 200
 	MaxText         = 16384
@@ -201,6 +202,20 @@ func (b *Ballot) Leaf() ([]byte, error) {
 	out = lp(out, b.VK)
 	out = lp(out, []byte(b.ChoiceID))
 	return lp(out, b.BallotSig), nil
+}
+
+// RowLeaf is the row leaf of a published ballot under tag whose choice_id is
+// whatever the service put there: ballot_leaf without the rule on the
+// choice id. A published row may carry any string; the vault needs its leaf
+// to see whether the row is in the tree (0.83.3, extra rows).
+func RowLeaf(recordTag, vk []byte, choiceID string, ballotSig []byte) ([]byte, error) {
+	if len(recordTag) != HashLen || len(vk) != KeyLen || len(choiceID) > 0xffff || len(ballotSig) != SigLen {
+		return nil, ErrField
+	}
+	out := append([]byte{}, recordTag...)
+	out = lp(out, vk)
+	out = lp(out, []byte(choiceID))
+	return lp(out, ballotSig), nil
 }
 
 // EmptyRowLeaf is the row leaf of a tag that did not vote: the tag alone

@@ -130,6 +130,21 @@ func (f *Feature) recordEvidence(s *vault.Session, r *record) []byte {
 		if rs.Proof != nil {
 			rb.Raw("row_proof", (&votewire.RecordProof{Index: rs.Proof.Index, TreeSize: rs.Proof.TreeSize, Path: rs.Proof.Path}).JSON())
 		}
+		if len(rs.Others) > 0 {
+			arr := []byte{'['}
+			for i, o := range rs.Others {
+				if i > 0 {
+					arr = append(arr, ',')
+				}
+				ballot := []byte(`null`)
+				if o.Row != nil {
+					ballot = strictjson.NewBuilder().Base64("vk", o.Row.VK).String("choice_id", o.Row.ChoiceID).String("pad", votewire.Pad(o.Row.ChoiceID)).Base64("ballot_sig", o.Row.BallotSig).Bytes()
+				}
+				arr = append(arr, strictjson.NewBuilder().Raw("row", strictjson.NewBuilder().Raw("ballot", ballot).Bytes()).
+					Raw("proof", (&votewire.RecordProof{Index: o.Proof.Index, TreeSize: o.Proof.TreeSize, Path: o.Proof.Path}).JSON()).Bytes()...)
+			}
+			rb.Raw("other_rows", append(arr, ']'))
+		}
 		e.Raw("results", rb.Bytes())
 	}
 	if r.Check != "" {

@@ -2,6 +2,7 @@ package vote
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -474,5 +475,24 @@ func TestGaveUpIsNeverEvicted(t *testing.T) {
 		if e.rec(lid(1)) == nil {
 			t.Fatalf("ballot %v: the gave_up record was evicted", withBallot)
 		}
+	}
+}
+
+// The problems notice lasts while the count is at the cap: once late checks
+// settle gave_up records (0.83.6), it goes without a release.
+func TestProblemsNoticeEndsBelowTheCap(t *testing.T) {
+	e := newEnv(t)
+	e.publish(e.svc)
+	for i := 1; i <= votewire.MaxProblemsPerConnection; i++ {
+		e.closedVote(i)
+		e.rec(lid(i)).Check = CheckGaveUp
+	}
+	e.f.st.Problems["svc"] = true
+	if got := string(e.f.problemsJSON()); !strings.Contains(got, `"connection_id":"svc"`) {
+		t.Fatalf("at the cap: %s", got)
+	}
+	e.rec(lid(1)).Check = CheckVerified // a late check settled it
+	if got := string(e.f.problemsJSON()); got != "[]" {
+		t.Fatalf("below the cap: %s", got)
 	}
 }

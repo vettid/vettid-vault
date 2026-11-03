@@ -334,11 +334,12 @@ func TestAPINotices(t *testing.T) {
 	if dr, _ := o.Array("dropped"); len(dr) != 0 {
 		t.Error("dropped notice came back")
 	}
-	// The problem cap: an entry until a record is released.
+	// The problem cap: an entry only while the count is at the cap (0.83.6;
+	// TestProblemsNoticeEndsBelowTheCap has the entry itself).
 	c.f.st.Problems["svc"] = true
 	o = obj(t, c.app("vote.list", `{}`))
-	if pr, _ := o.Array("problems"); len(pr) != 1 {
-		t.Error("problems")
+	if pr, _ := o.Array("problems"); len(pr) != 0 {
+		t.Error("problems below the cap")
 	}
 	// reconnect: a person connection with the key of a listed service.
 	c.h.AddConnection("person")

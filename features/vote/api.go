@@ -334,7 +334,8 @@ func (f *Feature) droppedJSON() []byte {
 }
 
 // problemsJSON is the notice that a connection is at its cap of problem
-// records (§10.19.2): until a record is released.
+// records (§10.19.2): until the count is below the cap again, by a release
+// or (0.83.6) a late check that settles a gave_up record.
 func (f *Feature) problemsJSON() []byte {
 	count := map[string]int{}
 	for _, r := range f.st.Records {
@@ -344,7 +345,7 @@ func (f *Feature) problemsJSON() []byte {
 	}
 	conns := make([]string, 0, len(f.st.Problems))
 	for c, on := range f.st.Problems {
-		if on {
+		if on && count[c] >= votewire.MaxProblemsPerConnection {
 			conns = append(conns, c)
 		}
 	}

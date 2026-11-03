@@ -266,10 +266,10 @@ func TestAPIConfirm(t *testing.T) {
 	own := ed25519.NewKeyFromSeed(c.rec(v.ID).VKSeed)
 	c.answer(v, c.statuses()[0], must(votewire.SignBallot(own, v.Hash, v.Tag, "no")), uint64(c.now.UnixMilli()), true)
 	// While the confirmation is pending: service_ballot {choice_id, msg_ms}
-	// in vote.get and confirm_pending in the list summary; never after.
+	// (and pad) in vote.get and confirm_pending in the list summary; never after.
 	g := obj(t, c.app("vote.get", pairBody("svc", v.ID)))
 	sbo, _ := g.Object("service_ballot")
-	if cid, _ := sbo.String("choice_id"); cid != "no" || !sbo.Has("msg_ms") || len(sbo) != 2 {
+	if cid, _ := sbo.String("choice_id"); cid != "no" || !sbo.Has("msg_ms") || !sbo.Has("pad") || len(sbo) != 3 {
 		t.Errorf("service_ballot: %v", g)
 	}
 	lo := obj(t, c.app("vote.list", `{}`))
@@ -334,11 +334,12 @@ func TestAPINotices(t *testing.T) {
 	if dr, _ := o.Array("dropped"); len(dr) != 0 {
 		t.Error("dropped notice came back")
 	}
-	// The problem cap: an entry until a record is released.
+	// The problem cap: an entry only while the count is at the cap (0.83.6;
+	// TestProblemsNoticeEndsBelowTheCap has the entry itself).
 	c.f.st.Problems["svc"] = true
 	o = obj(t, c.app("vote.list", `{}`))
-	if pr, _ := o.Array("problems"); len(pr) != 1 {
-		t.Error("problems")
+	if pr, _ := o.Array("problems"); len(pr) != 0 {
+		t.Error("problems below the cap")
 	}
 	// reconnect: a person connection with the key of a listed service.
 	c.h.AddConnection("person")
@@ -393,5 +394,43 @@ func TestNoCastWhileConfirmPending(t *testing.T) {
 	}
 	if len(c.h.SentOfType("vote.cast")) != 0 || c.rec(v.ID).Ballot != nil || c.rec(v.ID).ServiceBallot == nil {
 		t.Error("a ballot was made or the pending confirmation lost")
+	}
+}
+
+// The app's requests are read alike with a correct, absent or unexpected
+// `pad`; a duplicate `pad` is refused (§10.19.5, §5.3).
+func TestAPIPadIgnored(t *testing.T) {
+	pads := []struct {
+		name, pad string
+		ok        bool
+	}{
+		{"correct", `,"pad":"` + votewire.Pad("yes") + `"`, true},
+		{"absent", ``, true},
+		{"odd length", `,"pad":"000"`, true},
+		{"not zeros", `,"pad":"xyz"`, true},
+		{"number", `,"pad":7`, true},
+		{"duplicate", `,"pad":"0","pad":"00"`, false},
+	}
+	for _, p := range pads {
+		c := newCastEnv(t)
+		v := c.open(1)
+		r := c.app("vote.cast", pairBody("svc", v.ID, `"choice_id":"yes"`+p.pad))
+		if p.ok != r.OK() || (!p.ok && r.Code != "bad_request") {
+			t.Errorf("vote.cast %s: %q %s", p.name, r.Code, r.Body)
+		}
+	}
+	for _, p := range pads {
+		c, v := closedWith(t, receipted)
+		in := c.resultsFor(v, resOpts{mine: c.ownBallot(v)})
+		ballot := strictjson.NewBuilder().Base64("vk", in.Row.VK).String("choice_id", in.Row.ChoiceID).
+			Base64("ballot_sig", in.Row.BallotSig).Bytes()
+		ballot = append(append(ballot[:len(ballot)-1:len(ballot)-1], p.pad...), '}')
+		row := append(append([]byte(`{"ballot":`), ballot...), '}')
+		body := strictjson.NewBuilder().String("connection_id", "svc").String("proposal_id", v.ID).Base64("results", in.Results).
+			Base64("results_sig", in.Sig).Raw("bundle", in.Bundle).Raw("row", row).Raw("row_proof", in.Proof.JSON()).Bytes()
+		r := c.app("vote.results.submit", string(body))
+		if p.ok != r.OK() || (!p.ok && r.Code != "bad_request") {
+			t.Errorf("vote.results.submit %s: %q %s", p.name, r.Code, r.Body)
+		}
 	}
 }

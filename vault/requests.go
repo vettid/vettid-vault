@@ -165,7 +165,7 @@ func (m *Manager) outgoingEstablished(og *OutgoingHS, res *handshake.Result, now
 	m.queueDeposit(&OutboxEntry{Op: OpDeposit, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Token: held.Token, Payload: res.Fin}, now)
 	// ik: the invitation bundle's vault.ik, which hs.resp's signature was
 	// just checked against; sent only with the SAS (§10.4, 0.83.7).
-	b := strictjson.NewBuilder().String("connection_id", r.ID).String("sas", r.SAS).Base64("ik", p.IK).Bool("remote", r.Remote).
+	b := strictjson.NewBuilder().String("connection_id", r.ID).String("sas", r.SAS).Base64("ik", res.ResponderIK).Bool("remote", r.Remote).
 		String("exp", envelope.FormatTS(r.Expires))
 	if r.Name != "" {
 		b.String("name", r.Name)

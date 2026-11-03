@@ -374,3 +374,46 @@ func TestVerifiedWithConflictEvidence(t *testing.T) {
 }
 
 func boolOf(o strictjson.Object, k string) bool { v, _ := o.Bool(k); return v }
+
+// A gave_up check is not final (0.83.6, owner decision a): it makes one
+// vote.result item, a submission that does not verify leaves it gave_up, and
+// a verifying one is judged and takes the record out of the problem set.
+func TestGaveUpIsCheckedAgain(t *testing.T) {
+	c, v := closedWith(t, receipted)
+	// The results as published when the check was due; the member's app
+	// only gets to them after the vault gave up.
+	good := c.resultsFor(v, resOpts{mine: c.ownBallot(v)})
+	r := c.rec(v.ID)
+	c.now = r.dueAt().Add(CheckGiveUp + time.Second)
+	c.f.Tick(c.session())
+	if r = c.rec(v.ID); r.Check != CheckGaveUp || !r.problem() {
+		t.Fatalf("%q problem=%v", r.Check, r.problem())
+	}
+	results := func() (n int) {
+		for _, a := range c.h.Activities {
+			if a.Kind == "vote.result" && a.Ref == v.ID {
+				n++
+			}
+		}
+		return
+	}
+	if results() != 1 {
+		t.Fatalf("%d vote.result items at gave_up", results())
+	}
+	c.f.Tick(c.session())
+	if results() != 1 {
+		t.Fatal("the gave_up item came twice")
+	}
+	bad := c.resultsFor(v, resOpts{mine: c.ownBallot(v), badSig: true})
+	out, err := c.f.SubmitResults(c.session(), "svc", v.ID, bad)
+	if err != nil || out.State != CheckGaveUp || out.Reason != "input" || c.rec(v.ID).Check != CheckGaveUp {
+		t.Fatalf("no answer: %+v %v", out, err)
+	}
+	out, err = c.f.SubmitResults(c.session(), "svc", v.ID, good)
+	if err != nil || out.State != CheckVerified {
+		t.Fatalf("late check: %+v %v", out, err)
+	}
+	if r = c.rec(v.ID); r.Check != CheckVerified || r.problem() || !c.has("vote.check_ok", v.ID) {
+		t.Fatalf("%q problem=%v", r.Check, r.problem())
+	}
+}

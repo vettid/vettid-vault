@@ -527,38 +527,50 @@ func (f *Feature) apiResults(s *vault.Session, body []byte) (json.RawMessage, er
 		return nil, errBad
 	}
 	in.Bundle = append(json.RawMessage{}, raw...)
-	// row: {ballot: {vk, choice_id, ballot_sig} | null}
-	ro, err := o.Object("row")
-	if err != nil {
-		return nil, errBad
-	}
-	br, ok := ro["ballot"]
-	if !ok || len(ro) != 1 {
-		return nil, errBad
-	}
-	if string(br) != "null" {
-		bo, err := strictjson.AsObject(br)
+	// rows_unavailable (0.83.3): true, and then no row, row_proof or
+	// other_rows; anything else for it is a bad request.
+	if o.Has("rows_unavailable") {
+		if v, err := o.Bool("rows_unavailable"); err != nil || !v || o.Has("row") || o.Has("row_proof") || o.Has("other_rows") {
+			return nil, errBad
+		}
+		in.RowsUnavailable = true
+	} else {
+		// row: {ballot: {vk, choice_id, ballot_sig} | null}
+		ro, err := o.Object("row")
 		if err != nil {
 			return nil, errBad
 		}
-		rb := &votewire.RowBallot{}
-		if rb.VK, err = bo.Base64("vk", votewire.KeyLen); err != nil {
+		br, ok := ro["ballot"]
+		if !ok || len(ro) != 1 {
 			return nil, errBad
 		}
-		if rb.ChoiceID, err = bo.String("choice_id"); err != nil || !votewire.ValidChoiceID(rb.ChoiceID) {
+		if string(br) != "null" {
+			bo, err := strictjson.AsObject(br)
+			if err != nil {
+				return nil, errBad
+			}
+			rb := &votewire.RowBallot{}
+			if rb.VK, err = bo.Base64("vk", votewire.KeyLen); err != nil {
+				return nil, errBad
+			}
+			if rb.ChoiceID, err = bo.String("choice_id"); err != nil || !votewire.ValidChoiceID(rb.ChoiceID) {
+				return nil, errBad
+			}
+			if rb.BallotSig, err = bo.Base64("ballot_sig", votewire.SigLen); err != nil {
+				return nil, errBad
+			}
+			in.Row = rb
+		}
+		praw, ok := o["row_proof"]
+		if !ok {
 			return nil, errBad
 		}
-		if rb.BallotSig, err = bo.Base64("ballot_sig", votewire.SigLen); err != nil {
+		if in.Proof, err = votewire.ParseRecordProof(praw); err != nil {
 			return nil, errBad
 		}
-		in.Row = rb
-	}
-	praw, ok := o["row_proof"]
-	if !ok {
-		return nil, errBad
-	}
-	if in.Proof, err = votewire.ParseRecordProof(praw); err != nil {
-		return nil, errBad
+		if in.Others, err = parseOtherRows(o); err != nil {
+			return nil, err
+		}
 	}
 	out, err := f.SubmitResults(s, conn, id, in)
 	if err != nil {
@@ -572,4 +584,55 @@ func (f *Feature) apiResults(s *vault.Session, body []byte) (json.RawMessage, er
 		c.Bool("conflict_evidence", true)
 	}
 	return strictjson.NewBuilder().String("proposal_id", id).Raw("check", c.Bytes()).Bytes(), nil
+}
+
+// parseOtherRows reads other_rows (0.83.3): at most MaxOtherRows entries
+// {row: {ballot: {...} | null}, proof}. The shape is strict (a bad request
+// otherwise); an entry whose members do not decode (base64, types, the
+// proof) is marked Bad, input that does not verify, and judged with the
+// results. A choice id is any string: the entry is a published row, and the
+// vault only needs its leaf. `pad` beside it is ignored.
+func parseOtherRows(o strictjson.Object) ([]OtherRow, error) {
+	arr, present, err := o.OptArray("other_rows")
+	if err != nil || len(arr) > MaxOtherRows {
+		return nil, errBad
+	}
+	if !present {
+		return nil, nil
+	}
+	out := make([]OtherRow, 0, len(arr))
+	for _, raw := range arr {
+		eo, err := strictjson.AsObject(raw)
+		if err != nil || len(eo) != 2 {
+			return nil, errBad
+		}
+		ro, err := eo.Object("row")
+		if err != nil || len(ro) != 1 {
+			return nil, errBad
+		}
+		br, ok := ro["ballot"]
+		praw, ok2 := eo["proof"]
+		if !ok || !ok2 {
+			return nil, errBad
+		}
+		var e OtherRow
+		if string(br) == "null" {
+			e.Empty = true
+		} else {
+			bo, err := strictjson.AsObject(br)
+			if err != nil {
+				return nil, errBad
+			}
+			var e1, e2, e3 error
+			e.VK, e1 = bo.Base64("vk", votewire.KeyLen)
+			e.ChoiceID, e2 = bo.String("choice_id")
+			e.BallotSig, e3 = bo.Base64("ballot_sig", votewire.SigLen)
+			e.Bad = e1 != nil || e2 != nil || e3 != nil
+		}
+		if e.Proof, err = votewire.ParseRecordProof(praw); err != nil {
+			e.Proof, e.Bad = nil, true
+		}
+		out = append(out, e)
+	}
+	return out, nil
 }

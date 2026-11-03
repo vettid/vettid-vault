@@ -45,6 +45,10 @@ const (
 	CheckGaveUp      = "gave_up"
 )
 
+// CheckRowsUnavailable is the reason of a check that stays pending (or
+// gave up) because the app could not get the member's row (0.83.3).
+const CheckRowsUnavailable = "rows_unavailable"
+
 // The ballot (§10.19.3). Set by casting (PR 3); the bookkeeping of the
 // records below already depends on it.
 const (
@@ -156,7 +160,15 @@ type results struct {
 	Bundle json.RawMessage `json:"bundle,omitempty"`
 	Row    *svcBallot      `json:"row,omitempty"` // nil: an empty row
 	Proof  *proof          `json:"proof,omitempty"`
+	Others []*otherRow     `json:"other_rows,omitempty"` // second rows under the member's tag (row_duplicate)
 	AtMS   int64           `json:"at_ms"`
+}
+
+// otherRow is an extra row of the results under the member's tag that
+// verified to the signed rows_root at an index other than the main row's.
+type otherRow struct {
+	Row   *svcBallot `json:"row,omitempty"` // nil: an empty row
+	Proof *proof     `json:"proof"`
 }
 
 // record is one proposal kept (§10.19.2).
@@ -206,6 +218,9 @@ type record struct {
 
 	Check       string `json:"check,omitempty"`
 	CheckReason string `json:"check_reason,omitempty"`
+	// RowsProblem: the vote.problem of a rows_unavailable submission was
+	// raised (once per record).
+	RowsProblem bool `json:"rows_problem,omitempty"`
 
 	Ballot         *ballot `json:"ballot,omitempty"`
 	RefusalProblem bool    `json:"refusal_problem,omitempty"` // a refusal raised a vote.problem
@@ -394,6 +409,11 @@ func (r *record) problem() bool {
 	// A gave_up check never saw results that verify, so it is never clean
 	// (0.83.6): a service must not withhold its results and then evict it.
 	if r.RejectReason != "" || r.Check == CheckFailed || r.Check == CheckGaveUp || r.RefusalProblem || r.ConflictEv {
+		return true
+	}
+	// A check that waits for a row the app cannot get (0.83.3) is a problem
+	// record, not an in-progress one: it is never evicted.
+	if r.Check == CheckPending && r.CheckReason == CheckRowsUnavailable {
 		return true
 	}
 	if b := r.Ballot; b != nil && (b.State == BallotConflict || b.State == BallotDisputed) {

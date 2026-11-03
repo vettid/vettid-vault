@@ -40,9 +40,9 @@ func inviteBundleCapabilities(t *testing.T, notOffered bool) {
 			t.Fatalf("%s: %v", kind, err)
 		}
 		if kind == KindApp {
-			want := 3
+			want := 4
 			if notOffered {
-				want = 2
+				want = 3
 			}
 			if len(b.Capabilities) != want || !altchan.HasCapability(b.Capabilities, altchan.CapRecoveryR) ||
 				!altchan.HasCapability(b.Capabilities, altchan.CapAttachments) ||

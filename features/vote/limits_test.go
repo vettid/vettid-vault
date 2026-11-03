@@ -127,15 +127,15 @@ func TestInProgressIsNeverEvicted(t *testing.T) {
 			t.Errorf("no ballot, check %q: not evictable", c)
 		}
 	}
-	for _, c := range []string{CheckVerified, CheckGaveUp} {
-		r.Check = c
-		if !r.evictable(e.now) {
-			t.Errorf("check %s: evictable", c)
-		}
+	r.Check = CheckVerified
+	if !r.evictable(e.now) {
+		t.Error("check verified: evictable")
 	}
-	r.Check = CheckFailed
-	if r.evictable(e.now) || !r.problem() {
-		t.Error("failed check: a problem, never evicted")
+	for _, c := range []string{CheckFailed, CheckGaveUp} {
+		r.Check = c // gave_up never saw results that verify (0.83.6)
+		if r.evictable(e.now) || !r.problem() {
+			t.Errorf("check %s: a problem, never evicted", c)
+		}
 	}
 	r.Check = CheckVerified
 	r.RefusalProblem = true
@@ -327,8 +327,8 @@ func TestVaultCapOf128(t *testing.T) {
 	}
 }
 
-// A record that closed without a ballot is kept until its check is final
-// (verified or gave_up), so a burst of junk proposals cannot push it out
+// A record that closed without a ballot is kept until its check is
+// verified (a gave_up one is a problem record), so a burst of junk proposals cannot push it out
 // before the row check (VAULT-MESSAGING 0.83.6 §10.19.2).
 func TestClosedWithoutBallotStaysUntilCheckFinal(t *testing.T) {
 	for _, check := range []string{"", CheckPending} {
@@ -348,11 +348,13 @@ func TestClosedWithoutBallotStaysUntilCheckFinal(t *testing.T) {
 		if e.rec(lid(1)) == nil || len(e.f.st.Compact["svc"]) != 0 {
 			t.Fatalf("check %q: the record was evicted", check)
 		}
-		for _, final := range []string{CheckVerified, CheckGaveUp} {
-			e.rec(lid(1)).Check = final
-			if !e.rec(lid(1)).evictable(e.now) {
-				t.Errorf("check %q then %s: not evictable", check, final)
-			}
+		e.rec(lid(1)).Check = CheckGaveUp
+		if e.rec(lid(1)).evictable(e.now) || !e.rec(lid(1)).problem() {
+			t.Errorf("check %q then gave_up: a problem, never evicted", check)
+		}
+		e.rec(lid(1)).Check = CheckVerified
+		if !e.rec(lid(1)).evictable(e.now) {
+			t.Errorf("check %q then verified: not evictable", check)
 		}
 		e.closedVote(200)
 		if e.rec(lid(1)) != nil || e.rec(lid(200)) == nil || len(e.f.st.Compact["svc"]) != 1 {
@@ -406,5 +408,63 @@ func TestCheckingDoesNotCountAsOpen(t *testing.T) {
 	}
 	if _, code := e.openVote(401); code != "limit" {
 		t.Fatalf("checking records count toward the 32: %q", code)
+	}
+}
+
+// At the 16 not yet closed alone, nothing is evicted: evicting closed
+// records cannot make room for an open one (§10.19.2).
+func TestOpenCapEvictsNothing(t *testing.T) {
+	e := newEnv(t)
+	e.publish(e.svc)
+	for i := 1; i <= 5; i++ {
+		e.closedVote(i)
+		e.rec(lid(i)).Check = CheckVerified // evictable
+	}
+	for i := 101; i <= 100+votewire.MaxOpenPerConnection; i++ {
+		if _, code := e.openVote(i); code != "" {
+			t.Fatalf("open %d: %q", i, code)
+		}
+	}
+	if _, code := e.openVote(200); code != "limit" {
+		t.Fatalf("17th open: %q", code)
+	}
+	for i := 1; i <= 5; i++ {
+		if e.rec(lid(i)) == nil {
+			t.Fatalf("closed record %d evicted", i)
+		}
+	}
+	if n := len(e.f.st.Compact["svc"]); n != 0 {
+		t.Fatalf("%d compact records", n)
+	}
+}
+
+// A service that withholds its results until the check gives up cannot then
+// push the record out with a burst of proposals: gave_up is a problem record,
+// with or without a ballot (0.83.6 §10.19.2).
+func TestGaveUpIsNeverEvicted(t *testing.T) {
+	for _, withBallot := range []bool{false, true} {
+		e := newEnv(t)
+		e.publish(e.svc)
+		e.closedVote(1)
+		r := e.rec(lid(1))
+		r.Check = CheckGaveUp
+		if withBallot {
+			r.Ballot = &ballot{State: BallotRecorded, ChoiceID: "yes", BallotSig: make([]byte, 64), MsgMS: 1, ReceiptSig: make([]byte, 64)}
+		}
+		for i := 2; i <= votewire.MaxPerConnection+1; i++ {
+			e.closedVote(i)
+			e.rec(lid(i)).Check = CheckVerified
+		}
+		for i := 100; i < 140; i++ { // the burst: kept while verified ones make room, then limit
+			v := e.svc.NewVote(votetest.VoteSpec{ID: lid(i), Opens: e.now.Add(-3 * time.Hour), Closes: e.now.Add(-2 * time.Hour)})
+			e.send(v)
+			e.now = e.now.Add(time.Second)
+		}
+		if n := len(e.f.st.Compact["svc"]); n == 0 {
+			t.Fatalf("ballot %v: nothing was evicted, so the test proves nothing", withBallot)
+		}
+		if e.rec(lid(1)) == nil {
+			t.Fatalf("ballot %v: the gave_up record was evicted", withBallot)
+		}
 	}
 }

@@ -395,3 +395,41 @@ func TestNoCastWhileConfirmPending(t *testing.T) {
 		t.Error("a ballot was made or the pending confirmation lost")
 	}
 }
+
+// The app's requests are read alike with a correct, absent or unexpected
+// `pad`; a duplicate `pad` is refused (§10.19.5, §5.3).
+func TestAPIPadIgnored(t *testing.T) {
+	pads := []struct {
+		name, pad string
+		ok        bool
+	}{
+		{"correct", `,"pad":"` + votewire.Pad("yes") + `"`, true},
+		{"absent", ``, true},
+		{"odd length", `,"pad":"000"`, true},
+		{"not zeros", `,"pad":"xyz"`, true},
+		{"number", `,"pad":7`, true},
+		{"duplicate", `,"pad":"0","pad":"00"`, false},
+	}
+	for _, p := range pads {
+		c := newCastEnv(t)
+		v := c.open(1)
+		r := c.app("vote.cast", pairBody("svc", v.ID, `"choice_id":"yes"`+p.pad))
+		if p.ok != r.OK() || (!p.ok && r.Code != "bad_request") {
+			t.Errorf("vote.cast %s: %q %s", p.name, r.Code, r.Body)
+		}
+	}
+	for _, p := range pads {
+		c, v := closedWith(t, receipted)
+		in := c.resultsFor(v, resOpts{mine: c.ownBallot(v)})
+		ballot := strictjson.NewBuilder().Base64("vk", in.Row.VK).String("choice_id", in.Row.ChoiceID).
+			Base64("ballot_sig", in.Row.BallotSig).Bytes()
+		ballot = append(append(ballot[:len(ballot)-1:len(ballot)-1], p.pad...), '}')
+		row := append(append([]byte(`{"ballot":`), ballot...), '}')
+		body := strictjson.NewBuilder().String("connection_id", "svc").String("proposal_id", v.ID).Base64("results", in.Results).
+			Base64("results_sig", in.Sig).Raw("bundle", in.Bundle).Raw("row", row).Raw("row_proof", in.Proof.JSON()).Bytes()
+		r := c.app("vote.results.submit", string(body))
+		if p.ok != r.OK() || (!p.ok && r.Code != "bad_request") {
+			t.Errorf("vote.results.submit %s: %q %s", p.name, r.Code, r.Body)
+		}
+	}
+}

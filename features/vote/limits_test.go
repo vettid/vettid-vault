@@ -370,8 +370,17 @@ func TestCheckingDoesNotCountAsOpen(t *testing.T) {
 		e.f.st.Records[key("svc", lid(n))] = &record{Conn: "svc", ID: lid(n), Reason: ReasonTrustRoot,
 			Opens: e.now.Unix() - 10, Closes: e.now.Unix() + 3600, KeptMS: e.now.UnixMilli()}
 	}
+	addRestore := func(n int) {
+		e.f.st.Records[key("svc", lid(n))] = &record{Conn: "svc", ID: lid(n), Restore: true,
+			Opens: e.now.Unix() - 10, Closes: e.now.Unix() + 3600, KeptMS: e.now.UnixMilli()}
+	}
+	// Half checking for a reason, half checking after a restore.
 	for i := 1; i <= votewire.MaxOpenPerConnection; i++ {
-		addChecking(i)
+		if i%2 == 0 {
+			addRestore(i)
+		} else {
+			addChecking(i)
+		}
 	}
 	for i := 101; i <= 100+votewire.MaxOpenPerConnection; i++ {
 		if _, code := e.openVote(i); code != "" {
@@ -396,6 +405,6 @@ func TestCheckingDoesNotCountAsOpen(t *testing.T) {
 		t.Fatalf("32nd record: %q", code)
 	}
 	if _, code := e.openVote(401); code != "limit" {
-		t.Fatalf("checking records do not count toward 32: %q", code)
+		t.Fatalf("checking records count toward the 32: %q", code)
 	}
 }

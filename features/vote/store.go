@@ -501,15 +501,16 @@ func (f *Feature) admit(rec *record, now time.Time) *limitHit {
 		return &limitHit{max: votewire.MaxProblemsPerConnection, problems: true}
 	}
 	newProblem := rec.problem()
-	// A record in `checking` may never verify: it counts toward the 32 and
-	// the 128 but not toward the 16 not yet closed (§10.19.2).
-	newClosed := rec.closed(now) || rec.Reason != ""
+	// A record in `checking` (a check reason, or a restore not yet
+	// confirmed) may never verify: it counts toward the 32 and the 128 but
+	// not toward the 16 not yet closed (§10.19.2).
+	newClosed := rec.closed(now) || rec.Reason != "" || rec.Restore
 	for {
 		nonProblem, open := 0, 0
 		for _, r := range f.forConn(conn) {
 			if !r.problem() {
 				nonProblem++
-				if !r.closed(now) && r.Reason == "" {
+				if !r.closed(now) && r.Reason == "" && !r.Restore {
 					open++
 				}
 			}

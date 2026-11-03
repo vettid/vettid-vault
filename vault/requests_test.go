@@ -3,6 +3,7 @@ package vault
 import (
 	"context"
 	"crypto/ed25519"
+	"encoding/base64"
 	"fmt"
 	"strings"
 	"testing"
@@ -365,4 +366,36 @@ func FuzzRequestRef(f *testing.F) {
 			t.Fatalf("accepted %q %q", id, dir)
 		}
 	})
+}
+
+// §10.4 (0.83.7): an outgoing request carries the peer's ik (the
+// invitation bundle's vault.ik, which the handshake was checked against)
+// only together with the SAS; the accept answer and a waiting request
+// have none.
+func TestOutgoingRequestIK(t *testing.T) {
+	a, b := newVaultPair(t)
+	_, link := a.linkFor(t, time.Hour)
+	r, _ := b.request(t, "connection.invite.accept", `{"link":"`+link+`"}`)
+	cid := bodyStr(t, r, "connection_id")
+	if strings.Contains(string(r.Body), `"ik"`) {
+		t.Fatalf("accept carries ik: %s", r.Body)
+	}
+	if l, _ := b.request(t, "connection.request.list", `{}`); strings.Contains(string(l.Body), `"ik"`) {
+		t.Fatalf("waiting request carries ik: %s", l.Body)
+	}
+	want := `"ik":"` + base64.StdEncoding.EncodeToString(ed25519.NewKeyFromSeed(a.m.st.IdentitySeed).Public().(ed25519.PublicKey)) + `"`
+	pump(t, b, a) // hs.init
+	pump(t, a, b) // hs.resp
+	out := event(b.appInbox(), "connection.request.outgoing")
+	if out == nil || bodyStr(t, out, "connection_id") != cid || !strings.Contains(string(out.Body), want) {
+		t.Fatalf("outgoing: %+v", out)
+	}
+	if l, _ := b.request(t, "connection.request.list", `{}`); !strings.Contains(string(l.Body), want) {
+		t.Fatalf("list: %s", l.Body)
+	}
+	// The incoming side's entries are unchanged: no ik.
+	pump(t, b, a) // hs.fin
+	if l, _ := a.request(t, "connection.request.list", `{}`); strings.Contains(string(l.Body), `"ik"`) {
+		t.Fatalf("incoming entry carries ik: %s", l.Body)
+	}
 }

@@ -163,7 +163,9 @@ func (m *Manager) outgoingEstablished(og *OutgoingHS, res *handshake.Result, now
 	m.st.Requests[r.ID] = r
 	m.reqEpochs[r.ID] = res.Epoch
 	m.queueDeposit(&OutboxEntry{Op: OpDeposit, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Token: held.Token, Payload: res.Fin}, now)
-	b := strictjson.NewBuilder().String("connection_id", r.ID).String("sas", r.SAS).Bool("remote", r.Remote).
+	// ik: the invitation bundle's vault.ik, which hs.resp's signature was
+	// just checked against; sent only with the SAS (§10.4, 0.83.7).
+	b := strictjson.NewBuilder().String("connection_id", r.ID).String("sas", r.SAS).Base64("ik", p.IK).Bool("remote", r.Remote).
 		String("exp", envelope.FormatTS(r.Expires))
 	if r.Name != "" {
 		b.String("name", r.Name)
@@ -646,7 +648,7 @@ func (m *Manager) hRequestList(_ context.Context, s *Session, in *envelope.Inner
 			inc = append(inc, listedRequest{r.Created, r.ID, m.incomingJSON(r, true)})
 			continue
 		}
-		b := strictjson.NewBuilder().String("connection_id", r.ID).String("sas", r.SAS).Bool("remote", r.Remote).
+		b := strictjson.NewBuilder().String("connection_id", r.ID).String("sas", r.SAS).Base64("ik", r.Peer.IK).Bool("remote", r.Remote).
 			String("state", requestState(r)).Bool("peer_approved", r.PeerApproved).
 			String("created_at", envelope.FormatTS(r.Created)).String("exp", envelope.FormatTS(r.Expires))
 		if r.Name != "" {

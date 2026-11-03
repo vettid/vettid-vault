@@ -3,6 +3,7 @@ package vault
 import (
 	"context"
 	"crypto/ed25519"
+	"encoding/base64"
 	"fmt"
 	"strings"
 	"testing"
@@ -365,4 +366,112 @@ func FuzzRequestRef(f *testing.F) {
 			t.Fatalf("accepted %q %q", id, dir)
 		}
 	})
+}
+
+// §10.4 (0.83.7): an outgoing request carries the peer's ik (the
+// invitation bundle's vault.ik, which the handshake was checked against)
+// only together with the SAS; the accept answer and a waiting request
+// have none.
+func TestOutgoingRequestIK(t *testing.T) {
+	a, b := newVaultPair(t)
+	_, link := a.linkFor(t, time.Hour)
+	r, _ := b.request(t, "connection.invite.accept", `{"link":"`+link+`"}`)
+	cid := bodyStr(t, r, "connection_id")
+	if strings.Contains(string(r.Body), `"ik"`) {
+		t.Fatalf("accept carries ik: %s", r.Body)
+	}
+	if l, _ := b.request(t, "connection.request.list", `{}`); strings.Contains(string(l.Body), `"ik"`) {
+		t.Fatalf("waiting request carries ik: %s", l.Body)
+	}
+	want := `"ik":"` + base64.StdEncoding.EncodeToString(ed25519.NewKeyFromSeed(a.m.st.IdentitySeed).Public().(ed25519.PublicKey)) + `"`
+	pump(t, b, a) // hs.init
+	pump(t, a, b) // hs.resp
+	out := event(b.appInbox(), "connection.request.outgoing")
+	if out == nil || bodyStr(t, out, "connection_id") != cid || !strings.Contains(string(out.Body), want) {
+		t.Fatalf("outgoing: %+v", out)
+	}
+	if l, _ := b.request(t, "connection.request.list", `{}`); !strings.Contains(string(l.Body), want) {
+		t.Fatalf("list: %s", l.Body)
+	}
+	// The incoming side's entries are unchanged: no ik.
+	pump(t, b, a) // hs.fin
+	if l, _ := a.request(t, "connection.request.list", `{}`); strings.Contains(string(l.Body), `"ik"`) {
+		t.Fatalf("incoming entry carries ik: %s", l.Body)
+	}
+}
+
+// ikWant is the `"ik":"..."` member for d's identity key.
+func ikWant(d *devFixture) string {
+	return `"ik":"` + base64.StdEncoding.EncodeToString(ed25519.NewKeyFromSeed(d.m.st.IdentitySeed).Public().(ed25519.PublicKey)) + `"`
+}
+
+// The outgoing entry's ik is stored with the request: the list still carries
+// it once the vault is locked and unlocked again (§10.4, 0.83.7).
+func TestOutgoingRequestIKSurvivesRestart(t *testing.T) {
+	a, b := newVaultPair(t)
+	_, link := a.linkFor(t, time.Hour)
+	b.request(t, "connection.invite.accept", `{"link":"`+link+`"}`)
+	pump(t, b, a) // hs.init
+	pump(t, a, b) // hs.resp
+	want := ikWant(a)
+	if l, _ := b.request(t, "connection.request.list", `{}`); !strings.Contains(string(l.Body), want) {
+		t.Fatalf("list before: %s", l.Body)
+	}
+	if err := b.m.Lock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	m2, _, err := b.unlock(testPIN, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.m = m2
+	if l, _ := b.request(t, "connection.request.list", `{}`); !strings.Contains(string(l.Body), want) || !strings.Contains(string(l.Body), `"sas"`) {
+		t.Fatalf("list after the restart: %s", l.Body)
+	}
+}
+
+// A request made by accepting an introduction's link carries the introduced
+// vault's ik, in the event and the list (§10.15, §10.4).
+func TestOutgoingRequestIKThroughIntroduction(t *testing.T) {
+	a, b := newVaultPair(t)
+	a.m.mu.Lock()
+	_, link, err := managerHost{a.m}.CreateIntroInvite(context.Background(), ed25519.NewKeyFromSeed(b.m.st.IdentitySeed).Public().(ed25519.PublicKey), "conn-X", a.m.now())
+	a.m.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.m.mu.Lock()
+	_, err = managerHost{b.m}.AcceptInviteLink(context.Background(), link, "conn-X", b.m.now())
+	b.m.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pump(t, b, a) // hs.init
+	pump(t, a, b) // hs.resp
+	want := ikWant(a)
+	out := event(b.appInbox(), "connection.request.outgoing")
+	if out == nil || bodyStr(t, out, "introduced_by") != "conn-X" || !strings.Contains(string(out.Body), want) {
+		t.Fatalf("outgoing: %+v", out)
+	}
+	if l, _ := b.request(t, "connection.request.list", `{}`); !strings.Contains(string(l.Body), want) {
+		t.Fatalf("list: %s", l.Body)
+	}
+}
+
+// A service's invitation: the outgoing request carries peer_kind and the
+// service vault's ik together (§6.4, §10.4).
+func TestOutgoingRequestIKServicePeer(t *testing.T) {
+	a, b := newVaultPair(t)
+	link := serviceLinkFor(t, a, time.Hour, "service")
+	b.request(t, "connection.invite.accept", `{"link":"`+link+`"}`)
+	pump(t, b, a)
+	pump(t, a, b)
+	want := ikWant(a)
+	out := event(b.appInbox(), "connection.request.outgoing")
+	if out == nil || !strings.Contains(string(out.Body), want) || !strings.Contains(string(out.Body), `"peer_kind":"service"`) {
+		t.Fatalf("outgoing: %+v", out)
+	}
+	if l, _ := b.request(t, "connection.request.list", `{}`); !strings.Contains(string(l.Body), want) || !strings.Contains(string(l.Body), `"peer_kind":"service"`) {
+		t.Fatalf("list: %s", l.Body)
+	}
 }

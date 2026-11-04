@@ -302,7 +302,7 @@ func TestTransferThenRotateNoSignIn(t *testing.T) {
 	}
 }
 
-// §11.14.10, the reviewer's probe: a sign-in on the new phone before its
+// §11.14.10: a sign-in on the new phone before its
 // first unlock from storage would sign with K1 while the statement is held
 // (no chain from K0 yet): it is refused transfer_incomplete, and once the
 // move has finished the same challenge is approved and the peer follows.

@@ -140,3 +140,140 @@ func TestTransferRotatesCredentialKey(t *testing.T) {
 		t.Fatalf("K1→K2 not followed: %s", res)
 	}
 }
+
+// tkWorld is a member, a peer that pinned the member's credential key K0,
+// and helpers to move the member's vault to new phones.
+type tkWorld struct {
+	t     *testing.T
+	aw    *acWorld
+	a, p  *acApp
+	pConn string
+	k0    string
+}
+
+func newTKWorld(t *testing.T, seed byte) *tkWorld {
+	aw := newACWorld(t)
+	w := &tkWorld{t: t, aw: aw}
+	w.a = aw.newApp("member-tk", enclavetest.NewAndroidAttester(seed, enclavetest.AndroidOptions{}))
+	if r := aw.enroll(w.a, acPIN); !r.OK {
+		t.Fatal(r.Code)
+	}
+	w.p = aw.newApp("member-tk-peer", enclavetest.NewAndroidAttester(seed+1, enclavetest.AndroidOptions{}))
+	if r := aw.enroll(w.p, acPIN); !r.OK {
+		t.Fatal(r.Code)
+	}
+	w.pConn, _ = acConnectIDs(t, w.p, w.a)
+	w.k0 = w.key(w.a.dev)
+	if res := w.auth(w.a.dev); !strings.Contains(res, w.k0) {
+		t.Fatalf("first authentication: %s", res)
+	}
+	return w
+}
+
+func (w *tkWorld) auth(member *client.Device) string {
+	w.t.Helper()
+	ctx := ctxT(w.t, 120*time.Second)
+	id, err := w.p.dev.AuthRequest(ctx, w.pConn, "prove it")
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	waitEvent(w.t, member, "connection.authenticate.pending", has("request_id", id))
+	if _, err := member.CredentialUnlock(ctx, credPW); err != nil {
+		w.t.Fatal(err)
+	}
+	if err := member.AuthApprove(ctx, id); err != nil {
+		w.t.Fatal(err)
+	}
+	return string(waitEvent(w.t, w.p.dev, "connection.authenticate.result", has("request_id", id)).Body)
+}
+
+func (w *tkWorld) key(d *client.Device) string {
+	w.t.Helper()
+	v, err := d.CredentialVersion(ctxT(w.t, 60*time.Second))
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	k, _ := v.String("key")
+	return k
+}
+
+// move transfers the vault from the app from to a new phone, which pairs
+// and fetches the credential but does not unlock.
+func (w *tkWorld) move(from *acApp, name string, seed byte) *acApp {
+	w.t.Helper()
+	ctx := ctxT(w.t, 120*time.Second)
+	id, link, err := from.dev.TransferCreate(ctx)
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	b := w.aw.newApp(name, enclavetest.NewIOSAttester(seed, enclavetest.IOSOptions{}))
+	if _, err := b.dev.PairAttested(ctx, link, b.att); err != nil {
+		w.t.Fatal(err)
+	}
+	waitEvent(w.t, from.dev, "device.transfer.pending", has("transfer_id", id))
+	if err := from.dev.TransferApprove(ctx, id, acPIN, credPW); err != nil {
+		w.t.Fatal(err)
+	}
+	if err := b.dev.AwaitPaired(ctx); err != nil {
+		w.t.Fatalf("new app: %v", err)
+	}
+	b.guid, b.vid = b.dev.UserGUID(), from.vid
+	if err := b.dev.CredentialFetch(ctx); err != nil {
+		w.t.Fatal(err)
+	}
+	return b
+}
+
+// finish is the new phone's "Finish the move" unlock.
+func (w *tkWorld) finish(b *acApp) {
+	w.t.Helper()
+	w.aw.lock(b)
+	if r := w.aw.mustUnlock(b, acPIN, client.UnlockOptions{}, ""); !r.OK {
+		w.t.Fatalf("new app unlock: %+v", r)
+	}
+}
+
+func (w *tkWorld) noKeyEvent() {
+	w.t.Helper()
+	if in, err := w.p.dev.WaitEvent(ctxT(w.t, 5*time.Second), "connection.authenticate.key", nil); err == nil {
+		w.t.Fatalf("the peer was told of a key: %s", in.Body)
+	}
+}
+
+// §11.14.10 "The owed mark": a credential.rotate while the transfer's
+// statement is held sends K0→K1 and K1→K2 as one chain; the peer that
+// pinned K0 follows it to K2, and the later unlock sends nothing more.
+func TestTransferRotateWhileHeld(t *testing.T) {
+	w := newTKWorld(t, 0x86)
+	b := w.move(w.a, "new-phone-tk-b", 0x95)
+	w.noKeyEvent()
+	if err := b.dev.CredentialRotate(ctxT(t, 120*time.Second), credPW); err != nil {
+		t.Fatal(err)
+	}
+	k2 := w.key(b.dev)
+	waitEvent(t, w.p.dev, "connection.authenticate.key", has("key", k2))
+	w.finish(b)
+	w.noKeyEvent()
+	if res := w.auth(b.dev); !strings.Contains(res, `"key_changed":false`) || !strings.Contains(res, k2) {
+		t.Fatalf("K0→K2 not followed: %s", res)
+	}
+}
+
+// Two transfers before the first new phone unlocked: both statements are
+// held and go as one chain at the last phone's first unlock.
+func TestDoubleTransferChain(t *testing.T) {
+	w := newTKWorld(t, 0x87)
+	b := w.move(w.a, "new-phone-tk-1", 0x96)
+	k1 := w.key(b.dev)
+	c := w.move(b, "new-phone-tk-2", 0x97)
+	k2 := w.key(c.dev)
+	if k1 == w.k0 || k2 == k1 {
+		t.Fatal("the credential key did not rotate at each approval")
+	}
+	w.noKeyEvent()
+	w.finish(c)
+	waitEvent(t, w.p.dev, "connection.authenticate.key", has("key", k2))
+	if res := w.auth(c.dev); !strings.Contains(res, `"key_changed":false`) || !strings.Contains(res, k2) {
+		t.Fatalf("K0→K2 not followed: %s", res)
+	}
+}

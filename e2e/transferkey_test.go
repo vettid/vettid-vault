@@ -340,9 +340,12 @@ func TestSignInBeforeFinishRefused(t *testing.T) {
 // stateFaults fails the next state write of any vault once armed.
 type stateFaults struct {
 	store.Store
-	mu   sync.Mutex
-	fail int
+	mu      sync.Mutex
+	fail    int
+	headers int // header writes stored while state writes fail
 }
+
+func (s *stateFaults) headerPuts() int { s.mu.Lock(); defer s.mu.Unlock(); return s.headers }
 
 func (s *stateFaults) arm(n int) { s.mu.Lock(); s.fail = n; s.mu.Unlock() }
 
@@ -356,7 +359,15 @@ func (s *stateFaults) Put(ctx context.Context, key string, data []byte, ifMatch 
 		}
 		s.mu.Unlock()
 	}
-	return s.Store.Put(ctx, key, data, ifMatch)
+	v, err := s.Store.Put(ctx, key, data, ifMatch)
+	if err == nil && strings.Contains(key, "/header/") {
+		s.mu.Lock()
+		if s.fail > 0 {
+			s.headers++
+		}
+		s.mu.Unlock()
+	}
+	return v, err
 }
 
 // §11.14.10 "nothing needs undoing", with the real credential and items
@@ -391,6 +402,11 @@ func TestTransferCrashBeforeStep2(t *testing.T) {
 	// A crash: what is stored is step 1 and the state before the approval.
 	w.aw.instanceOf(w.a).Manager(w.a.vid).Crash()
 	sf.arm(0)
+	// Step 1 (the header with the next part) was stored while the state
+	// writes failed: the case is the one between the two writes.
+	if sf.headerPuts() == 0 {
+		t.Fatal("step 1 was not stored")
+	}
 	// The vault starts again from what is stored: the old phone opens it.
 	if r := w.aw.mustUnlock(w.a, acPIN, client.UnlockOptions{}, ""); !r.OK {
 		t.Fatalf("the old phone after a lost step 2: %+v", r)

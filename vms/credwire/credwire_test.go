@@ -73,7 +73,34 @@ func TestKeyRotationChain(t *testing.T) {
 		t.Fatal("ChainFrom")
 	}
 	if _, err := FollowChain(pin, []*KeyRotation{r2}); err != ErrChain {
-		t.Fatal("chain not starting at the pin accepted")
+		t.Fatal("chain not reaching the pin accepted")
+	}
+	// A chain that starts before the pin (links the receiver already
+	// followed) is followed from the pin on (VAULT-MESSAGING §10.4).
+	k3 := rotKey(4)
+	r3, _ := NewKeyRotation(k2, k3)
+	end, err = FollowChain(k1.Public().(ed25519.PublicKey), []*KeyRotation{r1, r2, r3})
+	if err != nil || !bytes.Equal(end, k3.Public().(ed25519.PublicKey)) {
+		t.Fatalf("chain from before the pin: %v", err)
+	}
+	// The skipped links are not trusted for anything: a broken link after
+	// the pin still fails, whatever comes before it.
+	brokenAfter := *r3
+	brokenAfter.SigOld = make([]byte, ed25519.SignatureSize)
+	if _, err := FollowChain(k1.Public().(ed25519.PublicKey), []*KeyRotation{r1, r2, &brokenAfter}); err != ErrChain {
+		t.Fatal("a broken link after the pin accepted")
+	}
+	// An unverifiable link before the pin is skipped, not followed: the
+	// result is the same as the chain from the pin alone.
+	junk := *r1
+	junk.SigNew = make([]byte, ed25519.SignatureSize)
+	if end, err = FollowChain(k1.Public().(ed25519.PublicKey), []*KeyRotation{&junk, r2}); err != nil || !bytes.Equal(end, k2.Public().(ed25519.PublicKey)) {
+		t.Fatalf("leading link before the pin: %v", err)
+	}
+	// A pinned key that is only a link's new key, never an old one: nothing
+	// to follow.
+	if _, err := FollowChain(k3.Public().(ed25519.PublicKey), []*KeyRotation{r1, r2, r3}); err != ErrChain {
+		t.Fatal("a chain ending at the pin accepted as a change")
 	}
 	// Forged: an attacker key signs as the "new" key but cannot sign as the old.
 	evil := rotKey(9)

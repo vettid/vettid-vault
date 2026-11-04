@@ -93,12 +93,20 @@ func (r *KeyRotation) Verify() error {
 	return nil
 }
 
-// FollowChain verifies a chain of statements from the pinned key: each
-// link's old key is the previous link's new key (the first's is pinned),
-// both signatures verify, at most MaxKeyChain links. It returns the key
-// the chain leads to.
+// FollowChain verifies a chain of statements from the pinned key
+// (VAULT-MESSAGING §10.4): it starts at the first statement whose old key
+// is the pinned one, skipping any before it (links the receiver already
+// followed: the sender cannot know whether a delivery arrived), and from
+// there each link's old key is the previous link's new key and both
+// signatures verify; at most MaxKeyChain statements in all. A chain with
+// no statement from the pinned key is refused. It returns the key the
+// chain leads to.
 func FollowChain(pinned ed25519.PublicKey, chain []*KeyRotation) (ed25519.PublicKey, error) {
 	if len(pinned) != ed25519.PublicKeySize || len(chain) == 0 || len(chain) > MaxKeyChain {
+		return nil, ErrChain
+	}
+	chain = ChainFrom(chain, pinned)
+	if chain == nil {
 		return nil, ErrChain
 	}
 	cur := pinned

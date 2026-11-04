@@ -1,13 +1,16 @@
 package vault
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"testing"
 	"time"
 
 	"github.com/vettid/vettid-relay/relayclient"
 	"github.com/vettid/vettid-vault/vms/envelope"
+	"github.com/vettid/vettid-vault/vms/handshake"
 )
 
 // §11.14.10 "The vault's keys after a transfer", "The rest, after the new
@@ -607,5 +610,84 @@ func TestRecoveryKeepsTransferMark(t *testing.T) {
 	}
 	if len(refs) != 1 || refs[0] != "t1" {
 		t.Fatalf("rotation_failed refs %v", refs)
+	}
+}
+
+// A rotation rekeys every session under the new keys (§3.4): a rekey
+// started under the old ones (each unlock starts the devices') is
+// replaced, its unsent hs.init dropped, and the new hs.init, under the new
+// ik, follows identity.rotate. The stored state restores it after a crash.
+func TestRotationReplacesRekeyUnderOldKeys(t *testing.T) {
+	d := newDevFixture(t)
+	d.m.mu.Lock()
+	now := d.m.now()
+	d.m.startRekey(d.devPeer, now)
+	var old *OutgoingHS
+	for _, og := range d.m.st.Outgoing {
+		old = og
+	}
+	if old == nil {
+		d.m.mu.Unlock()
+		t.Fatal("no rekey started")
+	}
+	oldEnv := append([]byte(nil), old.Init.Env...)
+	if err := d.m.rotateIdentity(now); err != nil {
+		d.m.mu.Unlock()
+		t.Fatal(err)
+	}
+	newIK := d.m.keys.ik.Public().(ed25519.PublicKey)
+	var rekeys []*OutgoingHS
+	for _, og := range d.m.st.Outgoing {
+		if og.PeerID == d.devPeer.ID && og.Purpose == handshake.PurposeRekey {
+			rekeys = append(rekeys, og)
+		}
+	}
+	oldSent, initAt := false, -1
+	for i, e := range d.m.st.Outbox {
+		if bytes.Equal(e.Payload, oldEnv) && !e.Done {
+			oldSent = true
+		}
+		if len(rekeys) == 1 && bytes.Equal(e.Payload, rekeys[0].Init.Env) {
+			initAt = i
+		}
+	}
+	d.m.mu.Unlock()
+	if len(rekeys) != 1 || rekeys[0].ID == old.ID || oldSent {
+		t.Fatalf("%d rekeys, the old one's hs.init still queued %v", len(rekeys), oldSent)
+	}
+	body, err := handshake.ParseInit(rekeys[0].Init.Body)
+	if err != nil || !bytes.Equal(body.From.IK, newIK) {
+		t.Fatalf("the rekey is not under the new ik: %v", err)
+	}
+	rotAt := -1
+	d.m.mu.Lock()
+	for i, e := range d.m.st.Outbox {
+		if e.PeerID == d.devPeer.ID && i < initAt && !e.Done && e.Op == OpDeposit {
+			rotAt = i // identity.rotate is queued before the new hs.init
+		}
+	}
+	d.m.mu.Unlock()
+	if initAt < 0 || rotAt < 0 {
+		t.Fatal("the new hs.init is not queued")
+	}
+	d.m.mu.Lock()
+	if err := d.m.persist(context.Background(), false); err != nil {
+		d.m.mu.Unlock()
+		t.Fatal(err)
+	}
+	d.m.mu.Unlock()
+	d.m.Crash()
+	m, _, err := d.fixture.unlock(testPIN, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Crash()
+	if m.outgoing[rekeys[0].ID] == nil {
+		t.Fatal("the rekey under the new ik was not restored")
+	}
+	for _, a := range m.Audit() {
+		if a.Event == "handshake_not_restored" {
+			t.Fatal("a handshake was not restored")
+		}
 	}
 }

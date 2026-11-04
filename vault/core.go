@@ -1,6 +1,7 @@
 package vault
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/subtle"
@@ -744,6 +745,10 @@ func (m *Manager) rotateIdentity(now time.Time) error {
 	for _, p := range m.allPeers() {
 		if p.State == PeerActive {
 			m.sendTo(p, "identity.rotate", body, now)
+			// Every session rekeys under the new keys (§3.4): a rekey
+			// started under the old ones (each unlock starts the devices')
+			// is replaced, after identity.rotate.
+			m.dropRekey(p.ID)
 			m.startRekey(p, now)
 		}
 	}
@@ -768,6 +773,24 @@ func (m *Manager) rotateIdentity(now time.Time) error {
 	// update once its epoch under the new ik is active.
 	m.profileCoreChanged(now)
 	return nil
+}
+
+// dropRekey abandons p's outgoing rekey: its hs.init, if not yet
+// deposited, is not sent; an hs.resp to it finds no handshake and is
+// dropped.
+func (m *Manager) dropRekey(peerID string) {
+	for id, og := range m.st.Outgoing {
+		if og.PeerID != peerID || og.New != nil || og.Purpose != handshake.PurposeRekey || og.Replaced {
+			continue
+		}
+		for _, e := range m.st.Outbox {
+			if !e.Done && e.PeerID == peerID && bytes.Equal(e.Payload, og.Init.Env) {
+				e.Done = true
+			}
+		}
+		m.dropOutgoing(id)
+		m.dirty = true
+	}
 }
 
 // pruneRetiredKEMs drops retired KEM keys after 400 days (§6.6).

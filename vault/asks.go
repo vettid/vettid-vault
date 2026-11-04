@@ -367,7 +367,10 @@ func CheckAsk(st *AskState, conn string, a Ask, others int, now time.Time, delay
 	if st.Paused() {
 		return drop(AskPaused)
 	}
-	if len(a.Idents) > 0 {
+	// (0.83.10) An approval challenge has no cooldown: a cooldown entry
+	// recorded for one before this release is not applied, and expires on
+	// its own (prune).
+	if len(a.Idents) > 0 && a.Bucket != AskBucketApproval {
 		all := true
 		for i, id := range a.Idents {
 			v.Cooled[i] = st.cooled(id, now)

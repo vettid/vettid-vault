@@ -427,6 +427,26 @@ func TestPurpose(t *testing.T) {
 			t.Fatalf("purpose %q after a round trip", c.Purpose)
 		}
 	}
+	// (0.83.10) Deny an approval: no cooldown and no decline counted, so the
+	// next approval challenge reaches the member at once.
+	for k := range b.f.d.In {
+		delete(b.f.d.In, k)
+	}
+	b.h.Reset()
+	at = t0.Add(2 * time.Hour)
+	challengeWith(t, a, b, peerwire.PurposeApproval, at)
+	id = field(t, last(t, b.h, "connection.authenticate.pending").Body, "request_id")
+	if r := featuretest.Call(b.f, b.h, at, "app", "connection.authenticate.deny", `{"request_id":"`+id+`"}`); !r.OK() {
+		t.Fatal(r.Code)
+	}
+	if st := b.h.Asks["cA"]; len(st.Declines) != 0 || st.Paused() {
+		t.Fatalf("an approval decline counted: %+v", st)
+	}
+	b.h.Reset()
+	challengeWith(t, a, b, peerwire.PurposeApproval, at.Add(time.Minute))
+	if len(b.h.SentOfType("connection.authenticate.pending")) != 1 || b.h.HasActivity("drop.ask_cooldown") {
+		t.Fatal("an approval after an approval decline did not reach the member")
+	}
 }
 
 // The ask gate's bucket names are the purposes.

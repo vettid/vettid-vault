@@ -529,6 +529,12 @@ func TestAskBuckets(t *testing.T) {
 	if v := CheckAsk(st, "c1", authAsk("a", AskBucketApproval, 0), 0, now.Add(3*time.Minute), time.Minute, r.rec); !v.Passed() {
 		t.Fatalf("approval right after approval declines: %+v", v)
 	}
+	// A cooldown recorded by an earlier release for an approval challenge
+	// is not applied (it expires on its own).
+	legacy := &AskState{Cooldowns: []AskCooldownEntry{{ID: "auth:approval", Until: now.Add(AskCooldownTTL)}}}
+	if v := CheckAsk(legacy, "c1", authAsk("l", AskBucketApproval, 0), 0, now.Add(time.Hour), time.Minute, r.rec); !v.Passed() {
+		t.Fatalf("approval under a cooldown from an earlier release: %+v", v)
+	}
 	// A pause from other declines still covers approvals, as mute does.
 	for i := 0; i < 3; i++ {
 		DeclineAskIn(st, AskBucketGeneral, []string{fmt.Sprintf("grant:item:x%d", i)}, now.Add(time.Duration(i)*time.Hour))

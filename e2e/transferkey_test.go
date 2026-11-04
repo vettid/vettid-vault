@@ -342,7 +342,8 @@ type stateFaults struct {
 	store.Store
 	mu      sync.Mutex
 	fail    int
-	headers int // header writes stored while state writes fail
+	vid     string // the vault whose header writes are counted
+	headers int    // its header writes stored while state writes fail
 }
 
 func (s *stateFaults) headerPuts() int { s.mu.Lock(); defer s.mu.Unlock(); return s.headers }
@@ -360,7 +361,7 @@ func (s *stateFaults) Put(ctx context.Context, key string, data []byte, ifMatch 
 		s.mu.Unlock()
 	}
 	v, err := s.Store.Put(ctx, key, data, ifMatch)
-	if err == nil && strings.Contains(key, "/header/") {
+	if err == nil && s.vid != "" && strings.HasPrefix(key, "vaults/"+s.vid+"/header/") {
 		s.mu.Lock()
 		if s.fail > 0 {
 			s.headers++
@@ -392,6 +393,9 @@ func TestTransferCrashBeforeStep2(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitEvent(t, w.a.dev, "device.transfer.pending", has("transfer_id", id))
+	sf.mu.Lock()
+	sf.vid = w.a.vid
+	sf.mu.Unlock()
 	// Every state write fails from now until the vault is gone: step 1
 	// (the header) is stored, step 2 never is, and the approval is not
 	// answered (its answer goes after the flush).

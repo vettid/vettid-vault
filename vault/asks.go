@@ -142,14 +142,21 @@ type HeldAnswer struct {
 // Paused reports whether the connection's asks are paused.
 func (st *AskState) Paused() bool { return st != nil && !st.PausedAt.IsZero() }
 
-// cooldownsInForce counts the cooldowns that have not ended.
+// ApprovalCooldownIdent is the cooldown identity an earlier release
+// recorded for a declined approval challenge (connauth's askIdent of the
+// approval purpose). From 0.83.10 none is recorded, and one left from
+// before is neither applied nor counted, and is dropped at the next prune.
+const ApprovalCooldownIdent = "auth:" + AskBucketApproval
+
+// cooldownsInForce counts the cooldowns that have not ended (an earlier
+// release's approval cooldown is not one, ApprovalCooldownIdent).
 func (st *AskState) cooldownsInForce(now time.Time) int {
 	if st == nil {
 		return 0
 	}
 	n := 0
 	for _, c := range st.Cooldowns {
-		if now.Before(c.Until) {
+		if now.Before(c.Until) && c.ID != ApprovalCooldownIdent {
 			n++
 		}
 	}
@@ -159,7 +166,7 @@ func (st *AskState) cooldownsInForce(now time.Time) int {
 func (st *AskState) prune(now time.Time) {
 	kept := st.Cooldowns[:0]
 	for _, c := range st.Cooldowns {
-		if now.Before(c.Until) {
+		if now.Before(c.Until) && c.ID != ApprovalCooldownIdent {
 			kept = append(kept, c)
 		}
 	}
@@ -367,7 +374,10 @@ func CheckAsk(st *AskState, conn string, a Ask, others int, now time.Time, delay
 	if st.Paused() {
 		return drop(AskPaused)
 	}
-	if len(a.Idents) > 0 {
+	// (0.83.10) An approval challenge has no cooldown: a cooldown entry
+	// recorded for one before this release is not applied, and expires on
+	// its own (prune).
+	if len(a.Idents) > 0 && a.Bucket != AskBucketApproval {
 		all := true
 		for i, id := range a.Idents {
 			v.Cooled[i] = st.cooled(id, now)
@@ -408,8 +418,18 @@ func DeclineAsk(st *AskState, idents []string, now time.Time) (paused bool) {
 
 // DeclineAskIn is DeclineAsk for an ask in bucket (0.65.0): a sign-in
 // decline cools its identities for AskSignInCooldownTTL only, and is not
-// a decline that counts toward a pause.
+// a decline that counts toward a pause; (0.83.10) an approval decline
+// does neither.
 func DeclineAskIn(st *AskState, bucket string, idents []string, now time.Time) (paused bool) {
+	// (0.83.10, owner decision of 2026-11-04) A decline of an approval
+	// challenge starts no cooldown and is not counted toward a pause:
+	// rightly declining a bogus approval request must not silence the
+	// service's real ones, repairs of its admin set included. Mute, a
+	// pause from other declines, the approval bucket's rate and the
+	// pending cap still apply.
+	if bucket == AskBucketApproval {
+		return false
+	}
 	st.prune(now)
 	t := now.UTC().Truncate(time.Millisecond)
 	for _, id := range idents {

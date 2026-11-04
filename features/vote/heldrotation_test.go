@@ -96,26 +96,33 @@ func TestCastWhileRotationHeld(t *testing.T) {
 	}
 }
 
-// A bad_ballot for the body under the old key while a copy under a
-// transfer's held key exists (the service follows the new key already):
-// the copy is the answer, sent once, not a refusal.
-func TestBadBallotAdoptsHeldCopy(t *testing.T) {
+// A stale bad_ballot (for a send older than the body in force) while a
+// copy under a transfer's held key exists: the body in force is the
+// answer, sent once; the held copy stays aside and the vote is not lost.
+// One for the body in force refuses as before, never adopting the copy.
+func TestBadBallotWhileHeld(t *testing.T) {
 	c := newCastEnv(t)
 	v := c.open(1)
 	c.cast(v, "yes")
 	_, ids := c.casts()
+	// An earlier rotation re-signed the body (generation 1), not yet sent.
+	c.rec(v.ID).Ballot.Gen = 1
 	_, k1, _ := ed25519.GenerateKey(rand.Reader)
-	k1Pub := k1.Public().(ed25519.PublicKey)
 	c.f.CredentialKeysHeld(c.session(), c.cred, k1)
+	inForce := string(c.rec(v.ID).Ballot.Body)
 	c.h.Reset()
 	c.refusal(v, ids[0], "vote.cast", "bad_ballot", votewire.H(c.leafOf(v)))
 	b := c.rec(v.ID).Ballot
-	if c.state(v) != "waiting:bad_ballot" || b.Held != nil || b.Gen != 1 {
-		t.Fatalf("state %s, held %v, gen %d", c.state(v), b.Held != nil, b.Gen)
-	}
 	bodies, _ := c.casts()
-	if len(bodies) != 1 || votewire.VerifyCast(k1Pub, v.Hash, c.leafOf(v), b.CastSig) != nil {
-		t.Fatalf("%d sent", len(bodies))
+	if c.state(v) != "waiting:bad_ballot" || b.Held == nil || string(b.Body) != inForce || len(bodies) != 1 || string(bodies[0]) != inForce {
+		t.Fatalf("state %s, held %v, %d sent", c.state(v), b.Held != nil, len(bodies))
+	}
+	// The answer to the body in force (generation 1): refused, the held
+	// copy not adopted.
+	_, ids = c.casts()
+	c.refusal(v, ids[len(ids)-1], "vote.cast", "bad_ballot", votewire.H(c.leafOf(v)))
+	if c.state(v) != "refused:bad_ballot" || string(c.rec(v.ID).Ballot.Body) != inForce {
+		t.Fatalf("state %s", c.state(v))
 	}
 }
 

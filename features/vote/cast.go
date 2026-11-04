@@ -422,21 +422,10 @@ func (f *Feature) castAnswer(s *vault.Session, r *record, in *envelope.Inner) {
 	case "not_active", "not_eligible":
 		f.refuse(s, r, code, true)
 	case "bad_ballot":
-		if h := b.Held; h != nil && b.Body != nil {
-			// The service refused the body under the key it was thought to
-			// pin while a copy under a transfer's new key is held
-			// (§11.14.10): it follows that key already (the new phone
-			// signed in to it). The copy is the answer, sent once.
-			b.Held = nil
-			b.CastSig, b.Body = h.CastSig, h.Body
-			b.Gen++
-			f.setWaiting(s, r, "bad_ballot")
-			if c, ok := s.Connection(r.Conn); ok && c.State == vault.PeerActive && now.Before(time.Unix(r.Closes, 0)) {
-				f.sendOwedChain(s, r.Conn)
-				f.sendBallot(s, r)
-			}
-			return
-		}
+		// A copy kept aside under a transfer's held key (b.Held) is never
+		// the answer: no connection follows that key before the statement
+		// goes out, since no sign-in is signed with it meanwhile (member
+		// authentication refuses them, §11.14.10).
 		if gen < b.Gen {
 			// A send made before the re-signed body: the body already
 			// re-signed is the answer, sent once if it was not yet.

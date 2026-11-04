@@ -119,16 +119,42 @@ func TestBadBallotAdoptsHeldCopy(t *testing.T) {
 	}
 }
 
-// A connection that was not active when a statement went out gets the
-// chain member authentication still owes it before the ballot the
-// schedule sends, once.
+// The chain member authentication gives a connection is queued before
+// every ballot the schedule sends, whether or not it went out when the
+// statement was made: a deposit the peer never processed (offline past the
+// relay's TTL) is made good with the next send.
 func TestTickSendsOwedChainFirst(t *testing.T) {
 	c := newCastEnv(t)
 	v := c.open(1)
 	c.cast(v, "yes")
 	c.auth.owed["svc"] = []byte(`{"rotations":[]}`)
+	for i, d := range []time.Duration{2 * time.Minute, 10 * time.Minute} {
+		c.h.Reset()
+		c.tickAt(d)
+		var order []string
+		for _, s := range c.h.Sent {
+			if s.Type == "connection.authenticate.rotated" || s.Type == "vote.cast" {
+				order = append(order, s.Type)
+			}
+		}
+		if len(order) != 2 || order[0] != "connection.authenticate.rotated" || order[1] != "vote.cast" {
+			t.Fatalf("send %d: %v", i, order)
+		}
+	}
+}
+
+// A bad_ballot answering a send made before the re-signed body: the body
+// is sent once, after the chain member authentication gives the
+// connection.
+func TestBadBallotResendAfterChain(t *testing.T) {
+	c := newCastEnv(t)
+	v := c.open(1)
+	c.cast(v, "yes")
+	_, ids := c.casts()
+	c.rec(v.ID).Ballot.Gen = 1 // re-signed for a statement; not yet sent
+	c.auth.owed["svc"] = []byte(`{"rotations":[]}`)
 	c.h.Reset()
-	c.tickAt(2 * time.Minute)
+	c.refusal(v, ids[0], "vote.cast", "bad_ballot", votewire.H(c.leafOf(v)))
 	var order []string
 	for _, s := range c.h.Sent {
 		if s.Type == "connection.authenticate.rotated" || s.Type == "vote.cast" {
@@ -137,14 +163,6 @@ func TestTickSendsOwedChainFirst(t *testing.T) {
 	}
 	if len(order) != 2 || order[0] != "connection.authenticate.rotated" || order[1] != "vote.cast" {
 		t.Fatalf("sent %v", order)
-	}
-	if len(c.auth.sent) != 1 || c.auth.sent[0] != "svc" {
-		t.Fatalf("not recorded as sent: %v", c.auth.sent)
-	}
-	c.h.Reset()
-	c.tickAt(10 * time.Minute)
-	if len(c.h.SentOfType("connection.authenticate.rotated")) != 0 {
-		t.Fatal("the chain was sent again")
 	}
 }
 
@@ -171,6 +189,14 @@ func TestCredentialDeletedDropsHeld(t *testing.T) {
 	}
 	if c.rec(w.ID).Ballot != nil {
 		t.Fatal("the ballot only kept aside stays")
+	}
+	// The member casts it again under the new credential.
+	_, kNew, _ := ed25519.GenerateKey(rand.Reader)
+	c.keys.key = kNew
+	c.auth.pins["svc"] = kNew.Public().(ed25519.PublicKey)
+	c.h.Reset()
+	if r, err := c.cast(w, "no"); err != nil || r.State != BallotSending || len(c.h.SentOfType("vote.cast")) != 1 {
+		t.Fatalf("cast again: %v %+v", err, r)
 	}
 	c.h.Reset()
 	c.f.CredentialKeyRotationsSent(c.session(), []*credwire.KeyRotation{{Old: c.cred.Public().(ed25519.PublicKey), New: k1.Public().(ed25519.PublicKey)}})

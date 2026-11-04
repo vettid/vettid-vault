@@ -23,14 +23,10 @@ type fakeKeys struct {
 
 func (k *fakeKeys) UseKey(time.Time, time.Duration) (ed25519.PrivateKey, bool) { return k.key, k.ok }
 
-type fakeAuth struct {
-	pins, owed map[string][]byte
-	sent       []string
-}
+type fakeAuth struct{ pins, owed map[string][]byte }
 
 func (a *fakeAuth) SignedInKey(c string) []byte { return a.pins[c] }
 func (a *fakeAuth) RotatedBody(c string) []byte { return a.owed[c] }
-func (a *fakeAuth) RotatedSent(c string)        { a.sent = append(a.sent, c); delete(a.owed, c) }
 
 // cenv is an env whose vault can cast: a credential key in its unlock
 // window and a connection that pinned it.

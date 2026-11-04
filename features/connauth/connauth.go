@@ -89,8 +89,9 @@ type data struct {
 	// a response with: the key that connection pinned.
 	Shown map[string][]byte `json:"shown,omitempty"`
 	// Delivered is, per connection, the key the last chain sent to it
-	// since that response leads to: a chain is not sent again until a
-	// later statement extends it. Cleared when a response is signed.
+	// since that response leads to: at a statement, a chain is not sent
+	// again until a later statement extends it (RotatedBody, for a
+	// ballot, ignores it). Cleared when a response is signed.
 	Delivered map[string][]byte `json:"delivered,omitempty"`
 }
 
@@ -623,31 +624,28 @@ func (f *Feature) SignedInKey(conn string) []byte {
 	return append([]byte(nil), f.d.Shown[conn]...)
 }
 
-// RotatedBody is the connection.authenticate.rotated body still owed to the
-// connection (the chain from the key it pinned to the current one), or nil
-// (§10.4: a ballot's cast_sig is queued after it).
+// RotatedBody is the connection.authenticate.rotated body that leads the
+// connection from the key it pinned (the one this vault last signed a
+// response with) to the current one, or nil (§10.4). The vote feature
+// queues it before a ballot it sends (§10.19.5), whether or not the chain
+// went out when the statement was made: a deposit the peer never
+// processed (it was offline past the relay's message TTL) is then made
+// good. A peer that already followed the chain refuses the repeat
+// (connection.authenticate.rotation_rejected) and keeps its pin, which is
+// harmless.
 func (f *Feature) RotatedBody(conn string) []byte {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if seg := f.owed(conn); len(seg) > 0 {
+	if seg := f.segment(f.d.Shown[conn]); len(seg) > 0 {
 		return peerwire.ConnAuthRotatedBody(seg)
 	}
 	return nil
 }
 
-// RotatedSent records that the chain RotatedBody returned was sent to the
-// connection (the vote feature queues it before a ballot), so it is not
-// owed again.
-func (f *Feature) RotatedSent(conn string) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if seg := f.owed(conn); len(seg) > 0 {
-		f.d.Delivered[conn] = append([]byte(nil), seg[len(seg)-1].New...)
-	}
-}
-
 // owed is the chain from the key the connection was last signed a response
-// with to the current key (§10.4), unless it was sent already.
+// with to the current key (§10.4), unless it was sent already when a
+// statement was made (statement-time delivery only; RotatedBody does not
+// skip it).
 func (f *Feature) owed(conn string) []*credwire.KeyRotation {
 	seg := f.segment(f.d.Shown[conn])
 	if len(seg) == 0 || suite.EqualPublic(f.d.Delivered[conn], seg[len(seg)-1].New) {

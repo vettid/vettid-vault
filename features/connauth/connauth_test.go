@@ -899,8 +899,7 @@ func TestSignedInKeyAndOwedRotation(t *testing.T) {
 
 // §11.14.10: a transfer's held statements, and a rotation's own after
 // them, go to a connection as one chain (the receiver follows a chain only
-// from its pinned key); a chain once sent is not owed again until a later
-// statement extends it.
+// from its pinned key).
 func TestKeyRotationsOneChain(t *testing.T) {
 	a, b := pair()
 	b.w.open = true
@@ -918,8 +917,10 @@ func TestKeyRotationsOneChain(t *testing.T) {
 	if len(msgs) != 1 {
 		t.Fatalf("%d chains sent", len(msgs))
 	}
-	if b.f.RotatedBody("cA") != nil {
-		t.Fatal("owed again after it was sent")
+	// The vote feature still gets the chain to queue before a ballot (a
+	// deposit the peer never processed is made good with it).
+	if b.f.RotatedBody("cA") == nil {
+		t.Fatal("no chain for a ballot")
 	}
 	a.h.Reset()
 	featuretest.Call(a.f, a.h, t0, "connection:cB", "connection.authenticate.rotated", string(msgs[0].Body))

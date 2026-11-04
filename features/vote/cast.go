@@ -80,14 +80,11 @@ func (f *Feature) Cast(s *vault.Session, conn, id, choice string) (CastResult, e
 	if f.dep.Auth != nil {
 		pinned, owed = f.dep.Auth.SignedInKey(conn), f.dep.Auth.RotatedBody(conn)
 	}
-	res, sentOwed, err := f.cast(s, conn, id, choice, pinned, owed)
-	if sentOwed && f.dep.Auth != nil {
-		f.dep.Auth.RotatedSent(conn)
-	}
+	res, _, err := f.cast(s, conn, id, choice, pinned, owed)
 	return res, err
 }
 
-// cast is Cast under the lock; sentOwed: the owed chain was sent.
+// cast is Cast under the lock; sentOwed: the chain was queued.
 func (f *Feature) cast(s *vault.Session, conn, id, choice string, pinned, owed []byte) (_ CastResult, sentOwed bool, _ error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -184,6 +181,19 @@ func (f *Feature) cast(s *vault.Session, conn, id, choice string, pinned, owed [
 	return CastResult{ProposalID: id, State: r.Ballot.State}, sentOwed, nil
 }
 
+// sendOwedChain queues the chain member authentication gives the
+// connection (read before the lock into f.owed) before a ballot, once per
+// tick or answer. It is queued whether or not it went out when the
+// statement was made, so a deposit the peer never processed is made good;
+// a peer that already followed it refuses the repeat
+// (connection.authenticate.rotation_rejected) and keeps its pin.
+func (f *Feature) sendOwedChain(s *vault.Session, conn string) {
+	if body := f.owed[conn]; len(body) > 0 {
+		_ = s.SendToConnection(conn, "connection.authenticate.rotated", body)
+		delete(f.owed, conn)
+	}
+}
+
 // sendBallot sends the stored body as a new request with a new inner id.
 func (f *Feature) sendBallot(s *vault.Session, r *record) {
 	b := r.Ballot
@@ -266,9 +276,23 @@ func (f *Feature) setWaiting(s *vault.Session, r *record, reason string) {
 // Response implements vault.ResponseObserver: the answers to vote.cast and
 // vote.status. Only a verified answer counts (§10.19.5).
 func (f *Feature) Response(s *vault.Session, in *envelope.Inner) bool {
+	// An answer to a cast may send the ballot again (bad_ballot): the chain
+	// member authentication gives the connection is read before the lock
+	// and queued first (sendOwedChain).
+	f.mu.Lock()
+	ref, ok := f.pend[in.Re]
+	f.mu.Unlock()
+	owed := map[string][]byte{}
+	if ok && ref.kind == "cast" && f.dep.Auth != nil {
+		if body := f.dep.Auth.RotatedBody(ref.conn); len(body) > 0 {
+			owed[ref.conn] = body
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	ref, ok := f.pend[in.Re]
+	f.owed = owed
+	defer func() { f.owed = nil }()
+	ref, ok = f.pend[in.Re]
 	if !ok {
 		return true // after a restart: dropped, as an answer matching no request
 	}
@@ -408,6 +432,7 @@ func (f *Feature) castAnswer(s *vault.Session, r *record, in *envelope.Inner) {
 			b.Gen++
 			f.setWaiting(s, r, "bad_ballot")
 			if c, ok := s.Connection(r.Conn); ok && c.State == vault.PeerActive && now.Before(time.Unix(r.Closes, 0)) {
+				f.sendOwedChain(s, r.Conn)
 				f.sendBallot(s, r)
 			}
 			return
@@ -417,6 +442,7 @@ func (f *Feature) castAnswer(s *vault.Session, r *record, in *envelope.Inner) {
 			// re-signed is the answer, sent once if it was not yet.
 			f.setWaiting(s, r, "bad_ballot")
 			if b.SentGen < b.Gen && now.Before(time.Unix(r.Closes, 0)) {
+				f.sendOwedChain(s, r.Conn)
 				f.sendBallot(s, r)
 			}
 			return
@@ -681,20 +707,14 @@ func (f *Feature) Tick(s *vault.Session) {
 			}
 		}
 	}
-	sent := f.tick(s, owed)
-	if f.dep.Auth != nil {
-		for _, c := range sent {
-			f.dep.Auth.RotatedSent(c)
-		}
-	}
+	f.tick(s, owed)
 }
 
-// tick is Tick under the lock; it returns the connections it sent an
-// owed chain to.
-func (f *Feature) tick(s *vault.Session, owed map[string][]byte) []string {
+// tick is Tick under the lock.
+func (f *Feature) tick(s *vault.Session, owed map[string][]byte) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.owed, f.owedSent = owed, nil
+	f.owed = owed
 	defer func() { f.owed = nil }()
 	now := s.Now()
 	for id, p := range f.pend { // as the Manager forgets its own requests
@@ -713,7 +733,6 @@ func (f *Feature) tick(s *vault.Session, owed map[string][]byte) []string {
 			f.tickRecord(s, r, now)
 		}
 	}
-	return f.owedSent
 }
 
 // closingAt is when vote.closing is due (§10.19.7): the close in force minus
@@ -780,12 +799,7 @@ func (f *Feature) tickRecord(s *vault.Session, r *record, now time.Time) {
 			return
 		}
 		if now.UnixMilli() >= b.NextSendMS {
-			if body := f.owed[r.Conn]; len(body) > 0 {
-				if s.SendToConnection(r.Conn, "connection.authenticate.rotated", body) == nil {
-					f.owedSent = append(f.owedSent, r.Conn)
-				}
-				delete(f.owed, r.Conn)
-			}
+			f.sendOwedChain(s, r.Conn)
 			f.sendBallot(s, r)
 		}
 		// 24 hours without a verified answer: also ask.
@@ -1020,7 +1034,12 @@ func (f *Feature) recordKeys() []string {
 }
 
 // adoptCast puts a cast_sig re-signed under newPub, and its body, in force,
-// and sends the body once to a connection that pinned another key.
+// and sends the body once to a connection that pinned another key. It runs
+// only right after member authentication has queued the chain to newPub
+// for every active connection (a rotation's observers, or the held
+// statements' observers before the followers), so the chain precedes the
+// body without being queued again here; an inactive connection gets the
+// body from the schedule, after the chain (sendOwedChain).
 func (f *Feature) adoptCast(s *vault.Session, r *record, sig, body, pin, newPub []byte, now time.Time) {
 	b := r.Ballot
 	b.CastSig, b.Body = sig, body // the same ballot: vk, choice, ballot_sig and leaf do not change

@@ -514,21 +514,27 @@ func TestAskBuckets(t *testing.T) {
 		t.Fatalf("sign-in after the hour: %+v", v)
 	}
 
-	// An approval decline: 7 days, approvals only, and it counts.
+	// (0.83.10) An approval decline starts no cooldown and is not counted
+	// toward a pause: the next approval challenge reaches the member at
+	// once, and three approval declines pause nothing.
 	st = &AskState{}
-	DeclineAskIn(st, AskBucketApproval, []string{"auth:approval"}, now)
-	if v := CheckAsk(st, "c1", authAsk("a", AskBucketApproval, 0), 0, now.Add(AskCooldownTTL-time.Millisecond), time.Minute, r.rec); v.Reason != AskCooldown {
-		t.Fatalf("approval within 7 days: %+v", v)
+	for i := 0; i < 3; i++ {
+		if DeclineAskIn(st, AskBucketApproval, []string{"auth:approval"}, now.Add(time.Duration(i)*time.Minute)) {
+			t.Fatal("approval declines paused the connection")
+		}
 	}
-	if v := CheckAsk(st, "c1", authAsk("s", AskBucketSignIn, 0), 0, now.Add(time.Minute), time.Minute, r.rec); !v.Passed() {
-		t.Fatalf("sign-in after an approval decline: %+v", v)
+	if st.Paused() || len(st.Declines) != 0 || len(st.Cooldowns) != 0 {
+		t.Fatalf("declines %v cooldowns %v", st.Declines, st.Cooldowns)
 	}
-	if len(st.Declines) != 1 {
-		t.Fatalf("declines %v", st.Declines)
+	if v := CheckAsk(st, "c1", authAsk("a", AskBucketApproval, 0), 0, now.Add(3*time.Minute), time.Minute, r.rec); !v.Passed() {
+		t.Fatalf("approval right after approval declines: %+v", v)
 	}
-	DeclineAskIn(st, AskBucketGeneral, []string{"grant:item:x"}, now.Add(time.Hour))
-	if !DeclineAskIn(st, AskBucketApproval, []string{"auth:approval"}, now.Add(2*time.Hour)) {
-		t.Fatal("three counted declines did not pause")
+	// A pause from other declines still covers approvals, as mute does.
+	for i := 0; i < 3; i++ {
+		DeclineAskIn(st, AskBucketGeneral, []string{fmt.Sprintf("grant:item:x%d", i)}, now.Add(time.Duration(i)*time.Hour))
+	}
+	if v := CheckAsk(st, "c1", authAsk("a2", AskBucketApproval, 0), 0, now.Add(3*time.Hour), time.Minute, r.rec); v.Reason != AskPaused {
+		t.Fatalf("approval while paused: %+v", v)
 	}
 }
 

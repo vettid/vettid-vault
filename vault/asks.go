@@ -408,8 +408,18 @@ func DeclineAsk(st *AskState, idents []string, now time.Time) (paused bool) {
 
 // DeclineAskIn is DeclineAsk for an ask in bucket (0.65.0): a sign-in
 // decline cools its identities for AskSignInCooldownTTL only, and is not
-// a decline that counts toward a pause.
+// a decline that counts toward a pause; (0.83.10) an approval decline
+// does neither.
 func DeclineAskIn(st *AskState, bucket string, idents []string, now time.Time) (paused bool) {
+	// (0.83.10, owner decision of 2026-11-04) A decline of an approval
+	// challenge starts no cooldown and is not counted toward a pause:
+	// rightly declining a bogus approval request must not silence the
+	// service's real ones, repairs of its admin set included. Mute, a
+	// pause from other declines, the approval bucket's rate and the
+	// pending cap still apply.
+	if bucket == AskBucketApproval {
+		return false
+	}
 	st.prune(now)
 	t := now.UTC().Truncate(time.Millisecond)
 	for _, id := range idents {

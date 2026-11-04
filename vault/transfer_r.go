@@ -2,6 +2,7 @@ package vault
 
 import (
 	"context"
+	"encoding/json"
 	"sync"
 	"time"
 
@@ -214,17 +215,18 @@ func (m *Manager) sendPendingUnlink(now time.Time) {
 
 // pendingUnlinkAtUnlock sends the held notice when the vault's current
 // app has unlocked from the stored objects under the transfer's
-// dek_version or a later one.
+// dek_version or a later one. The held credential key rotation statement
+// goes first, under its own transfer's dek_version (§11.14.10 "The rest,
+// after the new phone's first unlock").
 func (m *Manager) pendingUnlinkAtUnlock(now time.Time) {
-	pu := m.st.PendingUnlink
-	if pu == nil {
-		return
-	}
 	ver := m.hdr.DEKVersion
 	if m.repl != nil {
 		ver = m.repl.next.DEKVersion
 	}
-	if ver >= pu.DEKVersion {
+	if h := m.st.HeldKeyRotation; h != nil && ver >= h.DEKVersion {
+		m.sendHeldKeyRotations(now)
+	}
+	if pu := m.st.PendingUnlink; pu != nil && ver >= pu.DEKVersion {
 		m.sendPendingUnlink(now)
 	}
 }
@@ -266,4 +268,132 @@ func (m *Manager) recoveredPhonePaired(p *Peer, now time.Time) {
 	m.record(Activity{Kind: "recovery.device_paired", DeviceID: p.ID, Audit: true, Feed: true}, now)
 	m.notifyDevices("sync.event", strictjson.NewBuilder().String("kind", "device.paired").String("device_id", p.ID).
 		String("role", p.Kind).Bytes(), p.ID, now)
+}
+
+// HeldKeyRotation is the credential key's rotation statement K0→K1 made at
+// a transfer's approval (§11.14.10 "The credential key, at the approval"):
+// written with the step-2 state, and sent to the connections that pinned
+// the earlier key only at the first unlock from storage under DEKVersion or
+// a later one, before device.unlinked{transferred}; a recovery or a later
+// rotation sends it first. A state that was not stored, or was restored to
+// an earlier one, never holds it, so "The move didn't finish" needs no step
+// to undo it. Statements is the chain in order: a second transfer approved
+// before the first one's statement went out adds its own.
+type HeldKeyRotation struct {
+	TransferID string            `json:"transfer_id"`
+	DEKVersion uint64            `json:"dek_version"`
+	Statements []json.RawMessage `json:"statements"`
+}
+
+// KeyRotationHost is implemented by the runtime (§11.14.10): it holds the
+// credential key's rotation statements of a transfer's approval in the
+// state, and gives them up to a rotation that sends them first.
+type KeyRotationHost interface {
+	HoldKeyRotation(statement []byte, now time.Time) error
+	TakeHeldKeyRotations(now time.Time) [][]byte
+	KeyRotationHeld() bool
+}
+
+// KeyRotationSender is implemented by the credential feature: it sends
+// held rotation statements, in order, to the connections that pinned an
+// earlier credential key (§10.4). The runtime calls it outside the
+// feature's handlers. It must not call back into the runtime's holding.
+type KeyRotationSender interface {
+	SendKeyRotations(s *Session, statements [][]byte)
+}
+
+// HoldKeyRotation keeps a credential key rotation statement made at a
+// transfer's approval, after ApproveTransfer, until the new phone's first
+// unlock from storage (§11.14.10). If the handler then fails, it is not
+// kept.
+func (s *Session) HoldKeyRotation(statement []byte) error {
+	h, ok := s.host.(KeyRotationHost)
+	if !ok {
+		return errUnavailable
+	}
+	return h.HoldKeyRotation(statement, s.now)
+}
+
+// TakeHeldKeyRotations returns the statements still held, oldest first,
+// and stops holding them: the caller sends them before its own rotation
+// statement (§11.14.10 "The owed mark").
+func (s *Session) TakeHeldKeyRotations() [][]byte {
+	h, ok := s.host.(KeyRotationHost)
+	if !ok {
+		return nil
+	}
+	return h.TakeHeldKeyRotations(s.now)
+}
+
+// KeyRotationHeld reports whether a credential key rotation statement is
+// still held (§11.14.10): a signature under the current credential key may
+// then not be followed by a connection that pinned the earlier key.
+func (s *Session) KeyRotationHeld() bool {
+	h, ok := s.host.(KeyRotationHost)
+	return ok && h.KeyRotationHeld()
+}
+
+func (h managerHost) KeyRotationHeld() bool { return h.m.st.HeldKeyRotation != nil }
+
+func (h managerHost) HoldKeyRotation(statement []byte, now time.Time) error {
+	return h.m.holdKeyRotation(statement)
+}
+
+func (h managerHost) TakeHeldKeyRotations(time.Time) [][]byte { return h.m.takeHeldKeyRotations() }
+
+// holdKeyRotation adds a statement to the held chain, for the approved
+// transfer of the current handler, at the DEK version its step 2 writes.
+func (m *Manager) holdKeyRotation(statement []byte) error {
+	t := m.st.Transfer
+	if t == nil || t.State != TransferApproved || len(statement) == 0 {
+		return errNotFound
+	}
+	ver := m.hdr.DEKVersion
+	if m.repl != nil {
+		ver = m.repl.next.DEKVersion
+	}
+	prev := m.st.HeldKeyRotation
+	if !m.heldInHandler {
+		m.heldInHandler, m.heldBefore = true, prev
+	}
+	next := &HeldKeyRotation{TransferID: t.ID, DEKVersion: ver}
+	if prev != nil {
+		next.Statements = append(next.Statements, prev.Statements...)
+	}
+	next.Statements = append(next.Statements, append(json.RawMessage(nil), statement...))
+	m.st.HeldKeyRotation = next
+	m.dirty = true
+	return nil
+}
+
+// takeHeldKeyRotations clears the held chain and returns it.
+func (m *Manager) takeHeldKeyRotations() [][]byte {
+	h := m.st.HeldKeyRotation
+	if h == nil {
+		return nil
+	}
+	m.st.HeldKeyRotation = nil
+	m.dirty = true
+	out := make([][]byte, 0, len(h.Statements))
+	for _, st := range h.Statements {
+		out = append(out, []byte(st))
+	}
+	return out
+}
+
+// sendHeldKeyRotations sends the held chain to the connections that pinned
+// an earlier credential key (through the credential feature) and stops
+// holding it, in the same state write as what follows: the deposits are
+// queued in the outbox ahead of anything sent after them.
+func (m *Manager) sendHeldKeyRotations(now time.Time) {
+	stmts := m.takeHeldKeyRotations()
+	if len(stmts) == 0 {
+		return
+	}
+	sess := m.session(now)
+	for _, f := range m.features {
+		if ks, ok := f.(KeyRotationSender); ok {
+			ks.SendKeyRotations(sess, stmts)
+		}
+	}
 }

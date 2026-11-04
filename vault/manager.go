@@ -391,6 +391,11 @@ type Manager struct {
 	presentAfterFlush bool
 	// replInHandler: the current handler stored step 1 of a replacement.
 	replInHandler bool
+	// heldInHandler: the current handler held a credential key rotation
+	// statement; heldBefore is what was held before it, restored if the
+	// handler fails (§11.14.10).
+	heldInHandler bool
+	heldBefore    *HeldKeyRotation
 	// transferSecret is a transfer's new phone's unlock secret from its
 	// hs.init, in memory only until the approval (§11.14.10).
 	transferSecret []byte

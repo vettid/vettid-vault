@@ -610,6 +610,7 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 	}
 	handled = true
 	m.replInHandler = false
+	m.heldInHandler, m.heldBefore = false, nil
 	body, herr := te.handler.Handle(ctx, s, in)
 	if herr != nil && !errors.Is(herr, ErrDeferred) {
 		// Release R (§11.14.2): a handler that failed after step 1 of a
@@ -619,6 +620,9 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 		if m.replInHandler {
 			m.dropNext(now)
 		}
+		if m.heldInHandler {
+			m.st.HeldKeyRotation = m.heldBefore // a statement it held is not stored (§11.14.10)
+		}
 		m.transferAfter = ""
 		if t := m.st.Transfer; t != nil && t.State == TransferApproved {
 			// The new phone's secret was spent by the approval: the transfer
@@ -627,6 +631,7 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 		}
 	}
 	m.replInHandler = false
+	m.heldInHandler, m.heldBefore = false, nil
 	m.afterHandle(now)
 	if te.spec.Request {
 		var he *HandlerError

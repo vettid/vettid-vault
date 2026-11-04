@@ -693,8 +693,12 @@ func (m *Manager) retryOwedRotation(now time.Time) {
 }
 
 // rotateIdentity performs the rotation in memory; the caller persists it
-// (in a batch, the batch's flush does).
+// (in a batch, the batch's flush does). A credential key rotation statement
+// a transfer's approval still holds goes first (§11.14.10 "The owed mark":
+// a rotation that clears a transfer's mark sends it first); credential.rotate
+// takes it before it calls this.
 func (m *Manager) rotateIdentity(now time.Time) error {
+	m.sendHeldKeyRotations(now)
 	draw := suite.RandomBytes
 	if m.opt.KeyRand != nil {
 		draw = m.opt.KeyRand

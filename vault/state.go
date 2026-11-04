@@ -124,6 +124,10 @@ type State struct {
 	RecoveryCounterNotice time.Time `json:"recovery_counter_notice,omitempty"`
 	// PendingUnlink is a transfer's held notice to the old app (§11.14.10).
 	PendingUnlink *PendingUnlink `json:"pending_unlink,omitempty"`
+	// HeldKeyRotation is the credential key's rotation statement made at a
+	// transfer's approval and held until the new phone's first unlock from
+	// storage (§11.14.10 "The credential key, at the approval").
+	HeldKeyRotation *HeldKeyRotation `json:"held_key_rotation,omitempty"`
 	// RecoveredSigner is the vault's signer binding before a completed
 	// recovery removed the old app, until the recovered phone pairs and
 	// the binding moves (§11.7.1, §11.14.6): digest and class.

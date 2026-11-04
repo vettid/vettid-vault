@@ -203,6 +203,14 @@ func NewSet(o Options) *Set {
 	return s
 }
 
+// The vote feature re-signs at every credential key rotation, a transfer's
+// held one included (§3.5.5, §11.14.10); the credential sends a transfer's
+// held statement when the runtime asks.
+var (
+	_ credential.KeyRotationSigner = (*vote.Feature)(nil)
+	_ vault.KeyRotationSender      = (*credential.Feature)(nil)
+)
+
 // List returns the registered features in registration order. The audit
 // log and the feed come first so that they see activity recorded while
 // the others load. An optional feature that is not registered is absent.

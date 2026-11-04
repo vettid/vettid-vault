@@ -784,6 +784,7 @@ type signerObs struct {
 	order     *[]string
 	old, nw   ed25519.PrivateKey
 	newPub    ed25519.PublicKey
+	oldPub    ed25519.PublicKey
 	statement *credwire.KeyRotation
 }
 
@@ -792,10 +793,16 @@ func (o *signerObs) CredentialKeyRotated(_ *vault.Session, r *credwire.KeyRotati
 	o.statement = r
 }
 
+func (o *signerObs) CredentialKeysHeld(s *vault.Session, oldKey, newKey ed25519.PrivateKey) {
+	o.CredentialKeysOpen(s, oldKey, newKey)
+	(*o.order)[len(*o.order)-1] = "held keys"
+}
+
 func (o *signerObs) CredentialKeysOpen(_ *vault.Session, oldKey, newKey ed25519.PrivateKey) {
 	*o.order = append(*o.order, "keys")
 	o.old, o.nw = oldKey, newKey
 	o.newPub = append(ed25519.PublicKey(nil), newKey.Public().(ed25519.PublicKey)...)
+	o.oldPub = append(ed25519.PublicKey(nil), oldKey.Public().(ed25519.PublicKey)...)
 	// Both keys are usable now: the statement's signatures verify with them.
 	if o.statement != nil {
 		msg := append(append([]byte{}, o.statement.Old...), o.statement.New...)

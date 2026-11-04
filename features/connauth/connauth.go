@@ -173,6 +173,11 @@ var (
 	errNotFound = vault.NewError("not_found", "")
 	errLocked   = vault.NewError("credential_locked", "")
 	errConn     = vault.NewError("connection_unavailable", "")
+	// errMoveUnfinished: a sign-in while a transfer's credential key
+	// statement is held (§11.14.10): the move to this phone finishes at
+	// its first unlock from storage, and only then do the connections
+	// learn the new key.
+	errMoveUnfinished = vault.NewError("transfer_incomplete", "")
 )
 
 // wire is the challenge's body.
@@ -466,6 +471,15 @@ func (f *Feature) approve(s *vault.Session, body []byte) (json.RawMessage, error
 	if !ok || peer.State != vault.PeerActive {
 		delete(f.d.In, id)
 		return nil, errConn
+	}
+	if s.KeyRotationHeld() {
+		// A transfer's statement is held until the new phone's first
+		// unlock from storage (§11.14.10): a response signed with the new
+		// key now would reach the connection with no chain from the key it
+		// pinned (the statement is not in the chain yet), so it would see a
+		// key change. The challenge stays open; the member approves it
+		// again once the move has finished.
+		return nil, errMoveUnfinished
 	}
 	if f.keys == nil {
 		return nil, errLocked

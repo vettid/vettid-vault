@@ -1009,3 +1009,30 @@ func TestKeyRotationTwoDeliveries(t *testing.T) {
 		t.Fatalf("after two deliveries: %s", r)
 	}
 }
+
+// §11.14.10: while a transfer's credential key statement is held (before
+// the new phone's first unlock from storage) a sign-in is refused
+// transfer_incomplete and signs nothing; the challenge stays open and is
+// approved once the move has finished.
+func TestApproveRefusedWhileRotationHeld(t *testing.T) {
+	a, b := pair()
+	b.w.open = true
+	r := featuretest.Call(a.f, a.h, t0, "desktop", "connection.authenticate.request", `{"connection_id":"cB","context":"sign-in"}`)
+	if !r.OK() {
+		t.Fatal(r.Code)
+	}
+	ch := last(t, a.h, "connection.authenticate.challenge")
+	featuretest.CallExp(b.f, b.h, t0, ch.Opt.Exp, "connection:cA", "connection.authenticate.challenge", string(ch.Body))
+	id := field(t, last(t, b.h, "connection.authenticate.pending").Body, "request_id")
+	b.h.HeldRotations = [][]byte{[]byte(`{}`)}
+	if r := featuretest.Call(b.f, b.h, t0, "app", "connection.authenticate.approve", `{"request_id":"`+id+`"}`); r.Code != "transfer_incomplete" {
+		t.Fatalf("approve while held: %q", r.Code)
+	}
+	if len(b.h.SentOfType("connection.authenticate.response")) != 0 || len(b.f.SignedInKey("cA")) != 0 {
+		t.Fatal("signed while held")
+	}
+	b.h.HeldRotations = nil
+	if r := featuretest.Call(b.f, b.h, t0, "app", "connection.authenticate.approve", `{"request_id":"`+id+`"}`); !r.OK() {
+		t.Fatalf("approve after the move: %q", r.Code)
+	}
+}

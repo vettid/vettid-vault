@@ -943,3 +943,21 @@ func TestAsksNeverDelegable(t *testing.T) {
 		}
 	}
 }
+
+// §11.14.10: while a transfer's credential key statement is held, a grant
+// is not signed (its iss would be the new key, which no connection follows
+// yet): transfer_incomplete, nothing stored.
+func TestGrantRefusedWhileRotationHeld(t *testing.T) {
+	r := newRig(t)
+	r.w.open = true
+	r.h.HeldRotations = [][]byte{[]byte(`{}`)}
+	body := `{"agent_id":"dev-agent","scope":"connection.list","expires_at":"2026-12-01T00:00:00.000Z"}`
+	if res := featuretest.Call(r.f, r.h, t0, vault.KindApp, "leash.grant.issue", body); res.Code != "transfer_incomplete" {
+		t.Fatalf("while held: %q", res.Code)
+	}
+	if len(r.f.Grants()) != 0 {
+		t.Fatal("a refused grant was stored")
+	}
+	r.h.HeldRotations = nil
+	r.issue(t, body)
+}

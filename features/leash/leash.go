@@ -253,7 +253,10 @@ var (
 	errForbidden = vault.NewError("forbidden", "")
 	errConflict  = vault.NewError("conflict", "")
 	errLocked    = vault.NewError("credential_locked", "")
-	errInternal  = vault.NewError("internal", "")
+	// errMoveUnfinished: a grant signed while a transfer's credential key
+	// statement is held (§11.14.10), before the new phone's first unlock.
+	errMoveUnfinished = vault.NewError("transfer_incomplete", "")
+	errInternal       = vault.NewError("internal", "")
 )
 
 // Spec is a parsed grant specification (leash.grant.issue, or one entry of
@@ -1010,6 +1013,12 @@ func (f *Feature) issue(s *vault.Session, body []byte) (json.RawMessage, error) 
 // sign makes the grant's delegation with the credential key, which the
 // unlock window holds (§10.11).
 func (f *Feature) sign(s *vault.Session, g *Grant, agentIK []byte) error {
+	if s.KeyRotationHeld() {
+		// The delegation's iss would be the new credential key, which no
+		// connection can follow before the held statement goes out at the
+		// new phone's first unlock from storage (§11.14.10).
+		return errMoveUnfinished
+	}
 	if f.keys == nil {
 		return errLocked
 	}

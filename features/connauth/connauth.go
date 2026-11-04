@@ -757,7 +757,7 @@ func (f *Feature) rotated(s *vault.Session, body []byte) error {
 		// A chain that only ends at the pinned key: a repeated delivery
 		// (the vote feature queues the chain before each ballot) or one
 		// overtaken by a response that already moved the pin. Nothing has
-		// changed: no audit, no key event (VAULT-MESSAGING 0.83.9).
+		// changed: no audit, no key event (VAULT-MESSAGING 0.83.11).
 		return nil
 	}
 	end, err := credwire.FollowChain(st.Key, chain)

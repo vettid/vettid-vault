@@ -123,7 +123,32 @@ type Host struct {
 	Blobs       map[string][]byte
 	BlobMax     int
 	BlobResults []BlobResult
+	// Credential key rotation statements a transfer's approval holds
+	// (vault.KeyRotationHost, §11.14.10), the error HoldKeyRotation answers,
+	// and the error ApproveTransfer answers.
+	HeldRotations [][]byte
+	HoldErr       error
+	ApproveErr    error
 }
+
+// HoldKeyRotation implements vault.KeyRotationHost.
+func (h *Host) HoldKeyRotation(statement []byte, _ time.Time) error {
+	if h.HoldErr != nil {
+		return h.HoldErr
+	}
+	h.HeldRotations = append(h.HeldRotations, append([]byte(nil), statement...))
+	return nil
+}
+
+// TakeHeldKeyRotations implements vault.KeyRotationHost.
+func (h *Host) TakeHeldKeyRotations(time.Time) [][]byte {
+	out := h.HeldRotations
+	h.HeldRotations = nil
+	return out
+}
+
+// KeyRotationHeld implements vault.KeyRotationHost.
+func (h *Host) KeyRotationHeld() bool { return len(h.HeldRotations) > 0 }
 
 func (h *Host) askState(conn string) *vault.AskState {
 	if h.Asks == nil {
@@ -311,6 +336,9 @@ func (h *Host) Transfer() (vault.TransferInfo, bool) {
 func (h *Host) ApproveTransfer(_ context.Context, id, _ string, _ []byte, _ bool, now time.Time) error {
 	if h.Xfer == nil || h.Xfer.ID != id || !h.Xfer.Scanned {
 		return vault.NewError("not_found", "")
+	}
+	if h.ApproveErr != nil {
+		return h.ApproveErr
 	}
 	h.Xfer.State = vault.TransferApproved
 	return nil

@@ -70,8 +70,12 @@ type Feature struct {
 	asked map[string]int64   // the last RequestProposal by connection|id, ms (memory only)
 	opt   Options
 	st    state
-	last  int64      // unix ms of the last recheck (memory only)
-	idx   *listIndex // the held list, parsed (memory only)
+	last  int64 // unix ms of the last recheck (memory only)
+	// owed: during a tick or an answer, the chains member authentication
+	// gives each connection (RotatedBody), read before the lock; queued
+	// before a ballot sent then, once per connection (memory only).
+	owed map[string][]byte
+	idx  *listIndex // the held list, parsed (memory only)
 }
 
 // New returns the feature.

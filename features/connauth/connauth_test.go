@@ -918,6 +918,73 @@ func TestSignedInKeyAndOwedRotation(t *testing.T) {
 	}
 }
 
+// §11.14.10: a transfer's held statements, and a rotation's own after
+// them, go to a connection as one chain (the receiver follows a chain only
+// from its pinned key).
+func TestKeyRotationsOneChain(t *testing.T) {
+	a, b := pair()
+	b.w.open = true
+	if r := result(t, a, b); !strings.Contains(r, `"key_changed":false`) {
+		t.Fatal(r)
+	}
+	k1 := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0xd1}, 32))
+	k2 := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0xd2}, 32))
+	r1, _ := credwire.NewKeyRotation(b.w.key, k1)
+	r2, _ := credwire.NewKeyRotation(k1, k2)
+	b.w.key = k2
+	b.h.Reset()
+	b.f.CredentialKeyRotations(vault.NewSession(context.Background(), b.h, vault.PeerInfo{}, t0, nil), []*credwire.KeyRotation{r1, r2})
+	msgs := b.h.SentOfType("connection.authenticate.rotated")
+	if len(msgs) != 1 {
+		t.Fatalf("%d chains sent", len(msgs))
+	}
+	// The vote feature still gets the chain to queue before a ballot (a
+	// deposit the peer never processed is made good with it).
+	if b.f.RotatedBody("cA") == nil {
+		t.Fatal("no chain for a ballot")
+	}
+	a.h.Reset()
+	featuretest.Call(a.f, a.h, t0, "connection:cB", "connection.authenticate.rotated", string(msgs[0].Body))
+	if !a.h.HasActivity("connection.authenticate.key_rotated") {
+		t.Fatal("the one chain was not followed")
+	}
+	if r := result(t, a, b); !strings.Contains(r, `"key_changed":false`) {
+		t.Fatalf("after the chain: %s", r)
+	}
+}
+
+// A chain that only ends at the pinned key (a repeated delivery, or one a
+// response overtook) is ignored without an audit or a key event; any other
+// refused chain is still audited.
+func TestRepeatedChainIgnored(t *testing.T) {
+	a, b := pair()
+	b.w.open = true
+	if r := result(t, a, b); !strings.Contains(r, `"key_changed":false`) {
+		t.Fatal(r)
+	}
+	b.h.Reset()
+	rotate(t, b, 0xe1)
+	msg := last(t, b.h, "connection.authenticate.rotated")
+	featuretest.Call(a.f, a.h, t0, "connection:cB", "connection.authenticate.rotated", string(msg.Body))
+	a.h.Reset()
+	featuretest.Call(a.f, a.h, t0, "connection:cB", "connection.authenticate.rotated", string(msg.Body))
+	if a.h.HasActivity("connection.authenticate.rotation_rejected") || len(a.h.SentOfType("connection.authenticate.key")) != 0 ||
+		a.h.HasActivity("connection.authenticate.key_rotated") {
+		t.Fatal("a repeated chain was audited or changed the pin")
+	}
+	// A chain that neither starts nor ends at the pin is still refused and audited.
+	k2 := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0xe2}, 32))
+	k3 := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0xe3}, 32))
+	other, _ := credwire.NewKeyRotation(k2, k3)
+	featuretest.Call(a.f, a.h, t0, "connection:cB", "connection.authenticate.rotated", `{"rotations":[`+string(other.Marshal())+`]}`)
+	if !a.h.HasActivity("connection.authenticate.rotation_rejected") {
+		t.Fatal("a broken chain was not audited")
+	}
+	if r := result(t, a, b); !strings.Contains(r, `"key_changed":false`) {
+		t.Fatalf("pin lost: %s", r)
+	}
+}
+
 // §10.4 (0.83.9): two rotations delivered in a row with no sign-in
 // between. The second chain starts at the key B last signed with, before
 // A's new pin; A follows it from its pin, and the next authentication is
@@ -940,5 +1007,32 @@ func TestKeyRotationTwoDeliveries(t *testing.T) {
 	}
 	if r := result(t, a, b); !strings.Contains(r, `"key_changed":false`) {
 		t.Fatalf("after two deliveries: %s", r)
+	}
+}
+
+// §11.14.10: while a transfer's credential key statement is held (before
+// the new phone's first unlock from storage) a sign-in is refused
+// transfer_incomplete and signs nothing; the challenge stays open and is
+// approved once the move has finished.
+func TestApproveRefusedWhileRotationHeld(t *testing.T) {
+	a, b := pair()
+	b.w.open = true
+	r := featuretest.Call(a.f, a.h, t0, "desktop", "connection.authenticate.request", `{"connection_id":"cB","context":"sign-in"}`)
+	if !r.OK() {
+		t.Fatal(r.Code)
+	}
+	ch := last(t, a.h, "connection.authenticate.challenge")
+	featuretest.CallExp(b.f, b.h, t0, ch.Opt.Exp, "connection:cA", "connection.authenticate.challenge", string(ch.Body))
+	id := field(t, last(t, b.h, "connection.authenticate.pending").Body, "request_id")
+	b.h.HeldRotations = [][]byte{[]byte(`{}`)}
+	if r := featuretest.Call(b.f, b.h, t0, "app", "connection.authenticate.approve", `{"request_id":"`+id+`"}`); r.Code != "transfer_incomplete" {
+		t.Fatalf("approve while held: %q", r.Code)
+	}
+	if len(b.h.SentOfType("connection.authenticate.response")) != 0 || len(b.f.SignedInKey("cA")) != 0 {
+		t.Fatal("signed while held")
+	}
+	b.h.HeldRotations = nil
+	if r := featuretest.Call(b.f, b.h, t0, "app", "connection.authenticate.approve", `{"request_id":"`+id+`"}`); !r.OK() {
+		t.Fatalf("approve after the move: %q", r.Code)
 	}
 }

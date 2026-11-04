@@ -132,6 +132,19 @@ type ballot struct {
 	MsgMS      int64    `json:"msg_ms,omitempty"`
 	ReceiptSig []byte   `json:"receipt_sig,omitempty"`
 	Refusals   [][]byte `json:"refusals,omitempty"` // signed refusals, verbatim, the last 8
+
+	// Held is the cast_sig and body signed under a new credential key whose
+	// rotation statement is held (a transfer's approval, §11.14.10): put in
+	// force once the statement is sent.
+	Held *heldCast `json:"held,omitempty"`
+}
+
+// heldCast is a cast_sig, and its vote.cast body, under the credential key
+// Key, kept until Key's rotation statement is sent.
+type heldCast struct {
+	Key     []byte `json:"key"`
+	CastSig []byte `json:"cast_sig"`
+	Body    []byte `json:"body"`
 }
 
 func (b *ballot) final() bool {

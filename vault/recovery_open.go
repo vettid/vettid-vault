@@ -504,7 +504,11 @@ func (m *Manager) completeRecoveryR(ctx context.Context, p RecoveryOpenParams, r
 		EnrollKEM: r.App.KEM, EnrollAttest: r.App.Attestation, CreatedBy: inviteByRecovery}, now)
 	m.keepRecoveredSigner()
 	m.replaceApps("", now)
-	m.sendPendingUnlink(now) // a transfer's old phone, before the keys rotate (§11.14.10)
+	// A transfer's held credential key statement first (the backup copy the
+	// open used holds the new key), then the old phone's notice, before the
+	// keys rotate (§11.14.10).
+	m.sendHeldKeyRotations(now)
+	m.sendPendingUnlink(now)
 	// A rotation that cannot be made never fails the recovery: the owed
 	// mark, in this state write, makes the next unlock try again (§11.14.6
 	// step 6, §11.14.10 "The owed mark"). A rotation clears it.
@@ -671,6 +675,9 @@ func resumeRecovery(ctx context.Context, p RecoveryOpenParams, hdr *Header, hver
 			m.zeroize()
 			return nil, out.fail(OpenWrong)
 		}
+		// The first run's sending of a held credential key statement was in
+		// the state that was not stored (§11.14.10).
+		m.sendHeldKeyRotations(now)
 		// The event's attempt, as the first run set it, and its success
 		// sent again: the first run's PendingSucceed was in the state
 		// that was not stored. A `next` part from before the field has

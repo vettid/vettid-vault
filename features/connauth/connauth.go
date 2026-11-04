@@ -89,6 +89,11 @@ type data struct {
 	// a response with: the key that connection pinned, or one before it if
 	// it followed a delivered chain since (VAULT-MESSAGING §10.4).
 	Shown map[string][]byte `json:"shown,omitempty"`
+	// Delivered is, per connection, the key the last chain sent to it
+	// since that response leads to: at a statement, a chain is not sent
+	// again until a later statement extends it (RotatedBody, for a
+	// ballot, ignores it). Cleared when a response is signed.
+	Delivered map[string][]byte `json:"delivered,omitempty"`
 }
 
 // Feature implements vault.Feature and vault.ConnectionRemovedObserver.
@@ -103,7 +108,7 @@ type Feature struct {
 // New returns the feature; keys is the credential feature.
 func New(keys KeyUser) *Feature {
 	return &Feature{keys: keys, d: data{Out: map[string]*Challenge{}, In: map[string]*Challenge{}, States: map[string]*State{},
-		Shown: map[string][]byte{}}}
+		Shown: map[string][]byte{}, Delivered: map[string][]byte{}}}
 }
 
 var (
@@ -149,6 +154,9 @@ func (f *Feature) Load(raw json.RawMessage) error {
 	if d.Shown == nil {
 		d.Shown = map[string][]byte{}
 	}
+	if d.Delivered == nil {
+		d.Delivered = map[string][]byte{}
+	}
 	f.d = d
 	return nil
 }
@@ -165,6 +173,11 @@ var (
 	errNotFound = vault.NewError("not_found", "")
 	errLocked   = vault.NewError("credential_locked", "")
 	errConn     = vault.NewError("connection_unavailable", "")
+	// errMoveUnfinished: a sign-in while a transfer's credential key
+	// statement is held (§11.14.10): the move to this phone finishes at
+	// its first unlock from storage, and only then do the connections
+	// learn the new key.
+	errMoveUnfinished = vault.NewError("transfer_incomplete", "")
 )
 
 // wire is the challenge's body.
@@ -459,6 +472,15 @@ func (f *Feature) approve(s *vault.Session, body []byte) (json.RawMessage, error
 		delete(f.d.In, id)
 		return nil, errConn
 	}
+	if s.KeyRotationHeld() {
+		// A transfer's statement is held until the new phone's first
+		// unlock from storage (§11.14.10): a response signed with the new
+		// key now would reach the connection with no chain from the key it
+		// pinned (the statement is not in the chain yet), so it would see a
+		// key change. The challenge stays open; the member approves it
+		// again once the move has finished.
+		return nil, errMoveUnfinished
+	}
 	if f.keys == nil {
 		return nil, errLocked
 	}
@@ -479,6 +501,7 @@ func (f *Feature) approve(s *vault.Session, body []byte) (json.RawMessage, error
 		return nil, errConn
 	}
 	f.d.Shown[c.Conn] = append([]byte(nil), pub...)
+	delete(f.d.Delivered, c.Conn)
 	for _, o := range f.respObs {
 		o.ResponseSigned(s, c.Conn)
 	}
@@ -594,6 +617,7 @@ func (f *Feature) ConnectionRemoved(_ *vault.Session, id string) {
 	defer f.mu.Unlock()
 	delete(f.d.States, id)
 	delete(f.d.Shown, id)
+	delete(f.d.Delivered, id)
 	for k, c := range f.d.Out {
 		if c.Conn == id {
 			delete(f.d.Out, k)
@@ -616,9 +640,14 @@ func (f *Feature) SignedInKey(conn string) []byte {
 	return append([]byte(nil), f.d.Shown[conn]...)
 }
 
-// RotatedBody is the connection.authenticate.rotated body still owed to the
-// connection (the chain from the key it pinned to the current one), or nil
-// (§10.4: a ballot's cast_sig is queued after it).
+// RotatedBody is the connection.authenticate.rotated body that leads the
+// connection from the key it pinned (the one this vault last signed a
+// response with) to the current one, or nil (§10.4). The vote feature
+// queues it before a ballot it sends (§10.19.5), whether or not the chain
+// went out when the statement was made: a deposit the peer never
+// processed (it was offline past the relay's message TTL) is then made
+// good. A peer that already followed the chain ignores the repeat, which
+// ends at the key it pins.
 func (f *Feature) RotatedBody(conn string) []byte {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -626,6 +655,18 @@ func (f *Feature) RotatedBody(conn string) []byte {
 		return peerwire.ConnAuthRotatedBody(seg)
 	}
 	return nil
+}
+
+// owed is the chain from the key the connection was last signed a response
+// with to the current key (§10.4), unless it was sent already when a
+// statement was made (statement-time delivery only; RotatedBody does not
+// skip it).
+func (f *Feature) owed(conn string) []*credwire.KeyRotation {
+	seg := f.segment(f.d.Shown[conn])
+	if len(seg) == 0 || suite.EqualPublic(f.d.Delivered[conn], seg[len(seg)-1].New) {
+		return nil
+	}
+	return seg
 }
 
 // ResponseObserver is told when the vault has signed an authentication
@@ -660,9 +701,24 @@ func (f *Feature) segment(from []byte) []*credwire.KeyRotation {
 // statement is kept, and every active connection that pinned an earlier
 // key of this member gets the chain from that key (§10.4).
 func (f *Feature) CredentialKeyRotated(s *vault.Session, r *credwire.KeyRotation) {
+	f.CredentialKeyRotations(s, []*credwire.KeyRotation{r})
+}
+
+// CredentialKeyRotations implements credential.KeyRotationBatchObserver:
+// the statements are kept in order, and every active connection that
+// pinned an earlier key gets one chain, from the key it was last signed a
+// response with to the last one (§10.4): a transfer's held statements, and
+// a rotation's own after them, go as one chain (§11.14.10), since a
+// receiver follows a chain only from its pinned key.
+func (f *Feature) CredentialKeyRotations(s *vault.Session, rs []*credwire.KeyRotation) {
+	if len(rs) == 0 {
+		return
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.d.Chain = append(f.d.Chain, r.Marshal())
+	for _, r := range rs {
+		f.d.Chain = append(f.d.Chain, r.Marshal())
+	}
 	if n := len(f.d.Chain); n > credwire.MaxKeyChain {
 		f.d.Chain = append([]json.RawMessage(nil), f.d.Chain[n-credwire.MaxKeyChain:]...)
 	}
@@ -673,10 +729,12 @@ func (f *Feature) CredentialKeyRotated(s *vault.Session, r *credwire.KeyRotation
 	sort.Strings(conns)
 	for _, id := range conns {
 		if p, ok := s.Connection(id); !ok || p.State != vault.PeerActive {
-			continue
+			continue // RotatedBody gives it the chain later (the vote feature queues it before a ballot)
 		}
-		if seg := f.segment(f.d.Shown[id]); len(seg) > 0 {
-			_ = s.SendToConnection(id, peerwire.TypeConnAuthRotated, peerwire.ConnAuthRotatedBody(seg))
+		if seg := f.owed(id); len(seg) > 0 {
+			if s.SendToConnection(id, peerwire.TypeConnAuthRotated, peerwire.ConnAuthRotatedBody(seg)) == nil {
+				f.d.Delivered[id] = append([]byte(nil), seg[len(seg)-1].New...)
+			}
 		}
 	}
 }
@@ -694,6 +752,13 @@ func (f *Feature) rotated(s *vault.Session, body []byte) error {
 	st := f.d.States[conn]
 	if st == nil || len(st.Key) == 0 {
 		return nil // nothing pinned
+	}
+	if len(chain) > 0 && suite.EqualPublic(chain[len(chain)-1].New, st.Key) {
+		// A chain that only ends at the pinned key: a repeated delivery
+		// (the vote feature queues the chain before each ballot) or one
+		// overtaken by a response that already moved the pin. Nothing has
+		// changed: no audit, no key event (VAULT-MESSAGING 0.83.11).
+		return nil
 	}
 	end, err := credwire.FollowChain(st.Key, chain)
 	if err != nil {

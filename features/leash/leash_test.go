@@ -943,3 +943,43 @@ func TestAsksNeverDelegable(t *testing.T) {
 		}
 	}
 }
+
+// §11.14.10: while a transfer's credential key statement is held, a grant
+// is not signed (its iss would be the new key, which no connection follows
+// yet): transfer_incomplete, nothing stored.
+func TestGrantRefusedWhileRotationHeld(t *testing.T) {
+	r := newRig(t)
+	r.w.open = true
+	r.h.HeldRotations = [][]byte{[]byte(`{}`)}
+	body := `{"agent_id":"dev-agent","scope":"connection.list","expires_at":"2026-12-01T00:00:00.000Z"}`
+	if res := featuretest.Call(r.f, r.h, t0, vault.KindApp, "leash.grant.issue", body); res.Code != "transfer_incomplete" {
+		t.Fatalf("while held: %q", res.Code)
+	}
+	if len(r.f.Grants()) != 0 {
+		t.Fatal("a refused grant was stored")
+	}
+	r.h.HeldRotations = nil
+	r.issue(t, body)
+}
+
+// §11.14.10 (0.83.11): an agent's share rule signs a delegation, so it is
+// refused the same way while a transfer's statement is held.
+func TestAgentRuleRefusedWhileRotationHeld(t *testing.T) {
+	r := newRig(t)
+	r.w.open = true
+	sess := vault.NewSession(context.Background(), r.h, vault.PeerInfo{ID: "dev-app", Kind: vault.KindApp}, t0, nil)
+	id, _ := envelope.NewULID(t0)
+	spec := &itemspec.AgentRule{ID: id, AgentID: agent, PerHour: 2, PerDay: 10, StatusTTL: time.Minute,
+		Terms: itemspec.Terms{Tags: []string{"work"}, Match: "all", Access: "read", Mode: Auto, Uses: 5}}
+	r.h.HeldRotations = [][]byte{[]byte(`{}`)}
+	if _, err := r.f.SetAgentRule(sess, spec); err == nil || err.(*vault.HandlerError).Code != "transfer_incomplete" {
+		t.Fatalf("while held: %v", err)
+	}
+	if len(r.f.Grants()) != 0 {
+		t.Fatal("a refused rule was stored")
+	}
+	r.h.HeldRotations = nil
+	if ar, err := r.f.SetAgentRule(sess, spec); err != nil || ar.Version != 1 {
+		t.Fatalf("after the move: %v", err)
+	}
+}

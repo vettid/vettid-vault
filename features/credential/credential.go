@@ -180,11 +180,36 @@ type KeyRotationObserver interface {
 // KeyRotationSigner is implemented by an observer that must sign with both
 // credential keys while they are open (0.81.1 §3.5.5: the vote feature
 // re-signs the cast_sig of every ballot that is not final). The keys are
-// valid only during the call; they are wiped when the rotation ends. It is
-// called after every KeyRotationObserver has seen the statement, so what
-// it sends is queued after the statement.
+// valid only during the call; they are wiped when the rotation ends.
+//
+// CredentialKeysOpen is called after every KeyRotationObserver has seen the
+// statement, so what it sends is queued after the statement.
+//
+// CredentialKeysHeld is called at a transfer's approval (§11.14.10), whose
+// statement is held until the new phone's first unlock from storage: the
+// signer signs now, while both keys are open, but sends nothing under the
+// new key and keeps what it signed in force only once it is told of the
+// statement (CredentialKeyRotated with the same new key), which then
+// precedes it in the outbox.
 type KeyRotationSigner interface {
 	CredentialKeysOpen(s *vault.Session, oldKey, newKey ed25519.PrivateKey)
+	CredentialKeysHeld(s *vault.Session, oldKey, newKey ed25519.PrivateKey)
+}
+
+// KeyRotationBatchObserver is a KeyRotationObserver that is told of
+// several statements at once, in order (a transfer's held statements,
+// §11.14.10): member authentication sends each connection one chain.
+type KeyRotationBatchObserver interface {
+	CredentialKeyRotations(s *vault.Session, rs []*credwire.KeyRotation)
+}
+
+// KeyRotationFollower is told of the held statements once they are sent,
+// after every KeyRotationObserver has seen them, so that what it sends is
+// queued after the statements whatever the order of registration (the
+// vote feature puts its ballots re-signed at a transfer's approval in
+// force, CredentialKeysHeld).
+type KeyRotationFollower interface {
+	CredentialKeyRotationsSent(s *vault.Session, rs []*credwire.KeyRotation)
 }
 
 // AddKeyRotationObserver registers an observer (at construction).
@@ -1416,7 +1441,18 @@ func (f *Feature) transferReject(s *vault.Session, body []byte) (json.RawMessage
 // the password against the current blob; the CEK rotates (the old app's
 // copy is dead and nobody receives the new blob yet: the new app fetches
 // it after device.paired), and the approval completes the transfer, whose
-// handshake is already complete (0.10.3): the answer is {}.
+// handshake is already complete (0.10.3): the answer is {} (release R:
+// {"unlink":"after_new_unlock"}).
+//
+// Release R (§11.14.10 "The credential key, at the approval"): in the same
+// step-2 state write the credential key rotates, K0 to K1, as at
+// credential.rotate: every critical item is re-keyed, the new blob (the
+// vault's backup copy, which the new phone takes over) holds K1, and the
+// rotation statement K0→K1 is made but held by the runtime until the new
+// phone's first unlock from storage. Everything that can fail is done
+// before the vault's part, and nothing of the credential changes before
+// it has succeeded: a refusal or a failure leaves K0, and a step-2 write
+// that is not stored holds neither K1 nor the statement.
 func (f *Feature) transferApprove(s *vault.Session, body []byte, e *Envelope, p *Payload) (json.RawMessage, error) {
 	o, _ := strictjson.ParseObject(body)
 	id, err := o.String("transfer_id")
@@ -1449,18 +1485,96 @@ func (f *Feature) transferApprove(s *vault.Session, body []byte, e *Envelope, p 
 	}
 	defer cek.Destroy()
 	defer inner.Wipe()
-	// Release R (§11.14.10): the vault's part first (permit, new opener,
-	// step 1 of the DEK replacement); busy and retry change nothing but
-	// the spent UTK, and the transfer stays open.
-	if err := s.ApproveTransfer(id, string(p.PIN), p.Password, f.backupLocked()); err != nil {
+	// The new credential key, its statement, the re-keyed items and the
+	// next blob under a new CEK, none of them installed yet.
+	ks, err := suite.RandomBytes(32)
+	if err != nil {
+		return nil, errInternal
+	}
+	oldPriv, newPriv := ed25519.NewKeyFromSeed(inner.Key), ed25519.NewKeyFromSeed(ks)
+	// Both keys stay open to the signers below, and are wiped at the end.
+	defer suite.Wipe(oldPriv)
+	defer suite.Wipe(newPriv)
+	stmt, err := credwire.NewKeyRotation(oldPriv, newPriv)
+	if err != nil {
+		suite.Wipe(ks)
+		return nil, errInternal
+	}
+	commitItems, err := f.rekeyItems(s, inner) // every critical item under a fresh key (§10.7)
+	if err != nil {
+		suite.Wipe(ks)
 		return nil, err
 	}
-	f.endWindow()
-	if _, err := f.rotateCEK(s, inner, p.Password); err != nil {
+	suite.Wipe(inner.Key)
+	inner.Key = ks // wiped with inner
+	seed, blob, err := f.sealNext(s, inner, p.Password)
+	if err != nil {
 		return nil, err
+	}
+	// Release R (§11.14.10): the vault's part (permit, new opener, step 1
+	// of the DEK replacement); busy and retry change nothing but the spent
+	// UTK, and the transfer stays open.
+	if err := s.ApproveTransfer(id, string(p.PIN), p.Password, f.backupLocked()); err != nil {
+		suite.Wipe(seed)
+		return nil, err
+	}
+	// The statement, held in the step-2 state. If it cannot be held the
+	// handler fails, and the runtime drops step 1 and ends the transfer.
+	if err := s.HoldKeyRotation(stmt.Marshal()); err != nil {
+		suite.Wipe(seed)
+		return nil, errInternal
+	}
+	f.endWindow()
+	f.install(s, seed, blob, inner.Version)
+	commitItems()
+	f.st.Key = newPriv.Public().(ed25519.PublicKey)
+	for _, o := range f.rotObs {
+		if so, ok := o.(KeyRotationSigner); ok {
+			so.CredentialKeysHeld(s, oldPriv, newPriv)
+		}
 	}
 	_, _ = s.OwnerCheckPassed(nil, false)
 	return strictjson.NewBuilder().String("unlink", "after_new_unlock").Bytes(), nil
+}
+
+// SendKeyRotations implements vault.KeyRotationSender: the statements a
+// transfer's approval held go to the observers in order, as a rotation's
+// own statement does (§11.14.10).
+func (f *Feature) SendKeyRotations(s *vault.Session, statements [][]byte) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.notifyRotations(s, statements, true)
+}
+
+// notifyRotations tells every KeyRotationObserver of the statements, in
+// order (a KeyRotationBatchObserver of all of them at once); member
+// authentication sends them to the connections that pinned an earlier key
+// (§10.4). Then, with follow, every KeyRotationFollower is told. A
+// statement that does not parse is skipped.
+func (f *Feature) notifyRotations(s *vault.Session, statements [][]byte, follow bool) {
+	var rs []*credwire.KeyRotation
+	for _, raw := range statements {
+		if r, err := credwire.ParseKeyRotation(raw); err == nil {
+			rs = append(rs, r)
+		}
+	}
+	if len(rs) == 0 {
+		return
+	}
+	for _, o := range f.rotObs {
+		if b, ok := o.(KeyRotationBatchObserver); ok {
+			b.CredentialKeyRotations(s, rs)
+			continue
+		}
+		for _, r := range rs {
+			o.CredentialKeyRotated(s, r)
+		}
+	}
+	for _, o := range f.rotObs {
+		if fo, ok := o.(KeyRotationFollower); ok && follow {
+			fo.CredentialKeyRotationsSent(s, rs)
+		}
+	}
 }
 
 // vaultDelete authorizes a deletion (§12.5): the confirmation phrase and
@@ -1570,25 +1684,40 @@ func (f *Feature) acked(s *vault.Session) {
 // rotateCEK is step 6 of §3.5.3: a new CEK, the content sealed under it as
 // the next version, the old CEK destroyed. It returns the new blob.
 func (f *Feature) rotateCEK(s *vault.Session, inner *Inner, pw []byte) ([]byte, error) {
-	cek, err := suite.GeneratePrivateKey()
+	seed, blob, err := f.sealNext(s, inner, pw)
 	if err != nil {
-		return nil, errInternal
-	}
-	defer cek.Destroy()
-	seed, err := cek.Seed()
-	if err != nil {
-		return nil, errInternal
-	}
-	inner.Version = f.st.Version + 1
-	blob, err := f.seal(s, cek.Public(), inner, pw)
-	if err != nil {
-		suite.Wipe(seed)
 		return nil, err
 	}
+	f.install(s, seed, blob, inner.Version)
+	return blob, nil
+}
+
+// sealNext seals the content as the next version under a new CEK and
+// returns the CEK's seed and the blob; nothing is installed (install).
+func (f *Feature) sealNext(s *vault.Session, inner *Inner, pw []byte) (seed, blob []byte, err error) {
+	cek, err := suite.GeneratePrivateKey()
+	if err != nil {
+		return nil, nil, errInternal
+	}
+	defer cek.Destroy()
+	seed, err = cek.Seed()
+	if err != nil {
+		return nil, nil, errInternal
+	}
+	inner.Version = f.st.Version + 1
+	blob, err = f.seal(s, cek.Public(), inner, pw)
+	if err != nil {
+		suite.Wipe(seed)
+		return nil, nil, err
+	}
+	return seed, blob, nil
+}
+
+// install makes a sealed next version current: the old CEK is destroyed.
+func (f *Feature) install(s *vault.Session, seed, blob []byte, version uint64) {
 	suite.Wipe(f.st.CEKSeed) // the old CEK: every earlier blob is now dead
 	f.st.CEKSeed = seed
-	f.commit(s, blob, inner.Version)
-	return blob, nil
+	f.commit(s, blob, version)
 }
 
 // respond rotates the CEK and builds {extra..., credential, version, utks}.
@@ -1687,6 +1816,12 @@ func (f *Feature) rotate(s *vault.Session, inner *Inner, p *Payload) (json.RawMe
 		suite.Wipe(ks)
 		return nil, err
 	}
+	// A transfer's statement still held (K0→K1) goes first, in one chain
+	// with this rotation's own (K1→K2), so that the connections that pinned
+	// K0 get an unbroken chain (§11.14.10 "The owed mark"). It is taken
+	// now, so the vault's rotation below finds none to send; if this
+	// handler fails, the runtime holds it again.
+	chain := s.TakeHeldKeyRotations()
 	if err := s.RotateIdentity(); err != nil {
 		suite.Wipe(ks)
 		return nil, errInternal
@@ -1703,9 +1838,9 @@ func (f *Feature) rotate(s *vault.Session, inner *Inner, p *Payload) (json.RawMe
 	f.st.Key = pub
 	s.Record(vault.Activity{Kind: "credential.rotated", Audit: true, Feed: true})
 	f.resolveAlarm(s) // the forced rotation (§3.5.9)
-	for _, o := range f.rotObs {
-		o.CredentialKeyRotated(s, stmt)
-	}
+	// The signers re-sign under the new key below: what they kept aside
+	// under a held key is superseded, so no follower is told.
+	f.notifyRotations(s, append(chain, stmt.Marshal()), false)
 	for _, o := range f.rotObs {
 		if so, ok := o.(KeyRotationSigner); ok {
 			so.CredentialKeysOpen(s, oldPriv, newPriv)
@@ -1808,6 +1943,11 @@ func (f *Feature) holderReset(s *vault.Session, e *Envelope, p *Payload) (json.R
 		NewPassword: p.NewPassword, BackupCopy: s.Settings().Backup()}); err != nil {
 		return nil, err
 	}
+	// A transfer's statement still held announces a key of the credential
+	// destroyed now: it is never sent (a new credential has no statement,
+	// §3.5.5), and the signers' copies under that key go with it
+	// (DeleteObserver).
+	_ = s.TakeHeldKeyRotations()
 	me := s.From().ID
 	keep, ok := f.st.Pools[me]
 	delete(f.st.Pools, me)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"errors"
 	"github.com/vettid/vettid-vault/vms/handshake"
 	"github.com/vettid/vettid-vault/vms/leashwire"
 	"sort"
@@ -240,7 +241,17 @@ func (h managerHost) CompleteRecovery(id string, now time.Time) error {
 	return h.m.completeRecovery(id, now)
 }
 
-func (h managerHost) RotateIdentity(now time.Time) error { return h.m.rotateIdentity(now) }
+// RotateIdentity refuses while a transfer's credential key statement is
+// held: the rotation would send it through the credential feature, whose
+// handler is the caller (credential.rotate takes it first, §11.14.10).
+func (h managerHost) RotateIdentity(now time.Time) error {
+	if h.m.st.HeldKeyRotation != nil {
+		return errRotationHeld
+	}
+	return h.m.rotateIdentity(now)
+}
+
+var errRotationHeld = errors.New("vault: a credential key rotation statement is still held")
 
 func (h managerHost) Settings() Settings { return h.m.st.Settings.clone() }
 

@@ -80,6 +80,12 @@ func (f *Feature) Cast(s *vault.Session, conn, id, choice string) (CastResult, e
 	if f.dep.Auth != nil {
 		pinned, owed = f.dep.Auth.SignedInKey(conn), f.dep.Auth.RotatedBody(conn)
 	}
+	res, err := f.cast(s, conn, id, choice, pinned, owed)
+	return res, err
+}
+
+// cast is Cast under the lock.
+func (f *Feature) cast(s *vault.Session, conn, id, choice string, pinned, owed []byte) (CastResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	now := s.Now()
@@ -158,12 +164,34 @@ func (f *Feature) Cast(s *vault.Session, conn, id, choice string) (CastResult, e
 	r.Ballot = &ballot{State: BallotSending, ChoiceID: choice, VK: bal.VK, BallotSig: bal.BallotSig, CastSig: castSig, Body: body}
 	r.ChangedMS = now.UnixMilli()
 	f.audit(s, "vote.cast", conn, id) // never the choice
+	if credPub := credKey.Public().(ed25519.PublicKey); s.KeyRotationHeld() && !eq(pinned, credPub) {
+		// A transfer's credential key statement is still held (§11.14.10):
+		// the connection does not follow the key yet. The ballot waits
+		// aside and is sent after the statement (CredentialKeyRotationsSent).
+		r.Ballot.Held = &heldCast{Key: append([]byte(nil), credPub...), CastSig: castSig, Body: body}
+		r.Ballot.CastSig, r.Ballot.Body = nil, nil
+		f.event(s, r, "ballot")
+		return CastResult{ProposalID: id, State: r.Ballot.State}, nil
+	}
 	if len(owed) > 0 {
 		_ = s.SendToConnection(conn, "connection.authenticate.rotated", owed)
 	}
 	f.sendBallot(s, r)
 	f.event(s, r, "ballot")
 	return CastResult{ProposalID: id, State: r.Ballot.State}, nil
+}
+
+// sendOwedChain queues the chain member authentication gives the
+// connection (read before the lock into f.owed) before a ballot, once per
+// tick or answer. It is queued whether or not it went out when the
+// statement was made, so a deposit the peer never processed is made good;
+// a peer that already followed it ignores the repeat, which ends at the
+// key it pins.
+func (f *Feature) sendOwedChain(s *vault.Session, conn string) {
+	if body := f.owed[conn]; len(body) > 0 {
+		_ = s.SendToConnection(conn, "connection.authenticate.rotated", body)
+		delete(f.owed, conn)
+	}
 }
 
 // sendBallot sends the stored body as a new request with a new inner id.
@@ -248,9 +276,23 @@ func (f *Feature) setWaiting(s *vault.Session, r *record, reason string) {
 // Response implements vault.ResponseObserver: the answers to vote.cast and
 // vote.status. Only a verified answer counts (§10.19.5).
 func (f *Feature) Response(s *vault.Session, in *envelope.Inner) bool {
+	// An answer to a cast may send the ballot again (bad_ballot): the chain
+	// member authentication gives the connection is read before the lock
+	// and queued first (sendOwedChain).
+	f.mu.Lock()
+	ref, ok := f.pend[in.Re]
+	f.mu.Unlock()
+	owed := map[string][]byte{}
+	if ok && ref.kind == "cast" && f.dep.Auth != nil {
+		if body := f.dep.Auth.RotatedBody(ref.conn); len(body) > 0 {
+			owed[ref.conn] = body
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	ref, ok := f.pend[in.Re]
+	f.owed = owed
+	defer func() { f.owed = nil }()
+	ref, ok = f.pend[in.Re]
 	if !ok {
 		return true // after a restart: dropped, as an answer matching no request
 	}
@@ -380,11 +422,16 @@ func (f *Feature) castAnswer(s *vault.Session, r *record, in *envelope.Inner) {
 	case "not_active", "not_eligible":
 		f.refuse(s, r, code, true)
 	case "bad_ballot":
+		// A copy kept aside under a transfer's held key (b.Held) is never
+		// the answer: no connection follows that key before the statement
+		// goes out, since no sign-in is signed with it meanwhile (member
+		// authentication refuses them, §11.14.10).
 		if gen < b.Gen {
 			// A send made before the re-signed body: the body already
 			// re-signed is the answer, sent once if it was not yet.
 			f.setWaiting(s, r, "bad_ballot")
 			if b.SentGen < b.Gen && now.Before(time.Unix(r.Closes, 0)) {
+				f.sendOwedChain(s, r.Conn)
 				f.sendBallot(s, r)
 			}
 			return
@@ -637,8 +684,27 @@ func (f *Feature) Confirm(s *vault.Session, conn, id string, mine bool) (string,
 // status, the seed of a vote never cast, and the result checks that come
 // due. It runs whenever the vault is unlocked, held included.
 func (f *Feature) Tick(s *vault.Session) {
+	// The chains member authentication still owes a connection with a
+	// ballot to send, read before this feature's lock (a connection that
+	// was not active when a rotation's statement went out, §10.4): queued
+	// before the ballot, as at vote.cast.
+	owed := map[string][]byte{}
+	if f.dep.Auth != nil {
+		for c := range f.pinsFor(func(b *ballot) bool { return b.Body != nil }) {
+			if body := f.dep.Auth.RotatedBody(c); len(body) > 0 {
+				owed[c] = body
+			}
+		}
+	}
+	f.tick(s, owed)
+}
+
+// tick is Tick under the lock.
+func (f *Feature) tick(s *vault.Session, owed map[string][]byte) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.owed = owed
+	defer func() { f.owed = nil }()
 	now := s.Now()
 	for id, p := range f.pend { // as the Manager forgets its own requests
 		if now.Sub(time.UnixMilli(p.atMS)) > pendTTL {
@@ -722,6 +788,7 @@ func (f *Feature) tickRecord(s *vault.Session, r *record, now time.Time) {
 			return
 		}
 		if now.UnixMilli() >= b.NextSendMS {
+			f.sendOwedChain(s, r.Conn)
 			f.sendBallot(s, r)
 		}
 		// 24 hours without a verified answer: also ask.
@@ -802,8 +869,64 @@ func (f *Feature) RecoveryCompleted(s *vault.Session) { f.markRestore(s) }
 
 // CredentialKeyRotated implements credential.KeyRotationObserver: nothing to
 // do with the statement (member authentication sends it); the re-signing
-// is CredentialKeysOpen.
+// is CredentialKeysOpen, and a transfer's held one CredentialKeysHeld.
 func (f *Feature) CredentialKeyRotated(*vault.Session, *credwire.KeyRotation) {}
+
+// CredentialKeyRotationsSent implements credential.KeyRotationFollower: a
+// transfer's held statements have gone out (§11.14.10), after every
+// observer, so member authentication's chain precedes what this sends.
+// What was re-signed under a statement's new key while it was held
+// (CredentialKeysHeld) is put in force, as CredentialKeysOpen does for a
+// rotation.
+func (f *Feature) CredentialKeyRotationsSent(s *vault.Session, rs []*credwire.KeyRotation) {
+	pins := f.pinsFor(func(b *ballot) bool { return b.Held != nil })
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	now := s.Now()
+	for _, r := range rs {
+		for _, k := range f.recordKeys() {
+			rec := f.st.Records[k]
+			b := rec.Ballot
+			if b == nil || b.Held == nil {
+				continue
+			}
+			if b.final() {
+				b.Held = nil
+				continue
+			}
+			h := b.Held
+			if !eq(h.Key, r.New) {
+				continue // a later key's (a second transfer before this statement went out)
+			}
+			b.Held = nil
+			f.adoptCast(s, rec, h.CastSig, h.Body, pins[rec.Conn], r.New, now)
+		}
+	}
+}
+
+// CredentialDeleted implements credential.DeleteObserver: the credential
+// was destroyed (credential.reset, §3.5.5). A cast_sig kept aside under a
+// transfer's held key belongs to it, whose statement is never sent: it is
+// dropped. A ballot that was only kept aside (cast while the statement was
+// held) was never sent anywhere and is removed, so the member can cast
+// again under the new credential.
+func (f *Feature) CredentialDeleted(s *vault.Session) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, k := range f.recordKeys() {
+		r := f.st.Records[k]
+		b := r.Ballot
+		if b == nil || b.Held == nil {
+			continue
+		}
+		b.Held = nil
+		if b.Body == nil && !b.final() {
+			r.Ballot = nil
+			r.ChangedMS = s.Now().UnixMilli()
+			f.event(s, r, "ballot")
+		}
+	}
+}
 
 // CredentialKeysOpen implements credential.KeyRotationSigner (VAULT-
 // MESSAGING 0.81.1 §3.5.5): while both credential keys are open, the
@@ -814,31 +937,33 @@ func (f *Feature) CredentialKeyRotated(*vault.Session, *credwire.KeyRotation) {}
 // vote.cast and credential.rotate run one at a time in the vault, so no
 // cast signed under the old key is flushed after this pass.
 func (f *Feature) CredentialKeysOpen(s *vault.Session, _, newKey ed25519.PrivateKey) {
+	f.resign(s, newKey, false)
+}
+
+// CredentialKeysHeld implements credential.KeyRotationSigner: a transfer's
+// approval rotates the credential key but holds the statement until the
+// new phone's first unlock from storage (§11.14.10). The cast_sig of every
+// ballot that is not final is signed under the new key now, while it is
+// open, and kept aside: the body in force, under the key the connection
+// pinned, stays in force and is the one sent until the statement goes out
+// (CredentialKeyRotated). A body under the new key sent before it would be
+// refused bad_ballot by a service that pinned the old key.
+func (f *Feature) CredentialKeysHeld(s *vault.Session, _, newKey ed25519.PrivateKey) {
+	f.resign(s, newKey, true)
+}
+
+// resign signs the cast_sig of every ballot that is not final under newKey;
+// held keeps it aside, otherwise it is put in force (adoptCast).
+func (f *Feature) resign(s *vault.Session, newKey ed25519.PrivateKey, held bool) {
 	newPub := newKey.Public().(ed25519.PublicKey)
-	// Read what member authentication pinned before taking this lock.
-	pins := map[string][]byte{}
-	f.mu.Lock()
-	conns := map[string]bool{}
-	for _, r := range f.st.Records {
-		if r.Ballot != nil && !r.Ballot.final() {
-			conns[r.Conn] = true
-		}
-	}
-	f.mu.Unlock()
-	if f.dep.Auth != nil {
-		for c := range conns {
-			pins[c] = f.dep.Auth.SignedInKey(c)
-		}
+	var pins map[string][]byte
+	if !held {
+		pins = f.pinsFor(func(*ballot) bool { return true })
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	now := s.Now()
-	keys := make([]string, 0, len(f.st.Records))
-	for k := range f.st.Records {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
+	for _, k := range f.recordKeys() {
 		r := f.st.Records[k]
 		b := r.Ballot
 		if b == nil || b.final() {
@@ -857,22 +982,69 @@ func (f *Feature) CredentialKeysOpen(s *vault.Session, _, newKey ed25519.Private
 		if err != nil {
 			continue
 		}
-		b.CastSig, b.Body = sig, body // the same ballot: vk, choice, ballot_sig and leaf do not change
-		pin := pins[r.Conn]
-		if len(pin) == 0 || eq(pin, newPub) {
-			continue // pinned no key: only replaced
+		if held {
+			b.Held = &heldCast{Key: append([]byte(nil), newPub...), CastSig: sig, Body: body}
+			continue
 		}
-		// Every re-sign for a connection that pinned a key is a new
-		// generation, sent or not: a bad_ballot answering an older send is
-		// answered by it, whether or not the connection was reachable now.
-		b.Gen++
-		if !now.Before(time.Unix(r.Closes, 0)) {
-			continue // after the close in force: only replaced
-		}
-		c, ok := s.Connection(r.Conn)
-		if !ok || c.State != vault.PeerActive {
-			continue // sent at the next tick, by the schedule
-		}
-		f.sendBallot(s, r)
+		b.Held = nil // superseded: this key follows the held one's
+		f.adoptCast(s, r, sig, body, pins[r.Conn], newPub, now)
 	}
+}
+
+// pinsFor reads, before this feature's lock is taken, the key member
+// authentication pinned for each connection with a ballot that is not
+// final and that want selects.
+func (f *Feature) pinsFor(want func(*ballot) bool) map[string][]byte {
+	pins := map[string][]byte{}
+	f.mu.Lock()
+	conns := map[string]bool{}
+	for _, r := range f.st.Records {
+		if r.Ballot != nil && !r.Ballot.final() && want(r.Ballot) {
+			conns[r.Conn] = true
+		}
+	}
+	f.mu.Unlock()
+	if f.dep.Auth != nil {
+		for c := range conns {
+			pins[c] = f.dep.Auth.SignedInKey(c)
+		}
+	}
+	return pins
+}
+
+// recordKeys returns the records' keys in order.
+func (f *Feature) recordKeys() []string {
+	keys := make([]string, 0, len(f.st.Records))
+	for k := range f.st.Records {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// adoptCast puts a cast_sig re-signed under newPub, and its body, in force,
+// and sends the body once to a connection that pinned another key. It runs
+// only right after member authentication has queued the chain to newPub
+// for every active connection (a rotation's observers, or the held
+// statements' observers before the followers), so the chain precedes the
+// body without being queued again here; an inactive connection gets the
+// body from the schedule, after the chain (sendOwedChain).
+func (f *Feature) adoptCast(s *vault.Session, r *record, sig, body, pin, newPub []byte, now time.Time) {
+	b := r.Ballot
+	b.CastSig, b.Body = sig, body // the same ballot: vk, choice, ballot_sig and leaf do not change
+	if len(pin) == 0 || eq(pin, newPub) {
+		return // pinned no key: only replaced
+	}
+	// Every re-sign for a connection that pinned a key is a new
+	// generation, sent or not: a bad_ballot answering an older send is
+	// answered by it, whether or not the connection was reachable now.
+	b.Gen++
+	if !now.Before(time.Unix(r.Closes, 0)) {
+		return // after the close in force: only replaced
+	}
+	c, ok := s.Connection(r.Conn)
+	if !ok || c.State != vault.PeerActive {
+		return // sent at the next tick, by the schedule
+	}
+	f.sendBallot(s, r)
 }

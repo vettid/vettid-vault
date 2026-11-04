@@ -142,14 +142,21 @@ type HeldAnswer struct {
 // Paused reports whether the connection's asks are paused.
 func (st *AskState) Paused() bool { return st != nil && !st.PausedAt.IsZero() }
 
-// cooldownsInForce counts the cooldowns that have not ended.
+// ApprovalCooldownIdent is the cooldown identity an earlier release
+// recorded for a declined approval challenge (connauth's askIdent of the
+// approval purpose). From 0.83.10 none is recorded, and one left from
+// before is neither applied nor counted, and is dropped at the next prune.
+const ApprovalCooldownIdent = "auth:" + AskBucketApproval
+
+// cooldownsInForce counts the cooldowns that have not ended (an earlier
+// release's approval cooldown is not one, ApprovalCooldownIdent).
 func (st *AskState) cooldownsInForce(now time.Time) int {
 	if st == nil {
 		return 0
 	}
 	n := 0
 	for _, c := range st.Cooldowns {
-		if now.Before(c.Until) {
+		if now.Before(c.Until) && c.ID != ApprovalCooldownIdent {
 			n++
 		}
 	}
@@ -159,7 +166,7 @@ func (st *AskState) cooldownsInForce(now time.Time) int {
 func (st *AskState) prune(now time.Time) {
 	kept := st.Cooldowns[:0]
 	for _, c := range st.Cooldowns {
-		if now.Before(c.Until) {
+		if now.Before(c.Until) && c.ID != ApprovalCooldownIdent {
 			kept = append(kept, c)
 		}
 	}

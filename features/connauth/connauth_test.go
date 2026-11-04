@@ -451,7 +451,8 @@ func TestPurpose(t *testing.T) {
 
 // The ask gate's bucket names are the purposes.
 func TestBucketsArePurposes(t *testing.T) {
-	if vault.AskBucketSignIn != peerwire.PurposeSignIn || vault.AskBucketApproval != peerwire.PurposeApproval || vault.AskBucketGeneral != "" {
+	if vault.AskBucketSignIn != peerwire.PurposeSignIn || vault.AskBucketApproval != peerwire.PurposeApproval || vault.AskBucketGeneral != "" ||
+		askIdent(peerwire.PurposeApproval) != vault.ApprovalCooldownIdent {
 		t.Fatal("bucket names differ from the purposes")
 	}
 }

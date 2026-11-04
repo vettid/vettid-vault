@@ -511,3 +511,101 @@ func TestRotationRotatesTheWakeKey(t *testing.T) {
 		t.Fatalf("push.token-needed sent %d times", n)
 	}
 }
+
+// A rotation asked for by the member (credential.rotate, through the
+// host's RotateIdentity) while the transfer's notice still waits deposits
+// that notice first, then sends identity.rotate (§11.14.10 "The owed
+// mark"); it clears the transfer's mark, and the notice's later 201
+// rotates nothing more.
+func TestMemberRotationSendsThePendingNoticeFirst(t *testing.T) {
+	w := newTRWorld(t)
+	w.reopen()
+	w.relay.failMailbox = map[string]error{w.old: errors.New("unreachable")}
+	w.start() // the statement goes; the notice is not accepted
+	if got := w.connTypes(); !eq(got, "statement") || w.rotations() != 0 {
+		t.Fatalf("at the unlock: %v, %d rotations", got, w.rotations())
+	}
+	w.relay.failMailbox = nil
+	w.m.mu.Lock()
+	err := managerHost{w.m}.RotateIdentity(w.m.now())
+	o := w.m.st.RotationOwed
+	w.m.mu.Unlock()
+	if err != nil || o != nil {
+		t.Fatalf("rotate: %v, owed %+v", err, o)
+	}
+	if r := w.activities("identity.rotated"); len(r) != 1 || r[0].Ref != w.id {
+		t.Fatalf("identity.rotated %+v", r)
+	}
+	w.m.mu.Lock()
+	if err := w.m.persist(context.Background(), false); err != nil {
+		w.m.mu.Unlock()
+		t.Fatal(err)
+	}
+	w.m.drainOutbox(context.Background())
+	pu := w.m.st.PendingUnlink
+	w.m.mu.Unlock()
+	if got := w.connTypes(); !eq(got, "unlinked", "identity.rotate") {
+		t.Fatalf("deposits %v", got)
+	}
+	if pu != nil || w.rotations() != 1 {
+		t.Fatalf("pending %v, %d rotations", pu != nil, w.rotations())
+	}
+}
+
+// A vault being deleted rotates nothing: a queued notice accepted while
+// the deletion's step 2 drains the outbox settles, and the keys stay
+// (§12.5).
+func TestNoRotationWhileDeleting(t *testing.T) {
+	w := newTRWorld(t)
+	w.reopen()
+	w.m.mu.Lock()
+	w.m.st.Deleting = &Deletion{At: w.m.now(), Via: "app"}
+	w.m.markOK = true
+	w.m.drainOutbox(context.Background())
+	pu, o, rot := w.m.st.PendingUnlink, w.m.st.RotationOwed, len(w.m.st.Rotations)
+	w.m.retryOwedRotation(w.m.now())
+	rot2 := len(w.m.st.Rotations)
+	w.m.mu.Unlock()
+	if pu != nil || o == nil || rot != 0 || rot2 != 0 {
+		t.Fatalf("pending %v, owed %+v, %d/%d rotations", pu != nil, o, rot, rot2)
+	}
+	if got := w.connTypes(); !eq(got, "statement", "unlinked") {
+		t.Fatalf("deposits %v", got)
+	}
+}
+
+// A recovery keeps a transfer's owed mark next to its own; a rotation that
+// cannot be made is audited with the transfer_id, the ref a success would
+// carry (§11.14.10 "Failure").
+func TestRecoveryKeepsTransferMark(t *testing.T) {
+	sink := &recSink{}
+	at := time.Now().UTC().Truncate(time.Second)
+	f := newOpenFixtureWith(t, func(f *openFixture) {
+		f.m.mu.Lock()
+		f.m.st.RotationOwed = &RotationOwed{Transfer: "t1", DEKVersion: f.m.hdr.DEKVersion, At: at}
+		f.m.dirty = true
+		f.m.mu.Unlock()
+		if err := f.m.Lock(context.Background()); err != nil {
+			f.t.Fatal(err)
+		}
+	})
+	f.opts.Features = append(f.opts.Features, sink)
+	f.opts.KeyRand = func(int) ([]byte, error) { return nil, errors.New("no entropy") }
+	m, out := f.open(testPIN, rPW)
+	if m == nil || !out.OK {
+		t.Fatalf("open: %+v", out)
+	}
+	defer m.Crash()
+	if o := m.st.RotationOwed; o == nil || o.Recovery != recID || o.Transfer != "t1" || !o.At.Equal(at) {
+		t.Fatalf("owed %+v", o)
+	}
+	var refs []string
+	for _, a := range sink.got {
+		if a.Kind == "identity.rotation_failed" {
+			refs = append(refs, a.Ref)
+		}
+	}
+	if len(refs) != 1 || refs[0] != "t1" {
+		t.Fatalf("rotation_failed refs %v", refs)
+	}
+}

@@ -278,6 +278,9 @@ func (m *Manager) unlinkOutcome(e *OutboxEntry, err error, now time.Time) {
 		return
 	}
 	m.dropPendingUnlink()
+	if m.st.Deleting != nil {
+		return // a deletion's step 2 drains the outbox: nothing rotates (§12.5)
+	}
 	if o := m.st.RotationOwed; o != nil && o.Transfer != "" {
 		m.retryOwedRotation(now)
 		// The rotation's notices go out only after the state write that

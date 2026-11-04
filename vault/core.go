@@ -678,8 +678,8 @@ func (m *Manager) RotateIdentity(ctx context.Context) error {
 // (unlinkOutcome).
 func (m *Manager) retryOwedRotation(now time.Time) {
 	o := m.st.RotationOwed
-	if o == nil || (o.Recovery == "" && o.Transfer == "") {
-		return
+	if o == nil || (o.Recovery == "" && o.Transfer == "") || m.st.Deleting != nil {
+		return // (a vault being deleted rotates nothing, §12.5)
 	}
 	for _, inv := range m.st.Invites {
 		if inv.CreatedBy == inviteByRecovery {

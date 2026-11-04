@@ -518,8 +518,12 @@ func (m *Manager) completeRecoveryR(ctx context.Context, p RecoveryOpenParams, r
 		m.st.RotationOwed = &RotationOwed{Recovery: r.ID}
 	}
 	m.dirty = true
+	ref := "recovery" // the ref a success would carry (§11.14.10 "Failure")
+	if t := m.st.RotationOwed.Transfer; t != "" {
+		ref = t
+	}
 	if err := m.rotateIdentity(now); err != nil {
-		m.record(Activity{Kind: "identity.rotation_failed", Ref: "recovery", Audit: true, Feed: true, Priority: "high"}, now)
+		m.record(Activity{Kind: "identity.rotation_failed", Ref: ref, Audit: true, Feed: true, Priority: "high"}, now)
 	}
 	m.record(Activity{Kind: "recovery.completed", Ref: r.ID, Audit: true, Feed: true}, now)
 	recID := r.ID

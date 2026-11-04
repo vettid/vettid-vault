@@ -277,3 +277,23 @@ func TestDoubleTransferChain(t *testing.T) {
 		t.Fatalf("K0→K2 not followed: %s", res)
 	}
 }
+
+// §10.4 (0.83.9), §11.14.10: a transfer, the new phone's first unlock and
+// then credential.rotate, with no sign-in between. The second chain starts
+// at the key the member last signed the peer a response with (K0), before
+// the peer's new pin (K1); the peer follows it from its pin to K2.
+func TestTransferThenRotateNoSignIn(t *testing.T) {
+	w := newTKWorld(t, 0x88)
+	b := w.move(w.a, "new-phone-tk-r", 0x98)
+	k1 := w.key(b.dev)
+	w.finish(b)
+	waitEvent(t, w.p.dev, "connection.authenticate.key", has("key", k1))
+	if err := b.dev.CredentialRotate(ctxT(t, 120*time.Second), credPW); err != nil {
+		t.Fatal(err)
+	}
+	k2 := w.key(b.dev)
+	waitEvent(t, w.p.dev, "connection.authenticate.key", has("key", k2))
+	if res := w.auth(b.dev); !strings.Contains(res, `"key_changed":false`) || !strings.Contains(res, k2) {
+		t.Fatalf("K1→K2 not followed: %s", res)
+	}
+}

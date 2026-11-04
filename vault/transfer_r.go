@@ -339,7 +339,15 @@ func (h managerHost) HoldKeyRotation(statement []byte, now time.Time) error {
 	return h.m.holdKeyRotation(statement)
 }
 
-func (h managerHost) TakeHeldKeyRotations(time.Time) [][]byte { return h.m.takeHeldKeyRotations() }
+// TakeHeldKeyRotations gives a handler the held chain (credential.rotate);
+// if the handler fails, the chain is held again.
+func (h managerHost) TakeHeldKeyRotations(time.Time) [][]byte {
+	m := h.m
+	if m.st.HeldKeyRotation != nil && !m.heldInHandler {
+		m.heldInHandler, m.heldBefore = true, m.st.HeldKeyRotation
+	}
+	return m.takeHeldKeyRotations()
+}
 
 // holdKeyRotation adds a statement to the held chain, for the approved
 // transfer of the current handler, at the DEK version its step 2 writes.

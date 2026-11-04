@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/handshake"
@@ -14,20 +15,30 @@ import (
 // statement, as the credential feature's approval does (§11.14.10), and
 // sends held statements to a connection when the runtime asks.
 type keyHolder struct {
-	id   string
-	stmt []byte
-	fail bool
-	conn string
-	sent [][]byte
+	id     string
+	stmt   []byte
+	fail   bool
+	conn   string
+	sent   [][]byte
+	taken  [][]byte
+	rotErr error
 }
 
 func (*keyHolder) Name() string { return "keyholder" }
 func (*keyHolder) Types() []TypeSpec {
-	return []TypeSpec{{Type: "test.approvehold", Request: true, From: []string{KindApp}}}
+	return []TypeSpec{{Type: "test.approvehold", Request: true, From: []string{KindApp}},
+		{Type: "test.takefail", Request: true, From: []string{KindApp}}}
 }
 func (*keyHolder) Load(json.RawMessage) error     { return nil }
 func (*keyHolder) Save() (json.RawMessage, error) { return json.RawMessage(`{}`), nil }
-func (k *keyHolder) Handle(_ context.Context, s *Session, _ *envelope.Inner) (json.RawMessage, error) {
+func (k *keyHolder) Handle(_ context.Context, s *Session, in *envelope.Inner) (json.RawMessage, error) {
+	if in.Type == "test.takefail" {
+		// As credential.rotate: a rotation of ik and kem is refused while
+		// a statement is held; the handler takes the statements, then fails.
+		k.rotErr = s.RotateIdentity()
+		k.taken = s.TakeHeldKeyRotations()
+		return nil, NewError("internal", "")
+	}
 	if err := s.ApproveTransfer(k.id, testPIN, []byte(rPW), false); err != nil {
 		return nil, err
 	}
@@ -157,11 +168,14 @@ func TestHeldKeyRotationAcrossCrashes(t *testing.T) {
 		d2.m.mu.Unlock()
 		t.Fatal(err)
 	}
-	if err := d2.m.holdKeyRotation(heldStmt); err != nil || d2.m.st.HeldKeyRotation == nil {
+	if err := d2.m.holdKeyRotation(heldStmt); err != nil || d2.m.st.HeldKeyRotation == nil || d2.m.st.HeldKeyRotation.DEKVersion != 2 {
 		d2.m.mu.Unlock()
 		t.Fatalf("hold: %v", err)
 	}
 	d2.m.mu.Unlock()
+	if h := d2.storedHeader(); h.Next == nil || h.Next.DEKVersion != 2 {
+		t.Fatal("step 1 not stored")
+	}
 	d2.m.Crash() // step 1 stored, step 2 not
 	m2, _, err := d2.fixture.unlock(testPIN, 0, 0)
 	if err != nil {
@@ -233,6 +247,10 @@ func TestRecoverySendsHeldStatement(t *testing.T) {
 	f := newOpenFixtureWith(t, func(f *openFixture) {
 		f.m.mu.Lock()
 		f.m.st.HeldKeyRotation = &HeldKeyRotation{TransferID: "t1", DEKVersion: f.m.hdr.DEKVersion + 1, Statements: []json.RawMessage{heldStmt}}
+		// The old phone's notice, as a release before 0.55.10 held it.
+		f.m.st.PendingUnlink = &PendingUnlink{RelayURL: "https://relay.example.org", Mailbox: "old-phone", Token: "v4.public.T0xE",
+			TransferID: "t1", DEKVersion: f.m.hdr.DEKVersion + 1, At: f.clock, TokenExp: f.clock.Add(29 * 24 * time.Hour),
+			Payload: []byte("sealed notice")}
 		f.m.dirty = true
 		f.m.mu.Unlock()
 		if err := f.m.Lock(context.Background()); err != nil {
@@ -248,13 +266,16 @@ func TestRecoverySendsHeldStatement(t *testing.T) {
 	if len(k.sent) != 1 || m.st.HeldKeyRotation != nil {
 		t.Fatalf("sent %d, held %+v", len(k.sent), m.st.HeldKeyRotation)
 	}
+	if m.st.PendingUnlink != nil {
+		t.Fatal("the old phone's notice was not sent")
+	}
 	var kinds []string
 	for _, a := range sink.got {
-		if a.Kind == "test.statement_sent" || a.Kind == "identity.rotated" {
+		if a.Kind == "test.statement_sent" || a.Kind == "device.unlinked_sent" || a.Kind == "identity.rotated" {
 			kinds = append(kinds, a.Kind)
 		}
 	}
-	if len(kinds) != 2 || kinds[0] != "test.statement_sent" {
+	if len(kinds) != 3 || kinds[0] != "test.statement_sent" || kinds[1] != "device.unlinked_sent" || kinds[2] != "identity.rotated" {
 		t.Fatalf("order %v", kinds)
 	}
 }
@@ -271,5 +292,81 @@ func TestNoHeldKeyRotationFromEarlierRelease(t *testing.T) {
 	d.m.mu.Unlock()
 	if len(k.sent) != 0 || d.m.st.PendingUnlink != nil {
 		t.Fatal("not as before")
+	}
+}
+
+// A credential handler cannot rotate ik and kem while a statement is held
+// (the rotation would call back into it); one that takes the statements
+// and then fails holds them again.
+func TestHeldKeyRotationTakenByAFailingHandler(t *testing.T) {
+	d := newDevFixture(t)
+	k := &keyHolder{}
+	d.m.mu.Lock()
+	d.m.addFeature(k)
+	d.m.st.HeldKeyRotation = &HeldKeyRotation{TransferID: "t1", DEKVersion: 1, Statements: []json.RawMessage{heldStmt}}
+	d.m.mu.Unlock()
+	if c := d.errorCode(t, "test.takefail", `{}`); c != "internal" {
+		t.Fatalf("code %q", c)
+	}
+	if k.rotErr == nil || len(d.m.st.Rotations) != 0 || len(k.sent) != 0 {
+		t.Fatalf("rotated while held: %v", k.rotErr)
+	}
+	d.m.mu.Lock()
+	defer d.m.mu.Unlock()
+	if len(k.taken) != 1 || d.m.st.HeldKeyRotation == nil || len(d.m.st.HeldKeyRotation.Statements) != 1 {
+		t.Fatalf("taken %d, held again %+v", len(k.taken), d.m.st.HeldKeyRotation)
+	}
+}
+
+// Two transfers approved before the first statement went out hold both,
+// in order, at the later transfer's dek_version, and send them as one.
+func TestHeldKeyRotationTwoTransfers(t *testing.T) {
+	d := newDevFixture(t)
+	k := &keyHolder{}
+	approvedWithHeld(t, d, k)
+	d.m.mu.Lock()
+	defer d.m.mu.Unlock()
+	d.m.st.Transfer = &Transfer{ID: "t2", State: TransferApproved}
+	second := []byte(`{"v":1,"old_key":"K1","new_key":"K2"}`)
+	if err := d.m.holdKeyRotation(second); err != nil {
+		t.Fatal(err)
+	}
+	d.m.st.Transfer = nil
+	h := d.m.st.HeldKeyRotation
+	if h == nil || h.TransferID != "t2" || len(h.Statements) != 2 || !bytes.Equal(h.Statements[0], heldStmt) || !bytes.Equal(h.Statements[1], second) {
+		t.Fatalf("held %+v", h)
+	}
+	d.m.sendHeldKeyRotations(d.m.now())
+	if len(k.sent) != 2 || d.m.st.HeldKeyRotation != nil {
+		t.Fatalf("sent %d", len(k.sent))
+	}
+}
+
+// The resumed recovery whose first run's step 2 was not stored sends the
+// held statement too (it was in the state that was not stored).
+func TestResumedRecoverySendsHeldStatement(t *testing.T) {
+	k := &keyHolder{}
+	f := newOpenFixtureWith(t, func(f *openFixture) {
+		f.m.mu.Lock()
+		f.m.st.HeldKeyRotation = &HeldKeyRotation{TransferID: "t1", DEKVersion: f.m.hdr.DEKVersion + 1, Statements: []json.RawMessage{heldStmt}}
+		f.m.dirty = true
+		f.m.mu.Unlock()
+		if err := f.m.Lock(context.Background()); err != nil {
+			f.t.Fatal(err)
+		}
+	})
+	f.opts.Features = append(f.opts.Features, k)
+	f.st.failState = 1
+	if m, out := f.open(testPIN, rPW); m != nil || out.Code != OpenRetry {
+		t.Fatalf("open stopped after step 1: %+v", out)
+	}
+	k.sent = nil
+	m, out := f.open(testPIN, rPW)
+	if m == nil || !out.OK {
+		t.Fatalf("resumed: %+v", out)
+	}
+	defer m.Crash()
+	if len(k.sent) != 1 || m.st.HeldKeyRotation != nil {
+		t.Fatalf("sent %d, held %+v", len(k.sent), m.st.HeldKeyRotation)
 	}
 }

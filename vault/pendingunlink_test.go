@@ -38,7 +38,7 @@ func deliver(t *testing.T, d *devFixture, now time.Time) []*envelope.Inner {
 	d.relay.mu.Unlock()
 	d.m.mu.Lock()
 	d.m.sendPendingUnlink(now)
-	d.m.drainOutbox(context.Background())
+	d.m.flushThenDrain(context.Background())
 	d.m.mu.Unlock()
 	return d.inbox(d.self())["dev1"]
 }

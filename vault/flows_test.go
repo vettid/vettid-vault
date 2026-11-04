@@ -313,7 +313,7 @@ func TestSASCommitMismatch(t *testing.T) {
 	}
 	c, _ := relayauth.ParseToken(n.tok, d.m.keys.relay.Public().(ed25519.PublicKey))
 	d.m.mu.Lock()
-	d.m.drainOutbox(context.Background())
+	d.m.flushThenDrain(context.Background())
 	d.m.mu.Unlock()
 	if !containsStr(d.relay.revoked, "jti:"+c.Jti) {
 		t.Fatal("request token not denylisted")
@@ -389,7 +389,7 @@ func TestInviteSingleUse(t *testing.T) {
 	}
 	// The used open token is denylisted and the claim deleted.
 	d.m.mu.Lock()
-	d.m.drainOutbox(context.Background())
+	d.m.flushThenDrain(context.Background())
 	d.m.mu.Unlock()
 	if !containsStr(d.relay.revoked, "jti:"+inv.OpenJTI) {
 		t.Fatal("open token not denylisted")

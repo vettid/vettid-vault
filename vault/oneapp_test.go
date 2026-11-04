@@ -125,13 +125,10 @@ func TestTransferRuntime(t *testing.T) {
 	if len(d.m.transferSecret) != 0 {
 		t.Fatal("the new phone's secret outlived the approval")
 	}
-	got := n.received(d)
-	if len(got) != 1 || got[0].Type != "device.paired" || !strings.Contains(string(got[0].Body), `"transfer":true`) || bodyStr(t, got[0], "token") == "" {
-		t.Fatalf("device.paired: %+v", got)
-	}
-	// §6.7.1 (0.17.0): the member's user_guid from the sealed header.
-	if g := bodyStr(t, got[0], "user_guid"); g == "" || g != d.m.hdr.UserGUID {
-		t.Fatalf("device.paired user_guid %q, header %q", g, d.m.hdr.UserGUID)
+	// Nothing of the approval leaves before step 2 is stored (§11.14.2):
+	// a drain in between sends the new app nothing.
+	if got := n.received(d); len(got) != 0 {
+		t.Fatalf("sent before step 2: %+v", got)
 	}
 	if d.m.st.Devices["dev1"] != nil || d.m.st.Transfer != nil {
 		t.Fatal("old app kept")
@@ -168,8 +165,19 @@ func TestTransferRuntime(t *testing.T) {
 	if d.m.hdr.Next != nil || d.m.hdr.DEKVersion != 2 {
 		t.Fatal("not promoted")
 	}
-	d.m.pendingUnlinkAtUnlock(d.m.now())
 	d.m.drainOutbox(context.Background())
+	d.m.mu.Unlock()
+	got := n.received(d)
+	if len(got) != 1 || got[0].Type != "device.paired" || !strings.Contains(string(got[0].Body), `"transfer":true`) || bodyStr(t, got[0], "token") == "" {
+		t.Fatalf("device.paired: %+v", got)
+	}
+	// §6.7.1 (0.17.0): the member's user_guid from the sealed header.
+	if g := bodyStr(t, got[0], "user_guid"); g == "" || g != d.m.hdr.UserGUID {
+		t.Fatalf("device.paired user_guid %q, header %q", g, d.m.hdr.UserGUID)
+	}
+	d.m.mu.Lock()
+	d.m.pendingUnlinkAtUnlock(d.m.now())
+	d.m.flushThenDrain(context.Background())
 	d.m.mu.Unlock()
 	if d.m.st.PendingUnlink != nil || d.depositsTo(d.devPeer.Relay.Mailbox) != 1 {
 		t.Fatal("the held notice was not sent at the new phone's unlock")

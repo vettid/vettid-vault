@@ -19,6 +19,7 @@ import (
 	"errors"
 	"github.com/vettid/vettid-vault/vault/counter"
 	"github.com/vettid/vettid-vault/vms/recovery"
+	"maps"
 	"net/http"
 	"sort"
 	"strings"
@@ -396,14 +397,22 @@ type Manager struct {
 	// handler fails (§11.14.10).
 	heldInHandler bool
 	heldBefore    *HeldKeyRotation
-	// unstored: outbox entries queued outside a batch (a rotation made
-	// when the relay settled a transfer's notice, unlinkOutcome) that wait
-	// for the next state write before they are sent (§3.4: a vault sends
-	// its rotation notices only after the write that holds the rotation).
+	// unstored: the outbox entries queued since the last state write that
+	// succeeded (queue). A drain sends none of them: nothing leaves the
+	// vault before the write that commits it (§11.14.2 "order of writes",
+	// §8.3, §3.4). A batch whose write failed keeps its in-memory state
+	// and its entries wait; the next write that succeeds stores and
+	// releases them, and a lock or crash before one loses them with it.
 	unstored map[string]bool
 	// settledWrite: a drain settled a transfer's notice and made the owed
 	// rotation; the drain writes the state, then sends its notices.
 	settledWrite bool
+	// deleteRelease: a deletion whose marking state write failed; after
+	// its step 1 (the header's mark and the host's) the outbox entries the
+	// deletion queued go out, and those in deleteHeld, unstored before it,
+	// are dropped (§12.5, queue).
+	deleteRelease bool
+	deleteHeld    map[string]bool
 	// transferSecret is a transfer's new phone's unlock secret from its
 	// hs.init, in memory only until the approval (§11.14.10).
 	transferSecret []byte
@@ -849,6 +858,29 @@ func (m *Manager) allPeers() []*Peer {
 
 // persist flushes state. create = the first write (create-only objects).
 func (m *Manager) persist(ctx context.Context, create bool) error {
+	err := m.persistState(ctx, create)
+	if err != nil && !errors.Is(err, ErrSplitBrain) && !m.stored() {
+		m.dropVolatile()
+	}
+	return err
+}
+
+// stored reports whether the state in memory was stored by the last write:
+// nothing changed since, or only the header's write after it failed.
+func (m *Manager) stored() bool { return m.st != nil && !m.dirty && len(m.unstored) == 0 }
+
+// dropVolatile discards the memory-only answers sealed since the last
+// drain (§8.2: lost, the requester retransmits). After a state write that
+// failed they would tell what was not stored: the outbox's entries wait
+// for the next write that stores them (queue), these are never written.
+func (m *Manager) dropVolatile() {
+	for _, e := range m.volatile {
+		suite.Wipe(e.Payload)
+	}
+	m.volatile = nil
+}
+
+func (m *Manager) persistState(ctx context.Context, create bool) error {
 	// An app key the stored header does not name is confirmed on the
 	// host's row before anything is stored (appkeyconfirm.go).
 	if err := m.confirmAppKey(ctx); err != nil {
@@ -1211,6 +1243,7 @@ func (m *Manager) deleteLocked(ctx context.Context, via string) error {
 	if m.locked {
 		return ErrLocked
 	}
+	held := maps.Clone(m.unstored)
 	m.beginDelete(via, m.now())
 	m.deletePending = false
 	if err := m.persist(ctx, false); err != nil {
@@ -1219,7 +1252,10 @@ func (m *Manager) deleteLocked(ctx context.Context, via string) error {
 		}
 		// The state may not be marked: finishDelete still writes the
 		// header's mark and asks the host before anything of step 2
-		// (0.51.0), and erasing needs no marker.
+		// (0.51.0), and erasing needs no marker. The header's mark and
+		// the host's commit the deletion and its notices; what an earlier
+		// write that failed left unstored stays held (deleteHeld).
+		m.deleteHeld, m.deleteRelease = held, true
 	}
 	return m.finishDelete(ctx)
 }
@@ -1231,9 +1267,12 @@ func (m *Manager) lockLocked(ctx context.Context) error {
 	if m.st != nil && m.st.Deleting != nil {
 		return m.lockDeleting(ctx)
 	}
-	// Deliver what is queued first (an interrupted batch may have left
-	// deposits, such as an hs.fin, in the outbox), then flush.
+	// Deliver what is queued and stored first (an interrupted batch may
+	// have left deposits, such as an hs.fin, in the outbox), then flush.
+	// Entries no write has stored yet (a batch whose write failed) wait:
+	// the lock's own write stores them, or nothing does.
 	m.drainOutbox(ctx)
+	waiting := len(m.unstored) > 0
 	// A device's vault.lock names the device (0.23.2, §10.9); a lock
 	// with a reason (owner check, recovery) or by the host has none.
 	by := ""
@@ -1249,11 +1288,41 @@ func (m *Manager) lockLocked(ctx context.Context) error {
 	if errors.Is(err, ErrSplitBrain) {
 		return err
 	}
-	m.pushLockWake(m.sendLocking(ctx)) // §14.2 trigger 3, before zeroizing
+	if err == nil {
+		if waiting {
+			// What the write just stored goes out before vault.locking,
+			// which must not overtake it.
+			m.drainOutbox(ctx)
+			_ = m.flushIfDirty(ctx)
+		}
+		m.pushLockWake(m.sendLocking(ctx)) // §14.2 trigger 3, before zeroizing
+	} else {
+		// The write failed: the vault ends as a crash would, with what is
+		// stored. vault.locking and its wake would be sealed for the
+		// devices and sessions in memory, which may not be the stored
+		// ones (a phone move whose step 2 was not stored), so neither is
+		// sent; the next unlock starts from the stored state.
+		m.unpinAppKey()
+	}
 	vid := m.st.VaultID
 	m.zeroize()
 	m.report("locked", vid, m.opt.Release.PCR0)
 	return err
+}
+
+// unpinAppKey makes the header in memory name the app key the stored
+// header names (pin) again, before a lock whose write failed reports it:
+// a batch whose write failed may have adopted the next app's key in memory
+// (completeTransfer, a recovery), and `locked` must not report a key that
+// no stored header names (§11.5).
+func (m *Manager) unpinAppKey() {
+	if m.hdr == nil || len(m.pinned.key) == 0 {
+		return
+	}
+	if m.hdr.AppKeySeq != m.pinned.seq || !bytes.Equal(m.hdr.AppKey, m.pinned.key) {
+		m.hdr.AppKey, m.hdr.AppKeySeq = append([]byte(nil), m.pinned.key...), m.pinned.seq
+		m.appKeyChanged = false
+	}
 }
 
 // lockDeleting locks a vault whose deletion is marked and whose step 2 has

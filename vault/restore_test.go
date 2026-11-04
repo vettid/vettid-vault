@@ -1003,7 +1003,7 @@ func TestOpenRekeysAtRestore(t *testing.T) {
 		m := f.d.m
 		m.mu.Lock()
 		m.startRekey(f.p, f.now())
-		m.drainOutbox(context.Background())
+		m.flushThenDrain(context.Background())
 		m.mu.Unlock()
 		raw := f.takeFor(func(env *envelope.Envelope) bool { return env.Mode() == envelope.ModeSession })
 		if raw == nil {
@@ -1053,7 +1053,7 @@ func TestOpenRekeysAtRestore(t *testing.T) {
 		m := f.d.m
 		m.mu.Lock()
 		m.startRekey(f.p, f.now())
-		m.drainOutbox(context.Background())
+		m.flushThenDrain(context.Background())
 		m.mu.Unlock()
 		raw := f.takeFor(func(env *envelope.Envelope) bool { return env.Mode() == envelope.ModeSession })
 		restore(f)
@@ -1178,7 +1178,7 @@ func TestPersonCrossingReconnectsReadable(t *testing.T) {
 	}{{a, pa}, {b, pb}} {
 		x.d.m.mu.Lock()
 		x.d.m.startReconnect(x.p, x.d.m.now())
-		x.d.m.drainOutbox(context.Background()) // both hs.init are on the relay
+		x.d.m.flushThenDrain(context.Background()) // both hs.init are on the relay
 		x.d.m.mu.Unlock()
 	}
 	// The interleaving of the review: each vault answers the other's
@@ -1243,7 +1243,7 @@ func TestExpiredReconnectAnswerRevokesTokens(t *testing.T) {
 	f.at(f.off + HandshakeTTL + time.Hour)
 	f.d.m.mu.Lock()
 	f.d.m.housekeeping(f.now())
-	f.d.m.drainOutbox(context.Background())
+	f.d.m.flushThenDrain(context.Background())
 	f.d.m.mu.Unlock()
 	if f.awaiting() != 0 {
 		t.Fatal("answer kept")

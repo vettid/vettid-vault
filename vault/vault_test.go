@@ -699,7 +699,7 @@ func TestOutboxOrderPerMailbox(t *testing.T) {
 	q("a", "a2")
 	q("b", "b1")
 	f.m.st.Outbox[len(f.m.st.Outbox)-3].NotBefore = now.Add(time.Second) // a1 waits for a retry
-	f.m.drainOutbox(context.Background())                                // a2 must not overtake it
+	f.m.flushThenDrain(context.Background())                             // a2 must not overtake it
 	var got []string
 	for _, d := range f.relay.deposits {
 		got = append(got, string(d.payload))
@@ -708,7 +708,7 @@ func TestOutboxOrderPerMailbox(t *testing.T) {
 		t.Fatalf("deposits before the retry: %v", got)
 	}
 	now = now.Add(time.Minute)
-	f.m.drainOutbox(context.Background())
+	f.m.flushThenDrain(context.Background())
 	got = nil
 	for _, d := range f.relay.deposits {
 		got = append(got, string(d.payload))

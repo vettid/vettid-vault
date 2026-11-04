@@ -498,7 +498,7 @@ func TestRotationRotatesTheWakeKey(t *testing.T) {
 		t.Fatal("the wake keys were not zeroized")
 	}
 	d.m.mu.Lock()
-	d.m.drainOutbox(context.Background())
+	d.m.flushThenDrain(context.Background())
 	d.m.mu.Unlock()
 	ins := d.inbox(d.self())[d.devPeer.ID]
 	var n int

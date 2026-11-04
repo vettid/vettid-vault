@@ -376,8 +376,32 @@ func (s *stateFaults) Put(ctx context.Context, key string, data []byte, ifMatch 
 // fails. The old phone's blob is still the credential (K0, the critical
 // item under it), nothing is held or sent, and the old phone unlocks.
 func TestTransferCrashBeforeStep2(t *testing.T) {
+	transferFailedStep2(t, 0x8a, 0x9a, "new-phone-tk-c", func(w *tkWorld) {
+		// A crash: what is stored is step 1 and the state before the approval.
+		w.aw.instanceOf(w.a).Manager(w.a.vid).Crash()
+	})
+}
+
+// The same failed step 2, then a lock instead of a crash (§11.14.2 "order
+// of writes"): the manager still holds the unstored step-2 state, with the
+// relay revocation of the old phone's key and the answers queued. The lock
+// sends none of it (its own write fails as well), so the old phone is not
+// revoked: it unlocks, keeps K0 and signs in.
+func TestTransferLockAfterFailedStep2(t *testing.T) {
+	transferFailedStep2(t, 0x8c, 0x9c, "new-phone-tk-l", func(w *tkWorld) {
+		w.aw.lock(w.a)
+		if m := w.aw.instanceOf(w.a).Manager(w.a.vid); m != nil && !m.Locked() {
+			t.Fatal("the vault still runs after the lock")
+		}
+	})
+}
+
+// transferFailedStep2 approves a transfer whose step-2 state write fails,
+// ends the running vault with end, and checks that the old phone opens
+// the vault from what is stored.
+func transferFailedStep2(t *testing.T, seed, newSeed byte, newName string, end func(*tkWorld)) {
 	sf := &stateFaults{}
-	w := newTKWorld(t, 0x8a, func(s store.Store) store.Store { sf.Store = s; return sf })
+	w := newTKWorld(t, seed, func(s store.Store) store.Store { sf.Store = s; return sf })
 	ctx := ctxT(t, 240*time.Second)
 	sid, _, err := w.a.dev.ItemPutCritical(ctx, credPW, "", 0, nil, client.ItemContent{Name: "seed",
 		Fields: []client.ItemField{{Label: "Words", Kind: "multiline", Value: "legal winner thank year"}}})
@@ -388,7 +412,7 @@ func TestTransferCrashBeforeStep2(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b := w.aw.newApp("new-phone-tk-c", enclavetest.NewIOSAttester(0x9a, enclavetest.IOSOptions{}))
+	b := w.aw.newApp(newName, enclavetest.NewIOSAttester(newSeed, enclavetest.IOSOptions{}))
 	if _, err := b.dev.PairAttested(ctx, link, b.att); err != nil {
 		t.Fatal(err)
 	}
@@ -403,8 +427,7 @@ func TestTransferCrashBeforeStep2(t *testing.T) {
 	if err := w.a.dev.TransferApprove(ctxT(t, 20*time.Second), id, acPIN, credPW); err == nil {
 		t.Fatal("the approval was answered although step 2 was not stored")
 	}
-	// A crash: what is stored is step 1 and the state before the approval.
-	w.aw.instanceOf(w.a).Manager(w.a.vid).Crash()
+	end(w)
 	sf.arm(0)
 	// Step 1 (the header with the next part) was stored while the state
 	// writes failed: the case is the one between the two writes.

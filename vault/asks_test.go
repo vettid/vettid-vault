@@ -370,7 +370,7 @@ func TestAskHeldAnswerSent(t *testing.T) {
 		t.Fatalf("3 + 5 pending: %+v", v)
 	}
 	d.m.housekeeping(now.Add(59 * time.Second))
-	d.m.drainOutbox(context.Background())
+	d.m.flushThenDrain(context.Background())
 	d.m.mu.Unlock()
 	decided := func() []*envelope.Inner {
 		var out []*envelope.Inner
@@ -386,7 +386,7 @@ func TestAskHeldAnswerSent(t *testing.T) {
 	}
 	d.m.mu.Lock()
 	d.m.housekeeping(now.Add(time.Minute))
-	d.m.drainOutbox(context.Background())
+	d.m.flushThenDrain(context.Background())
 	d.m.mu.Unlock()
 	in := decided()
 	if len(in) != 1 || in[0].Type != "data.decided" || string(in[0].Body) != string(a.Answer) {

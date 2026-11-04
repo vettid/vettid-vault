@@ -325,6 +325,18 @@ func (m *Manager) finishDelete(ctx context.Context) error {
 		m.report("locked", vid, m.opt.Release.PCR0)
 		return err
 	}
+	if m.deleteRelease {
+		// The marking state write failed: step 1 (the header's mark and
+		// the host's) committed the deletion and what it queued. What an
+		// earlier write that failed left unstored is never sent: it is
+		// dropped, and holds back no notice of the deletion.
+		for _, e := range m.st.Outbox {
+			if m.deleteHeld[e.ID] {
+				e.Done = true
+			}
+		}
+		m.unstored, m.deleteHeld, m.deleteRelease = nil, nil, false
+	}
 	if m.relay != nil {
 		if sctx, cancel := step2Context(ctx); sctx != nil {
 			m.deleteMailbox(sctx)

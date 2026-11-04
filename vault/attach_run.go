@@ -213,9 +213,7 @@ func (m *Manager) attPass(r *attRunner) bool {
 	m.attBusyFetches(m.now())
 	starts := m.attSchedule(now)
 	mt := m.attMaintenanceWork(now)
-	_ = m.flushIfDirty(context.Background())
-	m.drainOutbox(r.ctx)
-	_ = m.flushIfDirty(context.Background())
+	m.attFlushThenDrain(r.ctx)
 	m.mu.Unlock()
 	for _, j := range starts {
 		go j()
@@ -607,7 +605,16 @@ func (m *Manager) attDrain(r *attRunner) {
 	if m.locked || m.st == nil || m.att != r {
 		return
 	}
-	m.drainOutbox(r.ctx)
+	m.attFlushThenDrain(r.ctx)
+}
+
+// attFlushThenDrain writes the state, then performs the due outbox entries
+// (as flushThenDrain), for the runner: its writes do not end with its
+// context (a lock's), its deposits do. A write that fails leaves what it
+// did not store unsent (queue); what was stored before still goes.
+func (m *Manager) attFlushThenDrain(ctx context.Context) {
+	_ = m.flushIfDirty(context.Background())
+	m.drainOutbox(ctx)
 	_ = m.flushIfDirty(context.Background())
 }
 
@@ -1290,8 +1297,7 @@ func (m *Manager) attMaintain(r *attRunner, w *attWork) {
 				}
 				m.dirty = true
 			}
-			m.drainOutbox(ctx)
-			_ = m.flushIfDirty(context.Background())
+			m.attFlushThenDrain(ctx)
 		}
 		m.mu.Unlock()
 	}

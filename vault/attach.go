@@ -1217,8 +1217,7 @@ func (m *Manager) SendRaw(ctx context.Context, conn, typ string, body []byte) (s
 	if id == "" {
 		return "", ErrNoSession
 	}
-	m.drainOutbox(ctx)
-	return id, m.flushIfDirty(ctx)
+	return id, m.flushThenDrain(ctx)
 }
 
 // PutBlobTo uploads data as is to a connection's mailbox under the

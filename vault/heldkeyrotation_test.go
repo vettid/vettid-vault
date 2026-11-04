@@ -113,7 +113,7 @@ func TestHeldKeyRotationSentBeforeTheUnlink(t *testing.T) {
 	d.relay.mu.Unlock()
 	d.m.mu.Lock()
 	d.m.pendingUnlinkAtUnlock(d.m.now())
-	d.m.drainOutbox(context.Background())
+	d.m.flushThenDrain(context.Background())
 	held, pending := d.m.st.HeldKeyRotation, d.m.st.PendingUnlink
 	d.m.mu.Unlock()
 	if len(k.sent) != 1 || held != nil || pending != nil {
@@ -301,7 +301,7 @@ func TestNoHeldKeyRotationFromEarlierRelease(t *testing.T) {
 	d.m.mu.Lock()
 	d.m.st.HeldKeyRotation = nil
 	d.m.pendingUnlinkAtUnlock(d.m.now())
-	d.m.drainOutbox(context.Background())
+	d.m.flushThenDrain(context.Background())
 	d.m.mu.Unlock()
 	if len(k.sent) != 0 || d.m.st.PendingUnlink != nil {
 		t.Fatal("not as before")

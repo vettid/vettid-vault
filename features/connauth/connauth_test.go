@@ -931,3 +931,35 @@ func TestKeyRotationsOneChain(t *testing.T) {
 		t.Fatalf("after the chain: %s", r)
 	}
 }
+
+// A chain that only ends at the pinned key (a repeated delivery, or one a
+// response overtook) is ignored without an audit or a key event; any other
+// refused chain is still audited.
+func TestRepeatedChainIgnored(t *testing.T) {
+	a, b := pair()
+	b.w.open = true
+	if r := result(t, a, b); !strings.Contains(r, `"key_changed":false`) {
+		t.Fatal(r)
+	}
+	b.h.Reset()
+	rotate(t, b, 0xe1)
+	msg := last(t, b.h, "connection.authenticate.rotated")
+	featuretest.Call(a.f, a.h, t0, "connection:cB", "connection.authenticate.rotated", string(msg.Body))
+	a.h.Reset()
+	featuretest.Call(a.f, a.h, t0, "connection:cB", "connection.authenticate.rotated", string(msg.Body))
+	if a.h.HasActivity("connection.authenticate.rotation_rejected") || len(a.h.SentOfType("connection.authenticate.key")) != 0 ||
+		a.h.HasActivity("connection.authenticate.key_rotated") {
+		t.Fatal("a repeated chain was audited or changed the pin")
+	}
+	// A chain that neither starts nor ends at the pin is still refused and audited.
+	k2 := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0xe2}, 32))
+	k3 := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0xe3}, 32))
+	other, _ := credwire.NewKeyRotation(k2, k3)
+	featuretest.Call(a.f, a.h, t0, "connection:cB", "connection.authenticate.rotated", `{"rotations":[`+string(other.Marshal())+`]}`)
+	if !a.h.HasActivity("connection.authenticate.rotation_rejected") {
+		t.Fatal("a broken chain was not audited")
+	}
+	if r := result(t, a, b); !strings.Contains(r, `"key_changed":false`) {
+		t.Fatalf("pin lost: %s", r)
+	}
+}

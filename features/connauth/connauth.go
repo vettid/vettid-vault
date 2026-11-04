@@ -630,9 +630,8 @@ func (f *Feature) SignedInKey(conn string) []byte {
 // queues it before a ballot it sends (§10.19.5), whether or not the chain
 // went out when the statement was made: a deposit the peer never
 // processed (it was offline past the relay's message TTL) is then made
-// good. A peer that already followed the chain refuses the repeat
-// (connection.authenticate.rotation_rejected) and keeps its pin, which is
-// harmless.
+// good. A peer that already followed the chain ignores the repeat, which
+// ends at the key it pins.
 func (f *Feature) RotatedBody(conn string) []byte {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -737,6 +736,13 @@ func (f *Feature) rotated(s *vault.Session, body []byte) error {
 	st := f.d.States[conn]
 	if st == nil || len(st.Key) == 0 {
 		return nil // nothing pinned
+	}
+	if len(chain) > 0 && suite.EqualPublic(chain[len(chain)-1].New, st.Key) {
+		// A chain that only ends at the pinned key: a repeated delivery
+		// (the vote feature queues the chain before each ballot) or one
+		// overtaken by a response that already moved the pin. Nothing has
+		// changed: no audit, no key event (VAULT-MESSAGING 0.83.9).
+		return nil
 	}
 	end, err := credwire.FollowChain(st.Key, chain)
 	if err != nil {

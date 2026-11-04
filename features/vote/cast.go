@@ -185,8 +185,8 @@ func (f *Feature) cast(s *vault.Session, conn, id, choice string, pinned, owed [
 // connection (read before the lock into f.owed) before a ballot, once per
 // tick or answer. It is queued whether or not it went out when the
 // statement was made, so a deposit the peer never processed is made good;
-// a peer that already followed it refuses the repeat
-// (connection.authenticate.rotation_rejected) and keeps its pin.
+// a peer that already followed it ignores the repeat, which ends at the
+// key it pins.
 func (f *Feature) sendOwedChain(s *vault.Session, conn string) {
 	if body := f.owed[conn]; len(body) > 0 {
 		_ = s.SendToConnection(conn, "connection.authenticate.rotated", body)

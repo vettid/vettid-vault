@@ -80,84 +80,84 @@ func (f *Feature) Cast(s *vault.Session, conn, id, choice string) (CastResult, e
 	if f.dep.Auth != nil {
 		pinned, owed = f.dep.Auth.SignedInKey(conn), f.dep.Auth.RotatedBody(conn)
 	}
-	res, _, err := f.cast(s, conn, id, choice, pinned, owed)
+	res, err := f.cast(s, conn, id, choice, pinned, owed)
 	return res, err
 }
 
-// cast is Cast under the lock; sentOwed: the chain was queued.
-func (f *Feature) cast(s *vault.Session, conn, id, choice string, pinned, owed []byte) (_ CastResult, sentOwed bool, _ error) {
+// cast is Cast under the lock.
+func (f *Feature) cast(s *vault.Session, conn, id, choice string, pinned, owed []byte) (CastResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	now := s.Now()
 	r := f.get(conn, id)
 	if r == nil || r.RejectReason != "" {
-		return CastResult{}, false, errNotFound
+		return CastResult{}, errNotFound
 	}
 	switch r.state(now) {
 	case StateChecking:
-		return CastResult{}, false, codeErr("checking", nil)
+		return CastResult{}, codeErr("checking", nil)
 	case StateUpcoming:
-		return CastResult{}, false, codeErr("not_open", tsBody("opens_at", r.Opens))
+		return CastResult{}, codeErr("not_open", tsBody("opens_at", r.Opens))
 	case StateClosed:
-		return CastResult{}, false, codeErr("closed", tsBody("closes_at", r.Closes))
+		return CastResult{}, codeErr("closed", tsBody("closes_at", r.Closes))
 	}
 	if !now.Before(time.Unix(r.Closes, 0).Add(-CastMargin)) {
-		return CastResult{}, false, codeErr("closing", tsBody("closes_at", r.Closes))
+		return CastResult{}, codeErr("closing", tsBody("closes_at", r.Closes))
 	}
 	p, err := votewire.ParseProposal(r.Proposal)
 	if err != nil || !p.HasChoice(choice) {
-		return CastResult{}, false, errBad
+		return CastResult{}, errBad
 	}
 	if b := r.Ballot; b != nil {
 		if b.ChoiceID == choice {
-			return CastResult{ProposalID: id, State: b.State}, false, nil // a repeat
+			return CastResult{ProposalID: id, State: b.State}, nil // a repeat
 		}
-		return CastResult{}, false, codeErr("already_voted", strictjson.NewBuilder().Raw("ballot", strictjson.NewBuilder().String("state", b.State).Bytes()).Bytes())
+		return CastResult{}, codeErr("already_voted", strictjson.NewBuilder().Raw("ballot", strictjson.NewBuilder().String("state", b.State).Bytes()).Bytes())
 	}
 	if r.Site == SiteMismatch {
-		return CastResult{}, false, codeErr("site_mismatch", nil)
+		return CastResult{}, codeErr("site_mismatch", nil)
 	}
 	if c, ok := s.Connection(conn); !ok || c.State != vault.PeerActive {
-		return CastResult{}, false, codeErr("connection_unavailable", nil)
+		return CastResult{}, codeErr("connection_unavailable", nil)
 	}
 	if len(pinned) == 0 {
-		return CastResult{}, false, codeErr("not_signed_in", strictjson.NewBuilder().String("connection_id", conn).Bytes())
+		return CastResult{}, codeErr("not_signed_in", strictjson.NewBuilder().String("connection_id", conn).Bytes())
 	}
 	if r.ServiceBallot != nil { // a vote.confirm is pending: no second ballot under the same key
-		return CastResult{}, false, codeErr("checking", nil)
+		return CastResult{}, codeErr("checking", nil)
 	}
 	if r.Restore { // not reachable while state() says checking; kept as the spec's own row
-		return CastResult{}, false, codeErr("checking", nil)
+		return CastResult{}, codeErr("checking", nil)
 	}
 	if f.dep.Keys == nil {
-		return CastResult{}, false, codeErr("credential_locked", nil)
+		return CastResult{}, codeErr("credential_locked", nil)
 	}
 	credKey, ok := f.dep.Keys.UseKey(now, s.Settings().UnlockTTL())
 	if !ok {
-		return CastResult{}, false, codeErr("credential_locked", nil)
+		return CastResult{}, codeErr("credential_locked", nil)
 	}
 	// 1. The ballot, signed by the voting key, and cast_sig by the credential
 	// key.
 	if len(r.VKSeed) != ed25519.SeedSize {
-		return CastResult{}, false, vault.NewError("internal", "")
+		return CastResult{}, vault.NewError("internal", "")
 	}
 	vk := ed25519.NewKeyFromSeed(r.VKSeed)
 	bal, err := votewire.SignBallot(vk, r.Hash, r.Tag, choice)
 	suite.Wipe(vk)
 	if err != nil {
-		return CastResult{}, false, vault.NewError("internal", "")
+		return CastResult{}, vault.NewError("internal", "")
 	}
 	leaf, err := bal.Leaf()
 	if err != nil {
-		return CastResult{}, false, vault.NewError("internal", "")
+		return CastResult{}, vault.NewError("internal", "")
 	}
 	castSig, err := votewire.SignCast(credKey, r.Hash, leaf)
 	if err != nil {
-		return CastResult{}, false, vault.NewError("internal", "")
+		return CastResult{}, vault.NewError("internal", "")
 	}
 	body, err := votewire.MarshalCast(id, bal, castSig)
 	if err != nil {
-		return CastResult{}, false, vault.NewError("internal", "")
+		return CastResult{}, vault.NewError("internal", "")
 	}
 	// 2. Stored; the flush precedes the sending. A rotation statement still
 	// owed to the connection goes first in the same outbox.
@@ -171,14 +171,14 @@ func (f *Feature) cast(s *vault.Session, conn, id, choice string, pinned, owed [
 		r.Ballot.Held = &heldCast{Key: append([]byte(nil), credPub...), CastSig: castSig, Body: body}
 		r.Ballot.CastSig, r.Ballot.Body = nil, nil
 		f.event(s, r, "ballot")
-		return CastResult{ProposalID: id, State: r.Ballot.State}, false, nil
+		return CastResult{ProposalID: id, State: r.Ballot.State}, nil
 	}
 	if len(owed) > 0 {
-		sentOwed = s.SendToConnection(conn, "connection.authenticate.rotated", owed) == nil
+		_ = s.SendToConnection(conn, "connection.authenticate.rotated", owed)
 	}
 	f.sendBallot(s, r)
 	f.event(s, r, "ballot")
-	return CastResult{ProposalID: id, State: r.Ballot.State}, sentOwed, nil
+	return CastResult{ProposalID: id, State: r.Ballot.State}, nil
 }
 
 // sendOwedChain queues the chain member authentication gives the

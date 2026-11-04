@@ -345,6 +345,12 @@ func (m *Manager) completeTransfer(p *Peer, now time.Time) {
 	// app's signer in this flush.
 	wasDigest, wasClass := m.vaultSigner(p.ID)
 	m.signerMoved(wasDigest, wasClass, p, now)
+	ver := m.dekVersion()
+	// The owed mark, in this step-2 state write, atomic with the move
+	// (§11.14.10 "The owed mark"): the vault's keys rotate after the new
+	// phone's first unlock, once the relay settled the old phone's notice
+	// or from day 7, and an unlock retries a rotation that failed.
+	m.owe(t.ID, ver, now)
 	if old := m.st.Devices[t.OldDevice]; old != nil {
 		// What is queued for the old app (the approval's response) still
 		// goes out on its token.
@@ -356,10 +362,6 @@ func (m *Manager) completeTransfer(p *Peer, now time.Time) {
 		// Release R (§11.14.10): device.unlinked{transferred} is held until
 		// the new phone's first unlock from storage, while its deposit
 		// token lives and at most 30 days (0.55.10).
-		ver := m.hdr.DEKVersion
-		if m.repl != nil {
-			ver = m.repl.next.DEKVersion
-		}
 		m.holdUnlink(old, t.ID, ver, now)
 		old.Standing.Token = "" // removed without the notice now
 		m.removeApp(old, "transferred", now)

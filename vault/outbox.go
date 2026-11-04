@@ -201,6 +201,12 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 			continue
 		}
 		key := e.RelayURL + "|" + e.Mailbox
+		if m.unstored[e.ID] {
+			if e.Op == OpDeposit {
+				blocked[key] = true
+			}
+			continue // not stored yet
+		}
 		if e.Op == OpDeposit && (blocked[key] || awaiting[key] && e.Token == "") {
 			continue
 		}
@@ -222,6 +228,9 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 			err = m.deposit(ctx, e, now)
 			if err == nil && !e.Done {
 				m.pushDeposited(e.PeerID, e.Wake) // §14.2: after the relay accepted it
+			}
+			if e.Unlink != "" {
+				m.unlinkOutcome(e, err, now) // §11.14.10: the notice settled, or not
 			}
 		case OpRevoke:
 			err = m.relay.Revoke(ctx, e.Kind, e.Value)
@@ -264,6 +273,15 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 			_, _ = m.relay.Deposit(ctx, e.RelayURL, e.Mailbox, p.Standing.Token, e.Payload)
 		}
 		suite.Wipe(e.Payload)
+	}
+	if m.settledWrite {
+		// The rotation made when the relay settled a transfer's notice
+		// (unlinkOutcome): its state write, then its notices. A write that
+		// fails leaves both to the next flush and drain.
+		m.settledWrite = false
+		if ctx.Err() == nil && m.persist(ctx, false) == nil {
+			m.drainOutbox(ctx)
+		}
 	}
 }
 

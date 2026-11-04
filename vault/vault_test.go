@@ -49,6 +49,8 @@ type stubRelay struct {
 	deposits []stubDeposit
 	revoked  []string
 	failWith error
+	// failMailbox fails the deposits to one mailbox with its error.
+	failMailbox map[string]error
 	// mailboxDeleted counts DeleteMailbox calls; deleteErr fails them.
 	mailboxDeleted int
 	deleteErr      error
@@ -89,6 +91,9 @@ func (r *stubRelay) Deposit(_ context.Context, _, mailbox, token string, payload
 	defer r.mu.Unlock()
 	if r.failWith != nil {
 		return "", r.failWith
+	}
+	if err := r.failMailbox[mailbox]; err != nil {
+		return "", err
 	}
 	r.deposits = append(r.deposits, stubDeposit{mailbox, token, append([]byte(nil), payload...)})
 	return fmt.Sprintf("m%d", len(r.deposits)), nil

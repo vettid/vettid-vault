@@ -396,6 +396,14 @@ type Manager struct {
 	// handler fails (§11.14.10).
 	heldInHandler bool
 	heldBefore    *HeldKeyRotation
+	// unstored: outbox entries queued outside a batch (a rotation made
+	// when the relay settled a transfer's notice, unlinkOutcome) that wait
+	// for the next state write before they are sent (§3.4: a vault sends
+	// its rotation notices only after the write that holds the rotation).
+	unstored map[string]bool
+	// settledWrite: a drain settled a transfer's notice and made the owed
+	// rotation; the drain writes the state, then sends its notices.
+	settledWrite bool
 	// transferSecret is a transfer's new phone's unlock secret from its
 	// hs.init, in memory only until the approval (§11.14.10).
 	transferSecret []byte
@@ -880,6 +888,7 @@ func (m *Manager) persist(ctx context.Context, create bool) error {
 	}
 	m.stateVer = v
 	m.dirty = false
+	m.unstored = nil
 	if err := m.promote(); err != nil { // step 3, written below
 		return err
 	}

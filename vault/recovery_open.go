@@ -512,7 +512,11 @@ func (m *Manager) completeRecoveryR(ctx context.Context, p RecoveryOpenParams, r
 	// A rotation that cannot be made never fails the recovery: the owed
 	// mark, in this state write, makes the next unlock try again (§11.14.6
 	// step 6, §11.14.10 "The owed mark"). A rotation clears it.
-	m.st.RotationOwed = &RotationOwed{Recovery: r.ID}
+	if o := m.st.RotationOwed; o != nil {
+		o.Recovery = r.ID // next to a transfer's mark, whose ref wins
+	} else {
+		m.st.RotationOwed = &RotationOwed{Recovery: r.ID}
+	}
 	m.dirty = true
 	if err := m.rotateIdentity(now); err != nil {
 		m.record(Activity{Kind: "identity.rotation_failed", Ref: "recovery", Audit: true, Feed: true, Priority: "high"}, now)

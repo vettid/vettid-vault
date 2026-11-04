@@ -315,7 +315,8 @@ func (f *Feature) challenge(s *vault.Session, in *envelope.Inner) error {
 	}
 	c.Long = c.Exp.After(now.Add(peerwire.ConnAuthChallengeTTL))
 	// A received challenge is an ask (§10.4.1, 0.23.0): mute, pause, the
-	// cooldown (any challenge with the same purpose, 0.65.0), the pending
+	// cooldown (any challenge with the same purpose, 0.65.0; none for an
+	// approval, 0.83.10), the pending
 	// caps and the purpose's rate bucket. A suppressed one is answered
 	// `denied`, later, by the vault.
 	v := s.Ask(conn, vault.Ask{Source: f.Name(), Ref: c.ID, Idents: []string{askIdent(c.Purpose)}, Pending: count(f.d.In, conn),
@@ -391,7 +392,7 @@ func (f *Feature) OpenAsks(now time.Time) []vault.PendingAsk {
 const AskIdent = "auth"
 
 // askIdent is a challenge's cooldown identity (0.65.0): any challenge
-// with the same purpose. The buckets' names are the purposes
+// with the same purpose (an approval's is never cooled, 0.83.10). The buckets' names are the purposes
 // (vault.AskBucketSignIn, vault.AskBucketApproval, "" for none).
 func askIdent(purpose string) string {
 	if purpose == "" {
@@ -508,7 +509,7 @@ func (f *Feature) deny(s *vault.Session, body []byte) (json.RawMessage, error) {
 	delete(f.d.In, id)
 	_ = s.SendToConnection(c.Conn, peerwire.TypeConnAuthResponse, peerwire.DeniedConnAuth(id).Marshal())
 	s.Record(vault.Activity{Kind: "connection.authenticate.denied", ConnectionID: c.Conn, Ref: id, Direction: "out", Audit: true})
-	s.AskDeclinedIn(c.Conn, c.Purpose, []string{askIdent(c.Purpose)}) // §10.4.1; a sign-in's: 1 hour, no pause (0.65.0)
+	s.AskDeclinedIn(c.Conn, c.Purpose, []string{askIdent(c.Purpose)}) // §10.4.1; a sign-in's: 1 hour, no pause (0.65.0); an approval's: none (0.83.10)
 	s.SyncEvent("connection.authenticate.decided", strictjson.NewBuilder().String("request_id", id).Bool("approved", false).Bytes())
 	return nil, nil
 }

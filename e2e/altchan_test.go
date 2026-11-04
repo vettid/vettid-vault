@@ -37,10 +37,14 @@ type acWorld struct {
 	trust client.Trust
 }
 
-func newACWorld(t *testing.T) *acWorld {
+// newACWorld starts the world; wrap, if given, wraps its store (faults).
+func newACWorld(t *testing.T, wrap ...func(store.Store) store.Store) *acWorld {
 	t.Helper()
 	r := relaytest.Start(t, nil)
 	w := enclavetest.NewWorld(time.Now, r.URL)
+	for _, f := range wrap {
+		w.Store = f(w.Store)
+	}
 	aw := &acWorld{t: t, w: w, relay: r.URL, trust: w.Trust()}
 	w.VaultOptions = vault.Options{PollWait: time.Second, Counter: countertest.NewLive(), // release R
 		Relay: func(base string, key ed25519.PrivateKey) vault.Relay {

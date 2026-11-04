@@ -3,13 +3,17 @@
 package e2e
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/vettid/vettid-vault/client"
 	"github.com/vettid/vettid-vault/internal/enclavetest"
+	"github.com/vettid/vettid-vault/vault/store"
 )
 
 // acConnectIDs connects two alternate-channel apps' vaults (§6.4), a
@@ -151,8 +155,8 @@ type tkWorld struct {
 	k0    string
 }
 
-func newTKWorld(t *testing.T, seed byte) *tkWorld {
-	aw := newACWorld(t)
+func newTKWorld(t *testing.T, seed byte, wrap ...func(store.Store) store.Store) *tkWorld {
+	aw := newACWorld(t, wrap...)
 	w := &tkWorld{t: t, aw: aw}
 	w.a = aw.newApp("member-tk", enclavetest.NewAndroidAttester(seed, enclavetest.AndroidOptions{}))
 	if r := aw.enroll(w.a, acPIN); !r.OK {
@@ -295,5 +299,114 @@ func TestTransferThenRotateNoSignIn(t *testing.T) {
 	waitEvent(t, w.p.dev, "connection.authenticate.key", has("key", k2))
 	if res := w.auth(b.dev); !strings.Contains(res, `"key_changed":false`) || !strings.Contains(res, k2) {
 		t.Fatalf("K1→K2 not followed: %s", res)
+	}
+}
+
+// §11.14.10, the reviewer's probe: a sign-in on the new phone before its
+// first unlock from storage would sign with K1 while the statement is held
+// (no chain from K0 yet): it is refused transfer_incomplete, and once the
+// move has finished the same challenge is approved and the peer follows.
+func TestSignInBeforeFinishRefused(t *testing.T) {
+	w := newTKWorld(t, 0x89)
+	b := w.move(w.a, "new-phone-tk-s", 0x99)
+	k1 := w.key(b.dev)
+	ctx := ctxT(t, 120*time.Second)
+	id, err := w.p.dev.AuthRequest(ctx, w.pConn, "prove it")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitEvent(t, b.dev, "connection.authenticate.pending", has("request_id", id))
+	if _, err := b.dev.CredentialUnlock(ctx, credPW); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.dev.AuthApprove(ctx, id); client.Code(err) != "transfer_incomplete" {
+		t.Fatalf("sign-in before the first unlock: %v", err)
+	}
+	w.noKeyEvent()
+	w.finish(b)
+	waitEvent(t, w.p.dev, "connection.authenticate.key", has("key", k1))
+	if _, err := b.dev.CredentialUnlock(ctx, credPW); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.dev.AuthApprove(ctx, id); err != nil {
+		t.Fatalf("after the move: %v", err)
+	}
+	res := string(waitEvent(t, w.p.dev, "connection.authenticate.result", has("request_id", id)).Body)
+	if !strings.Contains(res, `"key_changed":false`) || !strings.Contains(res, k1) {
+		t.Fatalf("after the move: %s", res)
+	}
+}
+
+// stateFaults fails the next state write of any vault once armed.
+type stateFaults struct {
+	store.Store
+	mu   sync.Mutex
+	fail int
+}
+
+func (s *stateFaults) arm(n int) { s.mu.Lock(); s.fail = n; s.mu.Unlock() }
+
+func (s *stateFaults) Put(ctx context.Context, key string, data []byte, ifMatch store.Version) (store.Version, error) {
+	if strings.HasSuffix(key, "/state") {
+		s.mu.Lock()
+		if s.fail > 0 {
+			s.fail--
+			s.mu.Unlock()
+			return "", errors.New("injected state write failure")
+		}
+		s.mu.Unlock()
+	}
+	return s.Store.Put(ctx, key, data, ifMatch)
+}
+
+// §11.14.10 "nothing needs undoing", with the real credential and items
+// features: the approval's step 1 is stored and its step-2 state write
+// fails. The old phone's blob is still the credential (K0, the critical
+// item under it), nothing is held or sent, and the old phone unlocks.
+func TestTransferCrashBeforeStep2(t *testing.T) {
+	sf := &stateFaults{}
+	w := newTKWorld(t, 0x8a, func(s store.Store) store.Store { sf.Store = s; return sf })
+	ctx := ctxT(t, 240*time.Second)
+	sid, _, err := w.a.dev.ItemPutCritical(ctx, credPW, "", 0, nil, client.ItemContent{Name: "seed",
+		Fields: []client.ItemField{{Label: "Words", Kind: "multiline", Value: "legal winner thank year"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, link, err := w.a.dev.TransferCreate(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := w.aw.newApp("new-phone-tk-c", enclavetest.NewIOSAttester(0x9a, enclavetest.IOSOptions{}))
+	if _, err := b.dev.PairAttested(ctx, link, b.att); err != nil {
+		t.Fatal(err)
+	}
+	waitEvent(t, w.a.dev, "device.transfer.pending", has("transfer_id", id))
+	// Every state write fails from now until the vault is gone: step 1
+	// (the header) is stored, step 2 never is, and the approval is not
+	// answered (its answer goes after the flush).
+	sf.arm(1 << 30)
+	if err := w.a.dev.TransferApprove(ctxT(t, 20*time.Second), id, acPIN, credPW); err == nil {
+		t.Fatal("the approval was answered although step 2 was not stored")
+	}
+	// A crash: what is stored is step 1 and the state before the approval.
+	w.aw.instanceOf(w.a).Manager(w.a.vid).Crash()
+	sf.arm(0)
+	// The vault starts again from what is stored: the old phone opens it.
+	if r := w.aw.mustUnlock(w.a, acPIN, client.UnlockOptions{}, ""); !r.OK {
+		t.Fatalf("the old phone after a lost step 2: %+v", r)
+	}
+	if k := w.key(w.a.dev); k != w.k0 {
+		t.Fatalf("the credential key is %s, not K0", k)
+	}
+	if _, err := w.a.dev.CredentialUnlock(ctx, credPW); err != nil {
+		t.Fatalf("the old phone's blob: %v", err)
+	}
+	v, err := w.a.dev.ItemRevealCritical(ctx, credPW, sid)
+	if err != nil || !strings.Contains(string(v), "legal winner") {
+		t.Fatalf("the critical item: %v", err)
+	}
+	w.noKeyEvent()
+	if res := w.auth(w.a.dev); !strings.Contains(res, `"key_changed":false`) || !strings.Contains(res, w.k0) {
+		t.Fatalf("sign-in under K0: %s", res)
 	}
 }

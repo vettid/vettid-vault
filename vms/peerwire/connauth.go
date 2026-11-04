@@ -260,7 +260,8 @@ type ConnAuthResponse struct {
 // challengerIK to the vault whose identity key is responderIK, with the
 // member's credential key: over the purpose too when c has a known one,
 // which the response then echoes (0.65.0). rotations, if any, lead from
-// the key that challenger pinned to key (credwire.ChainFrom).
+// the key this vault last signed a response to that challenger with (its
+// pin, or one before it, VAULT-MESSAGING §10.4) to key (credwire.ChainFrom).
 func SignConnAuth(key ed25519.PrivateKey, challengerIK, responderIK []byte, c *ConnAuthChallenge, signedAt time.Time,
 	rotations []*credwire.KeyRotation) (*ConnAuthResponse, error) {
 	label, m := c.Signed(challengerIK, responderIK)

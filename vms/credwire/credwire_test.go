@@ -97,6 +97,25 @@ func TestKeyRotationChain(t *testing.T) {
 	if end, err = FollowChain(k1.Public().(ed25519.PublicKey), []*KeyRotation{&junk, r2}); err != nil || !bytes.Equal(end, k2.Public().(ed25519.PublicKey)) {
 		t.Fatalf("leading link before the pin: %v", err)
 	}
+	// The first statement from the pin is the one followed: a junk one
+	// from the pin before a valid one fails closed (only the member's own
+	// vault composes a chain, and honest keys never repeat).
+	junkFromPin := *r2
+	junkFromPin.SigOld = make([]byte, ed25519.SignatureSize)
+	if _, err := FollowChain(k1.Public().(ed25519.PublicKey), []*KeyRotation{&junkFromPin, r2}); err != ErrChain {
+		t.Fatal("a junk statement from the pin followed past")
+	}
+	// MaxKeyChain counts the whole chain, skipped statements included.
+	prefixed := make([]*KeyRotation, 0, MaxKeyChain+1)
+	for len(prefixed) < MaxKeyChain-1 {
+		prefixed = append(prefixed, &junk)
+	}
+	if _, err := FollowChain(k1.Public().(ed25519.PublicKey), append(prefixed, r2, r3)); err != ErrChain {
+		t.Fatal("a chain over MaxKeyChain with its prefix accepted")
+	}
+	if _, err := FollowChain(k1.Public().(ed25519.PublicKey), append(prefixed[:MaxKeyChain-2], r2, r3)); err != nil {
+		t.Fatalf("a chain of MaxKeyChain with its prefix: %v", err)
+	}
 	// A pinned key that is only a link's new key, never an old one: nothing
 	// to follow.
 	if _, err := FollowChain(k3.Public().(ed25519.PublicKey), []*KeyRotation{r1, r2, r3}); err != ErrChain {

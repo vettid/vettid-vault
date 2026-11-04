@@ -86,7 +86,8 @@ type data struct {
 	// first (at most credwire.MaxKeyChain).
 	Chain []json.RawMessage `json:"chain,omitempty"`
 	// Shown is, per connection, the credential key this vault last signed
-	// a response with: the key that connection pinned.
+	// a response with: the key that connection pinned, or one before it if
+	// it followed a delivered chain since (VAULT-MESSAGING §10.4).
 	Shown map[string][]byte `json:"shown,omitempty"`
 }
 

@@ -51,6 +51,8 @@ type Keys interface {
 type Auth interface {
 	SignedInKey(conn string) []byte
 	RotatedBody(conn string) []byte
+	// RotatedSent records that RotatedBody's chain was sent to conn.
+	RotatedSent(conn string)
 }
 
 // Deps are the features the vote feature works with. Without Keys nothing
@@ -70,8 +72,12 @@ type Feature struct {
 	asked map[string]int64   // the last RequestProposal by connection|id, ms (memory only)
 	opt   Options
 	st    state
-	last  int64      // unix ms of the last recheck (memory only)
-	idx   *listIndex // the held list, parsed (memory only)
+	last  int64 // unix ms of the last recheck (memory only)
+	// owed and owedSent: during a tick, the chains member authentication
+	// still owes connections, and those sent (memory only).
+	owed     map[string][]byte
+	owedSent []string
+	idx      *listIndex // the held list, parsed (memory only)
 }
 
 // New returns the feature.

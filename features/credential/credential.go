@@ -196,6 +196,22 @@ type KeyRotationSigner interface {
 	CredentialKeysHeld(s *vault.Session, oldKey, newKey ed25519.PrivateKey)
 }
 
+// KeyRotationBatchObserver is a KeyRotationObserver that is told of
+// several statements at once, in order (a transfer's held statements,
+// §11.14.10): member authentication sends each connection one chain.
+type KeyRotationBatchObserver interface {
+	CredentialKeyRotations(s *vault.Session, rs []*credwire.KeyRotation)
+}
+
+// KeyRotationFollower is told of the held statements once they are sent,
+// after every KeyRotationObserver has seen them, so that what it sends is
+// queued after the statements whatever the order of registration (the
+// vote feature puts its ballots re-signed at a transfer's approval in
+// force, CredentialKeysHeld).
+type KeyRotationFollower interface {
+	CredentialKeyRotationsSent(s *vault.Session, rs []*credwire.KeyRotation)
+}
+
 // AddKeyRotationObserver registers an observer (at construction).
 func (f *Feature) AddKeyRotationObserver(o KeyRotationObserver) {
 	f.mu.Lock()
@@ -1527,20 +1543,36 @@ func (f *Feature) transferApprove(s *vault.Session, body []byte, e *Envelope, p 
 func (f *Feature) SendKeyRotations(s *vault.Session, statements [][]byte) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.sendRotations(s, statements)
+	f.notifyRotations(s, statements, true)
 }
 
-// sendRotations tells every KeyRotationObserver of each statement, in
-// order; member authentication sends them to the connections that pinned
-// an earlier key (§10.4). A statement that does not parse is skipped.
-func (f *Feature) sendRotations(s *vault.Session, statements [][]byte) {
+// notifyRotations tells every KeyRotationObserver of the statements, in
+// order (a KeyRotationBatchObserver of all of them at once); member
+// authentication sends them to the connections that pinned an earlier key
+// (§10.4). Then, with follow, every KeyRotationFollower is told. A
+// statement that does not parse is skipped.
+func (f *Feature) notifyRotations(s *vault.Session, statements [][]byte, follow bool) {
+	var rs []*credwire.KeyRotation
 	for _, raw := range statements {
-		r, err := credwire.ParseKeyRotation(raw)
-		if err != nil {
+		if r, err := credwire.ParseKeyRotation(raw); err == nil {
+			rs = append(rs, r)
+		}
+	}
+	if len(rs) == 0 {
+		return
+	}
+	for _, o := range f.rotObs {
+		if b, ok := o.(KeyRotationBatchObserver); ok {
+			b.CredentialKeyRotations(s, rs)
 			continue
 		}
-		for _, o := range f.rotObs {
+		for _, r := range rs {
 			o.CredentialKeyRotated(s, r)
+		}
+	}
+	for _, o := range f.rotObs {
+		if fo, ok := o.(KeyRotationFollower); ok && follow {
+			fo.CredentialKeyRotationsSent(s, rs)
 		}
 	}
 }
@@ -1784,10 +1816,12 @@ func (f *Feature) rotate(s *vault.Session, inner *Inner, p *Payload) (json.RawMe
 		suite.Wipe(ks)
 		return nil, err
 	}
-	// A transfer's statement still held (K0→K1) goes first, so that the
-	// connections that pinned K0 get an unbroken chain (§11.14.10 "The owed
-	// mark"); the vault's rotation below then finds none to send.
-	f.sendRotations(s, s.TakeHeldKeyRotations())
+	// A transfer's statement still held (K0→K1) goes first, in one chain
+	// with this rotation's own (K1→K2), so that the connections that pinned
+	// K0 get an unbroken chain (§11.14.10 "The owed mark"). It is taken
+	// now, so the vault's rotation below finds none to send; if this
+	// handler fails, the runtime holds it again.
+	chain := s.TakeHeldKeyRotations()
 	if err := s.RotateIdentity(); err != nil {
 		suite.Wipe(ks)
 		return nil, errInternal
@@ -1804,9 +1838,9 @@ func (f *Feature) rotate(s *vault.Session, inner *Inner, p *Payload) (json.RawMe
 	f.st.Key = pub
 	s.Record(vault.Activity{Kind: "credential.rotated", Audit: true, Feed: true})
 	f.resolveAlarm(s) // the forced rotation (§3.5.9)
-	for _, o := range f.rotObs {
-		o.CredentialKeyRotated(s, stmt)
-	}
+	// The signers re-sign under the new key below: what they kept aside
+	// under a held key is superseded, so no follower is told.
+	f.notifyRotations(s, append(chain, stmt.Marshal()), false)
 	for _, o := range f.rotObs {
 		if so, ok := o.(KeyRotationSigner); ok {
 			so.CredentialKeysOpen(s, oldPriv, newPriv)
@@ -1909,6 +1943,11 @@ func (f *Feature) holderReset(s *vault.Session, e *Envelope, p *Payload) (json.R
 		NewPassword: p.NewPassword, BackupCopy: s.Settings().Backup()}); err != nil {
 		return nil, err
 	}
+	// A transfer's statement still held announces a key of the credential
+	// destroyed now: it is never sent (a new credential has no statement,
+	// §3.5.5), and the signers' copies under that key go with it
+	// (DeleteObserver).
+	_ = s.TakeHeldKeyRotations()
 	me := s.From().ID
 	keep, ok := f.st.Pools[me]
 	delete(f.st.Pools, me)

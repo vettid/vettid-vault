@@ -202,3 +202,86 @@ type stmtRec struct{ got *[]*credwire.KeyRotation }
 func (s *stmtRec) CredentialKeyRotated(_ *vault.Session, r *credwire.KeyRotation) {
 	*s.got = append(*s.got, r)
 }
+
+// batchRec is a KeyRotationBatchObserver and a KeyRotationFollower that
+// records what it is told, in order.
+type batchRec struct {
+	order  *[]string
+	chains [][]*credwire.KeyRotation
+}
+
+func (b *batchRec) CredentialKeyRotated(_ *vault.Session, r *credwire.KeyRotation) {
+	b.CredentialKeyRotations(nil, []*credwire.KeyRotation{r})
+}
+func (b *batchRec) CredentialKeyRotations(_ *vault.Session, rs []*credwire.KeyRotation) {
+	*b.order = append(*b.order, "batch")
+	b.chains = append(b.chains, rs)
+}
+
+// followRec is a KeyRotationFollower registered before the observers.
+type followRec struct{ order *[]string }
+
+func (f *followRec) CredentialKeyRotated(*vault.Session, *credwire.KeyRotation) {}
+func (f *followRec) CredentialKeyRotationsSent(_ *vault.Session, rs []*credwire.KeyRotation) {
+	*f.order = append(*f.order, "followed")
+}
+
+// Held statements go to a batch observer as one chain, and every follower
+// is told after every observer, whatever the order of registration.
+func TestHeldStatementsOneChainFollowersLast(t *testing.T) {
+	var order []string
+	e := newEnv(t)
+	e.f.AddKeyRotationObserver(&followRec{order: &order})
+	br := &batchRec{order: &order}
+	e.f.AddKeyRotationObserver(br)
+	k0 := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{1}, 32))
+	k1 := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{2}, 32))
+	k2 := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{3}, 32))
+	s1, _ := credwire.NewKeyRotation(k0, k1)
+	s2, _ := credwire.NewKeyRotation(k1, k2)
+	e.f.SendKeyRotations(vault.NewSession(context.Background(), e.h, vault.PeerInfo{}, e.clk.T, nil), [][]byte{s1.Marshal(), s2.Marshal()})
+	if len(order) != 2 || order[0] != "batch" || order[1] != "followed" || len(br.chains) != 1 || len(br.chains[0]) != 2 {
+		t.Fatalf("order %v, chains %d", order, len(br.chains))
+	}
+}
+
+// credential.rotate while a statement is held tells a batch observer one
+// chain K0→K1→K2 (member authentication sends it as one), and no
+// follower: the signers re-sign under K2.
+func TestRotateDuringHeldOneChain(t *testing.T) {
+	x := newXferEnv(t)
+	br := &batchRec{order: &x.order}
+	x.f.AddKeyRotationObserver(br)
+	fr := &followRec{order: &x.order}
+	x.f.AddKeyRotationObserver(fr)
+	x.ok(x.approve())
+	x.f.TransferCompleted(nil, "dev-app", "dev-app2")
+	latest := blobOf(t, x.ok(x.raw("app2", "credential.get", `{}`)))
+	x.order = nil
+	x.ok(x.call("app2", "credential.rotate", latest, map[string]any{"password": pw}))
+	if len(br.chains) != 1 || len(br.chains[0]) != 2 || !bytes.Equal(br.chains[0][0].Old, x.k0) {
+		t.Fatalf("chains %+v", br.chains)
+	}
+	for _, o := range x.order {
+		if o == "followed" {
+			t.Fatal("a follower was told at a rotation")
+		}
+	}
+}
+
+// credential.reset while a statement is held: the statement is never
+// sent (the key it announces is destroyed) and the delete observers are
+// told.
+func TestResetDropsHeldStatement(t *testing.T) {
+	x := newXferEnv(t)
+	x.ok(x.approve())
+	x.f.TransferCompleted(nil, "dev-app", "dev-app2")
+	latest := blobOf(t, x.ok(x.raw("app2", "credential.get", `{}`)))
+	x.order = nil
+	x.o.statement = nil
+	r := x.call("app2", "credential.reset", latest, map[string]any{"password": pw, "pin": testPIN, "new_password": pw + "-2"})
+	x.ok(r)
+	if len(x.h.HeldRotations) != 0 || x.o.statement != nil {
+		t.Fatalf("held %d, statement %v", len(x.h.HeldRotations), x.o.statement)
+	}
+}

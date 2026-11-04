@@ -896,3 +896,37 @@ func TestSignedInKeyAndOwedRotation(t *testing.T) {
 		t.Error("the pin moved without a response")
 	}
 }
+
+// §11.14.10: a transfer's held statements, and a rotation's own after
+// them, go to a connection as one chain (the receiver follows a chain only
+// from its pinned key); a chain once sent is not owed again until a later
+// statement extends it.
+func TestKeyRotationsOneChain(t *testing.T) {
+	a, b := pair()
+	b.w.open = true
+	if r := result(t, a, b); !strings.Contains(r, `"key_changed":false`) {
+		t.Fatal(r)
+	}
+	k1 := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0xd1}, 32))
+	k2 := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0xd2}, 32))
+	r1, _ := credwire.NewKeyRotation(b.w.key, k1)
+	r2, _ := credwire.NewKeyRotation(k1, k2)
+	b.w.key = k2
+	b.h.Reset()
+	b.f.CredentialKeyRotations(vault.NewSession(context.Background(), b.h, vault.PeerInfo{}, t0, nil), []*credwire.KeyRotation{r1, r2})
+	msgs := b.h.SentOfType("connection.authenticate.rotated")
+	if len(msgs) != 1 {
+		t.Fatalf("%d chains sent", len(msgs))
+	}
+	if b.f.RotatedBody("cA") != nil {
+		t.Fatal("owed again after it was sent")
+	}
+	a.h.Reset()
+	featuretest.Call(a.f, a.h, t0, "connection:cB", "connection.authenticate.rotated", string(msgs[0].Body))
+	if !a.h.HasActivity("connection.authenticate.key_rotated") {
+		t.Fatal("the one chain was not followed")
+	}
+	if r := result(t, a, b); !strings.Contains(r, `"key_changed":false`) {
+		t.Fatalf("after the chain: %s", r)
+	}
+}

@@ -42,12 +42,12 @@ func TestHeldRotationWaitsForTheStatement(t *testing.T) {
 	// A statement for another key changes nothing.
 	_, other, _ := ed25519.GenerateKey(rand.Reader)
 	c.h.Reset()
-	c.f.CredentialKeyRotated(c.session(), &credwire.KeyRotation{Old: oldPub, New: other.Public().(ed25519.PublicKey)})
+	c.f.CredentialKeyRotationsSent(c.session(), []*credwire.KeyRotation{{Old: oldPub, New: other.Public().(ed25519.PublicKey)}})
 	if c.rec(v.ID).Ballot.Held == nil || len(c.h.SentOfType("vote.cast")) != 0 {
 		t.Fatal("another key's statement took the held body")
 	}
 	// The statement K0→K1 has gone out: the new body, once.
-	c.f.CredentialKeyRotated(c.session(), &credwire.KeyRotation{Old: oldPub, New: k1Pub})
+	c.f.CredentialKeyRotationsSent(c.session(), []*credwire.KeyRotation{{Old: oldPub, New: k1Pub}})
 	b = c.rec(v.ID).Ballot
 	bodies, _ = c.casts()
 	if b.Held != nil || len(bodies) != 1 || string(bodies[0]) == oldBody || b.Gen != 1 || b.SentGen != 1 {
@@ -88,10 +88,93 @@ func TestCastWhileRotationHeld(t *testing.T) {
 		t.Fatal("sent by the schedule while held")
 	}
 	c.h.HeldRotations = nil
-	c.f.CredentialKeyRotated(c.session(), &credwire.KeyRotation{Old: oldPub, New: k1Pub})
+	c.f.CredentialKeyRotationsSent(c.session(), []*credwire.KeyRotation{{Old: oldPub, New: k1Pub}})
 	bodies, _ := c.casts()
 	b = c.rec(v.ID).Ballot
 	if len(bodies) != 1 || b.Held != nil || votewire.VerifyCast(k1Pub, v.Hash, c.leafOf(v), b.CastSig) != nil {
 		t.Fatalf("after the statement: %d sent", len(bodies))
+	}
+}
+
+// A bad_ballot for the body under the old key while a copy under a
+// transfer's held key exists (the service follows the new key already):
+// the copy is the answer, sent once, not a refusal.
+func TestBadBallotAdoptsHeldCopy(t *testing.T) {
+	c := newCastEnv(t)
+	v := c.open(1)
+	c.cast(v, "yes")
+	_, ids := c.casts()
+	_, k1, _ := ed25519.GenerateKey(rand.Reader)
+	k1Pub := k1.Public().(ed25519.PublicKey)
+	c.f.CredentialKeysHeld(c.session(), c.cred, k1)
+	c.h.Reset()
+	c.refusal(v, ids[0], "vote.cast", "bad_ballot", votewire.H(c.leafOf(v)))
+	b := c.rec(v.ID).Ballot
+	if c.state(v) != "waiting:bad_ballot" || b.Held != nil || b.Gen != 1 {
+		t.Fatalf("state %s, held %v, gen %d", c.state(v), b.Held != nil, b.Gen)
+	}
+	bodies, _ := c.casts()
+	if len(bodies) != 1 || votewire.VerifyCast(k1Pub, v.Hash, c.leafOf(v), b.CastSig) != nil {
+		t.Fatalf("%d sent", len(bodies))
+	}
+}
+
+// A connection that was not active when a statement went out gets the
+// chain member authentication still owes it before the ballot the
+// schedule sends, once.
+func TestTickSendsOwedChainFirst(t *testing.T) {
+	c := newCastEnv(t)
+	v := c.open(1)
+	c.cast(v, "yes")
+	c.auth.owed["svc"] = []byte(`{"rotations":[]}`)
+	c.h.Reset()
+	c.tickAt(2 * time.Minute)
+	var order []string
+	for _, s := range c.h.Sent {
+		if s.Type == "connection.authenticate.rotated" || s.Type == "vote.cast" {
+			order = append(order, s.Type)
+		}
+	}
+	if len(order) != 2 || order[0] != "connection.authenticate.rotated" || order[1] != "vote.cast" {
+		t.Fatalf("sent %v", order)
+	}
+	if len(c.auth.sent) != 1 || c.auth.sent[0] != "svc" {
+		t.Fatalf("not recorded as sent: %v", c.auth.sent)
+	}
+	c.h.Reset()
+	c.tickAt(10 * time.Minute)
+	if len(c.h.SentOfType("connection.authenticate.rotated")) != 0 {
+		t.Fatal("the chain was sent again")
+	}
+}
+
+// credential.reset during the held window: the copies under the held key
+// are dropped, and a ballot only kept aside is removed (never sent).
+func TestCredentialDeletedDropsHeld(t *testing.T) {
+	c := newCastEnv(t)
+	v := c.open(1)
+	w := c.open(2)
+	c.cast(v, "yes")
+	oldBody := string(c.rec(v.ID).Ballot.Body)
+	_, k1, _ := ed25519.GenerateKey(rand.Reader)
+	c.f.CredentialKeysHeld(c.session(), c.cred, k1)
+	c.keys.key = k1
+	c.h.HeldRotations = [][]byte{[]byte(`{}`)}
+	c.cast(w, "no")
+	c.h.HeldRotations = nil
+	if c.rec(w.ID).Ballot == nil || c.rec(w.ID).Ballot.Held == nil {
+		t.Fatal("not kept aside")
+	}
+	c.f.CredentialDeleted(c.session())
+	if b := c.rec(v.ID).Ballot; b.Held != nil || string(b.Body) != oldBody {
+		t.Fatal("the held copy was not dropped")
+	}
+	if c.rec(w.ID).Ballot != nil {
+		t.Fatal("the ballot only kept aside stays")
+	}
+	c.h.Reset()
+	c.f.CredentialKeyRotationsSent(c.session(), []*credwire.KeyRotation{{Old: c.cred.Public().(ed25519.PublicKey), New: k1.Public().(ed25519.PublicKey)}})
+	if len(c.h.SentOfType("vote.cast")) != 0 {
+		t.Fatal("sent under the destroyed key")
 	}
 }

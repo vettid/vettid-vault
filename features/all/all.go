@@ -196,6 +196,7 @@ func NewSet(o Options) *Set {
 		// when the credential key rotates (§3.5.5).
 		s.Vote = vote.New(o.Vote, vote.Deps{Keys: cred, Auth: auth, Cred: cred})
 		cred.AddKeyRotationObserver(s.Vote)
+		cred.AddDeleteObserver(s.Vote) // a reset drops what was signed under a held key (§11.14.10)
 		auth.AddResponseObserver(s.Vote)
 		// The profile.update to a service says so (§10.19.1).
 		it.SetPeerFeatures([]string{vote.Name})
@@ -207,8 +208,12 @@ func NewSet(o Options) *Set {
 // held one included (§3.5.5, §11.14.10); the credential sends a transfer's
 // held statement when the runtime asks.
 var (
-	_ credential.KeyRotationSigner = (*vote.Feature)(nil)
-	_ vault.KeyRotationSender      = (*credential.Feature)(nil)
+	_ credential.KeyRotationSigner        = (*vote.Feature)(nil)
+	_ credential.KeyRotationFollower      = (*vote.Feature)(nil)
+	_ credential.DeleteObserver           = (*vote.Feature)(nil)
+	_ credential.KeyRotationBatchObserver = (*connauth.Feature)(nil)
+	_ vote.Auth                           = (*connauth.Feature)(nil)
+	_ vault.KeyRotationSender             = (*credential.Feature)(nil)
 )
 
 // List returns the registered features in registration order. The audit

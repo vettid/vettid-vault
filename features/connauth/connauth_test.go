@@ -963,3 +963,28 @@ func TestRepeatedChainIgnored(t *testing.T) {
 		t.Fatalf("pin lost: %s", r)
 	}
 }
+
+// §10.4 (0.83.9): two rotations delivered in a row with no sign-in
+// between. The second chain starts at the key B last signed with, before
+// A's new pin; A follows it from its pin, and the next authentication is
+// no change.
+func TestKeyRotationTwoDeliveries(t *testing.T) {
+	a, b := pair()
+	b.w.open = true
+	if r := result(t, a, b); !strings.Contains(r, `"key_changed":false`) {
+		t.Fatal(r)
+	}
+	for i, seed := range []byte{0xd1, 0xd2} {
+		b.h.Reset()
+		rotate(t, b, seed)
+		msg := last(t, b.h, "connection.authenticate.rotated")
+		a.h.Reset()
+		featuretest.Call(a.f, a.h, t0, "connection:cB", "connection.authenticate.rotated", string(msg.Body))
+		if a.h.HasActivity("connection.authenticate.rotation_rejected") || len(a.h.SentOfType("connection.authenticate.key")) != 1 {
+			t.Fatalf("delivery %d not followed", i+1)
+		}
+	}
+	if r := result(t, a, b); !strings.Contains(r, `"key_changed":false`) {
+		t.Fatalf("after two deliveries: %s", r)
+	}
+}

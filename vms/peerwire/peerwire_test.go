@@ -73,6 +73,14 @@ func TestConnAuth(t *testing.T) {
 		!PinnedKeyChanged(pub(key(5)), pub(cred), []*credwire.KeyRotation{rot}) {
 		t.Fatal("pin")
 	}
+	// A response whose chain starts before the pin (VAULT-MESSAGING
+	// 0.83.9 §10.4): pinned K1, rotations [K0->K1, K1->K2], key K2 is no
+	// change.
+	r01, _ := credwire.NewKeyRotation(key(6), key(7))
+	r12, _ := credwire.NewKeyRotation(key(7), key(8))
+	if PinnedKeyChanged(pub(key(7)), pub(key(8)), []*credwire.KeyRotation{r01, r12}) {
+		t.Fatal("a response chain from before the pin read as a change")
+	}
 	if _, err := NewConnAuthChallenge(reqID, strings.Repeat("x", ConnAuthMaxContext+1)); err == nil {
 		t.Fatal("long context")
 	}

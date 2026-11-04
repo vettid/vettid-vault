@@ -606,8 +606,8 @@ func (f *Feature) ConnectionRemoved(_ *vault.Session, id string) {
 }
 
 // SignedInKey is the credential key this vault last signed a response with
-// for the connection: the key the connection pinned (nil: it never signed
-// in). It is what the vote feature needs before it signs a ballot
+// for the connection: the key the connection pinned, or one before it if
+// it followed a delivered chain since (nil: it never signed in). It is what the vote feature needs before it signs a ballot
 // (VAULT-MESSAGING §10.19.5).
 func (f *Feature) SignedInKey(conn string) []byte {
 	f.mu.Lock()

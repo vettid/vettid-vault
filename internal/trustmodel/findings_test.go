@@ -74,7 +74,17 @@ func TestFindingB_RelayForkHiddenByIdentityResolve(t *testing.T) {
 // established, the responder's are refused rekey_not_current_epoch, and no
 // reconnect is triggered (standing tokens are valid).
 func TestFindingC_LostFinDivergesEpochs(t *testing.T) {
-	s := newScen(t, 2)
+	for _, old := range []bool{true, false} {
+		s := newScen(t, 2)
+		if old {
+			s = newScenOld(t, 2)
+		}
+		findingC(s, old)
+	}
+}
+
+func findingC(s *scen, old bool) {
+	t := s.t
 	P, Q := s.p(0), s.p(1)
 	s.do(P, func() { P.startHS(P.st.peer(Q.ID), false); P.write(); P.flush() })
 	s.run(1, Q) // Q answers
@@ -82,13 +92,28 @@ func TestFindingC_LostFinDivergesEpochs(t *testing.T) {
 	s.run(2, P) // P establishes and sends hs.fin
 	s.tick(msgTTL + hour)
 	s.w.checkEnd(true)
-	expectViolation(t, s, "I1/hs-lost:expired-at-relay-TTL")
+	if old {
+		expectViolation(t, s, "I1/hs-lost:expired-at-relay-TTL")
+	} else {
+		s.noViolation("I") // §6.3.1: both stay on the old epoch
+		t.Logf("under A: %d pending abandoned at B, %d confirmed", s.w.stats["A:abandoned:B passed"], s.w.stats["A:confirmed"])
+	}
 }
 
 // Finding C, variant inside §3.4.1's scope: the hs.fin sits in Q's old
 // mailbox, and Q, locked after its own rotation, misses the grace.
 func TestFindingC2_FinLostWithOldMailbox(t *testing.T) {
-	s := newScen(t, 2)
+	for _, old := range []bool{true, false} {
+		s := newScen(t, 2)
+		if old {
+			s = newScenOld(t, 2)
+		}
+		findingC2(s, old)
+	}
+}
+
+func findingC2(s *scen, old bool) {
+	t := s.t
 	P, Q := s.p(0), s.p(1)
 	s.do(P, func() { P.startHS(P.st.peer(Q.ID), false); P.write(); P.flush() })
 	s.run(1, Q)           // Q answers
@@ -97,7 +122,12 @@ func TestFindingC2_FinLostWithOldMailbox(t *testing.T) {
 	s.lock(Q)
 	s.tick(graceLen + hour)
 	s.w.checkEnd(true)
-	expectViolation(t, s, "I1/hs-lost")
+	if old {
+		expectViolation(t, s, "I1/hs-lost")
+	} else {
+		s.noViolation("I") // §6.3.1: the 32-day rekey from the old epoch repairs it
+		t.Logf("under A: %d pending abandoned at B, %d confirmed", s.w.stats["A:abandoned:B passed"], s.w.stats["A:confirmed"])
+	}
 }
 
 // Finding D (I1's exclusions vs §6.6 "Limits" and S1): both vaults rotate
@@ -125,4 +155,70 @@ func TestFindingD_DeadButNotStaleAfterBothMissTheGrace(t *testing.T) {
 	}
 	t.Logf("reproduced: %s and %s hold each other's old relay keys (%d, %d), both records active; S1 stales them at day 30",
 		P.Name, Q.Name, rp.Relay, rq.Relay)
+}
+
+// Finding E (§6.3.1 against §3.4.1 "Epochs after an ik link"): a reconnect
+// or rekey naming the responder's confirmed epoch "is neither a restore nor
+// fork evidence". When the old copy made the latest epoch with Q, the
+// original's reconnect from its own (older) epoch names Q's confirmed
+// epoch: it is answered as ordinary, and the fork evidence that #204
+// finding 1 restored is lost. Under the f4a4d97 rules Q suspends
+// (TestScenario204F1ForkReconnectSurvives).
+func TestFindingE_ConfirmedEpochHidesForkEvidence(t *testing.T) {
+	s := newScen(t, 2)
+	P, Q := s.p(0), s.p(1)
+	s.w.makeCopy(P)
+	C := s.w.P[len(s.w.P)-1]
+	s.do(C, C.unlock)
+	s.do(C, func() { C.startHS(C.st.peer(Q.ID), false); C.write(); C.flush() }) // the copy rekeys: E2 signed by ik0
+	s.run(3, Q, C)
+	s.w.holdRotate = true
+	s.rotate(P, pathCred)
+	s.do(P, func() { r := P.st.peer(Q.ID); P.abandonOwn(r); P.startHS(r, true); P.write(); P.flush() })
+	s.run(6, Q, P)
+	s.w.holdRotate = false
+	if Q.st.peer(P.ID).Status == stSuspended {
+		t.Errorf("finding no longer reproduces: Q suspended")
+		return
+	}
+	t.Logf("reproduced: Q answered the original's reconnect naming its confirmed epoch and did not suspend (cells: %d confirmed-epoch reconnects)", s.w.stats["cell B:current:hs.init"])
+}
+
+// Finding G (§6.3.1 lifetimes): a lost hs.confirm while the initiator is
+// away longer than B + T (46 days): the responder has dropped its
+// confirmed epoch, the initiator has abandoned the pending one, and each
+// side's reconnect names an epoch the other no longer accepts; the pair
+// goes stale (a new invitation). Pinned in TestScenarioALostConfirmInitiatorLocked (47 days).
+func TestFindingG_PinnedElsewhere(t *testing.T) {}
+
+// Finding H (§6.3.1 with §3.4.1 H5): the responder rotates its ik twice
+// while the initiator's rekeys are answered. Each time the initiator's
+// pending epoch is abandoned by H5 after its hs.fin went out, so the
+// responder activates an epoch the initiator never takes; at the second
+// activation "the epoch it superseded" (the responder's confirmed epoch)
+// is the first unconfirmed one, and the initiator's rekey from its own
+// current epoch is refused rekey_not_current_epoch: a permanent split.
+func TestFindingH_ConfirmedEpochReplacedBeforeConfirmation(t *testing.T) {
+	s := newScen(t, 2)
+	P, Q := s.p(0), s.p(1)
+	s.w.holdRotate = true // only the ik moves
+	s.do(P, func() { P.startHS(P.st.peer(Q.ID), false); P.write(); P.flush() })
+	s.run(1, Q) // Q answers
+	s.rotate(Q, pathCred)
+	s.run(1, P) // P: pending, then identity.rotate: H5 abandons it; hs.fin already out; rekey again from E0
+	s.run(1, Q) // Q activates E1 (confirmed E0) and answers the rekey under E0
+	s.rotate(Q, pathCred)
+	s.run(1, P) // the same again: Q activates E2, its confirmed epoch is now E1
+	s.w.holdRotate = false
+	s.run(6, Q, P)
+	s.w.checkEnd(true)
+	expectViolation(t, s, "I1")
+	for _, v := range s.w.viol {
+		t.Logf("  %s: %s", v.Inv, v.Detail)
+	}
+	for _, l := range s.w.log {
+		if strings.Contains(l, "PENDING") || strings.Contains(l, "ABANDON") || strings.Contains(l, "rekey_not_current") || strings.Contains(l, "confirmed-epoch") {
+			t.Log(l)
+		}
+	}
 }

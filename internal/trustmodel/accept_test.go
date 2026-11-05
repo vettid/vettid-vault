@@ -22,7 +22,7 @@ func (d dec) String() string {
 	return s + " [" + d.Cell + "]"
 }
 
-var colName = [...]string{"session", "update", "token.issued", "identity.rotate", "hs.init", "hs.resp/fin", "hs.resp/fin"}
+var colName = [...]string{"session", "update", "token.issued", "identity.rotate", "hs.init", "hs.resp/fin", "hs.resp/fin", "hs.confirm"}
 var rowName = [...]string{"current", "earlier-before", "earlier-after", "foreign"}
 
 // handle processes one collected message (§8.3 step 2). It returns
@@ -40,13 +40,14 @@ func (q *Party) handle(m *RMsg, set []Key) bool {
 			return false // §6.3: left unacked until hs.fin
 		}
 		w.logf("%s: drops %s from box %d: %s", q.Name, kindName[M.Kind], m.Box, why)
-		if M.Kind == KFin && !w.party(m.Actor).Copy {
+		if (M.Kind == KFin || M.Kind == KConfirm) && !w.party(m.Actor).Copy {
 			w.ttlFin[[2]PID{m.Actor, q.ID}] = "arrived-after-answer-expired"
 		}
 		return true
 	}
 	w.recordEvidence(q, r, M)
 	pos := Pos{m.Box, m.ID, m.DepAt}
+	q.beforeAccept(r, m, pos)
 	d := q.acceptFrom(r, m, pos, set)
 	w.stat("cell " + d.Cell)
 	w.stat("out " + d.Out)
@@ -187,6 +188,16 @@ func (q *Party) acceptFrom(r *PeerRec, m *RMsg, pos Pos, set []Key) dec {
 			return refuse("superseded_relay", cell+":handshake-kept")
 		}
 		return q.tableBFin(r, M, pos)
+	case KConfirm:
+		// SPEC FINDING: hs.confirm has no column in Table A; the model
+		// treats it as a session message.
+		if rs == rkAfter {
+			return refuse("superseded_relay", cell)
+		}
+		if d, bad := q.demoted(r, M, pos, cell); bad {
+			return d
+		}
+		return dec{"accept", "", cell}
 	}
 	return refuse("unexpected", "A:unknown-kind")
 }
@@ -322,8 +333,12 @@ func (q *Party) s2(r *PeerRec) {
 		q.enqueueRaw(r.ID, a.respMsg(q, r))
 	}
 	if r.LastFin != 0 {
-		if ep := r.epoch(r.Cur); ep != nil {
-			q.enqueueRaw(r.ID, Msg{Kind: KFin, Inner: r.LastFin, Epoch: r.Cur, HS: r.LastFinHS, NewEpoch: r.Cur, Sig: ep.Own, Reconnect: r.LastFinRC})
+		id := r.Cur
+		if r.Pend != nil {
+			id = r.Pend.ID // §6.3.1: the hs.fin is under the pending epoch
+		}
+		if ep := r.epoch(id); ep != nil {
+			q.enqueueRaw(r.ID, Msg{Kind: KFin, Inner: r.LastFin, Epoch: id, HS: r.LastFinHS, NewEpoch: id, Sig: ep.Own, Reconnect: r.LastFinRC})
 		}
 	}
 }
@@ -519,9 +534,12 @@ func (q *Party) followIK(r *PeerRec, app []IKLink, x Pos) {
 // forkEpoch: ctx names an epoch Q superseded by one signed by an ancestor ik.
 func (q *Party) forkEpoch(r *PeerRec, ctx int) bool {
 	for j, ep := range r.Epochs {
-		if ep.ID == ctx && j+1 < len(r.Epochs) {
-			next := r.Epochs[j+1]
-			return r.isAncestor(next.Signer)
+		if ep.ID == ctx {
+			for _, next := range r.Epochs[j+1:] {
+				if !next.Pending && !next.Abandoned {
+					return r.isAncestor(next.Signer)
+				}
+			}
 		}
 	}
 	return false
@@ -546,20 +564,42 @@ func (q *Party) tableBInit(r *PeerRec, m *RMsg, pos Pos) dec {
 			return refuse("reconnect_refused", cell+":replay")
 		}
 		last := r.lastEpoch()
-		if last == nil || M.Ctx != last.ID {
+		ok := last != nil && M.Ctx == last.ID
+		if q.w.optA {
+			// §6.6 (0.86.0): also the pending and the confirmed epoch; a side
+			// with its own reconnect's epoch pending counts that one as last
+			if pe := r.Pend; pe != nil && pe.Reconnect {
+				ok = M.Ctx == pe.ID
+			}
+			ok = ok || (r.Pend != nil && M.Ctx == r.Pend.ID) || (r.ConfID != 0 && M.Ctx == r.ConfID)
+		}
+		if !ok {
 			if !q.forkEpoch(r, M.Ctx) {
 				return refuse("reconnect_refused", cell+":ctx")
 			}
 			fork = true // judged at hs.fin (§6.6, H5's exemption)
 		}
 	} else {
-		if r.Cur == 0 || M.Ctx != r.Cur {
+		if q.w.optA && r.ConfID != 0 && M.Ctx == r.ConfID && M.Epoch == r.ConfID {
+			cell += ":confirmed-epoch" // §6.3.1: accepted as if current; my own rekey for it ends
+			if o := r.Own; o != nil && !o.Reconnect {
+				q.abandonOwn(r)
+			}
+		} else if r.Cur == 0 || M.Ctx != r.Cur {
 			if q.forkEpoch(r, M.Ctx) {
 				q.suspend(r, "connection.fork_suspected/epoch")
 				return dec{"suspend", "fork", cell + ":fork-epoch"}
 			}
 			return refuse("rekey_not_current_epoch", cell+":ctx")
 		}
+	}
+	// §6.3.1 crossing: I, holding a pending epoch, and a rekey under the current one
+	if q.w.optA && r.Pend != nil && !M.Reconnect && M.Ctx == r.Cur {
+		if M.Ts <= r.Pend.RespTs {
+			return dec{"drop", "crossing", cell + ":pending:ts-not-later"}
+		}
+		q.abandonPending(r, "a later rekey from the responder", false)
+		cell += ":pending:ts-later"
 	}
 	// crossing handshakes (§6.5; §6.6 "Between two persons"): answer as
 	// usual; the lower th1 wins. Own higher: abandon it. Own lower: keep
@@ -611,13 +651,13 @@ func (q *Party) tableBInit(r *PeerRec, m *RMsg, pos Pos) dec {
 
 // respMsg: the hs.resp of an answer (the same bytes each time).
 func (a *HS) respMsg(q *Party, r *PeerRec) Msg {
-	return Msg{Kind: KResp, Inner: a.RespInner, HS: a.ID, NewEpoch: a.NewEpoch, Sig: a.OwnIK,
+	return Msg{Kind: KResp, Inner: a.RespInner, Ts: a.Started, HS: a.ID, NewEpoch: a.NewEpoch, Sig: a.OwnIK,
 		Rot: q.ownLinks(a.RespFrom), Reconnect: a.Reconnect, Toks: a.RespToks}
 }
 
 func (q *Party) tableBResp(r *PeerRec, M *Msg, pos Pos) dec {
 	o := r.Own
-	if life := map[bool]int64{false: hsLife, true: reconnectFail}[o.Reconnect]; q.w.Now-o.Started > life {
+	if q.w.Now-o.Started > q.w.hsLifeFor(o.Reconnect) {
 		q.abandonOwn(r) // model: an initiator's handshake expires before the responder's answer
 		return dec{"drop", "expired", "hs.resp:own-handshake-expired"}
 	}
@@ -637,7 +677,11 @@ func (q *Party) tableBResp(r *PeerRec, M *Msg, pos Pos) dec {
 	if len(app) > 0 {
 		q.followIK(r, app, pos)
 	}
-	q.establish(r, M.NewEpoch, M.Sig, o.OwnIK, pos)
+	if q.w.optA {
+		q.makePending(r, M.NewEpoch, M.Sig, o.OwnIK, pos, M.Ts, o.Reconnect)
+	} else {
+		q.establish(r, M.NewEpoch, M.Sig, o.OwnIK, pos)
+	}
 	for _, a := range slices.Clone(r.Ans) {
 		if !a.Fork {
 			q.dropAnswer(r, a.ID) // own completed first: the crossing answer is dropped
@@ -670,6 +714,11 @@ func (q *Party) tableBFin(r *PeerRec, M *Msg, pos Pos) dec {
 	if M.Sig != a.PeerIK {
 		return dec{"drop", "sig_I", "hs.fin:sig-invalid:handshake-kept"}
 	}
+	if q.w.Now-a.Started > q.w.answerLife() {
+		q.w.ttlFin[[2]PID{r.ID, q.ID}] = "arrived-after-answer-expired"
+		q.dropAnswer(r, a.ID)
+		return dec{"drop", "expired", "hs.fin:answer-expired"}
+	}
 	st, app := r.ikState(a.PeerIK, a.Links)
 	cell := "B:" + ikName[st] + ":hs.fin"
 	switch st {
@@ -694,7 +743,17 @@ func (q *Party) tableBFin(r *PeerRec, M *Msg, pos Pos) dec {
 	if len(app) > 0 {
 		q.followIK(r, app, pos)
 	}
+	prev := r.Cur
+	if q.w.optA && r.Pend != nil {
+		// SPEC FINDING: §6.3.1 does not say what a responder's activation does
+		// to its own pending epoch; the model abandons it.
+		q.abandonPending(r, "the peer's handshake activated", false)
+	}
 	q.establish(r, a.NewEpoch, a.PeerIK, a.OwnIK, pos)
+	if q.w.optA && !q.OldConfirm {
+		r.ConfID, r.ConfKeep, r.ConfUntil = prev, prev, q.w.Now+aConfKeys
+		q.enqueue(r.ID, Msg{Kind: KConfirm, Epoch: a.NewEpoch}, nil)
+	}
 	if a.Reconnect {
 		toks, _ := q.ruleT(r, a.Toks, r.Relay)
 		q.keepTokens(r, toks)
@@ -732,6 +791,7 @@ func (r *PeerRec) superseded(k Key, links []IKLink) bool {
 func (q *Party) h5(r *PeerRec, except int) {
 	q.w.stat("H5")
 	if r.Status == stSuspended || r.Status == stStale {
+		q.abandonPending(r, "suspended or stale", false)
 		q.abandonOwn(r)
 		for len(r.Ans) > 0 {
 			q.dropAnswer(r, r.Ans[0].ID)
@@ -745,6 +805,9 @@ func (q *Party) h5(r *PeerRec, except int) {
 			r.RestartIK = r.IK
 			q.startHS(r, rc)
 		}
+	}
+	if pe := r.Pend; pe != nil && r.superseded(pe.Signer, nil) {
+		q.abandonPending(r, "H5: signer superseded", r.Own == nil)
 	}
 	for _, a := range slices.Clone(r.Ans) {
 		if a.ID != except && !a.Fork && r.superseded(a.PeerIK, a.Links) {

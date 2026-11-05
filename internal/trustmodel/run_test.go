@@ -12,14 +12,16 @@ import (
 // Setup, actions, quiescence, the invariants, shrinking.
 
 type Config struct {
-	Vaults  int  // 2 or 3
-	Devices bool // one device per vault
-	P429    float64
-	PRefuse float64
+	OldRules bool // f4a4d97 rules: no §6.3.1 (activation at hs.fin)
+	Vaults   int  // 2 or 3
+	Devices  bool // one device per vault
+	P429     float64
+	PRefuse  float64
 }
 
 func setup(cfg Config, seed uint64) *World {
 	w := newWorld(seed)
+	w.optA = !cfg.OldRules
 	w.p429, w.pRef = 0, 0
 	mk := func(name string, dev bool) *Party {
 		p := &Party{ID: PID(len(w.P)), Name: name, Device: dev, w: w, collTo: map[Key]int64{}}
@@ -409,7 +411,7 @@ func (w *World) quiet() bool {
 			}
 		}
 		for _, r := range p.st.Peers {
-			if r.Status == stActive && (r.Own != nil || len(r.Ans) > 0) {
+			if r.Status == stActive && (r.Own != nil || len(r.Ans) > 0 || r.Pend != nil) {
 				return false
 			}
 		}
@@ -439,7 +441,11 @@ func (w *World) settle() {
 		}
 		switch {
 		case it == 31 && calm == 0:
-			w.advance(ansLife + 1) // past every handshake retry and answer expiry
+			if w.optA {
+				w.advance(aPendLife + 1) // past every lifetime of §6.3.1 (B)
+			} else {
+				w.advance(ansLife + 1) // past every handshake retry and answer expiry
+			}
 		case it%16 == 15:
 			w.advance(day + 1)
 		case it%8 == 7:

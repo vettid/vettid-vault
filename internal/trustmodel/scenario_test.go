@@ -20,6 +20,22 @@ func newScen(t *testing.T, vaults int) *scen {
 	return &scen{t, w}
 }
 
+// newScenOld: the f4a4d97 rules (no §6.3.1).
+func newScenOld(t *testing.T, vaults int) *scen {
+	w := setup(Config{Vaults: vaults, OldRules: true}, 1)
+	return &scen{t, w}
+}
+
+func (s *scen) noViolation(prefix string) {
+	s.t.Helper()
+	for _, v := range s.w.viol {
+		if strings.HasPrefix(v.Inv, prefix) {
+			s.t.Errorf("violation %s: %s\ntrace:\n  %s", v.Inv, v.Detail, strings.Join(s.w.log, "\n  "))
+			return
+		}
+	}
+}
+
 func (s *scen) p(i int) *Party { return s.w.P[i] }
 
 func (s *scen) do(p *Party, f func()) {
@@ -225,9 +241,10 @@ func TestScenarioDesignH3ReconnectBeforeFollow(t *testing.T) {
 	})
 }
 
-// #204 finding 1: fork evidence on a reconnect survives a rotation (H5's exemption).
+// #204 finding 1: fork evidence on a reconnect survives a rotation (H5's
+// exemption). Under the f4a4d97 rules; under §6.3.1 see TestFindingE.
 func TestScenario204F1ForkReconnectSurvives(t *testing.T) {
-	s := newScen(t, 2)
+	s := newScenOld(t, 2)
 	P, Q := s.p(0), s.p(1)
 	s.w.makeCopy(P)
 	C := s.w.P[len(s.w.P)-1]

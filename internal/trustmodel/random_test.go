@@ -75,7 +75,8 @@ func TestRandom(t *testing.T) {
 	for i := 0; i < runs; i++ {
 		rs := master.Uint64()
 		rng := rand.New(rand.NewPCG(rs, 3))
-		cfg := Config{Vaults: 2 + rng.IntN(2), Devices: rng.IntN(2) == 0, P429: 0.05, PRefuse: 0.01}
+		cfg := Config{Vaults: 2 + rng.IntN(2), Devices: rng.IntN(2) == 0, P429: 0.05, PRefuse: 0.01,
+			OldRules: os.Getenv("TRUSTMODEL_OLD") != ""}
 		n := 1 + rng.IntN(steps)
 		acts := make([]Action, n)
 		for j := range acts {
@@ -93,7 +94,7 @@ func TestRandom(t *testing.T) {
 		inv := w.viol[0].Inv
 		sig := inv + " " + classify(w.viol[0].Detail)
 		a.stats["violation "+sig]++
-		if _, seen := a.found[sig]; seen || len(a.found) >= 12 {
+		if _, seen := a.found[sig]; seen || len(a.found) >= 24 {
 			continue
 		}
 		small := shrink(cfg, rs, acts, inv)

@@ -220,7 +220,7 @@ func (r *Relay) advance() {
 		}
 		if b.deleteAt != 0 && r.w.Now >= b.deleteAt {
 			for _, m := range b.msgs {
-				if m.P.Kind == KFin || m.P.Kind == KResp {
+				if m.P.Kind == KFin || m.P.Kind == KResp || m.P.Kind == KConfirm {
 					r.w.ttlFin[[2]PID{m.Actor, r.w.owner(k)}] = "deleted-with-old-mailbox"
 				}
 			}
@@ -232,7 +232,7 @@ func (r *Relay) advance() {
 		for _, m := range b.msgs {
 			if r.w.Now < m.DepAt+msgTTL {
 				kept = append(kept, m)
-			} else if m.P.Kind == KFin || m.P.Kind == KResp {
+			} else if m.P.Kind == KFin || m.P.Kind == KResp || m.P.Kind == KConfirm {
 				r.w.ttlFin[[2]PID{m.Actor, r.w.owner(k)}] = "expired-at-relay-TTL"
 			}
 		}

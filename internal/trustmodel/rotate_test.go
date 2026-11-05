@@ -46,11 +46,14 @@ func (p *Party) rotate(path int) {
 				continue
 			}
 			p.enqueue(r.ID, Msg{Kind: KIdRot, Rot: []IKLink{l}}, nil)
-			// S5: abandon own rekeys and reconnects, start again after identity.rotate
+			// S5: abandon own rekeys and reconnects (and pending epochs, §6.3.1),
+			// start again after identity.rotate
 			if o := r.Own; o != nil {
 				rc := o.Reconnect
 				p.abandonOwn(r)
 				p.startHS(r, rc)
+			} else if r.Pend != nil {
+				p.abandonPending(r, "S5: own ik rotated", true)
 			}
 		}
 	}
@@ -148,7 +151,7 @@ func (p *Party) completePending(atUnlock bool) {
 // startHS starts a rekey (reconnect=false) or a reconnect with r.
 func (p *Party) startHS(r *PeerRec, reconnect bool) {
 	w := p.w
-	if r.Status != stActive || r.Own != nil || (reconnect && r.Device) {
+	if r.Status != stActive || r.Own != nil || (reconnect && r.Device) || (p.w.optA && r.Pend != nil) {
 		return
 	}
 	if len(r.Ans) > 0 {
@@ -270,25 +273,28 @@ func (p *Party) tick() {
 				continue
 			}
 			if o := r.Own; o != nil {
-				if o.Reconnect && w.Now-o.Started > reconnectFail {
+				if o.Reconnect && w.Now-o.Started > w.hsLifeFor(true) {
 					r.Status, r.Ref = stStale, "reconnect failed"
 					p.h5(r, -1)
 					w.logf("%s: %s STALE (reconnect not completed in 7 days)", p.Name, w.party(r.ID).Name)
 					continue
 				}
-				if !o.Reconnect && w.Now-o.Started > hsLife {
+				if !o.Reconnect && w.Now-o.Started > w.hsLifeFor(false) {
 					p.abandonOwn(r)
 					p.startHS(r, o.Reconnect)
 				}
 			}
 			for _, a := range slices.Clone(r.Ans) {
-				if w.Now-a.Started > ansLife {
+				if w.Now-a.Started > w.answerLife() {
 					p.dropAnswer(r, a.ID)
 				}
 			}
 			r.Earlier = slices.DeleteFunc(r.Earlier, func(e Earlier) bool { return w.Now > e.Until })
+			if w.optA {
+				p.tickA(r)
+			}
 			r.Epochs = slices.DeleteFunc(r.Epochs, func(e Epoch) bool {
-				return e.ID != r.Cur && e.Superseded != 0 && w.Now-e.Superseded > 16*day
+				return e.ID != r.Cur && e.Superseded != 0 && w.Now-e.Superseded > 16*day && !(e.ID == r.ConfKeep && w.Now <= r.ConfUntil)
 			})
 			p.refresh(r)
 			if ep := r.epoch(r.Cur); ep != nil {

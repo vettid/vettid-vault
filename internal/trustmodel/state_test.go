@@ -14,9 +14,10 @@ const (
 	KInit                  // hs.init (rekey, reconnect)
 	KResp                  // hs.resp
 	KFin                   // hs.fin
+	KConfirm               // hs.confirm (0.86.0 draft, §6.3.1)
 )
 
-var kindName = [...]string{"session", "relay.address.update", "relay.token.issued", "identity.rotate", "hs.init", "hs.resp", "hs.fin"}
+var kindName = [...]string{"session", "relay.address.update", "relay.token.issued", "identity.rotate", "hs.init", "hs.resp", "hs.fin", "hs.confirm"}
 
 type IKLink struct{ Old, New, KEM Key }
 type RLink struct{ Old, New Key }
@@ -24,9 +25,10 @@ type RLink struct{ Old, New Key }
 // Msg is an abstract message. Fields are used by kind.
 type Msg struct {
 	Kind  Kind
-	Inner int // inner id, deduped by the receiver (§8.3)
-	Epoch int // session mode: the epoch it is sealed under; 0: sealed to a kem
-	Probe int // KSession: a probe number
+	Inner int   // inner id, deduped by the receiver (§8.3)
+	Epoch int   // session mode: the epoch it is sealed under; 0: sealed to a kem
+	Probe int   // KSession: a probe number
+	Ts    int64 // inner ts, set when the message is made
 
 	RelayPK Key // KUpdate
 	RLinks  []RLink
@@ -68,6 +70,18 @@ type Epoch struct {
 	DemotedAt  Pos
 	Superseded int64
 	EstAt      int64
+	Pending    bool // §6.3.1: an initiator's epoch awaiting confirmation
+	Abandoned  bool // §6.3.1: a pending epoch abandoned (nothing under it confirms)
+}
+
+// PendEp is an initiator's pending epoch (§6.3.1).
+type PendEp struct {
+	ID        int
+	Signer    Key
+	Own       Key
+	FinAt     int64
+	RespTs    int64
+	Reconnect bool
 }
 
 type Earlier struct {
@@ -110,6 +124,12 @@ type PeerRec struct {
 	CandB    IKLink
 	RelayFrk bool
 	Warned   bool // rule C between a vault and its own device: the member was told
+
+	Pend      *PendEp // §6.3.1: my pending epoch (I initiated)
+	ConfID    int     // §6.3.1: my confirmed epoch's id (I responded), until the peer confirms
+	ConfKeep  int     // the confirmed epoch whose receive keys are kept until ConfUntil
+	ConfUntil int64
+	Reconfirm bool // a message under the confirmed epoch in this batch: queue hs.confirm
 
 	IK, KEM Key
 	Chain   []IKLink // followed identity links
@@ -235,6 +255,10 @@ func (s *State) clone() State {
 		q.Toks = slices.Clone(p.Toks)
 		q.Issued = slices.Clone(p.Issued)
 		q.Own = cloneHS(p.Own)
+		if p.Pend != nil {
+			pe := *p.Pend
+			q.Pend = &pe
+		}
 		q.Ans = make([]HS, len(p.Ans))
 		for j := range p.Ans {
 			q.Ans[j] = *cloneHS(&p.Ans[j])
@@ -394,7 +418,7 @@ func (r *PeerRec) epoch(id int) *Epoch {
 // lastEpoch: the newest epoch not demoted.
 func (r *PeerRec) lastEpoch() *Epoch {
 	for i := len(r.Epochs) - 1; i >= 0; i-- {
-		if !r.Epochs[i].Demoted {
+		if e := r.Epochs[i]; !e.Demoted && !e.Pending && !e.Abandoned {
 			return &r.Epochs[i]
 		}
 	}

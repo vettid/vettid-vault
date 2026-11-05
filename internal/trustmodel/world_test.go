@@ -23,6 +23,7 @@ type World struct {
 	p429          float64 // chance a relay call is answered 429
 	pRef          float64 // chance a rotate or registration is refused definitively
 	holdRotate    bool
+	optA          bool // VAULT-MESSAGING 0.86.0 §6.3.1 option A (activation on confirmation)
 	debugUnlinked bool // scenarios: the relay's rotate and registration get no answer
 
 	issuer   map[int]Key    // jti -> iss: a token "verifies" only if its issuer minted it
@@ -141,6 +142,7 @@ type Party struct {
 	unlocks    int
 	collTo     map[Key]int64
 	pendEvid   []pendEv // evidence seen in the batch not yet written
+	OldConfirm bool     // an earlier-release responder: no hs.confirm, no confirmed epoch
 }
 
 type pendEv struct {
@@ -274,6 +276,9 @@ func (p *Party) keyRank(k Key) int {
 
 func (p *Party) enqueue(to PID, m Msg, f func(*Entry)) {
 	m.Inner = p.w.id()
+	if m.Ts == 0 {
+		m.Ts = p.w.Now
+	}
 	e := Entry{ID: m.Inner, To: to, M: m}
 	if f != nil {
 		f(&e)
@@ -433,6 +438,9 @@ func (p *Party) flush() {
 		if r == nil || r.Status != stActive {
 			e.Ended = true
 			continue
+		}
+		if pe := r.Pend; pe != nil && pe.Reconnect && e.M.Kind != KInit && e.M.Kind != KResp && e.M.Kind != KFin && e.M.Kind != KConfirm && !e.Denylist {
+			continue // §6.3.1: after a reconnect, nothing but the handshake until confirmation
 		}
 		if r.KeyFor != p.st.Relay && !allowedWhileUnacked(e) {
 			continue // S1: held until Q's token for my current key arrives
@@ -717,6 +725,7 @@ func (p *Party) collectRound(max int) int {
 				acks = append(acks, m)
 			}
 		}
+		p.reconfirm()
 		p.write()
 		for _, m := range acks {
 			w.R.ack(m.Box, m.ID)

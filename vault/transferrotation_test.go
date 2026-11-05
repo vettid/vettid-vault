@@ -5,10 +5,13 @@ import (
 	"context"
 	"crypto/ed25519"
 	"errors"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/vettid/vettid-relay/relayclient"
+	"github.com/vettid/vettid-vault/vault/store"
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/handshake"
 )
@@ -505,7 +508,7 @@ func TestRotationRotatesTheWakeKey(t *testing.T) {
 		t.Fatal("the wake keys were not zeroized")
 	}
 	d.m.mu.Lock()
-	d.m.drainOutbox(context.Background())
+	d.m.flushThenDrain(context.Background())
 	d.m.mu.Unlock()
 	ins := d.inbox(d.self())[d.devPeer.ID]
 	var n int
@@ -666,13 +669,22 @@ func TestRotationReplacesRekeyUnderOldKeys(t *testing.T) {
 	rotAt := -1
 	d.m.mu.Lock()
 	for i, e := range d.m.st.Outbox {
-		if e.PeerID == d.devPeer.ID && i < initAt && !e.Done && e.Op == OpDeposit {
-			rotAt = i // identity.rotate is queued before the new hs.init
+		if e.PeerID != d.devPeer.ID || e.Done || e.Op != OpDeposit {
+			continue
+		}
+		env, err := envelope.Parse(e.Payload)
+		if err != nil || env.Mode() != envelope.ModeSession {
+			continue
+		}
+		var kr handshake.Keyring
+		kr.Activate(d.ep, time.Now())
+		if in, _, err := kr.Open(env, time.Now()); err == nil && in.Type == "identity.rotate" {
+			rotAt = i
 		}
 	}
 	d.m.mu.Unlock()
-	if initAt < 0 || rotAt < 0 {
-		t.Fatal("the new hs.init is not queued")
+	if initAt < 0 || rotAt < 0 || rotAt > initAt {
+		t.Fatalf("identity.rotate at %d, the new hs.init at %d: not queued, or not in that order", rotAt, initAt)
 	}
 	d.m.mu.Lock()
 	if err := d.m.persist(context.Background(), false); err != nil {
@@ -692,6 +704,122 @@ func TestRotationReplacesRekeyUnderOldKeys(t *testing.T) {
 	for _, a := range m.Audit() {
 		if a.Event == "handshake_not_restored" {
 			t.Fatal("a handshake was not restored")
+		}
+	}
+}
+
+// conflictStateStore lets n state writes through, then answers the next
+// one with the store's version conflict: another instance wrote the state
+// (a split brain, §12.3).
+type conflictStateStore struct {
+	store.Store
+	mu   sync.Mutex
+	pass int
+}
+
+func (s *conflictStateStore) Put(ctx context.Context, key string, data []byte, ifMatch store.Version) (store.Version, error) {
+	if strings.HasSuffix(key, "/state") {
+		s.mu.Lock()
+		conflict := s.pass == 0
+		s.pass--
+		s.mu.Unlock()
+		if conflict {
+			return "", store.ErrConflict
+		}
+	}
+	return s.Store.Put(ctx, key, data, ifMatch)
+}
+
+// A split brain at the rotation's own write (after the notice's 201) zeroizes
+// the vault: Start reports ErrSplitBrain, nothing of the unstored rotation is
+// sent, and nothing reads the wiped state (it used to panic in persist).
+func TestTransferSettledWriteSplitBrain(t *testing.T) {
+	w := newTRWorld(t)
+	w.reopen()
+	// Start's own write passes; the settled write after the 201 conflicts.
+	w.m.opt.Store = &conflictStateStore{Store: w.fs, pass: 1}
+	err := w.m.Start(context.Background())
+	if !errors.Is(err, ErrSplitBrain) {
+		t.Fatalf("Start: %v, want ErrSplitBrain", err)
+	}
+	if !w.m.Locked() {
+		t.Fatal("not locked after the split brain")
+	}
+	if got := w.connTypes(); !eq(got, "statement", "unlinked") {
+		t.Fatalf("deposits %v: the unstored rotation's identity.rotate went out", got)
+	}
+	w.m.mu.Lock()
+	err = w.m.flushIfDirty(context.Background())
+	w.m.drainOutbox(context.Background())
+	w.m.mu.Unlock()
+	if !errors.Is(err, ErrSplitBrain) {
+		t.Fatalf("a later flush: %v", err)
+	}
+}
+
+// A lock after a failed write whose own write stores the transfer's notice:
+// the drain after it sends the notice, the relay settles it, and the owed
+// rotation's write meets a split brain (§12.3). The lock returns
+// ErrSplitBrain without reading the wiped state, and nothing more is sent
+// (no identity.rotate, no vault.locking).
+func TestFailedWriteThenLockSettledWriteSplitBrain(t *testing.T) {
+	w := newTRWorld(t)
+	w.reopen()
+	w.m.mu.Lock()
+	// The notice as a batch whose write failed leaves it: queued, unstored.
+	w.m.unstored = map[string]bool{}
+	for _, e := range w.m.st.Outbox {
+		if e.Unlink != "" && !e.Done {
+			w.m.unstored[e.ID] = true
+		}
+	}
+	if len(w.m.unstored) == 0 {
+		w.m.mu.Unlock()
+		t.Fatal("no notice queued")
+	}
+	// The lock's write passes; the settled write after the 201 conflicts.
+	w.m.opt.Store = &conflictStateStore{Store: w.fs, pass: 1}
+	w.m.mu.Unlock()
+	_ = w.responses(t)
+	if err := w.m.Lock(context.Background()); !errors.Is(err, ErrSplitBrain) {
+		t.Fatalf("Lock: %v, want ErrSplitBrain", err)
+	}
+	if !w.m.Locked() {
+		t.Fatal("not locked after the split brain")
+	}
+	if got := w.connTypes(); !eq(got, "statement", "unlinked") {
+		t.Fatalf("deposits %v", got)
+	}
+	for _, in := range w.responses(t) {
+		if in.Type == "vault.locking" {
+			t.Fatal("vault.locking sent after the split brain")
+		}
+	}
+}
+
+// A lock whose first drain settles the stored notice and meets a split
+// brain at the owed rotation's write (§12.3): the lock's own write that
+// follows finds the state wiped and returns ErrSplitBrain, without reading
+// it (persist's guard), and nothing more is sent.
+func TestLockFirstDrainSettledWriteSplitBrain(t *testing.T) {
+	w := newTRWorld(t)
+	w.reopen() // the notice is queued and stored
+	w.m.mu.Lock()
+	w.m.opt.Store = &conflictStateStore{Store: w.fs, pass: 0}
+	w.m.mu.Unlock()
+	_ = w.responses(t)
+	if err := w.m.Lock(context.Background()); !errors.Is(err, ErrSplitBrain) {
+		t.Fatalf("Lock: %v, want ErrSplitBrain", err)
+	}
+	if !w.m.Locked() {
+		t.Fatal("not locked after the split brain")
+	}
+	if got := w.connTypes(); !eq(got, "statement", "unlinked") {
+		t.Fatalf("deposits %v", got)
+	}
+	for _, in := range w.responses(t) {
+		if in.Type == "vault.locking" {
+			t.Fatal("vault.locking sent after the split brain")
 		}
 	}
 }

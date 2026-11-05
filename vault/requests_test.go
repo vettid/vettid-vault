@@ -37,7 +37,7 @@ func pump(t *testing.T, from, to *devFixture) int {
 	fromPK := from.m.keys.relay.Public().(ed25519.PublicKey)
 	var msgs []Message
 	from.m.mu.Lock()
-	from.m.drainOutbox(context.Background())
+	from.m.flushThenDrain(context.Background())
 	from.m.mu.Unlock()
 	from.relay.mu.Lock()
 	kept := from.relay.deposits[:0]
@@ -316,7 +316,7 @@ func TestDeclineRequest(t *testing.T) {
 	}
 	_ = d.send("connection.decline", []byte(`{"pending_id":"`+pid+`"}`))
 	d.m.mu.Lock()
-	d.m.drainOutbox(context.Background())
+	d.m.flushThenDrain(context.Background())
 	d.m.mu.Unlock()
 	c, _ := relayauth.ParseToken(n.tok, d.m.keys.relay.Public().(ed25519.PublicKey))
 	got := n.received(d)

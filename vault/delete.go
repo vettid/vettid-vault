@@ -325,6 +325,14 @@ func (m *Manager) finishDelete(ctx context.Context) error {
 		m.report("locked", vid, m.opt.Release.PCR0)
 		return err
 	}
+	// Step 1 (the header's mark and the host's) committed the deletion,
+	// so everything queued goes out now, also what a state write that
+	// failed left unstored (queue): the vault is erased after step 2 and
+	// the deletion revokes every token it issued, so no stored state is
+	// left for those entries to contradict, and among them may be the
+	// hs.fin or reconnect hs.init without which a peer cannot open a
+	// deletion notice sealed in the new epoch.
+	m.unstored = nil
 	if m.relay != nil {
 		if sctx, cancel := step2Context(ctx); sctx != nil {
 			m.deleteMailbox(sctx)

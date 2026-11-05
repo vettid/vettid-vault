@@ -450,7 +450,7 @@ func TestPushErasedWithApp(t *testing.T) {
 func (d *devFixture) deliver(typ, body string) {
 	d.withLock(func(m *Manager) {
 		m.sendTo(d.devPeer, typ, json.RawMessage(body), time.Now())
-		m.drainOutbox(context.Background())
+		m.flushThenDrain(context.Background())
 	})
 }
 
@@ -492,7 +492,7 @@ func TestPushWakeTriggers(t *testing.T) {
 	desk.peer.Access = &AccessSession{ID: "s1", Expires: time.Now().Add(time.Hour)}
 	d.withLock(func(m *Manager) {
 		m.sendTo(desk.peer, "feed.event", json.RawMessage(`{"kind":"message.received","priority":"high"}`), time.Now())
-		m.drainOutbox(context.Background())
+		m.flushThenDrain(context.Background())
 	})
 	d.request(t, "vault.status", `{}`)
 	g.noWake(t, n, 150*time.Millisecond)
@@ -518,7 +518,7 @@ func TestPushWakeAfterDepositOnly(t *testing.T) {
 		for _, e := range m.st.Outbox {
 			e.NotBefore = time.Time{}
 		}
-		m.drainOutbox(context.Background())
+		m.flushThenDrain(context.Background())
 	})
 	g.waitWakes(t, 1)
 }

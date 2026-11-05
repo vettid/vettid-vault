@@ -92,7 +92,7 @@ func newCrossFx(t *testing.T, inviterIsL bool) *crossFx {
 	}
 	for _, d := range c.d {
 		d.m.mu.Lock()
-		d.m.drainOutbox(context.Background()) // both hs.init are on the relay
+		d.m.flushThenDrain(context.Background()) // both hs.init are on the relay
 		d.m.mu.Unlock()
 	}
 	c.snapshot()
@@ -152,7 +152,7 @@ func (c *crossFx) step(from, to int, k msgKind) int {
 	c.t.Helper()
 	f := c.d[from]
 	f.m.mu.Lock()
-	f.m.drainOutbox(context.Background())
+	f.m.flushThenDrain(context.Background())
 	f.m.mu.Unlock()
 	n := pumpOnly(c.t, f, c.d[to], c.pred(c.d[to], k))
 	c.snapshot()
@@ -203,7 +203,7 @@ func (c *crossFx) settle(winner int) {
 	}
 	for _, d := range c.d {
 		d.m.mu.Lock()
-		d.m.drainOutbox(context.Background())
+		d.m.flushThenDrain(context.Background())
 		d.m.mu.Unlock()
 	}
 	for s, d := range c.d {

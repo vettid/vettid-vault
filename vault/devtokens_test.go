@@ -54,7 +54,7 @@ func TestDeviceTokensOwnerDevice(t *testing.T) {
 	d.withLock(func(m *Manager) {
 		m.markDeviceTokens(now)
 		m.markDeviceTokens(now)
-		m.drainOutbox(context.Background())
+		m.flushThenDrain(context.Background())
 	})
 	issued := 0
 	for _, in := range d.inbox(d.self())["dev1"] {

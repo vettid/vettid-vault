@@ -229,7 +229,7 @@ func TestAwaitTokenDoesNotBlockReconnect(t *testing.T) {
 		&OutboxEntry{ID: "o2", Op: OpDeposit, PeerID: "dev1", RelayURL: "https://relay.example.org", Mailbox: mb, Payload: []byte("later")},
 		&OutboxEntry{ID: "o3", Op: OpDeposit, RelayURL: "https://relay.example.org", Mailbox: mb, Token: "reconnect-token", Payload: []byte("hs.init")})
 	d.m.mu.Lock()
-	d.m.drainOutbox(context.Background())
+	d.m.flushThenDrain(context.Background())
 	d.m.mu.Unlock()
 	d.relay.mu.Lock()
 	defer d.relay.mu.Unlock()

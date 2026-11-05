@@ -284,7 +284,7 @@ func TestReconnectInitiatorChain(t *testing.T) {
 		m := d.m
 		m.mu.Lock()
 		m.startReconnect(p, m.now())
-		m.drainOutbox(context.Background())
+		m.flushThenDrain(context.Background())
 		m.mu.Unlock()
 		d.relay.mu.Lock()
 		defer d.relay.mu.Unlock()

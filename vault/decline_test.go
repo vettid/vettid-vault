@@ -48,7 +48,7 @@ func requested(t *testing.T) (a, b *devFixture, pid, cid string) {
 func outTo(t *testing.T, from, to *devFixture) (deps []stubDeposit, jtis []string) {
 	t.Helper()
 	from.m.mu.Lock()
-	from.m.drainOutbox(context.Background())
+	from.m.flushThenDrain(context.Background())
 	from.m.mu.Unlock()
 	toPK := to.m.keys.relay.Public().(ed25519.PublicKey)
 	from.relay.mu.Lock()
@@ -259,7 +259,7 @@ func TestDeclineCrossingActivation(t *testing.T) {
 	}
 	// A declines before B's connection.approved arrives (it is held back).
 	b.m.mu.Lock()
-	b.m.drainOutbox(context.Background())
+	b.m.flushThenDrain(context.Background())
 	b.m.mu.Unlock()
 	b.relay.mu.Lock()
 	held := b.relay.deposits
@@ -430,7 +430,7 @@ func TestTransferRejectedSent(t *testing.T) {
 			d.responses(t)
 			d.m.mu.Lock()
 			err := managerHost{d.m}.EndTransfer(inv.ID, reason, d.m.now())
-			d.m.drainOutbox(context.Background())
+			d.m.flushThenDrain(context.Background())
 			d.m.mu.Unlock()
 			if err != nil {
 				t.Fatal(err)
@@ -458,7 +458,7 @@ func TestOutboxNotAfter(t *testing.T) {
 	d.m.mu.Lock()
 	d.m.queueDeposit(&OutboxEntry{RelayURL: "https://relay.example.org", Mailbox: "mb", Token: "t", Payload: []byte("x"),
 		NotAfter: now.Add(-time.Second)}, now)
-	d.m.drainOutbox(context.Background())
+	d.m.flushThenDrain(context.Background())
 	d.m.mu.Unlock()
 	if d.depositsTo("mb") != 0 {
 		t.Fatal("deposited after NotAfter")

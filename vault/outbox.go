@@ -21,18 +21,41 @@ func (m *Manager) queueDeposit(e *OutboxEntry, now time.Time) {
 	e.ID = m.newID(now)
 	e.Op = OpDeposit
 	e.Created = now
-	m.st.Outbox = append(m.st.Outbox, e)
-	m.dirty = true
+	m.queue(e)
 }
 
 func (m *Manager) queueRevoke(kind, value string, now time.Time) {
-	m.st.Outbox = append(m.st.Outbox, &OutboxEntry{ID: m.newID(now), Op: OpRevoke, Kind: kind, Value: value, Created: now})
-	m.dirty = true
+	m.queue(&OutboxEntry{ID: m.newID(now), Op: OpRevoke, Kind: kind, Value: value, Created: now})
 }
 
 func (m *Manager) queueDeleteClaim(id string, now time.Time) {
-	m.st.Outbox = append(m.st.Outbox, &OutboxEntry{ID: m.newID(now), Op: OpDeleteClaim, Value: id, Created: now})
+	m.queue(&OutboxEntry{ID: m.newID(now), Op: OpDeleteClaim, Value: id, Created: now})
+}
+
+// queue adds e to the outbox. It is not sent before a state write stores
+// it (§11.14.2 "order of writes", §8.3: nothing leaves the vault before
+// the write that commits it): until then it is unstored, and a drain
+// passes it over and holds back the later deposits to its mailbox. A write
+// that fails leaves it unstored; the in-memory state it belongs to is
+// stored by the next write that succeeds, or never (a lock or crash first).
+func (m *Manager) queue(e *OutboxEntry) {
+	m.st.Outbox = append(m.st.Outbox, e)
+	if m.unstored == nil {
+		m.unstored = map[string]bool{}
+	}
+	m.unstored[e.ID] = true
 	m.dirty = true
+}
+
+// flushThenDrain writes the state if it changed, and only then performs the
+// due outbox entries (and writes their outcome): a drain sends only what a
+// write stored.
+func (m *Manager) flushThenDrain(ctx context.Context) error {
+	if err := m.flushIfDirty(ctx); err != nil {
+		return err
+	}
+	m.drainOutbox(ctx)
+	return m.flushIfDirty(ctx)
 }
 
 // sealAndQueue seals in to p's current epoch and queues the deposit.
@@ -190,6 +213,9 @@ func (m *Manager) retryPeer(peer string) {
 // token of its own: the reconnect's hs.init that brings the fresh token
 // (§6.6) must not wait behind it.
 func (m *Manager) drainOutbox(ctx context.Context) {
+	if m.st == nil {
+		return // zeroized (a split brain at the settled write below): nothing is sent
+	}
 	if m.holdForMark() {
 		return
 	}
@@ -205,7 +231,7 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 			if e.Op == OpDeposit {
 				blocked[key] = true
 			}
-			continue // not stored yet
+			continue // not stored yet (queue)
 		}
 		if e.Op == OpDeposit && (blocked[key] || awaiting[key] && e.Token == "") {
 			continue
@@ -286,7 +312,8 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 			m.drainOutbox(ctx)
 		case errors.Is(err, ErrSplitBrain):
 			// Another copy wrote the state: this one is zeroized and
-			// locked, and sends nothing more.
+			// locked. It sends nothing more: the caller's flushIfDirty
+			// returns ErrSplitBrain, and a later drain returns at once.
 		default:
 			// Not written: the state stays dirty, and the rotation's
 			// notices wait (unstored) for the next flush and drain.
@@ -356,6 +383,9 @@ func (m *Manager) deposit(ctx context.Context, e *OutboxEntry, now time.Time) er
 }
 
 func (m *Manager) flushIfDirty(ctx context.Context) error {
+	if m.splitBrained {
+		return ErrSplitBrain // a drain's settled write lost to another copy
+	}
 	if !m.dirty {
 		return nil
 	}

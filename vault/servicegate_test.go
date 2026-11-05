@@ -308,7 +308,7 @@ func TestNoAutomaticSenderReachesService(t *testing.T) {
 			m.sendWith(m.st.Connections["svc"], typ, json.RawMessage(`{}`), SendOptions{MemoryOnly: true}, time.Now())
 			m.sendTo(m.st.Connections["per"], typ, json.RawMessage(`{}`), time.Now())
 		}
-		m.drainOutbox(context.Background())
+		m.flushThenDrain(context.Background())
 	})
 	in := d.inbox(svc, per)
 	seen := map[string]bool{}

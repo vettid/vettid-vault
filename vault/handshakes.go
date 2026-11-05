@@ -873,9 +873,17 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 	if og.Replaced {
 		// A rekey made on the replaced line (§6.6): the answer verified, so
 		// it is authenticated. From a second copy (a later ts) it is fork
-		// evidence; otherwise it is dropped and nothing activates.
+		// evidence; otherwise it is dropped and nothing activates. Its
+		// hs.fin, if any was made, is never sent.
 		res.Epoch.Destroy()
 		m.replacedRekeyAnswered(p, res.Inner.TS, now)
+		return ackAfterFlush
+	}
+	if res.Fin == nil {
+		// A verify-only initiator (restoreLive) is never used beyond the
+		// replaced line's evidence above.
+		res.Epoch.Destroy()
+		m.audit(now, "hs_resp_dropped", og.PeerID)
 		return ackAfterFlush
 	}
 	if res.Resp.Token != "" {

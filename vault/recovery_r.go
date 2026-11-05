@@ -317,7 +317,11 @@ type SecretChange struct {
 // nothing has changed (busy, counter_unavailable, retry), except that a
 // generation closed by a change whose step 1 then failed stays closed.
 func (m *Manager) changeSecrets(ctx context.Context, c SecretChange, now time.Time) error {
-	if m.repl != nil {
+	if m.repl != nil || m.stateBehind {
+		// stateBehind: a failed state write is not caught up, so step 1
+		// would be refused (beginReplace). Refused here, before the
+		// counter closes a generation or the header's recovery fields
+		// change, so nothing is spent; the batch's write catches up.
 		return errRetry
 	}
 	// The heavy-derivation permit is taken first (busy changes nothing)

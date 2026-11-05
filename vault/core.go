@@ -752,6 +752,10 @@ func (m *Manager) rotateIdentity(now time.Time) error {
 			// token, a suspended peer): one under the old keys could not
 			// finish anyway (RestoreInitiator refuses it after a lock), and
 			// the next unlock or NeedsRekey starts one under the new keys.
+			// This is what keeps a rekey from signing with the old ik
+			// after the rotation. A reconnect or connection handshake
+			// begun before it still signs its hs.fin with the old ik its
+			// hs.init named, which the responder verifies; that is fine.
 			m.dropRekey(p.ID)
 			m.startRekey(p, now)
 		}

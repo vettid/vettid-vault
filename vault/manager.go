@@ -322,6 +322,11 @@ type Manager struct {
 	markOK bool
 
 	locked bool
+	// splitBrained: §12.3's guard zeroized this manager (another writer
+	// advanced the state). A Manager is never unlocked again, so it stays
+	// set; persist and flushIfDirty report it instead of using the wiped
+	// state.
+	splitBrained bool
 	// drainedOnce: a collect has returned less than a full batch since
 	// this unlock; holdAnswers: housekeeping keeps back the due held
 	// neutral answers until then (0.80.0, §10.4.1).
@@ -396,10 +401,12 @@ type Manager struct {
 	// handler fails (§11.14.10).
 	heldInHandler bool
 	heldBefore    *HeldKeyRotation
-	// unstored: outbox entries queued outside a batch (a rotation made
-	// when the relay settled a transfer's notice, unlinkOutcome) that wait
-	// for the next state write before they are sent (§3.4: a vault sends
-	// its rotation notices only after the write that holds the rotation).
+	// unstored: the outbox entries queued since the last state write that
+	// succeeded (queue). A drain sends none of them: nothing leaves the
+	// vault before the write that commits it (§11.14.2 "order of writes",
+	// §8.3, §3.4). A batch whose write failed keeps its in-memory state
+	// and its entries wait; the next write that succeeds stores and
+	// releases them, and a lock or crash before one loses them with it.
 	unstored map[string]bool
 	// settledWrite: a drain settled a transfer's notice and made the owed
 	// rotation; the drain writes the state, then sends its notices.
@@ -407,6 +414,21 @@ type Manager struct {
 	// transferSecret is a transfer's new phone's unlock secret from its
 	// hs.init, in memory only until the approval (§11.14.10).
 	transferSecret []byte
+	// storedView is the header as last read or written (a header write
+	// that failed leaves it): `locked` reports it (report).
+	storedView *headerView
+	// headerBehind: the last state write was stored and the header write
+	// after it failed; the batch's host reports wait for a write that
+	// stores the header too (ProcessBatch).
+	headerBehind bool
+	// stateWritten: the current persist stored the state (its header
+	// write may still fail).
+	stateWritten bool
+	// stateBehind: the last state write failed and none has stored the
+	// state since: memory is ahead of storage (a device removed in memory
+	// only, a phone move's step 2). beginReplace refuses until a write
+	// catches up, since its header names the devices in memory.
+	stateBehind bool
 }
 
 // unlocked counts the managers in this process that hold a DEK.
@@ -567,6 +589,7 @@ func Create(ctx context.Context, p CreateParams) (*Manager, error) {
 		return nil, err
 	}
 	m := newManager(p.Options, st, hdr, dek)
+	m.storedView = nil
 	if len(hdr.AppKey) > 0 {
 		m.acked, m.pinned, m.enrolling = nil, ackedKey{}, true // the first header: the host confirms it
 	}
@@ -682,6 +705,9 @@ func newManager(o Options, st *State, hdr *Header, dek []byte) *Manager {
 		m.holdsDEK = true
 		unlocked.Add(1)
 	}
+	if hdr != nil {
+		m.storedView = viewOf(hdr) // Create clears it: its header is not stored yet
+	}
 	if hdr != nil && len(hdr.AppKey) > 0 {
 		// The stored header names it already (a crash that lost the report
 		// is repaired by the unlocked report, the parent's re-assertion).
@@ -787,6 +813,16 @@ func (m *Manager) restoreLive() error {
 		m.awaiting[id] = r
 	}
 	for id, og := range m.st.Outgoing {
+		if og.Replaced && og.New == nil && og.Purpose == handshake.PurposeRekey {
+			// A rekey of the replaced line (§6.6) is kept as fork evidence
+			// only: restored without an identity key, so it verifies a
+			// late hs.resp and signs nothing (no hs.fin), whichever ik its
+			// hs.init named (a rotation since does not lose the evidence).
+			if i, err := handshake.RestoreInitiatorVerifyOnly(og.Init); err == nil {
+				m.outgoing[id] = i
+				continue
+			}
+		}
 		i, err := handshake.RestoreInitiator(og.Init, m.keys.ik)
 		if err != nil {
 			delete(m.st.Outgoing, id)
@@ -849,6 +885,38 @@ func (m *Manager) allPeers() []*Peer {
 
 // persist flushes state. create = the first write (create-only objects).
 func (m *Manager) persist(ctx context.Context, create bool) error {
+	if m.st == nil {
+		// Zeroized (a split brain, a crash): nothing is written. A caller
+		// that goes on after the loss reaches here, not a nil state.
+		if m.splitBrained {
+			return ErrSplitBrain
+		}
+		return ErrLocked
+	}
+	m.stateWritten = false
+	err := m.persistState(ctx, create)
+	if err != nil && !errors.Is(err, ErrSplitBrain) && !m.stateWritten {
+		m.dropVolatile()
+		m.stateBehind = true
+	}
+	if m.stateWritten {
+		m.stateBehind = false
+	}
+	return err
+}
+
+// dropVolatile discards the memory-only answers sealed since the last
+// drain (§8.2: lost, the requester retransmits). After a state write that
+// failed they would tell what was not stored: the outbox's entries wait
+// for the next write that stores them (queue), these are never written.
+func (m *Manager) dropVolatile() {
+	for _, e := range m.volatile {
+		suite.Wipe(e.Payload)
+	}
+	m.volatile = nil
+}
+
+func (m *Manager) persistState(ctx context.Context, create bool) error {
 	// An app key the stored header does not name is confirmed on the
 	// host's row before anything is stored (appkeyconfirm.go).
 	if err := m.confirmAppKey(ctx); err != nil {
@@ -889,6 +957,9 @@ func (m *Manager) persist(ctx context.Context, create bool) error {
 	m.stateVer = v
 	m.dirty = false
 	m.unstored = nil
+	m.stateWritten = true
+	// The header is behind until its write below succeeds.
+	m.headerBehind = true
 	if err := m.promote(); err != nil { // step 3, written below
 		return err
 	}
@@ -901,6 +972,7 @@ func (m *Manager) persist(ctx context.Context, create bool) error {
 	if err := m.writeHeader(ctx); err != nil {
 		return err
 	}
+	m.headerBehind = false
 	if m.presentAfterFlush {
 		// After the event's state write (§11.14.5); not recorded: sent
 		// again at the next unlock or owner check.
@@ -949,6 +1021,7 @@ func (m *Manager) writeHeaderWith(ctx context.Context, features bool) error {
 		return err
 	}
 	m.headerVer = v
+	m.storedView = viewOf(m.hdr)
 	if len(m.hdr.AppKey) > 0 {
 		m.pin(m.hdr.AppKey, m.hdr.AppKeySeq) // the stored header names it now
 	}
@@ -1053,6 +1126,7 @@ const enrollDeviceID = "enroll"
 // splitBrain is the §12.3 guard: another writer advanced the state. Zeroize
 // immediately, without flushing or acking.
 func (m *Manager) splitBrain() {
+	m.splitBrained = true
 	m.zeroize()
 }
 
@@ -1219,7 +1293,8 @@ func (m *Manager) deleteLocked(ctx context.Context, via string) error {
 		}
 		// The state may not be marked: finishDelete still writes the
 		// header's mark and asks the host before anything of step 2
-		// (0.51.0), and erasing needs no marker.
+		// (0.51.0), and erasing needs no marker. The header's mark and
+		// the host's commit the deletion and what is queued (finishDelete).
 	}
 	return m.finishDelete(ctx)
 }
@@ -1231,9 +1306,12 @@ func (m *Manager) lockLocked(ctx context.Context) error {
 	if m.st != nil && m.st.Deleting != nil {
 		return m.lockDeleting(ctx)
 	}
-	// Deliver what is queued first (an interrupted batch may have left
-	// deposits, such as an hs.fin, in the outbox), then flush.
+	// Deliver what is queued and stored first (an interrupted batch may
+	// have left deposits, such as an hs.fin, in the outbox), then flush.
+	// Entries no write has stored yet (a batch whose write failed) wait:
+	// the lock's own write stores them, or nothing does.
 	m.drainOutbox(ctx)
+	waiting := len(m.unstored) > 0
 	// A device's vault.lock names the device (0.23.2, §10.9); a lock
 	// with a reason (owner check, recovery) or by the host has none.
 	by := ""
@@ -1249,11 +1327,56 @@ func (m *Manager) lockLocked(ctx context.Context) error {
 	if errors.Is(err, ErrSplitBrain) {
 		return err
 	}
-	m.pushLockWake(m.sendLocking(ctx)) // §14.2 trigger 3, before zeroizing
+	if err == nil {
+		if waiting {
+			// What the write just stored goes out before vault.locking,
+			// which must not overtake it.
+			m.drainOutbox(ctx)
+			if err := m.flushIfDirty(ctx); errors.Is(err, ErrSplitBrain) {
+				// The drain's settled write (a transfer's notice the
+				// lock's write stored) lost to another copy: zeroized,
+				// nothing more is sent.
+				return err
+			}
+		}
+		// Host reports a batch whose write failed kept pending: this
+		// write stored what they describe (ProcessBatch).
+		m.reportAlarms()
+		m.reportAppKey()
+		m.pushLockWake(m.sendLocking(ctx)) // §14.2 trigger 3, before zeroizing
+	}
+	// A write that failed: the vault ends as a crash would, with what is
+	// stored. vault.locking and its wake would be sealed for the devices
+	// and sessions in memory, which may not be the stored ones (a phone
+	// move whose step 2 was not stored), so neither is sent; the next
+	// unlock starts from the stored state, and `locked` reports the
+	// stored header (storedView).
 	vid := m.st.VaultID
 	m.zeroize()
 	m.report("locked", vid, m.opt.Release.PCR0)
 	return err
+}
+
+// headerView is what the lifecycle reports of a header: its app key,
+// backup bit, `next` part and header_seq.
+type headerView struct {
+	appKey    []byte
+	appKeySeq uint64
+	backup    *bool
+	next      bool
+	headerSeq uint64
+}
+
+func viewOf(h *Header) *headerView {
+	v := &headerView{appKey: append([]byte(nil), h.AppKey...), appKeySeq: h.AppKeySeq, next: h.Next != nil, headerSeq: h.HeaderSeq}
+	if len(h.AppKey) == 0 {
+		v.appKey = nil
+	}
+	if h.CredentialBackup != nil {
+		b := *h.CredentialBackup
+		v.backup = &b
+	}
+	return v
 }
 
 // lockDeleting locks a vault whose deletion is marked and whose step 2 has
@@ -1288,6 +1411,24 @@ func (m *Manager) report(event, vaultID, release string) {
 		if (event == "locked" || event == "unlocked") && m.hdr != nil {
 			next := m.hdr.Next != nil
 			ev.Next, ev.HeaderSeq = &next, m.hdr.HeaderSeq
+		}
+		if v := m.storedView; event == "locked" && v != nil {
+			// The stored header's values (§11.5): after a lock whose write
+			// succeeded they are the header in memory; after a write that
+			// failed (the lock's, a deletion's mark, a batch's header
+			// write) not those set in memory and never stored (a
+			// transfer's next app key, completeTransfer; the header_seq a
+			// failed header write counted).
+			next := v.next
+			ev.AppKey, ev.AppKeySeq = append([]byte(nil), v.appKey...), v.appKeySeq
+			if len(v.appKey) == 0 {
+				ev.AppKey = nil
+			}
+			ev.CredentialBackup, ev.Next, ev.HeaderSeq = nil, &next, v.headerSeq
+			if v.backup != nil {
+				b := *v.backup
+				ev.CredentialBackup = &b
+			}
 		}
 		m.opt.Lifecycle(ev)
 	}

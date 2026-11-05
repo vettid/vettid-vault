@@ -282,17 +282,11 @@ func (m *Manager) unlinkOutcome(e *OutboxEntry, err error, now time.Time) {
 		return // a deletion's step 2 drains the outbox: nothing rotates (§12.5)
 	}
 	if o := m.st.RotationOwed; o != nil && o.Transfer != "" {
-		n := len(m.st.Outbox)
 		m.retryOwedRotation(now)
 		// The rotation's notices go out only after the state write that
-		// holds it (§3.4, §11.14.2): the drain writes the state when it
-		// has finished (settledWrite), and no drain sends them before.
-		for _, q := range m.st.Outbox[n:] {
-			if m.unstored == nil {
-				m.unstored = map[string]bool{}
-			}
-			m.unstored[q.ID] = true
-		}
+		// holds it (§3.4, §11.14.2): they are unstored until then (queue),
+		// and the drain writes the state when it has finished
+		// (settledWrite), then sends them.
 		m.settledWrite = true
 	}
 }

@@ -238,9 +238,11 @@ func (m *Manager) ProcessBatch(ctx context.Context, c Collector, msgs []Message)
 	for _, id := range ephemeral {
 		_ = c.Ack(ctx, id)
 	}
-	if len(msgs) > 0 || m.dirty {
+	if len(msgs) > 0 || m.dirty || m.headerBehind {
 		if err := m.persist(ctx, false); err != nil {
-			m.alarms, m.appKeyChanged, m.nameReport = nil, false, nil
+			// The host reports (alarms, app_key, the name) stay pending:
+			// the in-memory state they describe is stored by the next
+			// write that succeeds, and they are sent after it.
 			return err
 		}
 	}

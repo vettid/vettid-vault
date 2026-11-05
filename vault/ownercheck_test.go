@@ -197,7 +197,7 @@ func TestOwnerCheckHold(t *testing.T) {
 	f.m.notifyDevices("sync.event", []byte(`{"kind":"settings.changed","version":1}`), "", time.Now())
 	f.m.notifyDevices("feed.event", []byte(`{"kind":"message.received"}`), "", time.Now())
 	f.m.notifyDevices("sync.event", []byte(`{"kind":"credential.alarm","alarm_id":"a","state":"frozen"}`), "", time.Now())
-	f.m.drainOutbox(context.Background())
+	f.m.flushThenDrain(context.Background())
 	f.m.mu.Unlock()
 	in = f.inbox(f.app, f.desk)
 	if len(in["dev1"]) != 1 || len(in["desk1"]) != 1 || !strings.Contains(string(in["dev1"][0].Body), "credential.alarm") {
@@ -308,7 +308,7 @@ func TestOwnerCheckDue(t *testing.T) {
 	// Fan-out: desktops as usual, the app nothing.
 	f.m.mu.Lock()
 	f.m.notifyDevices("sync.event", []byte(`{"kind":"settings.changed","version":1}`), "", time.Now())
-	f.m.drainOutbox(context.Background())
+	f.m.flushThenDrain(context.Background())
 	f.m.mu.Unlock()
 	in = f.inbox(f.app, f.desk)
 	if len(in["dev1"]) != 0 || len(in["desk1"]) != 1 {

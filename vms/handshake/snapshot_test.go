@@ -138,3 +138,61 @@ func TestRestoreInitiatorOtherIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A verify-only initiator holds no identity key: it verifies the hs.resp
+// (a bad sig_R aborts it as any other) and returns the responder's inner
+// message, but signs nothing: no hs.fin (§6.6, the evidence of a replaced
+// line's rekey kept across a rotation).
+func TestRestoreInitiatorVerifyOnly(t *testing.T) {
+	i, r := newParty(t, 0x10), newParty(t, 0x20)
+	ini, err := NewInitiator(initCfg(i, r, PurposeConnection))
+	if err != nil {
+		t.Fatal(err)
+	}
+	is, err := ini.Export()
+	if err != nil {
+		t.Fatal(err)
+	}
+	vo, err := RestoreInitiatorVerifyOnly(roundTrip(t, is))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := vo.Export(); err != nil {
+		t.Fatalf("a verify-only initiator is stored again: %v", err)
+	}
+	p, err := OpenInit(ini.Envelope(), r.lookup, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, respEnv, err := p.Respond(respCfg(i, r, PurposeConnection))
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := vo.HandleResp(respEnv, r.relayPK(), t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Epoch.Destroy()
+	if res.Fin != nil || res.Inner == nil || res.Inner.Type != TypeResp {
+		t.Fatalf("fin %d bytes, inner %+v", len(res.Fin), res.Inner)
+	}
+	// A responder under another identity: sig_R does not verify.
+	other := newParty(t, 0x30)
+	vo2, err := RestoreInitiatorVerifyOnly(roundTrip(t, is))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p2, err := OpenInit(ini.Envelope(), r.lookup, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc := respCfg(i, r, PurposeConnection)
+	rc.Identity = other.ik
+	_, bad, err := p2.Respond(rc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := vo2.HandleResp(bad, r.relayPK(), t0); !errors.Is(err, ErrSigResp) {
+		t.Fatalf("a bad sig_R: %v", err)
+	}
+}

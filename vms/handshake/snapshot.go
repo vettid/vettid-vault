@@ -189,7 +189,23 @@ func (i *Initiator) Export() (InitiatorState, error) {
 // RestoreInitiator rebuilds an Initiator awaiting hs.resp. The identity
 // must be the key the hs.init named (ErrIdentity otherwise).
 func RestoreInitiator(s InitiatorState, identity ed25519.PrivateKey) (*Initiator, error) {
-	if len(identity) != ed25519.PrivateKeySize || len(s.Th1) != 32 || len(s.Ks) != suite.KeySize ||
+	if len(identity) != ed25519.PrivateKeySize {
+		return nil, ErrConfig
+	}
+	return restoreInitiator(s, identity)
+}
+
+// RestoreInitiatorVerifyOnly rebuilds an Initiator that holds no identity
+// key: HandleResp verifies an hs.resp (sig_R) and returns its epoch, inner
+// message and fields, but signs nothing and returns no hs.fin (Result.Fin
+// is nil). It keeps a handshake as evidence only, whatever identity key
+// its hs.init named (a rekey of a replaced line after a rotation, §6.6).
+func RestoreInitiatorVerifyOnly(s InitiatorState) (*Initiator, error) {
+	return restoreInitiator(s, nil)
+}
+
+func restoreInitiator(s InitiatorState, identity ed25519.PrivateKey) (*Initiator, error) {
+	if len(s.Th1) != 32 || len(s.Ks) != suite.KeySize ||
 		len(s.ResponderIK) != ed25519.PublicKeySize || len(s.ResponderRelayKey) != ed25519.PublicKeySize {
 		return nil, ErrConfig
 	}
@@ -202,7 +218,7 @@ func RestoreInitiator(s InitiatorState, identity ed25519.PrivateKey) (*Initiator
 		eph.Destroy()
 		return nil, ErrConfig
 	}
-	if !suite.EqualPublic(body.From.IK, identity.Public().(ed25519.PublicKey)) {
+	if identity != nil && !suite.EqualPublic(body.From.IK, identity.Public().(ed25519.PublicKey)) {
 		// The hs.init named another identity key (it was sent before a
 		// rotation, §3.4): hs.fin signed with this one would not verify
 		// at the responder, which binds the key the hs.init named.
@@ -223,6 +239,7 @@ func RestoreInitiator(s InitiatorState, identity ed25519.PrivateKey) (*Initiator
 			Identity: identity, ResponderIK: cp(s.ResponderIK), ResponderRelayKey: cp(s.ResponderRelayKey),
 			KnownResponderChain: known},
 		body: body, eph: eph, env: cp(s.Env), ks: cp(s.Ks), nI: cp(s.NI),
+		verifyOnly: identity == nil,
 	}
 	copy(i.th1[:], s.Th1)
 	return i, nil

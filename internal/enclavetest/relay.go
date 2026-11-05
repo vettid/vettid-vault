@@ -21,6 +21,7 @@ type MemRelay struct {
 	mu       sync.Mutex
 	base     string
 	key      ed25519.PrivateKey
+	rs       *MemRelays
 	Deposits []Deposit
 }
 
@@ -40,7 +41,7 @@ type MemRelays struct {
 
 // New returns a relay for a vault (the shape of vault.Options.Relay).
 func (rs *MemRelays) New(base string, key ed25519.PrivateKey) *MemRelay {
-	r := &MemRelay{base: base, key: key}
+	r := &MemRelay{base: base, key: key, rs: rs}
 	rs.mu.Lock()
 	rs.all = append(rs.all, r)
 	rs.mu.Unlock()
@@ -70,6 +71,31 @@ func (r *MemRelay) BaseURL() string { return r.base }
 // Register implements vault.Relay.
 func (r *MemRelay) Register(context.Context) (relayclient.Limits, error) {
 	return relayclient.Limits{MaxTokenLifetimeSeconds: 400 * 86400, OpenTokenMaxLifetimeSeconds: 7 * 86400, ClaimTTLSeconds: 7 * 86400}, nil
+}
+
+// RegisterCreated implements vault.Relay: every mailbox exists.
+func (r *MemRelay) RegisterCreated(ctx context.Context) (relayclient.Limits, bool, error) {
+	l, err := r.Register(ctx)
+	return l, false, err
+}
+
+// Rotate implements vault.Relay: the new mailbox id.
+func (r *MemRelay) Rotate(_ context.Context, newKey ed25519.PrivateKey) (string, error) {
+	return relayauth.MailboxID(newKey.Public().(ed25519.PublicKey)), nil
+}
+
+// WithKey implements vault.Relay: a relay for another of the vault's keys,
+// whose deposits are kept with the others.
+func (r *MemRelay) WithKey(key ed25519.PrivateKey) vault.Relay {
+	if r.rs == nil {
+		return &MemRelay{base: r.base, key: key}
+	}
+	return r.rs.New(r.base, key)
+}
+
+// MintFreshToken implements vault.Relay.
+func (r *MemRelay) MintFreshToken(sub ed25519.PublicKey, ttl time.Duration, jti string, q *relayauth.Quota, ownerDevice bool) (string, error) {
+	return vault.MintFresh(r.key, r.base, time.Now(), sub, ttl, jti, q, ownerDevice)
 }
 
 type idleCollector struct{}

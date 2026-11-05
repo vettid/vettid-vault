@@ -166,6 +166,93 @@ type RelayState struct {
 	URL     string `json:"url"`
 	Seed    []byte `json:"seed"`
 	Mailbox string `json:"mailbox"`
+	// Pending is a relay key stored before the relay's rotate makes its
+	// mailbox (§3.4 "The order of a relay-key rotation"): sealed in the
+	// state like every other key, never logged.
+	Pending *PendingRelay `json:"pending,omitempty"`
+	// Old are earlier relay keys, kept for deposits only (and, until the
+	// relay's grace ends, to collect from their own old mailbox) until
+	// §3.4 "When the old key is deleted" (Resending the new address (a)).
+	Old []OldRelayKey `json:"old,omitempty"`
+	// Limits are the relay's limits as last returned by a registration
+	// (not secret): used while the unlock does not register the current
+	// key, a relay key being pending (§3.4).
+	Limits *Limits `json:"limits,omitempty"`
+	// Updates are the relay.address.update bodies of the last relay-key
+	// rotation, by recipient (a device or connection id), with what the
+	// resend needs (§3.4 "Resending the new address" (b)).
+	Updates map[string]*AddressUpdate `json:"updates,omitempty"`
+}
+
+// PendingRelay is a relay key between the rotation's state write and the
+// second write that makes it current (§3.4 "The order of a relay-key
+// rotation"): its new tokens for every recipient, held until then, and the
+// state of its rotate.
+type PendingRelay struct {
+	Seed []byte `json:"seed"`
+	// Tokens are the held tokens, by recipient; Issued their registry
+	// entries, moved into State.Issued at the second write.
+	Tokens map[string]*HeldUpdate `json:"tokens,omitempty"`
+	Issued []IssuedToken          `json:"issued,omitempty"`
+	// RetryAfter is when a relay's retry_after runs out (not secret): no
+	// attempt is made before it, at an unlock either.
+	RetryAfter time.Time `json:"retry_after,omitzero"`
+	// Refused is the code of a definite refusal (the refused state): the
+	// key is kept, one attempt is made at each unlock, and only
+	// credential.rotate replaces it.
+	Refused string `json:"refused,omitempty"`
+	// Marks are the owed marks the rotation found when it was made
+	// (§11.14.10): its second write clears them. Named are those an
+	// earlier rotation's identity.rotated already named (a chained key):
+	// its own audit names only the rest.
+	Marks *RotationOwed `json:"marks,omitempty"`
+	Named *RotationOwed `json:"named,omitempty"`
+	// Next are the marks of rotations made while this key was pending
+	// (RotationOwed.RelayKey): they pass to the next key, which this
+	// key's second write stores.
+	Next *RotationOwed `json:"next,omitempty"`
+	// Created: the relay answered the registration of this key 201 (a
+	// fresh mailbox): its second write re-mints every held token, also
+	// when that write is made by a later run (§3.4 "After the grace").
+	Created bool `json:"created,omitempty"`
+	// Recovery is the recovery_id of the recovery that stored this key:
+	// it waits for the recovered phone's pairing (its vault_bundle gave
+	// it the current address, §11.14.6).
+	Recovery string `json:"recovery,omitempty"`
+}
+
+// HeldUpdate is one recipient's held tokens for a pending relay key.
+type HeldUpdate struct {
+	Standing  string `json:"standing"`
+	Reconnect string `json:"reconnect,omitempty"`
+}
+
+// OldRelayKey is an earlier relay key kept for deposits (§3.4 "Resending
+// the new address" (a)). Gone: its mailbox answered mailbox_unknown (the
+// relay's grace ended), so it is no longer collected.
+//
+// Retired: its use for deposits ended (§3.4 "When the old key is
+// deleted"); it is kept only to collect its old mailbox until Gone.
+type OldRelayKey struct {
+	Seed    []byte    `json:"seed"`
+	Mailbox string    `json:"mailbox"`
+	At      time.Time `json:"at"`
+	Gone    bool      `json:"gone,omitempty"`
+	Retired bool      `json:"retired,omitempty"`
+}
+
+// AddressUpdate is the relay.address.update a recipient was sent at the
+// last relay-key rotation, and its acknowledgement (§3.4 "The signal").
+type AddressUpdate struct {
+	Body json.RawMessage `json:"body"`
+	// JTIs are the new tokens': a deposit made with one acknowledges.
+	JTIs  []string `json:"jtis,omitempty"`
+	Acked bool     `json:"acked,omitempty"`
+	// Since is when the recipient was first sent this address: it has
+	// UnfollowedAfter to follow it.
+	Since  time.Time `json:"since,omitzero"`
+	Ended  bool      `json:"ended,omitempty"` // a deposit refused for good ended the resends
+	SentAt time.Time `json:"sent_at,omitzero"`
 }
 
 // RotationOwed holds the owed rotation marks (see State.RotationOwed).
@@ -174,11 +261,16 @@ type RelayState struct {
 // under it or a later one, "after the new phone's first unlock") and the
 // approval's time (from 7 days after it the rotation no longer waits for
 // the old phone's notice).
+//
+// RelayKey is the relay-key rotation owed (0.84.0, §3.4): a rotation was
+// made while a relay key was pending; that key's second write stores the
+// next relay key, which meets it.
 type RotationOwed struct {
 	Recovery   string    `json:"recovery,omitempty"`
 	Transfer   string    `json:"transfer,omitempty"`
 	DEKVersion uint64    `json:"dek_version,omitempty"`
 	At         time.Time `json:"at,omitzero"`
+	RelayKey   bool      `json:"relay_key,omitempty"`
 }
 
 // RetiredKEM is a retired static KEM key, kept 400 days for reconnects.
@@ -277,6 +369,28 @@ type Peer struct {
 	// (§6.6): it sends nothing and accepts nothing until a new invitation
 	// replaces it.
 	Fork *ForkSuspension `json:"fork_suspension,omitempty"`
+	// PrevRelay are the principal's earlier relay keys, replaced by its
+	// relay.address.update: still accepted as its collect sender until the
+	// relay's rotation grace ends, when the tokens issued to them are
+	// denylisted (§3.4 "Device relay key"; "Resending the new address").
+	PrevRelay []PrevRelayKey `json:"prev_relay,omitempty"`
+}
+
+// PrevRelayKey is a principal's earlier relay key, accepted until Until.
+//
+// EndedAt is when the principal was seen using a later key (owner
+// decision 2026-11-05): the tokens issued to this one were denylisted then,
+// and only what its relay received before then is still taken from it.
+type PrevRelayKey struct {
+	PK      []byte    `json:"pk"`
+	Until   time.Time `json:"until"`
+	EndedAt time.Time `json:"ended_at,omitzero"`
+	// SubPending: at EndedAt a handshake of the vault's with the principal,
+	// begun under this key, was still in progress: only the other tokens
+	// issued to the key were denylisted; the key itself (its sub) is once
+	// that handshake has finished or expired (owner decision 2026-11-05: a
+	// reconnect from the old key may finish one already in progress).
+	SubPending bool `json:"sub_pending,omitempty"`
 }
 
 // EpochRecord is one epoch of a service connection's history (§6.6, 0.72.0).
@@ -449,6 +563,10 @@ type Invite struct {
 	// Transfer marks the pairing of a direct transfer's new app (§6.7.1),
 	// the only app pairing a vault accepts after enrollment.
 	Transfer bool `json:"transfer,omitempty"`
+	// Mailbox is the vault's mailbox the invitation names when that is an
+	// old one (stamped at the relay key's second write, §3.4): it may still
+	// be claimed there while the old key lives. "" for the current one.
+	Mailbox string `json:"mailbox,omitempty"`
 }
 
 // AwaitingHS is a handshake where the vault sent hs.resp and awaits hs.fin.
@@ -535,6 +653,10 @@ type OutgoingHS struct {
 	// hs.resp is fork evidence when it carries a later ts.
 	Replaced bool `json:"replaced,omitempty"`
 
+	// Mailbox is the vault's old mailbox the hs.init named, stamped at the
+	// relay key's second write (§3.4); "" for the current one.
+	Mailbox string `json:"mailbox,omitempty"`
+
 	// An outgoing connection request in state waiting (§6.4, §10.4):
 	// what the accept learned from the bundle, and when it ends.
 	Remote  bool      `json:"remote,omitempty"`
@@ -611,6 +733,9 @@ type OutboxEntry struct {
 	Created    time.Time `json:"created"`
 	Attempts   int       `json:"attempts"`
 	NotBefore  time.Time `json:"not_before,omitempty"`
+	// AddressUpdate marks a relay.address.update (§3.4): a definite
+	// refusal of its deposit ends the resends to its recipient.
+	AddressUpdate bool `json:"address_update,omitempty"`
 	// NotAfter ends the retries of a best-effort deposit (0.10.5:
 	// connection.declined, device.pair.rejected); zero: no limit.
 	NotAfter time.Time `json:"not_after,omitempty"`

@@ -366,6 +366,19 @@ func (m *Manager) respondReconnect(pi *handshake.PendingInit, p *Peer, sender ed
 	}
 	st, err1 := m.heldToken(body.Token, p)
 	rt, err2 := m.heldToken(body.ReconnectToken, p)
+	if (err1 != nil || err2 != nil) && m.onCurrentKey(p.Standing.Token) && now.Before(p.Standing.Exp) {
+		// The hs.init was made before the peer followed the vault's new
+		// address: its tokens are for a relay key the vault no longer
+		// deposits with, and the peer has since issued one for the current
+		// key. The reconnect, a handshake in progress, finishes on that
+		// (owner decision 2026-11-05).
+		if err1 != nil {
+			st, err1 = p.Standing, nil
+		}
+		if err2 != nil && m.onCurrentKey(p.Reconnect.Token) && now.Before(p.Reconnect.Exp) {
+			rt, err2 = p.Reconnect, nil
+		}
+	}
 	if err1 != nil || err2 != nil {
 		m.audit(now, "reconnect_bad_token", p.ID)
 		pi.Discard()
@@ -433,6 +446,17 @@ func (m *Manager) respondReconnect(pi *handshake.PendingInit, p *Peer, sender ed
 	if !p.isService() {
 		m.crossingPersons(p, now)
 	}
+}
+
+// ancestorIK reports whether ik is one p's rotation chain has moved away
+// from (the old_ik of a link it followed).
+func ancestorIK(p *Peer, ik ed25519.PublicKey) bool {
+	for _, raw := range p.Chain {
+		if r, err := handshake.ParseRotation(raw); err == nil && suite.EqualPublic(r.OldIK, ik) {
+			return true
+		}
+	}
+	return false
 }
 
 // ownThHigher reports whether th1 of our own reconnect og is higher than
@@ -542,14 +566,11 @@ func (m *Manager) awaitingByKids(env *envelope.Envelope, sender ed25519.PublicKe
 			continue
 		}
 		aw := m.st.Awaiting[id]
-		var pk []byte
-		if aw.New != nil {
-			pk = aw.New.Relay.PK
-		} else if p := m.peer(aw.PeerID); p != nil {
-			pk = p.Relay.PK
-		}
-		if suite.EqualPublic(pk, sender) {
+		if aw.New != nil && suite.EqualPublic(aw.New.Relay.PK, sender) {
 			return id
+		}
+		if p := m.peer(aw.PeerID); aw.New == nil && p != nil && m.peerHasKey(p, sender) {
+			return id // its current relay key, or one it moved from (§3.4)
 		}
 	}
 	return ""
@@ -570,7 +591,23 @@ func (m *Manager) peer(id string) *Peer {
 // become a request that awaits approval (0.10.3).
 func (m *Manager) handleFin(ctx context.Context, id string, raw []byte, sender ed25519.PublicKey, now time.Time) disposition {
 	aw, r := m.st.Awaiting[id], m.awaiting[id]
-	fr, err := r.HandleFin(raw, sender, now)
+	if p := m.peer(aw.PeerID); aw.New == nil && p != nil && ancestorIK(p, r.InitiatorIK()) {
+		// The hs.fin of a handshake answered from an ik the peer has since
+		// rotated away from: only the holder of its old copy sends it
+		// (restartHandshakesUnderOldIK abandons them; a backstop).
+		m.audit(now, "rotation_rollback_refused", aw.PeerID)
+		m.abandonAwaiting(id, now)
+		return ackAfterFlush
+	}
+	// A peer that moved to a new relay key during the handshake (its
+	// relay.address.update came after its hs.init, VAULT-MESSAGING §3.4)
+	// may deposit hs.fin with the new key: both are its keys on record
+	// (awaitingByKids matched it), so it stands for the hs.init's.
+	cs := sender
+	if p := m.peer(aw.PeerID); aw.New == nil && p != nil && m.peerHasKey(p, sender) && (suite.EqualPublic(r.Sender(), p.Relay.PK) || p.wasKey(r.Sender())) {
+		cs = r.Sender()
+	}
+	fr, err := r.HandleFin(raw, cs, now)
 	switch {
 	case errors.Is(err, handshake.ErrType):
 		// A message in the new epoch that arrived before hs.fin: the epoch
@@ -588,6 +625,9 @@ func (m *Manager) handleFin(ctx context.Context, id string, raw []byte, sender e
 	}
 	delete(m.st.Awaiting, id)
 	delete(m.awaiting, id)
+	if p := m.peer(aw.PeerID); aw.New == nil && p != nil && p.liveEarlierKeys() && suite.EqualPublic(sender, p.Relay.PK) {
+		m.endPrevRelay(p, now) // its hs.fin came with its current key
+	}
 	if aw.New != nil && !aw.Direct {
 		m.newRequest(aw, fr, now)
 		return ackAfterFlush
@@ -678,7 +718,14 @@ func (m *Manager) finishReconnect(p *Peer, aw *AwaitingHS, fr *handshake.FinResu
 			p.Chain = append(p.Chain, r.Marshal())
 		}
 	}
-	p.Standing, p.Reconnect = pend.Standing, pend.Reconnect
+	// The hs.init's tokens, unless the peer moved since: they were issued
+	// by its old mailbox, and the ones held are for its current one (§3.4).
+	if _, err := m.heldToken(pend.Standing.Token, p); err == nil || p.Standing.Token == "" {
+		p.Standing = pend.Standing
+	}
+	if _, err := m.heldToken(pend.Reconnect.Token, p); err == nil || p.Reconnect.Token == "" {
+		p.Reconnect = pend.Reconnect
+	}
 	// Both ends settle on this epoch: a service yields (§6.6 "Crossing
 	// reconnects", 0.72.1) and between two persons a verified hs.fin
 	// comes first whatever the th1 (§6.6 "Between two persons", 0.74.0),
@@ -815,6 +862,9 @@ func (m *Manager) activate(p *Peer, ep *handshake.Epoch, purpose handshake.Purpo
 	if rotated && p.State == PeerActive {
 		m.connectionRotated(p.ID, now)
 	}
+	if isNew {
+		m.sendNewAddress(p, now) // a first contact that finished on an old relay key (§3.4)
+	}
 }
 
 func connEvent(id, ev string) json.RawMessage {
@@ -843,7 +893,15 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 			return ackAfterFlush
 		}
 	}
-	res, err := ini.HandleResp(raw, sender, now)
+	// A peer that moved to a new relay key since the hs.init (its
+	// relay.address.update came after it) answers with the new key, the
+	// one on record for it now: it stands for the key the hs.init pinned
+	// (as for an hs.fin, handleFin).
+	cs := sender
+	if p := m.peer(og.PeerID); og.New == nil && p != nil && suite.EqualPublic(sender, p.Relay.PK) && p.wasKey(ini.ResponderRelayKey()) {
+		cs = ini.ResponderRelayKey()
+	}
+	res, err := ini.HandleResp(raw, cs, now)
 	if err != nil {
 		if _, xerr := ini.Export(); errors.Is(xerr, handshake.ErrDone) {
 			// Aborted (§6.3): the handshake is gone.
@@ -886,13 +944,28 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 		m.audit(now, "hs_resp_dropped", og.PeerID)
 		return ackAfterFlush
 	}
+	if og.New == nil && !suite.EqualPublic(res.ResponderIK, p.IK) && ancestorIK(p, res.ResponderIK) {
+		// Signed by an identity key the peer has rotated away from: the
+		// holder of its old copy (it has the old key, and the old relay key
+		// the hs.init pinned) answered. Never a step back to an earlier ik
+		// (§3.4 "One successor per key"; owner decision 2026-11-05: no key
+		// change from the old key).
+		res.Epoch.Destroy()
+		m.audit(now, "rotation_rollback_refused", p.ID)
+		m.abandonOutgoing(id, now)
+		return ackAfterFlush
+	}
+	// The answer's tokens replace the held ones only if they are for the
+	// vault's same or a later relay key: an hs.resp collected late, after
+	// the vault moved and the peer issued it tokens for its current key,
+	// carries tokens for the old one (§3.4).
 	if res.Resp.Token != "" {
-		if t, err := m.heldToken(res.Resp.Token, p); err == nil {
+		if t, err := m.heldToken(res.Resp.Token, p); err == nil && m.keyRank(t.Token) >= m.keyRank(p.Standing.Token) {
 			p.Standing = t
 		}
 	}
 	if res.Resp.ReconnectToken != "" {
-		if t, err := m.heldToken(res.Resp.ReconnectToken, p); err == nil {
+		if t, err := m.heldToken(res.Resp.ReconnectToken, p); err == nil && m.keyRank(t.Token) >= m.keyRank(p.Reconnect.Token) {
 			p.Reconnect = t
 		}
 	}

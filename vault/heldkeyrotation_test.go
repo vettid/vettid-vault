@@ -281,14 +281,20 @@ func TestRecoverySendsHeldStatement(t *testing.T) {
 	if queued < 0 && !(settled && sink.has("device.unlinked_sent")) {
 		t.Fatal("the old phone's notice was not sent")
 	}
+	// The statement went before the rotation; identity.rotated comes at
+	// the relay key's second write (§3.4), after the recovered phone has
+	// paired (relayKeyAttempt).
+	m.mu.Lock()
+	rot, pending := len(m.st.Rotations), m.st.Relay.Pending != nil
+	m.mu.Unlock()
 	var kinds []string
 	for _, a := range sink.got {
 		if a.Kind == "test.statement_sent" || a.Kind == "identity.rotated" {
 			kinds = append(kinds, a.Kind)
 		}
 	}
-	if len(kinds) != 2 || kinds[0] != "test.statement_sent" || kinds[1] != "identity.rotated" {
-		t.Fatalf("order %v", kinds)
+	if len(kinds) != 1 || kinds[0] != "test.statement_sent" || rot != 1 || !pending {
+		t.Fatalf("order %v, %d rotations, relay key pending %v", kinds, rot, pending)
 	}
 }
 

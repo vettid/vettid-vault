@@ -232,15 +232,21 @@ const (
 
 // VaultRecord is what the device knows about its vault.
 type VaultRecord struct {
-	IK       []byte                 `json:"ik"`
-	KEM      []byte                 `json:"kem"`
-	RelayURL string                 `json:"relay_url"`
-	Mailbox  string                 `json:"mailbox"`
-	RelayPK  []byte                 `json:"relay_pk"`
-	Token    string                 `json:"token,omitempty"`
-	TokenExp time.Time              `json:"token_exp,omitempty"`
-	Sessions handshake.KeyringState `json:"sessions"`
-	Suite    uint8                  `json:"suite"`
+	IK       []byte `json:"ik"`
+	KEM      []byte `json:"kem"`
+	RelayURL string `json:"relay_url"`
+	Mailbox  string `json:"mailbox"`
+	RelayPK  []byte `json:"relay_pk"`
+	// PrevRelay are the vault's relay keys before its relay.address.updates
+	// (VAULT-MESSAGING §3.4): the vault deposits with them until it has this
+	// device's token for the new key. Each is dropped once the vault has
+	// deposited with its new key (and no rekey waits for its hs.fin), and at
+	// the latest at the relay's rotation grace.
+	PrevRelay []PrevRelayKey         `json:"prev_relay,omitempty"`
+	Token     string                 `json:"token,omitempty"`
+	TokenExp  time.Time              `json:"token_exp,omitempty"`
+	Sessions  handshake.KeyringState `json:"sessions"`
+	Suite     uint8                  `json:"suite"`
 }
 
 // Device is one owner device.
@@ -1524,8 +1530,12 @@ func (d *Device) handle(ctx context.Context, m relayclient.Message) (unacked boo
 		}
 		return false
 	}
-	if v == nil || !suite.EqualPublic(sender, v.RelayPK) {
-		return // §6.3: only the vault's relay key may send to a device
+	depositedAt, _ := time.Parse(time.RFC3339Nano, m.DepositedAt)
+	if v == nil || !v.hasKey(sender, now, depositedAt) {
+		return // §6.3: only the vault's relay key may send to a device (§3.4: or an earlier one)
+	}
+	if suite.EqualPublic(sender, v.RelayPK) {
+		v.endEarlierKeys(depositedAt, now) // the vault deposits with its new key now
 	}
 	d.pruneAwaiting(now)
 	in, ep, err := d.keyring.Open(env, now)
@@ -1533,7 +1543,14 @@ func (d *Device) handle(ctx context.Context, m relayclient.Message) (unacked boo
 		for i, r := range d.awaiting {
 			rk, sk := r.Kids()
 			if env.RecipientKid().Equal(rk) && env.SenderKid().Equal(sk) {
-				fr, err := r.HandleFin(m.Payload, sender, now)
+				// The vault's hs.fin may come with its new relay key when
+				// it moved during the rekey (§3.4): the previous key stands
+				// for the one the hs.init came from.
+				cs := sender
+				if v.hasKey(sender, now, depositedAt) && v.knows(r.Sender()) {
+					cs = r.Sender()
+				}
+				fr, err := r.HandleFin(m.Payload, cs, now)
 				if err == nil {
 					d.keyring.Activate(fr.Epoch, now)
 					d.dropAwaiting(i)
@@ -1563,8 +1580,15 @@ func (d *Device) handle(ctx context.Context, m relayclient.Message) (unacked boo
 			}
 		}
 	}
+	// From an earlier relay key of the vault (VAULT-MESSAGING §3.4; owner
+	// decision 2026-11-05): what the vault sent before the cut-off, never a
+	// new address, a key change or a new handshake (a holder of the vault's
+	// old copy has that key).
+	fromEarlier := !suite.EqualPublic(sender, v.RelayPK)
 	if in.Type == handshake.TypeInit {
-		d.handleRekey(ctx, m.Payload, in, ep, sender, now)
+		if !fromEarlier {
+			d.handleRekey(ctx, m.Payload, in, ep, sender, now)
+		}
 		return false
 	}
 	if err := in.CheckTime(now, in.Exp.IsZero()); err != nil {
@@ -1642,7 +1666,13 @@ func (d *Device) handle(ctx context.Context, m relayclient.Message) (unacked boo
 		}
 		d.storeVaultToken(in.Body)
 	case "identity.rotate":
-		d.followRotation(in.Body)
+		if !fromEarlier {
+			d.followRotation(in.Body)
+		}
+	case "relay.address.update":
+		if !fromEarlier {
+			d.followAddress(ctx, in.Body, depositedAt)
+		}
 	case "leash.grant.updated":
 		if in.Re == "" {
 			d.leashGrants = append(json.RawMessage(nil), in.Body...) // the agent's current grants (§10.11); d.mu is held
@@ -1904,6 +1934,123 @@ func (d *Device) followRotation(body json.RawMessage) {
 		return
 	}
 	d.st.Vault.IK, d.st.Vault.KEM = final, kem.Bytes()
+}
+
+// followAddress follows the vault's new relay address (VAULT-MESSAGING
+// §3.4): the new address and its standing token for this device's
+// mailbox, then relay.token.issued for the vault's new key (step 4). A
+// duplicate (a resend of an address already followed) is ignored.
+func (d *Device) followAddress(ctx context.Context, body json.RawMessage, depositedAt time.Time) {
+	v := d.st.Vault
+	o, err := strictjson.ParseObject(body)
+	if err != nil {
+		return
+	}
+	ro, err := o.Object("relay")
+	if err != nil {
+		return
+	}
+	var a handshake.RelayAddr
+	a.URL, _ = ro.String("url")
+	a.Mailbox, _ = ro.String("mailbox")
+	if a.PK, err = ro.Base64("pk", ed25519.PublicKeySize); err != nil || handshake.ValidateRelayAddr(a) != nil {
+		return
+	}
+	now := d.cfg.Now()
+	if v.knows(a.PK) {
+		return // followed already (a resend, a late copy)
+	}
+	tok, err := o.String("token")
+	if err != nil {
+		return
+	}
+	msg, err := relayauth.VerifyToken(tok, a.PK)
+	if err != nil {
+		return
+	}
+	c, err := relayauth.ParseClaims(msg)
+	if err != nil || c.Iss != a.Mailbox || c.Sub != relayauth.EncodeKey(d.relayKey.Public().(ed25519.PublicKey)) {
+		return
+	}
+	// The grace runs from the relay's time of the update when known.
+	from := depositedAt
+	if from.IsZero() || from.After(now) {
+		from = now
+	}
+	v.PrevRelay = append(v.PrevRelay, PrevRelayKey{PK: v.RelayPK, Until: from.Add(PrevRelayGrace)})
+	v.RelayURL, v.Mailbox, v.RelayPK = a.URL, a.Mailbox, append([]byte(nil), a.PK...)
+	v.Token, v.TokenExp = tok, c.Exp
+	if nt, err := d.mintForVault(); err == nil {
+		b := strictjson.NewBuilder().String("kind", "standing").String("token", nt).Bytes()
+		_, _ = d.sendLocked(ctx, "", "relay.token.issued", b, "", "")
+	}
+}
+
+// PrevRelayKey is an earlier relay key of the vault, accepted until Until.
+type PrevRelayKey struct {
+	PK    []byte    `json:"pk"`
+	Until time.Time `json:"until"`
+	// EndedAt is the relay's time of the vault's first deposit seen with a
+	// later key (our time when not known): only what the relay took by this
+	// key before then is still the vault's.
+	EndedAt time.Time `json:"ended_at,omitzero"`
+}
+
+// PrevRelayGrace bounds how long an earlier relay key of the vault is
+// accepted: the relay's rotation grace (RELAY-PROTOCOL §6.7, 7 days by
+// default).
+const PrevRelayGrace = 7 * 24 * time.Hour
+
+// hasKey reports whether a deposit by pk, taken by the relay at
+// depositedAt (zero: not known), is the vault's: its relay key, or an
+// earlier one within the grace and not ended before the deposit.
+func (v *VaultRecord) hasKey(pk []byte, now, depositedAt time.Time) bool {
+	if suite.EqualPublic(pk, v.RelayPK) {
+		return true
+	}
+	for _, k := range v.PrevRelay {
+		if suite.EqualPublic(pk, k.PK) && now.Before(k.Until) &&
+			(k.EndedAt.IsZero() || !depositedAt.IsZero() && depositedAt.Before(k.EndedAt)) {
+			return true
+		}
+	}
+	return false
+}
+
+// knows reports whether pk is the vault's relay key or one it moved from.
+func (v *VaultRecord) knows(pk []byte) bool {
+	if suite.EqualPublic(pk, v.RelayPK) {
+		return true
+	}
+	for _, k := range v.PrevRelay {
+		if suite.EqualPublic(pk, k.PK) {
+			return true
+		}
+	}
+	return false
+}
+
+// endEarlierKeys ends the earlier keys at the vault's first deposit with
+// its current one (taken at depositedAt), and drops those past the grace.
+func (v *VaultRecord) endEarlierKeys(depositedAt, now time.Time) {
+	at := depositedAt
+	if at.IsZero() || at.After(now) {
+		at = now
+	}
+	kept := v.PrevRelay[:0]
+	for _, k := range v.PrevRelay {
+		if !now.Before(k.Until) {
+			continue
+		}
+		if k.EndedAt.IsZero() {
+			k.EndedAt = at
+		}
+		kept = append(kept, k)
+	}
+	if len(kept) == 0 {
+		kept = nil
+	}
+	v.PrevRelay = kept
 }
 
 // RenewVaultToken mints a fresh standing token for the vault to deposit to

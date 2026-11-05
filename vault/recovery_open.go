@@ -36,6 +36,9 @@ const (
 	OpenNoRecovery     = "no_recovery"
 	OpenExpired        = "expired"
 	OpenRetry          = "retry"
+	// OpenRelayRefused (NEW): the relay refused the vault's fresh relay key
+	// (§3.4, recoveryReplacesRefusedKey); recorded in the recovery log.
+	OpenRelayRefused = "relay_refused"
 )
 
 // RecoveryCredential is implemented by the credential feature: the last
@@ -466,6 +469,33 @@ func (m *Manager) completeRecoveryR(ctx context.Context, p RecoveryOpenParams, r
 		return fail(CodeMissing)
 	}
 	m.unlockSecret = append([]byte(nil), p.UnlockSecret...)
+	inherited := ""
+	if m.st.Relay.Pending != nil && m.st.Deleting == nil {
+		// §3.4, §11.14.6 step 6: a relay key pending since an earlier run is
+		// settled before the phone is given the vault's address; with no
+		// definite answer from the relay the open is answered retry (a
+		// failed open stores nothing, so nothing of it is audited).
+		switch code, at := m.completeStoredRelayKey(ctx, p.Relay); code {
+		case "":
+		case OpenRelayRefused:
+			// A definite answer: recorded in the recovery log of the stored
+			// header (the state is not written by a failed open). The entry
+			// alone, by a header transaction: not the header in memory,
+			// which this open has changed (a replacement abandoned) without
+			// its step 2.
+			_ = headerTx(ctx, HeaderParams{Options: p.Options, VaultID: p.VaultID, UserGUID: p.UserGUID}, func(h *Header, _ time.Time) (bool, error) {
+				h.logRecovery(now, "recovery.open", openRef(r, OpenRelayRefused))
+				return false, nil
+			})
+			return fail(OpenRelayRefused)
+		default:
+			out.RetryAt = at
+			return fail(OpenRetry)
+		}
+		if m.keys.pendingRelay != nil {
+			inherited = mailboxOf(m.keys.pendingRelay) // kept, refused
+		}
+	}
 	var cred RecoveryCredential
 	for _, f := range m.features {
 		if c, ok := f.(RecoveryCredential); ok {
@@ -525,6 +555,9 @@ func (m *Manager) completeRecoveryR(ctx context.Context, p RecoveryOpenParams, r
 	if err := m.rotateIdentity(now); err != nil {
 		m.record(Activity{Kind: "identity.rotation_failed", Ref: ref, Audit: true, Feed: true, Priority: "high"}, now)
 	}
+	if pr := m.st.Relay.Pending; pr != nil && mailboxOf(m.keys.pendingRelay) != inherited {
+		pr.Recovery = r.ID // stored by this open: it waits for the phone's pairing (waitsForRecoveredPhone)
+	}
 	m.record(Activity{Kind: "recovery.completed", Ref: r.ID, Audit: true, Feed: true}, now)
 	recID := r.ID
 	appKeyFn := m.replacementPromoteFn(rep.next)
@@ -555,10 +588,16 @@ func (m *Manager) finishOpen(ctx context.Context, p RecoveryOpenParams, mv *Mani
 	now time.Time) (*Manager, *RecoveryOpenOutcome) {
 	var err error
 	m.relay = p.Relay(m.st.Relay.URL, m.keys.relay)
-	if m.limits, err = m.relay.Register(ctx); err != nil {
+	m.publishRelays()
+	// The current key's mailbox (a key pending since an earlier run was
+	// completed first, completeStoredRelayKey; one this recovery stored
+	// waits for the phone's pairing, and its rotate is signed by this key).
+	lim, err := m.relay.Register(ctx)
+	if err != nil {
 		m.zeroize()
 		return nil, out.fail(OpenRetry)
 	}
+	m.setLimits(lim)
 	if mv != nil && mv.Serial > m.hdr.ManifestSerial {
 		m.hdr.ManifestSerial = mv.Serial
 	}

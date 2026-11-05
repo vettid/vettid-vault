@@ -475,7 +475,15 @@ func TestRotationClearsBothMarks(t *testing.T) {
 	d.m.mu.Lock()
 	d.m.st.RotationOwed = &RotationOwed{Recovery: "r1", Transfer: "t1", DEKVersion: 1}
 	err := d.m.rotateIdentity(d.m.now())
+	o0 := d.m.st.RotationOwed
+	if err == nil {
+		err = completeRelayKey(d.m) // §3.4: the marks clear at the second write
+	}
 	o := d.m.st.RotationOwed
+	if o0 == nil || len(s.kinds("identity.rotated")) != 1 {
+		d.m.mu.Unlock()
+		t.Fatalf("cleared at the first write (%+v), or not audited at the second", o0)
+	}
 	d.m.mu.Unlock()
 	if err != nil || o != nil {
 		t.Fatalf("%v, owed %+v", err, o)
@@ -538,6 +546,9 @@ func TestMemberRotationSendsThePendingNoticeFirst(t *testing.T) {
 	w.relay.failMailbox = nil
 	w.m.mu.Lock()
 	err := managerHost{w.m}.RotateIdentity(w.m.now())
+	if err == nil {
+		err = completeRelayKey(w.m) // §3.4: the mark clears at the relay key's second write
+	}
 	o := w.m.st.RotationOwed
 	w.m.mu.Unlock()
 	if err != nil || o != nil {

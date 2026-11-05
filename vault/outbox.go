@@ -174,7 +174,7 @@ func (m *Manager) sendLocking(ctx context.Context) map[string]bool {
 		body := json.RawMessage(lb.String("unlock_id", m.unlockID).Bytes())
 		in := &envelope.Inner{ID: m.newID(now), Type: "vault.locking", TS: now, Exp: now.Add(time.Minute), Body: body}
 		if raw, err := kr.Current().Seal(in); err == nil {
-			if _, err := m.relay.Deposit(ctx, p.Relay.URL, p.Relay.Mailbox, p.Standing.Token, raw); err == nil {
+			if _, err := m.relayFor(p.Standing.Token).Deposit(ctx, p.Relay.URL, p.Relay.Mailbox, p.Standing.Token, raw); err == nil {
 				ok[p.ID] = true
 			}
 		}
@@ -296,7 +296,7 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 			continue // lost: the requester retransmits, which re-executes
 		}
 		if p := m.peer(e.PeerID); p != nil && p.Standing.Token != "" {
-			_, _ = m.relay.Deposit(ctx, e.RelayURL, e.Mailbox, p.Standing.Token, e.Payload)
+			_, _ = m.relayFor(p.Standing.Token).Deposit(ctx, e.RelayURL, e.Mailbox, p.Standing.Token, e.Payload)
 		}
 		suite.Wipe(e.Payload)
 	}
@@ -309,6 +309,10 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 		}
 		switch err := m.persist(ctx, false); {
 		case err == nil:
+			m.relayKeyStep(ctx, false) // §3.4: the rotation's relay key, then its second write
+			if m.st == nil {
+				return
+			}
 			m.drainOutbox(ctx)
 		case errors.Is(err, ErrSplitBrain):
 			// Another copy wrote the state: this one is zeroized and
@@ -336,11 +340,35 @@ func (m *Manager) deposit(ctx context.Context, e *OutboxEntry, now time.Time) er
 		e.Done = true
 		return nil
 	}
-	_, err := m.relay.Deposit(ctx, e.RelayURL, e.Mailbox, tok, e.Payload)
+	// Signed with the key the token was issued to: an old relay key while
+	// the recipient has issued none to the current one (§3.4 "Resending
+	// the new address" (a)).
+	oldKey := m.onOldKey(tok)
+	_, err := m.relayFor(tok).Deposit(ctx, e.RelayURL, e.Mailbox, tok, e.Payload)
 	if err == nil {
 		return nil
 	}
-	switch RelayCode(err) {
+	code := RelayCode(err)
+	if e.AddressUpdate && (code == CodeTokenExpired || code == CodeTokenRevoked || code == CodeMailboxUnknown) {
+		// A definite refusal ends the resends to that recipient (§3.4 (b));
+		// not audited. A recipient that followed the update refuses the old
+		// key (token_revoked): that is no reason to mark it stale.
+		m.endAddressUpdate(e.PeerID)
+		if code != CodeMailboxUnknown {
+			e.Done = true
+			return err
+		}
+	}
+	if code == CodeTokenRevoked && oldKey && p != nil && e.Token == "" {
+		// The recipient followed the new address and refuses the old key
+		// (a peer vault denylists it at once): the deposit waits for its
+		// token for the current key, which retryPeer releases.
+		e.NotBefore = now.Add(time.Hour)
+		e.AwaitToken = true
+		e.Attempts++
+		return err
+	}
+	switch code {
 	case CodeTokenExpired:
 		if p != nil && e.Token == "" {
 			if p.Kind == KindConnection {
@@ -355,17 +383,7 @@ func (m *Manager) deposit(ctx context.Context, e *OutboxEntry, now time.Time) er
 	case CodeTokenRevoked, CodeMailboxUnknown:
 		// Terminal: stop sending to that mailbox.
 		if p != nil && e.Token == "" {
-			p.State = PeerStale
-			m.audit(now, "peer_stale", p.ID)
-			for _, o := range m.st.Outbox {
-				if o.PeerID == p.ID {
-					o.Done = true
-				}
-			}
-			if p.Kind == KindConnection {
-				m.notifyDevices("connection.event", connEvent(p.ID, "stale"), "", now)
-				m.record(Activity{Kind: "connection.stale", ConnectionID: p.ID, Audit: true, Feed: true}, now)
-			}
+			m.markStale(p, now)
 		}
 		e.Done = true
 	case CodeTokenUsed:
@@ -380,6 +398,23 @@ func (m *Manager) deposit(ctx context.Context, e *OutboxEntry, now time.Time) er
 		}
 	}
 	return err
+}
+
+// markStale makes p stale (§7.4, §8.6): nothing more is sent to it; a
+// connection's devices are told (connection.event{stale}, a
+// connection.stale feed item), and it needs a new invitation.
+func (m *Manager) markStale(p *Peer, now time.Time) {
+	p.State = PeerStale
+	m.audit(now, "peer_stale", p.ID)
+	for _, o := range m.st.Outbox {
+		if o.PeerID == p.ID {
+			o.Done = true
+		}
+	}
+	if p.Kind == KindConnection {
+		m.notifyDevices("connection.event", connEvent(p.ID, "stale"), "", now)
+		m.record(Activity{Kind: "connection.stale", ConnectionID: p.ID, Audit: true, Feed: true}, now)
+	}
 }
 
 func (m *Manager) flushIfDirty(ctx context.Context) error {
@@ -444,6 +479,7 @@ func (m *Manager) housekeeping(now time.Time) {
 	m.ownerCheckTick(now)
 	m.attHousekeeping(m.attNow())
 	m.remintIssued(now)
+	m.relayKeyHousekeeping(now)
 	m.pruneHistories(now)
 	m.pruneIssued(now)
 	m.pruneRetiredKEMs(now)

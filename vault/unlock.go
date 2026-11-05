@@ -667,10 +667,19 @@ func (m *Manager) resume(ctx context.Context, p AltUnlockParams, out *AltUnlockO
 		// a transfer whose hs.init came before the lock starts again.
 		m.abortTransfer("locked", now)
 	}
-	var err error
 	m.relay = p.Relay(m.st.Relay.URL, m.keys.relay)
-	if m.limits, err = m.relay.Register(ctx); err != nil {
-		return fail(CodeRetry, err)
+	m.publishRelays()
+	// While a relay key is pending the unlock does not register the
+	// current key (after the grace that would make the old mailbox again):
+	// it calls the rotate instead, at §12.2 step 3 (§3.4).
+	if !m.rk.fromStorage {
+		lim, err := m.relay.Register(ctx)
+		if err != nil {
+			return fail(CodeRetry, err)
+		}
+		m.setLimits(lim)
+	} else {
+		m.storedLimits() // the last registration's (§3.4)
 	}
 	if !p.pinOnly {
 		m.unlockedBy = m.unlockDevice(p.DeviceIK)

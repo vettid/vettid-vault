@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -60,6 +61,102 @@ type stubRelay struct {
 	// blobs is an in-memory blob store (RELAY-PROTOCOL §6.8) two fixtures
 	// may share; nil: the relay has no blobs.
 	blobs *stubBlobs
+	// rot is the relay's answers to the relay-key rotation (§3.4), shared
+	// across unlocks when a test sets it; nil: every rotate succeeds.
+	rot *stubRot
+	// root is the relay a WithKey relay records its deposits on.
+	root *stubRelay
+	// now is the relay client's clock (nil: time.Now).
+	now func() time.Time
+}
+
+// stubRot scripts the rotate and registration answers (RELAY-PROTOCOL
+// §6.1, §6.7) and records the calls.
+type stubRot struct {
+	mu sync.Mutex
+	// rotate and register, if set, answer each call (nil: success).
+	rotate   func(newMailbox string) error
+	register func(mailbox string) (created bool, err error)
+	// rotated are the new mailboxes of the rotates made; registered the
+	// mailboxes registered (by RegisterCreated).
+	rotated    []string
+	registered []string
+	// limits, if set, are the registration's limits.
+	limits *Limits
+	// deleted are the mailboxes deleted; deleteErr fails a mailbox's.
+	deleted   []string
+	deleteErr map[string]error
+}
+
+// stubClaims reads a token's claims without verifying it.
+func stubClaims(tok string) (relayauth.Claims, bool) {
+	const prefix = "v4.public."
+	if !strings.HasPrefix(tok, prefix) {
+		return relayauth.Claims{}, false
+	}
+	body := strings.TrimPrefix(tok, prefix)
+	if i := strings.IndexByte(body, '.'); i >= 0 {
+		body = body[:i]
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(body)
+	if err != nil || len(raw) <= ed25519.SignatureSize {
+		return relayauth.Claims{}, false
+	}
+	c, err := relayauth.ParseClaims(raw[:len(raw)-ed25519.SignatureSize])
+	return c, err == nil
+}
+
+func (r *stubRelay) top() *stubRelay {
+	if r.root != nil {
+		return r.root
+	}
+	return r
+}
+
+func (r *stubRelay) RegisterCreated(context.Context) (Limits, bool, error) {
+	l := r.limitsOf()
+	t := r.top()
+	if t.rot == nil {
+		return l, false, nil
+	}
+	t.rot.mu.Lock()
+	defer t.rot.mu.Unlock()
+	mb := mailboxOf(r.key)
+	t.rot.registered = append(t.rot.registered, mb)
+	if t.rot.register != nil {
+		created, err := t.rot.register(mb)
+		return l, created, err
+	}
+	return l, false, nil
+}
+
+func (r *stubRelay) Rotate(_ context.Context, newKey ed25519.PrivateKey) (string, error) {
+	mb := mailboxOf(newKey)
+	t := r.top()
+	if t.rot == nil {
+		return mb, nil
+	}
+	t.rot.mu.Lock()
+	defer t.rot.mu.Unlock()
+	t.rot.rotated = append(t.rot.rotated, mb)
+	if t.rot.rotate != nil {
+		if err := t.rot.rotate(mb); err != nil {
+			return "", err
+		}
+	}
+	return mb, nil
+}
+
+func (r *stubRelay) WithKey(key ed25519.PrivateKey) Relay {
+	return &stubRelay{base: r.base, key: key, root: r.top(), claims: r.claims, blobs: r.blobs, now: r.now}
+}
+
+func (r *stubRelay) MintFreshToken(sub ed25519.PublicKey, ttl time.Duration, jti string, q *relayauth.Quota, ownerDevice bool) (string, error) {
+	now := time.Now
+	if r.now != nil {
+		now = r.now
+	}
+	return MintFresh(r.key, r.base, now(), sub, ttl, jti, q, ownerDevice)
 }
 
 // stubBlobs is a test relay's blob storage, keyed by blob id.
@@ -77,16 +174,40 @@ type stubBlob struct {
 type stubDeposit struct {
 	mailbox, token string
 	payload        []byte
+	// sender is the depositing key (X-VettID-Key); at, when the relay
+	// took it (deposited_at).
+	sender ed25519.PublicKey
+	at     time.Time
 }
 
 func (r *stubRelay) BaseURL() string { return r.base }
+
+// Register is recorded in rot.registered too (it answers 200, never the
+// script: the tests script the registrations of pending keys).
 func (r *stubRelay) Register(context.Context) (Limits, error) {
-	return Limits{MaxTokenLifetimeSeconds: 400 * 86400, OpenTokenMaxLifetimeSeconds: 7 * 86400, ClaimTTLSeconds: 7 * 86400}, nil
+	if t := r.top(); t.rot != nil {
+		t.rot.mu.Lock()
+		t.rot.registered = append(t.rot.registered, mailboxOf(r.key))
+		t.rot.mu.Unlock()
+	}
+	return r.limitsOf(), nil
+}
+
+func (r *stubRelay) limitsOf() Limits {
+	if t := r.top(); t.rot != nil && t.rot.limits != nil {
+		return *t.rot.limits
+	}
+	return Limits{MaxTokenLifetimeSeconds: 400 * 86400, OpenTokenMaxLifetimeSeconds: 7 * 86400, ClaimTTLSeconds: 7 * 86400}
 }
 func (r *stubRelay) Collector(context.Context, bool) (Collector, error) {
+	if r.root != nil {
+		return &fakeCollector{}, nil // an old key's (relay-key rotation tests)
+	}
 	return nil, errors.New("no collect")
 }
 func (r *stubRelay) Deposit(_ context.Context, _, mailbox, token string, payload []byte) (string, error) {
+	sender := r.key.Public().(ed25519.PublicKey)
+	r = r.top()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.failWith != nil {
@@ -95,10 +216,17 @@ func (r *stubRelay) Deposit(_ context.Context, _, mailbox, token string, payload
 	if err := r.failMailbox[mailbox]; err != nil {
 		return "", err
 	}
-	r.deposits = append(r.deposits, stubDeposit{mailbox, token, append([]byte(nil), payload...)})
+	// As the relay checks (RELAY-PROTOCOL §5.3): a deposit token's sub is
+	// the depositing key and its iss the mailbox (open tokens: any key).
+	// Tests' placeholder tokens that do not parse are let through.
+	if c, ok := stubClaims(token); ok && (c.Iss != mailbox || c.Sub != relayauth.OpenSub && c.Sub != relayauth.EncodeKey(sender)) {
+		return "", &relayclient.Error{Status: 401, Code: "token_invalid"}
+	}
+	r.deposits = append(r.deposits, stubDeposit{mailbox, token, append([]byte(nil), payload...), sender, time.Now()})
 	return fmt.Sprintf("m%d", len(r.deposits)), nil
 }
 func (r *stubRelay) Revoke(_ context.Context, kind, value string) error {
+	r = r.top()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.revoked = append(r.revoked, kind+":"+value)
@@ -126,6 +254,18 @@ func (r *stubRelay) GetClaim(_ context.Context, _, id string) ([]byte, error) {
 }
 func (r *stubRelay) DeleteClaim(context.Context, string) error { return nil }
 func (r *stubRelay) DeleteMailbox(context.Context) error {
+	if t := r.top(); t.rot != nil {
+		t.rot.mu.Lock()
+		mb := mailboxOf(r.key)
+		err := t.rot.deleteErr[mb]
+		if err == nil {
+			t.rot.deleted = append(t.rot.deleted, mb)
+		}
+		t.rot.mu.Unlock()
+		if err != nil {
+			return err
+		}
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.deleteErr != nil {
@@ -145,10 +285,10 @@ func (r *stubRelay) MintToken(sub ed25519.PublicKey, ttl time.Duration, jti stri
 var errStubNoBlob = &relayclient.Error{Status: 404, Code: "blob_unknown"}
 
 func (r *stubRelay) PutBlob(_ context.Context, _, mailbox, _ string, data []byte) (string, time.Time, error) {
-	if r.blobs == nil {
+	if r.top().blobs == nil {
 		return "", time.Time{}, &relayclient.Error{Status: 404, Code: "not_found"}
 	}
-	b := r.blobs
+	b := r.top().blobs
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.byID == nil {
@@ -161,15 +301,15 @@ func (r *stubRelay) PutBlob(_ context.Context, _, mailbox, _ string, data []byte
 }
 
 func (r *stubRelay) GetBlob(_ context.Context, id string) ([]byte, error) {
-	if h := r.getHook; h != nil {
+	if h := r.top().getHook; h != nil {
 		h()
 	}
-	if r.blobs == nil {
+	if r.top().blobs == nil {
 		return nil, errStubNoBlob
 	}
-	r.blobs.mu.Lock()
-	defer r.blobs.mu.Unlock()
-	b, ok := r.blobs.byID[id]
+	r.top().blobs.mu.Lock()
+	defer r.top().blobs.mu.Unlock()
+	b, ok := r.top().blobs.byID[id]
 	if !ok || b.mailbox != mailboxOf(r.key) {
 		return nil, errStubNoBlob
 	}
@@ -177,25 +317,25 @@ func (r *stubRelay) GetBlob(_ context.Context, id string) ([]byte, error) {
 }
 
 func (r *stubRelay) DeleteBlob(_ context.Context, id string) error {
-	if r.blobs == nil {
+	if r.top().blobs == nil {
 		return nil
 	}
-	r.blobs.mu.Lock()
-	defer r.blobs.mu.Unlock()
-	if b, ok := r.blobs.byID[id]; ok && b.mailbox == mailboxOf(r.key) {
-		delete(r.blobs.byID, id)
+	r.top().blobs.mu.Lock()
+	defer r.top().blobs.mu.Unlock()
+	if b, ok := r.top().blobs.byID[id]; ok && b.mailbox == mailboxOf(r.key) {
+		delete(r.top().blobs.byID, id)
 	}
 	return nil
 }
 
 func (r *stubRelay) ListBlobs(context.Context) (BlobList, error) {
-	if r.blobs == nil {
+	if r.top().blobs == nil {
 		return BlobList{}, &relayclient.Error{Status: 404, Code: "not_found"}
 	}
-	r.blobs.mu.Lock()
-	defer r.blobs.mu.Unlock()
+	r.top().blobs.mu.Lock()
+	defer r.top().blobs.mu.Unlock()
 	var out BlobList
-	for id, b := range r.blobs.byID {
+	for id, b := range r.top().blobs.byID {
 		if b.mailbox == mailboxOf(r.key) {
 			out.Blobs = append(out.Blobs, BlobEntry{BlobID: id, Size: int64(len(b.data)), Sender: b.sender})
 			out.UsedBytes += int64(len(b.data))

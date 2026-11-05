@@ -317,6 +317,18 @@ func (r *Responder) Kids() (recipient, sender suite.Kid) {
 	return r.sched.KidI2R, r.sched.KidR2I
 }
 
+// InitiatorIK returns the identity key the initiator's hs.fin must be
+// signed with.
+func (r *Responder) InitiatorIK() ed25519.PublicKey {
+	return append(ed25519.PublicKey(nil), r.verifyIK...)
+}
+
+// Sender returns the collect sender of the hs.init (the initiator's relay
+// key then): hs.fin must come from it (HandleFin).
+func (r *Responder) Sender() ed25519.PublicKey {
+	return append(ed25519.PublicKey(nil), r.sender...)
+}
+
 // Abort destroys the pending state.
 func (r *Responder) Abort() {
 	r.mu.Lock()

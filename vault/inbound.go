@@ -419,6 +419,7 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 		m.audit(now, "rotation_conflict_drop", p.ID)
 		return ackAfterFlush
 	}
+	m.noteFeatures(p, in.Features) // 0.86.0 (§10.8): it passed acceptFrom steps 1-4
 	if in.Type == handshake.TypeInit {
 		return m.handleRekeyInit(ctx, p, in, ep, raw, sender, now)
 	}
@@ -705,6 +706,7 @@ func (m *Manager) sendResponse(p *Peer, req *envelope.Inner, key string, out *en
 		return
 	}
 	out.ID, out.TS = id, now
+	out.Features = m.featuresFor(p) // counted in the size (0.86.0, §5.3)
 	// §8.1 (0.32.0): a response is never silence. One that cannot be
 	// sealed within §5.5's bound is replaced by response_too_large, which
 	// is cached and sent instead (sent only, for a volatile request).
@@ -716,7 +718,7 @@ func (m *Manager) sendResponse(p *Peer, req *envelope.Inner, key string, out *en
 		if kr == nil || kr.Current() == nil {
 			return
 		}
-		raw, err := kr.Current().Seal(out)
+		raw, err := m.sealFor(p, kr.Current(), out)
 		if err != nil {
 			return
 		}
@@ -750,6 +752,7 @@ func (m *Manager) resendCached(p *Peer, raw []byte) {
 	if err != nil {
 		return
 	}
+	in.Features = m.featuresFor(p)
 	if !m.fits(in) {
 		in = tooLarge(in) // cached by a release before §8.1's rule
 	}

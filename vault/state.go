@@ -277,6 +277,11 @@ type Peer struct {
 	// (§6.6): it sends nothing and accepts nothing until a new invitation
 	// replaces it.
 	Fork *ForkSuspension `json:"fork_suspension,omitempty"`
+
+	// PeerFeatures are the capability names the peer advertised (0.86.0,
+	// §10.8, §5.3), sorted; a name is only ever added. Nil: it advertised
+	// none (release 28 or earlier), which §3.4.1 rule L acts on.
+	PeerFeatures []string `json:"peer_features,omitempty"`
 }
 
 // EpochRecord is one epoch of a service connection's history (§6.6, 0.72.0).

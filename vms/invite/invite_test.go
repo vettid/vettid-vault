@@ -271,12 +271,12 @@ func TestBundleCapabilities(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(j), `"exp":"2026-10-01T12:10:00Z","capabilities":["attachments","recovery_offered","recovery_r","vote_rows"]`) {
+	if !strings.Contains(string(j), `"exp":"2026-10-01T12:10:00Z","capabilities":["attachments","hs_confirm","recovery_offered","recovery_r","vote_rows"]`) {
 		t.Fatalf("member order: %s", j)
 	}
 	blob, q := publish(t, b, KindApp)
 	got, err := OpenBundle(blob, q, t0)
-	if err != nil || !altchan.HasCapability(got.Capabilities, altchan.CapRecoveryR) || len(got.Capabilities) != 4 {
+	if err != nil || !altchan.HasCapability(got.Capabilities, altchan.CapRecoveryR) || len(got.Capabilities) != 5 {
 		t.Fatalf("%v %q", err, got.Capabilities)
 	}
 	// Removing a name changes the blob, which the QR's hash refuses.
@@ -307,7 +307,7 @@ func TestBundleCapabilities(t *testing.T) {
 	if _, err := bad.Marshal(); err == nil {
 		t.Fatal("unsorted capabilities accepted")
 	}
-	raw := strings.Replace(string(j), `["attachments","recovery_offered","recovery_r","vote_rows"]`, `["Recovery"]`, 1)
+	raw := strings.Replace(string(j), `["attachments","hs_confirm","recovery_offered","recovery_r","vote_rows"]`, `["Recovery"]`, 1)
 	if _, err := ParseBundle([]byte(raw)); err == nil {
 		t.Fatal("malformed capabilities parsed")
 	}

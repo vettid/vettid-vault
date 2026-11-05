@@ -70,7 +70,7 @@ func (m *Manager) sealAndQueueWake(p *Peer, in *envelope.Inner, wake string) str
 	if kr == nil || kr.Current() == nil || p.Fork != nil {
 		return "" // nothing is sent to a connection suspended on fork evidence (§6.6)
 	}
-	raw, err := kr.Current().Seal(in)
+	raw, err := m.sealFor(p, kr.Current(), in)
 	if err != nil {
 		return ""
 	}
@@ -104,7 +104,7 @@ func (m *Manager) sendWith(p *Peer, typ string, body json.RawMessage, o SendOpti
 	if kr == nil || kr.Current() == nil || p.Standing.Token == "" {
 		return ""
 	}
-	raw, err := kr.Current().Seal(in)
+	raw, err := m.sealFor(p, kr.Current(), in)
 	if err != nil {
 		return ""
 	}
@@ -173,7 +173,7 @@ func (m *Manager) sendLocking(ctx context.Context) map[string]bool {
 		}
 		body := json.RawMessage(lb.String("unlock_id", m.unlockID).Bytes())
 		in := &envelope.Inner{ID: m.newID(now), Type: "vault.locking", TS: now, Exp: now.Add(time.Minute), Body: body}
-		if raw, err := kr.Current().Seal(in); err == nil {
+		if raw, err := m.sealFor(p, kr.Current(), in); err == nil {
 			if _, err := m.relay.Deposit(ctx, p.Relay.URL, p.Relay.Mailbox, p.Standing.Token, raw); err == nil {
 				ok[p.ID] = true
 			}

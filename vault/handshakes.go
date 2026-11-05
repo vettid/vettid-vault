@@ -229,7 +229,10 @@ func (m *Manager) respondFirst(pi *handshake.PendingInit, inv *Invite, sender ed
 		return
 	}
 	p.Standing = held
-	cfg := handshake.ResponderConfig{Identity: m.keys.ik, Policy: policyFor(inv.Kind), CollectSender: sender, Now: now}
+	// 0.86.0 (§10.8): the hs.init's features count for the new record.
+	m.noteFeatures(p, pi.Inner().Features)
+	cfg := handshake.ResponderConfig{Identity: m.keys.ik, Policy: policyFor(inv.Kind), CollectSender: sender, Now: now,
+		Features: m.featuresFor(p)}
 	var issued []IssuedToken
 	if direct {
 		cfg.Token, issued, err = m.mintStanding(p, now, nil)
@@ -337,6 +340,7 @@ func (m *Manager) respondReconnect(pi *handshake.PendingInit, p *Peer, sender ed
 			return
 		}
 	}
+	m.noteFeatures(p, pi.Inner().Features) // 0.86.0, §10.8: steps 1-4 passed
 	kind, idx := classifyCtx(p, body.Ctx, now)
 	ownChain := p.OwnChainAtEpoch
 	switch kind {
@@ -376,7 +380,7 @@ func (m *Manager) respondReconnect(pi *handshake.PendingInit, p *Peer, sender ed
 		CollectSender: sender, RecordRelayKey: p.Relay.PK, KnownInitiatorIK: p.IK,
 		KnownInitiatorChain: parseRotations(p.Chain),
 		ExpectedCtx:         body.Ctx, Now: now,
-		Rotations: m.ownRotationsSince(ownChain),
+		Rotations: m.ownRotationsSince(ownChain), Features: m.featuresFor(p),
 	}
 	var issued []IssuedToken
 	var err error
@@ -517,6 +521,7 @@ func (m *Manager) handleRekeyInit(ctx context.Context, p *Peer, in *envelope.Inn
 	resp, env, err := pi.Respond(handshake.ResponderConfig{
 		Identity: m.keys.ik, Policy: policyFor(p.Kind), PinnedSuite: p.Suite,
 		CollectSender: sender, RecordRelayKey: p.Relay.PK, KnownInitiatorIK: p.IK, Now: now,
+		Features: m.featuresFor(p),
 	})
 	if err != nil {
 		m.audit(now, "rekey_refused", p.ID)
@@ -599,6 +604,9 @@ func (m *Manager) handleFin(ctx context.Context, id string, raw []byte, sender e
 	if p == nil {
 		fr.Epoch.Destroy()
 		return ackAfterFlush
+	}
+	if !p.suspended() {
+		m.noteFeatures(p, fr.Inner.Features) // 0.86.0, §10.8
 	}
 	if aw.Reconnect != nil {
 		m.finishReconnect(p, aw, fr, now)
@@ -870,6 +878,7 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 		res.Epoch.Destroy()
 		return ackAfterFlush
 	}
+	m.noteFeatures(p, res.Inner.Features) // 0.86.0, §10.8: even from a handshake then dropped
 	if og.Replaced {
 		// A rekey made on the replaced line (§6.6): the answer verified, so
 		// it is authenticated. From a second copy (a later ts) it is fork
@@ -971,7 +980,7 @@ func (m *Manager) startRekey(p *Peer, now time.Time) {
 	ini, err := handshake.NewInitiator(handshake.InitiatorConfig{
 		Purpose: handshake.PurposeRekey, Identity: m.keys.ik, StaticKEM: m.keys.kem.Public(), Relay: m.ownAddr(),
 		ResponderIK: p.IK, ResponderRelayKey: p.Relay.PK, Current: kr.Current(), PinnedSuite: p.Suite,
-		Policy: policyFor(p.Kind), Now: now,
+		Policy: policyFor(p.Kind), Now: now, Features: m.featuresFor(p),
 	})
 	if err != nil {
 		return
@@ -1007,7 +1016,7 @@ func (m *Manager) startReconnect(p *Peer, now time.Time) {
 		Identity: m.keys.ik, StaticKEM: m.keys.kem.Public(), Relay: m.ownAddr(),
 		Rotations:   m.ownRotationsSince(p.OwnChainAtEpoch),
 		ResponderIK: p.IK, KnownResponderChain: parseRotations(p.Chain), ResponderEK: kem, ResponderRelayKey: p.Relay.PK, PinnedSuite: p.Suite,
-		Policy: policyFor(p.Kind), Now: now,
+		Policy: policyFor(p.Kind), Now: now, Features: m.featuresFor(p),
 	}
 	if cfg.Token, issued, err = m.mintStanding(p, now, issued); err != nil {
 		return
@@ -1169,7 +1178,7 @@ func (m *Manager) acceptInvite(ctx context.Context, link, introBy string, now ti
 		Purpose: handshake.PurposeConnection, Ctx: b.InviteID,
 		Identity: m.keys.ik, StaticKEM: m.keys.kem.Public(), Relay: m.ownAddr(),
 		ResponderIK: b.Vault.IK, ResponderEK: b.Vault.KEM, ResponderRelayKey: b.Vault.Relay.PK,
-		Policy: handshake.PolicyVaultToVault, Now: now, Profile: profile,
+		Policy: handshake.PolicyVaultToVault, Now: now, Profile: profile, Features: m.featuresFor(p),
 	}
 	if cfg.Token, err = m.mintRequest(p, now); err != nil {
 		return nil, err

@@ -588,7 +588,7 @@ type CredentialBackupCopy interface {
 // (§3.5.7).
 var allowedWithoutCredential = map[string]bool{"vault.status": true, "vault.lock": true, "vault.delete": true, "credential.utk.get": true,
 	"credential.create": true, "credential.version": true, "relay.token.issued": true, "relay.token.refresh": true,
-	"relay.address.update": true}
+	"relay.address.update": true, TypeDeviceFeatures: true}
 
 // hasGate reports whether a credential feature is present.
 func (m *Manager) hasGate() bool {

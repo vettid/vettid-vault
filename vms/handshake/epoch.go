@@ -207,6 +207,23 @@ func (e *Epoch) retireSend() {
 	e.sendKey, e.rk = nil, nil
 }
 
+// retireSendOnly deletes the send key and keeps rk: a responder's
+// confirmed epoch while not current (0.86.0, §6.3.1) can still be rekeyed
+// from, but no longer sent in.
+func (e *Epoch) retireSendOnly() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	suite.Wipe(e.sendKey)
+	e.sendKey = nil
+}
+
+// HasRK reports whether the epoch still holds its rekey secret.
+func (e *Epoch) HasRK() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.rk != nil
+}
+
 // Destroy wipes every key of the epoch.
 func (e *Epoch) Destroy() {
 	e.mu.Lock()
@@ -217,11 +234,16 @@ func (e *Epoch) Destroy() {
 	e.sendKey, e.recvKey, e.rk = nil, nil, nil
 }
 
-// Keyring holds a session's current epoch and the receive keys of
-// previous epochs. It is safe for concurrent use.
+// Keyring holds a session's current epoch, the receive keys of previous
+// epochs and (0.86.0, §6.3.1) an initiator's pending epoch. A previous
+// epoch may keep more than its receive key for a while: a responder's
+// confirmed epoch keeps its rk, and the epoch an initiator activated
+// without confirmation superseded keeps its send key and rk, for a
+// revert. It is safe for concurrent use.
 type Keyring struct {
 	mu      sync.Mutex
 	current *Epoch
+	pending *Epoch
 	retired []retiredEpoch
 }
 
@@ -241,6 +263,181 @@ func (k *Keyring) Activate(e *Epoch, now time.Time) {
 	}
 	k.current = e
 	k.pruneLocked(now)
+}
+
+// Kept says what a superseded epoch keeps besides its receive key.
+type Kept uint8
+
+const (
+	KeepReceive Kept = iota // receive key only (§6.5)
+	KeepRK                  // and rk: a responder's confirmed epoch (§6.3.1)
+	KeepSend                // and the send key and rk: an epoch a reverting initiator may go back to (§6.3.1 "Deployment")
+)
+
+// ActivateKeeping makes e the current epoch as Activate does, but the
+// previous epoch keeps what kept says until until (0.86.0, §6.3.1).
+func (k *Keyring) ActivateKeeping(e *Epoch, now, until time.Time, kept Kept) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if c := k.current; c != nil {
+		switch kept {
+		case KeepReceive:
+			c.retireSend()
+			until = now.Add(ReceiveKeyRetention)
+		case KeepRK:
+			c.retireSendOnly()
+		}
+		k.retired = append(k.retired, retiredEpoch{e: c, until: until})
+	}
+	k.current = e
+	k.pruneLocked(now)
+}
+
+// SetPending records e as the initiator's pending epoch (§6.3.1): it opens
+// messages but is not current. An earlier pending epoch is abandoned.
+func (k *Keyring) SetPending(e *Epoch, now time.Time) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.abandonPendingLocked(now)
+	k.pending = e
+}
+
+// Pending returns the pending epoch (nil if none).
+func (k *Keyring) Pending() *Epoch {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.pending
+}
+
+// ConfirmPending makes the pending epoch current (§6.3.1): the previous
+// current epoch is retired as Activate retires it. It returns the epoch,
+// or nil if none was pending.
+func (k *Keyring) ConfirmPending(now time.Time) *Epoch {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	e := k.pending
+	if e == nil {
+		return nil
+	}
+	k.pending = nil
+	if k.current != nil {
+		k.current.retireSend()
+		k.retired = append(k.retired, retiredEpoch{e: k.current, until: now.Add(ReceiveKeyRetention)})
+	}
+	k.current = e
+	k.pruneLocked(now)
+	return e
+}
+
+// AbandonPending abandons the pending epoch (§6.3.1): its receive key is
+// kept 16 days as a previous epoch's, nothing else.
+func (k *Keyring) AbandonPending(now time.Time) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.abandonPendingLocked(now)
+}
+
+func (k *Keyring) abandonPendingLocked(now time.Time) {
+	if k.pending == nil {
+		return
+	}
+	k.pending.retireSend()
+	k.retired = append(k.retired, retiredEpoch{e: k.pending, until: now.Add(ReceiveKeyRetention)})
+	k.pending = nil
+}
+
+// Reinstate makes the superseded epoch id current again (a revert,
+// §6.3.1 "Deployment"): the current epoch is destroyed. It reports false,
+// changing nothing, unless id is a superseded epoch that kept its send key.
+func (k *Keyring) Reinstate(id [suite.EpochIDSize]byte) bool {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	for i, r := range k.retired {
+		if r.e.id != id || !r.e.CanSend() || !r.e.HasRK() {
+			continue
+		}
+		if k.current != nil {
+			k.current.Destroy()
+		}
+		k.current = r.e
+		k.retired = append(k.retired[:i], k.retired[i+1:]...)
+		return true
+	}
+	return false
+}
+
+// Release ends what the superseded epoch id kept beyond its receive key:
+// its send key and rk are deleted, and its receive key is kept until
+// until, or its earlier end.
+func (k *Keyring) Release(id [suite.EpochIDSize]byte, until time.Time) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	for i := range k.retired {
+		r := &k.retired[i]
+		if r.e.id == id {
+			r.e.retireSend()
+			if until.Before(r.until) {
+				r.until = until
+			}
+		}
+	}
+}
+
+// Retain sets when the superseded epoch id's keys end.
+func (k *Keyring) Retain(id [suite.EpochIDSize]byte, until time.Time) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	for i := range k.retired {
+		if k.retired[i].e.id == id {
+			k.retired[i].until = until
+		}
+	}
+}
+
+// DestroyEpoch destroys the epoch id wherever it is (current, pending or
+// superseded) and forgets it.
+func (k *Keyring) DestroyEpoch(id [suite.EpochIDSize]byte) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.current != nil && k.current.id == id {
+		k.current.Destroy()
+		k.current = nil
+	}
+	if k.pending != nil && k.pending.id == id {
+		k.pending.Destroy()
+		k.pending = nil
+	}
+	kept := k.retired[:0]
+	for _, r := range k.retired {
+		if r.e.id == id {
+			r.e.Destroy()
+			continue
+		}
+		kept = append(kept, r)
+	}
+	for i := len(kept); i < len(k.retired); i++ {
+		k.retired[i] = retiredEpoch{}
+	}
+	k.retired = kept
+}
+
+// Find returns the epoch id (current, pending, or superseded and still
+// kept), or nil.
+func (k *Keyring) Find(id [suite.EpochIDSize]byte) *Epoch {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.current != nil && k.current.id == id {
+		return k.current
+	}
+	if k.pending != nil && k.pending.id == id {
+		return k.pending
+	}
+	for _, r := range k.retired {
+		if r.e.id == id {
+			return r.e
+		}
+	}
+	return nil
 }
 
 // Current returns the current epoch (nil if none).
@@ -280,6 +477,9 @@ func (k *Keyring) lookup(kid suite.Kid, now time.Time) *Epoch {
 	if k.current != nil && kid.Equal(k.current.recvKid) {
 		found = k.current
 	}
+	if k.pending != nil && kid.Equal(k.pending.recvKid) && found == nil {
+		found = k.pending
+	}
 	for _, r := range k.retired {
 		if !now.After(r.until) && kid.Equal(r.e.recvKid) && found == nil {
 			found = r.e
@@ -311,6 +511,10 @@ func (k *Keyring) Destroy() {
 	if k.current != nil {
 		k.current.Destroy()
 		k.current = nil
+	}
+	if k.pending != nil {
+		k.pending.Destroy()
+		k.pending = nil
 	}
 	for _, r := range k.retired {
 		r.e.Destroy()

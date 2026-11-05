@@ -20,7 +20,16 @@ const (
 	TypeInit = "hs.init"
 	TypeResp = "hs.resp"
 	TypeFin  = "hs.fin"
+	// TypeConfirm (0.86.0, §6.3.1) is the responder's confirmation of a
+	// rekey or reconnect: body {}, session mode under the new epoch,
+	// durable, not a request.
+	TypeConfirm = "hs.confirm"
 )
+
+// CapConfirm is the capability name a side that implements §6.3.1
+// advertises (0.86.0, "Deployment").
+const CapConfirm = "hs_confirm"
+
 
 // Purpose is the hs.init purpose (§6.2).
 type Purpose string
@@ -91,7 +100,7 @@ type Init struct {
 	ReconnectToken string // "" when absent
 	Suites         []int
 	Profile        json.RawMessage       // optional object
-	Rotations      []*Rotation           // reconnect only
+	Rotations      []*Rotation           // reconnect, and rekey (0.85.0 S8)
 	DeviceAttest   *altchan.DeviceAttest // purpose app only (§6.7, §11.7)
 	// APIKey is the new app's app key, SPKI DER (0.15.0, §6.2, §11.12):
 	// purpose app only; the vault requires it in a transfer's hs.init.
@@ -377,7 +386,9 @@ func (in *Init) validate() error {
 	if len(in.Profile) > 0 && !(in.Purpose.IsPairing() || in.Purpose == PurposeConnection) {
 		return ErrBody
 	}
-	if len(in.Rotations) > 0 && in.Purpose != PurposeReconnect {
+	if len(in.Rotations) > 0 && in.Purpose != PurposeReconnect && in.Purpose != PurposeRekey {
+		// 0.85.0 S8: a rekey's hs.init carries the links since the epoch's
+		// signer too (release 28 and earlier refuse them).
 		return ErrBody
 	}
 	if len(in.Rotations) > MaxRotations {
@@ -553,7 +564,7 @@ func (r *Resp) validate(p Purpose) error {
 	if r.Suite < 0 || r.Suite > 255 || len(r.Sig) != ed25519.SignatureSize {
 		return ErrBody
 	}
-	if len(r.Rotations) > 0 && p != PurposeReconnect {
+	if len(r.Rotations) > 0 && p != PurposeReconnect && p != PurposeRekey {
 		return ErrBody
 	}
 	if len(r.Rotations) > MaxRotations {

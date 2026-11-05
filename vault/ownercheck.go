@@ -509,8 +509,8 @@ func (m *Manager) countHeld(a Activity) {
 // device p while the vault is due or held.
 func (m *Manager) holdAllows(p *Peer, typ, state string) bool {
 	switch typ {
-	case tokenIssuedType, tokenRefreshType, "relay.address.update":
-		return true // any device: the transport types
+	case tokenIssuedType, tokenRefreshType, "relay.address.update", TypeDeviceFeatures:
+		return true // any device: the transport types (device.features, §10.2)
 	}
 	deadline := m.st.OwnerCheck.Deadline
 	switch p.Kind {

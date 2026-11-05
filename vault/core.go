@@ -72,6 +72,7 @@ func (m *Manager) registerCore() {
 	r("identity.rotate", false, conns, m.hIdentityRotate)
 	r(TypeRotationResolve, true, []string{KindApp}, m.hRotationResolve) // release R (§3.4)
 	r("relay.address.update", false, all, m.hAddressUpdate)
+	r(TypeDeviceFeatures, false, devices, m.hDeviceFeatures) // 0.85.4, §10.2
 	r("settings.get", true, owners, m.hSettingsGet)
 	r("settings.set", true, owners, m.hSettingsSet)
 	r("account.get", true, owners, m.hAccountGet)
@@ -341,7 +342,7 @@ func (m *Manager) removePeer(p *Peer, notice string, now time.Time) {
 func (m *Manager) removePeerWith(p *Peer, notice string, body json.RawMessage, now time.Time) {
 	if kr := m.sessions[p.ID]; kr != nil && kr.Current() != nil && p.Standing.Token != "" && p.State == PeerActive {
 		in := &envelope.Inner{ID: m.newID(now), Type: notice, TS: now, Body: body}
-		if raw, err := kr.Current().Seal(in); err == nil {
+		if raw, err := m.sealFor(p, kr.Current(), in); err == nil {
 			m.queueDeposit(&OutboxEntry{RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Token: p.Standing.Token,
 				Payload: raw, BestEffort: true}, now)
 		}

@@ -138,7 +138,9 @@ type PeerRec struct {
 	DropAns       []int    // §6.3.1 (J): answers to destroy after this flush (no standing token)
 	IdResend      int64    // S5 resend: last identity.rotate resend to this peer
 	IdResendBatch bool     // ...in this batch
-	Reconfirm     bool     // a message under the confirmed epoch in this batch: queue hs.confirm
+	IdResendN     int      // resends for the rotation IdResendRot (at most 3)
+	IdResendRot   int64
+	Reconfirm     bool // a message under the confirmed epoch in this batch: queue hs.confirm
 
 	IK, KEM Key
 	Chain   []IKLink // followed identity links

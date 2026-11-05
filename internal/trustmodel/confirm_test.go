@@ -199,10 +199,14 @@ func (p *Party) idResend(r *PeerRec, m *RMsg) {
 	if ep == nil || ep.Own == p.st.IK || p.ownLinks(ep.Own) == nil || m.DepAt < p.st.LastRot {
 		return
 	}
-	if r.IdResendBatch || p.w.Now-r.IdResend < hour {
+	if r.IdResendRot != p.st.LastRot {
+		r.IdResendRot, r.IdResendN = p.st.LastRot, 0
+	}
+	if r.IdResendBatch || p.w.Now-r.IdResend < hour || r.IdResendN >= 3 {
 		return
 	}
 	r.IdResend, r.IdResendBatch = p.w.Now, true
+	r.IdResendN++
 	links := p.ownLinks(ep.Own)
 	p.w.stat("A:identity.rotate-resent")
 	p.enqueue(r.ID, Msg{Kind: KIdRot, Rot: links}, nil)

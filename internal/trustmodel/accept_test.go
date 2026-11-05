@@ -45,8 +45,12 @@ func (q *Party) handle(m *RMsg, set []Key) bool {
 		}
 		return true
 	}
-	w.recordEvidence(q, r, M)
 	pos := Pos{m.Box, m.ID, m.DepAt}
+	// I4 (0.86.0): only messages from keys Q knows for P, or a handshake
+	// Q can attribute to P (by its answer or open handshake)
+	if !w.optA || M.Kind == KResp || M.Kind == KFin || r.relayState(m.Sender, pos) != rkForeign {
+		w.recordEvidence(q, r, M)
+	}
 	q.beforeAccept(r, m, pos)
 	d := q.acceptFrom(r, m, pos, set)
 	w.stat("cell " + d.Cell)

@@ -794,7 +794,11 @@ func runActions(cfg Config, seed uint64, acts []Action, verbose bool) *World {
 	case "off": // no fix B (2da316e F1), for attribution
 		w.fixBStrict, w.fixBOff = false, true
 	}
-	w.featMode = os.Getenv("TRUSTMODEL_FEATMODE") // "" (first contact), echo, always
+	w.featMode = os.Getenv("TRUSTMODEL_FEATMODE") // "" or always (the spec: every message), first, echo
+	if w.featMode == "" {
+		w.featMode = "always"
+	}
+	w.r28Spec = os.Getenv("TRUSTMODEL_R28") == "spec"
 	defer w.expoStats()
 	defer w.gateStats()
 	for _, a := range acts {

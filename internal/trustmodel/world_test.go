@@ -36,12 +36,22 @@ type World struct {
 	f1Window      bool              // alternative: F1-demote only if the link's inner ts > the epoch's activation + T + 2 days
 	fixBOff       bool              // F1 as in 2da316e (no fix B); attribution runs only
 	fixBStrict    bool              // F1 (default, lead's choice): keep the ungated epoch only if the peer's new ik signed something under it
-	featMode      string            // "": features with the first message after an upgrade; echo: also when first seeing the peer's; always: on every message
+	r28Spec       bool              // TRUSTMODEL_R28=spec: release-28 parties follow f4a4d97 §3.4.1 (before r6); default: the release-28 code
+	featMode      string            // always (default, the spec): features on every message; first: with the first message after an upgrade; echo: also when first seeing the peer's
 	upAt          map[PID]int64     // upgrade mode: when each party upgraded from release 28
 	gateOpenAt    map[[2]PID]int64  // when q first saw r's features (q, r)
 	copyExpo      map[[2]int]*expo  // (honest party, copy epoch): when it was used
 	ownCopyStrict bool              // a92a6eb's own_copy wording (and nothing received from P); default: lead fix A
 	debugUnlinked bool              // scenarios: the relay's rotate and registration get no answer
+
+	// Fix switches for the review findings (f_scenarios_test.go). Each is
+	// false by default (the fix on); true turns that one fix off.
+	noF5        bool // F5: a message confirms only after its handler accepted it (not before step 5 and the handler)
+	noF9        bool // F9: token_expired keeps the pending epoch (so startHS refuses the reconnect)
+	noF10       bool // F10: hs.confirm queued again for every such batch, even with one still in the outbox
+	noF13B      bool // F13: B judged on time alone, not only after the first short collect after an unlock
+	noConfRekey bool // F13 §6.2 and lead item 6: a rekey whose ctx is the responder's confirmed (not current) epoch is refused
+	noLead5     bool // lead item 5: the revert does not re-seal what was sent under the new epoch
 
 	issuer   map[int]Key    // jti -> iss: a token "verifies" only if its issuer minted it
 	epTruth  map[int][2]PID // epoch -> (initiator actor, responder actor)
@@ -613,7 +623,7 @@ func (p *Party) deposit(e *Entry, r *PeerRec) {
 			return
 		}
 		m.Epoch = r.Cur
-		if m.Kind == KIdRot {
+		if m.Kind == KIdRot && !p.r28Code() { // release 28: one statement per rotation, its own (vault/core.go:744-747)
 			// S8: rotations from the signer of the epoch it travels in
 			if ep := r.epoch(r.Cur); ep != nil {
 				if l := p.ownLinks(ep.Own); len(l) > 0 {
@@ -648,11 +658,16 @@ func (p *Party) deposit(e *Entry, r *PeerRec) {
 		return
 	}
 	w.logf("%s -> %s: %s refused %s (with %d, box %d)", p.Name, w.party(e.To).Name, kindName[m.Kind], err, with, box)
+	if p.r28Code() && e.Tok.JTI == 0 && (err == tokenRevoked || err == mailboxUnknown) && r.Status == stActive {
+		// release 28: terminal deposit errors make the peer stale (vault/outbox.go:355-368)
+		p.markStale(r, "deposit refused ("+string(err)+")")
+		p.h5(r, -1)
+	}
 	switch err {
 	case rateLimited:
 		e.Indef = true
 	case tokenExpired:
-		if r.Pend != nil {
+		if r.Pend != nil && !w.noF9 {
 			p.abandonPending(r, "token_expired", false) // §6.3.1
 		}
 		if !r.Device {

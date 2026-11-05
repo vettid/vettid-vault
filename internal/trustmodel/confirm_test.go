@@ -209,7 +209,7 @@ func (q *Party) beforeAccept(r *PeerRec, m *RMsg, pos Pos) {
 			return
 		}
 	}
-	if r.Pend != nil && M.Epoch == r.Pend.ID && M.Kind != KFin {
+	if r.Pend != nil && M.Epoch == r.Pend.ID && M.Kind != KFin && !q.w.noF5 { // noF5: see handle
 		q.confirm(r)
 	}
 	if !q.respHalf() {
@@ -244,6 +244,9 @@ func (q *Party) revert(r *PeerRec, rekeyIn bool) {
 	q.w.stat("A:reverted")
 	q.w.logf("%s: E%d with %s REVERTED to E%d (the peer never activated it); connection.epoch_reverted", q.Name, gone, q.w.party(r.ID).Name, r.Cur)
 	for _, m := range r.RevSent { // lead item 5: re-sealed in the restored epoch, same inner id
+		if q.w.noLead5 {
+			break // switch: what was sent under the destroyed epoch is lost
+		}
 		q.w.stat("A:revert-resealed")
 		c := cloneMsg(m)
 		c.Ts = q.now() // same inner id, a new ts
@@ -284,7 +287,7 @@ func (q *Party) reconfirm() {
 		queued := slices.ContainsFunc(q.st.Out, func(e Entry) bool {
 			return e.To == r.ID && e.M.Kind == KConfirm && !e.Done && !e.Ended
 		})
-		if r.Cur != 0 && !q.OldConfirm && !queued {
+		if r.Cur != 0 && !q.OldConfirm && (!queued || q.w.noF10) { // noF10: no cap
 			q.w.stat("A:hs.confirm-again")
 			q.enqueue(r.ID, Msg{Kind: KConfirm, Epoch: r.Cur}, nil)
 		}
@@ -294,7 +297,7 @@ func (q *Party) reconfirm() {
 // tickA: §6.3.1 timers.
 func (p *Party) tickA(r *PeerRec) {
 	w := p.w
-	if pe := r.Pend; pe != nil && w.Now-pe.FinAt > aPendLife && p.collectedSinceUnlock {
+	if pe := r.Pend; pe != nil && w.Now-pe.FinAt > aPendLife && (p.collectedSinceUnlock || w.noF13B) {
 		p.abandonPending(r, "B passed", true)
 	}
 	if r.RevOld != 0 && w.Now > r.RevUntil {

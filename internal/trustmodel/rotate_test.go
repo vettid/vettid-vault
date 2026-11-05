@@ -51,8 +51,16 @@ func (p *Party) rotate(path int) {
 			}
 			p.enqueue(r.ID, Msg{Kind: KIdRot, Rot: []IKLink{l}}, nil)
 			// S5: abandon own rekeys and reconnects (and pending epochs, §6.3.1),
-			// start again after identity.rotate
-			if o := r.Own; o != nil {
+			// start again after identity.rotate. Release 28: rekeys only
+			// (vault/core.go:747-757: dropRekey, startRekey).
+			if p.r28Code() {
+				if o := r.Own; o != nil && !o.Reconnect {
+					p.abandonOwn(r)
+				}
+				if r.Own == nil {
+					p.startHS(r, false)
+				}
+			} else if o := r.Own; o != nil {
 				rc := o.Reconnect
 				p.abandonOwn(r)
 				p.startHS(r, rc)
@@ -181,6 +189,9 @@ func (p *Party) startHS(r *PeerRec, reconnect bool) {
 		InitHalf: p.initHalf(r)}
 	m := Msg{Kind: KInit, HS: h.ID, Reconnect: reconnect, Ctx: ep.ID, FromIK: p.st.IK, FromKEM: p.st.KEM,
 		FromRelay: r.KeyFor, Rot: p.ownLinks(ep.Own)}
+	if p.r28Code() && !reconnect {
+		m.Rot = nil // release 28: a rekey carries no rotations (vault/handshakes.go:972)
+	}
 	var f func(*Entry)
 	if reconnect {
 		rt := r.reconnectTok(r.KeyFor, r.Relay, w.Now)
@@ -293,7 +304,12 @@ func (p *Party) tick() {
 			if r.Status != stActive {
 				continue
 			}
-			if o := r.Own; o != nil {
+			if o := r.Own; o != nil && p.r28Code() {
+				if w.Now-o.Started > r28HSLife { // vault/outbox.go:427: dropped, never stale
+					p.abandonOwn(r)
+					w.stat("r28:own-handshake-expired")
+				}
+			} else if o != nil {
 				if o.Reconnect && w.Now-o.Started > w.hsLifeFor(true) {
 					p.markStale(r, "reconnect failed")
 					p.h5(r, -1)
@@ -305,8 +321,12 @@ func (p *Party) tick() {
 					p.startHS(r, o.Reconnect)
 				}
 			}
+			life := w.answerLife()
+			if p.r28Code() {
+				life = r28HSLife // vault/outbox.go:421
+			}
 			for _, a := range slices.Clone(r.Ans) {
-				if w.Now-a.Started > w.answerLife() {
+				if w.Now-a.Started > life {
 					p.dropAnswer(r, a.ID)
 				}
 			}
@@ -333,7 +353,7 @@ func (p *Party) tick() {
 					p.startHS(r, false)
 				}
 			}
-			if r.Device && r.standing(r.KeyFor, r.Relay, w.Now).JTI == 0 {
+			if r.Device && r.standing(r.KeyFor, r.Relay, w.Now).JTI == 0 && !p.r28Code() {
 				p.markStale(r, "tokens expired (needs pairing)")
 				p.h5(r, -1)
 				continue

@@ -65,7 +65,16 @@ func (q *Party) handle(m *RMsg, set []Key) bool {
 		w.recordEvidence(q, r, M)
 	}
 	q.beforeAccept(r, m, pos)
-	d := q.acceptFrom(r, m, pos, set)
+	var d dec
+	if q.r28Code() {
+		d = q.acceptR28(r, m, pos, set) // release 28 as the code is (r28_test.go)
+	} else {
+		d = q.acceptFrom(r, m, pos, set)
+	}
+	if w.noF5 && q.newSpec() && r.Pend != nil && M.Epoch == r.Pend.ID && M.Kind != KFin &&
+		(d.Out == "accept" || d.Out == "answer" || d.Out == "follow" || d.Out == "ignore") {
+		q.confirm(r) // switch noF5: the confirmation only once the handler has accepted the message
+	}
 	w.stat("cell " + d.Cell)
 	w.stat("out " + d.Out)
 	w.logf("%s <- %s: %s via %d: %s", q.Name, w.party(r.ID).Name, describe(M), m.Sender, d)
@@ -713,7 +722,7 @@ func (q *Party) tableBInit(r *PeerRec, m *RMsg, pos Pos) dec {
 			}
 		}
 	} else {
-		if q.respHalf() && r.ConfID != 0 && r.ConfID != r.Cur && M.Ctx == r.ConfID && M.Epoch == r.ConfID {
+		if q.respHalf() && !q.w.noConfRekey && r.ConfID != 0 && r.ConfID != r.Cur && M.Ctx == r.ConfID && M.Epoch == r.ConfID {
 			cell += ":confirmed-epoch" // §6.3.1: accepted as if current (F2: ordinary); my own rekey for it ends
 			namedConf = true
 			if o := r.Own; o != nil && !o.Reconnect {
@@ -758,6 +767,13 @@ func (q *Party) tableBInit(r *PeerRec, m *RMsg, pos Pos) dec {
 			q.dropAnswer(r, a.ID)
 		}
 	}
+	return q.answerInit(r, m, cell, app, fork, namedConf)
+}
+
+// answerInit: the answer to an accepted hs.init (hs.resp queued, the
+// answer kept until hs.fin).
+func (q *Party) answerInit(r *PeerRec, m *RMsg, cell string, app []IKLink, fork, namedConf bool) dec {
+	M := m.P
 	var toks []Token
 	box := Key(0)
 	var tok Token

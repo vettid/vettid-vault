@@ -458,6 +458,43 @@ func TestStep1RefusedWhileStateBehind(t *testing.T) {
 	}
 }
 
+// A PIN change while the stored state lags memory spends nothing: it is
+// refused before the counter closes the generation or the header's
+// recovery fields change, so the backup stays armed; after the state is
+// stored the change goes on.
+func TestPINChangeRefusedWhileStateBehindSpendsNothing(t *testing.T) {
+	f := newRFixture(t)
+	f.arm()
+	f.flush()
+	g, wrap := f.m.hdr.Rec.Generation, f.m.hdr.Rec.Wrap
+	f.m.mu.Lock()
+	f.st.mu.Lock()
+	f.st.failState = 1
+	f.st.mu.Unlock()
+	f.m.dirty = true
+	if err := f.m.persist(context.Background(), false); err == nil {
+		f.m.mu.Unlock()
+		t.Fatal("the state write did not fail")
+	}
+	f.m.mu.Unlock()
+	pinChange := SecretChange{Reason: ReplacePIN, PIN: testPIN, NewPIN: rPIN2, Password: []byte(rPW), NewUnlockSecret: testSecret2}
+	err := f.change(pinChange)
+	var he *HandlerError
+	if !errors.As(err, &he) || he.Code != "retry" {
+		t.Fatalf("a PIN change while the state is behind: %v", err)
+	}
+	if f.m.hdr.Rec.Generation != g || f.m.hdr.Rec.Wrap == nil || !bytes.Equal(f.m.hdr.Rec.Wrap.Wrap, wrap.Wrap) || f.m.hdr.Rec.ClosedUnchanged {
+		t.Fatal("the refused change closed the generation or disarmed the backup")
+	}
+	f.flush()
+	if err := f.change(pinChange); err != nil {
+		t.Fatalf("after the state was stored: %v", err)
+	}
+	if f.m.hdr.Rec.Generation == g {
+		t.Fatal("the change did not open a new generation")
+	}
+}
+
 // An older header served after the change opens nothing newer (§11.14.2,
 // "The host serves the old header again later").
 func TestOldHeaderOpensNothingNewer(t *testing.T) {

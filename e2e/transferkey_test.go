@@ -353,6 +353,7 @@ type stateFaults struct {
 	// sawState: a state write of vid since its last header write.
 	atStep1  int
 	sawState bool
+	failed   int // state writes failed so far
 }
 
 func (s *stateFaults) headerPuts() int { s.mu.Lock(); defer s.mu.Unlock(); return s.headers }
@@ -367,6 +368,7 @@ func (s *stateFaults) Put(ctx context.Context, key string, data []byte, ifMatch 
 		}
 		if s.fail > 0 {
 			s.fail--
+			s.failed++
 			s.mu.Unlock()
 			return "", errors.New("injected state write failure")
 		}
@@ -493,6 +495,14 @@ func TestTransferFailedStep2ThenStored(t *testing.T) {
 	sf.atStep1 = 1 // step 2's write fails; the next one succeeds
 	sf.mu.Unlock()
 	_ = w.a.dev.TransferApprove(ctxT(t, 20*time.Second), id, acPIN, credPW)
+	// The fault fired, on step 2: step 1 (a header with no state write
+	// before it) armed it, and exactly one state write failed.
+	sf.mu.Lock()
+	failed, armed := sf.failed, sf.atStep1 == 0 && sf.fail == 0
+	sf.mu.Unlock()
+	if failed != 1 || !armed {
+		t.Fatalf("the step-2 fault: %d writes failed, armed and spent %v", failed, armed)
+	}
 	// A later batch whose write succeeds (if the approval's retransmission
 	// did not store it first): the vault keeps running.
 	if _, err := w.a.dev.CredentialVersion(ctx); err != nil {

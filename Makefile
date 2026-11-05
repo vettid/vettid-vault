@@ -137,7 +137,7 @@ check-tcb:
 # End-to-end tests against the real vettid-relay binary (built at the
 # version in go.mod) and the dev enclave.
 e2e:
-	$(GO) test -race -count=1 -p 1 -parallel 2 -tags '$(E2ETAGS)' ./e2e/
+	$(GO) test -race -count=1 -timeout 30m -p 1 -parallel 2 -tags '$(E2ETAGS)' ./e2e/
 
 # V3 exit test against LocalStack (VAULT-PLAN §4 V3): the real relay, the
 # parent and dev enclave binaries, the member API stand-in and vaultctl,

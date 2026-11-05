@@ -976,10 +976,13 @@ func (m *Manager) startRekey(p *Peer, now time.Time) {
 	if err != nil {
 		return
 	}
-	if _, err := m.recordOutgoing(ini, p.ID, nil, handshake.PurposeRekey, nil, now); err != nil {
+	og, err := m.recordOutgoing(ini, p.ID, nil, handshake.PurposeRekey, nil, now)
+	if err != nil {
 		return
 	}
-	m.queueDeposit(&OutboxEntry{Op: OpDeposit, PeerID: p.ID, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Payload: ini.Envelope()}, now)
+	oe := &OutboxEntry{Op: OpDeposit, PeerID: p.ID, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Payload: ini.Envelope()}
+	m.queueDeposit(oe, now)
+	og.InitOutbox = oe.ID // so a rekey abandoned before the deposit sends nothing (restoreLive)
 }
 
 // startReconnect initiates a reconnect to connection p with its reconnect

@@ -95,8 +95,50 @@ func TestRotatedReconnectAbandonedAtUnlock(t *testing.T) {
 	}
 	defer m.Crash()
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	checkAbandoned(t, m, ogID, initOutbox, issued)
+	m.mu.Unlock()
+	// A reconnect's cleanup tells the devices nothing: the connection
+	// stays (only a new connection's devices hear that it failed).
+	d.m = m
+	_ = d.appInbox()
+	if err := m.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, ev := range d.appInbox() {
+		if ev.Type == "connection.event" {
+			t.Fatalf("a reconnect's cleanup sent connection.event %s", ev.Body)
+		}
+	}
+}
+
+// A rekey records its hs.init's outbox entry, so one abandoned before the
+// deposit (a restore that refuses it) sends nothing.
+func TestRekeyAbandonedSendsNoInit(t *testing.T) {
+	d := newDevFixture(t)
+	d.m.mu.Lock()
+	defer d.m.mu.Unlock()
+	var dev *Peer
+	for _, p := range d.m.st.Devices {
+		dev = p
+	}
+	d.m.dropRekey(dev.ID)
+	d.m.startRekey(dev, d.m.now())
+	var og *OutgoingHS
+	for _, o := range d.m.st.Outgoing {
+		if o.PeerID == dev.ID && o.Purpose == handshake.PurposeRekey {
+			og = o
+		}
+	}
+	if og == nil || og.InitOutbox == "" {
+		t.Fatalf("the rekey's hs.init is not recorded: %+v", og)
+	}
+	init := og.InitOutbox
+	d.m.abandonOutgoing(og.ID, d.m.now())
+	for _, e := range d.m.st.Outbox {
+		if e.ID == init && !e.Done {
+			t.Fatal("the abandoned rekey's hs.init is still to be sent")
+		}
+	}
 }
 
 // (b) A new connection (the vault accepted an invitation) still waiting

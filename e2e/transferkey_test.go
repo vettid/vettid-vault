@@ -494,18 +494,32 @@ func TestTransferFailedStep2ThenStored(t *testing.T) {
 	sf.vid = w.a.vid
 	sf.atStep1 = 1 // step 2's write fails; the next one succeeds
 	sf.mu.Unlock()
-	_ = w.a.dev.TransferApprove(ctxT(t, 20*time.Second), id, acPIN, credPW)
+	// The approval, sent again as the apps do on "try again" (busy or
+	// retry spend nothing) until step 1 is stored and step 2's write has
+	// failed: under load an approval can outlast one attempt's wait.
+	fired := func() (int, bool) {
+		sf.mu.Lock()
+		defer sf.mu.Unlock()
+		return sf.failed, sf.atStep1 == 0 && sf.fail == 0
+	}
+	for attempt := 0; ; attempt++ {
+		err := w.a.dev.TransferApprove(ctxT(t, 30*time.Second), id, acPIN, credPW)
+		if n, armed := fired(); n > 0 || armed {
+			break
+		}
+		if attempt == 5 {
+			t.Fatalf("step 2's write never failed: the last approval %v", err)
+		}
+		t.Logf("the approval again (%v)", err)
+	}
 	// The fault fired, on step 2: step 1 (a header with no state write
 	// before it) armed it, and exactly one state write failed.
-	sf.mu.Lock()
-	failed, armed := sf.failed, sf.atStep1 == 0 && sf.fail == 0
-	sf.mu.Unlock()
-	if failed != 1 || !armed {
+	if failed, armed := fired(); failed != 1 || !armed {
 		t.Fatalf("the step-2 fault: %d writes failed, armed and spent %v", failed, armed)
 	}
 	// A later batch whose write succeeds (if the approval's retransmission
 	// did not store it first): the vault keeps running.
-	if _, err := w.a.dev.CredentialVersion(ctx); err != nil {
+	if _, err := w.a.dev.CredentialVersion(ctxT(t, 60*time.Second)); err != nil {
 		t.Logf("the later request: %v", err)
 	}
 	if err := b.dev.AwaitPaired(ctx); err != nil {

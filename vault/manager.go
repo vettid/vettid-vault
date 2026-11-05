@@ -322,6 +322,11 @@ type Manager struct {
 	markOK bool
 
 	locked bool
+	// splitBrained: §12.3's guard zeroized this manager (another writer
+	// advanced the state). A Manager is never unlocked again, so it stays
+	// set; persist and flushIfDirty report it instead of using the wiped
+	// state.
+	splitBrained bool
 	// drainedOnce: a collect has returned less than a full batch since
 	// this unlock; holdAnswers: housekeeping keeps back the due held
 	// neutral answers until then (0.80.0, §10.4.1).
@@ -867,6 +872,14 @@ func (m *Manager) allPeers() []*Peer {
 
 // persist flushes state. create = the first write (create-only objects).
 func (m *Manager) persist(ctx context.Context, create bool) error {
+	if m.st == nil {
+		// Zeroized (a split brain, a crash): nothing is written. A caller
+		// that goes on after the loss reaches here, not a nil state.
+		if m.splitBrained {
+			return ErrSplitBrain
+		}
+		return ErrLocked
+	}
 	m.stateWritten = false
 	err := m.persistState(ctx, create)
 	if err != nil && !errors.Is(err, ErrSplitBrain) && !m.stateWritten {
@@ -1095,6 +1108,7 @@ const enrollDeviceID = "enroll"
 // splitBrain is the §12.3 guard: another writer advanced the state. Zeroize
 // immediately, without flushing or acking.
 func (m *Manager) splitBrain() {
+	m.splitBrained = true
 	m.zeroize()
 }
 
@@ -1300,7 +1314,12 @@ func (m *Manager) lockLocked(ctx context.Context) error {
 			// What the write just stored goes out before vault.locking,
 			// which must not overtake it.
 			m.drainOutbox(ctx)
-			_ = m.flushIfDirty(ctx)
+			if err := m.flushIfDirty(ctx); errors.Is(err, ErrSplitBrain) {
+				// The drain's settled write (a transfer's notice the
+				// lock's write stored) lost to another copy: zeroized,
+				// nothing more is sent.
+				return err
+			}
 		}
 		m.pushLockWake(m.sendLocking(ctx)) // §14.2 trigger 3, before zeroizing
 	} else {

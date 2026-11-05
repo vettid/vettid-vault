@@ -213,6 +213,9 @@ func (m *Manager) retryPeer(peer string) {
 // token of its own: the reconnect's hs.init that brings the fresh token
 // (§6.6) must not wait behind it.
 func (m *Manager) drainOutbox(ctx context.Context) {
+	if m.st == nil {
+		return // zeroized (a split brain at the settled write below): nothing is sent
+	}
 	if m.holdForMark() {
 		return
 	}
@@ -309,7 +312,8 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 			m.drainOutbox(ctx)
 		case errors.Is(err, ErrSplitBrain):
 			// Another copy wrote the state: this one is zeroized and
-			// locked, and sends nothing more.
+			// locked. It sends nothing more: the caller's flushIfDirty
+			// returns ErrSplitBrain, and a later drain returns at once.
 		default:
 			// Not written: the state stays dirty, and the rotation's
 			// notices wait (unstored) for the next flush and drain.
@@ -379,6 +383,9 @@ func (m *Manager) deposit(ctx context.Context, e *OutboxEntry, now time.Time) er
 }
 
 func (m *Manager) flushIfDirty(ctx context.Context) error {
+	if m.splitBrained {
+		return ErrSplitBrain // a drain's settled write lost to another copy
+	}
 	if !m.dirty {
 		return nil
 	}

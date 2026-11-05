@@ -825,8 +825,19 @@ func (m *Manager) restoreLive() error {
 		}
 		i, err := handshake.RestoreInitiator(og.Init, m.keys.ik)
 		if err != nil {
-			delete(m.st.Outgoing, id)
-			m.audit(m.now(), "handshake_not_restored", og.PeerID)
+			// Also a handshake begun under an identity key a rotation has
+			// since replaced (§3.4). It is cleaned up as an aborted one is
+			// (handleResp): its hs.init is not sent, the tokens it minted
+			// are denied, and a new connection's devices hear it failed.
+			// What this queues is unstored until the unlock's (or
+			// recovery's) first write; no drain sends it before then.
+			now := m.now()
+			m.audit(now, "handshake_not_restored", og.PeerID)
+			m.abandonOutgoing(id, now)
+			if og.New != nil {
+				m.denyPeerTokens(og.New, now)
+				m.notifyDevices("connection.event", connEvent(og.PeerID, "failed"), "", now)
+			}
 			continue
 		}
 		m.outgoing[id] = i

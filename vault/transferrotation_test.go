@@ -125,7 +125,11 @@ func (w *trWorld) rotations() int {
 	return len(w.m.st.Rotations)
 }
 
+// activities reads the sink under the manager's lock: Start's attachment
+// run drains the outbox, and records, from its own goroutine.
 func (w *trWorld) activities(kind string) []Activity {
+	w.m.mu.Lock()
+	defer w.m.mu.Unlock()
 	var out []Activity
 	for _, a := range w.sink.got {
 		if a.Kind == kind {

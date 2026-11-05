@@ -747,7 +747,11 @@ func (m *Manager) rotateIdentity(now time.Time) error {
 			m.sendTo(p, "identity.rotate", body, now)
 			// Every session rekeys under the new keys (§3.4): a rekey
 			// started under the old ones (each unlock starts the devices')
-			// is replaced, after identity.rotate.
+			// is replaced, after identity.rotate. It is dropped even when
+			// startRekey cannot start one now (no current epoch, no standing
+			// token, a suspended peer): one under the old keys could not
+			// finish anyway (RestoreInitiator refuses it after a lock), and
+			// the next unlock or NeedsRekey starts one under the new keys.
 			m.dropRekey(p.ID)
 			m.startRekey(p, now)
 		}

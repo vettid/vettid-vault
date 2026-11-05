@@ -435,6 +435,54 @@ func (m *Manager) respondReconnect(pi *handshake.PendingInit, p *Peer, sender ed
 	}
 }
 
+// ancestorIK reports whether ik is one p's rotation chain has moved away
+// from (the old_ik of a link it followed). A key the connection rotated
+// away from is never taken back (§3.4 "a receiver never returns to an
+// earlier key"): a handshake that authenticates under one was answered or
+// made before the rotation, and completing it now would hand the epoch to
+// an old copy that still holds that key.
+func ancestorIK(p *Peer, ik ed25519.PublicKey) bool {
+	for _, raw := range p.Chain {
+		if r, err := handshake.ParseRotation(raw); err == nil && suite.EqualPublic(r.OldIK, ik) {
+			return true
+		}
+	}
+	return false
+}
+
+// restartHandshakesUnderOldIK: following identity.rotate abandons the
+// handshakes pinned to p's superseded ik (our hs.init named it; our hs.resp
+// awaits an hs.fin signed with it) and starts a reconnect or rekey again
+// under the new one. Those of the replaced line (§6.6) stay: they are fork
+// evidence and activate nothing. What this queues (revocations, the new
+// hs.init) is unstored until the batch's write (queue).
+func (m *Manager) restartHandshakesUnderOldIK(p *Peer, now time.Time) {
+	var rekey, reconnect bool
+	for id, og := range m.st.Outgoing {
+		ini := m.outgoing[id]
+		if og.PeerID != p.ID || og.New != nil || og.Replaced || ini == nil || suite.EqualPublic(ini.ResponderIK(), p.IK) {
+			continue
+		}
+		switch og.Purpose {
+		case handshake.PurposeRekey:
+			rekey = true
+		case handshake.PurposeReconnect:
+			reconnect = true
+		}
+		m.abandonOutgoing(id, now)
+	}
+	for id, aw := range m.st.Awaiting {
+		if r := m.awaiting[id]; aw.PeerID == p.ID && aw.New == nil && !aw.Replaced && r != nil && ancestorIK(p, r.InitiatorIK()) {
+			m.abandonAwaiting(id, now)
+		}
+	}
+	if reconnect {
+		m.startReconnect(p, now)
+	} else if rekey {
+		m.startRekey(p, now)
+	}
+}
+
 // ownThHigher reports whether th1 of our own reconnect og is higher than
 // that of an answer aw (big-endian bytes, §6.6 "Between two persons"). A
 // record without a th1 (written before 0.74.0) compares as not higher.
@@ -570,6 +618,21 @@ func (m *Manager) peer(id string) *Peer {
 // become a request that awaits approval (0.10.3).
 func (m *Manager) handleFin(ctx context.Context, id string, raw []byte, sender ed25519.PublicKey, now time.Time) disposition {
 	aw, r := m.st.Awaiting[id], m.awaiting[id]
+	if aw == nil || r == nil {
+		m.audit(now, "unknown_kid", "")
+		return ackAfterFlush
+	}
+	if aw.New == nil && !aw.Replaced {
+		// §3.4: an answer made from a key the connection has since rotated
+		// away from is not finished (backstop to identity.rotate, which
+		// abandons it, for a rotation learned another way). A rekey of the
+		// replaced line is left to the fork check below.
+		if p := m.peer(aw.PeerID); p != nil && ancestorIK(p, r.InitiatorIK()) {
+			m.audit(now, "rotation_rollback_refused", aw.PeerID)
+			m.abandonAwaiting(id, now)
+			return ackAfterFlush
+		}
+	}
 	fr, err := r.HandleFin(raw, sender, now)
 	switch {
 	case errors.Is(err, handshake.ErrType):
@@ -884,6 +947,18 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 		// replaced line's evidence above.
 		res.Epoch.Destroy()
 		m.audit(now, "hs_resp_dropped", og.PeerID)
+		return ackAfterFlush
+	}
+	if !suite.EqualPublic(res.ResponderIK, p.IK) && ancestorIK(p, res.ResponderIK) {
+		// §3.4: sig_R verified under a key the connection has rotated away
+		// from (the hs.init was pinned to it before the rotation was
+		// followed): an old copy of the peer. Nothing of it is taken, no
+		// hs.fin is made, and the tokens our hs.init carried are revoked.
+		res.Epoch.Destroy()
+		m.audit(now, "rotation_rollback_refused", p.ID)
+		for _, t := range og.Issued {
+			m.denyJTI(t.JTI, now)
+		}
 		return ackAfterFlush
 	}
 	if res.Resp.Token != "" {

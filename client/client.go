@@ -1579,8 +1579,15 @@ func (d *Device) handle(ctx context.Context, m relayclient.Message) (unacked boo
 			}
 		}
 	}
+	// From an earlier relay key of the vault (VAULT-MESSAGING §3.4; owner
+	// decision 2026-11-05): what the vault sent before the cut-off, never a
+	// new address, a key change or a new handshake (a holder of the vault's
+	// old copy has that key).
+	fromEarlier := !suite.EqualPublic(sender, v.RelayPK)
 	if in.Type == handshake.TypeInit {
-		d.handleRekey(ctx, m.Payload, in, ep, sender, now)
+		if !fromEarlier {
+			d.handleRekey(ctx, m.Payload, in, ep, sender, now)
+		}
 		return false
 	}
 	if err := in.CheckTime(now, in.Exp.IsZero()); err != nil {
@@ -1658,9 +1665,13 @@ func (d *Device) handle(ctx context.Context, m relayclient.Message) (unacked boo
 		}
 		d.storeVaultToken(in.Body)
 	case "identity.rotate":
-		d.followRotation(in.Body)
+		if !fromEarlier {
+			d.followRotation(in.Body)
+		}
 	case "relay.address.update":
-		d.followAddress(ctx, in.Body)
+		if !fromEarlier {
+			d.followAddress(ctx, in.Body)
+		}
 	case "leash.grant.updated":
 		if in.Re == "" {
 			d.leashGrants = append(json.RawMessage(nil), in.Body...) // the agent's current grants (§10.11); d.mu is held

@@ -594,6 +594,11 @@ func (m *Manager) hIdentityRotate(_ context.Context, s *Session, in *envelope.In
 	if s.peer.suspended() {
 		return nil, nil
 	}
+	for _, c := range s.peer.Chain {
+		if bytes.Equal(c, r.Marshal()) {
+			return nil, nil // followed already: the peer sent it again (§3.4)
+		}
+	}
 	final, kem, err := handshake.ResolveChain(s.peer.IK, []*handshake.Rotation{r})
 	if err != nil {
 		m.audit(s.now, "bad_rotation", s.peer.ID)
@@ -621,7 +626,7 @@ func (m *Manager) hAddressUpdate(_ context.Context, s *Session, in *envelope.Inn
 	if a.PK, err = ro.Base64("pk", ed25519.PublicKeySize); err != nil || handshake.ValidateRelayAddr(a) != nil {
 		return nil, errBadRequest
 	}
-	if suite.EqualPublic(a.PK, s.peer.Relay.PK) || s.peer.prevKey(a.PK, s.now) {
+	if suite.EqualPublic(a.PK, s.peer.Relay.PK) || s.peer.wasKey(a.PK) {
 		return nil, nil // an address already followed (a resend, a late copy): ignored (§3.4 (b))
 	}
 	np := *s.peer

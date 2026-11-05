@@ -621,13 +621,19 @@ func (m *Manager) completeStoredRelayKey(ctx context.Context, newRelay func(stri
 
 // recoveryReplacesRefusedKey is a recovery's answer to a pending key whose
 // registration the relay refused past the grace, when the vault has no
-// live mailbox to give the phone (OWNER QUESTION open, 2026-11-05; the
-// recommended behaviour, kept apart so that it can be switched): as
-// credential.rotate's way out of the refused state does (§3.4), the
-// refused key, its tokens and its refused mark are discarded and a fresh
-// key is generated, stored as pending (meeting any relay-key rotation
-// owed) and registered; it is made current in memory by the open's step-2
-// write. false: not done now (the open answers retry).
+// live mailbox to give the phone (owner decision (a), 2026-11-05; spec
+// erratum pending): as credential.rotate's way out of the refused state
+// does (§3.4), the refused key, its tokens and its refused mark are
+// discarded and a fresh key is generated, stored as pending (meeting any
+// relay-key rotation owed) and registered; it is made current in memory by
+// the open's step-2 write. false: not done now (the open answers retry).
+//
+// The fresh key is registered before any state holds it: an open that
+// fails afterwards leaves a mailbox no key of the vault's owns. Accepted:
+// such an orphan is empty, receives nothing (no token for it was ever
+// sent) and costs the relay one mailbox, bounded by its limit on new
+// mailboxes (RELAY-PROTOCOL §7.2 limit 3); storing the key first would
+// need a write of its own before the open's step 2.
 func (m *Manager) recoveryReplacesRefusedKey(ctx context.Context, now time.Time) bool {
 	pr := m.st.Relay.Pending
 	draw := suite.RandomBytes
@@ -946,7 +952,7 @@ func (m *Manager) pruneOldRelayKeys(now time.Time) {
 				if p.Kind != KindConnection {
 					// A device that missed the address: the member is told it
 					// needs pairing again (NEW: the device.stale feed item,
-					// "<device> can't reach your vault any more. Pair it
+					// "<device> can't reach your vault anymore. Pair it
 					// again.", and sync.event{kind: "device.stale"}, for owner
 					// approval with the app PRs).
 					m.notifyDevices("sync.event", strictjson.NewBuilder().String("kind", "device.stale").String("device_id", p.ID).
@@ -1493,41 +1499,99 @@ func sameLimits(a, b Limits) bool {
 // issued to it are denylisted then.
 const PeerRelayGrace = 7 * 24 * time.Hour
 
-// prevKey reports whether pk is one of p's earlier relay keys, still
-// accepted at now.
-func (p *Peer) prevKey(pk []byte, now time.Time) bool {
+// prevKey reports whether a deposit by pk, made at the relay at
+// depositedAt (zero: not known), is still p's: pk is one of p's earlier
+// relay keys, within the grace, and not ended, or ended after the deposit
+// (owner decision 2026-11-05: it was sent before the cut-off).
+func (p *Peer) prevKey(pk []byte, now, depositedAt time.Time) bool {
 	for _, k := range p.PrevRelay {
-		if suite.EqualPublic(k.PK, pk) && now.Before(k.Until) {
+		if !suite.EqualPublic(k.PK, pk) || !now.Before(k.Until) {
+			continue
+		}
+		if k.EndedAt.IsZero() || !depositedAt.IsZero() && depositedAt.Before(k.EndedAt) {
 			return true
 		}
 	}
 	return false
 }
 
-// peerHasKey reports whether pk is p's relay key or an earlier one still
-// accepted.
+// wasKey reports whether pk is one of p's earlier relay keys still listed.
+func (p *Peer) wasKey(pk []byte) bool {
+	for _, k := range p.PrevRelay {
+		if suite.EqualPublic(k.PK, pk) {
+			return true
+		}
+	}
+	return false
+}
+
+// liveEarlierKeys reports whether p has an earlier relay key not ended.
+func (p *Peer) liveEarlierKeys() bool {
+	for _, k := range p.PrevRelay {
+		if k.EndedAt.IsZero() {
+			return true
+		}
+	}
+	return false
+}
+
+// peerHasKey reports whether a deposit by pk (the message being handled)
+// is p's: its relay key, or an earlier one still accepted for it.
 func (m *Manager) peerHasKey(p *Peer, pk []byte) bool {
-	return suite.EqualPublic(p.Relay.PK, pk) || p.prevKey(pk, m.now())
+	return suite.EqualPublic(p.Relay.PK, pk) || p.prevKey(pk, m.now(), m.relayAt)
 }
 
-// awaitingFrom reports whether a handshake of p's (a rekey or reconnect
-// the vault answered) waits for p's hs.fin.
-func (m *Manager) awaitingFrom(peerID string) bool {
-	for _, aw := range m.st.Awaiting {
-		if aw.New == nil && aw.PeerID == peerID {
-			return true
+// peerOnCurrentKey runs when p first issued the vault a token for its
+// current relay key, having held one for an earlier key:
+//   - what p refuses by rule from an earlier key (owner decision
+//     2026-11-05: never a key change), sent while the vault could deposit
+//     only with one, goes again: the identity.rotate links since p's last
+//     epoch, then a new rekey;
+//   - a deposit with the current key at once (a fresh relay.token.issued),
+//     so that p ends the earlier keys without waiting for other traffic.
+func (m *Manager) peerOnCurrentKey(p *Peer, now time.Time) {
+	if p.State != PeerActive {
+		return
+	}
+	if n := p.OwnChainAtEpoch; n >= 0 && n < len(m.st.Rotations) {
+		for _, raw := range m.st.Rotations[n:] {
+			m.sendTo(p, "identity.rotate", strictjson.NewBuilder().Raw("rotation", raw).Bytes(), now)
+		}
+		m.dropRekey(p.ID)
+		m.startRekey(p, now)
+	} else if m.hasOutgoing(p.ID, handshake.PurposeRekey) {
+		m.dropRekey(p.ID)
+		m.startRekey(p, now)
+	}
+	m.issueTo(p, TokStanding, now)
+}
+
+// followedAddress reports whether a relay.address.update names p's relay
+// key or one it moved from.
+func (m *Manager) followedAddress(p *Peer, body []byte) bool {
+	o, err := strictjson.ParseObject(body)
+	if err != nil {
+		return false
+	}
+	ro, err := o.Object("relay")
+	if err != nil {
+		return false
+	}
+	pk, err := ro.Base64("pk", ed25519.PublicKeySize)
+	return err == nil && (suite.EqualPublic(pk, p.Relay.PK) || p.wasKey(pk))
+}
+
+// endPrevRelay ends p's earlier relay keys, p being seen using its
+// current one (owner decision 2026-11-05): the tokens issued to them are
+// denylisted, so the relay takes no new deposit by them; what it received
+// before stays p's (prevKey) until the grace.
+func (m *Manager) endPrevRelay(p *Peer, now time.Time) {
+	for i := range p.PrevRelay {
+		if k := &p.PrevRelay[i]; k.EndedAt.IsZero() {
+			k.EndedAt = now.UTC()
+			m.denySubKey(k.PK, now)
 		}
 	}
-	return false
-}
-
-// endPrevRelay ends p's earlier relay keys: the tokens issued to them are
-// denylisted (§3.4 "Device relay key").
-func (m *Manager) endPrevRelay(p *Peer, now time.Time) {
-	for _, k := range p.PrevRelay {
-		m.denySubKey(k.PK, now)
-	}
-	p.PrevRelay = nil
 	m.dirty = true
 }
 
@@ -1542,7 +1606,9 @@ func (m *Manager) expirePeerRelayKeys(now time.Time) {
 				kept = append(kept, k)
 				continue
 			}
-			m.denySubKey(k.PK, now)
+			if k.EndedAt.IsZero() {
+				m.denySubKey(k.PK, now)
+			}
 			m.dirty = true
 		}
 		if len(kept) == 0 {

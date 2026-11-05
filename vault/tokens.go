@@ -272,14 +272,23 @@ func (m *Manager) storeIssuedTo(p *Peer, body json.RawMessage, now time.Time) {
 		}
 		return
 	}
+	prevRank, newRank, cur := m.keyRank(p.Standing.Token), m.keyRank(tok), len(m.keys.oldRelay)+1
 	if newer(p.Standing) {
 		p.Standing = ht
 		m.retryPeer(p.ID)
-		if u := m.st.Relay.Updates[p.ID]; u != nil && !u.Acked && !u.Ended && m.onOldKey(tok) && m.st.Relay.Pending == nil {
-			// p follows an earlier address of a chain (K1 of K0→K1→K2): it
-			// refuses a later update sent with the key before (§3.4), so the
-			// current one goes again now, with the key p just issued to.
-			m.sendAddressUpdate(p, u, now)
+		switch {
+		case newRank <= prevRank:
+			// A renewal on the same key: nothing to send again.
+		case newRank < cur:
+			if u := m.st.Relay.Updates[p.ID]; u != nil && !u.Acked && !u.Ended && m.st.Relay.Pending == nil {
+				// p follows an earlier address of a chain (K1 of K0→K1→K2): it
+				// refuses a later update sent with the key before (owner
+				// decision 2026-11-05), so the current one goes again now,
+				// with the key p just issued to.
+				m.sendAddressUpdate(p, u, now)
+			}
+		case prevRank > 0:
+			m.peerOnCurrentKey(p, now)
 		}
 	}
 	if !m.onOldKey(tok) {

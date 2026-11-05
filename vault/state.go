@@ -377,9 +377,14 @@ type Peer struct {
 }
 
 // PrevRelayKey is a principal's earlier relay key, accepted until Until.
+//
+// EndedAt is when the principal was seen using a later key (owner
+// decision 2026-11-05): the tokens issued to this one were denylisted then,
+// and only what its relay received before then is still taken from it.
 type PrevRelayKey struct {
-	PK    []byte    `json:"pk"`
-	Until time.Time `json:"until"`
+	PK      []byte    `json:"pk"`
+	Until   time.Time `json:"until"`
+	EndedAt time.Time `json:"ended_at,omitzero"`
 }
 
 // EpochRecord is one epoch of a service connection's history (§6.6, 0.72.0).

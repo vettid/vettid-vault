@@ -14,6 +14,8 @@ import (
 
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/handshake"
+	"github.com/vettid/vettid-vault/vms/peerwire"
+	"github.com/vettid/vettid-vault/vms/suite"
 )
 
 // Two vaults across a relay-key rotation (§3.4): the receiving vault keeps
@@ -59,7 +61,8 @@ func rkPump(t *testing.T, from, to *devFixture) int {
 			continue // refused token_revoked
 		}
 		pumped++
-		msgs = append(msgs, Message{MsgID: fmt.Sprintf("rkp%d", pumped), Sender: relayauth.EncodeKey(dep.sender), JTI: c.Jti, Payload: dep.payload})
+		msgs = append(msgs, Message{MsgID: fmt.Sprintf("rkp%d", pumped), Sender: relayauth.EncodeKey(dep.sender), JTI: c.Jti, Payload: dep.payload,
+			DepositedAt: dep.at.UTC().Format(time.RFC3339Nano)})
 	}
 	fr.deposits = kept
 	fr.mu.Unlock()
@@ -472,7 +475,8 @@ func inject(t *testing.T, to *devFixture, deps []stubDeposit) {
 	for _, d := range deps {
 		c, _ := stubClaims(d.token)
 		pumped++
-		msgs = append(msgs, Message{MsgID: fmt.Sprintf("inj%d", pumped), Sender: relayauth.EncodeKey(d.sender), JTI: c.Jti, Payload: d.payload})
+		msgs = append(msgs, Message{MsgID: fmt.Sprintf("inj%d", pumped), Sender: relayauth.EncodeKey(d.sender), JTI: c.Jti, Payload: d.payload,
+			DepositedAt: time.Now().UTC().Format(time.RFC3339Nano)})
 	}
 	if err := to.m.ProcessBatch(context.Background(), &fakeCollector{}, msgs); err != nil {
 		t.Fatal(err)
@@ -543,7 +547,7 @@ func TestRelayKeyOldCopyCannotActAsThePeer(t *testing.T) {
 	}
 	// A deposits with K1 (and no handshake of its waits): K0 ends.
 	settle(t, a, b)
-	if len(pb.PrevRelay) != 0 || !slices.Contains(b.relay.top().revoked, "sub:"+k0) {
+	if !ended(pb) || !slices.Contains(b.relay.top().revoked, "sub:"+k0) {
 		t.Fatal("A's earlier key not ended at its first deposit with the new one")
 	}
 	inject(t, b, session)
@@ -564,7 +568,183 @@ func TestRelayKeyPeerEarlierKeyEndsAtACurrentDeposit(t *testing.T) {
 	pb.PrevRelay = []PrevRelayKey{{PK: k0, Until: time.Now().Add(time.Hour)}}
 	sendConn(a, aConn, "profile.get")
 	rkPump(t, a, b)
-	if len(pb.PrevRelay) != 0 || !slices.Contains(b.relay.top().revoked, "sub:"+relayauth.EncodeKey(k0)) {
+	if !ended(pb) || !slices.Contains(b.relay.top().revoked, "sub:"+relayauth.EncodeKey(k0)) {
 		t.Fatal("not ended at a deposit with the current key")
+	}
+}
+
+// ended reports whether every earlier relay key of p has ended.
+func ended(p *Peer) bool {
+	for _, k := range p.PrevRelay {
+		if k.EndedAt.IsZero() {
+			return false
+		}
+	}
+	return true
+}
+
+// Round 4, item 1: A moved K1→K2, B followed, A had not yet collected B's
+// token for K2, and A rotated again (R3): identity.rotate and the rekey
+// went out with K1 and B refused them by rule. Once A holds B's token for
+// its current key it sends them again, and B follows A's identity key.
+func TestRelayKeyRefusedKeyChangeIsSentAgain(t *testing.T) {
+	a, b := newVaultPair(t)
+	aConn, bConn := rkConnect(t, a, b)
+	rkRotate(t, a)
+	settle(t, a, b)
+	rkRotate(t, a)  // K2
+	rkPump(t, a, b) // B follows K2; its tokens for K2 wait in its outbox
+	rkRotate(t, a)  // R3: sent with B's token for K1
+	rkPump(t, a, b)
+	if !audited(b, "earlier_key_refused") {
+		t.Fatal("B took a key change from an earlier key")
+	}
+	settle(t, a, b)
+	pb := b.m.st.Connections[bConn]
+	if !suite.EqualPublic(pb.IK, pubOf(a.m.keys.ik)) {
+		t.Fatal("B stays pinned to A's old identity key")
+	}
+	if audited(b, "bad_rotation") {
+		t.Fatal("a link B had followed, sent again, was audited bad_rotation")
+	}
+	if pb.Relay.Mailbox != a.m.st.Relay.Mailbox {
+		t.Fatal("B did not follow A's last address")
+	}
+	id := sendConn(a, aConn, "profile.get")
+	settle(t, a, b)
+	if !handled(b, id) || a.m.hasOutgoing(aConn, handshake.PurposeRekey) {
+		t.Fatal("the session or the rekey did not recover")
+	}
+}
+
+// Round 4, item 2: once A holds B's first token for its current key it
+// deposits with that key at once, so B ends A's earlier keys without
+// waiting for other traffic (here no rekey runs).
+func TestRelayKeyEarlierKeysEndWithoutTraffic(t *testing.T) {
+	a, b := newVaultPair(t)
+	aConn, bConn := rkConnect(t, a, b)
+	rkRotate(t, a)
+	a.m.mu.Lock()
+	a.m.dropRekey(aConn)
+	a.m.st.Connections[aConn].OwnChainAtEpoch = len(a.m.st.Rotations) // as if the rekey had completed: nothing to send again
+	a.m.mu.Unlock()
+	rkPump(t, a, b) // B follows
+	pb := b.m.st.Connections[bConn]
+	if ended(pb) || len(pb.PrevRelay) != 1 {
+		t.Fatal("ended too soon")
+	}
+	rkPump(t, b, a) // A stores B's token for its current key
+	rkPump(t, a, b)
+	if !ended(pb) {
+		t.Fatal("B's view of A's earlier key did not end without further traffic")
+	}
+}
+
+// Round 4, item 4: a deposit by an earlier key that the relay took before
+// the key was ended still counts; one after it does not.
+func TestRelayKeyEndedKeyKeepsEarlierDeposits(t *testing.T) {
+	a, b := newVaultPair(t)
+	aConn, bConn := rkConnect(t, a, b)
+	rkRotate(t, a)
+	rkPump(t, a, b) // B follows
+	id := sendConn(a, aConn, "profile.get")
+	late := capture(t, a, b) // deposited with K0 now, delivered late
+	settle(t, a, b)
+	pb := b.m.st.Connections[bConn]
+	if !ended(pb) {
+		t.Fatal("not ended")
+	}
+	var msgs []Message
+	for _, d := range late {
+		c, _ := stubClaims(d.token)
+		pumped++
+		msgs = append(msgs, Message{MsgID: fmt.Sprintf("late%d", pumped), Sender: relayauth.EncodeKey(d.sender), JTI: c.Jti, Payload: d.payload,
+			DepositedAt: d.at.UTC().Format(time.RFC3339Nano)})
+	}
+	if err := b.m.ProcessBatch(context.Background(), &fakeCollector{}, msgs); err != nil {
+		t.Fatal(err)
+	}
+	if !handled(b, id) {
+		t.Fatal("a message deposited before the cut-off was lost")
+	}
+}
+
+// Round 4, item 7: a renewal of a token for the same old key sends no
+// update again; item 8: a resend of an address already followed, from an
+// earlier key, is not audited as refused.
+func TestRelayKeyRenewalAndFollowedResend(t *testing.T) {
+	a, b := newVaultPair(t)
+	aConn, _ := rkConnect(t, a, b)
+	rkRotate(t, a)
+	rkPump(t, a, b) // B follows
+	a.m.mu.Lock()
+	u := a.m.st.Relay.Updates[aConn]
+	sendCount := func() int {
+		n := 0
+		for _, e := range a.m.st.Outbox {
+			if e.AddressUpdate && !e.Done {
+				n++
+			}
+		}
+		return n
+	}
+	before := sendCount()
+	a.m.sendAddressUpdate(a.m.st.Connections[aConn], u, a.m.now()) // a resend, with K0
+	a.m.mu.Unlock()
+	rkPump(t, a, b)
+	if audited(b, "earlier_key_refused") {
+		t.Fatal("a resend of a followed address was audited as refused")
+	}
+	// A renewal on the same old key: no resend.
+	a.m.mu.Lock()
+	p := a.m.st.Connections[aConn]
+	if !a.m.onOldKey(p.Standing.Token) {
+		a.m.mu.Unlock()
+		t.Fatal("A holds no token for its old key")
+	}
+	a.m.mu.Unlock()
+	tok := relayclient.New(rkBase, b.m.keys.relay)
+	renewal, _ := tok.MintToken(relayauth.EncodeKey(pubOf(a.m.keys.oldRelay[0])), rkBase, relayclient.TokenOptions{TTL: 40 * 24 * time.Hour})
+	a.m.mu.Lock()
+	before = sendCount()
+	a.m.storeIssuedTo(p, peerwire.TokenIssuedBody(TokStanding, renewal), a.m.now())
+	after := sendCount()
+	a.m.mu.Unlock()
+	if after != before {
+		t.Fatal("a renewal on the same key sent the update again")
+	}
+}
+
+// Round 4, item 9: B's own reconnect, answered by A with a key B already
+// knows as A's earlier one, completes (an hs.resp is no new handshake).
+func TestRelayKeyReconnectAnsweredWithAnEarlierKey(t *testing.T) {
+	a, b := newVaultPair(t)
+	aConn, bConn := rkConnect(t, a, b)
+	b.m.mu.Lock()
+	b.m.startReconnect(b.m.st.Connections[bConn], b.m.now())
+	b.m.mu.Unlock()
+	init := capture(t, b, a) // B's hs.init, held
+	rkRotate(t, a)
+	a.m.mu.Lock()
+	a.m.dropRekey(aConn)
+	a.m.mu.Unlock()
+	rkPump(t, a, b) // B follows: K0 is A's earlier key
+	var msgs []Message
+	for _, d := range init {
+		c, _ := stubClaims(d.token)
+		pumped++
+		msgs = append(msgs, Message{MsgID: fmt.Sprintf("ri%d", pumped), Sender: relayauth.EncodeKey(d.sender), JTI: c.Jti, Payload: d.payload})
+	}
+	if err := a.m.ProcessBatch(context.Background(), &fakeCollector{}, msgs); err != nil {
+		t.Fatal(err)
+	}
+	// A answers with B's reconnect hs.init's token: for A's K0.
+	rkPump(t, a, b)
+	if audited(b, "earlier_key_refused") {
+		t.Fatal("A's hs.resp from its earlier key was refused")
+	}
+	settle(t, a, b)
+	if b.m.hasOutgoing(bConn, handshake.PurposeReconnect) {
+		t.Fatal("B's reconnect did not complete")
 	}
 }

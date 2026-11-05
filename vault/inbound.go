@@ -331,16 +331,19 @@ func (m *Manager) handleMessage(ctx context.Context, msg Message, now time.Time)
 	if p != nil {
 		if !suite.EqualPublic(sender, p.Relay.PK) {
 			// An earlier relay key of p (§3.4): it may still carry what p
-			// sent before it followed its own update, and the hs.fin of a
-			// handshake awaiting from it; never a new handshake (a holder of
-			// the old copy must not start a reconnect as p).
-			if env.Mode() == envelope.ModeSealed {
+			// sent before it followed its own update, an hs.resp to a
+			// handshake the vault began and the hs.fin of one awaiting from
+			// it; never a new handshake (owner decision 2026-11-05: a holder
+			// of the old copy must not start a reconnect as p).
+			if env.Mode() == envelope.ModeSealed && m.lookupKEM(env.RecipientKid()) != nil {
 				m.audit(now, "earlier_key_refused", p.ID)
 				return ackAfterFlush
 			}
-		} else if len(p.PrevRelay) > 0 && !m.awaitingFrom(p.ID) {
-			// p deposits with its current key, and no handshake of its waits
-			// for an hs.fin from an earlier one: they end now (§3.4).
+		} else if p.liveEarlierKeys() {
+			// p deposits with its current key: its earlier keys end now
+			// (owner decision 2026-11-05). What their relay took before
+			// stays p's (prevKey), an hs.fin included; a later hs.fin comes
+			// with the current key (handleFin).
 			m.endPrevRelay(p, now)
 		}
 	}
@@ -447,7 +450,7 @@ func (m *Manager) peerByRelayKey(pk ed25519.PublicKey) *Peer {
 	// is still its earlier key's sender until the grace ends (§3.4).
 	now := m.now()
 	for _, p := range m.allPeers() {
-		if p.prevKey(pk, now) {
+		if p.prevKey(pk, now, m.relayAt) {
 			return p
 		}
 	}
@@ -459,9 +462,13 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 	if !suite.EqualPublic(sender, p.Relay.PK) {
 		switch in.Type {
 		case TypeAddressUpdate, "identity.rotate", handshake.TypeInit:
-			// From an earlier relay key (§3.4): never a new address, a key
-			// rotation or a rekey; the holder of an old copy has that key.
-			m.audit(now, "earlier_key_refused", p.ID)
+			// From an earlier relay key (owner decision 2026-11-05): never a
+			// new address, a key rotation or a rekey; the holder of an old
+			// copy has that key. A resend of an address already followed
+			// is no attempt (the rotating vault resends it): not audited.
+			if in.Type != TypeAddressUpdate || !m.followedAddress(p, in.Body) {
+				m.audit(now, "earlier_key_refused", p.ID)
+			}
 			return ackAfterFlush
 		}
 	}

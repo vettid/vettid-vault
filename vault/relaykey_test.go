@@ -1330,7 +1330,7 @@ func TestReviewRecoveryRefusedDeadlock(t *testing.T) {
 
 // A refused registration past the grace (no live mailbox): the recovery
 // replaces the refused key with a fresh one, registered, made current
-// (recoveryReplacesRefusedKey, the recommended answer to the owner question).
+// (recoveryReplacesRefusedKey, owner decision (a) 2026-11-05).
 func TestRelayKeyRecoveryReplacesARefusedRegistration(t *testing.T) {
 	f, rot, before := openWithPending(t)
 	var refusedMB string

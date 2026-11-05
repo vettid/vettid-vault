@@ -174,8 +174,10 @@ type stubBlob struct {
 type stubDeposit struct {
 	mailbox, token string
 	payload        []byte
-	// sender is the depositing key (X-VettID-Key).
+	// sender is the depositing key (X-VettID-Key); at, when the relay
+	// took it (deposited_at).
 	sender ed25519.PublicKey
+	at     time.Time
 }
 
 func (r *stubRelay) BaseURL() string { return r.base }
@@ -208,7 +210,7 @@ func (r *stubRelay) Deposit(_ context.Context, _, mailbox, token string, payload
 	if c, ok := stubClaims(token); ok && (c.Iss != mailbox || c.Sub != relayauth.OpenSub && c.Sub != relayauth.EncodeKey(sender)) {
 		return "", &relayclient.Error{Status: 401, Code: "token_invalid"}
 	}
-	r.deposits = append(r.deposits, stubDeposit{mailbox, token, append([]byte(nil), payload...), sender})
+	r.deposits = append(r.deposits, stubDeposit{mailbox, token, append([]byte(nil), payload...), sender, time.Now()})
 	return fmt.Sprintf("m%d", len(r.deposits)), nil
 }
 func (r *stubRelay) Revoke(_ context.Context, kind, value string) error {

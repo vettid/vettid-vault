@@ -40,6 +40,9 @@ func (q *Party) handle(m *RMsg, set []Key) bool {
 			return false // §6.3: left unacked until hs.fin
 		}
 		w.logf("%s: drops %s from box %d: %s", q.Name, kindName[M.Kind], m.Box, why)
+		if M.Feat {
+			w.stat("F:features not taken (dropped: " + why + ")")
+		}
 		if M.Kind == KSession && M.Probe > 0 && w.probeFate[M.Probe] == "" && !q.Copy {
 			w.probeFate[M.Probe] = "unreadable: " + why
 		}
@@ -68,6 +71,15 @@ func (q *Party) handle(m *RMsg, set []Key) bool {
 	w.logf("%s <- %s: %s via %d: %s", q.Name, w.party(r.ID).Name, describe(M), m.Sender, d)
 	if d.Out == "accept" || d.Out == "answer" {
 		w.noteCopyUse(q, r.ID, M.Epoch)
+	}
+	if M.Feat && q.newSpec() && (d.Out == "accept" || d.Out == "answer" || d.Out == "follow") {
+		q.seeFeatures(r)
+	} else if M.Feat && !r.PeerA {
+		if !q.newSpec() {
+			w.stat("F:features not taken (receiver still on 28)")
+		} else {
+			w.stat("F:features not taken (" + d.Out + ")")
+		}
 	}
 	if d.Out == "defer" || d.Out == "wait" {
 		return false

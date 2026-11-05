@@ -28,6 +28,7 @@ type Msg struct {
 	Inner int   // inner id, deduped by the receiver (§8.3)
 	Epoch int   // session mode: the epoch it is sealed under; 0: sealed to a kem
 	Probe int   // KSession: a probe number
+	Feat  bool  // carries the sender's features (first contact after an upgrade)
 	Ts    int64 // inner ts, set when the message is made
 
 	RelayPK Key // KUpdate
@@ -156,6 +157,7 @@ type PeerRec struct {
 	RevUntil      int64
 	RevSent       []Msg // Deployment: messages sent under the new epoch while the revert is possible
 	Reconfirm     bool  // a message under the confirmed epoch in this batch: queue hs.confirm
+	FeatOwed      bool  // upgrade mode: my features go with my next message to this peer
 
 	IK, KEM Key
 	Chain   []IKLink // followed identity links

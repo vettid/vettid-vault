@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -178,6 +179,14 @@ func genRun(rs uint64, steps int) (Config, []Action) {
 	acts := make([]Action, n)
 	for j := range acts {
 		acts[j] = randomAction(rng)
+	}
+	if os.Getenv("TRUSTMODEL_UPGRADE") != "" { // all start on 28; each party upgrades at a random point
+		cfg.Upgrade = true
+		cfg.Rel28 = []bool{true, true, true, true, true, true}
+		for i := range cfg.Rel28 {
+			at := rng.IntN(len(acts) + 1)
+			acts = slices.Insert(acts, at, Action{Op: opUpgrade, A: i, Seed: rng.Uint64()})
+		}
 	}
 	return cfg, acts
 }

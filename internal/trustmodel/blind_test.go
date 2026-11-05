@@ -295,9 +295,11 @@ func runSeed(t *testing.T, rs uint64, env map[string]string) *World {
 }
 
 // Lead fix B: seed 8756148401117559123 (R1, gate unseen) was a false
-// suspension; it must be clean.
+// suspension; under fix B (TRUSTMODEL_FIXB=fixb) it must be clean. The
+// default (strict) keeps the false suspension: the stated cost of the
+// lead's choice (gate unseen is the worst case).
 func TestLeadFixBSeed(t *testing.T) {
-	w := runSeed(t, 8756148401117559123, map[string]string{"TRUSTMODEL_OPT": "1", "TRUSTMODEL_UNSEEN": "1"})
+	w := runSeed(t, 8756148401117559123, map[string]string{"TRUSTMODEL_OPT": "1", "TRUSTMODEL_UNSEEN": "1", "TRUSTMODEL_FIXB": "fixb"})
 	t.Logf("fix B kept %d, F1 demotions %d", w.stats["A:F1-fixB-kept"], w.stats["A:F1-demoted"])
 	for _, v := range w.viol {
 		t.Errorf("%s: %s", v.Inv, v.Detail)
@@ -306,9 +308,11 @@ func TestLeadFixBSeed(t *testing.T) {
 
 // h2: the lead's H2 (an old copy's epoch made just before the original's
 // rotation must not survive the link). window: the alternative F1 rule.
-func h2(t *testing.T, window bool) *scen { return h2x(t, window, false) }
+func h2(t *testing.T, window bool) *scen { return h2x(t, window, !window) } // default: strict
 
 func h2s(t *testing.T) *scen { return h2x(t, false, true) }
+
+func h2b(t *testing.T) *scen { return h2x(t, false, false) } // fix B as in 9f1a0da
 
 func h2x(t *testing.T, window, strict bool) *scen {
 	s := newScen(t, 2)
@@ -367,7 +371,7 @@ func TestLeadFixBVariants(t *testing.T) {
 		{"I4-false, R1 unseen", 8756148401117559123, map[string]string{"TRUSTMODEL_OPT": "1", "TRUSTMODEL_UNSEEN": "1"}},
 		{"I4-misattributed, R1 gate on", 16663332612404948059, map[string]string{"TRUSTMODEL_OPT": "1"}},
 	}
-	for _, v := range []string{"", "strict", "window"} {
+	for _, v := range []string{"fixb", "strict", "window"} {
 		for _, sd := range seeds {
 			t.Run(v+"/"+sd.name, func(t *testing.T) {
 				env := map[string]string{"TRUSTMODEL_FIXB": v}
@@ -405,5 +409,5 @@ func h2v(t *testing.T, v string) *scen {
 	case "strict":
 		return h2s(t)
 	}
-	return h2(t, false)
+	return h2b(t)
 }

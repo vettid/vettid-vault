@@ -15,6 +15,7 @@ type Config struct {
 	Rel28    []bool // parties (by index) running release <= 28
 	Opt      int    // the release-29 option of the other parties (optFull: the whole draft)
 	Unseen   bool   // the hs_confirm gate is not yet open: no peer's features seen
+	Upgrade  bool   // every party starts on release 28 and upgrades during the run (opUpgrade)
 	Skew     bool   // each party's clock off by up to a day either way (the 2-day budget)
 	Gate     bool   // the Release A gate: §6.3.1 only toward peers that advertise it
 	OldRules bool   // f4a4d97 rules: no §6.3.1 (activation at hs.fin)
@@ -143,15 +144,16 @@ const (
 	opResolve
 	opRekey
 	opPeek
+	opUpgrade // upgrade mode only (weight 0): A is the party index
 	numOps
 )
 
 var opName = [...]string{"rotate", "rotate-both", "device-rotate", "send", "collect", "crash-at", "fail-write-at",
 	"lock", "unlock", "time", "snapshot", "copy-acts", "copy-forks", "copy-steals", "copy-deletes-mailbox",
-	"resolve", "rekey", "peek(lease)"}
+	"resolve", "rekey", "peek(lease)", "upgrade"}
 
 // weights of the random choice
-var opWeight = [...]int{6, 2, 2, 8, 14, 3, 3, 4, 6, 8, 3, 3, 1, 1, 1, 2, 3, 3}
+var opWeight = [...]int{6, 2, 2, 8, 14, 3, 3, 4, 6, 8, 3, 3, 1, 1, 1, 2, 3, 3, 0}
 
 type Action struct {
 	Op      Op
@@ -181,6 +183,11 @@ func (w *World) describeAction(a Action) string {
 		return fmt.Sprintf("time +%ds", jumps[a.N%len(jumps)])
 	case opCopyAct, opCopyFork, opCopySteal, opCopyDelete:
 		return fmt.Sprintf("%s %s", opName[a.Op], pick(w.copies(), a.A))
+	case opUpgrade:
+		if a.A < len(w.P) {
+			return "upgrade " + w.P[a.A].Name + " to release 29"
+		}
+		return "upgrade -"
 	case opCrash, opFail, opSnap:
 		return fmt.Sprintf("%s %s +%d", opName[a.Op], pick(w.real(), a.A), 1+a.N%3)
 	}
@@ -210,6 +217,10 @@ func (w *World) exec(a Action) {
 	real, vs, cs := w.real(), w.vaults(), w.copies()
 	p := real[a.A%len(real)]
 	switch a.Op {
+	case opUpgrade:
+		if a.A < len(w.P) && !w.P[a.A].Copy && w.P[a.A].Rel28 {
+			w.P[a.A].upgrade()
+		}
 	case opRotate:
 		v := vs[a.A%len(vs)]
 		if !v.Locked {
@@ -775,15 +786,17 @@ func runActions(cfg Config, seed uint64, acts []Action, verbose bool) *World {
 	w := setup(cfg, seed)
 	w.verbose = verbose
 	w.debugUnlinked = os.Getenv("TRUSTMODEL_DEBUG") != ""
-	switch os.Getenv("TRUSTMODEL_FIXB") { // F1 variants for the lead (default: fix B as committed)
-	case "strict":
-		w.fixBStrict = true
+	switch os.Getenv("TRUSTMODEL_FIXB") { // F1 variants (default: strict, the lead's choice)
+	case "fixb": // fix B as in 9f1a0da
+		w.fixBStrict = false
 	case "window":
-		w.f1Window = true
+		w.fixBStrict, w.f1Window = false, true
 	case "off": // no fix B (2da316e F1), for attribution
-		w.fixBOff = true
+		w.fixBStrict, w.fixBOff = false, true
 	}
+	w.featMode = os.Getenv("TRUSTMODEL_FEATMODE") // "" (first contact), echo, always
 	defer w.expoStats()
+	defer w.gateStats()
 	for _, a := range acts {
 		w.exec(a)
 		if len(w.viol) > 0 {

@@ -35,7 +35,10 @@ type World struct {
 	literalFork   bool              // read §3.4.1's fork sentence literally (no deposited-after condition) for the confirmed epoch
 	f1Window      bool              // alternative: F1-demote only if the link's inner ts > the epoch's activation + T + 2 days
 	fixBOff       bool              // F1 as in 2da316e (no fix B); attribution runs only
-	fixBStrict    bool              // fix B variant: keep only if the peer's new ik signed something under the epoch
+	fixBStrict    bool              // F1 (default, lead's choice): keep the ungated epoch only if the peer's new ik signed something under it
+	featMode      string            // "": features with the first message after an upgrade; echo: also when first seeing the peer's; always: on every message
+	upAt          map[PID]int64     // upgrade mode: when each party upgraded from release 28
+	gateOpenAt    map[[2]PID]int64  // when q first saw r's features (q, r)
 	copyExpo      map[[2]int]*expo  // (honest party, copy epoch): when it was used
 	ownCopyStrict bool              // a92a6eb's own_copy wording (and nothing received from P); default: lead fix A
 	debugUnlinked bool              // scenarios: the relay's rotate and registration get no answer
@@ -73,10 +76,10 @@ type ikFollow struct {
 }
 
 func newWorld(seed uint64) *World {
-	w := &World{rng: rand.New(rand.NewPCG(seed, 7)), issuer: map[int]Key{}, epTruth: map[int][2]PID{},
+	w := &World{fixBStrict: true, rng: rand.New(rand.NewPCG(seed, 7)), issuer: map[int]Key{}, epTruth: map[int][2]PID{},
 		rlinkBy: map[RLink]rot{}, iklinkBy: map[IKLink]rot{}, evid: map[[2]PID]map[Key]map[Key]bool{},
 		ikPos: map[[2]PID][]ikFollow{}, answered: map[int]bool{},
-		ended: map[int]bool{}, ever: map[PID]map[int]bool{}, probes: map[int]bool{}, stats: map[string]int{}, dead: map[PID]string{}, ttlFin: map[[2]PID]string{}, probeDep: map[int][2]PID{}, probeFate: map[int]string{}, reverted: map[int]bool{}, hasEpoch: map[[2]int]bool{}, staleAt: map[[2]PID]string{}, copyExpo: map[[2]int]*expo{}, probeEpoch: map[int]int{}, forkDue: map[[2]PID]int{}, evidKind: map[Key]string{}}
+		ended: map[int]bool{}, ever: map[PID]map[int]bool{}, probes: map[int]bool{}, stats: map[string]int{}, dead: map[PID]string{}, ttlFin: map[[2]PID]string{}, probeDep: map[int][2]PID{}, probeFate: map[int]string{}, reverted: map[int]bool{}, hasEpoch: map[[2]int]bool{}, staleAt: map[[2]PID]string{}, upAt: map[PID]int64{}, gateOpenAt: map[[2]PID]int64{}, copyExpo: map[[2]int]*expo{}, probeEpoch: map[int]int{}, forkDue: map[[2]PID]int{}, evidKind: map[Key]string{}}
 	w.R = newRelay(w)
 	w.Now = 1000 * day
 	return w
@@ -625,9 +628,16 @@ func (p *Party) deposit(e *Entry, r *PeerRec) {
 	if r.RevOld != 0 && m.Epoch == r.Cur && m.Epoch != 0 && (m.Kind == KSession || m.Kind == KTokIssued || m.Kind == KUpdate || m.Kind == KIdRot) {
 		r.RevSent = append(r.RevSent, cloneMsg(m))
 	}
+	if (r.FeatOwed || w.featMode == "always") && p.newSpec() {
+		m.Feat = true // first contact after the upgrade
+	}
 	id, err := w.R.deposit(p.ID, with, tok, box, &m)
 	w.stat("deposit:" + string(err))
 	if err == okRes {
+		if m.Feat {
+			r.FeatOwed = false
+			w.stat("F:features sent")
+		}
 		e.Done, e.Indef = true, false
 		if m.Kind == KSession && m.Probe > 0 && !p.Copy {
 			w.probeDep[m.Probe] = [2]PID{p.ID, e.To}

@@ -748,3 +748,160 @@ func TestRelayKeyReconnectAnsweredWithAnEarlierKey(t *testing.T) {
 		t.Fatal("B's reconnect did not complete")
 	}
 }
+
+// Round 5, R1 and R2: A's reconnect, answered by B while A was on K0, is
+// collected by A late, after A moved to K1 and B ended K0. A keeps its
+// tokens for its current key (the hs.resp's tokens for K0 are older), B
+// keeps its tokens for A's current mailbox (the hs.init's are A's old
+// mailbox's), and traffic goes both ways afterwards.
+func TestRelayKeyReconnectRespAfterTheCutOff(t *testing.T) {
+	a, b := newVaultPair(t)
+	aConn, bConn := rkConnect(t, a, b)
+	c := newDevFixture(t)
+	c.relay.claims = a.relay.claims
+	rkConnect(t, a, c) // C never collects after A rotates: K0 stays in use for it
+	a.m.mu.Lock()
+	a.m.startReconnect(a.m.st.Connections[aConn], a.m.now())
+	a.m.mu.Unlock()
+	rkPump(t, a, b) // B answers A's reconnect while A is on K0
+	resp := capture(t, b, a)
+	if len(resp) == 0 {
+		t.Fatal("no hs.resp")
+	}
+	rkRotate(t, a)
+	a.m.mu.Lock()
+	a.m.dropRekey(aConn)
+	a.m.mu.Unlock()
+	rkPump(t, a, b) // B follows K1
+	rkPump(t, b, a) // A stores B's token for K1, deposits with K1
+	rkPump(t, a, b) // B ends K0
+	if !ended(b.m.st.Connections[bConn]) {
+		t.Fatal("B did not end K0")
+	}
+	inject(t, a, resp) // B's hs.resp, collected late from A's old mailbox
+	if a.m.onOldKey(a.m.st.Connections[aConn].Standing.Token) {
+		t.Fatal("the late hs.resp put A back on its old key")
+	}
+	settle(t, a, b)
+	id := sendConn(a, aConn, "profile.get")
+	settle(t, a, b)
+	if !handled(b, id) {
+		t.Fatal("A's session message after the reconnect never reached B")
+	}
+	id2 := sendConn(b, bConn, "profile.get")
+	settle(t, a, b)
+	if !handled(a, id2) {
+		t.Fatal("B's session message after the reconnect never reached A")
+	}
+}
+
+// Round 5, R3: B's reconnect, begun before it followed A's new address,
+// is answered by A after B ended A's earlier key, on the hs.init's token
+// for that key: the relay still takes it (B revoked that key's other
+// tokens by jti, not the key), the reconnect finishes, and B revokes the
+// key once it has.
+//
+// "A keeps K0": another recipient still holds it, so A answers with K0 and
+// B's deferral of the key's revocation lets it through. "A retired K0": A
+// answers with its current key on B's token for it, and B takes the
+// hs.resp from A's current key for the K0 its hs.init pinned (M3).
+func TestRelayKeyReconnectInProgressFinishesAfterTheCutOff(t *testing.T) {
+	for _, keep := range []bool{true, false} {
+		t.Run(fmt.Sprintf("A keeps K0=%v", keep), func(t *testing.T) { reconnectInProgress(t, keep) })
+	}
+}
+
+func reconnectInProgress(t *testing.T, keepK0 bool) {
+	a, b := newVaultPair(t)
+	aConn, bConn := rkConnect(t, a, b)
+	if keepK0 {
+		c := newDevFixture(t)
+		c.relay.claims = a.relay.claims
+		rkConnect(t, a, c) // C never collects after A rotates: K0 stays in use for it
+	}
+	k0 := relayauth.EncodeKey(pubOf(a.m.keys.relay))
+	b.m.mu.Lock()
+	b.m.startReconnect(b.m.st.Connections[bConn], b.m.now())
+	b.m.mu.Unlock()
+	init := capture(t, b, a) // B's hs.init, held on the way
+	rkRotate(t, a)
+	a.m.mu.Lock()
+	a.m.dropRekey(aConn)
+	a.m.mu.Unlock()
+	rkPump(t, a, b) // B follows K1
+	rkPump(t, b, a) // A stores B's token for K1, deposits with K1
+	rkPump(t, a, b) // B ends K0
+	pb := b.m.st.Connections[bConn]
+	if !ended(pb) || slices.Contains(b.relay.top().revoked, "sub:"+k0) {
+		t.Fatal("not ended, or the key revoked while B's reconnect under it is in progress")
+	}
+	inject(t, a, init) // A answers
+	if rkPump(t, a, b) == 0 {
+		t.Fatal("the relay refused A's answer")
+	}
+	a.m.mu.Lock()
+	k0Kept := !a.m.st.Relay.Old[0].Retired
+	a.m.mu.Unlock()
+	if k0Kept != keepK0 {
+		t.Fatalf("setup: A keeps K0 %v", k0Kept)
+	}
+	settle(t, a, b)
+	if b.m.hasOutgoing(bConn, handshake.PurposeReconnect) {
+		t.Fatal("B's reconnect did not finish")
+	}
+	b.m.mu.Lock()
+	b.m.housekeeping(b.m.now())
+	b.m.flushThenDrain(context.Background())
+	b.m.mu.Unlock()
+	if !slices.Contains(b.relay.top().revoked, "sub:"+k0) {
+		t.Fatal("the key not revoked once the reconnect finished")
+	}
+}
+
+// Round 5, M1: the cut-off is the relay's time of the deposit that showed
+// A's current key, not when B handles it: B locked, A deposits with K1 at
+// T1, a holder of A's old copy deposits with K0 at T2 > T1, B unlocks and
+// collects both at T3: the K0 deposit is not A's.
+func TestRelayKeyCutOffIsTheDepositTime(t *testing.T) {
+	a, b := newVaultPair(t)
+	aConn, bConn := rkConnect(t, a, b)
+	msgID := sendConn(a, aConn, "profile.get")
+	thief := capture(t, a, b) // what the old copy can deposit with K0
+	rkRotate(t, a)
+	a.m.mu.Lock()
+	a.m.dropRekey(aConn)
+	a.m.mu.Unlock()
+	rkPump(t, a, b) // B follows K1
+	rkPump(t, b, a) // A stores B's token for K1: its prompt deposit with K1 waits
+	k1 := capture(t, a, b)
+	if len(k1) == 0 {
+		t.Fatal("no deposit with K1")
+	}
+	t1 := time.Now().Add(-time.Minute)
+	var batch []stubDeposit
+	for _, d := range k1 {
+		d.at = t1
+		batch = append(batch, d)
+	}
+	for _, d := range thief {
+		d.at = t1.Add(time.Second) // after A's cut-off, before B handles it
+		batch = append(batch, d)
+	}
+	var msgs []Message
+	for _, d := range batch {
+		c, _ := stubClaims(d.token)
+		pumped++
+		msgs = append(msgs, Message{MsgID: fmt.Sprintf("co%d", pumped), Sender: relayauth.EncodeKey(d.sender), JTI: c.Jti, Payload: d.payload,
+			DepositedAt: d.at.UTC().Format(time.RFC3339Nano)})
+	}
+	if err := b.m.ProcessBatch(context.Background(), &fakeCollector{}, msgs); err != nil {
+		t.Fatal(err)
+	}
+	pb := b.m.st.Connections[bConn]
+	if !ended(pb) || !pb.PrevRelay[0].EndedAt.Equal(t1.UTC().Truncate(time.Nanosecond)) && pb.PrevRelay[0].EndedAt.Sub(t1) > time.Millisecond {
+		t.Fatalf("cut-off %v, want the deposit's time %v", pb.PrevRelay[0].EndedAt, t1)
+	}
+	if handled(b, msgID) {
+		t.Fatal("a K0 deposit after A's cut-off was taken")
+	}
+}

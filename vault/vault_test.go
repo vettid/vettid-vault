@@ -114,7 +114,7 @@ func (r *stubRelay) top() *stubRelay {
 }
 
 func (r *stubRelay) RegisterCreated(context.Context) (Limits, bool, error) {
-	l, _ := r.Register(context.Background())
+	l := r.limitsOf()
 	t := r.top()
 	if t.rot == nil {
 		return l, false, nil
@@ -181,11 +181,23 @@ type stubDeposit struct {
 }
 
 func (r *stubRelay) BaseURL() string { return r.base }
+
+// Register is recorded in rot.registered too (it answers 200, never the
+// script: the tests script the registrations of pending keys).
 func (r *stubRelay) Register(context.Context) (Limits, error) {
-	if t := r.top(); t.rot != nil && t.rot.limits != nil {
-		return *t.rot.limits, nil
+	if t := r.top(); t.rot != nil {
+		t.rot.mu.Lock()
+		t.rot.registered = append(t.rot.registered, mailboxOf(r.key))
+		t.rot.mu.Unlock()
 	}
-	return Limits{MaxTokenLifetimeSeconds: 400 * 86400, OpenTokenMaxLifetimeSeconds: 7 * 86400, ClaimTTLSeconds: 7 * 86400}, nil
+	return r.limitsOf(), nil
+}
+
+func (r *stubRelay) limitsOf() Limits {
+	if t := r.top(); t.rot != nil && t.rot.limits != nil {
+		return *t.rot.limits
+	}
+	return Limits{MaxTokenLifetimeSeconds: 400 * 86400, OpenTokenMaxLifetimeSeconds: 7 * 86400, ClaimTTLSeconds: 7 * 86400}
 }
 func (r *stubRelay) Collector(context.Context, bool) (Collector, error) {
 	if r.root != nil {
@@ -273,10 +285,10 @@ func (r *stubRelay) MintToken(sub ed25519.PublicKey, ttl time.Duration, jti stri
 var errStubNoBlob = &relayclient.Error{Status: 404, Code: "blob_unknown"}
 
 func (r *stubRelay) PutBlob(_ context.Context, _, mailbox, _ string, data []byte) (string, time.Time, error) {
-	if r.blobs == nil {
+	if r.top().blobs == nil {
 		return "", time.Time{}, &relayclient.Error{Status: 404, Code: "not_found"}
 	}
-	b := r.blobs
+	b := r.top().blobs
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.byID == nil {
@@ -289,15 +301,15 @@ func (r *stubRelay) PutBlob(_ context.Context, _, mailbox, _ string, data []byte
 }
 
 func (r *stubRelay) GetBlob(_ context.Context, id string) ([]byte, error) {
-	if h := r.getHook; h != nil {
+	if h := r.top().getHook; h != nil {
 		h()
 	}
-	if r.blobs == nil {
+	if r.top().blobs == nil {
 		return nil, errStubNoBlob
 	}
-	r.blobs.mu.Lock()
-	defer r.blobs.mu.Unlock()
-	b, ok := r.blobs.byID[id]
+	r.top().blobs.mu.Lock()
+	defer r.top().blobs.mu.Unlock()
+	b, ok := r.top().blobs.byID[id]
 	if !ok || b.mailbox != mailboxOf(r.key) {
 		return nil, errStubNoBlob
 	}
@@ -305,25 +317,25 @@ func (r *stubRelay) GetBlob(_ context.Context, id string) ([]byte, error) {
 }
 
 func (r *stubRelay) DeleteBlob(_ context.Context, id string) error {
-	if r.blobs == nil {
+	if r.top().blobs == nil {
 		return nil
 	}
-	r.blobs.mu.Lock()
-	defer r.blobs.mu.Unlock()
-	if b, ok := r.blobs.byID[id]; ok && b.mailbox == mailboxOf(r.key) {
-		delete(r.blobs.byID, id)
+	r.top().blobs.mu.Lock()
+	defer r.top().blobs.mu.Unlock()
+	if b, ok := r.top().blobs.byID[id]; ok && b.mailbox == mailboxOf(r.key) {
+		delete(r.top().blobs.byID, id)
 	}
 	return nil
 }
 
 func (r *stubRelay) ListBlobs(context.Context) (BlobList, error) {
-	if r.blobs == nil {
+	if r.top().blobs == nil {
 		return BlobList{}, &relayclient.Error{Status: 404, Code: "not_found"}
 	}
-	r.blobs.mu.Lock()
-	defer r.blobs.mu.Unlock()
+	r.top().blobs.mu.Lock()
+	defer r.top().blobs.mu.Unlock()
 	var out BlobList
-	for id, b := range r.blobs.byID {
+	for id, b := range r.top().blobs.byID {
 		if b.mailbox == mailboxOf(r.key) {
 			out.Blobs = append(out.Blobs, BlobEntry{BlobID: id, Size: int64(len(b.data)), Sender: b.sender})
 			out.UsedBytes += int64(len(b.data))

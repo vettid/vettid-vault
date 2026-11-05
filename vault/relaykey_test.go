@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -515,6 +516,8 @@ func TestRelayDefiniteRefusal(t *testing.T) {
 		{&relayclient.Error{Status: 401, Code: CodeTimestampStale}, false},
 		{&relayclient.Error{Status: 401, Code: "replay_detected"}, false},
 		{&relayclient.Error{Status: 500, Code: "internal"}, false},
+		{&relayclient.Error{Status: 403, Code: "http_403"}, false}, // no relay error body: a proxy's
+
 		{context.DeadlineExceeded, false},
 	}
 	for _, c := range cases {
@@ -1392,16 +1395,16 @@ func TestRelayKeyPublishedCopies(t *testing.T) {
 	r.flushStep()
 	// A set nobody uses is wiped when replaced.
 	idle := r.m.rk.set.Load()
-	idleKey := idle.keys[0]
+	idleKey := idle.keys[1] // [0] is the current key's copy
 	r.with(func(m *Manager) { m.publishRelays() })
 	if !bytes.Equal(idleKey, make([]byte, len(idleKey))) {
 		t.Fatal("an unused replaced set kept its copies")
 	}
 	held := r.m.acquireRelays()
-	if len(held.keys) != 1 {
-		t.Fatal("no copy published")
+	if len(held.keys) != 2 || &held.keys[0][0] == &r.m.keys.relay[0] || !bytes.Equal(held.keys[0], r.m.keys.relay) {
+		t.Fatal("no copies published, or the current key's bytes shared")
 	}
-	copyKey := held.keys[0]
+	copyKey := held.keys[1]
 	r.with(func(m *Manager) {
 		suite.Wipe(m.keys.oldRelay[0]) // the vault's own bytes: not what an upload signs with
 	})
@@ -1425,5 +1428,65 @@ func TestRelayKeyPublishedCopies(t *testing.T) {
 	held.release()
 	if !bytes.Equal(copyKey, make([]byte, len(copyKey))) {
 		t.Fatal("a replaced set's copies outlived its last use")
+	}
+}
+
+// Round 5, L2: a refusal of the recovery's fresh key too is a definite
+// answer: the open fails with relay_refused, noted in the recovery log.
+func TestRelayKeyRecoveryFreshKeyRefused(t *testing.T) {
+	f, rot, _ := openWithPending(t)
+	rot.rotate = func(string) error { return &relayclient.Error{Status: 404, Code: CodeMailboxUnknown} }
+	rot.register = func(string) (bool, error) { return false, &relayclient.Error{Status: 400, Code: "bad_request"} }
+	m, out := f.open(testPIN, rPW)
+	if m != nil || out.Code != OpenRelayRefused {
+		t.Fatalf("open: %+v", out)
+	}
+	var noted bool
+	for _, e := range f.storedHeader().RecoveryLog {
+		noted = noted || strings.Contains(e.Ref, OpenRelayRefused)
+	}
+	if !noted {
+		t.Fatal("not noted in the recovery log")
+	}
+}
+
+// Round 5, L4: a 429 with a retry_after on the recovery path is told to
+// the phone (the open stores nothing).
+func TestRelayKeyRecoveryRetryAfter(t *testing.T) {
+	f, rot, _ := openWithPending(t)
+	rot.rotate = func(string) error { return &relayclient.Error{Status: 429, Code: "rate_limited", RetryAfter: 3600} }
+	m, out := f.open(testPIN, rPW)
+	if m != nil || out.Code != OpenRetry || out.RetryAt.Sub(f.clock) < 59*time.Minute {
+		t.Fatalf("open: %+v", out)
+	}
+}
+
+// Round 4/5, R6: the vault re-sends to a device (a reference-client
+// recipient) what it refuses from an earlier key, once the device issues a
+// token for the current key.
+func TestRelayKeyDeviceGetsKeyChangesAgain(t *testing.T) {
+	r := newRKFixture(t)
+	r.rotate(true)
+	r.flushStep()
+	r.issueToVault("dk1") // follows K1
+	r.rotate(true)        // K2: its update and R2's key change go out with the token for K1
+	r.flushStep()
+	_ = r.deposits()
+	r.with(func(m *Manager) {
+		p := m.st.Devices["dk1"]
+		p.OwnChainAtEpoch = 1 // R2's link is not in its epoch
+	})
+	r.issueToVault("dk1") // a token for K2: R2's identity.rotate again, a rekey, a fresh token
+	r.with(func(m *Manager) { _ = m.flushThenDrain(context.Background()) })
+	var rot, tok bool
+	for _, s := range r.deposits()["dk1"] {
+		if !bytes.Equal(s.sender, r.relayPub()) {
+			continue
+		}
+		rot = rot || s.in.Type == "identity.rotate"
+		tok = tok || s.in.Type == "relay.token.issued"
+	}
+	if !rot || !tok {
+		t.Fatalf("the device was not sent again (identity.rotate %v, token %v)", rot, tok)
 	}
 }

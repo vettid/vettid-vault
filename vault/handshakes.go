@@ -366,6 +366,19 @@ func (m *Manager) respondReconnect(pi *handshake.PendingInit, p *Peer, sender ed
 	}
 	st, err1 := m.heldToken(body.Token, p)
 	rt, err2 := m.heldToken(body.ReconnectToken, p)
+	if (err1 != nil || err2 != nil) && m.onCurrentKey(p.Standing.Token) && now.Before(p.Standing.Exp) {
+		// The hs.init was made before the peer followed the vault's new
+		// address: its tokens are for a relay key the vault no longer
+		// deposits with, and the peer has since issued one for the current
+		// key. The reconnect, a handshake in progress, finishes on that
+		// (owner decision 2026-11-05).
+		if err1 != nil {
+			st, err1 = p.Standing, nil
+		}
+		if err2 != nil {
+			rt, err2 = p.Reconnect, nil
+		}
+	}
 	if err1 != nil || err2 != nil {
 		m.audit(now, "reconnect_bad_token", p.ID)
 		pi.Discard()
@@ -686,7 +699,14 @@ func (m *Manager) finishReconnect(p *Peer, aw *AwaitingHS, fr *handshake.FinResu
 			p.Chain = append(p.Chain, r.Marshal())
 		}
 	}
-	p.Standing, p.Reconnect = pend.Standing, pend.Reconnect
+	// The hs.init's tokens, unless the peer moved since: they were issued
+	// by its old mailbox, and the ones held are for its current one (§3.4).
+	if _, err := m.heldToken(pend.Standing.Token, p); err == nil || p.Standing.Token == "" {
+		p.Standing = pend.Standing
+	}
+	if _, err := m.heldToken(pend.Reconnect.Token, p); err == nil || p.Reconnect.Token == "" {
+		p.Reconnect = pend.Reconnect
+	}
 	// Both ends settle on this epoch: a service yields (§6.6 "Crossing
 	// reconnects", 0.72.1) and between two persons a verified hs.fin
 	// comes first whatever the th1 (§6.6 "Between two persons", 0.74.0),
@@ -854,7 +874,15 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 			return ackAfterFlush
 		}
 	}
-	res, err := ini.HandleResp(raw, sender, now)
+	// A peer that moved to a new relay key since the hs.init (its
+	// relay.address.update came after it) answers with the new key, the
+	// one on record for it now: it stands for the key the hs.init pinned
+	// (as for an hs.fin, handleFin).
+	cs := sender
+	if p := m.peer(og.PeerID); og.New == nil && p != nil && suite.EqualPublic(sender, p.Relay.PK) && p.wasKey(ini.ResponderRelayKey()) {
+		cs = ini.ResponderRelayKey()
+	}
+	res, err := ini.HandleResp(raw, cs, now)
 	if err != nil {
 		if _, xerr := ini.Export(); errors.Is(xerr, handshake.ErrDone) {
 			// Aborted (§6.3): the handshake is gone.
@@ -897,13 +925,17 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 		m.audit(now, "hs_resp_dropped", og.PeerID)
 		return ackAfterFlush
 	}
+	// The answer's tokens replace the held ones only if they are for the
+	// vault's same or a later relay key: an hs.resp collected late, after
+	// the vault moved and the peer issued it tokens for its current key,
+	// carries tokens for the old one (§3.4).
 	if res.Resp.Token != "" {
-		if t, err := m.heldToken(res.Resp.Token, p); err == nil {
+		if t, err := m.heldToken(res.Resp.Token, p); err == nil && m.keyRank(t.Token) >= m.keyRank(p.Standing.Token) {
 			p.Standing = t
 		}
 	}
 	if res.Resp.ReconnectToken != "" {
-		if t, err := m.heldToken(res.Resp.ReconnectToken, p); err == nil {
+		if t, err := m.heldToken(res.Resp.ReconnectToken, p); err == nil && m.keyRank(t.Token) >= m.keyRank(p.Reconnect.Token) {
 			p.Reconnect = t
 		}
 	}

@@ -385,6 +385,12 @@ type PrevRelayKey struct {
 	PK      []byte    `json:"pk"`
 	Until   time.Time `json:"until"`
 	EndedAt time.Time `json:"ended_at,omitzero"`
+	// SubPending: at EndedAt a handshake of the vault's with the principal,
+	// begun under this key, was still in progress: only the other tokens
+	// issued to the key were denylisted; the key itself (its sub) is once
+	// that handshake has finished or expired (owner decision 2026-11-05: a
+	// reconnect from the old key may finish one already in progress).
+	SubPending bool `json:"sub_pending,omitempty"`
 }
 
 // EpochRecord is one epoch of a service connection's history (§6.6, 0.72.0).

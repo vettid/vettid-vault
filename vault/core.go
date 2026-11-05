@@ -649,7 +649,12 @@ func (m *Manager) hAddressUpdate(_ context.Context, s *Session, in *envelope.Inn
 	// ends, and the tokens issued to it are denylisted only then (§3.4
 	// "Device relay key"): what it deposited with it before following its
 	// own update, and a later update it sends with it, are still its own.
-	s.peer.PrevRelay = append(s.peer.PrevRelay, PrevRelayKey{PK: append([]byte(nil), s.peer.Relay.PK...), Until: s.now.Add(PeerRelayGrace).UTC()})
+	// The grace runs from the relay's time of the update when known.
+	from := m.relayAt
+	if from.IsZero() || from.After(s.now) {
+		from = s.now
+	}
+	s.peer.PrevRelay = append(s.peer.PrevRelay, PrevRelayKey{PK: append([]byte(nil), s.peer.Relay.PK...), Until: from.Add(PeerRelayGrace).UTC()})
 	s.peer.Relay, s.peer.Standing = np.Relay, st
 	if rt.Token != "" {
 		s.peer.Reconnect = rt

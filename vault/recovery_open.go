@@ -36,6 +36,9 @@ const (
 	OpenNoRecovery     = "no_recovery"
 	OpenExpired        = "expired"
 	OpenRetry          = "retry"
+	// OpenRelayRefused (NEW): the relay refused the vault's fresh relay key
+	// (§3.4, recoveryReplacesRefusedKey); recorded in the recovery log.
+	OpenRelayRefused = "relay_refused"
 )
 
 // RecoveryCredential is implemented by the credential feature: the last
@@ -472,7 +475,16 @@ func (m *Manager) completeRecoveryR(ctx context.Context, p RecoveryOpenParams, r
 		// settled before the phone is given the vault's address; with no
 		// definite answer from the relay the open is answered retry (a
 		// failed open stores nothing, so nothing of it is audited).
-		if !m.completeStoredRelayKey(ctx, p.Relay) {
+		switch code, at := m.completeStoredRelayKey(ctx, p.Relay); code {
+		case "":
+		case OpenRelayRefused:
+			// A definite answer: recorded in the recovery log of the header
+			// (the state is not written by a failed open).
+			m.hdr.logRecovery(now, "recovery.open", openRef(r, OpenRelayRefused))
+			_ = m.writeHeader(ctx)
+			return fail(OpenRelayRefused)
+		default:
+			out.RetryAt = at
 			return fail(OpenRetry)
 		}
 		if m.keys.pendingRelay != nil {

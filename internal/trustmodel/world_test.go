@@ -23,9 +23,16 @@ type World struct {
 	p429          float64 // chance a relay call is answered 429
 	pRef          float64 // chance a rotate or registration is refused definitively
 	holdRotate    bool
-	optA          bool // VAULT-MESSAGING 0.86.0 §6.3.1 option A (activation on confirmation)
-	literalFork   bool // read §3.4.1's fork sentence literally (no deposited-after condition) for the confirmed epoch
-	debugUnlinked bool // scenarios: the relay's rotate and registration get no answer
+	optA          bool            // VAULT-MESSAGING 0.86.0 §6.3.1 option A (activation on confirmation)
+	gate          bool            // Release A gate: activate on confirmation only toward peers that advertise it
+	probeDep      map[int][2]PID  // session probes deposited by real parties (from, to)
+	probeFate     map[int]string  // what became of each
+	seq           int             // ground truth arrival order at the relay
+	reverted      map[int]bool    // epochs destroyed by a revert
+	hasEpoch      map[[2]int]bool // (party, epoch): the party ever held the epoch
+	probeEpoch    map[int]int     // the epoch a probe was sealed under
+	literalFork   bool            // read §3.4.1's fork sentence literally (no deposited-after condition) for the confirmed epoch
+	debugUnlinked bool            // scenarios: the relay's rotate and registration get no answer
 
 	issuer   map[int]Key    // jti -> iss: a token "verifies" only if its issuer minted it
 	epTruth  map[int][2]PID // epoch -> (initiator actor, responder actor)
@@ -63,7 +70,7 @@ func newWorld(seed uint64) *World {
 	w := &World{rng: rand.New(rand.NewPCG(seed, 7)), issuer: map[int]Key{}, epTruth: map[int][2]PID{},
 		rlinkBy: map[RLink]rot{}, iklinkBy: map[IKLink]rot{}, evid: map[[2]PID]map[Key]map[Key]bool{},
 		ikPos: map[[2]PID][]ikFollow{}, answered: map[int]bool{},
-		ended: map[int]bool{}, ever: map[PID]map[int]bool{}, probes: map[int]bool{}, stats: map[string]int{}, dead: map[PID]string{}, ttlFin: map[[2]PID]string{}, forkDue: map[[2]PID]int{}, evidKind: map[Key]string{}}
+		ended: map[int]bool{}, ever: map[PID]map[int]bool{}, probes: map[int]bool{}, stats: map[string]int{}, dead: map[PID]string{}, ttlFin: map[[2]PID]string{}, probeDep: map[int][2]PID{}, probeFate: map[int]string{}, reverted: map[int]bool{}, hasEpoch: map[[2]int]bool{}, probeEpoch: map[int]int{}, forkDue: map[[2]PID]int{}, evidKind: map[Key]string{}}
 	w.R = newRelay(w)
 	w.Now = 1000 * day
 	return w
@@ -132,18 +139,21 @@ type Party struct {
 	SnapW  int // a copy: the write of the original it was taken at
 	w      *World
 
-	st, stored State
-	storedOut  map[int]bool
-	Locked     bool
-	writes     int
-	crashAt    int
-	failAt     int
-	snapAt     int
-	rotOK      bool // memory: the relay's rotate for the pending key succeeded
-	unlocks    int
-	collTo     map[Key]int64
-	pendEvid   []pendEv // evidence seen in the batch not yet written
-	OldConfirm bool     // an earlier-release responder: no hs.confirm, no confirmed epoch
+	st, stored           State
+	storedOut            map[int]bool
+	Locked               bool
+	writes               int
+	crashAt              int
+	failAt               int
+	snapAt               int
+	rotOK                bool // memory: the relay's rotate for the pending key succeeded
+	unlocks              int
+	collTo               map[Key]int64
+	pendEvid             []pendEv // evidence seen in the batch not yet written
+	OldConfirm           bool     // an earlier-release responder: no hs.confirm, no confirmed epoch
+	Rel28                bool     // release <= 28: activates at hs.fin, no hs.confirm, rekeys while an answer awaits hs.fin
+	Opt                  int      // a release-29 option (optFull, optR1, optR2, optR3)
+	collectedSinceUnlock bool     // B is judged only after the first collect after an unlock
 }
 
 type pendEv struct {
@@ -227,6 +237,7 @@ func (w *World) makeCopy(p *Party) {
 		w: w, Locked: true, collTo: map[Key]int64{}}
 	c.st = p.stored.clone()
 	c.stored = p.stored.clone()
+	c.Rel28, c.Opt, c.OldConfirm = p.Rel28, p.Opt, p.OldConfirm // the copy runs the same release
 	c.storedOut = map[int]bool{}
 	for _, e := range c.st.Out {
 		c.storedOut[e.ID] = true
@@ -485,7 +496,7 @@ func (p *Party) deposit(e *Entry, r *PeerRec) {
 		tok = r.standing(with, box, w.Now)
 	}
 	if tok.JTI == 0 {
-		if p.w.optA && m.Kind == KResp && !m.Reconnect && !slices.Contains(r.DropAns, m.HS) {
+		if p.newSpec() && m.Kind == KResp && !m.Reconnect && !slices.Contains(r.DropAns, m.HS) {
 			r.DropAns = append(r.DropAns, m.HS) // §6.3.1 (J)
 		}
 		if !r.Device && !(m.Kind == KInit && m.Reconnect) {
@@ -519,6 +530,10 @@ func (p *Party) deposit(e *Entry, r *PeerRec) {
 	w.stat("deposit:" + string(err))
 	if err == okRes {
 		e.Done, e.Indef = true, false
+		if m.Kind == KSession && m.Probe > 0 && !p.Copy {
+			w.probeDep[m.Probe] = [2]PID{p.ID, e.To}
+			w.probeEpoch[m.Probe] = m.Epoch
+		}
 		w.logf("%s -> %s: %s deposited with %d to box %d (msg %d)%s", p.Name, w.party(e.To).Name, describe(&m), with, box, id, "")
 		return
 	}
@@ -527,6 +542,9 @@ func (p *Party) deposit(e *Entry, r *PeerRec) {
 	case rateLimited:
 		e.Indef = true
 	case tokenExpired:
+		if r.Pend != nil {
+			p.abandonPending(r, "token_expired", false) // §6.3.1
+		}
 		if !r.Device {
 			p.wantReconnect(r)
 		}
@@ -674,6 +692,7 @@ func (p *Party) collectRound(max int) int {
 	}
 	w := p.w
 	start := w.Now
+	p.collectedSinceUnlock = true
 	var got []*RMsg
 	var set []Key
 	for _, b := range p.boxes() {

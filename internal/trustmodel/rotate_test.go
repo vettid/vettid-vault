@@ -22,7 +22,11 @@ func (p *Party) rotate(path int) {
 	}
 	w.logf("%s: ROTATE (%s)", p.Name, pathName[path])
 	w.stat("rotate:" + pathName[path])
-	if p.st.Pend != nil {
+	if p.Rel28 || p.Opt != optFull {
+		if path == pathDevice {
+			return // releases 28 and 29 rotate no relay key (the relay-key gate)
+		}
+	} else if p.st.Pend != nil {
 		if p.st.Pend.Refused && path == pathCred {
 			w.logf("%s: credential.rotate discards refused key %d", p.Name, p.st.Pend.Key)
 			p.st.Pend = nil
@@ -55,7 +59,7 @@ func (p *Party) rotate(path int) {
 			} else if r.Pend != nil {
 				p.abandonPending(r, "S5: own ik rotated", true)
 			}
-			if w.optA { // 0.86.0 S5: own answers awaiting hs.fin are dropped
+			if p.newSpec() { // 0.86.0 S5: own answers awaiting hs.fin are dropped
 				for len(r.Ans) > 0 {
 					p.dropAnswer(r, r.Ans[0].ID)
 					w.stat("A:S5-answer-dropped")
@@ -163,8 +167,8 @@ func (p *Party) startHS(r *PeerRec, reconnect bool) {
 	if r.Status != stActive || r.Own != nil || (reconnect && r.Device) || (p.w.optA && r.Pend != nil) {
 		return
 	}
-	if len(r.Ans) > 0 {
-		return // S5 / §6.6: none while an answer of mine awaits hs.fin
+	if len(r.Ans) > 0 && !p.Rel28 {
+		return // S5 / §6.6: none while an answer of mine awaits hs.fin (release <= 28: not checked)
 	}
 	ep := r.epoch(r.Cur)
 	if ep == nil || reconnect {
@@ -200,6 +204,7 @@ func (p *Party) unlock() {
 		return
 	}
 	p.Locked = false
+	p.collectedSinceUnlock = false
 	p.unlocks++
 	w := p.w
 	p.guard(func() {
@@ -305,11 +310,14 @@ func (p *Party) tick() {
 				}
 			}
 			r.Earlier = slices.DeleteFunc(r.Earlier, func(e Earlier) bool { return w.Now > e.Until })
-			if w.optA {
+			if p.newSpec() {
 				p.tickA(r)
 			}
 			r.Epochs = slices.DeleteFunc(r.Epochs, func(e Epoch) bool {
-				if w.optA && (e.ID == r.ConfID || slices.Contains(r.AbanIDs, e.ID)) {
+				if e.ID == r.RevOld {
+					return false // Deployment: the old epoch kept toward an ungated peer
+				}
+				if p.newSpec() && (e.ID == r.ConfID || slices.Contains(r.AbanIDs, e.ID)) {
 					return false // §6.3.1 (G): the id is kept
 				}
 				return e.ID != r.Cur && e.Superseded != 0 && w.Now-e.Superseded > 16*day

@@ -24,7 +24,7 @@ func newTenv() *tenv {
 	e.K0, e.K1 = e.r.Relay, w.key()
 	l := RLink{e.K0, e.K1}
 	w.rlinkBy[l] = rot{P.ID, 1}
-	e.cut = Pos{Q.st.Relay, 100, w.Now}
+	e.cut = Pos{Q.st.Relay, 100, w.Now, 0}
 	e.r.RChain = append(e.r.RChain, l)
 	e.r.Earlier = append(e.r.Earlier, Earlier{Key: e.K0, Cut: e.cut, Until: w.Now + 30*day})
 	e.r.Relay = e.K1
@@ -171,7 +171,7 @@ func TestTableCells(t *testing.T) {
 		}, "refuse", "rejected_ik", "B:rejected:hs.fin"},
 		{"a message under a demoted epoch deposited after the link", func(e *tenv) *RMsg {
 			ep := e.r.epoch(e.r.Cur)
-			ep.Demoted, ep.DemotedAt = true, Pos{e.Q.st.Relay, 150, e.w.Now}
+			ep.Demoted, ep.DemotedAt = true, Pos{e.Q.st.Relay, 150, e.w.Now, 0}
 			return e.msg(e.K1, 200, Msg{Kind: KSession, Probe: 1})
 		}, "refuse", "ancestor_ik", "E:demoted-epoch"},
 		{"a rekey naming an epoch superseded by one an ancestor signed", func(e *tenv) *RMsg {
@@ -186,7 +186,7 @@ func TestTableCells(t *testing.T) {
 			e.r.Epochs = append(e.r.Epochs, Epoch{ID: 555, Signer: e.ik0, Own: e.Q.st.IK, EstAt: e.w.Now, Demoted: true})
 			e.r.Cur, e.r.ConfID = 0, old
 			return e.msg(e.K1, 200, Msg{Kind: KInit, HS: 5, Ctx: old, Epoch: old, FromIK: e.r.IK, FromRelay: e.K1})
-		}, "suspend", "fork", "B:current:hs.init:confirmed-epoch-fork"},
+		}, "answer", "", "B:current:hs.init:confirmed-epoch"}, // 2da316e (F2): ordinary
 		{"§6.3.1: a rekey naming the confirmed epoch, superseded by one signed before the link", func(e *tenv) *RMsg {
 			e.w.optA = true
 			old := e.r.Cur
@@ -208,7 +208,7 @@ func TestTableCells(t *testing.T) {
 			t.Errorf("%s: Q cannot open the message", c.name)
 			continue
 		}
-		d := e.Q.acceptFrom(r, m, Pos{m.Box, m.ID, m.DepAt}, []Key{e.Q.st.Relay})
+		d := e.Q.acceptFrom(r, m, Pos{m.Box, m.ID, m.DepAt, m.Seq}, []Key{e.Q.st.Relay})
 		if d.Out != c.out || d.Reason != c.why || d.Cell != c.cell {
 			t.Errorf("%s: got %s, want %s (%s) [%s]", c.name, d, c.out, c.why, c.cell)
 		}

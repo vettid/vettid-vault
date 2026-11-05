@@ -12,9 +12,13 @@ import (
 // Setup, actions, quiescence, the invariants, shrinking.
 
 type Config struct {
-	OldRules bool // f4a4d97 rules: no §6.3.1 (activation at hs.fin)
-	Vaults   int  // 2 or 3
-	Devices  bool // one device per vault
+	Rel28    []bool // parties (by index) running release <= 28
+	Opt      int    // the release-29 option of the other parties (optFull: the whole draft)
+	Unseen   bool   // the hs_confirm gate is not yet open: no peer's features seen
+	Gate     bool   // the Release A gate: §6.3.1 only toward peers that advertise it
+	OldRules bool   // f4a4d97 rules: no §6.3.1 (activation at hs.fin)
+	Vaults   int    // 2 or 3
+	Devices  bool   // one device per vault
 	P429     float64
 	PRefuse  float64
 }
@@ -40,14 +44,25 @@ func setup(cfg Config, seed uint64) *World {
 			mk("D"+names[i], true)
 		}
 	}
+	w.gate = cfg.Gate
+	for _, p := range w.P {
+		p.Opt = cfg.Opt
+	}
+	for i, old := range cfg.Rel28 {
+		if i < len(w.P) && old {
+			w.P[i].Rel28 = true
+			w.P[i].Name += "(r28)"
+		}
+	}
 	connect := func(a, b *Party, dev bool) {
 		e := w.id()
 		w.epTruth[e] = [2]PID{a.ID, b.ID}
 		for _, x := range [][2]*Party{{a, b}, {b, a}} {
 			me, it := x[0], x[1]
 			me.st.Peers = append(me.st.Peers, PeerRec{ID: it.ID, Device: dev, IK: it.st.IK, KEM: it.st.KEM,
-				Relay: it.st.Relay, KeyFor: me.st.Relay, Cur: e, ConfID: e,
+				Relay: it.st.Relay, KeyFor: me.st.Relay, Cur: e, ConfID: e, PeerA: it.advertises() && !cfg.Unseen,
 				Epochs: []Epoch{{ID: e, Signer: it.st.IK, Own: me.st.IK, EstAt: w.Now}}})
+			w.hasEpoch[[2]int{int(me.ID), e}] = true
 		}
 		for _, x := range [][2]*Party{{a, b}, {b, a}} {
 			me, it := x[0], x[1]
@@ -516,8 +531,28 @@ func (w *World) checkEnd(liveness bool) {
 				}
 			}
 			sort.Strings(how)
-			if len(how) >= 2 && r.Status != stSuspended && r.Status != stConflicted && !r.Warned {
+			// a stale record (a new invitation is needed) is not checked
+			if len(how) >= 2 && r.Status != stSuspended && r.Status != stConflicted && r.Status != stStale && !r.Warned {
 				w.violate("I4", "%s saw two successors of %d from %s but is not suspended: carried in %s", q.Name, old, w.party(key[1]).Name, strings.Join(how, " + "))
+			}
+		}
+	}
+	// no suspension without a second copy (or a relay that misbehaved)
+	for _, q := range w.real() {
+		for _, r := range q.st.Peers {
+			if r.Status != stSuspended {
+				continue
+			}
+			two, other := false, false
+			for _, c := range w.copies() {
+				two = two || c.Origin == r.ID
+				other = other || c.Origin == q.ID
+			}
+			switch {
+			case !two && other:
+				w.violate("I4-misattributed", "%s suspended %s (%s) as two copies; the copy is %s's own", q.Name, w.party(r.ID).Name, r.Ref, q.Name)
+			case !two:
+				w.violate("I4-false", "%s suspended %s (%s) but no second copy of it exists", q.Name, w.party(r.ID).Name, r.Ref)
 			}
 		}
 	}
@@ -642,6 +677,33 @@ func (w *World) checkEnd(liveness bool) {
 	for _, id := range ids {
 		if !w.probes[id] {
 			w.violate("I1", "a message %s was not accepted at quiescence", probe[id])
+		}
+	}
+	// message loss: every session message a real party deposited was opened
+	// or refused with a reason (or lost as the spec states: TTL, old mailbox)
+	pids := make([]int, 0, len(w.probeDep))
+	for id := range w.probeDep {
+		pids = append(pids, id)
+	}
+	sort.Ints(pids)
+	for _, id := range pids {
+		ft := w.probeFate[id]
+		pr := w.probeDep[id]
+		if w.dead[pr[0]] != "" || w.dead[pr[1]] != "" || w.probes[id] {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(ft, "unreadable"):
+			inv := "I1-loss"
+			switch ep := w.probeEpoch[id]; {
+			case w.reverted[ep]:
+				inv = "I1-loss/revert" // the revert's stated loss
+			case !w.hasEpoch[[2]int{int(pr[1]), ep}]:
+				inv = "I1-loss/split" // under an epoch the receiver never activated
+			}
+			w.violate(inv, "a message %s->%s was silently unreadable (%s)", w.party(pr[0]).Name, w.party(pr[1]).Name, ft)
+		case ft == "":
+			w.violate("I1-loss", "a message %s->%s vanished (no fate)", w.party(pr[0]).Name, w.party(pr[1]).Name)
 		}
 	}
 }

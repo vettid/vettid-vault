@@ -76,7 +76,14 @@ func TestRandom(t *testing.T) {
 		rs := master.Uint64()
 		rng := rand.New(rand.NewPCG(rs, 3))
 		cfg := Config{Vaults: 2 + rng.IntN(2), Devices: rng.IntN(2) == 0, P429: 0.05, PRefuse: 0.01,
-			OldRules: os.Getenv("TRUSTMODEL_OLD") != ""}
+			OldRules: os.Getenv("TRUSTMODEL_OLD") != "", Gate: os.Getenv("TRUSTMODEL_GATE") != "",
+			Opt: envInt("TRUSTMODEL_OPT", optFull), Unseen: os.Getenv("TRUSTMODEL_UNSEEN") != ""}
+		if os.Getenv("TRUSTMODEL_MIXED") != "" { // release <= 28 parties, about half
+			cfg.Rel28 = make([]bool, 6)
+			for j := range cfg.Rel28 {
+				cfg.Rel28[j] = rng.IntN(2) == 0
+			}
+		}
 		n := 1 + rng.IntN(steps)
 		acts := make([]Action, n)
 		for j := range acts {
@@ -94,7 +101,7 @@ func TestRandom(t *testing.T) {
 		inv := w.viol[0].Inv
 		sig := inv + " " + classify(w.viol[0].Detail)
 		a.stats["violation "+sig]++
-		if _, seen := a.found[sig]; seen || len(a.found) >= 24 {
+		if _, seen := a.found[sig]; seen || len(a.found) >= 40 {
 			continue
 		}
 		small := shrink(cfg, rs, acts, inv)

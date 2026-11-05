@@ -45,6 +45,7 @@ type RMsg struct {
 	P          *Msg
 	leaseUntil int64
 	Actor      PID // ground truth: who deposited (never read by the parties)
+	Seq        int // ground truth arrival order
 }
 
 type mailbox struct {
@@ -162,8 +163,9 @@ func (r *Relay) deposit(actor PID, sender Key, tok Token, box Key, m *Msg) (int,
 		r.used[tok.JTI]++
 	}
 	r.next++
+	r.w.seq++
 	b.msgs = append(b.msgs, &RMsg{ID: r.next, Box: box, DepAt: r.w.Now, Sender: sender, JTI: tok.JTI,
-		Reconnect: tok.Reconnect, P: m, Actor: actor})
+		Reconnect: tok.Reconnect, P: m, Actor: actor, Seq: r.w.seq})
 	return r.next, okRes
 }
 
@@ -223,6 +225,9 @@ func (r *Relay) advance() {
 				if m.P.Kind == KFin || m.P.Kind == KResp || m.P.Kind == KConfirm {
 					r.w.ttlFin[[2]PID{m.Actor, r.w.owner(k)}] = "deleted-with-old-mailbox"
 				}
+				if m.P.Kind == KSession && r.w.probeFate[m.P.Probe] == "" {
+					r.w.probeFate[m.P.Probe] = "deleted with the old mailbox"
+				}
 			}
 			delete(r.boxes, k)
 			r.tomb[k] = b.deleteAt + freshWindow
@@ -232,8 +237,13 @@ func (r *Relay) advance() {
 		for _, m := range b.msgs {
 			if r.w.Now < m.DepAt+msgTTL {
 				kept = append(kept, m)
-			} else if m.P.Kind == KFin || m.P.Kind == KResp || m.P.Kind == KConfirm {
-				r.w.ttlFin[[2]PID{m.Actor, r.w.owner(k)}] = "expired-at-relay-TTL"
+			} else {
+				if m.P.Kind == KFin || m.P.Kind == KResp || m.P.Kind == KConfirm {
+					r.w.ttlFin[[2]PID{m.Actor, r.w.owner(k)}] = "expired-at-relay-TTL"
+				}
+				if m.P.Kind == KSession && r.w.probeFate[m.P.Probe] == "" {
+					r.w.probeFate[m.P.Probe] = "expired (relay TTL)"
+				}
 			}
 		}
 		b.msgs = kept
@@ -246,4 +256,11 @@ func (r *Relay) pending() int {
 		n += len(b.msgs)
 	}
 	return n
+}
+
+// swapPos: a misbehaving relay swaps the asserted positions (msg_id,
+// deposited_at) of two messages in a mailbox; delivery order is unchanged.
+func (r *Relay) swapPos(box Key, a, b *RMsg) {
+	a.ID, b.ID = b.ID, a.ID
+	a.DepAt, b.DepAt = b.DepAt, a.DepAt
 }

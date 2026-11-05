@@ -229,8 +229,9 @@ func TestFindingE_ConfirmedEpochHidesForkEvidence(t *testing.T) {
 	// 0.86.0 rev. 3: the copy's epoch was destroyed when Q accepted the
 	// original's reconnect naming its confirmed epoch: refused superseded_epoch
 	s.noViolation("I3")
-	if s.w.stats["cell E:superseded-epoch"] == 0 || s.w.stats["A:destroyed-later-epoch"] == 0 {
-		t.Errorf("E: the copy's epoch was not destroyed\n  %s", strings.Join(s.w.log, "\n  "))
+	// 2da316e: the copy's epoch is demoted by the F1 rule (or destroyed by rule E)
+	if s.w.stats["A:F1-demoted"]+s.w.stats["A:destroyed-later-epoch"] == 0 {
+		t.Errorf("E: the copy's epoch was not ended\n  %s", strings.Join(s.w.log, "\n  "))
 	}
 }
 

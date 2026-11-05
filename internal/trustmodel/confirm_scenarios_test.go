@@ -134,7 +134,7 @@ func TestScenarioAOlderDevice(t *testing.T) {
 // suspend. literal: §3.4.1's fork sentence read without the
 // deposited-after condition, which §6.3.1 says applies first.
 func TestScenarioAS5AbandonAfterFin(t *testing.T) {
-	for _, literal := range []bool{false, true} {
+	for _, literal := range []bool{false} { // 2da316e: §3.4.1 now says a ctx naming the confirmed epoch is ordinary
 		s := newScen(t, 2)
 		s.w.literalFork = literal
 		P, Q := s.p(0), s.p(1)
@@ -157,7 +157,7 @@ func TestScenarioAS5AbandonAfterFin(t *testing.T) {
 		if susp {
 			t.Errorf("Q suspended in the drafter's S5 case\n  %s", strings.Join(s.w.log, "\n  "))
 		}
-		s.done(true, s.cellSeen("B:current:hs.init:confirmed-epoch"))
+		s.done(true) // 2da316e: R demotes E1 by the F1 rule (or accepts E0 as confirmed); no suspension
 	}
 }
 

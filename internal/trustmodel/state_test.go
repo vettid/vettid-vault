@@ -51,6 +51,7 @@ type Pos struct {
 	Box   Key
 	ID    int
 	DepAt int64
+	Seq   int // ground truth arrival order (not relay-asserted; never read by parties)
 }
 
 // after reports whether m was deposited after the position x.
@@ -70,10 +71,11 @@ type Epoch struct {
 	DemotedAt  Pos
 	Superseded int64
 	EstAt      int64
-	Pending    bool // §6.3.1: an initiator's epoch awaiting confirmation
-	Abandoned  bool // §6.3.1: a pending epoch abandoned (nothing under it confirms)
-	KeysGone   bool // §6.3.1 (G): only the id is kept (for a reconnect's ctx)
-	Destroyed  bool // §6.3.1 (E, 0.86.0 rev. 3): a later epoch the peer never confirmed, destroyed
+	Pending    bool  // §6.3.1: an initiator's epoch awaiting confirmation
+	Abandoned  bool  // §6.3.1: a pending epoch abandoned (nothing under it confirms)
+	KeysGone   bool  // §6.3.1 (G): only the id is kept (for a reconnect's ctx)
+	Destroyed  bool  // §6.3.1 (E, 0.86.0 rev. 3): a later epoch the peer never confirmed, destroyed
+	DestroyTs  int64 // rule E: the accepted hs.init's inner ts (a later ts under it is fork evidence)
 }
 
 // PendEp is an initiator's pending epoch (§6.3.1).
@@ -109,6 +111,8 @@ type HS struct {
 	RespToks  []Token  // responder: the tokens my hs.resp carries
 	RespInner int      // responder: the hs.resp's inner id (the same bytes each time)
 	RespRot   []IKLink // responder: the hs.resp's rotations (the same bytes each time)
+	NamedConf bool     // responder: the hs.init named my confirmed epoch (rule E at hs.fin)
+	InitTs    int64    // responder: the hs.init's inner ts
 }
 
 const (
@@ -126,6 +130,7 @@ type PeerRec struct {
 	CandA    IKLink // identity conflict candidates (followed, other)
 	CandB    IKLink
 	RelayFrk bool
+	PeerA    bool // the peer advertises §6.3.1 (the Release A gate)
 	Warned   bool // rule C between a vault and its own device: the member was told
 
 	Pend          *PendEp  // §6.3.1: my pending epoch (I initiated)
@@ -140,6 +145,9 @@ type PeerRec struct {
 	IdResendBatch bool     // ...in this batch
 	IdResendN     int      // resends for the rotation IdResendRot (at most 3)
 	IdResendRot   int64
+	RevOld        int // Deployment: the old epoch kept toward an ungated peer (0: none)
+	RevFinAt      int64
+	RevUntil      int64
 	Reconfirm     bool // a message under the confirmed epoch in this batch: queue hs.confirm
 
 	IK, KEM Key

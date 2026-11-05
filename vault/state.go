@@ -526,7 +526,8 @@ type OutgoingHS struct {
 	// OwnChain is the own rotation-chain count whose key signed hs.init
 	// (§6.6, 0.72.0); nil in a record written before it. InitOutbox is the
 	// outbox entry holding the hs.init, so that an abandoned reconnect
-	// sends nothing (0.72.1).
+	// (0.72.1), or one dropped at restore (a connection request too),
+	// sends nothing.
 	OwnChain   *int   `json:"own_chain,omitempty"`
 	InitOutbox string `json:"init_outbox,omitempty"`
 	// Replaced marks a rekey open when a restore was accepted: it was made

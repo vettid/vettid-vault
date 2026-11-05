@@ -1183,8 +1183,10 @@ func (m *Manager) acceptInvite(ctx context.Context, link, introBy string, now ti
 	}
 	og.Remote, og.Name, og.IntroBy = b.Remote, truncateUTF8(b.HintName, invite.MaxHintName), introBy
 	og.Expires = now.Add(OutgoingRequestTTL)
-	m.queueDeposit(&OutboxEntry{Op: OpDeposit, RelayURL: b.Vault.Relay.URL, Mailbox: b.Vault.Relay.Mailbox,
-		Token: b.Token, Payload: ini.Envelope()}, now)
+	oe := &OutboxEntry{Op: OpDeposit, RelayURL: b.Vault.Relay.URL, Mailbox: b.Vault.Relay.Mailbox,
+		Token: b.Token, Payload: ini.Envelope()}
+	m.queueDeposit(oe, now)
+	og.InitOutbox = oe.ID // so a request abandoned before the deposit sends nothing (restoreLive)
 	return og, nil
 }
 

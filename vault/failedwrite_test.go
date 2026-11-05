@@ -169,29 +169,65 @@ func TestFailedWriteSendRawSendsNothing(t *testing.T) {
 	}
 }
 
-// A lock whose write fails reports the app key the stored header names,
-// not one a batch whose write failed adopted in memory (§11.5).
-func TestFailedLockReportsStoredAppKey(t *testing.T) {
-	d := newDevFixture(t)
-	k1, k2 := testAppKeyDER(t, 1), testAppKeyDER(t, 2)
-	d.m.mu.Lock()
-	d.m.setAppKey(k1)
-	if err := d.m.persist(context.Background(), false); err != nil {
-		d.m.mu.Unlock()
-		t.Fatal(err)
-	}
-	d.m.setAppKey(k2) // a transfer's step 2, in memory
-	d.m.mu.Unlock()
-	failWrites(d, 1<<20)
-	var evs []LifecycleEvent
-	d.m.mu.Lock()
-	d.m.opt.Lifecycle = func(ev LifecycleEvent) { evs = append(evs, ev) }
-	d.m.mu.Unlock()
-	if err := d.m.Lock(context.Background()); err == nil {
-		t.Fatal("the lock's write did not fail")
-	}
-	if len(evs) != 1 || evs[0].Event != "locked" || !bytes.Equal(evs[0].AppKey, k1) || evs[0].AppKeySeq != 1 {
-		t.Fatalf("locked %+v", evs)
+// A lock whose write fails reports in `locked` what the stored header
+// says (§11.5): its app key, not one a batch whose write failed adopted in
+// memory, and its header_seq, credential_backup and `next`, not the
+// values a header write that failed set in memory. Also a deletion whose
+// header mark fails (ErrNotMarked), which locks the vault.
+func TestFailedLockReportsStoredHeader(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		fault  func(*faultStore)
+		delete bool
+	}{
+		{"state write fails", func(s *faultStore) { s.failState = 1 << 20 }, false},
+		{"header write fails after the state write", func(s *faultStore) { s.failHeader = 1 << 20 }, false},
+		{"deletion's header mark fails", func(s *faultStore) { s.failHeader = 1 << 20 }, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := newDevFixture(t)
+			k1, k2 := testAppKeyDER(t, 1), testAppKeyDER(t, 2)
+			d.m.mu.Lock()
+			d.m.setAppKey(k1)
+			if err := d.m.persist(context.Background(), false); err != nil {
+				d.m.mu.Unlock()
+				t.Fatal(err)
+			}
+			d.m.setAppKey(k2) // a transfer's step 2, in memory
+			fs := &faultStore{Store: d.store}
+			tc.fault(fs)
+			d.m.opt.Store = fs
+			var evs []LifecycleEvent
+			d.m.opt.Lifecycle = func(ev LifecycleEvent) { evs = append(evs, ev) }
+			d.m.mu.Unlock()
+			var err error
+			if tc.delete {
+				err = d.m.Delete(context.Background())
+			} else {
+				err = d.m.Lock(context.Background())
+			}
+			if err == nil {
+				t.Fatal("the write did not fail")
+			}
+			h := d.storedHeader()
+			if len(evs) != 1 || evs[0].Event != "locked" {
+				t.Fatalf("lifecycle %+v", evs)
+			}
+			ev := evs[0]
+			if !bytes.Equal(ev.AppKey, k1) || ev.AppKeySeq != h.AppKeySeq || !bytes.Equal(h.AppKey, k1) {
+				t.Fatalf("locked app key seq %d, stored seq %d", ev.AppKeySeq, h.AppKeySeq)
+			}
+			if ev.HeaderSeq != h.HeaderSeq {
+				t.Fatalf("locked header_seq %d, stored %d", ev.HeaderSeq, h.HeaderSeq)
+			}
+			if ev.Next == nil || *ev.Next != (h.Next != nil) {
+				t.Fatalf("locked next %v, stored %v", ev.Next, h.Next != nil)
+			}
+			if (ev.CredentialBackup == nil) != (h.CredentialBackup == nil) ||
+				ev.CredentialBackup != nil && *ev.CredentialBackup != *h.CredentialBackup {
+				t.Fatalf("locked credential_backup %v, stored %v", ev.CredentialBackup, h.CredentialBackup)
+			}
+		})
 	}
 }
 
@@ -356,51 +392,74 @@ func TestLockStoresAndSendsBeforeLocking(t *testing.T) {
 	}
 }
 
-// The host reports of a batch whose write failed (here app_key) wait for
-// the write that stores them: a state write that fails, or a header write
-// that fails after the state write, then a later batch whose write
-// succeeds reports it once.
+// The host reports of a batch whose write failed (app_key, an alarm,
+// account_name) wait for the write that stores them: a state write that
+// fails, or a header write that fails after the state write, then a later
+// write that succeeds (a later batch's, or a lock's) reports each once.
 func TestFailedWriteKeepsReportsPending(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		fault func(*faultStore)
+		lock  bool
 	}{
-		{"state write fails", func(s *faultStore) { s.failState = 1 }},
-		{"header write fails after the state write", func(s *faultStore) { s.failHeader = 1 }},
+		{"state write fails", func(s *faultStore) { s.failState = 1 }, false},
+		{"header write fails after the state write", func(s *faultStore) { s.failHeader = 1 }, false},
+		{"state write fails, then a lock", func(s *faultStore) { s.failState = 1 }, true},
+		{"header write fails, then a lock", func(s *faultStore) { s.failHeader = 1 }, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			d := newDevFixture(t)
-			var evs []LifecycleEvent
+			count := map[string]int{}
+			var keys [][]byte
 			k := testAppKeyDER(t, 3)
 			fs := &faultStore{Store: d.store}
 			tc.fault(fs)
 			d.m.mu.Lock()
 			d.m.opt.Store = fs
+			early := false
 			d.m.opt.Lifecycle = func(ev LifecycleEvent) {
+				count[ev.Event]++
 				if ev.Event == EventAppKey {
-					evs = append(evs, ev)
+					keys = append(keys, ev.AppKey)
+				}
+				// Each is reported only once a write stored what it
+				// describes, the header included.
+				if h := d.storedHeader(); h == nil || !bytes.Equal(h.AppKey, k) {
+					early = true
 				}
 			}
-			d.m.setAppKey(k) // a transfer's step 2, in the batch below
+			// What a transfer's step 2, a clone alarm and a name request
+			// leave for the batch below to report after its write.
+			d.m.setAppKey(k)
+			managerHost{d.m}.ReportAlarm(AlarmCredentialClone)
+			d.m.requestAccountName("Ada", "Lovelace", "", d.m.now())
 			d.m.mu.Unlock()
 			if err := d.send("vault.status", []byte(`{}`)); err == nil {
 				t.Fatal("the batch's write did not fail")
 			}
-			if len(evs) != 0 {
-				t.Fatalf("reported before it was stored: %+v", evs)
+			if len(count) != 0 {
+				t.Fatalf("reported before it was stored: %v", count)
 			}
-			// An idle batch: nothing collected, the write is still owed.
-			if err := d.m.ProcessBatch(context.Background(), &fakeCollector{}, nil); err != nil {
+			if tc.lock {
+				if err := d.m.Lock(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := d.m.ProcessBatch(context.Background(), &fakeCollector{}, nil); err != nil {
+				// An idle batch: nothing collected, the write is still owed.
 				t.Fatal(err)
 			}
-			if len(evs) != 1 || !bytes.Equal(evs[0].AppKey, k) {
-				t.Fatalf("app_key after the later write: %+v", evs)
+			alarm := "alarm." + AlarmCredentialClone
+			if count[EventAppKey] != 1 || !bytes.Equal(keys[0], k) || count[alarm] != 1 || count[EventAccountName] != 1 {
+				t.Fatalf("after the later write: %v", count)
 			}
-			if h := d.storedHeader(); !bytes.Equal(h.AppKey, k) {
-				t.Fatal("the stored header does not name the key")
+			if early {
+				t.Fatal("reported before the stored header named the key")
 			}
-			if err := d.send("vault.status", []byte(`{}`)); err != nil || len(evs) != 1 {
-				t.Fatalf("reported again: %v %+v", err, evs)
+			if tc.lock {
+				return
+			}
+			if err := d.send("vault.status", []byte(`{}`)); err != nil || count[EventAppKey] != 1 || count[alarm] != 1 || count[EventAccountName] != 1 {
+				t.Fatalf("reported again: %v %v", err, count)
 			}
 		})
 	}

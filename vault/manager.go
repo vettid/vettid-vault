@@ -415,10 +415,8 @@ type Manager struct {
 	// hs.init, in memory only until the approval (§11.14.10).
 	transferSecret []byte
 	// storedView is the header as last read or written (a header write
-	// that failed leaves it); reportStored: a lock whose write failed
-	// reports it in `locked`.
-	storedView   *headerView
-	reportStored bool
+	// that failed leaves it): `locked` reports it (report).
+	storedView *headerView
 	// headerBehind: the last state write was stored and the header write
 	// after it failed; the batch's host reports wait for a write that
 	// stores the header too (ProcessBatch).
@@ -941,6 +939,8 @@ func (m *Manager) persistState(ctx context.Context, create bool) error {
 	m.dirty = false
 	m.unstored = nil
 	m.stateWritten = true
+	// The header is behind until its write below succeeds.
+	m.headerBehind = true
 	if err := m.promote(); err != nil { // step 3, written below
 		return err
 	}
@@ -951,7 +951,6 @@ func (m *Manager) persistState(ctx context.Context, create bool) error {
 		m.headerVer = ""
 	}
 	if err := m.writeHeader(ctx); err != nil {
-		m.headerBehind = true
 		return err
 	}
 	m.headerBehind = false
@@ -1321,15 +1320,18 @@ func (m *Manager) lockLocked(ctx context.Context) error {
 				return err
 			}
 		}
+		// Host reports a batch whose write failed kept pending: this
+		// write stored what they describe (ProcessBatch).
+		m.reportAlarms()
+		m.reportAppKey()
 		m.pushLockWake(m.sendLocking(ctx)) // §14.2 trigger 3, before zeroizing
-	} else {
-		// The write failed: the vault ends as a crash would, with what is
-		// stored. vault.locking and its wake would be sealed for the
-		// devices and sessions in memory, which may not be the stored
-		// ones (a phone move whose step 2 was not stored), so neither is
-		// sent; the next unlock starts from the stored state, and
-		// `locked` reports the stored header (storedView).
 	}
+	// A write that failed: the vault ends as a crash would, with what is
+	// stored. vault.locking and its wake would be sealed for the devices
+	// and sessions in memory, which may not be the stored ones (a phone
+	// move whose step 2 was not stored), so neither is sent; the next
+	// unlock starts from the stored state, and `locked` reports the
+	// stored header (storedView).
 	vid := m.st.VaultID
 	m.zeroize()
 	m.report("locked", vid, m.opt.Release.PCR0)
@@ -1370,7 +1372,6 @@ func (m *Manager) lockDeleting(ctx context.Context) error {
 		if errors.Is(err, ErrSplitBrain) {
 			return err
 		}
-		m.reportStored = err != nil
 	}
 	vid := m.st.VaultID
 	m.zeroize()
@@ -1392,10 +1393,13 @@ func (m *Manager) report(event, vaultID, release string) {
 			next := m.hdr.Next != nil
 			ev.Next, ev.HeaderSeq = &next, m.hdr.HeaderSeq
 		}
-		if v := m.storedView; event == "locked" && m.reportStored && v != nil {
-			// A lock whose write failed (§11.5): the stored header's
-			// values, not those a batch whose write failed set in memory
-			// (a transfer's next app key, completeTransfer).
+		if v := m.storedView; event == "locked" && v != nil {
+			// The stored header's values (§11.5): after a lock whose write
+			// succeeded they are the header in memory; after a write that
+			// failed (the lock's, a deletion's mark, a batch's header
+			// write) not those set in memory and never stored (a
+			// transfer's next app key, completeTransfer; the header_seq a
+			// failed header write counted).
 			next := v.next
 			ev.AppKey, ev.AppKeySeq = append([]byte(nil), v.appKey...), v.appKeySeq
 			if len(v.appKey) == 0 {

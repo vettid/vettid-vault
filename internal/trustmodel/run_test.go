@@ -15,6 +15,7 @@ type Config struct {
 	Rel28    []bool // parties (by index) running release <= 28
 	Opt      int    // the release-29 option of the other parties (optFull: the whole draft)
 	Unseen   bool   // the hs_confirm gate is not yet open: no peer's features seen
+	Skew     bool   // each party's clock off by up to a day either way (the 2-day budget)
 	Gate     bool   // the Release A gate: §6.3.1 only toward peers that advertise it
 	OldRules bool   // f4a4d97 rules: no §6.3.1 (activation at hs.fin)
 	Vaults   int    // 2 or 3
@@ -47,6 +48,9 @@ func setup(cfg Config, seed uint64) *World {
 	w.gate = cfg.Gate
 	for _, p := range w.P {
 		p.Opt = cfg.Opt
+		if cfg.Skew {
+			p.Skew = int64(w.rng.IntN(int(2*day))) - day
+		}
 	}
 	for i, old := range cfg.Rel28 {
 		if i < len(w.P) && old {
@@ -686,6 +690,26 @@ func (w *World) checkEnd(liveness bool) {
 		pids = append(pids, id)
 	}
 	sort.Ints(pids)
+	stale := false
+	for _, x := range w.real() {
+		for _, r := range x.st.Peers {
+			o := w.party(r.ID).st.peer(x.ID)
+			if x.ID < r.ID && (r.Status == stStale || (o != nil && o.Status == stStale)) {
+				ref := r.Ref
+				if r.Status != stStale {
+					ref = o.Ref
+				}
+				w.stat("end-stale pair: " + ref)
+				if w.ttlFin[[2]PID{x.ID, r.ID}]+w.ttlFin[[2]PID{r.ID, x.ID}] != "" {
+					w.stat("end-stale pair after a lost hs.fin/hs.confirm")
+				}
+				stale = true
+			}
+		}
+	}
+	if stale {
+		w.stat("end-stale run")
+	}
 	for _, id := range pids {
 		ft := w.probeFate[id]
 		pr := w.probeDep[id]

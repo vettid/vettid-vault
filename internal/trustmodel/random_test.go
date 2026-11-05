@@ -74,21 +74,7 @@ func TestRandom(t *testing.T) {
 	master := rand.New(rand.NewPCG(seed, 99))
 	for i := 0; i < runs; i++ {
 		rs := master.Uint64()
-		rng := rand.New(rand.NewPCG(rs, 3))
-		cfg := Config{Vaults: 2 + rng.IntN(2), Devices: rng.IntN(2) == 0, P429: 0.05, PRefuse: 0.01,
-			OldRules: os.Getenv("TRUSTMODEL_OLD") != "", Gate: os.Getenv("TRUSTMODEL_GATE") != "",
-			Opt: envInt("TRUSTMODEL_OPT", optFull), Unseen: os.Getenv("TRUSTMODEL_UNSEEN") != ""}
-		if os.Getenv("TRUSTMODEL_MIXED") != "" { // release <= 28 parties, about half
-			cfg.Rel28 = make([]bool, 6)
-			for j := range cfg.Rel28 {
-				cfg.Rel28[j] = rng.IntN(2) == 0
-			}
-		}
-		n := 1 + rng.IntN(steps)
-		acts := make([]Action, n)
-		for j := range acts {
-			acts[j] = randomAction(rng)
-		}
+		cfg, acts := genRun(rs, steps)
 		w := runActions(cfg, rs, acts, false)
 		a.runs++
 		for k, v := range w.stats {
@@ -172,4 +158,26 @@ func report(t *testing.T, a *agg, seed uint64, runs int, el time.Duration) {
 	for _, s := range sigs {
 		t.Logf("VIOLATION CLASS %q (first at run seed %d):\n%s", s, a.foundSeed[s], a.found[s])
 	}
+}
+
+// genRun: the configuration and actions of one random run (from its seed;
+// the environment selects the mix).
+func genRun(rs uint64, steps int) (Config, []Action) {
+	rng := rand.New(rand.NewPCG(rs, 3))
+	cfg := Config{Vaults: 2 + rng.IntN(2), Devices: rng.IntN(2) == 0, P429: 0.05, PRefuse: 0.01,
+		OldRules: os.Getenv("TRUSTMODEL_OLD") != "", Gate: os.Getenv("TRUSTMODEL_GATE") != "",
+		Opt: envInt("TRUSTMODEL_OPT", optFull), Unseen: os.Getenv("TRUSTMODEL_UNSEEN") != "",
+		Skew: os.Getenv("TRUSTMODEL_NOSKEW") == ""}
+	if os.Getenv("TRUSTMODEL_MIXED") != "" { // release <= 28 parties, about half
+		cfg.Rel28 = make([]bool, 6)
+		for j := range cfg.Rel28 {
+			cfg.Rel28[j] = rng.IntN(2) == 0
+		}
+	}
+	n := 1 + rng.IntN(steps)
+	acts := make([]Action, n)
+	for j := range acts {
+		acts[j] = randomAction(rng)
+	}
+	return cfg, acts
 }

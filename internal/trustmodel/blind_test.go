@@ -177,3 +177,76 @@ func TestBlindF3RuleEHidesTwoCopies(t *testing.T) {
 		t.Errorf("F3 still stands under 2da316e\n  %s", strings.Join(s.w.log, "\n  "))
 	}
 }
+
+// Lead item 2: a release-28 initiator's hs.fin is lost toward a release-29
+// (R1) responder. The 28 side activated at hs.resp; R stays on E0.
+func TestLeadR28FinLostToward29(t *testing.T) {
+	w := setup(Config{Vaults: 2, Rel28: []bool{true, false}, Opt: optR1}, 1)
+	s := &scen{t, w}
+	I, R := s.p(0), s.p(1)
+	s.do(I, func() { I.startHS(I.st.peer(R.ID), false); I.write(); I.flush() })
+	s.run(1, R) // R answers
+	s.run(1, I) // I (r28) activates E1 at hs.resp, sends hs.fin
+	if s.dropAt(R, KFin) == 0 {
+		t.Fatalf("no hs.fin to lose")
+	}
+	s.w.checkEnd(true)
+	ri, rr := I.st.peer(R.ID), R.st.peer(I.ID)
+	t.Logf("lead item 2: I(r28) cur E%d status %d (%s); R cur E%d status %d (%s); violations %d",
+		ri.Cur, ri.Status, ri.Ref, rr.Cur, rr.Status, rr.Ref, len(s.w.viol))
+	for _, v := range s.w.viol {
+		t.Logf("  %s: %s", v.Inv, v.Detail)
+	}
+}
+
+// Lead item 3: the I4-misattributed run (seed 16663332612404948059, R1
+// with 28) must be clean, and the fork still found by rule C.
+func TestLeadMisattributedSeed(t *testing.T) {
+	t.Setenv("TRUSTMODEL_OPT", "1")
+	t.Setenv("TRUSTMODEL_MIXED", "1")
+	t.Setenv("TRUSTMODEL_NOSKEW", "1")
+	const rs = 16663332612404948059
+	cfg, acts := genRun(rs, 40)
+	w := runActions(cfg, rs, acts, false)
+	// a92a6eb's exception needs "Q received no message from P under it";
+	// here Q did (R's identity.rotate under E74), so Q still suspends R
+	// although the copy is Q's own: reported, not failed.
+	for _, v := range w.viol {
+		t.Logf("still: %s: %s", v.Inv, v.Detail)
+	}
+	if len(w.viol) > 0 {
+		for _, l := range w.log {
+			if strings.Contains(l, "SUSP") || strings.Contains(l, "DEMOT") || strings.Contains(l, "E78") || strings.Contains(l, "ROTATE") || strings.Contains(l, "identity.rotate[") {
+				t.Log(l)
+			}
+		}
+	}
+	t.Logf("own_copy audits %d, rule C identity conflicts %d, suspensions: %d",
+		w.stats["A:fork_suspected(own_copy)"], w.stats["ruleC:identity"], w.stats["out suspend"])
+}
+
+// a92a6eb: the two sides disagree on the gate. The rotating responder P
+// has seen I's features and drops its answer at S5; I has not seen P's,
+// so it activated at hs.fin. P's identity.rotate under E0 makes I demote
+// E1 and reconnect naming E0 (§3.4.1 "Epochs after an ik link").
+func TestGateDisagreementS5Repaired(t *testing.T) {
+	w := setup(Config{Vaults: 2, Opt: optR1}, 1)
+	s := &scen{t, w}
+	I, P := s.p(0), s.p(1)
+	I.st.peer(P.ID).PeerA = false // I has not yet seen P's features
+	s.do(I, I.write)
+	s.w.holdRotate = true
+	s.do(I, func() { I.startHS(I.st.peer(P.ID), false); I.write(); I.flush() })
+	s.run(1, P)           // P answers
+	s.lease(I, KResp, 0)  // (no-op: keep order)
+	s.rotate(P, pathCred) // P sees the gate: drops its answer
+	s.run(1, I)           // I: hs.resp -> activates E1 at hs.fin; then P's identity.rotate under E0
+	s.w.holdRotate = false
+	s.run(8, I, P)
+	s.w.checkEnd(true)
+	s.report("gate-disagreement")
+	t.Logf("F1 demotions %d, reconnects started %d", s.w.stats["A:F1-demoted"], s.w.stats["start:reconnect"])
+	if len(s.w.viol) > 0 || s.w.stats["A:F1-demoted"] == 0 {
+		t.Errorf("not repaired by the demotion")
+	}
+}

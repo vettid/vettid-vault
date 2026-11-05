@@ -154,6 +154,8 @@ type Party struct {
 	Rel28                bool     // release <= 28: activates at hs.fin, no hs.confirm, rekeys while an answer awaits hs.fin
 	Opt                  int      // a release-29 option (optFull, optR1, optR2, optR3)
 	collectedSinceUnlock bool     // B is judged only after the first collect after an unlock
+	Skew                 int64    // clock offset (within the 2-day budget of §6.3.1)
+	ownCopy              bool     // scratch: forkEpoch's own_copy result
 }
 
 type pendEv struct {
@@ -286,10 +288,13 @@ func (p *Party) keyRank(k Key) int {
 	return -1
 }
 
+// now: this party's clock (inner ts).
+func (p *Party) now() int64 { return p.w.Now + p.Skew }
+
 func (p *Party) enqueue(to PID, m Msg, f func(*Entry)) {
 	m.Inner = p.w.id()
 	if m.Ts == 0 {
-		m.Ts = p.w.Now
+		m.Ts = p.now()
 	}
 	e := Entry{ID: m.Inner, To: to, M: m}
 	if f != nil {
@@ -526,6 +531,9 @@ func (p *Party) deposit(e *Entry, r *PeerRec) {
 	retry := e.Tried
 	e.Tried = true
 	p.checkI5(e, &m, r, retry)
+	if r.RevOld != 0 && m.Epoch == r.Cur && m.Epoch != 0 && (m.Kind == KSession || m.Kind == KTokIssued || m.Kind == KUpdate || m.Kind == KIdRot) {
+		r.RevSent = append(r.RevSent, cloneMsg(m))
+	}
 	id, err := w.R.deposit(p.ID, with, tok, box, &m)
 	w.stat("deposit:" + string(err))
 	if err == okRes {
@@ -692,7 +700,6 @@ func (p *Party) collectRound(max int) int {
 	}
 	w := p.w
 	start := w.Now
-	p.collectedSinceUnlock = true
 	var got []*RMsg
 	var set []Key
 	for _, b := range p.boxes() {
@@ -710,6 +717,9 @@ func (p *Party) collectRound(max int) int {
 		set = append(set, b)
 		if len(ms) < max {
 			p.collTo[b] = start - freshWindow
+			if b == p.st.Relay {
+				p.collectedSinceUnlock = true // a collect after the unlock that returned fewer than max
+			}
 		}
 		got = append(got, ms...)
 	}

@@ -59,7 +59,7 @@ func (p *Party) rotate(path int) {
 			} else if r.Pend != nil {
 				p.abandonPending(r, "S5: own ik rotated", true)
 			}
-			if p.newSpec() { // 0.86.0 S5: own answers awaiting hs.fin are dropped
+			if p.newSpec() && r.PeerA { // S5 answer drop only toward peers that advertise hs_confirm (lead item 1)
 				for len(r.Ans) > 0 {
 					p.dropAnswer(r, r.Ans[0].ID)
 					w.stat("A:S5-answer-dropped")
@@ -177,7 +177,8 @@ func (p *Party) startHS(r *PeerRec, reconnect bool) {
 	if ep == nil {
 		return
 	}
-	h := &HS{ID: w.id(), Reconnect: reconnect, Ctx: ep.ID, PeerIK: r.IK, OwnIK: p.st.IK, Started: w.Now, Relay: r.KeyFor}
+	h := &HS{ID: w.id(), Reconnect: reconnect, Ctx: ep.ID, PeerIK: r.IK, OwnIK: p.st.IK, Started: w.Now, Relay: r.KeyFor,
+		InitHalf: p.initHalf(r)}
 	m := Msg{Kind: KInit, HS: h.ID, Reconnect: reconnect, Ctx: ep.ID, FromIK: p.st.IK, FromKEM: p.st.KEM,
 		FromRelay: r.KeyFor, Rot: p.ownLinks(ep.Own)}
 	var f func(*Entry)

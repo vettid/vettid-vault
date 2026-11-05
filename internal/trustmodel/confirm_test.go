@@ -9,11 +9,11 @@ import "slices"
 // the others). Config.OldRules turns all of it off (f4a4d97).
 
 const (
-	aHSLife   = 16 * day      // an initiator's handshake awaiting hs.resp
-	aAnsLife  = 16 * day      // a responder's answer awaiting hs.fin (L)
-	aPendLife = 32 * day      // an initiator's pending epoch awaiting confirmation (B)
-	aConfKeys = 48 * day      // a confirmed epoch's keys while not current; the revert's keep
-	aRevert   = msgTTL + hour // Deployment: an old-epoch message this long after hs.fin reverts
+	aHSLife   = 16 * day       // an initiator's handshake awaiting hs.resp
+	aAnsLife  = 16 * day       // a responder's answer awaiting hs.fin (L)
+	aPendLife = 32 * day       // an initiator's pending epoch awaiting confirmation (B)
+	aConfKeys = 48 * day       // a confirmed epoch's keys while not current; the revert's keep
+	aRevert   = msgTTL + 2*day // Deployment: an old-epoch message this long after hs.fin reverts (lead item 5)
 )
 
 // Release-29 options (§15 item 50); optFull is the whole draft (A).
@@ -82,7 +82,7 @@ func (q *Party) makePending(r *PeerRec, id int, signer, own Key, pos Pos, respTs
 	if signer != r.IK {
 		q.w.violate("I3", "%s establishes E%d signed by %d, not its current ik %d for %s", q.Name, id, signer, r.IK, q.w.party(r.ID).Name)
 	}
-	r.Epochs = append(r.Epochs, Epoch{ID: id, Signer: signer, Own: own, Est: pos, EstAt: q.w.Now, Pending: true})
+	r.Epochs = append(r.Epochs, Epoch{ID: id, Signer: signer, Own: own, Est: pos, EstAt: q.w.Now, Pending: true, MineInit: true})
 	r.Pend = &PendEp{ID: id, Signer: signer, Own: own, FinAt: q.w.Now, RespTs: respTs, Reconnect: reconnect}
 	q.w.hasEpoch[[2]int{int(q.ID), id}] = true
 	q.w.stat("A:pending")
@@ -200,9 +200,9 @@ func (q *Party) beforeAccept(r *PeerRec, m *RMsg, pos Pos) {
 	if r.RevOld != 0 {
 		switch {
 		case M.Epoch == r.Cur:
-			r.RevOld = 0 // the peer activated: the old epoch goes as usual
+			r.RevOld, r.RevSent = 0, nil // the peer activated: the old epoch goes as usual
 		case M.Epoch == r.RevOld && M.Kind != KFin && M.Ts > r.RevFinAt+aRevert:
-			q.revert(r)
+			q.revert(r, M.Kind == KInit) // a92a6eb: a rekey hs.init triggers it too; it is then answered
 			return
 		}
 	}
@@ -223,8 +223,11 @@ func (q *Party) beforeAccept(r *PeerRec, m *RMsg, pos Pos) {
 
 // revert: the peer never activated the new epoch; it is destroyed, the old
 // one is current again, and I rekeys from it. What I sent under it is lost.
-func (q *Party) revert(r *PeerRec) {
+func (q *Party) revert(r *PeerRec, rekeyIn bool) {
 	gone := r.Cur
+	if pr := q.w.party(r.ID).st.peer(q.ID); pr != nil && pr.epoch(gone) != nil && !pr.epoch(gone).Destroyed && !pr.epoch(gone).Demoted {
+		q.w.violate("I1-false-revert", "%s reverted E%d although %s had activated it", q.Name, gone, q.w.party(r.ID).Name)
+	}
 	for j := range r.Epochs {
 		if ep := &r.Epochs[j]; ep.ID == gone {
 			ep.Destroyed, ep.DestroyTs = true, 1<<62
@@ -236,9 +239,18 @@ func (q *Party) revert(r *PeerRec) {
 		ep.Superseded = 0
 	}
 	q.w.stat("A:reverted")
-	q.w.logf("%s: E%d with %s REVERTED to E%d (the peer never activated it)", q.Name, gone, q.w.party(r.ID).Name, r.Cur)
+	q.w.logf("%s: E%d with %s REVERTED to E%d (the peer never activated it); connection.epoch_reverted", q.Name, gone, q.w.party(r.ID).Name, r.Cur)
+	for _, m := range r.RevSent { // lead item 5: re-sealed in the restored epoch, same inner id
+		q.w.stat("A:revert-resealed")
+		c := cloneMsg(m)
+		c.Ts = q.now() // same inner id, a new ts
+		q.enqueueRaw(r.ID, c)
+	}
+	r.RevSent = nil
 	q.abandonOwn(r)
-	q.startHS(r, false)
+	if !rekeyIn {
+		q.startHS(r, false) // else the peer's rekey is answered
+	}
 }
 
 // ruleE: at the verified hs.fin of a handshake that named the confirmed

@@ -63,19 +63,21 @@ func (x Pos) after(m Pos) bool {
 }
 
 type Epoch struct {
-	ID         int
-	Signer     Key // the peer-side ik that signed its handshake
-	Own        Key // my ik that signed it (S8: links from it)
-	Est        Pos // position of the message that established it here
-	Demoted    bool
-	DemotedAt  Pos
-	Superseded int64
-	EstAt      int64
-	Pending    bool  // §6.3.1: an initiator's epoch awaiting confirmation
-	Abandoned  bool  // §6.3.1: a pending epoch abandoned (nothing under it confirms)
-	KeysGone   bool  // §6.3.1 (G): only the id is kept (for a reconnect's ctx)
-	Destroyed  bool  // §6.3.1 (E, 0.86.0 rev. 3): a later epoch the peer never confirmed, destroyed
-	DestroyTs  int64 // rule E: the accepted hs.init's inner ts (a later ts under it is fork evidence)
+	ID          int
+	Signer      Key // the peer-side ik that signed its handshake
+	Own         Key // my ik that signed it (S8: links from it)
+	Est         Pos // position of the message that established it here
+	Demoted     bool
+	DemotedAt   Pos
+	Superseded  int64
+	EstAt       int64
+	Pending     bool  // §6.3.1: an initiator's epoch awaiting confirmation
+	Abandoned   bool  // §6.3.1: a pending epoch abandoned (nothing under it confirms)
+	KeysGone    bool  // §6.3.1 (G): only the id is kept (for a reconnect's ctx)
+	Destroyed   bool  // §6.3.1 (E, 0.86.0 rev. 3): a later epoch the peer never confirmed, destroyed
+	DestroyTs   int64 // rule E: the accepted hs.init's inner ts (a later ts under it is fork evidence)
+	MineInit    bool  // this side initiated the handshake that made it
+	GotFromPeer bool  // a message from the peer was received under it
 }
 
 // PendEp is an initiator's pending epoch (§6.3.1).
@@ -113,6 +115,8 @@ type HS struct {
 	RespRot   []IKLink // responder: the hs.resp's rotations (the same bytes each time)
 	NamedConf bool     // responder: the hs.init named my confirmed epoch (rule E at hs.fin)
 	InitTs    int64    // responder: the hs.init's inner ts
+	InitHalf  bool     // initiator: the gate as fixed when hs.init was sent
+	AnsTs     int64    // responder: the hs.resp's inner ts (its own clock)
 }
 
 const (
@@ -148,7 +152,8 @@ type PeerRec struct {
 	RevOld        int // Deployment: the old epoch kept toward an ungated peer (0: none)
 	RevFinAt      int64
 	RevUntil      int64
-	Reconfirm     bool // a message under the confirmed epoch in this batch: queue hs.confirm
+	RevSent       []Msg // Deployment: messages sent under the new epoch while the revert is possible
+	Reconfirm     bool  // a message under the confirmed epoch in this batch: queue hs.confirm
 
 	IK, KEM Key
 	Chain   []IKLink // followed identity links
@@ -285,6 +290,7 @@ func (s *State) clone() State {
 		}
 		q.Answered = slices.Clone(p.Answered)
 		q.AbanIDs = slices.Clone(p.AbanIDs)
+		q.RevSent = slices.Clone(p.RevSent)
 		q.Seen = slices.Clone(p.Seen)
 		q.RSeen = slices.Clone(p.RSeen)
 		q.DropAns = slices.Clone(p.DropAns)

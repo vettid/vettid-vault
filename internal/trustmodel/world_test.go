@@ -38,7 +38,7 @@ type World struct {
 	fixBOff       bool              // F1 as in 2da316e (no fix B); attribution runs only
 	fixBStrict    bool              // F1 (default, lead's choice): keep the ungated epoch only if the peer's new ik signed something under it
 	f3Suspend28   bool              // TRUSTMODEL_F3UNGATED=suspend: F3 suspends toward ungated peers too (before r8)
-	f3CtxMsg      bool              // TRUSTMODEL_F3RCCTX=msg: that reconnect names the message's epoch, not the confirmed one
+	f3CtxMsg      bool              // default: that reconnect names the message's epoch (lead, 2026-11-05); TRUSTMODEL_F3RCCTX=confirmed names the confirmed one
 	noRekeyRC     bool              // TRUSTMODEL_REKEYRC=off: no reconnect after a refused rekey toward an ungated peer (before r8)
 	ruleEKeepFin  bool              // TRUSTMODEL_RULEEFIN=keep: rule E leaves an unsent hs.fin for a destroyed epoch in the outbox (before r7)
 	r28Spec       bool              // TRUSTMODEL_R28=spec: release-28 parties follow f4a4d97 §3.4.1 (before r6); default: the release-28 code

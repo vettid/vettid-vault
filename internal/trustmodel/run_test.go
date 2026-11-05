@@ -802,7 +802,7 @@ func runActions(cfg Config, seed uint64, acts []Action, verbose bool) *World {
 	w.ruleEKeepFin = os.Getenv("TRUSTMODEL_RULEEFIN") == "keep"
 	w.f3Suspend28 = os.Getenv("TRUSTMODEL_F3UNGATED") == "suspend"
 	w.noRekeyRC = os.Getenv("TRUSTMODEL_REKEYRC") == "off"
-	w.f3CtxMsg = os.Getenv("TRUSTMODEL_F3RCCTX") == "msg"
+	w.f3CtxMsg = os.Getenv("TRUSTMODEL_F3RCCTX") != "confirmed"
 	defer w.expoStats()
 	defer w.gateStats()
 	defer w.rcStats()

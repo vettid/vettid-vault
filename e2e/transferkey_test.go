@@ -337,36 +337,43 @@ func TestSignInBeforeFinishRefused(t *testing.T) {
 	}
 }
 
-// stateFaults fails the next state write of any vault once armed.
+// stateFaults fails the next state writes once armed: of the vault vid
+// if set, of any vault otherwise.
 type stateFaults struct {
 	store.Store
-	mu      sync.Mutex
-	fail    int
-	vid     string // the vault whose header writes are counted
-	headers int    // its header writes stored while state writes fail
-	// atStep1: the next header write of vid that no state write preceded
-	// (a DEK replacement's step 1) arms the failure of this many state
-	// writes after it, from step 2's. Armed now instead, a write still
-	// due from the pairing (the one after the drain that sent
-	// device.transfer.pending) could take the failure: the approval would
-	// find the state behind and answer retry, with no step 1 stored.
-	// sawState: a state write of vid since its last header write.
-	atStep1  int
-	sawState bool
-	failed   int // state writes failed so far
+	mu   sync.Mutex
+	fail int
+	vid  string // the vault whose step 1 arms the failure
+	// atStep1: step 1 of vid's DEK replacement arms the failure of this
+	// many state writes after it, from step 2's. Step 1 is recognised by
+	// its read-back (beginReplace reads the header it wrote; no other
+	// path reads a running vault's header), so the failure can land
+	// neither on a write still due from the pairing nor on any other.
+	atStep1 int
+	step1s  int // step 1 read-backs that armed the failure
+	failed  int // state writes failed so far
 }
 
-func (s *stateFaults) headerPuts() int { s.mu.Lock(); defer s.mu.Unlock(); return s.headers }
+// step1 reports how many step 1s armed the failure.
+func (s *stateFaults) step1() int { s.mu.Lock(); defer s.mu.Unlock(); return s.step1s }
 
 func (s *stateFaults) arm(n int) { s.mu.Lock(); s.fail = n; s.mu.Unlock() }
+
+func (s *stateFaults) Get(ctx context.Context, key string) ([]byte, store.Version, error) {
+	b, v, err := s.Store.Get(ctx, key)
+	s.mu.Lock()
+	if err == nil && s.vid != "" && s.atStep1 > 0 && strings.HasPrefix(key, "vaults/"+s.vid+"/header/") {
+		s.fail, s.atStep1 = s.atStep1, 0
+		s.step1s++
+	}
+	s.mu.Unlock()
+	return b, v, err
+}
 
 func (s *stateFaults) Put(ctx context.Context, key string, data []byte, ifMatch store.Version) (store.Version, error) {
 	if strings.HasSuffix(key, "/state") {
 		s.mu.Lock()
-		if s.vid != "" && key == store.StateKey(s.vid) {
-			s.sawState = true
-		}
-		if s.fail > 0 {
+		if s.fail > 0 && (s.vid == "" || key == store.StateKey(s.vid)) {
 			s.fail--
 			s.failed++
 			s.mu.Unlock()
@@ -374,20 +381,11 @@ func (s *stateFaults) Put(ctx context.Context, key string, data []byte, ifMatch 
 		}
 		s.mu.Unlock()
 	}
-	v, err := s.Store.Put(ctx, key, data, ifMatch)
-	if err == nil && s.vid != "" && strings.HasPrefix(key, "vaults/"+s.vid+"/header/") {
-		s.mu.Lock()
-		if s.atStep1 > 0 && !s.sawState {
-			s.fail, s.atStep1 = s.atStep1, 0
-		}
-		if s.fail > 0 {
-			s.headers++
-		}
-		s.sawState = false
-		s.mu.Unlock()
-	}
-	return v, err
+	return s.Store.Put(ctx, key, data, ifMatch)
 }
+
+// isRetry reports a vault answer of retry (nothing spent; sent again).
+func isRetry(err error) bool { return err != nil && strings.HasSuffix(err.Error(), ": retry") }
 
 // §11.14.10 "nothing needs undoing", with the real credential and items
 // features: the approval's step 1 is stored and its step-2 state write
@@ -442,15 +440,19 @@ func transferFailedStep2(t *testing.T, seed, newSeed byte, newName string, end f
 	// answered (its answer goes after the flush).
 	sf.atStep1 = 1 << 30
 	sf.mu.Unlock()
-	if err := w.a.dev.TransferApprove(ctxT(t, 20*time.Second), id, acPIN, credPW); err == nil {
+	err = w.a.dev.TransferApprove(ctxT(t, 20*time.Second), id, acPIN, credPW)
+	if err == nil {
 		t.Fatal("the approval was answered although step 2 was not stored")
+	}
+	if isRetry(err) {
+		t.Fatalf("the approval was refused (%v): no step 1, the case is not tested", err)
 	}
 	end(w)
 	sf.arm(0)
-	// Step 1 (the header with the next part) was stored while the state
-	// writes failed: the case is the one between the two writes.
-	if sf.headerPuts() == 0 {
-		t.Fatal("step 1 was not stored")
+	// Step 1 (the header with the next part) was stored and read back,
+	// then step 2's write failed: the case is the one between the writes.
+	if n := sf.step1(); n != 1 {
+		t.Fatalf("%d step 1s armed the failure, not 1", n)
 	}
 	// The vault starts again from what is stored: the old phone opens it.
 	if r := w.aw.mustUnlock(w.a, acPIN, client.UnlockOptions{}, ""); !r.OK {
@@ -497,25 +499,27 @@ func TestTransferFailedStep2ThenStored(t *testing.T) {
 	// The approval, sent again as the apps do on "try again" (busy or
 	// retry spend nothing) until step 1 is stored and step 2's write has
 	// failed: under load an approval can outlast one attempt's wait.
-	fired := func() (int, bool) {
+	fired := func() (failed, step1 int) {
 		sf.mu.Lock()
 		defer sf.mu.Unlock()
-		return sf.failed, sf.atStep1 == 0 && sf.fail == 0
+		return sf.failed, sf.step1s
 	}
 	for attempt := 0; ; attempt++ {
 		err := w.a.dev.TransferApprove(ctxT(t, 30*time.Second), id, acPIN, credPW)
-		if n, armed := fired(); n > 0 || armed {
+		if n, _ := fired(); n > 0 {
 			break
 		}
 		if attempt == 5 {
 			t.Fatalf("step 2's write never failed: the last approval %v", err)
 		}
-		t.Logf("the approval again (%v)", err)
+		if err == nil {
+			t.Fatal("the approval was answered and no state write failed")
+		}
+		t.Logf("the approval again (%v, retry %v)", err, isRetry(err))
 	}
-	// The fault fired, on step 2: step 1 (a header with no state write
-	// before it) armed it, and exactly one state write failed.
-	if failed, armed := fired(); failed != 1 || !armed {
-		t.Fatalf("the step-2 fault: %d writes failed, armed and spent %v", failed, armed)
+	// The fault fired once, on step 2: armed by step 1's read-back.
+	if failed, step1 := fired(); failed != 1 || step1 != 1 {
+		t.Fatalf("the step-2 fault: %d writes failed after %d step 1s", failed, step1)
 	}
 	// A later batch whose write succeeds (if the approval's retransmission
 	// did not store it first): the vault keeps running.

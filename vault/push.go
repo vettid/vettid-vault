@@ -808,3 +808,27 @@ func (p *pusher) applier() {
 		}
 	}
 }
+
+// rotateWakeKey rotates the wake key with the vault's keys (§3.4, §14.1):
+// the registration in force and any pending one are erased with their wake
+// keys, and the app is sent push.token-needed{reason: "token_gone"}; its
+// next push.register generates a fresh wake key (§14.2). Nothing is
+// audited apart from the rotation itself.
+func (m *Manager) rotateWakeKey(now time.Time) {
+	var devs []string
+	if cur := m.st.Push; cur != nil {
+		devs = append(devs, cur.DeviceID)
+		m.clearPush()
+	}
+	if pp := m.st.PushPending; pp != nil {
+		if len(devs) == 0 || devs[0] != pp.DeviceID {
+			devs = append(devs, pp.DeviceID)
+		}
+		m.clearPushPending()
+	}
+	for _, id := range devs {
+		if p := m.st.Devices[id]; p != nil && p.State == PeerActive {
+			m.sendTo(p, TypePushTokenNeeded, strictjson.NewBuilder().String("reason", "token_gone").Bytes(), now)
+		}
+	}
+}

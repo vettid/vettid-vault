@@ -130,7 +130,8 @@ func TestHeldKeyRotationSentBeforeTheUnlink(t *testing.T) {
 		}
 	}
 	d.relay.mu.Unlock()
-	if len(order) != 2 || order[0] != "statement" || order[1] != "unlinked" {
+	// (The vault's own rotation follows the accepted notice, §11.14.10.)
+	if len(order) < 2 || order[0] != "statement" || order[1] != "unlinked" {
 		t.Fatalf("deposits %v", order)
 	}
 	// A later unlock sends nothing again.
@@ -266,16 +267,27 @@ func TestRecoverySendsHeldStatement(t *testing.T) {
 	if len(k.sent) != 1 || m.st.HeldKeyRotation != nil {
 		t.Fatalf("sent %d, held %+v", len(k.sent), m.st.HeldKeyRotation)
 	}
-	if m.st.PendingUnlink != nil {
+	// The notice is queued before the rotation (it is held until the relay
+	// settles it, and audited device.unlinked_sent at its 201).
+	m.mu.Lock()
+	queued := -1
+	for i, e := range m.st.Outbox {
+		if e.Unlink == "t1" {
+			queued = i
+		}
+	}
+	settled := m.st.PendingUnlink == nil
+	m.mu.Unlock()
+	if queued < 0 && !(settled && sink.has("device.unlinked_sent")) {
 		t.Fatal("the old phone's notice was not sent")
 	}
 	var kinds []string
 	for _, a := range sink.got {
-		if a.Kind == "test.statement_sent" || a.Kind == "device.unlinked_sent" || a.Kind == "identity.rotated" {
+		if a.Kind == "test.statement_sent" || a.Kind == "identity.rotated" {
 			kinds = append(kinds, a.Kind)
 		}
 	}
-	if len(kinds) != 3 || kinds[0] != "test.statement_sent" || kinds[1] != "device.unlinked_sent" || kinds[2] != "identity.rotated" {
+	if len(kinds) != 2 || kinds[0] != "test.statement_sent" || kinds[1] != "identity.rotated" {
 		t.Fatalf("order %v", kinds)
 	}
 }
@@ -289,6 +301,7 @@ func TestNoHeldKeyRotationFromEarlierRelease(t *testing.T) {
 	d.m.mu.Lock()
 	d.m.st.HeldKeyRotation = nil
 	d.m.pendingUnlinkAtUnlock(d.m.now())
+	d.m.drainOutbox(context.Background())
 	d.m.mu.Unlock()
 	if len(k.sent) != 0 || d.m.st.PendingUnlink != nil {
 		t.Fatal("not as before")

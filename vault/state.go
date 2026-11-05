@@ -23,11 +23,12 @@ type State struct {
 	Rotations    []json.RawMessage `json:"rotations,omitempty"` // own identity.rotate chain (§3.4)
 	WakeSeed     []byte            `json:"wake_seed"`
 	// RotationOwed is the owed mark (§11.14.10 "The owed mark"): a rotation
-	// of the vault's keys that could not be made. Recovery is the
-	// recovery_id of a completed recovery (§11.14.6 step 6), written in its
-	// step-2 state write. Transfer is the transfer_id of §11.14.10's own
-	// mark; no release writes it yet. Retried when the recovered phone has
-	// paired and at each later unlock; any rotation clears both.
+	// of the vault's keys still to be made. Recovery is the recovery_id of
+	// a completed recovery (§11.14.6 step 6), written in its step-2 state
+	// write. Transfer is the transfer_id of a transfer, written in the
+	// approval's step-2 state write. Retried when the recovered phone has
+	// paired, when the relay settles the transfer's notice to the old phone,
+	// and at each later unlock; any rotation clears both.
 	RotationOwed *RotationOwed `json:"rotation_owed,omitempty"`
 
 	Devices     map[string]*Peer `json:"devices"`
@@ -168,9 +169,16 @@ type RelayState struct {
 }
 
 // RotationOwed holds the owed rotation marks (see State.RotationOwed).
+// DEKVersion and At belong to the transfer's mark: the DEK version its
+// step 2 wrote (the rotation waits for an unlock from the stored objects
+// under it or a later one, "after the new phone's first unlock") and the
+// approval's time (from 7 days after it the rotation no longer waits for
+// the old phone's notice).
 type RotationOwed struct {
-	Recovery string `json:"recovery,omitempty"`
-	Transfer string `json:"transfer,omitempty"`
+	Recovery   string    `json:"recovery,omitempty"`
+	Transfer   string    `json:"transfer,omitempty"`
+	DEKVersion uint64    `json:"dek_version,omitempty"`
+	At         time.Time `json:"at,omitzero"`
 }
 
 // RetiredKEM is a retired static KEM key, kept 400 days for reconnects.
@@ -612,6 +620,10 @@ type OutboxEntry struct {
 	// Wake is the deposit's push wake class (0.24.0, §14.2): the app is
 	// woken once the relay accepted it; "" for none.
 	Wake string `json:"wake,omitempty"`
+	// Unlink marks the deposit of a transfer's held notice to the old app
+	// (§11.14.10): its transfer_id. The relay's answer settles the notice
+	// or leaves it for the next unlock (unlinkOutcome).
+	Unlink string `json:"unlink,omitempty"`
 }
 
 // AuditEntry records a dropped or refused message (§6.3, §6.6, §7.3).

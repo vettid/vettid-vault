@@ -48,6 +48,14 @@ type PendingUnlink struct {
 	// before this one sends (and the only thing it can read), and what
 	// this release sends for a notice that has no Epoch.
 	Payload []byte `json:"payload"`
+	// Queued is the outbox entry that deposits the notice now, until the
+	// relay answers: an unlock that finds it queued queues no second copy.
+	Queued string `json:"queued,omitempty"`
+	// Marked: the approval that held the notice also wrote the transfer's
+	// owed mark (State.RotationOwed). A notice held by a release before the
+	// mark existed has none, and is treated as owing a rotation
+	// (§11.14.10 "The owed mark").
+	Marked bool `json:"marked,omitempty"`
 }
 
 // until is when a held notice is deleted unsent: when its deposit token
@@ -168,7 +176,7 @@ func (m *Manager) holdUnlink(old *Peer, transferID string, dekVersion uint64, no
 		return
 	}
 	m.st.PendingUnlink = &PendingUnlink{RelayURL: old.Relay.URL, Mailbox: old.Relay.Mailbox, Token: old.Standing.Token,
-		TokenExp: old.Standing.Exp, TransferID: transferID, DEKVersion: dekVersion, At: now.UTC(), Epoch: &ep, Payload: raw}
+		TokenExp: old.Standing.Exp, TransferID: transferID, DEKVersion: dekVersion, At: now.UTC(), Epoch: &ep, Payload: raw, Marked: true}
 	m.dirty = true
 }
 
@@ -178,66 +186,183 @@ func (m *Manager) unlinkInner(transferID string, now time.Time) *envelope.Inner 
 	return &envelope.Inner{ID: m.newID(now), Type: "device.unlinked", TS: now, Body: body}
 }
 
-// sendPendingUnlink deposits the held notice (the new phone has unlocked
-// from storage at the transfer's dek_version or later, or a recovery
-// completed) and deletes it, whatever its age, while its token lives. It
-// is sealed now, with a fresh ts, in the old app's epoch (a notice held
-// by an earlier release, without the epoch, goes as it was sealed).
+// sendPendingUnlink queues the deposit of the held notice (the new phone
+// has unlocked from storage at the transfer's dek_version or later, a
+// recovery completed, or the vault's keys rotate), whatever its age, while
+// its token lives. It is sealed now, with a fresh ts, in the old app's
+// epoch, whose kept send counter moves on in the same state (a notice held
+// by an earlier release, without the epoch, goes as it was sealed). The
+// notice stays held until the relay settles it (unlinkOutcome): accepted,
+// or refused for good; any other answer leaves it for the next unlock
+// (§11.14.10 "What settles the notice", "If the notice is not accepted").
+// While one deposit is queued no second copy is queued.
 func (m *Manager) sendPendingUnlink(now time.Time) {
 	pu := m.st.PendingUnlink
 	if pu == nil {
 		return
 	}
-	m.st.PendingUnlink = nil
-	m.dirty = true
-	defer pu.wipe()
 	if pu.expired(now) {
-		return // deleted unsent: the token cannot deposit any more
+		m.dropPendingUnlink() // deleted unsent: the token cannot deposit any more
+		return
+	}
+	if pu.Queued != "" && m.outboxQueued(pu.Queued) {
+		return
 	}
 	payload := pu.Payload
 	if pu.Epoch != nil {
 		e, err := handshake.ImportSendOnly(*pu.Epoch)
 		if err != nil {
-			return // a damaged epoch: deleted unsent, as an expired one
-		}
-		raw, err := e.Seal(m.unlinkInner(pu.TransferID, now))
-		e.Destroy()
-		if err != nil {
+			m.dropPendingUnlink() // a damaged epoch: deleted unsent, as an expired one
 			return
 		}
+		raw, err := e.Seal(m.unlinkInner(pu.TransferID, now))
+		if err != nil {
+			e.Destroy()
+			return
+		}
+		ep, err := e.ExportSendOnly() // the counter after this seal
+		e.Destroy()
+		if err != nil {
+			suite.Wipe(raw)
+			return
+		}
+		suite.Wipe(pu.Epoch.SendKey)
+		pu.Epoch = &ep
 		payload = raw
 	} else {
 		payload = append([]byte(nil), payload...)
 	}
-	m.queueDeposit(&OutboxEntry{Op: OpDeposit, RelayURL: pu.RelayURL, Mailbox: pu.Mailbox, Token: pu.Token, Payload: payload, BestEffort: true}, now)
-	m.record(Activity{Kind: "device.unlinked_sent", Ref: pu.TransferID, Audit: true}, now)
+	e := &OutboxEntry{Op: OpDeposit, RelayURL: pu.RelayURL, Mailbox: pu.Mailbox, Token: pu.Token, Payload: payload,
+		BestEffort: true, Unlink: pu.TransferID}
+	m.queueDeposit(e, now)
+	pu.Queued = e.ID
+}
+
+// outboxQueued reports whether the outbox entry id is still to be done.
+func (m *Manager) outboxQueued(id string) bool {
+	for _, e := range m.st.Outbox {
+		if e.ID == id {
+			return !e.Done
+		}
+	}
+	return false
+}
+
+// dropPendingUnlink deletes the held notice and zeroizes its kept send key.
+func (m *Manager) dropPendingUnlink() {
+	if pu := m.st.PendingUnlink; pu != nil {
+		m.st.PendingUnlink = nil
+		m.dirty = true
+		pu.wipe()
+	}
+}
+
+// unlinkOutcome applies the relay's answer to the deposit of a held notice
+// (§11.14.10 "What settles the notice"): accepted (its 201), or refused for
+// good (the token expired or revoked, the mailbox gone), the notice is
+// settled and deleted, and a transfer's owed rotation is made in the state
+// write that follows; a timeout, an unreachable relay, a 5xx or any other
+// refusal leave it held, for the next unlock to deposit again.
+func (m *Manager) unlinkOutcome(e *OutboxEntry, err error, now time.Time) {
+	pu := m.st.PendingUnlink
+	if pu == nil || pu.Queued != e.ID {
+		return // an earlier transfer's notice, or one already settled
+	}
+	m.dirty = true
+	switch code := RelayCode(err); {
+	case err == nil:
+		m.record(Activity{Kind: "device.unlinked_sent", Ref: pu.TransferID, Audit: true}, now)
+	case code == CodeTokenExpired || code == CodeTokenRevoked || code == CodeMailboxUnknown:
+	default:
+		pu.Queued = ""
+		return
+	}
+	m.dropPendingUnlink()
+	if m.st.Deleting != nil {
+		return // a deletion's step 2 drains the outbox: nothing rotates (§12.5)
+	}
+	if o := m.st.RotationOwed; o != nil && o.Transfer != "" {
+		n := len(m.st.Outbox)
+		m.retryOwedRotation(now)
+		// The rotation's notices go out only after the state write that
+		// holds it (§3.4, §11.14.2): the drain writes the state when it
+		// has finished (settledWrite), and no drain sends them before.
+		for _, q := range m.st.Outbox[n:] {
+			if m.unstored == nil {
+				m.unstored = map[string]bool{}
+			}
+			m.unstored[q.ID] = true
+		}
+		m.settledWrite = true
+	}
 }
 
 // pendingUnlinkAtUnlock sends the held notice when the vault's current
 // app has unlocked from the stored objects under the transfer's
 // dek_version or a later one. The held credential key rotation statement
 // goes first, under its own transfer's dek_version (§11.14.10 "The rest,
-// after the new phone's first unlock").
+// after the new phone's first unlock"). A notice held by a release before
+// the owed mark existed gets the mark it would have had.
 func (m *Manager) pendingUnlinkAtUnlock(now time.Time) {
-	ver := m.hdr.DEKVersion
-	if m.repl != nil {
-		ver = m.repl.next.DEKVersion
-	}
+	ver := m.dekVersion()
 	if h := m.st.HeldKeyRotation; h != nil && ver >= h.DEKVersion {
 		m.sendHeldKeyRotations(now)
 	}
 	if pu := m.st.PendingUnlink; pu != nil && ver >= pu.DEKVersion {
+		if !pu.Marked {
+			pu.Marked = true
+			m.owe(pu.TransferID, pu.DEKVersion, pu.At)
+		}
 		m.sendPendingUnlink(now)
 	}
 }
+
+// dekVersion is the DEK version the state is written under.
+func (m *Manager) dekVersion() uint64 {
+	if m.repl != nil {
+		return m.repl.next.DEKVersion
+	}
+	return m.hdr.DEKVersion
+}
+
+// owe records a transfer's owed mark (§11.14.10 "The owed mark"), next to
+// a recovery's if one is owed.
+func (m *Manager) owe(transferID string, dekVersion uint64, at time.Time) {
+	o := m.st.RotationOwed
+	if o == nil {
+		o = &RotationOwed{}
+		m.st.RotationOwed = o
+	}
+	o.Transfer, o.DEKVersion, o.At = transferID, dekVersion, at.UTC()
+	m.dirty = true
+}
+
+// transferRotationWaits reports whether a transfer's owed rotation still
+// waits (§11.14.10 "The rest, after the new phone's first unlock"): for an
+// unlock under its DEK version, or for the old phone's notice, which can
+// still be delivered, before day 7 after the approval.
+func (m *Manager) transferRotationWaits(o *RotationOwed, now time.Time) bool {
+	if m.dekVersion() < o.DEKVersion {
+		return true
+	}
+	pu := m.st.PendingUnlink
+	if pu == nil || pu.expired(now) {
+		return false // no notice to wait for: settled
+	}
+	return now.Before(o.At.Add(TransferRotateAnyway))
+}
+
+// TransferRotateAnyway is how long after a transfer's approval its
+// rotation waits for the old phone's notice: from then, the next unlock
+// rotates with or without it (§11.14.10 "If the notice is not accepted",
+// the old app's day-7 check).
+const TransferRotateAnyway = 7 * 24 * time.Hour
 
 // expirePendingUnlink deletes a held notice whose token has expired
 // (housekeeping), and zeroizes its kept send key.
 func (m *Manager) expirePendingUnlink(now time.Time) {
 	if pu := m.st.PendingUnlink; pu != nil && pu.expired(now) {
-		m.st.PendingUnlink = nil
-		m.dirty = true
-		pu.wipe()
+		m.dropPendingUnlink()
 	}
 }
 

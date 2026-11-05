@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -35,6 +36,26 @@ type acWorld struct {
 	w     *enclavetest.World
 	relay string
 	trust client.Trust
+	// deposit, if set when a vault opens its relay, sees each of that
+	// relay's deposits (faults); next makes the deposit.
+	deposit atomic.Pointer[depositHook]
+}
+
+type depositHook func(ctx context.Context, relayURL, mailbox, token string, payload []byte,
+	next func(context.Context, string, string, string, []byte) (string, error)) (string, error)
+
+// hookRelay is a vault's relay whose deposits go through a hook.
+type hookRelay struct {
+	*vault.ClientRelay
+	hook depositHook
+}
+
+func (h *hookRelay) Collector(context.Context, bool) (vault.Collector, error) {
+	return h.NewPollCollector(time.Second), nil // as the world's PollWait
+}
+
+func (h *hookRelay) Deposit(ctx context.Context, relayURL, mailbox, token string, payload []byte) (string, error) {
+	return h.hook(ctx, relayURL, mailbox, token, payload, h.ClientRelay.Deposit)
 }
 
 // newACWorld starts the world; wrap, if given, wraps its store (faults).
@@ -48,7 +69,11 @@ func newACWorld(t *testing.T, wrap ...func(store.Store) store.Store) *acWorld {
 	aw := &acWorld{t: t, w: w, relay: r.URL, trust: w.Trust()}
 	w.VaultOptions = vault.Options{PollWait: time.Second, Counter: countertest.NewLive(), // release R
 		Relay: func(base string, key ed25519.PrivateKey) vault.Relay {
-			return vault.NewClientRelay(base, key, nil, time.Now)
+			r := vault.NewClientRelay(base, key, nil, time.Now)
+			if h := aw.deposit.Load(); h != nil {
+				return &hookRelay{ClientRelay: r, hook: *h}
+			}
+			return r
 		}}
 	w.Features = all.Dev
 	w.Stopped = func(id string, err error) { t.Logf("vault %s stopped: %v", id[:6], err) }

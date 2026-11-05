@@ -1,6 +1,7 @@
 package vault
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/subtle"
@@ -666,22 +667,28 @@ func (m *Manager) RotateIdentity(ctx context.Context) error {
 	return m.flushIfDirty(ctx)
 }
 
-// retryOwedRotation makes the rotation a recovery owes (§11.14.10 "Failure":
-// audited identity.rotation_failed, kept, tried again). It never fails what
-// calls it. While the recovered phone has not paired (its recovery invite is
+// retryOwedRotation makes an owed rotation (§11.14.10 "Failure": audited
+// identity.rotation_failed, kept, tried again). It never fails what calls
+// it. While the recovered phone has not paired (its recovery invite is
 // pending) it waits: the phone's first handshake verifies the vault's
 // identity key as the open's vault_bundle gave it, and a key rotated in
 // between would fail the pairing (vms/handshake/initiator.go); the pairing
-// calls it (recoveredPhonePaired).
+// calls it (recoveredPhonePaired). A transfer's mark alone waits for the
+// new phone's first unlock and the old phone's notice, up to day 7
+// (transferRotationWaits); the notice's settlement calls it
+// (unlinkOutcome).
 func (m *Manager) retryOwedRotation(now time.Time) {
 	o := m.st.RotationOwed
-	if o == nil || (o.Recovery == "" && o.Transfer == "") {
-		return
+	if o == nil || (o.Recovery == "" && o.Transfer == "") || m.st.Deleting != nil {
+		return // (a vault being deleted rotates nothing, §12.5)
 	}
 	for _, inv := range m.st.Invites {
 		if inv.CreatedBy == inviteByRecovery {
 			return
 		}
+	}
+	if o.Recovery == "" && m.transferRotationWaits(o, now) {
+		return
 	}
 	ref := "recovery"
 	if o.Transfer != "" {
@@ -692,13 +699,22 @@ func (m *Manager) retryOwedRotation(now time.Time) {
 	}
 }
 
-// rotateIdentity performs the rotation in memory; the caller persists it
-// (in a batch, the batch's flush does). A credential key rotation statement
-// a transfer's approval still holds goes first (§11.14.10 "The owed mark":
-// a rotation that clears a transfer's mark sends it first); credential.rotate
-// takes it before it calls this.
+// rotateIdentity performs the rotation of the vault's keys in memory: ik
+// and kem (identity.rotate to every device and connection) and the wake
+// key (§3.4, §14.1). The caller persists it (in a batch, the batch's flush
+// does). A credential key rotation statement a transfer's approval still
+// holds goes first (§11.14.10 "The owed mark": a rotation that clears a
+// transfer's mark sends it first; credential.rotate takes it before it
+// calls this), then a transfer's notice to the old phone still held (as
+// recovery step 6 does, §11.14.10).
+//
+// The relay key is not rotated here: the full set of §3.4 also has the
+// vault's relay key (new mailbox, new tokens, relay.address.update, the
+// old key kept for deposits), which this release does not build yet, for
+// a recovery, a transfer or credential.rotate alike.
 func (m *Manager) rotateIdentity(now time.Time) error {
 	m.sendHeldKeyRotations(now)
+	m.sendPendingUnlink(now)
 	draw := suite.RandomBytes
 	if m.opt.KeyRand != nil {
 		draw = m.opt.KeyRand
@@ -729,14 +745,23 @@ func (m *Manager) rotateIdentity(now time.Time) error {
 	for _, p := range m.allPeers() {
 		if p.State == PeerActive {
 			m.sendTo(p, "identity.rotate", body, now)
+			// Every session rekeys under the new keys (§3.4): a rekey
+			// started under the old ones (each unlock starts the devices')
+			// is replaced, after identity.rotate. It is dropped even when
+			// startRekey cannot start one now (no current epoch, no standing
+			// token, a suspended peer): one under the old keys could not
+			// finish anyway (RestoreInitiator refuses it after a lock), and
+			// the next unlock or NeedsRekey starts one under the new keys.
+			m.dropRekey(p.ID)
 			m.startRekey(p, now)
 		}
 	}
+	m.rotateWakeKey(now)
 	m.dirty = true
 	// One rotation clears every owed mark (§11.14.10); its audit entry
-	// says which: ref "recovery" when it cleared a recovery's, none when
-	// nothing was owed (0.69.2; a transfer's mark would carry its
-	// transfer_id).
+	// says which: the transfer_id when it cleared a transfer's, ref
+	// "recovery" when it cleared a recovery's only, none when nothing was
+	// owed (0.69.2).
 	ref := ""
 	if o := m.st.RotationOwed; o != nil {
 		switch {
@@ -752,6 +777,24 @@ func (m *Manager) rotateIdentity(now time.Time) error {
 	// update once its epoch under the new ik is active.
 	m.profileCoreChanged(now)
 	return nil
+}
+
+// dropRekey abandons p's outgoing rekey: its hs.init, if not yet
+// deposited, is not sent; an hs.resp to it finds no handshake and is
+// dropped.
+func (m *Manager) dropRekey(peerID string) {
+	for id, og := range m.st.Outgoing {
+		if og.PeerID != peerID || og.New != nil || og.Purpose != handshake.PurposeRekey || og.Replaced {
+			continue
+		}
+		for _, e := range m.st.Outbox {
+			if !e.Done && e.PeerID == peerID && bytes.Equal(e.Payload, og.Init.Env) {
+				e.Done = true
+			}
+		}
+		m.dropOutgoing(id)
+		m.dirty = true
+	}
 }
 
 // pruneRetiredKEMs drops retired KEM keys after 400 days (§6.6).

@@ -2,6 +2,7 @@ package handshake
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -113,5 +114,27 @@ func TestAcceptRekey(t *testing.T) {
 	p, err := AcceptRekey(ini.Envelope(), in, e, t0)
 	if err != nil || p.Th1() != ini.Th1() {
 		t.Fatalf("AcceptRekey: %v", err)
+	}
+}
+
+// An initiator is restored only with the identity key its hs.init named:
+// after the initiator's ik rotated, hs.fin signed with the new key would
+// not verify at the responder (§3.4).
+func TestRestoreInitiatorOtherIdentity(t *testing.T) {
+	i, r := newParty(t, 0x10), newParty(t, 0x20)
+	ini, err := NewInitiator(initCfg(i, r, PurposeConnection))
+	if err != nil {
+		t.Fatal(err)
+	}
+	is, err := ini.Export()
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := newParty(t, 0x30)
+	if _, err := RestoreInitiator(roundTrip(t, is), other.ik); !errors.Is(err, ErrIdentity) {
+		t.Fatalf("restored under another identity: %v", err)
+	}
+	if _, err := RestoreInitiator(roundTrip(t, is), i.ik); err != nil {
+		t.Fatal(err)
 	}
 }

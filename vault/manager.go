@@ -808,6 +808,16 @@ func (m *Manager) restoreLive() error {
 		m.awaiting[id] = r
 	}
 	for id, og := range m.st.Outgoing {
+		if og.Replaced && og.New == nil && og.Purpose == handshake.PurposeRekey {
+			// A rekey of the replaced line (§6.6) is kept as fork evidence
+			// only: restored without an identity key, so it verifies a
+			// late hs.resp and signs nothing (no hs.fin), whichever ik its
+			// hs.init named (a rotation since does not lose the evidence).
+			if i, err := handshake.RestoreInitiatorVerifyOnly(og.Init); err == nil {
+				m.outgoing[id] = i
+				continue
+			}
+		}
 		i, err := handshake.RestoreInitiator(og.Init, m.keys.ik)
 		if err != nil {
 			delete(m.st.Outgoing, id)

@@ -69,6 +69,9 @@ type Initiator struct {
 	ks   []byte
 	nI   []byte // the SAS nonce n_I, committed in hs.init (0.10.3)
 	done bool
+	// verifyOnly: restored without an identity key (RestoreInitiatorVerifyOnly);
+	// an hs.resp is verified and nothing is signed: no hs.fin.
+	verifyOnly bool
 }
 
 func innerMeta(id string, now time.Time) (string, time.Time, error) {
@@ -345,6 +348,11 @@ func (i *Initiator) completeResp(env *envelope.Envelope, padded []byte, exp suit
 		}
 	}
 	epoch := newEpoch(sched, RoleInitiator, uint8(resp.Suite), i.cfg.Policy, now)
+	if i.verifyOnly {
+		// Evidence only (RestoreInitiatorVerifyOnly): sig_R verified, no
+		// sig_I and no hs.fin. The caller activates nothing.
+		return &Result{Epoch: epoch, Resp: resp, ResponderIK: verifyIK, ResponderKEM: newKEM, Inner: in, SAS: sas}, nil
+	}
 	sigI, err := SignFin(i.cfg.Identity, th)
 	if err != nil {
 		epoch.Destroy()

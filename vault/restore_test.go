@@ -1348,3 +1348,90 @@ func pumpOnly(t *testing.T, from, to *devFixture, pred func(*envelope.Envelope) 
 	}
 	return len(msgs)
 }
+
+// A rekey of the replaced line kept as fork evidence (§6.6) survives a
+// rotation and a restart: it named the old identity key, which a restored
+// initiator could not sign with, so it is restored verify-only. The second
+// copy's late hs.resp still suspends the connection, nothing is audited as
+// not restored, and no hs.fin is made or sent from it.
+func TestReplacedRekeyEvidenceSurvivesRotation(t *testing.T) {
+	f := newSvcFx(t, "service")
+	f.build(3)
+	e3 := f.cur
+	f.at(4 * time.Hour)
+	m := f.d.m
+	m.mu.Lock()
+	m.startRekey(f.p, f.now())
+	m.flushThenDrain(context.Background())
+	m.mu.Unlock()
+	raw := f.takeFor(func(env *envelope.Envelope) bool { return env.Mode() == envelope.ModeSession })
+	if raw == nil {
+		t.Fatal("no rekey hs.init")
+	}
+	f.at(10 * time.Hour)
+	ini := f.initiate(f.ids[1], f.now(), nil)
+	f.deliver(ini.Envelope(), "")
+	if f.complete(ini) == nil {
+		t.Fatal("restore not answered")
+	}
+	oldIK := m.keys.ik.Public().(ed25519.PublicKey)
+	m.mu.Lock()
+	var marked string
+	for id, og := range m.st.Outgoing {
+		if og.Purpose == handshake.PurposeRekey && og.Replaced {
+			marked = id
+		}
+	}
+	err := m.rotateIdentity(f.now())
+	if err == nil {
+		err = m.persist(context.Background(), false)
+	}
+	m.mu.Unlock()
+	if marked == "" || err != nil {
+		t.Fatalf("marked %q, rotation %v", marked, err)
+	}
+	m.Crash()
+	m, _, err = f.d.fixture.unlock(testPIN, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Crash()
+	m.mu.Lock()
+	m.features = append(m.features, f.sink)
+	m.now = f.now
+	f.d.m, f.p = m, m.st.Connections[f.p.ID]
+	restored := m.outgoing[marked] != nil && m.st.Outgoing[marked] != nil
+	m.mu.Unlock()
+	if !restored {
+		t.Fatal("the replaced line's rekey was not restored")
+	}
+	for _, a := range m.Audit() {
+		if a.Event == "handshake_not_restored" {
+			t.Fatal("a handshake was not restored")
+		}
+	}
+	at := f.base.Add(11 * time.Hour) // the copy that kept running, after the restore
+	pi, err := handshake.OpenRekeyInit(raw, e3, at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, renv, err := pi.Respond(handshake.ResponderConfig{Identity: f.n.ik, Policy: policyFor(KindConnection),
+		CollectSender: f.vaultPK(), RecordRelayKey: f.vaultPK(), KnownInitiatorIK: oldIK, Now: at})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.d.relay.mu.Lock()
+	f.d.relay.deposits = nil
+	f.d.relay.mu.Unlock()
+	f.at(12 * time.Hour)
+	f.deliver(renv, f.stJTI)
+	m.mu.Lock()
+	fork := f.p.Fork != nil
+	m.mu.Unlock()
+	if !fork || f.feedFor("connection.fork_suspected") == nil {
+		t.Fatal("the late answer of the second copy was not caught after the rotation")
+	}
+	if f.takeFor(func(*envelope.Envelope) bool { return true }) != nil {
+		t.Fatal("a deposit to the peer after its rekey's answer (an hs.fin)")
+	}
+}

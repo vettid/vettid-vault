@@ -241,7 +241,20 @@ type VaultRecord struct {
 	TokenExp time.Time              `json:"token_exp,omitempty"`
 	Sessions handshake.KeyringState `json:"sessions"`
 	Suite    uint8                  `json:"suite"`
+	// Confirmed is the device's confirmed epoch with the vault (0.86.0,
+	// §6.3.1 "Responder"): the newest under which the vault sent anything
+	// but hs.fin. Nil: the current epoch.
+	Confirmed []byte `json:"confirmed,omitempty"`
 }
+
+// Features are this client's receiving-side capabilities (0.86.0,
+// §6.3.1 "Deployment", §10.2): sent in device.features after each epoch
+// it activates and in the inner features field of every message to its
+// vault. hs_confirm: it confirms the vault's rekeys with hs.confirm and
+// keeps its confirmed epoch (the responder half); a device initiates no
+// rekey, so the initiator half does not arise. relay_follow is not
+// implemented.
+func Features() []string { return []string{handshake.CapConfirm} }
 
 // Device is one owner device.
 type Device struct {
@@ -254,6 +267,8 @@ type Device struct {
 	// recovery-open result, memory only. "" for a release before L, or
 	// before any unlock: the device then locks unbound (LockVault).
 	unlockID string
+	// reconfirmed is when hs.confirm was last sent again (memory only).
+	reconfirmed time.Time
 
 	// leashStatus caches an agent's LEASH status statements by grant id
 	// (memory only; refreshed before they expire, §10.11).
@@ -737,6 +752,7 @@ func (d *Device) startInitWith(purpose handshake.Purpose, ctxID, depositToken st
 		Purpose: purpose, Ctx: ctxID, Identity: d.ik, StaticKEM: d.kem.Public(), Relay: d.RelayAddr(),
 		Token: tok, Profile: profile, ResponderIK: v.IK, ResponderEK: ek, ResponderRelayKey: v.RelayPK,
 		Policy: d.policy(), Now: now, ID: id, DeviceAttest: da, APIKey: apiKey, UnlockSecret: secret,
+		Features: Features(),
 	})
 	if err != nil {
 		return err
@@ -798,7 +814,7 @@ func (d *Device) sendFull(ctx context.Context, id, typ string, body json.RawMess
 			return "", err
 		}
 	}
-	in := &envelope.Inner{ID: id, Type: typ, TS: now, Exp: exp, Body: body, Re: re, Status: status}
+	in := &envelope.Inner{ID: id, Type: typ, TS: now, Exp: exp, Body: body, Re: re, Status: status, Features: Features()}
 	raw, err := d.keyring.Current().Seal(in)
 	if err != nil {
 		return "", err
@@ -1535,8 +1551,8 @@ func (d *Device) handle(ctx context.Context, m relayclient.Message) (unacked boo
 			if env.RecipientKid().Equal(rk) && env.SenderKid().Equal(sk) {
 				fr, err := r.HandleFin(m.Payload, sender, now)
 				if err == nil {
-					d.keyring.Activate(fr.Epoch, now)
 					d.dropAwaiting(i)
+					d.establishRekey(ctx, fr.Epoch, now)
 				}
 				if errors.Is(err, handshake.ErrType) {
 					// A message of the new epoch before hs.fin: the epoch
@@ -1563,9 +1579,15 @@ func (d *Device) handle(ctx context.Context, m relayclient.Message) (unacked boo
 			}
 		}
 	}
+	if in.Type != handshake.TypeFin {
+		d.noteConfirmed(ctx, ep, now)
+	}
 	if in.Type == handshake.TypeInit {
 		d.handleRekey(ctx, m.Payload, in, ep, sender, now)
 		return false
+	}
+	if in.Type == handshake.TypeConfirm {
+		return false // not a request: never answered (a device initiates no rekey)
 	}
 	if err := in.CheckTime(now, in.Exp.IsZero()); err != nil {
 		return false
@@ -1628,6 +1650,7 @@ func (d *Device) handle(ctx context.Context, m relayclient.Message) (unacked boo
 				}
 			}
 			d.st.Paired = pairedFrom(o, now)
+			d.sendFeatures(ctx) // §10.2: after each epoch it activates (0.86.0: hs_confirm)
 		}
 	case "relay.token.issued":
 		d.storeVaultToken(in.Body)
@@ -1777,7 +1800,9 @@ func (d *Device) handleResp(ctx context.Context, raw []byte, sender ed25519.Publ
 
 // handleRekey answers a vault-initiated rekey (§6.5).
 func (d *Device) handleRekey(ctx context.Context, raw []byte, in *envelope.Inner, ep *handshake.Epoch, sender ed25519.PublicKey, now time.Time) {
-	if d.keyring.Current() != ep {
+	if d.keyring.Current() != ep && !d.isConfirmed(ep) {
+		// §6.3.1: a rekey under the confirmed epoch while it is not current
+		// is accepted as if current.
 		return
 	}
 	pi, err := handshake.AcceptRekey(raw, in, ep, now)
@@ -1787,7 +1812,7 @@ func (d *Device) handleRekey(ctx context.Context, raw []byte, in *envelope.Inner
 	v := d.st.Vault
 	resp, env, err := pi.Respond(handshake.ResponderConfig{
 		Identity: d.ik, Policy: d.policy(), PinnedSuite: v.Suite, CollectSender: sender,
-		RecordRelayKey: v.RelayPK, KnownInitiatorIK: v.IK, Now: now,
+		RecordRelayKey: v.RelayPK, KnownInitiatorIK: v.IK, Now: now, Features: Features(),
 	})
 	if err != nil {
 		return

@@ -274,7 +274,7 @@ func (m *Manager) abandonPending(p *Peer, why string, restart bool, now time.Tim
 	}
 	p.Abandoned = append(p.Abandoned, append([]byte(nil), pe.ID...))
 	p.Pending = nil
-	m.audit(now, "pending_abandoned_"+why, p.ID)
+	m.note(now, "pending_abandoned_"+why, p.ID)
 	m.dirty = true
 	if !restart || p.State != PeerActive || p.suspended() {
 		return
@@ -364,7 +364,7 @@ func (m *Manager) ruleE(p *Peer, initTS, now time.Time) {
 		if p.Revert != nil && bytes.Equal(p.Revert.New, e.ID) {
 			p.Revert = nil
 		}
-		m.audit(now, "epoch_destroyed", p.ID)
+		m.note(now, "epoch_destroyed", p.ID)
 	}
 	m.dirty = true
 }
@@ -460,7 +460,7 @@ func (m *Manager) destroyedEpochMessage(p *Peer, meta *EpochMeta, in *envelope.I
 // (O7a, 0.85.4): it is kept in the vault's own audit log only.
 func (m *Manager) refusePeerKey(p *Peer, reason string, noHistory bool, now time.Time) {
 	if noHistory {
-		m.audit(now, "peer_key_"+reason, p.ID)
+		m.note(now, "peer_key_"+reason, p.ID)
 		return
 	}
 	m.record(Activity{Kind: "drop.peer_key", ConnectionID: connID(p), DeviceID: devID(p), Ref: reason, Audit: true}, now)
@@ -520,7 +520,7 @@ func (m *Manager) crossingRekeyLoses(p *Peer, theirs [32]byte, now time.Time) bo
 			}
 			continue
 		}
-		m.audit(now, "crossing_abandoned", p.ID)
+		m.note(now, "crossing_abandoned", p.ID)
 		m.abandonOutgoing(id, now)
 	}
 	return false

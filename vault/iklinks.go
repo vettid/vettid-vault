@@ -109,11 +109,9 @@ func (m *Manager) hIdentityRotate(_ context.Context, s *Session, in *envelope.In
 	switch first := links[i].OldIK; {
 	case bytes.Equal(first, p.IK):
 	case p.ancestor(first), p.rejected(first):
-		m.audit(s.now, "bad_rotation", p.ID)
 		m.refusePeerKey(p, "rejected_ik", false, s.now)
 		return nil, nil
 	default:
-		m.audit(s.now, "bad_rotation", p.ID)
 		m.refusePeerKey(p, "unknown_ik", false, s.now)
 		return nil, nil
 	}
@@ -169,7 +167,7 @@ func (m *Manager) followLinks(p *Peer, app []*handshake.Rotation, msgEpoch []byt
 		if posAfter(e.EstAt, e.EstMsg, m.relayAt, m.msgID) && !e.EstAt.IsZero() {
 			e.Demoted, e.DemotedAt, e.DemotedMsg = true, m.relayAt, m.msgID
 			demotedCurrent = demotedCurrent || bytes.Equal(e.ID, p.LastEpochID)
-			m.audit(now, "epoch_demoted", p.ID)
+			m.note(now, "epoch_demoted", p.ID)
 		}
 	}
 	m.f1Demote(p, app, msgEpoch, now)
@@ -197,7 +195,7 @@ func (m *Manager) f1Demote(p *Peer, app []*handshake.Rotation, msgEpoch []byte, 
 			continue
 		}
 		cur.Demoted, cur.DemotedAt, cur.DemotedMsg = true, time.Time{}, ""
-		m.audit(now, "epoch_demoted_f1", p.ID)
+		m.note(now, "epoch_demoted_f1", p.ID)
 		kr := m.sessions[p.ID]
 		if p.Revert != nil && bytes.Equal(p.Revert.Old, msgEpoch) && kr != nil && kr.Reinstate(epochIDOf(msgEpoch)) {
 			// The epoch it traveled under is current again (it was kept

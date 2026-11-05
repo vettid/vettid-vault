@@ -559,12 +559,12 @@ func TestPersistBeforeAck(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := r.entries()[mark:]
-	want := []string{"persist", "deposit " + v.mailbox(), "ack " + ids[0], "ack " + ids[1], "ack " + ids[2]}
+	want := []string{"persist", "deposit " + v.mailbox(), "deposit " + v.mailbox(), "ack " + ids[0], "ack " + ids[1], "ack " + ids[2]}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("relay calls %v, want %v", got, want)
 	}
 	st := loadState(t, saved)
-	if st.DeviceID != "dev-1" || st.Vault.Token != t2 || len(st.Awaiting) != 1 || len(st.Outbox) != 1 {
+	if st.DeviceID != "dev-1" || st.Vault.Token != t2 || len(st.Awaiting) != 1 || len(st.Outbox) != 2 {
 		t.Fatalf("saved: device %q, token new %v, awaiting %d, outbox %d", st.DeviceID, st.Vault.Token == t2, len(st.Awaiting), len(st.Outbox))
 	}
 	for _, id := range ids {
@@ -617,7 +617,7 @@ func TestPersistErrorLeavesBatchUnacked(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := r.entries()[mark:]
-	want := []string{"persist", "deposit " + v.mailbox(), "ack " + ids[0], "ack " + ids[1], "ack " + ids[2]}
+	want := []string{"persist", "deposit " + v.mailbox(), "deposit " + v.mailbox(), "ack " + ids[0], "ack " + ids[1], "ack " + ids[2]}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("relay calls %v, want %v", got, want)
 	}
@@ -701,7 +701,7 @@ func TestCrashAfterPersistReplaysHarmlessly(t *testing.T) {
 		t.Fatalf("relay calls after a crash in Persist: %v", got)
 	}
 	atCrash := loadState(t, saved)
-	if atCrash.DeviceID != "dev-1" || atCrash.Vault.Token != t2 || len(atCrash.Outbox) != 1 {
+	if atCrash.DeviceID != "dev-1" || atCrash.Vault.Token != t2 || len(atCrash.Outbox) != 2 /* and device.features, 0.86.0 */ {
 		t.Fatal("saved state lacks the batch")
 	}
 
@@ -712,7 +712,7 @@ func TestCrashAfterPersistReplaysHarmlessly(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := r.entries()[mark:]
-	want := []string{"deposit " + v.mailbox(), "ack " + ids[0], "ack " + ids[1], "ack " + ids[2]}
+	want := []string{"deposit " + v.mailbox(), "deposit " + v.mailbox(), "ack " + ids[0], "ack " + ids[1], "ack " + ids[2]}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("relay calls %v, want %v (the outbox, then the replayed batch acknowledged with no deposit and nothing to save)", got, want)
 	}

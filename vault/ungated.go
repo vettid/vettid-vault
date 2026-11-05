@@ -150,7 +150,7 @@ func (m *Manager) keepCopy(p *Peer, in *envelope.Inner, wake string) {
 	}
 	if len(j) > RevertClaimCheck {
 		r.Dropped++
-		m.audit(m.now(), "revert_copy_too_large", p.ID)
+		m.note(m.now(), "revert_copy_too_large", p.ID)
 		m.dirty = true
 		return
 	}
@@ -281,11 +281,11 @@ func (m *Manager) reconnectNaming(p *Peer, ctx []byte, why string, now time.Time
 	}
 	og := m.startReconnectCtx(p, ctx, now)
 	if og == nil {
-		m.audit(now, "reconnect_not_started", p.ID)
+		m.note(now, "reconnect_not_started", p.ID)
 		return false
 	}
 	og.RuleRC, og.Named = why, append([]byte(nil), ctx...)
-	m.audit(now, "reconnect_"+why, p.ID)
+	m.note(now, "reconnect_"+why, p.ID)
 	return true
 }
 

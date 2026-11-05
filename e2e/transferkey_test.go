@@ -453,3 +453,51 @@ func transferFailedStep2(t *testing.T, seed, newSeed byte, newName string, end f
 		t.Fatalf("sign-in under K0: %s", res)
 	}
 }
+
+// A transfer whose step-2 state write fails, then a later write that
+// succeeds (the approval's retransmission, or the next batch's): that write
+// stores the move with its own, and only then does what it held go out.
+// The new phone gets device.paired and opens the vault, and after its
+// first unlock the old phone is told once that it was moved away from.
+func TestTransferFailedStep2ThenStored(t *testing.T) {
+	sf := &stateFaults{}
+	w := newTKWorld(t, 0x8d, func(s store.Store) store.Store { sf.Store = s; return sf })
+	ctx := ctxT(t, 240*time.Second)
+	id, link, err := w.a.dev.TransferCreate(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := w.aw.newApp("new-phone-tk-s", enclavetest.NewIOSAttester(0x9d, enclavetest.IOSOptions{}))
+	if _, err := b.dev.PairAttested(ctx, link, b.att); err != nil {
+		t.Fatal(err)
+	}
+	waitEvent(t, w.a.dev, "device.transfer.pending", has("transfer_id", id))
+	sf.mu.Lock()
+	sf.vid = w.a.vid
+	sf.mu.Unlock()
+	sf.arm(1) // step 2's write fails; the next one succeeds
+	_ = w.a.dev.TransferApprove(ctxT(t, 20*time.Second), id, acPIN, credPW)
+	// A later batch whose write succeeds (if the approval's retransmission
+	// did not store it first): the vault keeps running.
+	if _, err := w.a.dev.CredentialVersion(ctx); err != nil {
+		t.Logf("the later request: %v", err)
+	}
+	if err := b.dev.AwaitPaired(ctx); err != nil {
+		t.Fatalf("the new phone after the later write: %v", err)
+	}
+	b.guid, b.vid = b.dev.UserGUID(), w.a.vid
+	if err := b.dev.CredentialFetch(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if k := w.key(b.dev); k == w.k0 {
+		t.Fatal("the credential key did not rotate")
+	}
+	w.finish(b)
+	waitEvent(t, w.a.dev, "device.unlinked", has("reason", "transferred"))
+	if in, err := w.a.dev.WaitEvent(ctxT(t, 5*time.Second), "device.unlinked", nil); err == nil {
+		t.Fatalf("the old phone was told twice: %s", in.Body)
+	}
+	if res := w.auth(b.dev); !strings.Contains(res, `"authenticated":true`) {
+		t.Fatalf("sign-in from the new phone: %s", res)
+	}
+}

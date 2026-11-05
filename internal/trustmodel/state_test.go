@@ -76,6 +76,7 @@ type Epoch struct {
 	Abandoned   bool  // §6.3.1: a pending epoch abandoned (nothing under it confirms)
 	KeysGone    bool  // §6.3.1 (G): only the id is kept (for a reconnect's ctx)
 	Destroyed   bool  // §6.3.1 (E, 0.86.0 rev. 3): a later epoch the peer never confirmed, destroyed
+	RCDone      bool  // r8: the one ungated-peer reconnect for this destroyed epoch was started
 	DestroyTs   int64 // rule E: the accepted hs.init's inner ts (a later ts under it is fork evidence)
 	MineInit    bool  // this side initiated the handshake that made it
 	GotFromPeer bool  // a message from the peer was received under it
@@ -157,6 +158,9 @@ type PeerRec struct {
 	RevUntil      int64
 	RevSent       []Msg // Deployment: messages sent under the new epoch while the revert is possible
 	Reconfirm     bool  // a message under the confirmed epoch in this batch: queue hs.confirm
+	RCCtx         int   // r8: the next reconnect names this epoch (0: the last)
+	RCEpoch       int   // r8: a rekey-refused reconnect was started on this current epoch
+	RCs           int   // r8: reconnects started toward this peer (stat)
 	FeatOwed      bool  // upgrade mode: my features go with my next message to this peer
 
 	IK, KEM Key

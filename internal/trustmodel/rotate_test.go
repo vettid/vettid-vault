@@ -182,6 +182,12 @@ func (p *Party) startHS(r *PeerRec, reconnect bool) {
 	if ep == nil || reconnect {
 		ep = r.lastEpoch()
 	}
+	if reconnect && r.RCCtx != 0 {
+		if e := r.epoch(r.RCCtx); e != nil {
+			ep = e
+		}
+		r.RCCtx = 0
+	}
 	if ep == nil {
 		return
 	}
@@ -207,6 +213,9 @@ func (p *Party) startHS(r *PeerRec, reconnect bool) {
 	}
 	r.Own = h
 	w.stat("start:" + map[bool]string{false: "rekey", true: "reconnect"}[reconnect])
+	if reconnect {
+		r.RCs++
+	}
 	p.enqueue(r.ID, m, f)
 }
 
@@ -318,7 +327,9 @@ func (p *Party) tick() {
 				}
 				if !o.Reconnect && w.Now-o.Started > w.hsLifeFor(false) {
 					p.abandonOwn(r)
-					p.startHS(r, o.Reconnect)
+					if !p.rekeyRefusedRC(r, o, "own rekey unanswered") {
+						p.startHS(r, o.Reconnect)
+					}
 				}
 			}
 			life := w.answerLife()
@@ -326,6 +337,9 @@ func (p *Party) tick() {
 				life = r28HSLife // vault/outbox.go:421
 			}
 			for _, a := range slices.Clone(r.Ans) {
+				if w.Now-a.Started > life && !a.Reconnect {
+					p.rekeyRefusedRC(r, nil, "my answer expired without hs.fin")
+				}
 				if w.Now-a.Started > life {
 					p.dropAnswer(r, a.ID)
 				}

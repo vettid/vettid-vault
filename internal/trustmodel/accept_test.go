@@ -193,6 +193,21 @@ func (q *Party) acceptFrom(r *PeerRec, m *RMsg, pos Pos, set []Key) dec {
 	}
 	if ep := r.epoch(M.Epoch); ep != nil && ep.Destroyed {
 		if M.Ts > ep.DestroyTs { // F3: a later ts under a destroyed epoch is fork evidence
+			if !r.PeerA && !q.w.f3Suspend28 {
+				// lead (b), r8: toward a peer without hs_confirm (a release-28
+				// responder activates a late hs.fin), reconnect naming the
+				// confirmed epoch, once per destroyed epoch
+				if !ep.RCDone {
+					ep.RCDone = true
+					q.w.stat("A:F3-ungated-reconnect")
+					ctx := r.ConfID
+					if q.w.f3CtxMsg {
+						ctx = M.Epoch // variant: the epoch the peer is on (release 28 accepts only its current)
+					}
+					q.reconnectNaming(r, ctx, "F3 toward an ungated peer")
+				}
+				return refuse("superseded_epoch", "E:destroyed-epoch-later-ts:ungated-reconnect")
+			}
 			q.suspend(r, "connection.fork_suspected/epoch")
 			return dec{"suspend", "fork", "E:destroyed-epoch-later-ts"}
 		}
@@ -735,6 +750,7 @@ func (q *Party) tableBInit(r *PeerRec, m *RMsg, pos Pos) dec {
 				return dec{"suspend", "fork", cell + ":fork-epoch"}
 			}
 			if !q.ownCopy || M.Epoch != M.Ctx {
+				q.rekeyRefusedRC(r, nil, "peer's rekey not on my current epoch")
 				return refuse("rekey_not_current_epoch", cell+":ctx")
 			}
 			q.acceptOwnCopy(r, M.Ctx)
@@ -748,6 +764,13 @@ func (q *Party) tableBInit(r *PeerRec, m *RMsg, pos Pos) dec {
 		}
 		q.abandonPending(r, "a later rekey from the responder", false)
 		cell += ":pending:ts-later"
+	}
+	// r8 (point 2): an ungated peer rekeys again while my answer to its
+	// last rekey still awaits hs.fin: it refused that answer
+	if !M.Reconnect && slices.ContainsFunc(r.Ans, func(a HS) bool { return !a.Reconnect }) {
+		if q.rekeyRefusedRC(r, nil, "peer rekeyed again, my answer unfinished") {
+			return dec{"drop", "reconnecting", cell + ":ungated-reconnect"} // my reconnect replaces this rekey
+		}
 	}
 	// crossing handshakes (§6.5; §6.6 "Between two persons"): answer as
 	// usual; the lower th1 wins. Own higher: abandon it. Own lower: keep
@@ -821,12 +844,14 @@ func (q *Party) tableBResp(r *PeerRec, M *Msg, pos Pos) dec {
 	switch st {
 	case ikAncestor:
 		q.abandonOwn(r)
+		q.rekeyRefusedRC(r, o, "hs.resp ancestor ik")
 		return dec{"abort", "ancestor_ik", cell}
 	case ikRejected:
 		q.abandonOwn(r)
 		return dec{"abort", "rejected_ik", cell}
 	case ikUnknown:
 		q.abandonOwn(r)
+		q.rekeyRefusedRC(r, o, "hs.resp unknown ik")
 		return dec{"abort", "unknown_ik", cell}
 	}
 	var extra []IKLink

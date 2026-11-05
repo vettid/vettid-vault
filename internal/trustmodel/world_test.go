@@ -37,6 +37,9 @@ type World struct {
 	f1Window      bool              // alternative: F1-demote only if the link's inner ts > the epoch's activation + T + 2 days
 	fixBOff       bool              // F1 as in 2da316e (no fix B); attribution runs only
 	fixBStrict    bool              // F1 (default, lead's choice): keep the ungated epoch only if the peer's new ik signed something under it
+	f3Suspend28   bool              // TRUSTMODEL_F3UNGATED=suspend: F3 suspends toward ungated peers too (before r8)
+	f3CtxMsg      bool              // TRUSTMODEL_F3RCCTX=msg: that reconnect names the message's epoch, not the confirmed one
+	noRekeyRC     bool              // TRUSTMODEL_REKEYRC=off: no reconnect after a refused rekey toward an ungated peer (before r8)
 	ruleEKeepFin  bool              // TRUSTMODEL_RULEEFIN=keep: rule E leaves an unsent hs.fin for a destroyed epoch in the outbox (before r7)
 	r28Spec       bool              // TRUSTMODEL_R28=spec: release-28 parties follow f4a4d97 §3.4.1 (before r6); default: the release-28 code
 	featMode      string            // always (default, the spec): features on every message; first: with the first message after an upgrade; echo: also when first seeing the peer's

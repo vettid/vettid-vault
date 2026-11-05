@@ -606,6 +606,7 @@ func (m *Manager) hIdentityRotate(_ context.Context, s *Session, in *envelope.In
 	}
 	s.peer.IK, s.peer.KEM = final, kem.Bytes()
 	s.peer.Chain = append(s.peer.Chain, r.Marshal())
+	m.restartHandshakesUnderOldIK(s.peer, s.now)
 	return nil, nil
 }
 

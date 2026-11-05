@@ -375,7 +375,7 @@ func (m *Manager) respondReconnect(pi *handshake.PendingInit, p *Peer, sender ed
 		if err1 != nil {
 			st, err1 = p.Standing, nil
 		}
-		if err2 != nil {
+		if err2 != nil && m.onCurrentKey(p.Reconnect.Token) && now.Before(p.Reconnect.Exp) {
 			rt, err2 = p.Reconnect, nil
 		}
 	}
@@ -446,6 +446,17 @@ func (m *Manager) respondReconnect(pi *handshake.PendingInit, p *Peer, sender ed
 	if !p.isService() {
 		m.crossingPersons(p, now)
 	}
+}
+
+// ancestorIK reports whether ik is one p's rotation chain has moved away
+// from (the old_ik of a link it followed).
+func ancestorIK(p *Peer, ik ed25519.PublicKey) bool {
+	for _, raw := range p.Chain {
+		if r, err := handshake.ParseRotation(raw); err == nil && suite.EqualPublic(r.OldIK, ik) {
+			return true
+		}
+	}
+	return false
 }
 
 // ownThHigher reports whether th1 of our own reconnect og is higher than
@@ -923,6 +934,17 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 		// replaced line's evidence above.
 		res.Epoch.Destroy()
 		m.audit(now, "hs_resp_dropped", og.PeerID)
+		return ackAfterFlush
+	}
+	if og.New == nil && !suite.EqualPublic(res.ResponderIK, p.IK) && ancestorIK(p, res.ResponderIK) {
+		// Signed by an identity key the peer has rotated away from: the
+		// holder of its old copy (it has the old key, and the old relay key
+		// the hs.init pinned) answered. Never a step back to an earlier ik
+		// (§3.4 "One successor per key"; owner decision 2026-11-05: no key
+		// change from the old key).
+		res.Epoch.Destroy()
+		m.audit(now, "rotation_rollback_refused", p.ID)
+		m.abandonOutgoing(id, now)
 		return ackAfterFlush
 	}
 	// The answer's tokens replace the held ones only if they are for the

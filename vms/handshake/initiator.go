@@ -202,6 +202,11 @@ func NewInitiator(cfg InitiatorConfig) (*Initiator, error) {
 // Envelope returns hs.init, ready to deposit.
 func (i *Initiator) Envelope() []byte { return append([]byte(nil), i.env...) }
 
+// ResponderIK is the responder's identity key the hs.init pinned.
+func (i *Initiator) ResponderIK() ed25519.PublicKey {
+	return append(ed25519.PublicKey(nil), i.cfg.ResponderIK...)
+}
+
 // ResponderRelayKey is the responder's relay key on record when the
 // hs.init was made: hs.resp must come from it (HandleResp).
 func (i *Initiator) ResponderRelayKey() ed25519.PublicKey {

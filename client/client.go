@@ -1671,7 +1671,7 @@ func (d *Device) handle(ctx context.Context, m relayclient.Message) (unacked boo
 		}
 	case "relay.address.update":
 		if !fromEarlier {
-			d.followAddress(ctx, in.Body)
+			d.followAddress(ctx, in.Body, depositedAt)
 		}
 	case "leash.grant.updated":
 		if in.Re == "" {
@@ -1940,7 +1940,7 @@ func (d *Device) followRotation(body json.RawMessage) {
 // §3.4): the new address and its standing token for this device's
 // mailbox, then relay.token.issued for the vault's new key (step 4). A
 // duplicate (a resend of an address already followed) is ignored.
-func (d *Device) followAddress(ctx context.Context, body json.RawMessage) {
+func (d *Device) followAddress(ctx context.Context, body json.RawMessage, depositedAt time.Time) {
 	v := d.st.Vault
 	o, err := strictjson.ParseObject(body)
 	if err != nil {
@@ -1972,7 +1972,12 @@ func (d *Device) followAddress(ctx context.Context, body json.RawMessage) {
 	if err != nil || c.Iss != a.Mailbox || c.Sub != relayauth.EncodeKey(d.relayKey.Public().(ed25519.PublicKey)) {
 		return
 	}
-	v.PrevRelay = append(v.PrevRelay, PrevRelayKey{PK: v.RelayPK, Until: now.Add(PrevRelayGrace)})
+	// The grace runs from the relay's time of the update when known.
+	from := depositedAt
+	if from.IsZero() || from.After(now) {
+		from = now
+	}
+	v.PrevRelay = append(v.PrevRelay, PrevRelayKey{PK: v.RelayPK, Until: from.Add(PrevRelayGrace)})
 	v.RelayURL, v.Mailbox, v.RelayPK = a.URL, a.Mailbox, append([]byte(nil), a.PK...)
 	v.Token, v.TokenExp = tok, c.Exp
 	if nt, err := d.mintForVault(); err == nil {

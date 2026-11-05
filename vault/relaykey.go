@@ -570,11 +570,13 @@ func (m *Manager) relayKeyAttempt(ctx context.Context, atUnlock bool) bool {
 			pr.Refused = "refused"
 		}
 		m.dirty = true
-		if err := m.persist(ctx, false); err != nil && m.locked {
-			return false // the refused state's own write: a split brain
+		if err := m.persist(ctx, false); err != nil {
+			// The refused state's own write failed: it stays in memory for
+			// the next write; audited only once a write stored it (the
+			// next unlock's attempt, refused again, audits it).
+			return false
 		}
-		// Audited after that write (a failed one leaves both to the next).
-		m.relayKeyFailed(now)
+		m.relayKeyFailed(now) // after the write that stored the refused state
 		return false
 	default:
 		if ctx.Err() != nil {
@@ -1665,9 +1667,15 @@ func (m *Manager) endPrevRelay(p *Peer, now time.Time) {
 }
 
 // handshakeTokens are the jtis of the tokens the vault minted for sub in
-// a handshake with p still in progress (one it began, or one it answered).
+// a handshake with p still in progress (one it began, or one it answered)
+// under p's current identity key: one pinned to an ik p has rotated away
+// from could only be finished by the holder of p's old copy.
 func (m *Manager) handshakeTokens(peerID, sub string) map[string]bool {
 	out := map[string]bool{}
+	p := m.peer(peerID)
+	if p == nil {
+		return out
+	}
 	add := func(list []IssuedToken) {
 		for _, t := range list {
 			if t.Sub == sub {
@@ -1675,17 +1683,44 @@ func (m *Manager) handshakeTokens(peerID, sub string) map[string]bool {
 			}
 		}
 	}
-	for _, og := range m.st.Outgoing {
-		if og.PeerID == peerID && og.New == nil {
+	for id, og := range m.st.Outgoing {
+		if ini := m.outgoing[id]; og.PeerID == peerID && og.New == nil && ini != nil && suite.EqualPublic(ini.ResponderIK(), p.IK) {
 			add(og.Issued)
 		}
 	}
-	for _, aw := range m.st.Awaiting {
-		if aw.PeerID == peerID && aw.New == nil {
+	for id, aw := range m.st.Awaiting {
+		if r := m.awaiting[id]; aw.PeerID == peerID && aw.New == nil && r != nil && suite.EqualPublic(r.InitiatorIK(), p.IK) {
 			add(aw.Issued)
 		}
 	}
 	return out
+}
+
+// restartHandshakesUnderOldIK runs when p's identity key changed (it
+// followed identity.rotate): the handshakes the vault began with p pinned
+// p's earlier ik, so only the holder of p's old copy could answer them.
+// They are abandoned (their hs.init not sent, their tokens revoked) and a
+// rekey or reconnect is started again under the new ik.
+func (m *Manager) restartHandshakesUnderOldIK(p *Peer, now time.Time) {
+	var rekey, reconnect bool
+	for id, og := range m.st.Outgoing {
+		ini := m.outgoing[id]
+		if og.PeerID != p.ID || og.New != nil || og.Replaced || ini == nil || suite.EqualPublic(ini.ResponderIK(), p.IK) {
+			continue
+		}
+		switch og.Purpose {
+		case handshake.PurposeRekey:
+			rekey = true
+		case handshake.PurposeReconnect:
+			reconnect = true
+		}
+		m.abandonOutgoing(id, now)
+	}
+	if reconnect {
+		m.startReconnect(p, now)
+	} else if rekey {
+		m.startRekey(p, now)
+	}
 }
 
 // denySubExcept revokes, by jti, every token issued to pk but keep.

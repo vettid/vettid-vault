@@ -1,6 +1,7 @@
 package vault
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"fmt"
@@ -820,13 +821,25 @@ func reconnectInProgress(t *testing.T, keepK0 bool) {
 		rkConnect(t, a, c) // C never collects after A rotates: K0 stays in use for it
 	}
 	k0 := relayauth.EncodeKey(pubOf(a.m.keys.relay))
+	// A rotates; its relay key stays pending a while: B follows A's new ik
+	// (still on K0), then begins a reconnect, pinned to the new ik and K0.
+	a.relay.top().rot = &stubRot{rotate: func(string) error { return &relayclient.Error{Status: 503, Code: "internal"} }}
+	rkRotate(t, a)
+	a.m.mu.Lock()
+	a.m.dropRekey(aConn)
+	a.m.mu.Unlock()
+	rkPump(t, a, b)
+	if !suite.EqualPublic(b.m.st.Connections[bConn].IK, pubOf(a.m.keys.ik)) {
+		t.Fatal("B did not follow A's new ik")
+	}
 	b.m.mu.Lock()
 	b.m.startReconnect(b.m.st.Connections[bConn], b.m.now())
 	b.m.mu.Unlock()
 	init := capture(t, b, a) // B's hs.init, held on the way
-	rkRotate(t, a)
+	a.relay.top().rot.rotate = nil
 	a.m.mu.Lock()
-	a.m.dropRekey(aConn)
+	a.m.rk.next = time.Time{}
+	a.m.relayKeyStep(context.Background(), false) // K1 current
 	a.m.mu.Unlock()
 	rkPump(t, a, b) // B follows K1
 	rkPump(t, b, a) // A stores B's token for K1, deposits with K1
@@ -834,6 +847,30 @@ func reconnectInProgress(t *testing.T, keepK0 bool) {
 	pb := b.m.st.Connections[bConn]
 	if !ended(pb) || slices.Contains(b.relay.top().revoked, "sub:"+k0) {
 		t.Fatal("not ended, or the key revoked while B's reconnect under it is in progress")
+	}
+	if !keepK0 {
+		// N2: the fallback takes the peer's reconnect token for the current
+		// key only while it is valid.
+		a.m.mu.Lock()
+		pa := a.m.st.Connections[aConn]
+		saved := pa.Reconnect
+		pa.Reconnect.Exp = time.Now().Add(-time.Minute)
+		a.m.mu.Unlock()
+		inject(t, a, init)
+		if !audited(a, "reconnect_bad_token") {
+			t.Fatal("answered on an expired reconnect token")
+		}
+		a.m.mu.Lock()
+		pa.Reconnect = saved
+		a.m.mu.Unlock()
+		for i := range init {
+			init[i].payload = append([]byte(nil), init[i].payload...)
+		}
+		a.m.mu.Lock()
+		for k := range a.m.st.SeenInit {
+			delete(a.m.st.SeenInit, k) // the same hs.init again, as a retransmission
+		}
+		a.m.mu.Unlock()
 	}
 	inject(t, a, init) // A answers
 	if rkPump(t, a, b) == 0 {
@@ -903,5 +940,121 @@ func TestRelayKeyCutOffIsTheDepositTime(t *testing.T) {
 	}
 	if handled(b, msgID) {
 		t.Fatal("a K0 deposit after A's cut-off was taken")
+	}
+}
+
+// oldCopyAnswer: B begins a reconnect to A; A answers it before its own
+// key change (what the holder of A's old copy can answer later, with K0
+// and the old ik): the hs.resp is returned, held, and B's connection id.
+func oldCopyAnswer(t *testing.T) (a, b *devFixture, aConn, bConn string, resp []stubDeposit) {
+	a, b = newVaultPair(t)
+	aConn, bConn = rkConnect(t, a, b)
+	b.m.mu.Lock()
+	b.m.startReconnect(b.m.st.Connections[bConn], b.m.now())
+	b.m.mu.Unlock()
+	inject(t, a, capture(t, b, a))
+	resp = capture(t, a, b)
+	if len(resp) == 0 {
+		t.Fatal("no hs.resp")
+	}
+	return
+}
+
+// Round 6, H1: the holder of A's old copy answers B's reconnect, begun
+// before A's credential.rotate, with A's old ik and K0, before and after
+// B's cut-off of K0: B never goes back to A's old ik nor makes an epoch
+// with it.
+func TestRelayKeyOldCopyCannotRollBackTheIK(t *testing.T) {
+	for _, afterCutOff := range []bool{false, true} {
+		t.Run(fmt.Sprintf("after the cut-off=%v", afterCutOff), func(t *testing.T) {
+			a, b, aConn, bConn, resp := oldCopyAnswer(t)
+			rkRotate(t, a)
+			a.m.mu.Lock()
+			a.m.dropRekey(aConn)
+			a.m.mu.Unlock()
+			rkPump(t, a, b) // B follows A's new ik and K1
+			if afterCutOff {
+				settle(t, a, b)
+				if !ended(b.m.st.Connections[bConn]) {
+					t.Fatal("not ended")
+				}
+			}
+			pb := b.m.st.Connections[bConn]
+			newIK := append([]byte(nil), pb.IK...)
+			epoch := append([]byte(nil), pb.LastEpochID...)
+			inject(t, b, resp)
+			if !suite.EqualPublic(pb.IK, newIK) || !bytes.Equal(pb.LastEpochID, epoch) {
+				t.Fatal("B took A's old ik back, or made an epoch with the old copy")
+			}
+		})
+	}
+}
+
+// H1 part 2: following identity.rotate abandons the handshakes B began
+// pinned to A's earlier ik and begins them again under the new one.
+func TestRelayKeyFollowingARotationRestartsHandshakes(t *testing.T) {
+	a, b, aConn, bConn, _ := oldCopyAnswer(t)
+	var old string
+	for id, og := range b.m.st.Outgoing {
+		if og.PeerID == bConn && og.Purpose == handshake.PurposeReconnect {
+			old = id
+		}
+	}
+	rkRotate(t, a)
+	a.m.mu.Lock()
+	a.m.dropRekey(aConn)
+	a.m.mu.Unlock()
+	rkPump(t, a, b)
+	if b.m.st.Outgoing[old] != nil {
+		t.Fatal("the reconnect pinned to the old ik is still open")
+	}
+	var again bool
+	for id, og := range b.m.st.Outgoing {
+		if og.PeerID == bConn && og.Purpose == handshake.PurposeReconnect && suite.EqualPublic(b.m.outgoing[id].ResponderIK(), pubOf(a.m.keys.ik)) {
+			again = true
+		}
+	}
+	if !again {
+		t.Fatal("no reconnect begun again under the new ik")
+	}
+}
+
+// followByHand makes B know A's new ik as a reconnect's rotations would,
+// without the identity.rotate handler (so its handshakes stay open).
+func followByHand(t *testing.T, a, b *devFixture, bConn string) {
+	pb := b.m.st.Connections[bConn]
+	pb.Chain = append(pb.Chain, a.m.st.Rotations...)
+	pb.IK = append([]byte(nil), pubOf(a.m.keys.ik)...)
+}
+
+// H1 part 1: an hs.resp signed by an ik the peer has rotated away from is
+// refused, whatever handshake it answers.
+func TestRelayKeyRespFromAnAncestorIKRefused(t *testing.T) {
+	a, b, _, bConn, resp := oldCopyAnswer(t)
+	rkRotate(t, a)
+	followByHand(t, a, b, bConn)
+	pb := b.m.st.Connections[bConn]
+	newIK := append([]byte(nil), pb.IK...)
+	inject(t, b, resp)
+	if !suite.EqualPublic(pb.IK, newIK) || !audited(b, "rotation_rollback_refused") {
+		t.Fatal("an answer under an ancestor ik was taken")
+	}
+}
+
+// H1 part 3: a handshake pinned to an ik the peer has rotated away from
+// does not hold back the revocation of the peer's earlier relay key.
+func TestRelayKeyOldIKHandshakeDoesNotDeferTheRevocation(t *testing.T) {
+	a, b, _, bConn, _ := oldCopyAnswer(t)
+	k0 := pubOf(a.m.keys.relay)
+	rkRotate(t, a)
+	followByHand(t, a, b, bConn)
+	pb := b.m.st.Connections[bConn]
+	pb.PrevRelay = []PrevRelayKey{{PK: append([]byte(nil), k0...), Until: time.Now().Add(time.Hour)}}
+	b.m.mu.Lock()
+	b.m.endPrevRelay(pb, b.m.now())
+	b.m.flushThenDrain(context.Background())
+	b.m.mu.Unlock()
+	if pb.PrevRelay[0].SubPending || !slices.Contains(b.relay.top().revoked, "sub:"+relayauth.EncodeKey(k0)) {
+		t.Fatal("a handshake under the old ik kept the earlier key's tokens")
 	}
 }

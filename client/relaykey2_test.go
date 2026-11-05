@@ -92,3 +92,18 @@ func TestDeviceRefusesKeyChangesFromAnEarlierKey(t *testing.T) {
 		t.Fatal("a key change from the current key was not taken")
 	}
 }
+
+// The grace of the vault's earlier relay key runs from the relay's time of
+// the update (as the vault does), not from when the device handles it.
+func TestDeviceGraceFromTheUpdateTime(t *testing.T) {
+	_, v, d := pair(t)
+	k1 := ed25519.NewKeyFromSeed(make([]byte, 32))
+	at := time.Now().Add(-time.Hour).UTC()
+	d.mu.Lock()
+	d.followAddress(context.Background(), addressUpdate(t, v, k1), at)
+	prev := d.st.Vault.PrevRelay
+	d.mu.Unlock()
+	if len(prev) != 1 || !prev[0].Until.Equal(at.Add(PrevRelayGrace)) {
+		t.Fatalf("grace until %+v, want from %v", prev, at)
+	}
+}

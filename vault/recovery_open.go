@@ -478,10 +478,15 @@ func (m *Manager) completeRecoveryR(ctx context.Context, p RecoveryOpenParams, r
 		switch code, at := m.completeStoredRelayKey(ctx, p.Relay); code {
 		case "":
 		case OpenRelayRefused:
-			// A definite answer: recorded in the recovery log of the header
-			// (the state is not written by a failed open).
-			m.hdr.logRecovery(now, "recovery.open", openRef(r, OpenRelayRefused))
-			_ = m.writeHeader(ctx)
+			// A definite answer: recorded in the recovery log of the stored
+			// header (the state is not written by a failed open). The entry
+			// alone, by a header transaction: not the header in memory,
+			// which this open has changed (a replacement abandoned) without
+			// its step 2.
+			_ = headerTx(ctx, HeaderParams{Options: p.Options, VaultID: p.VaultID, UserGUID: p.UserGUID}, func(h *Header, _ time.Time) (bool, error) {
+				h.logRecovery(now, "recovery.open", openRef(r, OpenRelayRefused))
+				return false, nil
+			})
 			return fail(OpenRelayRefused)
 		default:
 			out.RetryAt = at

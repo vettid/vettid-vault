@@ -1490,3 +1490,23 @@ func TestRelayKeyDeviceGetsKeyChangesAgain(t *testing.T) {
 		t.Fatalf("the device was not sent again (identity.rotate %v, token %v)", rot, tok)
 	}
 }
+
+// Round 6, L6: the refused state is audited only once a write stored it.
+func TestRelayKeyRefusedAuditedAfterItsWrite(t *testing.T) {
+	r := newRKFixture(t)
+	r.rot.rotate = func(string) error { return &relayclient.Error{Status: 400, Code: "bad_request"} }
+	r.rotate(true)
+	r.with(func(m *Manager) {
+		if err := m.persist(context.Background(), false); err != nil {
+			t.Fatal(err)
+		}
+	})
+	failWrites(r.devFixture, 1)
+	r.with(func(m *Manager) { m.relayKeyStep(context.Background(), false) })
+	if r.pending().Refused == "" {
+		t.Fatal("not refused")
+	}
+	if n := len(r.sink.kinds("identity.rotation_failed")); n != 0 {
+		t.Fatal("audited though its write failed")
+	}
+}

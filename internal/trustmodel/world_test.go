@@ -12,6 +12,7 @@ import (
 
 type Violation struct {
 	Inv, Detail string
+	Pair        string // the releases of the first two parties the detail names, at the time (pairType)
 }
 
 type World struct {
@@ -36,6 +37,7 @@ type World struct {
 	f1Window      bool              // alternative: F1-demote only if the link's inner ts > the epoch's activation + T + 2 days
 	fixBOff       bool              // F1 as in 2da316e (no fix B); attribution runs only
 	fixBStrict    bool              // F1 (default, lead's choice): keep the ungated epoch only if the peer's new ik signed something under it
+	ruleEKeepFin  bool              // TRUSTMODEL_RULEEFIN=keep: rule E leaves an unsent hs.fin for a destroyed epoch in the outbox (before r7)
 	r28Spec       bool              // TRUSTMODEL_R28=spec: release-28 parties follow f4a4d97 §3.4.1 (before r6); default: the release-28 code
 	featMode      string            // always (default, the spec): features on every message; first: with the first message after an upgrade; echo: also when first seeing the peer's
 	upAt          map[PID]int64     // upgrade mode: when each party upgraded from release 28
@@ -119,7 +121,7 @@ func (w *World) violate(inv, format string, a ...any) {
 			return
 		}
 	}
-	w.viol = append(w.viol, Violation{inv, d})
+	w.viol = append(w.viol, Violation{inv, d, w.pairType(d)})
 	w.logf("!!! %s VIOLATED: %s", inv, d)
 }
 

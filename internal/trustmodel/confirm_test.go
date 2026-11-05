@@ -268,6 +268,16 @@ func (q *Party) ruleE(r *PeerRec, ts int64) {
 		if after && !ep.Destroyed && !ep.Pending {
 			ep.Destroyed, ep.DestroyTs = true, ts
 			q.w.stat("A:destroyed-later-epoch")
+			if !q.w.ruleEKeepFin {
+				// lead's fix (r7): an hs.fin for a destroyed epoch not yet
+				// deposited is dropped with its outbox entry
+				for i := range q.st.Out {
+					if e := &q.st.Out[i]; e.To == r.ID && e.M.Kind == KFin && e.M.NewEpoch == ep.ID && !e.Done && !e.Ended {
+						e.Ended = true
+						q.w.stat("A:ruleE-unsent-fin-dropped")
+					}
+				}
+			}
 			q.w.logf("%s: E%d with %s DESTROYED by rule E (ts %d)", q.Name, ep.ID, q.w.party(r.ID).Name, ts)
 		}
 		after = after || ep.ID == r.ConfID

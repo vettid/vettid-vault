@@ -799,6 +799,7 @@ func runActions(cfg Config, seed uint64, acts []Action, verbose bool) *World {
 		w.featMode = "always"
 	}
 	w.r28Spec = os.Getenv("TRUSTMODEL_R28") == "spec"
+	w.ruleEKeepFin = os.Getenv("TRUSTMODEL_RULEEFIN") == "keep"
 	defer w.expoStats()
 	defer w.gateStats()
 	for _, a := range acts {

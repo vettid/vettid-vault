@@ -88,6 +88,7 @@ func TestRandom(t *testing.T) {
 		inv := w.viol[0].Inv
 		sig := inv + " " + classify(w.viol[0].Detail)
 		a.stats["violation "+sig]++
+		a.stats["pair "+w.viol[0].Pair+" | "+sig]++
 		if _, seen := a.found[sig]; seen || len(a.found) >= 40 {
 			continue
 		}
@@ -169,7 +170,9 @@ func genRun(rs uint64, steps int) (Config, []Action) {
 		OldRules: os.Getenv("TRUSTMODEL_OLD") != "", Gate: os.Getenv("TRUSTMODEL_GATE") != "",
 		Opt: envInt("TRUSTMODEL_OPT", optFull), Unseen: os.Getenv("TRUSTMODEL_UNSEEN") != "",
 		Skew: os.Getenv("TRUSTMODEL_NOSKEW") == ""}
-	if os.Getenv("TRUSTMODEL_MIXED") != "" { // release <= 28 parties, about half
+	if os.Getenv("TRUSTMODEL_ALL28") != "" { // every party on release 28: today's live behaviour
+		cfg.Rel28 = []bool{true, true, true, true, true, true}
+	} else if os.Getenv("TRUSTMODEL_MIXED") != "" { // release <= 28 parties, about half
 		cfg.Rel28 = make([]bool, 6)
 		for j := range cfg.Rel28 {
 			cfg.Rel28[j] = rng.IntN(2) == 0

@@ -78,6 +78,7 @@ type Epoch struct {
 	DestroyTs   int64 // rule E: the accepted hs.init's inner ts (a later ts under it is fork evidence)
 	MineInit    bool  // this side initiated the handshake that made it
 	GotFromPeer bool  // a message from the peer was received under it
+	UnconfFin   bool  // this side initiated it and activated it at hs.fin without confirmation (ungated)
 }
 
 // PendEp is an initiator's pending epoch (§6.3.1).

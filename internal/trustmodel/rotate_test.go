@@ -295,7 +295,7 @@ func (p *Party) tick() {
 			}
 			if o := r.Own; o != nil {
 				if o.Reconnect && w.Now-o.Started > w.hsLifeFor(true) {
-					r.Status, r.Ref = stStale, "reconnect failed"
+					p.markStale(r, "reconnect failed")
 					p.h5(r, -1)
 					w.logf("%s: %s STALE (reconnect not completed in 7 days)", p.Name, w.party(r.ID).Name)
 					continue
@@ -334,7 +334,7 @@ func (p *Party) tick() {
 				}
 			}
 			if r.Device && r.standing(r.KeyFor, r.Relay, w.Now).JTI == 0 {
-				r.Status, r.Ref = stStale, "tokens expired (needs pairing)"
+				p.markStale(r, "tokens expired (needs pairing)")
 				p.h5(r, -1)
 				continue
 			}
@@ -344,7 +344,7 @@ func (p *Party) tick() {
 			// S1: stale 30 days after the second write
 			for _, o := range p.st.Old {
 				if o.Key == r.KeyFor && w.Now-p.sinceAfter(o.Key) > staleAfter {
-					r.Status, r.Ref = stStale, "S1: not followed in 30 days"
+					p.markStale(r, "S1: not followed in 30 days")
 					p.h5(r, -1)
 					w.logf("%s: %s STALE (S1)", p.Name, w.party(r.ID).Name)
 				}

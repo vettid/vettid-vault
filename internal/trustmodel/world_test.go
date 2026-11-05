@@ -23,16 +23,19 @@ type World struct {
 	p429          float64 // chance a relay call is answered 429
 	pRef          float64 // chance a rotate or registration is refused definitively
 	holdRotate    bool
-	optA          bool            // VAULT-MESSAGING 0.86.0 §6.3.1 option A (activation on confirmation)
-	gate          bool            // Release A gate: activate on confirmation only toward peers that advertise it
-	probeDep      map[int][2]PID  // session probes deposited by real parties (from, to)
-	probeFate     map[int]string  // what became of each
-	seq           int             // ground truth arrival order at the relay
-	reverted      map[int]bool    // epochs destroyed by a revert
-	hasEpoch      map[[2]int]bool // (party, epoch): the party ever held the epoch
-	probeEpoch    map[int]int     // the epoch a probe was sealed under
-	literalFork   bool            // read §3.4.1's fork sentence literally (no deposited-after condition) for the confirmed epoch
-	debugUnlinked bool            // scenarios: the relay's rotate and registration get no answer
+	optA          bool              // VAULT-MESSAGING 0.86.0 §6.3.1 option A (activation on confirmation)
+	gate          bool              // Release A gate: activate on confirmation only toward peers that advertise it
+	probeDep      map[int][2]PID    // session probes deposited by real parties (from, to)
+	probeFate     map[int]string    // what became of each
+	seq           int               // ground truth arrival order at the relay
+	reverted      map[int]bool      // epochs destroyed by a revert
+	hasEpoch      map[[2]int]bool   // (party, epoch): the party ever held the epoch
+	staleAt       map[[2]PID]string // pair -> split cause when it first went stale (\"\" if the epochs matched)
+	probeEpoch    map[int]int       // the epoch a probe was sealed under
+	literalFork   bool              // read §3.4.1's fork sentence literally (no deposited-after condition) for the confirmed epoch
+	f1Window      bool              // alternative: F1-demote only if the link's inner ts > the epoch's activation + T + 2 days
+	ownCopyStrict bool              // a92a6eb's own_copy wording (and nothing received from P); default: lead fix A
+	debugUnlinked bool              // scenarios: the relay's rotate and registration get no answer
 
 	issuer   map[int]Key    // jti -> iss: a token "verifies" only if its issuer minted it
 	epTruth  map[int][2]PID // epoch -> (initiator actor, responder actor)
@@ -70,7 +73,7 @@ func newWorld(seed uint64) *World {
 	w := &World{rng: rand.New(rand.NewPCG(seed, 7)), issuer: map[int]Key{}, epTruth: map[int][2]PID{},
 		rlinkBy: map[RLink]rot{}, iklinkBy: map[IKLink]rot{}, evid: map[[2]PID]map[Key]map[Key]bool{},
 		ikPos: map[[2]PID][]ikFollow{}, answered: map[int]bool{},
-		ended: map[int]bool{}, ever: map[PID]map[int]bool{}, probes: map[int]bool{}, stats: map[string]int{}, dead: map[PID]string{}, ttlFin: map[[2]PID]string{}, probeDep: map[int][2]PID{}, probeFate: map[int]string{}, reverted: map[int]bool{}, hasEpoch: map[[2]int]bool{}, probeEpoch: map[int]int{}, forkDue: map[[2]PID]int{}, evidKind: map[Key]string{}}
+		ended: map[int]bool{}, ever: map[PID]map[int]bool{}, probes: map[int]bool{}, stats: map[string]int{}, dead: map[PID]string{}, ttlFin: map[[2]PID]string{}, probeDep: map[int][2]PID{}, probeFate: map[int]string{}, reverted: map[int]bool{}, hasEpoch: map[[2]int]bool{}, staleAt: map[[2]PID]string{}, probeEpoch: map[int]int{}, forkDue: map[[2]PID]int{}, evidKind: map[Key]string{}}
 	w.R = newRelay(w)
 	w.Now = 1000 * day
 	return w

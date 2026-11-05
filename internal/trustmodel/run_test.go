@@ -710,6 +710,21 @@ func (w *World) checkEnd(liveness bool) {
 	if stale {
 		w.stat("end-stale run")
 	}
+	// I1-stale-split: a pair that ends stale having split first
+	keys := make([][2]PID, 0, len(w.staleAt))
+	for k := range w.staleAt {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		return keys[i][0] < keys[j][0] || (keys[i][0] == keys[j][0] && keys[i][1] < keys[j][1])
+	})
+	for _, k := range keys {
+		a, b := w.party(k[0]).st.peer(k[1]), w.party(k[1]).st.peer(k[0])
+		endsStale := (a != nil && a.Status == stStale) || (b != nil && b.Status == stStale)
+		if cause := w.staleAt[k]; cause != "" && endsStale && w.dead[k[0]] == "" && w.dead[k[1]] == "" {
+			w.violate("I1-stale-split", "%s: stale after a split: %s", pairName(w, k[0], k[1]), cause)
+		}
+	}
 	for _, id := range pids {
 		ft := w.probeFate[id]
 		pr := w.probeDep[id]

@@ -625,7 +625,9 @@ func (q *Party) forkEpoch(r *PeerRec, ctx int) bool {
 		for _, ep := range r.Epochs[ic+1 : ik+1] {
 			if r.isAncestor(ep.Signer) {
 				fork = true
-				ownOnly = ownOnly && ep.MineInit && !ep.GotFromPeer
+				// lead fix A: every such epoch is one Q began (a92a6eb also
+				// required "and received nothing from P under it")
+				ownOnly = ownOnly && ep.MineInit && (!q.w.ownCopyStrict || !ep.GotFromPeer)
 			}
 		}
 		if fork && ownOnly {
@@ -811,7 +813,8 @@ func (q *Party) tableBResp(r *PeerRec, M *Msg, pos Pos) dec {
 		prev := r.Cur
 		q.establish(r, M.NewEpoch, M.Sig, o.OwnIK, pos)
 		r.Epochs[len(r.Epochs)-1].MineInit = true
-		if q.revertRule(r) && prev != 0 { // Deployment: toward an ungated peer, keep the old epoch
+		r.Epochs[len(r.Epochs)-1].UnconfFin = true // activated at hs.fin without confirmation
+		if q.revertRule(r) && prev != 0 {          // Deployment: toward an ungated peer, keep the old epoch
 			r.RevOld, r.RevFinAt, r.RevUntil, r.RevSent = prev, q.now(), q.w.Now+aConfKeys, nil
 		}
 	}
@@ -1122,6 +1125,21 @@ func (q *Party) f1Demote(r *PeerRec, M *Msg, app []IKLink, x Pos) {
 	cur := r.epoch(r.Cur)
 	for _, l := range app {
 		if cur != nil && cur.Signer == l.Old {
+			if !q.w.f1Window && cur.MineInit && cur.UnconfFin && !cur.GotFromPeer && r.predecessor(cur.ID) == M.Epoch {
+				// lead fix B: my own ungated epoch, link under its immediate
+				// predecessor: no demotion; rekey under the new ik and let
+				// confirmation or the revert decide (no old copy can be here)
+				q.w.stat("A:F1-fixB-kept")
+				q.w.logf("%s: E%d with %s kept (fix B): rekey, confirmation or revert decides", q.Name, cur.ID, q.w.party(r.ID).Name)
+				if r.Own == nil {
+					q.startHS(r, false)
+				}
+				return
+			}
+			if q.w.f1Window && M.Ts <= cur.EstAt+aRevert {
+				q.w.stat("A:F1-window-skipped")
+				return // the alternative rule: too soon after the activation
+			}
 			cur.Demoted, cur.DemotedAt = true, x
 			q.w.stat("A:F1-demoted")
 			q.w.logf("%s: E%d with %s DEMOTED (P never activated it; link under E%d)", q.Name, cur.ID, q.w.party(r.ID).Name, M.Epoch)
@@ -1158,4 +1176,18 @@ func (q *Party) acceptOwnCopy(r *PeerRec, ctx int) {
 	}
 	q.w.stat("A:fork_suspected(own_copy)")
 	q.w.logf("%s: connection.fork_suspected (own_copy) for %s: epochs after E%d demoted, not suspended", q.Name, q.w.party(r.ID).Name, ctx)
+}
+
+// predecessor: the last ordinary epoch recorded before id.
+func (r *PeerRec) predecessor(id int) int {
+	prev := 0
+	for _, e := range r.Epochs {
+		if e.ID == id {
+			return prev
+		}
+		if !e.Pending && !e.Abandoned && !e.Destroyed {
+			prev = e.ID
+		}
+	}
+	return 0
 }

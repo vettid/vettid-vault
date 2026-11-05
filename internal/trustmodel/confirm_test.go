@@ -1,6 +1,9 @@
 package trustmodel
 
-import "slices"
+import (
+	"fmt"
+	"slices"
+)
 
 // VAULT-MESSAGING 0.86.0 (draft) §6.3.1 at vettid.org 2da316e: lifetimes,
 // activation on confirmation, the confirmed epoch, rule E, and the
@@ -139,7 +142,7 @@ func (q *Party) abandonPending(r *PeerRec, why string, restart bool) {
 	case why == "B passed" && !r.Device:
 		q.startHS(r, true) // §6.3.1: I reconnects naming its current epoch
 	case why == "B passed" && !valid:
-		r.Status, r.Ref = stStale, "pair again (B passed)"
+		q.markStale(r, "pair again (B passed)")
 	default:
 		q.startHS(r, !r.Device && !valid)
 	}
@@ -349,4 +352,41 @@ func (p *Party) idResend(r *PeerRec, m *RMsg) {
 	r.IdResendN++
 	p.w.stat("A:identity.rotate-resent")
 	p.enqueue(r.ID, Msg{Kind: KIdRot, Rot: p.ownLinks(ep.Own)}, nil)
+}
+
+// markStale: the record goes stale. Ground truth for I1-stale-split: at the
+// moment a pair first goes stale, did the two sides' current epochs differ
+// (or did one side hold an epoch the other never held)?
+func (q *Party) markStale(r *PeerRec, ref string) {
+	r.Status, r.Ref = stStale, ref
+	w := q.w
+	if q.Copy {
+		return
+	}
+	key := [2]PID{min(q.ID, r.ID), max(q.ID, r.ID)}
+	if _, seen := w.staleAt[key]; seen {
+		return
+	}
+	pr := w.party(r.ID).st.peer(q.ID)
+	cause := ""
+	if pr != nil {
+		if !consistent(r, pr, q.respHalf(), w.party(r.ID).respHalf()) {
+			cause = fmt.Sprintf("%s, epochs differ (%s on E%d, %s on E%d)", ref, q.Name, r.Cur, w.party(r.ID).Name, pr.Cur)
+			if c := w.ttlFin[[2]PID{q.ID, r.ID}] + w.ttlFin[[2]PID{r.ID, q.ID}]; c != "" {
+				cause += "; lost handshake message: " + c
+			}
+		}
+	}
+	w.staleAt[key] = cause
+}
+
+// consistent: the two records can still talk: the same current epoch, or
+// one side's current is the other's pending epoch, its confirmed epoch,
+// or the old epoch it keeps for a revert.
+func consistent(a, b *PeerRec, aNew, bNew bool) bool {
+	ok := func(x, y *PeerRec, yNew bool) bool { // y can take x's current epoch
+		return x.Cur == y.Cur || (y.Pend != nil && y.Pend.ID == x.Cur) || (yNew && y.ConfID == x.Cur && x.Cur != 0) ||
+			(y.RevOld != 0 && y.RevOld == x.Cur)
+	}
+	return ok(a, b, bNew) || ok(b, a, aNew)
 }

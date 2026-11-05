@@ -72,6 +72,17 @@ func (m *Manager) nextFor(reason, pin string, secret []byte, kdf KDFParams, wrap
 // beginReplace is step 1: the header with the `next` part, written and
 // read back. On failure nothing has changed (errRetry, or ErrSplitBrain).
 func (m *Manager) beginReplace(ctx context.Context, r *replacement) error {
+	if m.stateBehind {
+		// A state write failed and none has stored the state since. The
+		// header below names the unlock keys of the devices in memory
+		// (syncUnlockKeys), so it could drop a device that the stored
+		// state still has (a phone move whose step 2 was not stored):
+		// after a lock or crash that phone could not unlock, and the new
+		// one is not stored. Nothing is written; the batch's own write
+		// catches the state up, and the retry goes on from there.
+		r.wipe()
+		return errRetry
+	}
 	if m.repl != nil || m.hdr.Next != nil {
 		m.dropNext(m.now())
 	}

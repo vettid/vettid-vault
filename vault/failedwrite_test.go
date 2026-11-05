@@ -478,3 +478,70 @@ func TestFailedWriteKeepsReportsPending(t *testing.T) {
 		})
 	}
 }
+
+// A state write that fails before a phone move's approval (any batch's,
+// such as the write after the drain that sent device.transfer.pending)
+// leaves the state behind: the approval's step 1 is refused with retry
+// (beginReplace) and nothing of the move is spent, so the old app's
+// approval sent again after that batch's write stored the state completes
+// the move once, and only then is the new app paired (§11.14.10, §6.7.1).
+func TestTransferApprovalRetriedAfterFailedWrite(t *testing.T) {
+	d := newDevFixture(t)
+	attestOK(d)
+	inv := d.transferInvite(t)
+	n := newNewcomer(t, 0x50)
+	n.hsInitAttest(t, d.m, handshake.PurposeApp, inv.ID, "t1", testAttest)
+	n.finish(t, d)
+	k := &keyHolder{id: inv.ID, stmt: heldStmt}
+	d.m.mu.Lock()
+	d.m.addFeature(k)
+	d.m.mu.Unlock()
+	failWrites(d, 1)
+	d.m.mu.Lock()
+	d.m.dirty = true
+	err := d.m.persist(context.Background(), false)
+	behind := d.m.stateBehind
+	d.m.mu.Unlock()
+	if err == nil || !behind {
+		t.Fatalf("the write before the approval: %v, behind %v", err, behind)
+	}
+	if c := d.errorCode(t, "test.approvehold", `{}`); c != "retry" {
+		t.Fatalf("the approval while the state is behind: %q", c)
+	}
+	d.m.mu.Lock()
+	tr, secret, old, behind := d.m.st.Transfer, len(d.m.transferSecret), d.m.st.Devices["dev1"], d.m.stateBehind
+	d.m.mu.Unlock()
+	if tr == nil || tr.State != TransferOpen || secret == 0 || old == nil {
+		t.Fatalf("a refused approval spent the move: transfer %+v, secret %d, old app kept %v", tr, secret, old != nil)
+	}
+	if behind {
+		t.Fatal("the approval's batch did not store the state")
+	}
+	if got := n.received(d); len(got) != 0 {
+		t.Fatalf("the new app was sent %v before the approval", typesOf(got))
+	}
+	// Sent again: the new app's deposits are read before errorCode's
+	// reading of the old app's clears the relay.
+	if err := d.send("test.approvehold", []byte(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	paired := 0
+	for _, in := range n.received(d) {
+		if in.Type == "device.paired" {
+			paired++
+		}
+	}
+	answered := false
+	for _, r := range d.responses(t) {
+		answered = answered || r.Type == "test.approvehold" && r.Error == nil
+	}
+	if !answered {
+		t.Fatal("the approval sent again was not answered")
+	}
+	d.m.mu.Lock()
+	tr, old = d.m.st.Transfer, d.m.st.Devices["dev1"]
+	d.m.mu.Unlock()
+	if tr != nil || old != nil || paired != 1 {
+		t.Fatalf("the move: transfer %v, old app kept %v, device.paired sent %d times", tr != nil, old != nil, paired)
+	}
+}

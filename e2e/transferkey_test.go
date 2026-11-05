@@ -344,6 +344,16 @@ type stateFaults struct {
 	fail    int
 	vid     string // the vault whose header writes are counted
 	headers int    // its header writes stored while state writes fail
+	// atStep1: the next header write of vid that no state write preceded
+	// (a DEK replacement's step 1) arms the failure of this many state
+	// writes after it, from step 2's. Armed now instead, a write still
+	// due from the pairing (the one after the drain that sent
+	// device.transfer.pending) could take the failure: the approval would
+	// find the state behind and answer retry, with no step 1 stored.
+	// sawState: a state write of vid since its last header write.
+	atStep1  int
+	sawState bool
+	failed   int // state writes failed so far
 }
 
 func (s *stateFaults) headerPuts() int { s.mu.Lock(); defer s.mu.Unlock(); return s.headers }
@@ -353,8 +363,12 @@ func (s *stateFaults) arm(n int) { s.mu.Lock(); s.fail = n; s.mu.Unlock() }
 func (s *stateFaults) Put(ctx context.Context, key string, data []byte, ifMatch store.Version) (store.Version, error) {
 	if strings.HasSuffix(key, "/state") {
 		s.mu.Lock()
+		if s.vid != "" && key == store.StateKey(s.vid) {
+			s.sawState = true
+		}
 		if s.fail > 0 {
 			s.fail--
+			s.failed++
 			s.mu.Unlock()
 			return "", errors.New("injected state write failure")
 		}
@@ -363,9 +377,13 @@ func (s *stateFaults) Put(ctx context.Context, key string, data []byte, ifMatch 
 	v, err := s.Store.Put(ctx, key, data, ifMatch)
 	if err == nil && s.vid != "" && strings.HasPrefix(key, "vaults/"+s.vid+"/header/") {
 		s.mu.Lock()
+		if s.atStep1 > 0 && !s.sawState {
+			s.fail, s.atStep1 = s.atStep1, 0
+		}
 		if s.fail > 0 {
 			s.headers++
 		}
+		s.sawState = false
 		s.mu.Unlock()
 	}
 	return v, err
@@ -419,11 +437,11 @@ func transferFailedStep2(t *testing.T, seed, newSeed byte, newName string, end f
 	waitEvent(t, w.a.dev, "device.transfer.pending", has("transfer_id", id))
 	sf.mu.Lock()
 	sf.vid = w.a.vid
-	sf.mu.Unlock()
-	// Every state write fails from now until the vault is gone: step 1
+	// Every state write fails from step 2 until the vault is gone: step 1
 	// (the header) is stored, step 2 never is, and the approval is not
 	// answered (its answer goes after the flush).
-	sf.arm(1 << 30)
+	sf.atStep1 = 1 << 30
+	sf.mu.Unlock()
 	if err := w.a.dev.TransferApprove(ctxT(t, 20*time.Second), id, acPIN, credPW); err == nil {
 		t.Fatal("the approval was answered although step 2 was not stored")
 	}
@@ -451,5 +469,75 @@ func transferFailedStep2(t *testing.T, seed, newSeed byte, newName string, end f
 	w.noKeyEvent()
 	if res := w.auth(w.a.dev); !strings.Contains(res, `"key_changed":false`) || !strings.Contains(res, w.k0) {
 		t.Fatalf("sign-in under K0: %s", res)
+	}
+}
+
+// A transfer whose step-2 state write fails, then a later write that
+// succeeds (the approval's retransmission, or the next batch's): that write
+// stores the move with its own, and only then does what it held go out.
+// The new phone gets device.paired and opens the vault, and after its
+// first unlock the old phone is told once that it was moved away from.
+func TestTransferFailedStep2ThenStored(t *testing.T) {
+	sf := &stateFaults{}
+	w := newTKWorld(t, 0x8d, func(s store.Store) store.Store { sf.Store = s; return sf })
+	ctx := ctxT(t, 240*time.Second)
+	id, link, err := w.a.dev.TransferCreate(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := w.aw.newApp("new-phone-tk-s", enclavetest.NewIOSAttester(0x9d, enclavetest.IOSOptions{}))
+	if _, err := b.dev.PairAttested(ctx, link, b.att); err != nil {
+		t.Fatal(err)
+	}
+	waitEvent(t, w.a.dev, "device.transfer.pending", has("transfer_id", id))
+	sf.mu.Lock()
+	sf.vid = w.a.vid
+	sf.atStep1 = 1 // step 2's write fails; the next one succeeds
+	sf.mu.Unlock()
+	// The approval, sent again as the apps do on "try again" (busy or
+	// retry spend nothing) until step 1 is stored and step 2's write has
+	// failed: under load an approval can outlast one attempt's wait.
+	fired := func() (int, bool) {
+		sf.mu.Lock()
+		defer sf.mu.Unlock()
+		return sf.failed, sf.atStep1 == 0 && sf.fail == 0
+	}
+	for attempt := 0; ; attempt++ {
+		err := w.a.dev.TransferApprove(ctxT(t, 30*time.Second), id, acPIN, credPW)
+		if n, armed := fired(); n > 0 || armed {
+			break
+		}
+		if attempt == 5 {
+			t.Fatalf("step 2's write never failed: the last approval %v", err)
+		}
+		t.Logf("the approval again (%v)", err)
+	}
+	// The fault fired, on step 2: step 1 (a header with no state write
+	// before it) armed it, and exactly one state write failed.
+	if failed, armed := fired(); failed != 1 || !armed {
+		t.Fatalf("the step-2 fault: %d writes failed, armed and spent %v", failed, armed)
+	}
+	// A later batch whose write succeeds (if the approval's retransmission
+	// did not store it first): the vault keeps running.
+	if _, err := w.a.dev.CredentialVersion(ctxT(t, 60*time.Second)); err != nil {
+		t.Logf("the later request: %v", err)
+	}
+	if err := b.dev.AwaitPaired(ctx); err != nil {
+		t.Fatalf("the new phone after the later write: %v", err)
+	}
+	b.guid, b.vid = b.dev.UserGUID(), w.a.vid
+	if err := b.dev.CredentialFetch(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if k := w.key(b.dev); k == w.k0 {
+		t.Fatal("the credential key did not rotate")
+	}
+	w.finish(b)
+	waitEvent(t, w.a.dev, "device.unlinked", has("reason", "transferred"))
+	if in, err := w.a.dev.WaitEvent(ctxT(t, 5*time.Second), "device.unlinked", nil); err == nil {
+		t.Fatalf("the old phone was told twice: %s", in.Body)
+	}
+	if res := w.auth(b.dev); !strings.Contains(res, `"authenticated":true`) {
+		t.Fatalf("sign-in from the new phone: %s", res)
 	}
 }

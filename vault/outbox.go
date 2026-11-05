@@ -299,11 +299,20 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 	}
 	if m.settledWrite {
 		// The rotation made when the relay settled a transfer's notice
-		// (unlinkOutcome): its state write, then its notices. A write that
-		// fails leaves both to the next flush and drain.
+		// (unlinkOutcome): its state write, then its notices.
 		m.settledWrite = false
-		if ctx.Err() == nil && m.persist(ctx, false) == nil {
+		if ctx.Err() != nil {
+			return // the state stays dirty: the next flush writes it
+		}
+		switch err := m.persist(ctx, false); {
+		case err == nil:
 			m.drainOutbox(ctx)
+		case errors.Is(err, ErrSplitBrain):
+			// Another copy wrote the state: this one is zeroized and
+			// locked, and sends nothing more.
+		default:
+			// Not written: the state stays dirty, and the rotation's
+			// notices wait (unstored) for the next flush and drain.
 		}
 	}
 }

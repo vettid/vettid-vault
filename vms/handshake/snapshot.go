@@ -186,7 +186,8 @@ func (i *Initiator) Export() (InitiatorState, error) {
 	}, nil
 }
 
-// RestoreInitiator rebuilds an Initiator awaiting hs.resp.
+// RestoreInitiator rebuilds an Initiator awaiting hs.resp. The identity
+// must be the key the hs.init named (ErrIdentity otherwise).
 func RestoreInitiator(s InitiatorState, identity ed25519.PrivateKey) (*Initiator, error) {
 	if len(identity) != ed25519.PrivateKeySize || len(s.Th1) != 32 || len(s.Ks) != suite.KeySize ||
 		len(s.ResponderIK) != ed25519.PublicKeySize || len(s.ResponderRelayKey) != ed25519.PublicKeySize {
@@ -200,6 +201,13 @@ func RestoreInitiator(s InitiatorState, identity ed25519.PrivateKey) (*Initiator
 	if err != nil || !body.Eph.Equal(eph.Public()) || body.Purpose.HasSAS() && !CheckSASCommit(body.SASCommit, s.NI) {
 		eph.Destroy()
 		return nil, ErrConfig
+	}
+	if !suite.EqualPublic(body.From.IK, identity.Public().(ed25519.PublicKey)) {
+		// The hs.init named another identity key (it was sent before a
+		// rotation, §3.4): hs.fin signed with this one would not verify
+		// at the responder, which binds the key the hs.init named.
+		eph.Destroy()
+		return nil, ErrIdentity
 	}
 	var known []*Rotation
 	for _, raw := range s.KnownResponderChain {

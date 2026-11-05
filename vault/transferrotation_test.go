@@ -796,3 +796,30 @@ func TestFailedWriteThenLockSettledWriteSplitBrain(t *testing.T) {
 		}
 	}
 }
+
+// A lock whose first drain settles the stored notice and meets a split
+// brain at the owed rotation's write (§12.3): the lock's own write that
+// follows finds the state wiped and returns ErrSplitBrain, without reading
+// it (persist's guard), and nothing more is sent.
+func TestLockFirstDrainSettledWriteSplitBrain(t *testing.T) {
+	w := newTRWorld(t)
+	w.reopen() // the notice is queued and stored
+	w.m.mu.Lock()
+	w.m.opt.Store = &conflictStateStore{Store: w.fs, pass: 0}
+	w.m.mu.Unlock()
+	_ = w.responses(t)
+	if err := w.m.Lock(context.Background()); !errors.Is(err, ErrSplitBrain) {
+		t.Fatalf("Lock: %v, want ErrSplitBrain", err)
+	}
+	if !w.m.Locked() {
+		t.Fatal("not locked after the split brain")
+	}
+	if got := w.connTypes(); !eq(got, "statement", "unlinked") {
+		t.Fatalf("deposits %v", got)
+	}
+	for _, in := range w.responses(t) {
+		if in.Type == "vault.locking" {
+			t.Fatal("vault.locking sent after the split brain")
+		}
+	}
+}

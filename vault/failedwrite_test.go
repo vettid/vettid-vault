@@ -169,6 +169,20 @@ func TestFailedWriteSendRawSendsNothing(t *testing.T) {
 	}
 }
 
+// A SendRaw whose write succeeds delivers at once: it writes before it
+// drains (flushThenDrain), so its deposit is stored when the drain runs.
+func TestSendRawWritesThenSends(t *testing.T) {
+	d := newDevFixture(t)
+	c := d.asConnection(t, "c1", 0x72)
+	_ = d.inbox(c)
+	if _, err := d.m.SendRaw(context.Background(), "c1", "test.raw", []byte(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	if got := typesOf(d.inbox(c)["c1"]); len(got) != 1 || got[0] != "test.raw" {
+		t.Fatalf("delivered: %v", got)
+	}
+}
+
 // A lock whose write fails reports in `locked` what the stored header
 // says (§11.5): its app key, not one a batch whose write failed adopted in
 // memory, and its header_seq, credential_backup and `next`, not the

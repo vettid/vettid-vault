@@ -30,7 +30,6 @@ const (
 // advertises (0.86.0, "Deployment").
 const CapConfirm = "hs_confirm"
 
-
 // Purpose is the hs.init purpose (§6.2).
 type Purpose string
 

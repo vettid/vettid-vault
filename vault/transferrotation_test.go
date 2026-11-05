@@ -669,13 +669,22 @@ func TestRotationReplacesRekeyUnderOldKeys(t *testing.T) {
 	rotAt := -1
 	d.m.mu.Lock()
 	for i, e := range d.m.st.Outbox {
-		if e.PeerID == d.devPeer.ID && i < initAt && !e.Done && e.Op == OpDeposit {
-			rotAt = i // identity.rotate is queued before the new hs.init
+		if e.PeerID != d.devPeer.ID || e.Done || e.Op != OpDeposit {
+			continue
+		}
+		env, err := envelope.Parse(e.Payload)
+		if err != nil || env.Mode() != envelope.ModeSession {
+			continue
+		}
+		var kr handshake.Keyring
+		kr.Activate(d.ep, time.Now())
+		if in, _, err := kr.Open(env, time.Now()); err == nil && in.Type == "identity.rotate" {
+			rotAt = i
 		}
 	}
 	d.m.mu.Unlock()
-	if initAt < 0 || rotAt < 0 {
-		t.Fatal("the new hs.init is not queued")
+	if initAt < 0 || rotAt < 0 || rotAt > initAt {
+		t.Fatalf("identity.rotate at %d, the new hs.init at %d: not queued, or not in that order", rotAt, initAt)
 	}
 	d.m.mu.Lock()
 	if err := d.m.persist(context.Background(), false); err != nil {

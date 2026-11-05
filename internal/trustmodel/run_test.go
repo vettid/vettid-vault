@@ -46,7 +46,7 @@ func setup(cfg Config, seed uint64) *World {
 		for _, x := range [][2]*Party{{a, b}, {b, a}} {
 			me, it := x[0], x[1]
 			me.st.Peers = append(me.st.Peers, PeerRec{ID: it.ID, Device: dev, IK: it.st.IK, KEM: it.st.KEM,
-				Relay: it.st.Relay, KeyFor: me.st.Relay, Cur: e,
+				Relay: it.st.Relay, KeyFor: me.st.Relay, Cur: e, ConfID: e,
 				Epochs: []Epoch{{ID: e, Signer: it.st.IK, Own: me.st.IK, EstAt: w.Now}}})
 		}
 		for _, x := range [][2]*Party{{a, b}, {b, a}} {
@@ -429,7 +429,7 @@ func (w *World) settle() {
 		p.unlock()
 	}
 	calm := 0
-	for it := 0; it < 64 && calm < 3; it++ {
+	for it := 0; it < 96 && calm < 3; it++ {
 		for _, p := range w.real() {
 			for i := 0; i < 8 && p.collectRound(maxCollect) > 0; i++ {
 			}
@@ -440,7 +440,7 @@ func (w *World) settle() {
 			calm = 0
 		}
 		switch {
-		case it == 31 && calm == 0:
+		case (it == 31 || it == 63) && calm == 0:
 			if w.optA {
 				w.advance(aPendLife + 1) // past every lifetime of §6.3.1 (B)
 			} else {
@@ -466,6 +466,11 @@ func pairName(w *World, a, b PID) string { return w.party(a).Name + "<->" + w.pa
 // checkEnd: I1 (at quiescence), I2 (at quiescence), I4.
 func (w *World) checkEnd(liveness bool) {
 	w.settle()
+	if os.Getenv("TRUSTMODEL_EXTRA_DAY") != "" {
+		// diagnostic: one more scheduled rekey (24 h) before I1
+		w.advance(day + hour)
+		w.settle()
+	}
 	// I4
 	for key, olds := range w.evid {
 		q := w.party(key[0])

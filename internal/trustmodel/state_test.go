@@ -72,6 +72,7 @@ type Epoch struct {
 	EstAt      int64
 	Pending    bool // §6.3.1: an initiator's epoch awaiting confirmation
 	Abandoned  bool // §6.3.1: a pending epoch abandoned (nothing under it confirms)
+	KeysGone   bool // §6.3.1 (G): only the id is kept (for a reconnect's ctx)
 }
 
 // PendEp is an initiator's pending epoch (§6.3.1).
@@ -103,9 +104,10 @@ type HS struct {
 	FinSent   bool
 	NewEpoch  int
 	Fork      bool
-	RespFrom  Key     // responder: my ik that signed the epoch ctx names (S8)
-	RespToks  []Token // responder: the tokens my hs.resp carries
-	RespInner int     // responder: the hs.resp's inner id (the same bytes each time)
+	RespFrom  Key      // responder: my ik that signed the epoch ctx names (S8)
+	RespToks  []Token  // responder: the tokens my hs.resp carries
+	RespInner int      // responder: the hs.resp's inner id (the same bytes each time)
+	RespRot   []IKLink // responder: the hs.resp's rotations (the same bytes each time)
 }
 
 const (
@@ -126,10 +128,11 @@ type PeerRec struct {
 	Warned   bool // rule C between a vault and its own device: the member was told
 
 	Pend      *PendEp // §6.3.1: my pending epoch (I initiated)
-	ConfID    int     // §6.3.1: my confirmed epoch's id (I responded), until the peer confirms
-	ConfKeep  int     // the confirmed epoch whose receive keys are kept until ConfUntil
-	ConfUntil int64
-	Reconfirm bool // a message under the confirmed epoch in this batch: queue hs.confirm
+	ConfID    int     // §6.3.1: the last epoch the peer used (other than hs.fin), or one I confirmed
+	ConfKeep  int     // unused since the revision (kept for clone compatibility)
+	ConfUntil int64   // its keys' end: 46 days from the first activation that superseded it; 0 not yet
+	AbanIDs   []int   // §6.3.1 (G): ids of epochs I abandoned, kept until a newer one is confirmed
+	Reconfirm bool    // a message under the confirmed epoch in this batch: queue hs.confirm
 
 	IK, KEM Key
 	Chain   []IKLink // followed identity links
@@ -232,6 +235,7 @@ func cloneHS(h *HS) *HS {
 	c.Toks = slices.Clone(h.Toks)
 	c.Links = slices.Clone(h.Links)
 	c.RespToks = slices.Clone(h.RespToks)
+	c.RespRot = slices.Clone(h.RespRot)
 	return &c
 }
 
@@ -264,6 +268,7 @@ func (s *State) clone() State {
 			q.Ans[j] = *cloneHS(&p.Ans[j])
 		}
 		q.Answered = slices.Clone(p.Answered)
+		q.AbanIDs = slices.Clone(p.AbanIDs)
 		q.Deferred = slices.Clone(p.Deferred)
 		c.Peers[i] = q
 	}

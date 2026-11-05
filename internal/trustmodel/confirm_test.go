@@ -1,5 +1,7 @@
 package trustmodel
 
+import "slices"
+
 // VAULT-MESSAGING 0.86.0 (draft) §6.3.1, option A: lifetimes, and
 // activation on confirmation for rekeys and reconnects. Selected by
 // World.optA (Config.OldRules turns it off: the f4a4d97 behaviour).
@@ -52,6 +54,7 @@ func (q *Party) confirm(r *PeerRec) {
 		}
 	}
 	r.Cur, r.Pend = pe.ID, nil
+	r.ConfID, r.ConfUntil, r.AbanIDs = pe.ID, 0, nil // activated at confirmation; abandoned ids end
 	q.w.stat("A:confirmed")
 	q.w.logf("%s: epoch E%d with %s CONFIRMED (current)", q.Name, pe.ID, q.w.party(r.ID).Name)
 }
@@ -69,6 +72,7 @@ func (q *Party) abandonPending(r *PeerRec, why string, restart bool) {
 		}
 	}
 	r.Pend = nil
+	r.AbanIDs = append(r.AbanIDs, pe.ID)
 	q.w.stat("A:abandoned:" + why)
 	q.w.logf("%s: pending E%d with %s ABANDONED (%s)", q.Name, pe.ID, q.w.party(r.ID).Name, why)
 	if restart && r.Status == stActive {
@@ -86,11 +90,14 @@ func (q *Party) beforeAccept(r *PeerRec, m *RMsg, pos Pos) {
 	if r.Pend != nil && M.Epoch == r.Pend.ID && M.Kind != KFin {
 		q.confirm(r)
 	}
-	if r.ConfID != 0 && M.Epoch == r.Cur && M.Kind != KFin {
-		q.w.logf("%s: %s confirmed E%d (confirmed epoch E%d ends)", q.Name, q.w.party(r.ID).Name, r.Cur, r.ConfID)
-		r.ConfID = 0
+	// the confirmed epoch: the last epoch the peer used (not hs.fin)
+	if M.Kind != KFin && M.Epoch != r.ConfID && r.newer(M.Epoch, r.ConfID) {
+		if r.ConfID != r.Cur && r.ConfID != 0 {
+			q.w.logf("%s: %s now uses E%d (confirmed epoch E%d ends)", q.Name, q.w.party(r.ID).Name, M.Epoch, r.ConfID)
+		}
+		r.ConfID, r.ConfUntil = M.Epoch, 0
 	}
-	if r.ConfID != 0 && M.Epoch == r.ConfID {
+	if r.ConfID != 0 && r.ConfID != r.Cur && M.Epoch == r.ConfID {
 		r.Reconfirm = true
 	}
 }
@@ -115,7 +122,52 @@ func (p *Party) tickA(r *PeerRec) {
 	if pe := r.Pend; pe != nil && w.Now-pe.FinAt > aPendLife {
 		p.abandonPending(r, "B passed", true)
 	}
-	if r.ConfKeep != 0 && w.Now > r.ConfUntil {
-		r.ConfKeep, r.ConfID = 0, 0
+	// keys end; ids stay (G): the confirmed epoch's and abandoned ones'
+	for j := range r.Epochs {
+		ep := &r.Epochs[j]
+		keep := ep.ID == r.ConfID || slices.Contains(r.AbanIDs, ep.ID)
+		if !keep || ep.ID == r.Cur || ep.KeysGone {
+			continue
+		}
+		if ep.ID == r.ConfID && r.ConfUntil != 0 && w.Now > r.ConfUntil {
+			ep.KeysGone = true
+		}
+		if ep.ID != r.ConfID && ep.Superseded != 0 && w.Now-ep.Superseded > 16*day {
+			ep.KeysGone = true
+		}
 	}
+}
+
+// newer: epoch a was recorded after epoch b (b == 0: any).
+func (r *PeerRec) newer(a, b int) bool {
+	ia, ib := -1, -1
+	for i, e := range r.Epochs {
+		if e.ID == a && !e.Pending && !e.Abandoned {
+			ia = i
+		}
+		if e.ID == b {
+			ib = i
+		}
+	}
+	return ia >= 0 && ia > ib
+}
+
+// confFork: §6.3.1 precedence. An epoch that superseded the confirmed one
+// is signed by an ancestor ik and was established after the link that
+// made it one (a demoted epoch). literalFork reads §3.4.1's sentence
+// without the deposited-after condition.
+func (q *Party) confFork(r *PeerRec) bool {
+	if q.w.literalFork {
+		return q.forkEpoch(r, r.ConfID)
+	}
+	after := false
+	for _, e := range r.Epochs {
+		if after && e.Demoted {
+			return true
+		}
+		if e.ID == r.ConfID {
+			after = true
+		}
+	}
+	return false
 }

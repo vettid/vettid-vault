@@ -1,6 +1,9 @@
 package trustmodel
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // Scenarios for VAULT-MESSAGING 0.86.0 §6.3.1 (option A).
 
@@ -42,13 +45,10 @@ func TestScenarioALostConfirmInitiatorLocked(t *testing.T) {
 		s.w.checkEnd(true)
 		stale := P.st.peer(Q.ID).Status == stStale || Q.st.peer(P.ID).Status == stStale
 		t.Logf("away %dd: abandoned at B %d, confirmed %d, stale %v", away/day, s.w.stats["A:abandoned:B passed"], s.w.stats["A:confirmed"], stale)
-		if away == 33*day {
-			s.noViolation("I")
-			if stale {
-				t.Errorf("33 days: the pair went stale")
-			}
-		} else if !stale {
-			t.Errorf("finding G no longer reproduces: the pair recovered after %d days", away/day)
+		// revised §6.3.1 (G): ids kept, so both recover
+		s.noViolation("I")
+		if stale {
+			t.Errorf("%d days: the pair went stale (finding G still stands)", away/day)
 		}
 	}
 }
@@ -125,4 +125,37 @@ func TestScenarioAOlderDevice(t *testing.T) {
 		t.Errorf("the device's first message did not confirm")
 	}
 	s.done(true)
+}
+
+// The drafter's case: the initiator's own S5 abandons pending E1 after its
+// hs.fin (old ik) is out; the responder activates E1; the restarted rekey
+// under the new ik names E0 (the responder's confirmed epoch). It must not
+// suspend. literal: §3.4.1's fork sentence read without the
+// deposited-after condition, which §6.3.1 says applies first.
+func TestScenarioAS5AbandonAfterFin(t *testing.T) {
+	for _, literal := range []bool{false, true} {
+		s := newScen(t, 2)
+		s.w.literalFork = literal
+		P, Q := s.p(0), s.p(1)
+		s.w.holdRotate = true
+		s.do(P, func() { P.startHS(P.st.peer(Q.ID), false); P.write(); P.flush() })
+		s.run(1, Q)           // Q answers
+		s.run(1, P)           // P: pending E1, hs.fin signed by ik0
+		s.rotate(P, pathCred) // S5: E1 abandoned; rekey again under ik1 naming E0
+		s.w.holdRotate = false
+		s.run(6, Q, P)
+		susp := Q.st.peer(P.ID).Status == stSuspended
+		if literal {
+			if !susp {
+				t.Errorf("literal reading: expected a suspension")
+			} else {
+				t.Logf("literal reading of §3.4.1's sentence: Q suspends (the ambiguity)")
+			}
+			continue
+		}
+		if susp {
+			t.Errorf("Q suspended in the drafter's S5 case\n  %s", strings.Join(s.w.log, "\n  "))
+		}
+		s.done(true, s.cellSeen("B:current:hs.init:confirmed-epoch"))
+	}
 }

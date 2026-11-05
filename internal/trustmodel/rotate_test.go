@@ -294,7 +294,10 @@ func (p *Party) tick() {
 				p.tickA(r)
 			}
 			r.Epochs = slices.DeleteFunc(r.Epochs, func(e Epoch) bool {
-				return e.ID != r.Cur && e.Superseded != 0 && w.Now-e.Superseded > 16*day && !(e.ID == r.ConfKeep && w.Now <= r.ConfUntil)
+				if w.optA && (e.ID == r.ConfID || slices.Contains(r.AbanIDs, e.ID)) {
+					return false // §6.3.1 (G): the id is kept
+				}
+				return e.ID != r.Cur && e.Superseded != 0 && w.Now-e.Superseded > 16*day
 			})
 			p.refresh(r)
 			if ep := r.epoch(r.Cur); ep != nil {

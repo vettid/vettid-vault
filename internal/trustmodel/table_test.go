@@ -17,7 +17,7 @@ type tenv struct {
 }
 
 func newTenv() *tenv {
-	w := setup(Config{Vaults: 2}, 1)
+	w := setup(Config{Vaults: 2, OldRules: true}, 1) // the f4a4d97 tables; §6.3.1 cases switch optA on
 	P, Q := w.P[0], w.P[1]
 	e := &tenv{w: w, P: P, Q: Q, r: Q.st.peer(P.ID)}
 	// P rotated once and Q followed both links (the state after an update at msg 100)
@@ -180,6 +180,20 @@ func TestTableCells(t *testing.T) {
 			e.r.Cur = 555
 			return e.msg(e.K1, 200, Msg{Kind: KInit, HS: 5, Ctx: old, Epoch: old, FromIK: e.r.IK, FromRelay: e.K1})
 		}, "suspend", "fork", "B:current:hs.init:fork-epoch"},
+		{"§6.3.1: a rekey naming the confirmed epoch, superseded by a demoted one", func(e *tenv) *RMsg {
+			e.w.optA = true
+			old := e.r.Cur
+			e.r.Epochs = append(e.r.Epochs, Epoch{ID: 555, Signer: e.ik0, Own: e.Q.st.IK, EstAt: e.w.Now, Demoted: true})
+			e.r.Cur, e.r.ConfID = 0, old
+			return e.msg(e.K1, 200, Msg{Kind: KInit, HS: 5, Ctx: old, Epoch: old, FromIK: e.r.IK, FromRelay: e.K1})
+		}, "suspend", "fork", "B:current:hs.init:confirmed-epoch-fork"},
+		{"§6.3.1: a rekey naming the confirmed epoch, superseded by one signed before the link", func(e *tenv) *RMsg {
+			e.w.optA = true
+			old := e.r.Cur
+			e.r.Epochs = append(e.r.Epochs, Epoch{ID: 555, Signer: e.ik0, Own: e.Q.st.IK, EstAt: e.w.Now})
+			e.r.Cur, e.r.ConfID = 555, old
+			return e.msg(e.K1, 200, Msg{Kind: KInit, HS: 5, Ctx: old, Epoch: old, FromIK: e.r.IK, FromRelay: e.K1})
+		}, "answer", "", "B:current:hs.init:confirmed-epoch"},
 		{"rule C: a second relay successor from an earlier key after its cut-off", func(e *tenv) *RMsg {
 			k := K(e)
 			l := e.newRLink(e.K0, k)

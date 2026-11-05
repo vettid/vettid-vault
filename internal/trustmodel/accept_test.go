@@ -68,7 +68,7 @@ func (q *Party) handle(m *RMsg, set []Key) bool {
 func (q *Party) locate(M *Msg) (*PeerRec, string) {
 	byEpoch := func(e int) *PeerRec {
 		for i := range q.st.Peers {
-			if q.st.Peers[i].epoch(e) != nil {
+			if ep := q.st.Peers[i].epoch(e); ep != nil && (!ep.KeysGone || (M.Kind == KInit && M.Reconnect)) {
 				return &q.st.Peers[i]
 			}
 		}
@@ -571,7 +571,12 @@ func (q *Party) tableBInit(r *PeerRec, m *RMsg, pos Pos) dec {
 			if pe := r.Pend; pe != nil && pe.Reconnect {
 				ok = M.Ctx == pe.ID
 			}
-			ok = ok || (r.Pend != nil && M.Ctx == r.Pend.ID) || (r.ConfID != 0 && M.Ctx == r.ConfID)
+			ok = ok || (r.Pend != nil && M.Ctx == r.Pend.ID) || (r.ConfID != 0 && M.Ctx == r.ConfID) ||
+				slices.Contains(r.AbanIDs, M.Ctx)
+			if ok && r.ConfID != r.Cur && M.Ctx == r.ConfID && q.confFork(r) {
+				fork = true // §6.3.1 precedence: fork evidence, judged at hs.fin (§6.6)
+				cell += ":confirmed-epoch-fork"
+			}
 		}
 		if !ok {
 			if !q.forkEpoch(r, M.Ctx) {
@@ -580,7 +585,11 @@ func (q *Party) tableBInit(r *PeerRec, m *RMsg, pos Pos) dec {
 			fork = true // judged at hs.fin (§6.6, H5's exemption)
 		}
 	} else {
-		if q.w.optA && r.ConfID != 0 && M.Ctx == r.ConfID && M.Epoch == r.ConfID {
+		if q.w.optA && r.ConfID != 0 && r.ConfID != r.Cur && M.Ctx == r.ConfID && M.Epoch == r.ConfID {
+			if q.confFork(r) { // §6.3.1 precedence: fork checks first
+				q.suspend(r, "connection.fork_suspected/epoch")
+				return dec{"suspend", "fork", cell + ":confirmed-epoch-fork"}
+			}
 			cell += ":confirmed-epoch" // §6.3.1: accepted as if current; my own rekey for it ends
 			if o := r.Own; o != nil && !o.Reconnect {
 				q.abandonOwn(r)
@@ -639,7 +648,7 @@ func (q *Party) tableBInit(r *PeerRec, m *RMsg, pos Pos) dec {
 		own = ep.Own
 	}
 	a := HS{ID: M.HS, Reconnect: M.Reconnect, Ctx: M.Ctx, PeerIK: M.FromIK, OwnIK: q.st.IK, Toks: toks,
-		Links: app, Started: q.w.Now, NewEpoch: q.w.id(), Fork: fork, RespFrom: own, RespInner: q.w.id()}
+		Links: app, Started: q.w.Now, NewEpoch: q.w.id(), Fork: fork, RespFrom: own, RespInner: q.w.id(), RespRot: q.ownLinks(own)}
 	q.w.epTruth[a.NewEpoch] = [2]PID{m.Actor, q.ID}
 	if M.Reconnect {
 		a.RespToks = q.issue(r, q.st.Relay, true)
@@ -652,7 +661,7 @@ func (q *Party) tableBInit(r *PeerRec, m *RMsg, pos Pos) dec {
 // respMsg: the hs.resp of an answer (the same bytes each time).
 func (a *HS) respMsg(q *Party, r *PeerRec) Msg {
 	return Msg{Kind: KResp, Inner: a.RespInner, Ts: a.Started, HS: a.ID, NewEpoch: a.NewEpoch, Sig: a.OwnIK,
-		Rot: q.ownLinks(a.RespFrom), Reconnect: a.Reconnect, Toks: a.RespToks}
+		Rot: a.RespRot, Reconnect: a.Reconnect, Toks: a.RespToks}
 }
 
 func (q *Party) tableBResp(r *PeerRec, M *Msg, pos Pos) dec {
@@ -674,6 +683,16 @@ func (q *Party) tableBResp(r *PeerRec, M *Msg, pos Pos) dec {
 		q.abandonOwn(r)
 		return dec{"abort", "unknown_ik", cell}
 	}
+	var extra []IKLink
+	if st == ikCurrent {
+		// Table B, Current: "accept, then H5 if links were appended": links
+		// past the signing ik (an answer made before the responder
+		// rotated), appended after the epoch is recorded
+		if more, ok := r.resolve(M.Rot); ok && len(more) > 0 {
+			extra = more
+			cell += ":links-appended"
+		}
+	}
 	if len(app) > 0 {
 		q.followIK(r, app, pos)
 	}
@@ -692,6 +711,10 @@ func (q *Party) tableBResp(r *PeerRec, M *Msg, pos Pos) dec {
 		q.keepTokens(r, toks)
 	}
 	r.Own = nil
+	if len(extra) > 0 {
+		q.followIK(r, extra, pos)
+		app = extra // H5 below
+	}
 	if q.st.IK != o.OwnIK {
 		q.w.violate("S5", "%s would send hs.fin signed by superseded ik %d", q.Name, o.OwnIK)
 	}
@@ -743,7 +766,6 @@ func (q *Party) tableBFin(r *PeerRec, M *Msg, pos Pos) dec {
 	if len(app) > 0 {
 		q.followIK(r, app, pos)
 	}
-	prev := r.Cur
 	if q.w.optA && r.Pend != nil {
 		// SPEC FINDING: §6.3.1 does not say what a responder's activation does
 		// to its own pending epoch; the model abandons it.
@@ -751,7 +773,11 @@ func (q *Party) tableBFin(r *PeerRec, M *Msg, pos Pos) dec {
 	}
 	q.establish(r, a.NewEpoch, a.PeerIK, a.OwnIK, pos)
 	if q.w.optA && !q.OldConfirm {
-		r.ConfID, r.ConfKeep, r.ConfUntil = prev, prev, q.w.Now+aConfKeys
+		// §6.3.1 (revised): a later activation does not replace the confirmed
+		// epoch; its keys run 46 days from the first activation superseding it
+		if r.ConfID != 0 && r.ConfID != r.Cur && r.ConfUntil == 0 {
+			r.ConfUntil = q.w.Now + aConfKeys
+		}
 		q.enqueue(r.ID, Msg{Kind: KConfirm, Epoch: a.NewEpoch}, nil)
 	}
 	if a.Reconnect {

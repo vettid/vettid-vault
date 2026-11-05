@@ -24,6 +24,7 @@ type World struct {
 	pRef          float64 // chance a rotate or registration is refused definitively
 	holdRotate    bool
 	optA          bool // VAULT-MESSAGING 0.86.0 §6.3.1 option A (activation on confirmation)
+	literalFork   bool // read §3.4.1's fork sentence literally (no deposited-after condition) for the confirmed epoch
 	debugUnlinked bool // scenarios: the relay's rotate and registration get no answer
 
 	issuer   map[int]Key    // jti -> iss: a token "verifies" only if its issuer minted it

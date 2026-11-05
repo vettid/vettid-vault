@@ -172,16 +172,24 @@ func TestFindingE_ConfirmedEpochHidesForkEvidence(t *testing.T) {
 	s.do(C, C.unlock)
 	s.do(C, func() { C.startHS(C.st.peer(Q.ID), false); C.write(); C.flush() }) // the copy rekeys: E2 signed by ik0
 	s.run(3, Q, C)
-	s.w.holdRotate = true
+	s.w.holdRotate = true // the relay key stays pending: K0 is still current at Q
 	s.rotate(P, pathCred)
 	s.do(P, func() { r := P.st.peer(Q.ID); P.abandonOwn(r); P.startHS(r, true); P.write(); P.flush() })
 	s.run(6, Q, P)
-	s.w.holdRotate = false
+	// Revised §6.3.1: fork checks first, but only epochs established after
+	// the link count; the copy's epoch was established before the
+	// original's rotation, exactly like the drafter's S5 case, so the
+	// reconnect naming Q's confirmed epoch is ordinary. The copy's epoch
+	// keeps its receive keys (16 days): the copy now sends under it.
 	if Q.st.peer(P.ID).Status == stSuspended {
-		t.Errorf("finding no longer reproduces: Q suspended")
+		t.Errorf("finding E is gone: Q suspended")
 		return
 	}
-	t.Logf("reproduced: Q answered the original's reconnect naming its confirmed epoch and did not suspend (cells: %d confirmed-epoch reconnects)", s.w.stats["cell B:current:hs.init"])
+	s.do(C, C.unlock)
+	s.do(C, func() { C.enqueue(Q.ID, Msg{Kind: KSession, Probe: s.w.id()}, nil); C.write(); C.flush() })
+	s.run(2, Q)
+	s.w.holdRotate = false
+	expectViolation(t, s, "I3")
 }
 
 // Finding G (§6.3.1 lifetimes): a lost hs.confirm while the initiator is
@@ -212,7 +220,7 @@ func TestFindingH_ConfirmedEpochReplacedBeforeConfirmation(t *testing.T) {
 	s.w.holdRotate = false
 	s.run(6, Q, P)
 	s.w.checkEnd(true)
-	expectViolation(t, s, "I1")
+	s.noViolation("I") // revised §6.3.1: the confirmed epoch stays until the peer sends under a newer one
 	for _, v := range s.w.viol {
 		t.Logf("  %s: %s", v.Inv, v.Detail)
 	}

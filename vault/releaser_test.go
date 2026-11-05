@@ -420,6 +420,44 @@ func TestStep1Dropped(t *testing.T) {
 	}
 }
 
+// Step 1 while the stored state lags memory: after a state write that
+// failed (a phone move's step 2, a device removed in memory only) the
+// header beginReplace writes would name the devices in memory, which may
+// drop one the stored state still has. It answers retry with nothing
+// written until a write stores the state; then the change goes on.
+func TestStep1RefusedWhileStateBehind(t *testing.T) {
+	f := newRFixture(t)
+	f.arm()
+	f.flush()
+	ctx := context.Background()
+	_, hv, _ := f.st.Get(ctx, store.HeaderKey(f.vid, testRelease.PCR0))
+	f.m.mu.Lock()
+	f.st.mu.Lock()
+	f.st.failState = 1
+	f.st.mu.Unlock()
+	f.m.dirty = true
+	if err := f.m.persist(ctx, false); err == nil {
+		f.m.mu.Unlock()
+		t.Fatal("the state write did not fail")
+	}
+	f.m.mu.Unlock()
+	err := f.change(SecretChange{Reason: ReplaceRenew, PIN: testPIN, Password: []byte(rPW), NewUnlockSecret: testSecret2})
+	var he *HandlerError
+	if !errors.As(err, &he) || he.Code != "retry" {
+		t.Fatalf("step 1 while the state is behind: %v", err)
+	}
+	if _, v, _ := f.st.Get(ctx, store.HeaderKey(f.vid, testRelease.PCR0)); v != hv || f.m.repl != nil || f.m.hdr.Next != nil {
+		t.Fatal("step 1 wrote the header although the stored state lags")
+	}
+	f.flush() // the batch's own write catches the state up
+	if err := f.change(SecretChange{Reason: ReplaceRenew, PIN: testPIN, Password: []byte(rPW), NewUnlockSecret: testSecret2}); err != nil {
+		t.Fatalf("after the state was stored: %v", err)
+	}
+	if f.m.hdr.Next == nil {
+		t.Fatal("step 1 not written after the state was stored")
+	}
+}
+
 // An older header served after the change opens nothing newer (§11.14.2,
 // "The host serves the old header again later").
 func TestOldHeaderOpensNothingNewer(t *testing.T) {

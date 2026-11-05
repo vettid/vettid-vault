@@ -424,6 +424,11 @@ type Manager struct {
 	// stateWritten: the current persist stored the state (its header
 	// write may still fail).
 	stateWritten bool
+	// stateBehind: the last state write failed and none has stored the
+	// state since: memory is ahead of storage (a device removed in memory
+	// only, a phone move's step 2). beginReplace refuses until a write
+	// catches up, since its header names the devices in memory.
+	stateBehind bool
 }
 
 // unlocked counts the managers in this process that hold a DEK.
@@ -892,6 +897,10 @@ func (m *Manager) persist(ctx context.Context, create bool) error {
 	err := m.persistState(ctx, create)
 	if err != nil && !errors.Is(err, ErrSplitBrain) && !m.stateWritten {
 		m.dropVolatile()
+		m.stateBehind = true
+	}
+	if m.stateWritten {
+		m.stateBehind = false
 	}
 	return err
 }

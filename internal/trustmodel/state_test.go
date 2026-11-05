@@ -79,6 +79,7 @@ type Epoch struct {
 	MineInit    bool  // this side initiated the handshake that made it
 	GotFromPeer bool  // a message from the peer was received under it
 	UnconfFin   bool  // this side initiated it and activated it at hs.fin without confirmation (ungated)
+	GotIKs      []Key // peer iks that signed messages received under it (FromIK, Sig, rotation new iks)
 }
 
 // PendEp is an initiator's pending epoch (§6.3.1).

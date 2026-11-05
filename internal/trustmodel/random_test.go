@@ -181,3 +181,49 @@ func genRun(rs uint64, steps int) (Config, []Action) {
 	}
 	return cfg, acts
 }
+
+// TestSeedsByClass: the run seeds (as TestRandom draws them) whose first
+// violation is in TRUSTMODEL_CLASS (a prefix), one per line. Attribution aid.
+func TestSeedsByClass(t *testing.T) {
+	cls := os.Getenv("TRUSTMODEL_CLASS")
+	if v, err := strconv.ParseUint(os.Getenv("TRUSTMODEL_TRACESEED"), 10, 64); err == nil {
+		cfg, acts := genRun(v, envInt("TRUSTMODEL_STEPS", 40))
+		w := runActions(cfg, v, acts, false)
+		small := acts
+		if len(w.viol) > 0 {
+			small = shrink(cfg, v, acts, w.viol[0].Inv)
+		}
+		sw := runActions(cfg, v, small, true)
+		for _, x := range small {
+			t.Logf("action %s", sw.describeAction(x))
+		}
+		for _, x := range sw.viol {
+			t.Logf("VIOLATION %s: %s", x.Inv, x.Detail)
+		}
+		t.Log("trace:\n" + traceOf(sw))
+		return
+	}
+	if cls == "" {
+		t.Skip("TRUSTMODEL_CLASS not set")
+	}
+	runs := envInt("TRUSTMODEL_RUNS", 3000)
+	master := rand.New(rand.NewPCG(uint64(envInt("TRUSTMODEL_SEED", 1)), 99))
+	for i := 0; i < runs; i++ {
+		rs := master.Uint64()
+		cfg, acts := genRun(rs, envInt("TRUSTMODEL_STEPS", 40))
+		w := runActions(cfg, rs, acts, false)
+		if k := strings.TrimPrefix(cls, "stat:"); k != cls {
+			if w.stats[k] > 0 {
+				var vs []string
+				for _, x := range w.viol {
+					vs = append(vs, x.Inv)
+				}
+				t.Logf("SEED %d stat %d, violations %v", rs, w.stats[k], vs)
+			}
+			continue
+		}
+		if len(w.viol) > 0 && strings.HasPrefix(w.viol[0].Inv, cls) {
+			t.Logf("SEED %d %s: %s", rs, w.viol[0].Inv, w.viol[0].Detail)
+		}
+	}
+}

@@ -306,9 +306,13 @@ func TestLeadFixBSeed(t *testing.T) {
 
 // h2: the lead's H2 (an old copy's epoch made just before the original's
 // rotation must not survive the link). window: the alternative F1 rule.
-func h2(t *testing.T, window bool) *scen {
+func h2(t *testing.T, window bool) *scen { return h2x(t, window, false) }
+
+func h2s(t *testing.T) *scen { return h2x(t, false, true) }
+
+func h2x(t *testing.T, window, strict bool) *scen {
 	s := newScen(t, 2)
-	s.w.f1Window = window
+	s.w.f1Window, s.w.fixBStrict = window, strict
 	P, Q := s.p(0), s.p(1)
 	s.w.makeCopy(P)
 	C := s.w.P[len(s.w.P)-1]
@@ -347,4 +351,59 @@ func TestLeadH2UnderTimeWindow(t *testing.T) {
 			t.Log(l)
 		}
 	}
+}
+
+// TestLeadFixBVariants: the named seeds and H2 under each F1 variant
+// (TRUSTMODEL_FIXB: "" = fix B as committed, strict, window). It logs;
+// the comparison is for the lead.
+func TestLeadFixBVariants(t *testing.T) {
+	seeds := []struct {
+		name string
+		rs   uint64
+		env  map[string]string
+	}{
+		{"I3 copy answers, R2 gate on", 5707634071088938680, map[string]string{"TRUSTMODEL_OPT": "2"}},
+		{"I3 copy answers, R2 mix28", 14995905639264089123, map[string]string{"TRUSTMODEL_OPT": "2", "TRUSTMODEL_MIXED": "1"}},
+		{"I4-false, R1 unseen", 8756148401117559123, map[string]string{"TRUSTMODEL_OPT": "1", "TRUSTMODEL_UNSEEN": "1"}},
+		{"I4-misattributed, R1 gate on", 16663332612404948059, map[string]string{"TRUSTMODEL_OPT": "1"}},
+	}
+	for _, v := range []string{"", "strict", "window"} {
+		for _, sd := range seeds {
+			t.Run(v+"/"+sd.name, func(t *testing.T) {
+				env := map[string]string{"TRUSTMODEL_FIXB": v}
+				for k, x := range sd.env {
+					env[k] = x
+				}
+				w := runSeed(t, sd.rs, env)
+				var got []string
+				for _, x := range w.viol {
+					got = append(got, x.Inv+": "+x.Detail)
+				}
+				t.Logf("variant %q seed %d: kept %d, F1 demoted %d, window skipped %d; violations %v",
+					v, sd.rs, w.stats["A:F1-fixB-kept"], w.stats["A:F1-demoted"], w.stats["A:F1-window-skipped"], got)
+			})
+		}
+		t.Run(v+"/H2", func(t *testing.T) {
+			t.Setenv("TRUSTMODEL_FIXB", v)
+			hs := h2v(t, v)
+			var got []string
+			for _, x := range hs.w.viol {
+				got = append(got, x.Inv+": "+x.Detail)
+			}
+			t.Logf("H2 variant %q: kept %d, F1 demoted %d, window skipped %d, rule E destroyed %d, suspensions %d; violations %v",
+				v, hs.w.stats["A:F1-fixB-kept"], hs.w.stats["A:F1-demoted"], hs.w.stats["A:F1-window-skipped"],
+				hs.w.stats["A:destroyed-later-epoch"], hs.w.stats["out suspend"], got)
+		})
+	}
+}
+
+// h2v: H2 under a TRUSTMODEL_FIXB variant.
+func h2v(t *testing.T, v string) *scen {
+	switch v {
+	case "window":
+		return h2(t, true)
+	case "strict":
+		return h2s(t)
+	}
+	return h2(t, false)
 }

@@ -588,7 +588,7 @@ func (w *World) checkEnd(liveness bool) {
 				continue
 			}
 			inv2 := "I2"
-			if c := w.ttlFin[[2]PID{x.ID, r.ID}] + w.ttlFin[[2]PID{r.ID, x.ID}]; c != "" {
+			if c := w.lostLabel(x.ID, r.ID); c != "" {
 				inv2 = "I2/hs-lost:" + c
 			}
 			for _, t := range r.Toks {
@@ -635,7 +635,7 @@ func (w *World) checkEnd(liveness bool) {
 		}
 		name := pairName(w, pr.a.ID, pr.b.ID)
 		inv1 := "I1"
-		if c := w.ttlFin[[2]PID{pr.a.ID, pr.b.ID}] + w.ttlFin[[2]PID{pr.b.ID, pr.a.ID}]; c != "" {
+		if c := w.lostLabel(pr.a.ID, pr.b.ID); c != "" {
 			inv1 = "I1/hs-lost:" + c
 		}
 		for _, s := range []struct {
@@ -700,7 +700,7 @@ func (w *World) checkEnd(liveness bool) {
 					ref = o.Ref
 				}
 				w.stat("end-stale pair: " + ref)
-				if w.ttlFin[[2]PID{x.ID, r.ID}]+w.ttlFin[[2]PID{r.ID, x.ID}] != "" {
+				if w.lostLabel(x.ID, r.ID) != "" {
 					w.stat("end-stale pair after a lost hs.fin/hs.confirm")
 				}
 				stale = true
@@ -775,6 +775,15 @@ func runActions(cfg Config, seed uint64, acts []Action, verbose bool) *World {
 	w := setup(cfg, seed)
 	w.verbose = verbose
 	w.debugUnlinked = os.Getenv("TRUSTMODEL_DEBUG") != ""
+	switch os.Getenv("TRUSTMODEL_FIXB") { // F1 variants for the lead (default: fix B as committed)
+	case "strict":
+		w.fixBStrict = true
+	case "window":
+		w.f1Window = true
+	case "off": // no fix B (2da316e F1), for attribution
+		w.fixBOff = true
+	}
+	defer w.expoStats()
 	for _, a := range acts {
 		w.exec(a)
 		if len(w.viol) > 0 {

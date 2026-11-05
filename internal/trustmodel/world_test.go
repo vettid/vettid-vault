@@ -34,6 +34,9 @@ type World struct {
 	probeEpoch    map[int]int       // the epoch a probe was sealed under
 	literalFork   bool              // read §3.4.1's fork sentence literally (no deposited-after condition) for the confirmed epoch
 	f1Window      bool              // alternative: F1-demote only if the link's inner ts > the epoch's activation + T + 2 days
+	fixBOff       bool              // F1 as in 2da316e (no fix B); attribution runs only
+	fixBStrict    bool              // fix B variant: keep only if the peer's new ik signed something under the epoch
+	copyExpo      map[[2]int]*expo  // (honest party, copy epoch): when it was used
 	ownCopyStrict bool              // a92a6eb's own_copy wording (and nothing received from P); default: lead fix A
 	debugUnlinked bool              // scenarios: the relay's rotate and registration get no answer
 
@@ -73,7 +76,7 @@ func newWorld(seed uint64) *World {
 	w := &World{rng: rand.New(rand.NewPCG(seed, 7)), issuer: map[int]Key{}, epTruth: map[int][2]PID{},
 		rlinkBy: map[RLink]rot{}, iklinkBy: map[IKLink]rot{}, evid: map[[2]PID]map[Key]map[Key]bool{},
 		ikPos: map[[2]PID][]ikFollow{}, answered: map[int]bool{},
-		ended: map[int]bool{}, ever: map[PID]map[int]bool{}, probes: map[int]bool{}, stats: map[string]int{}, dead: map[PID]string{}, ttlFin: map[[2]PID]string{}, probeDep: map[int][2]PID{}, probeFate: map[int]string{}, reverted: map[int]bool{}, hasEpoch: map[[2]int]bool{}, staleAt: map[[2]PID]string{}, probeEpoch: map[int]int{}, forkDue: map[[2]PID]int{}, evidKind: map[Key]string{}}
+		ended: map[int]bool{}, ever: map[PID]map[int]bool{}, probes: map[int]bool{}, stats: map[string]int{}, dead: map[PID]string{}, ttlFin: map[[2]PID]string{}, probeDep: map[int][2]PID{}, probeFate: map[int]string{}, reverted: map[int]bool{}, hasEpoch: map[[2]int]bool{}, staleAt: map[[2]PID]string{}, copyExpo: map[[2]int]*expo{}, probeEpoch: map[int]int{}, forkDue: map[[2]PID]int{}, evidKind: map[Key]string{}}
 	w.R = newRelay(w)
 	w.Now = 1000 * day
 	return w
@@ -108,6 +111,91 @@ func (w *World) violate(inv, format string, a ...any) {
 }
 
 func (w *World) stat(k string) { w.stats[k]++ }
+
+// expo: when an honest party used an epoch set up with an old copy
+// (ground truth): its activation there, its last use, the uses.
+type expo struct {
+	start, last int64
+	n           int
+	flag        string // "kept" (fix B) or "skipped" (window) when F1 left it current
+}
+
+// markF1: F1 left epoch e (toward peer r) current at q; ground truth
+// says whether e was made with an old copy.
+func (w *World) markF1(q *Party, r *PeerRec, e int, how string) {
+	tr, ok := w.epTruth[e]
+	if !ok || !(w.party(tr[0]).Copy || w.party(tr[1]).Copy) {
+		w.stat("X:F1-" + how + " on an honest epoch")
+		return
+	}
+	w.stat("X:F1-" + how + " on a copy epoch")
+	k := [2]int{int(q.ID), e}
+	if w.copyExpo[k] == nil {
+		st := w.Now
+		if ep := r.epoch(e); ep != nil {
+			st = ep.EstAt
+		}
+		w.copyExpo[k] = &expo{start: st, last: w.Now}
+	}
+	w.copyExpo[k].flag = how
+}
+
+// noteCopyUse records that honest p deposited or accepted a message under
+// epoch e toward peer to, if e was made with an old copy.
+func (w *World) noteCopyUse(p *Party, to PID, e int) {
+	tr, ok := w.epTruth[e]
+	if p.Copy || e == 0 || !ok || !(w.party(tr[0]).Copy || w.party(tr[1]).Copy) {
+		return
+	}
+	k := [2]int{int(p.ID), e}
+	x := w.copyExpo[k]
+	if x == nil {
+		x = &expo{start: w.Now, last: w.Now}
+		if r := p.st.peer(to); r != nil {
+			if ep := r.epoch(e); ep != nil {
+				x.start = ep.EstAt
+			}
+		}
+		w.copyExpo[k] = x
+	}
+	x.last, x.n = w.Now, x.n+1
+}
+
+// expoStats: one stat per copy epoch an honest party used: days from its
+// activation there to its last use, uses, and how it ended.
+func (w *World) expoStats() {
+	for k, x := range w.copyExpo {
+		w.stat(fmt.Sprintf("X:copy-epoch-use-days %03d", (x.last-x.start)/day))
+		w.stat(fmt.Sprintf("X:copy-epoch-uses %03d", x.n))
+		end := "no longer current"
+		p := w.party(PID(k[0]))
+		for _, r := range p.st.Peers {
+			if r.Status == stSuspended && r.epoch(k[1]) != nil {
+				end = "suspended"
+			} else if r.Cur == k[1] && r.Status != stSuspended {
+				end = "still current at the end"
+			}
+		}
+		w.stat("X:copy-epoch-end " + end)
+		if x.flag != "" {
+			w.stat(fmt.Sprintf("X:copy-epoch-%s use-days %03d", x.flag, (x.last-x.start)/day))
+			w.stat(fmt.Sprintf("X:copy-epoch-%s uses %03d", x.flag, x.n))
+			w.stat(fmt.Sprintf("X:copy-epoch-%s end %s", x.flag, end))
+		}
+	}
+}
+
+// lostLabel: how a handshake answer between a and b was lost, both
+// directions joined with " + " (empty if none was).
+func (w *World) lostLabel(a, b PID) string {
+	var out []string
+	for _, k := range [][2]PID{{a, b}, {b, a}} {
+		if c := w.ttlFin[k]; c != "" {
+			out = append(out, c)
+		}
+	}
+	return strings.Join(out, " + ")
+}
 
 func (w *World) party(id PID) *Party { return w.P[id] }
 
@@ -545,6 +633,7 @@ func (p *Party) deposit(e *Entry, r *PeerRec) {
 			w.probeDep[m.Probe] = [2]PID{p.ID, e.To}
 			w.probeEpoch[m.Probe] = m.Epoch
 		}
+		w.noteCopyUse(p, e.To, m.Epoch)
 		w.logf("%s -> %s: %s deposited with %d to box %d (msg %d)%s", p.Name, w.party(e.To).Name, describe(&m), with, box, id, "")
 		return
 	}

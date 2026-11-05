@@ -51,6 +51,10 @@ func (q *Party) handle(m *RMsg, set []Key) bool {
 	pos := Pos{m.Box, m.ID, m.DepAt, m.Seq}
 	if ep := r.epoch(M.Epoch); ep != nil && M.Epoch != 0 {
 		ep.GotFromPeer = true
+		ep.GotIKs = append(ep.GotIKs, M.FromIK, M.Sig) // the iks that signed what came under it
+		for _, l := range M.Rot {
+			ep.GotIKs = append(ep.GotIKs, l.New)
+		}
 	}
 	// I4 (0.86.0): only messages from keys Q knows for P, or a handshake
 	// Q can attribute to P (by its answer or open handshake)
@@ -62,6 +66,9 @@ func (q *Party) handle(m *RMsg, set []Key) bool {
 	w.stat("cell " + d.Cell)
 	w.stat("out " + d.Out)
 	w.logf("%s <- %s: %s via %d: %s", q.Name, w.party(r.ID).Name, describe(M), m.Sender, d)
+	if d.Out == "accept" || d.Out == "answer" {
+		w.noteCopyUse(q, r.ID, M.Epoch)
+	}
 	if d.Out == "defer" || d.Out == "wait" {
 		return false
 	}
@@ -1125,19 +1132,32 @@ func (q *Party) f1Demote(r *PeerRec, M *Msg, app []IKLink, x Pos) {
 	cur := r.epoch(r.Cur)
 	for _, l := range app {
 		if cur != nil && cur.Signer == l.Old {
-			if !q.w.f1Window && cur.MineInit && cur.UnconfFin && !cur.GotFromPeer && r.predecessor(cur.ID) == M.Epoch {
+			keep := cur.MineInit && cur.UnconfFin && r.predecessor(cur.ID) == M.Epoch
+			switch {
+			case q.w.f1Window, q.w.fixBOff:
+				keep = false
+			case q.w.fixBStrict: // variant: only if the peer's new ik signed something under it
+				keep = keep && cur.gotIK(l.New)
+			default:
+				keep = keep && !cur.GotFromPeer
+			}
+			if keep {
 				// lead fix B: my own ungated epoch, link under its immediate
 				// predecessor: no demotion; rekey under the new ik and let
 				// confirmation or the revert decide (no old copy can be here)
 				q.w.stat("A:F1-fixB-kept")
+				q.w.markF1(q, r, cur.ID, "kept")
 				q.w.logf("%s: E%d with %s kept (fix B): rekey, confirmation or revert decides", q.Name, cur.ID, q.w.party(r.ID).Name)
 				if r.Own == nil {
 					q.startHS(r, false)
 				}
 				return
 			}
-			if q.w.f1Window && M.Ts <= cur.EstAt+aRevert {
+			// window variant: only for an epoch this side initiated (its own
+			// hs.fin), judged on its own clock against the peer's inner ts
+			if q.w.f1Window && cur.MineInit && M.Ts <= cur.EstAt+(q.now()-q.w.Now)+aRevert {
 				q.w.stat("A:F1-window-skipped")
+				q.w.markF1(q, r, cur.ID, "skipped")
 				return // the alternative rule: too soon after the activation
 			}
 			cur.Demoted, cur.DemotedAt = true, x
@@ -1179,6 +1199,15 @@ func (q *Party) acceptOwnCopy(r *PeerRec, ctx int) {
 }
 
 // predecessor: the last ordinary epoch recorded before id.
+func (e *Epoch) gotIK(k Key) bool {
+	for _, x := range e.GotIKs {
+		if x == k && k != 0 {
+			return true
+		}
+	}
+	return false
+}
+
 func (r *PeerRec) predecessor(id int) int {
 	prev := 0
 	for _, e := range r.Epochs {

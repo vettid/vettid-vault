@@ -372,7 +372,7 @@ func (q *Party) markStale(r *PeerRec, ref string) {
 	if pr != nil {
 		if !consistent(r, pr, q.respHalf(), w.party(r.ID).respHalf()) {
 			cause = fmt.Sprintf("%s, epochs differ (%s on E%d, %s on E%d)", ref, q.Name, r.Cur, w.party(r.ID).Name, pr.Cur)
-			if c := w.ttlFin[[2]PID{q.ID, r.ID}] + w.ttlFin[[2]PID{r.ID, q.ID}]; c != "" {
+			if c := w.lostLabel(q.ID, r.ID); c != "" {
 				cause += "; lost handshake message: " + c
 			}
 		}

@@ -775,6 +775,7 @@ func (m *Manager) rotateKeys(now time.Time, byCredential bool) error {
 		return err
 	}
 	m.st.Rotations = append(m.st.Rotations, rot.Marshal())
+	m.expireFirstContactsUnderOldIK(now)
 	m.st.RetiredKEMs = append(m.st.RetiredKEMs, RetiredKEM{Seed: m.st.KEMSeed, RetiredAt: now})
 	m.keys.retired = append(m.keys.retired, m.keys.kem)
 	m.st.IdentitySeed, m.st.KEMSeed = ikSeed, kemSeed

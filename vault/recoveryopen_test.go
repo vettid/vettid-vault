@@ -32,6 +32,8 @@ type openFixture struct {
 	code    string
 	phone   ed25519.PrivateKey
 	phoneUS []byte
+	// heldIssued are a pending relay key's held tokens (relay-key tests).
+	heldIssued []IssuedToken
 }
 
 func newOpenFixture(t *testing.T) *openFixture { return newOpenFixtureWith(t, nil) }

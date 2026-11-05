@@ -466,15 +466,17 @@ func (m *Manager) completeRecoveryR(ctx context.Context, p RecoveryOpenParams, r
 		return fail(CodeMissing)
 	}
 	m.unlockSecret = append([]byte(nil), p.UnlockSecret...)
+	inherited := ""
 	if m.st.Relay.Pending != nil && m.st.Deleting == nil {
 		// §3.4, §11.14.6 step 6: a relay key pending since an earlier run is
-		// completed before the phone is given the vault's address; if it
-		// cannot be now, the open is answered retry (its key may have no
-		// mailbox left to give the phone). Audited, though a failed open
-		// stores nothing of the state.
+		// settled before the phone is given the vault's address; with no
+		// definite answer from the relay the open is answered retry (a
+		// failed open stores nothing, so nothing of it is audited).
 		if !m.completeStoredRelayKey(ctx, p.Relay) {
-			m.record(Activity{Kind: "identity.rotation_failed", Ref: m.pendingRef(), Audit: true, Feed: true, Priority: "high"}, now)
 			return fail(OpenRetry)
+		}
+		if m.keys.pendingRelay != nil {
+			inherited = mailboxOf(m.keys.pendingRelay) // kept, refused
 		}
 	}
 	var cred RecoveryCredential
@@ -536,7 +538,7 @@ func (m *Manager) completeRecoveryR(ctx context.Context, p RecoveryOpenParams, r
 	if err := m.rotateIdentity(now); err != nil {
 		m.record(Activity{Kind: "identity.rotation_failed", Ref: ref, Audit: true, Feed: true, Priority: "high"}, now)
 	}
-	if pr := m.st.Relay.Pending; pr != nil {
+	if pr := m.st.Relay.Pending; pr != nil && mailboxOf(m.keys.pendingRelay) != inherited {
 		pr.Recovery = r.ID // stored by this open: it waits for the phone's pairing (waitsForRecoveredPhone)
 	}
 	m.record(Activity{Kind: "recovery.completed", Ref: r.ID, Audit: true, Feed: true}, now)

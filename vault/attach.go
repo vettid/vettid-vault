@@ -1233,7 +1233,7 @@ func (m *Manager) PutBlobTo(ctx context.Context, conn string, data []byte) (stri
 		m.mu.Unlock()
 		return "", time.Time{}, ErrNoSession
 	}
-	url, mb, tok, r := p.Relay.URL, p.Relay.Mailbox, p.Standing.Token, m.relayFor(p.Standing.Token)
+	url, mb, tok := p.Relay.URL, p.Relay.Mailbox, p.Standing.Token
 	m.mu.Unlock()
-	return r.PutBlob(ctx, url, mb, tok, data)
+	return m.putBlob(ctx, url, mb, tok, data)
 }

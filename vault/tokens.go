@@ -275,6 +275,12 @@ func (m *Manager) storeIssuedTo(p *Peer, body json.RawMessage, now time.Time) {
 	if newer(p.Standing) {
 		p.Standing = ht
 		m.retryPeer(p.ID)
+		if u := m.st.Relay.Updates[p.ID]; u != nil && !u.Acked && !u.Ended && m.onOldKey(tok) && m.st.Relay.Pending == nil {
+			// p follows an earlier address of a chain (K1 of K0→K1→K2): it
+			// refuses a later update sent with the key before (§3.4), so the
+			// current one goes again now, with the key p just issued to.
+			m.sendAddressUpdate(p, u, now)
+		}
 	}
 	if !m.onOldKey(tok) {
 		m.noteAddressAck(p.ID) // a token for the new key: the new address followed (§3.4 "The signal")

@@ -328,6 +328,22 @@ func (m *Manager) handleMessage(ctx context.Context, msg Message, now time.Time)
 		return ackAfterFlush
 	}
 	p := m.peerByRelayKey(sender)
+	if p != nil {
+		if !suite.EqualPublic(sender, p.Relay.PK) {
+			// An earlier relay key of p (§3.4): it may still carry what p
+			// sent before it followed its own update, and the hs.fin of a
+			// handshake awaiting from it; never a new handshake (a holder of
+			// the old copy must not start a reconnect as p).
+			if env.Mode() == envelope.ModeSealed {
+				m.audit(now, "earlier_key_refused", p.ID)
+				return ackAfterFlush
+			}
+		} else if len(p.PrevRelay) > 0 && !m.awaitingFrom(p.ID) {
+			// p deposits with its current key, and no handshake of its waits
+			// for an hs.fin from an earlier one: they end now (§3.4).
+			m.endPrevRelay(p, now)
+		}
+	}
 	// §7.1 (0.10.3): a request token covers only the rest of a handshake
 	// that awaits approval and connection.approved.
 	if m.issuedKind(msg.JTI) == TokRequest {
@@ -440,6 +456,15 @@ func (m *Manager) peerByRelayKey(pk ed25519.PublicKey) *Peer {
 
 // dispatch handles a decrypted session-mode message from principal p.
 func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep *handshake.Epoch, raw []byte, sender ed25519.PublicKey, now time.Time) disposition {
+	if !suite.EqualPublic(sender, p.Relay.PK) {
+		switch in.Type {
+		case TypeAddressUpdate, "identity.rotate", handshake.TypeInit:
+			// From an earlier relay key (§3.4): never a new address, a key
+			// rotation or a rekey; the holder of an old copy has that key.
+			m.audit(now, "earlier_key_refused", p.ID)
+			return ackAfterFlush
+		}
+	}
 	if p.Kind == KindConnection && p.Fork != nil {
 		// §6.6 (0.72.0): a connection suspended on fork evidence accepts
 		// nothing, identity.rotate included.

@@ -735,7 +735,6 @@ func (m *Manager) outDeliverJob(r *attRunner, e *AttEntry, reupload, noUpload bo
 // refusal for the recipient's blob storage queues it without a blob.
 func (m *Manager) deliver(ctx context.Context, r *attRunner, id string, content []byte, reupload, noUpload bool) {
 	var relayURL, mailbox, token string
-	var put Relay
 	var thumb []byte
 	var thumbKey []byte
 	var tw bool
@@ -749,7 +748,6 @@ func (m *Manager) deliver(ctx context.Context, r *attRunner, id string, content 
 			return
 		}
 		relayURL, mailbox, token = p.Relay.URL, p.Relay.Mailbox, p.Standing.Token
-		put = m.relayFor(token) // signed with the key the token was issued to (§3.4)
 		vid, tw, thumbKey = m.st.VaultID, e.TW, append([]byte(nil), e.Key...)
 		thumb = append([]byte(nil), e.Thumb...)
 	})
@@ -782,7 +780,7 @@ func (m *Manager) deliver(ctx context.Context, r *attRunner, id string, content 
 			m.attRetryApply(r, id)
 			return
 		}
-		bid, exp, err := put.PutBlob(ctx, relayURL, mailbox, token, data)
+		bid, exp, err := m.putBlob(ctx, relayURL, mailbox, token, data)
 		suite.Wipe(data)
 		if err == nil {
 			blob = &attwire.Blob{ID: bid, Key: bkey, SHA256: sum, Size: len(content)}
@@ -1008,7 +1006,6 @@ func (m *Manager) ownerFetchJob(r *attRunner, f *attFetch) attJob {
 				return 0
 			}
 			var vid, mime, name, url, mailbox, token string
-			var put Relay
 			var hasName bool
 			var key []byte
 			found := m.attApply(r, f.att, func(e *AttEntry, _ time.Time) {
@@ -1018,7 +1015,6 @@ func (m *Manager) ownerFetchJob(r *attRunner, f *attFetch) attJob {
 				}
 				vid, key, mime, name, hasName = m.st.VaultID, append([]byte(nil), e.Key...), e.Mime, e.Name, e.HasName
 				url, mailbox, token = p.Relay.URL, p.Relay.Mailbox, p.Standing.Token
-				put = m.relayFor(token) // signed with the key the token was issued to (§3.4)
 			})
 			if !found {
 				return 0
@@ -1052,7 +1048,7 @@ func (m *Manager) ownerFetchJob(r *attRunner, f *attFetch) attJob {
 				answer(nil, "internal")
 				return len(content)
 			}
-			bid, exp, err := put.PutBlob(ctx, url, mailbox, token, data)
+			bid, exp, err := m.putBlob(ctx, url, mailbox, token, data)
 			suite.Wipe(data)
 			if err != nil {
 				suite.Wipe(bkey)
@@ -1254,7 +1250,7 @@ func (m *Manager) attMaintain(r *attRunner, w *attWork) {
 	if !w.needList || ctx.Err() != nil {
 		return
 	}
-	list, err := m.relays().cur.ListBlobs(ctx)
+	list, err := m.listBlobs(ctx)
 	listed := err == nil
 	if err != nil && w.purge {
 		m.mu.Lock()

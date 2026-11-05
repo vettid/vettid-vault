@@ -913,6 +913,28 @@ func TestRelayKeyOldKeyDeleted(t *testing.T) {
 			t.Fatal("not deleted once its mailbox is gone")
 		}
 	})
+	t.Run("a device not followed in 30 days", func(t *testing.T) {
+		r := newRKFixture(t)
+		r.rotate(true)
+		r.flushStep()
+		r.issueToVault("dev1")
+		r.issueToVault("c1")
+		_ = r.deposits()
+		r.advance(UnfollowedAfter + time.Minute)
+		r.sendFrom("dev1", "vault.status", `{}`, "")
+		if r.m.st.Devices["dk1"].State != PeerStale || len(r.sink.kinds("device.stale")) != 1 {
+			t.Fatal("the stale desktop has no member notice")
+		}
+		var sync bool
+		for _, s := range r.deposits()["dev1"] {
+			if s.in.Type == "sync.event" && bodyStr(t, s.in, "kind") == "device.stale" {
+				sync = true
+			}
+		}
+		if !sync {
+			t.Fatal("the app was not sent sync.event{device.stale}")
+		}
+	})
 	t.Run("not followed in 30 days", func(t *testing.T) {
 		r := newRKFixture(t)
 		r.rotate(true)
@@ -944,6 +966,7 @@ func TestRelayKeyOldKeyDeleted(t *testing.T) {
 		if !ev {
 			t.Fatal("the app was not sent connection.event{stale}")
 		}
+
 	})
 }
 
@@ -1081,6 +1104,9 @@ func openWithPending(t *testing.T) (*openFixture, *stubRot, string) {
 		f.m.mu.Lock()
 		defer f.m.mu.Unlock()
 		f.m.relay.(*stubRelay).rot = rot
+		cpk := pubOf(seedKey(0x91))
+		f.m.st.Connections["c9"] = &Peer{ID: "c9", Kind: KindConnection, State: PeerActive,
+			Relay: PeerRelay{URL: rkBase, Mailbox: relayauth.MailboxID(cpk), PK: cpk}}
 		if err := f.m.rotateKeys(f.m.now(), true); err != nil {
 			t.Fatal(err)
 		}
@@ -1091,6 +1117,7 @@ func openWithPending(t *testing.T) (*openFixture, *stubRot, string) {
 			t.Fatal("not pending")
 		}
 		current = f.m.st.Relay.Mailbox
+		f.heldIssued = append([]IssuedToken(nil), f.m.st.Relay.Pending.Issued...)
 	})
 	return f, rot, current
 }
@@ -1277,5 +1304,126 @@ func TestRelayKeyCollectorOwnKeyCopies(t *testing.T) {
 	_ = mc.Close()
 	if !bytes.Equal(k, make([]byte, len(k))) {
 		t.Fatal("the copy was not wiped at the close")
+	}
+}
+
+// N2 (review): an inherited pending key whose rotate the relay refused no
+// longer blocks every recovery open: the current mailbox lives, so the
+// open goes on with it and the key stays pending in the refused state,
+// the recovery's rotation owing a relay-key rotation (§3.4).
+func TestReviewRecoveryRefusedDeadlock(t *testing.T) {
+	f, rot, before := openWithPending(t)
+	rot.rotate = func(string) error { return &relayclient.Error{Status: 400, Code: "bad_request"} }
+	m, out := f.open(testPIN, rPW)
+	if m == nil || !out.OK {
+		t.Fatalf("the recovery does not open while the pending key is refused: %+v", out)
+	}
+	defer m.Crash()
+	pr := m.st.Relay.Pending
+	if pr == nil || pr.Refused != "bad_request" || pr.Recovery != "" || m.st.RotationOwed == nil || !m.st.RotationOwed.RelayKey {
+		t.Fatalf("not kept refused with a relay-key rotation owed: %+v, owed %+v", pr, m.st.RotationOwed)
+	}
+	if m.st.Relay.Mailbox != before || !bytes.Contains(out.VaultBundle, []byte(before)) {
+		t.Fatal("the vault_bundle does not carry the live mailbox")
+	}
+}
+
+// A refused registration past the grace (no live mailbox): the recovery
+// replaces the refused key with a fresh one, registered, made current
+// (recoveryReplacesRefusedKey, the recommended answer to the owner question).
+func TestRelayKeyRecoveryReplacesARefusedRegistration(t *testing.T) {
+	f, rot, before := openWithPending(t)
+	var refusedMB string
+	rot.rotate = func(string) error { return &relayclient.Error{Status: 404, Code: CodeMailboxUnknown} }
+	rot.register = func(mb string) (bool, error) {
+		if refusedMB == "" {
+			refusedMB = mb
+			return false, &relayclient.Error{Status: 400, Code: "bad_request"}
+		}
+		return true, nil
+	}
+	m, out := f.open(testPIN, rPW)
+	if m == nil || !out.OK {
+		t.Fatalf("open: %+v", out)
+	}
+	defer m.Crash()
+	cur := m.st.Relay.Mailbox
+	if cur == before || cur == refusedMB || len(m.st.Relay.Old) != 1 || m.st.Relay.Old[0].Mailbox != before {
+		t.Fatal("the refused key was not replaced by a fresh, current key")
+	}
+	if !bytes.Contains(out.VaultBundle, []byte(cur)) {
+		t.Fatal("the vault_bundle does not carry the fresh mailbox")
+	}
+}
+
+// N3: a key completed in the open re-mints every held token (a 201 there
+// would be lost with an open that fails later), even when the relay
+// answers 200.
+func TestRelayKeyRecoveryRemintsEveryHeldToken(t *testing.T) {
+	f, rot, _ := openWithPending(t)
+	var held []string
+	for _, it := range f.heldIssued {
+		held = append(held, it.JTI)
+	}
+	if len(held) == 0 {
+		t.Fatal("no held tokens to check")
+	}
+	rot.rotate = nil
+	m, out := f.open(testPIN, rPW)
+	if m == nil || !out.OK {
+		t.Fatalf("open: %+v", out)
+	}
+	defer m.Crash()
+	for _, it := range m.st.Issued {
+		if slices.Contains(held, it.JTI) {
+			t.Fatal("a held token was not re-minted")
+		}
+	}
+}
+
+// N6, N7: the lockless uploads sign with the published copies, not the
+// vault's live keys; a replaced set's copies are wiped once no transfer
+// uses it.
+func TestRelayKeyPublishedCopies(t *testing.T) {
+	r := newRKFixture(t)
+	oldPub := r.relayPub()
+	r.relay.blobs = &stubBlobs{}
+	r.rotate(true)
+	r.flushStep()
+	// A set nobody uses is wiped when replaced.
+	idle := r.m.rk.set.Load()
+	idleKey := idle.keys[0]
+	r.with(func(m *Manager) { m.publishRelays() })
+	if !bytes.Equal(idleKey, make([]byte, len(idleKey))) {
+		t.Fatal("an unused replaced set kept its copies")
+	}
+	held := r.m.acquireRelays()
+	if len(held.keys) != 1 {
+		t.Fatal("no copy published")
+	}
+	copyKey := held.keys[0]
+	r.with(func(m *Manager) {
+		suite.Wipe(m.keys.oldRelay[0]) // the vault's own bytes: not what an upload signs with
+	})
+	if _, _, err := r.m.PutBlobTo(context.Background(), "c1", []byte("blob")); err != nil {
+		t.Fatal(err)
+	}
+	b := r.relay.blobs
+	b.mu.Lock()
+	var sender string
+	for _, x := range b.byID {
+		sender = x.sender
+	}
+	b.mu.Unlock()
+	if sender != relayauth.EncodeKey(oldPub) {
+		t.Fatal("the upload signed with the vault's live key bytes")
+	}
+	r.with(func(m *Manager) { m.publishRelays() }) // replaced while in use
+	if bytes.Equal(copyKey, make([]byte, len(copyKey))) {
+		t.Fatal("a set in use was wiped")
+	}
+	held.release()
+	if !bytes.Equal(copyKey, make([]byte, len(copyKey))) {
+		t.Fatal("a replaced set's copies outlived its last use")
 	}
 }

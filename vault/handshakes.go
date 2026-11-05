@@ -373,7 +373,7 @@ func (m *Manager) respondReconnect(pi *handshake.PendingInit, p *Peer, sender ed
 	}
 	cfg := handshake.ResponderConfig{
 		Identity: m.keys.ik, Policy: policyFor(p.Kind), PinnedSuite: p.Suite,
-		CollectSender: sender, RecordRelayKey: m.recordKey(p, sender), KnownInitiatorIK: p.IK,
+		CollectSender: sender, RecordRelayKey: p.Relay.PK, KnownInitiatorIK: p.IK,
 		KnownInitiatorChain: parseRotations(p.Chain),
 		ExpectedCtx:         body.Ctx, Now: now,
 		Rotations: m.ownRotationsSince(ownChain),
@@ -516,7 +516,7 @@ func (m *Manager) handleRekeyInit(ctx context.Context, p *Peer, in *envelope.Inn
 	}
 	resp, env, err := pi.Respond(handshake.ResponderConfig{
 		Identity: m.keys.ik, Policy: policyFor(p.Kind), PinnedSuite: p.Suite,
-		CollectSender: sender, RecordRelayKey: m.recordKey(p, sender), KnownInitiatorIK: p.IK, Now: now,
+		CollectSender: sender, RecordRelayKey: p.Relay.PK, KnownInitiatorIK: p.IK, Now: now,
 	})
 	if err != nil {
 		m.audit(now, "rekey_refused", p.ID)
@@ -593,6 +593,9 @@ func (m *Manager) handleFin(ctx context.Context, id string, raw []byte, sender e
 	}
 	delete(m.st.Awaiting, id)
 	delete(m.awaiting, id)
+	if p := m.peer(aw.PeerID); aw.New == nil && p != nil && len(p.PrevRelay) > 0 && suite.EqualPublic(sender, p.Relay.PK) && !m.awaitingFrom(p.ID) {
+		m.endPrevRelay(p, now) // its hs.fin came with its current key and nothing else waits (§3.4)
+	}
 	if aw.New != nil && !aw.Direct {
 		m.newRequest(aw, fr, now)
 		return ackAfterFlush

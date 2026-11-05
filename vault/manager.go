@@ -1203,10 +1203,7 @@ func (m *Manager) zeroize() {
 	}
 	m.keys.destroy()
 	m.keys = nil
-	for _, k := range m.rk.copies {
-		suite.Wipe(k) // the lockless transfers' copies (publishRelays)
-	}
-	m.rk.copies = nil
+	m.unpublishRelays() // the lockless transfers' key copies go once unused
 	for _, kr := range m.sessions {
 		kr.Destroy()
 	}

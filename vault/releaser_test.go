@@ -440,8 +440,15 @@ func TestStep1RefusedWhileStateBehind(t *testing.T) {
 		f.m.mu.Unlock()
 		t.Fatal("the state write did not fail")
 	}
+	// beginReplace itself (changeSecrets refuses earlier, so it is
+	// called directly here: its check is the backstop for every caller).
+	r, err := f.m.nextFor(ReplaceRenew, testPIN, testSecret2, f.m.hdr.KDF, nil, f.m.now())
+	if err != nil {
+		f.m.mu.Unlock()
+		t.Fatal(err)
+	}
+	err = f.m.beginReplace(ctx, r)
 	f.m.mu.Unlock()
-	err := f.change(SecretChange{Reason: ReplaceRenew, PIN: testPIN, Password: []byte(rPW), NewUnlockSecret: testSecret2})
 	var he *HandlerError
 	if !errors.As(err, &he) || he.Code != "retry" {
 		t.Fatalf("step 1 while the state is behind: %v", err)

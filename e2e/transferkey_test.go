@@ -344,6 +344,15 @@ type stateFaults struct {
 	fail    int
 	vid     string // the vault whose header writes are counted
 	headers int    // its header writes stored while state writes fail
+	// atStep1: the next header write of vid that no state write preceded
+	// (a DEK replacement's step 1) arms the failure of this many state
+	// writes after it, from step 2's. Armed now instead, a write still
+	// due from the pairing (the one after the drain that sent
+	// device.transfer.pending) could take the failure: the approval would
+	// find the state behind and answer retry, with no step 1 stored.
+	// sawState: a state write of vid since its last header write.
+	atStep1  int
+	sawState bool
 }
 
 func (s *stateFaults) headerPuts() int { s.mu.Lock(); defer s.mu.Unlock(); return s.headers }
@@ -353,6 +362,9 @@ func (s *stateFaults) arm(n int) { s.mu.Lock(); s.fail = n; s.mu.Unlock() }
 func (s *stateFaults) Put(ctx context.Context, key string, data []byte, ifMatch store.Version) (store.Version, error) {
 	if strings.HasSuffix(key, "/state") {
 		s.mu.Lock()
+		if s.vid != "" && key == store.StateKey(s.vid) {
+			s.sawState = true
+		}
 		if s.fail > 0 {
 			s.fail--
 			s.mu.Unlock()
@@ -363,9 +375,13 @@ func (s *stateFaults) Put(ctx context.Context, key string, data []byte, ifMatch 
 	v, err := s.Store.Put(ctx, key, data, ifMatch)
 	if err == nil && s.vid != "" && strings.HasPrefix(key, "vaults/"+s.vid+"/header/") {
 		s.mu.Lock()
+		if s.atStep1 > 0 && !s.sawState {
+			s.fail, s.atStep1 = s.atStep1, 0
+		}
 		if s.fail > 0 {
 			s.headers++
 		}
+		s.sawState = false
 		s.mu.Unlock()
 	}
 	return v, err
@@ -419,11 +435,11 @@ func transferFailedStep2(t *testing.T, seed, newSeed byte, newName string, end f
 	waitEvent(t, w.a.dev, "device.transfer.pending", has("transfer_id", id))
 	sf.mu.Lock()
 	sf.vid = w.a.vid
-	sf.mu.Unlock()
-	// Every state write fails from now until the vault is gone: step 1
+	// Every state write fails from step 2 until the vault is gone: step 1
 	// (the header) is stored, step 2 never is, and the approval is not
 	// answered (its answer goes after the flush).
-	sf.arm(1 << 30)
+	sf.atStep1 = 1 << 30
+	sf.mu.Unlock()
 	if err := w.a.dev.TransferApprove(ctxT(t, 20*time.Second), id, acPIN, credPW); err == nil {
 		t.Fatal("the approval was answered although step 2 was not stored")
 	}
@@ -474,8 +490,8 @@ func TestTransferFailedStep2ThenStored(t *testing.T) {
 	waitEvent(t, w.a.dev, "device.transfer.pending", has("transfer_id", id))
 	sf.mu.Lock()
 	sf.vid = w.a.vid
+	sf.atStep1 = 1 // step 2's write fails; the next one succeeds
 	sf.mu.Unlock()
-	sf.arm(1) // step 2's write fails; the next one succeeds
 	_ = w.a.dev.TransferApprove(ctxT(t, 20*time.Second), id, acPIN, credPW)
 	// A later batch whose write succeeds (if the approval's retransmission
 	// did not store it first): the vault keeps running.

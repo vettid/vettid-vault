@@ -202,6 +202,11 @@ func NewInitiator(cfg InitiatorConfig) (*Initiator, error) {
 // Envelope returns hs.init, ready to deposit.
 func (i *Initiator) Envelope() []byte { return append([]byte(nil), i.env...) }
 
+// ResponderIK is the responder's identity key the hs.init pinned.
+func (i *Initiator) ResponderIK() ed25519.PublicKey {
+	return append(ed25519.PublicKey(nil), i.cfg.ResponderIK...)
+}
+
 // Th1 returns th1, which also decides simultaneous rekeys (§6.5).
 func (i *Initiator) Th1() [32]byte { return i.th1 }
 

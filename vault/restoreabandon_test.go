@@ -143,7 +143,9 @@ func TestRotatedConnectionRequestAbandonedAtUnlock(t *testing.T) {
 	}
 	b.m = m
 	defer m.Crash()
-	b.appInbox() // nothing yet: the unlock drained nothing
+	if got := b.appInbox(); len(got) != 0 {
+		t.Fatalf("the unlock delivered before a write stored it: %d messages", len(got)) // nothing is drained before the first write
+	}
 	m.mu.Lock()
 	if m.st.Outgoing[ogID] != nil || m.outgoing[ogID] != nil {
 		m.mu.Unlock()

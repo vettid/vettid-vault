@@ -43,7 +43,33 @@ func (q *Party) reconnectNaming(r *PeerRec, ctx int, why string) {
 	q.startHS(r, true)
 	if r.Own == nil || !r.Own.Reconnect {
 		q.w.stat("A:ungated-reconnect-not-started")
+		return
 	}
+	r.Own.RuleRC = true
+	r.RCTries = 1
+}
+
+// ruleRCExpired (r9, the lead's recheck): a rule-E or rule-L reconnect
+// that expired unanswered is tried again with the same ctx, up to 3 tries
+// per epoch (each within the reconnect token's quota, which the relay
+// enforces); it reports whether a try started. Otherwise the caller marks
+// the connection stale.
+func (p *Party) ruleRCExpired(r *PeerRec, o *HS) bool {
+	if !o.RuleRC || p.w.noRCRetry || r.RCTries >= 3 {
+		return false
+	}
+	p.abandonOwn(r)
+	r.RCCtx = o.Ctx
+	p.startHS(r, true)
+	if r.Own == nil || !r.Own.Reconnect {
+		p.w.stat("A:ruleRC-retry-not-started")
+		return false
+	}
+	r.Own.RuleRC = true
+	r.RCTries++
+	p.w.stat("A:ruleRC-retry")
+	p.w.logf("%s: reconnect to %s tried again (%d of 3)", p.Name, p.w.party(r.ID).Name, r.RCTries)
+	return true
 }
 
 // rekeyRefusedRC applies point 2; it reports whether a reconnect started.

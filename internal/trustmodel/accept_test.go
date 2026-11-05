@@ -851,6 +851,11 @@ func (q *Party) tableBResp(r *PeerRec, M *Msg, pos Pos) dec {
 		return dec{"abort", "rejected_ik", cell}
 	case ikUnknown:
 		q.abandonOwn(r)
+		if o.RuleRC && r.Status == stActive {
+			q.markStale(r, "reconnect refused") // r9: a refused rule-E / rule-L reconnect
+			q.h5(r, -1)
+			return dec{"abort", "unknown_ik", cell}
+		}
 		q.rekeyRefusedRC(r, o, "hs.resp unknown ik")
 		return dec{"abort", "unknown_ik", cell}
 	}

@@ -319,7 +319,9 @@ func (p *Party) tick() {
 					w.stat("r28:own-handshake-expired")
 				}
 			} else if o != nil {
-				if o.Reconnect && w.Now-o.Started > w.hsLifeFor(true) {
+				if o.Reconnect && w.Now-o.Started > w.hsLifeFor(true) && p.ruleRCExpired(r, o) {
+					// r9: tried again
+				} else if o.Reconnect && w.Now-o.Started > w.hsLifeFor(true) {
 					p.markStale(r, "reconnect failed")
 					p.h5(r, -1)
 					w.logf("%s: %s STALE (reconnect not completed in 7 days)", p.Name, w.party(r.ID).Name)

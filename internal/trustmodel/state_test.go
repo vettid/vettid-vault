@@ -120,6 +120,7 @@ type HS struct {
 	NamedConf bool     // responder: the hs.init named my confirmed epoch (rule E at hs.fin)
 	InitTs    int64    // responder: the hs.init's inner ts
 	InitHalf  bool     // initiator: the gate as fixed when hs.init was sent
+	RuleRC    bool     // initiator: a rule-E or rule-L reconnect (r9: retried up to 3 tries)
 	AnsTs     int64    // responder: the hs.resp's inner ts (its own clock)
 }
 
@@ -161,6 +162,7 @@ type PeerRec struct {
 	RCCtx         int   // r8: the next reconnect names this epoch (0: the last)
 	RCEpoch       int   // r8: a rekey-refused reconnect was started on this current epoch
 	RCs           int   // r8: reconnects started toward this peer (stat)
+	RCTries       int   // r9: tries of the current rule-E / rule-L reconnect
 	FeatOwed      bool  // upgrade mode: my features go with my next message to this peer
 
 	IK, KEM Key

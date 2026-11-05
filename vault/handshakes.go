@@ -591,6 +591,14 @@ func (m *Manager) peer(id string) *Peer {
 // become a request that awaits approval (0.10.3).
 func (m *Manager) handleFin(ctx context.Context, id string, raw []byte, sender ed25519.PublicKey, now time.Time) disposition {
 	aw, r := m.st.Awaiting[id], m.awaiting[id]
+	if p := m.peer(aw.PeerID); aw.New == nil && p != nil && ancestorIK(p, r.InitiatorIK()) {
+		// The hs.fin of a handshake answered from an ik the peer has since
+		// rotated away from: only the holder of its old copy sends it
+		// (restartHandshakesUnderOldIK abandons them; a backstop).
+		m.audit(now, "rotation_rollback_refused", aw.PeerID)
+		m.abandonAwaiting(id, now)
+		return ackAfterFlush
+	}
 	// A peer that moved to a new relay key during the handshake (its
 	// relay.address.update came after its hs.init, VAULT-MESSAGING §3.4)
 	// may deposit hs.fin with the new key: both are its keys on record

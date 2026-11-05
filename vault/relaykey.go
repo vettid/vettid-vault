@@ -1716,6 +1716,16 @@ func (m *Manager) restartHandshakesUnderOldIK(p *Peer, now time.Time) {
 		}
 		m.abandonOutgoing(id, now)
 	}
+	// The handshakes it answered from an ik it has since rotated away from:
+	// the real peer abandons its own (as here), so only the holder of its
+	// old copy could send their hs.fin. Abandoned (its tokens revoked); a
+	// narrowing of "a handshake already in progress may finish" to those
+	// under the peer's current ik (owner decision 2026-11-05, as built).
+	for id, aw := range m.st.Awaiting {
+		if r := m.awaiting[id]; aw.PeerID == p.ID && aw.New == nil && r != nil && ancestorIK(p, r.InitiatorIK()) {
+			m.abandonAwaiting(id, now)
+		}
+	}
 	if reconnect {
 		m.startReconnect(p, now)
 	} else if rekey {

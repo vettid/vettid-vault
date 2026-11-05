@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
@@ -1056,5 +1057,101 @@ func TestRelayKeyOldIKHandshakeDoesNotDeferTheRevocation(t *testing.T) {
 	b.m.mu.Unlock()
 	if pb.PrevRelay[0].SubPending || !slices.Contains(b.relay.top().revoked, "sub:"+relayauth.EncodeKey(k0)) {
 		t.Fatal("a handshake under the old ik kept the earlier key's tokens")
+	}
+}
+
+// oldCopyFin: A begins a reconnect and B answers it from A's current ik;
+// A then drops it (the real A moves on), while its old copy keeps the
+// reconnect's state: returned are B's answer and a maker of the old copy's
+// hs.fin for it.
+func oldCopyFin(t *testing.T) (a, b *devFixture, aConn, bConn string, makeFin func() []Message) {
+	a, b = newVaultPair(t)
+	aConn, bConn = rkConnect(t, a, b)
+	a.m.mu.Lock()
+	a.m.startReconnect(a.m.st.Connections[aConn], a.m.now())
+	a.m.exportLive()
+	var ogID string
+	var st handshake.InitiatorState
+	for id, og := range a.m.st.Outgoing {
+		if og.Purpose == handshake.PurposeReconnect {
+			ogID = id
+			raw, _ := json.Marshal(og.Init)
+			_ = json.Unmarshal(raw, &st)
+		}
+	}
+	oldIK := append(ed25519.PrivateKey(nil), a.m.keys.ik...)
+	k0 := append(ed25519.PublicKey(nil), pubOf(a.m.keys.relay)...)
+	a.m.mu.Unlock()
+	rkPump(t, a, b) // B answers: an Awaiting under A's current (soon old) ik
+	resp := capture(t, b, a)
+	if len(resp) == 0 || len(b.m.st.Awaiting) == 0 {
+		t.Fatal("no answer, or nothing awaiting")
+	}
+	a.m.mu.Lock()
+	a.m.abandonOutgoing(ogID, a.m.now())
+	a.m.mu.Unlock()
+	makeFin = func() []Message {
+		ini, err := handshake.RestoreInitiator(st, oldIK)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := ini.HandleResp(resp[0].payload, resp[0].sender, time.Now())
+		if err != nil || res.Fin == nil {
+			t.Fatalf("the old copy's hs.fin: %v", err)
+		}
+		jti := ""
+		for _, it := range b.m.st.Issued {
+			if it.PeerID == bConn && it.Kind == TokStanding && it.Sub == relayauth.EncodeKey(k0) {
+				jti = it.JTI
+			}
+		}
+		pumped++
+		return []Message{{MsgID: fmt.Sprintf("fin%d", pumped), Sender: relayauth.EncodeKey(k0), JTI: jti, Payload: res.Fin,
+			DepositedAt: time.Now().UTC().Format(time.RFC3339Nano)}}
+	}
+	return
+}
+
+// Round 7, M4: B answered A's reconnect from A's old ik; A then rotates and
+// B follows (before the cut-off of K0); the old copy's hs.fin makes no
+// epoch: B abandoned the answer when it followed.
+func TestRelayKeyOldCopyFinRefused(t *testing.T) {
+	a, b, aConn, bConn, makeFin := oldCopyFin(t)
+	rkRotate(t, a)
+	a.m.mu.Lock()
+	a.m.dropRekey(aConn)
+	a.m.mu.Unlock()
+	rkPump(t, a, b) // B follows A's new ik and K1; K0 not yet ended
+	pb := b.m.st.Connections[bConn]
+	if len(pb.PrevRelay) == 0 || ended(pb) {
+		t.Fatal("setup: B did not follow, or K0 already ended")
+	}
+	epoch := append([]byte(nil), pb.LastEpochID...)
+	for _, aw := range b.m.st.Awaiting {
+		if aw.PeerID == bConn && aw.Purpose == handshake.PurposeReconnect {
+			t.Fatal("the answer from the old ik is still open")
+		}
+	}
+	if err := b.m.ProcessBatch(context.Background(), &fakeCollector{}, makeFin()); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(pb.LastEpochID, epoch) {
+		t.Fatal("an epoch was made with the old copy")
+	}
+}
+
+// M4 backstop: with the answer still open (B knows A's new ik without the
+// identity.rotate handler), its hs.fin is refused and audited.
+func TestRelayKeyOldIKFinBackstop(t *testing.T) {
+	a, b, _, bConn, makeFin := oldCopyFin(t)
+	rkRotate(t, a)
+	followByHand(t, a, b, bConn)
+	pb := b.m.st.Connections[bConn]
+	epoch := append([]byte(nil), pb.LastEpochID...)
+	if err := b.m.ProcessBatch(context.Background(), &fakeCollector{}, makeFin()); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(pb.LastEpochID, epoch) || !audited(b, "rotation_rollback_refused") {
+		t.Fatal("the old copy's hs.fin was taken, or not audited")
 	}
 }

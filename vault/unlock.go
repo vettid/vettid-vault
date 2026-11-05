@@ -669,8 +669,13 @@ func (m *Manager) resume(ctx context.Context, p AltUnlockParams, out *AltUnlockO
 	}
 	var err error
 	m.relay = p.Relay(m.st.Relay.URL, m.keys.relay)
-	if m.limits, err = m.relay.Register(ctx); err != nil {
-		return fail(CodeRetry, err)
+	// While a relay key is pending the unlock does not register the
+	// current key (after the grace that would make the old mailbox again):
+	// it calls the rotate instead, at §12.2 step 3 (§3.4).
+	if !m.rk.fromStorage {
+		if m.limits, err = m.relay.Register(ctx); err != nil {
+			return fail(CodeRetry, err)
+		}
 	}
 	if !p.pinOnly {
 		m.unlockedBy = m.unlockDevice(p.DeviceIK)

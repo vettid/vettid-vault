@@ -67,6 +67,10 @@ func TestFailedRecoveryRotationIsRetriedAtTheNextUnlock(t *testing.T) {
 		}
 	}
 	m2.retryOwedRotation(m2.now())
+	if err := completeRelayKey(m2); err != nil { // §3.4: the mark clears at the second write
+		m2.mu.Unlock()
+		t.Fatal(err)
+	}
 	m2.mu.Unlock()
 	if len(m2.st.Rotations) != 1 || m2.st.RotationOwed != nil {
 		t.Fatalf("not retried after the pairing: %d rotations, owed %+v", len(m2.st.Rotations), m2.st.RotationOwed)

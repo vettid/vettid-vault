@@ -408,6 +408,11 @@ func (m *Manager) deleteMailbox(ctx context.Context) {
 	if m.holdForMark() {
 		return
 	}
+	if m.keys != nil && m.keys.pendingRelay != nil {
+		// A pending relay key's mailbox, which its rotate may have made
+		// (§3.4): deleting the current one would not delete it.
+		_ = m.pendingRelayClient().DeleteMailbox(ctx)
+	}
 	if err := m.relay.DeleteMailbox(ctx); err != nil {
 		return // the revocations and claim deletions remain the fallback
 	}

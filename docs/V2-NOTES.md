@@ -9,16 +9,10 @@ V2 and now live in the spec; vettid.org is the source of truth.
 
 ## Not in V2
 
-- Outgoing relay-key rotation (§3.4: dual-mailbox collect during the grace
-  period). Incoming `relay.address.update` and both directions of
-  `identity.rotate` are implemented.
-  So the rotation of the vault's keys at a completed recovery (§11.14.6
-  step 6), after a transfer (§11.14.10) and at `credential.rotate`
-  (§3.5.5) rotates `ik`, `kem` and the wake key, but not the relay key:
-  no new mailbox or tokens, no `relay.address.update`, and none of §3.4
-  "Resending the new address" (the old key kept for deposits, the resends
-  at each unlock). It waits for a decision on the order of the relay's
-  `POST /v1/mailbox/rotate` and the state write that holds the new key.
+- (Built since: the outgoing relay-key rotation, VAULT-MESSAGING 0.84.0
+  §3.4 "The order of a relay-key rotation" and "Resending the new
+  address", at a recovery, a transfer and `credential.rotate`; see
+  docs/MUST-COVERAGE.md "The relay-key rotation".)
 - Broadcast spreading over 0–30 s (§9.3, SHOULD) and flush coalescing
   (§8.3, SHOULD).
 - Application-level retries of the vault's own requests (§8.6).

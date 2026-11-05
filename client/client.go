@@ -232,15 +232,19 @@ const (
 
 // VaultRecord is what the device knows about its vault.
 type VaultRecord struct {
-	IK       []byte                 `json:"ik"`
-	KEM      []byte                 `json:"kem"`
-	RelayURL string                 `json:"relay_url"`
-	Mailbox  string                 `json:"mailbox"`
-	RelayPK  []byte                 `json:"relay_pk"`
-	Token    string                 `json:"token,omitempty"`
-	TokenExp time.Time              `json:"token_exp,omitempty"`
-	Sessions handshake.KeyringState `json:"sessions"`
-	Suite    uint8                  `json:"suite"`
+	IK       []byte `json:"ik"`
+	KEM      []byte `json:"kem"`
+	RelayURL string `json:"relay_url"`
+	Mailbox  string `json:"mailbox"`
+	RelayPK  []byte `json:"relay_pk"`
+	// PrevRelayPK is the vault's relay key before its last
+	// relay.address.update (VAULT-MESSAGING §3.4): the vault deposits with
+	// it until it has this device's token for the new key.
+	PrevRelayPK []byte                 `json:"prev_relay_pk,omitempty"`
+	Token       string                 `json:"token,omitempty"`
+	TokenExp    time.Time              `json:"token_exp,omitempty"`
+	Sessions    handshake.KeyringState `json:"sessions"`
+	Suite       uint8                  `json:"suite"`
 }
 
 // Device is one owner device.
@@ -1524,8 +1528,8 @@ func (d *Device) handle(ctx context.Context, m relayclient.Message) (unacked boo
 		}
 		return false
 	}
-	if v == nil || !suite.EqualPublic(sender, v.RelayPK) {
-		return // §6.3: only the vault's relay key may send to a device
+	if v == nil || !suite.EqualPublic(sender, v.RelayPK) && (len(v.PrevRelayPK) == 0 || !suite.EqualPublic(sender, v.PrevRelayPK)) {
+		return // §6.3: only the vault's relay key may send to a device (§3.4: or its previous one)
 	}
 	d.pruneAwaiting(now)
 	in, ep, err := d.keyring.Open(env, now)
@@ -1533,7 +1537,14 @@ func (d *Device) handle(ctx context.Context, m relayclient.Message) (unacked boo
 		for i, r := range d.awaiting {
 			rk, sk := r.Kids()
 			if env.RecipientKid().Equal(rk) && env.SenderKid().Equal(sk) {
-				fr, err := r.HandleFin(m.Payload, sender, now)
+				// The vault's hs.fin may come with its new relay key when
+				// it moved during the rekey (§3.4): the previous key stands
+				// for the one the hs.init came from.
+				cs := sender
+				if len(v.PrevRelayPK) > 0 && suite.EqualPublic(sender, v.RelayPK) && suite.EqualPublic(r.Sender(), v.PrevRelayPK) {
+					cs = r.Sender()
+				}
+				fr, err := r.HandleFin(m.Payload, cs, now)
 				if err == nil {
 					d.keyring.Activate(fr.Epoch, now)
 					d.dropAwaiting(i)
@@ -1643,6 +1654,8 @@ func (d *Device) handle(ctx context.Context, m relayclient.Message) (unacked boo
 		d.storeVaultToken(in.Body)
 	case "identity.rotate":
 		d.followRotation(in.Body)
+	case "relay.address.update":
+		d.followAddress(ctx, in.Body)
 	case "leash.grant.updated":
 		if in.Re == "" {
 			d.leashGrants = append(json.RawMessage(nil), in.Body...) // the agent's current grants (§10.11); d.mu is held
@@ -1904,6 +1917,50 @@ func (d *Device) followRotation(body json.RawMessage) {
 		return
 	}
 	d.st.Vault.IK, d.st.Vault.KEM = final, kem.Bytes()
+}
+
+// followAddress follows the vault's new relay address (VAULT-MESSAGING
+// §3.4): the new address and its standing token for this device's
+// mailbox, then relay.token.issued for the vault's new key (step 4). A
+// duplicate (a resend of an address already followed) is ignored.
+func (d *Device) followAddress(ctx context.Context, body json.RawMessage) {
+	v := d.st.Vault
+	o, err := strictjson.ParseObject(body)
+	if err != nil {
+		return
+	}
+	ro, err := o.Object("relay")
+	if err != nil {
+		return
+	}
+	var a handshake.RelayAddr
+	a.URL, _ = ro.String("url")
+	a.Mailbox, _ = ro.String("mailbox")
+	if a.PK, err = ro.Base64("pk", ed25519.PublicKeySize); err != nil || handshake.ValidateRelayAddr(a) != nil {
+		return
+	}
+	if suite.EqualPublic(a.PK, v.RelayPK) {
+		return
+	}
+	tok, err := o.String("token")
+	if err != nil {
+		return
+	}
+	msg, err := relayauth.VerifyToken(tok, a.PK)
+	if err != nil {
+		return
+	}
+	c, err := relayauth.ParseClaims(msg)
+	if err != nil || c.Iss != a.Mailbox || c.Sub != relayauth.EncodeKey(d.relayKey.Public().(ed25519.PublicKey)) {
+		return
+	}
+	v.PrevRelayPK = v.RelayPK
+	v.RelayURL, v.Mailbox, v.RelayPK = a.URL, a.Mailbox, append([]byte(nil), a.PK...)
+	v.Token, v.TokenExp = tok, c.Exp
+	if nt, err := d.mintForVault(); err == nil {
+		b := strictjson.NewBuilder().String("kind", "standing").String("token", nt).Bytes()
+		_, _ = d.sendLocked(ctx, "", "relay.token.issued", b, "", "")
+	}
 }
 
 // RenewVaultToken mints a fresh standing token for the vault to deposit to

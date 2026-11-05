@@ -26,6 +26,18 @@ type Relay interface {
 	// BaseURL is the vault's own relay (the audience of tokens it mints).
 	BaseURL() string
 	Register(ctx context.Context) (Limits, error)
+	// RegisterCreated registers the mailbox (RELAY-PROTOCOL §6.1) and
+	// reports whether the relay created it (201) or already had it (200).
+	RegisterCreated(ctx context.Context) (Limits, bool, error)
+	// Rotate moves the vault's mailbox to newKey (RELAY-PROTOCOL §6.7), in
+	// a request signed by this relay's key; it returns the new mailbox id.
+	// Repeated with the same key while the old mailbox lives it answers
+	// the same mailbox (0.10.1, "Repeating a rotation").
+	Rotate(ctx context.Context, newKey ed25519.PrivateKey) (string, error)
+	// WithKey returns a Relay on the same relay for another of the vault's
+	// own relay keys: a pending one, or an old one kept for deposits
+	// (VAULT-MESSAGING §3.4).
+	WithKey(key ed25519.PrivateKey) Relay
 	// Collector opens a collect session on the vault's mailbox (§12.2).
 	Collector(ctx context.Context, websocket bool) (Collector, error)
 	// Deposit deposits into a mailbox on any relay.
@@ -42,6 +54,11 @@ type Relay interface {
 	// owner_device claim (RELAY-PROTOCOL 0.9.2 §5.2): only on the tokens
 	// the vault mints for its own devices (§7.1, 0.32.0).
 	MintToken(sub ed25519.PublicKey, ttl time.Duration, jti string, quota *relayauth.Quota, ownerDevice bool) (string, error)
+	// MintFreshToken is MintToken with iat now, not backdated: the tokens
+	// of a mailbox the relay has just created again at an id with a
+	// tombstone (RELAY-PROTOCOL §6.10; VAULT-MESSAGING §3.4 "After the
+	// grace").
+	MintFreshToken(sub ed25519.PublicKey, ttl time.Duration, jti string, quota *relayauth.Quota, ownerDevice bool) (string, error)
 	MintOpenToken(ttl time.Duration, jti string) (string, error)
 	// Blob transfer (RELAY-PROTOCOL §6.8; VAULT-MESSAGING §5.5, §10.5.1).
 	// PutBlob uploads to a mailbox on any relay under a deposit token;
@@ -143,6 +160,28 @@ func (r *ClientRelay) Register(ctx context.Context) (Limits, error) {
 	return reg.Limits, err
 }
 
+// once is the client for one attempt: the relay-key rotation retries on
+// its own schedule (VAULT-MESSAGING §3.4: retry_after stored, full-jitter
+// backoff), not within the call.
+func (r *ClientRelay) once() *relayclient.Client {
+	c := *r.client(r.base)
+	c.MaxAttempts = 1
+	return &c
+}
+
+func (r *ClientRelay) RegisterCreated(ctx context.Context) (Limits, bool, error) {
+	reg, err := r.once().Register(ctx)
+	return reg.Limits, reg.Created, err
+}
+
+func (r *ClientRelay) Rotate(ctx context.Context, newKey ed25519.PrivateKey) (string, error) {
+	return r.once().Rotate(ctx, newKey)
+}
+
+func (r *ClientRelay) WithKey(key ed25519.PrivateKey) Relay {
+	return NewClientRelay(r.base, key, r.http, r.now)
+}
+
 func (r *ClientRelay) Deposit(ctx context.Context, relayURL, mailbox, token string, payload []byte) (string, error) {
 	return r.client(relayURL).Deposit(ctx, mailbox, token, payload)
 }
@@ -169,6 +208,26 @@ func (r *ClientRelay) DeleteMailbox(ctx context.Context) error {
 
 func (r *ClientRelay) MintToken(sub ed25519.PublicKey, ttl time.Duration, jti string, quota *relayauth.Quota, ownerDevice bool) (string, error) {
 	return r.client(r.base).MintToken(relayauth.EncodeKey(sub), r.base, relayclient.TokenOptions{TTL: ttl, JTI: jti, Quota: quota, OwnerDevice: ownerDevice})
+}
+
+func (r *ClientRelay) MintFreshToken(sub ed25519.PublicKey, ttl time.Duration, jti string, quota *relayauth.Quota, ownerDevice bool) (string, error) {
+	return mintFresh(r.key, r.base, r.now(), sub, ttl, jti, quota, ownerDevice)
+}
+
+// mintFresh mints a deposit token with iat = now (whole seconds), not
+// backdated (RELAY-PROTOCOL §6.10: a mailbox created again at an id with a
+// tombstone refuses tokens issued before it).
+func mintFresh(key ed25519.PrivateKey, base string, now time.Time, sub ed25519.PublicKey, ttl time.Duration, jti string, quota *relayauth.Quota, ownerDevice bool) (string, error) {
+	iat := now.UTC().Truncate(time.Second)
+	return relayauth.MintToken(key, relayauth.Claims{
+		Iss: relayauth.MailboxID(key.Public().(ed25519.PublicKey)), Sub: relayauth.EncodeKey(sub), Aud: base,
+		Iat: iat, Exp: iat.Add(ttl), Jti: jti, Scope: relayauth.ScopeDeposit, Quota: quota, OwnerDevice: ownerDevice,
+	})
+}
+
+// MintFresh is mintFresh for test relays (internal/enclavetest).
+func MintFresh(key ed25519.PrivateKey, base string, now time.Time, sub ed25519.PublicKey, ttl time.Duration, jti string, quota *relayauth.Quota, ownerDevice bool) (string, error) {
+	return mintFresh(key, base, now, sub, ttl, jti, quota, ownerDevice)
 }
 
 func (r *ClientRelay) PutBlob(ctx context.Context, relayURL, mailbox, token string, data []byte) (string, time.Time, error) {

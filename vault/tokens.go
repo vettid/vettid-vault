@@ -59,6 +59,16 @@ func (m *Manager) mintReconnect(p *Peer, now time.Time, acc []IssuedToken) (stri
 }
 
 func (m *Manager) mint(p *Peer, kind string, ttl time.Duration, quota *relayauth.Quota, now time.Time, acc []IssuedToken) (string, []IssuedToken, error) {
+	tok, it, err := m.mintBy(m.relay, false, p, kind, ttl, quota, now)
+	if err != nil {
+		return "", acc, err
+	}
+	return tok, append(acc, it), nil
+}
+
+// mintBy mints through r: the current key's relay, or a pending key's
+// (§3.4). fresh: iat now, not backdated (RELAY-PROTOCOL §6.10).
+func (m *Manager) mintBy(r Relay, fresh bool, p *Peer, kind string, ttl time.Duration, quota *relayauth.Quota, now time.Time) (string, IssuedToken, error) {
 	jti := m.newID(now)
 	// §7.1 (0.32.0, release A): the standing tokens of the vault's own
 	// app carry owner_device; no other token does (not a request,
@@ -66,13 +76,35 @@ func (m *Manager) mint(p *Peer, kind string, ttl time.Duration, quota *relayauth
 	// connection's: only the app sends attachments, §10.5.1, so only its
 	// uploads may use the room the relay keeps).
 	ownerDevice := kind == TokStanding && p.Kind == KindApp
-	tok, err := m.relay.MintToken(p.Relay.PK, ttl, jti, quota, ownerDevice)
-	if err != nil {
-		return "", acc, err
+	var tok string
+	var err error
+	iat := now.UTC().Truncate(time.Second)
+	if fresh {
+		tok, err = r.MintFreshToken(p.Relay.PK, ttl, jti, quota, ownerDevice)
+	} else {
+		tok, err = r.MintToken(p.Relay.PK, ttl, jti, quota, ownerDevice)
+		// relayclient backdates iat by 60 s (RELAY-PROTOCOL §5.2); exp = iat + ttl.
+		iat = iat.Add(-tokenBackdate)
 	}
-	// relayclient backdates iat by 60 s (RELAY-PROTOCOL §5.2); exp = iat + ttl.
-	exp := now.UTC().Truncate(time.Second).Add(-tokenBackdate).Add(ttl)
-	return tok, append(acc, IssuedToken{JTI: jti, Kind: kind, Sub: relayauth.EncodeKey(p.Relay.PK), PeerID: p.ID, Exp: exp}), nil
+	if err != nil {
+		return "", IssuedToken{}, err
+	}
+	return tok, IssuedToken{JTI: jti, Kind: kind, Sub: relayauth.EncodeKey(p.Relay.PK), PeerID: p.ID, Exp: iat.Add(ttl)}, nil
+}
+
+// mintKind mints a standing or reconnect token for p through r, with the
+// lifetime and quota of its kind (§7.1, §6.6).
+func (m *Manager) mintKind(r Relay, fresh bool, p *Peer, kind string, now time.Time) (string, IssuedToken, error) {
+	if kind == TokReconnect {
+		ttl := handshake.ReconnectTokenLifetime(time.Duration(m.limits.MaxTokenLifetimeSeconds) * time.Second)
+		quota := &relayauth.Quota{Msgs: i64(handshake.ReconnectTokenQuotaMsgs), Bytes: i64(handshake.ReconnectTokenQuotaBytes)}
+		return m.mintBy(r, fresh, p, kind, ttl, quota, now)
+	}
+	var quota *relayauth.Quota
+	if p.Kind == KindConnection {
+		quota = &relayauth.Quota{Msgs: i64(PeerQuotaMsgs), Bytes: i64(PeerQuotaBytes)}
+	}
+	return m.mintBy(r, fresh, p, kind, m.standingTTL(p.Kind), quota, now)
 }
 
 // heldToken validates a token another principal issued to the vault: its
@@ -216,10 +248,14 @@ func (m *Manager) storeIssuedTo(p *Peer, body json.RawMessage, now time.Time) {
 		}
 		return
 	}
-	if ht.Exp.After(p.Standing.Exp) {
+	// A token for the vault's current relay key replaces one held for an
+	// old key whatever their ends, and acknowledges the new address (§3.4
+	// "The signal").
+	if ht.Exp.After(p.Standing.Exp) || m.onOldKey(p.Standing.Token) {
 		p.Standing = ht
 		m.retryPeer(p.ID)
 	}
+	m.noteAddressAck(p.ID, "", true)
 }
 
 // denySub revokes every token issued to p's relay key (§7.4).

@@ -248,7 +248,7 @@ func (h managerHost) RotateIdentity(now time.Time) error {
 	if h.m.st.HeldKeyRotation != nil {
 		return errRotationHeld
 	}
-	return h.m.rotateIdentity(now)
+	return h.m.rotateKeys(now, true) // credential.rotate (§3.5.5): the way out of a refused relay key (§3.4)
 }
 
 var errRotationHeld = errors.New("vault: a credential key rotation statement is still held")

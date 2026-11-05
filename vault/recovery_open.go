@@ -555,9 +555,11 @@ func (m *Manager) finishOpen(ctx context.Context, p RecoveryOpenParams, mv *Mani
 	now time.Time) (*Manager, *RecoveryOpenOutcome) {
 	var err error
 	m.relay = p.Relay(m.st.Relay.URL, m.keys.relay)
-	if m.limits, err = m.relay.Register(ctx); err != nil {
-		m.zeroize()
-		return nil, out.fail(OpenRetry)
+	if !m.rk.fromStorage { // a relay key pending since an earlier run: its rotate instead (§3.4)
+		if m.limits, err = m.relay.Register(ctx); err != nil {
+			m.zeroize()
+			return nil, out.fail(OpenRetry)
+		}
 	}
 	if mv != nil && mv.Serial > m.hdr.ManifestSerial {
 		m.hdr.ManifestSerial = mv.Serial

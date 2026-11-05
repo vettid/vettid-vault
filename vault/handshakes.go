@@ -570,7 +570,15 @@ func (m *Manager) peer(id string) *Peer {
 // become a request that awaits approval (0.10.3).
 func (m *Manager) handleFin(ctx context.Context, id string, raw []byte, sender ed25519.PublicKey, now time.Time) disposition {
 	aw, r := m.st.Awaiting[id], m.awaiting[id]
-	fr, err := r.HandleFin(raw, sender, now)
+	// A peer that moved to a new relay key during the handshake (its
+	// relay.address.update came after its hs.init, VAULT-MESSAGING §3.4)
+	// deposits hs.fin with the new key: it is the key on record for it
+	// now (awaitingByKids matched it), and stands for the hs.init's.
+	cs := sender
+	if p := m.peer(aw.PeerID); aw.New == nil && p != nil && suite.EqualPublic(sender, p.Relay.PK) {
+		cs = r.Sender()
+	}
+	fr, err := r.HandleFin(raw, cs, now)
 	switch {
 	case errors.Is(err, handshake.ErrType):
 		// A message in the new epoch that arrived before hs.fin: the epoch

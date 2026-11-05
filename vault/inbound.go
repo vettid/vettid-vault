@@ -64,6 +64,19 @@ func (m *Manager) Start(ctx context.Context) error {
 	if err := m.persist(ctx, false); err != nil {
 		return err
 	}
+	// §12.2 step 3 (0.84.0): complete a pending relay key (the rotate, or
+	// the registration, then the second write); one attempt, and the steps
+	// after it go on whatever its answer. Then the new address again to
+	// the recipients that have not acknowledged it (§3.4 (b)).
+	m.relayKeyAtUnlock(ctx)
+	if m.locked {
+		return m.lockedErr()
+	}
+	m.resendAddressUpdates(m.now())
+	m.pruneOldRelayKeys(m.now())
+	if err := m.flushIfDirty(ctx); err != nil { // the resends are sent only once stored
+		return err
+	}
 	m.attStart(ctx)  // finishes what a lock or crash interrupted, from the index (§10.5.1)
 	m.reportAppKey() // a backup bit first recorded by this release (0.16.0)
 	m.drainOutbox(ctx)
@@ -101,6 +114,14 @@ func (m *Manager) Run(ctx context.Context) error {
 			refused++
 		default:
 			refused = 0
+		}
+		if RelayCode(err) == CodeMailboxUnknown {
+			// §3.4, §12.2 (0.84.0): while a relay key is pending (and not
+			// refused), mailbox_unknown on the current mailbox starts the
+			// rotate, then the registration of the pending key.
+			if err := m.relayMailboxUnknown(ctx); err != nil && (errors.Is(err, ErrLocked) || errors.Is(err, ErrSplitBrain)) {
+				return err
+			}
 		}
 		if !sleep(ctx, retryWait(refused)) {
 			return ctx.Err()
@@ -183,6 +204,8 @@ func (m *Manager) getCollector(ctx context.Context) (Collector, error) {
 			return nil, err
 		}
 	}
+	// §3.4, §12.2: also the old mailboxes still in the relay's grace.
+	c = m.withOldCollectors(ctx, c)
 	m.collector = c
 	return c, nil
 }
@@ -246,6 +269,7 @@ func (m *Manager) ProcessBatch(ctx context.Context, c Collector, msgs []Message)
 			return err
 		}
 	}
+
 	m.reportAlarms()
 	m.reportAppKey()
 	if h := m.opt.Hooks.AfterFlush; h != nil {
@@ -260,6 +284,14 @@ func (m *Manager) ProcessBatch(ctx context.Context, c Collector, msgs []Message)
 	if m.deletePending {
 		m.deletePending = false
 		return m.finishDelete(ctx) // §12.5; the vault is locked afterwards
+	}
+	// §3.4: a relay key this batch stored as pending (credential.rotate, a
+	// recovered phone's pairing), or a sooner retry that came due: the
+	// relay's rotate, then the second write; its updates go out with the
+	// drain below.
+	m.relayKeyStep(ctx, false)
+	if m.locked {
+		return m.lockedErr()
 	}
 	m.drainOutbox(ctx)
 	if err := m.flushIfDirty(ctx); err != nil {
@@ -296,6 +328,9 @@ func (m *Manager) handleMessage(ctx context.Context, msg Message, now time.Time)
 		return ackAfterFlush
 	}
 	p := m.peerByRelayKey(sender)
+	if p != nil && msg.JTI != "" {
+		m.noteAddressAck(p.ID, msg.JTI, false) // §3.4 "The signal": a deposit on a new token
+	}
 	// §7.1 (0.10.3): a request token covers only the rest of a handshake
 	// that awaits approval and connection.approved.
 	if m.issuedKind(msg.JTI) == TokRequest {

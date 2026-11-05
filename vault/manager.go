@@ -263,6 +263,8 @@ type Manager struct {
 	relay     Relay
 	limits    Limits
 	collector Collector
+	// rk is the relay-key rotation's runtime (§3.4; relaykey.go).
+	rk relayKeyRun
 
 	sessions map[string]*handshake.Keyring
 	awaiting map[string]*handshake.Responder
@@ -445,6 +447,10 @@ type keyset struct {
 	ik      ed25519.PrivateKey
 	kem     *suite.PrivateKey
 	retired []*suite.PrivateKey
+	// pendingRelay is RelayState.Pending's key, oldRelay the kept old
+	// relay keys (RelayState.Old, in order) (§3.4).
+	pendingRelay ed25519.PrivateKey
+	oldRelay     []ed25519.PrivateKey
 }
 
 func (k *keyset) destroy() {
@@ -452,6 +458,10 @@ func (k *keyset) destroy() {
 		return
 	}
 	suite.Wipe(k.relay)
+	suite.Wipe(k.pendingRelay)
+	for _, o := range k.oldRelay {
+		suite.Wipe(o)
+	}
 	suite.Wipe(k.ik)
 	if k.kem != nil {
 		k.kem.Destroy()
@@ -776,6 +786,18 @@ func (m *Manager) loadKeys() error {
 		return ErrState
 	}
 	k.relay = ed25519.NewKeyFromSeed(m.st.Relay.Seed)
+	if pr := m.st.Relay.Pending; pr != nil {
+		if len(pr.Seed) != 32 {
+			return ErrState
+		}
+		k.pendingRelay = ed25519.NewKeyFromSeed(pr.Seed)
+	}
+	for _, o := range m.st.Relay.Old {
+		if len(o.Seed) != 32 {
+			return ErrState
+		}
+		k.oldRelay = append(k.oldRelay, ed25519.NewKeyFromSeed(o.Seed))
+	}
 	k.ik = ed25519.NewKeyFromSeed(m.st.IdentitySeed)
 	if k.kem, err = suite.NewPrivateKey(m.st.KEMSeed); err != nil {
 		return ErrState
@@ -788,6 +810,11 @@ func (m *Manager) loadKeys() error {
 		k.retired = append(k.retired, rk)
 	}
 	m.keys = k
+	// A key pending in the state just read was left by an earlier run
+	// (§3.4): it is stored, and the unlock completes it (§12.2 step 3).
+	if pr := m.st.Relay.Pending; pr != nil {
+		m.rk.stored, m.rk.fromStorage, m.rk.leftMailbox = true, true, mailboxOf(k.pendingRelay)
+	}
 	return nil
 }
 
@@ -969,6 +996,7 @@ func (m *Manager) persistState(ctx context.Context, create bool) error {
 	m.dirty = false
 	m.unstored = nil
 	m.stateWritten = true
+	m.rk.stored = m.st.Relay.Pending != nil // §3.4 step 2 follows the write that stored the key
 	// The header is behind until its write below succeeds.
 	m.headerBehind = true
 	if err := m.promote(); err != nil { // step 3, written below
@@ -1201,6 +1229,12 @@ func (m *Manager) zeroize() {
 			m.st.PendingUnlink.wipe() // the kept send key (§11.14.10); stored under the DEK
 		}
 		suite.Wipe(m.st.Relay.Seed)
+		if pr := m.st.Relay.Pending; pr != nil {
+			suite.Wipe(pr.Seed)
+		}
+		for _, o := range m.st.Relay.Old {
+			suite.Wipe(o.Seed)
+		}
 		suite.Wipe(m.st.IdentitySeed)
 		suite.Wipe(m.st.KEMSeed)
 		suite.Wipe(m.st.WakeSeed)

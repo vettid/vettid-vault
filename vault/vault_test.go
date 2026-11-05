@@ -60,6 +60,79 @@ type stubRelay struct {
 	// blobs is an in-memory blob store (RELAY-PROTOCOL §6.8) two fixtures
 	// may share; nil: the relay has no blobs.
 	blobs *stubBlobs
+	// rot is the relay's answers to the relay-key rotation (§3.4), shared
+	// across unlocks when a test sets it; nil: every rotate succeeds.
+	rot *stubRot
+	// root is the relay a WithKey relay records its deposits on.
+	root *stubRelay
+	// now is the relay client's clock (nil: time.Now).
+	now func() time.Time
+}
+
+// stubRot scripts the rotate and registration answers (RELAY-PROTOCOL
+// §6.1, §6.7) and records the calls.
+type stubRot struct {
+	mu sync.Mutex
+	// rotate and register, if set, answer each call (nil: success).
+	rotate   func(newMailbox string) error
+	register func(mailbox string) (created bool, err error)
+	// rotated are the new mailboxes of the rotates made; registered the
+	// mailboxes registered (by RegisterCreated).
+	rotated    []string
+	registered []string
+}
+
+func (r *stubRelay) top() *stubRelay {
+	if r.root != nil {
+		return r.root
+	}
+	return r
+}
+
+func (r *stubRelay) RegisterCreated(context.Context) (Limits, bool, error) {
+	l, _ := r.Register(context.Background())
+	t := r.top()
+	if t.rot == nil {
+		return l, false, nil
+	}
+	t.rot.mu.Lock()
+	defer t.rot.mu.Unlock()
+	mb := mailboxOf(r.key)
+	t.rot.registered = append(t.rot.registered, mb)
+	if t.rot.register != nil {
+		created, err := t.rot.register(mb)
+		return l, created, err
+	}
+	return l, false, nil
+}
+
+func (r *stubRelay) Rotate(_ context.Context, newKey ed25519.PrivateKey) (string, error) {
+	mb := mailboxOf(newKey)
+	t := r.top()
+	if t.rot == nil {
+		return mb, nil
+	}
+	t.rot.mu.Lock()
+	defer t.rot.mu.Unlock()
+	t.rot.rotated = append(t.rot.rotated, mb)
+	if t.rot.rotate != nil {
+		if err := t.rot.rotate(mb); err != nil {
+			return "", err
+		}
+	}
+	return mb, nil
+}
+
+func (r *stubRelay) WithKey(key ed25519.PrivateKey) Relay {
+	return &stubRelay{base: r.base, key: key, root: r.top(), claims: r.claims, blobs: r.blobs, now: r.now}
+}
+
+func (r *stubRelay) MintFreshToken(sub ed25519.PublicKey, ttl time.Duration, jti string, q *relayauth.Quota, ownerDevice bool) (string, error) {
+	now := time.Now
+	if r.now != nil {
+		now = r.now
+	}
+	return MintFresh(r.key, r.base, now(), sub, ttl, jti, q, ownerDevice)
 }
 
 // stubBlobs is a test relay's blob storage, keyed by blob id.
@@ -77,6 +150,8 @@ type stubBlob struct {
 type stubDeposit struct {
 	mailbox, token string
 	payload        []byte
+	// sender is the depositing key (X-VettID-Key).
+	sender ed25519.PublicKey
 }
 
 func (r *stubRelay) BaseURL() string { return r.base }
@@ -87,6 +162,8 @@ func (r *stubRelay) Collector(context.Context, bool) (Collector, error) {
 	return nil, errors.New("no collect")
 }
 func (r *stubRelay) Deposit(_ context.Context, _, mailbox, token string, payload []byte) (string, error) {
+	sender := r.key.Public().(ed25519.PublicKey)
+	r = r.top()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.failWith != nil {
@@ -95,10 +172,11 @@ func (r *stubRelay) Deposit(_ context.Context, _, mailbox, token string, payload
 	if err := r.failMailbox[mailbox]; err != nil {
 		return "", err
 	}
-	r.deposits = append(r.deposits, stubDeposit{mailbox, token, append([]byte(nil), payload...)})
+	r.deposits = append(r.deposits, stubDeposit{mailbox, token, append([]byte(nil), payload...), sender})
 	return fmt.Sprintf("m%d", len(r.deposits)), nil
 }
 func (r *stubRelay) Revoke(_ context.Context, kind, value string) error {
+	r = r.top()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.revoked = append(r.revoked, kind+":"+value)

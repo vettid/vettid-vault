@@ -485,6 +485,9 @@ func (p *Party) deposit(e *Entry, r *PeerRec) {
 		tok = r.standing(with, box, w.Now)
 	}
 	if tok.JTI == 0 {
+		if p.w.optA && m.Kind == KResp && !m.Reconnect && !slices.Contains(r.DropAns, m.HS) {
+			r.DropAns = append(r.DropAns, m.HS) // §6.3.1 (J)
+		}
 		if !r.Device && !(m.Kind == KInit && m.Reconnect) {
 			p.wantReconnect(r)
 		}
@@ -732,6 +735,7 @@ func (p *Party) collectRound(max int) int {
 			w.R.ack(m.Box, m.ID)
 		}
 		p.flush()
+		p.startWanted()
 	})
 	return len(got)
 }

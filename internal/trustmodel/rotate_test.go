@@ -55,6 +55,15 @@ func (p *Party) rotate(path int) {
 			} else if r.Pend != nil {
 				p.abandonPending(r, "S5: own ik rotated", true)
 			}
+			if w.optA { // 0.86.0 S5: own answers awaiting hs.fin are dropped
+				for len(r.Ans) > 0 {
+					p.dropAnswer(r, r.Ans[0].ID)
+					w.stat("A:S5-answer-dropped")
+				}
+				if r.Own == nil && r.Pend == nil {
+					p.startHS(r, false)
+				}
+			}
 		}
 	}
 	p.st.LastRot = w.Now
@@ -243,6 +252,12 @@ func (p *Party) startWanted() {
 	any := false
 	for i := range p.st.Peers {
 		r := &p.st.Peers[i]
+		for _, id := range r.DropAns { // §6.3.1 (J): an undepositable answer ends at once
+			p.dropAnswer(r, id)
+			p.w.stat("A:answer-undepositable")
+			any = true
+		}
+		r.DropAns = nil
 		if r.WantRC {
 			r.WantRC = false
 			if r.Own == nil || !r.Own.Reconnect {

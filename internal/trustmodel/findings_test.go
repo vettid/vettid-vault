@@ -25,7 +25,17 @@ func expectViolation(t *testing.T, s *scen, inv string) {
 // hs.init's rotations is forgotten when that handshake does not finish, so
 // Q follows the other successor and never suspends.
 func TestFindingA_EvidenceInUnfinishedHandshakeIsForgotten(t *testing.T) {
-	s := newScen(t, 2)
+	for _, old := range []bool{true, false} {
+		s := newScen(t, 2)
+		if old {
+			s = newScenOld(t, 2)
+		}
+		findingA(s, old)
+	}
+}
+
+func findingA(s *scen, old bool) {
+	t := s.t
 	P, Q := s.p(0), s.p(1)
 	s.w.makeCopy(P)
 	C := s.w.P[len(s.w.P)-1]
@@ -42,7 +52,14 @@ func TestFindingA_EvidenceInUnfinishedHandshakeIsForgotten(t *testing.T) {
 	s.w.holdRotate = false
 	s.run(4, Q, P)
 	s.w.checkEnd(false)
-	expectViolation(t, s, "I4")
+	if old {
+		expectViolation(t, s, "I4")
+	} else {
+		s.noViolation("I4") // 0.86.0: seen links count for rule C
+		if Q.st.peer(P.ID).Status != stSuspended {
+			t.Errorf("A under 0.86.0: Q did not suspend")
+		}
+	}
 }
 
 // Finding B (I4, step order, rule C for relay links): while Q is suspended
@@ -50,7 +67,17 @@ func TestFindingA_EvidenceInUnfinishedHandshakeIsForgotten(t *testing.T) {
 // before step 3's evidence; resolve then resumes the connection although
 // a relay fork was seen ("the only exit is a new invitation").
 func TestFindingB_RelayForkHiddenByIdentityResolve(t *testing.T) {
-	s := newScen(t, 2)
+	for _, old := range []bool{true, false} {
+		s := newScen(t, 2)
+		if old {
+			s = newScenOld(t, 2)
+		}
+		findingB(s, old)
+	}
+}
+
+func findingB(s *scen, old bool) {
+	t := s.t
 	P, Q := s.p(0), s.p(1)
 	s.w.makeCopy(P)
 	C := s.w.P[len(s.w.P)-1]
@@ -60,8 +87,18 @@ func TestFindingB_RelayForkHiddenByIdentityResolve(t *testing.T) {
 	s.rotate(C, pathCred) // the copy: ik0 -> X, K0 -> K0'
 	s.run(2, Q)           // identity conflict: suspend; the relay update: refused (suspended)
 	s.do(Q, func() { Q.resolve(Q.st.peer(P.ID)); Q.write(); Q.flush() })
+	if !old {
+		// 0.86.0: the relay fork is recorded while suspended; resolve: not_found
+		if Q.st.peer(P.ID).Status != stSuspended || !Q.st.peer(P.ID).RelayFrk {
+			t.Errorf("B under 0.86.0: resolve resumed the connection")
+		}
+		s.run(3, Q, P)
+		s.w.checkEnd(false)
+		s.noViolation("I4")
+		return
+	}
 	if Q.st.peer(P.ID).Status != stActive {
-		t.Fatalf("resolve did not resume (relay fork recorded): the finding is gone")
+		t.Fatalf("resolve did not resume under the old rules")
 	}
 	s.run(3, Q, P)
 	s.w.checkEnd(false)
@@ -189,7 +226,12 @@ func TestFindingE_ConfirmedEpochHidesForkEvidence(t *testing.T) {
 	s.do(C, func() { C.enqueue(Q.ID, Msg{Kind: KSession, Probe: s.w.id()}, nil); C.write(); C.flush() })
 	s.run(2, Q)
 	s.w.holdRotate = false
-	expectViolation(t, s, "I3")
+	// 0.86.0 rev. 3: the copy's epoch was destroyed when Q accepted the
+	// original's reconnect naming its confirmed epoch: refused superseded_epoch
+	s.noViolation("I3")
+	if s.w.stats["cell E:superseded-epoch"] == 0 || s.w.stats["A:destroyed-later-epoch"] == 0 {
+		t.Errorf("E: the copy's epoch was not destroyed\n  %s", strings.Join(s.w.log, "\n  "))
+	}
 }
 
 // Finding G (§6.3.1 lifetimes): a lost hs.confirm while the initiator is

@@ -106,6 +106,7 @@ func (q *Party) beforeAccept(r *PeerRec, m *RMsg, pos Pos) {
 func (q *Party) reconfirm() {
 	for i := range q.st.Peers {
 		r := &q.st.Peers[i]
+		r.IdResendBatch = false
 		if r.Reconfirm {
 			r.Reconfirm = false
 			if r.Cur != 0 && !q.OldConfirm {
@@ -170,4 +171,39 @@ func (q *Party) confFork(r *PeerRec) bool {
 		}
 	}
 	return false
+}
+
+// destroyLater: §6.3.1 (rev. 3): Q accepts a rekey or reconnect naming its
+// confirmed epoch; every later epoch the peer never confirmed is destroyed
+// and messages under them are refused (superseded_epoch).
+func (q *Party) destroyLater(r *PeerRec) {
+	after := false
+	for j := range r.Epochs {
+		ep := &r.Epochs[j]
+		if after && !ep.Destroyed && !ep.Pending {
+			ep.Destroyed = true
+			q.w.stat("A:destroyed-later-epoch")
+			q.w.logf("%s: E%d with %s DESTROYED (never confirmed)", q.Name, ep.ID, q.w.party(r.ID).Name)
+			if r.Cur == ep.ID {
+				r.Cur = r.ConfID
+			}
+		}
+		after = after || ep.ID == r.ConfID
+	}
+}
+
+// idResend: S5 resend. A session message from Q under an epoch whose
+// P-side signer is an ancestor of P's ik, deposited after P's rotation.
+func (p *Party) idResend(r *PeerRec, m *RMsg) {
+	ep := r.epoch(m.P.Epoch)
+	if ep == nil || ep.Own == p.st.IK || p.ownLinks(ep.Own) == nil || m.DepAt < p.st.LastRot {
+		return
+	}
+	if r.IdResendBatch || p.w.Now-r.IdResend < hour {
+		return
+	}
+	r.IdResend, r.IdResendBatch = p.w.Now, true
+	links := p.ownLinks(ep.Own)
+	p.w.stat("A:identity.rotate-resent")
+	p.enqueue(r.ID, Msg{Kind: KIdRot, Rot: links}, nil)
 }

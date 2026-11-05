@@ -380,15 +380,24 @@ func (q *Party) resolve(r *PeerRec) {
 		return // not_found
 	}
 	w := q.w
-	realB := w.iklinkBy[r.CandB].By == r.ID
-	if !realB {
-		r.Dropped = append(r.Dropped, r.CandB)
-	} else {
-		i := slices.Index(r.Chain, r.CandA)
+	keep, drop := r.CandA, r.CandB
+	if w.iklinkBy[r.CandB].By == r.ID {
+		keep, drop = r.CandB, r.CandA
+	}
+	if i := slices.Index(r.Chain, drop); i >= 0 {
 		r.Dropped = append(r.Dropped, r.Chain[i:]...)
 		r.Chain = r.Chain[:i]
-		r.Chain = append(r.Chain, r.CandB)
-		r.IK, r.KEM = r.CandB.New, r.CandB.KEM
+		r.IK = drop.Old
+		if i > 0 {
+			r.KEM = r.Chain[i-1].KEM
+		}
+	} else {
+		r.Dropped = append(r.Dropped, drop)
+	}
+	r.Seen = slices.DeleteFunc(r.Seen, func(l IKLink) bool { return l == drop })
+	if !r.followed(keep) && keep.Old == r.IK {
+		r.Chain = append(r.Chain, keep)
+		r.IK, r.KEM = keep.New, keep.KEM
 	}
 	w.logf("%s: resolve %s keeps %d", q.Name, w.party(r.ID).Name, r.IK)
 	w.stat("resolve")
@@ -423,6 +432,22 @@ func (w *World) quiet() bool {
 // and online, no faults, leases expired, messages delivered and processed,
 // time past every resend (an unlock) and handshake retry.
 func (w *World) settle() {
+	w.settleOnce()
+	if w.optA {
+		// 0.86.0 I1: quiescence includes one rekey interval (§6.5: 7 days
+		// for devices) after the last rotation
+		last := int64(0)
+		for _, p := range w.real() {
+			last = max(last, p.st.LastRot)
+		}
+		if last != 0 && w.Now < last+7*day+hour {
+			w.advance(last + 7*day + hour - w.Now)
+			w.settleOnce()
+		}
+	}
+}
+
+func (w *World) settleOnce() {
 	w.p429, w.pRef = 0, 0
 	for _, p := range w.real() {
 		p.crashAt, p.failAt, p.snapAt = 0, 0, 0

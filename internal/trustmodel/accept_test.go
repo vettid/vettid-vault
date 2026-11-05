@@ -59,6 +59,9 @@ func (q *Party) handle(m *RMsg, set []Key) bool {
 	case "accept", "follow", "answer", "ignore":
 		q.st.Seen[M.Inner] = true
 		w.checkI3(q, r, m, d)
+		if w.optA && M.Epoch != 0 && M.Kind != KFin {
+			q.idResend(r, m)
+		}
 	}
 	return true
 }
@@ -120,6 +123,15 @@ func (q *Party) acceptFrom(r *PeerRec, m *RMsg, pos Pos, set []Key) dec {
 	col := colName[M.Kind]
 	// (1) suspended
 	if r.Status == stSuspended {
+		if q.w.optA && M.Kind == KUpdate && r.relayState(m.Sender, pos) != rkForeign {
+			// 0.86.0: the relay links are checked by rule C first, so a
+			// relay fork is recorded while suspended (resolve: not_found)
+			if l, ok := r.relayConflict(M.RLinks); ok {
+				r.RelayFrk = true
+				q.w.stat("ruleC:relay-while-suspended")
+				q.w.logf("%s: relay fork recorded while suspended (%v)", q.Name, l)
+			}
+		}
 		return refuse("suspended", "A:suspended:"+col)
 	}
 	if r.Status == stStale {
@@ -137,6 +149,9 @@ func (q *Party) acceptFrom(r *PeerRec, m *RMsg, pos Pos, set []Key) dec {
 	// (3) evidence first: rule C on every link the message carries
 	if d, stop := q.ruleC(r, M); stop {
 		return d
+	}
+	if ep := r.epoch(M.Epoch); ep != nil && ep.Destroyed {
+		return refuse("superseded_epoch", "E:superseded-epoch")
 	}
 	cell := "A:" + rowName[rs] + ":" + col
 	// (4) Table A
@@ -227,9 +242,16 @@ func (q *Party) ruleC(r *PeerRec, M *Msg) (dec, bool) {
 		if slices.Contains(r.Dropped, l) {
 			continue // remembered as dropped: refused later, not a new conflict
 		}
-		for _, f := range r.Chain {
-			if f.Old == l.Old && f.New != l.New {
+		prior := slices.Clone(r.Chain)
+		if q.w.optA {
+			prior = append(prior, r.Seen...) // 0.86.0: followed or seen
+		}
+		for _, f := range prior {
+			if f.Old == l.Old && f.New != l.New && !slices.Contains(r.Dropped, f) {
 				q.w.stat("ruleC:identity")
+				if !r.followed(f) {
+					q.w.stat("ruleC:identity-vs-seen")
+				}
 				if r.Device {
 					return q.deviceConflict(r, "C:identity-device"), true
 				}
@@ -240,21 +262,42 @@ func (q *Party) ruleC(r *PeerRec, M *Msg) (dec, bool) {
 		}
 	}
 	if M.Kind == KUpdate {
+		if _, bad := r.relayConflict(M.RLinks); bad {
+			q.w.stat("ruleC:relay")
+			if r.Device {
+				return q.deviceConflict(r, "C:relay-device"), true
+			}
+			r.RelayFrk = true
+			q.suspend(r, "connection.fork_suspected/relay")
+			return dec{"suspend", "fork", "C:relay"}, true
+		}
+	}
+	if q.w.optA { // remember what passed as seen, one per old key
+		for _, l := range M.Rot {
+			if !slices.ContainsFunc(r.Seen, func(f IKLink) bool { return f.Old == l.Old }) && !slices.Contains(r.Dropped, l) {
+				r.Seen = append(r.Seen, l)
+			}
+		}
 		for _, l := range M.RLinks {
-			for _, f := range r.RChain {
-				if f.Old == l.Old && f.New != l.New {
-					q.w.stat("ruleC:relay")
-					if r.Device {
-						return q.deviceConflict(r, "C:relay-device"), true
-					}
-					r.RelayFrk = true
-					q.suspend(r, "connection.fork_suspected/relay")
-					return dec{"suspend", "fork", "C:relay"}, true
-				}
+			if !slices.ContainsFunc(r.RSeen, func(f RLink) bool { return f.Old == l.Old }) {
+				r.RSeen = append(r.RSeen, l)
 			}
 		}
 	}
 	return dec{}, false
+}
+
+// relayConflict: a relay link whose old key has another followed (or seen) successor.
+func (r *PeerRec) relayConflict(links []RLink) (RLink, bool) {
+	prior := append(slices.Clone(r.RChain), r.RSeen...)
+	for _, l := range links {
+		for _, f := range prior {
+			if f.Old == l.Old && f.New != l.New {
+				return l, true
+			}
+		}
+	}
+	return RLink{}, false
 }
 
 // deviceConflict: between a vault and its own device nothing suspends; the
@@ -533,6 +576,18 @@ func (q *Party) followIK(r *PeerRec, app []IKLink, x Pos) {
 
 // forkEpoch: ctx names an epoch Q superseded by one signed by an ancestor ik.
 func (q *Party) forkEpoch(r *PeerRec, ctx int) bool {
+	if q.w.optA && !q.w.literalFork {
+		// 0.86.0: superseded by an epoch signed by an ancestor ik AND
+		// established after the link (a demoted epoch)
+		after := false
+		for _, ep := range r.Epochs {
+			if after && ep.Demoted {
+				return true
+			}
+			after = after || ep.ID == ctx
+		}
+		return false
+	}
 	for j, ep := range r.Epochs {
 		if ep.ID == ctx {
 			for _, next := range r.Epochs[j+1:] {
@@ -573,9 +628,13 @@ func (q *Party) tableBInit(r *PeerRec, m *RMsg, pos Pos) dec {
 			}
 			ok = ok || (r.Pend != nil && M.Ctx == r.Pend.ID) || (r.ConfID != 0 && M.Ctx == r.ConfID) ||
 				slices.Contains(r.AbanIDs, M.Ctx)
-			if ok && r.ConfID != r.Cur && M.Ctx == r.ConfID && q.confFork(r) {
-				fork = true // §6.3.1 precedence: fork evidence, judged at hs.fin (§6.6)
-				cell += ":confirmed-epoch-fork"
+			if ok && r.ConfID != r.Cur && M.Ctx == r.ConfID {
+				if q.confFork(r) {
+					fork = true // §6.3.1 precedence: fork evidence, judged at hs.fin (§6.6)
+					cell += ":confirmed-epoch-fork"
+				} else {
+					q.destroyLater(r)
+				}
 			}
 		}
 		if !ok {
@@ -591,6 +650,7 @@ func (q *Party) tableBInit(r *PeerRec, m *RMsg, pos Pos) dec {
 				return dec{"suspend", "fork", cell + ":confirmed-epoch-fork"}
 			}
 			cell += ":confirmed-epoch" // §6.3.1: accepted as if current; my own rekey for it ends
+			q.destroyLater(r)
 			if o := r.Own; o != nil && !o.Reconnect {
 				q.abandonOwn(r)
 			}

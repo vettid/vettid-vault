@@ -1,6 +1,7 @@
 package trustmodel
 
 import (
+	"slices"
 	"strings"
 	"testing"
 )
@@ -158,4 +159,47 @@ func TestScenarioAS5AbandonAfterFin(t *testing.T) {
 		}
 		s.done(true, s.cellSeen("B:current:hs.init:confirmed-epoch"))
 	}
+}
+
+// Drafter's scenario (I): R's identity.rotate expires while I is locked
+// with a pending epoch; I's next message under the old epoch makes R
+// resend it; I follows, abandons the pending epoch and rekeys.
+func TestScenarioAIdentityResend(t *testing.T) {
+	s := newScen(t, 2)
+	P, Q := s.p(0), s.p(1)
+	s.w.holdRotate = true // only the ik moves
+	s.do(P, func() { P.startHS(P.st.peer(Q.ID), false); P.write(); P.flush() })
+	s.run(1, Q) // Q answers
+	s.run(1, P) // P: pending E1, hs.fin out
+	s.lock(P)
+	s.rotate(Q, pathCred) // S5: Q drops its answer; identity.rotate to P
+	s.run(1, Q)           // the hs.fin arrives: no answer, dropped
+	s.tick(msgTTL + hour) // the identity.rotate expires while P is locked
+	s.do(P, P.unlock)
+	s.do(P, func() { P.enqueue(Q.ID, Msg{Kind: KSession, Probe: s.w.id()}, nil); P.write(); P.flush() })
+	s.run(6, Q, P)
+	s.w.holdRotate = false
+	s.done(true, func() string {
+		if s.w.stats["A:identity.rotate-resent"] == 0 {
+			return "no identity.rotate resend"
+		}
+		return ""
+	})
+}
+
+// Finding J fixed: an answer to a rekey that R cannot deposit (no valid
+// standing token for I) ends at once, and R reconnects.
+func TestScenarioAUndepositableAnswer(t *testing.T) {
+	s := newScen(t, 2)
+	P, Q := s.p(0), s.p(1)
+	Q.st.peer(P.ID).Toks = slices.DeleteFunc(Q.st.peer(P.ID).Toks, func(tk Token) bool { return !tk.Reconnect })
+	s.do(Q, Q.write) // Q's standing token for P is gone (as if expired)
+	s.do(P, func() { P.startHS(P.st.peer(Q.ID), false); P.write(); P.flush() })
+	s.run(6, Q, P)
+	s.done(true, func() string {
+		if s.w.stats["A:answer-undepositable"] == 0 {
+			return "the answer was not ended"
+		}
+		return ""
+	})
 }

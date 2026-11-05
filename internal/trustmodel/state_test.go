@@ -73,6 +73,7 @@ type Epoch struct {
 	Pending    bool // §6.3.1: an initiator's epoch awaiting confirmation
 	Abandoned  bool // §6.3.1: a pending epoch abandoned (nothing under it confirms)
 	KeysGone   bool // §6.3.1 (G): only the id is kept (for a reconnect's ctx)
+	Destroyed  bool // §6.3.1 (E, 0.86.0 rev. 3): a later epoch the peer never confirmed, destroyed
 }
 
 // PendEp is an initiator's pending epoch (§6.3.1).
@@ -127,12 +128,17 @@ type PeerRec struct {
 	RelayFrk bool
 	Warned   bool // rule C between a vault and its own device: the member was told
 
-	Pend      *PendEp // §6.3.1: my pending epoch (I initiated)
-	ConfID    int     // §6.3.1: the last epoch the peer used (other than hs.fin), or one I confirmed
-	ConfKeep  int     // unused since the revision (kept for clone compatibility)
-	ConfUntil int64   // its keys' end: 46 days from the first activation that superseded it; 0 not yet
-	AbanIDs   []int   // §6.3.1 (G): ids of epochs I abandoned, kept until a newer one is confirmed
-	Reconfirm bool    // a message under the confirmed epoch in this batch: queue hs.confirm
+	Pend          *PendEp  // §6.3.1: my pending epoch (I initiated)
+	ConfID        int      // §6.3.1: the last epoch the peer used (other than hs.fin), or one I confirmed
+	ConfKeep      int      // unused since the revision (kept for clone compatibility)
+	ConfUntil     int64    // its keys' end: 46 days from the first activation that superseded it; 0 not yet
+	AbanIDs       []int    // §6.3.1 (G): ids of epochs I abandoned, kept until a newer one is confirmed
+	Seen          []IKLink // §3.4.1 rule C (0.86.0): identity links seen at step 3, one per old key
+	RSeen         []RLink  // relay links seen at step 3, one per old key
+	DropAns       []int    // §6.3.1 (J): answers to destroy after this flush (no standing token)
+	IdResend      int64    // S5 resend: last identity.rotate resend to this peer
+	IdResendBatch bool     // ...in this batch
+	Reconfirm     bool     // a message under the confirmed epoch in this batch: queue hs.confirm
 
 	IK, KEM Key
 	Chain   []IKLink // followed identity links
@@ -269,6 +275,9 @@ func (s *State) clone() State {
 		}
 		q.Answered = slices.Clone(p.Answered)
 		q.AbanIDs = slices.Clone(p.AbanIDs)
+		q.Seen = slices.Clone(p.Seen)
+		q.RSeen = slices.Clone(p.RSeen)
+		q.DropAns = slices.Clone(p.DropAns)
 		q.Deferred = slices.Clone(p.Deferred)
 		c.Peers[i] = q
 	}

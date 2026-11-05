@@ -328,9 +328,6 @@ func (m *Manager) handleMessage(ctx context.Context, msg Message, now time.Time)
 		return ackAfterFlush
 	}
 	p := m.peerByRelayKey(sender)
-	if p != nil && msg.JTI != "" {
-		m.noteAddressAck(p.ID, msg.JTI, false) // §3.4 "The signal": a deposit on a new token
-	}
 	// §7.1 (0.10.3): a request token covers only the rest of a handshake
 	// that awaits approval and connection.approved.
 	if m.issuedKind(msg.JTI) == TokRequest {
@@ -427,6 +424,14 @@ func (m *Manager) peerByRelayKey(pk ed25519.PublicKey) *Peer {
 	}
 	for _, p := range m.st.Connections {
 		if suite.EqualPublic(p.Relay.PK, pk) {
+			return p
+		}
+	}
+	// A principal that moved to a new relay key (its relay.address.update)
+	// is still its earlier key's sender until the grace ends (§3.4).
+	now := m.now()
+	for _, p := range m.allPeers() {
+		if p.prevKey(pk, now) {
 			return p
 		}
 	}

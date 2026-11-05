@@ -609,10 +609,13 @@ func Create(ctx context.Context, p CreateParams) (*Manager, error) {
 	}
 	st.Relay.Mailbox = mailboxOf(m.keys.relay)
 	m.relay = p.Relay(p.RelayURL, m.keys.relay)
-	if m.limits, err = m.relay.Register(ctx); err != nil {
+	m.publishRelays()
+	lim, err := m.relay.Register(ctx)
+	if err != nil {
 		m.zeroize()
 		return nil, err
 	}
+	m.setLimits(lim)
 	if len(p.Account) > 0 && !m.applyAccount(p.Account, now) {
 		m.zeroize()
 		return nil, ErrAccount
@@ -1200,6 +1203,10 @@ func (m *Manager) zeroize() {
 	}
 	m.keys.destroy()
 	m.keys = nil
+	for _, k := range m.rk.copies {
+		suite.Wipe(k) // the lockless transfers' copies (publishRelays)
+	}
+	m.rk.copies = nil
 	for _, kr := range m.sessions {
 		kr.Destroy()
 	}

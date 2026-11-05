@@ -4,10 +4,13 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"math/rand/v2"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/vettid/vettid-relay/relayauth"
@@ -61,6 +64,10 @@ type relayKeyRun struct {
 	// (keys.oldRelay, by index); built when first used.
 	pending Relay
 	old     []Relay
+	// set is published for the lockless blob transfers (publishRelays);
+	// copies are the key copies it holds, wiped at the lock.
+	set    atomic.Pointer[relaySet]
+	copies []ed25519.PrivateKey
 }
 
 // Backoff of the sooner retries while unlocked (§3.4): the wait before
@@ -91,6 +98,7 @@ func (m *Manager) ownSub() string { return relayauth.EncodeKey(pubOf(m.keys.rela
 func (m *Manager) pendingRelayClient() Relay {
 	if m.relay == nil && m.opt.Relay != nil {
 		m.relay = m.opt.Relay(m.st.Relay.URL, m.keys.relay) // a recovery's open rotates before it registers
+		m.publishRelays()
 	}
 	if m.rk.pending == nil && m.keys.pendingRelay != nil {
 		m.rk.pending = m.relay.WithKey(m.keys.pendingRelay)
@@ -132,35 +140,58 @@ func heldTokenClaims(tok string) (sub string, exp time.Time, ok bool) {
 	return c.Sub, c.Exp, true
 }
 
+// oldIndex is the index of the old relay key, still used for deposits,
+// that tok was issued to; -1 for any other token.
+func (m *Manager) oldIndex(tok string) int {
+	sub, _, ok := heldTokenClaims(tok)
+	if !ok || m.keys == nil || sub == m.ownSub() {
+		return -1
+	}
+	for i, k := range m.keys.oldRelay {
+		if i < len(m.st.Relay.Old) && !m.st.Relay.Old[i].Retired && relayauth.EncodeKey(pubOf(k)) == sub {
+			return i
+		}
+	}
+	return -1
+}
+
 // relayFor is the Relay whose key a deposit on tok must be signed with:
 // the token's sub. A token another principal issued to an old relay key
 // is deposited with that key (§3.4 "Resending the new address" (a): the
 // old key is used only to deposit); anything else with the current key.
 func (m *Manager) relayFor(tok string) Relay {
-	sub, _, ok := heldTokenClaims(tok)
-	if !ok || m.keys == nil || sub == m.ownSub() {
-		return m.relay
-	}
-	for i, k := range m.keys.oldRelay {
-		if relayauth.EncodeKey(pubOf(k)) == sub {
-			return m.oldRelayClient(i)
-		}
+	if i := m.oldIndex(tok); i >= 0 {
+		return m.oldRelayClient(i)
 	}
 	return m.relay
 }
 
-// onOldKey reports whether tok was issued to one of the old relay keys.
-func (m *Manager) onOldKey(tok string) bool {
-	sub, _, ok := heldTokenClaims(tok)
-	if !ok || sub == m.ownSub() {
-		return false
+// onOldKey reports whether tok was issued to one of the old relay keys
+// still used for deposits.
+func (m *Manager) onOldKey(tok string) bool { return m.oldIndex(tok) >= 0 }
+
+// keyRank orders the vault's relay keys a token may be issued to: the
+// current key highest, then the old ones from the latest; 0 for none.
+func (m *Manager) keyRank(tok string) int {
+	if i := m.oldIndex(tok); i >= 0 {
+		return i + 1
 	}
-	for _, k := range m.keys.oldRelay {
-		if relayauth.EncodeKey(pubOf(k)) == sub {
-			return true
-		}
+	if sub, _, ok := heldTokenClaims(tok); ok && m.keys != nil && sub == m.ownSub() {
+		return len(m.keys.oldRelay) + 1
 	}
-	return false
+	return 0
+}
+
+// mintRelay is the Relay that mints p's tokens: the key p knows the vault
+// by. A first contact begun under an old relay key (an invitation or
+// pairing made before the rotation, a handshake in flight) finishes on
+// that key, and p is sent the new address when it completes; every
+// principal that was sent it gets tokens from the current key.
+func (m *Manager) mintRelay(p *Peer) Relay {
+	if _, sent := m.st.Relay.Updates[p.ID]; !sent {
+		return m.relayFor(p.Standing.Token)
+	}
+	return m.relay
 }
 
 // relayRecipients are the recipients of a relay-key rotation: every active
@@ -414,14 +445,14 @@ func (m *Manager) relayKeyCall(ctx context.Context) (out relayOutcome, fresh boo
 		// again creates nothing (RELAY-PROTOCOL §6.1); a failure keeps
 		// the limits the vault has.
 		if lim, _, rerr := pr.RegisterCreated(ctx); rerr == nil {
-			m.limits = lim
+			m.setLimits(lim)
 		}
 		return relayDone, false, nil
 	}
 	if RelayCode(err) == CodeMailboxUnknown {
 		lim, created, rerr := pr.RegisterCreated(ctx)
 		if rerr == nil {
-			m.limits = lim
+			m.setLimits(lim)
 			return relayDone, created, nil
 		}
 		err = rerr
@@ -445,10 +476,18 @@ func (m *Manager) relayKeyStep(ctx context.Context, atUnlock bool) {
 	}
 }
 
+// waitsForRecoveredPhone reports whether pr is a key a recovery stored
+// whose phone has not paired yet: its first handshake checks the vault's
+// relay key and mailbox as the open's vault_bundle gave them, so the key
+// is not made current before it (as retryOwedRotation waits for the
+// identity key). A key pending since before the recovery was completed by
+// its open (completeStoredRelayKey).
+func (m *Manager) waitsForRecoveredPhone(pr *PendingRelay) bool {
+	return pr.Recovery != "" && m.recoveredPhoneUnpaired()
+}
+
 // recoveredPhoneUnpaired reports whether a completed recovery's phone has
-// not paired yet: its first handshake checks the vault's relay key and
-// mailbox as the open's vault_bundle gave them, so the relay key is not
-// made current before it (as retryOwedRotation waits for the identity key).
+// not paired yet (its recovery invite is still there).
 func (m *Manager) recoveredPhoneUnpaired() bool {
 	for _, inv := range m.st.Invites {
 		if inv.CreatedBy == inviteByRecovery {
@@ -465,7 +504,7 @@ func (m *Manager) relayKeyAttempt(ctx context.Context, atUnlock bool) bool {
 		return false
 	}
 	pr := m.st.Relay.Pending
-	if pr == nil || m.st.Deleting != nil || !m.rk.stored || m.recoveredPhoneUnpaired() {
+	if pr == nil || m.st.Deleting != nil || !m.rk.stored || m.waitsForRecoveredPhone(pr) {
 		return false
 	}
 	now := m.now()
@@ -484,9 +523,20 @@ func (m *Manager) relayKeyAttempt(ctx context.Context, atUnlock bool) bool {
 		return false
 	}
 	out, fresh, err := m.relayKeyCall(ctx)
+	now = m.now() // after the relay's answer: a 201's tokens are minted with iat then
 	switch out {
 	case relayDone:
-		if !m.makePendingCurrent(fresh, now) {
+		if fresh && !pr.Created {
+			// A fresh mailbox: stored first, so that a second write that
+			// fails, made again by a later run (whose registration then
+			// answers 200), still re-mints every held token.
+			pr.Created = true
+			m.dirty = true
+			if err := m.persist(ctx, false); err != nil {
+				return false
+			}
+		}
+		if !m.makePendingCurrent(fresh || pr.Created, now) {
 			m.rk.next = now.Add(relayRetryWait(1))
 			return false
 		}
@@ -521,6 +571,26 @@ func (m *Manager) relayKeyAttempt(ctx context.Context, atUnlock bool) bool {
 	}
 }
 
+// completeStoredRelayKey completes, in a recovery's open, a relay key
+// pending since an earlier run, before the recovered phone is given the
+// vault's address (its vault_bundle): one attempt, the rotate or the
+// registration, then the second write in memory, stored by the open's
+// step-2 write. false: not completed now (the open answers retry).
+func (m *Manager) completeStoredRelayKey(ctx context.Context, newRelay func(string, ed25519.PrivateKey) Relay) bool {
+	pr := m.st.Relay.Pending
+	if pr == nil {
+		return true
+	}
+	m.relay = newRelay(m.st.Relay.URL, m.keys.relay)
+	m.publishRelays()
+	out, fresh, _ := m.relayKeyCall(ctx)
+	if out != relayDone || !m.makePendingCurrent(fresh || pr.Created, m.now()) {
+		return false
+	}
+	m.rk.fromStorage, m.rk.leftMailbox = false, ""
+	return true
+}
+
 // relayKeyFailed audits identity.rotation_failed for the pending key, with
 // its feed item, at most once per unlock (§3.4 "What is audited").
 func (m *Manager) relayKeyFailed(now time.Time) {
@@ -541,7 +611,7 @@ func (m *Manager) relayKeyAtUnlock(ctx context.Context) {
 		return
 	}
 	if pr := m.st.Relay.Pending; pr != nil && m.keys.pendingRelay != nil && mailboxOf(m.keys.pendingRelay) == m.rk.leftMailbox &&
-		!m.recoveredPhoneUnpaired() {
+		!m.waitsForRecoveredPhone(pr) {
 		m.relayKeyFailed(m.now())
 	}
 }
@@ -579,6 +649,21 @@ func (m *Manager) makePendingCurrent(fresh bool, now time.Time) bool {
 	m.relay, m.rk.pending = newRelay, nil
 	m.st.Relay.Pending = nil // its retry_after goes with it
 	m.resetCollector()
+	m.publishRelays()
+	// First contacts begun under the old key may finish on it (owner
+	// decision 2026-11-05): an invitation or pairing not yet claimed, and
+	// the vault's own hs.init in flight, are stamped with the old mailbox.
+	oldMB := m.st.Relay.Old[len(m.st.Relay.Old)-1].Mailbox
+	for _, inv := range m.st.Invites {
+		if inv.Mailbox == "" && !inv.Used && now.Before(inv.Exp) {
+			inv.Mailbox = oldMB
+		}
+	}
+	for _, og := range m.st.Outgoing {
+		if og.New != nil && og.Mailbox == "" {
+			og.Mailbox = oldMB
+		}
+	}
 
 	// The recipients again; tokens that waited are re-minted near their
 	// end (§7.2 "On unlock"), every one for a fresh mailbox (iat now).
@@ -610,21 +695,12 @@ func (m *Manager) makePendingCurrent(fresh bool, now time.Time) bool {
 			m.st.Issued = append(m.st.Issued, t)
 		}
 	}
-	addr := strictjson.NewBuilder().String("url", m.st.Relay.URL).String("mailbox", m.st.Relay.Mailbox).
-		Base64("pk", pubOf(m.keys.relay)).Bytes()
-	if m.rk.resent == nil {
-		m.rk.resent = map[string]bool{}
-	}
 	for _, p := range recips {
 		h := pr.Tokens[p.ID]
 		if h == nil || h.Standing == "" {
 			continue
 		}
-		b := strictjson.NewBuilder().Raw("relay", addr).String("token", h.Standing)
-		if h.Reconnect != "" {
-			b.String("reconnect_token", h.Reconnect)
-		}
-		u := &AddressUpdate{Body: b.Bytes()}
+		u := &AddressUpdate{Body: m.addressBody(h.Standing, h.Reconnect), Since: now.UTC()}
 		for _, t := range pr.Issued {
 			if t.PeerID == p.ID {
 				u.JTIs = append(u.JTIs, t.JTI)
@@ -648,6 +724,49 @@ func (m *Manager) makePendingCurrent(fresh bool, now time.Time) bool {
 	}
 	m.dirty = true
 	return true
+}
+
+// addressBody is relay.address.update's body: the current address and
+// the recipient's new tokens (§10.2).
+func (m *Manager) addressBody(standing, reconnect string) []byte {
+	addr := strictjson.NewBuilder().String("url", m.st.Relay.URL).String("mailbox", m.st.Relay.Mailbox).
+		Base64("pk", pubOf(m.keys.relay)).Bytes()
+	b := strictjson.NewBuilder().Raw("relay", addr).String("token", standing)
+	if reconnect != "" {
+		b.String("reconnect_token", reconnect)
+	}
+	return b.Bytes()
+}
+
+// sendNewAddress makes p a recipient of the last relay-key rotation when
+// its first contact finished on an old key (owner decision 2026-11-05):
+// new tokens from the current key and relay.address.update, after the
+// messages of its activation; it then counts like every recipient.
+func (m *Manager) sendNewAddress(p *Peer, now time.Time) {
+	if _, sent := m.st.Relay.Updates[p.ID]; sent || p.State != PeerActive || !m.onOldKey(p.Standing.Token) {
+		return
+	}
+	st, it, err := m.mintKind(m.relay, false, p, TokStanding, now)
+	if err != nil {
+		return
+	}
+	u := &AddressUpdate{Since: now.UTC(), JTIs: []string{it.JTI}}
+	m.st.Issued = append(m.st.Issued, it)
+	rc := ""
+	if p.Kind == KindConnection {
+		if tok, rit, err := m.mintKind(m.relay, false, p, TokReconnect, now); err == nil {
+			rc = tok
+			m.st.Issued = append(m.st.Issued, rit)
+			u.JTIs = append(u.JTIs, rit.JTI)
+		}
+	}
+	u.Body = m.addressBody(st, rc)
+	if m.st.Relay.Updates == nil {
+		m.st.Relay.Updates = map[string]*AddressUpdate{}
+	}
+	m.st.Relay.Updates[p.ID] = u
+	m.sendAddressUpdate(p, u, now)
+	m.dirty = true
 }
 
 // sendAddressUpdate queues relay.address.update to p (deposited, like
@@ -676,27 +795,15 @@ func (m *Manager) resetCollector() {
 
 // --- Resending the new address (§3.4 (b)) ---
 
-// noteAddressAck records a recipient's acknowledgement (§3.4 "The
-// signal"): relay.token.issued for the new sub (byToken), or a message
-// deposited with a token the vault issued for the new mailbox (jti).
-func (m *Manager) noteAddressAck(peerID, jti string, byToken bool) {
-	u := m.st.Relay.Updates[peerID]
-	if u == nil || u.Acked {
-		return
+// noteAddressAck records that a recipient followed the new address: it
+// issued the vault a token for the current key (relay.token.issued, §3.4
+// "The signal"; owner decision 2026-11-05: a deposit to the new mailbox
+// alone does not count).
+func (m *Manager) noteAddressAck(peerID string) {
+	if u := m.st.Relay.Updates[peerID]; u != nil && !u.Acked {
+		u.Acked = true
+		m.dirty = true
 	}
-	if !byToken {
-		found := false
-		for _, j := range u.JTIs {
-			if j == jti {
-				found = true
-			}
-		}
-		if !found {
-			return
-		}
-	}
-	u.Acked = true
-	m.dirty = true
 }
 
 // resendAddressUpdates deposits relay.address.update again at an unlock to
@@ -734,12 +841,26 @@ func (m *Manager) endAddressUpdate(peerID string) {
 	}
 }
 
-// pruneOldRelayKeys deletes the old relay keys no longer needed (§3.4
-// "When the old key is deleted"): when every recipient has acknowledged
-// or every standing token the recipients issued to it has expired,
-// whichever is first, and not while a notice to a removed device holds a
-// valid token for it (a pending unlink, a recovery's
-// device.unlinked{replaced}, any deposit queued on such a token).
+// UnfollowedAfter is how long a recipient may take to issue the vault a
+// token for its new key before it is shown as needing reconnecting (owner
+// decision 2026-11-05; divided by the release's time scale).
+const UnfollowedAfter = 30 * 24 * time.Hour
+
+// pruneOldRelayKeys ends the old relay keys' use (§3.4 "When the old key
+// is deleted", owner decision 2026-11-05):
+//   - A recipient that has not issued a token for the new key
+//     UnfollowedAfter after it was first sent the address is shown as
+//     needing reconnecting (the stale connection's state and notices) and
+//     no longer holds the key.
+//   - A key's use for deposits ends (Retired) when no recipient that has
+//     not followed holds a token for it, no notice to a removed device
+//     holds a valid token for it (a pending unlink, a recovery's
+//     device.unlinked{replaced}, any deposit queued on such a token), and
+//     no first contact begun under it lives (an invitation or pairing made
+//     before the rotation, a handshake or a request whose peer knows the
+//     vault by it).
+//   - A retired key is deleted once its mailbox is gone (the relay's grace
+//     ended): until then it collects that mailbox.
 func (m *Manager) pruneOldRelayKeys(now time.Time) {
 	if len(m.st.Relay.Old) == 0 {
 		if m.st.Relay.Updates != nil && m.st.Relay.Pending == nil {
@@ -748,15 +869,19 @@ func (m *Manager) pruneOldRelayKeys(now time.Time) {
 		}
 		return
 	}
-	allAcked := true
 	for id, u := range m.st.Relay.Updates {
-		if m.peer(id) == nil {
+		p := m.peer(id)
+		if p == nil {
 			delete(m.st.Relay.Updates, id) // a recipient removed since
 			m.dirty = true
 			continue
 		}
-		if !u.Acked && !u.Ended {
-			allAcked = false
+		if !u.Acked && !u.Ended && !u.Since.IsZero() && !now.Before(u.Since.Add(m.opt.scale(UnfollowedAfter))) {
+			u.Ended = true
+			m.dirty = true
+			if p.State == PeerActive {
+				m.markStale(p, now)
+			}
 		}
 	}
 	validFor := func(tok string, exp time.Time, sub string) bool {
@@ -766,66 +891,164 @@ func (m *Manager) pruneOldRelayKeys(now time.Time) {
 		}
 		return ok && s == sub && now.Before(exp)
 	}
+	// The earliest old key a recipient that has not followed holds a token
+	// for: it, and every later old key, which that recipient may still
+	// learn from an update sent with it (a chain K0→K1→K2), stay in use.
+	minRank := 0
+	for id, u := range m.st.Relay.Updates {
+		if p := m.peer(id); p != nil && !u.Acked && !u.Ended {
+			if r := m.keyRank(p.Standing.Token); r > 0 && r <= len(m.st.Relay.Old) && (minRank == 0 || r < minRank) {
+				minRank = r
+			}
+		}
+	}
 	keepSeeds := m.st.Relay.Old[:0]
 	var keepKeys []ed25519.PrivateKey
 	var keepRelays []Relay
+	removed := false
 	for i, o := range m.st.Relay.Old {
 		k := m.keys.oldRelay[i]
-		sub := relayauth.EncodeKey(pubOf(k))
-		needed := false
-		if !allAcked {
-			for id, u := range m.st.Relay.Updates {
-				if p := m.peer(id); !u.Acked && !u.Ended && p != nil && validFor(p.Standing.Token, p.Standing.Exp, sub) {
+		if !o.Retired {
+			sub := relayauth.EncodeKey(pubOf(k))
+			needed := minRank > 0 && i+1 >= minRank
+			if pu := m.st.PendingUnlink; pu != nil && validFor(pu.Token, pu.TokenExp, sub) {
+				needed = true
+			}
+			for _, e := range m.st.Outbox {
+				if !e.Done && e.Op == OpDeposit && e.Token != "" && validFor(e.Token, time.Time{}, sub) {
 					needed = true
 				}
 			}
-		}
-		if pu := m.st.PendingUnlink; pu != nil && validFor(pu.Token, pu.TokenExp, sub) {
-			needed = true
-		}
-		for _, e := range m.st.Outbox {
-			if !e.Done && e.Op == OpDeposit && e.Token != "" && validFor(e.Token, time.Time{}, sub) {
+			if m.firstContactsUnder(o.Mailbox, sub, now) {
 				needed = true
 			}
-		}
-		if needed {
-			keepSeeds = append(keepSeeds, o)
-			keepKeys = append(keepKeys, k)
-			if i < len(m.rk.old) {
-				keepRelays = append(keepRelays, m.rk.old[i])
-			} else {
-				keepRelays = append(keepRelays, nil)
+			if !needed {
+				o.Retired = true
+				m.dirty = true
 			}
+		}
+		if o.Retired && o.Gone {
+			suite.Wipe(o.Seed)
+			suite.Wipe(k) // the collectors and blob transfers sign with copies of their own
+			removed = true
+			m.dirty = true
 			continue
 		}
-		suite.Wipe(o.Seed)
-		suite.Wipe(k)
-		m.dirty = true
+		keepSeeds = append(keepSeeds, o)
+		keepKeys = append(keepKeys, k)
+		if i < len(m.rk.old) {
+			keepRelays = append(keepRelays, m.rk.old[i])
+		} else {
+			keepRelays = append(keepRelays, nil)
+		}
 	}
-	removed := len(keepKeys) != len(m.keys.oldRelay)
 	m.st.Relay.Old, m.keys.oldRelay, m.rk.old = keepSeeds, keepKeys, keepRelays
-	if len(m.st.Relay.Old) == 0 {
+	if m.st.Relay.Pending == nil && m.allRetired() {
 		m.st.Relay.Updates = nil
 	}
 	if removed {
-		m.resetCollector() // the deleted keys' mailboxes are no longer collected
+		m.resetCollector()
+		m.publishRelays()
 	}
 }
 
+// allRetired reports whether no old key is used for deposits any more.
+func (m *Manager) allRetired() bool {
+	for _, o := range m.st.Relay.Old {
+		if !o.Retired {
+			return false
+		}
+	}
+	return true
+}
+
+// firstContactsUnder reports whether a first contact begun under the old
+// key (mailbox, sub) still lives (owner decision 2026-11-05): it may
+// finish on the old address.
+func (m *Manager) firstContactsUnder(mailbox, sub string, now time.Time) bool {
+	on := func(tok string) bool {
+		s, _, ok := heldTokenClaims(tok)
+		return ok && s == sub
+	}
+	for _, inv := range m.st.Invites {
+		if inv.Mailbox == mailbox && !inv.Used && now.Before(inv.Exp) {
+			return true
+		}
+	}
+	for _, og := range m.st.Outgoing {
+		if og.New != nil && og.Mailbox == mailbox {
+			return true
+		}
+	}
+	for _, aw := range m.st.Awaiting {
+		if aw.New != nil && on(aw.New.Standing.Token) {
+			return true
+		}
+	}
+	for _, r := range m.st.Requests {
+		if on(r.Peer.Standing.Token) || r.PeerRequest != nil && on(r.PeerRequest.Token) {
+			return true
+		}
+	}
+	return false
+}
+
+// expireFirstContactsUnder ends the first contacts begun under an old key
+// whose mailbox is gone: they cannot finish. Each ends by its own expiry
+// path and notice (connection.event{failed}, the request's expired
+// sync.event); an invitation or pairing nobody claimed, or one whose
+// handshake had not completed, is recorded invite.expired (NEW, a feed
+// item: "Your invitation expired. Send a new one.", for owner approval
+// with the app PRs).
+func (m *Manager) expireFirstContactsUnder(mailbox, sub string, now time.Time) {
+	on := func(tok string) bool {
+		s, _, ok := heldTokenClaims(tok)
+		return ok && s == sub
+	}
+	for _, inv := range m.st.Invites {
+		if inv.Mailbox == mailbox && !inv.Used && now.Before(inv.Exp) {
+			inv.Exp = now
+			m.record(Activity{Kind: "invite.expired", Ref: inv.ID, Audit: true, Feed: true}, now)
+		}
+	}
+	for _, og := range m.st.Outgoing {
+		if og.New != nil && og.Mailbox == mailbox {
+			og.Expires = now // connection.event{failed} (expireRequests)
+		}
+	}
+	for _, aw := range m.st.Awaiting {
+		if aw.New != nil && on(aw.New.Standing.Token) {
+			aw.Expires = now
+			m.record(Activity{Kind: "invite.expired", Ref: aw.InviteID, Audit: true, Feed: true}, now)
+		}
+	}
+	for _, r := range m.st.Requests {
+		if on(r.Peer.Standing.Token) || r.PeerRequest != nil && on(r.PeerRequest.Token) {
+			r.Expires = now // the request's own expiry notice (expireRequests)
+		}
+	}
+	m.expireRequests(now)
+	m.dirty = true
+}
+
 // oldMailboxGone records that an old mailbox's grace ended (it answered
-// mailbox_unknown): it is no longer collected.
+// mailbox_unknown): it is no longer collected, and what was begun under
+// its key and has not finished cannot finish.
 func (m *Manager) oldMailboxGone(mailbox string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.st == nil {
 		return
 	}
+	now := m.now()
 	for i := range m.st.Relay.Old {
 		if m.st.Relay.Old[i].Mailbox == mailbox && !m.st.Relay.Old[i].Gone {
 			m.st.Relay.Old[i].Gone = true
 			m.dirty = true
+			m.expireFirstContactsUnder(mailbox, relayauth.EncodeKey(pubOf(m.keys.oldRelay[i])), now)
 		}
 	}
+	m.publishRelays()
 }
 
 // relayRefused reports the refused state, for vault.status (§10.2).
@@ -846,6 +1069,13 @@ type multiCollector struct {
 	extra []oldCollector
 	gone  func(mailbox string)
 	from  map[string]Collector
+	// keys are the old collectors' own copies of the old keys: the vault
+	// may delete a key while a collect is in flight outside its lock; the
+	// copies are wiped once the collector is closed and no collect runs.
+	mu     sync.Mutex
+	keys   []ed25519.PrivateKey
+	busy   bool
+	closed bool
 }
 
 type oldCollector struct {
@@ -855,6 +1085,21 @@ type oldCollector struct {
 }
 
 func (c *multiCollector) Next(ctx context.Context) ([]Message, error) {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return nil, errStreamClosed
+	}
+	c.busy = true
+	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		c.busy = false
+		if c.closed {
+			c.wipe()
+		}
+		c.mu.Unlock()
+	}()
 	for i := range c.extra {
 		x := &c.extra[i]
 		if x.gone {
@@ -894,38 +1139,201 @@ func (c *multiCollector) Close() error {
 	for _, x := range c.extra {
 		_ = x.c.Close()
 	}
+	c.mu.Lock()
+	c.closed = true
+	if !c.busy {
+		c.wipe()
+	}
+	c.mu.Unlock()
 	return c.main.Close()
 }
 
+func (c *multiCollector) wipe() {
+	for _, k := range c.keys {
+		suite.Wipe(k)
+	}
+	c.keys = nil
+}
+
 // withOldCollectors wraps the current mailbox's collector with the old
-// mailboxes still collected.
+// mailboxes still collected, each signing with its own copy of its key.
 func (m *Manager) withOldCollectors(ctx context.Context, main Collector) Collector {
-	var extra []oldCollector
+	mc := &multiCollector{main: main, gone: m.oldMailboxGone, from: map[string]Collector{}}
 	for i, o := range m.st.Relay.Old {
 		if o.Gone {
 			continue
 		}
-		r := m.oldRelayClient(i)
+		k := append(ed25519.PrivateKey(nil), m.keys.oldRelay[i]...)
+		r := m.relay.WithKey(k)
 		var c Collector
 		if cr, ok := r.(*ClientRelay); ok {
 			c = cr.NewPollCollector(0)
 		} else if oc, err := r.Collector(ctx, false); err == nil {
 			c = oc
 		} else {
+			suite.Wipe(k)
 			continue
 		}
-		extra = append(extra, oldCollector{c: c, mailbox: o.Mailbox})
+		mc.keys = append(mc.keys, k)
+		mc.extra = append(mc.extra, oldCollector{c: c, mailbox: o.Mailbox})
 	}
-	if len(extra) == 0 {
+	if len(mc.extra) == 0 {
 		return main
 	}
-	return &multiCollector{main: main, extra: extra, gone: m.oldMailboxGone, from: map[string]Collector{}}
+	return mc
+}
+
+// relaySet is what the blob transfers, which run outside the vault's
+// lock, use (§10.5.1): the current key's Relay and, for blobs a peer left
+// in an old mailbox still in the relay's grace, the old keys' (each with
+// its own copy of its key, wiped at the lock).
+type relaySet struct {
+	cur Relay
+	old []Relay
+}
+
+// publishRelays makes the Relays the lockless transfers use follow the
+// keys (after an unlock, a second write, an old mailbox gone).
+func (m *Manager) publishRelays() {
+	if m.relay == nil || m.keys == nil || m.st == nil {
+		return
+	}
+	set := &relaySet{cur: m.relay}
+	for i, o := range m.st.Relay.Old {
+		if !o.Gone && i < len(m.keys.oldRelay) {
+			k := append(ed25519.PrivateKey(nil), m.keys.oldRelay[i]...)
+			m.rk.copies = append(m.rk.copies, k)
+			set.old = append(set.old, m.relay.WithKey(k))
+		}
+	}
+	m.rk.set.Store(set)
+}
+
+// relays returns the published Relays (nil before an unlock published
+// them: then the current one alone).
+func (m *Manager) relays() *relaySet {
+	if s := m.rk.set.Load(); s != nil {
+		return s
+	}
+	return &relaySet{cur: m.relay}
+}
+
+// getBlob fetches a blob of the vault's mailbox: the current one, else an
+// old one still in the grace (a peer that had not followed the new
+// address uploaded it there).
+func (m *Manager) getBlob(ctx context.Context, id string) ([]byte, error) {
+	set := m.relays()
+	data, err := set.cur.GetBlob(ctx, id)
+	if RelayCode(err) != CodeBlobUnknown {
+		return data, err
+	}
+	for _, r := range set.old {
+		if d, e := r.GetBlob(ctx, id); e == nil {
+			return d, nil
+		}
+	}
+	return data, err
+}
+
+// deleteBlob deletes a blob of the vault's mailbox, wherever it is.
+func (m *Manager) deleteBlob(ctx context.Context, id string) error {
+	set := m.relays()
+	err := set.cur.DeleteBlob(ctx, id)
+	for _, r := range set.old {
+		_ = r.DeleteBlob(ctx, id)
+	}
+	return err
 }
 
 // relayKeyHousekeeping runs before each batch: the old keys no longer
 // needed are deleted.
 func (m *Manager) relayKeyHousekeeping(now time.Time) {
 	m.pruneOldRelayKeys(now)
+	m.expirePeerRelayKeys(now)
+}
+
+// setLimits takes the relay's limits from a registration, and keeps them
+// in the state for the unlocks that do not register (a relay key pending).
+func (m *Manager) setLimits(l Limits) {
+	m.limits = l
+	if m.st == nil {
+		return
+	}
+	if old := m.st.Relay.Limits; old == nil || !sameLimits(*old, l) {
+		c := l
+		m.st.Relay.Limits = &c
+		m.dirty = true
+	}
+}
+
+// storedLimits are the limits kept in the state (none: the zero limits).
+func (m *Manager) storedLimits() {
+	if l := m.st.Relay.Limits; l != nil {
+		m.limits = *l
+	}
+}
+
+func sameLimits(a, b Limits) bool {
+	ja, _ := json.Marshal(a)
+	jb, _ := json.Marshal(b)
+	return string(ja) == string(jb)
+}
+
+// --- a principal's own relay-key rotation, as its receiver (§3.4
+// "Device relay key"; a peer vault's rotation) ---
+
+// PeerRelayGrace is how long a principal's earlier relay key is accepted
+// after its relay.address.update: the relay's rotation grace
+// (RELAY-PROTOCOL §6.7, a relay setting, 7 days by default). The tokens
+// issued to it are denylisted then.
+const PeerRelayGrace = 7 * 24 * time.Hour
+
+// prevKey reports whether pk is one of p's earlier relay keys, still
+// accepted at now.
+func (p *Peer) prevKey(pk []byte, now time.Time) bool {
+	for _, k := range p.PrevRelay {
+		if suite.EqualPublic(k.PK, pk) && now.Before(k.Until) {
+			return true
+		}
+	}
+	return false
+}
+
+// peerHasKey reports whether pk is p's relay key or an earlier one still
+// accepted.
+func (m *Manager) peerHasKey(p *Peer, pk []byte) bool {
+	return suite.EqualPublic(p.Relay.PK, pk) || p.prevKey(pk, m.now())
+}
+
+// recordKey is the relay key on record for p that a handshake from sender
+// is checked against: sender itself when it is an earlier key of p's
+// still accepted (§3.4), else p's relay key.
+func (m *Manager) recordKey(p *Peer, sender ed25519.PublicKey) ed25519.PublicKey {
+	if p.prevKey(sender, m.now()) {
+		return sender
+	}
+	return p.Relay.PK
+}
+
+// expirePeerRelayKeys ends the grace of principals' earlier relay keys:
+// the tokens issued to them are denylisted (§3.4 "Device relay key": the
+// old sub after the grace period).
+func (m *Manager) expirePeerRelayKeys(now time.Time) {
+	for _, p := range m.allPeers() {
+		kept := p.PrevRelay[:0]
+		for _, k := range p.PrevRelay {
+			if now.Before(k.Until) {
+				kept = append(kept, k)
+				continue
+			}
+			m.denySubKey(k.PK, now)
+			m.dirty = true
+		}
+		if len(kept) == 0 {
+			kept = nil
+		}
+		p.PrevRelay = kept
+	}
 }
 
 // lockedErr is the error of a manager a write zeroized.
@@ -962,7 +1370,10 @@ type RelayKeyStatus struct {
 	Mailbox string // the current mailbox
 	Pending bool   // a key is pending
 	Refused string // the pending key's refusal code (the refused state)
-	OldKeys int    // old keys kept for deposits
+	OldKeys int    // old keys still used for deposits
+	// Collecting are the old mailboxes still collected (their keys kept
+	// until the relay's grace ends).
+	Collecting int
 	// Unacknowledged are the recipients that have not acknowledged the
 	// last new address (nor had their resends ended).
 	Unacknowledged []string
@@ -975,7 +1386,15 @@ func (m *Manager) RelayKeyStatus() RelayKeyStatus {
 	if m.st == nil {
 		return RelayKeyStatus{}
 	}
-	s := RelayKeyStatus{Mailbox: m.st.Relay.Mailbox, OldKeys: len(m.st.Relay.Old)}
+	s := RelayKeyStatus{Mailbox: m.st.Relay.Mailbox}
+	for _, o := range m.st.Relay.Old {
+		if !o.Retired {
+			s.OldKeys++
+		}
+		if !o.Gone {
+			s.Collecting++
+		}
+	}
 	if pr := m.st.Relay.Pending; pr != nil {
 		s.Pending, s.Refused = true, pr.Refused
 	}

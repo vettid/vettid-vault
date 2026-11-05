@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/handshake"
+	"github.com/vettid/vettid-vault/vms/suite"
 )
 
 // VAULT-MESSAGING §3.4 "The order of a relay-key rotation" and "Resending
@@ -606,6 +608,10 @@ func TestRelayKeyRefusedState(t *testing.T) {
 	if len(r.rotated()) != 2 {
 		t.Fatalf("%d attempts: not one per unlock", len(r.rotated()))
 	}
+	// The unlock's refused attempt is audited once in that unlock.
+	if n := len(r.sink.kinds("identity.rotation_failed")); n != 2 {
+		t.Fatalf("identity.rotation_failed %d times over two unlocks", n)
+	}
 	// A transfer's rotation keeps the refused key and owes a relay-key
 	// rotation.
 	r.rotate(false)
@@ -776,11 +782,18 @@ func TestRelayKeyDepositsAndAcknowledgement(t *testing.T) {
 			t.Fatal("deposited with the old key after the new token")
 		}
 	}
-	// The connection acknowledges by a deposit on one of its new tokens.
+	// A token for the old key is kept, but is no acknowledgement.
+	old := r.tokenFrom("dk1", oldPub, 30*24*time.Hour).Token
+	r.sendFrom("dk1", "relay.token.issued", `{"kind":"standing","token":"`+old+`"}`, "")
+	if r.m.st.Relay.Updates["dk1"].Acked || audited(r.devFixture, "bad_issued_token") {
+		t.Fatal("a token for the old key acknowledged, or was refused")
+	}
+	// A deposit to the new mailbox alone is no acknowledgement (owner
+	// decision 2026-11-05): the old key stays in use for that recipient.
 	jti := r.m.st.Relay.Updates["c1"].JTIs[0]
 	r.sendFrom("c1", "profile.get", `{}`, jti)
-	if !r.m.st.Relay.Updates["c1"].Acked {
-		t.Fatal("a deposit on a new token did not acknowledge")
+	if r.m.st.Relay.Updates["c1"].Acked || r.m.st.Relay.Old[0].Retired {
+		t.Fatal("a deposit on a new token counted as following the address")
 	}
 	// A peer refuses the old key: the deposit waits for its token, the
 	// peer is not marked stale.
@@ -854,7 +867,7 @@ func TestRelayKeyResend(t *testing.T) {
 // their standing tokens for it expired, and not while a notice to a
 // removed device holds a valid token for it.
 func TestRelayKeyOldKeyDeleted(t *testing.T) {
-	t.Run("all acknowledged, not before the notice", func(t *testing.T) {
+	t.Run("all followed, not before the notice, kept to collect until gone", func(t *testing.T) {
 		r := newRKFixture(t)
 		oldPub := r.relayPub()
 		r.rotate(true)
@@ -871,29 +884,66 @@ func TestRelayKeyOldKeyDeleted(t *testing.T) {
 		for id := range r.peers {
 			r.issueToVault(id)
 		}
-		if len(r.m.st.Relay.Old) != 1 {
-			t.Fatal("deleted while a removed device's notice holds a token for it")
+		if o := r.m.st.Relay.Old; len(o) != 1 || o[0].Retired {
+			t.Fatal("its use ended while a removed device's notice holds a token for it")
 		}
 		r.with(func(m *Manager) { m.st.PendingUnlink = nil })
 		r.sendFrom("dev1", "vault.status", `{}`, "")
-		if len(r.m.st.Relay.Old) != 0 || r.m.st.Relay.Updates != nil {
-			t.Fatal("not deleted when every recipient acknowledged")
+		o := r.m.st.Relay.Old
+		if len(o) != 1 || !o[0].Retired || r.m.st.Relay.Updates != nil {
+			t.Fatal("its use did not end when every recipient followed")
+		}
+		// Kept, deposit-only no more, to collect its mailbox in the grace.
+		if r.m.onOldKey(r.tokenFrom("c1", oldPub, time.Hour).Token) {
+			t.Fatal("a retired key still deposits")
+		}
+		var extra int
+		r.with(func(m *Manager) {
+			if mc, ok := m.withOldCollectors(context.Background(), &listCollector{}).(*multiCollector); ok {
+				extra = len(mc.extra)
+				_ = mc.Close()
+			}
+		})
+		if extra != 1 {
+			t.Fatal("the retired key's mailbox is not collected in the grace")
+		}
+		r.m.oldMailboxGone(o[0].Mailbox)
+		r.sendFrom("dev1", "vault.status", `{}`, "")
+		if len(r.m.st.Relay.Old) != 0 {
+			t.Fatal("not deleted once its mailbox is gone")
 		}
 	})
-	t.Run("tokens expired", func(t *testing.T) {
+	t.Run("not followed in 30 days", func(t *testing.T) {
 		r := newRKFixture(t)
 		r.rotate(true)
 		r.flushStep()
-		r.with(func(m *Manager) {
-			m.pruneOldRelayKeys(m.now())
-			if len(m.st.Relay.Old) != 1 {
-				t.Fatal("deleted while the recipients' tokens for it are valid")
+		r.issueToVault("dev1")
+		r.issueToVault("dk1")
+		// The connection only deposits to the new mailbox: no follow.
+		r.sendFrom("c1", "profile.get", `{}`, r.m.st.Relay.Updates["c1"].JTIs[0])
+		r.advance(UnfollowedAfter - time.Minute)
+		r.sendFrom("dev1", "vault.status", `{}`, "")
+		if r.m.st.Relay.Old[0].Retired || r.m.st.Connections["c1"].State != PeerActive {
+			t.Fatal("ended before 30 days")
+		}
+		_ = r.deposits()
+		r.advance(2 * time.Minute)
+		r.sendFrom("dev1", "vault.status", `{}`, "")
+		if r.m.st.Connections["c1"].State != PeerStale || !r.m.st.Relay.Old[0].Retired {
+			t.Fatal("not shown as needing reconnecting after 30 days")
+		}
+		if len(r.sink.kinds("connection.stale")) != 1 {
+			t.Fatal("no connection.stale feed item")
+		}
+		var ev bool
+		for _, s := range r.deposits()["dev1"] {
+			if s.in.Type == "connection.event" && bodyStr(t, s.in, "event") == "stale" {
+				ev = true
 			}
-			m.pruneOldRelayKeys(m.now().Add(21 * 24 * time.Hour))
-			if len(m.st.Relay.Old) != 0 {
-				t.Fatal("kept after the recipients' tokens for it expired")
-			}
-		})
+		}
+		if !ev {
+			t.Fatal("the app was not sent connection.event{stale}")
+		}
 	})
 }
 
@@ -995,6 +1045,7 @@ func TestRelayKeyNoRecipientsThenRecoveredPhone(t *testing.T) {
 		m.st.Invites["rec1"] = &Invite{ID: "rec1", Kind: KindApp, CreatedBy: inviteByRecovery, Exp: r.clock.Add(time.Hour)}
 	})
 	r.rotate(false)
+	r.with(func(m *Manager) { m.st.Relay.Pending.Recovery = "rec1" }) // as the recovery's open marks its own key
 	r.flushStep()
 	if len(r.rotated()) != 0 || r.pending() == nil {
 		t.Fatal("attempted while the recovered phone has not paired")
@@ -1016,5 +1067,215 @@ func TestRelayKeyNoRecipientsThenRecoveredPhone(t *testing.T) {
 	r.flushStep()
 	if r.pending() != nil || len(updatesOf(r.deposits()["app2"])) != 1 {
 		t.Fatal("the recovered phone got no update at the second write")
+	}
+}
+
+// openWithPending is a recovery fixture whose vault has a relay key pending
+// since before the recovery (its rotate got no answer), on a relay the test
+// scripts.
+func openWithPending(t *testing.T) (*openFixture, *stubRot, string) {
+	rot := &stubRot{rotate: func(string) error { return &relayclient.Error{Status: 503, Code: "internal"} }}
+	var current string
+	f := newOpenFixtureWith(t, func(f *openFixture) {
+		f.opts.Relay = func(base string, key ed25519.PrivateKey) Relay { return &stubRelay{base: base, key: key, rot: rot} }
+		f.m.mu.Lock()
+		defer f.m.mu.Unlock()
+		f.m.relay.(*stubRelay).rot = rot
+		if err := f.m.rotateKeys(f.m.now(), true); err != nil {
+			t.Fatal(err)
+		}
+		if err := completeRelayKey(f.m); err != nil {
+			t.Fatal(err)
+		}
+		if f.m.st.Relay.Pending == nil {
+			t.Fatal("not pending")
+		}
+		current = f.m.st.Relay.Mailbox
+	})
+	return f, rot, current
+}
+
+// §11.14.6 with §3.4: a relay key pending since before the recovery is
+// completed by the open before the phone is given the vault's address, so
+// the vault_bundle carries the current one; the recovery's own new key
+// waits for the phone's pairing.
+func TestRelayKeyRecoveryCompletesTheStoredKey(t *testing.T) {
+	f, rot, before := openWithPending(t)
+	rot.rotate = nil
+	m, out := f.open(testPIN, rPW)
+	if m == nil || !out.OK {
+		t.Fatalf("open: %+v", out)
+	}
+	defer m.Crash()
+	if m.st.Relay.Mailbox == before || len(m.st.Relay.Old) != 1 || m.st.Relay.Old[0].Mailbox != before {
+		t.Fatal("the stored pending key was not made current by the open")
+	}
+	if !bytes.Contains(out.VaultBundle, []byte(m.st.Relay.Mailbox)) || bytes.Contains(out.VaultBundle, []byte(before)) {
+		t.Fatal("the vault_bundle does not carry the current address")
+	}
+	if pr := m.st.Relay.Pending; pr == nil || pr.Recovery != recID {
+		t.Fatal("the recovery's own relay key is not pending, marked as the recovery's")
+	}
+}
+
+// If the stored key cannot be completed now, the open answers retry.
+func TestRelayKeyRecoveryRetryWhenTheStoredKeyCannotComplete(t *testing.T) {
+	f, _, _ := openWithPending(t)
+	if m, out := f.open(testPIN, rPW); m != nil || out.Code != OpenRetry {
+		t.Fatalf("open: %+v", out)
+	}
+}
+
+// The relay's limits are kept in the state: an unlock that does not
+// register (a key pending, its attempt unanswered) still makes invitations
+// and offers attachments.
+func TestRelayKeyLimitsKeptWhilePending(t *testing.T) {
+	r := newRKFixture(t)
+	blob, ttl := int64(8<<20), int64(7*86400)
+	r.rot.limits = &Limits{MaxTokenLifetimeSeconds: 400 * 86400, OpenTokenMaxLifetimeSeconds: 7 * 86400, ClaimTTLSeconds: 7 * 86400,
+		MaxBlobBytes: &blob, BlobTTLSeconds: &ttl}
+	r.lockUnlock(false) // a registration: the limits are stored
+	r.start()
+	r.rot.rotate = func(string) error { return &relayclient.Error{Status: 503, Code: "internal"} }
+	r.rotate(true)
+	r.flushStep()
+	r.lockUnlock(false)
+	r.start()
+	if r.pending() == nil {
+		t.Fatal("not pending")
+	}
+	r.with(func(m *Manager) {
+		if m.attMaxContent() == 0 {
+			t.Fatal("attachments not offered while a key is pending")
+		}
+	})
+	r.linkFor(t, time.Hour) // an invitation within the relay's limits
+}
+
+// Blobs in the old-key window: an upload to a recipient holding a token
+// for the old key is signed with it; a blob a peer left in the old mailbox
+// is fetched and deleted with the old key.
+func TestRelayKeyBlobsInTheOldKeyWindow(t *testing.T) {
+	r := newRKFixture(t)
+	oldPub := r.relayPub()
+	oldMB := r.m.st.Relay.Mailbox
+	r.relay.blobs = &stubBlobs{}
+	r.rotate(true)
+	r.flushStep()
+	// The upload: the connection's token is still for the old key.
+	if _, _, err := r.m.PutBlobTo(context.Background(), "c1", []byte("blob")); err != nil {
+		t.Fatal(err)
+	}
+	b := r.relay.blobs
+	b.mu.Lock()
+	var sender string
+	for _, x := range b.byID {
+		sender = x.sender
+	}
+	b.mu.Unlock()
+	if sender != relayauth.EncodeKey(oldPub) {
+		t.Fatal("the upload was not signed with the key the token was issued to")
+	}
+	// A blob in the old mailbox.
+	b.mu.Lock()
+	b.byID["01JB2Z6V9K3M4N5P6Q7R8SOLD1"] = stubBlob{mailbox: oldMB, data: []byte("old")}
+	b.mu.Unlock()
+	data, err := r.m.getBlob(context.Background(), "01JB2Z6V9K3M4N5P6Q7R8SOLD1")
+	if err != nil || string(data) != "old" {
+		t.Fatalf("a blob in the old mailbox: %v", err)
+	}
+	_ = r.m.deleteBlob(context.Background(), "01JB2Z6V9K3M4N5P6Q7R8SOLD1")
+	b.mu.Lock()
+	_, still := b.byID["01JB2Z6V9K3M4N5P6Q7R8SOLD1"]
+	b.mu.Unlock()
+	if still {
+		t.Fatal("a blob in the old mailbox was not deleted")
+	}
+}
+
+// A deletion also deletes a pending key's mailbox (its rotate may have
+// made it); a refusal there is retried like the current one's.
+func TestRelayKeyDeletionDeletesThePendingMailbox(t *testing.T) {
+	r := newRKFixture(t)
+	r.rot.rotate = func(string) error { return &relayclient.Error{Status: 503, Code: "internal"} }
+	r.rotate(true)
+	r.flushStep()
+	pend := mailboxOf(ed25519.NewKeyFromSeed(r.pending().Seed))
+	cur := r.m.st.Relay.Mailbox
+	r.rot.deleteErr = map[string]error{pend: &relayclient.Error{Status: 503, Code: "internal"}}
+	r.with(func(m *Manager) { m.deleteMailbox(context.Background()) })
+	if slices.Contains(r.rot.deleted, cur) {
+		t.Fatal("the current mailbox was deleted though the pending one's deletion failed")
+	}
+	r.rot.deleteErr = nil
+	r.with(func(m *Manager) { m.deleteMailbox(context.Background()) })
+	if !slices.Contains(r.rot.deleted, pend) || !slices.Contains(r.rot.deleted, cur) {
+		t.Fatalf("deleted %v", r.rot.deleted)
+	}
+}
+
+// A 201 is stored with the pending key before the second write: when that
+// write fails and a later run completes the key (its registration then
+// answers 200), every held token is still re-minted.
+func TestRelayKeyCreatedSurvivesAFailedSecondWrite(t *testing.T) {
+	r := newRKFixture(t)
+	r.rotate(true)
+	r.with(func(m *Manager) {
+		if err := m.persist(context.Background(), false); err != nil {
+			t.Fatal(err)
+		}
+	})
+	held := r.pending().Tokens["c1"].Standing
+	r.rot.rotate = func(string) error { return &relayclient.Error{Status: 404, Code: CodeMailboxUnknown} }
+	fs := failWrites(r.devFixture, 0)
+	r.rot.register = func(string) (bool, error) {
+		fs.mu.Lock()
+		fs.passState, fs.failState = 1, 1 // the 201's own write goes through; the second write fails
+		fs.mu.Unlock()
+		return true, nil
+	}
+	r.with(func(m *Manager) { m.relayKeyStep(context.Background(), false) })
+	r.lockUnlock(true)
+	if pr := r.pending(); pr == nil || !pr.Created {
+		t.Fatal("the 201 was not stored with the key")
+	}
+	r.rot.register = func(string) (bool, error) { return false, nil } // now 200
+	_ = r.deposits()
+	r.start()
+	ups := updatesOf(r.deposits()["c1"])
+	if len(ups) != 1 {
+		t.Fatalf("%d updates", len(ups))
+	}
+	if _, _, tok, _ := parseUpdate(t, ups[0].in.Body); tok == held {
+		t.Fatal("a held token was not re-minted for the fresh mailbox")
+	}
+}
+
+// The old collectors sign with copies of their own: deleting the key
+// leaves the copy until the collector is closed, then it is wiped.
+func TestRelayKeyCollectorOwnKeyCopies(t *testing.T) {
+	r := newRKFixture(t)
+	r.rotate(true)
+	r.flushStep()
+	var mc *multiCollector
+	r.with(func(m *Manager) {
+		mc, _ = m.withOldCollectors(context.Background(), &listCollector{}).(*multiCollector)
+	})
+	if mc == nil || len(mc.keys) != 1 {
+		t.Fatal("no old collector")
+	}
+	k := mc.keys[0]
+	r.with(func(m *Manager) {
+		if &k[0] == &m.keys.oldRelay[0][0] {
+			t.Fatal("the collector shares the vault's key")
+		}
+		suite.Wipe(m.keys.oldRelay[0]) // the vault deletes it
+	})
+	if bytes.Equal(k, make([]byte, len(k))) {
+		t.Fatal("the collector's copy went with the vault's key")
+	}
+	_ = mc.Close()
+	if !bytes.Equal(k, make([]byte, len(k))) {
+		t.Fatal("the copy was not wiped at the close")
 	}
 }

@@ -391,6 +391,7 @@ func (m *Manager) finishMarked(ctx context.Context) {
 	m.deletePending = false
 	if err := m.loadKeys(); err == nil && m.opt.Relay != nil {
 		m.relay = m.opt.Relay(m.st.Relay.URL, m.keys.relay)
+		m.publishRelays()
 	}
 	_ = m.finishDelete(ctx)
 	if !m.locked {
@@ -411,7 +412,9 @@ func (m *Manager) deleteMailbox(ctx context.Context) {
 	if m.keys != nil && m.keys.pendingRelay != nil {
 		// A pending relay key's mailbox, which its rotate may have made
 		// (§3.4): deleting the current one would not delete it.
-		_ = m.pendingRelayClient().DeleteMailbox(ctx)
+		if err := m.pendingRelayClient().DeleteMailbox(ctx); err != nil {
+			return // as for the current mailbox: retried, the fallbacks remain
+		}
 	}
 	if err := m.relay.DeleteMailbox(ctx); err != nil {
 		return // the revocations and claim deletions remain the fallback

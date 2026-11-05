@@ -90,9 +90,12 @@ func TestRelayKeyRotationCredentialRotateE2E(t *testing.T) {
 		return false
 	})
 
-	// Messages both ways, and the devices' requests, on the new address
-	// (the old mailbox is gone by now).
-	time.Sleep(5 * time.Second)
+	// Once the grace has run the old mailbox is gone: no longer collected,
+	// its key deleted. Messages both ways, and the devices' requests, on
+	// the new address.
+	waitRelayKey(t, a, "the old mailbox still collected after the grace", func(s vault.RelayKeyStatus) bool {
+		return s.Collecting == 0
+	})
 	id1 := sendText(t, a, a.app, aConn, "after the rotation")
 	waitEvent(t, b.app, "message.new", has("message_id", id1))
 	id2 := sendText(t, b, b.app, bConn, "and back")

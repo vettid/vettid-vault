@@ -383,17 +383,7 @@ func (m *Manager) deposit(ctx context.Context, e *OutboxEntry, now time.Time) er
 	case CodeTokenRevoked, CodeMailboxUnknown:
 		// Terminal: stop sending to that mailbox.
 		if p != nil && e.Token == "" {
-			p.State = PeerStale
-			m.audit(now, "peer_stale", p.ID)
-			for _, o := range m.st.Outbox {
-				if o.PeerID == p.ID {
-					o.Done = true
-				}
-			}
-			if p.Kind == KindConnection {
-				m.notifyDevices("connection.event", connEvent(p.ID, "stale"), "", now)
-				m.record(Activity{Kind: "connection.stale", ConnectionID: p.ID, Audit: true, Feed: true}, now)
-			}
+			m.markStale(p, now)
 		}
 		e.Done = true
 	case CodeTokenUsed:
@@ -408,6 +398,23 @@ func (m *Manager) deposit(ctx context.Context, e *OutboxEntry, now time.Time) er
 		}
 	}
 	return err
+}
+
+// markStale makes p stale (§7.4, §8.6): nothing more is sent to it; a
+// connection's devices are told (connection.event{stale}, a
+// connection.stale feed item), and it needs a new invitation.
+func (m *Manager) markStale(p *Peer, now time.Time) {
+	p.State = PeerStale
+	m.audit(now, "peer_stale", p.ID)
+	for _, o := range m.st.Outbox {
+		if o.PeerID == p.ID {
+			o.Done = true
+		}
+	}
+	if p.Kind == KindConnection {
+		m.notifyDevices("connection.event", connEvent(p.ID, "stale"), "", now)
+		m.record(Activity{Kind: "connection.stale", ConnectionID: p.ID, Audit: true, Feed: true}, now)
+	}
 }
 
 func (m *Manager) flushIfDirty(ctx context.Context) error {

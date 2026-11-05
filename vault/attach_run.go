@@ -441,7 +441,7 @@ func transient(err error) bool {
 // sniffing. It returns the content and its sniffed type, or a reason:
 // "unknown" (blob_unknown), "transient", ReasonBad or ReasonType.
 func (m *Manager) fetchBlob(ctx context.Context, b AttBlob, maxBlob int) ([]byte, string, string, error) {
-	data, err := m.relay.GetBlob(ctx, b.ID)
+	data, err := m.getBlob(ctx, b.ID)
 	if err != nil {
 		switch {
 		case RelayCode(err) == CodeBlobUnknown:
@@ -686,7 +686,7 @@ func (m *Manager) outPrepareJob(r *attRunner, e *AttEntry) attJob {
 			if m.attCrashAt("prepared") {
 				return n
 			}
-			_ = m.relay.DeleteBlob(ctx, blob.ID)
+			_ = m.deleteBlob(ctx, blob.ID)
 			if deliver {
 				m.deliver(ctx, r, id, content, false, false)
 			}
@@ -735,6 +735,7 @@ func (m *Manager) outDeliverJob(r *attRunner, e *AttEntry, reupload, noUpload bo
 // refusal for the recipient's blob storage queues it without a blob.
 func (m *Manager) deliver(ctx context.Context, r *attRunner, id string, content []byte, reupload, noUpload bool) {
 	var relayURL, mailbox, token string
+	var put Relay
 	var thumb []byte
 	var thumbKey []byte
 	var tw bool
@@ -748,6 +749,7 @@ func (m *Manager) deliver(ctx context.Context, r *attRunner, id string, content 
 			return
 		}
 		relayURL, mailbox, token = p.Relay.URL, p.Relay.Mailbox, p.Standing.Token
+		put = m.relayFor(token) // signed with the key the token was issued to (§3.4)
 		vid, tw, thumbKey = m.st.VaultID, e.TW, append([]byte(nil), e.Key...)
 		thumb = append([]byte(nil), e.Thumb...)
 	})
@@ -780,7 +782,7 @@ func (m *Manager) deliver(ctx context.Context, r *attRunner, id string, content 
 			m.attRetryApply(r, id)
 			return
 		}
-		bid, exp, err := m.relay.PutBlob(ctx, relayURL, mailbox, token, data)
+		bid, exp, err := put.PutBlob(ctx, relayURL, mailbox, token, data)
 		suite.Wipe(data)
 		if err == nil {
 			blob = &attwire.Blob{ID: bid, Key: bkey, SHA256: sum, Size: len(content)}
@@ -960,7 +962,7 @@ func (m *Manager) inFetchJob(r *attRunner, e *AttEntry) attJob {
 				if m.attCrashAt("stored") {
 					return n
 				}
-				_ = m.relay.DeleteBlob(ctx, blob.ID) // only then (§10.5.1 step 2)
+				_ = m.deleteBlob(ctx, blob.ID) // only then (§10.5.1 step 2)
 			}
 			m.attDrain(r)
 			return n
@@ -1006,6 +1008,7 @@ func (m *Manager) ownerFetchJob(r *attRunner, f *attFetch) attJob {
 				return 0
 			}
 			var vid, mime, name, url, mailbox, token string
+			var put Relay
 			var hasName bool
 			var key []byte
 			found := m.attApply(r, f.att, func(e *AttEntry, _ time.Time) {
@@ -1015,6 +1018,7 @@ func (m *Manager) ownerFetchJob(r *attRunner, f *attFetch) attJob {
 				}
 				vid, key, mime, name, hasName = m.st.VaultID, append([]byte(nil), e.Key...), e.Mime, e.Name, e.HasName
 				url, mailbox, token = p.Relay.URL, p.Relay.Mailbox, p.Standing.Token
+				put = m.relayFor(token) // signed with the key the token was issued to (§3.4)
 			})
 			if !found {
 				return 0
@@ -1048,7 +1052,7 @@ func (m *Manager) ownerFetchJob(r *attRunner, f *attFetch) attJob {
 				answer(nil, "internal")
 				return len(content)
 			}
-			bid, exp, err := m.relay.PutBlob(ctx, url, mailbox, token, data)
+			bid, exp, err := put.PutBlob(ctx, url, mailbox, token, data)
 			suite.Wipe(data)
 			if err != nil {
 				suite.Wipe(bkey)
@@ -1201,7 +1205,7 @@ func (m *Manager) attMaintain(r *attRunner, w *attWork) {
 		if ctx.Err() != nil {
 			return
 		}
-		_ = m.relay.DeleteBlob(ctx, id)
+		_ = m.deleteBlob(ctx, id)
 	}
 	for _, t := range w.thumbs {
 		obj, err := attwire.SealObject(t.key, t.vid, t.id, attwire.PartThumb, t.thumb)
@@ -1250,7 +1254,7 @@ func (m *Manager) attMaintain(r *attRunner, w *attWork) {
 	if !w.needList || ctx.Err() != nil {
 		return
 	}
-	list, err := m.relay.ListBlobs(ctx)
+	list, err := m.relays().cur.ListBlobs(ctx)
 	listed := err == nil
 	if err != nil && w.purge {
 		m.mu.Lock()
@@ -1271,7 +1275,7 @@ func (m *Manager) attMaintain(r *attRunner, w *attWork) {
 				named := m.st != nil && m.attBlobNamed(d.blob)
 				m.mu.Unlock()
 				if !named {
-					_ = m.relay.DeleteBlob(ctx, d.blob)
+					_ = m.deleteBlob(ctx, d.blob)
 				}
 			}
 		}
@@ -1329,7 +1333,7 @@ func (m *Manager) attPurge(r *attRunner, list BlobList) {
 	_ = m.flushIfDirty(context.Background())
 	m.mu.Unlock()
 	for _, id := range del {
-		_ = m.relay.DeleteBlob(r.ctx, id)
+		_ = m.deleteBlob(r.ctx, id)
 	}
 }
 

@@ -174,6 +174,10 @@ type RelayState struct {
 	// relay's grace ends, to collect from their own old mailbox) until
 	// §3.4 "When the old key is deleted" (Resending the new address (a)).
 	Old []OldRelayKey `json:"old,omitempty"`
+	// Limits are the relay's limits as last returned by a registration
+	// (not secret): used while the unlock does not register the current
+	// key, a relay key being pending (§3.4).
+	Limits *Limits `json:"limits,omitempty"`
 	// Updates are the relay.address.update bodies of the last relay-key
 	// rotation, by recipient (a device or connection id), with what the
 	// resend needs (§3.4 "Resending the new address" (b)).
@@ -207,6 +211,14 @@ type PendingRelay struct {
 	// (RotationOwed.RelayKey): they pass to the next key, which this
 	// key's second write stores.
 	Next *RotationOwed `json:"next,omitempty"`
+	// Created: the relay answered the registration of this key 201 (a
+	// fresh mailbox): its second write re-mints every held token, also
+	// when that write is made by a later run (§3.4 "After the grace").
+	Created bool `json:"created,omitempty"`
+	// Recovery is the recovery_id of the recovery that stored this key:
+	// it waits for the recovered phone's pairing (its vault_bundle gave
+	// it the current address, §11.14.6).
+	Recovery string `json:"recovery,omitempty"`
 }
 
 // HeldUpdate is one recipient's held tokens for a pending relay key.
@@ -218,11 +230,15 @@ type HeldUpdate struct {
 // OldRelayKey is an earlier relay key kept for deposits (§3.4 "Resending
 // the new address" (a)). Gone: its mailbox answered mailbox_unknown (the
 // relay's grace ended), so it is no longer collected.
+//
+// Retired: its use for deposits ended (§3.4 "When the old key is
+// deleted"); it is kept only to collect its old mailbox until Gone.
 type OldRelayKey struct {
 	Seed    []byte    `json:"seed"`
 	Mailbox string    `json:"mailbox"`
 	At      time.Time `json:"at"`
 	Gone    bool      `json:"gone,omitempty"`
+	Retired bool      `json:"retired,omitempty"`
 }
 
 // AddressUpdate is the relay.address.update a recipient was sent at the
@@ -230,8 +246,11 @@ type OldRelayKey struct {
 type AddressUpdate struct {
 	Body json.RawMessage `json:"body"`
 	// JTIs are the new tokens': a deposit made with one acknowledges.
-	JTIs   []string  `json:"jtis,omitempty"`
-	Acked  bool      `json:"acked,omitempty"`
+	JTIs  []string `json:"jtis,omitempty"`
+	Acked bool     `json:"acked,omitempty"`
+	// Since is when the recipient was first sent this address: it has
+	// UnfollowedAfter to follow it.
+	Since  time.Time `json:"since,omitzero"`
 	Ended  bool      `json:"ended,omitempty"` // a deposit refused for good ended the resends
 	SentAt time.Time `json:"sent_at,omitzero"`
 }
@@ -350,6 +369,17 @@ type Peer struct {
 	// (§6.6): it sends nothing and accepts nothing until a new invitation
 	// replaces it.
 	Fork *ForkSuspension `json:"fork_suspension,omitempty"`
+	// PrevRelay are the principal's earlier relay keys, replaced by its
+	// relay.address.update: still accepted as its collect sender until the
+	// relay's rotation grace ends, when the tokens issued to them are
+	// denylisted (§3.4 "Device relay key"; "Resending the new address").
+	PrevRelay []PrevRelayKey `json:"prev_relay,omitempty"`
+}
+
+// PrevRelayKey is a principal's earlier relay key, accepted until Until.
+type PrevRelayKey struct {
+	PK    []byte    `json:"pk"`
+	Until time.Time `json:"until"`
 }
 
 // EpochRecord is one epoch of a service connection's history (§6.6, 0.72.0).
@@ -522,6 +552,10 @@ type Invite struct {
 	// Transfer marks the pairing of a direct transfer's new app (§6.7.1),
 	// the only app pairing a vault accepts after enrollment.
 	Transfer bool `json:"transfer,omitempty"`
+	// Mailbox is the vault's mailbox the invitation names when that is an
+	// old one (stamped at the relay key's second write, §3.4): it may still
+	// be claimed there while the old key lives. "" for the current one.
+	Mailbox string `json:"mailbox,omitempty"`
 }
 
 // AwaitingHS is a handshake where the vault sent hs.resp and awaits hs.fin.
@@ -607,6 +641,10 @@ type OutgoingHS struct {
 	// on an epoch of the replaced line (§6.6); it blocks nothing, and its
 	// hs.resp is fork evidence when it carries a later ts.
 	Replaced bool `json:"replaced,omitempty"`
+
+	// Mailbox is the vault's old mailbox the hs.init named, stamped at the
+	// relay key's second write (§3.4); "" for the current one.
+	Mailbox string `json:"mailbox,omitempty"`
 
 	// An outgoing connection request in state waiting (§6.4, §10.4):
 	// what the accept learned from the bundle, and when it ends.

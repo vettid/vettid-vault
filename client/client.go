@@ -237,14 +237,16 @@ type VaultRecord struct {
 	RelayURL string `json:"relay_url"`
 	Mailbox  string `json:"mailbox"`
 	RelayPK  []byte `json:"relay_pk"`
-	// PrevRelayPK is the vault's relay key before its last
-	// relay.address.update (VAULT-MESSAGING §3.4): the vault deposits with
-	// it until it has this device's token for the new key.
-	PrevRelayPK []byte                 `json:"prev_relay_pk,omitempty"`
-	Token       string                 `json:"token,omitempty"`
-	TokenExp    time.Time              `json:"token_exp,omitempty"`
-	Sessions    handshake.KeyringState `json:"sessions"`
-	Suite       uint8                  `json:"suite"`
+	// PrevRelay are the vault's relay keys before its relay.address.updates
+	// (VAULT-MESSAGING §3.4): the vault deposits with them until it has this
+	// device's token for the new key. Each is dropped once the vault has
+	// deposited with its new key (and no rekey waits for its hs.fin), and at
+	// the latest at the relay's rotation grace.
+	PrevRelay []PrevRelayKey         `json:"prev_relay,omitempty"`
+	Token     string                 `json:"token,omitempty"`
+	TokenExp  time.Time              `json:"token_exp,omitempty"`
+	Sessions  handshake.KeyringState `json:"sessions"`
+	Suite     uint8                  `json:"suite"`
 }
 
 // Device is one owner device.
@@ -1528,8 +1530,11 @@ func (d *Device) handle(ctx context.Context, m relayclient.Message) (unacked boo
 		}
 		return false
 	}
-	if v == nil || !suite.EqualPublic(sender, v.RelayPK) && (len(v.PrevRelayPK) == 0 || !suite.EqualPublic(sender, v.PrevRelayPK)) {
-		return // §6.3: only the vault's relay key may send to a device (§3.4: or its previous one)
+	if v == nil || !v.hasKey(sender, now) {
+		return // §6.3: only the vault's relay key may send to a device (§3.4: or an earlier one)
+	}
+	if suite.EqualPublic(sender, v.RelayPK) && len(v.PrevRelay) > 0 && len(d.awaiting) == 0 {
+		v.PrevRelay = nil // the vault deposits with its new key now
 	}
 	d.pruneAwaiting(now)
 	in, ep, err := d.keyring.Open(env, now)
@@ -1541,7 +1546,7 @@ func (d *Device) handle(ctx context.Context, m relayclient.Message) (unacked boo
 				// it moved during the rekey (§3.4): the previous key stands
 				// for the one the hs.init came from.
 				cs := sender
-				if len(v.PrevRelayPK) > 0 && suite.EqualPublic(sender, v.RelayPK) && suite.EqualPublic(r.Sender(), v.PrevRelayPK) {
+				if v.hasKey(sender, now) && v.hasKey(r.Sender(), now) {
 					cs = r.Sender()
 				}
 				fr, err := r.HandleFin(m.Payload, cs, now)
@@ -1939,8 +1944,9 @@ func (d *Device) followAddress(ctx context.Context, body json.RawMessage) {
 	if a.PK, err = ro.Base64("pk", ed25519.PublicKeySize); err != nil || handshake.ValidateRelayAddr(a) != nil {
 		return
 	}
-	if suite.EqualPublic(a.PK, v.RelayPK) {
-		return
+	now := d.cfg.Now()
+	if v.hasKey(a.PK, now) {
+		return // followed already (a resend, a late copy)
 	}
 	tok, err := o.String("token")
 	if err != nil {
@@ -1954,13 +1960,38 @@ func (d *Device) followAddress(ctx context.Context, body json.RawMessage) {
 	if err != nil || c.Iss != a.Mailbox || c.Sub != relayauth.EncodeKey(d.relayKey.Public().(ed25519.PublicKey)) {
 		return
 	}
-	v.PrevRelayPK = v.RelayPK
+	v.PrevRelay = append(v.PrevRelay, PrevRelayKey{PK: v.RelayPK, Until: now.Add(PrevRelayGrace)})
 	v.RelayURL, v.Mailbox, v.RelayPK = a.URL, a.Mailbox, append([]byte(nil), a.PK...)
 	v.Token, v.TokenExp = tok, c.Exp
 	if nt, err := d.mintForVault(); err == nil {
 		b := strictjson.NewBuilder().String("kind", "standing").String("token", nt).Bytes()
 		_, _ = d.sendLocked(ctx, "", "relay.token.issued", b, "", "")
 	}
+}
+
+// PrevRelayKey is an earlier relay key of the vault, accepted until Until.
+type PrevRelayKey struct {
+	PK    []byte    `json:"pk"`
+	Until time.Time `json:"until"`
+}
+
+// PrevRelayGrace bounds how long an earlier relay key of the vault is
+// accepted: the relay's rotation grace (RELAY-PROTOCOL §6.7, 7 days by
+// default).
+const PrevRelayGrace = 7 * 24 * time.Hour
+
+// hasKey reports whether pk is the vault's relay key or an earlier one
+// still accepted.
+func (v *VaultRecord) hasKey(pk []byte, now time.Time) bool {
+	if suite.EqualPublic(pk, v.RelayPK) {
+		return true
+	}
+	for _, k := range v.PrevRelay {
+		if suite.EqualPublic(pk, k.PK) && now.Before(k.Until) {
+			return true
+		}
+	}
+	return false
 }
 
 // RenewVaultToken mints a fresh standing token for the vault to deposit to

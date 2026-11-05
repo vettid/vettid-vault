@@ -621,6 +621,9 @@ func (m *Manager) hAddressUpdate(_ context.Context, s *Session, in *envelope.Inn
 	if a.PK, err = ro.Base64("pk", ed25519.PublicKeySize); err != nil || handshake.ValidateRelayAddr(a) != nil {
 		return nil, errBadRequest
 	}
+	if suite.EqualPublic(a.PK, s.peer.Relay.PK) || s.peer.prevKey(a.PK, s.now) {
+		return nil, nil // an address already followed (a resend, a late copy): ignored (§3.4 (b))
+	}
 	np := *s.peer
 	np.Relay = PeerRelay{URL: a.URL, Mailbox: a.Mailbox, PK: a.PK}
 	tok, err := str(o, "token")
@@ -637,14 +640,23 @@ func (m *Manager) hAddressUpdate(_ context.Context, s *Session, in *envelope.Inn
 			return nil, errBadRequest
 		}
 	}
-	old := *s.peer
+	// The earlier key stays the principal's sender until the relay's grace
+	// ends, and the tokens issued to it are denylisted only then (§3.4
+	// "Device relay key"): what it deposited with it before following its
+	// own update, and a later update it sends with it, are still its own.
+	s.peer.PrevRelay = append(s.peer.PrevRelay, PrevRelayKey{PK: append([]byte(nil), s.peer.Relay.PK...), Until: s.now.Add(PeerRelayGrace).UTC()})
 	s.peer.Relay, s.peer.Standing = np.Relay, st
 	if rt.Token != "" {
 		s.peer.Reconnect = rt
 	}
-	// Tokens we issued to the old key stop working after the grace period
-	// (the relay denylists the old sub); issue fresh ones to the new key.
-	m.denySub(&old, s.now)
+	// Deposits still queued for it go to its new address.
+	for _, e := range m.st.Outbox {
+		if !e.Done && e.PeerID == s.peer.ID && e.Token == "" {
+			e.RelayURL, e.Mailbox = a.URL, a.Mailbox
+		}
+	}
+	m.retryPeer(s.peer.ID)
+	// Fresh tokens for the new key.
 	m.issueTo(s.peer, TokStanding, s.now)
 	if s.peer.Kind == KindConnection {
 		m.issueTo(s.peer, TokReconnect, s.now)

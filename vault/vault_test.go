@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -80,6 +81,29 @@ type stubRot struct {
 	// mailboxes registered (by RegisterCreated).
 	rotated    []string
 	registered []string
+	// limits, if set, are the registration's limits.
+	limits *Limits
+	// deleted are the mailboxes deleted; deleteErr fails a mailbox's.
+	deleted   []string
+	deleteErr map[string]error
+}
+
+// stubClaims reads a token's claims without verifying it.
+func stubClaims(tok string) (relayauth.Claims, bool) {
+	const prefix = "v4.public."
+	if !strings.HasPrefix(tok, prefix) {
+		return relayauth.Claims{}, false
+	}
+	body := strings.TrimPrefix(tok, prefix)
+	if i := strings.IndexByte(body, '.'); i >= 0 {
+		body = body[:i]
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(body)
+	if err != nil || len(raw) <= ed25519.SignatureSize {
+		return relayauth.Claims{}, false
+	}
+	c, err := relayauth.ParseClaims(raw[:len(raw)-ed25519.SignatureSize])
+	return c, err == nil
 }
 
 func (r *stubRelay) top() *stubRelay {
@@ -156,9 +180,15 @@ type stubDeposit struct {
 
 func (r *stubRelay) BaseURL() string { return r.base }
 func (r *stubRelay) Register(context.Context) (Limits, error) {
+	if t := r.top(); t.rot != nil && t.rot.limits != nil {
+		return *t.rot.limits, nil
+	}
 	return Limits{MaxTokenLifetimeSeconds: 400 * 86400, OpenTokenMaxLifetimeSeconds: 7 * 86400, ClaimTTLSeconds: 7 * 86400}, nil
 }
 func (r *stubRelay) Collector(context.Context, bool) (Collector, error) {
+	if r.root != nil {
+		return &fakeCollector{}, nil // an old key's (relay-key rotation tests)
+	}
 	return nil, errors.New("no collect")
 }
 func (r *stubRelay) Deposit(_ context.Context, _, mailbox, token string, payload []byte) (string, error) {
@@ -171,6 +201,12 @@ func (r *stubRelay) Deposit(_ context.Context, _, mailbox, token string, payload
 	}
 	if err := r.failMailbox[mailbox]; err != nil {
 		return "", err
+	}
+	// As the relay checks (RELAY-PROTOCOL §5.3): a deposit token's sub is
+	// the depositing key and its iss the mailbox (open tokens: any key).
+	// Tests' placeholder tokens that do not parse are let through.
+	if c, ok := stubClaims(token); ok && (c.Iss != mailbox || c.Sub != relayauth.OpenSub && c.Sub != relayauth.EncodeKey(sender)) {
+		return "", &relayclient.Error{Status: 401, Code: "token_invalid"}
 	}
 	r.deposits = append(r.deposits, stubDeposit{mailbox, token, append([]byte(nil), payload...), sender})
 	return fmt.Sprintf("m%d", len(r.deposits)), nil
@@ -204,6 +240,18 @@ func (r *stubRelay) GetClaim(_ context.Context, _, id string) ([]byte, error) {
 }
 func (r *stubRelay) DeleteClaim(context.Context, string) error { return nil }
 func (r *stubRelay) DeleteMailbox(context.Context) error {
+	if t := r.top(); t.rot != nil {
+		t.rot.mu.Lock()
+		mb := mailboxOf(r.key)
+		err := t.rot.deleteErr[mb]
+		if err == nil {
+			t.rot.deleted = append(t.rot.deleted, mb)
+		}
+		t.rot.mu.Unlock()
+		if err != nil {
+			return err
+		}
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.deleteErr != nil {

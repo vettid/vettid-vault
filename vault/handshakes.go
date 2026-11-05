@@ -373,7 +373,7 @@ func (m *Manager) respondReconnect(pi *handshake.PendingInit, p *Peer, sender ed
 	}
 	cfg := handshake.ResponderConfig{
 		Identity: m.keys.ik, Policy: policyFor(p.Kind), PinnedSuite: p.Suite,
-		CollectSender: sender, RecordRelayKey: p.Relay.PK, KnownInitiatorIK: p.IK,
+		CollectSender: sender, RecordRelayKey: m.recordKey(p, sender), KnownInitiatorIK: p.IK,
 		KnownInitiatorChain: parseRotations(p.Chain),
 		ExpectedCtx:         body.Ctx, Now: now,
 		Rotations: m.ownRotationsSince(ownChain),
@@ -516,7 +516,7 @@ func (m *Manager) handleRekeyInit(ctx context.Context, p *Peer, in *envelope.Inn
 	}
 	resp, env, err := pi.Respond(handshake.ResponderConfig{
 		Identity: m.keys.ik, Policy: policyFor(p.Kind), PinnedSuite: p.Suite,
-		CollectSender: sender, RecordRelayKey: p.Relay.PK, KnownInitiatorIK: p.IK, Now: now,
+		CollectSender: sender, RecordRelayKey: m.recordKey(p, sender), KnownInitiatorIK: p.IK, Now: now,
 	})
 	if err != nil {
 		m.audit(now, "rekey_refused", p.ID)
@@ -542,14 +542,11 @@ func (m *Manager) awaitingByKids(env *envelope.Envelope, sender ed25519.PublicKe
 			continue
 		}
 		aw := m.st.Awaiting[id]
-		var pk []byte
-		if aw.New != nil {
-			pk = aw.New.Relay.PK
-		} else if p := m.peer(aw.PeerID); p != nil {
-			pk = p.Relay.PK
-		}
-		if suite.EqualPublic(pk, sender) {
+		if aw.New != nil && suite.EqualPublic(aw.New.Relay.PK, sender) {
 			return id
+		}
+		if p := m.peer(aw.PeerID); aw.New == nil && p != nil && m.peerHasKey(p, sender) {
+			return id // its current relay key, or one it moved from (§3.4)
 		}
 	}
 	return ""
@@ -572,10 +569,10 @@ func (m *Manager) handleFin(ctx context.Context, id string, raw []byte, sender e
 	aw, r := m.st.Awaiting[id], m.awaiting[id]
 	// A peer that moved to a new relay key during the handshake (its
 	// relay.address.update came after its hs.init, VAULT-MESSAGING §3.4)
-	// deposits hs.fin with the new key: it is the key on record for it
-	// now (awaitingByKids matched it), and stands for the hs.init's.
+	// may deposit hs.fin with the new key: both are its keys on record
+	// (awaitingByKids matched it), so it stands for the hs.init's.
 	cs := sender
-	if p := m.peer(aw.PeerID); aw.New == nil && p != nil && suite.EqualPublic(sender, p.Relay.PK) {
+	if p := m.peer(aw.PeerID); aw.New == nil && p != nil && m.peerHasKey(p, sender) && m.peerHasKey(p, r.Sender()) {
 		cs = r.Sender()
 	}
 	fr, err := r.HandleFin(raw, cs, now)
@@ -822,6 +819,9 @@ func (m *Manager) activate(p *Peer, ep *handshake.Epoch, purpose handshake.Purpo
 	}
 	if rotated && p.State == PeerActive {
 		m.connectionRotated(p.ID, now)
+	}
+	if isNew {
+		m.sendNewAddress(p, now) // a first contact that finished on an old relay key (§3.4)
 	}
 }
 

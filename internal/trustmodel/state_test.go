@@ -156,6 +156,8 @@ type PeerRec struct {
 	RCFails       int     // R29-K6: failed tries for RCNamed
 	Held          []Entry // R29-K5: durable messages held after a demotion of the current epoch (unsealed)
 	LastConfirm   int64   // R29-D2: a device re-sends hs.confirm at most once a minute
+	SawHSC        bool    // R29-G2: the peer's features carried hs_confirm (sticky)
+	Notice        bool    // R29-D4: device.update_needed shown for this device
 
 	IK, KEM Key
 	Chain   []IKLink // followed identity links

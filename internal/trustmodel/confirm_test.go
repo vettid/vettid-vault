@@ -37,11 +37,12 @@ func (w *World) answerLife() int64 {
 // newSpec: this party implements §6.3.1 (Config.OldRules: none does).
 func (q *Party) newSpec() bool { return q.w.optA }
 
-// respHalf: the responder half applies toward every peer.
-func (q *Party) respHalf() bool { return q.newSpec() }
+// respHalf: the responder half applies toward every peer (an app from
+// before release 29 has none).
+func (q *Party) respHalf() bool { return q.newSpec() && !q.OldApp }
 
 // initHalf: the pending epoch and B, toward every peer (R29-I1: no gate).
-func (q *Party) initHalf() bool { return q.newSpec() }
+func (q *Party) initHalf() bool { return q.newSpec() && !q.OldApp }
 
 // makePending: the initiator, having verified sig_R, records the new epoch
 // as pending (established, signer recorded, not current).
@@ -116,6 +117,7 @@ func (q *Party) abandonPending(r *PeerRec, why string, restart bool) {
 	switch {
 	case why == "B passed" && r.Device:
 		q.w.hit("D1:B-rekey")
+		q.deviceNotice(r, "B passed")
 		q.startHS(r, false) // R29-D1: toward a device, rekey from the current epoch, token or not
 	case why == "B passed" && pe.Reconnect:
 		q.w.hit("I5:B-reconnect-stale")
@@ -343,11 +345,17 @@ func (q *Party) markStale(r *PeerRec, ref string) {
 	w := q.w
 	q.endHeld(r)
 	w.logf("%s: %s STALE (%s)", q.Name, w.party(r.ID).Name, ref)
+	w.feedItem(q.ID, r.ID, "connection.stale")
 	if q.Copy {
 		return
 	}
 	key := [2]PID{min(q.ID, r.ID), max(q.ID, r.ID)}
 	if _, seen := w.staleAt[key]; seen {
+		return
+	}
+	if w.preUpgrade && !w.migrated {
+		w.stat("stale before the upgrade (release 28)")
+		w.staleAt[key] = ""
 		return
 	}
 	pr := w.party(r.ID).st.peer(q.ID)

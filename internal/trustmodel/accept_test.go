@@ -60,8 +60,12 @@ func (q *Party) handle(m *RMsg, set []Key) bool {
 	if !w.optA || M.Kind == KResp || M.Kind == KFin || r.relayState(m.Sender, pos) != rkForeign {
 		w.recordEvidence(q, r, M)
 	}
+	ok14 := q.steps14(r, m, pos)
 	q.beforeAccept(r, m, pos)
 	d := q.acceptFrom(r, m, pos, set)
+	if ok14 {
+		q.seeFeatures(r, M) // R29-G2, D4
+	}
 	if w.noF5 && q.newSpec() && r.Pend != nil && M.Epoch == r.Pend.ID && M.Kind != KFin &&
 		(d.Out == "accept" || d.Out == "answer" || d.Out == "follow" || d.Out == "ignore") {
 		q.confirm(r) // switch noF5: the confirmation only once the handler has accepted the message
@@ -225,6 +229,7 @@ func (q *Party) acceptFrom(r *PeerRec, m *RMsg, pos Pos, set []Key) dec {
 		}
 		if q.newSpec() && !q.Device && r.Device && !M.Reconnect {
 			q.w.hit("D3:device-rekey-refused")
+			q.deviceNotice(r, "D3 refusal")
 			return refuse("unexpected", "D3:device-rekey") // R29-D3: the vault answers no rekey from a device
 		}
 		if M.Epoch != 0 {
@@ -347,6 +352,7 @@ func (q *Party) deviceConflict(r *PeerRec, cell string) dec {
 		r.Status = stConflicted // the vault sends that device nothing more
 	}
 	r.Warned = true // the member is told (a feed item, or the app's lasting warning)
+	q.w.feedItem(q.ID, r.ID, "rule C between a vault and its device")
 	return refuse("conflict", cell)
 }
 
@@ -354,6 +360,7 @@ func (q *Party) suspend(r *PeerRec, ref string) {
 	r.Status = stSuspended
 	r.Ref = ref
 	q.w.suspAt[[2]PID{q.ID, r.ID}] = q.w.Now
+	q.w.feedItem(q.ID, r.ID, "suspended: "+ref)
 	q.w.logf("%s SUSPENDS %s: %s", q.Name, q.w.party(r.ID).Name, ref)
 	q.h5(r, 0)
 }
@@ -952,8 +959,15 @@ func (q *Party) tableBFin(r *PeerRec, M *Msg, pos Pos) dec {
 		q.ruleE(r, a.InitTs)
 	}
 	q.establish(r, a.NewEpoch, a.PeerIK, a.OwnIK, pos)
-	if a.OwnIK != q.st.IK {
-		q.w.violate("S5", "%s establishes an answer pinned to its superseded ik %d", q.Name, a.OwnIK)
+	if a.OwnIK != q.st.IK && q.newSpec() {
+		if q.w.preUpgrade && a.Started <= q.w.migratedAt {
+			// SPEC GAP (U1): an answer made before the upgrade and kept across
+			// a release-28 rotation runs the responder half; its epoch is
+			// signed on this side by the superseded ik
+			q.w.hit("U1:answer-pinned-to-superseded-ik")
+		} else {
+			q.w.violate("S5", "%s establishes an answer pinned to its superseded ik %d", q.Name, a.OwnIK)
+		}
 	}
 	if q.respHalf() {
 		// §6.3.1 (revised): a later activation does not replace the confirmed

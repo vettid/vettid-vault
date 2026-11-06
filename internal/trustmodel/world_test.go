@@ -36,10 +36,15 @@ type World struct {
 	hsOrigin      map[int]string    // handshake id -> why it started
 	suspAt        map[[2]PID]int64
 	audits        map[[2]PID]int
-	everSplit     map[[2]PID]bool  // pair -> its epochs split at some point (both active)
-	ruleEKeepFin  bool             // TRUSTMODEL_RULEEFIN=keep: rule E leaves an unsent hs.fin for a destroyed epoch in the outbox (before r7)
-	copyExpo      map[[2]int]*expo // (honest party, copy epoch): when it was used
-	debugUnlinked bool             // scenarios: the relay's rotate and registration get no answer
+	everSplit     map[[2]PID]bool     // pair -> its epochs split at some point (both active)
+	feed          map[[2]PID][]string // pair -> feed items to the member about it (R29 I7)
+	preUpgrade    bool                // R29-U1: the run starts on release 28 (the f4a4d97 rules) and upgrades (opUpgrade)
+	migrated      bool
+	migratedAt    int64             // R29-U1: the upgrade migration ran
+	u1Risk        map[[2]PID][2]int // pair -> (responder, epoch): at the migration that hs.fin was still unprocessed (§3.4.1 Residuals)
+	ruleEKeepFin  bool              // TRUSTMODEL_RULEEFIN=keep: rule E leaves an unsent hs.fin for a destroyed epoch in the outbox (before r7)
+	copyExpo      map[[2]int]*expo  // (honest party, copy epoch): when it was used
+	debugUnlinked bool              // scenarios: the relay's rotate and registration get no answer
 
 	// Fix switches for the review findings (f_scenarios_test.go). Each is
 	// false by default (the fix on); true turns that one fix off.
@@ -85,7 +90,7 @@ func newWorld(seed uint64) *World {
 	w := &World{rng: rand.New(rand.NewPCG(seed, 7)), issuer: map[int]Key{}, epTruth: map[int][2]PID{},
 		rlinkBy: map[RLink]rot{}, iklinkBy: map[IKLink]rot{}, evid: map[[2]PID]map[Key]map[Key]bool{},
 		ikPos: map[[2]PID][]ikFollow{}, answered: map[int]bool{},
-		ended: map[int]bool{}, ever: map[PID]map[int]bool{}, probes: map[int]bool{}, stats: map[string]int{}, dead: map[PID]string{}, ttlFin: map[[2]PID]string{}, probeDep: map[int][2]PID{}, probeFate: map[int]string{}, hasEpoch: map[[2]int]bool{}, staleAt: map[[2]PID]string{}, hsOrigin: map[int]string{}, suspAt: map[[2]PID]int64{}, audits: map[[2]PID]int{}, everSplit: map[[2]PID]bool{}, copyExpo: map[[2]int]*expo{}, probeEpoch: map[int]int{}, forkDue: map[[2]PID]int{}, evidKind: map[Key]string{}}
+		ended: map[int]bool{}, ever: map[PID]map[int]bool{}, probes: map[int]bool{}, stats: map[string]int{}, dead: map[PID]string{}, ttlFin: map[[2]PID]string{}, probeDep: map[int][2]PID{}, probeFate: map[int]string{}, hasEpoch: map[[2]int]bool{}, staleAt: map[[2]PID]string{}, hsOrigin: map[int]string{}, suspAt: map[[2]PID]int64{}, audits: map[[2]PID]int{}, everSplit: map[[2]PID]bool{}, feed: map[[2]PID][]string{}, u1Risk: map[[2]PID][2]int{}, copyExpo: map[[2]int]*expo{}, probeEpoch: map[int]int{}, forkDue: map[[2]PID]int{}, evidKind: map[Key]string{}}
 	w.R = newRelay(w)
 	w.Now = 1000 * day
 	return w
@@ -225,6 +230,7 @@ type Party struct {
 	collTo               map[Key]int64
 	pendEvid             []pendEv // evidence seen in the batch not yet written
 	collectedSinceUnlock bool     // B is judged only after the first collect after an unlock
+	OldApp               bool     // R29-D4: a device app from before release 29 (no hs.confirm, no hs_confirm in features, rekeys)
 	Skew                 int64    // clock offset (within the 2-day budget of §6.3.1)
 }
 
@@ -314,6 +320,7 @@ func (w *World) makeCopy(p *Party) {
 		w: w, Locked: true, collTo: map[Key]int64{}}
 	c.st = p.stored.clone()
 	c.stored = p.stored.clone()
+	c.OldApp = p.OldApp
 	c.storedOut = map[int]bool{}
 	for _, e := range c.st.Out {
 		c.storedOut[e.ID] = true
@@ -613,8 +620,9 @@ func (p *Party) deposit(e *Entry, r *PeerRec) {
 	retry := e.Tried
 	e.Tried = true
 	p.checkI5(e, &m, r, retry)
-	if p.newSpec() {
+	if p.newSpec() && !p.OldApp {
 		m.Feat = true // R29-G1: hs_confirm in the inner features of every message
+		w.hit("G1:advertised")
 	}
 	id, err := w.R.deposit(p.ID, with, tok, box, &m)
 	w.stat("deposit:" + string(err))

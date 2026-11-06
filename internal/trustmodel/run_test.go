@@ -13,6 +13,8 @@ import (
 
 type Config struct {
 	NoRelayRot bool // no relay-key rotation (the oracle config; release 29 builds none)
+	OldApp     bool // the first device is an app from before release 29 (R29-D4)
+	PreUpgrade bool // R29-U1: start on release 28 (the f4a4d97 rules); opUpgrade migrates every party
 	Skew       bool // each party's clock off by up to a day either way (the 2-day budget)
 	OldRules   bool // f4a4d97 rules: no §6.3.1 (activation at hs.fin)
 	Vaults     int  // 2 or 3
@@ -23,7 +25,8 @@ type Config struct {
 
 func setup(cfg Config, seed uint64) *World {
 	w := newWorld(seed)
-	w.optA = !cfg.OldRules
+	w.optA = !cfg.OldRules && !cfg.PreUpgrade
+	w.preUpgrade = cfg.PreUpgrade
 	w.relayRot = !cfg.NoRelayRot
 	w.p429, w.pRef = 0, 0
 	mk := func(name string, dev bool) *Party {
@@ -42,6 +45,10 @@ func setup(cfg Config, seed uint64) *World {
 		for i := 0; i < cfg.Vaults; i++ {
 			mk("D"+names[i], true)
 		}
+	}
+	if cfg.OldApp && cfg.Devices {
+		w.P[cfg.Vaults].OldApp = true
+		w.logf("%s is an app from before release 29", w.P[cfg.Vaults].Name)
 	}
 	for _, p := range w.P {
 		if cfg.Skew {
@@ -133,15 +140,16 @@ const (
 	opResolve
 	opRekey
 	opPeek
+	opUpgrade // R29-U1: every party migrates to release 29 (Config.PreUpgrade; inserted, weight 0)
 	numOps
 )
 
 var opName = [...]string{"rotate", "rotate-both", "device-rotate", "send", "collect", "crash-at", "fail-write-at",
 	"lock", "unlock", "time", "snapshot", "copy-acts", "copy-forks", "copy-steals", "copy-deletes-mailbox",
-	"resolve", "rekey", "peek(lease)"}
+	"resolve", "rekey", "peek(lease)", "upgrade"}
 
 // weights of the random choice
-var opWeight = [...]int{6, 2, 2, 8, 14, 3, 3, 4, 6, 8, 3, 3, 1, 1, 1, 2, 3, 3}
+var opWeight = [...]int{6, 2, 2, 8, 14, 3, 3, 4, 6, 8, 3, 3, 1, 1, 1, 2, 3, 3, 0}
 
 type Action struct {
 	Op      Op
@@ -283,6 +291,8 @@ func (w *World) exec(a Action) {
 				p.flush()
 			})
 		}
+	case opUpgrade:
+		w.migrate()
 	case opPeek:
 		if !p.Locked {
 			for _, b := range p.boxes() {
@@ -612,6 +622,10 @@ func (w *World) checkEnd(liveness bool) {
 			w.stat("I1 pair excluded: " + map[bool]string{true: "suspended/stale/conflict"}[true])
 			continue
 		}
+		if res := w.residualOf(pr.a.ID, pr.b.ID); res != "" {
+			w.exempt("I1", res)
+			continue
+		}
 		if w.limits(pr.a, ra) || w.limits(pr.b, rb) {
 			// SPEC FINDING: §6.6 "Limits": the update cannot reach the peer
 			// (resends ended by a definite refusal); the pair is dead but not
@@ -714,6 +728,10 @@ func (w *World) checkEnd(liveness bool) {
 	for _, k := range keys {
 		a, b := w.party(k[0]).st.peer(k[1]), w.party(k[1]).st.peer(k[0])
 		endsStale := (a != nil && a.Status == stStale) || (b != nil && b.Status == stStale)
+		if res := w.residualOf(k[0], k[1]); res != "" && w.staleAt[k] != "" && endsStale {
+			w.exempt("I1-stale-split", res)
+			continue
+		}
 		if cause := w.staleAt[k]; cause != "" && endsStale && w.dead[k[0]] == "" && w.dead[k[1]] == "" {
 			w.violate("I1-stale-split", "%s: stale after a split: %s", pairName(w, k[0], k[1]), cause)
 		}
@@ -722,6 +740,10 @@ func (w *World) checkEnd(liveness bool) {
 		ft := w.probeFate[id]
 		pr := w.probeDep[id]
 		if w.dead[pr[0]] != "" || w.dead[pr[1]] != "" || w.probes[id] {
+			continue
+		}
+		if res := w.residualOf(pr[0], pr[1]); res != "" && !strings.HasPrefix(w.probeFate[id], "accept") {
+			w.exempt("I1-loss", res)
 			continue
 		}
 		switch {
@@ -793,6 +815,15 @@ func shrink(cfg Config, seed uint64, acts []Action, inv string) []Action {
 	for chunk := len(cur) / 2; chunk >= 1; chunk /= 2 {
 		for i := 0; i+chunk <= len(cur); {
 			try := append(slices.Clone(cur[:i]), cur[i+chunk:]...)
+			for _, a := range cur[i : i+chunk] {
+				if a.Op == opUpgrade { // R29-U1: the upgrade stays (else the run is release 28 only)
+					try = slices.Insert(try, i, a)
+				}
+			}
+			if len(try) == len(cur) {
+				i += chunk
+				continue
+			}
 			w := runActions(cfg, seed, try, false)
 			if len(w.viol) > 0 && w.viol[0].Inv == inv {
 				cur = try

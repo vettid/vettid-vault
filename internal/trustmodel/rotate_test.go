@@ -176,7 +176,7 @@ func (p *Party) startHS(r *PeerRec, reconnect bool) {
 	if r.Status != stActive || (reconnect && r.Device) {
 		return
 	}
-	if p.newSpec() && p.Device && r.Device {
+	if p.newSpec() && p.Device && r.Device && !p.OldApp {
 		w.hit("D2:device-starts-no-rekey")
 		return // R29-D2: a device runs only the responder half
 	}
@@ -416,7 +416,7 @@ func (p *Party) tick() {
 				if r.Device || p.Device {
 					due = 7 * day
 				}
-				if w.Now-ep.EstAt > due && !p.Device { // R29-D2: a device starts no rekey
+				if w.Now-ep.EstAt > due && (!p.Device || p.OldApp) { // R29-D2: a device starts no rekey (an old app does)
 					p.startHS(r, false)
 				}
 			}
@@ -445,6 +445,7 @@ func (p *Party) tick() {
 			if r.RevokedAt != 0 && !r.S9Audited && r.KeyFor != p.st.Relay && w.Now-r.RevokedAt > day {
 				r.S9Audited = true
 				w.stat("S9:fork_suspected")
+				w.feedItem(p.ID, r.ID, "S9 fork_suspected (relay_revoked)")
 				w.logf("%s: S9 connection.fork_suspected (relay_revoked) for %s", p.Name, w.party(r.ID).Name)
 			}
 		}

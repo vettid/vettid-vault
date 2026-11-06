@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -167,10 +168,15 @@ func genRun(rs uint64, steps int) (Config, []Action) {
 	cfg := Config{Vaults: 2 + rng.IntN(2), Devices: rng.IntN(2) == 0, P429: 0.05, PRefuse: 0.01,
 		OldRules: os.Getenv("TRUSTMODEL_OLD") != "", NoRelayRot: os.Getenv("TRUSTMODEL_RELAYROT") == "",
 		Skew: os.Getenv("TRUSTMODEL_NOSKEW") == ""}
+	cfg.OldApp = cfg.Devices && rng.IntN(4) == 0
+	cfg.PreUpgrade = !cfg.OldRules && rng.IntN(4) == 0
 	n := 1 + rng.IntN(steps)
 	acts := make([]Action, n)
 	for j := range acts {
 		acts[j] = randomAction(rng)
+	}
+	if cfg.PreUpgrade { // R29-U1: release 28 until the upgrade, at a random point
+		acts = slices.Insert(acts, rng.IntN(len(acts)+1), Action{Op: opUpgrade, Seed: rng.Uint64()})
 	}
 	return cfg, acts
 }

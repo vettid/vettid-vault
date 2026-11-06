@@ -105,3 +105,170 @@ func (q *Party) afterDemotion(r *PeerRec, why string) {
 func (q *Party) needsReconnect(r *PeerRec) bool {
 	return q.newSpec() && !r.Device && r.Status == stActive && r.Cur == 0 && r.Own == nil && r.Pend == nil
 }
+
+// ---------- R29-U1, the upgrade migration ----------
+
+// migrate: R29-U1 (§6.3.1 "Capability and upgrade"). The run so far was
+// release 28 (Config.PreUpgrade: the f4a4d97 rules, activation at
+// hs.resp, no hs.confirm); every party migrates at once (the test vaults
+// upgrade together; a device's app too, except an old app), stored and
+// memory state alike. Each connection's and device's stored epoch becomes
+// its epoch record: confirmed = current, signer = the stored ik, received
+// flag clear. Earlier epochs keep only their receive keys (an epoch
+// established before release 29 counts as signed by the ik current for P
+// at the upgrade, §3.4.1 "The neutral feed item"). An outgoing handshake
+// in flight is cleaned up as an aborted one (handshake_not_restored, its
+// hs.init not sent, its tokens denied: the model restores none); answers
+// awaiting hs.fin run the responder half.
+func (w *World) migrate() {
+	if w.migrated || !w.preUpgrade {
+		return
+	}
+	w.migrated, w.optA, w.migratedAt = true, true, w.Now
+	w.hit("U1:migrated")
+	w.logf("UPGRADE: every party migrates to release 29 (R29-U1)")
+	// ground truth for §3.4.1 Residuals, "two splits at the upgrade": an
+	// initiator activated at hs.resp, its hs.fin not yet processed
+	for _, p := range w.real() {
+		for _, r := range p.st.Peers {
+			if o := w.party(r.ID).st.peer(p.ID); o != nil && r.Cur != 0 {
+				for _, a := range o.Ans {
+					if a.NewEpoch == r.Cur {
+						w.u1Risk[pairKey(p.ID, r.ID)] = [2]int{int(r.ID), r.Cur}
+						w.hit("U1:hs.fin-in-flight")
+					}
+				}
+			}
+		}
+	}
+	for _, p := range w.P {
+		for _, st := range []*State{&p.st, &p.stored} {
+			for i := range st.Peers {
+				p.migratePeer(st, &st.Peers[i])
+			}
+		}
+		if !p.Copy {
+			p.storedOut = map[int]bool{}
+			for _, e := range p.stored.Out {
+				p.storedOut[e.ID] = true
+			}
+		}
+	}
+}
+
+func (p *Party) migratePeer(st *State, r *PeerRec) {
+	if r.Cur == 0 {
+		if e := r.lastEpoch(); e != nil {
+			r.Cur = e.ID
+		}
+	}
+	var eps []Epoch
+	for _, e := range r.Epochs {
+		if e.Demoted || e.Destroyed {
+			continue
+		}
+		e.Signer, e.Flag, e.Pending, e.Abandoned = r.IK, false, false, false
+		e.EverCur = e.ID == r.Cur || e.Superseded != 0
+		if e.ID == r.Cur {
+			e.Superseded, e.EverCur = 0, true
+		}
+		eps = append(eps, e)
+	}
+	r.Epochs = eps
+	r.ConfID, r.ConfUntil, r.Pend = r.Cur, 0, nil
+	r.AbanIDs, r.DemName, r.RCNamed, r.RCFails, r.DropAns = nil, 0, 0, 0, nil
+	if o := r.Own; o != nil {
+		if st == &p.st {
+			p.w.hit("U1:handshake-not-restored")
+		}
+		for i := range st.Out {
+			if e := &st.Out[i]; e.M.Kind == KInit && e.M.HS == o.ID && !e.Done {
+				e.Ended = true
+			}
+		}
+		by := map[Key][]int{}
+		for _, t := range o.Toks {
+			by[t.Iss] = append(by[t.Iss], t.JTI)
+		}
+		for b, j := range by {
+			st.Out = append(st.Out, Entry{ID: p.w.id(), Denylist: true, Box: b, With: b, Revoke: j})
+		}
+		r.Own = nil
+	}
+	if len(r.Ans) > 0 && st == &p.st {
+		p.w.hit("U1:answer-runs-responder-half")
+	}
+}
+
+// ---------- R29-D4, an app from before release 29 ----------
+
+// deviceNotice: the vault tells the member that device r needs an update
+// (feed item device.update_needed, high), once per device until it
+// advertises hs_confirm.
+func (q *Party) deviceNotice(r *PeerRec, why string) {
+	if q.Device || !r.Device || r.SawHSC || r.Notice || !q.newSpec() {
+		return
+	}
+	r.Notice = true
+	q.w.hit("D4:notice " + why)
+	q.w.feedItem(q.ID, r.ID, "device.update_needed")
+	q.w.logf("%s: device.update_needed for %s (%s)", q.Name, q.w.party(r.ID).Name, why)
+}
+
+// seeFeatures: R29-G2, a message from the peer that passed steps 1-4;
+// hs_confirm is sticky once seen. Toward a device without it: D4.
+func (q *Party) seeFeatures(r *PeerRec, M *Msg) {
+	if !q.newSpec() {
+		return
+	}
+	if M.Feat {
+		if !r.SawHSC {
+			q.w.hit("G2:hs_confirm-seen")
+		}
+		r.SawHSC = true
+		return
+	}
+	if r.SawHSC {
+		q.w.hit("G2:sticky")
+		return
+	}
+	q.deviceNotice(r, "message without hs_confirm")
+}
+
+// feedItem records a feed item to the member about the pair (R29 I7).
+func (w *World) feedItem(q, r PID, kind string) {
+	if w.party(q).Copy {
+		return
+	}
+	k := pairKey(q, w.party(r).Origin)
+	w.feed[k] = append(w.feed[k], kind)
+}
+
+// ---------- residuals (§3.4.1 Residuals, 0.87.0) ----------
+
+// Residual reasons: each exempts a pair from I1, I6 and I7, and is counted.
+const (
+	resOldApp   = "an app from before release 29 (earlier releases are unsupported; R29-D4 notice)"
+	resU1Fin    = "an hs.fin lost at the upgrade (two splits at the upgrade, U1)"
+	resCopyInit = "a copy acting as initiator sent nothing but hs.fin"
+)
+
+// residualOf: the residual that exempts the pair (a, b), or "".
+func (w *World) residualOf(a, b PID) string {
+	if w.party(a).OldApp || w.party(b).OldApp {
+		return resOldApp
+	}
+	if x, ok := w.u1Risk[pairKey(a, b)]; ok {
+		resp, other := w.party(PID(x[0])), a
+		if other == resp.ID {
+			other = b
+		}
+		if r := resp.st.peer(other); r == nil || r.epoch(x[1]) == nil {
+			return resU1Fin // the responder does not hold the epoch the migration made current
+		}
+	}
+	return ""
+}
+
+// exempt counts a residual exemption for a pair, once per invariant.
+func (w *World) exempt(inv, reason string) { w.stat("residual exemption (" + inv + "): " + reason) }

@@ -717,8 +717,7 @@ func (m *Manager) rotateIdentity(now time.Time) error {
 		if p.State == PeerActive {
 			// S5 (0.86.0): the vault's own open rekeys, reconnects and
 			// pending epoch with p are abandoned; its answers awaiting
-			// hs.fin are dropped toward a peer with hs_confirm and kept
-			// toward any other.
+			// hs.fin are dropped.
 			reconnect := m.s5(p, now)
 			// S8 (0.86.0): `rotations` carries the whole chain since the
 			// signer of the epoch it travels in, `rotation` the newest link.

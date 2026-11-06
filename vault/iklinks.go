@@ -3,7 +3,6 @@ package vault
 import (
 	"bytes"
 	"context"
-	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"time"
@@ -794,7 +793,3 @@ func (m *Manager) idResend(p *Peer, ep *handshake.Epoch, in *envelope.Inner, now
 		m.dirty = true
 	}
 }
-
-var _ = ed25519.PublicKeySize
-var _ = suite.EpochIDSize
-var _ json.RawMessage

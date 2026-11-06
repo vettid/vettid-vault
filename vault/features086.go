@@ -184,5 +184,3 @@ func (m *Manager) hDeviceFeatures(_ context.Context, s *Session, in *envelope.In
 	m.noteFeatures(s.peer, names)
 	return nil, nil
 }
-
-var _ = time.Second

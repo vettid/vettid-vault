@@ -300,8 +300,7 @@ type Peer struct {
 	// E destroyed or an ik link demoted it. Pruned when nothing needs it.
 	Epochs []EpochMeta `json:"epochs,omitempty"`
 	// Pending is the vault's own rekey or reconnect epoch awaiting the
-	// peer's confirmation (§6.3.1 "Initiator"), toward a peer that
-	// advertised hs_confirm when the hs.init was sent.
+	// peer's confirmation (§6.3.1 "Initiator").
 	Pending *PendingEpoch `json:"pending_epoch,omitempty"`
 	// Confirmed is the confirmed epoch (§6.3.1 "Responder"): the newest,
 	// in activation order, under which the peer sent a message other than
@@ -309,8 +308,8 @@ type Peer struct {
 	// moves back. Set at the peer's first epoch.
 	Confirmed []byte `json:"confirmed_epoch,omitempty"`
 	// Abandoned are the ids of the vault's own pending epochs it abandoned
-	// (B passed): a reconnect naming one is accepted until a newer epoch is
-	// confirmed (§6.3.1).
+	// (for any reason): a reconnect naming one is accepted until a newer
+	// epoch is confirmed, unless R29-K9 ended it (§6.3.1).
 	Abandoned [][]byte `json:"abandoned_epochs,omitempty"`
 	// Seen are the valid identity links of the peer that passed rule C but
 	// were not followed (one in an unfinished handshake's rotations, or in

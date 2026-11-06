@@ -237,9 +237,7 @@ func (e *Epoch) Destroy() {
 // Keyring holds a session's current epoch, the receive keys of previous
 // epochs and (0.86.0, §6.3.1) an initiator's pending epoch. A previous
 // epoch may keep more than its receive key for a while: a responder's
-// confirmed epoch keeps its rk, and the epoch an initiator activated
-// without confirmation superseded keeps its send key and rk, for a
-// revert. It is safe for concurrent use.
+// confirmed epoch keeps its rk. It is safe for concurrent use.
 type Keyring struct {
 	mu      sync.Mutex
 	current *Epoch
@@ -269,8 +267,7 @@ func (k *Keyring) Activate(e *Epoch, now time.Time) {
 type Kept uint8
 
 const (
-	KeepReceive Kept = iota // receive key only (§6.5)
-	KeepRK                  // and rk: a responder's confirmed epoch (§6.3.1)
+	KeepRK Kept = iota // and rk: a responder's confirmed epoch (§6.3.1)
 )
 
 // ActivateKeeping makes e the current epoch as Activate does, but the
@@ -279,11 +276,7 @@ func (k *Keyring) ActivateKeeping(e *Epoch, now, until time.Time, kept Kept) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	if c := k.current; c != nil {
-		switch kept {
-		case KeepReceive:
-			c.retireSend()
-			until = now.Add(ReceiveKeyRetention)
-		case KeepRK:
+		if kept == KeepRK {
 			c.retireSendOnly()
 		}
 		k.retired = append(k.retired, retiredEpoch{e: c, until: until})
@@ -358,17 +351,6 @@ func (k *Keyring) Release(id [suite.EpochIDSize]byte, until time.Time) {
 			if until.Before(r.until) {
 				r.until = until
 			}
-		}
-	}
-}
-
-// Retain sets when the superseded epoch id's keys end.
-func (k *Keyring) Retain(id [suite.EpochIDSize]byte, until time.Time) {
-	k.mu.Lock()
-	defer k.mu.Unlock()
-	for i := range k.retired {
-		if k.retired[i].e.id == id {
-			k.retired[i].until = until
 		}
 	}
 }

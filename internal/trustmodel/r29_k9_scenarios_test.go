@@ -198,8 +198,9 @@ func TestR29K9HonestActivatedNotJudged(t *testing.T) {
 
 // R29-K2: Q's pending E1 whose sig_R is by the link's old ik is abandoned
 // at the link. Followed in P's identity.rotate, K9 ends it (a later message
-// under it suspends); followed outside one, it is demoted from the start (a
-// later message under it is refused, ancestor_ik).
+// under it suspends); followed outside one (applied at the hs.fin of P's
+// reconnect), it is demoted from the start (a later message under it is
+// refused, ancestor_ik).
 func TestR29K2PendingEpochAtLink(t *testing.T) {
 	for _, via := range []string{"identity.rotate", "other"} {
 		t.Run(via, func(t *testing.T) {
@@ -217,13 +218,21 @@ func TestR29K2PendingEpochAtLink(t *testing.T) {
 			if via == "identity.rotate" {
 				s.run(1, Q)
 			} else {
+				// the link reaches Q in P's reconnect, applied at its hs.fin
+				// (a rekey's hs.init would abandon E1 at the crossing first,
+				// and Q, holding E1 pending, has no handshake of its own for
+				// an hs.resp to answer)
 				s.dropAt(Q, KIdRot)
-				l := P.st.Chain[len(P.st.Chain)-1]
-				s.do(Q, func() {
-					Q.followIK(r, []IKLink{l}, Pos{Box: Q.st.Relay, ID: 1 << 30, DepAt: s.w.Now, Seq: 1 << 30}, false)
-					Q.h5(r, 0)
-					Q.write()
-				})
+				s.dropAt(Q, KInit) // P's restarted rekey
+				rp := P.st.peer(Q.ID)
+				s.do(P, func() { P.abandonOwn(rp); P.startHS(rp, true); P.write(); P.flush() })
+				s.run(1, Q) // Q answers P's reconnect (links kept for hs.fin)
+				s.run(1, P) // P: pending, hs.fin
+				s.dropAt(Q, KIdRot)
+				s.run(1, Q) // Q applies the link at hs.fin
+				if r.IK != P.st.IK {
+					t.Fatalf("setup: Q did not follow P's link at hs.fin\n  %s", s.trace())
+				}
 			}
 			ep := r.epoch(e1)
 			if r.Pend != nil || ep == nil || !ep.Abandoned || !ep.AbanByLink || s.w.stats["R29 K2:pending-abandoned-at-link"] == 0 {

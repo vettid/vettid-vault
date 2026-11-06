@@ -1079,6 +1079,12 @@ func (q *Party) tableBFin(r *PeerRec, M *Msg, pos Pos) dec {
 	if len(app) > 0 && q.followIK(r, app, pos, false) {
 		return dec{"suspend", "fork", cell + ":K4-flag"}
 	}
+	if len(app) > 0 && q.newSpec() && r.Status == stActive && r.Pend != nil {
+		// the links applied here also abandon, by the link, a pending
+		// epoch whose sig_R their old ik made (K2: demoted from the start),
+		// before the peer's handshake activates
+		q.k2Pending(r)
+	}
 	if r.Pend != nil {
 		q.abandonPending(r, "the peer's handshake activated", false) // §6.3.1 (written)
 	}
@@ -1156,23 +1162,30 @@ func (q *Party) h5(r *PeerRec, except int) {
 			q.startHS(r, rc)
 		}
 	}
-	if pe := r.Pend; pe != nil && r.superseded(pe.Signer, nil) {
-		// R29-K2, "Pending epochs at a link": its sig_R was made by a
-		// superseded ik (P dropped that answer at S5): abandoned, and
-		// demoted from the start (messages under it: ancestor_ik)
-		id := pe.ID
-		q.w.hit("K2:pending-abandoned-at-link")
-		q.abandonPending(r, "H5: signer superseded", r.Own == nil)
-		if ep := r.epoch(id); ep != nil && q.newSpec() {
-			ep.AbanByLink = true
-			ep.Demoted, ep.DemotedAt = true, Pos{Box: -1}
-		}
-	}
+	q.k2Pending(r)
 	for _, a := range slices.Clone(r.Ans) {
 		if a.ID != except && !a.Fork && r.superseded(a.PeerIK, a.Links) {
 			q.w.hit("K2:answer-dropped-H5")
 			q.dropAnswer(r, a.ID)
 		}
+	}
+}
+
+// k2Pending: R29-K2, "Pending epochs at a link": following a link
+// abandons Q's pending epoch whose sig_R was made by the link's old ik (a
+// superseded ik: P dropped that answer at S5), and it is demoted from the
+// start (messages under it: ancestor_ik).
+func (q *Party) k2Pending(r *PeerRec) {
+	pe := r.Pend
+	if pe == nil || !r.superseded(pe.Signer, nil) {
+		return
+	}
+	id := pe.ID
+	q.w.hit("K2:pending-abandoned-at-link")
+	q.abandonPending(r, "H5: signer superseded", r.Own == nil)
+	if ep := r.epoch(id); ep != nil && q.newSpec() {
+		ep.AbanByLink = true
+		ep.Demoted, ep.DemotedAt = true, Pos{Box: -1}
 	}
 }
 

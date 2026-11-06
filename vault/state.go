@@ -311,9 +311,19 @@ type Peer struct {
 	// (§3.4.1 rule C, 0.86.0): a later different successor of that key is
 	// a second successor.
 	Seen []json.RawMessage `json:"seen_links,omitempty"`
+	// RC counts the failed tries of the vault's reconnects to the peer
+	// naming one epoch (§3.4.1 "The reconnect bound").
+	RC *ReconnectCount `json:"reconnect_tries,omitempty"`
 	// IDResend counts S5's identity.rotate resends to the peer for the
 	// vault's latest rotation (0.86.0).
 	IDResend *IDResend `json:"id_resend,omitempty"`
+}
+
+// ReconnectCount is Peer.RC: the epoch the reconnects named, and how many
+// tries failed.
+type ReconnectCount struct {
+	Epoch []byte `json:"epoch"`
+	Tries int    `json:"tries"`
 }
 
 // IDResend is S5's resend bookkeeping: for which rotation (the length of
@@ -355,10 +365,6 @@ type EpochMeta struct {
 	Demoted    bool      `json:"demoted,omitempty"`
 	DemotedAt  time.Time `json:"demoted_at,omitzero"`
 	DemotedMsg string    `json:"demoted_msg,omitempty"`
-	// RCTries counts, for a demoted current epoch, the reconnects that
-	// failed (at the third the connection goes stale, §3.4.1 "The
-	// reconnect bound").
-	RCTries int `json:"rc_tries,omitempty"`
 	// OwnChain is the own rotation count whose ik signed its handshake: a
 	// reconnect naming it carries the vault's links from there.
 	OwnChain int `json:"own_chain,omitempty"`
@@ -658,8 +664,8 @@ type OutgoingHS struct {
 	// on an epoch of the replaced line (§6.6); it blocks nothing, and its
 	// hs.resp is fork evidence when it carries a later ts.
 	Replaced bool `json:"replaced,omitempty"`
-	// Named is the epoch a reconnect after a demotion or by strict F1
-	// named (§3.4.1).
+	// Named is the epoch a reconnect named (its ctx; after a demotion or by
+	// strict F1 another than the current one, §3.4.1).
 	Named []byte `json:"named,omitempty"`
 
 	// An outgoing connection request in state waiting (§6.4, §10.4):

@@ -628,9 +628,9 @@ func TestR29DemotedNoSecondReconnectWhilePending(t *testing.T) {
 	}
 }
 
-// 0.86.5 (b): a try fails when its handshake expires or its pending
-// epoch is abandoned; both count, and the third makes the connection
-// stale, with no fourth try.
+// §3.4.1 "The reconnect bound": a try fails when its handshake expires
+// unanswered (counted); a try whose pending epoch reaches B makes the
+// connection stale at once, with no further try.
 func TestR29DemotedExpiryAndAbandonCountAsTries(t *testing.T) {
 	f := demoted(t, nil)
 	// try 1: expires unanswered
@@ -640,31 +640,23 @@ func TestR29DemotedExpiryAndAbandonCountAsTries(t *testing.T) {
 	if f.p(0).State == PeerStale || f.openReconnect(0) == nil {
 		t.Fatal("after one expiry: stale, or no second try")
 	}
-	// tries 2 and 3: answered, pending, the hs.fin lost; B abandons them
-	for try := 2; try <= 3; try++ {
-		f.deliver(0, 1, kHSInit)
-		f.deliver(1, 0, kHSResp)
-		if f.p(0).Pending == nil {
-			f.dump()
-			t.Fatalf("try %d: not pending", try)
-		}
-		f.lose(0, 1, kAny)
-		f.lose(1, 0, kAny)
-		f.advance(PendingLife + time.Hour)
-		f.tick(0)
-		f.tick(0)
-		if f.p(0).Pending != nil {
-			t.Fatalf("try %d: B did not abandon", try)
-		}
-		if try < 3 && (f.p(0).State == PeerStale || f.openReconnect(0) == nil) {
-			t.Fatalf("try %d: stale too early, or no next try", try)
-		}
+	// try 2: answered, pending, the hs.fin lost; B ends it stale
+	f.deliver(0, 1, kHSInit)
+	f.deliver(1, 0, kHSResp)
+	if f.p(0).Pending == nil {
+		f.dump()
+		t.Fatal("try 2: not pending")
 	}
+	f.lose(0, 1, kAny)
+	f.lose(1, 0, kAny)
+	f.advance(PendingLife + time.Hour)
+	f.tick(0)
+	f.tick(0)
 	if f.p(0).State != PeerStale || !f.sink[0].has("connection.stale") {
 		f.dump()
-		t.Fatal("the third failed try (an abandon) did not make it stale")
+		t.Fatal("a pending reconnect at B did not make the connection stale")
 	}
 	if f.openReconnect(0) != nil {
-		t.Fatal("a fourth try started")
+		t.Fatal("a further try started")
 	}
 }

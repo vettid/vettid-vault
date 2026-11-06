@@ -372,24 +372,22 @@ func (m *Manager) sealHeld(p *Peer) {
 	}
 }
 
-// demotedReconnectExpired counts an expired reconnect while p's current
-// epoch is demoted: at the third the connection goes stale (with
-// connection.stale and its feed item), as for rules E and L (the lead's
-// call; §3.4.1 "The reconnect bound"). Each expired one's tokens were
-// revoked already.
-//
-// 0.86.5: a try fails when its handshake expires or its pending epoch is
-// abandoned (B, H5, S5, crossing, link); both count. A refusal ends it
-// stale at once (handleResp). Three tries stay within the reconnect
-// token's quota (4 deposits).
-func (m *Manager) demotedReconnectExpired(p *Peer, now time.Time) {
-	e := m.demotedMeta(p)
-	if e == nil {
+// reconnectFailed counts a failed try of a reconnect to p naming epoch
+// named (§3.4.1 "The reconnect bound": a try fails only when its handshake
+// expires unanswered; a refusal is silent and not counted): at the third
+// for the same named epoch the connection goes stale (with
+// connection.stale and its feed item). Every reconnect counts, whatever
+// started it. Each expired one's tokens were revoked already.
+func (m *Manager) reconnectFailed(p *Peer, named []byte, now time.Time) {
+	if p.Kind != KindConnection {
 		return
 	}
-	e.RCTries++
+	if p.RC == nil || !bytes.Equal(p.RC.Epoch, named) {
+		p.RC = &ReconnectCount{Epoch: append([]byte(nil), named...)}
+	}
+	p.RC.Tries++
 	m.dirty = true
-	if e.RCTries >= ReconnectTries {
+	if p.RC.Tries >= ReconnectTries {
 		m.markStale(p, now)
 	}
 }
@@ -405,7 +403,7 @@ func (m *Manager) tickDemoted(p *Peer, now time.Time) {
 		return
 	}
 	if !m.canReconnect(p, now) {
-		if p.Reconnect.Token == "" || !now.Before(p.Reconnect.Exp) {
+		if noReconnectToken(p, now) {
 			m.markStale(p, now) // no reconnect token left: no way back (review RR2-3)
 		}
 		return // until something changes (an answer settles): no-op
@@ -455,7 +453,7 @@ func (m *Manager) currentDemoted(p *Peer) bool { return m.demotedMeta(p) != nil 
 // reconnect token, no answer of ours to its reconnect awaiting hs.fin
 // (between persons), its kem readable.
 func (m *Manager) canReconnect(p *Peer, now time.Time) bool {
-	if p.Kind != KindConnection || p.Reconnect.Token == "" || !now.Before(p.Reconnect.Exp) {
+	if p.Kind != KindConnection || noReconnectToken(p, now) {
 		return false
 	}
 	if !p.isService() && len(m.answeredReconnects(p)) > 0 {

@@ -585,7 +585,7 @@ func (m *Manager) handleRekeyInit(ctx context.Context, p *Peer, in *envelope.Inn
 		}
 	}
 	for _, og := range m.st.Outgoing {
-		if og.New == nil && og.PeerID == p.ID && og.Named != nil {
+		if og.New == nil && og.PeerID == p.ID && og.Purpose == handshake.PurposeReconnect && !bytes.Equal(og.Named, p.LastEpochID) {
 			// A reconnect naming an epoch (after a demotion, or by strict
 			// F1) is open: it replaces this rekey, which the peer cannot
 			// finish with the vault's current ik (the trust model's r8,
@@ -1243,8 +1243,7 @@ func (m *Manager) startReconnect(p *Peer, now time.Time) {
 // current epoch, never a pending one). It carries the vault's links since
 // the named epoch's signer.
 func (m *Manager) startReconnectCtx(p *Peer, ctx []byte, now time.Time) *OutgoingHS {
-	if p.Kind != KindConnection || p.suspended() || m.hasOutgoing(p.ID, handshake.PurposeReconnect) ||
-		p.Reconnect.Token == "" || !now.Before(p.Reconnect.Exp) || len(ctx) == 0 {
+	if p.Kind != KindConnection || p.suspended() || m.hasOutgoing(p.ID, handshake.PurposeReconnect) || len(ctx) == 0 {
 		return nil
 	}
 	if !p.isService() && len(m.answeredReconnects(p)) > 0 {
@@ -1255,6 +1254,14 @@ func (m *Manager) startReconnectCtx(p *Peer, ctx []byte, now time.Time) *Outgoin
 	if p.Pending != nil && p.Pending.Purpose == handshake.PurposeReconnect {
 		// The vault's own reconnect awaits confirmation: an open handshake
 		// (§6.3.1); it ends only by confirmation or abandonment.
+		return nil
+	}
+	if noReconnectToken(p, now) {
+		// §3.4.1 "The reconnect bound": Q cannot start a try because it
+		// holds no reconnect token for P.
+		if p.State == PeerActive {
+			m.markStale(p, now)
+		}
 		return nil
 	}
 	kem, err := suite.ParsePublicKey(p.KEM)
@@ -1294,6 +1301,7 @@ func (m *Manager) startReconnectCtx(p *Peer, ctx []byte, now time.Time) *Outgoin
 		Token: p.Reconnect.Token, Payload: ini.Envelope(), Handshake: true}
 	m.queueDeposit(oe, now)
 	og.InitOutbox = oe.ID // so a reconnect abandoned before the deposit sends nothing (§6.6, 0.72.1)
+	og.Named = append([]byte(nil), ctx...)
 	return og
 }
 

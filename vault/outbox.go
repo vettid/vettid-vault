@@ -483,7 +483,7 @@ func (m *Manager) housekeeping(now time.Time) {
 			switch {
 			case p == nil:
 			case og.Purpose == handshake.PurposeReconnect:
-				m.demotedReconnectExpired(p, now)
+				m.reconnectFailed(p, og.Named, now)
 			}
 		}
 	}

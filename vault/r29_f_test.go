@@ -270,9 +270,10 @@ func TestR29F13RekeyNamingConfirmedEpoch(t *testing.T) {
 }
 
 // Question B (the lead's rule, "if redeemable, revoke"): an abandoned
-// pending reconnect's tokens are revoked in the same write; the vault
-// restarts a reconnect (not a rekey), and a peer that did activate the
-// abandoned epoch converges through it.
+// pending reconnect's tokens are revoked in the same write. At B the
+// connection is then stale (§6.3.1); at S5 the vault restarts a reconnect
+// (not a rekey), and a peer that did activate the abandoned epoch
+// converges through it.
 func TestR29AbandonedReconnectTokensRevoked(t *testing.T) {
 	for _, path := range []string{"B", "S5"} {
 		f := newR29Fx(t)
@@ -305,6 +306,14 @@ func TestR29AbandonedReconnectTokensRevoked(t *testing.T) {
 			if !f.d[0].relayRevoked("jti", j) {
 				t.Fatalf("%s: token %s not revoked", path, j)
 			}
+		}
+		if path == "B" {
+			// §6.3.1: a pending reconnect that reaches B makes the
+			// connection stale at once (§3.4.1 "The reconnect bound").
+			if f.p(0).State != PeerStale || f.m(0).hasOutgoing(f.id[0], handshake.PurposeReconnect) {
+				t.Fatal("B: a pending reconnect at B did not end stale")
+			}
+			continue
 		}
 		if !f.m(0).hasOutgoing(f.id[0], handshake.PurposeReconnect) {
 			t.Fatalf("%s: no reconnect restarted", path)

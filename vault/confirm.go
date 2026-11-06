@@ -209,6 +209,9 @@ func (m *Manager) confirmPending(p *Peer, now time.Time) {
 	}
 	m.activate(p, ep, pe.Purpose, pe.Issued, "", pe.OwnChain, actOpts{how: actInstalled, mine: true}, now)
 	m.setConfirmed(p, pe.ID, now)
+	if pe.Purpose == handshake.PurposeReconnect {
+		p.RC = nil // the reconnect succeeded: its tries start again
+	}
 	m.dirty = true
 }
 
@@ -250,10 +253,11 @@ func (m *Manager) abandonPending(p *Peer, why string, restart bool, now time.Tim
 	p.Pending = nil
 	m.note(now, "pending_abandoned_"+why, p.ID)
 	m.dirty = true
-	if pe.Purpose == handshake.PurposeReconnect && why == "b_passed" && m.currentDemoted(p) {
-		// 0.86.6 S5: a try of the reconnect after a demotion fails at its
-		// handshake's expiry or at B only (at the third: stale).
-		m.demotedReconnectExpired(p, now)
+	if pe.Purpose == handshake.PurposeReconnect && why == "b_passed" && p.Kind == KindConnection {
+		// §6.3.1, §3.4.1 "The reconnect bound": a pending reconnect that
+		// reaches B makes the connection stale at once.
+		m.markStale(p, now)
+		return
 	}
 	if !restart || p.State != PeerActive || p.suspended() {
 		return

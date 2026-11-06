@@ -15,6 +15,10 @@ type State struct {
 	VaultID  string `json:"vault_id"`
 	UserGUID string `json:"user_guid"`
 	StateSeq uint64 `json:"state_seq"`
+	// MessagingRelease is §6.3.1's marker (0.87.1, "No upgrade: release 29
+	// starts clean"): written as 29 from a vault's first flush; a state
+	// without it, or with a smaller value, is not started (R29-U1).
+	MessagingRelease int `json:"messaging_release,omitempty"`
 
 	Relay        RelayState        `json:"relay"`
 	IdentitySeed []byte            `json:"ik_seed"`

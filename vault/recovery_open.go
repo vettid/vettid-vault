@@ -440,6 +440,11 @@ func openState(ctx context.Context, p RecoveryOpenParams, hdr *Header, hver stor
 		m.finishMarked(ctx)
 		return nil, codeDeleted
 	}
+	if !stateSupported(&st) {
+		// R29-U1: refused after the deleting check, before any write.
+		m.zeroize()
+		return nil, CodeStateUnsupported
+	}
 	return m, ""
 }
 

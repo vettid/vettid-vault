@@ -29,6 +29,9 @@ const (
 	CodeBadRequest         = "bad_request"
 	CodeDeviceSecret       = "device_secret"
 	CodeTransferIncomplete = "transfer_incomplete"
+	// Release 29 (§6.3.1 "No upgrade", §11.4): a state without
+	// messaging_release 29 or more is not started.
+	CodeStateUnsupported = "state_unsupported"
 )
 
 // Release update results and refusal codes (§11.4, §11.10.4).
@@ -391,6 +394,15 @@ func UnlockAlt(ctx context.Context, p AltUnlockParams) (*Manager, *AltUnlockOutc
 		m.stateVer, m.headerVer = sver, hver
 		m.finishMarked(ctx)
 		return nil, out.drop(ErrDeleted)
+	}
+	if !stateSupported(&st) {
+		// R29-U1 (§6.3.1 "No upgrade: release 29 starts clean"): after
+		// §12.5's deleting check, before anything is written: no state or
+		// header write, nothing sent, no unlocked, locked again.
+		suite.Wipe(op.dek1)
+		suite.Wipe(op.uk)
+		suite.Wipe(dek)
+		return nil, out.fail(CodeStateUnsupported, ErrStateUnsupported)
 	}
 	if st.SealedRelease == "" {
 		st.SealedRelease = hdr.SealedRelease

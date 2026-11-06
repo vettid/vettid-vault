@@ -224,6 +224,7 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 	now := m.now()
 	blocked := map[string]bool{}
 	awaiting := map[string]bool{}
+	held := map[string]bool{} // held for a pending reconnect (§6.3.1)
 	for _, e := range m.st.Outbox {
 		if e.Done {
 			continue
@@ -235,13 +236,14 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 			}
 			continue // not stored yet (queue)
 		}
-		if e.Op == OpDeposit && (blocked[key] || awaiting[key] && e.Token == "") {
+		if e.Op == OpDeposit && (blocked[key] || awaiting[key] && e.Token == "" || held[key] && !e.Handshake) {
 			continue
 		}
 		if e.Op == OpDeposit && !e.Handshake && m.pendingReconnectHold(e.PeerID) {
 			// §6.3.1: while a reconnect's epoch is pending, nothing but the
-			// handshake goes to the peer; the rest waits in order.
-			blocked[key] = true
+			// handshake goes to the peer; the rest waits in order, and the
+			// handshake's messages pass it.
+			held[key] = true
 			continue
 		}
 		if !e.NotAfter.IsZero() && !now.Before(e.NotAfter) {

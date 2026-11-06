@@ -341,7 +341,11 @@ func (m *Manager) respondReconnect(pi *handshake.PendingInit, p *Peer, sender ed
 		}
 	}
 	m.noteFeatures(p, pi.Inner().Features) // 0.86.0, §10.8: steps 1-4 passed
-	named86, namedConf, ownCopy, forkEp, refuse := m.classifyCtx086(p, body.Ctx)
+	var named86 []byte
+	var namedConf, ownCopy, forkEp, refuse bool
+	if !m.emu28 {
+		named86, namedConf, ownCopy, forkEp, refuse = m.classifyCtx086(p, body.Ctx)
+	}
 	if refuse {
 		m.audit(now, "reconnect_refused", p.ID)
 		pi.Discard()
@@ -529,6 +533,12 @@ func (m *Manager) handleRekeyInit(ctx context.Context, p *Peer, in *envelope.Inn
 	p.upgradeEpochs()
 	epID := ep.ID()
 	namedConf := false
+	if m.emu28 && (kr.Current() != ep || len(pi0Rotations(in)) > 0) {
+		// Release 28: a rekey only under the current epoch, and one
+		// carrying rotations does not parse.
+		m.audit(now, "rekey_not_current_epoch", p.ID)
+		return ackAfterFlush
+	}
 	if kr.Current() != ep {
 		if bytes.Equal(epID[:], p.confirmedID()) && ep.HasRK() {
 			namedConf = true
@@ -553,7 +563,7 @@ func (m *Manager) handleRekeyInit(ctx context.Context, p *Peer, in *envelope.Inn
 		// The peer's answer to ours ended without hs.fin (§6.5).
 		m.abandonPending(p, "later_rekey", false, now)
 	}
-	if p.Standing.Token == "" || !now.Before(p.Standing.Exp) {
+	if !m.emu28 && (p.Standing.Token == "" || !now.Before(p.Standing.Exp)) {
 		// Rule J (§6.3.1 "Lifetimes"): no standing token valid by its exp,
 		// so no answer could be deposited: none is made, and neither the
 		// rekey block nor §6.6's holds the vault back from reconnecting.
@@ -583,6 +593,16 @@ func (m *Manager) handleRekeyInit(ctx context.Context, p *Peer, in *envelope.Inn
 			if og.New == nil && og.PeerID == p.ID && og.Purpose == handshake.PurposeRekey && !og.Replaced {
 				m.abandonOutgoing(id, now)
 			}
+		}
+	}
+	for _, og := range m.st.Outgoing {
+		if og.New == nil && og.PeerID == p.ID && og.RuleRC != "" {
+			// A rule-E or rule-L reconnect is open: it replaces this rekey,
+			// which the peer cannot finish with the vault's current ik
+			// (the trust model's r8, point 2).
+			m.audit(now, "rekey_replaced_by_reconnect", p.ID)
+			pi.Discard()
+			return ackAfterFlush
 		}
 	}
 	// Crossing handshakes: the lower th1 wins (§6.5; 0.86.0: whatever
@@ -749,7 +769,7 @@ func (m *Manager) responderEstablish(p *Peer, aw *AwaitingHS, fr *handshake.FinR
 	if p.Pending != nil {
 		m.abandonPending(p, "peer_activated", false, now)
 	}
-	if aw.NamedConfirmed {
+	if aw.NamedConfirmed && !m.emu28 {
 		m.ruleE(p, aw.InitTS, now)
 	}
 	signer := aw.Signer
@@ -909,6 +929,16 @@ func (m *Manager) activate(p *Peer, ep *handshake.Epoch, purpose handshake.Purpo
 		kr.Activate(ep, now)
 	}
 	id := ep.ID()
+	if !isNew && !m.restoring {
+		// 0.86.0: a rekey of the vault's own still open was made from an
+		// earlier epoch, which no longer moves on: it is abandoned (it
+		// would otherwise hold the next rekey back until it expires).
+		for oid, og := range m.st.Outgoing {
+			if og.New == nil && og.PeerID == p.ID && og.Purpose == handshake.PurposeRekey && !og.Replaced {
+				m.abandonOutgoing(oid, now)
+			}
+		}
+	}
 	p.upgradeEpochs()
 	o.ownChain = ownChain
 	m.recordActivated(p, id[:], o, now)
@@ -1139,13 +1169,13 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 	// (§6.3.1 "Deployment").
 	old, oldChain := append([]byte(nil), p.LastEpochID...), p.OwnChainAtEpoch
 	o := actOpts{signer: res.ResponderIK, mine: true, unconfirmed: true}
-	if len(old) > 0 {
+	if len(old) > 0 && !m.emu28 {
 		o.how, o.until = actKeepSend, now.Add(ConfirmedKeysFor)
 		if p.Revert != nil {
 			m.endRevertKeep(p, now) // one keep at a time: the earlier old epoch goes as usual
 		}
 	}
-	if len(old) > 0 {
+	if len(old) > 0 && !m.emu28 {
 		m.startRevertKeep(p, old, newID[:], oldChain, now) // before activation sends anything in the new epoch
 	}
 	m.activate(p, res.Epoch, og.Purpose, og.Issued, "", chainOr(og.OwnChain, len(m.st.Rotations)), o, now)
@@ -1239,6 +1269,11 @@ func (m *Manager) startReconnectCtx(p *Peer, ctx []byte, now time.Time) *Outgoin
 	if !p.isService() && len(m.answeredReconnects(p)) > 0 {
 		// §6.6 "Between two persons" (0.74.0): no reconnect of our own
 		// while an answer of ours awaits hs.fin.
+		return nil
+	}
+	if p.Pending != nil && p.Pending.Purpose == handshake.PurposeReconnect {
+		// The vault's own reconnect awaits confirmation: an open handshake
+		// (§6.3.1); it ends only by confirmation or abandonment.
 		return nil
 	}
 	kem, err := suite.ParsePublicKey(p.KEM)
@@ -1524,4 +1559,15 @@ func (m *Manager) enrollApp(ctx context.Context, app *EnrollApp, now time.Time) 
 	}
 	m.queueDeposit(&OutboxEntry{Op: OpDeposit, RelayURL: app.Relay.URL, Mailbox: app.Relay.Mailbox, Token: app.OpenToken, Payload: env}, now)
 	return nil
+}
+
+// pi0Rotations returns the rotations of a rekey hs.init's body, or nil
+// (the release-28 stand-in refuses any).
+func pi0Rotations(in *envelope.Inner) []json.RawMessage {
+	o, err := strictjson.ParseObject(in.Body)
+	if err != nil {
+		return nil
+	}
+	arr, _, _ := o.OptArray("rotations")
+	return arr
 }

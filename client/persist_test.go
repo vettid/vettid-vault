@@ -514,6 +514,16 @@ func checkRekeyed(t *testing.T, r *fakeRelay, v *fakeVault, d *Device) {
 	if n := len(v.receivedTypes); n == 0 || v.receivedTypes[n-1] != "vault.status" {
 		t.Fatalf("vault did not get the device's message in the new epoch: %v", v.receivedTypes)
 	}
+	// 0.86.0 (§6.3.1, §10.2): the device confirmed the vault's rekey and
+	// sent its device.features in the new epoch.
+	confirm, feats := false, false
+	for _, ty := range v.receivedTypes {
+		confirm = confirm || ty == handshake.TypeConfirm
+		feats = feats || ty == "device.features"
+	}
+	if !confirm || !feats {
+		t.Fatalf("no hs.confirm or device.features after the rekey: %v", v.receivedTypes)
+	}
 }
 
 func loadState(t *testing.T, b []byte) State {

@@ -92,6 +92,9 @@ func (m *Manager) hIdentityRotate(_ context.Context, s *Session, in *envelope.In
 	if err != nil {
 		return nil, err
 	}
+	if m.emu28 {
+		links = links[len(links)-1:] // release 28 reads `rotation` only
+	}
 	p := s.peer
 	for _, r := range links {
 		if m.rotationConflict(p, r, s.now) {
@@ -447,7 +450,7 @@ func (m *Manager) idResend(p *Peer, ep *handshake.Epoch, in *envelope.Inner, now
 // the last failing, the connection goes stale. It reports whether a
 // reconnect started.
 func (m *Manager) ruleL(p *Peer, now time.Time) bool {
-	if p.Kind != KindConnection || p.advertisedFeatures() || p.State != PeerActive || p.suspended() {
+	if p.Kind != KindConnection || p.advertisedFeatures() || p.State != PeerActive || p.suspended() || m.emu28 {
 		return false
 	}
 	if p.OwnChainAtEpoch >= len(m.st.Rotations) {

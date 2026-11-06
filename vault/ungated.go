@@ -144,7 +144,9 @@ func (m *Manager) keepCopy(p *Peer, in *envelope.Inner, wake string) {
 	if te := m.registry[in.Type]; te != nil && te.spec.Ephemeral {
 		return // ephemeral: never re-sealed
 	}
-	j, err := in.Marshal(envelope.ModeSealed) // without seq; the inner id is kept
+	c := *in
+	c.Seq = 0
+	j, err := c.Marshal(envelope.ModeSealed) // without seq; the inner id is kept
 	if err != nil {
 		return
 	}

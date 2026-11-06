@@ -261,6 +261,7 @@ func (m *Manager) h5(p *Peer, now time.Time) {
 	for id, aw := range m.st.Awaiting {
 		if aw.New == nil && aw.PeerID == p.ID && aw.Signer != nil && !bytes.Equal(aw.Signer, p.IK) &&
 			(aw.Reconnect == nil || !aw.Reconnect.Fork) {
+			m.keepDroppedAnswer(p, aw, now)
 			m.abandonAwaiting(id, now)
 		}
 	}
@@ -380,6 +381,9 @@ func (m *Manager) identityRotateBody(p *Peer) []byte {
 // established there, then rekeyed at once under the new ik
 // (responderEstablish).
 func (m *Manager) s5(p *Peer, now time.Time) (reconnect bool) {
+	if m.emu28() {
+		return false // release 28: only its rekeys are replaced (rotateIdentity's dropRekey)
+	}
 	for id, og := range m.st.Outgoing {
 		if og.New != nil || og.PeerID != p.ID || og.Replaced {
 			continue

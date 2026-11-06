@@ -335,6 +335,9 @@ func (m *Manager) handleMessage(ctx context.Context, msg Message, now time.Time)
 	if id := m.awaitingByKids(env, sender); id != "" {
 		return m.handleFin(ctx, id, msg.Payload, sender, now)
 	}
+	if m.droppedAnswerFin(env, msg.Payload, sender, now) {
+		return ackAfterFlush // §3.4.1 O3a
+	}
 	if id := m.requestByKids(env, sender); id != "" {
 		return m.handleRequestMessage(id, env, now)
 	}

@@ -471,6 +471,7 @@ func (m *Manager) housekeeping(now time.Time) {
 	m.pruneHistories(now)
 	m.pruneIssued(now)
 	m.pruneRetiredKEMs(now)
+	m.pruneDroppedAnswers(now)
 	for id, fr := range m.featureReqs {
 		if now.Sub(fr.at) > featureReqTTL {
 			delete(m.featureReqs, id)

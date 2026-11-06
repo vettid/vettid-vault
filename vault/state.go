@@ -25,6 +25,10 @@ type State struct {
 	RotatedAt time.Time `json:"rotated_at,omitzero"`
 	// RevertSeq numbers the revert copies (§6.3.1 "Deployment").
 	RevertSeq uint64 `json:"revert_seq,omitempty"`
+	// DroppedAnswers are the answers H5 dropped, kept until their
+	// lifetime ends with only what checks their hs.fin (§3.4.1 O3a,
+	// 0.86.0): its kids, the key that opens it and the ik it pinned.
+	DroppedAnswers []DroppedAnswer `json:"dropped_answers,omitempty"`
 	WakeSeed  []byte `json:"wake_seed"`
 	// RotationOwed is the owed mark (§11.14.10 "The owed mark"): a rotation
 	// of the vault's keys still to be made. Recovery is the recovery_id of
@@ -313,6 +317,13 @@ type Peer struct {
 	// IDResend counts S5's identity.rotate resends to the peer for the
 	// vault's latest rotation (0.86.0).
 	IDResend *IDResend `json:"id_resend,omitempty"`
+}
+
+// DroppedAnswer is an answer H5 dropped (§3.4.1 O3a).
+type DroppedAnswer struct {
+	PeerID string                  `json:"peer_id"`
+	Check  handshake.FinCheckState `json:"check"`
+	Until  time.Time               `json:"until"`
 }
 
 // IDResend is S5's resend bookkeeping: for which rotation (the length of

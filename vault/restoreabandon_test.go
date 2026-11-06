@@ -35,13 +35,9 @@ func reconnectOf(t *testing.T, m *Manager, p *Peer) *OutgoingHS {
 	return nil
 }
 
-// checkAbandoned checks that the reconnect ogID is gone, its hs.init is not
-// to be sent, and each token it minted has a revoke queued.
-func checkAbandoned(t *testing.T, m *Manager, ogID, initOutbox string, issued []IssuedToken) {
-	checkAbandonedAt(t, m, ogID, initOutbox, issued, true)
-}
-
-// checkAbandonedAt is checkAbandoned; atRestore: the abandonment is the
+// checkAbandonedAt checks that the reconnect ogID is gone, its hs.init is
+// not to be sent, and each token it minted has a revoke queued; atRestore:
+// the abandonment is the
 // restore's (audited handshake_not_restored), not the rotation's own (S5,
 // 0.86.0, which abandons the vault's open reconnects in the rotation's
 // write).

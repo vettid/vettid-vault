@@ -521,6 +521,11 @@ func allowedWhileUnacked(e *Entry) bool {
 	switch e.M.Kind {
 	case KUpdate, KTokIssued:
 		return true
+	case KConfirm:
+		// (0.88.2, owner decision a) hs.confirm is on S1's list: else a
+		// pending or demoted Q holding relay.token.issued for P's new key
+		// and P's S1 holding hs.confirm wait for each other until B
+		return true
 	case KInit, KResp, KFin:
 		return e.M.Reconnect
 	}

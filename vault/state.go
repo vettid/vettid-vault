@@ -368,10 +368,10 @@ type EpochMeta struct {
 	// OwnChain is the own rotation count whose ik signed its handshake: a
 	// reconnect naming it carries the vault's links from there.
 	OwnChain int `json:"own_chain,omitempty"`
-	// GotFromPeer: a message from P other than a handshake message
-	// (hs.init, hs.resp, hs.fin, hs.confirm) passed beforeAccept under
-	// this epoch (S13 option a). An epoch recorded before it (release-28
-	// state) reads as false.
+	// GotFromPeer is §6.3.1's received flag (owner decision S13 a): a
+	// message from P other than hs.fin (hs.confirm, hs.init and session
+	// messages included) opened under this epoch and passed acceptFrom
+	// steps 1-4.
 	GotFromPeer bool `json:"got_from_peer,omitempty"`
 }
 

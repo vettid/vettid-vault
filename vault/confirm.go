@@ -3,7 +3,6 @@ package vault
 import (
 	"bytes"
 	"crypto/ed25519"
-	"strings"
 	"time"
 
 	"github.com/vettid/vettid-vault/vms/envelope"
@@ -387,8 +386,11 @@ func (m *Manager) beforeAccept(p *Peer, ep *handshake.Epoch, in *envelope.Inner,
 		return true
 	}
 	fin := in.Type == handshake.TypeFin
-	if meta != nil && !meta.GotFromPeer && !strings.HasPrefix(in.Type, "hs.") {
-		meta.GotFromPeer = true // S13 (a): written with this batch
+	if meta != nil && !meta.GotFromPeer && !fin {
+		// §6.3.1 "The received flag": set by any message from P that opens
+		// under this epoch and passes acceptFrom steps 1-4, except hs.fin;
+		// written with this batch.
+		meta.GotFromPeer = true
 		m.dirty = true
 	}
 	if pe := p.Pending; pe != nil && !fin && bytes.Equal(pe.ID, id[:]) {

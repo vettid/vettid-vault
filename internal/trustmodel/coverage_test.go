@@ -19,7 +19,7 @@ import (
 // rule: it is tested in the vault (§6.3.2).
 var r29Rules = []string{"G1", "G2", "L1", "I1", "I2", "I3", "I4", "I5", "I6", "I7",
 	"R1", "R2", "R3", "R4", "R5", "R6", "X1", "X2", "X3", "X4", "X5", "X6",
-	"K1", "K2", "K3", "K4", "K5", "K6", "K7", "K8", "F1", "F3", "D1", "D2", "D3", "D4"}
+	"K1", "K2", "K3", "K4", "K5", "K6", "K7", "K8", "K9", "F1", "F3", "D1", "D2", "D3", "D4"}
 
 // r29Branches: the branches that must each be hit. Branches the oracle
 // config cannot reach are listed in r29Unreachable with the reason.
@@ -40,16 +40,16 @@ var r29Branches = []string{
 	"X6:sealed-rekey-refused",
 	"K1:identity.rotate-whole-chain", "K1:hs.init-whole-chain",
 	"K2:S5-answer-dropped", "K2:S5-pending-abandoned", "K2:answer-dropped-H5", "K2:pending-abandoned-at-link",
-	"K2:abandoned-demoted", "K2:abandoned-flag-suspend",
 	"K3:identity.rotate-resent",
 	"K4:demote-audit", "K4:current-demoted", "K4:flag-suspend",
 	"K5:held", "K5:released", "K5:held-ended", "K5:hs.confirm-not-sent", "K5:reconnect-after-demotion",
 	"K6:try-failed", "K6:third-failure-stale", "K6:quota_exceeded-stale",
 	"K7:demote", "K7:demote-several", "K7:flag-suspend", "K7:reconnect-names-E",
 	"K8:link-kept-as-seen", "K8:second-successor-suspends",
+	"K9:ended", "K9:flag-suspend", "K9:ended-message-suspends",
 	"F1:fork-by-ctx-rekey", "F1:fork-by-ctx-reconnect",
 	"F3:flag-set", "F3:flag-set-by-hs.confirm",
-	"D1:B-rekey", "D1:B-no-token-stale", "D2:device-starts-no-rekey", "D2:confirm-rate-limited", "D3:device-rekey-refused",
+	"D1:B-rekey", "D1:B-no-token", "D1:no-token", "D2:device-starts-no-rekey", "D2:confirm-rate-limited", "D3:device-rekey-refused",
 	"D4:notice message without hs_confirm", "D4:notice D3 refusal",
 }
 
@@ -65,6 +65,7 @@ var r29Unreachable = map[string]string{
 	"L1:hs.fin-after-L":                  "an hs.fin arriving after L (16 days)",
 	"L1:confirmed-epoch-keys-end":        "48 days with the confirmed epoch not current",
 	"D1:rekey-not-reconnect":             "token_expired toward a device with a pending rekey, exp passed on the own clock",
+	"D1:no-token-stale":                  "the model's own device rule (no valid token at a timer: stale) ends the pair first",
 	"D4:notice B passed":                 "an old app that never sends under the new epoch for 32 days",
 	"I6:token_expired-before-own-exp":    "token_expired while the own clock is behind",
 	"I6:rekey-abandoned-token_expired":   "token_expired with a pending rekey (the parties check exp before depositing)",

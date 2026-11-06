@@ -80,6 +80,7 @@ type Epoch struct {
 	MineInit   bool  // this side initiated the handshake that made it
 	Flag       bool  // R29-F3: the received flag (a message from the peer under it passed steps 1-4, not hs.fin)
 	EverCur    bool  // it has been current here (R29-K5: the reconnect after a demotion names one)
+	Ended      bool  // R29-K9 (0.87.1): abandoned while pending, ended at P's identity.rotate: any later message under it is fork evidence
 }
 
 // PendEp is an initiator's pending epoch (§6.3.1).
@@ -129,7 +130,8 @@ const (
 
 type PeerRec struct {
 	ID       PID
-	Device   bool // the peer is a device or agent of mine, or my vault (no suspension)
+	Device   bool  // the peer is a device or agent of mine, or my vault (no suspension)
+	NoTokAt  int64 // R29-D1 (0.87.1, F): a rekey toward this device was abandoned with no valid token at this time
 	Status   int
 	Ref      string
 	CandA    IKLink // identity conflict candidates (followed, other)

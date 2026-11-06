@@ -265,6 +265,12 @@ func (q *Party) acceptFrom(r *PeerRec, m *RMsg, pos Pos, set []Key) dec {
 // demoted: "Epochs after an ik link": messages under a demoted epoch
 // deposited after x are refused.
 func (q *Party) demoted(r *PeerRec, M *Msg, pos Pos, cell string) (dec, bool) {
+	if ep := r.epoch(M.Epoch); ep != nil && ep.Ended {
+		q.w.hit("K9:ended-message-suspends")
+		q.w.logf("%s: a message under ended E%d from %s: fork evidence", q.Name, ep.ID, q.w.party(r.ID).Name)
+		q.suspend(r, "connection.fork_suspected/epoch")
+		return dec{"suspend", "fork", "E:ended-epoch"}, true
+	}
 	if ep := r.epoch(M.Epoch); ep != nil && ep.Demoted && ep.DemotedAt.after(pos) {
 		return refuse("ancestor_ik", "E:demoted-epoch"), true
 	}
@@ -571,6 +577,9 @@ func (q *Party) tableBRotate(r *PeerRec, M *Msg, pos Pos) dec {
 	if i == len(M.Rot) {
 		// SPEC FINDING: the ik is undefined when every link is followed; the
 		// model reads it as the Ancestor row's "every link already followed".
+		if q.judgeAbandoned(r, M.Rot, M.Epoch) { // R29-K9: judged also here
+			return dec{"suspend", "fork", "B:ancestor:identity.rotate:K9-flag"}
+		}
 		return dec{"ignore", "", "B:ancestor:identity.rotate"}
 	}
 	st, _ := r.ikState(M.Rot[i].Old, nil)
@@ -587,11 +596,14 @@ func (q *Party) tableBRotate(r *PeerRec, M *Msg, pos Pos) dec {
 			}
 		}
 		pre := r.Cur
-		if q.followIK(r, app, pos, true, M.Epoch) {
+		if q.followIK(r, app, pos, true) {
 			return dec{"suspend", "fork", cell + ":K4-flag"}
 		}
 		if q.f1Demote(r, M, app, pos, pre) {
 			return dec{"suspend", "fork", cell + ":K7-flag"}
+		}
+		if q.judgeAbandoned(r, M.Rot, M.Epoch) { // R29-K9
+			return dec{"suspend", "fork", cell + ":K9-flag"}
 		}
 		q.h5(r, 0)
 		return dec{"follow", "", cell}
@@ -612,11 +624,8 @@ func (q *Party) tableBRotate(r *PeerRec, M *Msg, pos Pos) dec {
 // connection.fork_suspected, ref epoch, no feed item). A demoted current
 // epoch starts the reconnect after a demotion (K5) unless the caller is
 // completing a handshake (restart false). It reports a suspension.
-// followIK follows links at x. msgEp is the epoch the message carrying them
-// traveled under (0.87.1, "Pending epochs at a link": epochs Q began and
-// abandoned while pending that are later than it are ended); -1 for an
-// hs.resp, which names Q's epoch, not P's.
-func (q *Party) followIK(r *PeerRec, app []IKLink, x Pos, restart bool, msgEp int) bool {
+// followIK follows links at x.
+func (q *Party) followIK(r *PeerRec, app []IKLink, x Pos, restart bool) bool {
 	for _, l := range app {
 		if r.isAncestor(l.New) || r.isRejected(l.New) {
 			q.w.violate("I3", "%s makes current ancestor/rejected ik %d", q.Name, l.New)
@@ -653,9 +662,6 @@ func (q *Party) followIK(r *PeerRec, app []IKLink, x Pos, restart bool, msgEp in
 				}
 			}
 		}
-		if q.newSpec() && msgEp >= 0 && q.abandonedAtLink(r, l, msgEp) {
-			return true
-		}
 	}
 	if r.Cur == 0 && r.Status == stActive && restart {
 		if q.newSpec() {
@@ -668,27 +674,36 @@ func (q *Party) followIK(r *PeerRec, app []IKLink, x Pos, restart bool, msgEp in
 	return false
 }
 
-// abandonedAtLink: R29-K2 (0.87.1, finding C). An epoch Q began, abandoned
-// while pending, whose sig_R is by the link's old_ik or an ancestor and that
-// is later than the epoch the link traveled under: P dropped that answer at
-// its rotation, so a set flag means a copy used it (suspend); otherwise it is
-// demoted from the start.
-func (q *Party) abandonedAtLink(r *PeerRec, l IKLink, msgEp int) bool {
+// judgeAbandoned: R29-K9 (0.87.1, finding C), at P's identity.rotate under
+// msgEp (also one whose links are all followed). An epoch Q began and
+// abandoned while pending, later than msgEp, whose sig_R is by a link's
+// old_ik or an ancestor, was never activated by P: a set flag suspends;
+// otherwise it is ended (a later message under it suspends).
+func (q *Party) judgeAbandoned(r *PeerRec, links []IKLink, msgEp int) bool {
+	if !q.newSpec() || r.Device || r.Status != stActive {
+		return false
+	}
 	im := slices.IndexFunc(r.Epochs, func(e Epoch) bool { return e.ID == msgEp })
-	for j := im + 1; j < len(r.Epochs); j++ {
-		ep := &r.Epochs[j]
-		if !ep.MineInit || !ep.Abandoned || ep.Demoted || ep.Destroyed || !(ep.Signer == l.Old || r.isAncestor(ep.Signer)) {
-			continue
+	if im < 0 {
+		return false
+	}
+	for _, l := range links {
+		for j := im + 1; j < len(r.Epochs); j++ {
+			ep := &r.Epochs[j]
+			if !ep.MineInit || !ep.Abandoned || ep.Ended || ep.Destroyed || !(ep.Signer == l.Old || r.isAncestor(ep.Signer)) {
+				continue
+			}
+			if ep.Flag {
+				q.w.hit("K9:flag-suspend")
+				q.w.logf("%s: abandoned E%d of %s, later than E%d, has its received flag set: a copy used it", q.Name, ep.ID, q.w.party(r.ID).Name, msgEp)
+				q.suspend(r, "connection.fork_suspected/epoch")
+				return true
+			}
+			q.w.hit("K9:ended")
+			ep.Ended = true
+			r.AbanIDs = slices.DeleteFunc(r.AbanIDs, func(id int) bool { return id == ep.ID })
+			q.w.logf("%s: abandoned E%d of %s ended (identity.rotate under E%d)", q.Name, ep.ID, q.w.party(r.ID).Name, msgEp)
 		}
-		if ep.Flag {
-			q.w.hit("K2:abandoned-flag-suspend")
-			q.w.logf("%s: abandoned E%d of %s, later than E%d, has its received flag set: a copy used it", q.Name, ep.ID, q.w.party(r.ID).Name, msgEp)
-			q.suspend(r, "connection.fork_suspected/epoch")
-			return true
-		}
-		q.w.hit("K2:abandoned-demoted")
-		ep.Demoted, ep.DemotedAt = true, Pos{Box: -1}
-		q.w.logf("%s: abandoned E%d of %s demoted from the start (link under E%d)", q.Name, ep.ID, q.w.party(r.ID).Name, msgEp)
 	}
 	return false
 }
@@ -930,7 +945,7 @@ func (q *Party) tableBResp(r *PeerRec, M *Msg, pos Pos) dec {
 			cell += ":links-appended"
 		}
 	}
-	if len(app) > 0 && q.followIK(r, app, pos, false, -1) {
+	if len(app) > 0 && q.followIK(r, app, pos, false) {
 		return dec{"suspend", "fork", cell + ":K4-flag"}
 	}
 	if q.initHalf() {
@@ -950,7 +965,7 @@ func (q *Party) tableBResp(r *PeerRec, M *Msg, pos Pos) dec {
 	}
 	r.Own = nil
 	if len(extra) > 0 {
-		if q.followIK(r, extra, pos, false, -1) {
+		if q.followIK(r, extra, pos, false) {
 			return dec{"suspend", "fork", cell + ":K4-flag"}
 		}
 		app = extra // H5 below
@@ -1006,7 +1021,7 @@ func (q *Party) tableBFin(r *PeerRec, M *Msg, pos Pos) dec {
 		return dec{"suspend", "fork", cell + ":fork-evidence"}
 	}
 	q.removeAnswer(r, a.ID)
-	if len(app) > 0 && q.followIK(r, app, pos, false, M.Epoch) {
+	if len(app) > 0 && q.followIK(r, app, pos, false) {
 		return dec{"suspend", "fork", cell + ":K4-flag"}
 	}
 	if r.Pend != nil {

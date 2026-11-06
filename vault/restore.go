@@ -225,9 +225,18 @@ func forkEvidence(p *Peer, ep *handshake.Epoch, ts, now time.Time) bool {
 // before you connect again.", approved 2026-10-28). There is nothing to
 // resolve (connection.rotation.resolve answers not_found): only a new
 // invitation resumes it, after the member has contacted the service.
-func (m *Manager) suspendFork(p *Peer, now time.Time) {
+func (m *Manager) suspendFork(p *Peer, now time.Time) { m.suspendForkRef(p, "", now) }
+
+// suspendForkRef is suspendFork with the audit's ref (0.86.0, §10.9):
+// "epoch" for §3.4.1 "Epochs after an ik link" and §6.3.1 rule E, whose
+// feed item the app shows in the neutral wording ("<connection name> or
+// your vault may be running from an old copy. ..."), not §6.6's.
+func (m *Manager) suspendForkRef(p *Peer, ref string, now time.Time) {
 	if p.Fork != nil {
 		return
+	}
+	if p.Pending != nil {
+		m.abandonPending(p, "suspended", false, now)
 	}
 	p.Fork = &ForkSuspension{At: now.UTC()}
 	m.abandonHandshakes(p, true, true, now)
@@ -237,7 +246,7 @@ func (m *Manager) suspendFork(p *Peer, now time.Time) {
 		}
 	}
 	m.dirty = true
-	m.record(Activity{Kind: "connection.fork_suspected", ConnectionID: p.ID, Audit: true, Feed: true, Priority: "high"}, now)
+	m.record(Activity{Kind: "connection.fork_suspected", ConnectionID: p.ID, Ref: ref, Audit: true, Feed: true, Priority: "high"}, now)
 }
 
 // abandonHandshakes drops the reconnects (and with rekeys, when all is set)

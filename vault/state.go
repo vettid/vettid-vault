@@ -21,7 +21,11 @@ type State struct {
 	KEMSeed      []byte            `json:"kem_seed"`
 	RetiredKEMs  []RetiredKEM      `json:"retired_kems,omitempty"`
 	Rotations    []json.RawMessage `json:"rotations,omitempty"` // own identity.rotate chain (§3.4)
-	WakeSeed     []byte            `json:"wake_seed"`
+	// RotatedAt is when the vault last rotated its ik (S5's resend, 0.86.0).
+	RotatedAt time.Time `json:"rotated_at,omitzero"`
+	// RevertSeq numbers the revert copies (§6.3.1 "Deployment").
+	RevertSeq uint64 `json:"revert_seq,omitempty"`
+	WakeSeed  []byte `json:"wake_seed"`
 	// RotationOwed is the owed mark (§11.14.10 "The owed mark"): a rotation
 	// of the vault's keys still to be made. Recovery is the recovery_id of
 	// a completed recovery (§11.14.6 step 6), written in its step-2 state
@@ -282,6 +286,145 @@ type Peer struct {
 	// §10.8, §5.3), sorted; a name is only ever added. Nil: it advertised
 	// none (release 28 or earlier), which §3.4.1 rule L acts on.
 	PeerFeatures []string `json:"peer_features,omitempty"`
+
+	// Epochs are what §3.4.1 and §6.3.1 (0.86.0) need to know about each
+	// epoch with the peer, in activation (or establishment) order: who
+	// signed it, who began it, where it was established, and whether rule
+	// E destroyed or an ik link demoted it. Pruned when nothing needs it.
+	Epochs []EpochMeta `json:"epochs,omitempty"`
+	// Pending is the vault's own rekey or reconnect epoch awaiting the
+	// peer's confirmation (§6.3.1 "Initiator"), toward a peer that
+	// advertised hs_confirm when the hs.init was sent.
+	Pending *PendingEpoch `json:"pending_epoch,omitempty"`
+	// Confirmed is the confirmed epoch (§6.3.1 "Responder"): the newest,
+	// in activation order, under which the peer sent a message other than
+	// hs.fin, or that the vault activated itself at confirmation. It never
+	// moves back. Nil in a record from before 0.86.0: the current epoch.
+	Confirmed []byte `json:"confirmed_epoch,omitempty"`
+	// Abandoned are the ids of the vault's own pending epochs it abandoned
+	// (B passed): a reconnect naming one is accepted until a newer epoch is
+	// confirmed (§6.3.1).
+	Abandoned [][]byte `json:"abandoned_epochs,omitempty"`
+	// Revert is what a reverting initiator keeps toward a peer without the
+	// gate (§6.3.1 "Deployment").
+	Revert *RevertKeep `json:"revert,omitempty"`
+	// RuleL is §3.4.1 rule L's bookkeeping toward a peer without features.
+	RuleL *RuleLState `json:"rule_l,omitempty"`
+	// IDResend counts S5's identity.rotate resends to the peer for the
+	// vault's latest rotation (0.86.0).
+	IDResend *IDResend `json:"id_resend,omitempty"`
+}
+
+// IDResend is S5's resend bookkeeping: for which rotation (the length of
+// the vault's chain), how many, and when the last went.
+type IDResend struct {
+	Rotation int       `json:"rotation"`
+	N        int       `json:"n"`
+	At       time.Time `json:"at,omitzero"`
+}
+
+// EpochMeta is one epoch with a peer (0.86.0, §3.4.1 "Terms": the epoch
+// signer and the position of the message that established it).
+type EpochMeta struct {
+	ID []byte `json:"id"`
+	// Signer is the peer-side ik that signed its handshake; an epoch from
+	// before this release counts as signed by the ik current at the
+	// upgrade.
+	Signer []byte `json:"signer,omitempty"`
+	// Mine: the vault began it (it was the handshake's initiator).
+	Mine bool `json:"mine,omitempty"`
+	// Unconfirmed: the vault activated it at hs.fin without confirmation
+	// (an initiator toward a peer without the gate).
+	Unconfirmed bool `json:"unconfirmed,omitempty"`
+	// EstAt and EstMsg are the position (deposited_at, msg_id) of the
+	// message that established it.
+	EstAt  time.Time `json:"est_at,omitzero"`
+	EstMsg string    `json:"est_msg,omitempty"`
+	// Pending: the vault's own pending epoch, not yet confirmed.
+	Pending bool `json:"pending,omitempty"`
+	// Superseded is when it stopped being current (zero while current or
+	// pending).
+	Superseded time.Time `json:"superseded,omitzero"`
+	// Destroyed by rule E (§6.3.1) with the accepted hs.init's inner ts:
+	// an authenticated message under it with a later ts is fork evidence
+	// (or, toward a peer without hs_confirm, starts a reconnect), one with
+	// an earlier ts is refused (superseded_epoch).
+	Destroyed bool      `json:"destroyed,omitempty"`
+	DestroyTS time.Time `json:"destroy_ts,omitzero"`
+	// Demoted by an ik link at the position (DemotedAt, DemotedMsg)
+	// (§3.4.1 "Epochs after an ik link"): messages under it deposited
+	// after that are refused (ancestor_ik). OwnCopy: demoted by the
+	// own_copy exception (no History line for such a refusal).
+	Demoted    bool      `json:"demoted,omitempty"`
+	DemotedAt  time.Time `json:"demoted_at,omitzero"`
+	DemotedMsg string    `json:"demoted_msg,omitempty"`
+	OwnCopy    bool      `json:"own_copy,omitempty"`
+	// RCTries counts rule E's reconnects for this destroyed epoch toward
+	// a peer without hs_confirm (at most 3).
+	RCTries int `json:"rc_tries,omitempty"`
+	// OwnChain is the own rotation count whose ik signed its handshake: a
+	// reconnect naming it carries the vault's links from there.
+	OwnChain int `json:"own_chain,omitempty"`
+}
+
+// PendingEpoch is an initiator's pending epoch (§6.3.1).
+type PendingEpoch struct {
+	ID      []byte            `json:"id"`
+	Purpose handshake.Purpose `json:"purpose"`
+	// FinAt is when the vault sent (queued) hs.fin; B runs from it.
+	FinAt time.Time `json:"fin_at"`
+	// RespTS is the inner ts of the hs.resp the vault processed: a rekey
+	// hs.init from the peer under the current epoch that is not later
+	// crosses it and is dropped.
+	RespTS time.Time `json:"resp_ts"`
+	// Issued are the tokens the hs.init minted, recorded at confirmation;
+	// OwnChain is the own rotation count whose ik signed the handshake.
+	Issued   []IssuedToken `json:"issued,omitempty"`
+	OwnChain int           `json:"own_chain"`
+	// SigIK is the vault's own ik that signed it (S5 abandons it when that
+	// ik is superseded).
+	SigIK []byte `json:"sig_ik,omitempty"`
+}
+
+// RevertKeep is what an initiator keeps after activating at hs.fin toward
+// a peer without the gate (§6.3.1 "Deployment"): the old epoch (with its
+// send keys and rk, in the keyring) and a copy of every durable message
+// it sent under the new one, until it receives anything under the new
+// epoch, at most RevertKeepFor.
+type RevertKeep struct {
+	Old   []byte    `json:"old"`
+	New   []byte    `json:"new"`
+	FinAt time.Time `json:"fin_at"`
+	Until time.Time `json:"until"`
+	// Copies are the inner plaintexts (sealed-mode JSON, no seq) of the
+	// durable messages sent under the new epoch, oldest first; Bytes their
+	// size and Dropped how many the caps dropped.
+	Copies  []RevertCopy `json:"copies,omitempty"`
+	Bytes   int          `json:"bytes,omitempty"`
+	Dropped int          `json:"dropped,omitempty"`
+	// OldOwnChain is the old epoch's own rotation count (OwnChainAtEpoch
+	// again after a revert).
+	OldOwnChain int `json:"old_own_chain,omitempty"`
+}
+
+// RevertCopy is one kept message.
+type RevertCopy struct {
+	Inner []byte `json:"inner"`
+	Wake  string `json:"wake,omitempty"`
+	// Seq orders copies across the vault (the vault-wide cap drops the
+	// oldest first).
+	Seq uint64 `json:"seq,omitempty"`
+	// Exp is the message's exp (zero: none): past it the copy goes,
+	// not counted as dropped.
+	Exp time.Time `json:"exp,omitzero"`
+}
+
+// RuleLState is rule L's (§3.4.1) bookkeeping.
+type RuleLState struct {
+	// Epoch is the current epoch the rule last acted for (once per
+	// current epoch); Tries the reconnects tried for it.
+	Epoch []byte `json:"epoch,omitempty"`
+	Tries int    `json:"tries,omitempty"`
 }
 
 // EpochRecord is one epoch of a service connection's history (§6.6, 0.72.0).
@@ -496,6 +639,21 @@ type AwaitingHS struct {
 	// Replaced marks a rekey answer open when a restore was accepted: it
 	// was made on an epoch of the line the restore replaced (§6.6).
 	Replaced bool `json:"replaced,omitempty"`
+	// 0.86.0 (§6.3.1): NamedConfirmed marks an answer whose hs.init named
+	// the confirmed epoch while it was not current (rule E applies at its
+	// hs.fin); InitTS is the hs.init's inner ts; SigIK the vault's ik that
+	// signed hs.resp (S5: an answer kept across a rotation toward a peer
+	// without the gate is established, then rekeyed at once); OwnCopy marks
+	// a reconnect accepted by §3.4.1's own_copy exception.
+	NamedConfirmed bool      `json:"named_confirmed,omitempty"`
+	InitTS         time.Time `json:"init_ts,omitzero"`
+	SigIK          []byte    `json:"sig_ik,omitempty"`
+	OwnCopy        bool      `json:"own_copy,omitempty"`
+	// Signer is the peer's ik that sig_I must verify under (the epoch's
+	// signer, §3.4.1); Links the links a rekey's hs.init carried (S8),
+	// followed at hs.fin.
+	Signer []byte            `json:"signer,omitempty"`
+	Links  []json.RawMessage `json:"links,omitempty"`
 }
 
 // PendingReconnect is a reconnect hs.init's effects, held until hs.fin.
@@ -513,6 +671,8 @@ type PendingReconnect struct {
 	Named []byte `json:"named,omitempty"`
 	Older bool   `json:"older,omitempty"`
 	Fork  bool   `json:"fork,omitempty"`
+	// ForkRef is the fork suspension's ref ("epoch": §3.4.1 F2, 0.86.0).
+	ForkRef string `json:"fork_ref,omitempty"`
 	// TS is the hs.init's inner ts.
 	TS time.Time `json:"ts"`
 }
@@ -539,6 +699,14 @@ type OutgoingHS struct {
 	// on an epoch of the replaced line (§6.6); it blocks nothing, and its
 	// hs.resp is fork evidence when it carries a later ts.
 	Replaced bool `json:"replaced,omitempty"`
+	// 0.86.0 (§6.3.1 "Deployment"): Gated is the gate as fixed when the
+	// hs.init was sent (the peer advertised hs_confirm then). RuleRC marks
+	// a reconnect started by rule E or rule L (tried again up to 3 times
+	// when it expires unanswered; stale when refused or the last fails);
+	// Named is the epoch it named.
+	Gated  bool   `json:"gated,omitempty"`
+	RuleRC string `json:"rule_rc,omitempty"`
+	Named  []byte `json:"named,omitempty"`
 
 	// An outgoing connection request in state waiting (§6.4, §10.4):
 	// what the accept learned from the bundle, and when it ends.
@@ -630,6 +798,14 @@ type OutboxEntry struct {
 	// (§11.14.10): its transfer_id. The relay's answer settles the notice
 	// or leaves it for the next unlock (unlinkOutcome).
 	Unlink string `json:"unlink,omitempty"`
+	// Confirm marks an hs.confirm (§6.3.1: a new one is queued only when
+	// none to the peer is still in the outbox); FinEpoch the epoch an
+	// hs.fin establishes (rule E drops one not yet sent for an epoch it
+	// destroys); Handshake an hs.* deposit (it is not held while a
+	// reconnect's epoch is pending).
+	Confirm   bool   `json:"confirm,omitempty"`
+	FinEpoch  []byte `json:"fin_epoch,omitempty"`
+	Handshake bool   `json:"handshake,omitempty"`
 }
 
 // AuditEntry records a dropped or refused message (§6.3, §6.6, §7.3).

@@ -341,8 +341,20 @@ func (m *Manager) respondReconnect(pi *handshake.PendingInit, p *Peer, sender ed
 		}
 	}
 	m.noteFeatures(p, pi.Inner().Features) // 0.86.0, §10.8: steps 1-4 passed
-	kind, idx := classifyCtx(p, body.Ctx, now)
+	named86, namedConf, ownCopy, forkEp, refuse := m.classifyCtx086(p, body.Ctx)
+	if refuse {
+		m.audit(now, "reconnect_refused", p.ID)
+		pi.Discard()
+		return
+	}
+	kind, idx := ctxCurrent, -1
+	if named86 == nil {
+		kind, idx = classifyCtx(p, body.Ctx, now)
+	}
 	ownChain := p.OwnChainAtEpoch
+	if e := p.epochMeta(named86); e != nil && e.OwnChain < ownChain {
+		ownChain = e.OwnChain
+	}
 	switch kind {
 	case ctxNone:
 		m.audit(now, "reconnect_refused", p.ID)
@@ -363,9 +375,12 @@ func (m *Manager) respondReconnect(pi *handshake.PendingInit, p *Peer, sender ed
 		ownChain = p.History[idx].OwnChain // §6.6 "Responder rotations"
 	}
 	named := []byte(nil)
-	if idx >= 0 {
+	switch {
+	case named86 != nil:
+		named = append(named, named86...)
+	case idx >= 0:
 		named = append(named, p.History[idx].ID...)
-	} else {
+	default:
 		named = append(named, p.LastEpochID...)
 	}
 	st, err1 := m.heldToken(body.Token, p)
@@ -413,8 +428,11 @@ func (m *Manager) respondReconnect(pi *handshake.PendingInit, p *Peer, sender ed
 		deny()
 		return
 	}
-	pend := &PendingReconnect{Standing: st, Reconnect: rt, Named: named, Older: kind == ctxOlder, Fork: kind == ctxFork,
+	pend := &PendingReconnect{Standing: st, Reconnect: rt, Named: named, Older: kind == ctxOlder, Fork: kind == ctxFork || forkEp,
 		TS: pi.Inner().TS}
+	if forkEp {
+		pend.ForkRef = "epoch" // §3.4.1 F2: judged at hs.fin (H5's exemption)
+	}
 	// Links already followed (from identity.rotate) are not added again;
 	// the rest are followed at hs.fin, once sig_I verified.
 	if len(body.Rotations) > 0 {
@@ -430,7 +448,9 @@ func (m *Manager) respondReconnect(pi *handshake.PendingInit, p *Peer, sender ed
 		Payload: env}
 	m.queueDeposit(oe, now)
 	m.st.Awaiting[id] = &AwaitingHS{ID: id, PeerID: p.ID, Purpose: handshake.PurposeReconnect, Created: now, Resp: rs, Issued: issued,
-		OwnChain: m.ownChainNow(), RespOutbox: oe.ID, Reconnect: pend, Th1: th1[:]}
+		OwnChain: m.ownChainNow(), RespOutbox: oe.ID, Reconnect: pend, Th1: th1[:],
+		NamedConfirmed: namedConf, OwnCopy: ownCopy, InitTS: pi.Inner().TS,
+		SigIK: append([]byte(nil), m.keys.ik.Public().(ed25519.PublicKey)...), Signer: append([]byte(nil), body.From.IK...)}
 	m.awaiting[id] = resp
 	// §6.6 "Between two persons" (0.74.0): with our own reconnect open as
 	// well, the lower th1 wins; a higher one of ours is abandoned now.
@@ -494,35 +514,98 @@ func epochIDOf(b []byte) [suite.EpochIDSize]byte {
 }
 
 // handleRekeyInit handles a rekey hs.init that arrived in session mode
-// (§6.2, §6.5).
+// (§6.2, §6.5). 0.86.0 (§6.3.1): one under the confirmed epoch while it is
+// not current is accepted as if current (rule E applies at its hs.fin);
+// with a pending epoch of the vault's own, a rekey under the current epoch
+// whose ts is not later than the hs.resp the vault processed crosses it
+// and is dropped, a later one abandons the pending epoch; an answer the
+// vault could not deposit (no valid standing token) is not made (rule J).
 func (m *Manager) handleRekeyInit(ctx context.Context, p *Peer, in *envelope.Inner, ep *handshake.Epoch, raw []byte, sender ed25519.PublicKey, now time.Time) disposition {
 	kr := m.sessions[p.ID]
-	if kr == nil || kr.Current() != ep {
+	if kr == nil || ep == nil {
 		m.audit(now, "rekey_not_current_epoch", p.ID)
 		return ackAfterFlush
+	}
+	p.upgradeEpochs()
+	epID := ep.ID()
+	namedConf := false
+	if kr.Current() != ep {
+		if bytes.Equal(epID[:], p.confirmedID()) && ep.HasRK() {
+			namedConf = true
+		} else if !m.rekeyOtherEpoch(p, in, ep, now) {
+			m.audit(now, "rekey_not_current_epoch", p.ID)
+			m.ruleL(p, now) // §3.4.1 rule L: the peer rekeys from an epoch other than the current one
+			return ackAfterFlush
+		}
 	}
 	pi, err := handshake.AcceptRekey(raw, in, ep, now)
 	if err != nil {
 		m.audit(now, "rekey_rejected", p.ID)
 		return ackAfterFlush
 	}
-	// Crossing rekeys: the lower th1 wins (§6.5).
-	for id, og := range m.st.Outgoing {
-		if og.PeerID == p.ID && og.Purpose == handshake.PurposeRekey && !og.Replaced { // a marked one is of the replaced line (§6.6)
-			var ours [32]byte
-			copy(ours[:], og.Th1)
-			if handshake.SimultaneousRekeyWinner(ours, pi.Th1()) {
-				pi.Discard()
-				return ackAfterFlush
+	if pe := p.Pending; pe != nil && kr.Current() == ep {
+		if !in.TS.After(pe.RespTS) {
+			// §6.3.1 "Crossing": the peer establishes ours at its hs.fin.
+			m.audit(now, "rekey_crossing_pending", p.ID)
+			pi.Discard()
+			return ackAfterFlush
+		}
+		// The peer's answer to ours ended without hs.fin (§6.5).
+		m.abandonPending(p, "later_rekey", false, now)
+	}
+	if p.Standing.Token == "" || !now.Before(p.Standing.Exp) {
+		// Rule J (§6.3.1 "Lifetimes"): no standing token valid by its exp,
+		// so no answer could be deposited: none is made, and neither the
+		// rekey block nor §6.6's holds the vault back from reconnecting.
+		m.audit(now, "rekey_undepositable", p.ID)
+		pi.Discard()
+		if p.Kind == KindConnection {
+			m.startReconnect(p, now)
+		}
+		return ackAfterFlush
+	}
+	if !p.advertisedFeatures() && p.Kind == KindConnection {
+		for _, aw := range m.st.Awaiting {
+			if aw.New == nil && aw.PeerID == p.ID && aw.Purpose == handshake.PurposeRekey {
+				// The peer rekeys again while the vault's answer to its last
+				// rekey awaits hs.fin: it refused that answer (rule L).
+				if m.ruleL(p, now) {
+					pi.Discard()
+					return ackAfterFlush
+				}
+				break
 			}
-			m.dropOutgoing(id)
 		}
 	}
-	resp, env, err := pi.Respond(handshake.ResponderConfig{
+	if namedConf {
+		// §6.3.1: the vault abandons its own open rekey for it.
+		for id, og := range m.st.Outgoing {
+			if og.New == nil && og.PeerID == p.ID && og.Purpose == handshake.PurposeRekey && !og.Replaced {
+				m.abandonOutgoing(id, now)
+			}
+		}
+	}
+	// Crossing handshakes: the lower th1 wins (§6.5; 0.86.0: whatever
+	// their purposes).
+	if m.crossingRekeyLoses(p, pi.Th1(), now) {
+		pi.Discard()
+		return ackAfterFlush
+	}
+	cfg := handshake.ResponderConfig{
 		Identity: m.keys.ik, Policy: policyFor(p.Kind), PinnedSuite: p.Suite,
-		CollectSender: sender, RecordRelayKey: p.Relay.PK, KnownInitiatorIK: p.IK, Now: now,
-		Features: m.featuresFor(p),
-	})
+		CollectSender: sender, RecordRelayKey: p.Relay.PK, KnownInitiatorIK: p.IK,
+		KnownInitiatorChain: parseRotations(p.Chain), Now: now, Features: m.featuresFor(p),
+	}
+	if p.advertisedFeatures() {
+		// S8: the vault's links since the signer of the epoch rekeyed.
+		chain := p.OwnChainAtEpoch
+		if e := p.epochMeta(epID[:]); e != nil && e.OwnChain < chain {
+			chain = e.OwnChain
+		}
+		cfg.Rotations = m.ownRotationsSince(chain)
+	}
+	body := pi.Init()
+	resp, env, err := pi.Respond(cfg)
 	if err != nil {
 		m.audit(now, "rekey_refused", p.ID)
 		return ackAfterFlush
@@ -532,9 +615,17 @@ func (m *Manager) handleRekeyInit(ctx context.Context, p *Peer, in *envelope.Inn
 		return ackAfterFlush
 	}
 	id := m.newID(now)
-	m.st.Awaiting[id] = &AwaitingHS{ID: id, PeerID: p.ID, Purpose: handshake.PurposeRekey, Created: now, Resp: rs, OwnChain: m.ownChainNow()}
+	aw := &AwaitingHS{ID: id, PeerID: p.ID, Purpose: handshake.PurposeRekey, Created: now, Resp: rs, OwnChain: m.ownChainNow(),
+		NamedConfirmed: namedConf, InitTS: in.TS, SigIK: append([]byte(nil), m.keys.ik.Public().(ed25519.PublicKey)...),
+		Signer: append([]byte(nil), body.From.IK...), Th1: func() []byte { t := pi.Th1(); return t[:] }()}
+	for _, r := range body.Rotations {
+		aw.Links = append(aw.Links, r.Marshal())
+	}
+	m.st.Awaiting[id] = aw
 	m.awaiting[id] = resp
-	m.queueDeposit(&OutboxEntry{Op: OpDeposit, PeerID: p.ID, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Payload: env}, now)
+	oe := &OutboxEntry{Op: OpDeposit, PeerID: p.ID, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Payload: env, Handshake: true}
+	m.queueDeposit(oe, now)
+	aw.RespOutbox = oe.ID
 	return ackAfterFlush
 }
 
@@ -623,8 +714,61 @@ func (m *Manager) handleFin(ctx context.Context, id string, raw []byte, sender e
 		m.audit(now, "hs_fin_dropped", p.ID)
 		return ackAfterFlush
 	}
-	m.activate(p, fr.Epoch, aw.Purpose, aw.Issued, "", chainOr(aw.OwnChain, len(m.st.Rotations)), now)
+	if aw.New != nil {
+		// A direct handshake (enrollment, recovery): a new device.
+		m.activate(p, fr.Epoch, aw.Purpose, aw.Issued, "", chainOr(aw.OwnChain, len(m.st.Rotations)), actOpts{signer: p.IK}, now)
+		return ackAfterFlush
+	}
+	m.responderEstablish(p, aw, fr, now, func(o actOpts) {
+		m.activate(p, fr.Epoch, aw.Purpose, aw.Issued, "", chainOr(aw.OwnChain, len(m.st.Rotations)), o, now)
+	})
 	return ackAfterFlush
+}
+
+// responderEstablish is the responder's write at a verified hs.fin of a
+// rekey or reconnect (0.86.0, §6.3.1 "Responder"): the vault's own pending
+// epoch with the peer is abandoned, rule E applies if the handshake named
+// the confirmed epoch while it was not current, the epoch activates (the
+// confirmed one keeping its rk), and hs.confirm is queued. An answer kept
+// across the vault's own rotation (toward a peer without the gate, S5) is
+// established and then rekeyed at once under the new ik.
+func (m *Manager) responderEstablish(p *Peer, aw *AwaitingHS, fr *handshake.FinResult, now time.Time, activate func(actOpts)) {
+	p.upgradeEpochs()
+	if aw.Reconnect == nil && len(aw.Links) > 0 {
+		// Table B "Reached" (S8): the rekey's links, applied at hs.fin, then
+		// H5. They are worked out again against what was followed since.
+		all := parseRotations(aw.Links)
+		final, _, n, err := handshake.ResolveChainKnown(p.IK, parseRotations(p.Chain), all)
+		if err != nil || len(all) != len(aw.Links) || !bytes.Equal(final, aw.Signer) {
+			fr.Epoch.Destroy()
+			m.audit(now, "hs_fin_dropped", p.ID)
+			return
+		}
+		m.followLinks(p, all[n:], nil, now)
+	}
+	if p.Pending != nil {
+		m.abandonPending(p, "peer_activated", false, now)
+	}
+	if aw.NamedConfirmed {
+		m.ruleE(p, aw.InitTS, now)
+	}
+	signer := aw.Signer
+	if signer == nil {
+		signer = p.IK
+	}
+	activate(m.responderActivation(p, signer, now))
+	m.queueConfirm(p, now)
+	for id, og := range m.st.Outgoing {
+		// A verified hs.fin comes first: the vault's own rekey is abandoned.
+		if og.New == nil && og.PeerID == p.ID && og.Purpose == handshake.PurposeRekey && !og.Replaced {
+			m.abandonOutgoing(id, now)
+		}
+	}
+	if aw.SigIK != nil && !bytes.Equal(aw.SigIK, m.keys.ik.Public().(ed25519.PublicKey)) {
+		// S5 (0.86.0): kept across the vault's rotation toward a peer
+		// without the gate; now a rekey under the new ik at once.
+		m.startRekey(p, now)
+	}
 }
 
 // finishReconnect applies a reconnect once its hs.fin verified (sig_I
@@ -650,8 +794,11 @@ func (m *Manager) finishReconnect(p *Peer, aw *AwaitingHS, fr *handshake.FinResu
 	if pend.Fork {
 		fr.Epoch.Destroy()
 		denyIssued()
-		m.suspendFork(p, now)
+		m.suspendForkRef(p, pend.ForkRef, now)
 		return
+	}
+	if aw.OwnCopy {
+		m.acceptOwnCopy(p, pend.Named, now) // §3.4.1: judged once sig_I verified
 	}
 	// The chain is worked out again against what the connection followed
 	// since the hs.init (§3.4, §6.6): links followed meanwhile (from
@@ -705,7 +852,15 @@ func (m *Manager) finishReconnect(p *Peer, aw *AwaitingHS, fr *handshake.FinResu
 		m.markRekeysReplaced(p)
 	}
 	m.restoring = pend.Older
-	m.activate(p, fr.Epoch, aw.Purpose, aw.Issued, "", chainOr(aw.OwnChain, len(m.st.Rotations)), now)
+	m.responderEstablish(p, aw, fr, now, func(o actOpts) {
+		if aw.OwnCopy {
+			// §3.4.1's own_copy exception: the epochs after the named one were
+			// demoted when the hs.init was accepted; the named one is current
+			// again.
+			o.how = actNormal
+		}
+		m.activate(p, fr.Epoch, aw.Purpose, aw.Issued, "", chainOr(aw.OwnChain, len(m.st.Rotations)), o, now)
+	})
 	m.restoring = false
 	if pend.Older {
 		// §6.6 "Told to the member": audited, shown in History as "<name>
@@ -717,7 +872,12 @@ func (m *Manager) finishReconnect(p *Peer, aw *AwaitingHS, fr *handshake.FinResu
 // activate installs a new epoch for p and finishes the bookkeeping of a
 // completed handshake, or of an approved request (pendingID: the incoming
 // connection request it came from, for connection.event{added}).
-func (m *Manager) activate(p *Peer, ep *handshake.Epoch, purpose handshake.Purpose, issued []IssuedToken, pendingID string, ownChain int, now time.Time) {
+//
+// o says how the keyring installs it (0.86.0, §6.3.1: a responder's
+// confirmed epoch keeps its rk, an ungated initiator keeps the old epoch
+// whole, a confirmed pending epoch is installed already) and what the
+// epoch record says (§3.4.1: its signer, who began it).
+func (m *Manager) activate(p *Peer, ep *handshake.Epoch, purpose handshake.Purpose, issued []IssuedToken, pendingID string, ownChain int, o actOpts, now time.Time) {
 	isNew := m.peer(p.ID) == nil
 	// A reconnect that named an older epoch is told as
 	// connection.restored_reconnect (the caller), in place of
@@ -739,8 +899,19 @@ func (m *Manager) activate(p *Peer, ep *handshake.Epoch, purpose handshake.Purpo
 		kr = &handshake.Keyring{}
 		m.sessions[p.ID] = kr
 	}
-	kr.Activate(ep, now)
+	switch o.how {
+	case actKeepRK:
+		kr.ActivateKeeping(ep, now, o.until, handshake.KeepRK)
+	case actKeepSend:
+		kr.ActivateKeeping(ep, now, o.until, handshake.KeepSend)
+	case actInstalled:
+	default:
+		kr.Activate(ep, now)
+	}
 	id := ep.ID()
+	p.upgradeEpochs()
+	o.ownChain = ownChain
+	m.recordActivated(p, id[:], o, now)
 	p.LastEpochID = id[:]
 	// The count whose key signed the epoch's handshake (§6.6, 0.72.0), not
 	// the count now: a rotation between hs.resp and hs.fin is not lost.
@@ -861,6 +1032,16 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 			if og.New != nil {
 				m.denyPeerTokens(og.New, now)
 				m.notifyDevices("connection.event", connEvent(og.PeerID, "failed"), "", now)
+			} else if sp := m.peer(og.PeerID); sp != nil {
+				switch {
+				case og.RuleRC != "":
+					// A rule-E or rule-L reconnect refused: the connection
+					// goes stale (§6.3.1, §3.4.1 rule L).
+					m.markStale(sp, now)
+				case og.Purpose == handshake.PurposeRekey:
+					// Rule L: an hs.resp aborted for an ik mismatch.
+					m.ruleL(sp, now)
+				}
 			}
 		} else {
 			m.audit(now, "hs_resp_dropped", og.PeerID)
@@ -905,7 +1086,9 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 			p.Reconnect = t
 		}
 	}
-	if og.Purpose == handshake.PurposeReconnect && !suite.EqualPublic(res.ResponderIK, p.IK) {
+	if !suite.EqualPublic(res.ResponderIK, p.IK) {
+		// A reconnect's links, or (S8, 0.85.0) a rekey's: sig_R verified
+		// under the key they lead to.
 		p.IK = res.ResponderIK
 		if res.ResponderKEM != nil {
 			p.KEM = res.ResponderKEM.Bytes()
@@ -917,7 +1100,9 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 	}
 	// hs.fin goes first: what activation sends in the new epoch (the
 	// profile.update after an ik rotation, §10.8) follows it.
-	m.queueDeposit(&OutboxEntry{Op: OpDeposit, PeerID: p.ID, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Payload: res.Fin}, now)
+	newID := res.Epoch.ID()
+	m.queueDeposit(&OutboxEntry{Op: OpDeposit, PeerID: p.ID, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Payload: res.Fin,
+		Handshake: true, FinEpoch: newID[:]}, now)
 	if og.Purpose == handshake.PurposeReconnect {
 		// §6.6 "Crossing reconnects" (0.72.1; between two persons 0.74.0,
 		// where our th1 was the lower): our reconnect completed first
@@ -935,7 +1120,35 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 			}
 		}
 	}
-	m.activate(p, res.Epoch, og.Purpose, og.Issued, "", chainOr(og.OwnChain, len(m.st.Rotations)), now)
+	for id, o := range m.st.Awaiting {
+		// 0.86.0 (§6.5: the lower th1 across purposes): the vault's own
+		// handshake completed first, so a crossing rekey answer it kept is
+		// dropped.
+		if o.New == nil && o.PeerID == p.ID && o.Purpose == handshake.PurposeRekey && !o.Replaced {
+			m.abandonAwaiting(id, now)
+		}
+	}
+	if og.Gated {
+		// §6.3.1 "Initiator": the new epoch is pending until a message
+		// from the peer opens under it.
+		m.makePending(p, og, res, now)
+		return ackAfterFlush
+	}
+	// Toward a peer without the gate: active at hs.fin as before, keeping
+	// the old epoch whole and copies of what is sent under the new one
+	// (§6.3.1 "Deployment").
+	old, oldChain := append([]byte(nil), p.LastEpochID...), p.OwnChainAtEpoch
+	o := actOpts{signer: res.ResponderIK, mine: true, unconfirmed: true}
+	if len(old) > 0 {
+		o.how, o.until = actKeepSend, now.Add(ConfirmedKeysFor)
+		if p.Revert != nil {
+			m.endRevertKeep(p, now) // one keep at a time: the earlier old epoch goes as usual
+		}
+	}
+	if len(old) > 0 {
+		m.startRevertKeep(p, old, newID[:], oldChain, now) // before activation sends anything in the new epoch
+	}
+	m.activate(p, res.Epoch, og.Purpose, og.Issued, "", chainOr(og.OwnChain, len(m.st.Rotations)), o, now)
 	return ackAfterFlush
 }
 
@@ -971,17 +1184,29 @@ func (m *Manager) hasOutgoing(peerID string, purpose handshake.Purpose) bool {
 	return false
 }
 
-// startRekey initiates a rekey of p's session (§6.5).
+// startRekey initiates a rekey of p's session (§6.5). None starts while
+// an answer of the vault's to p awaits hs.fin or its own new epoch awaits
+// confirmation (§6.5, §6.3.1). The hs.init carries the vault's links since
+// the epoch's signer (S8, 0.85.0: the whole chain) to a peer that
+// advertised features; release 28 and earlier refuse a rekey carrying
+// any (they parse no rotations in a rekey), so toward them it carries
+// none and rule L recovers a peer that missed a link. The gate is fixed
+// now (§6.3.1 "Deployment").
 func (m *Manager) startRekey(p *Peer, now time.Time) {
 	kr := m.sessions[p.ID]
-	if kr == nil || kr.Current() == nil || m.hasOutgoing(p.ID, handshake.PurposeRekey) || p.Standing.Token == "" || p.suspended() {
+	if kr == nil || kr.Current() == nil || m.hasOutgoing(p.ID, handshake.PurposeRekey) || p.Standing.Token == "" || p.suspended() ||
+		m.rekeyBlocked(p) {
 		return
 	}
-	ini, err := handshake.NewInitiator(handshake.InitiatorConfig{
+	cfg := handshake.InitiatorConfig{
 		Purpose: handshake.PurposeRekey, Identity: m.keys.ik, StaticKEM: m.keys.kem.Public(), Relay: m.ownAddr(),
-		ResponderIK: p.IK, ResponderRelayKey: p.Relay.PK, Current: kr.Current(), PinnedSuite: p.Suite,
-		Policy: policyFor(p.Kind), Now: now, Features: m.featuresFor(p),
-	})
+		ResponderIK: p.IK, KnownResponderChain: parseRotations(p.Chain), ResponderRelayKey: p.Relay.PK, Current: kr.Current(),
+		PinnedSuite: p.Suite, Policy: policyFor(p.Kind), Now: now, Features: m.featuresFor(p),
+	}
+	if p.advertisedFeatures() {
+		cfg.Rotations = m.ownRotationsSince(p.OwnChainAtEpoch)
+	}
+	ini, err := handshake.NewInitiator(cfg)
 	if err != nil {
 		return
 	}
@@ -989,53 +1214,72 @@ func (m *Manager) startRekey(p *Peer, now time.Time) {
 	if err != nil {
 		return
 	}
-	oe := &OutboxEntry{Op: OpDeposit, PeerID: p.ID, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Payload: ini.Envelope()}
+	og.Gated = gateFor(p)
+	oe := &OutboxEntry{Op: OpDeposit, PeerID: p.ID, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Payload: ini.Envelope(), Handshake: true}
 	m.queueDeposit(oe, now)
 	og.InitOutbox = oe.ID // so a rekey abandoned before the deposit sends nothing (restoreLive)
 }
 
 // startReconnect initiates a reconnect to connection p with its reconnect
-// token (§6.6).
+// token (§6.6), naming its current epoch.
 func (m *Manager) startReconnect(p *Peer, now time.Time) {
+	m.startReconnectCtx(p, p.LastEpochID, now)
+}
+
+// startReconnectCtx initiates a reconnect naming epoch ctx (rule E and
+// rule L name another than the current one, 0.86.0). A pending epoch of
+// the vault's own is abandoned first (§6.3.1: a reconnect names the
+// current epoch, never a pending one). It carries the vault's links since
+// the named epoch's signer.
+func (m *Manager) startReconnectCtx(p *Peer, ctx []byte, now time.Time) *OutgoingHS {
 	if p.Kind != KindConnection || p.suspended() || m.hasOutgoing(p.ID, handshake.PurposeReconnect) ||
-		p.Reconnect.Token == "" || !now.Before(p.Reconnect.Exp) || len(p.LastEpochID) == 0 {
-		return
+		p.Reconnect.Token == "" || !now.Before(p.Reconnect.Exp) || len(ctx) == 0 {
+		return nil
 	}
 	if !p.isService() && len(m.answeredReconnects(p)) > 0 {
 		// §6.6 "Between two persons" (0.74.0): no reconnect of our own
 		// while an answer of ours awaits hs.fin.
-		return
+		return nil
 	}
 	kem, err := suite.ParsePublicKey(p.KEM)
 	if err != nil {
-		return
+		return nil
+	}
+	if p.Pending != nil {
+		m.abandonPending(p, "reconnect", false, now)
+	}
+	chain := p.OwnChainAtEpoch
+	if e := p.epochMeta(ctx); e != nil && e.OwnChain < chain {
+		chain = e.OwnChain
 	}
 	var issued []IssuedToken
 	cfg := handshake.InitiatorConfig{
-		Purpose: handshake.PurposeReconnect, Ctx: handshake.EpochCtx(epochIDOf(p.LastEpochID)),
+		Purpose: handshake.PurposeReconnect, Ctx: handshake.EpochCtx(epochIDOf(ctx)),
 		Identity: m.keys.ik, StaticKEM: m.keys.kem.Public(), Relay: m.ownAddr(),
-		Rotations:   m.ownRotationsSince(p.OwnChainAtEpoch),
+		Rotations:   m.ownRotationsSince(chain),
 		ResponderIK: p.IK, KnownResponderChain: parseRotations(p.Chain), ResponderEK: kem, ResponderRelayKey: p.Relay.PK, PinnedSuite: p.Suite,
 		Policy: policyFor(p.Kind), Now: now, Features: m.featuresFor(p),
 	}
 	if cfg.Token, issued, err = m.mintStanding(p, now, issued); err != nil {
-		return
+		return nil
 	}
 	if cfg.ReconnectToken, issued, err = m.mintReconnect(p, now, issued); err != nil {
-		return
+		return nil
 	}
 	ini, err := handshake.NewInitiator(cfg)
 	if err != nil {
-		return
+		return nil
 	}
 	og, err := m.recordOutgoing(ini, p.ID, nil, handshake.PurposeReconnect, issued, now)
 	if err != nil {
-		return
+		return nil
 	}
+	og.Gated = gateFor(p)
 	oe := &OutboxEntry{Op: OpDeposit, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox,
-		Token: p.Reconnect.Token, Payload: ini.Envelope()}
+		Token: p.Reconnect.Token, Payload: ini.Envelope(), Handshake: true}
 	m.queueDeposit(oe, now)
 	og.InitOutbox = oe.ID // so a reconnect abandoned before the deposit sends nothing (§6.6, 0.72.1)
+	return og
 }
 
 // reconnectExpired starts reconnects for connections whose standing token

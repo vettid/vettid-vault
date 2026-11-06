@@ -570,36 +570,6 @@ func (m *Manager) hTokenRefresh(_ context.Context, s *Session, _ *envelope.Inner
 
 // --- rotation (§3.4) ---
 
-// hIdentityRotate follows one link of a connection's rotation chain.
-func (m *Manager) hIdentityRotate(_ context.Context, s *Session, in *envelope.Inner) (json.RawMessage, error) {
-	o, err := obj(in)
-	if err != nil {
-		return nil, err
-	}
-	raw, ok := o["rotation"]
-	if !ok {
-		return nil, errBadRequest
-	}
-	r, err := handshake.ParseRotation(raw)
-	if err != nil {
-		return nil, errBadRequest
-	}
-	if c := m.rotationConflict(s.peer, r, s.now); c {
-		return nil, nil
-	}
-	if s.peer.suspended() {
-		return nil, nil
-	}
-	final, kem, err := handshake.ResolveChain(s.peer.IK, []*handshake.Rotation{r})
-	if err != nil {
-		m.audit(s.now, "bad_rotation", s.peer.ID)
-		return nil, nil
-	}
-	s.peer.IK, s.peer.KEM = final, kem.Bytes()
-	s.peer.Chain = append(s.peer.Chain, r.Marshal())
-	return nil, nil
-}
-
 // hAddressUpdate records a principal's new relay address and tokens after
 // it rotated its relay key (§3.4).
 func (m *Manager) hAddressUpdate(_ context.Context, s *Session, in *envelope.Inner) (json.RawMessage, error) {
@@ -742,10 +712,24 @@ func (m *Manager) rotateIdentity(now time.Time) error {
 	m.keys.retired = append(m.keys.retired, m.keys.kem)
 	m.st.IdentitySeed, m.st.KEMSeed = ikSeed, kemSeed
 	m.keys.ik, m.keys.kem = newIK, newKEM
-	body := strictjson.NewBuilder().Raw("rotation", rot.Marshal()).Bytes()
+	m.st.RotatedAt = now
 	for _, p := range m.allPeers() {
 		if p.State == PeerActive {
+			// S5 (0.86.0): the vault's own open rekeys, reconnects and
+			// pending epoch with p are abandoned; its answers awaiting
+			// hs.fin are dropped toward a peer with hs_confirm and kept
+			// toward any other.
+			reconnect := m.s5(p, now)
+			// S8 (0.86.0): `rotations` carries the whole chain since the
+			// signer of the epoch it travels in, `rotation` the newest link.
+			body := m.identityRotateBody(p)
+			if body == nil {
+				body = strictjson.NewBuilder().Raw("rotation", rot.Marshal()).Bytes()
+			}
 			m.sendTo(p, "identity.rotate", body, now)
+			if reconnect {
+				m.startReconnect(p, now) // again, under the new ik, after identity.rotate
+			}
 			// Every session rekeys under the new keys (§3.4): a rekey
 			// started under the old ones (each unlock starts the devices')
 			// is replaced, after identity.rotate. It is dropped even when

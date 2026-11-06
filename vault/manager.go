@@ -239,6 +239,13 @@ type Manager struct {
 	// relayAt is the relay time of the message being handled (see
 	// Session.RelayTime); set by handleMessage.
 	relayAt time.Time
+	// msgID is the relay msg_id of the message being handled: with
+	// relayAt, its position (§3.4.1 "Terms", 0.86.0).
+	msgID string
+	// reconfirm are the peers a batch held a message from under their
+	// confirmed epoch while it is not current: each gets hs.confirm again
+	// after the batch unless one is still in the outbox (§6.3.1).
+	reconfirm map[string]bool
 	// featureReqs are the requests features sent (Host.SendRequest) and
 	// await an answer to; memory only, so an answer after a restart is dropped
 	// like any that matches no request.
@@ -799,6 +806,7 @@ func (m *Manager) restoreLive() error {
 			return ErrState
 		}
 		m.sessions[p.ID] = kr
+		p.upgradeEpochs() // 0.86.0: a record from before it gets its epoch record
 	}
 	// In-flight handshakes and requests that do not restore (made by an
 	// earlier release, before 0.10.3) are dropped: they would fail anyway,

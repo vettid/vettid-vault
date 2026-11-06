@@ -10,6 +10,7 @@ import (
 	"github.com/vettid/vettid-relay/relayclient"
 	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/envelope"
+	"github.com/vettid/vettid-vault/vms/handshake"
 	"github.com/vettid/vettid-vault/vms/suite"
 )
 
@@ -74,6 +75,7 @@ func (m *Manager) sealAndQueueWake(p *Peer, in *envelope.Inner, wake string) str
 	if err != nil {
 		return ""
 	}
+	m.keepCopy(p, in, wake) // §6.3.1 "Deployment": kept for a revert
 	m.queueDeposit(&OutboxEntry{PeerID: p.ID, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Payload: raw, Wake: wake}, m.now())
 	return in.ID
 }
@@ -234,6 +236,12 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 			continue // not stored yet (queue)
 		}
 		if e.Op == OpDeposit && (blocked[key] || awaiting[key] && e.Token == "") {
+			continue
+		}
+		if e.Op == OpDeposit && !e.Handshake && m.pendingReconnectHold(e.PeerID) {
+			// §6.3.1: while a reconnect's epoch is pending, nothing but the
+			// handshake goes to the peer; the rest waits in order.
+			blocked[key] = true
 			continue
 		}
 		if !e.NotAfter.IsZero() && !now.Before(e.NotAfter) {
@@ -421,14 +429,28 @@ func (m *Manager) housekeeping(now time.Time) {
 	for id, aw := range m.st.Awaiting {
 		if aw.New == nil && now.Sub(aw.Created) > HandshakeTTL {
 			m.abandonAwaiting(id, now) // its tokens are denylisted too (§6.6)
+			if p := m.peer(aw.PeerID); p != nil && aw.Purpose == handshake.PurposeRekey {
+				m.ruleL(p, now) // §3.4.1 rule L: the answer expired without hs.fin
+			}
 		}
 	}
 	for id, og := range m.st.Outgoing {
 		if og.New == nil && now.Sub(og.Created) > HandshakeTTL {
 			m.dropOutgoing(id)
+			p := m.peer(og.PeerID)
+			switch {
+			case p == nil:
+			case og.RuleRC != "":
+				m.ruleRCExpired(p, og, now) // tried again, up to 3 times; then stale
+			case og.Purpose == handshake.PurposeRekey:
+				m.ruleL(p, now) // rule L: the rekey went unanswered for its lifetime
+			}
 		}
 	}
 	for _, p := range m.allPeers() {
+		m.tickPending(p, now)
+		m.tickRevert(p, now)
+		m.pruneEpochs(p, now)
 		if p.State != PeerActive {
 			continue
 		}

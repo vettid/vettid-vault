@@ -266,7 +266,7 @@ func (m *Manager) activateRequest(r *Request, now time.Time) {
 	if r.Peer.Kind == KindConnection && r.Dir == ReqIn {
 		pendingID = r.ID
 	}
-	m.activate(r.Peer, ep, purpose, nil, pendingID, chainOr(r.OwnChain, len(m.st.Rotations)), now)
+	m.activate(r.Peer, ep, purpose, nil, pendingID, chainOr(r.OwnChain, len(m.st.Rotations)), actOpts{mine: r.Dir == ReqOut}, now)
 }
 
 // dropRequest ends a request without activation (§6.4, §6.7, §7.4): the

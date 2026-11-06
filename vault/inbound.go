@@ -225,6 +225,7 @@ func (m *Manager) ProcessBatch(ctx context.Context, c Collector, msgs []Message)
 			return ErrSplitBrain
 		}
 	}
+	m.reconfirmAll(now) // §6.3.1: hs.confirm again, once per batch, unless one is queued
 	if len(msgs) < MaxBatch {
 		m.attDrained()
 		m.drainedOnce = true
@@ -281,7 +282,7 @@ func (m *Manager) handleMessage(ctx context.Context, msg Message, now time.Time)
 		return ackAfterFlush // relay msg_id dedupe (§8.2 layer 1)
 	}
 	m.st.SeenMsgIDs[msg.MsgID] = now
-	m.relayAt = time.Time{}
+	m.relayAt, m.msgID = time.Time{}, msg.MsgID
 	if t, err := time.Parse(time.RFC3339Nano, msg.DepositedAt); err == nil {
 		m.relayAt = t.UTC()
 	}
@@ -420,6 +421,15 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 		return ackAfterFlush
 	}
 	m.noteFeatures(p, in.Features) // 0.86.0 (§10.8): it passed acceptFrom steps 1-4
+	// 0.86.0 (§6.3.1): a confirmation takes effect before anything else is
+	// done with the message (dedupe, the ts window, its handler).
+	if m.beforeAccept(p, ep, in, now) {
+		return ackAfterFlush
+	}
+	m.idResend(p, ep, in, now)
+	if in.Type == handshake.TypeConfirm {
+		return ackAfterFlush // not a request: never answered; one that confirms nothing is ignored, unaudited
+	}
 	if in.Type == handshake.TypeInit {
 		return m.handleRekeyInit(ctx, p, in, ep, raw, sender, now)
 	}
@@ -544,7 +554,7 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 			return disp(eph)
 		}
 	}
-	s := &Session{m: m, peer: p, host: managerHost{m}, from: info(p), ctx: ctx, now: now, inner: in, relayAt: m.relayAt}
+	s := &Session{m: m, peer: p, host: managerHost{m}, from: info(p), ctx: ctx, now: now, inner: in, relayAt: m.relayAt, epoch: ep}
 	allowed := te.allows(p.Kind) && !(p.Recovering && !recoveryAllowed[in.Type])
 	if (p.Kind == KindAgent || p.Kind == KindDesktop) && !te.spec.DesktopApproval {
 		if af, ok := te.handler.(AppOnlyForms); ok && af.AppOnly(in.Type, in.Body) {

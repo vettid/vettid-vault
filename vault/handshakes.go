@@ -839,9 +839,17 @@ func (m *Manager) finishReconnect(p *Peer, aw *AwaitingHS, fr *handshake.FinResu
 	}
 	ref := p.activatedAt(pend.Named)
 	if len(fresh) > 0 && kem != nil {
-		p.IK, p.KEM = append([]byte(nil), pend.IK...), kem.Bytes()
-		for _, r := range fresh {
-			p.Chain = append(p.Chain, r.Marshal())
+		// Table B "Reached": the links are applied, then H5 (answers
+		// pinned to an ik no longer current are dropped), with "Epochs
+		// after an ik link" and "Pending epochs at a link"; nothing is
+		// restarted beside the epoch this reconnect establishes.
+		m.noLinkRestart = true
+		m.followLinks(p, fresh, nil, now)
+		m.noLinkRestart = false
+		if p.suspended() {
+			fr.Epoch.Destroy()
+			denyIssued()
+			return
 		}
 	}
 	p.Standing, p.Reconnect = pend.Standing, pend.Reconnect

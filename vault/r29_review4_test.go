@@ -1,6 +1,7 @@
 package vault
 
 import (
+	"bytes"
 	"fmt"
 	"testing"
 )
@@ -80,5 +81,46 @@ func TestR29ForkByCtxReachedIKRekey(t *testing.T) {
 	if !f.suspendedRef(1, "epoch") {
 		f.dump()
 		t.Fatal("a rekey whose links reach past E1's signer was not fork evidence")
+	}
+}
+
+// M1, Table B "Reached" for a reconnect: its links are applied, then H5.
+// Q answered P's rekey (signer a); P rotates a→b and reconnects with the
+// link; once Q finishes the reconnect, its old answer (pinned to a) is
+// gone, so an old copy's hs.fin for it establishes nothing.
+func TestR29ReconnectLinksRunH5(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	f.rekey(0)
+	f.deliver(0, 1, kHSInit) // Q answers (signer a)
+	f.startCopy(0, f.snapshot(0))
+	if f.deliver(1, 2, kHSResp) != 1 { // the copy takes Q's answer; its hs.fin waits
+		t.Fatal("setup: no hs.resp for the copy")
+	}
+	f.rotate(0)
+	f.lose(0, 1, kAny)
+	f.do(0, func(m *Manager, p *Peer) {
+		for id, og := range m.st.Outgoing {
+			if og.PeerID == p.ID {
+				m.abandonOutgoing(id, f.clk)
+			}
+		}
+		m.startReconnect(p, f.clk)
+	})
+	f.deliver(0, 1, kHSInit)
+	f.deliver(1, 0, kHSResp)
+	f.deliver(0, 1, kHSFin)
+	rc := append([]byte(nil), f.cur(1)...)
+	if !bytes.Equal(f.cur(0), rc) && f.p(0).Pending == nil {
+		f.dump()
+		t.Fatal("setup: the reconnect did not complete")
+	}
+	if f.answerCount(1) != 0 {
+		t.Fatal("the answer pinned to the ancestor ik survived the reconnect's links")
+	}
+	f.deliver(2, 1, kHSFin)
+	if !bytes.Equal(f.cur(1), rc) {
+		f.dump()
+		t.Fatal("an old copy's hs.fin for the dropped answer established an epoch")
 	}
 }

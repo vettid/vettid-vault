@@ -572,6 +572,9 @@ func (m *Manager) h5(p *Peer, now time.Time) {
 			m.abandonAwaiting(id, now)
 		}
 	}
+	if m.noLinkRestart {
+		return // the caller's own handshake establishes the next epoch
+	}
 	switch {
 	case reconnect:
 		m.startReconnect(p, now)

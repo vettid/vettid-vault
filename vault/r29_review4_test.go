@@ -249,3 +249,45 @@ func TestR29RuleESparesOwnAbandoned(t *testing.T) {
 		t.Fatal("a message under the vault's own abandoned epoch was not processed")
 	}
 }
+
+// L1: responderEstablish follows a rekey's links at hs.fin without
+// restarting anything beside the epoch it establishes. Q (side 1) has its
+// own reconnect open (pinned to P's ik a) and no reconnect token left; P
+// rotates a→b and its rekey (with the link) is answered; at its hs.fin, H5
+// must not restart Q's reconnect (which, without a reconnect token, would
+// make the connection stale).
+func TestR29FinLinksNoRestart(t *testing.T) {
+	for try := 0; try < 50; try++ {
+		f := newR29Fx(t)
+		f.longTokens()
+		f.rotate(0) // a→b; P's rekey from E0 carries the link
+		f.lose(0, 1, kRotate)
+		f.do(1, func(m *Manager, p *Peer) { m.startReconnect(p, f.clk) })
+		f.lose(1, 0, kAny)
+		var mine, theirs []byte
+		for _, og := range f.m(1).st.Outgoing {
+			mine = og.Th1
+		}
+		for _, og := range f.m(0).st.Outgoing {
+			if og.Purpose == "rekey" {
+				theirs = og.Th1
+			}
+		}
+		if theirs == nil || bytes.Compare(mine, theirs) >= 0 {
+			continue // want Q's reconnect lower: kept beside the answer
+		}
+		f.p(1).Reconnect.Token = ""
+		f.deliver(0, 1, kHSInit)
+		if f.answerCount(1) != 1 {
+			t.Fatal("setup: P's rekey not answered")
+		}
+		f.deliver(1, 0, kHSResp)
+		f.deliver(0, 1, kHSFin)
+		if f.p(1).State == PeerStale || f.sink[1].has("connection.stale") {
+			f.dump()
+			t.Fatal("a restart at the hs.fin's links made the connection stale")
+		}
+		return
+	}
+	t.Skip("no th1 order found")
+}

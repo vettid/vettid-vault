@@ -762,7 +762,12 @@ func (m *Manager) responderEstablish(p *Peer, aw *AwaitingHS, fr *handshake.FinR
 			m.audit(now, "hs_fin_dropped", p.ID)
 			return
 		}
+		// Nothing is restarted beside the epoch this hs.fin establishes
+		// (the vault's own open handshakes are abandoned below).
+		prev := m.noLinkRestart
+		m.noLinkRestart = true
 		m.followLinks(p, all[n:], nil, now)
+		m.noLinkRestart = prev
 	}
 	if p.Pending != nil {
 		m.abandonPending(p, "peer_activated", false, now)

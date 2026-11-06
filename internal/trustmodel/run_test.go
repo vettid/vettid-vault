@@ -404,9 +404,7 @@ func (w *World) copyAction(c *Party, a Action) {
 			w.R.remove(c.st.Relay, w.Now)
 			if c.st.Relay == orig.st.Relay {
 				w.markDeadAll(c.Origin, "an old copy deleted the original's live mailbox")
-			} else {
-				w.noLive = "an old copy deleted a mailbox in its grace (stated residual)"
-			}
+			} // one in the original's grace: marked per pair by the deferred check above
 		}
 	}
 	c.Locked = true
@@ -593,10 +591,6 @@ func (w *World) checkEnd(liveness bool) {
 		}
 	}
 	if !liveness {
-		return
-	}
-	if w.noLive != "" {
-		w.stat("I1/I2 skipped: " + w.noLive)
 		return
 	}
 	// I2 at quiescence

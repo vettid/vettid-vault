@@ -73,7 +73,6 @@ type World struct {
 	log      []string
 	verbose  bool
 	stats    map[string]int
-	noLive   string            // why I1 is not checked in this run (a stated residual), or ""
 	deadAt   map[[2]PID]int64  // pair -> when a residual first ended its liveness: an old copy collected, acked or deleted a message meant for it, or the mailbox (resLiveMailbox), or the peer followed the copy's own rotation (resCopyRotated)
 	deadRes  map[[2]PID]string // ...which residual
 	deadWhy  map[[2]PID]string // ...and how

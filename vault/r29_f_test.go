@@ -290,3 +290,56 @@ func TestR29Lead6Repair(t *testing.T) {
 	}
 	f.talks()
 }
+
+// Question B (the lead's rule, "if redeemable, revoke"): an abandoned
+// pending reconnect's tokens are revoked in the same write; the vault
+// restarts a reconnect (not a rekey), and a peer that did activate the
+// abandoned epoch converges through it.
+func TestR29AbandonedReconnectTokensRevoked(t *testing.T) {
+	for _, path := range []string{"B", "S5"} {
+		f := newR29Fx(t)
+		f.longTokens()
+		f.do(0, func(m *Manager, p *Peer) { m.startReconnect(p, f.clk) })
+		f.deliver(0, 1, kHSInit)
+		f.deliver(1, 0, kHSResp)
+		pe := f.p(0).Pending
+		if pe == nil || pe.Purpose != handshake.PurposeReconnect || len(pe.Issued) == 0 {
+			t.Fatal("setup: no pending reconnect with tokens")
+		}
+		var jtis []string
+		for _, tk := range pe.Issued {
+			jtis = append(jtis, tk.JTI)
+		}
+		f.deliver(0, 1, kHSFin) // the peer activates it
+		f.lose(1, 0, kConfirm)
+		switch path {
+		case "B":
+			f.advance(PendingLife + time.Hour)
+			f.tick(0)
+		case "S5":
+			f.rotate(0)
+		}
+		if f.p(0).Pending != nil {
+			t.Fatalf("%s: not abandoned", path)
+		}
+		f.do(0, func(*Manager, *Peer) {}) // drain the revokes
+		for _, j := range jtis {
+			if !f.d[0].relayRevoked("jti", j) {
+				t.Fatalf("%s: token %s not revoked", path, j)
+			}
+		}
+		if !f.m(0).hasOutgoing(f.id[0], handshake.PurposeReconnect) {
+			t.Fatalf("%s: no reconnect restarted", path)
+		}
+		f.settle()
+		f.advance(time.Minute)
+		f.tick(0)
+		f.tick(1)
+		f.settle()
+		if !f.sameEpoch() {
+			f.dump()
+			t.Fatalf("%s: did not converge", path)
+		}
+		f.talks()
+	}
+}

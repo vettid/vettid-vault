@@ -266,11 +266,16 @@ func (m *Manager) abandonPending(p *Peer, why string, restart bool, now time.Tim
 		e.Pending, e.Superseded = false, now
 	}
 	for _, t := range pe.Issued {
-		// The tokens its hs.init carried stay valid (the peer may have
-		// activated and use them); they are recorded as issued, as at an
-		// activation.
-		t.PeerID = p.ID
+		// The tokens its hs.init carried (a reconnect's standing and
+		// reconnect tokens) are revoked in this write, as an abandoned
+		// handshake's are (§6.6): otherwise the peer, or an old copy of it
+		// holding its relay key and kem, could still deposit with them. A
+		// peer that did activate the epoch gets fresh ones in the
+		// reconnect that follows (B, token_expired, H5 and S5 restart a
+		// reconnect for an abandoned reconnect).
+		t.PeerID, t.Denied = p.ID, true
 		m.st.Issued = append(m.st.Issued, t)
+		m.queueRevoke("jti", t.JTI, now)
 	}
 	p.Abandoned = append(p.Abandoned, append([]byte(nil), pe.ID...))
 	p.Pending = nil

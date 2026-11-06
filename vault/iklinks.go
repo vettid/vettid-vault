@@ -281,7 +281,11 @@ func (m *Manager) h5(p *Peer, now time.Time) {
 	if pe := p.Pending; pe != nil {
 		if e := p.epochMeta(pe.ID); e != nil && !bytes.Equal(e.Signer, p.IK) {
 			m.abandonPending(p, "h5", false, now)
-			rekey = true
+			if pe.Purpose == handshake.PurposeReconnect {
+				reconnect = true // its tokens were revoked: a reconnect brings fresh ones
+			} else {
+				rekey = true
+			}
 		}
 	}
 	for id, aw := range m.st.Awaiting {
@@ -424,7 +428,8 @@ func (m *Manager) s5(p *Peer, now time.Time) (reconnect bool) {
 		reconnect = reconnect || og.Purpose == handshake.PurposeReconnect
 		m.abandonOutgoing(id, now)
 	}
-	if p.Pending != nil {
+	if pe := p.Pending; pe != nil {
+		reconnect = reconnect || pe.Purpose == handshake.PurposeReconnect
 		m.abandonPending(p, "s5", false, now)
 	}
 	if p.hasConfirm() {

@@ -298,9 +298,47 @@ func (q *Party) reconfirm() {
 	}
 }
 
+// confirmAgainAfter: (0.88.1, vettid.org #554) R queues hs.confirm again
+// 12 days after the last one it queued (T less 2 days; not scaled).
+const confirmAgainAfter = 12 * day
+
+// confirmAgain: (0.88.1) §6.3.1 Responder, "hs.confirm again". While R's
+// current epoch with I is one R activated as responder and R's confirmed
+// epoch is neither it nor a later one (activation order), R queues
+// hs.confirm under it again 12 days after the last one it queued, unless
+// one to I is still in its outbox; none while the epoch is demoted or the
+// connection suspended. A device does the same toward its vault.
+func (p *Party) confirmAgain(r *PeerRec) {
+	w := p.w
+	if !p.respHalf() || w.noConfirmAgain || r.Status != stActive || r.Cur == 0 {
+		return
+	}
+	ep := r.epoch(r.Cur)
+	if ep == nil || ep.MineInit || ep.Demoted || ep.Pending || ep.Abandoned {
+		return
+	}
+	ic := slices.IndexFunc(r.Epochs, func(e Epoch) bool { return e.ID == r.Cur })
+	if ik := slices.IndexFunc(r.Epochs, func(e Epoch) bool { return e.ID == r.ConfID }); ik >= ic {
+		return // the confirmed epoch is the current one or a later one
+	}
+	if w.Now-r.LastConfirm < confirmAgainAfter {
+		return
+	}
+	if slices.ContainsFunc(p.st.Out, func(e Entry) bool {
+		return e.To == r.ID && e.M.Kind == KConfirm && !e.Done && !e.Ended
+	}) {
+		return
+	}
+	w.hit("R3:hs.confirm-again-12d")
+	w.logf("%s: hs.confirm again under E%d for %s (12 days, not yet confirmed)", p.Name, r.Cur, w.party(r.ID).Name)
+	r.LastConfirm = w.Now
+	p.enqueue(r.ID, Msg{Kind: KConfirm, Epoch: r.Cur}, nil)
+}
+
 // tickA: §6.3.1 timers.
 func (p *Party) tickA(r *PeerRec) {
 	w := p.w
+	p.confirmAgain(r)
 	if pe := r.Pend; pe != nil && w.Now-pe.FinAt > aPendLife && (p.collectedSinceUnlock || w.noF13B) {
 		p.abandonPending(r, "B passed", true)
 	}

@@ -52,11 +52,12 @@ type World struct {
 
 	// Fix switches for the review findings (f_scenarios_test.go). Each is
 	// false by default (the fix on); true turns that one fix off.
-	noF5        bool // F5: a message confirms only after its handler accepted it (not before step 5 and the handler)
-	noF9        bool // F9: token_expired keeps the pending epoch (so startHS refuses the reconnect)
-	noF10       bool // F10: hs.confirm queued again for every such batch, even with one still in the outbox
-	noF13B      bool // F13: B judged on time alone, not only after the first short collect after an unlock
-	noConfRekey bool // F13 §6.2 and lead item 6: a rekey whose ctx is the responder's confirmed (not current) epoch is refused
+	noF5           bool // F5: a message confirms only after its handler accepted it (not before step 5 and the handler)
+	noF9           bool // F9: token_expired keeps the pending epoch (so startHS refuses the reconnect)
+	noF10          bool // F10: hs.confirm queued again for every such batch, even with one still in the outbox
+	noF13B         bool // F13: B judged on time alone, not only after the first short collect after an unlock
+	noConfirmAgain bool // 0.88.1: R does not queue hs.confirm again every 12 days (TestR29R3ConfirmAgain's "off")
+	noConfRekey    bool // F13 §6.2 and lead item 6: a rekey whose ctx is the responder's confirmed (not current) epoch is refused
 
 	issuer   map[int]Key    // jti -> iss: a token "verifies" only if its issuer minted it
 	epTruth  map[int][2]PID // epoch -> (initiator actor, responder actor)

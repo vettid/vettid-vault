@@ -335,3 +335,68 @@ func TestUnlockExchange(t *testing.T) {
 		}
 	}
 }
+
+// (0.88.1, vettid.org #554) §6.3.1 Responder, "hs.confirm again": I
+// starts a reconnect; R activates it at hs.fin and queues hs.confirm; I is
+// locked past T (14 days) and the relay drops R's hs.confirm. R, whose
+// confirmed epoch is still the earlier one, queues hs.confirm again 12
+// days after the last one; when I comes back it confirms its pending
+// reconnect before B and the pair is not stale. Off (noConfirmAgain): the
+// pair is not confirmed before B and ends stale. R's own rekeys and token
+// refreshes, which would also confirm, are kept from I until it confirms.
+func TestR29R3ConfirmAgain(t *testing.T) {
+	bothWays(t, func(t *testing.T, off bool) {
+		s := newScen(t, 2)
+		s.w.relayRot = false
+		s.w.noConfirmAgain = off
+		I, R := s.p(0), s.p(1)
+		ri, rr := I.st.peer(R.ID), R.st.peer(I.ID)
+		s.do(I, func() { I.startHS(ri, true); I.write(); I.flush() })
+		s.run(1, R) // R answers the reconnect
+		s.run(1, I) // I: pending reconnect E1, hs.fin
+		if ri.Pend == nil || !ri.Pend.Reconnect {
+			t.Fatalf("setup: I holds no pending reconnect\n  %s", s.trace())
+		}
+		e1 := ri.Pend.ID
+		s.lock(I)
+		s.run(1, R) // R activates E1 at hs.fin, hs.confirm queued and deposited
+		if rr.Cur != e1 || rr.ConfID == e1 {
+			t.Fatalf("setup: R on E%d, confirmed E%d", rr.Cur, rr.ConfID)
+		}
+		if s.dropAt(I, KConfirm) == 0 {
+			t.Fatalf("setup: no hs.confirm to drop")
+		}
+		for d := 0; d < 15; d++ {
+			s.tick(day)
+			s.drain(R)
+			s.do(R, R.tick)
+			s.dropAt(I, KInit)      // R's own rekeys and token refreshes (which would
+			s.dropAt(I, KTokIssued) // also confirm) are not the subject: they do not reach I
+		}
+		if !off && s.w.stats["R29 R3:hs.confirm-again-12d"] != 1 {
+			t.Errorf("R queued hs.confirm again %d times in 15 days, want 1", s.w.stats["R29 R3:hs.confirm-again-12d"])
+		}
+		I.unlock()
+		confirmed := false
+		for d := 0; d < 20 && I.st.peer(R.ID).Status == stActive; d++ {
+			s.run(1, I, R)
+			ri = I.st.peer(R.ID)
+			confirmed = confirmed || (ri.Cur == e1 && ri.Pend == nil)
+			s.tick(day)
+			s.do(I, I.tick)
+			s.do(R, R.tick)
+			if !confirmed {
+				s.dropAt(I, KInit)
+				s.dropAt(I, KTokIssued)
+			}
+		}
+		ri = I.st.peer(R.ID)
+		t.Logf("off %v: I on E%d (status %d, %s), confirmed E%d %v", off, ri.Cur, ri.Status, ri.Ref, e1, confirmed)
+		if !off && (!confirmed || ri.Status != stActive) {
+			t.Fatalf("I did not confirm E%d before B, or the pair ended stale\n  %s", e1, s.trace())
+		}
+		if off && (confirmed || ri.Status != stStale) {
+			t.Fatalf("off: want no confirmation and a stale pair at B (confirmed %v, status %d)\n  %s", confirmed, ri.Status, s.trace())
+		}
+	})
+}

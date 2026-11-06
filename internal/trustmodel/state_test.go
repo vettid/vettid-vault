@@ -367,6 +367,7 @@ func (r *PeerRec) isAncestor(k Key) bool {
 	}
 	return false
 }
+
 // signedBy: an epoch signer sig is the link's old ik or an ancestor of it
 // (§3.4.1 "Epochs after an ik link", strict F1, R29-K9: "that link's
 // old_ik or an ancestor"), walking the followed chain back from old; not

@@ -31,7 +31,7 @@ var r29Branches = []string{
 	"I5:B-reconnect-stale",
 	"I6:rekey-abandoned-no-token", "I6:reconnect-kept-without-token",
 	"I7:abandon", "I7:fresh-reconnect",
-	"R1:hs.confirm-queued", "R2:confirmed-moves", "R3:hs.confirm-again", "R3:one-still-queued",
+	"R1:hs.confirm-queued", "R2:confirmed-moves", "R3:hs.confirm-again", "R3:one-still-queued", "R3:hs.confirm-again-12d",
 	"R4:rekey-names-confirmed", "R4:reconnect-names-confirmed",
 	"R5:destroyed", "R5:own-abandoned-not-destroyed", "R6:fork-evidence",
 	"X1:crossing-dropped", "X1:later-abandons", "X2:own-higher-abandoned", "X2:own-lower-kept", "X2:fin-first",

@@ -345,6 +345,9 @@ func (m *Manager) respondReconnect(pi *handshake.PendingInit, p *Peer, sender ed
 	var namedConf, forkEp, refuse bool
 	named86, namedConf, forkEp, refuse = m.classifyCtx086(p, body.Ctx, p.reachedLinks(body.Rotations))
 	if refuse {
+		if pe := p.Pending; pe != nil && pe.Purpose == handshake.PurposeReconnect {
+			m.refusedReconnectLinks(p, body, now)
+		}
 		m.audit(now, "reconnect_refused", p.ID)
 		pi.Discard()
 		return
@@ -459,6 +462,37 @@ func (m *Manager) respondReconnect(pi *handshake.PendingInit, p *Peer, sender ed
 	if !p.isService() {
 		m.crossingPersons(p, now)
 	}
+}
+
+// refusedReconnectLinks is §6.6 "The links of a refused reconnect"
+// (0.88.2, owner decision a): a reconnect refused only because the
+// vault's own reconnect is pending (it has sent hs.fin for it) still has
+// its identity links applied, in the write that refuses it. The links its
+// hs.init carries that resolve from the stored ik to its from.ik (Table B
+// "Reached"; rule C already checked each) are followed as an
+// identity.rotate's would be: H5, "Pending epochs at a link", "Epochs
+// after an ik link" and strict F1, with the epoch its ctx names as the
+// one it travels under. Nothing restarts beside the vault's own pending
+// reconnect, nothing is answered, and R29-K9 is not judged.
+func (m *Manager) refusedReconnectLinks(p *Peer, body *handshake.Init, now time.Time) {
+	if len(body.Rotations) == 0 {
+		return
+	}
+	final, _, n, err := handshake.ResolveChainKnown(p.IK, parseRotations(p.Chain), body.Rotations)
+	if err != nil || !suite.EqualPublic(final, body.From.IK) || n >= len(body.Rotations) {
+		return
+	}
+	var named []byte
+	for _, e := range p.Epochs {
+		if !e.Pending && body.Ctx == handshake.EpochCtx(epochIDOf(e.ID)) {
+			named = e.ID
+		}
+	}
+	prev := m.noLinkRestart
+	m.noLinkRestart = true
+	m.followLinks(p, body.Rotations[n:], named, now)
+	m.noLinkRestart = prev
+	m.note(now, "refused_reconnect_links", p.ID)
 }
 
 // ownThHigher reports whether th1 of our own reconnect og is higher than

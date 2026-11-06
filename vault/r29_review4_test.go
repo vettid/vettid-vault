@@ -555,3 +555,68 @@ func TestR29ConnectionRemovedNotice(t *testing.T) {
 		}
 	}
 }
+
+// §6.6 "The links of a refused reconnect" (0.88.2, owner decision a): Q's
+// own reconnect is pending (P answered it under ik a); P rotates a→b
+// (dropping that answer, S5) and its identity.rotate does not reach Q.
+// P's reconnect, carrying a→b, is refused (Q's own reconnect is pending)
+// but its links are followed in the same write: "Pending epochs at a
+// link" abandons Q's pending epoch (sig_R by a), nothing is answered or
+// restarted, K9 is not judged; P's next reconnect is then accepted and
+// the pair converges. Without the rule Q stays pending and refuses every
+// reconnect from P.
+func TestR29RefusedReconnectLinksFollowed(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	f.do(0, func(m *Manager, p *Peer) { m.startReconnect(p, f.clk) })
+	f.deliver(0, 1, kHSInit)
+	f.deliver(1, 0, kHSResp) // Q's reconnect epoch pending, sig_R by a
+	f.lose(0, 1, kAny)       // its hs.fin: P has dropped the answer anyway (S5 below)
+	f.rotate(1)              // P: a→b
+	f.lose(1, 0, kAny)       // its identity.rotate and rekey do not reach Q
+	reconnectP := func() {
+		f.do(1, func(m *Manager, p *Peer) {
+			for id, og := range m.st.Outgoing {
+				if og.PeerID == p.ID {
+					m.abandonOutgoing(id, f.clk)
+				}
+			}
+			m.startReconnect(p, f.clk)
+		})
+	}
+	reconnectP()
+	if f.deliver(1, 0, kHSInit) != 1 {
+		t.Fatal("setup: no reconnect from P")
+	}
+	if !f.audited(0, "reconnect_refused") {
+		t.Fatal("setup: P's reconnect was not refused")
+	}
+	if !bytes.Equal(f.p(0).IK, f.m(1).keys.ik.Public().(ed25519.PublicKey)) {
+		f.dump()
+		t.Fatal("the refused reconnect's links were not followed")
+	}
+	if f.p(0).Pending != nil || !f.audited(0, "pending_abandoned_link") {
+		f.dump()
+		t.Fatal("Q's pending epoch signed by the old ik was not abandoned by the link")
+	}
+	if f.answerCount(0) != 0 || f.countOutgoingReconnects(0) != 0 {
+		t.Fatal("something was answered or restarted beside the refusal")
+	}
+	for _, e := range f.p(0).Epochs {
+		if e.Ended {
+			t.Fatal("K9 judged at a refused reconnect")
+		}
+	}
+	f.lose(1, 0, kAny)
+	reconnectP()
+	f.settle()
+	f.advance(time.Minute)
+	f.tick(0)
+	f.tick(1)
+	f.settle()
+	if !f.sameEpoch() || f.p(0).State != PeerActive || f.p(1).State != PeerActive {
+		f.dump()
+		t.Fatal("the pair did not converge")
+	}
+	f.talks()
+}

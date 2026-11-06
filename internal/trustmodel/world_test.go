@@ -71,7 +71,11 @@ type World struct {
 	verbose  bool
 	stats    map[string]int
 	noLive   string            // why I1 is not checked in this run (a stated residual), or ""
-	dead     map[PID]string    // parties whose liveness a stated residual ended
+	deadAt   map[[2]PID]int64  // pair -> when a residual first ended its liveness: an old copy collected, acked or deleted a message meant for it, or the mailbox (resLiveMailbox), or the peer followed the copy's own rotation (resCopyRotated)
+	deadRes  map[[2]PID]string // ...which residual
+	deadWhy  map[[2]PID]string // ...and how
+	splitAt  map[[2]PID]int64  // pair -> when its current (latest) split began (I7, the live-mailbox residual)
+	splitNow map[[2]PID]bool   // pair -> split at the last monitor
 	ttlFin   map[[2]PID]string // (from, to): how an hs.resp or hs.fin was lost
 	forkDue  map[[2]PID]int    // (Q, P): P's hs.init under its new ik found a copy's epoch current
 	evidKind map[Key]string    // a successor key -> the kind of the first message that carried it
@@ -91,7 +95,7 @@ func newWorld(seed uint64) *World {
 	w := &World{rng: rand.New(rand.NewPCG(seed, 7)), issuer: map[int]Key{}, epTruth: map[int][2]PID{},
 		rlinkBy: map[RLink]rot{}, iklinkBy: map[IKLink]rot{}, evid: map[[2]PID]map[Key]map[Key]bool{},
 		ikPos: map[[2]PID][]ikFollow{}, answered: map[int]bool{},
-		ended: map[int]bool{}, ever: map[PID]map[int]bool{}, probes: map[int]bool{}, stats: map[string]int{}, dead: map[PID]string{}, ttlFin: map[[2]PID]string{}, probeDep: map[int][2]PID{}, probeFate: map[int]string{}, hasEpoch: map[[2]int]bool{}, staleAt: map[[2]PID]string{}, hsOrigin: map[int]string{}, suspAt: map[[2]PID]int64{}, audits: map[[2]PID]int{}, everSplit: map[[2]PID]bool{}, feed: map[[2]PID][]string{}, copyExpo: map[[2]int]*expo{}, copyFlag: map[[2]int]bool{}, copyCur: map[[2]int]bool{}, copyAban: map[[2]int]*abanUse{}, oldApp: map[[2]PID]string{}, initIK: map[PID]Key{}, probeEpoch: map[int]int{}, forkDue: map[[2]PID]int{}, evidKind: map[Key]string{}}
+		ended: map[int]bool{}, ever: map[PID]map[int]bool{}, probes: map[int]bool{}, stats: map[string]int{}, deadAt: map[[2]PID]int64{}, deadWhy: map[[2]PID]string{}, deadRes: map[[2]PID]string{}, splitAt: map[[2]PID]int64{}, splitNow: map[[2]PID]bool{}, ttlFin: map[[2]PID]string{}, probeDep: map[int][2]PID{}, probeFate: map[int]string{}, hasEpoch: map[[2]int]bool{}, staleAt: map[[2]PID]string{}, hsOrigin: map[int]string{}, suspAt: map[[2]PID]int64{}, audits: map[[2]PID]int{}, everSplit: map[[2]PID]bool{}, feed: map[[2]PID][]string{}, copyExpo: map[[2]int]*expo{}, copyFlag: map[[2]int]bool{}, copyCur: map[[2]int]bool{}, copyAban: map[[2]int]*abanUse{}, oldApp: map[[2]PID]string{}, initIK: map[PID]Key{}, probeEpoch: map[int]int{}, forkDue: map[[2]PID]int{}, evidKind: map[Key]string{}}
 	w.R = newRelay(w)
 	w.Now = 1000 * day
 	return w
@@ -831,6 +835,9 @@ func (p *Party) collectRound(max int) int {
 			continue
 		}
 		set = append(set, b)
+		if p.Copy {
+			w.copyTook(p, b, ms, "collected")
+		}
 		if len(ms) < max {
 			p.collTo[b] = start - freshWindow
 			if b == p.st.Relay {
@@ -883,6 +890,47 @@ func (p *Party) collectRound(max int) int {
 		p.startWanted()
 	})
 	return len(got)
+}
+
+// copyTook: old copy c collected (leased), acked or deleted messages ms
+// from box b. If b is a mailbox the original still collects, each pair a
+// message was meant for falls under the residual "During the grace an old
+// copy holding the old key can collect, ack or delete the old mailbox" (and
+// "an old copy keeps the vault's live mailbox"), from now on.
+func (w *World) copyTook(c *Party, b Key, ms []*RMsg, how string) {
+	orig := w.party(c.Origin)
+	if !slices.Contains(orig.boxes(), b) {
+		return
+	}
+	for _, m := range ms {
+		w.markDead(orig.ID, w.party(m.Actor).Origin, resLiveMailbox, "an old copy "+how+" a message from the original's mailbox")
+	}
+}
+
+// markDead: residual res ends the liveness of the pair (a, b) from now.
+func (w *World) markDead(a, b PID, res, why string) {
+	if a == b {
+		return
+	}
+	k := pairKey(a, b)
+	if _, ok := w.deadAt[k]; !ok {
+		w.deadAt[k], w.deadRes[k], w.deadWhy[k] = w.Now, res, why
+	}
+}
+
+// markDeadAll: an old copy deleted or moved the original's mailbox: every
+// pair of the original, from now.
+func (w *World) markDeadAll(orig PID, why string) {
+	for _, r := range w.party(orig).st.Peers {
+		w.markDead(orig, r.ID, resLiveMailbox, why)
+	}
+}
+
+// dead: a residual (live mailbox, or the copy's own rotation followed)
+// ended the liveness of the pair (a, b).
+func (w *World) dead(a, b PID) bool {
+	_, ok := w.deadAt[pairKey(a, b)]
+	return ok
 }
 
 // otherBoxBehind: another mailbox of Q has not been collected past depAt.

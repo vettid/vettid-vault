@@ -13,12 +13,6 @@ func (w *World) stepTime() { w.advance(visTimeout + freshWindow + 1) }
 // the oracle config that is the original's live mailbox (a stated
 // residual: §3.4.1 Residuals, the copy keeps the live mailbox).
 func (w *World) copyCollects(c *Party, rounds int) {
-	orig := w.party(c.Origin)
-	for _, k := range c.myKeys() {
-		if w.R.live(k) && (k == orig.st.Relay || orig.holds(k)) {
-			w.dead[c.Origin] = "an old copy collected from the original's mailbox (stated residual)"
-		}
-	}
 	for i := 0; i < rounds; i++ {
 		c.collectRound(maxCollect)
 	}

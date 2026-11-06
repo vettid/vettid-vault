@@ -164,7 +164,8 @@ const (
 	resAbandonedEarlier = "a copy using an epoch Q abandoned while pending that R29-K9 does not judge: earlier than the epoch of P's identity.rotate, or before it arrives (owner decision b, 0.87.1)"
 	resCopyInit         = "a copy acting as initiator sent nothing but hs.fin"
 	resBeforeRotation   = "an old copy acting before the original's rotation is seen (an old copy can make any handshake as P)"
-	resLiveMailbox      = "an old copy collects, acks or deletes the original's live mailbox"
+	resLiveMailbox      = "an old copy collects, acks or deletes the original's live mailbox (a message meant for the pair, or the mailbox)"
+	resCopyRotated      = "an old copy rotated as P before the original did: its deposits count as P's (§3.4.1 Residuals, \"Until Q follows P's update\"; §11.14.2)"
 )
 
 // residualOf: the residual that covers the pair (a, b), or "". For an app

@@ -22,9 +22,15 @@ func (w *World) monitor() {
 			if ra == nil || rb == nil || ra.Status != stActive || rb.Status != stActive {
 				continue
 			}
-			if !consistent(ra, rb, a.respHalf(), b.respHalf()) {
-				w.everSplit[pairKey(a.ID, b.ID)] = true
+			k := pairKey(a.ID, b.ID)
+			split := !consistent(ra, rb, a.respHalf(), b.respHalf())
+			if split {
+				w.everSplit[k] = true
+				if !w.splitNow[k] {
+					w.splitAt[k] = w.Now
+				}
 			}
+			w.splitNow[k] = split
 		}
 	}
 }
@@ -95,8 +101,10 @@ func (w *World) checkI7() {
 				continue
 			}
 			switch {
-			case w.dead[a.ID] != "" || w.dead[b.ID] != "":
-				w.exempt("I7", resLiveMailbox)
+			case w.dead(a.ID, b.ID) && w.deadAt[k] <= w.splitAt[k]:
+				// only a split that began once the copy took a message
+				// meant for the pair (or the mailbox)
+				w.exempt("I7", w.deadRes[k])
 			case w.residualOf(a.ID, b.ID) == resOldApp:
 				w.violate("I7", "%s: an app from before release 29, epochs split (E%d vs E%d), and no device.update_needed was shown", pairName(w, a.ID, b.ID), ra.Cur, rb.Cur)
 			default:

@@ -647,6 +647,10 @@ func (q *Party) followIK(r *PeerRec, app []IKLink, x Pos, restart bool) bool {
 		}
 		r.Chain = append(r.Chain, l)
 		r.IK, r.KEM = l.New, l.KEM
+		if by := q.w.iklinkBy[l]; !q.Copy && q.w.party(by.By).Copy {
+			// ground truth: Q follows the old copy's own rotation as P's
+			q.w.markDead(q.ID, r.ID, resCopyRotated, "followed the copy's identity link")
+		}
 		key := [2]PID{q.ID, r.ID}
 		q.w.ikPos[key] = append(q.w.ikPos[key], ikFollow{l, x})
 		if q.newSpec() && r.Device {

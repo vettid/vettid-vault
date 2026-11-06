@@ -346,14 +346,6 @@ func (w *World) advance(d int64) {
 
 func (w *World) copyAction(c *Party, a Action) {
 	orig := w.party(c.Origin)
-	if a.Op != opCopyDelete {
-		for _, k := range c.myKeys() {
-			if slices.Contains(orig.boxes(), k) && w.R.live(k) {
-				// residual: the copy collects (and acks) a mailbox the original uses
-				w.dead[c.Origin] = "an old copy collected from the original's mailbox (stated residual)"
-			}
-		}
-	}
 	switch a.Op {
 	case opCopyAct:
 		c.unlock()
@@ -377,7 +369,7 @@ func (w *World) copyAction(c *Party, a Action) {
 		c.guard(func() { c.rotate(pathCred) })
 		if before == orig.st.Relay && c.st.Relay != before {
 			// residual: the copy holds the live relay key and moved its mailbox
-			w.dead[c.Origin] = "an old copy rotated the original's live mailbox (stated residual)"
+			w.markDeadAll(c.Origin, "an old copy rotated the original's live mailbox")
 		}
 		for i := 0; i < 2; i++ {
 			c.collectRound(maxCollect)
@@ -385,6 +377,7 @@ func (w *World) copyAction(c *Party, a Action) {
 	case opCopySteal:
 		for _, k := range c.myKeys() {
 			ms, _ := w.R.collect(k, maxCollect)
+			w.copyTook(c, k, ms, "collected and acked")
 			for _, m := range ms {
 				w.R.ack(k, m.ID)
 			}
@@ -393,7 +386,7 @@ func (w *World) copyAction(c *Party, a Action) {
 		if w.R.live(c.st.Relay) {
 			w.R.remove(c.st.Relay, w.Now)
 			if c.st.Relay == orig.st.Relay {
-				w.dead[c.Origin] = "an old copy deleted the original's live mailbox (stated residual)"
+				w.markDeadAll(c.Origin, "an old copy deleted the original's live mailbox")
 			} else {
 				w.noLive = "an old copy deleted a mailbox in its grace (stated residual)"
 			}
@@ -595,7 +588,7 @@ func (w *World) checkEnd(liveness bool) {
 			// SPEC FINDING (I2 wording): checked only for pairs active on both
 			// sides; a holder whose peer went stale cannot learn its mailbox ended.
 			o := w.party(r.ID).st.peer(x.ID)
-			if w.dead[x.ID] != "" || w.dead[r.ID] != "" {
+			if w.dead(x.ID, r.ID) {
 				continue
 			}
 			if r.Status != stActive || o == nil || o.Status != stActive || w.limits(x, &r) || w.limits(w.party(r.ID), o) {
@@ -632,12 +625,19 @@ func (w *World) checkEnd(liveness bool) {
 	probeOld := map[int][2]PID{} // probes between an old app and its vault
 	for _, pr := range pairs {
 		ra, rb := pr.a.st.peer(pr.b.ID), pr.b.st.peer(pr.a.ID)
-		if why := w.dead[pr.a.ID] + w.dead[pr.b.ID]; why != "" {
-			w.stat("I1 pair excluded: " + why)
+		if w.dead(pr.a.ID, pr.b.ID) {
+			w.exempt("I1", w.deadRes[pairKey(pr.a.ID, pr.b.ID)])
 			continue
 		}
 		if ra.Status != stActive || rb.Status != stActive {
 			w.stat("I1 pair excluded: " + map[bool]string{true: "suspended/stale/conflict"}[true])
+			continue
+		}
+		if ra.Warned || rb.Warned {
+			// rule C between a vault and its device, seen only by the
+			// device (the vault's record stays active): the second successor
+			// is refused and the member told; as a conflicted record
+			w.stat("I1 pair excluded: rule C between a vault and its device (member told)")
 			continue
 		}
 		// an app from before release 29 may lose the connection (§3.4.1
@@ -785,14 +785,18 @@ func (w *World) checkEnd(liveness bool) {
 	for _, k := range keys {
 		a, b := w.party(k[0]).st.peer(k[1]), w.party(k[1]).st.peer(k[0])
 		endsStale := (a != nil && a.Status == stStale) || (b != nil && b.Status == stStale)
-		if cause := w.staleAt[k]; cause != "" && endsStale && w.dead[k[0]] == "" && w.dead[k[1]] == "" {
+		if cause := w.staleAt[k]; cause != "" && endsStale && !w.dead(k[0], k[1]) {
 			w.stat("I7: stale after a split (visible)") // was the model's I1-stale-split; R29 §10: a split ending stale is visible
 		}
 	}
 	for _, id := range pids {
 		ft := w.probeFate[id]
 		pr := w.probeDep[id]
-		if w.dead[pr[0]] != "" || w.dead[pr[1]] != "" || w.probes[id] {
+		if w.probes[id] {
+			continue
+		}
+		if w.dead(pr[0], pr[1]) {
+			w.exempt("I1-loss", w.deadRes[pairKey(pr[0], pr[1])])
 			continue
 		}
 		if res := w.residualOf(pr[0], pr[1]); res == resOldApp && !strings.HasPrefix(w.probeFate[id], "accept") {

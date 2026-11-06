@@ -409,10 +409,18 @@ func (m *Manager) deposit(ctx context.Context, e *OutboxEntry, now time.Time) er
 				if op := m.peer(og.PeerID); op != nil {
 					m.markStale(op, now)
 				}
-				break
+				e.Done = true
+				return err
 			}
 		}
-		e.Done = true
+		// Any other deposit: as before 0.86.6, a 429 is retried with the
+		// backoff (the token's quota window moves on), another 4xx ends it.
+		// (fdcc746 ended every one, dropping e.g. an att.deliver: the
+		// e2e TestAttachmentMaliciousPeer failure on CI.)
+		if st, ok := statusOf(err); ok && st < 500 && st != 429 {
+			m.audit(now, "deposit_refused", e.PeerID)
+			e.Done = true
+		}
 	case CodeTokenUsed:
 		m.audit(now, "open_token_used", e.PeerID)
 		e.Done = true

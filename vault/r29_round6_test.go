@@ -610,3 +610,26 @@ func TestR29HoldIsByPeer(t *testing.T) {
 		t.Fatal("another record's deposit to the mailbox waited behind the held messages")
 	}
 }
+
+// A deposit refused quota_exceeded with 429 that is not a rule-E, rule-L
+// or demotion reconnect is retried with the backoff, as before 0.86.6
+// (fdcc746 dropped it: an att.deliver lost on CI, the e2e
+// TestAttachmentMaliciousPeer failure).
+func TestR29QuotaRetryForOtherDeposits(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	r := f.d[0].relay
+	r.mu.Lock()
+	r.failMailbox = map[string]error{f.m(1).st.Relay.Mailbox: &relayclient.Error{Status: 429, Code: CodeQuotaExceeded}}
+	r.mu.Unlock()
+	f.note(0, "after-quota")
+	r.mu.Lock()
+	r.failMailbox = nil
+	r.mu.Unlock()
+	f.advance(time.Minute) // past the outbox backoff
+	f.do(0, func(*Manager, *Peer) {})
+	f.deliver(0, 1, kNote)
+	if n := f.arrived(1, "after-quota"); n != 1 {
+		t.Fatalf("a deposit refused quota_exceeded (429) arrived %d times: dropped", n)
+	}
+}

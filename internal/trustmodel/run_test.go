@@ -651,11 +651,12 @@ func (w *World) checkEnd(liveness bool) {
 			w.stat("I1 pair excluded: " + map[bool]string{true: "suspended/stale/conflict"}[true])
 			continue
 		}
-		if ra.Warned || rb.Warned {
-			// rule C between a vault and its device, seen only by the
-			// device (the vault's record stays active): the second successor
-			// is refused and the member told; as a conflicted record
-			w.stat("I1 pair excluded: rule C between a vault and its device (member told)")
+		if (ra.Warned || rb.Warned) && w.devCopyFirst[pairKey(pr.a.ID, pr.b.ID)] {
+			// rule C between a vault and its device, where the successor
+			// kept (followed or seen first) is the old copy's: the copy's
+			// rotation counts as P's (§3.4.1 Residuals, bullets 2 and 3).
+			// When the real link came first, I1 still applies.
+			w.exempt("I1", resCopyRotated)
 			continue
 		}
 		// an app from before release 29 may lose the connection (§3.4.1

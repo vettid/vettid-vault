@@ -166,7 +166,7 @@ const (
 	resCopyInit         = "a copy acting as initiator sent nothing but hs.fin"
 	resBeforeRotation   = "an old copy acting before the original's rotation is seen (an old copy can make any handshake as P)"
 	resLiveMailbox      = "an old copy collects, acks or deletes the original's live mailbox (a message meant for the pair, or the mailbox)"
-	resCopyRotated      = "an old copy rotated as P before the original did: its deposits count as P's (§3.4.1 Residuals, \"Until Q follows P's update\"; §11.14.2)"
+	resCopyRotated      = "an old copy's own rotation, made with P's current relay key or with R's new keys, is followed (or seen first) as P's (§3.4.1 Residuals, bullets 2 and 3; §11.14.2)"
 )
 
 // residualOf: the residual that covers the pair (a, b), or "". For an app

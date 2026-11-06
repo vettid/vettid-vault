@@ -320,6 +320,9 @@ func (q *Party) ruleC(r *PeerRec, M *Msg) (dec, bool) {
 				}
 				if r.Device {
 					q.w.hit("K8:device-conflict-refused")
+					if !q.Copy && q.w.party(q.w.iklinkBy[f].By).Copy {
+						q.w.devCopyFirst[pairKey(q.ID, r.ID)] = true // ground truth: the kept successor is the copy's
+					}
 					return q.deviceConflict(r, "C:identity-device"), true
 				}
 				q.w.hit("K8:second-successor-suspends")
@@ -333,9 +336,14 @@ func (q *Party) ruleC(r *PeerRec, M *Msg) (dec, bool) {
 		}
 	}
 	if M.Kind == KUpdate {
-		if _, bad := r.relayConflict(M.RLinks); bad {
+		if l, bad := r.relayConflict(M.RLinks); bad {
 			q.w.stat("ruleC:relay")
 			if r.Device {
+				for _, f := range append(slices.Clone(r.RChain), r.RSeen...) {
+					if f.Old == l.Old && f.New != l.New && !q.Copy && q.w.party(q.w.rlinkBy[f].By).Copy {
+						q.w.devCopyFirst[pairKey(q.ID, r.ID)] = true
+					}
+				}
 				return q.deviceConflict(r, "C:relay-device"), true
 			}
 			r.RelayFrk = true

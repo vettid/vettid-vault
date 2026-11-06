@@ -519,6 +519,20 @@ func (m *Manager) rekeyBlocked(p *Peer) bool {
 // when the reconnect completes, as between two reconnects of persons).
 func (m *Manager) crossingRekeyLoses(p *Peer, theirs [32]byte, now time.Time) bool {
 	for id, og := range m.st.Outgoing {
+		if m.emu28() {
+			// 0ee0078 handshakes.go:506-517: against its own rekey only;
+			// its own higher one is dropped (not abandoned).
+			if og.PeerID != p.ID || og.Purpose != handshake.PurposeRekey || og.Replaced {
+				continue
+			}
+			var ours [32]byte
+			copy(ours[:], og.Th1)
+			if handshake.SimultaneousRekeyWinner(ours, theirs) {
+				return true
+			}
+			m.dropOutgoing(id)
+			continue
+		}
 		if og.New != nil || og.PeerID != p.ID || og.Replaced || len(og.Th1) != 32 {
 			continue
 		}

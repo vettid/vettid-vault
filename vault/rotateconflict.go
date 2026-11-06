@@ -42,7 +42,11 @@ func (m *Manager) rotationConflict(p *Peer, r *handshake.Rotation, now time.Time
 		}
 	}
 	followed := false
-	for _, raw := range append(append([]json.RawMessage(nil), p.Chain...), p.Seen...) {
+	prior := append([]json.RawMessage(nil), p.Chain...)
+	if !m.emu28() {
+		prior = append(prior, p.Seen...) // 0ee0078 rotateconflict.go:32: followed links only
+	}
+	for _, raw := range prior {
 		prev, err := handshake.ParseRotation(raw)
 		if err != nil || !suite.EqualPublic(prev.OldIK, r.OldIK) || rejectedLink(p, prev) {
 			continue // a link dropped at a resolution is no successor
@@ -57,15 +61,17 @@ func (m *Manager) rotationConflict(p *Peer, r *handshake.Rotation, now time.Time
 				Ref: fingerprint(prev.NewIK) + "/" + fingerprint(r.NewIK)}, now)
 			// H5: a conflict suspension abandons every open handshake with
 			// the peer and revokes its tokens (review RR2-4).
-			m.abandonHandshakes(p, true, true, now)
-			if p.Pending != nil {
-				m.abandonPending(p, "conflict", false, now)
+			if !m.emu28() {
+				m.abandonHandshakes(p, true, true, now)
+				if p.Pending != nil {
+					m.abandonPending(p, "conflict", false, now)
+				}
 			}
 			m.dirty = true
 		}
 		return true
 	}
-	if !followed && seenRelevant(p, r.OldIK) {
+	if !followed && !m.emu28() && seenRelevant(p, r.OldIK) {
 		// 0.86.0 rule C: kept as seen, followed or not; only links from
 		// the current ik, an ancestor, or a key a seen link reaches (review
 		// RR2 L6: the set stays bounded by P's own chain).

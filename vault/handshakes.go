@@ -787,6 +787,13 @@ func (m *Manager) responderEstablish(p *Peer, aw *AwaitingHS, fr *handshake.FinR
 	if signer == nil {
 		signer = p.IK
 	}
+	if m.emu28() {
+		// 0ee0078 handshakes.go:571-626 (rekey) and :691 (reconnect): the
+		// epoch activates as any (receive keys 16 days), no hs.confirm, and
+		// an open rekey of its own stays.
+		activate(actOpts{signer: signer})
+		return
+	}
 	activate(m.responderActivation(p, signer, now))
 	m.queueConfirm(p, now)
 	for id, og := range m.st.Outgoing {
@@ -940,7 +947,7 @@ func (m *Manager) activate(p *Peer, ep *handshake.Epoch, purpose handshake.Purpo
 		kr.Activate(ep, now)
 	}
 	id := ep.ID()
-	if !isNew && !m.restoring {
+	if !isNew && !m.restoring && !m.emu28() { // 0ee0078 handshakes.go:712: no such step
 		// 0.86.0: a rekey of the vault's own still open was made from an
 		// earlier epoch, which no longer moves on: it is abandoned (it
 		// would otherwise hold the next rekey back until it expires).
@@ -1141,6 +1148,20 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 			m.revokeIssued(t, p.ID, now)
 		}
 	}
+	if m.emu28() {
+		// 0ee0078 handshakes.go:900-908: a reconnect's links appended, no
+		// rule C, no epoch rule, no H5.
+		if og.Purpose == handshake.PurposeReconnect && !suite.EqualPublic(res.ResponderIK, p.IK) {
+			p.IK = res.ResponderIK
+			if res.ResponderKEM != nil {
+				p.KEM = res.ResponderKEM.Bytes()
+			}
+			for _, r := range res.Resp.Rotations[handshake.KnownPrefix(parseRotations(p.Chain), res.Resp.Rotations):] {
+				p.Chain = append(p.Chain, r.Marshal())
+			}
+		}
+		goto fin
+	}
 	for _, r := range res.Resp.Rotations {
 		if m.rotationConflict(p, r, now) && p.Conflict != nil {
 			res.Epoch.Destroy()
@@ -1159,6 +1180,7 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 			return ackAfterFlush
 		}
 	}
+fin:
 	// hs.fin goes first: what activation sends in the new epoch (the
 	// profile.update after an ik rotation, §10.8) follows it.
 	newID := res.Epoch.ID()
@@ -1184,8 +1206,8 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 	for id, o := range m.st.Awaiting {
 		// 0.86.0 (§6.5: the lower th1 across purposes): the vault's own
 		// handshake completed first, so a crossing rekey answer it kept is
-		// dropped.
-		if o.New == nil && o.PeerID == p.ID && o.Purpose == handshake.PurposeRekey && !o.Replaced {
+		// dropped (0ee0078 handshakes.go:912: reconnect answers only).
+		if !m.emu28() && o.New == nil && o.PeerID == p.ID && o.Purpose == handshake.PurposeRekey && !o.Replaced {
 			m.abandonAwaiting(id, now)
 		}
 	}
@@ -1256,7 +1278,7 @@ func (m *Manager) hasOutgoing(peerID string, purpose handshake.Purpose) bool {
 func (m *Manager) startRekey(p *Peer, now time.Time) {
 	kr := m.sessions[p.ID]
 	if kr == nil || kr.Current() == nil || m.hasOutgoing(p.ID, handshake.PurposeRekey) || p.Standing.Token == "" || p.suspended() ||
-		m.rekeyBlocked(p) || m.hasOutgoing(p.ID, handshake.PurposeReconnect) {
+		!m.emu28() && (m.rekeyBlocked(p) || m.hasOutgoing(p.ID, handshake.PurposeReconnect)) { // 0ee0078 handshakes.go:966: neither
 		// An open reconnect of the vault's own makes the new epoch: a rekey
 		// beside it would only cross it (and replace its pending epoch).
 		return

@@ -425,14 +425,16 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 	}
 	// 0.86.0 (§6.3.1): a confirmation takes effect before anything else is
 	// done with the message (dedupe, the ts window, its handler).
-	if m.evidenceFirst(p, in, now) || m.beforeAccept(p, ep, in, now) {
+	if !m.emu28() && (m.evidenceFirst(p, in, now) || m.beforeAccept(p, ep, in, now)) {
 		return ackAfterFlush
 	}
 	// §10.8: counted once the message is not refused for its epoch
 	// (destroyed, demoted; review L4).
 	m.noteFeatures(p, in.Features)
-	m.idResend(p, ep, in, now)
-	if in.Type == handshake.TypeConfirm {
+	if !m.emu28() {
+		m.idResend(p, ep, in, now)
+	}
+	if in.Type == handshake.TypeConfirm && !m.emu28() { // 0ee0078 inbound.go:481: an unknown type, unsupported_type
 		return ackAfterFlush // not a request: never answered; one that confirms nothing is ignored, unaudited
 	}
 	if in.Type == handshake.TypeInit {

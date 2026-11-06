@@ -451,17 +451,18 @@ func TestR29K9SignerAncestryOfTheLink(t *testing.T) {
 	}
 }
 
-// (0.88.2, owner decision a; §6.6 "The links of a refused reconnect")
-// Shape: Q reconnects to P; P answers; Q holds the reconnect pending (its
-// hs.fin sent, then lost). P rotates (S5 drops its answer), and its
-// identity.rotate never reaches Q (dropped here; in the review's runs it
-// was refused or out of reach). P then reconnects, carrying its link. Q
-// refuses that reconnect, only because its own is pending. With the rule
-// Q follows the link in the refusing write: H5 abandons Q's pending
-// reconnect (K2, signed by P's old ik), Q reconnects again under P's new
-// ik and the pair converges. Without it (World.noRefusedLinks) Q never
-// learns P's new ik, refuses every reconnect of P's, and its pending
-// reconnect reaches B: the pair ends stale.
+// Mirrors vettid-vault TestR29RefusedReconnectLinksFollowed
+// (vault/r29_review4_test.go): the same shape and outcome. Q reconnects to
+// P; P answers; Q holds the reconnect pending (sig_R by P's ik a) and its
+// hs.fin is lost. P rotates a->b (S5 drops its answer); its
+// identity.rotate and restarted rekey do not reach Q. P reconnects,
+// carrying a->b; Q refuses it (its own reconnect is pending) but follows
+// the link in the same write: K2 abandons Q's pending epoch (signed by a),
+// nothing is answered, K9 judges nothing. P's next reconnect is accepted
+// and the pair converges. One difference, by the coordinator's N1: here Q
+// restarts its own reconnect that the link ended (H5); the vault test at
+// 8647aa6 asserts nothing restarts (noLinkRestart). Off
+// (World.noRefusedLinks): Q never learns P's ik and both end stale.
 func TestR29RefusedReconnectLinks(t *testing.T) {
 	bothWays(t, func(t *testing.T, off bool) {
 		s := newScen(t, 2)
@@ -475,19 +476,42 @@ func TestR29RefusedReconnectLinks(t *testing.T) {
 		if rq.Pend == nil || !rq.Pend.Reconnect {
 			t.Fatalf("setup: Q holds no pending reconnect\n  %s", s.trace())
 		}
+		pend := rq.Pend.ID
 		s.dropAt(P, KFin)
 		s.rotate(P, pathCred) // S5: P drops its answer
-		s.dropAt(Q, KIdRot)   // P's identity.rotate never reaches Q
+		s.dropAt(Q, KIdRot)   // P's identity.rotate does not reach Q
 		s.dropAt(Q, KInit)    // nor P's restarted rekey
 		rp := P.st.peer(Q.ID)
+		answers, refused := s.w.stats["out answer"], s.w.stats["R29 X5:refused"]
 		s.do(P, func() { P.abandonOwn(rp); P.startHS(rp, true); P.write(); P.flush() })
 		s.run(1, Q) // Q refuses P's reconnect (its own is pending)
-		learned := Q.st.peer(P.ID).IK == P.st.IK
-		if !off && (!learned || s.w.stats["R29 X5:refused-links-followed"] == 0) {
-			t.Fatalf("Q did not follow the refused reconnect's link\n  %s", s.trace())
+		rq = Q.st.peer(P.ID)
+		if s.w.stats["R29 X5:refused"] == refused {
+			t.Fatalf("setup: P's reconnect was not refused\n  %s", s.trace())
 		}
-		if off && learned {
-			t.Fatalf("off: Q learned P's new ik some other way\n  %s", s.trace())
+		learned := rq.IK == P.st.IK
+		if off {
+			if learned {
+				t.Fatalf("off: Q learned P's new ik some other way\n  %s", s.trace())
+			}
+		} else {
+			if !learned || s.w.stats["R29 X5:refused-links-followed"] == 0 {
+				t.Fatalf("the refused reconnect's links were not followed\n  %s", s.trace())
+			}
+			if ep := rq.epoch(pend); ep == nil || !ep.Abandoned || !ep.AbanByLink || (rq.Pend != nil && rq.Pend.ID == pend) {
+				t.Fatalf("Q's pending epoch signed by the old ik was not abandoned by the link: %+v\n  %s", ep, s.trace())
+			}
+			if s.w.stats["out answer"] != answers {
+				t.Fatalf("something was answered beside the refusal")
+			}
+			for _, e := range rq.Epochs {
+				if e.Ended {
+					t.Fatalf("K9 judged at a refused reconnect")
+				}
+			}
+			if rq.Own == nil || !rq.Own.Reconnect {
+				t.Fatalf("N1: Q did not restart its own reconnect the link ended")
+			}
 		}
 		for d := 0; d < 50; d++ {
 			s.dropAt(Q, KIdRot) // P's identity.rotate (and its resends) stay out of reach
@@ -506,4 +530,43 @@ func TestR29RefusedReconnectLinks(t *testing.T) {
 			t.Fatalf("off: the pair did not end stale; the scenario does not test the rule\n  %s", s.trace())
 		}
 	})
+}
+
+// Mirrors vettid-vault TestR29RefusedReconnectLinksAllOrNothing
+// (vault/r29_review4_test.go): Q's own reconnect pending; P rotates a->b
+// and its identity.rotate does not reach Q; a reconnect carrying a->b and
+// then b->a (back to an ik left behind, an ik rollback) is refused, and
+// none of its links is followed: Q's chain and pending epoch are unchanged.
+func TestR29RefusedReconnectLinksAllOrNothing(t *testing.T) {
+	s := newScen(t, 2)
+	s.w.relayRot = false
+	P, Q := s.p(0), s.p(1)
+	rq := Q.st.peer(P.ID)
+	e0 := rq.Cur
+	s.do(Q, func() { Q.startHS(rq, true); Q.write(); Q.flush() })
+	s.run(1, P)
+	s.run(1, Q)
+	if rq.Pend == nil || !rq.Pend.Reconnect {
+		t.Fatalf("setup: Q holds no pending reconnect\n  %s", s.trace())
+	}
+	pend := rq.Pend.ID
+	s.dropAt(P, KFin)
+	a, aKEM := P.st.IK, P.st.KEM
+	s.rotate(P, pathCred) // a->b
+	s.dropAt(Q, KIdRot)
+	s.dropAt(Q, KInit)
+	r1 := P.st.Chain[len(P.st.Chain)-1]
+	r2 := IKLink{Old: r1.New, New: a, KEM: aKEM} // b->a, signed by b and a (P holds both)
+	s.w.iklinkBy[r2] = rot{P.ID, P.writes}
+	chain := len(rq.Chain)
+	pr := P.st.peer(Q.ID)
+	s.inject(P, P, Q, Msg{Kind: KInit, Reconnect: true, HS: s.w.id(), Ctx: e0, FromIK: a, FromKEM: aKEM, FromRelay: pr.KeyFor, Rot: []IKLink{r1, r2}})
+	s.run(1, Q)
+	rq = Q.st.peer(P.ID)
+	if s.w.stats["cell B:current:hs.init:ctx"] == 0 {
+		t.Fatalf("setup: not refused\n  %s", s.trace())
+	}
+	if len(rq.Chain) != chain || rq.Pend == nil || rq.Pend.ID != pend || s.w.stats["R29 X5:refused-links-followed"] != 0 {
+		t.Fatalf("a link of a refused reconnect was followed although another would be refused\n  %s", s.trace())
+	}
 }

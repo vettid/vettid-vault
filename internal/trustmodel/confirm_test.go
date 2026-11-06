@@ -72,7 +72,9 @@ func (q *Party) confirm(r *PeerRec) {
 	r.Cur, r.Pend = pe.ID, nil
 	q.w.noteCurrent(q, pe.ID)
 	if r.Device && !q.Copy {
+		// a newer epoch confirmed: F's gap is closed for this pair
 		delete(q.w.fWatch, pairKey(q.ID, r.ID))
+		delete(q.w.fDue, pairKey(q.ID, r.ID))
 	}
 	r.setConf(pe.ID, q.w.Now) // activated at confirmation
 	r.AbanIDs = nil
@@ -129,7 +131,7 @@ func (q *Party) abandonPending(r *PeerRec, why string, restart bool) {
 	}
 	r.Pend = nil
 	r.AbanIDs = append(r.AbanIDs, pe.ID)
-	if r.Device && !q.Device && !pe.Reconnect && (why == "B passed" || why == "no valid standing token") && !q.Copy {
+	if r.Device && !q.Device && !pe.Reconnect && (why == "B passed" || why == "no valid standing token" || why == "token_expired") && !q.Copy {
 		q.w.fWatch[pairKey(q.ID, r.ID)] = true // finding F: watched until a newer epoch is confirmed
 		q.watchF(r)
 	}

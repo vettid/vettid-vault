@@ -170,8 +170,8 @@ func TestR29U1RecoveryResumeRefused(t *testing.T) {
 	wc := &writeCounter{Store: f.opts.Store}
 	f.opts.Store = wc
 	m, out := f.open(testPIN, rPW)
-	if m != nil || out.OK || out.Code != CodeStateUnsupported {
-		t.Fatalf("resume: %+v", out)
+	if m != nil || out.OK || out.Code != CodeStateUnsupported || out.AttemptUsed() {
+		t.Fatalf("resume: %+v (no attempt is spent on the resume path)", out)
 	}
 	if wc.count() != 0 {
 		t.Fatalf("%d store writes on refusal", wc.count())

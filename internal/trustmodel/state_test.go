@@ -64,21 +64,22 @@ func (x Pos) after(m Pos) bool {
 }
 
 type Epoch struct {
-	ID          int
-	Signer      Key // the peer-side ik that signed its handshake
-	Own         Key // my ik that signed it (S8: links from it)
-	Est         Pos // position of the message that established it here
-	Demoted     bool
-	DemotedAt   Pos
-	Superseded  int64
-	EstAt       int64
-	Pending     bool  // §6.3.1: an initiator's epoch awaiting confirmation
-	Abandoned   bool  // §6.3.1: a pending epoch abandoned (nothing under it confirms)
-	KeysGone    bool  // §6.3.1 (G): only the id is kept (for a reconnect's ctx)
-	Destroyed   bool  // §6.3.1 (E, 0.86.0 rev. 3): a later epoch the peer never confirmed, destroyed
-	DestroyTs   int64 // rule E: the accepted hs.init's inner ts (a later ts under it is fork evidence)
-	MineInit    bool  // this side initiated the handshake that made it
-	GotFromPeer bool  // a message from the peer was received under it
+	ID         int
+	Signer     Key // the peer-side ik that signed its handshake
+	Own        Key // my ik that signed it (S8: links from it)
+	Est        Pos // position of the message that established it here
+	Demoted    bool
+	DemotedAt  Pos
+	Superseded int64
+	EstAt      int64
+	Pending    bool  // §6.3.1: an initiator's epoch awaiting confirmation
+	Abandoned  bool  // §6.3.1: a pending epoch abandoned (nothing under it confirms)
+	KeysGone   bool  // §6.3.1 (G): only the id is kept (for a reconnect's ctx)
+	Destroyed  bool  // §6.3.1 (E, 0.86.0 rev. 3): a later epoch the peer never confirmed, destroyed
+	DestroyTs  int64 // rule E: the accepted hs.init's inner ts (a later ts under it is fork evidence)
+	MineInit   bool  // this side initiated the handshake that made it
+	Flag       bool  // R29-F3: the received flag (a message from the peer under it passed steps 1-4, not hs.fin)
+	EverCur    bool  // it has been current here (R29-K5: the reconnect after a demotion names one)
 }
 
 // PendEp is an initiator's pending epoch (§6.3.1).
@@ -147,9 +148,14 @@ type PeerRec struct {
 	IdResendBatch bool     // ...in this batch
 	IdResendN     int      // resends for the rotation IdResendRot (at most 3)
 	IdResendRot   int64
-	Reconfirm     bool // a message under the confirmed epoch in this batch: queue hs.confirm
-	RCCtx         int  // the next reconnect names this epoch (0: the last)
-	RCs           int  // reconnects started toward this peer (stat)
+	Reconfirm     bool    // a message under the confirmed epoch in this batch: queue hs.confirm
+	RCCtx         int     // the next reconnect names this epoch (0: the current epoch, or K5's)
+	RCs           int     // reconnects started toward this peer (stat)
+	DemName       int     // R29-K7: after strict F1 the reconnect names E (until a new epoch is current)
+	RCNamed       int     // R29-K6: the epoch the failed tries named
+	RCFails       int     // R29-K6: failed tries for RCNamed
+	Held          []Entry // R29-K5: durable messages held after a demotion of the current epoch (unsealed)
+	LastConfirm   int64   // R29-D2: a device re-sends hs.confirm at most once a minute
 
 	IK, KEM Key
 	Chain   []IKLink // followed identity links
@@ -289,6 +295,11 @@ func (s *State) clone() State {
 		q.Seen = slices.Clone(p.Seen)
 		q.RSeen = slices.Clone(p.RSeen)
 		q.DropAns = slices.Clone(p.DropAns)
+		q.Held = make([]Entry, len(p.Held))
+		for j, e := range p.Held {
+			e.M = cloneMsg(e.M)
+			q.Held[j] = e
+		}
 		q.Deferred = slices.Clone(p.Deferred)
 		c.Peers[i] = q
 	}

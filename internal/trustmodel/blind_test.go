@@ -1,6 +1,7 @@
 package trustmodel
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -54,7 +55,9 @@ func (s *scen) report(name string, viols ...string) {
 // F1: the copy holds R's answer (taken after hs.resp, before R's rotation),
 // collects I's hs.fin from R's old mailbox during the grace, establishes E1
 // and deposits hs.confirm with R's earlier relay key. I confirms E1; the
-// real R dropped its answer at S5 and stays on E0: a split.
+// real R dropped its answer at S5 and stays on E0. R29-F3/K7: the
+// hs.confirm set E1's received flag, so R's identity.rotate under E0
+// (strict F1) makes I suspend: the copy acting as responder is caught.
 func TestBlindF1CopyFinishesAnswer(t *testing.T) {
 	s := newScen(t, 2)
 	I, R := s.p(0), s.p(1)
@@ -73,14 +76,17 @@ func TestBlindF1CopyFinishesAnswer(t *testing.T) {
 	s.lock(C)
 	s.run(8, R, I)
 	s.w.checkEnd(true)
-	stale := I.st.peer(R.ID).Status == stStale || R.st.peer(I.ID).Status == stStale
 	s.report("F1")
-	t.Logf("F1 (2da316e): F1 demotions %d; pair stale at the end: %v", s.w.stats["A:F1-demoted"], stale)
-	// 2da316e: R's link under E0 shows R never activated E1: I demotes it
-	// and reconnects naming E0. Fixed if the pair converges.
-	if stale || len(s.w.viol) > 0 || s.w.stats["A:F1-demoted"] == 0 {
-		t.Errorf("F1 still stands under 2da316e")
+	if os.Getenv("TRUSTMODEL_TRACE") != "" {
+		t.Log(s.trace())
 	}
+	r := I.st.peer(R.ID)
+	t.Logf("F1: K7 suspensions %d; I's record of R: status %d (%s)", s.w.stats["R29 K7:flag-suspend"], r.Status, r.Ref)
+	if r.Status != stSuspended || r.Ref != "connection.fork_suspected/epoch" || s.w.stats["R29 K7:flag-suspend"] == 0 {
+		t.Errorf("the copy's hs.confirm under E1 did not make I suspend at R's link\n  %s", s.trace())
+	}
+	s.noViolation("I3")
+	s.noViolation("I4")
 }
 
 // F2a: the relay asserts an honest S5 hs.fin as deposited after the link:

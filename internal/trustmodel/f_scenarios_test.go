@@ -227,8 +227,10 @@ func TestF9ReconnectWhilePending(t *testing.T) {
 			t.Logf("noF9=%v: token_expired abandons %d; pending %v; open reconnect %v (ctx E%d, current E%d)",
 				off, s.w.stats["A:abandoned:token_expired"], r.Pend != nil, r.Own != nil && r.Own.Reconnect, ctxOf(r.Own), r.Cur)
 			if off {
-				if ok {
-					t.Errorf("off: a reconnect started anyway")
+				// R29-I7: starting a reconnect abandons a pending rekey, so
+				// the reconnect starts without F9's abandon at token_expired
+				if !ok {
+					t.Errorf("off: no reconnect (R29-I7 abandons the pending epoch when a reconnect starts)")
 				}
 				return
 			}
@@ -240,18 +242,15 @@ func TestF9ReconnectWhilePending(t *testing.T) {
 		})
 	})
 
-	// (device at B) a device's rekey: the vault activates E1, the
-	// hs.confirm is lost, the vault is quiet; at B the device, whose
-	// standing token is valid, rekeys from E0. No switch: turning the
-	// device branch off (a device "reconnects", which it cannot) shows
-	// nothing, because the device's §6.5 rekey interval (7 days) starts the
-	// same rekey later in the same tick (rotate_test.go tick).
+	// (device at B, R29-D1) the vault's rekey: the device activates E1,
+	// its hs.confirm is lost, the device is quiet; at B the vault rekeys
+	// from E0 (it never reconnects to a device).
 	t.Run("device-B", func(t *testing.T) {
 		s, V, D, e0, _ := devPastB(t, func(*World) {})
-		r := D.st.peer(V.ID)
+		r := V.st.peer(D.ID)
 		t.Logf("B abandons %d; open rekey %v (ctx E%d)", s.w.stats["A:abandoned:B passed"], r.Own != nil, ctxOf(r.Own))
 		if r.Pend != nil || r.Own == nil || r.Own.Reconnect || r.Own.Ctx != e0 {
-			t.Errorf("the device did not rekey from E%d at B\n  %s", e0, s.trace())
+			t.Errorf("the vault did not rekey from E%d at B\n  %s", e0, s.trace())
 		}
 		s.run(6, V, D)
 		s.done(true)
@@ -265,23 +264,23 @@ func ctxOf(h *HS) int {
 	return h.Ctx
 }
 
-// devPastB: a device D rekeys with its vault V; V activates E1 and its
-// hs.confirm is lost; V stays quiet; D stays online and collects, and its
-// tick runs once past B. Tokens are extended (their expiry is not the
-// subject).
+// devPastB: a vault V rekeys with its device D (R29-D2: the device only
+// answers); D activates E1 and its hs.confirm is lost; D stays quiet; V
+// stays online and collects, and its tick runs once past B. Tokens are
+// extended (their expiry is not the subject).
 func devPastB(t *testing.T, mod func(*World)) (s *scen, V, D *Party, e0, e1 int) {
 	w := setup(Config{Vaults: 1, Devices: true}, 1)
 	mod(w)
 	s = &scen{t, w}
 	V, D = s.p(0), s.p(1)
 	s.longTokens(60 * day)
-	e0, e1 = s.lostConfirm(D, V)
-	if r := V.st.peer(D.ID); r.ConfID != e0 || r.Cur != e1 {
-		t.Fatalf("setup: the vault's confirmed epoch E%d, current E%d", r.ConfID, r.Cur)
+	e0, e1 = s.lostConfirm(V, D)
+	if r := D.st.peer(V.ID); r.ConfID != e0 || r.Cur != e1 {
+		t.Fatalf("setup: the device's confirmed epoch E%d, current E%d", r.ConfID, r.Cur)
 	}
 	s.tick(aPendLife + hour)
-	s.drain(D) // a short collect: B may now be judged
-	s.do(D, D.tick)
+	s.drain(V) // a short collect: B may now be judged
+	s.do(V, V.tick)
 	return s, V, D, e0, e1
 }
 
@@ -442,18 +441,18 @@ func TestF13Lifetimes(t *testing.T) {
 		})
 	})
 
-	// §6.2 "the epoch the hs.init travels under": a device's rekey at B
-	// travels under E0, the vault's confirmed epoch (the vault activated
-	// E1; its hs.confirm was lost). The vault answers it as if E0 were
-	// current. Off: §6.2 as before F13 (ctx must be the current epoch):
-	// refused rekey_not_current_epoch.
+	// §6.2 "the epoch the hs.init travels under": the vault's rekey at B
+	// (R29-D1) travels under E0, the device's confirmed epoch (the device
+	// activated E1; its hs.confirm was lost). The device answers it as if
+	// E0 were current. Off: §6.2 as before F13 (ctx must be the current
+	// epoch): refused rekey_not_current_epoch.
 	t.Run("rekey-ctx-confirmed-epoch", func(t *testing.T) {
 		bothWays(t, func(t *testing.T, off bool) {
 			s, V, D, e0, _ := devPastB(t, func(w *World) { w.noConfRekey = off })
-			if o := D.st.peer(V.ID).Own; o == nil || o.Reconnect || o.Ctx != e0 {
-				t.Fatalf("setup: the device has no rekey from E%d", e0)
+			if o := V.st.peer(D.ID).Own; o == nil || o.Reconnect || o.Ctx != e0 {
+				t.Fatalf("setup: the vault has no rekey from E%d", e0)
 			}
-			s.drain(V)
+			s.drain(D)
 			ans := s.w.stats["cell B:current:hs.init:confirmed-epoch"]
 			ref := s.w.stats["cell B:current:hs.init:ctx"]
 			t.Logf("noConfRekey=%v: answered as the confirmed epoch %d, refused rekey_not_current_epoch %d", off, ans, ref)

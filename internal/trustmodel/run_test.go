@@ -55,7 +55,7 @@ func setup(cfg Config, seed uint64) *World {
 			me, it := x[0], x[1]
 			me.st.Peers = append(me.st.Peers, PeerRec{ID: it.ID, Device: dev, IK: it.st.IK, KEM: it.st.KEM,
 				Relay: it.st.Relay, KeyFor: me.st.Relay, Cur: e, ConfID: e,
-				Epochs: []Epoch{{ID: e, Signer: it.st.IK, Own: me.st.IK, EstAt: w.Now}}})
+				Epochs: []Epoch{{ID: e, Signer: it.st.IK, Own: me.st.IK, EstAt: w.Now, EverCur: true}}})
 			w.hasEpoch[[2]int{int(me.ID), e}] = true
 		}
 		for _, x := range [][2]*Party{{a, b}, {b, a}} {
@@ -429,7 +429,7 @@ func (w *World) quiet() bool {
 			}
 		}
 		for _, r := range p.st.Peers {
-			if r.Status == stActive && (r.Own != nil || len(r.Ans) > 0 || r.Pend != nil) {
+			if r.Status == stActive && (r.Own != nil || len(r.Ans) > 0 || r.Pend != nil || len(r.Held) > 0) {
 				return false
 			}
 		}
@@ -646,6 +646,9 @@ func (w *World) checkEnd(liveness bool) {
 					w.violate(inv1, "%s: %s still holds %s for %s", name, s.me.Name, kindName[e.M.Kind], s.it.Name)
 					break
 				}
+			}
+			if len(s.r.Held) > 0 {
+				w.violate(inv1, "%s: %s still holds %d held message(s) for %s (R29-K5)", name, s.me.Name, len(s.r.Held), s.it.Name)
 			}
 		}
 		if ra.Cur == 0 || ra.Cur != rb.Cur {

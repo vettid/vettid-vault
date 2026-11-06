@@ -85,10 +85,10 @@ func TestScenarioACrossingTs(t *testing.T) {
 	s.done(true, s.cellSeen("B:current:hs.init:pending:ts-later"))
 }
 
-// A device (reference-client role) as responder and as initiator, with a
-// lost hs.fin in each role.
+// A device (reference-client role) as responder, with a lost hs.fin. (R29-D2:
+// a device starts no rekey, so it is never the initiator.)
 func TestScenarioADevice(t *testing.T) {
-	for _, devInit := range []bool{false, true} {
+	for _, devInit := range []bool{false} {
 		w := setup(Config{Vaults: 1, Devices: true}, 1)
 		s := &scen{t, w}
 		V, D := s.p(0), s.p(1)

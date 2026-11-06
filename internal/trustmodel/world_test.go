@@ -297,6 +297,11 @@ func (p *Party) restart(lock bool) {
 	for _, e := range p.st.Out {
 		have[e.ID] = true
 	}
+	for _, r := range p.st.Peers {
+		for _, e := range r.Held {
+			have[e.ID] = true // R29-K5: held, not lost
+		}
+	}
 	for id := range p.w.ever[p.ID] {
 		if !have[id] && !p.w.answered[id] && !p.w.ended[id] {
 			p.w.violate("I5", "%s lost stored outbox entry %d at a restart", p.Name, id)
@@ -525,8 +530,16 @@ func (p *Party) flush() {
 			e.Ended = true
 			continue
 		}
-		if pe := r.Pend; pe != nil && pe.Reconnect && e.M.Kind != KInit && e.M.Kind != KResp && e.M.Kind != KFin && e.M.Kind != KConfirm && !e.Denylist {
-			continue // §6.3.1: after a reconnect, nothing but the handshake until confirmation
+		if p.newSpec() && r.Cur == 0 && p.holdEntry(r, e) {
+			continue // R29-K5: demoted, only handshake messages (hs.fin included) go out
+		}
+		if pe := r.Pend; pe != nil && pe.Reconnect && e.M.Kind != KInit && e.M.Kind != KResp && e.M.Kind != KFin {
+			if e.M.Kind == KConfirm {
+				p.w.hit("I3:hs.confirm-held")
+			} else {
+				p.w.hit("I3:outbox-waits")
+			}
+			continue // R29-I3: while a reconnect is pending, nothing but the handshake, hs.confirm included
 		}
 		if r.KeyFor != p.st.Relay && !allowedWhileUnacked(e) {
 			continue // S1: held until Q's token for my current key arrives
@@ -541,7 +554,7 @@ func (p *Party) flush() {
 			}
 		}
 		if e.M.Kind != KUpdate && e.M.Kind != KTokIssued && e.M.Kind != KInit && e.M.Kind != KResp && r.Cur == 0 {
-			continue // demoted: nothing until a new epoch
+			continue // Config.OldRules, demoted: nothing until a new epoch
 		}
 		p.deposit(e, r)
 		if e.Indef {
@@ -620,13 +633,34 @@ func (p *Party) deposit(e *Entry, r *PeerRec) {
 	case rateLimited:
 		e.Indef = true
 	case tokenExpired:
-		if r.Pend != nil && !w.noF9 {
-			p.abandonPending(r, "token_expired", false) // §6.3.1
+		// R29-I6: a pending rekey is abandoned at token_expired once the
+		// token's exp has passed on the own clock; a pending reconnect is not
+		own := p.now() >= tok.Exp
+		switch {
+		case r.Pend == nil || w.noF9:
+		case r.Pend.Reconnect:
+			w.hit("I6:reconnect-kept-at-token_expired")
+		case !own:
+			w.hit("I6:token_expired-before-own-exp")
+		default:
+			w.hit("I6:rekey-abandoned-token_expired")
+			p.abandonPending(r, "token_expired", false)
+			if r.Device {
+				w.hit("D1:rekey-not-reconnect")
+				p.startHS(r, false) // R29-D1
+			}
 		}
-		if !r.Device {
+		if !r.Device && (own || r.Pend == nil) {
 			p.wantReconnect(r)
 		}
 		r.dropTok(tok.JTI)
+	case quotaExceeded:
+		if m.Kind == KInit && m.Reconnect && p.newSpec() && r.Status == stActive {
+			w.hit("K6:quota_exceeded-stale")
+			p.markStale(r, "K6: quota_exceeded for a reconnect hs.init")
+			p.h5(r, -1)
+		}
+		e.Ended = true
 	case tokenRevoked:
 		r.dropTok(tok.JTI)
 		// S9: a token Q issued to an earlier key of mine that is still my key for Q

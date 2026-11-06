@@ -53,6 +53,7 @@ func (q *Party) makePending(r *PeerRec, id int, signer, own Key, pos Pos, respTs
 	r.Pend = &PendEp{ID: id, Signer: signer, Own: own, FinAt: q.w.Now, RespTs: respTs, Reconnect: reconnect}
 	q.w.hasEpoch[[2]int{int(q.ID), id}] = true
 	q.w.stat("A:pending")
+	q.w.hit("I1:pending")
 	q.w.logf("%s: epoch E%d with %s PENDING (signer %d)", q.Name, id, q.w.party(r.ID).Name, signer)
 }
 
@@ -62,7 +63,7 @@ func (q *Party) confirm(r *PeerRec) {
 	for j := range r.Epochs {
 		ep := &r.Epochs[j]
 		if ep.ID == pe.ID {
-			ep.Pending = false
+			ep.Pending, ep.EverCur = false, true
 		} else if ep.Superseded == 0 {
 			ep.Superseded = q.w.Now
 		}
@@ -70,7 +71,12 @@ func (q *Party) confirm(r *PeerRec) {
 	r.Cur, r.Pend = pe.ID, nil
 	r.setConf(pe.ID, q.w.Now) // activated at confirmation
 	r.AbanIDs = nil
+	if pe.Reconnect {
+		r.RCNamed, r.RCFails = 0, 0 // R29-K6: the reconnect succeeded
+	}
+	q.releaseHeld(r) // R29-K5: sealed under the new epoch at confirmation
 	q.w.stat("A:confirmed")
+	q.w.hit("I2:confirmed")
 	q.w.logf("%s: epoch E%d with %s CONFIRMED (current)", q.Name, pe.ID, q.w.party(r.ID).Name)
 }
 
@@ -83,7 +89,11 @@ func (r *PeerRec) setConf(id int, now int64) {
 	r.ConfID, r.ConfUntil = id, 0
 }
 
-// abandonPending: H5, S5, crossing, token_expired, or B passed.
+// abandonPending: R29-I7, every abandon of a pending epoch (B, I6, H5/S5,
+// a link, a crossing, the peer's handshake activated, a reconnect starts).
+// The tokens its hs.init carried were revoked when that handshake ended
+// (abandonOwn at hs.resp's write keeps them in r.Issued; the abandon here
+// revokes them).
 func (q *Party) abandonPending(r *PeerRec, why string, restart bool) {
 	pe := r.Pend
 	if pe == nil {
@@ -97,17 +107,27 @@ func (q *Party) abandonPending(r *PeerRec, why string, restart bool) {
 	r.Pend = nil
 	r.AbanIDs = append(r.AbanIDs, pe.ID)
 	q.w.stat("A:abandoned:" + why)
+	q.w.hit("I7:abandon")
 	q.w.logf("%s: pending E%d with %s ABANDONED (%s)", q.Name, pe.ID, q.w.party(r.ID).Name, why)
 	if !restart || r.Status != stActive {
 		return
 	}
-	valid := r.standing(r.KeyFor, r.Relay, q.w.Now).JTI != 0
+	valid := r.standing(r.KeyFor, r.Relay, q.now()).JTI != 0
 	switch {
-	case why == "B passed" && !r.Device:
+	case why == "B passed" && r.Device:
+		q.w.hit("D1:B-rekey")
+		q.startHS(r, false) // R29-D1: toward a device, rekey from the current epoch, token or not
+	case why == "B passed" && pe.Reconnect:
+		q.w.hit("I5:B-reconnect-stale")
+		q.markStale(r, "K6: a pending reconnect reached B") // R29-I5, K6
+		q.h5(r, -1)
+	case why == "B passed":
+		q.w.hit("I5:B-reconnect")
 		q.w.nextOrigin = "B reconnect"
-		q.startHS(r, true) // §6.3.1: I reconnects naming its current epoch
-	case why == "B passed" && !valid:
-		q.markStale(r, "pair again (B passed)")
+		q.startHS(r, true) // R29-I5: I reconnects naming its current epoch
+	case pe.Reconnect:
+		q.w.hit("I7:fresh-reconnect")
+		q.startHS(r, true) // R29-I7: a fresh reconnect, not a rekey
 	default:
 		q.startHS(r, !r.Device && !valid)
 	}
@@ -164,6 +184,14 @@ func (q *Party) beforeAccept(r *PeerRec, m *RMsg, pos Pos) {
 	if !q.newSpec() || M.Epoch == 0 || !q.steps14(r, m, pos) {
 		return
 	}
+	// R29-F3: the received flag of that epoch, by every message but hs.fin
+	if ep := r.epoch(M.Epoch); ep != nil && M.Kind != KFin && !ep.Flag {
+		ep.Flag = true
+		q.w.hit("F3:flag-set")
+		if M.Kind == KConfirm {
+			q.w.hit("F3:flag-set-by-hs.confirm")
+		}
+	}
 	if r.Pend != nil && M.Epoch == r.Pend.ID && M.Kind != KFin && !q.w.noF5 { // noF5: see handle
 		q.confirm(r)
 	}
@@ -173,6 +201,7 @@ func (q *Party) beforeAccept(r *PeerRec, m *RMsg, pos Pos) {
 	// the confirmed epoch: the newest (activation order) the peer used, not hs.fin
 	if M.Kind != KFin && M.Epoch != r.ConfID && r.newer(M.Epoch, r.ConfID) {
 		r.setConf(M.Epoch, q.w.Now)
+		q.w.hit("R2:confirmed-moves")
 	}
 	if r.ConfID != 0 && r.ConfID != r.Cur && M.Epoch == r.ConfID {
 		r.Reconfirm = true
@@ -185,9 +214,13 @@ func (q *Party) ruleE(r *PeerRec, ts int64) {
 	after := false
 	for j := range r.Epochs {
 		ep := &r.Epochs[j]
-		if after && !ep.Destroyed && !ep.Pending {
+		if after && ep.Abandoned && !ep.Destroyed {
+			q.w.hit("R5:own-abandoned-not-destroyed") // R29-R5: I7 applies to it
+		}
+		if after && !ep.Destroyed && !ep.Pending && !ep.Abandoned {
 			ep.Destroyed, ep.DestroyTs = true, ts
 			q.w.stat("A:destroyed-later-epoch")
+			q.w.hit("R5:destroyed")
 			if !q.w.ruleEKeepFin {
 				// lead's fix (r7): an hs.fin for a destroyed epoch not yet
 				// deposited is dropped with its outbox entry
@@ -217,9 +250,17 @@ func (q *Party) reconfirm() {
 		queued := slices.ContainsFunc(q.st.Out, func(e Entry) bool {
 			return e.To == r.ID && e.M.Kind == KConfirm && !e.Done && !e.Ended
 		})
+		if q.Device && q.w.Now-r.LastConfirm < minute {
+			q.w.hit("D2:confirm-rate-limited") // R29-D2: at most once a minute
+			continue
+		}
 		if r.Cur != 0 && (!queued || q.w.noF10) { // noF10: no cap
 			q.w.stat("A:hs.confirm-again")
+			q.w.hit("R3:hs.confirm-again")
+			r.LastConfirm = q.w.Now
 			q.enqueue(r.ID, Msg{Kind: KConfirm, Epoch: r.Cur}, nil)
+		} else if queued {
+			q.w.hit("R3:one-still-queued")
 		}
 	}
 }
@@ -229,6 +270,16 @@ func (p *Party) tickA(r *PeerRec) {
 	w := p.w
 	if pe := r.Pend; pe != nil && w.Now-pe.FinAt > aPendLife && (p.collectedSinceUnlock || w.noF13B) {
 		p.abandonPending(r, "B passed", true)
+	}
+	// R29-I6: a pending rekey with no valid standing token (own clock) is
+	// abandoned; a pending reconnect is not (it ends at B)
+	if pe := r.Pend; pe != nil && r.standing(r.KeyFor, r.Relay, p.now()).JTI == 0 {
+		if pe.Reconnect {
+			w.hit("I6:reconnect-kept-without-token")
+		} else {
+			w.hit("I6:rekey-abandoned-no-token")
+			p.abandonPending(r, "no valid standing token", true)
+		}
 	}
 	// keys end; ids stay (G): the confirmed epoch's and abandoned ones'
 	for j := range r.Epochs {
@@ -290,6 +341,8 @@ func (p *Party) idResend(r *PeerRec, m *RMsg) {
 func (q *Party) markStale(r *PeerRec, ref string) {
 	r.Status, r.Ref = stStale, ref
 	w := q.w
+	q.endHeld(r)
+	w.logf("%s: %s STALE (%s)", q.Name, w.party(r.ID).Name, ref)
 	if q.Copy {
 		return
 	}

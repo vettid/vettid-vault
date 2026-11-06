@@ -248,15 +248,23 @@ func (m *Manager) followLinks(p *Peer, app []*handshake.Rotation, msgEpoch []byt
 			m.startRekey(p, now)
 		}
 	}()
+	byPosition := func(e *EpochMeta) bool {
+		return !e.Demoted && !e.Pending && p.ancestor(e.Signer) && !e.EstAt.IsZero() && posAfter(e.EstAt, e.EstMsg, m.relayAt, m.msgID)
+	}
+	for i := range p.Epochs {
+		if e := &p.Epochs[i]; byPosition(e) && e.GotFromPeer {
+			// §3.4.1 "Epochs after an ik link" (R29-K4): its received flag
+			// is set, so P's side used it after the rotation: a copy did.
+			m.suspendForkRef(p, "epoch", now)
+			return
+		}
+	}
 	demotedCurrent := false
 	for i := range p.Epochs {
 		e := &p.Epochs[i]
-		if e.Demoted || e.Pending || !p.ancestor(e.Signer) {
-			continue
-		}
 		// An epoch signed by an old ik, established by a message deposited
 		// after the link: an old copy's. It stops being current.
-		if posAfter(e.EstAt, e.EstMsg, m.relayAt, m.msgID) && !e.EstAt.IsZero() {
+		if byPosition(e) {
 			e.Demoted, e.DemotedAt, e.DemotedMsg = true, m.relayAt, m.msgID
 			// S8 (0.86.6): a demotion by position is audited as a fork
 			// sign (ref epoch), without a feed item or a suspension.

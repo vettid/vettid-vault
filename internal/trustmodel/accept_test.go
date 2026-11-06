@@ -211,6 +211,12 @@ func (q *Party) acceptFrom(r *PeerRec, m *RMsg, pos Pos, set []Key) dec {
 	case KIdRot:
 		if rs == rkAfter {
 			if q.allFollowed(r, M.Rot) {
+				// (0.87.1) Table A's "Earlier, after its cut-off" cell: every
+				// link already followed: ignore, and R29-K9 is still judged
+				q.w.hit("K9:judged-after-cut-off")
+				if q.judgeAbandoned(r, M.Rot, M.Epoch) {
+					return dec{"suspend", "fork", cell + ":all-followed:K9-flag"}
+				}
 				return dec{"ignore", "", cell + ":all-followed"}
 			}
 			return refuse("superseded_relay", cell)

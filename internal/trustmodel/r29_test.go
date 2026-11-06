@@ -160,6 +160,7 @@ func (w *World) feedItem(q, r PID, kind string) {
 // Residual reasons: each exempts a pair from I1, I6 and I7, and is counted.
 const (
 	resOldApp           = "an app from before release 29 (earlier releases are unsupported; R29-D4 notice)"
+	resDeviceF          = "F: the vault abandoned a pending rekey toward its device with no valid standing token; the pair may split with nothing shown (the device exception of §3.4.1 Invariants)"
 	resDevice           = "D: a device applies no demotion to its vault's epochs (§15 item 51; the device exception of §3.4.1 Invariants)"
 	resAbandonedEarlier = "a copy using an epoch Q abandoned while pending that R29-K9 does not judge: earlier than the epoch of P's identity.rotate, or before it arrives (owner decision b, 0.87.1)"
 	resCopyInit         = "a copy acting as initiator sent nothing but hs.fin"

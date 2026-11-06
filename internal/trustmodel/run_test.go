@@ -623,6 +623,7 @@ func (w *World) checkEnd(liveness bool) {
 	}
 	probe := map[int]string{}
 	probeOld := map[int][2]PID{} // probes between an old app and its vault
+	probeF := map[int]bool{}     // probes of a pair under finding F
 	for _, pr := range pairs {
 		ra, rb := pr.a.st.peer(pr.b.ID), pr.b.st.peer(pr.a.ID)
 		if w.dead(pr.a.ID, pr.b.ID) {
@@ -661,7 +662,17 @@ func (w *World) checkEnd(liveness bool) {
 			inv1 = "I1/hs-lost:" + c
 		}
 		k := pairKey(pr.a.ID, pr.b.ID)
+		// finding F: a failure is the device exception, counted once per pair
+		fPair := w.fDue[k]
+		fCounted := false
 		fail := func(inv, format string, a ...any) {
+			if fPair {
+				if !fCounted {
+					fCounted = true
+					w.exempt("I1", resDeviceF)
+				}
+				return
+			}
 			if oldApp {
 				w.oldAppDown(k, inv, fmt.Sprintf(format, a...))
 				return
@@ -724,6 +735,9 @@ func (w *World) checkEnd(liveness bool) {
 			if oldApp {
 				probeOld[id] = k
 			}
+			if fPair {
+				probeF[id] = true
+			}
 			me := s[0]
 			me.guard(func() {
 				me.enqueue(s[1].ID, Msg{Kind: KSession, Probe: id}, nil)
@@ -740,6 +754,10 @@ func (w *World) checkEnd(liveness bool) {
 	sort.Ints(ids)
 	for _, id := range ids {
 		if !w.probes[id] {
+			if probeF[id] {
+				w.exempt("I1", resDeviceF)
+				continue
+			}
 			if k, ok := probeOld[id]; ok {
 				w.oldAppDown(k, "I1", "a message "+probe[id]+" was not accepted at quiescence")
 				continue
@@ -797,6 +815,10 @@ func (w *World) checkEnd(liveness bool) {
 		}
 		if w.dead(pr[0], pr[1]) {
 			w.exempt("I1-loss", w.deadRes[pairKey(pr[0], pr[1])])
+			continue
+		}
+		if w.fDue[pairKey(pr[0], pr[1])] {
+			w.exempt("I1-loss", resDeviceF)
 			continue
 		}
 		if res := w.residualOf(pr[0], pr[1]); res == resOldApp && !strings.HasPrefix(w.probeFate[id], "accept") {

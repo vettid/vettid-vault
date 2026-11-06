@@ -307,6 +307,50 @@ func (p *Party) unlock() {
 		p.flush()
 		p.startWanted()
 	})
+	p.w.unlockExchange(p)
+}
+
+// unlockExchange: §7.2 "Unlock exchange": the member's app unlocks its
+// vault, and the unlock request carries a fresh app token and the result
+// a fresh vault token, without the relay. The model's device is the
+// member's app: when a vault or its app unlocks while the other is
+// unlocked, each gets a fresh standing token from the other. (A desktop
+// or agent has no such exchange; one offline past its token is paired
+// again, a member's action the model does not run.)
+func (w *World) unlockExchange(p *Party) {
+	if p.Copy || !p.newSpec() {
+		return
+	}
+	for _, q := range w.real() {
+		if q == p || q.Locked || p.Locked || q.Device == p.Device || q.Desktop || p.Desktop {
+			continue
+		}
+		V, D := p, q
+		if p.Device {
+			V, D = q, p
+		}
+		rv, rd := V.st.peer(D.ID), D.st.peer(V.ID)
+		if rv == nil || rd == nil || rv.Status != stActive || rd.Status != stActive {
+			continue
+		}
+		for _, x := range [][2]*Party{{V, D}, {D, V}} {
+			iss, hold := x[0], x[1]
+			ri, rh := iss.st.peer(hold.ID), hold.st.peer(iss.ID)
+			if ri.Relay != hold.st.Relay || rh.Relay != iss.st.Relay {
+				continue // the exchange names the keys each side knows; a rotation in flight goes by the relay
+			}
+			var ts []Token
+			if iss.guard(func() { ts = iss.issue(ri, iss.st.Relay, false); iss.write() }) || iss.Locked || hold.Locked {
+				continue
+			}
+			hold.guard(func() {
+				kept, _ := hold.ruleT(rh, ts, rh.Relay)
+				hold.keepTokens(rh, kept)
+				hold.write()
+			})
+		}
+		w.stat("unlock exchange")
+	}
 }
 
 // refresh re-mints tokens near their end (§7.2), sent in relay.token.issued.
@@ -434,10 +478,13 @@ func (p *Party) tick() {
 				w.nextOrigin = "K5 reconnect (retry)"
 				p.startHS(r, true) // R29-K5: the reconnect after a demotion, once nothing holds it back
 			}
-			if r.Device && r.standing(r.KeyFor, r.Relay, w.Now).JTI == 0 {
-				p.markStale(r, "tokens expired (needs pairing)")
-				p.h5(r, -1)
-				continue
+			// (0.87.1) no automatic stale between a vault and its device
+			// when tokens lapse: the vault keeps rekeying (R29-D1), and a
+			// split that follows is finding F, part of the device exception
+			// (§3.4.1 Invariants). §7.2's re-pairing of a desktop offline
+			// past its token is a member's action, not modelled.
+			if r.Device && !p.Device {
+				p.watchF(r)
 			}
 			if !r.Device && r.standing(r.KeyFor, r.Relay, w.Now).JTI == 0 {
 				w.nextOrigin = "token expiry reconnect"

@@ -51,5 +51,6 @@
 // (actions, quiescence, I1-I6, shrinking), visible (splits, feed items,
 // I7), coverage (TestR29Coverage: the minimum hit count per rule), and
 // the tests: random, scenario, table, findings, blind, confirm_scenarios,
-// f_scenarios, rotate_twice, r29_scenarios.
+// f_scenarios, rotate_twice, r29_scenarios (with finding F's pinned gap),
+// r29_k9_scenarios (R29-K9, K2's pending epoch at a link, K4's flag).
 package trustmodel

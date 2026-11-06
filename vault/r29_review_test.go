@@ -63,21 +63,7 @@ func TestR29ReviewAbandonedPendingDoesNotConfirm(t *testing.T) {
 // later with their original ts; held past MaxDurableAge they are dropped
 // by the receiver (stale_or_future), although §3.4.1 says none is dropped.
 func TestR29ReviewHeldMessagesNewTS(t *testing.T) {
-	f := newR29Fx(t)
-	f.longTokens()
-	f.rekey(0)
-	f.deliver(0, 1, kHSInit)
-	snap := f.snapshot(1)
-	f.rotate(1)
-	f.deliver(1, 0, kHSResp)
-	f.startCopy(1, snap)
-	f.deliver(0, 2, kHSFin)
-	f.deliver(2, 0, kConfirm)
-	e1 := append([]byte(nil), f.cur(0)...)
-	f.deliver(1, 0, kRotate)
-	if e := f.p(0).epochMeta(e1); e == nil || !e.Demoted {
-		t.Fatal("setup: the current epoch is not demoted")
-	}
+	f := demoted(t, nil)
 	f.note(0, "held-while-demoted")
 	// Drive the repair handshake, but delay the hs.confirm 17 days (the
 	// vault locked meanwhile), within B.

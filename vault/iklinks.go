@@ -232,24 +232,49 @@ func (m *Manager) followLinks(p *Peer, app []*handshake.Rotation, msgEpoch []byt
 	m.h5(p, now)
 }
 
-// f1Demote (§3.4.1, F1, strict): a link carried under an epoch E of P
-// while Q's current epoch is later than E and signed by the link's old_ik
-// shows that P never activated that later epoch: Q demotes it and
-// reconnects naming E (a device: rekeys), which P accepts as its last.
-// No exception for an epoch Q activated at hs.fin without confirmation.
+// f1Demote is §3.4.1 "Strict F1, a link under an earlier epoch": a link
+// carried under an epoch E of P, while Q's current epoch is later than E
+// and signed by the link's old_ik, shows that P never activated the epochs
+// after E signed by that key, or that a copy did. Q takes together every
+// epoch of P after E whose P-side signer is the link's old_ik or an
+// ancestor: if any has its received flag set, Q suspends (ref epoch);
+// otherwise it demotes them all and reconnects naming E (a device:
+// rekeys), which P accepts as its last.
 func (m *Manager) f1Demote(p *Peer, app []*handshake.Rotation, msgEpoch []byte, now time.Time) {
 	if msgEpoch == nil || bytes.Equal(msgEpoch, p.LastEpochID) || !p.newer(p.LastEpochID, msgEpoch) {
 		return
 	}
 	cur := p.epochMeta(p.LastEpochID)
-	if cur == nil {
+	ie := p.epochIndex(msgEpoch)
+	if cur == nil || ie < 0 {
 		return
 	}
 	for _, r := range app {
 		if !bytes.Equal(cur.Signer, r.OldIK) {
 			continue
 		}
-		cur.Demoted, cur.DemotedAt, cur.DemotedMsg = true, time.Time{}, ""
+		var later []*EpochMeta
+		for i := ie + 1; i < len(p.Epochs); i++ {
+			e := &p.Epochs[i]
+			if e.Pending || e.Abandoned || e.Destroyed {
+				continue // pending and abandoned ones: "Pending epochs at a link", K9
+			}
+			if bytes.Equal(e.Signer, r.OldIK) || p.ancestor(e.Signer) {
+				later = append(later, e)
+			}
+		}
+		for _, e := range later {
+			if e.GotFromPeer {
+				// P's side used it after the rotation: a copy did.
+				m.suspendForkRef(p, "epoch", now)
+				return
+			}
+		}
+		for _, e := range later {
+			if !e.Demoted {
+				e.Demoted, e.DemotedAt, e.DemotedMsg = true, time.Time{}, ""
+			}
+		}
 		m.note(now, "epoch_demoted_f1", p.ID)
 		kr := m.sessions[p.ID]
 		if kr != nil {

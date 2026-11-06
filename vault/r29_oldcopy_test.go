@@ -147,10 +147,9 @@ func TestR29OldCopyHarness(t *testing.T) {
 // TestLeadMisattributedSeed. The copy of R, taken after R answered I's
 // rekey, collects I's hs.fin, activates E1 and confirms it at I; the real
 // R rotated and dropped its answer (S5), so it stays on E0. R's link under
-// E0 makes I demote E1 (strict F1) and reconnect naming E0; R's restarted
-// rekey from E0 names an epoch older than I's confirmed E1, signed by R's
-// old ik: fork evidence, with no exception for an epoch I began (§3.4.1
-// "Fork by ctx", 0.87.1): I suspends (ref epoch).
+// E0 meets strict F1 with E1's received flag set (the copy's hs.confirm,
+// §6.3.1): a copy used it, so I suspends (ref epoch); there is no
+// exception for an epoch I began (§3.4.1 "Fork by ctx", 0.87.1).
 func TestR29OldCopyFinishesAnswerMisattributedShape(t *testing.T) {
 	f := newR29Fx(t)
 	f.longTokens()
@@ -171,18 +170,12 @@ func TestR29OldCopyFinishesAnswerMisattributedShape(t *testing.T) {
 		t.Fatal("setup: the copy did not confirm E1")
 	}
 	f.deliver(1, 0, kRotate) // R's link, under E0
-	if e := f.p(0).epochMeta(e1); e == nil || !e.Demoted {
-		f.dump()
-		t.Fatal("F1 did not demote the copy's epoch")
+	if e := f.p(0).epochMeta(e1); e == nil || !e.GotFromPeer {
+		t.Fatal("setup: the copy's hs.confirm did not set E1's flag")
 	}
-	f.settle()
-	f.advance(time.Hour)
-	f.tick(0)
-	f.tick(1)
-	f.settle()
 	if !f.suspendedRef(0, "epoch") {
 		f.dump()
-		t.Fatal("the copy's confirmed epoch did not make a ctx naming E0 fork evidence")
+		t.Fatal("strict F1 over the copy's epoch, its flag set, did not suspend")
 	}
 }
 
@@ -303,8 +296,7 @@ func TestR29OwnCopyCannotHideFork(t *testing.T) {
 // The I3 hole lead fix B had: Q rekeys; P's old copy answers it and
 // confirms it, so Q makes current an epoch made with the copy (signed by
 // P's old ik). P's real link under E0 must not let it be kept: strict F1
-// demotes it, and P's rekey from E0 is then fork evidence (§3.4.1 "Fork
-// by ctx": no exception for an epoch Q began): Q suspends.
+// finds its received flag set (the copy's hs.confirm): Q suspends.
 func TestR29OldCopyAnswerToRekeyNotKept(t *testing.T) {
 	f := newR29Fx(t)
 	f.longTokens()
@@ -315,21 +307,11 @@ func TestR29OldCopyAnswerToRekeyNotKept(t *testing.T) {
 	f.deliver(2, 1, kHSResp) // and answers as P
 	f.deliver(1, 2, kHSFin)
 	f.deliver(2, 1, kConfirm) // and confirms it as P
-	ec := append([]byte(nil), f.cur(1)...)
-	if f.p(1).Pending != nil {
+	if f.p(1).Pending != nil || !f.flag(1, f.cur(1)) {
 		t.Fatal("setup: the copy did not confirm Q's epoch")
 	}
 	f.rotate(0)
 	f.deliver(0, 1, kRotate)
-	if e := f.p(1).epochMeta(ec); e == nil || !e.Demoted {
-		f.dump()
-		t.Fatal("the copy's epoch was not demoted")
-	}
-	f.settle()
-	f.advance(time.Hour)
-	f.tick(0)
-	f.tick(1)
-	f.settle()
 	if !f.suspendedRef(1, "epoch") {
 		f.dump()
 		t.Fatal("Q did not suspend on the copy's epoch")
@@ -494,18 +476,8 @@ func TestR29SealedUndepositedResealed(t *testing.T) {
 // changes nothing (it is refused before the fork rule could move any
 // state).
 func TestR29MalformedRekeyOtherEpochChangesNothing(t *testing.T) {
-	f := newR29Fx(t)
-	f.longTokens()
-	f.rekey(0)
-	f.deliver(0, 1, kHSInit)
-	snap := f.snapshot(1)
-	f.rotate(1)
+	f := demoted(t, nil)
 	f.lose(1, 0, kHSInit) // R's own restarted rekey: not delivered here
-	f.deliver(1, 0, kHSResp)
-	f.startCopy(1, snap)
-	f.deliver(0, 2, kHSFin)
-	f.deliver(2, 0, kConfirm)
-	f.deliver(1, 0, kRotate)
 	state := func() []byte {
 		c := *f.p(0)
 		c.Sessions = handshake.KeyringState{} // its receive count moves with any message opened

@@ -1,7 +1,6 @@
 package vault
 
 import (
-	"bytes"
 	"strings"
 	"testing"
 	"time"
@@ -31,12 +30,10 @@ func (f *r29Fx) auditCount(s int, ev string) int {
 
 // The delta review's probes of 1c9f209, kept as regression tests.
 
-// RR2-1: Q's E1 was confirmed by R's old copy and demoted by R's link
-// (strict F1); Q's reconnect naming E0 is lost. The pair must not stay
-// wedged with Q's messages held: R's rekey from E0 names an epoch older
-// than Q's confirmed E1, signed by R's old ik, which is fork evidence with
-// no exception for an epoch Q began (§3.4.1 "Fork by ctx", 0.87.1): Q
-// suspends.
+// RR2-1: Q's E1 was confirmed by R's old copy (its hs.confirm sets E1's
+// received flag); R's link under E0 then meets strict F1 with the flag
+// set: Q suspends (ref epoch) at once, so nothing is left wedged
+// (0.87.1: this test "flips to suspended").
 func TestR29RR2OwnCopyNoRKLostReconnectWedges(t *testing.T) {
 	f := newR29Fx(t)
 	f.longTokens()
@@ -50,54 +47,11 @@ func TestR29RR2OwnCopyNoRKLostReconnectWedges(t *testing.T) {
 	if f.deliver(0, 2, kHSFin) != 1 {
 		t.Fatal("setup: no hs.fin for the copy")
 	}
-	f.deliver(2, 0, kConfirm)
-	e1 := append([]byte(nil), f.cur(0)...)
-	f.deliver(1, 0, kRotate) // F1: demote E1, reconnect naming E0 (f1)
-	if e := f.p(0).epochMeta(e1); e == nil || !e.Demoted {
-		t.Fatal("setup: F1 did not demote")
-	}
-	// Q's f1 reconnect is lost; everything else flows.
-	lost := f.lose(0, 1, kHSInit)
-	for i := 0; i < 4; i++ {
-		f.deliver(1, 0, kAny)
-		f.lose(0, 1, kHSInit)
-		f.deliver(0, 1, kAny)
-	}
-	t.Logf("lost Q reconnect hs.inits: %d; Q LastEpochID==E1: %v; kr current==E1: %v",
-		lost, bytes.Equal(f.cur(0), e1),
-		func() bool { id := f.m(0).sessions[f.id[0]].Current().ID(); return bytes.Equal(id[:], e1) }())
-	f.note(0, "after-wedge")
-	for d := 0; d < 6; d++ {
-		f.advance(HandshakeTTL + time.Hour)
-		f.tick(0)
-		f.tick(1)
-		f.settle()
-	}
-	f.settle()
-	got := 0
-	for _, b := range f.got[1] {
-		if strings.Contains(b, "after-wedge") {
-			got++
-		}
-	}
-	t.Logf("after ~100 days: same epoch %v; Q outgoing reconnects %d; Q's held note arrived %d; Q current demoted %v",
-		f.sameEpoch(), f.countOutgoingReconnects(0), got, func() bool { e := f.p(0).epochMeta(f.cur(0)); return e != nil && e.Demoted }())
-	held := 0
-	for _, e := range f.m(0).st.Outbox {
-		if !e.Done && e.Held != nil {
-			held++
-		}
-	}
-	kid := f.m(0).sessions[f.id[0]].Current().ID()
-	t.Logf("Q kr current==E1 %v, Q LastEpochID==R LastEpochID %v, Q held entries %d", bytes.Equal(kid[:], e1), f.sameEpoch(), held)
-	n1 := len(f.got[0])
-	f.note(1, "r-to-q")
-	f.settle()
-	t.Logf("R->Q note handled: %v", len(f.got[0]) > n1)
-	t.Logf("Q suspended %v fork %+v state %v", f.p(0).suspended(), f.p(0).Fork, f.p(0).State)
+	f.deliver(2, 0, kConfirm) // sets E1's received flag
+	f.deliver(1, 0, kRotate)  // strict F1: E1's flag is set
 	if !f.suspendedRef(0, "epoch") {
 		f.dump()
-		t.Error("the pair stayed wedged after the lost f1 reconnect: Q did not suspend")
+		t.Fatal("strict F1 over an epoch with its flag set did not suspend")
 	}
 }
 
@@ -105,21 +59,7 @@ func TestR29RR2OwnCopyNoRKLostReconnectWedges(t *testing.T) {
 // lost: how many reconnects over 6 handshake lifetimes (no bound besides
 // the reconnect token)?
 func TestR29RR2TickDemotedBound(t *testing.T) {
-	f := newR29Fx(t)
-	f.longTokens()
-	f.rekey(0)
-	f.deliver(0, 1, kHSInit)
-	snap := f.snapshot(1)
-	f.rotate(1)
-	f.deliver(1, 0, kHSResp)
-	f.startCopy(1, snap)
-	f.deliver(0, 2, kHSFin)
-	f.deliver(2, 0, kConfirm)
-	e1 := append([]byte(nil), f.cur(0)...)
-	f.deliver(1, 0, kRotate)
-	if e := f.p(0).epochMeta(e1); e == nil || !e.Demoted {
-		t.Fatal("setup: not demoted")
-	}
+	f := demoted(t, nil)
 	starts := 0
 	for i := 0; i < 6; i++ {
 		starts += f.lose(0, 1, kHSInit)
@@ -136,17 +76,7 @@ func TestR29RR2TickDemotedBound(t *testing.T) {
 // expired): every batch calls reconnectNaming, which abandons rekeys and
 // notes reconnect_not_started.
 func TestR29RR2TickDemotedNoTokenSpam(t *testing.T) {
-	f := newR29Fx(t)
-	f.longTokens()
-	f.rekey(0)
-	f.deliver(0, 1, kHSInit)
-	snap := f.snapshot(1)
-	f.rotate(1)
-	f.deliver(1, 0, kHSResp)
-	f.startCopy(1, snap)
-	f.deliver(0, 2, kHSFin)
-	f.deliver(2, 0, kConfirm)
-	f.deliver(1, 0, kRotate)
+	f := demoted(t, nil)
 	f.lose(0, 1, kAny)
 	f.advance(HandshakeTTL + time.Hour)
 	f.p(0).Reconnect.Token = ""

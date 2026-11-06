@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/vettid/vettid-relay/relayauth"
 
@@ -217,5 +218,34 @@ func TestR29OlderLinkDoesNotJudgeLaterSigner(t *testing.T) {
 	if f.p(1).suspended() || f.ended(1, e1) {
 		f.dump()
 		t.Fatal("an older link judged an epoch signed by a later key")
+	}
+}
+
+// M3, §6.3.1 rule E's last sentence: an epoch the vault began and
+// abandoned while pending is not in rule E's destroyed set; a later
+// message under it is processed (without confirming it), not fork
+// evidence.
+func TestR29RuleESparesOwnAbandoned(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	f.rekey(0)
+	f.deliver(0, 1, kHSInit)
+	f.deliver(1, 0, kHSResp)
+	e1 := append([]byte(nil), f.p(0).Pending.ID...)
+	f.deliver(0, 1, kHSFin) // P activates E1
+	f.lose(1, 0, kConfirm)
+	f.do(0, func(m *Manager, p *Peer) {
+		m.abandonPending(p, "test", false, f.clk)
+		m.ruleE(p, f.clk, f.clk) // as at a responder's establishment naming the confirmed E0
+	})
+	if e := f.p(0).epochMeta(e1); e == nil || e.Destroyed {
+		t.Fatal("rule E destroyed the vault's own abandoned epoch")
+	}
+	f.advance(time.Minute)
+	f.note(1, "under-abandoned-E1")
+	f.deliver(1, 0, kNote)
+	if f.p(0).suspended() || f.arrived(0, "under-abandoned-E1") != 1 {
+		f.dump()
+		t.Fatal("a message under the vault's own abandoned epoch was not processed")
 	}
 }

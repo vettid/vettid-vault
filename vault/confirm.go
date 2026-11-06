@@ -337,7 +337,9 @@ func (m *Manager) ruleE(p *Peer, initTS time.Time, now time.Time) {
 	kr := m.sessions[p.ID]
 	for i := ci + 1; i < len(p.Epochs); i++ {
 		e := &p.Epochs[i]
-		if e.Destroyed || e.Pending {
+		if e.Destroyed || e.Pending || e.Mine && e.Abandoned {
+			// Rule E's destroyed set does not include an epoch the vault
+			// began and abandoned while pending (§6.3.1 rule E).
 			continue
 		}
 		e.Destroyed, e.DestroyTS = true, initTS

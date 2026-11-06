@@ -2,6 +2,7 @@ package trustmodel
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 )
 
@@ -49,6 +50,25 @@ func (w *World) visible(a, b PID) bool {
 		}
 	}
 	return len(w.feed[pairKey(a, b)]) > 0
+}
+
+// abandonedResidualAll: epoch e, which Q began and abandoned while pending
+// (not by a link), is within the residual "A copy using an epoch Q
+// abandoned while pending, outside R29-K9" for every link of the original
+// made after copy c was taken that Q followed: R29-K9 never judged it.
+func (w *World) abandonedResidualAll(q *Party, r *PeerRec, e int, c *Party) bool {
+	for _, f := range w.ikPos[[2]PID{q.ID, r.ID}] {
+		if by := w.iklinkBy[f.L]; !r.followed(f.L) || by.By != r.ID || by.Write <= c.SnapW {
+			continue
+		}
+		if slices.Contains(r.IdRotLinks, f.L) && !slices.Contains(r.K9Spared, k9Spared{e, f.L}) {
+			return false
+		}
+		if ep := r.epoch(e); ep != nil && ep.Ended {
+			return false
+		}
+	}
+	return true
 }
 
 // checkI7: R29 I7, visible ends. Every pair whose epochs split, and every
@@ -103,11 +123,26 @@ func (w *World) checkI7() {
 		if copyP == nil || q.Copy {
 			continue
 		}
+		r := q.st.peer(copyP.Origin)
 		if !w.copyCur[[2]int{int(q.ID), e}] {
-			w.stat("I7: copy epoch never current (abandoned while pending; nothing sent but hs.fin)")
+			// never current at Q: touched only if Q accepted the copy's
+			// messages under it, abandoned while pending, after the rotation
+			ab := w.copyAban[[2]int{int(q.ID), e}]
+			switch {
+			case ab == nil:
+				w.stat("I7: copy epoch never current, nothing accepted under it after the rotation")
+			case w.visible(q.ID, copyP.Origin):
+				w.stat("I7: copy epoch abandoned while pending, used after the rotation, the pair ends visibly")
+			case q.Device:
+				w.exempt("I7", resDevice)
+			case r != nil && !ab.byLink && w.abandonedResidualAll(q, r, e, copyP):
+				w.exempt("I7", resAbandonedEarlier)
+			default:
+				w.violate("I7", "%s accepted %d message(s) under E%d, made with old copy %s and abandoned while pending, after %s's rotation, and nothing is visible",
+					q.Name, ab.n, e, copyP.Name, w.party(copyP.Origin).Name)
+			}
 			continue
 		}
-		r := q.st.peer(copyP.Origin)
 		if r == nil {
 			continue
 		}

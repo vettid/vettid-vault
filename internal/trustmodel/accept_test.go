@@ -76,6 +76,9 @@ func (q *Party) handle(m *RMsg, set []Key) bool {
 	if d.Out == "accept" || d.Out == "answer" {
 		w.noteCopyUse(q, r.ID, M.Epoch)
 	}
+	if d.Out == "accept" || d.Out == "answer" || d.Out == "follow" || d.Out == "ignore" {
+		w.noteAbanUse(q, r, m.Actor, M.Epoch)
+	}
 	if d.Out == "refuse" || d.Out == "drop" || d.Out == "abort" {
 		w.audits[pairKey(q.ID, r.ID)]++
 	}

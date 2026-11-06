@@ -177,14 +177,7 @@ func (m *Manager) followLinks(p *Peer, app []*handshake.Rotation, msgEpoch []byt
 		p.IK, p.KEM = append([]byte(nil), r.NewIK...), r.NewKEM.Bytes()
 		p.Chain = append(p.Chain, r.Marshal())
 	}
-	// A followed link is no longer only seen.
-	kept := p.Seen[:0]
-	for _, raw := range p.Seen {
-		if s, err := handshake.ParseRotation(raw); err == nil && handshake.KnownPrefix(parseRotations(p.Chain), []*handshake.Rotation{s}) == 0 {
-			kept = append(kept, raw)
-		}
-	}
-	p.Seen = kept
+	pruneSeen(p) // a followed link is no longer only seen; irrelevant ones go
 	m.dirty = true
 	// Following a link abandons the pending epoch whose sig_R the link's
 	// old_ik made (the peer dropped that answer at its rotation, S5),
@@ -195,6 +188,9 @@ func (m *Manager) followLinks(p *Peer, app []*handshake.Rotation, msgEpoch []byt
 			m.abandonPending(p, "link", false, now)
 			restart = string(pe.Purpose) // started again under the current ik, as H5 says
 		}
+	}
+	if m.noLinkRestart {
+		restart = ""
 	}
 	defer func() {
 		switch handshake.Purpose(restart) {
@@ -294,7 +290,8 @@ func (m *Manager) holdDemoted(p *Peer, in *envelope.Inner, wake string) {
 	if err != nil {
 		return
 	}
-	m.queueDeposit(&OutboxEntry{PeerID: p.ID, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Held: j, HeldExp: in.Exp, Wake: wake}, m.now())
+	m.queueDeposit(&OutboxEntry{PeerID: p.ID, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Held: j, HeldExp: in.Exp, Wake: wake,
+		HeldDevice: m.forDevice && p.Kind == KindConnection}, m.now())
 }
 
 // rehold turns p's outbox entries sealed under the epoch ep (the current
@@ -368,8 +365,11 @@ func (m *Manager) sealHeld(p *Peer) {
 			m.dirty = true
 			continue
 		}
+		was := m.forDevice
+		m.forDevice = e.HeldDevice
 		m.keepCopy(p, in, e.Wake)
-		e.Payload, e.Held, e.HeldExp = raw, nil, time.Time{}
+		m.forDevice = was
+		e.Payload, e.Held, e.HeldExp, e.HeldDevice = raw, nil, time.Time{}, false
 		e.RelayURL, e.Mailbox = p.Relay.URL, p.Relay.Mailbox
 		m.dirty = true
 	}
@@ -385,8 +385,8 @@ func (m *Manager) sealHeld(p *Peer) {
 // stale at once (handleResp). Three tries stay within the reconnect
 // token's quota (4 deposits).
 func (m *Manager) demotedReconnectExpired(p *Peer, now time.Time) {
-	e := p.epochMeta(p.LastEpochID)
-	if e == nil || !e.Demoted {
+	e := m.demotedMeta(p)
+	if e == nil {
 		return
 	}
 	e.RCTries++
@@ -403,12 +403,16 @@ func (m *Manager) demotedReconnectExpired(p *Peer, now time.Time) {
 // bounded by the handshake lifetime).
 func (m *Manager) tickDemoted(p *Peer, now time.Time) {
 	if p.Kind != KindConnection || p.State != PeerActive || p.suspended() || p.Pending != nil ||
-		m.hasOutgoing(p.ID, handshake.PurposeReconnect) {
+		m.hasOutgoing(p.ID, handshake.PurposeReconnect) || !m.currentDemoted(p) {
 		return
 	}
-	if e := p.epochMeta(p.LastEpochID); e != nil && e.Demoted {
-		m.restartAfterDemotion(p, now)
+	if !m.canReconnect(p, now) {
+		if p.Reconnect.Token == "" || !now.Before(p.Reconnect.Exp) {
+			m.markStale(p, now) // no reconnect token left: no way back (review RR2-3)
+		}
+		return // until something changes (an answer settles): no-op
 	}
+	m.restartAfterDemotion(p, now)
 }
 
 // restartAfterDemotion: the current epoch was demoted (an old copy's):
@@ -433,10 +437,36 @@ func (m *Manager) restartAfterDemotion(p *Peer, now time.Time) {
 	m.markStale(p, now)
 }
 
-// currentDemoted reports whether p's current epoch is demoted.
-func (p *Peer) currentDemoted() bool {
-	e := p.epochMeta(p.LastEpochID)
-	return e != nil && e.Demoted
+// demotedMeta is the record of the epoch current in p's keyring if it is
+// demoted, or nil. The keyring's current epoch, not LastEpochID: the
+// own_copy branch without rk takes the named epoch as the last by id
+// while the demoted one stays current in the keyring (review RR2-1).
+func (m *Manager) demotedMeta(p *Peer) *EpochMeta {
+	kr := m.sessions[p.ID]
+	if kr == nil || kr.Current() == nil {
+		return nil
+	}
+	id := kr.Current().ID()
+	if e := p.epochMeta(id[:]); e != nil && e.Demoted {
+		return e
+	}
+	return nil
+}
+
+func (m *Manager) currentDemoted(p *Peer) bool { return m.demotedMeta(p) != nil }
+
+// canReconnect reports whether a reconnect to p could start now: a valid
+// reconnect token, no answer of ours to its reconnect awaiting hs.fin
+// (between persons), its kem readable.
+func (m *Manager) canReconnect(p *Peer, now time.Time) bool {
+	if p.Kind != KindConnection || p.Reconnect.Token == "" || !now.Before(p.Reconnect.Exp) {
+		return false
+	}
+	if !p.isService() && len(m.answeredReconnects(p)) > 0 {
+		return false
+	}
+	_, err := suite.ParsePublicKey(p.KEM)
+	return err == nil
 }
 
 // h5 (§3.4.1 H5, 0.86.0): whenever the current ik for p changes, the
@@ -520,6 +550,9 @@ func (m *Manager) acceptOwnCopy(p *Peer, ctx []byte, now time.Time) {
 	}
 	if p.Pending != nil {
 		m.abandonPending(p, "own_copy", false, now)
+	}
+	if kr := m.sessions[p.ID]; kr != nil && m.currentDemoted(p) {
+		m.rehold(p, kr.Current()) // its undeposited entries wait for the next epoch (review RR2 L4)
 	}
 	m.record(Activity{Kind: "connection.fork_suspected", ConnectionID: connID(p), DeviceID: devID(p), Ref: "own_copy", Audit: true}, now)
 	m.dirty = true

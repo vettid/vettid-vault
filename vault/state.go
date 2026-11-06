@@ -837,9 +837,12 @@ type OutboxEntry struct {
 	Held []byte `json:"held,omitempty"`
 	// HeldExp is the held message's exp (zero: none): past it the entry
 	// is discarded, not sealed (0.86.2).
-	HeldExp   time.Time `json:"held_exp,omitzero"`
-	FinEpoch  []byte    `json:"fin_epoch,omitempty"`
-	Handshake bool      `json:"handshake,omitempty"`
+	HeldExp time.Time `json:"held_exp,omitzero"`
+	// HeldDevice: the held message is a device's content (sent while
+	// handling a device's request): keepCopy keeps its copy over 64 KiB.
+	HeldDevice bool   `json:"held_device,omitempty"`
+	FinEpoch   []byte `json:"fin_epoch,omitempty"`
+	Handshake  bool   `json:"handshake,omitempty"`
 }
 
 // AuditEntry records a dropped or refused message (§6.3, §6.6, §7.3).

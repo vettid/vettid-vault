@@ -55,16 +55,50 @@ func (m *Manager) rotationConflict(p *Peer, r *handshake.Rotation, now time.Time
 			p.Conflict = &RotationConflict{OldIK: append([]byte(nil), r.OldIK...), Statements: []json.RawMessage{raw, r.Marshal()}, At: now.UTC()}
 			m.record(Activity{Kind: "identity.rotate_conflict", ConnectionID: p.ID, Audit: true, Feed: true, Priority: "high",
 				Ref: fingerprint(prev.NewIK) + "/" + fingerprint(r.NewIK)}, now)
+			// H5: a conflict suspension abandons every open handshake with
+			// the peer and revokes its tokens (review RR2-4).
+			m.abandonHandshakes(p, true, true, now)
+			if p.Pending != nil {
+				m.abandonPending(p, "conflict", false, now)
+			}
 			m.dirty = true
 		}
 		return true
 	}
-	if !followed {
-		// 0.86.0 rule C: kept as seen, followed or not.
+	if !followed && seenRelevant(p, r.OldIK) {
+		// 0.86.0 rule C: kept as seen, followed or not; only links from
+		// the current ik, an ancestor, or a key a seen link reaches (review
+		// RR2 L6: the set stays bounded by P's own chain).
 		p.Seen = append(p.Seen, r.Marshal())
 		m.dirty = true
 	}
 	return false
+}
+
+// seenRelevant reports whether a link from old is kept as seen: old is p's
+// current ik, an ancestor, or reached through seen links.
+func seenRelevant(p *Peer, old []byte) bool {
+	if suite.EqualPublic(old, p.IK) || p.ancestor(old) {
+		return true
+	}
+	for _, raw := range p.Seen {
+		if s, err := handshake.ParseRotation(raw); err == nil && suite.EqualPublic(s.NewIK, old) {
+			return true
+		}
+	}
+	return false
+}
+
+// pruneSeen keeps the seen links that are still relevant.
+func pruneSeen(p *Peer) {
+	kept := p.Seen[:0]
+	for _, raw := range p.Seen {
+		if s, err := handshake.ParseRotation(raw); err == nil && handshake.KnownPrefix(parseRotations(p.Chain), []*handshake.Rotation{s}) == 0 &&
+			seenRelevant(p, s.OldIK) {
+			kept = append(kept, raw)
+		}
+	}
+	p.Seen = kept
 }
 
 func rejectedLink(p *Peer, r *handshake.Rotation) bool {

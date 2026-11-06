@@ -279,7 +279,7 @@ func (m *Manager) abandonPending(p *Peer, why string, restart bool, now time.Tim
 	p.Pending = nil
 	m.note(now, "pending_abandoned_"+why, p.ID)
 	m.dirty = true
-	if pe.Purpose == handshake.PurposeReconnect && p.currentDemoted() {
+	if pe.Purpose == handshake.PurposeReconnect && m.currentDemoted(p) {
 		// 0.86.5: an abandoned try of the reconnect after a demotion
 		// counts as a failed one (at the third: stale).
 		m.demotedReconnectExpired(p, now)
@@ -290,7 +290,7 @@ func (m *Manager) abandonPending(p *Peer, why string, restart bool, now time.Tim
 	switch {
 	case p.Kind != KindConnection:
 		m.startRekey(p, now)
-	case p.currentDemoted():
+	case m.currentDemoted(p):
 		m.restartAfterDemotion(p, now) // never naming the demoted epoch
 	default:
 		m.startReconnect(p, now)

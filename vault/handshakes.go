@@ -1080,7 +1080,7 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 					// A rule-E or rule-L reconnect refused: the connection
 					// goes stale (§6.3.1, §3.4.1 rule L).
 					m.markStale(sp, now)
-				case og.Purpose == handshake.PurposeReconnect && sp.currentDemoted():
+				case og.Purpose == handshake.PurposeReconnect && m.currentDemoted(sp):
 					// 0.86.5: the reconnect after a demotion refused: stale.
 					m.markStale(sp, now)
 				case og.Purpose == handshake.PurposeRekey:
@@ -1134,17 +1134,28 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 	// A reconnect's links, or (S8, 0.85.0) a rekey's: sig_R verified under
 	// the key they lead to. Rule C first, then they are followed with
 	// "Epochs after an ik link" and H5 (Table B "Reached"; review M5).
+	revokeOwn := func() {
+		// The handshake was already taken out of Outgoing: its tokens are
+		// revoked here (review RR2-4).
+		for _, t := range og.Issued {
+			m.revokeIssued(t, p.ID, now)
+		}
+	}
 	for _, r := range res.Resp.Rotations {
 		if m.rotationConflict(p, r, now) && p.Conflict != nil {
 			res.Epoch.Destroy()
+			revokeOwn()
 			return ackAfterFlush
 		}
 	}
 	if !suite.EqualPublic(res.ResponderIK, p.IK) {
 		known := parseRotations(p.Chain)
+		m.noLinkRestart = true // no restart beside this handshake's own epoch (review RR2-5)
 		m.followLinks(p, res.Resp.Rotations[handshake.KnownPrefix(known, res.Resp.Rotations):], nil, now)
+		m.noLinkRestart = false
 		if p.suspended() {
 			res.Epoch.Destroy()
+			revokeOwn()
 			return ackAfterFlush
 		}
 	}
@@ -1275,7 +1286,7 @@ func (m *Manager) startRekey(p *Peer, now time.Time) {
 // startReconnect initiates a reconnect to connection p with its reconnect
 // token (§6.6), naming its current epoch.
 func (m *Manager) startReconnect(p *Peer, now time.Time) {
-	if p.currentDemoted() {
+	if m.currentDemoted(p) {
 		// Never naming a demoted epoch (0.86.5): the reconnect after a
 		// demotion names the newest usable one, or the connection is stale.
 		if !m.hasOutgoing(p.ID, handshake.PurposeReconnect) && p.Pending == nil {

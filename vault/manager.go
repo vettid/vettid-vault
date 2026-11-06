@@ -242,6 +242,9 @@ type Manager struct {
 	// msgID is the relay msg_id of the message being handled: with
 	// relayAt, its position (§3.4.1 "Terms", 0.86.0).
 	msgID string
+	// noLinkRestart: followLinks runs inside handleResp, whose own
+	// handshake is about to make the new epoch: it restarts nothing.
+	noLinkRestart bool
 	// forDevice: a handler is handling a device's request, so what it sends
 	// a connection is that device's content (§6.3.1 "Deployment").
 	forDevice bool

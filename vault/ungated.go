@@ -273,8 +273,9 @@ func (m *Manager) tickRevert(p *Peer, now time.Time) {
 // to p are dropped (the peer did not finish them, and they would block
 // it), and its pending epoch is abandoned.
 func (m *Manager) reconnectNaming(p *Peer, ctx []byte, why string, now time.Time) bool {
-	if p.Kind != KindConnection || p.State != PeerActive || p.suspended() || m.hasOutgoing(p.ID, handshake.PurposeReconnect) {
-		return false
+	if p.Kind != KindConnection || p.State != PeerActive || p.suspended() || m.hasOutgoing(p.ID, handshake.PurposeReconnect) ||
+		!m.canReconnect(p, now) {
+		return false // nothing is abandoned for a reconnect that cannot start
 	}
 	for id, og := range m.st.Outgoing {
 		if og.New == nil && og.PeerID == p.ID && og.Purpose == handshake.PurposeRekey {

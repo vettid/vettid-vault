@@ -39,9 +39,6 @@ const (
 	// keys while not current, from the first activation that superseded
 	// it.
 	ConfirmedKeysFor = 48 * 24 * time.Hour
-	// RevertAfter is T + 2 days: an old-epoch message whose inner ts is
-	// later than hs.fin by more than this shows the peer never activated.
-	RevertAfter = 16 * 24 * time.Hour
 )
 
 // --- positions and epoch records ---
@@ -405,27 +402,13 @@ func (m *Manager) beforeAccept(p *Peer, ep *handshake.Epoch, in *envelope.Inner,
 	}
 	if meta != nil && meta.Demoted && posAfter(m.relayAt, m.msgID, meta.DemotedAt, meta.DemotedMsg) {
 		// §3.4.1 "Epochs after an ik link": deposited after the link.
-		m.refusePeerKey(p, "ancestor_ik", meta.OwnCopy, now)
+		m.refusePeerKey(p, "ancestor_ik", now)
 		return true
 	}
 	fin := in.Type == handshake.TypeFin
 	if meta != nil && !meta.GotFromPeer && !strings.HasPrefix(in.Type, "hs.") {
 		meta.GotFromPeer = true // S13 (a): written with this batch
 		m.dirty = true
-	}
-	if h := p.HoldFor; h != nil && !fin {
-		switch {
-		case bytes.Equal(h.Epoch, id[:]):
-			p.HoldFor = nil // the peer activated it: the held messages go
-			m.sealHeld(p)
-		case bytes.Equal(h.Named, id[:]) && in.TS.Sub(h.FinAt) > RevertAfter:
-			// It never activated it: the new epoch is destroyed (as a
-			// revert's), and the vault is demoted again (a new try).
-			if e := p.epochMeta(h.Epoch); e != nil {
-				e.Destroyed, e.DestroyTS, e.Demoted = true, in.TS, true
-			}
-			p.HoldFor = nil
-		}
 	}
 	if pe := p.Pending; pe != nil && !fin && bytes.Equal(pe.ID, id[:]) {
 		m.confirmPending(p, now)
@@ -448,11 +431,11 @@ func (m *Manager) beforeAccept(p *Peer, ep *handshake.Epoch, in *envelope.Inner,
 // is refused (superseded_epoch).
 func (m *Manager) destroyedEpochMessage(p *Peer, meta *EpochMeta, in *envelope.Inner, now time.Time) {
 	if !in.TS.After(meta.DestroyTS) {
-		m.refusePeerKey(p, "superseded_epoch", false, now)
+		m.refusePeerKey(p, "superseded_epoch", now)
 		return
 	}
 	if p.Kind != KindConnection {
-		m.refusePeerKey(p, "superseded_epoch", false, now)
+		m.refusePeerKey(p, "superseded_epoch", now)
 		return
 	}
 	if meta.GatedAtE {
@@ -461,18 +444,12 @@ func (m *Manager) destroyedEpochMessage(p *Peer, meta *EpochMeta, in *envelope.I
 		m.suspendForkRef(p, "epoch", now)
 		return
 	}
-	m.refusePeerKey(p, "superseded_epoch", false, now)
+	m.refusePeerKey(p, "superseded_epoch", now)
 }
 
 // refusePeerKey refuses a message under §3.4.1 (acked, dropped, audited
-// drop.peer_key with the reason). noHistory: an ancestor_ik refusal under
-// an epoch demoted with an own_copy audit, which shows no History line
-// (O7a, 0.85.4): it is kept in the vault's own audit log only.
-func (m *Manager) refusePeerKey(p *Peer, reason string, noHistory bool, now time.Time) {
-	if noHistory {
-		m.note(now, "peer_key_"+reason, p.ID)
-		return
-	}
+// drop.peer_key with the reason).
+func (m *Manager) refusePeerKey(p *Peer, reason string, now time.Time) {
 	m.record(Activity{Kind: "drop.peer_key", ConnectionID: connID(p), DeviceID: devID(p), Ref: reason, Audit: true}, now)
 }
 
@@ -543,41 +520,40 @@ func (m *Manager) crossingRekeyLoses(p *Peer, theirs [32]byte, now time.Time) bo
 // epoch while not current (namedConf: rule E at hs.fin), and an abandoned
 // pending epoch until a newer one is confirmed. An older epoch of the
 // connection is judged by §3.4.1 F2: fork evidence (forkEp, judged at
-// hs.fin) or the own_copy exception. named is nil when the classic rules
-// (classifyCtx) decide.
-func (m *Manager) classifyCtx086(p *Peer, ctx string) (named []byte, namedConf, ownCopy, forkEp, refuse bool) {
+// hs.fin; §3.4.1 "Fork by ctx": no exception for an epoch the vault
+// began). named is nil when the classic rules (classifyCtx) decide.
+func (m *Manager) classifyCtx086(p *Peer, ctx string) (named []byte, namedConf, forkEp, refuse bool) {
 	p.upgradeEpochs()
 	is := func(id []byte) bool { return len(id) == 16 && ctx == handshake.EpochCtx(epochIDOf(id)) }
 	if pe := p.Pending; pe != nil && pe.Purpose == handshake.PurposeReconnect {
 		if is(pe.ID) {
-			return pe.ID, false, false, false, false
+			return pe.ID, false, false, false
 		}
-		return nil, false, false, false, true
+		return nil, false, false, true
 	}
 	if is(p.LastEpochID) {
-		return nil, false, false, false, false
+		return nil, false, false, false
 	}
 	if pe := p.Pending; pe != nil && is(pe.ID) {
-		return pe.ID, false, false, false, false
+		return pe.ID, false, false, false
 	}
 	if c := p.confirmedID(); is(c) {
-		return c, true, false, false, false
+		return c, true, false, false
 	}
 	for _, a := range p.Abandoned {
 		if is(a) {
-			return a, false, false, false, false
+			return a, false, false, false
 		}
 	}
 	for _, e := range p.Epochs {
 		if !is(e.ID) || e.Destroyed || e.Pending {
 			continue
 		}
-		fork, own := p.forkEpoch(e.ID)
-		if fork || own {
-			return e.ID, false, own, fork, false
+		if p.forkEpoch(e.ID) {
+			return e.ID, false, true, false
 		}
 	}
-	return nil, false, false, false, false
+	return nil, false, false, false
 }
 
 // pendingReconnectHold reports whether deposits to peer wait because the

@@ -802,8 +802,7 @@ func (m *Manager) handleResponse(p *Peer, in *envelope.Inner, now time.Time) {
 
 // note keeps an event in the vault's internal audit entries only: no
 // activity (§10.9) and so no History line. For the bookkeeping of 0.86.0
-// (an epoch abandoned, destroyed or demoted, a reconnect started) and for
-// an ancestor_ik refusal under an epoch an own_copy audit demoted (O7a).
+// (an epoch abandoned, destroyed or demoted, a reconnect started).
 func (m *Manager) note(now time.Time, event, peer string) {
 	m.st.Audit = append(m.st.Audit, AuditEntry{At: now, Event: event, PeerID: peer})
 	if n := len(m.st.Audit); n > AuditMax {

@@ -257,42 +257,6 @@ func TestR29LinkAbandonedPendingRefused(t *testing.T) {
 	}
 }
 
-// S4: the reconnect after a demotion toward a peer without the gate: the
-// held messages stay unsent until something arrives under the new epoch.
-func TestR29DemotedUngatedHoldsUntilReceipt(t *testing.T) {
-	f := demoted(t, nil)
-	f.lose(0, 1, kAny)
-	f.do(0, func(m *Manager, p *Peer) {
-		for id, og := range m.st.Outgoing {
-			if og.PeerID == p.ID {
-				m.abandonOutgoing(id, f.clk)
-			}
-		}
-		p.PeerFeatures = nil // side 0 has not seen side 1's features: ungated
-		m.restartAfterDemotion(p, f.clk)
-	})
-	f.note(0, "held-ungated")
-	f.deliver(0, 1, kHSInit)
-	f.deliver(1, 0, kHSResp) // activates at hs.fin (ungated)
-	held := 0
-	for _, e := range f.m(0).st.Outbox {
-		if e.Held != nil && !e.Done {
-			held++
-		}
-	}
-	if held != 1 || f.p(0).HoldFor == nil {
-		f.dump()
-		t.Fatalf("held %d at activation: sent before anything arrived under the new epoch", held)
-	}
-	f.deliver(0, 1, kHSFin)
-	f.deliver(1, 0, kConfirm) // something under the new epoch
-	f.settle()
-	if n := f.arrived(1, "held-ungated"); n != 1 {
-		f.dump()
-		t.Fatalf("arrived %d times", n)
-	}
-}
-
 // S6: a verified hs.fin comes first whatever the purposes: the vault's own
 // open reconnect is abandoned when the peer's rekey it answered finishes.
 func TestR29FinFirstAbandonsOwnReconnect(t *testing.T) {
@@ -418,13 +382,11 @@ func TestR29QuotaRetryForOtherDeposits(t *testing.T) {
 	}
 }
 
-// S13 option (a), behind OwnCopyGotFromPeerSuspends: the own_copy setup
-// (side 1's copy confirmed E1 at side 0; the real side 1 never activated
-// it), where the harmless case (only hs.confirm under E1:
-// TestR29OldCopyFinishesAnswerMisattributedShape) stays quiet; here the
-// copy also sent a message under E1, so side 0 shows the paused-connection
-// feed item and suspends (fork_suspected, ref epoch), as the fork rule.
-func TestR29OwnCopyGotFromPeerSuspends(t *testing.T) {
+// §3.4.1 "Fork by ctx" (no exception for an epoch Q began): side 1's copy
+// confirmed E1 at side 0 (the real side 1 never activated it) and also
+// sent a message under E1, so side 0 shows the paused-connection feed item
+// and suspends (fork_suspected, ref epoch), as the fork rule.
+func TestR29CopyEpochSentUnderSuspends(t *testing.T) {
 	f := newR29Fx(t)
 	f.longTokens()
 	f.rekey(0)
@@ -444,16 +406,9 @@ func TestR29OwnCopyGotFromPeerSuspends(t *testing.T) {
 	f.tick(0)
 	f.tick(1)
 	f.settle()
-	if !OwnCopyGotFromPeerSuspends {
-		// switched off: the exception as before, quiet
-		if f.p(0).suspended() || !f.activity(0, "connection.fork_suspected", "own_copy") {
-			t.Fatal("with S13 (a) off the exception is not as before")
-		}
-		return
-	}
-	if !f.suspendedRef(0, "epoch") || f.activity(0, "connection.fork_suspected", "own_copy") {
+	if !f.suspendedRef(0, "epoch") {
 		f.dump()
-		t.Fatal("own_copy over an epoch P sent under: not the fork rule's suspension")
+		t.Fatal("a copy's epoch P sent under: not the fork rule's suspension")
 	}
 	feed := false
 	for _, a := range f.sink[0].got {

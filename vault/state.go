@@ -282,7 +282,7 @@ type Peer struct {
 
 	// PeerFeatures are the capability names the peer advertised (0.86.0,
 	// §10.8, §5.3), sorted; a name is only ever added. Nil: it advertised
-	// none (release 28 or earlier), which §3.4.1 rule L acts on.
+	// none (release 28 or earlier).
 	PeerFeatures []string `json:"peer_features,omitempty"`
 
 	// Epochs are what §3.4.1 and §6.3.1 (0.86.0) need to know about each
@@ -303,8 +303,6 @@ type Peer struct {
 	// (B passed): a reconnect naming one is accepted until a newer epoch is
 	// confirmed (§6.3.1).
 	Abandoned [][]byte `json:"abandoned_epochs,omitempty"`
-	// RuleL is §3.4.1 rule L's bookkeeping toward a peer without features.
-	RuleL *RuleLState `json:"rule_l,omitempty"`
 	// Seen are the valid identity links of the peer that passed rule C but
 	// were not followed (one in an unfinished handshake's rotations, or in
 	// an identity.rotate then refused; a rekey's only once it passed
@@ -313,22 +311,9 @@ type Peer struct {
 	// (§3.4.1 rule C, 0.86.0): a later different successor of that key is
 	// a second successor.
 	Seen []json.RawMessage `json:"seen_links,omitempty"`
-	// HoldFor: a reconnect after a demotion completed toward a peer
-	// without the gate (0.86.6 S4): the held messages stay unsent until
-	// something arrives under the new epoch (Epoch); a message under the
-	// epoch it named (Named) more than T + 2 days after its hs.fin shows
-	// the peer never activated it.
-	HoldFor *HoldFor `json:"hold_for,omitempty"`
 	// IDResend counts S5's identity.rotate resends to the peer for the
 	// vault's latest rotation (0.86.0).
 	IDResend *IDResend `json:"id_resend,omitempty"`
-}
-
-// HoldFor is Peer.HoldFor.
-type HoldFor struct {
-	Epoch []byte    `json:"epoch"`
-	Named []byte    `json:"named"`
-	FinAt time.Time `json:"fin_at"`
 }
 
 // IDResend is S5's resend bookkeeping: for which rotation (the length of
@@ -372,12 +357,10 @@ type EpochMeta struct {
 	DestroyTS time.Time `json:"destroy_ts,omitzero"`
 	// Demoted by an ik link at the position (DemotedAt, DemotedMsg)
 	// (§3.4.1 "Epochs after an ik link"): messages under it deposited
-	// after that are refused (ancestor_ik). OwnCopy: demoted by the
-	// own_copy exception (no History line for such a refusal).
+	// after that are refused (ancestor_ik).
 	Demoted    bool      `json:"demoted,omitempty"`
 	DemotedAt  time.Time `json:"demoted_at,omitzero"`
 	DemotedMsg string    `json:"demoted_msg,omitempty"`
-	OwnCopy    bool      `json:"own_copy,omitempty"`
 	// RCTries counts, for a demoted current epoch, the reconnects that
 	// failed (at the third the connection goes stale, §3.4.1 "The
 	// reconnect bound").
@@ -412,14 +395,6 @@ type PendingEpoch struct {
 	// SigIK is the vault's own ik that signed it (S5 abandons it when that
 	// ik is superseded).
 	SigIK []byte `json:"sig_ik,omitempty"`
-}
-
-// RuleLState is rule L's (§3.4.1) bookkeeping.
-type RuleLState struct {
-	// Epoch is the current epoch the rule last acted for (once per
-	// current epoch); Tries the reconnects tried for it.
-	Epoch []byte `json:"epoch,omitempty"`
-	Tries int    `json:"tries,omitempty"`
 }
 
 // EpochRecord is one epoch of a service connection's history (§6.6, 0.72.0).
@@ -638,12 +613,10 @@ type AwaitingHS struct {
 	// the confirmed epoch while it was not current (rule E applies at its
 	// hs.fin); InitTS is the hs.init's inner ts; SigIK the vault's ik that
 	// signed hs.resp (S5: an answer kept across a rotation toward a peer
-	// without the gate is established, then rekeyed at once); OwnCopy marks
-	// a reconnect accepted by §3.4.1's own_copy exception.
+	// without the gate is established, then rekeyed at once).
 	NamedConfirmed bool      `json:"named_confirmed,omitempty"`
 	InitTS         time.Time `json:"init_ts,omitzero"`
 	SigIK          []byte    `json:"sig_ik,omitempty"`
-	OwnCopy        bool      `json:"own_copy,omitempty"`
 	// Signer is the peer's ik that sig_I must verify under (the epoch's
 	// signer, §3.4.1); Links the links a rekey's hs.init carried (S8),
 	// followed at hs.fin.

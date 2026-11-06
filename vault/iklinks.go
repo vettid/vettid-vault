@@ -18,8 +18,8 @@ import (
 // (and that apply without relay-key rotation, which this release does not
 // build): Table B for identity.rotate with the whole chain (S8), "Epochs
 // after an ik link" (strict F1 demotion, F2 fork evidence by the confirmed
-// epoch, the own_copy exception), H5 with pending epochs, S5 at the
-// vault's own rotation, the identity.rotate resend, and rule L.
+// epoch), H5 with pending epochs, S5 at the vault's own rotation and the
+// identity.rotate resend.
 
 // ancestor reports whether ik is an ancestor of p's current ik: the old_ik
 // of a followed link (§3.4.1 "Terms").
@@ -110,10 +110,10 @@ func (m *Manager) hIdentityRotate(_ context.Context, s *Session, in *envelope.In
 	switch first := links[i].OldIK; {
 	case bytes.Equal(first, p.IK):
 	case p.ancestor(first), p.rejected(first):
-		m.refusePeerKey(p, "rejected_ik", false, s.now)
+		m.refusePeerKey(p, "rejected_ik", s.now)
 		return nil, nil
 	default:
-		m.refusePeerKey(p, "unknown_ik", false, s.now)
+		m.refusePeerKey(p, "unknown_ik", s.now)
 		return nil, nil
 	}
 	app := links[i:]
@@ -123,7 +123,7 @@ func (m *Manager) hIdentityRotate(_ context.Context, s *Session, in *envelope.In
 	}
 	for _, r := range app {
 		if p.ancestor(r.NewIK) || p.rejected(r.NewIK) {
-			m.refusePeerKey(p, "ik_rollback", false, s.now)
+			m.refusePeerKey(p, "ik_rollback", s.now)
 			return nil, nil
 		}
 	}
@@ -338,11 +338,6 @@ func (m *Manager) sealHeld(p *Peer) {
 	if kr == nil || kr.Current() == nil {
 		return
 	}
-	if h := p.HoldFor; h != nil {
-		if id := kr.Current().ID(); bytes.Equal(h.Epoch, id[:]) {
-			return // S4: until something arrives under it
-		}
-	}
 	now := m.now()
 	for _, e := range m.st.Outbox {
 		if e.Done || e.PeerID != p.ID || e.Held == nil {
@@ -442,9 +437,7 @@ func (m *Manager) restartAfterDemotion(p *Peer, now time.Time) {
 }
 
 // demotedMeta is the record of the epoch current in p's keyring if it is
-// demoted, or nil. The keyring's current epoch, not LastEpochID: the
-// own_copy branch without rk takes the named epoch as the last by id
-// while the demoted one stays current in the keyring (review RR2-1).
+// demoted, or nil (the keyring's current epoch, review RR2-1).
 func (m *Manager) demotedMeta(p *Peer) *EpochMeta {
 	kr := m.sessions[p.ID]
 	if kr == nil || kr.Current() == nil {
@@ -512,101 +505,39 @@ func (m *Manager) h5(p *Peer, now time.Time) {
 	}
 }
 
-// forkEpoch is "Epochs after an ik link" for a rekey or reconnect from P
-// whose ctx names epoch ctx (0.86.0, F2): the current or confirmed epoch
-// is ordinary; one older than the confirmed epoch, where an epoch after
-// it up to the confirmed one has an ancestor of P's ik as its signer, is
-// fork evidence; except when every such epoch is one the vault began
-// (own_copy).
-func (p *Peer) forkEpoch(ctx []byte) (fork, ownCopy bool) {
+// forkEpoch is §3.4.1 "Fork by ctx" for a rekey or reconnect from P whose
+// ctx names epoch ctx: the current or confirmed epoch is ordinary; one
+// older than the confirmed epoch, where an epoch after it up to the
+// confirmed one has an ancestor of P's ik as its signer, is fork
+// evidence. There is no exception for an epoch the vault began.
+func (p *Peer) forkEpoch(ctx []byte) bool {
 	if bytes.Equal(ctx, p.LastEpochID) || bytes.Equal(ctx, p.confirmedID()) {
-		return false, false
+		return false
 	}
 	ic, ik := p.epochIndex(ctx), p.epochIndex(p.confirmedID())
 	if ic < 0 || ik <= ic {
-		return false, false
+		return false
 	}
-	found, ownOnly := false, true
 	for _, e := range p.Epochs[ic+1 : ik+1] {
 		if p.ancestor(e.Signer) {
-			found = true
-			ownOnly = ownOnly && e.Mine
+			return true
 		}
 	}
-	return found && !ownOnly, found && ownOnly
+	return false
 }
 
-// acceptOwnCopy is the own_copy exception: the epochs after ctx are
-// demoted (every message under them is refused, ancestor_ik, without a
-// History line), ctx is accepted as the last epoch, and
-// connection.fork_suspected (ref own_copy) is audited with a History line
-// ("<connection name> restarted its secure session with you.", app text)
-// and no feed item.
-func (m *Manager) acceptOwnCopy(p *Peer, ctx []byte, now time.Time) {
-	after, got := false, false
-	for i := range p.Epochs {
-		e := &p.Epochs[i]
-		if after {
-			got = got || e.GotFromPeer // demoted already (F1) or not
-		}
-		if after && !e.Demoted {
-			e.Demoted, e.DemotedAt, e.DemotedMsg, e.OwnCopy = true, time.Time{}, "", true
-		}
-		after = after || bytes.Equal(e.ID, ctx)
-	}
-	if got && OwnCopyGotFromPeerSuspends {
-		// S13 option (a): P sent a message under an epoch the exception
-		// would demote, so "P never activated it" does not hold: this is
-		// the fork rule's outcome (§3.4.1 "Epochs after an ik link", ref
-		// epoch): suspended, with its paused-connection feed item.
-		m.suspendForkRef(p, "epoch", now)
+// rekeyOtherEpoch judges a rekey hs.init under an epoch that is neither
+// current nor the confirmed one, once the hs.init has passed
+// rekeyPrecheck: fork evidence (§3.4.1 "Fork by ctx") suspends. The
+// hs.init is not answered either way.
+func (m *Manager) rekeyOtherEpoch(p *Peer, ep *handshake.Epoch, now time.Time) {
+	if p.Kind != KindConnection {
 		return
 	}
-	if p.Pending != nil {
-		m.abandonPending(p, "own_copy", false, now)
-	}
-	if kr := m.sessions[p.ID]; kr != nil && m.currentDemoted(p) {
-		m.rehold(p, kr.Current()) // its undeposited entries wait for the next epoch (review RR2 L4)
-	}
-	m.record(Activity{Kind: "connection.fork_suspected", ConnectionID: connID(p), DeviceID: devID(p), Ref: "own_copy", Audit: true}, now)
-	m.dirty = true
-}
-
-// rekeyOtherEpoch decides a rekey hs.init under an epoch that is neither
-// current nor the confirmed one, once the hs.init has passed
-// rekeyPrecheck: fork evidence suspends; the own_copy exception (0.86.3
-// "When the exception applies") answers it only if that epoch still has
-// its rk (then the later epochs are demoted, the audit made, and the
-// epoch current again); otherwise the later epochs are demoted, the epoch
-// is taken as the last by id, the audit made, and the vault reconnects
-// naming it; the hs.init is then acked and dropped unanswered. answer
-// says whether to answer it; handled whether this rule dealt with it
-// (rule L then does not apply).
-func (m *Manager) rekeyOtherEpoch(p *Peer, in *envelope.Inner, ep *handshake.Epoch, now time.Time) (answer, handled bool) {
-	if p.Kind != KindConnection {
-		return false, false
-	}
 	id := ep.ID()
-	fork, own := p.forkEpoch(id[:])
-	if fork {
+	if p.forkEpoch(id[:]) {
 		m.suspendForkRef(p, "epoch", now)
-		return false, true
 	}
-	if !own {
-		return false, false
-	}
-	// 0.86.6 S2: the vault always takes the named epoch as its last, by id,
-	// and reconnects naming it; the rekey is acked and dropped unanswered.
-	// (A branch answering it when the epoch still had its rk was removed:
-	// unreachable, since anything received under a later epoch both
-	// confirms it and ends the revert keep that held that rk.)
-	m.acceptOwnCopy(p, id[:], now)
-	if p.suspended() {
-		return false, true // S13 (a)
-	}
-	p.LastEpochID = append([]byte(nil), id[:]...)
-	m.reconnectNaming(p, id[:], "own_copy", now)
-	return false, true
 }
 
 // rekeyPrecheck applies, before anything is changed, every check of a
@@ -641,13 +572,6 @@ func (m *Manager) rekeyPrecheck(p *Peer, in *envelope.Inner, ep *handshake.Epoch
 	}
 	return nil
 }
-
-// OwnCopyGotFromPeerSuspends switches S13 option (a), for the owner's
-// decision: when an epoch the own_copy exception would demote had a
-// message from P under it (EpochMeta.GotFromPeer), the connection is
-// suspended with fork_suspected (ref epoch) and its feed item instead.
-// false: the exception as before (audit and History line only).
-const OwnCopyGotFromPeerSuspends = true
 
 // --- the rotating side ---
 
@@ -741,29 +665,6 @@ func (m *Manager) idResend(p *Peer, ep *handshake.Epoch, in *envelope.Inner, now
 		r.At = now
 		m.dirty = true
 	}
-}
-
-// ruleL (§3.4.1 rule L, 0.86.0): toward a peer that has advertised no
-// features (release 28 or earlier), when its rekey was evidently refused
-// and the vault's ik is newer than the one that signed the current epoch
-// (the peer may have missed a link), the vault drops its unfinished
-// answers to it and reconnects (carrying the whole chain), once per
-// current epoch; tried again up to 3 times if unanswered; refused, or
-// the last failing, the connection goes stale. It reports whether a
-// reconnect started.
-func (m *Manager) ruleL(p *Peer, now time.Time) bool {
-	if p.Kind != KindConnection || p.advertisedFeatures() || p.State != PeerActive || p.suspended() {
-		return false
-	}
-	if p.OwnChainAtEpoch >= len(m.st.Rotations) {
-		return false // not after a rotation of the vault's own
-	}
-	if l := p.RuleL; l != nil && bytes.Equal(l.Epoch, p.LastEpochID) {
-		return false // once per current epoch
-	}
-	p.RuleL = &RuleLState{Epoch: append([]byte(nil), p.LastEpochID...), Tries: 1}
-	m.dirty = true
-	return m.reconnectNaming(p, p.LastEpochID, "rule_l", now)
 }
 
 var _ = ed25519.PublicKeySize

@@ -342,8 +342,8 @@ func (m *Manager) respondReconnect(pi *handshake.PendingInit, p *Peer, sender ed
 	}
 	m.noteFeatures(p, pi.Inner().Features) // 0.86.0, §10.8: steps 1-4 passed
 	var named86 []byte
-	var namedConf, ownCopy, forkEp, refuse bool
-	named86, namedConf, ownCopy, forkEp, refuse = m.classifyCtx086(p, body.Ctx)
+	var namedConf, forkEp, refuse bool
+	named86, namedConf, forkEp, refuse = m.classifyCtx086(p, body.Ctx)
 	if refuse {
 		m.audit(now, "reconnect_refused", p.ID)
 		pi.Discard()
@@ -451,7 +451,7 @@ func (m *Manager) respondReconnect(pi *handshake.PendingInit, p *Peer, sender ed
 	m.queueDeposit(oe, now)
 	m.st.Awaiting[id] = &AwaitingHS{ID: id, PeerID: p.ID, Purpose: handshake.PurposeReconnect, Created: now, Resp: rs, Issued: issued,
 		OwnChain: m.ownChainNow(), RespOutbox: oe.ID, Reconnect: pend, Th1: th1[:],
-		NamedConfirmed: namedConf, OwnCopy: ownCopy, InitTS: pi.Inner().TS, Gated: p.hasConfirm(),
+		NamedConfirmed: namedConf, InitTS: pi.Inner().TS, Gated: p.hasConfirm(),
 		SigIK: append([]byte(nil), m.keys.ik.Public().(ed25519.PublicKey)...), Signer: append([]byte(nil), body.From.IK...)}
 	m.awaiting[id] = resp
 	// §6.6 "Between two persons" (0.74.0): with our own reconnect open as
@@ -545,14 +545,9 @@ func (m *Manager) handleRekeyInit(ctx context.Context, p *Peer, in *envelope.Inn
 	if kr.Current() != ep {
 		if bytes.Equal(epID[:], p.confirmedID()) && ep.HasRK() {
 			namedConf = true
-		} else if answer, handled := m.rekeyOtherEpoch(p, in, ep, now); !answer {
+		} else {
+			m.rekeyOtherEpoch(p, ep, now)
 			m.audit(now, "rekey_not_current_epoch", p.ID)
-			if !handled {
-				// §3.4.1 rule L, whose own conditions ruleL checks: a peer
-				// without features, the vault's ik newer than the current
-				// epoch's signer, once per current epoch.
-				m.ruleL(p, now)
-			}
 			return ackAfterFlush
 		}
 	}
@@ -581,19 +576,6 @@ func (m *Manager) handleRekeyInit(ctx context.Context, p *Peer, in *envelope.Inn
 			m.startReconnect(p, now)
 		}
 		return ackAfterFlush
-	}
-	if !p.advertisedFeatures() && p.Kind == KindConnection {
-		for _, aw := range m.st.Awaiting {
-			if aw.New == nil && aw.PeerID == p.ID && aw.Purpose == handshake.PurposeRekey {
-				// The peer rekeys again while the vault's answer to its last
-				// rekey awaits hs.fin: it refused that answer (rule L).
-				if m.ruleL(p, now) {
-					pi.Discard()
-					return ackAfterFlush
-				}
-				break
-			}
-		}
 	}
 	if namedConf {
 		// §6.3.1: the vault abandons its own open rekey for it.
@@ -827,14 +809,6 @@ func (m *Manager) finishReconnect(p *Peer, aw *AwaitingHS, fr *handshake.FinResu
 		m.suspendForkRef(p, pend.ForkRef, now)
 		return
 	}
-	if aw.OwnCopy {
-		m.acceptOwnCopy(p, pend.Named, now) // §3.4.1: judged once sig_I verified
-		if p.suspended() {
-			fr.Epoch.Destroy() // S13 (a): suspended instead
-			denyIssued()
-			return
-		}
-	}
 	// The chain is worked out again against what the connection followed
 	// since the hs.init (§3.4, §6.6): links followed meanwhile (from
 	// identity.rotate) are skipped, and a stale reconnect must not roll the
@@ -888,12 +862,6 @@ func (m *Manager) finishReconnect(p *Peer, aw *AwaitingHS, fr *handshake.FinResu
 	}
 	m.restoring = pend.Older
 	m.responderEstablish(p, aw, fr, now, func(o actOpts) {
-		if aw.OwnCopy {
-			// §3.4.1's own_copy exception: the epochs after the named one were
-			// demoted when the hs.init was accepted; the named one is current
-			// again.
-			o.how = actNormal
-		}
 		m.activate(p, fr.Epoch, aw.Purpose, aw.Issued, "", chainOr(aw.OwnChain, len(m.st.Rotations)), o, now)
 	})
 	m.restoring = false
@@ -1079,13 +1047,10 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 			if og.New != nil {
 				m.denyPeerTokens(og.New, now)
 				m.notifyDevices("connection.event", connEvent(og.PeerID, "failed"), "", now)
-			} else if sp := m.peer(og.PeerID); sp != nil && og.Purpose == handshake.PurposeRekey {
-				// Rule L: an hs.resp aborted for an ik mismatch. (0.86.6 S5:
-				// a refused reconnect of rule E, rule L or a demotion no
-				// longer makes the connection stale: a try fails only when
-				// it expires or at B.)
-				m.ruleL(sp, now)
 			}
+			// (0.86.6 S5: a refused reconnect after a demotion does not
+			// make the connection stale: a try fails only when it expires
+			// or at B.)
 		} else {
 			m.audit(now, "hs_resp_dropped", og.PeerID)
 		}
@@ -1195,14 +1160,6 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 	}
 	// Toward a peer without the gate: active at hs.fin as before.
 	o := actOpts{signer: res.ResponderIK, mine: true, unconfirmed: true}
-	if m.currentDemoted(p) && og.Purpose == handshake.PurposeReconnect {
-		// 0.86.6 S4: the reconnect after a demotion, toward a peer without
-		// the gate: the held messages stay unsent until something arrives
-		// under the new epoch.
-		p.HoldFor = &HoldFor{Epoch: append([]byte(nil), newID[:]...), Named: append([]byte(nil), og.Named...), FinAt: now}
-		m.activate(p, res.Epoch, og.Purpose, og.Issued, "", chainOr(og.OwnChain, len(m.st.Rotations)), o, now)
-		return ackAfterFlush
-	}
 	m.activate(p, res.Epoch, og.Purpose, og.Issued, "", chainOr(og.OwnChain, len(m.st.Rotations)), o, now)
 	return ackAfterFlush
 }
@@ -1245,8 +1202,7 @@ func (m *Manager) hasOutgoing(peerID string, purpose handshake.Purpose) bool {
 // the epoch's signer (S8, 0.85.0: the whole chain) to a peer that
 // advertised features; release 28 and earlier refuse a rekey carrying
 // any (they parse no rotations in a rekey), so toward them it carries
-// none and rule L recovers a peer that missed a link. The gate is fixed
-// now (§6.3.1 "Deployment").
+// none. The gate is fixed now (§6.3.1 "Deployment").
 func (m *Manager) startRekey(p *Peer, now time.Time) {
 	kr := m.sessions[p.ID]
 	if kr == nil || kr.Current() == nil || m.hasOutgoing(p.ID, handshake.PurposeRekey) || p.Standing.Token == "" || p.suspended() ||
@@ -1291,8 +1247,8 @@ func (m *Manager) startReconnect(p *Peer, now time.Time) {
 	m.startReconnectCtx(p, p.LastEpochID, now)
 }
 
-// startReconnectCtx initiates a reconnect naming epoch ctx (rule E and
-// rule L name another than the current one, 0.86.0). A pending epoch of
+// startReconnectCtx initiates a reconnect naming epoch ctx (after a
+// demotion or by strict F1 another than the current one, §3.4.1). A pending epoch of
 // the vault's own is abandoned first (§6.3.1: a reconnect names the
 // current epoch, never a pending one). It carries the vault's links since
 // the named epoch's signer.

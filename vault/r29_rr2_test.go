@@ -31,10 +31,12 @@ func (f *r29Fx) auditCount(s int, ev string) int {
 
 // The delta review's probes of 1c9f209, kept as regression tests.
 
-// RR2-1: the own_copy no-rk branch sets LastEpochID to the named epoch
-// while the keyring's current stays the demoted one. If the reconnect it
-// relies on is lost, tickDemoted (which looks at LastEpochID) never
-// restarts one: the pair stays wedged, Q's messages held.
+// RR2-1: Q's E1 was confirmed by R's old copy and demoted by R's link
+// (strict F1); Q's reconnect naming E0 is lost. The pair must not stay
+// wedged with Q's messages held: R's rekey from E0 names an epoch older
+// than Q's confirmed E1, signed by R's old ik, which is fork evidence with
+// no exception for an epoch Q began (§3.4.1 "Fork by ctx", 0.87.1): Q
+// suspends.
 func TestR29RR2OwnCopyNoRKLostReconnectWedges(t *testing.T) {
 	f := newR29Fx(t)
 	f.longTokens()
@@ -61,8 +63,8 @@ func TestR29RR2OwnCopyNoRKLostReconnectWedges(t *testing.T) {
 		f.lose(0, 1, kHSInit)
 		f.deliver(0, 1, kAny)
 	}
-	t.Logf("lost Q reconnect hs.inits: %d; own_copy audited: %v; Q LastEpochID==E1: %v; kr current==E1: %v",
-		lost, f.activity(0, "connection.fork_suspected", "own_copy"), bytes.Equal(f.cur(0), e1),
+	t.Logf("lost Q reconnect hs.inits: %d; Q LastEpochID==E1: %v; kr current==E1: %v",
+		lost, bytes.Equal(f.cur(0), e1),
 		func() bool { id := f.m(0).sessions[f.id[0]].Current().ID(); return bytes.Equal(id[:], e1) }())
 	f.note(0, "after-wedge")
 	for d := 0; d < 6; d++ {
@@ -92,9 +94,10 @@ func TestR29RR2OwnCopyNoRKLostReconnectWedges(t *testing.T) {
 	f.note(1, "r-to-q")
 	f.settle()
 	t.Logf("R->Q note handled: %v", len(f.got[0]) > n1)
-	if !f.sameEpoch() || got == 0 {
+	t.Logf("Q suspended %v fork %+v state %v", f.p(0).suspended(), f.p(0).Fork, f.p(0).State)
+	if !f.suspendedRef(0, "epoch") {
 		f.dump()
-		t.Error("the pair did not recover after the lost own_copy/f1 reconnect")
+		t.Error("the pair stayed wedged after the lost f1 reconnect: Q did not suspend")
 	}
 }
 
@@ -161,21 +164,11 @@ func TestR29RR2TickDemotedNoTokenSpam(t *testing.T) {
 	}
 }
 
-// RR2-1b: as RR2-1, but the standing tokens expire 30 days on (as without
-// longTokens): does §7.2's expired-token reconnect rescue the pair?
+// RR2-1b: Q's current epoch demoted by strict F1 (flag clear, the
+// demoted fixture) and its reconnect naming E0 lost, with the standing
+// tokens expiring 30 days on (as without longTokens): the pair recovers.
 func TestR29RR2OwnCopyNoRKLostReconnectTokenExpiry(t *testing.T) {
-	f := newR29Fx(t)
-	f.longTokens()
-	f.rekey(0)
-	f.deliver(0, 1, kHSInit)
-	snap := f.snapshot(1)
-	f.rotate(1)
-	f.deliver(0, 1, kAny)
-	f.deliver(1, 0, kHSResp)
-	f.startCopy(1, snap)
-	f.deliver(0, 2, kHSFin)
-	f.deliver(2, 0, kConfirm)
-	f.deliver(1, 0, kRotate)
+	f := demoted(t, nil)
 	f.lose(0, 1, kHSInit)
 	for i := 0; i < 4; i++ {
 		f.deliver(1, 0, kAny)

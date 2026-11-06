@@ -111,7 +111,7 @@ func TestR29ReviewHeldMessagesNewTS(t *testing.T) {
 	}
 }
 
-// Probe C: an f1/demoted/own_copy reconnect (reconnectNaming) that
+// Probe C: an f1 or demoted reconnect (reconnectNaming) that
 // expires is retried with no bound; and
 // an expired reconnect's tokens are not revoked (housekeeping uses
 // dropOutgoing, not abandonOutgoing).

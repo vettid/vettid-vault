@@ -148,8 +148,9 @@ func TestR29OldCopyHarness(t *testing.T) {
 // rekey, collects I's hs.fin, activates E1 and confirms it at I; the real
 // R rotated and dropped its answer (S5), so it stays on E0. R's link under
 // E0 makes I demote E1 (strict F1) and reconnect naming E0; R's restarted
-// rekey from E0 meets I's own_copy exception (E1 is one I began): audited
-// own_copy, no suspension, and the pair converges.
+// rekey from E0 names an epoch older than I's confirmed E1, signed by R's
+// old ik: fork evidence, with no exception for an epoch I began (§3.4.1
+// "Fork by ctx", 0.87.1): I suspends (ref epoch).
 func TestR29OldCopyFinishesAnswerMisattributedShape(t *testing.T) {
 	f := newR29Fx(t)
 	f.longTokens()
@@ -179,22 +180,10 @@ func TestR29OldCopyFinishesAnswerMisattributedShape(t *testing.T) {
 	f.tick(0)
 	f.tick(1)
 	f.settle()
-	if f.p(0).suspended() || f.p(1).suspended() {
+	if !f.suspendedRef(0, "epoch") {
 		f.dump()
-		t.Fatal("suspended: no second successor exists")
+		t.Fatal("the copy's confirmed epoch did not make a ctx naming E0 fork evidence")
 	}
-	if !f.sameEpoch() || bytes.Equal(f.cur(0), e1) {
-		f.dump()
-		t.Fatal("did not converge off the copy's epoch")
-	}
-	if !f.activity(0, "connection.fork_suspected", "own_copy") {
-		f.dump()
-		t.Fatal("no own_copy audit")
-	}
-	if f.sink[0].has("connection.fork_suspected") && f.p(0).Fork != nil {
-		t.Fatal("own_copy suspended")
-	}
-	f.talks()
 }
 
 // Model: TestBlindF2aForcedSuspension (no copy). I's hs.fin, made before
@@ -289,10 +278,10 @@ func TestR29BlindF3RuleEEvidenceSuspends(t *testing.T) {
 	}
 }
 
-// Model: TestLeadFixAOwnCopyCannotHideFork. Whatever the copy's fork does
-// first (here its link under E0 meets strict F1, and its reconnect the
-// own_copy rule), no suspension follows from it alone; when the
-// original's real link arrives, rule C suspends.
+// Model: TestLeadFixAOwnCopyCannotHideFork. P sent a message under E1, an
+// epoch Q began; P's copy (holding E0) rotates and reconnects naming E0:
+// with no exception for an epoch Q began (§3.4.1 "Fork by ctx"), the
+// copy's fork is caught at once (ref epoch).
 func TestR29OwnCopyCannotHideFork(t *testing.T) {
 	f := newR29Fx(t)
 	f.longTokens()
@@ -305,31 +294,17 @@ func TestR29OwnCopyCannotHideFork(t *testing.T) {
 	f.rotate(2) // the copy's second successor of ik0
 	f.deliver(2, 1, kRotate)
 	f.deliver(2, 1, kAny)
-	if OwnCopyGotFromPeerSuspends {
-		// S13 (a): P sent a message under E1, so the own_copy exception
-		// does not hold: the copy's fork is caught at once (ref epoch).
-		if !f.suspendedRef(1, "epoch") {
-			f.dump()
-			t.Fatal("S13 (a): the copy's reconnect over an epoch P sent under did not suspend")
-		}
-		return
-	}
-	if f.p(1).suspended() {
+	if !f.suspendedRef(1, "epoch") {
 		f.dump()
-		t.Fatal("suspended on the copy's fork alone")
-	}
-	f.rotate(0) // the original's real link
-	f.deliver(0, 1, kRotate)
-	if !f.suspendedRef(1, "conflict") {
-		f.dump()
-		t.Fatal("rule C did not suspend on the real link")
+		t.Fatal("the copy's reconnect over an epoch P sent under did not suspend")
 	}
 }
 
 // The I3 hole lead fix B had: Q rekeys; P's old copy answers it and
 // confirms it, so Q makes current an epoch made with the copy (signed by
 // P's old ik). P's real link under E0 must not let it be kept: strict F1
-// demotes it, and Q converges with the real P.
+// demotes it, and P's rekey from E0 is then fork evidence (§3.4.1 "Fork
+// by ctx": no exception for an epoch Q began): Q suspends.
 func TestR29OldCopyAnswerToRekeyNotKept(t *testing.T) {
 	f := newR29Fx(t)
 	f.longTokens()
@@ -355,15 +330,10 @@ func TestR29OldCopyAnswerToRekeyNotKept(t *testing.T) {
 	f.tick(0)
 	f.tick(1)
 	f.settle()
-	if bytes.Equal(f.cur(1), ec) {
+	if !f.suspendedRef(1, "epoch") {
 		f.dump()
-		t.Fatal("the copy's epoch was kept")
+		t.Fatal("Q did not suspend on the copy's epoch")
 	}
-	if !f.sameEpoch() || !bytes.Equal(f.p(1).IK, f.m(0).keys.ik.Public().(ed25519.PublicKey)) {
-		f.dump()
-		t.Fatal("Q did not converge with the real P")
-	}
-	f.talks()
 }
 
 // The shape of TestLeadFixBSeed (seed 8756148401117559123, R1, the gate
@@ -414,22 +384,7 @@ func TestR29FixBSeedShapeStrictExpected(t *testing.T) {
 // message.send relayed to the peer: the same durable send path,
 // SendToConnection -> sendTo -> sealAndQueue.)
 func TestR29DemotedHoldsMessagesUntilNewEpoch(t *testing.T) {
-	f := newR29Fx(t)
-	f.longTokens()
-	f.rekey(0)
-	f.deliver(0, 1, kHSInit)
-	snap := f.snapshot(1)
-	f.rotate(1)
-	f.deliver(1, 0, kHSResp)
-	f.startCopy(1, snap)
-	f.deliver(0, 2, kHSFin)
-	f.deliver(2, 0, kConfirm)
-	e1 := append([]byte(nil), f.cur(0)...)
-	f.deliver(1, 0, kRotate)
-	if e := f.p(0).epochMeta(e1); e == nil || !e.Demoted || !bytes.Equal(f.cur(0), e1) {
-		f.dump()
-		t.Fatal("setup: the current epoch is not demoted")
-	}
+	f := demoted(t, nil)
 	f.note(0, "held-while-demoted")
 	held := 0
 	for _, e := range f.m(0).st.Outbox {
@@ -459,21 +414,24 @@ func TestR29DemotedHoldsMessagesUntilNewEpoch(t *testing.T) {
 }
 
 // demoted sets up side 0 with its current epoch E1 demoted by side 1's
-// link (E1 was confirmed by side 1's old copy; the real side 1 never
-// activated it). before runs just before the link arrives.
+// link (strict F1, its received flag clear): side 1 rekeyed E0 to E1,
+// side 0 activated E1 at hs.fin as responder, and side 1 rotated before
+// any hs.confirm reached it (S5 abandons its pending E1), so its
+// identity.rotate travels under E0. before runs just before the link
+// arrives.
 func demoted(t *testing.T, before func(f *r29Fx)) *r29Fx {
 	t.Helper()
 	f := newR29Fx(t)
 	f.longTokens()
-	f.rekey(0)
-	f.deliver(0, 1, kHSInit)
-	snap := f.snapshot(1)
-	f.rotate(1)
-	f.deliver(1, 0, kHSResp)
-	f.startCopy(1, snap)
-	f.deliver(0, 2, kHSFin)
-	f.deliver(2, 0, kConfirm)
+	f.rekey(1)
+	f.deliver(1, 0, kHSInit)
+	f.deliver(0, 1, kHSResp)
+	f.deliver(1, 0, kHSFin)
 	e1 := append([]byte(nil), f.cur(0)...)
+	if f.lose(0, 1, kConfirm) != 1 || f.p(1).Pending == nil {
+		t.Fatal("setup: side 1's E1 is not pending")
+	}
+	f.rotate(1)
 	if before != nil {
 		before(f)
 	}
@@ -574,8 +532,8 @@ func TestR29SealedUndepositedResealed(t *testing.T) {
 }
 
 // A rekey hs.init naming an older epoch that fails what AcceptRekey checks
-// changes nothing (it is refused before the own_copy exception or the
-// fork rule could move any state).
+// changes nothing (it is refused before the fork rule could move any
+// state).
 func TestR29MalformedRekeyOtherEpochChangesNothing(t *testing.T) {
 	f := newR29Fx(t)
 	f.longTokens()

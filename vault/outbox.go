@@ -473,9 +473,6 @@ func (m *Manager) housekeeping(now time.Time) {
 	for id, aw := range m.st.Awaiting {
 		if aw.New == nil && now.Sub(aw.Created) > HandshakeTTL {
 			m.abandonAwaiting(id, now) // its tokens are denylisted too (§6.6)
-			if p := m.peer(aw.PeerID); p != nil && aw.Purpose == handshake.PurposeRekey {
-				m.ruleL(p, now) // §3.4.1 rule L: the answer expired without hs.fin
-			}
 		}
 	}
 	for id, og := range m.st.Outgoing {
@@ -486,8 +483,6 @@ func (m *Manager) housekeeping(now time.Time) {
 			case p == nil:
 			case og.Purpose == handshake.PurposeReconnect:
 				m.demotedReconnectExpired(p, now)
-			case og.Purpose == handshake.PurposeRekey:
-				m.ruleL(p, now) // rule L: the rekey went unanswered for its lifetime
 			}
 		}
 	}

@@ -732,3 +732,47 @@ func TestR29RefusedReconnectLinksAllOrNothing(t *testing.T) {
 		t.Fatal("a link of a refused reconnect was followed although another would be refused")
 	}
 }
+
+// The links of a refused reconnect are followed only when its ctx would
+// otherwise be accepted and is not fork evidence (aligned with the model,
+// b36edf0). Q (side 1) has E1 (signer a) confirmed after E0 and its own
+// reconnect pending; P's copy line (holding E0) rotates a→b and
+// reconnects naming E0 with the link: "Fork by ctx" evidence, so nothing
+// is followed (and, refused, nothing is suspended either).
+func TestR29RefusedReconnectLinksNotForForkCtx(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	snap := f.snapshot(0)
+	f.rekey(1)
+	f.settle()
+	f.note(0, "under-E1")
+	f.settle()
+	f.do(1, func(m *Manager, p *Peer) { m.startReconnect(p, f.clk) })
+	f.deliver(1, 0, kHSInit)
+	f.deliver(0, 1, kHSResp)
+	f.lose(1, 0, kAny)
+	pe := f.p(1).Pending
+	if pe == nil || pe.Purpose != handshake.PurposeReconnect {
+		t.Fatal("setup: Q's reconnect not pending")
+	}
+	ik := append([]byte(nil), f.p(1).IK...)
+	f.startCopy(0, snap)
+	f.rotate(2)
+	f.lose(2, 1, kAny)
+	f.do(2, func(m *Manager, p *Peer) {
+		for id, og := range m.st.Outgoing {
+			if og.PeerID == p.ID {
+				m.abandonOutgoing(id, f.clk)
+			}
+		}
+		m.startReconnect(p, f.clk)
+	})
+	f.deliver(2, 1, kHSInit)
+	if !f.audited(1, "reconnect_refused") {
+		t.Fatal("setup: not refused")
+	}
+	if !bytes.Equal(f.p(1).IK, ik) || f.p(1).Pending != pe {
+		f.dump()
+		t.Fatal("the links of a reconnect whose ctx is fork evidence were followed")
+	}
+}

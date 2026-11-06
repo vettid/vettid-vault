@@ -503,12 +503,15 @@ func (m *Manager) refusedReconnectLinks(p *Peer, body *handshake.Init, now time.
 		}
 		before = append(before, r.NewIK)
 	}
-	// Its ctx would otherwise be accepted: judged as if the vault's own
-	// reconnect were not pending; a replaced line's epoch is not.
+	// Its ctx would otherwise be accepted, and is not fork evidence:
+	// judged as if the vault's own reconnect were not pending (the
+	// current, the confirmed or an abandoned-while-pending epoch; a
+	// service's older epoch); a fork-evidence epoch ("Fork by ctx", with
+	// the ik the links reach) or a replaced line's is not.
 	p.Pending = nil
-	named, _, _, refuse := m.classifyCtx086(p, body.Ctx, nil)
+	named, _, forkEp, refuse := m.classifyCtx086(p, body.Ctx, links)
 	p.Pending = pe
-	if refuse {
+	if refuse || forkEp {
 		return
 	}
 	if named == nil {

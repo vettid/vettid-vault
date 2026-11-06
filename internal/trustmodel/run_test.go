@@ -489,7 +489,9 @@ func (w *World) settleOnce() {
 		p.unlock()
 	}
 	calm := 0
-	for it := 0; it < 96 && calm < 3; it++ {
+	// R29-K6: a reconnect may take three tries of 16 days, so quiescence
+	// (time past every handshake retry) may need more than 96 rounds
+	for it := 0; it < 160 && calm < 3; it++ {
 		for _, p := range w.real() {
 			for i := 0; i < 8 && p.collectRound(maxCollect) > 0; i++ {
 			}
@@ -500,7 +502,7 @@ func (w *World) settleOnce() {
 			calm = 0
 		}
 		switch {
-		case (it == 31 || it == 63) && calm == 0:
+		case (it == 31 || it == 63 || it == 95 || it == 127) && calm == 0:
 			if w.optA {
 				w.advance(aPendLife + 1) // past every lifetime of §6.3.1 (B)
 			} else {
@@ -768,10 +770,6 @@ func (w *World) checkEnd(liveness bool) {
 	for _, k := range keys {
 		a, b := w.party(k[0]).st.peer(k[1]), w.party(k[1]).st.peer(k[0])
 		endsStale := (a != nil && a.Status == stStale) || (b != nil && b.Status == stStale)
-		if res := w.residualOf(k[0], k[1]); res != "" && w.staleAt[k] != "" && endsStale {
-			w.exempt("I1-stale-split", res)
-			continue
-		}
 		if cause := w.staleAt[k]; cause != "" && endsStale && w.dead[k[0]] == "" && w.dead[k[1]] == "" {
 			w.stat("I7: stale after a split (visible)") // was the model's I1-stale-split; R29 §10: a split ending stale is visible
 		}

@@ -21,6 +21,18 @@ func expectViolation(t *testing.T, s *scen, inv string) {
 	t.Errorf("finding no longer reproduces (%s); trace:\n  %s", inv, strings.Join(s.w.log, "\n  "))
 }
 
+// expectSplitEnd: the f4a4d97 rules split the pair; it either fails I1 or,
+// once quiescence runs past the reconnect bound (R29-K6 lengthened it),
+// ends stale after the split.
+func expectSplitEnd(t *testing.T, s *scen, inv string) {
+	t.Helper()
+	if s.w.stats["I7: stale after a split (visible)"] > 0 {
+		t.Logf("reproduced: the pair split and ended stale")
+		return
+	}
+	expectViolation(t, s, inv)
+}
+
 // Finding A (I4, rule C): a second successor that reaches Q only in an
 // hs.init's rotations is forgotten when that handshake does not finish, so
 // Q follows the other successor and never suspends.
@@ -130,7 +142,7 @@ func findingC(s *scen, old bool) {
 	s.tick(msgTTL + hour)
 	s.w.checkEnd(true)
 	if old {
-		expectViolation(t, s, "I1/hs-lost:expired-at-relay-TTL")
+		expectSplitEnd(t, s, "I1/hs-lost:expired-at-relay-TTL")
 	} else {
 		s.noViolation("I") // §6.3.1: both stay on the old epoch
 		t.Logf("under A: %d pending abandoned at B, %d confirmed", s.w.stats["A:abandoned:B passed"], s.w.stats["A:confirmed"])
@@ -160,7 +172,7 @@ func findingC2(s *scen, old bool) {
 	s.tick(graceLen + hour)
 	s.w.checkEnd(true)
 	if old {
-		expectViolation(t, s, "I1/hs-lost")
+		expectSplitEnd(t, s, "I1/hs-lost")
 	} else {
 		s.noViolation("I") // §6.3.1: the 32-day rekey from the old epoch repairs it
 		t.Logf("under A: %d pending abandoned at B, %d confirmed", s.w.stats["A:abandoned:B passed"], s.w.stats["A:confirmed"])

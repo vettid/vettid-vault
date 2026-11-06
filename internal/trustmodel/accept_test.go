@@ -838,7 +838,20 @@ func (q *Party) answerInit(r *PeerRec, m *RMsg, cell string, app []IKLink, fork,
 	a := HS{ID: M.HS, Reconnect: M.Reconnect, Ctx: M.Ctx, PeerIK: M.FromIK, OwnIK: q.st.IK, Toks: toks,
 		Links: app, Started: q.w.Now, NewEpoch: q.w.id(), Fork: fork, RespFrom: own, RespInner: q.w.id(), RespRot: q.ownLinks(own),
 		NamedConf: namedConf, InitTs: M.Ts, AnsTs: q.now()}
-	q.w.epTruth[a.NewEpoch] = [2]PID{m.Actor, q.ID}
+	actor := m.Actor
+	if c := q.w.party(actor); c.Copy {
+		// ground truth: a copy re-depositing the original's own queued
+		// hs.init (the same bytes) is the original's handshake
+		if o := q.w.party(c.Origin); o.st.peer(q.Origin) != nil {
+			if own := o.st.peer(q.Origin).Own; own != nil && own.ID == M.HS {
+				actor = c.Origin
+			}
+			if own := o.stored.peer(q.Origin).Own; own != nil && own.ID == M.HS {
+				actor = c.Origin
+			}
+		}
+	}
+	q.w.epTruth[a.NewEpoch] = [2]PID{actor, q.ID}
 	if M.Reconnect {
 		a.RespToks = q.issue(r, q.st.Relay, true)
 	}
@@ -1184,7 +1197,7 @@ func (w *World) checkI3(q *Party, r *PeerRec, m *RMsg, d dec) {
 	if m.P.Epoch != 0 && w.copyEpochAfterR(q, r, m.P.Epoch) {
 		for _, f := range w.ikPos[key] {
 			if r.followed(f.L) && m.Seq > f.Pos.Seq && !(m.Box != f.Pos.Box && m.DepAt == f.Pos.DepAt) { // ground truth
-				w.violate("I3", "%s accepts %s under copy epoch E%d deposited after the ik link %v", q.Name, kindName[m.P.Kind], m.P.Epoch, f.L)
+				w.violate("I3", "%s accepts %s under copy epoch E%d deposited after the ik link %v (epoch %s at %s)", q.Name, kindName[m.P.Kind], m.P.Epoch, f.L, r.epochState(m.P.Epoch), q.Name)
 			}
 		}
 	}
@@ -1264,4 +1277,24 @@ func (q *Party) f1Demote(r *PeerRec, M *Msg, app []IKLink, x Pos, pre int) bool 
 		return false
 	}
 	return false
+}
+
+// epochState names an epoch's state for diagnostics.
+func (r *PeerRec) epochState(id int) string {
+	ep := r.epoch(id)
+	switch {
+	case ep == nil:
+		return "unknown"
+	case ep.Demoted:
+		return "demoted"
+	case ep.Destroyed:
+		return "destroyed"
+	case ep.Abandoned:
+		return "abandoned while pending"
+	case ep.Pending:
+		return "pending"
+	case ep.ID == r.Cur:
+		return "current"
+	}
+	return "superseded"
 }

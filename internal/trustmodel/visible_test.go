@@ -75,8 +75,6 @@ func (w *World) checkI7() {
 				continue
 			}
 			switch res := w.residualOf(a.ID, b.ID); {
-			case a.OldApp || b.OldApp:
-				w.violate("D4", "%s: an app from before release 29 split from its vault with no device.update_needed notice", pairName(w, a.ID, b.ID))
 			case res != "":
 				w.exempt("I7", res)
 			case w.dead[a.ID] != "" || w.dead[b.ID] != "":

@@ -305,6 +305,15 @@ func TestR29OwnCopyCannotHideFork(t *testing.T) {
 	f.rotate(2) // the copy's second successor of ik0
 	f.deliver(2, 1, kRotate)
 	f.deliver(2, 1, kAny)
+	if OwnCopyGotFromPeerSuspends {
+		// S13 (a): P sent a message under E1, so the own_copy exception
+		// does not hold: the copy's fork is caught at once (ref epoch).
+		if !f.suspendedRef(1, "epoch") {
+			f.dump()
+			t.Fatal("S13 (a): the copy's reconnect over an epoch P sent under did not suspend")
+		}
+		return
+	}
 	if f.p(1).suspended() {
 		f.dump()
 		t.Fatal("suspended on the copy's fork alone")

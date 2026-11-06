@@ -633,3 +633,81 @@ func TestR29QuotaRetryForOtherDeposits(t *testing.T) {
 		t.Fatalf("a deposit refused quota_exceeded (429) arrived %d times: dropped", n)
 	}
 }
+
+// S13 option (a), behind OwnCopyGotFromPeerSuspends: the own_copy setup
+// (side 1's copy confirmed E1 at side 0; the real side 1 never activated
+// it), where the harmless case (only hs.confirm under E1:
+// TestR29OldCopyFinishesAnswerMisattributedShape) stays quiet; here the
+// copy also sent a message under E1, so side 0 shows the paused-connection
+// feed item and suspends (fork_suspected, ref epoch), as the fork rule.
+func TestR29OwnCopyGotFromPeerSuspends(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	f.rekey(0)
+	f.deliver(0, 1, kHSInit)
+	snap := f.snapshot(1)
+	f.rotate(1)
+	f.deliver(0, 1, kAny)
+	f.deliver(1, 0, kHSResp)
+	f.startCopy(1, snap)
+	f.deliver(0, 2, kHSFin)
+	f.deliver(2, 0, kConfirm)
+	f.note(2, "copy-under-E1") // the copy sent a real message under E1
+	f.deliver(2, 0, kNote)
+	f.deliver(1, 0, kRotate)
+	f.settle()
+	f.advance(time.Hour)
+	f.tick(0)
+	f.tick(1)
+	f.settle()
+	if !OwnCopyGotFromPeerSuspends {
+		// switched off: the exception as before, quiet
+		if f.p(0).suspended() || !f.activity(0, "connection.fork_suspected", "own_copy") {
+			t.Fatal("with S13 (a) off the exception is not as before")
+		}
+		return
+	}
+	if !f.suspendedRef(0, "epoch") || f.activity(0, "connection.fork_suspected", "own_copy") {
+		f.dump()
+		t.Fatal("own_copy over an epoch P sent under: not the fork rule's suspension")
+	}
+	feed := false
+	for _, a := range f.sink[0].got {
+		feed = feed || a.Kind == "connection.fork_suspected" && a.Ref == "epoch" && a.Feed
+	}
+	if !feed {
+		t.Fatal("no feed item")
+	}
+}
+
+// 0.86.6: keepToHeld shows the revert's History line only when a copy was
+// held; nothing held or dropped audits nothing; an expired copy is
+// audited drop.held_expired.
+func TestR29KeepToHeldAudits(t *testing.T) {
+	f := newR29Fx(t, false, true)
+	f.longTokens()
+	f.rekey(0)
+	f.deliver(0, 1, kHSInit)
+	f.deliver(1, 0, kHSResp)
+	f.do(0, func(m *Manager, p *Peer) {
+		m.keepToHeld(p, false, f.clk) // no copies
+	})
+	if f.activity(0, "connection.epoch_reverted", "") {
+		t.Fatal("an empty keep end audited epoch_reverted")
+	}
+	g := newR29Fx(t, false, true)
+	g.longTokens()
+	g.rekey(0)
+	g.deliver(0, 1, kHSInit)
+	g.deliver(1, 0, kHSResp)
+	g.do(0, func(m *Manager, p *Peer) {
+		m.sendWith(p, "test.note", json.RawMessage(`{"n":"short"}`), SendOptions{Exp: g.clk.Add(time.Minute)}, g.clk)
+		m.sendTo(p, "test.note", json.RawMessage(`{"n":"durable"}`), g.clk)
+	})
+	g.advance(time.Hour)
+	g.do(0, func(m *Manager, p *Peer) { m.keepToHeld(p, false, g.clk) })
+	if !g.activity(0, "connection.epoch_reverted", "") || !g.audited(0, "held_expired") {
+		g.dump()
+		t.Fatal("a keep end with a held copy and an expired one: not audited as 0.86.6 says")
+	}
+}

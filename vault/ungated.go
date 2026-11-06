@@ -176,18 +176,31 @@ func (m *Manager) keepToHeld(p *Peer, keepOld bool, now time.Time) {
 		return
 	}
 	kept, dropped := copies.take(p)
+	held := 0
 	for _, c := range kept {
 		in, err := envelope.ParseInner(c.Inner, envelope.ModeSealed)
-		if err != nil || !in.Exp.IsZero() && !now.Before(in.Exp) {
+		if err != nil {
+			continue
+		}
+		if !in.Exp.IsZero() && !now.Before(in.Exp) {
+			m.audit(now, "held_expired", p.ID) // as a held entry that expires (0.86.6)
 			continue
 		}
 		m.holdInner(p, in, c.Wake)
+		held++
 	}
 	ref := ""
 	if dropped > 0 {
 		ref = strconv.Itoa(dropped)
 	}
-	m.record(Activity{Kind: "connection.epoch_reverted", ConnectionID: connID(p), DeviceID: devID(p), Ref: ref, Audit: true}, now)
+	switch {
+	case held > 0:
+		// The revert's History line ("<connection name>: some messages were
+		// resent."), only when a copy was held (0.86.6).
+		m.record(Activity{Kind: "connection.epoch_reverted", ConnectionID: connID(p), DeviceID: devID(p), Ref: ref, Audit: true}, now)
+	case dropped > 0:
+		m.note(now, "epoch_reverted_dropped_"+ref, p.ID) // copies lost to the caps, none held: no History line
+	}
 	if kr := m.sessions[p.ID]; kr != nil && !keepOld {
 		kr.Release(epochIDOf(r.Old), now.Add(handshake.ReceiveKeyRetention))
 	}

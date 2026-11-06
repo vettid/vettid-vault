@@ -404,6 +404,11 @@ type EpochMeta struct {
 	// GatedAtE: the gate as judged at the hs.init of the handshake whose
 	// rule E destroyed it (0.86.6 S11).
 	GatedAtE bool `json:"gated_at_e,omitempty"`
+	// GotFromPeer: a message from P other than a handshake message
+	// (hs.init, hs.resp, hs.fin, hs.confirm) passed beforeAccept under
+	// this epoch (S13 option a). An epoch recorded before it (release-28
+	// state) reads as false.
+	GotFromPeer bool `json:"got_from_peer,omitempty"`
 }
 
 // PendingEpoch is an initiator's pending epoch (§6.3.1).

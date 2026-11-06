@@ -843,6 +843,11 @@ func (m *Manager) finishReconnect(p *Peer, aw *AwaitingHS, fr *handshake.FinResu
 	}
 	if aw.OwnCopy {
 		m.acceptOwnCopy(p, pend.Named, now) // §3.4.1: judged once sig_I verified
+		if p.suspended() {
+			fr.Epoch.Destroy() // S13 (a): suspended instead
+			denyIssued()
+			return
+		}
 	}
 	// The chain is worked out again against what the connection followed
 	// since the hs.init (§3.4, §6.6): links followed meanwhile (from

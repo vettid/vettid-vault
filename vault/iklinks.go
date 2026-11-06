@@ -577,13 +577,24 @@ func (p *Peer) forkEpoch(ctx []byte) (fork, ownCopy bool) {
 // ("<connection name> restarted its secure session with you.", app text)
 // and no feed item.
 func (m *Manager) acceptOwnCopy(p *Peer, ctx []byte, now time.Time) {
-	after := false
+	after, got := false, false
 	for i := range p.Epochs {
 		e := &p.Epochs[i]
+		if after {
+			got = got || e.GotFromPeer // demoted already (F1) or not
+		}
 		if after && !e.Demoted {
 			e.Demoted, e.DemotedAt, e.DemotedMsg, e.OwnCopy = true, time.Time{}, "", true
 		}
 		after = after || bytes.Equal(e.ID, ctx)
+	}
+	if got && OwnCopyGotFromPeerSuspends {
+		// S13 option (a): P sent a message under an epoch the exception
+		// would demote, so "P never activated it" does not hold: this is
+		// the fork rule's outcome (§3.4.1 "Epochs after an ik link", ref
+		// epoch): suspended, with its paused-connection feed item.
+		m.suspendForkRef(p, "epoch", now)
+		return
 	}
 	if p.Pending != nil {
 		m.abandonPending(p, "own_copy", false, now)
@@ -629,6 +640,9 @@ func (m *Manager) rekeyOtherEpoch(p *Peer, in *envelope.Inner, ep *handshake.Epo
 	// unreachable, since anything received under a later epoch both
 	// confirms it and ends the revert keep that held that rk.)
 	m.acceptOwnCopy(p, id[:], now)
+	if p.suspended() {
+		return false, true // S13 (a)
+	}
 	p.LastEpochID = append([]byte(nil), id[:]...)
 	m.reconnectNaming(p, id[:], "own_copy", now)
 	return false, true
@@ -666,6 +680,13 @@ func (m *Manager) rekeyPrecheck(p *Peer, in *envelope.Inner, ep *handshake.Epoch
 	}
 	return nil
 }
+
+// OwnCopyGotFromPeerSuspends switches S13 option (a), for the owner's
+// decision: when an epoch the own_copy exception would demote had a
+// message from P under it (EpochMeta.GotFromPeer), the connection is
+// suspended with fork_suspected (ref epoch) and its feed item instead.
+// false: the exception as before (audit and History line only).
+const OwnCopyGotFromPeerSuspends = true
 
 // --- the rotating side ---
 

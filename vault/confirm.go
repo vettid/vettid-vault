@@ -3,6 +3,7 @@ package vault
 import (
 	"bytes"
 	"crypto/ed25519"
+	"strings"
 	"time"
 
 	"github.com/vettid/vettid-vault/vms/envelope"
@@ -424,6 +425,10 @@ func (m *Manager) beforeAccept(p *Peer, ep *handshake.Epoch, in *envelope.Inner,
 		return true
 	}
 	fin := in.Type == handshake.TypeFin
+	if meta != nil && !meta.GotFromPeer && !strings.HasPrefix(in.Type, "hs.") {
+		meta.GotFromPeer = true // S13 (a): written with this batch
+		m.dirty = true
+	}
 	if h := p.HoldFor; h != nil && !fin {
 		switch {
 		case bytes.Equal(h.Epoch, id[:]):

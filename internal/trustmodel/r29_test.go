@@ -106,104 +106,10 @@ func (q *Party) needsReconnect(r *PeerRec) bool {
 	return q.newSpec() && !r.Device && r.Status == stActive && r.Cur == 0 && r.Own == nil && r.Pend == nil
 }
 
-// ---------- R29-U1, the upgrade migration ----------
-
-// migrate: R29-U1 (§6.3.1 "Capability and upgrade"). The run so far was
-// release 28 (Config.PreUpgrade: the f4a4d97 rules, activation at
-// hs.resp, no hs.confirm); every party migrates at once (the test vaults
-// upgrade together; a device's app too, except an old app), stored and
-// memory state alike. Each connection's and device's stored epoch becomes
-// its epoch record: confirmed = current, signer = the stored ik, received
-// flag clear. Earlier epochs keep only their receive keys (an epoch
-// established before release 29 counts as signed by the ik current for P
-// at the upgrade, §3.4.1 "The neutral feed item"). An outgoing handshake
-// in flight is cleaned up as an aborted one (handshake_not_restored, its
-// hs.init not sent, its tokens denied: the model restores none); answers
-// awaiting hs.fin run the responder half.
-func (w *World) migrate() {
-	if w.migrated || !w.preUpgrade {
-		return
-	}
-	w.migrated, w.optA, w.migratedAt = true, true, w.Now
-	w.hit("U1:migrated")
-	w.logf("UPGRADE: every party migrates to release 29 (R29-U1)")
-	// ground truth for §3.4.1 Residuals, "two splits at the upgrade": an
-	// initiator activated at hs.resp, its hs.fin not yet processed, or a
-	// pair already split by a lost hs.fin under release 28
-	for _, p := range w.real() {
-		for _, r := range p.st.Peers {
-			if o := w.party(r.ID).st.peer(p.ID); o != nil && r.Status == stActive && o.Status == stActive && r.Cur != o.Cur {
-				w.u1Split[pairKey(p.ID, r.ID)] = true
-				w.hit("U1:split-at-upgrade")
-			}
-			if o := w.party(r.ID).st.peer(p.ID); o != nil && r.Cur != 0 {
-				for _, a := range o.Ans {
-					if a.NewEpoch == r.Cur {
-						w.u1Risk[pairKey(p.ID, r.ID)] = [2]int{int(r.ID), r.Cur}
-						w.hit("U1:hs.fin-in-flight")
-					}
-				}
-			}
-		}
-	}
-	for _, p := range w.P {
-		for _, st := range []*State{&p.st, &p.stored} {
-			for i := range st.Peers {
-				p.migratePeer(st, &st.Peers[i])
-			}
-		}
-		if !p.Copy {
-			p.storedOut = map[int]bool{}
-			for _, e := range p.stored.Out {
-				p.storedOut[e.ID] = true
-			}
-		}
-	}
-}
-
-func (p *Party) migratePeer(st *State, r *PeerRec) {
-	if r.Cur == 0 {
-		if e := r.lastEpoch(); e != nil {
-			r.Cur = e.ID
-		}
-	}
-	var eps []Epoch
-	for _, e := range r.Epochs {
-		if e.Demoted || e.Destroyed {
-			continue
-		}
-		e.Signer, e.Flag, e.Pending, e.Abandoned = r.IK, false, false, false
-		e.EverCur = e.ID == r.Cur || e.Superseded != 0
-		if e.ID == r.Cur {
-			e.Superseded, e.EverCur = 0, true
-		}
-		eps = append(eps, e)
-	}
-	r.Epochs = eps
-	r.ConfID, r.ConfUntil, r.Pend = r.Cur, 0, nil
-	r.AbanIDs, r.DemName, r.RCNamed, r.RCFails, r.DropAns = nil, 0, 0, 0, nil
-	if o := r.Own; o != nil {
-		if st == &p.st {
-			p.w.hit("U1:handshake-not-restored")
-		}
-		for i := range st.Out {
-			if e := &st.Out[i]; e.M.Kind == KInit && e.M.HS == o.ID && !e.Done {
-				e.Ended = true
-			}
-		}
-		by := map[Key][]int{}
-		for _, t := range o.Toks {
-			by[t.Iss] = append(by[t.Iss], t.JTI)
-		}
-		for b, j := range by {
-			st.Out = append(st.Out, Entry{ID: p.w.id(), Denylist: true, Box: b, With: b, Revoke: j})
-		}
-		r.Own = nil
-	}
-	if len(r.Ans) > 0 && st == &p.st {
-		p.w.hit("U1:answer-runs-responder-half")
-	}
-}
+// R29-U1 (0.87.1): there is no upgrade migration. A release-29 vault
+// refuses state from an earlier release (state_unsupported) and is
+// re-enrolled; that is a unit test in the vault, not a two-sided run, so
+// every run starts on release 29.
 
 // ---------- R29-D4, an app from before release 29 ----------
 
@@ -254,7 +160,6 @@ func (w *World) feedItem(q, r PID, kind string) {
 // Residual reasons: each exempts a pair from I1, I6 and I7, and is counted.
 const (
 	resOldApp         = "an app from before release 29 (earlier releases are unsupported; R29-D4 notice)"
-	resU1Fin          = "an hs.fin lost at the upgrade (two splits at the upgrade, U1)"
 	resCopyInit       = "a copy acting as initiator sent nothing but hs.fin"
 	resBeforeRotation = "an old copy acting before the original's rotation is seen (an old copy can make any handshake as P)"
 	resLiveMailbox    = "an old copy collects, acks or deletes the original's live mailbox"
@@ -264,18 +169,6 @@ const (
 func (w *World) residualOf(a, b PID) string {
 	if w.party(a).OldApp || w.party(b).OldApp {
 		return resOldApp // I7 still requires the R29-D4 notice when the pair split
-	}
-	if w.u1Split[pairKey(a, b)] {
-		return resU1Fin
-	}
-	if x, ok := w.u1Risk[pairKey(a, b)]; ok {
-		resp, other := w.party(PID(x[0])), a
-		if other == resp.ID {
-			other = b
-		}
-		if r := resp.st.peer(other); r == nil || r.epoch(x[1]) == nil {
-			return resU1Fin // the responder does not hold the epoch the migration made current
-		}
 	}
 	return ""
 }

@@ -38,17 +38,12 @@ type World struct {
 	audits        map[[2]PID]int
 	everSplit     map[[2]PID]bool     // pair -> its epochs split at some point (both active)
 	feed          map[[2]PID][]string // pair -> feed items to the member about it (R29 I7)
-	preUpgrade    bool                // R29-U1: the run starts on release 28 (the f4a4d97 rules) and upgrades (opUpgrade)
-	migrated      bool
-	u1Split       map[[2]PID]bool   // pair -> split at the migration (an hs.fin lost under release 28)
-	migratedAt    int64             // R29-U1: the upgrade migration ran
-	u1Risk        map[[2]PID][2]int // pair -> (responder, epoch): at the migration that hs.fin was still unprocessed (§3.4.1 Residuals)
-	ruleEKeepFin  bool              // TRUSTMODEL_RULEEFIN=keep: rule E leaves an unsent hs.fin for a destroyed epoch in the outbox (before r7)
-	copyExpo      map[[2]int]*expo  // (honest party, copy epoch): when it was used
-	copyFlag      map[[2]int]bool   // (honest party, copy epoch): its received flag was set (ground truth, I7)
-	copyCur       map[[2]int]bool   // (honest party, copy epoch): it became current there (ground truth, I7)
-	initIK        map[PID]Key       // each party's ik at the start (I6)
-	debugUnlinked bool              // scenarios: the relay's rotate and registration get no answer
+	ruleEKeepFin  bool                // TRUSTMODEL_RULEEFIN=keep: rule E leaves an unsent hs.fin for a destroyed epoch in the outbox (before r7)
+	copyExpo      map[[2]int]*expo    // (honest party, copy epoch): when it was used
+	copyFlag      map[[2]int]bool     // (honest party, copy epoch): its received flag was set (ground truth, I7)
+	copyCur       map[[2]int]bool     // (honest party, copy epoch): it became current there (ground truth, I7)
+	initIK        map[PID]Key         // each party's ik at the start (I6)
+	debugUnlinked bool                // scenarios: the relay's rotate and registration get no answer
 
 	// Fix switches for the review findings (f_scenarios_test.go). Each is
 	// false by default (the fix on); true turns that one fix off.
@@ -94,7 +89,7 @@ func newWorld(seed uint64) *World {
 	w := &World{rng: rand.New(rand.NewPCG(seed, 7)), issuer: map[int]Key{}, epTruth: map[int][2]PID{},
 		rlinkBy: map[RLink]rot{}, iklinkBy: map[IKLink]rot{}, evid: map[[2]PID]map[Key]map[Key]bool{},
 		ikPos: map[[2]PID][]ikFollow{}, answered: map[int]bool{},
-		ended: map[int]bool{}, ever: map[PID]map[int]bool{}, probes: map[int]bool{}, stats: map[string]int{}, dead: map[PID]string{}, ttlFin: map[[2]PID]string{}, probeDep: map[int][2]PID{}, probeFate: map[int]string{}, hasEpoch: map[[2]int]bool{}, staleAt: map[[2]PID]string{}, hsOrigin: map[int]string{}, suspAt: map[[2]PID]int64{}, audits: map[[2]PID]int{}, everSplit: map[[2]PID]bool{}, feed: map[[2]PID][]string{}, u1Risk: map[[2]PID][2]int{}, u1Split: map[[2]PID]bool{}, copyExpo: map[[2]int]*expo{}, copyFlag: map[[2]int]bool{}, copyCur: map[[2]int]bool{}, initIK: map[PID]Key{}, probeEpoch: map[int]int{}, forkDue: map[[2]PID]int{}, evidKind: map[Key]string{}}
+		ended: map[int]bool{}, ever: map[PID]map[int]bool{}, probes: map[int]bool{}, stats: map[string]int{}, dead: map[PID]string{}, ttlFin: map[[2]PID]string{}, probeDep: map[int][2]PID{}, probeFate: map[int]string{}, hasEpoch: map[[2]int]bool{}, staleAt: map[[2]PID]string{}, hsOrigin: map[int]string{}, suspAt: map[[2]PID]int64{}, audits: map[[2]PID]int{}, everSplit: map[[2]PID]bool{}, feed: map[[2]PID][]string{}, copyExpo: map[[2]int]*expo{}, copyFlag: map[[2]int]bool{}, copyCur: map[[2]int]bool{}, initIK: map[PID]Key{}, probeEpoch: map[int]int{}, forkDue: map[[2]PID]int{}, evidKind: map[Key]string{}}
 	w.R = newRelay(w)
 	w.Now = 1000 * day
 	return w

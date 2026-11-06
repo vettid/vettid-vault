@@ -13,16 +13,15 @@
 // epoch rules K4 and K7, the received flag F3), the initiator and
 // responder halves of §6.3.1 (pending epochs, confirmation, rule E, the
 // held queue K5, the reconnect bound K6), the rotating side (S1-S9), the
-// upgrade migration (U1) and the device rules (D1-D4), and the invariants
+// device rules (D1-D4; 0.87.1: there is no upgrade migration, R29-U1), and the invariants
 // I1-I7 of §3.4.1, under random runs with crashes, failed writes, locks,
 // time jumps, lease reordering and an old-copy actor. The residuals of
 // §3.4.1 are explicit exemptions, each counted with its reason.
 //
 // Configurations (TestRandom, TestR29Coverage; genRun):
 //   - the oracle config (default): release 29 builds no relay-key
-//     rotation, so Table A reduces to current/foreign. A quarter of the
-//     runs start on release 28 (Config.PreUpgrade: the f4a4d97 rules,
-//     activation at hs.resp) and migrate at a random point (R29-U1); a
+//     rotation, so Table A reduces to current/foreign. Every run starts
+//     on release 29 (0.87.1: earlier state is refused and re-enrolled); a
 //     quarter of the runs with devices have an app from before release 29
 //     (Config.OldApp, R29-D4).
 //   - the regression config (TRUSTMODEL_RELAYROT=1): the same with
@@ -46,7 +45,7 @@
 // states), world (parties, writes, deposits, collecting), accept (the
 // receiving side), confirm (§6.3.1: pending epochs, confirmation, rule E,
 // timers), rotate (the rotating side, handshake starts, unlock, timers),
-// r29 (the epoch a reconnect names, the held queue, U1, D4, the
+// r29 (the epoch a reconnect names, the held queue, D4, the
 // residuals, hits by rule ID), reach (generators: an old copy as
 // responder and as initiator, hs.fin loss around a rotation), run
 // (actions, quiescence, I1-I6, shrinking), visible (splits, feed items,

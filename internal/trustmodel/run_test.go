@@ -14,7 +14,6 @@ import (
 type Config struct {
 	NoRelayRot bool // no relay-key rotation (the oracle config; release 29 builds none)
 	OldApp     bool // the first device is an app from before release 29 (R29-D4)
-	PreUpgrade bool // R29-U1: start on release 28 (the f4a4d97 rules); opUpgrade migrates every party
 	Skew       bool // each party's clock off by up to a day either way (the 2-day budget)
 	OldRules   bool // f4a4d97 rules: no §6.3.1 (activation at hs.fin)
 	Vaults     int  // 2 or 3
@@ -25,8 +24,7 @@ type Config struct {
 
 func setup(cfg Config, seed uint64) *World {
 	w := newWorld(seed)
-	w.optA = !cfg.OldRules && !cfg.PreUpgrade
-	w.preUpgrade = cfg.PreUpgrade
+	w.optA = !cfg.OldRules
 	w.relayRot = !cfg.NoRelayRot
 	w.p429, w.pRef = 0, 0
 	mk := func(name string, dev bool) *Party {
@@ -141,7 +139,6 @@ const (
 	opResolve
 	opRekey
 	opPeek
-	opUpgrade     // R29-U1: every party migrates to release 29 (Config.PreUpgrade; inserted, weight 0)
 	opCopyRespond // reach: an old copy answers and confirms Q's handshake
 	opCopyInit    // reach: an old copy makes a handshake with Q as initiator
 	opFinLoss     // reach: hs.fin lost around a rotation
@@ -150,10 +147,10 @@ const (
 
 var opName = [...]string{"rotate", "rotate-both", "device-rotate", "send", "collect", "crash-at", "fail-write-at",
 	"lock", "unlock", "time", "snapshot", "copy-acts", "copy-forks", "copy-steals", "copy-deletes-mailbox",
-	"resolve", "rekey", "peek(lease)", "upgrade", "copy-responds", "copy-initiates", "fin-loss"}
+	"resolve", "rekey", "peek(lease)", "copy-responds", "copy-initiates", "fin-loss"}
 
 // weights of the random choice
-var opWeight = [...]int{6, 2, 2, 8, 14, 3, 3, 4, 6, 8, 3, 3, 1, 1, 1, 2, 3, 3, 0, 2, 2, 2}
+var opWeight = [...]int{6, 2, 2, 8, 14, 3, 3, 4, 6, 8, 3, 3, 1, 1, 1, 2, 3, 3, 2, 2, 2}
 
 type Action struct {
 	Op      Op
@@ -295,8 +292,6 @@ func (w *World) exec(a Action) {
 				p.flush()
 			})
 		}
-	case opUpgrade:
-		w.migrate()
 	case opCopyRespond, opCopyInit:
 		if len(cs) == 0 { // reach: take the copy now (the original may rotate after it)
 			w.makeCopy(real[a.A%len(real)])
@@ -854,11 +849,6 @@ func shrink(cfg Config, seed uint64, acts []Action, inv string) []Action {
 	for chunk := len(cur) / 2; chunk >= 1; chunk /= 2 {
 		for i := 0; i+chunk <= len(cur); {
 			try := append(slices.Clone(cur[:i]), cur[i+chunk:]...)
-			for _, a := range cur[i : i+chunk] {
-				if a.Op == opUpgrade { // R29-U1: the upgrade stays (else the run is release 28 only)
-					try = slices.Insert(try, i, a)
-				}
-			}
 			if len(try) == len(cur) {
 				i += chunk
 				continue

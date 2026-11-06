@@ -10,12 +10,14 @@ import (
 
 // Rule coverage (R29 rule list §9.4): N random runs of the configuration
 // the environment selects (the oracle config by default); every release-29
-// rule of VAULT-MESSAGING 0.87.0 §6.3.2, and every branch listed below,
+// rule of VAULT-MESSAGING 0.87.1 §6.3.2, and every branch listed below,
 // must be hit at least TRUSTMODEL_MINHITS times (default 3). The hits are
 // counted by w.hit ("R29 <ID>:<branch>").
 
 // r29Rules: the rule IDs of §6.3.2, in its order (R29-F2 was withdrawn).
-var r29Rules = []string{"G1", "G2", "U1", "L1", "I1", "I2", "I3", "I4", "I5", "I6", "I7",
+// R29-U1 (0.87.1: no migration, earlier state refused) is not a two-sided
+// rule: it is tested in the vault (§6.3.2).
+var r29Rules = []string{"G1", "G2", "L1", "I1", "I2", "I3", "I4", "I5", "I6", "I7",
 	"R1", "R2", "R3", "R4", "R5", "R6", "X1", "X2", "X3", "X4", "X5", "X6",
 	"K1", "K2", "K3", "K4", "K5", "K6", "K7", "K8", "F1", "F3", "D1", "D2", "D3", "D4"}
 
@@ -23,7 +25,6 @@ var r29Rules = []string{"G1", "G2", "U1", "L1", "I1", "I2", "I3", "I4", "I5", "I
 // config cannot reach are listed in r29Unreachable with the reason.
 var r29Branches = []string{
 	"G1:advertised", "G2:hs_confirm-seen",
-	"U1:migrated", "U1:handshake-not-restored", "U1:answer-runs-responder-half", "U1:hs.fin-in-flight",
 	"L1:answer-expired-L", "L1:rekey-unanswered-16d",
 	"I1:pending", "I2:confirmed", "I3:hs.confirm-held", "I3:outbox-waits",
 	"I4:no-rekey-while-pending", "I4:no-rekey-while-answer-awaits-fin",
@@ -39,6 +40,7 @@ var r29Branches = []string{
 	"X6:sealed-rekey-refused",
 	"K1:identity.rotate-whole-chain", "K1:hs.init-whole-chain",
 	"K2:S5-answer-dropped", "K2:S5-pending-abandoned", "K2:answer-dropped-H5", "K2:pending-abandoned-at-link",
+	"K2:abandoned-demoted", "K2:abandoned-flag-suspend",
 	"K3:identity.rotate-resent",
 	"K4:demote-audit", "K4:current-demoted", "K4:flag-suspend",
 	"K5:held", "K5:released", "K5:held-ended", "K5:hs.confirm-not-sent", "K5:reconnect-after-demotion",
@@ -47,7 +49,7 @@ var r29Branches = []string{
 	"K8:link-kept-as-seen", "K8:second-successor-suspends",
 	"F1:fork-by-ctx-rekey", "F1:fork-by-ctx-reconnect",
 	"F3:flag-set", "F3:flag-set-by-hs.confirm",
-	"D1:B-rekey", "D2:device-starts-no-rekey", "D2:confirm-rate-limited", "D3:device-rekey-refused",
+	"D1:B-rekey", "D1:B-no-token-stale", "D2:device-starts-no-rekey", "D2:confirm-rate-limited", "D3:device-rekey-refused",
 	"D4:notice message without hs_confirm", "D4:notice D3 refusal",
 }
 
@@ -67,9 +69,7 @@ var r29Unreachable = map[string]string{
 	"I6:token_expired-before-own-exp":    "token_expired while the own clock is behind",
 	"I6:rekey-abandoned-token_expired":   "token_expired with a pending rekey (the parties check exp before depositing)",
 	"I6:reconnect-kept-at-token_expired": "as above, with a pending reconnect",
-	"G2:sticky":                          "a message without hs_confirm after it was seen (a copy from before the upgrade)",
-	"U1:answer-pinned-to-superseded-ik":  "an answer kept across a release-28 rotation (see the findings)",
-	"U1:split-at-upgrade":                "a lost hs.fin under release 28 before the upgrade",
+	"G2:sticky":                          "a message without hs_confirm after it was seen (a copy taken before the device first advertised it)",
 }
 
 func TestR29Coverage(t *testing.T) {

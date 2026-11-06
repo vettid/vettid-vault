@@ -116,6 +116,11 @@ func (q *Party) abandonPending(r *PeerRec, why string, restart bool) {
 	}
 	valid := r.standing(r.KeyFor, r.Relay, q.now()).JTI != 0
 	switch {
+	case why == "B passed" && r.Device && !valid:
+		q.w.hit("D1:B-no-token-stale")
+		q.deviceNotice(r, "B passed")
+		q.markStale(r, "D1: B with no valid token (0.87.1, finding F)") // R29-D1
+		q.h5(r, -1)
 	case why == "B passed" && r.Device:
 		q.w.hit("D1:B-rekey")
 		q.deviceNotice(r, "B passed")
@@ -357,11 +362,6 @@ func (q *Party) markStale(r *PeerRec, ref string) {
 	}
 	key := [2]PID{min(q.ID, r.ID), max(q.ID, r.ID)}
 	if _, seen := w.staleAt[key]; seen {
-		return
-	}
-	if w.preUpgrade && !w.migrated {
-		w.stat("stale before the upgrade (release 28)")
-		w.staleAt[key] = ""
 		return
 	}
 	pr := w.party(r.ID).st.peer(q.ID)

@@ -124,33 +124,6 @@ func TestR29K6ThirdFailureStale(t *testing.T) {
 	}
 }
 
-// FINDING (spec, R29-U1 with K7 and F1): I (release 28) rekeys with R and
-// activates E1 at hs.resp; its hs.fin is still in R's mailbox at the
-// upgrade, so U1 makes E1 I's confirmed epoch with a clear flag. R rotates
-// its ik (S5 drops its answer) and sends identity.rotate under E0, then its
-// restarted rekey naming E0. I: strict F1 demotes E1 and reconnects naming
-// E0; R's rekey naming E0 is older than I's confirmed epoch E1, whose
-// signer is now an ancestor: fork by ctx, I suspends R although no copy
-// exists (I4-false). The test pins the finding: it fails when the spec or
-// the model changes it.
-func TestFindingU1InFlightFinFalseFork(t *testing.T) {
-	w := setup(Config{Vaults: 2, PreUpgrade: true, NoRelayRot: true}, 1)
-	s := &scen{t, w}
-	I, R := s.p(0), s.p(1)
-	s.do(I, func() { I.startHS(I.st.peer(R.ID), false); I.write(); I.flush() })
-	s.run(1, R) // R answers
-	s.run(1, I) // release 28: I activates E1 at hs.resp, hs.fin to R
-	s.w.migrate()
-	s.rotate(R, pathCred) // S5: R drops its answer; identity.rotate and a rekey under E0
-	s.run(4, I, R)
-	r := I.st.peer(R.ID)
-	s.w.checkEnd(false)
-	t.Logf("I's record of R: status %d (%s); violations %v", r.Status, r.Ref, s.viols())
-	if r.Status != stSuspended {
-		t.Errorf("the finding no longer reproduces: status %d\n  %s", r.Status, s.trace())
-	}
-}
-
 // R29-R6: under an epoch rule E destroyed, an authenticated message with a
 // later inner ts than the recorded one is fork evidence; an earlier one is
 // refused superseded_epoch.

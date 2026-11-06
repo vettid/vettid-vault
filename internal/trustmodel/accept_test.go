@@ -587,7 +587,7 @@ func (q *Party) tableBRotate(r *PeerRec, M *Msg, pos Pos) dec {
 			}
 		}
 		pre := r.Cur
-		if q.followIK(r, app, pos, true) {
+		if q.followIK(r, app, pos, true, M.Epoch) {
 			return dec{"suspend", "fork", cell + ":K4-flag"}
 		}
 		if q.f1Demote(r, M, app, pos, pre) {
@@ -612,7 +612,11 @@ func (q *Party) tableBRotate(r *PeerRec, M *Msg, pos Pos) dec {
 // connection.fork_suspected, ref epoch, no feed item). A demoted current
 // epoch starts the reconnect after a demotion (K5) unless the caller is
 // completing a handshake (restart false). It reports a suspension.
-func (q *Party) followIK(r *PeerRec, app []IKLink, x Pos, restart bool) bool {
+// followIK follows links at x. msgEp is the epoch the message carrying them
+// traveled under (0.87.1, "Pending epochs at a link": epochs Q began and
+// abandoned while pending that are later than it are ended); -1 for an
+// hs.resp, which names Q's epoch, not P's.
+func (q *Party) followIK(r *PeerRec, app []IKLink, x Pos, restart bool, msgEp int) bool {
 	for _, l := range app {
 		if r.isAncestor(l.New) || r.isRejected(l.New) {
 			q.w.violate("I3", "%s makes current ancestor/rejected ik %d", q.Name, l.New)
@@ -649,6 +653,9 @@ func (q *Party) followIK(r *PeerRec, app []IKLink, x Pos, restart bool) bool {
 				}
 			}
 		}
+		if q.newSpec() && msgEp >= 0 && q.abandonedAtLink(r, l, msgEp) {
+			return true
+		}
 	}
 	if r.Cur == 0 && r.Status == stActive && restart {
 		if q.newSpec() {
@@ -657,6 +664,31 @@ func (q *Party) followIK(r *PeerRec, app []IKLink, x Pos, restart bool) bool {
 			q.abandonOwn(r)
 			q.startHS(r, false) // f4a4d97: a rekey sealed to the link's new_kem
 		}
+	}
+	return false
+}
+
+// abandonedAtLink: R29-K2 (0.87.1, finding C). An epoch Q began, abandoned
+// while pending, whose sig_R is by the link's old_ik or an ancestor and that
+// is later than the epoch the link traveled under: P dropped that answer at
+// its rotation, so a set flag means a copy used it (suspend); otherwise it is
+// demoted from the start.
+func (q *Party) abandonedAtLink(r *PeerRec, l IKLink, msgEp int) bool {
+	im := slices.IndexFunc(r.Epochs, func(e Epoch) bool { return e.ID == msgEp })
+	for j := im + 1; j < len(r.Epochs); j++ {
+		ep := &r.Epochs[j]
+		if !ep.MineInit || !ep.Abandoned || ep.Demoted || ep.Destroyed || !(ep.Signer == l.Old || r.isAncestor(ep.Signer)) {
+			continue
+		}
+		if ep.Flag {
+			q.w.hit("K2:abandoned-flag-suspend")
+			q.w.logf("%s: abandoned E%d of %s, later than E%d, has its received flag set: a copy used it", q.Name, ep.ID, q.w.party(r.ID).Name, msgEp)
+			q.suspend(r, "connection.fork_suspected/epoch")
+			return true
+		}
+		q.w.hit("K2:abandoned-demoted")
+		ep.Demoted, ep.DemotedAt = true, Pos{Box: -1}
+		q.w.logf("%s: abandoned E%d of %s demoted from the start (link under E%d)", q.Name, ep.ID, q.w.party(r.ID).Name, msgEp)
 	}
 	return false
 }
@@ -898,7 +930,7 @@ func (q *Party) tableBResp(r *PeerRec, M *Msg, pos Pos) dec {
 			cell += ":links-appended"
 		}
 	}
-	if len(app) > 0 && q.followIK(r, app, pos, false) {
+	if len(app) > 0 && q.followIK(r, app, pos, false, -1) {
 		return dec{"suspend", "fork", cell + ":K4-flag"}
 	}
 	if q.initHalf() {
@@ -918,7 +950,7 @@ func (q *Party) tableBResp(r *PeerRec, M *Msg, pos Pos) dec {
 	}
 	r.Own = nil
 	if len(extra) > 0 {
-		if q.followIK(r, extra, pos, false) {
+		if q.followIK(r, extra, pos, false, -1) {
 			return dec{"suspend", "fork", cell + ":K4-flag"}
 		}
 		app = extra // H5 below
@@ -974,7 +1006,7 @@ func (q *Party) tableBFin(r *PeerRec, M *Msg, pos Pos) dec {
 		return dec{"suspend", "fork", cell + ":fork-evidence"}
 	}
 	q.removeAnswer(r, a.ID)
-	if len(app) > 0 && q.followIK(r, app, pos, false) {
+	if len(app) > 0 && q.followIK(r, app, pos, false, M.Epoch) {
 		return dec{"suspend", "fork", cell + ":K4-flag"}
 	}
 	if r.Pend != nil {
@@ -985,14 +1017,7 @@ func (q *Party) tableBFin(r *PeerRec, M *Msg, pos Pos) dec {
 	}
 	q.establish(r, a.NewEpoch, a.PeerIK, a.OwnIK, pos)
 	if a.OwnIK != q.st.IK && q.newSpec() {
-		if q.w.preUpgrade && a.Started <= q.w.migratedAt {
-			// SPEC GAP (U1): an answer made before the upgrade and kept across
-			// a release-28 rotation runs the responder half; its epoch is
-			// signed on this side by the superseded ik
-			q.w.hit("U1:answer-pinned-to-superseded-ik")
-		} else {
-			q.w.violate("S5", "%s establishes an answer pinned to its superseded ik %d", q.Name, a.OwnIK)
-		}
+		q.w.violate("S5", "%s establishes an answer pinned to its superseded ik %d", q.Name, a.OwnIK)
 	}
 	if q.respHalf() {
 		// §6.3.1 (revised): a later activation does not replace the confirmed

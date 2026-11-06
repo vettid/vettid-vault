@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -324,6 +325,42 @@ func TestR29QuotaExhaustionLastFailure(t *testing.T) {
 	}
 }
 
+// §3.4.1 "The reconnect bound" (R29-K6): a plain reconnect, started after
+// an abandoned pending epoch (B passed, the hs.fin lost), whose hs.init a
+// relay refuses quota_exceeded makes the connection stale.
+func TestR29PlainReconnectQuotaExceededStale(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	f.rekey(0)
+	f.deliver(0, 1, kHSInit)
+	f.deliver(1, 0, kHSResp)
+	if f.p(0).Pending == nil {
+		t.Fatal("setup: no pending epoch")
+	}
+	f.lose(0, 1, kAny) // the hs.fin is lost: nothing confirms the epoch
+	r := f.d[0].relay
+	r.mu.Lock()
+	r.failMailbox = map[string]error{f.m(1).st.Relay.Mailbox: &relayclient.Error{Status: 429, Code: CodeQuotaExceeded}}
+	r.mu.Unlock()
+	f.advance(PendingLife + time.Hour)
+	f.tick(0) // B passes: the pending epoch is abandoned and a reconnect starts
+	f.tick(0)
+	if !f.audited(0, "pending_abandoned_b_passed") {
+		f.dump()
+		t.Fatal("setup: B did not abandon the pending epoch")
+	}
+	f.do(0, func(*Manager, *Peer) {})
+	for _, a := range f.m(0).st.Audit {
+		if strings.HasPrefix(a.Event, "reconnect_") {
+			t.Fatalf("setup: not a plain reconnect (%s)", a.Event) // reconnectNaming notes reconnect_<why>
+		}
+	}
+	if f.p(0).State != PeerStale || !f.sink[0].has("connection.stale") {
+		f.dump()
+		t.Fatal("a plain reconnect refused quota_exceeded did not make the connection stale")
+	}
+}
+
 // S12: held messages that expire are counted and audited.
 func TestR29HeldExpiryAudited(t *testing.T) {
 	f := demoted(t, nil)
@@ -359,8 +396,8 @@ func TestR29HoldIsByPeer(t *testing.T) {
 	}
 }
 
-// A deposit refused quota_exceeded with 429 that is not a rule-E, rule-L
-// or demotion reconnect is retried with the backoff, as before 0.86.6
+// A deposit refused quota_exceeded with 429 that is not a reconnect's
+// hs.init is retried with the backoff, as before 0.86.6
 // (fdcc746 dropped it: an att.deliver lost on CI, the e2e
 // TestAttachmentMaliciousPeer failure).
 func TestR29QuotaRetryForOtherDeposits(t *testing.T) {

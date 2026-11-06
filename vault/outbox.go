@@ -400,11 +400,12 @@ func (m *Manager) deposit(ctx context.Context, e *OutboxEntry, now time.Time) er
 		}
 		e.Done = true
 	case CodeQuotaExceeded:
-		// 0.86.6 S9: the reconnect token's quota is spent: for a reconnect
-		// after a demotion or by strict F1, the last try has failed.
-		// (A reconnect's hs.init carries its own token and no peer id.)
+		// §3.4.1 "The reconnect bound": a relay refusing a reconnect's
+		// hs.init with quota_exceeded (the reconnect token's quota) makes
+		// the connection stale, whatever started the reconnect. (A
+		// reconnect's hs.init carries its own token and no peer id.)
 		for _, og := range m.st.Outgoing {
-			if og.InitOutbox == e.ID && og.Named != nil {
+			if og.InitOutbox == e.ID && og.New == nil && og.Purpose == handshake.PurposeReconnect {
 				if op := m.peer(og.PeerID); op != nil {
 					m.markStale(op, now)
 				}

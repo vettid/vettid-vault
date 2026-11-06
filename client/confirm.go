@@ -94,12 +94,13 @@ func epochID(b []byte) (id [16]byte) {
 	return id
 }
 
-// sendConfirm sends hs.confirm (body {}, durable, not a request).
+// sendConfirm sends hs.confirm (body {}, durable, not a request). The
+// time of the last one is recorded only once it has been sealed and
+// queued (in a batch, or under Persist) or deposited.
 func (d *Device) sendConfirm(ctx context.Context) {
-	if d.st.Vault != nil {
+	if _, err := d.sendFull(ctx, "", handshake.TypeConfirm, json.RawMessage(`{}`), "", "", time.Time{}); err == nil && d.st.Vault != nil {
 		d.st.Vault.ConfirmAt = d.cfg.Now() // saved with the batch, or by tickConfirmLocked
 	}
-	_, _ = d.sendFull(ctx, "", handshake.TypeConfirm, json.RawMessage(`{}`), "", "", time.Time{})
 }
 
 // confirmResend is how long after the last hs.confirm the device sends
@@ -110,7 +111,10 @@ const confirmResend = 12 * 24 * time.Hour
 
 // tickConfirmLocked sends hs.confirm again confirmResend after the last
 // one while the current epoch is unconfirmed (Vault.Confirmed names an
-// earlier one), unless one is still in the outbox. d.mu is held.
+// earlier one), unless one is still in the outbox. Under Persist it is
+// queued in the outbox, saved before the next collect and deposited by
+// the outbox (retried, and seen by the check above); without Persist it
+// is deposited at once and counts only if that succeeds. d.mu is held.
 func (d *Device) tickConfirmLocked(ctx context.Context) {
 	v := d.st.Vault
 	if v == nil || v.Confirmed == nil || d.keyring.Current() == nil || d.cfg.Now().Sub(v.ConfirmAt) < confirmResend {
@@ -121,10 +125,15 @@ func (d *Device) tickConfirmLocked(ctx context.Context) {
 			return
 		}
 	}
-	d.sendConfirm(ctx)
-	if d.cfg.Persist != nil {
-		d.dirty = true // saved before the next collect (pollPersist)
+	if d.cfg.Persist == nil {
+		d.sendConfirm(ctx)
+		return
 	}
+	prev := d.batching
+	d.batching = true
+	d.sendConfirm(ctx)
+	d.batching = prev
+	d.dirty = true // saved before the next collect (pollPersist), then deposited
 }
 
 // sendFeatures sends device.features with this client's list (§10.2).

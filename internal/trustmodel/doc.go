@@ -1,5 +1,6 @@
 // Package trustmodel is an executable model of VAULT-MESSAGING 0.87.1
-// (vettid.org 4734dfd8) §3.4.1, "Which keys a peer's messages may come
+// (vettid.org 4734dfd8), with the 0.88.1 erratum (vettid.org #554 at
+// 9839e49: hs.confirm again after 12 days; hs.resp sets no flag), §3.4.1, "Which keys a peer's messages may come
 // from", and §6.3.1, "Lifetimes and activation on confirmation": release
 // 29, between release-29 vaults and their devices. It is the pass/fail
 // oracle for the release-29 rules of §6.3.2 (R29-G1 to R29-D4). It is

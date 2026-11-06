@@ -212,7 +212,8 @@ func (w *World) noteLocked(d int64) {
 // checkHonestStale: M2 (review of #207 at 90a0ff0), an honest pair must
 // not end stale. In a run with no old copy, no injected loss and no party
 // locked longer than T (14 days) at a stretch, a pair that ends stale is a
-// violation, unless by quota_exceeded (counted, resHonestStaleQuota).
+// violation; by quota_exceeded it is counted (resHonestStaleQuota) only in
+// the rotation-burst runs (TRUSTMODEL_ROTBURST), a violation elsewhere.
 func (w *World) checkHonestStale() {
 	switch {
 	case len(w.copies()) > 0:
@@ -244,7 +245,11 @@ func (w *World) checkHonestStale() {
 				continue
 			}
 			if slices.ContainsFunc(refs, func(s string) bool { return strings.Contains(s, "quota_exceeded") }) {
-				w.exempt("M2", resHonestStaleQuota)
+				if w.rotBurst {
+					w.exempt("M2", resHonestStaleQuota) // counted only in the rotation-burst runs
+					continue
+				}
+				w.violate("M2", "%s: an honest pair ends stale by quota_exceeded outside a rotation burst (%s)", pairName(w, a.ID, b.ID), strings.Join(refs, "; "))
 				continue
 			}
 			w.violate("M2", "%s: an honest pair ends stale (%s)", pairName(w, a.ID, b.ID), strings.Join(refs, "; "))

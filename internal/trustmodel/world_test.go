@@ -44,6 +44,7 @@ type World struct {
 	copyCur       map[[2]int]bool     // (honest party, copy epoch): it became current there (ground truth, I7)
 	lockedFor     map[PID]int64       // M2: how long each real party has been locked at a stretch (time passed by advance)
 	maxLock       int64               // M2: the longest such stretch in the run
+	rotBurst      bool                // TRUSTMODEL_ROTBURST: the run starts with a rotation burst (M2's quota exemption applies)
 	injLoss       bool                // M2: the run injected a loss (fin-loss)
 	devCopyFirst  map[[2]PID]bool     // vault<->device pair: rule C kept the old copy's successor and refused the real one (ground truth)
 	probeF        map[int]bool        // probes lost, if lost, through finding F (fLoss, at deposit; I1-loss)

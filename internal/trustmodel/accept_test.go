@@ -602,10 +602,10 @@ func (q *Party) tableBRotate(r *PeerRec, M *Msg, pos Pos) dec {
 		if q.f1Demote(r, M, app, pos, pre) {
 			return dec{"suspend", "fork", cell + ":K7-flag"}
 		}
-		if q.judgeAbandoned(r, M.Rot, M.Epoch) { // R29-K9
+		q.h5(r, 0) // may abandon the pending epoch at the link (K2)
+		if q.judgeAbandoned(r, M.Rot, M.Epoch) { // R29-K9, also on the epoch just abandoned: K9 wins (ended, not demoted)
 			return dec{"suspend", "fork", cell + ":K9-flag"}
 		}
-		q.h5(r, 0)
 		return dec{"follow", "", cell}
 	case ikAncestor:
 		// SPEC FINDING: not every link followed, first unfollowed starts at an

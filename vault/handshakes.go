@@ -1242,7 +1242,9 @@ func (m *Manager) hasOutgoing(peerID string, purpose handshake.Purpose) bool {
 func (m *Manager) startRekey(p *Peer, now time.Time) {
 	kr := m.sessions[p.ID]
 	if kr == nil || kr.Current() == nil || m.hasOutgoing(p.ID, handshake.PurposeRekey) || p.Standing.Token == "" || p.suspended() ||
-		m.rekeyBlocked(p) {
+		m.rekeyBlocked(p) || m.hasOutgoing(p.ID, handshake.PurposeReconnect) {
+		// An open reconnect of the vault's own makes the new epoch: a rekey
+		// beside it would only cross it (and replace its pending epoch).
 		return
 	}
 	cfg := handshake.InitiatorConfig{

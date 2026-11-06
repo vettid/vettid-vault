@@ -617,7 +617,7 @@ func (q *Party) tableBRotate(r *PeerRec, M *Msg, pos Pos) dec {
 		if q.f1Demote(r, M, app, pos, pre) {
 			return dec{"suspend", "fork", cell + ":K7-flag"}
 		}
-		q.h5(r, 0) // may abandon the pending epoch at the link (K2)
+		q.h5(r, 0)                               // may abandon the pending epoch at the link (K2)
 		if q.judgeAbandoned(r, M.Rot, M.Epoch) { // R29-K9, also on the epoch just abandoned: K9 wins (ended, not demoted)
 			return dec{"suspend", "fork", cell + ":K9-flag"}
 		}

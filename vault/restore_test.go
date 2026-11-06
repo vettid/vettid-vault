@@ -59,6 +59,9 @@ func newSvcFx(t *testing.T, kind string) *svcFx {
 		IK: f.n.ik.Public().(ed25519.PublicKey), KEM: f.n.kem.Public().Bytes(), LastEpochID: e0, PeerKind: kind,
 		Relay:    PeerRelay{URL: f.n.addr.URL, Mailbox: f.n.addr.Mailbox, PK: f.n.addr.PK},
 		Standing: HeldToken{Token: "v4.public.VEVTVA", Exp: f.base.Add(200 * 24 * time.Hour)}}
+	// Its epoch record (§3.4.1): e0, signed by the service's ik, confirmed.
+	p.Epochs = []EpochMeta{{ID: e0, Signer: append([]byte(nil), p.IK...)}}
+	p.Confirmed = e0
 	if kind == "service" {
 		p.History = []EpochRecord{{ID: e0, Activated: f.base}}
 	}
@@ -877,6 +880,9 @@ func TestCrossingReconnects(t *testing.T) {
 			t.Fatal(err)
 		}
 		own := fr.Epoch.ID()
+		// The service confirms it (§6.3.1: pending until then).
+		f.stJTI = f.jtiOf(pi.Init().Token, f.vaultPK())
+		f.sendUnder(fr.Epoch, handshake.TypeConfirm, f.now())
 		if !bytes.Equal(f.p.LastEpochID, own[:]) {
 			t.Fatal("the vault did not end on its own epoch")
 		}

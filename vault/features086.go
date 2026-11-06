@@ -14,7 +14,8 @@ import (
 )
 
 // Capability names on every message (VAULT-MESSAGING 0.86.0, §5.3, §10.8,
-// §6.3.1 "Deployment"). A vault of this release advertises hs_confirm to
+// §6.3.1 "Capability": hs_confirm is advertised only; no rule depends on
+// it but the device notice). A vault of this release advertises hs_confirm to
 // every connection (in profile.update's features and in the inner
 // `features` field of every message it deposits, handshake messages
 // included) and to its devices in its §11.10.9 list; it counts a peer's
@@ -110,7 +111,7 @@ func (m *Manager) noteFeatures(p *Peer, names []string) {
 // (release 29 or later).
 func (p *Peer) advertisedFeatures() bool { return p.PeerFeatures != nil }
 
-// hasConfirm reports whether p advertised hs_confirm (§6.3.1 "Deployment").
+// hasConfirm reports whether p advertised hs_confirm (§6.3.1 "Capability").
 func (p *Peer) hasConfirm() bool {
 	i := sort.SearchStrings(p.PeerFeatures, handshake.CapConfirm)
 	return i < len(p.PeerFeatures) && p.PeerFeatures[i] == handshake.CapConfirm

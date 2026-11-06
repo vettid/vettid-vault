@@ -451,7 +451,7 @@ func (m *Manager) respondReconnect(pi *handshake.PendingInit, p *Peer, sender ed
 	m.queueDeposit(oe, now)
 	m.st.Awaiting[id] = &AwaitingHS{ID: id, PeerID: p.ID, Purpose: handshake.PurposeReconnect, Created: now, Resp: rs, Issued: issued,
 		OwnChain: m.ownChainNow(), RespOutbox: oe.ID, Reconnect: pend, Th1: th1[:],
-		NamedConfirmed: namedConf, InitTS: pi.Inner().TS, Gated: p.hasConfirm(),
+		NamedConfirmed: namedConf, InitTS: pi.Inner().TS,
 		SigIK: append([]byte(nil), m.keys.ik.Public().(ed25519.PublicKey)...), Signer: append([]byte(nil), body.From.IK...)}
 	m.awaiting[id] = resp
 	// §6.6 "Between two persons" (0.74.0): with our own reconnect open as
@@ -528,7 +528,6 @@ func (m *Manager) handleRekeyInit(ctx context.Context, p *Peer, in *envelope.Inn
 		m.audit(now, "rekey_not_current_epoch", p.ID)
 		return ackAfterFlush
 	}
-	p.upgradeEpochs()
 	epID := ep.ID()
 	namedConf := false
 	if err := m.rekeyPrecheck(p, in, ep, sender, now); err != nil {
@@ -627,7 +626,7 @@ func (m *Manager) handleRekeyInit(ctx context.Context, p *Peer, in *envelope.Inn
 	}
 	id := m.newID(now)
 	aw := &AwaitingHS{ID: id, PeerID: p.ID, Purpose: handshake.PurposeRekey, Created: now, Resp: rs, OwnChain: m.ownChainNow(),
-		NamedConfirmed: namedConf, InitTS: in.TS, Gated: p.hasConfirm(), SigIK: append([]byte(nil), m.keys.ik.Public().(ed25519.PublicKey)...),
+		NamedConfirmed: namedConf, InitTS: in.TS, SigIK: append([]byte(nil), m.keys.ik.Public().(ed25519.PublicKey)...),
 		Signer: append([]byte(nil), body.From.IK...), Th1: func() []byte { t := pi.Th1(); return t[:] }()}
 	for _, r := range body.Rotations {
 		aw.Links = append(aw.Links, r.Marshal())
@@ -744,7 +743,6 @@ func (m *Manager) handleFin(ctx context.Context, id string, raw []byte, sender e
 // across the vault's own rotation (toward a peer without the gate, S5) is
 // established and then rekeyed at once under the new ik.
 func (m *Manager) responderEstablish(p *Peer, aw *AwaitingHS, fr *handshake.FinResult, now time.Time, activate func(actOpts)) {
-	p.upgradeEpochs()
 	if aw.Reconnect == nil && len(aw.Links) > 0 {
 		// Table B "Reached" (S8): the rekey's links, applied at hs.fin, then
 		// H5. They are worked out again against what was followed since.
@@ -761,7 +759,7 @@ func (m *Manager) responderEstablish(p *Peer, aw *AwaitingHS, fr *handshake.FinR
 		m.abandonPending(p, "peer_activated", false, now)
 	}
 	if aw.NamedConfirmed {
-		m.ruleE(p, aw.InitTS, aw.Gated, now)
+		m.ruleE(p, aw.InitTS, now)
 	}
 	signer := aw.Signer
 	if signer == nil {
@@ -920,7 +918,6 @@ func (m *Manager) activate(p *Peer, ep *handshake.Epoch, purpose handshake.Purpo
 			}
 		}
 	}
-	p.upgradeEpochs()
 	o.ownChain = ownChain
 	m.recordActivated(p, id[:], o, now)
 	p.LastEpochID = id[:]
@@ -1152,15 +1149,9 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 			m.abandonAwaiting(id, now)
 		}
 	}
-	if og.Gated {
-		// §6.3.1 "Initiator": the new epoch is pending until a message
-		// from the peer opens under it.
-		m.makePending(p, og, res, now)
-		return ackAfterFlush
-	}
-	// Toward a peer without the gate: active at hs.fin as before.
-	o := actOpts{signer: res.ResponderIK, mine: true, unconfirmed: true}
-	m.activate(p, res.Epoch, og.Purpose, og.Issued, "", chainOr(og.OwnChain, len(m.st.Rotations)), o, now)
+	// §6.3.1 "Initiator": the new epoch is pending until a message from
+	// the peer opens under it.
+	m.makePending(p, og, res, now)
 	return ackAfterFlush
 }
 
@@ -1202,7 +1193,7 @@ func (m *Manager) hasOutgoing(peerID string, purpose handshake.Purpose) bool {
 // the epoch's signer (S8, 0.85.0: the whole chain) to a peer that
 // advertised features; release 28 and earlier refuse a rekey carrying
 // any (they parse no rotations in a rekey), so toward them it carries
-// none. The gate is fixed now (§6.3.1 "Deployment").
+// none.
 func (m *Manager) startRekey(p *Peer, now time.Time) {
 	kr := m.sessions[p.ID]
 	if kr == nil || kr.Current() == nil || m.hasOutgoing(p.ID, handshake.PurposeRekey) || p.Standing.Token == "" || p.suspended() ||
@@ -1227,7 +1218,6 @@ func (m *Manager) startRekey(p *Peer, now time.Time) {
 	if err != nil {
 		return
 	}
-	og.Gated = gateFor(p)
 	oe := &OutboxEntry{Op: OpDeposit, PeerID: p.ID, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Payload: ini.Envelope(), Handshake: true}
 	m.queueDeposit(oe, now)
 	og.InitOutbox = oe.ID // so a rekey abandoned before the deposit sends nothing (restoreLive)
@@ -1300,7 +1290,6 @@ func (m *Manager) startReconnectCtx(p *Peer, ctx []byte, now time.Time) *Outgoin
 	if err != nil {
 		return nil
 	}
-	og.Gated = gateFor(p)
 	oe := &OutboxEntry{Op: OpDeposit, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox,
 		Token: p.Reconnect.Token, Payload: ini.Envelope(), Handshake: true}
 	m.queueDeposit(oe, now)

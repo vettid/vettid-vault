@@ -13,17 +13,14 @@ import (
 // Activation on confirmation (VAULT-MESSAGING 0.86.0, §6.3.1, owner
 // decision R1 of 2026-11-05), for purposes rekey and reconnect.
 //
-// The responder half applies toward every peer: R activates at a verified
-// hs.fin and queues hs.confirm in the same write; its confirmed epoch (the
-// newest in which the peer sent anything but hs.fin) keeps its rk and
-// receive keys while not current, a rekey or reconnect naming it is
-// accepted as if current, and at such a handshake's hs.fin rule E destroys
-// the epochs after it. The initiator half (a pending epoch that becomes
-// current only when a message from the peer opens under it, and the bound
-// B) applies only toward a peer that advertised hs_confirm when the
-// hs.init was sent. Toward the others the initiator activates at hs.fin
-// as before but keeps the old epoch and copies of what it sends, and
-// reverts if the peer shows it never activated (the "Deployment" text).
+// Both halves apply toward every peer (0.87.1: release 29 talks only to
+// release 29). The responder half: R activates at a verified hs.fin and
+// queues hs.confirm in the same write; its confirmed epoch (the newest in
+// which the peer sent anything but hs.fin) keeps its rk and receive keys
+// while not current, a rekey or reconnect naming it is accepted as if
+// current, and at such a handshake's hs.fin rule E destroys the epochs
+// after it. The initiator half: a pending epoch becomes current only when
+// a message from the peer opens under it, and the bound B.
 //
 // Every change below is made in memory within one batch; the batch's one
 // state write stores it with the outbox entries it queued (queue: nothing
@@ -110,12 +107,11 @@ func (p *Peer) newer(a, b []byte) bool {
 
 // actOpts says how activate installs an epoch and what it records.
 type actOpts struct {
-	how         int // actNormal, actKeepRK, actInstalled
-	until       time.Time
-	signer      []byte // the peer's ik that signed it; nil: the stored ik
-	mine        bool   // the vault began it
-	unconfirmed bool   // activated at hs.fin without confirmation
-	ownChain    int    // set by activate
+	how      int // actNormal, actKeepRK, actInstalled
+	until    time.Time
+	signer   []byte // the peer's ik that signed it; nil: the stored ik
+	mine     bool   // the vault began it
+	ownChain int    // set by activate
 }
 
 const (
@@ -142,7 +138,7 @@ func (m *Manager) recordActivated(p *Peer, id []byte, o actOpts, now time.Time) 
 		signer = p.IK
 	}
 	p.Epochs = append(p.Epochs, EpochMeta{ID: append([]byte(nil), id...), Signer: append([]byte(nil), signer...),
-		Mine: o.mine, Unconfirmed: o.unconfirmed, EstAt: m.relayAt, EstMsg: m.msgID, OwnChain: o.ownChain})
+		Mine: o.mine, EstAt: m.relayAt, EstMsg: m.msgID, OwnChain: o.ownChain})
 	if p.Confirmed == nil {
 		p.Confirmed = append([]byte(nil), id...) // a new peer's first epoch
 	}
@@ -188,11 +184,6 @@ func (m *Manager) pruneEpochs(p *Peer, now time.Time) {
 }
 
 // --- the initiator half ---
-
-// gateFor reports whether the initiator half applies to a handshake begun
-// now with p: p advertised hs_confirm (§6.3.1 "Deployment"; fixed when the
-// hs.init is sent).
-func gateFor(p *Peer) bool { return p.hasConfirm() }
 
 // makePending records the vault's own verified rekey or reconnect epoch as
 // pending (§6.3.1 "Initiator"): established, its signer recorded, not
@@ -342,7 +333,7 @@ func (m *Manager) reconfirmAll(now time.Time) {
 // not yet sent is dropped with its outbox entry. Their receive keys are
 // kept as a previous epoch's, so that a later message under one is still
 // authenticated (fork evidence or a refusal).
-func (m *Manager) ruleE(p *Peer, initTS time.Time, gated bool, now time.Time) {
+func (m *Manager) ruleE(p *Peer, initTS time.Time, now time.Time) {
 	ci := p.epochIndex(p.confirmedID())
 	if ci < 0 {
 		return
@@ -353,7 +344,7 @@ func (m *Manager) ruleE(p *Peer, initTS time.Time, gated bool, now time.Time) {
 		if e.Destroyed || e.Pending {
 			continue
 		}
-		e.Destroyed, e.DestroyTS, e.GatedAtE = true, initTS, gated
+		e.Destroyed, e.DestroyTS = true, initTS
 		if e.Superseded.IsZero() {
 			e.Superseded = now
 		}
@@ -393,7 +384,6 @@ func (m *Manager) beforeAccept(p *Peer, ep *handshake.Epoch, in *envelope.Inner,
 	if p.suspended() || ep == nil {
 		return false
 	}
-	p.upgradeEpochs()
 	id := ep.ID()
 	meta := p.epochMeta(id[:])
 	if meta != nil && meta.Destroyed {
@@ -426,9 +416,8 @@ func (m *Manager) beforeAccept(p *Peer, ep *handshake.Epoch, in *envelope.Inner,
 }
 
 // destroyedEpochMessage is an authenticated message under an epoch rule E
-// destroyed: with a later inner ts it is fork evidence (ref epoch); toward
-// a peer that has not advertised hs_confirm it is refused; an earlier ts
-// is refused (superseded_epoch).
+// destroyed: with a later inner ts it is fork evidence (ref epoch); an
+// earlier ts is refused (superseded_epoch).
 func (m *Manager) destroyedEpochMessage(p *Peer, meta *EpochMeta, in *envelope.Inner, now time.Time) {
 	if !in.TS.After(meta.DestroyTS) {
 		m.refusePeerKey(p, "superseded_epoch", now)
@@ -438,13 +427,7 @@ func (m *Manager) destroyedEpochMessage(p *Peer, meta *EpochMeta, in *envelope.I
 		m.refusePeerKey(p, "superseded_epoch", now)
 		return
 	}
-	if meta.GatedAtE {
-		// The gate as judged at the hs.init of the handshake whose rule E
-		// destroyed it (0.86.6 S11).
-		m.suspendForkRef(p, "epoch", now)
-		return
-	}
-	m.refusePeerKey(p, "superseded_epoch", now)
+	m.suspendForkRef(p, "epoch", now)
 }
 
 // refusePeerKey refuses a message under §3.4.1 (acked, dropped, audited
@@ -523,7 +506,6 @@ func (m *Manager) crossingRekeyLoses(p *Peer, theirs [32]byte, now time.Time) bo
 // hs.fin; §3.4.1 "Fork by ctx": no exception for an epoch the vault
 // began). named is nil when the classic rules (classifyCtx) decide.
 func (m *Manager) classifyCtx086(p *Peer, ctx string) (named []byte, namedConf, forkEp, refuse bool) {
-	p.upgradeEpochs()
 	is := func(id []byte) bool { return len(id) == 16 && ctx == handshake.EpochCtx(epochIDOf(id)) }
 	if pe := p.Pending; pe != nil && pe.Purpose == handshake.PurposeReconnect {
 		if is(pe.ID) {

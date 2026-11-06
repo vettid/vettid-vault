@@ -336,47 +336,6 @@ func TestR29OldCopyAnswerToRekeyNotKept(t *testing.T) {
 	}
 }
 
-// The shape of TestLeadFixBSeed (seed 8756148401117559123, R1, the gate
-// unseen both ways) under the strict F1 the lead chose. Neither side has
-// seen the other's features: Q activates at hs.fin; P keeps its answer
-// across its rotation (S5 toward an ungated peer), establishes it at
-// Q's hs.fin, and its link travelled under E0 before that hs.fin
-// arrived. Strict F1 demotes an epoch P did activate. The model at
-// 641ef63 runs that seed clean under strict (F1 demoted 2, no
-// violation), so the expected outcome here is no suspension and
-// convergence; a suspension would be the "false suspension" the lead
-// accepted as the cost of strict F1.
-func TestR29FixBSeedShapeStrictExpected(t *testing.T) {
-	f := newR29Fx(t)
-	f.longTokens()
-	for s := 0; s < 2; s++ {
-		f.do(s, func(_ *Manager, p *Peer) { p.PeerFeatures = nil })
-	}
-	f.rekey(1)
-	f.deliver(1, 0, kHSInit)
-	f.do(0, func(_ *Manager, p *Peer) { p.PeerFeatures = nil })
-	f.rotate(0) // P keeps its answer (Q ungated)
-	f.deliver(0, 1, kHSResp)
-	f.deliver(0, 1, kRotate) // P's link under E0, before Q's hs.fin reaches P
-	f.deliver(1, 0, kHSFin)
-	f.settle()
-	f.advance(time.Hour)
-	f.tick(0)
-	f.tick(1)
-	f.settle()
-	sus := f.p(0).suspended() || f.p(1).suspended()
-	t.Logf("strict F1, gate unseen: suspended %v, same epoch %v, stale %v/%v", sus, f.sameEpoch(), f.p(0).State, f.p(1).State)
-	if sus {
-		f.dump()
-		t.Fatal("a false suspension (the model at 641ef63 runs this seed clean)")
-	}
-	if !f.sameEpoch() {
-		f.dump()
-		t.Fatal("did not converge")
-	}
-	f.talks()
-}
-
 // §3.4.1 "Epochs after an ik link": while the current epoch is demoted the
 // vault sends nothing, but what it makes meanwhile is held, not lost:
 // sealed under the new epoch once the reconnect establishes it, and

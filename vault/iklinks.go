@@ -176,7 +176,6 @@ func (m *Manager) followLinks(p *Peer, app []*handshake.Rotation, msgEpoch []byt
 	if len(app) == 0 {
 		return
 	}
-	p.upgradeEpochs()
 	for _, r := range app {
 		p.IK, p.KEM = append([]byte(nil), r.NewIK...), r.NewKEM.Bytes()
 		p.Chain = append(p.Chain, r.Marshal())
@@ -599,11 +598,8 @@ func (m *Manager) identityRotateBody(p *Peer) []byte {
 
 // s5 is the vault's own rotation's step for p (S5, 0.86.0): its own open
 // rekeys and reconnects and its pending epoch are abandoned (started again
-// after identity.rotate); its answers awaiting hs.fin are dropped toward
-// a peer that advertised hs_confirm (their epochs would be signed by the
-// superseded ik), and kept toward any other, which activates at hs.fin:
-// established there, then rekeyed at once under the new ik
-// (responderEstablish).
+// after identity.rotate); its answers awaiting hs.fin are dropped (their
+// epochs would be signed by the superseded ik).
 func (m *Manager) s5(p *Peer, now time.Time) (reconnect bool) {
 	for id, og := range m.st.Outgoing {
 		if og.New != nil || og.PeerID != p.ID || og.Replaced {
@@ -617,9 +613,7 @@ func (m *Manager) s5(p *Peer, now time.Time) (reconnect bool) {
 		m.abandonPending(p, "s5", false, now)
 	}
 	for id, aw := range m.st.Awaiting {
-		// Toward a peer that advertised hs_confirm when its hs.init was
-		// answered (0.86.6 S11), the answer is dropped.
-		if aw.New == nil && aw.PeerID == p.ID && aw.Gated {
+		if aw.New == nil && aw.PeerID == p.ID {
 			m.abandonAwaiting(id, now)
 		}
 	}

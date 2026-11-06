@@ -334,9 +334,6 @@ type EpochMeta struct {
 	Signer []byte `json:"signer,omitempty"`
 	// Mine: the vault began it (it was the handshake's initiator).
 	Mine bool `json:"mine,omitempty"`
-	// Unconfirmed: the vault activated it at hs.fin without confirmation
-	// (an initiator toward a peer without the gate).
-	Unconfirmed bool `json:"unconfirmed,omitempty"`
 	// EstAt and EstMsg are the position (deposited_at, msg_id) of the
 	// message that established it.
 	EstAt  time.Time `json:"est_at,omitzero"`
@@ -350,9 +347,8 @@ type EpochMeta struct {
 	// pending).
 	Superseded time.Time `json:"superseded,omitzero"`
 	// Destroyed by rule E (§6.3.1) with the accepted hs.init's inner ts:
-	// an authenticated message under it with a later ts is fork evidence
-	// (or, toward a peer without hs_confirm, starts a reconnect), one with
-	// an earlier ts is refused (superseded_epoch).
+	// an authenticated message under it with a later ts is fork evidence,
+	// one with an earlier ts is refused (superseded_epoch).
 	Destroyed bool      `json:"destroyed,omitempty"`
 	DestroyTS time.Time `json:"destroy_ts,omitzero"`
 	// Demoted by an ik link at the position (DemotedAt, DemotedMsg)
@@ -368,9 +364,6 @@ type EpochMeta struct {
 	// OwnChain is the own rotation count whose ik signed its handshake: a
 	// reconnect naming it carries the vault's links from there.
 	OwnChain int `json:"own_chain,omitempty"`
-	// GatedAtE: the gate as judged at the hs.init of the handshake whose
-	// rule E destroyed it (0.86.6 S11).
-	GatedAtE bool `json:"gated_at_e,omitempty"`
 	// GotFromPeer: a message from P other than a handshake message
 	// (hs.init, hs.resp, hs.fin, hs.confirm) passed beforeAccept under
 	// this epoch (S13 option a). An epoch recorded before it (release-28
@@ -622,9 +615,6 @@ type AwaitingHS struct {
 	// followed at hs.fin.
 	Signer []byte            `json:"signer,omitempty"`
 	Links  []json.RawMessage `json:"links,omitempty"`
-	// Gated: the peer had advertised hs_confirm when its hs.init was
-	// answered (0.86.6 S11: rule E's branch and S5 judge the gate there).
-	Gated bool `json:"gated,omitempty"`
 }
 
 // PendingReconnect is a reconnect hs.init's effects, held until hs.fin.
@@ -670,10 +660,8 @@ type OutgoingHS struct {
 	// on an epoch of the replaced line (§6.6); it blocks nothing, and its
 	// hs.resp is fork evidence when it carries a later ts.
 	Replaced bool `json:"replaced,omitempty"`
-	// 0.86.0 (§6.3.1 "Deployment"): Gated is the gate as fixed when the
-	// hs.init was sent (the peer advertised hs_confirm then). Named is the
-	// epoch a reconnect after a demotion or by strict F1 named (§3.4.1).
-	Gated bool   `json:"gated,omitempty"`
+	// Named is the epoch a reconnect after a demotion or by strict F1
+	// named (§3.4.1).
 	Named []byte `json:"named,omitempty"`
 
 	// An outgoing connection request in state waiting (§6.4, §10.4):

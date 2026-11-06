@@ -244,13 +244,9 @@ func (f *r29Fx) audited(s int, ev string) bool {
 	return false
 }
 
-// --- features and the gate ---
+// --- the initiator's pending epoch ---
 
-// 0.86.0 (§10.8, §6.3.1 "Deployment"): each side counts the other's
-// hs_confirm from the messages of the connection's first handshake, so the
-// gate is open both ways from the start; a release-28 stand-in sends none
-// and is counted as having none.
-// Model: TestScenarioA (lost confirm) and the plain case. A gated rekey's
+// Model: TestScenarioA (lost confirm) and the plain case. A rekey's
 // epoch is pending at the initiator after hs.fin; it keeps sending in the
 // current epoch, which the responder still reads; the responder's
 // hs.confirm makes it current.
@@ -439,6 +435,25 @@ func TestR29RuleEReconnectNamingConfirmed(t *testing.T) {
 	f.talks()
 }
 
+// §6.3.1 rule E's evidence: an authenticated message with a later ts under
+// an epoch rule E destroyed suspends (ref epoch), toward every peer (model:
+// TestFindingE_ConfirmedEpochHidesForkEvidence). (The gated iteration of
+// the former TestR29RuleEEvidence; 0.87.1 has no gate.)
+func TestR29RuleEEvidenceSuspends(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	f.do(1, func(m *Manager, p *Peer) {
+		e := p.epochMeta(p.LastEpochID)
+		e.Destroyed, e.DestroyTS = true, f.clk.Add(-time.Hour)
+	})
+	f.note(0, "late")
+	f.deliver(0, 1, kNote)
+	if !f.suspendedRef(1, "epoch") || len(f.got[1]) != 0 {
+		f.dump()
+		t.Fatal("a later message under a destroyed epoch did not suspend")
+	}
+}
+
 // rotate rotates side s's identity.
 func (f *r29Fx) rotate(s int) {
 	f.t.Helper()
@@ -485,17 +500,11 @@ func TestR29RotateTwicePeerMissesFirst(t *testing.T) {
 	f.talks()
 }
 
-// The same with side 1 a release-28 stand-in: it reads `rotation` only and
-// ignores a link from an ik it does not hold, and refuses side 0's rekey
-// under the new ik. Rule L: side 0's rekey goes unanswered for its
-// lifetime; it reconnects with the whole chain, which release 28 follows.
-// The baseline: two release-28 stand-ins stay stuck (bad_rotation, the
-// rekey refused for good).
 // S5 (0.86.0): at the vault's own rotation, an answer awaiting hs.fin is
-// dropped toward a peer with hs_confirm (the initiator then abandons its
-// pending epoch when it follows the link) and the pair converges.
+// dropped (the initiator then abandons its pending epoch when it follows
+// the link) and the pair converges.
 // Model: TestGateDisagreementS5Repaired's gated half.
-func TestR29S5DropsAnswerTowardGatedPeer(t *testing.T) {
+func TestR29S5DropsAnswer(t *testing.T) {
 	f := newR29Fx(t)
 	f.rekey(0)
 	f.deliver(0, 1, kHSInit)
@@ -505,7 +514,7 @@ func TestR29S5DropsAnswerTowardGatedPeer(t *testing.T) {
 	}
 	f.rotate(1) // the responder rotates while its answer awaits hs.fin
 	if f.answerCount(1) != 0 {
-		t.Fatal("the answer to a gated peer was kept across the rotation")
+		t.Fatal("the answer was kept across the rotation")
 	}
 	f.settle()
 	f.advance(time.Hour)
@@ -521,9 +530,6 @@ func TestR29S5DropsAnswerTowardGatedPeer(t *testing.T) {
 	f.talks()
 }
 
-// S5 toward a peer without the gate (a release-28 stand-in initiator): the
-// answer is kept, established at its hs.fin, and a rekey under the new ik
-// follows at once.
 // The lower th1 decides crossing handshakes of different purposes (§6.5,
 // 0.86.0): an own reconnect with the higher th1 is abandoned when the
 // peer's rekey crosses it.
@@ -557,49 +563,4 @@ func TestR29LowerTh1AcrossPurposes(t *testing.T) {
 		return
 	}
 	t.Skip("no th1 order found")
-}
-
-// Model: TestBlindF1 (strict F1, the lead's choice: no exception). Side 0
-// rekeys toward a release-28 stand-in and activates at hs.fin, which is
-// lost; the peer rotates and its identity.rotate travels under the old
-// epoch. Side 0 follows the link, demotes the epoch it activated without
-// confirmation (signed by the link's old_ik), makes the old one current
-// again and reconnects naming it, which release 28 accepts.
-// §6.3.1 rule E's evidence: an authenticated message with a later ts under
-// an epoch rule E destroyed suspends (ref epoch) toward a peer with
-// hs_confirm (model: TestFindingE_ConfirmedEpochHidesForkEvidence) and,
-// toward a peer without it, starts a reconnect naming that epoch instead
-// (model: the lead's r8 point 1, F3 toward 28), refused as
-// superseded_epoch.
-// Model: TestGateDisagreementS5Repaired. Side 0 has not yet seen side 1's
-// features, so its rekey is ungated (active at hs.fin); side 1 has seen
-// side 0's, so at its rotation it drops its answer (S5). The hs.fin finds
-// no answer; side 1's identity.rotate (under the old epoch) makes side 0
-// demote the epoch it activated (strict F1) and reconnect; the pair
-// converges.
-func TestR29GateDisagreementS5Repaired(t *testing.T) {
-	f := newR29Fx(t)
-	f.longTokens()
-	f.do(0, func(m *Manager, p *Peer) { p.PeerFeatures = nil })
-	e0 := append([]byte(nil), f.cur(0)...)
-	f.rekey(0)
-	f.deliver(0, 1, kHSInit)
-	f.deliver(1, 0, kHSResp)
-	if f.p(0).Pending != nil || bytes.Equal(f.cur(0), e0) {
-		t.Fatal("setup: side 0 should have activated at hs.fin")
-	}
-	f.rotate(1)
-	if f.answerCount(1) != 0 {
-		t.Fatal("S5 kept the answer toward a gated peer")
-	}
-	f.settle()
-	f.advance(time.Hour)
-	f.tick(0)
-	f.tick(1)
-	f.settle()
-	if !f.sameEpoch() || !bytes.Equal(f.p(0).IK, f.m(1).keys.ik.Public().(ed25519.PublicKey)) {
-		f.dump()
-		t.Fatal("did not converge")
-	}
-	f.talks()
 }

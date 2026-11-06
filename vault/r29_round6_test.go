@@ -76,7 +76,7 @@ func TestR29RuleEDropsUnsentFin(t *testing.T) {
 		entry = &OutboxEntry{PeerID: p.ID, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Payload: []byte("x"), Handshake: true, FinEpoch: ghost}
 		m.queueDeposit(entry, f.clk)
 		m.unstored[entry.ID] = true // not yet sent
-		m.ruleE(p, f.clk, true, f.clk)
+		m.ruleE(p, f.clk, f.clk)
 	})
 	if !entry.Done {
 		t.Fatal("rule E left an unsent hs.fin for the epoch it destroyed")

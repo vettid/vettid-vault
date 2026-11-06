@@ -1,6 +1,7 @@
 package vault
 
 import (
+	"bytes"
 	"testing"
 	"time"
 )
@@ -74,5 +75,26 @@ func TestR29NoReconnectTokenStale(t *testing.T) {
 	if f.p(0).State != PeerStale || !f.sink[0].has("connection.stale") {
 		f.dump()
 		t.Fatal("no reconnect token, a reconnect needed, yet not stale")
+	}
+}
+
+// §6.3.1 "Initiator" (R29-I6): a pending rekey is abandoned when the vault
+// finds it holds no valid standing token for the peer (judged at the
+// tick, without a refused deposit); the connection then reconnects naming
+// its current epoch.
+func TestR29I6NoTokenAbandonsPendingRekey(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	e0, _ := f.lostConfirm()
+	f.p(0).Standing.Exp = f.clk.Add(-time.Second)
+	f.tick(0)
+	if f.p(0).Pending != nil || !f.audited(0, "pending_abandoned_no_token") {
+		f.dump()
+		t.Fatal("a pending rekey without a valid standing token was not abandoned")
+	}
+	og := f.openReconnect(0)
+	if og == nil || !bytes.Equal(og.Named, e0) {
+		f.dump()
+		t.Fatal("no reconnect naming the current epoch")
 	}
 }

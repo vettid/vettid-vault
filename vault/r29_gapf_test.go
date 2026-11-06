@@ -21,8 +21,9 @@ import (
 // rekeys from its current epoch instead, also at B with no valid token").
 // The vault rekeys toward a desktop, which activates E1 at hs.fin; the
 // desktop's hs.confirm is lost and the vault's standing token for it
-// expires. The vault abandons E1 and rekeys from E0, a rekey it cannot
-// deposit; it neither makes the device stale nor reconnects; after 16
+// expires. The vault abandons E1 for want of a valid standing token
+// (§6.3.1 "Initiator", R29-I6) and rekeys from E0, a rekey it cannot
+// deposit (refused token_expired, it waits for a token); it neither makes the device stale nor reconnects; after 16
 // days it no longer opens E1, while the device stays on E1; the member is
 // shown nothing. This is today's behaviour, a stated gap of release 29:
 // flip this test when the post-29 device work fixes it.
@@ -157,8 +158,9 @@ func (g *gapF) feedShown() bool {
 }
 
 // setup runs the gap up to the abandonment: E1 active at the desktop,
-// pending at the vault, the hs.confirm lost; the standing token expired;
-// the vault's next deposit refused token_expired.
+// pending at the vault, the hs.confirm lost; the standing token expired,
+// so the vault's next batch abandons E1 and rekeys from E0, whose hs.init
+// the relay refuses token_expired.
 func (g *gapF) setup() (e1ID []byte) {
 	g.t.Helper()
 	p := g.td.peer
@@ -177,9 +179,13 @@ func (g *gapF) setup() (e1ID []byte) {
 	g.d.relay.mu.Lock()
 	g.d.relay.failMailbox = map[string]error{p.Relay.Mailbox: &relayclient.Error{Status: 401, Code: CodeTokenExpired}}
 	g.d.relay.mu.Unlock()
-	g.d.withLock(func(m *Manager) { m.sendTo(p, "test.gapf", []byte(`{}`), g.clk) })
+	if err := g.d.m.ProcessBatch(context.Background(), &fakeCollector{}, nil); err != nil {
+		g.t.Fatal(err)
+	}
 	g.drain()
-	g.drain()
+	if !g.d.audited("pending_abandoned_no_token") {
+		g.t.Fatal("setup: E1 was not abandoned for want of a token")
+	}
 	return e1ID
 }
 
@@ -204,8 +210,8 @@ func (g *gapF) assertAbandonedWaiting(e1ID []byte) {
 	if rekey == nil {
 		g.t.Fatal("no rekey from the current epoch")
 	}
-	// Its hs.init waits in the outbox, behind the deposit refused
-	// token_expired (AwaitToken): undeposited until a fresh token arrives.
+	// Its hs.init, refused token_expired, waits in the outbox
+	// (AwaitToken): undeposited until a fresh token arrives.
 	waiting, awaiting := false, false
 	for _, e := range g.d.m.st.Outbox {
 		waiting = waiting || e.ID == rekey.InitOutbox && !e.Done

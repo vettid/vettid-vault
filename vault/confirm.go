@@ -266,10 +266,19 @@ func (m *Manager) abandonPending(p *Peer, why string, restart bool, now time.Tim
 }
 
 // tickPending applies B (§6.3.1): judged only once a collect since this
-// unlock returned fewer than max messages.
+// unlock returned fewer than max messages. A pending rekey is also
+// abandoned when the vault holds no valid standing token for the peer
+// (§6.3.1 "Initiator", R29-I6; a pending reconnect is not: it ends at B).
+// Afterwards a connection reconnects, a device gets a rekey from the
+// current epoch.
 func (m *Manager) tickPending(p *Peer, now time.Time) {
-	if pe := p.Pending; pe != nil && m.drainedOnce && now.Sub(pe.FinAt) > PendingLife {
+	pe := p.Pending
+	switch {
+	case pe == nil:
+	case m.drainedOnce && now.Sub(pe.FinAt) > PendingLife:
 		m.abandonPending(p, "b_passed", true, now)
+	case pe.Purpose == handshake.PurposeRekey && (p.Standing.Token == "" || !now.Before(p.Standing.Exp)):
+		m.abandonPending(p, "no_token", true, now)
 	}
 }
 

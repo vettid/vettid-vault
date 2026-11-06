@@ -277,3 +277,61 @@ func TestR29FDesktopBackWithinKeep(t *testing.T) {
 		t.Errorf("the device exception was needed (%d)", n)
 	}
 }
+
+// §7.2 "Unlock exchange": the member's app unlocks its vault; the request
+// carries a fresh app token and the result a fresh vault token, without
+// the relay. Both standing tokens have lapsed while both were away. The
+// app coming online exchanges nothing; the vault's unlock (by the app)
+// gives each side a fresh token, and the pair is live again. A desktop
+// has no such exchange.
+func TestUnlockExchange(t *testing.T) {
+	for _, desktop := range []bool{false, true} {
+		w := setup(Config{Vaults: 1, Devices: true}, 1)
+		s := &scen{t, w}
+		V, D := s.p(0), s.p(1)
+		D.Desktop = desktop
+		s.lock(V)
+		s.lock(D)
+		for _, p := range []*Party{V, D} {
+			for i := range p.stored.Peers {
+				r := &p.stored.Peers[i]
+				for j := range r.Toks {
+					r.Toks[j].Exp = w.Now + day
+				}
+				for j := range r.Issued {
+					r.Issued[j].Exp = w.Now + day
+				}
+			}
+			p.st = p.stored.clone()
+		}
+		s.tick(2 * day)
+		rv, rd := V.st.peer(D.ID), D.st.peer(V.ID)
+		valid := func() (bool, bool) {
+			rv, rd = V.st.peer(D.ID), D.st.peer(V.ID)
+			return rv.standing(rv.KeyFor, rv.Relay, w.Now).JTI != 0, rd.standing(rd.KeyFor, rd.Relay, w.Now).JTI != 0
+		}
+		V.unlock() // not by the app: it is offline
+		D.unlock() // the app comes online, the vault already unlocked
+		if a, b := valid(); a || b {
+			t.Fatalf("desktop %v: the device coming online exchanged tokens (%v, %v)", desktop, a, b)
+		}
+		s.lock(V)
+		V.unlock() // the app unlocks the vault
+		a, b := valid()
+		if desktop {
+			if a || b {
+				t.Errorf("a desktop got an unlock exchange (%v, %v)", a, b)
+			}
+			continue
+		}
+		if !a || !b || s.w.stats["unlock exchange"] == 0 {
+			t.Fatalf("the vault's unlock gave no fresh tokens (vault holds %v, app holds %v)", a, b)
+		}
+		probe := w.id()
+		s.do(V, func() { V.enqueue(D.ID, Msg{Kind: KSession, Probe: probe}, nil); V.write(); V.flush() })
+		s.run(2, V, D)
+		if !w.probes[probe] {
+			t.Errorf("a message vault->app was not accepted after the exchange\n  %s", s.trace())
+		}
+	}
+}

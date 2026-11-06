@@ -313,12 +313,13 @@ func (p *Party) unlock() {
 // unlockExchange: §7.2 "Unlock exchange": the member's app unlocks its
 // vault, and the unlock request carries a fresh app token and the result
 // a fresh vault token, without the relay. The model's device is the
-// member's app: when a vault or its app unlocks while the other is
-// unlocked, each gets a fresh standing token from the other. (A desktop
-// or agent has no such exchange; one offline past its token is paired
-// again, a member's action the model does not run.)
+// member's app: when a vault unlocks while its app is online (unlocked),
+// the unlock came from the app, and each gets a fresh standing token from
+// the other. The app merely coming online exchanges nothing. (A desktop or
+// agent has no such exchange; one offline past its token is paired again,
+// a member's action the model does not run.)
 func (w *World) unlockExchange(p *Party) {
-	if p.Copy || !p.newSpec() {
+	if p.Copy || !p.newSpec() || p.Device {
 		return
 	}
 	for _, q := range w.real() {

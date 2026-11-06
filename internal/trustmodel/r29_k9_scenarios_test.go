@@ -621,3 +621,67 @@ func TestR29RefusedReconnectLinksNotForForkCtx(t *testing.T) {
 		t.Fatalf("refused, it suspended (status %d)", rq.Status)
 	}
 }
+
+// (0.88.2, owner decision a, GC 01M6SEMS129B3R1QGQ49063G5P) "Fork by ctx"
+// skips an epoch Q began and abandoned while pending: it never became
+// current, so P never used it. The shape of random seed
+// 6415563950766347103 (TRUSTMODEL_ROTBURST=1), where two honest vaults
+// ended suspended (I4-false):
+//  1. Q rotates and rekeys P from E0; P answers; Q holds E1 pending (signed
+//     by P's ik a) and its hs.fin goes out.
+//  2. Q rotates again (S5 abandons E1); P rotates a->b, and its
+//     identity.rotate and its rekey naming E0 are delayed (a lease).
+//  3. P drops Q's hs.fin (no answer awaiting it) and answers Q's next
+//     rekey; Q follows a->b at that hs.resp, and E2 (signer b) is
+//     confirmed at both sides.
+//  4. P's delayed rekey (ctx E0) arrives: E0 is older than the confirmed
+//     E2, and the only epoch in between signed by an ancestor of b is E1,
+//     Q's own abandoned one. Q must not suspend. Off (World.noForkSkipAban,
+//     the rule before 0.88.2): it suspends.
+func TestR29ForkByCtxSkipsAbandoned(t *testing.T) {
+	bothWays(t, func(t *testing.T, off bool) {
+		s := newScen(t, 2)
+		s.w.relayRot = false
+		s.w.noForkSkipAban = off
+		P, Q := s.p(0), s.p(1)
+		e0 := Q.st.peer(P.ID).Cur
+		s.rotate(Q, pathCred) // Q rotates; its identity.rotate and rekey from E0
+		s.drain(P)            // P follows and answers
+		s.drain(Q)            // Q: E1 pending (signer a), hs.fin
+		rq := Q.st.peer(P.ID)
+		if rq.Pend == nil {
+			t.Fatalf("setup: Q holds no pending epoch\n  %s", s.trace())
+		}
+		e1 := rq.Pend.ID
+		s.rotate(Q, pathCred) // S5: E1 abandoned
+		if ep := Q.st.peer(P.ID).epoch(e1); ep == nil || !ep.Abandoned || !ep.MineInit {
+			t.Fatalf("setup: E%d not abandoned while pending", e1)
+		}
+		s.rotate(P, pathCred) // a->b: identity.rotate and a rekey naming E0
+		s.hold(Q, KIdRot)
+		s.hold(Q, KInit) // both delayed
+		for i := 0; i < 3; i++ {
+			s.drain(P) // P drops Q's hs.fin, answers Q's rekey (with a->b)
+			s.drain(Q) // Q: E2 pending (signer b), hs.fin; then confirmed
+		}
+		rq = Q.st.peer(P.ID)
+		if rq.IK != P.st.IK || rq.ConfID == e0 || rq.Cur == e0 || rq.Status != stActive {
+			t.Fatalf("setup: Q has no newer confirmed epoch signed by P's new ik (cur E%d conf E%d)\n  %s", rq.Cur, rq.ConfID, s.trace())
+		}
+		s.release(Q, KIdRot)
+		s.release(Q, KInit)
+		s.drain(Q) // P's delayed identity.rotate and rekey naming E0
+		rq = Q.st.peer(P.ID)
+		t.Logf("off %v: Q status %d (%s)", off, rq.Status, rq.Ref)
+		if !off && (rq.Status != stActive || s.w.stats["R29 F1:fork-by-ctx-skipped-abandoned"] == 0) {
+			t.Fatalf("Q suspended an honest P by Fork by ctx over its own abandoned E%d\n  %s", e1, s.trace())
+		}
+		if off && rq.Status != stSuspended {
+			t.Fatalf("off: no suspension; the scenario does not test the rule\n  %s", s.trace())
+		}
+		if !off {
+			s.run(4, P, Q)
+			s.done(true)
+		}
+	})
+}

@@ -785,8 +785,16 @@ func (q *Party) forkEpoch(r *PeerRec, ctx int) bool {
 		if ic < 0 || ik <= ic {
 			return false
 		}
-		// R29-F1: there is no own_copy exception
+		// R29-F1: there is no own_copy exception; (0.88.2, owner decision
+		// a, GC 01M6SEMS129B3R1QGQ49063G5P) but an epoch Q began and
+		// abandoned while pending never became current and is skipped
 		for _, ep := range r.Epochs[ic+1 : ik+1] {
+			if ep.MineInit && ep.Abandoned && !q.w.noForkSkipAban {
+				if r.isAncestor(ep.Signer) {
+					q.w.hit("F1:fork-by-ctx-skipped-abandoned")
+				}
+				continue
+			}
 			if r.isAncestor(ep.Signer) {
 				return true
 			}

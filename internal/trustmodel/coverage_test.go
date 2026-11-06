@@ -71,6 +71,7 @@ var r29Unreachable = map[string]string{
 	"I6:reconnect-kept-at-token_expired": "as above, with a pending reconnect",
 	"K9:judged-after-cut-off":            "Table A's after-cut-off row needs relay-key rotation, off in the oracle config (TestR29K9AfterCutOffIgnoreJudged)",
 	"K4:flag-suspend-already-demoted":    "a flag set on an epoch after its demotion needs a message deposited before the link in another mailbox (TestR29K4AlreadyDemotedFlagSuspends)",
+	"F1:fork-by-ctx-skipped-abandoned":   "rare: 2 hits in 3,000 oracle runs (more with TRUSTMODEL_ROTBURST); counted where the skipped epoch's signer was an ancestor; TestR29ForkByCtxSkipsAbandoned",
 	"G2:sticky":                          "a message without hs_confirm after it was seen (a copy taken before the device first advertised it)",
 }
 

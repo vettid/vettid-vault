@@ -11,8 +11,8 @@ import (
 )
 
 // The vectors of VAULT-MESSAGING §16 "§10.19 votes", copied byte for byte
-// from vettid/service-vault vote/testdata/vectors.json at dc6a4d2
-// (BALLOT-PROTOCOL 0.11.1 §11; unchanged at 0.12.0). The file is
+// from vettid/service-vault vote/testdata/vectors.json at 61aca6e
+// (BALLOT-PROTOCOL 0.13.10 §11, sha256 9bbc4fee...6a81). The file is
 // authoritative: a vector that stops matching is a stop-and-report item
 // (BALLOT-PROTOCOL §11), never a reason to edit the file here.
 const vectorsFile = "../../testdata/vote/vectors.json"
@@ -306,26 +306,31 @@ func TestMerkleVectors(t *testing.T) {
 	}
 }
 
-// The twelve cases of BALLOT-PROTOCOL §2 (VAULT-MESSAGING §16): the strict
+// The 24 cases of BALLOT-PROTOCOL §2 (VAULT-MESSAGING §16): the strict
 // verifier gives the vector's verdict on each.
 func TestEd25519Vectors(t *testing.T) {
 	v := load(t)
-	if len(v.Ed25519) != 12 {
+	if len(v.Ed25519) != 24 {
 		t.Fatalf("%d cases", len(v.Ed25519))
 	}
+	goAccepts := 0
 	for _, c := range v.Ed25519 {
 		err := Verify(hx(t, c.Key), LabelBallot, hx(t, c.Msg), hx(t, c.Sig))
 		if (err == nil) != c.Valid {
 			t.Errorf("%s: verifies=%v, vector says %v", c.Case, err == nil, c.Valid)
 		}
-		// The cases are ones Go's ed25519.Verify alone accepts, except
-		// S not below L: that is why the rules are made here.
-		if !c.Valid && c.Case != "S not below L" && c.Case != "key with y not below p" && c.Case != "key with x = 0 and the sign bit" {
-			m := append([]byte(LabelBallot), hx(t, c.Msg)...)
-			if !ed25519.Verify(hx(t, c.Key), m, hx(t, c.Sig)) {
-				t.Errorf("%s: the stdlib refuses it too; the case no longer shows the extra rules", c.Case)
-			}
+		// Count the refused cases Go's ed25519.Verify alone accepts: the
+		// strict rules must add something. Which cases those are is not
+		// pinned (the stdlib refuses some, such as S not below L or a
+		// non-canonical R), as in service-vault's TestVerifyRules.
+		key := hx(t, c.Key)
+		if !c.Valid && len(key) == ed25519.PublicKeySize && ed25519.Verify(key, append([]byte(LabelBallot), hx(t, c.Msg)...), hx(t, c.Sig)) {
+			goAccepts++
 		}
+	}
+	t.Logf("%d refused cases ed25519.Verify accepts", goAccepts)
+	if goAccepts == 0 {
+		t.Error("no refused case is one ed25519.Verify accepts: the vectors don't exercise the extra rules")
 	}
 	// Wrong lengths.
 	if Verify(make([]byte, 31), LabelBallot, nil, make([]byte, 64)) == nil || Verify(make([]byte, 32), LabelBallot, nil, make([]byte, 63)) == nil {

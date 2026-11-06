@@ -81,19 +81,6 @@ func (p *Peer) confirmedID() []byte {
 	return p.LastEpochID
 }
 
-// upgradeEpochs gives a record from before 0.86.0 its epoch record: the
-// current epoch, signed by the ik current for the peer at the upgrade
-// (§3.4.1), and confirmed.
-func (p *Peer) upgradeEpochs() {
-	if len(p.Epochs) > 0 || len(p.LastEpochID) == 0 {
-		return
-	}
-	p.Epochs = []EpochMeta{{ID: append([]byte(nil), p.LastEpochID...), Signer: append([]byte(nil), p.IK...)}}
-	if p.Confirmed == nil {
-		p.Confirmed = append([]byte(nil), p.LastEpochID...)
-	}
-}
-
 // newer reports whether epoch a was recorded after epoch b (b unknown or
 // nil: whether a is recorded at all). Pending and destroyed epochs are not
 // newer than anything.

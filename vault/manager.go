@@ -809,7 +809,6 @@ func (m *Manager) restoreLive() error {
 			return ErrState
 		}
 		m.sessions[p.ID] = kr
-		p.upgradeEpochs() // 0.86.0: a record from before it gets its epoch record
 	}
 	// In-flight handshakes and requests that do not restore (made by an
 	// earlier release, before 0.10.3) are dropped: they would fail anyway,

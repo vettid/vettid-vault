@@ -328,9 +328,7 @@ type IDResend struct {
 // signer and the position of the message that established it).
 type EpochMeta struct {
 	ID []byte `json:"id"`
-	// Signer is the peer-side ik that signed its handshake; an epoch from
-	// before this release counts as signed by the ik current at the
-	// upgrade.
+	// Signer is the peer-side ik that signed its handshake.
 	Signer []byte `json:"signer,omitempty"`
 	// Mine: the vault began it (it was the handshake's initiator).
 	Mine bool `json:"mine,omitempty"`

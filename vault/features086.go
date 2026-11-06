@@ -95,9 +95,10 @@ func mergeNames(have []string, names []string) ([]string, bool) {
 // successor). A name is only ever added. A list that is not well formed
 // counts for nothing.
 func (m *Manager) noteFeatures(p *Peer, names []string) {
-	if p != nil && p.Kind != KindConnection {
+	if p != nil && p.Kind != KindConnection && m.st.Devices[p.ID] == p {
 		// §6.3.1 "An app from before release 29" (R29-D4): a message from
-		// the device whose features lack hs_confirm.
+		// a paired device whose features lack hs_confirm (not a pairing's
+		// hs.init from a device not yet stored).
 		if !p.Heard {
 			p.Heard = true
 			m.dirty = true
@@ -124,7 +125,7 @@ func (m *Manager) noteFeatures(p *Peer, names []string) {
 // member's app and desktops, once per device until that device advertises
 // hs_confirm. A device that has sent nothing yet is not judged.
 func (m *Manager) deviceUpdateNeeded(p *Peer, now time.Time) {
-	if p == nil || p.Kind == KindConnection || !p.Heard || p.hasConfirm() || p.UpdateNoticed {
+	if p == nil || p.Kind == KindConnection || m.st.Devices[p.ID] != p || !p.Heard || p.hasConfirm() || p.UpdateNoticed {
 		return
 	}
 	p.UpdateNoticed = true

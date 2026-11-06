@@ -141,3 +141,15 @@ func TestR29D4AtB(t *testing.T) {
 		}
 	}
 }
+
+// L5: device.update_needed is judged only for a stored, paired device,
+// not for a pairing's hs.init from one not yet paired.
+func TestR29D4NotForUnpairedDevice(t *testing.T) {
+	d := newDevFixture(t)
+	sink := sinkOf(d)
+	np := &Peer{ID: "pairing", Kind: KindApp}
+	d.withLock(func(m *Manager) { m.noteFeatures(np, nil) })
+	if updateNotices(sink, np.ID) != 0 || np.Heard {
+		t.Fatal("judged a device that is not paired")
+	}
+}

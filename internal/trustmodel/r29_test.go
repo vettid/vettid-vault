@@ -167,12 +167,24 @@ const (
 	resLiveMailbox      = "an old copy collects, acks or deletes the original's live mailbox"
 )
 
-// residualOf: the residual that exempts the pair (a, b), or "".
+// residualOf: the residual that covers the pair (a, b), or "". For an app
+// from before release 29 it covers only I1 (the pair may lose the
+// connection) and the notice's wording: I7 still requires the R29-D4
+// notice (oldAppDown, checkI7).
 func (w *World) residualOf(a, b PID) string {
 	if w.party(a).OldApp || w.party(b).OldApp {
-		return resOldApp // I7 still requires the R29-D4 notice when the pair split
+		return resOldApp
 	}
 	return ""
+}
+
+// oldAppDown: the pair of an app from before release 29 and its vault
+// fails I1 (or loses a message) at quiescence; checkI7 requires the
+// member to have been told (device.update_needed, R29-D4).
+func (w *World) oldAppDown(k [2]PID, inv, detail string) {
+	if _, ok := w.oldApp[k]; !ok {
+		w.oldApp[k] = inv + ": " + detail
+	}
 }
 
 // exempt counts a residual exemption for a pair, once per invariant.

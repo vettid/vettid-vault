@@ -629,6 +629,7 @@ func (w *World) checkEnd(liveness bool) {
 		}
 	}
 	probe := map[int]string{}
+	probeOld := map[int][2]PID{} // probes between an old app and its vault
 	for _, pr := range pairs {
 		ra, rb := pr.a.st.peer(pr.b.ID), pr.b.st.peer(pr.a.ID)
 		if why := w.dead[pr.a.ID] + w.dead[pr.b.ID]; why != "" {
@@ -639,10 +640,10 @@ func (w *World) checkEnd(liveness bool) {
 			w.stat("I1 pair excluded: " + map[bool]string{true: "suspended/stale/conflict"}[true])
 			continue
 		}
-		if res := w.residualOf(pr.a.ID, pr.b.ID); res != "" {
-			w.exempt("I1", res)
-			continue
-		}
+		// an app from before release 29 may lose the connection (§3.4.1
+		// Residuals, "Earlier releases are unsupported"), but the member is
+		// still told (R29-D4): its failures are noted for I7, not exempted
+		oldApp := w.residualOf(pr.a.ID, pr.b.ID) == resOldApp
 		if w.limits(pr.a, ra) || w.limits(pr.b, rb) {
 			// SPEC FINDING: §6.6 "Limits": the update cannot reach the peer
 			// (resends ended by a definite refusal); the pair is dead but not
@@ -659,31 +660,39 @@ func (w *World) checkEnd(liveness bool) {
 		if c := w.lostLabel(pr.a.ID, pr.b.ID); c != "" {
 			inv1 = "I1/hs-lost:" + c
 		}
+		k := pairKey(pr.a.ID, pr.b.ID)
+		fail := func(inv, format string, a ...any) {
+			if oldApp {
+				w.oldAppDown(k, inv, fmt.Sprintf(format, a...))
+				return
+			}
+			w.violate(inv, format, a...)
+		}
 		for _, s := range []struct {
 			me, it *Party
 			r      *PeerRec
 		}{{pr.a, pr.b, ra}, {pr.b, pr.a, rb}} {
 			if s.r.Relay != s.it.st.Relay {
-				w.violate(inv1, "%s: %s has relay key %d for %s, which is at %d", name, s.me.Name, s.r.Relay, s.it.Name, s.it.st.Relay)
+				fail(inv1, "%s: %s has relay key %d for %s, which is at %d", name, s.me.Name, s.r.Relay, s.it.Name, s.it.st.Relay)
 			}
 			if s.r.IK != s.it.st.IK {
-				w.violate(inv1, "%s: %s has ik %d for %s, which is at %d", name, s.me.Name, s.r.IK, s.it.Name, s.it.st.IK)
+				fail(inv1, "%s: %s has ik %d for %s, which is at %d", name, s.me.Name, s.r.IK, s.it.Name, s.it.st.IK)
 			}
 			if s.r.KeyFor != s.me.st.Relay || s.r.standing(s.me.st.Relay, s.it.st.Relay, w.Now).JTI == 0 {
-				w.violate(inv1, "%s: %s holds no token passing rule T for %s's current mailbox (key for it %d, own %d)", name, s.me.Name, s.it.Name, s.r.KeyFor, s.me.st.Relay)
+				fail(inv1, "%s: %s holds no token passing rule T for %s's current mailbox (key for it %d, own %d)", name, s.me.Name, s.it.Name, s.r.KeyFor, s.me.st.Relay)
 			}
 			for _, e := range s.me.st.Out {
 				if e.To == s.it.ID && !e.Done && !e.Ended {
-					w.violate(inv1, "%s: %s still holds %s for %s", name, s.me.Name, kindName[e.M.Kind], s.it.Name)
+					fail(inv1, "%s: %s still holds %s for %s", name, s.me.Name, kindName[e.M.Kind], s.it.Name)
 					break
 				}
 			}
 			if len(s.r.Held) > 0 {
-				w.violate(inv1, "%s: %s still holds %d held message(s) for %s (R29-K5)", name, s.me.Name, len(s.r.Held), s.it.Name)
+				fail(inv1, "%s: %s still holds %d held message(s) for %s (R29-K5)", name, s.me.Name, len(s.r.Held), s.it.Name)
 			}
 		}
 		if ra.Cur == 0 || ra.Cur != rb.Cur {
-			w.violate(inv1, "%s: current epochs differ (E%d vs E%d)", name, ra.Cur, rb.Cur)
+			fail(inv1, "%s: current epochs differ (E%d vs E%d)", name, ra.Cur, rb.Cur)
 		} else if w.optA {
 			// R29 I6: after an ik rotation of either side, an epoch whose
 			// signer is the new ik is current at both sides
@@ -704,7 +713,7 @@ func (w *World) checkEnd(liveness bool) {
 					if mine != nil {
 						own = mine.Own
 					}
-					w.violate("I6", "%s: after %s's rotation the current epoch E%d is signed by %d (peer's record) / %d (own record), not its new ik %d",
+					fail("I6", "%s: after %s's rotation the current epoch E%d is signed by %d (peer's record) / %d (own record), not its new ik %d",
 						name, s.it.Name, ra.Cur, sig, own, s.it.st.IK)
 				}
 			}
@@ -712,6 +721,9 @@ func (w *World) checkEnd(liveness bool) {
 		for _, s := range [][2]*Party{{pr.a, pr.b}, {pr.b, pr.a}} {
 			id := w.id()
 			probe[id] = s[0].Name + "->" + s[1].Name
+			if oldApp {
+				probeOld[id] = k
+			}
 			me := s[0]
 			me.guard(func() {
 				me.enqueue(s[1].ID, Msg{Kind: KSession, Probe: id}, nil)
@@ -728,6 +740,10 @@ func (w *World) checkEnd(liveness bool) {
 	sort.Ints(ids)
 	for _, id := range ids {
 		if !w.probes[id] {
+			if k, ok := probeOld[id]; ok {
+				w.oldAppDown(k, "I1", "a message "+probe[id]+" was not accepted at quiescence")
+				continue
+			}
 			w.violate("I1", "a message %s was not accepted at quiescence", probe[id])
 		}
 	}
@@ -779,8 +795,8 @@ func (w *World) checkEnd(liveness bool) {
 		if w.dead[pr[0]] != "" || w.dead[pr[1]] != "" || w.probes[id] {
 			continue
 		}
-		if res := w.residualOf(pr[0], pr[1]); res != "" && !strings.HasPrefix(w.probeFate[id], "accept") {
-			w.exempt("I1-loss", res)
+		if res := w.residualOf(pr[0], pr[1]); res == resOldApp && !strings.HasPrefix(w.probeFate[id], "accept") {
+			w.oldAppDown(pairKey(pr[0], pr[1]), "I1-loss", "a message "+w.party(pr[0]).Name+"->"+w.party(pr[1]).Name+" was lost ("+ft+")")
 			continue
 		}
 		switch {

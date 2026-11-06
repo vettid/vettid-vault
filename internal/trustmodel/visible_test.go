@@ -94,14 +94,34 @@ func (w *World) checkI7() {
 				w.stat("I7: split healed")
 				continue
 			}
-			switch res := w.residualOf(a.ID, b.ID); {
-			case res != "":
-				w.exempt("I7", res)
+			switch {
 			case w.dead[a.ID] != "" || w.dead[b.ID] != "":
 				w.exempt("I7", resLiveMailbox)
+			case w.residualOf(a.ID, b.ID) == resOldApp:
+				w.violate("I7", "%s: an app from before release 29, epochs split (E%d vs E%d), and no device.update_needed was shown", pairName(w, a.ID, b.ID), ra.Cur, rb.Cur)
 			default:
 				w.violate("I7", "%s: epochs split (E%d vs E%d) and the pair ends with nothing visible", pairName(w, a.ID, b.ID), ra.Cur, rb.Cur)
 			}
+		}
+	}
+	// an app from before release 29 whose pair split or is down at
+	// quiescence: the residual covers only the notice's wording, so the
+	// member must have been shown device.update_needed (R29-D4)
+	olds := make([][2]PID, 0, len(w.oldApp))
+	for k := range w.oldApp {
+		olds = append(olds, k)
+	}
+	sort.Slice(olds, func(i, j int) bool {
+		return olds[i][0] < olds[j][0] || (olds[i][0] == olds[j][0] && olds[i][1] < olds[j][1])
+	})
+	for _, k := range olds {
+		switch {
+		case slices.Contains(w.feed[k], "device.update_needed"):
+			w.exempt("I1", resOldApp) // the notice was shown; only its wording is the residual
+		case w.visible(k[0], k[1]):
+			w.stat("I7: old app, the pair ends visibly")
+		default:
+			w.violate("I7", "%s: an app from before release 29, the pair is down at quiescence (%s), and no device.update_needed was shown", pairName(w, k[0], k[1]), w.oldApp[k])
 		}
 	}
 	keys := make([][2]int, 0, len(w.copyExpo))

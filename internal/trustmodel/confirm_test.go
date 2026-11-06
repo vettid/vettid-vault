@@ -5,7 +5,7 @@ import (
 	"slices"
 )
 
-// VAULT-MESSAGING 0.87.0 §6.3.1 at vettid.org e1c5efd: lifetimes,
+// VAULT-MESSAGING 0.87.1 §6.3.1 at vettid.org 4734dfd8: lifetimes,
 // activation on confirmation, the confirmed epoch, rule E. Release 29 has
 // no gate: both halves always run, between release-29 vaults and toward
 // their devices. Config.OldRules turns all of it off (f4a4d97).

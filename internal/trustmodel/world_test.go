@@ -24,7 +24,7 @@ type World struct {
 	p429          float64 // chance a relay call is answered 429
 	pRef          float64 // chance a rotate or registration is refused definitively
 	holdRotate    bool
-	optA          bool              // VAULT-MESSAGING 0.87.0 §6.3.1 (activation on confirmation); false: Config.OldRules
+	optA          bool              // VAULT-MESSAGING 0.87.1 §6.3.1 (activation on confirmation); false: Config.OldRules
 	relayRot      bool              // relay-key rotation (rule U, S1-S3, S9): off in the oracle config, on in the regression config
 	probeDep      map[int][2]PID    // session probes deposited by real parties (from, to)
 	probeFate     map[int]string    // what became of each

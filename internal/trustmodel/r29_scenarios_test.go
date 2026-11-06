@@ -2,7 +2,7 @@ package trustmodel
 
 import "testing"
 
-// Deterministic scenarios for the release-29 rules (VAULT-MESSAGING 0.87.0
+// Deterministic scenarios for the release-29 rules (VAULT-MESSAGING 0.87.1
 // §6.3.2), one per gap the rule list names where the model can drive it.
 
 // R29-F3, R29-K7: P rekeys E0->E1, sends hs.fin, rotates before any

@@ -1,6 +1,6 @@
 package trustmodel
 
-// VAULT-MESSAGING 0.87.0 release-29 rules (§6.3.1, §3.4.1) that span the
+// VAULT-MESSAGING 0.87.1 (vettid.org 4734dfd8) release-29 rules (§6.3.1, §3.4.1) that span the
 // receiving and the rotating side: the epoch a reconnect names (R29-X5,
 // K5, K7), the held queue after a demotion of the current epoch (K5), and
 // the count of each rule's branches by its §6.3.2 ID (w.hit).
@@ -155,7 +155,7 @@ func (w *World) feedItem(q, r PID, kind string) {
 	w.feed[k] = append(w.feed[k], kind)
 }
 
-// ---------- residuals (§3.4.1 Residuals, 0.87.0) ----------
+// ---------- residuals (§3.4.1 Residuals, 0.87.1) ----------
 
 // Residual reasons: each exempts a pair from I1, I6 and I7, and is counted.
 const (

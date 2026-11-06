@@ -150,7 +150,6 @@ type PeerRec struct {
 	IdResendN     int      // resends for the rotation IdResendRot (at most 3)
 	IdResendRot   int64
 	Reconfirm     bool    // a message under the confirmed epoch in this batch: queue hs.confirm
-	RCCtx         int     // the next reconnect names this epoch (0: the current epoch, or K5's)
 	RCs           int     // reconnects started toward this peer (stat)
 	DemName       int     // R29-K7: after strict F1 the reconnect names E (until a new epoch is current)
 	RCNamed       int     // R29-K6: the epoch the failed tries named
@@ -188,8 +187,7 @@ type PeerRec struct {
 	ResendEnd bool
 	RevokedAt int64 // S9: first token_revoked for an earlier key's token
 	S9Audited bool
-	RestartIK Key   // H5: restarted reconnect spent once per change of the current ik
-	Stamp     int64 // when this record last changed status (stale bookkeeping)
+	RestartIK Key // H5: restarted reconnect spent once per change of the current ik
 }
 
 type deferral struct {

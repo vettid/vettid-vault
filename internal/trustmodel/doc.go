@@ -1,5 +1,5 @@
-// Package trustmodel is an executable model of VAULT-MESSAGING 0.87.0
-// (vettid.org e1c5efd) §3.4.1, "Which keys a peer's messages may come
+// Package trustmodel is an executable model of VAULT-MESSAGING 0.87.1
+// (vettid.org 4734dfd8) §3.4.1, "Which keys a peer's messages may come
 // from", and §6.3.1, "Lifetimes and activation on confirmation": release
 // 29, between release-29 vaults and their devices. It is the pass/fail
 // oracle for the release-29 rules of §6.3.2 (R29-G1 to R29-D4). It is

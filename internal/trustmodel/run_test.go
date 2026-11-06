@@ -840,13 +840,6 @@ func runActions(cfg Config, seed uint64, acts []Action, verbose bool) *World {
 	return w
 }
 
-func firstInv(w *World) string {
-	if len(w.viol) == 0 {
-		return ""
-	}
-	return w.viol[0].Inv + ": " + strings.SplitN(w.viol[0].Detail, " ", 2)[0]
-}
-
 // shrink removes actions while the same invariant still fails (replay).
 func shrink(cfg Config, seed uint64, acts []Action, inv string) []Action {
 	cur := slices.Clone(acts)

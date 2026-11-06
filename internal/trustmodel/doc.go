@@ -30,8 +30,8 @@
 //
 // Run: go test ./internal/trustmodel/ -run . -v
 // Env: TRUSTMODEL_RUNS (default 3000), TRUSTMODEL_SEED (default 1),
-// TRUSTMODEL_STEPS (actions per run, default 40), TRUSTMODEL_STRICT (fail
-// TestRandom on any violation), TRUSTMODEL_RELAYROT (the regression
+// TRUSTMODEL_STEPS (actions per run, default 40), TRUSTMODEL_LENIENT (TestRandom
+// reports violations without failing; by default any violation fails it), TRUSTMODEL_RELAYROT (the regression
 // config), TRUSTMODEL_COVRUNS (TestR29Coverage's runs, default 3000),
 // TRUSTMODEL_MINHITS (its minimum hits per rule and branch, default 3),
 // TRUSTMODEL_NOSKEW (no clock skew), TRUSTMODEL_TRACE (print scenario

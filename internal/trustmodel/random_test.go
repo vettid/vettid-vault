@@ -106,7 +106,13 @@ func TestRandom(t *testing.T) {
 	}
 	el := time.Since(start)
 	report(t, &a, seed, runs, el)
-	if a.viol > 0 && os.Getenv("TRUSTMODEL_STRICT") != "" {
+	// any violation fails the test; TRUSTMODEL_LENIENT only reports (for
+	// attribution runs)
+	if a.viol > 0 {
+		if os.Getenv("TRUSTMODEL_LENIENT") != "" {
+			t.Logf("TRUSTMODEL_LENIENT: %d of %d runs violated an invariant", a.viol, a.runs)
+			return
+		}
 		t.Fatalf("%d of %d runs violated an invariant", a.viol, a.runs)
 	}
 }

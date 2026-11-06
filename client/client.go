@@ -245,6 +245,10 @@ type VaultRecord struct {
 	// §6.3.1 "Responder"): the newest under which the vault sent anything
 	// but hs.fin. Nil: the current epoch.
 	Confirmed []byte `json:"confirmed,omitempty"`
+	// Chain is the vault's identity links this device has followed
+	// (§3.4, S8): a rekey's or identity.rotate's leading links in it are
+	// not followed again.
+	Chain []json.RawMessage `json:"chain,omitempty"`
 }
 
 // Features are this client's receiving-side capabilities (0.86.0,
@@ -1812,11 +1816,15 @@ func (d *Device) handleRekey(ctx context.Context, raw []byte, in *envelope.Inner
 	v := d.st.Vault
 	resp, env, err := pi.Respond(handshake.ResponderConfig{
 		Identity: d.ik, Policy: d.policy(), PinnedSuite: v.Suite, CollectSender: sender,
-		RecordRelayKey: v.RelayPK, KnownInitiatorIK: v.IK, Now: now, Features: Features(),
+		RecordRelayKey: v.RelayPK, KnownInitiatorIK: v.IK, KnownInitiatorChain: d.chain(), Now: now, Features: Features(),
 	})
 	if err != nil {
 		return
 	}
+	// S8: the vault's links the rekey carried were checked by Respond (a
+	// chain from the stored ik to from.ik); a device follows them now (the
+	// vault's rekey is authenticated by the session it travels in).
+	d.followLinks(pi.Init().Rotations)
 	if err := d.depositVault(ctx, "hs.resp", v.RelayURL, v.Mailbox, v.Token, env); err != nil {
 		resp.Abort()
 		return
@@ -1924,11 +1932,47 @@ func (d *Device) followRotation(body json.RawMessage) {
 	if err != nil {
 		return
 	}
-	final, kem, err := handshake.ResolveChain(d.st.Vault.IK, []*handshake.Rotation{r})
-	if err != nil {
+	links := []*handshake.Rotation{r}
+	// S8 (0.86.0): `rotations` carries the whole chain since the epoch's
+	// signer, so a device that missed an earlier identity.rotate follows.
+	if arr, ok, err := o.OptArray("rotations"); err == nil && ok && len(arr) > 0 {
+		links = links[:0]
+		for _, raw := range arr {
+			x, err := handshake.ParseRotation(raw)
+			if err != nil {
+				return
+			}
+			links = append(links, x)
+		}
+	}
+	d.followLinks(links)
+}
+
+// followLinks follows the vault's links past those already followed.
+func (d *Device) followLinks(links []*handshake.Rotation) {
+	v := d.st.Vault
+	known := d.chain()
+	final, kem, n, err := handshake.ResolveChainKnown(v.IK, known, links)
+	if err != nil || n == len(links) {
 		return
 	}
-	d.st.Vault.IK, d.st.Vault.KEM = final, kem.Bytes()
+	v.IK = final
+	if kem != nil {
+		v.KEM = kem.Bytes()
+	}
+	for _, r := range links[n:] {
+		v.Chain = append(v.Chain, r.Marshal())
+	}
+}
+
+func (d *Device) chain() []*handshake.Rotation {
+	var out []*handshake.Rotation
+	for _, raw := range d.st.Vault.Chain {
+		if r, err := handshake.ParseRotation(raw); err == nil {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // RenewVaultToken mints a fresh standing token for the vault to deposit to

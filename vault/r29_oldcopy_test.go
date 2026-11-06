@@ -326,38 +326,39 @@ func TestR29OwnCopyCannotHideFork(t *testing.T) {
 	}
 }
 
-// Model: TestOldCopyForkToward28StillCaught. Q (release 28 stand-in) and
-// an old copy of Q each rotate from the same ik; P (release 29, Q
-// ungated) receives both links: rule C suspends.
-// The I3 hole lead fix B had: Q, toward P ungated, rekeys; P's old copy
-// answers it, so Q activates at hs.fin an epoch made with the copy (signed
-// by P's old ik). P's real link under E0 must not let it be kept: strict
-// F1 demotes it, and Q converges with the real P.
-func TestR29OldCopyAnswerToUngatedRekeyNotKept(t *testing.T) {
+// The I3 hole lead fix B had: Q rekeys; P's old copy answers it and
+// confirms it, so Q makes current an epoch made with the copy (signed by
+// P's old ik). P's real link under E0 must not let it be kept: strict F1
+// demotes it, and Q converges with the real P.
+func TestR29OldCopyAnswerToRekeyNotKept(t *testing.T) {
 	f := newR29Fx(t)
 	f.longTokens()
 	snap := f.snapshot(0)
 	f.startCopy(0, snap)
-	f.do(1, func(_ *Manager, p *Peer) { p.PeerFeatures = nil }) // Q has not seen P's features
 	f.rekey(1)
 	f.deliver(1, 2, kHSInit) // the copy collects it
 	f.deliver(2, 1, kHSResp) // and answers as P
-	ec := append([]byte(nil), f.cur(1)...)
-	if f.p(1).Pending != nil || f.p(1).Revert == nil {
-		t.Fatal("setup: Q did not activate at hs.fin")
-	}
 	f.deliver(1, 2, kHSFin)
+	f.deliver(2, 1, kConfirm) // and confirms it as P
+	ec := append([]byte(nil), f.cur(1)...)
+	if f.p(1).Pending != nil {
+		t.Fatal("setup: the copy did not confirm Q's epoch")
+	}
 	f.rotate(0)
 	f.deliver(0, 1, kRotate)
-	if e := f.p(1).epochMeta(ec); e == nil || !e.Demoted || bytes.Equal(f.cur(1), ec) {
+	if e := f.p(1).epochMeta(ec); e == nil || !e.Demoted {
 		f.dump()
-		t.Fatal("the copy's epoch was kept")
+		t.Fatal("the copy's epoch was not demoted")
 	}
 	f.settle()
 	f.advance(time.Hour)
 	f.tick(0)
 	f.tick(1)
 	f.settle()
+	if bytes.Equal(f.cur(1), ec) {
+		f.dump()
+		t.Fatal("the copy's epoch was kept")
+	}
 	if !f.sameEpoch() || !bytes.Equal(f.p(1).IK, f.m(0).keys.ik.Public().(ed25519.PublicKey)) {
 		f.dump()
 		t.Fatal("Q did not converge with the real P")
@@ -572,11 +573,6 @@ func TestR29SealedUndepositedResealed(t *testing.T) {
 	}
 }
 
-// A revert destroys the new epoch as rule E does, with the inner ts of the
-// message that caused it: a later message under it (here from an old copy
-// of the peer that collected the lost hs.fin) is fork evidence toward a
-// peer with hs_confirm, starts rule E's reconnect toward one without, and
-// one with an earlier ts is refused superseded_epoch.
 // A rekey hs.init naming an older epoch that fails what AcceptRekey checks
 // changes nothing (it is refused before the own_copy exception or the
 // fork rule could move any state).

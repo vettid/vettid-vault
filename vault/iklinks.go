@@ -217,9 +217,6 @@ func (m *Manager) followLinks(p *Peer, app []*handshake.Rotation, msgEpoch []byt
 			// S8 (0.86.6): a demotion by position is audited as a fork
 			// sign (ref epoch), without a feed item or a suspension.
 			m.record(Activity{Kind: "connection.fork_suspected", ConnectionID: connID(p), DeviceID: devID(p), Ref: "epoch", Audit: true}, now)
-			if p.Revert != nil && bytes.Equal(p.Revert.New, e.ID) {
-				m.keepToHeld(p, false, now) // S1
-			}
 			if bytes.Equal(e.ID, p.LastEpochID) {
 				demotedCurrent = true
 				if kr := m.sessions[p.ID]; kr != nil {
@@ -258,20 +255,6 @@ func (m *Manager) f1Demote(p *Peer, app []*handshake.Rotation, msgEpoch []byte, 
 		kr := m.sessions[p.ID]
 		if kr != nil {
 			m.rehold(p, kr.Current())
-		}
-		if r := p.Revert; r != nil && bytes.Equal(r.Old, msgEpoch) && kr != nil && kr.Reinstate(epochIDOf(msgEpoch), now) {
-			// The epoch it traveled under is current again (it was kept
-			// whole, §6.3.1 "Deployment"); the copies of what was sent
-			// under the demoted one are sealed in it (S1).
-			oldChain := r.OldOwnChain
-			m.keepToHeld(p, true, now)
-			p.LastEpochID, p.OwnChainAtEpoch = append([]byte(nil), msgEpoch...), oldChain
-			if e := p.epochMeta(msgEpoch); e != nil {
-				e.Superseded = time.Time{}
-			}
-			m.sealHeld(p)
-		} else if r != nil && bytes.Equal(r.New, cur.ID) {
-			m.keepToHeld(p, false, now) // S1: held for the next epoch
 		}
 		for id, og := range m.st.Outgoing {
 			if og.New == nil && og.PeerID == p.ID && og.Purpose == handshake.PurposeRekey {
@@ -389,7 +372,6 @@ func (m *Manager) sealHeld(p *Peer) {
 			m.dirty = true
 			continue
 		}
-		m.keepCopy(p, in, e.Wake)
 		e.Payload, e.Held, e.HeldExp = raw, nil, time.Time{}
 		e.RelayURL, e.Mailbox = p.Relay.URL, p.Relay.Mailbox
 		m.dirty = true
@@ -399,7 +381,8 @@ func (m *Manager) sealHeld(p *Peer) {
 // demotedReconnectExpired counts an expired reconnect while p's current
 // epoch is demoted: at the third the connection goes stale (with
 // connection.stale and its feed item), as for rules E and L (the lead's
-// call). Each expired one's tokens were revoked already.
+// call; §3.4.1 "The reconnect bound"). Each expired one's tokens were
+// revoked already.
 //
 // 0.86.5: a try fails when its handshake expires or its pending epoch is
 // abandoned (B, H5, S5, crossing, link); both count. A refusal ends it
@@ -412,7 +395,7 @@ func (m *Manager) demotedReconnectExpired(p *Peer, now time.Time) {
 	}
 	e.RCTries++
 	m.dirty = true
-	if e.RCTries >= RuleRCTries {
+	if e.RCTries >= ReconnectTries {
 		m.markStale(p, now)
 	}
 }
@@ -581,11 +564,6 @@ func (m *Manager) acceptOwnCopy(p *Peer, ctx []byte, now time.Time) {
 	}
 	if p.Pending != nil {
 		m.abandonPending(p, "own_copy", false, now)
-	}
-	if r := p.Revert; r != nil {
-		if e := p.epochMeta(r.New); e != nil && e.Demoted {
-			m.keepToHeld(p, false, now) // S1
-		}
 	}
 	if kr := m.sessions[p.ID]; kr != nil && m.currentDemoted(p) {
 		m.rehold(p, kr.Current()) // its undeposited entries wait for the next epoch (review RR2 L4)
@@ -785,7 +763,7 @@ func (m *Manager) ruleL(p *Peer, now time.Time) bool {
 	}
 	p.RuleL = &RuleLState{Epoch: append([]byte(nil), p.LastEpochID...), Tries: 1}
 	m.dirty = true
-	return m.reconnectNaming(p, p.LastEpochID, ruleRCL, now)
+	return m.reconnectNaming(p, p.LastEpochID, "rule_l", now)
 }
 
 var _ = ed25519.PublicKeySize

@@ -79,7 +79,6 @@ func (m *Manager) sealAndQueueWake(p *Peer, in *envelope.Inner, wake string) str
 	if err != nil {
 		return ""
 	}
-	m.keepCopy(p, in, wake) // §6.3.1 "Deployment": kept for a revert
 	m.queueDeposit(&OutboxEntry{PeerID: p.ID, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Payload: raw, Wake: wake}, m.now())
 	return in.ID
 }
@@ -402,10 +401,10 @@ func (m *Manager) deposit(ctx context.Context, e *OutboxEntry, now time.Time) er
 		e.Done = true
 	case CodeQuotaExceeded:
 		// 0.86.6 S9: the reconnect token's quota is spent: for a reconnect
-		// of rule E, rule L or after a demotion, the last try has failed.
+		// after a demotion or by strict F1, the last try has failed.
 		// (A reconnect's hs.init carries its own token and no peer id.)
 		for _, og := range m.st.Outgoing {
-			if og.InitOutbox == e.ID && (og.RuleRC != "" || og.Why != "") {
+			if og.InitOutbox == e.ID && og.Named != nil {
 				if op := m.peer(og.PeerID); op != nil {
 					m.markStale(op, now)
 				}
@@ -485,9 +484,7 @@ func (m *Manager) housekeeping(now time.Time) {
 			p := m.peer(og.PeerID)
 			switch {
 			case p == nil:
-			case og.RuleRC != "":
-				m.ruleRCExpired(p, og, now) // tried again, up to 3 times; then stale
-			case og.Why != "" || og.Purpose == handshake.PurposeReconnect:
+			case og.Purpose == handshake.PurposeReconnect:
 				m.demotedReconnectExpired(p, now)
 			case og.Purpose == handshake.PurposeRekey:
 				m.ruleL(p, now) // rule L: the rekey went unanswered for its lifetime
@@ -497,7 +494,6 @@ func (m *Manager) housekeeping(now time.Time) {
 	for _, p := range m.allPeers() {
 		m.tickDemoted(p, now)
 		m.tickPending(p, now)
-		m.tickRevert(p, now)
 		m.pruneEpochs(p, now)
 		if p.State != PeerActive {
 			continue

@@ -37,19 +37,11 @@ const (
 	PendingLife = 32 * 24 * time.Hour
 	// ConfirmedKeysFor is how long a responder's confirmed epoch keeps its
 	// keys while not current, from the first activation that superseded
-	// it; also how long a reverting initiator keeps the old epoch.
+	// it.
 	ConfirmedKeysFor = 48 * 24 * time.Hour
 	// RevertAfter is T + 2 days: an old-epoch message whose inner ts is
 	// later than hs.fin by more than this shows the peer never activated.
 	RevertAfter = 16 * 24 * time.Hour
-	// RuleRCTries bounds rule E's and rule L's reconnects per epoch.
-	RuleRCTries = 3
-)
-
-// Reasons a rule-E or rule-L reconnect was started (OutgoingHS.RuleRC).
-const (
-	ruleRCE = "rule_e"
-	ruleRCL = "rule_l"
 )
 
 // --- positions and epoch records ---
@@ -121,7 +113,7 @@ func (p *Peer) newer(a, b []byte) bool {
 
 // actOpts says how activate installs an epoch and what it records.
 type actOpts struct {
-	how         int // actNormal, actKeepRK, actKeepSend, actInstalled
+	how         int // actNormal, actKeepRK, actInstalled
 	until       time.Time
 	signer      []byte // the peer's ik that signed it; nil: the stored ik
 	mine        bool   // the vault began it
@@ -132,7 +124,6 @@ type actOpts struct {
 const (
 	actNormal    = iota
 	actKeepRK    // the previous epoch is the confirmed one: it keeps its rk (§6.3.1)
-	actKeepSend  // the previous epoch is kept whole for a revert (§6.3.1 "Deployment")
 	actInstalled // already current (a confirmed pending epoch)
 )
 
@@ -188,9 +179,6 @@ func (m *Manager) pruneEpochs(p *Peer, now time.Time) {
 			now.Sub(e.Superseded) < ConfirmedKeysFor+handshake.ReceiveKeyRetention
 		for _, a := range p.Abandoned {
 			needed = needed || bytes.Equal(a, e.ID)
-		}
-		if p.Revert != nil && (bytes.Equal(e.ID, p.Revert.Old) || bytes.Equal(e.ID, p.Revert.New)) {
-			needed = true
 		}
 		if needed {
 			keep = append(keep, e)
@@ -380,9 +368,6 @@ func (m *Manager) ruleE(p *Peer, initTS time.Time, gated bool, now time.Time) {
 				o.Done = true // its hs.fin, not yet sent, is dropped (rule E)
 			}
 		}
-		if p.Revert != nil && bytes.Equal(p.Revert.New, e.ID) {
-			m.keepToHeld(p, false, now) // S1: the copies go to the new epoch, audited
-		}
 		m.note(now, "epoch_destroyed", p.ID)
 	}
 	m.dirty = true
@@ -404,8 +389,7 @@ func (m *Manager) responderActivation(p *Peer, signer []byte, now time.Time) act
 
 // beforeAccept applies §6.3.1 to a session-mode message from p that opened
 // under ep, before anything else is done with it: a destroyed or demoted
-// epoch's refusals (and rule E's evidence), the reverting initiator's
-// checks, the confirmation of a pending epoch and the confirmed epoch's
+// epoch's refusals (and rule E's evidence), the confirmation of a pending epoch and the confirmed epoch's
 // bookkeeping. It reports whether the message was dealt with (acked and
 // dropped) here.
 func (m *Manager) beforeAccept(p *Peer, ep *handshake.Epoch, in *envelope.Inner, now time.Time) bool {
@@ -443,14 +427,6 @@ func (m *Manager) beforeAccept(p *Peer, ep *handshake.Epoch, in *envelope.Inner,
 			p.HoldFor = nil
 		}
 	}
-	if r := p.Revert; r != nil && !fin {
-		switch {
-		case bytes.Equal(r.New, id[:]):
-			m.endRevertKeep(p, now) // the peer activated: the old epoch goes as usual
-		case bytes.Equal(r.Old, id[:]) && in.TS.Sub(r.FinAt) > RevertAfter:
-			m.revert(p, in.Type == handshake.TypeInit, in.TS, now)
-		}
-	}
 	if pe := p.Pending; pe != nil && !fin && bytes.Equal(pe.ID, id[:]) {
 		m.confirmPending(p, now)
 	}
@@ -468,9 +444,8 @@ func (m *Manager) beforeAccept(p *Peer, ep *handshake.Epoch, in *envelope.Inner,
 
 // destroyedEpochMessage is an authenticated message under an epoch rule E
 // destroyed: with a later inner ts it is fork evidence (ref epoch); toward
-// a peer that has not advertised hs_confirm (it activated at hs.fin and
-// never learned of rule E) the vault reconnects naming that epoch
-// instead; an earlier ts is refused (superseded_epoch).
+// a peer that has not advertised hs_confirm it is refused; an earlier ts
+// is refused (superseded_epoch).
 func (m *Manager) destroyedEpochMessage(p *Peer, meta *EpochMeta, in *envelope.Inner, now time.Time) {
 	if !in.TS.After(meta.DestroyTS) {
 		m.refusePeerKey(p, "superseded_epoch", false, now)
@@ -487,9 +462,6 @@ func (m *Manager) destroyedEpochMessage(p *Peer, meta *EpochMeta, in *envelope.I
 		return
 	}
 	m.refusePeerKey(p, "superseded_epoch", false, now)
-	if meta.RCTries == 0 && m.reconnectNaming(p, meta.ID, ruleRCE, now) {
-		meta.RCTries = 1 // only once one started (review L3)
-	}
 }
 
 // refusePeerKey refuses a message under §3.4.1 (acked, dropped, audited

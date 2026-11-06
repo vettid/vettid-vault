@@ -604,10 +604,11 @@ func (m *Manager) handleRekeyInit(ctx context.Context, p *Peer, in *envelope.Inn
 		}
 	}
 	for _, og := range m.st.Outgoing {
-		if og.New == nil && og.PeerID == p.ID && (og.RuleRC != "" || og.Why != "") {
-			// A rule-E or rule-L reconnect is open: it replaces this rekey,
-			// which the peer cannot finish with the vault's current ik
-			// (the trust model's r8, point 2).
+		if og.New == nil && og.PeerID == p.ID && og.Named != nil {
+			// A reconnect naming an epoch (after a demotion, or by strict
+			// F1) is open: it replaces this rekey, which the peer cannot
+			// finish with the vault's current ik (the trust model's r8,
+			// point 2).
 			m.audit(now, "rekey_replaced_by_reconnect", p.ID)
 			pi.Discard()
 			return ackAfterFlush
@@ -908,8 +909,8 @@ func (m *Manager) finishReconnect(p *Peer, aw *AwaitingHS, fr *handshake.FinResu
 // connection request it came from, for connection.event{added}).
 //
 // o says how the keyring installs it (0.86.0, §6.3.1: a responder's
-// confirmed epoch keeps its rk, an ungated initiator keeps the old epoch
-// whole, a confirmed pending epoch is installed already) and what the
+// confirmed epoch keeps its rk, a confirmed pending epoch is installed
+// already) and what the
 // epoch record says (§3.4.1: its signer, who began it).
 func (m *Manager) activate(p *Peer, ep *handshake.Epoch, purpose handshake.Purpose, issued []IssuedToken, pendingID string, ownChain int, o actOpts, now time.Time) {
 	isNew := m.peer(p.ID) == nil
@@ -936,18 +937,11 @@ func (m *Manager) activate(p *Peer, ep *handshake.Epoch, purpose handshake.Purpo
 	switch o.how {
 	case actKeepRK:
 		kr.ActivateKeeping(ep, now, o.until, handshake.KeepRK)
-	case actKeepSend:
-		kr.ActivateKeeping(ep, now, o.until, handshake.KeepSend)
 	case actInstalled:
 	default:
 		kr.Activate(ep, now)
 	}
 	id := ep.ID()
-	if r := p.Revert; r != nil && !bytes.Equal(r.New, id[:]) {
-		// A later activation (as initiator or responder) ends the keep
-		// (S1, review 7): the copies are sealed under this epoch.
-		m.keepToHeld(p, false, now)
-	}
 	if !isNew && !m.restoring { // 0ee0078 handshakes.go:712: no such step
 		// 0.86.0: a rekey of the vault's own still open was made from an
 		// earlier epoch, which no longer moves on: it is abandoned (it
@@ -1199,28 +1193,15 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 		m.makePending(p, og, res, now)
 		return ackAfterFlush
 	}
-	// Toward a peer without the gate: active at hs.fin as before, keeping
-	// the old epoch whole and copies of what is sent under the new one
-	// (§6.3.1 "Deployment").
-	old, oldChain := append([]byte(nil), p.LastEpochID...), p.OwnChainAtEpoch
+	// Toward a peer without the gate: active at hs.fin as before.
 	o := actOpts{signer: res.ResponderIK, mine: true, unconfirmed: true}
 	if m.currentDemoted(p) && og.Purpose == handshake.PurposeReconnect {
 		// 0.86.6 S4: the reconnect after a demotion, toward a peer without
-		// the gate: no revert keep (the epoch it would go back to is the
-		// named one, which has no send keys); the held messages stay
-		// unsent until something arrives under the new epoch.
+		// the gate: the held messages stay unsent until something arrives
+		// under the new epoch.
 		p.HoldFor = &HoldFor{Epoch: append([]byte(nil), newID[:]...), Named: append([]byte(nil), og.Named...), FinAt: now}
 		m.activate(p, res.Epoch, og.Purpose, og.Issued, "", chainOr(og.OwnChain, len(m.st.Rotations)), o, now)
 		return ackAfterFlush
-	}
-	if len(old) > 0 {
-		o.how, o.until = actKeepSend, now.Add(ConfirmedKeysFor)
-		if p.Revert != nil {
-			m.keepToHeld(p, false, now) // one keep at a time: the earlier one's copies go to this epoch
-		}
-	}
-	if len(old) > 0 {
-		m.startRevertKeep(p, old, newID[:], oldChain, now) // before activation sends anything in the new epoch
 	}
 	m.activate(p, res.Epoch, og.Purpose, og.Issued, "", chainOr(og.OwnChain, len(m.st.Rotations)), o, now)
 	return ackAfterFlush

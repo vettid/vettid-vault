@@ -269,36 +269,6 @@ func TestR29F13RekeyNamingConfirmedEpoch(t *testing.T) {
 	}
 }
 
-// Lead item 6 (TestLead6R2Repair): two release-29 vaults where the
-// initiator activates at hs.fin (it has not seen the responder's
-// features), and the hs.fin is lost. After the responder's answer expires,
-// its rekey from E0 repairs the pair (the initiator reverts, or rule E
-// destroys E1, depending on the ts).
-func TestR29Lead6Repair(t *testing.T) {
-	f := newR29Fx(t)
-	f.longTokens()
-	f.do(0, func(_ *Manager, p *Peer) { p.PeerFeatures = nil })
-	f.rekey(0)
-	f.deliver(0, 1, kHSInit)
-	f.deliver(1, 0, kHSResp)
-	if f.p(0).Pending != nil {
-		t.Fatal("setup: the initiator should activate at hs.fin")
-	}
-	f.lose(0, 1, kHSFin)
-	f.advance(HandshakeTTL + time.Hour)
-	f.tick(1) // its answer expires; its rekey from E0
-	f.settle()
-	f.advance(time.Hour)
-	f.tick(0)
-	f.tick(1)
-	f.settle()
-	if !f.sameEpoch() {
-		f.dump()
-		t.Fatal("the pair did not repair")
-	}
-	f.talks()
-}
-
 // Question B (the lead's rule, "if redeemable, revoke"): an abandoned
 // pending reconnect's tokens are revoked in the same write; the vault
 // restarts a reconnect (not a rekey), and a peer that did activate the

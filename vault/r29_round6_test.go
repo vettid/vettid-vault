@@ -64,42 +64,6 @@ func (f *r29Fx) denied(s int, jti string) bool {
 	return false
 }
 
-// Code 1 / S1: a release-28 peer's daily rekey from E0 meets the confirmed
-// epoch while the revert keep is live; rule E destroys the new epoch at
-// its hs.fin, and the kept messages are sealed under the next epoch and
-// audited connection.epoch_reverted, not lost.
-// Code 4: the 1 MiB per-peer and 8 MiB per-vault byte caps drop the
-// oldest copy (the peer's for the per-peer cap, the vault's for the
-// total), each counted on its own peer.
-func TestR29RevertByteCaps(t *testing.T) {
-	big := func(seq uint64, n int) RevertCopy { return RevertCopy{Inner: make([]byte, n), Seq: seq} }
-	p := &Peer{Revert: &RevertKeep{}}
-	for i := 0; i < 20; i++ {
-		copies.add(p, big(uint64(i+1), 60<<10), []*Peer{p})
-	}
-	if p.Revert.Bytes > RevertMaxBytes || p.Revert.Dropped == 0 || p.Revert.Copies[0].Seq == 1 {
-		t.Fatalf("per-peer bytes %d dropped %d", p.Revert.Bytes, p.Revert.Dropped)
-	}
-	var peers []*Peer
-	for i := 0; i < 9; i++ {
-		peers = append(peers, &Peer{Revert: &RevertKeep{}})
-	}
-	seq := uint64(0)
-	for round := 0; round < 16; round++ {
-		for _, q := range peers {
-			seq++
-			copies.add(q, big(seq, 60<<10), peers)
-		}
-	}
-	total := 0
-	for _, q := range peers {
-		total += q.Revert.Bytes
-	}
-	if total > RevertMaxVaultBytes || peers[0].Revert.Dropped == 0 {
-		t.Fatalf("vault total %d (cap %d), first peer dropped %d", total, RevertMaxVaultBytes, peers[0].Revert.Dropped)
-	}
-}
-
 // Code 4: rule E drops an hs.fin of the vault's own for an epoch it
 // destroys, not yet sent.
 func TestR29RuleEDropsUnsentFin(t *testing.T) {
@@ -174,7 +138,7 @@ func TestR29AbortRevokesTokens(t *testing.T) {
 	f := newR29Fx(t)
 	f.longTokens()
 	var og *OutgoingHS
-	f.do(0, func(m *Manager, p *Peer) { og = m.startReconnectCtx(p, p.LastEpochID, f.clk); og.RuleRC = ruleRCL })
+	f.do(0, func(m *Manager, p *Peer) { og = m.startReconnectCtx(p, p.LastEpochID, f.clk) })
 	jtis := f.jtisOf(og.Issued)
 	f.m(0).mu.Lock()
 	_ = f.m(0).flushThenDrain(context.Background())
@@ -222,13 +186,10 @@ func TestR29AbortRevokesTokens(t *testing.T) {
 		}
 	}
 	if f.p(0).State == PeerStale {
-		t.Fatal("a refused rule-L reconnect made the connection stale (0.86.6 S5)")
+		t.Fatal("a refused reconnect made the connection stale (0.86.6 S5)")
 	}
 }
 
-// Code 4: the keyring's pending epoch and a kept-whole epoch survive a
-// lock and unlock: the pending one is still confirmed by the peer's
-// message, the kept one still reverts.
 // Code 5: a refused rekey's links are not recorded as seen (only once it
 // passed rekeyPrecheck), and Seen is capped.
 func TestR29SeenOnlyAfterPrecheckAndCapped(t *testing.T) {
@@ -271,13 +232,6 @@ func TestR29SeenOnlyAfterPrecheckAndCapped(t *testing.T) {
 	}
 }
 
-// Code 6: an hs.fin that matches a dropped answer's kids but does not
-// verify leaves the record in place.
-// Code 7: the revert drops its own unsent hs.fin for the epoch it
-// destroys; a later activation of the vault's own ends a live keep with
-// the copies sealed under it (audited, delivered once).
-// Code 8: content over 64 KiB is not copied, whoever's it is (counted as
-// dropped).
 // S3: a pending epoch abandoned by a link: messages under it are refused
 // (ancestor_ik); one abandoned otherwise processes them without
 // confirming it (TestR29ReviewAbandonedPendingDoesNotConfirm).
@@ -509,7 +463,3 @@ func TestR29OwnCopyGotFromPeerSuspends(t *testing.T) {
 		t.Fatal("no feed item")
 	}
 }
-
-// 0.86.6: keepToHeld shows the revert's History line only when a copy was
-// held; nothing held or dropped audits nothing; an expired copy is
-// audited drop.held_expired.

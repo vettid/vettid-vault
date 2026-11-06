@@ -124,8 +124,8 @@ func TestR29RR2TickDemotedBound(t *testing.T) {
 		f.tick(0)
 	}
 	t.Logf("reconnect hs.inits deposited over 6 lifetimes while demoted: %d; issued registry %d", starts, len(f.m(0).st.Issued))
-	if starts > RuleRCTries || f.p(0).State != PeerStale {
-		t.Errorf("%d tries while demoted (bound %d), state %v", starts, RuleRCTries, f.p(0).State)
+	if starts > ReconnectTries || f.p(0).State != PeerStale {
+		t.Errorf("%d tries while demoted (bound %d), state %v", starts, ReconnectTries, f.p(0).State)
 	}
 }
 

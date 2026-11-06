@@ -439,15 +439,6 @@ func TestR29RuleEReconnectNamingConfirmed(t *testing.T) {
 	f.talks()
 }
 
-// --- the ungated initiator: activation at hs.fin, the revert ---
-
-// Model: TestLead5RevertReseals. Toward a release-28 peer the initiator
-// activates at hs.fin; the hs.fin is lost, so the peer never activates;
-// what the initiator sends under the new epoch is kept; a message from the
-// peer under the old epoch more than T + 2 days after hs.fin reverts, and
-// the kept messages are sealed again in the old epoch and arrive.
-// The revert's caps: per peer 256 copies; the oldest go first and count
-// in connection.epoch_reverted's ref.
 // rotate rotates side s's identity.
 func (f *r29Fx) rotate(s int) {
 	f.t.Helper()
@@ -580,8 +571,6 @@ func TestR29LowerTh1AcrossPurposes(t *testing.T) {
 // toward a peer without it, starts a reconnect naming that epoch instead
 // (model: the lead's r8 point 1, F3 toward 28), refused as
 // superseded_epoch.
-// §6.3.1 "Deployment" (0.86.1): a revert re-seals with the same inner id
-// and a new ts, skips expired copies, and audits the dropped count.
 // Model: TestGateDisagreementS5Repaired. Side 0 has not yet seen side 1's
 // features, so its rekey is ungated (active at hs.fin); side 1 has seen
 // side 0's, so at its rotation it drops its answer (S5). The hs.fin finds

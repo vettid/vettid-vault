@@ -23,9 +23,7 @@ type State struct {
 	Rotations    []json.RawMessage `json:"rotations,omitempty"` // own identity.rotate chain (§3.4)
 	// RotatedAt is when the vault last rotated its ik (S5's resend, 0.86.0).
 	RotatedAt time.Time `json:"rotated_at,omitzero"`
-	// RevertSeq numbers the revert copies (§6.3.1 "Deployment").
-	RevertSeq uint64 `json:"revert_seq,omitempty"`
-	WakeSeed  []byte `json:"wake_seed"`
+	WakeSeed  []byte    `json:"wake_seed"`
 	// RotationOwed is the owed mark (§11.14.10 "The owed mark"): a rotation
 	// of the vault's keys still to be made. Recovery is the recovery_id of
 	// a completed recovery (§11.14.6 step 6), written in its step-2 state
@@ -305,9 +303,6 @@ type Peer struct {
 	// (B passed): a reconnect naming one is accepted until a newer epoch is
 	// confirmed (§6.3.1).
 	Abandoned [][]byte `json:"abandoned_epochs,omitempty"`
-	// Revert is what a reverting initiator keeps toward a peer without the
-	// gate (§6.3.1 "Deployment").
-	Revert *RevertKeep `json:"revert,omitempty"`
 	// RuleL is §3.4.1 rule L's bookkeeping toward a peer without features.
 	RuleL *RuleLState `json:"rule_l,omitempty"`
 	// Seen are the valid identity links of the peer that passed rule C but
@@ -383,9 +378,9 @@ type EpochMeta struct {
 	DemotedAt  time.Time `json:"demoted_at,omitzero"`
 	DemotedMsg string    `json:"demoted_msg,omitempty"`
 	OwnCopy    bool      `json:"own_copy,omitempty"`
-	// RCTries counts rule E's reconnects for this destroyed epoch toward
-	// a peer without hs_confirm (at most 3); for a demoted current epoch,
-	// the reconnects that expired (at the third the connection goes stale).
+	// RCTries counts, for a demoted current epoch, the reconnects that
+	// failed (at the third the connection goes stale, §3.4.1 "The
+	// reconnect bound").
 	RCTries int `json:"rc_tries,omitempty"`
 	// OwnChain is the own rotation count whose ik signed its handshake: a
 	// reconnect naming it carries the vault's links from there.
@@ -417,39 +412,6 @@ type PendingEpoch struct {
 	// SigIK is the vault's own ik that signed it (S5 abandons it when that
 	// ik is superseded).
 	SigIK []byte `json:"sig_ik,omitempty"`
-}
-
-// RevertKeep is what an initiator keeps after activating at hs.fin toward
-// a peer without the gate (§6.3.1 "Deployment"): the old epoch (with its
-// send keys and rk, in the keyring) and a copy of every durable message
-// it sent under the new one, until it receives anything under the new
-// epoch, at most RevertKeepFor.
-type RevertKeep struct {
-	Old   []byte    `json:"old"`
-	New   []byte    `json:"new"`
-	FinAt time.Time `json:"fin_at"`
-	Until time.Time `json:"until"`
-	// Copies are the inner plaintexts (sealed-mode JSON, no seq) of the
-	// durable messages sent under the new epoch, oldest first; Bytes their
-	// size and Dropped how many the caps dropped.
-	Copies  []RevertCopy `json:"copies,omitempty"`
-	Bytes   int          `json:"bytes,omitempty"`
-	Dropped int          `json:"dropped,omitempty"`
-	// OldOwnChain is the old epoch's own rotation count (OwnChainAtEpoch
-	// again after a revert).
-	OldOwnChain int `json:"old_own_chain,omitempty"`
-}
-
-// RevertCopy is one kept message.
-type RevertCopy struct {
-	Inner []byte `json:"inner"`
-	Wake  string `json:"wake,omitempty"`
-	// Seq orders copies across the vault (the vault-wide cap drops the
-	// oldest first).
-	Seq uint64 `json:"seq,omitempty"`
-	// Exp is the message's exp (zero: none): past it the copy goes,
-	// not counted as dropped.
-	Exp time.Time `json:"exp,omitzero"`
 }
 
 // RuleLState is rule L's (§3.4.1) bookkeeping.
@@ -736,17 +698,10 @@ type OutgoingHS struct {
 	// hs.resp is fork evidence when it carries a later ts.
 	Replaced bool `json:"replaced,omitempty"`
 	// 0.86.0 (§6.3.1 "Deployment"): Gated is the gate as fixed when the
-	// hs.init was sent (the peer advertised hs_confirm then). RuleRC marks
-	// a reconnect started by rule E or rule L (tried again up to 3 times
-	// when it expires unanswered; stale when refused or the last fails);
-	// Named is the epoch it named.
-	Gated  bool   `json:"gated,omitempty"`
-	RuleRC string `json:"rule_rc,omitempty"`
-	Named  []byte `json:"named,omitempty"`
-	// Why is another reason a reconnect naming an epoch was started (f1,
-	// demoted, own_copy): it is handled as any reconnect (no retry, and a
-	// refusal does not make the connection stale).
-	Why string `json:"why,omitempty"`
+	// hs.init was sent (the peer advertised hs_confirm then). Named is the
+	// epoch a reconnect after a demotion or by strict F1 named (§3.4.1).
+	Gated bool   `json:"gated,omitempty"`
+	Named []byte `json:"named,omitempty"`
 
 	// An outgoing connection request in state waiting (§6.4, §10.4):
 	// what the accept learned from the bundle, and when it ends.

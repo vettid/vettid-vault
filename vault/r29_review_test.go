@@ -111,8 +111,8 @@ func TestR29ReviewHeldMessagesNewTS(t *testing.T) {
 	}
 }
 
-// Probe C: an f1/demoted/own_copy reconnect (reconnectNaming with a why
-// other than rule_e / rule_l) that expires is retried with no bound; and
+// Probe C: an f1/demoted/own_copy reconnect (reconnectNaming) that
+// expires is retried with no bound; and
 // an expired reconnect's tokens are not revoked (housekeeping uses
 // dropOutgoing, not abandonOutgoing).
 func TestR29ReviewOtherReconnectsBoundedTokensRevoked(t *testing.T) {
@@ -128,7 +128,7 @@ func TestR29ReviewOtherReconnectsBoundedTokensRevoked(t *testing.T) {
 	for i := 0; i < 6; i++ {
 		var jtis []string
 		for _, og := range f.m(0).st.Outgoing {
-			if og.PeerID == f.id[0] && (og.RuleRC != "" || og.Why != "") {
+			if og.PeerID == f.id[0] && og.Named != nil {
 				tries++
 				for _, it := range og.Issued {
 					jtis = append(jtis, it.JTI)
@@ -157,8 +157,8 @@ func TestR29ReviewOtherReconnectsBoundedTokensRevoked(t *testing.T) {
 	}
 	t.Logf("f1 reconnect attempts seen over 6 lifetimes: %d; state %v; tokens of expired reconnects not revoked: %d",
 		tries, f.p(0).State, unrevoked)
-	if tries > RuleRCTries {
-		t.Errorf("an f1 reconnect was tried %d times (no bound; rule E/L stop at %d)", tries, RuleRCTries)
+	if tries > ReconnectTries {
+		t.Errorf("an f1 reconnect was tried %d times (no bound; the bound is %d)", tries, ReconnectTries)
 	}
 	if unrevoked > 0 {
 		t.Errorf("%d tokens of expired reconnect hs.inits were left redeemable", unrevoked)

@@ -523,6 +523,14 @@ func epochIDOf(b []byte) [suite.EpochIDSize]byte {
 // and is dropped, a later one abandons the pending epoch; an answer the
 // vault could not deposit (no valid standing token) is not made (rule J).
 func (m *Manager) handleRekeyInit(ctx context.Context, p *Peer, in *envelope.Inner, ep *handshake.Epoch, raw []byte, sender ed25519.PublicKey, now time.Time) disposition {
+	if p.Kind != KindConnection {
+		// §6.3.1 "Devices and agents" (R29-D3): the vault is always the
+		// initiator toward its device or agent; a rekey hs.init from one
+		// is acked, dropped and audited drop.peer_key (ref unexpected),
+		// and answered by none.
+		m.refusePeerKey(p, "unexpected", now)
+		return ackAfterFlush
+	}
 	kr := m.sessions[p.ID]
 	if kr == nil || ep == nil {
 		m.audit(now, "rekey_not_current_epoch", p.ID)

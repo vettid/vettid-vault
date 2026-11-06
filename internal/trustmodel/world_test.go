@@ -46,7 +46,7 @@ type World struct {
 	maxLock       int64               // M2: the longest such stretch in the run
 	injLoss       bool                // M2: the run injected a loss (fin-loss)
 	devCopyFirst  map[[2]PID]bool     // vault<->device pair: rule C kept the old copy's successor and refused the real one (ground truth)
-	probeF        map[int]bool        // probes deposited while finding F applied to their pair (I1-loss)
+	probeF        map[int]bool        // probes lost, if lost, through finding F (fLoss, at deposit; I1-loss)
 	fDue          map[[2]PID]bool     // vault<->device pair: a pending rekey was abandoned (any reason) and no newer epoch confirmed since: F applies (the device exception)
 	oldApp        map[[2]PID]string   // pair of an old app and its vault -> the first I1 failure at quiescence (I7 requires the R29-D4 notice)
 	copyAban      map[[2]int]*abanUse // (honest party, copy epoch): it accepted the copy's messages under it, abandoned while pending there, after P's rotation (I7)
@@ -647,8 +647,8 @@ func (p *Party) deposit(e *Entry, r *PeerRec) {
 		e.Done, e.Indef = true, false
 		if m.Kind == KSession && m.Probe > 0 && !p.Copy {
 			w.probeDep[m.Probe] = [2]PID{p.ID, e.To}
-			if w.fDue[pairKey(p.ID, e.To)] {
-				w.probeF[m.Probe] = true // deposited while finding F applied to the pair
+			if w.fLoss(p, e.To, m.Epoch) {
+				w.probeF[m.Probe] = true
 			}
 			w.probeEpoch[m.Probe] = m.Epoch
 		}
@@ -902,6 +902,32 @@ func (p *Party) collectRound(max int) int {
 		p.startWanted()
 	})
 	return len(got)
+}
+
+// fLoss: ground truth for finding F's message loss (§3.4.1 Invariants,
+// "With it, finding F"): a session message between a vault and its device
+// that is lost because of an abandoned pending rekey. Either the device
+// sends under an epoch its vault began and abandoned while pending (the
+// device activated it and stays on it; the vault's keys for it end 16
+// days after the abandonment), or, while F applies to the pair, the vault
+// sends under an epoch the device is no longer on (the device stays on
+// the abandoned one and in time no longer keeps the vault's). Any other
+// loss is not F.
+func (w *World) fLoss(from *Party, to PID, ep int) bool {
+	dst := w.party(to)
+	if from.Device == dst.Device {
+		return false
+	}
+	if from.Device {
+		vr := dst.st.peer(from.ID)
+		if vr == nil {
+			return false
+		}
+		e := vr.epoch(ep)
+		return e != nil && e.MineInit && e.Abandoned
+	}
+	dr := dst.st.peer(from.ID)
+	return w.fDue[pairKey(from.ID, to)] && dr != nil && dr.Cur != ep
 }
 
 // copyTook: old copy c collected (leased), acked or deleted messages ms

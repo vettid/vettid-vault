@@ -825,6 +825,7 @@ func (q *Party) tableBInit(r *PeerRec, m *RMsg, pos Pos) dec {
 		}
 		last := r.lastEpoch()
 		ok := last != nil && M.Ctx == last.ID
+		ownRC := false // refused only because Q's own reconnect is pending (0.88.2)
 		if q.respHalf() {
 			// R29-X5 (§6.6 "Accepting ctx"): the current epoch ("last epoch"
 			// means the current epoch), the own pending epoch, the confirmed
@@ -833,6 +834,7 @@ func (q *Party) tableBInit(r *PeerRec, m *RMsg, pos Pos) dec {
 			switch {
 			case r.Pend != nil && r.Pend.Reconnect:
 				ok = M.Ctx == r.Pend.ID
+				ownRC = !ok
 				q.w.hit("X5:own-reconnect-pending")
 			case r.Cur != 0 && M.Ctx == r.Cur:
 				ok = true
@@ -854,6 +856,12 @@ func (q *Party) tableBInit(r *PeerRec, m *RMsg, pos Pos) dec {
 				cell += ":confirmed-epoch"
 				q.w.hit("R4:reconnect-names-confirmed")
 			}
+		}
+		if !ok && ownRC && !q.w.noRefusedLinks && q.ctxOtherwiseAccepted(r, M.Ctx) {
+			// (0.88.2) refused only because Q's own reconnect is pending:
+			// its links are still followed; "Fork by ctx" and K9 are not run
+			q.w.hit("X5:refused")
+			return q.refusedReconnectLinks(r, m, pos, app, cell)
 		}
 		if !ok {
 			if !q.forkEpoch(r, M.Ctx) {
@@ -913,6 +921,48 @@ func (q *Party) tableBInit(r *PeerRec, m *RMsg, pos Pos) dec {
 		}
 	}
 	return q.answerInit(r, m, cell, app, fork, namedConf)
+}
+
+// ctxOtherwiseAccepted: X5 would accept a reconnect naming ctx if Q's own
+// reconnect were not pending (the current, confirmed or an
+// abandoned-while-pending epoch).
+func (q *Party) ctxOtherwiseAccepted(r *PeerRec, ctx int) bool {
+	return (r.Cur != 0 && ctx == r.Cur) || (r.ConfID != 0 && ctx == r.ConfID) || slices.Contains(r.AbanIDs, ctx)
+}
+
+// refusedReconnectLinks: (0.88.2, vettid.org branch vm-0.88.2 at 3037682,
+// §6.6 "The links of a refused reconnect") a reconnect refused only
+// because Q's own reconnect with P is pending (from Q's hs.fin until that
+// epoch is confirmed or abandoned) still has the identity links its
+// hs.init carries that resolve from the stored ik (Table B "Reached"; rule
+// C already checked them at step 3) followed in the refusing write, as an
+// identity.rotate's would be: H5, K2's pending epoch at a link (so an
+// epoch abandoned here is demoted from the start), K4 with this hs.init as
+// position x, and strict F1 with E the epoch its ctx names. A link Table B
+// would refuse makes Q follow none. Nothing is answered. Not run: R29-K9
+// and "Fork by ctx".
+func (q *Party) refusedReconnectLinks(r *PeerRec, m *RMsg, pos Pos, app []IKLink, cell string) dec {
+	M := m.P
+	if len(app) == 0 || !q.newSpec() || r.Device {
+		return refuse("reconnect_refused", cell+":ctx")
+	}
+	for _, l := range app {
+		if r.isAncestor(l.New) || r.isRejected(l.New) {
+			return refuse("reconnect_refused", cell+":ctx") // follow none
+		}
+	}
+	q.w.hit("X5:refused-links-followed")
+	pre := r.Cur
+	if q.followIK(r, app, pos, true) {
+		return dec{"suspend", "fork", cell + ":refused-links:K4-flag"}
+	}
+	under := *M
+	under.Epoch = M.Ctx // strict F1: E is the epoch the ctx names
+	if q.f1Demote(r, &under, app, pos, pre) {
+		return dec{"suspend", "fork", cell + ":refused-links:K7-flag"}
+	}
+	q.h5(r, 0) // H5 and K2's pending epoch at a link; no K9
+	return refuse("reconnect_refused", cell+":ctx:links-followed")
 }
 
 // answerInit: the answer to an accepted hs.init (hs.resp queued, the

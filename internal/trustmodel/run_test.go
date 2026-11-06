@@ -881,6 +881,7 @@ func runActions(cfg Config, seed uint64, acts []Action, verbose bool) *World {
 	w.verbose = verbose
 	w.debugUnlinked = os.Getenv("TRUSTMODEL_DEBUG") != ""
 	w.ruleEKeepFin = os.Getenv("TRUSTMODEL_RULEEFIN") == "keep"
+	w.noRefusedLinks = os.Getenv("TRUSTMODEL_NOM1") != "" // attribution: 0.88.2's links of a refused reconnect off
 	defer w.expoStats()
 	defer w.rcStats()
 	for _, a := range acts {

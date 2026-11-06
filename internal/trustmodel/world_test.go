@@ -58,6 +58,7 @@ type World struct {
 	noF9           bool // F9: token_expired keeps the pending epoch (so startHS refuses the reconnect)
 	noF10          bool // F10: hs.confirm queued again for every such batch, even with one still in the outbox
 	noF13B         bool // F13: B judged on time alone, not only after the first short collect after an unlock
+	noRefusedLinks bool // 0.88.2 (M1): a refused reconnect's links are not followed (the deadlock scenario's "off")
 	noConfirmAgain bool // 0.88.1: R does not queue hs.confirm again every 12 days (TestR29R3ConfirmAgain's "off")
 	noConfRekey    bool // F13 §6.2 and lead item 6: a rekey whose ctx is the responder's confirmed (not current) epoch is refused
 

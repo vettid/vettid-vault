@@ -450,3 +450,60 @@ func TestR29K9SignerAncestryOfTheLink(t *testing.T) {
 		t.Fatalf("an honest P's delayed identity.rotate judged E%d: status %d (%s), %+v\n  %s", e1, r.Status, r.Ref, ep, s.trace())
 	}
 }
+
+// (0.88.2, owner decision a; §6.6 "The links of a refused reconnect")
+// Shape: Q reconnects to P; P answers; Q holds the reconnect pending (its
+// hs.fin sent, then lost). P rotates (S5 drops its answer), and its
+// identity.rotate never reaches Q (dropped here; in the review's runs it
+// was refused or out of reach). P then reconnects, carrying its link. Q
+// refuses that reconnect, only because its own is pending. With the rule
+// Q follows the link in the refusing write: H5 abandons Q's pending
+// reconnect (K2, signed by P's old ik), Q reconnects again under P's new
+// ik and the pair converges. Without it (World.noRefusedLinks) Q never
+// learns P's new ik, refuses every reconnect of P's, and its pending
+// reconnect reaches B: the pair ends stale.
+func TestR29RefusedReconnectLinks(t *testing.T) {
+	bothWays(t, func(t *testing.T, off bool) {
+		s := newScen(t, 2)
+		s.w.relayRot = false
+		s.w.noRefusedLinks = off
+		P, Q := s.p(0), s.p(1)
+		rq := Q.st.peer(P.ID)
+		s.do(Q, func() { Q.startHS(rq, true); Q.write(); Q.flush() })
+		s.run(1, P) // P answers Q's reconnect
+		s.run(1, Q) // Q: pending reconnect, hs.fin
+		if rq.Pend == nil || !rq.Pend.Reconnect {
+			t.Fatalf("setup: Q holds no pending reconnect\n  %s", s.trace())
+		}
+		s.dropAt(P, KFin)
+		s.rotate(P, pathCred) // S5: P drops its answer
+		s.dropAt(Q, KIdRot)   // P's identity.rotate never reaches Q
+		s.dropAt(Q, KInit)    // nor P's restarted rekey
+		rp := P.st.peer(Q.ID)
+		s.do(P, func() { P.abandonOwn(rp); P.startHS(rp, true); P.write(); P.flush() })
+		s.run(1, Q) // Q refuses P's reconnect (its own is pending)
+		learned := Q.st.peer(P.ID).IK == P.st.IK
+		if !off && (!learned || s.w.stats["R29 X5:refused-links-followed"] == 0) {
+			t.Fatalf("Q did not follow the refused reconnect's link\n  %s", s.trace())
+		}
+		if off && learned {
+			t.Fatalf("off: Q learned P's new ik some other way\n  %s", s.trace())
+		}
+		for d := 0; d < 50; d++ {
+			s.dropAt(Q, KIdRot) // P's identity.rotate (and its resends) stay out of reach
+			s.run(1, P, Q)
+			s.tick(day)
+			s.do(P, P.tick)
+			s.do(Q, Q.tick)
+		}
+		rq, rp = Q.st.peer(P.ID), P.st.peer(Q.ID)
+		stale := rq.Status == stStale || rp.Status == stStale
+		t.Logf("off %v: Q %d (%s) E%d, P %d (%s) E%d", off, rq.Status, rq.Ref, rq.Cur, rp.Status, rp.Ref, rp.Cur)
+		if !off && (stale || rq.Cur == 0 || rq.Cur != rp.Cur) {
+			t.Fatalf("with the rule the pair did not converge\n  %s", s.trace())
+		}
+		if off && !stale {
+			t.Fatalf("off: the pair did not end stale; the scenario does not test the rule\n  %s", s.trace())
+		}
+	})
+}

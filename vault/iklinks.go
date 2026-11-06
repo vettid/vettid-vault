@@ -472,7 +472,11 @@ func (m *Manager) sealHeld(p *Peer) {
 		}
 		in, err := envelope.ParseInner(e.Held, envelope.ModeSealed)
 		if err != nil {
+			// Unreadable: dropped and audited (§3.4.1 "After a demotion":
+			// no held message goes silently).
 			e.Done, e.Held = true, nil
+			m.audit(now, "held_unsealable", p.ID)
+			m.dirty = true
 			continue
 		}
 		in.TS = now
@@ -484,7 +488,7 @@ func (m *Manager) sealHeld(p *Peer) {
 			// It cannot be sealed at all (review M1): dropped, audited, so
 			// that it does not hold the mailbox's queue for good.
 			e.Done, e.Held = true, nil
-			m.note(now, "held_unsealable", p.ID)
+			m.audit(now, "held_unsealable", p.ID) // drop.held_unsealable
 			m.dirty = true
 			continue
 		}

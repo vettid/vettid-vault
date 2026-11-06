@@ -466,3 +466,26 @@ func TestR29IdentityRotateAncestorFirstUnexpected(t *testing.T) {
 		t.Fatal("an ancestor first link was not refused unexpected")
 	}
 }
+
+// Step 6 review L3, §3.4.1 "After a demotion": a held message that cannot
+// be sealed under the new epoch is not dropped silently: the drop is
+// audited (drop.held_unsealable).
+func TestR29HeldUnsealableAudited(t *testing.T) {
+	f := demoted(t, nil)
+	f.do(0, func(m *Manager, p *Peer) {
+		m.queueDeposit(&OutboxEntry{PeerID: p.ID, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Held: []byte("{")}, f.clk)
+	})
+	f.settle()
+	f.advance(time.Hour)
+	f.tick(0)
+	f.tick(1)
+	f.settle()
+	if f.m(0).currentDemoted(f.p(0)) {
+		f.dump()
+		t.Fatal("setup: still demoted")
+	}
+	if !f.activity(0, "drop.held_unsealable", "") {
+		f.dump()
+		t.Fatal("a held message dropped at sealing was not audited")
+	}
+}

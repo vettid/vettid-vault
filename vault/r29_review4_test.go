@@ -291,3 +291,22 @@ func TestR29FinLinksNoRestart(t *testing.T) {
 	}
 	t.Skip("no th1 order found")
 }
+
+// L2: a reconnect naming an epoch does not start, and abandons nothing,
+// while the vault's own reconnect is pending.
+func TestR29ReconnectNamingKeepsPendingReconnect(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	f.do(0, func(m *Manager, p *Peer) { m.startReconnect(p, f.clk) })
+	f.deliver(0, 1, kHSInit)
+	f.deliver(1, 0, kHSResp)
+	pe := f.p(0).Pending
+	if pe == nil || pe.Purpose != "reconnect" {
+		t.Fatal("setup: no pending reconnect")
+	}
+	started := true
+	f.do(0, func(m *Manager, p *Peer) { started = m.reconnectNaming(p, p.LastEpochID, "f1", f.clk) })
+	if started || f.p(0).Pending != pe {
+		t.Fatal("a reconnect naming an epoch abandoned the pending reconnect")
+	}
+}

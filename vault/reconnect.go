@@ -26,7 +26,9 @@ func (m *Manager) reconnectNaming(p *Peer, ctx []byte, why string, now time.Time
 		return false
 	}
 	if p.Kind != KindConnection || p.State != PeerActive || p.suspended() || m.hasOutgoing(p.ID, handshake.PurposeReconnect) ||
-		!m.canReconnect(p, now) {
+		p.Pending != nil && p.Pending.Purpose == handshake.PurposeReconnect || !m.canReconnect(p, now) {
+		// One reconnect at a time (§3.4.1 "After a demotion"): none starts
+		// while the vault's own is open or pending.
 		return false // nothing is abandoned for a reconnect that cannot start
 	}
 	for id, og := range m.st.Outgoing {

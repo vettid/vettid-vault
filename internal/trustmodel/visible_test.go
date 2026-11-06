@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strings"
 )
 
 // Ground truth for the visibility of splits (§3.4.1 I7): which pairs
@@ -188,6 +189,65 @@ func (w *World) checkI7() {
 		default:
 			w.violate("I7", "%s used E%d, made with old copy %s, after %s's rotation, and nothing is visible",
 				q.Name, e, copyP.Name, w.party(copyP.Origin).Name)
+		}
+	}
+}
+
+// resHonestStaleQuota: the known honest cause of a stale pair (M2): rapid
+// rotations spend the reconnect token's 4 deposits and a reconnect hs.init
+// is refused quota_exceeded (§3.4.1 "The reconnect bound").
+const resHonestStaleQuota = "an honest pair stale by quota_exceeded: rapid rotations spent the reconnect token (§3.4.1 \"The reconnect bound\")"
+
+// noteLocked: time d passed; real parties locked through it add to their
+// stretch (M2).
+func (w *World) noteLocked(d int64) {
+	for _, p := range w.real() {
+		if p.Locked {
+			w.lockedFor[p.ID] += d
+			w.maxLock = max(w.maxLock, w.lockedFor[p.ID])
+		}
+	}
+}
+
+// checkHonestStale: M2 (review of #207 at 90a0ff0), an honest pair must
+// not end stale. In a run with no old copy, no injected loss and no party
+// locked longer than T (14 days) at a stretch, a pair that ends stale is a
+// violation, unless by quota_exceeded (counted, resHonestStaleQuota).
+func (w *World) checkHonestStale() {
+	switch {
+	case len(w.copies()) > 0:
+		w.stat("M2: not checked (an old copy)")
+		return
+	case w.injLoss:
+		w.stat("M2: not checked (an injected loss)")
+		return
+	case w.maxLock > 14*day:
+		w.stat("M2: not checked (a party locked longer than T)")
+		return
+	}
+	w.stat("M2: checked")
+	ps := w.real()
+	for i := range ps {
+		for j := i + 1; j < len(ps); j++ {
+			a, b := ps[i], ps[j]
+			ra, rb := a.st.peer(b.ID), b.st.peer(a.ID)
+			if ra == nil || rb == nil {
+				continue
+			}
+			var refs []string
+			for _, r := range []*PeerRec{ra, rb} {
+				if r.Status == stStale {
+					refs = append(refs, r.Ref)
+				}
+			}
+			if len(refs) == 0 {
+				continue
+			}
+			if slices.ContainsFunc(refs, func(s string) bool { return strings.Contains(s, "quota_exceeded") }) {
+				w.exempt("M2", resHonestStaleQuota)
+				continue
+			}
+			w.violate("M2", "%s: an honest pair ends stale (%s)", pairName(w, a.ID, b.ID), strings.Join(refs, "; "))
 		}
 	}
 }

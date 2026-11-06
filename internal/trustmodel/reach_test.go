@@ -179,6 +179,7 @@ func (w *World) finLoss(p *Party, a Action) {
 	if len(senders) == 0 {
 		return
 	}
+	w.injLoss = true // M2: an injected loss
 	w.stat("reach:hs.fin-lost")
 	var rot *Party
 	switch a.N % 4 {

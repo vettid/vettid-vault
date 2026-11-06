@@ -277,6 +277,7 @@ func (p *Party) unlock() {
 		return
 	}
 	p.Locked = false
+	p.w.lockedFor[p.ID] = 0
 	p.collectedSinceUnlock = false
 	p.unlocks++
 	w := p.w

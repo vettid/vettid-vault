@@ -322,6 +322,7 @@ func (w *World) advance(d int64) {
 				}
 			}
 			w.Now += visTimeout + freshWindow + 1
+			w.noteLocked(visTimeout + freshWindow + 1)
 			d -= visTimeout + freshWindow + 1
 			w.R.advance()
 		}
@@ -337,6 +338,7 @@ func (w *World) advance(d int64) {
 		step := min(d, day)
 		d -= step
 		w.Now += step
+		w.noteLocked(step)
 		w.R.advance()
 		for _, p := range w.real() {
 			p.tick()
@@ -891,6 +893,7 @@ func runActions(cfg Config, seed uint64, acts []Action, verbose bool) *World {
 	w.checkEnd(true)
 	w.monitor()
 	w.checkI7()
+	w.checkHonestStale()
 	return w
 }
 

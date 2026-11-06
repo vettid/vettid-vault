@@ -651,11 +651,20 @@ func (q *Party) followIK(r *PeerRec, app []IKLink, x Pos, restart bool) bool {
 		}
 		for j := range r.Epochs {
 			ep := &r.Epochs[j]
-			if !(ep.Signer == l.Old || r.isAncestor(ep.Signer)) || ep.Demoted || !x.after(ep.Est) {
+			if !(ep.Signer == l.Old || r.isAncestor(ep.Signer)) || !x.after(ep.Est) {
 				continue
 			}
+			if ep.Demoted && !(q.newSpec() && ep.Flag) {
+				continue // already demoted (from its earlier position); judged again only by its flag
+			}
 			if q.newSpec() {
+				// R29-K4 judges every such epoch at each link, one already
+				// demoted at an earlier link included: a flag set since
+				// (a message deposited before that link) suspends
 				if ep.Flag {
+					if ep.Demoted {
+						q.w.hit("K4:flag-suspend-already-demoted")
+					}
 					q.w.hit("K4:flag-suspend")
 					q.w.logf("%s: epoch E%d of %s after the link has its received flag set: a copy used it", q.Name, ep.ID, q.w.party(r.ID).Name)
 					q.suspend(r, "connection.fork_suspected/epoch")

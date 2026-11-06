@@ -18,8 +18,8 @@ import (
 func TestR29D3DeviceRekeyRefused(t *testing.T) {
 	d := newDevFixture(t)
 	sink := sinkOf(d)
-	for _, kind := range []string{KindDesktop, KindAgent} {
-		td := d.addDevice(t, "d3-"+kind, kind, map[string]byte{KindDesktop: 0x41, KindAgent: 0x45}[kind])
+	for _, kind := range []string{KindApp, KindDesktop, KindAgent} {
+		td := d.addDevice(t, "d3-"+kind, kind, map[string]byte{KindApp: 0x3d, KindDesktop: 0x41, KindAgent: 0x45}[kind])
 		d.inbox(td)
 		d.sendAs(td, handshake.TypeInit, `{"purpose":"rekey"}`)
 		refused := false

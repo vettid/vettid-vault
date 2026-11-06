@@ -434,16 +434,6 @@ func (p *Party) tick() {
 				w.nextOrigin = "K5 reconnect (retry)"
 				p.startHS(r, true) // R29-K5: the reconnect after a demotion, once nothing holds it back
 			}
-			if r.Device && r.NoTokAt != 0 {
-				if r.standing(r.KeyFor, r.Relay, w.Now).JTI != 0 {
-					r.NoTokAt = 0
-				} else if w.Now-r.NoTokAt >= 16*day {
-					p.w.hit("D1:no-token-stale")
-					p.markStale(r, "D1: no valid token 16 days after the abandon (0.87.1, finding F)")
-					p.h5(r, -1)
-					continue
-				}
-			}
 			if r.Device && r.standing(r.KeyFor, r.Relay, w.Now).JTI == 0 {
 				p.markStale(r, "tokens expired (needs pairing)")
 				p.h5(r, -1)

@@ -116,11 +116,6 @@ func (q *Party) abandonPending(r *PeerRec, why string, restart bool) {
 	}
 	valid := r.standing(r.KeyFor, r.Relay, q.now()).JTI != 0
 	switch {
-	case why == "B passed" && r.Device && !valid:
-		q.w.hit("D1:B-no-token")
-		q.deviceNotice(r, "B passed")
-		r.NoTokAt = q.w.Now // R29-D1 (F): stale if no valid token within 16 days
-		q.startHS(r, false)
 	case why == "B passed" && r.Device:
 		q.w.hit("D1:B-rekey")
 		q.deviceNotice(r, "B passed")
@@ -136,12 +131,6 @@ func (q *Party) abandonPending(r *PeerRec, why string, restart bool) {
 	case pe.Reconnect:
 		q.w.hit("I7:fresh-reconnect")
 		q.startHS(r, true) // R29-I7: a fresh reconnect, not a rekey
-	case r.Device && !valid && !pe.Reconnect:
-		// R29-D1 (0.87.1, finding F): toward a desktop or agent, a rekey
-		// abandoned for want of a token waits 16 days for one, then stale
-		q.w.hit("D1:no-token")
-		r.NoTokAt = q.w.Now
-		q.startHS(r, false)
 	default:
 		q.startHS(r, !r.Device && !valid)
 	}

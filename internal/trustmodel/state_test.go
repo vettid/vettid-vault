@@ -130,8 +130,7 @@ const (
 
 type PeerRec struct {
 	ID       PID
-	Device   bool  // the peer is a device or agent of mine, or my vault (no suspension)
-	NoTokAt  int64 // R29-D1 (0.87.1, F): a rekey toward this device was abandoned with no valid token at this time
+	Device   bool // the peer is a device or agent of mine, or my vault (no suspension)
 	Status   int
 	Ref      string
 	CandA    IKLink // identity conflict candidates (followed, other)

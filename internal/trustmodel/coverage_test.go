@@ -49,7 +49,7 @@ var r29Branches = []string{
 	"K9:ended", "K9:flag-suspend", "K9:ended-message-suspends",
 	"F1:fork-by-ctx-rekey", "F1:fork-by-ctx-reconnect",
 	"F3:flag-set", "F3:flag-set-by-hs.confirm",
-	"D1:B-rekey", "D1:B-no-token", "D1:no-token", "D2:device-starts-no-rekey", "D2:confirm-rate-limited", "D3:device-rekey-refused",
+	"D1:B-rekey", "D2:device-starts-no-rekey", "D2:confirm-rate-limited", "D3:device-rekey-refused",
 	"D4:notice message without hs_confirm", "D4:notice D3 refusal",
 }
 
@@ -65,7 +65,6 @@ var r29Unreachable = map[string]string{
 	"L1:hs.fin-after-L":                  "an hs.fin arriving after L (16 days)",
 	"L1:confirmed-epoch-keys-end":        "48 days with the confirmed epoch not current",
 	"D1:rekey-not-reconnect":             "token_expired toward a device with a pending rekey, exp passed on the own clock",
-	"D1:no-token-stale":                  "the model's own device rule (no valid token at a timer: stale) ends the pair first",
 	"D4:notice B passed":                 "an old app that never sends under the new epoch for 32 days",
 	"I6:token_expired-before-own-exp":    "token_expired while the own clock is behind",
 	"I6:rekey-abandoned-token_expired":   "token_expired with a pending rekey (the parties check exp before depositing)",

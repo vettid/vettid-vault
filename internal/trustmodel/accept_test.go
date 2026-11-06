@@ -700,6 +700,7 @@ func (q *Party) judgeAbandoned(r *PeerRec, links []IKLink, msgEp int) bool {
 				return true
 			}
 			q.w.hit("K9:ended")
+			q.w.audits[pairKey(q.ID, r.ID)]++ // connection.fork_suspected (ref epoch), no feed item
 			ep.Ended = true
 			r.AbanIDs = slices.DeleteFunc(r.AbanIDs, func(id int) bool { return id == ep.ID })
 			q.w.logf("%s: abandoned E%d of %s ended (identity.rotate under E%d)", q.Name, ep.ID, q.w.party(r.ID).Name, msgEp)

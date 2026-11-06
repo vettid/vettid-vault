@@ -298,7 +298,12 @@ func (q *Party) ruleC(r *PeerRec, M *Msg) (dec, bool) {
 					q.w.stat("ruleC:identity-vs-seen")
 				}
 				if r.Device {
+					q.w.hit("K8:device-conflict-refused")
 					return q.deviceConflict(r, "C:identity-device"), true
+				}
+				q.w.hit("K8:second-successor-suspends")
+				if !r.followed(f) {
+					q.w.hit("K8:against-a-seen-link")
 				}
 				r.CandA, r.CandB = f, l
 				q.suspend(r, "identity.rotate_conflict")
@@ -321,6 +326,7 @@ func (q *Party) ruleC(r *PeerRec, M *Msg) (dec, bool) {
 		for _, l := range M.Rot {
 			if !slices.ContainsFunc(r.Seen, func(f IKLink) bool { return f.Old == l.Old }) && !slices.Contains(r.Dropped, l) {
 				r.Seen = append(r.Seen, l)
+				q.w.hit("K8:link-kept-as-seen")
 			}
 		}
 		for _, l := range M.RLinks {
@@ -850,6 +856,9 @@ func (a *HS) respMsg(q *Party, r *PeerRec) Msg {
 func (q *Party) tableBResp(r *PeerRec, M *Msg, pos Pos) dec {
 	o := r.Own
 	if q.w.Now-o.Started > q.w.hsLifeFor(o.Reconnect) {
+		if q.newSpec() {
+			q.w.hit("L1:handshake-expired-at-hs.resp")
+		}
 		q.abandonOwn(r) // model: an initiator's handshake expires before the responder's answer
 		return dec{"drop", "expired", "hs.resp:own-handshake-expired"}
 	}
@@ -924,6 +933,9 @@ func (q *Party) tableBFin(r *PeerRec, M *Msg, pos Pos) dec {
 		return dec{"drop", "sig_I", "hs.fin:sig-invalid:handshake-kept"}
 	}
 	if q.w.Now-a.Started > q.w.answerLife() {
+		if q.newSpec() {
+			q.w.hit("L1:hs.fin-after-L")
+		}
 		q.w.ttlFin[[2]PID{r.ID, q.ID}] = "arrived-after-answer-expired"
 		q.dropAnswer(r, a.ID)
 		return dec{"drop", "expired", "hs.fin:answer-expired"}

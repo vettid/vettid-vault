@@ -128,9 +128,14 @@ func (w *World) migrate() {
 	w.hit("U1:migrated")
 	w.logf("UPGRADE: every party migrates to release 29 (R29-U1)")
 	// ground truth for §3.4.1 Residuals, "two splits at the upgrade": an
-	// initiator activated at hs.resp, its hs.fin not yet processed
+	// initiator activated at hs.resp, its hs.fin not yet processed, or a
+	// pair already split by a lost hs.fin under release 28
 	for _, p := range w.real() {
 		for _, r := range p.st.Peers {
+			if o := w.party(r.ID).st.peer(p.ID); o != nil && r.Status == stActive && o.Status == stActive && r.Cur != o.Cur {
+				w.u1Split[pairKey(p.ID, r.ID)] = true
+				w.hit("U1:split-at-upgrade")
+			}
 			if o := w.party(r.ID).st.peer(p.ID); o != nil && r.Cur != 0 {
 				for _, a := range o.Ans {
 					if a.NewEpoch == r.Cur {
@@ -257,6 +262,9 @@ const (
 func (w *World) residualOf(a, b PID) string {
 	if w.party(a).OldApp || w.party(b).OldApp {
 		return resOldApp
+	}
+	if w.u1Split[pairKey(a, b)] {
+		return resU1Fin
 	}
 	if x, ok := w.u1Risk[pairKey(a, b)]; ok {
 		resp, other := w.party(PID(x[0])), a

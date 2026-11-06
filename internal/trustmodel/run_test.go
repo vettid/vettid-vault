@@ -140,16 +140,19 @@ const (
 	opResolve
 	opRekey
 	opPeek
-	opUpgrade // R29-U1: every party migrates to release 29 (Config.PreUpgrade; inserted, weight 0)
+	opUpgrade     // R29-U1: every party migrates to release 29 (Config.PreUpgrade; inserted, weight 0)
+	opCopyRespond // reach: an old copy answers and confirms Q's handshake
+	opCopyInit    // reach: an old copy makes a handshake with Q as initiator
+	opFinLoss     // reach: hs.fin lost around a rotation
 	numOps
 )
 
 var opName = [...]string{"rotate", "rotate-both", "device-rotate", "send", "collect", "crash-at", "fail-write-at",
 	"lock", "unlock", "time", "snapshot", "copy-acts", "copy-forks", "copy-steals", "copy-deletes-mailbox",
-	"resolve", "rekey", "peek(lease)", "upgrade"}
+	"resolve", "rekey", "peek(lease)", "upgrade", "copy-responds", "copy-initiates", "fin-loss"}
 
 // weights of the random choice
-var opWeight = [...]int{6, 2, 2, 8, 14, 3, 3, 4, 6, 8, 3, 3, 1, 1, 1, 2, 3, 3, 0}
+var opWeight = [...]int{6, 2, 2, 8, 14, 3, 3, 4, 6, 8, 3, 3, 1, 1, 1, 2, 3, 3, 0, 2, 2, 2}
 
 type Action struct {
 	Op      Op
@@ -177,8 +180,8 @@ func (w *World) describeAction(a Action) string {
 		return fmt.Sprintf("collect %s (%d rounds, max %d)", pick(w.real(), a.A), 1+a.N%3, collectMax(a.B))
 	case opTime:
 		return fmt.Sprintf("time +%ds", jumps[a.N%len(jumps)])
-	case opCopyAct, opCopyFork, opCopySteal, opCopyDelete:
-		return fmt.Sprintf("%s %s", opName[a.Op], pick(w.copies(), a.A))
+	case opCopyAct, opCopyFork, opCopySteal, opCopyDelete, opCopyRespond, opCopyInit:
+		return fmt.Sprintf("%s %s (peer #%d, variant %d)", opName[a.Op], pick(w.copies(), a.A), a.B, a.N)
 	case opCrash, opFail, opSnap:
 		return fmt.Sprintf("%s %s +%d", opName[a.Op], pick(w.real(), a.A), 1+a.N%3)
 	}
@@ -293,6 +296,18 @@ func (w *World) exec(a Action) {
 		}
 	case opUpgrade:
 		w.migrate()
+	case opCopyRespond, opCopyInit:
+		if len(cs) == 0 { // reach: take the copy now (the original may rotate after it)
+			w.makeCopy(real[a.A%len(real)])
+			cs = w.copies()
+		}
+		if c := cs[a.A%len(cs)]; a.Op == opCopyRespond {
+			w.copyRespond(c, a)
+		} else {
+			w.copyInit(c, a)
+		}
+	case opFinLoss:
+		w.finLoss(p, a)
 	case opPeek:
 		if !p.Locked {
 			for _, b := range p.boxes() {

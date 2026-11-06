@@ -257,6 +257,9 @@ func (p *Party) startHS(r *PeerRec, reconnect bool) {
 		m.Epoch = r.Cur
 	}
 	r.Own = h
+	if p.newSpec() && len(m.Rot) > 1 {
+		w.hit("K1:hs.init-whole-chain")
+	}
 	w.stat("start:" + map[bool]string{false: "rekey", true: "reconnect"}[reconnect])
 	w.hsOrigin[h.ID] = origin
 	if origin == "" {
@@ -331,6 +334,7 @@ func (p *Party) startWanted() {
 		for _, id := range r.DropAns { // §6.3.1 (J): an undepositable answer ends at once
 			p.dropAnswer(r, id)
 			p.w.stat("A:answer-undepositable")
+			p.w.hit("X3:undepositable-answer-destroyed")
 			any = true
 		}
 		r.DropAns = nil
@@ -390,6 +394,9 @@ func (p *Party) tick() {
 					continue
 				}
 				if !o.Reconnect && w.Now-o.Started > w.hsLifeFor(false) {
+					if p.newSpec() {
+						w.hit("L1:rekey-unanswered-16d")
+					}
 					p.abandonOwn(r)
 					p.startHS(r, o.Reconnect)
 				}
@@ -397,6 +404,9 @@ func (p *Party) tick() {
 			life := w.answerLife()
 			for _, a := range slices.Clone(r.Ans) {
 				if w.Now-a.Started > life {
+					if p.newSpec() {
+						w.hit("L1:answer-expired-L")
+					}
 					p.dropAnswer(r, a.ID)
 				}
 			}

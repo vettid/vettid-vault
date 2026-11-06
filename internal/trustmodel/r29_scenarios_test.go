@@ -150,3 +150,30 @@ func TestFindingU1InFlightFinFalseFork(t *testing.T) {
 		t.Errorf("the finding no longer reproduces: status %d\n  %s", r.Status, s.trace())
 	}
 }
+
+// R29-R6: under an epoch rule E destroyed, an authenticated message with a
+// later inner ts than the recorded one is fork evidence; an earlier one is
+// refused superseded_epoch.
+func TestR29R6SupersededEpoch(t *testing.T) {
+	for _, later := range []bool{false, true} {
+		w := setup(Config{Vaults: 2}, 1)
+		P, Q := w.P[0], w.P[1]
+		r := Q.st.peer(P.ID)
+		e1 := w.id()
+		r.Epochs = append(r.Epochs, Epoch{ID: e1, Signer: r.IK, Own: Q.st.IK, EstAt: w.Now, EverCur: true, Destroyed: true, DestroyTs: w.Now})
+		ts := w.Now - hour
+		if later {
+			ts = w.Now + hour
+		}
+		m := &RMsg{ID: 10, Box: Q.st.Relay, DepAt: w.Now, Sender: r.Relay, Seq: 10, Actor: P.ID,
+			P: &Msg{Kind: KSession, Inner: w.id(), Epoch: e1, Probe: w.id(), Ts: ts}}
+		d := Q.acceptFrom(r, m, Pos{m.Box, m.ID, m.DepAt, m.Seq}, []Key{Q.st.Relay})
+		t.Logf("later ts %v: %s", later, d)
+		if later && (d.Out != "suspend" || r.Status != stSuspended) {
+			t.Errorf("a later ts under a destroyed epoch: %s", d)
+		}
+		if !later && d.Reason != "superseded_epoch" {
+			t.Errorf("an earlier ts under a destroyed epoch: %s", d)
+		}
+	}
+}

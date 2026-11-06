@@ -296,6 +296,7 @@ func (p *Party) tickA(r *PeerRec) {
 			}
 			if r.ConfUntil != 0 && w.Now > r.ConfUntil {
 				ep.KeysGone = true
+				w.hit("L1:confirmed-epoch-keys-end")
 			}
 		} else if ep.Superseded != 0 && w.Now-ep.Superseded > 16*day {
 			ep.KeysGone = true
@@ -334,6 +335,7 @@ func (p *Party) idResend(r *PeerRec, m *RMsg) {
 	r.IdResend, r.IdResendBatch = p.w.Now, true
 	r.IdResendN++
 	p.w.stat("A:identity.rotate-resent")
+	p.w.hit("K3:identity.rotate-resent")
 	p.enqueue(r.ID, Msg{Kind: KIdRot, Rot: p.ownLinks(ep.Own)}, nil)
 }
 

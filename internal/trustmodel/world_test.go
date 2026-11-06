@@ -40,6 +40,7 @@ type World struct {
 	feed          map[[2]PID][]string // pair -> feed items to the member about it (R29 I7)
 	preUpgrade    bool                // R29-U1: the run starts on release 28 (the f4a4d97 rules) and upgrades (opUpgrade)
 	migrated      bool
+	u1Split       map[[2]PID]bool   // pair -> split at the migration (an hs.fin lost under release 28)
 	migratedAt    int64             // R29-U1: the upgrade migration ran
 	u1Risk        map[[2]PID][2]int // pair -> (responder, epoch): at the migration that hs.fin was still unprocessed (§3.4.1 Residuals)
 	ruleEKeepFin  bool              // TRUSTMODEL_RULEEFIN=keep: rule E leaves an unsent hs.fin for a destroyed epoch in the outbox (before r7)
@@ -90,7 +91,7 @@ func newWorld(seed uint64) *World {
 	w := &World{rng: rand.New(rand.NewPCG(seed, 7)), issuer: map[int]Key{}, epTruth: map[int][2]PID{},
 		rlinkBy: map[RLink]rot{}, iklinkBy: map[IKLink]rot{}, evid: map[[2]PID]map[Key]map[Key]bool{},
 		ikPos: map[[2]PID][]ikFollow{}, answered: map[int]bool{},
-		ended: map[int]bool{}, ever: map[PID]map[int]bool{}, probes: map[int]bool{}, stats: map[string]int{}, dead: map[PID]string{}, ttlFin: map[[2]PID]string{}, probeDep: map[int][2]PID{}, probeFate: map[int]string{}, hasEpoch: map[[2]int]bool{}, staleAt: map[[2]PID]string{}, hsOrigin: map[int]string{}, suspAt: map[[2]PID]int64{}, audits: map[[2]PID]int{}, everSplit: map[[2]PID]bool{}, feed: map[[2]PID][]string{}, u1Risk: map[[2]PID][2]int{}, copyExpo: map[[2]int]*expo{}, probeEpoch: map[int]int{}, forkDue: map[[2]PID]int{}, evidKind: map[Key]string{}}
+		ended: map[int]bool{}, ever: map[PID]map[int]bool{}, probes: map[int]bool{}, stats: map[string]int{}, dead: map[PID]string{}, ttlFin: map[[2]PID]string{}, probeDep: map[int][2]PID{}, probeFate: map[int]string{}, hasEpoch: map[[2]int]bool{}, staleAt: map[[2]PID]string{}, hsOrigin: map[int]string{}, suspAt: map[[2]PID]int64{}, audits: map[[2]PID]int{}, everSplit: map[[2]PID]bool{}, feed: map[[2]PID][]string{}, u1Risk: map[[2]PID][2]int{}, u1Split: map[[2]PID]bool{}, copyExpo: map[[2]int]*expo{}, probeEpoch: map[int]int{}, forkDue: map[[2]PID]int{}, evidKind: map[Key]string{}}
 	w.R = newRelay(w)
 	w.Now = 1000 * day
 	return w
@@ -320,7 +321,7 @@ func (w *World) makeCopy(p *Party) {
 		w: w, Locked: true, collTo: map[Key]int64{}}
 	c.st = p.stored.clone()
 	c.stored = p.stored.clone()
-	c.OldApp = p.OldApp
+	c.OldApp, c.Skew = p.OldApp, p.Skew // the same software and clock as when it was taken
 	c.storedOut = map[int]bool{}
 	for _, e := range c.st.Out {
 		c.storedOut[e.ID] = true
@@ -613,6 +614,9 @@ func (p *Party) deposit(e *Entry, r *PeerRec) {
 			if ep := r.epoch(r.Cur); ep != nil {
 				if l := p.ownLinks(ep.Own); len(l) > 0 {
 					m.Rot = l
+					if len(l) > 1 && p.newSpec() {
+						w.hit("K1:identity.rotate-whole-chain")
+					}
 				}
 			}
 		}

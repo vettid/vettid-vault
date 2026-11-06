@@ -117,7 +117,7 @@ func classify(d string) string {
 	f := strings.Fields(d)
 	var out []string
 	for _, x := range f {
-		if _, err := strconv.Atoi(strings.Trim(x, "E(),#:")); err == nil {
+		if _, err := strconv.Atoi(strings.Trim(x, "E(),#:{}")); err == nil {
 			continue
 		}
 		if x == "P" || x == "Q" || x == "R" || x == "DP" || x == "DQ" || x == "DR" || strings.Contains(x, "<->") || strings.HasSuffix(x, "'") || strings.Contains(x, "->") {

@@ -35,6 +35,38 @@ func (p *Peer) ancestor(ik []byte) bool {
 	return false
 }
 
+// signedAtOrBefore reports whether signer is the link's oldIK or an
+// ancestor of it: the old_ik of a followed link before the one from oldIK
+// (§3.4.1 "that link's old_ik or an ancestor").
+func (p *Peer) signedAtOrBefore(signer, oldIK []byte) bool {
+	if len(signer) == 0 {
+		return false
+	}
+	if bytes.Equal(signer, oldIK) {
+		return true
+	}
+	for _, r := range parseRotations(p.Chain) {
+		if bytes.Equal(r.OldIK, oldIK) {
+			return false
+		}
+		if bytes.Equal(r.OldIK, signer) {
+			return true
+		}
+	}
+	return false
+}
+
+// signedByLinks reports whether signer is the old_ik of one of links, or
+// an ancestor of one.
+func (p *Peer) signedByLinks(signer []byte, links []*handshake.Rotation) bool {
+	for _, r := range links {
+		if p.signedAtOrBefore(signer, r.OldIK) {
+			return true
+		}
+	}
+	return false
+}
+
 // rejected reports whether ik was dropped at connection.rotation.resolve.
 func (p *Peer) rejected(ik []byte) bool {
 	for _, x := range p.Rejected {
@@ -161,7 +193,7 @@ func (m *Manager) k9(p *Peer, links []*handshake.Rotation, msgEpoch []byte, now 
 			continue
 		}
 		for _, r := range links {
-			if bytes.Equal(e.Signer, r.OldIK) || p.ancestor(e.Signer) {
+			if p.signedAtOrBefore(e.Signer, r.OldIK) {
 				judged = append(judged, e)
 				break
 			}
@@ -232,7 +264,7 @@ func (m *Manager) followLinks(p *Peer, app []*handshake.Rotation, msgEpoch []byt
 	// unless the message traveled under it (it has just confirmed it).
 	restart := ""
 	if pe := p.Pending; pe != nil && !bytes.Equal(pe.ID, msgEpoch) {
-		if e := p.epochMeta(pe.ID); e != nil && p.ancestor(e.Signer) {
+		if e := p.epochMeta(pe.ID); e != nil && p.signedByLinks(e.Signer, app) {
 			m.abandonPending(p, "link", false, now)
 			restart = string(pe.Purpose) // started again under the current ik, as H5 says
 		}
@@ -249,7 +281,7 @@ func (m *Manager) followLinks(p *Peer, app []*handshake.Rotation, msgEpoch []byt
 		}
 	}()
 	byPosition := func(e *EpochMeta) bool {
-		return !e.Demoted && !e.Pending && p.ancestor(e.Signer) && !e.EstAt.IsZero() && posAfter(e.EstAt, e.EstMsg, m.relayAt, m.msgID)
+		return !e.Demoted && !e.Pending && p.signedByLinks(e.Signer, app) && !e.EstAt.IsZero() && posAfter(e.EstAt, e.EstMsg, m.relayAt, m.msgID)
 	}
 	for i := range p.Epochs {
 		if e := &p.Epochs[i]; byPosition(e) && e.GotFromPeer {
@@ -312,7 +344,7 @@ func (m *Manager) f1Demote(p *Peer, app []*handshake.Rotation, msgEpoch []byte, 
 			if e.Pending || e.Abandoned || e.Destroyed {
 				continue // pending and abandoned ones: "Pending epochs at a link", K9
 			}
-			if bytes.Equal(e.Signer, r.OldIK) || p.ancestor(e.Signer) {
+			if p.signedAtOrBefore(e.Signer, r.OldIK) {
 				later = append(later, e)
 			}
 		}

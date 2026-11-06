@@ -343,7 +343,7 @@ func (m *Manager) respondReconnect(pi *handshake.PendingInit, p *Peer, sender ed
 	m.noteFeatures(p, pi.Inner().Features) // 0.86.0, §10.8: steps 1-4 passed
 	var named86 []byte
 	var namedConf, forkEp, refuse bool
-	named86, namedConf, forkEp, refuse = m.classifyCtx086(p, body.Ctx)
+	named86, namedConf, forkEp, refuse = m.classifyCtx086(p, body.Ctx, p.reachedLinks(body.Rotations))
 	if refuse {
 		m.audit(now, "reconnect_refused", p.ID)
 		pi.Discard()
@@ -554,7 +554,11 @@ func (m *Manager) handleRekeyInit(ctx context.Context, p *Peer, in *envelope.Inn
 		if bytes.Equal(epID[:], p.confirmedID()) && ep.HasRK() {
 			namedConf = true
 		} else {
-			m.rekeyOtherEpoch(p, ep, now)
+			var rots []*handshake.Rotation
+			if b, err := handshake.ParseInit(in.Body); err == nil {
+				rots = b.Rotations
+			}
+			m.rekeyOtherEpoch(p, ep, rots, now)
 			m.audit(now, "rekey_not_current_epoch", p.ID)
 			return ackAfterFlush
 		}

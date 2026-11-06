@@ -585,7 +585,11 @@ func (m *Manager) h5(p *Peer, now time.Time) {
 // older than the confirmed epoch, where an epoch after it up to the
 // confirmed one has an ancestor of P's ik as its signer, is fork
 // evidence. There is no exception for an epoch the vault began.
-func (p *Peer) forkEpoch(ctx []byte) bool {
+//
+// The ancestors are those of the ik the message reaches (Table B,
+// reached included): the stored chain's and the old_ik of every link the
+// message carries that Q has not yet followed (reached, from reachedLinks).
+func (p *Peer) forkEpoch(ctx []byte, reached []*handshake.Rotation) bool {
 	if bytes.Equal(ctx, p.LastEpochID) || bytes.Equal(ctx, p.confirmedID()) {
 		return false
 	}
@@ -597,20 +601,39 @@ func (p *Peer) forkEpoch(ctx []byte) bool {
 		if p.ancestor(e.Signer) {
 			return true
 		}
+		for _, r := range reached {
+			if bytes.Equal(r.OldIK, e.Signer) {
+				return true
+			}
+		}
 	}
 	return false
+}
+
+// reachedLinks returns the links of rots (a handshake's rotations) that
+// the vault has not yet followed, when the chain resolves from p's stored
+// ik (Table B "reached"); nil otherwise.
+func (p *Peer) reachedLinks(rots []*handshake.Rotation) []*handshake.Rotation {
+	if len(rots) == 0 {
+		return nil
+	}
+	_, _, n, err := handshake.ResolveChainKnown(p.IK, parseRotations(p.Chain), rots)
+	if err != nil {
+		return nil
+	}
+	return rots[n:]
 }
 
 // rekeyOtherEpoch judges a rekey hs.init under an epoch that is neither
 // current nor the confirmed one, once the hs.init has passed
 // rekeyPrecheck: fork evidence (§3.4.1 "Fork by ctx") suspends. The
 // hs.init is not answered either way.
-func (m *Manager) rekeyOtherEpoch(p *Peer, ep *handshake.Epoch, now time.Time) {
+func (m *Manager) rekeyOtherEpoch(p *Peer, ep *handshake.Epoch, rots []*handshake.Rotation, now time.Time) {
 	if p.Kind != KindConnection {
 		return
 	}
 	id := ep.ID()
-	if p.forkEpoch(id[:]) {
+	if p.forkEpoch(id[:], p.reachedLinks(rots)) {
 		m.suspendForkRef(p, "epoch", now)
 	}
 }

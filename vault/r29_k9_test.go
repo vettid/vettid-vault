@@ -84,7 +84,7 @@ func TestR29K9EndedCtxRefused(t *testing.T) {
 		t.Fatal("setup: not ended")
 	}
 	f.do(0, func(m *Manager, p *Peer) {
-		named, _, fork, refuse := m.classifyCtx086(p, handshake.EpochCtx(epochIDOf(e1)))
+		named, _, fork, refuse := m.classifyCtx086(p, handshake.EpochCtx(epochIDOf(e1)), nil)
 		if !refuse || fork || named != nil {
 			t.Fatalf("a ctx naming an ended epoch: named %x fork %v refuse %v", named, fork, refuse)
 		}

@@ -509,8 +509,10 @@ func (m *Manager) crossingRekeyLoses(p *Peer, theirs [32]byte, now time.Time) bo
 // pending epoch until a newer one is confirmed. An older epoch of the
 // connection is judged by §3.4.1 F2: fork evidence (forkEp, judged at
 // hs.fin; §3.4.1 "Fork by ctx": no exception for an epoch the vault
-// began). named is nil when the classic rules (classifyCtx) decide.
-func (m *Manager) classifyCtx086(p *Peer, ctx string) (named []byte, namedConf, forkEp, refuse bool) {
+// began; the ancestors are those of the ik the hs.init reaches, with
+// reached its links not yet followed). named is nil when the classic
+// rules (classifyCtx) decide.
+func (m *Manager) classifyCtx086(p *Peer, ctx string, reached []*handshake.Rotation) (named []byte, namedConf, forkEp, refuse bool) {
 	is := func(id []byte) bool { return len(id) == 16 && ctx == handshake.EpochCtx(epochIDOf(id)) }
 	if pe := p.Pending; pe != nil && pe.Purpose == handshake.PurposeReconnect {
 		if is(pe.ID) {
@@ -541,7 +543,7 @@ func (m *Manager) classifyCtx086(p *Peer, ctx string) (named []byte, namedConf, 
 		if !is(e.ID) || e.Destroyed || e.Pending {
 			continue
 		}
-		if p.forkEpoch(e.ID) {
+		if p.forkEpoch(e.ID, reached) {
 			return e.ID, false, true, false
 		}
 	}

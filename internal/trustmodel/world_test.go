@@ -13,6 +13,7 @@ import (
 type Violation struct {
 	Inv, Detail string
 	Pair        string // the releases of the first two parties the detail names, at the time (pairType)
+	At          int64
 }
 
 type World struct {
@@ -39,16 +40,25 @@ type World struct {
 	fixBStrict    bool              // F1 (default, lead's choice): keep the ungated epoch only if the peer's new ik signed something under it
 	f3Suspend28   bool              // TRUSTMODEL_F3UNGATED=suspend: F3 suspends toward ungated peers too (before r8)
 	f3CtxMsg      bool              // default: that reconnect names the message's epoch (lead, 2026-11-05); TRUSTMODEL_F3RCCTX=confirmed names the confirmed one
-	noRCRetry     bool              // TRUSTMODEL_RCRETRY=off: no second or third try (before r9)
-	noRekeyRC     bool              // TRUSTMODEL_REKEYRC=off: no reconnect after a refused rekey toward an ungated peer (before r8)
-	ruleEKeepFin  bool              // TRUSTMODEL_RULEEFIN=keep: rule E leaves an unsent hs.fin for a destroyed epoch in the outbox (before r7)
-	r28Spec       bool              // TRUSTMODEL_R28=spec: release-28 parties follow f4a4d97 §3.4.1 (before r6); default: the release-28 code
-	featMode      string            // always (default, the spec): features on every message; first: with the first message after an upgrade; echo: also when first seeing the peer's
-	upAt          map[PID]int64     // upgrade mode: when each party upgraded from release 28
-	gateOpenAt    map[[2]PID]int64  // when q first saw r's features (q, r)
-	copyExpo      map[[2]int]*expo  // (honest party, copy epoch): when it was used
-	ownCopyStrict bool              // a92a6eb's own_copy wording (and nothing received from P); default: lead fix A
-	debugUnlinked bool              // scenarios: the relay's rotate and registration get no answer
+	nextOrigin    string            // r10: why the next startHS starts (stats)
+	hsOrigin      map[int]string    // r10: handshake id -> why it started
+	lastEst       map[[2]PID]string // r10: pair -> origin of the last activation
+	finLost       map[[2]PID]PID    // r10: pair -> initiator of an hs.fin lost during the open split
+	episodes      map[[2]PID]*episode
+	suspAt        map[[2]PID]int64
+	audits        map[[2]PID]int
+	firstSplit    map[[2]PID]int64
+	r1Lite        bool             // TRUSTMODEL_R1LITE=1 (r10): no revert / keep / copies toward ungated peers
+	noRCRetry     bool             // TRUSTMODEL_RCRETRY=off: no second or third try (before r9)
+	noRekeyRC     bool             // TRUSTMODEL_REKEYRC=off: no reconnect after a refused rekey toward an ungated peer (before r8)
+	ruleEKeepFin  bool             // TRUSTMODEL_RULEEFIN=keep: rule E leaves an unsent hs.fin for a destroyed epoch in the outbox (before r7)
+	r28Spec       bool             // TRUSTMODEL_R28=spec: release-28 parties follow f4a4d97 §3.4.1 (before r6); default: the release-28 code
+	featMode      string           // always (default, the spec): features on every message; first: with the first message after an upgrade; echo: also when first seeing the peer's
+	upAt          map[PID]int64    // upgrade mode: when each party upgraded from release 28
+	gateOpenAt    map[[2]PID]int64 // when q first saw r's features (q, r)
+	copyExpo      map[[2]int]*expo // (honest party, copy epoch): when it was used
+	ownCopyStrict bool             // a92a6eb's own_copy wording (and nothing received from P); default: lead fix A
+	debugUnlinked bool             // scenarios: the relay's rotate and registration get no answer
 
 	// Fix switches for the review findings (f_scenarios_test.go). Each is
 	// false by default (the fix on); true turns that one fix off.
@@ -95,7 +105,7 @@ func newWorld(seed uint64) *World {
 	w := &World{fixBStrict: true, rng: rand.New(rand.NewPCG(seed, 7)), issuer: map[int]Key{}, epTruth: map[int][2]PID{},
 		rlinkBy: map[RLink]rot{}, iklinkBy: map[IKLink]rot{}, evid: map[[2]PID]map[Key]map[Key]bool{},
 		ikPos: map[[2]PID][]ikFollow{}, answered: map[int]bool{},
-		ended: map[int]bool{}, ever: map[PID]map[int]bool{}, probes: map[int]bool{}, stats: map[string]int{}, dead: map[PID]string{}, ttlFin: map[[2]PID]string{}, probeDep: map[int][2]PID{}, probeFate: map[int]string{}, reverted: map[int]bool{}, hasEpoch: map[[2]int]bool{}, staleAt: map[[2]PID]string{}, upAt: map[PID]int64{}, gateOpenAt: map[[2]PID]int64{}, copyExpo: map[[2]int]*expo{}, probeEpoch: map[int]int{}, forkDue: map[[2]PID]int{}, evidKind: map[Key]string{}}
+		ended: map[int]bool{}, ever: map[PID]map[int]bool{}, probes: map[int]bool{}, stats: map[string]int{}, dead: map[PID]string{}, ttlFin: map[[2]PID]string{}, probeDep: map[int][2]PID{}, probeFate: map[int]string{}, reverted: map[int]bool{}, hasEpoch: map[[2]int]bool{}, staleAt: map[[2]PID]string{}, hsOrigin: map[int]string{}, lastEst: map[[2]PID]string{}, finLost: map[[2]PID]PID{}, episodes: map[[2]PID]*episode{}, suspAt: map[[2]PID]int64{}, audits: map[[2]PID]int{}, firstSplit: map[[2]PID]int64{}, upAt: map[PID]int64{}, gateOpenAt: map[[2]PID]int64{}, copyExpo: map[[2]int]*expo{}, probeEpoch: map[int]int{}, forkDue: map[[2]PID]int{}, evidKind: map[Key]string{}}
 	w.R = newRelay(w)
 	w.Now = 1000 * day
 	return w
@@ -125,7 +135,7 @@ func (w *World) violate(inv, format string, a ...any) {
 			return
 		}
 	}
-	w.viol = append(w.viol, Violation{inv, d, w.pairType(d)})
+	w.viol = append(w.viol, Violation{inv, d, w.pairType(d), w.Now})
 	w.logf("!!! %s VIOLATED: %s", inv, d)
 }
 

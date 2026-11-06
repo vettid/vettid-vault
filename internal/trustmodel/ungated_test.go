@@ -3,6 +3,7 @@ package trustmodel
 import (
 	"fmt"
 	"slices"
+	"strings"
 )
 
 // r8, the lead's (b) on two points; switches turn each off.
@@ -39,6 +40,10 @@ func (q *Party) reconnectNaming(r *PeerRec, ctx int, why string) {
 		q.abandonPending(r, why, false)
 	}
 	r.RCCtx = ctx
+	q.w.nextOrigin = "rule L reconnect"
+	if strings.HasPrefix(why, "F3") {
+		q.w.nextOrigin = "rule E reconnect"
+	}
 	q.w.logf("%s: reconnect to %s naming E%d (%s)", q.Name, q.w.party(r.ID).Name, ctx, why)
 	q.startHS(r, true)
 	if r.Own == nil || !r.Own.Reconnect {
@@ -60,6 +65,7 @@ func (p *Party) ruleRCExpired(r *PeerRec, o *HS) bool {
 	}
 	p.abandonOwn(r)
 	r.RCCtx = o.Ctx
+	p.w.nextOrigin = "rule E/L retry"
 	p.startHS(r, true)
 	if r.Own == nil || !r.Own.Reconnect {
 		p.w.stat("A:ruleRC-retry-not-started")

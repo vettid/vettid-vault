@@ -172,6 +172,7 @@ func (q *Party) acceptR28(r *PeerRec, m *RMsg, pos Pos, set []Key) dec {
 			q.followIK(r, app, pos)
 		}
 		q.establish(r, M.NewEpoch, M.Sig, o.OwnIK, pos)
+		q.w.noteEst(q, r, q.w.hsOrigin[o.ID])
 		r.Epochs[len(r.Epochs)-1].MineInit = true
 		if o.Reconnect {
 			for _, a := range slices.Clone(r.Ans) {
@@ -199,6 +200,7 @@ func (q *Party) acceptR28(r *PeerRec, m *RMsg, pos Pos, set []Key) dec {
 		}
 		if q.w.Now-a.Started > r28HSLife {
 			q.w.ttlFin[[2]PID{r.ID, q.ID}] = "arrived-after-answer-expired"
+			q.w.noteFinLost(r.ID, q.ID)
 			q.dropAnswer(r, a.ID)
 			return dec{"drop", "expired", cell + ":answer-expired"}
 		}
@@ -215,6 +217,7 @@ func (q *Party) acceptR28(r *PeerRec, m *RMsg, pos Pos, set []Key) dec {
 			q.followIK(r, app, pos)
 		}
 		q.establish(r, a.NewEpoch, a.PeerIK, a.OwnIK, pos)
+		q.w.noteEst(q, r, q.w.hsOrigin[a.ID])
 		if a.Reconnect {
 			toks, _ := q.ruleT(r, a.Toks, r.Relay)
 			q.keepTokens(r, toks)

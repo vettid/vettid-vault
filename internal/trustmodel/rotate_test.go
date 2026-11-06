@@ -172,6 +172,13 @@ func (p *Party) completePending(atUnlock bool) {
 // startHS starts a rekey (reconnect=false) or a reconnect with r.
 func (p *Party) startHS(r *PeerRec, reconnect bool) {
 	w := p.w
+	origin := w.nextOrigin
+	w.nextOrigin = ""
+	defer func() {
+		if r.Own != nil && w.hsOrigin[r.Own.ID] == "" {
+			w.hsOrigin[r.Own.ID] = origin
+		}
+	}()
 	if r.Status != stActive || r.Own != nil || (reconnect && r.Device) || (p.w.optA && r.Pend != nil) {
 		return
 	}
@@ -213,6 +220,10 @@ func (p *Party) startHS(r *PeerRec, reconnect bool) {
 	}
 	r.Own = h
 	w.stat("start:" + map[bool]string{false: "rekey", true: "reconnect"}[reconnect])
+	w.hsOrigin[h.ID] = origin
+	if origin == "" {
+		w.hsOrigin[h.ID] = map[bool]string{false: "rekey", true: "reconnect"}[reconnect]
+	}
 	if reconnect {
 		r.RCs++
 	}
@@ -236,6 +247,7 @@ func (p *Party) unlock() {
 			}
 			p.refresh(r)
 			if !r.Device && r.standing(r.KeyFor, r.Relay, w.Now).JTI == 0 {
+				w.nextOrigin = "token expiry reconnect"
 				p.startHS(r, true)
 			}
 			if !p.Device && r.Device {
@@ -288,6 +300,7 @@ func (p *Party) startWanted() {
 			r.WantRC = false
 			if r.Own == nil || !r.Own.Reconnect {
 				p.abandonOwn(r)
+				p.w.nextOrigin = "token_expired reconnect"
 				p.startHS(r, true)
 				any = true
 			}
@@ -375,6 +388,7 @@ func (p *Party) tick() {
 				continue
 			}
 			if !r.Device && r.standing(r.KeyFor, r.Relay, w.Now).JTI == 0 {
+				w.nextOrigin = "token expiry reconnect"
 				p.startHS(r, true)
 			}
 			// S1: stale 30 days after the second write

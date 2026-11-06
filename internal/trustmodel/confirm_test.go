@@ -73,8 +73,8 @@ func (q *Party) initHalf(r *PeerRec) bool {
 // revertRule: toward an ungated peer the initiator activates at hs.fin,
 // keeps the old epoch and reverts (Deployment). R2 has no revert.
 func (q *Party) revertRule(r *PeerRec) bool {
-	if !q.newSpec() || q.initHalf(r) {
-		return false
+	if !q.newSpec() || q.initHalf(r) || q.w.r1Lite {
+		return false // R1-lite (r10): toward an ungated peer, as release 28 (no revert, keep or copies)
 	}
 	return q.Opt == optR1 || q.Opt == optR3 || (q.Opt == optFull && q.w.gate)
 }
@@ -95,6 +95,7 @@ func (q *Party) makePending(r *PeerRec, id int, signer, own Key, pos Pos, respTs
 // confirm: a message from the peer under the pending epoch.
 func (q *Party) confirm(r *PeerRec) {
 	pe := r.Pend
+	q.w.noteEst(q, r, "confirmation")
 	for j := range r.Epochs {
 		ep := &r.Epochs[j]
 		if ep.ID == pe.ID {
@@ -140,6 +141,7 @@ func (q *Party) abandonPending(r *PeerRec, why string, restart bool) {
 	valid := r.standing(r.KeyFor, r.Relay, q.w.Now).JTI != 0
 	switch {
 	case why == "B passed" && !r.Device:
+		q.w.nextOrigin = "B reconnect"
 		q.startHS(r, true) // §6.3.1: I reconnects naming its current epoch
 	case why == "B passed" && !valid:
 		q.markStale(r, "pair again (B passed)")
@@ -228,6 +230,7 @@ func (q *Party) beforeAccept(r *PeerRec, m *RMsg, pos Pos) {
 // one is current again, and I rekeys from it. What I sent under it is lost.
 func (q *Party) revert(r *PeerRec, rekeyIn bool) {
 	gone := r.Cur
+	q.w.noteEst(q, r, "revert")
 	if pr := q.w.party(r.ID).st.peer(q.ID); pr != nil && pr.epoch(gone) != nil && !pr.epoch(gone).Destroyed && !pr.epoch(gone).Demoted {
 		q.w.violate("I1-false-revert", "%s reverted E%d although %s had activated it", q.Name, gone, q.w.party(r.ID).Name)
 	}

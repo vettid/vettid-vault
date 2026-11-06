@@ -40,6 +40,9 @@ func (q *Party) handle(m *RMsg, set []Key) bool {
 			return false // §6.3: left unacked until hs.fin
 		}
 		w.logf("%s: drops %s from box %d: %s", q.Name, kindName[M.Kind], m.Box, why)
+		if !w.party(m.Actor).Copy {
+			w.audits[pairKey(q.ID, w.party(m.Actor).Origin)]++ // unknown_kid and the like
+		}
 		if M.Feat {
 			w.stat("F:features not taken (dropped: " + why + ")")
 		}
@@ -47,6 +50,9 @@ func (q *Party) handle(m *RMsg, set []Key) bool {
 			w.probeFate[M.Probe] = "unreadable: " + why
 		}
 		if (M.Kind == KFin || M.Kind == KConfirm) && !w.party(m.Actor).Copy {
+			if M.Kind == KFin {
+				w.noteFinLost(m.Actor, q.ID)
+			}
 			w.ttlFin[[2]PID{m.Actor, q.ID}] = "arrived-after-answer-expired"
 		}
 		return true
@@ -80,6 +86,9 @@ func (q *Party) handle(m *RMsg, set []Key) bool {
 	w.logf("%s <- %s: %s via %d: %s", q.Name, w.party(r.ID).Name, describe(M), m.Sender, d)
 	if d.Out == "accept" || d.Out == "answer" {
 		w.noteCopyUse(q, r.ID, M.Epoch)
+	}
+	if d.Out == "refuse" || d.Out == "drop" || d.Out == "abort" {
+		w.audits[pairKey(q.ID, r.ID)]++
 	}
 	if M.Feat && q.newSpec() && (d.Out == "accept" || d.Out == "answer" || d.Out == "follow") {
 		q.seeFeatures(r)
@@ -377,6 +386,7 @@ func (q *Party) deviceConflict(r *PeerRec, cell string) dec {
 func (q *Party) suspend(r *PeerRec, ref string) {
 	r.Status = stSuspended
 	r.Ref = ref
+	q.w.suspAt[[2]PID{q.ID, r.ID}] = q.w.Now
 	q.w.logf("%s SUSPENDS %s: %s", q.Name, q.w.party(r.ID).Name, ref)
 	q.h5(r, 0)
 }
@@ -877,6 +887,7 @@ func (q *Party) tableBResp(r *PeerRec, M *Msg, pos Pos) dec {
 	} else {
 		prev := r.Cur
 		q.establish(r, M.NewEpoch, M.Sig, o.OwnIK, pos)
+		q.w.noteEst(q, r, q.w.hsOrigin[o.ID])
 		r.Epochs[len(r.Epochs)-1].MineInit = true
 		r.Epochs[len(r.Epochs)-1].UnconfFin = true // activated at hs.fin without confirmation
 		if q.revertRule(r) && prev != 0 {          // Deployment: toward an ungated peer, keep the old epoch
@@ -921,6 +932,7 @@ func (q *Party) tableBFin(r *PeerRec, M *Msg, pos Pos) dec {
 	}
 	if q.w.Now-a.Started > q.w.answerLife() {
 		q.w.ttlFin[[2]PID{r.ID, q.ID}] = "arrived-after-answer-expired"
+		q.w.noteFinLost(r.ID, q.ID)
 		q.dropAnswer(r, a.ID)
 		return dec{"drop", "expired", "hs.fin:answer-expired"}
 	}
@@ -955,6 +967,7 @@ func (q *Party) tableBFin(r *PeerRec, M *Msg, pos Pos) dec {
 		q.ruleE(r, a.InitTs)
 	}
 	q.establish(r, a.NewEpoch, a.PeerIK, a.OwnIK, pos)
+	q.w.noteEst(q, r, q.w.hsOrigin[a.ID])
 	if a.OwnIK != q.st.IK && r.Status == stActive {
 		// lead item 1: an answer kept across my own rotation (toward an
 		// ungated peer) is established, then I rekey at once under the new ik

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"testing"
 	"time"
+
+	"github.com/vettid/vettid-relay/relayclient"
 )
 
 // §6.3.1 "Responder" (vettid.org #554 at 9839e49): while R's current
@@ -119,5 +121,50 @@ func TestR29ReconfirmTimeSurvivesRestart(t *testing.T) {
 	f.tick(1)
 	if n := len(f.confirmsTo(1, 0)); n != 1 {
 		t.Fatalf("%d hs.confirm 12 days after the last", n)
+	}
+}
+
+// None while one is still in R's outbox (here its deposit keeps failing).
+func TestR29ReconfirmNotWhileQueued(t *testing.T) {
+	f, _ := reconfirmSetup(t)
+	f.confirmsTo(1, 0)
+	r := f.d[1].relay
+	r.mu.Lock()
+	r.failMailbox = map[string]error{f.m(0).st.Relay.Mailbox: &relayclient.Error{Status: 503, Code: "unavailable"}}
+	r.mu.Unlock()
+	f.advance(ConfirmResend + time.Hour)
+	f.tick(1) // queued again; its deposit fails and it stays queued
+	f.advance(ConfirmResend + time.Hour)
+	f.tick(1)
+	n := 0
+	for _, e := range f.m(1).st.Outbox {
+		if e.Confirm && !e.Done {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("%d hs.confirm in R's outbox", n)
+	}
+}
+
+// It stops once the epoch stops being current: R's own rekey from E1 is
+// answered and confirmed, and R's current epoch is E2.
+func TestR29ReconfirmStopsWhenNotCurrent(t *testing.T) {
+	f, e1 := reconfirmSetup(t)
+	f.confirmsTo(1, 0)
+	f.rekey(1)
+	f.deliver(1, 0, kHSInit) // under E1: it also confirms I's pending E1
+	f.deliver(0, 1, kHSResp)
+	f.deliver(1, 0, kHSFin)
+	f.deliver(0, 1, kConfirm)
+	if bytes.Equal(f.cur(1), e1) || f.p(1).Pending != nil {
+		f.dump()
+		t.Fatal("setup: R's current epoch is still E1")
+	}
+	f.lose(1, 0, kAny)
+	f.advance(2 * ConfirmResend)
+	f.tick(1)
+	if n := len(f.confirmsTo(1, 0)); n != 0 {
+		t.Fatalf("%d hs.confirm after E1 stopped being current", n)
 	}
 }

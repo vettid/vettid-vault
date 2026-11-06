@@ -924,11 +924,13 @@ func (q *Party) tableBInit(r *PeerRec, m *RMsg, pos Pos) dec {
 }
 
 // ctxOtherwiseAccepted: a reconnect naming ctx would be accepted if Q's
-// own reconnect were not pending, as the vault judges it
-// (refusedReconnectLinks in vault/handshakes.go, classifyCtx086 with the
-// pending reconnect set aside): the current epoch, the confirmed epoch,
-// or an epoch abandoned while pending until a newer one is confirmed (not
-// one K9 ended); not an epoch Fork by ctx would take as evidence (N2).
+// own reconnect were not pending, and the ctx is not fork evidence, as
+// vettid-vault a00cad4 judges it (refusedReconnectLinks: classifyCtx086
+// with the pending reconnect set aside and the links as reached): the
+// current epoch, the confirmed epoch, or an epoch abandoned while pending
+// until a newer one is confirmed (not one K9 ended). Any other ctx (an
+// older epoch, fork evidence or not; the model has no services, so no
+// history window) is refused anyway, and nothing is followed.
 func (q *Party) ctxOtherwiseAccepted(r *PeerRec, ctx int) bool {
 	if (r.Cur != 0 && ctx == r.Cur) || (r.ConfID != 0 && ctx == r.ConfID) {
 		return true
@@ -936,56 +938,60 @@ func (q *Party) ctxOtherwiseAccepted(r *PeerRec, ctx int) bool {
 	if ep := r.epoch(ctx); ep != nil && ep.Ended {
 		return false
 	}
-	if slices.Contains(r.AbanIDs, ctx) {
-		return true
-	}
-	if ep := r.epoch(ctx); ep != nil && !ep.Destroyed && !ep.Pending && q.forkEpoch(r, ctx) {
-		// N2: a ctx that is fork evidence is not "otherwise accepted": no
-		// link is followed. (vettid-vault 8647aa6 still follows here:
-		// classifyCtx086 with reached nil returns the epoch with forkEp.)
-		q.w.stat("M1: a refused reconnect's ctx is fork evidence: links not followed")
-		return false
-	}
-	return false
+	return slices.Contains(r.AbanIDs, ctx)
 }
 
-// refusedReconnectLinks: (0.88.2, vettid.org branch vm-0.88.2 at 3037682,
-// §6.6 "The links of a refused reconnect"; mirrors vault/handshakes.go
-// refusedReconnectLinks at vettid-vault 8647aa6) a reconnect refused only
-// because Q's own reconnect with P is pending (from Q's hs.fin until that
-// epoch is confirmed or abandoned), whose ctx would otherwise be accepted,
-// still has its links followed in the refusing write: the whole chain must
-// resolve from the stored ik to from.ik (the links Q has not followed yet;
-// rule C checked them at step 3), and if any link is one Table B would
-// refuse (its new ik an ancestor, rejected, or an ik the chain left
-// behind; its old ik rejected) none is followed. They are followed as an
-// identity.rotate's would be: K4 with this hs.init as position x, strict
-// F1 with E the epoch the ctx names, H5 with K2's pending epoch at a link
-// (demoted from the start). Restarts: only Q's own pending reconnect,
-// which the link abandons (N1, H5's restart); no K5 or K7 reconnect beside
-// it. Nothing is answered; neither R29-K9 nor Fork by ctx is run.
+// refusedReconnectLinks: (0.88.2, §6.6 "The links of a refused
+// reconnect"; mirrors vault/handshakes.go refusedReconnectLinks at
+// vettid-vault a00cad4) a reconnect Q refuses only because its own
+// reconnect with P is pending, whose ctx would otherwise be accepted
+// (ctxOtherwiseAccepted), still has its links followed in the refusing
+// write:
+//   - the chain resolves from the stored ik to from.ik, from.kem the last
+//     new_kem; the links are those Q has not followed;
+//   - all or nothing: none is followed if a link's new ik is an ancestor
+//     or rejected, its old ik rejected, or the chain revisits an ik it
+//     left (the stored ik included);
+//   - the follow, with no restarts inside: "Pending epochs at a link"
+//     (K2: Q's pending epoch whose sig_R a link's old ik or an ancestor of
+//     it made is abandoned, demoted from the start), then K4 by position
+//     (this hs.init as x), then strict F1 with E the ctx's epoch, then H5;
+//   - afterwards, if Q's pending epoch is gone and the pair is active, Q
+//     starts one reconnect (naming its current epoch, or after a demotion
+//     as K5 says; the usual guards). Nothing else starts; nothing is
+//     answered; neither R29-K9 nor Fork by ctx is run.
 func (q *Party) refusedReconnectLinks(r *PeerRec, m *RMsg, pos Pos, cell string) dec {
 	M := m.P
 	no := refuse("reconnect_refused", cell+":ctx")
-	if !q.newSpec() || r.Device || len(M.Rot) == 0 {
+	if !q.newSpec() || r.Device || len(M.Rot) == 0 || r.Pend == nil || !r.Pend.Reconnect {
 		return no
 	}
 	app, ok := r.resolve(M.Rot)
-	if !ok || len(app) == 0 || app[len(app)-1].New != M.FromIK {
+	if !ok || len(app) == 0 || app[len(app)-1].New != M.FromIK || app[len(app)-1].KEM != M.FromKEM {
 		return no
 	}
 	before := []Key{r.IK}
 	for _, l := range app {
-		bad := r.isAncestor(l.New) || r.isRejected(l.New) || r.isRejected(l.Old) || slices.Contains(before, l.New)
-		if bad {
+		if r.isAncestor(l.New) || r.isRejected(l.New) || r.isRejected(l.Old) || slices.Contains(before, l.New) {
 			q.w.hit("X5:refused-links-none")
 			return no // all or nothing
 		}
 		before = append(before, l.New)
 	}
 	q.w.hit("X5:refused-links-followed")
+	// K2 first: the pending epoch whose sig_R a link's old ik (or an
+	// ancestor of it) made
+	if pe := r.Pend; pe != nil && slices.ContainsFunc(app, func(l IKLink) bool { return r.signedBy(pe.Signer, l.Old) }) {
+		id := pe.ID
+		q.w.hit("K2:pending-abandoned-at-link")
+		q.abandonPending(r, "H5: signer superseded", false)
+		if ep := r.epoch(id); ep != nil {
+			ep.AbanByLink = true
+			ep.Demoted, ep.DemotedAt = true, Pos{Box: -1}
+		}
+	}
 	pre := r.Cur
-	if q.followIK(r, app, pos, false) {
+	if q.followIK(r, app, pos, false) { // K4 by position, no K5 restart
 		return dec{"suspend", "fork", cell + ":refused-links:K4-flag"}
 	}
 	under := *M
@@ -993,8 +999,38 @@ func (q *Party) refusedReconnectLinks(r *PeerRec, m *RMsg, pos Pos, cell string)
 	if q.f1DemoteRestart(r, &under, app, pos, pre, false) {
 		return dec{"suspend", "fork", cell + ":refused-links:K7-flag"}
 	}
-	q.h5(r, 0) // K2 abandons Q's own pending reconnect and restarts it (N1); no K9
+	q.h5NoRestart(r)
+	if r.Pend == nil && r.Status == stActive {
+		q.w.hit("X5:refused-links-restart")
+		q.w.nextOrigin = "refused reconnect's links: own reconnect again"
+		q.startHS(r, true)
+	}
 	return refuse("reconnect_refused", cell+":ctx:links-followed")
+}
+
+// h5NoRestart: H5 without starting anything (a refused reconnect's links):
+// an open handshake of Q's pinned to a superseded ik is abandoned, a
+// pending epoch signed by one is abandoned (demoted from the start), and
+// answers pinned to one are dropped.
+func (q *Party) h5NoRestart(r *PeerRec) {
+	q.w.stat("H5")
+	if o := r.Own; o != nil && r.superseded(o.PeerIK, nil) {
+		q.abandonOwn(r)
+	}
+	if pe := r.Pend; pe != nil && r.superseded(pe.Signer, nil) {
+		id := pe.ID
+		q.w.hit("K2:pending-abandoned-at-link")
+		q.abandonPending(r, "H5: signer superseded", false)
+		if ep := r.epoch(id); ep != nil {
+			ep.AbanByLink = true
+			ep.Demoted, ep.DemotedAt = true, Pos{Box: -1}
+		}
+	}
+	for _, a := range slices.Clone(r.Ans) {
+		if !a.Fork && r.superseded(a.PeerIK, a.Links) {
+			q.dropAnswer(r, a.ID)
+		}
+	}
 }
 
 // answerInit: the answer to an accepted hs.init (hs.resp queued, the
@@ -1490,14 +1526,15 @@ func (q *Party) f1DemoteRestart(r *PeerRec, M *Msg, app []IKLink, x Pos, pre int
 		q.w.audits[pairKey(q.ID, r.ID)]++
 		q.w.stat("A:F1-demoted")
 		q.w.logf("%s: strict F1 for %s: %d epoch(s) after E%d DEMOTED; reconnect naming E%d", q.Name, q.w.party(r.ID).Name, len(set), M.Epoch, M.Epoch)
-		r.Cur, r.DemName = 0, M.Epoch
 		if !restart {
+			r.Cur = 0 // no K7 reconnect naming E here: a later reconnect names as K5 says
 			q.holdFor(r)
 			if o := r.Own; o != nil && !o.Reconnect {
 				q.abandonOwn(r)
 			}
 			return false
 		}
+		r.Cur, r.DemName = 0, M.Epoch
 		q.afterDemotion(r, "K7 reconnect (strict F1)")
 		return false
 	}

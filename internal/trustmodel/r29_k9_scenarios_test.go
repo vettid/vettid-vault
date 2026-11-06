@@ -452,17 +452,16 @@ func TestR29K9SignerAncestryOfTheLink(t *testing.T) {
 }
 
 // Mirrors vettid-vault TestR29RefusedReconnectLinksFollowed
-// (vault/r29_review4_test.go): the same shape and outcome. Q reconnects to
-// P; P answers; Q holds the reconnect pending (sig_R by P's ik a) and its
-// hs.fin is lost. P rotates a->b (S5 drops its answer); its
+// (vault/r29_review4_test.go at a00cad4): the same shape and outcome. Q
+// reconnects to P; P answers; Q holds the reconnect pending (sig_R by P's
+// ik a) and its hs.fin is lost. P rotates a->b (S5 drops its answer); its
 // identity.rotate and restarted rekey do not reach Q. P reconnects,
 // carrying a->b; Q refuses it (its own reconnect is pending) but follows
 // the link in the same write: K2 abandons Q's pending epoch (signed by a),
-// nothing is answered, K9 judges nothing. P's next reconnect is accepted
-// and the pair converges. One difference, by the coordinator's N1: here Q
-// restarts its own reconnect that the link ended (H5); the vault test at
-// 8647aa6 asserts nothing restarts (noLinkRestart). Off
-// (World.noRefusedLinks): Q never learns P's ik and both end stale.
+// nothing is answered, K9 judges nothing, and Q starts its own reconnect
+// again under P's new ik, and nothing else (no rekey). The pair converges
+// through it. Off (World.noRefusedLinks): Q never learns P's ik and both
+// end stale.
 func TestR29RefusedReconnectLinks(t *testing.T) {
 	bothWays(t, func(t *testing.T, off bool) {
 		s := newScen(t, 2)
@@ -509,8 +508,17 @@ func TestR29RefusedReconnectLinks(t *testing.T) {
 					t.Fatalf("K9 judged at a refused reconnect")
 				}
 			}
-			if rq.Own == nil || !rq.Own.Reconnect {
-				t.Fatalf("N1: Q did not restart its own reconnect the link ended")
+			if o := rq.Own; o == nil || !o.Reconnect || o.PeerIK != P.st.IK || s.w.stats["R29 X5:refused-links-restart"] != 1 {
+				t.Fatalf("Q's own reconnect, ended by the links, was not started again (once) under P's new ik\n  %s", s.trace())
+			}
+		}
+		if !off {
+			// converges through Q's restarted reconnect, P not trying again
+			s.dropAt(Q, KInit)
+			s.run(4, P, Q)
+			rq, rp = Q.st.peer(P.ID), P.st.peer(Q.ID)
+			if rq.Cur == 0 || rq.Cur != rp.Cur || rq.Pend != nil || rp.Pend != nil {
+				t.Fatalf("the pair did not converge through Q's restarted reconnect: Q E%d, P E%d\n  %s", rq.Cur, rp.Cur, s.trace())
 			}
 		}
 		for d := 0; d < 50; d++ {
@@ -533,7 +541,7 @@ func TestR29RefusedReconnectLinks(t *testing.T) {
 }
 
 // Mirrors vettid-vault TestR29RefusedReconnectLinksAllOrNothing
-// (vault/r29_review4_test.go): Q's own reconnect pending; P rotates a->b
+// (vault/r29_review4_test.go at a00cad4): Q's own reconnect pending; P rotates a->b
 // and its identity.rotate does not reach Q; a reconnect carrying a->b and
 // then b->a (back to an ik left behind, an ik rollback) is refused, and
 // none of its links is followed: Q's chain and pending epoch are unchanged.
@@ -568,5 +576,48 @@ func TestR29RefusedReconnectLinksAllOrNothing(t *testing.T) {
 	}
 	if len(rq.Chain) != chain || rq.Pend == nil || rq.Pend.ID != pend || s.w.stats["R29 X5:refused-links-followed"] != 0 {
 		t.Fatalf("a link of a refused reconnect was followed although another would be refused\n  %s", s.trace())
+	}
+}
+
+// Mirrors vettid-vault TestR29RefusedReconnectLinksNotForForkCtx
+// (vault/r29_review4_test.go at a00cad4): a refused reconnect whose ctx
+// would not otherwise be accepted (there, Fork-by-ctx evidence: an epoch
+// older than the confirmed one, signed by an ancestor of the ik reached)
+// has nothing followed. Q has E1 confirmed after E0 and its own reconnect
+// pending; a reconnect carrying P's new link and naming E0 is refused and
+// Q's ik and pending epoch are unchanged.
+func TestR29RefusedReconnectLinksNotForForkCtx(t *testing.T) {
+	s := newScen(t, 2)
+	s.w.relayRot = false
+	P, Q := s.p(0), s.p(1)
+	rq := Q.st.peer(P.ID)
+	e0 := rq.Cur
+	s.do(Q, func() { Q.startHS(rq, false); Q.write(); Q.flush() })
+	s.run(3, P, Q) // E1 confirmed at both
+	rq = Q.st.peer(P.ID)
+	if rq.Cur == e0 || rq.ConfID == e0 {
+		t.Fatalf("setup: no newer confirmed epoch\n  %s", s.trace())
+	}
+	s.do(Q, func() { Q.startHS(rq, true); Q.write(); Q.flush() })
+	s.run(1, P)
+	s.run(1, Q)
+	rq = Q.st.peer(P.ID)
+	if rq.Pend == nil || !rq.Pend.Reconnect {
+		t.Fatalf("setup: Q's reconnect not pending\n  %s", s.trace())
+	}
+	pend, ik := rq.Pend.ID, rq.IK
+	s.dropAt(P, KFin)
+	s.rotate(P, pathCred)
+	s.dropAt(Q, KIdRot)
+	s.dropAt(Q, KInit)
+	pr := P.st.peer(Q.ID)
+	s.inject(P, P, Q, Msg{Kind: KInit, Reconnect: true, HS: s.w.id(), Ctx: e0, FromIK: P.st.IK, FromKEM: P.st.KEM, FromRelay: pr.KeyFor, Rot: slices.Clone(P.st.Chain)})
+	s.run(1, Q)
+	rq = Q.st.peer(P.ID)
+	if rq.IK != ik || rq.Pend == nil || rq.Pend.ID != pend || s.w.stats["R29 X5:refused-links-followed"] != 0 {
+		t.Fatalf("the links of a reconnect whose ctx would not otherwise be accepted were followed\n  %s", s.trace())
+	}
+	if rq.Status != stActive {
+		t.Fatalf("refused, it suspended (status %d)", rq.Status)
 	}
 }

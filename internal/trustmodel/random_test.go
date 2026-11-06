@@ -179,6 +179,19 @@ func genRun(rs uint64, steps int) (Config, []Action) {
 	for j := range acts {
 		acts[j] = randomAction(rng)
 	}
+	if os.Getenv("TRUSTMODEL_ROTBURST") != "" {
+		// measurement variant: each vault rotates 4 to 6 times in quick
+		// succession at the start, its peers collecting in between
+		var burst []Action
+		for v := 0; v < cfg.Vaults; v++ {
+			for k := 4 + rng.IntN(3); k > 0; k-- {
+				burst = append(burst, Action{Op: opRotate, A: v, B: rng.IntN(64), N: rng.IntN(64), Seed: rng.Uint64()},
+					Action{Op: opCollect, A: rng.IntN(64), B: rng.IntN(64), N: rng.IntN(64), Seed: rng.Uint64()})
+			}
+		}
+		rng.Shuffle(len(burst), func(i, j int) { burst[i], burst[j] = burst[j], burst[i] })
+		acts = append(burst, acts...)
+	}
 	return cfg, acts
 }
 

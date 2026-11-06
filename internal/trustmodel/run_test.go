@@ -831,7 +831,9 @@ func (w *World) checkEnd(liveness bool) {
 			w.exempt("I1-loss", w.deadRes[pairKey(pr[0], pr[1])])
 			continue
 		}
-		if w.fDue[pairKey(pr[0], pr[1])] {
+		if w.fDue[pairKey(pr[0], pr[1])] || w.probeF[id] {
+			// F applies now, or applied when the message was sent (under
+			// the abandoned epoch, whose keys at the vault end after 16 days)
 			w.exempt("I1-loss", resDeviceF)
 			continue
 		}

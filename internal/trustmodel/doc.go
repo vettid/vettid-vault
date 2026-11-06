@@ -43,7 +43,9 @@
 // shrink and trace one run seed, or list the seeds of a violation class or
 // of "stat:<name>"), TRUSTMODEL_RULEEFIN=keep (rule E keeps an unsent
 // hs.fin, for attribution), TRUSTMODEL_EXTRA_DAY (one more rekey before
-// I1), TRUSTMODEL_DEBUG (report malformed updates as violations).
+// I1), TRUSTMODEL_ROTBURST (each vault rotates 4 to 6 times at the start),
+// TRUSTMODEL_NOM1 (0.88.2's links of a refused reconnect off, for
+// attribution), TRUSTMODEL_DEBUG (report malformed updates as violations).
 //
 // Files: relay (relay model), state (messages, state, ik and relay-key
 // states), world (parties, writes, deposits, collecting), accept (the

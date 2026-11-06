@@ -38,6 +38,14 @@ func reconnectOf(t *testing.T, m *Manager, p *Peer) *OutgoingHS {
 // checkAbandoned checks that the reconnect ogID is gone, its hs.init is not
 // to be sent, and each token it minted has a revoke queued.
 func checkAbandoned(t *testing.T, m *Manager, ogID, initOutbox string, issued []IssuedToken) {
+	checkAbandonedAt(t, m, ogID, initOutbox, issued, true)
+}
+
+// checkAbandonedAt is checkAbandoned; atRestore: the abandonment is the
+// restore's (audited handshake_not_restored), not the rotation's own (S5,
+// 0.86.0, which abandons the vault's open reconnects in the rotation's
+// write).
+func checkAbandonedAt(t *testing.T, m *Manager, ogID, initOutbox string, issued []IssuedToken, atRestore bool, relays ...*stubRelay) {
 	t.Helper()
 	if m.st.Outgoing[ogID] != nil || m.outgoing[ogID] != nil {
 		t.Fatal("the reconnect under the old identity key was restored")
@@ -54,11 +62,25 @@ func checkAbandoned(t *testing.T, m *Manager, ogID, initOutbox string, issued []
 				revoked = true
 			}
 		}
+		if sr, ok := m.relay.(*stubRelay); ok {
+			relays = append(relays, sr)
+		}
+		for _, sr := range relays {
+			if atRestore {
+				break
+			}
+			// S5: revoked at the rotation, perhaps sent already.
+			sr.mu.Lock()
+			for _, r := range sr.revoked {
+				revoked = revoked || r == "jti:"+it.JTI
+			}
+			sr.mu.Unlock()
+		}
 		if !revoked {
 			t.Fatalf("token %s (%s) it minted is not revoked", it.JTI, it.Kind)
 		}
 	}
-	audited := false
+	audited := !atRestore
 	for _, a := range m.st.Audit {
 		audited = audited || a.Event == "handshake_not_restored"
 	}
@@ -95,7 +117,10 @@ func TestRotatedReconnectAbandonedAtUnlock(t *testing.T) {
 	}
 	defer m.Crash()
 	m.mu.Lock()
-	checkAbandoned(t, m, ogID, initOutbox, issued)
+	// 0.86.0 (S5): the rotation's own write abandoned the reconnect begun
+	// under the old ik (and started one under the new ik), so the restore
+	// finds nothing to clean up.
+	checkAbandonedAt(t, m, ogID, initOutbox, issued, false)
 	m.mu.Unlock()
 	// A reconnect's cleanup tells the devices nothing: the connection
 	// stays (only a new connection's devices hear that it failed).
@@ -234,8 +259,10 @@ func TestRotatedConnectionRequestAbandonedAtUnlock(t *testing.T) {
 func TestRotatedReconnectAbandonedAtRecoveryOpen(t *testing.T) {
 	var ogID, initOutbox string
 	var issued []IssuedToken
+	var before *stubRelay
 	f := newOpenFixtureWith(t, func(f *openFixture) {
 		m := f.m
+		before, _ = m.relay.(*stubRelay)
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		now := m.now()
@@ -263,5 +290,5 @@ func TestRotatedReconnectAbandonedAtRecoveryOpen(t *testing.T) {
 	defer m.Crash()
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	checkAbandoned(t, m, ogID, initOutbox, issued)
+	checkAbandonedAt(t, m, ogID, initOutbox, issued, false, before) // S5 (0.86.0): abandoned in the rotation's write
 }

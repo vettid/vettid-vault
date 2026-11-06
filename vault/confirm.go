@@ -500,20 +500,28 @@ func (m *Manager) rekeyBlocked(p *Peer) bool {
 	return p.Pending != nil || m.answerAwaitingFin(p)
 }
 
-// crossingRekeyLoses: crossing rekeys, the lower th1 wins, against the
-// vault's own rekey only (as release 28; stage e extends it to every
-// purpose).
+// crossingRekeyLoses applies the lower-th1 rule to a peer's rekey hs.init
+// crossing the vault's own open handshakes with p (§6.5; 0.86.0: any two
+// crossing handshakes, whatever their purposes). Against an own rekey with
+// the lower th1 the peer's rekey loses (it is not answered, as before);
+// an own handshake with the higher th1 is abandoned; an own reconnect with
+// the lower th1 is kept and the rekey answered too (the answer is dropped
+// when the reconnect completes, as between two reconnects of persons).
 func (m *Manager) crossingRekeyLoses(p *Peer, theirs [32]byte, now time.Time) bool {
 	for id, og := range m.st.Outgoing {
-		if og.New != nil || og.PeerID != p.ID || og.Replaced || og.Purpose != handshake.PurposeRekey || len(og.Th1) != 32 {
+		if og.New != nil || og.PeerID != p.ID || og.Replaced || len(og.Th1) != 32 {
 			continue
 		}
 		var ours [32]byte
 		copy(ours[:], og.Th1)
 		if handshake.SimultaneousRekeyWinner(ours, theirs) {
-			return true
+			if og.Purpose == handshake.PurposeRekey {
+				return true
+			}
+			continue
 		}
-		m.dropOutgoing(id)
+		m.audit(now, "crossing_abandoned", p.ID)
+		m.abandonOutgoing(id, now)
 	}
 	return false
 }

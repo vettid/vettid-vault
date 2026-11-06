@@ -360,6 +360,9 @@ func (m *Manager) f1Demote(p *Peer, app []*handshake.Rotation, msgEpoch []byte, 
 				e.Demoted, e.DemotedAt, e.DemotedMsg = true, time.Time{}, ""
 			}
 		}
+		// Audited as a fork sign (ref epoch), without a feed item or a
+		// suspension, as a demotion by position is.
+		m.record(Activity{Kind: "connection.fork_suspected", ConnectionID: connID(p), DeviceID: devID(p), Ref: "epoch", Audit: true}, now)
 		m.note(now, "epoch_demoted_f1", p.ID)
 		kr := m.sessions[p.ID]
 		if kr != nil {

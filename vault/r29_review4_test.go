@@ -310,3 +310,13 @@ func TestR29ReconnectNamingKeepsPendingReconnect(t *testing.T) {
 		t.Fatal("a reconnect naming an epoch abandoned the pending reconnect")
 	}
 }
+
+// L3: a strict F1 demotion is audited connection.fork_suspected (ref
+// epoch) with no feed item and no suspension.
+func TestR29StrictF1Audited(t *testing.T) {
+	f := demoted(t, nil)
+	if !f.activity(0, "connection.fork_suspected", "epoch") || f.forkFeed(0) || f.p(0).suspended() {
+		f.dump()
+		t.Fatal("a strict F1 demotion was not audited fork_suspected (epoch) without a feed item")
+	}
+}

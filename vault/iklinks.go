@@ -379,6 +379,11 @@ func (m *Manager) sealHeld(p *Peer) {
 // epoch is demoted: at the third the connection goes stale (with
 // connection.stale and its feed item), as for rules E and L (the lead's
 // call). Each expired one's tokens were revoked already.
+//
+// 0.86.5: a try fails when its handshake expires or its pending epoch is
+// abandoned (B, H5, S5, crossing, link); both count. A refusal ends it
+// stale at once (handleResp). Three tries stay within the reconnect
+// token's quota (4 deposits).
 func (m *Manager) demotedReconnectExpired(p *Peer, now time.Time) {
 	e := p.epochMeta(p.LastEpochID)
 	if e == nil || !e.Demoted {
@@ -410,14 +415,28 @@ func (m *Manager) tickDemoted(p *Peer, now time.Time) {
 // nothing more is sent in it, and a new epoch is made (a reconnect naming
 // the newest epoch not demoted; a device: none can be made from it, so the
 // device pairs again, as §6.7).
+//
+// 0.86.5 (vettid.org #548): the epoch named is the newest of P's that has
+// been current here and is neither demoted nor destroyed (an abandoned
+// pending epoch never was current); with none, the connection goes stale.
 func (m *Manager) restartAfterDemotion(p *Peer, now time.Time) {
+	if p.Kind != KindConnection {
+		return
+	}
 	for i := len(p.Epochs) - 1; i >= 0; i-- {
 		e := p.Epochs[i]
-		if !e.Demoted && !e.Pending && !e.Destroyed && p.Kind == KindConnection {
+		if !e.Demoted && !e.Pending && !e.Abandoned && !e.Destroyed {
 			m.reconnectNaming(p, e.ID, "demoted", now)
 			return
 		}
 	}
+	m.markStale(p, now)
+}
+
+// currentDemoted reports whether p's current epoch is demoted.
+func (p *Peer) currentDemoted() bool {
+	e := p.epochMeta(p.LastEpochID)
+	return e != nil && e.Demoted
 }
 
 // h5 (§3.4.1 H5, 0.86.0): whenever the current ik for p changes, the

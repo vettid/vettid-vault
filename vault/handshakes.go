@@ -1080,6 +1080,9 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 					// A rule-E or rule-L reconnect refused: the connection
 					// goes stale (§6.3.1, §3.4.1 rule L).
 					m.markStale(sp, now)
+				case og.Purpose == handshake.PurposeReconnect && sp.currentDemoted():
+					// 0.86.5: the reconnect after a demotion refused: stale.
+					m.markStale(sp, now)
 				case og.Purpose == handshake.PurposeRekey:
 					// Rule L: an hs.resp aborted for an ik mismatch.
 					m.ruleL(sp, now)
@@ -1272,6 +1275,14 @@ func (m *Manager) startRekey(p *Peer, now time.Time) {
 // startReconnect initiates a reconnect to connection p with its reconnect
 // token (§6.6), naming its current epoch.
 func (m *Manager) startReconnect(p *Peer, now time.Time) {
+	if p.currentDemoted() {
+		// Never naming a demoted epoch (0.86.5): the reconnect after a
+		// demotion names the newest usable one, or the connection is stale.
+		if !m.hasOutgoing(p.ID, handshake.PurposeReconnect) && p.Pending == nil {
+			m.restartAfterDemotion(p, now)
+		}
+		return
+	}
 	m.startReconnectCtx(p, p.LastEpochID, now)
 }
 

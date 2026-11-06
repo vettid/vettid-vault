@@ -748,3 +748,79 @@ func TestR29DemotedReconnectsBoundedThenStale(t *testing.T) {
 		t.Fatal("a fourth reconnect started")
 	}
 }
+
+// openReconnect returns side s's open reconnect, or nil.
+func (f *r29Fx) openReconnect(s int) *OutgoingHS {
+	for _, og := range f.m(s).st.Outgoing {
+		if og.New == nil && og.PeerID == f.id[s] && og.Purpose == handshake.PurposeReconnect {
+			return og
+		}
+	}
+	return nil
+}
+
+// 0.86.5 (a): while the reconnect after a demotion has its epoch pending
+// (awaiting confirmation), no second reconnect starts, even past the
+// handshake's own lifetime; and it names no demoted epoch.
+func TestR29DemotedNoSecondReconnectWhilePending(t *testing.T) {
+	f := demoted(t, nil)
+	og := f.openReconnect(0)
+	if og == nil {
+		t.Fatal("setup: no reconnect")
+	}
+	if e := f.p(0).epochMeta(og.Named); e == nil || e.Demoted || e.Abandoned || e.Pending || e.Destroyed {
+		t.Fatal("the reconnect names an epoch it must not")
+	}
+	f.deliver(0, 1, kHSInit)
+	f.deliver(1, 0, kHSResp)
+	if f.p(0).Pending == nil {
+		t.Fatal("setup: no pending reconnect epoch")
+	}
+	f.lose(0, 1, kHSFin)
+	f.advance(HandshakeTTL + 24*time.Hour) // within B
+	f.tick(0)
+	if f.openReconnect(0) != nil || f.p(0).Pending == nil {
+		t.Fatal("a second reconnect started while the first's epoch was pending")
+	}
+}
+
+// 0.86.5 (b): a try fails when its handshake expires or its pending
+// epoch is abandoned; both count, and the third makes the connection
+// stale, with no fourth try.
+func TestR29DemotedExpiryAndAbandonCountAsTries(t *testing.T) {
+	f := demoted(t, nil)
+	// try 1: expires unanswered
+	f.lose(0, 1, kAny)
+	f.advance(HandshakeTTL + time.Hour)
+	f.tick(0)
+	if f.p(0).State == PeerStale || f.openReconnect(0) == nil {
+		t.Fatal("after one expiry: stale, or no second try")
+	}
+	// tries 2 and 3: answered, pending, the hs.fin lost; B abandons them
+	for try := 2; try <= 3; try++ {
+		f.deliver(0, 1, kHSInit)
+		f.deliver(1, 0, kHSResp)
+		if f.p(0).Pending == nil {
+			f.dump()
+			t.Fatalf("try %d: not pending", try)
+		}
+		f.lose(0, 1, kAny)
+		f.lose(1, 0, kAny)
+		f.advance(PendingLife + time.Hour)
+		f.tick(0)
+		f.tick(0)
+		if f.p(0).Pending != nil {
+			t.Fatalf("try %d: B did not abandon", try)
+		}
+		if try < 3 && (f.p(0).State == PeerStale || f.openReconnect(0) == nil) {
+			t.Fatalf("try %d: stale too early, or no next try", try)
+		}
+	}
+	if f.p(0).State != PeerStale || !f.sink[0].has("connection.stale") {
+		f.dump()
+		t.Fatal("the third failed try (an abandon) did not make it stale")
+	}
+	if f.openReconnect(0) != nil {
+		t.Fatal("a fourth try started")
+	}
+}

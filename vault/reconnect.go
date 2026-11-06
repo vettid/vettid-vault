@@ -21,14 +21,17 @@ func noReconnectToken(p *Peer, now time.Time) bool {
 // its unfinished rekey answers to p are dropped (the peer did not finish
 // them, and they would block it), and its pending epoch is abandoned.
 func (m *Manager) reconnectNaming(p *Peer, ctx []byte, why string, now time.Time) bool {
-	if p.Kind == KindConnection && p.State == PeerActive && !p.suspended() && noReconnectToken(p, now) {
+	if p.Kind != KindConnection || p.State != PeerActive || p.suspended() || m.hasOutgoing(p.ID, handshake.PurposeReconnect) ||
+		p.Pending != nil && p.Pending.Purpose == handshake.PurposeReconnect {
+		// One reconnect at a time (§3.4.1 "After a demotion"): none starts
+		// while the vault's own is open or pending, and none is tried.
+		return false
+	}
+	if noReconnectToken(p, now) {
 		m.markStale(p, now) // §3.4.1 "The reconnect bound": no reconnect token
 		return false
 	}
-	if p.Kind != KindConnection || p.State != PeerActive || p.suspended() || m.hasOutgoing(p.ID, handshake.PurposeReconnect) ||
-		p.Pending != nil && p.Pending.Purpose == handshake.PurposeReconnect || !m.canReconnect(p, now) {
-		// One reconnect at a time (§3.4.1 "After a demotion"): none starts
-		// while the vault's own is open or pending.
+	if !m.canReconnect(p, now) {
 		return false // nothing is abandoned for a reconnect that cannot start
 	}
 	for id, og := range m.st.Outgoing {

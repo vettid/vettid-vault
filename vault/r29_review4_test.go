@@ -415,3 +415,24 @@ func TestR29FinLinksSuspendNoEstablish(t *testing.T) {
 		t.Fatal("the hs.fin established its epoch on a connection its links suspended")
 	}
 }
+
+// Step 6 review L1: with the vault's own reconnect pending, a reconnect
+// naming an epoch is not tried, so its lack of a reconnect token does not
+// make the connection stale.
+func TestR29ReconnectNamingPendingBeforeTokenCheck(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	f.do(0, func(m *Manager, p *Peer) { m.startReconnect(p, f.clk) })
+	f.deliver(0, 1, kHSInit)
+	f.deliver(1, 0, kHSResp)
+	if f.p(0).Pending == nil {
+		t.Fatal("setup: no pending reconnect")
+	}
+	f.do(0, func(m *Manager, p *Peer) {
+		p.Reconnect.Token = ""
+		m.reconnectNaming(p, p.LastEpochID, "f1", f.clk)
+	})
+	if f.p(0).State == PeerStale || f.p(0).Pending == nil {
+		t.Fatal("a reconnect not tried (one pending) made the connection stale")
+	}
+}

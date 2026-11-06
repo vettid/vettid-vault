@@ -43,11 +43,8 @@ func TestRotateTwicePeerMissesFirst(t *testing.T) {
 		cfg  Config
 		must bool // must recover
 	}{
-		{"29<>29 option A", Config{}, true},
-		{"29<>29 R1", Config{Opt: optR1}, true},
-		{"29<>29 R2", Config{Opt: optR2}, true},
-		{"29 rotator, 28 follower", Config{Opt: optR1, Rel28: []bool{true, false}}, true}, // r8: the reconnect after a refused rekey
-		{"28<>28", Config{Rel28: []bool{true, true}}, false},
+		{"29<>29", Config{}, true},
+		{"29<>29 no relay rotation", Config{NoRelayRot: true}, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			ok, pik, qik, w := rotateTwiceMissFirst(t, c.cfg)
@@ -55,34 +52,10 @@ func TestRotateTwicePeerMissesFirst(t *testing.T) {
 			for _, v := range w.viol {
 				vs = append(vs, v.Inv+": "+v.Detail)
 			}
-			t.Logf("%s: recovered %v (P holds %d for Q, Q at %d); bad_rotation %d, rekey refused %d; violations %v",
-				c.name, ok, pik, qik, w.stats["cell r28:identity.rotate:bad_rotation"], w.stats["cell r28:hs.init:identity"], vs)
+			t.Logf("%s: recovered %v (P holds %d for Q, Q at %d); violations %v", c.name, ok, pik, qik, vs)
 			if c.must && (!ok || len(w.viol) > 0) {
 				t.Errorf("did not recover")
 			}
 		})
-	}
-}
-
-// TestOldCopyForkToward28StillCaught: Q (release 28) and an old copy of Q
-// each rotate from the same ik; P (release 29, R1, Q ungated) receives
-// both links. Rule C suspends whatever r8 changed for F3.
-func TestOldCopyForkToward28StillCaught(t *testing.T) {
-	w := setup(Config{Vaults: 2, Opt: optR1, Rel28: []bool{false, true}}, 1)
-	s := &scen{t, w}
-	P, Q := s.p(0), s.p(1)
-	w.makeCopy(Q)
-	C := w.P[len(w.P)-1]
-	s.do(C, C.unlock)
-	s.rotate(C, pathCred)
-	s.rotate(Q, pathCred)
-	for d := 0; d < 5; d++ {
-		s.drain(P)
-		s.tick(day)
-	}
-	r := P.st.peer(Q.ID)
-	t.Logf("P's view of Q: status %d (%s); ruleC identity %d", r.Status, r.Ref, w.stats["ruleC:identity"])
-	if r.Status != stSuspended || r.Ref != "identity.rotate_conflict" {
-		t.Errorf("the fork was not caught")
 	}
 }

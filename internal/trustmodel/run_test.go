@@ -12,22 +12,19 @@ import (
 // Setup, actions, quiescence, the invariants, shrinking.
 
 type Config struct {
-	Rel28    []bool // parties (by index) running release <= 28
-	Opt      int    // the release-29 option of the other parties (optFull: the whole draft)
-	Unseen   bool   // the hs_confirm gate is not yet open: no peer's features seen
-	Upgrade  bool   // every party starts on release 28 and upgrades during the run (opUpgrade)
-	Skew     bool   // each party's clock off by up to a day either way (the 2-day budget)
-	Gate     bool   // the Release A gate: §6.3.1 only toward peers that advertise it
-	OldRules bool   // f4a4d97 rules: no §6.3.1 (activation at hs.fin)
-	Vaults   int    // 2 or 3
-	Devices  bool   // one device per vault
-	P429     float64
-	PRefuse  float64
+	NoRelayRot bool // no relay-key rotation (the oracle config; release 29 builds none)
+	Skew       bool // each party's clock off by up to a day either way (the 2-day budget)
+	OldRules   bool // f4a4d97 rules: no §6.3.1 (activation at hs.fin)
+	Vaults     int  // 2 or 3
+	Devices    bool // one device per vault
+	P429       float64
+	PRefuse    float64
 }
 
 func setup(cfg Config, seed uint64) *World {
 	w := newWorld(seed)
 	w.optA = !cfg.OldRules
+	w.relayRot = !cfg.NoRelayRot
 	w.p429, w.pRef = 0, 0
 	mk := func(name string, dev bool) *Party {
 		p := &Party{ID: PID(len(w.P)), Name: name, Device: dev, w: w, collTo: map[Key]int64{}}
@@ -46,17 +43,9 @@ func setup(cfg Config, seed uint64) *World {
 			mk("D"+names[i], true)
 		}
 	}
-	w.gate = cfg.Gate
 	for _, p := range w.P {
-		p.Opt = cfg.Opt
 		if cfg.Skew {
 			p.Skew = int64(w.rng.IntN(int(2*day))) - day
-		}
-	}
-	for i, old := range cfg.Rel28 {
-		if i < len(w.P) && old {
-			w.P[i].Rel28 = true
-			w.P[i].Name += "(r28)"
 		}
 	}
 	connect := func(a, b *Party, dev bool) {
@@ -65,7 +54,7 @@ func setup(cfg Config, seed uint64) *World {
 		for _, x := range [][2]*Party{{a, b}, {b, a}} {
 			me, it := x[0], x[1]
 			me.st.Peers = append(me.st.Peers, PeerRec{ID: it.ID, Device: dev, IK: it.st.IK, KEM: it.st.KEM,
-				Relay: it.st.Relay, KeyFor: me.st.Relay, Cur: e, ConfID: e, PeerA: it.advertises() && !cfg.Unseen,
+				Relay: it.st.Relay, KeyFor: me.st.Relay, Cur: e, ConfID: e,
 				Epochs: []Epoch{{ID: e, Signer: it.st.IK, Own: me.st.IK, EstAt: w.Now}}})
 			w.hasEpoch[[2]int{int(me.ID), e}] = true
 		}
@@ -144,16 +133,15 @@ const (
 	opResolve
 	opRekey
 	opPeek
-	opUpgrade // upgrade mode only (weight 0): A is the party index
 	numOps
 )
 
 var opName = [...]string{"rotate", "rotate-both", "device-rotate", "send", "collect", "crash-at", "fail-write-at",
 	"lock", "unlock", "time", "snapshot", "copy-acts", "copy-forks", "copy-steals", "copy-deletes-mailbox",
-	"resolve", "rekey", "peek(lease)", "upgrade"}
+	"resolve", "rekey", "peek(lease)"}
 
 // weights of the random choice
-var opWeight = [...]int{6, 2, 2, 8, 14, 3, 3, 4, 6, 8, 3, 3, 1, 1, 1, 2, 3, 3, 0}
+var opWeight = [...]int{6, 2, 2, 8, 14, 3, 3, 4, 6, 8, 3, 3, 1, 1, 1, 2, 3, 3}
 
 type Action struct {
 	Op      Op
@@ -183,11 +171,6 @@ func (w *World) describeAction(a Action) string {
 		return fmt.Sprintf("time +%ds", jumps[a.N%len(jumps)])
 	case opCopyAct, opCopyFork, opCopySteal, opCopyDelete:
 		return fmt.Sprintf("%s %s", opName[a.Op], pick(w.copies(), a.A))
-	case opUpgrade:
-		if a.A < len(w.P) {
-			return "upgrade " + w.P[a.A].Name + " to release 29"
-		}
-		return "upgrade -"
 	case opCrash, opFail, opSnap:
 		return fmt.Sprintf("%s %s +%d", opName[a.Op], pick(w.real(), a.A), 1+a.N%3)
 	}
@@ -217,10 +200,6 @@ func (w *World) exec(a Action) {
 	real, vs, cs := w.real(), w.vaults(), w.copies()
 	p := real[a.A%len(real)]
 	switch a.Op {
-	case opUpgrade:
-		if a.A < len(w.P) && !w.P[a.A].Copy && w.P[a.A].Rel28 {
-			w.P[a.A].upgrade()
-		}
 	case opRotate:
 		v := vs[a.A%len(vs)]
 		if !v.Locked {
@@ -745,10 +724,7 @@ func (w *World) checkEnd(liveness bool) {
 		switch {
 		case strings.HasPrefix(ft, "unreadable"):
 			inv := "I1-loss"
-			switch ep := w.probeEpoch[id]; {
-			case w.reverted[ep]:
-				inv = "I1-loss/revert" // the revert's stated loss
-			case !w.hasEpoch[[2]int{int(pr[1]), ep}]:
+			if ep := w.probeEpoch[id]; !w.hasEpoch[[2]int{int(pr[1]), ep}] {
 				inv = "I1-loss/split" // under an epoch the receiver never activated
 			}
 			w.violate(inv, "a message %s->%s was silently unreadable (%s)", w.party(pr[0]).Name, w.party(pr[1]).Name, ft)
@@ -786,29 +762,9 @@ func runActions(cfg Config, seed uint64, acts []Action, verbose bool) *World {
 	w := setup(cfg, seed)
 	w.verbose = verbose
 	w.debugUnlinked = os.Getenv("TRUSTMODEL_DEBUG") != ""
-	switch os.Getenv("TRUSTMODEL_FIXB") { // F1 variants (default: strict, the lead's choice)
-	case "fixb": // fix B as in 9f1a0da
-		w.fixBStrict = false
-	case "window":
-		w.fixBStrict, w.f1Window = false, true
-	case "off": // no fix B (2da316e F1), for attribution
-		w.fixBStrict, w.fixBOff = false, true
-	}
-	w.featMode = os.Getenv("TRUSTMODEL_FEATMODE") // "" or always (the spec: every message), first, echo
-	if w.featMode == "" {
-		w.featMode = "always"
-	}
-	w.r28Spec = os.Getenv("TRUSTMODEL_R28") == "spec"
 	w.ruleEKeepFin = os.Getenv("TRUSTMODEL_RULEEFIN") == "keep"
-	w.f3Suspend28 = os.Getenv("TRUSTMODEL_F3UNGATED") == "suspend"
-	w.noRekeyRC = os.Getenv("TRUSTMODEL_REKEYRC") == "off"
-	w.noRCRetry = os.Getenv("TRUSTMODEL_RCRETRY") == "off"
-	w.r1Lite = os.Getenv("TRUSTMODEL_R1LITE") != ""
-	w.f3CtxMsg = os.Getenv("TRUSTMODEL_F3RCCTX") != "confirmed"
 	defer w.expoStats()
-	defer w.gateStats()
 	defer w.rcStats()
-	defer w.endStats()
 	for _, a := range acts {
 		w.exec(a)
 		w.monitor()

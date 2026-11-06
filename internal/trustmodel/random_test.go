@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"os"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -88,7 +87,6 @@ func TestRandom(t *testing.T) {
 		inv := w.viol[0].Inv
 		sig := inv + " " + classify(w.viol[0].Detail)
 		a.stats["violation "+sig]++
-		a.stats["pair "+w.viol[0].Pair+" | "+sig]++
 		if _, seen := a.found[sig]; seen || len(a.found) >= 40 {
 			continue
 		}
@@ -167,29 +165,12 @@ func report(t *testing.T, a *agg, seed uint64, runs int, el time.Duration) {
 func genRun(rs uint64, steps int) (Config, []Action) {
 	rng := rand.New(rand.NewPCG(rs, 3))
 	cfg := Config{Vaults: 2 + rng.IntN(2), Devices: rng.IntN(2) == 0, P429: 0.05, PRefuse: 0.01,
-		OldRules: os.Getenv("TRUSTMODEL_OLD") != "", Gate: os.Getenv("TRUSTMODEL_GATE") != "",
-		Opt: envInt("TRUSTMODEL_OPT", optFull), Unseen: os.Getenv("TRUSTMODEL_UNSEEN") != "",
+		OldRules: os.Getenv("TRUSTMODEL_OLD") != "", NoRelayRot: os.Getenv("TRUSTMODEL_RELAYROT") == "",
 		Skew: os.Getenv("TRUSTMODEL_NOSKEW") == ""}
-	if os.Getenv("TRUSTMODEL_ALL28") != "" { // every party on release 28: today's live behaviour
-		cfg.Rel28 = []bool{true, true, true, true, true, true}
-	} else if os.Getenv("TRUSTMODEL_MIXED") != "" { // release <= 28 parties, about half
-		cfg.Rel28 = make([]bool, 6)
-		for j := range cfg.Rel28 {
-			cfg.Rel28[j] = rng.IntN(2) == 0
-		}
-	}
 	n := 1 + rng.IntN(steps)
 	acts := make([]Action, n)
 	for j := range acts {
 		acts[j] = randomAction(rng)
-	}
-	if os.Getenv("TRUSTMODEL_UPGRADE") != "" { // all start on 28; each party upgrades at a random point
-		cfg.Upgrade = true
-		cfg.Rel28 = []bool{true, true, true, true, true, true}
-		for i := range cfg.Rel28 {
-			at := rng.IntN(len(acts) + 1)
-			acts = slices.Insert(acts, at, Action{Op: opUpgrade, A: i, Seed: rng.Uint64()})
-		}
 	}
 	return cfg, acts
 }

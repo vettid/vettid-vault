@@ -22,9 +22,9 @@ func (p *Party) rotate(path int) {
 	}
 	w.logf("%s: ROTATE (%s)", p.Name, pathName[path])
 	w.stat("rotate:" + pathName[path])
-	if p.Rel28 || p.Opt != optFull {
+	if !w.relayRot {
 		if path == pathDevice {
-			return // releases 28 and 29 rotate no relay key (the relay-key gate)
+			return // release 29 rotates no relay key (the oracle config)
 		}
 	} else if p.st.Pend != nil {
 		if p.st.Pend.Refused && path == pathCred {
@@ -51,23 +51,15 @@ func (p *Party) rotate(path int) {
 			}
 			p.enqueue(r.ID, Msg{Kind: KIdRot, Rot: []IKLink{l}}, nil)
 			// S5: abandon own rekeys and reconnects (and pending epochs, §6.3.1),
-			// start again after identity.rotate. Release 28: rekeys only
-			// (vault/core.go:747-757: dropRekey, startRekey).
-			if p.r28Code() {
-				if o := r.Own; o != nil && !o.Reconnect {
-					p.abandonOwn(r)
-				}
-				if r.Own == nil {
-					p.startHS(r, false)
-				}
-			} else if o := r.Own; o != nil {
+			// start again after identity.rotate.
+			if o := r.Own; o != nil {
 				rc := o.Reconnect
 				p.abandonOwn(r)
 				p.startHS(r, rc)
 			} else if r.Pend != nil {
 				p.abandonPending(r, "S5: own ik rotated", true)
 			}
-			if p.newSpec() && r.PeerA { // S5 answer drop only toward peers that advertise hs_confirm (lead item 1)
+			if p.newSpec() { // R29-K2: S5 drops every answer awaiting hs.fin, toward every peer
 				for len(r.Ans) > 0 {
 					p.dropAnswer(r, r.Ans[0].ID)
 					w.stat("A:S5-answer-dropped")
@@ -182,8 +174,8 @@ func (p *Party) startHS(r *PeerRec, reconnect bool) {
 	if r.Status != stActive || r.Own != nil || (reconnect && r.Device) || (p.w.optA && r.Pend != nil) {
 		return
 	}
-	if len(r.Ans) > 0 && !p.Rel28 {
-		return // S5 / §6.6: none while an answer of mine awaits hs.fin (release <= 28: not checked)
+	if len(r.Ans) > 0 {
+		return // S5 / §6.6: none while an answer of mine awaits hs.fin
 	}
 	ep := r.epoch(r.Cur)
 	if ep == nil || reconnect {
@@ -198,13 +190,9 @@ func (p *Party) startHS(r *PeerRec, reconnect bool) {
 	if ep == nil {
 		return
 	}
-	h := &HS{ID: w.id(), Reconnect: reconnect, Ctx: ep.ID, PeerIK: r.IK, OwnIK: p.st.IK, Started: w.Now, Relay: r.KeyFor,
-		InitHalf: p.initHalf(r)}
+	h := &HS{ID: w.id(), Reconnect: reconnect, Ctx: ep.ID, PeerIK: r.IK, OwnIK: p.st.IK, Started: w.Now, Relay: r.KeyFor}
 	m := Msg{Kind: KInit, HS: h.ID, Reconnect: reconnect, Ctx: ep.ID, FromIK: p.st.IK, FromKEM: p.st.KEM,
 		FromRelay: r.KeyFor, Rot: p.ownLinks(ep.Own)}
-	if p.r28Code() && !reconnect {
-		m.Rot = nil // release 28: a rekey carries no rotations (vault/handshakes.go:972)
-	}
 	var f func(*Entry)
 	if reconnect {
 		rt := r.reconnectTok(r.KeyFor, r.Relay, w.Now)
@@ -326,15 +314,8 @@ func (p *Party) tick() {
 			if r.Status != stActive {
 				continue
 			}
-			if o := r.Own; o != nil && p.r28Code() {
-				if w.Now-o.Started > r28HSLife { // vault/outbox.go:427: dropped, never stale
-					p.abandonOwn(r)
-					w.stat("r28:own-handshake-expired")
-				}
-			} else if o != nil {
-				if o.Reconnect && w.Now-o.Started > w.hsLifeFor(true) && p.ruleRCExpired(r, o) {
-					// r9: tried again
-				} else if o.Reconnect && w.Now-o.Started > w.hsLifeFor(true) {
+			if o := r.Own; o != nil {
+				if o.Reconnect && w.Now-o.Started > w.hsLifeFor(true) {
 					p.markStale(r, "reconnect failed")
 					p.h5(r, -1)
 					w.logf("%s: %s STALE (reconnect not completed in 7 days)", p.Name, w.party(r.ID).Name)
@@ -342,19 +323,11 @@ func (p *Party) tick() {
 				}
 				if !o.Reconnect && w.Now-o.Started > w.hsLifeFor(false) {
 					p.abandonOwn(r)
-					if !p.rekeyRefusedRC(r, o, "own rekey unanswered") {
-						p.startHS(r, o.Reconnect)
-					}
+					p.startHS(r, o.Reconnect)
 				}
 			}
 			life := w.answerLife()
-			if p.r28Code() {
-				life = r28HSLife // vault/outbox.go:421
-			}
 			for _, a := range slices.Clone(r.Ans) {
-				if w.Now-a.Started > life && !a.Reconnect {
-					p.rekeyRefusedRC(r, nil, "my answer expired without hs.fin")
-				}
 				if w.Now-a.Started > life {
 					p.dropAnswer(r, a.ID)
 				}
@@ -364,9 +337,6 @@ func (p *Party) tick() {
 				p.tickA(r)
 			}
 			r.Epochs = slices.DeleteFunc(r.Epochs, func(e Epoch) bool {
-				if e.ID == r.RevOld {
-					return false // Deployment: the old epoch kept toward an ungated peer
-				}
 				if p.newSpec() && (e.ID == r.ConfID || slices.Contains(r.AbanIDs, e.ID)) {
 					return false // §6.3.1 (G): the id is kept
 				}
@@ -382,7 +352,7 @@ func (p *Party) tick() {
 					p.startHS(r, false)
 				}
 			}
-			if r.Device && r.standing(r.KeyFor, r.Relay, w.Now).JTI == 0 && !p.r28Code() {
+			if r.Device && r.standing(r.KeyFor, r.Relay, w.Now).JTI == 0 {
 				p.markStale(r, "tokens expired (needs pairing)")
 				p.h5(r, -1)
 				continue

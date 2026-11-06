@@ -12,7 +12,6 @@ import (
 
 type Violation struct {
 	Inv, Detail string
-	Pair        string // the releases of the first two parties the detail names, at the time (pairType)
 	At          int64
 }
 
@@ -25,39 +24,21 @@ type World struct {
 	p429          float64 // chance a relay call is answered 429
 	pRef          float64 // chance a rotate or registration is refused definitively
 	holdRotate    bool
-	optA          bool              // VAULT-MESSAGING 0.86.0 §6.3.1 option A (activation on confirmation)
-	gate          bool              // Release A gate: activate on confirmation only toward peers that advertise it
+	optA          bool              // VAULT-MESSAGING 0.87.0 §6.3.1 (activation on confirmation); false: Config.OldRules
+	relayRot      bool              // relay-key rotation (rule U, S1-S3, S9): off in the oracle config, on in the regression config
 	probeDep      map[int][2]PID    // session probes deposited by real parties (from, to)
 	probeFate     map[int]string    // what became of each
 	seq           int               // ground truth arrival order at the relay
-	reverted      map[int]bool      // epochs destroyed by a revert
 	hasEpoch      map[[2]int]bool   // (party, epoch): the party ever held the epoch
 	staleAt       map[[2]PID]string // pair -> split cause when it first went stale (\"\" if the epochs matched)
 	probeEpoch    map[int]int       // the epoch a probe was sealed under
-	literalFork   bool              // read §3.4.1's fork sentence literally (no deposited-after condition) for the confirmed epoch
-	f1Window      bool              // alternative: F1-demote only if the link's inner ts > the epoch's activation + T + 2 days
-	fixBOff       bool              // F1 as in 2da316e (no fix B); attribution runs only
-	fixBStrict    bool              // F1 (default, lead's choice): keep the ungated epoch only if the peer's new ik signed something under it
-	f3Suspend28   bool              // TRUSTMODEL_F3UNGATED=suspend: F3 suspends toward ungated peers too (before r8)
-	f3CtxMsg      bool              // default: that reconnect names the message's epoch (lead, 2026-11-05); TRUSTMODEL_F3RCCTX=confirmed names the confirmed one
-	nextOrigin    string            // r10: why the next startHS starts (stats)
-	hsOrigin      map[int]string    // r10: handshake id -> why it started
-	lastEst       map[[2]PID]string // r10: pair -> origin of the last activation
-	finLost       map[[2]PID]PID    // r10: pair -> initiator of an hs.fin lost during the open split
-	episodes      map[[2]PID]*episode
+	nextOrigin    string            // why the next startHS starts (stats)
+	hsOrigin      map[int]string    // handshake id -> why it started
 	suspAt        map[[2]PID]int64
 	audits        map[[2]PID]int
-	firstSplit    map[[2]PID]int64
-	r1Lite        bool             // TRUSTMODEL_R1LITE=1 (r10): no revert / keep / copies toward ungated peers
-	noRCRetry     bool             // TRUSTMODEL_RCRETRY=off: no second or third try (before r9)
-	noRekeyRC     bool             // TRUSTMODEL_REKEYRC=off: no reconnect after a refused rekey toward an ungated peer (before r8)
+	everSplit     map[[2]PID]bool  // pair -> its epochs split at some point (both active)
 	ruleEKeepFin  bool             // TRUSTMODEL_RULEEFIN=keep: rule E leaves an unsent hs.fin for a destroyed epoch in the outbox (before r7)
-	r28Spec       bool             // TRUSTMODEL_R28=spec: release-28 parties follow f4a4d97 §3.4.1 (before r6); default: the release-28 code
-	featMode      string           // always (default, the spec): features on every message; first: with the first message after an upgrade; echo: also when first seeing the peer's
-	upAt          map[PID]int64    // upgrade mode: when each party upgraded from release 28
-	gateOpenAt    map[[2]PID]int64 // when q first saw r's features (q, r)
 	copyExpo      map[[2]int]*expo // (honest party, copy epoch): when it was used
-	ownCopyStrict bool             // a92a6eb's own_copy wording (and nothing received from P); default: lead fix A
 	debugUnlinked bool             // scenarios: the relay's rotate and registration get no answer
 
 	// Fix switches for the review findings (f_scenarios_test.go). Each is
@@ -67,7 +48,6 @@ type World struct {
 	noF10       bool // F10: hs.confirm queued again for every such batch, even with one still in the outbox
 	noF13B      bool // F13: B judged on time alone, not only after the first short collect after an unlock
 	noConfRekey bool // F13 §6.2 and lead item 6: a rekey whose ctx is the responder's confirmed (not current) epoch is refused
-	noLead5     bool // lead item 5: the revert does not re-seal what was sent under the new epoch
 
 	issuer   map[int]Key    // jti -> iss: a token "verifies" only if its issuer minted it
 	epTruth  map[int][2]PID // epoch -> (initiator actor, responder actor)
@@ -102,10 +82,10 @@ type ikFollow struct {
 }
 
 func newWorld(seed uint64) *World {
-	w := &World{fixBStrict: true, rng: rand.New(rand.NewPCG(seed, 7)), issuer: map[int]Key{}, epTruth: map[int][2]PID{},
+	w := &World{rng: rand.New(rand.NewPCG(seed, 7)), issuer: map[int]Key{}, epTruth: map[int][2]PID{},
 		rlinkBy: map[RLink]rot{}, iklinkBy: map[IKLink]rot{}, evid: map[[2]PID]map[Key]map[Key]bool{},
 		ikPos: map[[2]PID][]ikFollow{}, answered: map[int]bool{},
-		ended: map[int]bool{}, ever: map[PID]map[int]bool{}, probes: map[int]bool{}, stats: map[string]int{}, dead: map[PID]string{}, ttlFin: map[[2]PID]string{}, probeDep: map[int][2]PID{}, probeFate: map[int]string{}, reverted: map[int]bool{}, hasEpoch: map[[2]int]bool{}, staleAt: map[[2]PID]string{}, hsOrigin: map[int]string{}, lastEst: map[[2]PID]string{}, finLost: map[[2]PID]PID{}, episodes: map[[2]PID]*episode{}, suspAt: map[[2]PID]int64{}, audits: map[[2]PID]int{}, firstSplit: map[[2]PID]int64{}, upAt: map[PID]int64{}, gateOpenAt: map[[2]PID]int64{}, copyExpo: map[[2]int]*expo{}, probeEpoch: map[int]int{}, forkDue: map[[2]PID]int{}, evidKind: map[Key]string{}}
+		ended: map[int]bool{}, ever: map[PID]map[int]bool{}, probes: map[int]bool{}, stats: map[string]int{}, dead: map[PID]string{}, ttlFin: map[[2]PID]string{}, probeDep: map[int][2]PID{}, probeFate: map[int]string{}, hasEpoch: map[[2]int]bool{}, staleAt: map[[2]PID]string{}, hsOrigin: map[int]string{}, suspAt: map[[2]PID]int64{}, audits: map[[2]PID]int{}, everSplit: map[[2]PID]bool{}, copyExpo: map[[2]int]*expo{}, probeEpoch: map[int]int{}, forkDue: map[[2]PID]int{}, evidKind: map[Key]string{}}
 	w.R = newRelay(w)
 	w.Now = 1000 * day
 	return w
@@ -135,7 +115,7 @@ func (w *World) violate(inv, format string, a ...any) {
 			return
 		}
 	}
-	w.viol = append(w.viol, Violation{inv, d, w.pairType(d), w.Now})
+	w.viol = append(w.viol, Violation{inv, d, w.Now})
 	w.logf("!!! %s VIOLATED: %s", inv, d)
 }
 
@@ -146,27 +126,6 @@ func (w *World) stat(k string) { w.stats[k]++ }
 type expo struct {
 	start, last int64
 	n           int
-	flag        string // "kept" (fix B) or "skipped" (window) when F1 left it current
-}
-
-// markF1: F1 left epoch e (toward peer r) current at q; ground truth
-// says whether e was made with an old copy.
-func (w *World) markF1(q *Party, r *PeerRec, e int, how string) {
-	tr, ok := w.epTruth[e]
-	if !ok || !(w.party(tr[0]).Copy || w.party(tr[1]).Copy) {
-		w.stat("X:F1-" + how + " on an honest epoch")
-		return
-	}
-	w.stat("X:F1-" + how + " on a copy epoch")
-	k := [2]int{int(q.ID), e}
-	if w.copyExpo[k] == nil {
-		st := w.Now
-		if ep := r.epoch(e); ep != nil {
-			st = ep.EstAt
-		}
-		w.copyExpo[k] = &expo{start: st, last: w.Now}
-	}
-	w.copyExpo[k].flag = how
 }
 
 // noteCopyUse records that honest p deposited or accepted a message under
@@ -206,11 +165,6 @@ func (w *World) expoStats() {
 			}
 		}
 		w.stat("X:copy-epoch-end " + end)
-		if x.flag != "" {
-			w.stat(fmt.Sprintf("X:copy-epoch-%s use-days %03d", x.flag, (x.last-x.start)/day))
-			w.stat(fmt.Sprintf("X:copy-epoch-%s uses %03d", x.flag, x.n))
-			w.stat(fmt.Sprintf("X:copy-epoch-%s end %s", x.flag, end))
-		}
 	}
 }
 
@@ -270,12 +224,8 @@ type Party struct {
 	unlocks              int
 	collTo               map[Key]int64
 	pendEvid             []pendEv // evidence seen in the batch not yet written
-	OldConfirm           bool     // an earlier-release responder: no hs.confirm, no confirmed epoch
-	Rel28                bool     // release <= 28: activates at hs.fin, no hs.confirm, rekeys while an answer awaits hs.fin
-	Opt                  int      // a release-29 option (optFull, optR1, optR2, optR3)
 	collectedSinceUnlock bool     // B is judged only after the first collect after an unlock
 	Skew                 int64    // clock offset (within the 2-day budget of §6.3.1)
-	ownCopy              bool     // scratch: forkEpoch's own_copy result
 }
 
 type pendEv struct {
@@ -359,7 +309,6 @@ func (w *World) makeCopy(p *Party) {
 		w: w, Locked: true, collTo: map[Key]int64{}}
 	c.st = p.stored.clone()
 	c.stored = p.stored.clone()
-	c.Rel28, c.Opt, c.OldConfirm = p.Rel28, p.Opt, p.OldConfirm // the copy runs the same release
 	c.storedOut = map[int]bool{}
 	for _, e := range c.st.Out {
 		c.storedOut[e.ID] = true
@@ -639,7 +588,7 @@ func (p *Party) deposit(e *Entry, r *PeerRec) {
 			return
 		}
 		m.Epoch = r.Cur
-		if m.Kind == KIdRot && !p.r28Code() { // release 28: one statement per rotation, its own (vault/core.go:744-747)
+		if m.Kind == KIdRot {
 			// S8: rotations from the signer of the epoch it travels in
 			if ep := r.epoch(r.Cur); ep != nil {
 				if l := p.ownLinks(ep.Own); len(l) > 0 {
@@ -651,19 +600,12 @@ func (p *Party) deposit(e *Entry, r *PeerRec) {
 	retry := e.Tried
 	e.Tried = true
 	p.checkI5(e, &m, r, retry)
-	if r.RevOld != 0 && m.Epoch == r.Cur && m.Epoch != 0 && (m.Kind == KSession || m.Kind == KTokIssued || m.Kind == KUpdate || m.Kind == KIdRot) {
-		r.RevSent = append(r.RevSent, cloneMsg(m))
-	}
-	if (r.FeatOwed || w.featMode == "always") && p.newSpec() {
-		m.Feat = true // first contact after the upgrade
+	if p.newSpec() {
+		m.Feat = true // R29-G1: hs_confirm in the inner features of every message
 	}
 	id, err := w.R.deposit(p.ID, with, tok, box, &m)
 	w.stat("deposit:" + string(err))
 	if err == okRes {
-		if m.Feat {
-			r.FeatOwed = false
-			w.stat("F:features sent")
-		}
 		e.Done, e.Indef = true, false
 		if m.Kind == KSession && m.Probe > 0 && !p.Copy {
 			w.probeDep[m.Probe] = [2]PID{p.ID, e.To}
@@ -674,11 +616,6 @@ func (p *Party) deposit(e *Entry, r *PeerRec) {
 		return
 	}
 	w.logf("%s -> %s: %s refused %s (with %d, box %d)", p.Name, w.party(e.To).Name, kindName[m.Kind], err, with, box)
-	if p.r28Code() && e.Tok.JTI == 0 && (err == tokenRevoked || err == mailboxUnknown) && r.Status == stActive {
-		// release 28: terminal deposit errors make the peer stale (vault/outbox.go:355-368)
-		p.markStale(r, "deposit refused ("+string(err)+")")
-		p.h5(r, -1)
-	}
 	switch err {
 	case rateLimited:
 		e.Indef = true

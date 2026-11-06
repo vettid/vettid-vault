@@ -50,9 +50,6 @@ func (q *Party) handle(m *RMsg, set []Key) bool {
 			w.probeFate[M.Probe] = "unreadable: " + why
 		}
 		if (M.Kind == KFin || M.Kind == KConfirm) && !w.party(m.Actor).Copy {
-			if M.Kind == KFin {
-				w.noteFinLost(m.Actor, q.ID)
-			}
 			w.ttlFin[[2]PID{m.Actor, q.ID}] = "arrived-after-answer-expired"
 		}
 		return true
@@ -60,10 +57,6 @@ func (q *Party) handle(m *RMsg, set []Key) bool {
 	pos := Pos{m.Box, m.ID, m.DepAt, m.Seq}
 	if ep := r.epoch(M.Epoch); ep != nil && M.Epoch != 0 {
 		ep.GotFromPeer = true
-		ep.GotIKs = append(ep.GotIKs, M.FromIK, M.Sig) // the iks that signed what came under it
-		for _, l := range M.Rot {
-			ep.GotIKs = append(ep.GotIKs, l.New)
-		}
 	}
 	// I4 (0.86.0): only messages from keys Q knows for P, or a handshake
 	// Q can attribute to P (by its answer or open handshake)
@@ -71,12 +64,7 @@ func (q *Party) handle(m *RMsg, set []Key) bool {
 		w.recordEvidence(q, r, M)
 	}
 	q.beforeAccept(r, m, pos)
-	var d dec
-	if q.r28Code() {
-		d = q.acceptR28(r, m, pos, set) // release 28 as the code is (r28_test.go)
-	} else {
-		d = q.acceptFrom(r, m, pos, set)
-	}
+	d := q.acceptFrom(r, m, pos, set)
 	if w.noF5 && q.newSpec() && r.Pend != nil && M.Epoch == r.Pend.ID && M.Kind != KFin &&
 		(d.Out == "accept" || d.Out == "answer" || d.Out == "follow" || d.Out == "ignore") {
 		q.confirm(r) // switch noF5: the confirmation only once the handler has accepted the message
@@ -89,15 +77,6 @@ func (q *Party) handle(m *RMsg, set []Key) bool {
 	}
 	if d.Out == "refuse" || d.Out == "drop" || d.Out == "abort" {
 		w.audits[pairKey(q.ID, r.ID)]++
-	}
-	if M.Feat && q.newSpec() && (d.Out == "accept" || d.Out == "answer" || d.Out == "follow") {
-		q.seeFeatures(r)
-	} else if M.Feat && !r.PeerA {
-		if !q.newSpec() {
-			w.stat("F:features not taken (receiver still on 28)")
-		} else {
-			w.stat("F:features not taken (" + d.Out + ")")
-		}
 	}
 	if d.Out == "defer" || d.Out == "wait" {
 		return false
@@ -202,21 +181,6 @@ func (q *Party) acceptFrom(r *PeerRec, m *RMsg, pos Pos, set []Key) dec {
 	}
 	if ep := r.epoch(M.Epoch); ep != nil && ep.Destroyed {
 		if M.Ts > ep.DestroyTs { // F3: a later ts under a destroyed epoch is fork evidence
-			if !r.PeerA && !q.w.f3Suspend28 {
-				// lead (b), r8: toward a peer without hs_confirm (a release-28
-				// responder activates a late hs.fin), reconnect naming the
-				// confirmed epoch, once per destroyed epoch
-				if !ep.RCDone {
-					ep.RCDone = true
-					q.w.stat("A:F3-ungated-reconnect")
-					ctx := r.ConfID
-					if q.w.f3CtxMsg {
-						ctx = M.Epoch // variant: the epoch the peer is on (release 28 accepts only its current)
-					}
-					q.reconnectNaming(r, ctx, "F3 toward an ungated peer")
-				}
-				return refuse("superseded_epoch", "E:destroyed-epoch-later-ts:ungated-reconnect")
-			}
 			q.suspend(r, "connection.fork_suspected/epoch")
 			return dec{"suspend", "fork", "E:destroyed-epoch-later-ts"}
 		}
@@ -273,10 +237,6 @@ func (q *Party) acceptFrom(r *PeerRec, m *RMsg, pos Pos, set []Key) dec {
 		}
 		return q.tableBFin(r, M, pos)
 	case KConfirm:
-		if q.Rel28 { // release <= 28: an unknown type, answered unsupported_type
-			q.enqueue(r.ID, Msg{Kind: KSession, Probe: -1}, nil)
-			return dec{"accept", "unsupported_type", "rel28:hs.confirm-unsupported"}
-		}
 		// SPEC FINDING: hs.confirm has no column in Table A; the model
 		// treats it as a session message.
 		if rs == rkAfter {
@@ -633,7 +593,7 @@ func (q *Party) followIK(r *PeerRec, app []IKLink, x Pos) {
 		// Epochs after an ik link
 		for j := range r.Epochs {
 			ep := &r.Epochs[j]
-			if !q.Rel28 && (ep.Signer == l.Old || r.isAncestor(ep.Signer)) && !ep.Demoted && x.after(ep.Est) {
+			if (ep.Signer == l.Old || r.isAncestor(ep.Signer)) && !ep.Demoted && x.after(ep.Est) {
 				ep.Demoted, ep.DemotedAt = true, x
 				q.w.stat("epoch:demoted")
 				q.w.logf("%s: epoch E%d of %s demoted (signer %d, after the link)", q.Name, ep.ID, q.w.party(r.ID).Name, ep.Signer)
@@ -651,10 +611,7 @@ func (q *Party) followIK(r *PeerRec, app []IKLink, x Pos) {
 
 // forkEpoch: ctx names an epoch Q superseded by one signed by an ancestor ik.
 func (q *Party) forkEpoch(r *PeerRec, ctx int) bool {
-	if q.Rel28 {
-		return false // release <= 28: no §3.4.1 epoch rule
-	}
-	if q.newSpec() && !q.w.literalFork {
+	if q.newSpec() {
 		// 0.86.0 (2da316e, F2): a ctx naming the current or the confirmed
 		// epoch is ordinary; one older than the confirmed epoch, where an
 		// epoch after it up to the confirmed one is signed by an ancestor
@@ -674,20 +631,13 @@ func (q *Party) forkEpoch(r *PeerRec, ctx int) bool {
 		if ic < 0 || ik <= ic {
 			return false
 		}
-		fork, ownOnly := false, true
+		// R29-F1: there is no own_copy exception
 		for _, ep := range r.Epochs[ic+1 : ik+1] {
 			if r.isAncestor(ep.Signer) {
-				fork = true
-				// lead fix A: every such epoch is one Q began (a92a6eb also
-				// required "and received nothing from P under it")
-				ownOnly = ownOnly && ep.MineInit && (!q.w.ownCopyStrict || !ep.GotFromPeer)
+				return true
 			}
 		}
-		if fork && ownOnly {
-			q.ownCopy = true // a92a6eb: demote them, accept the ctx, audit own_copy
-			return false
-		}
-		return fork
+		return false
 	}
 	for j, ep := range r.Epochs {
 		if ep.ID == ctx {
@@ -735,16 +685,10 @@ func (q *Party) tableBInit(r *PeerRec, m *RMsg, pos Pos) dec {
 			}
 		}
 		if !ok {
-			q.ownCopy = false
-			switch {
-			case q.forkEpoch(r, M.Ctx):
-				fork = true // judged at hs.fin (§6.6, H5's exemption)
-			case q.ownCopy:
-				q.acceptOwnCopy(r, M.Ctx)
-				cell += ":own_copy"
-			default:
+			if !q.forkEpoch(r, M.Ctx) {
 				return refuse("reconnect_refused", cell+":ctx")
 			}
+			fork = true // judged at hs.fin (§6.6, H5's exemption)
 		}
 	} else {
 		if q.respHalf() && !q.w.noConfRekey && r.ConfID != 0 && r.ConfID != r.Cur && M.Ctx == r.ConfID && M.Epoch == r.ConfID {
@@ -754,17 +698,11 @@ func (q *Party) tableBInit(r *PeerRec, m *RMsg, pos Pos) dec {
 				q.abandonOwn(r)
 			}
 		} else if r.Cur == 0 || M.Ctx != r.Cur {
-			q.ownCopy = false
 			if q.forkEpoch(r, M.Ctx) {
 				q.suspend(r, "connection.fork_suspected/epoch")
 				return dec{"suspend", "fork", cell + ":fork-epoch"}
 			}
-			if !q.ownCopy || M.Epoch != M.Ctx {
-				q.rekeyRefusedRC(r, nil, "peer's rekey not on my current epoch")
-				return refuse("rekey_not_current_epoch", cell+":ctx")
-			}
-			q.acceptOwnCopy(r, M.Ctx)
-			cell += ":own_copy"
+			return refuse("rekey_not_current_epoch", cell+":ctx")
 		}
 	}
 	// §6.3.1 crossing: I, holding a pending epoch, and a rekey under the current one
@@ -774,13 +712,6 @@ func (q *Party) tableBInit(r *PeerRec, m *RMsg, pos Pos) dec {
 		}
 		q.abandonPending(r, "a later rekey from the responder", false)
 		cell += ":pending:ts-later"
-	}
-	// r8 (point 2): an ungated peer rekeys again while my answer to its
-	// last rekey still awaits hs.fin: it refused that answer
-	if !M.Reconnect && slices.ContainsFunc(r.Ans, func(a HS) bool { return !a.Reconnect }) {
-		if q.rekeyRefusedRC(r, nil, "peer rekeyed again, my answer unfinished") {
-			return dec{"drop", "reconnecting", cell + ":ungated-reconnect"} // my reconnect replaces this rekey
-		}
 	}
 	// crossing handshakes (§6.5; §6.6 "Between two persons"): answer as
 	// usual; the lower th1 wins. Own higher: abandon it. Own lower: keep
@@ -854,19 +785,12 @@ func (q *Party) tableBResp(r *PeerRec, M *Msg, pos Pos) dec {
 	switch st {
 	case ikAncestor:
 		q.abandonOwn(r)
-		q.rekeyRefusedRC(r, o, "hs.resp ancestor ik")
 		return dec{"abort", "ancestor_ik", cell}
 	case ikRejected:
 		q.abandonOwn(r)
 		return dec{"abort", "rejected_ik", cell}
 	case ikUnknown:
 		q.abandonOwn(r)
-		if o.RuleRC && r.Status == stActive {
-			q.markStale(r, "reconnect refused") // r9: a refused rule-E / rule-L reconnect
-			q.h5(r, -1)
-			return dec{"abort", "unknown_ik", cell}
-		}
-		q.rekeyRefusedRC(r, o, "hs.resp unknown ik")
 		return dec{"abort", "unknown_ik", cell}
 	}
 	var extra []IKLink
@@ -882,17 +806,11 @@ func (q *Party) tableBResp(r *PeerRec, M *Msg, pos Pos) dec {
 	if len(app) > 0 {
 		q.followIK(r, app, pos)
 	}
-	if o.InitHalf { // the gate as fixed when hs.init was sent
+	if q.initHalf() {
 		q.makePending(r, M.NewEpoch, M.Sig, o.OwnIK, pos, M.Ts, o.Reconnect)
-	} else {
-		prev := r.Cur
+	} else { // Config.OldRules: activation at hs.resp
 		q.establish(r, M.NewEpoch, M.Sig, o.OwnIK, pos)
-		q.w.noteEst(q, r, q.w.hsOrigin[o.ID])
 		r.Epochs[len(r.Epochs)-1].MineInit = true
-		r.Epochs[len(r.Epochs)-1].UnconfFin = true // activated at hs.fin without confirmation
-		if q.revertRule(r) && prev != 0 {          // Deployment: toward an ungated peer, keep the old epoch
-			r.RevOld, r.RevFinAt, r.RevUntil, r.RevSent = prev, q.now(), q.w.Now+aConfKeys, nil
-		}
 	}
 	for _, a := range slices.Clone(r.Ans) {
 		if !a.Fork {
@@ -932,7 +850,6 @@ func (q *Party) tableBFin(r *PeerRec, M *Msg, pos Pos) dec {
 	}
 	if q.w.Now-a.Started > q.w.answerLife() {
 		q.w.ttlFin[[2]PID{r.ID, q.ID}] = "arrived-after-answer-expired"
-		q.w.noteFinLost(r.ID, q.ID)
 		q.dropAnswer(r, a.ID)
 		return dec{"drop", "expired", "hs.fin:answer-expired"}
 	}
@@ -967,15 +884,10 @@ func (q *Party) tableBFin(r *PeerRec, M *Msg, pos Pos) dec {
 		q.ruleE(r, a.InitTs)
 	}
 	q.establish(r, a.NewEpoch, a.PeerIK, a.OwnIK, pos)
-	q.w.noteEst(q, r, q.w.hsOrigin[a.ID])
-	if a.OwnIK != q.st.IK && r.Status == stActive {
-		// lead item 1: an answer kept across my own rotation (toward an
-		// ungated peer) is established, then I rekey at once under the new ik
-		q.w.stat("S5:kept-answer-established")
-		q.abandonOwn(r)
-		defer q.startHS(r, false)
+	if a.OwnIK != q.st.IK {
+		q.w.violate("S5", "%s establishes an answer pinned to its superseded ik %d", q.Name, a.OwnIK)
 	}
-	if q.respHalf() && !q.OldConfirm {
+	if q.respHalf() {
 		// §6.3.1 (revised): a later activation does not replace the confirmed
 		// epoch; its keys run 46 days from the first activation superseding it
 		if r.ConfID != 0 && r.ConfID != r.Cur && r.ConfUntil == 0 {
@@ -1203,34 +1115,6 @@ func (q *Party) f1Demote(r *PeerRec, M *Msg, app []IKLink, x Pos) {
 	cur := r.epoch(r.Cur)
 	for _, l := range app {
 		if cur != nil && cur.Signer == l.Old {
-			keep := cur.MineInit && cur.UnconfFin && r.predecessor(cur.ID) == M.Epoch
-			switch {
-			case q.w.f1Window, q.w.fixBOff:
-				keep = false
-			case q.w.fixBStrict: // variant: only if the peer's new ik signed something under it
-				keep = keep && cur.gotIK(l.New)
-			default:
-				keep = keep && !cur.GotFromPeer
-			}
-			if keep {
-				// lead fix B: my own ungated epoch, link under its immediate
-				// predecessor: no demotion; rekey under the new ik and let
-				// confirmation or the revert decide (no old copy can be here)
-				q.w.stat("A:F1-fixB-kept")
-				q.w.markF1(q, r, cur.ID, "kept")
-				q.w.logf("%s: E%d with %s kept (fix B): rekey, confirmation or revert decides", q.Name, cur.ID, q.w.party(r.ID).Name)
-				if r.Own == nil {
-					q.startHS(r, false)
-				}
-				return
-			}
-			// window variant: only for an epoch this side initiated (its own
-			// hs.fin), judged on its own clock against the peer's inner ts
-			if q.w.f1Window && cur.MineInit && M.Ts <= cur.EstAt+(q.now()-q.w.Now)+aRevert {
-				q.w.stat("A:F1-window-skipped")
-				q.w.markF1(q, r, cur.ID, "skipped")
-				return // the alternative rule: too soon after the activation
-			}
 			cur.Demoted, cur.DemotedAt = true, x
 			q.w.stat("A:F1-demoted")
 			q.w.logf("%s: E%d with %s DEMOTED (P never activated it; link under E%d)", q.Name, cur.ID, q.w.party(r.ID).Name, M.Epoch)
@@ -1243,51 +1127,4 @@ func (q *Party) f1Demote(r *PeerRec, M *Msg, app []IKLink, x Pos) {
 			return
 		}
 	}
-}
-
-// acceptOwnCopy: §3.4.1 (a92a6eb) "Except": every ancestor-signed epoch
-// after ctx is one Q began and received nothing under from P. Q demotes
-// them, accepts ctx as its last epoch, and audits fork_suspected (own_copy).
-func (q *Party) acceptOwnCopy(r *PeerRec, ctx int) {
-	after := false
-	for j := range r.Epochs {
-		ep := &r.Epochs[j]
-		if after && !ep.Demoted {
-			ep.Demoted = true
-			ep.DemotedAt = Pos{Seq: -1} // refuse later messages under it
-		}
-		after = after || ep.ID == ctx
-	}
-	r.Cur = ctx
-	if ep := r.epoch(ctx); ep != nil {
-		ep.Superseded = 0
-	}
-	if r.Pend != nil {
-		q.abandonPending(r, "own_copy", false)
-	}
-	q.w.stat("A:fork_suspected(own_copy)")
-	q.w.logf("%s: connection.fork_suspected (own_copy) for %s: epochs after E%d demoted, not suspended", q.Name, q.w.party(r.ID).Name, ctx)
-}
-
-// predecessor: the last ordinary epoch recorded before id.
-func (e *Epoch) gotIK(k Key) bool {
-	for _, x := range e.GotIKs {
-		if x == k && k != 0 {
-			return true
-		}
-	}
-	return false
-}
-
-func (r *PeerRec) predecessor(id int) int {
-	prev := 0
-	for _, e := range r.Epochs {
-		if e.ID == id {
-			return prev
-		}
-		if !e.Pending && !e.Abandoned && !e.Destroyed {
-			prev = e.ID
-		}
-	}
-	return 0
 }

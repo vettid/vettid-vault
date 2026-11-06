@@ -703,3 +703,48 @@ func nNonRejected(got []Activity, n int) int {
 	}
 	return len(got)
 }
+
+// The lead's call: while the current epoch is demoted, reconnects that
+// expire are counted; the third expiry makes the connection stale (with
+// connection.stale), and no fourth starts. Each expired one's tokens are
+// revoked.
+func TestR29DemotedReconnectsBoundedThenStale(t *testing.T) {
+	f := demoted(t, nil)
+	for i := 1; i <= 3; i++ {
+		var jtis []string
+		for _, og := range f.m(0).st.Outgoing {
+			if og.Purpose == handshake.PurposeReconnect {
+				for _, it := range og.Issued {
+					jtis = append(jtis, it.JTI)
+				}
+			}
+		}
+		if len(jtis) == 0 {
+			f.dump()
+			t.Fatalf("try %d: no reconnect open", i)
+		}
+		f.lose(0, 1, kAny)
+		f.advance(HandshakeTTL + time.Hour)
+		f.tick(0)
+		for _, j := range jtis {
+			denied := false
+			for _, it := range f.m(0).st.Issued {
+				denied = denied || it.JTI == j && it.Denied
+			}
+			if !denied {
+				t.Fatalf("try %d: an expired reconnect's token was not revoked", i)
+			}
+		}
+		if i < 3 && f.p(0).State == PeerStale {
+			t.Fatalf("stale after %d expiries", i)
+		}
+	}
+	if f.p(0).State != PeerStale || !f.sink[0].has("connection.stale") {
+		t.Fatal("the third expiry did not make the connection stale")
+	}
+	f.advance(HandshakeTTL + time.Hour)
+	f.tick(0)
+	if f.m(0).hasOutgoing(f.id[0], handshake.PurposeReconnect) {
+		t.Fatal("a fourth reconnect started")
+	}
+}

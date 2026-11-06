@@ -459,6 +459,8 @@ func (m *Manager) housekeeping(now time.Time) {
 			case p == nil:
 			case og.RuleRC != "":
 				m.ruleRCExpired(p, og, now) // tried again, up to 3 times; then stale
+			case og.Why != "" || og.Purpose == handshake.PurposeReconnect:
+				m.demotedReconnectExpired(p, now)
 			case og.Purpose == handshake.PurposeRekey:
 				m.ruleL(p, now) // rule L: the rekey went unanswered for its lifetime
 			}

@@ -380,7 +380,8 @@ type EpochMeta struct {
 	DemotedMsg string    `json:"demoted_msg,omitempty"`
 	OwnCopy    bool      `json:"own_copy,omitempty"`
 	// RCTries counts rule E's reconnects for this destroyed epoch toward
-	// a peer without hs_confirm (at most 3).
+	// a peer without hs_confirm (at most 3); for a demoted current epoch,
+	// the reconnects that expired (at the third the connection goes stale).
 	RCTries int `json:"rc_tries,omitempty"`
 	// OwnChain is the own rotation count whose ik signed its handshake: a
 	// reconnect naming it carries the vault's links from there.

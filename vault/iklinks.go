@@ -375,6 +375,22 @@ func (m *Manager) sealHeld(p *Peer) {
 	}
 }
 
+// demotedReconnectExpired counts an expired reconnect while p's current
+// epoch is demoted: at the third the connection goes stale (with
+// connection.stale and its feed item), as for rules E and L (the lead's
+// call). Each expired one's tokens were revoked already.
+func (m *Manager) demotedReconnectExpired(p *Peer, now time.Time) {
+	e := p.epochMeta(p.LastEpochID)
+	if e == nil || !e.Demoted {
+		return
+	}
+	e.RCTries++
+	m.dirty = true
+	if e.RCTries >= RuleRCTries {
+		m.markStale(p, now)
+	}
+}
+
 // tickDemoted: while the current epoch is demoted and no handshake that
 // would replace it is open (the last one expired, its tokens revoked), a
 // new one is started (§3.4.1: Q sends nothing until a new epoch is

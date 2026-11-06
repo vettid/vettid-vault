@@ -561,9 +561,10 @@ func TestR29ConnectionRemovedNotice(t *testing.T) {
 // (dropping that answer, S5) and its identity.rotate does not reach Q.
 // P's reconnect, carrying a→b, is refused (Q's own reconnect is pending)
 // but its links are followed in the same write: "Pending epochs at a
-// link" abandons Q's pending epoch (sig_R by a), nothing is answered or
-// restarted, K9 is not judged; P's next reconnect is then accepted and
-// the pair converges. Without the rule Q stays pending and refuses every
+// link" abandons Q's pending epoch (sig_R by a), nothing is answered, K9
+// is not judged, and Q starts its own reconnect again under P's new ik
+// (H5), through which the pair converges without waiting for P's refused
+// try to expire. Without the rule Q stays pending and refuses every
 // reconnect from P.
 func TestR29RefusedReconnectLinksFollowed(t *testing.T) {
 	f := newR29Fx(t)
@@ -599,16 +600,28 @@ func TestR29RefusedReconnectLinksFollowed(t *testing.T) {
 		f.dump()
 		t.Fatal("Q's pending epoch signed by the old ik was not abandoned by the link")
 	}
-	if f.answerCount(0) != 0 || f.countOutgoingReconnects(0) != 0 {
-		t.Fatal("something was answered or restarted beside the refusal")
+	if f.answerCount(0) != 0 {
+		t.Fatal("the refused reconnect was answered")
+	}
+	// As H5 does, Q starts its own reconnect again, under P's new ik, and
+	// nothing else.
+	og := f.openReconnect(0)
+	if og == nil || f.countOutgoingReconnects(0) != 1 || !bytes.Equal(og.Init.ResponderIK, f.m(1).keys.ik.Public().(ed25519.PublicKey)) {
+		f.dump()
+		t.Fatal("Q's own reconnect, ended by the links, was not started again under P's new ik")
+	}
+	for _, o := range f.m(0).st.Outgoing {
+		if o.PeerID == f.id[0] && o.Purpose == handshake.PurposeRekey {
+			t.Fatal("a rekey was started beside the restarted reconnect")
+		}
 	}
 	for _, e := range f.p(0).Epochs {
 		if e.Ended {
 			t.Fatal("K9 judged at a refused reconnect")
 		}
 	}
-	f.lose(1, 0, kAny)
-	reconnectP()
+	// The pair converges through Q's restarted reconnect, without waiting
+	// for P's refused try to expire or P trying again.
 	f.settle()
 	f.advance(time.Minute)
 	f.tick(0)

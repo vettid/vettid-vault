@@ -527,6 +527,13 @@ func (m *Manager) refusedReconnectLinks(p *Peer, body *handshake.Init, now time.
 	m.followLinks(p, links, e, now)
 	m.noLinkRestart = prev
 	m.note(now, "refused_reconnect_links", p.ID)
+	if p.Pending == nil && !p.suspended() && p.State == PeerActive {
+		// H5 / "Pending epochs at a link" ended the vault's own pending
+		// reconnect: it is started again (under the new links; after a
+		// demotion naming as K5 says), and no other handshake is.
+		m.note(now, "refused_reconnect_links_restart", p.ID)
+		m.startReconnect(p, now)
+	}
 }
 
 // ownThHigher reports whether th1 of our own reconnect og is higher than

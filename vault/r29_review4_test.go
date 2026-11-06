@@ -12,6 +12,8 @@ import (
 	"github.com/vettid/vettid-relay/relayclient"
 
 	"github.com/vettid/vettid-vault/vms/envelope"
+	"github.com/vettid/vettid-vault/vms/handshake"
+	"github.com/vettid/vettid-vault/vms/suite"
 )
 
 // The lead's Opus review of r29-step5 (batch 4): one test per fix.
@@ -434,5 +436,33 @@ func TestR29ReconnectNamingPendingBeforeTokenCheck(t *testing.T) {
 	})
 	if f.p(0).State == PeerStale || f.p(0).Pending == nil {
 		t.Fatal("a reconnect not tried (one pending) made the connection stale")
+	}
+}
+
+// Step 6 review L2, Table B identity.rotate: a first unfollowed link whose
+// old_ik is an ancestor (here the followed a→b again, with another kem:
+// not a second successor, not followed) is refused unexpected, not
+// rejected_ik.
+func TestR29IdentityRotateAncestorFirstUnexpected(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	oldIK := f.m(1).keys.ik
+	f.rotate(1)
+	f.settle() // side 0 follows a→b
+	newIK := f.m(1).keys.ik
+	kem, err := suite.NewPrivateKey(bytes.Repeat([]byte{0x6e}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := handshake.NewRotation(oldIK, newIK, kem.Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(`{"rotation":` + string(r.Marshal()) + `}`)
+	f.do(1, func(m *Manager, p *Peer) { m.sendTo(p, "identity.rotate", body, f.clk) })
+	f.deliver(1, 0, kRotate)
+	if !f.activity(0, "drop.peer_key", "unexpected") || f.activity(0, "drop.peer_key", "rejected_ik") {
+		f.dump()
+		t.Fatal("an ancestor first link was not refused unexpected")
 	}
 }

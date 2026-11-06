@@ -115,8 +115,8 @@ func rotateLinks(body []byte) ([]*handshake.Rotation, error) {
 
 // hIdentityRotate is Table B's identity.rotate column (§3.4.1): the links
 // already followed are skipped (all followed: ignore); the first one not
-// followed must start at the current ik (an ancestor or rejected ik:
-// rejected_ik; any other: unknown_ik); the chain must verify and no new
+// followed must start at the current ik (an ancestor ik: unexpected; a
+// rejected ik: rejected_ik; any other: unknown_ik); the chain must verify and no new
 // ik may be an ancestor or rejected (ik_rollback). Following applies
 // "Epochs after an ik link" and H5.
 func (m *Manager) hIdentityRotate(_ context.Context, s *Session, in *envelope.Inner) (json.RawMessage, error) {
@@ -146,8 +146,14 @@ func (m *Manager) hIdentityRotate(_ context.Context, s *Session, in *envelope.In
 	}
 	switch first := links[i].OldIK; {
 	case bytes.Equal(first, p.IK):
-	case p.ancestor(first), p.rejected(first):
+	case p.rejected(first):
 		m.refusePeerKey(p, "rejected_ik", s.now)
+		return nil, nil
+	case p.ancestor(first):
+		// Table B: an ancestor ik in identity.rotate is only "every link
+		// already followed: ignore"; any other case cannot occur ("—"),
+		// so refuse (unexpected).
+		m.refusePeerKey(p, "unexpected", s.now)
 		return nil, nil
 	default:
 		m.refusePeerKey(p, "unknown_ik", s.now)

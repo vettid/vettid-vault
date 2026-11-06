@@ -310,8 +310,8 @@ func (m *Manager) followLinks(p *Peer, app []*handshake.Rotation, msgEpoch []byt
 		}
 	}
 	m.f1Demote(p, app, msgEpoch, now)
-	if demotedCurrent {
-		m.restartAfterDemotion(p, now)
+	if demotedCurrent && !m.noLinkRestart {
+		m.restartAfterDemotion(p, now) // not beside the caller's own handshake
 	}
 	m.h5(p, now)
 }
@@ -372,9 +372,13 @@ func (m *Manager) f1Demote(p *Peer, app []*handshake.Rotation, msgEpoch []byte, 
 				m.abandonOutgoing(id, now)
 			}
 		}
-		if p.Kind == KindConnection {
+		switch {
+		case m.noLinkRestart:
+			// Not beside the caller's own handshake, which establishes
+			// the next epoch.
+		case p.Kind == KindConnection:
 			m.reconnectNaming(p, msgEpoch, "f1", now)
-		} else {
+		default:
 			m.startRekey(p, now)
 		}
 		return

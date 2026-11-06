@@ -843,6 +843,9 @@ func (m *Manager) finishReconnect(p *Peer, aw *AwaitingHS, fr *handshake.FinResu
 		m.setWatch(p, pend.Named, pend.TS, now)
 	}
 	ref := p.activatedAt(pend.Named)
+	// The reconnect's tokens first, so that nothing the links set off
+	// judges the connection by tokens the reconnect replaces.
+	p.Standing, p.Reconnect = pend.Standing, pend.Reconnect
 	if len(fresh) > 0 && kem != nil {
 		// Table B "Reached": the links are applied, then H5 (answers
 		// pinned to an ik no longer current are dropped), with "Epochs
@@ -857,7 +860,6 @@ func (m *Manager) finishReconnect(p *Peer, aw *AwaitingHS, fr *handshake.FinResu
 			return
 		}
 	}
-	p.Standing, p.Reconnect = pend.Standing, pend.Reconnect
 	// Both ends settle on this epoch: a service yields (§6.6 "Crossing
 	// reconnects", 0.72.1) and between two persons a verified hs.fin
 	// comes first whatever the th1 (§6.6 "Between two persons", 0.74.0),

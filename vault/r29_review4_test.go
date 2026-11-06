@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/vettid/vettid-relay/relayauth"
+	"github.com/vettid/vettid-relay/relayclient"
 
 	"github.com/vettid/vettid-vault/vms/envelope"
 )
@@ -318,5 +319,59 @@ func TestR29StrictF1Audited(t *testing.T) {
 	if !f.activity(0, "connection.fork_suspected", "epoch") || f.forkFeed(0) || f.p(0).suspended() {
 		f.dump()
 		t.Fatal("a strict F1 demotion was not audited fork_suspected (epoch) without a feed item")
+	}
+}
+
+// Recheck L-a: links followed beside the caller's own handshake
+// (noLinkRestart) that demote the current epoch (by strict F1, and by
+// position) start
+// no reconnect after the demotion: no stale (here there is no reconnect token), no feed item,
+// and the held entries survive.
+func TestR29NoLinkRestartNoDemotionRestart(t *testing.T) {
+	for _, byPosition := range []bool{false, true} {
+		f := newR29Fx(t)
+		f.longTokens()
+		e0 := append([]byte(nil), f.cur(0)...)
+		f.rekey(1)
+		f.deliver(1, 0, kHSInit)
+		f.deliver(0, 1, kHSResp)
+		f.deliverAt(1, 0, kHSFin, "pump-z") // side 0 activates E1 (flag clear), with a position
+		f.lose(0, 1, kConfirm)
+		f.rotate(1) // side 1 abandons its pending E1; its link a→b
+		f.lose(1, 0, kAny)
+		r := f.d[0].relay
+		r.mu.Lock()
+		r.failMailbox = map[string]error{f.m(1).st.Relay.Mailbox: &relayclient.Error{Status: 503, Code: "unavailable"}}
+		r.mu.Unlock()
+		f.note(0, "sealed-before") // sealed under E1, not deposited
+		f.p(0).Reconnect.Token = ""
+		links := parseRotations(f.m(1).st.Rotations)
+		f.do(0, func(m *Manager, p *Peer) {
+			if byPosition {
+				// the link's position before E1's establishing hs.fin
+				e := p.epochMeta(p.LastEpochID)
+				m.relayAt, m.msgID = e.EstAt.Add(-time.Second), "pos"
+			}
+			m.noLinkRestart = true
+			m.followLinks(p, links, e0, f.clk) // E1 demoted (strict F1, or by position)
+			m.noLinkRestart = false
+			m.relayAt, m.msgID = time.Time{}, ""
+		})
+		if !f.m(0).currentDemoted(f.p(0)) {
+			t.Fatal("setup: the current epoch is not demoted")
+		}
+		if f.p(0).State == PeerStale || f.sink[0].has("connection.stale") || f.forkFeed(0) {
+			f.dump()
+			t.Fatalf("position %v: a restart after the demotion made the connection stale, or showed a feed item", byPosition)
+		}
+		held := 0
+		for _, e := range f.m(0).st.Outbox {
+			if e.Held != nil && !e.Done {
+				held++
+			}
+		}
+		if held != 1 {
+			t.Fatalf("held entries: %d", held)
+		}
 	}
 }

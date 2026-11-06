@@ -30,6 +30,16 @@ func fingerprint(ik []byte) string {
 // rotationConflict reports (and records) whether r conflicts with a
 // successor p already accepted.
 func (m *Manager) rotationConflict(p *Peer, r *handshake.Rotation, now time.Time) bool {
+	return m.rotationConflictRec(p, r, true, now)
+}
+
+// MaxSeen bounds Peer.Seen (review 5): a link past it is not recorded.
+const MaxSeen = handshake.MaxRotations
+
+// rotationConflictRec is rotationConflict; record says whether a link not
+// yet followed or seen is recorded as seen (not for a rekey hs.init until
+// it has passed rekeyPrecheck).
+func (m *Manager) rotationConflictRec(p *Peer, r *handshake.Rotation, record bool, now time.Time) bool {
 	if p.Kind != KindConnection || r.Verify() != nil {
 		return false
 	}
@@ -71,10 +81,11 @@ func (m *Manager) rotationConflict(p *Peer, r *handshake.Rotation, now time.Time
 		}
 		return true
 	}
-	if !followed && !m.emu28() && seenRelevant(p, r.OldIK) {
-		// 0.86.0 rule C: kept as seen, followed or not; only links from
-		// the current ik, an ancestor, or a key a seen link reaches (review
-		// RR2 L6: the set stays bounded by P's own chain).
+	if record && !followed && !m.emu28() && seenRelevant(p, r.OldIK) && len(p.Seen) < MaxSeen {
+		// 0.86.0 rule C: kept as seen, followed or not, at most one per old
+		// key (another would be the conflict above); only links from the
+		// current ik, an ancestor, or a key a seen link reaches, and at
+		// most MaxSeen of them.
 		p.Seen = append(p.Seen, r.Marshal())
 		m.dirty = true
 	}

@@ -150,10 +150,9 @@ func (m *Manager) keepCopy(p *Peer, in *envelope.Inner, wake string) {
 	if err != nil {
 		return
 	}
-	if len(j) > RevertClaimCheck && !(m.forDevice && p.Kind == KindConnection) {
-		// Content the vault itself produces, over 64 KiB, that this
-		// release cannot send by claim-check: not copied. A device's
-		// content keeps its copy (the caps apply).
+	if len(j) > RevertClaimCheck {
+		// Over 64 KiB, whoever's content it is: not copied (review 8; this
+		// release cannot send it by claim-check), counted as dropped.
 		r.Dropped++
 		m.note(m.now(), "revert_copy_too_large", p.ID)
 		m.dirty = true
@@ -161,6 +160,38 @@ func (m *Manager) keepCopy(p *Peer, in *envelope.Inner, wake string) {
 	}
 	m.st.RevertSeq++
 	copies.add(p, RevertCopy{Inner: j, Wake: wake, Seq: m.st.RevertSeq, Exp: in.Exp}, m.allPeers())
+	m.dirty = true
+}
+
+// keepToHeld ends a revert keep other than by an accepted message under
+// the new epoch (0.86.6 S1: rule E destroying it, a demotion, own_copy, a
+// later activation): the kept messages go into the held queue, sealed with
+// a new ts and their inner ids under the next current epoch (expired ones
+// skipped), connection.epoch_reverted is audited (ref: the copies the caps
+// dropped), and the copies are dropped. keepOld: the old epoch is being
+// made current again (its keys are not released).
+func (m *Manager) keepToHeld(p *Peer, keepOld bool, now time.Time) {
+	r := p.Revert
+	if r == nil {
+		return
+	}
+	kept, dropped := copies.take(p)
+	for _, c := range kept {
+		in, err := envelope.ParseInner(c.Inner, envelope.ModeSealed)
+		if err != nil || !in.Exp.IsZero() && !now.Before(in.Exp) {
+			continue
+		}
+		m.holdInner(p, in, c.Wake)
+	}
+	ref := ""
+	if dropped > 0 {
+		ref = strconv.Itoa(dropped)
+	}
+	m.record(Activity{Kind: "connection.epoch_reverted", ConnectionID: connID(p), DeviceID: devID(p), Ref: ref, Audit: true}, now)
+	if kr := m.sessions[p.ID]; kr != nil && !keepOld {
+		kr.Release(epochIDOf(r.Old), now.Add(handshake.ReceiveKeyRetention))
+	}
+	p.Revert = nil
 	m.dirty = true
 }
 
@@ -200,11 +231,18 @@ func (m *Manager) revert(p *Peer, rekeyIn bool, ts, now time.Time) {
 	if r == nil || kr == nil {
 		return
 	}
+	if !kr.Reinstate(epochIDOf(r.Old), now) {
+		// The old epoch cannot be current again: the keep ends, its copies
+		// held for the next epoch (S1).
+		m.keepToHeld(p, false, now)
+		return
+	}
 	kept, dropped := copies.take(p)
 	p.Revert = nil
-	if !kr.Reinstate(epochIDOf(r.Old), now) {
-		m.dirty = true
-		return
+	for _, o := range m.st.Outbox {
+		if !o.Done && o.PeerID == p.ID && bytes.Equal(o.FinEpoch, r.New) {
+			o.Done = true // its hs.fin, if not yet sent, goes with it (review)
+		}
 	}
 	if e := p.epochMeta(r.New); e != nil {
 		e.Destroyed, e.DestroyTS, e.Superseded = true, ts, now
@@ -342,6 +380,11 @@ func (m *Manager) markStale(p *Peer, now time.Time) {
 		return
 	}
 	p.State = PeerStale
+	for _, e := range m.st.Outbox {
+		if !e.Done && e.PeerID == p.ID && e.Held != nil {
+			e.Done, e.Held = true, nil // held for an epoch that will not come (review 2)
+		}
+	}
 	m.abandonHandshakes(p, true, true, now)
 	if p.Pending != nil {
 		m.abandonPending(p, "stale", false, now)

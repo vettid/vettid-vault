@@ -453,7 +453,7 @@ func (m *Manager) respondReconnect(pi *handshake.PendingInit, p *Peer, sender ed
 	m.queueDeposit(oe, now)
 	m.st.Awaiting[id] = &AwaitingHS{ID: id, PeerID: p.ID, Purpose: handshake.PurposeReconnect, Created: now, Resp: rs, Issued: issued,
 		OwnChain: m.ownChainNow(), RespOutbox: oe.ID, Reconnect: pend, Th1: th1[:],
-		NamedConfirmed: namedConf, OwnCopy: ownCopy, InitTS: pi.Inner().TS,
+		NamedConfirmed: namedConf, OwnCopy: ownCopy, InitTS: pi.Inner().TS, Gated: p.hasConfirm(),
 		SigIK: append([]byte(nil), m.keys.ik.Public().(ed25519.PublicKey)...), Signer: append([]byte(nil), body.From.IK...)}
 	m.awaiting[id] = resp
 	// §6.6 "Between two persons" (0.74.0): with our own reconnect open as
@@ -544,6 +544,11 @@ func (m *Manager) handleRekeyInit(ctx context.Context, p *Peer, in *envelope.Inn
 		// (no opening under ep alone vouches for its body) moves nothing.
 		m.audit(now, "rekey_rejected", p.ID)
 		return ackAfterFlush
+	}
+	if b, err := handshake.ParseInit(in.Body); err == nil && !m.emu28() {
+		for _, r := range b.Rotations {
+			m.rotationConflict(p, r, now) // recorded as seen now that it passed (rule C)
+		}
 	}
 	if kr.Current() != ep {
 		if bytes.Equal(epID[:], p.confirmedID()) && ep.HasRK() {
@@ -647,7 +652,7 @@ func (m *Manager) handleRekeyInit(ctx context.Context, p *Peer, in *envelope.Inn
 	}
 	id := m.newID(now)
 	aw := &AwaitingHS{ID: id, PeerID: p.ID, Purpose: handshake.PurposeRekey, Created: now, Resp: rs, OwnChain: m.ownChainNow(),
-		NamedConfirmed: namedConf, InitTS: in.TS, SigIK: append([]byte(nil), m.keys.ik.Public().(ed25519.PublicKey)...),
+		NamedConfirmed: namedConf, InitTS: in.TS, Gated: p.hasConfirm(), SigIK: append([]byte(nil), m.keys.ik.Public().(ed25519.PublicKey)...),
 		Signer: append([]byte(nil), body.From.IK...), Th1: func() []byte { t := pi.Th1(); return t[:] }()}
 	for _, r := range body.Rotations {
 		aw.Links = append(aw.Links, r.Marshal())
@@ -781,7 +786,7 @@ func (m *Manager) responderEstablish(p *Peer, aw *AwaitingHS, fr *handshake.FinR
 		m.abandonPending(p, "peer_activated", false, now)
 	}
 	if aw.NamedConfirmed && !m.emu28() {
-		m.ruleE(p, aw.InitTS, now)
+		m.ruleE(p, aw.InitTS, aw.Gated, now)
 	}
 	signer := aw.Signer
 	if signer == nil {
@@ -797,8 +802,9 @@ func (m *Manager) responderEstablish(p *Peer, aw *AwaitingHS, fr *handshake.FinR
 	activate(m.responderActivation(p, signer, now))
 	m.queueConfirm(p, now)
 	for id, og := range m.st.Outgoing {
-		// A verified hs.fin comes first: the vault's own rekey is abandoned.
-		if og.New == nil && og.PeerID == p.ID && og.Purpose == handshake.PurposeRekey && !og.Replaced {
+		// A verified hs.fin comes first, whatever the two purposes (0.86.6
+		// S6): the vault's own open handshake is abandoned.
+		if og.New == nil && og.PeerID == p.ID && !og.Replaced {
 			m.abandonOutgoing(id, now)
 		}
 	}
@@ -947,6 +953,11 @@ func (m *Manager) activate(p *Peer, ep *handshake.Epoch, purpose handshake.Purpo
 		kr.Activate(ep, now)
 	}
 	id := ep.ID()
+	if r := p.Revert; r != nil && !bytes.Equal(r.New, id[:]) {
+		// A later activation (as initiator or responder) ends the keep
+		// (S1, review 7): the copies are sealed under this epoch.
+		m.keepToHeld(p, false, now)
+	}
 	if !isNew && !m.restoring && !m.emu28() { // 0ee0078 handshakes.go:712: no such step
 		// 0.86.0: a rekey of the vault's own still open was made from an
 		// earlier epoch, which no longer moves on: it is abandoned (it
@@ -1078,22 +1089,18 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 			m.audit(now, "hs_resp_aborted", og.PeerID)
 			delete(m.st.Outgoing, id)
 			delete(m.outgoing, id)
+			for _, t := range og.Issued {
+				m.revokeIssued(t, og.PeerID, now) // always (review 3)
+			}
 			if og.New != nil {
 				m.denyPeerTokens(og.New, now)
 				m.notifyDevices("connection.event", connEvent(og.PeerID, "failed"), "", now)
-			} else if sp := m.peer(og.PeerID); sp != nil {
-				switch {
-				case og.RuleRC != "":
-					// A rule-E or rule-L reconnect refused: the connection
-					// goes stale (§6.3.1, §3.4.1 rule L).
-					m.markStale(sp, now)
-				case og.Purpose == handshake.PurposeReconnect && m.currentDemoted(sp):
-					// 0.86.5: the reconnect after a demotion refused: stale.
-					m.markStale(sp, now)
-				case og.Purpose == handshake.PurposeRekey:
-					// Rule L: an hs.resp aborted for an ik mismatch.
-					m.ruleL(sp, now)
-				}
+			} else if sp := m.peer(og.PeerID); sp != nil && og.Purpose == handshake.PurposeRekey {
+				// Rule L: an hs.resp aborted for an ik mismatch. (0.86.6 S5:
+				// a refused reconnect of rule E, rule L or a demotion no
+				// longer makes the connection stale: a try fails only when
+				// it expires or at B.)
+				m.ruleL(sp, now)
 			}
 		} else {
 			m.audit(now, "hs_resp_dropped", og.PeerID)
@@ -1222,10 +1229,19 @@ fin:
 	// (§6.3.1 "Deployment").
 	old, oldChain := append([]byte(nil), p.LastEpochID...), p.OwnChainAtEpoch
 	o := actOpts{signer: res.ResponderIK, mine: true, unconfirmed: true}
+	if m.currentDemoted(p) && og.Purpose == handshake.PurposeReconnect && !m.emu28() {
+		// 0.86.6 S4: the reconnect after a demotion, toward a peer without
+		// the gate: no revert keep (the epoch it would go back to is the
+		// named one, which has no send keys); the held messages stay
+		// unsent until something arrives under the new epoch.
+		p.HoldFor = &HoldFor{Epoch: append([]byte(nil), newID[:]...), Named: append([]byte(nil), og.Named...), FinAt: now}
+		m.activate(p, res.Epoch, og.Purpose, og.Issued, "", chainOr(og.OwnChain, len(m.st.Rotations)), o, now)
+		return ackAfterFlush
+	}
 	if len(old) > 0 && !m.emu28() {
 		o.how, o.until = actKeepSend, now.Add(ConfirmedKeysFor)
 		if p.Revert != nil {
-			m.endRevertKeep(p, now) // one keep at a time: the earlier old epoch goes as usual
+			m.keepToHeld(p, false, now) // one keep at a time: the earlier one's copies go to this epoch
 		}
 	}
 	if len(old) > 0 && !m.emu28() {

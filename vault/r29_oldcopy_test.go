@@ -91,7 +91,8 @@ func (f *r29Fx) deliverAt(from, to, k int, id string) int {
 		if c, err := relayauth.ParseToken(dep.token, toPK); err == nil {
 			jti = c.Jti
 		}
-		msgs = append(msgs, Message{MsgID: fmt.Sprintf("%s-%d", id, i), Sender: relayauth.EncodeKey(f.pk(from)), JTI: jti, Payload: dep.payload})
+		msgs = append(msgs, Message{MsgID: fmt.Sprintf("%s-%d", id, i), Sender: relayauth.EncodeKey(f.pk(from)), JTI: jti, Payload: dep.payload,
+			DepositedAt: f.clk.UTC().Format(time.RFC3339Nano)})
 	}
 	d.relay.deposits = kept
 	d.relay.mu.Unlock()
@@ -587,7 +588,7 @@ func TestR29RevertedEpochEvidence(t *testing.T) {
 	for _, c := range []struct {
 		name          string
 		gated, before bool
-	}{{"later-gated", true, false}, {"later-ungated", false, false}, {"earlier", false, true}} {
+	}{{"later-features-seen-after", true, false}, {"later-ungated", false, false}, {"earlier", false, true}} {
 		t.Run(c.name, func(t *testing.T) {
 			f := newR29Fx(t, false, true)
 			f.longTokens()
@@ -624,9 +625,12 @@ func TestR29RevertedEpochEvidence(t *testing.T) {
 			f.deliver(2, 0, kNote)
 			switch {
 			case c.gated:
-				if !f.suspendedRef(0, "epoch") {
+				// 0.86.6 S11: the gate is judged at hs.init; a revert's
+				// handshake was ungated, so a later hs_confirm changes
+				// nothing: rule E's reconnect, no suspension.
+				if f.p(0).suspended() || !f.audited(0, "reconnect_rule_e") {
 					f.dump()
-					t.Fatal("not fork evidence")
+					t.Fatal("the gate was judged at the message, not at hs.init")
 				}
 			case c.before:
 				if f.p(0).suspended() || f.audited(0, "reconnect_rule_e") || !f.activity(0, "drop.peer_key", "superseded_epoch") {

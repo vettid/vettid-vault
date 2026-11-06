@@ -316,10 +316,18 @@ type Peer struct {
 	RuleL *RuleLState `json:"rule_l,omitempty"`
 	// Seen are the valid identity links of the peer that passed rule C but
 	// were not followed (one in an unfinished handshake's rotations, or in
-	// a message then refused), at most one per old key (§3.4.1 rule C,
-	// 0.86.0): a later different successor of that key is a second
-	// successor.
+	// an identity.rotate then refused; a rekey's only once it passed
+	// rekeyPrecheck), at most one per old key, only from the current ik,
+	// an ancestor or a key a seen link reaches, and at most MaxSeen
+	// (§3.4.1 rule C, 0.86.0): a later different successor of that key is
+	// a second successor.
 	Seen []json.RawMessage `json:"seen_links,omitempty"`
+	// HoldFor: a reconnect after a demotion completed toward a peer
+	// without the gate (0.86.6 S4): the held messages stay unsent until
+	// something arrives under the new epoch (Epoch); a message under the
+	// epoch it named (Named) more than T + 2 days after its hs.fin shows
+	// the peer never activated it.
+	HoldFor *HoldFor `json:"hold_for,omitempty"`
 	// IDResend counts S5's identity.rotate resends to the peer for the
 	// vault's latest rotation (0.86.0).
 	IDResend *IDResend `json:"id_resend,omitempty"`
@@ -330,6 +338,13 @@ type DroppedAnswer struct {
 	PeerID string                  `json:"peer_id"`
 	Check  handshake.FinCheckState `json:"check"`
 	Until  time.Time               `json:"until"`
+}
+
+// HoldFor is Peer.HoldFor.
+type HoldFor struct {
+	Epoch []byte    `json:"epoch"`
+	Named []byte    `json:"named"`
+	FinAt time.Time `json:"fin_at"`
 }
 
 // IDResend is S5's resend bookkeeping: for which rotation (the length of
@@ -386,6 +401,9 @@ type EpochMeta struct {
 	// OwnChain is the own rotation count whose ik signed its handshake: a
 	// reconnect naming it carries the vault's links from there.
 	OwnChain int `json:"own_chain,omitempty"`
+	// GatedAtE: the gate as judged at the hs.init of the handshake whose
+	// rule E destroyed it (0.86.6 S11).
+	GatedAtE bool `json:"gated_at_e,omitempty"`
 }
 
 // PendingEpoch is an initiator's pending epoch (§6.3.1).
@@ -675,6 +693,9 @@ type AwaitingHS struct {
 	// followed at hs.fin.
 	Signer []byte            `json:"signer,omitempty"`
 	Links  []json.RawMessage `json:"links,omitempty"`
+	// Gated: the peer had advertised hs_confirm when its hs.init was
+	// answered (0.86.6 S11: rule E's branch and S5 judge the gate there).
+	Gated bool `json:"gated,omitempty"`
 }
 
 // PendingReconnect is a reconnect hs.init's effects, held until hs.fin.
@@ -837,12 +858,9 @@ type OutboxEntry struct {
 	Held []byte `json:"held,omitempty"`
 	// HeldExp is the held message's exp (zero: none): past it the entry
 	// is discarded, not sealed (0.86.2).
-	HeldExp time.Time `json:"held_exp,omitzero"`
-	// HeldDevice: the held message is a device's content (sent while
-	// handling a device's request): keepCopy keeps its copy over 64 KiB.
-	HeldDevice bool   `json:"held_device,omitempty"`
-	FinEpoch   []byte `json:"fin_epoch,omitempty"`
-	Handshake  bool   `json:"handshake,omitempty"`
+	HeldExp   time.Time `json:"held_exp,omitzero"`
+	FinEpoch  []byte    `json:"fin_epoch,omitempty"`
+	Handshake bool      `json:"handshake,omitempty"`
 }
 
 // AuditEntry records a dropped or refused message (§6.3, §6.6, §7.3).

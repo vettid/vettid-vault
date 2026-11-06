@@ -37,14 +37,15 @@ func (m *Manager) droppedAnswerFin(env *envelope.Envelope, raw []byte, sender ed
 		if !d.Check.Matches(env.RecipientKid(), env.SenderKid()) {
 			continue
 		}
-		// The record (k_i2r with it) is erased at the first matching
-		// hs.fin, whatever its outcome (the lead's call), or at its end.
+		if d.Check.CheckFin(raw, sender, now) != nil {
+			// Not the initiator's (sender, opening or sig_I): dropped; the
+			// record stays, so a forged match cannot erase it (review 6).
+			m.note(now, "hs_fin_dropped", d.PeerID)
+			return true
+		}
+		// Verified: the record (k_i2r with it) is erased now, or at its end.
 		m.st.DroppedAnswers = append(m.st.DroppedAnswers[:i:i], m.st.DroppedAnswers[i+1:]...)
 		m.dirty = true
-		if d.Check.CheckFin(raw, sender, now) != nil {
-			m.note(now, "hs_fin_dropped", d.PeerID)
-			return true // not verified: dropped
-		}
 		p := m.peer(d.PeerID)
 		if p == nil {
 			return true

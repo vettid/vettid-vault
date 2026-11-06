@@ -747,7 +747,8 @@ func TestR29RuleEEvidence(t *testing.T) {
 		f.longTokens()
 		f.do(1, func(m *Manager, p *Peer) {
 			e := p.epochMeta(p.LastEpochID)
-			e.Destroyed, e.DestroyTS = true, f.clk.Add(-time.Hour)
+			// GatedAtE: the gate as judged at the destroying hs.init (S11).
+			e.Destroyed, e.DestroyTS, e.GatedAtE = true, f.clk.Add(-time.Hour), !ungated
 		})
 		f.note(0, "late")
 		f.deliver(0, 1, kNote)

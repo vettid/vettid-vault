@@ -133,7 +133,15 @@ func TestR29F9TokenExpiredReconnects(t *testing.T) {
 	r.mu.Lock()
 	r.failMailbox = map[string]error{mb: &relayclient.Error{Status: 401, Code: CodeTokenExpired}}
 	r.mu.Unlock()
+	// 0.86.6 S5: while the token's exp has not passed on the vault's own
+	// clock, token_expired keeps the pending epoch.
 	f.note(0, "x")
+	if f.p(0).Pending == nil {
+		t.Fatal("token_expired abandoned the pending epoch before its exp on our clock")
+	}
+	f.do(0, func(_ *Manager, p *Peer) { p.Standing.Exp = f.clk.Add(-time.Second) })
+	f.advance(2 * time.Hour) // the deposit's retry: refused again, now past exp
+	f.do(0, func(*Manager, *Peer) {})
 	r.mu.Lock()
 	r.failMailbox = nil
 	r.mu.Unlock()

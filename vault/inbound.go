@@ -631,12 +631,7 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 	handled = true
 	m.replInHandler = false
 	m.heldInHandler, m.heldBefore = false, nil
-	// What a handler sends a connection while handling a device's request
-	// is that device's content (keepCopy's 64 KiB rule excuses only the
-	// vault's own, 0.86.1).
-	m.forDevice = p.Kind != KindConnection
 	body, herr := te.handler.Handle(ctx, s, in)
-	m.forDevice = false
 	if herr != nil && !errors.Is(herr, ErrDeferred) {
 		// Release R (§11.14.2): a handler that failed after step 1 of a
 		// DEK replacement changes nothing more: the `next` part is dropped

@@ -264,6 +264,13 @@ func (m *Manager) abandonPending(p *Peer, why string, restart bool, now time.Tim
 	}
 	if e := p.epochMeta(pe.ID); e != nil {
 		e.Pending, e.Abandoned, e.Superseded = false, true, now
+		if why == "link" {
+			// 0.86.6 S3: abandoned by a link (old-copy suspicion): messages
+			// under it are refused (ancestor_ik). Every other abandon keeps
+			// its receive keys and processes authenticated messages under
+			// it without confirming it.
+			e.Demoted, e.DemotedAt, e.DemotedMsg = true, time.Time{}, ""
+		}
 	}
 	for _, t := range pe.Issued {
 		// The tokens its hs.init carried (a reconnect's standing and
@@ -279,9 +286,9 @@ func (m *Manager) abandonPending(p *Peer, why string, restart bool, now time.Tim
 	p.Pending = nil
 	m.note(now, "pending_abandoned_"+why, p.ID)
 	m.dirty = true
-	if pe.Purpose == handshake.PurposeReconnect && m.currentDemoted(p) {
-		// 0.86.5: an abandoned try of the reconnect after a demotion
-		// counts as a failed one (at the third: stale).
+	if pe.Purpose == handshake.PurposeReconnect && why == "b_passed" && m.currentDemoted(p) {
+		// 0.86.6 S5: a try of the reconnect after a demotion fails at its
+		// handshake's expiry or at B only (at the third: stale).
 		m.demotedReconnectExpired(p, now)
 	}
 	if !restart || p.State != PeerActive || p.suspended() {
@@ -349,7 +356,7 @@ func (m *Manager) reconfirmAll(now time.Time) {
 // not yet sent is dropped with its outbox entry. Their receive keys are
 // kept as a previous epoch's, so that a later message under one is still
 // authenticated (fork evidence or a refusal).
-func (m *Manager) ruleE(p *Peer, initTS, now time.Time) {
+func (m *Manager) ruleE(p *Peer, initTS time.Time, gated bool, now time.Time) {
 	ci := p.epochIndex(p.confirmedID())
 	if ci < 0 {
 		return
@@ -360,7 +367,7 @@ func (m *Manager) ruleE(p *Peer, initTS, now time.Time) {
 		if e.Destroyed || e.Pending {
 			continue
 		}
-		e.Destroyed, e.DestroyTS = true, initTS
+		e.Destroyed, e.DestroyTS, e.GatedAtE = true, initTS, gated
 		if e.Superseded.IsZero() {
 			e.Superseded = now
 		}
@@ -373,7 +380,7 @@ func (m *Manager) ruleE(p *Peer, initTS, now time.Time) {
 			}
 		}
 		if p.Revert != nil && bytes.Equal(p.Revert.New, e.ID) {
-			p.Revert = nil
+			m.keepToHeld(p, false, now) // S1: the copies go to the new epoch, audited
 		}
 		m.note(now, "epoch_destroyed", p.ID)
 	}
@@ -417,6 +424,20 @@ func (m *Manager) beforeAccept(p *Peer, ep *handshake.Epoch, in *envelope.Inner,
 		return true
 	}
 	fin := in.Type == handshake.TypeFin
+	if h := p.HoldFor; h != nil && !fin {
+		switch {
+		case bytes.Equal(h.Epoch, id[:]):
+			p.HoldFor = nil // the peer activated it: the held messages go
+			m.sealHeld(p)
+		case bytes.Equal(h.Named, id[:]) && in.TS.Sub(h.FinAt) > RevertAfter:
+			// It never activated it: the new epoch is destroyed (as a
+			// revert's), and the vault is demoted again (a new try).
+			if e := p.epochMeta(h.Epoch); e != nil {
+				e.Destroyed, e.DestroyTS, e.Demoted = true, in.TS, true
+			}
+			p.HoldFor = nil
+		}
+	}
 	if r := p.Revert; r != nil && !fin {
 		switch {
 		case bytes.Equal(r.New, id[:]):
@@ -454,7 +475,9 @@ func (m *Manager) destroyedEpochMessage(p *Peer, meta *EpochMeta, in *envelope.I
 		m.refusePeerKey(p, "superseded_epoch", false, now)
 		return
 	}
-	if p.hasConfirm() {
+	if meta.GatedAtE {
+		// The gate as judged at the hs.init of the handshake whose rule E
+		// destroyed it (0.86.6 S11).
 		m.suspendForkRef(p, "epoch", now)
 		return
 	}

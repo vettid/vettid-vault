@@ -240,25 +240,27 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 			}
 			continue // not stored yet (queue)
 		}
-		if e.Op == OpDeposit && (blocked[key] || awaiting[key] && e.Token == "" || held[key] && !e.Handshake) {
+		if e.Op == OpDeposit && (blocked[key] || awaiting[key] && e.Token == "" || e.PeerID != "" && held[e.PeerID] && !e.Handshake) {
 			continue
 		}
 		if e.Op == OpDeposit && e.Held != nil && !e.HeldExp.IsZero() && !now.Before(e.HeldExp) {
 			e.Done, e.Held, m.dirty = true, nil, true // held past its exp: discarded (§3.4.1)
+			m.audit(now, "held_expired", e.PeerID)    // S12: counted and audited
 			continue
 		}
 		if e.Op == OpDeposit && e.Held != nil {
 			// Waiting, unsealed, for an epoch that is not demoted (§3.4.1);
-			// later deposits to the mailbox wait behind it, the handshake
-			// that makes that epoch excepted.
-			held[key] = true
+			// the peer's later deposits wait behind it (by peer, not by
+			// mailbox: a new invitation's first contact to the same
+			// mailbox is not held, review 2), the handshake excepted.
+			held[e.PeerID] = true
 			continue
 		}
 		if e.Op == OpDeposit && !e.Handshake && m.pendingReconnectHold(e.PeerID) {
 			// §6.3.1: while a reconnect's epoch is pending, nothing but the
 			// handshake goes to the peer; the rest waits in order, and the
 			// handshake's messages pass it.
-			held[key] = true
+			held[e.PeerID] = true
 			continue
 		}
 		if !e.NotAfter.IsZero() && !now.Before(e.NotAfter) {
@@ -368,8 +370,13 @@ func (m *Manager) deposit(ctx context.Context, e *OutboxEntry, now time.Time) er
 	switch RelayCode(err) {
 	case CodeTokenExpired:
 		if p != nil && e.Token == "" {
-			if p.Kind == KindConnection {
+			// 0.86.6 S5: with an epoch pending, token_expired abandons it
+			// only if the token's exp has passed on the vault's own clock
+			// (as rule J); a device is rekeyed, never reconnected (S7).
+			if p.Kind == KindConnection && (p.Pending == nil || !now.Before(p.Standing.Exp)) {
 				m.startReconnect(p, now) // §6.6 "When to use it"
+			} else if p.Kind != KindConnection && p.Pending != nil && !now.Before(p.Standing.Exp) {
+				m.abandonPending(p, "token_expired", true, now) // a device: rekeyed from the current epoch
 			}
 			e.NotBefore = now.Add(time.Hour) // retried when a fresh token arrives
 			e.AwaitToken = true
@@ -390,6 +397,19 @@ func (m *Manager) deposit(ctx context.Context, e *OutboxEntry, now time.Time) er
 			if p.Kind == KindConnection {
 				m.notifyDevices("connection.event", connEvent(p.ID, "stale"), "", now)
 				m.record(Activity{Kind: "connection.stale", ConnectionID: p.ID, Audit: true, Feed: true}, now)
+			}
+		}
+		e.Done = true
+	case CodeQuotaExceeded:
+		// 0.86.6 S9: the reconnect token's quota is spent: for a reconnect
+		// of rule E, rule L or after a demotion, the last try has failed.
+		// (A reconnect's hs.init carries its own token and no peer id.)
+		for _, og := range m.st.Outgoing {
+			if og.InitOutbox == e.ID && (og.RuleRC != "" || og.Why != "") {
+				if op := m.peer(og.PeerID); op != nil {
+					m.markStale(op, now)
+				}
+				break
 			}
 		}
 		e.Done = true

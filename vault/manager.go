@@ -245,9 +245,6 @@ type Manager struct {
 	// noLinkRestart: followLinks runs inside handleResp, whose own
 	// handshake is about to make the new epoch: it restarts nothing.
 	noLinkRestart bool
-	// forDevice: a handler is handling a device's request, so what it sends
-	// a connection is that device's content (§6.3.1 "Deployment").
-	forDevice bool
 	// reconfirm are the peers a batch held a message from under their
 	// confirmed epoch while it is not current: each gets hs.confirm again
 	// after the batch unless one is still in the outbox (§6.3.1).

@@ -166,9 +166,16 @@ func (m *Manager) evidenceFirst(p *Peer, in *envelope.Inner, now time.Time) bool
 	case "identity.rotate":
 		links, _ = rotateLinks(in.Body)
 	case handshake.TypeInit:
+		// A rekey's links are checked here and recorded as seen only once
+		// it has passed rekeyPrecheck (handleRekeyInit, review 5).
 		if b, err := handshake.ParseInit(in.Body); err == nil {
-			links = b.Rotations
+			for _, r := range b.Rotations {
+				if m.rotationConflictRec(p, r, false, now) {
+					return p.Conflict != nil
+				}
+			}
 		}
+		return false
 	}
 	for _, r := range links {
 		if m.rotationConflict(p, r, now) {
@@ -223,6 +230,12 @@ func (m *Manager) followLinks(p *Peer, app []*handshake.Rotation, msgEpoch []byt
 		// after the link: an old copy's. It stops being current.
 		if posAfter(e.EstAt, e.EstMsg, m.relayAt, m.msgID) && !e.EstAt.IsZero() {
 			e.Demoted, e.DemotedAt, e.DemotedMsg = true, m.relayAt, m.msgID
+			// S8 (0.86.6): a demotion by position is audited as a fork
+			// sign (ref epoch), without a feed item or a suspension.
+			m.record(Activity{Kind: "connection.fork_suspected", ConnectionID: connID(p), DeviceID: devID(p), Ref: "epoch", Audit: true}, now)
+			if p.Revert != nil && bytes.Equal(p.Revert.New, e.ID) {
+				m.keepToHeld(p, false, now) // S1
+			}
 			if bytes.Equal(e.ID, p.LastEpochID) {
 				demotedCurrent = true
 				if kr := m.sessions[p.ID]; kr != nil {
@@ -262,15 +275,19 @@ func (m *Manager) f1Demote(p *Peer, app []*handshake.Rotation, msgEpoch []byte, 
 		if kr != nil {
 			m.rehold(p, kr.Current())
 		}
-		if p.Revert != nil && bytes.Equal(p.Revert.Old, msgEpoch) && kr != nil && kr.Reinstate(epochIDOf(msgEpoch), now) {
+		if r := p.Revert; r != nil && bytes.Equal(r.Old, msgEpoch) && kr != nil && kr.Reinstate(epochIDOf(msgEpoch), now) {
 			// The epoch it traveled under is current again (it was kept
-			// whole, §6.3.1 "Deployment").
-			p.LastEpochID, p.OwnChainAtEpoch = append([]byte(nil), msgEpoch...), p.Revert.OldOwnChain
-			p.Revert = nil
+			// whole, §6.3.1 "Deployment"); the copies of what was sent
+			// under the demoted one are sealed in it (S1).
+			oldChain := r.OldOwnChain
+			m.keepToHeld(p, true, now)
+			p.LastEpochID, p.OwnChainAtEpoch = append([]byte(nil), msgEpoch...), oldChain
 			if e := p.epochMeta(msgEpoch); e != nil {
 				e.Superseded = time.Time{}
 			}
 			m.sealHeld(p)
+		} else if r != nil && bytes.Equal(r.New, cur.ID) {
+			m.keepToHeld(p, false, now) // S1: held for the next epoch
 		}
 		for id, og := range m.st.Outgoing {
 			if og.New == nil && og.PeerID == p.ID && og.Purpose == handshake.PurposeRekey {
@@ -297,14 +314,18 @@ func (m *Manager) holdDemoted(p *Peer, in *envelope.Inner, wake string) {
 	if te := m.registry[in.Type]; te != nil && te.spec.Ephemeral {
 		return // ephemeral: not sent
 	}
+	m.holdInner(p, in, wake)
+}
+
+// holdInner queues in, unsealed, as a held entry for p.
+func (m *Manager) holdInner(p *Peer, in *envelope.Inner, wake string) {
 	c := *in
 	c.Seq, c.Features = 0, nil
 	j, err := c.Marshal(envelope.ModeSealed)
 	if err != nil {
 		return
 	}
-	m.queueDeposit(&OutboxEntry{PeerID: p.ID, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Held: j, HeldExp: in.Exp, Wake: wake,
-		HeldDevice: m.forDevice && p.Kind == KindConnection}, m.now())
+	m.queueDeposit(&OutboxEntry{PeerID: p.ID, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Held: j, HeldExp: in.Exp, Wake: wake}, m.now())
 }
 
 // rehold turns p's outbox entries sealed under the epoch ep (the current
@@ -350,6 +371,11 @@ func (m *Manager) sealHeld(p *Peer) {
 	if kr == nil || kr.Current() == nil {
 		return
 	}
+	if h := p.HoldFor; h != nil {
+		if id := kr.Current().ID(); bytes.Equal(h.Epoch, id[:]) {
+			return // S4: until something arrives under it
+		}
+	}
 	now := m.now()
 	for _, e := range m.st.Outbox {
 		if e.Done || e.PeerID != p.ID || e.Held == nil {
@@ -357,6 +383,7 @@ func (m *Manager) sealHeld(p *Peer) {
 		}
 		if !e.HeldExp.IsZero() && !now.Before(e.HeldExp) {
 			e.Done, e.Held = true, nil
+			m.audit(now, "held_expired", p.ID) // S12
 			m.dirty = true
 			continue
 		}
@@ -378,11 +405,8 @@ func (m *Manager) sealHeld(p *Peer) {
 			m.dirty = true
 			continue
 		}
-		was := m.forDevice
-		m.forDevice = e.HeldDevice
 		m.keepCopy(p, in, e.Wake)
-		m.forDevice = was
-		e.Payload, e.Held, e.HeldExp, e.HeldDevice = raw, nil, time.Time{}, false
+		e.Payload, e.Held, e.HeldExp = raw, nil, time.Time{}
 		e.RelayURL, e.Mailbox = p.Relay.URL, p.Relay.Mailbox
 		m.dirty = true
 	}
@@ -564,6 +588,11 @@ func (m *Manager) acceptOwnCopy(p *Peer, ctx []byte, now time.Time) {
 	if p.Pending != nil {
 		m.abandonPending(p, "own_copy", false, now)
 	}
+	if r := p.Revert; r != nil {
+		if e := p.epochMeta(r.New); e != nil && e.Demoted {
+			m.keepToHeld(p, false, now) // S1
+		}
+	}
 	if kr := m.sessions[p.ID]; kr != nil && m.currentDemoted(p) {
 		m.rehold(p, kr.Current()) // its undeposited entries wait for the next epoch (review RR2 L4)
 	}
@@ -594,24 +623,14 @@ func (m *Manager) rekeyOtherEpoch(p *Peer, in *envelope.Inner, ep *handshake.Epo
 	if !own {
 		return false, false
 	}
+	// 0.86.6 S2: the vault always takes the named epoch as its last, by id,
+	// and reconnects naming it; the rekey is acked and dropped unanswered.
+	// (A branch answering it when the epoch still had its rk was removed:
+	// unreachable, since anything received under a later epoch both
+	// confirms it and ends the revert keep that held that rk.)
 	m.acceptOwnCopy(p, id[:], now)
-	if !ep.HasRK() || !ep.CanSend() {
-		p.LastEpochID = append([]byte(nil), id[:]...) // its last, by id
-		m.reconnectNaming(p, id[:], "own_copy", now)
-		return false, true
-	}
-	if kr := m.sessions[p.ID]; kr != nil && kr.Reinstate(id, now) {
-		defer m.sealHeld(p)
-		p.LastEpochID = append([]byte(nil), id[:]...)
-		if p.Revert != nil {
-			p.OwnChainAtEpoch = p.Revert.OldOwnChain
-			p.Revert = nil
-		}
-		if e := p.epochMeta(id[:]); e != nil {
-			e.Superseded = time.Time{}
-		}
-		return true, true
-	}
+	p.LastEpochID = append([]byte(nil), id[:]...)
+	m.reconnectNaming(p, id[:], "own_copy", now)
 	return false, true
 }
 
@@ -694,11 +713,11 @@ func (m *Manager) s5(p *Peer, now time.Time) (reconnect bool) {
 		reconnect = reconnect || pe.Purpose == handshake.PurposeReconnect
 		m.abandonPending(p, "s5", false, now)
 	}
-	if p.hasConfirm() {
-		for id, aw := range m.st.Awaiting {
-			if aw.New == nil && aw.PeerID == p.ID {
-				m.abandonAwaiting(id, now)
-			}
+	for id, aw := range m.st.Awaiting {
+		// Toward a peer that advertised hs_confirm when its hs.init was
+		// answered (0.86.6 S11), the answer is dropped.
+		if aw.New == nil && aw.PeerID == p.ID && aw.Gated {
+			m.abandonAwaiting(id, now)
 		}
 	}
 	return reconnect

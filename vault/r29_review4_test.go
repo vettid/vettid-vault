@@ -776,3 +776,87 @@ func TestR29RefusedReconnectLinksNotForForkCtx(t *testing.T) {
 		t.Fatal("the links of a reconnect whose ctx is fork evidence were followed")
 	}
 }
+
+// 0.88.2 §3.4.1 "Fork by ctx" (owner decision a): an epoch the vault
+// began and abandoned while pending is skipped. The model's trace (seed
+// 6415563950766347103, rotation burst): Q rotates and rekeys P from E0;
+// P answers; Q holds E1 pending (signer P's ik a); Q rotates again, so S5
+// abandons E1 (P never activated it); P rotates a→b and its rekey from E0
+// is delayed; Q and P complete another rekey (E2, signer b, confirmed at
+// both); P's delayed rekey (ctx E0) arrives: Q does not suspend.
+func TestR29ForkByCtxSkipsOwnAbandoned(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	f.rotate(0) // Q rotates; its rekey from E0
+	f.deliver(0, 1, kAny)
+	f.deliver(1, 0, kHSResp) // E1 pending at Q, signer a
+	if f.p(0).Pending == nil {
+		t.Fatal("setup: no pending E1")
+	}
+	e1 := append([]byte(nil), f.p(0).Pending.ID...)
+	f.lose(0, 1, kAny) // its hs.fin: P never activates E1
+	f.lose(1, 0, kAny)
+	f.rotate(0) // S5 abandons E1
+	if e := f.p(0).epochMeta(e1); e == nil || !e.Mine || !e.Abandoned {
+		t.Fatal("setup: E1 not abandoned")
+	}
+	f.deliver(0, 1, kRotate)
+	f.lose(0, 1, kAny) // Q's restarted rekey: not under test
+	f.rotate(1)        // P: a→b; its rekey from E0 is delayed
+	delayed := f.takeKind(1, 0, kHSInit)
+	if len(delayed) != 1 {
+		t.Fatal("setup: no rekey from P")
+	}
+	f.do(1, func(m *Manager, p *Peer) {
+		for id, og := range m.st.Outgoing {
+			if og.PeerID == p.ID {
+				m.abandonOutgoing(id, f.clk)
+			}
+		}
+	})
+	f.deliver(1, 0, kRotate) // Q follows a→b
+	f.do(0, func(m *Manager, p *Peer) {
+		for id, og := range m.st.Outgoing {
+			if og.PeerID == p.ID {
+				m.abandonOutgoing(id, f.clk)
+			}
+		}
+		m.startRekey(p, f.clk)
+	})
+	f.settle() // E2 (signer b), confirmed at both
+	if f.p(0).Pending != nil || !f.sameEpoch() || f.p(0).suspended() {
+		f.dump()
+		t.Fatal("setup: no new epoch confirmed")
+	}
+	f.process(0, delayed[0])
+	if f.p(0).suspended() {
+		f.dump()
+		t.Fatal("an epoch the vault began and abandoned while pending counted as fork evidence")
+	}
+}
+
+// The rule is otherwise unchanged: a ctx older than an epoch Q began that
+// became current, with an ancestor of the reached ik as its signer,
+// still suspends.
+func TestR29ForkByCtxOwnCurrentEpochSuspends(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	snap := f.snapshot(0)
+	f.rekey(1) // Q begins E1; it becomes current and confirmed
+	f.settle()
+	f.note(0, "under-E1")
+	f.settle()
+	if e := f.p(1).epochMeta(f.cur(1)); e == nil || !e.Mine || e.Abandoned {
+		t.Fatal("setup: E1 is not one Q began that became current")
+	}
+	f.startCopy(0, snap)
+	f.rotate(2)
+	f.lose(2, 1, kRotate)
+	if f.deliver(2, 1, kHSInit) != 1 {
+		t.Fatal("setup: no rekey from the copy")
+	}
+	if !f.suspendedRef(1, "epoch") {
+		f.dump()
+		t.Fatal("a ctx older than an epoch Q began that became current did not suspend")
+	}
+}

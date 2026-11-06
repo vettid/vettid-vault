@@ -635,7 +635,9 @@ func (m *Manager) h5(p *Peer, now time.Time) {
 // ctx names epoch ctx: the current or confirmed epoch is ordinary; one
 // older than the confirmed epoch, where an epoch after it up to the
 // confirmed one has an ancestor of P's ik as its signer, is fork
-// evidence. There is no exception for an epoch the vault began.
+// evidence. There is no exception for an epoch the vault began that
+// became current; one it began and abandoned while pending is skipped
+// (0.88.2, owner decision a).
 //
 // The ancestors are those of the ik the message reaches (Table B,
 // reached included): the stored chain's and the old_ik of every link the
@@ -649,6 +651,12 @@ func (p *Peer) forkEpoch(ctx []byte, reached []*handshake.Rotation) bool {
 		return false
 	}
 	for _, e := range p.Epochs[ic+1 : ik+1] {
+		if e.Mine && e.Abandoned {
+			// (0.88.2, owner decision a) an epoch the vault began and
+			// abandoned while pending never became current: P may never
+			// have activated it, so it is no evidence.
+			continue
+		}
 		if p.ancestor(e.Signer) {
 			return true
 		}

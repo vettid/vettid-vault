@@ -246,6 +246,10 @@ type VaultRecord struct {
 	// §6.3.1 "Responder"): the newest under which the vault sent anything
 	// but hs.fin. Nil: the current epoch.
 	Confirmed []byte `json:"confirmed,omitempty"`
+	// ConfirmAt is when the device last sent (queued) hs.confirm to the
+	// vault (§6.3.1 "Responder": again 12 days after it while its epoch
+	// is unconfirmed, vettid.org #554).
+	ConfirmAt time.Time `json:"confirm_at,omitzero"`
 	// Chain is the vault's identity links this device has followed
 	// (§3.4, S8): a rekey's or identity.rotate's leading links in it are
 	// not followed again.
@@ -1076,6 +1080,9 @@ func (d *Device) poll(ctx context.Context, skip func() bool) error {
 	if d.cfg.Persist != nil {
 		return d.pollPersist(ctx)
 	}
+	d.mu.Lock()
+	d.tickConfirmLocked(ctx)
+	d.mu.Unlock()
 	ferr := d.flushOutboxLocked(ctx) // a state saved under Persist may still hold some
 	msgs, err := d.own.Collect(ctx, d.cfg.PollWait, 32)
 	if err != nil {
@@ -1126,6 +1133,7 @@ func (d *Device) poll(ctx context.Context, skip func() bool) error {
 // transient deposit failures are retried later and not returned.
 func (d *Device) pollPersist(ctx context.Context) error {
 	d.mu.Lock()
+	d.tickConfirmLocked(ctx)
 	dirty := d.dirty
 	d.mu.Unlock()
 	if dirty {
@@ -1279,6 +1287,8 @@ func outboxKind(typ, re string) string {
 		return "token"
 	case typ == "relay.token.refresh":
 		return "refresh"
+	case typ == handshake.TypeConfirm:
+		return "hs.confirm"
 	}
 	return ""
 }

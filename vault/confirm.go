@@ -300,6 +300,36 @@ func (m *Manager) queueConfirm(p *Peer, now time.Time) {
 		return
 	}
 	m.queueDeposit(&OutboxEntry{PeerID: p.ID, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Payload: raw, Confirm: true}, now)
+	p.ConfirmAt = now
+	m.dirty = true
+}
+
+// ConfirmResend is how long after the last hs.confirm it queued a
+// responder queues one again while its epoch is unconfirmed (§6.3.1
+// "Responder", vettid.org #554): 12 days, so that one is in the relay
+// when the initiator collects after a lock of up to T. Not scaled.
+const ConfirmResend = 12 * 24 * time.Hour
+
+// tickConfirm: while p's current epoch is one the vault activated as
+// responder and its confirmed epoch is neither that epoch nor a later
+// one, hs.confirm is queued again ConfirmResend after the last one,
+// unless one is still in the outbox; not while the epoch is demoted or
+// the connection suspended.
+func (m *Manager) tickConfirm(p *Peer, now time.Time) {
+	if p.State != PeerActive || p.suspended() {
+		return
+	}
+	cur := p.epochMeta(p.LastEpochID)
+	if cur == nil || cur.Mine || cur.Demoted || cur.Destroyed || cur.Pending {
+		return
+	}
+	if ci := p.epochIndex(p.confirmedID()); ci >= p.epochIndex(p.LastEpochID) {
+		return
+	}
+	if now.Sub(p.ConfirmAt) < ConfirmResend || m.confirmQueued(p) {
+		return
+	}
+	m.queueConfirm(p, now)
 }
 
 // confirmQueued reports whether an hs.confirm to p is still in the outbox.

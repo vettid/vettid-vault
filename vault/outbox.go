@@ -490,6 +490,7 @@ func (m *Manager) housekeeping(now time.Time) {
 	for _, p := range m.allPeers() {
 		m.tickDemoted(p, now)
 		m.tickPending(p, now)
+		m.tickConfirm(p, now)
 		m.pruneEpochs(p, now)
 		if p.State != PeerActive {
 			continue

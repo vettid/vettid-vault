@@ -319,6 +319,10 @@ type Peer struct {
 	// (§3.4.1 rule C, 0.86.0): a later different successor of that key is
 	// a second successor.
 	Seen []json.RawMessage `json:"seen_links,omitempty"`
+	// ConfirmAt is when the vault last queued hs.confirm to the peer
+	// (§6.3.1 "Responder": again ConfirmResend after it while the epoch
+	// is unconfirmed).
+	ConfirmAt time.Time `json:"confirm_at,omitzero"`
 	// RC counts the failed tries of the vault's reconnects to the peer
 	// naming one epoch (§3.4.1 "The reconnect bound").
 	RC *ReconnectCount `json:"reconnect_tries,omitempty"`

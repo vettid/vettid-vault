@@ -96,7 +96,35 @@ func epochID(b []byte) (id [16]byte) {
 
 // sendConfirm sends hs.confirm (body {}, durable, not a request).
 func (d *Device) sendConfirm(ctx context.Context) {
+	if d.st.Vault != nil {
+		d.st.Vault.ConfirmAt = d.cfg.Now() // saved with the batch, or by tickConfirmLocked
+	}
 	_, _ = d.sendFull(ctx, "", handshake.TypeConfirm, json.RawMessage(`{}`), "", "", time.Time{})
+}
+
+// confirmResend is how long after the last hs.confirm the device sends
+// one again while its current epoch (a rekey of the vault's it activated
+// as responder) is not its confirmed epoch (§6.3.1 "Responder",
+// vettid.org #554). Not scaled.
+const confirmResend = 12 * 24 * time.Hour
+
+// tickConfirmLocked sends hs.confirm again confirmResend after the last
+// one while the current epoch is unconfirmed (Vault.Confirmed names an
+// earlier one), unless one is still in the outbox. d.mu is held.
+func (d *Device) tickConfirmLocked(ctx context.Context) {
+	v := d.st.Vault
+	if v == nil || v.Confirmed == nil || d.keyring.Current() == nil || d.cfg.Now().Sub(v.ConfirmAt) < confirmResend {
+		return
+	}
+	for _, o := range d.st.Outbox {
+		if o.Kind == "hs.confirm" {
+			return
+		}
+	}
+	d.sendConfirm(ctx)
+	if d.cfg.Persist != nil {
+		d.dirty = true // saved before the next collect (pollPersist)
+	}
 }
 
 // sendFeatures sends device.features with this client's list (§10.2).

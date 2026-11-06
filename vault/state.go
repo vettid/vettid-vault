@@ -29,7 +29,7 @@ type State struct {
 	// lifetime ends with only what checks their hs.fin (§3.4.1 O3a,
 	// 0.86.0): its kids, the key that opens it and the ik it pinned.
 	DroppedAnswers []DroppedAnswer `json:"dropped_answers,omitempty"`
-	WakeSeed  []byte `json:"wake_seed"`
+	WakeSeed       []byte          `json:"wake_seed"`
 	// RotationOwed is the owed mark (§11.14.10 "The owed mark"): a rotation
 	// of the vault's keys still to be made. Recovery is the recovery_id of
 	// a completed recovery (§11.14.6 step 6), written in its step-2 state

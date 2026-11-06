@@ -150,7 +150,10 @@ func (m *Manager) keepCopy(p *Peer, in *envelope.Inner, wake string) {
 	if err != nil {
 		return
 	}
-	if len(j) > RevertClaimCheck {
+	if len(j) > RevertClaimCheck && !(m.forDevice && p.Kind == KindConnection) {
+		// Content the vault itself produces, over 64 KiB, that this
+		// release cannot send by claim-check: not copied. A device's
+		// content keeps its copy (the caps apply).
 		r.Dropped++
 		m.note(m.now(), "revert_copy_too_large", p.ID)
 		m.dirty = true
@@ -291,7 +294,12 @@ func (m *Manager) reconnectNaming(p *Peer, ctx []byte, why string, now time.Time
 		m.note(now, "reconnect_not_started", p.ID)
 		return false
 	}
-	og.RuleRC, og.Named = why, append([]byte(nil), ctx...)
+	og.Named = append([]byte(nil), ctx...)
+	if why == ruleRCE || why == ruleRCL {
+		og.RuleRC = why // tried again up to 3 times; refused or the last: stale
+	} else {
+		og.Why = why
+	}
 	m.note(now, "reconnect_"+why, p.ID)
 	return true
 }

@@ -449,7 +449,7 @@ func (m *Manager) respondReconnect(pi *handshake.PendingInit, p *Peer, sender ed
 	id := m.newID(now)
 	oe := &OutboxEntry{Op: OpDeposit, PeerID: p.ID, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox,
 		Token:   st.Token, // the standing token the hs.init brought: ours may have expired
-		Payload: env}
+		Payload: env, Handshake: true}
 	m.queueDeposit(oe, now)
 	m.st.Awaiting[id] = &AwaitingHS{ID: id, PeerID: p.ID, Purpose: handshake.PurposeReconnect, Created: now, Resp: rs, Issued: issued,
 		OwnChain: m.ownChainNow(), RespOutbox: oe.ID, Reconnect: pend, Th1: th1[:],
@@ -607,7 +607,7 @@ func (m *Manager) handleRekeyInit(ctx context.Context, p *Peer, in *envelope.Inn
 		}
 	}
 	for _, og := range m.st.Outgoing {
-		if og.New == nil && og.PeerID == p.ID && og.RuleRC != "" {
+		if og.New == nil && og.PeerID == p.ID && (og.RuleRC != "" || og.Why != "") {
 			// A rule-E or rule-L reconnect is open: it replaces this rekey,
 			// which the peer cannot finish with the vault's current ik
 			// (the trust model's r8, point 2).
@@ -1128,16 +1128,21 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 			p.Reconnect = t
 		}
 	}
-	if !suite.EqualPublic(res.ResponderIK, p.IK) {
-		// A reconnect's links, or (S8, 0.85.0) a rekey's: sig_R verified
-		// under the key they lead to.
-		p.IK = res.ResponderIK
-		if res.ResponderKEM != nil {
-			p.KEM = res.ResponderKEM.Bytes()
+	// A reconnect's links, or (S8, 0.85.0) a rekey's: sig_R verified under
+	// the key they lead to. Rule C first, then they are followed with
+	// "Epochs after an ik link" and H5 (Table B "Reached"; review M5).
+	for _, r := range res.Resp.Rotations {
+		if m.rotationConflict(p, r, now) && p.Conflict != nil {
+			res.Epoch.Destroy()
+			return ackAfterFlush
 		}
+	}
+	if !suite.EqualPublic(res.ResponderIK, p.IK) {
 		known := parseRotations(p.Chain)
-		for _, r := range res.Resp.Rotations[handshake.KnownPrefix(known, res.Resp.Rotations):] {
-			p.Chain = append(p.Chain, r.Marshal())
+		m.followLinks(p, res.Resp.Rotations[handshake.KnownPrefix(known, res.Resp.Rotations):], nil, now)
+		if p.suspended() {
+			res.Epoch.Destroy()
+			return ackAfterFlush
 		}
 	}
 	// hs.fin goes first: what activation sends in the new epoch (the

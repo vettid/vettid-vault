@@ -311,7 +311,7 @@ func (m *Manager) abandonAwaiting(id string, now time.Time) {
 		r.Abort()
 	}
 	for _, t := range aw.Issued {
-		m.denyJTI(t.JTI, now)
+		m.revokeIssued(t, aw.PeerID, now)
 	}
 	m.dropOutboxEntry(aw.RespOutbox)
 	delete(m.awaiting, id)
@@ -329,7 +329,7 @@ func (m *Manager) abandonOutgoing(id string, now time.Time) {
 		return
 	}
 	for _, t := range og.Issued {
-		m.denyJTI(t.JTI, now)
+		m.revokeIssued(t, og.PeerID, now)
 	}
 	m.dropOutboxEntry(og.InitOutbox)
 	m.dropOutgoing(id)

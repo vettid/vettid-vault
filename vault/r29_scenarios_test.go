@@ -551,6 +551,17 @@ func TestR29RotateTwicePeerMissesFirst(t *testing.T) {
 	if !f.sameEpoch() {
 		t.Fatal("not on one epoch")
 	}
+	// A rekey under the new ik happened (S8 parses at the peer, review H1):
+	// the current epoch is signed by side 0's newest ik on both sides.
+	if f.p(0).OwnChainAtEpoch != len(f.m(0).st.Rotations) {
+		t.Fatalf("side 0's epoch signed by own chain %d of %d", f.p(0).OwnChainAtEpoch, len(f.m(0).st.Rotations))
+	}
+	if e := f.p(1).epochMeta(f.cur(1)); e == nil || !bytes.Equal(e.Signer, f.m(0).keys.ik.Public().(ed25519.PublicKey)) {
+		t.Fatal("side 1's current epoch is not signed by side 0's new ik")
+	}
+	if f.audited(1, "rekey_rejected") {
+		t.Fatal("a rekey with rotations was refused")
+	}
 	f.talks()
 }
 

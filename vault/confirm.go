@@ -112,7 +112,7 @@ func (p *Peer) upgradeEpochs() {
 // newer than anything.
 func (p *Peer) newer(a, b []byte) bool {
 	ia, ib := p.epochIndex(a), p.epochIndex(b)
-	if ia < 0 || p.Epochs[ia].Pending || p.Epochs[ia].Destroyed {
+	if ia < 0 || p.Epochs[ia].Pending || p.Epochs[ia].Abandoned || p.Epochs[ia].Destroyed {
 		return false
 	}
 	return ia > ib
@@ -263,7 +263,7 @@ func (m *Manager) abandonPending(p *Peer, why string, restart bool, now time.Tim
 		kr.AbandonPending(now)
 	}
 	if e := p.epochMeta(pe.ID); e != nil {
-		e.Pending, e.Superseded = false, now
+		e.Pending, e.Abandoned, e.Superseded = false, true, now
 	}
 	for _, t := range pe.Issued {
 		// The tokens its hs.init carried (a reconnect's standing and
@@ -273,9 +273,7 @@ func (m *Manager) abandonPending(p *Peer, why string, restart bool, now time.Tim
 		// peer that did activate the epoch gets fresh ones in the
 		// reconnect that follows (B, token_expired, H5 and S5 restart a
 		// reconnect for an abandoned reconnect).
-		t.PeerID, t.Denied = p.ID, true
-		m.st.Issued = append(m.st.Issued, t)
-		m.queueRevoke("jti", t.JTI, now)
+		m.revokeIssued(t, p.ID, now)
 	}
 	p.Abandoned = append(p.Abandoned, append([]byte(nil), pe.ID...))
 	p.Pending = nil
@@ -453,9 +451,8 @@ func (m *Manager) destroyedEpochMessage(p *Peer, meta *EpochMeta, in *envelope.I
 		return
 	}
 	m.refusePeerKey(p, "superseded_epoch", false, now)
-	if meta.RCTries == 0 {
-		meta.RCTries = 1
-		m.reconnectNaming(p, meta.ID, ruleRCE, now)
+	if meta.RCTries == 0 && m.reconnectNaming(p, meta.ID, ruleRCE, now) {
+		meta.RCTries = 1 // only once one started (review L3)
 	}
 }
 

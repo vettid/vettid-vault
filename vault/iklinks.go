@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/vettid/vettid-vault/internal/strictjson"
@@ -176,15 +177,33 @@ func (m *Manager) followLinks(p *Peer, app []*handshake.Rotation, msgEpoch []byt
 		p.IK, p.KEM = append([]byte(nil), r.NewIK...), r.NewKEM.Bytes()
 		p.Chain = append(p.Chain, r.Marshal())
 	}
+	// A followed link is no longer only seen.
+	kept := p.Seen[:0]
+	for _, raw := range p.Seen {
+		if s, err := handshake.ParseRotation(raw); err == nil && handshake.KnownPrefix(parseRotations(p.Chain), []*handshake.Rotation{s}) == 0 {
+			kept = append(kept, raw)
+		}
+	}
+	p.Seen = kept
 	m.dirty = true
 	// Following a link abandons the pending epoch whose sig_R the link's
 	// old_ik made (the peer dropped that answer at its rotation, S5),
 	// unless the message traveled under it (it has just confirmed it).
+	restart := ""
 	if pe := p.Pending; pe != nil && !bytes.Equal(pe.ID, msgEpoch) {
 		if e := p.epochMeta(pe.ID); e != nil && p.ancestor(e.Signer) {
 			m.abandonPending(p, "link", false, now)
+			restart = string(pe.Purpose) // started again under the current ik, as H5 says
 		}
 	}
+	defer func() {
+		switch handshake.Purpose(restart) {
+		case handshake.PurposeReconnect:
+			m.startReconnect(p, now)
+		case handshake.PurposeRekey:
+			m.startRekey(p, now)
+		}
+	}()
 	demotedCurrent := false
 	for i := range p.Epochs {
 		e := &p.Epochs[i]
@@ -338,13 +357,36 @@ func (m *Manager) sealHeld(p *Peer) {
 		}
 		in.TS = now
 		raw, err := m.sealFor(p, kr.Current(), in)
+		if errors.Is(err, errDemoted) {
+			return // still demoted: the rest wait too, in order
+		}
 		if err != nil {
-			return // still demoted
+			// It cannot be sealed at all (review M1): dropped, audited, so
+			// that it does not hold the mailbox's queue for good.
+			e.Done, e.Held = true, nil
+			m.note(now, "held_unsealable", p.ID)
+			m.dirty = true
+			continue
 		}
 		m.keepCopy(p, in, e.Wake)
 		e.Payload, e.Held, e.HeldExp = raw, nil, time.Time{}
 		e.RelayURL, e.Mailbox = p.Relay.URL, p.Relay.Mailbox
 		m.dirty = true
+	}
+}
+
+// tickDemoted: while the current epoch is demoted and no handshake that
+// would replace it is open (the last one expired, its tokens revoked), a
+// new one is started (§3.4.1: Q sends nothing until a new epoch is
+// established, so it keeps trying to establish one; one at a time, each
+// bounded by the handshake lifetime).
+func (m *Manager) tickDemoted(p *Peer, now time.Time) {
+	if p.Kind != KindConnection || p.State != PeerActive || p.suspended() || p.Pending != nil ||
+		m.hasOutgoing(p.ID, handshake.PurposeReconnect) {
+		return
+	}
+	if e := p.epochMeta(p.LastEpochID); e != nil && e.Demoted {
+		m.restartAfterDemotion(p, now)
 	}
 }
 

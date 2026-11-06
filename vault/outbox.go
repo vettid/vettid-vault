@@ -453,7 +453,7 @@ func (m *Manager) housekeeping(now time.Time) {
 	}
 	for id, og := range m.st.Outgoing {
 		if og.New == nil && now.Sub(og.Created) > HandshakeTTL {
-			m.dropOutgoing(id)
+			m.abandonOutgoing(id, now) // its tokens are revoked too (§6.6, review M3)
 			p := m.peer(og.PeerID)
 			switch {
 			case p == nil:
@@ -465,6 +465,7 @@ func (m *Manager) housekeeping(now time.Time) {
 		}
 	}
 	for _, p := range m.allPeers() {
+		m.tickDemoted(p, now)
 		m.tickPending(p, now)
 		m.tickRevert(p, now)
 		m.pruneEpochs(p, now)

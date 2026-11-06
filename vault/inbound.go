@@ -423,12 +423,14 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 		m.audit(now, "rotation_conflict_drop", p.ID)
 		return ackAfterFlush
 	}
-	m.noteFeatures(p, in.Features) // 0.86.0 (§10.8): it passed acceptFrom steps 1-4
 	// 0.86.0 (§6.3.1): a confirmation takes effect before anything else is
 	// done with the message (dedupe, the ts window, its handler).
 	if m.evidenceFirst(p, in, now) || m.beforeAccept(p, ep, in, now) {
 		return ackAfterFlush
 	}
+	// §10.8: counted once the message is not refused for its epoch
+	// (destroyed, demoted; review L4).
+	m.noteFeatures(p, in.Features)
 	m.idResend(p, ep, in, now)
 	if in.Type == handshake.TypeConfirm {
 		return ackAfterFlush // not a request: never answered; one that confirms nothing is ignored, unaudited
@@ -627,7 +629,12 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 	handled = true
 	m.replInHandler = false
 	m.heldInHandler, m.heldBefore = false, nil
+	// What a handler sends a connection while handling a device's request
+	// is that device's content (keepCopy's 64 KiB rule excuses only the
+	// vault's own, 0.86.1).
+	m.forDevice = p.Kind != KindConnection
 	body, herr := te.handler.Handle(ctx, s, in)
+	m.forDevice = false
 	if herr != nil && !errors.Is(herr, ErrDeferred) {
 		// Release R (§11.14.2): a handler that failed after step 1 of a
 		// DEK replacement changes nothing more: the `next` part is dropped

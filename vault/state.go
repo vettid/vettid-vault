@@ -314,6 +314,12 @@ type Peer struct {
 	Revert *RevertKeep `json:"revert,omitempty"`
 	// RuleL is §3.4.1 rule L's bookkeeping toward a peer without features.
 	RuleL *RuleLState `json:"rule_l,omitempty"`
+	// Seen are the valid identity links of the peer that passed rule C but
+	// were not followed (one in an unfinished handshake's rotations, or in
+	// a message then refused), at most one per old key (§3.4.1 rule C,
+	// 0.86.0): a later different successor of that key is a second
+	// successor.
+	Seen []json.RawMessage `json:"seen_links,omitempty"`
 	// IDResend counts S5's identity.rotate resends to the peer for the
 	// vault's latest rotation (0.86.0).
 	IDResend *IDResend `json:"id_resend,omitempty"`
@@ -352,7 +358,10 @@ type EpochMeta struct {
 	EstAt  time.Time `json:"est_at,omitzero"`
 	EstMsg string    `json:"est_msg,omitempty"`
 	// Pending: the vault's own pending epoch, not yet confirmed.
-	Pending bool `json:"pending,omitempty"`
+	// Abandoned: a pending epoch the vault abandoned; nothing under it
+	// confirms any more, and it never becomes the confirmed epoch.
+	Pending   bool `json:"pending,omitempty"`
+	Abandoned bool `json:"abandoned,omitempty"`
 	// Superseded is when it stopped being current (zero while current or
 	// pending).
 	Superseded time.Time `json:"superseded,omitzero"`
@@ -718,6 +727,10 @@ type OutgoingHS struct {
 	Gated  bool   `json:"gated,omitempty"`
 	RuleRC string `json:"rule_rc,omitempty"`
 	Named  []byte `json:"named,omitempty"`
+	// Why is another reason a reconnect naming an epoch was started (f1,
+	// demoted, own_copy): it is handled as any reconnect (no retry, and a
+	// refusal does not make the connection stale).
+	Why string `json:"why,omitempty"`
 
 	// An outgoing connection request in state waiting (§6.4, §10.4):
 	// what the accept learned from the bundle, and when it ends.

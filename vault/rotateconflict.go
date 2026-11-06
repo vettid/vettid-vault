@@ -41,13 +41,15 @@ func (m *Manager) rotationConflict(p *Peer, r *handshake.Rotation, now time.Time
 			return true
 		}
 	}
-	for _, raw := range p.Chain {
+	followed := false
+	for _, raw := range append(append([]json.RawMessage(nil), p.Chain...), p.Seen...) {
 		prev, err := handshake.ParseRotation(raw)
-		if err != nil || !suite.EqualPublic(prev.OldIK, r.OldIK) {
-			continue
+		if err != nil || !suite.EqualPublic(prev.OldIK, r.OldIK) || rejectedLink(p, prev) {
+			continue // a link dropped at a resolution is no successor
 		}
 		if suite.EqualPublic(prev.NewIK, r.NewIK) {
-			return false // the same statement again
+			followed = true // the same statement again (followed or seen)
+			continue
 		}
 		if p.Conflict == nil {
 			p.Conflict = &RotationConflict{OldIK: append([]byte(nil), r.OldIK...), Statements: []json.RawMessage{raw, r.Marshal()}, At: now.UTC()}
@@ -56,6 +58,20 @@ func (m *Manager) rotationConflict(p *Peer, r *handshake.Rotation, now time.Time
 			m.dirty = true
 		}
 		return true
+	}
+	if !followed {
+		// 0.86.0 rule C: kept as seen, followed or not.
+		p.Seen = append(p.Seen, r.Marshal())
+		m.dirty = true
+	}
+	return false
+}
+
+func rejectedLink(p *Peer, r *handshake.Rotation) bool {
+	for _, x := range p.Rejected {
+		if suite.EqualPublic(x.OldIK, r.OldIK) && suite.EqualPublic(x.NewIK, r.NewIK) {
+			return true
+		}
 	}
 	return false
 }

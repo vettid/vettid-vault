@@ -23,11 +23,11 @@ import (
 
 type r29Fx struct {
 	t    *testing.T
-	d    [2]*devFixture
-	id   [2]string
+	d    [3]*devFixture // sides 0 and 1; 2: an old copy (startCopy)
+	id   [3]string
 	clk  time.Time
-	got  [2][]string // test.note bodies each side received
-	sink [2]*recSink // each side's activity
+	got  [3][]string // test.note bodies each side received
+	sink [3]*recSink // each side's activity
 }
 
 // newR29Fx connects two vaults (side 0 the inviter) on a shared clock.
@@ -36,8 +36,8 @@ func newR29Fx(t *testing.T, emu ...bool) *r29Fx {
 	t.Helper()
 	f := &r29Fx{t: t, clk: time.Now().UTC().Truncate(time.Millisecond)}
 	a, b := newVaultPair(t)
-	f.d = [2]*devFixture{a, b}
-	for s, d := range f.d {
+	f.d = [3]*devFixture{a, b}
+	for s, d := range f.d[:2] {
 		s := s
 		d.m.now = func() time.Time { return f.clk }
 		d.m.register(TypeSpec{Type: "test.note", From: []string{KindConnection}, Connections: PeersBoth},
@@ -63,7 +63,7 @@ func newR29Fx(t *testing.T, emu ...bool) *r29Fx {
 	pump(t, a, b)
 	b.request(t, "connection.approve", `{"connection_id":"`+cid+`"}`)
 	pump(t, b, a)
-	for s, d := range f.d {
+	for s, d := range f.d[:2] {
 		for id, p := range d.m.st.Connections {
 			f.id[s] = id
 			if p.State != PeerActive {

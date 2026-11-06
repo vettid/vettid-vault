@@ -2,6 +2,7 @@ package vault
 
 import (
 	"context"
+	"errors"
 	"encoding/json"
 	"sort"
 	"time"
@@ -52,10 +53,23 @@ func (m *Manager) featuresFor(p *Peer) []string {
 }
 
 // sealFor seals in for p under ep, with the inner features field.
+//
+// Nothing is sealed under a demoted epoch (§3.4.1 "Epochs after an ik
+// link": Q sends nothing to P until a new epoch is established): such a
+// message is not sent (errDemoted).
 func (m *Manager) sealFor(p *Peer, ep *handshake.Epoch, in *envelope.Inner) ([]byte, error) {
+	if p != nil && ep != nil {
+		id := ep.ID()
+		if e := p.epochMeta(id[:]); e != nil && e.Demoted {
+			return nil, errDemoted
+		}
+	}
 	in.Features = m.featuresFor(p)
 	return ep.Seal(in)
 }
+
+// errDemoted: the epoch was demoted by an ik link (§3.4.1).
+var errDemoted = errors.New("vault: epoch demoted")
 
 // mergeNames adds names to a sorted list; it reports whether one was new.
 func mergeNames(have []string, names []string) ([]string, bool) {

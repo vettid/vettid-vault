@@ -138,6 +138,32 @@ func (m *Manager) hIdentityRotate(_ context.Context, s *Session, in *envelope.In
 	return nil, nil
 }
 
+// evidenceFirst is acceptFrom step 3 (§3.4.1): every identity link a
+// message carries is checked by rule C before anything refuses it (a
+// demoted or destroyed epoch, Table B), so that a second successor is
+// recorded whatever epoch it travels under. It reports whether the
+// connection is (now) suspended by a conflict.
+func (m *Manager) evidenceFirst(p *Peer, in *envelope.Inner, now time.Time) bool {
+	if p.Kind != KindConnection || m.emu28() {
+		return false
+	}
+	var links []*handshake.Rotation
+	switch in.Type {
+	case "identity.rotate":
+		links, _ = rotateLinks(in.Body)
+	case handshake.TypeInit:
+		if b, err := handshake.ParseInit(in.Body); err == nil {
+			links = b.Rotations
+		}
+	}
+	for _, r := range links {
+		if m.rotationConflict(p, r, now) {
+			return p.Conflict != nil
+		}
+	}
+	return false
+}
+
 // followLinks follows identity links at the position of the message being
 // handled, which traveled under epoch msgEpoch (nil: a handshake), with
 // "Epochs after an ik link" and H5.
@@ -334,10 +360,17 @@ func (m *Manager) rekeyOtherEpoch(p *Peer, in *envelope.Inner, ep *handshake.Epo
 		m.suspendForkRef(p, "epoch", now)
 		return false
 	}
-	if !own || !ep.HasRK() || !ep.CanSend() {
+	if !own {
 		return false
 	}
 	m.acceptOwnCopy(p, id[:], now)
+	if !ep.HasRK() || !ep.CanSend() {
+		// The named epoch can no longer be rekeyed from (its rk went when
+		// its successor activated): the vault accepts it as its last epoch
+		// by reconnecting naming it, which the peer accepts as its current.
+		m.reconnectNaming(p, id[:], "own_copy", now)
+		return false
+	}
 	if kr := m.sessions[p.ID]; kr != nil && kr.Reinstate(id) {
 		p.LastEpochID = append([]byte(nil), id[:]...)
 		if p.Revert != nil {

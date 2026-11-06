@@ -426,7 +426,7 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 	m.noteFeatures(p, in.Features) // 0.86.0 (§10.8): it passed acceptFrom steps 1-4
 	// 0.86.0 (§6.3.1): a confirmation takes effect before anything else is
 	// done with the message (dedupe, the ts window, its handler).
-	if m.beforeAccept(p, ep, in, now) {
+	if m.evidenceFirst(p, in, now) || m.beforeAccept(p, ep, in, now) {
 		return ackAfterFlush
 	}
 	m.idResend(p, ep, in, now)

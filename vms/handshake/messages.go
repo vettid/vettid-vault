@@ -543,7 +543,7 @@ func ParseInit(body []byte) (*Init, error) {
 	if in.Rotations, present, err = parseRotations(o); err != nil {
 		return nil, ErrBody
 	}
-	if present && in.Purpose != PurposeReconnect {
+	if present && in.Purpose != PurposeReconnect && in.Purpose != PurposeRekey {
 		return nil, ErrBody
 	}
 	if in.SASCommit, err = optSASField(o, "sas_commit"); err != nil {
@@ -622,7 +622,7 @@ func ParseResp(body []byte, p Purpose) (*Resp, error) {
 	if r.Rotations, present, err = parseRotations(o); err != nil {
 		return nil, ErrBody
 	}
-	if present && p != PurposeReconnect {
+	if present && p != PurposeReconnect && p != PurposeRekey {
 		return nil, ErrBody
 	}
 	if r.Sig, err = o.Base64("sig", ed25519.SignatureSize); err != nil {

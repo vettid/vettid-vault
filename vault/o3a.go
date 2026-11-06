@@ -37,11 +37,14 @@ func (m *Manager) droppedAnswerFin(env *envelope.Envelope, raw []byte, sender ed
 		if !d.Check.Matches(env.RecipientKid(), env.SenderKid()) {
 			continue
 		}
-		if d.Check.CheckFin(raw, sender, now) != nil {
-			return true // not the initiator's: dropped, the record kept to its end
-		}
+		// The record (k_i2r with it) is erased at the first matching
+		// hs.fin, whatever its outcome (the lead's call), or at its end.
 		m.st.DroppedAnswers = append(m.st.DroppedAnswers[:i:i], m.st.DroppedAnswers[i+1:]...)
 		m.dirty = true
+		if d.Check.CheckFin(raw, sender, now) != nil {
+			m.note(now, "hs_fin_dropped", d.PeerID)
+			return true // not verified: dropped
+		}
 		p := m.peer(d.PeerID)
 		if p == nil {
 			return true

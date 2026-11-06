@@ -1,7 +1,12 @@
 package vault
 
 import (
+	"context"
 	"testing"
+
+	"github.com/vettid/vettid-relay/relayauth"
+
+	"github.com/vettid/vettid-vault/vms/envelope"
 
 	"github.com/vettid/vettid-vault/vms/handshake"
 )
@@ -33,7 +38,15 @@ func TestR29O3aOlderPeersFin(t *testing.T) {
 			t.Fatal("H5 did not drop and record the answer")
 		}
 		f.deliver(1, 0, kHSResp)
-		if n := f.deliver(0, 1, kAny); n == 0 {
+		var fin []byte
+		f.d[0].relay.mu.Lock()
+		for _, dep := range f.d[0].relay.deposits {
+			if env, err := envelope.Parse(dep.payload); err == nil && dep.mailbox == f.m(1).st.Relay.Mailbox && env.Mode() == envelope.ModeSession {
+				fin = append([]byte(nil), dep.payload...)
+			}
+		}
+		f.d[0].relay.mu.Unlock()
+		if n := f.deliver(0, 1, kAny); n == 0 || fin == nil {
 			t.Fatal("no hs.fin")
 		}
 		p := f.p(1)
@@ -49,6 +62,32 @@ func TestR29O3aOlderPeersFin(t *testing.T) {
 		}
 		if len(f.m(1).st.DroppedAnswers) != 0 {
 			t.Fatal("the record outlived its hs.fin")
+		}
+		// The lead's call: erased at the first match; the same hs.fin again
+		// finds nothing (no record, no outcome).
+		before, acts, state := len(f.m(1).st.Audit), len(f.sink[1].got), p.State
+		jti := ""
+		for _, it := range f.m(1).st.Issued {
+			if it.PeerID == f.id[1] && it.Kind == TokStanding && !it.Denied {
+				jti = it.JTI
+			}
+		}
+		msg := Message{MsgID: "replayed-fin", Sender: relayauth.EncodeKey(f.pk(0)), JTI: jti, Payload: fin}
+		if err := f.m(1).ProcessBatch(context.Background(), &fakeCollector{}, []Message{msg}); err != nil {
+			t.Fatal(err)
+		}
+		for _, a := range f.m(1).st.Audit[before:] {
+			if a.Event == "hs_fin_dropped" {
+				t.Fatal("a second identical hs.fin found the record")
+			}
+		}
+		for _, a := range f.sink[1].got[acts:] {
+			if a.Kind == "connection.stale" {
+				t.Fatal("a second identical hs.fin had an outcome")
+			}
+		}
+		if p.State != state || len(f.m(1).st.DroppedAnswers) != 0 {
+			t.Fatal("a second identical hs.fin changed the connection")
 		}
 	}
 }

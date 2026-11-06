@@ -102,10 +102,16 @@ func (m *Manager) hIdentityRotate(_ context.Context, s *Session, in *envelope.In
 	if p.suspended() {
 		return nil, nil
 	}
+	var ep []byte
+	if s.epoch != nil {
+		id := s.epoch.ID()
+		ep = id[:]
+	}
 	known := parseRotations(p.Chain)
 	i := handshake.KnownPrefix(known, links)
 	if i == len(links) {
-		return nil, nil // every link already followed: ignore
+		m.k9(p, links, ep, s.now) // every link already followed: ignore, R29-K9 still judged
+		return nil, nil
 	}
 	switch first := links[i].OldIK; {
 	case bytes.Equal(first, p.IK):
@@ -127,13 +133,52 @@ func (m *Manager) hIdentityRotate(_ context.Context, s *Session, in *envelope.In
 			return nil, nil
 		}
 	}
-	var ep []byte
-	if s.epoch != nil {
-		id := s.epoch.ID()
-		ep = id[:]
-	}
 	m.followLinks(p, app, ep, s.now)
+	m.k9(p, links, ep, s.now)
 	return nil, nil
+}
+
+// k9 is §3.4.1 "Epochs abandoned while pending, at P's identity.rotate"
+// (R29-K9), in the write that follows or ignores an identity.rotate from
+// P under epoch msgEpoch (E): for each of its links, every epoch of P that
+// the vault began and abandoned while pending (never confirmed), later
+// than E in establishing order, whose sig_R was made by the link's old_ik
+// or an ancestor, was never activated by P. With its received flag set a
+// copy used it: suspended (ref epoch, the neutral feed item). Otherwise it
+// is ended (connection.fork_suspected, ref epoch, no feed item): a later
+// message under it is fork evidence, and a reconnect ctx naming it is
+// refused. One this message's link just abandoned is ended, not demoted.
+// It is not judged at an hs.resp or hs.fin.
+func (m *Manager) k9(p *Peer, links []*handshake.Rotation, msgEpoch []byte, now time.Time) {
+	ie := p.epochIndex(msgEpoch)
+	if p.Kind != KindConnection || ie < 0 || p.suspended() {
+		return
+	}
+	var judged []*EpochMeta
+	for i := ie + 1; i < len(p.Epochs); i++ {
+		e := &p.Epochs[i]
+		if !e.Mine || !e.Abandoned || e.Ended {
+			continue
+		}
+		for _, r := range links {
+			if bytes.Equal(e.Signer, r.OldIK) || p.ancestor(e.Signer) {
+				judged = append(judged, e)
+				break
+			}
+		}
+	}
+	for _, e := range judged {
+		if e.GotFromPeer {
+			m.suspendForkRef(p, "epoch", now)
+			return
+		}
+	}
+	for _, e := range judged {
+		e.Ended = true
+		e.Demoted, e.DemotedAt, e.DemotedMsg = false, time.Time{}, ""
+		m.record(Activity{Kind: "connection.fork_suspected", ConnectionID: connID(p), DeviceID: devID(p), Ref: "epoch", Audit: true}, now)
+		m.dirty = true
+	}
 }
 
 // evidenceFirst is acceptFrom step 3 (§3.4.1): every identity link a

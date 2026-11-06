@@ -115,3 +115,14 @@ func TestR29FinThenRotateDemotesNotSuspends(t *testing.T) {
 		t.Fatal("did not converge")
 	}
 }
+
+// forkFeed reports whether side s showed a connection.fork_suspected feed
+// item.
+func (f *r29Fx) forkFeed(s int) bool {
+	for _, a := range f.sink[s].got {
+		if a.Kind == "connection.fork_suspected" && a.Feed {
+			return true
+		}
+	}
+	return false
+}

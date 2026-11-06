@@ -233,10 +233,13 @@ func TestR29SeenOnlyAfterPrecheckAndCapped(t *testing.T) {
 	}
 }
 
-// S3: a pending epoch abandoned by a link: messages under it are refused
-// (ancestor_ik); one abandoned otherwise processes them without
-// confirming it (TestR29ReviewAbandonedPendingDoesNotConfirm).
-func TestR29LinkAbandonedPendingRefused(t *testing.T) {
+// §3.4.1 "Pending epochs at a link" with R29-K9 (the K2 case): a pending
+// epoch abandoned by the link of P's identity.rotate is judged by K9 in the
+// same write and, its flag clear, ended (audited, no feed item), not
+// demoted: a later message under it (here from P's old copy) suspends.
+// One abandoned otherwise processes them without confirming it
+// (TestR29ReviewAbandonedPendingDoesNotConfirm).
+func TestR29LinkAbandonedPendingEnded(t *testing.T) {
 	f := newR29Fx(t)
 	f.longTokens()
 	f.rekey(0)
@@ -244,17 +247,25 @@ func TestR29LinkAbandonedPendingRefused(t *testing.T) {
 	snap := f.snapshot(1) // holds the answer
 	f.rotate(1)           // S5: the real side 1 drops it
 	f.deliver(1, 0, kHSResp)
-	f.deliver(1, 0, kRotate) // side 0 follows: its pending epoch abandoned by the link
+	e1 := append([]byte(nil), f.p(0).Pending.ID...)
+	f.deliver(1, 0, kRotate) // side 0 follows: its pending epoch abandoned by the link, then ended (K9)
 	if f.p(0).Pending != nil {
 		t.Fatal("setup: still pending")
+	}
+	if e := f.p(0).epochMeta(e1); e == nil || !e.Ended || e.Demoted {
+		f.dump()
+		t.Fatal("the epoch abandoned by the identity.rotate's link was not ended (or was demoted)")
+	}
+	if !f.activity(0, "connection.fork_suspected", "epoch") || f.p(0).suspended() || f.forkFeed(0) {
+		t.Fatal("no fork_suspected audit, or suspended or a feed item at the link")
 	}
 	f.startCopy(1, snap)
 	f.deliver(0, 2, kHSFin)
 	f.note(2, "copy-under-abandoned")
 	f.deliver(2, 0, kNote)
-	if f.arrived(0, "copy-under-abandoned") != 0 || !f.activity(0, "drop.peer_key", "ancestor_ik") {
+	if f.arrived(0, "copy-under-abandoned") != 0 || !f.suspendedRef(0, "epoch") {
 		f.dump()
-		t.Fatal("a message under a link-abandoned pending epoch was not refused ancestor_ik")
+		t.Fatal("a message under a pending epoch ended at identity.rotate did not suspend")
 	}
 }
 

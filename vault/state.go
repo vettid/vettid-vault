@@ -368,6 +368,10 @@ type EpochMeta struct {
 	// OwnChain is the own rotation count whose ik signed its handshake: a
 	// reconnect naming it carries the vault's links from there.
 	OwnChain int `json:"own_chain,omitempty"`
+	// Ended: an epoch the vault began and abandoned while pending, ended
+	// at P's identity.rotate (§3.4.1 R29-K9): an authenticated message
+	// under it is fork evidence, and a reconnect naming it is refused.
+	Ended bool `json:"ended,omitempty"`
 	// GotFromPeer is §6.3.1's received flag (owner decision S13 a): a
 	// message from P other than hs.fin (hs.confirm, hs.init and session
 	// messages included) opened under this epoch and passed acceptFrom

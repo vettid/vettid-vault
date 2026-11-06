@@ -380,6 +380,12 @@ func (m *Manager) beforeAccept(p *Peer, ep *handshake.Epoch, in *envelope.Inner,
 		m.destroyedEpochMessage(p, meta, in, now)
 		return true
 	}
+	if meta != nil && meta.Ended {
+		// §3.4.1 R29-K9: an epoch ended at P's identity.rotate; links
+		// already checked by rule C (evidenceFirst).
+		m.suspendForkRef(p, "epoch", now)
+		return true
+	}
 	if meta != nil && meta.Demoted && posAfter(m.relayAt, m.msgID, meta.DemotedAt, meta.DemotedMsg) {
 		// §3.4.1 "Epochs after an ik link": deposited after the link.
 		m.refusePeerKey(p, "ancestor_ik", now)
@@ -514,6 +520,11 @@ func (m *Manager) classifyCtx086(p *Peer, ctx string) (named []byte, namedConf, 
 	}
 	if c := p.confirmedID(); is(c) {
 		return c, true, false, false
+	}
+	for _, e := range p.Epochs {
+		if is(e.ID) && e.Ended {
+			return nil, false, false, true // R29-K9: no longer kept; not fork evidence
+		}
 	}
 	for _, a := range p.Abandoned {
 		if is(a) {

@@ -768,6 +768,12 @@ func (m *Manager) responderEstablish(p *Peer, aw *AwaitingHS, fr *handshake.FinR
 		m.noLinkRestart = true
 		m.followLinks(p, all[n:], nil, now)
 		m.noLinkRestart = prev
+		if p.suspended() {
+			// Following them suspended the connection (as finishReconnect
+			// and handleResp): the new epoch is not established.
+			fr.Epoch.Destroy()
+			return
+		}
 	}
 	if p.Pending != nil {
 		m.abandonPending(p, "peer_activated", false, now)

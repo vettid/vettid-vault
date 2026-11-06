@@ -375,3 +375,43 @@ func TestR29NoLinkRestartNoDemotionRestart(t *testing.T) {
 		}
 	}
 }
+
+// Recheck L-b: following a rekey's links at its hs.fin can suspend the
+// connection (here "Epochs after an ik link" with the received flag set);
+// the epoch the hs.fin would establish is then not established.
+func TestR29FinLinksSuspendNoEstablish(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	snap := f.snapshot(0) // P's copy: ik a, E0
+	f.rotate(0)           // the real P: a→b; its rekey from E0 carries the link
+	f.lose(0, 1, kRotate)
+	f.deliver(0, 1, kHSInit) // Q answers it under E0
+	f.deliver(1, 0, kHSResp)
+	fins := f.takeKind(0, 1, kHSFin) // the real P's hs.fin, held back
+	if len(fins) != 1 {
+		t.Fatal("setup: no hs.fin from P")
+	}
+	f.startCopy(0, snap)
+	f.do(2, func(m *Manager, p *Peer) { m.startRekey(p, f.clk) })
+	f.deliver(2, 1, kHSInit)
+	f.deliver(1, 2, kHSResp)
+	f.deliverAt(2, 1, kHSFin, "pump-z") // Q activates the copy's E1 (signer a)
+	e1 := append([]byte(nil), f.cur(1)...)
+	f.deliver(1, 2, kConfirm) // the copy's E1 is confirmed
+	f.note(2, "copy-under-E1")
+	f.deliver(2, 1, kNote) // E1's flag set
+	if !f.flag(1, e1) || f.p(1).suspended() {
+		f.dump()
+		t.Fatalf("setup: flag %v suspended %v answers %d", f.flag(1, e1), f.p(1).suspended(), f.answerCount(1))
+	}
+	fin := fins[0]
+	fin.MsgID, fin.DepositedAt = "pump-a-0", f.clk.UTC().Format(time.RFC3339Nano) // before E1's hs.fin
+	f.process(1, fin)
+	if !f.suspendedRef(1, "epoch") {
+		f.dump()
+		t.Fatal("setup: the links did not suspend")
+	}
+	if !bytes.Equal(f.cur(1), e1) {
+		t.Fatal("the hs.fin established its epoch on a connection its links suspended")
+	}
+}

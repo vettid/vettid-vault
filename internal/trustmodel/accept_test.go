@@ -1423,6 +1423,11 @@ func (w *World) checkI3(q *Party, r *PeerRec, m *RMsg, d dec) {
 	// epoch clause
 	if m.P.Epoch != 0 && w.copyEpochAfterR(q, r, m.P.Epoch) {
 		for _, f := range w.ikPos[key] {
+			// R's link: one the original made after the copy was taken (a
+			// link the copy already holds is not R's)
+			if by := w.iklinkBy[f.L]; by.By != r.ID || by.Write <= actor.SnapW {
+				continue
+			}
 			if r.followed(f.L) && m.Seq > f.Pos.Seq && !(m.Box != f.Pos.Box && m.DepAt == f.Pos.DepAt) { // ground truth
 				if q.Device {
 					w.exempt("I3", resDevice)

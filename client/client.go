@@ -10,6 +10,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
@@ -1816,7 +1817,7 @@ func (d *Device) handleRekey(ctx context.Context, raw []byte, in *envelope.Inner
 	v := d.st.Vault
 	resp, env, err := pi.Respond(handshake.ResponderConfig{
 		Identity: d.ik, Policy: d.policy(), PinnedSuite: v.Suite, CollectSender: sender,
-		RecordRelayKey: v.RelayPK, KnownInitiatorIK: v.IK, KnownInitiatorChain: d.chain(), Now: now, Features: Features(),
+		RecordRelayKey: v.RelayPK, KnownInitiatorIK: v.IK, KnownInitiatorChain: d.knownFor(pi.Init().Rotations), Now: now, Features: Features(),
 	})
 	if err != nil {
 		return
@@ -1951,7 +1952,7 @@ func (d *Device) followRotation(body json.RawMessage) {
 // followLinks follows the vault's links past those already followed.
 func (d *Device) followLinks(links []*handshake.Rotation) {
 	v := d.st.Vault
-	known := d.chain()
+	known := d.knownFor(links)
 	final, kem, n, err := handshake.ResolveChainKnown(v.IK, known, links)
 	if err != nil || n == len(links) {
 		return
@@ -1963,6 +1964,37 @@ func (d *Device) followLinks(links []*handshake.Rotation) {
 	for _, r := range links[n:] {
 		v.Chain = append(v.Chain, r.Marshal())
 	}
+}
+
+// knownFor returns the followed links to resolve links against. A device
+// that followed the vault's earlier rotations before it kept its chain
+// (before 4bdad44) has none recorded; then a leading part of links that
+// is a valid chain ending at the stored ik counts as followed, and is
+// recorded (review RR2 L7).
+func (d *Device) knownFor(links []*handshake.Rotation) []*handshake.Rotation {
+	v := d.st.Vault
+	known := d.chain()
+	if len(links) == 0 || handshake.KnownPrefix(known, links) > 0 || bytes.Equal(links[0].OldIK, v.IK) {
+		return known
+	}
+	for i := 1; i < len(links); i++ {
+		if !bytes.Equal(links[i].OldIK, v.IK) {
+			continue
+		}
+		for j, r := range links[:i] {
+			if r.Verify() != nil || j > 0 && !bytes.Equal(r.OldIK, links[j-1].NewIK) {
+				return known
+			}
+		}
+		if !bytes.Equal(links[i-1].NewIK, v.IK) {
+			return known
+		}
+		for _, r := range links[:i] {
+			v.Chain = append(v.Chain, r.Marshal())
+		}
+		return d.chain()
+	}
+	return known
 }
 
 func (d *Device) chain() []*handshake.Rotation {

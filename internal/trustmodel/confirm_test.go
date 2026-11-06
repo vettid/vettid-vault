@@ -73,7 +73,6 @@ func (q *Party) confirm(r *PeerRec) {
 	q.w.noteCurrent(q, pe.ID)
 	if r.Device && !q.Copy {
 		// a newer epoch confirmed: F's gap is closed for this pair
-		delete(q.w.fWatch, pairKey(q.ID, r.ID))
 		delete(q.w.fDue, pairKey(q.ID, r.ID))
 	}
 	r.setConf(pe.ID, q.w.Now) // activated at confirmation
@@ -87,22 +86,23 @@ func (q *Party) confirm(r *PeerRec) {
 	q.w.logf("%s: epoch E%d with %s CONFIRMED (current)", q.Name, pe.ID, q.w.party(r.ID).Name)
 }
 
-// watchF: ground truth for finding F (§3.4.1 Invariants, "The device
-// exception"): the vault abandoned a pending rekey toward its device (at B
-// or for want of a token) and holds no valid standing token for it then or
-// later: its rekey from the current epoch may never be deposited while the
-// device stays on the abandoned epoch. The pair's I1 and I7 failures are
-// then the device exception.
-func (q *Party) watchF(r *PeerRec) {
+// markF: ground truth for finding F (§3.4.1 Invariants, "With it, finding
+// F"; 0.88.1, owner decision a, GC 01M6S2ECFHHGFXC7H8HPZ2FB2V): the vault
+// abandoned a pending rekey toward its device or agent, for any reason
+// (B, want of a token, token_expired, its own rotation S5, ...). The device
+// may already have activated that epoch and stay on it, while the vault's
+// rekey from its current epoch may never be deposited or opened. Until a
+// newer epoch is confirmed, the pair's I1, I1-loss and I7 failures are the
+// device exception.
+func (q *Party) markF(r *PeerRec, why string) {
 	k := pairKey(q.ID, r.ID)
-	if q.Copy || !q.w.fWatch[k] || q.w.fDue[k] {
+	if q.Copy || q.w.fDue[k] {
 		return
 	}
-	if r.standing(r.KeyFor, r.Relay, q.now()).JTI == 0 {
-		q.w.fDue[k] = true
-		q.w.hit("D1:F-no-token-after-abandon")
-		q.w.logf("%s: finding F for %s: a pending rekey abandoned and no valid standing token", q.Name, q.w.party(r.ID).Name)
-	}
+	q.w.fDue[k] = true
+	q.w.hit("D1:F-abandoned-toward-device")
+	q.w.stat("F: abandoned toward a device: " + why)
+	q.w.logf("%s: finding F for %s: a pending rekey abandoned (%s)", q.Name, q.w.party(r.ID).Name, why)
 }
 
 // setConf: the confirmed epoch moves forward (never back); the one it
@@ -131,9 +131,8 @@ func (q *Party) abandonPending(r *PeerRec, why string, restart bool) {
 	}
 	r.Pend = nil
 	r.AbanIDs = append(r.AbanIDs, pe.ID)
-	if r.Device && !q.Device && !pe.Reconnect && (why == "B passed" || why == "no valid standing token" || why == "token_expired") && !q.Copy {
-		q.w.fWatch[pairKey(q.ID, r.ID)] = true // finding F: watched until a newer epoch is confirmed
-		q.watchF(r)
+	if r.Device && !q.Device && !pe.Reconnect {
+		q.markF(r, why) // finding F: until a newer epoch is confirmed
 	}
 	q.w.stat("A:abandoned:" + why)
 	q.w.hit("I7:abandon")

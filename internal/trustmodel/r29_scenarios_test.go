@@ -400,3 +400,58 @@ func TestR29R3ConfirmAgain(t *testing.T) {
 		}
 	})
 }
+
+// (0.88.1, owner decision a, GC 01M6S2ECFHHGFXC7H8HPZ2FB2V) Finding F
+// through the vault's own rotation: V rekeys toward its app D; D activates
+// E1 at hs.fin and sends hs.confirm; the next day V rotates (credential
+// rotate) and S5 abandons the pending E1 before the hs.confirm arrives
+// (processed late, without confirming). D is offline about 60 days, past
+// the 48 days it keeps its confirmed epoch E0's keys, so V's rekeys from
+// E0 can no longer be opened and D stays on E1. The pair is split with
+// nothing shown, and its I1 failure is counted as F (the device
+// exception, §3.4.1 Invariants, "With it, finding F"), not reported. Like
+// TestR29FDeviceException it pins a stated gap and should flip when the
+// device work after release 29 closes F.
+func TestR29FVaultRotationS5(t *testing.T) {
+	w := setup(Config{Vaults: 1, Devices: true}, 1)
+	s := &scen{t, w}
+	V, D := s.p(0), s.p(1)
+	w.relayRot = false
+	_, e1 := s.pendingAt(V, D)
+	s.run(1, D) // D activates E1 at hs.fin; hs.confirm deposited
+	if D.st.peer(V.ID).Cur != e1 {
+		t.Fatalf("setup: D did not activate E%d", e1)
+	}
+	s.lock(D)
+	s.tick(day)
+	s.rotate(V, pathCred) // S5: the pending E1 abandoned
+	rv := V.st.peer(D.ID)
+	if ep := rv.epoch(e1); ep == nil || !ep.Abandoned || s.w.stats["A:abandoned:S5: own ik rotated"] == 0 {
+		t.Fatalf("setup: V did not abandon E%d at its rotation: %+v\n  %s", e1, ep, s.trace())
+	}
+	s.run(1, V) // D's hs.confirm, late: processed without confirming
+	if rv.Cur == e1 || rv.Pend != nil {
+		t.Fatalf("setup: V confirmed E%d", e1)
+	}
+	pk := pairKey(V.ID, D.ID)
+	if !s.w.fDue[pk] {
+		t.Fatalf("finding F not recorded at the S5 abandonment\n  %s", s.trace())
+	}
+	for i := 0; i < 60; i++ {
+		s.tick(day)
+		s.drain(V)
+		s.do(V, V.tick)
+	}
+	s.done(true)
+	rv, rd := V.st.peer(D.ID), D.st.peer(V.ID)
+	t.Logf("V on E%d, D on E%d; F exemptions %d", rv.Cur, rd.Cur, s.w.stats["residual exemption (I1): "+resDeviceF])
+	if rd.Cur != e1 || rv.Cur == e1 || rv.Status != stActive || rd.Status != stActive {
+		t.Errorf("want D still on the abandoned E%d and V elsewhere, both active: V E%d (%d), D E%d (%d)", e1, rv.Cur, rv.Status, rd.Cur, rd.Status)
+	}
+	if s.w.visible(V.ID, D.ID) {
+		t.Errorf("something is visible to the member: feed %v", s.w.feed[pk])
+	}
+	if s.w.stats["residual exemption (I1): "+resDeviceF] == 0 {
+		t.Errorf("the pair's I1 failure was not counted as F")
+	}
+}

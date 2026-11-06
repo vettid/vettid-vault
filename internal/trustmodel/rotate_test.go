@@ -484,9 +484,6 @@ func (p *Party) tick() {
 			// split that follows is finding F, part of the device exception
 			// (§3.4.1 Invariants). §7.2's re-pairing of a desktop offline
 			// past its token is a member's action, not modelled.
-			if r.Device && !p.Device {
-				p.watchF(r)
-			}
 			if !r.Device && r.standing(r.KeyFor, r.Relay, w.Now).JTI == 0 {
 				w.nextOrigin = "token expiry reconnect"
 				p.startHS(r, true)

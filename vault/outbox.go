@@ -243,6 +243,10 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 		if e.Op == OpDeposit && (blocked[key] || awaiting[key] && e.Token == "" || held[key] && !e.Handshake) {
 			continue
 		}
+		if e.Op == OpDeposit && e.Held != nil && !e.HeldExp.IsZero() && !now.Before(e.HeldExp) {
+			e.Done, e.Held, m.dirty = true, nil, true // held past its exp: discarded (§3.4.1)
+			continue
+		}
 		if e.Op == OpDeposit && e.Held != nil {
 			// Waiting, unsealed, for an epoch that is not demoted (§3.4.1);
 			// later deposits to the mailbox wait behind it, the handshake

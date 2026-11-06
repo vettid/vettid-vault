@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/vettid/vettid-relay/relayauth"
+	"github.com/vettid/vettid-relay/relayclient"
 
 	"github.com/vettid/vettid-vault/vault/store"
 	"github.com/vettid/vettid-vault/vms/envelope"
@@ -458,5 +459,120 @@ func TestR29DemotedHoldsMessagesUntilNewEpoch(t *testing.T) {
 	if n != 1 || !f.sameEpoch() {
 		f.dump()
 		t.Fatalf("the held message arrived %d times (same epoch %v)", n, f.sameEpoch())
+	}
+}
+
+// demoted sets up side 0 with its current epoch E1 demoted by side 1's
+// link (E1 was confirmed by side 1's old copy; the real side 1 never
+// activated it). before runs just before the link arrives.
+func demoted(t *testing.T, before func(f *r29Fx)) *r29Fx {
+	t.Helper()
+	f := newR29Fx(t)
+	f.longTokens()
+	f.rekey(0)
+	f.deliver(0, 1, kHSInit)
+	snap := f.snapshot(1)
+	f.rotate(1)
+	f.deliver(1, 0, kHSResp)
+	f.startCopy(1, snap)
+	f.deliver(0, 2, kHSFin)
+	f.deliver(2, 0, kConfirm)
+	e1 := append([]byte(nil), f.cur(0)...)
+	if before != nil {
+		before(f)
+	}
+	f.deliver(1, 0, kRotate)
+	if e := f.p(0).epochMeta(e1); e == nil || !e.Demoted {
+		f.dump()
+		t.Fatal("setup: the current epoch is not demoted")
+	}
+	return f
+}
+
+func (f *r29Fx) arrived(s int, body string) int {
+	n := 0
+	for _, b := range f.got[s] {
+		if bytes.Contains([]byte(b), []byte(body)) {
+			n++
+		}
+	}
+	return n
+}
+
+// Held longer than the 16-day durable ts window: sealed with a new ts, so
+// it is still accepted after the reconnect.
+func TestR29HeldLongerThanTSWindow(t *testing.T) {
+	f := demoted(t, nil)
+	f.note(0, "held-long")
+	f.lose(0, 1, kAny) // the first reconnect is lost: the hold lasts
+	f.advance(HandshakeTTL + 24*time.Hour)
+	f.tick(0) // the reconnect expired: tried again
+	f.tick(1)
+	f.settle()
+	f.advance(time.Hour)
+	f.tick(0)
+	f.tick(1)
+	f.settle()
+	if n := f.arrived(1, "held-long"); n != 1 || !f.sameEpoch() {
+		f.dump()
+		t.Fatalf("a message held %v arrived %d times", HandshakeTTL+24*time.Hour, n)
+	}
+}
+
+// A held message whose exp passes is discarded: nothing is deposited.
+func TestR29HeldExpiredDiscarded(t *testing.T) {
+	f := demoted(t, nil)
+	f.do(0, func(m *Manager, p *Peer) {
+		m.sendWith(p, "test.note", json.RawMessage(`{"n":"expiring"}`), SendOptions{Exp: f.clk.Add(time.Hour)}, f.clk)
+	})
+	f.advance(2 * time.Hour)
+	f.tick(0)
+	for _, e := range f.m(0).st.Outbox {
+		if e.Held != nil && !e.Done {
+			t.Fatal("an expired held message is still held")
+		}
+	}
+	f.settle()
+	f.advance(time.Hour)
+	f.tick(0)
+	f.tick(1)
+	f.settle()
+	if n := f.arrived(1, "expiring"); n != 0 {
+		t.Fatalf("an expired held message was delivered %d times", n)
+	}
+}
+
+// A message sealed under the epoch before its demotion and not yet
+// deposited goes back to held and arrives once, under the new epoch (the
+// real peer never held the demoted one, so it could not have opened it).
+func TestR29SealedUndepositedResealed(t *testing.T) {
+	var r *stubRelay
+	f := demoted(t, func(f *r29Fx) {
+		r = f.d[0].relay
+		r.mu.Lock()
+		r.failMailbox = map[string]error{f.m(1).st.Relay.Mailbox: &relayclient.Error{Status: 503, Code: "unavailable"}}
+		r.mu.Unlock()
+		f.note(0, "sealed-before")
+		r.mu.Lock()
+		r.failMailbox = nil
+		r.mu.Unlock()
+	})
+	held := 0
+	for _, e := range f.m(0).st.Outbox {
+		if e.Held != nil && !e.Done && bytes.Contains(e.Held, []byte("sealed-before")) {
+			held++
+		}
+	}
+	if held != 1 {
+		t.Fatalf("the undeposited entry was not held again (%d)", held)
+	}
+	f.settle()
+	f.advance(time.Hour)
+	f.tick(0)
+	f.tick(1)
+	f.settle()
+	if n := f.arrived(1, "sealed-before"); n != 1 || !f.sameEpoch() {
+		f.dump()
+		t.Fatalf("arrived %d times", n)
 	}
 }

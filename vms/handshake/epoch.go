@@ -521,3 +521,28 @@ func (k *Keyring) Destroy() {
 	}
 	k.retired = nil
 }
+
+// OpenSent decrypts a session-mode envelope this side sealed under the
+// epoch (its send kids and send key): the runtime reads back an outbox
+// entry it has not yet deposited (VAULT-MESSAGING 0.86.3 §3.4.1, a
+// message sealed under an epoch an ik link then demoted, sealed again
+// under the next one).
+func (e *Epoch) OpenSent(env *envelope.Envelope) (*envelope.Inner, error) {
+	if env.Mode() != envelope.ModeSession {
+		return nil, envelope.ErrWrongMode
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.sendKey == nil {
+		return nil, ErrEpochRetired
+	}
+	if !env.RecipientKid().Equal(e.sendRecipientKid) || !env.SenderKid().Equal(e.sendSenderKid) {
+		return nil, envelope.ErrKid
+	}
+	padded, err := envelope.OpenSession(env, e.sendKey)
+	if err != nil {
+		return nil, err
+	}
+	defer suite.Wipe(padded)
+	return envelope.DecodeInner(padded, envelope.ModeSession)
+}

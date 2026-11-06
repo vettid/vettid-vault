@@ -195,7 +195,12 @@ func (m *Manager) followLinks(p *Peer, app []*handshake.Rotation, msgEpoch []byt
 		// after the link: an old copy's. It stops being current.
 		if posAfter(e.EstAt, e.EstMsg, m.relayAt, m.msgID) && !e.EstAt.IsZero() {
 			e.Demoted, e.DemotedAt, e.DemotedMsg = true, m.relayAt, m.msgID
-			demotedCurrent = demotedCurrent || bytes.Equal(e.ID, p.LastEpochID)
+			if bytes.Equal(e.ID, p.LastEpochID) {
+				demotedCurrent = true
+				if kr := m.sessions[p.ID]; kr != nil {
+					m.rehold(p, kr.Current())
+				}
+			}
 			m.note(now, "epoch_demoted", p.ID)
 		}
 	}
@@ -226,6 +231,9 @@ func (m *Manager) f1Demote(p *Peer, app []*handshake.Rotation, msgEpoch []byte, 
 		cur.Demoted, cur.DemotedAt, cur.DemotedMsg = true, time.Time{}, ""
 		m.note(now, "epoch_demoted_f1", p.ID)
 		kr := m.sessions[p.ID]
+		if kr != nil {
+			m.rehold(p, kr.Current())
+		}
 		if p.Revert != nil && bytes.Equal(p.Revert.Old, msgEpoch) && kr != nil && kr.Reinstate(epochIDOf(msgEpoch)) {
 			// The epoch it traveled under is current again (it was kept
 			// whole, §6.3.1 "Deployment").
@@ -250,27 +258,77 @@ func (m *Manager) f1Demote(p *Peer, app []*handshake.Rotation, msgEpoch []byte, 
 	}
 }
 
-// holdDemoted queues a message made while p's current epoch is demoted,
-// unsealed, in its place in the outbox.
+// Held messages (§3.4.1 "Epochs after an ik link", 0.86.2/0.86.3 draft):
+// while p's current epoch is demoted, a durable message to p waits
+// unsealed in its place in the outbox and is sealed, with a new ts and the
+// same inner id (receivers dedupe by it), under the next current epoch;
+// one whose exp passes first is discarded; an ephemeral one is not sent.
+
+// holdDemoted queues a message made while p's current epoch is demoted.
 func (m *Manager) holdDemoted(p *Peer, in *envelope.Inner, wake string) {
+	if te := m.registry[in.Type]; te != nil && te.spec.Ephemeral {
+		return // ephemeral: not sent
+	}
 	c := *in
 	c.Seq, c.Features = 0, nil
 	j, err := c.Marshal(envelope.ModeSealed)
 	if err != nil {
 		return
 	}
-	m.queueDeposit(&OutboxEntry{PeerID: p.ID, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Held: j, Wake: wake}, m.now())
+	m.queueDeposit(&OutboxEntry{PeerID: p.ID, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Held: j, HeldExp: in.Exp, Wake: wake}, m.now())
+}
+
+// rehold turns p's outbox entries sealed under the epoch ep (the current
+// epoch, just demoted) and not yet deposited back into held ones: the
+// vault reads each back with ep's send key. Handshake messages and
+// entries already deposited are left as they are.
+func (m *Manager) rehold(p *Peer, ep *handshake.Epoch) {
+	if ep == nil {
+		return
+	}
+	for _, e := range m.st.Outbox {
+		if e.Done || e.PeerID != p.ID || e.Op != OpDeposit || e.Held != nil || e.Handshake || len(e.Payload) == 0 {
+			continue
+		}
+		env, err := envelope.Parse(e.Payload)
+		if err != nil {
+			continue
+		}
+		in, err := ep.OpenSent(env)
+		if err != nil {
+			continue // sealed under another epoch: as it is
+		}
+		if te := m.registry[in.Type]; te != nil && te.spec.Ephemeral {
+			e.Done = true // ephemeral: not sent
+			continue
+		}
+		in.Seq, in.Features = 0, nil
+		j, err := in.Marshal(envelope.ModeSealed)
+		if err != nil {
+			continue
+		}
+		e.Payload, e.Held, e.HeldExp = nil, j, in.Exp
+		m.dirty = true
+	}
 }
 
 // sealHeld seals p's held messages under its current epoch, once that is
-// not demoted, each in its place in the outbox (same inner id).
+// not demoted, each in its place in the outbox: the same inner id, a new
+// ts (the durable ts window is 16 days; a hold can last up to B); one
+// whose exp has passed is discarded.
 func (m *Manager) sealHeld(p *Peer) {
 	kr := m.sessions[p.ID]
 	if kr == nil || kr.Current() == nil {
 		return
 	}
+	now := m.now()
 	for _, e := range m.st.Outbox {
 		if e.Done || e.PeerID != p.ID || e.Held == nil {
+			continue
+		}
+		if !e.HeldExp.IsZero() && !now.Before(e.HeldExp) {
+			e.Done, e.Held = true, nil
+			m.dirty = true
 			continue
 		}
 		in, err := envelope.ParseInner(e.Held, envelope.ModeSealed)
@@ -278,12 +336,13 @@ func (m *Manager) sealHeld(p *Peer) {
 			e.Done, e.Held = true, nil
 			continue
 		}
+		in.TS = now
 		raw, err := m.sealFor(p, kr.Current(), in)
 		if err != nil {
 			return // still demoted
 		}
 		m.keepCopy(p, in, e.Wake)
-		e.Payload, e.Held = raw, nil
+		e.Payload, e.Held, e.HeldExp = raw, nil, time.Time{}
 		e.RelayURL, e.Mailbox = p.Relay.URL, p.Relay.Mailbox
 		m.dirty = true
 	}

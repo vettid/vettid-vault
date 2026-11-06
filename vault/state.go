@@ -820,9 +820,12 @@ type OutboxEntry struct {
 	// (§3.4.1: nothing is sent until a new epoch is established); it is
 	// sealed under that epoch when it is established (sealHeld), and has
 	// no Payload until then.
-	Held      []byte `json:"held,omitempty"`
-	FinEpoch  []byte `json:"fin_epoch,omitempty"`
-	Handshake bool   `json:"handshake,omitempty"`
+	Held []byte `json:"held,omitempty"`
+	// HeldExp is the held message's exp (zero: none): past it the entry
+	// is discarded, not sealed (0.86.2).
+	HeldExp   time.Time `json:"held_exp,omitzero"`
+	FinEpoch  []byte    `json:"fin_epoch,omitempty"`
+	Handshake bool      `json:"handshake,omitempty"`
 }
 
 // AuditEntry records a dropped or refused message (§6.3, §6.6, §7.3).

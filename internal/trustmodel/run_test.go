@@ -575,6 +575,10 @@ func (w *World) checkEnd(liveness bool) {
 	}
 	for key, e := range w.forkDue {
 		if r := w.party(key[0]).st.peer(key[1]); r.Status != stSuspended && r.Cur == e {
+			if w.party(key[0]).Device {
+				w.exempt("I3", resDevice)
+				continue
+			}
 			w.violate("I3", "%s: %s's first handshake under its new ik found copy epoch E%d current, and %s did not suspend", w.party(key[0]).Name, w.party(key[1]).Name, e, w.party(key[0]).Name)
 		}
 	}

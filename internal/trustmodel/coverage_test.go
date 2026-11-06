@@ -17,7 +17,7 @@ import (
 // r29Rules: the rule IDs of §6.3.2, in its order (R29-F2 was withdrawn).
 // R29-U1 (0.87.1: no migration, earlier state refused) is not a two-sided
 // rule: it is tested in the vault (§6.3.2).
-var r29Rules = []string{"G1", "G2", "L1", "I1", "I2", "I3", "I4", "I5", "I6", "I7",
+var r29Rules = []string{"G1", "G2", "L1", "I1", "I2", "I3", "I4", "I5", "I6", "I7", "I8",
 	"R1", "R2", "R3", "R4", "R5", "R6", "X1", "X2", "X3", "X4", "X5", "X6",
 	"K1", "K2", "K3", "K4", "K5", "K6", "K7", "K8", "K9", "F1", "F3", "D1", "D2", "D3", "D4"}
 
@@ -31,6 +31,7 @@ var r29Branches = []string{
 	"I5:B-reconnect-stale",
 	"I6:rekey-abandoned-no-token", "I6:reconnect-kept-without-token",
 	"I7:abandon", "I7:fresh-reconnect",
+	"I8:abandoned-keys-dropped", "I8:copy-message-dropped",
 	"R1:hs.confirm-queued", "R2:confirmed-moves", "R3:hs.confirm-again", "R3:one-still-queued",
 	"R4:rekey-names-confirmed", "R4:reconnect-names-confirmed",
 	"R5:destroyed", "R5:own-abandoned-not-destroyed", "R6:fork-evidence",
@@ -65,6 +66,7 @@ var r29Unreachable = map[string]string{
 	"L1:hs.fin-after-L":                  "an hs.fin arriving after L (16 days)",
 	"L1:confirmed-epoch-keys-end":        "48 days with the confirmed epoch not current",
 	"D1:rekey-not-reconnect":             "token_expired toward a device with a pending rekey, exp passed on the own clock",
+	"I8:late-message-history-line":       "an honest message sealed under the abandoned epoch and delivered after a later confirmation (rare)",
 	"D1:no-token-stale":                  "the model's own device rule (no valid token at a timer: stale) ends the pair first",
 	"D4:notice B passed":                 "an old app that never sends under the new epoch for 32 days",
 	"I6:token_expired-before-own-exp":    "token_expired while the own clock is behind",

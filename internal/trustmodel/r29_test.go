@@ -160,6 +160,7 @@ func (w *World) feedItem(q, r PID, kind string) {
 // Residual reasons: each exempts a pair from I1, I6 and I7, and is counted.
 const (
 	resOldApp         = "an app from before release 29 (earlier releases are unsupported; R29-D4 notice)"
+	resDevice         = "D: a device applies no demotion to its vault's epochs (§15 item 51; the device exception of §3.4.1 Invariants)"
 	resCopyInit       = "a copy acting as initiator sent nothing but hs.fin"
 	resBeforeRotation = "an old copy acting before the original's rotation is seen (an old copy can make any handshake as P)"
 	resLiveMailbox    = "an old copy collects, acks or deletes the original's live mailbox"

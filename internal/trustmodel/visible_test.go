@@ -114,6 +114,8 @@ func (w *World) checkI7() {
 		switch {
 		case w.visible(q.ID, copyP.Origin):
 			w.stat("I7: copy epoch, the pair ends visibly")
+		case q.Device:
+			w.exempt("I7", resDevice)
 		case !w.copyEpochAfterR(q, r, e):
 			w.exempt("I7", resBeforeRotation)
 		case init && !w.copyFlag[[2]int{int(q.ID), e}]:

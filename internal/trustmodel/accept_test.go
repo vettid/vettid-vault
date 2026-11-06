@@ -666,7 +666,7 @@ func (q *Party) followIK(r *PeerRec, app []IKLink, x Pos, restart bool) bool {
 		}
 		for j := range r.Epochs {
 			ep := &r.Epochs[j]
-			if !(ep.Signer == l.Old || r.isAncestor(ep.Signer)) || !x.after(ep.Est) {
+			if !r.signedBy(ep.Signer, l.Old) || !x.after(ep.Est) {
 				continue
 			}
 			if ep.Demoted && !(q.newSpec() && ep.Flag) {
@@ -739,7 +739,7 @@ func (q *Party) judgeAbandoned(r *PeerRec, links []IKLink, msgEp int) bool {
 	for _, l := range links {
 		for j := im + 1; j < len(r.Epochs); j++ {
 			ep := &r.Epochs[j]
-			if !ep.MineInit || !ep.Abandoned || ep.Ended || ep.Destroyed || !(ep.Signer == l.Old || r.isAncestor(ep.Signer)) {
+			if !ep.MineInit || !ep.Abandoned || ep.Ended || ep.Destroyed || !r.signedBy(ep.Signer, l.Old) {
 				continue
 			}
 			if ep.Flag {
@@ -1361,7 +1361,7 @@ func (q *Party) f1Demote(r *PeerRec, M *Msg, app []IKLink, x Pos, pre int) bool 
 		var set []int
 		flag := false
 		for j := ie + 1; j < len(r.Epochs); j++ {
-			if ep := &r.Epochs[j]; ep.Signer == l.Old || r.isAncestor(ep.Signer) {
+			if ep := &r.Epochs[j]; r.signedBy(ep.Signer, l.Old) {
 				set = append(set, j)
 				flag = flag || ep.Flag
 			}

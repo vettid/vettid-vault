@@ -284,3 +284,148 @@ func TestR29K4FlagSetSuspends(t *testing.T) {
 		t.Fatalf("K4 with the flag set: status %d (%s)\n  %s", r.Status, r.Ref, s.trace())
 	}
 }
+
+// R29-K9 on Table A's "Earlier, after its cut-off" row (relay-key rotation
+// on): Q has followed P's relay update (cut-off) and P's ik link (at an
+// hs.fin, which judges nothing); P's identity.rotate itself never reached
+// Q. An old copy of P taken after the rotation's first write (it holds the
+// old relay key and the new link, §3.4.1 Residuals) deposits an
+// identity.rotate under E0 from the old key after the cut-off: every link
+// is followed, so it is ignored, and K9 is still judged: E1, abandoned
+// while pending and later than E0, is ended.
+func TestR29K9AfterCutOffIgnoreJudged(t *testing.T) {
+	s := newScen(t, 2)
+	P, Q := s.p(0), s.p(1)
+	if !s.w.relayRot {
+		t.Fatalf("setup: relay-key rotation is off")
+	}
+	e0, e1 := s.pendingAt(Q, P)
+	if s.dropAt(P, KFin) == 0 {
+		t.Fatalf("setup: no hs.fin to lose")
+	}
+	r := Q.st.peer(P.ID)
+	s.do(Q, func() { Q.abandonPending(r, "no valid standing token", false); Q.write() })
+	s.rotate(P, pathCred)
+	s.w.makeCopy(P)
+	c := s.w.P[len(s.w.P)-1]
+	for i := 0; i < 10; i++ {
+		s.dropAt(Q, KIdRot) // P's own identity.rotate never reaches Q
+		s.run(1, P, Q)
+	}
+	if r.IK != P.st.IK || r.Relay != P.st.Relay || len(r.Earlier) == 0 {
+		t.Fatalf("setup: Q did not follow both links (ik %d/%d, relay %d/%d)\n  %s", r.IK, P.st.IK, r.Relay, P.st.Relay, s.trace())
+	}
+	if ep := r.epoch(e1); ep == nil || ep.Ended {
+		t.Fatalf("setup: E%d already judged: %+v\n  %s", e1, ep, s.trace())
+	}
+	cr := c.st.peer(Q.ID)
+	old := r.Earlier[0].Key
+	tok := cr.standing(old, cr.Relay, s.w.Now)
+	M := Msg{Kind: KIdRot, Inner: s.w.id(), Epoch: e0, Rot: slices.Clone(P.st.Chain), Ts: s.w.Now}
+	if _, err := s.w.R.deposit(c.ID, old, tok, Q.st.Relay, &M); err != okRes {
+		t.Fatalf("setup: the copy's deposit was refused (%v)", err)
+	}
+	s.run(1, Q)
+	if s.w.stats["cell A:earlier-after:identity.rotate:all-followed"] == 0 || s.w.stats["R29 K9:judged-after-cut-off"] == 0 {
+		t.Fatalf("not decided by Table A's after-cut-off ignore\n  %s", s.trace())
+	}
+	if ep := r.epoch(e1); ep == nil || !ep.Ended || r.Status != stActive {
+		t.Fatalf("K9 not judged at the ignore: E%d %+v, status %d\n  %s", e1, ep, r.Status, s.trace())
+	}
+}
+
+// R29-K4 at a later link judges an epoch an earlier link already demoted:
+// a flag set since (by a message deposited before the earlier link, which
+// is accepted) suspends. P rotates twice (a->b, then b->c); both
+// identity.rotates wait. The old copy (taken before both) sets up E2 with
+// Q, established after both links. At the first link E2 is demoted by
+// position, its flag clear; its flag is then set (as a message deposited
+// before that link would set it; set directly, since one mailbox cannot
+// order such a message after E2's hs.fin); the second link suspends.
+func TestR29K4AlreadyDemotedFlagSuspends(t *testing.T) {
+	s := newScen(t, 2)
+	s.w.relayRot = false
+	P, Q := s.p(0), s.p(1)
+	s.w.makeCopy(P)
+	c := s.w.P[len(s.w.P)-1]
+	s.rotate(P, pathCred) // a->b
+	s.rotate(P, pathCred) // b->c
+	s.hold(Q, KIdRot)
+	s.hold(Q, KInit) // P's restarted handshakes wait; only the links matter here
+	c.unlock()
+	s.do(c, func() { c.startHS(c.st.peer(Q.ID), false); c.write(); c.flush() })
+	s.run(1, Q) // Q answers the copy
+	s.run(1, c) // the copy: pending, hs.fin
+	s.run(1, Q) // Q activates the copy's epoch E2 (flag clear: only hs.fin)
+	c.Locked, c.st = true, c.stored.clone()
+	r := Q.st.peer(P.ID)
+	e2 := r.Cur
+	if ep := r.epoch(e2); ep == nil || ep.Flag {
+		t.Fatalf("setup: E%d %+v\n  %s", e2, ep, s.trace())
+	}
+	var ids []*RMsg
+	for _, m := range s.w.R.boxes[Q.st.Relay].msgs {
+		if m.P.Kind == KIdRot {
+			ids = append(ids, m)
+		}
+	}
+	if len(ids) != 2 {
+		t.Fatalf("setup: %d identity.rotate waiting, want 2", len(ids))
+	}
+	ids[0].leaseUntil = 0
+	s.run(1, Q) // the first link: E2 demoted by position, flag clear
+	ep := r.epoch(e2)
+	if ep == nil || !ep.Demoted || r.Status != stActive {
+		t.Fatalf("setup: E%d not demoted at the first link: %+v\n  %s", e2, ep, s.trace())
+	}
+	s.do(Q, func() { r.epoch(e2).Flag = true; Q.write() })
+	ids[1].leaseUntil = 0
+	s.run(1, Q)
+	if r.Status != stSuspended || s.w.stats["R29 K4:flag-suspend-already-demoted"] == 0 {
+		t.Fatalf("K4 at the second link did not judge the demoted E%d's flag: status %d\n  %s", e2, r.Status, s.trace())
+	}
+}
+
+// Signer ancestry is judged against the link's old ik, not P's current
+// ik. An honest sequence: P rotates a->b and its identity.rotate M1 under
+// E0 is delayed; Q learns a->b from P's hs.resp to Q's rekey, so E1
+// (signer b) goes pending; Q abandons E1; P had activated E1 and its
+// hs.confirm sets E1's flag; P rotates b->c (under E1); M1 then arrives
+// under E0. Every link of M1 is followed; E1's signer b is not a->b's old
+// ik a nor an ancestor of it, so K9 neither suspends nor ends E1.
+func TestR29K9SignerAncestryOfTheLink(t *testing.T) {
+	s := newScen(t, 2)
+	s.w.relayRot = false
+	P, Q := s.p(0), s.p(1)
+	s.rotate(P, pathCred) // a->b; M1 under E0
+	s.hold(Q, KIdRot)
+	s.hold(Q, KInit) // P's restarted rekey waits too
+	r := Q.st.peer(P.ID)
+	s.do(Q, func() { Q.startHS(r, false); Q.write(); Q.flush() })
+	s.run(1, P) // P answers under b, with a->b
+	s.run(1, Q) // Q follows a->b at hs.resp; E1 (signer b) pending; hs.fin
+	if r.Pend == nil || r.IK != P.st.IK {
+		t.Fatalf("setup: Q has no pending E1 signed by P's new ik\n  %s", s.trace())
+	}
+	e1 := r.Pend.ID
+	s.do(Q, func() { Q.abandonPending(r, "no valid standing token", false); Q.write() })
+	s.run(1, P) // P activates E1 at hs.fin, hs.confirm
+	s.run(1, Q) // E1's flag set (processed without confirming)
+	if ep := r.epoch(e1); ep == nil || !ep.Flag || !ep.Abandoned {
+		t.Fatalf("setup: E%d %+v\n  %s", e1, ep, s.trace())
+	}
+	if P.st.peer(Q.ID).Cur != e1 {
+		t.Fatalf("setup: P is not on E%d", e1)
+	}
+	s.rotate(P, pathCred) // b->c, under E1
+	s.hold(Q, KInit)
+	s.run(1, Q)
+	if r.IK != P.st.IK || r.Status != stActive {
+		t.Fatalf("setup: Q did not follow b->c (status %d)\n  %s", r.Status, s.trace())
+	}
+	s.release(Q, KIdRot) // M1, a->b under E0
+	s.run(1, Q)
+	if ep := r.epoch(e1); r.Status != stActive || ep == nil || ep.Ended {
+		t.Fatalf("an honest P's delayed identity.rotate judged E%d: status %d (%s), %+v\n  %s", e1, r.Status, r.Ref, ep, s.trace())
+	}
+}

@@ -69,6 +69,8 @@ var r29Unreachable = map[string]string{
 	"I6:token_expired-before-own-exp":    "token_expired while the own clock is behind",
 	"I6:rekey-abandoned-token_expired":   "token_expired with a pending rekey (the parties check exp before depositing)",
 	"I6:reconnect-kept-at-token_expired": "as above, with a pending reconnect",
+	"K9:judged-after-cut-off":            "Table A's after-cut-off row needs relay-key rotation, off in the oracle config (TestR29K9AfterCutOffIgnoreJudged)",
+	"K4:flag-suspend-already-demoted":    "a flag set on an epoch after its demotion needs a message deposited before the link in another mailbox (TestR29K4AlreadyDemotedFlagSuspends)",
 	"G2:sticky":                          "a message without hs_confirm after it was seen (a copy taken before the device first advertised it)",
 }
 

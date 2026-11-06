@@ -367,6 +367,25 @@ func (r *PeerRec) isAncestor(k Key) bool {
 	}
 	return false
 }
+// signedBy: an epoch signer sig is the link's old ik or an ancestor of it
+// (§3.4.1 "Epochs after an ik link", strict F1, R29-K9: "that link's
+// old_ik or an ancestor"), walking the followed chain back from old; not
+// any ancestor of P's current ik.
+func (r *PeerRec) signedBy(sig, old Key) bool {
+	k := old
+	for steps := 0; steps <= len(r.Chain); steps++ {
+		if sig == k {
+			return true
+		}
+		i := slices.IndexFunc(r.Chain, func(l IKLink) bool { return l.New == k })
+		if i < 0 {
+			return false
+		}
+		k = r.Chain[i].Old
+	}
+	return false
+}
+
 func (r *PeerRec) isRejected(k Key) bool {
 	for _, l := range r.Dropped {
 		if l.New == k {

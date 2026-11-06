@@ -202,6 +202,12 @@ func (q *Party) acceptFrom(r *PeerRec, m *RMsg, pos Pos, set []Key) dec {
 		q.w.probes[M.Probe] = true
 		return dec{"accept", "", cell}
 	case KUpdate:
+		// an update travels in session mode: under a demoted epoch it is
+		// refused, under an ended one it is fork evidence (acceptFrom,
+		// 0.86.2; R29-K9), as any message after step 3
+		if d, bad := q.demoted(r, M, pos, cell); bad {
+			return d
+		}
 		return q.ruleU(r, m, pos, rs)
 	case KTokIssued:
 		if d, bad := q.demoted(r, M, pos, cell); bad {

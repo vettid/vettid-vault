@@ -452,7 +452,7 @@ func (m *Manager) respondReconnect(pi *handshake.PendingInit, p *Peer, sender ed
 	m.st.Awaiting[id] = &AwaitingHS{ID: id, PeerID: p.ID, Purpose: handshake.PurposeReconnect, Created: now, Resp: rs, Issued: issued,
 		OwnChain: m.ownChainNow(), RespOutbox: oe.ID, Reconnect: pend, Th1: th1[:],
 		NamedConfirmed: namedConf, InitTS: pi.Inner().TS,
-		SigIK: append([]byte(nil), m.keys.ik.Public().(ed25519.PublicKey)...), Signer: append([]byte(nil), body.From.IK...)}
+		Signer: append([]byte(nil), body.From.IK...)}
 	m.awaiting[id] = resp
 	// §6.6 "Between two persons" (0.74.0): with our own reconnect open as
 	// well, the lower th1 wins; a higher one of ours is abandoned now.
@@ -606,14 +606,12 @@ func (m *Manager) handleRekeyInit(ctx context.Context, p *Peer, in *envelope.Inn
 		CollectSender: sender, RecordRelayKey: p.Relay.PK, KnownInitiatorIK: p.IK,
 		KnownInitiatorChain: parseRotations(p.Chain), Now: now, Features: m.featuresFor(p),
 	}
-	if p.advertisedFeatures() {
-		// S8: the vault's links since the signer of the epoch rekeyed.
-		chain := p.OwnChainAtEpoch
-		if e := p.epochMeta(epID[:]); e != nil && e.OwnChain < chain {
-			chain = e.OwnChain
-		}
-		cfg.Rotations = m.ownRotationsSince(chain)
+	// S8: the vault's links since the signer of the epoch rekeyed.
+	chain := p.OwnChainAtEpoch
+	if e := p.epochMeta(epID[:]); e != nil && e.OwnChain < chain {
+		chain = e.OwnChain
 	}
+	cfg.Rotations = m.ownRotationsSince(chain)
 	body := pi.Init()
 	resp, env, err := pi.Respond(cfg)
 	if err != nil {
@@ -626,7 +624,7 @@ func (m *Manager) handleRekeyInit(ctx context.Context, p *Peer, in *envelope.Inn
 	}
 	id := m.newID(now)
 	aw := &AwaitingHS{ID: id, PeerID: p.ID, Purpose: handshake.PurposeRekey, Created: now, Resp: rs, OwnChain: m.ownChainNow(),
-		NamedConfirmed: namedConf, InitTS: in.TS, SigIK: append([]byte(nil), m.keys.ik.Public().(ed25519.PublicKey)...),
+		NamedConfirmed: namedConf, InitTS: in.TS,
 		Signer: append([]byte(nil), body.From.IK...), Th1: func() []byte { t := pi.Th1(); return t[:] }()}
 	for _, r := range body.Rotations {
 		aw.Links = append(aw.Links, r.Marshal())
@@ -739,9 +737,7 @@ func (m *Manager) handleFin(ctx context.Context, id string, raw []byte, sender e
 // rekey or reconnect (0.86.0, §6.3.1 "Responder"): the vault's own pending
 // epoch with the peer is abandoned, rule E applies if the handshake named
 // the confirmed epoch while it was not current, the epoch activates (the
-// confirmed one keeping its rk), and hs.confirm is queued. An answer kept
-// across the vault's own rotation (toward a peer without the gate, S5) is
-// established and then rekeyed at once under the new ik.
+// confirmed one keeping its rk), and hs.confirm is queued.
 func (m *Manager) responderEstablish(p *Peer, aw *AwaitingHS, fr *handshake.FinResult, now time.Time, activate func(actOpts)) {
 	if aw.Reconnect == nil && len(aw.Links) > 0 {
 		// Table B "Reached" (S8): the rekey's links, applied at hs.fin, then
@@ -773,11 +769,6 @@ func (m *Manager) responderEstablish(p *Peer, aw *AwaitingHS, fr *handshake.FinR
 		if og.New == nil && og.PeerID == p.ID && !og.Replaced {
 			m.abandonOutgoing(id, now)
 		}
-	}
-	if aw.SigIK != nil && !bytes.Equal(aw.SigIK, m.keys.ik.Public().(ed25519.PublicKey)) {
-		// S5 (0.86.0): kept across the vault's rotation toward a peer
-		// without the gate; now a rekey under the new ik at once.
-		m.startRekey(p, now)
 	}
 }
 
@@ -1190,10 +1181,7 @@ func (m *Manager) hasOutgoing(peerID string, purpose handshake.Purpose) bool {
 // startRekey initiates a rekey of p's session (§6.5). None starts while
 // an answer of the vault's to p awaits hs.fin or its own new epoch awaits
 // confirmation (§6.5, §6.3.1). The hs.init carries the vault's links since
-// the epoch's signer (S8, 0.85.0: the whole chain) to a peer that
-// advertised features; release 28 and earlier refuse a rekey carrying
-// any (they parse no rotations in a rekey), so toward them it carries
-// none.
+// the epoch's signer (S8, 0.85.0: the whole chain).
 func (m *Manager) startRekey(p *Peer, now time.Time) {
 	kr := m.sessions[p.ID]
 	if kr == nil || kr.Current() == nil || m.hasOutgoing(p.ID, handshake.PurposeRekey) || p.Standing.Token == "" || p.suspended() ||
@@ -1206,9 +1194,7 @@ func (m *Manager) startRekey(p *Peer, now time.Time) {
 		Purpose: handshake.PurposeRekey, Identity: m.keys.ik, StaticKEM: m.keys.kem.Public(), Relay: m.ownAddr(),
 		ResponderIK: p.IK, KnownResponderChain: parseRotations(p.Chain), ResponderRelayKey: p.Relay.PK, Current: kr.Current(),
 		PinnedSuite: p.Suite, Policy: policyFor(p.Kind), Now: now, Features: m.featuresFor(p),
-	}
-	if p.advertisedFeatures() {
-		cfg.Rotations = m.ownRotationsSince(p.OwnChainAtEpoch)
+		Rotations: m.ownRotationsSince(p.OwnChainAtEpoch),
 	}
 	ini, err := handshake.NewInitiator(cfg)
 	if err != nil {
@@ -1547,15 +1533,4 @@ func (m *Manager) enrollApp(ctx context.Context, app *EnrollApp, now time.Time) 
 	}
 	m.queueDeposit(&OutboxEntry{Op: OpDeposit, RelayURL: app.Relay.URL, Mailbox: app.Relay.Mailbox, Token: app.OpenToken, Payload: env}, now)
 	return nil
-}
-
-// pi0Rotations returns the rotations of a rekey hs.init's body, or nil
-// (the release-28 stand-in refuses any).
-func pi0Rotations(in *envelope.Inner) []json.RawMessage {
-	o, err := strictjson.ParseObject(in.Body)
-	if err != nil {
-		return nil
-	}
-	arr, _, _ := o.OptArray("rotations")
-	return arr
 }

@@ -271,7 +271,6 @@ type Kept uint8
 const (
 	KeepReceive Kept = iota // receive key only (§6.5)
 	KeepRK                  // and rk: a responder's confirmed epoch (§6.3.1)
-	KeepSend                // and the send key and rk: an epoch a reverting initiator may go back to (§6.3.1 "Deployment")
 )
 
 // ActivateKeeping makes e the current epoch as Activate does, but the
@@ -344,31 +343,6 @@ func (k *Keyring) abandonPendingLocked(now time.Time) {
 	k.pending.retireSend()
 	k.retired = append(k.retired, retiredEpoch{e: k.pending, until: now.Add(ReceiveKeyRetention)})
 	k.pending = nil
-}
-
-// Reinstate makes the superseded epoch id current again (a revert,
-// §6.3.1 "Deployment"; §3.4.1): the current epoch loses its send key and
-// rk at once and keeps its receive key 16 days from now, as a previous
-// epoch's, so that a later message under it is still authenticated (the
-// caller decides what it is). It reports false, changing nothing, unless
-// id is a superseded epoch that kept its send key.
-func (k *Keyring) Reinstate(id [suite.EpochIDSize]byte, now time.Time) bool {
-	k.mu.Lock()
-	defer k.mu.Unlock()
-	for i, r := range k.retired {
-		if r.e.id != id || !r.e.CanSend() || !r.e.HasRK() {
-			continue
-		}
-		cur := k.current
-		k.current = r.e
-		k.retired = append(k.retired[:i], k.retired[i+1:]...)
-		if cur != nil {
-			cur.retireSend()
-			k.retired = append(k.retired, retiredEpoch{e: cur, until: now.Add(ReceiveKeyRetention)})
-		}
-		return true
-	}
-	return false
 }
 
 // Release ends what the superseded epoch id kept beyond its receive key:

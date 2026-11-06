@@ -47,7 +47,7 @@ func (p *Peer) rejected(ik []byte) bool {
 
 // rotateLinks reads an identity.rotate body: `rotations` (S8, 0.86.0: the
 // whole chain since the epoch's signer) when present, else `rotation`
-// alone (a release-28 sender).
+// alone (rotateIdentity's fallback when identityRotateBody has no chain).
 func rotateLinks(body []byte) ([]*handshake.Rotation, error) {
 	o, err := strictjson.ParseObject(body)
 	if err != nil {
@@ -648,9 +648,6 @@ func (m *Manager) rekeyPrecheck(p *Peer, in *envelope.Inner, ep *handshake.Epoch
 func (m *Manager) identityRotateBody(p *Peer) []byte {
 	links := m.ownRotationsSince(p.OwnChainAtEpoch)
 	if len(links) == 0 { // 0ee0078 core.go:744: `rotation` only
-		return nil
-	}
-	if len(links) == 0 {
 		return nil
 	}
 	last := links[len(links)-1]

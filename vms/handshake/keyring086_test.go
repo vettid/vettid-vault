@@ -54,32 +54,17 @@ func TestKeyringPendingAndKept(t *testing.T) {
 	}
 }
 
-func TestKeyringKeepReinstateRelease(t *testing.T) {
+func TestKeyringKeepRKRelease(t *testing.T) {
 	ip, rp := newParty(t, 3), newParty(t, 4)
 	a0, _ := runHandshake(t, ip, rp, PurposeConnection)
-	a1, _ := runHandshake(t, ip, rp, PurposeConnection)
+	b1, _ := runHandshake(t, ip, rp, PurposeConnection)
 	now := t0
 	var k Keyring
 	k.Activate(a0, now)
-	k.ActivateKeeping(a1, now, now.Add(48*24*time.Hour), KeepSend)
-	if !a0.CanSend() || !a0.HasRK() {
-		t.Fatal("KeepSend dropped the send key or rk")
-	}
-	k2, err := ImportKeyring(k.Export())
-	if err != nil || k2.Find(a0.ID()) == nil || !k2.Find(a0.ID()).CanSend() {
-		t.Fatal("a kept epoch did not survive export")
-	}
-	if !k.Reinstate(a0.ID(), now) || k.Current() != a0 || k.Find(a1.ID()) == nil || a1.CanSend() || a1.HasRK() {
-		t.Fatal("reinstate: the superseded current keeps its receive key only")
-	}
 	// KeepRK: rk without the send key; Release ends both.
-	b1, _ := runHandshake(t, ip, rp, PurposeConnection)
 	k.ActivateKeeping(b1, now, now.Add(48*24*time.Hour), KeepRK)
 	if a0.CanSend() || !a0.HasRK() {
 		t.Fatal("KeepRK")
-	}
-	if k.Reinstate(a0.ID(), now) {
-		t.Fatal("reinstated an epoch without its send key")
 	}
 	k.Release(a0.ID(), now.Add(ReceiveKeyRetention))
 	if a0.HasRK() {

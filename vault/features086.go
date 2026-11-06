@@ -107,10 +107,6 @@ func (m *Manager) noteFeatures(p *Peer, names []string) {
 	}
 }
 
-// advertisedFeatures reports whether p has advertised any features
-// (release 29 or later).
-func (p *Peer) advertisedFeatures() bool { return p.PeerFeatures != nil }
-
 // hasConfirm reports whether p advertised hs_confirm (§6.3.1 "Capability").
 func (p *Peer) hasConfirm() bool {
 	i := sort.SearchStrings(p.PeerFeatures, handshake.CapConfirm)

@@ -281,8 +281,7 @@ type Peer struct {
 	Fork *ForkSuspension `json:"fork_suspension,omitempty"`
 
 	// PeerFeatures are the capability names the peer advertised (0.86.0,
-	// §10.8, §5.3), sorted; a name is only ever added. Nil: it advertised
-	// none (release 28 or earlier).
+	// §10.8, §5.3), sorted; a name is only ever added. Nil: none seen yet.
 	PeerFeatures []string `json:"peer_features,omitempty"`
 
 	// Epochs are what §3.4.1 and §6.3.1 (0.86.0) need to know about each
@@ -297,7 +296,7 @@ type Peer struct {
 	// Confirmed is the confirmed epoch (§6.3.1 "Responder"): the newest,
 	// in activation order, under which the peer sent a message other than
 	// hs.fin, or that the vault activated itself at confirmation. It never
-	// moves back. Nil in a record from before 0.86.0: the current epoch.
+	// moves back. Set at the peer's first epoch.
 	Confirmed []byte `json:"confirmed_epoch,omitempty"`
 	// Abandoned are the ids of the vault's own pending epochs it abandoned
 	// (B passed): a reconnect naming one is accepted until a newer epoch is
@@ -393,9 +392,6 @@ type PendingEpoch struct {
 	// OwnChain is the own rotation count whose ik signed the handshake.
 	Issued   []IssuedToken `json:"issued,omitempty"`
 	OwnChain int           `json:"own_chain"`
-	// SigIK is the vault's own ik that signed it (S5 abandons it when that
-	// ik is superseded).
-	SigIK []byte `json:"sig_ik,omitempty"`
 }
 
 // EpochRecord is one epoch of a service connection's history (§6.6, 0.72.0).
@@ -612,12 +608,9 @@ type AwaitingHS struct {
 	Replaced bool `json:"replaced,omitempty"`
 	// 0.86.0 (§6.3.1): NamedConfirmed marks an answer whose hs.init named
 	// the confirmed epoch while it was not current (rule E applies at its
-	// hs.fin); InitTS is the hs.init's inner ts; SigIK the vault's ik that
-	// signed hs.resp (S5: an answer kept across a rotation toward a peer
-	// without the gate is established, then rekeyed at once).
+	// hs.fin); InitTS is the hs.init's inner ts.
 	NamedConfirmed bool      `json:"named_confirmed,omitempty"`
 	InitTS         time.Time `json:"init_ts,omitzero"`
-	SigIK          []byte    `json:"sig_ik,omitempty"`
 	// Signer is the peer's ik that sig_I must verify under (the epoch's
 	// signer, §3.4.1); Links the links a rekey's hs.init carried (S8),
 	// followed at hs.fin.

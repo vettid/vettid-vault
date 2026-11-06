@@ -2,7 +2,6 @@ package vault
 
 import (
 	"bytes"
-	"crypto/ed25519"
 	"time"
 
 	"github.com/vettid/vettid-vault/vms/envelope"
@@ -71,14 +70,9 @@ func (p *Peer) epochIndex(id []byte) int {
 	return -1
 }
 
-// confirmedID is the confirmed epoch: before 0.86.0 recorded one, the
-// current epoch.
-func (p *Peer) confirmedID() []byte {
-	if p.Confirmed != nil {
-		return p.Confirmed
-	}
-	return p.LastEpochID
-}
+// confirmedID is the confirmed epoch (§6.3.1 "Responder"), recorded from
+// the peer's first epoch.
+func (p *Peer) confirmedID() []byte { return p.Confirmed }
 
 // newer reports whether epoch a was recorded after epoch b (b unknown or
 // nil: whether a is recorded at all). Pending and destroyed epochs are not
@@ -186,7 +180,7 @@ func (m *Manager) makePending(p *Peer, og *OutgoingHS, res *handshake.Result, no
 	kr.SetPending(res.Epoch, now)
 	id := res.Epoch.ID()
 	p.Pending = &PendingEpoch{ID: id[:], Purpose: og.Purpose, FinAt: now, RespTS: res.Inner.TS, Issued: og.Issued,
-		OwnChain: chainOr(og.OwnChain, len(m.st.Rotations)), SigIK: append([]byte(nil), m.keys.ik.Public().(ed25519.PublicKey)...)}
+		OwnChain: chainOr(og.OwnChain, len(m.st.Rotations))}
 	p.Epochs = append(p.Epochs, EpochMeta{ID: id[:], Signer: append([]byte(nil), res.ResponderIK...), Mine: true, Pending: true,
 		EstAt: m.relayAt, EstMsg: m.msgID, OwnChain: p.Pending.OwnChain})
 	m.dirty = true

@@ -17,7 +17,7 @@ import (
 // message by message (deliver, hold, lose). The scenarios are those of the
 // executable model (vettid-vault trust-model, internal/trustmodel at
 // 641ef63) that this release's rules fix. A release-28 peer is stood in for
-// by a vault with emu28 set: no features sent or counted, no hs.confirm,
+// by a vault marked by setEmu28 (build tag vettid_emu28; skipped without): no features sent or counted, no hs.confirm,
 // no rule E, no revert, identity.rotate read from `rotation` only, a rekey
 // only under the current epoch and without rotations, no rules J and L.
 
@@ -45,8 +45,8 @@ func newR29Fx(t *testing.T, emu ...bool) *r29Fx {
 				f.got[s] = append(f.got[s], string(in.Body))
 				return nil, nil
 			}))
-		if s < len(emu) {
-			d.m.emu28 = emu[s]
+		if s < len(emu) && emu[s] {
+			setEmu28(t, d.m)
 		}
 		f.sink[s] = &recSink{}
 		d.m.features = append(d.m.features, f.sink[s])

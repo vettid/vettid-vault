@@ -300,7 +300,7 @@ func (m *Manager) tickPending(p *Peer, now time.Time) {
 // durable, not a request).
 func (m *Manager) queueConfirm(p *Peer, now time.Time) {
 	kr := m.sessions[p.ID]
-	if kr == nil || kr.Current() == nil || p.suspended() || m.emu28 {
+	if kr == nil || kr.Current() == nil || p.suspended() || m.emu28() {
 		return
 	}
 	in := &envelope.Inner{ID: m.newID(now), Type: handshake.TypeConfirm, TS: now, Body: []byte(`{}`)}
@@ -390,7 +390,7 @@ func (m *Manager) responderActivation(p *Peer, signer []byte, now time.Time) act
 // bookkeeping. It reports whether the message was dealt with (acked and
 // dropped) here.
 func (m *Manager) beforeAccept(p *Peer, ep *handshake.Epoch, in *envelope.Inner, now time.Time) bool {
-	if p.suspended() || ep == nil || m.emu28 {
+	if p.suspended() || ep == nil || m.emu28() {
 		return false
 	}
 	p.upgradeEpochs()

@@ -37,7 +37,7 @@ const TypeDeviceFeatures = "device.features"
 // to a service the optional features it can use); to a device the
 // vault's §11.10.9 list.
 func (m *Manager) featuresFor(p *Peer) []string {
-	if p == nil || m.emu28 {
+	if p == nil || m.emu28() {
 		return nil
 	}
 	if p.Kind != KindConnection {
@@ -79,7 +79,7 @@ func mergeNames(have []string, names []string) ([]string, bool) {
 // successor). A name is only ever added. A list that is not well formed
 // counts for nothing.
 func (m *Manager) noteFeatures(p *Peer, names []string) {
-	if p == nil || names == nil || m.emu28 || !envelope.ValidFeatures(names) {
+	if p == nil || names == nil || m.emu28() || !envelope.ValidFeatures(names) {
 		return
 	}
 	if p.PeerFeatures == nil {

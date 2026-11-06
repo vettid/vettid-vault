@@ -343,7 +343,7 @@ func (m *Manager) respondReconnect(pi *handshake.PendingInit, p *Peer, sender ed
 	m.noteFeatures(p, pi.Inner().Features) // 0.86.0, §10.8: steps 1-4 passed
 	var named86 []byte
 	var namedConf, ownCopy, forkEp, refuse bool
-	if !m.emu28 {
+	if !m.emu28() {
 		named86, namedConf, ownCopy, forkEp, refuse = m.classifyCtx086(p, body.Ctx)
 	}
 	if refuse {
@@ -533,7 +533,7 @@ func (m *Manager) handleRekeyInit(ctx context.Context, p *Peer, in *envelope.Inn
 	p.upgradeEpochs()
 	epID := ep.ID()
 	namedConf := false
-	if m.emu28 && (kr.Current() != ep || len(pi0Rotations(in)) > 0) {
+	if m.emu28() && (kr.Current() != ep || len(pi0Rotations(in)) > 0) {
 		// Release 28: a rekey only under the current epoch, and one
 		// carrying rotations does not parse.
 		m.audit(now, "rekey_not_current_epoch", p.ID)
@@ -563,7 +563,7 @@ func (m *Manager) handleRekeyInit(ctx context.Context, p *Peer, in *envelope.Inn
 		// The peer's answer to ours ended without hs.fin (§6.5).
 		m.abandonPending(p, "later_rekey", false, now)
 	}
-	if !m.emu28 && (p.Standing.Token == "" || !now.Before(p.Standing.Exp)) {
+	if !m.emu28() && (p.Standing.Token == "" || !now.Before(p.Standing.Exp)) {
 		// Rule J (§6.3.1 "Lifetimes"): no standing token valid by its exp,
 		// so no answer could be deposited: none is made, and neither the
 		// rekey block nor §6.6's holds the vault back from reconnecting.
@@ -769,7 +769,7 @@ func (m *Manager) responderEstablish(p *Peer, aw *AwaitingHS, fr *handshake.FinR
 	if p.Pending != nil {
 		m.abandonPending(p, "peer_activated", false, now)
 	}
-	if aw.NamedConfirmed && !m.emu28 {
+	if aw.NamedConfirmed && !m.emu28() {
 		m.ruleE(p, aw.InitTS, now)
 	}
 	signer := aw.Signer
@@ -1169,13 +1169,13 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 	// (§6.3.1 "Deployment").
 	old, oldChain := append([]byte(nil), p.LastEpochID...), p.OwnChainAtEpoch
 	o := actOpts{signer: res.ResponderIK, mine: true, unconfirmed: true}
-	if len(old) > 0 && !m.emu28 {
+	if len(old) > 0 && !m.emu28() {
 		o.how, o.until = actKeepSend, now.Add(ConfirmedKeysFor)
 		if p.Revert != nil {
 			m.endRevertKeep(p, now) // one keep at a time: the earlier old epoch goes as usual
 		}
 	}
-	if len(old) > 0 && !m.emu28 {
+	if len(old) > 0 && !m.emu28() {
 		m.startRevertKeep(p, old, newID[:], oldChain, now) // before activation sends anything in the new epoch
 	}
 	m.activate(p, res.Epoch, og.Purpose, og.Issued, "", chainOr(og.OwnChain, len(m.st.Rotations)), o, now)

@@ -351,10 +351,6 @@ type Manager struct {
 	// header. It ends with the Manager, so every earlier value is stale
 	// after any lock, restart or move. Not a secret.
 	unlockID string
-	// emu28 makes this vault behave as release 28 toward its connections
-	// in the respects 0.86.0 changed (tests only: the stand-in for a
-	// release-28 peer in mixed scenarios; nothing sets it in production).
-	emu28 bool
 	// unlockedBy: the app whose unlock started this manager (its device
 	// id; "" for a PIN-only unlock or an app without a device record
 	// yet), audited on vault.unlocked (0.23.2, §10.9).

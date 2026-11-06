@@ -620,3 +620,48 @@ func TestR29RefusedReconnectLinksFollowed(t *testing.T) {
 	}
 	f.talks()
 }
+
+// §3.4.1 "After a demotion of the current epoch": Q sends P nothing but
+// handshake messages, its reconnect's hs.fin included. With the current
+// epoch demoted (by strict F1, and by position) the vault's own
+// reconnect's hs.fin is deposited, and the pair confirms it (not B).
+func TestR29DemotedReconnectFinGoes(t *testing.T) {
+	for _, how := range []string{"f1", "position"} {
+		var f *r29Fx
+		q, pp := 0, 1
+		switch how {
+		case "f1":
+			f = demoted(t, nil)
+		case "position":
+			f = newR29Fx(t)
+			f.longTokens()
+			f.rekey(0)
+			f.deliver(0, 1, kHSInit)
+			f.deliver(1, 0, kHSResp)
+			f.rotate(0)
+			f.deliverAt(0, 1, kHSFin, "pump-z")
+			f.deliverAt(0, 1, kRotate, "pump-a")
+			f.lose(0, 1, kAny)
+			q, pp = 1, 0
+		}
+		if !f.m(q).currentDemoted(f.p(q)) || f.openReconnect(q) == nil {
+			f.dump()
+			t.Fatalf("%s: setup: not demoted and reconnecting", how)
+		}
+		f.lose(pp, q, kHSInit) // the peer's own rekey or reconnect: not under test
+		f.deliver(q, pp, kHSInit)
+		f.deliver(pp, q, kHSResp)
+		if f.p(q).Pending == nil || !f.m(q).currentDemoted(f.p(q)) {
+			t.Fatalf("%s: setup: the reconnect epoch is not pending beside the demoted one", how)
+		}
+		if n := f.deliver(q, pp, kHSFin); n != 1 {
+			f.dump()
+			t.Fatalf("%s: the reconnect's hs.fin was not deposited while demoted (%d)", how, n)
+		}
+		f.deliver(pp, q, kConfirm)
+		if f.p(q).Pending != nil || f.m(q).currentDemoted(f.p(q)) {
+			f.dump()
+			t.Fatalf("%s: the reconnect was not confirmed", how)
+		}
+	}
+}

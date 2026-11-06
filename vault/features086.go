@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"sort"
 	"time"
 
@@ -94,6 +95,17 @@ func mergeNames(have []string, names []string) ([]string, bool) {
 // successor). A name is only ever added. A list that is not well formed
 // counts for nothing.
 func (m *Manager) noteFeatures(p *Peer, names []string) {
+	if p != nil && p.Kind != KindConnection {
+		// §6.3.1 "An app from before release 29" (R29-D4): a message from
+		// the device whose features lack hs_confirm.
+		if !p.Heard {
+			p.Heard = true
+			m.dirty = true
+		}
+		if !slices.Contains(names, handshake.CapConfirm) || !envelope.ValidFeatures(names) {
+			defer m.deviceUpdateNeeded(p, m.now())
+		}
+	}
 	if p == nil || names == nil || !envelope.ValidFeatures(names) {
 		return
 	}
@@ -105,6 +117,19 @@ func (m *Manager) noteFeatures(p *Peer, names []string) {
 	if p.PeerFeatures, changed = mergeNames(p.PeerFeatures, names); changed {
 		m.dirty = true
 	}
+}
+
+// deviceUpdateNeeded is §6.3.1 "An app from before release 29" (R29-D4):
+// the feed item device.update_needed (priority high, device_id set) to the
+// member's app and desktops, once per device until that device advertises
+// hs_confirm. A device that has sent nothing yet is not judged.
+func (m *Manager) deviceUpdateNeeded(p *Peer, now time.Time) {
+	if p == nil || p.Kind == KindConnection || !p.Heard || p.hasConfirm() || p.UpdateNoticed {
+		return
+	}
+	p.UpdateNoticed = true
+	m.record(Activity{Kind: "device.update_needed", DeviceID: p.ID, Feed: true, Priority: "high"}, now)
+	m.dirty = true
 }
 
 // hasConfirm reports whether p advertised hs_confirm (§6.3.1 "Capability").

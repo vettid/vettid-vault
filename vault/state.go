@@ -284,6 +284,12 @@ type Peer struct {
 	// replaces it.
 	Fork *ForkSuspension `json:"fork_suspension,omitempty"`
 
+	// Heard: a device or agent has sent the vault a message (R29-D4 judges
+	// only such a device); UpdateNoticed: device.update_needed was shown
+	// for it (once per device until it advertises hs_confirm).
+	Heard         bool `json:"heard,omitempty"`
+	UpdateNoticed bool `json:"update_noticed,omitempty"`
+
 	// PeerFeatures are the capability names the peer advertised (0.86.0,
 	// §10.8, §5.3), sorted; a name is only ever added. Nil: none seen yet.
 	PeerFeatures []string `json:"peer_features,omitempty"`

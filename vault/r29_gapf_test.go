@@ -97,7 +97,7 @@ func (g *gapF) fromDevice(raw []byte) {
 // sendUnder seals a message from the desktop under ep.
 func (g *gapF) sendUnder(ep *handshake.Epoch, typ string, body []byte) {
 	id, _ := envelope.NewULID(g.clk)
-	raw, err := ep.Seal(&envelope.Inner{ID: id, Type: typ, TS: g.clk, Body: body})
+	raw, err := ep.Seal(&envelope.Inner{ID: id, Type: typ, TS: g.clk, Body: body, Features: []string{handshake.CapConfirm}})
 	if err != nil {
 		g.t.Fatal(err)
 	}
@@ -125,7 +125,7 @@ func (g *gapF) answerRekey(deps [][]byte, ep *handshake.Epoch) *handshake.Respon
 		}
 		resp, renv, err := pi.Respond(handshake.ResponderConfig{Identity: g.ik, Policy: handshake.PolicyVaultToDevice,
 			CollectSender: g.vaultRelay(), RecordRelayKey: g.vaultRelay(), KnownInitiatorIK: g.d.m.keys.ik.Public().(ed25519.PublicKey),
-			Now: g.clk})
+			Now: g.clk, Features: []string{handshake.CapConfirm}})
 		if err != nil {
 			g.t.Fatal(err)
 		}

@@ -529,6 +529,7 @@ func (m *Manager) handleRekeyInit(ctx context.Context, p *Peer, in *envelope.Inn
 		// is acked, dropped and audited drop.peer_key (ref unexpected),
 		// and answered by none.
 		m.refusePeerKey(p, "unexpected", now)
+		m.deviceUpdateNeeded(p, now) // R29-D4
 		return ackAfterFlush
 	}
 	kr := m.sessions[p.ID]

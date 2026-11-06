@@ -246,6 +246,9 @@ func (m *Manager) abandonPending(p *Peer, why string, restart bool, now time.Tim
 	p.Pending = nil
 	m.note(now, "pending_abandoned_"+why, p.ID)
 	m.dirty = true
+	if why == "b_passed" && p.Kind != KindConnection {
+		m.deviceUpdateNeeded(p, now) // R29-D4: B passed toward a device without hs_confirm
+	}
 	if pe.Purpose == handshake.PurposeReconnect && why == "b_passed" && p.Kind == KindConnection {
 		// §6.3.1, §3.4.1 "The reconnect bound": a pending reconnect that
 		// reaches B makes the connection stale at once.

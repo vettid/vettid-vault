@@ -93,22 +93,6 @@ func (m *Manager) hIdentityRotate(_ context.Context, s *Session, in *envelope.In
 	if err != nil {
 		return nil, err
 	}
-	if m.emu28() {
-		// 0ee0078 core.go:573-599: `rotation` only, rule C against followed
-		// links, followed only from the stored ik, else bad_rotation.
-		r := links[len(links)-1]
-		if m.rotationConflict(s.peer, r, s.now) || s.peer.suspended() {
-			return nil, nil
-		}
-		final, kem, err := handshake.ResolveChain(s.peer.IK, []*handshake.Rotation{r})
-		if err != nil {
-			m.audit(s.now, "bad_rotation", s.peer.ID)
-			return nil, nil
-		}
-		s.peer.IK, s.peer.KEM = final, kem.Bytes()
-		s.peer.Chain = append(s.peer.Chain, r.Marshal())
-		return nil, nil
-	}
 	p := s.peer
 	for _, r := range links {
 		if m.rotationConflict(p, r, s.now) {
@@ -158,7 +142,7 @@ func (m *Manager) hIdentityRotate(_ context.Context, s *Session, in *envelope.In
 // recorded whatever epoch it travels under. It reports whether the
 // connection is (now) suspended by a conflict.
 func (m *Manager) evidenceFirst(p *Peer, in *envelope.Inner, now time.Time) bool {
-	if p.Kind != KindConnection || m.emu28() {
+	if p.Kind != KindConnection {
 		return false
 	}
 	var links []*handshake.Rotation
@@ -534,7 +518,6 @@ func (m *Manager) h5(p *Peer, now time.Time) {
 	for id, aw := range m.st.Awaiting {
 		if aw.New == nil && aw.PeerID == p.ID && aw.Signer != nil && !bytes.Equal(aw.Signer, p.IK) &&
 			(aw.Reconnect == nil || !aw.Reconnect.Fork) {
-			m.keepDroppedAnswer(p, aw, now)
 			m.abandonAwaiting(id, now)
 		}
 	}
@@ -695,7 +678,7 @@ const OwnCopyGotFromPeerSuspends = true
 // epoch it travels in.
 func (m *Manager) identityRotateBody(p *Peer) []byte {
 	links := m.ownRotationsSince(p.OwnChainAtEpoch)
-	if len(links) == 0 || m.emu28() { // 0ee0078 core.go:744: `rotation` only
+	if len(links) == 0 { // 0ee0078 core.go:744: `rotation` only
 		return nil
 	}
 	if len(links) == 0 {
@@ -720,9 +703,6 @@ func (m *Manager) identityRotateBody(p *Peer) []byte {
 // established there, then rekeyed at once under the new ik
 // (responderEstablish).
 func (m *Manager) s5(p *Peer, now time.Time) (reconnect bool) {
-	if m.emu28() {
-		return false // release 28: only its rekeys are replaced (rotateIdentity's dropRekey)
-	}
 	for id, og := range m.st.Outgoing {
 		if og.New != nil || og.PeerID != p.ID || og.Replaced {
 			continue
@@ -794,7 +774,7 @@ func (m *Manager) idResend(p *Peer, ep *handshake.Epoch, in *envelope.Inner, now
 // the last failing, the connection goes stale. It reports whether a
 // reconnect started.
 func (m *Manager) ruleL(p *Peer, now time.Time) bool {
-	if p.Kind != KindConnection || p.advertisedFeatures() || p.State != PeerActive || p.suspended() || m.emu28() {
+	if p.Kind != KindConnection || p.advertisedFeatures() || p.State != PeerActive || p.suspended() {
 		return false
 	}
 	if p.OwnChainAtEpoch >= len(m.st.Rotations) {

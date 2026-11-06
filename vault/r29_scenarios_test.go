@@ -16,10 +16,8 @@ import (
 // two vaults in process, a shared clock, and a relay the test controls
 // message by message (deliver, hold, lose). The scenarios are those of the
 // executable model (vettid-vault trust-model, internal/trustmodel at
-// 641ef63) that this release's rules fix. A release-28 peer is stood in for
-// by a vault marked by setEmu28 (build tag vettid_emu28; skipped without): no features sent or counted, no hs.confirm,
-// no rule E, no revert, identity.rotate read from `rotation` only, a rekey
-// only under the current epoch and without rotations, no rules J and L.
+// 641ef63) that this release's rules fix. Both sides run release 29
+// (VAULT-MESSAGING 0.87.1: no path toward an earlier release).
 
 type r29Fx struct {
 	t    *testing.T
@@ -31,8 +29,7 @@ type r29Fx struct {
 }
 
 // newR29Fx connects two vaults (side 0 the inviter) on a shared clock.
-// emu says which sides stand in for release 28.
-func newR29Fx(t *testing.T, emu ...bool) *r29Fx {
+func newR29Fx(t *testing.T) *r29Fx {
 	t.Helper()
 	f := &r29Fx{t: t, clk: time.Now().UTC().Truncate(time.Millisecond)}
 	a, b := newVaultPair(t)
@@ -45,9 +42,6 @@ func newR29Fx(t *testing.T, emu ...bool) *r29Fx {
 				f.got[s] = append(f.got[s], string(in.Body))
 				return nil, nil
 			}))
-		if s < len(emu) && emu[s] {
-			setEmu28(t, d.m)
-		}
 		f.sink[s] = &recSink{}
 		d.m.features = append(d.m.features, f.sink[s])
 	}
@@ -256,24 +250,6 @@ func (f *r29Fx) audited(s int, ev string) bool {
 // hs_confirm from the messages of the connection's first handshake, so the
 // gate is open both ways from the start; a release-28 stand-in sends none
 // and is counted as having none.
-func TestR29FeaturesOpenTheGate(t *testing.T) {
-	f := newR29Fx(t)
-	for s := 0; s < 2; s++ {
-		if !f.p(s).hasConfirm() {
-			t.Fatalf("side %d did not count the peer's hs_confirm: %v", s, f.p(s).PeerFeatures)
-		}
-	}
-	g := newR29Fx(t, false, true)
-	if g.p(0).advertisedFeatures() || g.p(0).hasConfirm() {
-		t.Fatalf("a release-28 peer counted with features %v", g.p(0).PeerFeatures)
-	}
-	if g.p(1).advertisedFeatures() {
-		t.Fatal("the release-28 stand-in counted features")
-	}
-}
-
-// --- the initiator's pending epoch and confirmation ---
-
 // Model: TestScenarioA (lost confirm) and the plain case. A gated rekey's
 // epoch is pending at the initiator after hs.fin; it keeps sending in the
 // current epoch, which the responder still reads; the responder's
@@ -470,55 +446,8 @@ func TestR29RuleEReconnectNamingConfirmed(t *testing.T) {
 // what the initiator sends under the new epoch is kept; a message from the
 // peer under the old epoch more than T + 2 days after hs.fin reverts, and
 // the kept messages are sealed again in the old epoch and arrive.
-func TestR29RevertResealsTowardRelease28(t *testing.T) {
-	f := newR29Fx(t, false, true)
-	e0 := append([]byte(nil), f.cur(0)...)
-	f.rekey(0)
-	f.deliver(0, 1, kHSInit)
-	f.deliver(1, 0, kHSResp)
-	if f.p(0).Pending != nil || bytes.Equal(f.cur(0), e0) || f.p(0).Revert == nil {
-		t.Fatal("toward a peer without the gate: active at hs.fin, keeping the old epoch")
-	}
-	f.lose(0, 1, kHSFin)
-	f.note(0, "kept")
-	f.lose(0, 1, kAny) // under an epoch the peer never activated: unreadable
-	f.advance(RevertAfter + time.Hour)
-	f.tick(1) // the peer's answer expires
-	f.note(1, "old-epoch")
-	f.deliver(1, 0, kNote)
-	if !bytes.Equal(f.cur(0), e0) || f.p(0).Revert != nil {
-		t.Fatal("no revert")
-	}
-	f.settle()
-	found := false
-	for _, b := range f.got[1] {
-		found = found || bytes.Contains([]byte(b), []byte("kept"))
-	}
-	if !found {
-		t.Fatalf("the kept message was not sealed again: %v", f.got[1])
-	}
-	f.talks()
-}
-
 // The revert's caps: per peer 256 copies; the oldest go first and count
 // in connection.epoch_reverted's ref.
-func TestR29RevertCopyCap(t *testing.T) {
-	f := newR29Fx(t, false, true)
-	f.rekey(0)
-	f.deliver(0, 1, kHSInit)
-	f.deliver(1, 0, kHSResp)
-	f.do(0, func(m *Manager, p *Peer) {
-		for i := 0; i < RevertMaxCopies+3; i++ {
-			m.sendTo(p, "test.note", json.RawMessage(`{"n":"x"}`), f.clk)
-		}
-		if r := p.Revert; len(r.Copies) != RevertMaxCopies || r.Dropped != 3 {
-			t.Fatalf("copies %d dropped %d", len(r.Copies), r.Dropped)
-		}
-	})
-}
-
-// --- §3.4.1: rotations ---
-
 // rotate rotates side s's identity.
 func (f *r29Fx) rotate(s int) {
 	f.t.Helper()
@@ -569,49 +498,8 @@ func TestR29RotateTwicePeerMissesFirst(t *testing.T) {
 // ignores a link from an ik it does not hold, and refuses side 0's rekey
 // under the new ik. Rule L: side 0's rekey goes unanswered for its
 // lifetime; it reconnects with the whole chain, which release 28 follows.
-func TestR29RotateTwiceRelease28FollowerRecovers(t *testing.T) {
-	f := newR29Fx(t, false, true)
-	f.rotate(0)
-	f.lose(0, 1, kRotate)
-	f.lose(0, 1, kHSInit)
-	f.rotate(0)
-	f.settle()
-	f.longTokens()
-	if bytes.Equal(f.p(1).IK, f.m(0).keys.ik.Public().(ed25519.PublicKey)) {
-		t.Fatal("the stand-in followed a link from an ik it did not hold")
-	}
-	f.advance(HandshakeTTL + time.Hour)
-	f.tick(0)
-	f.tick(1)
-	if !f.audited(0, "reconnect_rule_l") {
-		t.Fatal("rule L did not reconnect")
-	}
-	f.settle()
-	if !bytes.Equal(f.p(1).IK, f.m(0).keys.ik.Public().(ed25519.PublicKey)) || !f.sameEpoch() {
-		f.dump()
-		t.Fatal("the release-28 follower did not recover")
-	}
-	f.talks()
-}
-
 // The baseline: two release-28 stand-ins stay stuck (bad_rotation, the
 // rekey refused for good).
-func TestR29RotateTwiceRelease28BothStuck(t *testing.T) {
-	f := newR29Fx(t, true, true)
-	f.rotate(0)
-	f.lose(0, 1, kRotate)
-	f.lose(0, 1, kHSInit)
-	f.rotate(0)
-	f.settle()
-	f.advance(HandshakeTTL + time.Hour)
-	f.tick(0)
-	f.tick(1)
-	f.settle()
-	if bytes.Equal(f.p(1).IK, f.m(0).keys.ik.Public().(ed25519.PublicKey)) {
-		t.Fatal("two release-28 vaults recovered: the stand-in is not release 28")
-	}
-}
-
 // S5 (0.86.0): at the vault's own rotation, an answer awaiting hs.fin is
 // dropped toward a peer with hs_confirm (the initiator then abandons its
 // pending epoch when it follows the link) and the pair converges.
@@ -645,25 +533,6 @@ func TestR29S5DropsAnswerTowardGatedPeer(t *testing.T) {
 // S5 toward a peer without the gate (a release-28 stand-in initiator): the
 // answer is kept, established at its hs.fin, and a rekey under the new ik
 // follows at once.
-func TestR29S5KeepsAnswerTowardUngatedPeer(t *testing.T) {
-	f := newR29Fx(t, true, false)
-	f.rekey(0)
-	f.deliver(0, 1, kHSInit)
-	f.rotate(1)
-	if f.answerCount(1) != 1 {
-		t.Fatal("the answer to an ungated peer was dropped")
-	}
-	f.settle()
-	f.advance(time.Hour)
-	f.tick(0)
-	f.tick(1)
-	f.settle()
-	if !f.sameEpoch() || !bytes.Equal(f.p(0).IK, f.m(1).keys.ik.Public().(ed25519.PublicKey)) {
-		t.Fatal("did not converge under the new ik")
-	}
-	f.talks()
-}
-
 // The lower th1 decides crossing handshakes of different purposes (§6.5,
 // 0.86.0): an own reconnect with the higher th1 is abandoned when the
 // peer's rekey crosses it.
@@ -705,103 +574,14 @@ func TestR29LowerTh1AcrossPurposes(t *testing.T) {
 // epoch. Side 0 follows the link, demotes the epoch it activated without
 // confirmation (signed by the link's old_ik), makes the old one current
 // again and reconnects naming it, which release 28 accepts.
-func TestR29F1StrictDemotion(t *testing.T) {
-	f := newR29Fx(t, false, true)
-	f.longTokens()
-	e0 := append([]byte(nil), f.cur(0)...)
-	f.rekey(0)
-	f.deliver(0, 1, kHSInit)
-	f.deliver(1, 0, kHSResp)
-	e1 := append([]byte(nil), f.cur(0)...)
-	f.lose(0, 1, kHSFin)
-	f.rotate(1)
-	f.deliver(1, 0, kRotate)
-	if e := f.p(0).epochMeta(e1); e == nil || !e.Demoted {
-		f.dump()
-		t.Fatal("F1 did not demote the epoch the peer never activated")
-	}
-	if !bytes.Equal(f.cur(0), e0) {
-		t.Fatal("the epoch the link traveled under is not current again")
-	}
-	f.settle()
-	f.advance(time.Hour)
-	f.tick(0)
-	f.tick(1)
-	f.settle()
-	if !f.sameEpoch() || !bytes.Equal(f.p(0).IK, f.m(1).keys.ik.Public().(ed25519.PublicKey)) {
-		f.dump()
-		t.Fatal("did not converge under the peer's new ik")
-	}
-	f.talks()
-}
-
 // §6.3.1 rule E's evidence: an authenticated message with a later ts under
 // an epoch rule E destroyed suspends (ref epoch) toward a peer with
 // hs_confirm (model: TestFindingE_ConfirmedEpochHidesForkEvidence) and,
 // toward a peer without it, starts a reconnect naming that epoch instead
 // (model: the lead's r8 point 1, F3 toward 28), refused as
 // superseded_epoch.
-func TestR29RuleEEvidence(t *testing.T) {
-	for _, ungated := range []bool{false, true} {
-		f := newR29Fx(t, ungated, false)
-		f.longTokens()
-		f.do(1, func(m *Manager, p *Peer) {
-			e := p.epochMeta(p.LastEpochID)
-			// GatedAtE: the gate as judged at the destroying hs.init (S11).
-			e.Destroyed, e.DestroyTS, e.GatedAtE = true, f.clk.Add(-time.Hour), !ungated
-		})
-		f.note(0, "late")
-		f.deliver(0, 1, kNote)
-		p := f.p(1)
-		switch {
-		case !ungated && (p.Fork == nil || len(f.got[1]) != 0):
-			t.Fatal("toward a gated peer: not suspended")
-		case ungated && (p.Fork != nil || !f.audited(1, "reconnect_rule_e") || len(f.got[1]) != 0):
-			f.dump()
-			t.Fatal("toward an ungated peer: no reconnect naming the destroyed epoch")
-		}
-	}
-}
-
 // §6.3.1 "Deployment" (0.86.1): a revert re-seals with the same inner id
 // and a new ts, skips expired copies, and audits the dropped count.
-func TestR29RevertAuditsDropped(t *testing.T) {
-	f := newR29Fx(t, false, true)
-	f.longTokens()
-	f.rekey(0)
-	f.deliver(0, 1, kHSInit)
-	f.deliver(1, 0, kHSResp)
-	f.lose(0, 1, kHSFin)
-	f.do(0, func(m *Manager, p *Peer) {
-		for i := 0; i < RevertMaxCopies+2; i++ {
-			m.sendTo(p, "test.note", json.RawMessage(`{"n":"x"}`), f.clk)
-		}
-		m.sendWith(p, "test.note", json.RawMessage(`{"n":"expiring"}`), SendOptions{Exp: f.clk.Add(time.Hour)}, f.clk)
-	})
-	f.lose(0, 1, kAny)
-	f.advance(RevertAfter + 2*time.Hour)
-	f.tick(0)
-	f.tick(1)
-	f.note(1, "old")
-	f.deliver(1, 0, kNote)
-	var ref string
-	var seen bool
-	for _, a := range f.sink[0].got {
-		if a.Kind == "connection.epoch_reverted" {
-			ref, seen = a.Ref, true
-		}
-	}
-	if !seen || ref != "3" {
-		t.Fatalf("connection.epoch_reverted ref %q (want the 3 dropped)", ref)
-	}
-	f.settle()
-	for _, b := range f.got[1] {
-		if bytes.Contains([]byte(b), []byte("expiring")) {
-			t.Fatal("an expired copy was sealed again")
-		}
-	}
-}
-
 // Model: TestGateDisagreementS5Repaired. Side 0 has not yet seen side 1's
 // features, so its rekey is ungated (active at hs.fin); side 1 has seen
 // side 0's, so at its rotation it drops its answer (S5). The hs.fin finds

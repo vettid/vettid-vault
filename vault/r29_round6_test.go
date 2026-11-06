@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
-	"strings"
 	"testing"
 	"time"
 
@@ -26,7 +25,6 @@ func (f *r29Fx) restart(s int) {
 	f.t.Helper()
 	d := f.d[s]
 	old := d.relay
-	emu := d.m.emu28()
 	if err := d.m.Lock(context.Background()); err != nil {
 		f.t.Fatal(err)
 	}
@@ -47,9 +45,6 @@ func (f *r29Fx) restart(s int) {
 			return nil, nil
 		}))
 	m.features = append(m.features, f.sink[s])
-	if emu {
-		setEmu28(f.t, m)
-	}
 }
 
 func (f *r29Fx) jtisOf(ts []IssuedToken) []string {
@@ -73,37 +68,6 @@ func (f *r29Fx) denied(s int, jti string) bool {
 // epoch while the revert keep is live; rule E destroys the new epoch at
 // its hs.fin, and the kept messages are sealed under the next epoch and
 // audited connection.epoch_reverted, not lost.
-func TestR29RuleEWithLiveRevertKeep(t *testing.T) {
-	f := newR29Fx(t, false, true)
-	f.longTokens()
-	f.rekey(0)
-	f.deliver(0, 1, kHSInit)
-	f.deliver(1, 0, kHSResp)
-	f.lose(0, 1, kHSFin) // the 28 peer never activates E1
-	if f.p(0).Revert == nil {
-		t.Fatal("setup: no keep")
-	}
-	f.note(0, "kept-by-rule-e")
-	f.lose(0, 1, kAny) // under E1: unreadable for the peer
-	f.advance(25 * time.Hour)
-	f.tick(1) // the 28 peer's daily rekey from E0
-	if f.deliver(1, 0, kHSInit) != 1 || f.answerCount(0) != 1 {
-		f.dump()
-		t.Fatal("setup: the rekey naming the confirmed epoch was not answered")
-	}
-	f.deliver(0, 1, kHSResp)
-	f.deliver(1, 0, kHSFin)
-	if !f.activity(0, "connection.epoch_reverted", "") {
-		f.dump()
-		t.Fatal("rule E ended the keep without the revert's audit")
-	}
-	f.settle()
-	if n := f.arrived(1, "kept-by-rule-e"); n != 1 {
-		f.dump()
-		t.Fatalf("the kept message arrived %d times", n)
-	}
-}
-
 // Code 4: the 1 MiB per-peer and 8 MiB per-vault byte caps drop the
 // oldest copy (the peer's for the per-peer cap, the vault's for the
 // total), each counted on its own peer.
@@ -265,38 +229,6 @@ func TestR29AbortRevokesTokens(t *testing.T) {
 // Code 4: the keyring's pending epoch and a kept-whole epoch survive a
 // lock and unlock: the pending one is still confirmed by the peer's
 // message, the kept one still reverts.
-func TestR29KeyringAcrossRestart(t *testing.T) {
-	f := newR29Fx(t)
-	f.longTokens()
-	f.rekey(0)
-	f.deliver(0, 1, kHSInit)
-	f.deliver(1, 0, kHSResp)
-	f.deliver(0, 1, kHSFin)
-	f.restart(0)
-	if f.p(0).Pending == nil || f.m(0).sessions[f.id[0]].Pending() == nil {
-		t.Fatal("the pending epoch did not survive the restart")
-	}
-	f.deliver(1, 0, kConfirm)
-	if f.p(0).Pending != nil || !f.sameEpoch() {
-		t.Fatal("not confirmed after the restart")
-	}
-	g := newR29Fx(t, false, true)
-	g.longTokens()
-	e0 := append([]byte(nil), g.cur(0)...)
-	g.rekey(0)
-	g.deliver(0, 1, kHSInit)
-	g.deliver(1, 0, kHSResp)
-	g.lose(0, 1, kHSFin)
-	g.restart(0)
-	g.advance(RevertAfter + time.Hour)
-	g.tick(1)
-	g.note(1, "old")
-	g.deliver(1, 0, kNote)
-	if !bytes.Equal(g.cur(0), e0) {
-		t.Fatal("the kept epoch did not revert after the restart")
-	}
-}
-
 // Code 5: a refused rekey's links are not recorded as seen (only once it
 // passed rekeyPrecheck), and Seen is capped.
 func TestR29SeenOnlyAfterPrecheckAndCapped(t *testing.T) {
@@ -341,113 +273,11 @@ func TestR29SeenOnlyAfterPrecheckAndCapped(t *testing.T) {
 
 // Code 6: an hs.fin that matches a dropped answer's kids but does not
 // verify leaves the record in place.
-func TestR29O3aForgedFinKeepsRecord(t *testing.T) {
-	f := newR29Fx(t)
-	m := f.m(0)
-	key := bytes.Repeat([]byte{0x33}, 32)
-	var rk, sk suite.Kid
-	copy(rk[:], bytes.Repeat([]byte{0x01}, suite.KidSize))
-	copy(sk[:], bytes.Repeat([]byte{0x02}, suite.KidSize))
-	m.mu.Lock()
-	m.st.DroppedAnswers = append(m.st.DroppedAnswers, DroppedAnswer{PeerID: f.id[0], Until: f.clk.Add(time.Hour),
-		Check: handshake.FinCheckState{Key: key, RecvKid: rk[:], SenderKid: sk[:], Th: make([]byte, 32), VerifyIK: f.p(0).IK,
-			Sender: f.pk(1), Purpose: handshake.PurposeReconnect}})
-	m.mu.Unlock()
-	in := &envelope.Inner{ID: m.newID(f.clk), Type: handshake.TypeFin, TS: f.clk, Seq: 1, Body: json.RawMessage(`{"sig":"AAAA"}`)}
-	padded, _ := envelope.EncodeInner(in, envelope.ModeSession)
-	forged, err := envelope.SealSession(bytes.Repeat([]byte{0x44}, 32), sk, rk, padded) // the wrong key
-	if err != nil {
-		t.Fatal(err)
-	}
-	jti := ""
-	for _, it := range m.st.Issued {
-		if it.PeerID == f.id[0] && it.Kind == TokStanding && !it.Denied {
-			jti = it.JTI
-		}
-	}
-	msg := Message{MsgID: "forged-fin", Sender: relayauth.EncodeKey(f.pk(1)), JTI: jti, Payload: forged}
-	if err := m.ProcessBatch(context.Background(), &fakeCollector{}, []Message{msg}); err != nil {
-		t.Fatal(err)
-	}
-	if len(m.st.DroppedAnswers) != 1 {
-		t.Fatal("a forged match erased the O3a record")
-	}
-	found := false
-	for _, a := range m.st.Audit {
-		found = found || a.Event == "hs_fin_dropped"
-	}
-	if !found {
-		t.Fatal("setup: the forged hs.fin did not reach the record")
-	}
-}
-
 // Code 7: the revert drops its own unsent hs.fin for the epoch it
 // destroys; a later activation of the vault's own ends a live keep with
 // the copies sealed under it (audited, delivered once).
-func TestR29RevertDropsUnsentFinAndLaterActivationEndsKeep(t *testing.T) {
-	f := newR29Fx(t, false, true)
-	f.longTokens()
-	r := f.d[0].relay
-	f.rekey(0)
-	f.deliver(0, 1, kHSInit)
-	r.mu.Lock()
-	r.failMailbox = map[string]error{f.m(1).st.Relay.Mailbox: &relayclient.Error{Status: 503, Code: "unavailable"}}
-	r.mu.Unlock()
-	f.deliver(1, 0, kHSResp) // the hs.fin stays unsent
-	f.advance(RevertAfter + time.Hour)
-	f.tick(1)
-	f.note(1, "old")
-	f.deliver(1, 0, kNote) // the revert
-	for _, e := range f.m(0).st.Outbox {
-		if e.FinEpoch != nil && !e.Done {
-			t.Fatal("the revert left its unsent hs.fin")
-		}
-	}
-	r.mu.Lock()
-	r.failMailbox = nil
-	r.mu.Unlock()
-
-	g := newR29Fx(t, false, true)
-	g.longTokens()
-	g.rekey(0)
-	g.deliver(0, 1, kHSInit)
-	g.deliver(1, 0, kHSResp)
-	g.deliver(0, 1, kHSFin) // the 28 peer activates; it sends nothing back
-	g.note(0, "under-E1")
-	g.deliver(0, 1, kNote)
-	if g.p(0).Revert == nil {
-		t.Fatal("setup: no live keep")
-	}
-	g.rekey(0) // its own next rekey from E1 (the peer's interval not yet due)
-	g.settle()
-	if g.p(0).Revert != nil && bytes.Equal(g.p(0).Revert.New, g.p(0).LastEpochID) == false {
-		t.Fatal("the later activation left the earlier keep")
-	}
-	if !g.activity(0, "connection.epoch_reverted", "") {
-		g.dump()
-		t.Fatal("the keep ended at a later activation without the revert's audit")
-	}
-	if n := g.arrived(1, "under-E1"); n != 1 {
-		t.Fatalf("the copy arrived %d times (deduped by inner id: once)", n)
-	}
-}
-
 // Code 8: content over 64 KiB is not copied, whoever's it is (counted as
 // dropped).
-func TestR29BigContentNotCopied(t *testing.T) {
-	f := newR29Fx(t, false, true)
-	f.longTokens()
-	f.rekey(0)
-	f.deliver(0, 1, kHSInit)
-	f.deliver(1, 0, kHSResp)
-	f.do(0, func(m *Manager, p *Peer) {
-		m.sendTo(p, "test.note", json.RawMessage(`{"n":"`+strings.Repeat("a", 70<<10)+`"}`), f.clk)
-		if len(p.Revert.Copies) != 0 || p.Revert.Dropped != 1 {
-			t.Fatalf("copies %d dropped %d", len(p.Revert.Copies), p.Revert.Dropped)
-		}
-	})
-}
-
 // S3: a pending epoch abandoned by a link: messages under it are refused
 // (ancestor_ik); one abandoned otherwise processes them without
 // confirming it (TestR29ReviewAbandonedPendingDoesNotConfirm).
@@ -683,31 +513,3 @@ func TestR29OwnCopyGotFromPeerSuspends(t *testing.T) {
 // 0.86.6: keepToHeld shows the revert's History line only when a copy was
 // held; nothing held or dropped audits nothing; an expired copy is
 // audited drop.held_expired.
-func TestR29KeepToHeldAudits(t *testing.T) {
-	f := newR29Fx(t, false, true)
-	f.longTokens()
-	f.rekey(0)
-	f.deliver(0, 1, kHSInit)
-	f.deliver(1, 0, kHSResp)
-	f.do(0, func(m *Manager, p *Peer) {
-		m.keepToHeld(p, false, f.clk) // no copies
-	})
-	if f.activity(0, "connection.epoch_reverted", "") {
-		t.Fatal("an empty keep end audited epoch_reverted")
-	}
-	g := newR29Fx(t, false, true)
-	g.longTokens()
-	g.rekey(0)
-	g.deliver(0, 1, kHSInit)
-	g.deliver(1, 0, kHSResp)
-	g.do(0, func(m *Manager, p *Peer) {
-		m.sendWith(p, "test.note", json.RawMessage(`{"n":"short"}`), SendOptions{Exp: g.clk.Add(time.Minute)}, g.clk)
-		m.sendTo(p, "test.note", json.RawMessage(`{"n":"durable"}`), g.clk)
-	})
-	g.advance(time.Hour)
-	g.do(0, func(m *Manager, p *Peer) { m.keepToHeld(p, false, g.clk) })
-	if !g.activity(0, "connection.epoch_reverted", "") || !g.audited(0, "held_expired") {
-		g.dump()
-		t.Fatal("a keep end with a held copy and an expired one: not audited as 0.86.6 says")
-	}
-}

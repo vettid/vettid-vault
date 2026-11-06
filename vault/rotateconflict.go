@@ -53,9 +53,7 @@ func (m *Manager) rotationConflictRec(p *Peer, r *handshake.Rotation, record boo
 	}
 	followed := false
 	prior := append([]json.RawMessage(nil), p.Chain...)
-	if !m.emu28() {
-		prior = append(prior, p.Seen...) // 0ee0078 rotateconflict.go:32: followed links only
-	}
+	prior = append(prior, p.Seen...) // 0ee0078 rotateconflict.go:32: followed links only
 	for _, raw := range prior {
 		prev, err := handshake.ParseRotation(raw)
 		if err != nil || !suite.EqualPublic(prev.OldIK, r.OldIK) || rejectedLink(p, prev) {
@@ -71,17 +69,15 @@ func (m *Manager) rotationConflictRec(p *Peer, r *handshake.Rotation, record boo
 				Ref: fingerprint(prev.NewIK) + "/" + fingerprint(r.NewIK)}, now)
 			// H5: a conflict suspension abandons every open handshake with
 			// the peer and revokes its tokens (review RR2-4).
-			if !m.emu28() {
-				m.abandonHandshakes(p, true, true, now)
-				if p.Pending != nil {
-					m.abandonPending(p, "conflict", false, now)
-				}
+			m.abandonHandshakes(p, true, true, now)
+			if p.Pending != nil {
+				m.abandonPending(p, "conflict", false, now)
 			}
 			m.dirty = true
 		}
 		return true
 	}
-	if record && !followed && !m.emu28() && seenRelevant(p, r.OldIK) && len(p.Seen) < MaxSeen {
+	if record && !followed && seenRelevant(p, r.OldIK) && len(p.Seen) < MaxSeen {
 		// 0.86.0 rule C: kept as seen, followed or not, at most one per old
 		// key (another would be the conflict above); only links from the
 		// current ik, an ancestor, or a key a seen link reaches, and at

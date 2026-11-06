@@ -319,7 +319,7 @@ func (m *Manager) tickPending(p *Peer, now time.Time) {
 // durable, not a request).
 func (m *Manager) queueConfirm(p *Peer, now time.Time) {
 	kr := m.sessions[p.ID]
-	if kr == nil || kr.Current() == nil || p.suspended() || m.emu28() {
+	if kr == nil || kr.Current() == nil || p.suspended() {
 		return
 	}
 	in := &envelope.Inner{ID: m.newID(now), Type: handshake.TypeConfirm, TS: now, Body: []byte(`{}`)}
@@ -409,7 +409,7 @@ func (m *Manager) responderActivation(p *Peer, signer []byte, now time.Time) act
 // bookkeeping. It reports whether the message was dealt with (acked and
 // dropped) here.
 func (m *Manager) beforeAccept(p *Peer, ep *handshake.Epoch, in *envelope.Inner, now time.Time) bool {
-	if p.suspended() || ep == nil || m.emu28() {
+	if p.suspended() || ep == nil {
 		return false
 	}
 	p.upgradeEpochs()
@@ -547,20 +547,6 @@ func (m *Manager) rekeyBlocked(p *Peer) bool {
 // when the reconnect completes, as between two reconnects of persons).
 func (m *Manager) crossingRekeyLoses(p *Peer, theirs [32]byte, now time.Time) bool {
 	for id, og := range m.st.Outgoing {
-		if m.emu28() {
-			// 0ee0078 handshakes.go:506-517: against its own rekey only;
-			// its own higher one is dropped (not abandoned).
-			if og.PeerID != p.ID || og.Purpose != handshake.PurposeRekey || og.Replaced {
-				continue
-			}
-			var ours [32]byte
-			copy(ours[:], og.Th1)
-			if handshake.SimultaneousRekeyWinner(ours, theirs) {
-				return true
-			}
-			m.dropOutgoing(id)
-			continue
-		}
 		if og.New != nil || og.PeerID != p.ID || og.Replaced || len(og.Th1) != 32 {
 			continue
 		}

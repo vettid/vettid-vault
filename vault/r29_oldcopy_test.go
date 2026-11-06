@@ -329,22 +329,6 @@ func TestR29OwnCopyCannotHideFork(t *testing.T) {
 // Model: TestOldCopyForkToward28StillCaught. Q (release 28 stand-in) and
 // an old copy of Q each rotate from the same ik; P (release 29, Q
 // ungated) receives both links: rule C suspends.
-func TestR29OldCopyForkToward28StillCaught(t *testing.T) {
-	f := newR29Fx(t, false, true)
-	f.longTokens()
-	snap := f.snapshot(1)
-	f.startCopy(1, snap)
-	setEmu28(t, f.m(2))
-	f.rotate(2)
-	f.rotate(1)
-	f.deliver(2, 0, kRotate)
-	f.deliver(1, 0, kRotate)
-	if !f.suspendedRef(0, "conflict") {
-		f.dump()
-		t.Fatal("the fork was not caught")
-	}
-}
-
 // The I3 hole lead fix B had: Q, toward P ungated, rekeys; P's old copy
 // answers it, so Q activates at hs.fin an epoch made with the copy (signed
 // by P's old ik). P's real link under E0 must not let it be kept: strict
@@ -593,72 +577,6 @@ func TestR29SealedUndepositedResealed(t *testing.T) {
 // of the peer that collected the lost hs.fin) is fork evidence toward a
 // peer with hs_confirm, starts rule E's reconnect toward one without, and
 // one with an earlier ts is refused superseded_epoch.
-func TestR29RevertedEpochEvidence(t *testing.T) {
-	for _, c := range []struct {
-		name          string
-		gated, before bool
-	}{{"later-features-seen-after", true, false}, {"later-ungated", false, false}, {"earlier", false, true}} {
-		t.Run(c.name, func(t *testing.T) {
-			f := newR29Fx(t, false, true)
-			f.longTokens()
-			f.rekey(0)
-			f.deliver(0, 1, kHSInit)
-			snap := f.snapshot(1) // holds the answer
-			f.deliver(1, 0, kHSResp)
-			if f.p(0).Revert == nil {
-				t.Fatal("setup: no keep")
-			}
-			f.startCopy(1, snap)
-			setEmu28(t, f.m(2)) // as the peer it copies: no features
-			if f.deliver(0, 2, kHSFin) != 1 {
-				t.Fatal("setup: the copy did not take the hs.fin")
-			}
-			e1 := append([]byte(nil), f.cur(0)...)
-			f.advance(RevertAfter + time.Hour)
-			f.tick(1)
-			f.note(1, "old-epoch")
-			f.deliver(1, 0, kNote)
-			if bytes.Equal(f.cur(0), e1) {
-				t.Fatal("setup: no revert")
-			}
-			if c.gated {
-				f.do(0, func(_ *Manager, p *Peer) { p.PeerFeatures = []string{handshake.CapConfirm} })
-			}
-			if c.before {
-				at := f.clk.Add(-time.Minute)
-				f.m(2).now = func() time.Time { return at }
-			} else {
-				f.advance(time.Minute)
-			}
-			f.note(2, "copy-under-E1")
-			f.deliver(2, 0, kNote)
-			switch {
-			case c.gated:
-				// 0.86.6 S11: the gate is judged at hs.init; a revert's
-				// handshake was ungated, so a later hs_confirm changes
-				// nothing: rule E's reconnect, no suspension.
-				if f.p(0).suspended() || !f.audited(0, "reconnect_rule_e") {
-					f.dump()
-					t.Fatal("the gate was judged at the message, not at hs.init")
-				}
-			case c.before:
-				if f.p(0).suspended() || f.audited(0, "reconnect_rule_e") || !f.activity(0, "drop.peer_key", "superseded_epoch") {
-					f.dump()
-					t.Fatal("an earlier-ts message was not refused superseded_epoch")
-				}
-			default:
-				if f.p(0).suspended() || !f.audited(0, "reconnect_rule_e") {
-					f.dump()
-					t.Fatal("no rule E reconnect")
-				}
-			}
-			if f.arrived(0, "copy-under-E1") != 0 {
-				t.Fatal("the message under the reverted epoch was handled")
-			}
-		})
-	}
-}
-
 // A rekey hs.init naming an older epoch that fails what AcceptRekey checks
 // changes nothing (it is refused before the own_copy exception or the
 // fork rule could move any state).

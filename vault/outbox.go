@@ -480,10 +480,6 @@ func (m *Manager) housekeeping(now time.Time) {
 		}
 	}
 	for id, og := range m.st.Outgoing {
-		if og.New == nil && now.Sub(og.Created) > HandshakeTTL && m.emu28() {
-			m.dropOutgoing(id) // 0ee0078 outbox.go:427
-			continue
-		}
 		if og.New == nil && now.Sub(og.Created) > HandshakeTTL {
 			m.abandonOutgoing(id, now) // its tokens are revoked too (§6.6, review M3)
 			p := m.peer(og.PeerID)
@@ -521,7 +517,6 @@ func (m *Manager) housekeeping(now time.Time) {
 	m.pruneHistories(now)
 	m.pruneIssued(now)
 	m.pruneRetiredKEMs(now)
-	m.pruneDroppedAnswers(now)
 	for id, fr := range m.featureReqs {
 		if now.Sub(fr.at) > featureReqTTL {
 			delete(m.featureReqs, id)

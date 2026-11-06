@@ -539,12 +539,23 @@ func (m *Manager) handleRekeyInit(ctx context.Context, p *Peer, in *envelope.Inn
 		m.audit(now, "rekey_not_current_epoch", p.ID)
 		return ackAfterFlush
 	}
+	if err := m.rekeyPrecheck(p, in, ep, sender, now); err != nil {
+		// Refused before anything changes: a malformed or forged hs.init
+		// (no opening under ep alone vouches for its body) moves nothing.
+		m.audit(now, "rekey_rejected", p.ID)
+		return ackAfterFlush
+	}
 	if kr.Current() != ep {
 		if bytes.Equal(epID[:], p.confirmedID()) && ep.HasRK() {
 			namedConf = true
-		} else if !m.rekeyOtherEpoch(p, in, ep, now) {
+		} else if answer, handled := m.rekeyOtherEpoch(p, in, ep, now); !answer {
 			m.audit(now, "rekey_not_current_epoch", p.ID)
-			m.ruleL(p, now) // §3.4.1 rule L: the peer rekeys from an epoch other than the current one
+			if !handled {
+				// §3.4.1 rule L, whose own conditions ruleL checks: a peer
+				// without features, the vault's ik newer than the current
+				// epoch's signer, once per current epoch.
+				m.ruleL(p, now)
+			}
 			return ackAfterFlush
 		}
 	}

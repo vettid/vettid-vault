@@ -1,6 +1,7 @@
 package handshake
 
 import (
+	"github.com/vettid/vettid-vault/vms/envelope"
 	"testing"
 	"time"
 )
@@ -68,8 +69,8 @@ func TestKeyringKeepReinstateRelease(t *testing.T) {
 	if err != nil || k2.Find(a0.ID()) == nil || !k2.Find(a0.ID()).CanSend() {
 		t.Fatal("a kept epoch did not survive export")
 	}
-	if !k.Reinstate(a0.ID()) || k.Current() != a0 || k.Find(a1.ID()) != nil {
-		t.Fatal("reinstate")
+	if !k.Reinstate(a0.ID(), now) || k.Current() != a0 || k.Find(a1.ID()) == nil || a1.CanSend() || a1.HasRK() {
+		t.Fatal("reinstate: the superseded current keeps its receive key only")
 	}
 	// KeepRK: rk without the send key; Release ends both.
 	b1, _ := runHandshake(t, ip, rp, PurposeConnection)
@@ -77,7 +78,7 @@ func TestKeyringKeepReinstateRelease(t *testing.T) {
 	if a0.CanSend() || !a0.HasRK() {
 		t.Fatal("KeepRK")
 	}
-	if k.Reinstate(a0.ID()) {
+	if k.Reinstate(a0.ID(), now) {
 		t.Fatal("reinstated an epoch without its send key")
 	}
 	k.Release(a0.ID(), now.Add(ReceiveKeyRetention))
@@ -87,5 +88,46 @@ func TestKeyringKeepReinstateRelease(t *testing.T) {
 	k.DestroyEpoch(a0.ID())
 	if k.Find(a0.ID()) != nil {
 		t.Fatal("destroy")
+	}
+}
+
+// 0.85.0 S8: a rekey's hs.init and hs.resp carry rotations; both parse
+// (release 28 refused them at parse; the stage-a change missed the parse
+// step and only relaxed validation).
+func TestRekeyRotationsParse(t *testing.T) {
+	ip, rp := newParty(t, 5), newParty(t, 6)
+	i0, r0 := runHandshake(t, ip, rp, PurposeConnection)
+	nk := newParty(t, 7)
+	rot, err := NewRotation(ip.ik, nk.ik, nk.kem.Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := InitiatorConfig{Purpose: PurposeRekey, Identity: nk.ik, StaticKEM: nk.kem.Public(), Relay: ip.addr,
+		ResponderIK: rp.pub(), ResponderRelayKey: rp.relayPK(), Current: i0, Policy: PolicyVaultToVault, Now: t0,
+		Rotations: []*Rotation{rot}}
+	ini, err := NewInitiator(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, _ := envelope.Parse(ini.Envelope())
+	in, err := r0.Open(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := ParseInit(in.Body)
+	if err != nil || len(b.Rotations) != 1 {
+		t.Fatalf("a rekey hs.init with rotations does not parse: %v", err)
+	}
+	pi, err := AcceptRekey(ini.Envelope(), in, r0, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, renv, err := pi.Respond(ResponderConfig{Identity: rp.ik, Policy: PolicyVaultToVault, CollectSender: ip.relayPK(),
+		RecordRelayKey: ip.relayPK(), KnownInitiatorIK: ip.pub(), Now: t0, Rotations: nil})
+	if err != nil {
+		t.Fatalf("respond: %v", err)
+	}
+	if _, err := ini.HandleResp(renv, rp.relayPK(), t0); err != nil {
+		t.Fatalf("hs.resp: %v", err)
 	}
 }

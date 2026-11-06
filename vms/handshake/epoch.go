@@ -347,20 +347,25 @@ func (k *Keyring) abandonPendingLocked(now time.Time) {
 }
 
 // Reinstate makes the superseded epoch id current again (a revert,
-// §6.3.1 "Deployment"): the current epoch is destroyed. It reports false,
-// changing nothing, unless id is a superseded epoch that kept its send key.
-func (k *Keyring) Reinstate(id [suite.EpochIDSize]byte) bool {
+// §6.3.1 "Deployment"; §3.4.1): the current epoch loses its send key and
+// rk at once and keeps its receive key 16 days from now, as a previous
+// epoch's, so that a later message under it is still authenticated (the
+// caller decides what it is). It reports false, changing nothing, unless
+// id is a superseded epoch that kept its send key.
+func (k *Keyring) Reinstate(id [suite.EpochIDSize]byte, now time.Time) bool {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	for i, r := range k.retired {
 		if r.e.id != id || !r.e.CanSend() || !r.e.HasRK() {
 			continue
 		}
-		if k.current != nil {
-			k.current.Destroy()
-		}
+		cur := k.current
 		k.current = r.e
 		k.retired = append(k.retired[:i], k.retired[i+1:]...)
+		if cur != nil {
+			cur.retireSend()
+			k.retired = append(k.retired, retiredEpoch{e: cur, until: now.Add(ReceiveKeyRetention)})
+		}
 		return true
 	}
 	return false

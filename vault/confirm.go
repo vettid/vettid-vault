@@ -416,7 +416,7 @@ func (m *Manager) beforeAccept(p *Peer, ep *handshake.Epoch, in *envelope.Inner,
 		case bytes.Equal(r.New, id[:]):
 			m.endRevertKeep(p, now) // the peer activated: the old epoch goes as usual
 		case bytes.Equal(r.Old, id[:]) && in.TS.Sub(r.FinAt) > RevertAfter:
-			m.revert(p, in.Type == handshake.TypeInit, now)
+			m.revert(p, in.Type == handshake.TypeInit, in.TS, now)
 		}
 	}
 	if pe := p.Pending; pe != nil && !fin && bytes.Equal(pe.ID, id[:]) {

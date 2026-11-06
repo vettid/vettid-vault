@@ -184,7 +184,14 @@ func (m *Manager) endRevertKeep(p *Peer, now time.Time) {
 // passed; connection.epoch_reverted is audited (ref: the copies the cap
 // dropped, if any); then the peer's rekey is answered (rekeyIn), or the
 // vault starts one from the old epoch.
-func (m *Manager) revert(p *Peer, rekeyIn bool, now time.Time) {
+//
+// The new epoch is destroyed as rule E destroys (§6.3.1): it records the
+// inner ts of the message that caused the revert, and keeps its receive
+// key 16 days, so that a later message under it is authenticated: with a
+// later ts it is fork evidence (or, toward a peer without hs_confirm, a
+// reconnect naming it), with an earlier one it is refused
+// (superseded_epoch).
+func (m *Manager) revert(p *Peer, rekeyIn bool, ts, now time.Time) {
 	r := p.Revert
 	kr := m.sessions[p.ID]
 	if r == nil || kr == nil {
@@ -192,14 +199,12 @@ func (m *Manager) revert(p *Peer, rekeyIn bool, now time.Time) {
 	}
 	kept, dropped := copies.take(p)
 	p.Revert = nil
-	if !kr.Reinstate(epochIDOf(r.Old)) {
+	if !kr.Reinstate(epochIDOf(r.Old), now) {
 		m.dirty = true
 		return
 	}
 	if e := p.epochMeta(r.New); e != nil {
-		// Destroyed for good: nothing under it is ever accepted (its keys are
-		// gone; a far ts so that nothing counts as evidence).
-		e.Destroyed, e.DestroyTS, e.Superseded = true, time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC), now
+		e.Destroyed, e.DestroyTS, e.Superseded = true, ts, now
 	}
 	if e := p.epochMeta(r.Old); e != nil {
 		e.Superseded = time.Time{}

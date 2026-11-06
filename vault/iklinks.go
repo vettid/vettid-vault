@@ -234,7 +234,7 @@ func (m *Manager) f1Demote(p *Peer, app []*handshake.Rotation, msgEpoch []byte, 
 		if kr != nil {
 			m.rehold(p, kr.Current())
 		}
-		if p.Revert != nil && bytes.Equal(p.Revert.Old, msgEpoch) && kr != nil && kr.Reinstate(epochIDOf(msgEpoch)) {
+		if p.Revert != nil && bytes.Equal(p.Revert.Old, msgEpoch) && kr != nil && kr.Reinstate(epochIDOf(msgEpoch), now) {
 			// The epoch it traveled under is current again (it was kept
 			// whole, §6.3.1 "Deployment").
 			p.LastEpochID, p.OwnChainAtEpoch = append([]byte(nil), msgEpoch...), p.Revert.OldOwnChain
@@ -449,32 +449,35 @@ func (m *Manager) acceptOwnCopy(p *Peer, ctx []byte, now time.Time) {
 }
 
 // rekeyOtherEpoch decides a rekey hs.init under an epoch that is neither
-// current nor the confirmed one: fork evidence suspends; the own_copy
-// exception accepts it when that epoch still has its rk (the epoch Q kept
-// whole as a reverting initiator), making it current again. It reports
-// whether the rekey is to be answered.
-func (m *Manager) rekeyOtherEpoch(p *Peer, in *envelope.Inner, ep *handshake.Epoch, now time.Time) bool {
+// current nor the confirmed one, once the hs.init has passed
+// rekeyPrecheck: fork evidence suspends; the own_copy exception (0.86.3
+// "When the exception applies") answers it only if that epoch still has
+// its rk (then the later epochs are demoted, the audit made, and the
+// epoch current again); otherwise the later epochs are demoted, the epoch
+// is taken as the last by id, the audit made, and the vault reconnects
+// naming it; the hs.init is then acked and dropped unanswered. answer
+// says whether to answer it; handled whether this rule dealt with it
+// (rule L then does not apply).
+func (m *Manager) rekeyOtherEpoch(p *Peer, in *envelope.Inner, ep *handshake.Epoch, now time.Time) (answer, handled bool) {
 	if p.Kind != KindConnection {
-		return false
+		return false, false
 	}
 	id := ep.ID()
 	fork, own := p.forkEpoch(id[:])
 	if fork {
 		m.suspendForkRef(p, "epoch", now)
-		return false
+		return false, true
 	}
 	if !own {
-		return false
+		return false, false
 	}
 	m.acceptOwnCopy(p, id[:], now)
 	if !ep.HasRK() || !ep.CanSend() {
-		// The named epoch can no longer be rekeyed from (its rk went when
-		// its successor activated): the vault accepts it as its last epoch
-		// by reconnecting naming it, which the peer accepts as its current.
+		p.LastEpochID = append([]byte(nil), id[:]...) // its last, by id
 		m.reconnectNaming(p, id[:], "own_copy", now)
-		return false
+		return false, true
 	}
-	if kr := m.sessions[p.ID]; kr != nil && kr.Reinstate(id) {
+	if kr := m.sessions[p.ID]; kr != nil && kr.Reinstate(id, now) {
 		defer m.sealHeld(p)
 		p.LastEpochID = append([]byte(nil), id[:]...)
 		if p.Revert != nil {
@@ -484,9 +487,42 @@ func (m *Manager) rekeyOtherEpoch(p *Peer, in *envelope.Inner, ep *handshake.Epo
 		if e := p.epochMeta(id[:]); e != nil {
 			e.Superseded = time.Time{}
 		}
-		return true
+		return true, true
 	}
-	return false
+	return false, true
+}
+
+// rekeyPrecheck applies, before anything is changed, every check of a
+// rekey hs.init that does not depend on the outcome (what AcceptRekey and
+// the responder's initiator check would refuse): it parses, is a rekey,
+// names the epoch it travels under, is within the durable ts window,
+// comes from the relay key on record (= from.relay.pk), and its from.ik
+// is the stored ik or reached through the links it carries.
+func (m *Manager) rekeyPrecheck(p *Peer, in *envelope.Inner, ep *handshake.Epoch, sender []byte, now time.Time) error {
+	body, err := handshake.ParseInit(in.Body)
+	if err != nil {
+		return err
+	}
+	if body.Purpose != handshake.PurposeRekey || body.Ctx != handshake.EpochCtx(ep.ID()) {
+		return handshake.ErrCtx
+	}
+	if err := in.CheckTime(now, true); err != nil {
+		return err
+	}
+	if !bytes.Equal(sender, p.Relay.PK) || !bytes.Equal(sender, body.From.Relay.PK) {
+		return handshake.ErrSender
+	}
+	if len(body.Rotations) == 0 {
+		if !bytes.Equal(body.From.IK, p.IK) {
+			return handshake.ErrIdentity
+		}
+		return nil
+	}
+	final, _, _, err := handshake.ResolveChainKnown(p.IK, parseRotations(p.Chain), body.Rotations)
+	if err != nil || !bytes.Equal(final, body.From.IK) {
+		return handshake.ErrIdentity
+	}
+	return nil
 }
 
 // --- the rotating side ---

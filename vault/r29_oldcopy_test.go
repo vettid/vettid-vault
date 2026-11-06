@@ -14,6 +14,7 @@ import (
 
 	"github.com/vettid/vettid-vault/vault/store"
 	"github.com/vettid/vettid-vault/vms/envelope"
+	"github.com/vettid/vettid-vault/vms/handshake"
 )
 
 // The old-copy actor (VAULT-MESSAGING §3.4.1 "Threat"): a snapshot of a
@@ -575,4 +576,130 @@ func TestR29SealedUndepositedResealed(t *testing.T) {
 		f.dump()
 		t.Fatalf("arrived %d times", n)
 	}
+}
+
+// A revert destroys the new epoch as rule E does, with the inner ts of the
+// message that caused it: a later message under it (here from an old copy
+// of the peer that collected the lost hs.fin) is fork evidence toward a
+// peer with hs_confirm, starts rule E's reconnect toward one without, and
+// one with an earlier ts is refused superseded_epoch.
+func TestR29RevertedEpochEvidence(t *testing.T) {
+	for _, c := range []struct {
+		name          string
+		gated, before bool
+	}{{"later-gated", true, false}, {"later-ungated", false, false}, {"earlier", false, true}} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newR29Fx(t, false, true)
+			f.longTokens()
+			f.rekey(0)
+			f.deliver(0, 1, kHSInit)
+			snap := f.snapshot(1) // holds the answer
+			f.deliver(1, 0, kHSResp)
+			if f.p(0).Revert == nil {
+				t.Fatal("setup: no keep")
+			}
+			f.startCopy(1, snap)
+			setEmu28(t, f.m(2)) // as the peer it copies: no features
+			if f.deliver(0, 2, kHSFin) != 1 {
+				t.Fatal("setup: the copy did not take the hs.fin")
+			}
+			e1 := append([]byte(nil), f.cur(0)...)
+			f.advance(RevertAfter + time.Hour)
+			f.tick(1)
+			f.note(1, "old-epoch")
+			f.deliver(1, 0, kNote)
+			if bytes.Equal(f.cur(0), e1) {
+				t.Fatal("setup: no revert")
+			}
+			if c.gated {
+				f.do(0, func(_ *Manager, p *Peer) { p.PeerFeatures = []string{handshake.CapConfirm} })
+			}
+			if c.before {
+				at := f.clk.Add(-time.Minute)
+				f.m(2).now = func() time.Time { return at }
+			} else {
+				f.advance(time.Minute)
+			}
+			f.note(2, "copy-under-E1")
+			f.deliver(2, 0, kNote)
+			switch {
+			case c.gated:
+				if !f.suspendedRef(0, "epoch") {
+					f.dump()
+					t.Fatal("not fork evidence")
+				}
+			case c.before:
+				if f.p(0).suspended() || f.audited(0, "reconnect_rule_e") || !f.activity(0, "drop.peer_key", "superseded_epoch") {
+					f.dump()
+					t.Fatal("an earlier-ts message was not refused superseded_epoch")
+				}
+			default:
+				if f.p(0).suspended() || !f.audited(0, "reconnect_rule_e") {
+					f.dump()
+					t.Fatal("no rule E reconnect")
+				}
+			}
+			if f.arrived(0, "copy-under-E1") != 0 {
+				t.Fatal("the message under the reverted epoch was handled")
+			}
+		})
+	}
+}
+
+// A rekey hs.init naming an older epoch that fails what AcceptRekey checks
+// changes nothing (it is refused before the own_copy exception or the
+// fork rule could move any state).
+func TestR29MalformedRekeyOtherEpochChangesNothing(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	f.rekey(0)
+	f.deliver(0, 1, kHSInit)
+	snap := f.snapshot(1)
+	f.rotate(1)
+	f.lose(1, 0, kHSInit) // R's own restarted rekey: not delivered here
+	f.deliver(1, 0, kHSResp)
+	f.startCopy(1, snap)
+	f.deliver(0, 2, kHSFin)
+	f.deliver(2, 0, kConfirm)
+	f.deliver(1, 0, kRotate)
+	state := func() []byte {
+		c := *f.p(0)
+		c.Sessions = handshake.KeyringState{} // its receive count moves with any message opened
+		j, _ := json.Marshal(&c)
+		return j
+	}
+	before := state()
+	nAct := len(f.sink[0].got)
+	// A forged rekey under E0: an hs.init whose body does not parse.
+	f.do(1, func(m *Manager, p *Peer) {
+		in := &envelope.Inner{ID: m.newID(f.clk), Type: handshake.TypeInit, TS: f.clk, Body: json.RawMessage(`{"purpose":"rekey"}`)}
+		raw, err := m.sealFor(p, m.sessions[p.ID].Current(), in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m.queueDeposit(&OutboxEntry{PeerID: p.ID, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Payload: raw}, f.clk)
+	})
+	f.deliver(1, 0, kHSInit)
+	after := state()
+	if !bytes.Equal(before, after) {
+		t.Logf("before %s\nafter  %s", before, after)
+	}
+	if !bytes.Equal(before, after) || len(f.sink[0].got) != nNonRejected(f.sink[0].got, nAct) {
+		f.dump()
+		t.Fatal("a malformed rekey changed the connection's state")
+	}
+	if !f.audited(0, "rekey_rejected") {
+		t.Fatal("not refused")
+	}
+}
+
+// nNonRejected: the activity count expected after a refusal (one
+// drop.rekey_rejected added to n).
+func nNonRejected(got []Activity, n int) int {
+	for _, a := range got[n:] {
+		if a.Kind != "drop.rekey_rejected" {
+			return -1
+		}
+	}
+	return len(got)
 }

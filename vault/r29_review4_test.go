@@ -489,3 +489,69 @@ func TestR29HeldUnsealableAudited(t *testing.T) {
 		t.Fatal("a held message dropped at sealing was not audited")
 	}
 }
+
+// depositsTo flushes side from and counts its deposits waiting for to.
+func (f *r29Fx) depositsTo(from, to int) int {
+	fm := f.m(from)
+	fm.mu.Lock()
+	_ = fm.flushThenDrain(context.Background())
+	fm.mu.Unlock()
+	d := f.d[from]
+	d.relay.mu.Lock()
+	defer d.relay.mu.Unlock()
+	n := 0
+	for _, dep := range d.relay.deposits {
+		if dep.mailbox == f.m(to).st.Relay.Mailbox {
+			n++
+		}
+	}
+	return n
+}
+
+// Step 6 review L4: connection.removed goes under a usable current epoch;
+// while the current epoch is demoted, or the vault's own reconnect is
+// pending, it is not sent, and the removal's audit entry says so
+// (ref notice_not_sent), never silently.
+func TestR29ConnectionRemovedNotice(t *testing.T) {
+	for _, c := range []string{"usable", "demoted", "pending"} {
+		var f *r29Fx
+		switch c {
+		case "usable":
+			f = newR29Fx(t)
+		case "demoted":
+			f = demoted(t, nil)
+		case "pending":
+			f = newR29Fx(t)
+			f.longTokens()
+			f.do(0, func(m *Manager, p *Peer) { m.startReconnect(p, f.clk) })
+			f.deliver(0, 1, kHSInit)
+			f.deliver(1, 0, kHSResp)
+			if f.p(0).Pending == nil {
+				t.Fatal("setup: no pending reconnect")
+			}
+		}
+		f.lose(0, 1, kAny)
+		id := f.id[0]
+		f.do(0, func(m *Manager, p *Peer) { m.removeConnection(p, "out", f.clk) })
+		n := f.depositsTo(0, 1)
+		var removed *Activity
+		for i := range f.sink[0].got {
+			if a := &f.sink[0].got[i]; a.Kind == "connection.removed" && a.ConnectionID == id {
+				removed = a
+			}
+		}
+		if removed == nil {
+			t.Fatalf("%s: no connection.removed", c)
+		}
+		switch c {
+		case "usable":
+			if n != 1 || removed.Ref != "" {
+				t.Fatalf("usable: %d deposits, ref %q", n, removed.Ref)
+			}
+		default:
+			if n != 0 || removed.Ref != "notice_not_sent" {
+				t.Fatalf("%s: %d deposits, ref %q", c, n, removed.Ref)
+			}
+		}
+	}
+}

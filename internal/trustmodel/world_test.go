@@ -896,14 +896,16 @@ func (p *Party) collectRound(max int) int {
 }
 
 // copyTook: old copy c collected (leased), acked or deleted messages ms
-// from box b. If b is a mailbox the original still collects, each pair a
+// from box b. If b is a mailbox of the original (its current one, one in
+// its grace, or its pending key's, which a copy taken after a rotation's
+// first write also holds), each pair a
 // message was meant for falls under the residual "During the grace an old
 // copy holding the old key can collect, ack or delete the old mailbox" (and
 // "an old copy keeps the vault's live mailbox"), from now on.
 func (w *World) copyTook(c *Party, b Key, ms []*RMsg, how string) {
 	orig := w.party(c.Origin)
-	if !slices.Contains(orig.boxes(), b) {
-		return
+	if !slices.Contains(orig.myKeys(), b) {
+		return // not a mailbox of the original (current, pending, or kept old)
 	}
 	for _, m := range ms {
 		w.markDead(orig.ID, w.party(m.Actor).Origin, resLiveMailbox, "an old copy "+how+" a message from the original's mailbox")

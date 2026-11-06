@@ -16,7 +16,10 @@
 // device rules (D1-D4; 0.87.1: there is no upgrade migration, R29-U1), and the invariants
 // I1-I7 of §3.4.1, under random runs with crashes, failed writes, locks,
 // time jumps, lease reordering and an old-copy actor. The residuals of
-// §3.4.1 are explicit exemptions, each counted with its reason.
+// §3.4.1 are explicit exemptions, each counted with its reason, and the
+// device exception (D, with finding F) likewise. A random run's device is
+// the member's app (§7.2's unlock exchange); a desktop (Party.Desktop) is
+// used only in scenarios.
 //
 // Configurations (TestRandom, TestR29Coverage; genRun):
 //   - the oracle config (default): release 29 builds no relay-key

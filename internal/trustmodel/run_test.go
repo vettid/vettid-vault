@@ -346,6 +346,23 @@ func (w *World) advance(d int64) {
 
 func (w *World) copyAction(c *Party, a Action) {
 	orig := w.party(c.Origin)
+	var live []Key // the original's mailboxes live before the action
+	for _, k := range orig.boxes() {
+		if w.R.live(k) {
+			live = append(live, k)
+		}
+	}
+	defer func() {
+		for _, k := range live {
+			moved := slices.ContainsFunc(c.stored.Old, func(o OldKey) bool { return o.Key == k })
+			if moved || (!w.R.live(k) && slices.Contains(c.myKeys(), k)) {
+				// residual: the copy rotated its relay key away from a
+				// mailbox the original still uses (it ends with the copy's
+				// grace), or deleted it
+				w.markDeadAll(c.Origin, "an old copy moved or deleted the original's mailbox")
+			}
+		}
+	}()
 	switch a.Op {
 	case opCopyAct:
 		c.unlock()

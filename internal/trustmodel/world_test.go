@@ -243,6 +243,8 @@ type Party struct {
 	unlocks              int
 	collTo               map[Key]int64
 	pendEvid             []pendEv // evidence seen in the batch not yet written
+	pendFlag             []int    // copy epochs whose received flag was set in the batch, not yet written (I7)
+	pendCur              []int    // copy epochs made current in the batch, not yet written (I7)
 	collectedSinceUnlock bool     // B is judged only after the first collect after an unlock
 	Desktop              bool     // a desktop or agent, not the member's app: no unlock exchange (§7.2); scenarios only
 	OldApp               bool     // R29-D4: a device app from before release 29 (no hs.confirm, no hs_confirm in features, rekeys)
@@ -287,6 +289,14 @@ func (p *Party) write() {
 		}
 	}
 	p.pendEvid = nil
+	for _, e := range p.pendFlag {
+		p.w.copyFlag[[2]int{int(p.ID), e}] = true
+	}
+	p.pendFlag = nil
+	for _, e := range p.pendCur {
+		p.w.copyCur[[2]int{int(p.ID), e}] = true
+	}
+	p.pendCur = nil
 	p.stored = p.st.clone()
 	p.storedOut = map[int]bool{}
 	if p.w.ever[p.ID] == nil {
@@ -306,6 +316,8 @@ func (p *Party) write() {
 func (p *Party) restart(lock bool) {
 	p.st = p.stored.clone()
 	p.pendEvid = nil
+	p.pendFlag = nil
+	p.pendCur = nil
 	p.rotOK = false
 	p.collTo = map[Key]int64{}
 	if lock {
@@ -1024,6 +1036,6 @@ func (w *World) noteAbanUse(q *Party, r *PeerRec, actor PID, e int) {
 // current at an honest party.
 func (w *World) noteCurrent(q *Party, e int) {
 	if tr, ok := w.epTruth[e]; ok && !q.Copy && (w.party(tr[0]).Copy || w.party(tr[1]).Copy) {
-		w.copyCur[[2]int{int(q.ID), e}] = true
+		q.pendCur = append(q.pendCur, e) // ground truth once the write stores it
 	}
 }

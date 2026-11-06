@@ -218,7 +218,7 @@ func (q *Party) beforeAccept(r *PeerRec, m *RMsg, pos Pos) {
 		ep.Flag = true
 		q.w.hit("F3:flag-set")
 		if tr, ok := q.w.epTruth[ep.ID]; ok && !q.Copy && (q.w.party(tr[0]).Copy || q.w.party(tr[1]).Copy) {
-			q.w.copyFlag[[2]int{int(q.ID), ep.ID}] = true
+			q.pendFlag = append(q.pendFlag, ep.ID) // ground truth once the write stores it
 		}
 		if M.Kind == KConfirm {
 			q.w.hit("F3:flag-set-by-hs.confirm")

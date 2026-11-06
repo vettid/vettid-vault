@@ -80,7 +80,6 @@ type Epoch struct {
 	MineInit   bool  // this side initiated the handshake that made it
 	Flag       bool  // R29-F3: the received flag (a message from the peer under it passed steps 1-4, not hs.fin)
 	EverCur    bool  // it has been current here (R29-K5: the reconnect after a demotion names one)
-	DroppedAt  int64 // R29-I8 (0.87.1): abandoned while pending, its keys dropped when a later epoch was confirmed (the id is kept 16 days to recognise late messages)
 	Ended      bool  // R29-K9 (0.87.1): abandoned while pending, ended at P's identity.rotate: any later message under it is fork evidence
 }
 

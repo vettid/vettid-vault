@@ -72,7 +72,6 @@ func (q *Party) confirm(r *PeerRec) {
 	r.Cur, r.Pend = pe.ID, nil
 	q.w.noteCurrent(q, pe.ID)
 	r.setConf(pe.ID, q.w.Now) // activated at confirmation
-	q.dropAbandoned(r)
 	r.AbanIDs = nil
 	if pe.Reconnect {
 		r.RCNamed, r.RCFails = 0, 0 // R29-K6: the reconnect succeeded
@@ -90,24 +89,6 @@ func (r *PeerRec) setConf(id int, now int64) {
 		old.Superseded = now
 	}
 	r.ConfID, r.ConfUntil = id, 0
-}
-
-// dropAbandoned: R29-I8 (0.87.1, owner decision a): once a later epoch is
-// confirmed with the peer, every epoch Q began and abandoned while pending
-// before it loses its receive keys at once (not after 16 days); its id is
-// kept 16 days only to recognise a late message (History line).
-func (q *Party) dropAbandoned(r *PeerRec) {
-	if !q.newSpec() {
-		return
-	}
-	ic := slices.IndexFunc(r.Epochs, func(e Epoch) bool { return e.ID == r.ConfID })
-	for j := 0; j < ic; j++ {
-		if ep := &r.Epochs[j]; ep.MineInit && ep.Abandoned && !ep.KeysGone && !ep.Destroyed {
-			ep.KeysGone, ep.DroppedAt = true, q.w.Now
-			r.AbanIDs = slices.DeleteFunc(r.AbanIDs, func(id int) bool { return id == ep.ID })
-			q.w.hit("I8:abandoned-keys-dropped")
-		}
-	}
 }
 
 // abandonPending: R29-I7, every abandon of a pending epoch (B, I6, H5/S5,
@@ -238,7 +219,6 @@ func (q *Party) beforeAccept(r *PeerRec, m *RMsg, pos Pos) {
 	if M.Kind != KFin && M.Epoch != r.ConfID && r.newer(M.Epoch, r.ConfID) {
 		r.setConf(M.Epoch, q.w.Now)
 		q.w.hit("R2:confirmed-moves")
-		q.dropAbandoned(r)
 	}
 	if r.ConfID != 0 && r.ConfID != r.Cur && M.Epoch == r.ConfID {
 		r.Reconfirm = true

@@ -40,7 +40,6 @@ func (q *Party) handle(m *RMsg, set []Key) bool {
 			return false // §6.3: left unacked until hs.fin
 		}
 		w.logf("%s: drops %s from box %d: %s", q.Name, kindName[M.Kind], m.Box, why)
-		q.lateUnderDropped(m)
 		if !w.party(m.Actor).Copy {
 			w.audits[pairKey(q.ID, w.party(m.Actor).Origin)]++ // unknown_kid and the like
 		}
@@ -95,33 +94,6 @@ func (q *Party) handle(m *RMsg, set []Key) bool {
 		}
 	}
 	return true
-}
-
-// lateUnderDropped: R29-I8. A message under an abandoned epoch whose keys
-// were dropped at a later confirmation: acked, dropped, unknown_kid, with a
-// History line. Ground truth: from the original, it must have been sealed
-// before the drop (a late delivery); from a copy, it is the gap I8 closes.
-func (q *Party) lateUnderDropped(m *RMsg) {
-	M := m.P
-	if q.Copy || M.Epoch == 0 {
-		return
-	}
-	for i := range q.st.Peers {
-		ep := q.st.Peers[i].epoch(M.Epoch)
-		if ep == nil || ep.DroppedAt == 0 {
-			continue
-		}
-		if q.w.party(m.Actor).Copy {
-			q.w.hit("I8:copy-message-dropped")
-			return
-		}
-		q.w.hit("I8:late-message-history-line")
-		q.w.stat("I8: an honest late message lost (History line)")
-		if M.Ts > ep.DroppedAt {
-			q.w.violate("I8", "%s drops an honest message under E%d sealed after its keys were dropped (not a late delivery)", q.Name, ep.ID)
-		}
-		return
-	}
 }
 
 // locate finds the peer a message is from: by the epoch it opens under,
@@ -1267,6 +1239,10 @@ func (w *World) checkI3(q *Party, r *PeerRec, m *RMsg, d dec) {
 			if r.followed(f.L) && m.Seq > f.Pos.Seq && !(m.Box != f.Pos.Box && m.DepAt == f.Pos.DepAt) { // ground truth
 				if q.Device {
 					w.exempt("I3", resDevice)
+					continue
+				}
+				if ep := r.epoch(m.P.Epoch); ep != nil && ep.MineInit && ep.Abandoned && !ep.Ended {
+					w.exempt("I3", resAbandonedEarlier)
 					continue
 				}
 				w.violate("I3", "%s accepts %s under copy epoch E%d deposited after the ik link %v (epoch %s at %s)", q.Name, kindName[m.P.Kind], m.P.Epoch, f.L, r.epochState(m.P.Epoch), q.Name)

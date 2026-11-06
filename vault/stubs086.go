@@ -13,17 +13,6 @@ import (
 // ungated path (stage c, ungated.go) and the §3.4.1 ik rules (stage d,
 // iklinks.go). Each stage removes its part of this file.
 
-// --- stage c ---
-
-func (m *Manager) startRevertKeep(*Peer, []byte, []byte, int, time.Time) {}
-func (m *Manager) keepCopy(*Peer, *envelope.Inner, string)               {}
-func (m *Manager) endRevertKeep(p *Peer, _ time.Time)                    { p.Revert = nil }
-func (m *Manager) revert(*Peer, bool, time.Time)                         {}
-func (m *Manager) tickRevert(*Peer, time.Time)                           {}
-func (m *Manager) reconnectNaming(*Peer, []byte, string, time.Time) bool { return false }
-func (m *Manager) ruleRCExpired(*Peer, *OutgoingHS, time.Time)           {}
-func (m *Manager) markStale(*Peer, time.Time)                            {}
-
 // --- stage d ---
 
 func (p *Peer) ancestor([]byte) bool                                           { return false }

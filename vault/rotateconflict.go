@@ -30,6 +30,16 @@ func fingerprint(ik []byte) string {
 // rotationConflict reports (and records) whether r conflicts with a
 // successor p already accepted.
 func (m *Manager) rotationConflict(p *Peer, r *handshake.Rotation, now time.Time) bool {
+	return m.rotationConflictRec(p, r, true, now)
+}
+
+// MaxSeen bounds Peer.Seen (review 5): a link past it is not recorded.
+const MaxSeen = handshake.MaxRotations
+
+// rotationConflictRec is rotationConflict; record says whether a link not
+// yet followed or seen is recorded as seen (not for a rekey hs.init until
+// it has passed rekeyPrecheck).
+func (m *Manager) rotationConflictRec(p *Peer, r *handshake.Rotation, record bool, now time.Time) bool {
 	if p.Kind != KindConnection || r.Verify() != nil {
 		return false
 	}
@@ -41,21 +51,74 @@ func (m *Manager) rotationConflict(p *Peer, r *handshake.Rotation, now time.Time
 			return true
 		}
 	}
-	for _, raw := range p.Chain {
+	followed := false
+	prior := append([]json.RawMessage(nil), p.Chain...)
+	prior = append(prior, p.Seen...) // 0ee0078 rotateconflict.go:32: followed links only
+	for _, raw := range prior {
 		prev, err := handshake.ParseRotation(raw)
-		if err != nil || !suite.EqualPublic(prev.OldIK, r.OldIK) {
-			continue
+		if err != nil || !suite.EqualPublic(prev.OldIK, r.OldIK) || rejectedLink(p, prev) {
+			continue // a link dropped at a resolution is no successor
 		}
 		if suite.EqualPublic(prev.NewIK, r.NewIK) {
-			return false // the same statement again
+			followed = true // the same statement again (followed or seen)
+			continue
 		}
 		if p.Conflict == nil {
 			p.Conflict = &RotationConflict{OldIK: append([]byte(nil), r.OldIK...), Statements: []json.RawMessage{raw, r.Marshal()}, At: now.UTC()}
 			m.record(Activity{Kind: "identity.rotate_conflict", ConnectionID: p.ID, Audit: true, Feed: true, Priority: "high",
 				Ref: fingerprint(prev.NewIK) + "/" + fingerprint(r.NewIK)}, now)
+			// H5: a conflict suspension abandons every open handshake with
+			// the peer and revokes its tokens (review RR2-4).
+			m.abandonHandshakes(p, true, true, now)
+			if p.Pending != nil {
+				m.abandonPending(p, "conflict", false, now)
+			}
 			m.dirty = true
 		}
 		return true
+	}
+	if record && !followed && seenRelevant(p, r.OldIK) && len(p.Seen) < MaxSeen {
+		// 0.86.0 rule C: kept as seen, followed or not, at most one per old
+		// key (another would be the conflict above); only links from the
+		// current ik, an ancestor, or a key a seen link reaches, and at
+		// most MaxSeen of them.
+		p.Seen = append(p.Seen, r.Marshal())
+		m.dirty = true
+	}
+	return false
+}
+
+// seenRelevant reports whether a link from old is kept as seen: old is p's
+// current ik, an ancestor, or reached through seen links.
+func seenRelevant(p *Peer, old []byte) bool {
+	if suite.EqualPublic(old, p.IK) || p.ancestor(old) {
+		return true
+	}
+	for _, raw := range p.Seen {
+		if s, err := handshake.ParseRotation(raw); err == nil && suite.EqualPublic(s.NewIK, old) {
+			return true
+		}
+	}
+	return false
+}
+
+// pruneSeen keeps the seen links that are still relevant.
+func pruneSeen(p *Peer) {
+	kept := p.Seen[:0]
+	for _, raw := range p.Seen {
+		if s, err := handshake.ParseRotation(raw); err == nil && handshake.KnownPrefix(parseRotations(p.Chain), []*handshake.Rotation{s}) == 0 &&
+			seenRelevant(p, s.OldIK) {
+			kept = append(kept, raw)
+		}
+	}
+	p.Seen = kept
+}
+
+func rejectedLink(p *Peer, r *handshake.Rotation) bool {
+	for _, x := range p.Rejected {
+		if suite.EqualPublic(x.OldIK, r.OldIK) && suite.EqualPublic(x.NewIK, r.NewIK) {
+			return true
+		}
 	}
 	return false
 }

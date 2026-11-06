@@ -104,7 +104,17 @@ func (m *Manager) reconnectClass(jti string) bool {
 			return t.Kind == TokReconnect
 		}
 	}
-	// Tokens minted in handshakes not yet complete.
+	// Tokens minted in handshakes not yet complete, a pending epoch's
+	// included (0.86.0, review M4).
+	for _, p := range m.allPeers() {
+		if p.Pending != nil {
+			for _, t := range p.Pending.Issued {
+				if t.JTI == jti {
+					return t.Kind == TokReconnect
+				}
+			}
+		}
+	}
 	for _, aw := range m.st.Awaiting {
 		for _, t := range aw.Issued {
 			if t.JTI == jti {
@@ -236,6 +246,27 @@ func (m *Manager) denySub(p *Peer, now time.Time) {
 	m.queueRevoke("sub", sub, now)
 }
 
+// revokeIssued revokes a token minted in a handshake that ended before it
+// entered the issued registry: it is recorded there as denied (so it
+// stays classified until it expires) and revoked at the relay.
+func (m *Manager) revokeIssued(t IssuedToken, peerID string, now time.Time) {
+	for i := range m.st.Issued {
+		if m.st.Issued[i].JTI == t.JTI {
+			if !m.st.Issued[i].Denied {
+				m.st.Issued[i].Denied = true
+				m.queueRevoke("jti", t.JTI, now)
+			}
+			return
+		}
+	}
+	if t.PeerID == "" {
+		t.PeerID = peerID
+	}
+	t.Denied = true
+	m.st.Issued = append(m.st.Issued, t)
+	m.queueRevoke("jti", t.JTI, now)
+}
+
 // denyPeerTokens revokes, by jti, every token issued to principal p,
 // including those minted in handshakes still in flight (§7.4).
 func (m *Manager) denyPeerTokens(p *Peer, now time.Time) {
@@ -248,15 +279,25 @@ func (m *Manager) denyPeerTokens(p *Peer, now time.Time) {
 	for i := range m.st.Issued {
 		deny(&m.st.Issued[i])
 	}
+	inflight := func(ts []IssuedToken) {
+		for _, t := range ts {
+			if (t.PeerID == p.ID || t.PeerID == "") && t.Kind != TokOpen {
+				m.revokeIssued(t, p.ID, now)
+			}
+		}
+	}
 	for _, aw := range m.st.Awaiting {
-		for i := range aw.Issued {
-			deny(&aw.Issued[i])
+		if aw.PeerID == p.ID {
+			inflight(aw.Issued)
 		}
 	}
 	for _, og := range m.st.Outgoing {
-		for i := range og.Issued {
-			deny(&og.Issued[i])
+		if og.PeerID == p.ID {
+			inflight(og.Issued)
 		}
+	}
+	if pe := p.Pending; pe != nil {
+		inflight(pe.Issued) // a pending reconnect's (0.86.0, review M4)
 	}
 }
 

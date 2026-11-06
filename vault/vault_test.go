@@ -506,7 +506,8 @@ func newDevFixture(t testing.TB) *devFixture {
 func (d *devFixture) send(typ string, body []byte) error {
 	d.seq++
 	id, _ := envelope.NewULID(time.Now())
-	raw, err := d.ep.Seal(&envelope.Inner{ID: id, Type: typ, TS: time.Now(), Body: body})
+	// A release-29 device: hs_confirm in every message's features (R29-D4).
+	raw, err := d.ep.Seal(&envelope.Inner{ID: id, Type: typ, TS: time.Now(), Body: body, Features: []string{handshake.CapConfirm}})
 	if err != nil {
 		return err
 	}

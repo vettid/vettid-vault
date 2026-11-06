@@ -59,6 +59,9 @@ func newSvcFx(t *testing.T, kind string) *svcFx {
 		IK: f.n.ik.Public().(ed25519.PublicKey), KEM: f.n.kem.Public().Bytes(), LastEpochID: e0, PeerKind: kind,
 		Relay:    PeerRelay{URL: f.n.addr.URL, Mailbox: f.n.addr.Mailbox, PK: f.n.addr.PK},
 		Standing: HeldToken{Token: "v4.public.VEVTVA", Exp: f.base.Add(200 * 24 * time.Hour)}}
+	// Its epoch record (§3.4.1): e0, signed by the service's ik, confirmed.
+	p.Epochs = []EpochMeta{{ID: e0, Signer: append([]byte(nil), p.IK...)}}
+	p.Confirmed = e0
 	if kind == "service" {
 		p.History = []EpochRecord{{ID: e0, Activated: f.base}}
 	}
@@ -142,7 +145,20 @@ func (f *svcFx) complete(ini *handshake.Initiator) *handshake.Result {
 		return nil
 	}
 	f.deliver(res.Fin, f.stJTI)
+	f.dropConfirm(res.Epoch)
 	return res
+}
+
+// dropConfirm removes the vault's hs.confirm under ep (0.86.0, §6.3.1: the
+// responder confirms every rekey and reconnect it activates), which these
+// tests of §6.6 do not look at.
+func (f *svcFx) dropConfirm(ep *handshake.Epoch) {
+	var kr handshake.Keyring
+	kr.Activate(ep, f.now())
+	f.takeFor(func(env *envelope.Envelope) bool {
+		in, _, err := kr.Open(env, f.now())
+		return err == nil && in.Type == handshake.TypeConfirm
+	})
 }
 
 // respOf takes the vault's hs.resp for ini and verifies it; the service
@@ -864,6 +880,9 @@ func TestCrossingReconnects(t *testing.T) {
 			t.Fatal(err)
 		}
 		own := fr.Epoch.ID()
+		// The service confirms it (§6.3.1: pending until then).
+		f.stJTI = f.jtiOf(pi.Init().Token, f.vaultPK())
+		f.sendUnder(fr.Epoch, handshake.TypeConfirm, f.now())
 		if !bytes.Equal(f.p.LastEpochID, own[:]) {
 			t.Fatal("the vault did not end on its own epoch")
 		}

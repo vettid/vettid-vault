@@ -454,4 +454,4 @@ func (m *Manager) completeRecovery(deviceID string, now time.Time) error {
 // 0.16.0 removed credential.reset and vault.delete: there is no recovery
 // with the backup off.
 var recoveryAllowed = map[string]bool{"credential.recover": true, "credential.utk.get": true, "vault.status": true,
-	"relay.token.issued": true, "relay.token.refresh": true, "relay.address.update": true}
+	"relay.token.issued": true, "relay.token.refresh": true, "relay.address.update": true, TypeDeviceFeatures: true}

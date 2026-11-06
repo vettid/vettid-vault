@@ -72,6 +72,7 @@ func (m *Manager) registerCore() {
 	r("identity.rotate", false, conns, m.hIdentityRotate)
 	r(TypeRotationResolve, true, []string{KindApp}, m.hRotationResolve) // release R (§3.4)
 	r("relay.address.update", false, all, m.hAddressUpdate)
+	r(TypeDeviceFeatures, false, devices, m.hDeviceFeatures) // 0.85.4, §10.2
 	r("settings.get", true, owners, m.hSettingsGet)
 	r("settings.set", true, owners, m.hSettingsSet)
 	r("account.get", true, owners, m.hAccountGet)
@@ -333,17 +334,23 @@ func (m *Manager) hDeviceUnlink(_ context.Context, s *Session, in *envelope.Inne
 
 // removePeer sends a best-effort notice, denylists the peer's sub, and
 // deletes its tokens, sessions and outbox entries (§7.4).
-func (m *Manager) removePeer(p *Peer, notice string, now time.Time) {
-	m.removePeerWith(p, notice, json.RawMessage(`{}`), now)
+func (m *Manager) removePeer(p *Peer, notice string, now time.Time) bool {
+	return m.removePeerWith(p, notice, json.RawMessage(`{}`), now)
 }
 
-// removePeerWith is removePeer with a notice body.
-func (m *Manager) removePeerWith(p *Peer, notice string, body json.RawMessage, now time.Time) {
-	if kr := m.sessions[p.ID]; kr != nil && kr.Current() != nil && p.Standing.Token != "" && p.State == PeerActive {
+// removePeerWith is removePeer with a notice body. It reports whether
+// the notice was queued: it is sent only under a usable current epoch,
+// not while that epoch is demoted or while the vault's own reconnect is
+// pending (§3.4.1 "After a demotion", §6.3.1: only handshake messages go
+// then); the caller audits a notice not sent.
+func (m *Manager) removePeerWith(p *Peer, notice string, body json.RawMessage, now time.Time) (sent bool) {
+	if kr := m.sessions[p.ID]; notice != "" && kr != nil && kr.Current() != nil && p.Standing.Token != "" && p.State == PeerActive &&
+		!m.pendingReconnectHold(p.ID) {
 		in := &envelope.Inner{ID: m.newID(now), Type: notice, TS: now, Body: body}
-		if raw, err := kr.Current().Seal(in); err == nil {
+		if raw, err := m.sealFor(p, kr.Current(), in); err == nil {
 			m.queueDeposit(&OutboxEntry{RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Token: p.Standing.Token,
 				Payload: raw, BestEffort: true}, now)
+			sent = true
 		}
 	}
 	if p.Kind == KindConnection {
@@ -371,6 +378,7 @@ func (m *Manager) removePeerWith(p *Peer, notice string, body json.RawMessage, n
 	delete(m.st.Devices, p.ID)
 	delete(m.st.Connections, p.ID)
 	m.dirty = true
+	return sent
 }
 
 // --- connections and invitations (§6.4) ---
@@ -569,36 +577,6 @@ func (m *Manager) hTokenRefresh(_ context.Context, s *Session, _ *envelope.Inner
 
 // --- rotation (§3.4) ---
 
-// hIdentityRotate follows one link of a connection's rotation chain.
-func (m *Manager) hIdentityRotate(_ context.Context, s *Session, in *envelope.Inner) (json.RawMessage, error) {
-	o, err := obj(in)
-	if err != nil {
-		return nil, err
-	}
-	raw, ok := o["rotation"]
-	if !ok {
-		return nil, errBadRequest
-	}
-	r, err := handshake.ParseRotation(raw)
-	if err != nil {
-		return nil, errBadRequest
-	}
-	if c := m.rotationConflict(s.peer, r, s.now); c {
-		return nil, nil
-	}
-	if s.peer.suspended() {
-		return nil, nil
-	}
-	final, kem, err := handshake.ResolveChain(s.peer.IK, []*handshake.Rotation{r})
-	if err != nil {
-		m.audit(s.now, "bad_rotation", s.peer.ID)
-		return nil, nil
-	}
-	s.peer.IK, s.peer.KEM = final, kem.Bytes()
-	s.peer.Chain = append(s.peer.Chain, r.Marshal())
-	return nil, nil
-}
-
 // hAddressUpdate records a principal's new relay address and tokens after
 // it rotated its relay key (§3.4).
 func (m *Manager) hAddressUpdate(_ context.Context, s *Session, in *envelope.Inner) (json.RawMessage, error) {
@@ -741,10 +719,23 @@ func (m *Manager) rotateIdentity(now time.Time) error {
 	m.keys.retired = append(m.keys.retired, m.keys.kem)
 	m.st.IdentitySeed, m.st.KEMSeed = ikSeed, kemSeed
 	m.keys.ik, m.keys.kem = newIK, newKEM
-	body := strictjson.NewBuilder().Raw("rotation", rot.Marshal()).Bytes()
+	m.st.RotatedAt = now
 	for _, p := range m.allPeers() {
 		if p.State == PeerActive {
+			// S5 (0.86.0): the vault's own open rekeys, reconnects and
+			// pending epoch with p are abandoned; its answers awaiting
+			// hs.fin are dropped.
+			reconnect := m.s5(p, now)
+			// S8 (0.86.0): `rotations` carries the whole chain since the
+			// signer of the epoch it travels in, `rotation` the newest link.
+			body := m.identityRotateBody(p)
+			if body == nil {
+				body = strictjson.NewBuilder().Raw("rotation", rot.Marshal()).Bytes()
+			}
 			m.sendTo(p, "identity.rotate", body, now)
+			if reconnect {
+				m.startReconnect(p, now) // again, under the new ik, after identity.rotate
+			}
 			// Every session rekeys under the new keys (§3.4): a rekey
 			// started under the old ones (each unlock starts the devices')
 			// is replaced, after identity.rotate. It is dropped even when

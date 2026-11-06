@@ -45,6 +45,9 @@ var (
 	ErrMissing    = errors.New("vault: vault missing")
 	ErrCrash      = errors.New("vault: simulated crash")
 	ErrRelease    = errors.New("vault: sealed to another release")
+	// ErrStateUnsupported: a state without messaging_release 29 or more
+	// (R29-U1, §6.3.1 "No upgrade").
+	ErrStateUnsupported = errors.New("vault: state from before release 29")
 )
 
 // Options configure a Manager.
@@ -239,6 +242,16 @@ type Manager struct {
 	// relayAt is the relay time of the message being handled (see
 	// Session.RelayTime); set by handleMessage.
 	relayAt time.Time
+	// msgID is the relay msg_id of the message being handled: with
+	// relayAt, its position (§3.4.1 "Terms", 0.86.0).
+	msgID string
+	// noLinkRestart: followLinks runs inside handleResp, whose own
+	// handshake is about to make the new epoch: it restarts nothing.
+	noLinkRestart bool
+	// reconfirm are the peers a batch held a message from under their
+	// confirmed epoch while it is not current: each gets hs.confirm again
+	// after the batch unless one is still in the outbox (§6.3.1).
+	reconfirm map[string]bool
 	// featureReqs are the requests features sent (Host.SendRequest) and
 	// await an answer to; memory only, so an answer after a restart is dropped
 	// like any that matches no request.
@@ -551,7 +564,7 @@ func Create(ctx context.Context, p CreateParams) (*Manager, error) {
 		return nil, err
 	}
 	st := &State{
-		V: 1, VaultID: p.VaultID, UserGUID: p.UserGUID,
+		V: 1, VaultID: p.VaultID, UserGUID: p.UserGUID, MessagingRelease: MessagingRelease,
 		Relay:        RelayState{URL: p.RelayURL, Seed: seeds[0]},
 		IdentitySeed: seeds[1], KEMSeed: seeds[2], WakeSeed: seeds[3],
 		SealedRelease: p.Release.PCR0, AnnouncedRelease: p.Release.PCR0,
@@ -1523,8 +1536,17 @@ func (m *Manager) reportAppKey() {
 }
 
 // StateVersion is the vault-state format version reported in lifecycle
-// events (§11.5).
-const StateVersion = 2 // release R: format 0x02 (§11.14.1, §11.5)
+// events (§11.5). Release R raised it to 2 (format 0x02, §11.14.1);
+// release 29 raises it to 3 (§6.3.1 "No upgrade": messaging_release).
+const StateVersion = 3
+
+// MessagingRelease is the state marker this release writes and the
+// smallest it opens (§6.3.1 "No upgrade: release 29 starts clean").
+const MessagingRelease = 29
+
+// stateSupported reports whether a state opened from the store may run
+// (R29-U1): its messaging_release is 29 or more.
+func stateSupported(st *State) bool { return st.MessagingRelease >= MessagingRelease }
 
 // Crash discards the in-memory vault without flushing (tests: process
 // death).

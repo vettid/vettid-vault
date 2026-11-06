@@ -146,6 +146,7 @@ func (m *Manager) newRequest(aw *AwaitingHS, fr *handshake.FinResult, now time.T
 // every app and desktop (§6.4, 0.10.3).
 func (m *Manager) outgoingEstablished(og *OutgoingHS, res *handshake.Result, now time.Time) {
 	p := og.New
+	m.noteFeatures(p, res.Inner.Features) // 0.86.0, §10.8
 	held, err := m.heldToken(res.Resp.Token, p)
 	if err != nil {
 		res.Epoch.Destroy()
@@ -200,7 +201,7 @@ func (m *Manager) approveRequest(r *Request, now time.Time) error {
 	if err != nil {
 		return NewError("relay_error", "")
 	}
-	raw, err := ep.Seal(&envelope.Inner{ID: m.newID(now), Type: connectionApprovedType, TS: now, Body: peerwire.ConnectionApprovedBody(tok, rt)})
+	raw, err := m.sealFor(p, ep, &envelope.Inner{ID: m.newID(now), Type: connectionApprovedType, TS: now, Body: peerwire.ConnectionApprovedBody(tok, rt)})
 	if err != nil {
 		return NewError("internal", "")
 	}
@@ -265,7 +266,7 @@ func (m *Manager) activateRequest(r *Request, now time.Time) {
 	if r.Peer.Kind == KindConnection && r.Dir == ReqIn {
 		pendingID = r.ID
 	}
-	m.activate(r.Peer, ep, purpose, nil, pendingID, chainOr(r.OwnChain, len(m.st.Rotations)), now)
+	m.activate(r.Peer, ep, purpose, nil, pendingID, chainOr(r.OwnChain, len(m.st.Rotations)), actOpts{mine: r.Dir == ReqOut}, now)
 }
 
 // dropRequest ends a request without activation (§6.4, §6.7, §7.4): the
@@ -306,7 +307,7 @@ func (m *Manager) sendEnded(r *Request, typ string, until time.Time, now time.Ti
 	if ep == nil || tok.Token == "" {
 		return
 	}
-	raw, err := ep.Seal(&envelope.Inner{ID: m.newID(now), Type: typ, TS: now, Body: []byte(`{}`)})
+	raw, err := m.sealFor(r.Peer, ep, &envelope.Inner{ID: m.newID(now), Type: typ, TS: now, Body: []byte(`{}`)})
 	if err != nil {
 		return
 	}

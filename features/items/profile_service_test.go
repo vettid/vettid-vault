@@ -45,7 +45,7 @@ func TestProfileToAndFromService(t *testing.T) {
 		t.Fatalf("name: %v", e.h.Sent)
 	}
 	b := string(ups[0].Body)
-	if !strings.Contains(b, `"name":"Alice"`) || !strings.HasSuffix(b, `"items":[]}`) || strings.Contains(b, "photo") || strings.Contains(b, "example.org") {
+	if !strings.Contains(b, `"name":"Alice"`) || !strings.HasSuffix(b, `"items":[],"features":["hs_confirm","vote"]}`) || strings.Contains(b, "photo") || strings.Contains(b, "example.org") {
 		t.Fatalf("service update: %s", b)
 	}
 	if a := e.sentTo("cA", "profile.update"); len(a) != 1 || !bytes.Contains(a[0].Body, []byte("example.org")) || !bytes.Contains(a[0].Body, []byte("photo")) {
@@ -54,7 +54,7 @@ func TestProfileToAndFromService(t *testing.T) {
 	// The activation update (ConnectionAdded) is reduced too.
 	e.h.Reset()
 	e.set.Items.ConnectionAdded(vault.NewSession(context.Background(), e.h, vault.PeerInfo{}, e.clk.T, nil), "cB")
-	if ups := e.sentTo("cB", "profile.update"); len(ups) != 1 || !strings.HasSuffix(string(ups[0].Body), `"items":[]}`) || strings.Contains(string(ups[0].Body), "photo") {
+	if ups := e.sentTo("cB", "profile.update"); len(ups) != 1 || !strings.HasSuffix(string(ups[0].Body), `"items":[],"features":["hs_confirm","vote"]}`) || strings.Contains(string(ups[0].Body), "photo") {
 		t.Fatalf("activation: %v", ups)
 	}
 	// A service's update is kept without items, its photo (a logo) kept.

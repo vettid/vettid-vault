@@ -440,6 +440,11 @@ func openState(ctx context.Context, p RecoveryOpenParams, hdr *Header, hver stor
 		m.finishMarked(ctx)
 		return nil, codeDeleted
 	}
+	if !stateSupported(&st) {
+		// R29-U1: refused after the deleting check, before any write.
+		m.zeroize()
+		return nil, CodeStateUnsupported
+	}
 	return m, ""
 }
 
@@ -660,6 +665,11 @@ func resumeRecovery(ctx context.Context, p RecoveryOpenParams, hdr *Header, hver
 		return nil, out.fail(OpenNoRecovery)
 	}
 	if code != "" {
+		// A refusal (stored_mismatch, state_unsupported): the keys go as
+		// in the branch above.
+		suite.Wipe(uk)
+		suite.Wipe(d0)
+		suite.Wipe(d1)
 		return nil, out.fail(code)
 	}
 	if stateVer == hdr.DEKVersion {

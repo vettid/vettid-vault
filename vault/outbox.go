@@ -10,6 +10,7 @@ import (
 	"github.com/vettid/vettid-relay/relayclient"
 	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/envelope"
+	"github.com/vettid/vettid-vault/vms/handshake"
 	"github.com/vettid/vettid-vault/vms/suite"
 )
 
@@ -70,7 +71,11 @@ func (m *Manager) sealAndQueueWake(p *Peer, in *envelope.Inner, wake string) str
 	if kr == nil || kr.Current() == nil || p.Fork != nil {
 		return "" // nothing is sent to a connection suspended on fork evidence (§6.6)
 	}
-	raw, err := kr.Current().Seal(in)
+	raw, err := m.sealFor(p, kr.Current(), in)
+	if errors.Is(err, errDemoted) {
+		m.holdDemoted(p, in, wake) // §3.4.1: held until a new epoch is established
+		return in.ID
+	}
 	if err != nil {
 		return ""
 	}
@@ -104,7 +109,7 @@ func (m *Manager) sendWith(p *Peer, typ string, body json.RawMessage, o SendOpti
 	if kr == nil || kr.Current() == nil || p.Standing.Token == "" {
 		return ""
 	}
-	raw, err := kr.Current().Seal(in)
+	raw, err := m.sealFor(p, kr.Current(), in)
 	if err != nil {
 		return ""
 	}
@@ -173,7 +178,7 @@ func (m *Manager) sendLocking(ctx context.Context) map[string]bool {
 		}
 		body := json.RawMessage(lb.String("unlock_id", m.unlockID).Bytes())
 		in := &envelope.Inner{ID: m.newID(now), Type: "vault.locking", TS: now, Exp: now.Add(time.Minute), Body: body}
-		if raw, err := kr.Current().Seal(in); err == nil {
+		if raw, err := m.sealFor(p, kr.Current(), in); err == nil {
 			if _, err := m.relay.Deposit(ctx, p.Relay.URL, p.Relay.Mailbox, p.Standing.Token, raw); err == nil {
 				ok[p.ID] = true
 			}
@@ -222,6 +227,7 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 	now := m.now()
 	blocked := map[string]bool{}
 	awaiting := map[string]bool{}
+	held := map[string]bool{} // held for a pending reconnect (§6.3.1)
 	for _, e := range m.st.Outbox {
 		if e.Done {
 			continue
@@ -233,7 +239,27 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 			}
 			continue // not stored yet (queue)
 		}
-		if e.Op == OpDeposit && (blocked[key] || awaiting[key] && e.Token == "") {
+		if e.Op == OpDeposit && (blocked[key] || awaiting[key] && e.Token == "" || e.PeerID != "" && held[e.PeerID] && !e.Handshake) {
+			continue
+		}
+		if e.Op == OpDeposit && e.Held != nil && !e.HeldExp.IsZero() && !now.Before(e.HeldExp) {
+			e.Done, e.Held, m.dirty = true, nil, true // held past its exp: discarded (§3.4.1)
+			m.audit(now, "held_expired", e.PeerID)    // S12: counted and audited
+			continue
+		}
+		if e.Op == OpDeposit && e.Held != nil {
+			// Waiting, unsealed, for an epoch that is not demoted (§3.4.1);
+			// the peer's later deposits wait behind it (by peer, not by
+			// mailbox: a new invitation's first contact to the same
+			// mailbox is not held, review 2), the handshake excepted.
+			held[e.PeerID] = true
+			continue
+		}
+		if e.Op == OpDeposit && !e.Handshake && m.pendingReconnectHold(e.PeerID) {
+			// §6.3.1: while a reconnect's epoch is pending, nothing but the
+			// handshake goes to the peer; the rest waits in order, and the
+			// handshake's messages pass it.
+			held[e.PeerID] = true
 			continue
 		}
 		if !e.NotAfter.IsZero() && !now.Before(e.NotAfter) {
@@ -343,8 +369,13 @@ func (m *Manager) deposit(ctx context.Context, e *OutboxEntry, now time.Time) er
 	switch RelayCode(err) {
 	case CodeTokenExpired:
 		if p != nil && e.Token == "" {
-			if p.Kind == KindConnection {
+			// 0.86.6 S5: with an epoch pending, token_expired abandons it
+			// only if the token's exp has passed on the vault's own clock
+			// (as rule J); a device is rekeyed, never reconnected (S7).
+			if p.Kind == KindConnection && (p.Pending == nil || !now.Before(p.Standing.Exp)) {
 				m.startReconnect(p, now) // §6.6 "When to use it"
+			} else if p.Kind != KindConnection && p.Pending != nil && !now.Before(p.Standing.Exp) {
+				m.abandonPending(p, "token_expired", true, now) // a device: rekeyed from the current epoch
 			}
 			e.NotBefore = now.Add(time.Hour) // retried when a fresh token arrives
 			e.AwaitToken = true
@@ -368,6 +399,28 @@ func (m *Manager) deposit(ctx context.Context, e *OutboxEntry, now time.Time) er
 			}
 		}
 		e.Done = true
+	case CodeQuotaExceeded:
+		// §3.4.1 "The reconnect bound": a relay refusing a reconnect's
+		// hs.init with quota_exceeded (the reconnect token's quota) makes
+		// the connection stale, whatever started the reconnect. (A
+		// reconnect's hs.init carries its own token and no peer id.)
+		for _, og := range m.st.Outgoing {
+			if og.InitOutbox == e.ID && og.New == nil && og.Purpose == handshake.PurposeReconnect {
+				if op := m.peer(og.PeerID); op != nil {
+					m.markStale(op, now)
+				}
+				e.Done = true
+				return err
+			}
+		}
+		// Any other deposit: as before 0.86.6, a 429 is retried with the
+		// backoff (the token's quota window moves on), another 4xx ends it.
+		// (fdcc746 ended every one, dropping e.g. an att.deliver: the
+		// e2e TestAttachmentMaliciousPeer failure on CI.)
+		if st, ok := statusOf(err); ok && st < 500 && st != 429 {
+			m.audit(now, "deposit_refused", e.PeerID)
+			e.Done = true
+		}
 	case CodeTokenUsed:
 		m.audit(now, "open_token_used", e.PeerID)
 		e.Done = true
@@ -425,10 +478,20 @@ func (m *Manager) housekeeping(now time.Time) {
 	}
 	for id, og := range m.st.Outgoing {
 		if og.New == nil && now.Sub(og.Created) > HandshakeTTL {
-			m.dropOutgoing(id)
+			m.abandonOutgoing(id, now) // its tokens are revoked too (§6.6, review M3)
+			p := m.peer(og.PeerID)
+			switch {
+			case p == nil:
+			case og.Purpose == handshake.PurposeReconnect:
+				m.reconnectFailed(p, og.Named, now)
+			}
 		}
 	}
 	for _, p := range m.allPeers() {
+		m.tickDemoted(p, now)
+		m.tickPending(p, now)
+		m.tickConfirm(p, now)
+		m.pruneEpochs(p, now)
 		if p.State != PeerActive {
 			continue
 		}

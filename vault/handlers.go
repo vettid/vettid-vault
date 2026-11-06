@@ -9,6 +9,7 @@ import (
 
 	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/envelope"
+	"github.com/vettid/vettid-vault/vms/handshake"
 )
 
 // Feature is a feature area (§10): it declares its types and handles them.
@@ -203,6 +204,8 @@ type Session struct {
 	// relayAt is the relay's time of the message being handled (its
 	// deposited_at); zero when unknown (tests, internal activity).
 	relayAt time.Time
+	// epoch is the epoch the message opened under (core handlers).
+	epoch *handshake.Epoch
 }
 
 // Host is what a Session acts on. The Manager implements it for the
@@ -588,7 +591,7 @@ type CredentialBackupCopy interface {
 // (§3.5.7).
 var allowedWithoutCredential = map[string]bool{"vault.status": true, "vault.lock": true, "vault.delete": true, "credential.utk.get": true,
 	"credential.create": true, "credential.version": true, "relay.token.issued": true, "relay.token.refresh": true,
-	"relay.address.update": true}
+	"relay.address.update": true, TypeDeviceFeatures: true}
 
 // hasGate reports whether a credential feature is present.
 func (m *Manager) hasGate() bool {

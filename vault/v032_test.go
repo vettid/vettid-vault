@@ -274,8 +274,9 @@ func TestResponseTooLargeAtMaxSeq(t *testing.T) {
 	// lengths, as the vault builds the answer.
 	id, _ := envelope.NewULID(time.Now())
 	size := func(n int, seq uint64) int {
+		// 0.86.0 (§5.3): the answer carries the vault's features too.
 		in := &envelope.Inner{ID: id, TS: time.Now(), Seq: seq, Type: "test.big", Re: id, Status: envelope.StatusOK,
-			Body: json.RawMessage(`{"v":"` + strings.Repeat("a", n) + `"}`)}
+			Features: d.m.featuresFor(d.devPeer), Body: json.RawMessage(`{"v":"` + strings.Repeat("a", n) + `"}`)}
 		j, err := in.Marshal(envelope.ModeSession)
 		if err != nil {
 			t.Fatal(err)

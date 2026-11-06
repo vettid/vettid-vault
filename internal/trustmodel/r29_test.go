@@ -253,15 +253,17 @@ func (w *World) feedItem(q, r PID, kind string) {
 
 // Residual reasons: each exempts a pair from I1, I6 and I7, and is counted.
 const (
-	resOldApp   = "an app from before release 29 (earlier releases are unsupported; R29-D4 notice)"
-	resU1Fin    = "an hs.fin lost at the upgrade (two splits at the upgrade, U1)"
-	resCopyInit = "a copy acting as initiator sent nothing but hs.fin"
+	resOldApp         = "an app from before release 29 (earlier releases are unsupported; R29-D4 notice)"
+	resU1Fin          = "an hs.fin lost at the upgrade (two splits at the upgrade, U1)"
+	resCopyInit       = "a copy acting as initiator sent nothing but hs.fin"
+	resBeforeRotation = "an old copy acting before the original's rotation is seen (an old copy can make any handshake as P)"
+	resLiveMailbox    = "an old copy collects, acks or deletes the original's live mailbox"
 )
 
 // residualOf: the residual that exempts the pair (a, b), or "".
 func (w *World) residualOf(a, b PID) string {
 	if w.party(a).OldApp || w.party(b).OldApp {
-		return resOldApp
+		return resOldApp // I7 still requires the R29-D4 notice when the pair split
 	}
 	if w.u1Split[pairKey(a, b)] {
 		return resU1Fin

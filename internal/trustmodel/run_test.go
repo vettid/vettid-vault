@@ -82,6 +82,7 @@ func setup(cfg Config, seed uint64) *World {
 	}
 	for _, p := range w.P {
 		p.write()
+		w.initIK[p.ID] = p.st.IK
 	}
 	w.p429, w.pRef = cfg.P429, cfg.PRefuse
 	return w
@@ -682,6 +683,30 @@ func (w *World) checkEnd(liveness bool) {
 		}
 		if ra.Cur == 0 || ra.Cur != rb.Cur {
 			w.violate(inv1, "%s: current epochs differ (E%d vs E%d)", name, ra.Cur, rb.Cur)
+		} else if w.optA {
+			// R29 I6: after an ik rotation of either side, an epoch whose
+			// signer is the new ik is current at both sides
+			for _, s := range []struct {
+				it  *Party
+				at  *PeerRec // the peer's record of it
+				own *PeerRec // its own record
+			}{{pr.b, ra, rb}, {pr.a, rb, ra}} {
+				if s.it.st.IK == w.initIK[s.it.ID] {
+					continue
+				}
+				ep, mine := s.at.epoch(s.at.Cur), s.own.epoch(s.own.Cur)
+				if ep == nil || mine == nil || ep.Signer != s.it.st.IK || mine.Own != s.it.st.IK {
+					sig, own := Key(0), Key(0)
+					if ep != nil {
+						sig = ep.Signer
+					}
+					if mine != nil {
+						own = mine.Own
+					}
+					w.violate("I6", "%s: after %s's rotation the current epoch E%d is signed by %d (peer's record) / %d (own record), not its new ik %d",
+						name, s.it.Name, ra.Cur, sig, own, s.it.st.IK)
+				}
+			}
 		}
 		for _, s := range [][2]*Party{{pr.a, pr.b}, {pr.b, pr.a}} {
 			id := w.id()
@@ -748,7 +773,7 @@ func (w *World) checkEnd(liveness bool) {
 			continue
 		}
 		if cause := w.staleAt[k]; cause != "" && endsStale && w.dead[k[0]] == "" && w.dead[k[1]] == "" {
-			w.violate("I1-stale-split", "%s: stale after a split: %s", pairName(w, k[0], k[1]), cause)
+			w.stat("I7: stale after a split (visible)") // was the model's I1-stale-split; R29 §10: a split ending stale is visible
 		}
 	}
 	for _, id := range pids {
@@ -814,6 +839,7 @@ func runActions(cfg Config, seed uint64, acts []Action, verbose bool) *World {
 	}
 	w.checkEnd(true)
 	w.monitor()
+	w.checkI7()
 	return w
 }
 

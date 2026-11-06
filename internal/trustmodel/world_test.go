@@ -45,6 +45,9 @@ type World struct {
 	u1Risk        map[[2]PID][2]int // pair -> (responder, epoch): at the migration that hs.fin was still unprocessed (§3.4.1 Residuals)
 	ruleEKeepFin  bool              // TRUSTMODEL_RULEEFIN=keep: rule E leaves an unsent hs.fin for a destroyed epoch in the outbox (before r7)
 	copyExpo      map[[2]int]*expo  // (honest party, copy epoch): when it was used
+	copyFlag      map[[2]int]bool   // (honest party, copy epoch): its received flag was set (ground truth, I7)
+	copyCur       map[[2]int]bool   // (honest party, copy epoch): it became current there (ground truth, I7)
+	initIK        map[PID]Key       // each party's ik at the start (I6)
 	debugUnlinked bool              // scenarios: the relay's rotate and registration get no answer
 
 	// Fix switches for the review findings (f_scenarios_test.go). Each is
@@ -91,7 +94,7 @@ func newWorld(seed uint64) *World {
 	w := &World{rng: rand.New(rand.NewPCG(seed, 7)), issuer: map[int]Key{}, epTruth: map[int][2]PID{},
 		rlinkBy: map[RLink]rot{}, iklinkBy: map[IKLink]rot{}, evid: map[[2]PID]map[Key]map[Key]bool{},
 		ikPos: map[[2]PID][]ikFollow{}, answered: map[int]bool{},
-		ended: map[int]bool{}, ever: map[PID]map[int]bool{}, probes: map[int]bool{}, stats: map[string]int{}, dead: map[PID]string{}, ttlFin: map[[2]PID]string{}, probeDep: map[int][2]PID{}, probeFate: map[int]string{}, hasEpoch: map[[2]int]bool{}, staleAt: map[[2]PID]string{}, hsOrigin: map[int]string{}, suspAt: map[[2]PID]int64{}, audits: map[[2]PID]int{}, everSplit: map[[2]PID]bool{}, feed: map[[2]PID][]string{}, u1Risk: map[[2]PID][2]int{}, u1Split: map[[2]PID]bool{}, copyExpo: map[[2]int]*expo{}, probeEpoch: map[int]int{}, forkDue: map[[2]PID]int{}, evidKind: map[Key]string{}}
+		ended: map[int]bool{}, ever: map[PID]map[int]bool{}, probes: map[int]bool{}, stats: map[string]int{}, dead: map[PID]string{}, ttlFin: map[[2]PID]string{}, probeDep: map[int][2]PID{}, probeFate: map[int]string{}, hasEpoch: map[[2]int]bool{}, staleAt: map[[2]PID]string{}, hsOrigin: map[int]string{}, suspAt: map[[2]PID]int64{}, audits: map[[2]PID]int{}, everSplit: map[[2]PID]bool{}, feed: map[[2]PID][]string{}, u1Risk: map[[2]PID][2]int{}, u1Split: map[[2]PID]bool{}, copyExpo: map[[2]int]*expo{}, copyFlag: map[[2]int]bool{}, copyCur: map[[2]int]bool{}, initIK: map[PID]Key{}, probeEpoch: map[int]int{}, forkDue: map[[2]PID]int{}, evidKind: map[Key]string{}}
 	w.R = newRelay(w)
 	w.Now = 1000 * day
 	return w
@@ -895,4 +898,12 @@ func (p *Party) otherBoxBehind(m *RMsg, set []Key) bool {
 		}
 	}
 	return false
+}
+
+// noteCurrent: ground truth for I7, an epoch made with an old copy became
+// current at an honest party.
+func (w *World) noteCurrent(q *Party, e int) {
+	if tr, ok := w.epTruth[e]; ok && !q.Copy && (w.party(tr[0]).Copy || w.party(tr[1]).Copy) {
+		w.copyCur[[2]int{int(q.ID), e}] = true
+	}
 }

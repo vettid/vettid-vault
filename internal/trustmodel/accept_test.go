@@ -1016,6 +1016,7 @@ func (q *Party) establish(r *PeerRec, id int, signer, own Key, pos Pos) {
 	}
 	r.Epochs = append(r.Epochs, Epoch{ID: id, Signer: signer, Own: own, Est: pos, EstAt: q.w.Now, EverCur: true})
 	r.Cur = id
+	q.w.noteCurrent(q, id)
 	q.releaseHeld(r) // R29-K5: a new epoch is current
 	q.w.hasEpoch[[2]int{int(q.ID), id}] = true
 	q.w.logf("%s: epoch E%d with %s established (signer %d)", q.Name, id, q.w.party(r.ID).Name, signer)

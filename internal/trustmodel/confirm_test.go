@@ -70,6 +70,7 @@ func (q *Party) confirm(r *PeerRec) {
 		}
 	}
 	r.Cur, r.Pend = pe.ID, nil
+	q.w.noteCurrent(q, pe.ID)
 	r.setConf(pe.ID, q.w.Now) // activated at confirmation
 	r.AbanIDs = nil
 	if pe.Reconnect {
@@ -190,6 +191,9 @@ func (q *Party) beforeAccept(r *PeerRec, m *RMsg, pos Pos) {
 	if ep := r.epoch(M.Epoch); ep != nil && M.Kind != KFin && !ep.Flag {
 		ep.Flag = true
 		q.w.hit("F3:flag-set")
+		if tr, ok := q.w.epTruth[ep.ID]; ok && !q.Copy && (q.w.party(tr[0]).Copy || q.w.party(tr[1]).Copy) {
+			q.w.copyFlag[[2]int{int(q.ID), ep.ID}] = true
+		}
 		if M.Kind == KConfirm {
 			q.w.hit("F3:flag-set-by-hs.confirm")
 		}

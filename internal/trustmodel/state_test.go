@@ -81,6 +81,7 @@ type Epoch struct {
 	Flag       bool  // R29-F3: the received flag (a message from the peer under it passed steps 1-4, not hs.fin)
 	EverCur    bool  // it has been current here (R29-K5: the reconnect after a demotion names one)
 	Ended      bool  // R29-K9 (0.87.1): abandoned while pending, ended at P's identity.rotate: any later message under it is fork evidence
+	AbanByLink bool  // R29-K2: abandoned by a link ("Pending epochs at a link"): demoted from the start, never the K9 residual
 }
 
 // PendEp is an initiator's pending epoch (§6.3.1).
@@ -149,15 +150,17 @@ type PeerRec struct {
 	IdResendBatch bool     // ...in this batch
 	IdResendN     int      // resends for the rotation IdResendRot (at most 3)
 	IdResendRot   int64
-	Reconfirm     bool    // a message under the confirmed epoch in this batch: queue hs.confirm
-	RCs           int     // reconnects started toward this peer (stat)
-	DemName       int     // R29-K7: after strict F1 the reconnect names E (until a new epoch is current)
-	RCNamed       int     // R29-K6: the epoch the failed tries named
-	RCFails       int     // R29-K6: failed tries for RCNamed
-	Held          []Entry // R29-K5: durable messages held after a demotion of the current epoch (unsealed)
-	LastConfirm   int64   // R29-D2: a device re-sends hs.confirm at most once a minute
-	SawHSC        bool    // R29-G2: the peer's features carried hs_confirm (sticky)
-	Notice        bool    // R29-D4: device.update_needed shown for this device
+	Reconfirm     bool       // a message under the confirmed epoch in this batch: queue hs.confirm
+	RCs           int        // reconnects started toward this peer (stat)
+	DemName       int        // R29-K7: after strict F1 the reconnect names E (until a new epoch is current)
+	RCNamed       int        // R29-K6: the epoch the failed tries named
+	RCFails       int        // R29-K6: failed tries for RCNamed
+	Held          []Entry    // R29-K5: durable messages held after a demotion of the current epoch (unsealed)
+	LastConfirm   int64      // R29-D2: a device re-sends hs.confirm at most once a minute
+	SawHSC        bool       // R29-G2: the peer's features carried hs_confirm (sticky)
+	Notice        bool       // R29-D4: device.update_needed shown for this device
+	IdRotLinks    []IKLink   // R29-K9: links carried by an identity.rotate from P that K9 judged at (followed or ignored)
+	K9Spared      []k9Spared // R29-K9: epochs not later than the epoch such an identity.rotate traveled under, per link
 
 	IK, KEM Key
 	Chain   []IKLink // followed identity links
@@ -188,6 +191,15 @@ type PeerRec struct {
 	RevokedAt int64 // S9: first token_revoked for an earlier key's token
 	S9Audited bool
 	RestartIK Key // H5: restarted reconnect spent once per change of the current ik
+}
+
+// k9Spared: at an identity.rotate carrying link L, epoch Ep was not later
+// than the epoch the message traveled under, so R29-K9 did not judge it
+// (the residual "A copy using an epoch Q abandoned while pending, outside
+// R29-K9").
+type k9Spared struct {
+	Ep int
+	L  IKLink
 }
 
 type deferral struct {
@@ -293,6 +305,8 @@ func (s *State) clone() State {
 		}
 		q.Answered = slices.Clone(p.Answered)
 		q.AbanIDs = slices.Clone(p.AbanIDs)
+		q.IdRotLinks = slices.Clone(p.IdRotLinks)
+		q.K9Spared = slices.Clone(p.K9Spared)
 		q.Seen = slices.Clone(p.Seen)
 		q.RSeen = slices.Clone(p.RSeen)
 		q.DropAns = slices.Clone(p.DropAns)

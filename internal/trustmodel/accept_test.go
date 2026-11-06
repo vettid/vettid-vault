@@ -708,6 +708,19 @@ func (q *Party) judgeAbandoned(r *PeerRec, links []IKLink, msgEp int) bool {
 	if im < 0 {
 		return false
 	}
+	// what K9 judged, for the residual's bounds (I3, I7): this link was
+	// carried by an identity.rotate, and every epoch up to msgEp was not
+	// later than the epoch it traveled under
+	for _, l := range links {
+		if !slices.Contains(r.IdRotLinks, l) {
+			r.IdRotLinks = append(r.IdRotLinks, l)
+		}
+		for j := 0; j <= im; j++ {
+			if sp := (k9Spared{r.Epochs[j].ID, l}); !slices.Contains(r.K9Spared, sp) {
+				r.K9Spared = append(r.K9Spared, sp)
+			}
+		}
+	}
 	for _, l := range links {
 		for j := im + 1; j < len(r.Epochs); j++ {
 			ep := &r.Epochs[j]
@@ -1131,6 +1144,7 @@ func (q *Party) h5(r *PeerRec, except int) {
 		q.w.hit("K2:pending-abandoned-at-link")
 		q.abandonPending(r, "H5: signer superseded", r.Own == nil)
 		if ep := r.epoch(id); ep != nil && q.newSpec() {
+			ep.AbanByLink = true
 			ep.Demoted, ep.DemotedAt = true, Pos{Box: -1}
 		}
 	}
@@ -1263,7 +1277,7 @@ func (w *World) checkI3(q *Party, r *PeerRec, m *RMsg, d dec) {
 					w.exempt("I3", resDevice)
 					continue
 				}
-				if ep := r.epoch(m.P.Epoch); ep != nil && ep.MineInit && ep.Abandoned && !ep.Ended {
+				if ep := r.epoch(m.P.Epoch); ep != nil && r.abandonedResidual(ep, f.L) {
 					w.exempt("I3", resAbandonedEarlier)
 					continue
 				}
@@ -1271,6 +1285,19 @@ func (w *World) checkI3(q *Party, r *PeerRec, m *RMsg, d dec) {
 			}
 		}
 	}
+}
+
+// abandonedResidual: the residual "A copy using an epoch Q abandoned while
+// pending, outside R29-K9" (owner decision b, 0.87.1) covers epoch ep for
+// P's ik link l: an epoch Q began and abandoned while pending (not by a
+// link: that one is demoted from the start, K2), not ended, which K9 did
+// not judge: not later than the epoch of an identity.rotate carrying l, or
+// no identity.rotate carrying l has been judged yet.
+func (r *PeerRec) abandonedResidual(ep *Epoch, l IKLink) bool {
+	if !ep.MineInit || !ep.Abandoned || ep.Ended || ep.AbanByLink {
+		return false
+	}
+	return slices.Contains(r.K9Spared, k9Spared{ep.ID, l}) || !slices.Contains(r.IdRotLinks, l)
 }
 
 // copyEpochAfterR: epoch e was set up with a copy of P taken before the

@@ -332,6 +332,18 @@ func TestR29K9AfterCutOffIgnoreJudged(t *testing.T) {
 	if ep := r.epoch(e1); ep == nil || !ep.Ended || r.Status != stActive {
 		t.Fatalf("K9 not judged at the ignore: E%d %+v, status %d\n  %s", e1, ep, r.Status, s.trace())
 	}
+	// the model's reading: the ended-epoch check runs where rule E's
+	// destroyed check does (before Table A), so the copy's message under E1
+	// from the earlier key after its cut-off is fork evidence, not merely
+	// refused (superseded_relay)
+	S := Msg{Kind: KSession, Inner: s.w.id(), Epoch: e1, Probe: s.w.id(), Ts: s.w.Now}
+	if _, err := s.w.R.deposit(c.ID, old, tok, Q.st.Relay, &S); err != okRes {
+		t.Fatalf("the copy's second deposit was refused (%v)", err)
+	}
+	s.run(1, Q)
+	if r.Status != stSuspended || s.w.stats["cell E:ended-epoch"] == 0 {
+		t.Fatalf("a message under the ended E%d from an earlier key after its cut-off did not suspend: status %d\n  %s", e1, r.Status, s.trace())
+	}
 }
 
 // R29-K4 at a later link judges an epoch an earlier link already demoted:

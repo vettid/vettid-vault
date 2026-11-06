@@ -192,6 +192,17 @@ func (q *Party) acceptFrom(r *PeerRec, m *RMsg, pos Pos, set []Key) dec {
 		q.w.hit("R6:superseded_epoch")
 		return refuse("superseded_epoch", "E:superseded-epoch")
 	}
+	// R29-K9: a message under an ended epoch is fork evidence "once step 3
+	// has checked its links by rule C". The model's reading: this is judged
+	// where rule E's destroyed epoch is, after step 3 and before Table A, so
+	// an old copy's message under an ended epoch from an earlier relay key
+	// after its cut-off (which Table A would only refuse) is fork evidence too.
+	if ep := r.epoch(M.Epoch); M.Epoch != 0 && ep != nil && ep.Ended {
+		q.w.hit("K9:ended-message-suspends")
+		q.w.logf("%s: a message under ended E%d from %s: fork evidence", q.Name, ep.ID, q.w.party(r.ID).Name)
+		q.suspend(r, "connection.fork_suspected/epoch")
+		return dec{"suspend", "fork", "E:ended-epoch"}
+	}
 	cell := "A:" + rowName[rs] + ":" + col
 	// (4) Table A
 	switch M.Kind {
@@ -280,12 +291,6 @@ func (q *Party) acceptFrom(r *PeerRec, m *RMsg, pos Pos, set []Key) dec {
 // demoted: "Epochs after an ik link": messages under a demoted epoch
 // deposited after x are refused.
 func (q *Party) demoted(r *PeerRec, M *Msg, pos Pos, cell string) (dec, bool) {
-	if ep := r.epoch(M.Epoch); ep != nil && ep.Ended {
-		q.w.hit("K9:ended-message-suspends")
-		q.w.logf("%s: a message under ended E%d from %s: fork evidence", q.Name, ep.ID, q.w.party(r.ID).Name)
-		q.suspend(r, "connection.fork_suspected/epoch")
-		return dec{"suspend", "fork", "E:ended-epoch"}, true
-	}
 	if ep := r.epoch(M.Epoch); ep != nil && ep.Demoted && ep.DemotedAt.after(pos) {
 		return refuse("ancestor_ik", "E:demoted-epoch"), true
 	}

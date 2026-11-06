@@ -234,6 +234,7 @@ func (m *Manager) f1Demote(p *Peer, app []*handshake.Rotation, msgEpoch []byte, 
 			if e := p.epochMeta(msgEpoch); e != nil {
 				e.Superseded = time.Time{}
 			}
+			m.sealHeld(p)
 		}
 		for id, og := range m.st.Outgoing {
 			if og.New == nil && og.PeerID == p.ID && og.Purpose == handshake.PurposeRekey {
@@ -246,6 +247,45 @@ func (m *Manager) f1Demote(p *Peer, app []*handshake.Rotation, msgEpoch []byte, 
 			m.startRekey(p, now)
 		}
 		return
+	}
+}
+
+// holdDemoted queues a message made while p's current epoch is demoted,
+// unsealed, in its place in the outbox.
+func (m *Manager) holdDemoted(p *Peer, in *envelope.Inner, wake string) {
+	c := *in
+	c.Seq, c.Features = 0, nil
+	j, err := c.Marshal(envelope.ModeSealed)
+	if err != nil {
+		return
+	}
+	m.queueDeposit(&OutboxEntry{PeerID: p.ID, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Held: j, Wake: wake}, m.now())
+}
+
+// sealHeld seals p's held messages under its current epoch, once that is
+// not demoted, each in its place in the outbox (same inner id).
+func (m *Manager) sealHeld(p *Peer) {
+	kr := m.sessions[p.ID]
+	if kr == nil || kr.Current() == nil {
+		return
+	}
+	for _, e := range m.st.Outbox {
+		if e.Done || e.PeerID != p.ID || e.Held == nil {
+			continue
+		}
+		in, err := envelope.ParseInner(e.Held, envelope.ModeSealed)
+		if err != nil {
+			e.Done, e.Held = true, nil
+			continue
+		}
+		raw, err := m.sealFor(p, kr.Current(), in)
+		if err != nil {
+			return // still demoted
+		}
+		m.keepCopy(p, in, e.Wake)
+		e.Payload, e.Held = raw, nil
+		e.RelayURL, e.Mailbox = p.Relay.URL, p.Relay.Mailbox
+		m.dirty = true
 	}
 }
 
@@ -376,6 +416,7 @@ func (m *Manager) rekeyOtherEpoch(p *Peer, in *envelope.Inner, ep *handshake.Epo
 		return false
 	}
 	if kr := m.sessions[p.ID]; kr != nil && kr.Reinstate(id) {
+		defer m.sealHeld(p)
 		p.LastEpochID = append([]byte(nil), id[:]...)
 		if p.Revert != nil {
 			p.OwnChainAtEpoch = p.Revert.OldOwnChain

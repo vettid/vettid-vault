@@ -943,6 +943,7 @@ func (m *Manager) activate(p *Peer, ep *handshake.Epoch, purpose handshake.Purpo
 	o.ownChain = ownChain
 	m.recordActivated(p, id[:], o, now)
 	p.LastEpochID = id[:]
+	m.sealHeld(p) // messages held while the previous epoch was demoted (§3.4.1)
 	// The count whose key signed the epoch's handshake (§6.6, 0.72.0), not
 	// the count now: a rotation between hs.resp and hs.fin is not lost.
 	p.OwnChainAtEpoch = ownChain

@@ -409,3 +409,54 @@ func TestR29FixBSeedShapeStrictExpected(t *testing.T) {
 	}
 	f.talks()
 }
+
+// §3.4.1 "Epochs after an ik link": while the current epoch is demoted the
+// vault sends nothing, but what it makes meanwhile is held, not lost:
+// sealed under the new epoch once the reconnect establishes it, and
+// delivered exactly once. (A test.note stands in for a member's
+// message.send relayed to the peer: the same durable send path,
+// SendToConnection -> sendTo -> sealAndQueue.)
+func TestR29DemotedHoldsMessagesUntilNewEpoch(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	f.rekey(0)
+	f.deliver(0, 1, kHSInit)
+	snap := f.snapshot(1)
+	f.rotate(1)
+	f.deliver(1, 0, kHSResp)
+	f.startCopy(1, snap)
+	f.deliver(0, 2, kHSFin)
+	f.deliver(2, 0, kConfirm)
+	e1 := append([]byte(nil), f.cur(0)...)
+	f.deliver(1, 0, kRotate)
+	if e := f.p(0).epochMeta(e1); e == nil || !e.Demoted || !bytes.Equal(f.cur(0), e1) {
+		f.dump()
+		t.Fatal("setup: the current epoch is not demoted")
+	}
+	f.note(0, "held-while-demoted")
+	held := 0
+	for _, e := range f.m(0).st.Outbox {
+		if e.Held != nil && !e.Done {
+			held++
+		}
+	}
+	if held != 1 {
+		t.Fatalf("held entries %d", held)
+	}
+	f.settle()
+	f.advance(time.Hour)
+	f.tick(0)
+	f.tick(1)
+	f.settle()
+	f.settle()
+	n := 0
+	for _, b := range f.got[1] {
+		if bytes.Contains([]byte(b), []byte("held-while-demoted")) {
+			n++
+		}
+	}
+	if n != 1 || !f.sameEpoch() {
+		f.dump()
+		t.Fatalf("the held message arrived %d times (same epoch %v)", n, f.sameEpoch())
+	}
+}

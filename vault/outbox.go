@@ -72,6 +72,10 @@ func (m *Manager) sealAndQueueWake(p *Peer, in *envelope.Inner, wake string) str
 		return "" // nothing is sent to a connection suspended on fork evidence (§6.6)
 	}
 	raw, err := m.sealFor(p, kr.Current(), in)
+	if errors.Is(err, errDemoted) {
+		m.holdDemoted(p, in, wake) // §3.4.1: held until a new epoch is established
+		return in.ID
+	}
 	if err != nil {
 		return ""
 	}
@@ -237,6 +241,13 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 			continue // not stored yet (queue)
 		}
 		if e.Op == OpDeposit && (blocked[key] || awaiting[key] && e.Token == "" || held[key] && !e.Handshake) {
+			continue
+		}
+		if e.Op == OpDeposit && e.Held != nil {
+			// Waiting, unsealed, for an epoch that is not demoted (§3.4.1);
+			// later deposits to the mailbox wait behind it, the handshake
+			// that makes that epoch excepted.
+			held[key] = true
 			continue
 		}
 		if e.Op == OpDeposit && !e.Handshake && m.pendingReconnectHold(e.PeerID) {

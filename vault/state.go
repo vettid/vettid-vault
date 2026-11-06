@@ -814,7 +814,13 @@ type OutboxEntry struct {
 	// hs.fin establishes (rule E drops one not yet sent for an epoch it
 	// destroys); Handshake an hs.* deposit (it is not held while a
 	// reconnect's epoch is pending).
-	Confirm   bool   `json:"confirm,omitempty"`
+	Confirm bool `json:"confirm,omitempty"`
+	// Held is the inner plaintext (sealed-mode JSON, no seq) of a message
+	// made while the peer's current epoch was demoted by an ik link
+	// (§3.4.1: nothing is sent until a new epoch is established); it is
+	// sealed under that epoch when it is established (sealHeld), and has
+	// no Payload until then.
+	Held      []byte `json:"held,omitempty"`
 	FinEpoch  []byte `json:"fin_epoch,omitempty"`
 	Handshake bool   `json:"handshake,omitempty"`
 }

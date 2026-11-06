@@ -465,32 +465,66 @@ func (m *Manager) respondReconnect(pi *handshake.PendingInit, p *Peer, sender ed
 }
 
 // refusedReconnectLinks is §6.6 "The links of a refused reconnect"
-// (0.88.2, owner decision a): a reconnect refused only because the
-// vault's own reconnect is pending (it has sent hs.fin for it) still has
-// its identity links applied, in the write that refuses it. The links its
-// hs.init carries that resolve from the stored ik to its from.ik (Table B
-// "Reached"; rule C already checked each) are followed as an
-// identity.rotate's would be: H5, "Pending epochs at a link", "Epochs
-// after an ik link" and strict F1, with the epoch its ctx names as the
-// one it travels under. Nothing restarts beside the vault's own pending
-// reconnect, nothing is answered, and R29-K9 is not judged.
+// (0.88.2 as revised, owner decision a): a reconnect hs.init refused only
+// because the vault's own reconnect with p is pending (from its hs.fin
+// until confirmed or abandoned) still has its identity links applied, in
+// the write that refuses it. The caller has made the replay, sender and
+// second-successor checks; here: the whole chain resolves from the stored
+// ik to from.ik with from.kem its last new_kem, its ctx would otherwise
+// be accepted (and is not a replaced line's), and no link is one Table B
+// would refuse (ik_rollback, rejected_ik: then none is followed). The
+// links are followed as an identity.rotate's would be: H5, "Pending
+// epochs at a link", "Epochs after an ik link" (this hs.init as the
+// position) and strict F1 with E the epoch the ctx names. Nothing
+// restarts beside the vault's own pending reconnect, nothing is answered,
+// and neither R29-K9 nor "Fork by ctx" is run.
 func (m *Manager) refusedReconnectLinks(p *Peer, body *handshake.Init, now time.Time) {
-	if len(body.Rotations) == 0 {
+	pe := p.Pending
+	if pe == nil || pe.Purpose != handshake.PurposeReconnect || len(body.Rotations) == 0 {
 		return
 	}
-	final, _, n, err := handshake.ResolveChainKnown(p.IK, parseRotations(p.Chain), body.Rotations)
-	if err != nil || !suite.EqualPublic(final, body.From.IK) || n >= len(body.Rotations) {
+	final, kem, n, err := handshake.ResolveChainKnown(p.IK, parseRotations(p.Chain), body.Rotations)
+	if err != nil || !suite.EqualPublic(final, body.From.IK) || kem == nil || body.From.KEM == nil || !kem.Equal(body.From.KEM) ||
+		n >= len(body.Rotations) {
 		return
 	}
-	var named []byte
-	for _, e := range p.Epochs {
-		if !e.Pending && body.Ctx == handshake.EpochCtx(epochIDOf(e.ID)) {
-			named = e.ID
+	links := body.Rotations[n:]
+	before := [][]byte{p.IK} // the iks these links leave behind
+	for _, r := range links {
+		rollback := p.ancestor(r.NewIK) || p.rejected(r.NewIK) || p.rejected(r.OldIK)
+		for _, b := range before {
+			rollback = rollback || suite.EqualPublic(b, r.NewIK)
+		}
+		if rollback {
+			// Table B would refuse it (ik_rollback, rejected_ik): none of
+			// the links is followed (all or nothing).
+			m.note(now, "refused_reconnect_links_none", p.ID)
+			return
+		}
+		before = append(before, r.NewIK)
+	}
+	// Its ctx would otherwise be accepted: judged as if the vault's own
+	// reconnect were not pending; a replaced line's epoch is not.
+	p.Pending = nil
+	named, _, _, refuse := m.classifyCtx086(p, body.Ctx, nil)
+	p.Pending = pe
+	if refuse {
+		return
+	}
+	if named == nil {
+		if kind, _ := classifyCtx(p, body.Ctx, now); kind == ctxNone || kind == ctxFork {
+			return
+		}
+	}
+	var e []byte
+	for _, x := range p.Epochs {
+		if !x.Pending && body.Ctx == handshake.EpochCtx(epochIDOf(x.ID)) {
+			e = x.ID
 		}
 	}
 	prev := m.noLinkRestart
 	m.noLinkRestart = true
-	m.followLinks(p, body.Rotations[n:], named, now)
+	m.followLinks(p, links, e, now)
 	m.noLinkRestart = prev
 	m.note(now, "refused_reconnect_links", p.ID)
 }

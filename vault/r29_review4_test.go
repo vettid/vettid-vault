@@ -665,3 +665,57 @@ func TestR29DemotedReconnectFinGoes(t *testing.T) {
 		}
 	}
 }
+
+// 0.88.2 (revised) "The links of a refused reconnect": all or nothing. A
+// refused reconnect whose links include one Table B would refuse (here
+// a→b then b→a, an ik rollback) has none of them followed.
+func TestR29RefusedReconnectLinksAllOrNothing(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	e0 := append([]byte(nil), f.cur(0)...)
+	f.do(0, func(m *Manager, p *Peer) { m.startReconnect(p, f.clk) })
+	f.deliver(0, 1, kHSInit)
+	f.deliver(1, 0, kHSResp) // Q's reconnect pending
+	f.lose(0, 1, kAny)
+	pe := f.p(0).Pending
+	if pe == nil {
+		t.Fatal("setup: not pending")
+	}
+	aIK, aKEM := f.m(1).keys.ik, f.m(1).keys.kem
+	f.rotate(1) // a→b
+	f.lose(1, 0, kAny)
+	bIK := f.m(1).keys.ik
+	r1 := parseRotations(f.m(1).st.Rotations)[0]
+	r2, err := handshake.NewRotation(bIK, aIK, aKEM.Public()) // b→a: back to an ik left behind
+	if err != nil {
+		t.Fatal(err)
+	}
+	m1 := f.m(1)
+	rc := relayclient.New(f.p(1).Relay.URL, m1.keys.relay)
+	mint := func() string {
+		tok, err := rc.MintToken(relayauth.EncodeKey(f.pk(0)), f.p(1).Relay.URL, relayclient.TokenOptions{TTL: 24 * time.Hour})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tok
+	}
+	ini, err := handshake.NewInitiator(handshake.InitiatorConfig{
+		Purpose: handshake.PurposeReconnect, Ctx: handshake.EpochCtx(epochIDOf(e0)),
+		Identity: aIK, StaticKEM: aKEM.Public(), Relay: m1.ownAddr(), Token: mint(), ReconnectToken: mint(),
+		Rotations:   []*handshake.Rotation{r1, r2},
+		ResponderIK: f.m(0).keys.ik.Public().(ed25519.PublicKey), ResponderEK: f.m(0).keys.kem.Public(), ResponderRelayKey: f.pk(0),
+		Policy: handshake.PolicyVaultToVault, Now: f.clk,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.process(0, Message{MsgID: "aon", Sender: relayauth.EncodeKey(f.pk(1)), Payload: ini.Envelope()})
+	if !f.audited(0, "reconnect_refused") {
+		f.dump()
+		t.Fatal("setup: not refused")
+	}
+	if len(f.p(0).Chain) != 0 || f.p(0).Pending != pe {
+		f.dump()
+		t.Fatal("a link of a refused reconnect was followed although another would be refused")
+	}
+}

@@ -571,8 +571,9 @@ func (p *Party) flush() {
 				continue // pending key (§3.4 step 1), or S1: an earlier deposit has no definite answer
 			}
 		}
-		if e.M.Kind != KUpdate && e.M.Kind != KTokIssued && e.M.Kind != KInit && e.M.Kind != KResp && r.Cur == 0 {
-			continue // Config.OldRules, demoted: nothing until a new epoch
+		if e.M.Kind != KUpdate && e.M.Kind != KTokIssued && e.M.Kind != KInit && e.M.Kind != KResp && r.Cur == 0 &&
+			(e.M.Kind != KFin || !p.newSpec()) {
+			continue // Config.OldRules, demoted: nothing until a new epoch (R29-K5: an hs.fin still goes out)
 		}
 		p.deposit(e, r)
 		if e.Indef {

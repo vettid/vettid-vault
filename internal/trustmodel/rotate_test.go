@@ -22,6 +22,9 @@ func (p *Party) rotate(path int) {
 	}
 	w.logf("%s: ROTATE (%s)", p.Name, pathName[path])
 	w.stat("rotate:" + pathName[path])
+	if !p.Copy && path != pathDevice {
+		w.rotTimes[p.ID] = append(w.rotTimes[p.ID], w.Now) // the rapid-rotation residual (M2)
+	}
 	if !w.relayRot {
 		if path == pathDevice {
 			return // release 29 rotates no relay key (the oracle config)

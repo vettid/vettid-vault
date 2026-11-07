@@ -193,10 +193,23 @@ func (w *World) checkI7() {
 	}
 }
 
+// rapidRotations: (0.88.2, the rapid-rotation residual) the vault rotated
+// its ik 3 or more times in quick succession: three consecutive
+// rotations, each within 2 hours of the one before.
+func (w *World) rapidRotations(p PID) bool {
+	ts := w.rotTimes[p]
+	for i := 2; i < len(ts); i++ {
+		if ts[i]-ts[i-1] <= 2*hour && ts[i-1]-ts[i-2] <= 2*hour {
+			return true
+		}
+	}
+	return false
+}
+
 // resHonestStaleQuota: the known honest cause of a stale pair (M2): rapid
 // rotations spend the reconnect token's 4 deposits and a reconnect hs.init
 // is refused quota_exceeded (§3.4.1 "The reconnect bound").
-const resHonestStaleQuota = "an honest pair stale by quota_exceeded: rapid rotations spent the reconnect token (§3.4.1 \"The reconnect bound\")"
+const resHonestStaleQuota = "rapid rotations: an honest pair stale by quota_exceeded after 3 or more rotations of one side in quick succession (§3.4.1 Residuals, 0.88.2)"
 
 // noteLocked: time d passed; real parties locked through it add to their
 // stretch (M2).
@@ -212,8 +225,8 @@ func (w *World) noteLocked(d int64) {
 // checkHonestStale: M2 (review of #207 at 90a0ff0), an honest pair must
 // not end stale. In a run with no old copy, no injected loss and no party
 // locked longer than T (14 days) at a stretch, a pair that ends stale is a
-// violation; by quota_exceeded it is counted (resHonestStaleQuota) only in
-// the rotation-burst runs (TRUSTMODEL_ROTBURST), a violation elsewhere.
+// violation; by quota_exceeded it is counted (resHonestStaleQuota) only when
+// one side rotated 3 or more times in quick succession (rapidRotations).
 func (w *World) checkHonestStale() {
 	switch {
 	case len(w.copies()) > 0:
@@ -245,11 +258,11 @@ func (w *World) checkHonestStale() {
 				continue
 			}
 			if slices.ContainsFunc(refs, func(s string) bool { return strings.Contains(s, "quota_exceeded") }) {
-				if w.rotBurst {
-					w.exempt("M2", resHonestStaleQuota) // counted only in the rotation-burst runs
+				if w.rapidRotations(a.ID) || w.rapidRotations(b.ID) {
+					w.exempt("M2", resHonestStaleQuota) // 0.88.2: 3 or more rotations in quick succession
 					continue
 				}
-				w.violate("M2", "%s: an honest pair ends stale by quota_exceeded outside a rotation burst (%s)", pairName(w, a.ID, b.ID), strings.Join(refs, "; "))
+				w.violate("M2", "%s: an honest pair ends stale by quota_exceeded without 3 rotations in quick succession (%s)", pairName(w, a.ID, b.ID), strings.Join(refs, "; "))
 				continue
 			}
 			w.violate("M2", "%s: an honest pair ends stale (%s)", pairName(w, a.ID, b.ID), strings.Join(refs, "; "))

@@ -148,6 +148,7 @@ type rpWorld struct {
 	fail    [2]int           // injected deposit failures left, by depositing side
 	fail429 [2]bool
 	refused map[string]int // relay refusals by code
+	expired int            // messages the relay dropped at T
 	trace   []string
 	verbose bool
 	// the relay keys and mailboxes, which never change (A5), kept here
@@ -251,6 +252,7 @@ func (w *rpWorld) expire() {
 			if w.f.clk.Sub(x.at) < 14*24*time.Hour {
 				kept = append(kept, x)
 			} else {
+				w.expired++
 				w.logf("relay: %s for %d expired", x.m.MsgID, s)
 			}
 		}
@@ -344,8 +346,7 @@ func (w *rpWorld) crash(s int) {
 		w.pull(s)
 		w.f.m(s).Crash()
 	}
-	w.locked[s] = false
-	w.open(s)
+	w.open(s) // a locked side's lock ends here (counted in maxLock)
 }
 
 func (w *rpWorld) do(s int, fn func(m *Manager, p *Peer)) {
@@ -484,7 +485,10 @@ func (w *rpWorld) verdict() string {
 		case w.maxLock > 14*24*time.Hour:
 			return "residual:lock>T"
 		case len(by) > 0:
-			return "stale:" + tag + " after " + strings.Join(by, "+")
+			tag += " after " + strings.Join(by, "+")
+		}
+		if w.expired > 0 {
+			tag += " (relay TTL drops)"
 		}
 		return "stale:" + tag
 	}

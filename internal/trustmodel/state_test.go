@@ -159,6 +159,7 @@ type PeerRec struct {
 	LastConfirm   int64      // R29-D2: a device re-sends hs.confirm at most once a minute
 	SawHSC        bool       // R29-G2: the peer's features carried hs_confirm (sticky)
 	Notice        bool       // R29-D4: device.update_needed shown for this device
+	RevokedJTI    []int      // 0.88.2 §8.6: standing tokens answered token_revoked, never used again
 	IdRotLinks    []IKLink   // R29-K9: links carried by an identity.rotate from P that K9 judged at (followed or ignored)
 	K9Spared      []k9Spared // R29-K9: epochs not later than the epoch such an identity.rotate traveled under, per link
 
@@ -306,6 +307,7 @@ func (s *State) clone() State {
 		q.Answered = slices.Clone(p.Answered)
 		q.AbanIDs = slices.Clone(p.AbanIDs)
 		q.IdRotLinks = slices.Clone(p.IdRotLinks)
+		q.RevokedJTI = slices.Clone(p.RevokedJTI)
 		q.K9Spared = slices.Clone(p.K9Spared)
 		q.Seen = slices.Clone(p.Seen)
 		q.RSeen = slices.Clone(p.RSeen)

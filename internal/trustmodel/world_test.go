@@ -63,6 +63,7 @@ type World struct {
 	noF10             bool // F10: hs.confirm queued again for every such batch, even with one still in the outbox
 	noF13B            bool // F13: B judged on time alone, not only after the first short collect after an unlock
 	noFlagJudged      bool // before 0.88.2: a flag set on a demoted epoch is not judged until a later link (TestR29DemotedFlagSetLateSuspends's "off")
+	noRevokedPath     bool // before 0.88.2: token_revoked between vaults ends the entry (no-token path not taken)
 	noKeepAnswers     bool // before 0.88.2: a new answered reconnect ends Q's earlier answers (TestR29KeepReconnectAnswers's "off")
 	noForkSkipDemoted bool // before 0.88.2: Fork by ctx counts a demoted flag-clear epoch (TestR29ForkByCtxSkipsDemoted's "off")
 	noForkSkipAban    bool // 0.88.2: Fork by ctx does not skip an epoch Q began and abandoned while pending (the scenario's "off")
@@ -691,6 +692,7 @@ func (p *Party) deposit(e *Entry, r *PeerRec) {
 		return
 	}
 	w.logf("%s -> %s: %s refused %s (with %d, box %d)", p.Name, w.party(e.To).Name, kindName[m.Kind], err, with, box)
+	keep := false // 0.88.2: token_revoked between vaults keeps the entry
 	switch err {
 	case rateLimited:
 		e.Indef = true
@@ -728,6 +730,8 @@ func (p *Party) deposit(e *Entry, r *PeerRec) {
 		// S9: a token Q issued to an earlier key of mine that is still my key for Q
 		if with != p.st.Relay && with == r.KeyFor && r.RevokedAt == 0 {
 			r.RevokedAt = w.Now
+		} else if p.newSpec() && !p.Device && !r.Device && !tok.Reconnect && !w.noRevokedPath {
+			keep = p.tokenRevoked(r, e, tok)
 		}
 	case mailboxUnknown:
 		if e.M.Kind == KResp && e.Box != 0 {
@@ -736,13 +740,50 @@ func (p *Party) deposit(e *Entry, r *PeerRec) {
 	default:
 		e.Ended = true
 	}
-	if e.Tok.JTI != 0 && err.definite() {
+	if e.Tok.JTI != 0 && err.definite() && !keep {
 		e.Ended = true // its one token is refused
 	}
 	if e.M.Kind == KUpdate && err.definite() && e.Resend {
 		r.ResendEnd = true // (b): a definite answer ends the resends
 		e.Ended = true
 	}
+}
+
+// tokenRevoked: (0.88.2 at 9453d59, owner decision a, §8.6) between two
+// vaults, token_revoked on a standing token ends that token only: it is
+// dropped and never used again, and the entry waits in the outbox for a
+// valid one. A reconnect's own hs.init so answered is a failed try of the
+// reconnect bound. With no other valid standing token, the vault is in the
+// "no valid standing token" case: it reconnects (a pending rekey is
+// abandoned when the reconnect starts). It reports whether the entry stays.
+func (p *Party) tokenRevoked(r *PeerRec, e *Entry, tok Token) bool {
+	w := p.w
+	w.hit("T:token_revoked-ends-the-token")
+	r.RevokedJTI = append(r.RevokedJTI, tok.JTI)
+	if e.M.Kind == KInit && e.M.Reconnect {
+		if o := r.Own; o != nil && o.Reconnect && o.ID == e.M.HS {
+			p.abandonOwn(r)
+			if o.Ctx != r.RCNamed {
+				r.RCNamed, r.RCFails = o.Ctx, 0
+			}
+			r.RCFails++
+			w.hit("K6:try-failed")
+			if r.RCFails >= 3 {
+				w.hit("K6:third-failure-stale")
+				p.markStale(r, "K6: third failed try")
+				p.h5(r, -1)
+				return false
+			}
+			p.wantReconnect(r)
+		}
+		return false
+	}
+	e.Tok = Token{} // waits for a valid standing token
+	if r.standing(r.KeyFor, r.Relay, w.Now).JTI == 0 {
+		w.hit("T:token_revoked-no-token-reconnect")
+		p.wantReconnect(r)
+	}
+	return true
 }
 
 func (r *PeerRec) dropTok(jti int) {

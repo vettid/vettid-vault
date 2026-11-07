@@ -434,6 +434,9 @@ func (q *Party) ruleT(r *PeerRec, toks []Token, iss Key) (kept []Token, unknown 
 
 func (q *Party) keepTokens(r *PeerRec, toks []Token) {
 	for _, t := range toks {
+		if slices.Contains(r.RevokedJTI, t.JTI) {
+			continue // 0.88.2 §8.6: a token answered token_revoked is never used again
+		}
 		if !slices.ContainsFunc(r.Toks, func(x Token) bool { return x.JTI == t.JTI }) {
 			r.Toks = append(r.Toks, t)
 		}

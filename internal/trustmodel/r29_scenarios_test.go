@@ -1,6 +1,9 @@
 package trustmodel
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 // Deterministic scenarios for the release-29 rules (VAULT-MESSAGING 0.87.1
 // §6.3.2), one per gap the rule list names where the model can drive it.
@@ -454,4 +457,42 @@ func TestR29FVaultRotationS5(t *testing.T) {
 	if s.w.stats["residual exemption (I1): "+resDeviceF] == 0 {
 		t.Errorf("the pair's I1 failure was not counted as F")
 	}
+}
+
+// (0.88.2 at 9453d59, owner decision a, §8.6) Between two vaults,
+// token_revoked on a standing token ends that token only: P drops it and
+// never uses it again, the entry waits in the outbox, and with no other
+// valid standing token P reconnects; the pair converges and the message
+// is delivered. Off (World.noRevokedPath): the entry ends.
+func TestR29TokenRevokedEndsTheToken(t *testing.T) {
+	bothWays(t, func(t *testing.T, off bool) {
+		s := newScen(t, 2)
+		s.w.relayRot = false
+		s.w.noRevokedPath = off
+		P, Q := s.p(0), s.p(1)
+		rp := P.st.peer(Q.ID)
+		tok := rp.standing(rp.KeyFor, rp.Relay, s.w.Now)
+		if tok.JTI == 0 {
+			t.Fatalf("setup: no standing token")
+		}
+		s.do(Q, func() { Q.revokeAt(Q.st.Relay, []int{tok.JTI}); Q.write(); Q.flush() }) // Q revokes it in flight
+		probe := s.w.id()
+		s.do(P, func() { P.enqueue(Q.ID, Msg{Kind: KSession, Probe: probe}, nil); P.write(); P.flush() })
+		rp = P.st.peer(Q.ID)
+		if slices.ContainsFunc(rp.Toks, func(x Token) bool { return x.JTI == tok.JTI }) {
+			t.Fatalf("the revoked token is still held")
+		}
+		if !off && !slices.Contains(rp.RevokedJTI, tok.JTI) {
+			t.Fatalf("the revoked token is not recorded as never to be used again")
+		}
+		s.do(P, P.startWanted) // as after any flush of P's
+		s.run(6, P, Q)
+		t.Logf("off %v: probe delivered %v, reconnect hits %d", off, s.w.probes[probe], s.w.stats["R29 T:token_revoked-no-token-reconnect"])
+		if !off && (!s.w.probes[probe] || s.w.stats["R29 T:token_revoked-no-token-reconnect"] == 0) {
+			t.Fatalf("the message did not wait for a new token and the no-token reconnect\n  %s", s.trace())
+		}
+		if off && s.w.probes[probe] {
+			t.Fatalf("off: the message was delivered; the scenario does not test the rule\n  %s", s.trace())
+		}
+	})
 }

@@ -60,6 +60,11 @@ type stubRelay struct {
 	// blobs is an in-memory blob store (RELAY-PROTOCOL §6.8) two fixtures
 	// may share; nil: the relay has no blobs.
 	blobs *stubBlobs
+	// now, if set, is the clock tokens are minted by (a simulated one);
+	// check, if set, judges each deposit as a relay would (token exp,
+	// revocation, quota; injected failures) before it is recorded.
+	now   func() time.Time
+	check func(mailbox, token string) error
 }
 
 // stubBlobs is a test relay's blob storage, keyed by blob id.
@@ -94,6 +99,11 @@ func (r *stubRelay) Deposit(_ context.Context, _, mailbox, token string, payload
 	}
 	if err := r.failMailbox[mailbox]; err != nil {
 		return "", err
+	}
+	if r.check != nil {
+		if err := r.check(mailbox, token); err != nil {
+			return "", err
+		}
 	}
 	r.deposits = append(r.deposits, stubDeposit{mailbox, token, append([]byte(nil), payload...)})
 	return fmt.Sprintf("m%d", len(r.deposits)), nil
@@ -136,6 +146,9 @@ func (r *stubRelay) DeleteMailbox(context.Context) error {
 }
 func (r *stubRelay) client() *relayclient.Client {
 	c := relayclient.New(r.base, r.key)
+	if r.now != nil {
+		c.Now = r.now
+	}
 	return c
 }
 func (r *stubRelay) MintToken(sub ed25519.PublicKey, ttl time.Duration, jti string, q *relayauth.Quota, ownerDevice bool) (string, error) {

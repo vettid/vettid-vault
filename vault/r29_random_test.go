@@ -1,0 +1,638 @@
+package vault
+
+import (
+	"bytes"
+	"context"
+	"crypto/ed25519"
+	"encoding/json"
+	"fmt"
+	"math/rand/v2"
+	"os"
+	"sort"
+	"strconv"
+	"strings"
+	"testing"
+	"testing/cryptotest"
+	"time"
+
+	"github.com/vettid/vettid-relay/relayauth"
+	"github.com/vettid/vettid-relay/relayclient"
+
+	"github.com/vettid/vettid-vault/vms/envelope"
+	"github.com/vettid/vettid-vault/vms/handshake"
+)
+
+// The release 29 deadlock search on the real code (owner decision a, GC
+// 01M6SRQ1B7NM0Q00G0CEGHFES8): two real vaults in process, with real
+// crypto and real state writes through the store; only the relay and the
+// clock are simulated. A seeded run draws random actions, mirroring the
+// trust model's mix (internal/trustmodel genRun and randomAction):
+// rotations by each path, sends, collects (partial and full, with
+// reordering, leases and redelivery), housekeeping ticks, time jumps,
+// locks and unlocks, crashes (a restart from the store, losing what was
+// not written) and injected deposit failures (429, 503). The simulated
+// relay enforces a token's exp, its revocation and its quota (§6.6: a
+// reconnect token's 4 deposits), and drops what it held 14 days (T).
+//
+// At quiescence (both unlocked, everything delivered, time past every
+// bound) the pair must have converged: one current epoch, each side's
+// record of the other at the other's current ik, no pending epoch or open
+// handshake, nothing held, a valid standing token each way. An honest
+// pair must not suspend, nor end stale, except the stated residuals,
+// counted apart: rapid rotations (3 or more key changes within 2 hours on
+// a side, ending by quota_exceeded) and a lock longer than T.
+//
+// Run: R29RP_RUNS=n go test -run TestR29RandomPair ./vault/
+//   R29RP_SEED   the master seed (default 1)
+//   R29RP_STEPS  at most this many random actions per run (default 40)
+//   R29RP_BURST  set: each side first rotates 3 to 6 times in quick
+//                succession
+//   R29RP_TRACE  a run seed: replay that run alone, with its trace
+//   R29RP_SHOW   how many seeds to list per failure class (default 5)
+//
+// Crypto randomness is seeded per run (testing/cryptotest), so keys,
+// nonces and transcript hashes replay; the vault's map iteration order and
+// the fixture's start time do not, so a replay can differ: R29RP_TRACE
+// runs a seed alone with its trace, and R29RP_REPEAT=n replays it n more
+// times and tallies the verdicts.
+
+type rpOp int
+
+const (
+	rpRotate rpOp = iota
+	rpSend
+	rpCollect
+	rpTick
+	rpTime
+	rpLock
+	rpUnlock
+	rpCrash
+	rpFault
+	rpNumOps
+)
+
+var rpOpName = [...]string{"rotate", "send", "collect", "tick", "time", "lock", "unlock", "crash", "fault"}
+var rpWeight = [...]int{6, 8, 14, 6, 8, 3, 3, 2, 3}
+var rpJumps = [...]time.Duration{61 * time.Second, 10 * time.Minute, time.Hour + time.Second, 24*time.Hour + time.Second,
+	7*24*time.Hour + time.Second, 14*24*time.Hour + time.Second, 30*24*time.Hour + time.Second}
+
+type rpAction struct {
+	Op      rpOp
+	A, B, N int
+}
+
+func (a rpAction) String() string {
+	s := a.A % 2
+	switch a.Op {
+	case rpRotate:
+		return fmt.Sprintf("rotate %d (%s)", s, [...]string{"credential.rotate", "transfer", "recovery"}[a.B%3])
+	case rpCollect:
+		return fmt.Sprintf("collect %d (max %d, %s)", s, rpCollectMax(a.B), map[bool]string{true: "redeliver", false: "ack"}[a.N%10 == 0])
+	case rpTime:
+		return fmt.Sprintf("time +%v", rpJumps[a.N%len(rpJumps)])
+	case rpFault:
+		return fmt.Sprintf("fault %d (%d × %s)", s, 1+a.N%3, map[bool]string{true: "429", false: "503"}[a.B%2 == 0])
+	}
+	return fmt.Sprintf("%s %d", rpOpName[a.Op], s)
+}
+
+func rpCollectMax(b int) int { return []int{1, 2, 5, 32}[b%4] }
+
+func rpGen(rs uint64, steps int, burst bool) []rpAction {
+	rng := rand.New(rand.NewPCG(rs, 3))
+	total := 0
+	for _, w := range rpWeight {
+		total += w
+	}
+	n := 1 + rng.IntN(steps)
+	acts := make([]rpAction, 0, n)
+	for range n {
+		x := rng.IntN(total)
+		op := rpOp(0)
+		for x >= rpWeight[op] {
+			x -= rpWeight[op]
+			op++
+		}
+		acts = append(acts, rpAction{Op: op, A: rng.IntN(64), B: rng.IntN(64), N: rng.IntN(64)})
+	}
+	if burst {
+		var b []rpAction
+		for s := 0; s < 2; s++ {
+			for k := 3 + rng.IntN(4); k > 0; k-- {
+				b = append(b, rpAction{Op: rpRotate, A: s, B: rng.IntN(64)}, rpAction{Op: rpCollect, A: rng.IntN(64), B: 3},
+					rpAction{Op: rpTime, N: rng.IntN(2)}) // 61 s or 10 min
+			}
+		}
+		rng.Shuffle(len(b), func(i, j int) { b[i], b[j] = b[j], b[i] })
+		acts = append(b, acts...)
+	}
+	return acts
+}
+
+type rpMsg struct {
+	m  Message
+	at time.Time
+}
+
+// rpWorld is one run.
+type rpWorld struct {
+	t       *testing.T
+	f       *r29Fx
+	locked  [2]bool
+	lockAt  [2]time.Time
+	maxLock time.Duration
+	q       [2][]rpMsg // q[s]: what waits in side s's mailbox
+	n       int
+	quota   map[string]int64 // deposits per jti under a quota
+	rot     [2][]time.Time   // when each side rotated
+	fail    [2]int           // injected deposit failures left, by depositing side
+	fail429 [2]bool
+	refused map[string]int // relay refusals by code
+	trace   []string
+	verbose bool
+	// the relay keys and mailboxes, which never change (A5), kept here
+	// so that a locked side's are known
+	pub  [2]ed25519.PublicKey
+	mbox [2]string
+}
+
+func (w *rpWorld) logf(format string, args ...any) {
+	if w.verbose {
+		w.trace = append(w.trace, fmt.Sprintf("%s ", w.f.clk.Format("01-02 15:04:05"))+fmt.Sprintf(format, args...))
+	}
+}
+
+// hook sets side s's relay stub to the simulated clock and relay checks.
+func (w *rpWorld) hook(s int) {
+	r := w.f.d[s].relay
+	r.mu.Lock()
+	r.now = func() time.Time { return w.f.clk }
+	r.check = func(mailbox, token string) error { return w.check(s, mailbox, token) }
+	r.mu.Unlock()
+}
+
+// check is the relay's judgement of a deposit by side s (RELAY-PROTOCOL
+// §5.3): injected failures, then the token (exp, revocation, quota).
+func (w *rpWorld) check(s int, mailbox, token string) error {
+	if w.fail[s] > 0 {
+		w.fail[s]--
+		if w.fail429[s] {
+			return &relayclient.Error{Status: 429, Code: "rate_limited"}
+		}
+		return &relayclient.Error{Status: 503, Code: "unavailable"}
+	}
+	o := 1 - s
+	if mailbox != w.mbox[o] {
+		return nil
+	}
+	c, err := relayauth.ParseToken(token, w.pub[o])
+	if err != nil {
+		return nil // not a token this relay judges (an open token, a placeholder)
+	}
+	refuse := func(st int, code string) error {
+		w.refused[code]++
+		w.logf("relay: %d's deposit refused %s", s, code)
+		return &relayclient.Error{Status: st, Code: code}
+	}
+	if !w.f.clk.Before(c.Exp) {
+		return refuse(401, CodeTokenExpired)
+	}
+	or := w.f.d[o].relay
+	for _, x := range or.revoked {
+		if x == "jti:"+c.Jti || x == "sub:"+c.Sub {
+			return refuse(403, CodeTokenRevoked)
+		}
+	}
+	if q := c.Quota; q != nil && q.Msgs != nil {
+		if w.quota[c.Jti] >= *q.Msgs {
+			return refuse(429, CodeQuotaExceeded)
+		}
+		w.quota[c.Jti]++
+	}
+	return nil
+}
+
+// pull moves side s's deposits for the other side into its mailbox.
+func (w *rpWorld) pull(s int) {
+	o := 1 - s
+	if !w.locked[s] {
+		m := w.f.m(s)
+		m.mu.Lock()
+		_ = m.flushThenDrain(context.Background())
+		m.mu.Unlock()
+	}
+	r := w.f.d[s].relay
+	r.mu.Lock()
+	deps := r.deposits
+	r.deposits = nil
+	r.mu.Unlock()
+	opk := w.pub[o]
+	for _, d := range deps {
+		if d.mailbox != w.mbox[o] {
+			continue
+		}
+		jti := ""
+		if c, err := relayauth.ParseToken(d.token, opk); err == nil {
+			jti = c.Jti
+		}
+		w.n++
+		w.q[o] = append(w.q[o], rpMsg{m: Message{MsgID: fmt.Sprintf("m%08d", w.n), Sender: relayauth.EncodeKey(w.pub[s]), JTI: jti,
+			Payload: d.payload, DepositedAt: w.f.clk.UTC().Format(time.RFC3339Nano)}, at: w.f.clk})
+	}
+}
+
+func (w *rpWorld) pullBoth() { w.pull(0); w.pull(1) }
+
+// expire drops what the relay held 14 days (T).
+func (w *rpWorld) expire() {
+	for s := 0; s < 2; s++ {
+		kept := w.q[s][:0]
+		for _, x := range w.q[s] {
+			if w.f.clk.Sub(x.at) < 14*24*time.Hour {
+				kept = append(kept, x)
+			} else {
+				w.logf("relay: %s for %d expired", x.m.MsgID, s)
+			}
+		}
+		w.q[s] = kept
+	}
+}
+
+// collect hands side s up to max waiting messages in one batch;
+// redeliver leaves them leased (delivered again later); reorder swaps
+// two of them.
+func (w *rpWorld) collect(s, max int, redeliver, reorder bool, rng *rand.Rand) {
+	if w.locked[s] {
+		return
+	}
+	w.expire()
+	k := min(max, len(w.q[s]))
+	batch := make([]Message, 0, k)
+	for _, x := range w.q[s][:k] {
+		batch = append(batch, x.m)
+	}
+	if reorder && k > 1 {
+		i, j := rng.IntN(k), rng.IntN(k)
+		batch[i], batch[j] = batch[j], batch[i]
+	}
+	if !redeliver {
+		w.q[s] = w.q[s][k:]
+	}
+	if err := w.f.m(s).ProcessBatch(context.Background(), &fakeCollector{}, batch); err != nil {
+		w.logf("side %d: batch error %v: restart", s, err)
+		w.crash(s)
+	}
+	w.pullBoth()
+}
+
+func (w *rpWorld) tick(s int) {
+	if w.locked[s] {
+		return
+	}
+	if err := w.f.m(s).ProcessBatch(context.Background(), &fakeCollector{}, nil); err != nil {
+		w.logf("side %d: tick error %v: restart", s, err)
+		w.crash(s)
+	}
+	w.pullBoth()
+}
+
+// open unlocks side s from the store, as r29Fx.restart does after a lock.
+func (w *rpWorld) open(s int) {
+	f := w.f
+	d := f.d[s]
+	old := d.relay
+	m, _, err := d.unlock(testPIN, 0, 0)
+	if err != nil {
+		w.t.Fatalf("side %d: unlock: %v", s, err)
+	}
+	d.m = m
+	old.mu.Lock()
+	d.relay.mu.Lock()
+	d.relay.deposits, d.relay.revoked, d.relay.claims, d.relay.blobs = old.deposits, old.revoked, old.claims, old.blobs
+	d.relay.mu.Unlock()
+	old.mu.Unlock()
+	m.now = func() time.Time { return f.clk }
+	m.register(TypeSpec{Type: "test.note", From: []string{KindConnection}, Connections: PeersBoth},
+		HandlerFunc(func(_ context.Context, _ *Session, in *envelope.Inner) (json.RawMessage, error) {
+			f.got[s] = append(f.got[s], string(in.Body))
+			return nil, nil
+		}))
+	m.features = append(m.features, f.sink[s])
+	w.hook(s)
+	if w.locked[s] {
+		w.maxLock = max(w.maxLock, f.clk.Sub(w.lockAt[s]))
+	}
+	w.locked[s] = false
+	w.pullBoth()
+}
+
+func (w *rpWorld) lock(s int) {
+	if w.locked[s] {
+		return
+	}
+	if err := w.f.m(s).Lock(context.Background()); err != nil {
+		w.logf("side %d: lock: %v", s, err)
+	}
+	w.pull(s)
+	w.locked[s], w.lockAt[s] = true, w.f.clk
+}
+
+// crash ends side s without its last unwritten changes and opens it again
+// from the store.
+func (w *rpWorld) crash(s int) {
+	if !w.locked[s] {
+		w.pull(s)
+		w.f.m(s).Crash()
+	}
+	w.locked[s] = false
+	w.open(s)
+}
+
+func (w *rpWorld) do(s int, fn func(m *Manager, p *Peer)) {
+	if w.locked[s] {
+		return
+	}
+	m := w.f.m(s)
+	m.mu.Lock()
+	fn(m, w.f.p(s))
+	_ = m.flushThenDrain(context.Background())
+	m.mu.Unlock()
+	w.pullBoth()
+}
+
+func (w *rpWorld) exec(a rpAction, rng *rand.Rand) {
+	s := a.A % 2
+	w.logf("== %s", a)
+	switch a.Op {
+	case rpRotate:
+		if w.locked[s] {
+			return
+		}
+		w.rot[s] = append(w.rot[s], w.f.clk)
+		w.do(s, func(m *Manager, _ *Peer) {
+			now := w.f.clk
+			switch a.B % 3 {
+			case 0: // credential.rotate
+				if err := m.session(now).RotateIdentity(); err != nil {
+					w.logf("rotate: %v", err)
+				}
+			case 1: // a transfer's rotation
+				m.st.RotationOwed = &RotationOwed{Transfer: "t" + strconv.Itoa(w.n), At: now.Add(-8 * 24 * time.Hour), DEKVersion: m.dekVersion()}
+				m.retryOwedRotation(now)
+			case 2: // a recovery's
+				m.st.RotationOwed = &RotationOwed{Recovery: "r" + strconv.Itoa(w.n)}
+				m.retryOwedRotation(now)
+			}
+		})
+	case rpSend:
+		w.do(s, func(m *Manager, p *Peer) {
+			m.sendTo(p, "test.note", json.RawMessage(`{"n":"x"}`), w.f.clk)
+		})
+	case rpCollect:
+		w.collect(s, rpCollectMax(a.B), a.N%10 == 0, a.N%7 == 0, rng)
+	case rpTick:
+		w.tick(s)
+	case rpTime:
+		w.f.advance(rpJumps[a.N%len(rpJumps)])
+	case rpLock:
+		w.lock(s)
+	case rpUnlock:
+		if w.locked[s] {
+			w.open(s)
+		}
+	case rpCrash:
+		w.crash(s)
+	case rpFault:
+		w.fail[s], w.fail429[s] = 1+a.N%3, a.B%2 == 0
+	}
+}
+
+// quiesce: both unlocked, no injected failure, everything delivered, and
+// time past every bound (B, the handshake lifetimes, token refreshes).
+func (w *rpWorld) quiesce() {
+	w.logf("== quiesce")
+	for s := 0; s < 2; s++ {
+		w.fail[s] = 0
+		if w.locked[s] {
+			w.open(s)
+		}
+	}
+	steps := []time.Duration{time.Minute, time.Minute, time.Hour, time.Hour}
+	for range 70 {
+		steps = append(steps, 24*time.Hour)
+	}
+	for _, d := range steps {
+		for i := 0; i < 20 && (len(w.q[0]) > 0 || len(w.q[1]) > 0); i++ {
+			w.collect(0, 32, false, false, nil)
+			w.collect(1, 32, false, false, nil)
+		}
+		w.tick(0)
+		w.tick(1)
+		w.f.advance(d)
+	}
+	for i := 0; i < 20 && (len(w.q[0]) > 0 || len(w.q[1]) > 0); i++ {
+		w.collect(0, 32, false, false, nil)
+		w.collect(1, 32, false, false, nil)
+	}
+}
+
+// rapid: 3 or more key changes within 2 hours on a side.
+func (w *rpWorld) rapid() bool {
+	for s := 0; s < 2; s++ {
+		ts := w.rot[s]
+		for i := 0; i+2 < len(ts); i++ {
+			if ts[i+2].Sub(ts[i]) <= 2*time.Hour {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// verdict classifies the end state ("" for converged).
+func (w *rpWorld) verdict() string {
+	f := w.f
+	var p [2]*Peer
+	for s := 0; s < 2; s++ {
+		p[s] = f.p(s)
+		if p[s] == nil {
+			return fmt.Sprintf("record-gone:%d", s)
+		}
+	}
+	for s := 0; s < 2; s++ {
+		if p[s].suspended() {
+			return fmt.Sprintf("suspend:%d", s)
+		}
+	}
+	var stale []string
+	for s := 0; s < 2; s++ {
+		if p[s].State == PeerStale {
+			stale = append(stale, strconv.Itoa(s))
+		}
+	}
+	if len(stale) > 0 {
+		by := []string{}
+		for _, c := range []string{CodeQuotaExceeded, CodeTokenRevoked, CodeTokenExpired} {
+			if w.refused[c] > 0 {
+				by = append(by, c)
+			}
+		}
+		tag := strings.Join(stale, ",")
+		switch {
+		case w.refused[CodeQuotaExceeded] > 0 && w.rapid():
+			return "residual:rapid-rotation"
+		case w.maxLock > 14*24*time.Hour:
+			return "residual:lock>T"
+		case len(by) > 0:
+			return "stale:" + tag + " after " + strings.Join(by, "+")
+		}
+		return "stale:" + tag
+	}
+	var why []string
+	if !bytes.Equal(f.cur(0), f.cur(1)) {
+		why = append(why, "epoch")
+	}
+	for s := 0; s < 2; s++ {
+		o := 1 - s
+		if !bytes.Equal(p[s].IK, f.m(o).keys.ik.Public().(ed25519.PublicKey)) {
+			why = append(why, fmt.Sprintf("ik@%d", s))
+		}
+		if p[s].Pending != nil {
+			why = append(why, fmt.Sprintf("pending@%d", s))
+		}
+		for _, og := range f.m(s).st.Outgoing {
+			if og.PeerID == p[s].ID {
+				why = append(why, fmt.Sprintf("outgoing-%s@%d", og.Purpose, s))
+			}
+		}
+		for _, aw := range f.m(s).st.Awaiting {
+			if aw.PeerID == p[s].ID {
+				why = append(why, fmt.Sprintf("answer-%s@%d", aw.Purpose, s))
+			}
+		}
+		for _, e := range f.m(s).st.Outbox {
+			if !e.Done && e.Held != nil && e.PeerID == p[s].ID {
+				why = append(why, fmt.Sprintf("held@%d", s))
+				break
+			}
+		}
+		if !f.clk.Before(p[s].Standing.Exp) {
+			why = append(why, fmt.Sprintf("token@%d", s))
+		}
+		if f.m(s).currentDemoted(p[s]) {
+			why = append(why, fmt.Sprintf("demoted@%d", s))
+		}
+	}
+	if len(why) > 0 {
+		if w.maxLock > 14*24*time.Hour {
+			return "residual:lock>T (not converged)"
+		}
+		return "diverged:" + strings.Join(why, ",")
+	}
+	return ""
+}
+
+func (w *rpWorld) dumpAudit() {
+	for s := 0; s < 2; s++ {
+		var ev []string
+		for _, a := range w.f.m(s).st.Audit {
+			ev = append(ev, a.Event)
+		}
+		w.trace = append(w.trace, fmt.Sprintf("audit %d: %s", s, strings.Join(ev, " ")))
+	}
+}
+
+// rpRun runs one seed; it returns the verdict and, if verbose, the trace.
+func rpRun(t *testing.T, rs uint64, steps int, burst, verbose bool) (string, []string) {
+	cryptotest.SetGlobalRandom(t, rs)
+	f := newR29Fx(t)
+	w := &rpWorld{t: t, f: f, quota: map[string]int64{}, refused: map[string]int{}, verbose: verbose}
+	for s := 0; s < 2; s++ {
+		w.pub[s], w.mbox[s] = f.pk(s), f.m(s).st.Relay.Mailbox
+	}
+	w.hook(0)
+	w.hook(1)
+	rng := rand.New(rand.NewPCG(rs, 7))
+	for _, a := range rpGen(rs, steps, burst) {
+		w.exec(a, rng)
+	}
+	w.quiesce()
+	v := w.verdict()
+	if verbose {
+		w.dumpAudit()
+	}
+	return v, w.trace
+}
+
+func rpEnv(k string, def int) int {
+	if v, err := strconv.Atoi(os.Getenv(k)); err == nil {
+		return v
+	}
+	return def
+}
+
+func TestR29RandomPair(t *testing.T) {
+	steps, burst := rpEnv("R29RP_STEPS", 40), os.Getenv("R29RP_BURST") != ""
+	if s := os.Getenv("R29RP_TRACE"); s != "" {
+		rs, err := strconv.ParseUint(s, 10, 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Run("trace", func(t *testing.T) {
+			for _, a := range rpGen(rs, steps, burst) {
+				t.Logf("action %s", a)
+			}
+			v, tr := rpRun(t, rs, steps, burst, true)
+			t.Log("trace:\n" + strings.Join(tr, "\n"))
+			t.Logf("verdict: %q", v)
+		})
+		// R29RP_REPEAT: replay the seed this many more times and tally the
+		// verdicts (map iteration order is not seeded, so a replay can
+		// differ).
+		tally := map[string]int{}
+		for i := 0; i < rpEnv("R29RP_REPEAT", 0); i++ {
+			t.Run(fmt.Sprintf("repeat%d", i), func(t *testing.T) {
+				v, _ := rpRun(t, rs, steps, burst, false)
+				tally[v]++
+			})
+		}
+		if len(tally) > 0 {
+			t.Logf("replays: %v", tally)
+		}
+		return
+	}
+	runs := rpEnv("R29RP_RUNS", 0)
+	if runs == 0 {
+		t.Skip("R29RP_RUNS not set")
+	}
+	master := rand.New(rand.NewPCG(uint64(rpEnv("R29RP_SEED", 1)), 99))
+	classes := map[string][]uint64{}
+	start := time.Now()
+	for i := 0; i < runs; i++ {
+		rs := master.Uint64()
+		var v string
+		t.Run(fmt.Sprintf("run%d", i), func(t *testing.T) { v, _ = rpRun(t, rs, steps, burst, false) })
+		if v == "" {
+			v = "converged"
+		}
+		classes[v] = append(classes[v], rs)
+	}
+	el := time.Since(start)
+	var ks []string
+	for k := range classes {
+		ks = append(ks, k)
+	}
+	sort.Strings(ks)
+	show := rpEnv("R29RP_SHOW", 5)
+	for _, k := range ks {
+		seeds := classes[k]
+		var ss []string
+		for _, s := range seeds[:min(show, len(seeds))] {
+			ss = append(ss, strconv.FormatUint(s, 10))
+		}
+		t.Logf("%-50s %5d  e.g. %s", k, len(seeds), strings.Join(ss, " "))
+	}
+	t.Logf("%d runs (burst %v, steps %d) in %v: %v per 10,000", runs, burst, steps, el.Round(time.Second),
+		(el * time.Duration(10000) / time.Duration(runs)).Round(time.Second))
+	_ = handshake.PurposeRekey
+}

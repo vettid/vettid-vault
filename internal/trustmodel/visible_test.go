@@ -193,11 +193,13 @@ func (w *World) checkI7() {
 	}
 }
 
-// rapidRotations: (0.88.2, the rapid-rotation residual) the vault rotated
-// its ik 3 or more times in quick succession: three consecutive
-// rotations, each within 2 hours of the one before.
-func (w *World) rapidRotations(p PID) bool {
-	ts := w.rotTimes[p]
+// rapidRotations: (0.88.2, the rapid-rotation residual; owner decision a,
+// GC 01M6SR938X9RP3XC3TJNPSAJD1) 3 or more key changes, on either side of
+// the pair or both, in quick succession: three consecutive rotations (of
+// a, b or both, in time order), each within 2 hours of the one before.
+func (w *World) rapidRotations(a, b PID) bool {
+	ts := append(slices.Clone(w.rotTimes[a]), w.rotTimes[b]...)
+	slices.Sort(ts)
 	for i := 2; i < len(ts); i++ {
 		if ts[i]-ts[i-1] <= 2*hour && ts[i-1]-ts[i-2] <= 2*hour {
 			return true
@@ -209,7 +211,7 @@ func (w *World) rapidRotations(p PID) bool {
 // resHonestStaleQuota: the known honest cause of a stale pair (M2): rapid
 // rotations spend the reconnect token's 4 deposits and a reconnect hs.init
 // is refused quota_exceeded (§3.4.1 "The reconnect bound").
-const resHonestStaleQuota = "rapid rotations: an honest pair stale by quota_exceeded after 3 or more rotations of one side in quick succession (§3.4.1 Residuals, 0.88.2)"
+const resHonestStaleQuota = "rapid rotations: an honest pair stale by quota_exceeded after 3 or more key changes, on either side or both, in quick succession (§3.4.1 Residuals, 0.88.2)"
 
 // noteLocked: time d passed; real parties locked through it add to their
 // stretch (M2).
@@ -258,7 +260,7 @@ func (w *World) checkHonestStale() {
 				continue
 			}
 			if slices.ContainsFunc(refs, func(s string) bool { return strings.Contains(s, "quota_exceeded") }) {
-				if w.rapidRotations(a.ID) || w.rapidRotations(b.ID) {
+				if w.rapidRotations(a.ID, b.ID) {
 					w.exempt("M2", resHonestStaleQuota) // 0.88.2: 3 or more rotations in quick succession
 					continue
 				}

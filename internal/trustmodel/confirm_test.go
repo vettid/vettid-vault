@@ -218,7 +218,11 @@ func (q *Party) beforeAccept(r *PeerRec, m *RMsg, pos Pos) {
 		ep.Flag = true
 		q.w.hit("F3:flag-set")
 		if tr, ok := q.w.epTruth[ep.ID]; ok && !q.Copy && (q.w.party(tr[0]).Copy || q.w.party(tr[1]).Copy) {
-			q.pendFlag = append(q.pendFlag, ep.ID) // ground truth once the write stores it
+			if ep.Demoted {
+				q.pendFlagLate = append(q.pendFlagLate, ep.ID) // set only after the epoch was demoted
+			} else {
+				q.pendFlag = append(q.pendFlag, ep.ID) // ground truth once the write stores it
+			}
 		}
 		if M.Kind == KConfirm {
 			q.w.hit("F3:flag-set-by-hs.confirm")

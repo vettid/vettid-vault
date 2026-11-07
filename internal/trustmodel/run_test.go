@@ -440,6 +440,7 @@ func (q *Party) resolve(r *PeerRec) {
 		r.IK, r.KEM = keep.New, keep.KEM
 	}
 	w.logf("%s: resolve %s keeps %d", q.Name, w.party(r.ID).Name, r.IK)
+	w.resolved[[2]PID{q.ID, r.ID}] = true
 	w.stat("resolve")
 	r.Status, r.Ref, r.CandA, r.CandB = stActive, "", IKLink{}, IKLink{}
 	q.h5(r, 0)
@@ -560,6 +561,19 @@ func (w *World) checkEnd(liveness bool) {
 			sort.Strings(how)
 			// a stale record (a new invitation is needed) is not checked
 			if len(how) >= 2 && r.Status != stSuspended && r.Status != stConflicted && r.Status != stStale && !r.Warned {
+				// 0.88.2 residual: after a resolution, a further successor
+				// that only ever arrived while the record was suspended
+				// (step 1 keeps no identity link then) is not known
+				active := 0
+				for nw := range news {
+					if !slices.ContainsFunc(r.Dropped, func(l IKLink) bool { return l.Old == old && l.New == nw }) && w.evidActive[key][nw] {
+						active++
+					}
+				}
+				if w.resolved[key] && active < 2 && slices.ContainsFunc(w.copies(), func(c *Party) bool { return c.Origin == key[1] }) {
+					w.exempt("I4", resCopySuccSusp)
+					continue
+				}
 				w.violate("I4", "%s saw two successors of %d from %s but is not suspended: carried in %s", q.Name, old, w.party(key[1]).Name, strings.Join(how, " + "))
 			}
 		}
@@ -576,6 +590,11 @@ func (w *World) checkEnd(liveness bool) {
 				other = other || c.Origin == q.ID
 			}
 			switch {
+			case !two && other && w.resolved[[2]PID{r.ID, q.ID}] && w.forkFinK7[[2]PID{q.ID, r.ID}] && w.copyForked(q.ID):
+				// 0.88.2 residual: Q's own copy forked; R suspended and
+				// resolved, and R's strict F1 reconnect named an epoch Q
+				// takes as fork evidence at its hs.fin
+				w.exempt("I4", resCopyForkResolve)
 			case !two && other:
 				w.violate("I4-misattributed", "%s suspended %s (%s) as two copies; the copy is %s's own", q.Name, w.party(r.ID).Name, r.Ref, q.Name)
 			case !two:
@@ -865,6 +884,16 @@ func (w *World) checkEnd(liveness bool) {
 			w.violate("I1-loss", "a message %s->%s vanished (no fate)", w.party(pr[0]).Name, w.party(pr[1]).Name)
 		}
 	}
+}
+
+// copyForked: an old copy of p made an identity link of its own (a fork).
+func (w *World) copyForked(p PID) bool {
+	for l, by := range w.iklinkBy {
+		if c := w.party(by.By); c.Copy && c.Origin == p && !slices.Contains(w.party(p).st.Chain, l) {
+			return true
+		}
+	}
+	return false
 }
 
 // limits: §6.6 "Limits": x's recipient has not followed x's new address

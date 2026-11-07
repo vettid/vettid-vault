@@ -1211,6 +1211,7 @@ func (q *Party) tableBFin(r *PeerRec, M *Msg, pos Pos) dec {
 	switch st {
 	case ikAncestor:
 		if a.Fork {
+			q.w.noteForkFin(q, r, a.ID)
 			q.suspend(r, "connection.fork_suspected/epoch")
 			return dec{"suspend", "fork", cell + ":fork-evidence"}
 		}
@@ -1223,6 +1224,7 @@ func (q *Party) tableBFin(r *PeerRec, M *Msg, pos Pos) dec {
 		return refuse("unexpected", cell)
 	}
 	if a.Fork {
+		q.w.noteForkFin(q, r, a.ID)
 		q.suspend(r, "connection.fork_suspected/epoch")
 		return dec{"suspend", "fork", cell + ":fork-evidence"}
 	}
@@ -1278,6 +1280,12 @@ func (q *Party) tableBFin(r *PeerRec, M *Msg, pos Pos) dec {
 		q.h5(r, a.ID)
 	}
 	return dec{"accept", "", cell}
+}
+
+// noteForkFin: ground truth for the 0.88.2 old-copy residual (1): Q
+// suspends at the hs.fin of P's reconnect as Fork-by-ctx evidence.
+func (w *World) noteForkFin(q *Party, r *PeerRec, hs int) {
+	w.forkFinK7[[2]PID{q.ID, r.ID}] = true
 }
 
 func (q *Party) establish(r *PeerRec, id int, signer, own Key, pos Pos) {
@@ -1407,11 +1415,19 @@ func (q *Party) enqueueRaw(to PID, m Msg, f ...func(*Entry)) {
 // batch's write stores its processing (a crash before it loses nothing Q
 // had processed).
 func (w *World) recordEvidence(q *Party, r *PeerRec, M *Msg) {
-	q.pendEvid = append(q.pendEvid, pendEv{r.ID, cloneMsg(*M)})
+	q.pendEvid = append(q.pendEvid, pendEv{r.ID, cloneMsg(*M), r.Status == stSuspended})
 }
 
-func (w *World) commitEvidence(q *Party, r *PeerRec, M *Msg) {
+func (w *World) commitEvidence(q *Party, r *PeerRec, M *Msg, susp bool) {
 	key := [2]PID{q.ID, r.ID}
+	if w.evidActive[key] == nil {
+		w.evidActive[key] = map[Key]bool{}
+	}
+	for _, l := range M.Rot {
+		if !susp {
+			w.evidActive[key][l.New] = true // carried while Q's record was not suspended
+		}
+	}
 	if w.evid[key] == nil {
 		w.evid[key] = map[Key]map[Key]bool{}
 	}

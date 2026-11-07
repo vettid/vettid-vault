@@ -705,11 +705,11 @@ func TestR29KeepReconnectAnswers(t *testing.T) {
 		P, Q := s.p(0), s.p(1)
 		rp := P.st.peer(Q.ID)
 		s.do(P, func() { P.startHS(rp, true); P.write(); P.flush() }) // R1
-		s.hold(Q, KInit)                                             // R1 delayed
+		s.hold(Q, KInit)                                              // R1 delayed
 		rp = P.st.peer(Q.ID)
 		s.do(P, func() { P.abandonOwn(rp); P.startHS(rp, true); P.write(); P.flush() }) // R2
-		s.drain(Q) // Q answers R2
-		s.drain(P) // P: R2's epoch pending, hs.fin
+		s.drain(Q)                                                                      // Q answers R2
+		s.drain(P)                                                                      // P: R2's epoch pending, hs.fin
 		rp = P.st.peer(Q.ID)
 		if rp.Pend == nil || !rp.Pend.Reconnect {
 			t.Fatalf("setup: P holds no pending reconnect\n  %s", s.trace())

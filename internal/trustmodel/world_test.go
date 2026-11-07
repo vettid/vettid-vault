@@ -41,6 +41,7 @@ type World struct {
 	ruleEKeepFin  bool                // TRUSTMODEL_RULEEFIN=keep: rule E leaves an unsent hs.fin for a destroyed epoch in the outbox (before r7)
 	copyExpo      map[[2]int]*expo    // (honest party, copy epoch): when it was used
 	copyFlag      map[[2]int]bool     // (honest party, copy epoch): its received flag was set (ground truth, I7)
+	copyFlagLate  map[[2]int]bool     // (honest party, copy epoch): its flag was set only after it was demoted (I7, 0.88.2 residual)
 	copyCur       map[[2]int]bool     // (honest party, copy epoch): it became current there (ground truth, I7)
 	lockedFor     map[PID]int64       // M2: how long each real party has been locked at a stretch (time passed by advance)
 	maxLock       int64               // M2: the longest such stretch in the run
@@ -80,18 +81,21 @@ type World struct {
 	ever     map[PID]map[int]bool            // outbox entry ids ever stored, per party
 	probes   map[int]bool                    // probes accepted
 
-	viol     []Violation
-	log      []string
-	verbose  bool
-	stats    map[string]int
-	deadAt   map[[2]PID]int64  // pair -> when a residual first ended its liveness: an old copy collected, acked or deleted a message meant for it, or the mailbox (resLiveMailbox), or the peer followed the copy's own rotation (resCopyRotated)
-	deadRes  map[[2]PID]string // ...which residual
-	deadWhy  map[[2]PID]string // ...and how
-	splitAt  map[[2]PID]int64  // pair -> when its current (latest) split began (I7, the live-mailbox residual)
-	splitNow map[[2]PID]bool   // pair -> split at the last monitor
-	ttlFin   map[[2]PID]string // (from, to): how an hs.resp or hs.fin was lost
-	forkDue  map[[2]PID]int    // (Q, P): P's hs.init under its new ik found a copy's epoch current
-	evidKind map[Key]string    // a successor key -> the kind of the first message that carried it
+	viol       []Violation
+	log        []string
+	verbose    bool
+	stats      map[string]int
+	deadAt     map[[2]PID]int64        // pair -> when a residual first ended its liveness: an old copy collected, acked or deleted a message meant for it, or the mailbox (resLiveMailbox), or the peer followed the copy's own rotation (resCopyRotated)
+	deadRes    map[[2]PID]string       // ...which residual
+	deadWhy    map[[2]PID]string       // ...and how
+	splitAt    map[[2]PID]int64        // pair -> when its current (latest) split began (I7, the live-mailbox residual)
+	splitNow   map[[2]PID]bool         // pair -> split at the last monitor
+	ttlFin     map[[2]PID]string       // (from, to): how an hs.resp or hs.fin was lost
+	forkDue    map[[2]PID]int          // (Q, P): P's hs.init under its new ik found a copy's epoch current
+	forkFinK7  map[[2]PID]bool         // (Q, P): Q suspended at the hs.fin of P's reconnect as Fork-by-ctx evidence
+	evidActive map[[2]PID]map[Key]bool // (Q, P): identity successors carried by a message while Q's record was not suspended
+	resolved   map[[2]PID]bool         // (Q, P): Q resolved a conflict of P's (connection.rotation.resolve)
+	evidKind   map[Key]string          // a successor key -> the kind of the first message that carried it
 }
 
 type rot struct {
@@ -108,7 +112,7 @@ func newWorld(seed uint64) *World {
 	w := &World{rng: rand.New(rand.NewPCG(seed, 7)), issuer: map[int]Key{}, epTruth: map[int][2]PID{},
 		rlinkBy: map[RLink]rot{}, iklinkBy: map[IKLink]rot{}, evid: map[[2]PID]map[Key]map[Key]bool{},
 		ikPos: map[[2]PID][]ikFollow{}, answered: map[int]bool{},
-		ended: map[int]bool{}, ever: map[PID]map[int]bool{}, probes: map[int]bool{}, stats: map[string]int{}, deadAt: map[[2]PID]int64{}, deadWhy: map[[2]PID]string{}, deadRes: map[[2]PID]string{}, splitAt: map[[2]PID]int64{}, splitNow: map[[2]PID]bool{}, ttlFin: map[[2]PID]string{}, probeDep: map[int][2]PID{}, probeFate: map[int]string{}, hasEpoch: map[[2]int]bool{}, staleAt: map[[2]PID]string{}, hsOrigin: map[int]string{}, suspAt: map[[2]PID]int64{}, audits: map[[2]PID]int{}, everSplit: map[[2]PID]bool{}, feed: map[[2]PID][]string{}, copyExpo: map[[2]int]*expo{}, copyFlag: map[[2]int]bool{}, copyCur: map[[2]int]bool{}, copyAban: map[[2]int]*abanUse{}, oldApp: map[[2]PID]string{}, devCopyFirst: map[[2]PID]bool{}, lockedFor: map[PID]int64{}, rotTimes: map[PID][]int64{}, fDue: map[[2]PID]bool{}, probeF: map[int]bool{}, fLostTok: map[[2]PID]bool{}, initIK: map[PID]Key{}, probeEpoch: map[int]int{}, forkDue: map[[2]PID]int{}, evidKind: map[Key]string{}}
+		ended: map[int]bool{}, ever: map[PID]map[int]bool{}, probes: map[int]bool{}, stats: map[string]int{}, deadAt: map[[2]PID]int64{}, deadWhy: map[[2]PID]string{}, deadRes: map[[2]PID]string{}, splitAt: map[[2]PID]int64{}, splitNow: map[[2]PID]bool{}, ttlFin: map[[2]PID]string{}, probeDep: map[int][2]PID{}, probeFate: map[int]string{}, hasEpoch: map[[2]int]bool{}, staleAt: map[[2]PID]string{}, hsOrigin: map[int]string{}, suspAt: map[[2]PID]int64{}, audits: map[[2]PID]int{}, everSplit: map[[2]PID]bool{}, feed: map[[2]PID][]string{}, copyExpo: map[[2]int]*expo{}, copyFlag: map[[2]int]bool{}, copyCur: map[[2]int]bool{}, copyFlagLate: map[[2]int]bool{}, copyAban: map[[2]int]*abanUse{}, oldApp: map[[2]PID]string{}, devCopyFirst: map[[2]PID]bool{}, lockedFor: map[PID]int64{}, rotTimes: map[PID][]int64{}, fDue: map[[2]PID]bool{}, probeF: map[int]bool{}, fLostTok: map[[2]PID]bool{}, initIK: map[PID]Key{}, probeEpoch: map[int]int{}, forkDue: map[[2]PID]int{}, evidKind: map[Key]string{}, evidActive: map[[2]PID]map[Key]bool{}, resolved: map[[2]PID]bool{}, forkFinK7: map[[2]PID]bool{}}
 	w.R = newRelay(w)
 	w.Now = 1000 * day
 	return w
@@ -249,6 +253,7 @@ type Party struct {
 	pendEvid             []pendEv // evidence seen in the batch not yet written
 	pendFlag             []int    // copy epochs whose received flag was set in the batch, not yet written (I7)
 	pendCur              []int    // copy epochs made current in the batch, not yet written (I7)
+	pendFlagLate         []int    // copy epochs whose flag was set only after they were demoted, not yet written (I7)
 	collectedSinceUnlock bool     // B is judged only after the first collect after an unlock
 	Desktop              bool     // a desktop or agent, not the member's app: no unlock exchange (§7.2); scenarios only
 	OldApp               bool     // R29-D4: a device app from before release 29 (no hs.confirm, no hs_confirm in features, rekeys)
@@ -258,6 +263,7 @@ type Party struct {
 type pendEv struct {
 	peer PID
 	m    Msg
+	susp bool // Q's record was suspended when it arrived
 }
 
 type abort struct{ why string }
@@ -289,7 +295,7 @@ func (p *Party) write() {
 	p.st.Out = out
 	for _, e := range p.pendEvid {
 		if r := p.st.peer(e.peer); r != nil {
-			p.w.commitEvidence(p, r, &e.m)
+			p.w.commitEvidence(p, r, &e.m, e.susp)
 		}
 	}
 	p.pendEvid = nil
@@ -301,6 +307,10 @@ func (p *Party) write() {
 		p.w.copyCur[[2]int{int(p.ID), e}] = true
 	}
 	p.pendCur = nil
+	for _, e := range p.pendFlagLate {
+		p.w.copyFlagLate[[2]int{int(p.ID), e}] = true
+	}
+	p.pendFlagLate = nil
 	p.stored = p.st.clone()
 	p.storedOut = map[int]bool{}
 	if p.w.ever[p.ID] == nil {
@@ -322,6 +332,7 @@ func (p *Party) restart(lock bool) {
 	p.pendEvid = nil
 	p.pendFlag = nil
 	p.pendCur = nil
+	p.pendFlagLate = nil
 	p.rotOK = false
 	p.collTo = map[Key]int64{}
 	if lock {

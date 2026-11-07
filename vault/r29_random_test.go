@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math/rand/v2"
@@ -50,11 +52,11 @@ import (
 //   R29RP_TRACE  a run seed: replay that run alone, with its trace
 //   R29RP_SHOW   how many seeds to list per failure class (default 5)
 //
-// Crypto randomness is seeded per run (testing/cryptotest), so keys,
-// nonces and transcript hashes replay; the vault's map iteration order and
-// the fixture's start time do not, so a replay can differ: R29RP_TRACE
-// runs a seed alone with its trace, and R29RP_REPEAT=n replays it n more
-// times and tallies the verdicts.
+// A run replays from its seed: crypto randomness is seeded per run
+// (testing/cryptotest), the fixtures are made at a start time drawn from
+// the seed and run on the run's clock, and the vault iterates its maps in
+// sorted order. R29RP_TRACE runs a seed alone with its trace, and
+// R29RP_REPEAT=n replays it n more times and tallies the verdicts.
 
 type rpOp int
 
@@ -130,8 +132,10 @@ func rpGen(rs uint64, steps int, burst bool) []rpAction {
 }
 
 type rpMsg struct {
-	m  Message
-	at time.Time
+	m    Message
+	at   time.Time
+	from int
+	typ  string // what the depositor sealed (decoded at deposit time)
 }
 
 // rpWorld is one run.
@@ -149,6 +153,9 @@ type rpWorld struct {
 	fail429 [2]bool
 	refused map[string]int // relay refusals by code
 	expired int            // messages the relay dropped at T
+	drops   []string       // which, for the trace
+	locks   [2][][2]time.Time
+	hasher  []string // what the run did, for its fingerprint
 	trace   []string
 	verbose bool
 	// the relay keys and mailboxes, which never change (A5), kept here
@@ -213,6 +220,34 @@ func (w *rpWorld) check(s int, mailbox, token string) error {
 	return nil
 }
 
+// typeOf decodes what side s deposited: a sealed-mode handshake message,
+// or a session message opened with s's own send keys.
+func (w *rpWorld) typeOf(s int, payload []byte) string {
+	env, err := envelope.Parse(payload)
+	if err != nil {
+		return "?"
+	}
+	if env.Mode() == envelope.ModeSealed {
+		return "sealed(hs.init|hs.resp)"
+	}
+	if w.locked[s] || w.f.m(s).st == nil {
+		return "session"
+	}
+	kr := w.f.m(s).sessions[w.f.id[s]]
+	if kr == nil {
+		return "session"
+	}
+	for _, ep := range []*handshake.Epoch{kr.Current(), kr.Pending()} {
+		if ep == nil {
+			continue
+		}
+		if in, err := ep.OpenSent(env); err == nil {
+			return in.Type
+		}
+	}
+	return "session(hs.fin or older epoch)"
+}
+
 // pull moves side s's deposits for the other side into its mailbox.
 func (w *rpWorld) pull(s int) {
 	o := 1 - s
@@ -237,8 +272,10 @@ func (w *rpWorld) pull(s int) {
 			jti = c.Jti
 		}
 		w.n++
+		typ := w.typeOf(s, d.payload)
+		w.hasher = append(w.hasher, fmt.Sprintf("dep %d m%08d %s %s", s, w.n, typ, w.f.clk.Format(time.RFC3339)))
 		w.q[o] = append(w.q[o], rpMsg{m: Message{MsgID: fmt.Sprintf("m%08d", w.n), Sender: relayauth.EncodeKey(w.pub[s]), JTI: jti,
-			Payload: d.payload, DepositedAt: w.f.clk.UTC().Format(time.RFC3339Nano)}, at: w.f.clk})
+			Payload: d.payload, DepositedAt: w.f.clk.UTC().Format(time.RFC3339Nano)}, at: w.f.clk, from: s, typ: typ})
 	}
 }
 
@@ -253,7 +290,9 @@ func (w *rpWorld) expire() {
 				kept = append(kept, x)
 			} else {
 				w.expired++
-				w.logf("relay: %s for %d expired", x.m.MsgID, s)
+				d := fmt.Sprintf("%s %s from %d (deposited %s) dropped at T", x.m.MsgID, x.typ, x.from, x.at.Format("01-02 15:04"))
+				w.drops = append(w.drops, w.f.clk.Format("01-02 15:04 ")+d)
+				w.logf("relay: %s", d)
 			}
 		}
 		w.q[s] = kept
@@ -323,6 +362,7 @@ func (w *rpWorld) open(s int) {
 	w.hook(s)
 	if w.locked[s] {
 		w.maxLock = max(w.maxLock, f.clk.Sub(w.lockAt[s]))
+		w.locks[s] = append(w.locks[s], [2]time.Time{w.lockAt[s], f.clk})
 	}
 	w.locked[s] = false
 	w.pullBoth()
@@ -364,6 +404,7 @@ func (w *rpWorld) do(s int, fn func(m *Manager, p *Peer)) {
 func (w *rpWorld) exec(a rpAction, rng *rand.Rand) {
 	s := a.A % 2
 	w.logf("== %s", a)
+	w.hasher = append(w.hasher, fmt.Sprintf("act %s %s", a, w.f.clk.Format(time.RFC3339)))
 	switch a.Op {
 	case rpRotate:
 		if w.locked[s] {
@@ -450,6 +491,48 @@ func (w *rpWorld) rapid() bool {
 	return false
 }
 
+// lockShape: whether both sides had locks longer than T that overlapped
+// (the hs.confirm re-send worst case, the 0.88.1 residual the owner
+// accepted), or a single side's lock longer than T.
+func (w *rpWorld) lockShape() (overlapping, single bool) {
+	const T = 14 * 24 * time.Hour
+	var long [2][][2]time.Time
+	for s := 0; s < 2; s++ {
+		for _, iv := range w.locks[s] {
+			if iv[1].Sub(iv[0]) > T {
+				long[s] = append(long[s], iv)
+			}
+		}
+	}
+	for s := 0; s < 2; s++ {
+		for _, a := range long[s] {
+			hit := false
+			for _, b := range long[1-s] {
+				if a[0].Before(b[1]) && b[0].Before(a[1]) {
+					hit = true
+				}
+			}
+			if hit {
+				overlapping = true
+			} else {
+				single = true
+			}
+		}
+	}
+	return overlapping, single
+}
+
+// lockClass: a failure's class when long locks explain it.
+func (w *rpWorld) lockClass() string {
+	switch over, single := w.lockShape(); {
+	case over && !single:
+		return "residual:overlapping-locks"
+	case single:
+		return "lock>T:single"
+	}
+	return ""
+}
+
 // verdict classifies the end state ("" for converged).
 func (w *rpWorld) verdict() string {
 	f := w.f
@@ -482,8 +565,8 @@ func (w *rpWorld) verdict() string {
 		switch {
 		case w.refused[CodeQuotaExceeded] > 0 && w.rapid():
 			return "residual:rapid-rotation"
-		case w.maxLock > 14*24*time.Hour:
-			return "residual:lock>T"
+		case w.lockClass() != "":
+			return w.lockClass()
 		case len(by) > 0:
 			tag += " after " + strings.Join(by, "+")
 		}
@@ -528,8 +611,8 @@ func (w *rpWorld) verdict() string {
 		}
 	}
 	if len(why) > 0 {
-		if w.maxLock > 14*24*time.Hour {
-			return "residual:lock>T (not converged)"
+		if c := w.lockClass(); c != "" {
+			return c + " (not converged)"
 		}
 		return "diverged:" + strings.Join(why, ",")
 	}
@@ -546,10 +629,44 @@ func (w *rpWorld) dumpAudit() {
 	}
 }
 
+// fingerprint hashes what the run did: its actions and deposits, every
+// audit entry of both vaults, and the end epochs.
+func (w *rpWorld) fingerprint() string {
+	h := sha256.New()
+	for _, x := range w.hasher {
+		h.Write([]byte(x + "\n"))
+	}
+	for s := 0; s < 2; s++ {
+		for _, a := range w.f.m(s).st.Audit {
+			fmt.Fprintf(h, "%d %s %s %s\n", s, a.At.Format(time.RFC3339Nano), a.Event, a.PeerID)
+		}
+		fmt.Fprintf(h, "epoch %d %x\n", s, w.f.cur(s))
+	}
+	return hex.EncodeToString(h.Sum(nil))[:16]
+}
+
 // rpRun runs one seed; it returns the verdict and, if verbose, the trace.
 func rpRun(t *testing.T, rs uint64, steps int, burst, verbose bool) (string, []string) {
+	v, tr, _ := rpRunFP(t, rs, steps, burst, verbose)
+	return v, tr
+}
+
+// rpRunFP is rpRun with the run's fingerprint.
+func rpRunFP(t *testing.T, rs uint64, steps int, burst, verbose bool) (string, []string, string) {
 	cryptotest.SetGlobalRandom(t, rs)
+	// A fixed start time from the seed: the fixtures are made at it, and
+	// from then on everything runs on the run's clock.
+	start := time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC).Add(time.Duration(rs%(365*24*3600)) * time.Second)
+	var fx *r29Fx
+	fixtureNow = func() time.Time {
+		if fx != nil {
+			return fx.clk
+		}
+		return start
+	}
+	t.Cleanup(func() { fixtureNow = nil })
 	f := newR29Fx(t)
+	fx = f
 	w := &rpWorld{t: t, f: f, quota: map[string]int64{}, refused: map[string]int{}, verbose: verbose}
 	for s := 0; s < 2; s++ {
 		w.pub[s], w.mbox[s] = f.pk(s), f.m(s).st.Relay.Mailbox
@@ -563,9 +680,14 @@ func rpRun(t *testing.T, rs uint64, steps int, burst, verbose bool) (string, []s
 	w.quiesce()
 	v := w.verdict()
 	if verbose {
+		for s := 0; s < 2; s++ {
+			w.trace = append(w.trace, fmt.Sprintf("locks %d: %v", s, w.locks[s]))
+		}
+		w.trace = append(w.trace, "relay TTL drops:")
+		w.trace = append(w.trace, w.drops...)
 		w.dumpAudit()
 	}
-	return v, w.trace
+	return v, w.trace, w.fingerprint()
 }
 
 func rpEnv(k string, def int) int {
@@ -573,6 +695,38 @@ func rpEnv(k string, def int) int {
 		return v
 	}
 	return def
+}
+
+// TestR29RandomPairReplay: R29RP_SEEDS lists run seeds, each "seed" or
+// "seed:b" (burst); each is run twice, and the verdicts and fingerprints
+// compared.
+func TestR29RandomPairReplay(t *testing.T) {
+	list := os.Getenv("R29RP_SEEDS")
+	if list == "" {
+		t.Skip("R29RP_SEEDS not set")
+	}
+	steps, same := rpEnv("R29RP_STEPS", 40), 0
+	var diff []string
+	ss := strings.Split(list, ",")
+	for _, x := range ss {
+		burst := strings.HasSuffix(x, ":b")
+		rs, err := strconv.ParseUint(strings.TrimSuffix(x, ":b"), 10, 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var v [2]string
+		var fp [2]string
+		for i := 0; i < 2; i++ {
+			t.Run(fmt.Sprintf("%s-%d", x, i), func(t *testing.T) { v[i], _, fp[i] = rpRunFP(t, rs, steps, burst, false) })
+		}
+		t.Logf("%-24s %-40q %s %s", x, v[0], fp[0], fp[1])
+		if v[0] == v[1] && fp[0] == fp[1] {
+			same++
+		} else {
+			diff = append(diff, x)
+		}
+	}
+	t.Logf("%d of %d seeds replayed identically; differing: %v", same, len(ss), diff)
 }
 
 func TestR29RandomPair(t *testing.T) {
@@ -638,5 +792,4 @@ func TestR29RandomPair(t *testing.T) {
 	}
 	t.Logf("%d runs (burst %v, steps %d) in %v: %v per 10,000", runs, burst, steps, el.Round(time.Second),
 		(el * time.Duration(10000) / time.Duration(runs)).Round(time.Second))
-	_ = handshake.PurposeRekey
 }

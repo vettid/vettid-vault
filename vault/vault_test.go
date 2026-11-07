@@ -251,14 +251,27 @@ type fixture struct {
 	vid   string
 }
 
+// fixtureNow, when set (the random pair search), is the clock fixtures
+// are made by: their vaults' Options.Now, their relays' token clock, and
+// the pairing's time, so that a run replays from its seed.
+var fixtureNow func() time.Time
+
+// testNow is fixtureNow, or the real clock.
+func testNow() time.Time {
+	if fixtureNow != nil {
+		return fixtureNow()
+	}
+	return time.Now()
+}
+
 func newFixture(t testing.TB) *fixture {
 	t.Helper()
 	f := &fixture{t: t, store: store.NewMemory()}
 	f.opts = Options{Store: f.store, Sealer: testSealer{key: bytes.Repeat([]byte{7}, 32)}, Release: testRelease, MarkDeleting: NoHostMark, ConfirmAppKey: NoHostAppKey,
 		Relay: func(base string, key ed25519.PrivateKey) Relay {
-			f.relay = &stubRelay{base: base, key: key}
+			f.relay = &stubRelay{base: base, key: key, now: fixtureNow}
 			return f.relay
-		}}
+		}, Now: fixtureNow}
 	k, err := MinKDF()
 	if err != nil {
 		t.Fatal(err)
@@ -473,7 +486,7 @@ func newDevFixture(t testing.TB) *devFixture {
 	devKEM, _ := suite.NewPrivateKey(bytes.Repeat([]byte{0x33}, 32))
 	pk := devRelay.Public().(ed25519.PublicKey)
 	addr := handshake.RelayAddr{URL: "https://relay.example.org", Mailbox: relayauth.MailboxID(pk), PK: pk}
-	now := time.Now()
+	now := testNow()
 	// Run a real pairing handshake directly between device and vault keys.
 	ini, err := handshake.NewInitiator(handshake.InitiatorConfig{Purpose: handshake.PurposeApp, Ctx: "01JB2Z6V9K3M4N5P6Q7R8S9T0V",
 		Identity: devIK, StaticKEM: devKEM.Public(), Relay: addr, Token: "v4.public.VEVTVA",

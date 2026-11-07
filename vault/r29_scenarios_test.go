@@ -31,7 +31,7 @@ type r29Fx struct {
 // newR29Fx connects two vaults (side 0 the inviter) on a shared clock.
 func newR29Fx(t *testing.T) *r29Fx {
 	t.Helper()
-	f := &r29Fx{t: t, clk: time.Now().UTC().Truncate(time.Millisecond)}
+	f := &r29Fx{t: t, clk: testNow().UTC().Truncate(time.Millisecond)}
 	a, b := newVaultPair(t)
 	f.d = [3]*devFixture{a, b}
 	for s, d := range f.d[:2] {

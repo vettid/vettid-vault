@@ -276,6 +276,9 @@ func TestFailedReconnectWriteThenDeleteSendsTheFin(t *testing.T) {
 	r1 := rcLink(t, k0, k1)
 	d, p, _ := rcSetup(t, k1, rawLinks(r1))
 	p.Reconnect = HeldToken{Token: "v4.public.VEVTVA", Exp: time.Now().Add(24 * time.Hour)}
+	// An active connection holds a standing token (0.88.2 §8.6: a deposit
+	// to a connection without one waits for one).
+	p.Standing = HeldToken{Token: "v4.public.VEVTVA", Exp: time.Now().Add(24 * time.Hour)}
 	m := d.m
 	vaultRelay := m.keys.relay.Public().(ed25519.PublicKey)
 	m.mu.Lock()

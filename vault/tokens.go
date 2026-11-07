@@ -3,6 +3,7 @@ package vault
 import (
 	"crypto/ed25519"
 	"encoding/json"
+	"errors"
 	"slices"
 	"time"
 
@@ -83,6 +84,11 @@ func (m *Manager) heldToken(tok string, p *Peer) (HeldToken, error) {
 	c, err := peerwire.VerifyHeldToken(tok, p.Relay.PK, p.Relay.Mailbox, p.Relay.URL, m.keys.relay.Public().(ed25519.PublicKey))
 	if err != nil {
 		return HeldToken{}, err
+	}
+	for _, r := range p.RevokedHeld {
+		if r.JTI == c.Jti {
+			return HeldToken{}, errRevokedHeld // 0.88.2 §8.6: never used again
+		}
 	}
 	return HeldToken{Token: tok, Exp: c.Exp}, nil
 }
@@ -182,10 +188,11 @@ func (m *Manager) issueTo(p *Peer, kind string, now time.Time) {
 // left (§7.2), and starts reconnects for connections whose token expired.
 func (m *Manager) refreshHeld(now time.Time) {
 	for _, p := range m.allPeers() {
-		if p.State != PeerActive || p.Standing.Token == "" {
+		if p.State != PeerActive || p.Standing.Token == "" && p.Kind != KindConnection {
 			continue
 		}
-		if !now.Before(p.Standing.Exp) {
+		if p.Standing.Token == "" || !now.Before(p.Standing.Exp) {
+			// Expired, or (0.88.2 §8.6) none held after a token_revoked.
 			if p.Kind == KindConnection {
 				m.startReconnect(p, now)
 			}
@@ -344,3 +351,7 @@ func (m *Manager) markDeviceTokens(now time.Time) {
 	m.st.DeviceTokensMarked = true
 	m.dirty = true
 }
+
+// errRevokedHeld: a standing token the relay answered token_revoked for is
+// offered again (0.88.2 §8.6).
+var errRevokedHeld = errors.New("vault: a revoked standing token")

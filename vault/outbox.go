@@ -7,6 +7,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/vettid/vettid-relay/relayauth"
 	"github.com/vettid/vettid-relay/relayclient"
 	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/envelope"
@@ -357,6 +358,12 @@ func (m *Manager) deposit(ctx context.Context, e *OutboxEntry, now time.Time) er
 			return nil
 		}
 		tok = p.Standing.Token
+		if tok == "" && p.Kind == KindConnection {
+			// No standing token held (0.88.2 §8.6: one revoked): the entry
+			// waits for a valid one; the no-token path is already taken.
+			e.NotBefore, e.AwaitToken = now.Add(time.Hour), true
+			return errNoStandingToken
+		}
 	}
 	if h := m.opt.Hooks.DropDeposit; h != nil && h(e) {
 		e.Done = true
@@ -384,6 +391,9 @@ func (m *Manager) deposit(ctx context.Context, e *OutboxEntry, now time.Time) er
 		}
 		e.Done = true
 	case CodeTokenRevoked, CodeMailboxUnknown:
+		if RelayCode(err) == CodeTokenRevoked && m.tokenRevoked(p, e, tok, now) {
+			return err // 0.88.2 §8.6: between two vaults, that token only
+		}
 		// Terminal: stop sending to that mailbox.
 		if p != nil && e.Token == "" {
 			p.State = PeerStale
@@ -538,4 +548,79 @@ func (m *Manager) tickFeatures(now time.Time) {
 			o.Tick(m.session(now))
 		}
 	}
+}
+
+// errNoStandingToken: a deposit to a connection waits, the vault holding
+// no standing token for it.
+var errNoStandingToken = errors.New("vault: no standing token held for the peer")
+
+// tokenRevoked is §8.6's token_revoked between two vaults (0.88.2, owner
+// decision a, GC 01M6SRQ1B7NM0Q00G0CEGHFES8): for a deposit to a
+// connection with a standing token (held, or carried by an hs.init or
+// hs.resp) the answer ends that token only, not the connection. The
+// token is dropped and never used again (a later offer of it is refused,
+// heldToken); the entry waits for a valid token; with no other valid
+// standing token held, the vault takes the "no valid standing token" path
+// (a pending rekey abandoned, §6.3.1; a reconnect, §6.6, bounded by the
+// reconnect bound). A reconnect's own hs.init answered token_revoked is a
+// failed try. It reports whether it handled the answer; a device's path
+// (toward a device's own vault) is unchanged.
+func (m *Manager) tokenRevoked(p *Peer, e *OutboxEntry, tok string, now time.Time) bool {
+	for id, og := range m.st.Outgoing {
+		if og.InitOutbox != e.ID || og.New != nil || og.Purpose != handshake.PurposeReconnect {
+			continue
+		}
+		op := m.peer(og.PeerID)
+		if op == nil || op.Kind != KindConnection {
+			return false
+		}
+		named := og.Named
+		m.audit(now, "reconnect_token_revoked", op.ID)
+		m.abandonOutgoing(id, now)
+		e.Done = true
+		m.reconnectFailed(op, named, now)
+		return true
+	}
+	if p == nil || p.Kind != KindConnection {
+		return false
+	}
+	m.dropHeldToken(p, tok, now)
+	m.audit(now, "standing_token_revoked", p.ID)
+	e.Token = "" // from now on the held standing token, once a valid one is held
+	e.NotBefore, e.AwaitToken = now.Add(time.Hour), true
+	e.Attempts++
+	if p.Standing.Token == "" || !now.Before(p.Standing.Exp) {
+		m.noStandingToken(p, now)
+	}
+	m.dirty = true
+	return true
+}
+
+// dropHeldToken forgets tok as p's standing token and records its jti as
+// revoked until its exp, so that it is refused if offered again.
+func (m *Manager) dropHeldToken(p *Peer, tok string, now time.Time) {
+	if p.Standing.Token == tok {
+		p.Standing = HeldToken{}
+	}
+	if c, err := relayauth.ParseToken(tok, p.Relay.PK); err == nil {
+		kept := p.RevokedHeld[:0]
+		for _, r := range p.RevokedHeld {
+			if now.Before(r.Exp) && r.JTI != c.Jti {
+				kept = append(kept, r)
+			}
+		}
+		p.RevokedHeld = append(kept, RevokedToken{JTI: c.Jti, Exp: c.Exp})
+	}
+	m.dirty = true
+}
+
+// noStandingToken is the "no valid standing token" case for connection
+// p: a pending rekey is abandoned (§6.3.1, restarting as a reconnect),
+// otherwise the vault reconnects (§6.6).
+func (m *Manager) noStandingToken(p *Peer, now time.Time) {
+	if pe := p.Pending; pe != nil && pe.Purpose == handshake.PurposeRekey {
+		m.abandonPending(p, "no_token", true, now)
+		return
+	}
+	m.startReconnect(p, now)
 }

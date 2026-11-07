@@ -323,12 +323,22 @@ type Peer struct {
 	// (§6.3.1 "Responder": again ConfirmResend after it while the epoch
 	// is unconfirmed).
 	ConfirmAt time.Time `json:"confirm_at,omitzero"`
+	// RevokedHeld are the standing tokens for the peer a relay answered
+	// token_revoked for (0.88.2 §8.6), by jti, kept until their exp: never
+	// used again, and refused if offered again.
+	RevokedHeld []RevokedToken `json:"revoked_held,omitempty"`
 	// RC counts the failed tries of the vault's reconnects to the peer
 	// naming one epoch (§3.4.1 "The reconnect bound").
 	RC *ReconnectCount `json:"reconnect_tries,omitempty"`
 	// IDResend counts S5's identity.rotate resends to the peer for the
 	// vault's latest rotation (0.86.0).
 	IDResend *IDResend `json:"id_resend,omitempty"`
+}
+
+// RevokedToken is a revoked standing token's jti and exp.
+type RevokedToken struct {
+	JTI string    `json:"jti"`
+	Exp time.Time `json:"exp"`
 }
 
 // ReconnectCount is Peer.RC: the epoch the reconnects named, and how many

@@ -457,6 +457,7 @@ func (m *Manager) respondReconnect(pi *handshake.PendingInit, p *Peer, sender ed
 		NamedConfirmed: namedConf, InitTS: pi.Inner().TS,
 		Signer: append([]byte(nil), body.From.IK...)}
 	m.awaiting[id] = resp
+	m.capReconnectAnswers(p, now)
 	// §6.6 "Between two persons" (0.74.0): with our own reconnect open as
 	// well, the lower th1 wins; a higher one of ours is abandoned now.
 	if !p.isService() {
@@ -536,6 +537,36 @@ func (m *Manager) refusedReconnectLinks(p *Peer, body *handshake.Init, now time.
 		// demotion naming as K5 says), and no other handshake is.
 		m.note(now, "refused_reconnect_links_restart", p.ID)
 		m.startReconnect(p, now)
+	}
+}
+
+// MaxReconnectAnswers is how many answers to a peer's reconnects the
+// vault keeps awaiting hs.fin (§3.4.1 H5, 0.88.2 owner decision a): a new
+// answer does not end an earlier one pinned to the same ik; the first
+// hs.fin whose sig_I verifies is established and the others are dropped
+// then (finishReconnect).
+const MaxReconnectAnswers = 4
+
+// capReconnectAnswers drops the oldest answers to p's reconnects beyond
+// MaxReconnectAnswers, revoking their tokens.
+func (m *Manager) capReconnectAnswers(p *Peer, now time.Time) {
+	for {
+		var oldest string
+		n := 0
+		for id, aw := range m.st.Awaiting {
+			if aw.New != nil || aw.PeerID != p.ID || aw.Purpose != handshake.PurposeReconnect {
+				continue
+			}
+			n++
+			if o := m.st.Awaiting[oldest]; oldest == "" || aw.Created.Before(o.Created) || aw.Created.Equal(o.Created) && id < oldest {
+				oldest = id
+			}
+		}
+		if n <= MaxReconnectAnswers {
+			return
+		}
+		m.note(now, "reconnect_answer_capped", p.ID)
+		m.abandonAwaiting(oldest, now)
 	}
 }
 

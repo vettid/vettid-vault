@@ -430,6 +430,14 @@ func (m *Manager) beforeAccept(p *Peer, ep *handshake.Epoch, in *envelope.Inner,
 		return true
 	}
 	fin := in.Type == handshake.TypeFin
+	if meta != nil && meta.Demoted && !fin {
+		// (0.88.2, owner decision a) §3.4.1 "The flag is judged whenever it
+		// is set": a message accepted under an epoch demoted with its flag
+		// clear (deposited before the link), that would set the flag, is
+		// P's side using it after the rotation: a copy. Q suspends.
+		m.suspendForkRef(p, "epoch", now)
+		return true
+	}
 	if meta != nil && !meta.GotFromPeer && !fin {
 		// §6.3.1 "The received flag": set by any message from P that opens
 		// under this epoch and passes acceptFrom steps 1-4, except hs.fin;

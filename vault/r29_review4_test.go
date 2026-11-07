@@ -900,3 +900,80 @@ func TestR29ForkByCtxSkipsDemotedFlagClear(t *testing.T) {
 		}
 	}
 }
+
+// pos gives a held message a position: its msg_id and deposited_at.
+func (f *r29Fx) pos(m Message, id string) Message {
+	m.MsgID, m.DepositedAt = id, f.clk.UTC().Format(time.RFC3339Nano)
+	return m
+}
+
+// 0.88.2 §3.4.1 "The flag is judged whenever it is set" (owner decision
+// a; the model's seed 17877842174007298786): a copy of P, as initiator,
+// rekeys with Q, sends hs.fin and then a session message under the new
+// epoch E, both deposited before P's link. P's identity.rotate (under E0)
+// is processed first: strict F1 demotes E, its flag clear. The copy's
+// message, deposited before the link and so accepted, would set the flag:
+// Q suspends (ref epoch, the neutral feed item).
+func TestR29FlagJudgedWhenSet(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	snap := f.snapshot(1) // the copy of P: ik a, E0
+	f.rotate(1)           // the real P: a→b
+	link := f.takeKind(1, 0, kRotate)
+	f.lose(1, 0, kAny)
+	if len(link) != 1 {
+		t.Fatal("setup: no identity.rotate")
+	}
+	f.startCopy(1, snap)
+	f.do(2, func(m *Manager, p *Peer) { m.startRekey(p, f.clk) })
+	f.deliver(2, 0, kHSInit)
+	f.deliver(0, 2, kHSResp)
+	fin := f.takeKind(2, 0, kHSFin)
+	if len(fin) != 1 {
+		t.Fatal("setup: no hs.fin from the copy")
+	}
+	f.process(0, f.pos(fin[0], "pos-1")) // Q activates E (responder)
+	e := append([]byte(nil), f.cur(0)...)
+	f.deliver(0, 2, kConfirm) // the copy confirms E
+	f.note(2, "copy-under-E")
+	note := f.takeKind(2, 0, kNote)
+	if len(note) != 1 {
+		t.Fatal("setup: no message from the copy under E")
+	}
+	f.process(0, f.pos(link[0], "pos-3")) // the link, deposited last, processed first
+	if m := f.p(0).epochMeta(e); m == nil || !m.Demoted || m.GotFromPeer || f.p(0).suspended() {
+		f.dump()
+		t.Fatal("setup: E not demoted by strict F1 with its flag clear")
+	}
+	f.process(0, f.pos(note[0], "pos-2")) // deposited before the link
+	if !f.suspendedRef(0, "epoch") || !f.forkFeed(0) {
+		f.dump()
+		t.Fatal("a flag-setting message under a demoted epoch did not suspend")
+	}
+}
+
+// hs.fin sets no flag: an honest late hs.fin under an epoch demoted with
+// its flag clear (P rekeyed E0→E1 and rotated before any hs.confirm) does
+// not suspend.
+func TestR29LateFinUnderDemotedNoSuspend(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	f.rekey(1)
+	f.deliver(1, 0, kHSInit)
+	f.deliver(0, 1, kHSResp)
+	fin := f.takeKind(1, 0, kHSFin)
+	f.process(0, f.pos(fin[0], "pos-1")) // Q activates E1
+	f.lose(0, 1, kConfirm)
+	f.rotate(1)
+	link := f.takeKind(1, 0, kRotate)
+	f.lose(1, 0, kAny)
+	f.process(0, f.pos(link[0], "pos-3")) // strict F1: E1 demoted, flag clear
+	if !f.m(0).currentDemoted(f.p(0)) {
+		t.Fatal("setup: not demoted")
+	}
+	f.process(0, f.pos(fin[0], "pos-2")) // the hs.fin again, late
+	if f.p(0).suspended() {
+		f.dump()
+		t.Fatal("a late hs.fin under a demoted epoch suspended")
+	}
+}

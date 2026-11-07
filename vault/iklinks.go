@@ -362,7 +362,11 @@ func (m *Manager) f1Demote(p *Peer, app []*handshake.Rotation, msgEpoch []byte, 
 		}
 		for _, e := range later {
 			if !e.Demoted {
-				e.Demoted, e.DemotedAt, e.DemotedMsg = true, time.Time{}, ""
+				// Demoted at the link's position x: messages under it
+				// deposited after x are refused (ancestor_ik); one deposited
+				// before x is accepted, and one that would set its flag
+				// suspends ("The flag is judged whenever it is set").
+				e.Demoted, e.DemotedAt, e.DemotedMsg = true, m.relayAt, m.msgID
 			}
 		}
 		// Audited as a fork sign (ref epoch), without a feed item or a

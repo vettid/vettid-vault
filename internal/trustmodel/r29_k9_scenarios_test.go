@@ -685,3 +685,106 @@ func TestR29ForkByCtxSkipsAbandoned(t *testing.T) {
 		}
 	})
 }
+
+// (0.88.2, owner decision a, GC 01M6SPZ1QXHR5G7DRR96CHW17P) §3.4.1 H5: a
+// new answered reconnect from P does not end Q's earlier answer to P's
+// reconnect pinned to the same ik; the first verified hs.fin establishes.
+// The shape of random seed 10393024044262541112 (and 13144670517934401752,
+// 13990320060266243842, 471004796172726989, 975096784083377806): P's
+// reconnect R1 is delayed (a lease); P abandons it and reconnects again
+// (R2); Q answers R2, P holds R2's epoch pending and sends hs.fin; then
+// R1 reaches Q and is answered too. With the rule, R2's hs.fin still
+// finds its answer and the pair converges. Off (World.noKeepAnswers, the
+// rule before 0.88.2): R1's answer ends R2's, R2's hs.fin finds nothing,
+// and the pair does not converge (in the random runs it ended stale).
+func TestR29KeepReconnectAnswers(t *testing.T) {
+	bothWays(t, func(t *testing.T, off bool) {
+		s := newScen(t, 2)
+		s.w.relayRot = false
+		s.w.noKeepAnswers = off
+		P, Q := s.p(0), s.p(1)
+		rp := P.st.peer(Q.ID)
+		s.do(P, func() { P.startHS(rp, true); P.write(); P.flush() }) // R1
+		s.hold(Q, KInit)                                             // R1 delayed
+		rp = P.st.peer(Q.ID)
+		s.do(P, func() { P.abandonOwn(rp); P.startHS(rp, true); P.write(); P.flush() }) // R2
+		s.drain(Q) // Q answers R2
+		s.drain(P) // P: R2's epoch pending, hs.fin
+		rp = P.st.peer(Q.ID)
+		if rp.Pend == nil || !rp.Pend.Reconnect {
+			t.Fatalf("setup: P holds no pending reconnect\n  %s", s.trace())
+		}
+		e2 := rp.Pend.ID
+		s.release(Q, KInit)
+		s.drain(Q) // R1 answered too, then R2's hs.fin
+		rq := Q.st.peer(P.ID)
+		if !off && rq.Cur != e2 {
+			t.Fatalf("R2's hs.fin did not establish E%d (Q on E%d)\n  %s", e2, rq.Cur, s.trace())
+		}
+		if off && rq.Cur == e2 {
+			t.Fatalf("off: R2's hs.fin still established E%d; the scenario does not test the rule\n  %s", e2, s.trace())
+		}
+		if !off && slices.ContainsFunc(rq.Ans, func(a HS) bool { return a.Reconnect }) {
+			t.Fatalf("the other answers to P's reconnects were not dropped at the verified hs.fin")
+		}
+		for d := 0; d < 40; d++ {
+			s.run(1, P, Q)
+			s.tick(day)
+			s.do(P, P.tick)
+			s.do(Q, Q.tick)
+		}
+		rq, rp = Q.st.peer(P.ID), P.st.peer(Q.ID)
+		converged := rq.Status == stActive && rp.Status == stActive && rp.Cur != 0 && rp.Cur == rq.Cur
+		t.Logf("off %v: P %d (%s) E%d, Q %d (%s) E%d", off, rp.Status, rp.Ref, rp.Cur, rq.Status, rq.Ref, rq.Cur)
+		if !off && !converged {
+			t.Fatalf("with the rule the pair did not converge\n  %s", s.trace())
+		}
+		if off && converged {
+			t.Fatalf("off: the pair converged; the scenario does not test the rule\n  %s", s.trace())
+		}
+	})
+}
+
+// (0.88.2, owner decision a, GC 01M6SPZ1QXHR5G7DRR96CHW17P) "Fork by ctx"
+// also skips an epoch Q demoted whose received flag is clear. The shape of
+// random seed 14692306168500431478 (TRUSTMODEL_ROTBURST=1): P rekeys
+// (E1), Q activates E1 at hs.fin; P rotates right after (S5 abandons E1)
+// and its identity.rotate under E0 makes Q's strict F1 demote E1 (flag
+// clear) and reconnect naming E0, which completes (E2 confirmed). P's
+// restarted rekey naming E0, delayed until then, arrives: E0 is older
+// than the confirmed E2 and the only epoch between signed by an ancestor
+// is the demoted E1. Q must not suspend. Off (World.noForkSkipDemoted):
+// it suspends.
+func TestR29ForkByCtxSkipsDemoted(t *testing.T) {
+	bothWays(t, func(t *testing.T, off bool) {
+		s := newScen(t, 2)
+		s.w.relayRot = false
+		s.w.noForkSkipDemoted = off
+		P, Q := s.p(0), s.p(1)
+		e0 := Q.st.peer(P.ID).Cur
+		_, e1 := s.pendingAt(P, Q) // P: E1 pending, hs.fin to Q
+		s.rotate(P, pathCred)      // S5 abandons E1; identity.rotate under E0, rekey naming E0
+		s.hold(Q, KInit)           // P's restarted rekey delayed
+		for i := 0; i < 4; i++ {
+			s.drain(Q) // E1 at hs.fin, then the link: strict F1 demotes E1, reconnect naming E0
+			s.drain(P)
+		}
+		rq := Q.st.peer(P.ID)
+		if ep := rq.epoch(e1); ep == nil || !ep.Demoted || ep.Flag {
+			t.Fatalf("setup: E%d not demoted with its flag clear: %+v\n  %s", e1, ep, s.trace())
+		}
+		if rq.Cur == 0 || rq.Cur == e0 || rq.ConfID == e0 || rq.Status != stActive {
+			t.Fatalf("setup: no newer confirmed epoch at Q (cur E%d conf E%d)\n  %s", rq.Cur, rq.ConfID, s.trace())
+		}
+		s.release(Q, KInit)
+		s.drain(Q) // P's delayed rekey naming E0
+		rq = Q.st.peer(P.ID)
+		t.Logf("off %v: Q status %d (%s)", off, rq.Status, rq.Ref)
+		if !off && (rq.Status != stActive || s.w.stats["R29 F1:fork-by-ctx-skipped-demoted"] == 0) {
+			t.Fatalf("Q suspended an honest P by Fork by ctx over the demoted E%d\n  %s", e1, s.trace())
+		}
+		if off && rq.Status != stSuspended {
+			t.Fatalf("off: no suspension; the scenario does not test the rule\n  %s", s.trace())
+		}
+	})
+}

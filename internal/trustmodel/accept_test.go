@@ -795,6 +795,14 @@ func (q *Party) forkEpoch(r *PeerRec, ctx int) bool {
 				}
 				continue
 			}
+			// (0.88.2, GC 01M6SPZ1QXHR5G7DRR96CHW17P) an epoch Q demoted whose
+			// received flag is clear: P's side never used it
+			if ep.Demoted && !ep.Flag && !q.w.noForkSkipDemoted {
+				if r.isAncestor(ep.Signer) {
+					q.w.hit("F1:fork-by-ctx-skipped-demoted")
+				}
+				continue
+			}
 			if r.isAncestor(ep.Signer) {
 				return true
 			}
@@ -921,11 +929,28 @@ func (q *Party) tableBInit(r *PeerRec, m *RMsg, pos Pos) dec {
 			cell += ":crossing-own-lower"
 		}
 	}
-	// §6.6: a new reconnect hs.init from P that Q answers ends Q's earlier
-	// answer to P's reconnect (rekeys: no such rule)
-	for _, a := range slices.Clone(r.Ans) {
-		if M.Reconnect && a.Reconnect && !a.Fork {
-			q.dropAnswer(r, a.ID)
+	// §6.6 (0.88.2, owner decision a, GC 01M6SPZ1QXHR5G7DRR96CHW17P): a
+	// new reconnect hs.init from P that Q answers does not end Q's earlier
+	// answer to P's reconnect pinned to the same ik; Q keeps both, at most
+	// 4 per peer (the oldest dropped beyond that, tokens revoked). The first
+	// verified hs.fin establishes and drops the others (tableBFin). No order
+	// is judged. (Before 0.88.2, with noKeepAnswers, the new one ended the
+	// earlier ones.)
+	if M.Reconnect {
+		var kept []int
+		for _, a := range r.Ans {
+			if a.Reconnect && !a.Fork {
+				if q.w.noKeepAnswers {
+					q.dropAnswer(r, a.ID)
+					continue
+				}
+				kept = append(kept, a.ID)
+			}
+		}
+		for len(kept) >= 4 {
+			q.w.hit("H5:reconnect-answers-capped")
+			q.dropAnswer(r, kept[0])
+			kept = kept[1:]
 		}
 	}
 	return q.answerInit(r, m, cell, app, fork, namedConf)
@@ -1202,6 +1227,16 @@ func (q *Party) tableBFin(r *PeerRec, M *Msg, pos Pos) dec {
 		return dec{"suspend", "fork", cell + ":fork-evidence"}
 	}
 	q.removeAnswer(r, a.ID)
+	if a.Reconnect && !q.w.noKeepAnswers {
+		// 0.88.2: the first verified hs.fin establishes; the other answers to
+		// P's reconnects are dropped in this write, tokens revoked
+		for _, o := range slices.Clone(r.Ans) {
+			if o.Reconnect && !o.Fork {
+				q.w.hit("H5:other-reconnect-answers-dropped")
+				q.dropAnswer(r, o.ID)
+			}
+		}
+	}
 	if len(app) > 0 && q.followIK(r, app, pos, false) {
 		return dec{"suspend", "fork", cell + ":K4-flag"}
 	}

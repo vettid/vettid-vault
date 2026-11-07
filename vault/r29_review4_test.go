@@ -860,3 +860,43 @@ func TestR29ForkByCtxOwnCurrentEpochSuspends(t *testing.T) {
 		t.Fatal("a ctx older than an epoch Q began that became current did not suspend")
 	}
 }
+
+// 0.88.2 at c91810f §3.4.1 "Fork by ctx" (owner decision a): an epoch
+// demoted with its received flag clear is skipped. The model's trace
+// (seed 14692306168500431478, burst): Q's responder epoch E1 (signer P's
+// old ik a) is demoted by strict F1, flag clear; Q's reconnect confirms a
+// new epoch; P's rekey naming E0, delayed past it, arrives: Q does not
+// suspend. With E1's flag set it still counts (it would have suspended
+// at its demotion).
+func TestR29ForkByCtxSkipsDemotedFlagClear(t *testing.T) {
+	for _, flagSet := range []bool{false, true} {
+		var delayed []Message
+		f := demoted(t, func(f *r29Fx) {
+			delayed = f.takeKind(1, 0, kHSInit) // P's rekey from E0, after its rotation
+		})
+		if len(delayed) != 1 {
+			t.Fatal("setup: no rekey from P")
+		}
+		e1 := append([]byte(nil), f.cur(0)...)
+		f.do(1, func(m *Manager, p *Peer) {
+			for id, og := range m.st.Outgoing {
+				if og.PeerID == p.ID {
+					m.abandonOutgoing(id, f.clk)
+				}
+			}
+		})
+		f.settle() // Q's reconnect after the demotion: confirmed
+		if f.m(0).currentDemoted(f.p(0)) || !f.sameEpoch() {
+			f.dump()
+			t.Fatal("setup: no new epoch after the demotion")
+		}
+		if flagSet {
+			f.do(0, func(_ *Manager, p *Peer) { p.epochMeta(e1).GotFromPeer = true })
+		}
+		f.process(0, delayed[0])
+		if f.p(0).suspended() != flagSet {
+			f.dump()
+			t.Fatalf("flag set %v: suspended %v", flagSet, f.p(0).suspended())
+		}
+	}
+}

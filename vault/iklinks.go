@@ -636,8 +636,9 @@ func (m *Manager) h5(p *Peer, now time.Time) {
 // older than the confirmed epoch, where an epoch after it up to the
 // confirmed one has an ancestor of P's ik as its signer, is fork
 // evidence. There is no exception for an epoch the vault began that
-// became current; one it began and abandoned while pending is skipped
-// (0.88.2, owner decision a).
+// became current; one it began and abandoned while pending, and one
+// demoted with its received flag clear, are skipped (0.88.2, owner
+// decisions a).
 //
 // The ancestors are those of the ik the message reaches (Table B,
 // reached included): the stored chain's and the old_ik of every link the
@@ -655,6 +656,12 @@ func (p *Peer) forkEpoch(ctx []byte, reached []*handshake.Rotation) bool {
 			// (0.88.2, owner decision a) an epoch the vault began and
 			// abandoned while pending never became current: P may never
 			// have activated it, so it is no evidence.
+			continue
+		}
+		if e.Demoted && !e.GotFromPeer {
+			// (0.88.2 at c91810f, owner decision a) an epoch demoted (K4,
+			// K7) with its received flag clear is no evidence either; one
+			// with its flag set suspended at its demotion.
 			continue
 		}
 		if p.ancestor(e.Signer) {

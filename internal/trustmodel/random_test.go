@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"os"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -88,7 +87,6 @@ func TestRandom(t *testing.T) {
 		inv := w.viol[0].Inv
 		sig := inv + " " + classify(w.viol[0].Detail)
 		a.stats["violation "+sig]++
-		a.stats["pair "+w.viol[0].Pair+" | "+sig]++
 		if _, seen := a.found[sig]; seen || len(a.found) >= 40 {
 			continue
 		}
@@ -108,7 +106,13 @@ func TestRandom(t *testing.T) {
 	}
 	el := time.Since(start)
 	report(t, &a, seed, runs, el)
-	if a.viol > 0 && os.Getenv("TRUSTMODEL_STRICT") != "" {
+	// any violation fails the test; TRUSTMODEL_LENIENT only reports (for
+	// attribution runs)
+	if a.viol > 0 {
+		if os.Getenv("TRUSTMODEL_LENIENT") != "" {
+			t.Logf("TRUSTMODEL_LENIENT: %d of %d runs violated an invariant", a.viol, a.runs)
+			return
+		}
 		t.Fatalf("%d of %d runs violated an invariant", a.viol, a.runs)
 	}
 }
@@ -118,7 +122,7 @@ func classify(d string) string {
 	f := strings.Fields(d)
 	var out []string
 	for _, x := range f {
-		if _, err := strconv.Atoi(strings.Trim(x, "E(),#:")); err == nil {
+		if _, err := strconv.Atoi(strings.Trim(x, "E(),#:{}")); err == nil {
 			continue
 		}
 		if x == "P" || x == "Q" || x == "R" || x == "DP" || x == "DQ" || x == "DR" || strings.Contains(x, "<->") || strings.HasSuffix(x, "'") || strings.Contains(x, "->") {
@@ -167,29 +171,26 @@ func report(t *testing.T, a *agg, seed uint64, runs int, el time.Duration) {
 func genRun(rs uint64, steps int) (Config, []Action) {
 	rng := rand.New(rand.NewPCG(rs, 3))
 	cfg := Config{Vaults: 2 + rng.IntN(2), Devices: rng.IntN(2) == 0, P429: 0.05, PRefuse: 0.01,
-		OldRules: os.Getenv("TRUSTMODEL_OLD") != "", Gate: os.Getenv("TRUSTMODEL_GATE") != "",
-		Opt: envInt("TRUSTMODEL_OPT", optFull), Unseen: os.Getenv("TRUSTMODEL_UNSEEN") != "",
+		OldRules: os.Getenv("TRUSTMODEL_OLD") != "", NoRelayRot: os.Getenv("TRUSTMODEL_RELAYROT") == "",
 		Skew: os.Getenv("TRUSTMODEL_NOSKEW") == ""}
-	if os.Getenv("TRUSTMODEL_ALL28") != "" { // every party on release 28: today's live behaviour
-		cfg.Rel28 = []bool{true, true, true, true, true, true}
-	} else if os.Getenv("TRUSTMODEL_MIXED") != "" { // release <= 28 parties, about half
-		cfg.Rel28 = make([]bool, 6)
-		for j := range cfg.Rel28 {
-			cfg.Rel28[j] = rng.IntN(2) == 0
-		}
-	}
+	cfg.OldApp = cfg.Devices && rng.IntN(4) == 0
 	n := 1 + rng.IntN(steps)
 	acts := make([]Action, n)
 	for j := range acts {
 		acts[j] = randomAction(rng)
 	}
-	if os.Getenv("TRUSTMODEL_UPGRADE") != "" { // all start on 28; each party upgrades at a random point
-		cfg.Upgrade = true
-		cfg.Rel28 = []bool{true, true, true, true, true, true}
-		for i := range cfg.Rel28 {
-			at := rng.IntN(len(acts) + 1)
-			acts = slices.Insert(acts, at, Action{Op: opUpgrade, A: i, Seed: rng.Uint64()})
+	if os.Getenv("TRUSTMODEL_ROTBURST") != "" {
+		// measurement variant: each vault rotates 4 to 6 times in quick
+		// succession at the start, its peers collecting in between
+		var burst []Action
+		for v := 0; v < cfg.Vaults; v++ {
+			for k := 4 + rng.IntN(3); k > 0; k-- {
+				burst = append(burst, Action{Op: opRotate, A: v, B: rng.IntN(64), N: rng.IntN(64), Seed: rng.Uint64()},
+					Action{Op: opCollect, A: rng.IntN(64), B: rng.IntN(64), N: rng.IntN(64), Seed: rng.Uint64()})
+			}
 		}
+		rng.Shuffle(len(burst), func(i, j int) { burst[i], burst[j] = burst[j], burst[i] })
+		acts = append(burst, acts...)
 	}
 	return cfg, acts
 }

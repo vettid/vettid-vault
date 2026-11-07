@@ -85,10 +85,10 @@ func TestScenarioACrossingTs(t *testing.T) {
 	s.done(true, s.cellSeen("B:current:hs.init:pending:ts-later"))
 }
 
-// A device (reference-client role) as responder and as initiator, with a
-// lost hs.fin in each role.
+// A device (reference-client role) as responder, with a lost hs.fin. (R29-D2:
+// a device starts no rekey, so it is never the initiator.)
 func TestScenarioADevice(t *testing.T) {
-	for _, devInit := range []bool{false, true} {
+	for _, devInit := range []bool{false} {
 		w := setup(Config{Vaults: 1, Devices: true}, 1)
 		s := &scen{t, w}
 		V, D := s.p(0), s.p(1)
@@ -108,26 +108,6 @@ func TestScenarioADevice(t *testing.T) {
 	}
 }
 
-// An earlier-release device: it sends no hs.confirm and keeps no confirmed
-// epoch; it confirms with its first ordinary message.
-func TestScenarioAOlderDevice(t *testing.T) {
-	w := setup(Config{Vaults: 1, Devices: true}, 1)
-	s := &scen{t, w}
-	V, D := s.p(0), s.p(1)
-	D.OldConfirm = true
-	s.do(V, func() { V.startHS(V.st.peer(D.ID), false); V.write(); V.flush() })
-	s.run(2, D, V)
-	if V.st.peer(D.ID).Pend == nil {
-		t.Fatalf("the vault's epoch is not pending")
-	}
-	s.do(D, func() { D.enqueue(V.ID, Msg{Kind: KSession, Probe: s.w.id()}, nil); D.write(); D.flush() })
-	s.run(2, V, D)
-	if V.st.peer(D.ID).Pend != nil {
-		t.Errorf("the device's first message did not confirm")
-	}
-	s.done(true)
-}
-
 // The drafter's case: the initiator's own S5 abandons pending E1 after its
 // hs.fin (old ik) is out; the responder activates E1; the restarted rekey
 // under the new ik names E0 (the responder's confirmed epoch). It must not
@@ -136,7 +116,6 @@ func TestScenarioAOlderDevice(t *testing.T) {
 func TestScenarioAS5AbandonAfterFin(t *testing.T) {
 	for _, literal := range []bool{false} { // 2da316e: §3.4.1 now says a ctx naming the confirmed epoch is ordinary
 		s := newScen(t, 2)
-		s.w.literalFork = literal
 		P, Q := s.p(0), s.p(1)
 		s.w.holdRotate = true
 		s.do(P, func() { P.startHS(P.st.peer(Q.ID), false); P.write(); P.flush() })

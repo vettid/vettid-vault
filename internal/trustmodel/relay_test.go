@@ -225,7 +225,6 @@ func (r *Relay) advance() {
 				if m.P.Kind == KFin || m.P.Kind == KResp || m.P.Kind == KConfirm {
 					r.w.ttlFin[[2]PID{m.Actor, r.w.owner(k)}] = "deleted-with-old-mailbox"
 					if m.P.Kind == KFin {
-						r.w.noteFinLost(m.Actor, r.w.owner(k))
 					}
 				}
 				if m.P.Kind == KSession && r.w.probeFate[m.P.Probe] == "" {
@@ -244,7 +243,6 @@ func (r *Relay) advance() {
 				if m.P.Kind == KFin || m.P.Kind == KResp || m.P.Kind == KConfirm {
 					r.w.ttlFin[[2]PID{m.Actor, r.w.owner(k)}] = "expired-at-relay-TTL"
 					if m.P.Kind == KFin {
-						r.w.noteFinLost(m.Actor, r.w.owner(k))
 					}
 				}
 				if m.P.Kind == KSession && r.w.probeFate[m.P.Probe] == "" {

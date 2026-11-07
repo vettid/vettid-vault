@@ -28,7 +28,7 @@ type Msg struct {
 	Inner int   // inner id, deduped by the receiver (§8.3)
 	Epoch int   // session mode: the epoch it is sealed under; 0: sealed to a kem
 	Probe int   // KSession: a probe number
-	Feat  bool  // carries the sender's features (first contact after an upgrade)
+	Feat  bool  // its inner features carry hs_confirm (R29-G1)
 	Ts    int64 // inner ts, set when the message is made
 
 	RelayPK Key // KUpdate
@@ -64,24 +64,24 @@ func (x Pos) after(m Pos) bool {
 }
 
 type Epoch struct {
-	ID          int
-	Signer      Key // the peer-side ik that signed its handshake
-	Own         Key // my ik that signed it (S8: links from it)
-	Est         Pos // position of the message that established it here
-	Demoted     bool
-	DemotedAt   Pos
-	Superseded  int64
-	EstAt       int64
-	Pending     bool  // §6.3.1: an initiator's epoch awaiting confirmation
-	Abandoned   bool  // §6.3.1: a pending epoch abandoned (nothing under it confirms)
-	KeysGone    bool  // §6.3.1 (G): only the id is kept (for a reconnect's ctx)
-	Destroyed   bool  // §6.3.1 (E, 0.86.0 rev. 3): a later epoch the peer never confirmed, destroyed
-	RCDone      bool  // r8: the one ungated-peer reconnect for this destroyed epoch was started
-	DestroyTs   int64 // rule E: the accepted hs.init's inner ts (a later ts under it is fork evidence)
-	MineInit    bool  // this side initiated the handshake that made it
-	GotFromPeer bool  // a message from the peer was received under it
-	UnconfFin   bool  // this side initiated it and activated it at hs.fin without confirmation (ungated)
-	GotIKs      []Key // peer iks that signed messages received under it (FromIK, Sig, rotation new iks)
+	ID         int
+	Signer     Key // the peer-side ik that signed its handshake
+	Own        Key // my ik that signed it (S8: links from it)
+	Est        Pos // position of the message that established it here
+	Demoted    bool
+	DemotedAt  Pos
+	Superseded int64
+	EstAt      int64
+	Pending    bool  // §6.3.1: an initiator's epoch awaiting confirmation
+	Abandoned  bool  // §6.3.1: a pending epoch abandoned (nothing under it confirms)
+	KeysGone   bool  // §6.3.1 (G): only the id is kept (for a reconnect's ctx)
+	Destroyed  bool  // §6.3.1 (E, 0.86.0 rev. 3): a later epoch the peer never confirmed, destroyed
+	DestroyTs  int64 // rule E: the accepted hs.init's inner ts (a later ts under it is fork evidence)
+	MineInit   bool  // this side initiated the handshake that made it
+	Flag       bool  // R29-F3: the received flag (a message from the peer under it passed steps 1-4, not hs.fin)
+	EverCur    bool  // it has been current here (R29-K5: the reconnect after a demotion names one)
+	Ended      bool  // R29-K9 (0.87.1): abandoned while pending, ended at P's identity.rotate: any later message under it is fork evidence
+	AbanByLink bool  // R29-K2: abandoned by a link ("Pending epochs at a link"): demoted from the start, never the K9 residual
 }
 
 // PendEp is an initiator's pending epoch (§6.3.1).
@@ -119,8 +119,6 @@ type HS struct {
 	RespRot   []IKLink // responder: the hs.resp's rotations (the same bytes each time)
 	NamedConf bool     // responder: the hs.init named my confirmed epoch (rule E at hs.fin)
 	InitTs    int64    // responder: the hs.init's inner ts
-	InitHalf  bool     // initiator: the gate as fixed when hs.init was sent
-	RuleRC    bool     // initiator: a rule-E or rule-L reconnect (r9: retried up to 3 tries)
 	AnsTs     int64    // responder: the hs.resp's inner ts (its own clock)
 }
 
@@ -139,12 +137,10 @@ type PeerRec struct {
 	CandA    IKLink // identity conflict candidates (followed, other)
 	CandB    IKLink
 	RelayFrk bool
-	PeerA    bool // the peer advertises §6.3.1 (the Release A gate)
 	Warned   bool // rule C between a vault and its own device: the member was told
 
 	Pend          *PendEp  // §6.3.1: my pending epoch (I initiated)
 	ConfID        int      // §6.3.1: the last epoch the peer used (other than hs.fin), or one I confirmed
-	ConfKeep      int      // unused since the revision (kept for clone compatibility)
 	ConfUntil     int64    // its keys' end: 46 days from the first activation that superseded it; 0 not yet
 	AbanIDs       []int    // §6.3.1 (G): ids of epochs I abandoned, kept until a newer one is confirmed
 	Seen          []IKLink // §3.4.1 rule C (0.86.0): identity links seen at step 3, one per old key
@@ -154,16 +150,18 @@ type PeerRec struct {
 	IdResendBatch bool     // ...in this batch
 	IdResendN     int      // resends for the rotation IdResendRot (at most 3)
 	IdResendRot   int64
-	RevOld        int // Deployment: the old epoch kept toward an ungated peer (0: none)
-	RevFinAt      int64
-	RevUntil      int64
-	RevSent       []Msg // Deployment: messages sent under the new epoch while the revert is possible
-	Reconfirm     bool  // a message under the confirmed epoch in this batch: queue hs.confirm
-	RCCtx         int   // r8: the next reconnect names this epoch (0: the last)
-	RCEpoch       int   // r8: a rekey-refused reconnect was started on this current epoch
-	RCs           int   // r8: reconnects started toward this peer (stat)
-	RCTries       int   // r9: tries of the current rule-E / rule-L reconnect
-	FeatOwed      bool  // upgrade mode: my features go with my next message to this peer
+	Reconfirm     bool       // a message under the confirmed epoch in this batch: queue hs.confirm
+	RCs           int        // reconnects started toward this peer (stat)
+	DemName       int        // R29-K7: after strict F1 the reconnect names E (until a new epoch is current)
+	RCNamed       int        // R29-K6: the epoch the failed tries named
+	RCFails       int        // R29-K6: failed tries for RCNamed
+	Held          []Entry    // R29-K5: durable messages held after a demotion of the current epoch (unsealed)
+	LastConfirm   int64      // R29-D2: a device re-sends hs.confirm at most once a minute
+	SawHSC        bool       // R29-G2: the peer's features carried hs_confirm (sticky)
+	Notice        bool       // R29-D4: device.update_needed shown for this device
+	RevokedJTI    []int      // 0.88.2 §8.6: standing tokens answered token_revoked, never used again
+	IdRotLinks    []IKLink   // R29-K9: links carried by an identity.rotate from P that K9 judged at (followed or ignored)
+	K9Spared      []k9Spared // R29-K9: epochs not later than the epoch such an identity.rotate traveled under, per link
 
 	IK, KEM Key
 	Chain   []IKLink // followed identity links
@@ -193,8 +191,16 @@ type PeerRec struct {
 	ResendEnd bool
 	RevokedAt int64 // S9: first token_revoked for an earlier key's token
 	S9Audited bool
-	RestartIK Key   // H5: restarted reconnect spent once per change of the current ik
-	Stamp     int64 // when this record last changed status (stale bookkeeping)
+	RestartIK Key // H5: restarted reconnect spent once per change of the current ik
+}
+
+// k9Spared: at an identity.rotate carrying link L, epoch Ep was not later
+// than the epoch the message traveled under, so R29-K9 did not judge it
+// (the residual "A copy using an epoch Q abandoned while pending, outside
+// R29-K9").
+type k9Spared struct {
+	Ep int
+	L  IKLink
 }
 
 type deferral struct {
@@ -300,10 +306,17 @@ func (s *State) clone() State {
 		}
 		q.Answered = slices.Clone(p.Answered)
 		q.AbanIDs = slices.Clone(p.AbanIDs)
-		q.RevSent = slices.Clone(p.RevSent)
+		q.IdRotLinks = slices.Clone(p.IdRotLinks)
+		q.RevokedJTI = slices.Clone(p.RevokedJTI)
+		q.K9Spared = slices.Clone(p.K9Spared)
 		q.Seen = slices.Clone(p.Seen)
 		q.RSeen = slices.Clone(p.RSeen)
 		q.DropAns = slices.Clone(p.DropAns)
+		q.Held = make([]Entry, len(p.Held))
+		for j, e := range p.Held {
+			e.M = cloneMsg(e.M)
+			q.Held[j] = e
+		}
 		q.Deferred = slices.Clone(p.Deferred)
 		c.Peers[i] = q
 	}
@@ -356,6 +369,26 @@ func (r *PeerRec) isAncestor(k Key) bool {
 	}
 	return false
 }
+
+// signedBy: an epoch signer sig is the link's old ik or an ancestor of it
+// (§3.4.1 "Epochs after an ik link", strict F1, R29-K9: "that link's
+// old_ik or an ancestor"), walking the followed chain back from old; not
+// any ancestor of P's current ik.
+func (r *PeerRec) signedBy(sig, old Key) bool {
+	k := old
+	for steps := 0; steps <= len(r.Chain); steps++ {
+		if sig == k {
+			return true
+		}
+		i := slices.IndexFunc(r.Chain, func(l IKLink) bool { return l.New == k })
+		if i < 0 {
+			return false
+		}
+		k = r.Chain[i].Old
+	}
+	return false
+}
+
 func (r *PeerRec) isRejected(k Key) bool {
 	for _, l := range r.Dropped {
 		if l.New == k {

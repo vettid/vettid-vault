@@ -12,22 +12,20 @@ import (
 // Setup, actions, quiescence, the invariants, shrinking.
 
 type Config struct {
-	Rel28    []bool // parties (by index) running release <= 28
-	Opt      int    // the release-29 option of the other parties (optFull: the whole draft)
-	Unseen   bool   // the hs_confirm gate is not yet open: no peer's features seen
-	Upgrade  bool   // every party starts on release 28 and upgrades during the run (opUpgrade)
-	Skew     bool   // each party's clock off by up to a day either way (the 2-day budget)
-	Gate     bool   // the Release A gate: §6.3.1 only toward peers that advertise it
-	OldRules bool   // f4a4d97 rules: no §6.3.1 (activation at hs.fin)
-	Vaults   int    // 2 or 3
-	Devices  bool   // one device per vault
-	P429     float64
-	PRefuse  float64
+	NoRelayRot bool // no relay-key rotation (the oracle config; release 29 builds none)
+	OldApp     bool // the first device is an app from before release 29 (R29-D4)
+	Skew       bool // each party's clock off by up to a day either way (the 2-day budget)
+	OldRules   bool // f4a4d97 rules: no §6.3.1 (activation at hs.fin)
+	Vaults     int  // 2 or 3
+	Devices    bool // one device per vault
+	P429       float64
+	PRefuse    float64
 }
 
 func setup(cfg Config, seed uint64) *World {
 	w := newWorld(seed)
 	w.optA = !cfg.OldRules
+	w.relayRot = !cfg.NoRelayRot
 	w.p429, w.pRef = 0, 0
 	mk := func(name string, dev bool) *Party {
 		p := &Party{ID: PID(len(w.P)), Name: name, Device: dev, w: w, collTo: map[Key]int64{}}
@@ -46,17 +44,13 @@ func setup(cfg Config, seed uint64) *World {
 			mk("D"+names[i], true)
 		}
 	}
-	w.gate = cfg.Gate
+	if cfg.OldApp && cfg.Devices {
+		w.P[cfg.Vaults].OldApp = true
+		w.logf("%s is an app from before release 29", w.P[cfg.Vaults].Name)
+	}
 	for _, p := range w.P {
-		p.Opt = cfg.Opt
 		if cfg.Skew {
 			p.Skew = int64(w.rng.IntN(int(2*day))) - day
-		}
-	}
-	for i, old := range cfg.Rel28 {
-		if i < len(w.P) && old {
-			w.P[i].Rel28 = true
-			w.P[i].Name += "(r28)"
 		}
 	}
 	connect := func(a, b *Party, dev bool) {
@@ -65,8 +59,8 @@ func setup(cfg Config, seed uint64) *World {
 		for _, x := range [][2]*Party{{a, b}, {b, a}} {
 			me, it := x[0], x[1]
 			me.st.Peers = append(me.st.Peers, PeerRec{ID: it.ID, Device: dev, IK: it.st.IK, KEM: it.st.KEM,
-				Relay: it.st.Relay, KeyFor: me.st.Relay, Cur: e, ConfID: e, PeerA: it.advertises() && !cfg.Unseen,
-				Epochs: []Epoch{{ID: e, Signer: it.st.IK, Own: me.st.IK, EstAt: w.Now}}})
+				Relay: it.st.Relay, KeyFor: me.st.Relay, Cur: e, ConfID: e,
+				Epochs: []Epoch{{ID: e, Signer: it.st.IK, Own: me.st.IK, EstAt: w.Now, EverCur: true}}})
 			w.hasEpoch[[2]int{int(me.ID), e}] = true
 		}
 		for _, x := range [][2]*Party{{a, b}, {b, a}} {
@@ -86,6 +80,7 @@ func setup(cfg Config, seed uint64) *World {
 	}
 	for _, p := range w.P {
 		p.write()
+		w.initIK[p.ID] = p.st.IK
 	}
 	w.p429, w.pRef = cfg.P429, cfg.PRefuse
 	return w
@@ -144,16 +139,18 @@ const (
 	opResolve
 	opRekey
 	opPeek
-	opUpgrade // upgrade mode only (weight 0): A is the party index
+	opCopyRespond // reach: an old copy answers and confirms Q's handshake
+	opCopyInit    // reach: an old copy makes a handshake with Q as initiator
+	opFinLoss     // reach: hs.fin lost around a rotation
 	numOps
 )
 
 var opName = [...]string{"rotate", "rotate-both", "device-rotate", "send", "collect", "crash-at", "fail-write-at",
 	"lock", "unlock", "time", "snapshot", "copy-acts", "copy-forks", "copy-steals", "copy-deletes-mailbox",
-	"resolve", "rekey", "peek(lease)", "upgrade"}
+	"resolve", "rekey", "peek(lease)", "copy-responds", "copy-initiates", "fin-loss"}
 
 // weights of the random choice
-var opWeight = [...]int{6, 2, 2, 8, 14, 3, 3, 4, 6, 8, 3, 3, 1, 1, 1, 2, 3, 3, 0}
+var opWeight = [...]int{6, 2, 2, 8, 14, 3, 3, 4, 6, 8, 3, 3, 1, 1, 1, 2, 3, 3, 2, 2, 2}
 
 type Action struct {
 	Op      Op
@@ -181,13 +178,8 @@ func (w *World) describeAction(a Action) string {
 		return fmt.Sprintf("collect %s (%d rounds, max %d)", pick(w.real(), a.A), 1+a.N%3, collectMax(a.B))
 	case opTime:
 		return fmt.Sprintf("time +%ds", jumps[a.N%len(jumps)])
-	case opCopyAct, opCopyFork, opCopySteal, opCopyDelete:
-		return fmt.Sprintf("%s %s", opName[a.Op], pick(w.copies(), a.A))
-	case opUpgrade:
-		if a.A < len(w.P) {
-			return "upgrade " + w.P[a.A].Name + " to release 29"
-		}
-		return "upgrade -"
+	case opCopyAct, opCopyFork, opCopySteal, opCopyDelete, opCopyRespond, opCopyInit:
+		return fmt.Sprintf("%s %s (peer #%d, variant %d)", opName[a.Op], pick(w.copies(), a.A), a.B, a.N)
 	case opCrash, opFail, opSnap:
 		return fmt.Sprintf("%s %s +%d", opName[a.Op], pick(w.real(), a.A), 1+a.N%3)
 	}
@@ -217,10 +209,6 @@ func (w *World) exec(a Action) {
 	real, vs, cs := w.real(), w.vaults(), w.copies()
 	p := real[a.A%len(real)]
 	switch a.Op {
-	case opUpgrade:
-		if a.A < len(w.P) && !w.P[a.A].Copy && w.P[a.A].Rel28 {
-			w.P[a.A].upgrade()
-		}
 	case opRotate:
 		v := vs[a.A%len(vs)]
 		if !v.Locked {
@@ -304,6 +292,18 @@ func (w *World) exec(a Action) {
 				p.flush()
 			})
 		}
+	case opCopyRespond, opCopyInit:
+		if len(cs) == 0 { // reach: take the copy now (the original may rotate after it)
+			w.makeCopy(real[a.A%len(real)])
+			cs = w.copies()
+		}
+		if c := cs[a.A%len(cs)]; a.Op == opCopyRespond {
+			w.copyRespond(c, a)
+		} else {
+			w.copyInit(c, a)
+		}
+	case opFinLoss:
+		w.finLoss(p, a)
 	case opPeek:
 		if !p.Locked {
 			for _, b := range p.boxes() {
@@ -322,6 +322,7 @@ func (w *World) advance(d int64) {
 				}
 			}
 			w.Now += visTimeout + freshWindow + 1
+			w.noteLocked(visTimeout + freshWindow + 1)
 			d -= visTimeout + freshWindow + 1
 			w.R.advance()
 		}
@@ -337,6 +338,7 @@ func (w *World) advance(d int64) {
 		step := min(d, day)
 		d -= step
 		w.Now += step
+		w.noteLocked(step)
 		w.R.advance()
 		for _, p := range w.real() {
 			p.tick()
@@ -346,14 +348,23 @@ func (w *World) advance(d int64) {
 
 func (w *World) copyAction(c *Party, a Action) {
 	orig := w.party(c.Origin)
-	if a.Op != opCopyDelete {
-		for _, k := range c.myKeys() {
-			if slices.Contains(orig.boxes(), k) && w.R.live(k) {
-				// residual: the copy collects (and acks) a mailbox the original uses
-				w.dead[c.Origin] = "an old copy collected from the original's mailbox (stated residual)"
-			}
+	var live []Key // the original's mailboxes live before the action
+	for _, k := range orig.boxes() {
+		if w.R.live(k) {
+			live = append(live, k)
 		}
 	}
+	defer func() {
+		for _, k := range live {
+			moved := slices.ContainsFunc(c.stored.Old, func(o OldKey) bool { return o.Key == k })
+			if moved || (!w.R.live(k) && slices.Contains(c.myKeys(), k)) {
+				// residual: the copy rotated its relay key away from a
+				// mailbox the original still uses (it ends with the copy's
+				// grace), or deleted it
+				w.markDeadAll(c.Origin, "an old copy moved or deleted the original's mailbox")
+			}
+		}
+	}()
 	switch a.Op {
 	case opCopyAct:
 		c.unlock()
@@ -377,7 +388,7 @@ func (w *World) copyAction(c *Party, a Action) {
 		c.guard(func() { c.rotate(pathCred) })
 		if before == orig.st.Relay && c.st.Relay != before {
 			// residual: the copy holds the live relay key and moved its mailbox
-			w.dead[c.Origin] = "an old copy rotated the original's live mailbox (stated residual)"
+			w.markDeadAll(c.Origin, "an old copy rotated the original's live mailbox")
 		}
 		for i := 0; i < 2; i++ {
 			c.collectRound(maxCollect)
@@ -385,6 +396,7 @@ func (w *World) copyAction(c *Party, a Action) {
 	case opCopySteal:
 		for _, k := range c.myKeys() {
 			ms, _ := w.R.collect(k, maxCollect)
+			w.copyTook(c, k, ms, "collected and acked")
 			for _, m := range ms {
 				w.R.ack(k, m.ID)
 			}
@@ -393,10 +405,8 @@ func (w *World) copyAction(c *Party, a Action) {
 		if w.R.live(c.st.Relay) {
 			w.R.remove(c.st.Relay, w.Now)
 			if c.st.Relay == orig.st.Relay {
-				w.dead[c.Origin] = "an old copy deleted the original's live mailbox (stated residual)"
-			} else {
-				w.noLive = "an old copy deleted a mailbox in its grace (stated residual)"
-			}
+				w.markDeadAll(c.Origin, "an old copy deleted the original's live mailbox")
+			} // one in the original's grace: marked per pair by the deferred check above
 		}
 	}
 	c.Locked = true
@@ -430,6 +440,7 @@ func (q *Party) resolve(r *PeerRec) {
 		r.IK, r.KEM = keep.New, keep.KEM
 	}
 	w.logf("%s: resolve %s keeps %d", q.Name, w.party(r.ID).Name, r.IK)
+	w.resolved[[2]PID{q.ID, r.ID}] = true
 	w.stat("resolve")
 	r.Status, r.Ref, r.CandA, r.CandB = stActive, "", IKLink{}, IKLink{}
 	q.h5(r, 0)
@@ -450,7 +461,7 @@ func (w *World) quiet() bool {
 			}
 		}
 		for _, r := range p.st.Peers {
-			if r.Status == stActive && (r.Own != nil || len(r.Ans) > 0 || r.Pend != nil) {
+			if r.Status == stActive && (r.Own != nil || len(r.Ans) > 0 || r.Pend != nil || len(r.Held) > 0) {
 				return false
 			}
 		}
@@ -484,7 +495,9 @@ func (w *World) settleOnce() {
 		p.unlock()
 	}
 	calm := 0
-	for it := 0; it < 96 && calm < 3; it++ {
+	// R29-K6: a reconnect may take three tries of 16 days, so quiescence
+	// (time past every handshake retry) may need more than 96 rounds
+	for it := 0; it < 160 && calm < 3; it++ {
 		for _, p := range w.real() {
 			for i := 0; i < 8 && p.collectRound(maxCollect) > 0; i++ {
 			}
@@ -495,7 +508,7 @@ func (w *World) settleOnce() {
 			calm = 0
 		}
 		switch {
-		case (it == 31 || it == 63) && calm == 0:
+		case (it == 31 || it == 63 || it == 95 || it == 127) && calm == 0:
 			if w.optA {
 				w.advance(aPendLife + 1) // past every lifetime of §6.3.1 (B)
 			} else {
@@ -548,6 +561,24 @@ func (w *World) checkEnd(liveness bool) {
 			sort.Strings(how)
 			// a stale record (a new invitation is needed) is not checked
 			if len(how) >= 2 && r.Status != stSuspended && r.Status != stConflicted && r.Status != stStale && !r.Warned {
+				// 0.88.2 residual: after a resolution, a further successor
+				// that only ever arrived while the record was suspended
+				// (step 1 keeps no identity link then) is not known
+				active, identity := 0, true
+				for nw := range news {
+					if slices.ContainsFunc(r.Dropped, func(l IKLink) bool { return l.Old == old && l.New == nw }) {
+						continue
+					}
+					if w.evidActive[key][nw] {
+						active++
+					} else if !w.identSucc[nw] {
+						identity = false // a relay successor: not this residual
+					}
+				}
+				if w.optA && identity && w.resolved[key] && active < 2 && slices.ContainsFunc(w.copies(), func(c *Party) bool { return c.Origin == key[1] }) {
+					w.exempt("I4", resCopySuccSusp)
+					continue
+				}
 				w.violate("I4", "%s saw two successors of %d from %s but is not suspended: carried in %s", q.Name, old, w.party(key[1]).Name, strings.Join(how, " + "))
 			}
 		}
@@ -564,6 +595,11 @@ func (w *World) checkEnd(liveness bool) {
 				other = other || c.Origin == q.ID
 			}
 			switch {
+			case !two && other && w.resolved[[2]PID{r.ID, q.ID}] && w.forkFinK7[[2]PID{q.ID, r.ID}] && w.copyForked(q.ID):
+				// 0.88.2 residual: Q's own copy forked; R suspended and
+				// resolved, and R's strict F1 reconnect named an epoch Q
+				// takes as fork evidence at its hs.fin
+				w.exempt("I4", resCopyForkResolve)
 			case !two && other:
 				w.violate("I4-misattributed", "%s suspended %s (%s) as two copies; the copy is %s's own", q.Name, w.party(r.ID).Name, r.Ref, q.Name)
 			case !two:
@@ -573,14 +609,14 @@ func (w *World) checkEnd(liveness bool) {
 	}
 	for key, e := range w.forkDue {
 		if r := w.party(key[0]).st.peer(key[1]); r.Status != stSuspended && r.Cur == e {
+			if w.party(key[0]).Device {
+				w.exempt("I3", resDevice)
+				continue
+			}
 			w.violate("I3", "%s: %s's first handshake under its new ik found copy epoch E%d current, and %s did not suspend", w.party(key[0]).Name, w.party(key[1]).Name, e, w.party(key[0]).Name)
 		}
 	}
 	if !liveness {
-		return
-	}
-	if w.noLive != "" {
-		w.stat("I1/I2 skipped: " + w.noLive)
 		return
 	}
 	// I2 at quiescence
@@ -589,7 +625,7 @@ func (w *World) checkEnd(liveness bool) {
 			// SPEC FINDING (I2 wording): checked only for pairs active on both
 			// sides; a holder whose peer went stale cannot learn its mailbox ended.
 			o := w.party(r.ID).st.peer(x.ID)
-			if w.dead[x.ID] != "" || w.dead[r.ID] != "" {
+			if w.dead(x.ID, r.ID) {
 				continue
 			}
 			if r.Status != stActive || o == nil || o.Status != stActive || w.limits(x, &r) || w.limits(w.party(r.ID), o) {
@@ -623,16 +659,30 @@ func (w *World) checkEnd(liveness bool) {
 		}
 	}
 	probe := map[int]string{}
+	probeOld := map[int][2]PID{} // probes between an old app and its vault
+	probeF := map[int]bool{}     // probes of a pair under finding F
 	for _, pr := range pairs {
 		ra, rb := pr.a.st.peer(pr.b.ID), pr.b.st.peer(pr.a.ID)
-		if why := w.dead[pr.a.ID] + w.dead[pr.b.ID]; why != "" {
-			w.stat("I1 pair excluded: " + why)
+		if w.dead(pr.a.ID, pr.b.ID) {
+			w.exempt("I1", w.deadRes[pairKey(pr.a.ID, pr.b.ID)])
 			continue
 		}
 		if ra.Status != stActive || rb.Status != stActive {
 			w.stat("I1 pair excluded: " + map[bool]string{true: "suspended/stale/conflict"}[true])
 			continue
 		}
+		if (ra.Warned || rb.Warned) && w.devCopyFirst[pairKey(pr.a.ID, pr.b.ID)] {
+			// rule C between a vault and its device, where the successor
+			// kept (followed or seen first) is the old copy's: the copy's
+			// rotation counts as P's (§3.4.1 Residuals, bullets 2 and 3).
+			// When the real link came first, I1 still applies.
+			w.exempt("I1", resCopyRotated)
+			continue
+		}
+		// an app from before release 29 may lose the connection (§3.4.1
+		// Residuals, "Earlier releases are unsupported"), but the member is
+		// still told (R29-D4): its failures are noted for I7, not exempted
+		oldApp := w.residualOf(pr.a.ID, pr.b.ID) == resOldApp
 		if w.limits(pr.a, ra) || w.limits(pr.b, rb) {
 			// SPEC FINDING: §6.6 "Limits": the update cannot reach the peer
 			// (resends ended by a definite refusal); the pair is dead but not
@@ -649,32 +699,95 @@ func (w *World) checkEnd(liveness bool) {
 		if c := w.lostLabel(pr.a.ID, pr.b.ID); c != "" {
 			inv1 = "I1/hs-lost:" + c
 		}
+		k := pairKey(pr.a.ID, pr.b.ID)
+		// finding F: a failure is the device exception, counted once per pair
+		fPair := w.fDue[k]
+		fCounted := false
+		fAfterPair := false
+		fail := func(inv, format string, a ...any) {
+			if fPair {
+				if !fCounted {
+					fCounted = true
+					w.exempt("I1", resDeviceF)
+				}
+				return
+			}
+			if oldApp {
+				w.oldAppDown(k, inv, fmt.Sprintf(format, a...))
+				return
+			}
+			w.violate(inv, format, a...)
+		}
 		for _, s := range []struct {
 			me, it *Party
 			r      *PeerRec
 		}{{pr.a, pr.b, ra}, {pr.b, pr.a, rb}} {
 			if s.r.Relay != s.it.st.Relay {
-				w.violate(inv1, "%s: %s has relay key %d for %s, which is at %d", name, s.me.Name, s.r.Relay, s.it.Name, s.it.st.Relay)
+				fail(inv1, "%s: %s has relay key %d for %s, which is at %d", name, s.me.Name, s.r.Relay, s.it.Name, s.it.st.Relay)
 			}
 			if s.r.IK != s.it.st.IK {
-				w.violate(inv1, "%s: %s has ik %d for %s, which is at %d", name, s.me.Name, s.r.IK, s.it.Name, s.it.st.IK)
+				fail(inv1, "%s: %s has ik %d for %s, which is at %d", name, s.me.Name, s.r.IK, s.it.Name, s.it.st.IK)
 			}
-			if s.r.KeyFor != s.me.st.Relay || s.r.standing(s.me.st.Relay, s.it.st.Relay, w.Now).JTI == 0 {
-				w.violate(inv1, "%s: %s holds no token passing rule T for %s's current mailbox (key for it %d, own %d)", name, s.me.Name, s.it.Name, s.r.KeyFor, s.me.st.Relay)
+			noTok := s.r.KeyFor != s.me.st.Relay || s.r.standing(s.me.st.Relay, s.it.st.Relay, w.Now).JTI == 0
+			// F's after-effect (0.88.2): the device's token refresh, sent under
+			// the epoch the vault abandoned while pending, was lost, and the
+			// vault still holds no token for it: the token, the outbox entries
+			// waiting on it and the vault->device message are F, not violations
+			fAfter := noTok && !fPair && !s.me.Device && s.it.Device && w.fLostTok[k]
+			if fAfter {
+				w.exempt("I1", resDeviceFAfter)
+				fAfterPair = true
+				continue
+			}
+			if noTok {
+				fail(inv1, "%s: %s holds no token passing rule T for %s's current mailbox (key for it %d, own %d)", name, s.me.Name, s.it.Name, s.r.KeyFor, s.me.st.Relay)
 			}
 			for _, e := range s.me.st.Out {
 				if e.To == s.it.ID && !e.Done && !e.Ended {
-					w.violate(inv1, "%s: %s still holds %s for %s", name, s.me.Name, kindName[e.M.Kind], s.it.Name)
+					fail(inv1, "%s: %s still holds %s for %s", name, s.me.Name, kindName[e.M.Kind], s.it.Name)
 					break
 				}
 			}
+			if len(s.r.Held) > 0 {
+				fail(inv1, "%s: %s still holds %d held message(s) for %s (R29-K5)", name, s.me.Name, len(s.r.Held), s.it.Name)
+			}
 		}
 		if ra.Cur == 0 || ra.Cur != rb.Cur {
-			w.violate(inv1, "%s: current epochs differ (E%d vs E%d)", name, ra.Cur, rb.Cur)
+			fail(inv1, "%s: current epochs differ (E%d vs E%d)", name, ra.Cur, rb.Cur)
+		} else if w.optA {
+			// R29 I6: after an ik rotation of either side, an epoch whose
+			// signer is the new ik is current at both sides
+			for _, s := range []struct {
+				it  *Party
+				at  *PeerRec // the peer's record of it
+				own *PeerRec // its own record
+			}{{pr.b, ra, rb}, {pr.a, rb, ra}} {
+				if s.it.st.IK == w.initIK[s.it.ID] {
+					continue
+				}
+				ep, mine := s.at.epoch(s.at.Cur), s.own.epoch(s.own.Cur)
+				if ep == nil || mine == nil || ep.Signer != s.it.st.IK || mine.Own != s.it.st.IK {
+					sig, own := Key(0), Key(0)
+					if ep != nil {
+						sig = ep.Signer
+					}
+					if mine != nil {
+						own = mine.Own
+					}
+					fail("I6", "%s: after %s's rotation the current epoch E%d is signed by %d (peer's record) / %d (own record), not its new ik %d",
+						name, s.it.Name, ra.Cur, sig, own, s.it.st.IK)
+				}
+			}
 		}
 		for _, s := range [][2]*Party{{pr.a, pr.b}, {pr.b, pr.a}} {
 			id := w.id()
 			probe[id] = s[0].Name + "->" + s[1].Name
+			if oldApp {
+				probeOld[id] = k
+			}
+			if fPair || (fAfterPair && !s[0].Device) {
+				probeF[id] = true
+			}
 			me := s[0]
 			me.guard(func() {
 				me.enqueue(s[1].ID, Msg{Kind: KSession, Probe: id}, nil)
@@ -691,6 +804,14 @@ func (w *World) checkEnd(liveness bool) {
 	sort.Ints(ids)
 	for _, id := range ids {
 		if !w.probes[id] {
+			if probeF[id] {
+				w.exempt("I1", resDeviceF)
+				continue
+			}
+			if k, ok := probeOld[id]; ok {
+				w.oldAppDown(k, "I1", "a message "+probe[id]+" was not accepted at quiescence")
+				continue
+			}
 			w.violate("I1", "a message %s was not accepted at quiescence", probe[id])
 		}
 	}
@@ -732,23 +853,35 @@ func (w *World) checkEnd(liveness bool) {
 	for _, k := range keys {
 		a, b := w.party(k[0]).st.peer(k[1]), w.party(k[1]).st.peer(k[0])
 		endsStale := (a != nil && a.Status == stStale) || (b != nil && b.Status == stStale)
-		if cause := w.staleAt[k]; cause != "" && endsStale && w.dead[k[0]] == "" && w.dead[k[1]] == "" {
-			w.violate("I1-stale-split", "%s: stale after a split: %s", pairName(w, k[0], k[1]), cause)
+		if cause := w.staleAt[k]; cause != "" && endsStale && !w.dead(k[0], k[1]) {
+			w.stat("I7: stale after a split (visible)") // was the model's I1-stale-split; R29 §10: a split ending stale is visible
 		}
 	}
 	for _, id := range pids {
 		ft := w.probeFate[id]
 		pr := w.probeDep[id]
-		if w.dead[pr[0]] != "" || w.dead[pr[1]] != "" || w.probes[id] {
+		if w.probes[id] {
+			continue
+		}
+		if w.dead(pr[0], pr[1]) {
+			w.exempt("I1-loss", w.deadRes[pairKey(pr[0], pr[1])])
+			continue
+		}
+		if w.probeF[id] {
+			// lost through finding F (fLoss: sent under the epoch the vault
+			// abandoned while pending, or, under F, under one the device
+			// is no longer on)
+			w.exempt("I1-loss", resDeviceF)
+			continue
+		}
+		if res := w.residualOf(pr[0], pr[1]); res == resOldApp && !strings.HasPrefix(w.probeFate[id], "accept") {
+			w.oldAppDown(pairKey(pr[0], pr[1]), "I1-loss", "a message "+w.party(pr[0]).Name+"->"+w.party(pr[1]).Name+" was lost ("+ft+")")
 			continue
 		}
 		switch {
 		case strings.HasPrefix(ft, "unreadable"):
 			inv := "I1-loss"
-			switch ep := w.probeEpoch[id]; {
-			case w.reverted[ep]:
-				inv = "I1-loss/revert" // the revert's stated loss
-			case !w.hasEpoch[[2]int{int(pr[1]), ep}]:
+			if ep := w.probeEpoch[id]; !w.hasEpoch[[2]int{int(pr[1]), ep}] {
 				inv = "I1-loss/split" // under an epoch the receiver never activated
 			}
 			w.violate(inv, "a message %s->%s was silently unreadable (%s)", w.party(pr[0]).Name, w.party(pr[1]).Name, ft)
@@ -756,6 +889,16 @@ func (w *World) checkEnd(liveness bool) {
 			w.violate("I1-loss", "a message %s->%s vanished (no fate)", w.party(pr[0]).Name, w.party(pr[1]).Name)
 		}
 	}
+}
+
+// copyForked: an old copy of p made an identity link of its own (a fork).
+func (w *World) copyForked(p PID) bool {
+	for l, by := range w.iklinkBy {
+		if c := w.party(by.By); c.Copy && c.Origin == p && !slices.Contains(w.party(p).st.Chain, l) {
+			return true
+		}
+	}
+	return false
 }
 
 // limits: §6.6 "Limits": x's recipient has not followed x's new address
@@ -786,29 +929,11 @@ func runActions(cfg Config, seed uint64, acts []Action, verbose bool) *World {
 	w := setup(cfg, seed)
 	w.verbose = verbose
 	w.debugUnlinked = os.Getenv("TRUSTMODEL_DEBUG") != ""
-	switch os.Getenv("TRUSTMODEL_FIXB") { // F1 variants (default: strict, the lead's choice)
-	case "fixb": // fix B as in 9f1a0da
-		w.fixBStrict = false
-	case "window":
-		w.fixBStrict, w.f1Window = false, true
-	case "off": // no fix B (2da316e F1), for attribution
-		w.fixBStrict, w.fixBOff = false, true
-	}
-	w.featMode = os.Getenv("TRUSTMODEL_FEATMODE") // "" or always (the spec: every message), first, echo
-	if w.featMode == "" {
-		w.featMode = "always"
-	}
-	w.r28Spec = os.Getenv("TRUSTMODEL_R28") == "spec"
 	w.ruleEKeepFin = os.Getenv("TRUSTMODEL_RULEEFIN") == "keep"
-	w.f3Suspend28 = os.Getenv("TRUSTMODEL_F3UNGATED") == "suspend"
-	w.noRekeyRC = os.Getenv("TRUSTMODEL_REKEYRC") == "off"
-	w.noRCRetry = os.Getenv("TRUSTMODEL_RCRETRY") == "off"
-	w.r1Lite = os.Getenv("TRUSTMODEL_R1LITE") != ""
-	w.f3CtxMsg = os.Getenv("TRUSTMODEL_F3RCCTX") != "confirmed"
+	w.noRefusedLinks = os.Getenv("TRUSTMODEL_NOM1") != "" // attribution: 0.88.2's links of a refused reconnect off
+	w.rotBurst = os.Getenv("TRUSTMODEL_ROTBURST") != ""
 	defer w.expoStats()
-	defer w.gateStats()
 	defer w.rcStats()
-	defer w.endStats()
 	for _, a := range acts {
 		w.exec(a)
 		w.monitor()
@@ -818,14 +943,9 @@ func runActions(cfg Config, seed uint64, acts []Action, verbose bool) *World {
 	}
 	w.checkEnd(true)
 	w.monitor()
+	w.checkI7()
+	w.checkHonestStale()
 	return w
-}
-
-func firstInv(w *World) string {
-	if len(w.viol) == 0 {
-		return ""
-	}
-	return w.viol[0].Inv + ": " + strings.SplitN(w.viol[0].Detail, " ", 2)[0]
 }
 
 // shrink removes actions while the same invariant still fails (replay).
@@ -834,6 +954,10 @@ func shrink(cfg Config, seed uint64, acts []Action, inv string) []Action {
 	for chunk := len(cur) / 2; chunk >= 1; chunk /= 2 {
 		for i := 0; i+chunk <= len(cur); {
 			try := append(slices.Clone(cur[:i]), cur[i+chunk:]...)
+			if len(try) == len(cur) {
+				i += chunk
+				continue
+			}
 			w := runActions(cfg, seed, try, false)
 			if len(w.viol) > 0 && w.viol[0].Inv == inv {
 				cur = try

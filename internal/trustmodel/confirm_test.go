@@ -5,29 +5,17 @@ import (
 	"slices"
 )
 
-// VAULT-MESSAGING 0.86.0 (draft) §6.3.1 at vettid.org 2da316e: lifetimes,
-// activation on confirmation, the confirmed epoch, rule E, and the
-// Deployment gate (responder half toward every peer, initiator half only
-// toward peers that advertise hs_confirm, a reverting initiator toward
-// the others). Config.OldRules turns all of it off (f4a4d97).
+// VAULT-MESSAGING 0.87.1 §6.3.1 at vettid.org 4734dfd8: lifetimes,
+// activation on confirmation, the confirmed epoch, rule E. Release 29 has
+// no gate: both halves always run, between release-29 vaults and toward
+// their devices. Config.OldRules turns all of it off (f4a4d97).
 
 const (
-	aHSLife   = 16 * day       // an initiator's handshake awaiting hs.resp
-	aAnsLife  = 16 * day       // a responder's answer awaiting hs.fin (L)
-	aPendLife = 32 * day       // an initiator's pending epoch awaiting confirmation (B)
-	aConfKeys = 48 * day       // a confirmed epoch's keys while not current; the revert's keep
-	aRevert   = msgTTL + 2*day // Deployment: an old-epoch message this long after hs.fin reverts (lead item 5)
+	aHSLife   = 16 * day // an initiator's handshake awaiting hs.resp
+	aAnsLife  = 16 * day // a responder's answer awaiting hs.fin (L)
+	aPendLife = 32 * day // an initiator's pending epoch awaiting confirmation (B)
+	aConfKeys = 48 * day // a confirmed epoch's keys while not current
 )
-
-// Release-29 options (§15 item 50); optFull is the whole draft (A).
-const (
-	optFull = iota
-	optR1   // everything, gated
-	optR2   // the responder half only
-	optR3   // the responder half and the revert, no confirmation
-)
-
-var optName = [...]string{"A", "R1", "R2", "R3"}
 
 func (w *World) hsLifeFor(reconnect bool) int64 {
 	switch {
@@ -46,38 +34,15 @@ func (w *World) answerLife() int64 {
 	return ansLife
 }
 
-// newSpec: this party implements 0.86.0 (not release <= 28).
-func (q *Party) newSpec() bool { return q.w.optA && !q.Rel28 }
+// newSpec: this party implements §6.3.1 (Config.OldRules: none does).
+func (q *Party) newSpec() bool { return q.w.optA }
 
-// respHalf: the responder half applies toward every peer.
-func (q *Party) respHalf() bool { return q.newSpec() }
+// respHalf: the responder half applies toward every peer (an app from
+// before release 29 has none).
+func (q *Party) respHalf() bool { return q.newSpec() && !q.OldApp }
 
-// advertises hs_confirm (every implementation of the subsection).
-func (p *Party) advertises() bool { return p.w.optA && !p.Rel28 }
-
-// initHalf: the pending epoch and B, only toward a peer that advertises
-// hs_confirm (and whose features this side has seen).
-func (q *Party) initHalf(r *PeerRec) bool {
-	if !q.newSpec() {
-		return false
-	}
-	switch q.Opt {
-	case optR2, optR3:
-		return false
-	case optR1:
-		return r.PeerA
-	}
-	return !q.w.gate || r.PeerA
-}
-
-// revertRule: toward an ungated peer the initiator activates at hs.fin,
-// keeps the old epoch and reverts (Deployment). R2 has no revert.
-func (q *Party) revertRule(r *PeerRec) bool {
-	if !q.newSpec() || q.initHalf(r) || q.w.r1Lite {
-		return false // R1-lite (r10): toward an ungated peer, as release 28 (no revert, keep or copies)
-	}
-	return q.Opt == optR1 || q.Opt == optR3 || (q.Opt == optFull && q.w.gate)
-}
+// initHalf: the pending epoch and B, toward every peer (R29-I1: no gate).
+func (q *Party) initHalf() bool { return q.newSpec() && !q.OldApp }
 
 // makePending: the initiator, having verified sig_R, records the new epoch
 // as pending (established, signer recorded, not current).
@@ -89,26 +54,55 @@ func (q *Party) makePending(r *PeerRec, id int, signer, own Key, pos Pos, respTs
 	r.Pend = &PendEp{ID: id, Signer: signer, Own: own, FinAt: q.w.Now, RespTs: respTs, Reconnect: reconnect}
 	q.w.hasEpoch[[2]int{int(q.ID), id}] = true
 	q.w.stat("A:pending")
+	q.w.hit("I1:pending")
 	q.w.logf("%s: epoch E%d with %s PENDING (signer %d)", q.Name, id, q.w.party(r.ID).Name, signer)
 }
 
 // confirm: a message from the peer under the pending epoch.
 func (q *Party) confirm(r *PeerRec) {
 	pe := r.Pend
-	q.w.noteEst(q, r, "confirmation")
 	for j := range r.Epochs {
 		ep := &r.Epochs[j]
 		if ep.ID == pe.ID {
-			ep.Pending = false
+			ep.Pending, ep.EverCur = false, true
 		} else if ep.Superseded == 0 {
 			ep.Superseded = q.w.Now
 		}
 	}
 	r.Cur, r.Pend = pe.ID, nil
+	q.w.noteCurrent(q, pe.ID)
+	if r.Device && !q.Copy {
+		// a newer epoch confirmed: F's gap is closed for this pair
+		delete(q.w.fDue, pairKey(q.ID, r.ID))
+	}
 	r.setConf(pe.ID, q.w.Now) // activated at confirmation
 	r.AbanIDs = nil
+	if pe.Reconnect {
+		r.RCNamed, r.RCFails = 0, 0 // R29-K6: the reconnect succeeded
+	}
+	q.releaseHeld(r) // R29-K5: sealed under the new epoch at confirmation
 	q.w.stat("A:confirmed")
+	q.w.hit("I2:confirmed")
 	q.w.logf("%s: epoch E%d with %s CONFIRMED (current)", q.Name, pe.ID, q.w.party(r.ID).Name)
+}
+
+// markF: ground truth for finding F (§3.4.1 Invariants, "With it, finding
+// F"; 0.88.1, owner decision a, GC 01M6S2ECFHHGFXC7H8HPZ2FB2V): the vault
+// abandoned a pending rekey toward its device or agent, for any reason
+// (B, want of a token, token_expired, its own rotation S5, ...). The device
+// may already have activated that epoch and stay on it, while the vault's
+// rekey from its current epoch may never be deposited or opened. Until a
+// newer epoch is confirmed, the pair's I1, I1-loss and I7 failures are the
+// device exception.
+func (q *Party) markF(r *PeerRec, why string) {
+	k := pairKey(q.ID, r.ID)
+	if q.Copy || q.w.fDue[k] {
+		return
+	}
+	q.w.fDue[k] = true
+	q.w.hit("D1:F-abandoned-toward-device")
+	q.w.stat("F: abandoned toward a device: " + why)
+	q.w.logf("%s: finding F for %s: a pending rekey abandoned (%s)", q.Name, q.w.party(r.ID).Name, why)
 }
 
 // setConf: the confirmed epoch moves forward (never back); the one it
@@ -120,7 +114,11 @@ func (r *PeerRec) setConf(id int, now int64) {
 	r.ConfID, r.ConfUntil = id, 0
 }
 
-// abandonPending: H5, S5, crossing, token_expired, or B passed.
+// abandonPending: R29-I7, every abandon of a pending epoch (B, I6, H5/S5,
+// a link, a crossing, the peer's handshake activated, a reconnect starts).
+// The tokens its hs.init carried were revoked when that handshake ended
+// (abandonOwn at hs.resp's write keeps them in r.Issued; the abandon here
+// revokes them).
 func (q *Party) abandonPending(r *PeerRec, why string, restart bool) {
 	pe := r.Pend
 	if pe == nil {
@@ -133,18 +131,32 @@ func (q *Party) abandonPending(r *PeerRec, why string, restart bool) {
 	}
 	r.Pend = nil
 	r.AbanIDs = append(r.AbanIDs, pe.ID)
+	if r.Device && !q.Device && !pe.Reconnect {
+		q.markF(r, why) // finding F: until a newer epoch is confirmed
+	}
 	q.w.stat("A:abandoned:" + why)
+	q.w.hit("I7:abandon")
 	q.w.logf("%s: pending E%d with %s ABANDONED (%s)", q.Name, pe.ID, q.w.party(r.ID).Name, why)
 	if !restart || r.Status != stActive {
 		return
 	}
-	valid := r.standing(r.KeyFor, r.Relay, q.w.Now).JTI != 0
+	valid := r.standing(r.KeyFor, r.Relay, q.now()).JTI != 0
 	switch {
-	case why == "B passed" && !r.Device:
+	case why == "B passed" && r.Device:
+		q.w.hit("D1:B-rekey")
+		q.deviceNotice(r, "B passed")
+		q.startHS(r, false) // R29-D1: toward a device, rekey from the current epoch, token or not
+	case why == "B passed" && pe.Reconnect:
+		q.w.hit("I5:B-reconnect-stale")
+		q.markStale(r, "K6: a pending reconnect reached B") // R29-I5, K6
+		q.h5(r, -1)
+	case why == "B passed":
+		q.w.hit("I5:B-reconnect")
 		q.w.nextOrigin = "B reconnect"
-		q.startHS(r, true) // §6.3.1: I reconnects naming its current epoch
-	case why == "B passed" && !valid:
-		q.markStale(r, "pair again (B passed)")
+		q.startHS(r, true) // R29-I5: I reconnects naming its current epoch
+	case pe.Reconnect:
+		q.w.hit("I7:fresh-reconnect")
+		q.startHS(r, true) // R29-I7: a fresh reconnect, not a rekey
 	default:
 		q.startHS(r, !r.Device && !valid)
 	}
@@ -201,14 +213,25 @@ func (q *Party) beforeAccept(r *PeerRec, m *RMsg, pos Pos) {
 	if !q.newSpec() || M.Epoch == 0 || !q.steps14(r, m, pos) {
 		return
 	}
-	// Deployment: the reverting initiator toward an ungated peer
-	if r.RevOld != 0 {
-		switch {
-		case M.Epoch == r.Cur:
-			r.RevOld, r.RevSent = 0, nil // the peer activated: the old epoch goes as usual
-		case M.Epoch == r.RevOld && M.Kind != KFin && M.Ts > r.RevFinAt+aRevert:
-			q.revert(r, M.Kind == KInit) // a92a6eb: a rekey hs.init triggers it too; it is then answered
-			return
+	// R29-F3: the received flag of that epoch, by every message but hs.fin
+	if ep := r.epoch(M.Epoch); ep != nil && M.Kind != KFin && !ep.Flag {
+		ep.Flag = true
+		q.w.hit("F3:flag-set")
+		if tr, ok := q.w.epTruth[ep.ID]; ok && !q.Copy && (q.w.party(tr[0]).Copy || q.w.party(tr[1]).Copy) {
+			q.pendFlag = append(q.pendFlag, ep.ID) // ground truth once the write stores it
+		}
+		if ep.Demoted && !r.Device && r.Status == stActive && !q.w.noFlagJudged {
+			// (0.88.2, owner decision a, GC 01M6SQNDPRKRMEXQFA7XFMGACH) the
+			// flag is judged whenever it is set: a flag-setting message
+			// accepted under an epoch demoted with its flag clear (K4 or K7;
+			// deposited before x, processed after the demotion) is P's side
+			// using it, which an honest P never does: a copy did
+			q.w.hit("F3:flag-on-demoted-suspends")
+			q.w.logf("%s: a flag-setting message under demoted E%d of %s: a copy used it", q.Name, ep.ID, q.w.party(r.ID).Name)
+			q.suspend(r, "connection.fork_suspected/epoch")
+		}
+		if M.Kind == KConfirm {
+			q.w.hit("F3:flag-set-by-hs.confirm")
 		}
 	}
 	if r.Pend != nil && M.Epoch == r.Pend.ID && M.Kind != KFin && !q.w.noF5 { // noF5: see handle
@@ -220,45 +243,10 @@ func (q *Party) beforeAccept(r *PeerRec, m *RMsg, pos Pos) {
 	// the confirmed epoch: the newest (activation order) the peer used, not hs.fin
 	if M.Kind != KFin && M.Epoch != r.ConfID && r.newer(M.Epoch, r.ConfID) {
 		r.setConf(M.Epoch, q.w.Now)
+		q.w.hit("R2:confirmed-moves")
 	}
 	if r.ConfID != 0 && r.ConfID != r.Cur && M.Epoch == r.ConfID {
 		r.Reconfirm = true
-	}
-}
-
-// revert: the peer never activated the new epoch; it is destroyed, the old
-// one is current again, and I rekeys from it. What I sent under it is lost.
-func (q *Party) revert(r *PeerRec, rekeyIn bool) {
-	gone := r.Cur
-	q.w.noteEst(q, r, "revert")
-	if pr := q.w.party(r.ID).st.peer(q.ID); pr != nil && pr.epoch(gone) != nil && !pr.epoch(gone).Destroyed && !pr.epoch(gone).Demoted {
-		q.w.violate("I1-false-revert", "%s reverted E%d although %s had activated it", q.Name, gone, q.w.party(r.ID).Name)
-	}
-	for j := range r.Epochs {
-		if ep := &r.Epochs[j]; ep.ID == gone {
-			ep.Destroyed, ep.DestroyTs = true, 1<<62
-		}
-	}
-	q.w.reverted[gone] = true
-	r.Cur, r.RevOld = r.RevOld, 0
-	if ep := r.epoch(r.Cur); ep != nil {
-		ep.Superseded = 0
-	}
-	q.w.stat("A:reverted")
-	q.w.logf("%s: E%d with %s REVERTED to E%d (the peer never activated it); connection.epoch_reverted", q.Name, gone, q.w.party(r.ID).Name, r.Cur)
-	for _, m := range r.RevSent { // lead item 5: re-sealed in the restored epoch, same inner id
-		if q.w.noLead5 {
-			break // switch: what was sent under the destroyed epoch is lost
-		}
-		q.w.stat("A:revert-resealed")
-		c := cloneMsg(m)
-		c.Ts = q.now() // same inner id, a new ts
-		q.enqueueRaw(r.ID, c)
-	}
-	r.RevSent = nil
-	q.abandonOwn(r)
-	if !rekeyIn {
-		q.startHS(r, false) // else the peer's rekey is answered
 	}
 }
 
@@ -268,9 +256,13 @@ func (q *Party) ruleE(r *PeerRec, ts int64) {
 	after := false
 	for j := range r.Epochs {
 		ep := &r.Epochs[j]
-		if after && !ep.Destroyed && !ep.Pending {
+		if after && ep.Abandoned && !ep.Destroyed {
+			q.w.hit("R5:own-abandoned-not-destroyed") // R29-R5: I7 applies to it
+		}
+		if after && !ep.Destroyed && !ep.Pending && !ep.Abandoned {
 			ep.Destroyed, ep.DestroyTs = true, ts
 			q.w.stat("A:destroyed-later-epoch")
+			q.w.hit("R5:destroyed")
 			if !q.w.ruleEKeepFin {
 				// lead's fix (r7): an hs.fin for a destroyed epoch not yet
 				// deposited is dropped with its outbox entry
@@ -300,21 +292,74 @@ func (q *Party) reconfirm() {
 		queued := slices.ContainsFunc(q.st.Out, func(e Entry) bool {
 			return e.To == r.ID && e.M.Kind == KConfirm && !e.Done && !e.Ended
 		})
-		if r.Cur != 0 && !q.OldConfirm && (!queued || q.w.noF10) { // noF10: no cap
+		if q.Device && q.w.Now-r.LastConfirm < minute {
+			q.w.hit("D2:confirm-rate-limited") // R29-D2: at most once a minute
+			continue
+		}
+		if r.Cur != 0 && (!queued || q.w.noF10) { // noF10: no cap
 			q.w.stat("A:hs.confirm-again")
+			q.w.hit("R3:hs.confirm-again")
+			r.LastConfirm = q.w.Now
 			q.enqueue(r.ID, Msg{Kind: KConfirm, Epoch: r.Cur}, nil)
+		} else if queued {
+			q.w.hit("R3:one-still-queued")
 		}
 	}
+}
+
+// confirmAgainAfter: (0.88.1, vettid.org #554) R queues hs.confirm again
+// 12 days after the last one it queued (T less 2 days; not scaled).
+const confirmAgainAfter = 12 * day
+
+// confirmAgain: (0.88.1) §6.3.1 Responder, "hs.confirm again". While R's
+// current epoch with I is one R activated as responder and R's confirmed
+// epoch is neither it nor a later one (activation order), R queues
+// hs.confirm under it again 12 days after the last one it queued, unless
+// one to I is still in its outbox; none while the epoch is demoted or the
+// connection suspended. A device does the same toward its vault.
+func (p *Party) confirmAgain(r *PeerRec) {
+	w := p.w
+	if !p.respHalf() || w.noConfirmAgain || r.Status != stActive || r.Cur == 0 {
+		return
+	}
+	ep := r.epoch(r.Cur)
+	if ep == nil || ep.MineInit || ep.Demoted || ep.Pending || ep.Abandoned {
+		return
+	}
+	ic := slices.IndexFunc(r.Epochs, func(e Epoch) bool { return e.ID == r.Cur })
+	if ik := slices.IndexFunc(r.Epochs, func(e Epoch) bool { return e.ID == r.ConfID }); ik >= ic {
+		return // the confirmed epoch is the current one or a later one
+	}
+	if w.Now-r.LastConfirm < confirmAgainAfter {
+		return
+	}
+	if slices.ContainsFunc(p.st.Out, func(e Entry) bool {
+		return e.To == r.ID && e.M.Kind == KConfirm && !e.Done && !e.Ended
+	}) {
+		return
+	}
+	w.hit("R3:hs.confirm-again-12d")
+	w.logf("%s: hs.confirm again under E%d for %s (12 days, not yet confirmed)", p.Name, r.Cur, w.party(r.ID).Name)
+	r.LastConfirm = w.Now
+	p.enqueue(r.ID, Msg{Kind: KConfirm, Epoch: r.Cur}, nil)
 }
 
 // tickA: §6.3.1 timers.
 func (p *Party) tickA(r *PeerRec) {
 	w := p.w
+	p.confirmAgain(r)
 	if pe := r.Pend; pe != nil && w.Now-pe.FinAt > aPendLife && (p.collectedSinceUnlock || w.noF13B) {
 		p.abandonPending(r, "B passed", true)
 	}
-	if r.RevOld != 0 && w.Now > r.RevUntil {
-		r.RevOld = 0
+	// R29-I6: a pending rekey with no valid standing token (own clock) is
+	// abandoned; a pending reconnect is not (it ends at B)
+	if pe := r.Pend; pe != nil && r.standing(r.KeyFor, r.Relay, p.now()).JTI == 0 {
+		if pe.Reconnect {
+			w.hit("I6:reconnect-kept-without-token")
+		} else {
+			w.hit("I6:rekey-abandoned-no-token")
+			p.abandonPending(r, "no valid standing token", true)
+		}
 	}
 	// keys end; ids stay (G): the confirmed epoch's and abandoned ones'
 	for j := range r.Epochs {
@@ -329,6 +374,7 @@ func (p *Party) tickA(r *PeerRec) {
 			}
 			if r.ConfUntil != 0 && w.Now > r.ConfUntil {
 				ep.KeysGone = true
+				w.hit("L1:confirmed-epoch-keys-end")
 			}
 		} else if ep.Superseded != 0 && w.Now-ep.Superseded > 16*day {
 			ep.KeysGone = true
@@ -367,6 +413,7 @@ func (p *Party) idResend(r *PeerRec, m *RMsg) {
 	r.IdResend, r.IdResendBatch = p.w.Now, true
 	r.IdResendN++
 	p.w.stat("A:identity.rotate-resent")
+	p.w.hit("K3:identity.rotate-resent")
 	p.enqueue(r.ID, Msg{Kind: KIdRot, Rot: p.ownLinks(ep.Own)}, nil)
 }
 
@@ -376,6 +423,9 @@ func (p *Party) idResend(r *PeerRec, m *RMsg) {
 func (q *Party) markStale(r *PeerRec, ref string) {
 	r.Status, r.Ref = stStale, ref
 	w := q.w
+	q.endHeld(r)
+	w.logf("%s: %s STALE (%s)", q.Name, w.party(r.ID).Name, ref)
+	w.feedItem(q.ID, r.ID, "connection.stale")
 	if q.Copy {
 		return
 	}
@@ -397,12 +447,10 @@ func (q *Party) markStale(r *PeerRec, ref string) {
 }
 
 // consistent: the two records can still talk: the same current epoch, or
-// one side's current is the other's pending epoch, its confirmed epoch,
-// or the old epoch it keeps for a revert.
+// one side's current is the other's pending epoch or its confirmed epoch.
 func consistent(a, b *PeerRec, aNew, bNew bool) bool {
 	ok := func(x, y *PeerRec, yNew bool) bool { // y can take x's current epoch
-		return x.Cur == y.Cur || (y.Pend != nil && y.Pend.ID == x.Cur) || (yNew && y.ConfID == x.Cur && x.Cur != 0) ||
-			(y.RevOld != 0 && y.RevOld == x.Cur)
+		return x.Cur == y.Cur || (y.Pend != nil && y.Pend.ID == x.Cur) || (yNew && y.ConfID == x.Cur && x.Cur != 0)
 	}
 	return ok(a, b, bNew) || ok(b, a, aNew)
 }

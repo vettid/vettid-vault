@@ -22,9 +22,12 @@ func (p *Party) rotate(path int) {
 	}
 	w.logf("%s: ROTATE (%s)", p.Name, pathName[path])
 	w.stat("rotate:" + pathName[path])
-	if p.Rel28 || p.Opt != optFull {
+	if !p.Copy && path != pathDevice {
+		w.rotTimes[p.ID] = append(w.rotTimes[p.ID], w.Now) // the rapid-rotation residual (M2)
+	}
+	if !w.relayRot {
 		if path == pathDevice {
-			return // releases 28 and 29 rotate no relay key (the relay-key gate)
+			return // release 29 rotates no relay key (the oracle config)
 		}
 	} else if p.st.Pend != nil {
 		if p.st.Pend.Refused && path == pathCred {
@@ -51,26 +54,20 @@ func (p *Party) rotate(path int) {
 			}
 			p.enqueue(r.ID, Msg{Kind: KIdRot, Rot: []IKLink{l}}, nil)
 			// S5: abandon own rekeys and reconnects (and pending epochs, §6.3.1),
-			// start again after identity.rotate. Release 28: rekeys only
-			// (vault/core.go:747-757: dropRekey, startRekey).
-			if p.r28Code() {
-				if o := r.Own; o != nil && !o.Reconnect {
-					p.abandonOwn(r)
-				}
-				if r.Own == nil {
-					p.startHS(r, false)
-				}
-			} else if o := r.Own; o != nil {
+			// start again after identity.rotate.
+			if o := r.Own; o != nil {
 				rc := o.Reconnect
 				p.abandonOwn(r)
 				p.startHS(r, rc)
 			} else if r.Pend != nil {
+				w.hit("K2:S5-pending-abandoned")
 				p.abandonPending(r, "S5: own ik rotated", true)
 			}
-			if p.newSpec() && r.PeerA { // S5 answer drop only toward peers that advertise hs_confirm (lead item 1)
+			if p.newSpec() { // R29-K2: S5 drops every answer awaiting hs.fin, toward every peer
 				for len(r.Ans) > 0 {
 					p.dropAnswer(r, r.Ans[0].ID)
 					w.stat("A:S5-answer-dropped")
+					w.hit("K2:S5-answer-dropped")
 				}
 				if r.Own == nil && r.Pend == nil {
 					p.startHS(r, false)
@@ -179,38 +176,82 @@ func (p *Party) startHS(r *PeerRec, reconnect bool) {
 			w.hsOrigin[r.Own.ID] = origin
 		}
 	}()
-	if r.Status != stActive || r.Own != nil || (reconnect && r.Device) || (p.w.optA && r.Pend != nil) {
+	if r.Status != stActive || (reconnect && r.Device) {
 		return
 	}
-	if len(r.Ans) > 0 && !p.Rel28 {
-		return // S5 / §6.6: none while an answer of mine awaits hs.fin (release <= 28: not checked)
+	if p.newSpec() && p.Device && r.Device && !p.OldApp {
+		w.hit("D2:device-starts-no-rekey")
+		return // R29-D2: a device runs only the responder half
 	}
-	ep := r.epoch(r.Cur)
-	if ep == nil || reconnect {
-		ep = r.lastEpoch()
-	}
-	if reconnect && r.RCCtx != 0 {
-		if e := r.epoch(r.RCCtx); e != nil {
-			ep = e
+	if o := r.Own; o != nil {
+		if reconnect && o.Reconnect {
+			w.hit("X4:one-reconnect-at-a-time")
 		}
-		r.RCCtx = 0
+		return
+	}
+	if p.w.optA && r.Pend != nil {
+		if !reconnect || r.Pend.Reconnect {
+			if reconnect {
+				w.hit("X4:one-reconnect-at-a-time")
+			} else {
+				w.hit("I4:no-rekey-while-pending")
+			}
+			return
+		}
+		p.abandonPending(r, "a reconnect starts", false) // R29-I7: a reconnect names the current epoch, never a pending one
+	}
+	if len(r.Ans) > 0 {
+		if p.newSpec() && !reconnect {
+			w.hit("I4:no-rekey-while-answer-awaits-fin")
+		}
+		return // S5 / §6.6: none while an answer of mine awaits hs.fin
+	}
+	var ep *Epoch
+	switch {
+	case reconnect && p.newSpec():
+		id := r.rcName() // R29-X5, K5, K7
+		if id == 0 {
+			w.hit("K5:no-epoch-to-name-stale")
+			p.markStale(r, "K5: no epoch to name")
+			p.h5(r, -1)
+			return
+		}
+		ep = r.epoch(id)
+		if r.Cur == 0 {
+			w.hit("K5:reconnect-after-demotion")
+			if r.DemName == id {
+				w.hit("K7:reconnect-names-E")
+			}
+		}
+	case p.newSpec():
+		ep = r.epoch(r.Cur) // a rekey only from the current epoch (§6.5; R29-X6: never sealed)
+	default:
+		ep = r.epoch(r.Cur)
+		if ep == nil || reconnect {
+			ep = r.lastEpoch()
+		}
 	}
 	if ep == nil {
 		return
 	}
-	h := &HS{ID: w.id(), Reconnect: reconnect, Ctx: ep.ID, PeerIK: r.IK, OwnIK: p.st.IK, Started: w.Now, Relay: r.KeyFor,
-		InitHalf: p.initHalf(r)}
+	h := &HS{ID: w.id(), Reconnect: reconnect, Ctx: ep.ID, PeerIK: r.IK, OwnIK: p.st.IK, Started: w.Now, Relay: r.KeyFor}
 	m := Msg{Kind: KInit, HS: h.ID, Reconnect: reconnect, Ctx: ep.ID, FromIK: p.st.IK, FromKEM: p.st.KEM,
 		FromRelay: r.KeyFor, Rot: p.ownLinks(ep.Own)}
-	if p.r28Code() && !reconnect {
-		m.Rot = nil // release 28: a rekey carries no rotations (vault/handshakes.go:972)
-	}
 	var f func(*Entry)
 	if reconnect {
 		rt := r.reconnectTok(r.KeyFor, r.Relay, w.Now)
 		box := r.KeyFor // the tokens are minted by the mailbox of the key it deposits with
+		if rt.JTI == 0 && p.newSpec() {
+			w.hit("K6:no-reconnect-token-stale")
+			p.markStale(r, "K6: no reconnect token")
+			p.h5(r, -1)
+			return
+		}
 		if rt.JTI == 0 || !w.R.live(box) {
 			return
+		}
+		if p.newSpec() && ep.ID != r.RCNamed {
+			r.RCNamed, r.RCFails = ep.ID, 0 // R29-K6: tries are counted per named epoch
 		}
 		h.Toks = p.issue(r, box, true)
 		m.Toks = h.Toks
@@ -219,6 +260,9 @@ func (p *Party) startHS(r *PeerRec, reconnect bool) {
 		m.Epoch = r.Cur
 	}
 	r.Own = h
+	if p.newSpec() && len(m.Rot) > 1 {
+		w.hit("K1:hs.init-whole-chain")
+	}
 	w.stat("start:" + map[bool]string{false: "rekey", true: "reconnect"}[reconnect])
 	w.hsOrigin[h.ID] = origin
 	if origin == "" {
@@ -236,6 +280,7 @@ func (p *Party) unlock() {
 		return
 	}
 	p.Locked = false
+	p.w.lockedFor[p.ID] = 0
 	p.collectedSinceUnlock = false
 	p.unlocks++
 	w := p.w
@@ -266,6 +311,51 @@ func (p *Party) unlock() {
 		p.flush()
 		p.startWanted()
 	})
+	p.w.unlockExchange(p)
+}
+
+// unlockExchange: §7.2 "Unlock exchange": the member's app unlocks its
+// vault, and the unlock request carries a fresh app token and the result
+// a fresh vault token, without the relay. The model's device is the
+// member's app: when a vault unlocks while its app is online (unlocked),
+// the unlock came from the app, and each gets a fresh standing token from
+// the other. The app merely coming online exchanges nothing. (A desktop or
+// agent has no such exchange; one offline past its token is paired again,
+// a member's action the model does not run.)
+func (w *World) unlockExchange(p *Party) {
+	if p.Copy || !p.newSpec() || p.Device {
+		return
+	}
+	for _, q := range w.real() {
+		if q == p || q.Locked || p.Locked || q.Device == p.Device || q.Desktop || p.Desktop {
+			continue
+		}
+		V, D := p, q
+		if p.Device {
+			V, D = q, p
+		}
+		rv, rd := V.st.peer(D.ID), D.st.peer(V.ID)
+		if rv == nil || rd == nil || rv.Status != stActive || rd.Status != stActive {
+			continue
+		}
+		for _, x := range [][2]*Party{{V, D}, {D, V}} {
+			iss, hold := x[0], x[1]
+			ri, rh := iss.st.peer(hold.ID), hold.st.peer(iss.ID)
+			if ri.Relay != hold.st.Relay || rh.Relay != iss.st.Relay {
+				continue // the exchange names the keys each side knows; a rotation in flight goes by the relay
+			}
+			var ts []Token
+			if iss.guard(func() { ts = iss.issue(ri, iss.st.Relay, false); iss.write() }) || iss.Locked || hold.Locked {
+				continue
+			}
+			hold.guard(func() {
+				kept, _ := hold.ruleT(rh, ts, rh.Relay)
+				hold.keepTokens(rh, kept)
+				hold.write()
+			})
+		}
+		w.stat("unlock exchange")
+	}
 }
 
 // refresh re-mints tokens near their end (§7.2), sent in relay.token.issued.
@@ -293,6 +383,7 @@ func (p *Party) startWanted() {
 		for _, id := range r.DropAns { // §6.3.1 (J): an undepositable answer ends at once
 			p.dropAnswer(r, id)
 			p.w.stat("A:answer-undepositable")
+			p.w.hit("X3:undepositable-answer-destroyed")
 			any = true
 		}
 		r.DropAns = nil
@@ -326,14 +417,25 @@ func (p *Party) tick() {
 			if r.Status != stActive {
 				continue
 			}
-			if o := r.Own; o != nil && p.r28Code() {
-				if w.Now-o.Started > r28HSLife { // vault/outbox.go:427: dropped, never stale
+			if o := r.Own; o != nil {
+				if o.Reconnect && w.Now-o.Started > w.hsLifeFor(true) && p.newSpec() {
+					// R29-K6: a try fails when its handshake expires unanswered
+					// (tokens revoked); the third failure for the same named
+					// epoch makes the connection stale
 					p.abandonOwn(r)
-					w.stat("r28:own-handshake-expired")
-				}
-			} else if o != nil {
-				if o.Reconnect && w.Now-o.Started > w.hsLifeFor(true) && p.ruleRCExpired(r, o) {
-					// r9: tried again
+					if o.Ctx != r.RCNamed {
+						r.RCNamed, r.RCFails = o.Ctx, 0
+					}
+					r.RCFails++
+					w.hit("K6:try-failed")
+					if r.RCFails >= 3 {
+						w.hit("K6:third-failure-stale")
+						p.markStale(r, "K6: third failed try")
+						p.h5(r, -1)
+						continue
+					}
+					w.nextOrigin = "K6 retry"
+					p.startHS(r, true)
 				} else if o.Reconnect && w.Now-o.Started > w.hsLifeFor(true) {
 					p.markStale(r, "reconnect failed")
 					p.h5(r, -1)
@@ -341,21 +443,19 @@ func (p *Party) tick() {
 					continue
 				}
 				if !o.Reconnect && w.Now-o.Started > w.hsLifeFor(false) {
-					p.abandonOwn(r)
-					if !p.rekeyRefusedRC(r, o, "own rekey unanswered") {
-						p.startHS(r, o.Reconnect)
+					if p.newSpec() {
+						w.hit("L1:rekey-unanswered-16d")
 					}
+					p.abandonOwn(r)
+					p.startHS(r, o.Reconnect)
 				}
 			}
 			life := w.answerLife()
-			if p.r28Code() {
-				life = r28HSLife // vault/outbox.go:421
-			}
 			for _, a := range slices.Clone(r.Ans) {
-				if w.Now-a.Started > life && !a.Reconnect {
-					p.rekeyRefusedRC(r, nil, "my answer expired without hs.fin")
-				}
 				if w.Now-a.Started > life {
+					if p.newSpec() {
+						w.hit("L1:answer-expired-L")
+					}
 					p.dropAnswer(r, a.ID)
 				}
 			}
@@ -364,11 +464,8 @@ func (p *Party) tick() {
 				p.tickA(r)
 			}
 			r.Epochs = slices.DeleteFunc(r.Epochs, func(e Epoch) bool {
-				if e.ID == r.RevOld {
-					return false // Deployment: the old epoch kept toward an ungated peer
-				}
-				if p.newSpec() && (e.ID == r.ConfID || slices.Contains(r.AbanIDs, e.ID)) {
-					return false // §6.3.1 (G): the id is kept
+				if p.newSpec() && (e.ID == r.ConfID || slices.Contains(r.AbanIDs, e.ID) || e.ID == r.DemName) {
+					return false // §6.3.1 (G): the id is kept (K7: E, until a new epoch is current)
 				}
 				return e.ID != r.Cur && e.Superseded != 0 && w.Now-e.Superseded > 16*day
 			})
@@ -378,15 +475,19 @@ func (p *Party) tick() {
 				if r.Device || p.Device {
 					due = 7 * day
 				}
-				if w.Now-ep.EstAt > due && !(p.Device && !r.Device) {
+				if w.Now-ep.EstAt > due && (!p.Device || p.OldApp) { // R29-D2: a device starts no rekey (an old app does)
 					p.startHS(r, false)
 				}
 			}
-			if r.Device && r.standing(r.KeyFor, r.Relay, w.Now).JTI == 0 && !p.r28Code() {
-				p.markStale(r, "tokens expired (needs pairing)")
-				p.h5(r, -1)
-				continue
+			if p.needsReconnect(r) {
+				w.nextOrigin = "K5 reconnect (retry)"
+				p.startHS(r, true) // R29-K5: the reconnect after a demotion, once nothing holds it back
 			}
+			// (0.87.1) no automatic stale between a vault and its device
+			// when tokens lapse: the vault keeps rekeying (R29-D1), and a
+			// split that follows is finding F, part of the device exception
+			// (§3.4.1 Invariants). §7.2's re-pairing of a desktop offline
+			// past its token is a member's action, not modelled.
 			if !r.Device && r.standing(r.KeyFor, r.Relay, w.Now).JTI == 0 {
 				w.nextOrigin = "token expiry reconnect"
 				p.startHS(r, true)
@@ -403,6 +504,7 @@ func (p *Party) tick() {
 			if r.RevokedAt != 0 && !r.S9Audited && r.KeyFor != p.st.Relay && w.Now-r.RevokedAt > day {
 				r.S9Audited = true
 				w.stat("S9:fork_suspected")
+				w.feedItem(p.ID, r.ID, "S9 fork_suspected (relay_revoked)")
 				w.logf("%s: S9 connection.fork_suspected (relay_revoked) for %s", p.Name, w.party(r.ID).Name)
 			}
 		}

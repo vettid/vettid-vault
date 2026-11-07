@@ -1,6 +1,7 @@
 package trustmodel
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -54,7 +55,9 @@ func (s *scen) report(name string, viols ...string) {
 // F1: the copy holds R's answer (taken after hs.resp, before R's rotation),
 // collects I's hs.fin from R's old mailbox during the grace, establishes E1
 // and deposits hs.confirm with R's earlier relay key. I confirms E1; the
-// real R dropped its answer at S5 and stays on E0: a split.
+// real R dropped its answer at S5 and stays on E0. R29-F3/K7: the
+// hs.confirm set E1's received flag, so R's identity.rotate under E0
+// (strict F1) makes I suspend: the copy acting as responder is caught.
 func TestBlindF1CopyFinishesAnswer(t *testing.T) {
 	s := newScen(t, 2)
 	I, R := s.p(0), s.p(1)
@@ -73,14 +76,17 @@ func TestBlindF1CopyFinishesAnswer(t *testing.T) {
 	s.lock(C)
 	s.run(8, R, I)
 	s.w.checkEnd(true)
-	stale := I.st.peer(R.ID).Status == stStale || R.st.peer(I.ID).Status == stStale
 	s.report("F1")
-	t.Logf("F1 (2da316e): F1 demotions %d; pair stale at the end: %v", s.w.stats["A:F1-demoted"], stale)
-	// 2da316e: R's link under E0 shows R never activated E1: I demotes it
-	// and reconnects naming E0. Fixed if the pair converges.
-	if stale || len(s.w.viol) > 0 || s.w.stats["A:F1-demoted"] == 0 {
-		t.Errorf("F1 still stands under 2da316e")
+	if os.Getenv("TRUSTMODEL_TRACE") != "" {
+		t.Log(s.trace())
 	}
+	r := I.st.peer(R.ID)
+	t.Logf("F1: K7 suspensions %d; I's record of R: status %d (%s)", s.w.stats["R29 K7:flag-suspend"], r.Status, r.Ref)
+	if r.Status != stSuspended || r.Ref != "connection.fork_suspected/epoch" || s.w.stats["R29 K7:flag-suspend"] == 0 {
+		t.Errorf("the copy's hs.confirm under E1 did not make I suspend at R's link\n  %s", s.trace())
+	}
+	s.noViolation("I3")
+	s.noViolation("I4")
 }
 
 // F2a: the relay asserts an honest S5 hs.fin as deposited after the link:
@@ -178,88 +184,17 @@ func TestBlindF3RuleEHidesTwoCopies(t *testing.T) {
 	}
 }
 
-// Lead item 2: a release-28 initiator's hs.fin is lost toward a release-29
-// (R1) responder. The 28 side activated at hs.resp; R stays on E0.
-func TestLeadR28FinLostToward29(t *testing.T) {
-	w := setup(Config{Vaults: 2, Rel28: []bool{true, false}, Opt: optR1}, 1)
-	s := &scen{t, w}
-	I, R := s.p(0), s.p(1)
-	s.do(I, func() { I.startHS(I.st.peer(R.ID), false); I.write(); I.flush() })
-	s.run(1, R) // R answers
-	s.run(1, I) // I (r28) activates E1 at hs.resp, sends hs.fin
-	if s.dropAt(R, KFin) == 0 {
-		t.Fatalf("no hs.fin to lose")
-	}
-	s.w.checkEnd(true)
-	ri, rr := I.st.peer(R.ID), R.st.peer(I.ID)
-	t.Logf("lead item 2: I(r28) cur E%d status %d (%s); R cur E%d status %d (%s); violations %d",
-		ri.Cur, ri.Status, ri.Ref, rr.Cur, rr.Status, rr.Ref, len(s.w.viol))
-	for _, v := range s.w.viol {
-		t.Logf("  %s: %s", v.Inv, v.Detail)
-	}
-}
-
-// Lead item 3: the I4-misattributed run (seed 16663332612404948059, R1
-// with 28) must be clean, and the fork still found by rule C.
-func TestLeadMisattributedSeed(t *testing.T) {
-	w := runSeed(t, 16663332612404948059, map[string]string{"TRUSTMODEL_OPT": "1", "TRUSTMODEL_MIXED": "1"})
-	// a92a6eb's exception needs "Q received no message from P under it";
-	// here Q did (R's identity.rotate under E74), so Q still suspends R
-	// although the copy is Q's own: reported, not failed.
-	for _, v := range w.viol {
-		t.Errorf("still: %s: %s", v.Inv, v.Detail) // lead fix A: must be clean
-	}
-	if len(w.viol) > 0 {
-		for _, l := range w.log {
-			if strings.Contains(l, "SUSP") || strings.Contains(l, "DEMOT") || strings.Contains(l, "E78") || strings.Contains(l, "ROTATE") || strings.Contains(l, "identity.rotate[") {
-				t.Log(l)
-			}
-		}
-	}
-	t.Logf("own_copy audits %d, rule C identity conflicts %d, suspensions: %d",
-		w.stats["A:fork_suspected(own_copy)"], w.stats["ruleC:identity"], w.stats["out suspend"])
-}
-
-// a92a6eb: the two sides disagree on the gate. The rotating responder P
-// has seen I's features and drops its answer at S5; I has not seen P's,
-// so it activated at hs.fin. P's identity.rotate under E0 makes I demote
-// E1 and reconnect naming E0 (§3.4.1 "Epochs after an ik link").
-func TestGateDisagreementS5Repaired(t *testing.T) {
-	w := setup(Config{Vaults: 2, Opt: optR1}, 1)
-	s := &scen{t, w}
-	I, P := s.p(0), s.p(1)
-	I.st.peer(P.ID).PeerA = false // I has not yet seen P's features
-	s.do(I, I.write)
-	s.w.holdRotate = true
-	s.do(I, func() { I.startHS(I.st.peer(P.ID), false); I.write(); I.flush() })
-	s.run(1, P)           // P answers
-	s.lease(I, KResp, 0)  // (no-op: keep order)
-	s.rotate(P, pathCred) // P sees the gate: drops its answer
-	s.run(1, I)           // I: hs.resp -> activates E1 at hs.fin; then P's identity.rotate under E0
-	s.w.holdRotate = false
-	s.run(8, I, P)
-	s.w.checkEnd(true)
-	s.report("gate-disagreement")
-	t.Logf("F1 demotions %d, fix B kept %d, reverts %d, rule E destroyed %d, reconnects %d",
-		s.w.stats["A:F1-demoted"], s.w.stats["A:F1-fixB-kept"], s.w.stats["A:reverted"], s.w.stats["A:destroyed-later-epoch"], s.w.stats["start:reconnect"])
-	// with lead fix B the demotion no longer applies here (I's own ungated
-	// epoch, link under its predecessor); the pair must still converge
-	if len(s.w.viol) > 0 {
-		t.Errorf("gate disagreement not repaired")
-	}
-}
-
-// Lead fix A: the own_copy exception (every such epoch one Q began) cannot
-// hide a real fork of P: P's old copy forks P's ik and reconnects naming
-// E0; Q's exception applies (audit, no suspension); when the original's
-// real link arrives, rule C suspends.
-func TestLeadFixAOwnCopyCannotHideFork(t *testing.T) {
+// R29-F1 (fix A withdrawn): P's old copy forks P's ik and reconnects
+// naming E0; the epoch after E0 up to Q's confirmed one is signed by an
+// ancestor of the ik the reconnect reaches: fork evidence at once, with no
+// own_copy exception (judged at hs.fin; here the answer carries Fork).
+func TestF1NoOwnCopyException(t *testing.T) {
 	w := setup(Config{Vaults: 2}, 1)
 	P, Q := w.P[0], w.P[1]
 	r := Q.st.peer(P.ID)
 	e0, ik0 := r.Cur, r.IK
 	e1 := w.id()
-	r.Epochs = append(r.Epochs, Epoch{ID: e1, Signer: ik0, Own: Q.st.IK, EstAt: w.Now, MineInit: true, GotFromPeer: true})
+	r.Epochs = append(r.Epochs, Epoch{ID: e1, Signer: ik0, Own: Q.st.IK, EstAt: w.Now, MineInit: true})
 	r.Epochs[0].Superseded = w.Now
 	r.Cur, r.ConfID = e1, e1
 	x := w.key()
@@ -270,53 +205,16 @@ func TestLeadFixAOwnCopyCannotHideFork(t *testing.T) {
 	init := &RMsg{ID: 10, Box: Q.st.Relay, DepAt: w.Now, Sender: r.Relay, Seq: 10, Actor: P.ID,
 		P: &Msg{Kind: KInit, Inner: w.id(), Reconnect: true, HS: w.id(), Ctx: e0, FromIK: x, FromRelay: r.Relay, Ts: w.Now}}
 	d := Q.acceptFrom(r, init, Pos{init.Box, init.ID, init.DepAt, init.Seq}, []Key{Q.st.Relay})
-	t.Logf("the copy's reconnect naming E%d: %s; own_copy audits %d", e0, d, w.stats["A:fork_suspected(own_copy)"])
-	if r.Status == stSuspended || w.stats["A:fork_suspected(own_copy)"] == 0 {
-		t.Errorf("fix A: the exception did not apply")
-	}
-	ik1 := w.key()
-	real := IKLink{ik0, ik1, w.key()} // the original's link
-	w.iklinkBy[real] = rot{P.ID, 2}
-	rot := &RMsg{ID: 11, Box: Q.st.Relay, DepAt: w.Now, Sender: r.Relay, Seq: 11, Actor: P.ID,
-		P: &Msg{Kind: KIdRot, Inner: w.id(), Epoch: r.Cur, Rot: []IKLink{real}, Ts: w.Now}}
-	d = Q.acceptFrom(r, rot, Pos{rot.Box, rot.ID, rot.DepAt, rot.Seq}, []Key{Q.st.Relay})
-	t.Logf("the original's link: %s", d)
-	if r.Status != stSuspended {
-		t.Errorf("fix A: rule C did not suspend on the real link")
-	}
-}
-
-func runSeed(t *testing.T, rs uint64, env map[string]string) *World {
-	for k, v := range env {
-		t.Setenv(k, v)
-	}
-	cfg, acts := genRun(rs, 40)
-	return runActions(cfg, rs, acts, false)
-}
-
-// Lead fix B: seed 8756148401117559123 (R1, gate unseen) was a false
-// suspension; under fix B (TRUSTMODEL_FIXB=fixb) it must be clean. The
-// default (strict) keeps the false suspension: the stated cost of the
-// lead's choice (gate unseen is the worst case).
-func TestLeadFixBSeed(t *testing.T) {
-	w := runSeed(t, 8756148401117559123, map[string]string{"TRUSTMODEL_OPT": "1", "TRUSTMODEL_UNSEEN": "1", "TRUSTMODEL_FIXB": "fixb"})
-	t.Logf("fix B kept %d, F1 demotions %d", w.stats["A:F1-fixB-kept"], w.stats["A:F1-demoted"])
-	for _, v := range w.viol {
-		t.Errorf("%s: %s", v.Inv, v.Detail)
+	t.Logf("the copy's reconnect naming E%d: %s", e0, d)
+	if d.Out != "answer" || len(r.Ans) != 1 || !r.Ans[0].Fork {
+		t.Errorf("F1: the reconnect naming E%d is not kept as fork evidence (%s)", e0, d)
 	}
 }
 
 // h2: the lead's H2 (an old copy's epoch made just before the original's
-// rotation must not survive the link). window: the alternative F1 rule.
-func h2(t *testing.T, window bool) *scen { return h2x(t, window, !window) } // default: strict
-
-func h2s(t *testing.T) *scen { return h2x(t, false, true) }
-
-func h2b(t *testing.T) *scen { return h2x(t, false, false) } // fix B as in 9f1a0da
-
-func h2x(t *testing.T, window, strict bool) *scen {
+// rotation must not survive the link).
+func h2(t *testing.T) *scen {
 	s := newScen(t, 2)
-	s.w.f1Window, s.w.fixBStrict = window, strict
 	P, Q := s.p(0), s.p(1)
 	s.w.makeCopy(P)
 	C := s.w.P[len(s.w.P)-1]
@@ -336,78 +234,7 @@ func h2x(t *testing.T, window, strict bool) *scen {
 }
 
 func TestLeadH2StillCaught(t *testing.T) {
-	s := h2(t, false)
+	s := h2(t)
 	s.noViolation("I3")
-	t.Logf("H2 (fix B rule): F1 demotions %d, destroyed %d, violations %d", s.w.stats["A:F1-demoted"], s.w.stats["A:destroyed-later-epoch"], len(s.w.viol))
-}
-
-func TestLeadH2UnderTimeWindow(t *testing.T) {
-	s := h2(t, true)
-	var got []string
-	for _, v := range s.w.viol {
-		got = append(got, v.Inv+": "+v.Detail)
-	}
-	t.Logf("H2 under the time-window rule: window skips %d, F1 demotions %d, rule E destroyed %d, fork suspensions %d, Q-P status %d, violations:\n  %s",
-		s.w.stats["A:F1-window-skipped"], s.w.stats["A:F1-demoted"], s.w.stats["A:destroyed-later-epoch"], s.w.stats["out suspend"],
-		s.p(1).st.peer(s.p(0).ID).Status, strings.Join(got, "\n  "))
-	for _, l := range s.w.log {
-		if strings.Contains(l, "SUSP") || strings.Contains(l, "DESTROY") || strings.Contains(l, "P' -> Q: session") || strings.Contains(l, "Q <- P: session") {
-			t.Log(l)
-		}
-	}
-}
-
-// TestLeadFixBVariants: the named seeds and H2 under each F1 variant
-// (TRUSTMODEL_FIXB: "" = fix B as committed, strict, window). It logs;
-// the comparison is for the lead.
-func TestLeadFixBVariants(t *testing.T) {
-	seeds := []struct {
-		name string
-		rs   uint64
-		env  map[string]string
-	}{
-		{"I3 copy answers, R2 gate on", 5707634071088938680, map[string]string{"TRUSTMODEL_OPT": "2"}},
-		{"I3 copy answers, R2 mix28", 14995905639264089123, map[string]string{"TRUSTMODEL_OPT": "2", "TRUSTMODEL_MIXED": "1"}},
-		{"I4-false, R1 unseen", 8756148401117559123, map[string]string{"TRUSTMODEL_OPT": "1", "TRUSTMODEL_UNSEEN": "1"}},
-		{"I4-misattributed, R1 gate on", 16663332612404948059, map[string]string{"TRUSTMODEL_OPT": "1"}},
-	}
-	for _, v := range []string{"fixb", "strict", "window"} {
-		for _, sd := range seeds {
-			t.Run(v+"/"+sd.name, func(t *testing.T) {
-				env := map[string]string{"TRUSTMODEL_FIXB": v}
-				for k, x := range sd.env {
-					env[k] = x
-				}
-				w := runSeed(t, sd.rs, env)
-				var got []string
-				for _, x := range w.viol {
-					got = append(got, x.Inv+": "+x.Detail)
-				}
-				t.Logf("variant %q seed %d: kept %d, F1 demoted %d, window skipped %d; violations %v",
-					v, sd.rs, w.stats["A:F1-fixB-kept"], w.stats["A:F1-demoted"], w.stats["A:F1-window-skipped"], got)
-			})
-		}
-		t.Run(v+"/H2", func(t *testing.T) {
-			t.Setenv("TRUSTMODEL_FIXB", v)
-			hs := h2v(t, v)
-			var got []string
-			for _, x := range hs.w.viol {
-				got = append(got, x.Inv+": "+x.Detail)
-			}
-			t.Logf("H2 variant %q: kept %d, F1 demoted %d, window skipped %d, rule E destroyed %d, suspensions %d; violations %v",
-				v, hs.w.stats["A:F1-fixB-kept"], hs.w.stats["A:F1-demoted"], hs.w.stats["A:F1-window-skipped"],
-				hs.w.stats["A:destroyed-later-epoch"], hs.w.stats["out suspend"], got)
-		})
-	}
-}
-
-// h2v: H2 under a TRUSTMODEL_FIXB variant.
-func h2v(t *testing.T, v string) *scen {
-	switch v {
-	case "window":
-		return h2(t, true)
-	case "strict":
-		return h2s(t)
-	}
-	return h2b(t)
+	t.Logf("H2: F1 demotions %d, destroyed %d, violations %d", s.w.stats["A:F1-demoted"], s.w.stats["A:destroyed-later-epoch"], len(s.w.viol))
 }

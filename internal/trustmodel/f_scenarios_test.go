@@ -227,8 +227,10 @@ func TestF9ReconnectWhilePending(t *testing.T) {
 			t.Logf("noF9=%v: token_expired abandons %d; pending %v; open reconnect %v (ctx E%d, current E%d)",
 				off, s.w.stats["A:abandoned:token_expired"], r.Pend != nil, r.Own != nil && r.Own.Reconnect, ctxOf(r.Own), r.Cur)
 			if off {
-				if ok {
-					t.Errorf("off: a reconnect started anyway")
+				// R29-I7: starting a reconnect abandons a pending rekey, so
+				// the reconnect starts without F9's abandon at token_expired
+				if !ok {
+					t.Errorf("off: no reconnect (R29-I7 abandons the pending epoch when a reconnect starts)")
 				}
 				return
 			}
@@ -240,18 +242,15 @@ func TestF9ReconnectWhilePending(t *testing.T) {
 		})
 	})
 
-	// (device at B) a device's rekey: the vault activates E1, the
-	// hs.confirm is lost, the vault is quiet; at B the device, whose
-	// standing token is valid, rekeys from E0. No switch: turning the
-	// device branch off (a device "reconnects", which it cannot) shows
-	// nothing, because the device's §6.5 rekey interval (7 days) starts the
-	// same rekey later in the same tick (rotate_test.go tick).
+	// (device at B, R29-D1) the vault's rekey: the device activates E1,
+	// its hs.confirm is lost, the device is quiet; at B the vault rekeys
+	// from E0 (it never reconnects to a device).
 	t.Run("device-B", func(t *testing.T) {
 		s, V, D, e0, _ := devPastB(t, func(*World) {})
-		r := D.st.peer(V.ID)
+		r := V.st.peer(D.ID)
 		t.Logf("B abandons %d; open rekey %v (ctx E%d)", s.w.stats["A:abandoned:B passed"], r.Own != nil, ctxOf(r.Own))
 		if r.Pend != nil || r.Own == nil || r.Own.Reconnect || r.Own.Ctx != e0 {
-			t.Errorf("the device did not rekey from E%d at B\n  %s", e0, s.trace())
+			t.Errorf("the vault did not rekey from E%d at B\n  %s", e0, s.trace())
 		}
 		s.run(6, V, D)
 		s.done(true)
@@ -265,23 +264,23 @@ func ctxOf(h *HS) int {
 	return h.Ctx
 }
 
-// devPastB: a device D rekeys with its vault V; V activates E1 and its
-// hs.confirm is lost; V stays quiet; D stays online and collects, and its
-// tick runs once past B. Tokens are extended (their expiry is not the
-// subject).
+// devPastB: a vault V rekeys with its device D (R29-D2: the device only
+// answers); D activates E1 and its hs.confirm is lost; D stays quiet; V
+// stays online and collects, and its tick runs once past B. Tokens are
+// extended (their expiry is not the subject).
 func devPastB(t *testing.T, mod func(*World)) (s *scen, V, D *Party, e0, e1 int) {
 	w := setup(Config{Vaults: 1, Devices: true}, 1)
 	mod(w)
 	s = &scen{t, w}
 	V, D = s.p(0), s.p(1)
 	s.longTokens(60 * day)
-	e0, e1 = s.lostConfirm(D, V)
-	if r := V.st.peer(D.ID); r.ConfID != e0 || r.Cur != e1 {
-		t.Fatalf("setup: the vault's confirmed epoch E%d, current E%d", r.ConfID, r.Cur)
+	e0, e1 = s.lostConfirm(V, D)
+	if r := D.st.peer(V.ID); r.ConfID != e0 || r.Cur != e1 {
+		t.Fatalf("setup: the device's confirmed epoch E%d, current E%d", r.ConfID, r.Cur)
 	}
 	s.tick(aPendLife + hour)
-	s.drain(D) // a short collect: B may now be judged
-	s.do(D, D.tick)
+	s.drain(V) // a short collect: B may now be judged
+	s.do(V, V.tick)
 	return s, V, D, e0, e1
 }
 
@@ -442,18 +441,18 @@ func TestF13Lifetimes(t *testing.T) {
 		})
 	})
 
-	// §6.2 "the epoch the hs.init travels under": a device's rekey at B
-	// travels under E0, the vault's confirmed epoch (the vault activated
-	// E1; its hs.confirm was lost). The vault answers it as if E0 were
-	// current. Off: §6.2 as before F13 (ctx must be the current epoch):
-	// refused rekey_not_current_epoch.
+	// §6.2 "the epoch the hs.init travels under": the vault's rekey at B
+	// (R29-D1) travels under E0, the device's confirmed epoch (the device
+	// activated E1; its hs.confirm was lost). The device answers it as if
+	// E0 were current. Off: §6.2 as before F13 (ctx must be the current
+	// epoch): refused rekey_not_current_epoch.
 	t.Run("rekey-ctx-confirmed-epoch", func(t *testing.T) {
 		bothWays(t, func(t *testing.T, off bool) {
 			s, V, D, e0, _ := devPastB(t, func(w *World) { w.noConfRekey = off })
-			if o := D.st.peer(V.ID).Own; o == nil || o.Reconnect || o.Ctx != e0 {
-				t.Fatalf("setup: the device has no rekey from E%d", e0)
+			if o := V.st.peer(D.ID).Own; o == nil || o.Reconnect || o.Ctx != e0 {
+				t.Fatalf("setup: the vault has no rekey from E%d", e0)
 			}
-			s.drain(V)
+			s.drain(D)
 			ans := s.w.stats["cell B:current:hs.init:confirmed-epoch"]
 			ref := s.w.stats["cell B:current:hs.init:ctx"]
 			t.Logf("noConfRekey=%v: answered as the confirmed epoch %d, refused rekey_not_current_epoch %d", off, ans, ref)
@@ -490,139 +489,5 @@ func TestF13Lifetimes(t *testing.T) {
 			t.Errorf("a pending epoch at quiescence")
 		}
 		t.Logf("abandoned at B %d, by a later rekey %d", s.w.stats["A:abandoned:B passed"], s.w.stats["A:abandoned:a later rekey from the responder"])
-	})
-}
-
-// ---------- lead item 5 ----------
-
-// Lead item 5 (§6.3.1 "Deployment"): toward an ungated peer I activates at
-// hs.fin and keeps the old epoch. Its hs.fin is lost; it sends under E1.
-// R's rekey from E0 with an inner ts more than T + 2 days after the hs.fin
-// makes I revert, and "I seals every message it sent under the new epoch
-// again in the old one, with the same inner id and a new ts". Off
-// (noLead5): nothing is re-sealed; the message under E1 is lost.
-func TestLead5RevertReseals(t *testing.T) {
-	bothWays(t, func(t *testing.T, off bool) {
-		w := setup(Config{Vaults: 2, Opt: optR1}, 1)
-		w.noLead5 = off
-		s := &scen{t, w}
-		I, R := s.p(0), s.p(1)
-		I.st.peer(R.ID).PeerA = false // I has not seen R's features: ungated
-		s.do(I, I.write)
-		s.longTokens(60 * day)
-		s.do(I, func() { I.startHS(I.st.peer(R.ID), false); I.write(); I.flush() })
-		s.run(1, R) // R answers
-		s.run(1, I) // I activates E1 at hs.fin (keeps E0)
-		ri := I.st.peer(R.ID)
-		e0, e1 := ri.RevOld, ri.Cur
-		if e0 == 0 || ri.Pend != nil {
-			t.Fatalf("setup: I is not reverting-capable (RevOld %d)", e0)
-		}
-		if s.dropAt(R, KFin) == 0 {
-			t.Fatalf("setup: no hs.fin to lose")
-		}
-		finAt := ri.RevFinAt
-		s.tick(10 * day)
-		probe := s.w.id()
-		s.do(I, func() { I.enqueue(R.ID, Msg{Kind: KSession, Probe: probe}, nil); I.write(); I.flush() })
-		sent := ri.RevSent
-		if len(sent) != 1 || sent[0].Epoch != e1 {
-			t.Fatalf("setup: the message under E%d was not kept for a revert", e1)
-		}
-		inner, ts := sent[0].Inner, sent[0].Ts
-		// R's answer expires (16 days); it rekeys from E0 and collects the
-		// message under E1, which it cannot open
-		s.tick(aRevert - 10*day + hour)
-		s.do(R, R.tick)
-		s.drain(R)
-		init := s.find(I, KInit)
-		if init == nil || init.P.Epoch != e0 || init.P.Ts <= finAt+aRevert {
-			t.Fatalf("setup: no rekey from E%d later than T + 2 days at I\n  %s", e0, s.trace())
-		}
-		s.drain(I)
-		var re *Msg // a copy: the outbox is compacted at the next write
-		for _, e := range I.st.Out {
-			if e.M.Kind == KSession && e.M.Probe == probe {
-				c := cloneMsg(e.M)
-				re = &c
-			}
-		}
-		t.Logf("noLead5=%v: reverted %d, re-sealed %d; the probe's fate at R before %q", off, s.w.stats["A:reverted"], s.w.stats["A:revert-resealed"], s.w.probeFate[probe])
-		if s.w.stats["A:reverted"] != 1 {
-			t.Fatalf("no revert\n  %s", s.trace())
-		}
-		s.run(4, I, R)
-		s.w.checkEnd(true)
-		lost := false
-		for _, v := range s.w.viol {
-			lost = lost || strings.HasPrefix(v.Inv, "I1-loss/revert")
-		}
-		if off {
-			if !lost || s.w.probes[probe] {
-				t.Errorf("off: the message was not lost (violations %v)", s.viols())
-			}
-			return
-		}
-		if re == nil {
-			t.Fatalf("the message was not re-sealed\n  %s", s.trace())
-		}
-		if re.Inner != inner || re.Ts <= ts || re.Ts <= finAt+aRevert {
-			t.Errorf("re-sealed with inner %d ts %d; want inner %d and a ts after %d", re.Inner, re.Ts, inner, finAt+aRevert)
-		}
-		if !s.w.probes[probe] || len(s.w.viol) > 0 {
-			t.Errorf("the re-sealed message was not accepted (violations %v)\n  %s", s.viols(), s.trace())
-		}
-	})
-}
-
-// ---------- lead item 6 ----------
-
-// Lead item 6 (R2, the responder half only): two release-29 vaults still
-// split on a lost hs.fin (the initiator activates at hs.fin). They repair
-// at the responder's first rekey after its answer expires: the
-// initiator's confirmed epoch is still the old one, so it accepts the
-// rekey, and rule E destroys the new epoch. Off (noConfRekey): the
-// initiator refuses a rekey naming its confirmed epoch; no repair.
-func TestLead6R2Repair(t *testing.T) {
-	bothWays(t, func(t *testing.T, off bool) {
-		w := setup(Config{Vaults: 2, Opt: optR2}, 1)
-		w.noConfRekey = off
-		s := &scen{t, w}
-		I, R := s.p(0), s.p(1)
-		s.longTokens(60 * day)
-		s.do(I, func() { I.startHS(I.st.peer(R.ID), false); I.write(); I.flush() })
-		s.run(1, R)
-		s.run(1, I) // I activates E1 at hs.fin
-		ri := I.st.peer(R.ID)
-		e1, e0 := ri.Cur, ri.ConfID
-		if ri.Pend != nil || e0 == e1 || ri.RevOld != 0 {
-			t.Fatalf("setup: R2 initiator state (pending %v, confirmed E%d, current E%d, revert %d)", ri.Pend != nil, e0, e1, ri.RevOld)
-		}
-		if s.dropAt(R, KFin) == 0 {
-			t.Fatalf("setup: no hs.fin to lose")
-		}
-		s.tick(aAnsLife + hour)
-		s.do(R, R.tick) // R's answer expires; its rekey from E0
-		s.drain(I)
-		destroyed := false
-		if ep := ri.epoch(e1); ep == nil || ep.Destroyed {
-			destroyed = true
-		}
-		ans := s.w.stats["cell B:current:hs.init:confirmed-epoch"]
-		s.run(2, R, I)
-		destroyed = destroyed || s.w.stats["A:destroyed-later-epoch"] > 0
-		t.Logf("noConfRekey=%v: answered naming the confirmed epoch %d, rule E destroyed %d; I current E%d, R current E%d",
-			off, ans, s.w.stats["A:destroyed-later-epoch"], I.st.peer(R.ID).Cur, R.st.peer(I.ID).Cur)
-		same := I.st.peer(R.ID).Cur == R.st.peer(I.ID).Cur
-		if off {
-			if ans != 0 || same {
-				t.Errorf("off: the pair repaired anyway")
-			}
-			return
-		}
-		if ans == 0 || !destroyed || !same {
-			t.Errorf("R2's repair did not happen\n  %s", s.trace())
-		}
-		s.done(true)
 	})
 }

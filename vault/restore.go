@@ -105,7 +105,11 @@ func pruneHistory(p *Peer, now time.Time) {
 }
 
 func (m *Manager) pruneHistories(now time.Time) {
-	for _, p := range m.st.Connections {
+	for _, sortedK := range sortedKeys(m.st.Connections) {
+		p, sortedOK := m.st.Connections[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if len(p.History) > 0 || p.Watch != nil {
 			pruneHistory(p, now)
 		}
@@ -257,14 +261,18 @@ func (m *Manager) suspendForkRef(p *Peer, ref string, now time.Time) {
 // hs.init always.
 func (m *Manager) abandonHandshakes(p *Peer, all, answers bool, now time.Time) {
 	if answers {
-		for id := range m.st.Awaiting {
+		for _, id := range sortedKeys(m.st.Awaiting) {
 			aw := m.st.Awaiting[id]
 			if aw.New == nil && aw.PeerID == p.ID && (all || aw.Purpose == handshake.PurposeReconnect) {
 				m.abandonAwaiting(id, now)
 			}
 		}
 	}
-	for id, og := range m.st.Outgoing {
+	for _, id := range sortedKeys(m.st.Outgoing) {
+		og, sortedOK := m.st.Outgoing[id]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if og.New == nil && og.PeerID == p.ID && (all || og.Purpose == handshake.PurposeReconnect) {
 			m.abandonOutgoing(id, now)
 		}
@@ -274,12 +282,20 @@ func (m *Manager) abandonHandshakes(p *Peer, all, answers bool, now time.Time) {
 // markRekeysReplaced marks the rekeys open for p, ours and answered, as made
 // on the replaced line (§6.6).
 func (m *Manager) markRekeysReplaced(p *Peer) {
-	for _, og := range m.st.Outgoing {
+	for _, sortedK := range sortedKeys(m.st.Outgoing) {
+		og, sortedOK := m.st.Outgoing[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if og.New == nil && og.PeerID == p.ID && og.Purpose == handshake.PurposeRekey {
 			og.Replaced = true
 		}
 	}
-	for _, aw := range m.st.Awaiting {
+	for _, sortedK := range sortedKeys(m.st.Awaiting) {
+		aw, sortedOK := m.st.Awaiting[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if aw.New == nil && aw.PeerID == p.ID && aw.Purpose == handshake.PurposeRekey {
 			aw.Replaced = true
 		}

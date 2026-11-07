@@ -54,7 +54,11 @@ func (m *Manager) Start(ctx context.Context) error {
 	m.remintIssued(now)
 	m.markDeviceTokens(now)
 	m.reconnectExpired(now)
-	for _, p := range m.st.Devices {
+	for _, sortedK := range sortedKeys(m.st.Devices) {
+		p, sortedOK := m.st.Devices[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if p.State == PeerActive {
 			m.startRekey(p, now) // device sessions rekey on every unlock (§6.5)
 		}
@@ -354,7 +358,11 @@ func (m *Manager) handleSealed(ctx context.Context, env *envelope.Envelope, raw 
 	if m.lookupKEM(rk) != nil {
 		return m.handleInit(ctx, raw, sender, p, false, now)
 	}
-	for id, og := range m.st.Outgoing {
+	for _, id := range sortedKeys(m.st.Outgoing) {
+		og, sortedOK := m.st.Outgoing[id]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if kid, err := kidFrom(og.EphKid); err == nil && kid.Equal(rk) {
 			return m.handleResp(ctx, id, raw, sender, now)
 		}
@@ -386,12 +394,20 @@ func kidFrom(b []byte) (suite.Kid, error) {
 }
 
 func (m *Manager) peerByRelayKey(pk ed25519.PublicKey) *Peer {
-	for _, p := range m.st.Devices {
+	for _, sortedK := range sortedKeys(m.st.Devices) {
+		p, sortedOK := m.st.Devices[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if suite.EqualPublic(p.Relay.PK, pk) {
 			return p
 		}
 	}
-	for _, p := range m.st.Connections {
+	for _, sortedK := range sortedKeys(m.st.Connections) {
+		p, sortedOK := m.st.Connections[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if suite.EqualPublic(p.Relay.PK, pk) {
 			return p
 		}

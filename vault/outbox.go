@@ -126,7 +126,11 @@ func (m *Manager) sendWith(p *Peer, typ string, body json.RawMessage, o SendOpti
 func (m *Manager) ownerDevices() []*Peer {
 	var out []*Peer
 	now := m.now()
-	for _, p := range m.st.Devices {
+	for _, sortedK := range sortedKeys(m.st.Devices) {
+		p, sortedOK := m.st.Devices[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if p.State == PeerActive && !p.Recovering && (p.Kind == KindApp || p.Kind == KindDesktop && m.hasAccess(p, now)) {
 			out = append(out, p)
 		}
@@ -414,7 +418,11 @@ func (m *Manager) deposit(ctx context.Context, e *OutboxEntry, now time.Time) er
 		// hs.init with quota_exceeded (the reconnect token's quota) makes
 		// the connection stale, whatever started the reconnect. (A
 		// reconnect's hs.init carries its own token and no peer id.)
-		for _, og := range m.st.Outgoing {
+		for _, sortedK := range sortedKeys(m.st.Outgoing) {
+			og, sortedOK := m.st.Outgoing[sortedK]
+			if !sortedOK {
+				continue // removed earlier in this loop
+			}
 			if og.InitOutbox == e.ID && og.New == nil && og.Purpose == handshake.PurposeReconnect {
 				if op := m.peer(og.PeerID); op != nil {
 					m.markStale(op, now)
@@ -458,7 +466,11 @@ func (m *Manager) flushIfDirty(ctx context.Context) error {
 // housekeeping runs before each batch: expire invites, pairings and
 // handshakes, rekey due sessions, refresh tokens.
 func (m *Manager) housekeeping(now time.Time) {
-	for id, inv := range m.st.Invites {
+	for _, id := range sortedKeys(m.st.Invites) {
+		inv, sortedOK := m.st.Invites[id]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if inv.CreatedBy == inviteByRecovery {
 			// The recovered phone's: kept until it pairs or a later
 			// recovery replaces it; its unlock renews it (§11.14.6, a
@@ -481,12 +493,20 @@ func (m *Manager) housekeeping(now time.Time) {
 	m.recoveryHousekeeping(context.Background(), now)
 	m.expirePendingUnlink(now) // release R: the presence retry, the counter notice
 	m.expireRequests(now)
-	for id, aw := range m.st.Awaiting {
+	for _, id := range sortedKeys(m.st.Awaiting) {
+		aw, sortedOK := m.st.Awaiting[id]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if aw.New == nil && now.Sub(aw.Created) > HandshakeTTL {
 			m.abandonAwaiting(id, now) // its tokens are denylisted too (§6.6)
 		}
 	}
-	for id, og := range m.st.Outgoing {
+	for _, id := range sortedKeys(m.st.Outgoing) {
+		og, sortedOK := m.st.Outgoing[id]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if og.New == nil && now.Sub(og.Created) > HandshakeTTL {
 			m.abandonOutgoing(id, now) // its tokens are revoked too (§6.6, review M3)
 			p := m.peer(og.PeerID)
@@ -566,7 +586,11 @@ var errNoStandingToken = errors.New("vault: no standing token held for the peer"
 // failed try. It reports whether it handled the answer; a device's path
 // (toward a device's own vault) is unchanged.
 func (m *Manager) tokenRevoked(p *Peer, e *OutboxEntry, tok string, now time.Time) bool {
-	for id, og := range m.st.Outgoing {
+	for _, id := range sortedKeys(m.st.Outgoing) {
+		og, sortedOK := m.st.Outgoing[id]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if og.InitOutbox != e.ID || og.New != nil || og.Purpose != handshake.PurposeReconnect {
 			continue
 		}

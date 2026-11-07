@@ -86,19 +86,31 @@ func (m *Manager) issuedKind(jti string) string {
 // those whose handshake is still running (§10.4: at most 256 each).
 func (m *Manager) countRequests(dir string) int {
 	n := 0
-	for _, r := range m.st.Requests {
+	for _, sortedK := range sortedKeys(m.st.Requests) {
+		r, sortedOK := m.st.Requests[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if r.Dir == dir && r.Peer.Kind == KindConnection {
 			n++
 		}
 	}
 	if dir == ReqIn {
-		for _, aw := range m.st.Awaiting {
+		for _, sortedK := range sortedKeys(m.st.Awaiting) {
+			aw, sortedOK := m.st.Awaiting[sortedK]
+			if !sortedOK {
+				continue // removed earlier in this loop
+			}
 			if aw.New != nil && aw.New.Kind == KindConnection {
 				n++
 			}
 		}
 	} else {
-		for _, og := range m.st.Outgoing {
+		for _, sortedK := range sortedKeys(m.st.Outgoing) {
+			og, sortedOK := m.st.Outgoing[sortedK]
+			if !sortedOK {
+				continue // removed earlier in this loop
+			}
 			if og.New != nil {
 				n++
 			}
@@ -434,7 +446,11 @@ func (m *Manager) handleRequestMessage(id string, env *envelope.Envelope, now ti
 func (m *Manager) handleOnRequestToken(ctx context.Context, env *envelope.Envelope, raw []byte, sender ed25519.PublicKey, p *Peer, now time.Time) disposition {
 	if env.Mode() == envelope.ModeSealed {
 		rk := env.RecipientKid()
-		for id, og := range m.st.Outgoing {
+		for _, id := range sortedKeys(m.st.Outgoing) {
+			og, sortedOK := m.st.Outgoing[id]
+			if !sortedOK {
+				continue // removed earlier in this loop
+			}
 			if kid, err := kidFrom(og.EphKid); err == nil && kid.Equal(rk) && og.New != nil {
 				return m.handleResp(ctx, id, raw, sender, now)
 			}
@@ -513,7 +529,11 @@ func (m *Manager) connRequest(id, dir string) (r *Request, waiting bool) {
 
 // waitingOutgoing returns the outgoing handshake of connection id.
 func (m *Manager) waitingOutgoing(connID string) string {
-	for oid, og := range m.st.Outgoing {
+	for _, oid := range sortedKeys(m.st.Outgoing) {
+		og, sortedOK := m.st.Outgoing[oid]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if og.New != nil && og.New.ID == connID {
 			return oid
 		}
@@ -641,7 +661,11 @@ func (m *Manager) hRequestList(_ context.Context, s *Session, in *envelope.Inner
 		return nil, err
 	}
 	var inc, out []listedRequest
-	for _, r := range m.st.Requests {
+	for _, sortedK := range sortedKeys(m.st.Requests) {
+		r, sortedOK := m.st.Requests[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if r.Peer.Kind != KindConnection {
 			continue
 		}
@@ -663,7 +687,11 @@ func (m *Manager) hRequestList(_ context.Context, s *Session, in *envelope.Inner
 		}
 		out = append(out, listedRequest{r.Created, r.ID, b.Bytes()})
 	}
-	for _, og := range m.st.Outgoing {
+	for _, sortedK := range sortedKeys(m.st.Outgoing) {
+		og, sortedOK := m.st.Outgoing[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if og.New == nil {
 			continue
 		}
@@ -688,12 +716,20 @@ func (m *Manager) hRequestList(_ context.Context, s *Session, in *envelope.Inner
 // retention", §6.7): first-contact handshakes without hs.fin, requests
 // past their expiry, and outgoing requests not active after 8 days.
 func (m *Manager) expireRequests(now time.Time) {
-	for id, aw := range m.st.Awaiting {
+	for _, id := range sortedKeys(m.st.Awaiting) {
+		aw, sortedOK := m.st.Awaiting[id]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if aw.New != nil && !aw.Expires.IsZero() && !now.Before(aw.Expires) {
 			m.dropAwaiting(id, "expired", now)
 		}
 	}
-	for id, og := range m.st.Outgoing {
+	for _, id := range sortedKeys(m.st.Outgoing) {
+		og, sortedOK := m.st.Outgoing[id]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if og.New != nil && !og.Expires.IsZero() && !now.Before(og.Expires) {
 			p := og.New
 			m.dropOutgoing(id)
@@ -725,7 +761,11 @@ func (m *Manager) expireRequests(now time.Time) {
 
 func (m *Manager) sortedRequests() []*Request {
 	out := make([]*Request, 0, len(m.st.Requests))
-	for _, r := range m.st.Requests {
+	for _, sortedK := range sortedKeys(m.st.Requests) {
+		r, sortedOK := m.st.Requests[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		out = append(out, r)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
@@ -735,12 +775,20 @@ func (m *Manager) sortedRequests() []*Request {
 // pairingRequest returns the pairing (desktop or agent) request for a
 // pairing id; waiting reports one whose handshake still runs.
 func (m *Manager) pairingRequest(pairingID string) (r *Request, waitingID string) {
-	for _, x := range m.st.Requests {
+	for _, sortedK := range sortedKeys(m.st.Requests) {
+		x, sortedOK := m.st.Requests[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if x.Dir == ReqIn && x.Peer.Kind != KindConnection && (x.InviteID == pairingID || x.ID == pairingID) {
 			return x, ""
 		}
 	}
-	for id, aw := range m.st.Awaiting {
+	for _, id := range sortedKeys(m.st.Awaiting) {
+		aw, sortedOK := m.st.Awaiting[id]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if aw.New != nil && aw.New.Kind != KindConnection && !aw.Direct && (aw.InviteID == pairingID || id == pairingID) {
 			return nil, id
 		}

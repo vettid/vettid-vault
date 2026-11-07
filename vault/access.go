@@ -418,7 +418,11 @@ func (m *Manager) expireAccess(now time.Time) {
 			m.dirty = true
 		}
 	}
-	for _, p := range m.st.Devices {
+	for _, sortedK := range sortedKeys(m.st.Devices) {
+		p, sortedOK := m.st.Devices[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if p.Access != nil && !now.Before(p.Access.Expires) {
 			p.Access = nil
 			m.dirty = true

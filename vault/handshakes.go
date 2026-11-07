@@ -278,12 +278,20 @@ func (m *Manager) respondFirst(pi *handshake.PendingInit, inv *Invite, sender ed
 // key is ik (§6.4 "The inviter's drop"), or nil. Stale connections are not
 // known: a fresh invitation may replace them (§7.4).
 func (m *Manager) knownIdentity(ik []byte) *Peer {
-	for _, p := range m.st.Devices {
+	for _, sortedK := range sortedKeys(m.st.Devices) {
+		p, sortedOK := m.st.Devices[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if suite.EqualPublic(p.IK, ik) {
 			return p
 		}
 	}
-	for _, p := range m.st.Connections {
+	for _, sortedK := range sortedKeys(m.st.Connections) {
+		p, sortedOK := m.st.Connections[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if !p.replaceable() && suite.EqualPublic(p.IK, ik) {
 			return p
 		}
@@ -553,7 +561,11 @@ func (m *Manager) capReconnectAnswers(p *Peer, now time.Time) {
 	for {
 		var oldest string
 		n := 0
-		for id, aw := range m.st.Awaiting {
+		for _, id := range sortedKeys(m.st.Awaiting) {
+			aw, sortedOK := m.st.Awaiting[id]
+			if !sortedOK {
+				continue // removed earlier in this loop
+			}
 			if aw.New != nil || aw.PeerID != p.ID || aw.Purpose != handshake.PurposeReconnect {
 				continue
 			}
@@ -581,7 +593,11 @@ func ownThHigher(og *OutgoingHS, aw *AwaitingHS) bool {
 // awaiting hs.fin.
 func (m *Manager) answeredReconnects(p *Peer) []string {
 	var ids []string
-	for id, aw := range m.st.Awaiting {
+	for _, id := range sortedKeys(m.st.Awaiting) {
+		aw, sortedOK := m.st.Awaiting[id]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if aw.New == nil && aw.PeerID == p.ID && aw.Purpose == handshake.PurposeReconnect {
 			ids = append(ids, id)
 		}
@@ -602,7 +618,11 @@ func (m *Manager) crossingPersons(p *Peer, now time.Time) bool {
 		return false
 	}
 	abandoned := false
-	for id, og := range m.st.Outgoing {
+	for _, id := range sortedKeys(m.st.Outgoing) {
+		og, sortedOK := m.st.Outgoing[id]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if og.New != nil || og.PeerID != p.ID || og.Purpose != handshake.PurposeReconnect || og.Replaced {
 			continue
 		}
@@ -700,13 +720,21 @@ func (m *Manager) handleRekeyInit(ctx context.Context, p *Peer, in *envelope.Inn
 	}
 	if namedConf {
 		// §6.3.1: the vault abandons its own open rekey for it.
-		for id, og := range m.st.Outgoing {
+		for _, id := range sortedKeys(m.st.Outgoing) {
+			og, sortedOK := m.st.Outgoing[id]
+			if !sortedOK {
+				continue // removed earlier in this loop
+			}
 			if og.New == nil && og.PeerID == p.ID && og.Purpose == handshake.PurposeRekey && !og.Replaced {
 				m.abandonOutgoing(id, now)
 			}
 		}
 	}
-	for _, og := range m.st.Outgoing {
+	for _, sortedK := range sortedKeys(m.st.Outgoing) {
+		og, sortedOK := m.st.Outgoing[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if og.New == nil && og.PeerID == p.ID && og.Purpose == handshake.PurposeReconnect && !bytes.Equal(og.Named, p.LastEpochID) {
 			// A reconnect naming an epoch (after a demotion, or by strict
 			// F1) is open: it replaces this rekey, which the peer cannot
@@ -762,7 +790,11 @@ func (m *Manager) handleRekeyInit(ctx context.Context, p *Peer, in *envelope.Inn
 // awaitingByKids finds the handshake awaiting this hs.fin by its new-epoch
 // kids and the expected sender.
 func (m *Manager) awaitingByKids(env *envelope.Envelope, sender ed25519.PublicKey) string {
-	for id, r := range m.awaiting {
+	for _, id := range sortedKeys(m.awaiting) {
+		r, sortedOK := m.awaiting[id]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		rk, sk := r.Kids()
 		if !env.RecipientKid().Equal(rk) || !env.SenderKid().Equal(sk) {
 			continue
@@ -896,7 +928,11 @@ func (m *Manager) responderEstablish(p *Peer, aw *AwaitingHS, fr *handshake.FinR
 	}
 	activate(m.responderActivation(p, signer, now))
 	m.queueConfirm(p, now)
-	for id, og := range m.st.Outgoing {
+	for _, id := range sortedKeys(m.st.Outgoing) {
+		og, sortedOK := m.st.Outgoing[id]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		// A verified hs.fin comes first, whatever the two purposes (0.86.6
 		// S6): the vault's own open handshake is abandoned.
 		if og.New == nil && og.PeerID == p.ID && !og.Replaced {
@@ -979,7 +1015,11 @@ func (m *Manager) finishReconnect(p *Peer, aw *AwaitingHS, fr *handshake.FinResu
 	// reconnects", 0.72.1) and between two persons a verified hs.fin
 	// comes first whatever the th1 (§6.6 "Between two persons", 0.74.0),
 	// so our own reconnect is abandoned, and any other answer with it.
-	for id, o := range m.st.Awaiting {
+	for _, id := range sortedKeys(m.st.Awaiting) {
+		o, sortedOK := m.st.Awaiting[id]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if id != aw.ID && o.New == nil && o.PeerID == p.ID && o.Purpose == handshake.PurposeReconnect {
 			m.abandonAwaiting(id, now)
 		}
@@ -1046,7 +1086,11 @@ func (m *Manager) activate(p *Peer, ep *handshake.Epoch, purpose handshake.Purpo
 		// 0.86.0: a rekey of the vault's own still open was made from an
 		// earlier epoch, which no longer moves on: it is abandoned (it
 		// would otherwise hold the next rekey back until it expires).
-		for oid, og := range m.st.Outgoing {
+		for _, oid := range sortedKeys(m.st.Outgoing) {
+			og, sortedOK := m.st.Outgoing[oid]
+			if !sortedOK {
+				continue // removed earlier in this loop
+			}
 			if og.New == nil && og.PeerID == p.ID && og.Purpose == handshake.PurposeRekey && !og.Replaced {
 				m.abandonOutgoing(oid, now)
 			}
@@ -1265,7 +1309,11 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 		// hs.init is dropped and its tokens revoked (not sent if not yet
 		// deposited); a later hs.fin for it finds nothing, is acked and
 		// dropped, and is not evidence for fork detection.
-		for id, o := range m.st.Awaiting {
+		for _, id := range sortedKeys(m.st.Awaiting) {
+			o, sortedOK := m.st.Awaiting[id]
+			if !sortedOK {
+				continue // removed earlier in this loop
+			}
 			// An answer stored before 0.74.0 has no th1 to compare: between
 			// persons it is kept, so that its hs.fin still establishes (the
 			// release-23 outcome, readable) instead of both sides dropping
@@ -1275,7 +1323,11 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 			}
 		}
 	}
-	for id, o := range m.st.Awaiting {
+	for _, id := range sortedKeys(m.st.Awaiting) {
+		o, sortedOK := m.st.Awaiting[id]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		// 0.86.0 (§6.5: the lower th1 across purposes): the vault's own
 		// handshake completed first, so a crossing rekey answer it kept is
 		// dropped (0ee0078 handshakes.go:912: reconnect answers only).
@@ -1313,7 +1365,11 @@ func (m *Manager) recordOutgoing(ini *handshake.Initiator, peerID string, newPee
 }
 
 func (m *Manager) hasOutgoing(peerID string, purpose handshake.Purpose) bool {
-	for _, og := range m.st.Outgoing {
+	for _, sortedK := range sortedKeys(m.st.Outgoing) {
+		og, sortedOK := m.st.Outgoing[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if og.PeerID == peerID && og.Purpose == purpose && !og.Replaced {
 			return true
 		}
@@ -1437,7 +1493,11 @@ func (m *Manager) startReconnectCtx(p *Peer, ctx []byte, now time.Time) *Outgoin
 // reconnectExpired starts reconnects for connections whose standing token
 // we hold has expired (§7.2 step 3).
 func (m *Manager) reconnectExpired(now time.Time) {
-	for _, p := range m.st.Connections {
+	for _, sortedK := range sortedKeys(m.st.Connections) {
+		p, sortedOK := m.st.Connections[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if p.State != PeerPending && handshake.ShouldUseReconnect(false, p.Standing.Exp, now) {
 			m.startReconnect(p, now)
 		}
@@ -1605,17 +1665,29 @@ func (m *Manager) existingWith(ik, relayPK []byte) string {
 	same := func(p *Peer) bool {
 		return p != nil && (suite.EqualPublic(p.IK, ik) || suite.EqualPublic(p.Relay.PK, relayPK))
 	}
-	for _, p := range m.st.Connections {
+	for _, sortedK := range sortedKeys(m.st.Connections) {
+		p, sortedOK := m.st.Connections[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if !p.replaceable() && same(p) {
 			return p.ID
 		}
 	}
-	for _, og := range m.st.Outgoing {
+	for _, sortedK := range sortedKeys(m.st.Outgoing) {
+		og, sortedOK := m.st.Outgoing[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if og.Purpose == handshake.PurposeConnection && same(og.New) {
 			return og.New.ID
 		}
 	}
-	for _, r := range m.st.Requests {
+	for _, sortedK := range sortedKeys(m.st.Requests) {
+		r, sortedOK := m.st.Requests[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if r.Dir == ReqOut && same(r.Peer) {
 			return r.ID
 		}

@@ -344,7 +344,7 @@ func (m *Manager) confirmQueued(p *Peer) bool {
 
 // reconfirmAll queues hs.confirm again for each peer the batch marked.
 func (m *Manager) reconfirmAll(now time.Time) {
-	for id := range m.reconfirm {
+	for _, id := range sortedKeys(m.reconfirm) {
 		if p := m.peer(id); p != nil && p.State == PeerActive && !m.confirmQueued(p) {
 			m.queueConfirm(p, now)
 		}
@@ -500,7 +500,11 @@ func devID(p *Peer) string {
 // answerAwaitingFin reports whether one of the vault's answers to p awaits
 // hs.fin.
 func (m *Manager) answerAwaitingFin(p *Peer) bool {
-	for _, aw := range m.st.Awaiting {
+	for _, sortedK := range sortedKeys(m.st.Awaiting) {
+		aw, sortedOK := m.st.Awaiting[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if aw.New == nil && aw.PeerID == p.ID {
 			return true
 		}
@@ -523,7 +527,11 @@ func (m *Manager) rekeyBlocked(p *Peer) bool {
 // the lower th1 is kept and the rekey answered too (the answer is dropped
 // when the reconnect completes, as between two reconnects of persons).
 func (m *Manager) crossingRekeyLoses(p *Peer, theirs [32]byte, now time.Time) bool {
-	for id, og := range m.st.Outgoing {
+	for _, id := range sortedKeys(m.st.Outgoing) {
+		og, sortedOK := m.st.Outgoing[id]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if og.New != nil || og.PeerID != p.ID || og.Replaced || len(og.Th1) != 32 {
 			continue
 		}

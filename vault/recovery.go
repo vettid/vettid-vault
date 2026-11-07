@@ -400,7 +400,11 @@ func (m *Manager) applyRecovery(now time.Time) {
 	}
 	m.hdr.RecoveryLog = nil
 	r := m.hdr.Recovery
-	for _, p := range m.st.Devices {
+	for _, sortedK := range sortedKeys(m.st.Devices) {
+		p, sortedOK := m.st.Devices[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if p.Recovering && (r == nil || r.App == nil || !suite.EqualPublic(r.App.IK, p.IK)) {
 			m.removePeer(p, "device.unlinked", now)
 		}

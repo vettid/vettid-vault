@@ -121,14 +121,22 @@ func (m *Manager) reconnectClass(jti string) bool {
 			}
 		}
 	}
-	for _, aw := range m.st.Awaiting {
+	for _, sortedK := range sortedKeys(m.st.Awaiting) {
+		aw, sortedOK := m.st.Awaiting[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		for _, t := range aw.Issued {
 			if t.JTI == jti {
 				return t.Kind == TokReconnect
 			}
 		}
 	}
-	for _, og := range m.st.Outgoing {
+	for _, sortedK := range sortedKeys(m.st.Outgoing) {
+		og, sortedOK := m.st.Outgoing[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		for _, t := range og.Issued {
 			if t.JTI == jti {
 				return t.Kind == TokReconnect
@@ -293,12 +301,20 @@ func (m *Manager) denyPeerTokens(p *Peer, now time.Time) {
 			}
 		}
 	}
-	for _, aw := range m.st.Awaiting {
+	for _, sortedK := range sortedKeys(m.st.Awaiting) {
+		aw, sortedOK := m.st.Awaiting[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if aw.PeerID == p.ID {
 			inflight(aw.Issued)
 		}
 	}
-	for _, og := range m.st.Outgoing {
+	for _, sortedK := range sortedKeys(m.st.Outgoing) {
+		og, sortedOK := m.st.Outgoing[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if og.PeerID == p.ID {
 			inflight(og.Issued)
 		}
@@ -343,7 +359,11 @@ func (m *Manager) markDeviceTokens(now time.Time) {
 	if m.st.DeviceTokensMarked {
 		return
 	}
-	for _, p := range m.st.Devices {
+	for _, sortedK := range sortedKeys(m.st.Devices) {
+		p, sortedOK := m.st.Devices[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if p.State == PeerActive && p.Kind == KindApp {
 			m.issueTo(p, TokStanding, now)
 		}

@@ -816,7 +816,11 @@ func (m *Manager) restoreLive() error {
 	// In-flight handshakes and requests that do not restore (made by an
 	// earlier release, before 0.10.3) are dropped: they would fail anyway,
 	// and the vault must still unlock.
-	for id, aw := range m.st.Awaiting {
+	for _, id := range sortedKeys(m.st.Awaiting) {
+		aw, sortedOK := m.st.Awaiting[id]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		r, err := handshake.RestoreResponder(aw.Resp)
 		if err != nil {
 			delete(m.st.Awaiting, id)
@@ -825,7 +829,11 @@ func (m *Manager) restoreLive() error {
 		}
 		m.awaiting[id] = r
 	}
-	for id, og := range m.st.Outgoing {
+	for _, id := range sortedKeys(m.st.Outgoing) {
+		og, sortedOK := m.st.Outgoing[id]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if og.Replaced && og.New == nil && og.Purpose == handshake.PurposeRekey {
 			// A rekey of the replaced line (§6.6) is kept as fork evidence
 			// only: restored without an identity key, so it verifies a
@@ -855,7 +863,11 @@ func (m *Manager) restoreLive() error {
 		}
 		m.outgoing[id] = i
 	}
-	for id, r := range m.st.Requests {
+	for _, id := range sortedKeys(m.st.Requests) {
+		r, sortedOK := m.st.Requests[id]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		e, err := handshake.ImportEpoch(r.Epoch)
 		if err != nil || r.Peer == nil {
 			delete(m.st.Requests, id)
@@ -879,12 +891,20 @@ func (m *Manager) exportLive() {
 			r.Epoch = e.Export()
 		}
 	}
-	for id, r := range m.awaiting {
+	for _, id := range sortedKeys(m.awaiting) {
+		r, sortedOK := m.awaiting[id]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if s, err := r.Export(); err == nil {
 			m.st.Awaiting[id].Resp = s
 		}
 	}
-	for id, i := range m.outgoing {
+	for _, id := range sortedKeys(m.outgoing) {
+		i, sortedOK := m.outgoing[id]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if s, err := i.Export(); err == nil {
 			m.st.Outgoing[id].Init = s
 		}
@@ -898,10 +918,18 @@ func (m *Manager) exportLive() {
 
 func (m *Manager) allPeers() []*Peer {
 	out := make([]*Peer, 0, len(m.st.Devices)+len(m.st.Connections))
-	for _, p := range m.st.Devices {
+	for _, sortedK := range sortedKeys(m.st.Devices) {
+		p, sortedOK := m.st.Devices[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		out = append(out, p)
 	}
-	for _, p := range m.st.Connections {
+	for _, sortedK := range sortedKeys(m.st.Connections) {
+		p, sortedOK := m.st.Connections[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		out = append(out, p)
 	}
 	return out
@@ -1075,7 +1103,11 @@ func (m *Manager) syncUnlockKeys() {
 		return fallback
 	}
 	var keys []UnlockKey
-	for _, p := range m.st.Devices {
+	for _, sortedK := range sortedKeys(m.st.Devices) {
+		p, sortedOK := m.st.Devices[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if p.Recovering && !m.hdr.isRecoveryKey(p.IK) {
 			continue // its recovery was cancelled (§11.11.4)
 		}
@@ -1090,7 +1122,11 @@ func (m *Manager) syncUnlockKeys() {
 	// recovered phone is one from the completion until its pairing (its
 	// invite), and a transfer's or recovery's new phone is in the `next`
 	// part until step 3 (findUnlockKey).
-	for _, inv := range m.st.Invites {
+	for _, sortedK := range sortedKeys(m.st.Invites) {
+		inv, sortedOK := m.st.Invites[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		// Kept until the phone pairs, past the invite's expiry: a lost
 		// ok is resumed by this phone's unlock (owner decision of
 		// 2026-10-16, §11.14.6).
@@ -1196,10 +1232,18 @@ func (m *Manager) zeroize() {
 	for _, e := range m.reqEpochs {
 		e.Destroy()
 	}
-	for _, r := range m.awaiting {
+	for _, sortedK := range sortedKeys(m.awaiting) {
+		r, sortedOK := m.awaiting[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		r.Abort()
 	}
-	for _, i := range m.outgoing {
+	for _, sortedK := range sortedKeys(m.outgoing) {
+		i, sortedOK := m.outgoing[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		i.Abort()
 	}
 	m.reqEpochs, m.awaiting, m.outgoing = nil, nil, nil

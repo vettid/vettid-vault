@@ -766,7 +766,11 @@ func resumeRecovery(ctx context.Context, p RecoveryOpenParams, hdr *Header, hver
 // earlier recovered phone's (a later recovery replaces it, with its
 // handshake if one is under way).
 func (m *Manager) setRecoveredInvite(inv *Invite, now time.Time) {
-	for id, old := range m.st.Invites {
+	for _, id := range sortedKeys(m.st.Invites) {
+		old, sortedOK := m.st.Invites[id]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if old.CreatedBy == inviteByRecovery && id != inv.ID {
 			m.dropRecoveredHandshake(id, now)
 			delete(m.st.Invites, id)
@@ -779,7 +783,11 @@ func (m *Manager) setRecoveredInvite(inv *Invite, now time.Time) {
 // recoveredInvite is the invite of the recovered phone whose identity is
 // ik, before its first handshake; nil for every other device.
 func (m *Manager) recoveredInvite(ik ed25519.PublicKey) *Invite {
-	for _, inv := range m.st.Invites {
+	for _, sortedK := range sortedKeys(m.st.Invites) {
+		inv, sortedOK := m.st.Invites[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if inv.CreatedBy == inviteByRecovery && inv.EnrollIK != nil && suite.EqualPublic(inv.EnrollIK, ik) {
 			return inv
 		}
@@ -790,7 +798,11 @@ func (m *Manager) recoveredInvite(ik ed25519.PublicKey) *Invite {
 // dropRecoveredHandshake ends a first handshake begun with invite id that
 // has not completed.
 func (m *Manager) dropRecoveredHandshake(id string, now time.Time) {
-	for aid, aw := range m.st.Awaiting {
+	for _, aid := range sortedKeys(m.st.Awaiting) {
+		aw, sortedOK := m.st.Awaiting[aid]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if aw.InviteID == id {
 			m.dropAwaiting(aid, "replaced", now)
 		}
@@ -855,7 +867,11 @@ func (m *Manager) resumeRecoveredInvite(r *RecoveryRecord, device ed25519.Public
 			return
 		}
 	}
-	for _, inv := range m.st.Invites {
+	for _, sortedK := range sortedKeys(m.st.Invites) {
+		inv, sortedOK := m.st.Invites[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if inv.CreatedBy == inviteByRecovery {
 			m.renewRecoveredInvite(inv, now)
 		}

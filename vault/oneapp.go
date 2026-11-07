@@ -415,7 +415,11 @@ func (m *Manager) replaceApps(keep string, now time.Time) {
 
 func (m *Manager) sortedDevices() []*Peer {
 	out := make([]*Peer, 0, len(m.st.Devices))
-	for _, p := range m.st.Devices {
+	for _, sortedK := range sortedKeys(m.st.Devices) {
+		p, sortedOK := m.st.Devices[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		out = append(out, p)
 	}
 	for i := 1; i < len(out); i++ {

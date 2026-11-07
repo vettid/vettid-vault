@@ -377,7 +377,11 @@ func (m *Manager) f1Demote(p *Peer, app []*handshake.Rotation, msgEpoch []byte, 
 		if kr != nil {
 			m.rehold(p, kr.Current())
 		}
-		for id, og := range m.st.Outgoing {
+		for _, id := range sortedKeys(m.st.Outgoing) {
+			og, sortedOK := m.st.Outgoing[id]
+			if !sortedOK {
+				continue // removed earlier in this loop
+			}
 			if og.New == nil && og.PeerID == p.ID && og.Purpose == handshake.PurposeRekey {
 				m.abandonOutgoing(id, now)
 			}
@@ -600,7 +604,11 @@ func (m *Manager) canReconnect(p *Peer, now time.Time) bool {
 // dropped.
 func (m *Manager) h5(p *Peer, now time.Time) {
 	rekey, reconnect := false, false
-	for id, og := range m.st.Outgoing {
+	for _, id := range sortedKeys(m.st.Outgoing) {
+		og, sortedOK := m.st.Outgoing[id]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if og.New != nil || og.PeerID != p.ID || og.Replaced || bytes.Equal(og.Init.ResponderIK, p.IK) {
 			continue
 		}
@@ -618,7 +626,11 @@ func (m *Manager) h5(p *Peer, now time.Time) {
 			}
 		}
 	}
-	for id, aw := range m.st.Awaiting {
+	for _, id := range sortedKeys(m.st.Awaiting) {
+		aw, sortedOK := m.st.Awaiting[id]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if aw.New == nil && aw.PeerID == p.ID && aw.Signer != nil && !bytes.Equal(aw.Signer, p.IK) &&
 			(aw.Reconnect == nil || !aw.Reconnect.Fork) {
 			m.abandonAwaiting(id, now)
@@ -767,7 +779,11 @@ func (m *Manager) identityRotateBody(p *Peer) []byte {
 // after identity.rotate); its answers awaiting hs.fin are dropped (their
 // epochs would be signed by the superseded ik).
 func (m *Manager) s5(p *Peer, now time.Time) (reconnect bool) {
-	for id, og := range m.st.Outgoing {
+	for _, id := range sortedKeys(m.st.Outgoing) {
+		og, sortedOK := m.st.Outgoing[id]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if og.New != nil || og.PeerID != p.ID || og.Replaced {
 			continue
 		}
@@ -778,7 +794,11 @@ func (m *Manager) s5(p *Peer, now time.Time) (reconnect bool) {
 		reconnect = reconnect || pe.Purpose == handshake.PurposeReconnect
 		m.abandonPending(p, "s5", false, now)
 	}
-	for id, aw := range m.st.Awaiting {
+	for _, id := range sortedKeys(m.st.Awaiting) {
+		aw, sortedOK := m.st.Awaiting[id]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if aw.New == nil && aw.PeerID == p.ID {
 			m.abandonAwaiting(id, now)
 		}

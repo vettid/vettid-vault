@@ -438,6 +438,10 @@ func (m *Manager) enterHold(now time.Time) {
 	m.record(Activity{Kind: "owner_check.held", Audit: true}, now)
 }
 
+// sortedKeys returns mp's keys in order. The vault also iterates its
+// peers, handshakes, invites, requests and confirmations in this order, so
+// that what it does does not depend on Go's random map order (replayable
+// runs of the random pair search).
 func sortedKeys[V any](mp map[string]V) []string {
 	out := make([]string, 0, len(mp))
 	for k := range mp {

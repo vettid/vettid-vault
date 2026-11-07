@@ -34,12 +34,20 @@ func (m *Manager) reconnectNaming(p *Peer, ctx []byte, why string, now time.Time
 	if !m.canReconnect(p, now) {
 		return false // nothing is abandoned for a reconnect that cannot start
 	}
-	for id, og := range m.st.Outgoing {
+	for _, id := range sortedKeys(m.st.Outgoing) {
+		og, sortedOK := m.st.Outgoing[id]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if og.New == nil && og.PeerID == p.ID && og.Purpose == handshake.PurposeRekey {
 			m.abandonOutgoing(id, now)
 		}
 	}
-	for id, aw := range m.st.Awaiting {
+	for _, id := range sortedKeys(m.st.Awaiting) {
+		aw, sortedOK := m.st.Awaiting[id]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if aw.New == nil && aw.PeerID == p.ID && aw.Purpose == handshake.PurposeRekey {
 			m.abandonAwaiting(id, now)
 		}

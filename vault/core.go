@@ -370,7 +370,11 @@ func (m *Manager) removePeerWith(p *Peer, notice string, body json.RawMessage, n
 		kr.Destroy()
 	}
 	delete(m.sessions, p.ID)
-	for id, og := range m.st.Outgoing {
+	for _, id := range sortedKeys(m.st.Outgoing) {
+		og, sortedOK := m.st.Outgoing[id]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if og.PeerID == p.ID {
 			m.dropOutgoing(id)
 		}
@@ -405,7 +409,11 @@ func (m *Manager) hInviteCreate(ctx context.Context, s *Session, in *envelope.In
 
 func (m *Manager) hInviteList(context.Context, *Session, *envelope.Inner) (json.RawMessage, error) {
 	var ids []string
-	for id, inv := range m.st.Invites {
+	for _, id := range sortedKeys(m.st.Invites) {
+		inv, sortedOK := m.st.Invites[id]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if !inv.Used && inv.Kind == KindConnection {
 			ids = append(ids, id)
 		}
@@ -660,7 +668,11 @@ func (m *Manager) retryOwedRotation(now time.Time) {
 	if o == nil || (o.Recovery == "" && o.Transfer == "") || m.st.Deleting != nil {
 		return // (a vault being deleted rotates nothing, §12.5)
 	}
-	for _, inv := range m.st.Invites {
+	for _, sortedK := range sortedKeys(m.st.Invites) {
+		inv, sortedOK := m.st.Invites[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if inv.CreatedBy == inviteByRecovery {
 			return
 		}
@@ -778,7 +790,11 @@ func (m *Manager) rotateIdentity(now time.Time) error {
 // deposited, is not sent; an hs.resp to it finds no handshake and is
 // dropped.
 func (m *Manager) dropRekey(peerID string) {
-	for id, og := range m.st.Outgoing {
+	for _, id := range sortedKeys(m.st.Outgoing) {
+		og, sortedOK := m.st.Outgoing[id]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if og.PeerID != peerID || og.New != nil || og.Purpose != handshake.PurposeRekey || og.Replaced {
 			continue
 		}

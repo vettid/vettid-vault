@@ -184,10 +184,6 @@ func (w *World) checkI7() {
 			w.exempt("I7", resDevice)
 		case !w.copyEpochAfterR(q, r, e):
 			w.exempt("I7", resBeforeRotation)
-		case init && !w.copyFlag[[2]int{int(q.ID), e}] && w.copyFlagLate[[2]int{int(q.ID), e}]:
-			// 0.88.2: its other messages, deposited before P's link, were
-			// processed only after strict F1 or K4 had demoted the epoch
-			w.exempt("I7", resCopyInitLate)
 		case init && !w.copyFlag[[2]int{int(q.ID), e}]:
 			w.exempt("I7", resCopyInit)
 		default:

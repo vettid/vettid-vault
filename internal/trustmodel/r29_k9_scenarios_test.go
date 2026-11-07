@@ -788,3 +788,52 @@ func TestR29ForkByCtxSkipsDemoted(t *testing.T) {
 		}
 	})
 }
+
+// (0.88.2, owner decision a, GC 01M6SQNDPRKRMEXQFA7XFMGACH) §3.4.1 "The
+// flag is judged whenever it is set". The shape of random seed
+// 17877842174007298786: an old copy of P, taken before P's rotation,
+// rekeys with Q as initiator; Q activates E1 at its hs.fin (flag clear);
+// the copy confirms and sends a session message under E1, which is
+// delayed (a lease). P rotates; its identity.rotate under E0 makes Q's
+// strict F1 demote E1 (flag still clear). The copy's message, deposited
+// before the link, is then processed and accepted: it sets E1's flag, and
+// Q suspends (ref epoch, visible). Off (World.noFlagJudged, the rule
+// before 0.88.2): the flag is set and nothing judges it; the copy's epoch
+// was used and nothing is visible.
+func TestR29DemotedFlagSetLateSuspends(t *testing.T) {
+	bothWays(t, func(t *testing.T, off bool) {
+		s := newScen(t, 2)
+		s.w.relayRot = false
+		s.w.noFlagJudged = off
+		P, Q := s.p(0), s.p(1)
+		s.w.makeCopy(P)
+		c := s.w.P[len(s.w.P)-1]
+		c.unlock()
+		s.do(c, func() { c.startHS(c.st.peer(Q.ID), false); c.write(); c.flush() })
+		s.drain(Q) // Q answers the copy
+		s.drain(c) // the copy: pending, hs.fin
+		s.drain(Q) // Q activates E1 at hs.fin, hs.confirm
+		e1 := Q.st.peer(P.ID).Cur
+		s.drain(c) // the copy confirms E1
+		s.do(c, func() { c.enqueue(Q.ID, Msg{Kind: KSession, Probe: s.w.id()}, nil); c.write(); c.flush() })
+		c.Locked, c.st = true, c.stored.clone()
+		s.hold(Q, KSession) // the copy's message waits
+		s.rotate(P, pathCred)
+		s.hold(Q, KInit) // P's restarted rekey is not the subject
+		s.drain(Q)       // P's identity.rotate under E0: strict F1 demotes E1
+		rq := Q.st.peer(P.ID)
+		if ep := rq.epoch(e1); ep == nil || !ep.Demoted || ep.Flag || rq.Status != stActive {
+			t.Fatalf("setup: E%d not demoted with its flag clear: %+v\n  %s", e1, ep, s.trace())
+		}
+		s.release(Q, KSession)
+		s.drain(Q) // the copy's message, deposited before the link
+		rq = Q.st.peer(P.ID)
+		t.Logf("off %v: Q status %d (%s)", off, rq.Status, rq.Ref)
+		if !off && (rq.Status != stSuspended || rq.Ref != "connection.fork_suspected/epoch") {
+			t.Fatalf("a flag set on the demoted E%d was not judged\n  %s", e1, s.trace())
+		}
+		if off && rq.Status != stActive {
+			t.Fatalf("off: Q suspended; the scenario does not test the rule\n  %s", s.trace())
+		}
+	})
+}

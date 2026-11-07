@@ -164,7 +164,6 @@ const (
 	resDeviceFAfter     = "F's after-effect: a device's token refresh sent under the epoch the vault abandoned while pending was lost, and the vault still holds no token for it (§3.4.1 Invariants, finding F, 0.88.2)"
 	resDevice           = "D: a device applies no demotion to its vault's epochs (§15 item 51; the device exception of §3.4.1 Invariants)"
 	resAbandonedEarlier = "a copy using an epoch Q abandoned while pending that R29-K9 does not judge: earlier than the epoch of P's identity.rotate, or before it arrives (owner decision b, 0.87.1)"
-	resCopyInitLate     = "a copy acting as initiator whose other messages were processed only after the epoch was demoted (the flag set too late; §3.4.1 Residuals, \"A copy acting as initiator is not visible\", 0.88.2)"
 	resCopyForkResolve  = "an old copy of Q forks; after R suspends and resolves, R's strict F1 reconnect names an epoch Q takes as fork evidence (§3.4.1 Residuals, two old-copy cases (1), 0.88.2)"
 	resCopySuccSusp     = "an old copy's further successor of P's ik arrived while Q's record was suspended and was not kept (§3.4.1 Residuals, two old-copy cases (2), 0.88.2)"
 	resCopyInit         = "a copy acting as initiator sent nothing but hs.fin"

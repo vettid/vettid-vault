@@ -218,11 +218,17 @@ func (q *Party) beforeAccept(r *PeerRec, m *RMsg, pos Pos) {
 		ep.Flag = true
 		q.w.hit("F3:flag-set")
 		if tr, ok := q.w.epTruth[ep.ID]; ok && !q.Copy && (q.w.party(tr[0]).Copy || q.w.party(tr[1]).Copy) {
-			if ep.Demoted {
-				q.pendFlagLate = append(q.pendFlagLate, ep.ID) // set only after the epoch was demoted
-			} else {
-				q.pendFlag = append(q.pendFlag, ep.ID) // ground truth once the write stores it
-			}
+			q.pendFlag = append(q.pendFlag, ep.ID) // ground truth once the write stores it
+		}
+		if ep.Demoted && !r.Device && r.Status == stActive && !q.w.noFlagJudged {
+			// (0.88.2, owner decision a, GC 01M6SQNDPRKRMEXQFA7XFMGACH) the
+			// flag is judged whenever it is set: a flag-setting message
+			// accepted under an epoch demoted with its flag clear (K4 or K7;
+			// deposited before x, processed after the demotion) is P's side
+			// using it, which an honest P never does: a copy did
+			q.w.hit("F3:flag-on-demoted-suspends")
+			q.w.logf("%s: a flag-setting message under demoted E%d of %s: a copy used it", q.Name, ep.ID, q.w.party(r.ID).Name)
+			q.suspend(r, "connection.fork_suspected/epoch")
 		}
 		if M.Kind == KConfirm {
 			q.w.hit("F3:flag-set-by-hs.confirm")

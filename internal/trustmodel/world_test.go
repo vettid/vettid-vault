@@ -41,7 +41,6 @@ type World struct {
 	ruleEKeepFin  bool                // TRUSTMODEL_RULEEFIN=keep: rule E leaves an unsent hs.fin for a destroyed epoch in the outbox (before r7)
 	copyExpo      map[[2]int]*expo    // (honest party, copy epoch): when it was used
 	copyFlag      map[[2]int]bool     // (honest party, copy epoch): its received flag was set (ground truth, I7)
-	copyFlagLate  map[[2]int]bool     // (honest party, copy epoch): its flag was set only after it was demoted (I7, 0.88.2 residual)
 	copyCur       map[[2]int]bool     // (honest party, copy epoch): it became current there (ground truth, I7)
 	lockedFor     map[PID]int64       // M2: how long each real party has been locked at a stretch (time passed by advance)
 	maxLock       int64               // M2: the longest such stretch in the run
@@ -63,6 +62,7 @@ type World struct {
 	noF9              bool // F9: token_expired keeps the pending epoch (so startHS refuses the reconnect)
 	noF10             bool // F10: hs.confirm queued again for every such batch, even with one still in the outbox
 	noF13B            bool // F13: B judged on time alone, not only after the first short collect after an unlock
+	noFlagJudged      bool // before 0.88.2: a flag set on a demoted epoch is not judged until a later link (TestR29DemotedFlagSetLateSuspends's "off")
 	noKeepAnswers     bool // before 0.88.2: a new answered reconnect ends Q's earlier answers (TestR29KeepReconnectAnswers's "off")
 	noForkSkipDemoted bool // before 0.88.2: Fork by ctx counts a demoted flag-clear epoch (TestR29ForkByCtxSkipsDemoted's "off")
 	noForkSkipAban    bool // 0.88.2: Fork by ctx does not skip an epoch Q began and abandoned while pending (the scenario's "off")
@@ -113,7 +113,7 @@ func newWorld(seed uint64) *World {
 	w := &World{rng: rand.New(rand.NewPCG(seed, 7)), issuer: map[int]Key{}, epTruth: map[int][2]PID{},
 		rlinkBy: map[RLink]rot{}, iklinkBy: map[IKLink]rot{}, evid: map[[2]PID]map[Key]map[Key]bool{},
 		ikPos: map[[2]PID][]ikFollow{}, answered: map[int]bool{},
-		ended: map[int]bool{}, ever: map[PID]map[int]bool{}, probes: map[int]bool{}, stats: map[string]int{}, deadAt: map[[2]PID]int64{}, deadWhy: map[[2]PID]string{}, deadRes: map[[2]PID]string{}, splitAt: map[[2]PID]int64{}, splitNow: map[[2]PID]bool{}, ttlFin: map[[2]PID]string{}, probeDep: map[int][2]PID{}, probeFate: map[int]string{}, hasEpoch: map[[2]int]bool{}, staleAt: map[[2]PID]string{}, hsOrigin: map[int]string{}, suspAt: map[[2]PID]int64{}, audits: map[[2]PID]int{}, everSplit: map[[2]PID]bool{}, feed: map[[2]PID][]string{}, copyExpo: map[[2]int]*expo{}, copyFlag: map[[2]int]bool{}, copyCur: map[[2]int]bool{}, copyFlagLate: map[[2]int]bool{}, copyAban: map[[2]int]*abanUse{}, oldApp: map[[2]PID]string{}, devCopyFirst: map[[2]PID]bool{}, lockedFor: map[PID]int64{}, rotTimes: map[PID][]int64{}, fDue: map[[2]PID]bool{}, probeF: map[int]bool{}, fLostTok: map[[2]PID]bool{}, initIK: map[PID]Key{}, probeEpoch: map[int]int{}, forkDue: map[[2]PID]int{}, evidKind: map[Key]string{}, evidActive: map[[2]PID]map[Key]bool{}, resolved: map[[2]PID]bool{}, identSucc: map[Key]bool{}, forkFinK7: map[[2]PID]bool{}}
+		ended: map[int]bool{}, ever: map[PID]map[int]bool{}, probes: map[int]bool{}, stats: map[string]int{}, deadAt: map[[2]PID]int64{}, deadWhy: map[[2]PID]string{}, deadRes: map[[2]PID]string{}, splitAt: map[[2]PID]int64{}, splitNow: map[[2]PID]bool{}, ttlFin: map[[2]PID]string{}, probeDep: map[int][2]PID{}, probeFate: map[int]string{}, hasEpoch: map[[2]int]bool{}, staleAt: map[[2]PID]string{}, hsOrigin: map[int]string{}, suspAt: map[[2]PID]int64{}, audits: map[[2]PID]int{}, everSplit: map[[2]PID]bool{}, feed: map[[2]PID][]string{}, copyExpo: map[[2]int]*expo{}, copyFlag: map[[2]int]bool{}, copyCur: map[[2]int]bool{}, copyAban: map[[2]int]*abanUse{}, oldApp: map[[2]PID]string{}, devCopyFirst: map[[2]PID]bool{}, lockedFor: map[PID]int64{}, rotTimes: map[PID][]int64{}, fDue: map[[2]PID]bool{}, probeF: map[int]bool{}, fLostTok: map[[2]PID]bool{}, initIK: map[PID]Key{}, probeEpoch: map[int]int{}, forkDue: map[[2]PID]int{}, evidKind: map[Key]string{}, evidActive: map[[2]PID]map[Key]bool{}, resolved: map[[2]PID]bool{}, identSucc: map[Key]bool{}, forkFinK7: map[[2]PID]bool{}}
 	w.R = newRelay(w)
 	w.Now = 1000 * day
 	return w
@@ -254,7 +254,6 @@ type Party struct {
 	pendEvid             []pendEv // evidence seen in the batch not yet written
 	pendFlag             []int    // copy epochs whose received flag was set in the batch, not yet written (I7)
 	pendCur              []int    // copy epochs made current in the batch, not yet written (I7)
-	pendFlagLate         []int    // copy epochs whose flag was set only after they were demoted, not yet written (I7)
 	collectedSinceUnlock bool     // B is judged only after the first collect after an unlock
 	Desktop              bool     // a desktop or agent, not the member's app: no unlock exchange (§7.2); scenarios only
 	OldApp               bool     // R29-D4: a device app from before release 29 (no hs.confirm, no hs_confirm in features, rekeys)
@@ -308,10 +307,6 @@ func (p *Party) write() {
 		p.w.copyCur[[2]int{int(p.ID), e}] = true
 	}
 	p.pendCur = nil
-	for _, e := range p.pendFlagLate {
-		p.w.copyFlagLate[[2]int{int(p.ID), e}] = true
-	}
-	p.pendFlagLate = nil
 	p.stored = p.st.clone()
 	p.storedOut = map[int]bool{}
 	if p.w.ever[p.ID] == nil {
@@ -333,7 +328,6 @@ func (p *Party) restart(lock bool) {
 	p.pendEvid = nil
 	p.pendFlag = nil
 	p.pendCur = nil
-	p.pendFlagLate = nil
 	p.rotOK = false
 	p.collTo = map[Key]int64{}
 	if lock {

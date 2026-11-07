@@ -564,13 +564,18 @@ func (w *World) checkEnd(liveness bool) {
 				// 0.88.2 residual: after a resolution, a further successor
 				// that only ever arrived while the record was suspended
 				// (step 1 keeps no identity link then) is not known
-				active := 0
+				active, identity := 0, true
 				for nw := range news {
-					if !slices.ContainsFunc(r.Dropped, func(l IKLink) bool { return l.Old == old && l.New == nw }) && w.evidActive[key][nw] {
+					if slices.ContainsFunc(r.Dropped, func(l IKLink) bool { return l.Old == old && l.New == nw }) {
+						continue
+					}
+					if w.evidActive[key][nw] {
 						active++
+					} else if !w.identSucc[nw] {
+						identity = false // a relay successor: not this residual
 					}
 				}
-				if w.resolved[key] && active < 2 && slices.ContainsFunc(w.copies(), func(c *Party) bool { return c.Origin == key[1] }) {
+				if w.optA && identity && w.resolved[key] && active < 2 && slices.ContainsFunc(w.copies(), func(c *Party) bool { return c.Origin == key[1] }) {
 					w.exempt("I4", resCopySuccSusp)
 					continue
 				}

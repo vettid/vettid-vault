@@ -937,19 +937,26 @@ func (q *Party) tableBInit(r *PeerRec, m *RMsg, pos Pos) dec {
 	// is judged. (Before 0.88.2, with noKeepAnswers, the new one ended the
 	// earlier ones.)
 	if M.Reconnect {
-		var kept []int
-		for _, a := range r.Ans {
+		var kept []HS
+		for _, a := range slices.Clone(r.Ans) {
 			if a.Reconnect && !a.Fork {
 				if q.w.noKeepAnswers {
 					q.dropAnswer(r, a.ID)
 					continue
 				}
-				kept = append(kept, a.ID)
+				kept = append(kept, a)
 			}
 		}
+		// as the vault: the oldest by creation time, ties by answer id
+		slices.SortFunc(kept, func(x, y HS) int {
+			if x.Started != y.Started {
+				return int(x.Started - y.Started)
+			}
+			return x.ID - y.ID
+		})
 		for len(kept) >= 4 {
 			q.w.hit("H5:reconnect-answers-capped")
-			q.dropAnswer(r, kept[0])
+			q.dropAnswer(r, kept[0].ID)
 			kept = kept[1:]
 		}
 	}
@@ -1424,6 +1431,7 @@ func (w *World) commitEvidence(q *Party, r *PeerRec, M *Msg, susp bool) {
 		w.evidActive[key] = map[Key]bool{}
 	}
 	for _, l := range M.Rot {
+		w.identSucc[l.New] = true
 		if !susp {
 			w.evidActive[key][l.New] = true // carried while Q's record was not suspended
 		}

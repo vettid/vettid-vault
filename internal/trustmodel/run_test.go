@@ -679,6 +679,7 @@ func (w *World) checkEnd(liveness bool) {
 		// finding F: a failure is the device exception, counted once per pair
 		fPair := w.fDue[k]
 		fCounted := false
+		fAfterPair := false
 		fail := func(inv, format string, a ...any) {
 			if fPair {
 				if !fCounted {
@@ -703,7 +704,18 @@ func (w *World) checkEnd(liveness bool) {
 			if s.r.IK != s.it.st.IK {
 				fail(inv1, "%s: %s has ik %d for %s, which is at %d", name, s.me.Name, s.r.IK, s.it.Name, s.it.st.IK)
 			}
-			if s.r.KeyFor != s.me.st.Relay || s.r.standing(s.me.st.Relay, s.it.st.Relay, w.Now).JTI == 0 {
+			noTok := s.r.KeyFor != s.me.st.Relay || s.r.standing(s.me.st.Relay, s.it.st.Relay, w.Now).JTI == 0
+			// F's after-effect (0.88.2): the device's token refresh, sent under
+			// the epoch the vault abandoned while pending, was lost, and the
+			// vault still holds no token for it: the token, the outbox entries
+			// waiting on it and the vault->device message are F, not violations
+			fAfter := noTok && !fPair && !s.me.Device && s.it.Device && w.fLostTok[k]
+			if fAfter {
+				w.exempt("I1", resDeviceFAfter)
+				fAfterPair = true
+				continue
+			}
+			if noTok {
 				fail(inv1, "%s: %s holds no token passing rule T for %s's current mailbox (key for it %d, own %d)", name, s.me.Name, s.it.Name, s.r.KeyFor, s.me.st.Relay)
 			}
 			for _, e := range s.me.st.Out {
@@ -749,7 +761,7 @@ func (w *World) checkEnd(liveness bool) {
 			if oldApp {
 				probeOld[id] = k
 			}
-			if fPair {
+			if fPair || (fAfterPair && !s[0].Device) {
 				probeF[id] = true
 			}
 			me := s[0]

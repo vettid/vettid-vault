@@ -48,6 +48,7 @@ type World struct {
 	rotBurst      bool                // TRUSTMODEL_ROTBURST: the run starts with a rotation burst (M2's quota exemption applies)
 	injLoss       bool                // M2: the run injected a loss (fin-loss)
 	devCopyFirst  map[[2]PID]bool     // vault<->device pair: rule C kept the old copy's successor and refused the real one (ground truth)
+	fLostTok      map[[2]PID]bool     // device<->vault: the device sent a token refresh under an epoch the vault abandoned while pending (F's after-effect)
 	probeF        map[int]bool        // probes lost, if lost, through finding F (fLoss, at deposit; I1-loss)
 	fDue          map[[2]PID]bool     // vault<->device pair: a pending rekey was abandoned (any reason) and no newer epoch confirmed since: F applies (the device exception)
 	oldApp        map[[2]PID]string   // pair of an old app and its vault -> the first I1 failure at quiescence (I7 requires the R29-D4 notice)
@@ -107,7 +108,7 @@ func newWorld(seed uint64) *World {
 	w := &World{rng: rand.New(rand.NewPCG(seed, 7)), issuer: map[int]Key{}, epTruth: map[int][2]PID{},
 		rlinkBy: map[RLink]rot{}, iklinkBy: map[IKLink]rot{}, evid: map[[2]PID]map[Key]map[Key]bool{},
 		ikPos: map[[2]PID][]ikFollow{}, answered: map[int]bool{},
-		ended: map[int]bool{}, ever: map[PID]map[int]bool{}, probes: map[int]bool{}, stats: map[string]int{}, deadAt: map[[2]PID]int64{}, deadWhy: map[[2]PID]string{}, deadRes: map[[2]PID]string{}, splitAt: map[[2]PID]int64{}, splitNow: map[[2]PID]bool{}, ttlFin: map[[2]PID]string{}, probeDep: map[int][2]PID{}, probeFate: map[int]string{}, hasEpoch: map[[2]int]bool{}, staleAt: map[[2]PID]string{}, hsOrigin: map[int]string{}, suspAt: map[[2]PID]int64{}, audits: map[[2]PID]int{}, everSplit: map[[2]PID]bool{}, feed: map[[2]PID][]string{}, copyExpo: map[[2]int]*expo{}, copyFlag: map[[2]int]bool{}, copyCur: map[[2]int]bool{}, copyAban: map[[2]int]*abanUse{}, oldApp: map[[2]PID]string{}, devCopyFirst: map[[2]PID]bool{}, lockedFor: map[PID]int64{}, rotTimes: map[PID][]int64{}, fDue: map[[2]PID]bool{}, probeF: map[int]bool{}, initIK: map[PID]Key{}, probeEpoch: map[int]int{}, forkDue: map[[2]PID]int{}, evidKind: map[Key]string{}}
+		ended: map[int]bool{}, ever: map[PID]map[int]bool{}, probes: map[int]bool{}, stats: map[string]int{}, deadAt: map[[2]PID]int64{}, deadWhy: map[[2]PID]string{}, deadRes: map[[2]PID]string{}, splitAt: map[[2]PID]int64{}, splitNow: map[[2]PID]bool{}, ttlFin: map[[2]PID]string{}, probeDep: map[int][2]PID{}, probeFate: map[int]string{}, hasEpoch: map[[2]int]bool{}, staleAt: map[[2]PID]string{}, hsOrigin: map[int]string{}, suspAt: map[[2]PID]int64{}, audits: map[[2]PID]int{}, everSplit: map[[2]PID]bool{}, feed: map[[2]PID][]string{}, copyExpo: map[[2]int]*expo{}, copyFlag: map[[2]int]bool{}, copyCur: map[[2]int]bool{}, copyAban: map[[2]int]*abanUse{}, oldApp: map[[2]PID]string{}, devCopyFirst: map[[2]PID]bool{}, lockedFor: map[PID]int64{}, rotTimes: map[PID][]int64{}, fDue: map[[2]PID]bool{}, probeF: map[int]bool{}, fLostTok: map[[2]PID]bool{}, initIK: map[PID]Key{}, probeEpoch: map[int]int{}, forkDue: map[[2]PID]int{}, evidKind: map[Key]string{}}
 	w.R = newRelay(w)
 	w.Now = 1000 * day
 	return w
@@ -669,6 +670,11 @@ func (p *Party) deposit(e *Entry, r *PeerRec) {
 		e.Done, e.Indef = true, false
 		if m.Kind == KSession && m.Probe > 0 && !p.Copy {
 			w.probeDep[m.Probe] = [2]PID{p.ID, e.To}
+		}
+		if m.Kind == KTokIssued && p.Device && !p.Copy && w.fLoss(p, e.To, m.Epoch) {
+			w.fLostTok[pairKey(p.ID, e.To)] = true // a token refresh sent under the abandoned epoch (F's after-effect)
+		}
+		if m.Kind == KSession && m.Probe > 0 && !p.Copy {
 			if w.fLoss(p, e.To, m.Epoch) {
 				w.probeF[m.Probe] = true
 			}

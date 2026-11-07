@@ -161,6 +161,7 @@ func (w *World) feedItem(q, r PID, kind string) {
 const (
 	resOldApp           = "an app from before release 29 (earlier releases are unsupported; R29-D4 notice)"
 	resDeviceF          = "F: the vault abandoned a pending rekey toward its device (any reason, 0.88.1); the pair may split with nothing shown (the device exception of §3.4.1 Invariants)"
+	resDeviceFAfter     = "F's after-effect: a device's token refresh sent under the epoch the vault abandoned while pending was lost, and the vault still holds no token for it (§3.4.1 Invariants, finding F, 0.88.2)"
 	resDevice           = "D: a device applies no demotion to its vault's epochs (§15 item 51; the device exception of §3.4.1 Invariants)"
 	resAbandonedEarlier = "a copy using an epoch Q abandoned while pending that R29-K9 does not judge: earlier than the epoch of P's identity.rotate, or before it arrives (owner decision b, 0.87.1)"
 	resCopyInit         = "a copy acting as initiator sent nothing but hs.fin"

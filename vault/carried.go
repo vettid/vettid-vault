@@ -101,7 +101,10 @@ func (m *Manager) adoptReached(p *Peer, id []byte, now time.Time) {
 			// from it by rekeys only: a later token-carrying handshake
 			// supersedes c (supersedeCarried), so no record of an earlier
 			// reconnect is still here (review F1: never adopt the tokens of
-			// an epoch the peer may have abandoned and revoked).
+			// an epoch the peer may have abandoned and revoked). "Rekeys
+			// only" relies on every token-carrying activation passing
+			// through a supersede: the own reconnect at makePending, the
+			// peer's at finishReconnect.
 			m.adoptCarried(p, &c)
 			m.note(now, "carried_adopted", p.ID)
 		default:
@@ -124,14 +127,27 @@ func (m *Manager) adoptReached(p *Peer, id []byte, now time.Time) {
 // earlier epoch's carried tokens are never adopted at a later confirmation
 // (0.88.2 §6.3.1 "When they are adopted"). No reconnect follows: the new
 // handshake is the way on.
+//
+// The current epoch's record is kept as a Discarded marker, as sweepCarried
+// keeps it, so that "hs.confirm again" stays stopped for that epoch if the
+// superseding handshake is abandoned (review 3ce94c6, item 1). If the
+// superseding handshake fails, the way on is §6.6's reconnect.
 func (m *Manager) supersedeCarried(p *Peer) {
 	if len(p.Carried) == 0 {
 		return
 	}
+	keep := p.Carried[:0]
 	for i := range p.Carried {
+		c := p.Carried[i]
+		if bytes.Equal(c.Epoch, p.LastEpochID) {
+			c.Discarded, c.Standing, c.Reconnect = true, HeldToken{}, HeldToken{}
+			keep = append(keep, c)
+		}
+	}
+	for i := len(keep); i < len(p.Carried); i++ {
 		p.Carried[i] = CarriedTokens{}
 	}
-	p.Carried = p.Carried[:0]
+	p.Carried = keep
 	m.dirty = true
 }
 

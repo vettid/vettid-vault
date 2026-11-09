@@ -1,6 +1,7 @@
 package vault
 
 import (
+	"bytes"
 	"context"
 	"slices"
 	"strconv"
@@ -438,5 +439,58 @@ func TestR29T1WaitGuardsEachTrigger(t *testing.T) {
 				t.Fatal("judged stale while carried tokens waited")
 			}
 		})
+	}
+}
+
+// "hs.confirm again" stays stopped for an epoch whose carried tokens were
+// discarded, even after an own reconnect superseded the record and was
+// then abandoned (review 3ce94c6, item 1).
+func TestR29T1SupersedeKeepsTheStopMarker(t *testing.T) {
+	f := newR29Fx(t)
+	f.revocations(0)
+	f.advance(10 * 24 * time.Hour)
+	f.t1Reconnect(1, 0)
+	f.lose(0, 1, kConfirm)
+	f.do(0, func(m *Manager, p *Peer) {
+		c := p.carriedFor(p.LastEpochID)
+		c.Discarded, c.Standing, c.Reconnect = true, HeldToken{}, HeldToken{}
+		m.supersedeCarried(p)
+		if !p.confirmStopped() {
+			t.Fatal("the supersede dropped the current epoch's stop marker")
+		}
+	})
+}
+
+// Two records collapse to one at the peer's reconnect's hs.fin, in a
+// crossing that rule E does not cover (the reconnect names R's current
+// epoch, not its confirmed one): I confirmed E1 but its prompt was lost, so
+// E1's record still waits at R when I's next reconnect E2 is established.
+// (Rule E usually destroys E1 first, which discards its record too.)
+func TestR29T1FinSupersedesAnEarlierRecord(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	f.t1Reconnect(1, 0) // E1
+	f.deliver(0, 1, kConfirm)
+	f.lose(1, 0, kAny) // the prompt is lost: E1's record still waits at R
+	if f.p(0).carriedFor(f.cur(0)) == nil {
+		t.Fatal("setup: no waiting record for E1")
+	}
+	e1 := append([]byte(nil), f.cur(0)...)
+	f.advance(time.Minute)
+	f.t1Reconnect(1, 0) // E2, naming I's current epoch E1 (R's current): no rule E
+	// E1 may stay as a Discarded marker (it was current at the supersede);
+	// only E2's record may still be adopted.
+	waiting := 0
+	for _, c := range f.p(0).Carried {
+		if !c.Discarded {
+			waiting++
+			if !bytes.Equal(c.Epoch, f.cur(0)) || bytes.Equal(c.Epoch, e1) {
+				t.Fatal("a record other than E2's still waits")
+			}
+		}
+	}
+	if waiting != 1 {
+		f.dump()
+		t.Fatalf("at E2's hs.fin R has %d waiting records, not just E2's", waiting)
 	}
 }

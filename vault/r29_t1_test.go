@@ -7,6 +7,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/vettid/vettid-relay/relayclient"
+	"github.com/vettid/vettid-vault/vms/handshake"
 )
 
 // R29-T1 (VAULT-MESSAGING 0.88.2 §6.3.1 "A handshake's tokens are adopted at
@@ -291,5 +294,149 @@ func TestR29T1NoAdoptionOfAnEarlierEpoch(t *testing.T) {
 	if !f.sameEpoch() {
 		f.dump()
 		t.Fatal("the pair did not end on one epoch")
+	}
+}
+
+// holdDeposits makes side s's relay refuse every deposit (503) until
+// released, so that a deposit is made only after what follows.
+func (f *r29Fx) holdDeposits(s int, on bool) {
+	r := f.d[s].relay
+	r.mu.Lock()
+	if on {
+		r.failWith = &relayclient.Error{Status: 503, Code: "unavailable"}
+	} else {
+		r.failWith = nil
+	}
+	r.mu.Unlock()
+}
+
+// token_revoked on R's hs.resp, deposited with the token I's hs.init
+// carried: I abandoned its reconnect (S5) before the answer was deposited.
+// The entry is dropped and the answer's carried tokens are discarded; the
+// held tokens are untouched.
+func TestR29T1CarriedRespRevoked(t *testing.T) {
+	f := newR29Fx(t)
+	f.revocations(0)
+	held := f.p(0).Standing
+	f.do(1, func(m *Manager, p *Peer) { m.startReconnect(p, f.clk) })
+	f.holdDeposits(0, true)
+	if f.deliver(1, 0, kHSInit) != 1 {
+		t.Fatal("no hs.init")
+	}
+	f.rotate(1) // S5: I abandons its reconnect and revokes what its hs.init carried
+	f.lose(1, 0, kAny)
+	f.holdDeposits(0, false)
+	f.advance(time.Minute)
+	f.tick(0)
+	if !f.audited(0, "carried_token_revoked") {
+		f.dump()
+		t.Fatal("token_revoked on the carried hs.resp was not handled as a carried token's")
+	}
+	for _, aw := range f.m(0).st.Awaiting {
+		if aw.Reconnect != nil && aw.Reconnect.Standing.Token != "" {
+			t.Fatal("the answer still keeps the hs.init's carried tokens")
+		}
+	}
+	if f.p(0).Standing != held || f.p(0).State != PeerActive {
+		t.Fatal("the refusal changed the held tokens or the connection")
+	}
+}
+
+// token_revoked on I's hs.fin, deposited with the token R's hs.resp
+// carried: R dropped its answer at its own rotation (S5) before the hs.fin
+// was deposited. The entry is dropped and the pending epoch's carried
+// tokens are discarded, never adopted.
+func TestR29T1CarriedFinRevoked(t *testing.T) {
+	f := newR29Fx(t)
+	f.revocations(1)
+	f.do(1, func(m *Manager, p *Peer) { m.startReconnect(p, f.clk) })
+	f.deliver(1, 0, kHSInit)
+	f.holdDeposits(1, true)
+	if f.deliver(0, 1, kHSResp) != 1 {
+		t.Fatal("no hs.resp")
+	}
+	f.rotate(0) // S5: R drops its answer and revokes what its hs.resp carried
+	f.lose(0, 1, kAny)
+	f.holdDeposits(1, false)
+	f.advance(time.Minute)
+	f.tick(1)
+	if !f.audited(1, "carried_token_revoked") {
+		f.dump()
+		t.Fatal("token_revoked on the carried hs.fin was not handled as a carried token's")
+	}
+	if pe := f.p(1).Pending; pe != nil && pe.Carried != nil {
+		t.Fatal("the pending epoch still keeps the hs.resp's carried tokens")
+	}
+}
+
+// t1Waiting brings side 0 (R) to "No reconnect while carried tokens wait":
+// its held standing token has expired, the carried one is valid, and I has
+// heard nothing since hs.fin.
+func (f *r29Fx) t1Waiting() {
+	f.t.Helper()
+	f.advance(10 * 24 * time.Hour)
+	f.t1Reconnect(1, 0)
+	f.lose(0, 1, kAny)
+	f.advance(25 * 24 * time.Hour)
+	if f.clk.Before(f.p(0).Standing.Exp) || !f.m(0).carriedWait(f.p(0), f.clk) {
+		f.t.Fatal("setup: not waiting with an expired held token")
+	}
+}
+
+// Each trigger that would start a reconnect for want of a valid standing
+// token, or judge "no reconnect token", does neither while carried tokens
+// wait (0.88.2 §6.3.1).
+func TestR29T1WaitGuardsEachTrigger(t *testing.T) {
+	cases := []struct {
+		name string
+		run  func(f *r29Fx, m *Manager, p *Peer)
+	}{
+		{"refreshHeld", func(f *r29Fx, m *Manager, p *Peer) { m.refreshHeld(f.clk) }},
+		{"reconnectExpired", func(f *r29Fx, m *Manager, p *Peer) { m.reconnectExpired(f.clk) }},
+		{"noStandingToken via token_revoked on a held token", func(f *r29Fx, m *Manager, p *Peer) {
+			e := &OutboxEntry{ID: m.newID(f.clk), PeerID: p.ID, Op: OpDeposit}
+			m.tokenRevoked(p, e, p.Standing.Token, f.clk)
+		}},
+		{"deposit answered token_expired", func(f *r29Fx, m *Manager, p *Peer) {
+			r := f.d[0].relay
+			r.mu.Lock()
+			r.failWith = &relayclient.Error{Status: 401, Code: CodeTokenExpired}
+			r.mu.Unlock()
+			e := &OutboxEntry{ID: m.newID(f.clk), PeerID: p.ID, Op: OpDeposit, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Payload: []byte("x")}
+			_ = m.deposit(context.Background(), e, f.clk)
+			r.mu.Lock()
+			r.failWith = nil
+			r.mu.Unlock()
+		}},
+		{"startReconnect with no reconnect token", func(f *r29Fx, m *Manager, p *Peer) {
+			p.Reconnect = HeldToken{}
+			m.startReconnect(p, f.clk)
+		}},
+		{"reconnectNaming with no reconnect token", func(f *r29Fx, m *Manager, p *Peer) {
+			p.Reconnect = HeldToken{}
+			m.reconnectNaming(p, p.LastEpochID, "test", f.clk)
+		}},
+		{"tickPending, a rekey with no valid token", func(f *r29Fx, m *Manager, p *Peer) {
+			p.Pending = &PendingEpoch{ID: []byte("rekey-epoch"), Purpose: handshake.PurposeRekey, FinAt: f.clk}
+			m.tickPending(p, f.clk)
+			if p.Pending == nil {
+				f.t.Error("tickPending abandoned the rekey for want of a token while carried tokens waited")
+			}
+			p.Pending = nil
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := newR29Fx(t)
+			f.t1Waiting()
+			before := f.countOutgoingReconnects(0)
+			f.do(0, func(m *Manager, p *Peer) { c.run(f, m, p) })
+			if n := f.countOutgoingReconnects(0); n != before {
+				t.Fatalf("a reconnect started while carried tokens waited (%d -> %d)", before, n)
+			}
+			if f.p(0).State == PeerStale {
+				t.Fatal("judged stale while carried tokens waited")
+			}
+		})
 	}
 }

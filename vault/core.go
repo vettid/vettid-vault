@@ -603,7 +603,9 @@ func (m *Manager) hTokenRefresh(_ context.Context, s *Session, _ *envelope.Inner
 			if under != nil && t.Exp.After(under.Exp) {
 				continue
 			}
-			if t.PeerID == s.peer.ID && t.Kind == TokStanding && !t.Denied && t != spare && t != prompt {
+			// The token it came under is denied whatever it is (a prompt's or a handshake's too): a deposit under it
+			// shows the peer adopted it (re-check of c567317, Fable F1).
+			if t.PeerID == s.peer.ID && t.Kind == TokStanding && !t.Denied && (t == under || t != spare && t != prompt) {
 				t.Denied = true
 				m.queueRevoke("jti", t.JTI, s.now)
 			}

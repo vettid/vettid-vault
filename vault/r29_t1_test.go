@@ -3,6 +3,7 @@ package vault
 import (
 	"bytes"
 	"context"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -243,6 +244,7 @@ func TestR29T1QuotaRefreshSparesThePrompt(t *testing.T) {
 	f.t1Reconnect(0, 1) // side 0 initiates: it is the issuer of the prompt
 	f.deliver(1, 0, kConfirm)
 	f.do(0, func(m *Manager, p *Peer) {
+		m.msgJTI = "" // the spares without a collect jti (with one, the token it came under is denied: option A)
 		s := &Session{m: m, peer: p, now: f.clk}
 		if _, err := m.hTokenRefresh(context.Background(), s, nil); err != nil {
 			t.Fatal(err)
@@ -382,6 +384,11 @@ func TestR29T1CarriedFinRevoked(t *testing.T) {
 	f.revocations(1)
 	f.do(1, func(m *Manager, p *Peer) { m.startReconnect(p, f.clk) })
 	f.deliver(1, 0, kHSInit)
+	var rcBefore *ReconnectCount
+	if rc := f.p(1).RC; rc != nil {
+		c := *rc
+		rcBefore = &c
+	}
 	f.holdDeposits(1, true)
 	if f.deliver(0, 1, kHSResp) != 1 {
 		t.Fatal("no hs.resp")
@@ -398,10 +405,17 @@ func TestR29T1CarriedFinRevoked(t *testing.T) {
 	if pe := f.p(1).Pending; pe != nil && pe.Carried != nil {
 		t.Fatal("the pending epoch still keeps the hs.resp's carried tokens")
 	}
-	// (owner decision a, item 2) The pending epoch ends now, not at B, and the reconnect starts again.
+	// (owner decision a, item 2) The pending epoch ends now, not at B, and the reconnect starts again, uncounted.
 	if !f.audited(1, "pending_abandoned_carried_revoked") {
 		f.dump()
 		t.Fatal("I's pending epoch did not end at the refusal")
+	}
+	if f.openReconnect(1) == nil && (f.p(1).Pending == nil || f.p(1).Pending.Purpose != handshake.PurposeReconnect) {
+		f.dump()
+		t.Fatal("I did not reconnect after the refused hs.fin")
+	}
+	if rc := f.p(1).RC; !reflect.DeepEqual(rc, rcBefore) {
+		t.Fatal("the refusal counted as a failed try of the reconnect bound")
 	}
 	if f.p(1).State != PeerActive {
 		t.Fatal("the refusal made the connection stale")
@@ -741,5 +755,81 @@ func TestR29ReplacedRekeyAnswerBlocksNoRekey(t *testing.T) {
 			t.Fatal("setup: an open rekey answer does not block R's rekeys")
 		}
 		delete(m.st.Awaiting, "replaced")
+	})
+}
+
+// R, holding no valid standing token, reconnects after its answer is
+// dropped at a refused hs.resp (the re-check of c567317).
+func TestR29DroppedAnswerWithNoTokenReconnects(t *testing.T) {
+	f := newR29Fx(t)
+	f.revocations(0)
+	f.do(1, func(m *Manager, p *Peer) { m.startReconnect(p, f.clk) })
+	f.holdDeposits(0, true)
+	if f.deliver(1, 0, kHSInit) != 1 {
+		t.Fatal("no hs.init")
+	}
+	f.rotate(1) // S5: I abandons its reconnect and revokes what its hs.init carried
+	f.lose(1, 0, kAny)
+	f.do(0, func(m *Manager, p *Peer) { p.Standing.Exp = f.clk.Add(-time.Minute) }) // R holds no valid standing token
+	f.holdDeposits(0, false)
+	f.advance(time.Minute)
+	f.tick(0)
+	if !f.audited(0, "answer_ended_carried_revoked") {
+		f.dump()
+		t.Fatal("setup: the answer was not dropped")
+	}
+	if f.openReconnect(0) == nil && f.p(0).Pending == nil {
+		f.dump()
+		t.Fatal("holding no valid standing token, R did not reconnect")
+	}
+}
+
+// The quota refresh denies the token it came under, the prompt's included,
+// and without a known collect jti denies as before (the re-check of
+// c567317).
+func TestR29QuotaRefreshUnderThePromptAndWithoutJTI(t *testing.T) {
+	f := newR29Fx(t)
+	f.t1Reconnect(0, 1) // side 0 initiates: it issues the prompt at confirmation
+	f.deliver(1, 0, kConfirm)
+	f.do(0, func(m *Manager, p *Peer) {
+		var prompt string
+		for _, it := range m.st.Issued {
+			if it.PeerID == p.ID && it.Kind == TokStanding && it.Prompt {
+				prompt = it.JTI
+			}
+		}
+		if prompt == "" {
+			t.Fatal("setup: no prompt token")
+		}
+		before := len(m.st.Issued)
+		m.msgJTI = prompt
+		if _, err := m.hTokenRefresh(context.Background(), &Session{m: m, peer: p, now: f.clk}, nil); err != nil {
+			t.Fatal(err)
+		}
+		m.msgJTI = ""
+		for _, it := range m.st.Issued {
+			if it.JTI == prompt && !it.Denied {
+				t.Fatal("the prompt token the refresh came under was spared")
+			}
+		}
+		if len(m.st.Issued) <= before {
+			t.Fatal("no fresh token was minted")
+		}
+	})
+	// No collect jti: every standing token but the spared ones is denied, as before option A.
+	g := newR29Fx(t)
+	g.do(0, func(m *Manager, p *Peer) {
+		g.advance(time.Hour)
+		m.issueTo(p, TokStanding, g.clk)
+		newer := m.latestIssued(p.ID, TokStanding).JTI
+		m.msgJTI = "" // the refresh came with no collect jti (a relay before 0.4)
+		if _, err := m.hTokenRefresh(context.Background(), &Session{m: m, peer: p, now: g.clk}, nil); err != nil {
+			t.Fatal(err)
+		}
+		for _, it := range m.st.Issued {
+			if it.JTI == newer && !it.Denied {
+				t.Fatal("without a jti, a newer token was spared")
+			}
+		}
 	})
 }

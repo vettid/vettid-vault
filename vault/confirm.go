@@ -544,7 +544,9 @@ func (m *Manager) answerAwaitingFin(p *Peer) bool {
 		if !sortedOK {
 			continue // removed earlier in this loop
 		}
-		if aw.New == nil && aw.PeerID == p.ID {
+		// A rekey answer marked replaced at a restore's reconnect is kept
+		// only as evidence (markRekeysReplaced): it holds no rekey back.
+		if aw.New == nil && aw.PeerID == p.ID && !aw.Replaced {
 			return true
 		}
 	}

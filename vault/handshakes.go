@@ -1363,6 +1363,23 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 	}
 	// §6.3.1 "Initiator": the new epoch is pending until a message from
 	// the peer opens under it.
+	if og.Purpose == handshake.PurposeReconnect {
+		// (0.88.2, §6.3.1 Initiator) I abandons its own open rekeys to the
+		// peer at its reconnect's hs.resp, before the reconnect's epoch is
+		// pending: R drops its answers to them when it establishes the
+		// reconnect, so a rekey's hs.resp processed after this one would make
+		// a pending epoch R no longer answers (the sides would differ until
+		// I's keys lapse). Mirrors the drop of I's rekey answers above.
+		for _, oid := range sortedKeys(m.st.Outgoing) {
+			o, sortedOK := m.st.Outgoing[oid]
+			if !sortedOK {
+				continue // removed earlier in this loop
+			}
+			if o.New == nil && o.PeerID == p.ID && o.Purpose == handshake.PurposeRekey && !o.Replaced {
+				m.abandonOutgoing(oid, now)
+			}
+		}
+	}
 	m.makePending(p, og, res, now)
 	if p.Pending != nil {
 		p.Pending.Carried = carried

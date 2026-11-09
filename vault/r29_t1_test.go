@@ -632,3 +632,61 @@ func TestR29ReconnectDropsTheRekeyAnswers(t *testing.T) {
 		t.Fatal("R kept its rekey answer after establishing I's reconnect")
 	}
 }
+
+// I has its rekey K open and starts reconnect C; R answers both; I gets
+// C's hs.resp first. I abandons K at C's hs.resp (0.88.2 §6.3.1 Initiator),
+// so the late hs.resp of K makes no pending epoch that R, which dropped its
+// answer to K at C's hs.fin, would never answer: the pair converges on C.
+// (The lead's merged re-check of 5b4fd3c, Opus M1, Fable F1.)
+func TestR29ReconnectRespAbandonsTheOwnRekeys(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	f.rekey(0)
+	if f.deliver(0, 1, kHSInit) != 1 {
+		t.Fatal("no rekey hs.init")
+	}
+	f.do(0, func(m *Manager, p *Peer) { m.startReconnect(p, f.clk) })
+	if f.deliver(0, 1, kHSInit) != 1 {
+		t.Fatal("no reconnect hs.init")
+	}
+	resps := f.takeKind(1, 0, kHSResp)
+	if len(resps) != 2 {
+		t.Fatalf("setup: %d answers, want the rekey's and the reconnect's", len(resps))
+	}
+	f.process(0, resps[1]) // the reconnect's first
+	f.process(0, resps[0]) // then the rekey's
+	f.settle()
+	for i := 0; i < 3; i++ {
+		f.advance(time.Hour)
+		f.tick(0)
+		f.tick(1)
+		f.settle()
+	}
+	if !f.sameEpoch() || f.p(0).Pending != nil || f.p(1).Pending != nil {
+		f.dump()
+		t.Fatal("the pair did not end on one epoch")
+	}
+	for _, og := range f.m(0).st.Outgoing {
+		if og.PeerID == f.p(0).ID && og.Purpose == handshake.PurposeRekey {
+			t.Fatal("I kept its rekey open past its reconnect's hs.resp")
+		}
+	}
+}
+
+// A rekey answer marked replaced at a restore's reconnect is kept only as
+// evidence: it holds no rekey of R's back (the lead's merged re-check of
+// 5b4fd3c, Opus L1, Fable F2).
+func TestR29ReplacedRekeyAnswerBlocksNoRekey(t *testing.T) {
+	f := newR29Fx(t)
+	f.do(1, func(m *Manager, p *Peer) {
+		m.st.Awaiting["replaced"] = &AwaitingHS{ID: "replaced", PeerID: p.ID, Purpose: handshake.PurposeRekey, Created: f.clk, Replaced: true}
+		if m.rekeyBlocked(p) {
+			t.Fatal("a replaced rekey answer blocks R's rekeys")
+		}
+		m.st.Awaiting["replaced"].Replaced = false
+		if !m.rekeyBlocked(p) {
+			t.Fatal("setup: an open rekey answer does not block R's rekeys")
+		}
+		delete(m.st.Awaiting, "replaced")
+	})
+}

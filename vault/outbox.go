@@ -387,9 +387,9 @@ func (m *Manager) deposit(ctx context.Context, e *OutboxEntry, now time.Time) er
 				m.startReconnect(p, now) // §6.6 "When to use it"; 0.88.2: not while carried tokens wait
 			} else if p.Kind != KindConnection && p.Pending != nil && !now.Before(p.Standing.Exp) {
 				m.abandonPending(p, "token_expired", true, now) // a device: rekeyed from the current epoch
-				if e.Done {
-					return err // this entry was the abandoned epoch's own hs.fin, withdrawn with it
-				}
+			}
+			if e.Done {
+				return err // this entry was an abandoned epoch's own hs.fin, withdrawn with it
 			}
 			e.NotBefore = now.Add(time.Hour) // retried when a fresh token arrives
 			e.AwaitToken = true

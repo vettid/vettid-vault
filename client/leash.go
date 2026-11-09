@@ -74,6 +74,8 @@ func (d *Device) newerGrantSet(body []byte) bool {
 	if err != nil {
 		return false
 	}
+	// The spec allows any u64; this test client caps at 2^53-1 like the
+	// strict parser. A vault would need 2^53 grant-set changes to reach it.
 	n, present, err := o.OptUint("grant_seq", 1, strictjson.MaxSafeInteger)
 	if err != nil || !present {
 		return false

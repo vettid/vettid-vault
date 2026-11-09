@@ -225,6 +225,9 @@ func (f *Feature) Types() []vault.TypeSpec {
 	return []vault.TypeSpec{
 		{Type: "leash.grant.issue", Request: true, From: apps},
 		{Type: "leash.grant.revoke", Request: true, From: owners},
+		// leash.grant.list must stay a queued, non-volatile answer: an
+		// agent's list can take a new grant_seq (seqOf), and the state
+		// holding it is written before the answer goes out (§10.11).
 		{Type: "leash.grant.list", Request: true, From: all},
 		{Type: "leash.agent.resume", Request: true, From: apps},
 		{Type: "leash.status.get", Request: true, From: agents},
@@ -271,12 +274,14 @@ func (f *Feature) changed(agent string) uint64 {
 	return f.d.Seq
 }
 
-// seqOf is the agent's current grant_seq. A set that has none yet takes the
-// counter's next value the first time it is described: an agent paired
-// without initial grants (the set a pairing completes with, §10.11, is then
-// the empty one, and the vault core calls AgentPaired only with grants), or
-// any agent of a vault that ran before 0.41.0. Its numbers therefore start
-// from the vault's current value, never from 0.
+// seqOf is the agent's current grant_seq. Every agent pairing takes one in
+// AgentPaired (with or without initial grants), so a set with none yet is
+// an agent of a vault that ran before 0.41.0 (or paired before this build):
+// it takes the counter's next value the first time it is described, so its
+// numbers start from the vault's current value, never from 0. Such a number
+// is taken in a read path (leash.grant.list), which is safe only because
+// that answer is queued and not volatile: the state holding it is written
+// before the answer goes out (see Types).
 func (f *Feature) seqOf(agent string) uint64 {
 	if n := f.d.GrantSeq[agent]; n > 0 {
 		return n
@@ -1311,12 +1316,15 @@ func (f *Feature) PrepareAgentGrants(s *vault.Session, agentIK []byte, raw json.
 }
 
 // AgentPaired implements vault.AgentGrantor: the signed initial grants
-// take effect with the pairing (§6.7).
+// take effect with the pairing (§6.7). The vault core calls it for every
+// agent pairing; with no initial grants (prepared empty) the set the
+// pairing completes with is the empty one, and it still takes its
+// grant_seq (§10.11).
 func (f *Feature) AgentPaired(s *vault.Session, agentID string, prepared json.RawMessage) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var gs []*Grant
-	if json.Unmarshal(prepared, &gs) != nil {
+	if len(prepared) > 0 && json.Unmarshal(prepared, &gs) != nil {
 		return
 	}
 	now := s.Now()

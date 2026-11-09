@@ -173,6 +173,42 @@ func TestPairingGrants(t *testing.T) {
 	}
 }
 
+// §6.7, §10.11: every agent pairing reaches the grantor, initial grants or
+// none, so the set it completes with (the empty one) takes its grant_seq at
+// the pairing; a desktop's pairing does not.
+func TestPairingWithoutGrantsReachesGrantor(t *testing.T) {
+	d := newDevFixture(t)
+	app := d.self()
+	pol := &policyType{valid: true}
+	d.m.addFeature(pol)
+	pair := func(kind string, base byte) {
+		inv := d.invite(t, kind, PairingApprovalTTL)
+		n := newNewcomer(t, base)
+		n.hsInit(t, d.m, handshake.Purpose(kind), inv.ID, "p"+string(rune('a'+base%20)))
+		n.finish(t, d)
+		d.inbox(app)
+		id := d.sendAs(app, "device.pair.approve", `{"pairing_id":"`+inv.ID+`"}`)
+		if r := find(d.inbox(app)["dev1"], reply(id)); r == nil || r.Status != envelope.StatusOK {
+			t.Fatalf("%s approval: %+v", kind, r)
+		}
+	}
+	pair(KindDesktop, 0x52)
+	pair(KindAgent, 0x56)
+	var agentID string
+	for _, x := range d.m.st.Devices {
+		if x.Kind == KindAgent {
+			agentID = x.ID
+		}
+	}
+	if agentID == "" {
+		t.Fatal("agent not paired")
+	}
+	g, ok := pol.paired[agentID]
+	if !ok || len(g) != 0 || len(pol.paired) != 1 {
+		t.Fatalf("grantor calls %v: want one, for the agent, with nothing prepared", pol.paired)
+	}
+}
+
 // §10.1: PairedDevice sees devices with or without an access session;
 // Device only those that may receive now.
 func TestPairedDevice(t *testing.T) {

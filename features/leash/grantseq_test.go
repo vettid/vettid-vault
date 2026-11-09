@@ -194,16 +194,30 @@ func TestGrantSeqPairingAndRepairing(t *testing.T) {
 		t.Fatalf("a re-paired agent's set took %d, at or below the vault's %d", repaired, second)
 	}
 
-	// Paired without initial grants (the vault core then doesn't call
-	// AgentPaired): the empty set is numbered the first time it's described,
-	// from the counter.
+	// Paired without initial grants: the vault core still calls AgentPaired
+	// (with nothing prepared), and the empty set takes its number then, not
+	// in a later read. The agent is told.
 	r.h.AddDevice("dev-agent-bare", vault.KindAgent)
 	bare, _ := r.h.Device("dev-agent-bare")
-	body := listAs(t, r, t0, bare)
-	empty := grantSeq(t, body)
+	r.f.AgentPaired(sess, "dev-agent-bare", nil)
+	empty, told := lastUpdate(t, r, "dev-agent-bare")
 	note(empty, "pairing without grants")
-	if empty <= repaired || !strings.Contains(string(body), `"grants":[]`) {
+	if told != 1 || empty <= repaired || r.f.d.GrantSeq["dev-agent-bare"] != empty {
+		t.Fatalf("pairing without grants: %d updates, grant_seq %d (stored %d), after %d",
+			told, empty, r.f.d.GrantSeq["dev-agent-bare"], repaired)
+	}
+	body := listAs(t, r, t0, bare)
+	if grantSeq(t, body) != empty || !strings.Contains(string(body), `"grants":[]`) {
 		t.Fatalf("empty set: %s", body)
+	}
+	// An agent with no number yet (paired before this build, or before
+	// 0.41.0): numbered the first time it's described, from the counter.
+	r.h.AddDevice("dev-agent-old", vault.KindAgent)
+	old, _ := r.h.Device("dev-agent-old")
+	if n := grantSeq(t, listAs(t, r, t0, old)); n <= empty {
+		t.Fatalf("an older agent's first list took %d, not above %d", n, empty)
+	} else {
+		note(n, "an older agent's first list")
 	}
 	// Described again: the same number.
 	if again := grantSeq(t, listAs(t, r, t0, bare)); again != empty {
@@ -344,4 +358,24 @@ func TestGrantSeqLoadCounterFloor(t *testing.T) {
 	if n, _ := lastUpdate(t, r, agent); n != 8 {
 		t.Fatalf("next change after a damaged counter: %d, want 8", n)
 	}
+}
+
+// An agent's leash.grant.list can take a new grant_seq (seqOf, for a set
+// with no number yet). That is safe only while the answer is durable: a
+// queued request answer is sent after the write that stores it (the vault
+// outbox; TestFailedWriteThenLaterWriteSendsStored), while a volatile or
+// ephemeral answer is deposited from memory. This pins the type's spec.
+func TestGrantSeqListAnswerIsDurable(t *testing.T) {
+	r := newRig(t)
+	for _, ts := range r.f.Types() {
+		if ts.Type != "leash.grant.list" {
+			continue
+		}
+		if !ts.Request || ts.Volatile || ts.Ephemeral {
+			t.Fatalf("leash.grant.list: request %v, volatile %v, ephemeral %v; it must be a durable, queued request",
+				ts.Request, ts.Volatile, ts.Ephemeral)
+		}
+		return
+	}
+	t.Fatal("leash.grant.list not registered")
 }

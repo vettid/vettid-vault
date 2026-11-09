@@ -592,6 +592,9 @@ type IssuedToken struct {
 	// standing token, which the peer may not yet have adopted (0.88.2 §7.2,
 	// §6.3.1 "Revocation by the issuer").
 	Handshake bool `json:"handshake,omitempty"`
+	// Prompt: re-minted at a reconnect's confirmation, the prompt to adopt
+	// (§6.3.1); the quota refresh spares the newest one too.
+	Prompt bool `json:"prompt,omitempty"`
 }
 
 // Invite is an outstanding connection invitation or device pairing (§6.4,

@@ -37,6 +37,13 @@ func newR29Fx(t *testing.T) *r29Fx {
 	for s, d := range f.d[:2] {
 		s := s
 		d.m.now = func() time.Time { return f.clk }
+		// The relay stub mints on the scenario's clock too (as the random
+		// pair does): otherwise a token minted after f.advance carries a
+		// wall-clock exp, already past on the vault's clock (0.88.2:
+		// carried tokens are judged by their exp, R29-T1).
+		d.relay.mu.Lock()
+		d.relay.now = func() time.Time { return f.clk }
+		d.relay.mu.Unlock()
 		d.m.register(TypeSpec{Type: "test.note", From: []string{KindConnection}, Connections: PeersBoth},
 			HandlerFunc(func(_ context.Context, _ *Session, in *envelope.Inner) (json.RawMessage, error) {
 				f.got[s] = append(f.got[s], string(in.Body))

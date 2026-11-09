@@ -177,6 +177,12 @@ func (m *Manager) remintIssued(now time.Time) {
 }
 
 func (m *Manager) issueTo(p *Peer, kind string, now time.Time) {
+	m.issueToMarked(p, kind, false, now)
+}
+
+// issueToMarked is issueTo; prompt marks the token as the re-mint at a
+// reconnect's confirmation (0.88.2 §6.3.1 "The prompt to adopt").
+func (m *Manager) issueToMarked(p *Peer, kind string, prompt bool, now time.Time) {
 	var tok string
 	var issued []IssuedToken
 	var err error
@@ -187,6 +193,9 @@ func (m *Manager) issueTo(p *Peer, kind string, now time.Time) {
 	}
 	if err != nil {
 		return
+	}
+	for i := range issued {
+		issued[i].Prompt = prompt
 	}
 	m.st.Issued = append(m.st.Issued, issued...)
 	m.sendTo(p, tokenIssuedType, peerwire.TokenIssuedBody(kind, tok), now)

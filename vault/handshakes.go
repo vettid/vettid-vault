@@ -713,7 +713,7 @@ func (m *Manager) handleRekeyInit(ctx context.Context, p *Peer, in *envelope.Inn
 		// rekey block nor §6.6's holds the vault back from reconnecting.
 		m.audit(now, "rekey_undepositable", p.ID)
 		pi.Discard()
-		if p.Kind == KindConnection {
+		if p.Kind == KindConnection && !m.carriedWait(p, now) { // 0.88.2 §6.3.1
 			m.startReconnect(p, now)
 		}
 		return ackAfterFlush

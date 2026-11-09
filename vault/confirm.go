@@ -210,13 +210,13 @@ func (m *Manager) confirmPending(p *Peer, now time.Time) {
 	m.adoptCarried(p, pe.Carried)
 	if pe.Purpose == handshake.PurposeReconnect {
 		p.RC = nil // the reconnect succeeded: its tries start again
-		if p.Kind == KindConnection && pe.Carried != nil {
+		if p.Kind == KindConnection {
 			// §6.3.1 "The prompt to adopt" (owner decision a, GC
 			// 01M70MBJ82KFZ0C7GX0M6VCR3S; §6.6 "Re-minted after every
 			// successful reconnect"): fresh tokens under the new epoch,
 			// which move the responder's confirmed epoch.
-			m.issueTo(p, TokStanding, now)
-			m.issueTo(p, TokReconnect, now)
+			m.issueToMarked(p, TokStanding, true, now)
+			m.issueToMarked(p, TokReconnect, true, now)
 		}
 	}
 	m.dirty = true

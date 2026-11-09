@@ -83,10 +83,12 @@ func (m *Manager) adoptReached(p *Peer, id []byte, now time.Time) {
 		return
 	}
 	keep := p.Carried[:0]
+	discarded := false
 	for i := range p.Carried {
 		c := p.Carried[i]
 		switch {
 		case !p.carriedUsable(&c, now):
+			discarded = discarded || !c.Discarded
 			if bytes.Equal(c.Epoch, p.LastEpochID) && !bytes.Equal(c.Epoch, id) {
 				c.Discarded, c.Standing, c.Reconnect = true, HeldToken{}, HeldToken{}
 				keep = append(keep, c)
@@ -100,6 +102,12 @@ func (m *Manager) adoptReached(p *Peer, id []byte, now time.Time) {
 	}
 	p.Carried = keep
 	m.dirty = true
+	if discarded {
+		// A discard here leads to a reconnect when no valid token is held;
+		// only then (at the initiator the hs.resp's tokens are adopted
+		// right after this, in confirmPending).
+		m.afterCarriedDiscard(p, now)
+	}
 }
 
 // carriedWait is §6.3.1 "No reconnect while carried tokens wait": p's

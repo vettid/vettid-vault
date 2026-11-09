@@ -260,16 +260,14 @@ func (m *Manager) abandonPending(p *Peer, why string, restart bool, now time.Tim
 		// reconnect for an abandoned reconnect).
 		m.revokeIssued(t, p.ID, now)
 	}
-	// Its own hs.fin, if not yet deposited (refused token_expired and
-	// waiting for a token), is dropped with its outbox entry: an hs.fin
-	// for an epoch I abandoned is never sent (as rule E's at R). Sent
-	// later, after a newer epoch was established at R, its rule E would
-	// destroy that epoch while I sends under it: a false fork.
-	for _, o := range m.st.Outbox {
-		if !o.Done && o.PeerID == p.ID && bytes.Equal(o.FinEpoch, pe.ID) {
-			o.Done = true
-		}
-	}
+	// Its own hs.fin, if the relay has not accepted it (for example
+	// refused token_expired and waiting for a token), is dropped with its
+	// outbox entry: an hs.fin for an epoch I abandoned is never sent (as
+	// rule E's at R). Sent later, after a newer epoch was established at R,
+	// its rule E would destroy that epoch while I sends under it: a false
+	// fork. (One the relay accepted is dealt with at R: finishReconnect
+	// drops R's open rekey answers to I.)
+	m.dropFin(p, pe.ID)
 	p.Abandoned = append(p.Abandoned, append([]byte(nil), pe.ID...))
 	p.Pending = nil
 	m.note(now, "pending_abandoned_"+why, p.ID)
@@ -310,6 +308,17 @@ func (m *Manager) tickPending(p *Peer, now time.Time) {
 		m.abandonPending(p, "b_passed", true, now)
 	case pe.Purpose == handshake.PurposeRekey && (p.Standing.Token == "" || !now.Before(p.Standing.Exp)) && !m.carriedWait(p, now):
 		m.abandonPending(p, "no_token", true, now) // 0.88.2: not while carried tokens wait (review F4)
+	}
+}
+
+// dropFin drops p's hs.fin for epoch id that the relay has not accepted,
+// with its outbox entry (rule E at R; an abandoned pending epoch at I).
+func (m *Manager) dropFin(p *Peer, id []byte) {
+	for _, o := range m.st.Outbox {
+		if !o.Done && o.PeerID == p.ID && bytes.Equal(o.FinEpoch, id) {
+			o.Done = true
+			m.dirty = true
+		}
 	}
 }
 
@@ -413,11 +422,7 @@ func (m *Manager) ruleE(p *Peer, initTS time.Time, now time.Time) {
 		if kr != nil && !bytes.Equal(e.ID, p.LastEpochID) {
 			kr.Release(epochIDOf(e.ID), now.Add(handshake.ReceiveKeyRetention))
 		}
-		for _, o := range m.st.Outbox {
-			if !o.Done && o.PeerID == p.ID && bytes.Equal(o.FinEpoch, e.ID) {
-				o.Done = true // its hs.fin, not yet sent, is dropped (rule E)
-			}
-		}
+		m.dropFin(p, e.ID) // its hs.fin, not yet sent, is dropped (rule E)
 		m.note(now, "epoch_destroyed", p.ID)
 	}
 	m.dirty = true

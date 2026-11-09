@@ -515,3 +515,120 @@ func TestR29T1FinSupersedesAnEarlierRecord(t *testing.T) {
 		t.Fatalf("at E2's hs.fin R has %d waiting records, not just E2's", waiting)
 	}
 }
+
+// t1RekeyFinWaiting gives side 0 a pending rekey whose hs.fin the relay
+// refused token_expired (side 0's deposits on its held standing token are
+// refused from now on), so it waits in the outbox for a token. It returns
+// the pending epoch's id.
+func (f *r29Fx) t1RekeyFinWaiting() []byte {
+	f.t.Helper()
+	f.rekey(0)
+	if f.deliver(0, 1, kHSInit) != 1 {
+		f.t.Fatal("setup: no rekey hs.init")
+	}
+	// From the hs.fin on (not before: a refused hs.init would start a reconnect instead).
+	held := f.p(0).Standing.Token
+	r := f.d[0].relay
+	r.mu.Lock()
+	r.check = func(_, token string) error {
+		if token == held {
+			return &relayclient.Error{Status: 401, Code: CodeTokenExpired}
+		}
+		return nil
+	}
+	r.mu.Unlock()
+	if f.deliver(1, 0, kHSResp) != 1 {
+		f.t.Fatal("setup: the rekey did not reach hs.resp")
+	}
+	pe := f.p(0).Pending
+	if pe == nil || f.finEntry(0, pe.ID) == nil {
+		f.dump()
+		f.t.Fatal("setup: no pending rekey with its hs.fin waiting")
+	}
+	return append([]byte(nil), pe.ID...)
+}
+
+// finEntry is side s's outbox entry, not done, holding the hs.fin of epoch id.
+func (f *r29Fx) finEntry(s int, id []byte) *OutboxEntry {
+	for _, e := range f.m(s).st.Outbox {
+		if !e.Done && bytes.Equal(e.FinEpoch, id) {
+			return e
+		}
+	}
+	return nil
+}
+
+// An abandoned pending epoch's hs.fin that the relay has not accepted is
+// dropped with it, whatever abandons it (VAULT-MESSAGING 0.88.2 §6.3.1
+// Initiator; the false suspensions of GC #6493).
+func TestR29AbandonedPendingDropsItsWaitingFin(t *testing.T) {
+	cases := []struct {
+		name    string
+		abandon func(f *r29Fx)
+	}{
+		{"its own reconnect", func(f *r29Fx) {
+			f.do(0, func(m *Manager, p *Peer) { m.startReconnect(p, f.clk) })
+			// The reconnect's own hs.fin, on its carried token, still goes.
+			if f.deliver(0, 1, kHSInit) != 1 || f.deliver(1, 0, kHSResp) != 1 || f.deliver(0, 1, kHSFin) != 1 {
+				f.dump()
+				f.t.Fatal("the newer epoch's hs.fin did not go")
+			}
+		}},
+		{"the peer's reconnect activated (peer_activated)", func(f *r29Fx) {
+			f.do(1, func(m *Manager, p *Peer) { m.startReconnect(p, f.clk) })
+			f.deliver(1, 0, kHSInit)
+			f.deliver(0, 1, kHSResp)
+			f.deliver(1, 0, kHSFin)
+		}},
+		{"its own rotation (S5)", func(f *r29Fx) { f.rotate(0) }},
+		{"no valid standing token (no_token)", func(f *r29Fx) {
+			f.do(0, func(m *Manager, p *Peer) { p.Standing.Exp = f.clk.Add(-time.Minute) })
+			f.tick(0)
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := newR29Fx(t)
+			f.longTokens()
+			id := f.t1RekeyFinWaiting()
+			c.abandon(f)
+			if f.p(0).Pending != nil && bytes.Equal(f.p(0).Pending.ID, id) {
+				f.dump()
+				t.Fatal("setup: the pending rekey was not abandoned")
+			}
+			if f.finEntry(0, id) != nil {
+				t.Fatal("the abandoned epoch's waiting hs.fin is still in the outbox")
+			}
+		})
+	}
+}
+
+// R drops its open rekey answers to I when it establishes I's reconnect at
+// its hs.fin (0.88.2): an hs.fin for one, redelivered after the reconnect's
+// epoch is confirmed, would otherwise make rule E destroy that epoch.
+func TestR29ReconnectDropsTheRekeyAnswers(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	f.rekey(0)
+	if f.deliver(0, 1, kHSInit) != 1 {
+		t.Fatal("no rekey hs.init")
+	}
+	f.lose(1, 0, kHSResp)
+	rekeyAnswers := func() int {
+		n := 0
+		for _, aw := range f.m(1).st.Awaiting {
+			if aw.PeerID == f.p(1).ID && aw.Purpose == handshake.PurposeRekey {
+				n++
+			}
+		}
+		return n
+	}
+	if rekeyAnswers() != 1 {
+		t.Fatal("setup: R holds no rekey answer")
+	}
+	f.t1Reconnect(0, 1)
+	if rekeyAnswers() != 0 {
+		f.dump()
+		t.Fatal("R kept its rekey answer after establishing I's reconnect")
+	}
+}

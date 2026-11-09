@@ -1026,7 +1026,19 @@ func (m *Manager) finishReconnect(p *Peer, aw *AwaitingHS, fr *handshake.FinResu
 		if !sortedOK {
 			continue // removed earlier in this loop
 		}
-		if id != aw.ID && o.New == nil && o.PeerID == p.ID && o.Purpose == handshake.PurposeReconnect {
+		if id == aw.ID || o.New != nil || o.PeerID != p.ID {
+			continue
+		}
+		// (0.88.2) R's open rekey answers to I go too: a verified reconnect
+		// from I means I abandoned its pending epoch and its rekeys and
+		// starts none while a reconnect is open (as I drops its rekey
+		// answers at its own reconnect's hs.resp). An hs.fin for one,
+		// redelivered after this epoch is confirmed, would otherwise make
+		// rule E destroy this epoch: a false fork. Release 29's rekey
+		// answers carry no tokens, so nothing is revoked. Not at a
+		// restore's reconnect (pend.Older): its open rekey answers stay,
+		// marked, as evidence against a second copy (markRekeysReplaced).
+		if o.Purpose == handshake.PurposeReconnect || o.Purpose == handshake.PurposeRekey && !o.Replaced && !pend.Older {
 			m.abandonAwaiting(id, now)
 		}
 	}

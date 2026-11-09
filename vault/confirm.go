@@ -260,6 +260,16 @@ func (m *Manager) abandonPending(p *Peer, why string, restart bool, now time.Tim
 		// reconnect for an abandoned reconnect).
 		m.revokeIssued(t, p.ID, now)
 	}
+	// Its own hs.fin, if not yet deposited (refused token_expired and
+	// waiting for a token), is dropped with its outbox entry: an hs.fin
+	// for an epoch I abandoned is never sent (as rule E's at R). Sent
+	// later, after a newer epoch was established at R, its rule E would
+	// destroy that epoch while I sends under it: a false fork.
+	for _, o := range m.st.Outbox {
+		if !o.Done && o.PeerID == p.ID && bytes.Equal(o.FinEpoch, pe.ID) {
+			o.Done = true
+		}
+	}
 	p.Abandoned = append(p.Abandoned, append([]byte(nil), pe.ID...))
 	p.Pending = nil
 	m.note(now, "pending_abandoned_"+why, p.ID)

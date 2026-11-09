@@ -35,6 +35,27 @@ import (
 //     messages expire at the relay unread, a vault that does not exist (an
 //     unlocked vault collects continuously). The regression test of
 //     advanceLive (the lead, GC #6449).
+//
+// The false suspensions of the 10,000-run searches at 3ce94c6 (GC #6493):
+// a pending rekey's hs.fin, refused token_expired and waiting for a token,
+// outlived the abandonment of its epoch; once the reconnect's hs.fin (on
+// its carried token) and its confirmation had overtaken it, it reached the
+// peer last, rule E destroyed the reconnect's epoch, and the prompt to
+// adopt under it was taken as fork evidence. An abandoned pending epoch's
+// hs.fin that was not deposited is now dropped (§6.3.1 Initiator).
+func TestR29T1SuspendSeeds(t *testing.T) {
+	for _, c := range []struct {
+		seed  uint64
+		burst bool
+	}{{8453991582502839313, false}, {7170116888466898459, true}, {10899583487953230597, true}} {
+		t.Run(strconv.FormatUint(c.seed, 10), func(t *testing.T) {
+			if v, _ := rpRun(t, c.seed, 40, c.burst, false); v != "" {
+				t.Fatalf("verdict %q, want converged", v)
+			}
+		})
+	}
+}
+
 func TestR29T1Seeds(t *testing.T) {
 	for _, seed := range []uint64{
 		16906628016574081987, 2547422016364076747, 8648490589795547312,

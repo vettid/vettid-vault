@@ -135,6 +135,9 @@ func (m *Manager) setConfirmed(p *Peer, id []byte, now time.Time) {
 	p.Confirmed = append([]byte(nil), id...)
 	p.Abandoned = nil // a newer epoch is confirmed (§6.3.1 "Initiator")
 	m.dirty = true
+	// 0.88.2 (R29-T1): the responder adopts the tokens of the epoch its
+	// confirmed epoch now reaches, before the message's handler runs.
+	m.adoptReached(p, id, now)
 	if old != nil && !bytes.Equal(old, p.LastEpochID) {
 		if kr := m.sessions[p.ID]; kr != nil {
 			kr.Release(epochIDOf(old), now.Add(handshake.ReceiveKeyRetention))
@@ -202,8 +205,19 @@ func (m *Manager) confirmPending(p *Peer, now time.Time) {
 	}
 	m.activate(p, ep, pe.Purpose, pe.Issued, "", pe.OwnChain, actOpts{how: actInstalled, mine: true}, now)
 	m.setConfirmed(p, pe.ID, now)
+	// 0.88.2 (R29-T1): the tokens the peer's hs.resp carried are adopted
+	// in this write, never before.
+	m.adoptCarried(p, pe.Carried)
 	if pe.Purpose == handshake.PurposeReconnect {
 		p.RC = nil // the reconnect succeeded: its tries start again
+		if p.Kind == KindConnection && pe.Carried != nil {
+			// §6.3.1 "The prompt to adopt" (owner decision a, GC
+			// 01M70MBJ82KFZ0C7GX0M6VCR3S; §6.6 "Re-minted after every
+			// successful reconnect"): fresh tokens under the new epoch,
+			// which move the responder's confirmed epoch.
+			m.issueTo(p, TokStanding, now)
+			m.issueTo(p, TokReconnect, now)
+		}
 	}
 	m.dirty = true
 }
@@ -299,7 +313,13 @@ func (m *Manager) queueConfirm(p *Peer, now time.Time) {
 	if err != nil {
 		return
 	}
-	m.queueDeposit(&OutboxEntry{PeerID: p.ID, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Payload: raw, Confirm: true}, now)
+	e := &OutboxEntry{PeerID: p.ID, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Payload: raw, Confirm: true}
+	cid := kr.Current().ID()
+	if c := p.carriedFor(cid[:]); c != nil && !c.Discarded && c.Standing.Token != "" {
+		// 0.88.2 §6.3.1: on the standing token the handshake carried.
+		e.Token, e.CarriedTok = c.Standing.Token, true
+	}
+	m.queueDeposit(e, now)
 	p.ConfirmAt = now
 	m.dirty = true
 }
@@ -326,8 +346,8 @@ func (m *Manager) tickConfirm(p *Peer, now time.Time) {
 	if ci := p.epochIndex(p.confirmedID()); ci >= p.epochIndex(p.LastEpochID) {
 		return
 	}
-	if now.Sub(p.ConfirmAt) < ConfirmResend || m.confirmQueued(p) {
-		return
+	if now.Sub(p.ConfirmAt) < ConfirmResend || m.confirmQueued(p) || p.confirmStopped() {
+		return // 0.88.2: also once the epoch's carried tokens are discarded
 	}
 	m.queueConfirm(p, now)
 }

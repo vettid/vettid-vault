@@ -230,6 +230,13 @@ type Peer struct {
 
 	Standing  HeldToken `json:"standing"`  // token the peer issued to us
 	Reconnect HeldToken `json:"reconnect"` // connections only
+	// Carried are the tokens a reconnect hs.init of the peer's carried, for
+	// each epoch the vault activated as responder and has not yet adopted
+	// them in (VAULT-MESSAGING 0.88.2 §6.3.1 "A handshake's tokens are
+	// adopted at confirmation", R29-T1): adopted when the confirmed epoch
+	// reaches that epoch, discarded if it is destroyed or demoted first,
+	// when one is answered token_revoked, or at the wait's bound.
+	Carried []CarriedTokens `json:"carried,omitempty"`
 
 	// Attestation is an app's device-attestation binding at pairing
 	// (§6.7, §11.7); the sealed header's copy is authoritative afterwards.
@@ -415,6 +422,25 @@ type PendingEpoch struct {
 	// OwnChain is the own rotation count whose ik signed the handshake.
 	Issued   []IssuedToken `json:"issued,omitempty"`
 	OwnChain int           `json:"own_chain"`
+	// Carried are the tokens the peer's hs.resp carried (0.88.2 §6.3.1,
+	// R29-T1): adopted in the write that confirms this epoch, never before.
+	Carried *CarriedTokens `json:"carried,omitempty"`
+}
+
+// CarriedTokens are the standing and reconnect tokens one handshake carried
+// for the vault, held apart from the tokens it uses until they are adopted
+// (0.88.2 §6.3.1, R29-T1). Epoch is the handshake's epoch (the responder's
+// record; empty on an initiator's pending epoch, which is its own); Since is
+// when the responder activated it (the wait's 32-day cap runs from it).
+type CarriedTokens struct {
+	Epoch     []byte    `json:"epoch,omitempty"`
+	Standing  HeldToken `json:"standing"`
+	Reconnect HeldToken `json:"reconnect"`
+	Since     time.Time `json:"since,omitzero"`
+	// Discarded: never to be adopted (its epoch destroyed or demoted, a
+	// token of it answered token_revoked, or the wait's bound passed); kept
+	// while its epoch is current so that "hs.confirm again" stops for it.
+	Discarded bool `json:"discarded,omitempty"`
 }
 
 // EpochRecord is one epoch of a service connection's history (§6.6, 0.72.0).
@@ -561,6 +587,11 @@ type IssuedToken struct {
 	PeerID string    `json:"peer_id,omitempty"`
 	Exp    time.Time `json:"exp"`
 	Denied bool      `json:"denied,omitempty"`
+	// Handshake: minted in a handshake's hs.init or hs.resp (recorded at
+	// activation). A refresh after quota_exceeded spares the newest such
+	// standing token, which the peer may not yet have adopted (0.88.2 §7.2,
+	// §6.3.1 "Revocation by the issuer").
+	Handshake bool `json:"handshake,omitempty"`
 }
 
 // Invite is an outstanding connection invitation or device pairing (§6.4,
@@ -784,6 +815,11 @@ type OutboxEntry struct {
 	// destroys); Handshake an hs.* deposit (it is not held while a
 	// reconnect's epoch is pending).
 	Confirm bool `json:"confirm,omitempty"`
+	// CarriedTok: Token is a carried token (an hs.resp, hs.fin or
+	// hs.confirm deposited with the token its handshake carried, 0.88.2
+	// §6.3.1): token_revoked on it drops the entry and discards that
+	// handshake's carried tokens (§8.6).
+	CarriedTok bool `json:"carried_tok,omitempty"`
 	// Held is the inner plaintext (sealed-mode JSON, no seq) of a message
 	// made while the peer's current epoch was demoted by an ik link
 	// (§3.4.1: nothing is sent until a new epoch is established); it is

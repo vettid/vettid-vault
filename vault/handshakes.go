@@ -458,7 +458,7 @@ func (m *Manager) respondReconnect(pi *handshake.PendingInit, p *Peer, sender ed
 	id := m.newID(now)
 	oe := &OutboxEntry{Op: OpDeposit, PeerID: p.ID, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox,
 		Token:   st.Token, // the standing token the hs.init brought: ours may have expired
-		Payload: env, Handshake: true}
+		Payload: env, Handshake: true, CarriedTok: true}
 	m.queueDeposit(oe, now)
 	m.st.Awaiting[id] = &AwaitingHS{ID: id, PeerID: p.ID, Purpose: handshake.PurposeReconnect, Created: now, Resp: rs, Issued: issued,
 		OwnChain: m.ownChainNow(), RespOutbox: oe.ID, Reconnect: pend, Th1: th1[:],
@@ -994,9 +994,14 @@ func (m *Manager) finishReconnect(p *Peer, aw *AwaitingHS, fr *handshake.FinResu
 		m.setWatch(p, pend.Named, pend.TS, now)
 	}
 	ref := p.activatedAt(pend.Named)
-	// The reconnect's tokens first, so that nothing the links set off
-	// judges the connection by tokens the reconnect replaces.
-	p.Standing, p.Reconnect = pend.Standing, pend.Reconnect
+	// 0.88.2 (R29-T1): the tokens the hs.init carried are not adopted at
+	// hs.fin: they are kept for this epoch and adopted when the confirmed
+	// epoch reaches it (setConfirmed). Recorded before the links are
+	// followed, so that nothing they set off reconnects for want of a token
+	// (carriedWait) once the epoch is current.
+	fid := fr.Epoch.ID()
+	p.Carried = append(p.Carried, CarriedTokens{Epoch: append([]byte(nil), fid[:]...), Standing: pend.Standing,
+		Reconnect: pend.Reconnect, Since: now})
 	if len(fresh) > 0 && kem != nil {
 		// Table B "Reached": the links are applied, then H5 (answers
 		// pinned to an ik no longer current are dropped), with "Epochs
@@ -1112,6 +1117,7 @@ func (m *Manager) activate(p *Peer, ep *handshake.Epoch, purpose handshake.Purpo
 	p.State = PeerActive
 	for _, t := range issued {
 		t.PeerID = p.ID
+		t.Handshake = true // 0.88.2 §7.2: the quota refresh spares the newest
 		m.st.Issued = append(m.st.Issued, t)
 	}
 	if isNew && p.Kind == KindConnection {
@@ -1259,14 +1265,17 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 		m.audit(now, "hs_resp_dropped", og.PeerID)
 		return ackAfterFlush
 	}
-	if res.Resp.Token != "" {
-		if t, err := m.heldToken(res.Resp.Token, p); err == nil {
-			p.Standing = t
+	// 0.88.2 (R29-T1): the tokens the hs.resp carried are kept with the
+	// pending epoch and adopted only at its confirmation; hs.fin goes on the
+	// carried standing token.
+	var carried *CarriedTokens
+	if res.Resp.Token != "" || res.Resp.ReconnectToken != "" {
+		carried = &CarriedTokens{}
+		if t, err := m.heldToken(res.Resp.Token, p); err == nil && res.Resp.Token != "" {
+			carried.Standing = t
 		}
-	}
-	if res.Resp.ReconnectToken != "" {
-		if t, err := m.heldToken(res.Resp.ReconnectToken, p); err == nil {
-			p.Reconnect = t
+		if t, err := m.heldToken(res.Resp.ReconnectToken, p); err == nil && res.Resp.ReconnectToken != "" {
+			carried.Reconnect = t
 		}
 	}
 	// A reconnect's links, or (S8, 0.85.0) a rekey's: sig_R verified under
@@ -1300,8 +1309,12 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 	// hs.fin goes first: what activation sends in the new epoch (the
 	// profile.update after an ik rotation, §10.8) follows it.
 	newID := res.Epoch.ID()
-	m.queueDeposit(&OutboxEntry{Op: OpDeposit, PeerID: p.ID, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Payload: res.Fin,
-		Handshake: true, FinEpoch: newID[:]}, now)
+	fin := &OutboxEntry{Op: OpDeposit, PeerID: p.ID, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Payload: res.Fin,
+		Handshake: true, FinEpoch: newID[:]}
+	if carried != nil && carried.Standing.Token != "" {
+		fin.Token, fin.CarriedTok = carried.Standing.Token, true
+	}
+	m.queueDeposit(fin, now)
 	if og.Purpose == handshake.PurposeReconnect {
 		// §6.6 "Crossing reconnects" (0.72.1; between two persons 0.74.0,
 		// where our th1 was the lower): our reconnect completed first
@@ -1338,6 +1351,9 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 	// §6.3.1 "Initiator": the new epoch is pending until a message from
 	// the peer opens under it.
 	m.makePending(p, og, res, now)
+	if p.Pending != nil {
+		p.Pending.Carried = carried
+	}
 	return ackAfterFlush
 }
 
@@ -1443,8 +1459,9 @@ func (m *Manager) startReconnectCtx(p *Peer, ctx []byte, now time.Time) *Outgoin
 	}
 	if noReconnectToken(p, now) {
 		// §3.4.1 "The reconnect bound": Q cannot start a try because it
-		// holds no reconnect token for P.
-		if p.State == PeerActive {
+		// holds no reconnect token for P; (0.88.2) not judged while
+		// carried tokens wait (§6.3.1).
+		if p.State == PeerActive && !m.carriedWait(p, now) {
 			m.markStale(p, now)
 		}
 		return nil
@@ -1498,8 +1515,8 @@ func (m *Manager) reconnectExpired(now time.Time) {
 		if !sortedOK {
 			continue // removed earlier in this loop
 		}
-		if p.State != PeerPending && handshake.ShouldUseReconnect(false, p.Standing.Exp, now) {
-			m.startReconnect(p, now)
+		if p.State != PeerPending && handshake.ShouldUseReconnect(false, p.Standing.Exp, now) && !m.carriedWait(p, now) {
+			m.startReconnect(p, now) // 0.88.2: not while carried tokens wait (§6.3.1)
 		}
 	}
 }

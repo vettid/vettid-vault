@@ -383,8 +383,8 @@ func (m *Manager) deposit(ctx context.Context, e *OutboxEntry, now time.Time) er
 			// 0.86.6 S5: with an epoch pending, token_expired abandons it
 			// only if the token's exp has passed on the vault's own clock
 			// (as rule J); a device is rekeyed, never reconnected (S7).
-			if p.Kind == KindConnection && (p.Pending == nil || !now.Before(p.Standing.Exp)) {
-				m.startReconnect(p, now) // §6.6 "When to use it"
+			if p.Kind == KindConnection && (p.Pending == nil || !now.Before(p.Standing.Exp)) && !m.carriedWait(p, now) {
+				m.startReconnect(p, now) // §6.6 "When to use it"; 0.88.2: not while carried tokens wait
 			} else if p.Kind != KindConnection && p.Pending != nil && !now.Before(p.Standing.Exp) {
 				m.abandonPending(p, "token_expired", true, now) // a device: rekeyed from the current epoch
 			}
@@ -520,6 +520,7 @@ func (m *Manager) housekeeping(now time.Time) {
 	for _, p := range m.allPeers() {
 		m.tickDemoted(p, now)
 		m.tickPending(p, now)
+		m.sweepCarried(p, now) // 0.88.2 §6.3.1: the carried tokens' bound
 		m.tickConfirm(p, now)
 		m.pruneEpochs(p, now)
 		if p.State != PeerActive {
@@ -608,12 +609,15 @@ func (m *Manager) tokenRevoked(p *Peer, e *OutboxEntry, tok string, now time.Tim
 	if p == nil || p.Kind != KindConnection {
 		return false
 	}
+	if m.carriedRevoked(p, e, tok, now) {
+		return true // 0.88.2 §6.3.1 "A carried token refused"
+	}
 	m.dropHeldToken(p, tok, now)
 	m.audit(now, "standing_token_revoked", p.ID)
 	e.Token = "" // from now on the held standing token, once a valid one is held
 	e.NotBefore, e.AwaitToken = now.Add(time.Hour), true
 	e.Attempts++
-	if p.Standing.Token == "" || !now.Before(p.Standing.Exp) {
+	if (p.Standing.Token == "" || !now.Before(p.Standing.Exp)) && !m.carriedWait(p, now) {
 		m.noStandingToken(p, now)
 	}
 	m.dirty = true

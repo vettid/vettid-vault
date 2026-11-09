@@ -38,14 +38,13 @@ func (f *r29Fx) revocations(s int) {
 }
 
 // The shape of the random search's seed 15373789217866551976: P (side 1)
-// reconnects; its hs.init carries a standing token, which Q (side 0)
-// holds from the reconnect's hs.fin; P rotates before any hs.confirm, and
-// S5 abandons its pending epoch, revoking the tokens its hs.init carried.
-// Q's next deposit is answered token_revoked: Q drops that token and,
-// holding no other, tries to reconnect (its reconnect token, from the same
-// hs.init, is revoked too: a failed try). P's own restarted reconnect
-// brings fresh tokens; the pair converges, not stale, and the waiting
-// message arrives.
+// reconnects; its hs.init carries a standing token; P rotates before any
+// hs.confirm, and S5 abandons its pending epoch, revoking the tokens its
+// hs.init carried. Before 0.88.2 Q (side 0) held them from the reconnect's
+// hs.fin and its next deposits were refused. (0.88.2, R29-T1) Q keeps them
+// apart as carried tokens and goes on with its held ones, so it never
+// holds a token P revoked; P's own restarted reconnect brings fresh tokens;
+// the pair converges, not stale, and the waiting message arrives.
 func TestR29TokenRevokedEndsTheTokenOnly(t *testing.T) {
 	f := newR29Fx(t)
 	f.longTokens()
@@ -57,22 +56,22 @@ func TestR29TokenRevokedEndsTheTokenOnly(t *testing.T) {
 	f.deliver(0, 1, kHSResp)
 	f.deliver(1, 0, kHSFin)
 	f.lose(0, 1, kConfirm)
-	tok := f.p(0).Standing.Token
-	if tok == before {
-		t.Fatal("setup: Q does not hold the reconnect's standing token")
+	if f.p(0).Standing.Token != before {
+		t.Fatal("Q adopted the reconnect's standing token at hs.fin (R29-T1)")
 	}
+	c := f.p(0).carriedFor(f.p(0).LastEpochID)
+	if c == nil || c.Standing.Token == "" {
+		t.Fatal("setup: Q does not keep the reconnect's carried tokens")
+	}
+	tok := c.Standing.Token
 	f.rotate(1) // S5: P abandons its pending epoch, revoking its tokens; its identity.rotate and new reconnect wait in the relay
 	f.note(0, "after-revoke")
 	if f.p(0).State == PeerStale {
 		f.dump()
-		t.Fatal("token_revoked on a standing token made the connection stale")
+		t.Fatal("the revocation of a carried token made the connection stale")
 	}
-	if f.p(0).Standing.Token == tok || !f.audited(0, "standing_token_revoked") {
-		t.Fatal("the revoked token was not dropped")
-	}
-	if f.openReconnect(0) == nil && !f.audited(0, "reconnect_token_revoked") {
-		f.dump()
-		t.Fatal("holding no other standing token, Q did not try to reconnect")
+	if f.p(0).Standing.Token == tok {
+		t.Fatal("Q holds a token P revoked")
 	}
 	f.settle()
 	f.advance(time.Minute)
@@ -83,12 +82,12 @@ func TestR29TokenRevokedEndsTheTokenOnly(t *testing.T) {
 		f.dump()
 		t.Fatal("the pair did not converge, or the waiting message was lost")
 	}
-	// The revoked token is refused if offered again.
-	f.do(0, func(m *Manager, p *Peer) {
-		if _, err := m.heldToken(tok, p); err == nil {
-			t.Fatal("a revoked standing token was accepted again")
-		}
-	})
+	// (0.88.2) Q never deposited with the revoked carried token, so it has
+	// not learnt the revocation from the relay; what counts is that it
+	// never adopted it.
+	if f.p(0).Standing.Token == tok {
+		t.Fatal("Q adopted a token P revoked")
+	}
 }
 
 // A reconnect's own hs.init answered token_revoked is a failed try

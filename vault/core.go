@@ -569,9 +569,20 @@ func (m *Manager) hTokenRefresh(_ context.Context, s *Session, _ *envelope.Inner
 		return nil, NewError("relay_error", "")
 	}
 	if quota {
+		// 0.88.2 §7.2, §6.3.1 "Revocation by the issuer": the standing
+		// token of the newest token-carrying handshake is spared (the peer
+		// may not yet have adopted it); a still-open handshake's tokens are
+		// not in the registry yet.
+		var spare *IssuedToken
 		for i := range m.st.Issued {
 			t := &m.st.Issued[i]
-			if t.PeerID == s.peer.ID && t.Kind == TokStanding && !t.Denied {
+			if t.PeerID == s.peer.ID && t.Kind == TokStanding && t.Handshake && !t.Denied && (spare == nil || t.Exp.After(spare.Exp)) {
+				spare = t
+			}
+		}
+		for i := range m.st.Issued {
+			t := &m.st.Issued[i]
+			if t.PeerID == s.peer.ID && t.Kind == TokStanding && !t.Denied && t != spare {
 				t.Denied = true
 				m.queueRevoke("jti", t.JTI, s.now)
 			}

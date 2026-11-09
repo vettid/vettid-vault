@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -162,6 +163,51 @@ type rpWorld struct {
 	// so that a locked side's are known
 	pub  [2]ed25519.PublicKey
 	mbox [2]string
+	// R29-T1 (0.88.2): the jti of each side's held standing and reconnect
+	// token when last looked at, and the adoptions of a token its issuer
+	// had already revoked.
+	heldJTI    [2][2]string
+	violations []string
+}
+
+// watchAdoption is R29-T1's harness assertion: whenever a side's held
+// standing or reconnect token changes (an adoption), the new one must not
+// be revoked by its issuer already (§6.3.1 "A handshake's tokens are
+// adopted at confirmation", "Revocation by the issuer"). A token revoked
+// after it was adopted (a quota refresh) is not judged here.
+func (w *rpWorld) watchAdoption(when string) {
+	for s := 0; s < 2; s++ {
+		if w.locked[s] || w.f.m(s).st == nil {
+			continue
+		}
+		p := w.f.p(s)
+		if p == nil {
+			continue
+		}
+		o := 1 - s
+		for k, tok := range []string{p.Standing.Token, p.Reconnect.Token} {
+			jti := ""
+			if c, err := relayauth.ParseToken(tok, w.pub[o]); err == nil {
+				jti = c.Jti
+			}
+			if jti == w.heldJTI[s][k] {
+				continue
+			}
+			w.heldJTI[s][k] = jti
+			if jti == "" {
+				continue
+			}
+			r := w.f.d[o].relay
+			r.mu.Lock()
+			revoked := slices.Contains(r.revoked, "jti:"+jti)
+			r.mu.Unlock()
+			if revoked {
+				v := fmt.Sprintf("%d:%s@%s", s, []string{"standing", "reconnect"}[k], when)
+				w.violations = append(w.violations, v)
+				w.logf("R29-T1 violation: %s adopted a revoked token", v)
+			}
+		}
+	}
 }
 
 func (w *rpWorld) logf(format string, args ...any) {
@@ -470,6 +516,7 @@ func (w *rpWorld) quiesce() {
 		}
 		w.tick(0)
 		w.tick(1)
+		w.watchAdoption("quiesce")
 		w.f.advance(d)
 	}
 	for i := 0; i < 20 && (len(w.q[0]) > 0 || len(w.q[1]) > 0); i++ {
@@ -536,6 +583,9 @@ func (w *rpWorld) lockClass() string {
 // verdict classifies the end state ("" for converged).
 func (w *rpWorld) verdict() string {
 	f := w.f
+	if len(w.violations) > 0 {
+		return "violation:R29-T1 adopted-revoked " + w.violations[0]
+	}
 	var p [2]*Peer
 	for s := 0; s < 2; s++ {
 		p[s] = f.p(s)
@@ -609,6 +659,10 @@ func (w *rpWorld) verdict() string {
 		if f.m(s).currentDemoted(p[s]) {
 			why = append(why, fmt.Sprintf("demoted@%d", s))
 		}
+		if f.m(s).carriedWait(p[s], f.clk) {
+			// I1 (0.88.2, R29-T1): no carried tokens awaiting adoption.
+			why = append(why, fmt.Sprintf("carried@%d", s))
+		}
 	}
 	if len(why) > 0 {
 		if c := w.lockClass(); c != "" {
@@ -674,8 +728,10 @@ func rpRunFP(t *testing.T, rs uint64, steps int, burst, verbose bool) (string, [
 	w.hook(0)
 	w.hook(1)
 	rng := rand.New(rand.NewPCG(rs, 7))
-	for _, a := range rpGen(rs, steps, burst) {
+	w.watchAdoption("start")
+	for i, a := range rpGen(rs, steps, burst) {
 		w.exec(a, rng)
+		w.watchAdoption(strconv.Itoa(i))
 	}
 	w.quiesce()
 	v := w.verdict()

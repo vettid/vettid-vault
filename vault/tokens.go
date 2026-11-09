@@ -200,8 +200,9 @@ func (m *Manager) refreshHeld(now time.Time) {
 			continue
 		}
 		if p.Standing.Token == "" || !now.Before(p.Standing.Exp) {
-			// Expired, or (0.88.2 §8.6) none held after a token_revoked.
-			if p.Kind == KindConnection {
+			// Expired, or (0.88.2 §8.6) none held after a token_revoked;
+			// not while carried tokens wait (0.88.2 §6.3.1).
+			if p.Kind == KindConnection && !m.carriedWait(p, now) {
 				m.startReconnect(p, now)
 			}
 			continue

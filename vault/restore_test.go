@@ -508,9 +508,15 @@ func TestReconnectChangesNothingBeforeFin(t *testing.T) {
 	if f.complete(ini) == nil {
 		t.Fatal("no hs.resp")
 	}
-	if !bytes.Equal(f.p.IK, k1.ik.Public().(ed25519.PublicKey)) || len(f.p.Chain) != 1 || f.p.Reconnect.Token == "" ||
+	// 0.88.2 (R29-T1): the tokens are kept for the new epoch, adopted only
+	// when the confirmed epoch reaches it.
+	c := f.p.carriedFor(f.p.LastEpochID)
+	if !bytes.Equal(f.p.IK, k1.ik.Public().(ed25519.PublicKey)) || len(f.p.Chain) != 1 || c == nil || c.Reconnect.Token == "" ||
 		!bytes.Equal(f.p.KEM, k1.kem.Public().Bytes()) {
-		t.Fatal("the verified hs.fin did not apply the rotation and the tokens")
+		t.Fatal("the verified hs.fin did not apply the rotation and keep the carried tokens")
+	}
+	if f.p.Reconnect.Token != "" {
+		t.Fatal("the reconnect's tokens were adopted at hs.fin (R29-T1)")
 	}
 }
 

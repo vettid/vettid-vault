@@ -212,6 +212,25 @@ func (m *Manager) confirmPending(p *Peer, now time.Time) {
 	// judges the connection by the tokens they replace (review L1/F3).
 	m.adoptCarried(p, pe.Carried)
 	m.setConfirmed(p, pe.ID, now)
+	if pe.Purpose == handshake.PurposeRekey {
+		// (0.88.2, §6.3.1 Initiator "I's open reconnects end at its rekey's
+		// confirmation"; the final review's F1) I's open reconnects named the
+		// epoch that was current when they started, which has just moved on.
+		// One completed later would make R's rule E destroy the epoch I now
+		// sends under: a false fork. They are abandoned here, their tokens
+		// revoked and an hs.init not yet deposited not sent. Mirrors "I's
+		// rekeys end at its reconnect's hs.resp".
+		for _, oid := range sortedKeys(m.st.Outgoing) {
+			og, sortedOK := m.st.Outgoing[oid]
+			if !sortedOK || og.New != nil || og.PeerID != p.ID || og.Purpose != handshake.PurposeReconnect || og.Replaced {
+				continue
+			}
+			if !bytes.Equal(og.Named, p.LastEpochID) {
+				m.note(now, "reconnect_stale_at_confirm", p.ID)
+				m.abandonOutgoing(oid, now)
+			}
+		}
+	}
 	if pe.Purpose == handshake.PurposeReconnect {
 		p.RC = nil // the reconnect succeeded: its tries start again
 		if p.Kind == KindConnection {

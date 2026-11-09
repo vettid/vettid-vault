@@ -697,6 +697,15 @@ func (m *Manager) handleRekeyInit(ctx context.Context, p *Peer, in *envelope.Inn
 		m.audit(now, "rekey_rejected", p.ID)
 		return ackAfterFlush
 	}
+	if m.initAnswered(pi.Th1()) {
+		// (0.88.2, the final review's F2) The same rekey hs.init again (I
+		// re-deposited it after a crash, under a new msg_id): answered once
+		// only, as a reconnect's (§6.6 "Replay"); a second answer would wait
+		// L for an hs.fin that never comes and hold R's rekeys back.
+		m.audit(now, "rekey_init_replayed", p.ID)
+		pi.Discard()
+		return ackAfterFlush
+	}
 	if pe := p.Pending; pe != nil && kr.Current() == ep {
 		if !in.TS.After(pe.RespTS) {
 			// §6.3.1 "Crossing": the peer establishes ours at its hs.fin.
@@ -768,6 +777,7 @@ func (m *Manager) handleRekeyInit(ctx context.Context, p *Peer, in *envelope.Inn
 		m.audit(now, "rekey_refused", p.ID)
 		return ackAfterFlush
 	}
+	m.markInit(pi.Th1(), now) // answered once (the final review's F2)
 	rs, err := resp.Export()
 	if err != nil {
 		return ackAfterFlush

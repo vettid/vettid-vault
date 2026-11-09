@@ -448,6 +448,12 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 	if in.Type == handshake.TypeConfirm { // 0ee0078 inbound.go:481: an unknown type, unsupported_type
 		return ackAfterFlush // not a request: never answered; one that confirms nothing is ignored, unaudited
 	}
+	if in.Type == handshake.TypeFin {
+		// (0.88.2, the final review's F3) An hs.fin whose answer is gone (a
+		// duplicate after the epoch was established) is acked and ignored, as
+		// an hs.confirm that confirms nothing, never answered unsupported_type.
+		return ackAfterFlush
+	}
 	if in.Type == handshake.TypeInit {
 		return m.handleRekeyInit(ctx, p, in, ep, raw, sender, now)
 	}

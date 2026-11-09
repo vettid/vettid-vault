@@ -209,7 +209,7 @@ func (m *Manager) sweepCarried(p *Peer, now time.Time) {
 // afterCarriedDiscard: a discard with no valid held standing token puts the
 // vault in §8.6's "no valid standing token" case.
 func (m *Manager) afterCarriedDiscard(p *Peer, now time.Time) {
-	if p.Kind != KindConnection || p.State != PeerActive || m.carriedWait(p, now) {
+	if p.Kind != KindConnection || p.State != PeerActive || p.suspended() || m.carriedWait(p, now) {
 		return
 	}
 	if p.Standing.Token == "" || !now.Before(p.Standing.Exp) {

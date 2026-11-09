@@ -833,3 +833,82 @@ func TestR29QuotaRefreshUnderThePromptAndWithoutJTI(t *testing.T) {
 		}
 	})
 }
+
+// The final review's F1 (Fable's probe on review/r29-final-probes, pinned):
+// I has rekey K open and starts a reconnect naming E0; the reconnect's
+// hs.init is delayed at the relay (R collected it and crashed before the
+// ack). K completes and I confirms E_K: I abandons its open reconnect then
+// (§6.3.1 Initiator "I's open reconnects end at its rekey's confirmation"),
+// so when the delayed hs.init reaches R and R answers it, I finds nothing
+// for the answer and sends no hs.fin: rule E never destroys E_K, and R
+// never suspends an honest peer.
+func TestR29StaleReconnectEndsAtTheRekeysConfirmation(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	f.rekey(0)
+	if f.deliver(0, 1, kHSInit) != 1 {
+		t.Fatal("setup: rekey hs.init not delivered")
+	}
+	f.advance(time.Minute)
+	f.do(0, func(m *Manager, p *Peer) { m.startReconnect(p, f.clk) })
+	rc := f.takeKind(0, 1, kHSInit)
+	if len(rc) != 1 {
+		t.Fatalf("setup: expected the reconnect hs.init, got %d", len(rc))
+	}
+	f.advance(time.Minute)
+	if f.deliver(1, 0, kHSResp) != 1 || f.deliver(0, 1, kHSFin) != 1 || f.deliver(1, 0, kConfirm) < 1 {
+		f.dump()
+		t.Fatal("setup: the rekey did not complete")
+	}
+	if f.p(0).Pending != nil || !f.sameEpoch() {
+		t.Fatal("setup: K not confirmed at I")
+	}
+	eK := append([]byte(nil), f.cur(0)...)
+	if f.openReconnect(0) != nil || !f.audited(0, "reconnect_stale_at_confirm") {
+		f.dump()
+		t.Fatal("I kept its reconnect open past its rekey's confirmation")
+	}
+	f.advance(time.Minute)
+	f.process(1, rc[0]) // the delayed reconnect hs.init: R may answer it
+	f.note(0, "under-EK")
+	notes := f.takeKind(0, 1, kNote)
+	f.settle()
+	for _, n := range notes {
+		f.process(1, n)
+	}
+	f.settle()
+	if f.p(1).suspended() || f.suspendedRef(1, "epoch") {
+		f.dump()
+		t.Fatal("FALSE FORK: R suspended an honest peer")
+	}
+	if e := f.p(1).epochMeta(eK); e != nil && e.Destroyed {
+		t.Fatal("rule E destroyed the epoch I sends under")
+	}
+	if !f.sameEpoch() {
+		f.dump()
+		t.Fatal("the pair did not end on one epoch")
+	}
+}
+
+// The final review's F2 (pinned): a rekey hs.init that I re-deposited after
+// a crash (the same bytes, a new msg_id) is answered once only.
+func TestR29DuplicateRekeyInitAnsweredOnce(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	f.rekey(0)
+	msgs := f.takeKind(0, 1, kHSInit)
+	if len(msgs) != 1 {
+		t.Fatalf("setup: expected one rekey hs.init, got %d", len(msgs))
+	}
+	dup := msgs[0]
+	dup.MsgID = "redeposit-after-crash"
+	f.process(1, msgs[0])
+	f.advance(time.Second)
+	f.process(1, dup)
+	if n := f.answerCount(1); n != 1 {
+		t.Fatalf("R holds %d answers to one rekey hs.init", n)
+	}
+	if !f.audited(1, "rekey_init_replayed") {
+		t.Fatal("the duplicate was not audited")
+	}
+}

@@ -236,13 +236,28 @@ func (m *Manager) carriedRevoked(p *Peer, e *OutboxEntry, tok string, now time.T
 		}
 	}
 	for _, id := range sortedKeys(m.st.Awaiting) {
-		if aw := m.st.Awaiting[id]; aw.PeerID == p.ID && aw.Reconnect != nil && aw.Reconnect.Standing.Token == tok {
+		aw := m.st.Awaiting[id]
+		if aw == nil || aw.PeerID != p.ID {
+			continue
+		}
+		if aw.RespOutbox == e.ID {
+			// (owner decision a, GC 01M713PZNT77VVDSCY6DC00NWH, item 2) Its hs.resp refused: I dropped this
+			// reconnect, so R's answer ends now, not after L (it would hold R's own reconnect back). Not a try of the
+			// reconnect bound: R's own reconnects are counted by their own handshakes.
+			m.abandonAwaiting(id, now)
+			m.note(now, "answer_ended_carried_revoked", p.ID)
+			continue
+		}
+		if aw.Reconnect != nil && aw.Reconnect.Standing.Token == tok {
 			aw.Reconnect.Standing, aw.Reconnect.Reconnect = HeldToken{}, HeldToken{}
 		}
 	}
 	// The initiator's, on its pending epoch.
-	if pe := p.Pending; pe != nil && pe.Carried != nil && pe.Carried.Standing.Token == tok {
+	if pe := p.Pending; pe != nil && (bytes.Equal(e.FinEpoch, pe.ID) || pe.Carried != nil && pe.Carried.Standing.Token == tok) {
+		// (owner decision a, item 2) Its hs.fin refused: R dropped its answer, so the pending epoch ends now, not at B,
+		// and the reconnect starts again (not a failed try of the reconnect bound: the try did not expire).
 		pe.Carried = nil
+		m.abandonPending(p, "carried_revoked", true, now)
 	}
 	m.dirty = true
 	m.afterCarriedDiscard(p, now)

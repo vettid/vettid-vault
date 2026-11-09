@@ -589,8 +589,20 @@ func (m *Manager) hTokenRefresh(_ context.Context, s *Session, _ *envelope.Inner
 				prompt = t
 			}
 		}
+		// (owner decision a, GC 01M713PZNT77VVDSCY6DC00NWH, item 3, option A) Only the standing tokens no newer than the
+		// one the refresh was deposited under (its collect jti) are denylisted: a newer one (a near-end re-mint, a
+		// prompt, a handshake's) may still be on its way to the peer. Without a jti (a relay before 0.4), as before.
+		var under *IssuedToken
+		for i := range m.st.Issued {
+			if t := &m.st.Issued[i]; m.msgJTI != "" && t.JTI == m.msgJTI && t.PeerID == s.peer.ID && t.Kind == TokStanding {
+				under = t
+			}
+		}
 		for i := range m.st.Issued {
 			t := &m.st.Issued[i]
+			if under != nil && t.Exp.After(under.Exp) {
+				continue
+			}
 			if t.PeerID == s.peer.ID && t.Kind == TokStanding && !t.Denied && t != spare && t != prompt {
 				t.Denied = true
 				m.queueRevoke("jti", t.JTI, s.now)

@@ -362,6 +362,15 @@ func TestR29T1CarriedRespRevoked(t *testing.T) {
 	if f.p(0).Standing != held || f.p(0).State != PeerActive {
 		t.Fatal("the refusal changed the held tokens or the connection")
 	}
+	// (owner decision a, GC 01M713PZNT77VVDSCY6DC00NWH, item 2) The answer ends now, not after L.
+	for _, aw := range f.m(0).st.Awaiting {
+		if aw.PeerID == f.p(0).ID && aw.Purpose == handshake.PurposeReconnect {
+			t.Fatal("R kept its answer to a reconnect I dropped")
+		}
+	}
+	if !f.audited(0, "answer_ended_carried_revoked") {
+		t.Fatal("the answer's end was not audited")
+	}
 }
 
 // token_revoked on I's hs.fin, deposited with the token R's hs.resp
@@ -389,6 +398,50 @@ func TestR29T1CarriedFinRevoked(t *testing.T) {
 	if pe := f.p(1).Pending; pe != nil && pe.Carried != nil {
 		t.Fatal("the pending epoch still keeps the hs.resp's carried tokens")
 	}
+	// (owner decision a, item 2) The pending epoch ends now, not at B, and the reconnect starts again.
+	if !f.audited(1, "pending_abandoned_carried_revoked") {
+		f.dump()
+		t.Fatal("I's pending epoch did not end at the refusal")
+	}
+	if f.p(1).State != PeerActive {
+		t.Fatal("the refusal made the connection stale")
+	}
+}
+
+// (owner decision a, GC 01M713PZNT77VVDSCY6DC00NWH, item 3, option A) A quota
+// refresh denies only the standing tokens no newer than the one it came
+// under (its collect jti): a newer one, still on its way, is spared.
+func TestR29QuotaRefreshSparesNewerThanItsOwnToken(t *testing.T) {
+	f := newR29Fx(t)
+	f.do(0, func(m *Manager, p *Peer) {
+		under := m.latestIssued(p.ID, TokStanding)
+		if under == nil {
+			t.Fatal("setup: no standing token issued to the peer")
+		}
+		underJTI := under.JTI
+		f.advance(time.Hour)
+		m.issueTo(p, TokStanding, f.clk) // a near-end re-mint still on its way
+		newer := m.latestIssued(p.ID, TokStanding)
+		newerJTI := newer.JTI
+		m.msgJTI = underJTI // the refresh was deposited under the older token
+		s := &Session{m: m, peer: p, now: f.clk}
+		if _, err := m.hTokenRefresh(context.Background(), s, nil); err != nil {
+			t.Fatal(err)
+		}
+		m.msgJTI = ""
+		for _, it := range m.st.Issued {
+			switch it.JTI {
+			case underJTI:
+				if !it.Denied {
+					t.Fatal("the token the refresh came under was not denied")
+				}
+			case newerJTI:
+				if it.Denied {
+					t.Fatal("a newer token, still on its way, was denied")
+				}
+			}
+		}
+	})
 }
 
 // t1Waiting brings side 0 (R) to "No reconnect while carried tokens wait":

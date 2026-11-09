@@ -251,6 +251,9 @@ type Manager struct {
 	// msgID is the relay msg_id of the message being handled: with
 	// relayAt, its position (§3.4.1 "Terms", 0.86.0).
 	msgID string
+	// msgJTI is the collect jti of the message being handled (RELAY-PROTOCOL 0.4.0 §6.3): the token it was deposited
+	// under, "" when the relay gave none.
+	msgJTI string
 	// noLinkRestart: followLinks runs inside handleResp, whose own
 	// handshake is about to make the new epoch: it restarts nothing.
 	noLinkRestart bool

@@ -286,7 +286,7 @@ func (m *Manager) handleMessage(ctx context.Context, msg Message, now time.Time)
 		return ackAfterFlush // relay msg_id dedupe (§8.2 layer 1)
 	}
 	m.st.SeenMsgIDs[msg.MsgID] = now
-	m.relayAt, m.msgID = time.Time{}, msg.MsgID
+	m.relayAt, m.msgID, m.msgJTI = time.Time{}, msg.MsgID, msg.JTI
 	if t, err := time.Parse(time.RFC3339Nano, msg.DepositedAt); err == nil {
 		m.relayAt = t.UTC()
 	}

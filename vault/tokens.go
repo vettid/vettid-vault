@@ -248,11 +248,17 @@ func (m *Manager) storeIssuedTo(p *Peer, body json.RawMessage, now time.Time) {
 	if kind == TokReconnect {
 		if p.Kind == KindConnection {
 			p.Reconnect = ht
+			if h := m.opt.Hooks.Adopt; h != nil {
+				h(p.ID, TokReconnect, ht.Token, "issued")
+			}
 		}
 		return
 	}
 	if ht.Exp.After(p.Standing.Exp) {
 		p.Standing = ht
+		if h := m.opt.Hooks.Adopt; h != nil {
+			h(p.ID, TokStanding, ht.Token, "issued")
+		}
 		m.retryPeer(p.ID)
 	}
 }

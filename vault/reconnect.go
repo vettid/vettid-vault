@@ -28,7 +28,9 @@ func (m *Manager) reconnectNaming(p *Peer, ctx []byte, why string, now time.Time
 		return false
 	}
 	if noReconnectToken(p, now) {
-		m.markStale(p, now) // §3.4.1 "The reconnect bound": no reconnect token
+		if !m.carriedWait(p, now) { // 0.88.2 §6.3.1: not judged while carried tokens wait
+			m.markStale(p, now) // §3.4.1 "The reconnect bound": no reconnect token
+		}
 		return false
 	}
 	if !m.canReconnect(p, now) {

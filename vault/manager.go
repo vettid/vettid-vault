@@ -222,6 +222,12 @@ const EventAppKey = "app_key"
 
 // Hooks let tests and supervisors observe or interrupt processing.
 type Hooks struct {
+	// Adopt, if set, is called in the write in which the vault starts to
+	// hold token tok of kind (standing, reconnect) for the peer; from is
+	// "carried" (an adoption of a handshake's carried tokens, 0.88.2
+	// R29-T1) or "issued" (relay.token.issued). The random pair's oracle
+	// judges it against the issuer's registry.
+	Adopt func(peerID, kind, tok, from string)
 	// AfterFlush runs after a batch's state flush and before its acks. An
 	// error stops processing there, like a crash: nothing is acked and the
 	// in-memory state is discarded.

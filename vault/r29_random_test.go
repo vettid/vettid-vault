@@ -163,50 +163,57 @@ type rpWorld struct {
 	// so that a locked side's are known
 	pub  [2]ed25519.PublicKey
 	mbox [2]string
-	// R29-T1 (0.88.2): the jti of each side's held standing and reconnect
-	// token when last looked at, and the adoptions of a token its issuer
-	// had already revoked.
-	heldJTI    [2][2]string
-	violations []string
+	// R29-T1 (0.88.2): the adoptions of a carried token its issuer had
+	// already revoked, and the relay.token.issued stores of one
+	// (judgeAdoption).
+	violations    []string
+	issuedRevoked int
 }
 
-// watchAdoption is R29-T1's harness assertion: whenever a side's held
-// standing or reconnect token changes (an adoption), the new one must not
-// be revoked by its issuer already (§6.3.1 "A handshake's tokens are
-// adopted at confirmation", "Revocation by the issuer"). A token revoked
-// after it was adopted (a quota refresh) is not judged here.
-func (w *rpWorld) watchAdoption(when string) {
-	for s := 0; s < 2; s++ {
-		if w.locked[s] || w.f.m(s).st == nil {
-			continue
-		}
-		p := w.f.p(s)
-		if p == nil {
-			continue
-		}
-		o := 1 - s
-		for k, tok := range []string{p.Standing.Token, p.Reconnect.Token} {
-			jti := ""
-			if c, err := relayauth.ParseToken(tok, w.pub[o]); err == nil {
-				jti = c.Jti
-			}
-			if jti == w.heldJTI[s][k] {
-				continue
-			}
-			w.heldJTI[s][k] = jti
-			if jti == "" {
-				continue
-			}
-			r := w.f.d[o].relay
-			r.mu.Lock()
-			revoked := slices.Contains(r.revoked, "jti:"+jti)
-			r.mu.Unlock()
-			if revoked {
-				v := fmt.Sprintf("%d:%s@%s", s, []string{"standing", "reconnect"}[k], when)
-				w.violations = append(w.violations, v)
-				w.logf("R29-T1 violation: %s adopted a revoked token", v)
+// rpIssuedRevokedRuns are the runs in which a side stored a revoked token
+// from relay.token.issued (reported in the summary, not a verdict).
+var rpIssuedRevokedRuns = map[string]bool{}
+
+// judgeAdoption is R29-T1's oracle (0.88.2 §6.3.1 "A handshake's tokens
+// are adopted at confirmation", "Revocation by the issuer"), called by the
+// Adopt hook in the write in which side s starts to hold tok: the issuer
+// (the other side) must not have revoked it already, judged by the
+// issuer's own registry (Issued[].Denied, in memory, or its stored state
+// while it is locked) and by the relay's denylist. A token revoked after it
+// was adopted (a quota refresh) is not judged here.
+//
+// R29-T1 is about carried tokens (from "carried"). A relay.token.issued
+// whose token the issuer revoked while it was in flight (a quota refresh
+// after a near-end re-mint; Fable L1 of the code review, a follow-up) is
+// counted in issuedRevoked, not as a violation; §8.6 handles its refusal.
+func (w *rpWorld) judgeAdoption(s int, kind, tok, from string) {
+	o := 1 - s
+	c, err := relayauth.ParseToken(tok, w.pub[o])
+	if err != nil {
+		return
+	}
+	denied := false
+	if st := w.f.m(o).st; st != nil && !w.locked[o] {
+		for _, t := range st.Issued {
+			if t.JTI == c.Jti && t.Denied {
+				denied = true
 			}
 		}
+	}
+	r := w.f.d[o].relay
+	r.mu.Lock()
+	denied = denied || slices.Contains(r.revoked, "jti:"+c.Jti)
+	r.mu.Unlock()
+	if denied && from != "carried" {
+		w.issuedRevoked++
+		rpIssuedRevokedRuns[w.f.t.Name()] = true
+		w.logf("side %d stored a revoked %s token from relay.token.issued", s, kind)
+		return
+	}
+	if denied {
+		v := fmt.Sprintf("%d:%s@%s", s, kind, w.f.clk.Format("01-02 15:04:05"))
+		w.violations = append(w.violations, v)
+		w.logf("R29-T1 violation: %s adopted a revoked token", v)
 	}
 }
 
@@ -223,6 +230,7 @@ func (w *rpWorld) hook(s int) {
 	r.now = func() time.Time { return w.f.clk }
 	r.check = func(mailbox, token string) error { return w.check(s, mailbox, token) }
 	r.mu.Unlock()
+	w.f.m(s).opt.Hooks.Adopt = func(_, kind, tok, from string) { w.judgeAdoption(s, kind, tok, from) }
 }
 
 // check is the relay's judgement of a deposit by side s (RELAY-PROTOCOL
@@ -542,7 +550,6 @@ func (w *rpWorld) quiesce() {
 		}
 		w.tick(0)
 		w.tick(1)
-		w.watchAdoption("quiesce")
 		w.f.advance(d)
 	}
 	for i := 0; i < 20 && (len(w.q[0]) > 0 || len(w.q[1]) > 0); i++ {
@@ -754,10 +761,8 @@ func rpRunFP(t *testing.T, rs uint64, steps int, burst, verbose bool) (string, [
 	w.hook(0)
 	w.hook(1)
 	rng := rand.New(rand.NewPCG(rs, 7))
-	w.watchAdoption("start")
-	for i, a := range rpGen(rs, steps, burst) {
+	for _, a := range rpGen(rs, steps, burst) {
 		w.exec(a, rng)
-		w.watchAdoption(strconv.Itoa(i))
 	}
 	w.quiesce()
 	v := w.verdict()
@@ -872,6 +877,7 @@ func TestR29RandomPair(t *testing.T) {
 		}
 		t.Logf("%-50s %5d  e.g. %s", k, len(seeds), strings.Join(ss, " "))
 	}
+	t.Logf("runs in which relay.token.issued delivered a token already revoked (follow-up, not R29-T1): %d", len(rpIssuedRevokedRuns))
 	t.Logf("%d runs (burst %v, steps %d) in %v: %v per 10,000", runs, burst, steps, el.Round(time.Second),
 		(el * time.Duration(10000) / time.Duration(runs)).Round(time.Second))
 }

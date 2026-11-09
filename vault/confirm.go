@@ -181,6 +181,9 @@ func (m *Manager) makePending(p *Peer, og *OutgoingHS, res *handshake.Result, no
 		m.abandonPending(p, "replaced", false, now)
 	}
 	kr.SetPending(res.Epoch, now)
+	if og.Purpose == handshake.PurposeReconnect {
+		m.supersedeCarried(p) // 0.88.2: this reconnect supersedes earlier carried tokens
+	}
 	id := res.Epoch.ID()
 	p.Pending = &PendingEpoch{ID: id[:], Purpose: og.Purpose, FinAt: now, RespTS: res.Inner.TS, Issued: og.Issued,
 		OwnChain: chainOr(og.OwnChain, len(m.st.Rotations))}
@@ -204,10 +207,11 @@ func (m *Manager) confirmPending(p *Peer, now time.Time) {
 		return
 	}
 	m.activate(p, ep, pe.Purpose, pe.Issued, "", pe.OwnChain, actOpts{how: actInstalled, mine: true}, now)
-	m.setConfirmed(p, pe.ID, now)
 	// 0.88.2 (R29-T1): the tokens the peer's hs.resp carried are adopted
-	// in this write, never before.
+	// in this write, never before; first, so that nothing setConfirmed does
+	// judges the connection by the tokens they replace (review L1/F3).
 	m.adoptCarried(p, pe.Carried)
+	m.setConfirmed(p, pe.ID, now)
 	if pe.Purpose == handshake.PurposeReconnect {
 		p.RC = nil // the reconnect succeeded: its tries start again
 		if p.Kind == KindConnection {
@@ -294,8 +298,8 @@ func (m *Manager) tickPending(p *Peer, now time.Time) {
 	case pe == nil:
 	case m.drainedOnce && now.Sub(pe.FinAt) > PendingLife:
 		m.abandonPending(p, "b_passed", true, now)
-	case pe.Purpose == handshake.PurposeRekey && (p.Standing.Token == "" || !now.Before(p.Standing.Exp)):
-		m.abandonPending(p, "no_token", true, now)
+	case pe.Purpose == handshake.PurposeRekey && (p.Standing.Token == "" || !now.Before(p.Standing.Exp)) && !m.carriedWait(p, now):
+		m.abandonPending(p, "no_token", true, now) // 0.88.2: not while carried tokens wait (review F4)
 	}
 }
 

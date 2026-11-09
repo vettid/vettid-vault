@@ -1000,6 +1000,7 @@ func (m *Manager) finishReconnect(p *Peer, aw *AwaitingHS, fr *handshake.FinResu
 	// followed, so that nothing they set off reconnects for want of a token
 	// (carriedWait) once the epoch is current.
 	fid := fr.Epoch.ID()
+	m.supersedeCarried(p) // this reconnect supersedes earlier carried tokens
 	p.Carried = append(p.Carried, CarriedTokens{Epoch: append([]byte(nil), fid[:]...), Standing: pend.Standing,
 		Reconnect: pend.Reconnect, Since: now})
 	if len(fresh) > 0 && kem != nil {

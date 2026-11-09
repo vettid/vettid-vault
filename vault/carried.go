@@ -20,9 +20,12 @@ import (
 
 // adoptHeld replaces the held token of a kind with a carried one only if the
 // carried one's exp is later.
-func adoptHeld(held *HeldToken, c HeldToken) {
+func (m *Manager) adoptHeld(p *Peer, kind string, held *HeldToken, c HeldToken) {
 	if c.Token != "" && c.Exp.After(held.Exp) {
 		*held = c
+		if h := m.opt.Hooks.Adopt; h != nil {
+			h(p.ID, kind, c.Token, "carried")
+		}
 	}
 }
 
@@ -32,9 +35,9 @@ func (m *Manager) adoptCarried(p *Peer, c *CarriedTokens) {
 	if c == nil {
 		return
 	}
-	adoptHeld(&p.Standing, c.Standing)
+	m.adoptHeld(p, TokStanding, &p.Standing, c.Standing)
 	if p.Kind == KindConnection {
-		adoptHeld(&p.Reconnect, c.Reconnect)
+		m.adoptHeld(p, TokReconnect, &p.Reconnect, c.Reconnect)
 	}
 	m.retryPeer(p.ID)
 	m.dirty = true
@@ -94,6 +97,11 @@ func (m *Manager) adoptReached(p *Peer, id []byte, now time.Time) {
 				keep = append(keep, c)
 			}
 		case bytes.Equal(c.Epoch, id) || p.newer(id, c.Epoch):
+			// The confirmed epoch reached c's epoch, or a later one reached
+			// from it by rekeys only: a later token-carrying handshake
+			// supersedes c (supersedeCarried), so no record of an earlier
+			// reconnect is still here (review F1: never adopt the tokens of
+			// an epoch the peer may have abandoned and revoked).
 			m.adoptCarried(p, &c)
 			m.note(now, "carried_adopted", p.ID)
 		default:
@@ -108,6 +116,23 @@ func (m *Manager) adoptReached(p *Peer, id []byte, now time.Time) {
 		// right after this, in confirmPending).
 		m.afterCarriedDiscard(p, now)
 	}
+}
+
+// supersedeCarried drops p's carried records of every epoch: a newer
+// token-carrying handshake (this vault's own reconnect becoming pending, or
+// the peer's reconnect established at its hs.fin) supersedes them, and an
+// earlier epoch's carried tokens are never adopted at a later confirmation
+// (0.88.2 §6.3.1 "When they are adopted"). No reconnect follows: the new
+// handshake is the way on.
+func (m *Manager) supersedeCarried(p *Peer) {
+	if len(p.Carried) == 0 {
+		return
+	}
+	for i := range p.Carried {
+		p.Carried[i] = CarriedTokens{}
+	}
+	p.Carried = p.Carried[:0]
+	m.dirty = true
 }
 
 // carriedWait is §6.3.1 "No reconnect while carried tokens wait": p's

@@ -212,6 +212,8 @@ func TestGrantSeqPairingAndRepairing(t *testing.T) {
 	}
 	// An agent with no number yet (paired before this build, or before
 	// 0.41.0): numbered the first time it's described, from the counter.
+	// AgentPaired is deliberately not called for it (the harness's
+	// AddDevice doesn't), which is what such an agent looks like.
 	r.h.AddDevice("dev-agent-old", vault.KindAgent)
 	old, _ := r.h.Device("dev-agent-old")
 	if n := grantSeq(t, listAs(t, r, t0, old)); n <= empty {

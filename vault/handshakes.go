@@ -796,9 +796,9 @@ func (m *Manager) activate(p *Peer, ep *handshake.Epoch, purpose handshake.Purpo
 			m.retryOwedRotation(now)
 		}
 		if p.Kind == KindAgent {
-			// The agent's initial LEASH grants (none is an empty set) take
-			// effect with the pairing, after device.paired, and the set
-			// takes its grant_seq then (§6.7, §10.11).
+			// The agent's initial LEASH grants (with none, the set is the
+			// empty one) take effect with the pairing, after device.paired,
+			// and the set takes its grant_seq then (§6.7, §10.11).
 			if g := m.agentGrantor(); g != nil {
 				g.AgentPaired(m.session(now), p.ID, p.PairGrants)
 			}

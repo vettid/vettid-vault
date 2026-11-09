@@ -63,10 +63,12 @@ func (d *Device) AgentRequest(ctx context.Context, op string, members map[string
 
 // newerGrantSet reports whether a leash.grant.updated body describes a newer
 // set than the one kept, as §10.11 "Grant-set sequence" has an agent judge:
-// a lower grant_seq (a reordered or replayed update) is ignored; an equal one
-// is the same set re-sent with fresh status statements (a hold's end) and
-// replaces it. A body without a valid grant_seq (a vault from before 0.41.0)
-// is taken only while no numbered one has been. d.mu is held.
+// a lower grant_seq (a reordered or replayed update) is ignored. An equal
+// one replaces the kept body: the vault re-sends an equal number only for
+// the same set with fresh status statements (a hold's end), less any grant
+// that has since expired (an expiry takes no number), so taking it whole
+// keeps the set and its newer statements. A body without a valid grant_seq
+// (absent, 0 or invalid) is ignored ("No fallback", §10.11). d.mu is held.
 func (d *Device) newerGrantSet(body []byte) bool {
 	o, err := strictjson.ParseObject(body)
 	if err != nil {
@@ -74,7 +76,7 @@ func (d *Device) newerGrantSet(body []byte) bool {
 	}
 	n, present, err := o.OptUint("grant_seq", 1, strictjson.MaxSafeInteger)
 	if err != nil || !present {
-		return d.leashSeq == 0
+		return false
 	}
 	if n < d.leashSeq {
 		return false

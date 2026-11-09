@@ -5,14 +5,15 @@ import "testing"
 // §10.11 "Grant-set sequence": the agent keeps the set with the highest
 // grant_seq; a lower one (reordered or replayed) is ignored; an equal one
 // (a hold's end re-sending fresh statements) replaces it; an unnumbered one
-// is taken only before the first numbered one.
+// is ignored ("No fallback").
 func TestNewerGrantSet(t *testing.T) {
 	d := &Device{}
 	for _, c := range []struct {
 		body string
 		want bool
 	}{
-		{`{"grants":[]}`, true},
+		{`{"grants":[]}`, false},
+		{`{"grants":[],"grant_seq":0}`, false},
 		{`{"grants":[],"grant_seq":3}`, true},
 		{`{"grants":[]}`, false},
 		{`{"grants":[],"grant_seq":2}`, false},

@@ -372,6 +372,32 @@ func (w *rpWorld) collect(s, max int, redeliver, reorder bool, rng *rand.Rand) {
 	w.pullBoth()
 }
 
+// advanceLive moves the clock by d. An unlocked vault collects
+// continuously (vault/inbound.go Manager.Run: a long-poll of about 25 s,
+// retries at most about 15 s apart; GC #6206), so a jump longer than a day
+// is made in steps of at most a day, and after each step every unlocked
+// side collects what waits for it and ticks. "Not collecting" is modelled
+// only as a lock (the lead, GC #6449): before this, a 30-day jump with both
+// sides unlocked let messages expire at the relay unread (seed
+// 14735564589240170962).
+func (w *rpWorld) advanceLive(d time.Duration) {
+	const step = 24 * time.Hour
+	for d > step {
+		w.f.advance(step)
+		d -= step
+		for s := 0; s < 2; s++ {
+			if w.locked[s] {
+				continue
+			}
+			for i := 0; i < 20 && len(w.q[s]) > 0; i++ {
+				w.collect(s, 32, false, false, nil)
+			}
+			w.tick(s)
+		}
+	}
+	w.f.advance(d)
+}
+
 func (w *rpWorld) tick(s int) {
 	if w.locked[s] {
 		return
@@ -481,7 +507,7 @@ func (w *rpWorld) exec(a rpAction, rng *rand.Rand) {
 	case rpTick:
 		w.tick(s)
 	case rpTime:
-		w.f.advance(rpJumps[a.N%len(rpJumps)])
+		w.advanceLive(rpJumps[a.N%len(rpJumps)])
 	case rpLock:
 		w.lock(s)
 	case rpUnlock:

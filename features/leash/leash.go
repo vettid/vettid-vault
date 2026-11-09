@@ -131,6 +131,15 @@ type data struct {
 	Grants map[string]*Grant `json:"grants"`
 	// Agents is the anti-spam and audit-summary state per agent (§10.11).
 	Agents map[string]*AgentState `json:"agents,omitempty"`
+	// Seq is the vault's one grant-set counter (§10.11 "Grant-set
+	// sequence", 0.41.0): the last number it gave out, 0 before the first.
+	// It only grows, is never reset, and no number is used twice.
+	Seq uint64 `json:"seq,omitempty"`
+	// GrantSeq is each agent's current grant_seq: the number its set took
+	// at its last change. Kept apart from Agents, which a resumption and an
+	// unlink delete; an unlinked agent's entry goes with it, the counter
+	// goes on.
+	GrantSeq map[string]uint64 `json:"grant_seq,omitempty"`
 }
 
 // Anti-spam limits and audit summaries (§10.11).
@@ -197,7 +206,8 @@ type Feature struct {
 // New returns the feature; keys is the credential feature, items the
 // items feature.
 func New(keys KeyUser, items AgentItems) *Feature {
-	return &Feature{keys: keys, items: items, d: data{Grants: map[string]*Grant{}, Agents: map[string]*AgentState{}}}
+	return &Feature{keys: keys, items: items, d: data{Grants: map[string]*Grant{}, Agents: map[string]*AgentState{},
+		GrantSeq: map[string]uint64{}}}
 }
 
 var (
@@ -236,8 +246,35 @@ func (f *Feature) Load(raw json.RawMessage) error {
 	if d.Agents == nil {
 		d.Agents = map[string]*AgentState{}
 	}
+	if d.GrantSeq == nil {
+		d.GrantSeq = map[string]uint64{}
+	}
 	f.d = d
 	return nil
+}
+
+// changed gives the agent's grant set the counter's next value (§10.11
+// "Grant-set sequence"): called once for each change to the set, before the
+// agent is told. The state carrying the new number is stored before
+// anything that names it is sent (a send is queued only after the write
+// that holds it, vault/outbox.go).
+func (f *Feature) changed(agent string) uint64 {
+	f.d.Seq++
+	f.d.GrantSeq[agent] = f.d.Seq
+	return f.d.Seq
+}
+
+// seqOf is the agent's current grant_seq. A set that has none yet takes the
+// counter's next value the first time it is described: an agent paired
+// without initial grants (the set a pairing completes with, §10.11, is then
+// the empty one, and the vault core calls AgentPaired only with grants), or
+// any agent of a vault that ran before 0.41.0. Its numbers therefore start
+// from the vault's current value, never from 0.
+func (f *Feature) seqOf(agent string) uint64 {
+	if n := f.d.GrantSeq[agent]; n > 0 {
+		return n
+	}
+	return f.changed(agent)
 }
 
 // Save implements vault.Feature.
@@ -582,6 +619,7 @@ func (f *Feature) suspend(s *vault.Session, id string, st *AgentState) {
 	f.flush(s, id, st)
 	s.Record(vault.Activity{Kind: "leash.agent.suspended", DeviceID: id, Audit: true, Feed: true, Priority: "high"})
 	s.SyncEvent("leash.agent.suspended", strictjson.NewBuilder().String("agent_id", id).Bool("suspended", true).Bytes())
+	f.changed(id) // suspension takes a new number (§10.11)
 	f.tell(s, id)
 }
 
@@ -851,7 +889,11 @@ func (f *Feature) grantWithStatus(s *vault.Session, g *Grant) []byte {
 	return append(append(raw[:len(raw)-1], ','), extra[1:]...)
 }
 
-// agentList is an agent's own grants, each with a fresh status statement.
+// agentList is an agent's own grants, each with a fresh status statement,
+// and the set's grant_seq (§10.11, 0.41.0): the body of the agent's
+// leash.grant.list answer and of every leash.grant.updated. Fresh
+// statements are not a change: describing the same set again keeps its
+// number.
 func (f *Feature) agentList(s *vault.Session, agent string) []byte {
 	var gs []*Grant
 	for _, g := range f.d.Grants {
@@ -868,7 +910,8 @@ func (f *Feature) agentList(s *vault.Session, agent string) []byte {
 		arr = append(arr, f.grantWithStatus(s, g)...)
 	}
 	st := f.d.Agents[agent]
-	return strictjson.NewBuilder().Raw("grants", append(arr, ']')).Bool("suspended", st != nil && st.Suspended).Bytes()
+	return strictjson.NewBuilder().Raw("grants", append(arr, ']')).Bool("suspended", st != nil && st.Suspended).
+		Uint("grant_seq", f.seqOf(agent)).Bytes()
 }
 
 func (f *Feature) listJSON(agent string) []byte {
@@ -1006,6 +1049,7 @@ func (f *Feature) issue(s *vault.Session, body []byte) (json.RawMessage, error) 
 	}
 	s.Record(vault.Activity{Kind: kind, DeviceID: agentID, Ref: g.ID, Audit: true})
 	syncChanged(s, g)
+	f.changed(agentID) // a grant issued or replaced
 	f.tell(s, agentID)
 	return g.JSON(), nil
 }
@@ -1068,12 +1112,16 @@ func grantID(body []byte) (string, error) {
 	return id, nil
 }
 
-// revoke deletes a grant and tells everyone concerned.
+// revoke deletes a grant and tells everyone concerned. With notifyAgent,
+// the agent's set takes a new number and the agent is told; without it,
+// the caller does both (once per agent) or, for an unlinked agent, ends the
+// set.
 func (f *Feature) revoke(s *vault.Session, g *Grant, notifyAgent bool) {
 	delete(f.d.Grants, g.ID)
 	s.Record(vault.Activity{Kind: "leash.grant.revoked", DeviceID: g.AgentID, Ref: g.ID, Audit: true})
 	syncRevoked(s, g)
 	if notifyAgent {
+		f.changed(g.AgentID)
 		f.tell(s, g.AgentID)
 	}
 }
@@ -1147,6 +1195,7 @@ func (f *Feature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner
 		delete(f.d.Agents, id) // a fresh start: no cooldowns, counts or window
 		s.Record(vault.Activity{Kind: "leash.agent.resumed", DeviceID: id, Audit: true})
 		s.SyncEvent("leash.agent.suspended", strictjson.NewBuilder().String("agent_id", id).Bool("suspended", false).Bytes())
+		f.changed(id) // resumption takes a new number; it never resets it (§10.11)
 		f.tell(s, id)
 		return nil, nil
 	}
@@ -1260,6 +1309,7 @@ func (f *Feature) AgentPaired(s *vault.Session, agentID string, prepared json.Ra
 		s.Record(vault.Activity{Kind: "leash.grant.issued", DeviceID: agentID, Ref: g.ID, Audit: true})
 		syncChanged(s, g)
 	}
+	f.changed(agentID) // the set the pairing completes with
 	f.tell(s, agentID)
 }
 
@@ -1277,6 +1327,9 @@ func (f *Feature) DeviceRemoved(s *vault.Session, deviceID string) {
 			f.revoke(s, g, false)
 		}
 	}
+	// Unlinking ends the set; the counter goes on, so a re-paired agent (a
+	// new device, §6.7) starts from the vault's current value (§10.11).
+	delete(f.d.GrantSeq, deviceID)
 }
 
 // ConnectionRemoved implements vault.ConnectionRemovedObserver: every
@@ -1292,9 +1345,19 @@ func (f *Feature) ConnectionRemoved(s *vault.Session, conn string) {
 			f.revoke(s, g, false)
 		}
 	}
-	for agent := range touched {
+	for _, agent := range sortedKeys(touched) {
+		f.changed(agent) // grants revoked with their connection
 		f.tell(s, agent)
 	}
+}
+
+func sortedKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func (f *Feature) sorted() []*Grant {
@@ -1402,6 +1465,7 @@ func (f *Feature) SetAgentRule(s *vault.Session, r *itemspec.AgentRule) (*itemsp
 	}
 	s.Record(vault.Activity{Kind: kind, DeviceID: r.AgentID, Ref: g.ID, Audit: true})
 	syncChanged(s, g)
+	f.changed(r.AgentID) // an agent share rule set (§10.12)
 	f.tell(s, r.AgentID)
 	out := g.agentRule()
 	return &out, nil

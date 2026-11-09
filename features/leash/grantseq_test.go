@@ -290,3 +290,58 @@ func TestGrantSeqOnlyForAgents(t *testing.T) {
 		}
 	}
 }
+
+// A hold drops leash.grant.updated to agents without queueing it
+// (holdDelivers). If the agent's last grant is revoked during the hold, the
+// hold's end must still tell it: the empty set, with the revocation's number.
+func TestGrantSeqHoldEndTellsEmptiedSet(t *testing.T) {
+	r := newRig(t)
+	_, gid := r.issue(t, `{"agent_id":"dev-agent","scope":"profile.get"}`)
+	if res := featuretest.Call(r.f, r.h, t0, vault.KindApp, "leash.grant.revoke", `{"grant_id":"`+gid+`"}`); !res.OK() {
+		t.Fatalf("revoke: %s", res.Code)
+	}
+	revoked, sent := lastUpdate(t, r, agent)
+	r.f.OwnerHoldEnded(appSession(r, t0))
+	n, sentAfter := lastUpdate(t, r, agent)
+	if sentAfter != sent+1 {
+		t.Fatalf("hold end sent %d updates to an agent with no grant left, want 1", sentAfter-sent)
+	}
+	if n != revoked {
+		t.Fatalf("hold end: grant_seq %d, want the revocation's %d", n, revoked)
+	}
+	msgs := r.h.SentOfType("leash.grant.updated")
+	o, err := strictjson.ParseObject(msgs[len(msgs)-1].Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gs, _ := o.Array("grants"); len(gs) != 0 {
+		t.Fatalf("hold end: %d grants, want none", len(gs))
+	}
+}
+
+// A damaged state whose counter is below an agent's number: Load raises the
+// counter, so no number is given out twice.
+func TestGrantSeqLoadCounterFloor(t *testing.T) {
+	r := newRig(t)
+	r.issue(t, `{"agent_id":"dev-agent","scope":"profile.get"}`)
+	raw, err := r.f.Save()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	m["seq"] = json.RawMessage(`1`)
+	m["grant_seq"] = json.RawMessage(`{"dev-agent":7}`)
+	raw, _ = json.Marshal(m)
+	g := New(r.w, r.it)
+	if err := g.Load(raw); err != nil {
+		t.Fatal(err)
+	}
+	r.f = g
+	r.issue(t, `{"agent_id":"dev-agent","scope":"connection.list"}`)
+	if n, _ := lastUpdate(t, r, agent); n != 8 {
+		t.Fatalf("next change after a damaged counter: %d, want 8", n)
+	}
+}

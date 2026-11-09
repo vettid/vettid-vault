@@ -249,6 +249,13 @@ func (f *Feature) Load(raw json.RawMessage) error {
 	if d.GrantSeq == nil {
 		d.GrantSeq = map[string]uint64{}
 	}
+	// The counter is never below a number it gave out (a damaged state
+	// would otherwise hand an agent a lower one).
+	for _, n := range d.GrantSeq {
+		if n > d.Seq {
+			d.Seq = n
+		}
+	}
 	f.d = d
 	return nil
 }
@@ -954,17 +961,30 @@ func (f *Feature) OwnerHoldStarted(*vault.Session) {}
 
 // OwnerHoldEnded implements vault.OwnerHoldObserver: after a check, agents
 // with a session receive leash.grant.updated with fresh status statements
-// (§3.6.3, §10.11).
+// (§3.6.3, §10.11). Agents whose set has a number are told too, even with
+// no grant left: an update dropped during the hold (a revocation of the
+// agent's last grant) is not queued, so this is how the agent learns its
+// set is now empty, with the higher number (§10.11).
 func (f *Feature) OwnerHoldEnded(s *vault.Session) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	seen := map[string]bool{}
+	var agents []string
 	for _, g := range f.sorted() {
-		if seen[g.AgentID] {
-			continue
+		if !seen[g.AgentID] {
+			seen[g.AgentID] = true
+			agents = append(agents, g.AgentID)
 		}
-		seen[g.AgentID] = true
-		f.tell(s, g.AgentID) // only within its access session (§6.8)
+	}
+	for id := range f.d.GrantSeq {
+		if !seen[id] {
+			seen[id] = true
+			agents = append(agents, id)
+		}
+	}
+	sort.Strings(agents)
+	for _, id := range agents {
+		f.tell(s, id) // only within its access session (§6.8)
 	}
 }
 

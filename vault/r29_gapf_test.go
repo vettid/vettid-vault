@@ -288,3 +288,50 @@ func TestR29GapFFreshTokenConverges(t *testing.T) {
 		t.Fatal("the member was shown something, or the device state changed")
 	}
 }
+
+// The device abandon inside the drain (outbox.go, token_expired toward a
+// device or agent): the vault's hs.fin of a pending rekey to its desktop,
+// waits undeposited while the relay answers token_expired and the vault's
+// standing token is still valid; once the token's exp has passed on the
+// vault's clock, the next refusal abandons the epoch from inside the
+// deposit, and that hs.fin is withdrawn with it (VAULT-MESSAGING 0.88.2 §6.3.1 Initiator; the lead's review of
+// 5b4fd3c, GC #6540).
+func TestR29DeviceAbandonInTheDrainDropsItsFin(t *testing.T) {
+	g := newGapF(t)
+	p := g.td.peer
+	g.d.withLock(func(m *Manager) { m.startRekey(p, g.clk) })
+	g.drain()
+	deps := g.take()
+	g.d.relay.mu.Lock()
+	g.d.relay.failMailbox = map[string]error{p.Relay.Mailbox: &relayclient.Error{Status: 401, Code: CodeTokenExpired}}
+	g.d.relay.mu.Unlock()
+	g.answerRekey(deps, g.e0)
+	g.drain() // the vault's hs.fin is refused: the token is still valid, so it waits
+	if p.Pending == nil {
+		t.Fatal("setup: no pending epoch at the vault")
+	}
+	e1 := append([]byte(nil), p.Pending.ID...)
+	fin := func() *OutboxEntry {
+		for _, e := range g.d.m.st.Outbox {
+			if !e.Done && bytes.Equal(e.FinEpoch, e1) {
+				return e
+			}
+		}
+		return nil
+	}
+	// It waits undeposited: refused, or held behind an entry the relay refused (by mailbox, §8.4).
+	if fin() == nil {
+		t.Fatal("setup: the hs.fin is not waiting in the outbox")
+	}
+	g.clk = g.clk.Add(21 * 24 * time.Hour) // past the standing token's exp
+	if g.clk.Before(p.Standing.Exp) {
+		t.Fatal("setup: the standing token has not expired")
+	}
+	g.drain() // the drain alone: no batch, so no tickPending first
+	if !g.d.audited("pending_abandoned_token_expired") {
+		t.Fatal("the drain did not abandon the pending epoch")
+	}
+	if fin() != nil {
+		t.Fatal("the abandoned epoch's hs.fin is still in the outbox")
+	}
+}

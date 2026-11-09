@@ -222,7 +222,7 @@ func (m *Manager) confirmPending(p *Peer, now time.Time) {
 		// rekeys end at its reconnect's hs.resp".
 		for _, oid := range sortedKeys(m.st.Outgoing) {
 			og, sortedOK := m.st.Outgoing[oid]
-			if !sortedOK || og.New != nil || og.PeerID != p.ID || og.Purpose != handshake.PurposeReconnect || og.Replaced {
+			if !sortedOK || og.New != nil || og.PeerID != p.ID || og.Purpose != handshake.PurposeReconnect {
 				continue
 			}
 			if !bytes.Equal(og.Named, p.LastEpochID) {

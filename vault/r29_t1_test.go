@@ -912,3 +912,31 @@ func TestR29DuplicateRekeyInitAnsweredOnce(t *testing.T) {
 		t.Fatal("the duplicate was not audited")
 	}
 }
+
+// The final review's F3: an hs.fin redelivered after its epoch was
+// established (its answer gone) is acked and ignored: no answer at all, so
+// no unsupported_type (§6.5, R29-T3).
+func TestR29RedeliveredFinIsIgnored(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	f.rekey(0)
+	if f.deliver(0, 1, kHSInit) != 1 || f.deliver(1, 0, kHSResp) != 1 {
+		t.Fatal("setup: the rekey did not reach hs.resp")
+	}
+	fins := f.takeKind(0, 1, kHSFin)
+	if len(fins) != 1 {
+		t.Fatalf("setup: expected one hs.fin, got %d", len(fins))
+	}
+	f.process(1, fins[0]) // establishes the epoch at R
+	cur := append([]byte(nil), f.cur(1)...)
+	before := f.depositsTo(1, 0)
+	dup := fins[0]
+	dup.MsgID = "redelivered"
+	f.process(1, dup)
+	if n := f.depositsTo(1, 0); n != before {
+		t.Fatalf("R answered the redelivered hs.fin (%d deposits, was %d)", n, before)
+	}
+	if !bytes.Equal(f.cur(1), cur) || f.p(1).suspended() {
+		t.Fatal("the redelivered hs.fin changed R's epoch or suspended the peer")
+	}
+}

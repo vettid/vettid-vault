@@ -78,6 +78,13 @@ import (
 //                refuses every deposit, the refresh included (its msgs
 //                spent): the vault's reconnect at once (owner decision a,
 //                GC #6840) is what recovers (the lead's review M2, #7027).
+//                The quiet phase's housekeeping spends no quota (70 days of
+//                re-mints and rekeys would spend a token of rpSpentQuota
+//                every few weeks; the real quota is 20,000); a token spent
+//                before stays spent. Every test.note must arrive
+//                (note-lost@s). The vault often recovers without decision a
+//                too (the issuer's re-mint within 16 days), so the search
+//                is a weak check of it; the unit tests pin it.
 //
 // A run replays from its seed: crypto randomness is seeded per run
 // (testing/cryptotest), the fixtures are made at a start time drawn from
@@ -1161,7 +1168,7 @@ func TestR29RandomPair(t *testing.T) {
 	t.Logf("refresh %v (spent %v): ~%d quota refreshes asked (by the harness) in %d runs, ~%d granted (approximate), %d standing-quota refusals (quota %d, spent %d)", md.refresh, md.spent,
 		rpTotals.refreshes, rpTotals.refreshRuns, rpTotals.granted, rpTotals.quotaed, rpStandingQuota, rpSpentQuota)
 	if md.spent {
-		t.Logf("spent: %d runs with a refused quota refresh; %d reconnect deposits after one (decision a), in %d runs", rpTotals.refusedRuns, rpTotals.spentRecs, rpTotals.recRuns)
+		t.Logf("spent (quiet-phase housekeeping spends no quota): %d runs with a refused quota refresh; %d reconnect deposits after one (decision a), in %d runs", rpTotals.refusedRuns, rpTotals.spentRecs, rpTotals.recRuns)
 	}
 	t.Logf("%d runs (burst %v, steps %d) in %v: %v per 10,000", runs, burst, steps, el.Round(time.Second),
 		(el * time.Duration(10000) / time.Duration(runs)).Round(time.Second))

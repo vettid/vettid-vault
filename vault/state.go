@@ -876,7 +876,10 @@ type OutboxEntry struct {
 	// InnerID (0.88.7) is the inner id of the message a durable deposit
 	// carries, for the not-delivered audit's ref (§8.3, §10.9); "" for a
 	// handshake message or an entry written before.
-	InnerID   string `json:"inner_id,omitempty"`
+	InnerID string `json:"inner_id,omitempty"`
+	// Ephemeral (0.88.7): the message is of an ephemeral type (§8.5); at a
+	// key change the entry ends silently.
+	Ephemeral bool   `json:"ephemeral,omitempty"`
 	FinEpoch  []byte `json:"fin_epoch,omitempty"`
 	Handshake bool   `json:"handshake,omitempty"`
 }

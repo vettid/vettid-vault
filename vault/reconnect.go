@@ -71,7 +71,8 @@ func (m *Manager) reconnectNaming(p *Peer, ctx []byte, why string, now time.Time
 // to a stale connection's peer a deposit of the peer's under it can still
 // arrive (0.88.7 §8.3 "Not delivered", case 6): the relay holds a message
 // up to T (14 days) after a deposit made just before the exp, plus the
-// clock skew the ts window allows.
+// clock skew the ts window allows; at least (staleReach: a relay whose
+// message_ttl_seconds is longer holds them that long).
 const StaleReach = 14*24*time.Hour + envelope.MaxClockSkewFuture
 
 // staleReachUntil is when connection p can no longer come back: the latest
@@ -106,7 +107,15 @@ func (m *Manager) staleReachUntil(p *Peer) time.Time {
 	if last.IsZero() {
 		return last
 	}
-	return last.Add(StaleReach)
+	return last.Add(m.staleReach())
+}
+
+// staleReach is StaleReach, or the relay's own message TTL plus the skew
+// when it holds messages longer than 14 days (its message_ttl_seconds at
+// Register).
+func (m *Manager) staleReach() time.Duration {
+	ttl := time.Duration(m.limits.MessageTTLSeconds) * time.Second
+	return max(StaleReach, ttl+envelope.MaxClockSkewFuture)
 }
 
 // tickStale ends the waiting messages of a stale connection that can no

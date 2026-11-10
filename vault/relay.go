@@ -81,6 +81,7 @@ const (
 	CodeMailboxUnknown = "mailbox_unknown"
 	CodeClaimUnknown   = "claim_unknown"
 	CodeTimestampStale = "timestamp_stale"
+	CodeReplayDetected = "replay_detected"
 	CodeBlobUnknown    = "blob_unknown"
 	CodeQuotaExceeded  = "quota_exceeded"
 	CodeNotFound       = "not_found"

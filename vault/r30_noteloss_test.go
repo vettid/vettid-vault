@@ -508,29 +508,30 @@ func TestR30StoredThenRefusedNoDuplicate(t *testing.T) {
 	}
 }
 
-// L1: at a key change an ephemeral entry stays as it is, under the old
-// epoch (whose receive key the peer keeps 16 days), not dropped.
-func TestR30EphemeralKeptAtKeyChange(t *testing.T) {
+// L1, #217 review 3: an ephemeral entry records Ephemeral when queued and
+// ends silently at the next key change (not deposited, not told).
+func TestR30EphemeralEndsAtKeyChange(t *testing.T) {
 	f := newR29Fx(t)
 	f.longTokens()
 	f.do(0, func(m *Manager, p *Peer) {
 		m.register(TypeSpec{Type: "test.eph", From: []string{KindConnection}, Connections: PeersBoth, Ephemeral: true},
 			HandlerFunc(func(context.Context, *Session, *envelope.Inner) (json.RawMessage, error) { return nil, nil }))
 	})
-	e, _ := f.waitingNote(0, "first") // waits; the ephemeral queues behind it
+	f.waitingNote(0, "first") // waits; the ephemeral queues behind it
 	var eph *OutboxEntry
 	f.do(0, func(m *Manager, p *Peer) {
 		m.sendWith(p, "test.eph", []byte(`{}`), SendOptions{Exp: f.clk.Add(time.Hour)}, f.clk)
 		eph = m.st.Outbox[len(m.st.Outbox)-1]
 		eph.NotBefore, eph.AwaitToken = f.clk.Add(365*24*time.Hour), true
 	})
+	if !eph.Ephemeral {
+		t.Fatal("Ephemeral not recorded at queue time")
+	}
 	before := append([]byte(nil), eph.Payload...)
 	f.peerReconnects()
 	f.deliver(1, 0, kHSInit)
 	f.deliver(0, 1, kHSResp)
 	f.deliver(1, 0, kHSFin)
-	// The reconnect's activation makes the waiting entries due (retryPeer):
-	// the ephemeral one goes out as it was sealed, under the old epoch.
 	r := f.d[0].relay
 	r.mu.Lock()
 	sent := false
@@ -538,8 +539,8 @@ func TestR30EphemeralKeptAtKeyChange(t *testing.T) {
 		sent = sent || bytes.Equal(d.payload, before)
 	}
 	r.mu.Unlock()
-	if eph == e || !(sent || !eph.Done && bytes.Equal(eph.Payload, before)) {
-		t.Fatalf("the ephemeral entry: done %v, deposited as it was %v (want kept, not dropped)", eph.Done, sent)
+	if !eph.Done || sent || f.auditedRef(0, "undelivered_unreadable", eph.InnerID) {
+		t.Fatalf("the ephemeral entry: done %v, deposited %v, told %v (want ended silently)", eph.Done, sent, f.auditedRef(0, "undelivered_unreadable", eph.InnerID))
 	}
 }
 
@@ -964,5 +965,205 @@ func TestR30NotDeliveredEndsQuotaRefresh(t *testing.T) {
 	f.do(0, func(m *Manager, p *Peer) { m.notDelivered(e, "undelivered_removed", f.clk) })
 	if slices.Contains(f.p(0).QuotaReqs, e.QuotaReq) {
 		t.Fatal("the refresh's request is still open after its entry ended")
+	}
+}
+
+// #217 review 1: a fork suspension ends the connection's waiting messages,
+// told (case 7).
+func TestR30SuspendedNotDelivered(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	e, in := f.waitingNote(0, "suspended")
+	f.do(0, func(m *Manager, p *Peer) { m.suspendForkRef(p, "epoch", f.clk) })
+	if !e.Done || !f.auditedRef(0, "undelivered_suspended", in.ID) {
+		t.Fatalf("done %v, told %v: want ended, drop.undelivered_suspended with its id", e.Done, f.auditedRef(0, "undelivered_suspended", in.ID))
+	}
+}
+
+// #217 review 2: a relay 4xx refusing a member deposit ends it, told (case
+// 8); timestamp_stale and replay_detected are about the attempt and are
+// retried.
+func TestR30RefusedNotDelivered(t *testing.T) {
+	for _, c := range []struct {
+		err  *relayclient.Error
+		told bool
+	}{
+		{&relayclient.Error{Status: 400, Code: "bad_request"}, true},
+		{&relayclient.Error{Status: 413, Code: "payload_too_large"}, true},
+		{&relayclient.Error{Status: 401, Code: CodeTimestampStale}, false},
+		{&relayclient.Error{Status: 401, Code: CodeReplayDetected}, false},
+	} {
+		f := newR29Fx(t)
+		f.longTokens()
+		r := f.d[0].relay
+		r.mu.Lock()
+		r.failMailbox = map[string]error{f.m(1).st.Relay.Mailbox: c.err}
+		r.mu.Unlock()
+		var e *OutboxEntry
+		f.do(0, func(m *Manager, p *Peer) {
+			m.sendTo(p, "test.note", []byte(`{"n":"refused"}`), f.clk)
+			e = m.st.Outbox[len(m.st.Outbox)-1]
+		})
+		told := f.auditedRef(0, "undelivered_refused", e.InnerID)
+		if told != c.told || e.Done != c.told || f.audited(0, "deposit_refused") {
+			t.Errorf("%s: done %v, told %v, deposit_refused %v (want told %v)", c.err.Code, e.Done, told, f.audited(0, "deposit_refused"), c.told)
+		}
+	}
+}
+
+// #217 review 4: an entry changed in place at a key change (held again, or
+// sealed again) is unstored until a write stores it.
+func TestR30ResealedUnstored(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	e, _ := f.waitingNote(0, "unstored")
+	m := f.m(0)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p := f.p(0)
+	m.unstored = nil
+	m.resealAtKeyChange(p, m.sessions[p.ID])
+	if e.Held == nil || !m.unstored[e.ID] {
+		t.Fatalf("held again %v, unstored %v (want both)", e.Held != nil, m.unstored[e.ID])
+	}
+	m.unstored = nil
+	m.sealHeld(p)
+	if e.Held != nil || !m.unstored[e.ID] {
+		t.Fatalf("sealed again %v, unstored %v (want both)", e.Held == nil, m.unstored[e.ID])
+	}
+}
+
+// #217 review 5: a relay holding messages longer than 14 days lengthens the
+// stale bound to its TTL plus the skew.
+func TestR30StaleReachRelayTTL(t *testing.T) {
+	m := &Manager{}
+	if got := m.staleReach(); got != StaleReach {
+		t.Fatalf("no TTL: %v, want %v", got, StaleReach)
+	}
+	m.limits.MessageTTLSeconds = 14 * 24 * 3600
+	if got := m.staleReach(); got != StaleReach {
+		t.Fatalf("14 days: %v, want %v", got, StaleReach)
+	}
+	m.limits.MessageTTLSeconds = 20 * 24 * 3600
+	if got := m.staleReach(); got != 20*24*time.Hour+envelope.MaxClockSkewFuture {
+		t.Fatalf("20 days: %v", got)
+	}
+}
+
+// #217 review 6: an entry that cannot be written back for holding is not
+// delivered, told (case 1), at the caller's time.
+func TestR30HoldMarshalFailNotDelivered(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	e, in := f.waitingNote(0, "marshal")
+	saved := marshalHeld
+	marshalHeld = func(*envelope.Inner) ([]byte, error) { return nil, errors.New("test: cannot marshal") }
+	t.Cleanup(func() { marshalHeld = saved })
+	at := f.clk.Add(-time.Minute)
+	f.do(0, func(m *Manager, p *Peer) { m.reholdAt(p, m.sessions[p.ID].Current(), true, at) })
+	if !e.Done || !f.auditedRef(0, "undelivered_unreadable", in.ID) {
+		t.Fatalf("done %v, told %v", e.Done, f.auditedRef(0, "undelivered_unreadable", in.ID))
+	}
+	for _, a := range f.m(0).st.Audit {
+		if a.Event == "undelivered_unreadable" && !a.At.Equal(at) {
+			t.Fatalf("audited at %v, want the caller's %v", a.At, at)
+		}
+	}
+}
+
+// #217 review 7: held_expired names the message's inner id.
+func TestR30HeldExpiredRef(t *testing.T) {
+	f := demoted(t, nil)
+	var id string
+	f.do(0, func(m *Manager, p *Peer) {
+		id = m.sendWith(p, "test.note", []byte(`{"n":"exp"}`), SendOptions{Exp: f.clk.Add(time.Hour)}, f.clk)
+	})
+	f.advance(2 * time.Hour)
+	f.tick(0)
+	if id == "" || !f.auditedRef(0, "held_expired", id) {
+		t.Fatal("drop.held_expired without the message's inner id")
+	}
+}
+
+// #217 review 8: a run that ends stale still accounts for every note:
+// waiting in its sender's outbox or told, else lost.
+func TestR30StaleEndAccountsNotes(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	f.gotIDs = [3]map[string]int{{}, {}, {}}
+	w := &rpWorld{t: t, f: f, ttlNote: map[string]bool{}, quotaNote: map[string]bool{}, staleNote: map[string]bool{}, fiveNote: map[string]bool{}, lockNote: map[string]bool{}}
+	e, in := f.waitingNote(0, "kept")
+	w.sent[0] = []string{in.ID}
+	if why := w.notesUnaccounted(); len(why) != 0 {
+		t.Fatalf("a note still waiting: %v", why)
+	}
+	f.do(0, func(m *Manager, p *Peer) { e.Done = true }) // gone, silently
+	if why := w.notesUnaccounted(); len(why) != 1 || why[0] != "note-lost@0" {
+		t.Fatalf("a note gone silently: %v, want note-lost@0", why)
+	}
+	f.do(0, func(m *Manager, p *Peer) { m.auditRef(f.clk, "undelivered_stale", p.ID, in.ID) })
+	if why := w.notesUnaccounted(); len(why) != 0 {
+		t.Fatalf("a note told: %v", why)
+	}
+}
+
+// #217 review 3: an ephemeral entry sealed under an epoch whose send key
+// is gone ends silently at a key change (never told as unreadable).
+func TestR30EphemeralUnreadableSilent(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	e, _ := f.waitingNote(0, "legacy-eph")
+	f.do(0, func(m *Manager, p *Peer) {
+		e.Ephemeral = true
+		kept := m.st.Outbox[:0]
+		for _, x := range m.st.Outbox {
+			if x != e {
+				kept = append(kept, x)
+			}
+		}
+		m.st.Outbox = kept
+	})
+	f.peerReconnects()
+	f.deliver(1, 0, kHSInit)
+	f.deliver(0, 1, kHSResp)
+	f.deliver(1, 0, kHSFin)
+	f.settle()
+	f.do(0, func(m *Manager, p *Peer) { m.st.Outbox = append(m.st.Outbox, e) })
+	f.do(0, func(m *Manager, p *Peer) { m.resealAtKeyChange(p, m.sessions[p.ID]) })
+	if !e.Done || f.audited(0, "undelivered_unreadable") {
+		t.Fatalf("done %v, told %v: want ended silently", e.Done, f.audited(0, "undelivered_unreadable"))
+	}
+}
+
+// #217 review 7: held_expired names the inner id when the expiry is found
+// at sealing too.
+func TestR30HeldExpiredRefAtSeal(t *testing.T) {
+	f := demoted(t, nil)
+	var id string
+	f.do(0, func(m *Manager, p *Peer) {
+		id = m.sendWith(p, "test.note", []byte(`{"n":"exp2"}`), SendOptions{Exp: f.clk.Add(time.Hour)}, f.clk)
+	})
+	f.advance(2 * time.Hour)
+	m := f.m(0)
+	m.mu.Lock()
+	m.sealHeld(f.p(0))
+	m.mu.Unlock()
+	if id == "" || !f.auditedRef(0, "held_expired", id) {
+		t.Fatal("drop.held_expired at sealing without the message's inner id")
+	}
+}
+
+// #217 review 3: ephemeral entries are no member deposits: a removal ends
+// them silently.
+func TestR30EphemeralNotTold(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	e, _ := f.waitingNote(0, "eph-removed")
+	f.do(0, func(m *Manager, p *Peer) {
+		e.Ephemeral = true
+		m.removePeer(p, "", f.clk)
+	})
+	if !e.Done || f.audited(0, "undelivered_removed") {
+		t.Fatalf("done %v, told %v: want ended silently", e.Done, f.audited(0, "undelivered_removed"))
 	}
 }

@@ -309,7 +309,7 @@ func (m *Manager) followLinks(p *Peer, app []*handshake.Rotation, msgEpoch []byt
 			if bytes.Equal(e.ID, p.LastEpochID) {
 				demotedCurrent = true
 				if kr := m.sessions[p.ID]; kr != nil {
-					m.rehold(p, kr.Current())
+					m.rehold(p, kr.Current(), now)
 				}
 			}
 			m.note(now, "epoch_demoted", p.ID)
@@ -375,7 +375,7 @@ func (m *Manager) f1Demote(p *Peer, app []*handshake.Rotation, msgEpoch []byte, 
 		m.note(now, "epoch_demoted_f1", p.ID)
 		kr := m.sessions[p.ID]
 		if kr != nil {
-			m.rehold(p, kr.Current())
+			m.rehold(p, kr.Current(), now)
 		}
 		for _, id := range sortedKeys(m.st.Outgoing) {
 			og, sortedOK := m.st.Outgoing[id]
@@ -428,7 +428,7 @@ func (m *Manager) holdInner(p *Peer, in *envelope.Inner, wake string) {
 // epoch, just demoted) and not yet deposited back into held ones: the
 // vault reads each back with ep's send key. Handshake messages and
 // entries already deposited are left as they are.
-func (m *Manager) rehold(p *Peer, ep *handshake.Epoch) { m.reholdAt(p, ep, false) }
+func (m *Manager) rehold(p *Peer, ep *handshake.Epoch, now time.Time) { m.reholdAt(p, ep, false, now) }
 
 // resealAtKeyChange is 0.88.7 §8.3 "Re-sealed at a key change" (owner
 // decision b, GC #7213 Q2): just before connection p's current epoch is
@@ -444,7 +444,7 @@ func (m *Manager) resealAtKeyChange(p *Peer, kr *handshake.Keyring) {
 	if p.Kind != KindConnection || kr == nil {
 		return
 	}
-	m.reholdAt(p, kr.Current(), true)
+	m.reholdAt(p, kr.Current(), true, m.now())
 }
 
 // reholdAt is rehold; at a key change (keyChange) an entry sealed in
@@ -453,12 +453,18 @@ func (m *Manager) resealAtKeyChange(p *Peer, kr *handshake.Keyring) {
 // change) cannot be re-sealed and is not delivered (notDelivered), an
 // hs.confirm excepted (as it is); an ephemeral entry stays as it is, and an
 // hs.confirm under ep is superseded (done).
-func (m *Manager) reholdAt(p *Peer, ep *handshake.Epoch, keyChange bool) {
+func (m *Manager) reholdAt(p *Peer, ep *handshake.Epoch, keyChange bool, now time.Time) {
 	if ep == nil {
 		return
 	}
 	for _, e := range m.st.Outbox {
 		if e.Done || e.PeerID != p.ID || e.Op != OpDeposit || e.Held != nil || e.Handshake || len(e.Payload) == 0 {
+			continue
+		}
+		if keyChange && e.Ephemeral {
+			// 0.88.7: an ephemeral entry (§8.5) ends silently at a key change:
+			// it is never told, and the peer may not open it later.
+			e.Done, m.dirty = true, true
 			continue
 		}
 		env, err := envelope.Parse(e.Payload)
@@ -467,17 +473,13 @@ func (m *Manager) reholdAt(p *Peer, ep *handshake.Epoch, keyChange bool) {
 		}
 		in, err := ep.OpenSent(env)
 		if err != nil {
-			if keyChange && !e.Confirm && env.Mode() == envelope.ModeSession {
-				m.notDelivered(e, "undelivered_unreadable", m.now()) // 0.88.7 §8.3: not safe to re-seal
+			if keyChange && memberDeposit(e) && env.Mode() == envelope.ModeSession {
+				m.notDelivered(e, "undelivered_unreadable", now) // 0.88.7 §8.3: not safe to re-seal
 			}
 			continue // sealed under another epoch: as it is
 		}
 		if te := m.registry[in.Type]; te != nil && te.spec.Ephemeral {
-			if !keyChange {
-				e.Done = true // ephemeral: not sent (a demoted epoch's)
-			}
-			// At a key change an ephemeral entry stays as it is, under the
-			// old epoch, whose receive key the peer keeps 16 days (0.88.7).
+			e.Done, m.dirty = true, true // ephemeral: not sent (one queued before 0.88.7 recorded Ephemeral)
 			continue
 		}
 		if keyChange && e.Confirm {
@@ -487,11 +489,18 @@ func (m *Manager) reholdAt(p *Peer, ep *handshake.Epoch, keyChange bool) {
 			continue
 		}
 		in.Seq, in.Features = 0, nil
-		j, err := in.Marshal(envelope.ModeSealed)
+		j, err := marshalHeld(in)
 		if err != nil {
+			if memberDeposit(e) {
+				m.notDelivered(e, "undelivered_unreadable", now) // 0.88.7: it cannot be held to be sealed again
+			}
 			continue
 		}
 		e.Payload, e.Held, e.HeldExp = nil, j, in.Exp
+		if e.InnerID == "" {
+			e.InnerID = in.ID
+		}
+		m.markUnstored(e) // changed in place: not sent before a write stores it
 		m.dirty = true
 	}
 }
@@ -518,9 +527,12 @@ func (m *Manager) sealHeld(p *Peer) {
 			continue
 		}
 		if !e.HeldExp.IsZero() && !now.Before(e.HeldExp) {
+			if e.InnerID == "" {
+				e.InnerID = heldID(e.Held)
+			}
 			e.Done, e.Held = true, nil
-			m.quotaRefreshEnded(e)             // a quota refresh's: no answer can come
-			m.audit(now, "held_expired", p.ID) // S12
+			m.quotaRefreshEnded(e)                           // a quota refresh's: no answer can come
+			m.auditRef(now, "held_expired", p.ID, e.InnerID) // S12 (0.88.7: ref = its inner id)
 			m.dirty = true
 			continue
 		}
@@ -549,8 +561,24 @@ func (m *Manager) sealHeld(p *Peer) {
 		}
 		e.Payload, e.Held, e.HeldExp = raw, nil, time.Time{}
 		e.RelayURL, e.Mailbox = p.Relay.URL, p.Relay.Mailbox
+		m.markUnstored(e) // sealed in place: not sent before a write stores it (0.88.7)
 		m.dirty = true
 	}
+}
+
+// marshalHeld writes an inner read back for holding (sealed-mode JSON);
+// a variable so that a test can make it fail.
+var marshalHeld = func(in *envelope.Inner) ([]byte, error) { return in.Marshal(envelope.ModeSealed) }
+
+// heldID is a held entry's inner id ("" if none or unreadable).
+func heldID(held []byte) string {
+	if held == nil {
+		return ""
+	}
+	if in, err := envelope.ParseInner(held, envelope.ModeSealed); err == nil {
+		return in.ID
+	}
+	return ""
 }
 
 // notDelivered is the seam of 0.88.7 §8.3 "Not delivered": a durable
@@ -561,10 +589,8 @@ func (m *Manager) sealHeld(p *Peer) {
 // card #6875's, which completes this function.
 func (m *Manager) notDelivered(e *OutboxEntry, reason string, now time.Time) {
 	ref := e.InnerID
-	if ref == "" && e.Held != nil {
-		if in, err := envelope.ParseInner(e.Held, envelope.ModeSealed); err == nil {
-			ref = in.ID
-		}
+	if ref == "" {
+		ref = heldID(e.Held)
 	}
 	e.Done, e.Held, e.Payload = true, nil, nil
 	m.quotaRefreshEnded(e)                 // a quota refresh's (#216): no answer can come

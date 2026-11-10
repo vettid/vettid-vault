@@ -47,6 +47,14 @@ func (m *Manager) queueDeleteClaim(id string, now time.Time) {
 // stored by the next write that succeeds, or never (a lock or crash first).
 func (m *Manager) queue(e *OutboxEntry) {
 	m.st.Outbox = append(m.st.Outbox, e)
+	m.markUnstored(e)
+}
+
+// markUnstored marks e as not yet stored: a drain passes it over (and holds
+// the later deposits to its mailbox) until a write stores it. Also for an
+// entry changed in place (0.88.7: re-sealed at a key change), so that a
+// drain after a failed write cannot deposit bytes no write has stored.
+func (m *Manager) markUnstored(e *OutboxEntry) {
 	if m.unstored == nil {
 		m.unstored = map[string]bool{}
 	}
@@ -85,7 +93,9 @@ func (m *Manager) sealAndQueueWake(p *Peer, in *envelope.Inner, wake string) str
 	if err != nil {
 		return ""
 	}
-	m.queueDeposit(&OutboxEntry{PeerID: p.ID, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Payload: raw, Wake: wake, InnerID: in.ID}, m.now())
+	te := m.registry[in.Type]
+	m.queueDeposit(&OutboxEntry{PeerID: p.ID, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Payload: raw, Wake: wake, InnerID: in.ID,
+		Ephemeral: te != nil && te.spec.Ephemeral}, m.now())
 	return in.ID
 }
 
@@ -220,11 +230,24 @@ func mayHaveStored(err error) bool {
 	return !ok || st >= 500
 }
 
+// refused ends deposit e that the relay refused with a 4xx other than 429
+// (0.88.7 §8.3 "Not delivered" case 8): a durable member deposit to a
+// connection is not delivered (told); any other is dropped and audited
+// deposit_refused, as before.
+func (m *Manager) refused(p *Peer, e *OutboxEntry, now time.Time) {
+	if p != nil && p.Kind == KindConnection && e.Token == "" && memberDeposit(e) {
+		m.notDelivered(e, "undelivered_refused", now)
+		return
+	}
+	m.audit(now, "deposit_refused", e.PeerID)
+	e.Done = true
+}
+
 // memberDeposit reports whether e is a durable deposit to its peer that
 // 0.88.7 §8.3 "Not delivered" covers: not a handshake message, an
-// hs.confirm or a best-effort notice.
+// hs.confirm, a best-effort notice or an ephemeral message.
 func memberDeposit(e *OutboxEntry) bool {
-	return e.Op == OpDeposit && !e.Handshake && !e.Confirm && !e.BestEffort
+	return e.Op == OpDeposit && !e.Handshake && !e.Confirm && !e.BestEffort && !e.Ephemeral
 }
 
 // outboxPending reports whether deposits to peer are still queued.
@@ -501,11 +524,14 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 			continue
 		}
 		if e.Op == OpDeposit && e.Held != nil && !e.HeldExp.IsZero() && !now.Before(e.HeldExp) {
+			if e.InnerID == "" {
+				e.InnerID = heldID(e.Held)
+			}
 			e.Done, e.Held, m.dirty = true, nil, true // held past its exp: discarded (§3.4.1)
 			if e.QuotaRefresh {
 				m.quotaRefreshEnded(e) // unsent: no answer can come
 			}
-			m.audit(now, "held_expired", e.PeerID) // S12: counted and audited
+			m.auditRef(now, "held_expired", e.PeerID, e.InnerID) // S12: counted and audited (0.88.7: ref)
 			continue
 		}
 		if e.Op == OpDeposit && e.Held != nil {
@@ -770,18 +796,21 @@ func (m *Manager) deposit(ctx context.Context, e *OutboxEntry, now time.Time) er
 		// (fdcc746 ended every one, dropping e.g. an att.deliver: the
 		// e2e TestAttachmentMaliciousPeer failure on CI.)
 		if st, ok := statusOf(err); ok && st < 500 && st != 429 {
-			m.audit(now, "deposit_refused", e.PeerID)
-			e.Done = true
+			m.refused(p, e, now)
 		}
 	case CodeTokenUsed:
 		m.audit(now, "open_token_used", e.PeerID)
 		e.Done = true
 	case "":
 		return err // transport or 5xx after relayclient's own retries
+	case CodeTimestampStale, CodeReplayDetected:
+		// 0.88.7: about this attempt's signature, not the message (a clock
+		// step, a nonce): retried with the backoff, freshly signed (one
+		// attempt per deposit), never ended for it.
+		return err
 	default:
 		if st, ok := statusOf(err); ok && st < 500 && st != 429 {
-			m.audit(now, "deposit_refused", e.PeerID)
-			e.Done = true
+			m.refused(p, e, now)
 		}
 	}
 	return err

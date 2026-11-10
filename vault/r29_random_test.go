@@ -1074,6 +1074,16 @@ func (w *rpWorld) verdict() string {
 		}
 	}
 	if len(stale) > 0 {
+		// A run that ends stale (the #217 review, Opus L4) still accounts
+		// for every note: handled once, still waiting in its sender's
+		// outbox, or told (drop.undelivered_* with its id); else lost,
+		// whatever the stale class. Case (a), the pending-reconnect
+		// abandonment: markStale abandons the vault's pending reconnect
+		// epoch, and the notes waiting behind it stay in the outbox (kept,
+		// 0.88.7 "Stale is not final"): waiting, not lost.
+		if why := w.notesUnaccounted(); len(why) > 0 {
+			return "diverged:" + strings.Join(why, ",")
+		}
 		by := []string{}
 		for _, c := range []string{CodeQuotaExceeded, CodeTokenRevoked, CodeTokenExpired} {
 			if w.refused[c] > 0 {
@@ -1192,6 +1202,52 @@ const rpLockWaitResidual = "residual:lock-wait>16d (#6875)"
 // the mailbox behind it), and the receiver audited stale_or_future
 // (rpQuotaWaitResidual); or if it was answered a 5xx and its sender audited
 // undelivered_window (told, rpToldResidual).
+// notesUnaccounted is the note oracle for a run that ends stale: a note
+// not handled must still wait in its sender's outbox or have been told
+// (drop.undelivered_* with its id), unless excused as notesLost excuses.
+func (w *rpWorld) notesUnaccounted() (why []string) {
+	lost, _ := w.notesLost()
+	if len(lost) == 0 {
+		return nil
+	}
+	over, single := w.lockShape()
+	for s := 0; s < 2; s++ {
+		o := 1 - s
+		got := w.f.handledIDs(o)
+		m := w.f.m(s)
+		bad := false
+		for _, id := range w.sent[s] {
+			if got[id] > 0 || w.ttlNote[id] && (over || single) {
+				continue
+			}
+			waiting, told := false, false
+			for _, e := range m.st.Outbox {
+				if !e.Done && (e.InnerID == id || heldID(e.Held) == id) {
+					waiting = true
+				}
+			}
+			for _, a := range m.st.Audit {
+				if a.Ref == id && strings.HasPrefix(a.Event, "undelivered_") {
+					told = true
+				}
+			}
+			if !waiting && !told {
+				bad = true
+				w.logf("note %s from %d unaccounted at a stale end", id, s)
+			}
+		}
+		if bad {
+			why = append(why, fmt.Sprintf("note-lost@%d", s))
+		}
+	}
+	for _, x := range lost {
+		if strings.HasPrefix(x, "note-duplicate") {
+			why = append(why, x)
+		}
+	}
+	return why
+}
+
 func (w *rpWorld) notesLost() (why []string, residual string) {
 	quotaWait, told, lockWait := false, false, false
 	over, single := w.lockShape()

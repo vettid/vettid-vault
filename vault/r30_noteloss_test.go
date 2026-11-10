@@ -874,10 +874,10 @@ func TestR30QuotaWaitAhead(t *testing.T) {
 	}{
 		{"no refusal", func(w *rpWorld) {}, false},
 		{"its own refusal", func(w *rpWorld) { w.quotaNote[in.ID] = true }, true},
-		{"the entry ahead refused", func(w *rpWorld) { w.lastDep[0] = "ahead"; w.quotaNote["ahead"] = true }, true},
-		{"the entry ahead not refused", func(w *rpWorld) { w.lastDep[0] = "ahead"; w.quotaNote["other"] = true }, false},
+		{"the entry ahead refused", func(w *rpWorld) { w.noteAhead[in.ID] = "ahead"; w.quotaNote["ahead"] = true }, true},
+		{"the entry ahead not refused", func(w *rpWorld) { w.noteAhead[in.ID] = "ahead"; w.quotaNote["other"] = true }, false},
 	} {
-		w := &rpWorld{t: t, f: f, noteBytes: map[string]string{}, quotaNote: map[string]bool{}, staleNote: map[string]bool{}}
+		w := &rpWorld{t: t, f: f, noteBytes: map[string]string{}, noteAhead: map[string]string{}, quotaNote: map[string]bool{}, staleNote: map[string]bool{}}
 		w.seeEpoch(0)
 		w.epochAt[0].since = in.TS
 		c.set(w)

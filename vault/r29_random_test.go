@@ -262,7 +262,7 @@ type rpWorld struct {
 	ttlNote   map[string]bool   // a copy the relay dropped at T
 	quotaNote map[string]bool   // a deposit of it refused for the standing quota (R29RP_REFRESH)
 	staleNote map[string]bool   // a copy accepted with a ts over 16 days old, under an epoch current since that ts (no key change), after a standing-quota refusal of the sender's since that ts
-	lastDep   [2]string         // the note id of side s's last accepted deposit ("" for another message): the entry ahead of the next
+	noteAhead map[string]string // the note queued by the same side just before it (the entry ahead in the outbox, of the notes)
 	fiveNote  map[string]bool   // a deposit of it answered an injected 5xx (possibly stored, to the vault)
 	lastRef   [2]time.Time
 }
@@ -392,7 +392,7 @@ func (w *rpWorld) check(s int, mailbox, token string, payload []byte) error {
 				if note != "" {
 					w.quotaNote[note] = true
 				}
-				w.logf("relay: %d's deposit refused %s (standing quota)", s, CodeQuotaExceeded)
+				w.logf("relay: %d's deposit refused %s (standing quota) note %q", s, CodeQuotaExceeded, note)
 				return &relayclient.Error{Status: 429, Code: CodeQuotaExceeded}
 			}
 			return refuse(429, CodeQuotaExceeded)
@@ -483,11 +483,12 @@ func (w *rpWorld) noteAccepted(s int, payload []byte) string {
 	old := w.f.clk.Sub(in.TS) > envelope.MaxDurableAge
 	same := bytes.Equal(ep, w.epochAt[s].id) && !w.epochAt[s].since.After(in.TS)
 	w.logf("note %s from %d accepted: ts %s, current epoch since %s", id, s, in.TS.Format("01-02 15:04"), w.epochAt[s].since.Format("01-02 15:04"))
-	// Behind the standing quota: this note refused for it, or the entry
-	// directly ahead of it in that mailbox (which held it). The lead's
+	// Behind the standing quota: this note refused for it, or the note
+	// queued just before it to that mailbox (which held it in the outbox's
+	// order; a token-carrying deposit may pass between them, §8.4). The lead's
 	// review L-b; this residual goes once #216 (the quota wait) and #6875
 	// (the 16-day re-stamp at deposit) land.
-	ahead := w.lastDep[s]
+	ahead := w.noteAhead[id]
 	waited := w.quotaNote[id] || ahead != "" && w.quotaNote[ahead]
 	if old && same && waited {
 		w.staleNote[id] = true
@@ -537,7 +538,6 @@ func (w *rpWorld) pull(s int) {
 		w.n++
 		typ := w.typeOf(s, d.payload)
 		note := w.noteAccepted(s, d.payload)
-		w.lastDep[s] = note
 		w.hasher = append(w.hasher, fmt.Sprintf("dep %d m%08d %s %s", s, w.n, typ, w.f.clk.Format(time.RFC3339)))
 		w.q[o] = append(w.q[o], rpMsg{m: Message{MsgID: fmt.Sprintf("m%08d", w.n), Sender: relayauth.EncodeKey(w.pub[s]), JTI: jti,
 			Payload: d.payload, DepositedAt: w.f.clk.UTC().Format(time.RFC3339Nano)}, at: w.f.clk, from: s, typ: typ, note: note})
@@ -780,6 +780,9 @@ func (w *rpWorld) exec(a rpAction, rng *rand.Rand) {
 		w.do(s, func(m *Manager, p *Peer) {
 			n := len(m.st.Outbox)
 			if id := m.sendTo(p, "test.note", json.RawMessage(`{"n":"x"}`), w.f.clk); id != "" {
+				if n := len(w.sent[s]); n > 0 {
+					w.noteAhead[id] = w.sent[s][n-1]
+				}
 				w.sent[s] = append(w.sent[s], id)
 				if len(m.st.Outbox) > n {
 					if e := m.st.Outbox[len(m.st.Outbox)-1]; len(e.Payload) > 0 {
@@ -1167,8 +1170,8 @@ func rpRunFP(t *testing.T, rs uint64, steps int, burst, verbose bool) (string, [
 	f.notesInState = true
 	fx = f
 	w := &rpWorld{t: t, f: f, quota: map[string]int64{}, refused: map[string]int{}, verbose: verbose, md: rpRunModes,
-		noteBytes: map[string]string{},
-		ttlNote:   map[string]bool{}, quotaNote: map[string]bool{}, staleNote: map[string]bool{}, fiveNote: map[string]bool{},
+		noteBytes: map[string]string{}, noteAhead: map[string]string{},
+		ttlNote: map[string]bool{}, quotaNote: map[string]bool{}, staleNote: map[string]bool{}, fiveNote: map[string]bool{},
 		srng: rand.New(rand.NewPCG(rs, 11))}
 	for s := 0; s < 2; s++ {
 		w.pub[s], w.mbox[s] = f.pk(s), f.m(s).st.Relay.Mailbox

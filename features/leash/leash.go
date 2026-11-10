@@ -1319,7 +1319,10 @@ func (f *Feature) PrepareAgentGrants(s *vault.Session, agentIK []byte, raw json.
 // take effect with the pairing (§6.7). The vault core calls it for every
 // agent pairing; with no initial grants (prepared empty) the set the
 // pairing completes with is the empty one, and it still takes its
-// grant_seq (§10.11).
+// grant_seq (§10.11). So does a pairing whose initial grants no longer
+// decode (in practice a build change between the approval and the
+// pairing's completion): none of them is installed. An initial grant
+// whose id is already in use is skipped, never replacing another grant.
 func (f *Feature) AgentPaired(s *vault.Session, agentID string, prepared json.RawMessage) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -1335,6 +1338,9 @@ func (f *Feature) AgentPaired(s *vault.Session, agentID string, prepared json.Ra
 	for _, g := range gs {
 		if g == nil || g.ID == "" || f.count(agentID) >= MaxGrants || !g.Expires.IsZero() && !now.Before(g.Expires) {
 			continue
+		}
+		if _, taken := f.d.Grants[g.ID]; taken {
+			continue // never replace another grant (or an earlier duplicate)
 		}
 		g.AgentID = agentID
 		f.d.Grants[g.ID] = g

@@ -387,34 +387,92 @@ func TestGrantSeqListAnswerIsDurable(t *testing.T) {
 // pairing still completes with the empty set: it takes its grant_seq and
 // the agent is told (§10.11).
 func TestGrantSeqDamagedPairGrants(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		damage func(t *testing.T, prepared json.RawMessage) json.RawMessage
+	}{
+		// A good grant, then one whose id has the wrong type: encoding/json
+		// fills the first before it reports the error.
+		{"a damaged second grant", func(t *testing.T, p json.RawMessage) json.RawMessage {
+			return append(append(json.RawMessage(nil), p[:len(p)-1]...), []byte(`,{"id":5}]`)...)
+		}},
+		// Damage inside the grant itself: its id and signature decode, the
+		// wrongly typed field stays zero, which could be wider than what the
+		// member approved.
+		{"a damaged field in the grant", func(t *testing.T, p json.RawMessage) json.RawMessage {
+			var gs []map[string]json.RawMessage
+			if err := json.Unmarshal(p, &gs); err != nil || len(gs) == 0 {
+				t.Fatalf("prepared: %v", err)
+			}
+			gs[0]["approval"] = json.RawMessage(`5`)
+			out, err := json.Marshal(gs)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return out
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := newRig(t)
+			sess := appSession(r, t0)
+			ag, _ := r.h.Device(agent)
+			prepared, err := r.f.PrepareAgentGrants(sess, ag.IK, json.RawMessage(`[{"scope":"profile.get"}]`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			damaged := c.damage(t, prepared)
+			var probe []*Grant
+			if json.Unmarshal(damaged, &probe) == nil || len(probe) == 0 || probe[0] == nil || probe[0].ID == "" {
+				t.Fatalf("the damaged value does not exercise a partial decode: %s", damaged)
+			}
+			r.f.AgentPaired(sess, agent, damaged)
+			if n := r.f.count(agent); n != 0 {
+				t.Fatalf("%d grants installed from damaged initial grants", n)
+			}
+			n, told := lastUpdate(t, r, agent)
+			if told != 1 || n == 0 || r.f.d.GrantSeq[agent] != n {
+				t.Fatalf("damaged pairing: %d updates, grant_seq %d (stored %d)", told, n, r.f.d.GrantSeq[agent])
+			}
+			msgs := r.h.SentOfType("leash.grant.updated")
+			o, err := strictjson.ParseObject(msgs[len(msgs)-1].Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if gs, _ := o.Array("grants"); len(gs) != 0 {
+				t.Fatalf("the agent was told of %d grants, want none", len(gs))
+			}
+		})
+	}
+}
+
+// An initial grant whose id is already in use (only damaged state could
+// make one) is skipped: it never replaces another agent's grant, which
+// keeps its agent and its number.
+func TestGrantSeqPairGrantIDTaken(t *testing.T) {
 	r := newRig(t)
 	sess := appSession(r, t0)
-	ag, _ := r.h.Device(agent)
-	prepared, err := r.f.PrepareAgentGrants(sess, ag.IK, json.RawMessage(`[{"scope":"profile.get"}]`))
+	_, gid := r.issue(t, `{"agent_id":"dev-agent","scope":"profile.get"}`)
+	before, _ := lastUpdate(t, r, agent)
+	r.h.AddDevice("dev-agent-new", vault.KindAgent)
+	nag, _ := r.h.Device("dev-agent-new")
+	prepared, err := r.f.PrepareAgentGrants(sess, nag.IK, json.RawMessage(`[{"scope":"connection.list"}]`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A good grant, then one whose id has the wrong type: encoding/json
-	// fills the first before it reports the error.
-	damaged := append(append(json.RawMessage(nil), prepared[:len(prepared)-1]...), []byte(`,{"id":5}]`)...)
-	var probe []*Grant
-	if json.Unmarshal(damaged, &probe) == nil || len(probe) == 0 || probe[0] == nil || probe[0].ID == "" {
-		t.Fatalf("the damaged value does not exercise a partial decode: %s", damaged)
+	var gs []map[string]json.RawMessage
+	if err := json.Unmarshal(prepared, &gs); err != nil || len(gs) != 1 {
+		t.Fatalf("prepared: %v", err)
 	}
-	r.f.AgentPaired(sess, agent, damaged)
-	if n := r.f.count(agent); n != 0 {
-		t.Fatalf("%d grants installed from damaged initial grants", n)
+	gs[0]["id"], _ = json.Marshal(gid)
+	collide, _ := json.Marshal(gs)
+	r.f.AgentPaired(sess, "dev-agent-new", collide)
+	if g := r.f.d.Grants[gid]; g == nil || g.AgentID != agent || g.Scope != "profile.get" {
+		t.Fatalf("the existing grant was replaced: %+v", g)
 	}
-	n, told := lastUpdate(t, r, agent)
-	if told != 1 || n == 0 || r.f.d.GrantSeq[agent] != n {
-		t.Fatalf("damaged pairing: %d updates, grant_seq %d (stored %d)", told, n, r.f.d.GrantSeq[agent])
+	if n := r.f.count("dev-agent-new"); n != 0 {
+		t.Fatalf("%d grants installed under a taken id", n)
 	}
-	msgs := r.h.SentOfType("leash.grant.updated")
-	o, err := strictjson.ParseObject(msgs[len(msgs)-1].Body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if gs, _ := o.Array("grants"); len(gs) != 0 {
-		t.Fatalf("the agent was told of %d grants, want none", len(gs))
+	if n, _ := lastUpdate(t, r, agent); n != before || r.f.d.GrantSeq[agent] != before {
+		t.Fatalf("the other agent's number moved: %d, want %d", n, before)
 	}
 }

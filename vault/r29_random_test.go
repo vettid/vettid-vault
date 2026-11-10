@@ -59,7 +59,13 @@ import (
 //                rpStandingQuota deposits at the relay, and a low-weight
 //                action (and quiescence) has a side refused for it ask for a
 //                quota refresh (relay.token.refresh, §7.2; option A of
-//                GC #6591: the denial by the collect jti and its spares)
+//                GC #6591: the denial by the collect jti and its spares).
+//                Only test.note deposits (known by their bytes) spend it,
+//                as an upload spends the byte quota, so the refresh itself
+//                still fits; the refresh is asked by the harness, not by
+//                the vault's deposit path (it tests the issuer's §7.2, not
+//                the holder's trigger). Once quiet, a deposit still queued
+//                for the peer or an unanswered refusal is quota-stuck@s.
 //
 // A run replays from its seed: crypto randomness is seeded per run
 // (testing/cryptotest), the fixtures are made at a start time drawn from
@@ -213,12 +219,13 @@ type rpWorld struct {
 	issuedRevoked int
 	// the optional modes (R29RP_SHUFFLE, R29RP_REFRESH)
 	md        rpModes
-	srng      *rand.Rand // the shuffle's, seeded from the run
-	shuffled  int        // messages delivered ahead of an older one
-	quotaHit  [2]bool    // side s's standing token refused for its quota since its last refresh
-	quotaed   int        // standing-quota refusals
-	refreshes int        // quota refreshes asked
-	granted   int        // quota refreshes the issuer granted (its Refreshed stamp moved)
+	srng      *rand.Rand      // the shuffle's, seeded from the run
+	shuffled  int             // messages delivered ahead of an older one
+	quotaHit  [2]bool         // side s's standing token refused for its quota since its last refresh
+	notes     map[string]bool // R29RP_REFRESH: the sealed test.note deposits, by their bytes
+	quotaed   int             // standing-quota refusals
+	refreshes int             // quota refreshes asked
+	granted   int             // quota refreshes the issuer granted (its Refreshed stamp moved)
 	lastRef   [2]time.Time
 }
 
@@ -324,7 +331,7 @@ func (w *rpWorld) check(s int, mailbox, token string, payload []byte) error {
 		// byte quota): a small message, the refresh among them, still fits.
 		standing := w.md.refresh && limit == PeerQuotaMsgs
 		if standing {
-			if w.typeOf(s, payload) != "test.note" {
+			if !w.notes[string(payload)] {
 				return nil
 			}
 			limit = rpStandingQuota
@@ -634,7 +641,16 @@ func (w *rpWorld) exec(a rpAction, rng *rand.Rand) {
 		})
 	case rpSend:
 		w.do(s, func(m *Manager, p *Peer) {
+			n := len(m.st.Outbox)
 			m.sendTo(p, "test.note", json.RawMessage(`{"n":"x"}`), w.f.clk)
+			if w.md.refresh && len(m.st.Outbox) > n {
+				// Known by its bytes, not by opening it: a note sealed under
+				// an epoch since replaced must still spend the quota.
+				if w.notes == nil {
+					w.notes = map[string]bool{}
+				}
+				w.notes[string(m.st.Outbox[len(m.st.Outbox)-1].Payload)] = true
+			}
 		})
 	case rpCollect:
 		w.collect(s, rpCollectMax(a.B), a.N%10 == 0, a.N%7 == 0, rng)
@@ -836,6 +852,21 @@ func (w *rpWorld) verdict() string {
 			if !e.Done && e.Held != nil && e.PeerID == p[s].ID {
 				why = append(why, fmt.Sprintf("held@%d", s))
 				break
+			}
+		}
+		if w.md.refresh {
+			// A standing-quota refusal is retried, so its note stays in the
+			// outbox: once quiet, every deposit to the peer must have got
+			// through and no refusal may be left unanswered by a refresh.
+			stuck := w.quotaHit[s]
+			for _, e := range f.m(s).st.Outbox {
+				if !e.Done && e.Held == nil && e.Op == OpDeposit && e.PeerID == p[s].ID {
+					stuck = true
+					break
+				}
+			}
+			if stuck {
+				why = append(why, fmt.Sprintf("quota-stuck@%d", s))
 			}
 		}
 		if !f.clk.Before(p[s].Standing.Exp) {
@@ -1046,7 +1077,7 @@ func TestR29RandomPair(t *testing.T) {
 	t.Logf("runs in which relay.token.issued delivered a token already revoked (follow-up, not R29-T1): %d", len(rpIssuedRevokedRuns))
 	md := rpRunModes
 	t.Logf("shuffle %v: %d messages delivered ahead of an older one, in %d runs", md.shuffle, rpTotals.shuffled, rpTotals.shuffleRuns)
-	t.Logf("refresh %v: %d quota refreshes asked in %d runs, %d granted, %d standing-quota refusals (quota %d)", md.refresh,
+	t.Logf("refresh %v: ~%d quota refreshes asked (by the harness) in %d runs, ~%d granted (approximate), %d standing-quota refusals (quota %d)", md.refresh,
 		rpTotals.refreshes, rpTotals.refreshRuns, rpTotals.granted, rpTotals.quotaed, rpStandingQuota)
 	t.Logf("%d runs (burst %v, steps %d) in %v: %v per 10,000", runs, burst, steps, el.Round(time.Second),
 		(el * time.Duration(10000) / time.Duration(runs)).Round(time.Second))

@@ -379,7 +379,11 @@ func (m *Manager) recoveredPhonePaired(p *Peer, now time.Time) {
 			o.TransferCompleted(sess, "", p.ID)
 		}
 	}
-	for id, inv := range m.st.Invites {
+	for _, id := range sortedKeys(m.st.Invites) {
+		inv, sortedOK := m.st.Invites[id]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if inv.CreatedBy == inviteByRecovery && suite.EqualPublic(inv.EnrollIK, p.IK) {
 			delete(m.st.Invites, id)
 		}

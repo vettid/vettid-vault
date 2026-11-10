@@ -234,8 +234,15 @@ func (m *Manager) removeConnection(p *Peer, dir string, now time.Time) {
 		notice = ""
 	}
 	m.attConnectionRemoved(p.ID, now) // §10.5.1 "Connections"
-	m.removePeer(p, notice, now)
-	m.record(Activity{Kind: "connection.removed", ConnectionID: p.ID, Direction: dir, Audit: true, Feed: dir == "in"}, now)
+	sent := m.removePeer(p, notice, now)
+	ref := ""
+	if notice != "" && !sent {
+		// The notice could not go (the current epoch demoted, the vault's
+		// own reconnect pending, or no usable epoch): recorded in the
+		// removal's own audit entry, never dropped silently.
+		ref = "notice_not_sent"
+	}
+	m.record(Activity{Kind: "connection.removed", ConnectionID: p.ID, Direction: dir, Ref: ref, Audit: true, Feed: dir == "in"}, now)
 	m.notifyDevices("connection.event", connEvent(p.ID, "removed"), "", now)
 	s := m.session(now)
 	for _, f := range m.features {

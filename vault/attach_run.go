@@ -810,7 +810,9 @@ func (m *Manager) deliver(ctx context.Context, r *attRunner, id string, content 
 			case RelayCode(upErr) == CodeQuotaExceeded:
 				noUpload = true // the recipient's blob storage: no retry; it asks with missing
 			case RelayCode(upErr) == CodeTokenExpired:
-				m.startReconnect(p, m.now())
+				if !m.carriedWait(p, now) { // 0.88.2 §6.3.1: not while carried tokens wait
+					m.startReconnect(p, m.now())
+				}
 				e.TokenAsked, e.TokenExp = now, p.Standing.Exp
 				e.NotBefore = now.Add(time.Hour)
 				m.dirty = true

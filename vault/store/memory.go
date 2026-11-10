@@ -68,3 +68,15 @@ func (m *Memory) Delete(_ context.Context, key string, ifMatch Version) error {
 	delete(m.objs, key)
 	return nil
 }
+
+// Clone returns an independent copy of the store's objects (tests: an old
+// copy of a vault, taken at its last write).
+func (m *Memory) Clone() *Memory {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	c := &Memory{objs: make(map[string]memObj, len(m.objs)), gen: m.gen}
+	for k, o := range m.objs {
+		c.objs[k] = memObj{data: append([]byte(nil), o.data...), ver: o.ver}
+	}
+	return c
+}

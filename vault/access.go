@@ -34,7 +34,7 @@ const (
 // accessExempt are the types a desktop or agent may send without an
 // access session (§6.8).
 var accessExempt = map[string]bool{"vault.status": true, "device.session.request": true, "device.session.end": true,
-	tokenIssuedType: true, tokenRefreshType: true, "relay.address.update": true}
+	tokenIssuedType: true, tokenRefreshType: true, "relay.address.update": true, TypeDeviceFeatures: true}
 
 // needsAccess reports whether a principal kind needs an access session.
 func needsAccess(kind string) bool { return kind == KindDesktop || kind == KindAgent }
@@ -418,7 +418,11 @@ func (m *Manager) expireAccess(now time.Time) {
 			m.dirty = true
 		}
 	}
-	for _, p := range m.st.Devices {
+	for _, sortedK := range sortedKeys(m.st.Devices) {
+		p, sortedOK := m.st.Devices[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if p.Access != nil && !now.Before(p.Access.Expires) {
 			p.Access = nil
 			m.dirty = true

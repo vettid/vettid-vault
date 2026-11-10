@@ -168,6 +168,8 @@ type ResponderConfig struct {
 	// ExpectedCtx, if set, must equal hs.init ctx. Required for reconnect:
 	// EpochCtx of the stored last epoch id (§6.6).
 	ExpectedCtx string
+	// Features (0.86.0, §5.3) is the inner `features` list hs.resp carries.
+	Features []string
 
 	ID  string
 	Now time.Time
@@ -246,7 +248,7 @@ func (p *PendingInit) Respond(cfg ResponderConfig) (*Responder, []byte, error) {
 		sched.Destroy()
 		return nil, nil, err
 	}
-	padded, err := envelope.EncodeInner(&envelope.Inner{ID: id, Type: TypeResp, TS: now, Body: rb}, envelope.ModeSealed)
+	padded, err := envelope.EncodeInner(&envelope.Inner{ID: id, Type: TypeResp, TS: now, Body: rb, Features: cfg.Features}, envelope.ModeSealed)
 	if err != nil {
 		sched.Destroy()
 		return nil, nil, err
@@ -280,7 +282,19 @@ func (p *PendingInit) checkInitiator(cfg ResponderConfig) (ed25519.PublicKey, er
 		if !suite.EqualPublic(cfg.CollectSender, cfg.RecordRelayKey) {
 			return nil, ErrSender
 		}
-		if !suite.EqualPublic(b.From.IK, cfg.KnownInitiatorIK) {
+		if len(b.Rotations) == 0 {
+			if !suite.EqualPublic(b.From.IK, cfg.KnownInitiatorIK) {
+				return nil, ErrIdentity
+			}
+			return b.From.IK, nil
+		}
+		// 0.85.0 S8: from.ik is the stored ik or reached from it through
+		// the links the hs.init carries (Table B "Current" or "Reached").
+		final, kem, _, err := ResolveChainKnown(cfg.KnownInitiatorIK, cfg.KnownInitiatorChain, b.Rotations)
+		if err != nil {
+			return nil, err
+		}
+		if !suite.EqualPublic(final, b.From.IK) || kem != nil && !kem.Equal(b.From.KEM) {
 			return nil, ErrIdentity
 		}
 		return b.From.IK, nil

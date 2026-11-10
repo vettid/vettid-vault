@@ -50,7 +50,40 @@ type Inner struct {
 	Exp    time.Time // optional; zero means absent
 	Status string    // responses: "ok" or "error"
 	Error  *Error    // present iff Status == "error"
-	Body   json.RawMessage
+	// Features (0.86.0, §5.3, §10.8) are the sender's capability names as
+	// it advertises them to this recipient: sorted, each once, each
+	// [a-z0-9_]{1,32}, never empty (nil: the member is absent). Older
+	// receivers ignore it as an unknown member.
+	Features []string
+	Body     json.RawMessage
+}
+
+// MaxFeatures bounds the inner `features` list (as §10.2's device.features
+// and §11.10.9's list are bounded).
+const MaxFeatures = 32
+
+// ValidFeatures reports whether names is a well-formed `features` list
+// (§5.3): 1 to MaxFeatures names, sorted in ascending byte order, each once,
+// each [a-z0-9_]{1,32}.
+func ValidFeatures(names []string) bool {
+	if len(names) == 0 || len(names) > MaxFeatures {
+		return false
+	}
+	for i, n := range names {
+		if len(n) == 0 || len(n) > 32 {
+			return false
+		}
+		for j := 0; j < len(n); j++ {
+			c := n[j]
+			if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '_') {
+				return false
+			}
+		}
+		if i > 0 && names[i-1] >= n {
+			return false
+		}
+	}
+	return true
 }
 
 // FormatTS formats t in the inner timestamp format (truncating to ms).
@@ -156,12 +189,15 @@ func (in *Inner) validate(mode Mode) error {
 			return ErrInner
 		}
 	}
+	if in.Features != nil && !ValidFeatures(in.Features) {
+		return ErrInner
+	}
 	return nil
 }
 
 // Marshal encodes the inner plaintext as compact JSON with members in the
-// order v, id, type, ts, seq, re, exp, status, error, body. A nil Body is
-// encoded as {}. mode selects the `seq` rule: required in session mode,
+// order v, id, type, ts, seq, re, exp, status, error, features, body. A
+// nil Body is encoded as {}. mode selects the `seq` rule: required in session mode,
 // absent in sealed mode.
 func (in *Inner) Marshal(mode Mode) ([]byte, error) {
 	if err := in.validate(mode); err != nil {
@@ -197,6 +233,16 @@ func (in *Inner) Marshal(mode Mode) ([]byte, error) {
 			eb.String("message", in.Error.Message)
 		}
 		b.Raw("error", eb.Bytes())
+	}
+	if in.Features != nil {
+		arr := []byte{'['}
+		for i, n := range in.Features {
+			if i > 0 {
+				arr = append(arr, ',')
+			}
+			arr = append(arr, strictjson.MarshalString(n)...)
+		}
+		b.Raw("features", append(arr, ']'))
 	}
 	b.Raw("body", body)
 	return b.Bytes(), nil
@@ -264,6 +310,22 @@ func ParseInner(b []byte, mode Mode) (*Inner, error) {
 			e.Message = msg
 		}
 		in.Error = e
+	}
+	if arr, ok, err := o.OptArray("features"); err != nil {
+		return nil, ErrInner
+	} else if ok {
+		// 0.86.0 (§5.3): a known member, so its form is checked.
+		in.Features = make([]string, 0, len(arr))
+		for _, raw := range arr {
+			n, err := strictjson.AsString(raw)
+			if err != nil {
+				return nil, ErrInner
+			}
+			in.Features = append(in.Features, n)
+		}
+		if !ValidFeatures(in.Features) {
+			return nil, ErrInner
+		}
 	}
 	if _, err := o.Object("body"); err != nil {
 		return nil, ErrInner

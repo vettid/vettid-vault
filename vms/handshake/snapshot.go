@@ -93,6 +93,8 @@ func ImportEpoch(s EpochState) (*Epoch, error) {
 type KeyringState struct {
 	Current *EpochState    `json:"current,omitempty"`
 	Retired []RetiredState `json:"retired,omitempty"`
+	// Pending is an initiator's pending epoch (0.86.0, §6.3.1).
+	Pending *EpochState `json:"pending,omitempty"`
 }
 
 // RetiredState is a retired epoch (receive key only) and its expiry.
@@ -110,6 +112,10 @@ func (k *Keyring) Export() KeyringState {
 		c := k.current.Export()
 		s.Current = &c
 	}
+	if k.pending != nil {
+		p := k.pending.Export()
+		s.Pending = &p
+	}
 	for _, r := range k.retired {
 		s.Retired = append(s.Retired, RetiredState{Epoch: r.e.Export(), Until: r.until})
 	}
@@ -125,6 +131,13 @@ func ImportKeyring(s KeyringState) (*Keyring, error) {
 			return nil, err
 		}
 		k.current = e
+	}
+	if s.Pending != nil {
+		e, err := ImportEpoch(*s.Pending)
+		if err != nil {
+			return nil, err
+		}
+		k.pending = e
 	}
 	for _, r := range s.Retired {
 		e, err := ImportEpoch(r.Epoch)
@@ -156,6 +169,8 @@ type InitiatorState struct {
 	// followed (a reconnect, §6.6: the initiator keeps it across a
 	// restart), as identity.rotate statements.
 	KnownResponderChain []json.RawMessage `json:"known_responder_chain,omitempty"`
+	// Features is the inner `features` list hs.fin carries (0.86.0).
+	Features []string `json:"features,omitempty"`
 }
 
 // Export returns the initiator's persistent state, or ErrDone after it
@@ -182,7 +197,7 @@ func (i *Initiator) Export() (InitiatorState, error) {
 		Purpose: i.cfg.Purpose, Suites: append([]int(nil), i.cfg.Suites...), PinnedSuite: i.cfg.PinnedSuite,
 		Policy: i.cfg.Policy, ResponderIK: cp(i.cfg.ResponderIK), ResponderRelayKey: cp(i.cfg.ResponderRelayKey),
 		EphSeed: seed, Env: cp(i.env), Ks: cp(i.ks), NI: cp(i.nI), Th1: cp(i.th1[:]), Body: body,
-		KnownResponderChain: known,
+		KnownResponderChain: known, Features: append([]string(nil), i.cfg.Features...),
 	}, nil
 }
 
@@ -237,7 +252,7 @@ func restoreInitiator(s InitiatorState, identity ed25519.PrivateKey) (*Initiator
 	i := &Initiator{
 		cfg: InitiatorConfig{Purpose: s.Purpose, Suites: s.Suites, PinnedSuite: s.PinnedSuite, Policy: s.Policy,
 			Identity: identity, ResponderIK: cp(s.ResponderIK), ResponderRelayKey: cp(s.ResponderRelayKey),
-			KnownResponderChain: known},
+			KnownResponderChain: known, Features: s.Features},
 		body: body, eph: eph, env: cp(s.Env), ks: cp(s.Ks), nI: cp(s.NI),
 		verifyOnly: identity == nil,
 	}

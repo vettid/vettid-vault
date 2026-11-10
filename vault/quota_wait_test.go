@@ -655,8 +655,9 @@ func (f *r29Fx) asking(s int) bool {
 	return len(p.QuotaReqs) > 0 && p.QuotaReqTok == tokenTag(p.Standing.Token) || f.m(s).requestPending(p.ID, tokenRefreshType)
 }
 
-// Re-review 4 M: the peer away for over a day; a refresh is asked hourly
-// and each is lost. At most a day of them stays open, the first kept: its
+// Re-review 4 M, 5 M: the peer away for over a day; a refresh is asked
+// hourly and each is lost. At most a day of them stays open, the first
+// kept, and the asks go on (the next oldest makes room): the first one's
 // grant, when it comes, is taken. None holds requestPending.
 func TestQuotaOpenRefreshesKeepTheFirst(t *testing.T) {
 	f := newR29Fx(t)
@@ -683,6 +684,12 @@ func TestQuotaOpenRefreshesKeepTheFirst(t *testing.T) {
 	}
 	if n := len(f.p(0).QuotaReqs); n != quotaReqsMax || f.p(0).QuotaReqs[0] != first {
 		t.Fatalf("%d open, first kept %v", n, f.p(0).QuotaReqs[0] == first)
+	}
+	f.advance(time.Hour + time.Minute)
+	f.tick(0)
+	f.tick(0)
+	if n := f.lose(0, 1, kOther); n != 1 {
+		t.Fatalf("%d refreshes asked at the cap, want 1 (the asks go on)", n)
 	}
 	if f.m(0).requestPending(f.p(0).ID, tokenRefreshType) {
 		t.Fatal("the open quota refreshes hold requestPending")

@@ -285,7 +285,7 @@ func (m *Manager) quotaNext(p *Peer, now time.Time) time.Time {
 // nearEnd: p's standing token has under HolderRefreshBelow left, when the
 // issuer grants a refresh hourly (§7.2): a quota too_soon no longer holds.
 func nearEnd(p *Peer, now time.Time) bool {
-	return p.Standing.Exp.Sub(now) < HolderRefreshBelow
+	return p.Standing.Exp.Sub(now) <= HolderRefreshBelow
 }
 
 // askQuotaRefresh asks p for a fresh standing token after a quota refusal
@@ -312,7 +312,9 @@ func (m *Manager) askQuotaRefresh(p *Peer, now time.Time) {
 		p.QuotaReqTok = tag
 	}
 	if len(p.QuotaReqs) >= quotaReqsMax {
-		return // a day of asks open: the oldest (the one the issuer grants) is kept; an answer frees one
+		// A day of asks open: the first (the one the issuer grants, if
+		// it ever got it) is kept, the next oldest makes room.
+		m.forgetRequest(p, p.QuotaReqs[1])
 	}
 	n := len(m.st.Outbox)
 	id := m.sendTo(p, tokenRefreshType, peerwire.TokenRefreshBody(), now)
@@ -458,7 +460,10 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 		}
 		if e.Op == OpDeposit && e.Held != nil && !e.HeldExp.IsZero() && !now.Before(e.HeldExp) {
 			e.Done, e.Held, m.dirty = true, nil, true // held past its exp: discarded (§3.4.1)
-			m.audit(now, "held_expired", e.PeerID)    // S12: counted and audited
+			if e.QuotaRefresh {
+				m.quotaRefreshEnded(e) // unsent: no answer can come
+			}
+			m.audit(now, "held_expired", e.PeerID) // S12: counted and audited
 			continue
 		}
 		if e.Op == OpDeposit && e.Held != nil {

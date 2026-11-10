@@ -146,6 +146,22 @@ func TestPairGrantDropped(t *testing.T) {
 			g["connections"] = json.RawMessage(`[]`)
 			return g
 		}, DropMismatch},
+		// The scope rewritten consistently, in the delegation's bytes and the
+		// stored grant, to an op this build does not delegate: the rebuild
+		// matches, so only the scope check drops it.
+		{"a scope this build does not delegate", func(t *testing.T, r *rig, g map[string]json.RawMessage) map[string]json.RawMessage {
+			var d []byte
+			if err := json.Unmarshal(g["delegation"], &d); err != nil {
+				t.Fatal(err)
+			}
+			from, to := []byte(`"op":"message.send"`), []byte(`"op":"settings.get"`)
+			if bytes.Count(d, from) != 1 {
+				t.Fatalf("delegation: %s", d)
+			}
+			g["delegation"] = mustJSON(t, bytes.Replace(d, from, to, 1))
+			g["scope"] = mustJSON(t, "settings.get")
+			return g
+		}, DropMismatch},
 		{"a delegation not in canonical form", func(t *testing.T, r *rig, g map[string]json.RawMessage) map[string]json.RawMessage {
 			var d []byte
 			if err := json.Unmarshal(g["delegation"], &d); err != nil || len(d) < 2 || d[0] != '{' {

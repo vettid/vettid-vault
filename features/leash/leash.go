@@ -1368,10 +1368,10 @@ func (f *Feature) PrepareAgentGrants(s *vault.Session, agentIK []byte, raw json.
 // §10.11 "Initial grants at pairing" (0.88.5): if the prepared set does
 // not decode (today the approval and the completion run in one call, so
 // this is defence in depth against damaged state), none of it is
-// installed, not even what
-// decoded before the error, and one leash.grant.dropped is recorded with
-// ref damaged. Otherwise each grant is installed unless dropReason gives
-// a reason, which is recorded as leash.grant.dropped. The pairing
+// installed, not even what decoded before the error, and one
+// leash.grant.dropped is recorded with ref damaged. Otherwise each grant
+// is installed unless dropReason gives a reason, which is recorded as
+// leash.grant.dropped. The pairing
 // completes either way, with what was installed (possibly nothing): that
 // set takes its grant_seq and the agent is told, so its view matches the
 // vault's.

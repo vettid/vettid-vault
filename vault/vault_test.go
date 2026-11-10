@@ -65,6 +65,9 @@ type stubRelay struct {
 	// revocation, quota; injected failures) before it is recorded.
 	now   func() time.Time
 	check func(mailbox, token string) error
+	// checkPayload, if set, is check with the deposit's payload (the
+	// random-pair harness's quota by message type).
+	checkPayload func(mailbox, token string, payload []byte) error
 }
 
 // stubBlobs is a test relay's blob storage, keyed by blob id.
@@ -102,6 +105,11 @@ func (r *stubRelay) Deposit(_ context.Context, _, mailbox, token string, payload
 	}
 	if r.check != nil {
 		if err := r.check(mailbox, token); err != nil {
+			return "", err
+		}
+	}
+	if r.checkPayload != nil {
+		if err := r.checkPayload(mailbox, token, payload); err != nil {
 			return "", err
 		}
 	}

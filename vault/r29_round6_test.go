@@ -37,7 +37,7 @@ func (f *r29Fx) restart(s int) {
 	old.mu.Lock()
 	d.relay.mu.Lock()
 	d.relay.deposits, d.relay.revoked, d.relay.claims, d.relay.blobs = old.deposits, old.revoked, old.claims, old.blobs
-	d.relay.now, d.relay.check = old.now, old.check // the scenario's clock and relay checks (0.88.2)
+	d.relay.now, d.relay.check, d.relay.checkPayload = old.now, old.check, old.checkPayload // the scenario's clock and relay checks (0.88.2)
 	d.relay.mu.Unlock()
 	old.mu.Unlock()
 	m.now = func() time.Time { return f.clk }

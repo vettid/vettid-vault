@@ -20,9 +20,9 @@ import (
 
 	"github.com/vettid/vettid-relay/relayauth"
 	"github.com/vettid/vettid-relay/relayclient"
-
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/handshake"
+	"github.com/vettid/vettid-vault/vms/peerwire"
 )
 
 // The release 29 deadlock search on the real code (owner decision a, GC
@@ -52,6 +52,25 @@ import (
 //                succession
 //   R29RP_TRACE  a run seed: replay that run alone, with its trace
 //   R29RP_SHOW   how many seeds to list per failure class (default 5)
+//   R29RP_SHUFFLE set: every collect takes its batch from anywhere in the
+//                mailbox, in any order (cross-batch reordering, §8.4), and
+//                a batch left unacked comes back in any later one
+//   R29RP_REFRESH set: a connection's standing token has a quota of
+//                rpStandingQuota deposits at the relay, and a low-weight
+//                action (and quiescence) has a side refused for it ask for a
+//                quota refresh (relay.token.refresh, §7.2; option A of
+//                GC #6591: the denial by the collect jti and its spares).
+//                Only test.note deposits (known by their bytes) spend it,
+//                as an upload spends the byte quota, so the refresh itself
+//                still fits; the refresh is asked by the harness, not by
+//                the vault's deposit path (it tests the issuer's §7.2, not
+//                the holder's trigger). Once quiet, a deposit still queued
+//                for the peer or an unanswered refusal is quota-stuck@s.
+//                Known gap, until the vault fix (GC #6775): a note refused
+//                for the token's quota is retried unchanged and holds every
+//                later deposit to the mailbox, handshakes and tokens too,
+//                so about 1 run in 1,000-3,000 ends quota-stuck (seeds
+//                13894595740220335007, 9200229175364500436).
 //
 // A run replays from its seed: crypto randomness is seeded per run
 // (testing/cryptotest), the fixtures are made at a start time drawn from
@@ -71,11 +90,45 @@ const (
 	rpUnlock
 	rpCrash
 	rpFault
+	rpRefresh
 	rpNumOps
 )
 
-var rpOpName = [...]string{"rotate", "send", "collect", "tick", "time", "lock", "unlock", "crash", "fault"}
-var rpWeight = [...]int{6, 8, 14, 6, 8, 3, 3, 2, 3}
+var rpOpName = [...]string{"rotate", "send", "collect", "tick", "time", "lock", "unlock", "crash", "fault", "refresh"}
+
+// rpWeight: the refresh action has weight 0 unless R29RP_REFRESH is set
+// (rpWeights), so that the other modes draw the runs they always drew.
+var rpWeight = [...]int{6, 8, 14, 6, 8, 3, 3, 2, 3, 0}
+
+// rpRefreshWeight is the refresh action's weight under R29RP_REFRESH.
+const rpRefreshWeight = 2
+
+// rpStandingQuota is how many bulk messages (test.note) a connection's
+// standing token may deposit at the harness relay under R29RP_REFRESH (the
+// real quota, PeerQuotaMsgs, is never reached in a run).
+const rpStandingQuota = 2
+
+// rpModes are the optional modes of a run.
+type rpModes struct{ shuffle, refresh bool }
+
+func rpEnvModes() rpModes {
+	return rpModes{shuffle: os.Getenv("R29RP_SHUFFLE") != "", refresh: os.Getenv("R29RP_REFRESH") != ""}
+}
+
+func (md rpModes) weights() [rpNumOps]int {
+	w := rpWeight
+	if md.refresh {
+		w[rpRefresh] = rpRefreshWeight
+	}
+	return w
+}
+
+// rpTotals sums what the modes did over the runs of a search (the summary).
+var rpTotals struct {
+	shuffled, shuffleRuns           int // messages delivered ahead of an older one; runs with any
+	refreshes, refreshRuns, quotaed int // refreshes asked; runs with any; standing-quota refusals
+	granted                         int // refreshes the issuer granted
+}
 var rpJumps = [...]time.Duration{61 * time.Second, 10 * time.Minute, time.Hour + time.Second, 24*time.Hour + time.Second,
 	7*24*time.Hour + time.Second, 14*24*time.Hour + time.Second, 30*24*time.Hour + time.Second}
 
@@ -101,8 +154,9 @@ func (a rpAction) String() string {
 
 func rpCollectMax(b int) int { return []int{1, 2, 5, 32}[b%4] }
 
-func rpGen(rs uint64, steps int, burst bool) []rpAction {
+func rpGen(rs uint64, steps int, burst bool, md rpModes) []rpAction {
 	rng := rand.New(rand.NewPCG(rs, 3))
+	rpWeight := md.weights()
 	total := 0
 	for _, w := range rpWeight {
 		total += w
@@ -168,6 +222,16 @@ type rpWorld struct {
 	// (judgeAdoption).
 	violations    []string
 	issuedRevoked int
+	// the optional modes (R29RP_SHUFFLE, R29RP_REFRESH)
+	md        rpModes
+	srng      *rand.Rand      // the shuffle's, seeded from the run
+	shuffled  int             // messages delivered ahead of an older one
+	quotaHit  [2]bool         // side s's standing token refused for its quota since its last refresh
+	notes     map[string]bool // R29RP_REFRESH: the sealed test.note deposits, by their bytes
+	quotaed   int             // standing-quota refusals
+	refreshes int             // quota refreshes asked
+	granted   int             // quota refreshes the issuer granted (its Refreshed stamp moved)
+	lastRef   [2]time.Time
 }
 
 // rpIssuedRevokedRuns are the runs in which a side stored a revoked token
@@ -228,14 +292,14 @@ func (w *rpWorld) hook(s int) {
 	r := w.f.d[s].relay
 	r.mu.Lock()
 	r.now = func() time.Time { return w.f.clk }
-	r.check = func(mailbox, token string) error { return w.check(s, mailbox, token) }
+	r.checkPayload = func(mailbox, token string, payload []byte) error { return w.check(s, mailbox, token, payload) }
 	r.mu.Unlock()
 	w.f.m(s).opt.Hooks.Adopt = func(_, kind, tok, from string) { w.judgeAdoption(s, kind, tok, from) }
 }
 
 // check is the relay's judgement of a deposit by side s (RELAY-PROTOCOL
 // §5.3): injected failures, then the token (exp, revocation, quota).
-func (w *rpWorld) check(s int, mailbox, token string) error {
+func (w *rpWorld) check(s int, mailbox, token string, payload []byte) error {
 	if w.fail[s] > 0 {
 		w.fail[s]--
 		if w.fail429[s] {
@@ -266,7 +330,26 @@ func (w *rpWorld) check(s int, mailbox, token string) error {
 		}
 	}
 	if q := c.Quota; q != nil && q.Msgs != nil {
-		if w.quota[c.Jti] >= *q.Msgs {
+		limit := *q.Msgs
+		// Under R29RP_REFRESH a standing token's quota is spent by the bulk
+		// messages alone (test.note, as an attachment's upload spends the
+		// byte quota): a small message, the refresh among them, still fits.
+		standing := w.md.refresh && limit == PeerQuotaMsgs
+		if standing {
+			if !w.notes[string(payload)] {
+				return nil
+			}
+			limit = rpStandingQuota
+		}
+		if w.quota[c.Jti] >= limit {
+			if standing {
+				// Counted apart: a reconnect token's quota_exceeded is what the
+				// rapid-rotation residual is judged by, never this one.
+				w.quotaed++
+				w.quotaHit[s] = true
+				w.logf("relay: %d's deposit refused %s (standing quota)", s, CodeQuotaExceeded)
+				return &relayclient.Error{Status: 429, Code: CodeQuotaExceeded}
+			}
 			return refuse(429, CodeQuotaExceeded)
 		}
 		w.quota[c.Jti]++
@@ -333,7 +416,35 @@ func (w *rpWorld) pull(s int) {
 	}
 }
 
-func (w *rpWorld) pullBoth() { w.pull(0); w.pull(1) }
+func (w *rpWorld) pullBoth() {
+	w.pull(0)
+	w.pull(1)
+	if w.md.refresh {
+		w.noteGrants()
+	}
+}
+
+// noteGrants counts the quota refreshes each side granted: its stamp of
+// the last one (§7.2, at most one in 24 hours) moved.
+func (w *rpWorld) noteGrants() {
+	for s := 0; s < 2; s++ {
+		if w.locked[s] {
+			continue
+		}
+		m := w.f.m(s)
+		if m == nil || m.st == nil {
+			continue
+		}
+		p := w.f.p(s)
+		if p == nil {
+			continue
+		}
+		if t, ok := m.st.attach().Refreshed[p.ID]; ok && !t.Equal(w.lastRef[s]) {
+			w.granted++
+			w.lastRef[s] = t
+		}
+	}
+}
 
 // expire drops what the relay held 14 days (T).
 func (w *rpWorld) expire() {
@@ -363,15 +474,42 @@ func (w *rpWorld) collect(s, max int, redeliver, reorder bool, rng *rand.Rand) {
 	w.expire()
 	k := min(max, len(w.q[s]))
 	batch := make([]Message, 0, k)
-	for _, x := range w.q[s][:k] {
-		batch = append(batch, x.m)
-	}
-	if reorder && k > 1 {
-		i, j := rng.IntN(k), rng.IntN(k)
-		batch[i], batch[j] = batch[j], batch[i]
-	}
-	if !redeliver {
-		w.q[s] = w.q[s][k:]
+	if w.md.shuffle && k > 0 {
+		// Cross-batch: k messages from anywhere in the mailbox, in any order.
+		pick := w.srng.Perm(len(w.q[s]))[:k]
+		taken := map[int]bool{}
+		for _, i := range pick {
+			taken[i] = true
+		}
+		for _, i := range pick {
+			batch = append(batch, w.q[s][i].m)
+			for j := 0; j < i; j++ {
+				if !taken[j] {
+					w.shuffled++ // delivered ahead of an older one still waiting
+					break
+				}
+			}
+		}
+		if !redeliver {
+			kept := w.q[s][:0]
+			for i, x := range w.q[s] {
+				if !taken[i] {
+					kept = append(kept, x)
+				}
+			}
+			w.q[s] = kept
+		}
+	} else {
+		for _, x := range w.q[s][:k] {
+			batch = append(batch, x.m)
+		}
+		if reorder && k > 1 {
+			i, j := rng.IntN(k), rng.IntN(k)
+			batch[i], batch[j] = batch[j], batch[i]
+		}
+		if !redeliver {
+			w.q[s] = w.q[s][k:]
+		}
 	}
 	if err := w.f.m(s).ProcessBatch(context.Background(), &fakeCollector{}, batch); err != nil {
 		w.logf("side %d: batch error %v: restart", s, err)
@@ -508,7 +646,16 @@ func (w *rpWorld) exec(a rpAction, rng *rand.Rand) {
 		})
 	case rpSend:
 		w.do(s, func(m *Manager, p *Peer) {
+			n := len(m.st.Outbox)
 			m.sendTo(p, "test.note", json.RawMessage(`{"n":"x"}`), w.f.clk)
+			if w.md.refresh && len(m.st.Outbox) > n {
+				// Known by its bytes, not by opening it: a note sealed under
+				// an epoch since replaced must still spend the quota.
+				if w.notes == nil {
+					w.notes = map[string]bool{}
+				}
+				w.notes[string(m.st.Outbox[len(m.st.Outbox)-1].Payload)] = true
+			}
 		})
 	case rpCollect:
 		w.collect(s, rpCollectMax(a.B), a.N%10 == 0, a.N%7 == 0, rng)
@@ -526,7 +673,29 @@ func (w *rpWorld) exec(a rpAction, rng *rand.Rand) {
 		w.crash(s)
 	case rpFault:
 		w.fail[s], w.fail429[s] = 1+a.N%3, a.B%2 == 0
+	case rpRefresh:
+		w.refresh(s)
 	}
+}
+
+// refresh: side s, refused for its standing token's quota, asks the other
+// for a fresh one (§7.2), as the vault's own path does (attAskToken).
+func (w *rpWorld) refresh(s int) {
+	if !w.quotaHit[s] || w.locked[s] {
+		return
+	}
+	w.quotaHit[s] = false
+	w.do(s, func(m *Manager, p *Peer) {
+		if p == nil || m.requestPending(p.ID, tokenRefreshType) {
+			return
+		}
+		if id := m.sendTo(p, tokenRefreshType, peerwire.TokenRefreshBody(), w.f.clk); id != "" {
+			m.requests[id] = p.ID
+			m.requestTypes[id] = tokenRefreshType
+			w.refreshes++
+			w.logf("side %d: quota refresh asked", s)
+		}
+	})
 }
 
 // quiesce: both unlocked, no injected failure, everything delivered, and
@@ -550,6 +719,10 @@ func (w *rpWorld) quiesce() {
 		}
 		w.tick(0)
 		w.tick(1)
+		if w.md.refresh {
+			w.refresh(0) // a side still refused for its quota asks again
+			w.refresh(1)
+		}
 		w.f.advance(d)
 	}
 	for i := 0; i < 20 && (len(w.q[0]) > 0 || len(w.q[1]) > 0); i++ {
@@ -686,6 +859,21 @@ func (w *rpWorld) verdict() string {
 				break
 			}
 		}
+		if w.md.refresh {
+			// A standing-quota refusal is retried, so its note stays in the
+			// outbox: once quiet, every deposit to the peer must have got
+			// through and no refusal may be left unanswered by a refresh.
+			stuck := w.quotaHit[s]
+			for _, e := range f.m(s).st.Outbox {
+				if !e.Done && e.Held == nil && e.Op == OpDeposit && e.PeerID == p[s].ID {
+					stuck = true
+					break
+				}
+			}
+			if stuck {
+				why = append(why, fmt.Sprintf("quota-stuck@%d", s))
+			}
+		}
 		if !f.clk.Before(p[s].Standing.Exp) {
 			why = append(why, fmt.Sprintf("token@%d", s))
 		}
@@ -738,6 +926,9 @@ func rpRun(t *testing.T, rs uint64, steps int, burst, verbose bool) (string, []s
 	return v, tr
 }
 
+// rpRunModes is the mode set every run of this process uses (from the env).
+var rpRunModes = rpEnvModes()
+
 // rpRunFP is rpRun with the run's fingerprint.
 func rpRunFP(t *testing.T, rs uint64, steps int, burst, verbose bool) (string, []string, string) {
 	cryptotest.SetGlobalRandom(t, rs)
@@ -754,18 +945,29 @@ func rpRunFP(t *testing.T, rs uint64, steps int, burst, verbose bool) (string, [
 	t.Cleanup(func() { fixtureNow = nil })
 	f := newR29Fx(t)
 	fx = f
-	w := &rpWorld{t: t, f: f, quota: map[string]int64{}, refused: map[string]int{}, verbose: verbose}
+	w := &rpWorld{t: t, f: f, quota: map[string]int64{}, refused: map[string]int{}, verbose: verbose, md: rpRunModes,
+		srng: rand.New(rand.NewPCG(rs, 11))}
 	for s := 0; s < 2; s++ {
 		w.pub[s], w.mbox[s] = f.pk(s), f.m(s).st.Relay.Mailbox
 	}
 	w.hook(0)
 	w.hook(1)
 	rng := rand.New(rand.NewPCG(rs, 7))
-	for _, a := range rpGen(rs, steps, burst) {
+	for _, a := range rpGen(rs, steps, burst, w.md) {
 		w.exec(a, rng)
 	}
 	w.quiesce()
 	v := w.verdict()
+	rpTotals.shuffled += w.shuffled
+	rpTotals.refreshes += w.refreshes
+	rpTotals.quotaed += w.quotaed
+	rpTotals.granted += w.granted
+	if w.shuffled > 0 {
+		rpTotals.shuffleRuns++
+	}
+	if w.refreshes > 0 {
+		rpTotals.refreshRuns++
+	}
 	if verbose {
 		for s := 0; s < 2; s++ {
 			w.trace = append(w.trace, fmt.Sprintf("locks %d: %v", s, w.locks[s]))
@@ -824,7 +1026,7 @@ func TestR29RandomPair(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Run("trace", func(t *testing.T) {
-			for _, a := range rpGen(rs, steps, burst) {
+			for _, a := range rpGen(rs, steps, burst, rpRunModes) {
 				t.Logf("action %s", a)
 			}
 			v, tr := rpRun(t, rs, steps, burst, true)
@@ -878,6 +1080,10 @@ func TestR29RandomPair(t *testing.T) {
 		t.Logf("%-50s %5d  e.g. %s", k, len(seeds), strings.Join(ss, " "))
 	}
 	t.Logf("runs in which relay.token.issued delivered a token already revoked (follow-up, not R29-T1): %d", len(rpIssuedRevokedRuns))
+	md := rpRunModes
+	t.Logf("shuffle %v: %d messages delivered ahead of an older one, in %d runs", md.shuffle, rpTotals.shuffled, rpTotals.shuffleRuns)
+	t.Logf("refresh %v: ~%d quota refreshes asked (by the harness) in %d runs, ~%d granted (approximate), %d standing-quota refusals (quota %d)", md.refresh,
+		rpTotals.refreshes, rpTotals.refreshRuns, rpTotals.granted, rpTotals.quotaed, rpStandingQuota)
 	t.Logf("%d runs (burst %v, steps %d) in %v: %v per 10,000", runs, burst, steps, el.Round(time.Second),
 		(el * time.Duration(10000) / time.Duration(runs)).Round(time.Second))
 }

@@ -381,3 +381,40 @@ func TestGrantSeqListAnswerIsDurable(t *testing.T) {
 	}
 	t.Fatal("leash.grant.list not registered")
 }
+
+// Damaged initial grants (the sealed PairGrants does not decode): none of
+// them is installed, not even one that decoded before the error, and the
+// pairing still completes with the empty set: it takes its grant_seq and
+// the agent is told (§10.11).
+func TestGrantSeqDamagedPairGrants(t *testing.T) {
+	r := newRig(t)
+	sess := appSession(r, t0)
+	ag, _ := r.h.Device(agent)
+	prepared, err := r.f.PrepareAgentGrants(sess, ag.IK, json.RawMessage(`[{"scope":"profile.get"}]`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A good grant, then one whose id has the wrong type: encoding/json
+	// fills the first before it reports the error.
+	damaged := append(append(json.RawMessage(nil), prepared[:len(prepared)-1]...), []byte(`,{"id":5}]`)...)
+	var probe []*Grant
+	if json.Unmarshal(damaged, &probe) == nil || len(probe) == 0 || probe[0] == nil || probe[0].ID == "" {
+		t.Fatalf("the damaged value does not exercise a partial decode: %s", damaged)
+	}
+	r.f.AgentPaired(sess, agent, damaged)
+	if n := r.f.count(agent); n != 0 {
+		t.Fatalf("%d grants installed from damaged initial grants", n)
+	}
+	n, told := lastUpdate(t, r, agent)
+	if told != 1 || n == 0 || r.f.d.GrantSeq[agent] != n {
+		t.Fatalf("damaged pairing: %d updates, grant_seq %d (stored %d)", told, n, r.f.d.GrantSeq[agent])
+	}
+	msgs := r.h.SentOfType("leash.grant.updated")
+	o, err := strictjson.ParseObject(msgs[len(msgs)-1].Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gs, _ := o.Array("grants"); len(gs) != 0 {
+		t.Fatalf("the agent was told of %d grants, want none", len(gs))
+	}
+}

@@ -1325,7 +1325,11 @@ func (f *Feature) AgentPaired(s *vault.Session, agentID string, prepared json.Ra
 	defer f.mu.Unlock()
 	var gs []*Grant
 	if len(prepared) > 0 && json.Unmarshal(prepared, &gs) != nil {
-		return
+		// Damaged initial grants (the sealed PairGrants): install none of
+		// them, not even what decoded before the error, and complete the
+		// pairing with the empty set. It still takes its grant_seq and the
+		// agent is told, so its view matches the vault's (§10.11).
+		gs = nil
 	}
 	now := s.Now()
 	for _, g := range gs {

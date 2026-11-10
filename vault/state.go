@@ -807,13 +807,20 @@ type OutboxEntry struct {
 	AwaitToken bool `json:"await_token,omitempty"`
 	// QuotaWait: the relay refused the deposit for its standing token's
 	// quota (§8.6 quota_exceeded, `token`). It is not retried unchanged:
-	// it waits for a fresh token (asked for, §7.2), and holds nothing
-	// behind it, since what follows may fit (a small message under a byte
-	// quota) or carries its own token (a handshake's). QuotaTok names the
-	// standing token it was refused under (tokenTag): refused again under
-	// another one with no `quota`, it is the mailbox's quota (§8.6).
+	// it waits for a fresh token (asked for, §7.2), and, as AwaitToken,
+	// the later deposits to the mailbox under the standing token wait
+	// behind it, in order; one that carries its own token (a handshake's)
+	// and the refresh itself (QuotaRefresh) go. QuotaTok names the
+	// standing token it was refused under (tokenTag): it is never sent
+	// again under that one (RELAY-PROTOCOL §7.1), only asks again for a
+	// refresh; tried under another one, the wait ends (QuotaWait false),
+	// and a refusal there with no `quota` is the mailbox's (§8.6). Kept
+	// after the wait, so that reading sticks.
 	QuotaWait bool   `json:"quota_wait,omitempty"`
 	QuotaTok  string `json:"quota_tok,omitempty"`
+	// QuotaRefresh marks the relay.token.refresh a quota wait asked for:
+	// the one deposit under the standing token that passes the wait.
+	QuotaRefresh bool `json:"quota_refresh,omitempty"`
 	// Wake is the deposit's push wake class (0.24.0, §14.2): the app is
 	// woken once the relay accepted it; "" for none.
 	Wake string `json:"wake,omitempty"`

@@ -415,7 +415,8 @@ func TestR29HoldIsByPeer(t *testing.T) {
 // token, asked for, and is tried again within the hour.
 func TestR29QuotaRetryForOtherDeposits(t *testing.T) {
 	f := newR29Fx(t)
-	f.longTokens()
+	// Not longTokens: a fresh token is adopted only with a later exp, and
+	// the deposit is tried again under a fresh one (GC #6783).
 	r := f.d[0].relay
 	r.mu.Lock()
 	r.failMailbox = map[string]error{f.m(1).st.Relay.Mailbox: &relayclient.Error{Status: 429, Code: CodeQuotaExceeded}}

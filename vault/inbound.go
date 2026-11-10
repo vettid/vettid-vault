@@ -13,6 +13,7 @@ import (
 	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/handshake"
+	"github.com/vettid/vettid-vault/vms/peerwire"
 	"github.com/vettid/vettid-vault/vms/suite"
 )
 
@@ -819,6 +820,8 @@ func (m *Manager) handleResponse(p *Peer, in *envelope.Inner, now time.Time) {
 	delete(m.requests, in.Re)
 	if in.Type == "relay.token.refresh" && in.Status == envelope.StatusOK {
 		m.storeIssuedTo(p, in.Body, now)
+	} else if in.Type == "relay.token.refresh" && in.Error != nil && in.Error.Code == peerwire.CodeTooSoon {
+		m.quotaTooSoon(p, in.Body, now)
 	}
 }
 

@@ -810,6 +810,12 @@ func (m *Manager) handleResponse(p *Peer, in *envelope.Inner, now time.Time) {
 		return
 	}
 	peer, ok := m.requests[in.Re]
+	if (!ok || peer != p.ID) && quotaRequest(p, in.Re) {
+		// One of p's quota refreshes still open, also one asked before a
+		// restart (m.requests is memory only): the issuer grants the
+		// first one, so its answer is taken whenever it comes (§7.2).
+		peer, ok = p.ID, true
+	}
 	if !ok || peer != p.ID {
 		if p.isService() {
 			// §6.4: a response from a service that matches no request.
@@ -823,8 +829,8 @@ func (m *Manager) handleResponse(p *Peer, in *envelope.Inner, now time.Time) {
 	} else if in.Type == "relay.token.refresh" && in.Error != nil && in.Error.Code == peerwire.CodeTooSoon {
 		m.quotaTooSoon(p, in.Re, in.Body, now)
 	}
-	if q := m.quotaAsk[p.ID]; q != nil {
-		delete(q.reqs, in.Re) // answered
+	if quotaRequest(p, in.Re) {
+		m.forgetRequest(p, in.Re) // answered
 	}
 }
 

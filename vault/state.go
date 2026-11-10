@@ -234,6 +234,13 @@ type Peer struct {
 	// quota_exceeded without `quota` (a relay before 0.9.2) was read as the
 	// mailbox's (§8.6): under that token every later one is read so too.
 	QuotaMailbox string `json:"quota_mailbox,omitempty"`
+	// QuotaReqs are the request ids of the quota refreshes (§7.2) still
+	// open, asked under the standing token QuotaReqTok names (tokenTag):
+	// an answer to any of them is taken, also after a restart (the
+	// issuer grants the first and answers the later ones too_soon). At
+	// most quotaReqsMax; forgotten once another standing token is held.
+	QuotaReqs   []string `json:"quota_reqs,omitempty"`
+	QuotaReqTok string   `json:"quota_req_tok,omitempty"`
 	// Carried are the tokens a reconnect hs.init of the peer's carried, for
 	// each epoch the vault activated as responder and has not yet adopted
 	// them in (VAULT-MESSAGING 0.88.2 §6.3.1 "A handshake's tokens are

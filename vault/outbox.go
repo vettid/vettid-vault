@@ -192,6 +192,13 @@ func (m *Manager) sendLocking(ctx context.Context) map[string]bool {
 	return ok
 }
 
+// memberDeposit reports whether e is a durable deposit to its peer that
+// 0.88.7 §8.3 "Not delivered" covers: not a handshake message, an
+// hs.confirm or a best-effort notice.
+func memberDeposit(e *OutboxEntry) bool {
+	return e.Op == OpDeposit && !e.Handshake && !e.Confirm && !e.BestEffort
+}
+
 // outboxPending reports whether deposits to peer are still queued.
 func (m *Manager) outboxPending(peer string) bool {
 	for _, e := range m.st.Outbox {
@@ -374,6 +381,9 @@ func (m *Manager) deposit(ctx context.Context, e *OutboxEntry, now time.Time) er
 		return nil
 	}
 	_, err := m.relay.Deposit(ctx, e.RelayURL, e.Mailbox, tok, e.Payload)
+	if err == nil || RelayCode(err) == "" {
+		e.Tried = true // 0.88.7 §8.3: it may have reached the relay
+	}
 	if err == nil {
 		return nil
 	}
@@ -406,7 +416,9 @@ func (m *Manager) deposit(ctx context.Context, e *OutboxEntry, now time.Time) er
 			p.State = PeerStale
 			m.audit(now, "peer_stale", p.ID)
 			for _, o := range m.st.Outbox {
-				if o.PeerID == p.ID {
+				if o.PeerID == p.ID && !o.Done && p.Kind == KindConnection && memberDeposit(o) {
+					m.notDelivered(o, "undelivered_mailbox_unknown", now) // 0.88.7 §8.3: never silently
+				} else if o.PeerID == p.ID {
 					o.Done = true
 				}
 			}

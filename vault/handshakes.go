@@ -1102,6 +1102,17 @@ func (m *Manager) activate(p *Peer, ep *handshake.Epoch, purpose handshake.Purpo
 		kr = &handshake.Keyring{}
 		m.sessions[p.ID] = kr
 	}
+	if o.how != actInstalled {
+		// 0.88.7 §8.3 "Re-sealed at a key change" (GC #7160 cause 2): the
+		// entries waiting under the epoch being replaced go back to held;
+		// sealHeld below seals them under ep (a confirmed pending epoch's
+		// were, by confirmPending, before the keyring switched).
+		m.resealAtKeyChange(p, kr)
+	}
+	// 0.88.7 §3.4.1 "The reconnect bound" (owner decision b, GC #7213 Q1):
+	// stale is not final; the peer's rekey or reconnect makes it active
+	// again, its held messages are sent (sealHeld) and the member is told.
+	revived := !isNew && p.Kind == KindConnection && p.State == PeerStale
 	switch o.how {
 	case actKeepRK:
 		kr.ActivateKeeping(ep, now, o.until, handshake.KeepRK)
@@ -1138,6 +1149,11 @@ func (m *Manager) activate(p *Peer, ep *handshake.Epoch, purpose handshake.Purpo
 		p.Suite = ep.Suite() // §13.4 pin
 	}
 	p.State = PeerActive
+	if revived {
+		// The feed item: "Your connection with <name> works again." (app
+		// text, owner-approved 2026-11-10, GC #7229).
+		m.record(Activity{Kind: "connection.active_again", ConnectionID: p.ID, Ref: p.ID, Audit: true, Feed: true}, now)
+	}
 	for _, t := range issued {
 		t.PeerID = p.ID
 		t.Handshake = true // 0.88.2 §7.2: the quota refresh spares the newest

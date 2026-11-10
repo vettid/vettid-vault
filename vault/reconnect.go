@@ -69,17 +69,17 @@ func (m *Manager) reconnectNaming(p *Peer, ctx []byte, why string, now time.Time
 // markStale makes connection p stale (§3.4.1 "The reconnect bound"):
 // audited connection.stale with its feed item ("Your connection with
 // <name> stopped working. Send them a new invitation.", app text), so a
-// new invitation from that peer is accepted (§6.4).
+// new invitation from that peer is accepted (§6.4). (0.88.7) Stale is not
+// final: the peer's rekey or reconnect can make it active again
+// (activate, connection.active_again), so the outbox keeps its entries,
+// held ones included; a removal or a replacement ends them (notDelivered).
 func (m *Manager) markStale(p *Peer, now time.Time) {
 	if p.State == PeerStale {
 		return
 	}
 	p.State = PeerStale
-	for _, e := range m.st.Outbox {
-		if !e.Done && e.PeerID == p.ID && e.Held != nil {
-			e.Done, e.Held = true, nil // held for an epoch that will not come (review 2)
-		}
-	}
+	// Held entries are kept (0.88.7, GC #7160 cause 1; until then they
+	// were dropped here, unaudited, and lost when the connection came back).
 	m.abandonHandshakes(p, true, true, now)
 	if p.Pending != nil {
 		m.abandonPending(p, "stale", false, now)

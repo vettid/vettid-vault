@@ -831,9 +831,14 @@ type OutboxEntry struct {
 	Held []byte `json:"held,omitempty"`
 	// HeldExp is the held message's exp (zero: none): past it the entry
 	// is discarded, not sealed (0.86.2).
-	HeldExp   time.Time `json:"held_exp,omitzero"`
-	FinEpoch  []byte    `json:"fin_epoch,omitempty"`
-	Handshake bool      `json:"handshake,omitempty"`
+	HeldExp time.Time `json:"held_exp,omitzero"`
+	// Tried (0.88.7 §8.3): a deposit of this entry may have reached the
+	// relay (accepted, or no relay answer: a transport error, or a 5xx
+	// without a relay error code), so the peer may hold its inner id: a
+	// re-seal keeps its ts (sealHeld).
+	Tried     bool   `json:"tried,omitempty"`
+	FinEpoch  []byte `json:"fin_epoch,omitempty"`
+	Handshake bool   `json:"handshake,omitempty"`
 }
 
 // AuditEntry records a dropped or refused message (§6.3, §6.6, §7.3).

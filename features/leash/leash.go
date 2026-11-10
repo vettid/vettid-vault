@@ -1157,6 +1157,14 @@ func matchesDelegation(g *Grant, agentIK []byte) bool {
 	if !g.Expires.Truncate(time.Second).Equal(d.Expires) || d.Limits == nil && (g.PerHour != 0 || g.PerDay != 0) {
 		return false
 	}
+	// Stored values the delegation's form cannot carry: a share rule (an
+	// initial grant is never items.read), a scope this build does not
+	// delegate, a status_ttl with a fraction of a second, and an empty
+	// (rather than absent) connection list.
+	if g.Rule != nil || !delegable[g.Scope] || g.Scope == ScopeItems || g.StatusTTL%time.Second != 0 ||
+		g.Connections != nil && len(g.Connections) == 0 {
+		return false
+	}
 	want := delegationOf(g, d.Iss, agentIK, d.StatusIssuer, d.Nonce, d.IssuedAt).Marshal()
 	return bytes.Equal(want, g.Delegation)
 }
@@ -1357,9 +1365,10 @@ func (f *Feature) PrepareAgentGrants(s *vault.Session, agentIK []byte, raw json.
 // pairing completes with is the empty one, and it still takes its
 // grant_seq (§10.11).
 //
-// §10.11 "Initial grants at pairing" (0.88.5): if the prepared set no
-// longer decodes (for example after a build change between the approval
-// and the pairing's completion), none of it is installed, not even what
+// §10.11 "Initial grants at pairing" (0.88.5): if the prepared set does
+// not decode (today the approval and the completion run in one call, so
+// this is defence in depth against damaged state), none of it is
+// installed, not even what
 // decoded before the error, and one leash.grant.dropped is recorded with
 // ref damaged. Otherwise each grant is installed unless dropReason gives
 // a reason, which is recorded as leash.grant.dropped. The pairing
@@ -1400,8 +1409,9 @@ const (
 )
 
 // decodePairGrants decodes the sealed PairGrants strictly: an unknown
-// field (one a later or earlier build named differently) or trailing data
-// is damage, like a wrong type. Empty is the empty set.
+// field, trailing data or null (PrepareAgentGrants makes 1–MaxGrants
+// grants) is damage, like a wrong type. Empty is the empty set: a pairing
+// without initial grants.
 func decodePairGrants(prepared json.RawMessage) ([]*Grant, bool) {
 	if len(prepared) == 0 {
 		return nil, true
@@ -1409,7 +1419,7 @@ func decodePairGrants(prepared json.RawMessage) ([]*Grant, bool) {
 	dec := json.NewDecoder(bytes.NewReader(prepared))
 	dec.DisallowUnknownFields()
 	var gs []*Grant
-	if dec.Decode(&gs) != nil {
+	if dec.Decode(&gs) != nil || gs == nil {
 		return nil, false
 	}
 	if _, err := dec.Token(); err != io.EOF {

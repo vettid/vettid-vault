@@ -12,14 +12,19 @@ import (
 )
 
 // droppedFor is the refs of the leash.grant.dropped entries recorded for
-// device, in order. An entry that is not in the audit log shows as
-// "not-audit:<ref>", which no test wants.
+// device, in order. An entry that is not in the audit log only shows as
+// "not-audit:<ref>", and one that also makes a feed item as
+// "feed:<ref>", which no test wants (§10.9: the audit log only).
 func droppedFor(r *rig, device string) []string {
 	var out []string
 	for _, a := range r.h.Activities {
 		if a.Kind == "leash.grant.dropped" && a.DeviceID == device {
-			if !a.Audit {
+			switch {
+			case !a.Audit:
 				out = append(out, "not-audit:"+a.Ref)
+				continue
+			case a.Feed:
+				out = append(out, "feed:"+a.Ref)
 				continue
 			}
 			out = append(out, a.Ref)
@@ -125,6 +130,22 @@ func TestPairGrantDropped(t *testing.T) {
 			g["id"] = mustJSON(t, "01JB2Z6V9K3M4N5P6Q7R8S9T0V")
 			return g
 		}, DropMismatch},
+		{"a share rule", func(t *testing.T, r *rig, g map[string]json.RawMessage) map[string]json.RawMessage {
+			g["rule"] = json.RawMessage(`{"tags":[],"match":"","access":""}`)
+			return g
+		}, DropMismatch},
+		{"a status_ttl with a fraction of a second", func(t *testing.T, r *rig, g map[string]json.RawMessage) map[string]json.RawMessage {
+			var ttl time.Duration
+			if err := json.Unmarshal(g["status_ttl"], &ttl); err != nil {
+				t.Fatal(err)
+			}
+			g["status_ttl"] = mustJSON(t, ttl+999*time.Millisecond)
+			return g
+		}, DropMismatch},
+		{"an empty connection list", func(t *testing.T, r *rig, g map[string]json.RawMessage) map[string]json.RawMessage {
+			g["connections"] = json.RawMessage(`[]`)
+			return g
+		}, DropMismatch},
 		{"a delegation not in canonical form", func(t *testing.T, r *rig, g map[string]json.RawMessage) map[string]json.RawMessage {
 			var d []byte
 			if err := json.Unmarshal(g["delegation"], &d); err != nil || len(d) < 2 || d[0] != '{' {
@@ -156,6 +177,11 @@ func TestPairGrantDropped(t *testing.T) {
 			}
 			if n := issuedFor(r, newAgent); n != wantN {
 				t.Fatalf("%d leash.grant.issued, want %d", n, wantN)
+			}
+			for _, a := range r.h.Activities {
+				if a.Kind == "leash.grant.issued" && (!a.Audit || a.Feed) {
+					t.Fatalf("leash.grant.issued: audit %v, feed %v; want the audit log only", a.Audit, a.Feed)
+				}
 			}
 			if n, told := lastUpdate(t, r, newAgent); told != 1 || n == 0 {
 				t.Fatalf("the pairing: %d updates, grant_seq %d", told, n)
@@ -200,6 +226,9 @@ func TestPairGrantDroppedDamagedSet(t *testing.T) {
 		}},
 		{"trailing data", func(t *testing.T, gs []map[string]json.RawMessage) json.RawMessage {
 			return append(mustJSON(t, gs), []byte(` []`)...)
+		}},
+		{"null", func(t *testing.T, gs []map[string]json.RawMessage) json.RawMessage {
+			return json.RawMessage(`null`)
 		}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -269,6 +298,32 @@ func TestPairGrantDroppedExpiryCapAndOrder(t *testing.T) {
 			t.Fatalf("recorded %v, want [expired mismatch]", got)
 		}
 	})
+	// Mismatched and expired: mismatch. Its id taken and the agent at the
+	// cap: id_taken (and the next grant, cap).
+	t.Run("order: mismatch before expired", func(t *testing.T) {
+		r := newRig(t)
+		ag, gs := pairEdits(t, r, "dev-agent-x", raw)
+		gs[0]["scope"] = mustJSON(t, "connection.get")
+		r.f.AgentPaired(appSession(r, exp), "dev-agent-x", ag.IK, mustJSON(t, gs))
+		if got := droppedFor(r, "dev-agent-x"); fmt.Sprint(got) != "[mismatch]" {
+			t.Fatalf("recorded %v, want [mismatch]", got)
+		}
+	})
+	t.Run("order: id_taken before cap", func(t *testing.T) {
+		r := newRig(t)
+		ag, gs := pairEdits(t, r, "dev-agent-x", `[{"scope":"profile.get"},{"scope":"connection.list"}]`)
+		var first string
+		_ = json.Unmarshal(gs[0]["id"], &first)
+		r.f.d.Grants[first] = &Grant{ID: first, AgentID: "dev-agent-x", Scope: "profile.get"}
+		for i := 0; i < MaxGrants-1; i++ {
+			id := fmt.Sprintf("held-%02d", i)
+			r.f.d.Grants[id] = &Grant{ID: id, AgentID: "dev-agent-x", Scope: "profile.get"}
+		}
+		r.f.AgentPaired(appSession(r, t0), "dev-agent-x", ag.IK, mustJSON(t, gs))
+		if got := droppedFor(r, "dev-agent-x"); fmt.Sprint(got) != "[id_taken cap]" {
+			t.Fatalf("recorded %v, want [id_taken cap]", got)
+		}
+	})
 }
 
 // Two stored values the rebuilt delegation alone would not catch: an
@@ -281,6 +336,15 @@ func TestPairGrantDroppedDirectComparisons(t *testing.T) {
 		ag, gs := pairEdits(t, r, "dev-agent-x", fmt.Sprintf(`[{"scope":"profile.get","expires_at":"%s"}]`,
 			envelope.FormatTS(t0.Add(500*time.Millisecond))))
 		r.f.AgentPaired(appSession(r, t0.Add(100*time.Millisecond)), "dev-agent-x", ag.IK, mustJSON(t, gs))
+		if n, got := r.f.count("dev-agent-x"), droppedFor(r, "dev-agent-x"); n != 0 || fmt.Sprint(got) != "[mismatch]" {
+			t.Fatalf("%d installed, recorded %v", n, got)
+		}
+	})
+	t.Run("an empty connection list on a grant signed without one", func(t *testing.T) {
+		r := newRig(t)
+		ag, gs := pairEdits(t, r, "dev-agent-x", `[{"scope":"message.send"}]`)
+		gs[0]["connections"] = json.RawMessage(`[]`)
+		r.f.AgentPaired(appSession(r, t0), "dev-agent-x", ag.IK, mustJSON(t, gs))
 		if n, got := r.f.count("dev-agent-x"), droppedFor(r, "dev-agent-x"); n != 0 || fmt.Sprint(got) != "[mismatch]" {
 			t.Fatalf("%d installed, recorded %v", n, got)
 		}

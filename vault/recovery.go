@@ -400,7 +400,11 @@ func (m *Manager) applyRecovery(now time.Time) {
 	}
 	m.hdr.RecoveryLog = nil
 	r := m.hdr.Recovery
-	for _, p := range m.st.Devices {
+	for _, sortedK := range sortedKeys(m.st.Devices) {
+		p, sortedOK := m.st.Devices[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if p.Recovering && (r == nil || r.App == nil || !suite.EqualPublic(r.App.IK, p.IK)) {
 			m.removePeer(p, "device.unlinked", now)
 		}
@@ -454,4 +458,4 @@ func (m *Manager) completeRecovery(deviceID string, now time.Time) error {
 // 0.16.0 removed credential.reset and vault.delete: there is no recovery
 // with the backup off.
 var recoveryAllowed = map[string]bool{"credential.recover": true, "credential.utk.get": true, "vault.status": true,
-	"relay.token.issued": true, "relay.token.refresh": true, "relay.address.update": true}
+	"relay.token.issued": true, "relay.token.refresh": true, "relay.address.update": true, TypeDeviceFeatures: true}

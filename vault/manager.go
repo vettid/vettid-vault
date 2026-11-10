@@ -45,6 +45,9 @@ var (
 	ErrMissing    = errors.New("vault: vault missing")
 	ErrCrash      = errors.New("vault: simulated crash")
 	ErrRelease    = errors.New("vault: sealed to another release")
+	// ErrStateUnsupported: a state without messaging_release 29 or more
+	// (R29-U1, §6.3.1 "No upgrade").
+	ErrStateUnsupported = errors.New("vault: state from before release 29")
 )
 
 // Options configure a Manager.
@@ -219,6 +222,12 @@ const EventAppKey = "app_key"
 
 // Hooks let tests and supervisors observe or interrupt processing.
 type Hooks struct {
+	// Adopt, if set, is called in the write in which the vault starts to
+	// hold token tok of kind (standing, reconnect) for the peer; from is
+	// "carried" (an adoption of a handshake's carried tokens, 0.88.2
+	// R29-T1) or "issued" (relay.token.issued). The random pair's oracle
+	// judges it against the issuer's registry.
+	Adopt func(peerID, kind, tok, from string)
 	// AfterFlush runs after a batch's state flush and before its acks. An
 	// error stops processing there, like a crash: nothing is acked and the
 	// in-memory state is discarded.
@@ -239,6 +248,19 @@ type Manager struct {
 	// relayAt is the relay time of the message being handled (see
 	// Session.RelayTime); set by handleMessage.
 	relayAt time.Time
+	// msgID is the relay msg_id of the message being handled: with
+	// relayAt, its position (§3.4.1 "Terms", 0.86.0).
+	msgID string
+	// msgJTI is the collect jti of the message being handled (RELAY-PROTOCOL 0.4.0 §6.3): the token it was deposited
+	// under, "" when the relay gave none.
+	msgJTI string
+	// noLinkRestart: followLinks runs inside handleResp, whose own
+	// handshake is about to make the new epoch: it restarts nothing.
+	noLinkRestart bool
+	// reconfirm are the peers a batch held a message from under their
+	// confirmed epoch while it is not current: each gets hs.confirm again
+	// after the batch unless one is still in the outbox (§6.3.1).
+	reconfirm map[string]bool
 	// featureReqs are the requests features sent (Host.SendRequest) and
 	// await an answer to; memory only, so an answer after a restart is dropped
 	// like any that matches no request.
@@ -551,7 +573,7 @@ func Create(ctx context.Context, p CreateParams) (*Manager, error) {
 		return nil, err
 	}
 	st := &State{
-		V: 1, VaultID: p.VaultID, UserGUID: p.UserGUID,
+		V: 1, VaultID: p.VaultID, UserGUID: p.UserGUID, MessagingRelease: MessagingRelease,
 		Relay:        RelayState{URL: p.RelayURL, Seed: seeds[0]},
 		IdentitySeed: seeds[1], KEMSeed: seeds[2], WakeSeed: seeds[3],
 		SealedRelease: p.Release.PCR0, AnnouncedRelease: p.Release.PCR0,
@@ -803,7 +825,11 @@ func (m *Manager) restoreLive() error {
 	// In-flight handshakes and requests that do not restore (made by an
 	// earlier release, before 0.10.3) are dropped: they would fail anyway,
 	// and the vault must still unlock.
-	for id, aw := range m.st.Awaiting {
+	for _, id := range sortedKeys(m.st.Awaiting) {
+		aw, sortedOK := m.st.Awaiting[id]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		r, err := handshake.RestoreResponder(aw.Resp)
 		if err != nil {
 			delete(m.st.Awaiting, id)
@@ -812,7 +838,11 @@ func (m *Manager) restoreLive() error {
 		}
 		m.awaiting[id] = r
 	}
-	for id, og := range m.st.Outgoing {
+	for _, id := range sortedKeys(m.st.Outgoing) {
+		og, sortedOK := m.st.Outgoing[id]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if og.Replaced && og.New == nil && og.Purpose == handshake.PurposeRekey {
 			// A rekey of the replaced line (§6.6) is kept as fork evidence
 			// only: restored without an identity key, so it verifies a
@@ -842,7 +872,11 @@ func (m *Manager) restoreLive() error {
 		}
 		m.outgoing[id] = i
 	}
-	for id, r := range m.st.Requests {
+	for _, id := range sortedKeys(m.st.Requests) {
+		r, sortedOK := m.st.Requests[id]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		e, err := handshake.ImportEpoch(r.Epoch)
 		if err != nil || r.Peer == nil {
 			delete(m.st.Requests, id)
@@ -866,12 +900,20 @@ func (m *Manager) exportLive() {
 			r.Epoch = e.Export()
 		}
 	}
-	for id, r := range m.awaiting {
+	for _, id := range sortedKeys(m.awaiting) {
+		r, sortedOK := m.awaiting[id]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if s, err := r.Export(); err == nil {
 			m.st.Awaiting[id].Resp = s
 		}
 	}
-	for id, i := range m.outgoing {
+	for _, id := range sortedKeys(m.outgoing) {
+		i, sortedOK := m.outgoing[id]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if s, err := i.Export(); err == nil {
 			m.st.Outgoing[id].Init = s
 		}
@@ -885,10 +927,18 @@ func (m *Manager) exportLive() {
 
 func (m *Manager) allPeers() []*Peer {
 	out := make([]*Peer, 0, len(m.st.Devices)+len(m.st.Connections))
-	for _, p := range m.st.Devices {
+	for _, sortedK := range sortedKeys(m.st.Devices) {
+		p, sortedOK := m.st.Devices[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		out = append(out, p)
 	}
-	for _, p := range m.st.Connections {
+	for _, sortedK := range sortedKeys(m.st.Connections) {
+		p, sortedOK := m.st.Connections[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		out = append(out, p)
 	}
 	return out
@@ -1062,7 +1112,11 @@ func (m *Manager) syncUnlockKeys() {
 		return fallback
 	}
 	var keys []UnlockKey
-	for _, p := range m.st.Devices {
+	for _, sortedK := range sortedKeys(m.st.Devices) {
+		p, sortedOK := m.st.Devices[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if p.Recovering && !m.hdr.isRecoveryKey(p.IK) {
 			continue // its recovery was cancelled (§11.11.4)
 		}
@@ -1077,7 +1131,11 @@ func (m *Manager) syncUnlockKeys() {
 	// recovered phone is one from the completion until its pairing (its
 	// invite), and a transfer's or recovery's new phone is in the `next`
 	// part until step 3 (findUnlockKey).
-	for _, inv := range m.st.Invites {
+	for _, sortedK := range sortedKeys(m.st.Invites) {
+		inv, sortedOK := m.st.Invites[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		// Kept until the phone pairs, past the invite's expiry: a lost
 		// ok is resumed by this phone's unlock (owner decision of
 		// 2026-10-16, §11.14.6).
@@ -1183,10 +1241,18 @@ func (m *Manager) zeroize() {
 	for _, e := range m.reqEpochs {
 		e.Destroy()
 	}
-	for _, r := range m.awaiting {
+	for _, sortedK := range sortedKeys(m.awaiting) {
+		r, sortedOK := m.awaiting[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		r.Abort()
 	}
-	for _, i := range m.outgoing {
+	for _, sortedK := range sortedKeys(m.outgoing) {
+		i, sortedOK := m.outgoing[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		i.Abort()
 	}
 	m.reqEpochs, m.awaiting, m.outgoing = nil, nil, nil
@@ -1523,8 +1589,17 @@ func (m *Manager) reportAppKey() {
 }
 
 // StateVersion is the vault-state format version reported in lifecycle
-// events (§11.5).
-const StateVersion = 2 // release R: format 0x02 (§11.14.1, §11.5)
+// events (§11.5). Release R raised it to 2 (format 0x02, §11.14.1);
+// release 29 raises it to 3 (§6.3.1 "No upgrade": messaging_release).
+const StateVersion = 3
+
+// MessagingRelease is the state marker this release writes and the
+// smallest it opens (§6.3.1 "No upgrade: release 29 starts clean").
+const MessagingRelease = 29
+
+// stateSupported reports whether a state opened from the store may run
+// (R29-U1): its messaging_release is 29 or more.
+func stateSupported(st *State) bool { return st.MessagingRelease >= MessagingRelease }
 
 // Crash discards the in-memory vault without flushing (tests: process
 // death).

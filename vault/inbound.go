@@ -54,7 +54,11 @@ func (m *Manager) Start(ctx context.Context) error {
 	m.remintIssued(now)
 	m.markDeviceTokens(now)
 	m.reconnectExpired(now)
-	for _, p := range m.st.Devices {
+	for _, sortedK := range sortedKeys(m.st.Devices) {
+		p, sortedOK := m.st.Devices[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if p.State == PeerActive {
 			m.startRekey(p, now) // device sessions rekey on every unlock (§6.5)
 		}
@@ -225,6 +229,7 @@ func (m *Manager) ProcessBatch(ctx context.Context, c Collector, msgs []Message)
 			return ErrSplitBrain
 		}
 	}
+	m.reconfirmAll(now) // §6.3.1: hs.confirm again, once per batch, unless one is queued
 	if len(msgs) < MaxBatch {
 		m.attDrained()
 		m.drainedOnce = true
@@ -281,7 +286,7 @@ func (m *Manager) handleMessage(ctx context.Context, msg Message, now time.Time)
 		return ackAfterFlush // relay msg_id dedupe (§8.2 layer 1)
 	}
 	m.st.SeenMsgIDs[msg.MsgID] = now
-	m.relayAt = time.Time{}
+	m.relayAt, m.msgID, m.msgJTI = time.Time{}, msg.MsgID, msg.JTI
 	if t, err := time.Parse(time.RFC3339Nano, msg.DepositedAt); err == nil {
 		m.relayAt = t.UTC()
 	}
@@ -353,7 +358,11 @@ func (m *Manager) handleSealed(ctx context.Context, env *envelope.Envelope, raw 
 	if m.lookupKEM(rk) != nil {
 		return m.handleInit(ctx, raw, sender, p, false, now)
 	}
-	for id, og := range m.st.Outgoing {
+	for _, id := range sortedKeys(m.st.Outgoing) {
+		og, sortedOK := m.st.Outgoing[id]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if kid, err := kidFrom(og.EphKid); err == nil && kid.Equal(rk) {
 			return m.handleResp(ctx, id, raw, sender, now)
 		}
@@ -385,12 +394,20 @@ func kidFrom(b []byte) (suite.Kid, error) {
 }
 
 func (m *Manager) peerByRelayKey(pk ed25519.PublicKey) *Peer {
-	for _, p := range m.st.Devices {
+	for _, sortedK := range sortedKeys(m.st.Devices) {
+		p, sortedOK := m.st.Devices[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if suite.EqualPublic(p.Relay.PK, pk) {
 			return p
 		}
 	}
-	for _, p := range m.st.Connections {
+	for _, sortedK := range sortedKeys(m.st.Connections) {
+		p, sortedOK := m.st.Connections[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if suite.EqualPublic(p.Relay.PK, pk) {
 			return p
 		}
@@ -417,6 +434,24 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 		// Release R (§3.4): a connection with two successors of one key
 		// is suspended; nothing is accepted from either.
 		m.audit(now, "rotation_conflict_drop", p.ID)
+		return ackAfterFlush
+	}
+	// 0.86.0 (§6.3.1): a confirmation takes effect before anything else is
+	// done with the message (dedupe, the ts window, its handler).
+	if m.evidenceFirst(p, in, now) || m.beforeAccept(p, ep, in, now) {
+		return ackAfterFlush
+	}
+	// §10.8: counted once the message is not refused for its epoch
+	// (destroyed, demoted; review L4).
+	m.noteFeatures(p, in.Features)
+	m.idResend(p, ep, in, now)
+	if in.Type == handshake.TypeConfirm { // 0ee0078 inbound.go:481: an unknown type, unsupported_type
+		return ackAfterFlush // not a request: never answered; one that confirms nothing is ignored, unaudited
+	}
+	if in.Type == handshake.TypeFin {
+		// (0.88.2, the final review's F3) An hs.fin whose answer is gone (a
+		// duplicate after the epoch was established) is acked and ignored, as
+		// an hs.confirm that confirms nothing, never answered unsupported_type.
 		return ackAfterFlush
 	}
 	if in.Type == handshake.TypeInit {
@@ -543,7 +578,7 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 			return disp(eph)
 		}
 	}
-	s := &Session{m: m, peer: p, host: managerHost{m}, from: info(p), ctx: ctx, now: now, inner: in, relayAt: m.relayAt}
+	s := &Session{m: m, peer: p, host: managerHost{m}, from: info(p), ctx: ctx, now: now, inner: in, relayAt: m.relayAt, epoch: ep}
 	allowed := te.allows(p.Kind) && !(p.Recovering && !recoveryAllowed[in.Type])
 	if (p.Kind == KindAgent || p.Kind == KindDesktop) && !te.spec.DesktopApproval {
 		if af, ok := te.handler.(AppOnlyForms); ok && af.AppOnly(in.Type, in.Body) {
@@ -705,6 +740,7 @@ func (m *Manager) sendResponse(p *Peer, req *envelope.Inner, key string, out *en
 		return
 	}
 	out.ID, out.TS = id, now
+	out.Features = m.featuresFor(p) // counted in the size (0.86.0, §5.3)
 	// §8.1 (0.32.0): a response is never silence. One that cannot be
 	// sealed within §5.5's bound is replaced by response_too_large, which
 	// is cached and sent instead (sent only, for a volatile request).
@@ -716,7 +752,7 @@ func (m *Manager) sendResponse(p *Peer, req *envelope.Inner, key string, out *en
 		if kr == nil || kr.Current() == nil {
 			return
 		}
-		raw, err := kr.Current().Seal(out)
+		raw, err := m.sealFor(p, kr.Current(), out)
 		if err != nil {
 			return
 		}
@@ -750,6 +786,7 @@ func (m *Manager) resendCached(p *Peer, raw []byte) {
 	if err != nil {
 		return
 	}
+	in.Features = m.featuresFor(p)
 	if !m.fits(in) {
 		in = tooLarge(in) // cached by a release before §8.1's rule
 	}
@@ -782,6 +819,16 @@ func (m *Manager) handleResponse(p *Peer, in *envelope.Inner, now time.Time) {
 	delete(m.requests, in.Re)
 	if in.Type == "relay.token.refresh" && in.Status == envelope.StatusOK {
 		m.storeIssuedTo(p, in.Body, now)
+	}
+}
+
+// note keeps an event in the vault's internal audit entries only: no
+// activity (§10.9) and so no History line. For the bookkeeping of 0.86.0
+// (an epoch abandoned, destroyed or demoted, a reconnect started).
+func (m *Manager) note(now time.Time, event, peer string) {
+	m.st.Audit = append(m.st.Audit, AuditEntry{At: now, Event: event, PeerID: peer})
+	if n := len(m.st.Audit); n > AuditMax {
+		m.st.Audit = append([]AuditEntry(nil), m.st.Audit[n-AuditMax:]...)
 	}
 }
 

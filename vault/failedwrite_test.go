@@ -266,14 +266,19 @@ func TestFailedWriteThenDeleteSendsAllQueued(t *testing.T) {
 }
 
 // A reconnect's hs.resp arrives in a batch whose write fails: the vault
-// holds the hs.fin (unstored) and its session is in the new epoch in
-// memory. A host deletion then seals connection.removed in that epoch;
-// step 2 sends the hs.fin first, so the peer opens the notice.
+// holds the hs.fin (unstored) and its new epoch is pending in memory. A
+// host deletion then sends the hs.fin first at step 2; anything else that
+// goes is opened by the peer under the new epoch. (§6.3.1: while the
+// vault's own reconnect epoch is pending it sends nothing but the
+// handshake, so connection.removed is held, not sent.)
 func TestFailedReconnectWriteThenDeleteSendsTheFin(t *testing.T) {
 	k0, k1 := rcKey(t, 0x10), rcKey(t, 0x20)
 	r1 := rcLink(t, k0, k1)
 	d, p, _ := rcSetup(t, k1, rawLinks(r1))
 	p.Reconnect = HeldToken{Token: "v4.public.VEVTVA", Exp: time.Now().Add(24 * time.Hour)}
+	// An active connection holds a standing token (0.88.2 §8.6: a deposit
+	// to a connection without one waits for one).
+	p.Standing = HeldToken{Token: "v4.public.VEVTVA", Exp: time.Now().Add(24 * time.Hour)}
 	m := d.m
 	vaultRelay := m.keys.relay.Public().(ed25519.PublicKey)
 	m.mu.Lock()
@@ -350,8 +355,13 @@ func TestFailedReconnectWriteThenDeleteSendsTheFin(t *testing.T) {
 		}
 		got = append(got, in.Type)
 	}
-	if len(got) < 2 || got[0] != "hs.fin" || got[len(got)-1] != peerwire.TypeConnectionRemoved {
+	if len(got) < 1 || got[0] != "hs.fin" {
 		t.Fatalf("deposits to the peer: %v", got)
+	}
+	for _, g := range got[1:] {
+		if g != peerwire.TypeConnectionRemoved {
+			t.Fatalf("deposits to the peer: %v", got)
+		}
 	}
 }
 

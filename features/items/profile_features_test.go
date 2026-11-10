@@ -29,10 +29,11 @@ func TestProfileFeaturesToService(t *testing.T) {
 	if len(svc) != 1 || len(per) != 1 {
 		t.Fatalf("%v", e.h.Sent)
 	}
-	if !strings.Contains(string(svc[0].Body), `"features":["vote"]`) || !strings.HasSuffix(string(svc[0].Body), `"items":[]}`) {
+	// 0.86.0: hs_confirm goes to every connection, after items (§10.8).
+	if !strings.HasSuffix(string(svc[0].Body), `"items":[],"features":["hs_confirm","vote"]}`) {
 		t.Errorf("service: %s", svc[0].Body)
 	}
-	if strings.Contains(string(per[0].Body), "features") {
+	if !strings.HasSuffix(string(per[0].Body), `,"features":["hs_confirm"]}`) {
 		t.Errorf("person: %s", per[0].Body)
 	}
 	// Already advertised: an unlock sends nothing.
@@ -56,7 +57,7 @@ func TestProfileFeaturesAddedByARelease(t *testing.T) {
 	s := vault.NewSession(context.Background(), h, vault.PeerInfo{}, now, nil)
 	old.Items.ConnectionAdded(s, "cB") // counts the core and sends the first update
 	first := toConn(h, "cB")
-	if len(first) != 1 || strings.Contains(string(first[0].Body), "features") {
+	if len(first) != 1 || !strings.Contains(string(first[0].Body), `"features":["hs_confirm"]`) {
 		t.Fatalf("without the feature: %v", first)
 	}
 	raw, err := old.Items.Save()
@@ -72,7 +73,7 @@ func TestProfileFeaturesAddedByARelease(t *testing.T) {
 	s = vault.NewSession(context.Background(), h, vault.PeerInfo{}, now, nil)
 	now2.Items.Unlocked(s)
 	ups := toConn(h, "cB")
-	if len(ups) != 1 || ups[0].To != "cB" || !strings.Contains(string(ups[0].Body), `"features":["vote"]`) {
+	if len(ups) != 1 || ups[0].To != "cB" || !strings.Contains(string(ups[0].Body), `"features":["hs_confirm","vote"]`) {
 		t.Fatalf("after the release: %v", h.Sent)
 	}
 	if !strings.Contains(string(first[0].Body), `"version":1`) || !strings.Contains(string(ups[0].Body), `"version":2`) {

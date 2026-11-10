@@ -30,6 +30,11 @@ const (
 	// CapVoteRows: other_rows and rows_unavailable of vote.results.submit
 	// (§10.19.6 step 3).
 	CapVoteRows = "vote_rows"
+	// CapHSConfirm: activation on confirmation (0.86.0, §6.3.1): the
+	// vault answers a device's rekey with hs.confirm and holds its own
+	// rekey's epoch pending until the device confirms it, toward a device
+	// that sends hs_confirm in device.features.
+	CapHSConfirm = "hs_confirm"
 )
 
 // Bounds on a capability list (§11.10.9).
@@ -44,9 +49,9 @@ const (
 // recovery_offered, compiled into the image like every release constant).
 func ReleaseCapabilities(offered bool) []string {
 	if offered {
-		return []string{CapAttachments, CapRecoveryOffered, CapRecoveryR, CapVoteRows}
+		return []string{CapAttachments, CapHSConfirm, CapRecoveryOffered, CapRecoveryR, CapVoteRows}
 	}
-	return []string{CapAttachments, CapRecoveryR, CapVoteRows}
+	return []string{CapAttachments, CapHSConfirm, CapRecoveryR, CapVoteRows}
 }
 
 // HasCapability reports whether caps names c.

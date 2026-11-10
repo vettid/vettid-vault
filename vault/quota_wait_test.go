@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/vettid/vettid-relay/relayclient"
+	"github.com/vettid/vettid-vault/vms/peerwire"
 )
 
 // A deposit refused for its standing token's quota (§8.6 quota_exceeded,
@@ -215,10 +216,11 @@ func TestQuotaTooSoonIsHonoured(t *testing.T) {
 	}
 }
 
-// Opus review M3 (owner question pending): the refresh itself refused for
-// the token's quota; nothing more is asked under it, and the entry goes
-// under the token the issuer re-mints (§7.2).
-func TestQuotaRefreshRefusedForTheTokenAsksNoMore(t *testing.T) {
+// Opus review M3, owner decision of 2026-11-10 (GC #6840, a): the refresh
+// itself refused for the token's quota (its msgs spent) starts a reconnect
+// at once; the note goes under the reconnect's fresh standing token, in
+// time (a wait for the issuer's re-mint would outlast MaxDurableAge).
+func TestQuotaRefreshRefusedForTheTokenReconnects(t *testing.T) {
 	f := newR29Fx(t)
 	q := qNotes{}
 	spent := f.p(0).Standing.Token
@@ -229,39 +231,29 @@ func TestQuotaRefreshRefusedForTheTokenAsksNoMore(t *testing.T) {
 		return nil
 	})
 	q.send(f, 0, "big")
+	f.advance(time.Minute)
 	f.settle()
 	if *refusals != 2 {
 		t.Fatalf("%d refusals, want 2 (the note, then its refresh)", *refusals)
 	}
-	if f.m(0).quotaAsk[f.p(0).ID].spent != tokenTag(spent) {
-		t.Fatal("the token is not known spent")
+	if !f.audited(0, "quota_refresh_refused") {
+		t.Fatal("the refused refresh is not noted")
 	}
-	f.advance(3 * time.Hour)
+	if f.m(0).requestPending(f.p(0).ID, tokenRefreshType) {
+		t.Fatal("the refused refresh's request is still pending")
+	}
+	f.advance(time.Minute)
 	f.tick(0)
-	f.settle()
-	if *refusals != 2 {
-		t.Fatalf("%d refusals: asked or sent again under the spent token", *refusals)
-	}
-	if e := q.entry(f, 0, "big"); e == nil || !e.NotBefore.Equal(f.p(0).Standing.Exp) {
-		t.Fatalf("entry %+v: not due at the token's exp (%v)", e, f.p(0).Standing.Exp)
-	}
-	// The issuer re-mints with under 10 days left; the note goes under it,
-	// but by then it is older than MaxDurableAge (16 days) and side 1 drops
-	// it (stale_or_future). Pinned: the gap the owner question on M3 is
-	// about (reconnect at once instead).
-	f.advance(f.p(0).Standing.Exp.Sub(f.clk) - 9*24*time.Hour)
-	f.tick(1)
 	f.settle()
 	if f.p(0).Standing.Token == spent {
-		t.Fatal("no re-minted token")
+		f.dump()
+		t.Fatal("no fresh standing token: no reconnect")
 	}
-	f.tick(0)
-	f.settle()
-	if q.entry(f, 0, "big") != nil {
-		t.Fatal("the note did not go under the re-minted token")
+	if got := strings.Join(f.got[1], " "); got != `{"n":"big"}` {
+		t.Fatalf("side 1 got %s", got)
 	}
-	if len(f.got[1]) != 0 || !f.audited(1, "stale_or_future") {
-		t.Fatalf("side 1 got %v: the known gap changed (update the M3 test)", f.got[1])
+	if *refusals != 2 {
+		t.Fatalf("%d refusals: sent again under the spent token", *refusals)
 	}
 }
 
@@ -363,4 +355,202 @@ func TestQuotaSeeds(t *testing.T) {
 			}
 		})
 	}
+}
+
+// refreshes counts side s's undone quota-refresh entries.
+func (f *r29Fx) refreshes(s int) int {
+	n := 0
+	for _, e := range f.m(s).st.Outbox {
+		if !e.Done && e.QuotaRefresh {
+			n++
+		}
+	}
+	return n
+}
+
+// Re-review M1: a refresh still queued (the relay down) is not asked
+// again beside it; its request is the only one open.
+func TestQuotaRefreshesDoNotPileUp(t *testing.T) {
+	f := newR29Fx(t)
+	q := qNotes{}
+	down := true
+	f.quotaRelayBy(0, q, func(_, body string) error {
+		switch {
+		case body == "big":
+			return &relayclient.Error{Status: 429, Code: CodeQuotaExceeded, Quota: relayclient.QuotaToken}
+		case down:
+			return &relayclient.Error{Status: 503}
+		}
+		return nil
+	})
+	q.send(f, 0, "big")
+	for i := 0; i < 6; i++ {
+		f.advance(time.Hour + time.Minute)
+		f.tick(0)
+	}
+	if n := f.refreshes(0); n != 1 {
+		t.Fatalf("%d refresh entries queued, want 1", n)
+	}
+	if n := len(f.m(0).quotaAsk[f.p(0).ID].reqs); n != 1 {
+		t.Fatalf("%d quota refresh requests open, want 1", n)
+	}
+	down = false
+	f.quotaRelay(0, q, relayclient.QuotaToken, nil)
+	f.advance(time.Hour + time.Minute)
+	f.tick(0)
+	f.settle()
+	if got := strings.Join(f.got[1], " "); got != `{"n":"big"}` {
+		t.Fatalf("side 1 got %s", got)
+	}
+}
+
+// Re-review M4: a refresh still queued when another fresh token came is
+// not sent under it (it would spend the issuer's daily quota refresh).
+func TestQuotaLeftoverRefreshIsNotSentUnderANewToken(t *testing.T) {
+	f := newR29Fx(t)
+	q := qNotes{}
+	old := f.p(0).Standing.Token
+	sent := 0
+	f.quotaRelayBy(0, q, func(tok, body string) error {
+		switch {
+		case tok == old && body == "big":
+			return &relayclient.Error{Status: 429, Code: CodeQuotaExceeded, Quota: relayclient.QuotaToken}
+		case tok == old:
+			return &relayclient.Error{Status: 503}
+		case body == "":
+			sent++
+		}
+		return nil
+	})
+	q.send(f, 0, "big")
+	if f.refreshes(0) != 1 {
+		t.Fatal("no refresh queued")
+	}
+	f.do(0, func(m *Manager, p *Peer) { // another fresh token (as the issuer's re-mint)
+		p.Standing.Token = "fresh." + old
+		m.retryPeer(p.ID)
+	})
+	f.advance(time.Minute)
+	f.tick(0)
+	if sent != 0 || f.refreshes(0) != 0 {
+		t.Fatalf("the leftover refresh: %d sent, %d queued", sent, f.refreshes(0))
+	}
+	if f.m(0).requestPending(f.p(0).ID, tokenRefreshType) {
+		t.Fatal("its request is still pending")
+	}
+}
+
+// Re-review L1: refused for its quota past the token's exp (the relay's
+// clock behind), the entry is not resent with the backoff: a reconnect.
+func TestQuotaRefusalPastTheExpReconnects(t *testing.T) {
+	f := newR29Fx(t)
+	q := qNotes{}
+	old := f.p(0).Standing.Token
+	refusals := f.quotaRelayBy(0, q, func(tok, body string) error {
+		if tok == old && body == "big" {
+			return &relayclient.Error{Status: 429, Code: CodeQuotaExceeded, Quota: relayclient.QuotaToken}
+		}
+		return nil
+	})
+	f.do(0, func(_ *Manager, p *Peer) { p.Standing.Exp = f.clk.Add(-time.Minute) })
+	q.send(f, 0, "big")
+	n := *refusals
+	for i := 0; i < 5; i++ {
+		f.advance(time.Minute)
+		f.tick(0)
+	}
+	if *refusals != n {
+		t.Fatalf("%d refusals after %d: resent under the refused token", *refusals, n)
+	}
+	if f.openReconnect(0) == nil {
+		t.Fatal("no reconnect")
+	}
+	if f.m(0).requestPending(f.p(0).ID, tokenRefreshType) {
+		t.Fatal("a refresh asked under an expired token")
+	}
+}
+
+// Re-review M2: a refresh the relay refused (not for its quota) ends its
+// request: requestPending is not held by it.
+func TestQuotaRefusedRefreshEndsItsRequest(t *testing.T) {
+	f := newR29Fx(t)
+	q := qNotes{}
+	f.quotaRelayBy(0, q, func(_, body string) error {
+		if body == "big" {
+			return &relayclient.Error{Status: 429, Code: CodeQuotaExceeded, Quota: relayclient.QuotaToken}
+		}
+		return &relayclient.Error{Status: 403, Code: "forbidden"}
+	})
+	q.send(f, 0, "big")
+	f.advance(time.Minute)
+	f.tick(0)
+	if f.refreshes(0) != 0 {
+		t.Fatal("the refused refresh is still queued")
+	}
+	if f.m(0).requestPending(f.p(0).ID, tokenRefreshType) {
+		t.Fatal("the refused refresh's request is still pending")
+	}
+}
+
+// Re-review M3: the mailbox reading is persisted: after a restart, a no-
+// quota refusal under the same token is still the mailbox's.
+func TestQuotaMailboxReadingSurvivesARestart(t *testing.T) {
+	f := newR29Fx(t)
+	q := qNotes{}
+	f.quotaRelay(0, q, "", map[string]bool{"big": true})
+	q.send(f, 0, "big")
+	f.advance(time.Minute)
+	f.settle() // fresh token; refused again: the mailbox's
+	if f.p(0).QuotaMailbox != tokenTag(f.p(0).Standing.Token) {
+		t.Fatal("the mailbox reading is not on the peer")
+	}
+	f.restart(0)
+	f.quotaRelay(0, q, "", map[string]bool{"other": true})
+	q.send(f, 0, "other")
+	f.advance(time.Minute)
+	f.tick(0)
+	if e := q.entry(f, 0, "other"); e == nil || e.QuotaWait || f.m(0).requestPending(f.p(0).ID, tokenRefreshType) {
+		t.Fatalf("entry %+v: read as the token's after a restart", e)
+	}
+}
+
+// Nit 1: the hourly bound on its own: made due again within the hour
+// (retryPeer), the entry asks for no second refresh.
+func TestQuotaAskedAtMostHourly(t *testing.T) {
+	f := newR29Fx(t)
+	q := qNotes{}
+	f.quotaRelay(0, q, relayclient.QuotaToken, map[string]bool{"big": true})
+	q.send(f, 0, "big")
+	f.lose(0, 1, kOther)
+	f.advance(30 * time.Minute)
+	f.do(0, func(m *Manager, p *Peer) { m.retryPeer(p.ID) })
+	f.tick(0)
+	if n := f.lose(0, 1, kOther); n != 0 {
+		t.Fatalf("%d refreshes asked within the hour", n)
+	}
+}
+
+// Nit 2: a reconnect's hs.init (its own token) passes a quota wait.
+func TestQuotaWaitLetsTheHandshakePass(t *testing.T) {
+	f := newR29Fx(t)
+	q := qNotes{}
+	f.quotaRelay(0, q, relayclient.QuotaToken, map[string]bool{"big": true})
+	q.send(f, 0, "big")
+	f.do(0, func(m *Manager, p *Peer) { m.startReconnect(p, f.clk) })
+	if n := f.deliver(0, 1, kHSInit); n != 1 {
+		t.Fatalf("%d hs.init delivered past the wait, want 1", n)
+	}
+}
+
+// Re-review L2: a too_soon answer to a refresh that was not a quota
+// refresh (the near-end one) sets no allowed_after.
+func TestQuotaTooSoonOnlyForAQuotaRefresh(t *testing.T) {
+	f := newR29Fx(t)
+	f.do(0, func(m *Manager, p *Peer) {
+		m.quotaFor(p.ID)
+		m.quotaTooSoon(p, "not-a-quota-refresh", peerwire.TooSoonBody(f.clk.Add(time.Hour)), f.clk)
+		if !m.quotaAsk[p.ID].after.IsZero() {
+			t.Fatal("allowed_after set by another refresh's too_soon")
+		}
+	})
 }

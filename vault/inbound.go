@@ -821,7 +821,10 @@ func (m *Manager) handleResponse(p *Peer, in *envelope.Inner, now time.Time) {
 	if in.Type == "relay.token.refresh" && in.Status == envelope.StatusOK {
 		m.storeIssuedTo(p, in.Body, now)
 	} else if in.Type == "relay.token.refresh" && in.Error != nil && in.Error.Code == peerwire.CodeTooSoon {
-		m.quotaTooSoon(p, in.Body, now)
+		m.quotaTooSoon(p, in.Re, in.Body, now)
+	}
+	if q := m.quotaAsk[p.ID]; q != nil {
+		delete(q.reqs, in.Re) // answered
 	}
 }
 

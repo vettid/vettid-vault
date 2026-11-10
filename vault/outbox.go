@@ -208,20 +208,20 @@ func (m *Manager) outboxPending(peer string) bool {
 // tokenQuota reports whether a deposit's quota_exceeded is its standing
 // token's (§8.6): `quota: token`; with no `quota` (a relay before 0.9.2),
 // the token's the first time, and the mailbox's for an entry refused
-// before and now tried under a fresh token, or for any entry under a
-// token the peer's quota was already read as the mailbox's under (sticky:
-// it never reverts to the token's under that token).
+// before and now tried under a fresh token, and for any entry under a
+// token the peer's quota was already read as the mailbox's under
+// (Peer.QuotaMailbox, persisted: it never reverts under that token).
 func (m *Manager) tokenQuota(err error, e *OutboxEntry, p *Peer) bool {
 	switch RelayQuota(err) {
 	case "token":
 		return true
 	case "":
 		tag := tokenTag(p.Standing.Token)
-		if q := m.quotaAsk[p.ID]; q != nil && q.mailbox == tag {
+		if p.QuotaMailbox == tag {
 			return false
 		}
 		if e.QuotaTok != "" && e.QuotaTok != tag {
-			m.quotaFor(p.ID).mailbox = tag
+			p.QuotaMailbox, m.dirty = tag, true
 			return false
 		}
 		return true
@@ -239,10 +239,9 @@ func tokenTag(tok string) string {
 // quotaAsk is what the vault knows of its quota refreshes to one peer, in
 // memory only: after a restart the waiting entries ask again when due.
 type quotaAsk struct {
-	at      time.Time // when askQuotaRefresh last asked
-	after   time.Time // the peer's too_soon allowed_after (§7.2)
-	spent   string    // tokenTag of a standing token whose refresh was itself refused for its quota
-	mailbox string    // tokenTag of a standing token a quota without `quota` was read as the mailbox's under
+	at    time.Time       // when askQuotaRefresh last asked
+	after time.Time       // the peer's too_soon allowed_after to a quota refresh (§7.2)
+	reqs  map[string]bool // the request ids of the quota refreshes still open
 }
 
 func (m *Manager) quotaFor(peer string) *quotaAsk {
@@ -251,63 +250,98 @@ func (m *Manager) quotaFor(peer string) *quotaAsk {
 	}
 	q := m.quotaAsk[peer]
 	if q == nil {
-		q = &quotaAsk{}
+		q = &quotaAsk{reqs: map[string]bool{}}
 		m.quotaAsk[peer] = q
 	}
 	return q
 }
 
-// quotaAskEvery bounds askQuotaRefresh: a refresh refused or lost on its
-// way is asked again when the waiting entries are next due, no sooner.
+// quotaAskEvery bounds askQuotaRefresh: a refresh lost on its way or
+// unanswered is asked again when the waiting entries are next due, no
+// sooner.
 const quotaAskEvery = time.Hour
 
 // quotaNext is when a deposit waiting for a fresh token for p's quota is
-// next due: the next ask, but no later than the standing token's exp (then
-// it is tried, and token_expired reconnects, §6.6).
+// next due: the next ask (not before a too_soon allowed_after), but no
+// later than the standing token's exp (then it is tried, and
+// token_expired reconnects, §6.6); an hour on once that exp has passed.
 func (m *Manager) quotaNext(p *Peer, now time.Time) time.Time {
 	t := now.Add(quotaAskEvery)
-	if q := m.quotaAsk[p.ID]; q != nil {
-		if q.spent == tokenTag(p.Standing.Token) {
-			t = p.Standing.Exp // nothing to ask under it: a re-mint or the exp
-		} else if q.after.After(t) {
-			t = q.after
-		}
+	if q := m.quotaAsk[p.ID]; q != nil && q.after.After(t) {
+		t = q.after
 	}
-	if !p.Standing.Exp.IsZero() && p.Standing.Exp.Before(t) {
+	if now.Before(p.Standing.Exp) && p.Standing.Exp.Before(t) {
 		t = p.Standing.Exp
 	}
 	return t
 }
 
 // askQuotaRefresh asks p for a fresh standing token after a quota refusal
-// (§7.2): at most once an hour, not before the peer's too_soon
-// allowed_after, and not under a token whose refresh was itself refused
-// for its quota (spent: only the issuer's re-mint, §7.2, or the token's
-// exp then cures it). An earlier one stays open: a late answer to it still
-// delivers its token. The refresh is the one deposit under the standing
-// token that passes the quota wait (QuotaRefresh): it is small, and
-// changes no epoch.
+// (§7.2): not while an earlier one is still queued (it goes first), at
+// most once an hour, and not before the peer's too_soon allowed_after. A
+// new one supersedes the earlier ones still unanswered: their answers are
+// dropped (§8.1), the new one's brings the token. The refresh is the one
+// deposit under the standing token that passes the quota wait
+// (QuotaRefresh): it is small, and changes no epoch.
 func (m *Manager) askQuotaRefresh(p *Peer, now time.Time) {
 	q := m.quotaFor(p.ID)
-	if !q.at.IsZero() && now.Sub(q.at) < quotaAskEvery || now.Before(q.after) || q.spent == tokenTag(p.Standing.Token) {
+	if !q.at.IsZero() && now.Sub(q.at) < quotaAskEvery || now.Before(q.after) {
 		return
 	}
+	for _, e := range m.st.Outbox {
+		if e.PeerID == p.ID && e.QuotaRefresh && !e.Done {
+			return
+		}
+	}
+	m.dropQuotaRequests(p.ID)
 	n := len(m.st.Outbox)
 	id := m.sendTo(p, tokenRefreshType, peerwire.TokenRefreshBody(), now)
 	if id == "" {
 		return
 	}
 	q.at = now
+	q.reqs[id] = true
 	m.requests[id] = p.ID
 	m.requestTypes[id] = tokenRefreshType
 	for _, e := range m.st.Outbox[n:] {
-		e.QuotaRefresh = true
+		e.QuotaRefresh, e.QuotaTok, e.QuotaReq = true, tokenTag(p.Standing.Token), id
 	}
 }
 
-// quotaTooSoon records a quota refresh's too_soon answer (§7.2): asked
-// again after allowed_after, bounded by the issuer's own period.
-func (m *Manager) quotaTooSoon(p *Peer, body []byte, now time.Time) {
+// dropQuotaRequests forgets the quota refreshes to peer still open (a new
+// one supersedes them, or a fresh token came), so that requestPending
+// (the near-end refresh, an attachment's token) is not held by them.
+func (m *Manager) dropQuotaRequests(peer string) {
+	q := m.quotaAsk[peer]
+	if q == nil {
+		return
+	}
+	for id := range q.reqs {
+		delete(m.requests, id)
+		delete(m.requestTypes, id)
+		delete(q.reqs, id)
+	}
+}
+
+// quotaRefreshEnded drops a quota refresh's request when its deposit ends
+// unsent (refused, or its wait over): no answer can come.
+func (m *Manager) quotaRefreshEnded(e *OutboxEntry) {
+	if q := m.quotaAsk[e.PeerID]; q != nil && q.reqs[e.QuotaReq] {
+		delete(q.reqs, e.QuotaReq)
+		delete(m.requests, e.QuotaReq)
+		delete(m.requestTypes, e.QuotaReq)
+	}
+}
+
+// quotaTooSoon records the too_soon answer to a quota refresh (§7.2):
+// asked again after allowed_after, bounded by the issuer's own period. A
+// near-end refresh's too_soon (RenewEvery) is not one.
+func (m *Manager) quotaTooSoon(p *Peer, re string, body []byte, now time.Time) {
+	q := m.quotaAsk[p.ID]
+	if q == nil || !q.reqs[re] {
+		return
+	}
+	delete(q.reqs, re)
 	t, err := peerwire.ParseTooSoon(body)
 	if err != nil {
 		return
@@ -315,12 +349,25 @@ func (m *Manager) quotaTooSoon(p *Peer, body []byte, now time.Time) {
 	if lim := now.Add(peerwire.QuotaRefreshEvery + time.Minute); t.After(lim) {
 		t = lim
 	}
-	m.quotaFor(p.ID).after = t
+	q.after = t
+}
+
+// quotaReconnect starts a reconnect for a connection whose standing token
+// cannot be refreshed (owner decision of 2026-11-10, GC #6840): its
+// refresh was itself refused for the token's quota, or the token's exp
+// passed with a quota refusal still answered. As token_expired's (§6.6):
+// not while an epoch is pending before the exp, nor while carried tokens
+// wait. The reconnect's hs.init carries its own token and passes the wait.
+func (m *Manager) quotaReconnect(p *Peer, now time.Time) {
+	if (p.Pending == nil || !now.Before(p.Standing.Exp)) && !m.carriedWait(p, now) {
+		m.startReconnect(p, now)
+	}
 }
 
 // retryPeer makes p's waiting entries eligible again (after a token
 // refresh or reconnect).
 func (m *Manager) retryPeer(peer string) {
+	m.dropQuotaRequests(peer) // a fresh token is in hand: the quota refreshes still open are not needed
 	for _, e := range m.st.Outbox {
 		if e.PeerID == peer && !e.Done {
 			e.NotBefore, e.AwaitToken = time.Time{}, false
@@ -348,7 +395,8 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 	now := m.now()
 	blocked := map[string]bool{}
 	awaiting := map[string]bool{}
-	held := map[string]bool{} // held for a pending reconnect (§6.3.1)
+	quotaWaiting := map[string]bool{} // a deposit waits for a fresh token for its quota: a volatile one does not pass it
+	held := map[string]bool{}         // held for a pending reconnect (§6.3.1)
 	for _, e := range m.st.Outbox {
 		if e.Done {
 			continue
@@ -388,6 +436,9 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 			continue
 		}
 		if now.Before(e.NotBefore) {
+			if e.Op == OpDeposit && e.QuotaWait {
+				quotaWaiting[key] = true
+			}
 			if e.Op == OpDeposit && (e.AwaitToken || e.QuotaWait) {
 				awaiting[key] = true
 			} else if e.Op == OpDeposit {
@@ -414,9 +465,15 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 			}
 		}
 		m.dirty = true
+		if err != nil && e.Done && e.QuotaRefresh {
+			m.quotaRefreshEnded(e) // refused: no answer can come
+		}
 		if err == nil || e.BestEffort {
 			e.Done = true
 			continue
+		}
+		if e.Op == OpDeposit && !e.Done && e.QuotaWait {
+			quotaWaiting[key] = true
 		}
 		if e.Op == OpDeposit && !e.Done && (e.AwaitToken || e.QuotaWait) {
 			awaiting[key] = true
@@ -438,7 +495,7 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 	vol := m.volatile
 	m.volatile = nil
 	for _, e := range vol {
-		if blocked[e.RelayURL+"|"+e.Mailbox] || ctx.Err() != nil {
+		if blocked[e.RelayURL+"|"+e.Mailbox] || quotaWaiting[e.RelayURL+"|"+e.Mailbox] || ctx.Err() != nil {
 			suite.Wipe(e.Payload)
 			continue // lost: the requester retransmits, which re-executes
 		}
@@ -483,6 +540,14 @@ func (m *Manager) deposit(ctx context.Context, e *OutboxEntry, now time.Time) er
 			// waits for a valid one; the no-token path is already taken.
 			e.NotBefore, e.AwaitToken = now.Add(time.Hour), true
 			return errNoStandingToken
+		}
+		if e.QuotaRefresh && tokenTag(tok) != e.QuotaTok {
+			// Asked under a token since replaced: the wait it was for is
+			// over, and under the new one it would only spend the daily
+			// quota refresh (§7.2).
+			e.Done = true
+			m.quotaRefreshEnded(e)
+			return nil
 		}
 		if e.QuotaWait && tokenTag(tok) == e.QuotaTok && now.Before(p.Standing.Exp) {
 			// RELAY-PROTOCOL §7.1: not retried unchanged under the token
@@ -563,16 +628,18 @@ func (m *Manager) deposit(ctx context.Context, e *OutboxEntry, now time.Time) er
 		if p != nil && e.Token == "" && p.Kind == KindConnection && m.tokenQuota(err, e, p) {
 			tag := tokenTag(p.Standing.Token)
 			if e.QuotaRefresh {
-				// The refresh itself refused for the token's quota: with
-				// `quota: token`, none can be asked under it, and the
-				// entries wait for the issuer's re-mint (§7.2) or the
-				// token's exp (token_expired, §6.6). Without `quota` it
-				// may be the mailbox's: asked again in an hour.
-				if RelayQuota(err) == "token" {
-					m.quotaFor(p.ID).spent = tag
-				}
+				// The refresh itself refused for the token's quota (its
+				// msgs are spent): no refresh can be asked under it, and
+				// the issuer's re-mint may come only after the waiting
+				// messages are too old (MaxDurableAge). Reconnect at once
+				// (owner decision of 2026-11-10, GC #6840). Without
+				// `quota` it may be the mailbox's: asked again in an hour.
 				m.note(now, "quota_refresh_refused", p.ID)
 				e.Done = true
+				m.quotaRefreshEnded(e)
+				if RelayQuota(err) == "token" {
+					m.quotaReconnect(p, now)
+				}
 				return err
 			}
 			// §8.6 quota_exceeded `token` (RELAY-PROTOCOL §7.1: never
@@ -580,7 +647,13 @@ func (m *Manager) deposit(ctx context.Context, e *OutboxEntry, now time.Time) er
 			// and try once more with it (retryPeer when it arrives).
 			e.QuotaWait, e.QuotaTok = true, tag
 			e.Attempts++
-			m.askQuotaRefresh(p, now)
+			if !now.Before(p.Standing.Exp) {
+				// Refused for its quota past the token's exp (the relay's
+				// clock behind ours): no refresh, reconnect (§6.6).
+				m.quotaReconnect(p, now)
+			} else {
+				m.askQuotaRefresh(p, now)
+			}
 			e.NotBefore = m.quotaNext(p, now)
 			return err
 		}

@@ -271,6 +271,31 @@ func TestPairGrantDroppedExpiryCapAndOrder(t *testing.T) {
 	})
 }
 
+// Two stored values the rebuilt delegation alone would not catch: an
+// expiry within the second it was signed in (its exp is a second later, so
+// rounded down the stored expiry is not exp), and a daily rate on a grant
+// signed without limits.
+func TestPairGrantDroppedDirectComparisons(t *testing.T) {
+	t.Run("an expiry within the signing second", func(t *testing.T) {
+		r := newRig(t)
+		ag, gs := pairEdits(t, r, "dev-agent-x", fmt.Sprintf(`[{"scope":"profile.get","expires_at":"%s"}]`,
+			envelope.FormatTS(t0.Add(500*time.Millisecond))))
+		r.f.AgentPaired(appSession(r, t0.Add(100*time.Millisecond)), "dev-agent-x", ag.IK, mustJSON(t, gs))
+		if n, got := r.f.count("dev-agent-x"), droppedFor(r, "dev-agent-x"); n != 0 || fmt.Sprint(got) != "[mismatch]" {
+			t.Fatalf("%d installed, recorded %v", n, got)
+		}
+	})
+	t.Run("a daily rate without limits", func(t *testing.T) {
+		r := newRig(t)
+		ag, gs := pairEdits(t, r, "dev-agent-x", `[{"scope":"profile.get"}]`)
+		gs[0]["per_day"] = mustJSON(t, 5)
+		r.f.AgentPaired(appSession(r, t0), "dev-agent-x", ag.IK, mustJSON(t, gs))
+		if n, got := r.f.count("dev-agent-x"), droppedFor(r, "dev-agent-x"); n != 0 || fmt.Sprint(got) != "[mismatch]" {
+			t.Fatalf("%d installed, recorded %v", n, got)
+		}
+	})
+}
+
 // A grant that matches is the one the member signed: what is installed
 // carries the same delegation bytes, unchanged.
 func TestPairGrantInstalledAsSigned(t *testing.T) {

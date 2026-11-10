@@ -1149,6 +1149,14 @@ func matchesDelegation(g *Grant, agentIK []byte) bool {
 	if err != nil {
 		return false
 	}
+	// The rebuild alone would let two stored values pass: an expiry within
+	// the signing second (sign moves exp to iat+1s), and a per_day without
+	// limits (limits follow per_hour). The spec compares them directly: the
+	// stored expires_at, rounded down to whole seconds, is exp; with no
+	// limits, both rates are 0.
+	if !g.Expires.Truncate(time.Second).Equal(d.Expires) || d.Limits == nil && (g.PerHour != 0 || g.PerDay != 0) {
+		return false
+	}
 	want := delegationOf(g, d.Iss, agentIK, d.StatusIssuer, d.Nonce, d.IssuedAt).Marshal()
 	return bytes.Equal(want, g.Delegation)
 }

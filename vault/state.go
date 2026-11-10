@@ -805,6 +805,15 @@ type OutboxEntry struct {
 	// AwaitToken: the peer's standing token expired; the deposit waits
 	// for the fresh one the reconnect it started brings (§6.6, §8.6).
 	AwaitToken bool `json:"await_token,omitempty"`
+	// QuotaWait: the relay refused the deposit for its standing token's
+	// quota (§8.6 quota_exceeded, `token`). It is not retried unchanged:
+	// it waits for a fresh token (asked for, §7.2), and holds nothing
+	// behind it, since what follows may fit (a small message under a byte
+	// quota) or carries its own token (a handshake's). QuotaTok names the
+	// standing token it was refused under (tokenTag): refused again under
+	// another one with no `quota`, it is the mailbox's quota (§8.6).
+	QuotaWait bool   `json:"quota_wait,omitempty"`
+	QuotaTok  string `json:"quota_tok,omitempty"`
 	// Wake is the deposit's push wake class (0.24.0, §14.2): the app is
 	// woken once the relay accepted it; "" for none.
 	Wake string `json:"wake,omitempty"`

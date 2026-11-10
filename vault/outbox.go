@@ -2,6 +2,8 @@ package vault
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"sort"
@@ -12,6 +14,7 @@ import (
 	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/handshake"
+	"github.com/vettid/vettid-vault/vms/peerwire"
 	"github.com/vettid/vettid-vault/vms/suite"
 )
 
@@ -202,6 +205,41 @@ func (m *Manager) outboxPending(peer string) bool {
 	return false
 }
 
+// tokenQuota reports whether a deposit's quota_exceeded is its standing
+// token's (§8.6): `quota: token`, or no `quota` unless the entry, refused
+// before under another standing token, was just tried with a fresh one
+// (then it is the mailbox's).
+func (m *Manager) tokenQuota(err error, e *OutboxEntry, p *Peer) bool {
+	switch RelayQuota(err) {
+	case "token":
+		return true
+	case "":
+		return !e.QuotaWait || tokenTag(p.Standing.Token) == e.QuotaTok
+	}
+	return false
+}
+
+// tokenTag names a token without holding it: the first 8 bytes of its
+// SHA-256, in hex.
+func tokenTag(tok string) string {
+	h := sha256.Sum256([]byte(tok))
+	return hex.EncodeToString(h[:8])
+}
+
+// askQuotaRefresh asks p for a fresh standing token after a quota refusal
+// (§7.2), unless a refresh to it is already open. The issuer's bound (one
+// in 24 hours after quota_exceeded) answers too_soon within it; the
+// refused entries ask again when they are next due.
+func (m *Manager) askQuotaRefresh(p *Peer, now time.Time) {
+	if m.requestPending(p.ID, tokenRefreshType) {
+		return
+	}
+	if id := m.sendTo(p, tokenRefreshType, peerwire.TokenRefreshBody(), now); id != "" {
+		m.requests[id] = p.ID
+		m.requestTypes[id] = tokenRefreshType
+	}
+}
+
 // retryPeer makes p's waiting entries eligible again (after a token
 // refresh or reconnect).
 func (m *Manager) retryPeer(peer string) {
@@ -274,7 +312,7 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 		if now.Before(e.NotBefore) {
 			if e.Op == OpDeposit && e.AwaitToken {
 				awaiting[key] = true
-			} else if e.Op == OpDeposit {
+			} else if e.Op == OpDeposit && !e.QuotaWait {
 				blocked[key] = true
 			}
 			continue
@@ -304,7 +342,7 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 		}
 		if e.Op == OpDeposit && !e.Done && e.AwaitToken {
 			awaiting[key] = true
-		} else if e.Op == OpDeposit && !e.Done {
+		} else if e.Op == OpDeposit && !e.Done && !e.QuotaWait {
 			blocked[key] = true
 		}
 		if e.Done || e.NotBefore.After(now) {
@@ -434,8 +472,20 @@ func (m *Manager) deposit(ctx context.Context, e *OutboxEntry, now time.Time) er
 				return err
 			}
 		}
-		// Any other deposit: as before 0.86.6, a 429 is retried with the
-		// backoff (the token's quota window moves on), another 4xx ends it.
+		if p != nil && e.Token == "" && p.Kind == KindConnection && m.tokenQuota(err, e, p) {
+			// §8.6 quota_exceeded `token` (RELAY-PROTOCOL §7.1: never
+			// retried unchanged): ask for a fresh standing token (§7.2)
+			// and try once more with it (retryPeer when it arrives).
+			e.QuotaWait, e.QuotaTok = true, tokenTag(p.Standing.Token)
+			e.NotBefore = now.Add(time.Hour) // asked again then, if no fresh token came
+			e.Attempts++
+			m.askQuotaRefresh(p, now)
+			return err
+		}
+		e.QuotaWait = false
+		// Any other deposit (the mailbox's quota, or a reconnect token's
+		// elsewhere): as before 0.86.6, a 429 is retried with the
+		// backoff, another 4xx ends it.
 		// (fdcc746 ended every one, dropping e.g. an att.deliver: the
 		// e2e TestAttachmentMaliciousPeer failure on CI.)
 		if st, ok := statusOf(err); ok && st < 500 && st != 429 {

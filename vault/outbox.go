@@ -273,6 +273,9 @@ func (m *Manager) quotaNext(p *Peer, now time.Time) time.Time {
 	if q := m.quotaAsk[p.ID]; q != nil && q.after.After(t) && !nearEnd(p, now) {
 		t = q.after
 	}
+	if ne := p.Standing.Exp.Add(-HolderRefreshBelow); now.Before(ne) && ne.Before(t) {
+		t = ne // the issuer grants a refresh hourly from then on (§7.2): a too_soon no longer holds
+	}
 	if now.Before(p.Standing.Exp) && p.Standing.Exp.Before(t) {
 		t = p.Standing.Exp
 	}
@@ -308,18 +311,16 @@ func (m *Manager) askQuotaRefresh(p *Peer, now time.Time) {
 		m.dropQuotaRequests(p)
 		p.QuotaReqTok = tag
 	}
+	if len(p.QuotaReqs) >= quotaReqsMax {
+		return // a day of asks open: the oldest (the one the issuer grants) is kept; an answer frees one
+	}
 	n := len(m.st.Outbox)
 	id := m.sendTo(p, tokenRefreshType, peerwire.TokenRefreshBody(), now)
 	if id == "" {
 		return
 	}
 	q.at = now
-	if len(p.QuotaReqs) >= quotaReqsMax {
-		m.forgetRequest(p, p.QuotaReqs[0])
-	}
 	p.QuotaReqs, m.dirty = append(p.QuotaReqs, id), true
-	m.requests[id] = p.ID
-	m.requestTypes[id] = tokenRefreshType
 	for _, e := range m.st.Outbox[n:] {
 		e.QuotaRefresh, e.QuotaTok, e.QuotaReq = true, tag, id
 	}
@@ -336,9 +337,12 @@ func (m *Manager) quotaWaits(peer string) bool {
 	return false
 }
 
-// quotaRequest reports whether re is one of p's open quota refreshes.
+// quotaRequest reports whether re is one of p's open quota refreshes,
+// asked under the standing token p holds. They are not in m.requests
+// (so they never hold requestPending, the near-end refresh's and an
+// attachment's), and handleResponse takes their answers from here.
 func quotaRequest(p *Peer, re string) bool {
-	return re != "" && slices.Contains(p.QuotaReqs, re)
+	return re != "" && p.QuotaReqTok == tokenTag(p.Standing.Token) && slices.Contains(p.QuotaReqs, re)
 }
 
 // forgetRequest drops one of p's quota refreshes (answered, ended unsent,
@@ -348,8 +352,6 @@ func (m *Manager) forgetRequest(p *Peer, id string) {
 	if len(p.QuotaReqs) == 0 {
 		p.QuotaReqs = nil
 	}
-	delete(m.requests, id)
-	delete(m.requestTypes, id)
 	m.dirty = true
 }
 
@@ -357,10 +359,6 @@ func (m *Manager) forgetRequest(p *Peer, id string) {
 // token is held, so that requestPending (the near-end refresh, an
 // attachment's token) is not held by them.
 func (m *Manager) dropQuotaRequests(p *Peer) {
-	for _, id := range p.QuotaReqs {
-		delete(m.requests, id)
-		delete(m.requestTypes, id)
-	}
 	if p.QuotaReqs != nil || p.QuotaReqTok != "" {
 		p.QuotaReqs, p.QuotaReqTok, m.dirty = nil, "", true
 	}

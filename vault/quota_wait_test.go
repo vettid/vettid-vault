@@ -93,7 +93,7 @@ func TestQuotaRefusedNoteAsksForATokenAndKeepsTheOrder(t *testing.T) {
 	if len(w) != 1 || w[0] != q.entry(f, 0, "big") || w[0].QuotaTok != tokenTag(f.p(0).Standing.Token) {
 		t.Fatalf("quota-waiting entries %+v", w)
 	}
-	if !f.m(0).requestPending(f.p(0).ID, tokenRefreshType) {
+	if !f.asking(0) {
 		t.Fatal("no relay.token.refresh asked")
 	}
 	q.send(f, 0, "small") // waits behind the refused one: the order is kept
@@ -137,7 +137,7 @@ func TestQuotaWithoutQuotaFieldIsTheMailboxAfterAFreshToken(t *testing.T) {
 	if e == nil || e.QuotaWait {
 		t.Fatalf("entry %+v: want it kept, read as the mailbox's quota (backoff), not waiting for a token", e)
 	}
-	if f.m(0).requestPending(f.p(0).ID, tokenRefreshType) {
+	if f.asking(0) {
 		t.Fatal("a second refresh asked for the mailbox's quota")
 	}
 	// Opus review H1: after the backoff, refused again with no quota under
@@ -147,7 +147,7 @@ func TestQuotaWithoutQuotaFieldIsTheMailboxAfterAFreshToken(t *testing.T) {
 	if *refusals != 3 {
 		t.Fatalf("%d refusals, want 3 (retried with the backoff)", *refusals)
 	}
-	if e := q.entry(f, 0, "big"); e == nil || e.QuotaWait || f.m(0).requestPending(f.p(0).ID, tokenRefreshType) {
+	if e := q.entry(f, 0, "big"); e == nil || e.QuotaWait || f.asking(0) {
 		t.Fatalf("entry %+v: the mailbox's quota read as the token's again", e)
 	}
 	// Another note refused with no quota under that token: the mailbox's too.
@@ -155,7 +155,7 @@ func TestQuotaWithoutQuotaFieldIsTheMailboxAfterAFreshToken(t *testing.T) {
 	f.quotaRelay(0, q, "", map[string]bool{"other": true})
 	f.advance(time.Minute)
 	f.tick(0)
-	if e := q.entry(f, 0, "other"); e == nil || e.QuotaWait || f.m(0).requestPending(f.p(0).ID, tokenRefreshType) {
+	if e := q.entry(f, 0, "other"); e == nil || e.QuotaWait || f.asking(0) {
 		t.Fatalf("entry %+v: a later entry's no-quota refusal read as the token's under a mailbox-read token", e)
 	}
 }
@@ -239,7 +239,7 @@ func TestQuotaRefreshRefusedForTheTokenReconnects(t *testing.T) {
 	if !f.audited(0, "quota_refresh_refused") {
 		t.Fatal("the refused refresh is not noted")
 	}
-	if f.m(0).requestPending(f.p(0).ID, tokenRefreshType) {
+	if f.asking(0) {
 		t.Fatal("the refused refresh's request is still pending")
 	}
 	f.advance(time.Minute)
@@ -264,7 +264,7 @@ func TestQuotaMailboxBacksOff(t *testing.T) {
 	q := qNotes{}
 	refusals := f.quotaRelay(0, q, relayclient.QuotaMailbox, map[string]bool{"big": true})
 	q.send(f, 0, "big")
-	if e := q.entry(f, 0, "big"); e == nil || e.QuotaWait || f.m(0).requestPending(f.p(0).ID, tokenRefreshType) {
+	if e := q.entry(f, 0, "big"); e == nil || e.QuotaWait || f.asking(0) {
 		t.Fatalf("entry %+v: the mailbox's quota read as the token's", e)
 	}
 	f.advance(time.Minute)
@@ -435,7 +435,7 @@ func TestQuotaLeftoverRefreshIsNotSentUnderANewToken(t *testing.T) {
 	if sent != 0 || f.refreshes(0) != 0 {
 		t.Fatalf("the leftover refresh: %d sent, %d queued", sent, f.refreshes(0))
 	}
-	if f.m(0).requestPending(f.p(0).ID, tokenRefreshType) {
+	if f.asking(0) {
 		t.Fatal("its request is still pending")
 	}
 }
@@ -465,7 +465,7 @@ func TestQuotaRefusalPastTheExpReconnects(t *testing.T) {
 	if f.openReconnect(0) == nil {
 		t.Fatal("no reconnect")
 	}
-	if f.m(0).requestPending(f.p(0).ID, tokenRefreshType) {
+	if f.asking(0) {
 		t.Fatal("a refresh asked under an expired token")
 	}
 }
@@ -487,7 +487,7 @@ func TestQuotaRefusedRefreshEndsItsRequest(t *testing.T) {
 	if f.refreshes(0) != 0 {
 		t.Fatal("the refused refresh is still queued")
 	}
-	if f.m(0).requestPending(f.p(0).ID, tokenRefreshType) {
+	if f.asking(0) {
 		t.Fatal("the refused refresh's request is still pending")
 	}
 }
@@ -509,7 +509,7 @@ func TestQuotaMailboxReadingSurvivesARestart(t *testing.T) {
 	q.send(f, 0, "other")
 	f.advance(time.Minute)
 	f.tick(0)
-	if e := q.entry(f, 0, "other"); e == nil || e.QuotaWait || f.m(0).requestPending(f.p(0).ID, tokenRefreshType) {
+	if e := q.entry(f, 0, "other"); e == nil || e.QuotaWait || f.asking(0) {
 		t.Fatalf("entry %+v: read as the token's after a restart", e)
 	}
 }
@@ -645,5 +645,80 @@ func TestQuotaRefreshRefusedWithoutAReconnectTokenWaits(t *testing.T) {
 	}
 	if q.entry(f, 0, "big") == nil {
 		t.Fatal("the note was dropped")
+	}
+}
+
+// asking reports whether side s has a token refresh open: a quota refresh
+// (Peer.QuotaReqs under the token it holds) or another (requestPending).
+func (f *r29Fx) asking(s int) bool {
+	p := f.p(s)
+	return len(p.QuotaReqs) > 0 && p.QuotaReqTok == tokenTag(p.Standing.Token) || f.m(s).requestPending(p.ID, tokenRefreshType)
+}
+
+// Re-review 4 M: the peer away for over a day; a refresh is asked hourly
+// and each is lost. At most a day of them stays open, the first kept: its
+// grant, when it comes, is taken. None holds requestPending.
+func TestQuotaOpenRefreshesKeepTheFirst(t *testing.T) {
+	f := newR29Fx(t)
+	q := qNotes{}
+	old := f.p(0).Standing.Token
+	f.quotaRelayBy(0, q, func(tok, body string) error {
+		if tok == old && body == "big" {
+			return &relayclient.Error{Status: 429, Code: CodeQuotaExceeded, Quota: relayclient.QuotaToken}
+		}
+		return nil
+	})
+	q.send(f, 0, "big")
+	f.tick(0)
+	r1 := f.takeKind(0, 1, kOther)
+	if len(r1) != 1 {
+		t.Fatalf("%d refreshes, want 1", len(r1))
+	}
+	first := f.p(0).QuotaReqs[0]
+	for i := 0; i < 30; i++ {
+		f.advance(time.Hour + time.Minute)
+		f.tick(0)
+		f.tick(0)
+		f.lose(0, 1, kOther)
+	}
+	if n := len(f.p(0).QuotaReqs); n != quotaReqsMax || f.p(0).QuotaReqs[0] != first {
+		t.Fatalf("%d open, first kept %v", n, f.p(0).QuotaReqs[0] == first)
+	}
+	if f.m(0).requestPending(f.p(0).ID, tokenRefreshType) {
+		t.Fatal("the open quota refreshes hold requestPending")
+	}
+	f.process(1, r1[0]) // the peer is back: it grants the first
+	f.settle()
+	f.tick(0)
+	f.settle()
+	if f.p(0).Standing.Token == old {
+		t.Fatal("the first refresh's grant was dropped")
+	}
+	if got := strings.Join(f.got[1], " "); got != `{"n":"big"}` {
+		t.Fatalf("side 1 got %s", got)
+	}
+}
+
+// Re-review 4 L3: a quota too_soon (24 h) does not hold the entry past the
+// token's last 3 days, when the issuer grants a refresh hourly (§7.2).
+func TestQuotaTooSoonDoesNotHoldPastTheTokensLastDays(t *testing.T) {
+	f := newR29Fx(t)
+	q := qNotes{}
+	f.quotaRelay(0, q, relayclient.QuotaToken, map[string]bool{"big": true})
+	f.m(1).st.attach().Refreshed[f.p(1).ID] = f.clk
+	q.send(f, 0, "big")
+	f.settle() // too_soon, allowed_after +24 h
+	f.do(0, func(_ *Manager, p *Peer) { p.Standing.Exp = f.clk.Add(HolderRefreshBelow + 2*time.Hour) })
+	ne := f.p(0).Standing.Exp.Add(-HolderRefreshBelow)
+	f.advance(time.Hour + time.Minute)
+	f.tick(0)
+	if e := q.entry(f, 0, "big"); e == nil || e.NotBefore.After(ne) {
+		t.Fatalf("entry %+v: due after the token's last days begin (%v)", e, ne)
+	}
+	f.advance(ne.Sub(f.clk) + time.Minute)
+	f.tick(0)
+	f.tick(0)
+	if n := f.lose(0, 1, kOther); n != 1 {
+		t.Fatalf("%d refreshes asked in the token's last days, want 1", n)
 	}
 }

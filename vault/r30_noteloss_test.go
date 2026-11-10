@@ -1167,3 +1167,57 @@ func TestR30EphemeralNotTold(t *testing.T) {
 		t.Fatalf("done %v, told %v: want ended silently", e.Done, f.audited(0, "undelivered_removed"))
 	}
 }
+
+// #217 final nits 1 and 2: replay_detected marks the entry possibly stored;
+// a clock the relay keeps refusing (timestamp_stale) is noted once per
+// entry.
+func TestR30AttemptRefusals(t *testing.T) {
+	for _, code := range []string{CodeReplayDetected, CodeTimestampStale} {
+		f := newR29Fx(t)
+		f.longTokens()
+		r := f.d[0].relay
+		r.mu.Lock()
+		r.failMailbox = map[string]error{f.m(1).st.Relay.Mailbox: &relayclient.Error{Status: 401, Code: code}}
+		r.mu.Unlock()
+		var e *OutboxEntry
+		f.do(0, func(m *Manager, p *Peer) {
+			m.sendTo(p, "test.note", []byte(`{"n":"attempt"}`), f.clk)
+			e = m.st.Outbox[len(m.st.Outbox)-1]
+		})
+		for i := 0; i < 5; i++ {
+			f.do(0, func(m *Manager, p *Peer) { e.NotBefore = time.Time{} })
+		}
+		if e.Done {
+			t.Fatalf("%s ended the entry", code)
+		}
+		if got := e.Tried; got != (code == CodeReplayDetected) {
+			t.Fatalf("%s: tried %v", code, got)
+		}
+		if n := f.auditCount(0, "relay_clock_stale"); n != map[bool]int{true: 1, false: 0}[code == CodeTimestampStale] {
+			t.Fatalf("%s: relay_clock_stale noted %d times", code, n)
+		}
+	}
+}
+
+// #217 final nit 3: an ephemeral entry queued before 0.88.7 (no flag) and
+// still readable ends silently at a key change, by its type.
+func TestR30LegacyEphemeralByType(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	f.do(0, func(m *Manager, p *Peer) {
+		m.register(TypeSpec{Type: "test.eph", From: []string{KindConnection}, Connections: PeersBoth, Ephemeral: true},
+			HandlerFunc(func(context.Context, *Session, *envelope.Inner) (json.RawMessage, error) { return nil, nil }))
+	})
+	f.waitingNote(0, "first")
+	var eph *OutboxEntry
+	f.do(0, func(m *Manager, p *Peer) {
+		m.sendWith(p, "test.eph", []byte(`{}`), SendOptions{Exp: f.clk.Add(time.Hour)}, f.clk)
+		eph = m.st.Outbox[len(m.st.Outbox)-1]
+		eph.Ephemeral = false // as written before 0.88.7
+		eph.NotBefore, eph.AwaitToken = f.clk.Add(365*24*time.Hour), true
+	})
+	f.do(0, func(m *Manager, p *Peer) { m.resealAtKeyChange(p, m.sessions[p.ID]) })
+	if !eph.Done || f.audited(0, "undelivered_unreadable") {
+		t.Fatalf("done %v, told %v: want ended silently", eph.Done, f.audited(0, "undelivered_unreadable"))
+	}
+}

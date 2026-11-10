@@ -230,6 +230,10 @@ func mayHaveStored(err error) bool {
 	return !ok || st >= 500
 }
 
+// relayClockStaleAfter is the timestamp_stale refusal of one entry at
+// which the vault notes relay_clock_stale (once per entry).
+const relayClockStaleAfter = 3
+
 // refused ends deposit e that the relay refused with a 4xx other than 429
 // (0.88.7 §8.3 "Not delivered" case 8): a durable member deposit to a
 // connection is not delivered (told); any other is dropped and audited
@@ -806,7 +810,15 @@ func (m *Manager) deposit(ctx context.Context, e *OutboxEntry, now time.Time) er
 	case CodeTimestampStale, CodeReplayDetected:
 		// 0.88.7: about this attempt's signature, not the message (a clock
 		// step, a nonce): retried with the backoff, freshly signed (one
-		// attempt per deposit), never ended for it.
+		// attempt per deposit), never ended for it. A replay means an earlier
+		// copy of the request reached the relay: possibly stored (Tried). A
+		// clock the relay keeps refusing is noted once per entry, at its
+		// relayClockStaleAfter-th refusal, so that it is visible.
+		if RelayCode(err) == CodeReplayDetected {
+			e.Tried = true
+		} else if e.Attempts+1 == relayClockStaleAfter {
+			m.note(now, "relay_clock_stale", e.PeerID)
+		}
 		return err
 	default:
 		if st, ok := statusOf(err); ok && st < 500 && st != 429 {

@@ -1192,16 +1192,6 @@ const rpToldResidual = "residual:told-after-5xx (#6875)"
 // Card GC #6875's re-stamp at deposit ends it. Counted apart, accepted.
 const rpLockWaitResidual = "residual:lock-wait>16d (#6875)"
 
-// notesLost is the note oracle (GC #7160, every mode): each test.note side
-// s queued is handled exactly once by the other side, by inner id. One not
-// handled is excused only if the relay dropped a copy of it at T and the
-// run has a lock longer than T (the lock residual), or, as quotaWait, if
-// the copy accepted carried a ts over 16 days old under an epoch current
-// since that ts (no key change), after a standing-quota refusal of the
-// sender's since that ts (the note's own, or an earlier deposit's that held
-// the mailbox behind it), and the receiver audited stale_or_future
-// (rpQuotaWaitResidual); or if it was answered a 5xx and its sender audited
-// undelivered_window (told, rpToldResidual).
 // notesUnaccounted is the note oracle for a run that ends stale: a note
 // not handled must still wait in its sender's outbox or have been told
 // (drop.undelivered_* with its id), unless excused as notesLost excuses.
@@ -1248,6 +1238,16 @@ func (w *rpWorld) notesUnaccounted() (why []string) {
 	return why
 }
 
+// notesLost is the note oracle (GC #7160, every mode): each test.note side
+// s queued is handled exactly once by the other side, by inner id. One not
+// handled is excused only if the relay dropped a copy of it at T and the
+// run has a lock longer than T (the lock residual), or, as quotaWait, if
+// the copy accepted carried a ts over 16 days old under an epoch current
+// since that ts (no key change), after a standing-quota refusal of the
+// sender's since that ts (the note's own, or an earlier deposit's that held
+// the mailbox behind it), and the receiver audited stale_or_future
+// (rpQuotaWaitResidual); or if it was answered a 5xx and its sender audited
+// undelivered_window (told, rpToldResidual).
 func (w *rpWorld) notesLost() (why []string, residual string) {
 	quotaWait, told, lockWait := false, false, false
 	over, single := w.lockShape()

@@ -447,8 +447,25 @@ func TestGrantSeqDamagedPairGrants(t *testing.T) {
 
 // An initial grant whose id is already in use (only damaged state could
 // make one) is skipped: it never replaces another agent's grant, which
-// keeps its agent and its number.
+// keeps its agent and its number. A skipped grant leaves no trace (no
+// leash.grant.issued).
 func TestGrantSeqPairGrantIDTaken(t *testing.T) {
+	t.Run("another agent's grant", testPairGrantIDTakenOther)
+	t.Run("a duplicate within one set", testPairGrantIDDuplicate)
+}
+
+// issuedFor counts the leash.grant.issued activities recorded for device.
+func issuedFor(r *rig, device string) int {
+	n := 0
+	for _, a := range r.h.Activities {
+		if a.Kind == "leash.grant.issued" && a.DeviceID == device {
+			n++
+		}
+	}
+	return n
+}
+
+func testPairGrantIDTakenOther(t *testing.T) {
 	r := newRig(t)
 	sess := appSession(r, t0)
 	_, gid := r.issue(t, `{"agent_id":"dev-agent","scope":"profile.get"}`)
@@ -475,6 +492,9 @@ func TestGrantSeqPairGrantIDTaken(t *testing.T) {
 	if n := r.f.count("dev-agent-new"); n != 0 {
 		t.Fatalf("%d grants installed under a taken id", n)
 	}
+	if n := issuedFor(r, "dev-agent-new"); n != 0 {
+		t.Fatalf("%d leash.grant.issued recorded for a skipped grant", n)
+	}
 	if n, _ := lastUpdate(t, r, agent); n != before || r.f.d.GrantSeq[agent] != before {
 		t.Fatalf("the other agent's number moved: %d, want %d", n, before)
 	}
@@ -482,16 +502,20 @@ func TestGrantSeqPairGrantIDTaken(t *testing.T) {
 	if n, told := lastUpdate(t, r, "dev-agent-new"); told != 1 || n <= before {
 		t.Fatalf("the new agent: %d updates, grant_seq %d, after %d", told, n, before)
 	}
+}
 
-	// A duplicate id within one PairGrants: the first copy is installed,
-	// the second skipped.
+// A duplicate id within one PairGrants: the first copy is installed, the
+// second skipped.
+func testPairGrantIDDuplicate(t *testing.T) {
+	r := newRig(t)
+	sess := appSession(r, t0)
 	r.h.AddDevice("dev-agent-dup", vault.KindAgent)
 	dag, _ := r.h.Device("dev-agent-dup")
 	two, err := r.f.PrepareAgentGrants(sess, dag.IK, json.RawMessage(`[{"scope":"profile.get"},{"scope":"connection.list"}]`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	gs = nil
+	var gs []map[string]json.RawMessage
 	if err := json.Unmarshal(two, &gs); err != nil || len(gs) != 2 {
 		t.Fatalf("prepared: %v", err)
 	}
@@ -500,6 +524,9 @@ func TestGrantSeqPairGrantIDTaken(t *testing.T) {
 	r.f.AgentPaired(sess, "dev-agent-dup", dup)
 	if n := r.f.count("dev-agent-dup"); n != 1 {
 		t.Fatalf("a duplicate id: %d grants installed, want 1", n)
+	}
+	if n := issuedFor(r, "dev-agent-dup"); n != 1 {
+		t.Fatalf("a duplicate id: %d leash.grant.issued recorded, want 1", n)
 	}
 	var firstID string
 	_ = json.Unmarshal(gs[0]["id"], &firstID)

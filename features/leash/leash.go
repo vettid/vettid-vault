@@ -1320,9 +1320,11 @@ func (f *Feature) PrepareAgentGrants(s *vault.Session, agentIK []byte, raw json.
 // agent pairing; with no initial grants (prepared empty) the set the
 // pairing completes with is the empty one, and it still takes its
 // grant_seq (§10.11). So does a pairing whose initial grants no longer
-// decode (in practice a build change between the approval and the
-// pairing's completion): none of them is installed. An initial grant
-// whose id is already in use is skipped, never replacing another grant.
+// decode (a decode error, for example after a build change between the
+// approval and the pairing's completion): none of them is installed. This
+// covers decode errors only; a grant that decodes is not yet checked
+// against its signed delegation. An initial grant whose id is already in
+// use is skipped, never replacing another grant.
 func (f *Feature) AgentPaired(s *vault.Session, agentID string, prepared json.RawMessage) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

@@ -282,7 +282,8 @@ type Device struct {
 	// leashStatus caches an agent's LEASH status statements by grant id
 	// (memory only; refreshed before they expire, §10.11).
 	leashStatus map[string]*cachedStatus
-	leashGrants json.RawMessage // the latest leash.grant.updated body
+	leashGrants json.RawMessage // the leash.grant.updated body with the highest grant_seq
+	leashSeq    uint64          // its grant_seq (0 before the first numbered one)
 
 	ik       ed25519.PrivateKey
 	kem      *suite.PrivateKey
@@ -1682,7 +1683,7 @@ func (d *Device) handle(ctx context.Context, m relayclient.Message) (unacked boo
 	case "identity.rotate":
 		d.followRotation(in.Body)
 	case "leash.grant.updated":
-		if in.Re == "" {
+		if in.Re == "" && d.newerGrantSet(in.Body) {
 			d.leashGrants = append(json.RawMessage(nil), in.Body...) // the agent's current grants (§10.11); d.mu is held
 		}
 	}

@@ -61,8 +61,34 @@ func (d *Device) AgentRequest(ctx context.Context, op string, members map[string
 	return d.Request(ctx, "agent.request", b)
 }
 
-// LeashGrants returns the grants in the latest leash.grant.updated this
-// agent received (nil if none).
+// newerGrantSet reports whether a leash.grant.updated body describes a newer
+// set than the one kept, as §10.11 "Grant-set sequence" has an agent judge:
+// a lower grant_seq (a reordered or replayed update) is ignored. An equal
+// one replaces the kept body: the vault re-sends an equal number only for
+// the same set with fresh status statements (a hold's end), less any grant
+// that has since expired (an expiry takes no number), so taking it whole
+// keeps the set and its newer statements. A body without a valid grant_seq
+// (absent, 0 or invalid) is ignored ("No fallback", §10.11). d.mu is held.
+func (d *Device) newerGrantSet(body []byte) bool {
+	o, err := strictjson.ParseObject(body)
+	if err != nil {
+		return false
+	}
+	// The spec allows any u64; this test client caps at 2^53-1 like the
+	// strict parser. A vault would need 2^53 grant-set changes to reach it.
+	n, present, err := o.OptUint("grant_seq", 1, strictjson.MaxSafeInteger)
+	if err != nil || !present {
+		return false
+	}
+	if n < d.leashSeq {
+		return false
+	}
+	d.leashSeq = n
+	return true
+}
+
+// LeashGrants returns the grants in the leash.grant.updated with the highest
+// grant_seq this agent received (nil if none).
 func (d *Device) LeashGrants() []json.RawMessage {
 	d.mu.Lock()
 	body := d.leashGrants

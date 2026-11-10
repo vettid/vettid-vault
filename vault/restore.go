@@ -245,7 +245,11 @@ func (m *Manager) suspendForkRef(p *Peer, ref string, now time.Time) {
 	p.Fork = &ForkSuspension{At: now.UTC()}
 	m.abandonHandshakes(p, true, true, now)
 	for _, e := range m.st.Outbox {
-		if e.PeerID == p.ID {
+		if e.PeerID == p.ID && !e.Done && p.Kind == KindConnection && memberDeposit(e) {
+			// 0.88.7 §8.3 "Not delivered" case 7: nothing is sent to a
+			// suspended connection, and its waiting messages are told.
+			m.notDelivered(e, "undelivered_suspended", now)
+		} else if e.PeerID == p.ID {
 			e.Done = true // nothing is sent to a suspended connection
 		}
 	}

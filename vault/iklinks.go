@@ -309,7 +309,7 @@ func (m *Manager) followLinks(p *Peer, app []*handshake.Rotation, msgEpoch []byt
 			if bytes.Equal(e.ID, p.LastEpochID) {
 				demotedCurrent = true
 				if kr := m.sessions[p.ID]; kr != nil {
-					m.rehold(p, kr.Current())
+					m.rehold(p, kr.Current(), now)
 				}
 			}
 			m.note(now, "epoch_demoted", p.ID)
@@ -375,7 +375,7 @@ func (m *Manager) f1Demote(p *Peer, app []*handshake.Rotation, msgEpoch []byte, 
 		m.note(now, "epoch_demoted_f1", p.ID)
 		kr := m.sessions[p.ID]
 		if kr != nil {
-			m.rehold(p, kr.Current())
+			m.rehold(p, kr.Current(), now)
 		}
 		for _, id := range sortedKeys(m.st.Outgoing) {
 			og, sortedOK := m.st.Outgoing[id]
@@ -421,19 +421,50 @@ func (m *Manager) holdInner(p *Peer, in *envelope.Inner, wake string) {
 	if err != nil {
 		return
 	}
-	m.queueDeposit(&OutboxEntry{PeerID: p.ID, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Held: j, HeldExp: in.Exp, Wake: wake}, m.now())
+	m.queueDeposit(&OutboxEntry{PeerID: p.ID, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Held: j, HeldExp: in.Exp, Wake: wake, InnerID: in.ID}, m.now())
 }
 
 // rehold turns p's outbox entries sealed under the epoch ep (the current
 // epoch, just demoted) and not yet deposited back into held ones: the
 // vault reads each back with ep's send key. Handshake messages and
 // entries already deposited are left as they are.
-func (m *Manager) rehold(p *Peer, ep *handshake.Epoch) {
+func (m *Manager) rehold(p *Peer, ep *handshake.Epoch, now time.Time) { m.reholdAt(p, ep, false, now) }
+
+// resealAtKeyChange is 0.88.7 §8.3 "Re-sealed at a key change" (owner
+// decision b, GC #7213 Q2): just before connection p's current epoch is
+// replaced (activate, confirmPending), every durable entry to p still
+// waiting in the outbox goes back to held, and sealHeld seals it under the
+// new epoch, in its place, with the same inner id and (unless an earlier
+// copy may have reached the relay) a fresh ts. Before 0.88.7 such an entry
+// kept the bytes sealed at queue time and, deposited after a long wait,
+// was refused by the peer (unknown_kid, stale_or_future) after the relay
+// accepted it: lost silently (GC #7160 cause 2). A device's entries are
+// left as they are.
+func (m *Manager) resealAtKeyChange(p *Peer, kr *handshake.Keyring) {
+	if p.Kind != KindConnection || kr == nil {
+		return
+	}
+	m.reholdAt(p, kr.Current(), true, m.now())
+}
+
+// reholdAt is rehold; at a key change (keyChange) an entry sealed in
+// session mode that ep cannot read back (sealed under an epoch whose send
+// key is gone: an entry from before 0.88.7 that already waited across a key
+// change) cannot be re-sealed and is not delivered (notDelivered), an
+// hs.confirm excepted (as it is); an ephemeral entry stays as it is, and an
+// hs.confirm under ep is superseded (done).
+func (m *Manager) reholdAt(p *Peer, ep *handshake.Epoch, keyChange bool, now time.Time) {
 	if ep == nil {
 		return
 	}
 	for _, e := range m.st.Outbox {
 		if e.Done || e.PeerID != p.ID || e.Op != OpDeposit || e.Held != nil || e.Handshake || len(e.Payload) == 0 {
+			continue
+		}
+		if keyChange && e.Ephemeral {
+			// 0.88.7: an ephemeral entry (§8.5) ends silently at a key change:
+			// it is never told, and the peer may not open it later.
+			e.Done, m.dirty = true, true
 			continue
 		}
 		env, err := envelope.Parse(e.Payload)
@@ -442,18 +473,34 @@ func (m *Manager) rehold(p *Peer, ep *handshake.Epoch) {
 		}
 		in, err := ep.OpenSent(env)
 		if err != nil {
+			if keyChange && memberDeposit(e) && env.Mode() == envelope.ModeSession {
+				m.notDelivered(e, "undelivered_unreadable", now) // 0.88.7 §8.3: not safe to re-seal
+			}
 			continue // sealed under another epoch: as it is
 		}
 		if te := m.registry[in.Type]; te != nil && te.spec.Ephemeral {
-			e.Done = true // ephemeral: not sent
+			e.Done, m.dirty = true, true // ephemeral: not sent (one queued before 0.88.7 recorded Ephemeral)
+			continue
+		}
+		if keyChange && e.Confirm {
+			// An hs.confirm for the epoch being replaced is superseded: the
+			// new epoch's own follows (queueConfirm) or is not needed.
+			e.Done, m.dirty = true, true
 			continue
 		}
 		in.Seq, in.Features = 0, nil
-		j, err := in.Marshal(envelope.ModeSealed)
+		j, err := marshalHeld(in)
 		if err != nil {
+			if memberDeposit(e) {
+				m.notDelivered(e, "undelivered_unreadable", now) // 0.88.7: it cannot be held to be sealed again
+			}
 			continue
 		}
 		e.Payload, e.Held, e.HeldExp = nil, j, in.Exp
+		if e.InnerID == "" {
+			e.InnerID = in.ID
+		}
+		m.markUnstored(e) // changed in place: not sent before a write stores it
 		m.dirty = true
 	}
 }
@@ -462,6 +509,13 @@ func (m *Manager) rehold(p *Peer, ep *handshake.Epoch) {
 // not demoted, each in its place in the outbox: the same inner id, a new
 // ts (the durable ts window is 16 days; a hold can last up to B); one
 // whose exp has passed is discarded.
+//
+// 0.88.7 §8.3 "Re-sealed at a key change": an entry an earlier deposit of
+// which may have reached the relay (Tried: a lost answer) keeps its ts, so
+// that the peer's ts window (16 days) refuses it no later than the peer's
+// inner-id dedupe (also 16 days) forgets the first copy: a fresh ts could
+// make the peer run it twice. Kept, and already past the window, it is not
+// delivered (notDelivered).
 func (m *Manager) sealHeld(p *Peer) {
 	kr := m.sessions[p.ID]
 	if kr == nil || kr.Current() == nil {
@@ -473,9 +527,12 @@ func (m *Manager) sealHeld(p *Peer) {
 			continue
 		}
 		if !e.HeldExp.IsZero() && !now.Before(e.HeldExp) {
+			if e.InnerID == "" {
+				e.InnerID = heldID(e.Held)
+			}
 			e.Done, e.Held = true, nil
-			m.quotaRefreshEnded(e)             // a quota refresh's: no answer can come
-			m.audit(now, "held_expired", p.ID) // S12
+			m.quotaRefreshEnded(e)                           // a quota refresh's: no answer can come
+			m.auditRef(now, "held_expired", p.ID, e.InnerID) // S12 (0.88.7: ref = its inner id)
 			m.dirty = true
 			continue
 		}
@@ -483,13 +540,15 @@ func (m *Manager) sealHeld(p *Peer) {
 		if err != nil {
 			// Unreadable: dropped and audited (§3.4.1 "After a demotion":
 			// no held message goes silently).
-			e.Done, e.Held = true, nil
-			m.quotaRefreshEnded(e)
-			m.audit(now, "held_unsealable", p.ID)
-			m.dirty = true
+			m.notDelivered(e, "held_unsealable", now)
 			continue
 		}
-		in.TS = now
+		if !e.Tried {
+			in.TS = now
+		} else if now.Sub(in.TS) > envelope.MaxDurableAge {
+			m.notDelivered(e, "undelivered_window", now) // 0.88.7 §8.3: kept ts, past §8.4's window
+			continue
+		}
 		raw, err := m.sealFor(p, kr.Current(), in)
 		if errors.Is(err, errDemoted) {
 			return // still demoted: the rest wait too, in order
@@ -497,16 +556,46 @@ func (m *Manager) sealHeld(p *Peer) {
 		if err != nil {
 			// It cannot be sealed at all (review M1): dropped, audited, so
 			// that it does not hold the mailbox's queue for good.
-			e.Done, e.Held = true, nil
-			m.quotaRefreshEnded(e)
-			m.audit(now, "held_unsealable", p.ID) // drop.held_unsealable
-			m.dirty = true
+			m.notDelivered(e, "held_unsealable", now) // drop.held_unsealable
 			continue
 		}
 		e.Payload, e.Held, e.HeldExp = raw, nil, time.Time{}
 		e.RelayURL, e.Mailbox = p.Relay.URL, p.Relay.Mailbox
+		m.markUnstored(e) // sealed in place: not sent before a write stores it (0.88.7)
 		m.dirty = true
 	}
+}
+
+// marshalHeld writes an inner read back for holding (sealed-mode JSON);
+// a variable so that a test can make it fail.
+var marshalHeld = func(in *envelope.Inner) ([]byte, error) { return in.Marshal(envelope.ModeSealed) }
+
+// heldID is a held entry's inner id ("" if none or unreadable).
+func heldID(held []byte) string {
+	if held == nil {
+		return ""
+	}
+	if in, err := envelope.ParseInner(held, envelope.ModeSealed); err == nil {
+		return in.ID
+	}
+	return ""
+}
+
+// notDelivered is the seam of 0.88.7 §8.3 "Not delivered": a durable
+// entry to a connection that the vault will not deposit (it cannot be
+// re-sealed safely, or its connection ended: removed, replaced, its
+// mailbox unknown) ends here, never silently. For now it ends the entry and
+// audits drop.<reason>; the member's notice (its feed item or batching) is
+// card #6875's, which completes this function.
+func (m *Manager) notDelivered(e *OutboxEntry, reason string, now time.Time) {
+	ref := e.InnerID
+	if ref == "" {
+		ref = heldID(e.Held)
+	}
+	e.Done, e.Held, e.Payload = true, nil, nil
+	m.quotaRefreshEnded(e)                 // a quota refresh's (#216): no answer can come
+	m.auditRef(now, reason, e.PeerID, ref) // ref: the message's inner id (#6875's notice names it)
+	m.dirty = true
 }
 
 // reconnectFailed counts a failed try of a reconnect to p naming epoch

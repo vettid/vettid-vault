@@ -19,6 +19,11 @@ type State struct {
 	// starts clean"): written as 29 from a vault's first flush; a state
 	// without it, or with a smaller value, is not started (R29-U1).
 	MessagingRelease int `json:"messaging_release,omitempty"`
+	// OutboxTried (0.88.7 §8.3): the outbox's entries carry Tried. A state
+	// written before (release 29) did not record it: at its first load every
+	// sealed session-mode entry not done is taken as one that may have
+	// reached the relay (init).
+	OutboxTried bool `json:"outbox_tried,omitempty"`
 
 	Relay        RelayState        `json:"relay"`
 	IdentitySeed []byte            `json:"ik_seed"`
@@ -862,9 +867,21 @@ type OutboxEntry struct {
 	Held []byte `json:"held,omitempty"`
 	// HeldExp is the held message's exp (zero: none): past it the entry
 	// is discarded, not sealed (0.86.2).
-	HeldExp   time.Time `json:"held_exp,omitzero"`
-	FinEpoch  []byte    `json:"fin_epoch,omitempty"`
-	Handshake bool      `json:"handshake,omitempty"`
+	HeldExp time.Time `json:"held_exp,omitzero"`
+	// Tried (0.88.7 §8.3): a deposit of this entry may have reached the
+	// relay (accepted, or no relay answer: a transport error, or a 5xx
+	// without a relay error code), so the peer may hold its inner id: a
+	// re-seal keeps its ts (sealHeld).
+	Tried bool `json:"tried,omitempty"`
+	// InnerID (0.88.7) is the inner id of the message a durable deposit
+	// carries, for the not-delivered audit's ref (§8.3, §10.9); "" for a
+	// handshake message or an entry written before.
+	InnerID string `json:"inner_id,omitempty"`
+	// Ephemeral (0.88.7): the message is of an ephemeral type (§8.5); at a
+	// key change the entry ends silently.
+	Ephemeral bool   `json:"ephemeral,omitempty"`
+	FinEpoch  []byte `json:"fin_epoch,omitempty"`
+	Handshake bool   `json:"handshake,omitempty"`
 }
 
 // AuditEntry records a dropped or refused message (§6.3, §6.6, §7.3).
@@ -873,6 +890,9 @@ type AuditEntry struct {
 	At     time.Time `json:"at"`
 	Event  string    `json:"event"`
 	PeerID string    `json:"peer_id,omitempty"`
+	// Ref (0.88.7) is the message's inner id for drop.undelivered_* and
+	// drop.stale_or_future (§10.9); "" otherwise.
+	Ref string `json:"ref,omitempty"`
 }
 
 // Settings are the owner's settings (§10.8), versioned as one object.

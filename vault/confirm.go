@@ -201,6 +201,12 @@ func (m *Manager) confirmPending(p *Peer, now time.Time) {
 	if pe == nil || kr == nil {
 		return
 	}
+	if kr.Pending() != nil {
+		// 0.88.7 §8.3 "Re-sealed at a key change" (GC #7160 cause 2): the
+		// entries waiting under the epoch this confirmation replaces are
+		// sealed again under the confirmed one (activate's sealHeld).
+		m.resealAtKeyChange(p, kr)
+	}
 	ep := kr.ConfirmPending(now)
 	p.Pending = nil
 	if ep == nil {

@@ -362,7 +362,11 @@ func (m *Manager) removePeerWith(p *Peer, notice string, body json.RawMessage, n
 		m.denySub(p, now) // §6.7: a re-paired device needs a new relay key
 	}
 	for _, e := range m.st.Outbox {
-		if e.PeerID == p.ID {
+		if e.PeerID == p.ID && !e.Done && p.Kind == KindConnection && memberDeposit(e) {
+			// 0.88.7 §8.3 "Not delivered": a removed or replaced connection's
+			// waiting messages end, never silently.
+			m.notDelivered(e, "undelivered_removed", now)
+		} else if e.PeerID == p.ID {
 			e.Done = true
 		}
 	}

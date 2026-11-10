@@ -3,6 +3,7 @@ package vault
 import (
 	"time"
 
+	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/handshake"
 )
 
@@ -66,20 +67,94 @@ func (m *Manager) reconnectNaming(p *Peer, ctx []byte, why string, now time.Time
 	return true
 }
 
+// StaleReach is how long after the last exp of a token this vault issued
+// to a stale connection's peer a deposit of the peer's under it can still
+// arrive (0.88.7 §8.3 "Not delivered", case 6): the relay holds a message
+// up to T (14 days) after a deposit made just before the exp, plus the
+// clock skew the ts window allows; at least (staleReach: a relay whose
+// message_ttl_seconds is longer holds them that long).
+const StaleReach = 14*24*time.Hour + envelope.MaxClockSkewFuture
+
+// staleReachUntil is when connection p can no longer come back: the latest
+// exp of any token this vault issued to the peer (adopted, or in a
+// handshake still in flight: an hs.resp or hs.init not yet activated,
+// revoked or not, since one deposited before the revocation still
+// arrives), plus StaleReach. Zero: none was recorded (the entries are then
+// kept: the bound cannot be judged).
+func (m *Manager) staleReachUntil(p *Peer) time.Time {
+	var last time.Time
+	see := func(ts []IssuedToken, all bool) {
+		for _, t := range ts {
+			if (all || t.PeerID == p.ID) && t.Exp.After(last) {
+				last = t.Exp
+			}
+		}
+	}
+	see(m.st.Issued, false)
+	for _, aw := range m.st.Awaiting {
+		if aw.PeerID == p.ID {
+			see(aw.Issued, true)
+		}
+	}
+	for _, og := range m.st.Outgoing {
+		if og.PeerID == p.ID {
+			see(og.Issued, true)
+		}
+	}
+	if p.Pending != nil {
+		see(p.Pending.Issued, true)
+	}
+	if last.IsZero() {
+		return last
+	}
+	return last.Add(m.staleReach())
+}
+
+// staleReach is StaleReach, or the relay's own message TTL plus the skew
+// when it holds messages longer than 14 days (its message_ttl_seconds at
+// Register).
+func (m *Manager) staleReach() time.Duration {
+	ttl := time.Duration(m.limits.MessageTTLSeconds) * time.Second
+	return max(StaleReach, ttl+envelope.MaxClockSkewFuture)
+}
+
+// tickStale ends the waiting messages of a stale connection that can no
+// longer come back (0.88.7 §3.4.1 "Stale is not final", proposed bound,
+// §8.3 "Not delivered" case 6): the peer reaches this vault only with a
+// token this vault issued to it (a standing token for its rekey, a
+// reconnect token for its reconnect), so once the last of them has expired
+// and anything deposited under it has left the relay (staleReachUntil), no
+// rekey or reconnect of its can make the connection active again. Each
+// waiting durable member deposit (held or sealed) is then not delivered
+// (undelivered_stale). A new invitation replaces the record (§7.4).
+func (m *Manager) tickStale(p *Peer, now time.Time) {
+	if p.Kind != KindConnection || p.State != PeerStale {
+		return
+	}
+	if until := m.staleReachUntil(p); until.IsZero() || now.Before(until) {
+		return // it can still come back (or no token was ever recorded: kept)
+	}
+	for _, e := range m.st.Outbox {
+		if !e.Done && e.PeerID == p.ID && memberDeposit(e) {
+			m.notDelivered(e, "undelivered_stale", now)
+		}
+	}
+}
+
 // markStale makes connection p stale (§3.4.1 "The reconnect bound"):
 // audited connection.stale with its feed item ("Your connection with
 // <name> stopped working. Send them a new invitation.", app text), so a
-// new invitation from that peer is accepted (§6.4).
+// new invitation from that peer is accepted (§6.4). (0.88.7) Stale is not
+// final: the peer's rekey or reconnect can make it active again
+// (activate, connection.active_again), so the outbox keeps its entries,
+// held ones included; a removal or a replacement ends them (notDelivered).
 func (m *Manager) markStale(p *Peer, now time.Time) {
 	if p.State == PeerStale {
 		return
 	}
 	p.State = PeerStale
-	for _, e := range m.st.Outbox {
-		if !e.Done && e.PeerID == p.ID && e.Held != nil {
-			e.Done, e.Held = true, nil // held for an epoch that will not come (review 2)
-		}
-	}
+	// Held entries are kept (0.88.7, GC #7160 cause 1; until then they
+	// were dropped here, unaudited, and lost when the connection came back).
 	m.abandonHandshakes(p, true, true, now)
 	if p.Pending != nil {
 		m.abandonPending(p, "stale", false, now)

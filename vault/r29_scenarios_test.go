@@ -20,13 +20,23 @@ import (
 // (VAULT-MESSAGING 0.87.1: no path toward an earlier release).
 
 type r29Fx struct {
-	t    *testing.T
-	d    [3]*devFixture // sides 0 and 1; 2: an old copy (startCopy)
-	id   [3]string
-	clk  time.Time
-	got  [3][]string // test.note bodies each side received
-	sink [3]*recSink // each side's activity
+	t   *testing.T
+	d   [3]*devFixture // sides 0 and 1; 2: an old copy (startCopy)
+	id  [3]string
+	clk time.Time
+	got [3][]string // test.note bodies each side received
+	// gotIDs counts the test.notes each side handled, by inner id (the
+	// random pair's oracle: each exactly once).
+	gotIDs [3]map[string]int
+	sink   [3]*recSink // each side's activity
+	// notesInState keeps the count in each vault's state instead (the
+	// random pair: a crash before the batch's write loses the handling with
+	// the rest of it, and the redelivery handles it again, once).
+	notesInState bool
 }
+
+// rpNotesKey is where notesInState keeps the counts (st.Features).
+const rpNotesKey = "test.notes.handled"
 
 // newR29Fx connects two vaults (side 0 the inviter) on a shared clock.
 func newR29Fx(t *testing.T) *r29Fx {
@@ -47,6 +57,7 @@ func newR29Fx(t *testing.T) *r29Fx {
 		d.m.register(TypeSpec{Type: "test.note", From: []string{KindConnection}, Connections: PeersBoth},
 			HandlerFunc(func(_ context.Context, _ *Session, in *envelope.Inner) (json.RawMessage, error) {
 				f.got[s] = append(f.got[s], string(in.Body))
+				f.handled(s, in)
 				return nil, nil
 			}))
 		f.sink[s] = &recSink{}
@@ -75,6 +86,37 @@ func newR29Fx(t *testing.T) *r29Fx {
 	}
 	f.settle()
 	return f
+}
+
+// handled counts a test.note side s's handler ran, by its inner id.
+func (f *r29Fx) handled(s int, in *envelope.Inner) {
+	if f.notesInState {
+		m := f.m(s)
+		ids := f.handledIDs(s)
+		ids[in.ID]++
+		m.st.Features[rpNotesKey], _ = json.Marshal(ids)
+		m.dirty = true
+		return
+	}
+	if f.gotIDs[s] == nil {
+		f.gotIDs[s] = map[string]int{}
+	}
+	f.gotIDs[s][in.ID]++
+}
+
+// handledIDs is side s's count of handled test.notes by inner id.
+func (f *r29Fx) handledIDs(s int) map[string]int {
+	if !f.notesInState {
+		if f.gotIDs[s] == nil {
+			f.gotIDs[s] = map[string]int{}
+		}
+		return f.gotIDs[s]
+	}
+	ids := map[string]int{}
+	if m := f.m(s); m.st != nil {
+		_ = json.Unmarshal(m.st.Features[rpNotesKey], &ids)
+	}
+	return ids
 }
 
 func (f *r29Fx) p(s int) *Peer           { return f.d[s].m.st.Connections[f.id[s]] }
@@ -240,6 +282,17 @@ func (f *r29Fx) talks() {
 
 func (f *r29Fx) rekey(s int) {
 	f.do(s, func(m *Manager, p *Peer) { m.startRekey(p, f.clk) })
+}
+
+// auditedRef reports whether side s audited ev with ref (0.88.7: the
+// message's inner id).
+func (f *r29Fx) auditedRef(s int, ev, ref string) bool {
+	for _, a := range f.m(s).st.Audit {
+		if a.Event == ev && a.Ref == ref {
+			return true
+		}
+	}
+	return false
 }
 
 func (f *r29Fx) audited(s int, ev string) bool {

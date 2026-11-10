@@ -85,17 +85,23 @@ func TestR29RuleEDropsUnsentFin(t *testing.T) {
 	}
 }
 
-// Code 2: held entries are done at stale and at removal; after stale, a
-// new invitation to the same peer connects (the hold is by peer, not by
-// mailbox, so the first contact is not held behind them).
+// Code 2: held entries are kept at stale (0.88.7: stale is not final, GC
+// #7213 Q1) and end, audited drop.undelivered_removed, at removal and at
+// the replacement by a new connection; after stale, a new invitation to the
+// same peer connects (the hold is by peer, not by mailbox, so the first
+// contact is not held behind them).
 func TestR29HeldAtStaleAndNewInvitation(t *testing.T) {
 	f := demoted(t, nil)
 	f.note(0, "held")
 	f.do(0, func(m *Manager, p *Peer) { m.markStale(p, f.clk) })
+	var held *OutboxEntry
 	for _, e := range f.m(0).st.Outbox {
 		if e.Held != nil && !e.Done {
-			t.Fatal("a held entry survived stale")
+			held = e
 		}
+	}
+	if held == nil {
+		t.Fatal("stale dropped the held entry (0.88.7 keeps it)")
 	}
 	// side 1's member removes the connection (its record is active), then
 	// invites again; side 0 accepts with its stale record.
@@ -120,6 +126,9 @@ func TestR29HeldAtStaleAndNewInvitation(t *testing.T) {
 	if p := b.m.st.Connections[cid]; p == nil || p.State != PeerActive {
 		t.Fatal("the new invitation did not connect")
 	}
+	if !held.Done || !f.audited(0, "undelivered_removed") {
+		t.Fatalf("the replaced connection's held entry: done %v, audited %v (want both, §8.3 \"Not delivered\")", held.Done, f.audited(0, "undelivered_removed"))
+	}
 }
 
 func TestR29HeldAtRemoval(t *testing.T) {
@@ -130,6 +139,9 @@ func TestR29HeldAtRemoval(t *testing.T) {
 		if e.Held != nil && !e.Done {
 			t.Fatal("a held entry survived removal")
 		}
+	}
+	if !f.audited(0, "undelivered_removed") {
+		t.Fatal("removal ended a held message without drop.undelivered_removed (§8.3 \"Not delivered\")")
 	}
 }
 

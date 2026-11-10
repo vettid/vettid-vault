@@ -246,6 +246,7 @@ type rpWorld struct {
 	refreshes int             // quota refreshes asked
 	qrrSeen   [2]int          // R29RP_SPENT: side s's quota_refresh_refused audits already followed by a reconnect deposit
 	spentRecs int             // R29RP_SPENT: reconnect-token deposits that followed a refused quota refresh (decision a's path)
+	sentNotes [2]int          // R29RP_SPENT: test.notes side s queued (each must reach the other side)
 	quiet     bool            // in quiesce: R29RP_SPENT's housekeeping deposits do not spend a quota (the real one is 20,000)
 	granted   int             // quota refreshes the issuer granted (its Refreshed stamp moved)
 	lastRef   [2]time.Time
@@ -692,7 +693,9 @@ func (w *rpWorld) exec(a rpAction, rng *rand.Rand) {
 	case rpSend:
 		w.do(s, func(m *Manager, p *Peer) {
 			n := len(m.st.Outbox)
-			m.sendTo(p, "test.note", json.RawMessage(`{"n":"x"}`), w.f.clk)
+			if m.sendTo(p, "test.note", json.RawMessage(`{"n":"x"}`), w.f.clk) != "" {
+				w.sentNotes[s]++
+			}
 			if w.md.refresh && len(m.st.Outbox) > n {
 				// Known by its bytes, not by opening it: a note sealed under
 				// an epoch since replaced must still spend the quota.
@@ -821,6 +824,14 @@ func (w *rpWorld) lockShape() (overlapping, single bool) {
 	return overlapping, single
 }
 
+// rpAccepted reports whether a run's class is one of the stated residuals,
+// counted apart and not a failure of the search: the "residual:" classes
+// (rapid rotations ending by quota_exceeded, overlapping long locks) and a
+// single lock longer than T ("lock>T:single", converged or not).
+func rpAccepted(class string) bool {
+	return strings.HasPrefix(class, "residual:") || strings.HasPrefix(class, "lock>T:single")
+}
+
 // lockClass: a failure's class when long locks explain it.
 func (w *rpWorld) lockClass() string {
 	switch over, single := w.lockShape(); {
@@ -919,6 +930,11 @@ func (w *rpWorld) verdict() string {
 			if stuck {
 				why = append(why, fmt.Sprintf("quota-stuck@%d", s))
 			}
+		}
+		if w.md.spent && len(f.got[o]) < w.sentNotes[s] {
+			// A note that waited past §8.4's 16 days is dropped by its
+			// receiver: the loss decision a exists to prevent (GC #6840).
+			why = append(why, fmt.Sprintf("note-lost@%d", s))
 		}
 		if !f.clk.Before(p[s].Standing.Exp) {
 			why = append(why, fmt.Sprintf("token@%d", s))
@@ -1133,6 +1149,13 @@ func TestR29RandomPair(t *testing.T) {
 		t.Logf("%-50s %5d  e.g. %s", k, len(seeds), strings.Join(ss, " "))
 	}
 	t.Logf("runs in which relay.token.issued delivered a token already revoked (follow-up, not R29-T1): %d", len(rpIssuedRevokedRuns))
+	// The search fails when any run ends outside the accepted residuals (the
+	// lead, GC #7066): a PASS then means no such run, not just no crash.
+	for _, k := range ks {
+		if k != "converged" && !rpAccepted(k) {
+			t.Errorf("%d runs ended %s (not an accepted residual), e.g. %d", len(classes[k]), k, classes[k][0])
+		}
+	}
 	md := rpRunModes
 	t.Logf("shuffle %v: %d messages delivered ahead of an older one, in %d runs", md.shuffle, rpTotals.shuffled, rpTotals.shuffleRuns)
 	t.Logf("refresh %v (spent %v): ~%d quota refreshes asked (by the harness) in %d runs, ~%d granted (approximate), %d standing-quota refusals (quota %d, spent %d)", md.refresh, md.spent,

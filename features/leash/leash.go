@@ -20,11 +20,13 @@
 package leash
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/json"
+	"io"
 	"sort"
 	"strconv"
 	"sync"
@@ -1096,6 +1098,24 @@ func (f *Feature) sign(s *vault.Session, g *Grant, agentIK []byte) error {
 		return errLocked
 	}
 	iat := s.Now().UTC().Truncate(time.Second)
+	nonce, err := leashwire.NewNonce() // new for each signature, a replacement's included
+	if err != nil {
+		return errInternal
+	}
+	stmt := delegationOf(g, key.Public().(ed25519.PublicKey), agentIK, s.IdentityKey(), nonce, iat).Marshal()
+	sig, err := leashwire.Sign(key, stmt)
+	if err != nil {
+		return errInternal
+	}
+	g.Delegation, g.DelegationSig = stmt, sig
+	return nil
+}
+
+// delegationOf is the delegation statement for g's fields (§10.11), with
+// the values fixed when it is signed: the credential key iss, the agent's
+// ik sub, the vault's ik as status issuer, the nonce and iat (whole
+// seconds). sign makes it; matchesDelegation rebuilds it to compare.
+func delegationOf(g *Grant, iss, sub, statusIssuer ed25519.PublicKey, nonce []byte, iat time.Time) *leashwire.Delegation {
 	var exp time.Time // LEASH §3.2: the contract's expiry, if any
 	if !g.Expires.IsZero() {
 		exp = g.Expires.Truncate(time.Second)
@@ -1103,11 +1123,7 @@ func (f *Feature) sign(s *vault.Session, g *Grant, agentIK []byte) error {
 			exp = iat.Add(time.Second)
 		}
 	}
-	nonce, err := leashwire.NewNonce() // new for each signature, a replacement's included
-	if err != nil {
-		return errInternal
-	}
-	d := &leashwire.Delegation{Iss: key.Public().(ed25519.PublicKey), Sub: agentIK, StatusIssuer: s.IdentityKey(),
+	d := &leashwire.Delegation{Iss: iss, Sub: sub, StatusIssuer: statusIssuer,
 		GrantID: g.ID, Version: g.Version, Approval: g.Approval, Scope: leashwire.Scope{Op: g.Scope, Connections: g.Connections},
 		StatusTTL: g.StatusTTL, Nonce: nonce, IssuedAt: iat, Expires: exp}
 	if g.Rule != nil {
@@ -1116,13 +1132,41 @@ func (f *Feature) sign(s *vault.Session, g *Grant, agentIK []byte) error {
 	if g.PerHour > 0 { // every auto and items.read grant (§10.11)
 		d.Limits = &leashwire.Limits{PerHour: g.PerHour, PerDay: g.PerDay}
 	}
-	stmt := d.Marshal()
-	sig, err := leashwire.Sign(key, stmt)
+	return d
+}
+
+// matchesDelegation reports whether g's stored fields are the ones its
+// delegation signed, for the agent with identity key agentIK: the
+// delegation is in canonical form, and rebuilding it from g with its own
+// iss, status issuer, nonce and iat, and agentIK as sub, gives the same
+// bytes. So a stored copy that lost a field (its connections, a limit,
+// its expiry), or a delegation whose sub is not the pairing agent's ik,
+// does not match (§10.11 "Initial grants at pairing", 0.88.5). The
+// signature itself is not checked: the vault made it, and both are
+// sealed with the pending pairing.
+func matchesDelegation(g *Grant, agentIK []byte) bool {
+	d, err := leashwire.ParseCanonical(g.Delegation)
 	if err != nil {
-		return errInternal
+		return false
 	}
-	g.Delegation, g.DelegationSig = stmt, sig
-	return nil
+	// The rebuild alone would let two stored values pass: an expiry within
+	// the signing second (sign moves exp to iat+1s), and a per_day without
+	// limits (limits follow per_hour). The spec compares them directly: the
+	// stored expires_at, rounded down to whole seconds, is exp; with no
+	// limits, both rates are 0.
+	if !g.Expires.Truncate(time.Second).Equal(d.Expires) || d.Limits == nil && (g.PerHour != 0 || g.PerDay != 0) {
+		return false
+	}
+	// Stored values the delegation's form cannot carry: a share rule (an
+	// initial grant is never items.read), a scope this build does not
+	// delegate, a status_ttl with a fraction of a second, and an empty
+	// (rather than absent) connection list.
+	if g.Rule != nil || !delegable[g.Scope] || g.Scope == ScopeItems || g.StatusTTL%time.Second != 0 ||
+		g.Connections != nil && len(g.Connections) == 0 {
+		return false
+	}
+	want := delegationOf(g, d.Iss, agentIK, d.StatusIssuer, d.Nonce, d.IssuedAt).Marshal()
+	return bytes.Equal(want, g.Delegation)
 }
 
 func grantID(body []byte) (string, error) {
@@ -1319,30 +1363,30 @@ func (f *Feature) PrepareAgentGrants(s *vault.Session, agentIK []byte, raw json.
 // take effect with the pairing (§6.7). The vault core calls it for every
 // agent pairing; with no initial grants (prepared empty) the set the
 // pairing completes with is the empty one, and it still takes its
-// grant_seq (§10.11). So does a pairing whose initial grants no longer
-// decode (a decode error, for example after a build change between the
-// approval and the pairing's completion): none of them is installed. This
-// covers decode errors only; a grant that decodes is not yet checked
-// against its signed delegation. An initial grant whose id is already in
-// use is skipped, never replacing another grant.
-func (f *Feature) AgentPaired(s *vault.Session, agentID string, prepared json.RawMessage) {
+// grant_seq (§10.11).
+//
+// §10.11 "Initial grants at pairing" (0.88.5): if the prepared set does
+// not decode (today the approval and the completion run in one call, so
+// this is defence in depth against damaged state), none of it is
+// installed, not even what decoded before the error, and one
+// leash.grant.dropped is recorded with ref damaged. Otherwise each grant
+// is installed unless dropReason gives a reason, which is recorded as
+// leash.grant.dropped. The pairing
+// completes either way, with what was installed (possibly nothing): that
+// set takes its grant_seq and the agent is told, so its view matches the
+// vault's.
+func (f *Feature) AgentPaired(s *vault.Session, agentID string, agentIK []byte, prepared json.RawMessage) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	var gs []*Grant
-	if len(prepared) > 0 && json.Unmarshal(prepared, &gs) != nil {
-		// Damaged initial grants (the sealed PairGrants): install none of
-		// them, not even what decoded before the error, and complete the
-		// pairing with the empty set. It still takes its grant_seq and the
-		// agent is told, so its view matches the vault's (§10.11).
-		gs = nil
+	gs, ok := decodePairGrants(prepared)
+	if !ok {
+		f.dropped(s, agentID, DropDamaged)
 	}
 	now := s.Now()
 	for _, g := range gs {
-		if g == nil || g.ID == "" || f.count(agentID) >= MaxGrants || !g.Expires.IsZero() && !now.Before(g.Expires) {
+		if reason := f.dropReason(g, agentID, agentIK, now); reason != "" {
+			f.dropped(s, agentID, reason)
 			continue
-		}
-		if _, taken := f.d.Grants[g.ID]; taken {
-			continue // never replace another grant (or an earlier duplicate)
 		}
 		g.AgentID = agentID
 		f.d.Grants[g.ID] = g
@@ -1351,6 +1395,62 @@ func (f *Feature) AgentPaired(s *vault.Session, agentID string, prepared json.Ra
 	}
 	f.changed(agentID) // the set the pairing completes with
 	f.tell(s, agentID)
+}
+
+// The reasons an approved initial grant is not installed at pairing, the
+// ref of its leash.grant.dropped (§10.9, §10.11 "Initial grants at
+// pairing", 0.88.5). They are fixed values; a new one is a spec change.
+const (
+	DropDamaged  = "damaged"  // the set does not decode, or a grant has no id or no signed delegation
+	DropMismatch = "mismatch" // the grant differs from the delegation the member signed for it
+	DropExpired  = "expired"  // its expires_at has passed
+	DropIDTaken  = "id_taken" // its id is in use (another grant, or an earlier one of the set)
+	DropCap      = "cap"      // the agent already has MaxGrants grants
+)
+
+// decodePairGrants decodes the sealed PairGrants strictly: an unknown
+// field, trailing data or null (PrepareAgentGrants makes 1–MaxGrants
+// grants) is damage, like a wrong type. Empty is the empty set: a pairing
+// without initial grants.
+func decodePairGrants(prepared json.RawMessage) ([]*Grant, bool) {
+	if len(prepared) == 0 {
+		return nil, true
+	}
+	dec := json.NewDecoder(bytes.NewReader(prepared))
+	dec.DisallowUnknownFields()
+	var gs []*Grant
+	if dec.Decode(&gs) != nil || gs == nil {
+		return nil, false
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return nil, false
+	}
+	return gs, true
+}
+
+// dropReason is why initial grant g is not installed for the agent, or ""
+// to install it: the first that applies, in the spec's order.
+func (f *Feature) dropReason(g *Grant, agentID string, agentIK []byte, now time.Time) string {
+	switch {
+	case g == nil || g.ID == "" || len(g.Delegation) == 0 || len(g.DelegationSig) == 0:
+		return DropDamaged
+	case !matchesDelegation(g, agentIK):
+		return DropMismatch
+	case !g.Expires.IsZero() && !now.Before(g.Expires):
+		return DropExpired
+	}
+	if _, taken := f.d.Grants[g.ID]; taken {
+		return DropIDTaken // never replace another grant
+	}
+	if f.count(agentID) >= MaxGrants {
+		return DropCap
+	}
+	return ""
+}
+
+// dropped records an initial grant the pairing did not install (§10.9).
+func (f *Feature) dropped(s *vault.Session, agentID, reason string) {
+	s.Record(vault.Activity{Kind: "leash.grant.dropped", DeviceID: agentID, Ref: reason, Audit: true})
 }
 
 // DeviceRemoved implements vault.DeviceRemovedObserver: unlinking an

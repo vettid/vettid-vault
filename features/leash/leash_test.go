@@ -736,7 +736,7 @@ func TestPairingUnlinkRemoval(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r.f.AgentPaired(sess, agent, prepared)
+	r.f.AgentPaired(sess, agent, ag.IK, prepared)
 	gs := r.f.Grants()
 	if len(gs) != 3 || len(r.h.SentOfType("leash.grant.updated")) != 1 {
 		t.Fatalf("initial grants: %d", len(gs))

@@ -201,6 +201,16 @@ func rpGen(rs uint64, steps int, burst bool, md rpModes) []rpAction {
 	return acts
 }
 
+// rpSeal is what a note deposit carried, judged when the relay saw it (the
+// sender running, even in the drain of its own lock): its inner id and ts,
+// and whether it was sealed under the sender's epoch current since that ts
+// (no key change since it was sealed).
+type rpSeal struct {
+	id   string
+	ts   time.Time
+	same bool
+}
+
 // rpEpochSeen is a side's current epoch and when the harness first saw it.
 type rpEpochSeen struct {
 	id    []byte
@@ -257,13 +267,16 @@ type rpWorld struct {
 	// (sent[s], by inner id) must be handled exactly once by the other side
 	// (r29Fx.gotIDs): note-lost@s, note-duplicate@s.
 	sent      [2][]string
-	noteBytes map[string]string // a note's bytes as queued -> its inner id
-	epochAt   [2]rpEpochSeen    // side s's current epoch and since when (seen at each pull)
-	ttlNote   map[string]bool   // a copy the relay dropped at T
-	quotaNote map[string]bool   // a deposit of it refused for the standing quota (R29RP_REFRESH)
-	staleNote map[string]bool   // a copy accepted with a ts over 16 days old, under an epoch current since that ts (no key change), after a standing-quota refusal of the sender's since that ts
-	noteAhead map[string]string // the note queued by the same side just before it (the entry ahead in the outbox, of the notes)
-	fiveNote  map[string]bool   // a deposit of it answered an injected 5xx (possibly stored, to the vault)
+	noteBytes map[string]string    // a note's bytes as queued -> its inner id
+	epochAt   [2]rpEpochSeen       // side s's current epoch and since when (seen at each pull)
+	ttlNote   map[string]bool      // a copy the relay dropped at T
+	quotaNote map[string]bool      // a deposit of it refused for the standing quota (R29RP_REFRESH)
+	quotaLast map[string]time.Time // when it was last refused for it
+	sealed    map[string]rpSeal    // what each note deposit's bytes carried, seen at the relay (the sender live)
+	lockNote  map[string]bool      // a copy accepted with no key change since its ts, after a lock of the sender's over 16 days since that ts
+	staleNote map[string]bool      // a copy accepted with a ts over 16 days old, under an epoch current since that ts (no key change), after a standing-quota refusal of the sender's since that ts
+	noteAhead map[string]string    // the note queued by the same side just before it (the entry ahead in the outbox, of the notes)
+	fiveNote  map[string]bool      // a deposit of it answered an injected 5xx (possibly stored, to the vault)
 	lastRef   [2]time.Time
 }
 
@@ -333,6 +346,7 @@ func (w *rpWorld) hook(s int) {
 // check is the relay's judgement of a deposit by side s (RELAY-PROTOCOL
 // §5.3): injected failures, then the token (exp, revocation, quota).
 func (w *rpWorld) check(s int, mailbox, token string, payload []byte) error {
+	w.seeNote(s, payload)
 	if w.fail[s] > 0 {
 		w.fail[s]--
 		if w.fail429[s] {
@@ -391,6 +405,7 @@ func (w *rpWorld) check(s int, mailbox, token string, payload []byte) error {
 				w.quotaHit[s] = true
 				if note != "" {
 					w.quotaNote[note] = true
+					w.quotaLast[note] = w.f.clk
 				}
 				w.logf("relay: %d's deposit refused %s (standing quota) note %q", s, CodeQuotaExceeded, note)
 				return &relayclient.Error{Status: 429, Code: CodeQuotaExceeded}
@@ -434,7 +449,7 @@ func (w *rpWorld) typeOf(s int, payload []byte) string {
 // pending epoch): the inner and the epoch's id, or nil.
 func (w *rpWorld) noteInner(s int, payload []byte) (*envelope.Inner, []byte) {
 	env, err := envelope.Parse(payload)
-	if err != nil || env.Mode() != envelope.ModeSession || w.locked[s] || w.f.m(s).st == nil {
+	if err != nil || env.Mode() != envelope.ModeSession || w.f.m(s).st == nil {
 		return nil, nil
 	}
 	kr := w.f.m(s).sessions[w.f.id[s]]
@@ -453,8 +468,23 @@ func (w *rpWorld) noteInner(s int, payload []byte) (*envelope.Inner, []byte) {
 	return nil, nil
 }
 
-// noteOf is the inner id of side s's test.note deposit: by its bytes as
-// queued (one sealed under an epoch since replaced) or opened, else "".
+// seeNote records a test.note deposit side s is making (the relay's check:
+// the vault is running, also in the drain of its own lock): its bytes, so
+// that a copy re-sealed since it was queued is still known by them later
+// (the lead's re-check Low 1), and what it carried (rpSeal).
+func (w *rpWorld) seeNote(s int, payload []byte) {
+	in, ep := w.noteInner(s, payload)
+	if in == nil || in.Type != "test.note" {
+		return
+	}
+	w.seeEpochLive(s)
+	w.noteBytes[string(payload)] = in.ID
+	w.sealed[string(payload)] = rpSeal{id: in.ID, ts: in.TS,
+		same: bytes.Equal(ep, w.epochAt[s].id) && !w.epochAt[s].since.After(in.TS)}
+}
+
+// noteOf is the inner id of side s's test.note deposit: by its bytes (as
+// queued, or as seen at the relay) or opened, else "".
 func (w *rpWorld) noteOf(s int, payload []byte) string {
 	if id, ok := w.noteBytes[string(payload)]; ok {
 		return id
@@ -466,39 +496,58 @@ func (w *rpWorld) noteOf(s int, payload []byte) string {
 }
 
 // noteAccepted is noteOf for a deposit the relay accepted; it records a
-// copy with a ts over 16 days old (the peer refuses it stale_or_future)
-// sealed under side s's current epoch, current since no later than that ts:
-// no key change since it was sealed (a key change re-seals it with a fresh
-// ts, 0.88.7 §8.3).
+// copy sealed under side s's epoch current since its ts (no key change since
+// it was sealed: a key change re-seals it with a fresh ts, 0.88.7 §8.3)
+// that waited behind the standing quota. Whether the peer refused it for
+// its ts is the peer's stale_or_future with its id (notesLost), not judged
+// here.
 func (w *rpWorld) noteAccepted(s int, payload []byte) string {
 	id := w.noteOf(s, payload)
 	if id == "" {
 		return ""
 	}
-	in, ep := w.noteInner(s, payload)
-	if in == nil {
+	sl, ok := w.sealed[string(payload)]
+	if !ok {
 		w.logf("note %s from %d accepted, sealed under an epoch since replaced", id, s)
 		return id
 	}
-	old := w.f.clk.Sub(in.TS) > envelope.MaxDurableAge
-	same := bytes.Equal(ep, w.epochAt[s].id) && !w.epochAt[s].since.After(in.TS)
-	w.logf("note %s from %d accepted: ts %s, current epoch since %s", id, s, in.TS.Format("01-02 15:04"), w.epochAt[s].since.Format("01-02 15:04"))
+	same := sl.same
+	w.logf("note %s from %d accepted: ts %s, no key change since %v", id, s, sl.ts.Format("01-02 15:04"), same)
 	// Behind the standing quota: this note refused for it, or the note
 	// queued just before it to that mailbox (which held it in the outbox's
 	// order; a token-carrying deposit may pass between them, §8.4). The lead's
 	// review L-b; this residual goes once #216 (the quota wait) and #6875
 	// (the 16-day re-stamp at deposit) land.
+	// The note ahead's refusal counts only if it came after this note's ts
+	// (the lead's re-check Low 2).
 	ahead := w.noteAhead[id]
-	waited := w.quotaNote[id] || ahead != "" && w.quotaNote[ahead]
-	if old && same && waited {
+	waited := w.quotaNote[id] || ahead != "" && w.quotaNote[ahead] && !w.quotaLast[ahead].Before(sl.ts)
+	if same && waited {
 		w.staleNote[id] = true
+	}
+	// The sender itself locked for over 16 days since the note's ts, with
+	// no key change: deposited at its unlock with that ts (#6875's re-stamp
+	// at deposit ends it).
+	for _, iv := range w.locks[s] {
+		if same && !iv[0].Before(sl.ts) && iv[1].Sub(iv[0]) > envelope.MaxDurableAge {
+			w.lockNote[id] = true
+		}
 	}
 	return id
 }
 
 // seeEpoch records side s's current epoch, and when it was first seen.
 func (w *rpWorld) seeEpoch(s int) {
-	if w.locked[s] || w.f.m(s).st == nil {
+	if w.locked[s] {
+		return
+	}
+	w.seeEpochLive(s)
+}
+
+// seeEpochLive is seeEpoch while side s's vault runs (also in its lock's
+// drain).
+func (w *rpWorld) seeEpochLive(s int) {
+	if w.f.m(s).st == nil {
 		return
 	}
 	kr := w.f.m(s).sessions[w.f.id[s]]
@@ -1069,6 +1118,12 @@ const rpQuotaWaitResidual = "residual:quota-wait>16d (#216, #6875)"
 // lost, as the vault cannot know. Counted apart, accepted.
 const rpToldResidual = "residual:told-after-5xx (#6875)"
 
+// rpLockWaitResidual: a run whose only fault is a test.note refused
+// stale_or_future (by its id) after its sender was locked for over 16 days
+// since its ts, with no key change: it went at the unlock with that ts.
+// Card GC #6875's re-stamp at deposit ends it. Counted apart, accepted.
+const rpLockWaitResidual = "residual:lock-wait>16d (#6875)"
+
 // notesLost is the note oracle (GC #7160, every mode): each test.note side
 // s queued is handled exactly once by the other side, by inner id. One not
 // handled is excused only if the relay dropped a copy of it at T and the
@@ -1080,7 +1135,7 @@ const rpToldResidual = "residual:told-after-5xx (#6875)"
 // (rpQuotaWaitResidual); or if it was answered a 5xx and its sender audited
 // undelivered_window (told, rpToldResidual).
 func (w *rpWorld) notesLost() (why []string, residual string) {
-	quotaWait, told := false, false
+	quotaWait, told, lockWait := false, false, false
 	over, single := w.lockShape()
 	for s := 0; s < 2; s++ {
 		o := 1 - s
@@ -1096,6 +1151,8 @@ func (w *rpWorld) notesLost() (why []string, residual string) {
 				quotaWait = true
 			case w.fiveNote[id] && w.f.auditedRef(s, "undelivered_window", id):
 				told = true
+			case w.lockNote[id] && w.f.auditedRef(o, "stale_or_future", id):
+				lockWait = true
 			default:
 				lost = true
 				w.logf("note %s from %d lost: ttl %v quota %v stale-copy %v", id, s, w.ttlNote[id], w.quotaNote[id], w.staleNote[id])
@@ -1113,6 +1170,8 @@ func (w *rpWorld) notesLost() (why []string, residual string) {
 		residual = rpToldResidual
 	case quotaWait:
 		residual = rpQuotaWaitResidual
+	case lockWait:
+		residual = rpLockWaitResidual
 	}
 	return why, residual
 }
@@ -1172,6 +1231,7 @@ func rpRunFP(t *testing.T, rs uint64, steps int, burst, verbose bool) (string, [
 	w := &rpWorld{t: t, f: f, quota: map[string]int64{}, refused: map[string]int{}, verbose: verbose, md: rpRunModes,
 		noteBytes: map[string]string{}, noteAhead: map[string]string{},
 		ttlNote: map[string]bool{}, quotaNote: map[string]bool{}, staleNote: map[string]bool{}, fiveNote: map[string]bool{},
+		quotaLast: map[string]time.Time{}, sealed: map[string]rpSeal{}, lockNote: map[string]bool{},
 		srng: rand.New(rand.NewPCG(rs, 11))}
 	for s := 0; s < 2; s++ {
 		w.pub[s], w.mbox[s] = f.pk(s), f.m(s).st.Relay.Mailbox

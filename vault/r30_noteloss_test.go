@@ -38,14 +38,21 @@ import (
 // the standing quota too (it did not before: its bytes had changed); it
 // converges with #216's quota fix (want "" once #216 merges).
 var r30NoteSeeds = []struct {
-	seed    uint64
-	refresh bool
-	want    string
+	seed           uint64
+	burst, refresh bool
+	lost           bool // R29RP_LOSTANS
+	want           string
 }{
-	{9545559820980032774, true, ""}, {8594494249170355390, true, ""}, {8579791540454706926, true, ""},
-	{17172539816259494157, true, ""}, {2741807807086018555, true, ""}, {16785278149167989050, true, ""},
-	{15093282355162425551, true, ""}, {6650889704533313486, true, rpQuotaWaitResidual},
-	{3269441301900938, false, ""}, {16236571777707351782, false, ""},
+	{9545559820980032774, true, true, false, ""}, {8594494249170355390, true, true, false, ""},
+	{8579791540454706926, true, true, false, ""}, {17172539816259494157, true, true, false, ""},
+	{2741807807086018555, true, true, false, ""}, {16785278149167989050, true, true, false, ""},
+	{15093282355162425551, true, true, false, ""}, {6650889704533313486, true, true, false, rpQuotaWaitResidual},
+	{3269441301900938, true, false, false, ""}, {16236571777707351782, true, false, false, ""},
+	// R29RP_REFRESH and R29RP_LOSTANS (the lead's re-check Low 1): a
+	// re-sealed copy known by its bytes as the relay saw it, and the
+	// receiver's stale_or_future for it judging the quota wait.
+	{8495705468849050258, false, true, true, rpQuotaWaitResidual},
+	{14452917345793243350, false, true, true, rpLockWaitResidual},
 }
 
 func TestR30NoteLossSeeds(t *testing.T) {
@@ -53,8 +60,8 @@ func TestR30NoteLossSeeds(t *testing.T) {
 	t.Cleanup(func() { rpRunModes = saved })
 	for _, c := range r30NoteSeeds {
 		t.Run(strconv.FormatUint(c.seed, 10), func(t *testing.T) {
-			rpRunModes = rpModes{refresh: c.refresh}
-			if v, _ := rpRun(t, c.seed, 40, true, false); v != c.want {
+			rpRunModes = rpModes{refresh: c.refresh, lost: c.lost}
+			if v, _ := rpRun(t, c.seed, 40, c.burst, false); v != c.want {
 				t.Fatalf("verdict %q, want %q (no note lost)", v, c.want)
 			}
 		})
@@ -771,7 +778,7 @@ func TestR30NoteOracle(t *testing.T) {
 	f.longTokens()
 	newW := func() *rpWorld {
 		f.gotIDs = [3]map[string]int{{}, {}, {}}
-		return &rpWorld{t: t, f: f, refused: map[string]int{}, ttlNote: map[string]bool{}, quotaNote: map[string]bool{}, staleNote: map[string]bool{}, fiveNote: map[string]bool{}}
+		return &rpWorld{t: t, f: f, refused: map[string]int{}, ttlNote: map[string]bool{}, quotaNote: map[string]bool{}, staleNote: map[string]bool{}, fiveNote: map[string]bool{}, lockNote: map[string]bool{}}
 	}
 	long := [][2]time.Time{{f.clk.Add(-20 * 24 * time.Hour), f.clk}}
 	for _, c := range []struct {
@@ -813,6 +820,18 @@ func TestR30NoteOracle(t *testing.T) {
 	}
 	if v := w.verdict(); v != rpQuotaWaitResidual {
 		t.Fatalf("verdict %q, want %q", v, rpQuotaWaitResidual)
+	}
+	// The sender's own long lock (no key change): only with the peer's
+	// stale_or_future for this note (side 1 audited one for "a" above).
+	w = newW()
+	w.sent[0] = []string{"b"}
+	w.lockNote["b"] = true
+	if lost, res := w.notesLost(); len(lost) != 1 || res != "" {
+		t.Fatalf("lock wait without the peer's stale_or_future: %v %q", lost, res)
+	}
+	f.do(1, func(m *Manager, p *Peer) { m.auditRef(f.clk, "stale_or_future", p.ID, "b") })
+	if lost, res := w.notesLost(); len(lost) != 0 || res != rpLockWaitResidual {
+		t.Fatalf("lock wait: %v %q, want the residual", lost, res)
 	}
 	// Told after a 5xx: only with the sender's undelivered_window.
 	w = newW()
@@ -874,19 +893,48 @@ func TestR30QuotaWaitAhead(t *testing.T) {
 	}{
 		{"no refusal", func(w *rpWorld) {}, false},
 		{"its own refusal", func(w *rpWorld) { w.quotaNote[in.ID] = true }, true},
-		{"the entry ahead refused", func(w *rpWorld) { w.noteAhead[in.ID] = "ahead"; w.quotaNote["ahead"] = true }, true},
+		{"the entry ahead refused after its ts", func(w *rpWorld) {
+			w.noteAhead[in.ID] = "ahead"
+			w.quotaNote["ahead"], w.quotaLast["ahead"] = true, in.TS.Add(time.Minute)
+		}, true},
+		{"the entry ahead refused before its ts", func(w *rpWorld) {
+			w.noteAhead[in.ID] = "ahead"
+			w.quotaNote["ahead"], w.quotaLast["ahead"] = true, in.TS.Add(-time.Minute)
+		}, false},
 		{"the entry ahead not refused", func(w *rpWorld) { w.noteAhead[in.ID] = "ahead"; w.quotaNote["other"] = true }, false},
 	} {
-		w := &rpWorld{t: t, f: f, noteBytes: map[string]string{}, noteAhead: map[string]string{}, quotaNote: map[string]bool{}, staleNote: map[string]bool{}}
+		w := &rpWorld{t: t, f: f, noteBytes: map[string]string{}, noteAhead: map[string]string{}, quotaNote: map[string]bool{},
+			quotaLast: map[string]time.Time{}, sealed: map[string]rpSeal{}, staleNote: map[string]bool{}}
 		w.seeEpoch(0)
 		w.epochAt[0].since = in.TS
+		w.seeNote(0, e.Payload)
 		c.set(w)
-		clk := f.clk
-		f.clk = in.TS.Add(17 * 24 * time.Hour)
 		w.noteAccepted(0, e.Payload)
-		f.clk = clk
 		if w.staleNote[in.ID] != c.stale {
 			t.Errorf("%s: stale-copy %v, want %v", c.name, w.staleNote[in.ID], c.stale)
 		}
+	}
+}
+
+// Nit 1: with no token ever recorded for the peer the bound cannot be
+// judged: a stale connection's waiting messages are kept.
+func TestR30StaleNoTokenRecordKeeps(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	e, _ := f.waitingNote(0, "no-record")
+	f.do(0, func(m *Manager, p *Peer) {
+		m.markStale(p, f.clk)
+		kept := m.st.Issued[:0]
+		for _, it := range m.st.Issued {
+			if it.PeerID != p.ID {
+				kept = append(kept, it)
+			}
+		}
+		m.st.Issued = kept
+	})
+	f.advance(StaleReach + time.Hour)
+	f.tick(0)
+	if e.Done || f.audited(0, "undelivered_stale") {
+		t.Fatal("ended with no token record to judge the bound by")
 	}
 }

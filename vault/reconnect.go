@@ -78,7 +78,8 @@ const StaleReach = 14*24*time.Hour + envelope.MaxClockSkewFuture
 // exp of any token this vault issued to the peer (adopted, or in a
 // handshake still in flight: an hs.resp or hs.init not yet activated,
 // revoked or not, since one deposited before the revocation still
-// arrives), plus StaleReach. Zero: none was ever issued.
+// arrives), plus StaleReach. Zero: none was recorded (the entries are then
+// kept: the bound cannot be judged).
 func (m *Manager) staleReachUntil(p *Peer) time.Time {
 	var last time.Time
 	see := func(ts []IssuedToken, all bool) {
@@ -121,8 +122,8 @@ func (m *Manager) tickStale(p *Peer, now time.Time) {
 	if p.Kind != KindConnection || p.State != PeerStale {
 		return
 	}
-	if now.Before(m.staleReachUntil(p)) {
-		return // it can still come back
+	if until := m.staleReachUntil(p); until.IsZero() || now.Before(until) {
+		return // it can still come back (or no token was ever recorded: kept)
 	}
 	for _, e := range m.st.Outbox {
 		if !e.Done && e.PeerID == p.ID && memberDeposit(e) {

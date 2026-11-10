@@ -421,12 +421,14 @@ func TestR29HoldIsByPeer(t *testing.T) {
 }
 
 // A deposit refused quota_exceeded with 429 that is not a reconnect's
-// hs.init is retried with the backoff, as before 0.86.6
-// (fdcc746 dropped it: an att.deliver lost on CI, the e2e
-// TestAttachmentMaliciousPeer failure).
+// hs.init is retried, never dropped (fdcc746 dropped it: an att.deliver
+// lost on CI, the e2e TestAttachmentMaliciousPeer failure). With no
+// `quota` it is first read as the token's (§8.6): it waits for a fresh
+// token, asked for, and is tried again within the hour.
 func TestR29QuotaRetryForOtherDeposits(t *testing.T) {
 	f := newR29Fx(t)
-	f.longTokens()
+	// Not longTokens: a fresh token is adopted only with a later exp, and
+	// the deposit is tried again under a fresh one (GC #6783).
 	r := f.d[0].relay
 	r.mu.Lock()
 	r.failMailbox = map[string]error{f.m(1).st.Relay.Mailbox: &relayclient.Error{Status: 429, Code: CodeQuotaExceeded}}
@@ -435,9 +437,9 @@ func TestR29QuotaRetryForOtherDeposits(t *testing.T) {
 	r.mu.Lock()
 	r.failMailbox = nil
 	r.mu.Unlock()
-	f.advance(time.Minute) // past the outbox backoff
+	f.advance(time.Hour + time.Minute) // past the quota wait
 	f.do(0, func(*Manager, *Peer) {})
-	f.deliver(0, 1, kNote)
+	f.settle()
 	if n := f.arrived(1, "after-quota"); n != 1 {
 		t.Fatalf("a deposit refused quota_exceeded (429) arrived %d times: dropped", n)
 	}

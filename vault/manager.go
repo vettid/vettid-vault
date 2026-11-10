@@ -301,8 +301,9 @@ type Manager struct {
 
 	ephemeralSeen map[string]time.Time
 	rates         map[string]*rateWindow
-	requests      map[string]string // our outstanding request inner id -> peer id
-	requestTypes  map[string]string // ... -> type
+	requests      map[string]string    // our outstanding request inner id -> peer id
+	requestTypes  map[string]string    // ... -> type
+	quotaAsk      map[string]*quotaAsk // peer id -> its quota refreshes (memory: a restart asks again)
 	// volatile holds deposits that must never reach vault state (responses
 	// carrying secret values, TypeSpec.Volatile); drained after the
 	// durable outbox, dropped on failure or lock.

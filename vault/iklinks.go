@@ -519,6 +519,7 @@ func (m *Manager) sealHeld(p *Peer) {
 		}
 		if !e.HeldExp.IsZero() && !now.Before(e.HeldExp) {
 			e.Done, e.Held = true, nil
+			m.quotaRefreshEnded(e)             // a quota refresh's: no answer can come
 			m.audit(now, "held_expired", p.ID) // S12
 			m.dirty = true
 			continue
@@ -566,6 +567,7 @@ func (m *Manager) notDelivered(e *OutboxEntry, reason string, now time.Time) {
 		}
 	}
 	e.Done, e.Held, e.Payload = true, nil, nil
+	m.quotaRefreshEnded(e)                 // a quota refresh's (#216): no answer can come
 	m.auditRef(now, reason, e.PeerID, ref) // ref: the message's inner id (#6875's notice names it)
 	m.dirty = true
 }

@@ -235,6 +235,17 @@ type Peer struct {
 
 	Standing  HeldToken `json:"standing"`  // token the peer issued to us
 	Reconnect HeldToken `json:"reconnect"` // connections only
+	// QuotaMailbox is the tokenTag of a standing token under which a
+	// quota_exceeded without `quota` (a relay before 0.9.2) was read as the
+	// mailbox's (§8.6): under that token every later one is read so too.
+	QuotaMailbox string `json:"quota_mailbox,omitempty"`
+	// QuotaReqs are the request ids of the quota refreshes (§7.2) still
+	// open, asked under the standing token QuotaReqTok names (tokenTag):
+	// an answer to any of them is taken, also after a restart (the
+	// issuer grants the first and answers the later ones too_soon). At
+	// most quotaReqsMax; forgotten once another standing token is held.
+	QuotaReqs   []string `json:"quota_reqs,omitempty"`
+	QuotaReqTok string   `json:"quota_req_tok,omitempty"`
 	// Carried are the tokens a reconnect hs.init of the peer's carried, for
 	// each epoch the vault activated as responder and has not yet adopted
 	// them in (VAULT-MESSAGING 0.88.2 §6.3.1 "A handshake's tokens are
@@ -810,6 +821,26 @@ type OutboxEntry struct {
 	// AwaitToken: the peer's standing token expired; the deposit waits
 	// for the fresh one the reconnect it started brings (§6.6, §8.6).
 	AwaitToken bool `json:"await_token,omitempty"`
+	// QuotaWait: the relay refused the deposit for its standing token's
+	// quota (§8.6 quota_exceeded, `token`). It is not retried unchanged:
+	// it waits for a fresh token (asked for, §7.2), and, as AwaitToken,
+	// the later deposits to the mailbox under the standing token wait
+	// behind it, in order; one that carries its own token (a handshake's)
+	// and the refresh itself (QuotaRefresh) go. QuotaTok names the
+	// standing token it was refused under (tokenTag): it is never sent
+	// again under that one (RELAY-PROTOCOL §7.1), only asks again for a
+	// refresh; tried under another one, the wait ends (QuotaWait false),
+	// and a refusal there with no `quota` is the mailbox's (§8.6). Kept
+	// after the wait, so that reading sticks.
+	QuotaWait bool   `json:"quota_wait,omitempty"`
+	QuotaTok  string `json:"quota_tok,omitempty"`
+	// QuotaRefresh marks the relay.token.refresh a quota wait asked for:
+	// the one deposit under the standing token that passes the wait. Its
+	// QuotaTok is the token it was asked under: under another one it is
+	// not sent (the wait it was for is over), and QuotaReq is its request
+	// id, dropped from the pending requests when it ends unsent.
+	QuotaRefresh bool   `json:"quota_refresh,omitempty"`
+	QuotaReq     string `json:"quota_req,omitempty"`
 	// Wake is the deposit's push wake class (0.24.0, §14.2): the app is
 	// woken once the relay accepted it; "" for none.
 	Wake string `json:"wake,omitempty"`

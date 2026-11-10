@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -33,10 +34,10 @@ import (
 
 // r30NoteSeeds are the random-pair seeds that lost a test.note on main
 // (49284d4) and converge with the fix: R29RP_BURST and R29RP_REFRESH, then
-// two R29RP_BURST alone. want is the verdict: 6650889704533313486 ends in
-// the quota-wait residual since the harness counts a re-sealed note against
-// the standing quota too (it did not before: its bytes had changed); it
-// converges with #216's quota fix (want "" once #216 merges).
+// two R29RP_BURST alone. want is the verdict. 6650889704533313486 needs
+// #216's quota fix too since the harness counts a re-sealed note against
+// the standing quota (it did not before: its bytes had changed); with #216
+// merged it converges.
 var r30NoteSeeds = []struct {
 	seed           uint64
 	burst, refresh bool
@@ -46,12 +47,12 @@ var r30NoteSeeds = []struct {
 	{9545559820980032774, true, true, false, ""}, {8594494249170355390, true, true, false, ""},
 	{8579791540454706926, true, true, false, ""}, {17172539816259494157, true, true, false, ""},
 	{2741807807086018555, true, true, false, ""}, {16785278149167989050, true, true, false, ""},
-	{15093282355162425551, true, true, false, ""}, {6650889704533313486, true, true, false, rpQuotaWaitResidual},
+	{15093282355162425551, true, true, false, ""}, {6650889704533313486, true, true, false, ""},
 	{3269441301900938, true, false, false, ""}, {16236571777707351782, true, false, false, ""},
 	// R29RP_REFRESH and R29RP_LOSTANS (the lead's re-check Low 1): a
 	// re-sealed copy known by its bytes as the relay saw it, and the
 	// receiver's stale_or_future for it judging the quota wait.
-	{8495705468849050258, false, true, true, rpQuotaWaitResidual},
+	{8495705468849050258, false, true, true, ""},
 	{14452917345793243350, false, true, true, rpLockWaitResidual},
 }
 
@@ -936,5 +937,32 @@ func TestR30StaleNoTokenRecordKeeps(t *testing.T) {
 	f.tick(0)
 	if e.Done || f.audited(0, "undelivered_stale") {
 		t.Fatal("ended with no token record to judge the bound by")
+	}
+}
+
+// With #216: a quota refresh ended as not delivered forgets its request
+// (no answer can come), as its other ends do.
+func TestR30NotDeliveredEndsQuotaRefresh(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	r := f.d[0].relay
+	r.mu.Lock()
+	r.failMailbox = map[string]error{f.m(1).st.Relay.Mailbox: &relayclient.Error{Status: 429, Code: "rate_limited"}}
+	r.mu.Unlock()
+	var e *OutboxEntry
+	f.do(0, func(m *Manager, p *Peer) {
+		m.askQuotaRefresh(p, f.clk)
+		for _, x := range m.st.Outbox {
+			if x.QuotaRefresh && !x.Done {
+				e = x
+			}
+		}
+	})
+	if e == nil || !slices.Contains(f.p(0).QuotaReqs, e.QuotaReq) {
+		t.Fatal("setup: no open quota refresh")
+	}
+	f.do(0, func(m *Manager, p *Peer) { m.notDelivered(e, "undelivered_removed", f.clk) })
+	if slices.Contains(f.p(0).QuotaReqs, e.QuotaReq) {
+		t.Fatal("the refresh's request is still open after its entry ended")
 	}
 }

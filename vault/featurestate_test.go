@@ -12,14 +12,11 @@ import (
 // counterFeature changes its own state in a queued request, as LEASH does
 // when an agent's leash.grant.list takes a grant_seq (§10.11): each
 // test.count takes the next number and answers it.
-type counterFeature struct {
-	n        uint64
-	volatile bool
-}
+type counterFeature struct{ n uint64 }
 
 func (c *counterFeature) Name() string { return "counter" }
 func (c *counterFeature) Types() []TypeSpec {
-	return []TypeSpec{{Type: "test.count", Request: true, From: []string{KindApp}, Volatile: c.volatile}}
+	return []TypeSpec{{Type: "test.count", Request: true, From: []string{KindApp}}}
 }
 func (c *counterFeature) Handle(context.Context, *Session, *envelope.Inner) (json.RawMessage, error) {
 	c.n++
@@ -38,6 +35,10 @@ func (c *counterFeature) Save() (json.RawMessage, error) { return json.Marshal(c
 // next write that succeeds stores the feature's state and only then sends
 // the answer; and a vault reopened after a crash (no write of its own) has
 // the number the answer carried, so it is never given out again.
+//
+// The first half follows TestFailedWriteThenLaterWriteSendsStored, which
+// does this for core state; what is new here is a feature's state in the
+// same write, and the reopen.
 func TestFeatureStateStoredBeforeAnswer(t *testing.T) {
 	d := newDevFixture(t)
 	c := &counterFeature{}
@@ -56,21 +57,25 @@ func TestFeatureStateStoredBeforeAnswer(t *testing.T) {
 	if err := d.send("device.list", []byte(`{}`)); err != nil {
 		t.Fatal(err)
 	}
-	var answered string
-	for _, in := range d.responses(t) {
-		if in.Type == "test.count" {
-			answered = string(in.Body)
-		}
+	got := d.responses(t)
+	if types := typesOf(got); len(types) != 2 || types[0] != "test.count" || types[1] != "device.list" {
+		t.Fatalf("after the later write: %v", types)
 	}
-	if answered != `{"n":1}` {
-		t.Fatalf("after the later write, test.count answered %q", answered)
+	if string(got[0].Body) != `{"n":1}` {
+		t.Fatalf("test.count answered %s", got[0].Body)
+	}
+	d.m.mu.Lock()
+	_ = d.m.flushThenDrain(context.Background())
+	d.m.mu.Unlock()
+	if again := d.responses(t); len(again) != 0 {
+		t.Fatalf("sent again: %v", typesOf(again))
 	}
 
 	// Reopen from the store without a write of the vault's own.
 	d.m.Crash()
-	d.opts.Store = d.store
 	c2 := &counterFeature{}
 	opts := d.opts
+	opts.Store = d.store
 	opts.Features = append(append([]Feature(nil), d.opts.Features...), c2)
 	m, _, err := Unlock(context.Background(), UnlockParams{Options: opts, VaultID: d.vid, PIN: testPIN, UnlockSecret: testSecret})
 	if err != nil {

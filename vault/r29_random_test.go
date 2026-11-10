@@ -66,11 +66,11 @@ import (
 //                the vault's deposit path (it tests the issuer's §7.2, not
 //                the holder's trigger). Once quiet, a deposit still queued
 //                for the peer or an unanswered refusal is quota-stuck@s.
-//                Known gap, until the vault fix (GC #6775): a note refused
-//                for the token's quota is retried unchanged and holds every
-//                later deposit to the mailbox, handshakes and tokens too,
-//                so about 1 run in 1,000-3,000 ends quota-stuck (seeds
-//                13894595740220335007, 9200229175364500436).
+//                The vault's own deposit path asks too (GC #6783): a note
+//                refused for the token's quota waits for a fresh token,
+//                letting the handshakes and the refresh pass; the two seeds
+//                that ended quota-stuck before it (13894595740220335007,
+//                9200229175364500436) are TestQuotaSeeds.
 //
 // A run replays from its seed: crypto randomness is seeded per run
 // (testing/cryptotest), the fixtures are made at a start time drawn from

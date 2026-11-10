@@ -1,6 +1,7 @@
 package vault
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"testing"
@@ -20,7 +21,11 @@ type policyType struct {
 	valid    bool
 	locked   bool
 	paired   map[string]json.RawMessage
-	removed  []string
+	// signedFor is the ik PrepareAgentGrants last signed for; pairedIK the
+	// ik AgentPaired was given, per agent.
+	signedFor []byte
+	pairedIK  map[string][]byte
+	removed   []string
 }
 
 func (p *policyType) Types() []TypeSpec {
@@ -44,14 +49,16 @@ func (p *policyType) PrepareAgentGrants(_ *Session, ik []byte, g json.RawMessage
 	if !p.valid || string(g) == `[]` || len(ik) != 32 {
 		return nil, errBadRequest
 	}
+	p.signedFor = append([]byte(nil), ik...)
 	return json.RawMessage(`["signed"]`), nil
 }
 
-func (p *policyType) AgentPaired(_ *Session, id string, g json.RawMessage) {
+func (p *policyType) AgentPaired(_ *Session, id string, ik []byte, g json.RawMessage) {
 	if p.paired == nil {
-		p.paired = map[string]json.RawMessage{}
+		p.paired, p.pairedIK = map[string]json.RawMessage{}, map[string][]byte{}
 	}
 	p.paired[id] = g
+	p.pairedIK[id] = append([]byte(nil), ik...)
 }
 
 func (p *policyType) DeviceRemoved(_ *Session, id string) { p.removed = append(p.removed, id) }
@@ -161,6 +168,12 @@ func TestPairingGrants(t *testing.T) {
 	if string(pol.paired[p.ID]) != `["signed"]` || p.PairGrants != nil {
 		t.Fatalf("initial grants not installed: %v", pol.paired)
 	}
+	// They are installed for the ik they were signed for, the agent's
+	// (§10.11 "Initial grants at pairing": a delegation whose sub is not
+	// the pairing agent's ik is dropped as mismatch).
+	if ik := pol.pairedIK[p.ID]; len(ik) != 32 || !bytes.Equal(ik, pol.signedFor) || !bytes.Equal(ik, p.IK) {
+		t.Fatalf("installed for ik %x, signed for %x, agent's %x", ik, pol.signedFor, p.IK)
+	}
 	// Without a grantor, grants are refused.
 	d2 := newDevFixture(t)
 	inv := d2.invite(t, KindAgent, PairingApprovalTTL)
@@ -170,6 +183,42 @@ func TestPairingGrants(t *testing.T) {
 	id := d2.sendAs(d2.self(), "device.pair.approve", `{"pairing_id":"`+inv.ID+`","grants":[{"scope":"profile.get"}]}`)
 	if r := find(d2.inbox(d2.self())["dev1"], reply(id)); errCode(r) != "bad_request" {
 		t.Fatalf("no grantor: %+v", r)
+	}
+}
+
+// §6.7, §10.11: every agent pairing reaches the grantor, initial grants or
+// none, so the set it completes with (the empty one) takes its grant_seq at
+// the pairing; a desktop's pairing does not.
+func TestPairingWithoutGrantsReachesGrantor(t *testing.T) {
+	d := newDevFixture(t)
+	app := d.self()
+	pol := &policyType{valid: true}
+	d.m.addFeature(pol)
+	pair := func(kind string, base byte) {
+		inv := d.invite(t, kind, PairingApprovalTTL)
+		n := newNewcomer(t, base)
+		n.hsInit(t, d.m, handshake.Purpose(kind), inv.ID, "p"+string(rune('a'+base%20)))
+		n.finish(t, d)
+		d.inbox(app)
+		id := d.sendAs(app, "device.pair.approve", `{"pairing_id":"`+inv.ID+`"}`)
+		if r := find(d.inbox(app)["dev1"], reply(id)); r == nil || r.Status != envelope.StatusOK {
+			t.Fatalf("%s approval: %+v", kind, r)
+		}
+	}
+	pair(KindDesktop, 0x52)
+	pair(KindAgent, 0x56)
+	var agentID string
+	for _, x := range d.m.st.Devices {
+		if x.Kind == KindAgent {
+			agentID = x.ID
+		}
+	}
+	if agentID == "" {
+		t.Fatal("agent not paired")
+	}
+	g, ok := pol.paired[agentID]
+	if !ok || len(g) != 0 || len(pol.paired) != 1 {
+		t.Fatalf("grantor calls %v: want one, for the agent, with nothing prepared", pol.paired)
 	}
 }
 

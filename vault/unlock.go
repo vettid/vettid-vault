@@ -29,6 +29,9 @@ const (
 	CodeBadRequest         = "bad_request"
 	CodeDeviceSecret       = "device_secret"
 	CodeTransferIncomplete = "transfer_incomplete"
+	// Release 29 (§6.3.1 "No upgrade", §11.4): a state without
+	// messaging_release 29 or more is not started.
+	CodeStateUnsupported = "state_unsupported"
 )
 
 // Release update results and refusal codes (§11.4, §11.10.4).
@@ -392,6 +395,15 @@ func UnlockAlt(ctx context.Context, p AltUnlockParams) (*Manager, *AltUnlockOutc
 		m.finishMarked(ctx)
 		return nil, out.drop(ErrDeleted)
 	}
+	if !stateSupported(&st) {
+		// R29-U1 (§6.3.1 "No upgrade: release 29 starts clean"): after
+		// §12.5's deleting check, before anything is written: no state or
+		// header write, nothing sent, no unlocked, locked again.
+		suite.Wipe(op.dek1)
+		suite.Wipe(op.uk)
+		suite.Wipe(dek)
+		return nil, out.fail(CodeStateUnsupported, ErrStateUnsupported)
+	}
 	if st.SealedRelease == "" {
 		st.SealedRelease = hdr.SealedRelease
 	}
@@ -751,7 +763,11 @@ func (m *Manager) resume(ctx context.Context, p AltUnlockParams, out *AltUnlockO
 // lists it. The first app before its enrollment handshake and a recovered
 // app before its handshake have none ("").
 func (m *Manager) unlockDevice(ik ed25519.PublicKey) string {
-	for _, d := range m.st.Devices {
+	for _, sortedK := range sortedKeys(m.st.Devices) {
+		d, sortedOK := m.st.Devices[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if d.Kind == KindApp && suite.EqualPublic(d.IK, ik) {
 			return d.ID
 		}
@@ -764,7 +780,11 @@ func (m *Manager) unlockDevice(ik ed25519.PublicKey) string {
 // standing token for the vault's mailbox that the result carries.
 func (m *Manager) unlockTokens(k *UnlockKey, deviceToken string, now time.Time) string {
 	var p *Peer
-	for _, d := range m.st.Devices {
+	for _, sortedK := range sortedKeys(m.st.Devices) {
+		d, sortedOK := m.st.Devices[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if suite.EqualPublic(d.IK, k.IK) && d.Kind == KindApp {
 			p = d
 		}
@@ -773,7 +793,11 @@ func (m *Manager) unlockTokens(k *UnlockKey, deviceToken string, now time.Time) 
 		// The first app before its enrollment handshake: the enrollment
 		// binding names its relay key.
 		inv := m.st.Invites[m.st.VaultID]
-		for _, ri := range m.st.Invites {
+		for _, sortedK := range sortedKeys(m.st.Invites) {
+			ri, sortedOK := m.st.Invites[sortedK]
+			if !sortedOK {
+				continue // removed earlier in this loop
+			}
 			if ri.CreatedBy == inviteByRecovery && ri.EnrollIK != nil && suite.EqualPublic(ri.EnrollIK, k.IK) {
 				inv = ri // the recovered phone before its handshake (§11.14.6)
 			}

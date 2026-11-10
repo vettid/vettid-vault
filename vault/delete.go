@@ -135,13 +135,21 @@ func (m *Manager) beginDelete(via string, now time.Time) {
 	if m.st.Transfer != nil {
 		m.st.Transfer = nil
 	}
-	for _, p := range m.st.Connections {
+	for _, sortedK := range sortedKeys(m.st.Connections) {
+		p, sortedOK := m.st.Connections[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if p.State == PeerActive {
 			m.sendTo(p, peerwire.TypeConnectionRemoved, peerwire.ConnectionRemovedBody(), now)
 		}
 	}
 	notice := strictjson.NewBuilder().String("reason", "vault_deleted").Bytes()
-	for _, p := range m.st.Devices {
+	for _, sortedK := range sortedKeys(m.st.Devices) {
+		p, sortedOK := m.st.Devices[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if p.State == PeerActive {
 			m.sendTo(p, "device.unlinked", notice, now)
 		}
@@ -158,7 +166,11 @@ func (m *Manager) beginDelete(via string, now time.Time) {
 			m.denySubOnly(p, now)
 		}
 	}
-	for id, inv := range m.st.Invites {
+	for _, id := range sortedKeys(m.st.Invites) {
+		inv, sortedOK := m.st.Invites[id]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if !inv.Used && inv.ClaimID != "" {
 			m.queueDeleteClaim(inv.ClaimID, now)
 		}

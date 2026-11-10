@@ -76,7 +76,7 @@ func TestEnrollUnlock(t *testing.T) {
 		case "locked":
 			locked++
 		}
-		if ev.VaultVersion != r3.PCR0Hex() || ev.StateVersion != 2 {
+		if ev.VaultVersion != r3.PCR0Hex() || ev.StateVersion != 3 { // release 29 (§6.3.1 "No upgrade")
 			t.Fatalf("event %+v", ev)
 		}
 	}

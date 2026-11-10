@@ -72,8 +72,8 @@ func (d *devFixture) addDevice(t testing.TB, id, kind string, seed byte) *tdev {
 // sendAs sends a message from td (the fixture's own device is d.self()).
 func (d *devFixture) sendAs(td *tdev, typ, body string) string {
 	d.seq++
-	id, _ := envelope.NewULID(time.Now())
-	raw, err := td.ep.Seal(&envelope.Inner{ID: id, Type: typ, TS: time.Now(), Body: []byte(body)})
+	id, _ := envelope.NewULID(testNow())
+	raw, err := td.ep.Seal(&envelope.Inner{ID: id, Type: typ, TS: testNow(), Body: []byte(body), Features: []string{handshake.CapConfirm}})
 	if err != nil {
 		panic(err)
 	}

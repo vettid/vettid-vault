@@ -42,7 +42,7 @@ func TestPersistRetriedWithoutRedelivery(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := r.entries()[mark:]
-	want := []string{"persist", "deposit " + v.mailbox()}
+	want := []string{"persist", "deposit " + v.mailbox(), "deposit " + v.mailbox()} // the batch's deposit and device.features (0.86.0)
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("relay calls %v, want %v (saved and sent with the batch still leased)", got, want)
 	}

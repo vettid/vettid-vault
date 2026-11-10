@@ -9,6 +9,7 @@ import (
 
 	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/envelope"
+	"github.com/vettid/vettid-vault/vms/handshake"
 )
 
 // Feature is a feature area (§10): it declares its types and handles them.
@@ -203,6 +204,8 @@ type Session struct {
 	// relayAt is the relay's time of the message being handled (its
 	// deposited_at); zero when unknown (tests, internal activity).
 	relayAt time.Time
+	// epoch is the epoch the message opened under (core handlers).
+	epoch *handshake.Epoch
 }
 
 // Host is what a Session acts on. The Manager implements it for the
@@ -588,7 +591,7 @@ type CredentialBackupCopy interface {
 // (§3.5.7).
 var allowedWithoutCredential = map[string]bool{"vault.status": true, "vault.lock": true, "vault.delete": true, "credential.utk.get": true,
 	"credential.create": true, "credential.version": true, "relay.token.issued": true, "relay.token.refresh": true,
-	"relay.address.update": true}
+	"relay.address.update": true, TypeDeviceFeatures: true}
 
 // hasGate reports whether a credential feature is present.
 func (m *Manager) hasGate() bool {
@@ -671,10 +674,11 @@ type AgentPolicy interface {
 // §6.7, §10.3). PrepareAgentGrants checks and signs them at the approval
 // (for the agent's identity key; a *HandlerError such as
 // credential_locked is answered as is) and returns what AgentPaired
-// installs in the flush that completes the pairing.
+// installs in the flush that completes the pairing, for the agent with
+// identity key agentIK (the one the grants were signed for, §10.11).
 type AgentGrantor interface {
 	PrepareAgentGrants(s *Session, agentIK []byte, grants json.RawMessage) (json.RawMessage, error)
-	AgentPaired(s *Session, agentID string, prepared json.RawMessage)
+	AgentPaired(s *Session, agentID string, agentIK []byte, prepared json.RawMessage)
 }
 
 // AgentCoverage is optionally implemented by the AgentPolicy feature: when

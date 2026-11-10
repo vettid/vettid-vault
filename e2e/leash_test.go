@@ -11,6 +11,7 @@ import (
 
 	"github.com/vettid/vettid-vault/client"
 	"github.com/vettid/vettid-vault/internal/relaytest"
+	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault"
 )
 
@@ -79,6 +80,31 @@ func TestLeashAgent(t *testing.T) {
 	if n := strings.Count(string(up.Body), `"grant_id"`); n != 2 {
 		t.Fatalf("initial grants: %s", up.Body)
 	}
+	// §10.11 "Grant-set sequence" (0.41.0): every change takes a higher
+	// grant_seq, from one counter in the vault's sealed state. WaitEvent
+	// also returns an earlier, unread update that matches, so each wait
+	// below asks for a number above the last one seen.
+	var lastSeq uint64
+	seqOf := func(body json.RawMessage) uint64 {
+		o, err := strictjson.ParseObject(body)
+		if err != nil {
+			return 0
+		}
+		n, _ := o.Uint("grant_seq", 1, strictjson.MaxSafeInteger)
+		return n
+	}
+	newer := func(pred func(json.RawMessage) bool) func(json.RawMessage) bool {
+		return func(b json.RawMessage) bool { return seqOf(b) > lastSeq && (pred == nil || pred(b)) }
+	}
+	higher := func(what string, body json.RawMessage) {
+		t.Helper()
+		n := seqOf(body)
+		if n <= lastSeq {
+			t.Fatalf("%s: grant_seq %d after %d", what, n, lastSeq)
+		}
+		lastSeq = n
+	}
+	higher("initial grants", up.Body)
 	cv, err := a.app.CredentialVersion(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -107,7 +133,7 @@ func TestLeashAgent(t *testing.T) {
 		t.Fatal(err)
 	}
 	rid, _ := ro.String("rule_id")
-	waitEvent(t, agent, "leash.grant.updated", func(b json.RawMessage) bool { return strings.Contains(string(b), rid) })
+	higher("share rule set", waitEvent(t, agent, "leash.grant.updated", newer(func(b json.RawMessage) bool { return strings.Contains(string(b), rid) })).Body)
 	var mine json.RawMessage
 	for _, g := range agent.LeashGrants() {
 		if strings.Contains(string(g), rid) {
@@ -176,7 +202,7 @@ func TestLeashAgent(t *testing.T) {
 	if err := a.app.ShareRuleDelete(ctx, rid); err != nil {
 		t.Fatal(err)
 	}
-	waitEvent(t, agent, "leash.grant.updated", func(b json.RawMessage) bool { return !strings.Contains(string(b), rid) })
+	higher("share rule deleted", waitEvent(t, agent, "leash.grant.updated", newer(func(b json.RawMessage) bool { return !strings.Contains(string(b), rid) })).Body)
 	time.Sleep(2100 * time.Millisecond)
 	if rr, err := agent.AgentRequest(ctx, "item.get", map[string]any{"item_id": wifi}); err != nil || rr.ErrorCode() != "forbidden" {
 		t.Fatalf("after delete: %v %q", err, rr.ErrorCode())
@@ -222,16 +248,20 @@ func TestLeashAgent(t *testing.T) {
 			t.Fatalf("hammer %d: %q", i, rr.ErrorCode())
 		}
 	}
-	waitEvent(t, agent, "leash.grant.updated", func(b json.RawMessage) bool { return strings.Contains(string(b), `"suspended":true`) })
+	higher("suspended", waitEvent(t, agent, "leash.grant.updated", newer(func(b json.RawMessage) bool { return strings.Contains(string(b), `"suspended":true`) })).Body)
 	waitEvent(t, a.app, "sync.event", syncKind("leash.agent.suspended"))
 	useBody := map[string]any{"item_id": wifi, "field_id": "f1", "action": "hmac-sha256", "data": base64.StdEncoding.EncodeToString([]byte("hi"))}
 	if rr, err := agent.AgentRequest(ctx, "item.use", useBody); err != nil || rr.ErrorCode() != "forbidden" {
 		t.Fatalf("suspended agent: %v %q", err, rr.ErrorCode())
 	}
 	mustOK(t, a.request(a.app, "leash.agent.resume", `{"agent_id":"`+agent.DeviceID()+`"}`))
-	waitEvent(t, agent, "leash.grant.updated", func(b json.RawMessage) bool { return strings.Contains(string(b), `"suspended":false`) })
+	higher("resumed", waitEvent(t, agent, "leash.grant.updated", newer(func(b json.RawMessage) bool { return strings.Contains(string(b), `"suspended":false`) })).Body)
 	if rr, err := agent.AgentRequest(ctx, "item.use", useBody); err != nil || !rr.OK() {
 		t.Fatalf("after resume: %v %+v", err, rr)
+	}
+	// The agent's own list describes the same set: the same number.
+	if n, err := mustOK(t, a.request(agent, "leash.grant.list", `{}`)).Uint("grant_seq", 1, strictjson.MaxSafeInteger); err != nil || n != lastSeq {
+		t.Fatalf("agent list grant_seq %d, want %d (%v)", n, lastSeq, err)
 	}
 
 	// Audit (§10.9): refusals and throttling summarised, not one entry each.

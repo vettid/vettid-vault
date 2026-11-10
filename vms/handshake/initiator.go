@@ -32,7 +32,7 @@ type InitiatorConfig struct {
 	ReconnectToken string
 	Suites         []int // default [2]
 	Profile        json.RawMessage
-	Rotations      []*Rotation // reconnect: own rotations since the last epoch
+	Rotations      []*Rotation // reconnect: own rotations since the last epoch; rekey (S8): since the epoch's signer
 	// KnownResponderChain is the responder's rotation chain already
 	// followed; its leading links in the answer are not followed again.
 	KnownResponderChain []*Rotation
@@ -51,6 +51,10 @@ type InitiatorConfig struct {
 	Current     *Epoch // rekey only: the epoch hs.init travels in; K_s = its rk
 	PinnedSuite uint8
 	Policy      Policy
+
+	// Features (0.86.0, §5.3, §10.8) is the inner `features` list that
+	// hs.init and hs.fin carry; nil for none.
+	Features []string
 
 	// Inner metadata. Zero values are generated (ULID, current time).
 	ID    string
@@ -159,7 +163,7 @@ func NewInitiator(cfg InitiatorConfig) (*Initiator, error) {
 		eph.Destroy()
 		return nil, err
 	}
-	in := &envelope.Inner{ID: cfg.ID, Type: TypeInit, TS: cfg.Now, Body: bj}
+	in := &envelope.Inner{ID: cfg.ID, Type: TypeInit, TS: cfg.Now, Body: bj, Features: cfg.Features}
 
 	i := &Initiator{cfg: cfg, body: body, eph: eph, nI: nI}
 	if rekey {
@@ -326,7 +330,9 @@ func (i *Initiator) completeResp(env *envelope.Envelope, padded []byte, exp suit
 	}
 	verifyIK := i.cfg.ResponderIK
 	var newKEM *suite.PublicKey
-	if i.cfg.Purpose == PurposeReconnect {
+	if i.cfg.Purpose == PurposeReconnect || i.cfg.Purpose == PurposeRekey && len(resp.Rotations) > 0 {
+		// A rekey's hs.resp carries the links since the epoch's signer
+		// (0.85.0 S8), as a reconnect's does since its ctx.
 		if verifyIK, newKEM, _, err = ResolveChainKnown(i.cfg.ResponderIK, i.cfg.KnownResponderChain, resp.Rotations); err != nil {
 			return nil, err
 		}
@@ -368,7 +374,7 @@ func (i *Initiator) completeResp(env *envelope.Envelope, padded []byte, exp suit
 		epoch.Destroy()
 		return nil, err
 	}
-	fin, err := epoch.Seal(&envelope.Inner{ID: finID, Type: TypeFin, TS: finNow, Body: fb})
+	fin, err := epoch.Seal(&envelope.Inner{ID: finID, Type: TypeFin, TS: finNow, Body: fb, Features: i.cfg.Features})
 	if err != nil {
 		epoch.Destroy()
 		return nil, err

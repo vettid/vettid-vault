@@ -20,11 +20,13 @@
 package leash
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/json"
+	"io"
 	"sort"
 	"strconv"
 	"sync"
@@ -131,6 +133,15 @@ type data struct {
 	Grants map[string]*Grant `json:"grants"`
 	// Agents is the anti-spam and audit-summary state per agent (§10.11).
 	Agents map[string]*AgentState `json:"agents,omitempty"`
+	// Seq is the vault's one grant-set counter (§10.11 "Grant-set
+	// sequence", 0.41.0): the last number it gave out, 0 before the first.
+	// It only grows, is never reset, and no number is used twice.
+	Seq uint64 `json:"seq,omitempty"`
+	// GrantSeq is each agent's current grant_seq: the number its set took
+	// at its last change. Kept apart from Agents, which a resumption and an
+	// unlink delete; an unlinked agent's entry goes with it, the counter
+	// goes on.
+	GrantSeq map[string]uint64 `json:"grant_seq,omitempty"`
 }
 
 // Anti-spam limits and audit summaries (§10.11).
@@ -197,7 +208,8 @@ type Feature struct {
 // New returns the feature; keys is the credential feature, items the
 // items feature.
 func New(keys KeyUser, items AgentItems) *Feature {
-	return &Feature{keys: keys, items: items, d: data{Grants: map[string]*Grant{}, Agents: map[string]*AgentState{}}}
+	return &Feature{keys: keys, items: items, d: data{Grants: map[string]*Grant{}, Agents: map[string]*AgentState{},
+		GrantSeq: map[string]uint64{}}}
 }
 
 var (
@@ -215,6 +227,9 @@ func (f *Feature) Types() []vault.TypeSpec {
 	return []vault.TypeSpec{
 		{Type: "leash.grant.issue", Request: true, From: apps},
 		{Type: "leash.grant.revoke", Request: true, From: owners},
+		// leash.grant.list must stay a queued, non-volatile answer: an
+		// agent's list can take a new grant_seq (seqOf), and the state
+		// holding it is written before the answer goes out (§10.11).
 		{Type: "leash.grant.list", Request: true, From: all},
 		{Type: "leash.agent.resume", Request: true, From: apps},
 		{Type: "leash.status.get", Request: true, From: agents},
@@ -236,8 +251,44 @@ func (f *Feature) Load(raw json.RawMessage) error {
 	if d.Agents == nil {
 		d.Agents = map[string]*AgentState{}
 	}
+	if d.GrantSeq == nil {
+		d.GrantSeq = map[string]uint64{}
+	}
+	// The counter is never below a number it gave out (a damaged state
+	// would otherwise hand an agent a lower one).
+	for _, n := range d.GrantSeq {
+		if n > d.Seq {
+			d.Seq = n
+		}
+	}
 	f.d = d
 	return nil
+}
+
+// changed gives the agent's grant set the counter's next value (§10.11
+// "Grant-set sequence"): called once for each change to the set, before the
+// agent is told. The state carrying the new number is stored before
+// anything that names it is sent (a send is queued only after the write
+// that holds it, vault/outbox.go).
+func (f *Feature) changed(agent string) uint64 {
+	f.d.Seq++
+	f.d.GrantSeq[agent] = f.d.Seq
+	return f.d.Seq
+}
+
+// seqOf is the agent's current grant_seq. Every agent pairing takes one in
+// AgentPaired (with or without initial grants), so a set with none yet is
+// an agent of a vault that ran before 0.41.0 (or paired before this build):
+// it takes the counter's next value the first time it is described, so its
+// numbers start from the vault's current value, never from 0. Such a number
+// is taken in a read path (leash.grant.list), which is safe only because
+// that answer is queued and not volatile: the state holding it is written
+// before the answer goes out (see Types).
+func (f *Feature) seqOf(agent string) uint64 {
+	if n := f.d.GrantSeq[agent]; n > 0 {
+		return n
+	}
+	return f.changed(agent)
 }
 
 // Save implements vault.Feature.
@@ -582,6 +633,7 @@ func (f *Feature) suspend(s *vault.Session, id string, st *AgentState) {
 	f.flush(s, id, st)
 	s.Record(vault.Activity{Kind: "leash.agent.suspended", DeviceID: id, Audit: true, Feed: true, Priority: "high"})
 	s.SyncEvent("leash.agent.suspended", strictjson.NewBuilder().String("agent_id", id).Bool("suspended", true).Bytes())
+	f.changed(id) // suspension takes a new number (§10.11)
 	f.tell(s, id)
 }
 
@@ -851,7 +903,11 @@ func (f *Feature) grantWithStatus(s *vault.Session, g *Grant) []byte {
 	return append(append(raw[:len(raw)-1], ','), extra[1:]...)
 }
 
-// agentList is an agent's own grants, each with a fresh status statement.
+// agentList is an agent's own grants, each with a fresh status statement,
+// and the set's grant_seq (§10.11, 0.41.0): the body of the agent's
+// leash.grant.list answer and of every leash.grant.updated. Fresh
+// statements are not a change: describing the same set again keeps its
+// number.
 func (f *Feature) agentList(s *vault.Session, agent string) []byte {
 	var gs []*Grant
 	for _, g := range f.d.Grants {
@@ -868,7 +924,8 @@ func (f *Feature) agentList(s *vault.Session, agent string) []byte {
 		arr = append(arr, f.grantWithStatus(s, g)...)
 	}
 	st := f.d.Agents[agent]
-	return strictjson.NewBuilder().Raw("grants", append(arr, ']')).Bool("suspended", st != nil && st.Suspended).Bytes()
+	return strictjson.NewBuilder().Raw("grants", append(arr, ']')).Bool("suspended", st != nil && st.Suspended).
+		Uint("grant_seq", f.seqOf(agent)).Bytes()
 }
 
 func (f *Feature) listJSON(agent string) []byte {
@@ -911,17 +968,30 @@ func (f *Feature) OwnerHoldStarted(*vault.Session) {}
 
 // OwnerHoldEnded implements vault.OwnerHoldObserver: after a check, agents
 // with a session receive leash.grant.updated with fresh status statements
-// (§3.6.3, §10.11).
+// (§3.6.3, §10.11). Agents whose set has a number are told too, even with
+// no grant left: an update dropped during the hold (a revocation of the
+// agent's last grant) is not queued, so this is how the agent learns its
+// set is now empty, with the higher number (§10.11).
 func (f *Feature) OwnerHoldEnded(s *vault.Session) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	seen := map[string]bool{}
+	var agents []string
 	for _, g := range f.sorted() {
-		if seen[g.AgentID] {
-			continue
+		if !seen[g.AgentID] {
+			seen[g.AgentID] = true
+			agents = append(agents, g.AgentID)
 		}
-		seen[g.AgentID] = true
-		f.tell(s, g.AgentID) // only within its access session (§6.8)
+	}
+	for id := range f.d.GrantSeq {
+		if !seen[id] {
+			seen[id] = true
+			agents = append(agents, id)
+		}
+	}
+	sort.Strings(agents)
+	for _, id := range agents {
+		f.tell(s, id) // only within its access session (§6.8)
 	}
 }
 
@@ -1006,6 +1076,7 @@ func (f *Feature) issue(s *vault.Session, body []byte) (json.RawMessage, error) 
 	}
 	s.Record(vault.Activity{Kind: kind, DeviceID: agentID, Ref: g.ID, Audit: true})
 	syncChanged(s, g)
+	f.changed(agentID) // a grant issued or replaced
 	f.tell(s, agentID)
 	return g.JSON(), nil
 }
@@ -1027,6 +1098,24 @@ func (f *Feature) sign(s *vault.Session, g *Grant, agentIK []byte) error {
 		return errLocked
 	}
 	iat := s.Now().UTC().Truncate(time.Second)
+	nonce, err := leashwire.NewNonce() // new for each signature, a replacement's included
+	if err != nil {
+		return errInternal
+	}
+	stmt := delegationOf(g, key.Public().(ed25519.PublicKey), agentIK, s.IdentityKey(), nonce, iat).Marshal()
+	sig, err := leashwire.Sign(key, stmt)
+	if err != nil {
+		return errInternal
+	}
+	g.Delegation, g.DelegationSig = stmt, sig
+	return nil
+}
+
+// delegationOf is the delegation statement for g's fields (§10.11), with
+// the values fixed when it is signed: the credential key iss, the agent's
+// ik sub, the vault's ik as status issuer, the nonce and iat (whole
+// seconds). sign makes it; matchesDelegation rebuilds it to compare.
+func delegationOf(g *Grant, iss, sub, statusIssuer ed25519.PublicKey, nonce []byte, iat time.Time) *leashwire.Delegation {
 	var exp time.Time // LEASH §3.2: the contract's expiry, if any
 	if !g.Expires.IsZero() {
 		exp = g.Expires.Truncate(time.Second)
@@ -1034,11 +1123,7 @@ func (f *Feature) sign(s *vault.Session, g *Grant, agentIK []byte) error {
 			exp = iat.Add(time.Second)
 		}
 	}
-	nonce, err := leashwire.NewNonce() // new for each signature, a replacement's included
-	if err != nil {
-		return errInternal
-	}
-	d := &leashwire.Delegation{Iss: key.Public().(ed25519.PublicKey), Sub: agentIK, StatusIssuer: s.IdentityKey(),
+	d := &leashwire.Delegation{Iss: iss, Sub: sub, StatusIssuer: statusIssuer,
 		GrantID: g.ID, Version: g.Version, Approval: g.Approval, Scope: leashwire.Scope{Op: g.Scope, Connections: g.Connections},
 		StatusTTL: g.StatusTTL, Nonce: nonce, IssuedAt: iat, Expires: exp}
 	if g.Rule != nil {
@@ -1047,13 +1132,41 @@ func (f *Feature) sign(s *vault.Session, g *Grant, agentIK []byte) error {
 	if g.PerHour > 0 { // every auto and items.read grant (§10.11)
 		d.Limits = &leashwire.Limits{PerHour: g.PerHour, PerDay: g.PerDay}
 	}
-	stmt := d.Marshal()
-	sig, err := leashwire.Sign(key, stmt)
+	return d
+}
+
+// matchesDelegation reports whether g's stored fields are the ones its
+// delegation signed, for the agent with identity key agentIK: the
+// delegation is in canonical form, and rebuilding it from g with its own
+// iss, status issuer, nonce and iat, and agentIK as sub, gives the same
+// bytes. So a stored copy that lost a field (its connections, a limit,
+// its expiry), or a delegation whose sub is not the pairing agent's ik,
+// does not match (§10.11 "Initial grants at pairing", 0.88.5). The
+// signature itself is not checked: the vault made it, and both are
+// sealed with the pending pairing.
+func matchesDelegation(g *Grant, agentIK []byte) bool {
+	d, err := leashwire.ParseCanonical(g.Delegation)
 	if err != nil {
-		return errInternal
+		return false
 	}
-	g.Delegation, g.DelegationSig = stmt, sig
-	return nil
+	// The rebuild alone would let two stored values pass: an expiry within
+	// the signing second (sign moves exp to iat+1s), and a per_day without
+	// limits (limits follow per_hour). The spec compares them directly: the
+	// stored expires_at, rounded down to whole seconds, is exp; with no
+	// limits, both rates are 0.
+	if !g.Expires.Truncate(time.Second).Equal(d.Expires) || d.Limits == nil && (g.PerHour != 0 || g.PerDay != 0) {
+		return false
+	}
+	// Stored values the delegation's form cannot carry: a share rule (an
+	// initial grant is never items.read), a scope this build does not
+	// delegate, a status_ttl with a fraction of a second, and an empty
+	// (rather than absent) connection list.
+	if g.Rule != nil || !delegable[g.Scope] || g.Scope == ScopeItems || g.StatusTTL%time.Second != 0 ||
+		g.Connections != nil && len(g.Connections) == 0 {
+		return false
+	}
+	want := delegationOf(g, d.Iss, agentIK, d.StatusIssuer, d.Nonce, d.IssuedAt).Marshal()
+	return bytes.Equal(want, g.Delegation)
 }
 
 func grantID(body []byte) (string, error) {
@@ -1068,12 +1181,16 @@ func grantID(body []byte) (string, error) {
 	return id, nil
 }
 
-// revoke deletes a grant and tells everyone concerned.
+// revoke deletes a grant and tells everyone concerned. With notifyAgent,
+// the agent's set takes a new number and the agent is told; without it,
+// the caller does both (once per agent) or, for an unlinked agent, ends the
+// set.
 func (f *Feature) revoke(s *vault.Session, g *Grant, notifyAgent bool) {
 	delete(f.d.Grants, g.ID)
 	s.Record(vault.Activity{Kind: "leash.grant.revoked", DeviceID: g.AgentID, Ref: g.ID, Audit: true})
 	syncRevoked(s, g)
 	if notifyAgent {
+		f.changed(g.AgentID)
 		f.tell(s, g.AgentID)
 	}
 }
@@ -1147,6 +1264,7 @@ func (f *Feature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner
 		delete(f.d.Agents, id) // a fresh start: no cooldowns, counts or window
 		s.Record(vault.Activity{Kind: "leash.agent.resumed", DeviceID: id, Audit: true})
 		s.SyncEvent("leash.agent.suspended", strictjson.NewBuilder().String("agent_id", id).Bool("suspended", false).Bytes())
+		f.changed(id) // resumption takes a new number; it never resets it (§10.11)
 		f.tell(s, id)
 		return nil, nil
 	}
@@ -1242,17 +1360,32 @@ func (f *Feature) PrepareAgentGrants(s *vault.Session, agentIK []byte, raw json.
 }
 
 // AgentPaired implements vault.AgentGrantor: the signed initial grants
-// take effect with the pairing (§6.7).
-func (f *Feature) AgentPaired(s *vault.Session, agentID string, prepared json.RawMessage) {
+// take effect with the pairing (§6.7). The vault core calls it for every
+// agent pairing; with no initial grants (prepared empty) the set the
+// pairing completes with is the empty one, and it still takes its
+// grant_seq (§10.11).
+//
+// §10.11 "Initial grants at pairing" (0.88.5): if the prepared set does
+// not decode (today the approval and the completion run in one call, so
+// this is defence in depth against damaged state), none of it is
+// installed, not even what decoded before the error, and one
+// leash.grant.dropped is recorded with ref damaged. Otherwise each grant
+// is installed unless dropReason gives a reason, which is recorded as
+// leash.grant.dropped. The pairing
+// completes either way, with what was installed (possibly nothing): that
+// set takes its grant_seq and the agent is told, so its view matches the
+// vault's.
+func (f *Feature) AgentPaired(s *vault.Session, agentID string, agentIK []byte, prepared json.RawMessage) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	var gs []*Grant
-	if json.Unmarshal(prepared, &gs) != nil {
-		return
+	gs, ok := decodePairGrants(prepared)
+	if !ok {
+		f.dropped(s, agentID, DropDamaged)
 	}
 	now := s.Now()
 	for _, g := range gs {
-		if g == nil || g.ID == "" || f.count(agentID) >= MaxGrants || !g.Expires.IsZero() && !now.Before(g.Expires) {
+		if reason := f.dropReason(g, agentID, agentIK, now); reason != "" {
+			f.dropped(s, agentID, reason)
 			continue
 		}
 		g.AgentID = agentID
@@ -1260,7 +1393,64 @@ func (f *Feature) AgentPaired(s *vault.Session, agentID string, prepared json.Ra
 		s.Record(vault.Activity{Kind: "leash.grant.issued", DeviceID: agentID, Ref: g.ID, Audit: true})
 		syncChanged(s, g)
 	}
+	f.changed(agentID) // the set the pairing completes with
 	f.tell(s, agentID)
+}
+
+// The reasons an approved initial grant is not installed at pairing, the
+// ref of its leash.grant.dropped (§10.9, §10.11 "Initial grants at
+// pairing", 0.88.5). They are fixed values; a new one is a spec change.
+const (
+	DropDamaged  = "damaged"  // the set does not decode, or a grant has no id or no signed delegation
+	DropMismatch = "mismatch" // the grant differs from the delegation the member signed for it
+	DropExpired  = "expired"  // its expires_at has passed
+	DropIDTaken  = "id_taken" // its id is in use (another grant, or an earlier one of the set)
+	DropCap      = "cap"      // the agent already has MaxGrants grants
+)
+
+// decodePairGrants decodes the sealed PairGrants strictly: an unknown
+// field, trailing data or null (PrepareAgentGrants makes 1–MaxGrants
+// grants) is damage, like a wrong type. Empty is the empty set: a pairing
+// without initial grants.
+func decodePairGrants(prepared json.RawMessage) ([]*Grant, bool) {
+	if len(prepared) == 0 {
+		return nil, true
+	}
+	dec := json.NewDecoder(bytes.NewReader(prepared))
+	dec.DisallowUnknownFields()
+	var gs []*Grant
+	if dec.Decode(&gs) != nil || gs == nil {
+		return nil, false
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return nil, false
+	}
+	return gs, true
+}
+
+// dropReason is why initial grant g is not installed for the agent, or ""
+// to install it: the first that applies, in the spec's order.
+func (f *Feature) dropReason(g *Grant, agentID string, agentIK []byte, now time.Time) string {
+	switch {
+	case g == nil || g.ID == "" || len(g.Delegation) == 0 || len(g.DelegationSig) == 0:
+		return DropDamaged
+	case !matchesDelegation(g, agentIK):
+		return DropMismatch
+	case !g.Expires.IsZero() && !now.Before(g.Expires):
+		return DropExpired
+	}
+	if _, taken := f.d.Grants[g.ID]; taken {
+		return DropIDTaken // never replace another grant
+	}
+	if f.count(agentID) >= MaxGrants {
+		return DropCap
+	}
+	return ""
+}
+
+// dropped records an initial grant the pairing did not install (§10.9).
+func (f *Feature) dropped(s *vault.Session, agentID, reason string) {
+	s.Record(vault.Activity{Kind: "leash.grant.dropped", DeviceID: agentID, Ref: reason, Audit: true})
 }
 
 // DeviceRemoved implements vault.DeviceRemovedObserver: unlinking an
@@ -1277,6 +1467,9 @@ func (f *Feature) DeviceRemoved(s *vault.Session, deviceID string) {
 			f.revoke(s, g, false)
 		}
 	}
+	// Unlinking ends the set; the counter goes on, so a re-paired agent (a
+	// new device, §6.7) starts from the vault's current value (§10.11).
+	delete(f.d.GrantSeq, deviceID)
 }
 
 // ConnectionRemoved implements vault.ConnectionRemovedObserver: every
@@ -1292,9 +1485,19 @@ func (f *Feature) ConnectionRemoved(s *vault.Session, conn string) {
 			f.revoke(s, g, false)
 		}
 	}
-	for agent := range touched {
+	for _, agent := range sortedKeys(touched) {
+		f.changed(agent) // grants revoked with their connection
 		f.tell(s, agent)
 	}
+}
+
+func sortedKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func (f *Feature) sorted() []*Grant {
@@ -1402,6 +1605,7 @@ func (f *Feature) SetAgentRule(s *vault.Session, r *itemspec.AgentRule) (*itemsp
 	}
 	s.Record(vault.Activity{Kind: kind, DeviceID: r.AgentID, Ref: g.ID, Audit: true})
 	syncChanged(s, g)
+	f.changed(r.AgentID) // an agent share rule set (§10.12)
 	f.tell(s, r.AgentID)
 	out := g.agentRule()
 	return &out, nil

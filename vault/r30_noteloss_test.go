@@ -1,9 +1,16 @@
 package vault
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strconv"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -26,16 +33,19 @@ import (
 
 // r30NoteSeeds are the random-pair seeds that lost a test.note on main
 // (49284d4) and converge with the fix: R29RP_BURST and R29RP_REFRESH, then
-// two R29RP_BURST alone. Every one converges on main without #216's quota
-// fix too.
+// two R29RP_BURST alone. want is the verdict: 6650889704533313486 ends in
+// the quota-wait residual since the harness counts a re-sealed note against
+// the standing quota too (it did not before: its bytes had changed); it
+// converges with #216's quota fix (want "" once #216 merges).
 var r30NoteSeeds = []struct {
 	seed    uint64
 	refresh bool
+	want    string
 }{
-	{9545559820980032774, true}, {8594494249170355390, true}, {8579791540454706926, true},
-	{17172539816259494157, true}, {2741807807086018555, true}, {16785278149167989050, true},
-	{15093282355162425551, true}, {6650889704533313486, true},
-	{3269441301900938, false}, {16236571777707351782, false},
+	{9545559820980032774, true, ""}, {8594494249170355390, true, ""}, {8579791540454706926, true, ""},
+	{17172539816259494157, true, ""}, {2741807807086018555, true, ""}, {16785278149167989050, true, ""},
+	{15093282355162425551, true, ""}, {6650889704533313486, true, rpQuotaWaitResidual},
+	{3269441301900938, false, ""}, {16236571777707351782, false, ""},
 }
 
 func TestR30NoteLossSeeds(t *testing.T) {
@@ -44,8 +54,8 @@ func TestR30NoteLossSeeds(t *testing.T) {
 	for _, c := range r30NoteSeeds {
 		t.Run(strconv.FormatUint(c.seed, 10), func(t *testing.T) {
 			rpRunModes = rpModes{refresh: c.refresh}
-			if v, _ := rpRun(t, c.seed, 40, true, false); v != "" {
-				t.Fatalf("verdict %q, want converged (no note lost)", v)
+			if v, _ := rpRun(t, c.seed, 40, true, false); v != c.want {
+				t.Fatalf("verdict %q, want %q (no note lost)", v, c.want)
 			}
 		})
 	}
@@ -78,7 +88,8 @@ func (f *r29Fx) waitingNote(s int, body string) (*OutboxEntry, *envelope.Inner) 
 	f.do(s, func(m *Manager, p *Peer) {
 		r := f.d[s].relay
 		r.mu.Lock()
-		r.failMailbox = map[string]error{f.m(1 - s).st.Relay.Mailbox: &relayclient.Error{Status: 503, Code: "unavailable"}}
+		// A refusal (429): the relay stored nothing, so Tried stays false.
+		r.failMailbox = map[string]error{f.m(1 - s).st.Relay.Mailbox: &relayclient.Error{Status: 429, Code: "rate_limited"}}
 		r.mu.Unlock()
 		m.sendTo(p, "test.note", []byte(`{"n":"`+body+`"}`), f.clk)
 		e = m.st.Outbox[len(m.st.Outbox)-1]
@@ -352,5 +363,348 @@ func TestR30NotDeliveredAuditKind(t *testing.T) {
 		if k := auditKind(ev); k != "drop."+ev {
 			t.Fatalf("%s: kind %q", ev, k)
 		}
+	}
+}
+
+// storeThenRefuse records a deposit to mailbox and then answers err: the
+// relay stored it, and the answer the vault sees is a later attempt's or a
+// failure after the commit (the lead's review H1).
+type storeThenRefuse struct {
+	Relay
+	mailbox string
+	err     error
+}
+
+func (r *storeThenRefuse) Deposit(ctx context.Context, url, mailbox, token string, payload []byte) (string, error) {
+	id, err := r.Relay.Deposit(ctx, url, mailbox, token, payload)
+	if err == nil && r.err != nil && mailbox == r.mailbox {
+		return "", r.err
+	}
+	return id, err
+}
+
+// H1: an answer the vault cannot tell from a stored deposit marks it Tried;
+// a refusal does not.
+func TestR30MayHaveStored(t *testing.T) {
+	for _, c := range []struct {
+		err  error
+		want bool
+	}{
+		{nil, true},
+		{errors.New("transport: connection reset"), true},
+		{&relayclient.Error{Status: 500, Code: "internal"}, true},
+		{&relayclient.Error{Status: 503, Code: "unavailable"}, true},
+		{&relayclient.Error{Status: 502}, true},
+		{&relayclient.Error{Status: 429, Code: CodeQuotaExceeded}, false},
+		{&relayclient.Error{Status: 429, Code: "rate_limited"}, false},
+		{&relayclient.Error{Status: 401, Code: CodeTokenExpired}, false},
+	} {
+		if got := mayHaveStored(c.err); got != c.want {
+			t.Errorf("%v: %v, want %v", c.err, got, c.want)
+		}
+	}
+}
+
+// H1: a deposit is one relayclient attempt, so the answer the outbox sees
+// is that attempt's; other calls keep relayclient's retries.
+func TestR30DepositOneAttempt(t *testing.T) {
+	r := NewClientRelay("https://relay.example", ed25519.NewKeyFromSeed(make([]byte, 32)), nil, nil)
+	if n := r.depositClient("https://relay.example/").MaxAttempts; n != 1 {
+		t.Fatalf("deposit attempts %d, want 1", n)
+	}
+	if n := r.client("https://relay.example").MaxAttempts; n != 3 {
+		t.Fatalf("other calls' attempts %d, want relayclient's 3", n)
+	}
+}
+
+// H1, at the client: the relay stores attempt 1 and its answer is lost;
+// a second attempt would be answered 429 quota_exceeded. A deposit makes one
+// attempt, so the vault sees the lost answer (possibly stored), not the 429.
+func TestR30StoredThen429OneAttempt(t *testing.T) {
+	var mu sync.Mutex
+	stored := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		stored++
+		n := stored
+		mu.Unlock()
+		if n == 1 {
+			conn, _, err := w.(http.Hijacker).Hijack() // stored; the answer is lost
+			if err == nil {
+				conn.Close()
+			}
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(429)
+		_, _ = w.Write([]byte(`{"code":"quota_exceeded","message":"token quota"}`))
+	}))
+	defer srv.Close()
+	r := NewClientRelay(srv.URL, ed25519.NewKeyFromSeed(make([]byte, 32)), srv.Client(), nil)
+	_, err := r.Deposit(context.Background(), srv.URL, "mbox", "v4.public.x", []byte("payload"))
+	mu.Lock()
+	n := stored
+	mu.Unlock()
+	if n != 1 || !mayHaveStored(err) {
+		t.Fatalf("%d attempts, answer %v (possibly stored %v): want 1 attempt, possibly stored", n, err, mayHaveStored(err))
+	}
+}
+
+// H1, in the vault: stored, its answer lost; 17 days later a key change:
+// the entry keeps its ts and is not delivered (told), never handled twice
+// once the peer's dedupe has forgotten the first copy.
+func TestR30StoredThenRefusedNoDuplicate(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	sr := &storeThenRefuse{Relay: f.m(0).relay, mailbox: f.m(1).st.Relay.Mailbox,
+		err: errors.New("transport: connection reset after the relay stored it")}
+	f.m(0).relay = sr
+	var e *OutboxEntry
+	f.do(0, func(m *Manager, p *Peer) {
+		m.sendTo(p, "test.note", []byte(`{"n":"stored-429"}`), f.clk)
+		e = m.st.Outbox[len(m.st.Outbox)-1]
+	})
+	sr.err = &relayclient.Error{Status: 429, Code: CodeQuotaExceeded}
+	f.do(0, func(m *Manager, p *Peer) { e.NotBefore = time.Time{} }) // its retry: refused 429
+	sr.err = nil
+	if e.Done || !e.Tried {
+		t.Fatalf("setup: done %v, tried %v (want waiting, tried)", e.Done, e.Tried)
+	}
+	f.do(0, func(m *Manager, p *Peer) { e.NotBefore, e.AwaitToken = f.clk.Add(365*24*time.Hour), true })
+	f.deliver(0, 1, kAny) // the stored copy arrives and is handled
+	f.advance(17 * 24 * time.Hour)
+	f.tick(1) // the peer's dedupe forgets it (16 days and 5 minutes)
+	f.peerReconnects()
+	f.deliver(1, 0, kHSInit)
+	f.deliver(0, 1, kHSResp)
+	f.deliver(1, 0, kHSFin)
+	f.release(0)
+	f.settle()
+	if n := f.arrived(1, "stored-429"); n != 1 {
+		t.Fatalf("handled %d times, want once", n)
+	}
+	if !f.audited(0, "undelivered_window") {
+		t.Fatal("the kept-ts copy was not told as not delivered (drop.undelivered_window)")
+	}
+}
+
+// L1: at a key change an ephemeral entry stays as it is, under the old
+// epoch (whose receive key the peer keeps 16 days), not dropped.
+func TestR30EphemeralKeptAtKeyChange(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	f.do(0, func(m *Manager, p *Peer) {
+		m.register(TypeSpec{Type: "test.eph", From: []string{KindConnection}, Connections: PeersBoth, Ephemeral: true},
+			HandlerFunc(func(context.Context, *Session, *envelope.Inner) (json.RawMessage, error) { return nil, nil }))
+	})
+	e, _ := f.waitingNote(0, "first") // waits; the ephemeral queues behind it
+	var eph *OutboxEntry
+	f.do(0, func(m *Manager, p *Peer) {
+		m.sendWith(p, "test.eph", []byte(`{}`), SendOptions{Exp: f.clk.Add(time.Hour)}, f.clk)
+		eph = m.st.Outbox[len(m.st.Outbox)-1]
+		eph.NotBefore, eph.AwaitToken = f.clk.Add(365*24*time.Hour), true
+	})
+	before := append([]byte(nil), eph.Payload...)
+	f.peerReconnects()
+	f.deliver(1, 0, kHSInit)
+	f.deliver(0, 1, kHSResp)
+	f.deliver(1, 0, kHSFin)
+	// The reconnect's activation makes the waiting entries due (retryPeer):
+	// the ephemeral one goes out as it was sealed, under the old epoch.
+	r := f.d[0].relay
+	r.mu.Lock()
+	sent := false
+	for _, d := range r.deposits {
+		sent = sent || bytes.Equal(d.payload, before)
+	}
+	r.mu.Unlock()
+	if eph == e || !(sent || !eph.Done && bytes.Equal(eph.Payload, before)) {
+		t.Fatalf("the ephemeral entry: done %v, deposited as it was %v (want kept, not dropped)", eph.Done, sent)
+	}
+}
+
+// N1: at a key change a waiting hs.confirm for the epoch being replaced is
+// superseded (done), not sealed again under the new one.
+func TestR30ConfirmSupersededAtKeyChange(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	f.waitingNote(0, "first")
+	var c *OutboxEntry
+	f.do(0, func(m *Manager, p *Peer) {
+		m.queueConfirm(p, f.clk)
+		c = m.st.Outbox[len(m.st.Outbox)-1]
+		c.NotBefore, c.AwaitToken = f.clk.Add(365*24*time.Hour), true
+	})
+	if !c.Confirm {
+		t.Fatal("setup: not an hs.confirm")
+	}
+	before := append([]byte(nil), c.Payload...)
+	f.peerReconnects()
+	f.deliver(1, 0, kHSInit)
+	f.deliver(0, 1, kHSResp)
+	f.deliver(1, 0, kHSFin)
+	if !c.Done || !bytes.Equal(c.Payload, before) {
+		t.Fatalf("the old hs.confirm: done %v, re-sealed %v (want superseded, not sealed again)", c.Done, !bytes.Equal(c.Payload, before))
+	}
+}
+
+// L2: a release 29 state's attempted entries are taken as Tried at its
+// first load; a 0.88.7 state's are left as they are.
+func TestR30LoadMarksAttemptedTried(t *testing.T) {
+	a := &OutboxEntry{Op: OpDeposit, Attempts: 2}
+	b := &OutboxEntry{Op: OpDeposit}
+	c := &OutboxEntry{Op: OpDeposit, Attempts: 1, Done: true}
+	st := &State{Outbox: []*OutboxEntry{a, b, c}}
+	st.init()
+	if !a.Tried || b.Tried || c.Tried || !st.OutboxTried {
+		t.Fatalf("tried %v %v %v, marked %v (want true false false, true)", a.Tried, b.Tried, c.Tried, st.OutboxTried)
+	}
+	d := &OutboxEntry{Op: OpDeposit, Attempts: 3}
+	st2 := &State{OutboxTried: true, Outbox: []*OutboxEntry{d}}
+	st2.init()
+	if d.Tried {
+		t.Fatal("a 0.88.7 state's entry was marked again (its Tried is exact)")
+	}
+}
+
+// L3: an inner id is kept 16 days and 5 minutes, past the ts window for a
+// first copy whose ts was up to 5 minutes ahead.
+func TestR30SeenInnerOutlivesTSWindow(t *testing.T) {
+	f := newR29Fx(t)
+	f.do(0, func(m *Manager, p *Peer) {
+		m.st.SeenInner["keep"] = f.clk.Add(-(DedupeRetention + 4*time.Minute))
+		m.st.SeenInner["drop"] = f.clk.Add(-(DedupeRetention + 6*time.Minute))
+		m.prune()
+		if _, ok := m.st.SeenInner["keep"]; !ok {
+			t.Fatal("an inner id within 16 days and 5 minutes was forgotten")
+		}
+		if _, ok := m.st.SeenInner["drop"]; ok {
+			t.Fatal("an inner id past 16 days and 5 minutes was kept")
+		}
+	})
+}
+
+// L4 (proposed bound): a stale connection's held messages wait while the
+// peer still holds a valid token this vault issued (it can come back), and
+// end, told (drop.undelivered_stale), once none is valid.
+func TestR30StaleHeldEndWhenPeerCannotReturn(t *testing.T) {
+	f := demoted(t, nil)
+	f.note(0, "held-stale")
+	f.lose(0, 1, kAny)
+	f.do(0, func(m *Manager, p *Peer) { m.markStale(p, f.clk) })
+	var held *OutboxEntry
+	for _, e := range f.m(0).st.Outbox {
+		if !e.Done && e.Held != nil {
+			held = e
+		}
+	}
+	f.tick(0)
+	if held == nil || held.Done {
+		t.Fatal("a held entry ended while the peer can still come back")
+	}
+	f.do(0, func(m *Manager, p *Peer) {
+		for i := range m.st.Issued {
+			if m.st.Issued[i].PeerID == p.ID {
+				m.st.Issued[i].Exp = f.clk.Add(time.Minute)
+			}
+		}
+	})
+	f.advance(time.Hour)
+	f.tick(0)
+	if !held.Done || !f.audited(0, "undelivered_stale") {
+		t.Fatalf("done %v, audited %v: want ended, told", held.Done, f.audited(0, "undelivered_stale"))
+	}
+}
+
+// N2: a stale service connection revived by a restore reconnect records one
+// History line, connection.restored_reconnect (it names the restored
+// epoch); connection.active_again is its feed item only.
+func TestR30RestoreRevivalOneHistoryLine(t *testing.T) {
+	f := newSvcFx(t, "service")
+	f.build(3)
+	e1 := f.ids[1]
+	f.sink.got = nil
+	f.d.m.mu.Lock()
+	f.p.State = PeerStale
+	f.d.m.mu.Unlock()
+	f.at(10 * time.Hour)
+	ini := f.initiate(e1, f.now(), nil)
+	f.deliver(ini.Envelope(), "")
+	if f.complete(ini) == nil {
+		t.Fatal("no hs.resp")
+	}
+	if f.p.State != PeerActive {
+		t.Fatal("not active again")
+	}
+	r, a := f.feedFor("connection.restored_reconnect"), f.feedFor("connection.active_again")
+	if r == nil || !r.Audit || a == nil || a.Audit || !a.Feed {
+		t.Fatalf("restored_reconnect %+v, active_again %+v: want one History line (the restore) and the feed item", r, a)
+	}
+}
+
+// M2: the note oracle by inner id: a duplicate fails, a loss is excused
+// only by a copy dropped at T behind a lock longer than T, the quota-wait
+// residual is narrow, and no lock class absorbs a lost or duplicate note.
+func TestR30NoteOracle(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	newW := func() *rpWorld {
+		f.gotIDs = [3]map[string]int{{}, {}, {}}
+		return &rpWorld{t: t, f: f, refused: map[string]int{}, ttlNote: map[string]bool{}, quotaNote: map[string]bool{}, staleNote: map[string]bool{}, fiveNote: map[string]bool{}}
+	}
+	long := [][2]time.Time{{f.clk.Add(-20 * 24 * time.Hour), f.clk}}
+	for _, c := range []struct {
+		name     string
+		set      func(w *rpWorld)
+		want     string
+		residual string
+	}{
+		{"handled once", func(w *rpWorld) { f.gotIDs[1]["a"] = 1 }, "", ""},
+		{"handled twice", func(w *rpWorld) { f.gotIDs[1]["a"] = 2 }, "note-duplicate@0", ""},
+		{"lost", func(w *rpWorld) {}, "note-lost@0", ""},
+		{"dropped at T, no long lock", func(w *rpWorld) { w.ttlNote["a"] = true }, "note-lost@0", ""},
+		{"dropped at T, long lock", func(w *rpWorld) { w.ttlNote["a"] = true; w.locks[1] = long }, "", ""},
+		{"long lock, not dropped at T", func(w *rpWorld) { w.locks[1] = long }, "note-lost@0", ""},
+		{"quota wait, no stale copy", func(w *rpWorld) { w.quotaNote["a"] = true }, "note-lost@0", ""},
+	} {
+		w := newW()
+		w.sent[0] = []string{"a"}
+		c.set(w)
+		lost, res := w.notesLost()
+		if strings.Join(lost, ",") != c.want || res != c.residual {
+			t.Errorf("%s: %v %q, want %q %q", c.name, lost, res, c.want, c.residual)
+		}
+	}
+	// The quota-wait residual needs the receiver's stale_or_future too.
+	w := newW()
+	w.sent[0] = []string{"a"}
+	w.staleNote["a"] = true
+	if lost, res := w.notesLost(); len(lost) != 1 || res != "" {
+		t.Fatalf("quota wait without the peer's stale_or_future: %v %q", lost, res)
+	}
+	f.do(1, func(m *Manager, p *Peer) { m.audit(f.clk, "stale_or_future", p.ID) })
+	if lost, res := w.notesLost(); len(lost) != 0 || res != rpQuotaWaitResidual {
+		t.Fatalf("quota wait: %v %q, want the residual", lost, res)
+	}
+	if v := w.verdict(); v != rpQuotaWaitResidual {
+		t.Fatalf("verdict %q, want %q", v, rpQuotaWaitResidual)
+	}
+	// Told after a 5xx: only with the sender's undelivered_window.
+	w = newW()
+	w.sent[0] = []string{"a"}
+	w.fiveNote["a"] = true
+	if lost, res := w.notesLost(); len(lost) != 1 || res != "" {
+		t.Fatalf("5xx without the sender's undelivered_window: %v %q", lost, res)
+	}
+	f.do(0, func(m *Manager, p *Peer) { m.audit(f.clk, "undelivered_window", p.ID) })
+	if lost, res := w.notesLost(); len(lost) != 0 || res != rpToldResidual {
+		t.Fatalf("told after a 5xx: %v %q, want the residual", lost, res)
+	}
+	// A lost note behind a long lock is not absorbed by the lock class.
+	w = newW()
+	w.sent[0] = []string{"a"}
+	w.locks[1] = long
+	if v := w.verdict(); v != "diverged:note-lost@0" {
+		t.Fatalf("verdict %q, want diverged:note-lost@0 (no lock class)", v)
 	}
 }

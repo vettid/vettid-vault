@@ -16,7 +16,8 @@ import (
 )
 
 // Outbox retry backoff for transport errors and 5xx (§8.6: full jitter,
-// 0.25 s × 2ⁿ, capped at 30 s; relayclient retries within one attempt).
+// 0.25 s × 2ⁿ, capped at 30 s). (0.88.7) A deposit is one relayclient
+// attempt (ClientRelay.depositClient): the outbox's backoff is the retry.
 const outboxMaxBackoff = 30 * time.Second
 
 func (m *Manager) queueDeposit(e *OutboxEntry, now time.Time) {
@@ -190,6 +191,20 @@ func (m *Manager) sendLocking(ctx context.Context) map[string]bool {
 		}
 	}
 	return ok
+}
+
+// mayHaveStored reports whether a deposit answered err may have been
+// stored by the relay (0.88.7 §8.3): accepted, no answer (a transport
+// error, a lost answer) or any 5xx, coded or not (the relay may have
+// committed it before failing). A 4xx, 429 included, is a refusal. A
+// deposit is one attempt (ClientRelay.depositClient), so the answer is that
+// attempt's.
+func mayHaveStored(err error) bool {
+	if err == nil {
+		return true
+	}
+	st, ok := statusOf(err)
+	return !ok || st >= 500
 }
 
 // memberDeposit reports whether e is a durable deposit to its peer that
@@ -381,7 +396,7 @@ func (m *Manager) deposit(ctx context.Context, e *OutboxEntry, now time.Time) er
 		return nil
 	}
 	_, err := m.relay.Deposit(ctx, e.RelayURL, e.Mailbox, tok, e.Payload)
-	if err == nil || RelayCode(err) == "" {
+	if mayHaveStored(err) {
 		e.Tried = true // 0.88.7 §8.3: it may have reached the relay
 	}
 	if err == nil {
@@ -534,6 +549,7 @@ func (m *Manager) housekeeping(now time.Time) {
 	}
 	for _, p := range m.allPeers() {
 		m.tickDemoted(p, now)
+		m.tickStale(p, now)
 		m.tickPending(p, now)
 		m.sweepCarried(p, now) // 0.88.2 §6.3.1: the carried tokens' bound
 		m.tickConfirm(p, now)

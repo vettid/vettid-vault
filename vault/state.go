@@ -19,6 +19,11 @@ type State struct {
 	// starts clean"): written as 29 from a vault's first flush; a state
 	// without it, or with a smaller value, is not started (R29-U1).
 	MessagingRelease int `json:"messaging_release,omitempty"`
+	// OutboxTried (0.88.7 §8.3): the outbox's entries carry Tried. A state
+	// written before (release 29) did not record it: at its first load an
+	// entry not done that was attempted (Attempts > 0) is taken as one that
+	// may have reached the relay (init).
+	OutboxTried bool `json:"outbox_tried,omitempty"`
 
 	Relay        RelayState        `json:"relay"`
 	IdentitySeed []byte            `json:"ik_seed"`

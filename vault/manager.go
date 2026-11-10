@@ -747,6 +747,16 @@ func newManager(o Options, st *State, hdr *Header, dek []byte) *Manager {
 }
 
 func (st *State) init() {
+	if !st.OutboxTried {
+		// 0.88.7 §8.3: a release 29 state's attempted entries may have
+		// reached the relay (their answers then were not told apart).
+		for _, e := range st.Outbox {
+			if e != nil && !e.Done && e.Op == OpDeposit && e.Attempts > 0 {
+				e.Tried = true
+			}
+		}
+		st.OutboxTried = true
+	}
 	if st.Devices == nil {
 		st.Devices = map[string]*Peer{}
 	}

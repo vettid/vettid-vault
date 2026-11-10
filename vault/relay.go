@@ -109,6 +109,12 @@ type ClientRelay struct {
 
 	mu      sync.Mutex
 	clients map[string]*relayclient.Client
+	// deposits are the clients deposits go through: one attempt each
+	// (0.88.7 §8.3, §8.6). The outbox retries with its own backoff, and an
+	// in-client retry could hide that an earlier attempt was stored (its
+	// answer lost) behind a later attempt's refusal, so that the entry would
+	// not be marked as one that may have reached the relay (Tried).
+	deposits map[string]*relayclient.Client
 }
 
 // NewClientRelay returns a Relay for the vault whose relay key is key and
@@ -120,7 +126,8 @@ func NewClientRelay(baseURL string, key ed25519.PrivateKey, httpClient *http.Cli
 	if now == nil {
 		now = time.Now
 	}
-	return &ClientRelay{base: strings.TrimRight(baseURL, "/"), key: key, http: httpClient, now: now, clients: map[string]*relayclient.Client{}}
+	return &ClientRelay{base: strings.TrimRight(baseURL, "/"), key: key, http: httpClient, now: now, clients: map[string]*relayclient.Client{},
+		deposits: map[string]*relayclient.Client{}}
 }
 
 func (r *ClientRelay) client(url string) *relayclient.Client {
@@ -136,6 +143,20 @@ func (r *ClientRelay) client(url string) *relayclient.Client {
 	return c
 }
 
+// depositClient is client with one attempt per call (deposits).
+func (r *ClientRelay) depositClient(url string) *relayclient.Client {
+	url = strings.TrimRight(url, "/")
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	c, ok := r.deposits[url]
+	if !ok {
+		c = relayclient.New(url, r.key)
+		c.HTTP, c.Now, c.MaxAttempts = r.http, r.now, 1
+		r.deposits[url] = c
+	}
+	return c
+}
+
 func (r *ClientRelay) BaseURL() string { return r.base }
 
 func (r *ClientRelay) Register(ctx context.Context) (Limits, error) {
@@ -144,7 +165,7 @@ func (r *ClientRelay) Register(ctx context.Context) (Limits, error) {
 }
 
 func (r *ClientRelay) Deposit(ctx context.Context, relayURL, mailbox, token string, payload []byte) (string, error) {
-	return r.client(relayURL).Deposit(ctx, mailbox, token, payload)
+	return r.depositClient(relayURL).Deposit(ctx, mailbox, token, payload)
 }
 
 func (r *ClientRelay) Revoke(ctx context.Context, kind, value string) error {

@@ -66,6 +66,29 @@ func (m *Manager) reconnectNaming(p *Peer, ctx []byte, why string, now time.Time
 	return true
 }
 
+// tickStale ends the held messages of a stale connection that can no
+// longer come back (0.88.7 §3.4.1 "Stale is not final", proposed bound):
+// the peer reaches this vault only with a token this vault issued to it (a
+// standing token for its rekey, a reconnect token for its reconnect), so
+// once none it was issued is valid, no rekey or reconnect of its can make
+// the connection active again, and each held message is not delivered
+// (undelivered_stale). A new invitation replaces the record (§7.4).
+func (m *Manager) tickStale(p *Peer, now time.Time) {
+	if p.Kind != KindConnection || p.State != PeerStale {
+		return
+	}
+	for _, it := range m.st.Issued {
+		if it.PeerID == p.ID && !it.Denied && now.Before(it.Exp) {
+			return // it can still come back
+		}
+	}
+	for _, e := range m.st.Outbox {
+		if !e.Done && e.PeerID == p.ID && e.Held != nil {
+			m.notDelivered(e, "undelivered_stale", now)
+		}
+	}
+}
+
 // markStale makes connection p stale (§3.4.1 "The reconnect bound"):
 // audited connection.stale with its feed item ("Your connection with
 // <name> stopped working. Send them a new invitation.", app text), so a

@@ -451,7 +451,8 @@ func (m *Manager) resealAtKeyChange(p *Peer, kr *handshake.Keyring) {
 // session mode that ep cannot read back (sealed under an epoch whose send
 // key is gone: an entry from before 0.88.7 that already waited across a key
 // change) cannot be re-sealed and is not delivered (notDelivered), an
-// hs.confirm excepted (as it is).
+// hs.confirm excepted (as it is); an ephemeral entry stays as it is, and an
+// hs.confirm under ep is superseded (done).
 func (m *Manager) reholdAt(p *Peer, ep *handshake.Epoch, keyChange bool) {
 	if ep == nil {
 		return
@@ -472,7 +473,17 @@ func (m *Manager) reholdAt(p *Peer, ep *handshake.Epoch, keyChange bool) {
 			continue // sealed under another epoch: as it is
 		}
 		if te := m.registry[in.Type]; te != nil && te.spec.Ephemeral {
-			e.Done = true // ephemeral: not sent
+			if !keyChange {
+				e.Done = true // ephemeral: not sent (a demoted epoch's)
+			}
+			// At a key change an ephemeral entry stays as it is, under the
+			// old epoch, whose receive key the peer keeps 16 days (0.88.7).
+			continue
+		}
+		if keyChange && e.Confirm {
+			// An hs.confirm for the epoch being replaced is superseded: the
+			// new epoch's own follows (queueConfirm) or is not needed.
+			e.Done, m.dirty = true, true
 			continue
 		}
 		in.Seq, in.Features = 0, nil

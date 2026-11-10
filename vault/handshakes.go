@@ -1151,8 +1151,11 @@ func (m *Manager) activate(p *Peer, ep *handshake.Epoch, purpose handshake.Purpo
 	p.State = PeerActive
 	if revived {
 		// The feed item: "Your connection with <name> works again." (app
-		// text, owner-approved 2026-11-10, GC #7229).
-		m.record(Activity{Kind: "connection.active_again", ConnectionID: p.ID, Ref: p.ID, Audit: true, Feed: true}, now)
+		// text, owner-approved 2026-11-10, GC #7229). After a restore
+		// reconnect the caller's connection.restored_reconnect is the one
+		// History line (it names the restored epoch, §6.6): the feed item
+		// alone here.
+		m.record(Activity{Kind: "connection.active_again", ConnectionID: p.ID, Ref: p.ID, Audit: !restored, Feed: true}, now)
 	}
 	for _, t := range issued {
 		t.PeerID = p.ID

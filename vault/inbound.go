@@ -22,6 +22,11 @@ const (
 	ResponseRetention = 24 * time.Hour
 	EphemeralDedupe   = 10 * time.Minute
 	AuditMax          = 1000
+	// SeenInnerRetention keeps an inner id past the durable ts window
+	// (§8.4: 16 days in the past, 5 minutes in the future), so that no
+	// copy a sender's re-seal keeps the ts of (§8.3) is accepted after its
+	// id is forgotten, whatever skew the first copy's ts had (0.88.7).
+	SeenInnerRetention = DedupeRetention + envelope.MaxClockSkewFuture
 )
 
 // disposition of one collected message.
@@ -876,7 +881,7 @@ func (m *Manager) prune() {
 		}
 	}
 	for k, t := range m.st.SeenInner {
-		if now.Sub(t) > DedupeRetention {
+		if now.Sub(t) > SeenInnerRetention {
 			delete(m.st.SeenInner, k)
 		}
 	}

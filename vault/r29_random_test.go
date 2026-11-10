@@ -66,11 +66,25 @@ import (
 //                the vault's deposit path (it tests the issuer's §7.2, not
 //                the holder's trigger). Once quiet, a deposit still queued
 //                for the peer or an unanswered refusal is quota-stuck@s.
-//                Known gap, until the vault fix (GC #6775): a note refused
-//                for the token's quota is retried unchanged and holds every
-//                later deposit to the mailbox, handshakes and tokens too,
-//                so about 1 run in 1,000-3,000 ends quota-stuck (seeds
-//                13894595740220335007, 9200229175364500436).
+//                The vault's own deposit path asks too (GC #6783): a note
+//                refused for the token's quota waits for a fresh token,
+//                letting the handshakes and the refresh pass; the two seeds
+//                that ended quota-stuck before it (13894595740220335007,
+//                9200229175364500436) are TestQuotaSeeds.
+//   R29RP_SPENT  set (with R29RP_REFRESH): the production relay's answer
+//                (RELAY-PROTOCOL 0.9.2 §7.1): every deposit under a
+//                standing token spends its quota (rpSpentQuota), the
+//                refusal carries `quota: token`, and once spent the token
+//                refuses every deposit, the refresh included (its msgs
+//                spent): the vault's reconnect at once (owner decision a,
+//                GC #6840) is what recovers (the lead's review M2, #7027).
+//                The quiet phase's housekeeping spends no quota (70 days of
+//                re-mints and rekeys would spend a token of rpSpentQuota
+//                every few weeks; the real quota is 20,000); a token spent
+//                before stays spent. Every test.note must arrive
+//                (note-lost@s). The vault often recovers without decision a
+//                too (the issuer's re-mint within 16 days), so the search
+//                is a weak check of it; the unit tests pin it.
 //
 // A run replays from its seed: crypto randomness is seeded per run
 // (testing/cryptotest), the fixtures are made at a start time drawn from
@@ -108,11 +122,16 @@ const rpRefreshWeight = 2
 // real quota, PeerQuotaMsgs, is never reached in a run).
 const rpStandingQuota = 2
 
+// rpSpentQuota is how many deposits of any kind a connection's standing
+// token may make under R29RP_SPENT.
+const rpSpentQuota = 24
+
 // rpModes are the optional modes of a run.
-type rpModes struct{ shuffle, refresh bool }
+type rpModes struct{ shuffle, refresh, spent bool }
 
 func rpEnvModes() rpModes {
-	return rpModes{shuffle: os.Getenv("R29RP_SHUFFLE") != "", refresh: os.Getenv("R29RP_REFRESH") != ""}
+	refresh := os.Getenv("R29RP_REFRESH") != ""
+	return rpModes{shuffle: os.Getenv("R29RP_SHUFFLE") != "", refresh: refresh, spent: refresh && os.Getenv("R29RP_SPENT") != ""}
 }
 
 func (md rpModes) weights() [rpNumOps]int {
@@ -128,6 +147,7 @@ var rpTotals struct {
 	shuffled, shuffleRuns           int // messages delivered ahead of an older one; runs with any
 	refreshes, refreshRuns, quotaed int // refreshes asked; runs with any; standing-quota refusals
 	granted                         int // refreshes the issuer granted
+	refusedRuns, spentRecs, recRuns int // R29RP_SPENT: runs with a refused quota refresh; reconnects after one; runs with any
 }
 var rpJumps = [...]time.Duration{61 * time.Second, 10 * time.Minute, time.Hour + time.Second, 24*time.Hour + time.Second,
 	7*24*time.Hour + time.Second, 14*24*time.Hour + time.Second, 30*24*time.Hour + time.Second}
@@ -203,6 +223,7 @@ type rpWorld struct {
 	q       [2][]rpMsg // q[s]: what waits in side s's mailbox
 	n       int
 	quota   map[string]int64 // deposits per jti under a quota
+	spentJ  map[string]bool  // R29RP_SPENT: the standing tokens whose quota is spent (every deposit refused)
 	rot     [2][]time.Time   // when each side rotated
 	fail    [2]int           // injected deposit failures left, by depositing side
 	fail429 [2]bool
@@ -230,6 +251,10 @@ type rpWorld struct {
 	notes     map[string]bool // R29RP_REFRESH: the sealed test.note deposits, by their bytes
 	quotaed   int             // standing-quota refusals
 	refreshes int             // quota refreshes asked
+	qrrSeen   [2]int          // R29RP_SPENT: side s's quota_refresh_refused audits already followed by a reconnect deposit
+	spentRecs int             // R29RP_SPENT: reconnect-token deposits that followed a refused quota refresh (decision a's path)
+	sentNotes [2]int          // R29RP_SPENT: test.notes side s queued (each must reach the other side)
+	quiet     bool            // in quiesce: R29RP_SPENT's housekeeping deposits do not spend a quota (the real one is 20,000)
 	granted   int             // quota refreshes the issuer granted (its Refreshed stamp moved)
 	lastRef   [2]time.Time
 }
@@ -315,6 +340,13 @@ func (w *rpWorld) check(s int, mailbox, token string, payload []byte) error {
 	if err != nil {
 		return nil // not a token this relay judges (an open token, a placeholder)
 	}
+	if w.md.spent && c.Quota != nil && c.Quota.Msgs != nil && *c.Quota.Msgs == handshake.ReconnectTokenQuotaMsgs {
+		// A reconnect's deposit after a refused quota refresh: decision a's
+		// path reached (counted once per refusal).
+		if n := w.f.auditCount(s, "quota_refresh_refused"); n > w.qrrSeen[s] {
+			w.qrrSeen[s], w.spentRecs = n, w.spentRecs+1
+		}
+	}
 	refuse := func(st int, code string) error {
 		w.refused[code]++
 		w.logf("relay: %d's deposit refused %s", s, code)
@@ -336,10 +368,27 @@ func (w *rpWorld) check(s int, mailbox, token string, payload []byte) error {
 		// byte quota): a small message, the refresh among them, still fits.
 		standing := w.md.refresh && limit == PeerQuotaMsgs
 		if standing {
-			if !w.notes[string(payload)] {
-				return nil
+			if w.md.spent && w.spentJ[c.Jti] {
+				w.quotaed++
+				w.quotaHit[s] = true
+				w.logf("relay: %d's deposit refused %s (standing quota spent)", s, CodeQuotaExceeded)
+				return &relayclient.Error{Status: 429, Code: CodeQuotaExceeded, Quota: relayclient.QuotaToken}
 			}
-			limit = rpStandingQuota
+			if w.md.spent {
+				// Every deposit spends it (Fable, #7043): an hs.fin or a
+				// rekey's traffic can be the first refusal. Not the quiet
+				// phase's housekeeping (70 days of re-mints and rekeys
+				// would spend a token of rpSpentQuota every few weeks, the
+				// real one 20,000); a token spent before stays spent.
+				if w.quiet {
+					return nil
+				}
+				limit = rpSpentQuota
+			} else if !w.notes[string(payload)] {
+				return nil
+			} else {
+				limit = rpStandingQuota
+			}
 		}
 		if w.quota[c.Jti] >= limit {
 			if standing {
@@ -348,6 +397,10 @@ func (w *rpWorld) check(s int, mailbox, token string, payload []byte) error {
 				w.quotaed++
 				w.quotaHit[s] = true
 				w.logf("relay: %d's deposit refused %s (standing quota)", s, CodeQuotaExceeded)
+				if w.md.spent {
+					w.spentJ[c.Jti] = true
+					return &relayclient.Error{Status: 429, Code: CodeQuotaExceeded, Quota: relayclient.QuotaToken}
+				}
 				return &relayclient.Error{Status: 429, Code: CodeQuotaExceeded}
 			}
 			return refuse(429, CodeQuotaExceeded)
@@ -647,7 +700,9 @@ func (w *rpWorld) exec(a rpAction, rng *rand.Rand) {
 	case rpSend:
 		w.do(s, func(m *Manager, p *Peer) {
 			n := len(m.st.Outbox)
-			m.sendTo(p, "test.note", json.RawMessage(`{"n":"x"}`), w.f.clk)
+			if m.sendTo(p, "test.note", json.RawMessage(`{"n":"x"}`), w.f.clk) != "" {
+				w.sentNotes[s]++
+			}
 			if w.md.refresh && len(m.st.Outbox) > n {
 				// Known by its bytes, not by opening it: a note sealed under
 				// an epoch since replaced must still spend the quota.
@@ -702,6 +757,7 @@ func (w *rpWorld) refresh(s int) {
 // time past every bound (B, the handshake lifetimes, token refreshes).
 func (w *rpWorld) quiesce() {
 	w.logf("== quiesce")
+	w.quiet = true
 	for s := 0; s < 2; s++ {
 		w.fail[s] = 0
 		if w.locked[s] {
@@ -773,6 +829,14 @@ func (w *rpWorld) lockShape() (overlapping, single bool) {
 		}
 	}
 	return overlapping, single
+}
+
+// rpAccepted reports whether a run's class is one of the stated residuals,
+// counted apart and not a failure of the search: the "residual:" classes
+// (rapid rotations ending by quota_exceeded, overlapping long locks) and a
+// single lock longer than T ("lock>T:single", converged or not).
+func rpAccepted(class string) bool {
+	return strings.HasPrefix(class, "residual:") || strings.HasPrefix(class, "lock>T:single")
 }
 
 // lockClass: a failure's class when long locks explain it.
@@ -874,6 +938,11 @@ func (w *rpWorld) verdict() string {
 				why = append(why, fmt.Sprintf("quota-stuck@%d", s))
 			}
 		}
+		if w.md.spent && len(f.got[o]) < w.sentNotes[s] {
+			// A note that waited past §8.4's 16 days is dropped by its
+			// receiver: the loss decision a exists to prevent (GC #6840).
+			why = append(why, fmt.Sprintf("note-lost@%d", s))
+		}
 		if !f.clk.Before(p[s].Standing.Exp) {
 			why = append(why, fmt.Sprintf("token@%d", s))
 		}
@@ -945,7 +1014,7 @@ func rpRunFP(t *testing.T, rs uint64, steps int, burst, verbose bool) (string, [
 	t.Cleanup(func() { fixtureNow = nil })
 	f := newR29Fx(t)
 	fx = f
-	w := &rpWorld{t: t, f: f, quota: map[string]int64{}, refused: map[string]int{}, verbose: verbose, md: rpRunModes,
+	w := &rpWorld{t: t, f: f, quota: map[string]int64{}, spentJ: map[string]bool{}, refused: map[string]int{}, verbose: verbose, md: rpRunModes,
 		srng: rand.New(rand.NewPCG(rs, 11))}
 	for s := 0; s < 2; s++ {
 		w.pub[s], w.mbox[s] = f.pk(s), f.m(s).st.Relay.Mailbox
@@ -962,6 +1031,13 @@ func rpRunFP(t *testing.T, rs uint64, steps int, burst, verbose bool) (string, [
 	rpTotals.refreshes += w.refreshes
 	rpTotals.quotaed += w.quotaed
 	rpTotals.granted += w.granted
+	rpTotals.spentRecs += w.spentRecs
+	if w.spentRecs > 0 {
+		rpTotals.recRuns++
+	}
+	if w.f.audited(0, "quota_refresh_refused") || w.f.audited(1, "quota_refresh_refused") {
+		rpTotals.refusedRuns++
+	}
 	if w.shuffled > 0 {
 		rpTotals.shuffleRuns++
 	}
@@ -1080,10 +1156,20 @@ func TestR29RandomPair(t *testing.T) {
 		t.Logf("%-50s %5d  e.g. %s", k, len(seeds), strings.Join(ss, " "))
 	}
 	t.Logf("runs in which relay.token.issued delivered a token already revoked (follow-up, not R29-T1): %d", len(rpIssuedRevokedRuns))
+	// The search fails when any run ends outside the accepted residuals (the
+	// lead, GC #7066): a PASS then means no such run, not just no crash.
+	for _, k := range ks {
+		if k != "converged" && !rpAccepted(k) {
+			t.Errorf("%d runs ended %s (not an accepted residual), e.g. %d", len(classes[k]), k, classes[k][0])
+		}
+	}
 	md := rpRunModes
 	t.Logf("shuffle %v: %d messages delivered ahead of an older one, in %d runs", md.shuffle, rpTotals.shuffled, rpTotals.shuffleRuns)
-	t.Logf("refresh %v: ~%d quota refreshes asked (by the harness) in %d runs, ~%d granted (approximate), %d standing-quota refusals (quota %d)", md.refresh,
-		rpTotals.refreshes, rpTotals.refreshRuns, rpTotals.granted, rpTotals.quotaed, rpStandingQuota)
+	t.Logf("refresh %v (spent %v): ~%d quota refreshes asked (by the harness) in %d runs, ~%d granted (approximate), %d standing-quota refusals (quota %d, spent %d)", md.refresh, md.spent,
+		rpTotals.refreshes, rpTotals.refreshRuns, rpTotals.granted, rpTotals.quotaed, rpStandingQuota, rpSpentQuota)
+	if md.spent {
+		t.Logf("spent (quiet-phase housekeeping spends no quota): %d runs with a refused quota refresh; %d reconnect deposits after one (decision a), in %d runs", rpTotals.refusedRuns, rpTotals.spentRecs, rpTotals.recRuns)
+	}
 	t.Logf("%d runs (burst %v, steps %d) in %v: %v per 10,000", runs, burst, steps, el.Round(time.Second),
 		(el * time.Duration(10000) / time.Duration(runs)).Round(time.Second))
 }

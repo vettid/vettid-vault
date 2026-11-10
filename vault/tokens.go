@@ -216,7 +216,9 @@ func (m *Manager) refreshHeld(now time.Time) {
 			}
 			continue
 		}
-		if p.Standing.Exp.Sub(now) < HolderRefreshBelow && !m.requestPending(p.ID, tokenRefreshType) {
+		if p.Standing.Exp.Sub(now) < HolderRefreshBelow && m.quotaWaits(p.ID) {
+			m.askQuotaRefresh(p, now) // the refresh that passes the quota wait (§8.6)
+		} else if p.Standing.Exp.Sub(now) < HolderRefreshBelow && !m.requestPending(p.ID, tokenRefreshType) {
 			if id := m.sendTo(p, tokenRefreshType, peerwire.TokenRefreshBody(), now); id != "" {
 				m.requests[id] = p.ID
 				m.requestTypes[id] = tokenRefreshType

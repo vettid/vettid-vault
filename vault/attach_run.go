@@ -879,7 +879,11 @@ func (m *Manager) attAskToken(p *Peer, e *AttEntry, now time.Time) bool {
 	e.TokenTried, e.TokenAsked, e.TokenExp = true, now, p.Standing.Exp
 	e.NotBefore = now.Add(time.Hour)
 	m.dirty = true
-	if !m.requestPending(p.ID, tokenRefreshType) {
+	if m.quotaWaits(p.ID) {
+		// A deposit waits for a fresh token for the same quota: the
+		// refresh it asks for is the one that passes the wait (§8.6).
+		m.askQuotaRefresh(p, m.now())
+	} else if !m.requestPending(p.ID, tokenRefreshType) {
 		if id := m.sendTo(p, tokenRefreshType, peerwire.TokenRefreshBody(), m.now()); id != "" {
 			m.requests[id] = p.ID
 			m.requestTypes[id] = tokenRefreshType

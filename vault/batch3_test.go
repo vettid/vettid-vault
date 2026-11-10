@@ -47,7 +47,7 @@ func (p *policyType) PrepareAgentGrants(_ *Session, ik []byte, g json.RawMessage
 	return json.RawMessage(`["signed"]`), nil
 }
 
-func (p *policyType) AgentPaired(_ *Session, id string, g json.RawMessage) {
+func (p *policyType) AgentPaired(_ *Session, id string, _ []byte, g json.RawMessage) {
 	if p.paired == nil {
 		p.paired = map[string]json.RawMessage{}
 	}

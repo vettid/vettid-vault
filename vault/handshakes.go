@@ -1195,7 +1195,7 @@ func (m *Manager) activate(p *Peer, ep *handshake.Epoch, purpose handshake.Purpo
 			// empty one) take effect with the pairing, after device.paired,
 			// and the set takes its grant_seq then (§6.7, §10.11).
 			if g := m.agentGrantor(); g != nil {
-				g.AgentPaired(m.session(now), p.ID, p.PairGrants)
+				g.AgentPaired(m.session(now), p.ID, p.IK, p.PairGrants)
 			}
 			p.PairGrants = nil
 		}

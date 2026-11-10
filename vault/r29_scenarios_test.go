@@ -284,6 +284,17 @@ func (f *r29Fx) rekey(s int) {
 	f.do(s, func(m *Manager, p *Peer) { m.startRekey(p, f.clk) })
 }
 
+// auditedRef reports whether side s audited ev with ref (0.88.7: the
+// message's inner id).
+func (f *r29Fx) auditedRef(s int, ev, ref string) bool {
+	for _, a := range f.m(s).st.Audit {
+		if a.Event == ev && a.Ref == ref {
+			return true
+		}
+	}
+	return false
+}
+
 func (f *r29Fx) audited(s int, ev string) bool {
 	for _, a := range f.m(s).st.Audit {
 		if a.Event == ev {

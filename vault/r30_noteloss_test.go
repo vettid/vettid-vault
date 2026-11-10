@@ -441,12 +441,24 @@ func TestR30StoredThen429OneAttempt(t *testing.T) {
 	}))
 	defer srv.Close()
 	r := NewClientRelay(srv.URL, ed25519.NewKeyFromSeed(make([]byte, 32)), srv.Client(), nil)
-	_, err := r.Deposit(context.Background(), srv.URL, "mbox", "v4.public.x", []byte("payload"))
+	_, err := r.Deposit(withOneAttempt(context.Background()), srv.URL, "mbox", "v4.public.x", []byte("payload"))
 	mu.Lock()
 	n := stored
 	mu.Unlock()
 	if n != 1 || !mayHaveStored(err) {
 		t.Fatalf("%d attempts, answer %v (possibly stored %v): want 1 attempt, possibly stored", n, err, mayHaveStored(err))
+	}
+	// L-c: a deposit outside the outbox (volatile, vault.locking) judges no
+	// Tried and keeps relayclient's retries.
+	mu.Lock()
+	stored = 0
+	mu.Unlock()
+	_, err = r.Deposit(context.Background(), srv.URL, "mbox", "v4.public.x", []byte("payload"))
+	mu.Lock()
+	n = stored
+	mu.Unlock()
+	if n != 2 || RelayCode(err) != CodeQuotaExceeded {
+		t.Fatalf("outside the outbox: %d attempts, answer %v: want the retry (2) and its 429", n, err)
 	}
 }
 
@@ -548,18 +560,23 @@ func TestR30ConfirmSupersededAtKeyChange(t *testing.T) {
 	}
 }
 
-// L2: a release 29 state's attempted entries are taken as Tried at its
-// first load; a 0.88.7 state's are left as they are.
+// L2, N-a: a release 29 state's sealed entries not done are taken as Tried
+// at its first load (an attempt cut off by a lock is not counted); a 0.88.7
+// state's are left as they are.
 func TestR30LoadMarksAttemptedTried(t *testing.T) {
-	a := &OutboxEntry{Op: OpDeposit, Attempts: 2}
-	b := &OutboxEntry{Op: OpDeposit}
-	c := &OutboxEntry{Op: OpDeposit, Attempts: 1, Done: true}
+	f := newR29Fx(t)
+	f.longTokens()
+	w, _ := f.waitingNote(0, "sealed")
+	sealed := w.Payload
+	a := &OutboxEntry{Op: OpDeposit, Payload: sealed}             // never counted as attempted (cut off by a lock)
+	b := &OutboxEntry{Op: OpDeposit, Held: []byte(`{}`)}          // held, never sealed
+	c := &OutboxEntry{Op: OpDeposit, Payload: sealed, Done: true} // done
 	st := &State{Outbox: []*OutboxEntry{a, b, c}}
 	st.init()
 	if !a.Tried || b.Tried || c.Tried || !st.OutboxTried {
 		t.Fatalf("tried %v %v %v, marked %v (want true false false, true)", a.Tried, b.Tried, c.Tried, st.OutboxTried)
 	}
-	d := &OutboxEntry{Op: OpDeposit, Attempts: 3}
+	d := &OutboxEntry{Op: OpDeposit, Payload: sealed}
 	st2 := &State{OutboxTried: true, Outbox: []*OutboxEntry{d}}
 	st2.init()
 	if d.Tried {
@@ -609,10 +626,114 @@ func TestR30StaleHeldEndWhenPeerCannotReturn(t *testing.T) {
 			}
 		}
 	})
+	// A deposit of the peer's made just before the exp can sit at the relay
+	// up to T, so the bound is the exp plus T plus the future skew.
+	f.advance(14 * 24 * time.Hour)
+	f.tick(0)
+	if held.Done {
+		t.Fatal("a held entry ended within T of the peer's last token exp")
+	}
 	f.advance(time.Hour)
 	f.tick(0)
-	if !held.Done || !f.audited(0, "undelivered_stale") {
-		t.Fatalf("done %v, audited %v: want ended, told", held.Done, f.audited(0, "undelivered_stale"))
+	if !held.Done || !f.auditedRef(0, "undelivered_stale", held.InnerID) || held.InnerID == "" {
+		t.Fatalf("done %v, audited with its inner id %v: want ended, told", held.Done, f.auditedRef(0, "undelivered_stale", held.InnerID))
+	}
+}
+
+// M-A: the peer's reconnect answered (its hs.resp's fresh tokens still in
+// flight, in Awaiting) while the stale side's adopted tokens expire: the held
+// messages wait, and the hs.fin revives the connection with them delivered.
+func TestR30StaleHeldWaitForInFlightAnswer(t *testing.T) {
+	f := demoted(t, nil)
+	f.note(0, "held-in-flight")
+	f.lose(0, 1, kAny)
+	f.do(0, func(m *Manager, p *Peer) { m.markStale(p, f.clk) })
+	f.peerReconnects()
+	f.deliver(1, 0, kHSInit) // side 0 answers: the hs.resp's tokens are in Awaiting
+	if len(f.m(0).st.Awaiting) == 0 {
+		t.Fatal("setup: no answer awaiting hs.fin")
+	}
+	f.do(0, func(m *Manager, p *Peer) {
+		for i := range m.st.Issued {
+			if m.st.Issued[i].PeerID == p.ID {
+				m.st.Issued[i].Exp = f.clk.Add(time.Minute)
+			}
+		}
+	})
+	f.advance(15 * 24 * time.Hour)
+	f.tick(0)
+	if f.audited(0, "undelivered_stale") {
+		t.Fatal("the held messages ended while the answer's tokens were in flight")
+	}
+	f.deliver(0, 1, kHSResp)
+	f.deliver(1, 0, kHSFin)
+	f.settle()
+	f.advance(time.Hour)
+	f.tick(0)
+	f.tick(1)
+	f.settle()
+	if f.p(0).State != PeerActive || f.arrived(1, "held-in-flight") != 1 {
+		f.dump()
+		t.Fatalf("active %v, arrived %d: want revived, delivered once", f.p(0).State == PeerActive, f.arrived(1, "held-in-flight"))
+	}
+}
+
+// L-d: a sealed entry waiting for a token on a stale connection ends under
+// the same bound (it would otherwise retry for good, silently).
+func TestR30StaleSealedWaitingEnds(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	e, in := f.waitingNote(0, "sealed-stale")
+	f.do(0, func(m *Manager, p *Peer) {
+		m.markStale(p, f.clk)
+		for i := range m.st.Issued {
+			if m.st.Issued[i].PeerID == p.ID {
+				m.st.Issued[i].Exp = f.clk.Add(time.Minute)
+			}
+		}
+	})
+	f.advance(StaleReach + time.Hour)
+	f.tick(0)
+	if !e.Done || !f.auditedRef(0, "undelivered_stale", in.ID) {
+		t.Fatalf("done %v, audited with its id %v: want ended, told", e.Done, f.auditedRef(0, "undelivered_stale", in.ID))
+	}
+}
+
+// L-c: a 429's retry_after is the entry's next try.
+func TestR30RetryAfterHonoured(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	r := f.d[0].relay
+	r.mu.Lock()
+	r.failMailbox = map[string]error{f.m(1).st.Relay.Mailbox: &relayclient.Error{Status: 429, Code: "rate_limited", RetryAfter: 600}}
+	r.mu.Unlock()
+	var e *OutboxEntry
+	f.do(0, func(m *Manager, p *Peer) {
+		m.sendTo(p, "test.note", []byte(`{"n":"later"}`), f.clk)
+		e = m.st.Outbox[len(m.st.Outbox)-1]
+	})
+	if e.Done || e.NotBefore.Before(f.clk.Add(600*time.Second)) {
+		t.Fatalf("not before %v, want %v (retry_after)", e.NotBefore, f.clk.Add(600*time.Second))
+	}
+}
+
+// L-a: the peer's stale_or_future drop names the message's inner id.
+func TestR30StaleOrFutureRef(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	var id string
+	f.do(0, func(m *Manager, p *Peer) {
+		in := &envelope.Inner{ID: m.newID(f.clk), Type: "test.note", TS: f.clk.Add(-17 * 24 * time.Hour), Body: []byte(`{"n":"old"}`)}
+		raw, err := m.sealFor(p, m.sessions[p.ID].Current(), in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id = in.ID
+		m.queueDeposit(&OutboxEntry{PeerID: p.ID, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Payload: raw, InnerID: id}, f.clk)
+	})
+	f.settle()
+	if !f.auditedRef(1, "stale_or_future", id) {
+		t.Fatal("drop.stale_or_future without the message's inner id")
 	}
 }
 
@@ -682,7 +803,11 @@ func TestR30NoteOracle(t *testing.T) {
 	if lost, res := w.notesLost(); len(lost) != 1 || res != "" {
 		t.Fatalf("quota wait without the peer's stale_or_future: %v %q", lost, res)
 	}
-	f.do(1, func(m *Manager, p *Peer) { m.audit(f.clk, "stale_or_future", p.ID) })
+	f.do(1, func(m *Manager, p *Peer) { m.auditRef(f.clk, "stale_or_future", p.ID, "other") })
+	if lost, res := w.notesLost(); len(lost) != 1 || res != "" {
+		t.Fatalf("another note's stale_or_future: %v %q", lost, res)
+	}
+	f.do(1, func(m *Manager, p *Peer) { m.auditRef(f.clk, "stale_or_future", p.ID, "a") })
 	if lost, res := w.notesLost(); len(lost) != 0 || res != rpQuotaWaitResidual {
 		t.Fatalf("quota wait: %v %q, want the residual", lost, res)
 	}
@@ -696,7 +821,11 @@ func TestR30NoteOracle(t *testing.T) {
 	if lost, res := w.notesLost(); len(lost) != 1 || res != "" {
 		t.Fatalf("5xx without the sender's undelivered_window: %v %q", lost, res)
 	}
-	f.do(0, func(m *Manager, p *Peer) { m.audit(f.clk, "undelivered_window", p.ID) })
+	f.do(0, func(m *Manager, p *Peer) { m.auditRef(f.clk, "undelivered_window", p.ID, "other") })
+	if lost, res := w.notesLost(); len(lost) != 1 || res != "" {
+		t.Fatalf("another note's undelivered_window: %v %q", lost, res)
+	}
+	f.do(0, func(m *Manager, p *Peer) { m.auditRef(f.clk, "undelivered_window", p.ID, "a") })
 	if lost, res := w.notesLost(); len(lost) != 0 || res != rpToldResidual {
 		t.Fatalf("told after a 5xx: %v %q, want the residual", lost, res)
 	}
@@ -706,5 +835,58 @@ func TestR30NoteOracle(t *testing.T) {
 	w.locks[1] = long
 	if v := w.verdict(); v != "diverged:note-lost@0" {
 		t.Fatalf("verdict %q, want diverged:note-lost@0 (no lock class)", v)
+	}
+}
+
+// ctxRelay records whether each deposit's context asked for one attempt.
+type ctxRelay struct {
+	Relay
+	once []bool
+}
+
+func (r *ctxRelay) Deposit(ctx context.Context, url, mailbox, token string, payload []byte) (string, error) {
+	r.once = append(r.once, ctx.Value(oneAttemptKey{}) != nil)
+	return r.Relay.Deposit(ctx, url, mailbox, token, payload)
+}
+
+// H1, L-c: the outbox's deposits ask for one attempt.
+func TestR30OutboxDepositsOneAttempt(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	cr := &ctxRelay{Relay: f.m(0).relay}
+	f.m(0).relay = cr
+	f.note(0, "once")
+	if len(cr.once) == 0 || !cr.once[len(cr.once)-1] {
+		t.Fatalf("the outbox deposit's context: %v (want one attempt)", cr.once)
+	}
+}
+
+// L-b: a stale copy counts for the quota-wait residual only after a
+// standing-quota refusal of this note, or of the entry directly ahead of it.
+func TestR30QuotaWaitAhead(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	e, in := f.waitingNote(0, "behind")
+	for _, c := range []struct {
+		name  string
+		set   func(w *rpWorld)
+		stale bool
+	}{
+		{"no refusal", func(w *rpWorld) {}, false},
+		{"its own refusal", func(w *rpWorld) { w.quotaNote[in.ID] = true }, true},
+		{"the entry ahead refused", func(w *rpWorld) { w.lastDep[0] = "ahead"; w.quotaNote["ahead"] = true }, true},
+		{"the entry ahead not refused", func(w *rpWorld) { w.lastDep[0] = "ahead"; w.quotaNote["other"] = true }, false},
+	} {
+		w := &rpWorld{t: t, f: f, noteBytes: map[string]string{}, quotaNote: map[string]bool{}, staleNote: map[string]bool{}}
+		w.seeEpoch(0)
+		w.epochAt[0].since = in.TS
+		c.set(w)
+		clk := f.clk
+		f.clk = in.TS.Add(17 * 24 * time.Hour)
+		w.noteAccepted(0, e.Payload)
+		f.clk = clk
+		if w.staleNote[in.ID] != c.stale {
+			t.Errorf("%s: stale-copy %v, want %v", c.name, w.staleNote[in.ID], c.stale)
+		}
 	}
 }

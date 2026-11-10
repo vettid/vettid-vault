@@ -421,7 +421,7 @@ func (m *Manager) holdInner(p *Peer, in *envelope.Inner, wake string) {
 	if err != nil {
 		return
 	}
-	m.queueDeposit(&OutboxEntry{PeerID: p.ID, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Held: j, HeldExp: in.Exp, Wake: wake}, m.now())
+	m.queueDeposit(&OutboxEntry{PeerID: p.ID, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Held: j, HeldExp: in.Exp, Wake: wake, InnerID: in.ID}, m.now())
 }
 
 // rehold turns p's outbox entries sealed under the epoch ep (the current
@@ -559,8 +559,14 @@ func (m *Manager) sealHeld(p *Peer) {
 // audits drop.<reason>; the member's notice (its feed item or batching) is
 // card #6875's, which completes this function.
 func (m *Manager) notDelivered(e *OutboxEntry, reason string, now time.Time) {
+	ref := e.InnerID
+	if ref == "" && e.Held != nil {
+		if in, err := envelope.ParseInner(e.Held, envelope.ModeSealed); err == nil {
+			ref = in.ID
+		}
+	}
 	e.Done, e.Held, e.Payload = true, nil, nil
-	m.audit(now, reason, e.PeerID)
+	m.auditRef(now, reason, e.PeerID, ref) // ref: the message's inner id (#6875's notice names it)
 	m.dirty = true
 }
 

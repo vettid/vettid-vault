@@ -81,7 +81,7 @@ func (m *Manager) sealAndQueueWake(p *Peer, in *envelope.Inner, wake string) str
 	if err != nil {
 		return ""
 	}
-	m.queueDeposit(&OutboxEntry{PeerID: p.ID, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Payload: raw, Wake: wake}, m.now())
+	m.queueDeposit(&OutboxEntry{PeerID: p.ID, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Payload: raw, Wake: wake, InnerID: in.ID}, m.now())
 	return in.ID
 }
 
@@ -193,11 +193,20 @@ func (m *Manager) sendLocking(ctx context.Context) map[string]bool {
 	return ok
 }
 
+// retryAfter is a 429's retry_after (0 for any other answer).
+func retryAfter(err error) time.Duration {
+	var re *relayclient.Error
+	if errors.As(err, &re) && re.Status == 429 && re.RetryAfter > 0 {
+		return time.Duration(re.RetryAfter) * time.Second
+	}
+	return 0
+}
+
 // mayHaveStored reports whether a deposit answered err may have been
 // stored by the relay (0.88.7 §8.3): accepted, no answer (a transport
 // error, a lost answer) or any 5xx, coded or not (the relay may have
-// committed it before failing). A 4xx, 429 included, is a refusal. A
-// deposit is one attempt (ClientRelay.depositClient), so the answer is that
+// committed it before failing). A 4xx, 429 included, is a refusal. An
+// outbox deposit is one attempt (withOneAttempt), so the answer is that
 // attempt's.
 func mayHaveStored(err error) bool {
 	if err == nil {
@@ -338,6 +347,9 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 		e.Attempts++
 		d := time.Duration(250*(1<<min(e.Attempts, 7))) * time.Millisecond
 		e.NotBefore = now.Add(min(d, outboxMaxBackoff))
+		if ra := retryAfter(err); now.Add(ra).After(e.NotBefore) {
+			e.NotBefore = now.Add(ra) // a 429's retry_after is honoured (§8.6)
+		}
 	}
 	// Volatile deposits go after everything durable to the same mailbox
 	// (so a response never overtakes an hs.fin); one attempt each.
@@ -395,7 +407,7 @@ func (m *Manager) deposit(ctx context.Context, e *OutboxEntry, now time.Time) er
 		e.Done = true
 		return nil
 	}
-	_, err := m.relay.Deposit(ctx, e.RelayURL, e.Mailbox, tok, e.Payload)
+	_, err := m.relay.Deposit(withOneAttempt(ctx), e.RelayURL, e.Mailbox, tok, e.Payload)
 	if mayHaveStored(err) {
 		e.Tried = true // 0.88.7 §8.3: it may have reached the relay
 	}

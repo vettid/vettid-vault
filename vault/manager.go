@@ -28,6 +28,7 @@ import (
 
 	"github.com/vettid/vettid-vault/vault/store"
 	"github.com/vettid/vettid-vault/vms/altchan"
+	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/handshake"
 	"github.com/vettid/vettid-vault/vms/suite"
 )
@@ -748,10 +749,14 @@ func newManager(o Options, st *State, hdr *Header, dek []byte) *Manager {
 
 func (st *State) init() {
 	if !st.OutboxTried {
-		// 0.88.7 §8.3: a release 29 state's attempted entries may have
-		// reached the relay (their answers then were not told apart).
+		// 0.88.7 §8.3: a release 29 state's sealed entries may have
+		// reached the relay: their answers were not told apart, and an
+		// attempt cut off by a lock or a crash is not counted.
 		for _, e := range st.Outbox {
-			if e != nil && !e.Done && e.Op == OpDeposit && e.Attempts > 0 {
+			if e == nil || e.Done || e.Op != OpDeposit || len(e.Payload) == 0 {
+				continue
+			}
+			if env, err := envelope.Parse(e.Payload); err == nil && env.Mode() == envelope.ModeSession {
 				e.Tried = true
 			}
 		}

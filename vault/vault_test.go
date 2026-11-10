@@ -110,12 +110,25 @@ func (r *stubRelay) Deposit(_ context.Context, _, mailbox, token string, payload
 	}
 	if r.checkPayload != nil {
 		if err := r.checkPayload(mailbox, token, payload); err != nil {
-			return "", err
+			var se storedErr
+			if !errors.As(err, &se) {
+				return "", err
+			}
+			// Stored, then answered err (an answer lost after the commit).
+			r.deposits = append(r.deposits, stubDeposit{mailbox, token, append([]byte(nil), payload...)})
+			return "", se.err
 		}
 	}
 	r.deposits = append(r.deposits, stubDeposit{mailbox, token, append([]byte(nil), payload...)})
 	return fmt.Sprintf("m%d", len(r.deposits)), nil
 }
+
+// storedErr, from checkPayload, makes the stub store the deposit and then
+// answer err (the random pair's R29RP_LOSTANS fault).
+type storedErr struct{ err error }
+
+func (e storedErr) Error() string { return "stored, then: " + e.err.Error() }
+
 func (r *stubRelay) Revoke(_ context.Context, kind, value string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()

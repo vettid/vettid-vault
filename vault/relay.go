@@ -109,11 +109,13 @@ type ClientRelay struct {
 
 	mu      sync.Mutex
 	clients map[string]*relayclient.Client
-	// deposits are the clients deposits go through: one attempt each
-	// (0.88.7 §8.3, §8.6). The outbox retries with its own backoff, and an
-	// in-client retry could hide that an earlier attempt was stored (its
-	// answer lost) behind a later attempt's refusal, so that the entry would
-	// not be marked as one that may have reached the relay (Tried).
+	// deposits are the clients the outbox's deposits go through
+	// (withOneAttempt): one attempt each (0.88.7 §8.3, §8.6). The outbox
+	// retries with its own backoff, and an in-client retry could hide that
+	// an earlier attempt was stored (its answer lost) behind a later
+	// attempt's refusal, so that the entry would not be marked as one that
+	// may have reached the relay (Tried). Other deposits (volatile ones,
+	// vault.locking), which judge no Tried, keep relayclient's retries.
 	deposits map[string]*relayclient.Client
 }
 
@@ -165,7 +167,19 @@ func (r *ClientRelay) Register(ctx context.Context) (Limits, error) {
 }
 
 func (r *ClientRelay) Deposit(ctx context.Context, relayURL, mailbox, token string, payload []byte) (string, error) {
-	return r.depositClient(relayURL).Deposit(ctx, mailbox, token, payload)
+	if ctx.Value(oneAttemptKey{}) != nil {
+		return r.depositClient(relayURL).Deposit(ctx, mailbox, token, payload)
+	}
+	return r.client(relayURL).Deposit(ctx, mailbox, token, payload)
+}
+
+// oneAttemptKey marks a context whose deposit makes one attempt.
+type oneAttemptKey struct{}
+
+// withOneAttempt is ctx for an outbox deposit: one relayclient attempt
+// (ClientRelay.depositClient), so that its answer is that attempt's.
+func withOneAttempt(ctx context.Context) context.Context {
+	return context.WithValue(ctx, oneAttemptKey{}, true)
 }
 
 func (r *ClientRelay) Revoke(ctx context.Context, kind, value string) error {

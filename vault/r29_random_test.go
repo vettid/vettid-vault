@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand/v2"
 	"os"
@@ -61,6 +62,10 @@ import (
 //                succession
 //   R29RP_TRACE  a run seed: replay that run alone, with its trace
 //   R29RP_SHOW   how many seeds to list per failure class (default 5)
+//   R29RP_LOSTANS set: an injected "503" fault is instead a deposit the
+//                relay stores and whose answer is lost (a transport error):
+//                the vault deposits it again, and the peer's inner-id dedupe
+//                (§8.2) must absorb the copy (note-duplicate@s otherwise).
 //   R29RP_SHUFFLE set: every collect takes its batch from anywhere in the
 //                mailbox, in any order (cross-batch reordering, §8.4), and
 //                a batch left unacked comes back in any later one
@@ -118,10 +123,11 @@ const rpRefreshWeight = 2
 const rpStandingQuota = 2
 
 // rpModes are the optional modes of a run.
-type rpModes struct{ shuffle, refresh bool }
+type rpModes struct{ shuffle, refresh, lost bool }
 
 func rpEnvModes() rpModes {
-	return rpModes{shuffle: os.Getenv("R29RP_SHUFFLE") != "", refresh: os.Getenv("R29RP_REFRESH") != ""}
+	return rpModes{shuffle: os.Getenv("R29RP_SHUFFLE") != "", refresh: os.Getenv("R29RP_REFRESH") != "",
+		lost: os.Getenv("R29RP_LOSTANS") != ""}
 }
 
 func (md rpModes) weights() [rpNumOps]int {
@@ -256,7 +262,7 @@ type rpWorld struct {
 	ttlNote   map[string]bool   // a copy the relay dropped at T
 	quotaNote map[string]bool   // a deposit of it refused for the standing quota (R29RP_REFRESH)
 	staleNote map[string]bool   // a copy accepted with a ts over 16 days old, under an epoch current since that ts (no key change), after a standing-quota refusal of the sender's since that ts
-	quotaAt   [2][]time.Time    // when side s's deposits were refused for the standing quota
+	lastDep   [2]string         // the note id of side s's last accepted deposit ("" for another message): the entry ahead of the next
 	fiveNote  map[string]bool   // a deposit of it answered an injected 5xx (possibly stored, to the vault)
 	lastRef   [2]time.Time
 }
@@ -332,6 +338,11 @@ func (w *rpWorld) check(s int, mailbox, token string, payload []byte) error {
 		if w.fail429[s] {
 			return &relayclient.Error{Status: 429, Code: "rate_limited"}
 		}
+		if w.md.lost {
+			// R29RP_LOSTANS: stored, and the answer lost (a transport error).
+			w.logf("relay: %d's deposit stored, its answer lost", s)
+			return storedErr{err: errors.New("transport: connection reset after the relay stored it")}
+		}
 		if id := w.noteOf(s, payload); id != "" {
 			w.fiveNote[id] = true
 		}
@@ -381,7 +392,6 @@ func (w *rpWorld) check(s int, mailbox, token string, payload []byte) error {
 				if note != "" {
 					w.quotaNote[note] = true
 				}
-				w.quotaAt[s] = append(w.quotaAt[s], w.f.clk)
 				w.logf("relay: %d's deposit refused %s (standing quota)", s, CodeQuotaExceeded)
 				return &relayclient.Error{Status: 429, Code: CodeQuotaExceeded}
 			}
@@ -473,10 +483,12 @@ func (w *rpWorld) noteAccepted(s int, payload []byte) string {
 	old := w.f.clk.Sub(in.TS) > envelope.MaxDurableAge
 	same := bytes.Equal(ep, w.epochAt[s].id) && !w.epochAt[s].since.After(in.TS)
 	w.logf("note %s from %d accepted: ts %s, current epoch since %s", id, s, in.TS.Format("01-02 15:04"), w.epochAt[s].since.Format("01-02 15:04"))
-	waited := false // behind the standing quota: this note's refusal, or an earlier deposit's that held the mailbox
-	for _, at := range w.quotaAt[s] {
-		waited = waited || !at.Before(in.TS)
-	}
+	// Behind the standing quota: this note refused for it, or the entry
+	// directly ahead of it in that mailbox (which held it). The lead's
+	// review L-b; this residual goes once #216 (the quota wait) and #6875
+	// (the 16-day re-stamp at deposit) land.
+	ahead := w.lastDep[s]
+	waited := w.quotaNote[id] || ahead != "" && w.quotaNote[ahead]
 	if old && same && waited {
 		w.staleNote[id] = true
 	}
@@ -525,6 +537,7 @@ func (w *rpWorld) pull(s int) {
 		w.n++
 		typ := w.typeOf(s, d.payload)
 		note := w.noteAccepted(s, d.payload)
+		w.lastDep[s] = note
 		w.hasher = append(w.hasher, fmt.Sprintf("dep %d m%08d %s %s", s, w.n, typ, w.f.clk.Format(time.RFC3339)))
 		w.q[o] = append(w.q[o], rpMsg{m: Message{MsgID: fmt.Sprintf("m%08d", w.n), Sender: relayauth.EncodeKey(w.pub[s]), JTI: jti,
 			Payload: d.payload, DepositedAt: w.f.clk.UTC().Format(time.RFC3339Nano)}, at: w.f.clk, from: s, typ: typ, note: note})
@@ -1076,9 +1089,9 @@ func (w *rpWorld) notesLost() (why []string, residual string) {
 				dup = true
 			case n == 1:
 			case w.ttlNote[id] && (over || single):
-			case w.staleNote[id] && w.f.audited(o, "stale_or_future"):
+			case w.staleNote[id] && w.f.auditedRef(o, "stale_or_future", id):
 				quotaWait = true
-			case w.fiveNote[id] && w.f.audited(s, "undelivered_window"):
+			case w.fiveNote[id] && w.f.auditedRef(s, "undelivered_window", id):
 				told = true
 			default:
 				lost = true

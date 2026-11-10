@@ -465,7 +465,7 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 	te := m.registry[in.Type]
 	eph := te != nil && te.spec.Ephemeral
 	if err := in.CheckTime(now, !eph); err != nil {
-		m.audit(now, "stale_or_future", p.ID)
+		m.auditRef(now, "stale_or_future", p.ID, in.ID) // 0.88.7: ref = its inner id
 		return ackAfterFlush
 	}
 	if eph {
@@ -837,10 +837,13 @@ func (m *Manager) note(now time.Time, event, peer string) {
 	}
 }
 
-func (m *Manager) audit(now time.Time, event, peer string) {
-	m.st.Audit = append(m.st.Audit, AuditEntry{At: now, Event: event, PeerID: peer})
+func (m *Manager) audit(now time.Time, event, peer string) { m.auditRef(now, event, peer, "") }
+
+// auditRef is audit with a ref (0.88.7: a message's inner id).
+func (m *Manager) auditRef(now time.Time, event, peer, ref string) {
+	m.st.Audit = append(m.st.Audit, AuditEntry{At: now, Event: event, PeerID: peer, Ref: ref})
 	if k := auditKind(event); k != "" {
-		a := Activity{Kind: k, Audit: true}
+		a := Activity{Kind: k, Audit: true, Ref: ref}
 		if _, ok := m.st.Connections[peer]; ok {
 			a.ConnectionID = peer
 		} else if peer != "" {

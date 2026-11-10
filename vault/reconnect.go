@@ -3,6 +3,7 @@ package vault
 import (
 	"time"
 
+	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/handshake"
 )
 
@@ -66,24 +67,65 @@ func (m *Manager) reconnectNaming(p *Peer, ctx []byte, why string, now time.Time
 	return true
 }
 
-// tickStale ends the held messages of a stale connection that can no
-// longer come back (0.88.7 §3.4.1 "Stale is not final", proposed bound):
-// the peer reaches this vault only with a token this vault issued to it (a
-// standing token for its rekey, a reconnect token for its reconnect), so
-// once none it was issued is valid, no rekey or reconnect of its can make
-// the connection active again, and each held message is not delivered
+// StaleReach is how long after the last exp of a token this vault issued
+// to a stale connection's peer a deposit of the peer's under it can still
+// arrive (0.88.7 §8.3 "Not delivered", case 6): the relay holds a message
+// up to T (14 days) after a deposit made just before the exp, plus the
+// clock skew the ts window allows.
+const StaleReach = 14*24*time.Hour + envelope.MaxClockSkewFuture
+
+// staleReachUntil is when connection p can no longer come back: the latest
+// exp of any token this vault issued to the peer (adopted, or in a
+// handshake still in flight: an hs.resp or hs.init not yet activated,
+// revoked or not, since one deposited before the revocation still
+// arrives), plus StaleReach. Zero: none was ever issued.
+func (m *Manager) staleReachUntil(p *Peer) time.Time {
+	var last time.Time
+	see := func(ts []IssuedToken, all bool) {
+		for _, t := range ts {
+			if (all || t.PeerID == p.ID) && t.Exp.After(last) {
+				last = t.Exp
+			}
+		}
+	}
+	see(m.st.Issued, false)
+	for _, aw := range m.st.Awaiting {
+		if aw.PeerID == p.ID {
+			see(aw.Issued, true)
+		}
+	}
+	for _, og := range m.st.Outgoing {
+		if og.PeerID == p.ID {
+			see(og.Issued, true)
+		}
+	}
+	if p.Pending != nil {
+		see(p.Pending.Issued, true)
+	}
+	if last.IsZero() {
+		return last
+	}
+	return last.Add(StaleReach)
+}
+
+// tickStale ends the waiting messages of a stale connection that can no
+// longer come back (0.88.7 §3.4.1 "Stale is not final", proposed bound,
+// §8.3 "Not delivered" case 6): the peer reaches this vault only with a
+// token this vault issued to it (a standing token for its rekey, a
+// reconnect token for its reconnect), so once the last of them has expired
+// and anything deposited under it has left the relay (staleReachUntil), no
+// rekey or reconnect of its can make the connection active again. Each
+// waiting durable member deposit (held or sealed) is then not delivered
 // (undelivered_stale). A new invitation replaces the record (§7.4).
 func (m *Manager) tickStale(p *Peer, now time.Time) {
 	if p.Kind != KindConnection || p.State != PeerStale {
 		return
 	}
-	for _, it := range m.st.Issued {
-		if it.PeerID == p.ID && !it.Denied && now.Before(it.Exp) {
-			return // it can still come back
-		}
+	if now.Before(m.staleReachUntil(p)) {
+		return // it can still come back
 	}
 	for _, e := range m.st.Outbox {
-		if !e.Done && e.PeerID == p.ID && e.Held != nil {
+		if !e.Done && e.PeerID == p.ID && memberDeposit(e) {
 			m.notDelivered(e, "undelivered_stale", now)
 		}
 	}

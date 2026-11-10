@@ -474,6 +474,7 @@ func (m *Manager) sealHeld(p *Peer) {
 		}
 		if !e.HeldExp.IsZero() && !now.Before(e.HeldExp) {
 			e.Done, e.Held = true, nil
+			m.quotaRefreshEnded(e) // a quota refresh's: no answer can come
 			m.audit(now, "held_expired", p.ID) // S12
 			m.dirty = true
 			continue
@@ -483,6 +484,7 @@ func (m *Manager) sealHeld(p *Peer) {
 			// Unreadable: dropped and audited (§3.4.1 "After a demotion":
 			// no held message goes silently).
 			e.Done, e.Held = true, nil
+			m.quotaRefreshEnded(e)
 			m.audit(now, "held_unsealable", p.ID)
 			m.dirty = true
 			continue
@@ -496,6 +498,7 @@ func (m *Manager) sealHeld(p *Peer) {
 			// It cannot be sealed at all (review M1): dropped, audited, so
 			// that it does not hold the mailbox's queue for good.
 			e.Done, e.Held = true, nil
+			m.quotaRefreshEnded(e)
 			m.audit(now, "held_unsealable", p.ID) // drop.held_unsealable
 			m.dirty = true
 			continue

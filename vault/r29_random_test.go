@@ -71,6 +71,12 @@ import (
 //                letting the handshakes and the refresh pass; the two seeds
 //                that ended quota-stuck before it (13894595740220335007,
 //                9200229175364500436) are TestQuotaSeeds.
+//   R29RP_SPENT  set (with R29RP_REFRESH): the production relay's answer
+//                (RELAY-PROTOCOL 0.9.2 §7.1): the standing quota's
+//                refusal carries `quota: token`, and once spent the token
+//                refuses every deposit, the refresh included (its msgs
+//                spent): the vault's reconnect at once (owner decision a,
+//                GC #6840) is what recovers (the lead's review M2, #7027).
 //
 // A run replays from its seed: crypto randomness is seeded per run
 // (testing/cryptotest), the fixtures are made at a start time drawn from
@@ -109,10 +115,11 @@ const rpRefreshWeight = 2
 const rpStandingQuota = 2
 
 // rpModes are the optional modes of a run.
-type rpModes struct{ shuffle, refresh bool }
+type rpModes struct{ shuffle, refresh, spent bool }
 
 func rpEnvModes() rpModes {
-	return rpModes{shuffle: os.Getenv("R29RP_SHUFFLE") != "", refresh: os.Getenv("R29RP_REFRESH") != ""}
+	refresh := os.Getenv("R29RP_REFRESH") != ""
+	return rpModes{shuffle: os.Getenv("R29RP_SHUFFLE") != "", refresh: refresh, spent: refresh && os.Getenv("R29RP_SPENT") != ""}
 }
 
 func (md rpModes) weights() [rpNumOps]int {
@@ -203,6 +210,7 @@ type rpWorld struct {
 	q       [2][]rpMsg // q[s]: what waits in side s's mailbox
 	n       int
 	quota   map[string]int64 // deposits per jti under a quota
+	spentJ  map[string]bool  // R29RP_SPENT: the standing tokens whose quota is spent (every deposit refused)
 	rot     [2][]time.Time   // when each side rotated
 	fail    [2]int           // injected deposit failures left, by depositing side
 	fail429 [2]bool
@@ -336,6 +344,12 @@ func (w *rpWorld) check(s int, mailbox, token string, payload []byte) error {
 		// byte quota): a small message, the refresh among them, still fits.
 		standing := w.md.refresh && limit == PeerQuotaMsgs
 		if standing {
+			if w.md.spent && w.spentJ[c.Jti] {
+				w.quotaed++
+				w.quotaHit[s] = true
+				w.logf("relay: %d's deposit refused %s (standing quota spent)", s, CodeQuotaExceeded)
+				return &relayclient.Error{Status: 429, Code: CodeQuotaExceeded, Quota: relayclient.QuotaToken}
+			}
 			if !w.notes[string(payload)] {
 				return nil
 			}
@@ -348,6 +362,10 @@ func (w *rpWorld) check(s int, mailbox, token string, payload []byte) error {
 				w.quotaed++
 				w.quotaHit[s] = true
 				w.logf("relay: %d's deposit refused %s (standing quota)", s, CodeQuotaExceeded)
+				if w.md.spent {
+					w.spentJ[c.Jti] = true
+					return &relayclient.Error{Status: 429, Code: CodeQuotaExceeded, Quota: relayclient.QuotaToken}
+				}
 				return &relayclient.Error{Status: 429, Code: CodeQuotaExceeded}
 			}
 			return refuse(429, CodeQuotaExceeded)
@@ -945,7 +963,7 @@ func rpRunFP(t *testing.T, rs uint64, steps int, burst, verbose bool) (string, [
 	t.Cleanup(func() { fixtureNow = nil })
 	f := newR29Fx(t)
 	fx = f
-	w := &rpWorld{t: t, f: f, quota: map[string]int64{}, refused: map[string]int{}, verbose: verbose, md: rpRunModes,
+	w := &rpWorld{t: t, f: f, quota: map[string]int64{}, spentJ: map[string]bool{}, refused: map[string]int{}, verbose: verbose, md: rpRunModes,
 		srng: rand.New(rand.NewPCG(rs, 11))}
 	for s := 0; s < 2; s++ {
 		w.pub[s], w.mbox[s] = f.pk(s), f.m(s).st.Relay.Mailbox
@@ -1082,7 +1100,7 @@ func TestR29RandomPair(t *testing.T) {
 	t.Logf("runs in which relay.token.issued delivered a token already revoked (follow-up, not R29-T1): %d", len(rpIssuedRevokedRuns))
 	md := rpRunModes
 	t.Logf("shuffle %v: %d messages delivered ahead of an older one, in %d runs", md.shuffle, rpTotals.shuffled, rpTotals.shuffleRuns)
-	t.Logf("refresh %v: ~%d quota refreshes asked (by the harness) in %d runs, ~%d granted (approximate), %d standing-quota refusals (quota %d)", md.refresh,
+	t.Logf("refresh %v (spent %v): ~%d quota refreshes asked (by the harness) in %d runs, ~%d granted (approximate), %d standing-quota refusals (quota %d)", md.refresh, md.spent,
 		rpTotals.refreshes, rpTotals.refreshRuns, rpTotals.granted, rpTotals.quotaed, rpStandingQuota)
 	t.Logf("%d runs (burst %v, steps %d) in %v: %v per 10,000", runs, burst, steps, el.Round(time.Second),
 		(el * time.Duration(10000) / time.Duration(runs)).Round(time.Second))

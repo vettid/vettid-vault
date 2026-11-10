@@ -301,12 +301,15 @@ func (m *Manager) askQuotaRefresh(p *Peer, now time.Time) {
 	if !q.at.IsZero() && now.Sub(q.at) < quotaAskEvery || now.Before(q.after) && !nearEnd(p, now) {
 		return
 	}
+	if p.Standing.Token == "" {
+		return // none held: nothing to ask under (the open ones stay, quotaRequest)
+	}
+	tag := tokenTag(p.Standing.Token)
 	for _, e := range m.st.Outbox {
-		if e.PeerID == p.ID && e.QuotaRefresh && !e.Done {
+		if e.PeerID == p.ID && e.QuotaRefresh && e.QuotaTok == tag && !e.Done {
 			return
 		}
 	}
-	tag := tokenTag(p.Standing.Token)
 	if p.QuotaReqTok != tag {
 		m.dropQuotaRequests(p)
 		p.QuotaReqTok = tag
@@ -340,11 +343,16 @@ func (m *Manager) quotaWaits(peer string) bool {
 }
 
 // quotaRequest reports whether re is one of p's open quota refreshes,
-// asked under the standing token p holds. They are not in m.requests
+// asked under the standing token p holds, or under one since dropped with
+// none held now (revoked between the grant and its collect: the grant is
+// still taken, or the connection could go stale). They are not in m.requests
 // (so they never hold requestPending, the near-end refresh's and an
 // attachment's), and handleResponse takes their answers from here.
 func quotaRequest(p *Peer, re string) bool {
-	return re != "" && p.QuotaReqTok == tokenTag(p.Standing.Token) && slices.Contains(p.QuotaReqs, re)
+	if re == "" || p.QuotaReqTok == "" || p.Standing.Token != "" && p.QuotaReqTok != tokenTag(p.Standing.Token) {
+		return false
+	}
+	return slices.Contains(p.QuotaReqs, re)
 }
 
 // forgetRequest drops one of p's quota refreshes (answered, ended unsent,
@@ -395,16 +403,19 @@ func (m *Manager) quotaTooSoon(p *Peer, re string, body []byte, now time.Time) {
 // quotaReconnect starts a reconnect for a connection whose standing token
 // cannot be refreshed (owner decision of 2026-11-10, GC #6840): its
 // refresh was itself refused for the token's quota, or the token's exp
-// passed with a quota refusal still answered. As token_expired's (§6.6):
-// not while an epoch is pending before the exp, nor while carried tokens
-// wait. Before the exp, not without a reconnect token (that would make the
-// connection stale, §3.4.1, while the issuer's re-mint may still come).
-// The reconnect's hs.init carries its own token and passes the wait.
+// passed with a quota refusal still answered. At once (§8.6 0.88.6), also
+// while an own rekey's epoch is pending: unlike token_expired's clock-skew
+// guard (rule J), a pending rekey changes nothing here (its hs.fin may be
+// the very deposit refused), and the reconnect abandons it
+// (startReconnectCtx). Not while carried tokens wait. Before the exp, not
+// without a reconnect token (that would make the connection stale,
+// §3.4.1, while the issuer's re-mint may still come). The reconnect's
+// hs.init carries its own token and passes the wait.
 func (m *Manager) quotaReconnect(p *Peer, now time.Time) {
 	if now.Before(p.Standing.Exp) && noReconnectToken(p, now) {
 		return
 	}
-	if (p.Pending == nil || !now.Before(p.Standing.Exp)) && !m.carriedWait(p, now) {
+	if !m.carriedWait(p, now) {
 		m.startReconnect(p, now)
 	}
 }
@@ -412,7 +423,7 @@ func (m *Manager) quotaReconnect(p *Peer, now time.Time) {
 // retryPeer makes p's waiting entries eligible again (after a token
 // refresh or reconnect).
 func (m *Manager) retryPeer(peer string) {
-	if p := m.peer(peer); p != nil && p.QuotaReqTok != "" && p.QuotaReqTok != tokenTag(p.Standing.Token) {
+	if p := m.peer(peer); p != nil && p.QuotaReqTok != "" && p.Standing.Token != "" && p.QuotaReqTok != tokenTag(p.Standing.Token) {
 		m.dropQuotaRequests(p) // another standing token is held: the quota refreshes still open are not needed
 	}
 	for _, e := range m.st.Outbox {
@@ -442,7 +453,6 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 	now := m.now()
 	blocked := map[string]bool{}
 	awaiting := map[string]bool{}
-	quotaWaiting := map[string]bool{} // a deposit waits for a fresh token for its quota: a volatile one does not pass it
 	held := map[string]bool{}         // held for a pending reconnect (§6.3.1)
 	for _, e := range m.st.Outbox {
 		if e.Done {
@@ -486,9 +496,6 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 			continue
 		}
 		if now.Before(e.NotBefore) {
-			if e.Op == OpDeposit && e.QuotaWait {
-				quotaWaiting[key] = true
-			}
 			if e.Op == OpDeposit && (e.AwaitToken || e.QuotaWait) {
 				awaiting[key] = true
 			} else if e.Op == OpDeposit {
@@ -522,9 +529,6 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 			e.Done = true
 			continue
 		}
-		if e.Op == OpDeposit && !e.Done && e.QuotaWait {
-			quotaWaiting[key] = true
-		}
 		if e.Op == OpDeposit && !e.Done && (e.AwaitToken || e.QuotaWait) {
 			awaiting[key] = true
 		} else if e.Op == OpDeposit && !e.Done {
@@ -544,6 +548,15 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 	// (so a response never overtakes an hs.fin); one attempt each.
 	vol := m.volatile
 	m.volatile = nil
+	// A deposit still waiting for a fresh token for its quota (whatever
+	// held it back in this pass): a volatile one to that mailbox does not
+	// pass it.
+	quotaWaiting := map[string]bool{}
+	for _, e := range m.st.Outbox {
+		if e.Op == OpDeposit && e.QuotaWait && !e.Done {
+			quotaWaiting[e.RelayURL+"|"+e.Mailbox] = true
+		}
+	}
 	for _, e := range vol {
 		if blocked[e.RelayURL+"|"+e.Mailbox] || quotaWaiting[e.RelayURL+"|"+e.Mailbox] || ctx.Err() != nil {
 			suite.Wipe(e.Payload)

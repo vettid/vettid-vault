@@ -407,7 +407,8 @@ func (m *Manager) quotaTooSoon(p *Peer, re string, body []byte, now time.Time) {
 // while an own rekey's epoch is pending: unlike token_expired's clock-skew
 // guard (rule J), a pending rekey changes nothing here (its hs.fin may be
 // the very deposit refused), and the reconnect abandons it
-// (startReconnectCtx). Not while carried tokens wait. Before the exp, not
+// (startReconnectCtx). A rekey whose hs.fin the relay already took is
+// then the abandon rules' case (§6.3.1), as after token_revoked. Not while carried tokens wait. Before the exp, not
 // without a reconnect token (that would make the connection stale,
 // §3.4.1, while the issuer's re-mint may still come). The reconnect's
 // hs.init carries its own token and passes the wait.

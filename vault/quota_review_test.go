@@ -343,3 +343,34 @@ func TestQuotaPastTheExpNotResentWhileCarriedTokensWait(t *testing.T) {
 		t.Fatalf("entry %+v: want it still waiting", e)
 	}
 }
+
+// Opus N1 (#7043): a volatile deposit (§8.2, §8.5) is not sent to a
+// mailbox where a deposit still waits for its quota: it is lost, and the
+// requester retransmits.
+func TestQuotaVolatileNotSentPastAWait(t *testing.T) {
+	f := newR29Fx(t)
+	q := qNotes{}
+	vol := 0
+	f.quotaRelayBy(0, q, func(_, body string) error {
+		switch body {
+		case "big":
+			return &relayclient.Error{Status: 429, Code: CodeQuotaExceeded, Quota: relayclient.QuotaToken}
+		case "vol":
+			vol++
+		}
+		return nil
+	})
+	q.send(f, 0, "big")
+	f.do(0, func(m *Manager, p *Peer) {
+		q["vol"] = "vol"
+		m.volatile = append(m.volatile, &OutboxEntry{ID: "vol", Op: OpDeposit, PeerID: p.ID, RelayURL: p.Relay.URL,
+			Mailbox: p.Relay.Mailbox, Payload: []byte("vol"), BestEffort: true, Created: f.clk})
+	})
+	f.tick(0)
+	if len(f.quotaEntries(0)) != 1 {
+		t.Fatal("no deposit waits for its quota: the scenario is not set up")
+	}
+	if vol != 0 {
+		t.Fatalf("the volatile deposit went %d times past the quota wait", vol)
+	}
+}

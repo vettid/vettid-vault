@@ -453,7 +453,7 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 	now := m.now()
 	blocked := map[string]bool{}
 	awaiting := map[string]bool{}
-	held := map[string]bool{}         // held for a pending reconnect (§6.3.1)
+	held := map[string]bool{} // held for a pending reconnect (§6.3.1)
 	for _, e := range m.st.Outbox {
 		if e.Done {
 			continue

@@ -474,7 +474,7 @@ func (m *Manager) sealHeld(p *Peer) {
 		}
 		if !e.HeldExp.IsZero() && !now.Before(e.HeldExp) {
 			e.Done, e.Held = true, nil
-			m.quotaRefreshEnded(e) // a quota refresh's: no answer can come
+			m.quotaRefreshEnded(e)             // a quota refresh's: no answer can come
 			m.audit(now, "held_expired", p.ID) // S12
 			m.dirty = true
 			continue

@@ -438,6 +438,10 @@ func (m *Manager) enterHold(now time.Time) {
 	m.record(Activity{Kind: "owner_check.held", Audit: true}, now)
 }
 
+// sortedKeys returns mp's keys in order. The vault also iterates its
+// peers, handshakes, invites, requests and confirmations in this order, so
+// that what it does does not depend on Go's random map order (replayable
+// runs of the random pair search).
 func sortedKeys[V any](mp map[string]V) []string {
 	out := make([]string, 0, len(mp))
 	for k := range mp {
@@ -509,8 +513,8 @@ func (m *Manager) countHeld(a Activity) {
 // device p while the vault is due or held.
 func (m *Manager) holdAllows(p *Peer, typ, state string) bool {
 	switch typ {
-	case tokenIssuedType, tokenRefreshType, "relay.address.update":
-		return true // any device: the transport types
+	case tokenIssuedType, tokenRefreshType, "relay.address.update", TypeDeviceFeatures:
+		return true // any device: the transport types (device.features, §10.2)
 	}
 	deadline := m.st.OwnerCheck.Deadline
 	switch p.Kind {

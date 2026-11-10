@@ -10,6 +10,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
@@ -241,7 +242,28 @@ type VaultRecord struct {
 	TokenExp time.Time              `json:"token_exp,omitempty"`
 	Sessions handshake.KeyringState `json:"sessions"`
 	Suite    uint8                  `json:"suite"`
+	// Confirmed is the device's confirmed epoch with the vault (0.86.0,
+	// §6.3.1 "Responder"): the newest under which the vault sent anything
+	// but hs.fin. Nil: the current epoch.
+	Confirmed []byte `json:"confirmed,omitempty"`
+	// ConfirmAt is when the device last sent (queued) hs.confirm to the
+	// vault (§6.3.1 "Responder": again 12 days after it while its epoch
+	// is unconfirmed, vettid.org #554).
+	ConfirmAt time.Time `json:"confirm_at,omitzero"`
+	// Chain is the vault's identity links this device has followed
+	// (§3.4, S8): a rekey's or identity.rotate's leading links in it are
+	// not followed again.
+	Chain []json.RawMessage `json:"chain,omitempty"`
 }
+
+// Features are this client's receiving-side capabilities (0.86.0,
+// §6.3.1 "Deployment", §10.2): sent in device.features after each epoch
+// it activates and in the inner features field of every message to its
+// vault. hs_confirm: it confirms the vault's rekeys with hs.confirm and
+// keeps its confirmed epoch (the responder half); a device initiates no
+// rekey, so the initiator half does not arise. relay_follow is not
+// implemented.
+func Features() []string { return []string{handshake.CapConfirm} }
 
 // Device is one owner device.
 type Device struct {
@@ -254,6 +276,8 @@ type Device struct {
 	// recovery-open result, memory only. "" for a release before L, or
 	// before any unlock: the device then locks unbound (LockVault).
 	unlockID string
+	// reconfirmed is when hs.confirm was last sent again (memory only).
+	reconfirmed time.Time
 
 	// leashStatus caches an agent's LEASH status statements by grant id
 	// (memory only; refreshed before they expire, §10.11).
@@ -738,6 +762,7 @@ func (d *Device) startInitWith(purpose handshake.Purpose, ctxID, depositToken st
 		Purpose: purpose, Ctx: ctxID, Identity: d.ik, StaticKEM: d.kem.Public(), Relay: d.RelayAddr(),
 		Token: tok, Profile: profile, ResponderIK: v.IK, ResponderEK: ek, ResponderRelayKey: v.RelayPK,
 		Policy: d.policy(), Now: now, ID: id, DeviceAttest: da, APIKey: apiKey, UnlockSecret: secret,
+		Features: Features(),
 	})
 	if err != nil {
 		return err
@@ -799,7 +824,7 @@ func (d *Device) sendFull(ctx context.Context, id, typ string, body json.RawMess
 			return "", err
 		}
 	}
-	in := &envelope.Inner{ID: id, Type: typ, TS: now, Exp: exp, Body: body, Re: re, Status: status}
+	in := &envelope.Inner{ID: id, Type: typ, TS: now, Exp: exp, Body: body, Re: re, Status: status, Features: Features()}
 	raw, err := d.keyring.Current().Seal(in)
 	if err != nil {
 		return "", err
@@ -1056,6 +1081,9 @@ func (d *Device) poll(ctx context.Context, skip func() bool) error {
 	if d.cfg.Persist != nil {
 		return d.pollPersist(ctx)
 	}
+	d.mu.Lock()
+	d.tickConfirmLocked(ctx)
+	d.mu.Unlock()
 	ferr := d.flushOutboxLocked(ctx) // a state saved under Persist may still hold some
 	msgs, err := d.own.Collect(ctx, d.cfg.PollWait, 32)
 	if err != nil {
@@ -1106,6 +1134,7 @@ func (d *Device) poll(ctx context.Context, skip func() bool) error {
 // transient deposit failures are retried later and not returned.
 func (d *Device) pollPersist(ctx context.Context) error {
 	d.mu.Lock()
+	d.tickConfirmLocked(ctx)
 	dirty := d.dirty
 	d.mu.Unlock()
 	if dirty {
@@ -1259,6 +1288,8 @@ func outboxKind(typ, re string) string {
 		return "token"
 	case typ == "relay.token.refresh":
 		return "refresh"
+	case typ == handshake.TypeConfirm:
+		return "hs.confirm"
 	}
 	return ""
 }
@@ -1536,8 +1567,8 @@ func (d *Device) handle(ctx context.Context, m relayclient.Message) (unacked boo
 			if env.RecipientKid().Equal(rk) && env.SenderKid().Equal(sk) {
 				fr, err := r.HandleFin(m.Payload, sender, now)
 				if err == nil {
-					d.keyring.Activate(fr.Epoch, now)
 					d.dropAwaiting(i)
+					d.establishRekey(ctx, fr.Epoch, now)
 				}
 				if errors.Is(err, handshake.ErrType) {
 					// A message of the new epoch before hs.fin: the epoch
@@ -1564,9 +1595,15 @@ func (d *Device) handle(ctx context.Context, m relayclient.Message) (unacked boo
 			}
 		}
 	}
+	if in.Type != handshake.TypeFin {
+		d.noteConfirmed(ctx, ep, now)
+	}
 	if in.Type == handshake.TypeInit {
 		d.handleRekey(ctx, m.Payload, in, ep, sender, now)
 		return false
+	}
+	if in.Type == handshake.TypeConfirm {
+		return false // not a request: never answered (a device initiates no rekey)
 	}
 	if err := in.CheckTime(now, in.Exp.IsZero()); err != nil {
 		return false
@@ -1629,6 +1666,7 @@ func (d *Device) handle(ctx context.Context, m relayclient.Message) (unacked boo
 				}
 			}
 			d.st.Paired = pairedFrom(o, now)
+			d.sendFeatures(ctx) // §10.2: after each epoch it activates (0.86.0: hs_confirm)
 		}
 	case "relay.token.issued":
 		d.storeVaultToken(in.Body)
@@ -1778,7 +1816,9 @@ func (d *Device) handleResp(ctx context.Context, raw []byte, sender ed25519.Publ
 
 // handleRekey answers a vault-initiated rekey (§6.5).
 func (d *Device) handleRekey(ctx context.Context, raw []byte, in *envelope.Inner, ep *handshake.Epoch, sender ed25519.PublicKey, now time.Time) {
-	if d.keyring.Current() != ep {
+	if d.keyring.Current() != ep && !d.isConfirmed(ep) {
+		// §6.3.1: a rekey under the confirmed epoch while it is not current
+		// is accepted as if current.
 		return
 	}
 	pi, err := handshake.AcceptRekey(raw, in, ep, now)
@@ -1788,11 +1828,15 @@ func (d *Device) handleRekey(ctx context.Context, raw []byte, in *envelope.Inner
 	v := d.st.Vault
 	resp, env, err := pi.Respond(handshake.ResponderConfig{
 		Identity: d.ik, Policy: d.policy(), PinnedSuite: v.Suite, CollectSender: sender,
-		RecordRelayKey: v.RelayPK, KnownInitiatorIK: v.IK, Now: now,
+		RecordRelayKey: v.RelayPK, KnownInitiatorIK: v.IK, KnownInitiatorChain: d.knownFor(pi.Init().Rotations), Now: now, Features: Features(),
 	})
 	if err != nil {
 		return
 	}
+	// S8: the vault's links the rekey carried were checked by Respond (a
+	// chain from the stored ik to from.ik); a device follows them now (the
+	// vault's rekey is authenticated by the session it travels in).
+	d.followLinks(pi.Init().Rotations)
 	if err := d.depositVault(ctx, "hs.resp", v.RelayURL, v.Mailbox, v.Token, env); err != nil {
 		resp.Abort()
 		return
@@ -1900,11 +1944,78 @@ func (d *Device) followRotation(body json.RawMessage) {
 	if err != nil {
 		return
 	}
-	final, kem, err := handshake.ResolveChain(d.st.Vault.IK, []*handshake.Rotation{r})
-	if err != nil {
+	links := []*handshake.Rotation{r}
+	// S8 (0.86.0): `rotations` carries the whole chain since the epoch's
+	// signer, so a device that missed an earlier identity.rotate follows.
+	if arr, ok, err := o.OptArray("rotations"); err == nil && ok && len(arr) > 0 {
+		links = links[:0]
+		for _, raw := range arr {
+			x, err := handshake.ParseRotation(raw)
+			if err != nil {
+				return
+			}
+			links = append(links, x)
+		}
+	}
+	d.followLinks(links)
+}
+
+// followLinks follows the vault's links past those already followed.
+func (d *Device) followLinks(links []*handshake.Rotation) {
+	v := d.st.Vault
+	known := d.knownFor(links)
+	final, kem, n, err := handshake.ResolveChainKnown(v.IK, known, links)
+	if err != nil || n == len(links) {
 		return
 	}
-	d.st.Vault.IK, d.st.Vault.KEM = final, kem.Bytes()
+	v.IK = final
+	if kem != nil {
+		v.KEM = kem.Bytes()
+	}
+	for _, r := range links[n:] {
+		v.Chain = append(v.Chain, r.Marshal())
+	}
+}
+
+// knownFor returns the followed links to resolve links against. A device
+// that followed the vault's earlier rotations before it kept its chain
+// (before 4bdad44) has none recorded; then a leading part of links that
+// is a valid chain ending at the stored ik counts as followed, and is
+// recorded (review RR2 L7).
+func (d *Device) knownFor(links []*handshake.Rotation) []*handshake.Rotation {
+	v := d.st.Vault
+	known := d.chain()
+	if len(links) == 0 || handshake.KnownPrefix(known, links) > 0 || bytes.Equal(links[0].OldIK, v.IK) {
+		return known
+	}
+	for i := 1; i < len(links); i++ {
+		if !bytes.Equal(links[i].OldIK, v.IK) {
+			continue
+		}
+		for j, r := range links[:i] {
+			if r.Verify() != nil || j > 0 && !bytes.Equal(r.OldIK, links[j-1].NewIK) {
+				return known
+			}
+		}
+		if !bytes.Equal(links[i-1].NewIK, v.IK) {
+			return known
+		}
+		for _, r := range links[:i] {
+			v.Chain = append(v.Chain, r.Marshal())
+		}
+		return d.chain()
+	}
+	return known
+}
+
+func (d *Device) chain() []*handshake.Rotation {
+	var out []*handshake.Rotation
+	for _, raw := range d.st.Vault.Chain {
+		if r, err := handshake.ParseRotation(raw); err == nil {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // RenewVaultToken mints a fresh standing token for the vault to deposit to

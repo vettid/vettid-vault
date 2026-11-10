@@ -3,6 +3,7 @@ package items
 import (
 	"bytes"
 	"encoding/json"
+	"sort"
 	"strings"
 
 	"github.com/vettid/vettid-vault/features/itemspec"
@@ -108,7 +109,9 @@ func (f *Feature) sendTo(s *vault.Session, id string) {
 		f.sendService(s, id, body)
 		return
 	}
-	_ = s.SendToConnection(id, "profile.update", body)
+	if s.SendToConnection(id, "profile.update", body) == nil {
+		f.setAdvertisedNames(id, vault.CoreFeatures())
+	}
 }
 
 // sendService sends a service connection its profile.update and, when it
@@ -121,14 +124,52 @@ func (f *Feature) sendService(s *vault.Session, id string, body []byte) {
 }
 
 func (f *Feature) setAdvertised(id string) {
-	if len(f.peerFeatures) == 0 {
+	f.setAdvertisedNames(id, f.serviceNames())
+}
+
+func (f *Feature) setAdvertisedNames(id string, names []string) {
+	if len(names) == 0 {
 		delete(f.st.Profile.Advertised, id)
 		return
 	}
 	if f.st.Profile.Advertised == nil {
 		f.st.Profile.Advertised = map[string][]string{}
 	}
-	f.st.Profile.Advertised[id] = append([]string(nil), f.peerFeatures...)
+	f.st.Profile.Advertised[id] = append([]string(nil), names...)
+}
+
+// serviceNames are the names a service connection is told (§10.8): the
+// optional features it can use and the runtime's own (hs_confirm, 0.86.0).
+func (f *Feature) serviceNames() []string {
+	names := append(append([]string(nil), f.peerFeatures...), vault.CoreFeatures()...)
+	sort.Strings(names)
+	out := names[:0]
+	for i, n := range names {
+		if i == 0 || names[i-1] != n {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// namesFor are the names connection c is told (§10.8).
+func (f *Feature) namesFor(c vault.PeerInfo) []string {
+	if c.IsService() {
+		return f.serviceNames()
+	}
+	return vault.CoreFeatures()
+}
+
+// featuresJSON is a `features` array.
+func featuresJSON(names []string) []byte {
+	arr := []byte{'['}
+	for i, n := range names {
+		if i > 0 {
+			arr = append(arr, ',')
+		}
+		arr = append(arr, strictjson.MarshalString(n)...)
+	}
+	return append(arr, ']')
 }
 
 func sameNames(a, b []string) bool {
@@ -153,15 +194,17 @@ func (f *Feature) Unlocked(s *vault.Session) {
 	f.advertise(s)
 }
 
-// advertise sends the active service connections whose last advertised set
-// differs from this image's their update, once, with the next version.
+// advertise sends the active connections whose last advertised set
+// differs from this image's their update, once, with the next version
+// (§10.8 (b): to every connection for hs_confirm, 0.86.0; to a service
+// for its features too).
 func (f *Feature) advertise(s *vault.Session) {
 	bumped := false
 	for _, c := range s.Connections() {
-		if !c.IsService() || c.State != vault.PeerActive || c.RotationPending {
+		if c.State != vault.PeerActive || c.RotationPending {
 			continue
 		}
-		if sameNames(f.st.Profile.Advertised[c.ID], f.peerFeatures) {
+		if sameNames(f.st.Profile.Advertised[c.ID], f.namesFor(c)) {
 			continue
 		}
 		if f.st.Profile.Core == nil {
@@ -170,6 +213,17 @@ func (f *Feature) advertise(s *vault.Session) {
 		if !bumped {
 			f.st.Profile.Shared++
 			bumped = true
+		}
+		if !c.IsService() {
+			body, ok := f.updateBody(s, f.st.Profile.Shared)
+			if !ok {
+				s.Record(vault.Activity{Kind: "profile.core_missing", Audit: true})
+				return
+			}
+			if s.SendToConnection(c.ID, "profile.update", body) == nil {
+				f.setAdvertisedNames(c.ID, vault.CoreFeatures())
+			}
+			continue
 		}
 		body, ok := f.serviceBody(s, f.st.Profile.Shared)
 		if !ok {
@@ -192,19 +246,10 @@ func (f *Feature) serviceBody(s *vault.Session, v uint64) ([]byte, bool) {
 	if f.st.Profile.Name != "" {
 		b.String("name", f.st.Profile.Name)
 	}
-	if len(f.peerFeatures) > 0 {
-		// §10.8 (0.81.0): the names of the optional features a service can
-		// use, sorted, each once; absent, never an empty array.
-		arr := []byte{'['}
-		for i, n := range f.peerFeatures {
-			if i > 0 {
-				arr = append(arr, ',')
-			}
-			arr = append(arr, strictjson.MarshalString(n)...)
-		}
-		b.Raw("features", append(arr, ']'))
-	}
 	b.Raw("items", []byte("[]"))
+	// §10.8 (0.81.0): the names of the optional features a service can
+	// use and (0.86.0) hs_confirm, sorted, each once.
+	b.Raw("features", featuresJSON(f.serviceNames()))
 	return peerwire.ProfileUpdateBody(v, c.FirstName, c.LastName, c.IK, b.Bytes()), true
 }
 
@@ -233,7 +278,9 @@ func (f *Feature) sendAll(s *vault.Session, toServices bool) {
 			}
 			continue
 		}
-		_ = s.SendToConnection(c.ID, "profile.update", body)
+		if s.SendToConnection(c.ID, "profile.update", body) == nil {
+			f.setAdvertisedNames(c.ID, vault.CoreFeatures())
+		}
 	}
 }
 
@@ -278,7 +325,9 @@ func (f *Feature) sharedBody() []byte {
 		}
 		arr = append(arr, profileItemJSON(it)...)
 	}
-	return b.Raw("items", append(arr, ']')).Bytes()
+	// 0.86.0 (§10.8): a person connection is told the runtime's own names
+	// (hs_confirm) and nothing else.
+	return b.Raw("items", append(arr, ']')).Raw("features", featuresJSON(vault.CoreFeatures())).Bytes()
 }
 
 // bodyWith is a profile.update body with version v and core c:
@@ -533,6 +582,19 @@ func (f *Feature) profileUpdate(s *vault.Session, body []byte) error {
 	}
 	from := s.From()
 	conn := from.ID
+	if o, err := strictjson.ParseObject(body); err == nil {
+		// §10.8 (0.86.0): hs_confirm is read from any connection's update
+		// and kept once seen, whatever the version.
+		if arr, ok, err := o.OptArray("features"); err == nil && ok {
+			var names []string
+			for _, raw := range arr {
+				if n, err := strictjson.AsString(raw); err == nil {
+					names = append(names, n)
+				}
+			}
+			s.NotePeerFeatures(names)
+		}
+	}
 	if u.Version <= f.st.Profile.Peers[conn] {
 		return nil // older or repeated (§8.4)
 	}

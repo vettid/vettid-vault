@@ -527,9 +527,7 @@ func (m *Manager) pushOutcome(o pushOutcome) {
 // on the registered app's entry (§10.3, 0.24.0).
 func (m *Manager) devicesJSON(now time.Time) json.RawMessage {
 	ids := make([]string, 0, len(m.st.Devices))
-	for id := range m.st.Devices {
-		ids = append(ids, id)
-	}
+	ids = append(ids, sortedKeys(m.st.Devices)...)
 	sort.Strings(ids)
 	arr := []byte{'['}
 	for i, id := range ids {

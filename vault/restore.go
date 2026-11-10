@@ -105,7 +105,11 @@ func pruneHistory(p *Peer, now time.Time) {
 }
 
 func (m *Manager) pruneHistories(now time.Time) {
-	for _, p := range m.st.Connections {
+	for _, sortedK := range sortedKeys(m.st.Connections) {
+		p, sortedOK := m.st.Connections[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if len(p.History) > 0 || p.Watch != nil {
 			pruneHistory(p, now)
 		}
@@ -225,9 +229,18 @@ func forkEvidence(p *Peer, ep *handshake.Epoch, ts, now time.Time) bool {
 // before you connect again.", approved 2026-10-28). There is nothing to
 // resolve (connection.rotation.resolve answers not_found): only a new
 // invitation resumes it, after the member has contacted the service.
-func (m *Manager) suspendFork(p *Peer, now time.Time) {
+func (m *Manager) suspendFork(p *Peer, now time.Time) { m.suspendForkRef(p, "", now) }
+
+// suspendForkRef is suspendFork with the audit's ref (0.86.0, §10.9):
+// "epoch" for §3.4.1 "Epochs after an ik link" and §6.3.1 rule E, whose
+// feed item the app shows in the neutral wording ("<connection name> or
+// your vault may be running from an old copy. ..."), not §6.6's.
+func (m *Manager) suspendForkRef(p *Peer, ref string, now time.Time) {
 	if p.Fork != nil {
 		return
+	}
+	if p.Pending != nil {
+		m.abandonPending(p, "suspended", false, now)
 	}
 	p.Fork = &ForkSuspension{At: now.UTC()}
 	m.abandonHandshakes(p, true, true, now)
@@ -237,7 +250,7 @@ func (m *Manager) suspendFork(p *Peer, now time.Time) {
 		}
 	}
 	m.dirty = true
-	m.record(Activity{Kind: "connection.fork_suspected", ConnectionID: p.ID, Audit: true, Feed: true, Priority: "high"}, now)
+	m.record(Activity{Kind: "connection.fork_suspected", ConnectionID: p.ID, Ref: ref, Audit: true, Feed: true, Priority: "high"}, now)
 }
 
 // abandonHandshakes drops the reconnects (and with rekeys, when all is set)
@@ -248,14 +261,18 @@ func (m *Manager) suspendFork(p *Peer, now time.Time) {
 // hs.init always.
 func (m *Manager) abandonHandshakes(p *Peer, all, answers bool, now time.Time) {
 	if answers {
-		for id := range m.st.Awaiting {
+		for _, id := range sortedKeys(m.st.Awaiting) {
 			aw := m.st.Awaiting[id]
 			if aw.New == nil && aw.PeerID == p.ID && (all || aw.Purpose == handshake.PurposeReconnect) {
 				m.abandonAwaiting(id, now)
 			}
 		}
 	}
-	for id, og := range m.st.Outgoing {
+	for _, id := range sortedKeys(m.st.Outgoing) {
+		og, sortedOK := m.st.Outgoing[id]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if og.New == nil && og.PeerID == p.ID && (all || og.Purpose == handshake.PurposeReconnect) {
 			m.abandonOutgoing(id, now)
 		}
@@ -265,12 +282,20 @@ func (m *Manager) abandonHandshakes(p *Peer, all, answers bool, now time.Time) {
 // markRekeysReplaced marks the rekeys open for p, ours and answered, as made
 // on the replaced line (§6.6).
 func (m *Manager) markRekeysReplaced(p *Peer) {
-	for _, og := range m.st.Outgoing {
+	for _, sortedK := range sortedKeys(m.st.Outgoing) {
+		og, sortedOK := m.st.Outgoing[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if og.New == nil && og.PeerID == p.ID && og.Purpose == handshake.PurposeRekey {
 			og.Replaced = true
 		}
 	}
-	for _, aw := range m.st.Awaiting {
+	for _, sortedK := range sortedKeys(m.st.Awaiting) {
+		aw, sortedOK := m.st.Awaiting[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if aw.New == nil && aw.PeerID == p.ID && aw.Purpose == handshake.PurposeRekey {
 			aw.Replaced = true
 		}
@@ -302,7 +327,7 @@ func (m *Manager) abandonAwaiting(id string, now time.Time) {
 		r.Abort()
 	}
 	for _, t := range aw.Issued {
-		m.denyJTI(t.JTI, now)
+		m.revokeIssued(t, aw.PeerID, now)
 	}
 	m.dropOutboxEntry(aw.RespOutbox)
 	delete(m.awaiting, id)
@@ -320,7 +345,7 @@ func (m *Manager) abandonOutgoing(id string, now time.Time) {
 		return
 	}
 	for _, t := range og.Issued {
-		m.denyJTI(t.JTI, now)
+		m.revokeIssued(t, og.PeerID, now)
 	}
 	m.dropOutboxEntry(og.InitOutbox)
 	m.dropOutgoing(id)

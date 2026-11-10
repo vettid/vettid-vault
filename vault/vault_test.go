@@ -60,6 +60,11 @@ type stubRelay struct {
 	// blobs is an in-memory blob store (RELAY-PROTOCOL §6.8) two fixtures
 	// may share; nil: the relay has no blobs.
 	blobs *stubBlobs
+	// now, if set, is the clock tokens are minted by (a simulated one);
+	// check, if set, judges each deposit as a relay would (token exp,
+	// revocation, quota; injected failures) before it is recorded.
+	now   func() time.Time
+	check func(mailbox, token string) error
 }
 
 // stubBlobs is a test relay's blob storage, keyed by blob id.
@@ -94,6 +99,11 @@ func (r *stubRelay) Deposit(_ context.Context, _, mailbox, token string, payload
 	}
 	if err := r.failMailbox[mailbox]; err != nil {
 		return "", err
+	}
+	if r.check != nil {
+		if err := r.check(mailbox, token); err != nil {
+			return "", err
+		}
 	}
 	r.deposits = append(r.deposits, stubDeposit{mailbox, token, append([]byte(nil), payload...)})
 	return fmt.Sprintf("m%d", len(r.deposits)), nil
@@ -136,6 +146,9 @@ func (r *stubRelay) DeleteMailbox(context.Context) error {
 }
 func (r *stubRelay) client() *relayclient.Client {
 	c := relayclient.New(r.base, r.key)
+	if r.now != nil {
+		c.Now = r.now
+	}
 	return c
 }
 func (r *stubRelay) MintToken(sub ed25519.PublicKey, ttl time.Duration, jti string, q *relayauth.Quota, ownerDevice bool) (string, error) {
@@ -238,14 +251,27 @@ type fixture struct {
 	vid   string
 }
 
+// fixtureNow, when set (the random pair search), is the clock fixtures
+// are made by: their vaults' Options.Now, their relays' token clock, and
+// the pairing's time, so that a run replays from its seed.
+var fixtureNow func() time.Time
+
+// testNow is fixtureNow, or the real clock.
+func testNow() time.Time {
+	if fixtureNow != nil {
+		return fixtureNow()
+	}
+	return time.Now()
+}
+
 func newFixture(t testing.TB) *fixture {
 	t.Helper()
 	f := &fixture{t: t, store: store.NewMemory()}
 	f.opts = Options{Store: f.store, Sealer: testSealer{key: bytes.Repeat([]byte{7}, 32)}, Release: testRelease, MarkDeleting: NoHostMark, ConfirmAppKey: NoHostAppKey,
 		Relay: func(base string, key ed25519.PrivateKey) Relay {
-			f.relay = &stubRelay{base: base, key: key}
+			f.relay = &stubRelay{base: base, key: key, now: fixtureNow}
 			return f.relay
-		}}
+		}, Now: fixtureNow}
 	k, err := MinKDF()
 	if err != nil {
 		t.Fatal(err)
@@ -460,7 +486,7 @@ func newDevFixture(t testing.TB) *devFixture {
 	devKEM, _ := suite.NewPrivateKey(bytes.Repeat([]byte{0x33}, 32))
 	pk := devRelay.Public().(ed25519.PublicKey)
 	addr := handshake.RelayAddr{URL: "https://relay.example.org", Mailbox: relayauth.MailboxID(pk), PK: pk}
-	now := time.Now()
+	now := testNow()
 	// Run a real pairing handshake directly between device and vault keys.
 	ini, err := handshake.NewInitiator(handshake.InitiatorConfig{Purpose: handshake.PurposeApp, Ctx: "01JB2Z6V9K3M4N5P6Q7R8S9T0V",
 		Identity: devIK, StaticKEM: devKEM.Public(), Relay: addr, Token: "v4.public.VEVTVA",
@@ -506,7 +532,8 @@ func newDevFixture(t testing.TB) *devFixture {
 func (d *devFixture) send(typ string, body []byte) error {
 	d.seq++
 	id, _ := envelope.NewULID(time.Now())
-	raw, err := d.ep.Seal(&envelope.Inner{ID: id, Type: typ, TS: time.Now(), Body: body})
+	// A release-29 device: hs_confirm in every message's features (R29-D4).
+	raw, err := d.ep.Seal(&envelope.Inner{ID: id, Type: typ, TS: time.Now(), Body: body, Features: []string{handshake.CapConfirm}})
 	if err != nil {
 		return err
 	}

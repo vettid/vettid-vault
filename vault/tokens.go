@@ -3,6 +3,7 @@ package vault
 import (
 	"crypto/ed25519"
 	"encoding/json"
+	"errors"
 	"slices"
 	"time"
 
@@ -84,6 +85,11 @@ func (m *Manager) heldToken(tok string, p *Peer) (HeldToken, error) {
 	if err != nil {
 		return HeldToken{}, err
 	}
+	for _, r := range p.RevokedHeld {
+		if r.JTI == c.Jti {
+			return HeldToken{}, errRevokedHeld // 0.88.2 §8.6: never used again
+		}
+	}
 	return HeldToken{Token: tok, Exp: c.Exp}, nil
 }
 
@@ -104,15 +110,33 @@ func (m *Manager) reconnectClass(jti string) bool {
 			return t.Kind == TokReconnect
 		}
 	}
-	// Tokens minted in handshakes not yet complete.
-	for _, aw := range m.st.Awaiting {
+	// Tokens minted in handshakes not yet complete, a pending epoch's
+	// included (0.86.0, review M4).
+	for _, p := range m.allPeers() {
+		if p.Pending != nil {
+			for _, t := range p.Pending.Issued {
+				if t.JTI == jti {
+					return t.Kind == TokReconnect
+				}
+			}
+		}
+	}
+	for _, sortedK := range sortedKeys(m.st.Awaiting) {
+		aw, sortedOK := m.st.Awaiting[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		for _, t := range aw.Issued {
 			if t.JTI == jti {
 				return t.Kind == TokReconnect
 			}
 		}
 	}
-	for _, og := range m.st.Outgoing {
+	for _, sortedK := range sortedKeys(m.st.Outgoing) {
+		og, sortedOK := m.st.Outgoing[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		for _, t := range og.Issued {
 			if t.JTI == jti {
 				return t.Kind == TokReconnect
@@ -153,6 +177,12 @@ func (m *Manager) remintIssued(now time.Time) {
 }
 
 func (m *Manager) issueTo(p *Peer, kind string, now time.Time) {
+	m.issueToMarked(p, kind, false, now)
+}
+
+// issueToMarked is issueTo; prompt marks the token as the re-mint at a
+// reconnect's confirmation (0.88.2 §6.3.1 "The prompt to adopt").
+func (m *Manager) issueToMarked(p *Peer, kind string, prompt bool, now time.Time) {
 	var tok string
 	var issued []IssuedToken
 	var err error
@@ -164,6 +194,9 @@ func (m *Manager) issueTo(p *Peer, kind string, now time.Time) {
 	if err != nil {
 		return
 	}
+	for i := range issued {
+		issued[i].Prompt = prompt
+	}
 	m.st.Issued = append(m.st.Issued, issued...)
 	m.sendTo(p, tokenIssuedType, peerwire.TokenIssuedBody(kind, tok), now)
 }
@@ -172,11 +205,13 @@ func (m *Manager) issueTo(p *Peer, kind string, now time.Time) {
 // left (§7.2), and starts reconnects for connections whose token expired.
 func (m *Manager) refreshHeld(now time.Time) {
 	for _, p := range m.allPeers() {
-		if p.State != PeerActive || p.Standing.Token == "" {
+		if p.State != PeerActive || p.Standing.Token == "" && p.Kind != KindConnection {
 			continue
 		}
-		if !now.Before(p.Standing.Exp) {
-			if p.Kind == KindConnection {
+		if p.Standing.Token == "" || !now.Before(p.Standing.Exp) {
+			// Expired, or (0.88.2 §8.6) none held after a token_revoked;
+			// not while carried tokens wait (0.88.2 §6.3.1).
+			if p.Kind == KindConnection && !m.carriedWait(p, now) {
 				m.startReconnect(p, now)
 			}
 			continue
@@ -213,11 +248,17 @@ func (m *Manager) storeIssuedTo(p *Peer, body json.RawMessage, now time.Time) {
 	if kind == TokReconnect {
 		if p.Kind == KindConnection {
 			p.Reconnect = ht
+			if h := m.opt.Hooks.Adopt; h != nil {
+				h(p.ID, TokReconnect, ht.Token, "issued")
+			}
 		}
 		return
 	}
 	if ht.Exp.After(p.Standing.Exp) {
 		p.Standing = ht
+		if h := m.opt.Hooks.Adopt; h != nil {
+			h(p.ID, TokStanding, ht.Token, "issued")
+		}
 		m.retryPeer(p.ID)
 	}
 }
@@ -236,6 +277,27 @@ func (m *Manager) denySub(p *Peer, now time.Time) {
 	m.queueRevoke("sub", sub, now)
 }
 
+// revokeIssued revokes a token minted in a handshake that ended before it
+// entered the issued registry: it is recorded there as denied (so it
+// stays classified until it expires) and revoked at the relay.
+func (m *Manager) revokeIssued(t IssuedToken, peerID string, now time.Time) {
+	for i := range m.st.Issued {
+		if m.st.Issued[i].JTI == t.JTI {
+			if !m.st.Issued[i].Denied {
+				m.st.Issued[i].Denied = true
+				m.queueRevoke("jti", t.JTI, now)
+			}
+			return
+		}
+	}
+	if t.PeerID == "" {
+		t.PeerID = peerID
+	}
+	t.Denied = true
+	m.st.Issued = append(m.st.Issued, t)
+	m.queueRevoke("jti", t.JTI, now)
+}
+
 // denyPeerTokens revokes, by jti, every token issued to principal p,
 // including those minted in handshakes still in flight (§7.4).
 func (m *Manager) denyPeerTokens(p *Peer, now time.Time) {
@@ -248,15 +310,33 @@ func (m *Manager) denyPeerTokens(p *Peer, now time.Time) {
 	for i := range m.st.Issued {
 		deny(&m.st.Issued[i])
 	}
-	for _, aw := range m.st.Awaiting {
-		for i := range aw.Issued {
-			deny(&aw.Issued[i])
+	inflight := func(ts []IssuedToken) {
+		for _, t := range ts {
+			if (t.PeerID == p.ID || t.PeerID == "") && t.Kind != TokOpen {
+				m.revokeIssued(t, p.ID, now)
+			}
 		}
 	}
-	for _, og := range m.st.Outgoing {
-		for i := range og.Issued {
-			deny(&og.Issued[i])
+	for _, sortedK := range sortedKeys(m.st.Awaiting) {
+		aw, sortedOK := m.st.Awaiting[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
 		}
+		if aw.PeerID == p.ID {
+			inflight(aw.Issued)
+		}
+	}
+	for _, sortedK := range sortedKeys(m.st.Outgoing) {
+		og, sortedOK := m.st.Outgoing[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
+		if og.PeerID == p.ID {
+			inflight(og.Issued)
+		}
+	}
+	if pe := p.Pending; pe != nil {
+		inflight(pe.Issued) // a pending reconnect's (0.86.0, review M4)
 	}
 }
 
@@ -295,7 +375,11 @@ func (m *Manager) markDeviceTokens(now time.Time) {
 	if m.st.DeviceTokensMarked {
 		return
 	}
-	for _, p := range m.st.Devices {
+	for _, sortedK := range sortedKeys(m.st.Devices) {
+		p, sortedOK := m.st.Devices[sortedK]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
 		if p.State == PeerActive && p.Kind == KindApp {
 			m.issueTo(p, TokStanding, now)
 		}
@@ -303,3 +387,7 @@ func (m *Manager) markDeviceTokens(now time.Time) {
 	m.st.DeviceTokensMarked = true
 	m.dirty = true
 }
+
+// errRevokedHeld: a standing token the relay answered token_revoked for is
+// offered again (0.88.2 §8.6).
+var errRevokedHeld = errors.New("vault: a revoked standing token")

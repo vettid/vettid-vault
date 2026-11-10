@@ -201,7 +201,13 @@ func waitEntry(t *testing.T, tv *testVault, msg string, pred func(vault.AttEntry
 			}
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("%s: entry of %s never matched: %+v", tv.name, msg, tv.manager().AttachEntries())
+			// The vault's audit tail says what it dropped or refused meanwhile
+			// (to trace CI-only failures).
+			au := tv.manager().Audit()
+			if len(au) > 30 {
+				au = au[len(au)-30:]
+			}
+			t.Fatalf("%s: entry of %s never matched: %+v\naudit tail: %+v", tv.name, msg, tv.manager().AttachEntries(), au)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}

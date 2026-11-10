@@ -674,10 +674,11 @@ type AgentPolicy interface {
 // §6.7, §10.3). PrepareAgentGrants checks and signs them at the approval
 // (for the agent's identity key; a *HandlerError such as
 // credential_locked is answered as is) and returns what AgentPaired
-// installs in the flush that completes the pairing.
+// installs in the flush that completes the pairing, for the agent with
+// identity key agentIK (the one the grants were signed for, §10.11).
 type AgentGrantor interface {
 	PrepareAgentGrants(s *Session, agentIK []byte, grants json.RawMessage) (json.RawMessage, error)
-	AgentPaired(s *Session, agentID string, prepared json.RawMessage)
+	AgentPaired(s *Session, agentID string, agentIK []byte, prepared json.RawMessage)
 }
 
 // AgentCoverage is optionally implemented by the AgentPolicy feature: when

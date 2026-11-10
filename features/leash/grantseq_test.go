@@ -164,7 +164,7 @@ func TestGrantSeqPairingAndRepairing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r.f.AgentPaired(sess, agent, prepared)
+	r.f.AgentPaired(sess, agent, ag.IK, prepared)
 	first, _ := lastUpdate(t, r, agent)
 	note(first, "pairing with grants")
 	r.issue(t, `{"agent_id":"dev-agent","scope":"connection.list"}`)
@@ -187,7 +187,7 @@ func TestGrantSeqPairingAndRepairing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r.f.AgentPaired(sess, "dev-agent-new", prepared)
+	r.f.AgentPaired(sess, "dev-agent-new", nag.IK, prepared)
 	repaired, _ := lastUpdate(t, r, "dev-agent-new")
 	note(repaired, "re-pairing")
 	if repaired <= second {
@@ -199,7 +199,7 @@ func TestGrantSeqPairingAndRepairing(t *testing.T) {
 	// in a later read. The agent is told.
 	r.h.AddDevice("dev-agent-bare", vault.KindAgent)
 	bare, _ := r.h.Device("dev-agent-bare")
-	r.f.AgentPaired(sess, "dev-agent-bare", nil)
+	r.f.AgentPaired(sess, "dev-agent-bare", bare.IK, nil)
 	empty, told := lastUpdate(t, r, "dev-agent-bare")
 	note(empty, "pairing without grants")
 	if told != 1 || empty <= repaired || r.f.d.GrantSeq["dev-agent-bare"] != empty {
@@ -238,7 +238,7 @@ func TestGrantSeqPairingAndRepairing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r.f.AgentPaired(sess, "dev-agent-early", prepared)
+	r.f.AgentPaired(sess, "dev-agent-early", early.IK, prepared)
 	paired, _ := lastUpdate(t, r, "dev-agent-early")
 	note(paired, "pairing after an early list")
 	if paired <= before {
@@ -425,7 +425,7 @@ func TestGrantSeqDamagedPairGrants(t *testing.T) {
 			if json.Unmarshal(damaged, &probe) == nil || len(probe) == 0 || probe[0] == nil || probe[0].ID == "" {
 				t.Fatalf("the damaged value does not exercise a partial decode: %s", damaged)
 			}
-			r.f.AgentPaired(sess, agent, damaged)
+			r.f.AgentPaired(sess, agent, ag.IK, damaged)
 			if n := r.f.count(agent); n != 0 {
 				t.Fatalf("%d grants installed from damaged initial grants", n)
 			}
@@ -441,14 +441,19 @@ func TestGrantSeqDamagedPairGrants(t *testing.T) {
 			if gs, _ := o.Array("grants"); len(gs) != 0 {
 				t.Fatalf("the agent was told of %d grants, want none", len(gs))
 			}
+			// One entry for the set, not one per grant (0.88.5).
+			if got := droppedFor(r, agent); len(got) != 1 || got[0] != DropDamaged {
+				t.Fatalf("recorded %v, want [damaged]", got)
+			}
 		})
 	}
 }
 
 // An initial grant whose id is already in use (only damaged state could
 // make one) is skipped: it never replaces another agent's grant, which
-// keeps its agent and its number. A skipped grant leaves no trace (no
-// leash.grant.issued).
+// keeps its agent and its number. A skipped grant is not issued (no
+// leash.grant.issued); it is recorded as leash.grant.dropped with ref
+// id_taken (0.88.5).
 func TestGrantSeqPairGrantIDTaken(t *testing.T) {
 	t.Run("another agent's grant", testPairGrantIDTakenOther)
 	t.Run("a duplicate within one set", testPairGrantIDDuplicate)
@@ -468,21 +473,27 @@ func issuedFor(r *rig, device string) int {
 func testPairGrantIDTakenOther(t *testing.T) {
 	r := newRig(t)
 	sess := appSession(r, t0)
-	_, gid := r.issue(t, `{"agent_id":"dev-agent","scope":"profile.get"}`)
-	before, _ := lastUpdate(t, r, agent)
 	r.h.AddDevice("dev-agent-new", vault.KindAgent)
 	nag, _ := r.h.Device("dev-agent-new")
-	prepared, err := r.f.PrepareAgentGrants(sess, nag.IK, json.RawMessage(`[{"scope":"connection.list"}]`))
+	collide, err := r.f.PrepareAgentGrants(sess, nag.IK, json.RawMessage(`[{"scope":"connection.list"}]`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var gs []map[string]json.RawMessage
-	if err := json.Unmarshal(prepared, &gs); err != nil || len(gs) != 1 {
+	var gs []*Grant
+	if err := json.Unmarshal(collide, &gs); err != nil || len(gs) != 1 {
 		t.Fatalf("prepared: %v", err)
 	}
-	gs[0]["id"], _ = json.Marshal(gid)
-	collide, _ := json.Marshal(gs)
-	r.f.AgentPaired(sess, "dev-agent-new", collide)
+	// The other agent's grant takes the id the pairing's grant was signed
+	// with, so the pairing's grant still matches its delegation: id_taken,
+	// not mismatch.
+	gid := gs[0].ID
+	_, issued := r.issue(t, `{"agent_id":"dev-agent","scope":"profile.get"}`)
+	g := r.f.d.Grants[issued]
+	delete(r.f.d.Grants, issued)
+	g.ID = gid
+	r.f.d.Grants[gid] = g
+	before, _ := lastUpdate(t, r, agent)
+	r.f.AgentPaired(sess, "dev-agent-new", nag.IK, collide)
 	if g := r.f.d.Grants[gid]; g == nil || g.AgentID != agent || g.Scope != "profile.get" {
 		if g == nil {
 			t.Fatal("the existing grant is gone")
@@ -502,26 +513,35 @@ func testPairGrantIDTakenOther(t *testing.T) {
 	if n, told := lastUpdate(t, r, "dev-agent-new"); told != 1 || n <= before {
 		t.Fatalf("the new agent: %d updates, grant_seq %d, after %d", told, n, before)
 	}
+	if got := droppedFor(r, "dev-agent-new"); len(got) != 1 || got[0] != DropIDTaken {
+		t.Fatalf("recorded %v, want [id_taken]", got)
+	}
 }
 
 // A duplicate id within one PairGrants: the first copy is installed, the
-// second skipped.
+// second skipped (id_taken). The second copy matches the same delegation;
+// it differs only in a field the delegation does not sign (its rate
+// window), which shows which copy was kept.
 func testPairGrantIDDuplicate(t *testing.T) {
 	r := newRig(t)
 	sess := appSession(r, t0)
 	r.h.AddDevice("dev-agent-dup", vault.KindAgent)
 	dag, _ := r.h.Device("dev-agent-dup")
-	two, err := r.f.PrepareAgentGrants(sess, dag.IK, json.RawMessage(`[{"scope":"profile.get"},{"scope":"connection.list"}]`))
+	one, err := r.f.PrepareAgentGrants(sess, dag.IK, json.RawMessage(`[{"scope":"profile.get"}]`))
 	if err != nil {
 		t.Fatal(err)
 	}
 	var gs []map[string]json.RawMessage
-	if err := json.Unmarshal(two, &gs); err != nil || len(gs) != 2 {
+	if err := json.Unmarshal(one, &gs); err != nil || len(gs) != 1 {
 		t.Fatalf("prepared: %v", err)
 	}
-	gs[1]["id"] = gs[0]["id"]
-	dup, _ := json.Marshal(gs)
-	r.f.AgentPaired(sess, "dev-agent-dup", dup)
+	second := map[string]json.RawMessage{}
+	for k, v := range gs[0] {
+		second[k] = v
+	}
+	second["hour_n"] = json.RawMessage(`7`)
+	dup, _ := json.Marshal([]map[string]json.RawMessage{gs[0], second})
+	r.f.AgentPaired(sess, "dev-agent-dup", dag.IK, dup)
 	if n := r.f.count("dev-agent-dup"); n != 1 {
 		t.Fatalf("a duplicate id: %d grants installed, want 1", n)
 	}
@@ -530,7 +550,10 @@ func testPairGrantIDDuplicate(t *testing.T) {
 	}
 	var firstID string
 	_ = json.Unmarshal(gs[0]["id"], &firstID)
-	if g := r.f.d.Grants[firstID]; g == nil || g.Scope != "profile.get" {
+	if g := r.f.d.Grants[firstID]; g == nil || g.HourN != 0 {
 		t.Fatal("a duplicate id: the first copy was not the one kept")
+	}
+	if got := droppedFor(r, "dev-agent-dup"); len(got) != 1 || got[0] != DropIDTaken {
+		t.Fatalf("a duplicate id: recorded %v, want [id_taken]", got)
 	}
 }

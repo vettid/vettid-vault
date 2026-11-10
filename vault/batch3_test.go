@@ -1,6 +1,7 @@
 package vault
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"testing"
@@ -20,7 +21,11 @@ type policyType struct {
 	valid    bool
 	locked   bool
 	paired   map[string]json.RawMessage
-	removed  []string
+	// signedFor is the ik PrepareAgentGrants last signed for; pairedIK the
+	// ik AgentPaired was given, per agent.
+	signedFor []byte
+	pairedIK  map[string][]byte
+	removed   []string
 }
 
 func (p *policyType) Types() []TypeSpec {
@@ -44,14 +49,16 @@ func (p *policyType) PrepareAgentGrants(_ *Session, ik []byte, g json.RawMessage
 	if !p.valid || string(g) == `[]` || len(ik) != 32 {
 		return nil, errBadRequest
 	}
+	p.signedFor = append([]byte(nil), ik...)
 	return json.RawMessage(`["signed"]`), nil
 }
 
-func (p *policyType) AgentPaired(_ *Session, id string, g json.RawMessage) {
+func (p *policyType) AgentPaired(_ *Session, id string, ik []byte, g json.RawMessage) {
 	if p.paired == nil {
-		p.paired = map[string]json.RawMessage{}
+		p.paired, p.pairedIK = map[string]json.RawMessage{}, map[string][]byte{}
 	}
 	p.paired[id] = g
+	p.pairedIK[id] = append([]byte(nil), ik...)
 }
 
 func (p *policyType) DeviceRemoved(_ *Session, id string) { p.removed = append(p.removed, id) }
@@ -160,6 +167,12 @@ func TestPairingGrants(t *testing.T) {
 	}
 	if string(pol.paired[p.ID]) != `["signed"]` || p.PairGrants != nil {
 		t.Fatalf("initial grants not installed: %v", pol.paired)
+	}
+	// They are installed for the ik they were signed for, the agent's
+	// (§10.11 "Initial grants at pairing": a delegation whose sub is not
+	// the pairing agent's ik is dropped as mismatch).
+	if ik := pol.pairedIK[p.ID]; len(ik) != 32 || !bytes.Equal(ik, pol.signedFor) || !bytes.Equal(ik, p.IK) {
+		t.Fatalf("installed for ik %x, signed for %x, agent's %x", ik, pol.signedFor, p.IK)
 	}
 	// Without a grantor, grants are refused.
 	d2 := newDevFixture(t)

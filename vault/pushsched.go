@@ -354,8 +354,11 @@ func (s *wakeSched) done(now time.Time, r wakeResult, retryAfter time.Duration) 
 				again(jitter(d, s.t.Jitter))
 				return
 			}
-			// Dropped after its last retry, as an ordinary wake is.
+			// Dropped after its last retry, as an ordinary wake is, with the
+			// ordinary retry it carried (start merged it: its count and wait
+			// go with it).
 			s.callRetries, s.callNotBefore = 0, time.Time{}
+			s.retries, s.notBefore = 0, time.Time{}
 			return
 		}
 		if s.retries < len(s.t.Retries) {

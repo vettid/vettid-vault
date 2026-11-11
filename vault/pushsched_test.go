@@ -456,25 +456,25 @@ func TestSchedACallWakes429HoldsOrdinaryWakes(t *testing.T) {
 	}
 }
 
-// (Review M2) A fresh call wake has its own retries: an ordinary wake's
-// failures before it do not shorten them, and its own do not touch the
-// ordinary count.
+// (Review M2) A fresh call wake has its own retries: a call that arrives in
+// the middle of an ordinary wake's backoff (2 failures) gets a first retry
+// of 5 s, not the ordinary wake's third wait.
 func TestSchedACallWakeHasItsOwnRetries(t *testing.T) {
 	s := testSched()
 	s.trigger(false)
 	now := t0
-	for i := 0; i < 3; i++ { // the ordinary wake fails 3 times
+	for i := 0; i < 2; i++ { // the ordinary wake fails twice: retries = 2
 		at, _ := s.next(now)
 		s.start(at)
 		s.done(at, wakeFailed, 0)
 		now = at
 	}
-	at, _ := s.next(now)
-	s.start(at)
-	s.done(at, wakeFailed, 0) // dropped after its last retry
+	if s.retries != 2 {
+		t.Fatalf("setup: retries %d", s.retries)
+	}
 	s.triggerCall("c1")
 	s.keepCalls(map[string]bool{"c1": true})
-	c, _ := s.next(at)
+	c, _ := s.next(now)
 	s.start(c)
 	s.done(c, wakeFailed, 0)
 	if len(s.calls) != 1 || !s.callRetry {
@@ -483,6 +483,65 @@ func TestSchedACallWakeHasItsOwnRetries(t *testing.T) {
 	s.keepCalls(map[string]bool{"c1": true})
 	if r, _ := s.next(c); !r.Equal(c.Add(5 * time.Second)) {
 		t.Fatalf("its first retry waits %v, not 5 s", r.Sub(c))
+	}
+}
+
+// (Review F2) A call wake's retry dropped because its call ended keeps the
+// retry count of the ordinary wake merged into it.
+func TestSchedADroppedCallRetryKeepsTheMergedOrdinaryRetry(t *testing.T) {
+	s := testSched()
+	s.trigger(false)
+	now := t0
+	for i := 0; i < 2; i++ {
+		at, _ := s.next(now)
+		s.start(at)
+		s.done(at, wakeFailed, 0)
+		now = at
+	}
+	s.triggerCall("c1")
+	s.keepCalls(map[string]bool{"c1": true})
+	c, _ := s.next(now)
+	s.start(c)
+	s.done(c, wakeFailed, 0)
+	s.keepCalls(map[string]bool{"c1": false}) // the call ended
+	if !s.pending || s.retries != 2 {
+		t.Fatalf("the merged ordinary retry: pending %v retries %d", s.pending, s.retries)
+	}
+}
+
+// (Review F1) A call wake dropped after its last retry takes the ordinary
+// retry it carried with it: the next fresh ordinary wake starts its retries
+// at 5 s.
+func TestSchedADroppedCallWakeTakesItsMergedRetry(t *testing.T) {
+	s := testSched()
+	s.trigger(false)
+	now := t0
+	for i := 0; i < 2; i++ {
+		at, _ := s.next(now)
+		s.start(at)
+		s.done(at, wakeFailed, 0)
+		now = at
+	}
+	s.triggerCall("c1")
+	for i := 0; i < 4; i++ { // the call wake and its 3 retries all fail
+		s.keepCalls(map[string]bool{"c1": true})
+		at, ok := s.next(now)
+		if !ok {
+			t.Fatalf("attempt %d not due", i+1)
+		}
+		s.start(at)
+		s.done(at, wakeFailed, 0)
+		now = at
+	}
+	if len(s.calls) != 0 || s.pending || s.retries != 0 || !s.notBefore.IsZero() {
+		t.Fatalf("after the drop: calls %v pending %v retries %d notBefore %v", s.calls, s.pending, s.retries, s.notBefore)
+	}
+	s.trigger(false)
+	o, _ := s.next(now.Add(time.Minute))
+	s.start(o)
+	s.done(o, wakeFailed, 0)
+	if r, _ := s.next(o); !r.Equal(o.Add(5 * time.Second)) {
+		t.Fatalf("a fresh ordinary wake's first retry waits %v", r.Sub(o))
 	}
 }
 

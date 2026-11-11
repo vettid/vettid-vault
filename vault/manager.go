@@ -1112,13 +1112,18 @@ func (m *Manager) writeHeader(ctx context.Context) error { return m.writeHeaderW
 
 // writeHeaderWith writes the header; features false keeps the credential
 // bits as they are (a DEK replacement's step 1 runs inside the credential
-// feature's handler, which holds its lock).
+// feature's handler, which holds its lock), as does a Required feature
+// that did not load.
 func (m *Manager) writeHeaderWith(ctx context.Context, features bool) error {
 	if err := m.confirmAppKey(ctx); err != nil {
 		return err
 	}
 	m.syncUnlockKeys()
-	if m.st != nil && features {
+	// §3.3 (GC #8621 a): with a Required feature unread (a move that carries
+	// it), the credential bits stay as stored: computed from the features
+	// that loaded they would say "no credential" and refuse or cancel a
+	// recovery until a release that reads it opens the vault.
+	if m.st != nil && features && !m.requiredUnreadable {
 		m.hdr.HasCredential = m.credentialExists() && m.hasGate()
 		// §3.3, §11.5 (0.16.0): the backup bit, and an event when it
 		// changes on a running vault (reported after the write).

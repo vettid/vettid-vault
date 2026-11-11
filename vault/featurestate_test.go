@@ -2,6 +2,7 @@ package vault
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"strconv"
@@ -652,6 +653,14 @@ func TestAnApprovedMoveCarriesAnUnreadablePart(t *testing.T) {
 		t.Fatalf("plain unlock: %+v", out)
 	}
 	gauge := Unlocked()
+	registers := 0
+	inner := opts.Relay
+	opts.Relay = func(base string, key ed25519.PrivateKey) Relay {
+		return &registerCount{Relay: inner(base, key), n: &registers}
+	}
+	d.relay.mu.Lock()
+	deposits := len(d.relay.deposits)
+	d.relay.mu.Unlock()
 	m, out := altUnlockWith(d, opts, func(p *AltUnlockParams) {
 		moveParams(d, p, target)
 		p.Update = &UpdateRequest{To: target, ToRelease: testRelease.Number + 1,
@@ -670,6 +679,18 @@ func TestAnApprovedMoveCarriesAnUnreadablePart(t *testing.T) {
 	}
 	if got := storedPartWith(t, d, dek, "counter"); got != part {
 		t.Fatalf("the part in N+1's state: %s, was %s", got, part)
+	}
+	if registers != 0 {
+		t.Fatalf("registered at the relay %d times", registers)
+	}
+	d.relay.mu.Lock()
+	sent := len(d.relay.deposits) - deposits
+	d.relay.mu.Unlock()
+	if sent != 0 {
+		t.Fatalf("%d messages sent", sent)
+	}
+	if mv := storedState(t, d, dek).ReleaseMove; mv == nil || mv.To != target {
+		t.Fatalf("the move is not in the stored state: %+v", mv)
 	}
 	if _, _, err := d.store.Get(context.Background(), store.HeaderKey(d.vid, target)); err != nil {
 		t.Fatalf("not sealed for the next release: %v", err)
@@ -703,4 +724,133 @@ func d0(m *Manager) string {
 		}
 	}
 	return ""
+}
+
+// gatePart is a credential feature (a CredentialGate) as far as the header
+// bits go: it holds a credential.
+type gatePart struct{ counterFeature }
+
+func (g *gatePart) Name() string           { return "gate" }
+func (g *gatePart) Types() []TypeSpec      { return nil }
+func (g *gatePart) CredentialReady() bool  { return true }
+func (g *gatePart) CredentialExists() bool { return true }
+
+// unreadGate is the credential feature of a release that cannot read its
+// part: Required, and its Load fails.
+type unreadGate struct{ gatePart }
+
+func (g *unreadGate) RequiredAtUnlock() bool { return true }
+func (g *unreadGate) Load(json.RawMessage) error {
+	return errors.New("a state from a later release")
+}
+
+// credGateFixture is a locked vault whose header says it holds a credential,
+// with the credential's part stored.
+func credGateFixture(t *testing.T, before func(*Manager)) *devFixture {
+	d := newDevFixture(t)
+	ctx := context.Background()
+	d.m.addFeature(&gatePart{})
+	d.m.mu.Lock()
+	if before != nil {
+		before(d.m)
+	}
+	d.m.dirty = true
+	_ = d.m.flushThenDrain(ctx)
+	if err := d.m.writeHeader(ctx); err != nil {
+		t.Fatal(err)
+	}
+	d.m.mu.Unlock()
+	if err := d.m.Lock(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if h := storedHeader(t, d); !h.HasCredential {
+		t.Fatal("setup: no credential in the header")
+	}
+	return d
+}
+
+// headerAt is the sealed header stored for release.
+func headerAt(t *testing.T, d *devFixture, release string) *Header {
+	t.Helper()
+	blob, _, err := d.store.Get(context.Background(), store.HeaderKey(d.vid, release))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := unsealHeader(context.Background(), d.opts.Sealer, blob, d.vid, release)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return h
+}
+
+// (GC #8621 a) A move with the credential's part unread keeps the header's
+// credential bits as stored, on both paths: the next release's header still
+// says the vault holds a credential, so a recovery is neither refused
+// no_credential nor cancelled before a release that reads it opens.
+func TestAMoveWithTheCredentialUnreadKeepsTheHeaderBits(t *testing.T) {
+	for _, pending := range []bool{false, true} {
+		target := strings.Repeat("d5", 48)
+		if pending {
+			target = strings.Repeat("d6", 48)
+		}
+		d := credGateFixture(t, func(m *Manager) {
+			if pending {
+				m.st.ReleaseMove = &ReleaseMove{To: target, ToRelease: testRelease.Number + 1, From: testRelease.PCR0, ApprovedBy: d0(m)}
+			}
+		})
+		before := storedHeader(t, d)
+		opts := d.opts
+		opts.Store = d.store
+		opts.Features = append(append([]Feature(nil), d.opts.Features...), &unreadGate{})
+		m, out := altUnlockWith(d, opts, func(p *AltUnlockParams) {
+			moveParams(d, p, target)
+			if !pending {
+				p.Update = &UpdateRequest{To: target, ToRelease: testRelease.Number + 1,
+					VerifyApproval: func(k *UnlockKey) (json.RawMessage, error) { return k.Attestation, nil }}
+			}
+		})
+		if m != nil || !out.OK || out.Update == nil || out.Update.Result != UpdateMoved {
+			t.Fatalf("pending %v: %+v %+v", pending, out, out.Update)
+		}
+		for name, h := range map[string]*Header{"N": storedHeader(t, d), "N+1": headerAt(t, d, target)} {
+			if h.HasCredential != before.HasCredential || !sameBool(h.CredentialBackup, before.CredentialBackup) {
+				t.Fatalf("pending %v, %s: has_credential %v backup %v, was %v %v", pending, name,
+					h.HasCredential, h.CredentialBackup, before.HasCredential, before.CredentialBackup)
+			}
+			if r := h.RecoveryRefusal(); r != before.RecoveryRefusal() {
+				t.Fatalf("pending %v, %s: recovery refusal %q, was %q", pending, name, r, before.RecoveryRefusal())
+			}
+		}
+	}
+}
+
+func sameBool(a, b *bool) bool { return (a == nil) == (b == nil) && (a == nil || *a == *b) }
+
+// registerCount counts the relay registrations of a vault.
+type registerCount struct {
+	Relay
+	n *int
+}
+
+func (r *registerCount) Register(ctx context.Context) (Limits, error) {
+	*r.n++
+	return r.Relay.Register(ctx)
+}
+
+// storedState is the stored state, opened with dek.
+func storedState(t *testing.T, d *devFixture, dek []byte) *State {
+	t.Helper()
+	blob, _, err := d.store.Get(context.Background(), store.StateKey(d.vid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pt, _, err := decryptState(dek, d.vid, blob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var st State
+	if err := json.Unmarshal(pt, &st); err != nil {
+		t.Fatal(err)
+	}
+	return &st
 }

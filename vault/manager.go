@@ -49,6 +49,9 @@ var (
 	// ErrStateUnsupported: a state without messaging_release 29 or more
 	// (R29-U1, §6.3.1 "No upgrade").
 	ErrStateUnsupported = errors.New("vault: state from before release 29")
+	// ErrStateUnreadable: a feature others call directly could not read its
+	// part of the state (§3.3, 0.88.17).
+	ErrStateUnreadable = errors.New("vault: a required feature's state does not read")
 )
 
 // Options configure a Manager.
@@ -415,10 +418,13 @@ type Manager struct {
 	// with a step 1, a `next` part with an app key dropped.
 	unlockKey    []byte
 	unlockSecret []byte
-	repl         *replacement
-	replaced     []string
-	nextCleared  bool
-	orphans      []orphanClear // confirmed keys no stored header names, to clear again
+	// requiredUnreadable: a Required feature's part of the state did not
+	// read (§3.3, 0.88.17); the unlock is refused before any write.
+	requiredUnreadable bool
+	repl               *replacement
+	replaced           []string
+	nextCleared        bool
+	orphans            []orphanClear // confirmed keys no stored header names, to clear again
 	// rec is the recovery runtime: the counter, the last status read, the
 	// presence retry (§11.14.4, §11.14.5).
 	rec recoveryRuntime
@@ -747,8 +753,8 @@ func newManager(o Options, st *State, hdr *Header, dek []byte) *Manager {
 	m.registerCore()
 	// §3.3 (0.88.17, owner decision 2026-11-11): a feature whose part of the
 	// state does not read (damaged, or written by a later release) fails
-	// closed. It is not added: its types are not registered (a device's
-	// message is answered unsupported_type, a peer's dropped), its
+	// closed. It is not added: its types are not registered (unknown types,
+	// §11.10.8: answered unsupported_type, one with re dropped), its
 	// observers and timers do not run, and its part is carried unchanged
 	// (an entry for a feature this image does not run is never rewritten,
 	// §11.10.8), so a release that can read it finds it whole.
@@ -756,14 +762,20 @@ func newManager(o Options, st *State, hdr *Header, dek []byte) *Manager {
 	for _, f := range o.Features {
 		if raw, ok := st.Features[f.Name()]; ok {
 			if err := f.Load(raw); err != nil {
+				if r, ok := f.(Required); ok && r.RequiredAtUnlock() {
+					// Others call it directly: the unlock is refused (the
+					// callers check requiredUnreadable before any write).
+					m.requiredUnreadable = true
+				}
 				failed = append(failed, f.Name())
 				continue
 			}
 		}
 		m.addFeature(f)
 	}
-	// Audited once per unlock, by the features that record activity (the
-	// audit log's own failure cannot be recorded by it).
+	// Audited once per opening of the state (an unlock, a recovery open),
+	// by the features that record activity. The audit log is Required:
+	// when it does not read, nothing is opened and nothing recorded.
 	for _, name := range failed {
 		m.record(Activity{Kind: "feature.load_failed", Ref: name, Audit: true}, m.now())
 	}

@@ -3,6 +3,7 @@ package all_test
 import (
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/vettid/vettid-vault/features/all"
@@ -148,5 +149,23 @@ func TestVoteFeatureHooks(t *testing.T) {
 		if !ok {
 			t.Errorf("%s", name)
 		}
+	}
+}
+
+// VAULT-MESSAGING §3.3 (0.88.17, owner decision 2026-11-11): the features
+// that other features call directly (the wiring in NewSet) are exactly the
+// Required ones, whose unreadable state refuses the unlock; every other one
+// is stand-alone, not run when its state does not read.
+func TestRequiredAreTheWiredFeatures(t *testing.T) {
+	want := []string{"audit", "connauth", "credential", "critical", "grants", "items", "leash", "vote", "wallet"}
+	var got []string
+	for _, f := range all.Dev() {
+		if r, ok := f.(vault.Required); ok && r.RequiredAtUnlock() {
+			got = append(got, f.Name())
+		}
+	}
+	sort.Strings(got)
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("required %v, want %v", got, want)
 	}
 }

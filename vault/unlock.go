@@ -32,6 +32,11 @@ const (
 	// Release 29 (§6.3.1 "No upgrade", §11.4): a state without
 	// messaging_release 29 or more is not started.
 	CodeStateUnsupported = "state_unsupported"
+	// §3.3 (0.88.17): the state opened, but a feature others call directly
+	// could not read its part (damaged, or a later release's). Nothing is
+	// written; unlike state_unsupported the vault is not to be set up again:
+	// a release that reads it opens it.
+	CodeStateUnreadable = "state_unreadable"
 )
 
 // Release update results and refusal codes (§11.4, §11.10.4).
@@ -408,6 +413,16 @@ func UnlockAlt(ctx context.Context, p AltUnlockParams) (*Manager, *AltUnlockOutc
 		st.SealedRelease = hdr.SealedRelease
 	}
 	m := newManager(p.Options, &st, hdr, dek)
+	if m.requiredUnreadable {
+		// §3.3 (0.88.17, owner decision 2026-11-11): a feature others call
+		// directly could not read its part. Not run half: refused
+		// state_unreadable, before any write, nothing sent,
+		// no unlocked, locked again; a release that reads it opens it.
+		suite.Wipe(op.dek1)
+		suite.Wipe(op.uk)
+		m.zeroize()
+		return nil, out.fail(CodeStateUnreadable, ErrStateUnreadable)
+	}
 	m.stateVer, m.headerVer = sver, hver
 	m.unlockKey, m.unlockSecret = op.uk, append([]byte(nil), p.UnlockSecret...)
 	switch op.mode {

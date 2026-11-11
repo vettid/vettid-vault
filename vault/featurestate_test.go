@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/vettid/vettid-vault/vault/store"
 	"github.com/vettid/vettid-vault/vms/envelope"
 )
 
@@ -159,5 +160,94 @@ func TestFeatureThatDoesNotLoadFailsClosed(t *testing.T) {
 	}
 	if r, _ := d.request(t, "test.count", `{}`); r.Error != nil || string(r.Body) != `{"n":2}` {
 		t.Fatalf("after: %+v", r)
+	}
+}
+
+// requiredCounter is counterFeature as a feature other features call
+// directly (vault.Required), in a release that cannot read its state.
+type requiredCounter struct{ failingCounter }
+
+func (r *requiredCounter) RequiredAtUnlock() bool { return true }
+
+// §3.3 (0.88.17, owner decision 2026-11-11): when a feature others call
+// directly cannot read its part, it is not run half: the unlock is refused
+// with no write,
+// no unlocked, answered state_unreadable (not state_unsupported, which tells
+// the member to set the vault up again); a release that reads it opens the
+// vault, its part whole.
+func TestRequiredFeatureThatDoesNotLoadRefusesTheUnlock(t *testing.T) {
+	f := newRFixture(t)
+	f.m.mu.Lock()
+	f.m.st.Features["counter"] = json.RawMessage("7")
+	f.m.dirty = true
+	f.m.mu.Unlock()
+	f.flush()
+	if err := f.m.Lock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	base := f.opts.Features
+	f.opts.Features = append(append([]Feature(nil), base...), &requiredCounter{})
+	wc := &writeCounter{Store: f.opts.Store}
+	store := f.opts.Store
+	f.opts.Store = wc
+	m, out := f.unlock(testPIN, testSecret)
+	if m != nil || out.OK || out.Code != CodeStateUnreadable {
+		t.Fatalf("%+v", out)
+	}
+	if wc.count() != 0 {
+		t.Fatalf("%d writes on refusal", wc.count())
+	}
+	for _, ev := range out.Events {
+		if ev.Event == "unlocked" {
+			t.Fatal("unlocked reported")
+		}
+	}
+
+	// A feature that is not Required is not run, and the unlock goes on.
+	f.opts.Store = store
+	f.opts.Features = append(append([]Feature(nil), base...), &failingCounter{})
+	m, out = f.unlock(testPIN, testSecret)
+	if m == nil || !out.OK {
+		t.Fatalf("not required: %+v", out)
+	}
+	_ = m.Lock(context.Background())
+
+	// A release that reads it opens the vault, the part whole.
+	c := &counterFeature{}
+	f.opts.Features = append(append([]Feature(nil), base...), c)
+	m, out = f.unlock(testPIN, testSecret)
+	if m == nil || !out.OK || c.n != 7 {
+		t.Fatalf("reader: %+v, n %d", out, c.n)
+	}
+	_ = m.Lock(context.Background())
+}
+
+// §3.3 (0.88.17): a recovery open refuses the same way, state_unreadable,
+// with no write.
+func TestRequiredFeatureThatDoesNotLoadRefusesTheRecoveryOpen(t *testing.T) {
+	f := newOpenFixtureWith(t, func(f *openFixture) {
+		f.m.mu.Lock()
+		f.m.st.Features["counter"] = json.RawMessage("7")
+		f.m.dirty = true
+		f.m.mu.Unlock()
+		f.flush()
+	})
+	before, _, err := f.st.Get(context.Background(), store.StateKey(f.vid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.opts.Features = append(append([]Feature(nil), f.opts.Features...), &requiredCounter{})
+	wc := &writeCounter{Store: f.opts.Store}
+	f.opts.Store = wc
+	m, out := f.open(testPIN, rPW)
+	if m != nil || out.OK || out.Code != CodeStateUnreadable {
+		t.Fatalf("recovery open: %+v", out)
+	}
+	if wc.count() != 0 {
+		t.Fatalf("%d store writes on refusal", wc.count())
+	}
+	after, _, err := f.st.Get(context.Background(), store.StateKey(f.vid))
+	if err != nil || string(before) != string(after) {
+		t.Fatal("the state was written after it opened")
 	}
 }

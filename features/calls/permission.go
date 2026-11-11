@@ -58,9 +58,9 @@ func loadState(data json.RawMessage) (*state, error) {
 		return nil, err
 	}
 	if st.V > stateVersion {
-		// Refused rather than read without the fields it doesn't know. (The
-		// manager ignores a feature's Load error today, so the feature then
-		// starts empty, calls allowed; failing closed there is a separate change.)
+		// Refused rather than read without the fields it doesn't know; the
+		// vault then does not run the feature and keeps this state as it is
+		// (VAULT-MESSAGING §3.3, 0.88.17).
 		return nil, errors.New("calls: state from a later release")
 	}
 	if st.Calls == nil {

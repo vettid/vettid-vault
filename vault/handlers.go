@@ -22,6 +22,15 @@ type Feature interface {
 	Save() (json.RawMessage, error)
 }
 
+// Required is a feature that other features call directly (credential,
+// items, LEASH, the wallet, …): when its part of the state does not read,
+// the unlock is refused, writing nothing, because not running it would leave
+// the others calling it as if it were empty (§3.3, 0.88.17, owner decision
+// 2026-11-11). A feature that is not Required is not run instead.
+type Required interface {
+	RequiredAtUnlock() bool
+}
+
 // Handler handles one decrypted, authorized, deduplicated inner plaintext
 // (VAULT-PLAN §2: Handler(ctx, Session, Inner)). For a request type it
 // returns the response body, or a *HandlerError for an error response.

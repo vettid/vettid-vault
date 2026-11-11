@@ -563,12 +563,12 @@ func (f *Feature) offer(ctx context.Context, s *vault.Session, in *envelope.Inne
 	if s.OwnerHeld() {
 		// A held vault rings no device and does not answer, not even busy:
 		// the caller times out as with a locked callee (§3.6.3, §10.10).
+		// The missed call doesn't count toward the limits: the member
+		// couldn't have answered it (owner decision 2026-11-11).
 		f.finish(s, c, "unavailable")
-		f.missed(s, c)
+		recordMissed(s, c)
 		return nil
 	}
-	// (A held vault's offer took the held branch above: the same outcome,
-	// an ended call and a missed call, counted, without drop.call_rate.)
 	if f.limited(conn, now) {
 		// Too many unanswered calls from this connection: no ringing, no
 		// answer; an ended call and a missed call (§10.10, V5).
@@ -651,9 +651,18 @@ func (f *Feature) finish(s *vault.Session, c *Call, reason string) {
 // A missed call counts toward the connection's unanswered-call limit
 // (§10.10, V5), as a declined one does (end); an incoming call the vault
 // ends for its own reasons (no ICE configuration, an answer it couldn't
-// forward) does not.
+// forward) does not, nor one missed because of the vault hold or ended
+// because calls were turned off (recordMissed).
 func (f *Feature) missed(s *vault.Session, c *Call) {
 	f.noteUnanswered(s, c.Conn, s.Now())
+	recordMissed(s, c)
+}
+
+// recordMissed records a missed call in the feed without counting it: a
+// call the member couldn't answer because of the vault hold, or one ended
+// because calls with the connection were turned off (§10.10, owner
+// decision 2026-11-11).
+func recordMissed(s *vault.Session, c *Call) {
 	s.Record(vault.Activity{Kind: "call.missed", ConnectionID: c.Conn, Ref: c.ID, Direction: DirIn, Feed: true, Priority: "high",
 		Batch: MissedMergeWindow, BatchWhileActive: true}) // missed calls merge (§10.10, V5)
 }

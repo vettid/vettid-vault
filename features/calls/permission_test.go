@@ -247,8 +247,9 @@ func (failingICE) Issue(context.Context, string, time.Duration) ([]callwire.ICES
 	return nil, context.DeadlineExceeded
 }
 
-// Calls off is checked before glare: an off connection's offer can't end
-// the member's own call to it, placed before calls were turned off.
+// Calls off is checked before glare. Turning calls off ends the member's
+// own ringing call to the connection (owner decision 2026-11-11), so an
+// offer from it afterwards is dropped as off, never taken as a glare.
 func TestOffBeforeGlare(t *testing.T) {
 	a := newSide("cB")
 	sk, _ := callwire.NewOfferKey()
@@ -259,9 +260,140 @@ func TestOffBeforeGlare(t *testing.T) {
 	featuretest.Call(a.f, a.h, t0, "app", "call.permission.set", `{"connection_id":"cB","allowed":false}`)
 	a.h.Reset()
 	featuretest.CallExp(a.f, a.h, t0.Add(time.Second), t0.Add(OfferTTL), "connection:cB", "call.offer", peerOffer("cB", lo, "audio", sk.Public().Bytes()))
-	if c, _ := a.f.Get(hi); c.State != StateRinging || !a.h.HasActivity("drop.call_off") || a.h.HasActivity("drop.call_glare") {
+	if c, _ := a.f.Get(hi); c.State != StateEnded || !a.h.HasActivity("drop.call_off") || a.h.HasActivity("drop.call_glare") || len(a.h.Sent) != 0 {
 		t.Fatalf("our call after an off connection's offer: %+v", c)
 	}
+}
+
+// Turning calls off ends a call with the connection that still rings, in
+// either direction, each unavailable; an active call carries on (§10.10,
+// owner decision 2026-11-11).
+func TestOffEndsRinging(t *testing.T) {
+	sk, _ := callwire.NewOfferKey()
+	ek := sk.Public().Bytes()
+	off := func(s *side, conn string, at time.Time) {
+		t.Helper()
+		if r := featuretest.Call(s.f, s.h, at, "app", "call.permission.set", `{"connection_id":"`+conn+`","allowed":false}`); !r.OK() {
+			t.Fatal(r.Code)
+		}
+	}
+	t.Run("incoming", func(t *testing.T) {
+		b := newSide("cA")
+		id := newCallID("cA")
+		featuretest.CallExp(b.f, b.h, t0, t0.Add(OfferTTL), "connection:cA", "call.offer", peerOffer("cA", id, "audio", ek))
+		b.h.Reset()
+		off(b, "cA", t0.Add(time.Second))
+		c, _ := b.f.Get(id)
+		// The devices stop ringing; the peer is told nothing (off is
+		// silent); a missed call, not counted.
+		if c.State != StateEnded || c.Reason != "unavailable" || b.countActivity("call.missed") != 1 || len(b.f.unanswered["cA"]) != 0 {
+			t.Fatalf("%+v, missed %d, counts %v", c, b.countActivity("call.missed"), b.f.unanswered["cA"])
+		}
+		end := b.h.SentOfType("call.end")
+		if len(end) != 1 || end[0].To != "devices" || string(end[0].Body) != string(endJSON(id, "unavailable")) {
+			t.Fatalf("call.end: %+v", end)
+		}
+		for _, m := range b.h.Sent {
+			if strings.HasPrefix(m.To, "c") {
+				t.Fatalf("the peer was told: %+v", m)
+			}
+		}
+	})
+	t.Run("outgoing", func(t *testing.T) {
+		a := newSide("cB")
+		id := newCallID("cB")
+		if r := featuretest.Call(a.f, a.h, t0, "app", "call.start", startBodyID("cB", id, ek)); !r.OK() {
+			t.Fatal(r.Code)
+		}
+		a.h.Reset()
+		off(a, "cB", t0.Add(time.Second))
+		c, _ := a.f.Get(id)
+		if c.State != StateEnded || c.Reason != "unavailable" || a.countActivity("call.missed") != 0 {
+			t.Fatalf("%+v", c)
+		}
+		if b := a.sent(t, "cB", "call.end").Body; string(b) != string(endJSON(id, "unavailable")) {
+			t.Fatalf("to the peer: %s", b)
+		}
+		if b := a.sent(t, "dev-app", "call.end").Body; string(b) != string(endJSON(id, "unavailable")) {
+			t.Fatalf("to the call's device: %s", b)
+		}
+	})
+	t.Run("active carries on", func(t *testing.T) {
+		b := newSide("cA")
+		id := newCallID("cA")
+		featuretest.CallExp(b.f, b.h, t0, t0.Add(OfferTTL), "connection:cA", "call.offer", peerOffer("cA", id, "audio", ek))
+		enc, _, _ := callwire.Answer(ek, id)
+		if r := featuretest.Call(b.f, b.h, t0.Add(time.Second), "app", "call.answer", answerBody("dev-app", id, enc)); !r.OK() {
+			t.Fatal(r.Code)
+		}
+		b.h.Reset()
+		off(b, "cA", t0.Add(2*time.Second))
+		if c, _ := b.f.Get(id); c.State != StateActive || len(b.h.SentOfType("call.end")) != 0 {
+			t.Fatalf("an active call ended: %+v", c)
+		}
+	})
+	t.Run("other connections ring on", func(t *testing.T) {
+		b := newSide("cA")
+		b.addConn("cC")
+		id := newCallID("cA")
+		featuretest.CallExp(b.f, b.h, t0, t0.Add(OfferTTL), "connection:cA", "call.offer", peerOffer("cA", id, "audio", ek))
+		b.h.Reset()
+		off(b, "cC", t0.Add(time.Second))
+		if c, _ := b.f.Get(id); c.State != StateRinging || len(b.h.SentOfType("call.end")) != 0 {
+			t.Fatalf("another connection's call ended: %+v", c)
+		}
+	})
+	t.Run("turning on ends nothing", func(t *testing.T) {
+		a := newSide("cB")
+		featuretest.Call(a.f, a.h, t0, "app", "call.permission.set", `{"connection_id":"cB","allowed":false}`)
+		featuretest.Call(a.f, a.h, t0, "app", "call.permission.set", `{"connection_id":"cB","allowed":true}`)
+		id := newCallID("cB")
+		if r := featuretest.Call(a.f, a.h, t0.Add(time.Second), "app", "call.start", startBodyID("cB", id, ek)); !r.OK() {
+			t.Fatal(r.Code)
+		}
+		featuretest.Call(a.f, a.h, t0.Add(2*time.Second), "app", "call.permission.set", `{"connection_id":"cB","allowed":true}`)
+		if c, _ := a.f.Get(id); c.State != StateRinging {
+			t.Fatalf("%+v", c)
+		}
+	})
+}
+
+// Calls missed because of the vault hold don't count toward the limits
+// (owner decision 2026-11-11): offers that arrive while held, and ringing
+// calls the hold's start ended. Each is still a missed call.
+func TestHoldMissedNotCounted(t *testing.T) {
+	sk, _ := callwire.NewOfferKey()
+	ek := sk.Public().Bytes()
+	b := newSide("cA")
+	b.h.Hold = vault.OwnerCheckHeld
+	for i := 0; i < LimitShort+1; i++ {
+		at := t0.Add(time.Duration(i) * time.Minute)
+		featuretest.CallExp(b.f, b.h, at, at.Add(OfferTTL), "connection:cA", "call.offer", peerOffer("cA", newCallID("cA"), "audio", ek))
+	}
+	if b.countActivity("call.missed") != LimitShort+1 || len(b.f.unanswered["cA"]) != 0 || b.h.HasActivity("drop.call_rate") {
+		t.Fatalf("held offers: missed %d, counts %v", b.countActivity("call.missed"), b.f.unanswered["cA"])
+	}
+	// Ringing when the hold begins.
+	c := newSide("cA")
+	for i := 0; i < LimitShort; i++ {
+		at := t0.Add(time.Duration(i) * time.Minute)
+		id := newCallID("cA")
+		featuretest.CallExp(c.f, c.h, at, at.Add(OfferTTL), "connection:cA", "call.offer", peerOffer("cA", id, "audio", ek))
+		c.h.Hold = vault.OwnerCheckHeld
+		c.f.OwnerHoldStarted(vault.NewSession(context.Background(), c.h, vault.PeerInfo{}, at.Add(time.Second), nil))
+		c.h.Hold = ""
+		if got, _ := c.f.Get(id); got.State != StateEnded {
+			t.Fatalf("not ended by the hold: %+v", got)
+		}
+	}
+	if c.countActivity("call.missed") != LimitShort || len(c.f.unanswered["cA"]) != 0 {
+		t.Fatalf("ended by the hold: missed %d, counts %v", c.countActivity("call.missed"), c.f.unanswered["cA"])
+	}
+	// After the hold the next offer rings.
+	c.h.Reset()
+	at := t0.Add(5 * time.Minute)
+	featuretest.CallExp(c.f, c.h, at, at.Add(OfferTTL), "connection:cA", "call.offer", peerOffer("cA", newCallID("cA"), "audio", ek))
+	c.sent(t, "devices", "call.offer")
 }
 
 // The limited state is kept, so a limit that lapsed while the vault was

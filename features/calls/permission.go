@@ -147,7 +147,9 @@ func permissionEvent(s *vault.Session, conn string) {
 }
 
 // setPermission is call.permission.set {connection_id, allowed}: calls from
-// and to the connection are allowed (the default) or off.
+// and to the connection are allowed (the default) or off. Turning them off
+// also ends a call with the connection that still rings (endRingingWith);
+// an active call carries on.
 func (f *Feature) setPermission(s *vault.Session, body []byte) (json.RawMessage, error) {
 	if k := s.From().Kind; k != vault.KindApp && k != vault.KindDesktop {
 		return nil, vault.NewError("forbidden", "") // the owner's own devices only; not delegable
@@ -178,8 +180,35 @@ func (f *Feature) setPermission(s *vault.Session, body []byte) (json.RawMessage,
 		kind = "call.permission_off"
 	}
 	s.Record(vault.Activity{Kind: kind, ConnectionID: conn, Audit: true})
+	if !allowed {
+		f.endRingingWith(s, conn)
+	}
 	permissionEvent(s, conn)
 	return strictjson.NewBuilder().Bytes(), nil
+}
+
+// endRingingWith ends the calls with conn that still ring, when calls with
+// it are turned off (§10.10, owner decision 2026-11-11), each unavailable:
+// an incoming one stops ringing on the devices and is recorded as missed,
+// not counted, and the peer is told nothing (off is silent: its caller
+// times out); our outgoing one ends with call.end to the peer vault (where
+// it stops ringing) and the devices told. An active call carries on.
+func (f *Feature) endRingingWith(s *vault.Session, conn string) {
+	now := s.Now()
+	for _, id := range f.sorted() {
+		c := f.calls[id]
+		if c.Conn != conn || c.State != StateRinging || !c.live(now) {
+			continue
+		}
+		f.finish(s, c, "unavailable")
+		if c.Dir == DirOut {
+			_ = s.SendToConnection(c.Conn, "call.end", endJSON(c.ID, "unavailable"))
+			endToDevices(s, c, "unavailable", "")
+			continue
+		}
+		s.NotifyDevicesWith("call.end", endJSON(c.ID, "unavailable"), "", vault.SendOptions{})
+		recordMissed(s, c)
+	}
 }
 
 // listPermissions is call.permission.list: the connections that differ from

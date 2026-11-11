@@ -78,6 +78,7 @@ func (f *Feature) tickCheck(s *vault.Session, r *record, now time.Time) {
 }
 
 func (f *Feature) failCheck(s *vault.Session, r *record, reason string) CheckOutcome {
+	f.rejectAside(s, r) // a final judgement (0.88.12)
 	r.Check, r.CheckReason = CheckFailed, reason
 	r.ChangedMS = s.Now().UnixMilli()
 	f.audit(s, "vote.check_failed", r.Conn, r.ID+":"+reason)
@@ -116,17 +117,54 @@ func conflictVerdict(r *record, row *votewire.RowBallot) (state, reason string, 
 			return CheckFailed, "row_mismatch", true
 		}
 		return CheckFailed, "conflict", true
-	case b != nil && b.State == BallotDisputed:
-		return CheckFailed, "disputed", true
 	}
 	return "", "", false
 }
 
+// selfVerdict is the row of the table for self_unrecorded or self_conflict
+// with no conflict evidence (0.88.12, §10.19.3, §10.19.6 step 3): the
+// own-vk ballot the service showed came with its receipt, so the row must
+// be exactly that ballot, and is then `unconfirmed` (the vault cannot tell
+// a rollback from a leaked seed); any other row is `failed` (row_mismatch):
+// the service signed a receipt for a ballot its results lack. Two receipts
+// for one tag (the vault's own for a different ballot, or two different
+// own-vk ballots shown) are `failed` (row_mismatch) whatever the row.
+func selfVerdict(r *record, row *votewire.RowBallot) (state, reason string, ok bool) {
+	if !r.SelfUnrecorded && !r.SelfConflict || r.Self == nil {
+		return "", "", false
+	}
+	shown := r.Self
+	if l := r.SelfLatest; l != nil && !sameSvc(l, shown) {
+		return CheckFailed, "row_mismatch", true
+	}
+	if b := r.Ballot; b != nil && len(b.ReceiptSig) > 0 && !shown.is(b) {
+		return CheckFailed, "row_mismatch", true
+	}
+	if row != nil && eq(row.VK, shown.VK) && row.ChoiceID == shown.ChoiceID && eq(row.BallotSig, shown.BallotSig) {
+		return CheckUnconfirmed, "", true
+	}
+	return CheckFailed, "row_mismatch", true
+}
+
+func sameSvc(a, b *svcBallot) bool {
+	return eq(a.VK, b.VK) && a.ChoiceID == b.ChoiceID && eq(a.BallotSig, b.BallotSig)
+}
+
 // verdict is the table of §10.19.6 step 3: what the vault holds against
-// the member's row.
+// the member's row. Its rows are tried in this order and the first that
+// applies decides (GC #7991 B): disputed; conflict evidence;
+// self_unrecorded / self_conflict; then the receipt, no ballot,
+// unreceipted and refusal rows ("a receipt is always the first row" holds
+// only among these).
 func verdict(r *record, row *votewire.RowBallot) (state, reason string) {
 	b := r.Ballot
+	if b != nil && b.State == BallotDisputed {
+		return CheckFailed, "disputed"
+	}
 	if st, why, ok := conflictVerdict(r, row); ok {
+		return st, why
+	}
+	if st, why, ok := selfVerdict(r, row); ok {
 		return st, why
 	}
 	switch {
@@ -195,7 +233,8 @@ func (f *Feature) SubmitResults(s *vault.Session, conn, id string, in ResultsSub
 	if err != nil || votewire.VerifyResults(r.Signer, r.Hash, in.Results, in.Sig) != nil {
 		return noAnswer, nil
 	}
-	switch f.anchor(s, conn, r.signers(), in.Results, in.Bundle, time.Time{}) {
+	ares, info := f.anchorInfo(s, conn, r.signers(), in.Results, in.Bundle, time.Time{})
+	switch ares {
 	case anchorOK:
 	case anchorServiceList:
 		return CheckOutcome{State: unsettled, Reason: ReasonServiceList}, nil
@@ -230,6 +269,22 @@ func (f *Feature) SubmitResults(s *vault.Session, conn, id string, in ResultsSub
 		adopt = append(adopt, &extRec{N: ext.N, Doc: x.Doc, Sig: x.Sig, Closes: ext.ClosesAt})
 		closes = ext.ClosesAt
 	}
+	// An extension adopted from results.json carries no bundle the vault
+	// verified, so it never takes what is kept aside (GC #7991 C): one that
+	// would bring a kept-aside receipt into the window is input that does
+	// not verify, and the check waits for the extension from vote.extended
+	// or the site's entry.
+	if at := r.asidePending(); at != 0 && len(adopt) > 0 && at < closes*1000 {
+		return noAnswer, nil
+	}
+	// Not before the close (0.88.12): t_tsa at or after the close in force
+	// once the results' extensions are adopted. The service anchors only
+	// past that close + 60 s, the TSA's allowance; an earlier stamp is
+	// results made before every ballot could be in, a contradiction under
+	// the service's signature and the anchor.
+	if info == nil || info.GenTime.Unix() < closes {
+		return f.failCheck(s, r, "results"), nil
+	}
 	if res.CheckProposal(p) != nil || r.Proof == nil || res.Counts.Eligible != int64(r.Proof.TreeSize) {
 		return f.failCheck(s, r, "results"), nil
 	}
@@ -238,11 +293,7 @@ func (f *Feature) SubmitResults(s *vault.Session, conn, id string, in ResultsSub
 		// verified; the vault cannot check the claim, so the check waits:
 		// pending with the reason (a gave_up one stays gave_up), and one
 		// vote.problem for the record.
-		r.Exts = append(r.Exts, adopt...)
-		if len(adopt) > 0 {
-			r.Closes = closes
-			r.ChangedMS = now.UnixMilli() // an earlier evidence export is no longer current
-		}
+		f.adopt(s, r, adopt, closes)
 		return f.rowsUnavailable(s, r, now), nil
 	}
 	// The row. The proof must verify to the signed rows_root before the row
@@ -280,12 +331,9 @@ func (f *Feature) SubmitResults(s *vault.Session, conn, id string, in ResultsSub
 		rs.Row = &svcBallot{VK: in.Row.VK, ChoiceID: in.Row.ChoiceID, BallotSig: in.Row.BallotSig}
 	}
 	if len(dups) > 0 {
-		r.Exts = append(r.Exts, adopt...)
-		if len(adopt) > 0 {
-			r.Closes = closes
-		}
+		f.adopt(s, r, adopt, closes)
 		r.Results = rs
-		r.setResultsMatch(in.Results)
+		f.resultsMatch(s, r)
 		return f.failCheck(s, r, "row_duplicate"), nil
 	}
 	if in.Proof.Index != r.Proof.Index {
@@ -294,18 +342,16 @@ func (f *Feature) SubmitResults(s *vault.Session, conn, id string, in ResultsSub
 	if rb != nil && (!p.HasChoice(rb.ChoiceID) || votewire.VerifyBallot(r.Hash, rb) != nil) {
 		return f.failCheck(s, r, "results"), nil // the service published an invalid ballot under the member's code
 	}
-	r.Exts = append(r.Exts, adopt...)
-	if len(adopt) > 0 {
-		r.Closes = closes
-	}
+	f.adopt(s, r, adopt, closes)
 	// The vault keeps the results with its row; vote.closed's hash against
 	// them is evidence only.
 	r.Results = rs
-	r.setResultsMatch(in.Results)
+	f.resultsMatch(s, r)
 	state, reason := verdict(r, in.Row)
 	if state == CheckFailed {
 		return f.failCheck(s, r, reason), nil
 	}
+	f.rejectAside(s, r) // a final judgement (0.88.12)
 	r.Check, r.CheckReason, r.ChangedMS = state, "", now.UnixMilli()
 	if state == CheckVerified {
 		f.audit(s, "vote.check_ok", r.Conn, r.ID)
@@ -370,12 +416,33 @@ func (f *Feature) rowsUnavailable(s *vault.Session, r *record, now time.Time) Ch
 	return CheckOutcome{State: r.Check, Reason: CheckRowsUnavailable, ConflictEvidence: r.conflictEvidence()}
 }
 
-// setResultsMatch compares vote.closed's hash with the results (evidence only).
-func (r *record) setResultsMatch(doc []byte) {
-	if r.ResultsHash != nil {
-		r.ResultsMatch = "no"
-		if eq(r.ResultsHash, votewire.H(doc)) {
-			r.ResultsMatch = "yes"
-		}
+// adopt keeps the extensions the results carry that the vault lacked
+// (checked as vote.extended is, without a bundle) and moves the close in
+// force. It never takes what is kept aside (GC #7991 C; SubmitResults
+// waits instead when an adopted close would cover it).
+func (f *Feature) adopt(s *vault.Session, r *record, adopt []*extRec, closes int64) {
+	if len(adopt) == 0 {
+		return
+	}
+	r.Exts = append(r.Exts, adopt...)
+	r.Closes = closes
+	r.ChangedMS = s.Now().UnixMilli() // an earlier evidence export is no longer current
+}
+
+// resultsMatch compares vote.closed's hash with the results held (whose
+// results_sig verified), in either order (0.88.12): evidence only, no
+// change to the check and no feed item; a "no" is audited
+// vote.results_conflict once per record.
+func (f *Feature) resultsMatch(s *vault.Session, r *record) {
+	if r.ResultsHash == nil || r.Results == nil {
+		return
+	}
+	r.ResultsMatch = "no"
+	if eq(r.ResultsHash, votewire.H(r.Results.Doc)) {
+		r.ResultsMatch = "yes"
+	}
+	if r.ResultsMatch == "no" && !r.ResultsConflict {
+		r.ResultsConflict = true
+		f.audit(s, "vote.results_conflict", r.Conn, r.ID)
 	}
 }

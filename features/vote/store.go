@@ -137,6 +137,33 @@ type ballot struct {
 	// rotation statement is held (a transfer's approval, §11.14.10): put in
 	// force once the statement is sent.
 	Held *heldCast `json:"held,omitempty"`
+
+	// Aside is a verified receipt for this ballot whose msg_ms is at or
+	// after the close in force but before the original close + 86,400 s
+	// (0.88.12, §10.19.5 ok): an extension the vault has not learned yet.
+	// It is judged again whenever the close moves and taken (then nil) once
+	// msg_ms is before it; one still outside at a final judgement of the
+	// results is rejected and kept as evidence. The latest only.
+	Aside *keptReceipt `json:"aside,omitempty"`
+	// Stopped: already_voted showed an own-vk ballot, the service's final
+	// answer to this one: it is not sent again (GC #7991 E).
+	Stopped bool `json:"stopped,omitempty"`
+}
+
+// shownAside is a ballot the service showed with a receipt for an extension
+// not learned yet: Answer from already_voted, Restore from a restore's ask.
+type shownAside struct {
+	Ballot   *svcBallot `json:"ballot"`
+	Answer   bool       `json:"answer,omitempty"`
+	Restore  bool       `json:"restore,omitempty"`
+	Rejected bool       `json:"rejected,omitempty"`
+}
+
+// keptReceipt is a receipt kept aside (ballot.Aside).
+type keptReceipt struct {
+	MsgMS      int64  `json:"msg_ms"`
+	ReceiptSig []byte `json:"receipt_sig"`
+	Rejected   bool   `json:"rejected,omitempty"` // still outside at a final judgement: no receipt, evidence
 }
 
 // heldCast is a cast_sig, and its vote.cast body, under the credential key
@@ -267,6 +294,32 @@ type record struct {
 	CheckDueSent bool       `json:"check_due_sent,omitempty"`
 	Results      *results   `json:"results,omitempty"`
 	ResultsMatch string     `json:"results_hash_match,omitempty"` // "", "yes" or "no": vote.closed's hash against the results (evidence only)
+	// ResultsConflict: vote.results_conflict was audited (once per record,
+	// 0.88.12).
+	ResultsConflict bool `json:"results_conflict,omitempty"`
+
+	// A ballot under the record's own voting key that is not the vault's
+	// own (0.88.12, §10.19.3): SelfUnrecorded when the vault held no ballot
+	// of its own, SelfConflict when it held a different one. Self is the
+	// first such ballot, SelfLatest the latest beside it (evidence);
+	// SelfFeed: vote.self_mismatch was made (once per record). TwoReceipts:
+	// the service signed receipts for two different ballots under the tag
+	// (GC #7991 D), a vote.problem counted toward the cap.
+	SelfUnrecorded bool       `json:"self_unrecorded,omitempty"`
+	SelfConflict   bool       `json:"self_conflict,omitempty"`
+	Self           *svcBallot `json:"self,omitempty"`
+	SelfLatest     *svcBallot `json:"self_latest,omitempty"`
+	SelfFeed       bool       `json:"self_feed,omitempty"`
+	TwoReceipts    bool       `json:"two_receipts,omitempty"`
+	// OldVKs are the earlier public voting keys the record held (a reopened
+	// vote never cast gets a fresh one): a ballot under any is own-vk.
+	OldVKs [][]byte `json:"old_vks,omitempty"`
+	// AsideShown is a shown ballot (foreign or own-vk) whose receipt is for
+	// an extension not learned yet (GC #7991 C), kept aside like the vault's
+	// own receipt (ballot.Aside). AsideProblem: one still outside at a final
+	// judgement raised vote.problem (once).
+	AsideShown   *shownAside `json:"aside_shown,omitempty"`
+	AsideProblem bool        `json:"aside_problem,omitempty"`
 
 	// AbsentMS is the vault-clock time of the first `absent` answer after the
 	// close in force (a found document clears it); unpublished needs a second
@@ -319,6 +372,12 @@ type compact struct {
 	StatusAnswers [][]byte        `json:"status_answers,omitempty"`
 	Other         *svcBallot      `json:"other,omitempty"`
 	RejectReason  string          `json:"reject_reason,omitempty"`
+	// (0.88.12) the own-vk ballots of self_unrecorded or self_conflict (the
+	// first and the latest), and a receipt kept aside that was never taken.
+	Self       *svcBallot   `json:"self,omitempty"`
+	SelfLatest *svcBallot   `json:"self_latest,omitempty"`
+	Aside      *keptReceipt `json:"aside,omitempty"`
+	AsideShown *shownAside  `json:"aside_shown,omitempty"`
 }
 
 type droppedNote struct {
@@ -417,8 +476,17 @@ func (r *record) checkPending(now time.Time) bool {
 	return r.Check == CheckPending || r.Check == "" && !now.Before(r.dueAt()) && r.closed(now)
 }
 
-// problem reports whether the record is in the problem set (§10.19.2).
+// problem reports whether the record is in the problem set (§10.19.2):
+// (0.88.12) self_unrecorded and self_conflict included.
 func (r *record) problem() bool {
+	return r.capProblem() || r.SelfUnrecorded || r.SelfConflict
+}
+
+// capProblem reports whether the record is a problem that counts toward the
+// cap of 16 problem records per connection: (0.88.12) a record whose only
+// problem is self_unrecorded or self_conflict is not the service's doing
+// and does not.
+func (r *record) capProblem() bool {
 	// A gave_up check never saw results that verify, so it is never clean
 	// (0.83.6): a service must not withhold its results and then evict it.
 	if r.RejectReason != "" || r.Check == CheckFailed || r.Check == CheckGaveUp || r.RefusalProblem || r.ConflictEv {
@@ -427,6 +495,9 @@ func (r *record) problem() bool {
 	// A check that waits for a row the app cannot get (0.83.3) is a problem
 	// record, not an in-progress one: it is never evicted.
 	if r.Check == CheckPending && r.CheckReason == CheckRowsUnavailable {
+		return true
+	}
+	if r.TwoReceipts || r.AsideProblem {
 		return true
 	}
 	if b := r.Ballot; b != nil && (b.State == BallotConflict || b.State == BallotDisputed) {
@@ -466,6 +537,10 @@ func (r *record) release() *compact {
 		c.Outcome, c.RejectReason = "released:rejected", r.RejectReason
 	}
 	c.Site, c.SiteCopy, c.StatusAnswers, c.Other = r.Site, r.SiteCopy, r.StatusAnswers, r.Other
+	c.Self, c.SelfLatest, c.AsideShown = r.Self, r.SelfLatest, r.AsideShown
+	if r.Ballot != nil {
+		c.Aside = r.Ballot.Aside
+	}
 	if r.Closes == 0 {
 		c.ClosedAt = r.KeptMS / 1000
 	}
@@ -528,7 +603,7 @@ func (f *Feature) admit(rec *record, now time.Time) *limitHit {
 	conn := rec.Conn
 	problems := 0
 	for _, r := range f.forConn(conn) {
-		if r.problem() {
+		if r.capProblem() {
 			problems++
 		}
 	}

@@ -3,6 +3,7 @@ package vote
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"strings"
 	"testing"
 	"time"
 
@@ -32,6 +33,20 @@ func (c *cenv) answer(v *votetest.Vote, reqID string, ballot *votewire.Ballot, m
 	}
 	body := c.statusBody(v, rb, msgMS, rsig, ssig)
 	c.respond(reqID, "vote.status", &envelope.Inner{Status: envelope.StatusOK, Body: body})
+}
+
+// alreadyVoted answers the vault's cast reqID with a signed already_voted
+// carrying shown and its receipt at msgMS.
+func (c *cenv) alreadyVoted(v *votetest.Vote, reqID string, shown *votewire.Ballot, msgMS uint64) {
+	c.t.Helper()
+	sleaf := must(shown.Leaf())
+	rsig, _ := suite.Sign(c.svc.IK, votewire.LabelReceipt, must(votewire.ReceiptMsg(v.Hash, sleaf, msgMS)))
+	msg := must(votewire.RefusalMsg(v.ID, votewire.H(c.h.IK), v.Tag, "vote.cast", "already_voted", msgMS, votewire.H(c.leafOf(v))))
+	sig, _ := suite.Sign(c.svc.IK, votewire.LabelRefusal, msg)
+	body := strictjson.NewBuilder().Base64("refusal_sig", sig).Uint("msg_ms", msgMS).Base64("connection", votewire.H(c.h.IK)).Base64("record_tag", v.Tag).
+		Raw("ballot", strictjson.NewBuilder().Base64("vk", shown.VK).String("choice_id", shown.ChoiceID).Base64("ballot_sig", shown.BallotSig).Bytes()).
+		Uint("ballot_msg_ms", msgMS).Base64("receipt_sig", rsig).Bytes()
+	c.respond(reqID, "vote.cast", &envelope.Inner{Status: envelope.StatusError, Error: &envelope.Error{Code: "already_voted"}, Body: body})
 }
 
 func (c *cenv) ownBallot(v *votetest.Vote) *votewire.Ballot {
@@ -314,5 +329,140 @@ func TestRecordedStaysRecordedWithConflictEvidence(t *testing.T) {
 	g := obj(t, c.app("vote.get", pairBody("svc", v.ID)))
 	if !boolOf(g, "conflict_evidence") {
 		t.Errorf("%v", g)
+	}
+}
+
+// 0.88.12 (§10.19.3 "A ballot under the record's own voting key"): a status
+// answer carrying a ballot under the record's own vk with no restore, the
+// vault holding no ballot, is self_unrecorded (no prompt, no vote.conflict,
+// one vote.self_mismatch); a cast after it makes self_conflict.
+func TestStatusOwnVKWithoutARestore(t *testing.T) {
+	c := newCastEnv(t)
+	v := c.open(1)
+	shown := c.selfBallot(v, "no")
+	c.f.Check(c.session(), "svc", v.ID)
+	c.answer(v, c.statuses()[0], shown, uint64(c.now.UnixMilli()), true)
+	r := c.rec(v.ID)
+	if !r.SelfUnrecorded || r.SelfConflict || r.ServiceBallot != nil || r.ConflictEv || r.Ballot != nil || r.Self == nil || !r.problem() || r.capProblem() {
+		t.Fatalf("%+v", r)
+	}
+	if !c.has("vote.self_unrecorded", v.ID) || c.hasKind("vote.conflict") || c.hasKind("vote.problem") || c.countKind("vote.self_mismatch") != 1 {
+		t.Errorf("%v", c.h.Activities)
+	}
+	for _, a := range c.h.Activities {
+		if a.Kind == "vote.self_mismatch" && (a.Priority != "high" || a.Ref != v.ID || !a.Feed) {
+			t.Errorf("%+v", a)
+		}
+	}
+	g := obj(t, c.app("vote.get", pairBody("svc", v.ID)))
+	if !boolOf(g, "self_unrecorded") || boolOf(g, "self_conflict") || boolOf(g, "conflict_evidence") || boolOf(g, "confirm_pending") || !boolOf(g, "can_cast") {
+		t.Errorf("vote.get %v", g)
+	}
+	// The same ballot shown again changes nothing the member is told.
+	c.now = c.now.Add(11 * time.Minute)
+	c.f.Check(c.session(), "svc", v.ID)
+	c.answer(v, c.statuses()[1], shown, uint64(c.now.UnixMilli()), true)
+	if c.countKind("vote.self_mismatch") != 1 || c.countKind("vote.self_unrecorded") != 1 || c.rec(v.ID).SelfLatest == nil {
+		t.Errorf("a repeat: %v", c.h.Activities)
+	}
+	// A cast after it: the vault's own ballot meets the shown one.
+	if _, err := c.cast(v, "yes"); err != nil {
+		t.Fatal(err)
+	}
+	if r := c.rec(v.ID); !r.SelfConflict || r.Ballot.State != BallotSending || r.conflictEvidence() || !c.has("vote.self_conflict", v.ID) || c.countKind("vote.self_mismatch") != 1 {
+		t.Errorf("after the cast: %+v %v", r.Ballot, c.h.Activities)
+	}
+	e := c.evidence(t, v.ID)
+	if _, ok := e["self_ballot"]; !ok {
+		t.Errorf("evidence %v", e)
+	}
+	if _, ok := e["self_ballot_latest"]; !ok {
+		t.Errorf("evidence %v", e)
+	}
+	l := obj(t, c.app("vote.list", "{}"))
+	if votes, _ := l.Array("votes"); len(votes) != 1 || !strings.Contains(string(votes[0]), `"self_unrecorded":true`) || !strings.Contains(string(votes[0]), `"self_conflict":true`) {
+		t.Errorf("vote.list %s", votes)
+	}
+}
+
+// 0.88.12: already_voted carrying a different ballot under the record's own
+// vk sets self_conflict: audit vote.self_conflict, feed item
+// vote.self_mismatch, no vote.conflict and no vote.problem; it is not
+// conflict evidence. (GC #7991 E) The ballot keeps its state and is not
+// sent again. A foreign ballot after it is conflict evidence.
+func TestAlreadyVotedOwnVK(t *testing.T) {
+	c := newCastEnv(t)
+	v := c.open(1)
+	shown := c.selfBallot(v, "no")
+	c.cast(v, "yes")
+	_, ids := c.casts()
+	c.h.Reset()
+	c.alreadyVoted(v, ids[0], shown, uint64(c.now.UnixMilli()))
+	r := c.rec(v.ID)
+	if r.Ballot.State != BallotSending || !r.Ballot.Stopped || !r.SelfConflict || r.SelfUnrecorded || r.Other != nil || r.conflictEvidence() || !r.problem() || r.capProblem() {
+		t.Fatalf("%+v", r.Ballot)
+	}
+	before, _ := c.casts()
+	c.tickAt(2 * time.Hour)
+	if after, _ := c.casts(); len(after) != len(before) {
+		t.Error("sent again after already_voted with an own-vk ballot")
+	}
+	if !c.has("vote.self_conflict", v.ID) || c.hasKind("vote.conflict") || c.hasKind("vote.problem") || c.countKind("vote.self_mismatch") != 1 {
+		t.Errorf("%v", c.h.Activities)
+	}
+	g := obj(t, c.app("vote.get", pairBody("svc", v.ID)))
+	if !boolOf(g, "self_conflict") || boolOf(g, "conflict_evidence") {
+		t.Errorf("vote.get %v", g)
+	}
+	// A foreign ballot after it is conflict evidence.
+	_, vk2, _ := ed25519.GenerateKey(rand.Reader)
+	c.f.Check(c.session(), "svc", v.ID)
+	c.answer(v, c.statuses()[0], must(votewire.SignBallot(vk2, v.Hash, v.Tag, "no")), uint64(c.rec(v.ID).Opens*1000+1), true)
+	if r := c.rec(v.ID); !r.conflictEvidence() || !c.has("vote.conflict", v.ID) || !r.capProblem() {
+		t.Errorf("foreign after self: %+v", r)
+	}
+}
+
+// 0.88.12: after a restore the confirm prompt for a ballot under the
+// record's own vk is unchanged (no self flags).
+func TestRestorePromptUnchangedByOwnVKRule(t *testing.T) {
+	c := newCastEnv(t)
+	v := c.open(1)
+	c.f.TransferCompleted(c.session(), "old", "new")
+	c.f.Tick(c.session())
+	c.answer(v, c.statuses()[0], c.selfBallot(v, "no"), uint64(c.now.UnixMilli()), true)
+	if r := c.rec(v.ID); r.ServiceBallot == nil || r.SelfUnrecorded || r.SelfConflict || c.hasKind("vote.self_mismatch") {
+		t.Errorf("%+v", r)
+	}
+}
+
+// 0.88.12 ("A proposal the vault was never sent"; GC #7991 A): a status
+// answer that carries a ballot keeps the proposal with conflict evidence
+// (one vote.conflict, one vote.problem) and the answer in vote.evidence,
+// after a restore too: there is no prompt for a proposal never held.
+func TestStatusBallotForAProposalNeverSent(t *testing.T) {
+	_, svk, _ := ed25519.GenerateKey(rand.Reader)
+	for _, restore := range []bool{false, true} {
+		c := newCastEnv(t)
+		if restore {
+			c.f.RecoveryCompleted(c.session())
+		}
+		v := c.unheld(5)
+		body := `{"entries":[{"proposal_id":"` + v.ID + `","document":` + c.foundDoc(v, "", "") + `}]}`
+		if got := c.syncResults(t, "entries", body); len(got) != 1 || !strings.HasSuffix(got[0], ":kept") {
+			t.Fatalf("%v", got)
+		}
+		ids := c.statuses()
+		c.answer(v, ids[len(ids)-1], must(votewire.SignBallot(svk, v.Hash, v.Tag, "no")), uint64(c.now.UnixMilli()), true)
+		r := c.rec(v.ID)
+		if r == nil || !r.ConflictEv || r.Other == nil || r.ServiceBallot != nil || c.countKind("vote.conflict") != 1 || c.problems(v.ID) != 1 || len(r.StatusAnswers) != 1 {
+			t.Fatalf("restore %v: %+v", restore, r)
+		}
+		if arr, _ := c.evidence(t, v.ID).Array("status_answers"); len(arr) != 1 {
+			t.Errorf("restore %v: status answers in evidence: %d", restore, len(arr))
+		}
+		if _, err := c.cast(v, "yes"); err != nil {
+			t.Errorf("restore %v: casting stays allowed: %v", restore, err)
+		}
 	}
 }

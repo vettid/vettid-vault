@@ -722,3 +722,37 @@ func TestRowDuplicateSetsResultsMatch(t *testing.T) {
 		t.Errorf("%q match=%q", r.Check, r.ResultsMatch)
 	}
 }
+
+// 0.88.12: a record whose only problem is self_conflict (or
+// self_unrecorded) does not count toward the cap of 16 problems and is
+// never evicted; (GC #7991 D) two receipts for one tag do count.
+func TestProblemCapSelfOnly(t *testing.T) {
+	e := newEnv(t)
+	e.publish(e.svc)
+	for i := 1; i <= votewire.MaxProblemsPerConnection; i++ {
+		e.closedVote(i)
+		r := e.rec(lid(i))
+		r.Check, r.SelfConflict = CheckUnconfirmed, true
+		if i%2 == 0 {
+			r.SelfConflict, r.SelfUnrecorded = false, true
+		}
+		if !r.problem() || r.capProblem() || r.evictable(e.now) {
+			t.Fatalf("%d: problem %v cap %v evictable %v", i, r.problem(), r.capProblem(), r.evictable(e.now))
+		}
+	}
+	probe := func() *limitHit {
+		return e.f.admit(&record{Conn: "svc", ID: lid(999), Opens: e.now.Unix() - 3600, Closes: e.now.Unix() - 10}, e.now)
+	}
+	if hit := probe(); hit != nil {
+		t.Errorf("self-only records hit the cap: %+v", hit)
+	}
+	if n := len(e.f.st.Records); n != votewire.MaxProblemsPerConnection {
+		t.Errorf("a self-only record was evicted: %d left", n)
+	}
+	for i := 1; i <= votewire.MaxProblemsPerConnection; i++ {
+		e.rec(lid(i)).TwoReceipts = true
+	}
+	if hit := probe(); hit == nil || !hit.problems {
+		t.Errorf("two receipts do not count: %+v", hit)
+	}
+}

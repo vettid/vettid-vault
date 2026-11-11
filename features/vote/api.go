@@ -159,6 +159,13 @@ func (f *Feature) summary(s *vault.Session, r *record, pinned []byte) *strictjso
 	if r.ServiceBallot != nil {
 		b.Bool("confirm_pending", true) // vote.confirm is waiting for the member
 	}
+	// 0.88.12: a ballot under the record's own voting key (§10.19.3).
+	if r.SelfUnrecorded {
+		b.Bool("self_unrecorded", true)
+	}
+	if r.SelfConflict {
+		b.Bool("self_conflict", true)
+	}
 	block := f.castBlock(s, r, pinned)
 	b.Bool("can_cast", block == "")
 	if block != "" {
@@ -339,7 +346,7 @@ func (f *Feature) droppedJSON() []byte {
 func (f *Feature) problemsJSON() []byte {
 	count := map[string]int{}
 	for _, r := range f.st.Records {
-		if r.problem() {
+		if r.capProblem() {
 			count[r.Conn]++
 		}
 	}

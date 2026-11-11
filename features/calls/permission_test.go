@@ -343,17 +343,18 @@ func TestOffEndsRinging(t *testing.T) {
 			t.Fatalf("another connection's call ended: %+v", c)
 		}
 	})
-	t.Run("turning on ends nothing", func(t *testing.T) {
-		a := newSide("cB")
-		featuretest.Call(a.f, a.h, t0, "app", "call.permission.set", `{"connection_id":"cB","allowed":false}`)
-		featuretest.Call(a.f, a.h, t0, "app", "call.permission.set", `{"connection_id":"cB","allowed":true}`)
-		id := newCallID("cB")
-		if r := featuretest.Call(a.f, a.h, t0.Add(time.Second), "app", "call.start", startBodyID("cB", id, ek)); !r.OK() {
-			t.Fatal(r.Code)
+	t.Run("a stale record is left for the timer", func(t *testing.T) {
+		b := newSide("cA")
+		id := newCallID("cA")
+		featuretest.CallExp(b.f, b.h, t0, t0.Add(OfferTTL), "connection:cA", "call.offer", peerOffer("cA", id, "audio", ek))
+		b.h.Reset()
+		off(b, "cA", t0.Add(OfferTTL+time.Second)) // past exp, before the timer ran
+		if c, _ := b.f.Get(id); c.State != StateRinging || len(b.h.SentOfType("call.end")) != 0 || b.h.HasActivity("call.missed") {
+			t.Fatalf("a stale record ended by off: %+v", c)
 		}
-		featuretest.Call(a.f, a.h, t0.Add(2*time.Second), "app", "call.permission.set", `{"connection_id":"cB","allowed":true}`)
-		if c, _ := a.f.Get(id); c.State != StateRinging {
-			t.Fatalf("%+v", c)
+		b.f.Tick(vault.NewSession(context.Background(), b.h, vault.PeerInfo{}, t0.Add(OfferTTL+2*time.Second), nil))
+		if c, _ := b.f.Get(id); c.State != StateEnded || c.Reason != "timeout" {
+			t.Fatalf("the timer: %+v", c)
 		}
 	})
 }

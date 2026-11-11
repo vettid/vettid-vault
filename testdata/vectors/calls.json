@@ -52,5 +52,27 @@
     "config": "{\"v\":1,\"call_id\":\"01JB2Z6V9K3M4N5P6Q7R8S9T50\",\"exp\":1800000000,\"ice_servers\":[]}",
     "ice_config_b64": "eyJ2IjoxLCJjYWxsX2lkIjoiMDFKQjJaNlY5SzNNNE41UDZRN1I4UzlUNTAiLCJleHAiOjE4MDAwMDAwMDAsImljZV9zZXJ2ZXJzIjpbXX0=",
     "ice_sig_b64": "SDtpdoc/Y++n6Z7tOMKD7kNcsCjRN2F0o5I0VNvrjUq+4abRkispKRA1DPclh/+chWvcngw4ps3dvpiA6D+tBA=="
-  }
+  },
+  "glare": [
+    {
+      "own": "01JB2Z6V9K3M4N5P6Q7R8S9T0A",
+      "offer": "01JB2Z6V9K3M4N5P6Q7R8S9T0B",
+      "own_wins": true
+    },
+    {
+      "own": "01JB2Z6V9K3M4N5P6Q7R8S9T0B",
+      "offer": "01JB2Z6V9K3M4N5P6Q7R8S9T0A",
+      "own_wins": false
+    },
+    {
+      "own": "01JB2Z6V9K3M4N5P6Q7R8S9T0Z",
+      "offer": "01JB2Z6V9K3M4N5P6Q7R8S9T10",
+      "own_wins": true
+    },
+    {
+      "own": "01JC000000000000000000000A",
+      "offer": "01JB2Z6V9K3M4N5P6Q7R8S9T0Z",
+      "own_wins": false
+    }
+  ]
 }

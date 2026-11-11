@@ -5,11 +5,13 @@ import (
 	"crypto/ed25519"
 	"crypto/hkdf"
 	"crypto/sha256"
+	"encoding/json"
 	"testing"
 	"time"
 
 	"github.com/vettid/vettid-vault/internal/hpkederand"
 	"github.com/vettid/vettid-vault/vms/callwire"
+	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/suite"
 )
 
@@ -21,6 +23,7 @@ func TestCallVectors(t *testing.T) { checkCallVectors(t, Dir) }
 // hand), and through callwire's own receiving functions.
 func checkCallVectors(t *testing.T, dir string) {
 	d := load(t, dir, "calls.json")
+	checkGlareVectors(t, d)
 	for k, want := range map[string]string{"label_call": "vettid/vms/2/call", "label_call_key": "vettid/vms/2/call-key",
 		"media_salt": "vettid-call-v1", "label_share": "vettid/vms/2/call-share", "label_vouch": "vettid/vms/2/call-vouch",
 		"label_ice": "vettid/vms/2/ice"} {
@@ -128,5 +131,40 @@ func checkCallVectors(t *testing.T, dir string) {
 		if _, err := callwire.VerifyICE(callee.vaultPub, cfg, sig, id, time.Unix(exp-1, 0)); err != callwire.ErrICESig {
 			t.Errorf("%s: accepted under another vault's ik", name)
 		}
+	}
+}
+
+// checkGlareVectors re-derives the §10.10 "Glare" cases byte by byte (the
+// lower call_id, as its 26 ASCII bytes, wins) and through callwire. A
+// frozen calls.json from before C2's glare has none.
+func checkGlareVectors(t *testing.T, d doc) {
+	raw, ok := d.m["glare"]
+	if !ok {
+		return
+	}
+	var cases []struct {
+		Own     string `json:"own"`
+		Offer   string `json:"offer"`
+		OwnWins bool   `json:"own_wins"`
+	}
+	if err := json.Unmarshal(raw, &cases); err != nil {
+		t.Fatalf("glare: %v", err)
+	}
+	wins, losses := 0, 0
+	for i, c := range cases {
+		if !envelope.ValidULID(c.Own) || !envelope.ValidULID(c.Offer) {
+			t.Errorf("glare %d: not call ids", i)
+		}
+		if got := bytes.Compare([]byte(c.Own), []byte(c.Offer)) < 0; got != c.OwnWins || callwire.LowerWins(c.Own, c.Offer) != c.OwnWins {
+			t.Errorf("glare %d: own_wins %v", i, c.OwnWins)
+		}
+		if c.OwnWins {
+			wins++
+		} else {
+			losses++
+		}
+	}
+	if wins == 0 || losses == 0 {
+		t.Error("glare: the cases don't show both outcomes")
 	}
 }

@@ -104,6 +104,19 @@ func TestR30StaleAnswerKeptForAMessageUnderTheNamedEpoch(t *testing.T) {
 			t.Fatal("a restore's answer was dropped")
 		}
 		aw.Reconnect.Older = false
+		aw.Reconnect.Fork = true
+		m.dropStaleReconnectAnswers(p, p.LastEpochID, f.clk.Add(time.Hour), f.clk)
+		if m.st.Awaiting[id] == nil {
+			t.Fatal("a fork sign's answer was dropped")
+		}
+		aw.Reconnect.Fork = false
+		named := aw.Reconnect.Named
+		aw.Reconnect.Named = []byte("an epoch not among the peer's")
+		m.dropStaleReconnectAnswers(p, p.LastEpochID, f.clk.Add(time.Hour), f.clk)
+		if m.st.Awaiting[id] == nil {
+			t.Fatal("an answer naming an epoch not among the peer's was dropped")
+		}
+		aw.Reconnect.Named = named
 		m.dropStaleReconnectAnswers(p, p.LastEpochID, f.clk.Add(time.Hour), f.clk)
 		if m.st.Awaiting[id] != nil {
 			t.Fatal("setup check: the answer was not dropped when both conditions hold")

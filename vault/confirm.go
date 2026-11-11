@@ -535,8 +535,10 @@ func (m *Manager) beforeAccept(p *Peer, ep *handshake.Epoch, in *envelope.Inner,
 // tokens revoked, an hs.resp not yet deposited not sent), so that it holds
 // back neither the vault's rekeys nor, between two persons, its reconnects
 // until L. hs.fin is not such a message (the caller). A restore's answer
-// (Older) is kept: it names an older epoch by design, and is evidence
-// against a second copy.
+// (Older) and one to a reconnect naming a replaced line's epoch (Fork) are
+// kept: they name such an epoch by design, the second is fork evidence
+// judged at its hs.fin; and the named epoch must be one of p's epochs, so
+// that "newer" compares two of them.
 func (m *Manager) dropStaleReconnectAnswers(p *Peer, msgEpoch []byte, ts time.Time, now time.Time) {
 	if p.Kind != KindConnection {
 		return
@@ -547,7 +549,7 @@ func (m *Manager) dropStaleReconnectAnswers(p *Peer, msgEpoch []byte, ts time.Ti
 			continue
 		}
 		rc := aw.Reconnect
-		if rc == nil || rc.Older || !ts.After(rc.TS) || !p.newer(msgEpoch, rc.Named) {
+		if rc == nil || rc.Older || rc.Fork || p.epochIndex(rc.Named) < 0 || !ts.After(rc.TS) || !p.newer(msgEpoch, rc.Named) {
 			continue
 		}
 		m.abandonAwaiting(id, now)

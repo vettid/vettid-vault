@@ -243,6 +243,7 @@ func TestSchedCallWakeHasItsOwnCap(t *testing.T) {
 	for i := 0; i < 30; i++ {
 		s.hour = append(s.hour, now.Add(-time.Minute))
 	}
+	s.last = now.Add(-time.Minute) // the last ordinary wake: call wakes do not move it
 	for i := 0; i < 20; i++ {
 		s.triggerCall("c")
 		at, ok := s.next(now)
@@ -298,8 +299,8 @@ func TestSchedCallWakeRetry(t *testing.T) {
 	at, _ := s.next(t0)
 	s.start(at)
 	s.done(at, wakeFailed, 0)
-	if len(s.calls) != 1 || s.pending || !s.counted || s.checked {
-		t.Fatalf("retry: calls %v pending %v counted %v checked %v", s.calls, s.pending, s.counted, s.checked)
+	if len(s.calls) != 1 || s.pending || !s.callRetry || s.counted || s.checked {
+		t.Fatalf("retry: calls %v pending %v callRetry %v counted %v checked %v", s.calls, s.pending, s.callRetry, s.counted, s.checked)
 	}
 	s.keepCalls(map[string]bool{"c1": true})
 	at2, ok := s.next(at)
@@ -310,5 +311,109 @@ func TestSchedCallWakeRetry(t *testing.T) {
 	s.done(at2, wakeSent, 0)
 	if len(s.callHour) != 1 {
 		t.Fatalf("counted %d times", len(s.callHour))
+	}
+}
+
+// (Review F1) After a look, a wait (a retry's, a 429's) means a new look before the wake goes.
+func TestSchedCallWakeLooksAgainAfterAWait(t *testing.T) {
+	s := testSched()
+	s.triggerCall("c1")
+	s.keepCalls(map[string]bool{"c1": true})
+	at, _ := s.next(t0)
+	s.start(at)
+	s.done(at, wakeFailed, 0)                // retry in 5 s
+	s.keepCalls(map[string]bool{"c1": true}) // the look right after done
+	at2, ok := s.next(at)
+	t.Logf("retry at %v ok %v", at2.Sub(at), ok)
+	// call answered at +2 s; at +5 s the loop wakes:
+	if ids := s.callsToCheck(); ids == nil {
+		t.Errorf(" no new look before the retry goes at +%v", at2.Sub(at))
+	}
+}
+
+// (Review F2) A call wake's retry whose call ended leaves no retry state to the next wake.
+func TestSchedADroppedCallRetryLeavesNothing(t *testing.T) {
+	s := testSched()
+	s.triggerCall("c1")
+	s.keepCalls(map[string]bool{"c1": true})
+	at, _ := s.next(t0)
+	s.start(at)
+	s.done(at, wakeFailed, 0)
+	s.keepCalls(map[string]bool{"c1": false}) // call answered
+	t.Logf("after drop: counted %v retries %d notBefore %v", s.counted, s.retries, s.notBefore.Sub(at))
+	s.trigger(false)
+	at2, _ := s.next(at.Add(time.Minute))
+	s.start(at2)
+	if len(s.hour) == 0 {
+		t.Errorf(" the next ordinary wake was not counted toward the 30 (hour=%d)", len(s.hour))
+	}
+}
+
+// (Review F3) Ordinary triggers merged into a call wake that failed are not
+// lost when its call ends before the retry.
+func TestSchedMergedTriggersSurviveAFailedCallWake(t *testing.T) {
+	s := testSched()
+	s.trigger(false)
+	sendAt(t, &s, t0, wakeSent)
+	s.trigger(false) // a new feed item, deferred to t0+5s
+	s.triggerCall("c1")
+	s.keepCalls(map[string]bool{"c1": true})
+	at, _ := s.next(t0.Add(time.Second))
+	s.start(at)
+	s.done(at, wakeFailed, 0)
+	s.keepCalls(map[string]bool{"c1": false})
+	if _, ok := s.next(at.Add(10 * time.Second)); !ok {
+		t.Errorf(" the merged feed item's wake is lost (pending %v)", s.pending)
+	}
+}
+
+// (Review F4) The retry of the CallCap-th call wake stays a call wake (looked
+// at, not held by the cap).
+func TestSchedTheLastCallWakesRetryStaysACallWake(t *testing.T) {
+	s := testSched()
+	now := t0
+	for i := 0; i < 19; i++ {
+		s.callHour = append(s.callHour, now.Add(-time.Minute))
+	}
+	s.triggerCall("c20")
+	s.keepCalls(map[string]bool{"c20": true})
+	at, _ := s.next(now)
+	s.start(at)
+	s.done(at, wakeFailed, 0)
+	s.keepCalls(map[string]bool{"c20": true})
+	s.next(at)
+	if len(s.calls) == 0 {
+		t.Errorf(" the 20th call wake's retry became ordinary (pending %v), sent without ringing check", s.pending)
+	}
+}
+
+// (Review F5) A call wake goes at once, not after an ordinary wake's 5xx
+// retry wait; the ordinary retry merges into it.
+func TestSchedACallWakeDoesNotWaitForAnOrdinaryRetry(t *testing.T) {
+	s := testSched()
+	s.trigger(false)
+	now := t0
+	for i := 0; i < 3; i++ {
+		at, _ := s.next(now)
+		s.start(at)
+		s.done(at, wakeFailed, 0)
+		now = at
+	}
+	s.triggerCall("c1")
+	s.keepCalls(map[string]bool{"c1": true})
+	at, ok := s.next(now)
+	if !ok || !at.Equal(now) {
+		t.Fatalf("call wake deferred by %v", at.Sub(now))
+	}
+	s.start(at)
+	if s.pending {
+		t.Fatal("the ordinary retry did not merge into the call wake")
+	}
+	// A 429's wait does hold it.
+	s.done(at, wakeRateLimited, time.Minute)
+	s.triggerCall("c2")
+	s.keepCalls(map[string]bool{"c1": true, "c2": true})
+	if at2, _ := s.next(at); !at2.Equal(at.Add(time.Minute)) {
+		t.Fatalf("after a 429: %v", at2.Sub(at))
 	}
 }

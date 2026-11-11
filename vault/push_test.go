@@ -950,7 +950,7 @@ type ringerFeature struct {
 }
 
 func (r *ringerFeature) Name() string { return "ringer" }
-func (r *ringerFeature) CallRinging(id string) bool {
+func (r *ringerFeature) CallRinging(id string, _ time.Time) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.ringing[id]

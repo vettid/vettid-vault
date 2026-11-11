@@ -427,7 +427,8 @@ const (
 // asked from the wake's goroutine, holding no lock of the vault's or the
 // pusher's, and must take only its own.
 type CallRinger interface {
-	CallRinging(callID string) bool
+	// CallRinging: whether callID still rings at now (the vault's clock).
+	CallRinging(callID string, now time.Time) bool
 }
 
 // wakeClass is the §14.2 trigger class of a durable message to owner
@@ -500,11 +501,11 @@ func (m *Manager) pushDeposited(peerID, class string) {
 // hold calls say (none: no call rings). It is a copy of the features at
 // the pusher's start and takes no lock of the manager's (the wake's
 // goroutine calls it).
-func (m *Manager) callRinging() func(string) bool {
+func (m *Manager) callRinging() func(string, time.Time) bool {
 	rs := append([]CallRinger(nil), m.ringers...)
-	return func(callID string) bool {
+	return func(callID string, now time.Time) bool {
 		for _, f := range rs {
-			if f.CallRinging(callID) {
+			if f.CallRinging(callID, now) {
 				return true
 			}
 		}
@@ -622,7 +623,7 @@ type pusher struct {
 	now   func() time.Time
 	apply func(pushOutcome)
 	// ringing (C2) says whether a call still rings; asked with no lock held.
-	ringing func(callID string) bool
+	ringing func(callID string, now time.Time) bool
 
 	mu       sync.Mutex
 	s        wakeSched
@@ -636,9 +637,9 @@ type pusher struct {
 	outcomes chan pushOutcome
 }
 
-func newPusher(gw PushGateway, t PushTiming, now func() time.Time, apply func(pushOutcome), ringing func(string) bool) *pusher {
+func newPusher(gw PushGateway, t PushTiming, now func() time.Time, apply func(pushOutcome), ringing func(string, time.Time) bool) *pusher {
 	if ringing == nil {
-		ringing = func(string) bool { return false }
+		ringing = func(string, time.Time) bool { return false }
 	}
 	p := &pusher{gw: gw, t: t, now: now, apply: apply, ringing: ringing, s: newWakeSched(t), kick: make(chan struct{}, 1),
 		stopCh: make(chan struct{}), outcomes: make(chan pushOutcome, 16)}
@@ -768,7 +769,7 @@ func (p *pusher) run() {
 			p.mu.Unlock()
 			live := map[string]bool{}
 			for _, id := range ids {
-				live[id] = p.ringing(id)
+				live[id] = p.ringing(id, now)
 			}
 			p.mu.Lock()
 			if !p.stopped && p.reg != nil {

@@ -2,12 +2,14 @@ package calls
 
 import (
 	"context"
+	"crypto/ed25519"
 	"testing"
 	"time"
 
 	"github.com/vettid/vettid-vault/internal/featuretest"
 	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vms/callwire"
+	"github.com/vettid/vettid-vault/vms/suite"
 )
 
 // §3.6.3, §10.10 (0.13.0): a held vault rings no device and does not
@@ -468,4 +470,63 @@ func TestNotAGlare(t *testing.T) {
 	if a.h.HasActivity("drop.call_glare") {
 		t.Fatal("another connection's offer taken as a glare")
 	}
+}
+
+// peerAnswer is a call.answer from the peer vault behind conn, its share
+// signed by the peer device and vouched for by that vault (as peerOffer).
+func peerAnswer(conn, id string, enc []byte) string {
+	dev := featuretest.DeviceKey("peer-device")
+	m := callwire.ShareMessage(callwire.RoleAnswer, id, "", enc)
+	ds, _ := callwire.SignShare(dev, m)
+	devPub := dev.Public().(ed25519.PublicKey)
+	vs, _ := suite.Sign(peerVault(conn), callwire.LabelVouch, callwire.VouchMessage(devPub, m))
+	return `{"call_id":"` + id + `","sdp":"v=0","enc":"` + b64(enc) + `","device_ik":"` + b64(devPub) +
+		`","device_sig":"` + b64(ds) + `","vault_sig":"` + b64(vs) + `"}`
+}
+
+// Not a glare either, from the same connection: once our call was answered
+// the offer is busy (and missed); once it ended, or it rings past its exp
+// (not live, the timer not run yet), the offer rings.
+func TestNotAGlareSameConnection(t *testing.T) {
+	sk, _ := callwire.NewOfferKey()
+	setup := func(t *testing.T) (*side, string, string) {
+		a := newSide("cB")
+		hi, lo := newCallID("nsg"), newCallID("nsg") // lo is later: hi < lo
+		if r := featuretest.Call(a.f, a.h, t0, "app", "call.start", startBodyID("cB", hi, sk.Public().Bytes())); !r.OK() {
+			t.Fatal(r.Code)
+		}
+		return a, hi, lo
+	}
+	offer := func(a *side, at time.Time, id string) {
+		featuretest.CallExp(a.f, a.h, at, at.Add(OfferTTL), "connection:cB", "call.offer", peerOffer("cB", id, "audio", sk.Public().Bytes()))
+	}
+	t.Run("answered", func(t *testing.T) {
+		a, hi, lo := setup(t)
+		enc, _, _ := callwire.Answer(sk.Public().Bytes(), hi)
+		featuretest.Call(a.f, a.h, t0.Add(time.Second), "connection:cB", "call.answer", peerAnswer("cB", hi, enc))
+		if c, _ := a.f.Get(hi); c.State != StateActive {
+			t.Fatalf("our call not answered: %+v", c)
+		}
+		a.h.Reset()
+		offer(a, t0.Add(2*time.Second), lo)
+		if e := a.sent(t, "cB", "call.end"); str(t, e.Body, "reason") != "busy" || a.h.HasActivity("drop.call_glare") {
+			t.Fatal("an offer while our call is active: not busy, or taken as a glare")
+		}
+	})
+	t.Run("ended", func(t *testing.T) {
+		a, hi, lo := setup(t)
+		featuretest.Call(a.f, a.h, t0.Add(time.Second), "app", "call.end", `{"call_id":"`+hi+`","reason":"hangup"}`)
+		a.h.Reset()
+		offer(a, t0.Add(2*time.Second), lo)
+		a.sent(t, "devices", "call.offer")
+	})
+	t.Run("ringing past exp", func(t *testing.T) {
+		a, hi, lo := setup(t)
+		a.h.Reset()
+		offer(a, t0.Add(OfferTTL+time.Second), lo)
+		a.sent(t, "devices", "call.offer")
+		if c, _ := a.f.Get(hi); c.State != StateRinging || a.h.HasActivity("drop.call_glare") {
+			t.Fatalf("our stale call: %+v", c)
+		}
+	})
 }

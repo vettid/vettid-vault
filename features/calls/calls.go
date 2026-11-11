@@ -576,6 +576,7 @@ func (f *Feature) glare(s *vault.Session, conn, y string, now time.Time) bool {
 			except = x.Device
 		}
 		s.NotifyDevicesWith("call.end", body, except, vault.SendOptions{})
+		return true // one own ringing call at most (start refuses while busy)
 	}
 	return true
 }

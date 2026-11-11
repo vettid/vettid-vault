@@ -684,6 +684,7 @@ type kaFeature struct {
 	callGate
 	got     int
 	batches int
+	seenAt  []int // got as BatchEnd saw it, per batch
 }
 
 func (k *kaFeature) Name() string { return "ka" }
@@ -696,7 +697,7 @@ func (k *kaFeature) Handle(_ context.Context, _ *Session, in *envelope.Inner) (j
 	}
 	return nil, nil
 }
-func (k *kaFeature) BatchEnd(*Session) { k.batches++ }
+func (k *kaFeature) BatchEnd(*Session) { k.batches++; k.seenAt = append(k.seenAt, k.got) }
 
 // §3.6.3 with C2 liveness, through ProcessBatch: while held, a keep-alive
 // from the device of a call answered before the deadline reaches the
@@ -724,6 +725,9 @@ func TestHeldKeepaliveThroughTheBatch(t *testing.T) {
 	send()
 	if k.got != 1 || k.batches != before+1 {
 		t.Fatalf("keep-alive of a call answered before the deadline: got %d, batches %d", k.got, k.batches-before)
+	}
+	if k.seenAt[len(k.seenAt)-1] != 1 {
+		t.Fatal("BatchEnd ran before the batch's keep-alive was handled")
 	}
 	k.at = f.m.st.OwnerCheck.Deadline.Add(time.Minute)
 	send()

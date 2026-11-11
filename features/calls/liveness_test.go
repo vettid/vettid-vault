@@ -217,3 +217,96 @@ func TestStartKeepaliveFlag(t *testing.T) {
 		t.Fatal("not watched")
 	}
 }
+
+// An outgoing watched call answered by the peer: keep-alives come from the
+// caller's device and count from the peer's answer; silence ends it failed
+// and the peer vault is told. A second housekeeping sends nothing more.
+func TestOutgoingWatchedCall(t *testing.T) {
+	a, b := newSide("cB"), newSide("cA")
+	link(a, b)
+	sk, _ := callwire.NewOfferKey()
+	start := strings.TrimSuffix(startBody("cB", sk.Public().Bytes()), "}") + `,"keepalive":true}`
+	r := featuretest.Call(a.f, a.h, t0, "app", "call.start", start)
+	if !r.OK() {
+		t.Fatalf("start: %s", r.Code)
+	}
+	id := str(t, r.Body, "call_id")
+	off := a.sent(t, "cB", "call.offer")
+	featuretest.CallExp(b.f, b.h, t0, off.Opt.Exp, "connection:cA", "call.offer", string(off.Body))
+	ring := b.sent(t, "devices", "call.offer")
+	ek, _ := obj(t, ring.Body).Base64("ek", callwire.EKSize)
+	enc, _, err := callwire.Answer(ek, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	featuretest.Call(b.f, b.h, t0.Add(5*time.Second), "app", "call.answer", answerBody("dev-app", id, enc))
+	fwd := b.sent(t, "cA", "call.answer")
+	answered := t0.Add(5 * time.Second)
+	featuretest.Call(a.f, a.h, answered, "connection:cB", "call.answer", string(fwd.Body))
+	if c, _ := a.f.Get(id); c.State != StateActive || !c.Watched || c.Device != "dev-app" {
+		t.Fatalf("caller's record: %+v", c)
+	}
+	featuretest.Call(a.f, a.h, answered.Add(60*time.Second), "app", "call.keepalive", `{"call_id":"`+id+`"}`)
+	tickAt(a, answered.Add(150*time.Second))
+	if c, _ := a.f.Get(id); c.State != StateActive {
+		t.Fatal("ended within 90 s of the caller's keep-alive")
+	}
+	a.h.Reset()
+	tickAt(a, answered.Add(151*time.Second))
+	if c, _ := a.f.Get(id); c.State != StateEnded || c.Reason != "failed" {
+		t.Fatalf("not ended failed: %+v", c)
+	}
+	if e := a.sent(t, "cB", "call.end"); str(t, e.Body, "reason") != "failed" {
+		t.Fatal("the peer vault was not told")
+	}
+	a.h.Reset()
+	tickAt(a, answered.Add(300*time.Second))
+	if len(a.h.Sent) != 0 {
+		t.Fatalf("a second housekeeping sent: %+v", a.h.Sent)
+	}
+}
+
+// A keep-alive for a ringing call or an unknown call_id is answered
+// call.end{unavailable}; a ring timeout is sent once.
+func TestKeepaliveForRingingAndUnknown(t *testing.T) {
+	b := newSide("cA")
+	sk, _ := callwire.NewOfferKey()
+	id := "01JB2Z6V9K3M4N5P6Q7R8S9T0A"
+	featuretest.CallExp(b.f, b.h, t0, t0.Add(OfferTTL), "connection:cA", "call.offer", peerOffer("cA", id, "audio", sk.Public().Bytes()))
+	for _, cid := range []string{id, "01JB2Z6V9K3M4N5P6Q7R8S9T0B"} {
+		b.h.Reset()
+		featuretest.Call(b.f, b.h, t0.Add(time.Second), "app", "call.keepalive", `{"call_id":"`+cid+`"}`)
+		if e := b.sent(t, "dev-app", "call.end"); str(t, e.Body, "reason") != "unavailable" {
+			t.Fatalf("%s: not answered unavailable", cid)
+		}
+	}
+	if c, _ := b.f.Get(id); c.State != StateRinging {
+		t.Fatal("a keep-alive changed a ringing call")
+	}
+	tickAt(b, t0.Add(OfferTTL))
+	if missedCount(b) != 1 {
+		t.Fatal("no missed call")
+	}
+	b.h.Reset()
+	tickAt(b, t0.Add(2*OfferTTL))
+	if len(b.h.Sent) != 0 || missedCount(b) != 0 {
+		t.Fatalf("a second housekeeping after the timeout: %+v", b.h.Sent)
+	}
+}
+
+// keepalive in call.answer: any value but true is refused.
+func TestAnswerKeepaliveFlag(t *testing.T) {
+	b := newSide("cA")
+	sk, _ := callwire.NewOfferKey()
+	id := "01JB2Z6V9K3M4N5P6Q7R8S9T0A"
+	featuretest.CallExp(b.f, b.h, t0, t0.Add(OfferTTL), "connection:cA", "call.offer", peerOffer("cA", id, "audio", sk.Public().Bytes()))
+	body := strings.TrimSuffix(answerBody("dev-app", id, make([]byte, callwire.EncSize)), "}")
+	for _, v := range []string{"false", `"true"`, "1"} {
+		if r := featuretest.Call(b.f, b.h, t0.Add(time.Second), "app", "call.answer", body+`,"keepalive":`+v+`}`); r.Code != "bad_request" {
+			t.Fatalf("keepalive %s: %q", v, r.Code)
+		}
+	}
+	if c, _ := b.f.Get(id); c.State != StateRinging {
+		t.Fatal("a refused answer changed the call")
+	}
+}

@@ -949,11 +949,6 @@ func (m *Manager) responderEstablish(p *Peer, aw *AwaitingHS, fr *handshake.FinR
 			m.abandonOutgoing(id, now)
 		}
 	}
-	// (Release 29 final review, item 1) §6.3.1 "Discarded, never adopted": carried tokens of an epoch rule E
-	// destroyed (or the links above demoted) are discarded in this write, and with no valid standing token held
-	// the reconnect starts in it too, not at the next batch's housekeeping. After the activation and the
-	// abandonment above, so that the epoch established here (and its own carried record) is current.
-	m.sweepCarried(p, now)
 }
 
 // finishReconnect applies a reconnect once its hs.fin verified (sig_I

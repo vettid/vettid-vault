@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"encoding/base64"
+	"encoding/json"
+	"github.com/vettid/vettid-vault/vms/envelope"
 	"strings"
 	"testing"
 	"time"
@@ -221,19 +223,55 @@ func TestForm2AnswerChecked(t *testing.T) {
 	}
 }
 
-// call.list (C2): v: 2, now, and per call exp and device_id.
+// call.list (C2): v: 2, now (the vault's clock), and per call exp (the
+// offer's) and device_id (the call's device; absent while an incoming
+// call rings).
 func TestCallListV2(t *testing.T) {
 	a := newSide("cB")
+	a.addConn("cC")
 	sk, _ := callwire.NewOfferKey()
-	id := newCallID("lv2")
-	featuretest.Call(a.f, a.h, t0, "app", "call.start", startBody2("cB", id, sk.Public().Bytes(), []int{1}))
-	r := featuretest.Call(a.f, a.h, t0.Add(time.Second), "app", "call.list", `{}`)
-	o := obj(t, r.Body)
-	if v, _ := o.Uint("v", 0, 10); v != 2 || mustStr(t, o, "now") == "" {
+	out := newCallID("lv2")
+	if r := featuretest.Call(a.f, a.h, t0, "app", "call.start", startBody2("cB", out, sk.Public().Bytes(), []int{1})); !r.OK() {
+		t.Fatal(r.Code)
+	}
+	in := newCallID("cC")
+	inExp := t0.Add(30 * time.Second)
+	featuretest.CallExp(a.f, a.h, t0, inExp, "connection:cC", "call.offer", peerOffer("cC", in, "audio", sk.Public().Bytes()))
+	now := t0.Add(1234 * time.Millisecond)
+	r := featuretest.Call(a.f, a.h, now, "app", "call.list", `{}`)
+	var got struct {
+		V     int                          `json:"v"`
+		Now   string                       `json:"now"`
+		Calls []map[string]json.RawMessage `json:"calls"`
+	}
+	if err := json.Unmarshal(r.Body, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.V != 2 || got.Now != envelope.FormatTS(now) || len(got.Calls) != 2 {
 		t.Fatalf("%s", r.Body)
 	}
-	if !strings.Contains(string(r.Body), `"exp":"`) || !strings.Contains(string(r.Body), `"device_id":"dev-app"`) {
-		t.Fatalf("per call: %s", r.Body)
+	str := func(c map[string]json.RawMessage, k string) string {
+		var v string
+		_ = json.Unmarshal(c[k], &v)
+		return v
+	}
+	seen := 0
+	for _, c := range got.Calls {
+		switch str(c, "call_id") {
+		case out:
+			seen++
+			if str(c, "exp") != envelope.FormatTS(t0.Add(OfferTTL).UTC().Truncate(time.Millisecond)) || str(c, "device_id") != "dev-app" {
+				t.Errorf("outgoing: %v", c)
+			}
+		case in:
+			seen++
+			if _, has := c["device_id"]; has || str(c, "exp") != envelope.FormatTS(inExp) {
+				t.Errorf("incoming ringing: exp %s, device_id present %v", str(c, "exp"), has)
+			}
+		}
+	}
+	if seen != 2 {
+		t.Fatalf("%s", r.Body)
 	}
 }
 

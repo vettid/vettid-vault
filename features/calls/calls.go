@@ -388,6 +388,9 @@ func suiteList(o strictjson.Object, name string) ([]int, bool, error) {
 	if !present {
 		return nil, false, nil
 	}
+	if len(raw) == 0 || len(raw) > callwire.MaxSuites {
+		return nil, false, errBad // before parsing any element
+	}
 	out := make([]int, len(raw))
 	for i, r := range raw {
 		v, err := strictjson.AsUint(r, 1, callwire.MaxSuite)

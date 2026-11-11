@@ -114,7 +114,11 @@ func checkCallVectors(t *testing.T, dir string) {
 	// (C2) Form 2 and key confirmation, by hand: m2 with the suites, and
 	// k_confirm and confirm by HKDF and HMAC. A frozen calls.json from
 	// before C2 has none.
-	if _, ok := d.m["offer_share2"]; ok {
+	_, has2 := d.m["offer_share2"]
+	if !has2 && dir == Dir {
+		t.Fatal("calls.json has no form 2 vectors") // only a frozen release's may lack them
+	}
+	if has2 {
 		// ints reads a vector's suite list; list(x) is written by hand.
 		ints := func(sh doc, k string) []int {
 			var v []int

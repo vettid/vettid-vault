@@ -206,6 +206,26 @@ func (m *Manager) sweepCarried(p *Peer, now time.Time) {
 	}
 }
 
+// dropCarried removes p's carried record of epoch id without a discard: the
+// epoch was never established (finishReconnect, when following the links
+// suspended the connection), so nothing was waiting for its tokens.
+func (m *Manager) dropCarried(p *Peer, id []byte) {
+	keep := p.Carried[:0]
+	for i := range p.Carried {
+		if !bytes.Equal(p.Carried[i].Epoch, id) {
+			keep = append(keep, p.Carried[i])
+		}
+	}
+	if len(keep) == len(p.Carried) {
+		return
+	}
+	for i := len(keep); i < len(p.Carried); i++ {
+		p.Carried[i] = CarriedTokens{}
+	}
+	p.Carried = keep
+	m.dirty = true
+}
+
 // afterCarriedDiscard: a discard with no valid held standing token puts the
 // vault in §8.6's "no valid standing token" case.
 func (m *Manager) afterCarriedDiscard(p *Peer, now time.Time) {

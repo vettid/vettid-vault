@@ -579,3 +579,128 @@ func TestLoadFailedIsStored(t *testing.T) {
 		t.Fatalf("the stored audit: %s", part)
 	}
 }
+
+// moveParams makes p an unlock that may move to target (release N+1):
+// the manifest lists it, and its sealer is the test's.
+func moveParams(d *devFixture, p *AltUnlockParams, target string) {
+	own := ReleaseEntry{PCR0: testRelease.PCR0, Number: testRelease.Number, Status: "active"}
+	next := ReleaseEntry{PCR0: target, Number: testRelease.Number + 1, Status: "active"}
+	p.Manifest = func(seen uint64) (*ManifestView, error) {
+		return &ManifestView{Serial: seen + 1, Own: own, Lookup: func(pcr0 string) (ReleaseEntry, bool) {
+			if pcr0 == target {
+				return next, true
+			}
+			return own, true
+		}}, nil
+	}
+	p.SealerFor = func(context.Context, ReleaseEntry) (Sealer, *SealKeyRecord, error) {
+		return d.opts.Sealer, &SealKeyRecord{VerifiedBy: testRelease.PCR0}, nil
+	}
+}
+
+// storedPartWith is name's part of the stored state, opened with dek.
+func storedPartWith(t *testing.T, d *devFixture, dek []byte, name string) string {
+	t.Helper()
+	blob, _, err := d.store.Get(context.Background(), store.StateKey(d.vid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pt, _, err := decryptState(dek, d.vid, blob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var st struct {
+		Features map[string]json.RawMessage `json:"features"`
+	}
+	if err := json.Unmarshal(pt, &st); err != nil {
+		t.Fatal(err)
+	}
+	return string(st.Features[name])
+}
+
+// unreadableFixture is a locked vault whose counter part a Required
+// feature cannot read, and the DEK to open its stored state with.
+func unreadableFixture(t *testing.T, before func(*Manager)) (*devFixture, []byte, string) {
+	d := newDevFixture(t)
+	ctx := context.Background()
+	d.m.mu.Lock()
+	d.m.st.Features["counter"] = json.RawMessage(`{"later":true,"n":7}`)
+	if before != nil {
+		before(d.m)
+	}
+	d.m.dirty = true
+	_ = d.m.flushThenDrain(ctx)
+	dek := append([]byte(nil), d.m.dek...)
+	d.m.mu.Unlock()
+	part := storedPartWith(t, d, dek, "counter")
+	if err := d.m.Lock(ctx); err != nil {
+		t.Fatal(err)
+	}
+	return d, dek, part
+}
+
+// (Owner decision 2026-11-11, GC #8621 a) An approved update with a part
+// a Required feature cannot read: the move is recorded and sealed for the
+// next release, the part carried byte for byte, no feature run, no
+// unlocked. A plain unlock of the same state still answers
+// state_unreadable.
+func TestAnApprovedMoveCarriesAnUnreadablePart(t *testing.T) {
+	const target = "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+	d, dek, part := unreadableFixture(t, nil)
+	opts := withRequired(d)
+	if m, out := altUnlockWith(d, opts, nil); m != nil || out.Code != CodeStateUnreadable {
+		t.Fatalf("plain unlock: %+v", out)
+	}
+	gauge := Unlocked()
+	m, out := altUnlockWith(d, opts, func(p *AltUnlockParams) {
+		moveParams(d, p, target)
+		p.Update = &UpdateRequest{To: target, ToRelease: testRelease.Number + 1,
+			VerifyApproval: func(k *UnlockKey) (json.RawMessage, error) { return k.Attestation, nil }}
+	})
+	if m != nil || !out.OK || out.Update == nil || out.Update.Result != UpdateMoved {
+		t.Fatalf("move: %+v %+v", out, out.Update)
+	}
+	for _, e := range out.Events {
+		if e.Event == "unlocked" {
+			t.Fatal("unlocked reported")
+		}
+	}
+	if Unlocked() != gauge {
+		t.Fatalf("unlocked gauge %d, was %d", Unlocked(), gauge)
+	}
+	if got := storedPartWith(t, d, dek, "counter"); got != part {
+		t.Fatalf("the part in N+1's state: %s, was %s", got, part)
+	}
+	if _, _, err := d.store.Get(context.Background(), store.HeaderKey(d.vid, target)); err != nil {
+		t.Fatalf("not sealed for the next release: %v", err)
+	}
+}
+
+// (L1, GC #8621 a) A pending move with a part a Required feature cannot
+// read completes as any pending move does, the part carried unchanged.
+func TestAPendingMoveCompletesWithAnUnreadablePart(t *testing.T) {
+	const target = "c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4"
+	d, dek, part := unreadableFixture(t, func(m *Manager) {
+		m.st.ReleaseMove = &ReleaseMove{To: target, ToRelease: testRelease.Number + 1, From: testRelease.PCR0, ApprovedBy: d0(m)}
+	})
+	m, out := altUnlockWith(d, withRequired(d), func(p *AltUnlockParams) { moveParams(d, p, target) })
+	if m != nil || !out.OK || out.Update == nil || out.Update.Result != UpdateMoved {
+		t.Fatalf("pending move: %+v %+v", out, out.Update)
+	}
+	if got := storedPartWith(t, d, dek, "counter"); got != part {
+		t.Fatalf("the part: %s, was %s", got, part)
+	}
+	if _, _, err := d.store.Get(context.Background(), store.HeaderKey(d.vid, target)); err != nil {
+		t.Fatalf("not sealed for the next release: %v", err)
+	}
+}
+
+// d0 is the vault's first app device, the move's approver.
+func d0(m *Manager) string {
+	for id, p := range m.st.Devices {
+		if p.Kind == KindApp {
+			return id
+		}
+	}
+	return ""
+}

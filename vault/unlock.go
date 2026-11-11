@@ -415,8 +415,9 @@ func UnlockAlt(ctx context.Context, p AltUnlockParams) (*Manager, *AltUnlockOutc
 	m := newManager(p.Options, &st, hdr, dek)
 	// A feature others call directly that could not read its part
 	// (m.requiredUnreadable) is refused in resume, after the release
-	// decisions (§11.10.4: a stale header is still wrong_release), or
-	// before an update's move is recorded.
+	// decisions (§11.10.4: a stale header is still wrong_release); an
+	// approved move, and a pending move's completion, still go through
+	// with the part carried unchanged (GC #8621 a).
 	m.stateVer, m.headerVer = sver, hver
 	m.unlockKey, m.unlockSecret = op.uk, append([]byte(nil), p.UnlockSecret...)
 	switch op.mode {
@@ -542,10 +543,11 @@ func (m *Manager) releaseRules(ctx context.Context, p AltUnlockParams, key *Unlo
 	if err != nil {
 		return refuse(RefuseSealKey)
 	}
-	if m.requiredUnreadable {
-		// §3.3: nothing is written, the move included.
-		return m.refuseUnreadable(out)
-	}
+	// §3.3 (owner decision 2026-11-11, GC #8621 a): a part this release
+	// cannot read does not hold back an approved move. The move is
+	// recorded and sealed for the next release with the part carried
+	// unchanged (it was not loaded, so it is written back as stored); no
+	// feature runs, nothing is sent, no unlocked. Only resume refuses.
 	// Step 6: record the move. From here on the vault does not resume
 	// under this release.
 	st.ReleaseMove = &ReleaseMove{To: entry.PCR0, ToRelease: entry.Number, From: own.PCR0, ManifestSerial: mv.Serial,

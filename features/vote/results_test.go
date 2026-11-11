@@ -1083,3 +1083,128 @@ func TestConfirmTwoReceiptsAndLateAlreadyVoted(t *testing.T) {
 		t.Errorf("%s", c.state(v))
 	}
 }
+
+// Recheck of a07d2fe: after a final check, a receipt below the close in
+// force but outside the verified close (an extension adopted from the
+// results, not verified yet) stays aside, unaccused, and is taken once the
+// extension's bundle is verified; the same holds for a shown own-vk ballot
+// and a held restore prompt. One at or after the close in force is
+// rejected at once.
+func TestFinalCheckKeepsReceiptsForAnAdoptedExtension(t *testing.T) {
+	judged := func() (*cenv, *votetest.Vote, []string, time.Time, []byte) {
+		c := newCastEnv(t)
+		v := c.open(1)
+		c.cast(v, "yes")
+		_, ids := c.casts()
+		closes := time.Unix(c.rec(v.ID).Closes, 0)
+		doc, msg := c.svc.Extension(v, 1, closes.Add(time.Hour), c.now) // its vote.extended is lost
+		c.now = closes.Add(time.Hour + CheckDelay + time.Minute)
+		c.f.Tick(c.session())
+		out, _ := c.f.SubmitResults(c.session(), "svc", v.ID, c.resultsFor(v, resOpts{mine: c.ownBallot(v), extra: []votewire.Signed{{Doc: doc, Sig: signExt(c.svc, v, doc)}}}))
+		if out.State != CheckUnconfirmed && out.State != CheckVerified || len(c.rec(v.ID).Exts) != 1 {
+			t.Fatalf("%+v", out)
+		}
+		c.h.Reset()
+		return c, v, ids, closes, msg
+	}
+	quiet := func(c *cenv, what string) {
+		t.Helper()
+		if c.hasKind("vote.receipt_rejected") || c.hasKind("vote.problem") {
+			t.Errorf("%s: accused: %v", what, c.h.Activities)
+		}
+	}
+	// The vault's own receipt.
+	c, v, ids, closes, msg := judged()
+	c.okReceipt(v, ids[0], c.leafOf(v), uint64(closes.Add(30*time.Minute).UnixMilli()))
+	quiet(c, "own")
+	if b := c.rec(v.ID).Ballot; b.Aside == nil || b.Aside.Rejected {
+		t.Fatalf("own: %+v", b.Aside)
+	}
+	c.call("vote.extended", msg)
+	if c.state(v) != BallotRecorded {
+		t.Errorf("own: %s", c.state(v))
+	}
+	// One at or after the close in force is rejected at once.
+	c, v, ids, closes, _ = judged()
+	c.okReceipt(v, ids[0], c.leafOf(v), uint64(closes.Add(70*time.Minute).UnixMilli()))
+	if !c.has("vote.receipt_rejected", v.ID) || !c.rec(v.ID).Ballot.Aside.Rejected {
+		t.Error("past the close in force: not rejected")
+	}
+	// A shown own-vk ballot (its seed taken before the close erases it).
+	c = newCastEnv(t)
+	v = c.open(1)
+	shown := c.selfBallot(v, "no")
+	closes = time.Unix(c.rec(v.ID).Closes, 0)
+	doc, msg := c.svc.Extension(v, 1, closes.Add(time.Hour), c.now)
+	c.now = closes.Add(time.Hour + CheckDelay + time.Minute)
+	c.f.Tick(c.session())
+	c.f.SubmitResults(c.session(), "svc", v.ID, c.resultsFor(v, resOpts{extra: []votewire.Signed{{Doc: doc, Sig: signExt(c.svc, v, doc)}}}))
+	c.h.Reset()
+	c.f.Check(c.session(), "svc", v.ID)
+	c.answer(v, c.statuses()[len(c.statuses())-1], shown, uint64(closes.Add(30*time.Minute).UnixMilli()), true)
+	if r := c.rec(v.ID); !r.SelfUnrecorded || !r.Self.Late || r.Self.LateRejected || c.hasKind("vote.receipt_rejected") {
+		t.Errorf("shown: %+v", r.Self)
+	}
+	c.call("vote.extended", msg)
+	if r := c.rec(v.ID); r.Self.Late {
+		t.Error("shown: still late after the extension")
+	}
+}
+
+// Recheck of a07d2fe: a restore prompt held for a receipt inside an
+// adopted, unverified extension after a final check stays held (no
+// self_unrecorded) and is offered once the extension verifies.
+func TestFinalCheckKeepsRestorePrompt(t *testing.T) {
+	c := newCastEnv(t)
+	v := c.open(1)
+	shown := c.selfBallot(v, "no")
+	closes := time.Unix(c.rec(v.ID).Closes, 0)
+	doc, msg := c.svc.Extension(v, 1, closes.Add(time.Hour), c.now)
+	c.now = closes.Add(time.Hour + CheckDelay + time.Minute)
+	c.f.Tick(c.session())
+	c.f.SubmitResults(c.session(), "svc", v.ID, c.resultsFor(v, resOpts{extra: []votewire.Signed{{Doc: doc, Sig: signExt(c.svc, v, doc)}}}))
+	c.f.TransferCompleted(c.session(), "old", "new")
+	c.f.Tick(c.session())
+	st := c.statuses()
+	c.h.Reset()
+	c.answer(v, st[len(st)-1], shown, uint64(closes.Add(30*time.Minute).UnixMilli()), true)
+	if r := c.rec(v.ID); r.ServiceBallot == nil || r.SelfUnrecorded || c.hasKind("vote.receipt_rejected") || c.hasKind("vote.problem") {
+		t.Fatalf("%+v", r.ServiceBallot)
+	}
+	c.call("vote.extended", msg)
+	if g := obj(t, c.app("vote.get", pairBody("svc", v.ID))); !boolOf(g, "confirm_pending") {
+		t.Errorf("not offered: %v", g)
+	}
+}
+
+// Recheck of a07d2fe: with a gave_up check, a receipt inside an adopted
+// extension is taken once it verifies, and a later submission is verified.
+func TestGaveUpThenVerifiedExtension(t *testing.T) {
+	c := newCastEnv(t)
+	v := c.open(1)
+	c.cast(v, "yes")
+	_, ids := c.casts()
+	closes := time.Unix(c.rec(v.ID).Closes, 0)
+	doc, msg := c.svc.Extension(v, 1, closes.Add(time.Hour), c.now)
+	x := votewire.Signed{Doc: doc, Sig: signExt(c.svc, v, doc)}
+	c.now = closes.Add(time.Hour + CheckDelay + time.Minute)
+	c.f.Tick(c.session())
+	ru := c.resultsFor(v, resOpts{extra: []votewire.Signed{x}})
+	ru.Row, ru.Proof, ru.RowsUnavailable = nil, nil, true
+	c.f.SubmitResults(c.session(), "svc", v.ID, ru)
+	c.now = c.now.Add(CheckGiveUp + time.Hour)
+	c.f.Tick(c.session())
+	if c.rec(v.ID).Check != CheckGaveUp {
+		t.Fatalf("%q", c.rec(v.ID).Check)
+	}
+	c.f.pend[ids[0]] = pendRef{conn: "svc", id: v.ID, kind: "cast", atMS: c.now.UnixMilli()}
+	c.okReceipt(v, ids[0], c.leafOf(v), uint64(closes.Add(30*time.Minute).UnixMilli()))
+	c.call("vote.extended", msg)
+	if c.state(v) != BallotRecorded {
+		t.Fatalf("%s", c.state(v))
+	}
+	stamp := closes.Add(time.Hour + CheckDelay + time.Minute) // the results were anchored then
+	if out, _ := c.f.SubmitResults(c.session(), "svc", v.ID, c.resultsFor(v, resOpts{mine: c.ownBallot(v), stampAt: stamp})); out.State != CheckVerified {
+		t.Errorf("%+v", out)
+	}
+}

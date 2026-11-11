@@ -477,11 +477,14 @@ func (f *Feature) keepShownAside(s *vault.Session, r *record, sb *svcBallot, ans
 }
 
 // asideAfterFinal: once the results were judged finally, what is kept
-// aside can no longer come into the window: it is no receipt now.
+// aside at or after the close in force (adopted extensions included) can
+// no longer come into the window: it is no receipt now. One below it, for
+// an extension adopted but not verified yet, stays aside until that
+// extension's bundle is verified (recheck of a07d2fe).
 func (f *Feature) asideAfterFinal(s *vault.Session, r *record) {
 	switch r.Check {
 	case CheckVerified, CheckUnconfirmed, CheckFailed:
-		f.rejectAside(s, r)
+		f.rejectAsideFrom(s, r, r.Closes*1000)
 	}
 }
 
@@ -545,13 +548,19 @@ func (r *record) asidePending() int64 {
 // first, never rejected (review fix 3). A restore prompt held for a late
 // receipt becomes self_unrecorded (review fix 5).
 func (f *Feature) rejectAside(s *vault.Session, r *record) {
+	f.rejectAsideFrom(s, r, 0)
+}
+
+// rejectAsideFrom is rejectAside for the receipts kept aside whose msg_ms
+// is at or after from (0: all of them).
+func (f *Feature) rejectAsideFrom(s *vault.Session, r *record, from int64) {
 	f.rejudgeAside(s, r)
 	hit := false
-	if b := r.Ballot; b != nil && b.Aside != nil && !b.Aside.Rejected {
+	if b := r.Ballot; b != nil && b.Aside != nil && !b.Aside.Rejected && b.Aside.MsgMS >= from {
 		b.Aside.Rejected, hit = true, true
 	}
 	for _, x := range r.shownBallots() {
-		if x.Late && !x.LateRejected {
+		if x.Late && !x.LateRejected && x.MsgMS >= from {
 			x.LateRejected, hit = true, true
 		}
 	}
@@ -565,7 +574,7 @@ func (f *Feature) rejectAside(s *vault.Session, r *record) {
 		f.feed(s, "vote.problem", r.Conn, r.ID, "high")
 		f.event(s, r, "problem")
 	}
-	if sb := r.ServiceBallot; sb != nil && sb.Late && r.Ballot == nil {
+	if sb := r.ServiceBallot; sb != nil && sb.Late && sb.LateRejected && r.Ballot == nil {
 		r.ServiceBallot = nil
 		f.self(s, r, nil, sb, false)
 	}

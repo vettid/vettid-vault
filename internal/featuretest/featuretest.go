@@ -417,7 +417,7 @@ func (h *Host) VouchCallShare(deviceIK ed25519.PublicKey, m []byte) ([]byte, err
 		return nil, errors.New("not a share")
 	}
 	if v := callwire.VouchingParty(m); v != nil && !v.Equal(h.Identity.Public().(ed25519.PublicKey)) {
-		return nil, errors.New("not a share") // (0.88.16) form 2 names another vault on this side
+		return nil, vault.NewError("bad_request", "") // (0.88.16) form 2 names another vault on this side
 	}
 	return suite.Sign(h.Identity, callwire.LabelVouch, callwire.VouchMessage(deviceIK, m))
 }

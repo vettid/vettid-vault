@@ -55,8 +55,10 @@ func callInfo(callID string) string { return LabelCall + callID }
 // public half (`ek`, 1,216 bytes) goes in call.start / call.offer.
 func NewOfferKey() (*suite.PrivateKey, error) { return suite.GeneratePrivateKey() }
 
-func mediaKey(k []byte, callID string) ([]byte, error) {
-	out, err := hkdf.Key(sha256.New, k, []byte(MediaSalt), callID, KeySize)
+// mediaKey is k_call from the exporter secret K; info is call_id, and in
+// form 2 (0.88.16) call_id || caller_ik || callee_ik.
+func mediaKey(k []byte, info string) ([]byte, error) {
+	out, err := hkdf.Key(sha256.New, k, []byte(MediaSalt), info, KeySize)
 	suite.Wipe(k)
 	if err != nil {
 		return nil, ErrCall
@@ -71,6 +73,28 @@ func mediaKey(k []byte, callID string) ([]byte, error) {
 //	K          = ctx.Export("vettid/vms/2/call-key", 32)
 //	k_call     = HKDF-SHA-256(ikm = K, salt = "vettid-call-v1", info = call_id, L = 32)
 func Answer(ek []byte, callID string) (enc, kCall []byte, err error) {
+	return answer(ek, callID, callID)
+}
+
+// Answer2 is Answer for a form 2 call (VAULT-MESSAGING 0.88.16): k_call is
+// bound to both members' vault identity keys,
+//
+//	k_call = HKDF-SHA-256(ikm = K, salt = "vettid-call-v1", info = call_id || caller_ik || callee_ik, L = 32)
+//
+// so the two sides of a call passed on by a third vault derive different
+// keys.
+func Answer2(ek []byte, callID string, p Parties) (enc, kCall []byte, err error) {
+	if !p.Valid() {
+		return nil, nil, ErrCall
+	}
+	return answer(ek, callID, partiesInfo(callID, p))
+}
+
+func partiesInfo(callID string, p Parties) string {
+	return callID + string(p.Caller) + string(p.Callee)
+}
+
+func answer(ek []byte, callID, info string) (enc, kCall []byte, err error) {
 	if len(ek) != EKSize || callID == "" {
 		return nil, nil, ErrCall
 	}
@@ -86,7 +110,7 @@ func Answer(ek []byte, callID string) (enc, kCall []byte, err error) {
 	if err != nil {
 		return nil, nil, ErrCall
 	}
-	kCall, err = mediaKey(k, callID)
+	kCall, err = mediaKey(k, info)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -96,6 +120,18 @@ func Answer(ek []byte, callID string) (enc, kCall []byte, err error) {
 // Accept is run by the calling device on the answer's `enc`; it returns
 // the same k_call.
 func Accept(sk *suite.PrivateKey, enc []byte, callID string) ([]byte, error) {
+	return accept(sk, enc, callID, callID)
+}
+
+// Accept2 is Accept for a form 2 call: the k_call of Answer2.
+func Accept2(sk *suite.PrivateKey, enc []byte, callID string, p Parties) ([]byte, error) {
+	if !p.Valid() {
+		return nil, ErrCall
+	}
+	return accept(sk, enc, callID, partiesInfo(callID, p))
+}
+
+func accept(sk *suite.PrivateKey, enc []byte, callID, info string) ([]byte, error) {
 	if sk == nil || len(enc) != EncSize || callID == "" {
 		return nil, ErrCall
 	}
@@ -107,7 +143,7 @@ func Accept(sk *suite.PrivateKey, enc []byte, callID string) ([]byte, error) {
 	if err != nil {
 		return nil, ErrCall
 	}
-	return mediaKey(k, callID)
+	return mediaKey(k, info)
 }
 
 // ICEServer is one entry of an ICE configuration (CALLING-SERVICE §6).

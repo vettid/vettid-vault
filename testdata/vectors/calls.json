@@ -101,6 +101,10 @@
     ]
   },
   "label_confirm": "vettid/vms/2/call-confirm",
-  "k_confirm_hex": "12c88150b1abc8da386bf6a3696d93d62822219b8bd78e261a0f76f324ba3745",
-  "confirm_b64": "B0bvmnz40gi9fW+JEAL9wlx9SeLPaTDWMZnxC6KnxuA="
+  "k_call2_hex": "fc69525bf7681cf0aa0bf2109578a36ba249fef9ea06a7f10bf6f44668d5612e",
+  "k_confirm_hex": "efc0b1e6cd50c9d22063ba085f3ca828581ffde1441f1769227f65b1c6b60122",
+  "confirm_b64": "XtY+gk1IXvTir4rH1Yk2/sHuwmpDe1UGciaS5duDNXw=",
+  "relay_vault_ik_b64": "iN9VZBNTiwAgFelhmwG9tcxIxyFWRXklY/VGD3MHp2M=",
+  "k_call2_relayed_callee_hex": "658f2ce918bdb72fec26036eea2ad4a8b34e5e813713f301fd70c377639af947",
+  "confirm_relayed_b64": "UKutbv2SCl3G6yJqXa+M/wD8ygu8Jh1FRjfw+vlkHw4="
 }

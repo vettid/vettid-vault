@@ -96,7 +96,7 @@ func TestForm2Call(t *testing.T) {
 	if raw, _, _ := r.OptArray("suites"); len(raw) != 1 || string(raw[0]) != "1" {
 		t.Fatalf("the devices' offer suites: %s", ring.Body)
 	}
-	enc, kCall, err := callwire.Answer(ek, id)
+	enc, kCall, err := callwire.Answer2(ek, id, p) // (0.88.16) the devices' form 2 k_call
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -566,12 +566,16 @@ func TestForm2PartialForNoCall(t *testing.T) {
 	}
 }
 
-// (0.88.16) A call passed on by a shared connection fails on both sides.
-// A's device calls C; C re-vouches A's device share for its own vault and
-// offers it to B as its own call: B's vault checks "C calls B" and drops
-// it. B's answer to such a call, passed back to A as C's, fails at A's
-// vault, which checks "A calls C". A device that names another callee
-// than the connection's key is refused at the start.
+// (0.88.16) A call passed on by a shared connection that re-vouches the
+// shares fails at both vaults. A's device calls C; C re-vouches A's device
+// share for its own vault and offers it to B as its own call: B's vault
+// checks "C calls B" and drops it. B's answer, passed back to A as C's,
+// fails at A's vault, which checks "A calls C". (A C that re-signs both
+// shares with a device of its own passes every vault check; the devices
+// stop it with confirm and the bound k_call, which the vault never holds:
+// see callwire.TestAnswer2 and the vectors' confirm_relayed.) A device
+// that names another party than the vault's records is refused at the
+// start.
 func TestForm2RelayedCall(t *testing.T) {
 	sk, _ := callwire.NewOfferKey()
 	ek := sk.Public().Bytes()
@@ -629,5 +633,19 @@ func TestForm2RelayedCall(t *testing.T) {
 	wrong = startBody2P("cB", newCallID("relay"), ek, []int{1}, callwire.Parties{Caller: aIK, Callee: cbIK})
 	if r := featuretest.Call(a3.f, a3.h, t0, "app", "call.start", wrong); r.Code != "bad_request" {
 		t.Fatalf("a start naming another caller: %q", r.Code)
+	}
+}
+
+// The vault's refusal to vouch for a form 2 share naming another vault on
+// its side reaches the device as bad_request, not internal. (Here the
+// feature's own view of its key differs from the key it signs with.)
+func TestForm2VouchRefusedIsBadRequest(t *testing.T) {
+	sk, _ := callwire.NewOfferKey()
+	a := newSide("cB")
+	other := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x7e}, 32)).Public().(ed25519.PublicKey)
+	a.h.IK = other // what IdentityKey returns; the host still signs with its own key
+	p := callwire.Parties{Caller: other, Callee: peerVault("cB").Public().(ed25519.PublicKey)}
+	if r := featuretest.Call(a.f, a.h, t0, "app", "call.start", startBody2P("cB", newCallID("vr"), sk.Public().Bytes(), []int{1}, p)); r.Code != "bad_request" {
+		t.Fatalf("%q", r.Code)
 	}
 }

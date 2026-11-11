@@ -102,13 +102,46 @@ func genCalls() (obj, error) {
 		return nil, err
 	}
 	answer2 = append(answer2, member{"suite", chosen}, member{"offered", offered})
-	kConfirm, err := callwire.ConfirmKey(kCall, CallID)
+	// (0.88.16) The form 2 k_call names both members, on the same enc.
+	kCall2, err := callwire.Accept2(sk, enc, CallID, parties)
+	if err != nil {
+		return nil, err
+	}
+	if bytes.Equal(kCall2, kCall) {
+		return nil, errors.New("vectors: the form 2 call key is the form 1 one")
+	}
+	kConfirm, err := callwire.ConfirmKey(kCall2, CallID)
 	if err != nil {
 		return nil, err
 	}
 	confirm := callwire.Confirm(kConfirm, chosen, offered, CallID, parties)
 	if !callwire.VerifyConfirm(kConfirm, chosen, offered, CallID, parties, confirm) {
 		return nil, errors.New("vectors: confirm does not verify")
+	}
+	// A call passed on by a relay vault C: B (the callee) answers "C calls
+	// B", A checks "A calls C". B's confirm never verifies at A.
+	relayVault := ed(SeedCallRelayVaultIK)
+	atB := callwire.Parties{Caller: pub(relayVault), Callee: pub(calleeVault)}
+	atA := callwire.Parties{Caller: pub(callerVault), Callee: pub(relayVault)}
+	kCallB, err := callwire.Accept2(sk, enc, CallID, atB)
+	if err != nil {
+		return nil, err
+	}
+	kConfirmB, err := callwire.ConfirmKey(kCallB, CallID)
+	if err != nil {
+		return nil, err
+	}
+	kCallA, err := callwire.Accept2(sk, enc, CallID, atA)
+	if err != nil {
+		return nil, err
+	}
+	kConfirmA, err := callwire.ConfirmKey(kCallA, CallID)
+	if err != nil {
+		return nil, err
+	}
+	confirmRelayed := callwire.Confirm(kConfirmB, chosen, offered, CallID, atB)
+	if callwire.VerifyConfirm(kConfirmA, chosen, offered, CallID, atA, confirmRelayed) || bytes.Equal(kCallA, kCallB) {
+		return nil, errors.New("vectors: a relayed call confirms")
 	}
 	answer, err := share(callwire.RoleAnswer, "", enc, calleeDev, calleeVault)
 	if err != nil {
@@ -175,8 +208,12 @@ func genCalls() (obj, error) {
 		{"offer_share2", offer2},
 		{"answer_share2", answer2},
 		{"label_confirm", callwire.LabelConfirm},
+		{"k_call2_hex", hx(kCall2)},
 		{"k_confirm_hex", hx(kConfirm)},
 		{"confirm_b64", b64(confirm)},
+		{"relay_vault_ik_b64", b64(pub(relayVault))},
+		{"k_call2_relayed_callee_hex", hx(kCallB)},
+		{"confirm_relayed_b64", b64(confirmRelayed)},
 	}, nil
 }
 

@@ -196,7 +196,20 @@ func checkCallVectors(t *testing.T, dir string) {
 		if d.str("label_confirm") != "vettid/vms/2/call-confirm" {
 			t.Error("label_confirm")
 		}
-		kc, err := hkdf.Key(sha256.New, kCall, []byte("vettid/vms/2/call-confirm"), id, 32)
+		// (0.88.16) The form 2 k_call names both members: info = call_id ||
+		// caller_ik || callee_ik, over the same exporter secret.
+		kCall2, err := hkdf.Key(sha256.New, k, []byte("vettid-call-v1"), id+string(caller.vaultPub)+string(callee.vaultPub), 32)
+		if err != nil {
+			t.Fatal(err)
+		}
+		eq(t, "k_call2", kCall2, d.hex("k_call2_hex"))
+		if bytes.Equal(kCall2, kCall) {
+			t.Error("the form 2 k_call is the form 1 one")
+		}
+		if got, err := callwire.Accept2(sk, enc, id, parties); err != nil || !bytes.Equal(got, kCall2) {
+			t.Errorf("k_call2 (callwire.Accept2): %v", err)
+		}
+		kc, err := hkdf.Key(sha256.New, kCall2, []byte("vettid/vms/2/call-confirm"), id, 32)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -208,7 +221,8 @@ func checkCallVectors(t *testing.T, dir string) {
 		eq(t, "confirm", mac.Sum(nil), d.b64("confirm_b64"))
 		if dir == Dir {
 			// The value VAULT-MESSAGING 0.88.16 §16 prints for this case.
-			eq(t, "confirm (spec §16)", d.b64("confirm_b64"), mustHex("0746ef9a7cf8d208bd7d6f891002fdc25c7d49e2cf6930d63199f10ba2a7c6e0"))
+			eq(t, "k_call2 (spec §16)", kCall2, mustHex("fc69525bf7681cf0aa0bf2109578a36ba249fef9ea06a7f10bf6f44668d5612e"))
+			eq(t, "confirm (spec §16)", d.b64("confirm_b64"), mustHex("5ed63e824d485ef4e2af8ac7d58936fec1eec26a437b5506722692e5db83357c"))
 			eq(t, "caller vault ik (spec §16)", caller.vaultPub, mustHex("c050c5637a44fa8629fff3cccce2300cb362a63d99d95fc54145266f4332445a"))
 			eq(t, "callee vault ik (spec §16)", callee.vaultPub, mustHex("f80cccdce4ae1c07ae208a2adf99a310ae4207e0306fa0236110b06827bbb8d0"))
 		}
@@ -217,6 +231,26 @@ func checkCallVectors(t *testing.T, dir string) {
 			callwire.VerifyConfirm(kc, chosen+1, offered, id, parties, d.b64("confirm_b64")) ||
 			callwire.VerifyConfirm(kc, chosen, offered, id, swapped, d.b64("confirm_b64")) {
 			t.Error("confirm through callwire, or bound to the choice and the parties")
+		}
+		// A call passed on by a relay vault C: B derives "C calls B", A
+		// "A calls C". Different keys, and B's confirm fails at A.
+		relay := ed25519.PublicKey(d.b64("relay_vault_ik_b64"))
+		kB, err := hkdf.Key(sha256.New, k, []byte("vettid-call-v1"), id+string(relay)+string(callee.vaultPub), 32)
+		if err != nil {
+			t.Fatal(err)
+		}
+		eq(t, "k_call2 relayed, callee's", kB, d.hex("k_call2_relayed_callee_hex"))
+		kcB, _ := hkdf.Key(sha256.New, kB, []byte("vettid/vms/2/call-confirm"), id, 32)
+		macB := hmac.New(sha256.New, kcB)
+		macB.Write([]byte(strconv.Itoa(chosen) + "\x00" + list(offered) + "\x00" + id))
+		macB.Write(relay)
+		macB.Write(callee.vaultPub)
+		eq(t, "confirm relayed", macB.Sum(nil), d.b64("confirm_relayed_b64"))
+		kA, _ := hkdf.Key(sha256.New, k, []byte("vettid-call-v1"), id+string(caller.vaultPub)+string(relay), 32)
+		kcA, _ := hkdf.Key(sha256.New, kA, []byte("vettid/vms/2/call-confirm"), id, 32)
+		atA := callwire.Parties{Caller: caller.vaultPub, Callee: relay}
+		if bytes.Equal(kA, kB) || callwire.VerifyConfirm(kcA, chosen, offered, id, atA, d.b64("confirm_relayed_b64")) {
+			t.Error("a relayed call shares a key, or its confirm verifies at the caller")
 		}
 	}
 

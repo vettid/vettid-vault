@@ -67,6 +67,9 @@ func (p Parties) Valid() bool {
 }
 
 func m2(role, callID, media, suites string, p Parties, share []byte) []byte {
+	if !p.Valid() {
+		return nil // never a message that names a short or missing key
+	}
 	m := make([]byte, 0, len(role)+len(callID)+len(media)+len(suites)+4+2*ed25519.PublicKeySize+len(share))
 	m = append(append(m, role...), 0)
 	m = append(append(m, callID...), 0)
@@ -107,6 +110,9 @@ func ConfirmKey(kCall []byte, callID string) ([]byte, error) {
 // list(offered) || 0x00 || call_id || caller_ik || callee_ik), with
 // chosen, offered and the parties as in the answer's m2.
 func Confirm(kConfirm []byte, chosen int, offered []int, callID string, p Parties) []byte {
+	if !p.Valid() {
+		return nil
+	}
 	mac := hmac.New(sha256.New, kConfirm)
 	mac.Write([]byte(strconv.Itoa(chosen) + "\x00" + SuiteList(offered) + "\x00" + callID))
 	mac.Write(p.Caller)

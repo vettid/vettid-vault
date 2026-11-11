@@ -94,3 +94,42 @@ func TestParties(t *testing.T) {
 		t.Error("confirm not bound to the parties in order")
 	}
 }
+
+// (0.88.16) Form 2's k_call names both members: both devices derive the
+// same key, which differs from form 1's and from another pair's.
+func TestAnswer2(t *testing.T) {
+	const id = "01JABCDEFGHJKMNPQRSTVWXYZ0"
+	sk, err := NewOfferKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, b, c := bytes.Repeat([]byte{1}, 32), bytes.Repeat([]byte{2}, 32), bytes.Repeat([]byte{3}, 32)
+	pp := Parties{Caller: a, Callee: b}
+	enc, k2, err := Answer2(sk.Public().Bytes(), id, pp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := Accept2(sk, enc, id, pp)
+	if err != nil || !bytes.Equal(got, k2) {
+		t.Fatalf("the two sides differ: %v", err)
+	}
+	k1, _ := Accept(sk, enc, id)
+	other, _ := Accept2(sk, enc, id, Parties{Caller: c, Callee: b})
+	swapped, _ := Accept2(sk, enc, id, Parties{Caller: b, Callee: a})
+	if bytes.Equal(k1, k2) || bytes.Equal(other, k2) || bytes.Equal(swapped, k2) {
+		t.Fatal("k_call not bound to the parties")
+	}
+	if _, _, err := Answer2(sk.Public().Bytes(), id, Parties{Caller: a}); err == nil {
+		t.Fatal("Answer2 with one party")
+	}
+	if _, err := Accept2(sk, enc, id, Parties{Caller: a, Callee: b[:31]}); err == nil {
+		t.Fatal("Accept2 with a short key")
+	}
+	// A message or confirm naming a short or missing key is never built.
+	ek := sk.Public().Bytes()
+	if OfferMessage2(id, "audio", []int{1}, Parties{Caller: a}, ek) != nil ||
+		AnswerMessage2(id, 1, []int{1}, Parties{Caller: a, Callee: b[:31]}, enc) != nil ||
+		Confirm(bytes.Repeat([]byte{9}, 32), 1, []int{1}, id, Parties{Callee: b}) != nil {
+		t.Fatal("built with a short or missing key")
+	}
+}

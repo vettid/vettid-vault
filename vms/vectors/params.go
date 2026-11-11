@@ -55,6 +55,7 @@ const (
 	SeedCallCallerVaultIK  byte = 0x51 // its vault's ik
 	SeedCallCalleeDeviceIK byte = 0x52 // the answering device's ik
 	SeedCallCalleeVaultIK  byte = 0x53 // its vault's ik
+	SeedCallRelayVaultIK   byte = 0x56 // (0.88.16) a third vault that passes a call on
 	SeedCallOfferKEM       byte = 0x54 // the caller's ephemeral KEM key
 	RandCallAnswer         byte = 0x55 // the answerer's encapsulation randomness
 

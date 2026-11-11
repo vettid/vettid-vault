@@ -457,7 +457,7 @@ func TestReceiptKeptAsideForAnExtension(t *testing.T) {
 		return c, v, closes
 	}
 	// It keeps sending.
-	c, v, _ := aside()
+	c, _, _ := aside()
 	n, _ := c.casts()
 	c.tickAt(2 * time.Minute)
 	if m, _ := c.casts(); len(m) <= len(n) {

@@ -573,19 +573,14 @@ func (r *record) asidePending() int64 {
 	return at
 }
 
-// rejectAside: a receipt kept aside still outside the window at a final
-// judgement of the results is no receipt: audited vote.receipt_rejected
-// then and kept as evidence, and (GC #7991 F) the service signed for a cast
-// outside its own window, so the member is told (vote.problem, once). The
-// row check is unchanged by it. One inside the window by now is judged
-// first, never rejected (review fix 3). A restore prompt held for a late
-// receipt becomes self_unrecorded (review fix 5).
-func (f *Feature) rejectAside(s *vault.Session, r *record) {
-	f.rejectAsideFrom(s, r, 0)
-}
-
-// rejectAsideFrom is rejectAside for the receipts kept aside whose msg_ms
-// is at or after from (0: all of them).
+// rejectAsideFrom: a receipt kept aside whose msg_ms is at or after from
+// (0: all of them), still outside the window at a final judgement of the
+// results, is no receipt: audited vote.receipt_rejected then and kept as
+// evidence, and (GC #7991 F) the service signed for a cast outside its own
+// window, so the member is told (vote.problem, once). The row check is
+// unchanged by it. One inside the window by now is judged first, never
+// rejected (review fix 3). A restore prompt held for a late receipt becomes
+// self_unrecorded (review fix 5).
 func (f *Feature) rejectAsideFrom(s *vault.Session, r *record, from int64) {
 	f.rejudgeAside(s, r)
 	hit := false

@@ -242,6 +242,10 @@ type Hooks struct {
 	// deleted), crashes the vault there (fault injection, §10.5.1 write
 	// order).
 	AttachStep func(step string) error
+	// RestampFail, if it returns an error, fails ageCheck's re-seal of e
+	// with it (fault injection, card GC #6875: an entry that can't be sealed
+	// again).
+	RestampFail func(e *OutboxEntry) error
 }
 
 // Manager is one unlocked vault.

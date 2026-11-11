@@ -314,7 +314,13 @@ func (m *Manager) ageCheck(e *OutboxEntry, now time.Time) bool {
 		return false
 	case !e.Tried && age > RestampAfter:
 		in.TS, in.Seq, in.Features = now, 0, nil
-		raw, err := m.sealFor(p, kr.Current(), in)
+		var raw []byte
+		if h := m.opt.Hooks.RestampFail; h != nil {
+			err = h(e)
+		}
+		if err == nil {
+			raw, err = m.sealFor(p, kr.Current(), in)
+		}
 		if errors.Is(err, errDemoted) {
 			// Demoted since: the demotion's rehold holds it; until then it
 			// waits here (its old bytes are not sent under a demoted epoch).

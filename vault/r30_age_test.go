@@ -3,6 +3,7 @@ package vault
 import (
 	"bytes"
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -488,5 +489,79 @@ func TestAgeLateThenWindowOneNotice(t *testing.T) {
 	}
 	if n := f.unconfirmedNotices(0); n != 1 {
 		t.Fatalf("%d notices, want 1", n)
+	}
+}
+
+// Lead's L1 (b), #7906: told "may not have been delivered" at its late
+// deposit, then ended by the peer's removal: no "couldn't be delivered"
+// after it (it may have arrived); the end is audited.
+func TestAgeLateThenRemovedOneNotice(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	e, _ := f.waitingNote(0, "late-then-removed")
+	f.do(0, func(m *Manager, p *Peer) { e.Tried = true })
+	f.advance(RestampAfter + time.Hour)
+	d := f.d[0]
+	d.relay.mu.Lock()
+	d.relay.failMailbox = map[string]error{f.m(1).st.Relay.Mailbox: &relayclient.Error{Status: 429, Code: "rate_limited"}}
+	d.relay.mu.Unlock()
+	f.release(0) // told, refused
+	f.do(0, func(m *Manager, p *Peer) { m.removeConnection(p, "in", f.clk) })
+	if !e.Done || !f.audited(0, "undelivered_removed") {
+		t.Fatalf("done %v, audited %v: want ended (undelivered_removed)", e.Done, f.audited(0, "undelivered_removed"))
+	}
+	n := 0
+	for _, a := range f.sink[0].got {
+		if a.Feed && (a.Kind == NoticeUnconfirmed || a.Kind == NoticeNotDelivered) {
+			n++
+		}
+	}
+	if n != 1 || f.unconfirmedNotices(0) != 1 {
+		t.Fatalf("%d notices, want the one at the late deposit", n)
+	}
+}
+
+// Upkeep deposited late (here relay.token.refresh) is neither told nor
+// audited as unconfirmed_late: only the member's own messages are.
+func TestAgeLateUpkeepNotTold(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	e, _ := f.waitingNote(0, "late-upkeep")
+	f.do(0, func(m *Manager, p *Peer) { e.Tried, e.Type = true, "relay.token.refresh" })
+	f.advance(RestampAfter + time.Hour)
+	f.release(0)
+	f.settle()
+	if n := f.unconfirmedNotices(0); n != 0 || f.audited(0, "unconfirmed_late") {
+		t.Fatalf("%d notices, audited %v: want neither for upkeep", n, f.audited(0, "unconfirmed_late"))
+	}
+}
+
+// An untried entry past RestampAfter whose re-seal fails within the 16
+// days goes as it is, and the member is told it may not have been
+// delivered.
+func TestAgeUnsealableWithinWindowTold(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	e, _ := f.waitingNote(0, "unsealable")
+	before := append([]byte(nil), e.Payload...)
+	f.m(0).opt.Hooks.RestampFail = func(x *OutboxEntry) error {
+		if x == e {
+			return errors.New("test: can't be sealed again")
+		}
+		return nil
+	}
+	f.advance(RestampAfter + time.Hour)
+	f.do(0, func(m *Manager, p *Peer) {
+		if m.ageCheck(e, f.clk) || !bytes.Equal(e.Payload, before) {
+			t.Fatal("an entry that couldn't be sealed again was changed or held")
+		}
+	})
+	f.release(0)
+	f.settle()
+	if n := f.arrived(1, "unsealable"); n != 1 {
+		t.Fatalf("arrived %d times, want 1 (as it is)", n)
+	}
+	if n := f.unconfirmedNotices(0); n != 1 || !f.audited(0, "unconfirmed_late") {
+		t.Fatalf("%d notices, audited %v: want told once", n, f.audited(0, "unconfirmed_late"))
 	}
 }

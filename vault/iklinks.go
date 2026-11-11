@@ -666,11 +666,14 @@ func (m *Manager) notDelivered(e *OutboxEntry, reason string, now time.Time) {
 	if reason == "undelivered_removed" && m.removingOwn && !NoticeOwnRemoval {
 		return // the member's own removal: audited, not told (#7806)
 	}
+	if e.Unconfirmed {
+		// Told at its late deposit that it may not have been delivered: any
+		// end since is audited, not told again; "couldn't be delivered"
+		// would overstate it, as it may have arrived (lead, #7906).
+		return
+	}
 	kind := NoticeNotDelivered
 	if reason == "undelivered_window" {
-		if e.Unconfirmed {
-			return // told already, at its late deposit: the same notice
-		}
 		kind = NoticeUnconfirmed
 	}
 	m.notice(e, typ, kind, ref, now)

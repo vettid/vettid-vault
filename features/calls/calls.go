@@ -23,6 +23,7 @@ import (
 	"crypto/sha1" // coturn use-auth-secret is HMAC-SHA1 (CALLING-SERVICE §5)
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"sort"
 	"strconv"
 	"sync"
@@ -245,7 +246,7 @@ func (f *Feature) Handle(ctx context.Context, s *vault.Session, in *envelope.Inn
 	case "call.start":
 		return f.start(ctx, s, in.Body)
 	case "call.list":
-		return f.list(in.Body)
+		return f.list(s, in.Body)
 	case "call.offer":
 		return nil, f.offer(ctx, s, in)
 	case "call.answer":
@@ -332,6 +333,10 @@ type Start struct {
 	EK           []byte
 	EKSig        []byte // the device's signature over the share
 	Keepalive    bool   // (C2) its device sends call.keepalive
+	// (C2) Form 2: the offered media suites and the device's signature
+	// over m2 ("Call forms"); both or neither.
+	Suites []int
+	EKSig2 []byte
 }
 
 func sig(o strictjson.Object, name string) ([]byte, error) {
@@ -374,6 +379,112 @@ func (v Vouched) add(b *strictjson.Builder) *strictjson.Builder {
 	return b.Base64("device_ik", v.DeviceIK).Base64("device_sig", v.DeviceSig).Base64("vault_sig", v.VaultSig)
 }
 
+// suiteList reads an optional suites or offered list (C2): 1 to 8 integers
+// 1–65,535, none repeated.
+func suiteList(o strictjson.Object, name string) ([]int, bool, error) {
+	raw, present, err := o.OptArray(name)
+	if err != nil {
+		return nil, false, errBad
+	}
+	if !present {
+		return nil, false, nil
+	}
+	if len(raw) == 0 || len(raw) > callwire.MaxSuites {
+		return nil, false, errBad // before parsing any element
+	}
+	out := make([]int, len(raw))
+	for i, r := range raw {
+		v, err := strictjson.AsUint(r, 1, callwire.MaxSuite)
+		if err != nil {
+			return nil, false, errBad
+		}
+		out[i] = int(v)
+	}
+	if callwire.ValidSuites(out) != nil {
+		return nil, false, errBad
+	}
+	return out, true, nil
+}
+
+func suitesJSON(list []int) []byte {
+	b := []byte{'['}
+	for i, s := range list {
+		if i > 0 {
+			b = append(b, ',')
+		}
+		b = strconv.AppendInt(b, int64(s), 10)
+	}
+	return append(b, ']')
+}
+
+// form2 are an answer's form 2 members (C2): the chosen suite, the offered
+// list as the answering device read it, and the key confirmation.
+type form2 struct {
+	Suite   int
+	Offered []int
+	Confirm []byte
+}
+
+// answerForm2 reads an answer's form 2 members: all of suite, offered and
+// confirm, or none (an answer is in exactly one form).
+func answerForm2(o strictjson.Object) (*form2, error) {
+	_, hasSuite := o["suite"]
+	offered, hasOffered, err := suiteList(o, "offered")
+	if err != nil {
+		return nil, err
+	}
+	_, hasConfirm := o["confirm"]
+	if !hasSuite && !hasOffered && !hasConfirm {
+		return nil, nil
+	}
+	if !hasSuite || !hasOffered || !hasConfirm {
+		return nil, errBad
+	}
+	s, err := o.Uint("suite", 1, callwire.MaxSuite)
+	if err != nil {
+		return nil, errBad
+	}
+	c, err := o.Base64("confirm", callwire.ConfirmSize)
+	if err != nil {
+		return nil, errBad
+	}
+	return &form2{Suite: int(s), Offered: offered, Confirm: c}, nil
+}
+
+func (f2 *form2) add(b *strictjson.Builder) *strictjson.Builder {
+	if f2 == nil {
+		return b
+	}
+	return b.Uint("suite", uint64(f2.Suite)).Raw("offered", suitesJSON(f2.Offered)).Base64("confirm", f2.Confirm)
+}
+
+// parties are a call's two members as this vault names them in form 2
+// (0.88.16), from its own records: its own identity key, and conn's
+// pinned one; dir is the call's direction here.
+//
+// ok is false when either key is missing (the connection is gone): the
+// caller then treats the share as one that doesn't verify.
+func parties(s *vault.Session, conn, dir string) (callwire.Parties, bool) {
+	own := s.IdentityKey()
+	var peer ed25519.PublicKey
+	if p, ok := s.Connection(conn); ok {
+		peer = p.IK
+	}
+	pp := callwire.Parties{Caller: peer, Callee: own}
+	if dir == DirOut {
+		pp = callwire.Parties{Caller: own, Callee: peer}
+	}
+	return pp, pp.Valid()
+}
+
+// answerMessage is the signed bytes of an answer in its form.
+func answerMessage(callID string, f2 *form2, p callwire.Parties, enc []byte) []byte {
+	if f2 != nil {
+		return callwire.AnswerMessage2(callID, f2.Suite, f2.Offered, p, enc)
+	}
+	return callwire.ShareMessage(callwire.RoleAnswer, callID, "", enc)
+}
+
 // vouch checks a share from one of our devices against its paired record
 // and signs it for the peer vault.
 func vouch(s *vault.Session, m, deviceSig []byte) (Vouched, error) {
@@ -383,6 +494,10 @@ func vouch(s *vault.Session, m, deviceSig []byte) (Vouched, error) {
 	}
 	vs, err := s.VouchCallShare(dev, m)
 	if err != nil {
+		var he *vault.HandlerError
+		if errors.As(err, &he) && he.Code == "bad_request" {
+			return Vouched{}, err // a share the vault won't vouch for (form 2 naming another vault)
+		}
 		return Vouched{}, errInternal
 	}
 	return Vouched{DeviceIK: append([]byte(nil), dev...), DeviceSig: deviceSig, VaultSig: vs}, nil
@@ -443,6 +558,20 @@ func ParseStart(body []byte) (*Start, error) {
 	if st.Keepalive, err = keepaliveFlag(o); err != nil {
 		return nil, err
 	}
+	suites, hasSuites, err := suiteList(o, "suites")
+	if err != nil {
+		return nil, err
+	}
+	_, hasSig2 := o["ek_sig2"]
+	if hasSuites != hasSig2 {
+		return nil, errBad // suites without ek_sig2, or the reverse
+	}
+	if hasSuites {
+		st.Suites = suites
+		if st.EKSig2, err = sig(o, "ek_sig2"); err != nil {
+			return nil, err
+		}
+	}
 	return st, nil
 }
 
@@ -472,12 +601,27 @@ func (f *Feature) start(ctx context.Context, s *vault.Session, body []byte) (jso
 	if err != nil {
 		return nil, err
 	}
+	var v2 Vouched
+	if st.Suites != nil {
+		// Form 2 is vouched only after the device's signature of it verified.
+		pp, ok := parties(s, st.ConnectionID, DirOut)
+		if !ok {
+			return nil, errNotFound
+		}
+		if v2, err = vouch(s, callwire.OfferMessage2(id, st.Media, st.Suites, pp, st.EK), st.EKSig2); err != nil {
+			return nil, err
+		}
+	}
 	exp := now.Add(OfferTTL).UTC().Truncate(time.Millisecond)
 	cfg, isig, err := f.iceFor(ctx, s, id)
 	if err != nil {
 		return nil, errInternal
 	}
-	offer := v.add(strictjson.NewBuilder().String("call_id", id).String("media", st.Media).String("sdp", st.SDP).Base64("ek", st.EK)).Bytes()
+	ob := v.add(strictjson.NewBuilder().String("call_id", id).String("media", st.Media).String("sdp", st.SDP).Base64("ek", st.EK))
+	if st.Suites != nil {
+		ob.Raw("suites", suitesJSON(st.Suites)).Base64("device_sig2", v2.DeviceSig).Base64("vault_sig2", v2.VaultSig)
+	}
+	offer := ob.Bytes()
 	if err := s.Send(st.ConnectionID, "call.offer", offer, vault.SendOptions{Exp: exp}); err != nil {
 		return nil, errConn
 	}
@@ -498,6 +642,11 @@ type Offer struct {
 	SDP    string
 	EK     []byte
 	Vouched
+	// (C2) Form 2: the suites and their signatures. Form2Bad: the offer
+	// carries part of form 2 (it is dropped, drop.call_share).
+	Suites                []int
+	DeviceSig2, VaultSig2 []byte
+	Form2Bad              bool
 }
 
 // ParseOffer parses a call.offer body strictly.
@@ -522,6 +671,20 @@ func ParseOffer(body []byte) (*Offer, error) {
 	if of.Vouched, err = vouched(o); err != nil {
 		return nil, err
 	}
+	suites, hasSuites, err := suiteList(o, "suites")
+	_, hasD2 := o["device_sig2"]
+	_, hasV2 := o["vault_sig2"]
+	switch {
+	case err != nil, hasSuites != hasD2, hasSuites != hasV2:
+		of.Form2Bad = true
+	case hasSuites:
+		of.Suites = suites
+		of.DeviceSig2, err = sig(o, "device_sig2")
+		if err == nil {
+			of.VaultSig2, err = sig(o, "vault_sig2")
+		}
+		of.Form2Bad = err != nil
+	}
 	return of, nil
 }
 
@@ -543,6 +706,16 @@ func (f *Feature) offer(ctx context.Context, s *vault.Session, in *envelope.Inne
 	}
 	if !checkPeerShare(s, callwire.ShareMessage(callwire.RoleOffer, of.CallID, of.Media, of.EK), of.Vouched) {
 		return nil // a swapped or unsigned share: no ringing
+	}
+	// (C2) Every form an offer carries is checked: form 2 incomplete or
+	// not verifying drops the offer.
+	pp, okP := parties(s, conn, DirIn)
+	if of.Form2Bad || of.Suites != nil && (!okP || !checkPeerShare(s, callwire.OfferMessage2(of.CallID, of.Media, of.Suites, pp, of.EK),
+		Vouched{DeviceIK: of.DeviceIK, DeviceSig: of.DeviceSig2, VaultSig: of.VaultSig2})) {
+		if of.Form2Bad || !okP { // (checkPeerShare audits a share that doesn't verify)
+			s.Record(vault.Activity{Kind: "drop.call_share", ConnectionID: conn, Audit: true})
+		}
+		return nil
 	}
 	if f.off[conn] {
 		// Calls from this connection are off: no ringing, no answer, no
@@ -590,9 +763,13 @@ func (f *Feature) offer(ctx context.Context, s *vault.Session, in *envelope.Inne
 		return nil
 	}
 	peer, _ := s.Connection(conn)
-	ev := of.Vouched.add(strictjson.NewBuilder().String("call_id", c.ID).String("connection_id", conn).String("media", c.Media).
+	eb := of.Vouched.add(strictjson.NewBuilder().String("call_id", c.ID).String("connection_id", conn).String("media", c.Media).
 		String("sdp", of.SDP).Base64("ek", of.EK).String("exp", envelope.FormatTS(c.Exp)).
-		Base64("ice_config", cfg).Base64("ice_sig", isig)).Base64("peer_ik", peer.IK).Bytes()
+		Base64("ice_config", cfg).Base64("ice_sig", isig)).Base64("peer_ik", peer.IK)
+	if of.Suites != nil {
+		eb.Raw("suites", suitesJSON(of.Suites)).Base64("device_sig2", of.DeviceSig2).Base64("vault_sig2", of.VaultSig2)
+	}
+	ev := eb.Bytes()
 	s.NotifyDevicesWith("call.offer", ev, "", vault.SendOptions{Exp: c.Exp})
 	return nil
 }
@@ -706,6 +883,11 @@ type Answer struct {
 	// Keepalive: (C2) a device's answer says it sends call.keepalive.
 	Keepalive bool
 	Vouched
+	// Form2: (C2) the answer is in form 2 (its signatures are over m2).
+	// Form2Bad: it carries part of form 2, or a form 2 member malformed;
+	// it is treated as a share that doesn't verify (drop.call_share).
+	Form2    *form2
+	Form2Bad bool
 }
 
 // ParseAnswer parses a call.answer body strictly: from a device it carries
@@ -725,6 +907,8 @@ func ParseAnswer(body []byte, fromPeer bool) (*Answer, error) {
 	if a.Enc, err = o.Base64("enc", callwire.EncSize); err != nil {
 		return nil, errBad
 	}
+	a.Form2, err = answerForm2(o)
+	a.Form2Bad = err != nil
 	if fromPeer {
 		a.Vouched, err = vouched(o)
 	} else {
@@ -757,12 +941,23 @@ func (f *Feature) answerFromDevice(s *vault.Session, body []byte) error {
 	if c == nil || c.Dir != DirIn || c.State != StateRinging || !now.Before(c.Exp) {
 		return unavailable(s, a.CallID)
 	}
-	v, err := vouch(s, callwire.ShareMessage(callwire.RoleAnswer, c.ID, "", a.Enc), a.EncSig)
+	if a.Form2Bad {
+		s.Record(vault.Activity{Kind: "drop.call_share", DeviceID: s.From().ID, Audit: true})
+		return unavailable(s, a.CallID)
+	}
+	pp, ok := parties(s, c.Conn, DirIn)
+	if a.Form2 != nil && !ok {
+		s.Record(vault.Activity{Kind: "drop.call_share", DeviceID: s.From().ID, Audit: true})
+		return unavailable(s, a.CallID) // the connection is gone: nothing to name
+	}
+	v, err := vouch(s, answerMessage(c.ID, a.Form2, pp, a.Enc), a.EncSig)
 	if err != nil {
 		s.Record(vault.Activity{Kind: "drop.call_share", DeviceID: s.From().ID, Audit: true})
 		return unavailable(s, a.CallID)
 	}
-	out := v.add(strictjson.NewBuilder().String("call_id", c.ID).String("sdp", a.SDP).Base64("enc", a.Enc)).Bytes()
+	// The vault doesn't judge the choice or confirm: that is for the calling
+	// device, which alone knows what it offered (§10.10 "Call forms").
+	out := a.Form2.add(v.add(strictjson.NewBuilder().String("call_id", c.ID).String("sdp", a.SDP).Base64("enc", a.Enc))).Bytes()
 	if err := s.SendToConnection(c.Conn, "call.answer", out); err != nil {
 		f.finish(s, c, "unavailable")
 		return unavailable(s, a.CallID)
@@ -786,7 +981,16 @@ func (f *Feature) answerFromPeer(s *vault.Session, body []byte) error {
 	if c == nil || c.Conn != s.From().ID || c.Dir != DirOut || c.State != StateRinging {
 		return nil
 	}
-	if !checkPeerShare(s, callwire.ShareMessage(callwire.RoleAnswer, c.ID, "", a.Enc), a.Vouched) {
+	if a.Form2Bad {
+		s.Record(vault.Activity{Kind: "drop.call_share", ConnectionID: c.Conn, Audit: true})
+		return nil // as a share that doesn't verify: the call keeps ringing
+	}
+	pp, ok := parties(s, c.Conn, DirOut)
+	if a.Form2 != nil && !ok {
+		s.Record(vault.Activity{Kind: "drop.call_share", ConnectionID: c.Conn, Audit: true})
+		return nil
+	}
+	if !checkPeerShare(s, answerMessage(c.ID, a.Form2, pp, a.Enc), a.Vouched) {
 		return nil // the call keeps ringing until it times out or ends
 	}
 	if s.OwnerHeld() {
@@ -799,8 +1003,8 @@ func (f *Feature) answerFromPeer(s *vault.Session, body []byte) error {
 		return nil
 	}
 	peer, _ := s.Connection(c.Conn)
-	if err := s.Send(c.Device, "call.answer", a.Vouched.add(strictjson.NewBuilder().String("call_id", c.ID).String("sdp", a.SDP).
-		Base64("enc", a.Enc)).Base64("peer_ik", peer.IK).Bytes(), vault.SendOptions{}); err != nil {
+	if err := s.Send(c.Device, "call.answer", a.Form2.add(a.Vouched.add(strictjson.NewBuilder().String("call_id", c.ID).String("sdp", a.SDP).
+		Base64("enc", a.Enc)).Base64("peer_ik", peer.IK)).Bytes(), vault.SendOptions{}); err != nil {
 		// Its device can't receive the answer (a desktop whose session
 		// ended, an app gated past the deadline, a suspended or removed
 		// device): the call can't go on.
@@ -1002,7 +1206,7 @@ func (f *Feature) ringing(s *vault.Session, body []byte, fromConn bool) error {
 }
 
 // list: the call history, newest first.
-func (f *Feature) list(body []byte) (json.RawMessage, error) {
+func (f *Feature) list(s *vault.Session, body []byte) (json.RawMessage, error) {
 	o, err := strictjson.ParseObject(body)
 	if err != nil {
 		return nil, errBad
@@ -1032,12 +1236,20 @@ func (f *Feature) list(body []byte) (json.RawMessage, error) {
 		if !c.Ended.IsZero() {
 			b.String("ended_at", envelope.FormatTS(c.Ended))
 		}
+		// (C2) exp, the offer's, and the call's device (absent while an
+		// incoming call rings).
+		b.String("exp", envelope.FormatTS(c.Exp))
+		if c.Device != "" {
+			b.String("device_id", c.Device)
+		}
 		if i > 0 {
 			arr = append(arr, ',')
 		}
 		arr = append(arr, b.Bytes()...)
 	}
-	return strictjson.NewBuilder().Raw("calls", append(arr, ']')).Bytes(), nil
+	// (C2) v: 2 tells a device its vault's level ("Mixed releases"); now is
+	// the vault's clock.
+	return strictjson.NewBuilder().Uint("v", 2).String("now", envelope.FormatTS(s.Now())).Raw("calls", append(arr, ']')).Bytes(), nil
 }
 
 // ConnectionRemoved implements vault.ConnectionRemovedObserver: live calls

@@ -149,6 +149,9 @@ func (h managerHost) VouchCallShare(deviceIK ed25519.PublicKey, m []byte) ([]byt
 	if len(deviceIK) != ed25519.PublicKeySize || !callwire.ValidShareMessage(m) {
 		return nil, errBadRequest
 	}
+	if v := callwire.VouchingParty(m); v != nil && !v.Equal(h.m.keys.ik.Public().(ed25519.PublicKey)) {
+		return nil, errBadRequest // (0.88.16) form 2 names another vault on this side
+	}
 	return suite.Sign(h.m.keys.ik, callwire.LabelVouch, callwire.VouchMessage(deviceIK, m))
 }
 

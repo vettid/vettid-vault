@@ -114,17 +114,18 @@ func TestForeignBallotIsAConflictNotAPrompt(t *testing.T) {
 		t.Errorf("cast after the conflict evidence: %v", err)
 	}
 	// The results check fails with the conflict.
-	// Without a restore: a ballot the vault never signed, even with the
-	// record's own vk, is a conflict.
+	// Without a restore: a ballot the vault never signed with the record's
+	// own vk is no prompt and (0.88.12) no conflict evidence either: it is
+	// self_unrecorded, and an empty row fails (row_mismatch).
 	c2 := newCastEnv(t)
 	w := c2.open(1)
 	c2.f.Check(c2.session(), "svc", w.ID)
 	own := ed25519.NewKeyFromSeed(c2.rec(w.ID).VKSeed)
 	c2.answer(w, c2.statuses()[0], must(votewire.SignBallot(own, w.Hash, w.Tag, "no")), uint64(c2.now.UnixMilli()), true)
-	if r := c2.rec(w.ID); r.ServiceBallot != nil || !r.ConflictEv {
+	if r := c2.rec(w.ID); r.ServiceBallot != nil || r.ConflictEv || !r.SelfUnrecorded {
 		t.Errorf("no restore: %+v", r.ServiceBallot)
 	}
-	if s, why := verdict(c2.rec(w.ID), nil); s != CheckFailed || why != "conflict" {
+	if s, why := verdict(c2.rec(w.ID), nil); s != CheckFailed || why != "row_mismatch" {
 		t.Errorf("verdict %s %s", s, why)
 	}
 	// After a restore, the record's own vk: offered.
@@ -255,14 +256,22 @@ func TestUnheldStatusIsVerified(t *testing.T) {
 }
 
 // Receipts that arrive in a status answer are held to the window as those of
-// vote.cast are.
+// vote.cast are: (0.88.12) one at the close in force, before the original
+// close + 86,400 s, is kept aside, not taken; one past that is no answer.
 func TestStatusReceiptWindow(t *testing.T) {
 	c := newCastEnv(t)
 	v := c.open(1)
 	c.cast(v, "yes")
 	c.f.Check(c.session(), "svc", v.ID)
 	c.answer(v, c.statuses()[0], c.ownBallot(v), uint64(c.rec(v.ID).Closes*1000), true) // not before the close
-	if c.state(v) == BallotRecorded || len(c.rec(v.ID).StatusAnswers) != 0 {
+	if b := c.rec(v.ID).Ballot; b.State != BallotSending || b.Aside == nil || len(b.ReceiptSig) != 0 || len(c.rec(v.ID).VKSeed) == 0 {
+		t.Errorf("a receipt for an extension not learned: %+v", b)
+	}
+	c.now = c.now.Add(11 * time.Minute)
+	c.f.Check(c.session(), "svc", v.ID)
+	n := len(c.rec(v.ID).StatusAnswers)
+	c.answer(v, c.statuses()[1], c.ownBallot(v), uint64((c.rec(v.ID).OrigClose+votewire.MaxExtension)*1000), true)
+	if c.state(v) == BallotRecorded || len(c.rec(v.ID).StatusAnswers) != n {
 		t.Error("a receipt outside the window was taken")
 	}
 }

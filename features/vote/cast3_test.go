@@ -365,7 +365,8 @@ func TestStatusOwnVKWithoutARestore(t *testing.T) {
 	if c.countKind("vote.self_mismatch") != 1 || c.countKind("vote.self_unrecorded") != 1 || c.rec(v.ID).SelfLatest == nil {
 		t.Errorf("a repeat: %v", c.h.Activities)
 	}
-	// A cast after it: the vault's own ballot meets the shown one.
+	// A cast after it: the vault's own ballot meets the shown one
+	// (self_conflict; self_unrecorded is cleared, GC #8012).
 	if _, err := c.cast(v, "yes"); err != nil {
 		t.Fatal(err)
 	}
@@ -380,7 +381,7 @@ func TestStatusOwnVKWithoutARestore(t *testing.T) {
 		t.Errorf("evidence %v", e)
 	}
 	l := obj(t, c.app("vote.list", "{}"))
-	if votes, _ := l.Array("votes"); len(votes) != 1 || !strings.Contains(string(votes[0]), `"self_unrecorded":true`) || !strings.Contains(string(votes[0]), `"self_conflict":true`) {
+	if votes, _ := l.Array("votes"); len(votes) != 1 || strings.Contains(string(votes[0]), `"self_unrecorded"`) || !strings.Contains(string(votes[0]), `"self_conflict":true`) {
 		t.Errorf("vote.list %s", votes)
 	}
 }

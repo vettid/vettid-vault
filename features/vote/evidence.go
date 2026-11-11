@@ -116,7 +116,10 @@ func (f *Feature) recordEvidence(s *vault.Session, r *record) []byte {
 		}
 		e.Raw("member", bb.Bytes())
 		e.Raw("refusals", arrOfB64(b.Refusals))
-		if b.Aside != nil {
+		// Only once finally rejected (review fix 6d), as compactEvidence
+		// exports a released record's (GC #8012): a receipt still kept
+		// aside may yet be taken.
+		if b.Aside != nil && b.Aside.Rejected {
 			e.Raw("late_receipt", asideJSON(b.Aside))
 		}
 	}
@@ -227,7 +230,7 @@ func compactEvidence(c *compact) []byte {
 		if c.SelfLatest != nil {
 			e.Raw("self_ballot_latest", svcBallotJSON(c.SelfLatest))
 		}
-		if c.Aside != nil && c.Aside.Rejected {
+		if c.Aside != nil && c.Aside.Rejected { // as recordEvidence
 			e.Raw("late_receipt", asideJSON(c.Aside))
 		}
 

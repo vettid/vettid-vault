@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -1206,5 +1207,147 @@ func TestGaveUpThenVerifiedExtension(t *testing.T) {
 	stamp := closes.Add(time.Hour + CheckDelay + time.Minute) // the results were anchored then
 	if out, _ := c.f.SubmitResults(c.session(), "svc", v.ID, c.resultsFor(v, resOpts{mine: c.ownBallot(v), stampAt: stamp})); out.State != CheckVerified {
 		t.Errorf("%+v", out)
+	}
+}
+
+// GC #8012 fix 1: an extension adopted from results.json stays unverified
+// across a save and a reload (its absent bundle is not read back as
+// `null`): a receipt inside it is not taken at the next submit; a record
+// of an older release whose extension holds a real bundle and no Verified
+// flag counts it verified.
+func TestAdoptedExtensionSurvivesReload(t *testing.T) {
+	c := newCastEnv(t)
+	v := c.open(1)
+	c.cast(v, "yes")
+	_, ids := c.casts()
+	closes := time.Unix(c.rec(v.ID).Closes, 0)
+	doc, _ := c.svc.Extension(v, 1, closes.Add(time.Hour), c.now)
+	x := votewire.Signed{Doc: doc, Sig: signExt(c.svc, v, doc)}
+	c.now = closes.Add(time.Hour + CheckDelay + time.Minute)
+	c.f.Tick(c.session())
+	ru := c.resultsFor(v, resOpts{extra: []votewire.Signed{x}})
+	ru.Row, ru.Proof, ru.RowsUnavailable = nil, nil, true
+	c.f.SubmitResults(c.session(), "svc", v.ID, ru)
+	pend := c.f.pend
+	c.reload()
+	c.f.pend = pend
+	if e := c.rec(v.ID).Exts[0]; e.Verified || len(e.Bundle) != 0 || c.rec(v.ID).verifiedClose() != closes.Unix() {
+		t.Fatalf("reloaded as verified: %q %v", e.Bundle, e.Verified)
+	}
+	c.okReceipt(v, ids[0], c.leafOf(v), uint64(closes.Add(30*time.Minute).UnixMilli()))
+	c.reload()
+	out, _ := c.f.SubmitResults(c.session(), "svc", v.ID, c.resultsFor(v, resOpts{mine: c.ownBallot(v)})) // E1 is held: resultsFor carries it
+	if c.state(v) == BallotRecorded || out.Reason != CheckExtension {
+		t.Errorf("taken after a reload: %s %+v", c.state(v), out)
+	}
+	// An older release's extension: a real bundle, no Verified flag.
+	c2 := newCastEnv(t)
+	w := c2.open(1)
+	_, msg := c2.svc.Extension(w, 1, time.Unix(c2.rec(w.ID).Closes, 0).Add(time.Hour), c2.now)
+	c2.call("vote.extended", msg)
+	c2.rec(w.ID).Exts[0].Verified = false
+	c2.reload()
+	if e := c2.rec(w.ID).Exts[0]; !e.Verified || c2.rec(w.ID).verifiedClose() != e.Closes {
+		t.Error("an older release's verified extension is not verified")
+	}
+	// A bundle written as JSON null is absent.
+	c2.rec(w.ID).Exts[0].Bundle, c2.rec(w.ID).Exts[0].Verified = json.RawMessage("null"), false
+	c2.reload()
+	if e := c2.rec(w.ID).Exts[0]; e.Verified || len(e.Bundle) != 0 {
+		t.Errorf("null bundle: %q %v", e.Bundle, e.Verified)
+	}
+}
+
+// GC #8012 fixes 2, 3: two receipts fail whatever the row while a restore
+// prompt is pending, and a second own-vk ballot does not replace the
+// pending prompt.
+func TestRestorePromptTwoReceiptsAndNoOverwrite(t *testing.T) {
+	var a, b, d *votewire.Ballot
+	c, v := closedWith(t, func(c *cenv, v *votetest.Vote) {
+		a, b, d = c.selfBallot(v, "no"), c.selfBallot(v, "yes"), c.selfBallot(v, "abstain")
+		c.f.TransferCompleted(c.session(), "old", "new")
+		c.f.Tick(c.session())
+		c.tickAt(61 * time.Minute) // a second ask for the restore
+		st := c.statuses()
+		c.answer(v, st[0], a, uint64(c.rec(v.ID).Opens*1000+1), true)
+		c.answer(v, st[1], b, uint64(c.rec(v.ID).Opens*1000+2), true)
+		if sb := c.rec(v.ID).ServiceBallot; sb == nil || sb.ChoiceID != "no" {
+			t.Fatalf("the pending prompt was replaced: %+v", sb)
+		}
+		c.now = c.now.Add(11 * time.Minute)
+		c.f.Check(c.session(), "svc", v.ID)
+		st = c.statuses()
+		c.answer(v, st[len(st)-1], d, uint64(c.rec(v.ID).Opens*1000+3), true)
+		if r := c.rec(v.ID); !r.TwoReceipts || r.SelfUnrecorded {
+			t.Fatalf("two %v self %v", r.TwoReceipts, r.SelfUnrecorded)
+		}
+	})
+	if out, _ := c.f.SubmitResults(c.session(), "svc", v.ID, c.resultsFor(v, resOpts{mine: a})); out.State != CheckFailed || out.Reason != "row_mismatch" {
+		t.Errorf("%+v", out)
+	}
+}
+
+// GC #8012 fixes 4, 5: a failed check does not reject a receipt inside a
+// held, unverified extension; once it verifies the receipt is taken and a
+// final check is judged again on its stored row (a mismatch is failed with
+// one vote.problem; a match upgrades unconfirmed to verified).
+func TestReceiptTakenAfterAFinalCheck(t *testing.T) {
+	setup := func() (*cenv, *votetest.Vote, votewire.Signed, []byte, time.Time) {
+		c := newCastEnv(t)
+		v := c.open(1)
+		c.cast(v, "yes")
+		_, ids := c.casts()
+		closes := time.Unix(c.rec(v.ID).Closes, 0)
+		doc, msg := c.svc.Extension(v, 1, closes.Add(time.Hour), c.now)
+		x := votewire.Signed{Doc: doc, Sig: signExt(c.svc, v, doc)}
+		c.now = closes.Add(time.Hour + CheckDelay + time.Minute)
+		c.f.Tick(c.session())
+		ru := c.resultsFor(v, resOpts{extra: []votewire.Signed{x}})
+		ru.Row, ru.Proof, ru.RowsUnavailable = nil, nil, true
+		c.f.SubmitResults(c.session(), "svc", v.ID, ru) // adopts E1, unverified
+		c.okReceipt(v, ids[0], c.leafOf(v), uint64(closes.Add(30*time.Minute).UnixMilli()))
+		return c, v, x, msg, closes
+	}
+	// Fix 4: a contradiction fails the check; the receipt stays aside.
+	c, v, x, msg, _ := setup()
+	in := c.resultsFor(v, resOpts{extra: []votewire.Signed{x}, tamper: func(r *votewire.Results) { delete(r.Tally, "no") }})
+	if out, _ := c.f.SubmitResults(c.session(), "svc", v.ID, in); out.State != CheckFailed || c.hasKind("vote.receipt_rejected") || c.rec(v.ID).Ballot.Aside.Rejected {
+		t.Fatalf("%+v", out)
+	}
+	c.call("vote.extended", msg)
+	if c.state(v) != BallotRecorded {
+		t.Errorf("not taken after a failed check: %s", c.state(v))
+	}
+	// Fix 5: the results (adopting E1) are judged unconfirmed before the
+	// receipt arrives; it is taken once E1 verifies, and the stored row is
+	// judged again.
+	for _, ownRow := range []bool{false, true} {
+		c := newCastEnv(t)
+		v := c.open(1)
+		c.cast(v, "yes")
+		_, ids := c.casts()
+		closes := time.Unix(c.rec(v.ID).Closes, 0)
+		doc, msg := c.svc.Extension(v, 1, closes.Add(time.Hour), c.now)
+		c.now = closes.Add(time.Hour + CheckDelay + time.Minute)
+		c.f.Tick(c.session())
+		var mine *votewire.Ballot
+		if ownRow {
+			mine = c.ownBallot(v)
+		}
+		if out, _ := c.f.SubmitResults(c.session(), "svc", v.ID, c.resultsFor(v, resOpts{mine: mine, extra: []votewire.Signed{{Doc: doc, Sig: signExt(c.svc, v, doc)}}})); out.State != CheckUnconfirmed {
+			t.Fatalf("%+v", out)
+		}
+		c.okReceipt(v, ids[0], c.leafOf(v), uint64(closes.Add(30*time.Minute).UnixMilli()))
+		c.h.Reset()
+		c.call("vote.extended", msg)
+		r := c.rec(v.ID)
+		switch {
+		case c.state(v) != BallotRecorded:
+			t.Errorf("own row %v: %s", ownRow, c.state(v))
+		case !ownRow && (r.Check != CheckFailed || r.CheckReason != "row_mismatch" || c.problems(v.ID) != 1):
+			t.Errorf("empty row: %q %q %d", r.Check, r.CheckReason, c.problems(v.ID))
+		case ownRow && (r.Check != CheckVerified || !c.has("vote.check_ok", v.ID)):
+			t.Errorf("own row: %q", r.Check)
+		}
 	}
 }

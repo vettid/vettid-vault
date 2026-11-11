@@ -164,7 +164,10 @@ func (f *Feature) cast(s *vault.Session, conn, id, choice string, pinned, owed [
 	r.Ballot = &ballot{State: BallotSending, ChoiceID: choice, VK: bal.VK, BallotSig: bal.BallotSig, CastSig: castSig, Body: body}
 	r.ChangedMS = now.UnixMilli()
 	f.audit(s, "vote.cast", conn, id) // never the choice
-	if r.SelfUnrecorded && (!r.Self.is(r.Ballot) || r.SelfLatest != nil && !r.SelfLatest.is(r.Ballot)) {
+	if r.SelfUnrecorded {
+		r.SelfUnrecorded = false // the record holds a ballot of its own now (GC #8012)
+	}
+	if r.Self != nil && (!r.Self.is(r.Ballot) || r.SelfLatest != nil && !r.SelfLatest.is(r.Ballot)) {
 		// A self_unrecorded record can cast (0.88.12): its own ballot then
 		// meets the one shown under its vk as self_conflict.
 		f.setSelfConflict(s, r)
@@ -394,7 +397,7 @@ func (r *record) msgInWindow(msgMS int64) bool {
 func (r *record) verifiedClose() int64 {
 	c := r.OrigClose
 	for _, e := range r.Exts {
-		if len(e.Bundle) == 0 {
+		if !e.Verified {
 			break
 		}
 		c = e.Closes
@@ -508,6 +511,7 @@ func (f *Feature) rejudgeAside(s *vault.Session, r *record) {
 			}
 		default:
 			f.receipt(s, r, a.MsgMS, a.ReceiptSig)
+			f.rejudgeResults(s, r)
 		}
 	}
 	changed := false
@@ -522,6 +526,31 @@ func (f *Feature) rejudgeAside(s *vault.Session, r *record) {
 			f.event(s, r, "ballot") // the restore prompt is offered now
 		}
 		f.twoReceipts(s, r)
+	}
+}
+
+// rejudgeResults: a receipt taken after the results were judged finally
+// (GC #8012) changes what the vault holds, so the stored row is judged
+// again: a failure is `failed` with its reason and one vote.problem (the
+// check was not failed before); an unconfirmed check that now verifies is
+// verified.
+func (f *Feature) rejudgeResults(s *vault.Session, r *record) {
+	rs := r.Results
+	if rs == nil || (r.Check != CheckVerified && r.Check != CheckUnconfirmed) {
+		return
+	}
+	var row *votewire.RowBallot
+	if rs.Row != nil {
+		row = &votewire.RowBallot{VK: rs.Row.VK, ChoiceID: rs.Row.ChoiceID, BallotSig: rs.Row.BallotSig}
+	}
+	switch st, why := verdict(r, row); {
+	case st == CheckFailed:
+		f.failCheck(s, r, why)
+	case st == CheckVerified && r.Check == CheckUnconfirmed:
+		r.Check, r.ChangedMS = CheckVerified, s.Now().UnixMilli()
+		f.audit(s, "vote.check_ok", r.Conn, r.ID)
+		f.feed(s, "vote.result", r.Conn, r.ID, "")
+		f.event(s, r, "check")
 	}
 }
 
@@ -777,7 +806,7 @@ func (f *Feature) shown(s *vault.Session, r *record, sb *svcBallot, answer, rest
 		return // judged already (review fix 2)
 	}
 	switch {
-	case b == nil && restore && r.ownVK(sb.VK):
+	case b == nil && restore && r.ownVK(sb.VK) && r.ServiceBallot == nil:
 		// After a restore the service holds a ballot made with this record's
 		// own voting key that the vault lost: the member confirms it
 		// (vote.confirm).

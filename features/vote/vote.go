@@ -15,6 +15,7 @@
 package vote
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
@@ -113,8 +114,31 @@ func (f *Feature) Load(raw json.RawMessage) error {
 		return err
 	}
 	st.init()
+	for _, r := range st.Records {
+		migrateExts(r.Exts)
+		if r.Aside != nil {
+			migrateExts([]*extRec{r.Aside})
+		}
+	}
 	f.st = st
 	return nil
+}
+
+// migrateExts reads the held extensions as this release keeps them (GC
+// #8012): a bundle that is JSON null (written before Bundle had omitempty)
+// is absent; and an extension with a real bundle and no Verified flag,
+// written by a release before Verified existed, counts as verified, since
+// those releases stored a bundle only through applyExtension, which
+// verified it.
+func migrateExts(exts []*extRec) {
+	for _, e := range exts {
+		if string(bytes.TrimSpace(e.Bundle)) == "null" {
+			e.Bundle = nil
+		}
+		if !e.Verified && len(e.Bundle) > 0 {
+			e.Verified = true
+		}
+	}
 }
 
 // Save implements vault.Feature.

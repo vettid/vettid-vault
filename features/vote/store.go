@@ -94,8 +94,11 @@ type extRec struct {
 	N      int64           `json:"n"`
 	Doc    []byte          `json:"doc"`
 	Sig    []byte          `json:"sig"`
-	Bundle json.RawMessage `json:"bundle"`
+	Bundle json.RawMessage `json:"bundle,omitempty"`
 	Closes int64           `json:"closes_at"`
+	// Verified: the bundle was verified (applyExtension, verifyHeld); one
+	// adopted from results.json has none until verifyHeld (GC #8012).
+	Verified bool `json:"verified,omitempty"`
 }
 
 // sendRec is one send of the ballot (vote.cast), kept to tell which earlier

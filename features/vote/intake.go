@@ -431,7 +431,7 @@ func (f *Feature) extend(s *vault.Session, conn string, m *votewire.ExtendedMsg)
 		if eq(r.Exts[ext.N-1].Doc, m.Extension) {
 			// The same bytes: a re-send, or (review fix 1) the bundle of one
 			// adopted from results.json, verified now.
-			if held := r.Exts[ext.N-1]; len(held.Bundle) == 0 && eq(held.Sig, m.ExtensionSig) {
+			if held := r.Exts[ext.N-1]; !held.Verified && eq(held.Sig, m.ExtensionSig) {
 				if reason := f.verifyHeld(s, r, held, m.Bundle); reason != "" {
 					return fail(reason)
 				}
@@ -478,7 +478,7 @@ func (f *Feature) verifyHeld(s *vault.Session, r *record, e *extRec, bundle []by
 	default:
 		return "anchor"
 	}
-	e.Bundle = append([]byte{}, bundle...)
+	e.Bundle, e.Verified = append([]byte{}, bundle...), true
 	r.ChangedMS = s.Now().UnixMilli()
 	f.audit(s, "vote.extended", r.Conn, r.ID+":"+strconv.FormatInt(e.N, 10))
 	f.extensionVerified(s, r)
@@ -527,6 +527,7 @@ func (f *Feature) applyExtension(s *vault.Session, r *record, e *extRec) string 
 	default:
 		return "anchor"
 	}
+	e.Verified = true // its bundle verified just above
 	r.Exts = append(r.Exts, e)
 	r.Closes = e.Closes
 	r.AbsentMS = 0 // the 404s counted were for the old close

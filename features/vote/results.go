@@ -84,7 +84,9 @@ func (f *Feature) failCheck(s *vault.Session, r *record, reason string) CheckOut
 // failCheckFeed is failCheck; feed false when the cause already raised its
 // vote.problem (two receipts for one tag, 7adc8fe).
 func (f *Feature) failCheckFeed(s *vault.Session, r *record, reason string, feed bool) CheckOutcome {
-	f.rejectAside(s, r) // a final judgement (0.88.12)
+	// A final judgement (0.88.12); a receipt inside a held extension not
+	// verified yet stays aside (GC #8012).
+	f.rejectAsideFrom(s, r, r.Closes*1000)
 	r.Check, r.CheckReason = CheckFailed, reason
 	r.ChangedMS = s.Now().UnixMilli()
 	f.audit(s, "vote.check_failed", r.Conn, r.ID+":"+reason)
@@ -142,11 +144,13 @@ func conflictVerdict(r *record, row *votewire.RowBallot) (state, reason string, 
 // with no own-vk ballot whose receipt is held, the row falls to the rows
 // after this one.
 func selfVerdict(r *record, row *votewire.RowBallot) (state, reason string, ok bool) {
-	if !r.SelfUnrecorded && !r.SelfConflict {
-		return "", "", false
-	}
+	// Two receipts for one tag fail whatever the row, also while a restore
+	// prompt is pending and no self flag is set (GC #8012).
 	if r.TwoReceipts {
 		return CheckFailed, "row_mismatch", true
+	}
+	if !r.SelfUnrecorded && !r.SelfConflict {
+		return "", "", false
 	}
 	held := r.receiptedSelf()
 	if len(held) == 0 {
@@ -384,7 +388,7 @@ func (f *Feature) SubmitResults(s *vault.Session, conn, id string, in ResultsSub
 		quiet := r.TwoReceipts && reason == "row_mismatch" && !r.conflictEvidence() && (r.Ballot == nil || r.Ballot.State != BallotDisputed)
 		return f.failCheckFeed(s, r, reason, !quiet), nil
 	}
-	f.rejectAside(s, r) // a final judgement (0.88.12)
+	f.rejectAsideFrom(s, r, r.Closes*1000) // a final judgement (0.88.12; GC #8012)
 	r.Check, r.CheckReason, r.ChangedMS = state, "", now.UnixMilli()
 	if state == CheckVerified {
 		f.audit(s, "vote.check_ok", r.Conn, r.ID)

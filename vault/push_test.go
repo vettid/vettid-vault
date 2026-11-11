@@ -940,3 +940,54 @@ func TestPushPendingReused(t *testing.T) {
 		t.Fatalf("new challenge's code: %+v", r.Error)
 	}
 }
+
+// ringerFeature is a calls feature as far as the wake needs one: the calls
+// that still ring.
+type ringerFeature struct {
+	recSink
+	mu      sync.Mutex
+	ringing map[string]bool
+}
+
+func (r *ringerFeature) Name() string { return "ringer" }
+func (r *ringerFeature) CallRinging(id string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.ringing[id]
+}
+
+// (C2, §14.2 trigger 5) A call.offer deposited to the app wakes it at once,
+// not deferred by the debounce, while the call rings; one that no longer
+// rings when the wake would go wakes nobody; an offer to a desktop never.
+func TestPushCallWake(t *testing.T) {
+	d, g := pushFixture(t)
+	d.m.opt.PushTiming = &PushTiming{Debounce: 400 * time.Millisecond}
+	r := &ringerFeature{ringing: map[string]bool{"c1": true}}
+	d.m.addFeature(r)
+	d.registerPush(t, g, fcmReg)
+	d.deliver("vault.held", `{}`)
+	g.waitWakes(t, 1)
+	start := time.Now()
+	d.deliver("call.offer", `{"call_id":"c1","connection_id":"k1"}`)
+	g.waitWakes(t, 2)
+	if el := time.Since(start); el >= 400*time.Millisecond {
+		t.Fatalf("the call wake waited for the debounce: %v", el)
+	}
+	// A call that no longer rings: no wake.
+	d.deliver("call.offer", `{"call_id":"c2","connection_id":"k1"}`)
+	g.noWake(t, 2, 200*time.Millisecond)
+	// An offer without a call_id is no call wake, nor any other wake.
+	d.deliver("call.offer", `{"connection_id":"k1"}`)
+	g.noWake(t, 2, 150*time.Millisecond)
+	// A desktop's offer wakes nobody.
+	desk := d.addDevice(t, "desk1", KindDesktop, 0x61)
+	desk.peer.Access = &AccessSession{ID: "s1", Expires: time.Now().Add(time.Hour)}
+	d.withLock(func(m *Manager) {
+		m.sendTo(desk.peer, "call.offer", json.RawMessage(`{"call_id":"c1","connection_id":"k1"}`), time.Now())
+		m.flushThenDrain(context.Background())
+	})
+	g.noWake(t, 2, 150*time.Millisecond)
+	if c := d.m.wakeClass(d.devPeer, "call.offer", json.RawMessage(`{"call_id":"c9"}`)); c != wakeCall+":c9" {
+		t.Fatalf("class %q", c)
+	}
+}

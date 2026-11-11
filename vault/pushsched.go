@@ -20,6 +20,10 @@ type PushTiming struct {
 	// ExemptCap: wakes for vault.locking, credential.alarm and urgent
 	// feed items skip the cap up to this many per Window (10).
 	ExemptCap int
+	// CallCap: (C2) call wakes (trigger 5) per Window (20). A call wake
+	// is not debounced and counts toward neither HourCap nor ExemptCap;
+	// past CallCap trigger 5 is an ordinary trigger.
+	CallCap int
 	// Retries are the waits after a 5xx, a timeout or no connection (5 s,
 	// 30 s, 120 s, each ±Jitter); then the wake is dropped.
 	Retries []time.Duration
@@ -39,7 +43,7 @@ type PushTiming struct {
 
 // DefaultPushTiming is §14.2.
 var DefaultPushTiming = PushTiming{
-	Debounce: 5 * time.Second, Window: time.Hour, HourCap: 30, OverCapEvery: 10 * time.Minute, ExemptCap: 10,
+	Debounce: 5 * time.Second, Window: time.Hour, HourCap: 30, OverCapEvery: 10 * time.Minute, ExemptCap: 10, CallCap: 20,
 	Retries: []time.Duration{5 * time.Second, 30 * time.Second, 120 * time.Second}, Jitter: 0.2,
 	RetryAfter: time.Minute, MaxRetryAfter: time.Hour, LockBudget: 3 * time.Second,
 	RegisterTimeout: 10 * time.Second, WakeTimeout: 10 * time.Second,
@@ -61,6 +65,9 @@ func (t PushTiming) withDefaults() PushTiming {
 	}
 	if t.ExemptCap > 0 {
 		d.ExemptCap = t.ExemptCap
+	}
+	if t.CallCap > 0 {
+		d.CallCap = t.CallCap
 	}
 	if t.Retries != nil {
 		d.Retries = append([]time.Duration(nil), t.Retries...)
@@ -103,19 +110,26 @@ const (
 type wakeSched struct {
 	t PushTiming
 
-	pending bool // a wake is waiting (triggers merge into it)
+	pending bool // an ordinary wake is waiting (triggers merge into it)
 	exempt  bool // ... and one of its triggers skips the hourly cap
 	counted bool // ... and it was already sent once (a retry)
+
+	// (C2) calls: the calls whose offers wait for a call wake (trigger
+	// 5); checked: each was found still ringing since it was added.
+	calls   []string
+	checked bool
 
 	inflight   bool
 	curExempt  bool
 	curCounted bool
+	curCalls   []string // the calls of a call wake in flight
 
 	last       time.Time // the last wake's first attempt
 	notBefore  time.Time // a 429's retry_after or a retry's wait
 	retries    int       // failed attempts of the wake being retried
 	hour       []time.Time
 	exemptHour []time.Time
+	callHour   []time.Time
 }
 
 func newWakeSched(t PushTiming) wakeSched { return wakeSched{t: t} }
@@ -125,6 +139,54 @@ func newWakeSched(t PushTiming) wakeSched { return wakeSched{t: t} }
 func (s *wakeSched) trigger(exempt bool) {
 	s.pending = true
 	s.exempt = s.exempt || exempt
+}
+
+// triggerCall records the deposit of a call's offer to the app (§14.2
+// trigger 5): a call wake, sent as soon as no wake is in flight while the
+// call still rings.
+func (s *wakeSched) triggerCall(callID string) {
+	for _, c := range s.calls {
+		if c == callID {
+			return
+		}
+	}
+	s.calls = append(s.calls, callID)
+	s.checked = false
+}
+
+// callsToCheck returns the waiting calls whose ringing is to be looked at
+// before a wake goes out (nil when checked).
+func (s *wakeSched) callsToCheck() []string {
+	if s.checked || len(s.calls) == 0 {
+		return nil
+	}
+	return append([]string(nil), s.calls...)
+}
+
+// keepCalls keeps the waiting calls that still ring (ringing, as the
+// caller found them out of the lock): a call answered, declined, ended,
+// timed out or superseded meanwhile gets no wake and is not counted. A
+// call added since the look is kept, to be looked at next.
+func (s *wakeSched) keepCalls(ringing map[string]bool) {
+	kept := s.calls[:0]
+	all := true
+	for _, c := range s.calls {
+		live, looked := ringing[c]
+		if !looked {
+			all = false
+		}
+		if live || !looked {
+			kept = append(kept, c)
+		}
+	}
+	s.calls = kept
+	s.checked = all
+}
+
+// callWake reports whether the waiting wake goes out as a call wake at t:
+// a call waits and the call cap is not reached.
+func (s *wakeSched) callWake(t time.Time) bool {
+	return len(s.calls) > 0 && s.count(s.callHour, t) < s.t.CallCap
 }
 
 func later(a, b time.Time) time.Time {
@@ -153,16 +215,25 @@ func (s *wakeSched) prune(now time.Time) {
 		}
 		return l[i:]
 	}
-	s.hour, s.exemptHour = keep(s.hour), keep(s.exemptHour)
+	s.hour, s.exemptHour, s.callHour = keep(s.hour), keep(s.exemptHour), keep(s.callHour)
 }
 
 // next returns when the pending wake may be sent; ok is false when none
 // is pending or one is in flight.
 func (s *wakeSched) next(now time.Time) (time.Time, bool) {
-	if !s.pending || s.inflight {
+	if (!s.pending && len(s.calls) == 0) || s.inflight {
 		return time.Time{}, false
 	}
 	s.prune(now)
+	if len(s.calls) > 0 {
+		if s.callWake(now) {
+			// (C2) Not deferred by the debounce: as soon as nothing is in
+			// flight (and after a 429's or a retry's wait).
+			return later(now, s.notBefore), true
+		}
+		// Past the call cap: an ordinary trigger.
+		s.pending, s.calls = true, nil
+	}
 	at := now
 	if !s.last.IsZero() {
 		at = later(at, s.last.Add(s.t.Debounce))
@@ -189,7 +260,16 @@ func (s *wakeSched) next(now time.Time) (time.Time, bool) {
 // the caps and moves the debounce.
 func (s *wakeSched) start(now time.Time) {
 	s.inflight, s.curExempt, s.curCounted = true, s.exempt, s.counted
-	if !s.counted {
+	s.curCalls = nil
+	if s.callWake(now) {
+		// (C2) A call wake counts toward its own cap only; the ordinary
+		// triggers waiting merge into it.
+		s.curCalls = s.calls
+		if !s.counted {
+			s.last = now
+			s.callHour = append(s.callHour, now)
+		}
+	} else if !s.counted {
 		s.last = now
 		s.hour = append(s.hour, now)
 		if s.exempt {
@@ -197,6 +277,7 @@ func (s *wakeSched) start(now time.Time) {
 		}
 	}
 	s.pending, s.exempt, s.counted = false, false, false
+	s.calls, s.checked = nil, false
 }
 
 // done applies the attempt's outcome at now; retryAfter is a 429's wait
@@ -204,7 +285,16 @@ func (s *wakeSched) start(now time.Time) {
 func (s *wakeSched) done(now time.Time, r wakeResult, retryAfter time.Duration) {
 	s.inflight = false
 	again := func(wait time.Duration) {
-		s.pending, s.counted = true, true
+		if len(s.curCalls) > 0 {
+			// A call wake's retry stays a call wake, for the calls that
+			// still ring when it goes (looked at again).
+			for _, c := range s.curCalls {
+				s.triggerCall(c)
+			}
+		} else {
+			s.pending = true
+		}
+		s.counted = true
 		s.exempt = s.exempt || s.curExempt
 		s.notBefore = now.Add(wait)
 	}

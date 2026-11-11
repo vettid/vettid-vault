@@ -187,3 +187,128 @@ func TestSchedRateLimited(t *testing.T) {
 		t.Fatal("gone keeps state")
 	}
 }
+
+// (C2, VAULT-MESSAGING §14.2 trigger 5) A call wake is not deferred by the
+// 5 s rule: it goes as soon as no wake is in flight, and ordinary triggers
+// waiting merge into it.
+func TestSchedCallWakeIsNotDebounced(t *testing.T) {
+	s := testSched()
+	s.trigger(false)
+	sendAt(t, &s, t0, wakeSent)
+	s.trigger(false)
+	s.triggerCall("c1")
+	at, ok := s.next(t0.Add(time.Second))
+	if !ok || !at.Equal(t0.Add(time.Second)) {
+		t.Fatalf("call wake at %v (not deferred to %v)", at, t0.Add(5*time.Second))
+	}
+	s.start(at)
+	if s.pending {
+		t.Fatal("the ordinary trigger did not merge into the call wake")
+	}
+	s.done(at, wakeSent, 0)
+	if len(s.hour) != 1 || len(s.exemptHour) != 0 || len(s.callHour) != 1 {
+		t.Fatalf("counts: %d hourly, %d exempt, %d call", len(s.hour), len(s.exemptHour), len(s.callHour))
+	}
+	// One waits while another wake is in flight, and goes when it ends.
+	s.trigger(false)
+	at2, _ := s.next(at.Add(10 * time.Second))
+	s.start(at2)
+	s.triggerCall("c2")
+	if _, ok := s.next(at2); ok {
+		t.Fatal("a call wake while one is in flight")
+	}
+	s.done(at2.Add(time.Second), wakeSent, 0)
+	if at3, ok := s.next(at2.Add(time.Second)); !ok || !at3.Equal(at2.Add(time.Second)) {
+		t.Fatalf("after the wake in flight: %v %v", at3, ok)
+	}
+}
+
+// Call wakes count toward neither the 30 nor the 10: with the hour full of
+// ordinary wakes a call wake still goes at once; past 20 call wakes,
+// trigger 5 is an ordinary trigger (debounced, under the 30).
+func TestSchedCallWakeHasItsOwnCap(t *testing.T) {
+	s := testSched()
+	now := t0
+	for i := 0; i < 30; i++ {
+		s.trigger(false)
+		now = sendAt(t, &s, now, wakeSent).Add(6 * time.Second)
+	}
+	s.trigger(false)
+	if at, _ := s.next(now); !at.After(now) {
+		t.Fatal("the hourly cap did not hold an ordinary wake")
+	}
+	s = testSched()
+	s.hour = nil
+	now = t0
+	for i := 0; i < 30; i++ {
+		s.hour = append(s.hour, now.Add(-time.Minute))
+	}
+	for i := 0; i < 20; i++ {
+		s.triggerCall("c")
+		at, ok := s.next(now)
+		if !ok || !at.Equal(now) {
+			t.Fatalf("call wake %d at %v with the hour full", i+1, at)
+		}
+		s.start(at)
+		s.done(at, wakeSent, 0)
+		now = now.Add(time.Second)
+	}
+	if len(s.hour) != 30 {
+		t.Fatalf("call wakes counted toward the 30: %d", len(s.hour))
+	}
+	// The 21st: an ordinary trigger, under the full hourly cap.
+	s.triggerCall("c21")
+	at, ok := s.next(now)
+	if !ok || !at.After(now) || !s.pending || len(s.calls) != 0 {
+		t.Fatalf("past the call cap: at %v, pending %v, calls %v", at, s.pending, s.calls)
+	}
+}
+
+// A call wake goes only while its call rings: calls looked at and found
+// ended are dropped, uncounted; a call added after the look is kept.
+func TestSchedCallWakeOnlyWhileRinging(t *testing.T) {
+	s := testSched()
+	s.triggerCall("c1")
+	s.triggerCall("c2")
+	s.triggerCall("c1")
+	ids := s.callsToCheck()
+	if len(ids) != 2 {
+		t.Fatalf("to check: %v", ids)
+	}
+	s.triggerCall("c3") // added while the look runs
+	s.keepCalls(map[string]bool{"c1": false, "c2": false})
+	if len(s.calls) != 1 || s.calls[0] != "c3" || s.checked {
+		t.Fatalf("after the look: %v checked %v", s.calls, s.checked)
+	}
+	s.keepCalls(map[string]bool{"c3": false})
+	if _, ok := s.next(t0); ok || len(s.callHour) != 0 {
+		t.Fatal("a wake for calls that no longer ring")
+	}
+	if s.callsToCheck() != nil {
+		t.Fatal("nothing to look at")
+	}
+}
+
+// A call wake's retry stays a call wake for its calls, looked at again,
+// and is not counted again.
+func TestSchedCallWakeRetry(t *testing.T) {
+	s := testSched()
+	s.triggerCall("c1")
+	s.keepCalls(map[string]bool{"c1": true})
+	at, _ := s.next(t0)
+	s.start(at)
+	s.done(at, wakeFailed, 0)
+	if len(s.calls) != 1 || s.pending || !s.counted || s.checked {
+		t.Fatalf("retry: calls %v pending %v counted %v checked %v", s.calls, s.pending, s.counted, s.checked)
+	}
+	s.keepCalls(map[string]bool{"c1": true})
+	at2, ok := s.next(at)
+	if !ok || !at2.Equal(at.Add(5*time.Second)) {
+		t.Fatalf("retry at %v", at2)
+	}
+	s.start(at2)
+	s.done(at2, wakeSent, 0)
+	if len(s.callHour) != 1 {
+		t.Fatalf("counted %d times", len(s.callHour))
+	}
+}

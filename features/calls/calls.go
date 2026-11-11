@@ -142,12 +142,16 @@ func (c *Call) live(now time.Time) bool {
 type Options struct {
 	// ICE issues ICE servers; nil means NoServers.
 	ICE ICEIssuer
+	// Clock is CallRinging's clock (the wake asks with no session); nil
+	// means time.Now.
+	Clock func() time.Time
 }
 
 // Feature implements vault.Feature and vault.ConnectionRemovedObserver.
 type Feature struct {
 	mu     sync.Mutex
 	issuer ICEIssuer
+	clock  func() time.Time
 	calls  map[string]*Call
 	// alive is when each watched active call's device last showed it was
 	// alive (liveness.go): memory only, never in the state.
@@ -168,7 +172,10 @@ func New(o Options) *Feature {
 	if o.ICE == nil {
 		o.ICE = NoServers{}
 	}
-	return &Feature{issuer: o.ICE, calls: map[string]*Call{}, alive: map[string]time.Time{},
+	if o.Clock == nil {
+		o.Clock = time.Now
+	}
+	return &Feature{issuer: o.ICE, clock: o.Clock, calls: map[string]*Call{}, alive: map[string]time.Time{},
 		off: map[string]bool{}, unanswered: map[string][]time.Time{}, limitedSent: map[string]bool{}}
 }
 
@@ -180,6 +187,17 @@ var (
 
 // Name implements vault.Feature.
 func (f *Feature) Name() string { return "calls" }
+
+// CallRinging implements vault.CallRinger (VAULT-MESSAGING §14.2 trigger
+// 5): whether the incoming call callID still rings, by the record and its
+// offer's exp. A call answered, declined, ended, timed out or superseded
+// does not. Takes only the feature's own lock.
+func (f *Feature) CallRinging(callID string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	c := f.calls[callID]
+	return c != nil && c.Dir == DirIn && c.State == StateRinging && f.clock().Before(c.Exp)
+}
 
 // Types implements vault.Feature.
 func (f *Feature) Types() []vault.TypeSpec {

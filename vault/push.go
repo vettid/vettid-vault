@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -407,7 +408,7 @@ func (m *Manager) pushSync() {
 		return
 	}
 	if m.push == nil {
-		m.push = newPusher(m.opt.Push, m.pushTiming(), m.now, m.pushOutcome)
+		m.push = newPusher(m.opt.Push, m.pushTiming(), m.now, m.pushOutcome, m.callRinging())
 	}
 	m.push.setReg(&pushReg{gen: m.pushGen, key: ed25519.NewKeyFromSeed(cur.WakeSeed), blob: cur.WakeBlob})
 }
@@ -416,12 +417,24 @@ func (m *Manager) pushSync() {
 const (
 	wakeNormal = "n"
 	wakeExempt = "x" // skips the hourly cap (§14.2)
+	// wakeCall (C2, §14.2 trigger 5) is followed by ":" and the call's id:
+	// a call wake for that call while it rings.
+	wakeCall = "c"
 )
+
+// CallRinger is a feature that knows whether a call still rings (§14.2
+// trigger 5: a call wake is sent only while its call is ringing). It is
+// asked from the wake's goroutine, holding no lock of the vault's or the
+// pusher's, and must take only its own.
+type CallRinger interface {
+	CallRinging(callID string) bool
+}
 
 // wakeClass is the §14.2 trigger class of a durable message to owner
 // device p ("" for none): a new feed item of priority normal, high or
 // urgent that is not a guide (urgent: exempt), vault.held, and
-// credential.alarm (exempt). Only the registered app is woken.
+// credential.alarm (exempt), and (C2) a call.offer (a call wake for its
+// call_id). Only the registered app is woken.
 func (m *Manager) wakeClass(p *Peer, typ string, body json.RawMessage) string {
 	cur := m.st.Push
 	if cur == nil || p.Kind != KindApp || p.ID != cur.DeviceID {
@@ -432,6 +445,17 @@ func (m *Manager) wakeClass(p *Peer, typ string, body json.RawMessage) string {
 		return wakeNormal
 	case "credential.alarm":
 		return wakeExempt
+	case "call.offer":
+		// (C2, §14.2 trigger 5) The offer reached the app only because the
+		// call rings the member's devices (§10.10 "Ringing").
+		o, err := strictjson.ParseObject(body)
+		if err != nil {
+			return ""
+		}
+		if id, _ := o.String("call_id"); id != "" {
+			return wakeCall + ":" + id
+		}
+		return ""
 	case "feed.event":
 		o, err := strictjson.ParseObject(body)
 		if err != nil {
@@ -462,8 +486,29 @@ func (m *Manager) pushDeposited(peerID, class string) {
 	if m.push == nil {
 		m.pushSync()
 	}
-	if m.push != nil {
-		m.push.trigger(class == wakeExempt)
+	if m.push == nil {
+		return
+	}
+	if id, ok := strings.CutPrefix(class, wakeCall+":"); ok {
+		m.push.triggerCall(id)
+		return
+	}
+	m.push.trigger(class == wakeExempt)
+}
+
+// callRinging returns whether a call still rings, as the features that
+// hold calls say (none: no call rings). It is a copy of the features at
+// the pusher's start and takes no lock of the manager's (the wake's
+// goroutine calls it).
+func (m *Manager) callRinging() func(string) bool {
+	rs := append([]CallRinger(nil), m.ringers...)
+	return func(callID string) bool {
+		for _, f := range rs {
+			if f.CallRinging(callID) {
+				return true
+			}
+		}
+		return false
 	}
 }
 
@@ -576,6 +621,8 @@ type pusher struct {
 	t     PushTiming
 	now   func() time.Time
 	apply func(pushOutcome)
+	// ringing (C2) says whether a call still rings; asked with no lock held.
+	ringing func(callID string) bool
 
 	mu       sync.Mutex
 	s        wakeSched
@@ -589,8 +636,11 @@ type pusher struct {
 	outcomes chan pushOutcome
 }
 
-func newPusher(gw PushGateway, t PushTiming, now func() time.Time, apply func(pushOutcome)) *pusher {
-	p := &pusher{gw: gw, t: t, now: now, apply: apply, s: newWakeSched(t), kick: make(chan struct{}, 1),
+func newPusher(gw PushGateway, t PushTiming, now func() time.Time, apply func(pushOutcome), ringing func(string) bool) *pusher {
+	if ringing == nil {
+		ringing = func(string) bool { return false }
+	}
+	p := &pusher{gw: gw, t: t, now: now, apply: apply, ringing: ringing, s: newWakeSched(t), kick: make(chan struct{}, 1),
 		stopCh: make(chan struct{}), outcomes: make(chan pushOutcome, 16)}
 	go p.run()
 	go p.applier()
@@ -640,6 +690,16 @@ func (p *pusher) trigger(exempt bool) {
 // lockWake triggers an exempt wake and waits at most budget for it to be
 // sent (the debounce and caps still apply; a wake that could not go out
 // within the budget is not sent).
+// triggerCall records a call's offer deposited to the app (§14.2 trigger 5).
+func (p *pusher) triggerCall(callID string) {
+	p.mu.Lock()
+	if p.reg != nil && !p.stopped {
+		p.s.triggerCall(callID)
+	}
+	p.mu.Unlock()
+	p.poke()
+}
+
 func (p *pusher) lockWake(budget time.Duration) {
 	p.mu.Lock()
 	if p.reg == nil || p.stopped {
@@ -702,6 +762,20 @@ func (p *pusher) run() {
 		send := false
 		if p.reg == nil {
 			p.endFinal()
+		} else if ids := p.s.callsToCheck(); ids != nil {
+			// (C2) Which waiting calls still ring, asked out of the lock;
+			// then the wake is decided again.
+			p.mu.Unlock()
+			live := map[string]bool{}
+			for _, id := range ids {
+				live[id] = p.ringing(id)
+			}
+			p.mu.Lock()
+			if !p.stopped && p.reg != nil {
+				p.s.keepCalls(live)
+			}
+			p.mu.Unlock()
+			continue
 		} else if at, ok := p.s.next(now); ok {
 			switch {
 			case p.final != nil && at.After(p.finalBy):

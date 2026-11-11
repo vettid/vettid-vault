@@ -397,7 +397,9 @@ type Manager struct {
 	// push sends the registration's wakes (0.24.0, §14.2); pushGen
 	// changes with every registration so that late outcomes of an older
 	// one are ignored.
-	push    *pusher
+	push *pusher
+	// ringers (C2) are the features that know whether a call rings.
+	ringers []CallRinger
 	pushGen uint64
 	// att is the attachment runner while the vault runs (§10.5.1).
 	att *attRunner

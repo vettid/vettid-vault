@@ -172,6 +172,9 @@ func (m *Manager) addFeature(f Feature) {
 		m.featureNames = map[string]bool{}
 	}
 	m.featureNames[f.Name()] = true
+	if r, ok := f.(CallRinger); ok {
+		m.ringers = append(m.ringers, r)
+	}
 	for _, ts := range f.Types() {
 		m.register(ts, f)
 	}

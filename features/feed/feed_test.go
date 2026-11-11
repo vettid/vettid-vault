@@ -232,3 +232,34 @@ func TestItemName(t *testing.T) {
 		t.Fatalf("wire form: %s", ItemJSON(&it))
 	}
 }
+
+// Missed calls merge (VAULT-MESSAGING §10.10, C2 V5): BatchWhileActive
+// merges into the connection's item while it is still active and within
+// the window, the item taking the latest ref; once the member read it, the
+// next makes a new item.
+func TestBatchWhileActive(t *testing.T) {
+	f, h := New(), featuretest.NewHost()
+	missed := func(at time.Time, ref string) {
+		rec(f, h, at, vault.Activity{Kind: "call.missed", ConnectionID: "c1", Ref: ref, Feed: true, Priority: "high",
+			Batch: 24 * time.Hour, BatchWhileActive: true})
+	}
+	missed(t0, "call1")
+	missed(t0.Add(time.Hour), "call2")
+	its := f.Items()
+	if len(its) != 1 || its[0].Count != 2 || its[0].Ref != "call2" {
+		t.Fatalf("merged: %+v", its)
+	}
+	if r := featuretest.Call(f, h, t0.Add(2*time.Hour), "app", "feed.update", `{"item_id":"`+its[0].ID+`","status":"read"}`); !r.OK() {
+		t.Fatal(r.Code)
+	}
+	missed(t0.Add(3*time.Hour), "call3")
+	if its := f.Items(); len(its) != 2 || its[1].Ref != "call3" || its[1].Count > 1 || its[0].Ref != "call2" {
+		t.Fatalf("after the read: %+v", its)
+	}
+	g := New()
+	featuretest.RoundTrip(t, f, g)
+	missed(t0.Add(4*time.Hour), "call4")
+	if its := f.Items(); len(its) != 2 || its[1].Count != 2 || its[1].Ref != "call4" {
+		t.Fatalf("the new batch: %+v", its)
+	}
+}

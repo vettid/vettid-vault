@@ -401,12 +401,19 @@ func (f *Feature) ownReceipt(s *vault.Session, r *record, msgMS int64, sig []byt
 	return true
 }
 
-// keepShownAside keeps aside a ballot the service showed (foreign or under
-// an own vk) whose receipt's msg_ms is msgAside: judged as shown once a
-// verified extension brings it into the window (GC #7991 C). The latest.
-func (f *Feature) keepShownAside(s *vault.Session, r *record, sb *svcBallot, answer, restore bool) {
-	r.AsideShown = &shownAside{Ballot: sb, Answer: answer, Restore: restore}
+// keepShownAside: a ballot the service showed (foreign or under an own vk)
+// whose receipt's msg_ms is msgAside (VAULT-MESSAGING 7adc8fe) is judged
+// at once (conflict evidence or self_*), and only its receipt is kept
+// aside (Late), for the two-receipts rule and the row, until a verified
+// extension brings it into the window. A late receipt never offers the
+// restore prompt (it would record a receipt outside the window). The
+// latest.
+func (f *Feature) keepShownAside(s *vault.Session, r *record, sb *svcBallot, answer bool) {
+	sb.Late = true
+	cp := *sb
+	r.AsideShown = &shownAside{Ballot: &cp, Answer: answer}
 	r.ChangedMS = s.Now().UnixMilli()
+	f.shown(s, r, sb, answer, false)
 	f.asideAfterFinal(s, r)
 }
 
@@ -437,7 +444,13 @@ func (f *Feature) rejudgeAside(s *vault.Session, r *record) {
 	}
 	if a := r.AsideShown; a != nil && !a.Rejected && r.msgInWindow(a.Ballot.MsgMS) {
 		r.AsideShown = nil
-		f.shown(s, r, a.Ballot, a.Answer, a.Restore)
+		for _, x := range []*svcBallot{r.Self, r.SelfLatest, r.Other, r.OtherLatest} {
+			if x != nil && x.Late && sameSvc(x, a.Ballot) && x.MsgMS == a.Ballot.MsgMS {
+				x.Late = false // its receipt now counts
+			}
+		}
+		r.ChangedMS = s.Now().UnixMilli()
+		f.twoReceipts(s, r)
 	}
 }
 
@@ -567,7 +580,7 @@ func (f *Feature) castAnswer(s *vault.Session, r *record, in *envelope.Inner) {
 		case r.msgInWindow(sb.MsgMS):
 			f.shown(s, r, sb, true, false)
 		case r.msgAside(sb.MsgMS):
-			f.keepShownAside(s, r, sb, true, false) // GC #7991 C
+			f.keepShownAside(s, r, sb, true) // GC #7991 C
 		}
 	}
 }
@@ -649,9 +662,9 @@ func (f *Feature) statusAnswer(s *vault.Session, ref pendRef, in *envelope.Inner
 			f.event(s, r, "ballot")
 		}
 	case !r.msgInWindow(sb.MsgMS):
-		// For an extension not learned yet (GC #7991 C): judged when a
-		// verified extension brings it into the window.
-		f.keepShownAside(s, r, sb, false, ref.restore)
+		// For an extension not learned yet (GC #7991 C, 7adc8fe): judged
+		// now, its receipt kept aside.
+		f.keepShownAside(s, r, sb, false)
 	default:
 		f.shown(s, r, sb, false, ref.restore)
 	}
@@ -682,6 +695,18 @@ func (f *Feature) shown(s *vault.Session, r *record, sb *svcBallot, answer, rest
 		// cast.
 		f.foreign(s, r, b, sb, answer)
 	}
+}
+
+// receiptedSelf are the own-vk ballots shown whose receipt is held (not
+// kept aside).
+func (r *record) receiptedSelf() []*svcBallot {
+	var out []*svcBallot
+	for _, x := range []*svcBallot{r.Self, r.SelfLatest} {
+		if x != nil && !x.Late {
+			out = append(out, x)
+		}
+	}
+	return out
 }
 
 // ownVK reports whether vk is the record's voting key, now or an earlier
@@ -743,13 +768,18 @@ func (f *Feature) self(s *vault.Session, r *record, b *ballot, sb *svcBallot, an
 // receipt, or two different own-vk ballots shown. vote.problem (high),
 // once; it counts toward the cap of 16, and the check fails (row_mismatch).
 func (f *Feature) twoReceipts(s *vault.Session, r *record) {
-	if r.TwoReceipts || r.Self == nil {
+	if r.TwoReceipts {
 		return
 	}
+	// Only receipts held count (7adc8fe: as soon as both are, whichever
+	// came first); one kept aside (Late) does not yet.
+	held := r.receiptedSelf()
 	b := r.Ballot
-	two := r.SelfLatest != nil && !sameSvc(r.Self, r.SelfLatest)
-	if b != nil && len(b.ReceiptSig) > 0 && (!r.Self.is(b) || r.SelfLatest != nil && !r.SelfLatest.is(b)) {
-		two = true
+	two := len(held) == 2 && !sameSvc(held[0], held[1])
+	for _, x := range held {
+		if b != nil && len(b.ReceiptSig) > 0 && !x.is(b) {
+			two = true
+		}
 	}
 	if !two {
 		return
@@ -863,7 +893,7 @@ func (f *Feature) intakeStatus(s *vault.Session, ref pendRef, a *votewire.Status
 	case r.msgInWindow(sb.MsgMS):
 		f.foreign(s, r, nil, sb, false)
 	case r.msgAside(sb.MsgMS):
-		f.keepShownAside(s, r, sb, false, false) // judged (as foreign) when a verified extension covers it
+		f.keepShownAside(s, r, sb, false) // foreign now, its receipt kept aside
 	}
 	// A receipt outside both: no answer for the ballot, as for a held
 	// record; the answer stays as evidence.

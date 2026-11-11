@@ -482,8 +482,13 @@ func (f *Feature) applyExtension(s *vault.Session, r *record, e *extRec) string 
 	r.Exts = append(r.Exts, e)
 	r.Closes = e.Closes
 	r.AbsentMS = 0 // the 404s counted were for the old close
-	// A receipt kept aside for this extension is judged again (0.88.12).
+	// A receipt kept aside for this extension is judged again (0.88.12), and
+	// a check that waited for this bundle (reason extension) is judged at
+	// the next submission.
 	f.rejudgeAside(s, r)
+	if r.CheckReason == CheckExtension {
+		r.CheckReason = ""
+	}
 	if r.Ballot == nil && len(r.VKSeed) == 0 {
 		// A vote that was never cast and has reopened needs a voting key again.
 		// The earlier public key stays: a ballot under it is own-vk (GC #7991 G).

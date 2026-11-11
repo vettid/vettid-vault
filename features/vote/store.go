@@ -49,6 +49,11 @@ const (
 // gave up) because the app could not get the member's row (0.83.3).
 const CheckRowsUnavailable = "rows_unavailable"
 
+// CheckExtension is the reason of a check that waits for the bundle of an
+// extension the results carry, which alone would bring a kept-aside
+// receipt into the window (VAULT-MESSAGING 7adc8fe).
+const CheckExtension = "extension"
+
 // The ballot (§10.19.3). Set by casting (PR 3); the bookkeeping of the
 // records below already depends on it.
 const (
@@ -150,12 +155,12 @@ type ballot struct {
 	Stopped bool `json:"stopped,omitempty"`
 }
 
-// shownAside is a ballot the service showed with a receipt for an extension
-// not learned yet: Answer from already_voted, Restore from a restore's ask.
+// shownAside is the receipt of a ballot the service showed (with the
+// ballot it is for) kept aside for an extension not learned yet: Answer
+// when it came in already_voted.
 type shownAside struct {
 	Ballot   *svcBallot `json:"ballot"`
 	Answer   bool       `json:"answer,omitempty"`
-	Restore  bool       `json:"restore,omitempty"`
 	Rejected bool       `json:"rejected,omitempty"`
 }
 
@@ -191,6 +196,10 @@ type svcBallot struct {
 	BallotSig  []byte `json:"ballot_sig"`
 	MsgMS      int64  `json:"msg_ms,omitempty"`
 	ReceiptSig []byte `json:"receipt_sig,omitempty"`
+	// Late: the receipt is for an extension not learned yet and is kept
+	// aside (record.AsideShown); it does not count until a verified
+	// extension brings it into the window (7adc8fe).
+	Late bool `json:"late,omitempty"`
 }
 
 // results is what the vault keeps of a checked result (§10.19.6).

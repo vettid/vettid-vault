@@ -493,10 +493,10 @@ func TestReceiptKeptAsideForAnExtension(t *testing.T) {
 	c.now = closes.Add(time.Hour + CheckDelay + time.Minute)
 	c.f.Tick(c.session())
 	in := c.resultsFor(v, resOpts{mine: c.ownBallot(v), extra: []votewire.Signed{{Doc: doc, Sig: signExt(c.svc, v, doc)}}})
-	if out, _ := c.f.SubmitResults(c.session(), "svc", v.ID, in); out.State != CheckPending || out.Reason != "input" || c.state(v) != BallotSending || len(c.rec(v.ID).Exts) != 0 || c.hasKind("vote.receipt_rejected") {
+	if out, _ := c.f.SubmitResults(c.session(), "svc", v.ID, in); out.State != CheckPending || out.Reason != CheckExtension || c.rec(v.ID).CheckReason != CheckExtension || c.state(v) != BallotSending || len(c.rec(v.ID).Exts) != 0 || c.hasKind("vote.receipt_rejected") {
 		t.Errorf("adopted from the results: %+v %s", out, c.state(v))
 	}
-	if r := c.call("vote.extended", extMsg); !r.OK() || c.state(v) != BallotRecorded {
+	if r := c.call("vote.extended", extMsg); !r.OK() || c.state(v) != BallotRecorded || c.rec(v.ID).CheckReason != "" {
 		t.Fatalf("the extension's bundle verified: %q %s", r.Code, c.state(v))
 	}
 	if out, _ := c.f.SubmitResults(c.session(), "svc", v.ID, in); out.State != CheckVerified {

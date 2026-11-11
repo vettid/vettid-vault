@@ -78,11 +78,19 @@ func (f *Feature) tickCheck(s *vault.Session, r *record, now time.Time) {
 }
 
 func (f *Feature) failCheck(s *vault.Session, r *record, reason string) CheckOutcome {
+	return f.failCheckFeed(s, r, reason, true)
+}
+
+// failCheckFeed is failCheck; feed false when the cause already raised its
+// vote.problem (two receipts for one tag, 7adc8fe).
+func (f *Feature) failCheckFeed(s *vault.Session, r *record, reason string, feed bool) CheckOutcome {
 	f.rejectAside(s, r) // a final judgement (0.88.12)
 	r.Check, r.CheckReason = CheckFailed, reason
 	r.ChangedMS = s.Now().UnixMilli()
 	f.audit(s, "vote.check_failed", r.Conn, r.ID+":"+reason)
-	f.feed(s, "vote.problem", r.Conn, r.ID, "high")
+	if feed {
+		f.feed(s, "vote.problem", r.Conn, r.ID, "high")
+	}
 	f.event(s, r, "check")
 	return CheckOutcome{State: CheckFailed, Reason: reason, ConflictEvidence: r.conflictEvidence()}
 }
@@ -129,17 +137,22 @@ func conflictVerdict(r *record, row *votewire.RowBallot) (state, reason string, 
 // the service signed a receipt for a ballot its results lack. Two receipts
 // for one tag (the vault's own for a different ballot, or two different
 // own-vk ballots shown) are `failed` (row_mismatch) whatever the row.
+//
+// (7adc8fe) A receipt kept aside (Late) is judged as if it did not exist:
+// with no own-vk ballot whose receipt is held, the row falls to the rows
+// after this one.
 func selfVerdict(r *record, row *votewire.RowBallot) (state, reason string, ok bool) {
-	if !r.SelfUnrecorded && !r.SelfConflict || r.Self == nil {
+	if !r.SelfUnrecorded && !r.SelfConflict {
 		return "", "", false
 	}
-	shown := r.Self
-	if l := r.SelfLatest; l != nil && !sameSvc(l, shown) {
+	if r.TwoReceipts {
 		return CheckFailed, "row_mismatch", true
 	}
-	if b := r.Ballot; b != nil && len(b.ReceiptSig) > 0 && !shown.is(b) {
-		return CheckFailed, "row_mismatch", true
+	held := r.receiptedSelf()
+	if len(held) == 0 {
+		return "", "", false
 	}
+	shown := held[0]
 	if row != nil && eq(row.VK, shown.VK) && row.ChoiceID == shown.ChoiceID && eq(row.BallotSig, shown.BallotSig) {
 		return CheckUnconfirmed, "", true
 	}
@@ -274,8 +287,18 @@ func (f *Feature) SubmitResults(s *vault.Session, conn, id string, in ResultsSub
 	// would bring a kept-aside receipt into the window is input that does
 	// not verify, and the check waits for the extension from vote.extended
 	// or the site's entry.
+	// (7adc8fe) The check waits with its own reason, `extension`, until
+	// the extension's bundle is verified (vote.extended, a site entry); a
+	// gave_up one stays gave_up.
 	if at := r.asidePending(); at != 0 && len(adopt) > 0 && at < closes*1000 {
-		return noAnswer, nil
+		if r.Check == "" {
+			r.Check = CheckPending
+		}
+		if r.CheckReason != CheckExtension {
+			r.CheckReason = CheckExtension
+			r.ChangedMS = now.UnixMilli()
+		}
+		return CheckOutcome{State: r.Check, Reason: CheckExtension, ConflictEvidence: r.conflictEvidence()}, nil
 	}
 	// Not before the close (0.88.12): t_tsa at or after the close in force
 	// once the results' extensions are adopted. The service anchors only
@@ -349,7 +372,9 @@ func (f *Feature) SubmitResults(s *vault.Session, conn, id string, in ResultsSub
 	f.resultsMatch(s, r)
 	state, reason := verdict(r, in.Row)
 	if state == CheckFailed {
-		return f.failCheck(s, r, reason), nil
+		// Two receipts raised their vote.problem when both were held.
+		quiet := r.TwoReceipts && reason == "row_mismatch" && !r.conflictEvidence() && (r.Ballot == nil || r.Ballot.State != BallotDisputed)
+		return f.failCheckFeed(s, r, reason, !quiet), nil
 	}
 	f.rejectAside(s, r) // a final judgement (0.88.12)
 	r.Check, r.CheckReason, r.ChangedMS = state, "", now.UnixMilli()

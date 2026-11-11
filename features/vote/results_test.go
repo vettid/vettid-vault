@@ -668,9 +668,10 @@ func TestReceiptAsideAtTheFinalJudgement(t *testing.T) {
 	}
 }
 
-// GC #7991 C: a shown ballot whose receipt is for an extension not learned
-// yet is kept aside the same way, and judged (here: foreign, a conflict)
-// once a verified extension covers it.
+// GC #7991 C, 7adc8fe: a shown ballot whose receipt is for an extension
+// not learned yet is judged at once (here: foreign, a conflict) and only
+// its receipt is kept aside, in vote.evidence, until a verified extension
+// covers it.
 func TestShownBallotKeptAside(t *testing.T) {
 	c := newCastEnv(t)
 	v := c.open(1)
@@ -680,7 +681,7 @@ func TestShownBallotKeptAside(t *testing.T) {
 	closes := time.Unix(c.rec(v.ID).Closes, 0)
 	c.alreadyVoted(v, ids[0], must(votewire.SignBallot(vk2, v.Hash, v.Tag, "no")), uint64(closes.Add(30*time.Minute).UnixMilli()))
 	r := c.rec(v.ID)
-	if r.AsideShown == nil || r.Ballot.State != BallotSending || c.hasKind("vote.conflict") {
+	if r.AsideShown == nil || r.Ballot.State != BallotConflict || !c.has("vote.conflict", v.ID) || !r.Other.Late {
 		t.Fatalf("%+v", r.AsideShown)
 	}
 	if _, ok := c.evidence(t, v.ID)["ballot_aside"]; !ok {
@@ -688,8 +689,54 @@ func TestShownBallotKeptAside(t *testing.T) {
 	}
 	_, msg := c.svc.Extension(v, 1, closes.Add(time.Hour), c.now)
 	c.call("vote.extended", msg)
-	if r := c.rec(v.ID); r.AsideShown != nil || r.Ballot.State != BallotConflict || !c.has("vote.conflict", v.ID) {
-		t.Errorf("%s", r.Ballot.State)
+	if r := c.rec(v.ID); r.AsideShown != nil || r.Other.Late || c.countKind("vote.conflict") != 1 {
+		t.Errorf("%+v", r.Other)
+	}
+}
+
+// 7adc8fe: an own-vk ballot shown with a receipt kept aside is self_* at
+// once; its receipt counts for two receipts only once a verified extension
+// covers it (then vote.problem, once, and a failed check adds none); at a
+// final judgement still aside, the row is judged as if it did not exist.
+func TestLateSelfReceipt(t *testing.T) {
+	late := func(c *cenv, v *votetest.Vote) *votewire.Ballot {
+		shown := c.selfBallot(v, "no")
+		c.f.Check(c.session(), "svc", v.ID)
+		c.answer(v, c.statuses()[0], shown, uint64(time.Unix(c.rec(v.ID).Closes, 0).Add(30*time.Minute).UnixMilli()), true)
+		return shown
+	}
+	// Still aside at the final judgement: no ballot, empty row: verified.
+	c, v := closedWith(t, func(c *cenv, v *votetest.Vote) { late(c, v) })
+	if r := c.rec(v.ID); !r.SelfUnrecorded || !r.Self.Late {
+		t.Fatalf("%+v", r.Self)
+	}
+	out, _ := c.f.SubmitResults(c.session(), "svc", v.ID, c.resultsFor(v, resOpts{}))
+	if out.State != CheckVerified || !c.has("vote.receipt_rejected", v.ID) {
+		t.Errorf("%+v", out)
+	}
+	// Two receipts once the late one counts.
+	c = newCastEnv(t)
+	v = c.open(1)
+	var shown *votewire.Ballot
+	c.cast(v, "yes")
+	shown = must(votewire.SignBallot(ed25519.NewKeyFromSeed(c.rec(v.ID).VKSeed), v.Hash, v.Tag, "no"))
+	_, ids := c.casts()
+	c.okReceipt(v, ids[0], c.leafOf(v), uint64(c.now.UnixMilli()))
+	c.f.Check(c.session(), "svc", v.ID)
+	closes := time.Unix(c.rec(v.ID).Closes, 0)
+	c.answer(v, c.statuses()[0], shown, uint64(closes.Add(30*time.Minute).UnixMilli()), true)
+	if r := c.rec(v.ID); !r.SelfConflict || r.TwoReceipts || c.problems(v.ID) != 0 {
+		t.Fatalf("two receipts before the late one counts: %v", r.TwoReceipts)
+	}
+	_, msg := c.svc.Extension(v, 1, closes.Add(time.Hour), c.now)
+	c.call("vote.extended", msg)
+	if r := c.rec(v.ID); !r.TwoReceipts || c.problems(v.ID) != 1 || !r.capProblem() {
+		t.Fatalf("two receipts: %v %d", r.TwoReceipts, c.problems(v.ID))
+	}
+	c.now = closes.Add(time.Hour + CheckDelay + time.Minute)
+	c.f.Tick(c.session())
+	if out, _ := c.f.SubmitResults(c.session(), "svc", v.ID, c.resultsFor(v, resOpts{mine: c.ownBallot(v)})); out.State != CheckFailed || out.Reason != "row_mismatch" || c.problems(v.ID) != 1 {
+		t.Errorf("%+v problems %d", out, c.problems(v.ID))
 	}
 }
 

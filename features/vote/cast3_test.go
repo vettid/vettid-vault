@@ -403,7 +403,8 @@ func TestAlreadyVotedOwnVK(t *testing.T) {
 		t.Fatalf("%+v", r.Ballot)
 	}
 	before, _ := c.casts()
-	c.tickAt(2 * time.Hour)
+	c.tickAt(10 * time.Minute) // before the close: the schedule would send
+	c.tickAt(40 * time.Minute)
 	if after, _ := c.casts(); len(after) != len(before) {
 		t.Error("sent again after already_voted with an own-vk ballot")
 	}

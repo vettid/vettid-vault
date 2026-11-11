@@ -52,8 +52,9 @@ type Item struct {
 	Status       string    `json:"status"`
 	Priority     string    `json:"priority"`
 	ConnectionID string    `json:"connection_id,omitempty"`
-	// Name is the connection's display name when the item was made (card
-	// GC #6875: the connection may be gone when it is shown).
+	// Name is the connection's display name, else its first and last name,
+	// when the item was made (card GC #6875, owner a on #7862: the
+	// connection may be gone when it is shown).
 	Name     string `json:"name,omitempty"`
 	DeviceID string `json:"device_id,omitempty"`
 	Ref      string `json:"ref,omitempty"`

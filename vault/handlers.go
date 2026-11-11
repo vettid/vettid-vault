@@ -523,8 +523,9 @@ func (s *Session) Settings() Settings { return s.host.Settings() }
 type Activity struct {
 	Kind         string
 	ConnectionID string
-	// Name is the connection's display name when the activity was
-	// recorded, for a feed item that names a connection which may be gone
+	// Name is the connection's display name, else its first and last name
+	// (noticeName), when the activity was recorded, for a feed item that
+	// names a connection which may be gone
 	// by the time it is shown (card GC #6875). Vault-local.
 	Name      string
 	DeviceID  string

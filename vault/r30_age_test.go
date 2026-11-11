@@ -278,6 +278,26 @@ func TestNoticeNameAndOwnRemoval(t *testing.T) {
 			t.Fatalf("a removal by the peer: %+v", got)
 		}
 	})
+	// Owner a, GC #7862, at the notice itself: no display name, so the
+	// peer's first and last name; never the member's own names or display
+	// name (the fixture's two vaults share "Ada Lovelace", so the peer's
+	// are set apart here). Past the batch window, so it's a new item.
+	f.advance(NoticeWindow + time.Minute)
+	f.do(0, func(m *Manager, p *Peer) {
+		p.Name = " "
+		p.Profile = []byte(`{"first_name":"Grace","last_name":"Hopper"}`)
+		before := len(f.sink[0].got)
+		m.notDelivered(&OutboxEntry{PeerID: p.ID, Type: "test.note", InnerID: "unnamed"}, "undelivered_removed", f.clk)
+		var got *Activity
+		for i, a := range f.sink[0].got[before:] {
+			if a.Feed {
+				got = &f.sink[0].got[before+i]
+			}
+		}
+		if got == nil || got.Name != "Grace Hopper" {
+			t.Fatalf("no display name: %+v, want the peer's first and last name", got)
+		}
+	})
 }
 
 // Review M1 (#218): an entry waits, untried, through a clean lock; then
@@ -577,6 +597,14 @@ func TestNoticeName(t *testing.T) {
 		{"", `{"first_name":"Alexandra","last_name":""}`, "Alexandra"},
 		{"", ``, ""},
 		{"", `not json`, ""},
+		// Only spaces is no display name; each part is trimmed; one part only.
+		{"   ", `{"first_name":" Alexandra ","last_name":"  Smith "}`, "Alexandra Smith"},
+		{" Alex ", ``, "Alex"},
+		{"", `{"first_name":"","last_name":"Smith"}`, "Smith"},
+		{"", `{"first_name":"  ","last_name":"  "}`, ""},
+		// The 128-byte cut: on a rune boundary, and no space left at its end.
+		{"", `{"first_name":"` + strings.Repeat("a", 127) + `","last_name":"Smith"}`, strings.Repeat("a", 127)},
+		{"", `{"first_name":"` + strings.Repeat("é", 70) + `","last_name":""}`, strings.Repeat("é", 64)},
 	} {
 		p := &Peer{Name: c.name, Profile: []byte(c.profile)}
 		if got := noticeName(p); got != c.want {

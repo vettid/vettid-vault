@@ -708,8 +708,9 @@ func (m *Manager) notice(e *OutboxEntry, typ, kind, ref string, now time.Time) {
 	if (p != nil && p.Kind != KindConnection) || !memberMessage(e, typ) {
 		return
 	}
-	// The connection's name as the vault has it now, so that the app can
-	// name a connection that is gone (vault-local: the feed only).
+	// The connection's name as the vault has it now (its display name, else
+	// its first and last name: noticeName), so that the app can name a
+	// connection that is gone (vault-local: the feed only).
 	name := noticeName(p)
 	m.record(Activity{Kind: kind, ConnectionID: e.PeerID, Name: name, Ref: ref, Feed: true, Batch: NoticeWindow}, now)
 }
@@ -1057,13 +1058,14 @@ func (m *Manager) idResend(p *Peer, ep *handshake.Epoch, in *envelope.Inner, now
 
 // noticeName is the name a "not delivered" notice carries (owner a, GC
 // #7862): the connection's display name, or else the first and last name
-// its profile always shares (§6.2); "" when neither can be read.
+// its profile always shares (§6.2); "" when neither can be read. A display
+// name of only spaces counts as none.
 func noticeName(p *Peer) string {
 	if p == nil {
 		return ""
 	}
-	if p.Name != "" {
-		return p.Name
+	if n := strings.TrimSpace(p.Name); n != "" {
+		return n
 	}
 	if len(p.Profile) == 0 {
 		return ""
@@ -1072,7 +1074,12 @@ func noticeName(p *Peer) string {
 	if err != nil {
 		return ""
 	}
-	first, _, _ := o.OptString("first_name")
-	last, _, _ := o.OptString("last_name")
-	return truncateUTF8(strings.TrimSpace(first+" "+last), 128)
+	var parts []string
+	for _, k := range []string{"first_name", "last_name"} {
+		if v, _, _ := o.OptString(k); strings.TrimSpace(v) != "" {
+			parts = append(parts, strings.TrimSpace(v))
+		}
+	}
+	// Trimmed again after the cut, which may end on a space.
+	return strings.TrimSpace(truncateUTF8(strings.Join(parts, " "), 128))
 }

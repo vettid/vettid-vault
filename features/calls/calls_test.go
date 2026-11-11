@@ -608,7 +608,7 @@ func TestGlare(t *testing.T) {
 	var lost featuretest.Sent
 	for _, m := range b.h.Sent {
 		if m.To == "cA" {
-			if m.Type != "call.end" || str(t, m.Body, "call_id") != hi || str(t, m.Body, "reason") != "busy" {
+			if m.Type != "call.end" || string(m.Body) != string(endJSON(hi, "busy")) {
 				t.Fatalf("to the peer vault: %+v", m)
 			}
 			toPeer++
@@ -622,8 +622,8 @@ func TestGlare(t *testing.T) {
 	// rings on.
 	a.h.Reset()
 	featuretest.Call(a.f, a.h, t0.Add(2*time.Second), "connection:cB", "call.end", string(lost.Body))
-	if c, _ := a.f.Get(lo); c.State != StateRinging || len(a.h.Sent) != 0 {
-		t.Fatalf("the winner after the loser's busy: %+v, sent %+v", c, a.h.Sent)
+	if c, _ := a.f.Get(lo); c.State != StateRinging || len(a.h.Sent) != 0 || len(a.h.Activities) != 0 {
+		t.Fatalf("the winner after the loser's busy: %+v, sent %+v, activities %+v", c, a.h.Sent, a.h.Activities)
 	}
 	if c, _ := b.f.Get(lo); c.State != StateRinging {
 		t.Fatalf("the winning offer: %+v", c)

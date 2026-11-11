@@ -257,9 +257,34 @@ func TestBatchWhileActive(t *testing.T) {
 		t.Fatalf("after the read: %+v", its)
 	}
 	g := New()
-	featuretest.RoundTrip(t, f, g)
-	missed(t0.Add(4*time.Hour), "call4")
-	if its := f.Items(); len(its) != 2 || its[1].Count != 2 || its[1].Ref != "call4" {
-		t.Fatalf("the new batch: %+v", its)
+	featuretest.RoundTrip(t, f, g) // the batch survives a save and a load
+	recG := func(at time.Time, ref string) {
+		rec(g, h, at, vault.Activity{Kind: "call.missed", ConnectionID: "c1", Ref: ref, Feed: true, Priority: "high",
+			Batch: 24 * time.Hour, BatchWhileActive: true})
+	}
+	recG(t0.Add(4*time.Hour), "call4")
+	if its := g.Items(); len(its) != 2 || its[1].Count != 2 || its[1].Ref != "call4" {
+		t.Fatalf("the new batch after a load: %+v", its)
+	}
+	// 24 hours from its first, the item no longer merges.
+	recG(t0.Add(3*time.Hour+24*time.Hour), "call5")
+	if its := g.Items(); len(its) != 3 || its[2].Ref != "call5" {
+		t.Fatalf("after 24 hours: %+v", its)
+	}
+	// Archived or deleted ends a batch too.
+	for i, st := range []string{"archived", "deleted"} {
+		its := g.Items()
+		last := its[len(its)-1]
+		at := t0.Add(28*time.Hour + time.Duration(i)*time.Hour)
+		if st == "deleted" {
+			featuretest.Call(g, h, at, "app", "feed.delete", `{"item_id":"`+last.ID+`"}`)
+		} else {
+			featuretest.Call(g, h, at, "app", "feed.update", `{"item_id":"`+last.ID+`","status":"`+st+`"}`)
+		}
+		n := len(g.Items())
+		recG(at.Add(time.Minute), "after-"+st)
+		if its := g.Items(); len(its) <= n-1 || its[len(its)-1].Ref != "after-"+st || its[len(its)-1].Count > 1 {
+			t.Fatalf("after %s: %+v", st, its)
+		}
 	}
 }

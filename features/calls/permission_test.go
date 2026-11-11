@@ -220,3 +220,64 @@ func TestCallStateFormsAndRemoval(t *testing.T) {
 		t.Fatal("a removed connection's permission or counts kept")
 	}
 }
+
+// What counts toward the limit: a decline does; an incoming call the vault
+// ends for its own reasons (no ICE configuration) doesn't.
+func TestUnansweredWhatCounts(t *testing.T) {
+	b := newSide("cA")
+	sk, _ := callwire.NewOfferKey()
+	id := newCallID("cA")
+	featuretest.CallExp(b.f, b.h, t0, t0.Add(OfferTTL), "connection:cA", "call.offer", peerOffer("cA", id, "audio", sk.Public().Bytes()))
+	featuretest.Call(b.f, b.h, t0.Add(time.Second), "app", "call.end", `{"call_id":"`+id+`","reason":"decline"}`)
+	if len(b.f.unanswered["cA"]) != 1 {
+		t.Fatalf("a decline counted %d", len(b.f.unanswered["cA"]))
+	}
+	c := newSide("cA")
+	c.f = New(Options{ICE: failingICE{}})
+	featuretest.CallExp(c.f, c.h, t0, t0.Add(OfferTTL), "connection:cA", "call.offer", peerOffer("cA", newCallID("cA"), "audio", sk.Public().Bytes()))
+	if len(c.f.unanswered["cA"]) != 0 {
+		t.Fatal("a call the vault ended for its own reasons counted")
+	}
+}
+
+type failingICE struct{}
+
+func (failingICE) Issue(context.Context, string, time.Duration) ([]callwire.ICEServer, error) {
+	return nil, context.DeadlineExceeded
+}
+
+// Calls off is checked before glare: an off connection's offer can't end
+// the member's own call to it, placed before calls were turned off.
+func TestOffBeforeGlare(t *testing.T) {
+	a := newSide("cB")
+	sk, _ := callwire.NewOfferKey()
+	lo, hi := newCallID("obg"), newCallID("obg")
+	if r := featuretest.Call(a.f, a.h, t0, "app", "call.start", startBodyID("cB", hi, sk.Public().Bytes())); !r.OK() {
+		t.Fatal(r.Code)
+	}
+	featuretest.Call(a.f, a.h, t0, "app", "call.permission.set", `{"connection_id":"cB","allowed":false}`)
+	a.h.Reset()
+	featuretest.CallExp(a.f, a.h, t0.Add(time.Second), t0.Add(OfferTTL), "connection:cB", "call.offer", peerOffer("cB", lo, "audio", sk.Public().Bytes()))
+	if c, _ := a.f.Get(hi); c.State != StateRinging || !a.h.HasActivity("drop.call_off") || a.h.HasActivity("drop.call_glare") {
+		t.Fatalf("our call after an off connection's offer: %+v", c)
+	}
+}
+
+// The limited state is kept, so a limit that lapsed while the vault was
+// locked is announced after the unlock, at housekeeping.
+func TestLimitedSurvivesALoad(t *testing.T) {
+	b := newSide("cA")
+	for i := 0; i < 3; i++ {
+		missOne(t, b, t0.Add(time.Duration(i)*time.Minute))
+	}
+	saved, _ := b.f.Save()
+	g := New(Options{})
+	if err := g.Load(saved); err != nil || !g.limitedSent["cA"] {
+		t.Fatalf("limited not kept: %v", err)
+	}
+	b.h.Reset()
+	g.Tick(vault.NewSession(context.Background(), b.h, vault.PeerInfo{}, t0.Add(time.Hour), nil))
+	if b.permEvents() != 1 || g.limitedSent["cA"] {
+		t.Fatal("a lapse during the lock not announced")
+	}
+}

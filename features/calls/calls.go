@@ -567,6 +567,8 @@ func (f *Feature) offer(ctx context.Context, s *vault.Session, in *envelope.Inne
 		f.missed(s, c)
 		return nil
 	}
+	// (A held vault's offer took the held branch above: the same outcome,
+	// an ended call and a missed call, counted, without drop.call_rate.)
 	if f.limited(conn, now) {
 		// Too many unanswered calls from this connection: no ringing, no
 		// answer; an ended call and a missed call (§10.10, V5).
@@ -642,13 +644,16 @@ func (f *Feature) finish(s *vault.Session, c *Call, reason string) {
 	c.State, c.Reason, c.Ended = StateEnded, reason, s.Now()
 	delete(f.alive, c.ID)
 	s.Record(vault.Activity{Kind: "call.ended", ConnectionID: c.Conn, Ref: c.ID, Direction: c.Dir, Audit: true})
-	if c.Dir == DirIn && c.Answered.IsZero() {
-		f.noteUnanswered(s, c.Conn, c.Ended) // missed, declined, busy or suppressed (§10.10, V5)
-	}
 }
 
 // missed records an incoming call that was never answered in the feed.
+//
+// A missed call counts toward the connection's unanswered-call limit
+// (§10.10, V5), as a declined one does (end); an incoming call the vault
+// ends for its own reasons (no ICE configuration, an answer it couldn't
+// forward) does not.
 func (f *Feature) missed(s *vault.Session, c *Call) {
+	f.noteUnanswered(s, c.Conn, s.Now())
 	s.Record(vault.Activity{Kind: "call.missed", ConnectionID: c.Conn, Ref: c.ID, Direction: DirIn, Feed: true, Priority: "high",
 		Batch: MissedMergeWindow, BatchWhileActive: true}) // missed calls merge (§10.10, V5)
 }
@@ -852,6 +857,9 @@ func (f *Feature) end(s *vault.Session, body []byte, fromConn bool) error {
 		return nil
 	}
 	f.finish(s, c, e.Reason)
+	if c.Dir == DirIn && ringing {
+		f.noteUnanswered(s, c.Conn, c.Ended) // declined: counts toward the limit (§10.10, V5)
+	}
 	_ = s.SendToConnection(c.Conn, "call.end", endJSON(c.ID, e.Reason))
 	s.NotifyDevicesWith("call.end", endJSON(c.ID, e.Reason), s.From().ID, vault.SendOptions{})
 	return nil

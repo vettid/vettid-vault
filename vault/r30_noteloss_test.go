@@ -53,7 +53,7 @@ var r30NoteSeeds = []struct {
 	// re-sealed copy known by its bytes as the relay saw it, and the
 	// receiver's stale_or_future for it judging the quota wait.
 	{8495705468849050258, false, true, true, ""},
-	{14452917345793243350, false, true, true, ""}, // was rpLockWaitResidual: #6875's re-stamp delivers it
+	{14452917345793243350, false, true, true, ""}, // was the lock-wait residual: #6875's re-stamp delivers it
 }
 
 func TestR30NoteLossSeeds(t *testing.T) {

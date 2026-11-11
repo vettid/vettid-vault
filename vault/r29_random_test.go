@@ -49,11 +49,10 @@ import (
 // duplicate note. An honest pair must not suspend, nor end stale, except
 // the stated residuals, counted apart: rapid rotations (3 or more key
 // changes within 2 hours on a side, ending by quota_exceeded), a lock
-// longer than T, and (R29RP_REFRESH) rpQuotaWaitResidual: a note refused
-// stale_or_future after a standing-quota wait of over 16 days with no key
-// change (vettid-vault #216's quota wait and card GC #6875's re-stamp end
-// it). TestR29RandomPair fails when any run ends outside them
-// (rpAccepted).
+// longer than T, and a note told rather than delivered (rpToldResidual,
+// rpCrashToldResidual). The quota-wait and lock-wait residuals are closed
+// by card GC #6875's re-stamp at deposit. TestR29RandomPair fails when any
+// run ends outside them (rpAccepted).
 //
 // Run: R29RP_RUNS=n go test -run TestR29RandomPair ./vault/
 //   R29RP_SEED   the master seed (default 1)
@@ -1188,13 +1187,6 @@ func (w *rpWorld) verdict() string {
 	return residual
 }
 
-// rpQuotaWaitResidual: a run whose only fault is a test.note refused
-// stale_or_future after a standing-quota wait of over 16 days with no key
-// change (the lead's review M1). The vault fix of vettid-vault #216 (the
-// quota wait) and card GC #6875 (the 16-day re-stamp at deposit) end it;
-// with #216 those seeds converge. Counted apart, accepted (rpAccepted).
-const rpQuotaWaitResidual = "residual:quota-wait>16d (#216, #6875)"
-
 // rpToldResidual: a run whose only fault is a test.note answered a 5xx
 // (which may have been stored, 0.88.7 §8.3), then re-sealed at a key change
 // with its kept ts past 16 days, so not deposited and told
@@ -1202,12 +1194,6 @@ const rpQuotaWaitResidual = "residual:quota-wait>16d (#216, #6875)"
 // #6875's notice). The harness's 503 stores nothing, so the note is in fact
 // lost, as the vault cannot know. Counted apart, accepted.
 const rpToldResidual = "residual:told-after-5xx (#6875)"
-
-// rpLockWaitResidual: a run whose only fault is a test.note refused
-// stale_or_future (by its id) after its sender was locked for over 16 days
-// since its ts, with no key change: it went at the unlock with that ts.
-// Card GC #6875's re-stamp at deposit ends it. Counted apart, accepted.
-const rpLockWaitResidual = "residual:lock-wait>16d (#6875)"
 
 // rpCrashToldResidual: a run whose only fault is a test.note waiting in its
 // sender's outbox at a crash, taken as possibly tried at the restart (card
@@ -1266,13 +1252,9 @@ func (w *rpWorld) notesUnaccounted() (why []string) {
 // notesLost is the note oracle (GC #7160, every mode): each test.note side
 // s queued is handled exactly once by the other side, by inner id. One not
 // handled is excused only if the relay dropped a copy of it at T and the
-// run has a lock longer than T (the lock residual), or, as quotaWait, if
-// the copy accepted carried a ts over 16 days old under an epoch current
-// since that ts (no key change), after a standing-quota refusal of the
-// sender's since that ts (the note's own, or an earlier deposit's that held
-// the mailbox behind it), and the receiver audited stale_or_future
-// (rpQuotaWaitResidual); or if it was answered a 5xx and its sender audited
-// undelivered_window (told, rpToldResidual).
+// run has a lock longer than T (the lock residual); or if it was answered
+// a 5xx, or was waiting at a crash, and its sender audited
+// undelivered_window (told: rpToldResidual, rpCrashToldResidual).
 func (w *rpWorld) notesLost() (why []string, residual string) {
 	told, crashTold := false, false // quota-wait and lock-wait are no longer excused (#6875)
 	over, single := w.lockShape()

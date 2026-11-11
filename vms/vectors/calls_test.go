@@ -206,6 +206,12 @@ func checkCallVectors(t *testing.T, dir string) {
 		mac.Write(caller.vaultPub)
 		mac.Write(callee.vaultPub)
 		eq(t, "confirm", mac.Sum(nil), d.b64("confirm_b64"))
+		if dir == Dir {
+			// The value VAULT-MESSAGING 0.88.16 §16 prints for this case.
+			eq(t, "confirm (spec §16)", d.b64("confirm_b64"), mustHex("0746ef9a7cf8d208bd7d6f891002fdc25c7d49e2cf6930d63199f10ba2a7c6e0"))
+			eq(t, "caller vault ik (spec §16)", caller.vaultPub, mustHex("c050c5637a44fa8629fff3cccce2300cb362a63d99d95fc54145266f4332445a"))
+			eq(t, "callee vault ik (spec §16)", callee.vaultPub, mustHex("f80cccdce4ae1c07ae208a2adf99a310ae4207e0306fa0236110b06827bbb8d0"))
+		}
 		swapped := callwire.Parties{Caller: callee.vaultPub, Callee: caller.vaultPub}
 		if !callwire.VerifyConfirm(kc, chosen, offered, id, parties, d.b64("confirm_b64")) ||
 			callwire.VerifyConfirm(kc, chosen+1, offered, id, parties, d.b64("confirm_b64")) ||

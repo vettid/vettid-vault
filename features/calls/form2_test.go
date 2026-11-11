@@ -617,7 +617,10 @@ func TestForm2RelayedCall(t *testing.T) {
 		t.Fatal("A used an answer passed on")
 	}
 
-	// A device that names another callee than the connection's key.
+	// A device that names another callee than the connection's key: its own
+	// vault rebuilds m2 from its records, so the device's signature fails
+	// before anything is vouched (the vouching check itself is
+	// vault.TestVouchCallShareParties).
 	a3 := newSide("cB")
 	wrong := startBody2P("cB", newCallID("relay"), ek, []int{1}, callwire.Parties{Caller: testIK, Callee: cIK})
 	if r := featuretest.Call(a3.f, a3.h, t0, "app", "call.start", wrong); r.Code != "bad_request" {

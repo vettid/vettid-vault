@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/hkdf"
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -106,6 +108,49 @@ func checkCallVectors(t *testing.T, dir string) {
 	}
 	check("offer_share", "offer", "audio", ek, caller, callee.vaultPub)
 	check("answer_share", "answer", "", enc, callee, caller.vaultPub)
+
+	// (C2) Form 2 and key confirmation, by hand: m2 with the suites, and
+	// k_confirm and confirm by HKDF and HMAC. A frozen calls.json from
+	// before C2 has none.
+	if _, ok := d.m["offer_share2"]; ok {
+		check2 := func(name, role, media, suites string, share []byte, by party, wrongVault ed25519.PublicKey) {
+			sh := d.sub(name)
+			if sh.str("role") != role || sh.str("media") != media {
+				t.Errorf("%s: role or media", name)
+			}
+			m := bytes.Join([][]byte{[]byte(role), []byte(id), []byte(media), []byte(suites), share}, []byte{0})
+			eq(t, name+" message", m, sh.b64("message_b64"))
+			ds := ed25519.Sign(by.dev, append([]byte("vettid/vms/2/call-share"), m...))
+			eq(t, name+" device_sig", ds, sh.b64("device_sig_b64"))
+			vm := append(append([]byte(nil), by.devPub...), m...)
+			vs := ed25519.Sign(by.vault, append([]byte("vettid/vms/2/call-vouch"), vm...))
+			eq(t, name+" vault_sig", vs, sh.b64("vault_sig_b64"))
+			if callwire.VerifyShare(wrongVault, by.devPub, m, ds, vs) == nil {
+				t.Errorf("%s: verifies under another vault's ik", name)
+			}
+			// A form 2 signature never verifies as form 1, nor the reverse.
+			m1 := bytes.Join([][]byte{[]byte(strings.TrimSuffix(role, "2")), []byte(id), []byte(media), share}, []byte{0})
+			if callwire.VerifyDeviceShare(by.devPub, m1, ds) == nil {
+				t.Errorf("%s: a form 2 signature verifies over form 1", name)
+			}
+		}
+		check2("offer_share2", "offer2", "audio", "2 1", ek, caller, callee.vaultPub)
+		check2("answer_share2", "answer2", "", "1\x002 1", enc, callee, caller.vaultPub)
+		if d.str("label_confirm") != "vettid/vms/2/call-confirm" {
+			t.Error("label_confirm")
+		}
+		kc, err := hkdf.Key(sha256.New, kCall, []byte("vettid/vms/2/call-confirm"), id, 32)
+		if err != nil {
+			t.Fatal(err)
+		}
+		eq(t, "k_confirm", kc, d.hex("k_confirm_hex"))
+		mac := hmac.New(sha256.New, kc)
+		mac.Write([]byte("1\x002 1\x00" + id))
+		eq(t, "confirm", mac.Sum(nil), d.b64("confirm_b64"))
+		if !callwire.VerifyConfirm(kc, 1, []int{2, 1}, id, d.b64("confirm_b64")) || callwire.VerifyConfirm(kc, 2, []int{2, 1}, id, d.b64("confirm_b64")) {
+			t.Error("confirm through callwire, or bound to the choice")
+		}
+	}
 
 	// ICE configurations.
 	exp := int64(d.num("ice_exp"))

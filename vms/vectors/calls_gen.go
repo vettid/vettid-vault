@@ -63,8 +63,11 @@ func genCalls() (obj, error) {
 	}
 
 	// share signs a share as its device and vouches for it as its vault.
+	var shareM func(role, media string, m []byte, dev, vault ed25519.PrivateKey) (obj, error)
 	share := func(role, media string, value []byte, dev, vault ed25519.PrivateKey) (obj, error) {
-		m := callwire.ShareMessage(role, CallID, media, value)
+		return shareM(role, media, callwire.ShareMessage(role, CallID, media, value), dev, vault)
+	}
+	shareM = func(role, media string, m []byte, dev, vault ed25519.PrivateKey) (obj, error) {
 		ds, err := callwire.SignShare(dev, m)
 		if err != nil {
 			return nil, err
@@ -82,6 +85,29 @@ func genCalls() (obj, error) {
 			{"vouch_message_b64", b64(vm)}, {"vault_sig_b64", b64(vs)}}, nil
 	}
 	offer, err := share(callwire.RoleOffer, CallMedia, ek, callerDev, callerVault)
+	if err != nil {
+		return nil, err
+	}
+	// (C2) Form 2: the suites signed with the share, and key confirmation.
+	offered, chosen := []int{2, 1}, 1
+	offer2, err := shareM(callwire.RoleOffer2, CallMedia, callwire.OfferMessage2(CallID, CallMedia, offered, ek), callerDev, callerVault)
+	if err != nil {
+		return nil, err
+	}
+	offer2 = append(offer2, member{"suites", offered})
+	answer2, err := shareM(callwire.RoleAnswer2, "", callwire.AnswerMessage2(CallID, chosen, offered, enc), calleeDev, calleeVault)
+	if err != nil {
+		return nil, err
+	}
+	answer2 = append(answer2, member{"suite", chosen}, member{"offered", offered})
+	kConfirm, err := callwire.ConfirmKey(kCall, CallID)
+	if err != nil {
+		return nil, err
+	}
+	confirm := callwire.Confirm(kConfirm, chosen, offered, CallID)
+	if !callwire.VerifyConfirm(kConfirm, chosen, offered, CallID, confirm) {
+		return nil, errors.New("vectors: confirm does not verify")
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -147,6 +173,11 @@ func genCalls() (obj, error) {
 		{"ice", iceServers},
 		{"ice_no_servers", iceEmpty},
 		{"glare", glareCases()},
+		{"offer_share2", offer2},
+		{"answer_share2", answer2},
+		{"label_confirm", callwire.LabelConfirm},
+		{"k_confirm_hex", hx(kConfirm)},
+		{"confirm_b64", b64(confirm)},
 	}, nil
 }
 

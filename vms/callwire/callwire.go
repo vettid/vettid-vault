@@ -332,9 +332,9 @@ func VerifyShare(vaultIK, deviceIK ed25519.PublicKey, m, deviceSig, vaultSig []b
 }
 
 // ValidShareMessage reports whether m has the ShareMessage form with a
-// known role (what a vault agrees to vouch for).
+// known role, form 1 or (C2) form 2 (what a vault agrees to vouch for).
 func ValidShareMessage(m []byte) bool {
-	for _, r := range []string{RoleOffer, RoleAnswer} {
+	for _, r := range []string{RoleOffer, RoleAnswer, RoleOffer2, RoleAnswer2} {
 		if len(m) > len(r) && string(m[:len(r)]) == r && m[len(r)] == 0 {
 			return true
 		}

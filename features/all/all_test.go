@@ -153,9 +153,11 @@ func TestVoteFeatureHooks(t *testing.T) {
 }
 
 // VAULT-MESSAGING §3.3 (0.88.17, owner decision 2026-11-11): the features
-// that other features call directly (the wiring in NewSet) are exactly the
-// Required ones, whose unreadable state refuses the unlock; every other one
-// is stand-alone, not run when its state does not read.
+// that other features call directly are the Required ones, whose
+// unreadable state refuses the unlock; every other one is stand-alone, not
+// run when its state does not read. The list is fixed here by hand, from
+// the wiring in NewSet: a feature newly wired into another must be added
+// to it and marked Required (this test does not read NewSet).
 func TestRequiredAreTheWiredFeatures(t *testing.T) {
 	want := []string{"audit", "connauth", "credential", "critical", "grants", "items", "leash", "vote", "wallet"}
 	var got []string

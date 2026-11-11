@@ -90,6 +90,9 @@ func TestParties(t *testing.T) {
 	}
 	// Keys of the wrong length never verify, even when their bytes run
 	// together into the same HMAC input (a‖b with nothing after it).
+	if VerifyConfirm(k, 1, []int{1}, id, pp, nil) || VerifyConfirm(k, 1, []int{1}, id, pp, []byte{}) || VerifyConfirm(k, 1, []int{1}, id, pp, c[:31]) {
+		t.Error("an empty or truncated confirm verifies")
+	}
 	if VerifyConfirm(k, 1, []int{1}, id, Parties{}, nil) || VerifyConfirm(k, 1, []int{1}, id, Parties{}, []byte{}) {
 		t.Error("no parties and an empty confirm verify") // Confirm is nil for invalid parties
 	}

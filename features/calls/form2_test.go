@@ -681,3 +681,16 @@ func TestForm2AnswerConnectionGone(t *testing.T) {
 		t.Fatalf("device answer, connection gone: %+v", b.h.Sent)
 	}
 }
+
+// A connection whose key the vault can't name (no ik on record): a form 2
+// call.start is not_found, nothing vouched or sent.
+func TestForm2StartWithoutConnectionKey(t *testing.T) {
+	sk, _ := callwire.NewOfferKey()
+	a := newSide("cB")
+	p := a.h.Conns["cB"]
+	p.IK = nil
+	a.h.Conns["cB"] = p
+	if r := featuretest.Call(a.f, a.h, t0, "app", "call.start", startBody2("cB", newCallID("nk"), sk.Public().Bytes(), []int{1})); r.Code != "not_found" || len(a.h.Sent) != 0 {
+		t.Fatalf("%q, %d sent", r.Code, len(a.h.Sent))
+	}
+}

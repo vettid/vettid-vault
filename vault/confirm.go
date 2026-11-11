@@ -520,8 +520,45 @@ func (m *Manager) beforeAccept(p *Peer, ep *handshake.Epoch, in *envelope.Inner,
 			}
 			m.reconfirm[p.ID] = true
 		}
+		m.dropStaleReconnectAnswers(p, id[:], in.TS, now)
 	}
 	return false
+}
+
+// dropStaleReconnectAnswers is §3.4.1's fix for "A stale reconnect answer
+// after a rekey's confirmation" (GC #6647): a message from p that opens
+// under an epoch newer than the one an open reconnect answer's hs.init
+// named, with a later inner ts than that hs.init, shows that p moved on
+// after sending it; p ended that reconnect (§6.3.1 Initiator "I's open
+// reconnects end at its rekey's confirmation", or "A verified hs.fin comes
+// first") and will send no hs.fin for it. The answer is abandoned (its
+// tokens revoked, an hs.resp not yet deposited not sent), so that it holds
+// back neither the vault's rekeys nor, between two persons, its reconnects
+// until L. hs.fin is not such a message (the caller): a pending rekey's
+// hs.fin is made under the newer epoch while I's reconnect is still open
+// (§6.5 "A verified hs.fin comes first" then decides). A restore's answer
+// (Older) is kept, and so is a fork sign's (Fork: a reconnect naming a
+// replaced line's epoch, §6.6 "Fork detection", or an epoch older than the
+// confirmed one, §3.4.1 "Fork by ctx"), judged at its hs.fin; the named
+// epoch must be one of p's epochs, so that "newer" compares two of them.
+// "Newer" is p.newer: an epoch established, not pending, abandoned or
+// destroyed, later in establishing order.
+func (m *Manager) dropStaleReconnectAnswers(p *Peer, msgEpoch []byte, ts time.Time, now time.Time) {
+	if p.Kind != KindConnection {
+		return
+	}
+	for _, id := range sortedKeys(m.st.Awaiting) {
+		aw := m.st.Awaiting[id]
+		if aw == nil || aw.New != nil || aw.PeerID != p.ID || aw.Purpose != handshake.PurposeReconnect {
+			continue
+		}
+		rc := aw.Reconnect
+		if rc == nil || rc.Older || rc.Fork || p.epochIndex(rc.Named) < 0 || !ts.After(rc.TS) || !p.newer(msgEpoch, rc.Named) {
+			continue
+		}
+		m.abandonAwaiting(id, now)
+		m.note(now, "answer_ended_stale", p.ID)
+	}
 }
 
 // destroyedEpochMessage is an authenticated message under an epoch rule E

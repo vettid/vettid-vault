@@ -216,6 +216,12 @@ func (m *Manager) k9(p *Peer, links []*handshake.Rotation, msgEpoch []byte, now 
 		m.record(Activity{Kind: "connection.fork_suspected", ConnectionID: connID(p), DeviceID: devID(p), Ref: "epoch", Audit: true}, now)
 		m.dirty = true
 	}
+	if len(judged) > 0 {
+		// (Release 29 final review, item 1) In the write that ends them, as for rule E and a demotion. Carried
+		// records are a responder's (an epoch not Mine) and k9 ends only epochs the vault began, so today this
+		// finds nothing to discard; it keeps the rule in one place should either change.
+		m.sweepCarried(p, now)
+	}
 }
 
 // evidenceFirst is acceptFrom step 3 (§3.4.1): every identity link a
@@ -320,6 +326,13 @@ func (m *Manager) followLinks(p *Peer, app []*handshake.Rotation, msgEpoch []byt
 		m.restartAfterDemotion(p, now) // not beside the caller's own handshake
 	}
 	m.h5(p, now)
+	if !m.noLinkRestart && !p.suspended() {
+		// (Release 29 final review, item 1) Carried tokens of an epoch demoted here are discarded in this write
+		// (§6.3.1 "Discarded, never adopted"), with the reconnect when no valid standing token is held. Inside a
+		// handshake's own write (noLinkRestart) that handshake is the way on, and its caller sweeps once its
+		// epoch is established (responderEstablish) or the next housekeeping does.
+		m.sweepCarried(p, now)
+	}
 }
 
 // f1Demote is §3.4.1 "Strict F1, a link under an earlier epoch": a link

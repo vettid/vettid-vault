@@ -62,6 +62,7 @@ func (f *r29Fx) startCopy(s int, snap *store.Memory) {
 		}))
 	f.sink[2] = &recSink{}
 	m.features = append(m.features, f.sink[2])
+	startWrite(m)
 	f.d[2] = &devFixture{fixture: cf}
 	f.id[2] = f.id[s]
 }

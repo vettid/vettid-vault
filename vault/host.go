@@ -124,6 +124,20 @@ func (h managerHost) Send(to, typ string, body json.RawMessage, o SendOptions, n
 	return nil
 }
 
+func (h managerHost) SendCallSignal(to, typ string, body json.RawMessage, o SendOptions, now time.Time) error {
+	if !callSignal[typ] || typ == "call.keepalive" {
+		return errors.New("vault: not a call signal to a device")
+	}
+	p, ok := h.m.st.Devices[to]
+	if !ok || p.State != PeerActive || p.Recovering || p.Kind != KindApp && p.Kind != KindDesktop {
+		return ErrNoSession
+	}
+	if h.m.sendWith(p, typ, body, o, now) == "" {
+		return ErrNoSession
+	}
+	return nil
+}
+
 func (h managerHost) SignICEConfig(config []byte) ([]byte, error) {
 	if _, err := callwire.ParseICEConfig(config); err != nil {
 		return nil, err
@@ -326,6 +340,8 @@ func auditKind(event string) string {
 	switch event {
 	case "peer_stale":
 		return "" // recorded as connection.stale
+	case "unconfirmed_late":
+		return "" // not dropped: it still goes; recorded as message.delivery_unconfirmed (#7901)
 	}
 	return "drop." + event
 }

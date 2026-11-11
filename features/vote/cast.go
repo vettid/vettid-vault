@@ -164,6 +164,14 @@ func (f *Feature) cast(s *vault.Session, conn, id, choice string, pinned, owed [
 	r.Ballot = &ballot{State: BallotSending, ChoiceID: choice, VK: bal.VK, BallotSig: bal.BallotSig, CastSig: castSig, Body: body}
 	r.ChangedMS = now.UnixMilli()
 	f.audit(s, "vote.cast", conn, id) // never the choice
+	if r.SelfUnrecorded {
+		r.SelfUnrecorded = false // the record holds a ballot of its own now (GC #8012)
+	}
+	if r.Self != nil && (!r.Self.is(r.Ballot) || r.SelfLatest != nil && !r.SelfLatest.is(r.Ballot)) {
+		// A self_unrecorded record can cast (0.88.12): its own ballot then
+		// meets the one shown under its vk as self_conflict.
+		f.setSelfConflict(s, r)
+	}
 	if credPub := credKey.Public().(ed25519.PublicKey); s.KeyRotationHeld() && !eq(pinned, credPub) {
 		// A transfer's credential key statement is still held (§11.14.10):
 		// the connection does not follow the key yet. The ballot waits
@@ -197,6 +205,9 @@ func (f *Feature) sendOwedChain(s *vault.Session, conn string) {
 // sendBallot sends the stored body as a new request with a new inner id.
 func (f *Feature) sendBallot(s *vault.Session, r *record) {
 	b := r.Ballot
+	if b.Stopped {
+		return // already_voted with an own-vk ballot was the service's final answer (0.88.12)
+	}
 	now := s.Now()
 	id, err := s.SendRequest(r.Conn, "vote.cast", b.Body)
 	if err != nil {
@@ -344,6 +355,16 @@ func (b *ballot) unansweredBefore(reqID string) bool {
 	return false
 }
 
+// heldBytes reports whether list holds exactly body.
+func heldBytes(list [][]byte, body []byte) bool {
+	for _, x := range list {
+		if eq(x, body) {
+			return true
+		}
+	}
+	return false
+}
+
 func keepRefusal(list [][]byte, body []byte) [][]byte {
 	list = append(list, append([]byte{}, body...))
 	if len(list) > votewire.MaxRefusalsKept {
@@ -359,10 +380,232 @@ func (f *Feature) receipt(s *vault.Session, r *record, msgMS int64, sig []byte) 
 	b.MsgMS, b.ReceiptSig = msgMS, append([]byte{}, sig...)
 	f.setFinal(s, r, BallotRecorded, "")
 	f.audit(s, "vote.recorded", r.Conn, r.ID)
+	f.twoReceipts(s, r)
 }
 
+// msgInWindow reports a receipt's msg_ms inside the window: not before
+// opens_at and before the verified close (review fix 1: an extension
+// adopted from results.json alone never moves it).
 func (r *record) msgInWindow(msgMS int64) bool {
-	return msgMS >= r.Opens*1000 && msgMS < r.Closes*1000
+	return msgMS >= r.Opens*1000 && msgMS < r.verifiedClose()*1000
+}
+
+// verifiedClose is the close moved only by extensions whose bundle the
+// vault verified (vote.extended, a site entry): the close of the last held
+// extension of the verified prefix. One adopted from results.json carries
+// no bundle until one verifies (verifyHeld).
+func (r *record) verifiedClose() int64 {
+	c := r.OrigClose
+	for _, e := range r.Exts {
+		if !e.Verified {
+			break
+		}
+		c = e.Closes
+	}
+	if c == 0 {
+		c = r.Closes
+	}
+	return c
+}
+
+// msgAside reports a msg_ms that only an extension the vault has not
+// verified yet can bring into the window (0.88.12, §10.19.5 ok): at or
+// after the verified close and before the original close + 86,400 s.
+func (r *record) msgAside(msgMS int64) bool {
+	return msgMS >= r.Opens*1000 && msgMS >= r.verifiedClose()*1000 && msgMS < (r.OrigClose+votewire.MaxExtension)*1000
+}
+
+// ownReceipt takes a verified receipt for the vault's own ballot: inside
+// the window it is the receipt; one msgAside is kept aside (the latest),
+// the ballot keeping its state and sending, and judged again when the
+// verified close moves (rejudgeAside). The same receipt again changes
+// nothing (review fix 2). It reports false for a receipt that is neither,
+// which is no receipt.
+func (f *Feature) ownReceipt(s *vault.Session, r *record, msgMS int64, sig []byte) bool {
+	if r.msgInWindow(msgMS) {
+		f.receipt(s, r, msgMS, sig)
+		return true
+	}
+	if !r.msgAside(msgMS) {
+		return false
+	}
+	b := r.Ballot
+	if a := b.Aside; a != nil && a.MsgMS == msgMS && eq(a.ReceiptSig, sig) {
+		return true // held already
+	}
+	b.Aside = &keptReceipt{MsgMS: msgMS, ReceiptSig: append([]byte{}, sig...)}
+	r.ChangedMS = s.Now().UnixMilli()
+	f.asideAfterFinal(s, r)
+	return true
+}
+
+// shownBallots are the ballots the service showed that the record keeps.
+func (r *record) shownBallots() []*svcBallot {
+	var out []*svcBallot
+	for _, x := range []*svcBallot{r.Self, r.SelfLatest, r.Other, r.OtherLatest, r.ServiceBallot} {
+		if x != nil {
+			out = append(out, x)
+		}
+	}
+	return out
+}
+
+// holds reports whether the record already keeps exactly sb (the ballot and
+// its receipt) as a shown ballot.
+func (r *record) holds(sb *svcBallot) bool {
+	for _, x := range r.shownBallots() {
+		if sameSvc(x, sb) && x.MsgMS == sb.MsgMS && eq(x.ReceiptSig, sb.ReceiptSig) {
+			return true
+		}
+	}
+	return false
+}
+
+// keepShownAside: a ballot the service showed (foreign or under an own vk)
+// whose receipt's msg_ms is msgAside (VAULT-MESSAGING 7adc8fe) is judged
+// at once (conflict evidence or self_*), and only its receipt is kept
+// aside (Late), for the two-receipts rule and the row, until a verified
+// extension brings it into the window. (Review fix 5, the coordinator's
+// ruling) After a restore, an own-vk ballot with no ballot of the vault's
+// own is held as the restore prompt (ServiceBallot, no cast) with no self
+// flag, and offered once its receipt counts.
+func (f *Feature) keepShownAside(s *vault.Session, r *record, sb *svcBallot, answer, restore bool) {
+	if r.holds(sb) {
+		return // the same ballot and receipt again (review fix 2)
+	}
+	sb.Late = true
+	r.ChangedMS = s.Now().UnixMilli()
+	f.shown(s, r, sb, answer, restore)
+	f.asideAfterFinal(s, r)
+}
+
+// asideAfterFinal: once the results were judged finally, what is kept
+// aside at or after the close in force (adopted extensions included) can
+// no longer come into the window: it is no receipt now. One below it, for
+// an extension adopted but not verified yet, stays aside until that
+// extension's bundle is verified (recheck of a07d2fe).
+func (f *Feature) asideAfterFinal(s *vault.Session, r *record) {
+	switch r.Check {
+	case CheckVerified, CheckUnconfirmed, CheckFailed:
+		f.rejectAsideFrom(s, r, r.Closes*1000)
+	}
+}
+
+// rejudgeAside judges every receipt kept aside again after the verified
+// close moved (vote.extended, a site entry; never one adopted from
+// results.json, GC #7991 C), whatever the ballot's state (review fix 3):
+// once its msg_ms is inside the window, the vault's own receipt is taken as
+// any receipt is (it wins over a final closed or late refusal; a ballot in
+// conflict or disputed keeps its state and holds it), and a shown ballot's
+// receipt counts (two receipts; a held restore prompt is offered).
+func (f *Feature) rejudgeAside(s *vault.Session, r *record) {
+	if b := r.Ballot; b != nil && b.Aside != nil && !b.Aside.Rejected && r.msgInWindow(b.Aside.MsgMS) {
+		a := b.Aside
+		b.Aside = nil
+		r.ChangedMS = s.Now().UnixMilli()
+		switch b.State {
+		case BallotRecorded:
+		case BallotConflict, BallotDisputed:
+			if len(b.ReceiptSig) == 0 {
+				b.MsgMS, b.ReceiptSig = a.MsgMS, a.ReceiptSig // evidence, not a state change
+			}
+		default:
+			f.receipt(s, r, a.MsgMS, a.ReceiptSig)
+			f.rejudgeResults(s, r)
+		}
+	}
+	changed := false
+	for _, x := range r.shownBallots() {
+		if x.Late && !x.LateRejected && r.msgInWindow(x.MsgMS) {
+			x.Late, changed = false, true // its receipt now counts
+		}
+	}
+	if changed {
+		r.ChangedMS = s.Now().UnixMilli()
+		if r.ServiceBallot != nil && !r.ServiceBallot.Late {
+			f.event(s, r, "ballot") // the restore prompt is offered now
+		}
+		f.twoReceipts(s, r)
+		f.rejudgeResults(s, r) // a receipt that now counts may change a final check
+	}
+}
+
+// rejudgeResults: a receipt taken after the results were judged finally
+// (GC #8012) changes what the vault holds, so the stored row is judged
+// again: a failure is `failed` with its reason and one vote.problem (the
+// check was not failed before); an unconfirmed check that now verifies is
+// verified.
+func (f *Feature) rejudgeResults(s *vault.Session, r *record) {
+	rs := r.Results
+	if rs == nil || (r.Check != CheckVerified && r.Check != CheckUnconfirmed) {
+		return
+	}
+	var row *votewire.RowBallot
+	if rs.Row != nil {
+		row = &votewire.RowBallot{VK: rs.Row.VK, ChoiceID: rs.Row.ChoiceID, BallotSig: rs.Row.BallotSig}
+	}
+	switch st, why := verdict(r, row); {
+	case st == CheckFailed:
+		// Two receipts raised their vote.problem when both were held
+		// (GC #8014): no second one.
+		quiet := r.TwoReceipts && why == "row_mismatch" && !r.conflictEvidence()
+		f.failCheckFeed(s, r, why, !quiet)
+	case st == CheckVerified && r.Check == CheckUnconfirmed:
+		r.Check, r.ChangedMS = CheckVerified, s.Now().UnixMilli()
+		f.audit(s, "vote.check_ok", r.Conn, r.ID)
+		f.feed(s, "vote.result", r.Conn, r.ID, "")
+		f.event(s, r, "check")
+	}
+}
+
+// asidePending reports the earliest msg_ms kept aside that is really still
+// outside the window and not yet judged finally (0 when none).
+func (r *record) asidePending() int64 {
+	var at int64
+	if b := r.Ballot; b != nil && b.Aside != nil && !b.Aside.Rejected && !r.msgInWindow(b.Aside.MsgMS) {
+		at = b.Aside.MsgMS
+	}
+	for _, x := range r.shownBallots() {
+		if x.Late && !x.LateRejected && !r.msgInWindow(x.MsgMS) && (at == 0 || x.MsgMS < at) {
+			at = x.MsgMS
+		}
+	}
+	return at
+}
+
+// rejectAsideFrom: a receipt kept aside whose msg_ms is at or after from
+// (0: all of them), still outside the window at a final judgement of the
+// results, is no receipt: audited vote.receipt_rejected then and kept as
+// evidence, and (GC #7991 F) the service signed for a cast outside its own
+// window, so the member is told (vote.problem, once). The row check is
+// unchanged by it. One inside the window by now is judged first, never
+// rejected (review fix 3). A restore prompt held for a late receipt becomes
+// self_unrecorded (review fix 5).
+func (f *Feature) rejectAsideFrom(s *vault.Session, r *record, from int64) {
+	f.rejudgeAside(s, r)
+	hit := false
+	if b := r.Ballot; b != nil && b.Aside != nil && !b.Aside.Rejected && b.Aside.MsgMS >= from {
+		b.Aside.Rejected, hit = true, true
+	}
+	for _, x := range r.shownBallots() {
+		if x.Late && !x.LateRejected && x.MsgMS >= from {
+			x.LateRejected, hit = true, true
+		}
+	}
+	if !hit {
+		return
+	}
+	r.ChangedMS = s.Now().UnixMilli()
+	f.audit(s, "vote.receipt_rejected", r.Conn, r.ID)
+	if !r.AsideProblem {
+		r.AsideProblem = true
+		f.feed(s, "vote.problem", r.Conn, r.ID, "high")
+		f.event(s, r, "problem")
+	}
+	if sb := r.ServiceBallot; sb != nil && sb.Late && sb.LateRejected && r.Ballot == nil {
+		r.ServiceBallot = nil
+		f.self(s, r, nil, sb, false)
+	}
 }
 
 // castAnswer handles the answer to a vote.cast (§10.19.5 "The answer").
@@ -381,12 +624,12 @@ func (f *Feature) castAnswer(s *vault.Session, r *record, in *envelope.Inner) {
 	}
 	if in.Status != envelope.StatusError {
 		a, err := votewire.ParseCastAnswer(in.Body)
-		if err != nil || a.Verify(r.Signer, r.ID, r.Hash, leaf) != nil || !r.msgInWindow(int64(a.MsgMS)) {
+		if err != nil || a.Verify(r.Signer, r.ID, r.Hash, leaf) != nil || !r.msgInWindow(int64(a.MsgMS)) && !r.msgAside(int64(a.MsgMS)) {
 			f.audit(s, "vote.receipt_rejected", r.Conn, r.ID)
 			return
 		}
 		b.marksAnswered(in.Re, now)
-		f.receipt(s, r, int64(a.MsgMS), a.ReceiptSig)
+		f.ownReceipt(s, r, int64(a.MsgMS), a.ReceiptSig)
 		return
 	}
 	if in.Error == nil {
@@ -439,14 +682,25 @@ func (f *Feature) castAnswer(s *vault.Session, r *record, in *envelope.Inner) {
 		f.refuse(s, r, code, true)
 	case "already_voted":
 		eb, err := rf.VerifyExisting(r.Signer, r.Hash, r.Tag)
-		if err != nil || !r.msgInWindow(int64(rf.BallotMsgMS)) {
+		if err != nil {
 			return
 		}
 		if eq(eb.VK, b.VK) && eb.ChoiceID == b.ChoiceID && eq(eb.BallotSig, b.BallotSig) {
-			f.receipt(s, r, int64(rf.BallotMsgMS), rf.ReceiptSig) // exactly this vault's ballot: it is the receipt
+			// Exactly this vault's ballot: it is the receipt (or one kept
+			// aside, 0.88.12); one outside both is rejected as for an ok
+			// answer (review fix 6c).
+			if !f.ownReceipt(s, r, int64(rf.BallotMsgMS), rf.ReceiptSig) {
+				f.audit(s, "vote.receipt_rejected", r.Conn, r.ID)
+			}
 			return
 		}
-		f.foreign(s, r, b, &svcBallot{VK: eb.VK, ChoiceID: eb.ChoiceID, BallotSig: eb.BallotSig, MsgMS: int64(rf.BallotMsgMS), ReceiptSig: rf.ReceiptSig}, true)
+		sb := &svcBallot{VK: eb.VK, ChoiceID: eb.ChoiceID, BallotSig: eb.BallotSig, MsgMS: int64(rf.BallotMsgMS), ReceiptSig: rf.ReceiptSig}
+		switch {
+		case r.msgInWindow(sb.MsgMS):
+			f.shown(s, r, sb, true, false)
+		case r.msgAside(sb.MsgMS):
+			f.keepShownAside(s, r, sb, true, false) // GC #7991 C
+		}
 	}
 }
 
@@ -479,7 +733,7 @@ func (f *Feature) statusAnswer(s *vault.Session, ref pendRef, in *envelope.Inner
 		if len(ref.want) > 0 && !eq(a.Proposal, ref.want) {
 			return
 		}
-		f.intakeStatus(s, ref.conn, a)
+		f.intakeStatus(s, ref, a, in.Body)
 		return
 	}
 	if !eq(a.Proposal, r.Proposal) || a.VerifySig(r.Signer, r.Hash) != nil {
@@ -489,13 +743,21 @@ func (f *Feature) statusAnswer(s *vault.Session, ref pendRef, in *envelope.Inner
 	if err != nil || !eq(tag, r.Tag) {
 		return
 	}
-	if a.Ballot != nil && !r.msgInWindow(int64(a.MsgMS)) {
+	b := r.Ballot
+	same := a.Ballot != nil && b != nil && eq(a.Ballot.VK, b.VK) && a.Ballot.ChoiceID == b.ChoiceID && eq(a.Ballot.BallotSig, b.BallotSig)
+	if a.Ballot != nil && !r.msgInWindow(int64(a.MsgMS)) && !r.msgAside(int64(a.MsgMS)) {
 		return // a receipt outside the window is no answer, as for vote.cast
 	}
-	r.StatusAnswers = keepRefusal(r.StatusAnswers, in.Body)
-	r.Restore = false // the service answered: a cast is possible again
-	r.ChangedMS = now.UnixMilli()
-	b := r.Ballot
+	// The same answer again (the hourly ask after the close) is not kept
+	// twice and changes nothing the member exported (review fix 2).
+	if !heldBytes(r.StatusAnswers, in.Body) {
+		r.StatusAnswers = keepRefusal(r.StatusAnswers, in.Body)
+		r.ChangedMS = now.UnixMilli()
+	}
+	if r.Restore {
+		r.Restore = false // the service answered: a cast is possible again
+		r.ChangedMS = now.UnixMilli()
+	}
 	if b != nil {
 		b.LastAnswerMS = now.UnixMilli()
 	}
@@ -513,28 +775,187 @@ func (f *Feature) statusAnswer(s *vault.Session, ref pendRef, in *envelope.Inner
 		return
 	}
 	sb := &svcBallot{VK: a.Ballot.VK, ChoiceID: a.Ballot.ChoiceID, BallotSig: a.Ballot.BallotSig, MsgMS: int64(a.MsgMS), ReceiptSig: a.ReceiptSig}
-	same := b != nil && eq(sb.VK, b.VK) && sb.ChoiceID == b.ChoiceID && eq(sb.BallotSig, b.BallotSig)
 	switch {
 	case same:
 		// The vault's own ballot (a refused connection_ended one included):
-		// the receipt, a lost answer recovered.
-		if b.State != BallotRecorded && b.State != BallotConflict && b.State != BallotDisputed {
+		// the receipt, a lost answer recovered (or kept aside, 0.88.12).
+		if b.State != BallotRecorded && b.State != BallotConflict && b.State != BallotDisputed && r.msgInWindow(sb.MsgMS) {
 			f.receipt(s, r, sb.MsgMS, sb.ReceiptSig)
 		} else {
+			if b.State != BallotRecorded && b.State != BallotConflict && b.State != BallotDisputed {
+				f.ownReceipt(s, r, sb.MsgMS, sb.ReceiptSig) // kept aside (0.88.12)
+			}
 			f.event(s, r, "ballot")
 		}
-	case b == nil && ref.restore && eq(sb.VK, r.VK):
+	case !r.msgInWindow(sb.MsgMS):
+		// For an extension not learned yet (GC #7991 C, 7adc8fe): judged
+		// now, its receipt kept aside.
+		f.keepShownAside(s, r, sb, false, ref.restore)
+	default:
+		f.shown(s, r, sb, false, ref.restore)
+	}
+}
+
+// shown judges a ballot the service showed that is not the vault's own
+// (§10.19.5): answer is an already_voted answer to the vault's cast,
+// restore an answer to an ask the restore made.
+func (f *Feature) shown(s *vault.Session, r *record, sb *svcBallot, answer, restore bool) {
+	b := r.Ballot
+	if r.holds(sb) {
+		return // judged already (review fix 2)
+	}
+	switch {
+	case b == nil && restore && r.ownVK(sb.VK) && r.ServiceBallot == nil:
 		// After a restore the service holds a ballot made with this record's
 		// own voting key that the vault lost: the member confirms it
 		// (vote.confirm).
 		r.ServiceBallot = sb
+		r.ChangedMS = s.Now().UnixMilli()
 		f.event(s, r, "ballot")
+		// A different own-vk ballot shown with a receipt before the prompt
+		// makes two receipts in this order too.
+		f.twoReceipts(s, r)
+	case r.ownVK(sb.VK):
+		// A ballot under the record's own vk outside the restore prompt
+		// (0.88.12, §10.19.3): self_unrecorded or self_conflict, not
+		// conflict evidence; the vault's own ballot keeps its state.
+		f.self(s, r, b, sb, answer)
 	default:
-		// A ballot the vault never signed (another vk, or no restore), or
-		// another one than its own: a conflict, kept as evidence. Without a
-		// ballot of the vault's own it prompts nothing and does not change
-		// whether it can cast.
-		f.foreign(s, r, b, sb, false)
+		// A ballot the vault never signed (another vk), or another one than
+		// its own: a conflict, kept as evidence. Without a ballot of the
+		// vault's own it prompts nothing and does not change whether it can
+		// cast.
+		f.foreign(s, r, b, sb, answer)
+	}
+}
+
+// receiptedSelf are the own-vk ballots shown whose receipt is held (not
+// kept aside).
+func (r *record) receiptedSelf() []*svcBallot {
+	var out []*svcBallot
+	for _, x := range []*svcBallot{r.Self, r.SelfLatest} {
+		if x != nil && !x.Late {
+			out = append(out, x)
+		}
+	}
+	return out
+}
+
+// ownVK reports whether vk is the record's voting key, now or an earlier
+// one it held (GC #7991 G: a reopened vote never cast gets a fresh one).
+func (r *record) ownVK(vk []byte) bool {
+	if eq(vk, r.VK) {
+		return true
+	}
+	for _, k := range r.OldVKs {
+		if eq(vk, k) {
+			return true
+		}
+	}
+	return false
+}
+
+// is reports whether sb is exactly the ballot b.
+func (sb *svcBallot) is(b *ballot) bool {
+	return sb != nil && b != nil && eq(sb.VK, b.VK) && sb.ChoiceID == b.ChoiceID && eq(sb.BallotSig, b.BallotSig)
+}
+
+// self records a ballot the service shows under the record's own vk that
+// is not the vault's own (0.88.12, §10.19.3 "A ballot under the record's
+// own voting key"): only a holder of the vk seed can have made it (this
+// vault before a rollback, or someone the seed leaked to), so the vault
+// neither takes it as its own nor blames the service. self_unrecorded when
+// the vault holds no ballot, self_conflict when it holds another; the
+// ballot keeps its state, and with answer (already_voted to the vault's own
+// cast, the service's final answer to it) it is not sent again (GC #7991
+// E). The first and the latest are kept; the member is told once per
+// record (vote.self_mismatch); no vote.conflict, and no vote.problem unless
+// the service signed two receipts for the tag (twoReceipts).
+func (f *Feature) self(s *vault.Session, r *record, b *ballot, sb *svcBallot, answer bool) {
+	if r.Self == nil {
+		r.Self = sb
+	} else {
+		r.SelfLatest = sb
+	}
+	r.ChangedMS = s.Now().UnixMilli()
+	if b == nil && r.ServiceBallot != nil {
+		// A restore prompt is pending (review fix 6a): kept as evidence,
+		// no flag; judged at the member's answer (Confirm).
+		f.twoReceipts(s, r)
+		return
+	}
+	if b == nil {
+		if !r.SelfUnrecorded {
+			r.SelfUnrecorded = true
+			f.audit(s, "vote.self_unrecorded", r.Conn, r.ID)
+		}
+	} else {
+		if answer && !b.final() {
+			b.Stopped = true
+		}
+		f.setSelfConflict(s, r)
+	}
+	f.selfFeed(s, r)
+	f.twoReceipts(s, r)
+	f.event(s, r, "problem")
+}
+
+// twoReceipts: the service signed receipts for two different ballots under
+// the member's tag, its own contradiction (GC #7991 D): the vault's receipt
+// for its own ballot beside a different own-vk ballot shown with a
+// receipt, or two different own-vk ballots shown. vote.problem (high),
+// once; it counts toward the cap of 16, and the check fails (row_mismatch):
+// a check judged finally before is judged again here, whichever path made
+// the two receipts.
+func (f *Feature) twoReceipts(s *vault.Session, r *record) {
+	if r.TwoReceipts {
+		return
+	}
+	// Only receipts held count (7adc8fe: as soon as both are, whichever
+	// came first); one kept aside (Late) does not yet. A pending restore
+	// prompt's ballot is one of them (GC #8014).
+	held := r.receiptedSelf()
+	if sb := r.ServiceBallot; sb != nil && !sb.Late {
+		held = append(held, sb)
+	}
+	b := r.Ballot
+	two := false
+	for i, x := range held {
+		for _, y := range held[i+1:] {
+			if !sameSvc(x, y) {
+				two = true
+			}
+		}
+		if b != nil && len(b.ReceiptSig) > 0 && !x.is(b) {
+			two = true
+		}
+	}
+	if !two {
+		return
+	}
+	r.TwoReceipts = true
+	r.ChangedMS = s.Now().UnixMilli()
+	f.feed(s, "vote.problem", r.Conn, r.ID, "high")
+	f.event(s, r, "problem")
+	f.rejudgeResults(s, r)
+}
+
+// setSelfConflict sets self_conflict, audited once.
+func (f *Feature) setSelfConflict(s *vault.Session, r *record) {
+	if r.SelfConflict {
+		return
+	}
+	r.SelfConflict = true
+	r.ChangedMS = s.Now().UnixMilli()
+	f.audit(s, "vote.self_conflict", r.Conn, r.ID)
+	f.selfFeed(s, r)
+}
+
+// selfFeed makes vote.self_mismatch once per record.
+func (f *Feature) selfFeed(s *vault.Session, r *record) {
+	if !r.SelfFeed {
+		r.SelfFeed = true
+		f.feed(s, "vote.self_mismatch", r.Conn, r.ID, "high")
 	}
 }
 
@@ -593,7 +1014,13 @@ func (f *Feature) statusRefusal(s *vault.Session, r *record, ref pendRef, in *en
 // intakeStatus keeps a proposal from a status answer (§10.19.4 "A proposal
 // the vault was never sent"): steps 2 to 6 on the answer's members, a
 // missing bundle leaving it `checking` (site) until the site's arrives.
-func (f *Feature) intakeStatus(s *vault.Session, conn string, a *votewire.StatusAnswer) {
+//
+// (0.88.12, GC #7991 A) The answer is kept verbatim among the record's
+// status answers, and a ballot it carries is judged, not dropped: the
+// record's vk is fresh, so it is never under it, and it is always foreign,
+// conflict evidence (vote.conflict and vote.problem, once), restore or not.
+func (f *Feature) intakeStatus(s *vault.Session, ref pendRef, a *votewire.StatusAnswer, body []byte) {
+	conn := ref.conn
 	// The answer's signatures first: nothing is kept (not even a rejected
 	// record) from an answer that does not verify under the service's key.
 	p, err := votewire.ParseProposal(a.Proposal)
@@ -602,6 +1029,24 @@ func (f *Feature) intakeStatus(s *vault.Session, conn string, a *votewire.Status
 	}
 	msg := &votewire.ProposalMsg{Proposal: a.Proposal, ProposalSig: a.ProposalSig, Bundle: a.Bundle, RecordSecret: a.RecordSecret, RecordProof: a.RecordProof}
 	_, _ = f.intake(s, conn, msg)
+	r := f.get(conn, a.ProposalID)
+	if r == nil || r.RejectReason != "" || r.Ballot != nil || r.ServiceBallot != nil {
+		return
+	}
+	r.StatusAnswers = keepRefusal(r.StatusAnswers, body)
+	r.ChangedMS = s.Now().UnixMilli()
+	if a.Ballot == nil {
+		return
+	}
+	sb := &svcBallot{VK: a.Ballot.VK, ChoiceID: a.Ballot.ChoiceID, BallotSig: a.Ballot.BallotSig, MsgMS: int64(a.MsgMS), ReceiptSig: a.ReceiptSig}
+	switch {
+	case r.msgInWindow(sb.MsgMS):
+		f.foreign(s, r, nil, sb, false)
+	case r.msgAside(sb.MsgMS):
+		f.keepShownAside(s, r, sb, false, false) // foreign now, its receipt kept aside
+	}
+	// A receipt outside both: no answer for the ballot, as for a held
+	// record; the answer stays as evidence.
 }
 
 // RequestProposal asks the service for a proposal on the site's index that
@@ -664,14 +1109,20 @@ func (f *Feature) Confirm(s *vault.Session, conn, id string, mine bool) (string,
 		return "", errNotFound
 	}
 	sb := r.ServiceBallot
-	if sb == nil {
-		return "", errBad
+	if sb == nil || sb.Late {
+		return "", errBad // (review fix 5) not offered while its receipt is kept aside
 	}
 	r.ServiceBallot = nil
 	r.Ballot = &ballot{ChoiceID: sb.ChoiceID, VK: sb.VK, BallotSig: sb.BallotSig, MsgMS: sb.MsgMS, ReceiptSig: sb.ReceiptSig}
 	if mine {
 		f.setFinal(s, r, BallotRecorded, "")
 		f.audit(s, "vote.recorded", r.Conn, r.ID)
+		// An own-vk ballot shown meanwhile is now beside a different
+		// ballot of the vault's own (review fix 6a).
+		if r.Self != nil && !r.Self.is(r.Ballot) || r.SelfLatest != nil && !r.SelfLatest.is(r.Ballot) {
+			f.setSelfConflict(s, r)
+		}
+		f.twoReceipts(s, r)
 	} else {
 		f.setFinal(s, r, BallotDisputed, "")
 		f.audit(s, "vote.disputed", r.Conn, r.ID)

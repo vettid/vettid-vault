@@ -3,7 +3,11 @@ package votewire
 import (
 	"encoding/hex"
 	"encoding/json"
+	"strings"
+	"unicode"
 	"unicode/utf8"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 // The documents of BALLOT-PROTOCOL §8.5. Each is JCS (RFC 8785) and is
@@ -268,7 +272,42 @@ func (p *Proposal) Validate() error {
 			return ErrDocument
 		}
 	}
+	// No two labels the same once folded (VAULT-MESSAGING 0.88.12 §10.19.4
+	// step 2), abstain's included: a real choice cannot look like it.
+	folded := map[string]bool{}
+	for _, c := range p.Choices {
+		k := FoldLabel(c.Label)
+		if k == "" || folded[k] { // empty once folded is malformed (GC #7991 H)
+			return ErrDocument
+		}
+		folded[k] = true
+	}
 	return nil
+}
+
+// FoldLabel is the key two labels are compared by (VAULT-MESSAGING 0.88.12
+// §10.19.4 step 2): the format characters (general category Cf, the
+// bidirectional marks and isolates among them) removed, NFC, then simple
+// case folding (the equivalence of strings.EqualFold, not full folding:
+// "ß" stays apart from "ss"), each rune mapped to the smallest rune of its
+// unicode.SimpleFold orbit.
+func FoldLabel(label string) string {
+	noCf := strings.Map(func(r rune) rune {
+		if unicode.Is(unicode.Cf, r) {
+			return -1
+		}
+		return r
+	}, label)
+	return strings.Map(foldRune, norm.NFC.String(noCf))
+}
+
+// foldRune is the smallest rune of r's simple case folding orbit.
+func foldRune(r rune) rune {
+	least := r
+	for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+		least = min(least, f)
+	}
+	return least
 }
 
 // HasChoice reports whether id is one of the proposal's choices.

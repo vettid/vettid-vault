@@ -122,6 +122,9 @@ type Call struct {
 	Ended    time.Time `json:"ended,omitempty"`
 	Rang     bool      `json:"rang,omitempty"`
 	ICE      int       `json:"ice,omitempty"`
+	// Watched: its device said it sends call.keepalive (keepalive: true in
+	// its call.start or call.answer, C2): the 90 s rule applies to it.
+	Watched bool `json:"watched,omitempty"`
 }
 
 func (c *Call) live(now time.Time) bool {
@@ -145,6 +148,12 @@ type Feature struct {
 	mu     sync.Mutex
 	issuer ICEIssuer
 	calls  map[string]*Call
+	// alive is when each watched active call's device last showed it was
+	// alive (liveness.go): memory only, never in the state.
+	alive map[string]time.Time
+	// lastTick is the previous housekeeping (memory only), to see a gap in
+	// collecting (CollectGap).
+	lastTick time.Time
 }
 
 // New returns the feature.
@@ -152,7 +161,7 @@ func New(o Options) *Feature {
 	if o.ICE == nil {
 		o.ICE = NoServers{}
 	}
-	return &Feature{issuer: o.ICE, calls: map[string]*Call{}}
+	return &Feature{issuer: o.ICE, calls: map[string]*Call{}, alive: map[string]time.Time{}}
 }
 
 var (
@@ -174,6 +183,7 @@ func (f *Feature) Types() []vault.TypeSpec {
 		{Type: "call.end", From: both},
 		{Type: "call.ice", Ephemeral: true, From: both},
 		{Type: "call.ringing", Ephemeral: true, From: both},
+		{Type: "call.keepalive", Ephemeral: true, From: owners},
 	}
 }
 
@@ -186,6 +196,8 @@ func (f *Feature) Load(data json.RawMessage) error {
 		return err
 	}
 	f.calls = c
+	f.alive = map[string]time.Time{} // memory only: counted again from the first look after the unlock
+	f.lastTick = time.Time{}
 	return nil
 }
 
@@ -227,6 +239,8 @@ func (f *Feature) Handle(ctx context.Context, s *vault.Session, in *envelope.Inn
 		return nil, f.ice(s, in.Body, fromConn)
 	case "call.ringing":
 		return nil, f.ringing(s, in.Body, fromConn)
+	case "call.keepalive":
+		return nil, f.keepalive(s, in.Body)
 	}
 	return nil, vault.NewError("unsupported_type", "")
 }
@@ -293,6 +307,7 @@ type Start struct {
 	SDP          string
 	EK           []byte
 	EKSig        []byte // the device's signature over the share
+	Keepalive    bool   // (C2) its device sends call.keepalive
 }
 
 func sig(o strictjson.Object, name string) ([]byte, error) {
@@ -401,6 +416,9 @@ func ParseStart(body []byte) (*Start, error) {
 	if st.EK, err = o.Base64("ek", callwire.EKSize); err != nil {
 		return nil, errBad
 	}
+	if st.Keepalive, err = keepaliveFlag(o); err != nil {
+		return nil, err
+	}
 	return st, nil
 }
 
@@ -437,7 +455,7 @@ func (f *Feature) start(ctx context.Context, s *vault.Session, body []byte) (jso
 		return nil, errConn
 	}
 	f.calls[id] = &Call{ID: id, Conn: st.ConnectionID, Dir: DirOut, Media: st.Media, State: StateRinging, Device: s.From().ID,
-		Created: now, Exp: exp}
+		Created: now, Exp: exp, Watched: st.Keepalive}
 	f.prune(now)
 	s.Record(vault.Activity{Kind: "call.outgoing", ConnectionID: st.ConnectionID, Ref: id, Direction: DirOut, Audit: true})
 	return strictjson.NewBuilder().String("call_id", id).String("exp", envelope.FormatTS(exp)).
@@ -540,12 +558,39 @@ func (f *Feature) busyExcept(id string, now time.Time) bool {
 
 func (f *Feature) finish(s *vault.Session, c *Call, reason string) {
 	c.State, c.Reason, c.Ended = StateEnded, reason, s.Now()
+	delete(f.alive, c.ID)
 	s.Record(vault.Activity{Kind: "call.ended", ConnectionID: c.Conn, Ref: c.ID, Direction: c.Dir, Audit: true})
 }
 
 // missed records an incoming call that was never answered in the feed.
 func (f *Feature) missed(s *vault.Session, c *Call) {
 	s.Record(vault.Activity{Kind: "call.missed", ConnectionID: c.Conn, Ref: c.ID, Direction: DirIn, Feed: true, Priority: "high"})
+}
+
+// endToDevices tells the owner devices that c ended: its call device
+// directly, which may be a desktop whose access session has ended (the
+// call outlives it, §6.8, 0.88.13), and the others as usual, except
+// `except` (the device that ended it).
+func endToDevices(s *vault.Session, c *Call, reason, except string) {
+	body := endJSON(c.ID, reason)
+	if c.Device != "" && c.Device != except {
+		_ = s.SendCallSignal(c.Device, "call.end", body, vault.SendOptions{})
+		if except == "" {
+			except = c.Device
+		}
+	}
+	s.NotifyDevicesWith("call.end", body, except, vault.SendOptions{})
+}
+
+// endToLiveDevice is endToDevices for a call that was live; a stale record
+// (past its exp or 12 h) ends with the usual fan-out only, so nothing goes
+// past a desktop's expired session for it.
+func endToLiveDevice(s *vault.Session, c *Call, reason string, live bool) {
+	if live {
+		endToDevices(s, c, reason, "")
+		return
+	}
+	s.NotifyDevicesWith("call.end", endJSON(c.ID, reason), "", vault.SendOptions{})
 }
 
 func endJSON(id, reason string) []byte {
@@ -558,6 +603,8 @@ type Answer struct {
 	SDP    string
 	Enc    []byte
 	EncSig []byte // from a device
+	// Keepalive: (C2) a device's answer says it sends call.keepalive.
+	Keepalive bool
 	Vouched
 }
 
@@ -582,6 +629,9 @@ func ParseAnswer(body []byte, fromPeer bool) (*Answer, error) {
 		a.Vouched, err = vouched(o)
 	} else {
 		a.EncSig, err = sig(o, "enc_sig")
+		if err == nil {
+			a.Keepalive, err = keepaliveFlag(o)
+		}
 	}
 	if err != nil {
 		return nil, err
@@ -591,7 +641,7 @@ func ParseAnswer(body []byte, fromPeer bool) (*Answer, error) {
 
 // unavailable tells a device that a call it acted on is gone.
 func unavailable(s *vault.Session, id string) error {
-	_ = s.Send(s.From().ID, "call.end", endJSON(id, "unavailable"), vault.SendOptions{})
+	_ = s.SendCallSignal(s.From().ID, "call.end", endJSON(id, "unavailable"), vault.SendOptions{})
 	return nil
 }
 
@@ -617,7 +667,8 @@ func (f *Feature) answerFromDevice(s *vault.Session, body []byte) error {
 		f.finish(s, c, "unavailable")
 		return unavailable(s, a.CallID)
 	}
-	c.State, c.Device, c.Answered = StateActive, s.From().ID, now
+	c.State, c.Device, c.Answered, c.Watched = StateActive, s.From().ID, now, a.Keepalive
+	f.alive[c.ID] = now // the 90 s count from the answer until the first keep-alive
 	s.NotifyDevicesWith("call.end", endJSON(c.ID, "answered_elsewhere"), s.From().ID, vault.SendOptions{})
 	s.Record(vault.Activity{Kind: "call.answered", ConnectionID: c.Conn, Ref: c.ID, Direction: DirIn, Audit: true})
 	return nil
@@ -637,10 +688,28 @@ func (f *Feature) answerFromPeer(s *vault.Session, body []byte) error {
 	if !checkPeerShare(s, callwire.ShareMessage(callwire.RoleAnswer, c.ID, "", a.Enc), a.Vouched) {
 		return nil // the call keeps ringing until it times out or ends
 	}
-	c.State, c.Answered = StateActive, s.Now()
+	if s.OwnerHeld() {
+		// Answered after the hold began, so after the deadline: it does
+		// not continue (§3.6.3, 0.88.13). Ended, the peer and the devices
+		// told, rather than left to 90 s of silence.
+		f.finish(s, c, "unavailable")
+		_ = s.SendToConnection(c.Conn, "call.end", endJSON(c.ID, "unavailable"))
+		endToDevices(s, c, "unavailable", "")
+		return nil
+	}
 	peer, _ := s.Connection(c.Conn)
-	_ = s.Send(c.Device, "call.answer", a.Vouched.add(strictjson.NewBuilder().String("call_id", c.ID).String("sdp", a.SDP).
-		Base64("enc", a.Enc)).Base64("peer_ik", peer.IK).Bytes(), vault.SendOptions{})
+	if err := s.Send(c.Device, "call.answer", a.Vouched.add(strictjson.NewBuilder().String("call_id", c.ID).String("sdp", a.SDP).
+		Base64("enc", a.Enc)).Base64("peer_ik", peer.IK).Bytes(), vault.SendOptions{}); err != nil {
+		// Its device can't receive the answer (a desktop whose session
+		// ended, an app gated past the deadline, a suspended or removed
+		// device): the call can't go on.
+		f.finish(s, c, "unavailable")
+		_ = s.SendToConnection(c.Conn, "call.end", endJSON(c.ID, "unavailable"))
+		endToDevices(s, c, "unavailable", "")
+		return nil
+	}
+	c.State, c.Answered = StateActive, s.Now()
+	f.alive[c.ID] = c.Answered // the 90 s count from the answer until the first keep-alive
 	s.Record(vault.Activity{Kind: "call.answered", ConnectionID: c.Conn, Ref: c.ID, Direction: DirOut, Audit: true})
 	return nil
 }
@@ -682,8 +751,9 @@ func (f *Feature) end(s *vault.Session, body []byte, fromConn bool) error {
 		if c.Conn != s.From().ID {
 			return nil
 		}
+		live := c.live(s.Now())
 		f.finish(s, c, e.Reason)
-		s.NotifyDevicesWith("call.end", endJSON(c.ID, e.Reason), "", vault.SendOptions{})
+		endToLiveDevice(s, c, e.Reason, live)
 		if c.Dir == DirIn && ringing {
 			f.missed(s, c)
 		}
@@ -773,7 +843,7 @@ func (f *Feature) ice(s *vault.Session, body []byte, fromConn bool) error {
 		}
 		c.ICE++
 		if c.Device != "" {
-			_ = s.Send(c.Device, "call.ice", out, eph(now))
+			_ = s.SendCallSignal(c.Device, "call.ice", out, eph(now))
 		} else {
 			s.NotifyDevicesWith("call.ice", out, "", eph(now))
 		}
@@ -873,8 +943,9 @@ func (f *Feature) ConnectionRemoved(s *vault.Session, id string) {
 	defer f.mu.Unlock()
 	for _, c := range f.calls {
 		if c.Conn == id && c.State != StateEnded {
+			live := c.live(s.Now())
 			f.finish(s, c, "unavailable")
-			s.NotifyDevicesWith("call.end", endJSON(c.ID, "unavailable"), "", vault.SendOptions{})
+			endToLiveDevice(s, c, "unavailable", live)
 		}
 	}
 }

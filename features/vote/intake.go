@@ -143,30 +143,37 @@ func (f *Feature) acceptedKeys(s *vault.Session, conn string, keys ...[]byte) []
 // release does not recognise is trust_root; a stamp more than 300 s ahead
 // of this vault's clock is clock (0.81.1).
 func (f *Feature) anchor(s *vault.Session, conn string, signers [][]byte, doc []byte, bundle json.RawMessage, notAfter time.Time) anchorResult {
+	res, _ := f.anchorInfo(s, conn, signers, doc, bundle, notAfter)
+	return res
+}
+
+// anchorInfo is anchor, with what the bundle holds when it verifies (its
+// t_tsa, for the results' not-before, §10.19.6 step 2).
+func (f *Feature) anchorInfo(s *vault.Session, conn string, signers [][]byte, doc []byte, bundle json.RawMessage, notAfter time.Time) (anchorResult, *votewire.BundleInfo) {
 	if f.st.List == nil {
-		return anchorServiceList
+		return anchorServiceList, nil
 	}
 	keys := f.acceptedKeys(s, conn, signers...)
 	if len(keys) == 0 {
-		return anchorServiceList
+		return anchorServiceList, nil
 	}
 	if len(bundle) == 0 {
-		return anchorSite // a status answer without a bundle waits for the site's
+		return anchorSite, nil // a status answer without a bundle waits for the site's
 	}
-	_, err := votewire.VerifyBundle(doc, bundle, keys, f.opt.Roots, notAfter, s.Now())
+	info, err := votewire.VerifyBundle(doc, bundle, keys, f.opt.Roots, notAfter, s.Now())
 	switch {
 	case err == nil:
-		return anchorOK
+		return anchorOK, info
 	case errors.Is(err, votewire.ErrAnchorKey):
-		return anchorServiceList
+		return anchorServiceList, nil
 	case errors.Is(err, votewire.ErrAnchor):
-		return anchorRejected
+		return anchorRejected, nil
 	case errors.Is(err, votewire.ErrAnchorLate):
-		return anchorLate
+		return anchorLate, nil
 	case errors.Is(err, votewire.ErrBundleClock):
-		return anchorClock
+		return anchorClock, nil
 	}
-	return anchorTrustRoot
+	return anchorTrustRoot, nil
 }
 
 // reject records a refusal of the request itself: the audit entry, and,
@@ -367,7 +374,15 @@ func (f *Feature) onClosed(s *vault.Session, in *envelope.Inner) (json.RawMessag
 		r.ResultsHash = m.ResultsHash
 		r.ClosedMS = s.Now().UnixMilli()
 		r.ChangedMS = r.ClosedMS
+		// In either order (0.88.12): results already held are compared now.
+		f.resultsMatch(s, r)
 		f.event(s, r, "closed")
+	} else if !eq(r.ResultsHash, m.ResultsHash) {
+		// The latest hash is kept (GC #7991 I) and compared again; the
+		// arrival that set the schedule stays.
+		r.ResultsHash = m.ResultsHash
+		r.ChangedMS = s.Now().UnixMilli()
+		f.resultsMatch(s, r)
 	}
 	return okBody(r.ID), nil
 }
@@ -414,6 +429,13 @@ func (f *Feature) extend(s *vault.Session, conn string, m *votewire.ExtendedMsg)
 	switch {
 	case ext.N <= int64(len(r.Exts)):
 		if eq(r.Exts[ext.N-1].Doc, m.Extension) {
+			// The same bytes: a re-send, or (review fix 1) the bundle of one
+			// adopted from results.json, verified now.
+			if held := r.Exts[ext.N-1]; !held.Verified && eq(held.Sig, m.ExtensionSig) {
+				if reason := f.verifyHeld(s, r, held, m.Bundle); reason != "" {
+					return fail(reason)
+				}
+			}
 			return okBody(r.ID), nil
 		}
 		return fail("order")
@@ -435,6 +457,47 @@ func (f *Feature) extend(s *vault.Session, conn string, m *votewire.ExtendedMsg)
 		}
 	}
 	return okBody(r.ID), nil
+}
+
+// verifyHeld verifies the bundle of an extension adopted from results.json
+// (held without one): anchored before the close it extends, as
+// applyExtension checks. It then counts toward the verified close, and
+// what is kept aside is judged again (review fix 1).
+func (f *Feature) verifyHeld(s *vault.Session, r *record, e *extRec, bundle []byte) string {
+	if len(bundle) == 0 {
+		return ""
+	}
+	prev := r.OrigClose
+	if e.N > 1 {
+		prev = r.Exts[e.N-2].Closes
+	}
+	switch f.anchor(s, r.Conn, r.signers(), e.Doc, bundle, time.Unix(prev-1, 0)) {
+	case anchorOK:
+	case anchorLate:
+		return "late"
+	default:
+		return "anchor"
+	}
+	e.Bundle, e.Verified = append([]byte{}, bundle...), true
+	r.ChangedMS = s.Now().UnixMilli()
+	f.audit(s, "vote.extended", r.Conn, r.ID+":"+strconv.FormatInt(e.N, 10))
+	f.extensionVerified(s, r)
+	return ""
+}
+
+// extensionVerified: the verified close moved. What is kept aside is
+// judged again, and a check that waited for this bundle (reason extension)
+// is judged at the next submission (a rows_unavailable one goes back to
+// that reason).
+func (f *Feature) extensionVerified(s *vault.Session, r *record) {
+	f.rejudgeAside(s, r)
+	if r.CheckReason == CheckExtension {
+		r.CheckReason = ""
+		if r.RowsWait {
+			r.CheckReason = CheckRowsUnavailable
+		}
+		r.RowsWait = false
+	}
 }
 
 // applyExtension checks the order, the total and the anchor of the next
@@ -464,12 +527,21 @@ func (f *Feature) applyExtension(s *vault.Session, r *record, e *extRec) string 
 	default:
 		return "anchor"
 	}
+	e.Verified = true // its bundle verified just above
 	r.Exts = append(r.Exts, e)
 	r.Closes = e.Closes
 	r.AbsentMS = 0 // the 404s counted were for the old close
+	// A receipt kept aside for this extension is judged again (0.88.12), and
+	// a check that waited for this bundle (reason extension) is judged at
+	// the next submission.
+	f.extensionVerified(s, r)
 	if r.Ballot == nil && len(r.VKSeed) == 0 {
 		// A vote that was never cast and has reopened needs a voting key again.
+		// The earlier public key stays: a ballot under it is own-vk (GC #7991 G).
 		if seed, err := suite.RandomBytes(ed25519.SeedSize); err == nil {
+			if len(r.VK) > 0 {
+				r.OldVKs = append(r.OldVKs, r.VK)
+			}
 			r.VKSeed = seed
 			r.VK = append([]byte{}, ed25519.NewKeyFromSeed(seed).Public().(ed25519.PublicKey)...)
 		}

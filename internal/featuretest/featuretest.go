@@ -489,6 +489,15 @@ func (h *Host) Send(to, typ string, body json.RawMessage, o vault.SendOptions, _
 	return nil
 }
 
+// SendCallSignal records a call signal to a device (also one without an
+// access session: the fake host has none).
+func (h *Host) SendCallSignal(to, typ string, body json.RawMessage, o vault.SendOptions, now time.Time) error {
+	if _, dev := h.Devices[to]; !dev {
+		return vault.ErrNoSession
+	}
+	return h.Send(to, typ, body, o, now)
+}
+
 func (h *Host) NotifyDevicesWith(typ string, body json.RawMessage, except string, o vault.SendOptions, _ time.Time) {
 	to := "devices"
 	if except != "" {

@@ -177,3 +177,58 @@ func FuzzParseGuides(f *testing.F) {
 		}
 	})
 }
+
+// A batched kind (card GC #6875's not-delivered notice): items of one kind
+// for one connection within the window form one item with a count; another
+// kind, another connection, or the window's end starts a new one; asks keep
+// their own batch.
+func TestKindBatch(t *testing.T) {
+	f, h := New(), featuretest.NewHost()
+	nd := func(at time.Time, kind, conn string) {
+		rec(f, h, at, vault.Activity{Kind: kind, ConnectionID: conn, Ref: "m", Feed: true, Batch: time.Hour})
+	}
+	nd(t0, "message.not_delivered", "c1")
+	nd(t0.Add(20*time.Minute), "message.not_delivered", "c1")
+	nd(t0.Add(30*time.Minute), "message.not_delivered", "c1")
+	nd(t0.Add(30*time.Minute), "message.delivery_unconfirmed", "c1")
+	nd(t0.Add(30*time.Minute), "message.not_delivered", "c2")
+	rec(f, h, t0.Add(31*time.Minute), vault.Activity{Kind: "grant.request", ConnectionID: "c1", Feed: true, AskBatch: true})
+	nd(t0.Add(61*time.Minute), "message.not_delivered", "c1")
+	its := f.Items()
+	if len(its) != 5 {
+		t.Fatalf("%d items", len(its))
+	}
+	if its[0].Kind != "message.not_delivered" || its[0].Count != 3 {
+		t.Fatalf("the first batch: %+v", its[0])
+	}
+	for _, it := range its[1:] {
+		if it.Count > 1 {
+			t.Fatalf("%+v batched", it)
+		}
+	}
+	g := New()
+	featuretest.RoundTrip(t, f, g)
+	if len(g.Items()) != 5 {
+		t.Fatal("round trip")
+	}
+	// The window survives a reload: 40 minutes into the last batch (past an
+	// ask's 10) still counts into it.
+	rec(g, h, t0.Add(101*time.Minute), vault.Activity{Kind: "message.not_delivered", ConnectionID: "c1", Ref: "m", Feed: true, Batch: time.Hour})
+	if its := g.Items(); len(its) != 5 || its[4].Count != 2 {
+		t.Fatalf("after a reload: %d items, last %+v", len(its), its[len(its)-1])
+	}
+}
+
+// A not-delivered item carries the connection's name, in the item and its
+// wire form, for a connection that may be gone when it is shown.
+func TestItemName(t *testing.T) {
+	f, h := New(), featuretest.NewHost()
+	rec(f, h, t0, vault.Activity{Kind: "message.not_delivered", ConnectionID: "c1", Name: "Alex", Ref: "m", Feed: true, Batch: time.Hour})
+	if its := f.Items(); len(its) != 1 || its[0].Name != "Alex" {
+		t.Fatalf("%+v", f.Items())
+	}
+	it := f.Items()[0]
+	if !strings.Contains(string(ItemJSON(&it)), `"connection_name":"Alex"`) {
+		t.Fatalf("wire form: %s", ItemJSON(&it))
+	}
+}

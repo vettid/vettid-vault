@@ -435,3 +435,102 @@ func TestAlreadyVotedAfterEarlierForeign(t *testing.T) {
 		t.Error("kept sending")
 	}
 }
+
+// 0.88.12 (§10.19.5 ok): a verified receipt whose msg_ms is at or after the
+// close in force and before the original close + 86,400 s is kept aside:
+// the ballot stays `sending` (the seed kept); a vote.extended that moves
+// the close past msg_ms makes it `recorded` and the results `verified`;
+// one at the original close + 86,400 s is vote.receipt_rejected.
+func TestReceiptKeptAsideForAnExtension(t *testing.T) {
+	aside := func() (*cenv, *votetest.Vote, time.Time) {
+		c := newCastEnv(t)
+		v := c.open(1)
+		c.cast(v, "yes")
+		_, ids := c.casts()
+		closes := time.Unix(c.rec(v.ID).Closes, 0)
+		c.h.Reset()
+		c.okReceipt(v, ids[0], c.leafOf(v), uint64(closes.Add(30*time.Minute).UnixMilli()))
+		b := c.rec(v.ID).Ballot
+		if b.State != BallotSending || b.Aside == nil || len(c.rec(v.ID).VKSeed) == 0 || c.hasKind("vote.receipt_rejected") || c.hasKind("vote.recorded") {
+			t.Fatalf("not kept aside: %+v %v", b, c.h.Activities)
+		}
+		return c, v, closes
+	}
+	// It keeps sending.
+	c, _, _ := aside()
+	n, _ := c.casts()
+	c.tickAt(2 * time.Minute)
+	if m, _ := c.casts(); len(m) <= len(n) {
+		t.Error("sending stopped")
+	}
+	// vote.extended past msg_ms: recorded, then verified.
+	c, v, closes := aside()
+	_, msg := c.svc.Extension(v, 1, closes.Add(time.Hour), c.now)
+	if r := c.call("vote.extended", msg); !r.OK() {
+		t.Fatalf("%q", r.Code)
+	}
+	if b := c.rec(v.ID).Ballot; b.State != BallotRecorded || b.Aside != nil || len(c.rec(v.ID).VKSeed) != 0 || !c.has("vote.recorded", v.ID) {
+		t.Fatalf("not taken: %+v", b)
+	}
+	c.now = closes.Add(time.Hour + CheckDelay + time.Minute)
+	c.f.Tick(c.session())
+	if out, _ := c.f.SubmitResults(c.session(), "svc", v.ID, c.resultsFor(v, resOpts{mine: c.ownBallot(v)})); out.State != CheckVerified {
+		t.Errorf("results: %+v", out)
+	}
+	// An extension too short for msg_ms leaves it aside.
+	c, v, closes = aside()
+	_, msg = c.svc.Extension(v, 1, closes.Add(10*time.Minute), c.now)
+	c.call("vote.extended", msg)
+	if b := c.rec(v.ID).Ballot; b.State != BallotSending || b.Aside == nil {
+		t.Errorf("taken before its time: %+v", b)
+	}
+	// An extension adopted from the results (no bundle) never takes it
+	// (GC #7991 C, VAULT-MESSAGING ad6f31e): the check stays pending
+	// (input) until the extension's bundle is verified (vote.extended),
+	// which takes the receipt; the results are then verified.
+	c, v, closes = aside()
+	doc, extMsg := c.svc.Extension(v, 1, closes.Add(time.Hour), c.now)
+	c.now = closes.Add(time.Hour + CheckDelay + time.Minute)
+	c.f.Tick(c.session())
+	in := c.resultsFor(v, resOpts{mine: c.ownBallot(v), extra: []votewire.Signed{{Doc: doc, Sig: signExt(c.svc, v, doc)}}})
+	if out, _ := c.f.SubmitResults(c.session(), "svc", v.ID, in); out.State != CheckPending || out.Reason != CheckExtension || c.rec(v.ID).CheckReason != CheckExtension || c.state(v) != BallotSending || len(c.rec(v.ID).Exts) != 1 || len(c.rec(v.ID).Exts[0].Bundle) != 0 || c.hasKind("vote.receipt_rejected") {
+		t.Errorf("adopted from the results: %+v %s", out, c.state(v))
+	}
+	if r := c.call("vote.extended", extMsg); !r.OK() || c.state(v) != BallotRecorded || c.rec(v.ID).CheckReason != "" {
+		t.Fatalf("the extension's bundle verified: %q %s", r.Code, c.state(v))
+	}
+	if out, _ := c.f.SubmitResults(c.session(), "svc", v.ID, in); out.State != CheckVerified {
+		t.Errorf("after the extension: %+v", out)
+	}
+	// At the original close + 86,400 s: rejected at once.
+	c = newCastEnv(t)
+	v = c.open(1)
+	c.cast(v, "yes")
+	_, ids := c.casts()
+	c.okReceipt(v, ids[0], c.leafOf(v), uint64((c.rec(v.ID).OrigClose+votewire.MaxExtension)*1000))
+	if b := c.rec(v.ID).Ballot; b.Aside != nil || b.State != BallotSending || !c.has("vote.receipt_rejected", v.ID) {
+		t.Errorf("past the most an extension adds: %+v", b)
+	}
+}
+
+// 0.88.12: a kept-aside receipt that becomes valid wins over a final
+// `closed` refusal, as any receipt does.
+func TestReceiptAsideWinsOverClosed(t *testing.T) {
+	c := newCastEnv(t)
+	v := c.open(1)
+	c.cast(v, "yes")
+	_, ids := c.casts()
+	closes := time.Unix(c.rec(v.ID).Closes, 0)
+	c.okReceipt(v, ids[0], c.leafOf(v), uint64(closes.Add(30*time.Minute).UnixMilli()))
+	c.tickAt(2 * time.Minute)
+	_, ids = c.casts()
+	c.refusal(v, ids[len(ids)-1], "vote.cast", "closed", votewire.H(c.leafOf(v)))
+	if c.state(v) != "refused:closed" {
+		t.Fatalf("%s", c.state(v))
+	}
+	_, msg := c.svc.Extension(v, 1, closes.Add(time.Hour), c.now)
+	c.call("vote.extended", msg)
+	if c.state(v) != BallotRecorded {
+		t.Errorf("%s", c.state(v))
+	}
+}

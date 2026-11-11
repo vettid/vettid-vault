@@ -3,10 +3,13 @@ package vault
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/vettid/vettid-relay/relayauth"
 	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/handshake"
@@ -511,62 +514,74 @@ func TestHoldAllowList(t *testing.T) {
 	for _, typ := range []string{TypeOwnerCheck, "vault.status", "vault.lock", "credential.utk.get", "credential.get",
 		"credential.ack", "credential.version", "credential.lock", "call.end", tokenIssuedType, tokenRefreshType, "relay.address.update",
 		"location.share.stop"} {
-		if !m.holdAllows(app, typ, OwnerCheckHeld) || !m.holdAllows(app, typ, OwnerCheckDue) {
+		if !m.holdAllows(app, typ, callBody, OwnerCheckHeld) || !m.holdAllows(app, typ, callBody, OwnerCheckDue) {
 			t.Fatalf("app %s", typ)
 		}
 	}
 	for _, typ := range []string{"credential.alarm.confirm", "credential.rotate", "device.transfer.approve", "device.transfer.reject",
-		"call.ice", "call.answer", "credential.unlock", "credential.reset", "device.transfer.create", "settings.set", "vault.delete", "pin.change",
+		"call.ice", "call.keepalive", "call.answer", "credential.unlock", "credential.reset", "device.transfer.create", "settings.set", "vault.delete", "pin.change",
 		"approval.decide", "device.session.approve", "account.get", TypeAccountNameSet, "message.send", "location.update", "device.unlink",
 		"location.share.start", "location.share.list", "location.get", "location.request", "location.history.share",
 		"pending.list"} {
-		if m.holdAllows(app, typ, OwnerCheckHeld) {
+		if m.holdAllows(app, typ, callBody, OwnerCheckHeld) {
 			t.Fatalf("app %s allowed", typ)
 		}
 	}
 	f.oc.alarm = "frozen"
-	if !m.holdAllows(app, "credential.alarm.confirm", OwnerCheckHeld) || m.holdAllows(app, "credential.rotate", OwnerCheckHeld) {
+	if !m.holdAllows(app, "credential.alarm.confirm", callBody, OwnerCheckHeld) || m.holdAllows(app, "credential.rotate", callBody, OwnerCheckHeld) {
 		t.Fatal("frozen alarm path")
 	}
 	f.oc.alarm = "rotation_required"
-	if !m.holdAllows(app, "credential.rotate", OwnerCheckHeld) {
+	if !m.holdAllows(app, "credential.rotate", callBody, OwnerCheckHeld) {
 		t.Fatal("rotation path")
 	}
 	m.st.Transfer = &Transfer{ID: "x"}
-	if !m.holdAllows(app, "device.transfer.approve", OwnerCheckHeld) || !m.holdAllows(app, "device.transfer.reject", OwnerCheckHeld) {
+	if !m.holdAllows(app, "device.transfer.approve", callBody, OwnerCheckHeld) || !m.holdAllows(app, "device.transfer.reject", callBody, OwnerCheckHeld) {
 		t.Fatal("open transfer")
 	}
 	for _, typ := range []string{"vault.status", "vault.lock", "device.session.end", tokenRefreshType, "location.share.stop"} {
-		if !m.holdAllows(desk, typ, OwnerCheckHeld) {
+		if !m.holdAllows(desk, typ, callBody, OwnerCheckHeld) {
 			t.Fatalf("desktop %s", typ)
 		}
 	}
 	for _, typ := range []string{"location.share.start", "location.update", "location.get"} {
-		if m.holdAllows(desk, typ, OwnerCheckHeld) {
+		if m.holdAllows(desk, typ, callBody, OwnerCheckHeld) {
 			t.Fatalf("desktop %s allowed while held", typ)
 		}
 	}
-	if m.holdAllows(agent, "location.share.stop", OwnerCheckHeld) {
+	if m.holdAllows(agent, "location.share.stop", callBody, OwnerCheckHeld) {
 		t.Fatal("agent location.share.stop allowed while held")
 	}
-	if m.holdAllows(desk, "call.ice", OwnerCheckHeld) || m.holdAllows(desk, "call.end", OwnerCheckHeld) || !m.holdAllows(desk, "message.send", OwnerCheckDue) {
+	if m.holdAllows(desk, "call.ice", callBody, OwnerCheckHeld) || m.holdAllows(desk, "call.end", callBody, OwnerCheckHeld) || !m.holdAllows(desk, "message.send", callBody, OwnerCheckDue) {
 		t.Fatal("desktop calls / due")
 	}
 	cg := &callGate{device: "desk1", at: m.st.OwnerCheck.Deadline.Add(-time.Minute)}
 	m.addFeature(cg)
-	if !m.holdAllows(desk, "call.ice", OwnerCheckHeld) || !m.holdAllows(desk, "call.end", OwnerCheckHeld) {
-		t.Fatal("desktop's call answered before the deadline")
+	for _, typ := range []string{"call.ice", "call.end", "call.keepalive"} {
+		if !m.holdAllows(desk, typ, callBody, OwnerCheckHeld) {
+			t.Fatalf("desktop's call answered before the deadline: %s", typ)
+		}
+	}
+	if m.holdAllows(desk, "call.ice", []byte(`{"call_id":"c2"}`), OwnerCheckHeld) || m.holdAllows(desk, "call.end", nil, OwnerCheckHeld) {
+		t.Fatal("another call's id, or none, passed the hold")
 	}
 	cg.at = m.st.OwnerCheck.Deadline.Add(time.Minute)
-	if m.holdAllows(desk, "call.ice", OwnerCheckHeld) {
+	if m.holdAllows(desk, "call.ice", callBody, OwnerCheckHeld) || m.holdAllows(desk, "call.keepalive", callBody, OwnerCheckHeld) {
 		t.Fatal("call answered after the deadline")
 	}
+	cg.device, cg.at = app.ID, m.st.OwnerCheck.Deadline.Add(-time.Minute)
+	for _, typ := range []string{"call.ice", "call.keepalive"} {
+		if !m.holdAllows(app, typ, callBody, OwnerCheckHeld) || !m.holdAllows(app, typ, callBody, OwnerCheckDue) {
+			t.Fatalf("app's call answered before the deadline: %s", typ)
+		}
+	}
+	cg.device = "desk1"
 	for _, typ := range []string{"vault.status", "device.session.end", "relay.address.update"} {
-		if !m.holdAllows(agent, typ, OwnerCheckHeld) {
+		if !m.holdAllows(agent, typ, callBody, OwnerCheckHeld) {
 			t.Fatalf("agent %s", typ)
 		}
 	}
-	if m.holdAllows(agent, "leash.status.get", OwnerCheckHeld) || !m.holdAllows(agent, "leash.status.get", OwnerCheckDue) {
+	if m.holdAllows(agent, "leash.status.get", callBody, OwnerCheckHeld) || !m.holdAllows(agent, "leash.status.get", callBody, OwnerCheckDue) {
 		t.Fatal("agent leash.status.get")
 	}
 	// What still reaches the owner's devices while held.
@@ -610,14 +625,35 @@ func TestHoldAllowList(t *testing.T) {
 
 type callGate struct {
 	recSink
-	device string
-	at     time.Time
+	device     string
+	at         time.Time
+	active     bool        // CallActive for device
+	endsAt     []time.Time // EndCallsAnsweredFrom's t, per call
+	ringingOut bool        // CallRingingOut for device
+	ended      []string    // AccessEnded's devices
+	removed    []string    // DeviceRemoved's devices
+}
+
+func (c *callGate) AccessEnded(_ *Session, device string) { c.ended = append(c.ended, device) }
+func (c *callGate) DeviceRemoved(_ *Session, device string) {
+	c.removed = append(c.removed, device)
 }
 
 func (c *callGate) Name() string { return "callgate" }
-func (c *callGate) CallAnsweredBefore(device string, t time.Time) bool {
-	return device == c.device && c.at.Before(t)
+func (c *callGate) CallAnsweredBefore(device, callID string, t, _ time.Time) bool {
+	return device == c.device && callID == "c1" && c.at.Before(t)
 }
+
+// callBody is a call message naming the stand-in calls feature's call.
+var callBody = []byte(`{"call_id":"c1"}`)
+
+func (c *callGate) CallActive(device, callID string, _ time.Time) bool {
+	return c.active && device == c.device && callID == "c1"
+}
+func (c *callGate) CallRingingOut(device, callID string, _ time.Time) bool {
+	return c.ringingOut && device == c.device && callID == "c1"
+}
+func (c *callGate) EndCallsAnsweredFrom(_ *Session, t time.Time) { c.endsAt = append(c.endsAt, t) }
 
 // §3.6.3, §6.4: while held an incoming connection request completes its
 // handshake but stays pending: in-person auto-approval does not apply, and
@@ -664,5 +700,320 @@ func TestHeldAccountSnapshot(t *testing.T) {
 	id := f.sendAs(f.app, "account.get", `{}`)
 	if r := find(f.inbox(f.app)["dev1"], reply(id)); errCode(r) != "owner_check_required" {
 		t.Fatalf("account.get while held: %+v", r)
+	}
+}
+
+// kaFeature stands in for the calls feature: it takes call.keepalive (an
+// ephemeral owner type) and is the CallGate.
+type kaFeature struct {
+	callGate
+	got     int
+	batches int
+	seenAt  []int          // got as BatchEnd saw it, per batch
+	types   map[string]int // messages handled, by type
+}
+
+func (k *kaFeature) Name() string { return "ka" }
+func (k *kaFeature) Types() []TypeSpec {
+	return []TypeSpec{{Type: "call.keepalive", Ephemeral: true, From: []string{KindApp, KindDesktop}},
+		{Type: "call.ice", Ephemeral: true, From: []string{KindApp, KindDesktop}},
+		{Type: "call.end", From: []string{KindApp, KindDesktop}},
+		{Type: "call.answer", From: []string{KindApp, KindDesktop}}}
+}
+func (k *kaFeature) Handle(_ context.Context, _ *Session, in *envelope.Inner) (json.RawMessage, error) {
+	if in.Type == "call.keepalive" {
+		k.got++
+	}
+	if k.types == nil {
+		k.types = map[string]int{}
+	}
+	k.types[in.Type]++
+	return nil, nil
+}
+func (k *kaFeature) BatchEnd(*Session) { k.batches++; k.seenAt = append(k.seenAt, k.got) }
+
+// §3.6.3 with C2 liveness, through ProcessBatch: while held, a keep-alive
+// from the device of a call answered before the deadline reaches the
+// feature (so the 90 s rule does not end the call); one for a call answered
+// after it is dropped. BatchEnd runs once per batch, after the messages.
+func TestHeldKeepaliveThroughTheBatch(t *testing.T) {
+	f := newOCFixture(t)
+	k := &kaFeature{callGate: callGate{device: "desk1"}}
+	f.m.addFeature(k)
+	f.pastDeadline()
+	_ = f.m.ProcessBatch(context.Background(), &fakeCollector{}, nil) // enter the hold
+	send := func() {
+		f.seq++
+		id, _ := envelope.NewULID(testNow())
+		raw, err := f.desk.ep.Seal(&envelope.Inner{ID: id, Type: "call.keepalive", TS: testNow(), Exp: testNow().Add(30 * time.Second),
+			Body: []byte(`{"call_id":"c1"}`), Features: []string{handshake.CapConfirm}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		msg := Message{MsgID: fmt.Sprintf("b%d", f.seq), Sender: relayauth.EncodeKey(f.desk.peer.Relay.PK), Payload: raw}
+		_ = f.m.ProcessBatch(context.Background(), &fakeCollector{}, []Message{msg})
+	}
+	k.at = f.m.st.OwnerCheck.Deadline.Add(-time.Minute)
+	before := k.batches
+	send()
+	if k.got != 1 || k.batches != before+1 {
+		t.Fatalf("keep-alive of a call answered before the deadline: got %d, batches %d", k.got, k.batches-before)
+	}
+	if k.seenAt[len(k.seenAt)-1] != 1 {
+		t.Fatal("BatchEnd ran before the batch's keep-alive was handled")
+	}
+	k.at = f.m.st.OwnerCheck.Deadline.Add(time.Minute)
+	send()
+	if k.got != 1 {
+		t.Fatal("keep-alive of a call answered after the deadline reached the feature")
+	}
+}
+
+// The hold's start ends the calls answered at or after its deadline: the
+// calls feature is asked once, with the deadline (§3.6.3, owner decision
+// 2026-11-11).
+func TestHoldEndsCallsAnsweredFromTheDeadline(t *testing.T) {
+	f := newOCFixture(t)
+	k := &kaFeature{callGate: callGate{device: "desk1"}}
+	f.m.addFeature(k)
+	f.pastDeadline()
+	deadline := f.m.st.OwnerCheck.Deadline
+	_ = f.m.ProcessBatch(context.Background(), &fakeCollector{}, nil) // enter the hold
+	_ = f.m.ProcessBatch(context.Background(), &fakeCollector{}, nil) // still held: not again
+	if len(k.endsAt) != 1 || !k.endsAt[0].Equal(deadline) {
+		t.Fatalf("EndCallsAnsweredFrom: %v, want once with %v", k.endsAt, deadline)
+	}
+}
+
+// §6.8 with §10.10 (owner decision 2026-11-11): a desktop whose access
+// session expired keeps its active call: its call.keepalive passes; with
+// no active call it is refused as before, and other types still are.
+func TestExpiredSessionKeepsTheCall(t *testing.T) {
+	f := newOCFixture(t)
+	k := &kaFeature{callGate: callGate{device: "desk1", active: true}}
+	f.m.addFeature(k)
+	f.m.st.Devices["desk1"].Access = nil // the session expired
+	send := func() {
+		f.seq++
+		id, _ := envelope.NewULID(testNow())
+		raw, err := f.desk.ep.Seal(&envelope.Inner{ID: id, Type: "call.keepalive", TS: testNow(), Exp: testNow().Add(30 * time.Second),
+			Body: []byte(`{"call_id":"c1"}`), Features: []string{handshake.CapConfirm}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		msg := Message{MsgID: fmt.Sprintf("s%d", f.seq), Sender: relayauth.EncodeKey(f.desk.peer.Relay.PK), Payload: raw}
+		_ = f.m.ProcessBatch(context.Background(), &fakeCollector{}, []Message{msg})
+	}
+	send()
+	if k.got != 1 {
+		t.Fatal("an active call's keep-alive was refused on an expired session")
+	}
+	k.active = false
+	send()
+	if k.got != 1 {
+		t.Fatal("a keep-alive passed an expired session with no active call")
+	}
+	// Another call's id: refused, the call checked by its id.
+	k.active = true
+	f.seq++
+	mid, _ := envelope.NewULID(testNow())
+	raw, err := f.desk.ep.Seal(&envelope.Inner{ID: mid, Type: "call.keepalive", TS: testNow(), Exp: testNow().Add(30 * time.Second),
+		Body: []byte(`{"call_id":"c2"}`), Features: []string{handshake.CapConfirm}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = f.m.ProcessBatch(context.Background(), &fakeCollector{}, []Message{{MsgID: fmt.Sprintf("o%d", f.seq), Sender: relayauth.EncodeKey(f.desk.peer.Relay.PK), Payload: raw}})
+	if k.got != 1 {
+		t.Fatal("another call's keep-alive passed an expired session")
+	}
+	k.active = true
+	id := f.sendAs(f.desk, "connection.list", `{}`)
+	if r := find(f.inbox(f.desk)["desk1"], reply(id)); errCode(r) != "session_required" {
+		t.Fatalf("another type on an expired session: %+v", r)
+	}
+	// call.ice and call.end pass too; another call type doesn't.
+	for _, typ := range []string{"call.ice", "call.end", "call.answer"} {
+		f.seq++
+		mid, _ := envelope.NewULID(testNow())
+		raw, err := f.desk.ep.Seal(&envelope.Inner{ID: mid, Type: typ, TS: testNow(), Exp: testNow().Add(30 * time.Second),
+			Body: []byte(`{"call_id":"c1"}`), Features: []string{handshake.CapConfirm}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		msg := Message{MsgID: fmt.Sprintf("t%d", f.seq), Sender: relayauth.EncodeKey(f.desk.peer.Relay.PK), Payload: raw}
+		_ = f.m.ProcessBatch(context.Background(), &fakeCollector{}, []Message{msg})
+	}
+	if k.types["call.ice"] != 1 || k.types["call.end"] != 1 || k.types["call.answer"] != 0 {
+		t.Fatalf("handled on an expired session: %v", k.types)
+	}
+}
+
+// §6.8 (0.88.13): a call's call.ice and call.end reach its desktop also
+// without an access session (the call outlives it); nothing else does,
+// and an ordinary send still needs the session.
+func TestCallSignalReachesADesktopWithoutASession(t *testing.T) {
+	f := newOCFixture(t)
+	f.inbox(f.desk)
+	f.m.st.Devices["desk1"].Access = nil
+	h := managerHost{f.m}
+	if err := h.Send("desk1", "call.end", []byte(`{"call_id":"c1","reason":"hangup"}`), SendOptions{}, testNow()); !errors.Is(err, ErrNoSession) {
+		t.Fatalf("an ordinary send without a session: %v", err)
+	}
+	if err := h.SendCallSignal("desk1", "call.answer", []byte(`{}`), SendOptions{}, testNow()); err == nil {
+		t.Fatal("call.answer sent as a call signal")
+	}
+	if err := h.SendCallSignal("desk1", "call.end", []byte(`{"call_id":"c1","reason":"hangup"}`), SendOptions{}, testNow()); err != nil {
+		t.Fatal(err)
+	}
+	ice := []byte(`{"call_id":"c1","candidates":[{"candidate":"candidate:1 1 udp 1 192.0.2.1 9 typ host"}]}`)
+	if err := h.Send("desk1", "call.ice", ice, SendOptions{}, testNow()); !errors.Is(err, ErrNoSession) {
+		t.Fatalf("a peer's ICE as an ordinary send without a session: %v", err)
+	}
+	if err := h.SendCallSignal("desk1", "call.ice", ice, SendOptions{}, testNow()); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.m.ProcessBatch(context.Background(), &fakeCollector{}, nil) // flush
+	in := f.inbox(f.desk)["desk1"]
+	if find(in, ofType("call.end")) == nil || find(in, ofType("call.ice")) == nil {
+		t.Fatal("the call's end and ICE did not reach the desktop without a session")
+	}
+	// Never a keep-alive, never an agent, a recovering device or one that
+	// isn't paired.
+	if err := h.SendCallSignal("desk1", "call.keepalive", []byte(`{"call_id":"c1"}`), SendOptions{}, testNow()); err == nil {
+		t.Fatal("call.keepalive sent as a call signal")
+	}
+	if err := h.SendCallSignal("agent1", "call.end", []byte(`{"call_id":"c1","reason":"hangup"}`), SendOptions{}, testNow()); err == nil {
+		t.Fatal("a call signal to an agent")
+	}
+	if err := h.SendCallSignal("nobody", "call.end", []byte(`{"call_id":"c1","reason":"hangup"}`), SendOptions{}, testNow()); err == nil {
+		t.Fatal("a call signal to an unknown device")
+	}
+	f.m.st.Devices["desk1"].Recovering = true
+	if err := h.SendCallSignal("desk1", "call.end", []byte(`{"call_id":"c1","reason":"hangup"}`), SendOptions{}, testNow()); err == nil {
+		t.Fatal("a call signal to a recovering device")
+	}
+	f.m.st.Devices["desk1"].Recovering = false
+	f.m.st.Devices["desk1"].State = PeerPending
+	if err := h.SendCallSignal("desk1", "call.end", []byte(`{"call_id":"c1","reason":"hangup"}`), SendOptions{}, testNow()); err == nil {
+		t.Fatal("a call signal to a device not yet active")
+	}
+}
+
+// agentKA is kaFeature with its call types open to agents too, so only the
+// exemption's own desktop guard can refuse an agent.
+type agentKA struct{ kaFeature }
+
+func (k *agentKA) Types() []TypeSpec {
+	ts := k.kaFeature.Types()
+	for i := range ts {
+		ts[i].From = append(ts[i].From, KindAgent)
+	}
+	return ts
+}
+
+// An agent without a session gets no call exemption: agents take no calls.
+func TestAgentGetsNoCallExemption(t *testing.T) {
+	f := newOCFixture(t)
+	ak := &agentKA{kaFeature{callGate: callGate{device: "agent1", active: true}}}
+	k := &ak.kaFeature
+	f.m.addFeature(ak)
+	f.m.st.Devices["agent1"].Access = nil
+	if !f.m.callActive("agent1", callBody, testNow()) {
+		t.Fatal("the stand-in should report the call")
+	}
+	for _, typ := range []string{"call.keepalive", "call.ice"} {
+		f.seq++
+		mid, _ := envelope.NewULID(testNow())
+		raw, err := f.agent.ep.Seal(&envelope.Inner{ID: mid, Type: typ, TS: testNow(), Exp: testNow().Add(30 * time.Second),
+			Body: callBody, Features: []string{handshake.CapConfirm}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = f.m.ProcessBatch(context.Background(), &fakeCollector{}, []Message{{MsgID: fmt.Sprintf("g%d", f.seq), Sender: relayauth.EncodeKey(f.agent.peer.Relay.PK), Payload: raw}})
+	}
+	if k.types["call.keepalive"] != 0 || k.types["call.ice"] != 0 {
+		t.Fatalf("an agent's call types handled: %v", k.types)
+	}
+}
+
+// §7.4 (0.88.13): an unlink tells the calls feature (which ends the
+// device's call); expiry of a session doesn't.
+func TestUnlinkTellsTheCalls(t *testing.T) {
+	f := newOCFixture(t)
+	k := &kaFeature{callGate: callGate{device: "desk1"}}
+	f.m.addFeature(k)
+	f.sendAs(f.app, "device.unlink", `{"device_id":"desk1"}`)
+	if len(k.removed) != 1 || k.removed[0] != "desk1" {
+		t.Fatalf("unlink: %v", k.removed)
+	}
+}
+
+// §6.8 (0.88.13, owner decision 2026-11-11): an access end on purpose is
+// told to the calls feature (which ends that desktop's call); expiry isn't.
+func TestAccessEndedOnPurposeOnly(t *testing.T) {
+	f := newOCFixture(t)
+	k := &kaFeature{callGate: callGate{device: "desk1"}}
+	f.m.addFeature(k)
+	f.m.st.Devices["desk1"].Access.Expires = testNow().Add(-time.Second)
+	_ = f.m.ProcessBatch(context.Background(), &fakeCollector{}, nil) // the expiry sweep
+	if len(k.ended) != 0 {
+		t.Fatalf("expiry told as an end: %v", k.ended)
+	}
+	f.sendAs(f.app, "device.session.end", `{"device_id":"desk1"}`)
+	if len(k.ended) != 1 || k.ended[0] != "desk1" {
+		t.Fatalf("an end on purpose: %v", k.ended)
+	}
+}
+
+// §6.8 (0.88.13, owner decision 2026-11-11): an expired desktop may hang
+// up its own outgoing call while it rings: call.end only, that call only.
+func TestExpiredSessionEndsItsRingingCall(t *testing.T) {
+	f := newOCFixture(t)
+	k := &kaFeature{callGate: callGate{device: "desk1", ringingOut: true}}
+	f.m.addFeature(k)
+	f.m.st.Devices["desk1"].Access = nil
+	send := func(typ, body string) {
+		f.seq++
+		mid, _ := envelope.NewULID(testNow())
+		raw, err := f.desk.ep.Seal(&envelope.Inner{ID: mid, Type: typ, TS: testNow(), Exp: testNow().Add(30 * time.Second),
+			Body: []byte(body), Features: []string{handshake.CapConfirm}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = f.m.ProcessBatch(context.Background(), &fakeCollector{}, []Message{{MsgID: fmt.Sprintf("r%d", f.seq), Sender: relayauth.EncodeKey(f.desk.peer.Relay.PK), Payload: raw}})
+	}
+	send("call.ice", `{"call_id":"c1"}`)
+	send("call.keepalive", `{"call_id":"c1"}`)
+	send("call.end", `{"call_id":"c2"}`)
+	if k.types["call.ice"] != 0 || k.types["call.keepalive"] != 0 || k.types["call.end"] != 0 {
+		t.Fatalf("passed for a ringing call: %v", k.types)
+	}
+	send("call.end", `{"call_id":"c1"}`)
+	if k.types["call.end"] != 1 {
+		t.Fatalf("its own ringing call's end: %v", k.types)
+	}
+}
+
+// §3.6.2 with §3.6.3 (0.88.13): the holder shortening the interval moves the
+// deadline back at once, with no check (the clock isn't restarted), and the
+// hold that may then begin ends the calls answered at or after the new
+// deadline, also ones answered while the check was ok. As decided for now:
+// the hold judges by the deadline in force when it begins.
+func TestShorterIntervalMidCall(t *testing.T) {
+	f := newOCFixture(t)
+	k := &kaFeature{callGate: callGate{device: "desk1"}}
+	f.m.addFeature(k)
+	rec := f.m.st.OwnerCheck
+	rec.LastAt = time.Now().Add(-90 * time.Minute)
+	if c := errCode(f.req(t, f.app, "settings.set", `{"version":0,"set":{"owner_check.interval_seconds":3600}}`)); c != "" {
+		t.Fatal(c)
+	}
+	want := rec.LastAt.Add(time.Hour)
+	if !rec.Deadline.Equal(want) {
+		t.Fatalf("deadline %v, want %v", rec.Deadline, want)
+	}
+	_ = f.m.ProcessBatch(context.Background(), &fakeCollector{}, nil)
+	if len(k.endsAt) != 1 || !k.endsAt[0].Equal(want) {
+		t.Fatalf("the hold's calls ended from %v, want the new deadline %v", k.endsAt, want)
 	}
 }

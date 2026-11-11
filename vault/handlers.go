@@ -244,6 +244,11 @@ type Host interface {
 	// Send sends a message to one principal (an active connection or owner
 	// device) with options (an `exp`, or memory-only delivery).
 	Send(to, typ string, body json.RawMessage, o SendOptions, now time.Time) error
+	// SendCallSignal sends a call's call.ice or call.end to its device,
+	// also to a desktop whose access session has expired or ended: the
+	// call outlives the session (§6.8, 0.88.13). The hold's and a
+	// suspension's rules still apply.
+	SendCallSignal(to, typ string, body json.RawMessage, o SendOptions, now time.Time) error
 	// SendRequest sends a request to an active connection and registers it,
 	// so that its response reaches the feature as a ResponseObserver
 	// (0.81.2, the vote feature's vote.cast and vote.status). It returns the
@@ -415,6 +420,12 @@ func (s *Session) Send(to, typ string, body json.RawMessage, o SendOptions) erro
 	return s.host.Send(to, typ, body, o, s.now)
 }
 
+// SendCallSignal sends a call's call.ice or call.end to the call's device,
+// within its access session or not (§6.8, 0.88.13).
+func (s *Session) SendCallSignal(to, typ string, body json.RawMessage, o SendOptions) error {
+	return s.host.SendCallSignal(to, typ, body, o, s.now)
+}
+
 // SendRequest sends a request to an active connection; its response is
 // handed to the features that implement ResponseObserver. It returns the
 // request's inner id.
@@ -523,16 +534,25 @@ func (s *Session) Settings() Settings { return s.host.Settings() }
 type Activity struct {
 	Kind         string
 	ConnectionID string
-	DeviceID     string
-	Ref          string
-	Direction    string // "in", "out" or ""
-	Audit        bool   // record in the audit log
-	Feed         bool   // create a feed item
-	Priority     string // feed priority ("" = normal)
+	// Name is the connection's display name, else its first and last name
+	// (noticeName), when the activity was recorded, for a feed item that
+	// names a connection which may be gone
+	// by the time it is shown (card GC #6875). Vault-local.
+	Name      string
+	DeviceID  string
+	Ref       string
+	Direction string // "in", "out" or ""
+	Audit     bool   // record in the audit log
+	Feed      bool   // create a feed item
+	Priority  string // feed priority ("" = normal)
 	// AskBatch marks the feed item of a connection's ask that reached the
 	// member (§10.4.1, 0.23.0): asks of one connection within 10 minutes
 	// of the first form one batch, one feed item with `count`.
 	AskBatch bool
+	// Batch, if set, batches feed items of this kind for one connection
+	// within Batch of the first into one item with `count` (card GC #6875:
+	// the "not delivered" notice, an hour).
+	Batch time.Duration
 }
 
 // ActivitySink is implemented by features that keep activity (the audit
@@ -557,6 +577,15 @@ type ResponseObserver interface {
 // each time the vault processes a batch, held included, locked never.
 type TickObserver interface {
 	Tick(s *Session)
+}
+
+// BatchEndObserver is implemented by features with clock work that must
+// see the batch's messages first (call liveness: a keep-alive in the batch
+// counts before the silence is judged). BatchEnd is called after a batch's
+// messages are handled and before the state is written, held included,
+// locked never.
+type BatchEndObserver interface {
+	BatchEnd(s *Session)
 }
 
 // RecoveryObserver is told when a recovery completes (§11.11.5).
@@ -709,6 +738,14 @@ type ReadOnlyForms interface {
 // grants are revoked).
 type DeviceRemovedObserver interface {
 	DeviceRemoved(s *Session, deviceID string)
+}
+
+// AccessEndedObserver is implemented by features that act when a desktop's
+// or agent's access is ended on purpose (device.session.end, §6.8), not
+// when it expires: the calls feature ends that device's call in progress
+// (0.88.13, owner decision 2026-11-11).
+type AccessEndedObserver interface {
+	AccessEnded(s *Session, deviceID string)
 }
 
 // HandshakeProfiler supplies the display name of the vault's hs.init

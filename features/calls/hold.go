@@ -72,7 +72,27 @@ func (f *Feature) EndCallsAnsweredFrom(s *vault.Session, t time.Time) {
 		}
 		f.finish(s, c, "unavailable")
 		_ = s.SendToConnection(c.Conn, "call.end", endJSON(c.ID, "unavailable"))
-		s.NotifyDevicesWith("call.end", endJSON(c.ID, "unavailable"), "", vault.SendOptions{})
+		endToDevices(s, c, "unavailable", "")
+	}
+}
+
+// AccessEnded implements vault.AccessEndedObserver: a desktop whose access
+// is ended on purpose (End access, "Deny and end access now", or its own
+// device.session.end) loses its call too: ended unavailable, the peer
+// vault and the owner devices told, the desktop included. A session that
+// only expires keeps the call (§6.8, 0.88.13, owner decision 2026-11-11).
+func (f *Feature) AccessEnded(s *vault.Session, device string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	now := s.Now()
+	for _, id := range f.sorted() {
+		c := f.calls[id]
+		if c.Device != device || c.State == StateEnded || !c.live(now) {
+			continue
+		}
+		f.finish(s, c, "unavailable")
+		_ = s.SendToConnection(c.Conn, "call.end", endJSON(c.ID, "unavailable"))
+		endToDevices(s, c, "unavailable", "")
 	}
 }
 

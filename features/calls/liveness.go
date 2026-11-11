@@ -58,7 +58,7 @@ func (f *Feature) BatchEnd(s *vault.Session) {
 		if c.State == StateActive && c.Watched && now.Sub(f.lastAlive(c, now)) > KeepaliveSilence {
 			f.finish(s, c, "failed")
 			_ = s.SendToConnection(c.Conn, "call.end", endJSON(c.ID, "failed"))
-			s.NotifyDevicesWith("call.end", endJSON(c.ID, "failed"), "", vault.SendOptions{})
+			endToDevices(s, c, "failed", "")
 		}
 	}
 }
@@ -106,7 +106,7 @@ func (f *Feature) keepalive(s *vault.Session, body []byte) error {
 		return nil
 	}
 	if c == nil || c.State != StateActive || !c.live(s.Now()) {
-		_ = s.Send(s.From().ID, "call.end", endJSON(id, "unavailable"), eph(s.Now()))
+		_ = s.SendCallSignal(s.From().ID, "call.end", endJSON(id, "unavailable"), eph(s.Now()))
 		return nil
 	}
 	f.alive[id] = s.Now()

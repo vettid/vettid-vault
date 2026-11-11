@@ -244,6 +244,11 @@ type Host interface {
 	// Send sends a message to one principal (an active connection or owner
 	// device) with options (an `exp`, or memory-only delivery).
 	Send(to, typ string, body json.RawMessage, o SendOptions, now time.Time) error
+	// SendCallSignal sends a call's call.ice or call.end to its device,
+	// also to a desktop whose access session has expired or ended: the
+	// call outlives the session (§6.8, 0.88.13). The hold's and a
+	// suspension's rules still apply.
+	SendCallSignal(to, typ string, body json.RawMessage, o SendOptions, now time.Time) error
 	// SendRequest sends a request to an active connection and registers it,
 	// so that its response reaches the feature as a ResponseObserver
 	// (0.81.2, the vote feature's vote.cast and vote.status). It returns the
@@ -413,6 +418,12 @@ func (s *Session) NotifyDevicesWith(typ string, body json.RawMessage, except str
 // active owner device.
 func (s *Session) Send(to, typ string, body json.RawMessage, o SendOptions) error {
 	return s.host.Send(to, typ, body, o, s.now)
+}
+
+// SendCallSignal sends a call's call.ice or call.end to the call's device,
+// within its access session or not (§6.8, 0.88.13).
+func (s *Session) SendCallSignal(to, typ string, body json.RawMessage, o SendOptions) error {
+	return s.host.SendCallSignal(to, typ, body, o, s.now)
 }
 
 // SendRequest sends a request to an active connection; its response is
@@ -718,6 +729,14 @@ type ReadOnlyForms interface {
 // grants are revoked).
 type DeviceRemovedObserver interface {
 	DeviceRemoved(s *Session, deviceID string)
+}
+
+// AccessEndedObserver is implemented by features that act when a desktop's
+// or agent's access is ended on purpose (device.session.end, §6.8), not
+// when it expires: the calls feature ends that device's call in progress
+// (0.88.13, owner decision 2026-11-11).
+type AccessEndedObserver interface {
+	AccessEnded(s *Session, deviceID string)
 }
 
 // HandshakeProfiler supplies the display name of the vault's hs.init

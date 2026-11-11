@@ -220,6 +220,12 @@ func (m *Manager) hSessionEnd(ctx context.Context, s *Session, in *envelope.Inne
 	// The sender gets no sync.event: an app drops the asks itself (§6.8, §10.1).
 	m.endAccess(ctx, target, s.peer.ID != target.ID, "ended", s.peer.ID, s.now)
 	m.record(Activity{Kind: "device.session.ended", DeviceID: target.ID, Audit: true}, s.now)
+	fs := m.session(s.now)
+	for _, f := range m.features {
+		if o, ok := f.(AccessEndedObserver); ok {
+			o.AccessEnded(fs, target.ID) // ended on purpose: its call ends too (0.88.13)
+		}
+	}
 	return nil, nil
 }
 

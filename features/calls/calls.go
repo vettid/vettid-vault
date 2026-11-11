@@ -567,6 +567,21 @@ func (f *Feature) missed(s *vault.Session, c *Call) {
 	s.Record(vault.Activity{Kind: "call.missed", ConnectionID: c.Conn, Ref: c.ID, Direction: DirIn, Feed: true, Priority: "high"})
 }
 
+// endToDevices tells the owner devices that c ended: its call device
+// directly, which may be a desktop whose access session has ended (the
+// call outlives it, §6.8, 0.88.13), and the others as usual, except
+// `except` (the device that ended it).
+func endToDevices(s *vault.Session, c *Call, reason, except string) {
+	body := endJSON(c.ID, reason)
+	if c.Device != "" && c.Device != except {
+		_ = s.SendCallSignal(c.Device, "call.end", body, vault.SendOptions{})
+		if except == "" {
+			except = c.Device
+		}
+	}
+	s.NotifyDevicesWith("call.end", body, except, vault.SendOptions{})
+}
+
 func endJSON(id, reason string) []byte {
 	return strictjson.NewBuilder().String("call_id", id).String("reason", reason).Bytes()
 }
@@ -615,7 +630,7 @@ func ParseAnswer(body []byte, fromPeer bool) (*Answer, error) {
 
 // unavailable tells a device that a call it acted on is gone.
 func unavailable(s *vault.Session, id string) error {
-	_ = s.Send(s.From().ID, "call.end", endJSON(id, "unavailable"), vault.SendOptions{})
+	_ = s.SendCallSignal(s.From().ID, "call.end", endJSON(id, "unavailable"), vault.SendOptions{})
 	return nil
 }
 
@@ -661,6 +676,15 @@ func (f *Feature) answerFromPeer(s *vault.Session, body []byte) error {
 	}
 	if !checkPeerShare(s, callwire.ShareMessage(callwire.RoleAnswer, c.ID, "", a.Enc), a.Vouched) {
 		return nil // the call keeps ringing until it times out or ends
+	}
+	if s.OwnerHeld() {
+		// Answered after the hold began, so after the deadline: it does
+		// not continue (§3.6.3, 0.88.13). Ended, the peer and the devices
+		// told, rather than left to 90 s of silence.
+		f.finish(s, c, "unavailable")
+		_ = s.SendToConnection(c.Conn, "call.end", endJSON(c.ID, "unavailable"))
+		endToDevices(s, c, "unavailable", "")
+		return nil
 	}
 	c.State, c.Answered = StateActive, s.Now()
 	f.alive[c.ID] = c.Answered // the 90 s count from the answer until the first keep-alive
@@ -709,7 +733,7 @@ func (f *Feature) end(s *vault.Session, body []byte, fromConn bool) error {
 			return nil
 		}
 		f.finish(s, c, e.Reason)
-		s.NotifyDevicesWith("call.end", endJSON(c.ID, e.Reason), "", vault.SendOptions{})
+		endToDevices(s, c, e.Reason, "")
 		if c.Dir == DirIn && ringing {
 			f.missed(s, c)
 		}
@@ -799,7 +823,7 @@ func (f *Feature) ice(s *vault.Session, body []byte, fromConn bool) error {
 		}
 		c.ICE++
 		if c.Device != "" {
-			_ = s.Send(c.Device, "call.ice", out, eph(now))
+			_ = s.SendCallSignal(c.Device, "call.ice", out, eph(now))
 		} else {
 			s.NotifyDevicesWith("call.ice", out, "", eph(now))
 		}
@@ -900,7 +924,7 @@ func (f *Feature) ConnectionRemoved(s *vault.Session, id string) {
 	for _, c := range f.calls {
 		if c.Conn == id && c.State != StateEnded {
 			f.finish(s, c, "unavailable")
-			s.NotifyDevicesWith("call.end", endJSON(c.ID, "unavailable"), "", vault.SendOptions{})
+			endToDevices(s, c, "unavailable", "")
 		}
 	}
 }

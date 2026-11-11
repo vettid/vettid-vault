@@ -148,7 +148,8 @@ func TestKeepaliveSilenceEndsAWatchedCall(t *testing.T) {
 	if e := b.sent(t, "cA", "call.end"); str(t, e.Body, "reason") != "failed" {
 		t.Fatal("the peer vault was not told")
 	}
-	b.sent(t, "devices", "call.end")
+	b.sent(t, "dev-app", "call.end")
+	b.sent(t, "devices-except:dev-app", "call.end")
 	if !b.h.HasActivity("call.ended") {
 		t.Fatal("not audited")
 	}

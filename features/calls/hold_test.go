@@ -136,10 +136,81 @@ func TestHoldEndsCallsAnsweredFromTheDeadline(t *testing.T) {
 	if e := b.sent(t, "cA", "call.end"); str(t, e.Body, "reason") != "unavailable" {
 		t.Fatalf("peer: %s", e.Body)
 	}
-	if e := b.sent(t, "devices", "call.end"); str(t, e.Body, "reason") != "unavailable" {
+	if e := b.sent(t, "dev-desktop", "call.end"); str(t, e.Body, "reason") != "unavailable" {
+		t.Fatalf("the call device: %s", e.Body)
+	}
+	if e := b.sent(t, "devices-except:dev-desktop", "call.end"); str(t, e.Body, "reason") != "unavailable" {
 		t.Fatalf("devices: %s", e.Body)
+	}
+	if b.h.HasActivity("call.missed") {
+		t.Fatal("an answered call recorded as missed")
 	}
 	if b.f.CallActive("dev-desktop", now) {
 		t.Fatal("an ended call is still active")
 	}
+}
+
+// §3.6.3 (0.88.13): an outgoing call the peer answers after the hold
+// began was answered after the deadline: it is ended unavailable, the
+// peer and the devices told, never made active.
+func TestHeldCallerAnswerEndsTheCall(t *testing.T) {
+	a, b := newSide("cB"), newSide("cA")
+	link(a, b)
+	sk, _ := callwire.NewOfferKey()
+	r := featuretest.Call(a.f, a.h, t0, "app", "call.start", startBody("cB", sk.Public().Bytes()))
+	if !r.OK() {
+		t.Fatal(r.Code)
+	}
+	callID := str(t, r.Body, "call_id")
+	off := a.sent(t, "cB", "call.offer")
+	featuretest.CallExp(b.f, b.h, t0, off.Opt.Exp, "connection:cA", "call.offer", string(off.Body))
+	ring := b.sent(t, "devices", "call.offer")
+	ek, _ := obj(t, ring.Body).Base64("ek", callwire.EKSize)
+	enc, _, err := callwire.Answer(ek, callID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	featuretest.Call(b.f, b.h, t0.Add(5*time.Second), "app", "call.answer", answerBody("dev-app", callID, enc))
+	fwd := b.sent(t, "cA", "call.answer")
+	a.h.Reset()
+	a.h.Hold = vault.OwnerCheckHeld
+	featuretest.Call(a.f, a.h, t0.Add(5*time.Second), "connection:cB", "call.answer", string(fwd.Body))
+	a.none(t, "call.answer")
+	if c, _ := a.f.Get(callID); c.State != StateEnded || c.Reason != "unavailable" {
+		t.Fatalf("answered while held: %+v", c)
+	}
+	if e := a.sent(t, "cB", "call.end"); str(t, e.Body, "reason") != "unavailable" {
+		t.Fatal("the peer was not told")
+	}
+	a.sent(t, "dev-app", "call.end")
+	a.sent(t, "devices-except:dev-app", "call.end")
+}
+
+// §6.8 (0.88.13, owner decision 2026-11-11): access ended on purpose ends
+// that desktop's call, the peer and every device (the desktop too) told;
+// another device's end changes nothing.
+func TestAccessEndedEndsTheCall(t *testing.T) {
+	b := newSide("cA")
+	sk, _ := callwire.NewOfferKey()
+	id := newCallID("cA")
+	featuretest.CallExp(b.f, b.h, t0, t0.Add(OfferTTL), "connection:cA", "call.offer", peerOffer("cA", id, "audio", sk.Public().Bytes()))
+	enc, _, err := callwire.Answer(sk.Public().Bytes(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := featuretest.Call(b.f, b.h, t0.Add(2*time.Second), "desktop", "call.answer", answerBody("dev-desktop", id, enc)); !r.OK() {
+		t.Fatal(r.Code)
+	}
+	b.h.Reset()
+	b.f.AccessEnded(vault.NewSession(context.Background(), b.h, vault.PeerInfo{}, t0.Add(time.Minute), nil), "dev-other")
+	b.none(t, "call.end")
+	b.f.AccessEnded(vault.NewSession(context.Background(), b.h, vault.PeerInfo{}, t0.Add(time.Minute), nil), "dev-desktop")
+	if c, _ := b.f.Get(id); c.State != StateEnded || c.Reason != "unavailable" {
+		t.Fatalf("%+v", c)
+	}
+	if e := b.sent(t, "cA", "call.end"); str(t, e.Body, "reason") != "unavailable" {
+		t.Fatal("the peer was not told")
+	}
+	b.sent(t, "dev-desktop", "call.end")
+	b.sent(t, "devices-except:dev-desktop", "call.end")
 }

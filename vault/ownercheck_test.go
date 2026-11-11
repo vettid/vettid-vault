@@ -3,6 +3,7 @@ package vault
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -625,7 +626,10 @@ type callGate struct {
 	at     time.Time
 	active bool        // CallActive for device
 	endsAt []time.Time // EndCallsAnsweredFrom's t, per call
+	ended  []string    // AccessEnded's devices
 }
+
+func (c *callGate) AccessEnded(_ *Session, device string) { c.ended = append(c.ended, device) }
 
 func (c *callGate) Name() string { return "callgate" }
 func (c *callGate) CallAnsweredBefore(device string, t, _ time.Time) bool {
@@ -690,17 +694,25 @@ type kaFeature struct {
 	callGate
 	got     int
 	batches int
-	seenAt  []int // got as BatchEnd saw it, per batch
+	seenAt  []int          // got as BatchEnd saw it, per batch
+	types   map[string]int // messages handled, by type
 }
 
 func (k *kaFeature) Name() string { return "ka" }
 func (k *kaFeature) Types() []TypeSpec {
-	return []TypeSpec{{Type: "call.keepalive", Ephemeral: true, From: []string{KindApp, KindDesktop}}}
+	return []TypeSpec{{Type: "call.keepalive", Ephemeral: true, From: []string{KindApp, KindDesktop}},
+		{Type: "call.ice", Ephemeral: true, From: []string{KindApp, KindDesktop}},
+		{Type: "call.end", From: []string{KindApp, KindDesktop}},
+		{Type: "call.answer", From: []string{KindApp, KindDesktop}}}
 }
 func (k *kaFeature) Handle(_ context.Context, _ *Session, in *envelope.Inner) (json.RawMessage, error) {
 	if in.Type == "call.keepalive" {
 		k.got++
 	}
+	if k.types == nil {
+		k.types = map[string]int{}
+	}
+	k.types[in.Type]++
 	return nil, nil
 }
 func (k *kaFeature) BatchEnd(*Session) { k.batches++; k.seenAt = append(k.seenAt, k.got) }
@@ -790,5 +802,60 @@ func TestExpiredSessionKeepsTheCall(t *testing.T) {
 	id := f.sendAs(f.desk, "connection.list", `{}`)
 	if r := find(f.inbox(f.desk)["desk1"], reply(id)); errCode(r) != "session_required" {
 		t.Fatalf("another type on an expired session: %+v", r)
+	}
+	// call.ice and call.end pass too; another call type doesn't.
+	for _, typ := range []string{"call.ice", "call.end", "call.answer"} {
+		f.seq++
+		mid, _ := envelope.NewULID(testNow())
+		raw, err := f.desk.ep.Seal(&envelope.Inner{ID: mid, Type: typ, TS: testNow(), Exp: testNow().Add(30 * time.Second),
+			Body: []byte(`{"call_id":"c1"}`), Features: []string{handshake.CapConfirm}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		msg := Message{MsgID: fmt.Sprintf("t%d", f.seq), Sender: relayauth.EncodeKey(f.desk.peer.Relay.PK), Payload: raw}
+		_ = f.m.ProcessBatch(context.Background(), &fakeCollector{}, []Message{msg})
+	}
+	if k.types["call.ice"] != 1 || k.types["call.end"] != 1 || k.types["call.answer"] != 0 {
+		t.Fatalf("handled on an expired session: %v", k.types)
+	}
+}
+
+// §6.8 (0.88.13): a call's call.ice and call.end reach its desktop also
+// without an access session (the call outlives it); nothing else does,
+// and an ordinary send still needs the session.
+func TestCallSignalReachesADesktopWithoutASession(t *testing.T) {
+	f := newOCFixture(t)
+	f.inbox(f.desk)
+	f.m.st.Devices["desk1"].Access = nil
+	h := managerHost{f.m}
+	if err := h.Send("desk1", "call.end", []byte(`{"call_id":"c1","reason":"hangup"}`), SendOptions{}, testNow()); !errors.Is(err, ErrNoSession) {
+		t.Fatalf("an ordinary send without a session: %v", err)
+	}
+	if err := h.SendCallSignal("desk1", "call.answer", []byte(`{}`), SendOptions{}, testNow()); err == nil {
+		t.Fatal("call.answer sent as a call signal")
+	}
+	if err := h.SendCallSignal("desk1", "call.end", []byte(`{"call_id":"c1","reason":"hangup"}`), SendOptions{}, testNow()); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.m.ProcessBatch(context.Background(), &fakeCollector{}, nil) // flush
+	if e := find(f.inbox(f.desk)["desk1"], ofType("call.end")); e == nil {
+		t.Fatal("the call's end did not reach the desktop without a session")
+	}
+}
+
+// §6.8 (0.88.13, owner decision 2026-11-11): an access end on purpose is
+// told to the calls feature (which ends that desktop's call); expiry isn't.
+func TestAccessEndedOnPurposeOnly(t *testing.T) {
+	f := newOCFixture(t)
+	k := &kaFeature{callGate: callGate{device: "desk1"}}
+	f.m.addFeature(k)
+	f.m.st.Devices["desk1"].Access.Expires = testNow().Add(-time.Second)
+	_ = f.m.ProcessBatch(context.Background(), &fakeCollector{}, nil) // the expiry sweep
+	if len(k.ended) != 0 {
+		t.Fatalf("expiry told as an end: %v", k.ended)
+	}
+	f.sendAs(f.app, "device.session.end", `{"device_id":"desk1"}`)
+	if len(k.ended) != 1 || k.ended[0] != "desk1" {
+		t.Fatalf("an end on purpose: %v", k.ended)
 	}
 }

@@ -516,6 +516,9 @@ func (f *Feature) offer(ctx context.Context, s *vault.Session, in *envelope.Inne
 	if !checkPeerShare(s, callwire.ShareMessage(callwire.RoleOffer, of.CallID, of.Media, of.EK), of.Vouched) {
 		return nil // a swapped or unsigned share: no ringing
 	}
+	// Glare comes before the held check: a held vault has no ringing call
+	// of its own (the hold's start ends them, and call.start is refused
+	// while held), so the order changes nothing there.
 	if !f.glare(s, conn, of.CallID, now) {
 		return nil // our own call to this connection wins
 	}

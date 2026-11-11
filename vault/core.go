@@ -596,20 +596,25 @@ func (m *Manager) hTokenRefresh(_ context.Context, s *Session, _ *envelope.Inner
 		// (owner decision a, GC 01M713PZNT77VVDSCY6DC00NWH, item 3, option A) Only the standing tokens no newer than the
 		// one the refresh was deposited under (its collect jti) are denylisted: a newer one (a near-end re-mint, a
 		// prompt, a handshake's) may still be on its way to the peer. Without a jti (a relay before 0.4), as before.
-		var under *IssuedToken
+		// (Release 29 final review, item 4) "Newer" is issue order, the registry's order (appended as issued, pruned
+		// in place), not exp: two tokens issued in the same second have the same exp, and the later one may be the
+		// one on its way. The token it came under is found by its jti whether or not it is denied already: it marks
+		// the place in that order.
+		under := -1
 		for i := range m.st.Issued {
 			if t := &m.st.Issued[i]; m.msgJTI != "" && t.JTI == m.msgJTI && t.PeerID == s.peer.ID && t.Kind == TokStanding {
-				under = t
+				under = i
+				break
 			}
 		}
 		for i := range m.st.Issued {
 			t := &m.st.Issued[i]
-			if under != nil && t.Exp.After(under.Exp) {
+			if under >= 0 && i > under {
 				continue
 			}
 			// The token it came under is denied whatever it is (a prompt's or a handshake's too): a deposit under it
 			// shows the peer adopted it (re-check of c567317, Fable F1).
-			if t.PeerID == s.peer.ID && t.Kind == TokStanding && !t.Denied && (t == under || t != spare && t != prompt) {
+			if t.PeerID == s.peer.ID && t.Kind == TokStanding && !t.Denied && (i == under || t != spare && t != prompt) {
 				t.Denied = true
 				m.queueRevoke("jti", t.JTI, s.now)
 			}

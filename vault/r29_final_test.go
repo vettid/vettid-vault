@@ -2,6 +2,7 @@ package vault
 
 import (
 	"bytes"
+	"context"
 	"testing"
 	"time"
 )
@@ -112,4 +113,46 @@ func TestR29FinalSuspendedFinLeavesNoCarriedRecord(t *testing.T) {
 	if f.audited(0, "carried_discarded") {
 		t.Fatal("a discard was audited for a suspended connection's epoch never established")
 	}
+}
+
+// Item 4: a token issued after the one a quota refresh came under is spared
+// even when both expire in the same second ("newer" is issue order, not
+// exp), and the one it came under is denied.
+func TestR29FinalQuotaRefreshSparesALaterTokenOfTheSameExp(t *testing.T) {
+	f := newR29Fx(t)
+	f.do(0, func(m *Manager, p *Peer) {
+		under := m.latestIssued(p.ID, TokStanding)
+		if under == nil {
+			t.Fatal("setup: no standing token issued to the peer")
+		}
+		underJTI, underExp := under.JTI, under.Exp
+		m.issueTo(p, TokStanding, f.clk) // issued in the same second: the same exp
+		var laterJTI string
+		for _, it := range m.st.Issued {
+			if it.PeerID == p.ID && it.Kind == TokStanding && it.JTI != underJTI && it.Exp.Equal(underExp) {
+				laterJTI = it.JTI
+			}
+		}
+		if laterJTI == "" {
+			t.Fatal("setup: no later token of the same exp")
+		}
+		m.msgJTI = underJTI
+		s := &Session{m: m, peer: p, now: f.clk}
+		if _, err := m.hTokenRefresh(context.Background(), s, nil); err != nil {
+			t.Fatal(err)
+		}
+		m.msgJTI = ""
+		for _, it := range m.st.Issued {
+			switch it.JTI {
+			case underJTI:
+				if !it.Denied {
+					t.Fatal("the token the refresh came under was not denied")
+				}
+			case laterJTI:
+				if it.Denied {
+					t.Fatal("a token issued after it, of the same exp, was denied")
+				}
+			}
+		}
+	})
 }

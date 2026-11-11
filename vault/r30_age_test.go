@@ -565,3 +565,25 @@ func TestAgeUnsealableWithinWindowTold(t *testing.T) {
 		t.Fatalf("%d notices, audited %v: want told once", n, f.audited(0, "unconfirmed_late"))
 	}
 }
+
+// Owner a, GC #7862: the notice's name is the display name, or else the
+// connection's first and last name.
+func TestNoticeName(t *testing.T) {
+	for _, c := range []struct {
+		name, profile, want string
+	}{
+		{"Alex", `{"first_name":"Alexandra","last_name":"Smith","name":"Alex"}`, "Alex"},
+		{"", `{"first_name":"Alexandra","last_name":"Smith"}`, "Alexandra Smith"},
+		{"", `{"first_name":"Alexandra","last_name":""}`, "Alexandra"},
+		{"", ``, ""},
+		{"", `not json`, ""},
+	} {
+		p := &Peer{Name: c.name, Profile: []byte(c.profile)}
+		if got := noticeName(p); got != c.want {
+			t.Errorf("name %q, profile %s: %q, want %q", c.name, c.profile, got, c.want)
+		}
+	}
+	if noticeName(nil) != "" {
+		t.Error("a gone peer has a name")
+	}
+}

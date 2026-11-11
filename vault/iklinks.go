@@ -710,10 +710,7 @@ func (m *Manager) notice(e *OutboxEntry, typ, kind, ref string, now time.Time) {
 	}
 	// The connection's name as the vault has it now, so that the app can
 	// name a connection that is gone (vault-local: the feed only).
-	name := ""
-	if p != nil {
-		name = p.Name
-	}
+	name := noticeName(p)
 	m.record(Activity{Kind: kind, ConnectionID: e.PeerID, Name: name, Ref: ref, Feed: true, Batch: NoticeWindow}, now)
 }
 
@@ -1056,4 +1053,26 @@ func (m *Manager) idResend(p *Peer, ep *handshake.Epoch, in *envelope.Inner, now
 		r.At = now
 		m.dirty = true
 	}
+}
+
+// noticeName is the name a "not delivered" notice carries (owner a, GC
+// #7862): the connection's display name, or else the first and last name
+// its profile always shares (§6.2); "" when neither can be read.
+func noticeName(p *Peer) string {
+	if p == nil {
+		return ""
+	}
+	if p.Name != "" {
+		return p.Name
+	}
+	if len(p.Profile) == 0 {
+		return ""
+	}
+	o, err := strictjson.ParseObject(p.Profile)
+	if err != nil {
+		return ""
+	}
+	first, _, _ := o.OptString("first_name")
+	last, _, _ := o.OptString("last_name")
+	return truncateUTF8(strings.TrimSpace(first+" "+last), 128)
 }

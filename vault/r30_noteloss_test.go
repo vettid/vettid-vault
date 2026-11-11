@@ -53,7 +53,7 @@ var r30NoteSeeds = []struct {
 	// re-sealed copy known by its bytes as the relay saw it, and the
 	// receiver's stale_or_future for it judging the quota wait.
 	{8495705468849050258, false, true, true, ""},
-	{14452917345793243350, false, true, true, rpLockWaitResidual},
+	{14452917345793243350, false, true, true, ""}, // was rpLockWaitResidual: #6875's re-stamp delivers it
 }
 
 func TestR30NoteLossSeeds(t *testing.T) {
@@ -585,11 +585,19 @@ func TestR30LoadMarksAttemptedTried(t *testing.T) {
 	if !a.Tried || b.Tried || c.Tried || !st.OutboxTried {
 		t.Fatalf("tried %v %v %v, marked %v (want true false false, true)", a.Tried, b.Tried, c.Tried, st.OutboxTried)
 	}
+	// A 0.88.7 state from a clean end keeps its exact Tried; one without
+	// (a crash, card GC #6875) is marked as possibly tried.
 	d := &OutboxEntry{Op: OpDeposit, Payload: sealed}
-	st2 := &State{OutboxTried: true, Outbox: []*OutboxEntry{d}}
+	st2 := &State{OutboxTried: true, CleanEnd: true, Outbox: []*OutboxEntry{d}}
 	st2.init()
 	if d.Tried {
-		t.Fatal("a 0.88.7 state's entry was marked again (its Tried is exact)")
+		t.Fatal("a cleanly ended state's entry was marked (its Tried is exact)")
+	}
+	e := &OutboxEntry{Op: OpDeposit, Payload: sealed}
+	st3 := &State{OutboxTried: true, Outbox: []*OutboxEntry{e}}
+	st3.init()
+	if !e.Tried {
+		t.Fatal("a crashed state's entry wasn't marked possibly tried")
 	}
 }
 
@@ -738,7 +746,10 @@ func TestR30StaleOrFutureRef(t *testing.T) {
 			t.Fatal(err)
 		}
 		id = in.ID
-		m.queueDeposit(&OutboxEntry{PeerID: p.ID, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Payload: raw, InnerID: id}, f.clk)
+		// Best effort: not a member deposit, so the sender's age check
+		// (#6875) leaves its old ts for the peer to refuse.
+		m.queueDeposit(&OutboxEntry{PeerID: p.ID, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Payload: raw, InnerID: id,
+			BestEffort: true}, f.clk)
 	})
 	f.settle()
 	if !f.auditedRef(1, "stale_or_future", id) {
@@ -816,24 +827,18 @@ func TestR30NoteOracle(t *testing.T) {
 	if lost, res := w.notesLost(); len(lost) != 1 || res != "" {
 		t.Fatalf("another note's stale_or_future: %v %q", lost, res)
 	}
+	// With #6875 the quota-wait and lock-wait shapes are losses, not
+	// residuals: the re-stamp at deposit delivers such a note.
 	f.do(1, func(m *Manager, p *Peer) { m.auditRef(f.clk, "stale_or_future", p.ID, "a") })
-	if lost, res := w.notesLost(); len(lost) != 0 || res != rpQuotaWaitResidual {
-		t.Fatalf("quota wait: %v %q, want the residual", lost, res)
+	if lost, res := w.notesLost(); len(lost) != 1 || res != "" {
+		t.Fatalf("quota wait: %v %q, want lost (no longer a residual)", lost, res)
 	}
-	if v := w.verdict(); v != rpQuotaWaitResidual {
-		t.Fatalf("verdict %q, want %q", v, rpQuotaWaitResidual)
-	}
-	// The sender's own long lock (no key change): only with the peer's
-	// stale_or_future for this note (side 1 audited one for "a" above).
 	w = newW()
 	w.sent[0] = []string{"b"}
 	w.lockNote["b"] = true
-	if lost, res := w.notesLost(); len(lost) != 1 || res != "" {
-		t.Fatalf("lock wait without the peer's stale_or_future: %v %q", lost, res)
-	}
 	f.do(1, func(m *Manager, p *Peer) { m.auditRef(f.clk, "stale_or_future", p.ID, "b") })
-	if lost, res := w.notesLost(); len(lost) != 0 || res != rpLockWaitResidual {
-		t.Fatalf("lock wait: %v %q, want the residual", lost, res)
+	if lost, res := w.notesLost(); len(lost) != 1 || res != "" {
+		t.Fatalf("lock wait: %v %q, want lost (no longer a residual)", lost, res)
 	}
 	// Told after a 5xx: only with the sender's undelivered_window.
 	w = newW()

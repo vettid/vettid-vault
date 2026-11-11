@@ -246,6 +246,9 @@ type Hooks struct {
 
 // Manager is one unlocked vault.
 type Manager struct {
+	// removingOwn: removeConnection is applying the member's own removal
+	// (card GC #6875, NoticeOwnRemoval).
+	removingOwn bool
 	// relayAt is the relay time of the message being handled (see
 	// Session.RelayTime); set by handleMessage.
 	relayAt time.Time
@@ -749,6 +752,20 @@ func newManager(o Options, st *State, hdr *Header, dek []byte) *Manager {
 }
 
 func (st *State) init() {
+	if !st.CleanEnd {
+		// Card GC #6875: not a clean end (a crash after a deposit the relay
+		// accepted, before the write that stored its Tried): any waiting
+		// session-mode deposit may have reached the relay.
+		for _, e := range st.Outbox {
+			if e == nil || e.Done || e.Op != OpDeposit || len(e.Payload) == 0 {
+				continue
+			}
+			if env, err := envelope.Parse(e.Payload); err == nil && env.Mode() == envelope.ModeSession {
+				e.Tried = true
+			}
+		}
+	}
+	st.CleanEnd = false // set again only by a lock's last write
 	if !st.OutboxTried {
 		// 0.88.7 §8.3: a release 29 state's sealed entries may have
 		// reached the relay: their answers were not told apart, and an
@@ -1416,6 +1433,11 @@ func (m *Manager) lockLocked(ctx context.Context) error {
 		ref = LockIdle // §10.9 (0.29.0, release L): the idle lock, §3.6.8
 	}
 	m.record(Activity{Kind: "vault.locked", DeviceID: by, Ref: ref, Audit: true}, m.now())
+	// A clean end (card GC #6875) is the last write, after the last drain:
+	// this one, unless entries wait to go after it.
+	if m.st != nil { // zeroized by a split brain in the drain above: persist says so
+		m.st.CleanEnd = !waiting
+	}
 	err := m.persist(ctx, false)
 	if errors.Is(err, ErrSplitBrain) {
 		return err
@@ -1425,6 +1447,9 @@ func (m *Manager) lockLocked(ctx context.Context) error {
 			// What the write just stored goes out before vault.locking,
 			// which must not overtake it.
 			m.drainOutbox(ctx)
+			if m.st != nil {
+				m.st.CleanEnd, m.dirty = true, true // the last write, after the last drain
+			}
 			if err := m.flushIfDirty(ctx); errors.Is(err, ErrSplitBrain) {
 				// The drain's settled write (a transfer's notice the
 				// lock's write stored) lost to another copy: zeroized,

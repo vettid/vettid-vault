@@ -19,6 +19,12 @@ type State struct {
 	// starts clean"): written as 29 from a vault's first flush; a state
 	// without it, or with a smaller value, is not started (R29-U1).
 	MessagingRelease int `json:"messaging_release,omitempty"`
+	// CleanEnd (card GC #6875): the state was written by a lock's last
+	// write, after its last drain, so every deposit's Tried is stored. A
+	// state loaded without it (a crash, a kill, a release before) may have
+	// lost a Tried, so init marks every waiting session-mode deposit Tried:
+	// none of them is then stamped again (a peer could run it twice).
+	CleanEnd bool `json:"clean_end,omitempty"`
 	// OutboxTried (0.88.7 §8.3): the outbox's entries carry Tried. A state
 	// written before (release 29) did not record it: at its first load every
 	// sealed session-mode entry not done is taken as one that may have
@@ -801,13 +807,17 @@ const (
 // at deposit time from the peer's record unless Token is set (open and
 // reconnect tokens, best-effort notices to removed peers).
 type OutboxEntry struct {
-	ID         string    `json:"id"`
-	Op         string    `json:"op"`
-	PeerID     string    `json:"peer_id,omitempty"`
-	RelayURL   string    `json:"relay_url,omitempty"`
-	Mailbox    string    `json:"mailbox,omitempty"`
-	Token      string    `json:"token,omitempty"`
-	Payload    []byte    `json:"payload,omitempty"`
+	ID       string `json:"id"`
+	Op       string `json:"op"`
+	PeerID   string `json:"peer_id,omitempty"`
+	RelayURL string `json:"relay_url,omitempty"`
+	Mailbox  string `json:"mailbox,omitempty"`
+	Token    string `json:"token,omitempty"`
+	Payload  []byte `json:"payload,omitempty"`
+	// Type is the message's inner type, recorded at queue time (card GC
+	// #6875: the member's "not delivered" notice covers the member's own
+	// messages, not the vault's upkeep). Empty for an entry queued before.
+	Type       string    `json:"type,omitempty"`
 	BestEffort bool      `json:"best_effort,omitempty"`
 	Kind       string    `json:"kind,omitempty"`  // revoke: "jti" | "sub"
 	Value      string    `json:"value,omitempty"` // revoke value, claim id

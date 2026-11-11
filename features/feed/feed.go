@@ -52,10 +52,13 @@ type Item struct {
 	Status       string    `json:"status"`
 	Priority     string    `json:"priority"`
 	ConnectionID string    `json:"connection_id,omitempty"`
-	DeviceID     string    `json:"device_id,omitempty"`
-	Ref          string    `json:"ref,omitempty"`
-	Title        string    `json:"title,omitempty"`
-	Body         string    `json:"body,omitempty"`
+	// Name is the connection's display name when the item was made (card
+	// GC #6875: the connection may be gone when it is shown).
+	Name     string `json:"name,omitempty"`
+	DeviceID string `json:"device_id,omitempty"`
+	Ref      string `json:"ref,omitempty"`
+	Title    string `json:"title,omitempty"`
+	Body     string `json:"body,omitempty"`
 	// Count is the number of asks a batch's item stands for (§10.4.1,
 	// 0.23.0); 0 or 1 is not sent.
 	Count int `json:"count,omitempty"`
@@ -66,6 +69,10 @@ type Item struct {
 type Batch struct {
 	ItemID string    `json:"item_id"`
 	Start  time.Time `json:"start"`
+	// Window is the batch's length (0: an ask's, vault.AskBatchWindow).
+	// Batches are keyed by connection id for asks, and by kind and
+	// connection id for another batched kind (card GC #6875).
+	Window time.Duration `json:"window,omitempty"`
 }
 
 type state struct {
@@ -134,16 +141,30 @@ func (f *Feature) RecordActivity(s *vault.Session, a vault.Activity) {
 	if !priorities[p] {
 		p = "normal"
 	}
-	if a.AskBatch && a.ConnectionID != "" && f.batched(s, a.ConnectionID) {
+	// The batch key: asks share one per connection (as before); another
+	// batched kind has its own per connection.
+	key := ""
+	switch {
+	case a.ConnectionID == "":
+	case a.AskBatch:
+		key = a.ConnectionID
+	case a.Batch > 0:
+		key = a.Kind + "|" + a.ConnectionID
+	}
+	if key != "" && f.batched(s, key) {
 		return
 	}
-	it := &Item{Kind: a.Kind, Priority: p, ConnectionID: a.ConnectionID, DeviceID: a.DeviceID, Ref: a.Ref}
+	it := &Item{Kind: a.Kind, Priority: p, ConnectionID: a.ConnectionID, Name: a.Name, DeviceID: a.DeviceID, Ref: a.Ref}
 	f.add(s, it)
-	if a.AskBatch && a.ConnectionID != "" {
+	if key != "" {
 		if f.st.Batches == nil {
 			f.st.Batches = map[string]*Batch{}
 		}
-		f.st.Batches[a.ConnectionID] = &Batch{ItemID: it.ID, Start: it.At}
+		w := time.Duration(0)
+		if !a.AskBatch {
+			w = a.Batch
+		}
+		f.st.Batches[key] = &Batch{ItemID: it.ID, Start: it.At, Window: w}
 	}
 }
 
@@ -154,7 +175,11 @@ func (f *Feature) RecordActivity(s *vault.Session, a vault.Activity) {
 func (f *Feature) batched(s *vault.Session, conn string) bool {
 	now := s.Now()
 	for c, b := range f.st.Batches {
-		if !now.Before(b.Start.Add(vault.AskBatchWindow)) {
+		w := b.Window
+		if w <= 0 {
+			w = vault.AskBatchWindow
+		}
+		if !now.Before(b.Start.Add(w)) {
 			delete(f.st.Batches, c)
 		}
 	}
@@ -204,6 +229,9 @@ func ItemJSON(it *Item) []byte {
 		String("at", envelope.FormatTS(it.At)).String("status", it.Status).String("priority", it.Priority)
 	if it.ConnectionID != "" {
 		b.String("connection_id", it.ConnectionID)
+	}
+	if it.Name != "" {
+		b.String("connection_name", it.Name)
 	}
 	if it.DeviceID != "" {
 		b.String("device_id", it.DeviceID)

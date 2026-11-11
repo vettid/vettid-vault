@@ -301,6 +301,7 @@ type rpWorld struct {
 	staleNote map[string]bool      // a copy accepted with a ts over 16 days old, under an epoch current since that ts (no key change), after a standing-quota refusal of the sender's since that ts
 	noteAhead map[string]string    // the note queued by the same side just before it (the entry ahead in the outbox, of the notes)
 	fiveNote  map[string]bool      // a deposit of it answered an injected 5xx (possibly stored, to the vault)
+	crashNote map[string]bool      // waiting in its sender's outbox when the sender crashed (#6875: possibly tried)
 	lastRef   [2]time.Time
 }
 
@@ -840,7 +841,20 @@ func (w *rpWorld) lock(s int) {
 func (w *rpWorld) crash(s int) {
 	if !w.locked[s] {
 		w.pull(s)
-		w.f.m(s).Crash()
+		// Card GC #6875: what waits at a crash is taken as possibly tried
+		// at the restart (no clean end), so it is told, not stamped again.
+		m := w.f.m(s)
+		m.mu.Lock()
+		for _, e := range m.st.Outbox {
+			if !e.Done && e.Op == OpDeposit && e.InnerID != "" {
+				if w.crashNote == nil {
+					w.crashNote = map[string]bool{}
+				}
+				w.crashNote[e.InnerID] = true
+			}
+		}
+		m.mu.Unlock()
+		m.Crash()
 	}
 	w.open(s) // a locked side's lock ends here (counted in maxLock)
 }
@@ -1192,6 +1206,14 @@ const rpToldResidual = "residual:told-after-5xx (#6875)"
 // Card GC #6875's re-stamp at deposit ends it. Counted apart, accepted.
 const rpLockWaitResidual = "residual:lock-wait>16d (#6875)"
 
+// rpCrashToldResidual: a run whose only fault is a test.note waiting in its
+// sender's outbox at a crash, taken as possibly tried at the restart (card
+// GC #6875: a crash leaves no clean end, so a Tried may have been lost),
+// and so ended past 16 days as undelivered_window, told ("may not have
+// been delivered") rather than stamped again (which could make the peer
+// run it twice). Counted apart, accepted.
+const rpCrashToldResidual = "residual:told-after-crash (#6875)"
+
 // notesUnaccounted is the note oracle for a run that ends stale: a note
 // not handled must still wait in its sender's outbox or have been told
 // (drop.undelivered_* with its id), unless excused as notesLost excuses.
@@ -1249,7 +1271,7 @@ func (w *rpWorld) notesUnaccounted() (why []string) {
 // (rpQuotaWaitResidual); or if it was answered a 5xx and its sender audited
 // undelivered_window (told, rpToldResidual).
 func (w *rpWorld) notesLost() (why []string, residual string) {
-	quotaWait, told, lockWait := false, false, false
+	quotaWait, told, lockWait, crashTold := false, false, false, false // quotaWait, lockWait: no longer excused (#6875)
 	over, single := w.lockShape()
 	for s := 0; s < 2; s++ {
 		o := 1 - s
@@ -1261,12 +1283,14 @@ func (w *rpWorld) notesLost() (why []string, residual string) {
 				dup = true
 			case n == 1:
 			case w.ttlNote[id] && (over || single):
-			case w.staleNote[id] && w.f.auditedRef(o, "stale_or_future", id):
-				quotaWait = true
+			// The quota-wait and lock-wait residuals are no longer excused:
+			// card GC #6875's re-stamp at deposit closes both (a note that
+			// waited past 16 days with no key change and no attempt is
+			// sealed again with a fresh ts), so such a loss is a loss.
 			case w.fiveNote[id] && w.f.auditedRef(s, "undelivered_window", id):
 				told = true
-			case w.lockNote[id] && w.f.auditedRef(o, "stale_or_future", id):
-				lockWait = true
+			case w.crashNote[id] && w.f.auditedRef(s, "undelivered_window", id):
+				crashTold = true
 			default:
 				lost = true
 				w.logf("note %s from %d lost: ttl %v quota %v stale-copy %v", id, s, w.ttlNote[id], w.quotaNote[id], w.staleNote[id])
@@ -1282,6 +1306,8 @@ func (w *rpWorld) notesLost() (why []string, residual string) {
 	switch {
 	case told:
 		residual = rpToldResidual
+	case crashTold:
+		residual = rpCrashToldResidual
 	case quotaWait:
 		residual = rpQuotaWaitResidual
 	case lockWait:
@@ -1345,6 +1371,7 @@ func rpRunFP(t *testing.T, rs uint64, steps int, burst, verbose bool) (string, [
 	w := &rpWorld{t: t, f: f, quota: map[string]int64{}, spentJ: map[string]bool{}, refused: map[string]int{}, verbose: verbose, md: rpRunModes,
 		noteBytes: map[string]string{}, noteAhead: map[string]string{},
 		ttlNote: map[string]bool{}, quotaNote: map[string]bool{}, staleNote: map[string]bool{}, fiveNote: map[string]bool{},
+		crashNote: map[string]bool{},
 		quotaLast: map[string]time.Time{}, sealed: map[string]rpSeal{}, lockNote: map[string]bool{},
 		srng: rand.New(rand.NewPCG(rs, 11))}
 	for s := 0; s < 2; s++ {

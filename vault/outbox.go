@@ -95,7 +95,7 @@ func (m *Manager) sealAndQueueWake(p *Peer, in *envelope.Inner, wake string) str
 	}
 	te := m.registry[in.Type]
 	m.queueDeposit(&OutboxEntry{PeerID: p.ID, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Payload: raw, Wake: wake, InnerID: in.ID,
-		Ephemeral: te != nil && te.spec.Ephemeral}, m.now())
+		Type: in.Type, Ephemeral: te != nil && te.spec.Ephemeral}, m.now())
 	return in.ID
 }
 
@@ -252,6 +252,82 @@ func (m *Manager) refused(p *Peer, e *OutboxEntry, now time.Time) {
 // hs.confirm, a best-effort notice or an ephemeral message.
 func memberDeposit(e *OutboxEntry) bool {
 	return e.Op == OpDeposit && !e.Handshake && !e.Confirm && !e.BestEffort && !e.Ephemeral
+}
+
+// RestampAfter is how old a waiting durable message's ts may be before it
+// is sealed again with a fresh one (card GC #6875, owner decision #6866 a):
+// §8.4's 16 days less the relay's 14-day hold, so that a copy the relay
+// holds for the full 14 days still reaches the peer within its window.
+const RestampAfter = envelope.MaxDurableAge - 14*24*time.Hour
+
+// ageCheck is card GC #6875's check at deposit of a waiting durable member
+// message to a connection, sealed under its current epoch (one under
+// another epoch is the key change's, §8.3 "Re-sealed at a key change"):
+//   - no attempt of it may have reached the relay (not Tried), and its ts
+//     is older than RestampAfter: the peer cannot have it, so it is sealed
+//     again, in its place, with the same inner id and a fresh ts, and is
+//     deposited only once a write stores it (unstored);
+//   - an attempt may have reached the relay (Tried), and its ts is past
+//     §8.4's 16 days: the peer would refuse it, and a fresh ts could make
+//     it run twice, so it is not delivered (undelivered_window: it may or
+//     may not have been delivered), never stamped again.
+//
+// It reports whether it changed or ended e.
+func (m *Manager) ageCheck(e *OutboxEntry, now time.Time) bool {
+	if !memberDeposit(e) || e.Held != nil || len(e.Payload) == 0 {
+		return false
+	}
+	p := m.peer(e.PeerID)
+	if p == nil || p.Kind != KindConnection {
+		return false
+	}
+	kr := m.sessions[p.ID]
+	if kr == nil || kr.Current() == nil {
+		return false
+	}
+	env, err := envelope.Parse(e.Payload)
+	if err != nil {
+		return false
+	}
+	in, err := kr.Current().OpenSent(env)
+	if err != nil {
+		return false // under another epoch: the key change re-seals or ends it
+	}
+	age := now.Sub(in.TS)
+	switch {
+	case e.Tried && age > envelope.MaxDurableAge:
+		if e.InnerID == "" {
+			e.InnerID = in.ID
+		}
+		m.notDelivered(e, "undelivered_window", now)
+		return true
+	case !e.Tried && age > RestampAfter:
+		in.TS, in.Seq, in.Features = now, 0, nil
+		raw, err := m.sealFor(p, kr.Current(), in)
+		if errors.Is(err, errDemoted) {
+			// Demoted since: the demotion's rehold holds it; until then it
+			// waits here (its old bytes are not sent under a demoted epoch).
+			return true
+		}
+		if err != nil {
+			if age <= envelope.MaxDurableAge {
+				return false // still within the peer's window: as it is
+			}
+			if e.InnerID == "" {
+				e.InnerID = in.ID
+			}
+			m.notDelivered(e, "held_unsealable", now) // §8.3 case 3: it can't be sealed again
+			return true
+		}
+		if e.InnerID == "" {
+			e.InnerID = in.ID
+		}
+		e.Payload = raw
+		m.markUnstored(e) // sealed in place: deposited only once stored
+		m.dirty = true
+		return true
+	}
+	return false
 }
 
 // outboxPending reports whether deposits to peer are still queued.
@@ -561,6 +637,14 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 			if e.Op == OpDeposit && (e.AwaitToken || e.QuotaWait) {
 				awaiting[key] = true
 			} else if e.Op == OpDeposit {
+				blocked[key] = true
+			}
+			continue
+		}
+		if e.Op == OpDeposit && m.ageCheck(e, now) {
+			// Re-stamped (not stored yet: the mailbox's later deposits wait
+			// behind it, in order), or ended (not delivered).
+			if !e.Done {
 				blocked[key] = true
 			}
 			continue

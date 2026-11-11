@@ -349,3 +349,65 @@ func TestNoticeOwnRemovalEndToEnd(t *testing.T) {
 		}
 	}
 }
+
+// Re-check #7846 (1): a lock right after a clean load, with no write since,
+// takes the waiting branch: its first drain sends nothing (the guard), so
+// the second, after its write, must. Without the branch the lock sends
+// nothing and the message waits for the next unlock.
+func TestAgeLockAfterCleanLoadDeposits(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	f.waitingNote(0, "m1") // stored: waiting, not tried
+	d := f.d[0]
+	mb := f.m(1).st.Relay.Mailbox
+	d.relay.mu.Lock()
+	d.relay.failMailbox = map[string]error{mb: &relayclient.Error{Status: 429, Code: "rate_limited"}}
+	d.relay.mu.Unlock()
+	if err := d.m.Lock(context.Background()); err != nil { // clean, untried
+		t.Fatal(err)
+	}
+	f.reopenNoStart(0) // loaded clean, and no write since
+	count := func() int {
+		d.relay.mu.Lock()
+		defer d.relay.mu.Unlock()
+		n := 0
+		for _, dep := range d.relay.deposits {
+			if dep.mailbox == mb {
+				n++
+			}
+		}
+		return n
+	}
+	before := count()
+	m := d.m
+	func() {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		m.retryPeer(f.p(0).ID) // due now; nothing written
+	}()
+	if err := m.Lock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if n := count() - before; n != 1 {
+		t.Fatalf("the lock deposited %d, want 1", n)
+	}
+}
+
+// Re-check #7846 (2): an entry waiting for a standing token is not sealed
+// again (no seq burned) every drain; it is judged once a token is there.
+func TestAgeNoRestampWithoutStandingToken(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	e, _ := f.waitingNote(0, "m1")
+	f.advance(RestampAfter + time.Hour)
+	m, p := f.m(0), f.p(0)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.retryPeer(p.ID) // due
+	p.Standing.Token = ""
+	was := append([]byte(nil), e.Payload...)
+	m.drainOutbox(context.Background())
+	if !bytes.Equal(e.Payload, was) {
+		t.Fatal("sealed again while waiting for a standing token")
+	}
+}

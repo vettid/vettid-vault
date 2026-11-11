@@ -32,8 +32,15 @@ func (f *r29Fx) restart(s int) {
 }
 
 // reopen unlocks side s, locked, from its store, keeping its relay's
-// deposits and the scenario's clock and handlers.
+// deposits and the scenario's clock and handlers, and makes Start's write.
 func (f *r29Fx) reopen(s int) {
+	f.t.Helper()
+	f.reopenNoStart(s)
+	startWrite(f.d[s].m)
+}
+
+// reopenNoStart is reopen without Start's write.
+func (f *r29Fx) reopenNoStart(s int) {
 	f.t.Helper()
 	d := f.d[s]
 	old := d.relay
@@ -55,7 +62,6 @@ func (f *r29Fx) reopen(s int) {
 			return nil, nil
 		}))
 	m.features = append(m.features, f.sink[s])
-	startWrite(m)
 }
 
 // startWrite is Start's state write, which Run makes before any drain

@@ -2,6 +2,7 @@ package calls
 
 import (
 	"encoding/json"
+	"errors"
 	"sort"
 	"time"
 
@@ -56,6 +57,9 @@ func loadState(data json.RawMessage) (*state, error) {
 	if err := json.Unmarshal(data, st); err != nil {
 		return nil, err
 	}
+	if st.V > stateVersion {
+		return nil, errors.New("calls: state from a later release") // never drop what it doesn't know
+	}
 	if st.Calls == nil {
 		st.Calls = map[string]*Call{}
 	}
@@ -66,7 +70,13 @@ func loadState(data json.RawMessage) (*state, error) {
 // LimitShort in LimitShortWindow, or LimitLong in LimitLongWindow.
 func (f *Feature) limited(conn string, now time.Time) bool {
 	short, long := 0, 0
-	for _, t := range f.unanswered[conn] {
+	ts := f.unanswered[conn]
+	for i, t := range ts {
+		// A count from before the clock went back is moved to now once, so
+		// it ages from there: a step back doesn't lengthen a limit.
+		if t.After(now) {
+			ts[i], t = now, now
+		}
 		if now.Sub(t) < LimitLongWindow {
 			long++
 			if now.Sub(t) < LimitShortWindow {
@@ -85,6 +95,9 @@ func (f *Feature) noteUnanswered(s *vault.Session, conn string, now time.Time) {
 	}
 	var keep []time.Time
 	for _, t := range f.unanswered[conn] {
+		if t.After(now) {
+			t = now // as in limited
+		}
 		if now.Sub(t) < LimitLongWindow {
 			keep = append(keep, t)
 		}
@@ -136,6 +149,9 @@ func permissionEvent(s *vault.Session, conn string) {
 // setPermission is call.permission.set {connection_id, allowed}: calls from
 // and to the connection are allowed (the default) or off.
 func (f *Feature) setPermission(s *vault.Session, body []byte) (json.RawMessage, error) {
+	if k := s.From().Kind; k != vault.KindApp && k != vault.KindDesktop {
+		return nil, vault.NewError("forbidden", "") // the owner's own devices only; not delegable
+	}
 	o, err := strictjson.ParseObject(body)
 	if err != nil {
 		return nil, errBad
@@ -169,8 +185,11 @@ func (f *Feature) setPermission(s *vault.Session, body []byte) (json.RawMessage,
 // listPermissions is call.permission.list: the connections that differ from
 // the default (calls off, or limited now).
 func (f *Feature) listPermissions(s *vault.Session, body []byte) (json.RawMessage, error) {
-	if _, err := strictjson.ParseObject(body); err != nil {
-		return nil, errBad
+	if k := s.From().Kind; k != vault.KindApp && k != vault.KindDesktop {
+		return nil, vault.NewError("forbidden", "")
+	}
+	if o, err := strictjson.ParseObject(body); err != nil || len(o) != 0 {
+		return nil, errBad // {} only
 	}
 	now := s.Now()
 	seen := map[string]bool{}

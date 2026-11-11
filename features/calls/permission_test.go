@@ -10,6 +10,7 @@ import (
 	"github.com/vettid/vettid-vault/internal/featuretest"
 	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vms/callwire"
+	"github.com/vettid/vettid-vault/vms/envelope"
 )
 
 func (s *side) permEvents() int {
@@ -279,5 +280,143 @@ func TestLimitedSurvivesALoad(t *testing.T) {
 	g.Tick(vault.NewSession(context.Background(), b.h, vault.PeerInfo{}, t0.Add(time.Hour), nil))
 	if b.permEvents() != 1 || g.limitedSent["cA"] {
 		t.Fatal("a lapse during the lock not announced")
+	}
+}
+
+// Busy and suppressed calls count; a limited offer is silent even when the
+// vault is busy (limited before busy: the caller learns nothing).
+func TestBusyAndSuppressedCount(t *testing.T) {
+	b := newSide("cA")
+	b.addConn("cC")
+	sk, _ := callwire.NewOfferKey()
+	active := newCallID("cC")
+	featuretest.CallExp(b.f, b.h, t0, t0.Add(OfferTTL), "connection:cC", "call.offer", peerOffer("cC", active, "audio", sk.Public().Bytes()))
+	enc, _, _ := callwire.Answer(sk.Public().Bytes(), active)
+	featuretest.Call(b.f, b.h, t0, "app", "call.answer", answerBody("dev-app", active, enc))
+	// While busy: each offer from cA is answered busy and counts.
+	for i := 0; i < 3; i++ {
+		at := t0.Add(time.Duration(i+1) * time.Second)
+		featuretest.CallExp(b.f, b.h, at, at.Add(OfferTTL), "connection:cA", "call.offer", peerOffer("cA", newCallID("cA"), "audio", sk.Public().Bytes()))
+	}
+	if len(b.f.unanswered["cA"]) != 3 {
+		t.Fatalf("busy calls counted %d", len(b.f.unanswered["cA"]))
+	}
+	// Now limited, and still busy: no busy reply, an unavailable record.
+	b.h.Reset()
+	id := newCallID("cA")
+	at := t0.Add(5 * time.Second)
+	featuretest.CallExp(b.f, b.h, at, at.Add(OfferTTL), "connection:cA", "call.offer", peerOffer("cA", id, "audio", sk.Public().Bytes()))
+	if len(b.h.SentOfType("call.end")) != 0 || !b.h.HasActivity("drop.call_rate") {
+		t.Fatal("a limited offer while busy was answered busy")
+	}
+	if c, _ := b.f.Get(id); c.Reason != "unavailable" || len(b.f.unanswered["cA"]) != 4 {
+		t.Fatalf("a suppressed call: %+v, counted %d", c, len(b.f.unanswered["cA"]))
+	}
+}
+
+// The windows' exact ends: 10 minutes and 24 hours, "in the last".
+func TestLimitWindowBoundaries(t *testing.T) {
+	f := New(Options{})
+	f.unanswered["c"] = []time.Time{t0, t0.Add(time.Minute), t0.Add(2 * time.Minute)}
+	if !f.limited("c", t0.Add(10*time.Minute-time.Nanosecond)) || f.limited("c", t0.Add(10*time.Minute)) {
+		t.Fatal("the 10 minute window")
+	}
+	var ten []time.Time
+	for i := 0; i < 10; i++ {
+		ten = append(ten, t0.Add(time.Duration(i)*time.Hour))
+	}
+	f.unanswered["c"] = ten
+	if !f.limited("c", t0.Add(24*time.Hour-time.Nanosecond)) || f.limited("c", t0.Add(24*time.Hour)) {
+		t.Fatal("the 24 hour window")
+	}
+	if MissedMergeWindow != 24*time.Hour || LimitShortWindow != 10*time.Minute || LimitLongWindow != 24*time.Hour {
+		t.Fatal("the spec's windows")
+	}
+}
+
+// A clock stepped back doesn't lengthen a limit: a count later than now is
+// moved to now once and ages from there.
+func TestLimitClockStepBack(t *testing.T) {
+	f := New(Options{})
+	future := t0.Add(time.Hour)
+	f.unanswered["c"] = []time.Time{future, future, future}
+	if !f.limited("c", t0) {
+		t.Fatal("counts from before the step")
+	}
+	if f.limited("c", t0.Add(10*time.Minute)) {
+		t.Fatal("a limit lengthened by a clock stepped back")
+	}
+}
+
+// Only the owner's own devices: an agent or a connection is refused.
+func TestCallPermissionSenders(t *testing.T) {
+	b := newSide("cA")
+	for _, from := range []string{"agent", "connection:cA"} {
+		for _, typ := range []string{"call.permission.set", "call.permission.list"} {
+			body := `{}`
+			if typ == "call.permission.set" {
+				body = `{"connection_id":"cA","allowed":false}`
+			}
+			if r := featuretest.Call(b.f, b.h, t0, from, typ, body); r.Code != "forbidden" {
+				t.Errorf("%s from %s: %q", typ, from, r.Code)
+			}
+		}
+	}
+	if b.f.off["cA"] {
+		t.Fatal("set by another sender")
+	}
+	if r := featuretest.Call(b.f, b.h, t0, "app", "call.permission.list", `{"x":1}`); r.Code != "bad_request" {
+		t.Fatalf("list with a member: %q", r.Code)
+	}
+}
+
+// Clearing the counts of a limited connection announces it; the list
+// leaves out a connection with counts that isn't limited.
+func TestClearAnnouncesAndListLeavesOut(t *testing.T) {
+	b := newSide("cA")
+	b.addConn("cC")
+	missOne(t, b, t0) // cA: one, not limited
+	for i := 0; i < 3; i++ {
+		sk, _ := callwire.NewOfferKey()
+		id := newCallID("cC")
+		at := t0.Add(time.Duration(i) * time.Minute)
+		featuretest.CallExp(b.f, b.h, at, at.Add(OfferTTL), "connection:cC", "call.offer", peerOffer("cC", id, "audio", sk.Public().Bytes()))
+		featuretest.Call(b.f, b.h, at.Add(time.Second), "connection:cC", "call.end", `{"call_id":"`+id+`","reason":"hangup"}`)
+	}
+	r := featuretest.Call(b.f, b.h, t0.Add(3*time.Minute), "app", "call.permission.list", `{}`)
+	if string(r.Body) != `{"connections":[{"connection_id":"cC","allowed":true,"limited":true}]}` {
+		t.Fatalf("list: %s", r.Body)
+	}
+	b.h.Reset()
+	sk, _ := callwire.NewOfferKey()
+	featuretest.Call(b.f, b.h, t0.Add(4*time.Minute), "app", "call.start", startBody("cC", sk.Public().Bytes()))
+	if b.permEvents() != 1 {
+		t.Fatalf("clearing a limit announced %d times", b.permEvents())
+	}
+}
+
+// A state from a later release is refused, never loaded without what it
+// doesn't know.
+func TestCallStateLaterVersion(t *testing.T) {
+	if err := New(Options{}).Load([]byte(`{"v":3,"calls":{}}`)); err == nil {
+		t.Fatal("a later state version loaded")
+	}
+}
+
+// The handler itself refuses another sender kind (a second guard beside
+// the type's registration).
+func TestCallPermissionHandlerGuard(t *testing.T) {
+	b := newSide("cA")
+	s := vault.NewSession(context.Background(), b.h, vault.PeerInfo{ID: "agent1", Kind: vault.KindAgent, State: vault.PeerActive}, t0, nil)
+	for _, in := range []*envelope.Inner{
+		{Type: "call.permission.set", Body: []byte(`{"connection_id":"cA","allowed":false}`)},
+		{Type: "call.permission.list", Body: []byte(`{}`)},
+	} {
+		if _, err := b.f.Handle(context.Background(), s, in); err == nil || !strings.Contains(err.Error(), "forbidden") {
+			t.Errorf("%s from an agent: %v", in.Type, err)
+		}
+	}
+	if b.f.off["cA"] {
+		t.Fatal("set by an agent")
 	}
 }

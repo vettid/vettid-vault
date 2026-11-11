@@ -210,6 +210,15 @@ func (f *Feature) batched(s *vault.Session, conn, ref string) bool {
 	return true
 }
 
+// endWhileActive ends a WhileActive batch whose item left the active state.
+func (f *Feature) endWhileActive(itemID string) {
+	for k, b := range f.st.Batches {
+		if b.WhileActive && b.ItemID == itemID {
+			delete(f.st.Batches, k)
+		}
+	}
+}
+
 // add stores a new item and sends feed.event to every owner device.
 func (f *Feature) add(s *vault.Session, it *Item) {
 	now := s.Now().UTC().Truncate(time.Millisecond)
@@ -297,6 +306,9 @@ func (f *Feature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner
 		}
 		if u.Status != "" {
 			it.Status = u.Status
+			if u.Status != StatusActive {
+				f.endWhileActive(it.ID) // set active again later, it doesn't merge again
+			}
 		}
 		if u.Priority != "" {
 			it.Priority = u.Priority

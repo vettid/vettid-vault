@@ -288,3 +288,26 @@ func TestBatchWhileActive(t *testing.T) {
 		}
 	}
 }
+
+// An ask batch keeps its first ref (only a missed-call batch takes the
+// latest); an item read and set active again doesn't merge again.
+func TestBatchRefAndReactivated(t *testing.T) {
+	f, h := New(), featuretest.NewHost()
+	rec(f, h, t0, vault.Activity{Kind: "grant.request", ConnectionID: "c1", Ref: "first", Feed: true, AskBatch: true})
+	rec(f, h, t0.Add(time.Minute), vault.Activity{Kind: "grant.request", ConnectionID: "c1", Ref: "second", Feed: true, AskBatch: true})
+	if its := f.Items(); len(its) != 1 || its[0].Ref != "first" || its[0].Count != 2 {
+		t.Fatalf("ask batch: %+v", its)
+	}
+	g, h2 := New(), featuretest.NewHost()
+	missed := func(at time.Time, ref string) {
+		rec(g, h2, at, vault.Activity{Kind: "call.missed", ConnectionID: "c1", Ref: ref, Feed: true, Batch: 24 * time.Hour, BatchWhileActive: true})
+	}
+	missed(t0, "a")
+	id := g.Items()[0].ID
+	featuretest.Call(g, h2, t0.Add(time.Minute), "app", "feed.update", `{"item_id":"`+id+`","status":"read"}`)
+	featuretest.Call(g, h2, t0.Add(2*time.Minute), "app", "feed.update", `{"item_id":"`+id+`","status":"active"}`)
+	missed(t0.Add(3*time.Minute), "b")
+	if its := g.Items(); len(its) != 2 || its[1].Ref != "b" {
+		t.Fatalf("after read and active again: %+v", its)
+	}
+}

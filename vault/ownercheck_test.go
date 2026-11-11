@@ -3,10 +3,12 @@ package vault
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/vettid/vettid-relay/relayauth"
 	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/handshake"
@@ -624,7 +626,7 @@ type callGate struct {
 }
 
 func (c *callGate) Name() string { return "callgate" }
-func (c *callGate) CallAnsweredBefore(device string, t time.Time) bool {
+func (c *callGate) CallAnsweredBefore(device string, t, _ time.Time) bool {
 	return device == c.device && c.at.Before(t)
 }
 
@@ -673,5 +675,59 @@ func TestHeldAccountSnapshot(t *testing.T) {
 	id := f.sendAs(f.app, "account.get", `{}`)
 	if r := find(f.inbox(f.app)["dev1"], reply(id)); errCode(r) != "owner_check_required" {
 		t.Fatalf("account.get while held: %+v", r)
+	}
+}
+
+// kaFeature stands in for the calls feature: it takes call.keepalive (an
+// ephemeral owner type) and is the CallGate.
+type kaFeature struct {
+	callGate
+	got     int
+	batches int
+}
+
+func (k *kaFeature) Name() string { return "ka" }
+func (k *kaFeature) Types() []TypeSpec {
+	return []TypeSpec{{Type: "call.keepalive", Ephemeral: true, From: []string{KindApp, KindDesktop}}}
+}
+func (k *kaFeature) Handle(_ context.Context, _ *Session, in *envelope.Inner) (json.RawMessage, error) {
+	if in.Type == "call.keepalive" {
+		k.got++
+	}
+	return nil, nil
+}
+func (k *kaFeature) BatchEnd(*Session) { k.batches++ }
+
+// §3.6.3 with C2 liveness, through ProcessBatch: while held, a keep-alive
+// from the device of a call answered before the deadline reaches the
+// feature (so the 90 s rule does not end the call); one for a call answered
+// after it is dropped. BatchEnd runs once per batch, after the messages.
+func TestHeldKeepaliveThroughTheBatch(t *testing.T) {
+	f := newOCFixture(t)
+	k := &kaFeature{callGate: callGate{device: "desk1"}}
+	f.m.addFeature(k)
+	f.pastDeadline()
+	_ = f.m.ProcessBatch(context.Background(), &fakeCollector{}, nil) // enter the hold
+	send := func() {
+		f.seq++
+		id, _ := envelope.NewULID(testNow())
+		raw, err := f.desk.ep.Seal(&envelope.Inner{ID: id, Type: "call.keepalive", TS: testNow(), Exp: testNow().Add(30 * time.Second),
+			Body: []byte(`{"call_id":"c1"}`), Features: []string{handshake.CapConfirm}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		msg := Message{MsgID: fmt.Sprintf("b%d", f.seq), Sender: relayauth.EncodeKey(f.desk.peer.Relay.PK), Payload: raw}
+		_ = f.m.ProcessBatch(context.Background(), &fakeCollector{}, []Message{msg})
+	}
+	k.at = f.m.st.OwnerCheck.Deadline.Add(-time.Minute)
+	before := k.batches
+	send()
+	if k.got != 1 || k.batches != before+1 {
+		t.Fatalf("keep-alive of a call answered before the deadline: got %d, batches %d", k.got, k.batches-before)
+	}
+	k.at = f.m.st.OwnerCheck.Deadline.Add(time.Minute)
+	send()
+	if k.got != 1 {
+		t.Fatal("keep-alive of a call answered after the deadline reached the feature")
 	}
 }

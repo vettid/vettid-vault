@@ -150,7 +150,9 @@ type OwnerHoldObserver interface {
 // a call, still active, before t (its call.ice and call.end pass the gate,
 // §3.6.3).
 type CallGate interface {
-	CallAnsweredBefore(deviceID string, t time.Time) bool
+	// CallAnsweredBefore: the device has a call answered before t that is
+	// still live at now (not past the 12 h limit).
+	CallAnsweredBefore(deviceID string, t, now time.Time) bool
 }
 
 // CredentialAlarm is implemented by the credential feature: the open clone
@@ -591,7 +593,7 @@ func (m *Manager) alarmState() string {
 
 func (m *Manager) callAnsweredBefore(device string, t time.Time) bool {
 	for _, f := range m.features {
-		if c, ok := f.(CallGate); ok && c.CallAnsweredBefore(device, t) {
+		if c, ok := f.(CallGate); ok && c.CallAnsweredBefore(device, t, m.now()) {
 			return true
 		}
 	}

@@ -11,9 +11,21 @@ import (
 	"github.com/vettid/vettid-vault/vms/callwire"
 )
 
-// tickAt runs the feature's housekeeping at now.
+// tickAt runs one empty batch at now: the housekeeping (Tick) and the end
+// of the batch (BatchEnd).
 func tickAt(s *side, now time.Time) {
-	s.f.Tick(vault.NewSession(context.Background(), s.h, vault.PeerInfo{}, now, nil))
+	sess := vault.NewSession(context.Background(), s.h, vault.PeerInfo{}, now, nil)
+	s.f.Tick(sess)
+	s.f.BatchEnd(sess)
+}
+
+// collect runs empty batches every 20 s from after `from` up to and
+// including `to` (a vault collecting without a gap).
+func collect(s *side, from, to time.Time) {
+	for t := from.Add(20 * time.Second); t.Before(to); t = t.Add(20 * time.Second) {
+		tickAt(s, t)
+	}
+	tickAt(s, to)
 }
 
 func missedCount(s *side) int {
@@ -121,9 +133,9 @@ func watchedCall(t *testing.T, ka bool) (*side, string) {
 func TestKeepaliveSilenceEndsAWatchedCall(t *testing.T) {
 	b, id := watchedCall(t, true)
 	answered := t0.Add(time.Second)
-	tickAt(b, answered.Add(80*time.Second))
+	collect(b, answered, answered.Add(80*time.Second))
 	featuretest.Call(b.f, b.h, answered.Add(80*time.Second), "app", "call.keepalive", `{"call_id":"`+id+`"}`)
-	tickAt(b, answered.Add(170*time.Second))
+	collect(b, answered.Add(80*time.Second), answered.Add(170*time.Second))
 	if c, _ := b.f.Get(id); c.State != StateActive {
 		t.Fatal("ended within 90 s of a keep-alive")
 	}
@@ -157,18 +169,20 @@ func TestKeepaliveFromOthersAndForEndedCalls(t *testing.T) {
 	b, id := watchedCall(t, true)
 	answered := t0.Add(time.Second)
 	b.h.Reset()
+	collect(b, answered, answered.Add(80*time.Second))
+	b.h.Reset()
 	featuretest.Call(b.f, b.h, answered.Add(80*time.Second), "desktop", "call.keepalive", `{"call_id":"`+id+`"}`)
 	if len(b.h.Sent) != 0 {
 		t.Fatalf("answered another device's keep-alive: %+v", b.h.Sent)
 	}
-	tickAt(b, answered.Add(91*time.Second))
+	collect(b, answered.Add(80*time.Second), answered.Add(91*time.Second))
 	if c, _ := b.f.Get(id); c.State != StateEnded {
 		t.Fatal("another device's keep-alive kept the call alive")
 	}
 	b.h.Reset()
 	featuretest.Call(b.f, b.h, answered.Add(100*time.Second), "app", "call.keepalive", `{"call_id":"`+id+`"}`)
-	if e := b.sent(t, "dev-app", "call.end"); str(t, e.Body, "reason") != "unavailable" {
-		t.Fatal("a keep-alive for an ended call not answered unavailable")
+	if e := b.sent(t, "dev-app", "call.end"); str(t, e.Body, "reason") != "unavailable" || !e.Opt.MemoryOnly || e.Opt.Exp.IsZero() {
+		t.Fatalf("a keep-alive for an ended call not answered with an ephemeral unavailable: %+v", e.Opt)
 	}
 }
 
@@ -190,7 +204,7 @@ func TestKeepaliveCountsFromTheUnlock(t *testing.T) {
 	b.f = f2
 	unlock := t0.Add(time.Hour)
 	tickAt(b, unlock)
-	tickAt(b, unlock.Add(90*time.Second))
+	collect(b, unlock, unlock.Add(90*time.Second))
 	if c, _ := b.f.Get(id); c.State != StateActive {
 		t.Fatal("ended within 90 s of the unlock")
 	}
@@ -246,8 +260,9 @@ func TestOutgoingWatchedCall(t *testing.T) {
 	if c, _ := a.f.Get(id); c.State != StateActive || !c.Watched || c.Device != "dev-app" {
 		t.Fatalf("caller's record: %+v", c)
 	}
+	collect(a, answered, answered.Add(60*time.Second))
 	featuretest.Call(a.f, a.h, answered.Add(60*time.Second), "app", "call.keepalive", `{"call_id":"`+id+`"}`)
-	tickAt(a, answered.Add(150*time.Second))
+	collect(a, answered.Add(60*time.Second), answered.Add(150*time.Second))
 	if c, _ := a.f.Get(id); c.State != StateActive {
 		t.Fatal("ended within 90 s of the caller's keep-alive")
 	}
@@ -308,5 +323,88 @@ func TestAnswerKeepaliveFlag(t *testing.T) {
 	}
 	if c, _ := b.f.Get(id); c.State != StateRinging {
 		t.Fatal("a refused answer changed the call")
+	}
+}
+
+// A collect gap (M1, the lead's review): the vault did not collect for
+// 100 s, so the device's keep-alives may not have reached it. The batch
+// that ends the gap counts its own keep-alive before the silence is judged
+// (BatchEnd after the messages), and without one the count starts again at
+// the gap's end, as at the unlock.
+func TestCollectGapDoesNotEndLiveCalls(t *testing.T) {
+	for _, withKA := range []bool{true, false} {
+		b, id := watchedCall(t, true)
+		answered := t0.Add(time.Second)
+		collect(b, answered, answered.Add(20*time.Second))
+		after := answered.Add(120 * time.Second) // 100 s with no collect
+		sess := vault.NewSession(context.Background(), b.h, vault.PeerInfo{}, after, nil)
+		b.f.Tick(sess)
+		if withKA {
+			featuretest.Call(b.f, b.h, after, "app", "call.keepalive", `{"call_id":"`+id+`"}`)
+		}
+		b.f.BatchEnd(sess)
+		if c, _ := b.f.Get(id); c.State != StateActive {
+			t.Fatalf("keep-alive %v: a collect gap ended a live call", withKA)
+		}
+		collect(b, after, after.Add(90*time.Second))
+		if c, _ := b.f.Get(id); c.State != StateActive {
+			t.Fatalf("keep-alive %v: ended within 90 s of the gap's end", withKA)
+		}
+		tickAt(b, after.Add(91*time.Second))
+		if c, _ := b.f.Get(id); c.State != StateEnded || c.Reason != "failed" {
+			t.Fatalf("keep-alive %v: not ended 90 s after the gap's end", withKA)
+		}
+	}
+}
+
+// The count of an outgoing watched call starts at the peer's answer: still
+// active at answer + 90 s with no keep-alive, failed at + 91 s. An outgoing
+// call started without keepalive is not watched.
+func TestOutgoingCountFromThePeersAnswer(t *testing.T) {
+	for _, ka := range []bool{true, false} {
+		a, b := newSide("cB"), newSide("cA")
+		link(a, b)
+		sk, _ := callwire.NewOfferKey()
+		start := startBody("cB", sk.Public().Bytes())
+		if ka {
+			start = strings.TrimSuffix(start, "}") + `,"keepalive":true}`
+		}
+		r := featuretest.Call(a.f, a.h, t0, "app", "call.start", start)
+		id := str(t, r.Body, "call_id")
+		off := a.sent(t, "cB", "call.offer")
+		featuretest.CallExp(b.f, b.h, t0, off.Opt.Exp, "connection:cA", "call.offer", string(off.Body))
+		ring := b.sent(t, "devices", "call.offer")
+		ek, _ := obj(t, ring.Body).Base64("ek", callwire.EKSize)
+		enc, _, _ := callwire.Answer(ek, id)
+		featuretest.Call(b.f, b.h, t0.Add(5*time.Second), "app", "call.answer", answerBody("dev-app", id, enc))
+		answered := t0.Add(5 * time.Second)
+		featuretest.Call(a.f, a.h, answered, "connection:cB", "call.answer", string(b.sent(t, "cA", "call.answer").Body))
+		if c, _ := a.f.Get(id); c.Watched != ka {
+			t.Fatalf("keepalive %v: watched %v", ka, c.Watched)
+		}
+		collect(a, answered, answered.Add(90*time.Second))
+		if c, _ := a.f.Get(id); c.State != StateActive {
+			t.Fatalf("keepalive %v: ended within 90 s of the peer's answer", ka)
+		}
+		tickAt(a, answered.Add(91*time.Second))
+		c, _ := a.f.Get(id)
+		if ka && (c.State != StateEnded || c.Reason != "failed") {
+			t.Fatal("not ended 91 s after the peer's answer")
+		}
+		if !ka && c.State != StateActive {
+			t.Fatal("an unwatched outgoing call was ended")
+		}
+	}
+}
+
+// A keep-alive for an active call past the 12 h limit (L1) is answered
+// unavailable and does not count.
+func TestKeepalivePastTheCallLimit(t *testing.T) {
+	b, id := watchedCall(t, true)
+	late := t0.Add(MaxCallDuration + 2*time.Second)
+	b.h.Reset()
+	featuretest.Call(b.f, b.h, late, "app", "call.keepalive", `{"call_id":"`+id+`"}`)
+	if e := b.sent(t, "dev-app", "call.end"); str(t, e.Body, "reason") != "unavailable" || !e.Opt.MemoryOnly {
+		t.Fatal("a keep-alive past 12 h not answered with an ephemeral unavailable")
 	}
 }

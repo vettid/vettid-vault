@@ -57,9 +57,14 @@ func TestCallsWhileHeld(t *testing.T) {
 	if r := featuretest.Call(b.f, b.h, t0.Add(2*time.Second), "desktop", "call.answer", answerBody("dev-desktop", id3, enc)); !r.OK() {
 		t.Fatal(r.Code)
 	}
-	if !b.f.CallAnsweredBefore("dev-desktop", t0.Add(time.Minute)) || b.f.CallAnsweredBefore("dev-desktop", t0) ||
-		b.f.CallAnsweredBefore("dev-app", t0.Add(time.Minute)) {
+	now := t0.Add(time.Minute)
+	if !b.f.CallAnsweredBefore("dev-desktop", t0.Add(time.Minute), now) || b.f.CallAnsweredBefore("dev-desktop", t0, now) ||
+		b.f.CallAnsweredBefore("dev-app", t0.Add(time.Minute), now) {
 		t.Fatal("CallAnsweredBefore")
+	}
+	// The 12 h limit: a stale active record keeps nothing open (L1).
+	if b.f.CallAnsweredBefore("dev-desktop", t0.Add(time.Minute), t0.Add(MaxCallDuration+time.Minute)) {
+		t.Fatal("a call past the 12 h limit still passes the hold")
 	}
 	b.h.Reset()
 	b.f.OwnerHoldStarted(vault.NewSession(context.Background(), b.h, vault.PeerInfo{}, t0.Add(3*time.Second), nil))

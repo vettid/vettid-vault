@@ -559,6 +559,15 @@ type TickObserver interface {
 	Tick(s *Session)
 }
 
+// BatchEndObserver is implemented by features with clock work that must
+// see the batch's messages first (call liveness: a keep-alive in the batch
+// counts before the silence is judged). BatchEnd is called after a batch's
+// messages are handled and before the state is written, held included,
+// locked never.
+type BatchEndObserver interface {
+	BatchEnd(s *Session)
+}
+
 // RecoveryObserver is told when a recovery completes (§11.11.5).
 type RecoveryObserver interface {
 	RecoveryCompleted(s *Session)

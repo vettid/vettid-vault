@@ -151,6 +151,9 @@ type Feature struct {
 	// alive is when each watched active call's device last showed it was
 	// alive (liveness.go): memory only, never in the state.
 	alive map[string]time.Time
+	// lastTick is the previous housekeeping (memory only), to see a gap in
+	// collecting (CollectGap).
+	lastTick time.Time
 }
 
 // New returns the feature.
@@ -194,6 +197,7 @@ func (f *Feature) Load(data json.RawMessage) error {
 	}
 	f.calls = c
 	f.alive = map[string]time.Time{} // memory only: counted again from the first look after the unlock
+	f.lastTick = time.Time{}
 	return nil
 }
 

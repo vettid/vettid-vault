@@ -30,12 +30,13 @@ func (f *Feature) OwnerHoldStarted(s *vault.Session) {
 func (f *Feature) OwnerHoldEnded(*vault.Session) {}
 
 // CallAnsweredBefore implements vault.CallGate: the device is the call
-// device of an active call answered before t.
-func (f *Feature) CallAnsweredBefore(device string, t time.Time) bool {
+// device of an active call answered before t and still live at now (the
+// 12 h limit: a stale record keeps nothing open through the hold).
+func (f *Feature) CallAnsweredBefore(device string, t, now time.Time) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for _, c := range f.calls {
-		if c.Device == device && c.State == StateActive && !c.Answered.IsZero() && c.Answered.Before(t) {
+		if c.Device == device && c.State == StateActive && !c.Answered.IsZero() && c.Answered.Before(t) && c.live(now) {
 			return true
 		}
 	}

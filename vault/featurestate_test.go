@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/vettid/vettid-vault/vault/store"
@@ -434,5 +435,147 @@ func TestAnUnrunFeaturesConnectionTypeIsUnsupported(t *testing.T) {
 	in := d.inbox(conn)[conn.peer.ID]
 	if r := find(in, reply(id)); r == nil || r.Status != envelope.StatusError || errCode(r) != "unsupported_type" {
 		t.Fatalf("test.ring to an unrun feature: %+v", in)
+	}
+}
+
+// altUnlockWith unlocks d's vault as d's app through §11.10.4's release rules
+// (not pinOnly), with the device, manifest and key checks stubbed; opts
+// are d's options with the features under test.
+func altUnlockWith(d *devFixture, opts Options, tweak func(*AltUnlockParams)) (*Manager, *AltUnlockOutcome) {
+	own := ReleaseEntry{PCR0: testRelease.PCR0, Number: testRelease.Number, Status: "active"}
+	p := AltUnlockParams{Options: opts, VaultID: d.vid, UserGUID: "u1", DeviceIK: d.devPeer.IK, PIN: testPIN, UnlockSecret: testSecret,
+		VerifyDevice: func(k *UnlockKey) (json.RawMessage, error) { return k.Attestation, nil },
+		Manifest: func(seen uint64) (*ManifestView, error) {
+			return &ManifestView{Serial: seen + 1, Own: own, Lookup: func(string) (ReleaseEntry, bool) { return own, true }}, nil
+		},
+		OwnKeyCheck: func(context.Context, ReleaseEntry) (*SealKeyRecord, error) {
+			return &SealKeyRecord{VerifiedBy: testRelease.PCR0}, nil
+		}}
+	if tweak != nil {
+		tweak(&p)
+	}
+	return UnlockAlt(context.Background(), p)
+}
+
+// withRequired is d's options with requiredCounter, which cannot read
+// its part.
+func withRequired(d *devFixture) Options {
+	opts := d.opts
+	opts.Store = d.store
+	opts.Features = append(append([]Feature(nil), d.opts.Features...), &requiredCounter{})
+	return opts
+}
+
+// The confirming unlock at a move's new release (§11.10.4) with a Required
+// part that does not read: refused state_unreadable, the move not
+// confirmed (the state not written), and the old release's header kept.
+func TestUnreadablePartAtAMovesConfirmationKeepsTheOldHeader(t *testing.T) {
+	d := newDevFixture(t)
+	old := strings.Repeat("ef", 48)
+	ctx := context.Background()
+	if _, err := d.store.Put(ctx, store.HeaderKey(d.vid, old), []byte("the old release's header"), ""); err != nil {
+		t.Fatal(err)
+	}
+	d.m.mu.Lock()
+	d.m.st.Features["counter"] = json.RawMessage("7")
+	d.m.st.ReleaseMove = &ReleaseMove{To: testRelease.PCR0, ToRelease: testRelease.Number, From: old, ApprovedBy: d.devPeer.ID}
+	d.m.dirty = true
+	_ = d.m.flushThenDrain(ctx)
+	d.m.mu.Unlock()
+	if err := d.m.Lock(ctx); err != nil {
+		t.Fatal(err)
+	}
+	stateBefore, _, _ := d.store.Get(ctx, store.StateKey(d.vid))
+	gauge := Unlocked()
+	m, out := altUnlockWith(d, withRequired(d), nil)
+	if m != nil || out.OK || out.Code != CodeStateUnreadable {
+		t.Fatalf("confirmation: %+v", out)
+	}
+	if Unlocked() != gauge {
+		t.Fatalf("unlocked gauge %d, was %d", Unlocked(), gauge)
+	}
+	if b, _, err := d.store.Get(ctx, store.HeaderKey(d.vid, old)); err != nil || string(b) != "the old release's header" {
+		t.Fatalf("the old header went: %q %v", b, err)
+	}
+	if stateAfter, _, _ := d.store.Get(ctx, store.StateKey(d.vid)); string(stateAfter) != string(stateBefore) {
+		t.Fatal("the state was written: the move was confirmed")
+	}
+}
+
+// An unlock that would cancel a recovery, with a Required part that does
+// not read: refused state_unreadable, and no cancellation is reported or
+// stored: no marker, no event, the stored header unchanged.
+func TestUnreadablePartCancelsNoRecovery(t *testing.T) {
+	d := cancelFixture(t, func(m *Manager) {
+		m.mu.Lock()
+		m.st.Features["counter"] = json.RawMessage("7")
+		m.dirty = true
+		_ = m.flushThenDrain(context.Background())
+		m.mu.Unlock()
+	})
+	ctx := context.Background()
+	hdrBefore, _, _ := d.store.Get(ctx, store.HeaderKey(d.vid, testRelease.PCR0))
+	m, out := cancelUnlock(d, withRequired(d), nil)
+	if m != nil || out.OK || out.Code != CodeStateUnreadable {
+		t.Fatalf("unlock: %+v", out)
+	}
+	if out.RecoveryCancelled || out.CancelledRecoveryID != "" || out.CancelledMarker() != "" || len(out.Events) != 0 {
+		t.Fatalf("a cancellation was reported: %+v", out)
+	}
+	if hdrAfter, _, _ := d.store.Get(ctx, store.HeaderKey(d.vid, testRelease.PCR0)); string(hdrAfter) != string(hdrBefore) {
+		t.Fatal("the stored header changed")
+	}
+	if r := storedRecovery(t, d); r == nil || r.ID != cancelledRecID {
+		t.Fatalf("the recovery went: %+v", r)
+	}
+}
+
+// auditSink keeps the kinds of the audited activity in its own part of
+// the state, as the audit log does.
+type auditSink struct{ kinds []string }
+
+func (a *auditSink) Name() string      { return "auditsink" }
+func (a *auditSink) Types() []TypeSpec { return nil }
+func (a *auditSink) Load(raw json.RawMessage) error {
+	if len(raw) == 0 {
+		return nil
+	}
+	return json.Unmarshal(raw, &a.kinds)
+}
+func (a *auditSink) Save() (json.RawMessage, error) { return json.Marshal(a.kinds) }
+func (a *auditSink) RecordActivity(_ *Session, x Activity) {
+	if x.Audit {
+		a.kinds = append(a.kinds, x.Kind)
+	}
+}
+func (a *auditSink) Handle(context.Context, *Session, *envelope.Inner) (json.RawMessage, error) {
+	return nil, nil
+}
+
+// feature.load_failed is durable: after an unlock and a flush with nothing
+// else to store, the audit's stored part has it.
+func TestLoadFailedIsStored(t *testing.T) {
+	d := newDevFixture(t)
+	ctx := context.Background()
+	d.m.mu.Lock()
+	d.m.st.Features["counter"] = json.RawMessage("7")
+	d.m.dirty = true
+	_ = d.m.flushThenDrain(ctx)
+	d.m.mu.Unlock()
+	d.m.Crash()
+	opts := d.opts
+	opts.Store = d.store
+	opts.Features = append(append([]Feature(nil), d.opts.Features...), &failingCounter{}, &auditSink{})
+	m, _, err := Unlock(ctx, UnlockParams{Options: opts, VaultID: d.vid, PIN: testPIN, UnlockSecret: testSecret})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.m = m
+	defer m.Crash()
+	m.mu.Lock()
+	_ = m.flushThenDrain(ctx)
+	m.mu.Unlock()
+	if part := storedPart(t, d, "auditsink"); !strings.Contains(part, "feature.load_failed") {
+		t.Fatalf("the stored audit: %s", part)
 	}
 }

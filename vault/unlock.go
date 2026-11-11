@@ -643,9 +643,6 @@ func (m *Manager) syncUnlockKeysWith(k *UnlockKey) {
 	}
 }
 
-// resume starts the vault under this release: keys, sessions, relay
-// registration, the device's fresh token, a header write recording the
-// reset backoff, counter and manifest serial, and the result fields.
 // refuseUnreadable is §3.3's refusal (0.88.17, owner decision
 // 2026-11-11): a feature others call directly could not read its part,
 // and the vault is not run half. Answered state_unreadable after the
@@ -660,6 +657,9 @@ func (m *Manager) refuseUnreadable(out *AltUnlockOutcome) (*Manager, *AltUnlockO
 	return nil, out.fail(CodeStateUnreadable, ErrStateUnreadable)
 }
 
+// resume starts the vault under this release: keys, sessions, relay
+// registration, the device's fresh token, a header write recording the
+// reset backoff, counter and manifest serial, and the result fields.
 func (m *Manager) resume(ctx context.Context, p AltUnlockParams, out *AltUnlockOutcome, now time.Time) (*Manager, *AltUnlockOutcome) {
 	fail := func(code string, err error) (*Manager, *AltUnlockOutcome) {
 		m.zeroize()

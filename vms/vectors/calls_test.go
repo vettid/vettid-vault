@@ -137,6 +137,9 @@ func checkCallVectors(t *testing.T, dir string) {
 			}
 			m := bytes.Join([][]byte{[]byte(role), []byte(id), []byte(media), []byte(lists), share}, []byte{0})
 			eq(t, name+" message", m, sh.b64("message_b64"))
+			if !callwire.ValidShareMessage(m) {
+				t.Errorf("%s: a vault wouldn't vouch for it", name)
+			}
 			ds := ed25519.Sign(by.dev, append([]byte("vettid/vms/2/call-share"), m...))
 			eq(t, name+" device_sig", ds, sh.b64("device_sig_b64"))
 			vm := append(append([]byte(nil), by.devPub...), m...)

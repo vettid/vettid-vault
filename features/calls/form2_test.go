@@ -341,12 +341,7 @@ func TestForm2PartialDeviceAnswer(t *testing.T) {
 			body = strings.TrimSuffix(answerBody("dev-app", id, enc), "}") + extra + "}"
 		}
 		featuretest.Call(b.f, b.h, t0.Add(time.Second), "app", "call.answer", body)
-		c, _ := b.f.Get(id)
-		end := b.h.SentOfType("call.end")
-		if len(b.h.SentOfType("call.answer")) != 0 || c.State != StateRinging || !b.h.HasActivity("drop.call_share") ||
-			len(end) != 1 || end[0].To != "dev-app" || string(end[0].Body) != string(endJSON(id, "unavailable")) {
-			t.Errorf("%s: state %s, %d sent", name, c.State, len(b.h.Sent))
-		}
+		assertBadShareFromDevice(t, b, id, name)
 	}
 }
 
@@ -389,9 +384,7 @@ func TestForm2MemberTypes(t *testing.T) {
 			t.Fatalf("%s: the edit changed nothing", name)
 		}
 		featuretest.Call(b.f, b.h, t0.Add(time.Second), "app", "call.answer", body)
-		if len(b.h.SentOfType("call.answer")) != 0 || !b.h.HasActivity("drop.call_share") {
-			t.Errorf("%s: passed on, or not audited", name)
-		}
+		assertBadShareFromDevice(t, b, cid, name)
 	}
 }
 
@@ -425,3 +418,88 @@ func TestForm2PeerOfferMalformed(t *testing.T) {
 }
 
 func b64url(b []byte) string { return base64.URLEncoding.EncodeToString(b) }
+
+// assertBadShareFromDevice: a device's answer was refused as a share that
+// doesn't verify: audited, nothing passed on, the device told unavailable,
+// the call still ringing.
+func assertBadShareFromDevice(t *testing.T, b *side, id, name string) {
+	t.Helper()
+	c, _ := b.f.Get(id)
+	end := b.h.SentOfType("call.end")
+	if len(b.h.SentOfType("call.answer")) != 0 || c.State != StateRinging || !b.h.HasActivity("drop.call_share") ||
+		len(end) != 1 || end[0].To != "dev-app" || string(end[0].Body) != string(endJSON(id, "unavailable")) {
+		t.Errorf("%s: state %s, %d sent", name, c.State, len(b.h.Sent))
+	}
+}
+
+// Values outside their limits, signed as sent, so only the parsing can
+// refuse them: a device's answer, a peer's offer and a peer's answer.
+func TestForm2OutOfRangeSigned(t *testing.T) {
+	sk, _ := callwire.NewOfferKey()
+	ek := sk.Public().Bytes()
+	cf := make([]byte, 32)
+	for name, c := range map[string]struct {
+		suite   int
+		offered []int
+	}{
+		"suite 0": {0, []int{1}}, "suite -1": {-1, []int{1}}, "suite 65536": {65536, []int{1}},
+		"offered [1,1]": {1, []int{1, 1}}, "offered [0]": {1, []int{0}}, "offered nine": {1, []int{1, 2, 3, 4, 5, 6, 7, 8, 9}},
+	} {
+		// From a device.
+		b := newSide("cA")
+		id := newCallID("cA")
+		featuretest.CallExp(b.f, b.h, t0, t0.Add(OfferTTL), "connection:cA", "call.offer", peerOffer2("cA", id, "audio", ek, []int{1}, true, false))
+		enc, _, _ := callwire.Answer(ek, id)
+		b.h.Reset()
+		featuretest.Call(b.f, b.h, t0.Add(time.Second), "app", "call.answer", answerBody2("dev-app", id, enc, c.suite, c.offered, cf))
+		assertBadShareFromDevice(t, b, id, "device "+name)
+		// From the peer.
+		a := newSide("cB")
+		oid := newCallID("f2or")
+		featuretest.Call(a.f, a.h, t0, "app", "call.start", startBody2("cB", oid, ek, []int{1}))
+		enc, _, _ = callwire.Answer(ek, oid)
+		a.h.Reset()
+		featuretest.Call(a.f, a.h, t0.Add(time.Second), "connection:cB", "call.answer", peerAnswerSigned("cB", oid, enc,
+			callwire.AnswerMessage2(oid, c.suite, c.offered, enc),
+			`,"suite":`+itoa(c.suite)+`,"offered":`+string(suitesJSON(c.offered))+`,"confirm":"`+b64(cf)+`"`))
+		if got, _ := a.f.Get(oid); len(a.h.SentOfType("call.answer")) != 0 || got.State != StateRinging || !a.h.HasActivity("drop.call_share") {
+			t.Errorf("peer answer %s: passed on, ended or not audited", name)
+		}
+	}
+	for name, suites := range map[string][]int{"[0]": {0}, "[1,1]": {1, 1}, "[65536]": {65536}, "nine": {1, 2, 3, 4, 5, 6, 7, 8, 9}} {
+		b := newSide("cA")
+		featuretest.CallExp(b.f, b.h, t0, t0.Add(OfferTTL), "connection:cA", "call.offer", peerOffer2("cA", newCallID("cA"), "audio", ek, suites, true, false))
+		if len(b.h.SentOfType("call.offer")) != 0 || !b.h.HasActivity("drop.call_share") {
+			t.Errorf("peer offer suites %s: rang, or not audited", name)
+		}
+	}
+}
+
+// Part of form 2 in an answer for a call that isn't there, isn't ringing
+// or isn't the sender's: as any such answer, no drop.call_share (a
+// connection can't have one audited against another's call); a device
+// is told unavailable.
+func TestForm2PartialForNoCall(t *testing.T) {
+	sk, _ := callwire.NewOfferKey()
+	ek := sk.Public().Bytes()
+	b := newSide("cA")
+	id := newCallID("cA")
+	enc, _, _ := callwire.Answer(ek, id)
+	partial := strings.Replace(answerBody2("dev-app", id, enc, 1, []int{1}, make([]byte, 32)), `,"suite":1`, ``, 1)
+	featuretest.Call(b.f, b.h, t0, "app", "call.answer", partial)
+	if end := b.h.SentOfType("call.end"); b.h.HasActivity("drop.call_share") || len(end) != 1 || end[0].To != "dev-app" {
+		t.Fatalf("device, no call: %+v", b.h.Activities)
+	}
+	// Our call to cB, answered by cC with part of form 2.
+	a := newSide("cB")
+	a.addConn("cC")
+	oid := newCallID("f2nc")
+	featuretest.Call(a.f, a.h, t0, "app", "call.start", startBody2("cB", oid, ek, []int{1}))
+	enc, _, _ = callwire.Answer(ek, oid)
+	a.h.Reset()
+	featuretest.Call(a.f, a.h, t0.Add(time.Second), "connection:cC", "call.answer", peerAnswerSigned("cC", oid, enc,
+		callwire.AnswerMessage2(oid, 1, []int{1}, enc), `,"offered":[1]`))
+	if a.h.HasActivity("drop.call_share") {
+		t.Fatal("another connection's partial answer audited against our call")
+	}
+}

@@ -380,8 +380,8 @@ func ValidShareMessage(m []byte) bool {
 	case RoleOffer2:
 		return canonicalList(f[2])
 	case RoleAnswer2:
-		c, ok := canonicalSuite(f[2])
-		return ok && c >= 1 && canonicalList(f[3])
+		_, ok := canonicalSuite(f[2]) // never 0: no leading zero
+		return ok && canonicalList(f[3])
 	}
 	return true
 }

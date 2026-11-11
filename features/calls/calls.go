@@ -559,8 +559,9 @@ func (f *Feature) offer(ctx context.Context, s *vault.Session, in *envelope.Inne
 // both vaults agree. Ours wins: y is dropped (no ringing, no answer, no
 // record, no missed call), audited drop.call_glare; false. Theirs wins:
 // ours ends busy, the owner devices are told with superseded_by = y, the
-// peer vault call.end{busy} for ours (one that already dropped it ignores
-// it; one still in the race stops ringing; owner decision 2026-11-11), and
+// peer vault call.end{busy} for ours (one that dropped it ignores it; one
+// whose own call had ended or expired when ours arrived, and so rings for
+// it, stops ringing, a missed call; owner decision 2026-11-11), and
 // y is handled as any offer; true. With no such call of ours: true.
 func (f *Feature) glare(s *vault.Session, conn, y string, now time.Time) bool {
 	for _, id := range f.sorted() {

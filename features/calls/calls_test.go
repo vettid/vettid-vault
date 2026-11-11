@@ -593,7 +593,7 @@ func TestGlare(t *testing.T) {
 	}
 
 	// b's own call (hi) loses to a's offer (lo): ended busy, its devices
-	// told with superseded_by, the peer vault nothing; lo rings.
+	// told with superseded_by, the peer vault busy for hi; lo rings.
 	featuretest.CallExp(b.f, b.h, t0.Add(time.Second), offLo.Opt.Exp, "connection:cA", "call.offer", string(offLo.Body))
 	if c, _ := b.f.Get(hi); c.State != StateEnded || c.Reason != "busy" {
 		t.Fatalf("b's own call: %+v", c)
@@ -605,12 +605,14 @@ func TestGlare(t *testing.T) {
 	b.sent(t, "devices-except:dev-app", "call.end")
 	// The peer vault is told busy for the losing call, exactly once.
 	toPeer := 0
+	var lost featuretest.Sent
 	for _, m := range b.h.Sent {
 		if m.To == "cA" {
 			if m.Type != "call.end" || str(t, m.Body, "call_id") != hi || str(t, m.Body, "reason") != "busy" {
 				t.Fatalf("to the peer vault: %+v", m)
 			}
 			toPeer++
+			lost = m
 		}
 	}
 	if toPeer != 1 {
@@ -618,12 +620,6 @@ func TestGlare(t *testing.T) {
 	}
 	// The winner, which dropped that offer, ignores the end; its own call
 	// rings on.
-	var lost featuretest.Sent
-	for _, m := range b.h.Sent {
-		if m.To == "cA" {
-			lost = m
-		}
-	}
 	a.h.Reset()
 	featuretest.Call(a.f, a.h, t0.Add(2*time.Second), "connection:cB", "call.end", string(lost.Body))
 	if c, _ := a.f.Get(lo); c.State != StateRinging || len(a.h.Sent) != 0 {
@@ -752,4 +748,24 @@ func TestGlareNeedsAValidShare(t *testing.T) {
 	if c, _ := a.f.Get(hi); c.State != StateRinging || a.h.HasActivity("drop.call_glare") || len(a.h.SentOfType("call.end")) != 0 {
 		t.Fatalf("a bad share ended our call: %+v", c)
 	}
+}
+
+// The loser's busy matters to a peer whose own call had already ended when
+// the loser's offer arrived, and so rang for it: it stops ringing, a missed
+// call.
+func TestGlareBusyStopsALateRing(t *testing.T) {
+	a := newSide("cB")
+	sk, _ := callwire.NewOfferKey()
+	ours, theirs := newCallID("gbl"), newCallID("gbl")
+	if r := featuretest.Call(a.f, a.h, t0, "app", "call.start", startBodyID("cB", ours, sk.Public().Bytes())); !r.OK() {
+		t.Fatal(r.Code)
+	}
+	featuretest.Call(a.f, a.h, t0.Add(time.Second), "app", "call.end", `{"call_id":"`+ours+`","reason":"hangup"}`)
+	featuretest.CallExp(a.f, a.h, t0.Add(2*time.Second), t0.Add(OfferTTL), "connection:cB", "call.offer", peerOffer("cB", theirs, "audio", sk.Public().Bytes()))
+	a.h.Reset()
+	featuretest.Call(a.f, a.h, t0.Add(3*time.Second), "connection:cB", "call.end", `{"call_id":"`+theirs+`","reason":"busy"}`)
+	if c, _ := a.f.Get(theirs); c.State != StateEnded || c.Reason != "busy" || !a.h.HasActivity("call.missed") {
+		t.Fatalf("the late ring after the loser's busy: %+v", c)
+	}
+	a.sent(t, "devices", "call.end")
 }

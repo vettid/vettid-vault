@@ -1570,3 +1570,58 @@ func TestRejudgeWithConflictEvidenceAndTwoReceipts(t *testing.T) {
 		t.Errorf("%q %q problems %d", r.Check, r.CheckReason, c.problems(v.ID))
 	}
 }
+
+// A final judgement that re-enters (the extension verified while the outer
+// check fails): one vote.problem and one vote.check_failed, not two.
+func TestReentrantJudgementOneProblem(t *testing.T) {
+	c := newCastEnv(t)
+	v := c.open(1)
+	shown := c.selfBallot(v, "no")
+	c.cast(v, "yes")
+	_, ids := c.casts()
+	closes := time.Unix(c.rec(v.ID).Closes, 0)
+	doc, msg := c.svc.Extension(v, 1, closes.Add(time.Hour), c.now)
+	// vote.extended is lost: the results bring the extension.
+	c.now = closes.Add(time.Hour + CheckDelay + time.Minute)
+	c.f.Tick(c.session())
+	if out, _ := c.f.SubmitResults(c.session(), "svc", v.ID, c.resultsFor(v, resOpts{mine: shown, extra: []votewire.Signed{{Doc: doc, Sig: signExt(c.svc, v, doc)}}})); out.State != CheckUnconfirmed {
+		t.Fatalf("%+v", out)
+	}
+	c.f.Check(c.session(), "svc", v.ID)
+	st := c.statuses()
+	c.answer(v, st[len(st)-1], shown, uint64(closes.Add(30*time.Minute).UnixMilli()), true)
+	c.okReceipt(v, ids[0], c.leafOf(v), uint64(closes.Add(31*time.Minute).UnixMilli()))
+	c.h.Reset()
+	c.call("vote.extended", msg)
+	if r := c.rec(v.ID); r.Check != CheckFailed || c.problems(v.ID) != 1 || c.countKind("vote.check_failed") != 1 {
+		t.Errorf("%q %q problems %d check_failed %d", r.Check, r.CheckReason, c.problems(v.ID), c.countKind("vote.check_failed"))
+	}
+}
+
+// A receipt kept aside for an own-vk ballot shown, beside the vault's own
+// ballot without a receipt, fails an unconfirmed check once a verified
+// extension brings it into the window (rejudgeAside's re-judging).
+func TestLateSelfReceiptFailsAnUnconfirmedCheck(t *testing.T) {
+	c := newCastEnv(t)
+	v := c.open(1)
+	shown := c.selfBallot(v, "no")
+	c.cast(v, "yes")
+	closes := time.Unix(c.rec(v.ID).Closes, 0)
+	doc, msg := c.svc.Extension(v, 1, closes.Add(time.Hour), c.now)
+	// vote.extended is lost: the results bring the extension.
+	c.now = closes.Add(time.Hour + CheckDelay + time.Minute)
+	c.f.Tick(c.session())
+	if out, _ := c.f.SubmitResults(c.session(), "svc", v.ID, c.resultsFor(v, resOpts{mine: c.ownBallot(v), extra: []votewire.Signed{{Doc: doc, Sig: signExt(c.svc, v, doc)}}})); out.State != CheckUnconfirmed {
+		t.Fatalf("%+v", out)
+	}
+	c.f.Check(c.session(), "svc", v.ID)
+	st := c.statuses()
+	c.answer(v, st[len(st)-1], shown, uint64(closes.Add(30*time.Minute).UnixMilli()), true)
+	if r := c.rec(v.ID); r.Check != CheckUnconfirmed || r.Self == nil || !r.Self.Late {
+		t.Fatalf("before the extension: %q %+v", r.Check, r.Self)
+	}
+	c.call("vote.extended", msg)
+	if r := c.rec(v.ID); r.Check != CheckFailed || r.CheckReason != "row_mismatch" {
+		t.Errorf("%q %q", r.Check, r.CheckReason)
+	}
+}

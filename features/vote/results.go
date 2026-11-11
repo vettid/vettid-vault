@@ -86,7 +86,13 @@ func (f *Feature) failCheck(s *vault.Session, r *record, reason string) CheckOut
 func (f *Feature) failCheckFeed(s *vault.Session, r *record, reason string, feed bool) CheckOutcome {
 	// A final judgement (0.88.12); a receipt inside a held extension not
 	// verified yet stays aside (GC #8012).
+	was := r.Check
 	f.rejectAsideFrom(s, r, r.Closes*1000)
+	if was != CheckFailed && r.Check == CheckFailed {
+		// Judging what it took failed the check already, with its audit
+		// and vote.problem: not twice.
+		return CheckOutcome{State: CheckFailed, Reason: r.CheckReason, ConflictEvidence: r.conflictEvidence()}
+	}
 	r.Check, r.CheckReason = CheckFailed, reason
 	r.ChangedMS = s.Now().UnixMilli()
 	f.audit(s, "vote.check_failed", r.Conn, r.ID+":"+reason)

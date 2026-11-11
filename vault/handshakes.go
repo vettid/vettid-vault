@@ -1024,6 +1024,9 @@ func (m *Manager) finishReconnect(p *Peer, aw *AwaitingHS, fr *handshake.FinResu
 		if p.suspended() {
 			fr.Epoch.Destroy()
 			denyIssued()
+			// (Release 29 final review, item 2) The epoch is not established: its carried record goes with it,
+			// so that no later sweep audits a discard (carried_discarded) of tokens never held for a usable epoch.
+			m.dropCarried(p, fid[:])
 			return
 		}
 	}

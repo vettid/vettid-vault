@@ -10,6 +10,7 @@
 package callwire
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/hkdf"
 	"crypto/sha256"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"github.com/vettid/vettid-vault/internal/strictjson"
+	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/suite"
 )
 
@@ -331,15 +333,87 @@ func VerifyShare(vaultIK, deviceIK ed25519.PublicKey, m, deviceSig, vaultSig []b
 	return nil
 }
 
-// ValidShareMessage reports whether m has the ShareMessage form with a
-// known role, form 1 or (C2) form 2 (what a vault agrees to vouch for).
+// ValidShareMessage reports whether m is exactly a share's signed bytes,
+// form 1 (ShareMessage) or (C2) form 2 (OfferMessage2, AnswerMessage2):
+// a known role, a call_id, the role's media, in form 2 the canonical
+// lists, and a share of its size. It is what a vault agrees to vouch for.
 func ValidShareMessage(m []byte) bool {
-	for _, r := range []string{RoleOffer, RoleAnswer, RoleOffer2, RoleAnswer2} {
-		if len(m) > len(r) && string(m[:len(r)]) == r && m[len(r)] == 0 {
-			return true
-		}
+	role, rest, ok := bytes.Cut(m, []byte{0})
+	if !ok {
+		return false
 	}
-	return false
+	var n, size int
+	switch string(role) {
+	case RoleOffer, RoleAnswer:
+		n = 2
+	case RoleOffer2:
+		n = 3
+	case RoleAnswer2:
+		n = 4
+	default:
+		return false
+	}
+	if role[0] == 'o' {
+		size = EKSize
+	} else {
+		size = EncSize
+	}
+	f := make([]string, n)
+	for i := range f {
+		var v []byte
+		if v, rest, ok = bytes.Cut(rest, []byte{0}); !ok {
+			return false
+		}
+		f[i] = string(v)
+	}
+	if !envelope.ValidULID(f[0]) || len(rest) != size {
+		return false
+	}
+	if role[0] == 'o' {
+		if f[1] != "audio" && f[1] != "video" {
+			return false
+		}
+	} else if f[1] != "" {
+		return false
+	}
+	switch string(role) {
+	case RoleOffer2:
+		return canonicalList(f[2])
+	case RoleAnswer2:
+		c, ok := canonicalSuite(f[2])
+		return ok && c >= 1 && canonicalList(f[3])
+	}
+	return true
+}
+
+// canonicalSuite reads a suite number written as list(x) writes it:
+// decimal, no sign or leading zero, 1–MaxSuite.
+func canonicalSuite(s string) (int, bool) {
+	if s == "" || len(s) > 5 || s[0] == '0' {
+		return 0, false
+	}
+	n := 0
+	for _, c := range []byte(s) {
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n, n <= MaxSuite
+}
+
+// canonicalList reports whether s is list(x) of a valid suites list.
+func canonicalList(s string) bool {
+	parts := strings.Split(s, " ")
+	list := make([]int, len(parts))
+	for i, p := range parts {
+		n, ok := canonicalSuite(p)
+		if !ok {
+			return false
+		}
+		list[i] = n
+	}
+	return ValidSuites(list) == nil
 }
 
 // VerifyDeviceShare checks only the device's signature (what the device's

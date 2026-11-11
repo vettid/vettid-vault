@@ -852,7 +852,10 @@ type Answer struct {
 	Keepalive bool
 	Vouched
 	// Form2: (C2) the answer is in form 2 (its signatures are over m2).
-	Form2 *form2
+	// Form2Bad: it carries part of form 2, or a form 2 member malformed;
+	// it is treated as a share that doesn't verify (drop.call_share).
+	Form2    *form2
+	Form2Bad bool
 }
 
 // ParseAnswer parses a call.answer body strictly: from a device it carries
@@ -872,9 +875,8 @@ func ParseAnswer(body []byte, fromPeer bool) (*Answer, error) {
 	if a.Enc, err = o.Base64("enc", callwire.EncSize); err != nil {
 		return nil, errBad
 	}
-	if a.Form2, err = answerForm2(o); err != nil {
-		return nil, err
-	}
+	a.Form2, err = answerForm2(o)
+	a.Form2Bad = err != nil
 	if fromPeer {
 		a.Vouched, err = vouched(o)
 	} else {
@@ -907,6 +909,10 @@ func (f *Feature) answerFromDevice(s *vault.Session, body []byte) error {
 	if c == nil || c.Dir != DirIn || c.State != StateRinging || !now.Before(c.Exp) {
 		return unavailable(s, a.CallID)
 	}
+	if a.Form2Bad {
+		s.Record(vault.Activity{Kind: "drop.call_share", DeviceID: s.From().ID, Audit: true})
+		return unavailable(s, a.CallID)
+	}
 	v, err := vouch(s, answerMessage(c.ID, a.Form2, a.Enc), a.EncSig)
 	if err != nil {
 		s.Record(vault.Activity{Kind: "drop.call_share", DeviceID: s.From().ID, Audit: true})
@@ -937,6 +943,10 @@ func (f *Feature) answerFromPeer(s *vault.Session, body []byte) error {
 	c := f.calls[a.CallID]
 	if c == nil || c.Conn != s.From().ID || c.Dir != DirOut || c.State != StateRinging {
 		return nil
+	}
+	if a.Form2Bad {
+		s.Record(vault.Activity{Kind: "drop.call_share", ConnectionID: c.Conn, Audit: true})
+		return nil // as a share that doesn't verify: the call keeps ringing
 	}
 	if !checkPeerShare(s, answerMessage(c.ID, a.Form2, a.Enc), a.Vouched) {
 		return nil // the call keeps ringing until it times out or ends

@@ -108,9 +108,6 @@ func genCalls() (obj, error) {
 	if !callwire.VerifyConfirm(kConfirm, chosen, offered, CallID, confirm) {
 		return nil, errors.New("vectors: confirm does not verify")
 	}
-	if err != nil {
-		return nil, err
-	}
 	answer, err := share(callwire.RoleAnswer, "", enc, calleeDev, calleeVault)
 	if err != nil {
 		return nil, err

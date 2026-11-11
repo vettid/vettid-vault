@@ -1,7 +1,9 @@
 package calls
 
 import (
+	"bytes"
 	"crypto/ed25519"
+	"encoding/base64"
 	"strings"
 	"testing"
 	"time"
@@ -58,8 +60,15 @@ func TestForm2Call(t *testing.T) {
 	}
 	featuretest.CallExp(b.f, b.h, t0, off.Opt.Exp, "connection:cA", "call.offer", string(off.Body))
 	ring := b.sent(t, "devices", "call.offer")
-	if r := obj(t, ring.Body); !r.Has("suites") || !r.Has("device_sig2") || !r.Has("vault_sig2") {
-		t.Fatalf("the devices' offer lacks form 2: %s", ring.Body)
+	// What rings is exactly what was verified.
+	r := obj(t, ring.Body)
+	for k, want := range map[string]string{"device_sig": b64(d1), "vault_sig": b64(v1), "device_sig2": b64(d2), "vault_sig2": b64(v2)} {
+		if got, _ := r.String(k); got != want {
+			t.Errorf("the devices' offer %s = %q", k, got)
+		}
+	}
+	if raw, _, _ := r.OptArray("suites"); len(raw) != 1 || string(raw[0]) != "1" {
+		t.Fatalf("the devices' offer suites: %s", ring.Body)
 	}
 	enc, kCall, err := callwire.Answer(ek, id)
 	if err != nil {
@@ -85,6 +94,14 @@ func TestForm2Call(t *testing.T) {
 	gc, _ := got.Base64("confirm", 32)
 	if s, _ := got.Uint("suite", 1, 65535); s != 1 || !callwire.VerifyConfirm(kc, 1, suites, id, gc) {
 		t.Fatal("the calling device didn't get the form 2 members")
+	}
+	for k, want := range map[string]string{"device_sig": b64(fd), "vault_sig": b64(fv), "device_ik": b64(fdev)} {
+		if g, _ := got.String(k); g != want {
+			t.Errorf("the calling device's answer %s = %q", k, g)
+		}
+	}
+	if raw, _, _ := got.OptArray("offered"); len(raw) != 1 || string(raw[0]) != "1" {
+		t.Fatalf("the calling device's offered: %v", got)
 	}
 }
 
@@ -219,3 +236,192 @@ func TestCallListV2(t *testing.T) {
 		t.Fatalf("per call: %s", r.Body)
 	}
 }
+
+// peerAnswerSigned is a call.answer from conn's vault: its share signed
+// and vouched over sigM (form 1 or form 2 bytes), carrying the extra
+// members given (form 2's, or none).
+func peerAnswerSigned(conn, id string, enc, sigM []byte, extra string) string {
+	dev := featuretest.DeviceKey("peer-device")
+	devPub := dev.Public().(ed25519.PublicKey)
+	ds, _ := callwire.SignShare(dev, sigM)
+	vs, _ := suite.Sign(peerVault(conn), callwire.LabelVouch, callwire.VouchMessage(devPub, sigM))
+	return `{"call_id":"` + id + `","sdp":"v=0","enc":"` + b64(enc) + `","device_ik":"` + b64(devPub) +
+		`","device_sig":"` + b64(ds) + `","vault_sig":"` + b64(vs) + `"` + extra + `}`
+}
+
+// A peer's answer in the form its signatures don't cover, or with part of
+// form 2, reaches no device: the call keeps ringing (drop.call_share). A
+// vault that adds form 2's members to a form 1 answer, or strips them from
+// a form 2 one, gains nothing.
+func TestForm2PeerAnswerChecked(t *testing.T) {
+	sk, _ := callwire.NewOfferKey()
+	ek := sk.Public().Bytes()
+	conf := `"` + b64(make([]byte, 32)) + `"`
+	f2 := `,"suite":1,"offered":[1],"confirm":` + conf
+	for name, mk := range map[string]func(id string, enc []byte) string{
+		"form 2 members on a form 1 answer": func(id string, enc []byte) string {
+			return peerAnswerSigned("cB", id, enc, callwire.ShareMessage(callwire.RoleAnswer, id, "", enc), f2)
+		},
+		"form 2 stripped": func(id string, enc []byte) string {
+			return peerAnswerSigned("cB", id, enc, callwire.AnswerMessage2(id, 1, []int{1}, enc), "")
+		},
+		"another choice than signed": func(id string, enc []byte) string {
+			return peerAnswerSigned("cB", id, enc, callwire.AnswerMessage2(id, 1, []int{1, 2}, enc), `,"suite":2,"offered":[1,2],"confirm":`+conf)
+		},
+		"no confirm": func(id string, enc []byte) string {
+			return peerAnswerSigned("cB", id, enc, callwire.AnswerMessage2(id, 1, []int{1}, enc), `,"suite":1,"offered":[1]`)
+		},
+		"no suite": func(id string, enc []byte) string {
+			return peerAnswerSigned("cB", id, enc, callwire.AnswerMessage2(id, 1, []int{1}, enc), `,"offered":[1],"confirm":`+conf)
+		},
+		"a short confirm": func(id string, enc []byte) string {
+			return peerAnswerSigned("cB", id, enc, callwire.AnswerMessage2(id, 1, []int{1}, enc), `,"suite":1,"offered":[1],"confirm":"`+b64(make([]byte, 31))+`"`)
+		},
+		"form 1 signed, a stray suite": func(id string, enc []byte) string {
+			return peerAnswerSigned("cB", id, enc, callwire.ShareMessage(callwire.RoleAnswer, id, "", enc), `,"suite":1`)
+		},
+		"form 1 signed, a stray confirm": func(id string, enc []byte) string {
+			return peerAnswerSigned("cB", id, enc, callwire.ShareMessage(callwire.RoleAnswer, id, "", enc), `,"confirm":`+conf)
+		},
+		"a bad offered": func(id string, enc []byte) string {
+			return peerAnswerSigned("cB", id, enc, callwire.AnswerMessage2(id, 1, []int{1}, enc), `,"suite":1,"offered":[1,1],"confirm":`+conf)
+		},
+	} {
+		a := newSide("cB")
+		id := newCallID("f2pa")
+		if r := featuretest.Call(a.f, a.h, t0, "app", "call.start", startBody2("cB", id, ek, []int{1})); !r.OK() {
+			t.Fatalf("start: %q", r.Code)
+		}
+		enc, _, _ := callwire.Answer(ek, id)
+		a.h.Reset()
+		featuretest.Call(a.f, a.h, t0.Add(time.Second), "connection:cB", "call.answer", mk(id, enc))
+		c, _ := a.f.Get(id)
+		if len(a.h.SentOfType("call.answer")) != 0 || c.State != StateRinging || !a.h.HasActivity("drop.call_share") {
+			t.Errorf("%s: passed on, ended or not audited (%s)", name, c.State)
+		}
+	}
+	// The same answer in its own form goes through.
+	a := newSide("cB")
+	id := newCallID("f2pa")
+	featuretest.Call(a.f, a.h, t0, "app", "call.start", startBody2("cB", id, ek, []int{1}))
+	enc, _, _ := callwire.Answer(ek, id)
+	featuretest.Call(a.f, a.h, t0.Add(time.Second), "connection:cB", "call.answer",
+		peerAnswerSigned("cB", id, enc, callwire.AnswerMessage2(id, 1, []int{1}, enc), f2))
+	got := obj(t, a.sent(t, "dev-app", "call.answer").Body)
+	if !got.Has("suite") || !got.Has("offered") || !got.Has("confirm") {
+		t.Fatalf("form 2 members not passed on: %v", got)
+	}
+}
+
+// A device's answer with part of form 2 is treated as a share that
+// doesn't verify: audited, the device told unavailable, the call still
+// rings.
+func TestForm2PartialDeviceAnswer(t *testing.T) {
+	sk, _ := callwire.NewOfferKey()
+	ek := sk.Public().Bytes()
+	for name, edit := range map[string]func(string) string{
+		"no confirm": func(s string) string { return s[:strings.Index(s, `,"confirm":`)] + `}` },
+		"no suite":   func(s string) string { return strings.Replace(s, `,"suite":1`, ``, 1) },
+		"no offered": func(s string) string { return strings.Replace(s, `,"offered":[1]`, ``, 1) },
+		"suite as a string": func(s string) string {
+			return strings.Replace(s, `"suite":1`, `"suite":"1"`, 1)
+		},
+		// Signed in form 1, with one of form 2's members: not a form 1
+		// answer either.
+		"form 1 signed, a stray offered": func(string) string { return "form1:" + `,"offered":[1]` },
+		"form 1 signed, a stray suite":   func(string) string { return "form1:" + `,"suite":1` },
+	} {
+		b := newSide("cA")
+		id := newCallID("cA")
+		featuretest.CallExp(b.f, b.h, t0, t0.Add(OfferTTL), "connection:cA", "call.offer", peerOffer2("cA", id, "audio", ek, []int{1}, true, false))
+		enc, _, _ := callwire.Answer(ek, id)
+		b.h.Reset()
+		body := edit(answerBody2("dev-app", id, enc, 1, []int{1}, make([]byte, 32)))
+		if extra, ok := strings.CutPrefix(body, "form1:"); ok {
+			body = strings.TrimSuffix(answerBody("dev-app", id, enc), "}") + extra + "}"
+		}
+		featuretest.Call(b.f, b.h, t0.Add(time.Second), "app", "call.answer", body)
+		c, _ := b.f.Get(id)
+		end := b.h.SentOfType("call.end")
+		if len(b.h.SentOfType("call.answer")) != 0 || c.State != StateRinging || !b.h.HasActivity("drop.call_share") ||
+			len(end) != 1 || end[0].To != "dev-app" || string(end[0].Body) != string(endJSON(id, "unavailable")) {
+			t.Errorf("%s: state %s, %d sent", name, c.State, len(b.h.Sent))
+		}
+	}
+}
+
+// The members' types: suites, suite and confirm in exactly their form.
+func TestForm2MemberTypes(t *testing.T) {
+	sk, _ := callwire.NewOfferKey()
+	ek := sk.Public().Bytes()
+	a := newSide("cB")
+	id := newCallID("f2t")
+	good := startBody2("cB", id, ek, []int{1})
+	for _, v := range []string{`[-1]`, `[1e0]`, `[1.0]`, `["1"]`, `[01]`, `null`, `1`, `[[1]]`, `[true]`} {
+		if c := featuretest.Call(a.f, a.h, t0, "app", "call.start", strings.Replace(good, `"suites":[1]`, `"suites":`+v, 1)).Code; c != "bad_request" {
+			t.Errorf("start suites %s: %q", v, c)
+		}
+	}
+	// A device's answer: suite and confirm malformed are refused as a bad
+	// share (a device told unavailable, nothing passed on).
+	cf := bytes.Repeat([]byte{0xff}, 32) // "//8…", so the URL alphabet differs
+	conf := b64(cf)
+	for name, edit := range map[string]func(string) string{
+		"suite -1":                 func(s string) string { return strings.Replace(s, `"suite":1`, `"suite":-1`, 1) },
+		"suite 1e0":                func(s string) string { return strings.Replace(s, `"suite":1`, `"suite":1e0`, 1) },
+		"suite 1.0":                func(s string) string { return strings.Replace(s, `"suite":1`, `"suite":1.0`, 1) },
+		"suite 0":                  func(s string) string { return strings.Replace(s, `"suite":1`, `"suite":0`, 1) },
+		"suite 65536":              func(s string) string { return strings.Replace(s, `"suite":1`, `"suite":65536`, 1) },
+		"confirm 31 bytes":         func(s string) string { return strings.Replace(s, conf, b64(make([]byte, 31)), 1) },
+		"confirm 33 bytes":         func(s string) string { return strings.Replace(s, conf, b64(make([]byte, 33)), 1) },
+		"confirm unpadded":         func(s string) string { return strings.Replace(s, conf, strings.TrimRight(conf, "="), 1) },
+		"confirm url-safe":         func(s string) string { return strings.Replace(s, conf, b64url(cf), 1) },
+		"confirm non-zero padding": func(s string) string { return strings.Replace(s, conf, conf[:len(conf)-2]+"9=", 1) },
+		"offered null":             func(s string) string { return strings.Replace(s, `"offered":[1]`, `"offered":null`, 1) },
+	} {
+		b := newSide("cA")
+		cid := newCallID("cA")
+		featuretest.CallExp(b.f, b.h, t0, t0.Add(OfferTTL), "connection:cA", "call.offer", peerOffer2("cA", cid, "audio", ek, []int{1}, true, false))
+		enc, _, _ := callwire.Answer(ek, cid)
+		b.h.Reset()
+		body := edit(answerBody2("dev-app", cid, enc, 1, []int{1}, cf))
+		if body == answerBody2("dev-app", cid, enc, 1, []int{1}, cf) {
+			t.Fatalf("%s: the edit changed nothing", name)
+		}
+		featuretest.Call(b.f, b.h, t0.Add(time.Second), "app", "call.answer", body)
+		if len(b.h.SentOfType("call.answer")) != 0 || !b.h.HasActivity("drop.call_share") {
+			t.Errorf("%s: passed on, or not audited", name)
+		}
+	}
+}
+
+// Malformed form 2 in a peer's offer: dropped, audited.
+func TestForm2PeerOfferMalformed(t *testing.T) {
+	sk, _ := callwire.NewOfferKey()
+	ek := sk.Public().Bytes()
+	for name, edit := range map[string]func(s string) string{
+		"a bad vault_sig2": func(s string) string {
+			i := strings.Index(s, `"vault_sig2":"`) + len(`"vault_sig2":"`)
+			return s[:i] + b64(make([]byte, 64)) + s[i+88:]
+		},
+		"sigs without suites": func(s string) string { return strings.Replace(s, `"suites":[1],`, ``, 1) },
+		"suites [0]":          func(s string) string { return strings.Replace(s, `"suites":[1]`, `"suites":[0]`, 1) },
+		"suites [1,1]":        func(s string) string { return strings.Replace(s, `"suites":[1]`, `"suites":[1,1]`, 1) },
+		`suites ["1"]`:        func(s string) string { return strings.Replace(s, `"suites":[1]`, `"suites":["1"]`, 1) },
+		"suites [1.0]":        func(s string) string { return strings.Replace(s, `"suites":[1]`, `"suites":[1.0]`, 1) },
+		"suites null":         func(s string) string { return strings.Replace(s, `"suites":[1]`, `"suites":null`, 1) },
+		"suites []":           func(s string) string { return strings.Replace(s, `"suites":[1]`, `"suites":[]`, 1) },
+	} {
+		b := newSide("cA")
+		body := peerOffer2("cA", newCallID("cA"), "audio", ek, []int{1}, true, false)
+		if edit(body) == body {
+			t.Fatalf("%s: the edit changed nothing", name)
+		}
+		featuretest.CallExp(b.f, b.h, t0, t0.Add(OfferTTL), "connection:cA", "call.offer", edit(body))
+		if len(b.h.SentOfType("call.offer")) != 0 || len(b.h.SentOfType("call.end")) != 0 || !b.h.HasActivity("drop.call_share") {
+			t.Errorf("%s: rang, answered, or not audited", name)
+		}
+	}
+}
+
+func b64url(b []byte) string { return base64.URLEncoding.EncodeToString(b) }

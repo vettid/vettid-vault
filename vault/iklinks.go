@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/vettid/vettid-vault/internal/strictjson"
@@ -421,7 +422,8 @@ func (m *Manager) holdInner(p *Peer, in *envelope.Inner, wake string) {
 	if err != nil {
 		return
 	}
-	m.queueDeposit(&OutboxEntry{PeerID: p.ID, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Held: j, HeldExp: in.Exp, Wake: wake, InnerID: in.ID}, m.now())
+	m.queueDeposit(&OutboxEntry{PeerID: p.ID, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Held: j, HeldExp: in.Exp, Wake: wake, InnerID: in.ID,
+		Type: in.Type}, m.now())
 }
 
 // rehold turns p's outbox entries sealed under the epoch ep (the current
@@ -581,21 +583,136 @@ func heldID(held []byte) string {
 	return ""
 }
 
+// The member's notice of 0.88.7 §8.3 "Not delivered" (card GC #6875,
+// owner decision a, GC #7711): one feed item per connection per hour, with
+// a count. NoticeNotDelivered for every case but undelivered_window, whose
+// message may already have reached the peer (NoticeUnconfirmed: "may not
+// have been delivered").
+const (
+	NoticeNotDelivered = "message.not_delivered"
+	NoticeUnconfirmed  = "message.delivery_unconfirmed"
+	NoticeWindow       = time.Hour
+)
+
+// NoticeOwnRemoval is whether the member is told of messages to a
+// connection that they removed themselves: not (the owner's a, GC #7806:
+// they chose to end it; the drop is still audited). Removals by the peer,
+// a replacement and a gone mailbox are told.
+const NoticeOwnRemoval = false
+
+// upkeepTypes are the vault's own messages to a connection, which recover
+// by themselves and are not the member's to be told about: profile and
+// identity upkeep, the held notice; with upkeepPrefixes, the relay's
+// tokens (relay.token.refresh, relay.token.issued, and the answers to the
+// peer's own, which carry the request's type) and attachment transfers.
+var (
+	upkeepTypes    = map[string]bool{"profile.update": true, "identity.rotate": true, "vault.held": true}
+	upkeepPrefixes = []string{"relay.", "att."}
+)
+
+// memberMessage reports whether an entry is the member's own message
+// (sent or answered): not a quota refresh or upkeep. One whose type can't
+// be read is taken as the member's (told rather than silent).
+func memberMessage(e *OutboxEntry, typ string) bool {
+	if e.QuotaRefresh || upkeepTypes[typ] {
+		return false
+	}
+	for _, p := range upkeepPrefixes {
+		if strings.HasPrefix(typ, p) {
+			return false
+		}
+	}
+	return true
+}
+
+// entryType is e's inner type: recorded at queue time, or read back from
+// a held entry or from its payload under the current epoch ("" if none).
+func (m *Manager) entryType(e *OutboxEntry) string {
+	if e.Type != "" {
+		return e.Type
+	}
+	if e.Held != nil {
+		if in, err := envelope.ParseInner(e.Held, envelope.ModeSealed); err == nil {
+			return in.Type
+		}
+		return ""
+	}
+	if kr := m.sessions[e.PeerID]; kr != nil && kr.Current() != nil && len(e.Payload) > 0 {
+		if env, err := envelope.Parse(e.Payload); err == nil {
+			if in, err := kr.Current().OpenSent(env); err == nil {
+				return in.Type
+			}
+		}
+	}
+	return ""
+}
+
 // notDelivered is the seam of 0.88.7 §8.3 "Not delivered": a durable
 // entry to a connection that the vault will not deposit (it cannot be
 // re-sealed safely, or its connection ended: removed, replaced, its
-// mailbox unknown) ends here, never silently. For now it ends the entry and
-// audits drop.<reason>; the member's notice (its feed item or batching) is
-// card #6875's, which completes this function.
+// mailbox unknown, suspended, refused) ends here, never silently: it
+// audits drop.<reason>, and for the member's own messages (card GC #6875)
+// records the member's notice.
 func (m *Manager) notDelivered(e *OutboxEntry, reason string, now time.Time) {
 	ref := e.InnerID
 	if ref == "" {
 		ref = heldID(e.Held)
 	}
+	typ := m.entryType(e)
 	e.Done, e.Held, e.Payload = true, nil, nil
 	m.quotaRefreshEnded(e)                 // a quota refresh's (#216): no answer can come
-	m.auditRef(now, reason, e.PeerID, ref) // ref: the message's inner id (#6875's notice names it)
+	m.auditRef(now, reason, e.PeerID, ref) // ref: the message's inner id
 	m.dirty = true
+	if reason == "undelivered_removed" && m.removingOwn && !NoticeOwnRemoval {
+		return // the member's own removal: audited, not told (#7806)
+	}
+	if e.Unconfirmed {
+		// Told at its late deposit that it may not have been delivered: any
+		// end since is audited, not told again; "couldn't be delivered"
+		// would overstate it, as it may have arrived (lead, #7906).
+		return
+	}
+	kind := NoticeNotDelivered
+	if reason == "undelivered_window" {
+		kind = NoticeUnconfirmed
+	}
+	m.notice(e, typ, kind, ref, now)
+}
+
+// unconfirmedLate tells the member, once, that e may not have been
+// delivered: it goes as it is with a ts older than RestampAfter, and the
+// relay's hold may take it past the peer's 16 days (the late window, lead
+// a #7901). It is audited (unconfirmed_late) and still deposited. Only the
+// member's own messages are told or audited (not upkeep).
+//
+// Once per stored state: Unconfirmed is stored by the drain's write after
+// the deposit; a crash before it can tell the member again after the
+// restart (told twice, never not at all).
+func (m *Manager) unconfirmedLate(e *OutboxEntry, now time.Time) {
+	if e.Unconfirmed {
+		return
+	}
+	e.Unconfirmed, m.dirty = true, true
+	typ := m.entryType(e)
+	if !memberMessage(e, typ) {
+		return
+	}
+	m.auditRef(now, "unconfirmed_late", e.PeerID, e.InnerID)
+	m.notice(e, typ, NoticeUnconfirmed, e.InnerID, now)
+}
+
+// notice records the member's feed item for e, if it is the member's own
+// message to a connection (or one gone).
+func (m *Manager) notice(e *OutboxEntry, typ, kind, ref string, now time.Time) {
+	p := m.peer(e.PeerID)
+	if (p != nil && p.Kind != KindConnection) || !memberMessage(e, typ) {
+		return
+	}
+	// The connection's name as the vault has it now (its display name, else
+	// its first and last name: noticeName), so that the app can name a
+	// connection that is gone (vault-local: the feed only).
+	name := noticeName(p)
+	m.record(Activity{Kind: kind, ConnectionID: e.PeerID, Name: name, Ref: ref, Feed: true, Batch: NoticeWindow}, now)
 }
 
 // reconnectFailed counts a failed try of a reconnect to p naming epoch
@@ -937,4 +1054,32 @@ func (m *Manager) idResend(p *Peer, ep *handshake.Epoch, in *envelope.Inner, now
 		r.At = now
 		m.dirty = true
 	}
+}
+
+// noticeName is the name a "not delivered" notice carries (owner a, GC
+// #7862): the connection's display name, or else the first and last name
+// its profile always shares (§6.2); "" when neither can be read. A display
+// name of only spaces counts as none.
+func noticeName(p *Peer) string {
+	if p == nil {
+		return ""
+	}
+	if n := strings.TrimSpace(p.Name); n != "" {
+		return n
+	}
+	if len(p.Profile) == 0 {
+		return ""
+	}
+	o, err := strictjson.ParseObject(p.Profile)
+	if err != nil {
+		return ""
+	}
+	var parts []string
+	for _, k := range []string{"first_name", "last_name"} {
+		if v, _, _ := o.OptString(k); strings.TrimSpace(v) != "" {
+			parts = append(parts, strings.TrimSpace(v))
+		}
+	}
+	// Trimmed again after the cut, which may end on a space.
+	return strings.TrimSpace(truncateUTF8(strings.Join(parts, " "), 128))
 }

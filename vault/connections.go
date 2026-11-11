@@ -234,7 +234,9 @@ func (m *Manager) removeConnection(p *Peer, dir string, now time.Time) {
 		notice = ""
 	}
 	m.attConnectionRemoved(p.ID, now) // §10.5.1 "Connections"
+	m.removingOwn = dir == "out"      // #6875: the member's own removal (NoticeOwnRemoval)
 	sent := m.removePeer(p, notice, now)
+	m.removingOwn = false
 	ref := ""
 	if notice != "" && !sent {
 		// The notice could not go (the current epoch demoted, the vault's

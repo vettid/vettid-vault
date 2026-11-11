@@ -1173,7 +1173,7 @@ Tests marked (tc) need `-tags vettid_testcost` (the recovery wrap at 8 MiB inste
 
 ## Sign-in and approval challenges (§10.4, §10.4.1; 0.65.0)
 
-| § | Must | Test |
+| § | Requirement | Tests |
 |---|---|---|
 | 10.4 | `purpose` (`signin`, `approval`) on `connection.authenticate.request`, the challenge, `.pending`, a signed `.response` and `.result`; a received unknown or non-string value is absent (not shown, gated or signed as a purpose); a request naming an unknown one is `bad_request` (chosen; not in the spec) | `peerwire.TestConnAuthPurpose`, `connauth.TestPurpose` |
 | 10.4 | Signed with the purpose: `len(purpose) \|\| purpose \|\| m` under `vettid/vms/2/conn-auth-purpose`, echoed in the response; a signature for one purpose never verifies for another nor without the purpose; a response carrying a purpose member for a challenge without one, or any other value than the challenge's (empty, unknown, not a string), is `bad_signature`; a response without a purpose (a vault before 0.65.0) verifies over `m`, and the result then has no `purpose` | `peerwire.TestConnAuthPurpose`, `vectors.TestConnAuthPurposeVectors`, `connauth.TestPurpose`, `connauth.TestPurposeMismatchReported` |
@@ -1183,7 +1183,7 @@ Tests marked (tc) need `-tags vettid_testcost` (the recovery wrap at 8 MiB inste
 
 Scope: the rotation here is of `ik`, `kem` and the wake key (`rotateIdentity`), at a recovery, a transfer and `credential.rotate` alike. Rotating the vault's relay key (new mailbox and tokens, `relay.address.update`, the old key kept for deposits, §3.4) is **not built yet**, for any of the three (docs/V2-NOTES.md).
 
-| § | Must | Test |
+| § | Requirement | Tests |
 |---|---|---|
 | 11.14.6, 11.14.10 | A completed recovery records, in its step-2 state write, that a rotation of the vault's keys is owed (`rotation_owed.recovery` = the `recovery_id`); a rotation that cannot be made never fails the recovery, is audited `identity.rotation_failed` (`ref` `recovery`, feed item, priority `high`) and the mark is kept in the stored state | `vault.TestFailedRecoveryRotationIsRetriedAtTheNextUnlock`, `e2e.TestRecoveryRotationOwedWaitsForThePairing` |
 | 11.14.10, 11.14.6 | The rotation is not retried while the recovered phone has not paired (its recovery invite is pending, up to 24 h and longer): its first handshake verifies the vault's `ik` as the open's `vault_bundle` gave it, and a rotation in between would fail the pairing. The pairing (`recoveredPhonePaired`'s caller) makes it, after `device.paired` is sent; so does any later unlock | `e2e.TestRecoveryRotationOwedWaitsForThePairing` (the enclave runs the manager at once after the open; the phone pairs; then the rotation), `vault.TestFailedRecoveryRotationIsRetriedAtTheNextUnlock` |
@@ -1207,7 +1207,7 @@ Scope: the rotation here is of `ik`, `kem` and the wake key (`rotateIdentity`), 
 
 ## Open asks that arrive only as events: `pending.list` (§10.4.2; 0.70.0, release 24)
 
-| § | Must | Test |
+| § | Requirement | Tests |
 |---|---|---|
 | 10.4.2 | `pending.list{after?, limit?}` (`limit` 1-100, default 50; anything else, or an unknown shape, `bad_request`) answers `{asks: [{kind, body}], next?}`; `kind` is `authenticate`, `session`, `approval`, `action` or `location` and `body` is the body of the event it repeats (`connection.authenticate.pending`, `device.session.pending`, `approval.pending`, `action.pending`, `location.request.pending`), built by the same function as the event. **Known difference:** the `session` and `approval` entries are built from the device's current record, so after a device rename their `name` (and `role`) is the current one, not the event's; no event body is stored | `vault.TestPendingListKindsAndRoles` (session and approval, byte-equal to their events), `connauth.TestOpenAsksRepeatTheEvent`, `actions.TestOpenAsksRepeatTheEvent`, `location.TestOpenAsksRepeatTheEvent`, `e2e.TestPendingListSurvivesLockE2E` (authenticate, location) |
 | 10.4.2 | Lists every ask of these kinds the vault would still accept a decision on: not decided by any device, not expired (an ask past its `exp` is not listed even before the feature's expiry sweep); a decided one is gone | `vault.TestPendingListKindsAndRoles` (decisions, expiry), the three `OpenAsks` tests, `e2e.TestPendingListSurvivesLockE2E` |
@@ -1221,7 +1221,7 @@ Scope: the rotation here is of `ik`, `kem` and the wake key (`rotateIdentity`), 
 
 The member vault's side. The service vault's side is vettid/service-vault. `svcFx` (`vault/restore_test.go`) plays a service with its own keys and real handshakes; a restored copy and a copy that kept running are two uses of the same epochs.
 
-| § | Must | Test |
+| § | Requirement | Tests |
 |---|---|---|
 | 6.4 (0.69.0) | The bundle's `peer_kind` is optional, written only for `service` in a bundle of kind `connection`; any other value, a non-string, one longer than 32 bytes, `null` and the member in a pairing bundle are read as absent; the QR's `h` binds it | `invite.TestBundlePeerKind` |
 | 6.4, 10.4 (0.69.0) | The accepting vault reads the marker at `connection.invite.accept`, returns it in the answer, `connection.request.outgoing` and the request list, copies it into the connection at activation (listed as `peer_kind`), and the inviter's view of an accepter has none; a link accepted through an introduction ignores it | `vault.TestPeerKindFromBundleToConnection` |
@@ -1334,6 +1334,7 @@ The member vault's side. The service vault's side is vettid/service-vault. `svcF
 |---|---|---|
 | 3.6.3 | A call answered before the deadline continues through the hold, its `call.keepalive` too, by `call_id`; one answered at or after the deadline, an outgoing call the peer answers while held, and (owner decision 2026-11-11) an outgoing call still ringing are ended `unavailable` when the hold begins, the peer and the devices told once | `calls.TestHoldEndsCallsAnsweredFromTheDeadline`, `calls.TestHeldCallerAnswerEndsTheCall`, `calls.TestHoldEndsOutgoingRinging`, `vault.TestHoldEndsCallsAnsweredFromTheDeadline`, `vault.TestHeldKeepaliveThroughTheBatch`, `vault.TestHoldAllowList` |
 | 6.8 | A desktop whose session expired: its live active call's `call.keepalive`, `call.ice` and `call.end` pass by `call_id`, and its own ringing outgoing call's `call.end` (owner decision); nothing else, never an agent's | `vault.TestExpiredSessionKeepsTheCall`, `vault.TestExpiredSessionEndsItsRingingCall`, `vault.TestAgentGetsNoCallExemption`, `calls.TestCallActiveAndRingingOutgoing`, `calls.TestCallRingingOut` |
-| 6.8 | The vault's `call.ice` and `call.end` for a live call reach its device without a session (`SendCallSignal`: ice and end only, an active non-recovering app or desktop); a stale record's end doesn't | `vault.TestCallSignalReachesADesktopWithoutASession`, `calls.TestCallFlow`, `calls.TestKeepaliveSilenceEndsAWatchedCall`, `calls.TestRingTimerOutgoing` |
+| 6.8 | The vault's `call.ice` and `call.end` for a live call reach its device without a session (`SendCallSignal`: ice and end only, an active non-recovering app or desktop); a stale record's end doesn't | `vault.TestCallSignalReachesADesktopWithoutASession`, `calls.TestCallFlow`, `calls.TestKeepaliveSilenceEndsAWatchedCall`, `calls.TestRingTimerOutgoing`, `calls.TestStaleEndNotSentToTheDevice`, `calls.TestStaleConnectionRemovedNotSentToTheDevice` |
+| 3.6.2, 3.6.3 | Shortening the interval moves the deadline back at once, with no check; the hold then ends calls answered at or after the new deadline | `vault.TestShorterIntervalMidCall` |
 | 6.8, 7.4 | Access ended on purpose (`device.session.end`), an unlink, or an app replaced by a transfer or recovery ends that device's call, `unavailable`, the peer and devices told; expiry doesn't | `vault.TestAccessEndedOnPurposeOnly`, `vault.TestUnlinkTellsTheCalls`, `calls.TestAccessEndedEndsTheCall`, `calls.TestDeviceRemovedEndsTheCall` |
 | 10.10 | An outgoing call whose answer its device can't receive is ended `unavailable`, the peer told, never made active | `calls.TestCallerAnswerUndeliverableEndsTheCall` |

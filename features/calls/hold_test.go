@@ -264,7 +264,7 @@ func TestCallerAnswerUndeliverableEndsTheCall(t *testing.T) {
 	a.h.Reset()
 	delete(a.h.Devices, "dev-app") // the answer can't reach it
 	featuretest.Call(a.f, a.h, t0.Add(5*time.Second), "connection:cB", "call.answer", string(fwd.Body))
-	if c, _ := a.f.Get(callID); c.State != StateEnded || c.Reason != "unavailable" {
+	if c, _ := a.f.Get(callID); c.State != StateEnded || c.Reason != "unavailable" || !c.Answered.IsZero() {
 		t.Fatalf("%+v", c)
 	}
 	if e := a.sent(t, "cB", "call.end"); str(t, e.Body, "reason") != "unavailable" {
@@ -359,6 +359,25 @@ func TestStaleEndNotSentToTheDevice(t *testing.T) {
 	callID := str(t, r.Body, "call_id")
 	a.h.Reset()
 	featuretest.Call(a.f, a.h, t0.Add(OfferTTL+time.Second), "connection:cB", "call.end", `{"call_id":"`+callID+`","reason":"hangup"}`)
+	for _, e := range a.h.SentOfType("call.end") {
+		if e.To == "dev-app" {
+			t.Fatal("a stale record's end went straight to its device")
+		}
+	}
+	a.sent(t, "devices", "call.end")
+}
+
+// A removed connection's stale record (an outgoing call past its exp, not
+// yet swept) ends by the usual fan-out only, never straight to its device.
+func TestStaleConnectionRemovedNotSentToTheDevice(t *testing.T) {
+	a, b := newSide("cB"), newSide("cA")
+	link(a, b)
+	sk, _ := callwire.NewOfferKey()
+	if r := featuretest.Call(a.f, a.h, t0, "app", "call.start", startBody("cB", sk.Public().Bytes())); !r.OK() {
+		t.Fatal(r.Code)
+	}
+	a.h.Reset()
+	a.f.ConnectionRemoved(vault.NewSession(context.Background(), a.h, vault.PeerInfo{}, t0.Add(OfferTTL+time.Second), nil), "cB")
 	for _, e := range a.h.SentOfType("call.end") {
 		if e.To == "dev-app" {
 			t.Fatal("a stale record's end went straight to its device")

@@ -892,13 +892,31 @@ func TestCallSignalReachesADesktopWithoutASession(t *testing.T) {
 	if err := h.SendCallSignal("desk1", "call.end", []byte(`{"call_id":"c1","reason":"hangup"}`), SendOptions{}, testNow()); err == nil {
 		t.Fatal("a call signal to a recovering device")
 	}
+	f.m.st.Devices["desk1"].Recovering = false
+	f.m.st.Devices["desk1"].State = PeerPending
+	if err := h.SendCallSignal("desk1", "call.end", []byte(`{"call_id":"c1","reason":"hangup"}`), SendOptions{}, testNow()); err == nil {
+		t.Fatal("a call signal to a device not yet active")
+	}
+}
+
+// agentKA is kaFeature with its call types open to agents too, so only the
+// exemption's own desktop guard can refuse an agent.
+type agentKA struct{ kaFeature }
+
+func (k *agentKA) Types() []TypeSpec {
+	ts := k.kaFeature.Types()
+	for i := range ts {
+		ts[i].From = append(ts[i].From, KindAgent)
+	}
+	return ts
 }
 
 // An agent without a session gets no call exemption: agents take no calls.
 func TestAgentGetsNoCallExemption(t *testing.T) {
 	f := newOCFixture(t)
-	k := &kaFeature{callGate: callGate{device: "agent1", active: true}}
-	f.m.addFeature(k)
+	ak := &agentKA{kaFeature{callGate: callGate{device: "agent1", active: true}}}
+	k := &ak.kaFeature
+	f.m.addFeature(ak)
 	f.m.st.Devices["agent1"].Access = nil
 	if !f.m.callActive("agent1", callBody, testNow()) {
 		t.Fatal("the stand-in should report the call")
@@ -973,5 +991,29 @@ func TestExpiredSessionEndsItsRingingCall(t *testing.T) {
 	send("call.end", `{"call_id":"c1"}`)
 	if k.types["call.end"] != 1 {
 		t.Fatalf("its own ringing call's end: %v", k.types)
+	}
+}
+
+// §3.6.2 with §3.6.3 (0.88.13): the holder shortening the interval moves the
+// deadline back at once, with no check (the clock isn't restarted), and the
+// hold that may then begin ends the calls answered at or after the new
+// deadline, also ones answered while the check was ok. As decided for now:
+// the hold judges by the deadline in force when it begins.
+func TestShorterIntervalMidCall(t *testing.T) {
+	f := newOCFixture(t)
+	k := &kaFeature{callGate: callGate{device: "desk1"}}
+	f.m.addFeature(k)
+	rec := f.m.st.OwnerCheck
+	rec.LastAt = time.Now().Add(-90 * time.Minute)
+	if c := errCode(f.req(t, f.app, "settings.set", `{"version":0,"set":{"owner_check.interval_seconds":3600}}`)); c != "" {
+		t.Fatal(c)
+	}
+	want := rec.LastAt.Add(time.Hour)
+	if !rec.Deadline.Equal(want) {
+		t.Fatalf("deadline %v, want %v", rec.Deadline, want)
+	}
+	_ = f.m.ProcessBatch(context.Background(), &fakeCollector{}, nil)
+	if len(k.endsAt) != 1 || !k.endsAt[0].Equal(want) {
+		t.Fatalf("the hold's calls ended from %v, want the new deadline %v", k.endsAt, want)
 	}
 }

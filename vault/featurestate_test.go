@@ -704,9 +704,24 @@ func TestAPendingMoveCompletesWithAnUnreadablePart(t *testing.T) {
 	d, dek, part := unreadableFixture(t, func(m *Manager) {
 		m.st.ReleaseMove = &ReleaseMove{To: target, ToRelease: testRelease.Number + 1, From: testRelease.PCR0, ApprovedBy: d0(m)}
 	})
-	m, out := altUnlockWith(d, withRequired(d), func(p *AltUnlockParams) { moveParams(d, p, target) })
+	opts := withRequired(d)
+	registers := 0
+	inner := opts.Relay
+	opts.Relay = func(base string, key ed25519.PrivateKey) Relay {
+		return &registerCount{Relay: inner(base, key), n: &registers}
+	}
+	d.relay.mu.Lock()
+	deposits := len(d.relay.deposits)
+	d.relay.mu.Unlock()
+	m, out := altUnlockWith(d, opts, func(p *AltUnlockParams) { moveParams(d, p, target) })
 	if m != nil || !out.OK || out.Update == nil || out.Update.Result != UpdateMoved {
 		t.Fatalf("pending move: %+v %+v", out, out.Update)
+	}
+	d.relay.mu.Lock()
+	sent := len(d.relay.deposits) - deposits
+	d.relay.mu.Unlock()
+	if registers != 0 || sent != 0 {
+		t.Fatalf("registered %d times, %d messages sent", registers, sent)
 	}
 	if got := storedPartWith(t, d, dek, "counter"); got != part {
 		t.Fatalf("the part: %s, was %s", got, part)
@@ -734,6 +749,10 @@ func (g *gatePart) Name() string           { return "gate" }
 func (g *gatePart) Types() []TypeSpec      { return nil }
 func (g *gatePart) CredentialReady() bool  { return true }
 func (g *gatePart) CredentialExists() bool { return true }
+
+// HasBackupCopy: it keeps the credential's backup copy (§3.5.6), so the
+// header's credential_backup bit is true.
+func (g *gatePart) HasBackupCopy() bool { return true }
 
 // unreadGate is the credential feature of a release that cannot read its
 // part: Required, and its Load fails.
@@ -763,8 +782,8 @@ func credGateFixture(t *testing.T, before func(*Manager)) *devFixture {
 	if err := d.m.Lock(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if h := storedHeader(t, d); !h.HasCredential {
-		t.Fatal("setup: no credential in the header")
+	if h := storedHeader(t, d); !h.HasCredential || h.CredentialBackup == nil || !*h.CredentialBackup || h.RecoveryRefusal() != "" {
+		t.Fatalf("setup: header %v %v %q", h.HasCredential, h.CredentialBackup, h.RecoveryRefusal())
 	}
 	return d
 }
@@ -817,8 +836,11 @@ func TestAMoveWithTheCredentialUnreadKeepsTheHeaderBits(t *testing.T) {
 				t.Fatalf("pending %v, %s: has_credential %v backup %v, was %v %v", pending, name,
 					h.HasCredential, h.CredentialBackup, before.HasCredential, before.CredentialBackup)
 			}
-			if r := h.RecoveryRefusal(); r != before.RecoveryRefusal() {
-				t.Fatalf("pending %v, %s: recovery refusal %q, was %q", pending, name, r, before.RecoveryRefusal())
+			if r := h.RecoveryRefusal(); r != "" {
+				t.Fatalf("pending %v, %s: recovery refused %q", pending, name, r)
+			}
+			if h.CredentialBackup == nil || !*h.CredentialBackup {
+				t.Fatalf("pending %v, %s: the backup bit went", pending, name)
 			}
 		}
 	}

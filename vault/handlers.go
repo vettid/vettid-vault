@@ -534,16 +534,25 @@ func (s *Session) Settings() Settings { return s.host.Settings() }
 type Activity struct {
 	Kind         string
 	ConnectionID string
-	DeviceID     string
-	Ref          string
-	Direction    string // "in", "out" or ""
-	Audit        bool   // record in the audit log
-	Feed         bool   // create a feed item
-	Priority     string // feed priority ("" = normal)
+	// Name is the connection's display name, else its first and last name
+	// (noticeName), when the activity was recorded, for a feed item that
+	// names a connection which may be gone
+	// by the time it is shown (card GC #6875). Vault-local.
+	Name      string
+	DeviceID  string
+	Ref       string
+	Direction string // "in", "out" or ""
+	Audit     bool   // record in the audit log
+	Feed      bool   // create a feed item
+	Priority  string // feed priority ("" = normal)
 	// AskBatch marks the feed item of a connection's ask that reached the
 	// member (§10.4.1, 0.23.0): asks of one connection within 10 minutes
 	// of the first form one batch, one feed item with `count`.
 	AskBatch bool
+	// Batch, if set, batches feed items of this kind for one connection
+	// within Batch of the first into one item with `count` (card GC #6875:
+	// the "not delivered" notice, an hour).
+	Batch time.Duration
 }
 
 // ActivitySink is implemented by features that keep activity (the audit

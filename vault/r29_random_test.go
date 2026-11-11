@@ -49,11 +49,10 @@ import (
 // duplicate note. An honest pair must not suspend, nor end stale, except
 // the stated residuals, counted apart: rapid rotations (3 or more key
 // changes within 2 hours on a side, ending by quota_exceeded), a lock
-// longer than T, and (R29RP_REFRESH) rpQuotaWaitResidual: a note refused
-// stale_or_future after a standing-quota wait of over 16 days with no key
-// change (vettid-vault #216's quota wait and card GC #6875's re-stamp end
-// it). TestR29RandomPair fails when any run ends outside them
-// (rpAccepted).
+// longer than T, and a note told rather than delivered (rpToldResidual,
+// rpCrashToldResidual). The quota-wait and lock-wait residuals are closed
+// by card GC #6875's re-stamp at deposit. TestR29RandomPair fails when any
+// run ends outside them (rpAccepted).
 //
 // Run: R29RP_RUNS=n go test -run TestR29RandomPair ./vault/
 //   R29RP_SEED   the master seed (default 1)
@@ -301,6 +300,7 @@ type rpWorld struct {
 	staleNote map[string]bool      // a copy accepted with a ts over 16 days old, under an epoch current since that ts (no key change), after a standing-quota refusal of the sender's since that ts
 	noteAhead map[string]string    // the note queued by the same side just before it (the entry ahead in the outbox, of the notes)
 	fiveNote  map[string]bool      // a deposit of it answered an injected 5xx (possibly stored, to the vault)
+	crashNote map[string]bool      // waiting in its sender's outbox when the sender crashed (#6875: possibly tried)
 	lastRef   [2]time.Time
 }
 
@@ -829,6 +829,7 @@ func (w *rpWorld) open(s int) {
 		}))
 	m.features = append(m.features, f.sink[s])
 	w.hook(s)
+	startWrite(m)
 	if w.locked[s] {
 		w.maxLock = max(w.maxLock, f.clk.Sub(w.lockAt[s]))
 		w.locks[s] = append(w.locks[s], [2]time.Time{w.lockAt[s], f.clk})
@@ -853,7 +854,22 @@ func (w *rpWorld) lock(s int) {
 func (w *rpWorld) crash(s int) {
 	if !w.locked[s] {
 		w.pull(s)
-		w.f.m(s).Crash()
+		// Card GC #6875: what waits at a crash is taken as possibly tried
+		// at the restart (no clean end), so it is told, not stamped again.
+		m := w.f.m(s)
+		m.mu.Lock()
+		for _, e := range m.stOutbox() {
+			// As State.init marks: a waiting deposit with a payload (a held
+			// entry is sealed again, never marked).
+			if !e.Done && e.Op == OpDeposit && e.InnerID != "" && len(e.Payload) > 0 && e.Held == nil {
+				if w.crashNote == nil {
+					w.crashNote = map[string]bool{}
+				}
+				w.crashNote[e.InnerID] = true
+			}
+		}
+		m.mu.Unlock()
+		m.Crash()
 	}
 	w.open(s) // a locked side's lock ends here (counted in maxLock)
 }
@@ -1185,13 +1201,6 @@ func (w *rpWorld) verdict() string {
 	return residual
 }
 
-// rpQuotaWaitResidual: a run whose only fault is a test.note refused
-// stale_or_future after a standing-quota wait of over 16 days with no key
-// change (the lead's review M1). The vault fix of vettid-vault #216 (the
-// quota wait) and card GC #6875 (the 16-day re-stamp at deposit) end it;
-// with #216 those seeds converge. Counted apart, accepted (rpAccepted).
-const rpQuotaWaitResidual = "residual:quota-wait>16d (#216, #6875)"
-
 // rpToldResidual: a run whose only fault is a test.note answered a 5xx
 // (which may have been stored, 0.88.7 §8.3), then re-sealed at a key change
 // with its kept ts past 16 days, so not deposited and told
@@ -1200,11 +1209,13 @@ const rpQuotaWaitResidual = "residual:quota-wait>16d (#216, #6875)"
 // lost, as the vault cannot know. Counted apart, accepted.
 const rpToldResidual = "residual:told-after-5xx (#6875)"
 
-// rpLockWaitResidual: a run whose only fault is a test.note refused
-// stale_or_future (by its id) after its sender was locked for over 16 days
-// since its ts, with no key change: it went at the unlock with that ts.
-// Card GC #6875's re-stamp at deposit ends it. Counted apart, accepted.
-const rpLockWaitResidual = "residual:lock-wait>16d (#6875)"
+// rpCrashToldResidual: a run whose only fault is a test.note waiting in its
+// sender's outbox at a crash, taken as possibly tried at the restart (card
+// GC #6875: a crash leaves no clean end, so a Tried may have been lost),
+// and so ended past 16 days as undelivered_window, told ("may not have
+// been delivered") rather than stamped again (which could make the peer
+// run it twice). Counted apart, accepted.
+const rpCrashToldResidual = "residual:told-after-crash (#6875)"
 
 // notesUnaccounted is the note oracle for a run that ends stale: a note
 // not handled must still wait in its sender's outbox or have been told
@@ -1255,15 +1266,12 @@ func (w *rpWorld) notesUnaccounted() (why []string) {
 // notesLost is the note oracle (GC #7160, every mode): each test.note side
 // s queued is handled exactly once by the other side, by inner id. One not
 // handled is excused only if the relay dropped a copy of it at T and the
-// run has a lock longer than T (the lock residual), or, as quotaWait, if
-// the copy accepted carried a ts over 16 days old under an epoch current
-// since that ts (no key change), after a standing-quota refusal of the
-// sender's since that ts (the note's own, or an earlier deposit's that held
-// the mailbox behind it), and the receiver audited stale_or_future
-// (rpQuotaWaitResidual); or if it was answered a 5xx and its sender audited
-// undelivered_window (told, rpToldResidual).
+// run has a lock longer than T (the lock residual); or if it was answered
+// a 5xx, or was waiting at a crash, and its sender audited
+// undelivered_window, or unconfirmed_late at its deposit (told:
+// rpToldResidual, rpCrashToldResidual).
 func (w *rpWorld) notesLost() (why []string, residual string) {
-	quotaWait, told, lockWait := false, false, false
+	told, crashTold := false, false // quota-wait and lock-wait are no longer excused (#6875)
 	over, single := w.lockShape()
 	for s := 0; s < 2; s++ {
 		o := 1 - s
@@ -1275,12 +1283,14 @@ func (w *rpWorld) notesLost() (why []string, residual string) {
 				dup = true
 			case n == 1:
 			case w.ttlNote[id] && (over || single):
-			case w.staleNote[id] && w.f.auditedRef(o, "stale_or_future", id):
-				quotaWait = true
-			case w.fiveNote[id] && w.f.auditedRef(s, "undelivered_window", id):
+			// The quota-wait and lock-wait residuals are no longer excused:
+			// card GC #6875's re-stamp at deposit closes both (a note that
+			// waited past 16 days with no key change and no attempt is
+			// sealed again with a fresh ts), so such a loss is a loss.
+			case w.fiveNote[id] && w.toldRef(s, id):
 				told = true
-			case w.lockNote[id] && w.f.auditedRef(o, "stale_or_future", id):
-				lockWait = true
+			case w.crashNote[id] && w.toldRef(s, id):
+				crashTold = true
 			default:
 				lost = true
 				w.logf("note %s from %d lost: ttl %v quota %v stale-copy %v", id, s, w.ttlNote[id], w.quotaNote[id], w.staleNote[id])
@@ -1296,10 +1306,8 @@ func (w *rpWorld) notesLost() (why []string, residual string) {
 	switch {
 	case told:
 		residual = rpToldResidual
-	case quotaWait:
-		residual = rpQuotaWaitResidual
-	case lockWait:
-		residual = rpLockWaitResidual
+	case crashTold:
+		residual = rpCrashToldResidual
 	}
 	return why, residual
 }
@@ -1359,6 +1367,7 @@ func rpRunFP(t *testing.T, rs uint64, steps int, burst, verbose bool) (string, [
 	w := &rpWorld{t: t, f: f, quota: map[string]int64{}, spentJ: map[string]bool{}, refused: map[string]int{}, verbose: verbose, md: rpRunModes,
 		noteBytes: map[string]string{}, noteAhead: map[string]string{},
 		ttlNote: map[string]bool{}, quotaNote: map[string]bool{}, staleNote: map[string]bool{}, fiveNote: map[string]bool{},
+		crashNote: map[string]bool{},
 		quotaLast: map[string]time.Time{}, sealed: map[string]rpSeal{}, lockNote: map[string]bool{},
 		srng: rand.New(rand.NewPCG(rs, 11))}
 	for s := 0; s < 2; s++ {
@@ -1517,6 +1526,25 @@ func TestR29RandomPair(t *testing.T) {
 	}
 	t.Logf("%d runs (burst %v, steps %d) in %v: %v per 10,000", runs, burst, steps, el.Round(time.Second),
 		(el * time.Duration(10000) / time.Duration(runs)).Round(time.Second))
+}
+
+// stOutbox is the outbox, or none for a zeroized state.
+func (m *Manager) stOutbox() []*OutboxEntry {
+	if m.st == nil {
+		return nil
+	}
+	return m.st.Outbox
+}
+
+// toldRef reports whether side s told the member that note id may not have
+// been delivered: ended past 16 days (undelivered_window), or deposited
+// late as it is (unconfirmed_late, #7901) and then refused by the peer as
+// too old (its stale_or_future for that id), the loss the notice is for.
+func (w *rpWorld) toldRef(s int, id string) bool {
+	if w.f.auditedRef(s, "undelivered_window", id) {
+		return true
+	}
+	return w.f.auditedRef(s, "unconfirmed_late", id) && w.f.auditedRef(1-s, "stale_or_future", id)
 }
 
 // The unlock's first short collect (GC #7899): two seeds whose receiver

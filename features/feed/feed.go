@@ -74,6 +74,9 @@ type Batch struct {
 	// Batches are keyed by connection id for asks, and by kind and
 	// connection id for another batched kind (card GC #6875).
 	Window time.Duration `json:"window,omitempty"`
+	// WhileActive: the batch ends once its item is no longer active, and
+	// each item it stands for takes the item's ref (missed calls, §10.10).
+	WhileActive bool `json:"while_active,omitempty"`
 }
 
 type state struct {
@@ -152,7 +155,7 @@ func (f *Feature) RecordActivity(s *vault.Session, a vault.Activity) {
 	case a.Batch > 0:
 		key = a.Kind + "|" + a.ConnectionID
 	}
-	if key != "" && f.batched(s, key) {
+	if key != "" && f.batched(s, key, a.Ref) {
 		return
 	}
 	it := &Item{Kind: a.Kind, Priority: p, ConnectionID: a.ConnectionID, Name: a.Name, DeviceID: a.DeviceID, Ref: a.Ref}
@@ -165,7 +168,7 @@ func (f *Feature) RecordActivity(s *vault.Session, a vault.Activity) {
 		if !a.AskBatch {
 			w = a.Batch
 		}
-		f.st.Batches[key] = &Batch{ItemID: it.ID, Start: it.At, Window: w}
+		f.st.Batches[key] = &Batch{ItemID: it.ID, Start: it.At, Window: w, WhileActive: a.BatchWhileActive}
 	}
 }
 
@@ -173,7 +176,7 @@ func (f *Feature) RecordActivity(s *vault.Session, a vault.Activity) {
 // ask within 10 minutes of the batch's first updates the batch's item (a
 // new seq, the same item_id, count) instead of creating one; it reports
 // false when no batch is open (none, ended, or its item deleted).
-func (f *Feature) batched(s *vault.Session, conn string) bool {
+func (f *Feature) batched(s *vault.Session, conn, ref string) bool {
 	now := s.Now()
 	for c, b := range f.st.Batches {
 		w := b.Window
@@ -189,9 +192,12 @@ func (f *Feature) batched(s *vault.Session, conn string) bool {
 		return false
 	}
 	it := f.find(b.ItemID)
-	if it == nil || it.Status == StatusDeleted {
+	if it == nil || it.Status == StatusDeleted || b.WhileActive && it.Status != StatusActive {
 		delete(f.st.Batches, conn)
 		return false
+	}
+	if b.WhileActive && ref != "" {
+		it.Ref = ref // the latest item it stands for (a missed call's call_id)
 	}
 	if it.Count < 1 {
 		it.Count = 1
@@ -202,6 +208,15 @@ func (f *Feature) batched(s *vault.Session, conn string) bool {
 	s.NotifyAllDevices("sync.event", strictjson.NewBuilder().String("kind", "feed.updated").String("item_id", it.ID).
 		Uint("seq", it.Seq).Bytes())
 	return true
+}
+
+// endWhileActive ends a WhileActive batch whose item left the active state.
+func (f *Feature) endWhileActive(itemID string) {
+	for k, b := range f.st.Batches {
+		if b.WhileActive && b.ItemID == itemID {
+			delete(f.st.Batches, k)
+		}
+	}
 }
 
 // add stores a new item and sends feed.event to every owner device.
@@ -291,6 +306,9 @@ func (f *Feature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner
 		}
 		if u.Status != "" {
 			it.Status = u.Status
+			if u.Status != StatusActive {
+				f.endWhileActive(it.ID) // set active again later, it doesn't merge again
+			}
 		}
 		if u.Priority != "" {
 			it.Priority = u.Priority

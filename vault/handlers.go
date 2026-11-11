@@ -553,6 +553,11 @@ type Activity struct {
 	// within Batch of the first into one item with `count` (card GC #6875:
 	// the "not delivered" notice, an hour).
 	Batch time.Duration
+	// BatchWhileActive (with Batch): the batch goes on only while its item
+	// is still active (not read, archived or deleted), and each item it
+	// stands for updates the item's ref to its own (§10.10 "Missed calls
+	// merge", C2 V5).
+	BatchWhileActive bool
 }
 
 // ActivitySink is implemented by features that keep activity (the audit

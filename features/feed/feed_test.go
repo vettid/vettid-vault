@@ -232,3 +232,82 @@ func TestItemName(t *testing.T) {
 		t.Fatalf("wire form: %s", ItemJSON(&it))
 	}
 }
+
+// Missed calls merge (VAULT-MESSAGING §10.10, C2 V5): BatchWhileActive
+// merges into the connection's item while it is still active and within
+// the window, the item taking the latest ref; once the member read it, the
+// next makes a new item.
+func TestBatchWhileActive(t *testing.T) {
+	f, h := New(), featuretest.NewHost()
+	missed := func(at time.Time, ref string) {
+		rec(f, h, at, vault.Activity{Kind: "call.missed", ConnectionID: "c1", Ref: ref, Feed: true, Priority: "high",
+			Batch: 24 * time.Hour, BatchWhileActive: true})
+	}
+	missed(t0, "call1")
+	missed(t0.Add(time.Hour), "call2")
+	its := f.Items()
+	if len(its) != 1 || its[0].Count != 2 || its[0].Ref != "call2" {
+		t.Fatalf("merged: %+v", its)
+	}
+	if r := featuretest.Call(f, h, t0.Add(2*time.Hour), "app", "feed.update", `{"item_id":"`+its[0].ID+`","status":"read"}`); !r.OK() {
+		t.Fatal(r.Code)
+	}
+	missed(t0.Add(3*time.Hour), "call3")
+	if its := f.Items(); len(its) != 2 || its[1].Ref != "call3" || its[1].Count > 1 || its[0].Ref != "call2" {
+		t.Fatalf("after the read: %+v", its)
+	}
+	g := New()
+	featuretest.RoundTrip(t, f, g) // the batch survives a save and a load
+	recG := func(at time.Time, ref string) {
+		rec(g, h, at, vault.Activity{Kind: "call.missed", ConnectionID: "c1", Ref: ref, Feed: true, Priority: "high",
+			Batch: 24 * time.Hour, BatchWhileActive: true})
+	}
+	recG(t0.Add(4*time.Hour), "call4")
+	if its := g.Items(); len(its) != 2 || its[1].Count != 2 || its[1].Ref != "call4" {
+		t.Fatalf("the new batch after a load: %+v", its)
+	}
+	// 24 hours from its first, the item no longer merges.
+	recG(t0.Add(3*time.Hour+24*time.Hour), "call5")
+	if its := g.Items(); len(its) != 3 || its[2].Ref != "call5" {
+		t.Fatalf("after 24 hours: %+v", its)
+	}
+	// Archived or deleted ends a batch too.
+	for i, st := range []string{"archived", "deleted"} {
+		its := g.Items()
+		last := its[len(its)-1]
+		at := t0.Add(28*time.Hour + time.Duration(i)*time.Hour)
+		if st == "deleted" {
+			featuretest.Call(g, h, at, "app", "feed.delete", `{"item_id":"`+last.ID+`"}`)
+		} else {
+			featuretest.Call(g, h, at, "app", "feed.update", `{"item_id":"`+last.ID+`","status":"`+st+`"}`)
+		}
+		n := len(g.Items())
+		recG(at.Add(time.Minute), "after-"+st)
+		if its := g.Items(); len(its) <= n-1 || its[len(its)-1].Ref != "after-"+st || its[len(its)-1].Count > 1 {
+			t.Fatalf("after %s: %+v", st, its)
+		}
+	}
+}
+
+// An ask batch keeps its first ref (only a missed-call batch takes the
+// latest); an item read and set active again doesn't merge again.
+func TestBatchRefAndReactivated(t *testing.T) {
+	f, h := New(), featuretest.NewHost()
+	rec(f, h, t0, vault.Activity{Kind: "grant.request", ConnectionID: "c1", Ref: "first", Feed: true, AskBatch: true})
+	rec(f, h, t0.Add(time.Minute), vault.Activity{Kind: "grant.request", ConnectionID: "c1", Ref: "second", Feed: true, AskBatch: true})
+	if its := f.Items(); len(its) != 1 || its[0].Ref != "first" || its[0].Count != 2 {
+		t.Fatalf("ask batch: %+v", its)
+	}
+	g, h2 := New(), featuretest.NewHost()
+	missed := func(at time.Time, ref string) {
+		rec(g, h2, at, vault.Activity{Kind: "call.missed", ConnectionID: "c1", Ref: ref, Feed: true, Batch: 24 * time.Hour, BatchWhileActive: true})
+	}
+	missed(t0, "a")
+	id := g.Items()[0].ID
+	featuretest.Call(g, h2, t0.Add(time.Minute), "app", "feed.update", `{"item_id":"`+id+`","status":"read"}`)
+	featuretest.Call(g, h2, t0.Add(2*time.Minute), "app", "feed.update", `{"item_id":"`+id+`","status":"active"}`)
+	missed(t0.Add(3*time.Minute), "b")
+	if its := g.Items(); len(its) != 2 || its[1].Ref != "b" {
+		t.Fatalf("after read and active again: %+v", its)
+	}
+}

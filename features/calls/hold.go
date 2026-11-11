@@ -19,7 +19,8 @@ var (
 // OwnerHoldStarted implements vault.OwnerHoldObserver: an incoming call
 // ringing when the hold begins stops ringing on the devices
 // (call.end{unavailable} to them only; the caller is not told and times
-// out) and is recorded as missed. (0.88.13, owner decision 2026-11-11) An
+// out) and is recorded as missed, not counted toward the limits (the member
+// couldn't have answered it). (0.88.13, owner decisions 2026-11-11) An
 // outgoing call still ringing ends too: call.end{unavailable} to the peer
 // vault, and the devices told once. A call answered before continues
 // (§3.6.3, §10.10).
@@ -40,7 +41,7 @@ func (f *Feature) OwnerHoldStarted(s *vault.Session) {
 		}
 		s.NotifyDevicesWith("call.end", endJSON(c.ID, "unavailable"), "", vault.SendOptions{})
 		f.finish(s, c, "unavailable")
-		f.missed(s, c)
+		recordMissed(s, c)
 	}
 }
 

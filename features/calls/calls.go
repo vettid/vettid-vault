@@ -154,6 +154,12 @@ type Feature struct {
 	// lastTick is the previous housekeeping (memory only), to see a gap in
 	// collecting (CollectGap).
 	lastTick time.Time
+	// Permission and limits (permission.go), DEK state: the connections
+	// whose calls are off, each connection's unanswered incoming calls,
+	// and the connections last announced as limited.
+	off         map[string]bool
+	unanswered  map[string][]time.Time
+	limitedSent map[string]bool
 }
 
 // New returns the feature.
@@ -161,7 +167,8 @@ func New(o Options) *Feature {
 	if o.ICE == nil {
 		o.ICE = NoServers{}
 	}
-	return &Feature{issuer: o.ICE, calls: map[string]*Call{}, alive: map[string]time.Time{}}
+	return &Feature{issuer: o.ICE, calls: map[string]*Call{}, alive: map[string]time.Time{},
+		off: map[string]bool{}, unanswered: map[string][]time.Time{}, limitedSent: map[string]bool{}}
 }
 
 var (
@@ -184,6 +191,8 @@ func (f *Feature) Types() []vault.TypeSpec {
 		{Type: "call.ice", Ephemeral: true, From: both},
 		{Type: "call.ringing", Ephemeral: true, From: both},
 		{Type: "call.keepalive", Ephemeral: true, From: owners},
+		{Type: "call.permission.set", Request: true, From: owners},
+		{Type: "call.permission.list", Request: true, From: owners},
 	}
 }
 
@@ -191,11 +200,15 @@ func (f *Feature) Types() []vault.TypeSpec {
 func (f *Feature) Load(data json.RawMessage) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	c := map[string]*Call{}
-	if err := json.Unmarshal(data, &c); err != nil {
+	st, err := loadState(data)
+	if err != nil {
 		return err
 	}
-	f.calls = c
+	f.calls = st.Calls
+	f.off, f.unanswered, f.limitedSent = orEmpty(st.Off), st.Unanswered, orEmpty(st.Limited)
+	if f.unanswered == nil {
+		f.unanswered = map[string][]time.Time{}
+	}
 	f.alive = map[string]time.Time{} // memory only: counted again from the first look after the unlock
 	f.lastTick = time.Time{}
 	return nil
@@ -205,7 +218,14 @@ func (f *Feature) Load(data json.RawMessage) error {
 func (f *Feature) Save() (json.RawMessage, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return json.Marshal(f.calls)
+	return json.Marshal(&state{V: stateVersion, Calls: f.calls, Off: f.off, Unanswered: f.unanswered, Limited: f.limitedSent})
+}
+
+func orEmpty(m map[string]bool) map[string]bool {
+	if m == nil {
+		return map[string]bool{}
+	}
+	return m
 }
 
 var (
@@ -241,6 +261,10 @@ func (f *Feature) Handle(ctx context.Context, s *vault.Session, in *envelope.Inn
 		return nil, f.ringing(s, in.Body, fromConn)
 	case "call.keepalive":
 		return nil, f.keepalive(s, in.Body)
+	case "call.permission.set":
+		return f.setPermission(s, in.Body)
+	case "call.permission.list":
+		return f.listPermissions(s, in.Body)
 	}
 	return nil, vault.NewError("unsupported_type", "")
 }
@@ -433,6 +457,9 @@ func (f *Feature) start(ctx context.Context, s *vault.Session, body []byte) (jso
 	if p, ok := s.Connection(st.ConnectionID); !ok || p.State != vault.PeerActive {
 		return nil, errNotFound
 	}
+	if f.off[st.ConnectionID] {
+		return nil, errCallsOff
+	}
 	now := s.Now()
 	if f.busy(now) {
 		return nil, errBusy
@@ -458,6 +485,7 @@ func (f *Feature) start(ctx context.Context, s *vault.Session, body []byte) (jso
 		Created: now, Exp: exp, Watched: st.Keepalive}
 	f.prune(now)
 	s.Record(vault.Activity{Kind: "call.outgoing", ConnectionID: st.ConnectionID, Ref: id, Direction: DirOut, Audit: true})
+	f.clearUnanswered(s, st.ConnectionID, now) // a call the member places clears the counts
 	return strictjson.NewBuilder().String("call_id", id).String("exp", envelope.FormatTS(exp)).
 		Base64("ice_config", cfg).Base64("ice_sig", isig).Bytes(), nil
 }
@@ -516,6 +544,12 @@ func (f *Feature) offer(ctx context.Context, s *vault.Session, in *envelope.Inne
 	if !checkPeerShare(s, callwire.ShareMessage(callwire.RoleOffer, of.CallID, of.Media, of.EK), of.Vouched) {
 		return nil // a swapped or unsigned share: no ringing
 	}
+	if f.off[conn] {
+		// Calls from this connection are off: no ringing, no answer, no
+		// record, no missed call, no wake (§10.10, V5).
+		s.Record(vault.Activity{Kind: "drop.call_off", ConnectionID: conn, Ref: of.CallID, Audit: true})
+		return nil
+	}
 	// Glare comes before the held check: a held vault has no ringing call
 	// of its own (the hold's start ends them, and call.start is refused
 	// while held), so the order changes nothing there.
@@ -529,6 +563,16 @@ func (f *Feature) offer(ctx context.Context, s *vault.Session, in *envelope.Inne
 	if s.OwnerHeld() {
 		// A held vault rings no device and does not answer, not even busy:
 		// the caller times out as with a locked callee (§3.6.3, §10.10).
+		// The missed call doesn't count toward the limits: the member
+		// couldn't have answered it (owner decision 2026-11-11).
+		f.finish(s, c, "unavailable")
+		recordMissed(s, c)
+		return nil
+	}
+	if f.limited(conn, now) {
+		// Too many unanswered calls from this connection: no ringing, no
+		// answer; an ended call and a missed call (§10.10, V5).
+		s.Record(vault.Activity{Kind: "drop.call_rate", ConnectionID: conn, Ref: c.ID, Audit: true})
 		f.finish(s, c, "unavailable")
 		f.missed(s, c)
 		return nil
@@ -603,8 +647,24 @@ func (f *Feature) finish(s *vault.Session, c *Call, reason string) {
 }
 
 // missed records an incoming call that was never answered in the feed.
+//
+// A missed call counts toward the connection's unanswered-call limit
+// (§10.10, V5), as a declined one does (end); an incoming call the vault
+// ends for its own reasons (no ICE configuration, an answer it couldn't
+// forward) does not, nor one missed because of the vault hold or ended
+// because calls were turned off (recordMissed).
 func (f *Feature) missed(s *vault.Session, c *Call) {
-	s.Record(vault.Activity{Kind: "call.missed", ConnectionID: c.Conn, Ref: c.ID, Direction: DirIn, Feed: true, Priority: "high"})
+	f.noteUnanswered(s, c.Conn, s.Now())
+	recordMissed(s, c)
+}
+
+// recordMissed records a missed call in the feed without counting it: a
+// call the member couldn't answer because of the vault hold, or one ended
+// because calls with the connection were turned off (§10.10, owner
+// decision 2026-11-11).
+func recordMissed(s *vault.Session, c *Call) {
+	s.Record(vault.Activity{Kind: "call.missed", ConnectionID: c.Conn, Ref: c.ID, Direction: DirIn, Feed: true, Priority: "high",
+		Batch: MissedMergeWindow, BatchWhileActive: true}) // missed calls merge (§10.10, V5)
 }
 
 // endToDevices tells the owner devices that c ended: its call device
@@ -708,7 +768,8 @@ func (f *Feature) answerFromDevice(s *vault.Session, body []byte) error {
 		return unavailable(s, a.CallID)
 	}
 	c.State, c.Device, c.Answered, c.Watched = StateActive, s.From().ID, now, a.Keepalive
-	f.alive[c.ID] = now // the 90 s count from the answer until the first keep-alive
+	f.clearUnanswered(s, c.Conn, now) // an answered call from the connection clears the counts
+	f.alive[c.ID] = now               // the 90 s count from the answer until the first keep-alive
 	s.NotifyDevicesWith("call.end", endJSON(c.ID, "answered_elsewhere"), s.From().ID, vault.SendOptions{})
 	s.Record(vault.Activity{Kind: "call.answered", ConnectionID: c.Conn, Ref: c.ID, Direction: DirIn, Audit: true})
 	return nil
@@ -805,6 +866,9 @@ func (f *Feature) end(s *vault.Session, body []byte, fromConn bool) error {
 		return nil
 	}
 	f.finish(s, c, e.Reason)
+	if c.Dir == DirIn && ringing {
+		f.noteUnanswered(s, c.Conn, c.Ended) // declined: counts toward the limit (§10.10, V5)
+	}
 	_ = s.SendToConnection(c.Conn, "call.end", endJSON(c.ID, e.Reason))
 	s.NotifyDevicesWith("call.end", endJSON(c.ID, e.Reason), s.From().ID, vault.SendOptions{})
 	return nil
@@ -988,6 +1052,7 @@ func (f *Feature) ConnectionRemoved(s *vault.Session, id string) {
 			endToLiveDevice(s, c, "unavailable", live)
 		}
 	}
+	f.dropConnection(id)
 }
 
 // Get returns a copy of a call record (tests, tools).

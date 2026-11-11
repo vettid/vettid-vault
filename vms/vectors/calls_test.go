@@ -223,6 +223,9 @@ func checkCallVectors(t *testing.T, dir string) {
 			// The value VAULT-MESSAGING 0.88.16 §16 prints for this case.
 			eq(t, "k_call2 (spec §16)", kCall2, mustHex("fc69525bf7681cf0aa0bf2109578a36ba249fef9ea06a7f10bf6f44668d5612e"))
 			eq(t, "confirm (spec §16)", d.b64("confirm_b64"), mustHex("5ed63e824d485ef4e2af8ac7d58936fec1eec26a437b5506722692e5db83357c"))
+			eq(t, "k_confirm (spec §16)", d.hex("k_confirm_hex"), mustHex("efc0b1e6cd50c9d22063ba085f3ca828581ffde1441f1769227f65b1c6b60122"))
+			eq(t, "relayed k_call (spec §16)", d.hex("k_call2_relayed_callee_hex"), mustHex("658f2ce918bdb72fec26036eea2ad4a8b34e5e813713f301fd70c377639af947"))
+			eq(t, "relayed confirm (spec §16)", d.b64("confirm_relayed_b64"), mustHex("50abad6efd920a5dc6eb226a5daf8cff00fcca0bbc261d454637f0faf9641f0e"))
 			eq(t, "caller vault ik (spec §16)", caller.vaultPub, mustHex("c050c5637a44fa8629fff3cccce2300cb362a63d99d95fc54145266f4332445a"))
 			eq(t, "callee vault ik (spec §16)", callee.vaultPub, mustHex("f80cccdce4ae1c07ae208a2adf99a310ae4207e0306fa0236110b06827bbb8d0"))
 		}
@@ -235,6 +238,7 @@ func checkCallVectors(t *testing.T, dir string) {
 		// A call passed on by a relay vault C: B derives "C calls B", A
 		// "A calls C". Different keys, and B's confirm fails at A.
 		relay := ed25519.PublicKey(d.b64("relay_vault_ik_b64"))
+		eq(t, "relay vault ik (seed 0x56)", relay, ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x56}, 32)).Public().(ed25519.PublicKey))
 		kB, err := hkdf.Key(sha256.New, k, []byte("vettid-call-v1"), id+string(relay)+string(callee.vaultPub), 32)
 		if err != nil {
 			t.Fatal(err)

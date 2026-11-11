@@ -90,6 +90,9 @@ func TestParties(t *testing.T) {
 	}
 	// Keys of the wrong length never verify, even when their bytes run
 	// together into the same HMAC input (a‖b with nothing after it).
+	if VerifyConfirm(k, 1, []int{1}, id, Parties{}, nil) || VerifyConfirm(k, 1, []int{1}, id, Parties{}, []byte{}) {
+		t.Error("no parties and an empty confirm verify") // Confirm is nil for invalid parties
+	}
 	if VerifyConfirm(k, 1, []int{1}, id, Parties{Caller: append(bytes.Clone(a), b...)}, c) {
 		t.Error("confirm not bound to the parties in order")
 	}

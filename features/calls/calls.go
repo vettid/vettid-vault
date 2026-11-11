@@ -712,7 +712,7 @@ func (f *Feature) offer(ctx context.Context, s *vault.Session, in *envelope.Inne
 	pp, okP := parties(s, conn, DirIn)
 	if of.Form2Bad || of.Suites != nil && (!okP || !checkPeerShare(s, callwire.OfferMessage2(of.CallID, of.Media, of.Suites, pp, of.EK),
 		Vouched{DeviceIK: of.DeviceIK, DeviceSig: of.DeviceSig2, VaultSig: of.VaultSig2})) {
-		if of.Form2Bad {
+		if of.Form2Bad || !okP { // (checkPeerShare audits a share that doesn't verify)
 			s.Record(vault.Activity{Kind: "drop.call_share", ConnectionID: conn, Audit: true})
 		}
 		return nil
@@ -946,8 +946,12 @@ func (f *Feature) answerFromDevice(s *vault.Session, body []byte) error {
 		return unavailable(s, a.CallID)
 	}
 	pp, ok := parties(s, c.Conn, DirIn)
+	if a.Form2 != nil && !ok {
+		s.Record(vault.Activity{Kind: "drop.call_share", DeviceID: s.From().ID, Audit: true})
+		return unavailable(s, a.CallID) // the connection is gone: nothing to name
+	}
 	v, err := vouch(s, answerMessage(c.ID, a.Form2, pp, a.Enc), a.EncSig)
-	if err != nil || a.Form2 != nil && !ok {
+	if err != nil {
 		s.Record(vault.Activity{Kind: "drop.call_share", DeviceID: s.From().ID, Audit: true})
 		return unavailable(s, a.CallID)
 	}
@@ -982,7 +986,11 @@ func (f *Feature) answerFromPeer(s *vault.Session, body []byte) error {
 		return nil // as a share that doesn't verify: the call keeps ringing
 	}
 	pp, ok := parties(s, c.Conn, DirOut)
-	if a.Form2 != nil && !ok || !checkPeerShare(s, answerMessage(c.ID, a.Form2, pp, a.Enc), a.Vouched) {
+	if a.Form2 != nil && !ok {
+		s.Record(vault.Activity{Kind: "drop.call_share", ConnectionID: c.Conn, Audit: true})
+		return nil
+	}
+	if !checkPeerShare(s, answerMessage(c.ID, a.Form2, pp, a.Enc), a.Vouched) {
 		return nil // the call keeps ringing until it times out or ends
 	}
 	if s.OwnerHeld() {

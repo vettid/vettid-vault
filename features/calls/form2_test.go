@@ -649,3 +649,35 @@ func TestForm2VouchRefusedIsBadRequest(t *testing.T) {
 		t.Fatalf("%q", r.Code)
 	}
 }
+
+// A form 2 answer for a call whose connection is gone (no key to name):
+// audited drop.call_share; from the device, unavailable to it; from the
+// peer, nothing passed on.
+func TestForm2AnswerConnectionGone(t *testing.T) {
+	sk, _ := callwire.NewOfferKey()
+	ek := sk.Public().Bytes()
+	// Our call to cB; its answer arrives after cB is removed.
+	a := newSide("cB")
+	oid := newCallID("gone")
+	featuretest.Call(a.f, a.h, t0, "app", "call.start", startBody2("cB", oid, ek, []int{1}))
+	enc, _, _ := callwire.Answer2(ek, oid, outP("cB"))
+	body := peerAnswerSigned("cB", oid, enc, callwire.AnswerMessage2(oid, 1, []int{1}, outP("cB"), enc), `,"suite":1,"offered":[1],"confirm":"`+b64(make([]byte, 32))+`"`)
+	delete(a.h.Conns, "cB")
+	a.h.Reset()
+	featuretest.Call(a.f, a.h, t0.Add(time.Second), "connection:cB", "call.answer", body)
+	if len(a.h.SentOfType("call.answer")) != 0 || !a.h.HasActivity("drop.call_share") {
+		t.Fatal("peer answer, connection gone")
+	}
+	// An incoming call from cA; the device answers after cA is removed.
+	b := newSide("cA")
+	id := newCallID("cA")
+	featuretest.CallExp(b.f, b.h, t0, t0.Add(OfferTTL), "connection:cA", "call.offer", peerOffer2("cA", id, "audio", ek, []int{1}, true, false))
+	enc, _, _ = callwire.Answer2(ek, id, inP("cA"))
+	delete(b.h.Conns, "cA")
+	b.h.Reset()
+	featuretest.Call(b.f, b.h, t0.Add(time.Second), "app", "call.answer", answerBody2("dev-app", id, enc, 1, []int{1}, make([]byte, 32)))
+	end := b.h.SentOfType("call.end")
+	if len(b.h.SentOfType("call.answer")) != 0 || !b.h.HasActivity("drop.call_share") || len(end) != 1 || end[0].To != "dev-app" {
+		t.Fatalf("device answer, connection gone: %+v", b.h.Sent)
+	}
+}

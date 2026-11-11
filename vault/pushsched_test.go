@@ -314,7 +314,9 @@ func TestSchedCallWakeRetry(t *testing.T) {
 	}
 }
 
-// (Review F1) After a look, a wait (a retry's, a 429's) means a new look before the wake goes.
+// (Review F1) A call wake that must wait (here its retry's 5 s) is looked at
+// again when the wait is over: the look made before the wait does not
+// count, so a call answered meanwhile gets no wake.
 func TestSchedCallWakeLooksAgainAfterAWait(t *testing.T) {
 	s := testSched()
 	s.triggerCall("c1")
@@ -324,14 +326,22 @@ func TestSchedCallWakeLooksAgainAfterAWait(t *testing.T) {
 	s.done(at, wakeFailed, 0)                // retry in 5 s
 	s.keepCalls(map[string]bool{"c1": true}) // the look right after done
 	at2, ok := s.next(at)
-	t.Logf("retry at %v ok %v", at2.Sub(at), ok)
-	// call answered at +2 s; at +5 s the loop wakes:
-	if ids := s.callsToCheck(); ids == nil {
-		t.Errorf(" no new look before the retry goes at +%v", at2.Sub(at))
+	if !ok || !at2.Equal(at.Add(5*time.Second)) {
+		t.Fatalf("retry at +%v ok %v", at2.Sub(at), ok)
+	}
+	ids := s.callsToCheck()
+	if len(ids) != 1 || ids[0] != "c1" {
+		t.Fatalf("no new look before the retry goes: %v", ids)
+	}
+	// Answered meanwhile: the look drops it, and nothing goes.
+	s.keepCalls(map[string]bool{"c1": false})
+	if _, ok := s.next(at2); ok {
+		t.Fatal("a retry for a call that no longer rings")
 	}
 }
 
-// (Review F2) A call wake's retry whose call ended leaves no retry state to the next wake.
+// (Review F2) A call wake's retry whose call ended leaves no retry state to
+// the next wake: its retry count and wait go, nothing is "counted".
 func TestSchedADroppedCallRetryLeavesNothing(t *testing.T) {
 	s := testSched()
 	s.triggerCall("c1")
@@ -340,17 +350,20 @@ func TestSchedADroppedCallRetryLeavesNothing(t *testing.T) {
 	s.start(at)
 	s.done(at, wakeFailed, 0)
 	s.keepCalls(map[string]bool{"c1": false}) // call answered
-	t.Logf("after drop: counted %v retries %d notBefore %v", s.counted, s.retries, s.notBefore.Sub(at))
+	if s.counted || s.retries != 0 || s.callRetries != 0 || s.callRetry || !s.callNotBefore.IsZero() || !s.notBefore.IsZero() {
+		t.Fatalf("left: counted %v retries %d callRetries %d callRetry %v callNotBefore %v notBefore %v",
+			s.counted, s.retries, s.callRetries, s.callRetry, s.callNotBefore, s.notBefore)
+	}
 	s.trigger(false)
 	at2, _ := s.next(at.Add(time.Minute))
 	s.start(at2)
-	if len(s.hour) == 0 {
-		t.Errorf(" the next ordinary wake was not counted toward the 30 (hour=%d)", len(s.hour))
+	if len(s.hour) != 1 {
+		t.Fatalf("the next ordinary wake was not counted toward the 30 (hour=%d)", len(s.hour))
 	}
 }
 
 // (Review F3) Ordinary triggers merged into a call wake that failed are not
-// lost when its call ends before the retry.
+// lost when its call ends before the retry; they wait the retry's wait.
 func TestSchedMergedTriggersSurviveAFailedCallWake(t *testing.T) {
 	s := testSched()
 	s.trigger(false)
@@ -362,8 +375,12 @@ func TestSchedMergedTriggersSurviveAFailedCallWake(t *testing.T) {
 	s.start(at)
 	s.done(at, wakeFailed, 0)
 	s.keepCalls(map[string]bool{"c1": false})
-	if _, ok := s.next(at.Add(10 * time.Second)); !ok {
-		t.Errorf(" the merged feed item's wake is lost (pending %v)", s.pending)
+	at2, ok := s.next(at)
+	if !ok || !s.pending {
+		t.Fatalf("the merged feed item's wake is lost (pending %v)", s.pending)
+	}
+	if at2.Before(at.Add(5 * time.Second)) {
+		t.Fatalf("the merged triggers did not wait the 5xx retry's wait: +%v", at2.Sub(at))
 	}
 }
 
@@ -381,14 +398,14 @@ func TestSchedTheLastCallWakesRetryStaysACallWake(t *testing.T) {
 	s.start(at)
 	s.done(at, wakeFailed, 0)
 	s.keepCalls(map[string]bool{"c20": true})
-	s.next(at)
-	if len(s.calls) == 0 {
-		t.Errorf(" the 20th call wake's retry became ordinary (pending %v), sent without ringing check", s.pending)
+	if _, ok := s.next(at); !ok || len(s.calls) != 1 || s.pending {
+		t.Fatalf("the 20th call wake's retry became ordinary (pending %v, calls %v)", s.pending, s.calls)
 	}
 }
 
-// (Review F5) A call wake goes at once, not after an ordinary wake's 5xx
-// retry wait; the ordinary retry merges into it.
+// (Review F5, L1) A call wake goes at once, not after an ordinary wake's 5xx
+// retry wait (the ordinary retry merges into it); a 429's wait holds it,
+// the ordinary wake's 429 as much as its own.
 func TestSchedACallWakeDoesNotWaitForAnOrdinaryRetry(t *testing.T) {
 	s := testSched()
 	s.trigger(false)
@@ -409,11 +426,84 @@ func TestSchedACallWakeDoesNotWaitForAnOrdinaryRetry(t *testing.T) {
 	if s.pending {
 		t.Fatal("the ordinary retry did not merge into the call wake")
 	}
-	// A 429's wait does hold it.
-	s.done(at, wakeRateLimited, time.Minute)
+	s.done(at, wakeSent, 0)
+
+	// An ordinary wake's 429 holds a new call wake until its retry_after.
+	s.trigger(false)
+	o, _ := s.next(at.Add(time.Minute))
+	s.start(o)
+	s.done(o, wakeRateLimited, 10*time.Minute)
 	s.triggerCall("c2")
-	s.keepCalls(map[string]bool{"c1": true, "c2": true})
-	if at2, _ := s.next(at); !at2.Equal(at.Add(time.Minute)) {
-		t.Fatalf("after a 429: %v", at2.Sub(at))
+	s.keepCalls(map[string]bool{"c2": true})
+	if c, _ := s.next(o.Add(time.Second)); !c.Equal(o.Add(10 * time.Minute)) {
+		t.Fatalf("a call wake after an ordinary 429: +%v", c.Sub(o))
+	}
+}
+
+// (Review M1) A call wake's 429 holds the ordinary wakes too: a feed item
+// after its call ended waits the retry_after.
+func TestSchedACallWakes429HoldsOrdinaryWakes(t *testing.T) {
+	s := testSched()
+	s.triggerCall("c1")
+	s.keepCalls(map[string]bool{"c1": true})
+	at, _ := s.next(t0)
+	s.start(at)
+	s.done(at, wakeRateLimited, 10*time.Minute)
+	s.keepCalls(map[string]bool{"c1": false}) // the call ended
+	s.trigger(false)
+	if o, ok := s.next(at.Add(20 * time.Second)); !ok || o.Before(at.Add(10*time.Minute)) {
+		t.Fatalf("an ordinary wake inside the call wake's 429: +%v", o.Sub(at))
+	}
+}
+
+// (Review M2) A fresh call wake has its own retries: an ordinary wake's
+// failures before it do not shorten them, and its own do not touch the
+// ordinary count.
+func TestSchedACallWakeHasItsOwnRetries(t *testing.T) {
+	s := testSched()
+	s.trigger(false)
+	now := t0
+	for i := 0; i < 3; i++ { // the ordinary wake fails 3 times
+		at, _ := s.next(now)
+		s.start(at)
+		s.done(at, wakeFailed, 0)
+		now = at
+	}
+	at, _ := s.next(now)
+	s.start(at)
+	s.done(at, wakeFailed, 0) // dropped after its last retry
+	s.triggerCall("c1")
+	s.keepCalls(map[string]bool{"c1": true})
+	c, _ := s.next(at)
+	s.start(c)
+	s.done(c, wakeFailed, 0)
+	if len(s.calls) != 1 || !s.callRetry {
+		t.Fatal("the call wake's first failure dropped it")
+	}
+	s.keepCalls(map[string]bool{"c1": true})
+	if r, _ := s.next(c); !r.Equal(c.Add(5 * time.Second)) {
+		t.Fatalf("its first retry waits %v, not 5 s", r.Sub(c))
+	}
+}
+
+// (§14.2 Outcomes, C2) A call wake's retry after its offer's exp, or once
+// the call stops ringing, is dropped: the look finds it not ringing.
+func TestSchedACallWakesRetryAfterItsCallIsDropped(t *testing.T) {
+	s := testSched()
+	s.triggerCall("c1")
+	s.keepCalls(map[string]bool{"c1": true})
+	at, _ := s.next(t0)
+	s.start(at)
+	s.done(at, wakeRateLimited, time.Minute)
+	r, _ := s.next(at)
+	if ids := s.callsToCheck(); len(ids) != 1 {
+		t.Fatalf("no look before the retry at +%v", r.Sub(at))
+	}
+	s.keepCalls(map[string]bool{"c1": false}) // past its exp, or answered
+	if _, ok := s.next(r); ok {
+		t.Fatal("the retry went")
+	}
+	if len(s.callHour) != 1 {
+		t.Fatalf("counted %d times", len(s.callHour))
 	}
 }

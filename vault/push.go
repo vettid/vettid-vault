@@ -688,9 +688,6 @@ func (p *pusher) trigger(exempt bool) {
 	p.poke()
 }
 
-// lockWake triggers an exempt wake and waits at most budget for it to be
-// sent (the debounce and caps still apply; a wake that could not go out
-// within the budget is not sent).
 // triggerCall records a call's offer deposited to the app (§14.2 trigger 5).
 func (p *pusher) triggerCall(callID string) {
 	p.mu.Lock()
@@ -701,6 +698,9 @@ func (p *pusher) triggerCall(callID string) {
 	p.poke()
 }
 
+// lockWake triggers an exempt wake and waits at most budget for it to be
+// sent (the debounce and caps still apply; a wake that could not go out
+// within the budget is not sent).
 func (p *pusher) lockWake(budget time.Duration) {
 	p.mu.Lock()
 	if p.reg == nil || p.stopped {

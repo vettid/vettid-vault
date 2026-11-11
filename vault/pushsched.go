@@ -123,6 +123,7 @@ type wakeSched struct {
 	checked       bool
 	callRetry     bool
 	callNotBefore time.Time
+	callRetries   int // failed attempts of the call wake being retried
 
 	inflight   bool
 	curExempt  bool
@@ -178,7 +179,7 @@ func (s *wakeSched) callsToCheck() []string {
 func (s *wakeSched) keepCalls(ringing map[string]bool) {
 	defer func() {
 		if len(s.calls) == 0 && s.callRetry {
-			s.callRetry, s.callNotBefore, s.retries = false, time.Time{}, 0
+			s.callRetry, s.callNotBefore, s.callRetries = false, time.Time{}, 0
 		}
 	}()
 	kept := s.calls[:0]
@@ -262,6 +263,7 @@ func (s *wakeSched) next(now time.Time) (time.Time, bool) {
 		at = later(at, s.last.Add(s.t.Debounce))
 	}
 	at = later(at, s.notBefore)
+	at = later(at, s.limitedUntil) // a 429 holds every wake, a call wake's included
 	if s.counted || s.count(s.hour, at) < s.t.HourCap {
 		return at, true
 	}
@@ -291,6 +293,9 @@ func (s *wakeSched) start(now time.Time) {
 		// is retried and its calls end).
 		s.curCalls, s.curPending = s.calls, s.pending
 		if !s.callRetry {
+			// A fresh call wake: its retries are its own, not an ordinary
+			// wake's (which it carries if one was waiting).
+			s.callRetries = 0
 			s.callHour = append(s.callHour, now)
 		}
 	} else if !s.counted {
@@ -316,11 +321,14 @@ func (s *wakeSched) done(now time.Time, r wakeResult, retryAfter time.Duration) 
 			for _, c := range s.curCalls {
 				s.triggerCall(c)
 			}
+			// (A new call while it waits rides this retry: bounded by the
+			// retries, and looked at again before it goes.)
 			s.callRetry, s.callNotBefore = true, now.Add(wait)
 			if s.curPending {
 				s.pending = true
 				s.counted = s.counted || s.curCounted
 				s.exempt = s.exempt || s.curExempt
+				s.notBefore = now.Add(wait)
 			}
 			return
 		}
@@ -330,7 +338,7 @@ func (s *wakeSched) done(now time.Time, r wakeResult, retryAfter time.Duration) 
 	}
 	switch r {
 	case wakeSent:
-		s.retries, s.notBefore, s.limitedUntil = 0, time.Time{}, time.Time{}
+		s.retries, s.callRetries, s.notBefore, s.limitedUntil = 0, 0, time.Time{}, time.Time{}
 	case wakeRateLimited:
 		if retryAfter <= 0 {
 			retryAfter = s.t.RetryAfter
@@ -339,6 +347,17 @@ func (s *wakeSched) done(now time.Time, r wakeResult, retryAfter time.Duration) 
 		s.limitedUntil = now.Add(d)
 		again(d)
 	case wakeFailed:
+		if len(s.curCalls) > 0 {
+			if s.callRetries < len(s.t.Retries) {
+				d := s.t.Retries[s.callRetries]
+				s.callRetries++
+				again(jitter(d, s.t.Jitter))
+				return
+			}
+			// Dropped after its last retry, as an ordinary wake is.
+			s.callRetries, s.callNotBefore = 0, time.Time{}
+			return
+		}
 		if s.retries < len(s.t.Retries) {
 			d := s.t.Retries[s.retries]
 			s.retries++

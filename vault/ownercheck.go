@@ -153,6 +153,15 @@ type CallGate interface {
 	// CallAnsweredBefore: the device has a call answered before t that is
 	// still live at now (not past the 12 h limit).
 	CallAnsweredBefore(deviceID string, t, now time.Time) bool
+	// CallActive: the device has an active call still live at now. Its
+	// own call.keepalive, call.ice and call.end pass an expired access
+	// session (§6.8): the call continues until it ends.
+	CallActive(deviceID string, now time.Time) bool
+	// EndCallsAnsweredFrom ends, when the hold begins, every active call
+	// answered at or after t (the deadline): only a call answered before
+	// it continues through the hold (§3.6.3). The peer and the owner
+	// devices are told.
+	EndCallsAnsweredFrom(s *Session, t time.Time)
 }
 
 // CredentialAlarm is implemented by the credential feature: the open clone
@@ -428,6 +437,9 @@ func (m *Manager) enterHold(now time.Time) {
 		if o, ok := f.(OwnerHoldObserver); ok {
 			o.OwnerHoldStarted(s) // the unlock window ends; ringing stops
 		}
+		if c, ok := f.(CallGate); ok {
+			c.EndCallsAnsweredFrom(s, m.st.OwnerCheck.Deadline)
+		}
 	}
 	for _, id := range sortedKeys(m.st.Held) {
 		m.answerHeld(m.st.Held[id], "owner_check_required", now)
@@ -589,6 +601,15 @@ func (m *Manager) alarmState() string {
 		}
 	}
 	return ""
+}
+
+func (m *Manager) callActive(device string, now time.Time) bool {
+	for _, f := range m.features {
+		if c, ok := f.(CallGate); ok && c.CallActive(device, now) {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Manager) callAnsweredBefore(device string, t time.Time) bool {

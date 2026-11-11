@@ -36,6 +36,10 @@ const (
 var accessExempt = map[string]bool{"vault.status": true, "device.session.request": true, "device.session.end": true,
 	tokenIssuedType: true, tokenRefreshType: true, "relay.address.update": true, TypeDeviceFeatures: true}
 
+// callSignal are a call's own messages from its device, which pass an
+// expired access session while that device's call is active (§6.8).
+var callSignal = map[string]bool{"call.keepalive": true, "call.ice": true, "call.end": true}
+
 // needsAccess reports whether a principal kind needs an access session.
 func needsAccess(kind string) bool { return kind == KindDesktop || kind == KindAgent }
 

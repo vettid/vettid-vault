@@ -623,12 +623,18 @@ type callGate struct {
 	recSink
 	device string
 	at     time.Time
+	active bool        // CallActive for device
+	endsAt []time.Time // EndCallsAnsweredFrom's t, per call
 }
 
 func (c *callGate) Name() string { return "callgate" }
 func (c *callGate) CallAnsweredBefore(device string, t, _ time.Time) bool {
 	return device == c.device && c.at.Before(t)
 }
+func (c *callGate) CallActive(device string, _ time.Time) bool {
+	return c.active && device == c.device
+}
+func (c *callGate) EndCallsAnsweredFrom(_ *Session, t time.Time) { c.endsAt = append(c.endsAt, t) }
 
 // §3.6.3, §6.4: while held an incoming connection request completes its
 // handshake but stays pending: in-person auto-approval does not apply, and
@@ -733,5 +739,56 @@ func TestHeldKeepaliveThroughTheBatch(t *testing.T) {
 	send()
 	if k.got != 1 {
 		t.Fatal("keep-alive of a call answered after the deadline reached the feature")
+	}
+}
+
+// The hold's start ends the calls answered at or after its deadline: the
+// calls feature is asked once, with the deadline (§3.6.3, owner decision
+// 2026-11-11).
+func TestHoldEndsCallsAnsweredFromTheDeadline(t *testing.T) {
+	f := newOCFixture(t)
+	k := &kaFeature{callGate: callGate{device: "desk1"}}
+	f.m.addFeature(k)
+	f.pastDeadline()
+	deadline := f.m.st.OwnerCheck.Deadline
+	_ = f.m.ProcessBatch(context.Background(), &fakeCollector{}, nil) // enter the hold
+	_ = f.m.ProcessBatch(context.Background(), &fakeCollector{}, nil) // still held: not again
+	if len(k.endsAt) != 1 || !k.endsAt[0].Equal(deadline) {
+		t.Fatalf("EndCallsAnsweredFrom: %v, want once with %v", k.endsAt, deadline)
+	}
+}
+
+// §6.8 with §10.10 (owner decision 2026-11-11): a desktop whose access
+// session expired keeps its active call: its call.keepalive passes; with
+// no active call it is refused as before, and other types still are.
+func TestExpiredSessionKeepsTheCall(t *testing.T) {
+	f := newOCFixture(t)
+	k := &kaFeature{callGate: callGate{device: "desk1", active: true}}
+	f.m.addFeature(k)
+	f.m.st.Devices["desk1"].Access = nil // the session expired
+	send := func() {
+		f.seq++
+		id, _ := envelope.NewULID(testNow())
+		raw, err := f.desk.ep.Seal(&envelope.Inner{ID: id, Type: "call.keepalive", TS: testNow(), Exp: testNow().Add(30 * time.Second),
+			Body: []byte(`{"call_id":"c1"}`), Features: []string{handshake.CapConfirm}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		msg := Message{MsgID: fmt.Sprintf("s%d", f.seq), Sender: relayauth.EncodeKey(f.desk.peer.Relay.PK), Payload: raw}
+		_ = f.m.ProcessBatch(context.Background(), &fakeCollector{}, []Message{msg})
+	}
+	send()
+	if k.got != 1 {
+		t.Fatal("an active call's keep-alive was refused on an expired session")
+	}
+	k.active = false
+	send()
+	if k.got != 1 {
+		t.Fatal("a keep-alive passed an expired session with no active call")
+	}
+	k.active = true
+	id := f.sendAs(f.desk, "connection.list", `{}`)
+	if r := find(f.inbox(f.desk)["desk1"], reply(id)); errCode(r) != "session_required" {
+		t.Fatalf("another type on an expired session: %+v", r)
 	}
 }

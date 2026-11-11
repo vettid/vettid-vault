@@ -43,6 +43,39 @@ func (f *Feature) CallAnsweredBefore(device string, t, now time.Time) bool {
 	return false
 }
 
+// CallActive implements vault.CallGate: the device is the call device of
+// an active call still live at now.
+func (f *Feature) CallActive(device string, now time.Time) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, c := range f.calls {
+		if c.Device == device && c.State == StateActive && c.live(now) {
+			return true
+		}
+	}
+	return false
+}
+
+// EndCallsAnsweredFrom implements vault.CallGate: when the hold begins, an
+// active call answered at or after the deadline t (by a desktop while the
+// check was due, or past a lapsed hold_off_until) ends unavailable at
+// once, with the peer vault and the owner devices told, rather than by
+// 90 s of silence (§3.6.3).
+func (f *Feature) EndCallsAnsweredFrom(s *vault.Session, t time.Time) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	now := s.Now()
+	for _, id := range f.sorted() {
+		c := f.calls[id]
+		if c.State != StateActive || !c.live(now) || c.Answered.Before(t) {
+			continue
+		}
+		f.finish(s, c, "unavailable")
+		_ = s.SendToConnection(c.Conn, "call.end", endJSON(c.ID, "unavailable"))
+		s.NotifyDevicesWith("call.end", endJSON(c.ID, "unavailable"), "", vault.SendOptions{})
+	}
+}
+
 // CallInProgress implements vault.CallActivity: a call is live (ringing or
 // answered, not ended or timed out). The idle lock waits for it to end
 // (VAULT-MESSAGING 0.29.0 §3.6.8, release L); a call ends within 12 hours

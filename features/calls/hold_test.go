@@ -99,3 +99,47 @@ func TestCallInProgress(t *testing.T) {
 		t.Fatal("an answered call, and its 12 h bound")
 	}
 }
+
+// §3.6.3 (owner decision 2026-11-11): when the hold begins, a call answered
+// at or after the deadline ends unavailable at once, with the peer and the
+// devices told; one answered before continues. CallActive is the device's
+// live active call (an expired access session passes its signals, §6.8).
+func TestHoldEndsCallsAnsweredFromTheDeadline(t *testing.T) {
+	b := newSide("cA")
+	sk, _ := callwire.NewOfferKey()
+	id := newCallID("cA")
+	featuretest.CallExp(b.f, b.h, t0, t0.Add(OfferTTL), "connection:cA", "call.offer", peerOffer("cA", id, "audio", sk.Public().Bytes()))
+	enc, _, err := callwire.Answer(sk.Public().Bytes(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	answered := t0.Add(2 * time.Second)
+	if r := featuretest.Call(b.f, b.h, answered, "desktop", "call.answer", answerBody("dev-desktop", id, enc)); !r.OK() {
+		t.Fatal(r.Code)
+	}
+	now := t0.Add(time.Minute)
+	if !b.f.CallActive("dev-desktop", now) || b.f.CallActive("dev-app", now) || b.f.CallActive("dev-desktop", answered.Add(MaxCallDuration)) {
+		t.Fatal("CallActive")
+	}
+	// Answered before the deadline: it continues.
+	b.h.Reset()
+	b.f.EndCallsAnsweredFrom(vault.NewSession(context.Background(), b.h, vault.PeerInfo{}, now, nil), answered.Add(time.Nanosecond))
+	b.none(t, "call.end")
+	if c, _ := b.f.Get(id); c.State != StateActive {
+		t.Fatalf("a call answered before the deadline ended: %+v", c)
+	}
+	// Answered at the deadline: ended, the peer and the devices told.
+	b.f.EndCallsAnsweredFrom(vault.NewSession(context.Background(), b.h, vault.PeerInfo{}, now, nil), answered)
+	if c, _ := b.f.Get(id); c.State != StateEnded || c.Reason != "unavailable" {
+		t.Fatalf("a call answered at the deadline: %+v", c)
+	}
+	if e := b.sent(t, "cA", "call.end"); str(t, e.Body, "reason") != "unavailable" {
+		t.Fatalf("peer: %s", e.Body)
+	}
+	if e := b.sent(t, "devices", "call.end"); str(t, e.Body, "reason") != "unavailable" {
+		t.Fatalf("devices: %s", e.Body)
+	}
+	if b.f.CallActive("dev-desktop", now) {
+		t.Fatal("an ended call is still active")
+	}
+}

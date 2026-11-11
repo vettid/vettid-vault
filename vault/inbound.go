@@ -235,7 +235,8 @@ func (m *Manager) ProcessBatch(ctx context.Context, c Collector, msgs []Message)
 			return ErrSplitBrain
 		}
 	}
-	m.reconfirmAll(now) // §6.3.1: hs.confirm again, once per batch, unless one is queued
+	m.batchEndFeatures(now) // after the messages: call liveness sees the batch's keep-alives
+	m.reconfirmAll(now)     // §6.3.1: hs.confirm again, once per batch, unless one is queued
 	if len(msgs) < MaxBatch {
 		m.attDrained()
 		m.drainedOnce = true
@@ -575,7 +576,7 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 		// The daily owner check (§3.6.3): past the deadline the app, and
 		// with the hold on every owner device, may send only the hold's
 		// allow list. A recovering app keeps its own set (§11.11.5).
-		if st := m.ownerCheckState(now); st != OwnerCheckOK && !m.holdAllows(p, in.Type, st) {
+		if st := m.ownerCheckState(now); st != OwnerCheckOK && !m.holdAllows(p, in.Type, in.Body, st) {
 			if te.spec.Request {
 				m.respondError(p, in, rkey, "owner_check_required", "", now)
 			} else {
@@ -620,8 +621,10 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 		}
 		return disp(eph)
 	}
-	if !accessExempt[in.Type] && !m.hasAccess(p, now) {
-		// §6.8: a desktop or agent acts only within an access session.
+	if !accessExempt[in.Type] && !m.hasAccess(p, now) && !(p.Kind == KindDesktop && m.callOutlivesSession(p.ID, in.Type, in.Body, now)) {
+		// §6.8: a desktop or agent acts only within an access session;
+		// a desktop's active call continues until it ends, its own
+		// keep-alive, ice and end passing an expired session.
 		if te.spec.Request {
 			m.respondError(p, in, rkey, "session_required", "", now)
 		} else {

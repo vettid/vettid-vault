@@ -36,6 +36,24 @@ const (
 var accessExempt = map[string]bool{"vault.status": true, "device.session.request": true, "device.session.end": true,
 	tokenIssuedType: true, tokenRefreshType: true, "relay.address.update": true, TypeDeviceFeatures: true}
 
+// callSignal are a call's own messages from its device, which pass an
+// expired access session while that device's call is active (§6.8).
+var callSignal = map[string]bool{"call.keepalive": true, "call.ice": true, "call.end": true}
+
+// callOutlivesSession reports whether a desktop's message without an
+// access session belongs to a call that outlives it (§6.8, 0.88.13): the
+// keep-alive, ICE or end of its live active call, or the end of its own
+// outgoing call still ringing.
+func (m *Manager) callOutlivesSession(device, typ string, body []byte, now time.Time) bool {
+	switch {
+	case callSignal[typ] && m.callActive(device, body, now):
+		return true
+	case typ == "call.end":
+		return m.callRingingOut(device, body, now)
+	}
+	return false
+}
+
 // needsAccess reports whether a principal kind needs an access session.
 func needsAccess(kind string) bool { return kind == KindDesktop || kind == KindAgent }
 
@@ -216,6 +234,12 @@ func (m *Manager) hSessionEnd(ctx context.Context, s *Session, in *envelope.Inne
 	// The sender gets no sync.event: an app drops the asks itself (§6.8, §10.1).
 	m.endAccess(ctx, target, s.peer.ID != target.ID, "ended", s.peer.ID, s.now)
 	m.record(Activity{Kind: "device.session.ended", DeviceID: target.ID, Audit: true}, s.now)
+	fs := m.session(s.now)
+	for _, f := range m.features {
+		if o, ok := f.(AccessEndedObserver); ok {
+			o.AccessEnded(fs, target.ID) // ended on purpose: its call ends too (0.88.13)
+		}
+	}
 	return nil, nil
 }
 

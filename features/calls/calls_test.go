@@ -249,7 +249,8 @@ func TestCallFlow(t *testing.T) {
 	end := a.sent(t, "cB", "call.end")
 	b.h.Reset()
 	featuretest.Call(b.f, b.h, t0.Add(time.Minute), "connection:cA", "call.end", string(end.Body))
-	b.sent(t, "devices", "call.end")
+	b.sent(t, "dev-app", "call.end") // the call device directly (it may be a desktop without a session)
+	b.sent(t, "devices-except:dev-app", "call.end")
 	if c, _ := b.f.Get(callID); c.State != StateEnded || c.Reason != "hangup" {
 		t.Fatalf("callee record %+v", c)
 	}

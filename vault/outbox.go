@@ -1051,6 +1051,16 @@ func statusOf(err error) (int, bool) {
 	return 0, false
 }
 
+// batchEndFeatures runs the clock work that follows a batch's messages
+// (BatchEndObserver).
+func (m *Manager) batchEndFeatures(now time.Time) {
+	for _, f := range m.features {
+		if o, ok := f.(BatchEndObserver); ok {
+			o.BatchEnd(m.session(now))
+		}
+	}
+}
+
 // tickFeatures runs the work features have due by the clock (TickObserver).
 func (m *Manager) tickFeatures(now time.Time) {
 	for _, f := range m.features {

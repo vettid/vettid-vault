@@ -516,6 +516,12 @@ func (f *Feature) offer(ctx context.Context, s *vault.Session, in *envelope.Inne
 	if !checkPeerShare(s, callwire.ShareMessage(callwire.RoleOffer, of.CallID, of.Media, of.EK), of.Vouched) {
 		return nil // a swapped or unsigned share: no ringing
 	}
+	// Glare comes before the held check: a held vault has no ringing call
+	// of its own (the hold's start ends them, and call.start is refused
+	// while held), so the order changes nothing there.
+	if !f.glare(s, conn, of.CallID, now) {
+		return nil // our own call to this connection wins
+	}
 	c := &Call{ID: of.CallID, Conn: conn, Dir: DirIn, Media: of.Media, State: StateRinging, Created: now, Exp: in.Exp}
 	f.calls[of.CallID] = c
 	f.prune(now)
@@ -545,6 +551,40 @@ func (f *Feature) offer(ctx context.Context, s *vault.Session, in *envelope.Inne
 		Base64("ice_config", cfg).Base64("ice_sig", isig)).Base64("peer_ik", peer.IK).Bytes()
 	s.NotifyDevicesWith("call.offer", ev, "", vault.SendOptions{Exp: c.Exp})
 	return nil
+}
+
+// glare settles two members calling each other at once (§10.10 "Glare",
+// CALLS-PLAN V6, D21): an offer y from conn while this vault's own call
+// to conn still rings. The lower call_id (its 26 ASCII bytes) wins, so
+// both vaults agree. Ours wins: y is dropped (no ringing, no answer, no
+// record, no missed call), audited drop.call_glare; false. Theirs wins:
+// ours ends busy, the owner devices are told with superseded_by = y, the
+// peer vault call.end{busy} for ours (one that dropped it ignores it; one
+// whose own call had ended or expired when ours arrived, and so rings for
+// it, stops ringing, a missed call; owner decision 2026-11-11), and
+// y is handled as any offer; true. With no such call of ours: true.
+func (f *Feature) glare(s *vault.Session, conn, y string, now time.Time) bool {
+	for _, id := range f.sorted() {
+		x := f.calls[id]
+		if x.Conn != conn || x.Dir != DirOut || x.State != StateRinging || !x.live(now) {
+			continue
+		}
+		if callwire.LowerWins(x.ID, y) {
+			s.Record(vault.Activity{Kind: "drop.call_glare", ConnectionID: conn, Ref: y, Audit: true})
+			return false
+		}
+		f.finish(s, x, "busy")
+		_ = s.SendToConnection(conn, "call.end", endJSON(x.ID, "busy"))
+		body := strictjson.NewBuilder().String("call_id", x.ID).String("reason", "busy").String("superseded_by", y).Bytes()
+		except := ""
+		if x.Device != "" {
+			_ = s.SendCallSignal(x.Device, "call.end", body, vault.SendOptions{})
+			except = x.Device
+		}
+		s.NotifyDevicesWith("call.end", body, except, vault.SendOptions{})
+		return true // one own ringing call at most (start refuses while busy)
+	}
+	return true
 }
 
 func (f *Feature) busyExcept(id string, now time.Time) bool {

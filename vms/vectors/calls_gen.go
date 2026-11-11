@@ -146,5 +146,23 @@ func genCalls() (obj, error) {
 		{"ice_exp", CallICEExp},
 		{"ice", iceServers},
 		{"ice_no_servers", iceEmpty},
+		{"glare", glareCases()},
 	}, nil
+}
+
+// glareCases are §10.10 "Glare" pairs: own is the vault's own ringing
+// call, offer the other's; own_wins says whether own goes on (the lower
+// call_id, compared as its 26 ASCII bytes).
+func glareCases() []obj {
+	cases := [][2]string{
+		{"01JB2Z6V9K3M4N5P6Q7R8S9T0A", "01JB2Z6V9K3M4N5P6Q7R8S9T0B"}, // the last byte decides
+		{"01JB2Z6V9K3M4N5P6Q7R8S9T0B", "01JB2Z6V9K3M4N5P6Q7R8S9T0A"},
+		{"01JB2Z6V9K3M4N5P6Q7R8S9T0Z", "01JB2Z6V9K3M4N5P6Q7R8S9T10"}, // an earlier byte decides ('0' < '1'), not the last ('Z' > '0')
+		{"01JC000000000000000000000A", "01JB2Z6V9K3M4N5P6Q7R8S9T0Z"}, // the time prefix decides
+	}
+	out := make([]obj, len(cases))
+	for i, c := range cases {
+		out[i] = obj{{"own", c[0]}, {"offer", c[1]}, {"own_wins", callwire.LowerWins(c[0], c[1])}}
+	}
+	return out
 }

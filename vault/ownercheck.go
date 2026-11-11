@@ -435,7 +435,8 @@ func (m *Manager) ownerCheckTick(now time.Time) {
 	m.idleLockTick(now) // §3.6.8 (0.29.0, release L)
 }
 
-// enterHold runs once when the hold begins (§3.6.3), in the batch's flush.
+// enterHold runs once when the hold begins (§3.6.3), at the batch's start
+// (housekeeping, before its messages).
 func (m *Manager) enterHold(now time.Time) {
 	s := m.session(now)
 	for _, f := range m.features {

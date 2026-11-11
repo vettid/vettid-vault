@@ -745,11 +745,27 @@ func newManager(o Options, st *State, hdr *Header, dek []byte) *Manager {
 		m.pin(hdr.AppKey, hdr.AppKeySeq)
 	}
 	m.registerCore()
+	// §3.3 (0.88.17, owner decision 2026-11-11): a feature whose part of the
+	// state does not read (damaged, or written by a later release) fails
+	// closed. It is not added: its types are not registered (a device's
+	// message is answered unsupported_type, a peer's dropped), its
+	// observers and timers do not run, and its part is carried unchanged
+	// (an entry for a feature this image does not run is never rewritten,
+	// §11.10.8), so a release that can read it finds it whole.
+	var failed []string
 	for _, f := range o.Features {
-		m.addFeature(f)
 		if raw, ok := st.Features[f.Name()]; ok {
-			_ = f.Load(raw)
+			if err := f.Load(raw); err != nil {
+				failed = append(failed, f.Name())
+				continue
+			}
 		}
+		m.addFeature(f)
+	}
+	// Audited once per unlock, by the features that record activity (the
+	// audit log's own failure cannot be recorded by it).
+	for _, name := range failed {
+		m.record(Activity{Kind: "feature.load_failed", Ref: name, Audit: true}, m.now())
 	}
 	m.clearDeadHolder() // §3.5.9 (0.52.0): a holder naming no live app is none
 	return m

@@ -3,6 +3,7 @@ package vault
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strconv"
 	"testing"
 
@@ -84,5 +85,79 @@ func TestFeatureStateStoredBeforeAnswer(t *testing.T) {
 	defer m.Crash()
 	if c2.n != 1 {
 		t.Fatalf("the stored state has %d, the answer said 1", c2.n)
+	}
+}
+
+// failingCounter is counterFeature as a release that cannot read the stored
+// state (a later release's, or a damaged one).
+type failingCounter struct{ counterFeature }
+
+func (f *failingCounter) Load(json.RawMessage) error {
+	return errors.New("a state from a later release")
+}
+
+// §3.3 (0.88.17, owner decision 2026-11-11): a feature whose part of the
+// state does not read fails closed. It is audited feature.load_failed, does
+// not run (its device type is answered unsupported_type), and its part is
+// carried unchanged through flushes, so a release that can read it finds it
+// whole; it is never run, or saved, as an empty state.
+func TestFeatureThatDoesNotLoadFailsClosed(t *testing.T) {
+	d := newDevFixture(t)
+	d.m.addFeature(&counterFeature{})
+	_ = d.responses(t)
+	if r, _ := d.request(t, "test.count", `{}`); r.Error != nil {
+		t.Fatal(r.Error.Code)
+	}
+	d.m.mu.Lock()
+	_ = d.m.flushThenDrain(context.Background())
+	stored := append(json.RawMessage(nil), d.m.st.Features["counter"]...)
+	d.m.mu.Unlock()
+	if string(stored) != "1" {
+		t.Fatalf("stored %s", stored)
+	}
+	reopen := func(fs ...Feature) *Manager {
+		d.m.Crash()
+		opts := d.opts
+		opts.Store = d.store
+		opts.Features = append(append([]Feature(nil), d.opts.Features...), fs...)
+		m, _, err := Unlock(context.Background(), UnlockParams{Options: opts, VaultID: d.vid, PIN: testPIN, UnlockSecret: testSecret})
+		if err != nil {
+			t.Fatal(err)
+		}
+		d.m = m
+		return m
+	}
+
+	sink := &recSink{}
+	m := reopen(&failingCounter{}, sink)
+	var refs []string
+	for _, a := range sink.got {
+		if a.Kind == "feature.load_failed" {
+			refs = append(refs, a.Ref)
+		}
+	}
+	if len(refs) != 1 || refs[0] != "counter" {
+		t.Fatalf("audited %v", refs)
+	}
+	if r, _ := d.request(t, "test.count", `{}`); r.Error == nil || r.Error.Code != "unsupported_type" {
+		t.Fatalf("a feature that did not load ran: %+v", r)
+	}
+	m.mu.Lock()
+	_ = m.flushThenDrain(context.Background())
+	kept := append(json.RawMessage(nil), m.st.Features["counter"]...)
+	m.mu.Unlock()
+	if string(kept) != string(stored) {
+		t.Fatalf("the stored part was changed: %s, was %s", kept, stored)
+	}
+
+	// A release that reads it finds it whole, and goes on from it.
+	c3 := &counterFeature{}
+	reopen(c3)
+	defer d.m.Crash()
+	if c3.n != 1 {
+		t.Fatalf("the state found later: %d", c3.n)
+	}
+	if r, _ := d.request(t, "test.count", `{}`); r.Error != nil || string(r.Body) != `{"n":2}` {
+		t.Fatalf("after: %+v", r)
 	}
 }

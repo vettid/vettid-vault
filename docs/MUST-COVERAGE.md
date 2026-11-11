@@ -131,6 +131,7 @@ end covers §7, §8, §11.8, §12 and §13.2.
 | § | Requirement | Test(s) |
 |---|---|---|
 | 3.3 | Sealed header holds no relay key, session keys or feature data | `vault.TestHeaderContents` |
+| 3.3 | (0.88.17) A feature whose part of the state does not read (damaged, or a later release's) fails closed: audited `feature.load_failed` (`ref` = the feature's name), not run (its device types answered `unsupported_type`, its peer types dropped, no observers or timers), its part carried unchanged through flushes, and found whole by a release that reads it | `vault.TestFeatureThatDoesNotLoadFailsClosed` |
 | 3.3.1 | DEK = HKDF(Argon2id(PIN), pepper); parameters below t=1, m=8 MiB refused; state bound to vault_id and state_seq | `vault.TestKDF`, `vault.TestStateBlobBinding` |
 | 5.3 | Unknown type without `re` answered with `unsupported_type`; role not allowed → `forbidden` | `vault.TestRequestResponseAndDedupe` |
 | 11.3 | First app: purpose app, ctx = vault_id, pre-authorized keys only | `e2e.TestPairConnectMessage`, `e2e.TestVaultctlSmoke` |

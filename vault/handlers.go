@@ -26,7 +26,9 @@ type Feature interface {
 // items, LEASH, the wallet, …): when its part of the state does not read,
 // the unlock is refused, writing nothing, because not running it would leave
 // the others calling it as if it were empty (§3.3, 0.88.17, owner decision
-// 2026-11-11). A feature that is not Required is not run instead.
+// 2026-11-11). The feed is Required too: everything writes its notices to
+// it, some once only, and none may be dropped. A feature that is not
+// Required is not run instead.
 type Required interface {
 	RequiredAtUnlock() bool
 }

@@ -159,7 +159,8 @@ func TestVoteFeatureHooks(t *testing.T) {
 // the wiring in NewSet: a feature newly wired into another must be added
 // to it and marked Required (this test does not read NewSet).
 func TestRequiredAreTheWiredFeatures(t *testing.T) {
-	want := []string{"audit", "connauth", "credential", "critical", "grants", "items", "leash", "vote", "wallet"}
+	// The feed too (owner decision 2026-11-11): everything writes its notices to it, some once only.
+	want := []string{"audit", "connauth", "credential", "critical", "feed", "grants", "items", "leash", "vote", "wallet"}
 	var got []string
 	for _, f := range all.Dev() {
 		if r, ok := f.(vault.Required); ok && r.RequiredAtUnlock() {

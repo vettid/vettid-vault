@@ -723,36 +723,49 @@ func TestRowDuplicateSetsResultsMatch(t *testing.T) {
 	}
 }
 
-// 0.88.12: a record whose only problem is self_conflict (or
-// self_unrecorded) does not count toward the cap of 16 problems and is
-// never evicted; (GC #7991 D) two receipts for one tag do count.
+// 0.88.12: a record whose only problem is self_unrecorded or
+// self_conflict does not count toward the cap of 16 problems and is never
+// evicted; (GC #7991 D) two receipts for one tag do count. Reached through
+// the service's answers.
 func TestProblemCapSelfOnly(t *testing.T) {
-	e := newEnv(t)
-	e.publish(e.svc)
+	keep := func(c *cenv, n int) bool {
+		v := c.svc.NewVote(votetest.VoteSpec{ID: lid(n), Opens: c.now.Add(-time.Hour), Closes: c.now.Add(2 * time.Hour)})
+		return c.send(v).OK()
+	}
+	c := newCastEnv(t)
 	for i := 1; i <= votewire.MaxProblemsPerConnection; i++ {
-		e.closedVote(i)
-		r := e.rec(lid(i))
-		r.Check, r.SelfConflict = CheckUnconfirmed, true
+		v := c.open(i)
+		shown := c.selfBallot(v, "no")
 		if i%2 == 0 {
-			r.SelfConflict, r.SelfUnrecorded = false, true
+			c.cast(v, "yes") // self_conflict, the vault's ballot unreceipted
 		}
-		if !r.problem() || r.capProblem() || r.evictable(e.now) {
-			t.Fatalf("%d: problem %v cap %v evictable %v", i, r.problem(), r.capProblem(), r.evictable(e.now))
+		c.f.Check(c.session(), "svc", v.ID)
+		ids := c.statuses()
+		c.answer(v, ids[len(ids)-1], shown, uint64(c.now.UnixMilli()), true)
+		r := c.rec(v.ID)
+		if !(r.SelfUnrecorded || r.SelfConflict) || !r.problem() || r.capProblem() || r.evictable(c.now) {
+			t.Fatalf("%d: %+v", i, r)
 		}
 	}
-	probe := func() *limitHit {
-		return e.f.admit(&record{Conn: "svc", ID: lid(999), Opens: e.now.Unix() - 3600, Closes: e.now.Unix() - 10}, e.now)
+	if !keep(c, 99) {
+		t.Error("self-only records hit the cap")
 	}
-	if hit := probe(); hit != nil {
-		t.Errorf("self-only records hit the cap: %+v", hit)
-	}
-	if n := len(e.f.st.Records); n != votewire.MaxProblemsPerConnection {
-		t.Errorf("a self-only record was evicted: %d left", n)
-	}
+	// Two receipts for one tag count.
+	c = newCastEnv(t)
 	for i := 1; i <= votewire.MaxProblemsPerConnection; i++ {
-		e.rec(lid(i)).TwoReceipts = true
+		v := c.open(i)
+		shown := c.selfBallot(v, "no")
+		c.cast(v, "yes")
+		_, ids := c.casts()
+		c.okReceipt(v, ids[len(ids)-1], c.leafOf(v), uint64(c.now.UnixMilli()))
+		c.f.Check(c.session(), "svc", v.ID)
+		st := c.statuses()
+		c.answer(v, st[len(st)-1], shown, uint64(c.now.UnixMilli()), true)
+		if r := c.rec(v.ID); !r.TwoReceipts || !r.capProblem() {
+			t.Fatalf("%d: two receipts %v", i, r.TwoReceipts)
+		}
 	}
-	if hit := probe(); hit == nil || !hit.problems {
-		t.Errorf("two receipts do not count: %+v", hit)
+	if keep(c, 99) {
+		t.Error("two receipts do not count toward the cap")
 	}
 }

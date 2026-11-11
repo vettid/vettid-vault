@@ -33,8 +33,14 @@ func arrOfB64(list [][]byte) []byte {
 	return append(arr, ']')
 }
 
+// svcBallotJSON is a shown ballot with its receipt; a receipt finally
+// rejected as late is marked (review fix 6d).
 func svcBallotJSON(sb *svcBallot) []byte {
-	return ballotEvidence(sb.VK, sb.ChoiceID, sb.BallotSig, sb.MsgMS, sb.ReceiptSig)
+	b := ballotEvidence(sb.VK, sb.ChoiceID, sb.BallotSig, sb.MsgMS, sb.ReceiptSig)
+	if sb.LateRejected {
+		b = append(b[:len(b)-1], []byte(`,"late_receipt":true}`)...)
+	}
+	return b
 }
 
 // asideJSON is a receipt kept aside (0.88.12): msg_ms and receipt_sig, and
@@ -42,15 +48,6 @@ func svcBallotJSON(sb *svcBallot) []byte {
 func asideJSON(k *keptReceipt) []byte {
 	b := strictjson.NewBuilder().Uint("msg_ms", uint64(k.MsgMS)).Base64("receipt_sig", k.ReceiptSig)
 	if k.Rejected {
-		b.Bool("rejected", true)
-	}
-	return b.Bytes()
-}
-
-// shownAsideJSON is a shown ballot kept aside with its receipt (GC #7991 C).
-func shownAsideJSON(a *shownAside) []byte {
-	b := strictjson.NewBuilder().Raw("ballot", svcBallotJSON(a.Ballot))
-	if a.Rejected {
 		b.Bool("rejected", true)
 	}
 	return b.Bytes()
@@ -133,9 +130,7 @@ func (f *Feature) recordEvidence(s *vault.Session, r *record) []byte {
 	if r.Self != nil {
 		e.Raw("self_ballot", svcBallotJSON(r.Self))
 	}
-	if r.AsideShown != nil {
-		e.Raw("ballot_aside", shownAsideJSON(r.AsideShown))
-	}
+
 	if r.SelfLatest != nil {
 		e.Raw("self_ballot_latest", svcBallotJSON(r.SelfLatest))
 	}
@@ -232,12 +227,10 @@ func compactEvidence(c *compact) []byte {
 		if c.SelfLatest != nil {
 			e.Raw("self_ballot_latest", svcBallotJSON(c.SelfLatest))
 		}
-		if c.Aside != nil {
+		if c.Aside != nil && c.Aside.Rejected {
 			e.Raw("late_receipt", asideJSON(c.Aside))
 		}
-		if c.AsideShown != nil {
-			e.Raw("ballot_aside", shownAsideJSON(c.AsideShown))
-		}
+
 	}
 	return e.Bytes()
 }

@@ -9,6 +9,7 @@ import (
 
 	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/internal/votetest"
+	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/suite"
 	"github.com/vettid/vettid-vault/vms/votewire"
 )
@@ -666,6 +667,40 @@ func TestReceiptAsideAtTheFinalJudgement(t *testing.T) {
 	if c.state(v) != BallotSending {
 		t.Errorf("%s", c.state(v))
 	}
+	// Later hourly status answers carrying the same late receipt stay quiet
+	// (review fix 2): no audit, no change, the export stays current.
+	c.evidence(t, v.ID)
+	changed := c.rec(v.ID).ChangedMS
+	c.h.Reset()
+	late := uint64(time.Unix(c.rec(v.ID).Closes, 0).Add(time.Hour).UnixMilli())
+	// The service's answer is the same bytes each time (its proposal bundle
+	// does not change).
+	own := c.ownBallot(v)
+	leaf := must(own.Leaf())
+	rsig, _ := suite.Sign(c.svc.IK, votewire.LabelReceipt, must(votewire.ReceiptMsg(v.Hash, leaf, late)))
+	ssig, _ := suite.Sign(c.svc.IK, votewire.LabelStatus, must(votewire.StatusMsg(v.ID, v.Tag, leaf)))
+	body := c.statusBody(v, &votewire.RowBallot{VK: own.VK, ChoiceID: own.ChoiceID, BallotSig: own.BallotSig}, late, rsig, ssig)
+	for i := 0; i < 3; i++ {
+		c.now = c.now.Add(61 * time.Minute)
+		n := len(c.statuses())
+		c.f.Tick(c.session())
+		st := c.statuses()
+		if len(st) == n {
+			t.Fatalf("round %d: no status asked", i)
+		}
+		c.respond(st[len(st)-1], "vote.status", &envelope.Inner{Status: envelope.StatusOK, Body: body})
+		if i == 0 {
+			if c.hasKind("vote.receipt_rejected") || c.problems(v.ID) != 0 {
+				t.Errorf("the first later answer: %v", c.h.Activities)
+			}
+			c.evidence(t, v.ID) // the first one is new evidence; the export after it
+			changed = c.rec(v.ID).ChangedMS
+			c.h.Reset()
+		}
+	}
+	if r := c.rec(v.ID); len(c.h.Activities) != 0 || r.ChangedMS != changed || !eq(r.EvidenceHash, r.digest()) {
+		t.Errorf("later answers: %v changed %d->%d", c.h.Activities, changed, r.ChangedMS)
+	}
 }
 
 // GC #7991 C, 7adc8fe: a shown ballot whose receipt is for an extension
@@ -681,15 +716,16 @@ func TestShownBallotKeptAside(t *testing.T) {
 	closes := time.Unix(c.rec(v.ID).Closes, 0)
 	c.alreadyVoted(v, ids[0], must(votewire.SignBallot(vk2, v.Hash, v.Tag, "no")), uint64(closes.Add(30*time.Minute).UnixMilli()))
 	r := c.rec(v.ID)
-	if r.AsideShown == nil || r.Ballot.State != BallotConflict || !c.has("vote.conflict", v.ID) || !r.Other.Late {
-		t.Fatalf("%+v", r.AsideShown)
+	if r.Ballot.State != BallotConflict || !c.has("vote.conflict", v.ID) || !r.Other.Late {
+		t.Fatalf("%+v", r.Other)
 	}
-	if _, ok := c.evidence(t, v.ID)["ballot_aside"]; !ok {
-		t.Error("not in vote.evidence")
+	// Its receipt is inside other_ballot (review fix 6d).
+	if ob, err := c.evidence(t, v.ID).Object("other_ballot"); err != nil || ob["receipt_sig"] == nil {
+		t.Errorf("other_ballot %v %v", ob, err)
 	}
 	_, msg := c.svc.Extension(v, 1, closes.Add(time.Hour), c.now)
 	c.call("vote.extended", msg)
-	if r := c.rec(v.ID); r.AsideShown != nil || r.Other.Late || c.countKind("vote.conflict") != 1 {
+	if r := c.rec(v.ID); r.Other.Late || c.countKind("vote.conflict") != 1 {
 		t.Errorf("%+v", r.Other)
 	}
 }
@@ -768,21 +804,54 @@ func TestEarlierVoteKeyIsOwn(t *testing.T) {
 }
 
 // GC #7991 B: disputed is tried first, then conflict evidence, then the
-// self rows, then the rest.
+// self rows, then the rest; reached through the service's answers.
 func TestVerdictOrder(t *testing.T) {
-	sb := &svcBallot{VK: make([]byte, 32), ChoiceID: "no", BallotSig: make([]byte, 64)}
-	r := &record{Ballot: &ballot{State: BallotDisputed}, ConflictEv: true, SelfUnrecorded: true, Self: sb}
-	if st, why := verdict(r, nil); st != CheckFailed || why != "disputed" {
-		t.Errorf("disputed first: %s %s", st, why)
+	_, vk2, _ := ed25519.GenerateKey(rand.Reader)
+	var shown *votewire.Ballot
+	foreignTo := func(c *cenv, v *votetest.Vote) {
+		c.now = c.now.Add(11 * time.Minute)
+		c.f.Check(c.session(), "svc", v.ID)
+		st := c.statuses()
+		c.answer(v, st[len(st)-1], must(votewire.SignBallot(vk2, v.Hash, v.Tag, "yes")), uint64(c.rec(v.ID).Opens*1000+1), true)
 	}
-	r.Ballot = nil
-	if st, why := verdict(r, &votewire.RowBallot{VK: sb.VK, ChoiceID: sb.ChoiceID, BallotSig: sb.BallotSig}); st != CheckFailed || why != "conflict" {
-		t.Errorf("conflict evidence before self: %s %s", st, why)
+	// Disputed, then a foreign ballot: disputed.
+	c, v := closedWith(t, func(c *cenv, v *votetest.Vote) {
+		shown = c.selfBallot(v, "no")
+		c.f.TransferCompleted(c.session(), "old", "new")
+		c.f.Tick(c.session())
+		c.answer(v, c.statuses()[0], shown, uint64(c.now.UnixMilli()), true)
+		if _, err := c.f.Confirm(c.session(), "svc", v.ID, false); err != nil {
+			t.Fatal(err)
+		}
+		foreignTo(c, v)
+	})
+	if r := c.rec(v.ID); !r.ConflictEv || r.Ballot.State != BallotDisputed {
+		t.Fatalf("%+v", r.Ballot)
 	}
-	r.ConflictEv = false
-	r.Ballot = &ballot{State: BallotRecorded, VK: sb.VK, ChoiceID: "yes", BallotSig: make([]byte, 64), ReceiptSig: []byte{1}}
-	if st, why := verdict(r, &votewire.RowBallot{VK: sb.VK, ChoiceID: "yes", BallotSig: make([]byte, 64)}); st != CheckFailed || why != "row_mismatch" {
-		t.Errorf("self before the receipt row: %s %s", st, why)
+	if out, _ := c.f.SubmitResults(c.session(), "svc", v.ID, c.resultsFor(v, resOpts{mine: shown})); out.Reason != "disputed" {
+		t.Errorf("disputed first: %+v", out)
+	}
+	// self_unrecorded, then a foreign ballot: conflict, even for the
+	// receipted own-vk row.
+	c, v = closedWith(t, func(c *cenv, v *votetest.Vote) {
+		shown = c.selfBallot(v, "no")
+		c.f.Check(c.session(), "svc", v.ID)
+		c.answer(v, c.statuses()[0], shown, uint64(c.now.UnixMilli()), true)
+		foreignTo(c, v)
+	})
+	if out, _ := c.f.SubmitResults(c.session(), "svc", v.ID, c.resultsFor(v, resOpts{mine: shown})); out.Reason != "conflict" {
+		t.Errorf("conflict evidence before self: %+v", out)
+	}
+	// self_conflict beside the vault's receipt, the vault's own row: the
+	// self row (two receipts), not the receipt row.
+	c, v = closedWith(t, func(c *cenv, v *votetest.Vote) {
+		shown = c.selfBallot(v, "no")
+		receipted(c, v)
+		c.f.Check(c.session(), "svc", v.ID)
+		c.answer(v, c.statuses()[0], shown, uint64(c.now.UnixMilli()), true)
+	})
+	if out, _ := c.f.SubmitResults(c.session(), "svc", v.ID, c.resultsFor(v, resOpts{mine: c.ownBallot(v)})); out.State != CheckFailed || out.Reason != "row_mismatch" {
+		t.Errorf("self before the receipt row: %+v", out)
 	}
 }
 
@@ -797,5 +866,220 @@ func TestClosedLatestHash(t *testing.T) {
 	}
 	if r := c.rec(v.ID); r.ResultsMatch != "no" || !eq(r.ResultsHash, votewire.H([]byte("y"))) || c.countKind("vote.results_conflict") != 1 {
 		t.Errorf("%q %d", r.ResultsMatch, c.countKind("vote.results_conflict"))
+	}
+}
+
+// Review fix 1: an extension adopted from the results alone (here with
+// rows_unavailable) moves no receipt window: a receipt that arrives after
+// it, by a cast answer, a status answer or already_voted, is kept aside;
+// a vote.extended with the same bytes and a bundle that verifies (or the
+// site's entry) verifies it, and the receipt is taken.
+func TestAdoptedExtensionTakesNoReceipt(t *testing.T) {
+	setup := func() (*cenv, *votetest.Vote, []string, time.Time, []byte) {
+		c := newCastEnv(t)
+		v := c.open(1)
+		c.cast(v, "yes")
+		_, ids := c.casts()
+		closes := time.Unix(c.rec(v.ID).Closes, 0)
+		doc, msg := c.svc.Extension(v, 1, closes.Add(time.Hour), c.now)
+		c.now = closes.Add(time.Hour + CheckDelay + time.Minute)
+		c.f.Tick(c.session())
+		ru := c.resultsFor(v, resOpts{extra: []votewire.Signed{{Doc: doc, Sig: signExt(c.svc, v, doc)}}})
+		ru.Row, ru.Proof, ru.RowsUnavailable = nil, nil, true
+		if out, _ := c.f.SubmitResults(c.session(), "svc", v.ID, ru); out.State != CheckPending || len(c.rec(v.ID).Exts) != 1 {
+			t.Fatalf("%+v", out)
+		}
+		return c, v, ids, closes, msg
+	}
+	for _, via := range []string{"cast", "status", "already_voted"} {
+		c, v, ids, closes, msg := setup()
+		at := uint64(closes.Add(30 * time.Minute).UnixMilli())
+		switch via {
+		case "cast":
+			c.okReceipt(v, ids[0], c.leafOf(v), at)
+		case "status":
+			c.f.Check(c.session(), "svc", v.ID)
+			c.answer(v, c.statuses()[len(c.statuses())-1], c.ownBallot(v), at, true)
+		case "already_voted":
+			c.alreadyVoted(v, ids[0], c.ownBallot(v), at)
+		}
+		if b := c.rec(v.ID).Ballot; b.State == BallotRecorded || b.Aside == nil || c.hasKind("vote.recorded") {
+			t.Fatalf("%s: taken on an unverified extension: %s", via, b.State)
+		}
+		if r := c.call("vote.extended", msg); !r.OK() {
+			t.Fatalf("%s: %q", via, r.Code)
+		}
+		if c.state(v) != BallotRecorded || len(c.rec(v.ID).Exts[0].Bundle) == 0 {
+			t.Errorf("%s: the extension's bundle verified: %s", via, c.state(v))
+		}
+	}
+	// The site's entry verifies it too.
+	c, v, ids, closes, msg := setup()
+	c.okReceipt(v, ids[0], c.leafOf(v), uint64(closes.Add(30*time.Minute).UnixMilli()))
+	mm, _ := votewire.ParseExtendedMsg(msg)
+	e1 := `{"extension":"` + b64(mm.Extension) + `","extension_sig":"` + b64(mm.ExtensionSig) + `","bundle":` + string(mm.Bundle) + `}`
+	doc := `{"status":"found","proposal":"` + b64(v.Doc) + `","proposal_sig":"` + b64(v.Sig) + `","extensions":[` + e1 + `]}`
+	c.syncResults(t, "entries", `{"entries":[{"proposal_id":"`+v.ID+`","document":`+doc+`}]}`)
+	if c.state(v) != BallotRecorded {
+		t.Errorf("site entry: %s", c.state(v))
+	}
+	// A shown own-vk ballot's receipt does not count toward two receipts on
+	// an unverified extension.
+	c = newCastEnv(t)
+	v = c.open(1)
+	shown := c.selfBallot(v, "no")
+	receipted(c, v)
+	closes = time.Unix(c.rec(v.ID).Closes, 0)
+	d2, _ := c.svc.Extension(v, 1, closes.Add(time.Hour), c.now)
+	c.now = closes.Add(time.Hour + CheckDelay + time.Minute)
+	c.f.Tick(c.session())
+	ru := c.resultsFor(v, resOpts{extra: []votewire.Signed{{Doc: d2, Sig: signExt(c.svc, v, d2)}}})
+	ru.Row, ru.Proof, ru.RowsUnavailable = nil, nil, true
+	c.f.SubmitResults(c.session(), "svc", v.ID, ru)
+	c.f.Check(c.session(), "svc", v.ID)
+	c.answer(v, c.statuses()[0], shown, uint64(closes.Add(30*time.Minute).UnixMilli()), true)
+	if r := c.rec(v.ID); r.TwoReceipts || !r.Self.Late {
+		t.Errorf("two receipts on an unverified extension: %v", r.TwoReceipts)
+	}
+}
+
+// Review fix 3: a kept-aside receipt that a verified extension brings into
+// the window is never reported late, whatever the ballot's state.
+func TestAsideInWindowNotLateInAnyState(t *testing.T) {
+	c := newCastEnv(t)
+	v := c.open(1)
+	c.cast(v, "yes")
+	_, ids := c.casts()
+	closes := time.Unix(c.rec(v.ID).Closes, 0)
+	c.okReceipt(v, ids[0], c.leafOf(v), uint64(closes.Add(30*time.Minute).UnixMilli()))
+	_, vk2, _ := ed25519.GenerateKey(rand.Reader)
+	c.tickAt(2 * time.Minute)
+	_, ids = c.casts()
+	c.alreadyVoted(v, ids[len(ids)-1], must(votewire.SignBallot(vk2, v.Hash, v.Tag, "no")), uint64(c.now.UnixMilli()))
+	if c.state(v) != BallotConflict {
+		t.Fatalf("%s", c.state(v))
+	}
+	_, msg := c.svc.Extension(v, 1, closes.Add(time.Hour), c.now)
+	c.call("vote.extended", msg)
+	if r := c.rec(v.ID); r.Ballot.Aside != nil || len(r.Ballot.ReceiptSig) == 0 || r.asidePending() != 0 {
+		t.Errorf("not judged in conflict: %+v", r.Ballot.Aside)
+	}
+	c.now = closes.Add(time.Hour + CheckDelay + time.Minute)
+	c.f.Tick(c.session())
+	c.h.Reset()
+	c.f.SubmitResults(c.session(), "svc", v.ID, c.resultsFor(v, resOpts{mine: c.ownBallot(v)}))
+	if c.hasKind("vote.receipt_rejected") || c.rec(v.ID).AsideProblem {
+		t.Errorf("an in-window receipt was reported late: %v", c.h.Activities)
+	}
+}
+
+// Review fix 4: the `extension` wait comes after the contradictions in the
+// results (a tally that does not name every choice is failed), and a
+// rows_unavailable record stays in the problem set while it waits.
+func TestExtensionWaitOrder(t *testing.T) {
+	aside := func() (*cenv, *votetest.Vote, votewire.Signed) {
+		c := newCastEnv(t)
+		v := c.open(1)
+		c.cast(v, "yes")
+		_, ids := c.casts()
+		closes := time.Unix(c.rec(v.ID).Closes, 0)
+		c.okReceipt(v, ids[0], c.leafOf(v), uint64(closes.Add(30*time.Minute).UnixMilli()))
+		doc, _ := c.svc.Extension(v, 1, closes.Add(time.Hour), c.now)
+		c.now = closes.Add(time.Hour + CheckDelay + time.Minute)
+		c.f.Tick(c.session())
+		return c, v, votewire.Signed{Doc: doc, Sig: signExt(c.svc, v, doc)}
+	}
+	c, v, x := aside()
+	in := c.resultsFor(v, resOpts{extra: []votewire.Signed{x}, tamper: func(r *votewire.Results) { delete(r.Tally, "no") }})
+	if out, _ := c.f.SubmitResults(c.session(), "svc", v.ID, in); out.State != CheckFailed || out.Reason != "results" {
+		t.Errorf("a contradiction while waiting: %+v", out)
+	}
+	c, v, x = aside()
+	ru := c.resultsFor(v, resOpts{extra: []votewire.Signed{x}})
+	ru.Row, ru.Proof, ru.RowsUnavailable = nil, nil, true
+	out, _ := c.f.SubmitResults(c.session(), "svc", v.ID, ru)
+	if r := c.rec(v.ID); out.Reason != CheckExtension || !r.capProblem() || !r.RowsProblem {
+		t.Errorf("rows_unavailable dropped while waiting: %+v", out)
+	}
+}
+
+// Review fix 5 (the coordinator's ruling): after a restore, an own-vk
+// ballot whose receipt is kept aside is held with no prompt and no self
+// flag (no cast); a verified extension offers the prompt; still outside
+// at a final judgement it is a late receipt and then self_unrecorded.
+func TestRestoreLateOwnVK(t *testing.T) {
+	restored := func() (*cenv, *votetest.Vote, time.Time) {
+		c := newCastEnv(t)
+		v := c.open(1)
+		shown := c.selfBallot(v, "no")
+		c.f.TransferCompleted(c.session(), "old", "new")
+		c.f.Tick(c.session())
+		closes := time.Unix(c.rec(v.ID).Closes, 0)
+		c.answer(v, c.statuses()[0], shown, uint64(closes.Add(30*time.Minute).UnixMilli()), true)
+		r := c.rec(v.ID)
+		if r.ServiceBallot == nil || !r.ServiceBallot.Late || r.SelfUnrecorded || c.hasKind("vote.self_mismatch") {
+			t.Fatalf("%+v", r.ServiceBallot)
+		}
+		if g := obj(t, c.app("vote.get", pairBody("svc", v.ID))); boolOf(g, "confirm_pending") || boolOf(g, "can_cast") {
+			t.Errorf("vote.get %v", g)
+		}
+		if _, err := c.f.Confirm(c.session(), "svc", v.ID, true); code(err) != "bad_request" {
+			t.Errorf("confirm offered: %v", err)
+		}
+		if _, err := c.cast(v, "yes"); code(err) != "checking" {
+			t.Errorf("cast: %v", err)
+		}
+		return c, v, closes
+	}
+	c, v, closes := restored()
+	_, msg := c.svc.Extension(v, 1, closes.Add(time.Hour), c.now)
+	c.call("vote.extended", msg)
+	if g := obj(t, c.app("vote.get", pairBody("svc", v.ID))); !boolOf(g, "confirm_pending") {
+		t.Errorf("not offered: %v", g)
+	}
+	if st, err := c.f.Confirm(c.session(), "svc", v.ID, true); err != nil || st != BallotRecorded {
+		t.Errorf("%s %v", st, err)
+	}
+	c, v, closes = restored()
+	c.now = closes.Add(CheckDelay + time.Minute)
+	c.f.Tick(c.session())
+	c.f.SubmitResults(c.session(), "svc", v.ID, c.resultsFor(v, resOpts{}))
+	if r := c.rec(v.ID); r.ServiceBallot != nil || !r.SelfUnrecorded || !c.has("vote.receipt_rejected", v.ID) || c.problems(v.ID) != 1 {
+		t.Errorf("%+v", r.ServiceBallot)
+	}
+	if sb, err := c.evidence(t, v.ID).Object("self_ballot"); err != nil || !boolOf(sb, "late_receipt") {
+		t.Errorf("self_ballot %v", sb)
+	}
+}
+
+// Review fix 6a, 6c: Confirm "yes" runs the two-receipts check against an
+// own-vk ballot shown while the prompt was pending (which set no flag);
+// an already_voted own receipt past the original close + 86,400 s is
+// vote.receipt_rejected.
+func TestConfirmTwoReceiptsAndLateAlreadyVoted(t *testing.T) {
+	c := newCastEnv(t)
+	v := c.open(1)
+	a, b := c.selfBallot(v, "no"), c.selfBallot(v, "yes")
+	c.f.TransferCompleted(c.session(), "old", "new")
+	c.f.Tick(c.session())
+	c.answer(v, c.statuses()[0], a, uint64(c.now.UnixMilli()), true)
+	c.now = c.now.Add(11 * time.Minute)
+	c.f.Check(c.session(), "svc", v.ID)
+	st := c.statuses()
+	c.answer(v, st[len(st)-1], b, uint64(c.now.UnixMilli()), true)
+	if r := c.rec(v.ID); r.SelfUnrecorded || r.Self == nil || r.ServiceBallot == nil {
+		t.Fatalf("while pending: %+v", r)
+	}
+	c.f.Confirm(c.session(), "svc", v.ID, true)
+	if r := c.rec(v.ID); !r.TwoReceipts || !r.SelfConflict || c.problems(v.ID) != 1 {
+		t.Errorf("after yes: two %v self %v", r.TwoReceipts, r.SelfConflict)
+	}
+	c = newCastEnv(t)
+	v = c.open(1)
+	c.cast(v, "yes")
+	_, ids := c.casts()
+	c.alreadyVoted(v, ids[0], c.ownBallot(v), uint64((c.rec(v.ID).OrigClose+votewire.MaxExtension)*1000))
+	if !c.has("vote.receipt_rejected", v.ID) || c.state(v) == BallotRecorded {
+		t.Errorf("%s", c.state(v))
 	}
 }

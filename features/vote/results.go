@@ -190,7 +190,7 @@ func verdict(r *record, row *votewire.RowBallot) (state, reason string) {
 		if row == nil {
 			return CheckVerified, ""
 		}
-		if sb := r.ServiceBallot; sb != nil && eq(row.VK, sb.VK) && row.ChoiceID == sb.ChoiceID && eq(row.BallotSig, sb.BallotSig) {
+		if sb := r.ServiceBallot; sb != nil && !sb.Late && eq(row.VK, sb.VK) && row.ChoiceID == sb.ChoiceID && eq(row.BallotSig, sb.BallotSig) {
 			return CheckUnconfirmed, "" // the member has not yet answered vote.confirm
 		}
 		return CheckFailed, "row_unexpected"
@@ -282,24 +282,6 @@ func (f *Feature) SubmitResults(s *vault.Session, conn, id string, in ResultsSub
 		adopt = append(adopt, &extRec{N: ext.N, Doc: x.Doc, Sig: x.Sig, Closes: ext.ClosesAt})
 		closes = ext.ClosesAt
 	}
-	// An extension adopted from results.json carries no bundle the vault
-	// verified, so it never takes what is kept aside (GC #7991 C): one that
-	// would bring a kept-aside receipt into the window is input that does
-	// not verify, and the check waits for the extension from vote.extended
-	// or the site's entry.
-	// (7adc8fe) The check waits with its own reason, `extension`, until
-	// the extension's bundle is verified (vote.extended, a site entry); a
-	// gave_up one stays gave_up.
-	if at := r.asidePending(); at != 0 && len(adopt) > 0 && at < closes*1000 {
-		if r.Check == "" {
-			r.Check = CheckPending
-		}
-		if r.CheckReason != CheckExtension {
-			r.CheckReason = CheckExtension
-			r.ChangedMS = now.UnixMilli()
-		}
-		return CheckOutcome{State: r.Check, Reason: CheckExtension, ConflictEvidence: r.conflictEvidence()}, nil
-	}
 	// Not before the close (0.88.12): t_tsa at or after the close in force
 	// once the results' extensions are adopted. The service anchors only
 	// past that close + 60 s, the TSA's allowance; an earlier stamp is
@@ -310,6 +292,32 @@ func (f *Feature) SubmitResults(s *vault.Session, conn, id string, in ResultsSub
 	}
 	if res.CheckProposal(p) != nil || r.Proof == nil || res.Counts.Eligible != int64(r.Proof.TreeSize) {
 		return f.failCheck(s, r, "results"), nil
+	}
+	// An extension adopted from results.json carries no bundle the vault
+	// verified, so it never takes what is kept aside (GC #7991 C; the
+	// receipt window is the verified close, review fix 1). When a kept-aside
+	// receipt could only become valid through such an extension (held
+	// already without a bundle, or adopted now), the check waits with its
+	// own reason, `extension` (7adc8fe), until the extension's bundle is
+	// verified (vote.extended, a site entry); a gave_up one stays gave_up.
+	// It comes after the contradictions in the results themselves (review
+	// fix 4), and a rows_unavailable record stays in the problem set.
+	if at := r.asidePending(); at != 0 && at < closes*1000 {
+		f.adopt(s, r, adopt, closes)
+		if in.RowsUnavailable {
+			f.rowsUnavailable(s, r, now)
+		}
+		if r.Check == "" {
+			r.Check = CheckPending
+		}
+		if r.CheckReason == CheckRowsUnavailable {
+			r.RowsWait = true
+		}
+		if r.CheckReason != CheckExtension {
+			r.CheckReason = CheckExtension
+			r.ChangedMS = now.UnixMilli()
+		}
+		return CheckOutcome{State: r.Check, Reason: CheckExtension, ConflictEvidence: r.conflictEvidence()}, nil
 	}
 	if in.RowsUnavailable {
 		// The app could not get the member's row (0.83.3). The results are

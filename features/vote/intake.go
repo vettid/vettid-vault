@@ -429,6 +429,13 @@ func (f *Feature) extend(s *vault.Session, conn string, m *votewire.ExtendedMsg)
 	switch {
 	case ext.N <= int64(len(r.Exts)):
 		if eq(r.Exts[ext.N-1].Doc, m.Extension) {
+			// The same bytes: a re-send, or (review fix 1) the bundle of one
+			// adopted from results.json, verified now.
+			if held := r.Exts[ext.N-1]; len(held.Bundle) == 0 && eq(held.Sig, m.ExtensionSig) {
+				if reason := f.verifyHeld(s, r, held, m.Bundle); reason != "" {
+					return fail(reason)
+				}
+			}
 			return okBody(r.ID), nil
 		}
 		return fail("order")
@@ -450,6 +457,47 @@ func (f *Feature) extend(s *vault.Session, conn string, m *votewire.ExtendedMsg)
 		}
 	}
 	return okBody(r.ID), nil
+}
+
+// verifyHeld verifies the bundle of an extension adopted from results.json
+// (held without one): anchored before the close it extends, as
+// applyExtension checks. It then counts toward the verified close, and
+// what is kept aside is judged again (review fix 1).
+func (f *Feature) verifyHeld(s *vault.Session, r *record, e *extRec, bundle []byte) string {
+	if len(bundle) == 0 {
+		return ""
+	}
+	prev := r.OrigClose
+	if e.N > 1 {
+		prev = r.Exts[e.N-2].Closes
+	}
+	switch f.anchor(s, r.Conn, r.signers(), e.Doc, bundle, time.Unix(prev-1, 0)) {
+	case anchorOK:
+	case anchorLate:
+		return "late"
+	default:
+		return "anchor"
+	}
+	e.Bundle = append([]byte{}, bundle...)
+	r.ChangedMS = s.Now().UnixMilli()
+	f.audit(s, "vote.extended", r.Conn, r.ID+":"+strconv.FormatInt(e.N, 10))
+	f.extensionVerified(s, r)
+	return ""
+}
+
+// extensionVerified: the verified close moved. What is kept aside is
+// judged again, and a check that waited for this bundle (reason extension)
+// is judged at the next submission (a rows_unavailable one goes back to
+// that reason).
+func (f *Feature) extensionVerified(s *vault.Session, r *record) {
+	f.rejudgeAside(s, r)
+	if r.CheckReason == CheckExtension {
+		r.CheckReason = ""
+		if r.RowsWait {
+			r.CheckReason = CheckRowsUnavailable
+		}
+		r.RowsWait = false
+	}
 }
 
 // applyExtension checks the order, the total and the anchor of the next
@@ -485,10 +533,7 @@ func (f *Feature) applyExtension(s *vault.Session, r *record, e *extRec) string 
 	// A receipt kept aside for this extension is judged again (0.88.12), and
 	// a check that waited for this bundle (reason extension) is judged at
 	// the next submission.
-	f.rejudgeAside(s, r)
-	if r.CheckReason == CheckExtension {
-		r.CheckReason = ""
-	}
+	f.extensionVerified(s, r)
 	if r.Ballot == nil && len(r.VKSeed) == 0 {
 		// A vote that was never cast and has reopened needs a voting key again.
 		// The earlier public key stays: a ballot under it is own-vk (GC #7991 G).

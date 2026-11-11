@@ -318,8 +318,8 @@ func (f *Feature) syncEntry(s *vault.Session, id, serviceID string, d *syncDocum
 		_ = f.siteDocument(s, r.Conn, id, d.doc)
 		if r = f.get(r.Conn, id); r != nil && r.RejectReason == "" {
 			for _, m := range d.exts {
-				if int64(len(r.Exts)) >= extN(m) {
-					continue // held already
+				if n := extN(m); int64(len(r.Exts)) >= n && (n < 1 || len(r.Exts[n-1].Bundle) > 0) {
+					continue // held already, with its bundle (one adopted from the results is verified here, review fix 1)
 				}
 				_, _ = f.extend(s, r.Conn, m) // checked as vote.extended is
 			}

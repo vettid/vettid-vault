@@ -155,15 +155,6 @@ type ballot struct {
 	Stopped bool `json:"stopped,omitempty"`
 }
 
-// shownAside is the receipt of a ballot the service showed (with the
-// ballot it is for) kept aside for an extension not learned yet: Answer
-// when it came in already_voted.
-type shownAside struct {
-	Ballot   *svcBallot `json:"ballot"`
-	Answer   bool       `json:"answer,omitempty"`
-	Rejected bool       `json:"rejected,omitempty"`
-}
-
 // keptReceipt is a receipt kept aside (ballot.Aside).
 type keptReceipt struct {
 	MsgMS      int64  `json:"msg_ms"`
@@ -196,10 +187,12 @@ type svcBallot struct {
 	BallotSig  []byte `json:"ballot_sig"`
 	MsgMS      int64  `json:"msg_ms,omitempty"`
 	ReceiptSig []byte `json:"receipt_sig,omitempty"`
-	// Late: the receipt is for an extension not learned yet and is kept
-	// aside (record.AsideShown); it does not count until a verified
-	// extension brings it into the window (7adc8fe).
-	Late bool `json:"late,omitempty"`
+	// Late: the receipt is for an extension not verified yet and is kept
+	// aside; it does not count until a verified extension brings it into
+	// the window (7adc8fe). LateRejected: still outside at a final
+	// judgement (no receipt, evidence).
+	Late         bool `json:"late,omitempty"`
+	LateRejected bool `json:"late_rejected,omitempty"`
 }
 
 // results is what the vault keeps of a checked result (§10.19.6).
@@ -323,12 +316,11 @@ type record struct {
 	// OldVKs are the earlier public voting keys the record held (a reopened
 	// vote never cast gets a fresh one): a ballot under any is own-vk.
 	OldVKs [][]byte `json:"old_vks,omitempty"`
-	// AsideShown is a shown ballot (foreign or own-vk) whose receipt is for
-	// an extension not learned yet (GC #7991 C), kept aside like the vault's
-	// own receipt (ballot.Aside). AsideProblem: one still outside at a final
-	// judgement raised vote.problem (once).
-	AsideShown   *shownAside `json:"aside_shown,omitempty"`
-	AsideProblem bool        `json:"aside_problem,omitempty"`
+	// AsideProblem: a receipt kept aside still outside at a final
+	// judgement raised vote.problem (once). RowsWait: the check waits for
+	// an extension's bundle (reason extension) and was rows_unavailable.
+	AsideProblem bool `json:"aside_problem,omitempty"`
+	RowsWait     bool `json:"rows_wait,omitempty"`
 
 	// AbsentMS is the vault-clock time of the first `absent` answer after the
 	// close in force (a found document clears it); unpublished needs a second
@@ -386,7 +378,6 @@ type compact struct {
 	Self       *svcBallot   `json:"self,omitempty"`
 	SelfLatest *svcBallot   `json:"self_latest,omitempty"`
 	Aside      *keptReceipt `json:"aside,omitempty"`
-	AsideShown *shownAside  `json:"aside_shown,omitempty"`
 }
 
 type droppedNote struct {
@@ -503,7 +494,7 @@ func (r *record) capProblem() bool {
 	}
 	// A check that waits for a row the app cannot get (0.83.3) is a problem
 	// record, not an in-progress one: it is never evicted.
-	if r.Check == CheckPending && r.CheckReason == CheckRowsUnavailable {
+	if r.Check == CheckPending && (r.CheckReason == CheckRowsUnavailable || r.CheckReason == CheckExtension && r.RowsWait) {
 		return true
 	}
 	if r.TwoReceipts || r.AsideProblem {
@@ -546,7 +537,7 @@ func (r *record) release() *compact {
 		c.Outcome, c.RejectReason = "released:rejected", r.RejectReason
 	}
 	c.Site, c.SiteCopy, c.StatusAnswers, c.Other = r.Site, r.SiteCopy, r.StatusAnswers, r.Other
-	c.Self, c.SelfLatest, c.AsideShown = r.Self, r.SelfLatest, r.AsideShown
+	c.Self, c.SelfLatest = r.Self, r.SelfLatest
 	if r.Ballot != nil {
 		c.Aside = r.Ballot.Aside
 	}

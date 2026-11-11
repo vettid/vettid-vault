@@ -216,6 +216,9 @@ func (m *Manager) dropCarried(p *Peer, id []byte) {
 			keep = append(keep, p.Carried[i])
 		}
 	}
+	if len(keep) == len(p.Carried) {
+		return
+	}
 	for i := len(keep); i < len(p.Carried); i++ {
 		p.Carried[i] = CarriedTokens{}
 	}

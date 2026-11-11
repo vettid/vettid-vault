@@ -156,3 +156,75 @@ func TestR29FinalQuotaRefreshSparesALaterTokenOfTheSameExp(t *testing.T) {
 		}
 	})
 }
+
+// refreshUnder runs side m's hTokenRefresh for p as if deposited under jti.
+func refreshUnder(t *testing.T, f *r29Fx, m *Manager, p *Peer, jti string) {
+	t.Helper()
+	m.msgJTI = jti
+	if _, err := m.hTokenRefresh(context.Background(), &Session{m: m, peer: p, now: f.clk}, nil); err != nil {
+		t.Fatal(err)
+	}
+	m.msgJTI = ""
+}
+
+func deniedJTI(m *Manager, jti string) bool {
+	for _, it := range m.st.Issued {
+		if it.JTI == jti {
+			return it.Denied
+		}
+	}
+	return false
+}
+
+// Item 4 (review of a28c54d, finding 2): a handshake's token enters the
+// registry at activation, after a token minted later (a refresh answered
+// meanwhile); a refresh under the handshake's token spares that later one.
+func TestR29FinalQuotaRefreshSparesALaterTokenRegisteredBefore(t *testing.T) {
+	f := newR29Fx(t)
+	f.do(0, func(m *Manager, p *Peer) {
+		h := m.latestIssued(p.ID, TokStanding)
+		hJTI := h.JTI
+		f.advance(time.Hour)
+		m.issueTo(p, TokStanding, f.clk) // X: minted after H, its exp later
+		x := m.latestIssued(p.ID, TokStanding)
+		xJTI := x.JTI
+		// H enters the registry after X, as a handshake's tokens do at activation.
+		var hRec IssuedToken
+		kept := m.st.Issued[:0]
+		for _, it := range m.st.Issued {
+			if it.JTI == hJTI {
+				hRec = it
+				continue
+			}
+			kept = append(kept, it)
+		}
+		m.st.Issued = append(kept, hRec)
+		refreshUnder(t, f, m, p, hJTI)
+		if !deniedJTI(m, hJTI) {
+			t.Fatal("the token the refresh came under was not denied")
+		}
+		if deniedJTI(m, xJTI) {
+			t.Fatal("a token minted after it, registered before it, was denied")
+		}
+	})
+}
+
+// Item 4 (review of a28c54d, M6): a second refresh under a token the first
+// already denied spares the token the first one minted, still on its way.
+func TestR29FinalSecondRefreshUnderADeniedTokenSparesTheFirstsToken(t *testing.T) {
+	f := newR29Fx(t)
+	f.do(0, func(m *Manager, p *Peer) {
+		under := m.latestIssued(p.ID, TokStanding).JTI
+		f.advance(time.Second)
+		refreshUnder(t, f, m, p, under)
+		first := m.latestIssued(p.ID, TokStanding).JTI
+		if first == under || !deniedJTI(m, under) {
+			t.Fatal("setup: the first refresh did not mint a fresh token and deny the old one")
+		}
+		f.advance(25 * time.Hour) // past the one-a-day bound
+		refreshUnder(t, f, m, p, under)
+		if deniedJTI(m, first) {
+			t.Fatal("a refresh under an already denied token denied the token the first refresh minted")
+		}
+	})
+}

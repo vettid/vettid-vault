@@ -6,10 +6,22 @@ import (
 	"github.com/vettid/vettid-vault/vault"
 )
 
+// The runtime interfaces the calls feature implements.
+var (
+	_ vault.CallGate              = (*Feature)(nil)
+	_ vault.AccessEndedObserver   = (*Feature)(nil)
+	_ vault.DeviceRemovedObserver = (*Feature)(nil)
+	_ vault.BatchEndObserver      = (*Feature)(nil)
+	_ vault.TickObserver          = (*Feature)(nil)
+	_ vault.OwnerHoldObserver     = (*Feature)(nil)
+)
+
 // OwnerHoldStarted implements vault.OwnerHoldObserver: an incoming call
 // ringing when the hold begins stops ringing on the devices
 // (call.end{unavailable} to them only; the caller is not told and times
-// out) and is recorded as missed. A call answered before continues
+// out) and is recorded as missed. (0.88.13, owner decision 2026-11-11) An
+// outgoing call still ringing ends too: call.end{unavailable} to the peer
+// vault, and the devices told once. A call answered before continues
 // (§3.6.3, §10.10).
 func (f *Feature) OwnerHoldStarted(s *vault.Session) {
 	f.mu.Lock()
@@ -17,7 +29,13 @@ func (f *Feature) OwnerHoldStarted(s *vault.Session) {
 	now := s.Now()
 	for _, id := range f.sorted() {
 		c := f.calls[id]
-		if c.Dir != DirIn || c.State != StateRinging || !c.live(now) {
+		if c.State != StateRinging || !c.live(now) {
+			continue
+		}
+		if c.Dir == DirOut {
+			f.finish(s, c, "unavailable")
+			_ = s.SendToConnection(c.Conn, "call.end", endJSON(c.ID, "unavailable"))
+			endToDevices(s, c, "unavailable", "")
 			continue
 		}
 		s.NotifyDevicesWith("call.end", endJSON(c.ID, "unavailable"), "", vault.SendOptions{})
@@ -29,18 +47,14 @@ func (f *Feature) OwnerHoldStarted(s *vault.Session) {
 // OwnerHoldEnded implements vault.OwnerHoldObserver.
 func (f *Feature) OwnerHoldEnded(*vault.Session) {}
 
-// CallAnsweredBefore implements vault.CallGate: the device is the call
-// device of an active call answered before t and still live at now (the
-// 12 h limit: a stale record keeps nothing open through the hold).
-func (f *Feature) CallAnsweredBefore(device string, t, now time.Time) bool {
+// CallAnsweredBefore implements vault.CallGate: callID is the device's
+// active call, answered before t and still live at now (the 12 h limit: a
+// stale record keeps nothing open through the hold).
+func (f *Feature) CallAnsweredBefore(device, callID string, t, now time.Time) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	for _, c := range f.calls {
-		if c.Device == device && c.State == StateActive && !c.Answered.IsZero() && c.Answered.Before(t) && c.live(now) {
-			return true
-		}
-	}
-	return false
+	c := f.calls[callID]
+	return c != nil && c.Device == device && c.State == StateActive && !c.Answered.IsZero() && c.Answered.Before(t) && c.live(now)
 }
 
 // CallActive implements vault.CallGate: callID is an active call of the
@@ -50,6 +64,15 @@ func (f *Feature) CallActive(device, callID string, now time.Time) bool {
 	defer f.mu.Unlock()
 	c := f.calls[callID]
 	return c != nil && c.Device == device && c.State == StateActive && c.live(now)
+}
+
+// CallRingingOut implements vault.CallGate: callID is the device's own
+// outgoing call, still ringing at now.
+func (f *Feature) CallRingingOut(device, callID string, now time.Time) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	c := f.calls[callID]
+	return c != nil && c.Device == device && c.Dir == DirOut && c.State == StateRinging && c.live(now)
 }
 
 // EndCallsAnsweredFrom implements vault.CallGate: when the hold begins, an

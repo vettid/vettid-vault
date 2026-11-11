@@ -92,7 +92,8 @@ func TestRingTimerOutgoing(t *testing.T) {
 	if e := a.sent(t, "cB", "call.end"); str(t, e.Body, "reason") != "timeout" {
 		t.Fatal("the peer vault was not told timeout")
 	}
-	a.sent(t, "devices", "call.end")
+	a.sent(t, "dev-app", "call.end") // the caller's device directly (a desktop without a session too, §6.8)
+	a.sent(t, "devices-except:dev-app", "call.end")
 	if missedCount(a) != 0 {
 		t.Fatal("an outgoing call recorded as missed")
 	}

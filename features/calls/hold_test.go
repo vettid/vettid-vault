@@ -58,12 +58,12 @@ func TestCallsWhileHeld(t *testing.T) {
 		t.Fatal(r.Code)
 	}
 	now := t0.Add(time.Minute)
-	if !b.f.CallAnsweredBefore("dev-desktop", t0.Add(time.Minute), now) || b.f.CallAnsweredBefore("dev-desktop", t0, now) ||
-		b.f.CallAnsweredBefore("dev-app", t0.Add(time.Minute), now) {
+	if !b.f.CallAnsweredBefore("dev-desktop", id3, t0.Add(time.Minute), now) || b.f.CallAnsweredBefore("dev-desktop", id3, t0, now) ||
+		b.f.CallAnsweredBefore("dev-app", id3, t0.Add(time.Minute), now) || b.f.CallAnsweredBefore("dev-desktop", id2, t0.Add(time.Minute), now) {
 		t.Fatal("CallAnsweredBefore")
 	}
 	// The 12 h limit: a stale active record keeps nothing open (L1).
-	if b.f.CallAnsweredBefore("dev-desktop", t0.Add(time.Minute), t0.Add(MaxCallDuration+time.Minute)) {
+	if b.f.CallAnsweredBefore("dev-desktop", id3, t0.Add(time.Minute), t0.Add(MaxCallDuration+time.Minute)) {
 		t.Fatal("a call past the 12 h limit still passes the hold")
 	}
 	b.h.Reset()
@@ -270,4 +270,99 @@ func TestCallerAnswerUndeliverableEndsTheCall(t *testing.T) {
 	if e := a.sent(t, "cB", "call.end"); str(t, e.Body, "reason") != "unavailable" {
 		t.Fatal("the peer was not told")
 	}
+}
+
+// §3.6.3 (0.88.13, owner decision 2026-11-11): an outgoing call still
+// ringing when the hold begins ends, the peer told and the devices once.
+func TestHoldEndsOutgoingRinging(t *testing.T) {
+	a, b := newSide("cB"), newSide("cA")
+	link(a, b)
+	sk, _ := callwire.NewOfferKey()
+	r := featuretest.Call(a.f, a.h, t0, "app", "call.start", startBody("cB", sk.Public().Bytes()))
+	if !r.OK() {
+		t.Fatal(r.Code)
+	}
+	callID := str(t, r.Body, "call_id")
+	a.h.Reset()
+	a.f.OwnerHoldStarted(vault.NewSession(context.Background(), a.h, vault.PeerInfo{}, t0.Add(time.Second), nil))
+	if c, _ := a.f.Get(callID); c.State != StateEnded || c.Reason != "unavailable" {
+		t.Fatalf("%+v", c)
+	}
+	if e := a.sent(t, "cB", "call.end"); str(t, e.Body, "reason") != "unavailable" {
+		t.Fatal("the peer was not told")
+	}
+	if n := len(a.h.SentOfType("call.end")); n != 3 { // the peer, the caller's device, the others
+		t.Fatalf("%d call.end", n)
+	}
+	if a.h.HasActivity("call.missed") {
+		t.Fatal("an outgoing call recorded as missed")
+	}
+}
+
+// CallActive is an active call only, not a ringing one; access ended on
+// purpose also ends the device's ringing outgoing call.
+func TestCallActiveAndRingingOutgoing(t *testing.T) {
+	a, b := newSide("cB"), newSide("cA")
+	link(a, b)
+	sk, _ := callwire.NewOfferKey()
+	r := featuretest.Call(a.f, a.h, t0, "app", "call.start", startBody("cB", sk.Public().Bytes()))
+	if !r.OK() {
+		t.Fatal(r.Code)
+	}
+	callID := str(t, r.Body, "call_id")
+	if a.f.CallActive("dev-app", callID, t0.Add(time.Second)) {
+		t.Fatal("a ringing call counted as active")
+	}
+	a.h.Reset()
+	a.f.AccessEnded(vault.NewSession(context.Background(), a.h, vault.PeerInfo{}, t0.Add(time.Second), nil), "dev-app")
+	if c, _ := a.f.Get(callID); c.State != StateEnded || c.Reason != "unavailable" {
+		t.Fatalf("%+v", c)
+	}
+	a.sent(t, "cB", "call.end")
+	a.sent(t, "dev-app", "call.end")
+}
+
+// CallRingingOut: only the device's own outgoing call while it rings.
+func TestCallRingingOut(t *testing.T) {
+	a, b := newSide("cB"), newSide("cA")
+	link(a, b)
+	sk, _ := callwire.NewOfferKey()
+	r := featuretest.Call(a.f, a.h, t0, "app", "call.start", startBody("cB", sk.Public().Bytes()))
+	if !r.OK() {
+		t.Fatal(r.Code)
+	}
+	callID := str(t, r.Body, "call_id")
+	now := t0.Add(time.Second)
+	if !a.f.CallRingingOut("dev-app", callID, now) || a.f.CallRingingOut("dev-desktop", callID, now) ||
+		a.f.CallRingingOut("dev-app", newCallID("cB"), now) || a.f.CallRingingOut("dev-app", callID, t0.Add(OfferTTL)) {
+		t.Fatal("CallRingingOut")
+	}
+	// An incoming ringing call is not one's own outgoing call.
+	id := newCallID("cA")
+	featuretest.CallExp(b.f, b.h, t0, t0.Add(OfferTTL), "connection:cA", "call.offer", peerOffer("cA", id, "audio", sk.Public().Bytes()))
+	if b.f.CallRingingOut("dev-app", id, now) || b.f.CallRingingOut("", id, now) {
+		t.Fatal("an incoming call counted as one's own outgoing")
+	}
+}
+
+// A stale record (an outgoing call past its exp, not yet swept) ended by
+// the peer goes out by the usual fan-out only, never straight to its
+// device past an expired session.
+func TestStaleEndNotSentToTheDevice(t *testing.T) {
+	a, b := newSide("cB"), newSide("cA")
+	link(a, b)
+	sk, _ := callwire.NewOfferKey()
+	r := featuretest.Call(a.f, a.h, t0, "app", "call.start", startBody("cB", sk.Public().Bytes()))
+	if !r.OK() {
+		t.Fatal(r.Code)
+	}
+	callID := str(t, r.Body, "call_id")
+	a.h.Reset()
+	featuretest.Call(a.f, a.h, t0.Add(OfferTTL+time.Second), "connection:cB", "call.end", `{"call_id":"`+callID+`","reason":"hangup"}`)
+	for _, e := range a.h.SentOfType("call.end") {
+		if e.To == "dev-app" {
+			t.Fatal("a stale record's end went straight to its device")
+		}
+	}
+	a.sent(t, "devices", "call.end")
 }

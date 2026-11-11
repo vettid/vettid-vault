@@ -576,7 +576,7 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 		// The daily owner check (§3.6.3): past the deadline the app, and
 		// with the hold on every owner device, may send only the hold's
 		// allow list. A recovering app keeps its own set (§11.11.5).
-		if st := m.ownerCheckState(now); st != OwnerCheckOK && !m.holdAllows(p, in.Type, st) {
+		if st := m.ownerCheckState(now); st != OwnerCheckOK && !m.holdAllows(p, in.Type, in.Body, st) {
 			if te.spec.Request {
 				m.respondError(p, in, rkey, "owner_check_required", "", now)
 			} else {
@@ -621,7 +621,7 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 		}
 		return disp(eph)
 	}
-	if !accessExempt[in.Type] && !m.hasAccess(p, now) && !(p.Kind == KindDesktop && callSignal[in.Type] && m.callActive(p.ID, in.Body, now)) {
+	if !accessExempt[in.Type] && !m.hasAccess(p, now) && !(p.Kind == KindDesktop && m.callOutlivesSession(p.ID, in.Type, in.Body, now)) {
 		// §6.8: a desktop or agent acts only within an access session;
 		// a desktop's active call continues until it ends, its own
 		// keep-alive, ice and end passing an expired session.

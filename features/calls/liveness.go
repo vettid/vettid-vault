@@ -70,7 +70,7 @@ func (f *Feature) BatchEnd(s *vault.Session) {
 // nothing (it ends its own record by its own timer).
 func (f *Feature) ringTimeout(s *vault.Session, c *Call) {
 	f.finish(s, c, "timeout")
-	s.NotifyDevicesWith("call.end", endJSON(c.ID, "timeout"), "", vault.SendOptions{})
+	endToDevices(s, c, "timeout", "")
 	if c.Dir == DirOut {
 		_ = s.SendToConnection(c.Conn, "call.end", endJSON(c.ID, "timeout"))
 		return

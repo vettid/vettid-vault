@@ -182,7 +182,7 @@ func (m *Manager) runBlobCall(r *attRunner, deviceID string, req envelope.Inner,
 		case !m.credentialReady() && !(p.Recovering && m.credentialExists()):
 			code = "credential_required"
 		case !p.Recovering:
-			if st := m.ownerCheckState(now); st != OwnerCheckOK && !m.holdAllows(p, req.Type, st) {
+			if st := m.ownerCheckState(now); st != OwnerCheckOK && !m.holdAllows(p, req.Type, nil, st) {
 				code = "owner_check_required"
 			}
 		case !recoveryAllowed[req.Type]:

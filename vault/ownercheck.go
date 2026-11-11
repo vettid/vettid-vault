@@ -150,13 +150,18 @@ type OwnerHoldObserver interface {
 // a call, still active, before t (its call.ice and call.end pass the gate,
 // §3.6.3).
 type CallGate interface {
-	// CallAnsweredBefore: the device has a call answered before t that is
-	// still live at now (not past the 12 h limit).
-	CallAnsweredBefore(deviceID string, t, now time.Time) bool
+	// CallAnsweredBefore: callID is the device's call, answered before t
+	// and still live at now (not past the 12 h limit).
+	CallAnsweredBefore(deviceID, callID string, t, now time.Time) bool
 	// CallActive: callID is an active call of the device, still live at
 	// now. Its own call.keepalive, call.ice and call.end pass an expired
 	// access session (§6.8): the call continues until it ends.
 	CallActive(deviceID, callID string, now time.Time) bool
+	// CallRingingOut: callID is the device's own outgoing call, still
+	// ringing at now. Its call.end (only) passes an expired access
+	// session: a desktop can always hang up the call it placed (§6.8,
+	// 0.88.13, owner decision 2026-11-11).
+	CallRingingOut(deviceID, callID string, now time.Time) bool
 	// EndCallsAnsweredFrom ends, when the hold begins, every active call
 	// answered at or after t (the deadline): only a call answered before
 	// it continues through the hold (§3.6.3). The peer and the owner
@@ -525,7 +530,7 @@ func (m *Manager) countHeld(a Activity) {
 
 // holdAllows is the hold's allow list (§3.6.3) for a message from owner
 // device p while the vault is due or held.
-func (m *Manager) holdAllows(p *Peer, typ, state string) bool {
+func (m *Manager) holdAllows(p *Peer, typ string, body []byte, state string) bool {
 	switch typ {
 	case tokenIssuedType, tokenRefreshType, "relay.address.update", TypeDeviceFeatures:
 		return true // any device: the transport types (device.features, §10.2)
@@ -546,7 +551,7 @@ func (m *Manager) holdAllows(p *Peer, typ, state string) bool {
 		case "device.transfer.approve", "device.transfer.reject":
 			return m.st.Transfer != nil // a transfer opened before the hold
 		case "call.ice", "call.keepalive": // a call answered before the deadline continues (C2: its liveness too)
-			return m.callAnsweredBefore(p.ID, deadline)
+			return m.callAnsweredBefore(p.ID, body, deadline)
 		}
 		return false
 	case KindDesktop:
@@ -557,7 +562,7 @@ func (m *Manager) holdAllows(p *Peer, typ, state string) bool {
 		case "vault.status", "vault.lock", "device.session.end", "location.share.stop":
 			return true
 		case "call.end", "call.ice", "call.keepalive":
-			return m.callAnsweredBefore(p.ID, deadline)
+			return m.callAnsweredBefore(p.ID, body, deadline)
 		}
 		return false
 	case KindAgent:
@@ -604,12 +609,8 @@ func (m *Manager) alarmState() string {
 }
 
 func (m *Manager) callActive(device string, body []byte, now time.Time) bool {
-	o, err := strictjson.ParseObject(body)
-	if err != nil {
-		return false
-	}
-	callID, err := o.String("call_id")
-	if err != nil || callID == "" {
+	callID := bodyCallID(body)
+	if callID == "" {
 		return false
 	}
 	for _, f := range m.features {
@@ -620,13 +621,43 @@ func (m *Manager) callActive(device string, body []byte, now time.Time) bool {
 	return false
 }
 
-func (m *Manager) callAnsweredBefore(device string, t time.Time) bool {
+func (m *Manager) callRingingOut(device string, body []byte, now time.Time) bool {
+	callID := bodyCallID(body)
+	if callID == "" {
+		return false
+	}
 	for _, f := range m.features {
-		if c, ok := f.(CallGate); ok && c.CallAnsweredBefore(device, t, m.now()) {
+		if c, ok := f.(CallGate); ok && c.CallRingingOut(device, callID, now) {
 			return true
 		}
 	}
 	return false
+}
+
+func (m *Manager) callAnsweredBefore(device string, body []byte, t time.Time) bool {
+	callID := bodyCallID(body)
+	if callID == "" {
+		return false
+	}
+	for _, f := range m.features {
+		if c, ok := f.(CallGate); ok && c.CallAnsweredBefore(device, callID, t, m.now()) {
+			return true
+		}
+	}
+	return false
+}
+
+// bodyCallID is a call message's call_id, or "".
+func bodyCallID(body []byte) string {
+	o, err := strictjson.ParseObject(body)
+	if err != nil {
+		return ""
+	}
+	id, err := o.String("call_id")
+	if err != nil {
+		return ""
+	}
+	return id
 }
 
 // ownerCheckStatus is vault.status's owner_check member (§10.2): the

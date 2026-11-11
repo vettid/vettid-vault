@@ -582,6 +582,17 @@ func endToDevices(s *vault.Session, c *Call, reason, except string) {
 	s.NotifyDevicesWith("call.end", body, except, vault.SendOptions{})
 }
 
+// endToLiveDevice is endToDevices for a call that was live; a stale record
+// (past its exp or 12 h) ends with the usual fan-out only, so nothing goes
+// past a desktop's expired session for it.
+func endToLiveDevice(s *vault.Session, c *Call, reason string, live bool) {
+	if live {
+		endToDevices(s, c, reason, "")
+		return
+	}
+	s.NotifyDevicesWith("call.end", endJSON(c.ID, reason), "", vault.SendOptions{})
+}
+
 func endJSON(id, reason string) []byte {
 	return strictjson.NewBuilder().String("call_id", id).String("reason", reason).Bytes()
 }
@@ -686,18 +697,19 @@ func (f *Feature) answerFromPeer(s *vault.Session, body []byte) error {
 		endToDevices(s, c, "unavailable", "")
 		return nil
 	}
-	c.State, c.Answered = StateActive, s.Now()
-	f.alive[c.ID] = c.Answered // the 90 s count from the answer until the first keep-alive
 	peer, _ := s.Connection(c.Conn)
 	if err := s.Send(c.Device, "call.answer", a.Vouched.add(strictjson.NewBuilder().String("call_id", c.ID).String("sdp", a.SDP).
 		Base64("enc", a.Enc)).Base64("peer_ik", peer.IK).Bytes(), vault.SendOptions{}); err != nil {
-		// The caller can't get the answer (a desktop whose session ended
-		// while it rang, or a device gone): the call can't go on.
+		// Its device can't receive the answer (a desktop whose session
+		// ended, an app gated past the deadline, a suspended or removed
+		// device): the call can't go on.
 		f.finish(s, c, "unavailable")
 		_ = s.SendToConnection(c.Conn, "call.end", endJSON(c.ID, "unavailable"))
 		endToDevices(s, c, "unavailable", "")
 		return nil
 	}
+	c.State, c.Answered = StateActive, s.Now()
+	f.alive[c.ID] = c.Answered // the 90 s count from the answer until the first keep-alive
 	s.Record(vault.Activity{Kind: "call.answered", ConnectionID: c.Conn, Ref: c.ID, Direction: DirOut, Audit: true})
 	return nil
 }
@@ -739,8 +751,9 @@ func (f *Feature) end(s *vault.Session, body []byte, fromConn bool) error {
 		if c.Conn != s.From().ID {
 			return nil
 		}
+		live := c.live(s.Now())
 		f.finish(s, c, e.Reason)
-		endToDevices(s, c, e.Reason, "")
+		endToLiveDevice(s, c, e.Reason, live)
 		if c.Dir == DirIn && ringing {
 			f.missed(s, c)
 		}
@@ -930,8 +943,9 @@ func (f *Feature) ConnectionRemoved(s *vault.Session, id string) {
 	defer f.mu.Unlock()
 	for _, c := range f.calls {
 		if c.Conn == id && c.State != StateEnded {
+			live := c.live(s.Now())
 			f.finish(s, c, "unavailable")
-			endToDevices(s, c, "unavailable", "")
+			endToLiveDevice(s, c, "unavailable", live)
 		}
 	}
 }

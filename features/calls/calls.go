@@ -151,9 +151,9 @@ type Feature struct {
 	// ringMu guards ringingIn: the incoming calls that ring, by id, with
 	// their offer's exp. Kept apart from mu, which a handler holds across a
 	// network call, so that the wake's look (CallRinging) never waits on it.
-	ringMu  sync.Mutex
+	ringMu    sync.Mutex
 	ringingIn map[string]time.Time
-	calls  map[string]*Call
+	calls     map[string]*Call
 	// alive is when each watched active call's device last showed it was
 	// alive (liveness.go): memory only, never in the state.
 	alive map[string]time.Time

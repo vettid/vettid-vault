@@ -597,7 +597,8 @@ func (m *Manager) hTokenRefresh(_ context.Context, s *Session, _ *envelope.Inner
 		// one the refresh was deposited under (its collect jti) are denylisted: a newer one (a near-end re-mint, a
 		// prompt, a handshake's) may still be on its way to the peer. Without a jti (a relay before 0.4), as before.
 		// (Release 29 final review, item 4) "Newer" is a later exp (a standing token's exp is its issue second
-		// plus a fixed TTL, so exp orders by issue to the second), and for the same exp the later place in the
+		// plus its kind's TTL, so exp orders by issue to the second while the relay's token limit,
+		// MaxTokenLifetimeSeconds, and the TTL option are unchanged), and for the same exp the later place in the
 		// registry (appended as minted, pruned in place). Not the registry's order alone: a handshake's tokens are
 		// minted at hs.init or hs.resp but enter the registry only at activation, after any minted meanwhile. The
 		// token it came under is found by its jti whether or not it is denied already: it marks the place.

@@ -54,6 +54,9 @@ var r30NoteSeeds = []struct {
 	// receiver's stale_or_future for it judging the quota wait.
 	{8495705468849050258, false, true, true, ""},
 	{14452917345793243350, false, true, true, ""}, // was the lock-wait residual: #6875's re-stamp delivers it
+	// The late window (#7898, lead a #7901): Tried by three 503s, deposited
+	// 3 days late as it is, collected after 16 days: lost, and now told.
+	{14731834898612197969, false, true, false, rpToldResidual},
 }
 
 func TestR30NoteLossSeeds(t *testing.T) {

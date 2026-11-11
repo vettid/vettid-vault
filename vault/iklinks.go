@@ -666,19 +666,52 @@ func (m *Manager) notDelivered(e *OutboxEntry, reason string, now time.Time) {
 	if reason == "undelivered_removed" && m.removingOwn && !NoticeOwnRemoval {
 		return // the member's own removal: audited, not told (#7806)
 	}
-	if p := m.peer(e.PeerID); (p == nil || p.Kind == KindConnection) && memberMessage(e, typ) {
-		kind := NoticeNotDelivered
-		if reason == "undelivered_window" {
-			kind = NoticeUnconfirmed
+	kind := NoticeNotDelivered
+	if reason == "undelivered_window" {
+		if e.Unconfirmed {
+			return // told already, at its late deposit: the same notice
 		}
-		// The connection's name as the vault has it now, so that the app
-		// can name a connection that is gone (vault-local: the feed only).
-		name := ""
-		if p != nil {
-			name = p.Name
-		}
-		m.record(Activity{Kind: kind, ConnectionID: e.PeerID, Name: name, Ref: ref, Feed: true, Batch: NoticeWindow}, now)
+		kind = NoticeUnconfirmed
 	}
+	m.notice(e, typ, kind, ref, now)
+}
+
+// unconfirmedLate tells the member, once, that e may not have been
+// delivered: it goes as it is with a ts older than RestampAfter, and the
+// relay's hold may take it past the peer's 16 days (the late window, lead
+// a #7901). It is audited (unconfirmed_late) and still deposited. Only the
+// member's own messages are told or audited (not upkeep).
+//
+// Once per stored state: Unconfirmed is stored by the drain's write after
+// the deposit; a crash before it can tell the member again after the
+// restart (told twice, never not at all).
+func (m *Manager) unconfirmedLate(e *OutboxEntry, now time.Time) {
+	if e.Unconfirmed {
+		return
+	}
+	e.Unconfirmed, m.dirty = true, true
+	typ := m.entryType(e)
+	if !memberMessage(e, typ) {
+		return
+	}
+	m.auditRef(now, "unconfirmed_late", e.PeerID, e.InnerID)
+	m.notice(e, typ, NoticeUnconfirmed, e.InnerID, now)
+}
+
+// notice records the member's feed item for e, if it is the member's own
+// message to a connection (or one gone).
+func (m *Manager) notice(e *OutboxEntry, typ, kind, ref string, now time.Time) {
+	p := m.peer(e.PeerID)
+	if (p != nil && p.Kind != KindConnection) || !memberMessage(e, typ) {
+		return
+	}
+	// The connection's name as the vault has it now, so that the app can
+	// name a connection that is gone (vault-local: the feed only).
+	name := ""
+	if p != nil {
+		name = p.Name
+	}
+	m.record(Activity{Kind: kind, ConnectionID: e.PeerID, Name: name, Ref: ref, Feed: true, Batch: NoticeWindow}, now)
 }
 
 // reconnectFailed counts a failed try of a reconnect to p naming epoch

@@ -270,7 +270,12 @@ const RestampAfter = envelope.MaxDurableAge - 14*24*time.Hour
 //   - an attempt may have reached the relay (Tried), and its ts is past
 //     §8.4's 16 days: the peer would refuse it, and a fresh ts could make
 //     it run twice, so it is not delivered (undelivered_window: it may or
-//     may not have been delivered), never stamped again.
+//     may not have been delivered), never stamped again;
+//   - the late window (lead a, #7901): Tried, or untried but it can't be
+//     sealed again, with a ts older than RestampAfter and within 16 days:
+//     it goes as it is, and the relay's hold may take it past the peer's
+//     window, so the member is told once that it may not have been
+//     delivered (unconfirmed_late, message.delivery_unconfirmed).
 //
 // It reports whether it changed or ended e.
 func (m *Manager) ageCheck(e *OutboxEntry, now time.Time) bool {
@@ -301,6 +306,12 @@ func (m *Manager) ageCheck(e *OutboxEntry, now time.Time) bool {
 		}
 		m.notDelivered(e, "undelivered_window", now)
 		return true
+	case e.Tried && age > RestampAfter:
+		if e.InnerID == "" {
+			e.InnerID = in.ID
+		}
+		m.unconfirmedLate(e, now) // goes as it is
+		return false
 	case !e.Tried && age > RestampAfter:
 		in.TS, in.Seq, in.Features = now, 0, nil
 		raw, err := m.sealFor(p, kr.Current(), in)
@@ -311,7 +322,12 @@ func (m *Manager) ageCheck(e *OutboxEntry, now time.Time) bool {
 		}
 		if err != nil {
 			if age <= envelope.MaxDurableAge {
-				return false // still within the peer's window: as it is
+				// Still within the peer's window: as it is, told (the late window).
+				if e.InnerID == "" {
+					e.InnerID = in.ID
+				}
+				m.unconfirmedLate(e, now)
+				return false
 			}
 			if e.InnerID == "" {
 				e.InnerID = in.ID

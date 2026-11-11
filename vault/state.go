@@ -887,6 +887,10 @@ type OutboxEntry struct {
 	// without a relay error code), so the peer may hold its inner id: a
 	// re-seal keeps its ts (sealHeld).
 	Tried bool `json:"tried,omitempty"`
+	// Unconfirmed (card GC #6875, the late window, lead a #7901): the member
+	// was told this message may not have been delivered (deposited with a ts
+	// older than RestampAfter, as it is), once; it still goes.
+	Unconfirmed bool `json:"unconfirmed,omitempty"`
 	// InnerID (0.88.7) is the inner id of the message a durable deposit
 	// carries, for the not-delivered audit's ref (§8.3, §10.9); "" for a
 	// handshake message or an entry written before.

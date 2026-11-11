@@ -1254,7 +1254,8 @@ func (w *rpWorld) notesUnaccounted() (why []string) {
 // handled is excused only if the relay dropped a copy of it at T and the
 // run has a lock longer than T (the lock residual); or if it was answered
 // a 5xx, or was waiting at a crash, and its sender audited
-// undelivered_window (told: rpToldResidual, rpCrashToldResidual).
+// undelivered_window, or unconfirmed_late at its deposit (told:
+// rpToldResidual, rpCrashToldResidual).
 func (w *rpWorld) notesLost() (why []string, residual string) {
 	told, crashTold := false, false // quota-wait and lock-wait are no longer excused (#6875)
 	over, single := w.lockShape()
@@ -1272,9 +1273,9 @@ func (w *rpWorld) notesLost() (why []string, residual string) {
 			// card GC #6875's re-stamp at deposit closes both (a note that
 			// waited past 16 days with no key change and no attempt is
 			// sealed again with a fresh ts), so such a loss is a loss.
-			case w.fiveNote[id] && w.f.auditedRef(s, "undelivered_window", id):
+			case w.fiveNote[id] && w.toldRef(s, id):
 				told = true
-			case w.crashNote[id] && w.f.auditedRef(s, "undelivered_window", id):
+			case w.crashNote[id] && w.toldRef(s, id):
 				crashTold = true
 			default:
 				lost = true
@@ -1519,4 +1520,15 @@ func (m *Manager) stOutbox() []*OutboxEntry {
 		return nil
 	}
 	return m.st.Outbox
+}
+
+// toldRef reports whether side s told the member that note id may not have
+// been delivered: ended past 16 days (undelivered_window), or deposited
+// late as it is (unconfirmed_late, #7901) and then refused by the peer as
+// too old (its stale_or_future for that id), the loss the notice is for.
+func (w *rpWorld) toldRef(s int, id string) bool {
+	if w.f.auditedRef(s, "undelivered_window", id) {
+		return true
+	}
+	return w.f.auditedRef(s, "unconfirmed_late", id) && w.f.auditedRef(1-s, "stale_or_future", id)
 }

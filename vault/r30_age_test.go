@@ -411,3 +411,82 @@ func TestAgeNoRestampWithoutStandingToken(t *testing.T) {
 		t.Fatal("sealed again while waiting for a standing token")
 	}
 }
+
+// unconfirmedNotices counts side s's "may not have been delivered" items.
+func (f *r29Fx) unconfirmedNotices(s int) int {
+	n := 0
+	for _, a := range f.sink[s].got {
+		if a.Feed && a.Kind == NoticeUnconfirmed {
+			n++
+		}
+	}
+	return n
+}
+
+// The late window (#7898, lead a #7901): a Tried entry deposited with a ts
+// older than RestampAfter goes as it is, and the member is told once, over
+// any number of drains, that it may not have been delivered.
+func TestAgeLateWindowTold(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	e, _ := f.waitingNote(0, "late")
+	f.do(0, func(m *Manager, p *Peer) { e.Tried = true })
+	before := append([]byte(nil), e.Payload...)
+	f.advance(RestampAfter + time.Hour)
+	d := f.d[0]
+	for i := 0; i < 3; i++ { // refused each time: drained again, told once
+		d.relay.mu.Lock()
+		d.relay.failMailbox = map[string]error{f.m(1).st.Relay.Mailbox: &relayclient.Error{Status: 429, Code: "rate_limited"}}
+		d.relay.mu.Unlock()
+		f.release(0)
+		if !bytes.Equal(e.Payload, before) {
+			t.Fatal("a tried entry was sealed again")
+		}
+	}
+	d.relay.mu.Lock()
+	d.relay.failMailbox = nil
+	d.relay.mu.Unlock()
+	f.release(0)
+	f.settle()
+	if n := f.arrived(1, "late"); n != 1 {
+		t.Fatalf("arrived %d times, want 1 (as it is)", n)
+	}
+	if n := f.unconfirmedNotices(0); n != 1 || !f.audited(0, "unconfirmed_late") {
+		t.Fatalf("%d notices, audited %v: want told once (unconfirmed_late)", n, f.audited(0, "unconfirmed_late"))
+	}
+	for _, a := range f.sink[0].got {
+		if a.Kind == "drop.unconfirmed_late" {
+			t.Fatal("a message that still goes recorded as dropped")
+		}
+	}
+}
+
+// Told at its late deposit, then ended past the 16 days: the same notice
+// is not given twice; the end is still audited.
+func TestAgeLateThenWindowOneNotice(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	e, _ := f.waitingNote(0, "late-then-gone")
+	f.do(0, func(m *Manager, p *Peer) { e.Tried = true })
+	f.advance(RestampAfter + time.Hour)
+	d := f.d[0]
+	d.relay.mu.Lock()
+	d.relay.failMailbox = map[string]error{f.m(1).st.Relay.Mailbox: &relayclient.Error{Status: 429, Code: "rate_limited"}}
+	d.relay.mu.Unlock()
+	f.release(0) // told, refused
+	if n := f.unconfirmedNotices(0); n != 1 || !f.audited(0, "unconfirmed_late") {
+		t.Fatalf("at the late deposit: %d notices, audited %v: want told once", n, f.audited(0, "unconfirmed_late"))
+	}
+	f.advance(15 * 24 * time.Hour)
+	d.relay.mu.Lock()
+	d.relay.failMailbox = nil
+	d.relay.mu.Unlock()
+	f.release(0)
+	f.settle()
+	if !e.Done || !f.audited(0, "undelivered_window") {
+		t.Fatalf("done %v, audited %v: want ended (undelivered_window)", e.Done, f.audited(0, "undelivered_window"))
+	}
+	if n := f.unconfirmedNotices(0); n != 1 {
+		t.Fatalf("%d notices, want 1", n)
+	}
+}

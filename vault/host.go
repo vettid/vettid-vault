@@ -326,6 +326,8 @@ func auditKind(event string) string {
 	switch event {
 	case "peer_stale":
 		return "" // recorded as connection.stale
+	case "unconfirmed_late":
+		return "" // not dropped: it still goes; recorded as message.delivery_unconfirmed (#7901)
 	}
 	return "drop." + event
 }

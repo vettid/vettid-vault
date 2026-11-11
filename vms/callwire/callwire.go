@@ -366,6 +366,9 @@ func ValidShareMessage(m []byte) bool {
 		}
 		f[i] = string(v)
 	}
+	if n > 2 {
+		size += 2 * ed25519.PublicKeySize // (0.88.16) caller_ik || callee_ik before the share
+	}
 	if !envelope.ValidULID(f[0]) || len(rest) != size {
 		return false
 	}
@@ -384,6 +387,32 @@ func ValidShareMessage(m []byte) bool {
 		return ok && canonicalList(f[3])
 	}
 	return true
+}
+
+// VouchingParty is the vault identity key a well-formed form 2 message
+// names for the side whose vault vouches for it: the caller in an offer,
+// the callee in an answer (0.88.16). A vault vouches only for a form 2
+// message that names its own key there. Nil for form 1 or a malformed
+// message.
+func VouchingParty(m []byte) ed25519.PublicKey {
+	if !ValidShareMessage(m) {
+		return nil
+	}
+	role, _, _ := bytes.Cut(m, []byte{0})
+	var share int
+	switch string(role) {
+	case RoleOffer2:
+		share = EKSize
+	case RoleAnswer2:
+		share = EncSize
+	default:
+		return nil
+	}
+	end := len(m) - share // caller_ik || callee_ik end here
+	if string(role) == RoleOffer2 {
+		return ed25519.PublicKey(bytes.Clone(m[end-2*ed25519.PublicKeySize : end-ed25519.PublicKeySize]))
+	}
+	return ed25519.PublicKey(bytes.Clone(m[end-ed25519.PublicKeySize : end]))
 }
 
 // canonicalSuite reads a suite number written as list(x) writes it:

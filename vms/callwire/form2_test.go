@@ -9,55 +9,83 @@ import (
 // exactly as the four forms write them.
 func TestValidShareMessage(t *testing.T) {
 	const id = "01JABCDEFGHJKMNPQRSTVWXYZ0"
-	ek, enc := bytes.Repeat([]byte{0}, EKSize), bytes.Repeat([]byte{7}, EncSize) // shares may hold 0x00
+	ek, enc := bytes.Repeat([]byte{0}, EKSize), bytes.Repeat([]byte{7}, EncSize)            // shares may hold 0x00
+	pp := Parties{Caller: bytes.Repeat([]byte{0}, 32), Callee: bytes.Repeat([]byte{9}, 32)} // keys may hold 0x00 too
 	for name, m := range map[string][]byte{
 		"offer":   ShareMessage(RoleOffer, id, "audio", ek),
 		"video":   ShareMessage(RoleOffer, id, "video", ek),
 		"answer":  ShareMessage(RoleAnswer, id, "", enc),
-		"offer2":  OfferMessage2(id, "audio", []int{2, 1}, ek),
-		"answer2": AnswerMessage2(id, 1, []int{2, 1}, enc),
-		"max":     AnswerMessage2(id, MaxSuite, []int{MaxSuite, 1, 2, 3, 4, 5, 6, 7}, enc),
+		"offer2":  OfferMessage2(id, "audio", []int{2, 1}, pp, ek),
+		"answer2": AnswerMessage2(id, 1, []int{2, 1}, pp, enc),
+		"max":     AnswerMessage2(id, MaxSuite, []int{MaxSuite, 1, 2, 3, 4, 5, 6, 7}, pp, enc),
 	} {
 		if !ValidShareMessage(m) {
 			t.Errorf("%s refused", name)
 		}
 	}
 	bad := map[string][]byte{
-		"empty":            nil,
-		"role only":        []byte("offer"),
-		"unknown role":     ShareMessage("offer3", id, "audio", ek),
-		"bad call_id":      ShareMessage(RoleOffer, id[:25], "audio", ek),
-		"lower call_id":    ShareMessage(RoleOffer, "01jabcdefghjkmnpqrstvwxyz0", "audio", ek),
-		"offer no media":   ShareMessage(RoleOffer, id, "", ek),
-		"offer bad media":  ShareMessage(RoleOffer, id, "text", ek),
-		"answer media":     ShareMessage(RoleAnswer, id, "audio", enc),
-		"offer enc size":   ShareMessage(RoleOffer, id, "audio", enc),
-		"answer ek size":   ShareMessage(RoleAnswer, id, "", ek),
-		"short share":      ShareMessage(RoleOffer, id, "audio", ek[1:]),
-		"long share":       ShareMessage(RoleOffer, id, "audio", append(ek, 0)),
-		"form 1 as 2":      ShareMessage(RoleOffer2, id, "audio", ek),
-		"answer 1 as 2":    ShareMessage(RoleAnswer2, id, "", enc),
-		"no suites":        m2(RoleOffer2, id, "audio", "", ek),
-		"leading zero":     m2(RoleOffer2, id, "audio", "02 1", ek),
-		"zero":             m2(RoleOffer2, id, "audio", "0", ek),
-		"too big":          m2(RoleOffer2, id, "audio", "65536", ek),
-		"sign":             m2(RoleOffer2, id, "audio", "+1", ek),
-		"repeated":         m2(RoleOffer2, id, "audio", "1 1", ek),
-		"two spaces":       m2(RoleOffer2, id, "audio", "2  1", ek),
-		"trailing space":   m2(RoleOffer2, id, "audio", "1 ", ek),
-		"comma":            m2(RoleOffer2, id, "audio", "2,1", ek),
-		"nine":             m2(RoleOffer2, id, "audio", "1 2 3 4 5 6 7 8 9", ek),
-		"chosen empty":     m2(RoleAnswer2, id, "", "\x002 1", enc),
-		"chosen zero":      m2(RoleAnswer2, id, "", "0\x002 1", enc),
-		"chosen leading 0": m2(RoleAnswer2, id, "", "01\x002 1", enc),
-		"chosen too big":   m2(RoleAnswer2, id, "", "65536\x002 1", enc),
-		"answer2 media":    m2(RoleAnswer2, id, "audio", "1\x002 1", enc),
-		"answer2 no list":  m2(RoleAnswer2, id, "", "1\x00", enc),
-		"offer2 enc":       m2(RoleOffer2, id, "audio", "1", enc),
+		"empty":             nil,
+		"role only":         []byte("offer"),
+		"unknown role":      ShareMessage("offer3", id, "audio", ek),
+		"bad call_id":       ShareMessage(RoleOffer, id[:25], "audio", ek),
+		"lower call_id":     ShareMessage(RoleOffer, "01jabcdefghjkmnpqrstvwxyz0", "audio", ek),
+		"offer no media":    ShareMessage(RoleOffer, id, "", ek),
+		"offer bad media":   ShareMessage(RoleOffer, id, "text", ek),
+		"answer media":      ShareMessage(RoleAnswer, id, "audio", enc),
+		"offer enc size":    ShareMessage(RoleOffer, id, "audio", enc),
+		"answer ek size":    ShareMessage(RoleAnswer, id, "", ek),
+		"short share":       ShareMessage(RoleOffer, id, "audio", ek[1:]),
+		"long share":        ShareMessage(RoleOffer, id, "audio", append(ek, 0)),
+		"form 1 as 2":       ShareMessage(RoleOffer2, id, "audio", ek),
+		"answer 1 as 2":     ShareMessage(RoleAnswer2, id, "", enc),
+		"no suites":         m2(RoleOffer2, id, "audio", "", pp, ek),
+		"leading zero":      m2(RoleOffer2, id, "audio", "02 1", pp, ek),
+		"zero":              m2(RoleOffer2, id, "audio", "0", pp, ek),
+		"too big":           m2(RoleOffer2, id, "audio", "65536", pp, ek),
+		"sign":              m2(RoleOffer2, id, "audio", "+1", pp, ek),
+		"repeated":          m2(RoleOffer2, id, "audio", "1 1", pp, ek),
+		"two spaces":        m2(RoleOffer2, id, "audio", "2  1", pp, ek),
+		"trailing space":    m2(RoleOffer2, id, "audio", "1 ", pp, ek),
+		"comma":             m2(RoleOffer2, id, "audio", "2,1", pp, ek),
+		"nine":              m2(RoleOffer2, id, "audio", "1 2 3 4 5 6 7 8 9", pp, ek),
+		"chosen empty":      m2(RoleAnswer2, id, "", "\x002 1", pp, enc),
+		"chosen zero":       m2(RoleAnswer2, id, "", "0\x002 1", pp, enc),
+		"chosen leading 0":  m2(RoleAnswer2, id, "", "01\x002 1", pp, enc),
+		"chosen too big":    m2(RoleAnswer2, id, "", "65536\x002 1", pp, enc),
+		"answer2 media":     m2(RoleAnswer2, id, "audio", "1\x002 1", pp, enc),
+		"answer2 no list":   m2(RoleAnswer2, id, "", "1\x00", pp, enc),
+		"offer2 enc":        m2(RoleOffer2, id, "audio", "1", pp, enc),
+		"offer2 no parties": append([]byte(RoleOffer2+"\x00"+id+"\x00audio\x001\x00"), ek...),
+		"offer2 one party":  m2(RoleOffer2, id, "audio", "1", Parties{Caller: pp.Caller}, ek),
+		"answer2 short":     m2(RoleAnswer2, id, "", "1\x001", Parties{Caller: pp.Caller, Callee: pp.Callee[:31]}, enc),
 	}
 	for name, m := range bad {
 		if ValidShareMessage(m) {
 			t.Errorf("%s accepted", name)
 		}
+	}
+}
+
+// VouchingParty: the caller's key in an offer, the callee's in an answer;
+// nil for form 1. Confirm names both parties, in order.
+func TestParties(t *testing.T) {
+	const id = "01JABCDEFGHJKMNPQRSTVWXYZ0"
+	ek, enc := bytes.Repeat([]byte{0}, EKSize), bytes.Repeat([]byte{7}, EncSize)
+	a, b := bytes.Repeat([]byte{1}, 32), bytes.Repeat([]byte{2}, 32)
+	pp := Parties{Caller: a, Callee: b}
+	if v := VouchingParty(OfferMessage2(id, "audio", []int{1}, pp, ek)); !bytes.Equal(v, a) {
+		t.Errorf("offer: %x", v)
+	}
+	if v := VouchingParty(AnswerMessage2(id, 1, []int{1}, pp, enc)); !bytes.Equal(v, b) {
+		t.Errorf("answer: %x", v)
+	}
+	if VouchingParty(ShareMessage(RoleOffer, id, "audio", ek)) != nil || VouchingParty([]byte("junk")) != nil {
+		t.Error("form 1 or junk")
+	}
+	k := bytes.Repeat([]byte{3}, 32)
+	c := Confirm(k, 1, []int{1}, id, pp)
+	if !VerifyConfirm(k, 1, []int{1}, id, pp, c) || VerifyConfirm(k, 1, []int{1}, id, Parties{Caller: b, Callee: a}, c) ||
+		VerifyConfirm(k, 1, []int{1}, id, Parties{Caller: a}, c) {
+		t.Error("confirm not bound to the parties in order")
 	}
 }

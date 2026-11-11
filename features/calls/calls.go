@@ -457,10 +457,25 @@ func (f2 *form2) add(b *strictjson.Builder) *strictjson.Builder {
 	return b.Uint("suite", uint64(f2.Suite)).Raw("offered", suitesJSON(f2.Offered)).Base64("confirm", f2.Confirm)
 }
 
+// parties are a call's two members as this vault names them in form 2
+// (0.88.16), from its own records: its own identity key, and conn's
+// pinned one; dir is the call's direction here.
+func parties(s *vault.Session, conn, dir string) callwire.Parties {
+	own := s.IdentityKey()
+	var peer ed25519.PublicKey
+	if p, ok := s.Connection(conn); ok {
+		peer = p.IK
+	}
+	if dir == DirOut {
+		return callwire.Parties{Caller: own, Callee: peer}
+	}
+	return callwire.Parties{Caller: peer, Callee: own}
+}
+
 // answerMessage is the signed bytes of an answer in its form.
-func answerMessage(callID string, f2 *form2, enc []byte) []byte {
+func answerMessage(callID string, f2 *form2, p callwire.Parties, enc []byte) []byte {
 	if f2 != nil {
-		return callwire.AnswerMessage2(callID, f2.Suite, f2.Offered, enc)
+		return callwire.AnswerMessage2(callID, f2.Suite, f2.Offered, p, enc)
 	}
 	return callwire.ShareMessage(callwire.RoleAnswer, callID, "", enc)
 }
@@ -580,7 +595,7 @@ func (f *Feature) start(ctx context.Context, s *vault.Session, body []byte) (jso
 	var v2 Vouched
 	if st.Suites != nil {
 		// Form 2 is vouched only after the device's signature of it verified.
-		if v2, err = vouch(s, callwire.OfferMessage2(id, st.Media, st.Suites, st.EK), st.EKSig2); err != nil {
+		if v2, err = vouch(s, callwire.OfferMessage2(id, st.Media, st.Suites, parties(s, st.ConnectionID, DirOut), st.EK), st.EKSig2); err != nil {
 			return nil, err
 		}
 	}
@@ -681,7 +696,7 @@ func (f *Feature) offer(ctx context.Context, s *vault.Session, in *envelope.Inne
 	}
 	// (C2) Every form an offer carries is checked: form 2 incomplete or
 	// not verifying drops the offer.
-	if of.Form2Bad || of.Suites != nil && !checkPeerShare(s, callwire.OfferMessage2(of.CallID, of.Media, of.Suites, of.EK),
+	if of.Form2Bad || of.Suites != nil && !checkPeerShare(s, callwire.OfferMessage2(of.CallID, of.Media, of.Suites, parties(s, conn, DirIn), of.EK),
 		Vouched{DeviceIK: of.DeviceIK, DeviceSig: of.DeviceSig2, VaultSig: of.VaultSig2}) {
 		if of.Form2Bad {
 			s.Record(vault.Activity{Kind: "drop.call_share", ConnectionID: conn, Audit: true})
@@ -916,7 +931,7 @@ func (f *Feature) answerFromDevice(s *vault.Session, body []byte) error {
 		s.Record(vault.Activity{Kind: "drop.call_share", DeviceID: s.From().ID, Audit: true})
 		return unavailable(s, a.CallID)
 	}
-	v, err := vouch(s, answerMessage(c.ID, a.Form2, a.Enc), a.EncSig)
+	v, err := vouch(s, answerMessage(c.ID, a.Form2, parties(s, c.Conn, DirIn), a.Enc), a.EncSig)
 	if err != nil {
 		s.Record(vault.Activity{Kind: "drop.call_share", DeviceID: s.From().ID, Audit: true})
 		return unavailable(s, a.CallID)
@@ -951,7 +966,7 @@ func (f *Feature) answerFromPeer(s *vault.Session, body []byte) error {
 		s.Record(vault.Activity{Kind: "drop.call_share", ConnectionID: c.Conn, Audit: true})
 		return nil // as a share that doesn't verify: the call keeps ringing
 	}
-	if !checkPeerShare(s, answerMessage(c.ID, a.Form2, a.Enc), a.Vouched) {
+	if !checkPeerShare(s, answerMessage(c.ID, a.Form2, parties(s, c.Conn, DirOut), a.Enc), a.Vouched) {
 		return nil // the call keeps ringing until it times out or ends
 	}
 	if s.OwnerHeld() {

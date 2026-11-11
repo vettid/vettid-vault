@@ -111,9 +111,9 @@ func checkCallVectors(t *testing.T, dir string) {
 	check("offer_share", "offer", "audio", ek, caller, callee.vaultPub)
 	check("answer_share", "answer", "", enc, callee, caller.vaultPub)
 
-	// (C2) Form 2 and key confirmation, by hand: m2 with the suites, and
-	// k_confirm and confirm by HKDF and HMAC. A frozen calls.json from
-	// before C2 has none.
+	// (C2) Form 2 and key confirmation, by hand: m2 with the suites and
+	// (0.88.16) both vaults' identity keys, and k_confirm and confirm by
+	// HKDF and HMAC. A frozen calls.json from before C2 has none.
 	_, has2 := d.m["offer_share2"]
 	if !has2 && dir == Dir {
 		t.Fatal("calls.json has no form 2 vectors") // only a frozen release's may lack them
@@ -139,7 +139,11 @@ func checkCallVectors(t *testing.T, dir string) {
 			if sh.str("role") != role || sh.str("media") != media {
 				t.Errorf("%s: role or media", name)
 			}
-			m := bytes.Join([][]byte{[]byte(role), []byte(id), []byte(media), []byte(lists), share}, []byte{0})
+			m2 := func(callerIK, calleeIK []byte) []byte {
+				m := bytes.Join([][]byte{[]byte(role), []byte(id), []byte(media), []byte(lists), nil}, []byte{0})
+				return append(append(append(m, callerIK...), calleeIK...), share...)
+			}
+			m := m2(caller.vaultPub, callee.vaultPub)
 			eq(t, name+" message", m, sh.b64("message_b64"))
 			if !callwire.ValidShareMessage(m) {
 				t.Errorf("%s: a vault wouldn't vouch for it", name)
@@ -165,6 +169,15 @@ func checkCallVectors(t *testing.T, dir string) {
 			if callwire.VerifyDeviceShare(by.devPub, m, ds1) == nil {
 				t.Errorf("%s: a form 1 signature verifies over form 2", name)
 			}
+			// (0.88.16) Bound to both members: the parties swapped, or a
+			// third vault in either place (a call passed on), don't verify.
+			third := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x33}, 32)).Public().(ed25519.PublicKey)
+			for what, other := range map[string][]byte{"swapped": m2(callee.vaultPub, caller.vaultPub),
+				"another caller": m2(third, callee.vaultPub), "another callee": m2(caller.vaultPub, third)} {
+				if bytes.Equal(other, m) || callwire.VerifyDeviceShare(by.devPub, other, ds) == nil {
+					t.Errorf("%s: verifies with the parties %s", name, what)
+				}
+			}
 		}
 		offered := ints(d.sub("offer_share2"), "suites")
 		a2 := d.sub("answer_share2")
@@ -177,8 +190,9 @@ func checkCallVectors(t *testing.T, dir string) {
 		}
 		check2("offer_share2", "offer2", "audio", list(offered), ek, caller, callee.vaultPub)
 		check2("answer_share2", "answer2", "", strconv.Itoa(chosen)+"\x00"+list(offered), enc, callee, caller.vaultPub)
-		eq(t, "offer_share2 message (callwire)", callwire.OfferMessage2(id, "audio", offered, ek), d.sub("offer_share2").b64("message_b64"))
-		eq(t, "answer_share2 message (callwire)", callwire.AnswerMessage2(id, chosen, offered, enc), a2.b64("message_b64"))
+		parties := callwire.Parties{Caller: caller.vaultPub, Callee: callee.vaultPub}
+		eq(t, "offer_share2 message (callwire)", callwire.OfferMessage2(id, "audio", offered, parties, ek), d.sub("offer_share2").b64("message_b64"))
+		eq(t, "answer_share2 message (callwire)", callwire.AnswerMessage2(id, chosen, offered, parties, enc), a2.b64("message_b64"))
 		if d.str("label_confirm") != "vettid/vms/2/call-confirm" {
 			t.Error("label_confirm")
 		}
@@ -189,9 +203,14 @@ func checkCallVectors(t *testing.T, dir string) {
 		eq(t, "k_confirm", kc, d.hex("k_confirm_hex"))
 		mac := hmac.New(sha256.New, kc)
 		mac.Write([]byte(strconv.Itoa(chosen) + "\x00" + list(offered) + "\x00" + id))
+		mac.Write(caller.vaultPub)
+		mac.Write(callee.vaultPub)
 		eq(t, "confirm", mac.Sum(nil), d.b64("confirm_b64"))
-		if !callwire.VerifyConfirm(kc, chosen, offered, id, d.b64("confirm_b64")) || callwire.VerifyConfirm(kc, chosen+1, offered, id, d.b64("confirm_b64")) {
-			t.Error("confirm through callwire, or bound to the choice")
+		swapped := callwire.Parties{Caller: callee.vaultPub, Callee: caller.vaultPub}
+		if !callwire.VerifyConfirm(kc, chosen, offered, id, parties, d.b64("confirm_b64")) ||
+			callwire.VerifyConfirm(kc, chosen+1, offered, id, parties, d.b64("confirm_b64")) ||
+			callwire.VerifyConfirm(kc, chosen, offered, id, swapped, d.b64("confirm_b64")) {
+			t.Error("confirm through callwire, or bound to the choice and the parties")
 		}
 	}
 

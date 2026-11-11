@@ -1,6 +1,7 @@
 package callwire
 
 import (
+	"crypto/ed25519"
 	"crypto/hkdf"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -53,29 +54,42 @@ func SuiteList(list []int) string {
 	return strings.Join(parts, " ")
 }
 
-func m2(role, callID, media, suites string, share []byte) []byte {
-	m := make([]byte, 0, len(role)+len(callID)+len(media)+len(suites)+4+len(share))
+// Parties are the two members of a call as form 2 names them (0.88.16):
+// the calling and the called member's vault identity keys. They travel in
+// no message: each party puts them in from its own records.
+type Parties struct {
+	Caller, Callee ed25519.PublicKey
+}
+
+// Valid reports whether both keys are Ed25519 public keys.
+func (p Parties) Valid() bool {
+	return len(p.Caller) == ed25519.PublicKeySize && len(p.Callee) == ed25519.PublicKeySize
+}
+
+func m2(role, callID, media, suites string, p Parties, share []byte) []byte {
+	m := make([]byte, 0, len(role)+len(callID)+len(media)+len(suites)+4+2*ed25519.PublicKeySize+len(share))
 	m = append(append(m, role...), 0)
 	m = append(append(m, callID...), 0)
 	m = append(append(m, media...), 0)
 	m = append(append(m, suites...), 0)
+	m = append(append(m, p.Caller...), p.Callee...)
 	return append(m, share...)
 }
 
 // OfferMessage2 is a form 2 offer's signed bytes:
 //
-//	"offer2" || 0x00 || call_id || 0x00 || media || 0x00 || list(offered) || 0x00 || ek
-func OfferMessage2(callID, media string, offered []int, ek []byte) []byte {
-	return m2(RoleOffer2, callID, media, SuiteList(offered), ek)
+//	"offer2" || 0x00 || call_id || 0x00 || media || 0x00 || list(offered) || 0x00 || caller_ik || callee_ik || ek
+func OfferMessage2(callID, media string, offered []int, p Parties, ek []byte) []byte {
+	return m2(RoleOffer2, callID, media, SuiteList(offered), p, ek)
 }
 
 // AnswerMessage2 is a form 2 answer's signed bytes:
 //
-//	"answer2" || 0x00 || call_id || 0x00 || "" || 0x00 || chosen || 0x00 || list(offered) || 0x00 || enc
+//	"answer2" || 0x00 || call_id || 0x00 || "" || 0x00 || chosen || 0x00 || list(offered) || 0x00 || caller_ik || callee_ik || enc
 //
 // offered is the caller's list as the answering device read it.
-func AnswerMessage2(callID string, chosen int, offered []int, enc []byte) []byte {
-	return m2(RoleAnswer2, callID, "", strconv.Itoa(chosen)+"\x00"+SuiteList(offered), enc)
+func AnswerMessage2(callID string, chosen int, offered []int, p Parties, enc []byte) []byte {
+	return m2(RoleAnswer2, callID, "", strconv.Itoa(chosen)+"\x00"+SuiteList(offered), p, enc)
 }
 
 // ConfirmKey is k_confirm = HKDF-SHA-256(ikm = k_call, salt =
@@ -90,15 +104,17 @@ func ConfirmKey(kCall []byte, callID string) ([]byte, error) {
 }
 
 // Confirm is confirm = HMAC-SHA-256(k_confirm, chosen || 0x00 ||
-// list(offered) || 0x00 || call_id), with chosen and offered as in the
-// answer's m2.
-func Confirm(kConfirm []byte, chosen int, offered []int, callID string) []byte {
+// list(offered) || 0x00 || call_id || caller_ik || callee_ik), with
+// chosen, offered and the parties as in the answer's m2.
+func Confirm(kConfirm []byte, chosen int, offered []int, callID string, p Parties) []byte {
 	mac := hmac.New(sha256.New, kConfirm)
 	mac.Write([]byte(strconv.Itoa(chosen) + "\x00" + SuiteList(offered) + "\x00" + callID))
+	mac.Write(p.Caller)
+	mac.Write(p.Callee)
 	return mac.Sum(nil)
 }
 
 // VerifyConfirm checks confirm in constant time (the calling device).
-func VerifyConfirm(kConfirm []byte, chosen int, offered []int, callID string, confirm []byte) bool {
-	return hmac.Equal(Confirm(kConfirm, chosen, offered, callID), confirm)
+func VerifyConfirm(kConfirm []byte, chosen int, offered []int, callID string, p Parties, confirm []byte) bool {
+	return p.Valid() && hmac.Equal(Confirm(kConfirm, chosen, offered, callID, p), confirm)
 }

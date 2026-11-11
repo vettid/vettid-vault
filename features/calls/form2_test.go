@@ -16,18 +16,41 @@ import (
 	"github.com/vettid/vettid-vault/vms/suite"
 )
 
-// startBody2 is a form 2 call.start from dev-app (both forms signed).
+// testIK is the identity key of a test vault that set none (NewHost's).
+var testIK = featuretest.NewHost().IK
+
+// outP and inP are the parties (0.88.16) of an unlinked test vault's call
+// to conn, and of conn's call to it.
+func outP(conn string) callwire.Parties {
+	return callwire.Parties{Caller: testIK, Callee: peerVault(conn).Public().(ed25519.PublicKey)}
+}
+
+func inP(conn string) callwire.Parties {
+	return callwire.Parties{Caller: peerVault(conn).Public().(ed25519.PublicKey), Callee: testIK}
+}
+
+// startBody2 is a form 2 call.start from dev-app (both forms signed) on an
+// unlinked test vault.
 func startBody2(conn, id string, ek []byte, suites []int) string {
+	return startBody2P(conn, id, ek, suites, outP(conn))
+}
+
+func startBody2P(conn, id string, ek []byte, suites []int, p callwire.Parties) string {
 	dev := featuretest.DeviceKey("dev-app")
 	sig, _ := callwire.SignShare(dev, callwire.ShareMessage(callwire.RoleOffer, id, "video", ek))
-	sig2, _ := callwire.SignShare(dev, callwire.OfferMessage2(id, "video", suites, ek))
+	sig2, _ := callwire.SignShare(dev, callwire.OfferMessage2(id, "video", suites, p, ek))
 	return `{"connection_id":"` + conn + `","call_id":"` + id + `","media":"video","sdp":"` + strings.ReplaceAll(sdpOffer, "\r\n", `\r\n`) +
 		`","ek":"` + b64(ek) + `","ek_sig":"` + b64(sig) + `","suites":` + string(suitesJSON(suites)) + `,"ek_sig2":"` + b64(sig2) + `"}`
 }
 
-// answerBody2 is a form 2 call.answer from dev, enc_sig over m2.
+// answerBody2 is a form 2 call.answer from dev, enc_sig over m2, to an
+// offer from cA on an unlinked test vault.
 func answerBody2(dev, id string, enc []byte, chosen int, offered []int, confirm []byte) string {
-	sig, _ := callwire.SignShare(featuretest.DeviceKey(dev), callwire.AnswerMessage2(id, chosen, offered, enc))
+	return answerBody2P(dev, id, enc, chosen, offered, confirm, inP("cA"))
+}
+
+func answerBody2P(dev, id string, enc []byte, chosen int, offered []int, confirm []byte, p callwire.Parties) string {
+	sig, _ := callwire.SignShare(featuretest.DeviceKey(dev), callwire.AnswerMessage2(id, chosen, offered, p, enc))
 	return `{"call_id":"` + id + `","sdp":"v=0","enc":"` + b64(enc) + `","enc_sig":"` + b64(sig) +
 		`","suite":` + itoa(chosen) + `,"offered":` + string(suitesJSON(offered)) + `,"confirm":"` + b64(confirm) + `"}`
 }
@@ -46,7 +69,8 @@ func TestForm2Call(t *testing.T) {
 	ek := sk.Public().Bytes()
 	id := newCallID("f2")
 	suites := []int{1}
-	if r := featuretest.Call(a.f, a.h, t0, "app", "call.start", startBody2("cB", id, ek, suites)); !r.OK() {
+	p := callwire.Parties{Caller: a.h.IK, Callee: b.h.IK} // each vault names the other by its pinned key
+	if r := featuretest.Call(a.f, a.h, t0, "app", "call.start", startBody2P("cB", id, ek, suites, p)); !r.OK() {
 		t.Fatalf("start: %q", r.Code)
 	}
 	off := a.sent(t, "cB", "call.offer")
@@ -57,7 +81,7 @@ func TestForm2Call(t *testing.T) {
 	d2, _ := o.Base64("device_sig2", 64)
 	v2, _ := o.Base64("vault_sig2", 64)
 	if callwire.VerifyShare(a.h.IK, devIK, callwire.ShareMessage(callwire.RoleOffer, id, "video", ek), d1, v1) != nil ||
-		callwire.VerifyShare(a.h.IK, devIK, callwire.OfferMessage2(id, "video", suites, ek), d2, v2) != nil {
+		callwire.VerifyShare(a.h.IK, devIK, callwire.OfferMessage2(id, "video", suites, p, ek), d2, v2) != nil {
 		t.Fatal("the offer's forms aren't both vouched")
 	}
 	featuretest.CallExp(b.f, b.h, t0, off.Opt.Exp, "connection:cA", "call.offer", string(off.Body))
@@ -77,9 +101,9 @@ func TestForm2Call(t *testing.T) {
 		t.Fatal(err)
 	}
 	kc, _ := callwire.ConfirmKey(kCall, id)
-	confirm := callwire.Confirm(kc, 1, suites, id)
+	confirm := callwire.Confirm(kc, 1, suites, id, p)
 	b.h.Reset()
-	if r := featuretest.Call(b.f, b.h, t0.Add(time.Second), "app", "call.answer", answerBody2("dev-app", id, enc, 1, suites, confirm)); !r.OK() {
+	if r := featuretest.Call(b.f, b.h, t0.Add(time.Second), "app", "call.answer", answerBody2P("dev-app", id, enc, 1, suites, confirm, p)); !r.OK() {
 		t.Fatalf("answer: %q", r.Code)
 	}
 	fwd := b.sent(t, "cA", "call.answer")
@@ -87,14 +111,14 @@ func TestForm2Call(t *testing.T) {
 	fd, _ := fo.Base64("device_sig", 64)
 	fv, _ := fo.Base64("vault_sig", 64)
 	fdev, _ := fo.Base64("device_ik", ed25519.PublicKeySize)
-	if callwire.VerifyShare(b.h.IK, fdev, callwire.AnswerMessage2(id, 1, suites, enc), fd, fv) != nil {
+	if callwire.VerifyShare(b.h.IK, fdev, callwire.AnswerMessage2(id, 1, suites, p, enc), fd, fv) != nil {
 		t.Fatal("the answer isn't vouched over m2")
 	}
 	a.h.Reset()
 	featuretest.Call(a.f, a.h, t0.Add(time.Second), "connection:cB", "call.answer", string(fwd.Body))
 	got := obj(t, a.sent(t, "dev-app", "call.answer").Body)
 	gc, _ := got.Base64("confirm", 32)
-	if s, _ := got.Uint("suite", 1, 65535); s != 1 || !callwire.VerifyConfirm(kc, 1, suites, id, gc) {
+	if s, _ := got.Uint("suite", 1, 65535); s != 1 || !callwire.VerifyConfirm(kc, 1, suites, id, p, gc) {
 		t.Fatal("the calling device didn't get the form 2 members")
 	}
 	for k, want := range map[string]string{"device_sig": b64(fd), "vault_sig": b64(fv), "device_ik": b64(fdev)} {
@@ -132,7 +156,7 @@ func TestForm2Refusals(t *testing.T) {
 	}
 	// ek_sig2 over other suites than sent: the device's form 2 doesn't verify.
 	dev := featuretest.DeviceKey("dev-app")
-	wrong, _ := callwire.SignShare(dev, callwire.OfferMessage2(id, "video", []int{2}, ek))
+	wrong, _ := callwire.SignShare(dev, callwire.OfferMessage2(id, "video", []int{2}, outP("cB"), ek))
 	o, _ := strictjson.ParseObject([]byte(good))
 	body := strings.Replace(good, mustStr(t, o, "ek_sig2"), b64(wrong), 1)
 	if c := start(body); c != "bad_request" {
@@ -159,12 +183,12 @@ func peerOffer2(conn, id, media string, ek []byte, suites []int, vaultSig2 bool,
 	m1 := callwire.ShareMessage(callwire.RoleOffer, id, media, ek)
 	d1, _ := callwire.SignShare(dev, m1)
 	v1, _ := suite.Sign(peerVault(conn), callwire.LabelVouch, callwire.VouchMessage(devPub, m1))
-	m2 := callwire.OfferMessage2(id, media, suites, ek)
+	m2 := callwire.OfferMessage2(id, media, suites, inP(conn), ek)
 	if badDev2 {
-		m2 = callwire.OfferMessage2(id, media, []int{2}, ek)
+		m2 = callwire.OfferMessage2(id, media, []int{2}, inP(conn), ek)
 	}
 	d2, _ := callwire.SignShare(dev, m2)
-	v2, _ := suite.Sign(peerVault(conn), callwire.LabelVouch, callwire.VouchMessage(devPub, callwire.OfferMessage2(id, media, suites, ek)))
+	v2, _ := suite.Sign(peerVault(conn), callwire.LabelVouch, callwire.VouchMessage(devPub, callwire.OfferMessage2(id, media, suites, inP(conn), ek)))
 	s := `{"call_id":"` + id + `","media":"` + media + `","sdp":"v=0","ek":"` + b64(ek) + `","device_ik":"` + b64(devPub) +
 		`","device_sig":"` + b64(d1) + `","vault_sig":"` + b64(v1) + `","suites":` + string(suitesJSON(suites)) + `,"device_sig2":"` + b64(d2) + `"`
 	if vaultSig2 {
@@ -200,7 +224,7 @@ func TestForm2AnswerChecked(t *testing.T) {
 			return strings.Replace(answerBody2("dev-app", id, enc, 1, []int{1}, make([]byte, 32)), `,"confirm":"`+b64(make([]byte, 32))+`"`, ``, 1)
 		},
 		"no offered, signed so": func(id string, enc []byte) string {
-			sig, _ := callwire.SignShare(featuretest.DeviceKey("dev-app"), callwire.AnswerMessage2(id, 1, nil, enc))
+			sig, _ := callwire.SignShare(featuretest.DeviceKey("dev-app"), callwire.AnswerMessage2(id, 1, nil, inP("cA"), enc))
 			return `{"call_id":"` + id + `","sdp":"v=0","enc":"` + b64(enc) + `","enc_sig":"` + b64(sig) + `","suite":1,"confirm":"` + b64(make([]byte, 32)) + `"}`
 		},
 		"form 1 signature": func(id string, enc []byte) string {
@@ -301,19 +325,19 @@ func TestForm2PeerAnswerChecked(t *testing.T) {
 			return peerAnswerSigned("cB", id, enc, callwire.ShareMessage(callwire.RoleAnswer, id, "", enc), f2)
 		},
 		"form 2 stripped": func(id string, enc []byte) string {
-			return peerAnswerSigned("cB", id, enc, callwire.AnswerMessage2(id, 1, []int{1}, enc), "")
+			return peerAnswerSigned("cB", id, enc, callwire.AnswerMessage2(id, 1, []int{1}, outP("cB"), enc), "")
 		},
 		"another choice than signed": func(id string, enc []byte) string {
-			return peerAnswerSigned("cB", id, enc, callwire.AnswerMessage2(id, 1, []int{1, 2}, enc), `,"suite":2,"offered":[1,2],"confirm":`+conf)
+			return peerAnswerSigned("cB", id, enc, callwire.AnswerMessage2(id, 1, []int{1, 2}, outP("cB"), enc), `,"suite":2,"offered":[1,2],"confirm":`+conf)
 		},
 		"no confirm": func(id string, enc []byte) string {
-			return peerAnswerSigned("cB", id, enc, callwire.AnswerMessage2(id, 1, []int{1}, enc), `,"suite":1,"offered":[1]`)
+			return peerAnswerSigned("cB", id, enc, callwire.AnswerMessage2(id, 1, []int{1}, outP("cB"), enc), `,"suite":1,"offered":[1]`)
 		},
 		"no suite": func(id string, enc []byte) string {
-			return peerAnswerSigned("cB", id, enc, callwire.AnswerMessage2(id, 1, []int{1}, enc), `,"offered":[1],"confirm":`+conf)
+			return peerAnswerSigned("cB", id, enc, callwire.AnswerMessage2(id, 1, []int{1}, outP("cB"), enc), `,"offered":[1],"confirm":`+conf)
 		},
 		"a short confirm": func(id string, enc []byte) string {
-			return peerAnswerSigned("cB", id, enc, callwire.AnswerMessage2(id, 1, []int{1}, enc), `,"suite":1,"offered":[1],"confirm":"`+b64(make([]byte, 31))+`"`)
+			return peerAnswerSigned("cB", id, enc, callwire.AnswerMessage2(id, 1, []int{1}, outP("cB"), enc), `,"suite":1,"offered":[1],"confirm":"`+b64(make([]byte, 31))+`"`)
 		},
 		"form 1 signed, a stray suite": func(id string, enc []byte) string {
 			return peerAnswerSigned("cB", id, enc, callwire.ShareMessage(callwire.RoleAnswer, id, "", enc), `,"suite":1`)
@@ -322,7 +346,7 @@ func TestForm2PeerAnswerChecked(t *testing.T) {
 			return peerAnswerSigned("cB", id, enc, callwire.ShareMessage(callwire.RoleAnswer, id, "", enc), `,"confirm":`+conf)
 		},
 		"a bad offered": func(id string, enc []byte) string {
-			return peerAnswerSigned("cB", id, enc, callwire.AnswerMessage2(id, 1, []int{1}, enc), `,"suite":1,"offered":[1,1],"confirm":`+conf)
+			return peerAnswerSigned("cB", id, enc, callwire.AnswerMessage2(id, 1, []int{1}, outP("cB"), enc), `,"suite":1,"offered":[1,1],"confirm":`+conf)
 		},
 	} {
 		a := newSide("cB")
@@ -344,7 +368,7 @@ func TestForm2PeerAnswerChecked(t *testing.T) {
 	featuretest.Call(a.f, a.h, t0, "app", "call.start", startBody2("cB", id, ek, []int{1}))
 	enc, _, _ := callwire.Answer(ek, id)
 	featuretest.Call(a.f, a.h, t0.Add(time.Second), "connection:cB", "call.answer",
-		peerAnswerSigned("cB", id, enc, callwire.AnswerMessage2(id, 1, []int{1}, enc), f2))
+		peerAnswerSigned("cB", id, enc, callwire.AnswerMessage2(id, 1, []int{1}, outP("cB"), enc), f2))
 	got := obj(t, a.sent(t, "dev-app", "call.answer").Body)
 	if !got.Has("suite") || !got.Has("offered") || !got.Has("confirm") {
 		t.Fatalf("form 2 members not passed on: %v", got)
@@ -498,7 +522,7 @@ func TestForm2OutOfRangeSigned(t *testing.T) {
 		enc, _, _ = callwire.Answer(ek, oid)
 		a.h.Reset()
 		featuretest.Call(a.f, a.h, t0.Add(time.Second), "connection:cB", "call.answer", peerAnswerSigned("cB", oid, enc,
-			callwire.AnswerMessage2(oid, c.suite, c.offered, enc),
+			callwire.AnswerMessage2(oid, c.suite, c.offered, outP("cB"), enc),
 			`,"suite":`+itoa(c.suite)+`,"offered":`+string(suitesJSON(c.offered))+`,"confirm":"`+b64(cf)+`"`))
 		if got, _ := a.f.Get(oid); len(a.h.SentOfType("call.answer")) != 0 || got.State != StateRinging || !a.h.HasActivity("drop.call_share") {
 			t.Errorf("peer answer %s: passed on, ended or not audited", name)
@@ -536,8 +560,71 @@ func TestForm2PartialForNoCall(t *testing.T) {
 	enc, _, _ = callwire.Answer(ek, oid)
 	a.h.Reset()
 	featuretest.Call(a.f, a.h, t0.Add(time.Second), "connection:cC", "call.answer", peerAnswerSigned("cC", oid, enc,
-		callwire.AnswerMessage2(oid, 1, []int{1}, enc), `,"offered":[1]`))
+		callwire.AnswerMessage2(oid, 1, []int{1}, outP("cC"), enc), `,"offered":[1]`))
 	if a.h.HasActivity("drop.call_share") {
 		t.Fatal("another connection's partial answer audited against our call")
+	}
+}
+
+// (0.88.16) A call passed on by a shared connection fails on both sides.
+// A's device calls C; C re-vouches A's device share for its own vault and
+// offers it to B as its own call: B's vault checks "C calls B" and drops
+// it. B's answer to such a call, passed back to A as C's, fails at A's
+// vault, which checks "A calls C". A device that names another callee
+// than the connection's key is refused at the start.
+func TestForm2RelayedCall(t *testing.T) {
+	sk, _ := callwire.NewOfferKey()
+	ek := sk.Public().Bytes()
+	aIK := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0xa1}, 32)).Public().(ed25519.PublicKey)
+	cIK := peerVault("cC").Public().(ed25519.PublicKey)
+	id := newCallID("relay")
+	devA := featuretest.DeviceKey("peer-device")
+	devPub := devA.Public().(ed25519.PublicKey)
+
+	// B, whose connection C relays: A's device signed "A calls C".
+	b := newSide("cC")
+	m1 := callwire.ShareMessage(callwire.RoleOffer, id, "audio", ek)
+	d1, _ := callwire.SignShare(devA, m1)
+	signed := callwire.OfferMessage2(id, "audio", []int{1}, callwire.Parties{Caller: aIK, Callee: cIK}, ek)
+	d2, _ := callwire.SignShare(devA, signed)
+	v1, _ := suite.Sign(peerVault("cC"), callwire.LabelVouch, callwire.VouchMessage(devPub, m1))
+	v2, _ := suite.Sign(peerVault("cC"), callwire.LabelVouch, callwire.VouchMessage(devPub, signed)) // C re-vouches what A signed
+	offer := `{"call_id":"` + id + `","media":"audio","sdp":"v=0","ek":"` + b64(ek) + `","device_ik":"` + b64(devPub) +
+		`","device_sig":"` + b64(d1) + `","vault_sig":"` + b64(v1) + `","suites":[1],"device_sig2":"` + b64(d2) + `","vault_sig2":"` + b64(v2) + `"}`
+	featuretest.CallExp(b.f, b.h, t0, t0.Add(OfferTTL), "connection:cC", "call.offer", offer)
+	if len(b.h.SentOfType("call.offer")) != 0 || !b.h.HasActivity("drop.call_share") {
+		t.Fatal("B rang for a call passed on by C")
+	}
+	// Signed "C calls B", as C's own call would be, it rings.
+	b2 := newSide("cC")
+	featuretest.CallExp(b2.f, b2.h, t0, t0.Add(OfferTTL), "connection:cC", "call.offer", peerOffer2("cC", newCallID("relay"), "audio", ek, []int{1}, true, false))
+	b2.sent(t, "devices", "call.offer")
+
+	// A, whose call to cB is answered with B's answer passed on: B's
+	// device signed "cB calls B" (B's own view), not "A calls cB".
+	a := newSide("cB")
+	oid := newCallID("relay")
+	if r := featuretest.Call(a.f, a.h, t0, "app", "call.start", startBody2("cB", oid, ek, []int{1})); !r.OK() {
+		t.Fatal(r.Code)
+	}
+	enc, _, _ := callwire.Answer(ek, oid)
+	bIK := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0xb2}, 32)).Public().(ed25519.PublicKey)
+	cbIK := peerVault("cB").Public().(ed25519.PublicKey)
+	a.h.Reset()
+	featuretest.Call(a.f, a.h, t0.Add(time.Second), "connection:cB", "call.answer", peerAnswerSigned("cB", oid, enc,
+		callwire.AnswerMessage2(oid, 1, []int{1}, callwire.Parties{Caller: cbIK, Callee: bIK}, enc), `,"suite":1,"offered":[1],"confirm":"`+b64(make([]byte, 32))+`"`))
+	if c, _ := a.f.Get(oid); len(a.h.SentOfType("call.answer")) != 0 || c.State != StateRinging || !a.h.HasActivity("drop.call_share") {
+		t.Fatal("A used an answer passed on")
+	}
+
+	// A device that names another callee than the connection's key.
+	a3 := newSide("cB")
+	wrong := startBody2P("cB", newCallID("relay"), ek, []int{1}, callwire.Parties{Caller: testIK, Callee: cIK})
+	if r := featuretest.Call(a3.f, a3.h, t0, "app", "call.start", wrong); r.Code != "bad_request" {
+		t.Fatalf("a start naming another callee: %q", r.Code)
+	}
+	wrong = startBody2P("cB", newCallID("relay"), ek, []int{1}, callwire.Parties{Caller: aIK, Callee: cbIK})
+	if r := featuretest.Call(a3.f, a3.h, t0, "app", "call.start", wrong); r.Code != "bad_request" {
+		t.Fatalf("a start naming another caller: %q", r.Code)
 	}
 }

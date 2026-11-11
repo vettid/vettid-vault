@@ -90,12 +90,14 @@ func genCalls() (obj, error) {
 	}
 	// (C2) Form 2: the suites signed with the share, and key confirmation.
 	offered, chosen := []int{2, 1}, 1
-	offer2, err := shareM(callwire.RoleOffer2, CallMedia, callwire.OfferMessage2(CallID, CallMedia, offered, ek), callerDev, callerVault)
+	// (0.88.16) Form 2 names both members' vaults.
+	parties := callwire.Parties{Caller: pub(callerVault), Callee: pub(calleeVault)}
+	offer2, err := shareM(callwire.RoleOffer2, CallMedia, callwire.OfferMessage2(CallID, CallMedia, offered, parties, ek), callerDev, callerVault)
 	if err != nil {
 		return nil, err
 	}
 	offer2 = append(offer2, member{"suites", offered})
-	answer2, err := shareM(callwire.RoleAnswer2, "", callwire.AnswerMessage2(CallID, chosen, offered, enc), calleeDev, calleeVault)
+	answer2, err := shareM(callwire.RoleAnswer2, "", callwire.AnswerMessage2(CallID, chosen, offered, parties, enc), calleeDev, calleeVault)
 	if err != nil {
 		return nil, err
 	}
@@ -104,8 +106,8 @@ func genCalls() (obj, error) {
 	if err != nil {
 		return nil, err
 	}
-	confirm := callwire.Confirm(kConfirm, chosen, offered, CallID)
-	if !callwire.VerifyConfirm(kConfirm, chosen, offered, CallID, confirm) {
+	confirm := callwire.Confirm(kConfirm, chosen, offered, CallID, parties)
+	if !callwire.VerifyConfirm(kConfirm, chosen, offered, CallID, parties, confirm) {
 		return nil, errors.New("vectors: confirm does not verify")
 	}
 	answer, err := share(callwire.RoleAnswer, "", enc, calleeDev, calleeVault)

@@ -526,7 +526,7 @@ func (f *Feature) rejudgeAside(s *vault.Session, r *record) {
 			f.event(s, r, "ballot") // the restore prompt is offered now
 		}
 		f.twoReceipts(s, r)
-		f.rejudgeResults(s, r) // two receipts may now fail a final check (GC #8014)
+		f.rejudgeResults(s, r) // a receipt that now counts may change a final check
 	}
 }
 
@@ -817,6 +817,9 @@ func (f *Feature) shown(s *vault.Session, r *record, sb *svcBallot, answer, rest
 		r.ServiceBallot = sb
 		r.ChangedMS = s.Now().UnixMilli()
 		f.event(s, r, "ballot")
+		// A different own-vk ballot shown with a receipt before the prompt
+		// makes two receipts in this order too.
+		f.twoReceipts(s, r)
 	case r.ownVK(sb.VK):
 		// A ballot under the record's own vk outside the restore prompt
 		// (0.88.12, §10.19.3): self_unrecorded or self_conflict, not
@@ -906,7 +909,9 @@ func (f *Feature) self(s *vault.Session, r *record, b *ballot, sb *svcBallot, an
 // the member's tag, its own contradiction (GC #7991 D): the vault's receipt
 // for its own ballot beside a different own-vk ballot shown with a
 // receipt, or two different own-vk ballots shown. vote.problem (high),
-// once; it counts toward the cap of 16, and the check fails (row_mismatch).
+// once; it counts toward the cap of 16, and the check fails (row_mismatch):
+// a check judged finally before is judged again here, whichever path made
+// the two receipts.
 func (f *Feature) twoReceipts(s *vault.Session, r *record) {
 	if r.TwoReceipts {
 		return
@@ -937,6 +942,7 @@ func (f *Feature) twoReceipts(s *vault.Session, r *record) {
 	r.ChangedMS = s.Now().UnixMilli()
 	f.feed(s, "vote.problem", r.Conn, r.ID, "high")
 	f.event(s, r, "problem")
+	f.rejudgeResults(s, r)
 }
 
 // setSelfConflict sets self_conflict, audited once.

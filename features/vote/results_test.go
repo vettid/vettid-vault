@@ -1406,3 +1406,167 @@ func TestReceiptTakenAfterAFinalCheck(t *testing.T) {
 		}
 	}
 }
+
+// Two receipts in the reverse order: an own-vk ballot shown first in a
+// status answer, then a different one at the restore prompt. The service
+// signed both, so two receipts fire (one vote.problem) and the check of
+// either row fails.
+func TestTwoReceiptsShownThenRestorePrompt(t *testing.T) {
+	var a, b *votewire.Ballot
+	c, v := closedWith(t, func(c *cenv, v *votetest.Vote) {
+		a, b = c.selfBallot(v, "no"), c.selfBallot(v, "yes")
+		c.now = c.now.Add(11 * time.Minute)
+		c.f.Check(c.session(), "svc", v.ID)
+		ids := c.statuses()
+		c.answer(v, ids[len(ids)-1], b, uint64(c.now.UnixMilli()), true)
+		if r := c.rec(v.ID); !r.SelfUnrecorded || r.TwoReceipts {
+			t.Fatalf("shown: self %v two %v", r.SelfUnrecorded, r.TwoReceipts)
+		}
+		c.f.TransferCompleted(c.session(), "old", "new")
+		c.f.Tick(c.session())
+		ids = c.statuses()
+		c.answer(v, ids[len(ids)-1], a, uint64(c.rec(v.ID).Opens*1000+1), true)
+		r := c.rec(v.ID)
+		if sb := r.ServiceBallot; sb == nil || sb.ChoiceID != "no" {
+			t.Fatalf("no restore prompt: %+v", sb)
+		}
+		if !r.TwoReceipts || c.problems(v.ID) != 1 {
+			t.Fatalf("two %v problems %d", r.TwoReceipts, c.problems(v.ID))
+		}
+	})
+	if out, _ := c.f.SubmitResults(c.session(), "svc", v.ID, c.resultsFor(v, resOpts{mine: b})); out.State != CheckFailed || out.Reason != "row_mismatch" {
+		t.Errorf("%+v", out)
+	}
+	if c.problems(v.ID) != 1 {
+		t.Errorf("problems %d", c.problems(v.ID))
+	}
+}
+
+// Two receipts that fire after a final check (an in-window own-vk ballot
+// shown beside the vault's own receipt) fail that check at once, with one
+// vote.problem.
+func TestTwoReceiptsInWindowAfterAFinalCheck(t *testing.T) {
+	c := newCastEnv(t)
+	v := c.open(1)
+	shown := c.selfBallot(v, "no") // before the receipt erases the seed
+	receipted(c, v)
+	closes := time.Unix(c.rec(v.ID).Closes, 0)
+	c.now = closes.Add(CheckDelay + time.Minute)
+	c.f.Tick(c.session())
+	if out, _ := c.f.SubmitResults(c.session(), "svc", v.ID, c.resultsFor(v, resOpts{mine: c.ownBallot(v)})); out.State != CheckVerified {
+		t.Fatalf("%+v", out)
+	}
+	c.h.Reset()
+	c.f.Check(c.session(), "svc", v.ID)
+	ids := c.statuses()
+	c.answer(v, ids[len(ids)-1], shown, uint64(closes.Add(-30*time.Minute).UnixMilli()), true)
+	if r := c.rec(v.ID); !r.TwoReceipts || r.Check != CheckFailed || r.CheckReason != "row_mismatch" || c.problems(v.ID) != 1 {
+		t.Errorf("%v %q %q problems %d", r.TwoReceipts, r.Check, r.CheckReason, c.problems(v.ID))
+	}
+}
+
+// The same own-vk ballot shown twice (Self and SelfLatest) and a different
+// one at the restore prompt: three receipts held, two of them different,
+// so two receipts fire.
+func TestTwoReceiptsSameSelfTwiceThenRestorePrompt(t *testing.T) {
+	closedWith(t, func(c *cenv, v *votetest.Vote) {
+		a, b := c.selfBallot(v, "no"), c.selfBallot(v, "yes")
+		for i := 0; i < 2; i++ {
+			c.now = c.now.Add(11 * time.Minute)
+			c.f.Check(c.session(), "svc", v.ID)
+			ids := c.statuses()
+			c.answer(v, ids[len(ids)-1], b, uint64(c.now.UnixMilli()), true)
+		}
+		if r := c.rec(v.ID); r.Self == nil || r.SelfLatest == nil || !sameSvc(r.Self, r.SelfLatest) || r.TwoReceipts {
+			t.Fatalf("shown twice: %+v %+v two %v", r.Self, r.SelfLatest, r.TwoReceipts)
+		}
+		c.f.TransferCompleted(c.session(), "old", "new")
+		c.f.Tick(c.session())
+		ids := c.statuses()
+		c.answer(v, ids[len(ids)-1], a, uint64(c.rec(v.ID).Opens*1000+1), true)
+		if r := c.rec(v.ID); r.ServiceBallot == nil || !r.TwoReceipts || c.problems(v.ID) != 1 {
+			t.Fatalf("two %v problems %d", r.TwoReceipts, c.problems(v.ID))
+		}
+	})
+}
+
+// A restore prompt whose receipt is kept aside (Late) beside a held,
+// different own-vk ballot: no two receipts until a verified extension
+// brings it into the window.
+func TestTwoReceiptsLateRestorePrompt(t *testing.T) {
+	c := newCastEnv(t)
+	v := c.open(1)
+	a, b := c.selfBallot(v, "no"), c.selfBallot(v, "yes")
+	c.now = c.now.Add(11 * time.Minute)
+	c.f.Check(c.session(), "svc", v.ID)
+	ids := c.statuses()
+	c.answer(v, ids[len(ids)-1], b, uint64(c.now.UnixMilli()), true)
+	closes := time.Unix(c.rec(v.ID).Closes, 0)
+	_, msg := c.svc.Extension(v, 1, closes.Add(time.Hour), c.now)
+	c.now = closes.Add(time.Minute)
+	c.f.TransferCompleted(c.session(), "old", "new")
+	c.f.Tick(c.session())
+	ids = c.statuses()
+	c.answer(v, ids[len(ids)-1], a, uint64(closes.Add(30*time.Minute).UnixMilli()), true)
+	if r := c.rec(v.ID); r.ServiceBallot == nil || !r.ServiceBallot.Late || r.TwoReceipts || c.problems(v.ID) != 0 {
+		t.Fatalf("late prompt: %+v two %v problems %d", r.ServiceBallot, r.TwoReceipts, c.problems(v.ID))
+	}
+	c.call("vote.extended", msg)
+	if r := c.rec(v.ID); r.ServiceBallot == nil || r.ServiceBallot.Late || !r.TwoReceipts || c.problems(v.ID) != 1 {
+		t.Errorf("after the extension: %+v two %v problems %d", r.ServiceBallot, r.TwoReceipts, c.problems(v.ID))
+	}
+}
+
+// A pending restore prompt is not an own-vk ballot shown for the self
+// rows: with the only shown one kept aside, the row is judged by the rows
+// after them, never against the prompt's ballot.
+func TestRestorePromptIsNotASelfRow(t *testing.T) {
+	c := newCastEnv(t)
+	v := c.open(1)
+	a, b := c.selfBallot(v, "no"), c.selfBallot(v, "yes")
+	closes := time.Unix(c.rec(v.ID).Closes, 0)
+	c.now = closes.Add(time.Minute)
+	c.f.Check(c.session(), "svc", v.ID)
+	ids := c.statuses()
+	c.answer(v, ids[len(ids)-1], b, uint64(closes.Add(30*time.Minute).UnixMilli()), true)
+	c.f.TransferCompleted(c.session(), "old", "new")
+	c.f.Tick(c.session())
+	ids = c.statuses()
+	c.answer(v, ids[len(ids)-1], a, uint64(c.rec(v.ID).Opens*1000+1), true)
+	r := c.rec(v.ID)
+	if r.Self == nil || !r.Self.Late || !r.SelfUnrecorded || r.ServiceBallot == nil || r.ServiceBallot.Late || r.TwoReceipts {
+		t.Fatalf("setup: self %+v unrecorded %v prompt %+v two %v", r.Self, r.SelfUnrecorded, r.ServiceBallot, r.TwoReceipts)
+	}
+	c.now = closes.Add(CheckDelay + time.Minute)
+	// The row is the shown ballot whose receipt is kept aside: judged as if
+	// it were not there (no ballot of the vault's own), not against the
+	// prompt's ballot.
+	if out, _ := c.f.SubmitResults(c.session(), "svc", v.ID, c.resultsFor(v, resOpts{mine: b})); out.State != CheckFailed || out.Reason != "row_unexpected" {
+		t.Errorf("%+v", out)
+	}
+}
+
+// With conflict evidence, a final check that two receipts fail on re-judging
+// still raises its own vote.problem: the two receipts' one does not stand
+// for the conflict's (pins the quiet rule's conflict term).
+func TestRejudgeWithConflictEvidenceAndTwoReceipts(t *testing.T) {
+	c := newCastEnv(t)
+	v := c.open(1)
+	other := c.selfBallot(v, "no") // before the receipt erases the seed
+	receipted(c, v)
+	c.now = time.Unix(c.rec(v.ID).Closes, 0).Add(CheckDelay + time.Minute)
+	c.f.Tick(c.session())
+	if out, _ := c.f.SubmitResults(c.session(), "svc", v.ID, c.resultsFor(v, resOpts{mine: c.ownBallot(v)})); out.State != CheckVerified {
+		t.Fatalf("%+v", out)
+	}
+	// The stored row turns out to be another ballot, with conflict
+	// evidence and two receipts already held.
+	r := c.rec(v.ID)
+	r.ConflictEv, r.TwoReceipts = true, true
+	r.Results.Row = &svcBallot{VK: other.VK, ChoiceID: other.ChoiceID, BallotSig: other.BallotSig}
+	c.h.Reset()
+	c.f.rejudgeResults(c.session(), r)
+	if r.Check != CheckFailed || r.CheckReason != "row_mismatch" || c.problems(v.ID) != 1 {
+		t.Errorf("%q %q problems %d", r.Check, r.CheckReason, c.problems(v.ID))
+	}
+}

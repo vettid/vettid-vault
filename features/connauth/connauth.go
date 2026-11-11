@@ -134,12 +134,12 @@ func (f *Feature) Types() []vault.TypeSpec {
 	}
 }
 
-// Load implements vault.Feature.
 // RequiredAtUnlock implements vault.Required: other features call this one
 // directly, so a state of it that does not read refuses the unlock
 // (VAULT-MESSAGING §3.3, 0.88.17).
 func (f *Feature) RequiredAtUnlock() bool { return true }
 
+// Load implements vault.Feature.
 func (f *Feature) Load(raw json.RawMessage) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

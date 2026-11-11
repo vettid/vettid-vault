@@ -413,16 +413,10 @@ func UnlockAlt(ctx context.Context, p AltUnlockParams) (*Manager, *AltUnlockOutc
 		st.SealedRelease = hdr.SealedRelease
 	}
 	m := newManager(p.Options, &st, hdr, dek)
-	if m.requiredUnreadable {
-		// §3.3 (0.88.17, owner decision 2026-11-11): a feature others call
-		// directly could not read its part. Not run half: refused
-		// state_unreadable, before any write, nothing sent,
-		// no unlocked, locked again; a release that reads it opens it.
-		suite.Wipe(op.dek1)
-		suite.Wipe(op.uk)
-		m.zeroize()
-		return nil, out.fail(CodeStateUnreadable, ErrStateUnreadable)
-	}
+	// A feature others call directly that could not read its part
+	// (m.requiredUnreadable) is refused in resume, after the release
+	// decisions (§11.10.4: a stale header is still wrong_release), or
+	// before an update's move is recorded.
 	m.stateVer, m.headerVer = sver, hver
 	m.unlockKey, m.unlockSecret = op.uk, append([]byte(nil), p.UnlockSecret...)
 	switch op.mode {
@@ -548,6 +542,10 @@ func (m *Manager) releaseRules(ctx context.Context, p AltUnlockParams, key *Unlo
 	if err != nil {
 		return refuse(RefuseSealKey)
 	}
+	if m.requiredUnreadable {
+		// §3.3: nothing is written, the move included.
+		return m.refuseUnreadable(out)
+	}
 	// Step 6: record the move. From here on the vault does not resume
 	// under this release.
 	st.ReleaseMove = &ReleaseMove{To: entry.PCR0, ToRelease: entry.Number, From: own.PCR0, ManifestSerial: mv.Serial,
@@ -648,6 +646,20 @@ func (m *Manager) syncUnlockKeysWith(k *UnlockKey) {
 // resume starts the vault under this release: keys, sessions, relay
 // registration, the device's fresh token, a header write recording the
 // reset backoff, counter and manifest serial, and the result fields.
+// refuseUnreadable is §3.3's refusal (0.88.17, owner decision
+// 2026-11-11): a feature others call directly could not read its part,
+// and the vault is not run half. Answered state_unreadable after the
+// release decisions, before anything is written or sent, no unlocked,
+// locked again (the keys wiped); a release that reads it opens it. What
+// the unlock had changed in memory goes with the manager, the
+// cancellation of a recovery included.
+func (m *Manager) refuseUnreadable(out *AltUnlockOutcome) (*Manager, *AltUnlockOutcome) {
+	m.zeroize()
+	out.RecoveryCancelled, out.CancelledRecoveryID = false, ""
+	out.Update = nil
+	return nil, out.fail(CodeStateUnreadable, ErrStateUnreadable)
+}
+
 func (m *Manager) resume(ctx context.Context, p AltUnlockParams, out *AltUnlockOutcome, now time.Time) (*Manager, *AltUnlockOutcome) {
 	fail := func(code string, err error) (*Manager, *AltUnlockOutcome) {
 		m.zeroize()
@@ -665,6 +677,9 @@ func (m *Manager) resume(ctx context.Context, p AltUnlockParams, out *AltUnlockO
 			}
 			m.hdr.SealKeyVerified = r
 		}
+	}
+	if m.requiredUnreadable {
+		return m.refuseUnreadable(out)
 	}
 	// The registered phone's no_backup refusal (§11.11.5 step 1) is not
 	// for a recovered phone (its recovered invite is in the state): its

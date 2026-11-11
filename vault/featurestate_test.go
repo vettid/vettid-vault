@@ -18,7 +18,10 @@ type counterFeature struct{ n uint64 }
 
 func (c *counterFeature) Name() string { return "counter" }
 func (c *counterFeature) Types() []TypeSpec {
-	return []TypeSpec{{Type: "test.count", Request: true, From: []string{KindApp}}}
+	return []TypeSpec{
+		{Type: "test.count", Request: true, From: []string{KindApp}},
+		{Type: "test.ring", Request: true, From: []string{KindConnection}}, // as a call.offer
+	}
 }
 func (c *counterFeature) Handle(context.Context, *Session, *envelope.Inner) (json.RawMessage, error) {
 	c.n++
@@ -190,9 +193,13 @@ func TestRequiredFeatureThatDoesNotLoadRefusesTheUnlock(t *testing.T) {
 	wc := &writeCounter{Store: f.opts.Store}
 	store := f.opts.Store
 	f.opts.Store = wc
+	gauge := Unlocked()
 	m, out := f.unlock(testPIN, testSecret)
 	if m != nil || out.OK || out.Code != CodeStateUnreadable {
 		t.Fatalf("%+v", out)
+	}
+	if Unlocked() != gauge {
+		t.Fatalf("unlocked gauge %d, was %d: the manager was not zeroized", Unlocked(), gauge)
 	}
 	if wc.count() != 0 {
 		t.Fatalf("%d writes on refusal", wc.count())
@@ -239,9 +246,13 @@ func TestRequiredFeatureThatDoesNotLoadRefusesTheRecoveryOpen(t *testing.T) {
 	f.opts.Features = append(append([]Feature(nil), f.opts.Features...), &requiredCounter{})
 	wc := &writeCounter{Store: f.opts.Store}
 	f.opts.Store = wc
+	gauge := Unlocked()
 	m, out := f.open(testPIN, rPW)
 	if m != nil || out.OK || out.Code != CodeStateUnreadable || !out.AttemptUsed() {
 		t.Fatalf("recovery open: %+v (the attempt is spent before the state opens)", out)
+	}
+	if Unlocked() != gauge {
+		t.Fatalf("unlocked gauge %d, was %d", Unlocked(), gauge)
 	}
 	if wc.count() != 0 {
 		t.Fatalf("%d store writes on refusal", wc.count())
@@ -301,11 +312,127 @@ func TestRequiredFeatureThatDoesNotLoadRefusesTheRecoveryResume(t *testing.T) {
 	f.opts.Features = append(append([]Feature(nil), f.opts.Features...), &requiredCounter{})
 	wc := &writeCounter{Store: f.opts.Store}
 	f.opts.Store = wc
+	gauge := Unlocked()
 	m, out := f.open(testPIN, rPW)
 	if m != nil || out.OK || out.Code != CodeStateUnreadable || out.AttemptUsed() {
 		t.Fatalf("resume: %+v (no attempt is spent on the resume path)", out)
 	}
+	if Unlocked() != gauge {
+		t.Fatalf("unlocked gauge %d, was %d", Unlocked(), gauge)
+	}
 	if wc.count() != 0 {
 		t.Fatalf("%d store writes on refusal", wc.count())
+	}
+}
+
+// §11.10.4 before §3.3: a stale header (a release the vault has left) is
+// still answered wrong_release when a Required feature's part does not read
+// either: the release decisions come first.
+func TestUnreadableRequiredPartStillAnswersWrongRelease(t *testing.T) {
+	f := newRFixture(t)
+	f.m.mu.Lock()
+	f.m.st.Features["counter"] = json.RawMessage("7")
+	f.m.st.SealedRelease = "a release this vault has left"
+	f.m.dirty = true
+	f.m.mu.Unlock()
+	f.flush()
+	if err := f.m.Lock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	f.opts.Features = append(append([]Feature(nil), f.opts.Features...), &requiredCounter{})
+	gauge := Unlocked()
+	m, out := f.unlock(testPIN, testSecret)
+	if m != nil || out.OK || out.Code != CodeWrongRelease {
+		t.Fatalf("stale header: %+v", out)
+	}
+	if Unlocked() != gauge {
+		t.Fatalf("unlocked gauge %d, was %d", Unlocked(), gauge)
+	}
+}
+
+// storedPart is feature name's part of the state as stored, decrypted.
+func storedPart(t *testing.T, d *devFixture, name string) string {
+	t.Helper()
+	d.m.mu.Lock()
+	defer d.m.mu.Unlock()
+	blob, _, err := d.store.Get(context.Background(), store.StateKey(d.vid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pt, _, err := decryptState(d.m.dek, d.vid, blob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var st struct {
+		Features map[string]json.RawMessage `json:"features"`
+	}
+	if err := json.Unmarshal(pt, &st); err != nil {
+		t.Fatal(err)
+	}
+	return string(st.Features[name])
+}
+
+// The part of a feature that does not run is carried byte for byte, as
+// stored: also a value a re-encoding would change (key order, a number
+// past float64, 1.0, characters JSON may escape, a duplicate key). It is
+// compared in the decrypted stored state, not in memory.
+func TestAnUnrunPartIsCarriedByteForByte(t *testing.T) {
+	d := newDevFixture(t)
+	const nasty = `{"z":1,"a":18446744073709551615,"f":1.0,"s":"<&>é","d":{"k":1,"k":2}}`
+	d.m.mu.Lock()
+	d.m.st.Features["counter"] = json.RawMessage(nasty)
+	d.m.dirty = true
+	_ = d.m.flushThenDrain(context.Background())
+	d.m.mu.Unlock()
+	// The state's encoding escapes <, & and > once (the same JSON); what is
+	// stored then is never re-encoded differently.
+	before := storedPart(t, d, "counter")
+	if want := `{"z":1,"a":18446744073709551615,"f":1.0,"s":"\u003c\u0026\u003eé","d":{"k":1,"k":2}}`; before != want {
+		t.Fatalf("stored as %s", before)
+	}
+	d.m.Crash()
+	opts := d.opts
+	opts.Store = d.store
+	opts.Features = append(append([]Feature(nil), d.opts.Features...), &failingCounter{})
+	m, _, err := Unlock(context.Background(), UnlockParams{Options: opts, VaultID: d.vid, PIN: testPIN, UnlockSecret: testSecret})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.m = m
+	defer m.Crash()
+	m.mu.Lock()
+	m.dirty = true
+	_ = m.flushThenDrain(context.Background())
+	m.mu.Unlock()
+	if after := storedPart(t, d, "counter"); after != before {
+		t.Fatalf("carried as %s, stored as %s", after, before)
+	}
+}
+
+// A connection's message without re to a feature that does not run (as a
+// call.offer to calls) is answered unsupported_type, not dropped: the
+// caller's vault learns at once that the call cannot be made.
+func TestAnUnrunFeaturesConnectionTypeIsUnsupported(t *testing.T) {
+	d := newDevFixture(t)
+	conn := d.asConnection(t, "c1", 0x71)
+	d.m.addFeature(&counterFeature{})
+	d.m.mu.Lock()
+	d.m.dirty = true
+	_ = d.m.flushThenDrain(context.Background())
+	d.m.mu.Unlock()
+	d.m.Crash()
+	opts := d.opts
+	opts.Store = d.store
+	opts.Features = append(append([]Feature(nil), d.opts.Features...), &failingCounter{})
+	m, _, err := Unlock(context.Background(), UnlockParams{Options: opts, VaultID: d.vid, PIN: testPIN, UnlockSecret: testSecret})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.m = m
+	defer m.Crash()
+	id := d.sendRaw(t, conn, "test.ring", "")
+	in := d.inbox(conn)[conn.peer.ID]
+	if r := find(in, reply(id)); r == nil || r.Status != envelope.StatusError || errCode(r) != "unsupported_type" {
+		t.Fatalf("test.ring to an unrun feature: %+v", in)
 	}
 }

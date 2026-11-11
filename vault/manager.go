@@ -779,6 +779,12 @@ func newManager(o Options, st *State, hdr *Header, dek []byte) *Manager {
 	for _, name := range failed {
 		m.record(Activity{Kind: "feature.load_failed", Ref: name, Audit: true}, m.now())
 	}
+	if len(failed) > 0 && !m.requiredUnreadable {
+		// Durable: stored with the state the opening writes (the audit
+		// log's entry is in the audit feature's part). A refused opening
+		// writes nothing, the record included.
+		m.dirty = true
+	}
 	m.clearDeadHolder() // §3.5.9 (0.52.0): a holder naming no live app is none
 	return m
 }

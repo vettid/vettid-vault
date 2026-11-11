@@ -153,10 +153,10 @@ type CallGate interface {
 	// CallAnsweredBefore: the device has a call answered before t that is
 	// still live at now (not past the 12 h limit).
 	CallAnsweredBefore(deviceID string, t, now time.Time) bool
-	// CallActive: the device has an active call still live at now. Its
-	// own call.keepalive, call.ice and call.end pass an expired access
-	// session (§6.8): the call continues until it ends.
-	CallActive(deviceID string, now time.Time) bool
+	// CallActive: callID is an active call of the device, still live at
+	// now. Its own call.keepalive, call.ice and call.end pass an expired
+	// access session (§6.8): the call continues until it ends.
+	CallActive(deviceID, callID string, now time.Time) bool
 	// EndCallsAnsweredFrom ends, when the hold begins, every active call
 	// answered at or after t (the deadline): only a call answered before
 	// it continues through the hold (§3.6.3). The peer and the owner
@@ -603,9 +603,17 @@ func (m *Manager) alarmState() string {
 	return ""
 }
 
-func (m *Manager) callActive(device string, now time.Time) bool {
+func (m *Manager) callActive(device string, body []byte, now time.Time) bool {
+	o, err := strictjson.ParseObject(body)
+	if err != nil {
+		return false
+	}
+	callID, err := o.String("call_id")
+	if err != nil || callID == "" {
+		return false
+	}
 	for _, f := range m.features {
-		if c, ok := f.(CallGate); ok && c.CallActive(device, now) {
+		if c, ok := f.(CallGate); ok && c.CallActive(device, callID, now) {
 			return true
 		}
 	}

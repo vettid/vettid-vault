@@ -689,8 +689,15 @@ func (f *Feature) answerFromPeer(s *vault.Session, body []byte) error {
 	c.State, c.Answered = StateActive, s.Now()
 	f.alive[c.ID] = c.Answered // the 90 s count from the answer until the first keep-alive
 	peer, _ := s.Connection(c.Conn)
-	_ = s.Send(c.Device, "call.answer", a.Vouched.add(strictjson.NewBuilder().String("call_id", c.ID).String("sdp", a.SDP).
-		Base64("enc", a.Enc)).Base64("peer_ik", peer.IK).Bytes(), vault.SendOptions{})
+	if err := s.Send(c.Device, "call.answer", a.Vouched.add(strictjson.NewBuilder().String("call_id", c.ID).String("sdp", a.SDP).
+		Base64("enc", a.Enc)).Base64("peer_ik", peer.IK).Bytes(), vault.SendOptions{}); err != nil {
+		// The caller can't get the answer (a desktop whose session ended
+		// while it rang, or a device gone): the call can't go on.
+		f.finish(s, c, "unavailable")
+		_ = s.SendToConnection(c.Conn, "call.end", endJSON(c.ID, "unavailable"))
+		endToDevices(s, c, "unavailable", "")
+		return nil
+	}
 	s.Record(vault.Activity{Kind: "call.answered", ConnectionID: c.Conn, Ref: c.ID, Direction: DirOut, Audit: true})
 	return nil
 }

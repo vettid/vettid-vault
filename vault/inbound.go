@@ -621,7 +621,7 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 		}
 		return disp(eph)
 	}
-	if !accessExempt[in.Type] && !m.hasAccess(p, now) && !(p.Kind == KindDesktop && callSignal[in.Type] && m.callActive(p.ID, now)) {
+	if !accessExempt[in.Type] && !m.hasAccess(p, now) && !(p.Kind == KindDesktop && callSignal[in.Type] && m.callActive(p.ID, in.Body, now)) {
 		// §6.8: a desktop or agent acts only within an access session;
 		// a desktop's active call continues until it ends, its own
 		// keep-alive, ice and end passing an expired session.

@@ -43,22 +43,18 @@ func (f *Feature) CallAnsweredBefore(device string, t, now time.Time) bool {
 	return false
 }
 
-// CallActive implements vault.CallGate: the device is the call device of
-// an active call still live at now.
-func (f *Feature) CallActive(device string, now time.Time) bool {
+// CallActive implements vault.CallGate: callID is an active call of the
+// device, still live at now.
+func (f *Feature) CallActive(device, callID string, now time.Time) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	for _, c := range f.calls {
-		if c.Device == device && c.State == StateActive && c.live(now) {
-			return true
-		}
-	}
-	return false
+	c := f.calls[callID]
+	return c != nil && c.Device == device && c.State == StateActive && c.live(now)
 }
 
 // EndCallsAnsweredFrom implements vault.CallGate: when the hold begins, an
 // active call answered at or after the deadline t (by a desktop while the
-// check was due, or past a lapsed hold_off_until) ends unavailable at
+// check was due, or while hold_off_until held the hold off) ends unavailable at
 // once, with the peer vault and the owner devices told, rather than by
 // 90 s of silence (§3.6.3).
 func (f *Feature) EndCallsAnsweredFrom(s *vault.Session, t time.Time) {
@@ -82,6 +78,19 @@ func (f *Feature) EndCallsAnsweredFrom(s *vault.Session, t time.Time) {
 // vault and the owner devices told, the desktop included. A session that
 // only expires keeps the call (§6.8, 0.88.13, owner decision 2026-11-11).
 func (f *Feature) AccessEnded(s *vault.Session, device string) {
+	f.endDeviceCalls(s, device)
+}
+
+// DeviceRemoved implements vault.DeviceRemovedObserver: a device unlinked,
+// or an app a transfer or a recovery replaced, loses its call in progress
+// as an access ended on purpose does (§6.8, §7.4, 0.88.13).
+func (f *Feature) DeviceRemoved(s *vault.Session, device string) {
+	f.endDeviceCalls(s, device)
+}
+
+// endDeviceCalls ends the device's live calls unavailable, the peer vault
+// and the owner devices told.
+func (f *Feature) endDeviceCalls(s *vault.Session, device string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	now := s.Now()

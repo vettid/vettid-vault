@@ -118,7 +118,8 @@ func TestHoldEndsCallsAnsweredFromTheDeadline(t *testing.T) {
 		t.Fatal(r.Code)
 	}
 	now := t0.Add(time.Minute)
-	if !b.f.CallActive("dev-desktop", now) || b.f.CallActive("dev-app", now) || b.f.CallActive("dev-desktop", answered.Add(MaxCallDuration)) {
+	if !b.f.CallActive("dev-desktop", id, now) || b.f.CallActive("dev-app", id, now) || b.f.CallActive("dev-desktop", newCallID("cA"), now) ||
+		b.f.CallActive("dev-desktop", id, answered.Add(MaxCallDuration)) {
 		t.Fatal("CallActive")
 	}
 	// Answered before the deadline: it continues.
@@ -145,7 +146,7 @@ func TestHoldEndsCallsAnsweredFromTheDeadline(t *testing.T) {
 	if b.h.HasActivity("call.missed") {
 		t.Fatal("an answered call recorded as missed")
 	}
-	if b.f.CallActive("dev-desktop", now) {
+	if b.f.CallActive("dev-desktop", id, now) {
 		t.Fatal("an ended call is still active")
 	}
 }
@@ -213,4 +214,60 @@ func TestAccessEndedEndsTheCall(t *testing.T) {
 	}
 	b.sent(t, "dev-desktop", "call.end")
 	b.sent(t, "devices-except:dev-desktop", "call.end")
+}
+
+// §7.4 (0.88.13): a device unlinked (or an app a transfer replaced) loses
+// its call in progress, the peer and the devices told.
+func TestDeviceRemovedEndsTheCall(t *testing.T) {
+	b := newSide("cA")
+	sk, _ := callwire.NewOfferKey()
+	id := newCallID("cA")
+	featuretest.CallExp(b.f, b.h, t0, t0.Add(OfferTTL), "connection:cA", "call.offer", peerOffer("cA", id, "audio", sk.Public().Bytes()))
+	enc, _, err := callwire.Answer(sk.Public().Bytes(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	featuretest.Call(b.f, b.h, t0.Add(2*time.Second), "desktop", "call.answer", answerBody("dev-desktop", id, enc))
+	b.h.Reset()
+	var _ vault.DeviceRemovedObserver = b.f
+	b.f.DeviceRemoved(vault.NewSession(context.Background(), b.h, vault.PeerInfo{}, t0.Add(time.Minute), nil), "dev-desktop")
+	if c, _ := b.f.Get(id); c.State != StateEnded || c.Reason != "unavailable" {
+		t.Fatalf("%+v", c)
+	}
+	if e := b.sent(t, "cA", "call.end"); str(t, e.Body, "reason") != "unavailable" {
+		t.Fatal("the peer was not told")
+	}
+	b.sent(t, "devices-except:dev-desktop", "call.end")
+}
+
+// An outgoing call whose answer can't reach its caller device (a desktop
+// whose session ended while it rang) is ended, the peer told.
+func TestCallerAnswerUndeliverableEndsTheCall(t *testing.T) {
+	a, b := newSide("cB"), newSide("cA")
+	link(a, b)
+	sk, _ := callwire.NewOfferKey()
+	r := featuretest.Call(a.f, a.h, t0, "app", "call.start", startBody("cB", sk.Public().Bytes()))
+	if !r.OK() {
+		t.Fatal(r.Code)
+	}
+	callID := str(t, r.Body, "call_id")
+	off := a.sent(t, "cB", "call.offer")
+	featuretest.CallExp(b.f, b.h, t0, off.Opt.Exp, "connection:cA", "call.offer", string(off.Body))
+	ring := b.sent(t, "devices", "call.offer")
+	ek, _ := obj(t, ring.Body).Base64("ek", callwire.EKSize)
+	enc, _, err := callwire.Answer(ek, callID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	featuretest.Call(b.f, b.h, t0.Add(5*time.Second), "app", "call.answer", answerBody("dev-app", callID, enc))
+	fwd := b.sent(t, "cA", "call.answer")
+	a.h.Reset()
+	delete(a.h.Devices, "dev-app") // the answer can't reach it
+	featuretest.Call(a.f, a.h, t0.Add(5*time.Second), "connection:cB", "call.answer", string(fwd.Body))
+	if c, _ := a.f.Get(callID); c.State != StateEnded || c.Reason != "unavailable" {
+		t.Fatalf("%+v", c)
+	}
+	if e := a.sent(t, "cB", "call.end"); str(t, e.Body, "reason") != "unavailable" {
+		t.Fatal("the peer was not told")
+	}
 }

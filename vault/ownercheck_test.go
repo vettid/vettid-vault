@@ -635,8 +635,8 @@ func (c *callGate) Name() string { return "callgate" }
 func (c *callGate) CallAnsweredBefore(device string, t, _ time.Time) bool {
 	return device == c.device && c.at.Before(t)
 }
-func (c *callGate) CallActive(device string, _ time.Time) bool {
-	return c.active && device == c.device
+func (c *callGate) CallActive(device, callID string, _ time.Time) bool {
+	return c.active && device == c.device && callID == "c1"
 }
 func (c *callGate) EndCallsAnsweredFrom(_ *Session, t time.Time) { c.endsAt = append(c.endsAt, t) }
 
@@ -797,6 +797,19 @@ func TestExpiredSessionKeepsTheCall(t *testing.T) {
 	send()
 	if k.got != 1 {
 		t.Fatal("a keep-alive passed an expired session with no active call")
+	}
+	// Another call's id: refused, the call checked by its id.
+	k.active = true
+	f.seq++
+	mid, _ := envelope.NewULID(testNow())
+	raw, err := f.desk.ep.Seal(&envelope.Inner{ID: mid, Type: "call.keepalive", TS: testNow(), Exp: testNow().Add(30 * time.Second),
+		Body: []byte(`{"call_id":"c2"}`), Features: []string{handshake.CapConfirm}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = f.m.ProcessBatch(context.Background(), &fakeCollector{}, []Message{{MsgID: fmt.Sprintf("o%d", f.seq), Sender: relayauth.EncodeKey(f.desk.peer.Relay.PK), Payload: raw}})
+	if k.got != 1 {
+		t.Fatal("another call's keep-alive passed an expired session")
 	}
 	k.active = true
 	id := f.sendAs(f.desk, "connection.list", `{}`)

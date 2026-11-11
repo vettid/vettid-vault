@@ -526,6 +526,7 @@ func (f *Feature) rejudgeAside(s *vault.Session, r *record) {
 			f.event(s, r, "ballot") // the restore prompt is offered now
 		}
 		f.twoReceipts(s, r)
+		f.rejudgeResults(s, r) // two receipts may now fail a final check (GC #8014)
 	}
 }
 
@@ -545,7 +546,10 @@ func (f *Feature) rejudgeResults(s *vault.Session, r *record) {
 	}
 	switch st, why := verdict(r, row); {
 	case st == CheckFailed:
-		f.failCheck(s, r, why)
+		// Two receipts raised their vote.problem when both were held
+		// (GC #8014): no second one.
+		quiet := r.TwoReceipts && why == "row_mismatch" && !r.conflictEvidence()
+		f.failCheckFeed(s, r, why, !quiet)
 	case st == CheckVerified && r.Check == CheckUnconfirmed:
 		r.Check, r.ChangedMS = CheckVerified, s.Now().UnixMilli()
 		f.audit(s, "vote.check_ok", r.Conn, r.ID)
@@ -908,11 +912,20 @@ func (f *Feature) twoReceipts(s *vault.Session, r *record) {
 		return
 	}
 	// Only receipts held count (7adc8fe: as soon as both are, whichever
-	// came first); one kept aside (Late) does not yet.
+	// came first); one kept aside (Late) does not yet. A pending restore
+	// prompt's ballot is one of them (GC #8014).
 	held := r.receiptedSelf()
+	if sb := r.ServiceBallot; sb != nil && !sb.Late {
+		held = append(held, sb)
+	}
 	b := r.Ballot
-	two := len(held) == 2 && !sameSvc(held[0], held[1])
-	for _, x := range held {
+	two := false
+	for i, x := range held {
+		for _, y := range held[i+1:] {
+			if !sameSvc(x, y) {
+				two = true
+			}
+		}
 		if b != nil && len(b.ReceiptSig) > 0 && !x.is(b) {
 			two = true
 		}

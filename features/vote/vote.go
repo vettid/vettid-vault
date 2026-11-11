@@ -116,8 +116,10 @@ func (f *Feature) Load(raw json.RawMessage) error {
 	st.init()
 	for _, r := range st.Records {
 		migrateExts(r.Exts)
-		if r.Aside != nil {
-			migrateExts([]*extRec{r.Aside})
+		// An extension kept aside was never applied: only a null bundle is
+		// cleared, it is not marked verified (GC #8014).
+		if a := r.Aside; a != nil && string(bytes.TrimSpace(a.Bundle)) == "null" {
+			a.Bundle = nil
 		}
 	}
 	f.st = st

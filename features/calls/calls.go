@@ -122,6 +122,9 @@ type Call struct {
 	Ended    time.Time `json:"ended,omitempty"`
 	Rang     bool      `json:"rang,omitempty"`
 	ICE      int       `json:"ice,omitempty"`
+	// Watched: its device said it sends call.keepalive (keepalive: true in
+	// its call.start or call.answer, C2): the 90 s rule applies to it.
+	Watched bool `json:"watched,omitempty"`
 }
 
 func (c *Call) live(now time.Time) bool {
@@ -145,6 +148,9 @@ type Feature struct {
 	mu     sync.Mutex
 	issuer ICEIssuer
 	calls  map[string]*Call
+	// alive is when each watched active call's device last showed it was
+	// alive (liveness.go): memory only, never in the state.
+	alive map[string]time.Time
 }
 
 // New returns the feature.
@@ -152,7 +158,7 @@ func New(o Options) *Feature {
 	if o.ICE == nil {
 		o.ICE = NoServers{}
 	}
-	return &Feature{issuer: o.ICE, calls: map[string]*Call{}}
+	return &Feature{issuer: o.ICE, calls: map[string]*Call{}, alive: map[string]time.Time{}}
 }
 
 var (
@@ -174,6 +180,7 @@ func (f *Feature) Types() []vault.TypeSpec {
 		{Type: "call.end", From: both},
 		{Type: "call.ice", Ephemeral: true, From: both},
 		{Type: "call.ringing", Ephemeral: true, From: both},
+		{Type: "call.keepalive", Ephemeral: true, From: owners},
 	}
 }
 
@@ -186,6 +193,7 @@ func (f *Feature) Load(data json.RawMessage) error {
 		return err
 	}
 	f.calls = c
+	f.alive = map[string]time.Time{} // memory only: counted again from the first look after the unlock
 	return nil
 }
 
@@ -227,6 +235,8 @@ func (f *Feature) Handle(ctx context.Context, s *vault.Session, in *envelope.Inn
 		return nil, f.ice(s, in.Body, fromConn)
 	case "call.ringing":
 		return nil, f.ringing(s, in.Body, fromConn)
+	case "call.keepalive":
+		return nil, f.keepalive(s, in.Body)
 	}
 	return nil, vault.NewError("unsupported_type", "")
 }
@@ -293,6 +303,7 @@ type Start struct {
 	SDP          string
 	EK           []byte
 	EKSig        []byte // the device's signature over the share
+	Keepalive    bool   // (C2) its device sends call.keepalive
 }
 
 func sig(o strictjson.Object, name string) ([]byte, error) {
@@ -401,6 +412,9 @@ func ParseStart(body []byte) (*Start, error) {
 	if st.EK, err = o.Base64("ek", callwire.EKSize); err != nil {
 		return nil, errBad
 	}
+	if st.Keepalive, err = keepaliveFlag(o); err != nil {
+		return nil, err
+	}
 	return st, nil
 }
 
@@ -437,7 +451,7 @@ func (f *Feature) start(ctx context.Context, s *vault.Session, body []byte) (jso
 		return nil, errConn
 	}
 	f.calls[id] = &Call{ID: id, Conn: st.ConnectionID, Dir: DirOut, Media: st.Media, State: StateRinging, Device: s.From().ID,
-		Created: now, Exp: exp}
+		Created: now, Exp: exp, Watched: st.Keepalive}
 	f.prune(now)
 	s.Record(vault.Activity{Kind: "call.outgoing", ConnectionID: st.ConnectionID, Ref: id, Direction: DirOut, Audit: true})
 	return strictjson.NewBuilder().String("call_id", id).String("exp", envelope.FormatTS(exp)).
@@ -540,6 +554,7 @@ func (f *Feature) busyExcept(id string, now time.Time) bool {
 
 func (f *Feature) finish(s *vault.Session, c *Call, reason string) {
 	c.State, c.Reason, c.Ended = StateEnded, reason, s.Now()
+	delete(f.alive, c.ID)
 	s.Record(vault.Activity{Kind: "call.ended", ConnectionID: c.Conn, Ref: c.ID, Direction: c.Dir, Audit: true})
 }
 
@@ -558,6 +573,8 @@ type Answer struct {
 	SDP    string
 	Enc    []byte
 	EncSig []byte // from a device
+	// Keepalive: (C2) a device's answer says it sends call.keepalive.
+	Keepalive bool
 	Vouched
 }
 
@@ -582,6 +599,9 @@ func ParseAnswer(body []byte, fromPeer bool) (*Answer, error) {
 		a.Vouched, err = vouched(o)
 	} else {
 		a.EncSig, err = sig(o, "enc_sig")
+		if err == nil {
+			a.Keepalive, err = keepaliveFlag(o)
+		}
 	}
 	if err != nil {
 		return nil, err
@@ -617,7 +637,8 @@ func (f *Feature) answerFromDevice(s *vault.Session, body []byte) error {
 		f.finish(s, c, "unavailable")
 		return unavailable(s, a.CallID)
 	}
-	c.State, c.Device, c.Answered = StateActive, s.From().ID, now
+	c.State, c.Device, c.Answered, c.Watched = StateActive, s.From().ID, now, a.Keepalive
+	f.alive[c.ID] = now // the 90 s count from the answer until the first keep-alive
 	s.NotifyDevicesWith("call.end", endJSON(c.ID, "answered_elsewhere"), s.From().ID, vault.SendOptions{})
 	s.Record(vault.Activity{Kind: "call.answered", ConnectionID: c.Conn, Ref: c.ID, Direction: DirIn, Audit: true})
 	return nil
@@ -638,6 +659,7 @@ func (f *Feature) answerFromPeer(s *vault.Session, body []byte) error {
 		return nil // the call keeps ringing until it times out or ends
 	}
 	c.State, c.Answered = StateActive, s.Now()
+	f.alive[c.ID] = c.Answered // the 90 s count from the answer until the first keep-alive
 	peer, _ := s.Connection(c.Conn)
 	_ = s.Send(c.Device, "call.answer", a.Vouched.add(strictjson.NewBuilder().String("call_id", c.ID).String("sdp", a.SDP).
 		Base64("enc", a.Enc)).Base64("peer_ik", peer.IK).Bytes(), vault.SendOptions{})

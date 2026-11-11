@@ -516,7 +516,7 @@ func TestHoldAllowList(t *testing.T) {
 		}
 	}
 	for _, typ := range []string{"credential.alarm.confirm", "credential.rotate", "device.transfer.approve", "device.transfer.reject",
-		"call.ice", "call.answer", "credential.unlock", "credential.reset", "device.transfer.create", "settings.set", "vault.delete", "pin.change",
+		"call.ice", "call.keepalive", "call.answer", "credential.unlock", "credential.reset", "device.transfer.create", "settings.set", "vault.delete", "pin.change",
 		"approval.decide", "device.session.approve", "account.get", TypeAccountNameSet, "message.send", "location.update", "device.unlink",
 		"location.share.start", "location.share.list", "location.get", "location.request", "location.history.share",
 		"pending.list"} {
@@ -554,13 +554,22 @@ func TestHoldAllowList(t *testing.T) {
 	}
 	cg := &callGate{device: "desk1", at: m.st.OwnerCheck.Deadline.Add(-time.Minute)}
 	m.addFeature(cg)
-	if !m.holdAllows(desk, "call.ice", OwnerCheckHeld) || !m.holdAllows(desk, "call.end", OwnerCheckHeld) {
-		t.Fatal("desktop's call answered before the deadline")
+	for _, typ := range []string{"call.ice", "call.end", "call.keepalive"} {
+		if !m.holdAllows(desk, typ, OwnerCheckHeld) {
+			t.Fatalf("desktop's call answered before the deadline: %s", typ)
+		}
 	}
 	cg.at = m.st.OwnerCheck.Deadline.Add(time.Minute)
-	if m.holdAllows(desk, "call.ice", OwnerCheckHeld) {
+	if m.holdAllows(desk, "call.ice", OwnerCheckHeld) || m.holdAllows(desk, "call.keepalive", OwnerCheckHeld) {
 		t.Fatal("call answered after the deadline")
 	}
+	cg.device, cg.at = app.ID, m.st.OwnerCheck.Deadline.Add(-time.Minute)
+	for _, typ := range []string{"call.ice", "call.keepalive"} {
+		if !m.holdAllows(app, typ, OwnerCheckHeld) || !m.holdAllows(app, typ, OwnerCheckDue) {
+			t.Fatalf("app's call answered before the deadline: %s", typ)
+		}
+	}
+	cg.device = "desk1"
 	for _, typ := range []string{"vault.status", "device.session.end", "relay.address.update"} {
 		if !m.holdAllows(agent, typ, OwnerCheckHeld) {
 			t.Fatalf("agent %s", typ)

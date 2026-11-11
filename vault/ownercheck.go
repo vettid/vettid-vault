@@ -531,7 +531,7 @@ func (m *Manager) holdAllows(p *Peer, typ, state string) bool {
 			return m.alarmState() == "rotation_required"
 		case "device.transfer.approve", "device.transfer.reject":
 			return m.st.Transfer != nil // a transfer opened before the hold
-		case "call.ice":
+		case "call.ice", "call.keepalive": // a call answered before the deadline continues (C2: its liveness too)
 			return m.callAnsweredBefore(p.ID, deadline)
 		}
 		return false
@@ -542,7 +542,7 @@ func (m *Manager) holdAllows(p *Peer, typ, state string) bool {
 		switch typ {
 		case "vault.status", "vault.lock", "device.session.end", "location.share.stop":
 			return true
-		case "call.end", "call.ice":
+		case "call.end", "call.ice", "call.keepalive":
 			return m.callAnsweredBefore(p.ID, deadline)
 		}
 		return false

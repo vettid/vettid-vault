@@ -33,8 +33,24 @@ func arrOfB64(list [][]byte) []byte {
 	return append(arr, ']')
 }
 
+// svcBallotJSON is a shown ballot with its receipt; a receipt finally
+// rejected as late is marked (review fix 6d).
 func svcBallotJSON(sb *svcBallot) []byte {
-	return ballotEvidence(sb.VK, sb.ChoiceID, sb.BallotSig, sb.MsgMS, sb.ReceiptSig)
+	b := ballotEvidence(sb.VK, sb.ChoiceID, sb.BallotSig, sb.MsgMS, sb.ReceiptSig)
+	if sb.LateRejected {
+		b = append(b[:len(b)-1], []byte(`,"late_receipt":true}`)...)
+	}
+	return b
+}
+
+// asideJSON is a receipt kept aside (0.88.12): msg_ms and receipt_sig, and
+// rejected once a final judgement found it still outside the window.
+func asideJSON(k *keptReceipt) []byte {
+	b := strictjson.NewBuilder().Uint("msg_ms", uint64(k.MsgMS)).Base64("receipt_sig", k.ReceiptSig)
+	if k.Rejected {
+		b.Bool("rejected", true)
+	}
+	return b.Bytes()
 }
 
 func evidenceCopy(e *evidence) []byte {
@@ -100,6 +116,12 @@ func (f *Feature) recordEvidence(s *vault.Session, r *record) []byte {
 		}
 		e.Raw("member", bb.Bytes())
 		e.Raw("refusals", arrOfB64(b.Refusals))
+		// Only once finally rejected (review fix 6d), as compactEvidence
+		// exports a released record's (GC #8012): a receipt still kept
+		// aside may yet be taken.
+		if b.Aside != nil && b.Aside.Rejected {
+			e.Raw("late_receipt", asideJSON(b.Aside))
+		}
 	}
 	e.Raw("status_answers", arrOfB64(r.StatusAnswers))
 	if r.Other != nil {
@@ -107,6 +129,13 @@ func (f *Feature) recordEvidence(s *vault.Session, r *record) []byte {
 	}
 	if r.OtherLatest != nil {
 		e.Raw("other_ballot_latest", svcBallotJSON(r.OtherLatest))
+	}
+	if r.Self != nil {
+		e.Raw("self_ballot", svcBallotJSON(r.Self))
+	}
+
+	if r.SelfLatest != nil {
+		e.Raw("self_ballot_latest", svcBallotJSON(r.SelfLatest))
 	}
 	if r.ServiceBallot != nil {
 		e.Raw("service_ballot", svcBallotJSON(r.ServiceBallot))
@@ -157,6 +186,9 @@ func (f *Feature) recordEvidence(s *vault.Session, r *record) []byte {
 	if len(r.ResultsHash) > 0 {
 		e.Base64("results_hash", r.ResultsHash)
 	}
+	if r.ResultsMatch != "" {
+		e.String("results_hash_match", r.ResultsMatch)
+	}
 	return e.Bytes()
 }
 
@@ -192,6 +224,16 @@ func compactEvidence(c *compact) []byte {
 		if c.Other != nil {
 			e.Raw("other_ballot", svcBallotJSON(c.Other))
 		}
+		if c.Self != nil {
+			e.Raw("self_ballot", svcBallotJSON(c.Self))
+		}
+		if c.SelfLatest != nil {
+			e.Raw("self_ballot_latest", svcBallotJSON(c.SelfLatest))
+		}
+		if c.Aside != nil && c.Aside.Rejected { // as recordEvidence
+			e.Raw("late_receipt", asideJSON(c.Aside))
+		}
+
 	}
 	return e.Bytes()
 }
@@ -276,7 +318,7 @@ func (f *Feature) apiRelease(s *vault.Session, in *envelope.Inner) (json.RawMess
 	delete(f.st.Records, key(conn, id))
 	problems := 0
 	for _, x := range f.st.Records {
-		if x.Conn == conn && x.problem() {
+		if x.Conn == conn && x.capProblem() {
 			problems++
 		}
 	}

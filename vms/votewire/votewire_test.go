@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"math/big"
 	"strings"
 	"testing"
@@ -140,12 +141,65 @@ func proposalFrom(t *testing.T, mut func(m map[string]any)) []byte {
 	return out
 }
 
+// choices makes n choices, abstain first; the real ones are labelled label
+// with its last byte made distinct (labels are distinct once folded,
+// 0.88.12), keeping its length.
 func choices(n int, label string) []any {
 	out := []any{map[string]any{"id": "abstain", "label": "Abstain"}}
 	for i := 1; i < n; i++ {
-		out = append(out, map[string]any{"id": "c" + string(rune('a'+i)), "label": label})
+		l := label
+		if l != "" {
+			l = l[:len(l)-1] + string(rune('a'+i))
+		}
+		out = append(out, map[string]any{"id": "c" + string(rune('a'+i)), "label": l})
 	}
 	return out
+}
+
+// labelled makes a proposal's choices from labels: abstain's first, then
+// the real ones.
+func labelled(abstain string, labels ...string) func(m map[string]any) {
+	return func(m map[string]any) {
+		out := []any{map[string]any{"id": "abstain", "label": abstain}}
+		for i, l := range labels {
+			out = append(out, map[string]any{"id": "c" + string(rune('1'+i)), "label": l})
+		}
+		m["choices"] = out
+	}
+}
+
+// Labels distinct once folded (VAULT-MESSAGING 0.88.12 §10.19.4 step 2):
+// format characters removed, NFC, simple case folding; abstain's label
+// counts.
+func TestProposalLabelsFolded(t *testing.T) {
+	cases := []struct {
+		name string
+		mut  func(m map[string]any)
+		ok   bool
+	}{
+		{"Yes and No", labelled("Abstain", "Yes", "No"), true},
+		{"Yes and YES", labelled("Abstain", "Yes", "YES"), false},
+		{"Yes and Yes+RLM", labelled("Abstain", "Yes", "Yes\u200f"), false},
+		{"Yes and Yes+LRI", labelled("Abstain", "Yes", "Yes\u2066"), false},
+		{"Yes and LRM+Yes+PDF", labelled("Abstain", "Yes", "\u200eY\u202aes\u202c"), false},
+		{"decomposed and precomposed e-acute", labelled("Abstain", "Caf\u00e9", "Cafe\u0301"), false},
+		{"a real choice labelled Abstain", labelled("Abstain", "Yes", "abstain"), false},
+		{"a real choice labelled ABSTAIN+ZWJ", labelled("Abstain", "Yes", "ABS\u200dTAIN"), false},
+		{"Strasse and Stra-sharp-s (simple folding)", labelled("Abstain", "Stra\u00dfe", "Strasse"), true},
+		{"sharp s and capital sharp s", labelled("Abstain", "\u00df", "\u1e9e"), false},
+		{"Kelvin sign and k", labelled("Abstain", "\u212a", "k"), false},
+		{"sigma forms", labelled("Abstain", "\u03c3", "\u03c2"), false},
+		{"a label empty once folded", labelled("Abstain", "Yes", "\u200f\u2066"), false},
+	}
+	for _, c := range cases {
+		_, err := ParseProposal(proposalFrom(t, c.mut))
+		if (err == nil) != c.ok {
+			t.Errorf("%s: err=%v, want ok=%v", c.name, err, c.ok)
+		}
+		if err != nil && !errors.Is(err, ErrDocument) {
+			t.Errorf("%s: err=%v, want ErrDocument", c.name, err)
+		}
+	}
 }
 
 // The bounds of VAULT-MESSAGING §10.19.4 step 2: each at its largest and

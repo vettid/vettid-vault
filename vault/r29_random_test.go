@@ -781,6 +781,19 @@ func (w *rpWorld) advanceLive(d time.Duration) {
 	w.f.advance(d)
 }
 
+// unlockCollect is the first short collect a vault makes once unlocked
+// (its collector starts at the unlock), so that what waits for it at the
+// relay is taken before anything else can happen. Without it an unlock
+// followed at once by a lock collected nothing, and two locks with no
+// collect between them, longer than T together, let the relay drop a note
+// at T that a real vault would have taken (seeds 18156677481926059718,
+// 7316038411081238857; GC #7899).
+func (w *rpWorld) unlockCollect(s int) {
+	for i := 0; i < 20 && len(w.q[s]) > 0 && !w.locked[s]; i++ {
+		w.collect(s, 32, false, false, nil)
+	}
+}
+
 func (w *rpWorld) tick(s int) {
 	if w.locked[s] {
 		return
@@ -916,6 +929,7 @@ func (w *rpWorld) exec(a rpAction, rng *rand.Rand) {
 	case rpUnlock:
 		if w.locked[s] {
 			w.open(s)
+			w.unlockCollect(s)
 		}
 	case rpCrash:
 		w.crash(s)
@@ -1503,4 +1517,18 @@ func TestR29RandomPair(t *testing.T) {
 	}
 	t.Logf("%d runs (burst %v, steps %d) in %v: %v per 10,000", runs, burst, steps, el.Round(time.Second),
 		(el * time.Duration(10000) / time.Duration(runs)).Round(time.Second))
+}
+
+// The unlock's first short collect (GC #7899): two seeds whose receiver
+// locked, unlocked and locked again at once, longer than T together, so the
+// relay dropped a note at T before the harness modelled that collect. Each
+// must now converge.
+func TestR29UnlockCollectSeeds(t *testing.T) {
+	for _, seed := range []uint64{18156677481926059718, 7316038411081238857} {
+		t.Run(strconv.FormatUint(seed, 10), func(t *testing.T) {
+			if v, _ := rpRun(t, seed, 40, false, false); v != "" {
+				t.Fatalf("verdict %q, want converged", v)
+			}
+		})
+	}
 }

@@ -559,7 +559,8 @@ func TestSwappedShares(t *testing.T) {
 // at once. Both vaults compare the two call_ids and the lower wins, so one
 // call connects: the winning side drops the losing offer (no ringing, no
 // answer, no record, no missed call; drop.call_glare), and the losing side
-// ends its own call busy with superseded_by and rings for the winner.
+// ends its own call busy with superseded_by, tells the peer busy for it,
+// and rings for the winner.
 func TestGlare(t *testing.T) {
 	a, b := newSide("cB"), newSide("cA")
 	link(a, b)
@@ -602,10 +603,31 @@ func TestGlare(t *testing.T) {
 		t.Fatalf("the superseded end: %s", e.Body)
 	}
 	b.sent(t, "devices-except:dev-app", "call.end")
+	// The peer vault is told busy for the losing call, exactly once.
+	toPeer := 0
 	for _, m := range b.h.Sent {
 		if m.To == "cA" {
-			t.Fatalf("the peer vault was told: %+v", m)
+			if m.Type != "call.end" || str(t, m.Body, "call_id") != hi || str(t, m.Body, "reason") != "busy" {
+				t.Fatalf("to the peer vault: %+v", m)
+			}
+			toPeer++
 		}
+	}
+	if toPeer != 1 {
+		t.Fatalf("%d messages to the peer vault on a loss", toPeer)
+	}
+	// The winner, which dropped that offer, ignores the end; its own call
+	// rings on.
+	var lost featuretest.Sent
+	for _, m := range b.h.Sent {
+		if m.To == "cA" {
+			lost = m
+		}
+	}
+	a.h.Reset()
+	featuretest.Call(a.f, a.h, t0.Add(2*time.Second), "connection:cB", "call.end", string(lost.Body))
+	if c, _ := a.f.Get(lo); c.State != StateRinging || len(a.h.Sent) != 0 {
+		t.Fatalf("the winner after the loser's busy: %+v, sent %+v", c, a.h.Sent)
 	}
 	if c, _ := b.f.Get(lo); c.State != StateRinging {
 		t.Fatalf("the winning offer: %+v", c)

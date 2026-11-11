@@ -558,9 +558,10 @@ func (f *Feature) offer(ctx context.Context, s *vault.Session, in *envelope.Inne
 // to conn still rings. The lower call_id (its 26 ASCII bytes) wins, so
 // both vaults agree. Ours wins: y is dropped (no ringing, no answer, no
 // record, no missed call), audited drop.call_glare; false. Theirs wins:
-// ours ends busy, the owner devices are told with superseded_by = y (the
-// peer vault nothing), and y is handled as any offer; true. With no such
-// call of ours: true.
+// ours ends busy, the owner devices are told with superseded_by = y, the
+// peer vault call.end{busy} for ours (one that already dropped it ignores
+// it; one still in the race stops ringing; owner decision 2026-11-11), and
+// y is handled as any offer; true. With no such call of ours: true.
 func (f *Feature) glare(s *vault.Session, conn, y string, now time.Time) bool {
 	for _, id := range f.sorted() {
 		x := f.calls[id]
@@ -572,6 +573,7 @@ func (f *Feature) glare(s *vault.Session, conn, y string, now time.Time) bool {
 			return false
 		}
 		f.finish(s, x, "busy")
+		_ = s.SendToConnection(conn, "call.end", endJSON(x.ID, "busy"))
 		body := strictjson.NewBuilder().String("call_id", x.ID).String("reason", "busy").String("superseded_by", y).Bytes()
 		except := ""
 		if x.Device != "" {

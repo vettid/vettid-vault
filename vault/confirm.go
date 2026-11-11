@@ -534,11 +534,15 @@ func (m *Manager) beforeAccept(p *Peer, ep *handshake.Epoch, in *envelope.Inner,
 // first") and will send no hs.fin for it. The answer is abandoned (its
 // tokens revoked, an hs.resp not yet deposited not sent), so that it holds
 // back neither the vault's rekeys nor, between two persons, its reconnects
-// until L. hs.fin is not such a message (the caller). A restore's answer
-// (Older) and one to a reconnect naming a replaced line's epoch (Fork) are
-// kept: they name such an epoch by design, the second is fork evidence
-// judged at its hs.fin; and the named epoch must be one of p's epochs, so
-// that "newer" compares two of them.
+// until L. hs.fin is not such a message (the caller): a pending rekey's
+// hs.fin is made under the newer epoch while I's reconnect is still open
+// (§6.5 "A verified hs.fin comes first" then decides). A restore's answer
+// (Older) is kept, and so is a fork sign's (Fork: a reconnect naming a
+// replaced line's epoch, §6.6 "Fork detection", or an epoch older than the
+// confirmed one, §3.4.1 "Fork by ctx"), judged at its hs.fin; the named
+// epoch must be one of p's epochs, so that "newer" compares two of them.
+// "Newer" is p.newer: an epoch established, not pending, abandoned or
+// destroyed, later in establishing order.
 func (m *Manager) dropStaleReconnectAnswers(p *Peer, msgEpoch []byte, ts time.Time, now time.Time) {
 	if p.Kind != KindConnection {
 		return

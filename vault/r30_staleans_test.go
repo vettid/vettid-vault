@@ -123,3 +123,133 @@ func TestR30StaleAnswerKeptForAMessageUnderTheNamedEpoch(t *testing.T) {
 		}
 	})
 }
+
+// (Opus review of a09a3ff, Medium) A copy of P reconnects naming E0, older
+// than Q's confirmed E1 (§3.4.1 "Fork by ctx"): Q's answer is fork evidence
+// judged at its hs.fin. The honest P's later message under E1 must not end
+// that answer as stale: the copy's hs.fin still suspends.
+func TestR30StaleAnswerKeepsAForkByCtxAnswer(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	snap := f.snapshot(0) // P's copy line: E0
+	f.rekey(1)            // Q begins E1 with P
+	f.settle()
+	f.note(0, "under-E1")
+	f.settle()
+	f.startCopy(0, snap)
+	f.rotate(2) // the copy line rotates a→b
+	f.lose(2, 1, kAny)
+	f.do(2, func(m *Manager, p *Peer) {
+		for id, og := range m.st.Outgoing {
+			if og.PeerID == p.ID {
+				m.abandonOutgoing(id, f.clk)
+			}
+		}
+		m.startReconnect(p, f.clk)
+	})
+	f.deliver(2, 1, kHSInit)
+	if f.reconnectAnswer(1) == "" {
+		f.dump()
+		t.Fatal("setup: Q did not answer the copy's reconnect")
+	}
+	f.advance(time.Minute)
+	f.note(0, "honest-under-E1") // newer than E0, a later ts
+	f.deliver(0, 1, kNote)
+	if f.reconnectAnswer(1) == "" {
+		t.Fatal("a fork-by-ctx answer was ended as stale")
+	}
+	f.deliver(1, 2, kHSResp)
+	f.deliver(2, 1, kHSFin)
+	if !f.suspendedRef(1, "epoch") {
+		f.dump()
+		t.Fatal("Q did not suspend at the copy's hs.fin")
+	}
+}
+
+// (Opus review of a09a3ff, Low: hs.fin excluded) I's rekey K and reconnect
+// X are both open and R answers both; I takes K's hs.resp, then X's. R gets
+// K's hs.fin (made under K, newer, a later ts), a copy of it, then X's
+// hs.fin: neither K's hs.fin nor its copy may end X's answer.
+func TestR30StaleAnswerNotEndedByAnHsFin(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	f.rekey(0)
+	f.advance(time.Minute)
+	f.do(0, func(m *Manager, p *Peer) { m.startReconnect(p, f.clk) })
+	if f.deliver(0, 1, kHSInit) != 2 {
+		f.dump()
+		t.Fatal("setup: expected both hs.init")
+	}
+	resps := f.takeKind(1, 0, kHSResp)
+	if len(resps) != 2 {
+		t.Fatalf("setup: expected two hs.resp, got %d", len(resps))
+	}
+	f.advance(time.Minute)
+	f.process(0, resps[0])
+	f.advance(time.Minute)
+	f.process(0, resps[1])
+	fins := f.takeKind(0, 1, kHSFin)
+	if len(fins) != 2 {
+		f.dump()
+		t.Fatalf("setup: expected two hs.fin, got %d", len(fins))
+	}
+	f.process(1, fins[0])
+	f.advance(time.Second)
+	f.process(1, f.pos(fins[0], "redeposited-fin-k")) // deposited again (a crash before the answer): a new msg_id
+	if f.reconnectAnswer(1) == "" {
+		t.Fatal("an hs.fin ended the reconnect answer")
+	}
+	f.process(1, fins[1])
+	f.settle()
+	if f.p(0).Pending != nil || !f.sameEpoch() || f.p(1).suspended() {
+		f.dump()
+		t.Fatal("the pair did not end on one epoch")
+	}
+	f.talks()
+}
+
+// (Opus review of a09a3ff, Low: after confirmPending) I's reconnect X and
+// R's rekey Pr cross; R answers X late while Pr is pending at R; I
+// activates Pr at its hs.fin ("A verified hs.fin comes first": X ends) and
+// confirms it. That hs.confirm, under R's then pending Pr, confirms Pr and
+// then ends X's answer.
+func TestR30StaleAnswerEndedByAConfirmOfTheOwnPendingEpoch(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	f.do(0, func(m *Manager, p *Peer) { m.startReconnect(p, f.clk) })
+	x := f.takeKind(0, 1, kHSInit)
+	if len(x) != 1 {
+		t.Fatal("setup: no reconnect hs.init")
+	}
+	f.advance(time.Minute)
+	f.rekey(1)
+	if f.deliver(1, 0, kHSInit) != 1 || f.deliver(0, 1, kHSResp) != 1 || f.p(1).Pending == nil {
+		f.dump()
+		t.Fatal("setup: R's rekey is not pending")
+	}
+	f.advance(time.Minute)
+	f.process(1, x[0]) // X reaches R late; Pr pending at R
+	if f.reconnectAnswer(1) == "" {
+		f.dump()
+		t.Fatal("setup: R did not answer X")
+	}
+	f.advance(time.Minute)
+	if f.deliver(1, 0, kHSFin) != 1 {
+		f.dump()
+		t.Fatal("setup: Pr's hs.fin did not reach I")
+	}
+	f.advance(time.Minute)
+	f.deliver(0, 1, kConfirm)
+	if f.p(1).Pending != nil {
+		t.Fatal("setup: Pr not confirmed at R")
+	}
+	if f.reconnectAnswer(1) != "" {
+		f.dump()
+		t.Fatal("the hs.confirm under R's pending epoch did not end X's answer")
+	}
+	f.settle()
+	if !f.sameEpoch() || f.p(0).suspended() || f.p(1).suspended() {
+		f.dump()
+		t.Fatal("the pair did not end on one epoch")
+	}
+}

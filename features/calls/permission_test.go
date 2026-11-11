@@ -239,6 +239,51 @@ func TestUnansweredWhatCounts(t *testing.T) {
 	if len(c.f.unanswered["cA"]) != 0 {
 		t.Fatal("a call the vault ended for its own reasons counted")
 	}
+	// A call nobody answered, ended by the ring timer, counts.
+	d := newSide("cA")
+	tid := newCallID("cA")
+	featuretest.CallExp(d.f, d.h, t0, t0.Add(OfferTTL), "connection:cA", "call.offer", peerOffer("cA", tid, "audio", sk.Public().Bytes()))
+	d.f.Tick(vault.NewSession(context.Background(), d.h, vault.PeerInfo{}, t0.Add(OfferTTL+time.Second), nil))
+	if got, _ := d.f.Get(tid); got.State != StateEnded || got.Reason != "timeout" || len(d.f.unanswered["cA"]) != 1 || d.countActivity("call.missed") != 1 {
+		t.Fatalf("the ring timer: %+v, counts %v", got, d.f.unanswered["cA"])
+	}
+}
+
+// The held check comes before the limit: a held offer from a limited
+// connection is a missed call, not counted, and not drop.call_rate.
+func TestHeldBeforeLimited(t *testing.T) {
+	b := newSide("cA")
+	for i := 0; i < LimitShort; i++ {
+		missOne(t, b, t0.Add(time.Duration(i)*time.Minute))
+	}
+	before := append([]time.Time(nil), b.f.unanswered["cA"]...)
+	if !b.f.limited("cA", t0.Add(4*time.Minute)) {
+		t.Fatal("not limited")
+	}
+	b.h.Reset()
+	b.h.Hold = vault.OwnerCheckHeld
+	sk, _ := callwire.NewOfferKey()
+	at := t0.Add(4 * time.Minute)
+	featuretest.CallExp(b.f, b.h, at, at.Add(OfferTTL), "connection:cA", "call.offer", peerOffer("cA", newCallID("cA"), "audio", sk.Public().Bytes()))
+	if b.h.HasActivity("drop.call_rate") || b.countActivity("call.missed") != 1 || len(b.f.unanswered["cA"]) != len(before) {
+		t.Fatalf("held offer while limited: counts %v", b.f.unanswered["cA"])
+	}
+	for i := range before {
+		if !b.f.unanswered["cA"][i].Equal(before[i]) {
+			t.Fatal("the counts changed")
+		}
+	}
+}
+
+// A desktop may set calls off (within its session), as the app may.
+func TestCallPermissionFromDesktop(t *testing.T) {
+	b := newSide("cA")
+	if r := featuretest.Call(b.f, b.h, t0, "desktop", "call.permission.set", `{"connection_id":"cA","allowed":false}`); !r.OK() || !b.f.off["cA"] {
+		t.Fatalf("set from a desktop: %q", r.Code)
+	}
+	if r := featuretest.Call(b.f, b.h, t0, "desktop", "call.permission.list", `{}`); !r.OK() || !strings.Contains(string(r.Body), `"allowed":false`) {
+		t.Fatalf("list from a desktop: %q %s", r.Code, r.Body)
+	}
 }
 
 type failingICE struct{}

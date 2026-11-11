@@ -58,7 +58,10 @@ func loadState(data json.RawMessage) (*state, error) {
 		return nil, err
 	}
 	if st.V > stateVersion {
-		return nil, errors.New("calls: state from a later release") // never drop what it doesn't know
+		// Refused rather than read without the fields it doesn't know. (The
+		// manager ignores a feature's Load error today, so the feature then
+		// starts empty, calls allowed; failing closed there is a separate change.)
+		return nil, errors.New("calls: state from a later release")
 	}
 	if st.Calls == nil {
 		st.Calls = map[string]*Call{}
@@ -94,10 +97,9 @@ func (f *Feature) noteUnanswered(s *vault.Session, conn string, now time.Time) {
 		return // the connection is gone (its counts go with it)
 	}
 	var keep []time.Time
+	// A count later than now (the clock stepped back) is kept here and
+	// moved to now by limited, through announceLimited below.
 	for _, t := range f.unanswered[conn] {
-		if t.After(now) {
-			t = now // as in limited
-		}
 		if now.Sub(t) < LimitLongWindow {
 			keep = append(keep, t)
 		}

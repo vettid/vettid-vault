@@ -855,6 +855,17 @@ func TestR30NoteOracle(t *testing.T) {
 	if lost, res := w.notesLost(); len(lost) != 0 || res != rpToldResidual {
 		t.Fatalf("told after a 5xx: %v %q, want the residual", lost, res)
 	}
+	// Told after a crash: only with the sender's undelivered_window.
+	w = newW()
+	w.sent[0] = []string{"c"}
+	w.crashNote = map[string]bool{"c": true}
+	if lost, res := w.notesLost(); len(lost) != 1 || res != "" {
+		t.Fatalf("a crash without the sender's undelivered_window: %v %q", lost, res)
+	}
+	f.do(0, func(m *Manager, p *Peer) { m.auditRef(f.clk, "undelivered_window", p.ID, "c") })
+	if lost, res := w.notesLost(); len(lost) != 0 || res != rpCrashToldResidual {
+		t.Fatalf("told after a crash: %v %q, want the residual", lost, res)
+	}
 	// A lost note behind a long lock is not absorbed by the lock class.
 	w = newW()
 	w.sent[0] = []string{"a"}

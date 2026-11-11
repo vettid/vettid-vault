@@ -817,6 +817,7 @@ func (w *rpWorld) open(s int) {
 		}))
 	m.features = append(m.features, f.sink[s])
 	w.hook(s)
+	startWrite(m)
 	if w.locked[s] {
 		w.maxLock = max(w.maxLock, f.clk.Sub(w.lockAt[s]))
 		w.locks[s] = append(w.locks[s], [2]time.Time{w.lockAt[s], f.clk})
@@ -845,8 +846,10 @@ func (w *rpWorld) crash(s int) {
 		// at the restart (no clean end), so it is told, not stamped again.
 		m := w.f.m(s)
 		m.mu.Lock()
-		for _, e := range m.st.Outbox {
-			if !e.Done && e.Op == OpDeposit && e.InnerID != "" {
+		for _, e := range m.stOutbox() {
+			// As State.init marks: a waiting deposit with a payload (a held
+			// entry is sealed again, never marked).
+			if !e.Done && e.Op == OpDeposit && e.InnerID != "" && len(e.Payload) > 0 && e.Held == nil {
 				if w.crashNote == nil {
 					w.crashNote = map[string]bool{}
 				}
@@ -1271,7 +1274,7 @@ func (w *rpWorld) notesUnaccounted() (why []string) {
 // (rpQuotaWaitResidual); or if it was answered a 5xx and its sender audited
 // undelivered_window (told, rpToldResidual).
 func (w *rpWorld) notesLost() (why []string, residual string) {
-	quotaWait, told, lockWait, crashTold := false, false, false, false // quotaWait, lockWait: no longer excused (#6875)
+	told, crashTold := false, false // quota-wait and lock-wait are no longer excused (#6875)
 	over, single := w.lockShape()
 	for s := 0; s < 2; s++ {
 		o := 1 - s
@@ -1308,10 +1311,6 @@ func (w *rpWorld) notesLost() (why []string, residual string) {
 		residual = rpToldResidual
 	case crashTold:
 		residual = rpCrashToldResidual
-	case quotaWait:
-		residual = rpQuotaWaitResidual
-	case lockWait:
-		residual = rpLockWaitResidual
 	}
 	return why, residual
 }
@@ -1530,4 +1529,12 @@ func TestR29RandomPair(t *testing.T) {
 	}
 	t.Logf("%d runs (burst %v, steps %d) in %v: %v per 10,000", runs, burst, steps, el.Round(time.Second),
 		(el * time.Duration(10000) / time.Duration(runs)).Round(time.Second))
+}
+
+// stOutbox is the outbox, or none for a zeroized state.
+func (m *Manager) stOutbox() []*OutboxEntry {
+	if m.st == nil {
+		return nil
+	}
+	return m.st.Outbox
 }

@@ -752,10 +752,12 @@ func newManager(o Options, st *State, hdr *Header, dek []byte) *Manager {
 }
 
 func (st *State) init() {
-	if !st.CleanEnd {
-		// Card GC #6875: not a clean end (a crash after a deposit the relay
-		// accepted, before the write that stored its Tried): any waiting
-		// session-mode deposit may have reached the relay.
+	// Any waiting session-mode deposit may have reached the relay:
+	//   - card GC #6875: not a clean end (a crash after a deposit the relay
+	//     accepted, before the write that stored its Tried);
+	//   - 0.88.7 §8.3: a release 29 state (its answers were not told
+	//     apart, and an attempt cut off by a lock or a crash not counted).
+	if !st.CleanEnd || !st.OutboxTried {
 		for _, e := range st.Outbox {
 			if e == nil || e.Done || e.Op != OpDeposit || len(e.Payload) == 0 {
 				continue
@@ -765,21 +767,9 @@ func (st *State) init() {
 			}
 		}
 	}
+	st.loadedClean = st.CleanEnd && st.OutboxTried
 	st.CleanEnd = false // set again only by a lock's last write
-	if !st.OutboxTried {
-		// 0.88.7 §8.3: a release 29 state's sealed entries may have
-		// reached the relay: their answers were not told apart, and an
-		// attempt cut off by a lock or a crash is not counted.
-		for _, e := range st.Outbox {
-			if e == nil || e.Done || e.Op != OpDeposit || len(e.Payload) == 0 {
-				continue
-			}
-			if env, err := envelope.Parse(e.Payload); err == nil && env.Mode() == envelope.ModeSession {
-				e.Tried = true
-			}
-		}
-		st.OutboxTried = true
-	}
+	st.OutboxTried = true
 	if st.Devices == nil {
 		st.Devices = map[string]*Peer{}
 	}
@@ -1052,6 +1042,7 @@ func (m *Manager) persistState(ctx context.Context, create bool) error {
 	m.dirty = false
 	m.unstored = nil
 	m.stateWritten = true
+	m.st.loadedClean = false // a write since the load: the store no longer says clean
 	// The header is behind until its write below succeeds.
 	m.headerBehind = true
 	if err := m.promote(); err != nil { // step 3, written below
@@ -1421,7 +1412,10 @@ func (m *Manager) lockLocked(ctx context.Context) error {
 	// Entries no write has stored yet (a batch whose write failed) wait:
 	// the lock's own write stores them, or nothing does.
 	m.drainOutbox(ctx)
-	waiting := len(m.unstored) > 0
+	// Waiting: entries no write has stored, or (review M1) no write since a
+	// clean load, so that the first drain sent nothing and the second, after
+	// this write, may.
+	waiting := len(m.unstored) > 0 || m.st != nil && m.st.loadedClean
 	// A device's vault.lock names the device (0.23.2, §10.9); a lock
 	// with a reason (owner check, recovery) or by the host has none.
 	by := ""

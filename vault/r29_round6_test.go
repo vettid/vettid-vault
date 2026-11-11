@@ -25,10 +25,18 @@ import (
 func (f *r29Fx) restart(s int) {
 	f.t.Helper()
 	d := f.d[s]
-	old := d.relay
 	if err := d.m.Lock(context.Background()); err != nil {
 		f.t.Fatal(err)
 	}
+	f.reopen(s)
+}
+
+// reopen unlocks side s, locked, from its store, keeping its relay's
+// deposits and the scenario's clock and handlers.
+func (f *r29Fx) reopen(s int) {
+	f.t.Helper()
+	d := f.d[s]
+	old := d.relay
 	m, _, err := d.unlock(testPIN, 0, 0)
 	if err != nil {
 		f.t.Fatal(err)
@@ -47,6 +55,16 @@ func (f *r29Fx) restart(s int) {
 			return nil, nil
 		}))
 	m.features = append(m.features, f.sink[s])
+	startWrite(m)
+}
+
+// startWrite is Start's state write, which Run makes before any drain
+// (inbound.go): these fixtures unlock without Start. It may fail; a drain
+// after a clean load then deposits nothing until a write succeeds (#218 M1).
+func startWrite(m *Manager) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_ = m.persist(context.Background(), false)
 }
 
 func (f *r29Fx) jtisOf(ts []IssuedToken) []string {

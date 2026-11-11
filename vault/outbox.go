@@ -278,8 +278,8 @@ func (m *Manager) ageCheck(e *OutboxEntry, now time.Time) bool {
 		return false
 	}
 	p := m.peer(e.PeerID)
-	if p == nil || p.Kind != KindConnection {
-		return false
+	if p == nil || p.Kind != KindConnection || p.Standing.Token == "" {
+		return false // no standing token: deposit waits for one, and is judged then
 	}
 	kr := m.sessions[p.ID]
 	if kr == nil || kr.Current() == nil {
@@ -583,6 +583,13 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 		return // zeroized (a split brain at the settled write below): nothing is sent
 	}
 	if m.holdForMark() {
+		return
+	}
+	if m.st.loadedClean {
+		// Review M1 (#218): loaded from a clean end, and no write since, so
+		// the store still says clean: a deposit now, and a write failing
+		// until a crash, would leave its Tried lost and unseen. The first
+		// successful write lifts it (Start's comes before its drain).
 		return
 	}
 	now := m.now()

@@ -6,6 +6,10 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/vettid/vettid-relay/relayclient"
+	"github.com/vettid/vettid-vault/vault/store"
+	"github.com/vettid/vettid-vault/vms/envelope"
 )
 
 // Card GC #6875: a durable message that waited in the outbox past §8.4's 16
@@ -126,6 +130,9 @@ func TestNoticeKinds(t *testing.T) {
 			{&OutboxEntry{PeerID: p.ID, Type: "test.note", InnerID: "n1"}, NoticeNotDelivered},
 			{&OutboxEntry{PeerID: p.ID, Type: "profile.update", InnerID: "n2"}, ""},
 			{&OutboxEntry{PeerID: p.ID, Type: "att.offer", InnerID: "n3"}, ""},
+			{&OutboxEntry{PeerID: p.ID, Type: "relay.token.refresh", InnerID: "n6"}, ""},
+			{&OutboxEntry{PeerID: p.ID, Type: "relay.token.issued", InnerID: "n7"}, ""},
+			{&OutboxEntry{PeerID: p.ID, Type: "message.send", InnerID: "n8"}, NoticeNotDelivered},
 			{&OutboxEntry{PeerID: p.ID, QuotaRefresh: true, InnerID: "n4"}, ""},
 			{&OutboxEntry{PeerID: p.ID, InnerID: "n5"}, NoticeNotDelivered}, // type unreadable: told
 		} {
@@ -270,4 +277,75 @@ func TestNoticeNameAndOwnRemoval(t *testing.T) {
 			t.Fatalf("a removal by the peer: %+v", got)
 		}
 	})
+}
+
+// Review M1 (#218): an entry waits, untried, through a clean lock; then
+// every state write fails, from the unlock's Start through the next lock.
+// Nothing may be deposited while the store still says clean with it
+// untried: 17 days on it would be stamped again, and the peer, its dedupe
+// past, would run it twice.
+func TestAgeCleanLoadNoDepositBeforeWrite(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	f.waitingNote(0, "m1") // stored: waiting, not tried
+	d := f.d[0]
+	refuse := func(on bool) {
+		d.relay.mu.Lock()
+		defer d.relay.mu.Unlock()
+		d.relay.failMailbox = nil
+		if on {
+			d.relay.failMailbox = map[string]error{f.m(1).st.Relay.Mailbox: &relayclient.Error{Status: 429, Code: "rate_limited"}}
+		}
+	}
+	refuse(true) // the lock's drains are refused too: a clean end, untried
+	if err := d.m.Lock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	fail := &putFailStore{Store: d.store, key: store.StateKey(d.vid), n: 1 << 20}
+	d.opts.Store = fail
+	f.reopen(0) // loaded clean; Start's write fails; the relay accepts now
+	refuse(false)
+	func() {
+		m := d.m
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		m.retryPeer(f.p(0).ID)
+		_ = m.flushThenDrain(context.Background()) // fails: the outage
+	}()
+	_ = d.m.Lock(context.Background()) // its writes fail too
+	fail.mu.Lock()
+	fail.n = 0 // the outage ends
+	fail.mu.Unlock()
+	f.reopen(0)
+	// Whatever the outage deposited reaches the peer, before any drain.
+	pumpOnly(t, f.d[0], f.d[1], func(*envelope.Envelope) bool { return true })
+	f.advance(17 * 24 * time.Hour)
+	f.do(1, func(m *Manager, p *Peer) { m.housekeeping(f.clk) }) // the peer's dedupe forgets
+	f.release(0)
+	f.settle()
+	if n := f.arrived(1, "m1"); n != 1 {
+		t.Fatalf("arrived %d times, want 1", n)
+	}
+}
+
+// Review L (#218): the own-removal switch through the removal itself: the
+// member's own removal is not told, a removal by the peer is.
+func TestNoticeOwnRemovalEndToEnd(t *testing.T) {
+	for _, dir := range []string{"out", "in"} {
+		f := newR29Fx(t)
+		f.longTokens()
+		f.waitingNote(0, "to-"+dir)
+		before := len(f.sink[0].got)
+		f.do(0, func(m *Manager, p *Peer) { m.removeConnection(p, dir, f.clk) })
+		told := false
+		for _, a := range f.sink[0].got[before:] {
+			told = told || a.Feed && a.Kind == NoticeNotDelivered
+		}
+		if want := dir == "in" || NoticeOwnRemoval; told != want {
+			t.Fatalf("removal %q: told %v, want %v", dir, told, want)
+		}
+		if !f.audited(0, "undelivered_removed") {
+			t.Fatalf("removal %q: not audited", dir)
+		}
+	}
 }

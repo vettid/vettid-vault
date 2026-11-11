@@ -25,6 +25,10 @@ type State struct {
 	// lost a Tried, so init marks every waiting session-mode deposit Tried:
 	// none of them is then stamped again (a peer could run it twice).
 	CleanEnd bool `json:"clean_end,omitempty"`
+	// loadedClean (not stored): this state was loaded with CleanEnd, so its
+	// Tried flags were trusted; until a write since the load succeeds, the
+	// store still says clean, and nothing is deposited (review M1, #218).
+	loadedClean bool
 	// OutboxTried (0.88.7 §8.3): the outbox's entries carry Tried. A state
 	// written before (release 29) did not record it: at its first load every
 	// sealed session-mode entry not done is taken as one that may have

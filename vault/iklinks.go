@@ -602,14 +602,27 @@ const NoticeOwnRemoval = false
 
 // upkeepTypes are the vault's own messages to a connection, which recover
 // by themselves and are not the member's to be told about: profile and
-// identity upkeep, the held notice, and attachment transfers (att.*).
-var upkeepTypes = map[string]bool{"profile.update": true, "identity.rotate": true, "vault.held": true}
+// identity upkeep, the held notice; with upkeepPrefixes, the relay's
+// tokens (relay.token.refresh, relay.token.issued, and the answers to the
+// peer's own, which carry the request's type) and attachment transfers.
+var (
+	upkeepTypes    = map[string]bool{"profile.update": true, "identity.rotate": true, "vault.held": true}
+	upkeepPrefixes = []string{"relay.", "att."}
+)
 
 // memberMessage reports whether an entry is the member's own message
 // (sent or answered): not a quota refresh or upkeep. One whose type can't
 // be read is taken as the member's (told rather than silent).
 func memberMessage(e *OutboxEntry, typ string) bool {
-	return !e.QuotaRefresh && !upkeepTypes[typ] && !strings.HasPrefix(typ, "att.")
+	if e.QuotaRefresh || upkeepTypes[typ] {
+		return false
+	}
+	for _, p := range upkeepPrefixes {
+		if strings.HasPrefix(typ, p) {
+			return false
+		}
+	}
+	return true
 }
 
 // entryType is e's inner type: recorded at queue time, or read back from

@@ -638,6 +638,7 @@ func (w *World) checkEnd(liveness bool) {
 			if c := w.lostLabel(x.ID, r.ID); c != "" {
 				inv2 = "I2/hs-lost:" + c
 			}
+			n0 := len(w.viol)
 			for _, t := range r.Toks {
 				if !x.holds(t.Sub) || (t.Sub == pendKey(x)) {
 					w.violate(inv2, "%s holds a token from %s naming sub %d it does not have or keep", x.Name, w.party(r.ID).Name, t.Sub)
@@ -645,6 +646,9 @@ func (w *World) checkEnd(liveness bool) {
 				if !w.R.live(t.Iss) {
 					w.violate(inv2, "%s holds a token from %s naming iss %d, no live mailbox", x.Name, w.party(r.ID).Name, t.Iss)
 				}
+			}
+			if len(w.viol) > n0 {
+				w.statWait(inv2, x.ID, r.ID, w.viol[n0].Detail)
 			}
 		}
 	}
@@ -893,8 +897,10 @@ func (w *World) checkEnd(liveness bool) {
 			if ep := w.probeEpoch[id]; !w.hasEpoch[[2]int{int(pr[1]), ep}] {
 				inv = "I1-loss/split" // under an epoch the receiver never activated
 			}
+			w.statWait(inv, pr[0], pr[1], "a message was silently unreadable")
 			w.violate(inv, "a message %s->%s was silently unreadable (%s)", w.party(pr[0]).Name, w.party(pr[1]).Name, ft)
 		case ft == "":
+			w.statWait("I1-loss", pr[0], pr[1], "a message vanished")
 			w.violate("I1-loss", "a message %s->%s vanished (no fate)", w.party(pr[0]).Name, w.party(pr[1]).Name)
 		}
 	}

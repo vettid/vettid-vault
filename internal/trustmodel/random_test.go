@@ -225,6 +225,20 @@ func TestSeedsByClass(t *testing.T) {
 		rs := master.Uint64()
 		cfg, acts := genRun(rs, envInt("TRUSTMODEL_STEPS", 40))
 		w := runActions(cfg, rs, acts, false)
+		if k := strings.TrimPrefix(cls, "statprefix:"); k != cls {
+			// every stat with that prefix, one line per run and stat
+			var ks []string
+			for s := range w.stats {
+				if strings.HasPrefix(s, k) {
+					ks = append(ks, s)
+				}
+			}
+			sort.Strings(ks)
+			for _, s := range ks {
+				t.Logf("SEED %d %s: %d", rs, s, w.stats[s])
+			}
+			continue
+		}
 		if k := strings.TrimPrefix(cls, "stat:"); k != cls {
 			if w.stats[k] > 0 {
 				var vs []string

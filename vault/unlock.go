@@ -407,6 +407,7 @@ func UnlockAlt(ctx context.Context, p AltUnlockParams) (*Manager, *AltUnlockOutc
 		suite.Wipe(op.dek1)
 		suite.Wipe(op.uk)
 		suite.Wipe(dek)
+		out.StateSeq = st.StateSeq // as state_unreadable: the state read, not run
 		return nil, out.fail(CodeStateUnsupported, ErrStateUnsupported)
 	}
 	if st.SealedRelease == "" {

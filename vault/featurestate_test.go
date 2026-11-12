@@ -649,6 +649,7 @@ func TestAnApprovedMoveCarriesAnUnreadablePart(t *testing.T) {
 	const target = "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
 	d, dek, part := unreadableFixture(t, nil)
 	opts := withRequired(d)
+	opts.Features = append(opts.Features, &auditSink{})
 	if m, out := altUnlockWith(d, opts, nil); m != nil || out.Code != CodeStateUnreadable {
 		t.Fatalf("plain unlock: %+v", out)
 	}
@@ -691,6 +692,10 @@ func TestAnApprovedMoveCarriesAnUnreadablePart(t *testing.T) {
 	}
 	if mv := storedState(t, d, dek).ReleaseMove; mv == nil || mv.To != target {
 		t.Fatalf("the move is not in the stored state: %+v", mv)
+	}
+	// §3.3: the move's write stores the opening's feature.load_failed.
+	if a := storedPartWith(t, d, dek, "auditsink"); !strings.Contains(a, "feature.load_failed") {
+		t.Fatalf("the stored audit: %s", a)
 	}
 	if _, _, err := d.store.Get(context.Background(), store.HeaderKey(d.vid, target)); err != nil {
 		t.Fatalf("not sealed for the next release: %v", err)
@@ -895,8 +900,27 @@ func TestAnUnconfirmedReleaseThatCannotReadMovesOnWithAnApprovedUpdate(t *testin
 	before := storedHeader(t, d)
 	opts := d.opts
 	opts.Store = d.store
-	opts.Features = append(append([]Feature(nil), d.opts.Features...), &unreadGate{})
+	opts.Features = append(append([]Feature(nil), d.opts.Features...), &unreadGate{}, &auditSink{})
 	approved := func(k *UnlockKey) (json.RawMessage, error) { return k.Attestation, nil }
+	// lookupNumber makes the manifest list target at release number n.
+	lookupNumber := func(p *AltUnlockParams, n uint64) {
+		look := p.Manifest
+		p.Manifest = func(seen uint64) (*ManifestView, error) {
+			v, err := look(seen)
+			if err != nil {
+				return nil, err
+			}
+			inner := v.Lookup
+			v.Lookup = func(pcr0 string) (ReleaseEntry, bool) {
+				e, ok := inner(pcr0)
+				if pcr0 == target {
+					e.Number = n
+				}
+				return e, ok
+			}
+			return v, nil
+		}
+	}
 	refused := map[string]func(*AltUnlockParams){
 		"no update": func(p *AltUnlockParams) { moveParams(d, p, target) },
 		"approval does not verify": func(p *AltUnlockParams) {
@@ -923,6 +947,11 @@ func TestAnUnconfirmedReleaseThatCannotReadMovesOnWithAnApprovedUpdate(t *testin
 				return v, nil
 			}
 			p.Update = &UpdateRequest{To: target, ToRelease: testRelease.Number, VerifyApproval: approved}
+		},
+		"the manifest's number is not the approved one": func(p *AltUnlockParams) {
+			moveParams(d, p, target)
+			lookupNumber(p, testRelease.Number)
+			p.Update = &UpdateRequest{To: target, ToRelease: testRelease.Number + 1, VerifyApproval: approved}
 		},
 		"not active": func(p *AltUnlockParams) {
 			moveParams(d, p, target)
@@ -1000,10 +1029,61 @@ func TestAnUnconfirmedReleaseThatCannotReadMovesOnWithAnApprovedUpdate(t *testin
 	if got := storedPartWith(t, d, dek, "gate"); got != part {
 		t.Fatalf("the part: %s, was %s", got, part)
 	}
+	if a := storedPartWith(t, d, dek, "auditsink"); !strings.Contains(a, "feature.load_failed") {
+		t.Fatalf("the stored audit: %s", a)
+	}
 	for name, h := range map[string]*Header{"N+1": storedHeader(t, d), "N+2": headerAt(t, d, target)} {
 		if h.HasCredential != before.HasCredential || !sameBool(h.CredentialBackup, before.CredentialBackup) || h.RecoveryRefusal() != "" {
 			t.Fatalf("%s: has_credential %v backup %v refusal %q, was %v %v", name,
 				h.HasCredential, h.CredentialBackup, h.RecoveryRefusal(), before.HasCredential, before.CredentialBackup)
 		}
+	}
+}
+
+// A release a move went to that reads every part confirms the move even
+// when the unlock carries an approved update: the update is not taken
+// there (the move goes on only from a release that cannot read a part).
+func TestAReadableUnconfirmedReleaseConfirmsDespiteAnUpdate(t *testing.T) {
+	old, target := strings.Repeat("e9", 48), strings.Repeat("ea", 48)
+	d := newDevFixture(t)
+	ctx := context.Background()
+	if _, err := d.store.Put(ctx, store.HeaderKey(d.vid, old), []byte("the old release's header"), ""); err != nil {
+		t.Fatal(err)
+	}
+	d.m.mu.Lock()
+	d.m.st.ReleaseMove = &ReleaseMove{To: testRelease.PCR0, ToRelease: testRelease.Number, From: old, ApprovedBy: d.devPeer.ID}
+	d.m.st.SealedRelease = old
+	d.m.dirty = true
+	_ = d.m.flushThenDrain(ctx)
+	dek := append([]byte(nil), d.m.dek...)
+	d.m.mu.Unlock()
+	if err := d.m.Lock(ctx); err != nil {
+		t.Fatal(err)
+	}
+	opts := d.opts
+	opts.Store = d.store
+	m, out := altUnlockWith(d, opts, func(p *AltUnlockParams) {
+		moveParams(d, p, target)
+		p.Update = &UpdateRequest{To: target, ToRelease: testRelease.Number + 1,
+			VerifyApproval: func(k *UnlockKey) (json.RawMessage, error) { return k.Attestation, nil }}
+	})
+	if m == nil || !out.OK {
+		t.Fatalf("confirmation: %+v", out)
+	}
+	if out.Update != nil && out.Update.Result == UpdateMoved {
+		t.Fatalf("the update was taken: %+v", out.Update)
+	}
+	if err := m.Lock(ctx); err != nil {
+		t.Fatal(err)
+	}
+	st := storedState(t, d, dek)
+	if st.ReleaseMove != nil || st.SealedRelease != testRelease.PCR0 {
+		t.Fatalf("not confirmed: move %+v, sealed %s", st.ReleaseMove, st.SealedRelease)
+	}
+	if _, _, err := d.store.Get(ctx, store.HeaderKey(d.vid, old)); err == nil {
+		t.Fatal("the old release's header was kept")
+	}
+	if _, _, err := d.store.Get(ctx, store.HeaderKey(d.vid, target)); err == nil {
+		t.Fatalf("sealed for %s", target)
 	}
 }

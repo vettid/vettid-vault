@@ -9,7 +9,7 @@ import (
 )
 
 // VAULT-MESSAGING 0.90.0 §3.4.2 RK1, the reconnect after a demotion as
-// release 29 builds it: the parts the §6.3.2 RK1 row lists without a test.
+// release 29 builds it: parts of RK1 without a test.
 
 // RK1-b: while side 0's reconnect after a strict-F1 demotion is open and
 // names an epoch other than its current one, side 1's rekey hs.init is

@@ -2,6 +2,7 @@ package vault
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 	"time"
 )
@@ -48,7 +49,9 @@ func ruleEUnconfirmedCurrent(t *testing.T, f *r29Fx) (e1, e2 []byte) {
 	if !bytes.Equal(f.cur(1), e2) {
 		t.Fatal("setup: R did not establish E2")
 	}
-	f.lose(1, 0, kConfirm)
+	if f.lose(1, 0, kConfirm) != 1 {
+		t.Fatal("setup: no hs.confirm for E2")
+	}
 	return e1, e2
 }
 
@@ -83,6 +86,14 @@ func TestR29RuleENotAtReconnectNamingUnconfirmedCurrent(t *testing.T) {
 	if f.p(0).State != PeerActive || f.p(1).State != PeerActive {
 		t.Fatal("the pair did not stay active")
 	}
+	took := false
+	for _, b := range f.got[1] {
+		took = took || strings.Contains(b, "under-e1")
+	}
+	if !took {
+		f.dump()
+		t.Fatal("R did not take I's message under the epoch its reconnect named")
+	}
 	if !f.sameEpoch() {
 		f.dump()
 		t.Fatal("the pair did not converge on one epoch")
@@ -114,7 +125,7 @@ func TestR29RuleEAtReconnectNamingConfirmedNotCurrent(t *testing.T) {
 	}
 	snap := f.snapshot(0) // I with E1 pending
 	f.startCopy(0, snap)
-	if f.deliver(1, 2, kAny) == 0 { // R's hs.confirm for E1 reaches only the copy
+	if f.deliver(1, 2, kConfirm) == 0 { // R's hs.confirm for E1 reaches only the copy
 		t.Fatal("setup: no hs.confirm for the copy")
 	}
 	if !bytes.Equal(f.cur(2), e1) {

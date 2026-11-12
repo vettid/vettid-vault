@@ -14,6 +14,7 @@ var (
 	_ vault.BatchEndObserver      = (*Feature)(nil)
 	_ vault.TickObserver          = (*Feature)(nil)
 	_ vault.OwnerHoldObserver     = (*Feature)(nil)
+	_ vault.CallRinger            = (*Feature)(nil) // the call wake asks it (§14.2 trigger 5)
 )
 
 // OwnerHoldStarted implements vault.OwnerHoldObserver: an incoming call

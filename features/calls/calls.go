@@ -148,7 +148,12 @@ type Options struct {
 type Feature struct {
 	mu     sync.Mutex
 	issuer ICEIssuer
-	calls  map[string]*Call
+	// ringMu guards ringingIn: the incoming calls that ring, by id, with
+	// their offer's exp. Kept apart from mu, which a handler holds across a
+	// network call, so that the wake's look (CallRinging) never waits on it.
+	ringMu    sync.Mutex
+	ringingIn map[string]time.Time
+	calls     map[string]*Call
 	// alive is when each watched active call's device last showed it was
 	// alive (liveness.go): memory only, never in the state.
 	alive map[string]time.Time
@@ -181,6 +186,40 @@ var (
 // Name implements vault.Feature.
 func (f *Feature) Name() string { return "calls" }
 
+// CallRinging implements vault.CallRinger (VAULT-MESSAGING §14.2 trigger
+// 5): whether the incoming call callID still rings, by its record and its
+// offer's exp, at now (the vault's clock). A call answered, declined,
+// ended, timed out or superseded does not. Takes only ringMu, never mu.
+func (f *Feature) CallRinging(callID string, now time.Time) bool {
+	f.ringMu.Lock()
+	defer f.ringMu.Unlock()
+	exp, ok := f.ringingIn[callID]
+	return ok && now.Before(exp)
+}
+
+// syncRinging records whether c rings (an incoming call in state
+// ringing), for CallRinging. Called under mu wherever a call's state is
+// set.
+func (f *Feature) syncRinging(c *Call) {
+	f.ringMu.Lock()
+	defer f.ringMu.Unlock()
+	if f.ringingIn == nil {
+		f.ringingIn = map[string]time.Time{}
+	}
+	if c.Dir == DirIn && c.State == StateRinging {
+		f.ringingIn[c.ID] = c.Exp
+	} else {
+		delete(f.ringingIn, c.ID)
+	}
+}
+
+// notRinging records that call id no longer rings.
+func (f *Feature) notRinging(id string) {
+	f.ringMu.Lock()
+	delete(f.ringingIn, id)
+	f.ringMu.Unlock()
+}
+
 // Types implements vault.Feature.
 func (f *Feature) Types() []vault.TypeSpec {
 	return []vault.TypeSpec{
@@ -206,6 +245,12 @@ func (f *Feature) Load(data json.RawMessage) error {
 		return err
 	}
 	f.calls = st.Calls
+	f.ringMu.Lock()
+	f.ringingIn = map[string]time.Time{}
+	f.ringMu.Unlock()
+	for _, c := range f.calls {
+		f.syncRinging(c)
+	}
 	f.off, f.unanswered, f.limitedSent = orEmpty(st.Off), st.Unanswered, orEmpty(st.Limited)
 	if f.unanswered == nil {
 		f.unanswered = map[string][]time.Time{}
@@ -287,6 +332,7 @@ func (f *Feature) prune(now time.Time) {
 	ids := f.sorted()
 	for _, id := range ids[MaxHistory:] {
 		if !f.calls[id].live(now) {
+			f.notRinging(id)
 			delete(f.calls, id)
 		}
 	}
@@ -731,6 +777,7 @@ func (f *Feature) offer(ctx context.Context, s *vault.Session, in *envelope.Inne
 	}
 	c := &Call{ID: of.CallID, Conn: conn, Dir: DirIn, Media: of.Media, State: StateRinging, Created: now, Exp: in.Exp}
 	f.calls[of.CallID] = c
+	f.syncRinging(c)
 	f.prune(now)
 	s.Record(vault.Activity{Kind: "call.incoming", ConnectionID: conn, Ref: c.ID, Direction: DirIn, Audit: true})
 	if s.OwnerHeld() {
@@ -819,6 +866,7 @@ func (f *Feature) busyExcept(id string, now time.Time) bool {
 
 func (f *Feature) finish(s *vault.Session, c *Call, reason string) {
 	c.State, c.Reason, c.Ended = StateEnded, reason, s.Now()
+	f.notRinging(c.ID)
 	delete(f.alive, c.ID)
 	s.Record(vault.Activity{Kind: "call.ended", ConnectionID: c.Conn, Ref: c.ID, Direction: c.Dir, Audit: true})
 }
@@ -963,6 +1011,7 @@ func (f *Feature) answerFromDevice(s *vault.Session, body []byte) error {
 		return unavailable(s, a.CallID)
 	}
 	c.State, c.Device, c.Answered, c.Watched = StateActive, s.From().ID, now, a.Keepalive
+	f.notRinging(c.ID)
 	f.clearUnanswered(s, c.Conn, now) // an answered call from the connection clears the counts
 	f.alive[c.ID] = now               // the 90 s count from the answer until the first keep-alive
 	s.NotifyDevicesWith("call.end", endJSON(c.ID, "answered_elsewhere"), s.From().ID, vault.SendOptions{})
@@ -1014,6 +1063,7 @@ func (f *Feature) answerFromPeer(s *vault.Session, body []byte) error {
 		return nil
 	}
 	c.State, c.Answered = StateActive, s.Now()
+	f.notRinging(c.ID)
 	f.alive[c.ID] = c.Answered // the 90 s count from the answer until the first keep-alive
 	s.Record(vault.Activity{Kind: "call.answered", ConnectionID: c.Conn, Ref: c.ID, Direction: DirOut, Audit: true})
 	return nil

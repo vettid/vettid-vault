@@ -262,11 +262,14 @@ func (w *World) checkHonestStale() {
 			if slices.ContainsFunc(refs, func(s string) bool { return strings.Contains(s, "quota_exceeded") }) {
 				if w.rapidRotations(a.ID, b.ID) {
 					w.exempt("M2", resHonestStaleQuota) // 0.88.2: 3 or more rotations in quick succession
+					w.statWait("M2 (quota residual)", a.ID, b.ID, strings.Join(refs, "; "))
 					continue
 				}
+				w.statWait("M2", a.ID, b.ID, strings.Join(refs, "; "))
 				w.violate("M2", "%s: an honest pair ends stale by quota_exceeded without 3 rotations in quick succession (%s)", pairName(w, a.ID, b.ID), strings.Join(refs, "; "))
 				continue
 			}
+			w.statWait("M2", a.ID, b.ID, strings.Join(refs, "; "))
 			w.violate("M2", "%s: an honest pair ends stale (%s)", pairName(w, a.ID, b.ID), strings.Join(refs, "; "))
 		}
 	}

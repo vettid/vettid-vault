@@ -98,6 +98,10 @@ type World struct {
 	identSucc  map[Key]bool            // keys that arrived as an identity successor (not a relay one)
 	resolved   map[[2]PID]bool         // (Q, P): Q resolved a conflict of P's (connection.rotation.resolve)
 	evidKind   map[Key]string          // a successor key -> the kind of the first message that carried it
+
+	waitEv     map[[2]PID]map[string]int64 // (from, to): wait-class events, label -> last time (waitclass_test.go)
+	progressAt map[[2]PID]int64            // pair: when an epoch last became current at either side
+	staleClass map[[2]PID]string           // pair: its wait class when it first went stale
 }
 
 type rot struct {
@@ -114,7 +118,8 @@ func newWorld(seed uint64) *World {
 	w := &World{rng: rand.New(rand.NewPCG(seed, 7)), issuer: map[int]Key{}, epTruth: map[int][2]PID{},
 		rlinkBy: map[RLink]rot{}, iklinkBy: map[IKLink]rot{}, evid: map[[2]PID]map[Key]map[Key]bool{},
 		ikPos: map[[2]PID][]ikFollow{}, answered: map[int]bool{},
-		ended: map[int]bool{}, ever: map[PID]map[int]bool{}, probes: map[int]bool{}, stats: map[string]int{}, deadAt: map[[2]PID]int64{}, deadWhy: map[[2]PID]string{}, deadRes: map[[2]PID]string{}, splitAt: map[[2]PID]int64{}, splitNow: map[[2]PID]bool{}, ttlFin: map[[2]PID]string{}, probeDep: map[int][2]PID{}, probeFate: map[int]string{}, hasEpoch: map[[2]int]bool{}, staleAt: map[[2]PID]string{}, hsOrigin: map[int]string{}, suspAt: map[[2]PID]int64{}, audits: map[[2]PID]int{}, everSplit: map[[2]PID]bool{}, feed: map[[2]PID][]string{}, copyExpo: map[[2]int]*expo{}, copyFlag: map[[2]int]bool{}, copyCur: map[[2]int]bool{}, copyAban: map[[2]int]*abanUse{}, oldApp: map[[2]PID]string{}, devCopyFirst: map[[2]PID]bool{}, lockedFor: map[PID]int64{}, rotTimes: map[PID][]int64{}, fDue: map[[2]PID]bool{}, probeF: map[int]bool{}, fLostTok: map[[2]PID]bool{}, initIK: map[PID]Key{}, probeEpoch: map[int]int{}, forkDue: map[[2]PID]int{}, evidKind: map[Key]string{}, evidActive: map[[2]PID]map[Key]bool{}, resolved: map[[2]PID]bool{}, identSucc: map[Key]bool{}, forkFinK7: map[[2]PID]bool{}}
+		ended: map[int]bool{}, ever: map[PID]map[int]bool{}, probes: map[int]bool{}, stats: map[string]int{}, deadAt: map[[2]PID]int64{}, deadWhy: map[[2]PID]string{}, deadRes: map[[2]PID]string{}, splitAt: map[[2]PID]int64{}, splitNow: map[[2]PID]bool{}, ttlFin: map[[2]PID]string{}, probeDep: map[int][2]PID{}, probeFate: map[int]string{}, hasEpoch: map[[2]int]bool{}, staleAt: map[[2]PID]string{}, hsOrigin: map[int]string{}, suspAt: map[[2]PID]int64{}, audits: map[[2]PID]int{}, everSplit: map[[2]PID]bool{}, feed: map[[2]PID][]string{}, copyExpo: map[[2]int]*expo{}, copyFlag: map[[2]int]bool{}, copyCur: map[[2]int]bool{}, copyAban: map[[2]int]*abanUse{}, oldApp: map[[2]PID]string{}, devCopyFirst: map[[2]PID]bool{}, lockedFor: map[PID]int64{}, rotTimes: map[PID][]int64{}, fDue: map[[2]PID]bool{}, probeF: map[int]bool{}, fLostTok: map[[2]PID]bool{}, initIK: map[PID]Key{}, probeEpoch: map[int]int{}, forkDue: map[[2]PID]int{}, evidKind: map[Key]string{}, evidActive: map[[2]PID]map[Key]bool{}, resolved: map[[2]PID]bool{}, identSucc: map[Key]bool{}, forkFinK7: map[[2]PID]bool{},
+		waitEv: map[[2]PID]map[string]int64{}, progressAt: map[[2]PID]int64{}, staleClass: map[[2]PID]string{}}
 	w.R = newRelay(w)
 	w.Now = 1000 * day
 	return w
@@ -592,6 +597,7 @@ func (p *Party) flush() {
 			continue // R29-I3: while a reconnect is pending, nothing but the handshake, hs.confirm included
 		}
 		if r.KeyFor != p.st.Relay && !allowedWhileUnacked(e) {
+			p.waitS1Fin(r, e)
 			continue // S1: held until Q's token for my current key arrives
 		}
 		if e.M.Kind == KUpdate {
@@ -692,6 +698,9 @@ func (p *Party) deposit(e *Entry, r *PeerRec) {
 		return
 	}
 	w.logf("%s -> %s: %s refused %s (with %d, box %d)", p.Name, w.party(e.To).Name, kindName[m.Kind], err, with, box)
+	if err.definite() {
+		p.waitDeposit(e.To, &m, with, box, tok, err)
+	}
 	keep := false // 0.88.2: token_revoked between vaults keeps the entry
 	switch err {
 	case rateLimited:

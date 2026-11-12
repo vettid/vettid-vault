@@ -72,6 +72,7 @@ func (q *Party) handle(m *RMsg, set []Key) bool {
 	}
 	w.stat("cell " + d.Cell)
 	w.stat("out " + d.Out)
+	q.waitRefused(r, m, d)
 	w.logf("%s <- %s: %s via %d: %s", q.Name, w.party(r.ID).Name, describe(M), m.Sender, d)
 	if d.Out == "accept" || d.Out == "answer" {
 		w.noteCopyUse(q, r.ID, M.Epoch)
@@ -1310,6 +1311,7 @@ func (q *Party) establish(r *PeerRec, id int, signer, own Key, pos Pos) {
 	r.Epochs = append(r.Epochs, Epoch{ID: id, Signer: signer, Own: own, Est: pos, EstAt: q.w.Now, EverCur: true})
 	r.Cur = id
 	q.w.noteCurrent(q, id)
+	q.w.noteProgress(q, r)
 	q.releaseHeld(r) // R29-K5: a new epoch is current
 	q.w.hasEpoch[[2]int{int(q.ID), id}] = true
 	q.w.logf("%s: epoch E%d with %s established (signer %d)", q.Name, id, q.w.party(r.ID).Name, signer)

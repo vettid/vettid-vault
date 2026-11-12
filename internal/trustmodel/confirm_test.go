@@ -71,6 +71,7 @@ func (q *Party) confirm(r *PeerRec) {
 	}
 	r.Cur, r.Pend = pe.ID, nil
 	q.w.noteCurrent(q, pe.ID)
+	q.w.noteProgress(q, r)
 	if r.Device && !q.Copy {
 		// a newer epoch confirmed: F's gap is closed for this pair
 		delete(q.w.fDue, pairKey(q.ID, r.ID))
@@ -421,8 +422,11 @@ func (p *Party) idResend(r *PeerRec, m *RMsg) {
 // moment a pair first goes stale, did the two sides' current epochs differ
 // (or did one side hold an epoch the other never held)?
 func (q *Party) markStale(r *PeerRec, ref string) {
-	r.Status, r.Ref = stStale, ref
 	w := q.w
+	if k := pairKey(q.ID, r.ID); !q.Copy && w.relayRot && w.staleClass[k] == "" && r.Status == stActive {
+		w.staleClass[k] = w.waitClass(q.ID, r.ID, ref) // before its held messages end
+	}
+	r.Status, r.Ref = stStale, ref
 	q.endHeld(r)
 	w.logf("%s: %s STALE (%s)", q.Name, w.party(r.ID).Name, ref)
 	w.feedItem(q.ID, r.ID, "connection.stale")

@@ -659,8 +659,9 @@ func (w *World) checkEnd(liveness bool) {
 		}
 	}
 	probe := map[int]string{}
-	probeOld := map[int][2]PID{} // probes between an old app and its vault
-	probeF := map[int]bool{}     // probes of a pair under finding F
+	probePair := map[int][2]PID{} // wait classes
+	probeOld := map[int][2]PID{}  // probes between an old app and its vault
+	probeF := map[int]bool{}      // probes of a pair under finding F
 	for _, pr := range pairs {
 		ra, rb := pr.a.st.peer(pr.b.ID), pr.b.st.peer(pr.a.ID)
 		if w.dead(pr.a.ID, pr.b.ID) {
@@ -703,6 +704,7 @@ func (w *World) checkEnd(liveness bool) {
 		// finding F: a failure is the device exception, counted once per pair
 		fPair := w.fDue[k]
 		fCounted := false
+		waitNoted := false
 		fAfterPair := false
 		fail := func(inv, format string, a ...any) {
 			if fPair {
@@ -715,6 +717,10 @@ func (w *World) checkEnd(liveness bool) {
 			if oldApp {
 				w.oldAppDown(k, inv, fmt.Sprintf(format, a...))
 				return
+			}
+			if !waitNoted {
+				waitNoted = true
+				w.statWait(inv, pr.a.ID, pr.b.ID, fmt.Sprintf(format, a...))
 			}
 			w.violate(inv, format, a...)
 		}
@@ -782,6 +788,7 @@ func (w *World) checkEnd(liveness bool) {
 		for _, s := range [][2]*Party{{pr.a, pr.b}, {pr.b, pr.a}} {
 			id := w.id()
 			probe[id] = s[0].Name + "->" + s[1].Name
+			probePair[id] = [2]PID{s[0].ID, s[1].ID}
 			if oldApp {
 				probeOld[id] = k
 			}
@@ -812,6 +819,8 @@ func (w *World) checkEnd(liveness bool) {
 				w.oldAppDown(k, "I1", "a message "+probe[id]+" was not accepted at quiescence")
 				continue
 			}
+			pk := probePair[id]
+			w.statWait("I1 probe", pk[0], pk[1], "a message was not accepted at quiescence")
 			w.violate("I1", "a message %s was not accepted at quiescence", probe[id])
 		}
 	}

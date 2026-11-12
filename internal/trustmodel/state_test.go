@@ -95,10 +95,15 @@ type PendEp struct {
 }
 
 type Earlier struct {
-	Key       Key
-	Cut       Pos
-	Until     int64
-	NewerSeen bool // N2: Q has accepted a message from a newer key of P's
+	Key   Key
+	Cut   Pos
+	Until int64
+}
+
+// accKey (RK7): the latest relay key of P's (by its rank on Q's chain) Q
+// has accepted a message from under epoch Ep.
+type accKey struct {
+	Ep, Rank int
 }
 
 type HS struct {
@@ -196,6 +201,8 @@ type PeerRec struct {
 	RevokedAt int64 // S9: first token_revoked for an earlier key's token
 	S9Audited bool
 	RestartIK Key // H5: restarted reconnect spent once per change of the current ik
+
+	AccKeys []accKey // RK7: per epoch, the latest relay key of P's Q accepted a message from
 
 	RCRevokedEarlier bool  // 2.5: a reconnect token for my earlier key was refused token_revoked
 	WaitBox          Key   // 2.7: the next reconnect waits for a mailbox of P newer than this one
@@ -305,6 +312,7 @@ func (s *State) clone() State {
 		q.Dropped = slices.Clone(p.Dropped)
 		q.RChain = slices.Clone(p.RChain)
 		q.Earlier = slices.Clone(p.Earlier)
+		q.AccKeys = slices.Clone(p.AccKeys)
 		q.Epochs = slices.Clone(p.Epochs)
 		q.Toks = slices.Clone(p.Toks)
 		q.Issued = slices.Clone(p.Issued)
@@ -478,6 +486,20 @@ func (r *PeerRec) relayState(sender Key, pos Pos) rkSt {
 		}
 	}
 	return rkForeign
+}
+
+// relayRank: the place of P's relay key k on Q's followed chain (later
+// keys rank higher); -1 if Q does not know it.
+func (r *PeerRec) relayRank(k Key) int {
+	if k == r.Relay {
+		return len(r.RChain)
+	}
+	for i, l := range r.RChain {
+		if l.Old == k {
+			return i
+		}
+	}
+	return -1
 }
 
 func (r *PeerRec) keeps(k Key) bool {

@@ -293,72 +293,6 @@ func (q *Party) updateIK(r *PeerRec, M *Msg, pos Pos) (dec, bool) {
 	return dec{}, false
 }
 
-// refusedUpdateLinks: 2.7, an update refused only because its epoch is
-// demoted or destroyed still has its links applied (ik links first, then
-// the relay links); its tokens are not taken (G2BX: its reconnect tokens
-// are held).
-func (q *Party) refusedUpdateLinks(r *PeerRec, m *RMsg, pos Pos, no dec) dec {
-	M := m.P
-	if !q.w.ch("R27") || q.Device || r.Device {
-		return no
-	}
-	q.w.stat("R27: update refused under a demoted or destroyed epoch (" + no.Reason + ")")
-	if d, stop := q.updateIK(r, M, pos); stop {
-		if d.Out == "suspend" {
-			return d
-		}
-		return no
-	}
-	if r.Status != stActive {
-		return no
-	}
-	L := M.RLinks
-	ok := len(L) >= 1 && L[0].Old == m.Sender && L[len(L)-1].New == M.RelayPK
-	for i := 1; ok && i < len(L); i++ {
-		ok = L[i].Old == L[i-1].New
-	}
-	for _, l := range L {
-		if _, made := q.w.rlinkBy[l]; !made {
-			ok = false
-		}
-	}
-	switch {
-	case !ok:
-		q.w.stat("R27: refused update's links do not verify")
-	case slices.ContainsFunc(L, func(l RLink) bool { return slices.Contains(r.RChain, l) }) && L[len(L)-1].New == r.Relay:
-		q.w.stat("R27: refused update's links already followed")
-	}
-	if ok && q.followRelay(r, L, pos, 0) {
-		q.w.stat("R27: links of a refused update followed")
-		no.Cell += ":links-followed"
-		if q.w.ch("R27T") {
-			// candidate: the update's tokens for P's new mailbox are kept as
-			// held tokens (rule T; they move no S2)
-			kept, _ := q.ruleT(r, M.Toks, r.Relay)
-			q.keepTok(r, kept, false)
-			q.w.stat("R27T: refused update's tokens kept as held")
-		}
-	}
-	q.holdRCTokens(r, M.Toks)
-	q.n1(r, 0)
-	return no
-}
-
-// holdRCTokens: G2BX, Q keeps the reconnect tokens of a message it refuses
-// under a demoted epoch (held; they move no S2).
-func (q *Party) holdRCTokens(r *PeerRec, toks []Token) {
-	if !q.w.ch("G2BX") {
-		return
-	}
-	kept, _ := q.ruleT(r, toks, r.Relay)
-	for _, t := range kept {
-		if t.Reconnect && !slices.ContainsFunc(r.Toks, func(x Token) bool { return x.JTI == t.JTI }) && !slices.Contains(r.RevokedJTI, t.JTI) {
-			r.Toks = append(r.Toks, t)
-			q.w.stat("G2BX: reconnect token held from a refused message")
-		}
-	}
-}
-
 // ---------- rule 1 (G2-B) ----------
 
 // carried: rule 1, an entry sent on a carried token goes with the key its
@@ -374,21 +308,6 @@ func (p *Party) carried(r *PeerRec, toks []Token) func(*Entry) {
 		}
 	}
 	return nil
-}
-
-// g2bxToken: G2BX, a demoted p's reconnect may go on a held reconnect token
-// naming a newer key of p's, deposited with that key.
-func (p *Party) g2bxToken(r *PeerRec) Token {
-	if !(p.w.ch("G2BX") && r.Cur == 0) && !p.w.ch("G2BXA") {
-		return Token{}
-	}
-	for _, t := range r.Toks {
-		if t.Reconnect && t.Iss == r.Relay && t.Sub != r.KeyFor && p.holds(t.Sub) && t.valid(p.w.Now) &&
-			!slices.Contains(r.RevokedJTI, t.JTI) {
-			return t
-		}
-	}
-	return Token{}
 }
 
 // ---------- 7.16 measurements ----------
@@ -504,15 +423,43 @@ func (w *World) tell(k Key, msgs []*RMsg) {
 	}
 }
 
-// n2: N2, an hs.confirm or an hs.fin to an answer Q has open passes the
-// cut-off of P's earlier key m came from.
+// msgEpoch (RK7): the epoch a message from P travels under; an hs.resp
+// or hs.fin, the one its handshake makes.
+func msgEpoch(M *Msg) int {
+	if M.Epoch == 0 && (M.Kind == KResp || M.Kind == KFin) {
+		return M.NewEpoch
+	}
+	return M.Epoch
+}
+
+// noteAccKey (RK7): Q accepted M from P's relay key sender.
+func (r *PeerRec) noteAccKey(M *Msg, sender Key) {
+	ep, rk := msgEpoch(M), r.relayRank(sender)
+	if ep == 0 || rk < 0 {
+		return
+	}
+	for i := range r.AccKeys {
+		if r.AccKeys[i].Ep == ep {
+			r.AccKeys[i].Rank = max(r.AccKeys[i].Rank, rk)
+			return
+		}
+	}
+	r.AccKeys = append(r.AccKeys, accKey{ep, rk})
+}
+
+// n2: N2 (RK7), an hs.confirm or an hs.fin to an answer Q has open passes
+// the cut-off of P's earlier key m came from. The pass closes per epoch:
+// once Q has accepted, under that epoch or a later one, a message from a
+// relay key of P's later than m's sender.
 func (q *Party) n2(r *PeerRec, m *RMsg) bool {
 	M := m.P
 	if !q.w.ch("N2") || q.Device || r.Device {
 		return false
 	}
-	for _, e := range r.Earlier {
-		if e.Key == m.Sender && e.NewerSeen {
+	ep, rk := msgEpoch(M), r.relayRank(m.Sender)
+	for _, a := range r.AccKeys {
+		if a.Ep >= ep && a.Rank > rk {
+			q.w.stat("N2: pass closed (a later key accepted under this epoch or a later one)")
 			return false
 		}
 	}

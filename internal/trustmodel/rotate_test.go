@@ -272,12 +272,6 @@ func (p *Party) startHS(r *PeerRec, reconnect bool) {
 	if reconnect {
 		rt := r.reconnectTok(r.KeyFor, r.Relay, w.Now)
 		with := r.KeyFor
-		if rt.JTI == 0 {
-			if t := p.g2bxToken(r); t.JTI != 0 {
-				rt, with = t, t.Sub // G2BX: a held token naming a newer key of mine
-				w.stat("G2BX: reconnect on a held token naming a newer key")
-			}
-		}
 		if w.ch("R27") && r.WaitBox != 0 {
 			if r.Relay == r.WaitBox && (r.WaitTok == 0 || rt.JTI == 0 || rt.JTI == r.WaitTok) {
 				if w.Now-r.WaitSince > holdLimit {

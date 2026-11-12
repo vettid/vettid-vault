@@ -92,10 +92,8 @@ func (q *Party) handle(m *RMsg, set []Key) bool {
 	switch d.Out {
 	case "accept", "follow", "answer", "ignore":
 		w.noteAuth(q, r)
-		if w.ch("N2") && r.relayState(m.Sender, pos) == rkCurrent {
-			for i := range r.Earlier {
-				r.Earlier[i].NewerSeen = true
-			}
+		if w.ch("N2") {
+			r.noteAccKey(M, m.Sender)
 		}
 		q.st.Seen[M.Inner] = true
 		w.checkI3(q, r, m, d)
@@ -214,9 +212,8 @@ func (q *Party) acceptFrom(r *PeerRec, m *RMsg, pos Pos, set []Key) dec {
 			return dec{"suspend", "fork", "E:destroyed-epoch-later-ts"}
 		}
 		q.w.hit("R6:superseded_epoch")
-		if M.Kind == KUpdate && rs != rkAfter {
-			return q.refusedUpdateLinks(r, m, pos, refuse("superseded_epoch", "E:superseded-epoch")) // 2.7
-		}
+		// RK10: a refused update has none of its links followed and none
+		// of its tokens kept, whatever the reason
 		return refuse("superseded_epoch", "E:superseded-epoch")
 	}
 	// R29-K9: a message under an ended epoch is fork evidence "once step 3
@@ -247,12 +244,11 @@ func (q *Party) acceptFrom(r *PeerRec, m *RMsg, pos Pos, set []Key) dec {
 		// refused, under an ended one it is fork evidence (acceptFrom,
 		// 0.86.2; R29-K9), as any message after step 3
 		if d, bad := q.demoted(r, M, pos, cell); bad {
-			return q.refusedUpdateLinks(r, m, pos, d) // 2.7
+			return d // RK10: no link followed, no token kept
 		}
 		return q.ruleU(r, m, pos, rs)
 	case KTokIssued:
 		if d, bad := q.demoted(r, M, pos, cell); bad {
-			q.holdRCTokens(r, M.Toks) // G2BX
 			return d
 		}
 		return q.tokIssued(r, m, set, cell)

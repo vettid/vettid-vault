@@ -24,8 +24,9 @@ import (
 //  5. The copy collects P's hs.confirm, confirms E2 and sends a note under
 //     it: P handles it as Q's, and E2 becomes P's confirmed epoch.
 //  6. A month later (P's records of E1 are kept 64 days after it was
-//     superseded) Q reconnects naming E1, carrying its link. E1 is no longer kept as
-//     abandoned while pending at P (a newer epoch, E2, is confirmed), and
+//     superseded) Q reconnects naming E1, carrying its link (started
+//     directly here; in a real run it follows its rekeys' expiry). E1 is
+//     no longer kept as abandoned while pending at P (a newer epoch, E2, is confirmed), and
 //     E2, between E1 and P's confirmed epoch, is signed by the link's old
 //     ik: "Fork by ctx". P suspends at the reconnect's hs.fin (ref epoch,
 //     with a feed item).
@@ -49,7 +50,9 @@ func TestR29CopyReconnectAfterReplacedRekey(t *testing.T) {
 	if !bytes.Equal(f.cur(1), e1) {
 		t.Fatal("setup: Q did not activate E1")
 	}
-	f.lose(1, 0, kConfirm)
+	if f.lose(1, 0, kConfirm) != 1 {
+		t.Fatal("setup: no hs.confirm for E1")
+	}
 	snap := f.snapshot(1)
 
 	// 2.
@@ -120,13 +123,22 @@ func TestR29CopyReconnectAfterReplacedRekey(t *testing.T) {
 	if og := f.openReconnect(1); og == nil || !bytes.Equal(og.Named, e1) {
 		t.Fatal("setup: Q has no reconnect naming E1")
 	}
-	f.deliver(1, 0, kHSInit)
+	for _, a := range f.sink[0].got {
+		if a.Kind == "connection.fork_suspected" {
+			t.Fatalf("setup: P already has fork activity before Q's reconnect: %v", activityKinds(f.sink[0]))
+		}
+	}
+	if f.deliver(1, 0, kHSInit) != 1 {
+		t.Fatal("setup: Q's reconnect hs.init did not reach P")
+	}
 	if f.p(0).suspended() {
 		t.Fatal("P suspended before Q's hs.fin")
 	}
-	f.deliver(0, 1, kHSResp)
-	f.deliver(1, 0, kHSFin)
-	if !f.p(0).suspended() || !f.suspendedRef(0, "epoch") || !f.forkFeed(0) {
+	if f.deliver(0, 1, kHSResp) != 1 || f.deliver(1, 0, kHSFin) != 1 {
+		t.Fatal("setup: the reconnect's hs.resp or hs.fin was not delivered")
+	}
+	last := f.sink[0].got[len(f.sink[0].got)-1]
+	if !f.p(0).suspended() || last.Kind != "connection.fork_suspected" || last.Ref != "epoch" || !last.Feed {
 		t.Fatalf("P did not suspend (fork by ctx, with a feed item) at Q's reconnect; P's activity %v", activityKinds(f.sink[0]))
 	}
 	t.Logf("P suspended at Q's reconnect hs.fin (ref epoch, feed item); Q suspended %v, Q feed %v", f.p(1).suspended(), f.forkFeed(1))

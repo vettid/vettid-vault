@@ -272,16 +272,30 @@ func (p *Party) startHS(r *PeerRec, reconnect bool) {
 	if reconnect {
 		rt := r.reconnectTok(r.KeyFor, r.Relay, w.Now)
 		with := r.KeyFor
-		if w.ch("R27") && r.WaitBox != 0 {
-			if r.Relay == r.WaitBox && (r.WaitTok == 0 || rt.JTI == 0 || rt.JTI == r.WaitTok) {
-				if w.Now-r.WaitSince > holdLimit {
-					w.stat("R27: no newer mailbox within the hold's limit")
-					p.markStale(r, "R27: no newer mailbox within 60 days")
-					p.h5(r, -1)
-				}
-				return // 2.7: the next try waits for a newer mailbox or token
+		if rt.JTI != 0 {
+			r.RK6Since = 0
+		} else if r.RK6Since != 0 {
+			// RK6: Q waits for a reconnect token for P's new mailbox, up to
+			// RK13's cap (in its own S1) or 60 days after the follow
+			if w.Now <= p.waitCap(r, r.RK6Since) {
+				w.stat("RK6: restart waits for a reconnect token for the new mailbox")
+				return
 			}
-			r.WaitBox, r.WaitTok, r.WaitSince = 0, 0, 0
+			w.stat("RK6: no reconnect token for the new mailbox by the cap")
+			r.RK6Since = 0
+		}
+		if w.ch("R27") && r.WaitBox != 0 {
+			// RK10: the next try waits for a newer mailbox, or (after a
+			// covered refusal other than mailbox_unknown) a new reconnect
+			// token or the refused try's expiry
+			newer := r.Relay != r.WaitBox
+			newTok := r.WaitTok != 0 && rt.JTI != 0 && rt.JTI != r.WaitTok
+			expired := r.WaitUntil != 0 && w.Now >= r.WaitUntil
+			if !newer && !newTok && !expired {
+				p.rk10Limit(r)
+				return
+			}
+			r.WaitBox, r.WaitTok, r.WaitSince, r.WaitUntil = 0, 0, 0, 0
 		}
 		box := with // the tokens are minted by the mailbox of the key it deposits with
 		announce := false
@@ -296,15 +310,20 @@ func (p *Party) startHS(r *PeerRec, reconnect bool) {
 				return t.Iss == r.Relay && t.Sub != r.KeyFor && p.holds(t.Sub) && t.valid(w.Now)
 			}) {
 				w.noteWait(p.ID, r.ID, "G4H") // holds tokens naming my newer key only
-				if w.ch("G4HS") {
-					w.stat("G4HS: no-token judgement suspended while tokens naming my newer key are held")
-					return
-				}
+			}
+			if p.rk11Wait(r) {
+				w.stat("G4HS: no-token judgement suspended while tokens naming my newer key are held")
+				return
 			}
 			if w.ch("R25") && r.KeyFor != p.st.Relay && r.RCRevokedEarlier {
-				w.stat("R25: no-token judgement suspended during S1")
-				w.noteWait(p.ID, r.ID, "R25W")
-				return
+				// RK9: not judged while P holds no reconnect token only
+				// because of such revocations, until RK13's cap
+				if c, _ := p.rk13Cap(r); w.Now <= c {
+					w.stat("R25: no-token judgement suspended during S1")
+					w.noteWait(p.ID, r.ID, "R25W")
+					return
+				}
+				w.stat("R25: suspension ended at RK13's cap")
 			}
 			w.hit("K6:no-reconnect-token-stale")
 			p.markStale(r, "K6: no reconnect token")
@@ -379,7 +398,7 @@ func (p *Party) unlock() {
 				continue
 			}
 			p.refresh(r)
-			if !r.Device && r.standing(r.KeyFor, r.Relay, w.Now).JTI == 0 {
+			if !r.Device && r.standing(r.KeyFor, r.Relay, w.Now).JTI == 0 && !p.rk11Wait(r) {
 				w.nextOrigin = "token expiry reconnect"
 				p.startHS(r, true)
 			}
@@ -591,15 +610,25 @@ func (p *Party) tick() {
 			// split that follows is finding F, part of the device exception
 			// (§3.4.1 Invariants). §7.2's re-pairing of a desktop offline
 			// past its token is a member's action, not modelled.
-			if !r.Device && r.standing(r.KeyFor, r.Relay, w.Now).JTI == 0 {
+			if !r.Device && r.standing(r.KeyFor, r.Relay, w.Now).JTI == 0 && !p.rk11Wait(r) {
 				w.nextOrigin = "token expiry reconnect"
 				p.startHS(r, true)
+			}
+			if r.RK6Since != 0 && r.Status == stActive && (r.Own == nil || !r.Own.Reconnect) &&
+				(r.reconnectTok(r.KeyFor, r.Relay, w.Now).JTI != 0 || w.Now > p.waitCap(r, r.RK6Since)) {
+				w.nextOrigin = "RK6 restart"
+				p.startHS(r, true) // RK6: a reconnect token for the new mailbox, or the wait's cap
+			}
+			if w.ch("R27") && r.WaitBox != 0 && r.Status == stActive {
+				p.rk10Limit(r)
 			}
 			// S1: stale 30 days after the second write
 			for _, o := range p.st.Old {
 				if o.Key == r.KeyFor && w.s1Expired(p, r, p.sinceAfter(o.Key)) {
 					w.s1StaleGap(p, r)
-					if w.ch("S9END") && (r.RevokedAt != 0 || r.RCRevokedEarlier) {
+					if w.ch("S9END") && r.RCRevokedEarlier {
+						// RK9: only a reconnect-token revocation is judged
+						// at S1's end (S9's feed item instead of the stale's)
 						w.stat("S9END: S1's stale shown with S9's text")
 						w.feedItem(p.ID, r.ID, "S9 fork_suspected at S1's end")
 					}
@@ -609,7 +638,9 @@ func (p *Party) tick() {
 				}
 			}
 			// S9
-			if r.RevokedAt != 0 && !r.S9Audited && r.KeyFor != p.st.Relay && w.Now-r.RevokedAt > day && !w.ch("S9END") {
+			if r.RevokedAt != 0 && !r.S9Audited && r.KeyFor != p.st.Relay && w.Now-r.RevokedAt > day {
+				// S9 as written (24 hours); with S9END (RK9) RevokedAt is
+				// set for a revoked standing token only
 				r.S9Audited = true
 				w.stat("S9:fork_suspected")
 				w.feedItem(p.ID, r.ID, "S9 fork_suspected (relay_revoked)")

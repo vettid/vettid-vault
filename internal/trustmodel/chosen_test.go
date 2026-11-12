@@ -124,9 +124,29 @@ func (w *World) grace() int64 {
 
 // ---------- S1's pause (7.10 b) ----------
 
-// noteAuth: q accepted an authenticated message from r.
-func (w *World) noteAuth(q *Party, r *PeerRec) {
+// tsWindow is §8.4's durable ts window, 16 days back. Its 5 minutes ahead
+// is not modelled: the model's clocks are skewed by up to a day.
+const tsWindow = 16 * day
+
+// noteAuth: q accepted M from r (RK13's pause). Only an authenticated
+// message counts: a handshake message whose signature q verified (hs.resp,
+// hs.fin) or a message under an epoch; a reconnect hs.init alone does not
+// (its signature is checked only at its hs.fin). It must have passed
+// dedupe (handle returns earlier for a duplicate) and the ts window. The
+// model applies §8.4's ts window only here, and only its past bound:
+// acceptance itself does not judge ts (a model limit). A message re-sent
+// with its ts kept (the S2 re-deposit of an hs.fin, built without one)
+// counts.
+func (w *World) noteAuth(q *Party, r *PeerRec, M *Msg) {
 	if q.Copy {
+		return
+	}
+	if M.Kind == KInit && M.Epoch == 0 {
+		w.stat("S1PAUSE: a reconnect hs.init does not pause S1")
+		return
+	}
+	if M.Ts != 0 && q.now()-M.Ts > tsWindow {
+		w.stat("S1PAUSE: outside the ts window, does not pause S1")
 		return
 	}
 	k := [2]PID{q.ID, r.ID}
@@ -157,6 +177,58 @@ func (w *World) s1Expired(p *Party, r *PeerRec, since int64) bool {
 		}
 	}
 	return el-paused > staleAfter
+}
+
+// ---------- RK13's cap on the other waits ----------
+
+// rk13Cap: the end of S1's clock toward r (RK13's cap, 60 days after the
+// second write); ok is false when p is not in its own S1 toward r.
+func (p *Party) rk13Cap(r *PeerRec) (int64, bool) {
+	if r.KeyFor == p.st.Relay {
+		return 0, false
+	}
+	return p.sinceAfter(r.KeyFor) + s1Cap, true
+}
+
+// waitCap: how long RK6's and RK10's waits last: RK13's cap for a side in
+// its own S1, else 60 days from `from` (the follow, the first refusal).
+func (p *Party) waitCap(r *PeerRec, from int64) int64 {
+	if c, ok := p.rk13Cap(r); ok {
+		return c
+	}
+	return from + s1Cap
+}
+
+// rk11Wait (RK11): p has followed r's relay link and holds tokens from r's
+// current mailbox, kept under rule T, that name a relay key of p's newer
+// than its key for r. Then p judges neither "no valid standing token"
+// (§8.6) nor "no reconnect token" toward r, until those tokens' exp or
+// RK13's cap for p's own rotation.
+func (p *Party) rk11Wait(r *PeerRec) bool {
+	if !p.w.ch("G4HS") || r.Device || p.Device || len(r.RChain) == 0 {
+		return false
+	}
+	c, ok := p.rk13Cap(r)
+	if !ok || p.w.Now > c {
+		return false
+	}
+	return slices.ContainsFunc(r.Toks, func(t Token) bool {
+		return t.Iss == r.Relay && p.keyRank(t.Sub) > p.keyRank(r.KeyFor) && t.valid(p.w.Now)
+	})
+}
+
+// rk10Limit: RK10's wait for links after mailbox_unknown, with no newer
+// mailbox known, reached its limit: the connection becomes stale as S1
+// does.
+func (p *Party) rk10Limit(r *PeerRec) {
+	if r.WaitTok != 0 || r.WaitUntil != 0 || r.Relay != r.WaitBox || r.Status != stActive {
+		return
+	}
+	if p.w.Now > p.waitCap(r, r.WaitSince) {
+		p.w.stat("R27: no newer mailbox by the wait's limit")
+		p.markStale(r, "R27: no newer mailbox by the wait's limit")
+		p.h5(r, -1)
+	}
 }
 
 // ---------- 2.4 and rule U: following relay links ----------
@@ -271,6 +343,12 @@ func (q *Party) n1(r *PeerRec, by int) {
 		slices.ContainsFunc(o.Toks, func(t Token) bool { return slices.Contains(passed, t.Sub) }) {
 		q.w.stat("N1: own reconnect restarted at a follow")
 		q.abandonOwn(r)
+		if r.reconnectTok(r.KeyFor, r.Relay, q.w.Now).JTI == 0 {
+			// RK6: no reconnect token in the message followed: the restart
+			// waits for one for P's new mailbox (startHS, tick)
+			q.w.stat("RK6: restart waits (no reconnect token in the message followed)")
+			r.RK6Since = q.w.Now
+		}
 		q.w.nextOrigin = "N1 restart"
 		q.startHS(r, true)
 	}
@@ -479,28 +557,38 @@ func (q *Party) n2(r *PeerRec, m *RMsg) bool {
 	return ok
 }
 
-// refusedReconnect: 2.7, a definite refusal of my reconnect hs.init ends
-// that try at once. mailbox_unknown for P's earlier mailbox while I know no
-// newer one is not counted (I wait for the links, at most the hold's
-// limit); otherwise it is a failed try of the reconnect bound, and the
-// next try starts once a newer mailbox or another reconnect token is known.
+// refusedReconnect: RK10, a definite refusal of my reconnect hs.init.
+// Only a refusal tied to rotation is covered: any while I am in my own S1
+// toward P, or mailbox_unknown (token_revoked on a reconnect token for an
+// earlier key of mine is RK9's, R25). Any other stays silent: the try
+// stays open, and the next one comes at its 16-day expiry (tick). A
+// covered refusal ends the try at once. mailbox_unknown for P's mailbox
+// as I know it, with no newer one known, is not counted: I wait for P's
+// links, up to RK13's cap (in my own S1) or 60 days after the first such
+// refusal. Any other covered refusal is a failed try of the reconnect
+// bound; the next try starts at a newer mailbox (at once after
+// mailbox_unknown), a new reconnect token, or the refused try's expiry.
 func (p *Party) refusedReconnect(r *PeerRec, e *Entry, box Key, tok Token, err relayErr) {
 	w := p.w
 	o := r.Own
 	if o == nil || !o.Reconnect || o.ID != e.M.HS {
 		return
 	}
+	if r.KeyFor == p.st.Relay && err != mailboxUnknown {
+		w.stat("R27: refusal not tied to rotation: silent, next try at the try's expiry (" + string(err) + ")")
+		return
+	}
 	p.abandonOwn(r)
-	wait := func(jti int) {
+	wait := func(jti int, until int64) {
 		if r.WaitBox == 0 {
 			r.WaitSince = w.Now
 		}
-		r.WaitBox, r.WaitTok = box, jti
+		r.WaitBox, r.WaitTok, r.WaitUntil = box, jti, until
 	}
 	if err == mailboxUnknown && box == r.Relay {
 		w.stat("R27: refused at an earlier mailbox, no newer known: waits for the links")
 		w.noteWait(p.ID, r.ID, "G9W")
-		wait(0)
+		wait(0, 0)
 		return
 	}
 	if o.Ctx != r.RCNamed {
@@ -520,5 +608,5 @@ func (p *Party) refusedReconnect(r *PeerRec, e *Entry, box Key, tok Token, err r
 		return
 	}
 	w.noteWait(p.ID, r.ID, "G9W")
-	wait(tok.JTI)
+	wait(tok.JTI, o.Started+w.hsLifeFor(true))
 }

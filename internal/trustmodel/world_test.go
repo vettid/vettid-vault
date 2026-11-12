@@ -652,8 +652,8 @@ func (p *Party) deposit(e *Entry, r *PeerRec) {
 		if p.newSpec() && m.Kind == KResp && !m.Reconnect && !slices.Contains(r.DropAns, m.HS) {
 			r.DropAns = append(r.DropAns, m.HS) // §6.3.1 (J)
 		}
-		if !r.Device && !(m.Kind == KInit && m.Reconnect) {
-			p.wantReconnect(r)
+		if !r.Device && !(m.Kind == KInit && m.Reconnect) && !p.rk11Wait(r) {
+			p.wantReconnect(r) // §8.6 "no valid standing token" (not judged while RK11 waits)
 		}
 		return
 	}
@@ -772,7 +772,8 @@ func (p *Party) deposit(e *Entry, r *PeerRec) {
 			break
 		}
 		// S9: a token Q issued to an earlier key of mine that is still my key for Q
-		if with != p.st.Relay && with == r.KeyFor && r.RevokedAt == 0 {
+		if with != p.st.Relay && with == r.KeyFor && r.RevokedAt == 0 && !(tok.Reconnect && w.ch("S9END")) {
+			// RK9: a reconnect-token revocation never starts S9's wait
 			r.RevokedAt = w.Now
 		} else if p.newSpec() && !p.Device && !r.Device && !tok.Reconnect && !w.noRevokedPath {
 			keep = p.tokenRevoked(r, e, tok)
@@ -837,7 +838,7 @@ func (p *Party) tokenRevoked(r *PeerRec, e *Entry, tok Token) bool {
 		return false
 	}
 	e.Tok = Token{} // waits for a valid standing token
-	if r.standing(r.KeyFor, r.Relay, w.Now).JTI == 0 {
+	if r.standing(r.KeyFor, r.Relay, w.Now).JTI == 0 && !p.rk11Wait(r) {
 		w.hit("T:token_revoked-no-token-reconnect")
 		p.wantReconnect(r)
 	}

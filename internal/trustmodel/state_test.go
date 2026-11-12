@@ -208,6 +208,8 @@ type PeerRec struct {
 	WaitBox          Key   // 2.7: the next reconnect waits for a mailbox of P newer than this one
 	WaitTok          int   // 2.7: ...or for a reconnect token other than this jti
 	WaitSince        int64 // 2.7: since
+	WaitUntil        int64 // RK10: ...or until the refused try's expiry (0: none)
+	RK6Since         int64 // RK6: a restart waits for a reconnect token for P's new mailbox, since the follow
 }
 
 // k9Spared: at an identity.rotate carrying link L, epoch Ep was not later

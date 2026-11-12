@@ -91,7 +91,7 @@ func (q *Party) handle(m *RMsg, set []Key) bool {
 	}
 	switch d.Out {
 	case "accept", "follow", "answer", "ignore":
-		w.noteAuth(q, r)
+		w.noteAuth(q, r, M)
 		if w.ch("N2") {
 			r.noteAccKey(M, m.Sender)
 		}
@@ -495,6 +495,7 @@ func (q *Party) s2(r *PeerRec) {
 	q.w.stat("S2:advance")
 	r.KeyFor = best
 	r.RevokedAt = 0
+	r.RCRevokedEarlier = false // RK9: that S1 is over
 	if o := r.Own; o != nil && o.Reconnect && !o.FinSent && o.Relay != best {
 		q.abandonOwn(r)
 		q.startHS(r, true)

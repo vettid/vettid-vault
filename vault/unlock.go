@@ -32,6 +32,11 @@ const (
 	// Release 29 (§6.3.1 "No upgrade", §11.4): a state without
 	// messaging_release 29 or more is not started.
 	CodeStateUnsupported = "state_unsupported"
+	// §3.3 (0.88.17): the state opened, but a feature others call directly
+	// could not read its part (damaged, or a later release's). Nothing is
+	// written; unlike state_unsupported the vault is not to be set up again:
+	// a release that reads it opens it.
+	CodeStateUnreadable = "state_unreadable"
 )
 
 // Release update results and refusal codes (§11.4, §11.10.4).
@@ -402,12 +407,18 @@ func UnlockAlt(ctx context.Context, p AltUnlockParams) (*Manager, *AltUnlockOutc
 		suite.Wipe(op.dek1)
 		suite.Wipe(op.uk)
 		suite.Wipe(dek)
+		out.StateSeq = st.StateSeq // as state_unreadable: the state read, not run
 		return nil, out.fail(CodeStateUnsupported, ErrStateUnsupported)
 	}
 	if st.SealedRelease == "" {
 		st.SealedRelease = hdr.SealedRelease
 	}
 	m := newManager(p.Options, &st, hdr, dek)
+	// A feature others call directly that could not read its part
+	// (m.requiredUnreadable) is refused in resume, after the release
+	// decisions (§11.10.4: a stale header is still wrong_release); an
+	// approved move, and a pending move's completion, still go through
+	// with the part carried unchanged (GC #8621 a).
 	m.stateVer, m.headerVer = sver, hver
 	m.unlockKey, m.unlockSecret = op.uk, append([]byte(nil), p.UnlockSecret...)
 	switch op.mode {
@@ -466,6 +477,14 @@ func (m *Manager) releaseRules(ctx context.Context, p AltUnlockParams, key *Unlo
 	pending := st.ReleaseMove
 	switch {
 	case pending != nil && pending.To == own.PCR0:
+		if m.requiredUnreadable && p.Update != nil {
+			// §3.3 (owner decision 2026-11-12, GC #8689 a): this release
+			// cannot read a part either, so the move is not confirmed; an
+			// approved update to a later release still goes on from here.
+			if mm, o, moved := m.moveOnUnconfirmed(ctx, p, key, mv, out); moved {
+				return mm, o
+			}
+		}
 		// Confirmation at the new release: from this flush on the move is
 		// final; then the old header is deleted.
 		old := pending.From
@@ -533,6 +552,11 @@ func (m *Manager) releaseRules(ctx context.Context, p AltUnlockParams, key *Unlo
 	if err != nil {
 		return refuse(RefuseSealKey)
 	}
+	// §3.3 (owner decision 2026-11-11, GC #8621 a): a part this release
+	// cannot read does not hold back an approved move. The move is
+	// recorded and sealed for the next release with the part carried
+	// unchanged (it was not loaded, so it is written back as stored); no
+	// feature runs, nothing is sent, no unlocked. Only resume refuses.
 	// Step 6: record the move. From here on the vault does not resume
 	// under this release.
 	st.ReleaseMove = &ReleaseMove{To: entry.PCR0, ToRelease: entry.Number, From: own.PCR0, ManifestSerial: mv.Serial,
@@ -546,6 +570,52 @@ func (m *Manager) releaseRules(ctx context.Context, p AltUnlockParams, key *Unlo
 		return refuse(RefuseWrite)
 	}
 	return m.completeMoveWith(ctx, p, entry, sealer, rec, out)
+}
+
+// moveOnUnconfirmed takes an approved update from the release a recorded
+// move went to, before that release has confirmed it, when a Required
+// part does not read here (§3.3, GC #8689 a): the move is recorded again
+// for the later release, from the release the vault is still sealed at,
+// and the header sealed for it, with the part carried unchanged and the
+// header's credential bits as stored. Nothing is confirmed, opened or
+// sent. moved is false when the update does not hold (another release,
+// not active, not later, an approval that does not verify, no sealer):
+// the caller then refuses state_unreadable as before, with nothing
+// written. This release's own header is left: an unlock here answers
+// wrong_release, and the vault's deletion sweeps it.
+func (m *Manager) moveOnUnconfirmed(ctx context.Context, p AltUnlockParams, key *UnlockKey, mv *ManifestView, out *AltUnlockOutcome) (*Manager, *AltUnlockOutcome, bool) {
+	own, st, u := p.Release, m.st, p.Update
+	pending := st.ReleaseMove
+	entry, ok := mv.Lookup(u.To)
+	if !ok || entry.Status != "active" || entry.Number != u.ToRelease || u.ToRelease <= own.Number {
+		return nil, nil, false
+	}
+	nb, err := u.VerifyApproval(key)
+	if err != nil {
+		return nil, nil, false
+	}
+	sealer, rec, err := p.SealerFor(ctx, entry)
+	if err != nil {
+		return nil, nil, false
+	}
+	key.Attestation = nb
+	st.ReleaseMove = &ReleaseMove{To: entry.PCR0, ToRelease: entry.Number, From: pending.From, ManifestSerial: mv.Serial,
+		ApprovedBy: key.DeviceID}
+	m.syncUnlockKeysWith(key)
+	if err := m.persist(ctx, false); err != nil {
+		if d, ok := sealer.(interface{ Destroy() }); ok {
+			d.Destroy()
+		}
+		if errors.Is(err, ErrSplitBrain) {
+			m.zeroize()
+			return nil, out.fail(CodeRetry, err), true
+		}
+		st.ReleaseMove = pending
+		mm, o := m.refuseUnreadable(out)
+		return mm, o, true
+	}
+	mm, o := m.completeMoveWith(ctx, p, entry, sealer, rec, out)
+	return mm, o, true
 }
 
 // completeMove is step 7 for a move recorded earlier.
@@ -630,6 +700,20 @@ func (m *Manager) syncUnlockKeysWith(k *UnlockKey) {
 	}
 }
 
+// refuseUnreadable is §3.3's refusal (0.88.17, owner decision
+// 2026-11-11): a feature others call directly could not read its part,
+// and the vault is not run half. Answered state_unreadable after the
+// release decisions, before anything is written or sent, no unlocked,
+// locked again (the keys wiped); a release that reads it opens it. What
+// the unlock had changed in memory goes with the manager, the
+// cancellation of a recovery included.
+func (m *Manager) refuseUnreadable(out *AltUnlockOutcome) (*Manager, *AltUnlockOutcome) {
+	m.zeroize()
+	out.RecoveryCancelled, out.CancelledRecoveryID = false, ""
+	out.Update = nil
+	return nil, out.fail(CodeStateUnreadable, ErrStateUnreadable)
+}
+
 // resume starts the vault under this release: keys, sessions, relay
 // registration, the device's fresh token, a header write recording the
 // reset backoff, counter and manifest serial, and the result fields.
@@ -650,6 +734,9 @@ func (m *Manager) resume(ctx context.Context, p AltUnlockParams, out *AltUnlockO
 			}
 			m.hdr.SealKeyVerified = r
 		}
+	}
+	if m.requiredUnreadable {
+		return m.refuseUnreadable(out)
 	}
 	// The registered phone's no_backup refusal (§11.11.5 step 1) is not
 	// for a recovered phone (its recovered invite is in the state): its

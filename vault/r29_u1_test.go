@@ -71,6 +71,9 @@ func TestR29U1UnlockRefused(t *testing.T) {
 		if m != nil || out.OK || out.Code != CodeStateUnsupported {
 			t.Fatalf("messaging_release %d: %+v", release, out)
 		}
+		if out.StateSeq == 0 {
+			t.Fatalf("messaging_release %d: no state_seq on the refusal (state_unreadable gives it)", release)
+		}
 		if wc.count() != 0 {
 			t.Fatalf("messaging_release %d: %d writes on refusal", release, wc.count())
 		}

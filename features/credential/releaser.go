@@ -4,10 +4,10 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vms/altchan"
 	"github.com/vettid/vettid-vault/vms/recovery"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // Release R's credential operations (VAULT-MESSAGING 0.33.0 §11.14.9).

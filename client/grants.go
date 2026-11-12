@@ -5,8 +5,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/sharewire"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 	"github.com/vettid/vettid-vault/vms/suite"
 )
 

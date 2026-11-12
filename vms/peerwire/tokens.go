@@ -8,8 +8,8 @@ import (
 
 	"github.com/vettid/vettid-relay/relayauth"
 
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/envelope"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // Token kinds (§7.1). The reconnect token's lifetime, quota and re-mint

@@ -1,6 +1,6 @@
 package peerwire
 
-import "github.com/vettid/vettid-vault/internal/strictjson"
+import "github.com/vettid/vettid-vault/vms/strictjson"
 
 // A connection's lifecycle (§6.4, §7.4): connection.approved carries the
 // approving member's vault's standing and reconnect tokens for the peer,

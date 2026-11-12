@@ -14,10 +14,10 @@ import (
 
 	"github.com/vettid/vettid-vault/client"
 	"github.com/vettid/vettid-vault/internal/relaytest"
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vms/callwire"
 	"github.com/vettid/vettid-vault/vms/envelope"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // V4 batch 2, block (§7.4, §10.4) through the real relay: A blocks B (its

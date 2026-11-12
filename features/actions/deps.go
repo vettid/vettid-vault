@@ -7,9 +7,9 @@ import (
 	"github.com/vettid/vettid-vault/features/audit"
 	"github.com/vettid/vettid-vault/features/grants"
 	"github.com/vettid/vettid-vault/features/wallet"
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vms/envelope"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // Deps are the features the built-in actions run through (§10.14). A nil

@@ -11,8 +11,8 @@ import (
 
 	"github.com/vettid/vettid-vault/client"
 	cwallet "github.com/vettid/vettid-vault/client/wallet"
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/btc"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // The wallet (VAULT-MESSAGING §10.18). vaultctl is not a chain client: it

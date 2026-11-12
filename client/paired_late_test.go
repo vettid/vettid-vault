@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vettid/vettid-vault/internal/strictjson"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 func pairedWith(v *fakeVault, deviceID, release string, number uint64) []byte {

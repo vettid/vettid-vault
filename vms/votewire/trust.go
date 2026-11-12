@@ -8,7 +8,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/vettid/vettid-vault/internal/strictjson"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // A pinned Sigstore trusted root (VAULT-MESSAGING §11.10.8

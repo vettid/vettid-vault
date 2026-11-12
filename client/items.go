@@ -4,8 +4,8 @@ import (
 	"context"
 	"encoding/json"
 
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/credwire"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // Items, tags and share rules from a device's side (VAULT-MESSAGING

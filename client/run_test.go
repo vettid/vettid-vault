@@ -12,8 +12,8 @@ import (
 
 	"github.com/vettid/vettid-relay/relayclient"
 
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/envelope"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // Run, the one collecting loop (VAULT-MESSAGING §8.1, AGENT-PLAN AV2).

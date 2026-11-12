@@ -7,10 +7,10 @@ import (
 	"strings"
 
 	"github.com/vettid/vettid-vault/features/itemspec"
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/peerwire"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // The profile (§10.8): the shared profile every active connection

@@ -9,9 +9,9 @@ import (
 	"encoding/base64"
 
 	"github.com/vettid/vettid-vault/client"
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/btc"
 	"github.com/vettid/vettid-vault/vms/credwire"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // The wallet (VAULT-MESSAGING §10.18). The app is the chain source: it

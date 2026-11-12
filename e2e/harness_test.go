@@ -21,10 +21,10 @@ import (
 	"github.com/vettid/vettid-vault/features/messaging"
 	"github.com/vettid/vettid-vault/internal/countertest"
 	"github.com/vettid/vettid-vault/internal/enclavetest"
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vault/store"
 	"github.com/vettid/vettid-vault/vms/envelope"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 const pin = "424242"

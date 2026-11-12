@@ -6,10 +6,10 @@ import (
 	"time"
 
 	"github.com/vettid/vettid-vault/features/itemspec"
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/leashwire"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // Agent rule limits (§10.11): the LEASH grant limits.

@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"unicode/utf8"
 
-	"github.com/vettid/vettid-vault/internal/strictjson"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // The shared profile (§10.8): every active connection receives

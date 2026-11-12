@@ -5,9 +5,9 @@ import (
 	"sort"
 	"time"
 
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vms/envelope"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // The member's own location log (§10.16, owner decision of 2026-10-03):

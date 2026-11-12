@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/peerwire"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // roFeature has a step-up type with a read-only form (a dry run).

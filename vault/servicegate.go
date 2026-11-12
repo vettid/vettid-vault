@@ -4,9 +4,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/peerwire"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // Service connections (VAULT-MESSAGING §6.4, 0.69.0; votes 0.81.0): a

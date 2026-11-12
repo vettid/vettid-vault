@@ -3,8 +3,8 @@ package calls
 import (
 	"time"
 
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // The ring timer (CALLS-PLAN V2) and call liveness (V3, decision D12),

@@ -28,9 +28,9 @@ import (
 	"github.com/vettid/vettid-vault/features/grants"
 	"github.com/vettid/vettid-vault/features/itemspec"
 	"github.com/vettid/vettid-vault/features/wallet"
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vms/envelope"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // Limits (§10.14).

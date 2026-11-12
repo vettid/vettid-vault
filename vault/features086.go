@@ -8,10 +8,10 @@ import (
 	"sort"
 	"time"
 
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/altchan"
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/handshake"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // Capability names on every message (VAULT-MESSAGING 0.86.0, §5.3, §10.8,

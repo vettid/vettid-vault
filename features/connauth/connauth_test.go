@@ -10,10 +10,10 @@ import (
 	"time"
 
 	"github.com/vettid/vettid-vault/internal/featuretest"
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vms/credwire"
 	"github.com/vettid/vettid-vault/vms/peerwire"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 var t0 = time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)

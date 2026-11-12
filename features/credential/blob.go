@@ -11,8 +11,8 @@ import (
 	"golang.org/x/crypto/argon2"
 
 	"github.com/vettid/vettid-vault/features/itemspec"
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/envelope"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 	"github.com/vettid/vettid-vault/vms/suite"
 )
 

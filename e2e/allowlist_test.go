@@ -13,8 +13,8 @@ import (
 	"github.com/vettid/vettid-vault/client"
 	"github.com/vettid/vettid-vault/features/all"
 	"github.com/vettid/vettid-vault/internal/relaytest"
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // The feature allowlist (VAULT-MESSAGING 0.26.0 §11.10.8) with the real

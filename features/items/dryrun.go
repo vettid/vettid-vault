@@ -5,9 +5,9 @@ import (
 	"sort"
 
 	"github.com/vettid/vettid-vault/features/itemspec"
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vms/envelope"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // Dry runs of item.put and item.tag (§10.7, 0.21.0): the vault plans the

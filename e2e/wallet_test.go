@@ -12,8 +12,8 @@ import (
 	"github.com/vettid/vettid-vault/client"
 	"github.com/vettid/vettid-vault/client/wallet"
 	"github.com/vettid/vettid-vault/internal/relaytest"
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/btc"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 const bip84Phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"

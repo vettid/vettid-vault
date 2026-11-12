@@ -14,9 +14,9 @@ import (
 
 	"github.com/vettid/vettid-vault/features/wallet"
 	"github.com/vettid/vettid-vault/internal/featuretest"
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/btc"
 	"github.com/vettid/vettid-vault/vms/envelope"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // Spend caps (VAULT-MESSAGING 0.82.3 §10.18 "Spend caps", first specified

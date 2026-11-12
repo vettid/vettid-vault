@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/vettid/vettid-vault/client"
-	"github.com/vettid/vettid-vault/internal/strictjson"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // Feature commands (VAULT-MESSAGING §10.6, §10.8, §10.9). Passwords come from the

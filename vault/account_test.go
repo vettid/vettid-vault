@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/peerwire"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 func snapshotAt(t time.Time, extra string) []byte {

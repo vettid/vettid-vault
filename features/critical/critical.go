@@ -29,10 +29,10 @@ import (
 
 	"github.com/vettid/vettid-vault/features/credential"
 	"github.com/vettid/vettid-vault/features/itemspec"
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/sharewire"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 	"github.com/vettid/vettid-vault/vms/suite"
 )
 

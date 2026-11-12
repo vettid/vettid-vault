@@ -5,9 +5,9 @@ import (
 	"encoding/base64"
 	"time"
 
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/recovery"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // The recovery open (VAULT-MESSAGING 0.33.0, release R, §11.14.6): the

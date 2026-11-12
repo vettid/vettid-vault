@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/vettid/vettid-vault/internal/strictjson"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // CredentialSource supplies credentials (the parent, over the control

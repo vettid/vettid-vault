@@ -10,9 +10,9 @@ import (
 	"time"
 
 	"github.com/vettid/vettid-relay/relayauth"
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/handshake"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // ocFeature stands in for the credential feature in the runtime's owner

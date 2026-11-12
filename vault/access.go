@@ -7,8 +7,8 @@ import (
 	"sort"
 	"time"
 
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/envelope"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // Access sessions and approvals for desktops and agents (VAULT-MESSAGING

@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/envelope"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // askSource is a feature with open asks (connauth, actions and location

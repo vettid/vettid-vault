@@ -12,9 +12,9 @@ import (
 
 	"github.com/vettid/vettid-vault/client"
 	"github.com/vettid/vettid-vault/internal/relaytest"
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vms/attwire"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // photo returns a JPEG-looking content of n bytes (the vault sniffs only

@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // The daily owner check (VAULT-MESSAGING 0.13.0, §3.6.1): the holder's

@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/envelope"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // VAULT-MESSAGING 0.82.5 §6.8 "Ending": device.session.end may name the

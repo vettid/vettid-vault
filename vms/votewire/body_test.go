@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/envelope"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 func e64(b []byte) string { return base64.StdEncoding.EncodeToString(b) }

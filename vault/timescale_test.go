@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/invite"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // The staging time scale in the vault (VAULT-MESSAGING 0.43.0 §11.10.8,

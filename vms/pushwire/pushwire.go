@@ -21,7 +21,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/vettid/vettid-vault/internal/strictjson"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // Platforms, environments and the wake class.

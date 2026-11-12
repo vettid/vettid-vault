@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/vettid/vettid-vault/client"
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/leashwire"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // V4 batch 3, LEASH (VAULT-MESSAGING §10.11).

@@ -3,7 +3,7 @@ package client
 import (
 	"context"
 
-	"github.com/vettid/vettid-vault/internal/strictjson"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // Introductions (VAULT-MESSAGING §10.15): the member introduces two of

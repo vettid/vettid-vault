@@ -8,8 +8,8 @@ import (
 	"sort"
 	"time"
 
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/envelope"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // Asks from a connection: no approval fatigue (VAULT-MESSAGING §10.4.1,

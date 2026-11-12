@@ -10,8 +10,8 @@ import (
 
 	"github.com/vettid/vettid-relay/relayauth"
 
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/envelope"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // bigFeature answers with a body of the size its request names: test.big

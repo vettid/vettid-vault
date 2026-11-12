@@ -11,8 +11,8 @@ import (
 
 	"github.com/vettid/vettid-vault/client"
 	"github.com/vettid/vettid-vault/internal/relaytest"
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // V4 batch 3 and V4 items, LEASH (§6.7, §6.8, §10.11, §10.12) through the

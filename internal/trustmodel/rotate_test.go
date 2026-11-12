@@ -274,7 +274,11 @@ func (p *Party) startHS(r *PeerRec, reconnect bool) {
 		}
 		h.Toks = p.issue(r, box, true)
 		m.Toks = h.Toks
-		f = func(e *Entry) { e.Tok, e.With = rt, r.KeyFor }
+		// as the vault (handshakes.go startReconnectCtx): the hs.init's
+		// mailbox is fixed when it is queued, with the reconnect token
+		// that mailbox minted
+		relay := r.Relay
+		f = func(e *Entry) { e.Tok, e.With, e.Box = rt, r.KeyFor, relay }
 	} else if r.Cur != 0 {
 		m.Epoch = r.Cur
 	}

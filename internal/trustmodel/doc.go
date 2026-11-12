@@ -45,7 +45,9 @@
 // seed, e.g. "statprefix:wait class"), TRUSTMODEL_RULEEFIN=keep (rule E
 // keeps an unsent hs.fin, for attribution), TRUSTMODEL_EXTRA_DAY (one more rekey before
 // I1), TRUSTMODEL_ROTBURST (each vault rotates 4 to 6 times at the start),
-// TRUSTMODEL_NOM1 (0.88.2's links of a refused reconnect off, for
+// TRUSTMODEL_CHOSEN (the relay-key rotation design chosen on 2026-11-12,
+// every rule; chosen_test.go), TRUSTMODEL_CH=a,b,-c (single rules of it, and
+// the candidate G2BX), TRUSTMODEL_NOM1 (0.88.2's links of a refused reconnect off, for
 // attribution), TRUSTMODEL_DEBUG (report malformed updates as violations).
 //
 // Files: relay (relay model), state (messages, state, ik and relay-key
@@ -56,7 +58,7 @@
 // residuals, hits by rule ID), reach (generators: an old copy as
 // responder and as initiator, hs.fin loss around a rotation), run
 // (actions, quiescence, I1-I6, shrinking), visible (splits, feed items,
-// I7), waitclass (with relay-key rotation on, the wait a stale pair or
+// I7), chosen (the chosen relay-key rotation design behind switches), waitclass (with relay-key rotation on, the wait a stale pair or
 // a liveness failure was stuck in: the design note's G1-G7), coverage
 // (TestR29Coverage: the minimum hit count per rule), and
 // the tests: random, scenario, table, findings, blind, confirm_scenarios,

@@ -36,6 +36,19 @@ import (
 //     a mailbox's grace ends, its owner's peer still addresses it (has not
 //     followed the update), and the peer's own earlier mailbox, which the
 //     owner still addresses, has already ended.
+//   - G4F: G4 "after P followed Q" (7.16 (1)): Q, demoted and in its own
+//     S1 toward P, has no usable reconnect token while P has followed Q's
+//     update and P's rule U revoked Q's old-key reconnect token (noted
+//     where Q's reconnect finds no token).
+//   - G4H: (chosen set) P, in S1 toward Q, holds valid tokens for Q's
+//     mailbox that name only its newer key (rule 0 tokens, carried or from
+//     an update, which under 7.4 c move no S2) and no token for its key for
+//     Q, so the "no valid standing token" reconnect finds no reconnect
+//     token (noted where the reconnect finds none; demoted or not).
+//   - G9W: (chosen set, 2.7) Q's reconnect waits for a newer mailbox of P
+//     after mailbox_unknown at P's earlier mailbox, or for another token.
+//   - R25W: (chosen set, 2.5) the "no reconnect token" judgement suspended
+//     during S1 after a revoked earlier-key reconnect token.
 //
 // How it decides: each such event is noted per ordered pair with its time
 // (w.waitEv). A pair's class is the set of labels noted, in either
@@ -47,7 +60,7 @@ import (
 
 // waitLabels are the design note's labels; anything else noted is context
 // for OTHER.
-var waitLabels = []string{"G1", "G2", "G3", "G4", "G6", "G7", "G8"}
+var waitLabels = []string{"G1", "G2", "G3", "G4", "G4F", "G4H", "G6", "G7", "G8", "G9W", "R25W"}
 
 // noteWait records event label for the ordered pair (from, to).
 func (w *World) noteWait(from, to PID, label string) {

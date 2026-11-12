@@ -103,6 +103,11 @@ type World struct {
 	progressAt map[[2]PID]int64            // pair: when an epoch last became current at either side
 	staleClass map[[2]PID]string           // pair: its wait class when it first went stale
 	k5Held     map[[2]PID]bool             // (Q, P): Q's K5 retry was held by its pending epoch (noteK5Held)
+	k5Since    map[[2]PID]int64            // (Q, P): Q's K5 retry is held now, since (7.16.3)
+	chosen     map[string]bool             // the chosen design's rules that are on (chosen_test.go)
+	s1Pause    map[[2]PID][][2]int64       // (P, Q): S1's pause intervals (7.10 b)
+	revokedRC  map[[2]PID]bool             // (P, Q): P's rule U revoked reconnect tokens it issued to Q's earlier key
+	gapOpen    map[[2]PID]int64            // (P, Q): P ended the pair stale by S1 while Q waits (7.16.2), since
 }
 
 type rot struct {
@@ -120,7 +125,8 @@ func newWorld(seed uint64) *World {
 		rlinkBy: map[RLink]rot{}, iklinkBy: map[IKLink]rot{}, evid: map[[2]PID]map[Key]map[Key]bool{},
 		ikPos: map[[2]PID][]ikFollow{}, answered: map[int]bool{},
 		ended: map[int]bool{}, ever: map[PID]map[int]bool{}, probes: map[int]bool{}, stats: map[string]int{}, deadAt: map[[2]PID]int64{}, deadWhy: map[[2]PID]string{}, deadRes: map[[2]PID]string{}, splitAt: map[[2]PID]int64{}, splitNow: map[[2]PID]bool{}, ttlFin: map[[2]PID]string{}, probeDep: map[int][2]PID{}, probeFate: map[int]string{}, hasEpoch: map[[2]int]bool{}, staleAt: map[[2]PID]string{}, hsOrigin: map[int]string{}, suspAt: map[[2]PID]int64{}, audits: map[[2]PID]int{}, everSplit: map[[2]PID]bool{}, feed: map[[2]PID][]string{}, copyExpo: map[[2]int]*expo{}, copyFlag: map[[2]int]bool{}, copyCur: map[[2]int]bool{}, copyAban: map[[2]int]*abanUse{}, oldApp: map[[2]PID]string{}, devCopyFirst: map[[2]PID]bool{}, lockedFor: map[PID]int64{}, rotTimes: map[PID][]int64{}, fDue: map[[2]PID]bool{}, probeF: map[int]bool{}, fLostTok: map[[2]PID]bool{}, initIK: map[PID]Key{}, probeEpoch: map[int]int{}, forkDue: map[[2]PID]int{}, evidKind: map[Key]string{}, evidActive: map[[2]PID]map[Key]bool{}, resolved: map[[2]PID]bool{}, identSucc: map[Key]bool{}, forkFinK7: map[[2]PID]bool{},
-		waitEv: map[[2]PID]map[string]int64{}, progressAt: map[[2]PID]int64{}, staleClass: map[[2]PID]string{}}
+		waitEv: map[[2]PID]map[string]int64{}, progressAt: map[[2]PID]int64{}, staleClass: map[[2]PID]string{},
+		k5Since: map[[2]PID]int64{}, chosen: map[string]bool{}, s1Pause: map[[2]PID][][2]int64{}, revokedRC: map[[2]PID]bool{}, gapOpen: map[[2]PID]int64{}}
 	w.R = newRelay(w)
 	w.Now = 1000 * day
 	return w
@@ -265,6 +271,7 @@ type Party struct {
 	Desktop              bool     // a desktop or agent, not the member's app: no unlock exchange (§7.2); scenarios only
 	OldApp               bool     // R29-D4: a device app from before release 29 (no hs.confirm, no hs_confirm in features, rekeys)
 	Skew                 int64    // clock offset (within the 2-day budget of §6.3.1)
+	lastPassed           []Key    // N1: the keys the last followRelay passed
 }
 
 type pendEv struct {
@@ -458,7 +465,7 @@ func (p *Party) mintPass() {
 				continue
 			}
 			box := p.st.Relay
-			if e.M.Kind == KInit {
+			if e.M.Kind == KInit && !e.Announce {
 				box = e.With
 			}
 			e.M.Toks = p.issue(r, box, true)
@@ -652,6 +659,10 @@ func (p *Party) deposit(e *Entry, r *PeerRec) {
 	}
 	if m.Kind == KInit {
 		m.FromRelay = with // SPEC FINDING (silent): built when deposited, as S2 says for reconnects
+		if e.Announce && with != p.st.Relay {
+			// 2.4: from.relay announces K', with the links from K
+			m.FromRelay, m.RelayPK, m.RLinks = p.st.Relay, p.st.Relay, p.linksFrom(with)
+		}
 	}
 	// session mode: sealed under the current epoch at deposit
 	switch m.Kind {
@@ -660,6 +671,13 @@ func (p *Party) deposit(e *Entry, r *PeerRec) {
 			return
 		}
 		m.Epoch = r.Cur
+		if m.Kind == KUpdate && p.w.ch("BINDL") {
+			// binding L: the update carries my ik links from the signer of
+			// the epoch it travels in, sealed afresh at each deposit
+			if ep := r.epoch(r.Cur); ep != nil {
+				m.Rot = p.ownLinks(ep.Own)
+			}
+		}
 		if m.Kind == KIdRot {
 			// S8: rotations from the signer of the epoch it travels in
 			if ep := r.epoch(r.Cur); ep != nil {
@@ -704,6 +722,7 @@ func (p *Party) deposit(e *Entry, r *PeerRec) {
 		p.waitDeposit(e.To, &m, with, box, tok, err)
 	}
 	keep := false // 0.88.2: token_revoked between vaults keeps the entry
+	r25 := false
 	switch err {
 	case rateLimited:
 		e.Indef = true
@@ -738,6 +757,20 @@ func (p *Party) deposit(e *Entry, r *PeerRec) {
 		e.Ended = true
 	case tokenRevoked:
 		r.dropTok(tok.JTI)
+		if tok.Reconnect && with != p.st.Relay && w.ch("R25") && !r.Device {
+			// 2.5: a reconnect token for my earlier key, revoked by Q's
+			// honest follow: no failed try, no S9 clock, no "no reconnect
+			// token" judgement during S1
+			r.RCRevokedEarlier = true
+			r.RevokedJTI = append(r.RevokedJTI, tok.JTI)
+			w.stat("R25: reconnect token for an earlier key revoked")
+			if o := r.Own; o != nil && o.Reconnect && e.M.Kind == KInit && o.ID == e.M.HS {
+				p.abandonOwn(r)
+				p.wantReconnect(r)
+			}
+			r25 = true
+			break
+		}
 		// S9: a token Q issued to an earlier key of mine that is still my key for Q
 		if with != p.st.Relay && with == r.KeyFor && r.RevokedAt == 0 {
 			r.RevokedAt = w.Now
@@ -745,14 +778,28 @@ func (p *Party) deposit(e *Entry, r *PeerRec) {
 			keep = p.tokenRevoked(r, e, tok)
 		}
 	case mailboxUnknown:
+		if e.HoldSince == 0 {
+			e.HoldSince = w.Now
+		}
 		if e.M.Kind == KResp && e.Box != 0 {
 			e.Ended = true
+		}
+		if w.ch("HOLD") && w.Now-e.HoldSince > holdLimit && e.M.Kind != KInit && e.M.Kind != KResp && e.M.Kind != KFin {
+			// 3.3: the hold's limit, then message.not_delivered
+			e.Ended = true
+			w.stat("HOLD: ended at the hold's limit (not delivered)")
+			if e.M.Kind == KSession && e.M.Probe > 0 && !p.Copy && w.probeFate[e.M.Probe] == "" {
+				w.probeFate[e.M.Probe] = "not delivered: the hold's limit"
+			}
 		}
 	default:
 		e.Ended = true
 	}
 	if e.Tok.JTI != 0 && err.definite() && !keep {
 		e.Ended = true // its one token is refused
+	}
+	if !r25 && err.definite() && err != quotaExceeded && m.Kind == KInit && m.Reconnect && w.ch("R27") && r.Status == stActive {
+		p.refusedReconnect(r, e, box, tok, err)
 	}
 	if e.M.Kind == KUpdate && err.definite() && e.Resend {
 		r.ResendEnd = true // (b): a definite answer ends the resends

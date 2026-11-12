@@ -115,7 +115,7 @@ func (r *Relay) rotate(old, nw Key) relayErr {
 		r.boxes[nw] = &mailbox{key: nw, denyJTI: map[int]bool{}, denySub: map[Key]bool{}, tnb: r.tomb[nw]}
 	}
 	if b.deleteAt == 0 {
-		b.deleteAt = r.w.Now + graceLen
+		b.deleteAt = r.w.Now + r.w.grace()
 	}
 	b.succ = nw
 	return okRes
@@ -234,6 +234,7 @@ func (r *Relay) advance() {
 			delete(r.boxes, k)
 			r.tomb[k] = b.deleteAt + freshWindow
 			r.w.waitGraceEnd(k)
+			r.w.tell(k, b.msgs)
 			continue
 		}
 		kept := b.msgs[:0]

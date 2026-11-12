@@ -154,6 +154,18 @@ func (p *Party) completePending(atUnlock bool) {
 	p.st.Relay = pd.Key
 	p.st.Pend = nil
 	p.rotOK = false
+	if w.ch("L24") {
+		// 2.4: at the second write, my open reconnects that announced an
+		// earlier key and sent no hs.fin are restarted (announcing K')
+		for i := range p.st.Peers {
+			r := &p.st.Peers[i]
+			if o := r.Own; o != nil && o.Reconnect && !o.FinSent && o.Relay != p.st.Relay && r.Status == stActive && !r.Device {
+				w.stat("L24: open reconnect restarted at the second write")
+				p.abandonOwn(r)
+				p.startHS(r, true)
+			}
+		}
+	}
 	if p.st.Owed {
 		p.st.Owed = false
 		p.newPending(pd.Path)
@@ -259,8 +271,43 @@ func (p *Party) startHS(r *PeerRec, reconnect bool) {
 	var f func(*Entry)
 	if reconnect {
 		rt := r.reconnectTok(r.KeyFor, r.Relay, w.Now)
-		box := r.KeyFor // the tokens are minted by the mailbox of the key it deposits with
+		with := r.KeyFor
+		if rt.JTI == 0 {
+			if t := p.g2bxToken(r); t.JTI != 0 {
+				rt, with = t, t.Sub // G2BX: a held token naming a newer key of mine
+				w.stat("G2BX: reconnect on a held token naming a newer key")
+			}
+		}
+		if w.ch("R27") && r.WaitBox != 0 {
+			if r.Relay == r.WaitBox && (r.WaitTok == 0 || rt.JTI == 0 || rt.JTI == r.WaitTok) {
+				if w.Now-r.WaitSince > holdLimit {
+					w.stat("R27: no newer mailbox within the hold's limit")
+					p.markStale(r, "R27: no newer mailbox within 60 days")
+					p.h5(r, -1)
+				}
+				return // 2.7: the next try waits for a newer mailbox or token
+			}
+			r.WaitBox, r.WaitTok, r.WaitSince = 0, 0, 0
+		}
+		box := with // the tokens are minted by the mailbox of the key it deposits with
+		announce := false
+		if w.ch("L24") && !r.Device && r.KeyFor != p.st.Relay && with == r.KeyFor {
+			box, announce = p.st.Relay, true // 2.4: announces K', tokens from K''s mailbox (rule 4)
+		}
 		if rt.JTI == 0 && p.newSpec() {
+			if !p.Copy && w.relayRot && w.g4f(p, r) {
+				w.noteWait(p.ID, r.ID, "G4F")
+			}
+			if !p.Copy && w.relayRot && r.KeyFor != p.st.Relay && slices.ContainsFunc(r.Toks, func(t Token) bool {
+				return t.Iss == r.Relay && t.Sub != r.KeyFor && p.holds(t.Sub) && t.valid(w.Now)
+			}) {
+				w.noteWait(p.ID, r.ID, "G4H") // holds tokens naming my newer key only
+			}
+			if w.ch("R25") && r.KeyFor != p.st.Relay && r.RCRevokedEarlier {
+				w.stat("R25: no-token judgement suspended during S1")
+				w.noteWait(p.ID, r.ID, "R25W")
+				return
+			}
 			w.hit("K6:no-reconnect-token-stale")
 			p.markStale(r, "K6: no reconnect token")
 			p.h5(r, -1)
@@ -274,11 +321,16 @@ func (p *Party) startHS(r *PeerRec, reconnect bool) {
 		}
 		h.Toks = p.issue(r, box, true)
 		m.Toks = h.Toks
+		if announce {
+			h.Relay = p.st.Relay
+		} else {
+			h.Relay = with
+		}
 		// as the vault (handshakes.go startReconnectCtx): the hs.init's
 		// mailbox is fixed when it is queued, with the reconnect token
 		// that mailbox minted
 		relay := r.Relay
-		f = func(e *Entry) { e.Tok, e.With, e.Box = rt, r.KeyFor, relay }
+		f = func(e *Entry) { e.Tok, e.With, e.Box, e.Announce = rt, with, relay, announce }
 	} else if r.Cur != 0 {
 		m.Epoch = r.Cur
 	}
@@ -526,6 +578,11 @@ func (p *Party) tick() {
 			}
 			if p.newSpec() && !p.Copy && !r.Device && r.Status == stActive && r.Cur == 0 && r.Pend != nil && (r.Own == nil || !r.Own.Reconnect) {
 				w.noteK5Held(p, r)
+				if _, ok := w.k5Since[[2]PID{p.ID, r.ID}]; !ok {
+					w.k5Since[[2]PID{p.ID, r.ID}] = w.Now
+				}
+			} else if !p.Copy {
+				delete(w.k5Since, [2]PID{p.ID, r.ID})
 			}
 			if p.needsReconnect(r) {
 				w.nextOrigin = "K5 reconnect (retry)"
@@ -542,14 +599,19 @@ func (p *Party) tick() {
 			}
 			// S1: stale 30 days after the second write
 			for _, o := range p.st.Old {
-				if o.Key == r.KeyFor && w.Now-p.sinceAfter(o.Key) > staleAfter {
+				if o.Key == r.KeyFor && w.s1Expired(p, r, p.sinceAfter(o.Key)) {
+					w.s1StaleGap(p, r)
+					if w.ch("S9END") && (r.RevokedAt != 0 || r.RCRevokedEarlier) {
+						w.stat("S9END: S1's stale shown with S9's text")
+						w.feedItem(p.ID, r.ID, "S9 fork_suspected at S1's end")
+					}
 					p.markStale(r, "S1: not followed in 30 days")
 					p.h5(r, -1)
 					w.logf("%s: %s STALE (S1)", p.Name, w.party(r.ID).Name)
 				}
 			}
 			// S9
-			if r.RevokedAt != 0 && !r.S9Audited && r.KeyFor != p.st.Relay && w.Now-r.RevokedAt > day {
+			if r.RevokedAt != 0 && !r.S9Audited && r.KeyFor != p.st.Relay && w.Now-r.RevokedAt > day && !w.ch("S9END") {
 				r.S9Audited = true
 				w.stat("S9:fork_suspected")
 				w.feedItem(p.ID, r.ID, "S9 fork_suspected (relay_revoked)")

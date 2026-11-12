@@ -314,6 +314,7 @@ func (w *World) exec(a Action) {
 }
 
 func (w *World) advance(d int64) {
+	defer w.gapCheck(false)
 	if d > hour {
 		// unlocked parties are online: they collect before a long quiet spell
 		for k := 0; k < 2; k++ {
@@ -947,6 +948,7 @@ func runActions(cfg Config, seed uint64, acts []Action, verbose bool) *World {
 	w.ruleEKeepFin = os.Getenv("TRUSTMODEL_RULEEFIN") == "keep"
 	w.noRefusedLinks = os.Getenv("TRUSTMODEL_NOM1") != "" // attribution: 0.88.2's links of a refused reconnect off
 	w.rotBurst = os.Getenv("TRUSTMODEL_ROTBURST") != ""
+	w.loadChosen()
 	defer w.expoStats()
 	defer w.rcStats()
 	for _, a := range acts {
@@ -959,6 +961,7 @@ func runActions(cfg Config, seed uint64, acts []Action, verbose bool) *World {
 	w.checkEnd(true)
 	w.monitor()
 	w.checkI7()
+	w.gapCheck(true)
 	w.checkHonestStale()
 	return w
 }

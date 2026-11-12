@@ -82,6 +82,12 @@ func (q *Party) confirm(r *PeerRec) {
 		r.RCNamed, r.RCFails = 0, 0 // R29-K6: the reconnect succeeded
 	}
 	q.releaseHeld(r) // R29-K5: sealed under the new epoch at confirmation
+	if pe.Reconnect && q.w.ch("G2B") && !q.Device && !r.Device {
+		// §6.3.1 "The prompt to adopt": re-minted tokens for the peer under
+		// the newly current epoch (naming its key on my record, rule 0)
+		q.w.stat("G2B: prompt relay.token.issued at a reconnect's confirmation")
+		q.enqueue(r.ID, Msg{Kind: KTokIssued, Toks: []Token{{}, {Reconnect: true}}}, nil)
+	}
 	q.w.stat("A:confirmed")
 	q.w.hit("I2:confirmed")
 	q.w.logf("%s: epoch E%d with %s CONFIRMED (current)", q.Name, pe.ID, q.w.party(r.ID).Name)

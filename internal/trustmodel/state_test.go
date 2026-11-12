@@ -95,9 +95,10 @@ type PendEp struct {
 }
 
 type Earlier struct {
-	Key   Key
-	Cut   Pos
-	Until int64
+	Key       Key
+	Cut       Pos
+	Until     int64
+	NewerSeen bool // N2: Q has accepted a message from a newer key of P's
 }
 
 type HS struct {
@@ -120,6 +121,9 @@ type HS struct {
 	NamedConf bool     // responder: the hs.init named my confirmed epoch (rule E at hs.fin)
 	InitTs    int64    // responder: the hs.init's inner ts
 	AnsTs     int64    // responder: the hs.resp's inner ts (its own clock)
+	RLinks    []RLink  // responder (2.4): the hs.init's relay links, followed at hs.fin
+	RespRL    []RLink  // responder (2.4): the relay links its hs.resp announces
+	RespPK    Key      // responder (2.4): the relay key its hs.resp announces
 }
 
 const (
@@ -192,6 +196,11 @@ type PeerRec struct {
 	RevokedAt int64 // S9: first token_revoked for an earlier key's token
 	S9Audited bool
 	RestartIK Key // H5: restarted reconnect spent once per change of the current ik
+
+	RCRevokedEarlier bool  // 2.5: a reconnect token for my earlier key was refused token_revoked
+	WaitBox          Key   // 2.7: the next reconnect waits for a mailbox of P newer than this one
+	WaitTok          int   // 2.7: ...or for a reconnect token other than this jti
+	WaitSince        int64 // 2.7: since
 }
 
 // k9Spared: at an identity.rotate carrying link L, epoch Ep was not later
@@ -210,20 +219,22 @@ type deferral struct {
 }
 
 type Entry struct {
-	ID       int
-	To       PID
-	M        Msg
-	Target   Key   // KUpdate: the relay key it announces (held until current)
-	Box      Key   // explicit mailbox (an hs.resp to a reconnect's from.relay)
-	Tok      Token // explicit token (that hs.init's standing token; a reconnect token)
-	With     Key   // explicit sending key (0: my key for the peer)
-	Done     bool  // answered 201; removed at the next write
-	Tried    bool  // deposited at least once (its bytes are fixed)
-	Resend   bool  // an update resent by (b)
-	Indef    bool  // last attempt had no definite answer
-	Ended    bool  // ended by a definite refusal
-	Revoke   []int // KDeny pseudo-entry: jtis to revoke at mailbox Box with key With
-	Denylist bool
+	ID        int
+	To        PID
+	M         Msg
+	Target    Key   // KUpdate: the relay key it announces (held until current)
+	Box       Key   // explicit mailbox (an hs.resp to a reconnect's from.relay)
+	Tok       Token // explicit token (that hs.init's standing token; a reconnect token)
+	With      Key   // explicit sending key (0: my key for the peer)
+	Done      bool  // answered 201; removed at the next write
+	Tried     bool  // deposited at least once (its bytes are fixed)
+	Resend    bool  // an update resent by (b)
+	Indef     bool  // last attempt had no definite answer
+	Ended     bool  // ended by a definite refusal
+	Revoke    []int // KDeny pseudo-entry: jtis to revoke at mailbox Box with key With
+	Denylist  bool
+	HoldSince int64 // first refused mailbox_unknown (the Q-side hold, 3.3)
+	Announce  bool  // 2.4: a reconnect hs.init announcing my current relay key during S1
 }
 
 type Pending struct {
@@ -273,6 +284,8 @@ func cloneHS(h *HS) *HS {
 	c.Links = slices.Clone(h.Links)
 	c.RespToks = slices.Clone(h.RespToks)
 	c.RespRot = slices.Clone(h.RespRot)
+	c.RLinks = slices.Clone(h.RLinks)
+	c.RespRL = slices.Clone(h.RespRL)
 	return &c
 }
 

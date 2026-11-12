@@ -91,6 +91,12 @@ func (q *Party) handle(m *RMsg, set []Key) bool {
 	}
 	switch d.Out {
 	case "accept", "follow", "answer", "ignore":
+		w.noteAuth(q, r)
+		if w.ch("N2") && r.relayState(m.Sender, pos) == rkCurrent {
+			for i := range r.Earlier {
+				r.Earlier[i].NewerSeen = true
+			}
+		}
 		q.st.Seen[M.Inner] = true
 		w.checkI3(q, r, m, d)
 		if q.newSpec() && M.Epoch != 0 && M.Kind != KFin {
@@ -172,7 +178,8 @@ func (q *Party) acceptFrom(r *PeerRec, m *RMsg, pos Pos, set []Key) dec {
 		return dec{"drop", "stale", "model:stale"} // needs a new invitation or pairing
 	}
 	// Table A preamble: an hs.init's sender must be its from.relay.pk
-	if M.Kind == KInit && m.Sender != M.FromRelay {
+	l24 := q.links24(r, m) // 2.4: the message announces a newer key of P's by links from its sender
+	if M.Kind == KInit && m.Sender != M.FromRelay && !(l24 && M.FromRelay == M.RelayPK) {
 		return refuse("foreign_sender", "A:hs.init-sender-not-from.relay")
 	}
 	// (2) foreign
@@ -191,6 +198,9 @@ func (q *Party) acceptFrom(r *PeerRec, m *RMsg, pos Pos, set []Key) dec {
 			return dec{"suspend", "fork", "E:destroyed-epoch-later-ts"}
 		}
 		q.w.hit("R6:superseded_epoch")
+		if M.Kind == KUpdate && rs != rkAfter {
+			return q.refusedUpdateLinks(r, m, pos, refuse("superseded_epoch", "E:superseded-epoch")) // 2.7
+		}
 		return refuse("superseded_epoch", "E:superseded-epoch")
 	}
 	// R29-K9: a message under an ended epoch is fork evidence "once step 3
@@ -221,11 +231,12 @@ func (q *Party) acceptFrom(r *PeerRec, m *RMsg, pos Pos, set []Key) dec {
 		// refused, under an ended one it is fork evidence (acceptFrom,
 		// 0.86.2; R29-K9), as any message after step 3
 		if d, bad := q.demoted(r, M, pos, cell); bad {
-			return d
+			return q.refusedUpdateLinks(r, m, pos, d) // 2.7
 		}
 		return q.ruleU(r, m, pos, rs)
 	case KTokIssued:
 		if d, bad := q.demoted(r, M, pos, cell); bad {
+			q.holdRCTokens(r, M.Toks) // G2BX
 			return d
 		}
 		return q.tokIssued(r, m, set, cell)
@@ -247,7 +258,7 @@ func (q *Party) acceptFrom(r *PeerRec, m *RMsg, pos Pos, set []Key) dec {
 		}
 		return q.tableBRotate(r, M, pos)
 	case KInit:
-		if rs == rkAfter {
+		if rs == rkAfter && !(l24 && M.Reconnect) {
 			return refuse("superseded_relay", cell)
 		}
 		if q.newSpec() && !M.Reconnect && M.Epoch == 0 {
@@ -266,19 +277,19 @@ func (q *Party) acceptFrom(r *PeerRec, m *RMsg, pos Pos, set []Key) dec {
 		}
 		return q.tableBInit(r, m, pos)
 	case KResp:
-		if rs == rkAfter {
+		if rs == rkAfter && !(l24 && M.Reconnect) {
 			return refuse("superseded_relay", cell+":handshake-kept")
 		}
 		return q.tableBResp(r, M, pos)
 	case KFin:
-		if rs == rkAfter {
+		if rs == rkAfter && !q.n2(r, m) {
 			return refuse("superseded_relay", cell+":handshake-kept")
 		}
 		return q.tableBFin(r, M, pos)
 	case KConfirm:
 		// SPEC FINDING: hs.confirm has no column in Table A; the model
 		// treats it as a session message.
-		if rs == rkAfter {
+		if rs == rkAfter && !q.n2(r, m) {
 			return refuse("superseded_relay", cell)
 		}
 		if d, bad := q.demoted(r, M, pos, cell); bad {
@@ -433,7 +444,11 @@ func (q *Party) ruleT(r *PeerRec, toks []Token, iss Key) (kept []Token, unknown 
 	return kept, unknown
 }
 
-func (q *Party) keepTokens(r *PeerRec, toks []Token) {
+func (q *Party) keepTokens(r *PeerRec, toks []Token) { q.keepTok(r, toks, true) }
+
+// keepTok keeps tokens; signal: they came in relay.token.issued (G2B: the
+// signal unchanged, only that advances S2).
+func (q *Party) keepTok(r *PeerRec, toks []Token, signal bool) {
 	for _, t := range toks {
 		if slices.Contains(r.RevokedJTI, t.JTI) {
 			continue // 0.88.2 §8.6: a token answered token_revoked is never used again
@@ -442,7 +457,9 @@ func (q *Party) keepTokens(r *PeerRec, toks []Token) {
 			r.Toks = append(r.Toks, t)
 		}
 	}
-	q.s2(r)
+	if signal || !q.w.ch("G2B") {
+		q.s2(r)
+	}
 }
 
 // s2: when P's token for my newer key arrives, my key for P advances (S2).
@@ -464,10 +481,14 @@ func (q *Party) s2(r *PeerRec) {
 		q.abandonOwn(r)
 		q.startHS(r, true)
 	}
+	g2b := q.w.ch("G2B")      // rule 3: entries on carried tokens keep their token's key
 	for _, a := range r.Ans { // hs.resp deposited with the earlier key: again, same bytes
+		if g2b && a.Reconnect {
+			continue
+		}
 		q.enqueueRaw(r.ID, a.respMsg(q, r))
 	}
-	if r.LastFin != 0 {
+	if r.LastFin != 0 && !(g2b && r.LastFinRC) {
 		id := r.Cur
 		if r.Pend != nil {
 			id = r.Pend.ID // §6.3.1: the hs.fin is under the pending epoch
@@ -535,6 +556,12 @@ func (q *Party) ruleU(r *PeerRec, m *RMsg, pos Pos, rs rkSt) dec {
 		}
 		return refuse("relay_unlinked", pre+"unlinked")
 	}
+	if d, stop := q.updateIK(r, M, pos); stop { // binding L: the ik links first
+		return d
+	}
+	if q.w.ch("BINDL") && len(M.Rot) > 0 && (r.Status == stSuspended || r.Status == stStale) {
+		return refuse("suspended", pre+"after-ik-links") // the ik links suspended or ended the record
+	}
 	skip := 0
 	for skip < len(L) && slices.Contains(r.RChain, L[skip]) {
 		skip++
@@ -560,35 +587,11 @@ func (q *Party) ruleU(r *PeerRec, m *RMsg, pos Pos, rs rkSt) dec {
 	if !hasStanding {
 		return refuse("token_unusable", pre+"token")
 	}
-	// I3: never a relay key Q followed away from
-	for _, l := range r.RChain {
-		if l.Old == M.RelayPK {
-			q.w.violate("I3", "%s makes current relay key %d it followed away from", q.Name, M.RelayPK)
-		}
-	}
 	// one state write: links, passed keys with this cut-off, new key, tokens
-	var revoke = map[Key][]int{}
-	for _, l := range L[skip:] {
-		until := q.w.Now
-		for _, t := range r.Issued {
-			if t.Sub == l.Old && !t.Reconnect && t.Exp > until {
-				until = t.Exp
-			}
-			if t.Sub == l.Old && t.Reconnect {
-				revoke[t.Iss] = append(revoke[t.Iss], t.JTI)
-			}
-		}
-		r.Earlier = append(r.Earlier, Earlier{Key: l.Old, Cut: pos, Until: until})
-		r.RChain = append(r.RChain, l)
-	}
-	r.Relay = M.RelayPK
-	// SPEC FINDING (silent): tokens for P's earlier mailboxes are dropped here.
-	r.Toks = slices.DeleteFunc(r.Toks, func(t Token) bool { return t.Iss != r.Relay })
-	q.keepTokens(r, kept)
-	q.enqueue(r.ID, Msg{Kind: KTokIssued, Toks: []Token{{}, {Reconnect: !r.Device}}}, nil)
-	for box, jtis := range revoke {
-		q.revokeAt(box, jtis)
-	}
+	// (followRelay; SPEC FINDING (silent): tokens for P's earlier mailboxes
+	// are dropped there)
+	q.followRelayThen(r, L, pos, func() { q.keepTok(r, kept, false) })
+	q.n1(r, 0)
 	return dec{"follow", "", pre + "follow"}
 }
 
@@ -1096,6 +1099,7 @@ func (q *Party) answerInit(r *PeerRec, m *RMsg, cell string, app []IKLink, fork,
 	var toks []Token
 	box := Key(0)
 	var tok Token
+	var rl []RLink
 	if M.Reconnect {
 		toks, _ = q.ruleT(r, M.Toks, M.FromRelay)
 		r.Answered = append(r.Answered, M.HS)
@@ -1105,6 +1109,9 @@ func (q *Party) answerInit(r *PeerRec, m *RMsg, cell string, app []IKLink, fork,
 				tok = t
 			}
 		}
+		if M.RelayPK != 0 && M.RelayPK != r.Relay && q.links24(r, m) {
+			rl = slices.Clone(M.RLinks) // 2.4: followed at the verified hs.fin
+		}
 	}
 	ep := r.epoch(M.Ctx)
 	own := q.st.IK
@@ -1113,7 +1120,10 @@ func (q *Party) answerInit(r *PeerRec, m *RMsg, cell string, app []IKLink, fork,
 	}
 	a := HS{ID: M.HS, Reconnect: M.Reconnect, Ctx: M.Ctx, PeerIK: M.FromIK, OwnIK: q.st.IK, Toks: toks,
 		Links: app, Started: q.w.Now, NewEpoch: q.w.id(), Fork: fork, RespFrom: own, RespInner: q.w.id(), RespRot: q.ownLinks(own),
-		NamedConf: namedConf, InitTs: M.Ts, AnsTs: q.now()}
+		NamedConf: namedConf, InitTs: M.Ts, AnsTs: q.now(), RLinks: rl}
+	if M.Reconnect && q.w.ch("L24") && !q.Device && !r.Device && r.KeyFor != q.st.Relay {
+		a.RespRL, a.RespPK = q.linksFrom(r.KeyFor), q.st.Relay // 2.4: the hs.resp announces K' during S1
+	}
 	actor := m.Actor
 	if c := q.w.party(actor); c.Copy {
 		// ground truth: a copy re-depositing the original's own queued
@@ -1132,14 +1142,23 @@ func (q *Party) answerInit(r *PeerRec, m *RMsg, cell string, app []IKLink, fork,
 		a.RespToks = q.issue(r, q.st.Relay, true)
 	}
 	r.Ans = append(r.Ans, a)
-	q.enqueueRaw(r.ID, a.respMsg(q, r), func(e *Entry) { e.Box, e.Tok = box, tok })
+	g2b := q.w.ch("G2B") && tok.JTI != 0 && tok.Sub != r.KeyFor && q.holds(tok.Sub)
+	q.enqueueRaw(r.ID, a.respMsg(q, r), func(e *Entry) {
+		e.Box, e.Tok = box, tok
+		if g2b {
+			e.With = tok.Sub // G2B rule 1: the carried token's sub
+		}
+	})
+	if g2b {
+		q.w.stat("G2B: rule 1 deposit key from a carried token")
+	}
 	return dec{"answer", "", cell}
 }
 
 // respMsg: the hs.resp of an answer (the same bytes each time).
 func (a *HS) respMsg(q *Party, r *PeerRec) Msg {
 	return Msg{Kind: KResp, Inner: a.RespInner, Ts: a.AnsTs, HS: a.ID, NewEpoch: a.NewEpoch, Sig: a.OwnIK,
-		Rot: a.RespRot, Reconnect: a.Reconnect, Toks: a.RespToks}
+		Rot: a.RespRot, Reconnect: a.Reconnect, Toks: a.RespToks, RelayPK: a.RespPK, RLinks: slices.Clone(a.RespRL)}
 }
 
 func (q *Party) tableBResp(r *PeerRec, M *Msg, pos Pos) dec {
@@ -1188,9 +1207,14 @@ func (q *Party) tableBResp(r *PeerRec, M *Msg, pos Pos) dec {
 			q.dropAnswer(r, a.ID) // own completed first: the crossing answer is dropped
 		}
 	}
+	var carriedToks []Token
 	if o.Reconnect {
+		if len(M.RLinks) > 0 && q.w.ch("L24") && q.followRelay(r, M.RLinks, pos, o.ID) {
+			q.w.stat("L24: followed at an hs.resp's sig_R")
+		}
 		toks, _ := q.ruleT(r, M.Toks, r.Relay)
-		q.keepTokens(r, toks)
+		q.keepTok(r, toks, false)
+		carriedToks = toks
 	}
 	r.Own = nil
 	if len(extra) > 0 {
@@ -1203,7 +1227,7 @@ func (q *Party) tableBResp(r *PeerRec, M *Msg, pos Pos) dec {
 		q.w.violate("S5", "%s would send hs.fin signed by superseded ik %d", q.Name, o.OwnIK)
 	}
 	fin := Msg{Kind: KFin, Epoch: M.NewEpoch, HS: M.HS, NewEpoch: M.NewEpoch, Sig: o.OwnIK, Reconnect: o.Reconnect}
-	q.enqueue(r.ID, fin, nil)
+	q.enqueue(r.ID, fin, q.carried(r, carriedToks)) // G2B rule 1
 	r.LastFin, r.LastFinHS, r.LastFinRC = q.st.Out[len(q.st.Out)-1].M.Inner, M.HS, o.Reconnect
 	if len(app) > 0 {
 		q.h5(r, 0)
@@ -1278,6 +1302,13 @@ func (q *Party) tableBFin(r *PeerRec, M *Msg, pos Pos) dec {
 		q.ruleE(r, a.InitTs)
 	}
 	q.establish(r, a.NewEpoch, a.PeerIK, a.OwnIK, pos)
+	if len(a.RLinks) > 0 && q.followRelay(r, a.RLinks, pos, a.ID) { // 2.4: Q follows at the verified hs.fin
+		q.w.stat("L24: followed at a reconnect's hs.fin")
+	}
+	var carriedToks []Token
+	if a.Reconnect {
+		carriedToks, _ = q.ruleT(r, a.Toks, r.Relay)
+	}
 	if a.OwnIK != q.st.IK && q.newSpec() {
 		q.w.violate("S5", "%s establishes an answer pinned to its superseded ik %d", q.Name, a.OwnIK)
 	}
@@ -1289,11 +1320,11 @@ func (q *Party) tableBFin(r *PeerRec, M *Msg, pos Pos) dec {
 		}
 		q.w.hit("R1:hs.confirm-queued")
 		r.LastConfirm = q.w.Now
-		q.enqueue(r.ID, Msg{Kind: KConfirm, Epoch: a.NewEpoch}, nil)
+		q.enqueue(r.ID, Msg{Kind: KConfirm, Epoch: a.NewEpoch}, q.carried(r, carriedToks)) // G2B rule 1
 	}
 	if a.Reconnect {
-		toks, _ := q.ruleT(r, a.Toks, r.Relay)
-		q.keepTokens(r, toks)
+		q.keepTok(r, carriedToks, false)
+		q.n1(r, a.ID)
 	}
 	if r.Own != nil {
 		q.w.hit("X2:fin-first")

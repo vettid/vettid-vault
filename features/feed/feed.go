@@ -112,6 +112,12 @@ func (f *Feature) Types() []vault.TypeSpec {
 	}
 }
 
+// RequiredAtUnlock implements vault.Required: every feature and the vault
+// itself write their notices to the feed, some of them once only, so a
+// state of it that does not read refuses the unlock rather than drop them
+// (VAULT-MESSAGING §3.3, 0.88.17; owner decision 2026-11-11).
+func (f *Feature) RequiredAtUnlock() bool { return true }
+
 // Load implements vault.Feature.
 func (f *Feature) Load(data json.RawMessage) error {
 	f.mu.Lock()

@@ -49,6 +49,9 @@ var (
 	// ErrStateUnsupported: a state without messaging_release 29 or more
 	// (R29-U1, §6.3.1 "No upgrade").
 	ErrStateUnsupported = errors.New("vault: state from before release 29")
+	// ErrStateUnreadable: a feature others call directly could not read its
+	// part of the state (§3.3, 0.88.17).
+	ErrStateUnreadable = errors.New("vault: a required feature's state does not read")
 )
 
 // Options configure a Manager.
@@ -415,10 +418,13 @@ type Manager struct {
 	// with a step 1, a `next` part with an app key dropped.
 	unlockKey    []byte
 	unlockSecret []byte
-	repl         *replacement
-	replaced     []string
-	nextCleared  bool
-	orphans      []orphanClear // confirmed keys no stored header names, to clear again
+	// requiredUnreadable: a Required feature's part of the state did not
+	// read (§3.3, 0.88.17); the unlock is refused before any write.
+	requiredUnreadable bool
+	repl               *replacement
+	replaced           []string
+	nextCleared        bool
+	orphans            []orphanClear // confirmed keys no stored header names, to clear again
 	// rec is the recovery runtime: the counter, the last status read, the
 	// presence retry (§11.14.4, §11.14.5).
 	rec recoveryRuntime
@@ -745,11 +751,39 @@ func newManager(o Options, st *State, hdr *Header, dek []byte) *Manager {
 		m.pin(hdr.AppKey, hdr.AppKeySeq)
 	}
 	m.registerCore()
+	// §3.3 (0.88.17, owner decision 2026-11-11): a feature whose part of the
+	// state does not read (damaged, or written by a later release) fails
+	// closed. It is not added: its types are not registered (unknown types,
+	// §11.10.8: answered unsupported_type, one with re dropped), its
+	// observers and timers do not run, and its part is carried unchanged
+	// (an entry for a feature this image does not run is never rewritten,
+	// §11.10.8), so a release that can read it finds it whole.
+	var failed []string
 	for _, f := range o.Features {
-		m.addFeature(f)
 		if raw, ok := st.Features[f.Name()]; ok {
-			_ = f.Load(raw)
+			if err := f.Load(raw); err != nil {
+				if r, ok := f.(Required); ok && r.RequiredAtUnlock() {
+					// Others call it directly: the unlock is refused (the
+					// callers check requiredUnreadable before any write).
+					m.requiredUnreadable = true
+				}
+				failed = append(failed, f.Name())
+				continue
+			}
 		}
+		m.addFeature(f)
+	}
+	// Audited once per opening of the state (an unlock, a recovery open),
+	// by the features that record activity. The audit log is Required:
+	// when it does not read, nothing is opened and nothing recorded.
+	for _, name := range failed {
+		m.record(Activity{Kind: "feature.load_failed", Ref: name, Audit: true}, m.now())
+	}
+	if len(failed) > 0 && !m.requiredUnreadable {
+		// Durable: stored with the state the opening writes (the audit
+		// log's entry is in the audit feature's part). A refused opening
+		// writes nothing, the record included.
+		m.dirty = true
 	}
 	m.clearDeadHolder() // §3.5.9 (0.52.0): a holder naming no live app is none
 	return m
@@ -1078,13 +1112,18 @@ func (m *Manager) writeHeader(ctx context.Context) error { return m.writeHeaderW
 
 // writeHeaderWith writes the header; features false keeps the credential
 // bits as they are (a DEK replacement's step 1 runs inside the credential
-// feature's handler, which holds its lock).
+// feature's handler, which holds its lock), as does a Required feature
+// that did not load.
 func (m *Manager) writeHeaderWith(ctx context.Context, features bool) error {
 	if err := m.confirmAppKey(ctx); err != nil {
 		return err
 	}
 	m.syncUnlockKeys()
-	if m.st != nil && features {
+	// §3.3 (GC #8621 a): with a Required feature unread (a move that carries
+	// it), the credential bits stay as stored: computed from the features
+	// that loaded they would say "no credential" and refuse or cancel a
+	// recovery until a release that reads it opens the vault.
+	if m.st != nil && features && !m.requiredUnreadable {
 		m.hdr.HasCredential = m.credentialExists() && m.hasGate()
 		// §3.3, §11.5 (0.16.0): the backup bit, and an event when it
 		// changes on a running vault (reported after the write).

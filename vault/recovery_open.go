@@ -445,6 +445,12 @@ func openState(ctx context.Context, p RecoveryOpenParams, hdr *Header, hver stor
 		m.zeroize()
 		return nil, CodeStateUnsupported
 	}
+	if m.requiredUnreadable {
+		// §3.3 (0.88.17): a feature others call directly could not read
+		// its part; refused before any write.
+		m.zeroize()
+		return nil, CodeStateUnreadable
+	}
 	return m, ""
 }
 
@@ -665,7 +671,7 @@ func resumeRecovery(ctx context.Context, p RecoveryOpenParams, hdr *Header, hver
 		return nil, out.fail(OpenNoRecovery)
 	}
 	if code != "" {
-		// A refusal (stored_mismatch, state_unsupported): the keys go as
+		// A refusal (stored_mismatch, state_unsupported, state_unreadable): the keys go as
 		// in the branch above.
 		suite.Wipe(uk)
 		suite.Wipe(d0)

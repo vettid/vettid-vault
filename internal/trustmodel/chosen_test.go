@@ -69,6 +69,14 @@ import (
 //   - S9END: S9 at S1's end: no 24-hour clock; when S1 ends a pair stale
 //     and a token for an earlier key was revoked, the member gets S9's text
 //     (counted; the stale is visible either way).
+//   - G4HS (candidate b for G4H): the "no reconnect token" judgement is
+//     suspended while the side holds valid tokens for the peer's mailbox
+//     naming its newer key.
+//   - RSEENSUSP (candidate for the I4 relay-successor gap): relay links a
+//     message carries while the record is suspended are kept as seen.
+//   - R27T (candidate for 2.7's open point): the K'-mailbox tokens of an
+//     update refused under a demoted or destroyed epoch are kept as held
+//     tokens once its links are followed.
 //   - G2BXA (measurement variant of G2BX): the same for a record that is
 //     not demoted.
 //   - G2BX (candidate, not chosen): a demoted Q's reconnect may use a held
@@ -294,6 +302,7 @@ func (q *Party) refusedUpdateLinks(r *PeerRec, m *RMsg, pos Pos, no dec) dec {
 	if !q.w.ch("R27") || q.Device || r.Device {
 		return no
 	}
+	q.w.stat("R27: update refused under a demoted or destroyed epoch (" + no.Reason + ")")
 	if d, stop := q.updateIK(r, M, pos); stop {
 		if d.Out == "suspend" {
 			return d
@@ -313,9 +322,22 @@ func (q *Party) refusedUpdateLinks(r *PeerRec, m *RMsg, pos Pos, no dec) dec {
 			ok = false
 		}
 	}
+	switch {
+	case !ok:
+		q.w.stat("R27: refused update's links do not verify")
+	case slices.ContainsFunc(L, func(l RLink) bool { return slices.Contains(r.RChain, l) }) && L[len(L)-1].New == r.Relay:
+		q.w.stat("R27: refused update's links already followed")
+	}
 	if ok && q.followRelay(r, L, pos, 0) {
 		q.w.stat("R27: links of a refused update followed")
 		no.Cell += ":links-followed"
+		if q.w.ch("R27T") {
+			// candidate: the update's tokens for P's new mailbox are kept as
+			// held tokens (rule T; they move no S2)
+			kept, _ := q.ruleT(r, M.Toks, r.Relay)
+			q.keepTok(r, kept, false)
+			q.w.stat("R27T: refused update's tokens kept as held")
+		}
 	}
 	q.holdRCTokens(r, M.Toks)
 	q.n1(r, 0)

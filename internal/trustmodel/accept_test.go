@@ -172,6 +172,17 @@ func (q *Party) acceptFrom(r *PeerRec, m *RMsg, pos Pos, set []Key) dec {
 				q.w.logf("%s: relay fork recorded while suspended (%v)", q.Name, l)
 			}
 		}
+		if q.w.ch("RSEENSUSP") && len(M.RLinks) > 0 && r.relayState(m.Sender, pos) != rkForeign {
+			// candidate: relay links carried while suspended are kept as
+			// seen (as step 3 keeps them), so rule C judges a different
+			// successor of the same key after the resolve
+			for _, l := range M.RLinks {
+				if !slices.ContainsFunc(r.RSeen, func(f RLink) bool { return f.Old == l.Old }) {
+					r.RSeen = append(r.RSeen, l)
+					q.w.stat("RSEENSUSP: relay link kept as seen while suspended")
+				}
+			}
+		}
 		return refuse("suspended", "A:suspended:"+col)
 	}
 	if r.Status == stStale {
@@ -179,7 +190,9 @@ func (q *Party) acceptFrom(r *PeerRec, m *RMsg, pos Pos, set []Key) dec {
 	}
 	// Table A preamble: an hs.init's sender must be its from.relay.pk
 	l24 := q.links24(r, m) // 2.4: the message announces a newer key of P's by links from its sender
-	if M.Kind == KInit && m.Sender != M.FromRelay && !(l24 && M.FromRelay == M.RelayPK) {
+	preamble := M.Kind == KInit && m.Sender != M.FromRelay && !(l24 && M.FromRelay == M.RelayPK)
+	late := q.w.ch("L24") && len(M.RLinks) > 0 // 2.4: Table A's preamble after step 3, so rule C sees the links
+	if preamble && !late {
 		return refuse("foreign_sender", "A:hs.init-sender-not-from.relay")
 	}
 	// (2) foreign
@@ -190,6 +203,9 @@ func (q *Party) acceptFrom(r *PeerRec, m *RMsg, pos Pos, set []Key) dec {
 	// (3) evidence first: rule C on every link the message carries
 	if d, stop := q.ruleC(r, M); stop {
 		return d
+	}
+	if preamble {
+		return refuse("foreign_sender", "A:hs.init-sender-not-from.relay")
 	}
 	if ep := r.epoch(M.Epoch); ep != nil && ep.Destroyed {
 		if M.Ts > ep.DestroyTs { // F3: a later ts under a destroyed epoch is fork evidence
@@ -347,12 +363,18 @@ func (q *Party) ruleC(r *PeerRec, M *Msg) (dec, bool) {
 					q.w.hit("K8:against-a-seen-link")
 				}
 				r.CandA, r.CandB = f, l
+				if _, bad := r.relayConflict(M.RLinks); bad && q.w.ch("BINDL") {
+					// step 3 checks every identity and relay link: an update
+					// carrying both (binding L) also records its relay fork
+					r.RelayFrk = true
+					q.w.stat("BINDL: relay fork recorded with an identity conflict")
+				}
 				q.suspend(r, "identity.rotate_conflict")
 				return dec{"suspend", "conflict", "C:identity"}, true
 			}
 		}
 	}
-	if M.Kind == KUpdate {
+	if M.Kind == KUpdate || (q.w.ch("L24") && len(M.RLinks) > 0) { // 2.4: a reconnect's relay links too
 		if l, bad := r.relayConflict(M.RLinks); bad {
 			q.w.stat("ruleC:relay")
 			if r.Device {

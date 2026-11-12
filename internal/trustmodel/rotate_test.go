@@ -302,6 +302,10 @@ func (p *Party) startHS(r *PeerRec, reconnect bool) {
 				return t.Iss == r.Relay && t.Sub != r.KeyFor && p.holds(t.Sub) && t.valid(w.Now)
 			}) {
 				w.noteWait(p.ID, r.ID, "G4H") // holds tokens naming my newer key only
+				if w.ch("G4HS") {
+					w.stat("G4HS: no-token judgement suspended while tokens naming my newer key are held")
+					return
+				}
 			}
 			if w.ch("R25") && r.KeyFor != p.st.Relay && r.RCRevokedEarlier {
 				w.stat("R25: no-token judgement suspended during S1")

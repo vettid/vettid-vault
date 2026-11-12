@@ -103,7 +103,7 @@ func (q *Party) afterDemotion(r *PeerRec, why string) {
 // retries the reconnect after a demotion, which an answer awaiting hs.fin
 // may have held back).
 func (q *Party) needsReconnect(r *PeerRec) bool {
-	return q.newSpec() && !r.Device && r.Status == stActive && r.Cur == 0 && r.Own == nil && r.Pend == nil
+	return q.newSpec() && !r.Device && r.Status == stActive && r.Cur == 0 && (r.Own == nil || !r.Own.Reconnect) && r.Pend == nil
 }
 
 // R29-U1 (0.87.1): there is no upgrade migration. A release-29 vault

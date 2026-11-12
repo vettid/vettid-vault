@@ -920,6 +920,14 @@ func (q *Party) tableBInit(r *PeerRec, m *RMsg, pos Pos) dec {
 		q.abandonPending(r, "a later rekey from the responder", false)
 		cell += ":pending:ts-later"
 	}
+	// As the shipped vault (vettid-vault main, vault/handshakes.go): while
+	// Q's own reconnect naming an epoch other than the current one (after
+	// a demotion, or by strict F1) is open, a rekey hs.init from P is
+	// discarded: the reconnect replaces it (rekey_replaced_by_reconnect).
+	if !M.Reconnect && q.newSpec() && r.Own != nil && r.Own.Reconnect && r.Own.Ctx != r.Cur {
+		q.w.stat("shipped: rekey_replaced_by_reconnect")
+		return dec{"drop", "rekey_replaced_by_reconnect", cell + ":replaced-by-reconnect"}
+	}
 	// crossing handshakes (§6.5; §6.6 "Between two persons"): answer as
 	// usual; the lower th1 wins. Own higher: abandon it. Own lower: keep
 	// both; the answer is dropped when the own one completes.

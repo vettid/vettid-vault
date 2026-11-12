@@ -183,24 +183,37 @@ func (p *Party) startHS(r *PeerRec, reconnect bool) {
 		w.hit("D2:device-starts-no-rekey")
 		return // R29-D2: a device runs only the responder half
 	}
-	if o := r.Own; o != nil {
+	// As the shipped vault (vettid-vault main, vault/reconnect.go
+	// reconnectNaming): a reconnect after a demotion of the current epoch,
+	// or by strict F1, once it can start, abandons the own rekey and
+	// pending epoch and drops the open answers to the peer's rekeys (they
+	// would block it). Nothing is abandoned for one that cannot start.
+	naming := reconnect && p.newSpec() && r.Cur == 0
+	if o := r.Own; o != nil && !(naming && !o.Reconnect) {
 		if reconnect && o.Reconnect {
 			w.hit("X4:one-reconnect-at-a-time")
 		}
 		return
 	}
-	if p.w.optA && r.Pend != nil {
-		if !reconnect || r.Pend.Reconnect {
-			if reconnect {
-				w.hit("X4:one-reconnect-at-a-time")
-			} else {
-				w.hit("I4:no-rekey-while-pending")
-			}
-			return
+	if p.w.optA && r.Pend != nil && (!reconnect || r.Pend.Reconnect) {
+		if reconnect {
+			w.hit("X4:one-reconnect-at-a-time")
+		} else {
+			w.hit("I4:no-rekey-while-pending")
 		}
-		p.abandonPending(r, "a reconnect starts", false) // R29-I7: a reconnect names the current epoch, never a pending one
+		return
 	}
-	if len(r.Ans) > 0 {
+	if reconnect && p.newSpec() {
+		// As the shipped vault (handshakes.go startReconnectCtx, iklinks.go
+		// canReconnect): only an answer to the peer's reconnect awaiting
+		// hs.fin holds a reconnect back (answeredReconnects); an answer to
+		// a rekey does not. reconnectNaming judges the reconnect token
+		// first: without one the connection goes stale (below).
+		noRT := r.reconnectTok(r.KeyFor, r.Relay, w.Now).JTI == 0
+		if slices.ContainsFunc(r.Ans, func(a HS) bool { return a.Reconnect }) && !(naming && noRT) {
+			return // §6.6: none while an answer of mine to a reconnect awaits hs.fin
+		}
+	} else if len(r.Ans) > 0 {
 		if p.newSpec() && !reconnect {
 			w.hit("I4:no-rekey-while-answer-awaits-fin")
 		}
@@ -258,6 +271,21 @@ func (p *Party) startHS(r *PeerRec, reconnect bool) {
 		f = func(e *Entry) { e.Tok, e.With = rt, r.KeyFor }
 	} else if r.Cur != 0 {
 		m.Epoch = r.Cur
+	}
+	if naming {
+		if r.Own != nil {
+			p.abandonOwn(r) // the own rekey (reconnectNaming)
+			w.stat("shipped: reconnect after a demotion abandons the own rekey")
+		}
+		for _, a := range slices.Clone(r.Ans) {
+			if !a.Reconnect {
+				p.dropAnswer(r, a.ID) // reconnectNaming: abandonAwaiting
+				w.stat("shipped: reconnect after a demotion drops a rekey answer")
+			}
+		}
+	}
+	if p.w.optA && r.Pend != nil {
+		p.abandonPending(r, "a reconnect starts", false) // R29-I7: a reconnect names the current epoch, never a pending one
 	}
 	r.Own = h
 	if p.newSpec() && len(m.Rot) > 1 {

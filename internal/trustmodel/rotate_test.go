@@ -495,7 +495,14 @@ func (p *Party) tick() {
 				if p.newSpec() && (e.ID == r.ConfID || slices.Contains(r.AbanIDs, e.ID) || e.ID == r.DemName) {
 					return false // §6.3.1 (G): the id is kept (K7: E, until a new epoch is current)
 				}
-				return e.ID != r.Cur && e.Superseded != 0 && w.Now-e.Superseded > 16*day
+				keep := int64(16 * day)
+				if p.newSpec() {
+					// as the vault (vault/confirm.go pruneEpochs): a record
+					// is kept ConfirmedKeysFor + 16 days after it was
+					// superseded; its keys end earlier (tickA)
+					keep = aConfKeys + 16*day
+				}
+				return e.ID != r.Cur && e.Superseded != 0 && w.Now-e.Superseded > keep
 			})
 			p.refresh(r)
 			if ep := r.epoch(r.Cur); ep != nil {

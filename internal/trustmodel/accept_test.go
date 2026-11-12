@@ -767,8 +767,12 @@ func (q *Party) judgeAbandoned(r *PeerRec, links []IKLink, msgEp int) bool {
 	return false
 }
 
-// forkEpoch: ctx names an epoch Q superseded by one signed by an ancestor ik.
-func (q *Party) forkEpoch(r *PeerRec, ctx int) bool {
+// forkEpoch: ctx names an epoch Q superseded by one signed by an ancestor
+// ik, or (as the vault, vault/iklinks.go forkEpoch with the hs.init's
+// reachedLinks) by the old ik of a link the hs.init carries that Q has not
+// followed yet.
+func (q *Party) forkEpoch(r *PeerRec, ctx int, reached []IKLink) bool {
+	oldOfReached := func(k Key) bool { return slices.ContainsFunc(reached, func(l IKLink) bool { return l.Old == k }) }
 	if q.newSpec() {
 		// 0.86.0 (2da316e, F2): a ctx naming the current or the confirmed
 		// epoch is ordinary; one older than the confirmed epoch, where an
@@ -807,7 +811,7 @@ func (q *Party) forkEpoch(r *PeerRec, ctx int) bool {
 				}
 				continue
 			}
-			if r.isAncestor(ep.Signer) {
+			if r.isAncestor(ep.Signer) || oldOfReached(ep.Signer) {
 				return true
 			}
 		}
@@ -884,7 +888,7 @@ func (q *Party) tableBInit(r *PeerRec, m *RMsg, pos Pos) dec {
 			return q.refusedReconnectLinks(r, m, pos, cell)
 		}
 		if !ok {
-			if !q.forkEpoch(r, M.Ctx) {
+			if !q.forkEpoch(r, M.Ctx, app) {
 				if q.respHalf() {
 					q.w.hit("X5:refused")
 				}
@@ -902,7 +906,7 @@ func (q *Party) tableBInit(r *PeerRec, m *RMsg, pos Pos) dec {
 				q.abandonOwn(r)
 			}
 		} else if r.Cur == 0 || M.Ctx != r.Cur {
-			if q.forkEpoch(r, M.Ctx) {
+			if q.forkEpoch(r, M.Ctx, app) {
 				q.w.hit("F1:fork-by-ctx-rekey")
 				q.suspend(r, "connection.fork_suspected/epoch")
 				return dec{"suspend", "fork", cell + ":fork-epoch"}

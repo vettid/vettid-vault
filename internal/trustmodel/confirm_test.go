@@ -107,10 +107,16 @@ func (q *Party) markF(r *PeerRec, why string) {
 }
 
 // setConf: the confirmed epoch moves forward (never back); the one it
-// leaves keeps its keys 16 days from now (F6).
+// leaves keeps its keys 16 days from now (F6). As the vault
+// (vault/confirm.go setConfirmed), an epoch abandoned while pending is
+// kept only until a newer one is confirmed, at either half: a responder's
+// confirmed epoch moving (R2) ends them too.
 func (r *PeerRec) setConf(id int, now int64) {
 	if old := r.epoch(r.ConfID); old != nil && old.ID != id && old.ID != r.Cur {
 		old.Superseded = now
+	}
+	if id != r.ConfID {
+		r.AbanIDs = nil
 	}
 	r.ConfID, r.ConfUntil = id, 0
 }

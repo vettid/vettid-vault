@@ -876,3 +876,134 @@ func storedState(t *testing.T, d *devFixture, dek []byte) *State {
 	}
 	return &st
 }
+
+// (Owner decision 2026-11-12, GC #8689 a) The release a move went to cannot
+// read a Required part either: it does not confirm the move, but an approved
+// update to a later active release still goes on from it, from the release
+// the vault is still sealed at, with the part carried unchanged and the
+// header's credential bits as stored. Without such an update it refuses
+// state_unreadable and writes nothing.
+func TestAnUnconfirmedReleaseThatCannotReadMovesOnWithAnApprovedUpdate(t *testing.T) {
+	old, target := strings.Repeat("e7", 48), strings.Repeat("e8", 48)
+	var dek []byte
+	d := credGateFixture(t, func(m *Manager) {
+		m.st.ReleaseMove = &ReleaseMove{To: testRelease.PCR0, ToRelease: testRelease.Number, From: old, ApprovedBy: d0(m)}
+		m.st.SealedRelease = old
+		dek = append([]byte(nil), m.dek...)
+	})
+	part := storedPartWith(t, d, dek, "gate")
+	before := storedHeader(t, d)
+	opts := d.opts
+	opts.Store = d.store
+	opts.Features = append(append([]Feature(nil), d.opts.Features...), &unreadGate{})
+	approved := func(k *UnlockKey) (json.RawMessage, error) { return k.Attestation, nil }
+	refused := map[string]func(*AltUnlockParams){
+		"no update": func(p *AltUnlockParams) { moveParams(d, p, target) },
+		"approval does not verify": func(p *AltUnlockParams) {
+			moveParams(d, p, target)
+			p.Update = &UpdateRequest{To: target, ToRelease: testRelease.Number + 1,
+				VerifyApproval: func(*UnlockKey) (json.RawMessage, error) { return nil, errors.New("no") }}
+		},
+		"not a later release": func(p *AltUnlockParams) {
+			moveParams(d, p, target)
+			look := p.Manifest
+			p.Manifest = func(seen uint64) (*ManifestView, error) {
+				v, err := look(seen)
+				if err != nil {
+					return nil, err
+				}
+				inner := v.Lookup
+				v.Lookup = func(pcr0 string) (ReleaseEntry, bool) {
+					e, ok := inner(pcr0)
+					if pcr0 == target {
+						e.Number = testRelease.Number
+					}
+					return e, ok
+				}
+				return v, nil
+			}
+			p.Update = &UpdateRequest{To: target, ToRelease: testRelease.Number, VerifyApproval: approved}
+		},
+		"not active": func(p *AltUnlockParams) {
+			moveParams(d, p, target)
+			look := p.Manifest
+			p.Manifest = func(seen uint64) (*ManifestView, error) {
+				v, err := look(seen)
+				if err != nil {
+					return nil, err
+				}
+				inner := v.Lookup
+				v.Lookup = func(pcr0 string) (ReleaseEntry, bool) {
+					e, ok := inner(pcr0)
+					if pcr0 == target {
+						e.Status = "deprecated"
+					}
+					return e, ok
+				}
+				return v, nil
+			}
+			p.Update = &UpdateRequest{To: target, ToRelease: testRelease.Number + 1, VerifyApproval: approved}
+		},
+	}
+	for name, set := range refused {
+		gauge := Unlocked()
+		if m, out := altUnlockWith(d, opts, set); m != nil || out.OK || out.Code != CodeStateUnreadable {
+			t.Fatalf("%s: %+v", name, out)
+		}
+		if Unlocked() != gauge {
+			t.Fatalf("%s: unlocked gauge %d, was %d", name, Unlocked(), gauge)
+		}
+		if mv := storedState(t, d, dek).ReleaseMove; mv == nil || mv.To != testRelease.PCR0 || mv.From != old {
+			t.Fatalf("%s: the stored move changed: %+v", name, mv)
+		}
+		if _, _, err := d.store.Get(context.Background(), store.HeaderKey(d.vid, target)); err == nil {
+			t.Fatalf("%s: sealed for %s", name, target)
+		}
+	}
+	gauge := Unlocked()
+	registers := 0
+	inner := opts.Relay
+	opts.Relay = func(base string, key ed25519.PrivateKey) Relay {
+		return &registerCount{Relay: inner(base, key), n: &registers}
+	}
+	d.relay.mu.Lock()
+	deposits := len(d.relay.deposits)
+	d.relay.mu.Unlock()
+	m, out := altUnlockWith(d, opts, func(p *AltUnlockParams) {
+		moveParams(d, p, target)
+		p.Update = &UpdateRequest{To: target, ToRelease: testRelease.Number + 1, VerifyApproval: approved}
+	})
+	if m != nil || !out.OK || out.Update == nil || out.Update.Result != UpdateMoved {
+		t.Fatalf("move on: %+v %+v", out, out.Update)
+	}
+	for _, e := range out.Events {
+		if e.Event == "unlocked" {
+			t.Fatal("unlocked reported")
+		}
+	}
+	if Unlocked() != gauge {
+		t.Fatalf("unlocked gauge %d, was %d", Unlocked(), gauge)
+	}
+	d.relay.mu.Lock()
+	sent := len(d.relay.deposits) - deposits
+	d.relay.mu.Unlock()
+	if registers != 0 || sent != 0 {
+		t.Fatalf("registered %d times, %d messages sent", registers, sent)
+	}
+	st := storedState(t, d, dek)
+	if mv := st.ReleaseMove; mv == nil || mv.To != target || mv.ToRelease != testRelease.Number+1 || mv.From != old {
+		t.Fatalf("the stored move: %+v", mv)
+	}
+	if st.SealedRelease != old {
+		t.Fatalf("the move was confirmed: sealed release %s", st.SealedRelease)
+	}
+	if got := storedPartWith(t, d, dek, "gate"); got != part {
+		t.Fatalf("the part: %s, was %s", got, part)
+	}
+	for name, h := range map[string]*Header{"N+1": storedHeader(t, d), "N+2": headerAt(t, d, target)} {
+		if h.HasCredential != before.HasCredential || !sameBool(h.CredentialBackup, before.CredentialBackup) || h.RecoveryRefusal() != "" {
+			t.Fatalf("%s: has_credential %v backup %v refusal %q, was %v %v", name,
+				h.HasCredential, h.CredentialBackup, h.RecoveryRefusal(), before.HasCredential, before.CredentialBackup)
+		}
+	}
+}

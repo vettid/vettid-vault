@@ -477,6 +477,14 @@ func (m *Manager) releaseRules(ctx context.Context, p AltUnlockParams, key *Unlo
 	pending := st.ReleaseMove
 	switch {
 	case pending != nil && pending.To == own.PCR0:
+		if m.requiredUnreadable && p.Update != nil {
+			// §3.3 (owner decision 2026-11-12, GC #8689 a): this release
+			// cannot read a part either, so the move is not confirmed; an
+			// approved update to a later release still goes on from here.
+			if mm, o, moved := m.moveOnUnconfirmed(ctx, p, key, mv, out); moved {
+				return mm, o
+			}
+		}
 		// Confirmation at the new release: from this flush on the move is
 		// final; then the old header is deleted.
 		old := pending.From
@@ -562,6 +570,52 @@ func (m *Manager) releaseRules(ctx context.Context, p AltUnlockParams, key *Unlo
 		return refuse(RefuseWrite)
 	}
 	return m.completeMoveWith(ctx, p, entry, sealer, rec, out)
+}
+
+// moveOnUnconfirmed takes an approved update from the release a recorded
+// move went to, before that release has confirmed it, when a Required
+// part does not read here (§3.3, GC #8689 a): the move is recorded again
+// for the later release, from the release the vault is still sealed at,
+// and the header sealed for it, with the part carried unchanged and the
+// header's credential bits as stored. Nothing is confirmed, opened or
+// sent. moved is false when the update does not hold (another release,
+// not active, not later, an approval that does not verify, no sealer):
+// the caller then refuses state_unreadable as before, with nothing
+// written. This release's own header is left: an unlock here answers
+// wrong_release, and the vault's deletion sweeps it.
+func (m *Manager) moveOnUnconfirmed(ctx context.Context, p AltUnlockParams, key *UnlockKey, mv *ManifestView, out *AltUnlockOutcome) (*Manager, *AltUnlockOutcome, bool) {
+	own, st, u := p.Release, m.st, p.Update
+	pending := st.ReleaseMove
+	entry, ok := mv.Lookup(u.To)
+	if !ok || entry.Status != "active" || entry.Number != u.ToRelease || u.ToRelease <= own.Number {
+		return nil, nil, false
+	}
+	nb, err := u.VerifyApproval(key)
+	if err != nil {
+		return nil, nil, false
+	}
+	sealer, rec, err := p.SealerFor(ctx, entry)
+	if err != nil {
+		return nil, nil, false
+	}
+	key.Attestation = nb
+	st.ReleaseMove = &ReleaseMove{To: entry.PCR0, ToRelease: entry.Number, From: pending.From, ManifestSerial: mv.Serial,
+		ApprovedBy: key.DeviceID}
+	m.syncUnlockKeysWith(key)
+	if err := m.persist(ctx, false); err != nil {
+		if d, ok := sealer.(interface{ Destroy() }); ok {
+			d.Destroy()
+		}
+		if errors.Is(err, ErrSplitBrain) {
+			m.zeroize()
+			return nil, out.fail(CodeRetry, err), true
+		}
+		st.ReleaseMove = pending
+		mm, o := m.refuseUnreadable(out)
+		return mm, o, true
+	}
+	mm, o := m.completeMoveWith(ctx, p, entry, sealer, rec, out)
+	return mm, o, true
 }
 
 // completeMove is step 7 for a move recorded earlier.

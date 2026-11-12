@@ -990,4 +990,7 @@ func TestPushCallWake(t *testing.T) {
 	if c := d.m.wakeClass(d.devPeer, "call.offer", json.RawMessage(`{"call_id":"c9"}`)); c != wakeCall+":c9" {
 		t.Fatalf("class %q", c)
 	}
+	if c := d.m.wakeClass(desk.peer, "call.offer", json.RawMessage(`{"call_id":"c9"}`)); c != "" {
+		t.Fatalf("a desktop's class %q", c)
+	}
 }

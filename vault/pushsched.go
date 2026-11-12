@@ -123,7 +123,8 @@ type wakeSched struct {
 	checked       bool
 	callRetry     bool
 	callNotBefore time.Time
-	callRetries   int // failed attempts of the call wake being retried
+	callRetries   int      // failed attempts of the call wake being retried
+	retryCalls    []string // that wake's own calls: the retry is theirs
 
 	inflight   bool
 	curExempt  bool
@@ -175,11 +176,12 @@ func (s *wakeSched) callsToCheck() []string {
 // caller found them out of the lock): a call answered, declined, ended,
 // timed out or superseded meanwhile gets no wake and is not counted. A
 // call added since the look is kept, to be looked at next. A call wake's
-// retry whose calls all ended is over: its retry count and wait go.
+// retry whose own calls all ended is over: its retry count and wait go,
+// and a call that came while it waited goes as a fresh call wake.
 func (s *wakeSched) keepCalls(ringing map[string]bool) {
 	defer func() {
-		if len(s.calls) == 0 && s.callRetry {
-			s.callRetry, s.callNotBefore, s.callRetries = false, time.Time{}, 0
+		if s.callRetry && !s.retryRings() {
+			s.callRetry, s.callNotBefore, s.callRetries, s.retryCalls = false, time.Time{}, 0, nil
 		}
 	}()
 	kept := s.calls[:0]
@@ -195,6 +197,19 @@ func (s *wakeSched) keepCalls(ringing map[string]bool) {
 	}
 	s.calls = kept
 	s.checked = all
+}
+
+// retryRings reports whether a call of the waiting call wake's retry is
+// still kept (ringing, or not yet looked at).
+func (s *wakeSched) retryRings() bool {
+	for _, r := range s.retryCalls {
+		for _, c := range s.calls {
+			if c == r {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // callWake reports whether the waiting wake goes out as a call wake at t:
@@ -306,7 +321,7 @@ func (s *wakeSched) start(now time.Time) {
 		}
 	}
 	s.pending, s.exempt, s.counted = false, false, false
-	s.calls, s.checked, s.callRetry, s.callNotBefore = nil, false, false, time.Time{}
+	s.calls, s.checked, s.callRetry, s.callNotBefore, s.retryCalls = nil, false, false, time.Time{}, nil
 }
 
 // done applies the attempt's outcome at now; retryAfter is a 429's wait
@@ -321,13 +336,19 @@ func (s *wakeSched) done(now time.Time, r wakeResult, retryAfter time.Duration) 
 			for _, c := range s.curCalls {
 				s.triggerCall(c)
 			}
-			// (A new call while it waits rides this retry: bounded by the
-			// retries, and looked at again before it goes.)
+			// (A new call while it waits rides this retry while one of
+			// the retry's own calls still rings; once none does, it goes
+			// as a fresh call wake: keepCalls.)
 			s.callRetry, s.callNotBefore = true, now.Add(wait)
+			s.retryCalls = append([]string(nil), s.curCalls...)
 			if s.curPending {
 				s.pending = true
 				s.counted = s.counted || s.curCounted
 				s.exempt = s.exempt || s.curExempt
+			}
+			if s.pending {
+				// The ordinary triggers it carried, and any that came while
+				// it was in flight, wait as long as it does.
 				s.notBefore = now.Add(wait)
 			}
 			return
@@ -357,7 +378,7 @@ func (s *wakeSched) done(now time.Time, r wakeResult, retryAfter time.Duration) 
 			// Dropped after its last retry, as an ordinary wake is, with the
 			// ordinary retry it carried (start merged it: its count and wait
 			// go with it).
-			s.callRetries, s.callNotBefore = 0, time.Time{}
+			s.callRetries, s.callNotBefore, s.retryCalls = 0, time.Time{}, nil
 			s.retries, s.notBefore = 0, time.Time{}
 			return
 		}

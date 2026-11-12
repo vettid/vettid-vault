@@ -566,3 +566,80 @@ func TestSchedACallWakesRetryAfterItsCallIsDropped(t *testing.T) {
 		t.Fatalf("counted %d times", len(s.callHour))
 	}
 }
+
+// (C2) A new call does not ride a call wake's retry whose own calls no
+// longer ring: call A's wake failed three times and waits 120 s; A stops
+// ringing with no look; call B comes at +60 s and goes then, as a fresh
+// call wake (counted, its retries its own), not at A's retry.
+func TestSchedANewCallDoesNotRideADeadRetry(t *testing.T) {
+	s := testSched()
+	s.triggerCall("A")
+	s.keepCalls(map[string]bool{"A": true})
+	now := t0
+	for i := 0; i < 3; i++ {
+		at, ok := s.next(now)
+		if !ok {
+			t.Fatal("nothing pending")
+		}
+		s.start(at)
+		s.done(at, wakeFailed, 0)
+		s.keepCalls(map[string]bool{"A": true})
+		now = at
+	}
+	retryAt, _ := s.next(now)
+	if retryAt.Sub(now) != 120*time.Second || s.callRetries != 3 {
+		t.Fatalf("setup: retry in %v, retries %d", retryAt.Sub(now), s.callRetries)
+	}
+	b := now.Add(60 * time.Second)
+	s.triggerCall("B")
+	if ids := s.callsToCheck(); len(ids) != 2 {
+		t.Fatalf("looked at %v", ids)
+	}
+	s.keepCalls(map[string]bool{"A": false, "B": true})
+	if s.callRetry || s.callRetries != 0 || !s.callNotBefore.IsZero() {
+		t.Fatalf("A's retry left: retry %v, retries %d, wait %v", s.callRetry, s.callRetries, s.callNotBefore)
+	}
+	at, ok := s.next(b)
+	if !ok || !at.Equal(b) {
+		t.Fatalf("B goes at %v, want %v", at.Sub(b), time.Duration(0))
+	}
+	calls := len(s.callHour)
+	s.start(at)
+	if len(s.callHour) != calls+1 {
+		t.Fatal("B's wake was not counted as a fresh call wake")
+	}
+	// While one of the retry's own calls still rings, a new call rides it.
+	s = testSched()
+	s.triggerCall("A")
+	s.keepCalls(map[string]bool{"A": true})
+	at, _ = s.next(t0)
+	s.start(at)
+	s.done(at, wakeFailed, 0)
+	s.triggerCall("B")
+	s.keepCalls(map[string]bool{"A": true, "B": true})
+	if at2, _ := s.next(t0.Add(time.Second)); !s.callRetry || at2.Sub(t0) != 5*time.Second {
+		t.Fatalf("B did not ride A's live retry: retry %v, at %v", s.callRetry, at2.Sub(t0))
+	}
+}
+
+// (C2) Ordinary triggers that came while a call wake was in flight wait
+// as long as its retry does, as the ones it carried.
+func TestSchedTriggersDuringACallWakeTakeItsWait(t *testing.T) {
+	s := testSched()
+	s.triggerCall("A")
+	s.keepCalls(map[string]bool{"A": true})
+	at, _ := s.next(t0)
+	s.start(at)
+	if s.curPending {
+		t.Fatal("setup: an ordinary trigger carried")
+	}
+	s.trigger(false) // a feed item while the call wake is in flight
+	s.done(at, wakeFailed, 0)
+	if !s.pending || !s.notBefore.Equal(at.Add(5*time.Second)) {
+		t.Fatalf("pending %v, notBefore %v", s.pending, s.notBefore.Sub(at))
+	}
+	s.keepCalls(map[string]bool{"A": false})
+	if next, ok := s.next(at.Add(time.Second)); !ok || next.Before(at.Add(5*time.Second)) {
+		t.Fatalf("the ordinary wake goes at %v", next.Sub(at))
+	}
+}

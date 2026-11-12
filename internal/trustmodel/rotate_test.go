@@ -193,6 +193,12 @@ func (p *Party) startHS(r *PeerRec, reconnect bool) {
 		if reconnect && o.Reconnect {
 			w.hit("X4:one-reconnect-at-a-time")
 		}
+		if reconnect && !o.Reconnect && p.newSpec() && !p.Copy {
+			// model difference: the vault (handshakes.go startReconnectCtx)
+			// starts this reconnect beside its open rekey; the model has
+			// one open handshake of its own per peer
+			w.stat("model: a reconnect not after a demotion not started beside an own open rekey")
+		}
 		return
 	}
 	if p.w.optA && r.Pend != nil && (!reconnect || r.Pend.Reconnect) {
@@ -513,6 +519,9 @@ func (p *Party) tick() {
 				if w.Now-ep.EstAt > due && (!p.Device || p.OldApp) { // R29-D2: a device starts no rekey (an old app does)
 					p.startHS(r, false)
 				}
+			}
+			if p.newSpec() && !p.Copy && !r.Device && r.Status == stActive && r.Cur == 0 && r.Pend != nil && (r.Own == nil || !r.Own.Reconnect) {
+				w.noteK5Held(p, r)
 			}
 			if p.needsReconnect(r) {
 				w.nextOrigin = "K5 reconnect (retry)"

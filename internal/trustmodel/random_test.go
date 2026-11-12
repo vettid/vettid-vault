@@ -226,11 +226,15 @@ func TestSeedsByClass(t *testing.T) {
 		cfg, acts := genRun(rs, envInt("TRUSTMODEL_STEPS", 40))
 		w := runActions(cfg, rs, acts, false)
 		if k := strings.TrimPrefix(cls, "statprefix:"); k != cls {
-			// every stat with that prefix, one line per run and stat
+			// every stat with that prefix ("|" separates several), one line per
+			// run and stat
 			var ks []string
 			for s := range w.stats {
-				if strings.HasPrefix(s, k) {
-					ks = append(ks, s)
+				for _, pre := range strings.Split(k, "|") {
+					if strings.HasPrefix(s, pre) {
+						ks = append(ks, s)
+						break
+					}
 				}
 			}
 			sort.Strings(ks)

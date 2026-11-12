@@ -233,6 +233,7 @@ func (r *Relay) advance() {
 			}
 			delete(r.boxes, k)
 			r.tomb[k] = b.deleteAt + freshWindow
+			r.w.waitGraceEnd(k)
 			continue
 		}
 		kept := b.msgs[:0]
@@ -240,6 +241,7 @@ func (r *Relay) advance() {
 			if r.w.Now < m.DepAt+msgTTL {
 				kept = append(kept, m)
 			} else {
+				r.w.waitTTL(m, k)
 				if m.P.Kind == KFin || m.P.Kind == KResp || m.P.Kind == KConfirm {
 					r.w.ttlFin[[2]PID{m.Actor, r.w.owner(k)}] = "expired-at-relay-TTL"
 					if m.P.Kind == KFin {

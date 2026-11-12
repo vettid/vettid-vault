@@ -10,7 +10,7 @@ import (
 // Wait classes (instrumentation only; nothing here changes what a party
 // does). With relay-key rotation on, a pair that ends stale, or fails I1 at
 // quiescence, is labelled by the wait it was stuck in, as the relay-key
-// rotation design note (vettid.org RELAY-KEY-ROTATION.md, draft 4,
+// rotation design note (vettid.org RELAY-KEY-ROTATION.md, draft 5,
 // sections 1 and 5) names them. P is the side whose relay key for the
 // other is not (or was not) current; Q the recipient.
 //
@@ -29,6 +29,13 @@ import (
 //   - G7: a deposit into a mailbox of the other side that no longer exists
 //     (mailbox_unknown, its rotation grace over; the model has a grace,
 //     graceLen).
+//   - G4: both sides rotate within one hop: each side's key for the other
+//     is not its current key (both in S1), seen at a flush that S1 holds
+//     or when the pair goes stale.
+//   - G8: both sides' old mailboxes end before either update lands: when
+//     a mailbox's grace ends, its owner's peer still addresses it (has not
+//     followed the update), and the peer's own earlier mailbox, which the
+//     owner still addresses, has already ended.
 //
 // How it decides: each such event is noted per ordered pair with its time
 // (w.waitEv). A pair's class is the set of labels noted, in either
@@ -40,7 +47,7 @@ import (
 
 // waitLabels are the design note's labels; anything else noted is context
 // for OTHER.
-var waitLabels = []string{"G1", "G2", "G3", "G6", "G7"}
+var waitLabels = []string{"G1", "G2", "G3", "G4", "G6", "G7", "G8"}
 
 // noteWait records event label for the ordered pair (from, to).
 func (w *World) noteWait(from, to PID, label string) {
@@ -119,10 +126,59 @@ func (p *Party) waitS1Fin(r *PeerRec, e *Entry) {
 	}
 }
 
+// bothS1: each of a and b holds the other in S1 (its key for the other is
+// not its current key).
+func (w *World) bothS1(a, b PID) bool {
+	x, y := w.party(a), w.party(b)
+	rx, ry := x.st.peer(b), y.st.peer(a)
+	return rx != nil && ry != nil && rx.KeyFor != x.st.Relay && ry.KeyFor != y.st.Relay
+}
+
+// waitS1Both: S1 at p holds an entry for r while r also holds p in S1 (G4).
+func (p *Party) waitS1Both(r *PeerRec) {
+	if !p.Copy && p.w.relayRot && !p.w.party(r.ID).Copy && p.w.bothS1(p.ID, r.ID) {
+		p.w.noteWait(p.ID, r.ID, "G4")
+	}
+}
+
+// waitGraceEnd: mailbox k ends at its grace (G8, and context for OTHER).
+func (w *World) waitGraceEnd(k Key) {
+	if !w.relayRot {
+		return
+	}
+	o := w.keyOwner(k)
+	if o < 0 || w.party(o).Copy {
+		return
+	}
+	x := w.party(o)
+	for _, rx := range x.st.Peers {
+		y := w.party(rx.ID)
+		ry := y.st.peer(x.ID)
+		if y.Copy || ry == nil || ry.Relay != k {
+			continue
+		}
+		if rx.Relay != y.st.Relay && !w.R.live(rx.Relay) {
+			w.noteWait(x.ID, y.ID, "G8")
+		} else {
+			w.noteWait(y.ID, x.ID, "mailbox ended before its update was followed")
+		}
+	}
+}
+
+// waitTTL: a message from a to b expired at the relay (context for OTHER).
+func (w *World) waitTTL(m *RMsg, box Key) {
+	if !w.relayRot || m.P.Kind == KSession {
+		return
+	}
+	if to := w.keyOwner(box); to >= 0 && m.Actor != to {
+		w.noteWait(m.Actor, to, "lost to relay TTL: "+kindName[m.P.Kind])
+	}
+}
+
 // waitClass: the class of pair (a, b) now (see above).
 func (w *World) waitClass(a, b PID, ref string) string {
 	since := w.progressAt[pairKey(a, b)]
-	got := map[string]bool{}
+	got := map[string]bool{"G4": w.bothS1(a, b)}
 	var other []string
 	for _, k := range [][2]PID{{a, b}, {b, a}} {
 		for l, at := range w.waitEv[k] {
@@ -196,4 +252,33 @@ func (w *World) statWait(inv string, a, b PID, ref string) {
 		c = w.waitClass(a, b, ref)
 	}
 	w.stat("wait class " + inv + ": " + c)
+}
+
+// keyOwner: the real party whose relay key k is or was (ground truth), or -1.
+func (w *World) keyOwner(k Key) PID {
+	if o := w.owner(k); o >= 0 {
+		return o
+	}
+	for l, by := range w.rlinkBy {
+		if l.Old == k || l.New == k {
+			return w.party(by.By).Origin
+		}
+	}
+	return -1
+}
+
+// noteK5Held: a demoted record whose reconnect after a demotion is not
+// retried because an epoch of its own is pending (needsReconnect, as the
+// vault's tickDemoted). Counted once per pair and run, with whether its
+// pending epoch is a rekey or a reconnect.
+func (w *World) noteK5Held(p *Party, r *PeerRec) {
+	k := [2]PID{p.ID, r.ID}
+	if w.k5Held == nil {
+		w.k5Held = map[[2]PID]bool{}
+	}
+	if w.k5Held[k] {
+		return
+	}
+	w.k5Held[k] = true
+	w.stat("K5 retry held by a pending " + map[bool]string{false: "rekey", true: "reconnect"}[r.Pend.Reconnect])
 }

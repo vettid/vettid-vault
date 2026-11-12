@@ -102,6 +102,7 @@ type World struct {
 	waitEv     map[[2]PID]map[string]int64 // (from, to): wait-class events, label -> last time (waitclass_test.go)
 	progressAt map[[2]PID]int64            // pair: when an epoch last became current at either side
 	staleClass map[[2]PID]string           // pair: its wait class when it first went stale
+	k5Held     map[[2]PID]bool             // (Q, P): Q's K5 retry was held by its pending epoch (noteK5Held)
 }
 
 type rot struct {
@@ -598,6 +599,7 @@ func (p *Party) flush() {
 		}
 		if r.KeyFor != p.st.Relay && !allowedWhileUnacked(e) {
 			p.waitS1Fin(r, e)
+			p.waitS1Both(r)
 			continue // S1: held until Q's token for my current key arrives
 		}
 		if e.M.Kind == KUpdate {

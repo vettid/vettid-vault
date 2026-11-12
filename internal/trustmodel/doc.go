@@ -41,7 +41,7 @@
 // TRUSTMODEL_NOSKEW (no clock skew), TRUSTMODEL_TRACE (print scenario
 // traces), TRUSTMODEL_TRACESEED and TRUSTMODEL_CLASS (TestSeedsByClass:
 // shrink and trace one run seed, or list the seeds of a violation class or
-// of "stat:<name>", or every stat starting "statprefix:<prefix>" per run
+// of "stat:<name>", or every stat starting "statprefix:<p1>|<p2>..." per run
 // seed, e.g. "statprefix:wait class"), TRUSTMODEL_RULEEFIN=keep (rule E
 // keeps an unsent hs.fin, for attribution), TRUSTMODEL_EXTRA_DAY (one more rekey before
 // I1), TRUSTMODEL_ROTBURST (each vault rotates 4 to 6 times at the start),

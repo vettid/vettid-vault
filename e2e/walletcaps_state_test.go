@@ -11,8 +11,8 @@ import (
 	"github.com/vettid/vettid-vault/client/wallet"
 	"github.com/vettid/vettid-vault/internal/enclavetest"
 	"github.com/vettid/vettid-vault/internal/relaytest"
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/btc"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // Wallet spend caps and the ledger are part of the wallet's DEK state

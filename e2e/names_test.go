@@ -14,8 +14,8 @@ import (
 	"github.com/vettid/vettid-vault/client"
 	"github.com/vettid/vettid-vault/internal/enclavetest"
 	"github.com/vettid/vettid-vault/internal/relaytest"
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // VAULT-MESSAGING 0.18.0 (§10.8, §11.5, §11.13) through the real relay:

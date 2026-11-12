@@ -3,7 +3,7 @@ package client
 import (
 	"context"
 
-	"github.com/vettid/vettid-vault/internal/strictjson"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // Presence (VAULT-MESSAGING §9.2, §10.17): on-demand pings; a connection

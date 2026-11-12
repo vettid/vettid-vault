@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/envelope"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // Feature operations of VAULT-MESSAGING §10.6–§10.9. Each is a request to

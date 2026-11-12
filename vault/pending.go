@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/envelope"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // Open asks that arrive only as events (VAULT-MESSAGING 0.70.0 §10.4.2,

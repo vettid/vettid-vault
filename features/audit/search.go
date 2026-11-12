@@ -3,8 +3,8 @@ package audit
 import (
 	"strings"
 
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // The search text of an entry (VAULT-MESSAGING 0.20.0, §10.9): its kind,

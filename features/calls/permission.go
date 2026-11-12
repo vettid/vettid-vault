@@ -6,8 +6,8 @@ import (
 	"sort"
 	"time"
 
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // Permission and limits (VAULT-MESSAGING §10.10 "Permission and limits",

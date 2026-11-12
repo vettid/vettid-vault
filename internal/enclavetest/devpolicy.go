@@ -11,9 +11,9 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/devattest"
 	"github.com/vettid/vettid-vault/vms/pins"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // A dev device policy (DEVELOPMENT ONLY, the dev enclave's

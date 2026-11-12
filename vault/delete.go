@@ -10,9 +10,9 @@ import (
 
 	"github.com/vettid/vettid-relay/relayauth"
 
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault/store"
 	"github.com/vettid/vettid-vault/vms/peerwire"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // Vault deletion (VAULT-MESSAGING §12.5, 0.9.0). A deletion is authorized

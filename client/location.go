@@ -6,8 +6,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/envelope"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // Location sharing (VAULT-MESSAGING §10.16): 1:1 shares to a connection,

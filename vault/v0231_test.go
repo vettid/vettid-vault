@@ -10,9 +10,9 @@ import (
 	"time"
 
 	"github.com/vettid/vettid-relay/relayauth"
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/peerwire"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // VAULT-MESSAGING 0.23.1: errata to 0.23.0 from its implementation

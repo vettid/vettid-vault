@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/vettid/vettid-vault/internal/strictjson"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 func parseC(t *testing.T, body string) (*ContentIn, error) {

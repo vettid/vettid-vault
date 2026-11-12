@@ -3,9 +3,9 @@ package credential
 import (
 	"encoding/json"
 
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vms/envelope"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // The account's name change from the app (VAULT-MESSAGING 0.18.0, §10.8;

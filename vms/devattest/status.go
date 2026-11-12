@@ -3,7 +3,7 @@ package devattest
 import (
 	"time"
 
-	"github.com/vettid/vettid-vault/internal/strictjson"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // MaxStatusList bounds the Google attestation status list (about 180 KB

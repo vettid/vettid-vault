@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vettid/vettid-vault/internal/strictjson"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // Owner decision of 2026-10-16: recovery_offered is listed exactly when

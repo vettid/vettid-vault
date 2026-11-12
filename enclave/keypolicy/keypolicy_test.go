@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/manifest"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 const (

@@ -18,9 +18,9 @@ import (
 	"github.com/vettid/vettid-vault/enclave"
 	"github.com/vettid/vettid-vault/internal/enclavetest"
 	"github.com/vettid/vettid-vault/internal/relaytest"
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vms/altchan"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // One app per vault (VAULT-MESSAGING 0.9.0, owner decisions of

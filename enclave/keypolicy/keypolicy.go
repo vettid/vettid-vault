@@ -22,8 +22,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/manifest"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // CheckError is a refusal by one of the §11.10.7 checks.

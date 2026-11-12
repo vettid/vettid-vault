@@ -16,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/vettid/vettid-vault/internal/strictjson"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // The Sigstore bundle check (VAULT-MESSAGING §10.19.4 step 6; BALLOT-PROTOCOL

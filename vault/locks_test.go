@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/altchan"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // VAULT-MESSAGING 0.29.0 §10.2 "Locks" (release L): every opening of the

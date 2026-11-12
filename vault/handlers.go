@@ -7,9 +7,9 @@ import (
 	"errors"
 	"time"
 
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/handshake"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // Feature is a feature area (§10): it declares its types and handles them.

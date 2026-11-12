@@ -4,8 +4,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/envelope"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // The daily owner check from the app's side (VAULT-MESSAGING 0.13.0,

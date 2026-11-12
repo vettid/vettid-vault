@@ -9,9 +9,9 @@ import (
 	"time"
 
 	"github.com/vettid/vettid-vault/internal/featuretest"
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vms/envelope"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // fakeCred stands in for the credential feature: the holder, an open

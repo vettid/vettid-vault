@@ -6,9 +6,9 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/handshake"
 	"github.com/vettid/vettid-vault/vms/leashwire"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // LEASH (VAULT-MESSAGING §10.11): an app issues, revokes and lists an

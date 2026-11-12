@@ -13,8 +13,8 @@ import (
 	"github.com/vettid/vettid-vault/client"
 	"github.com/vettid/vettid-vault/client/wallet"
 	"github.com/vettid/vettid-vault/internal/relaytest"
-	"github.com/vettid/vettid-vault/internal/strictjson"
 	"github.com/vettid/vettid-vault/vms/btc"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // Wallet spend caps (VAULT-MESSAGING 0.82.0 §10.18 "Spend caps") through

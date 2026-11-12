@@ -3,7 +3,7 @@ package client
 import (
 	"context"
 
-	"github.com/vettid/vettid-vault/internal/strictjson"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // PendingList returns one page of the open asks that arrive only as

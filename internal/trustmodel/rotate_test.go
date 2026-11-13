@@ -622,6 +622,10 @@ func (p *Party) tick() {
 			if w.ch("R27") && r.WaitBox != 0 && r.Status == stActive {
 				p.rk10Limit(r)
 			}
+			p.holdLimitTick(r) // RK14
+			if r.Status != stActive {
+				continue
+			}
 			// S1: stale 30 days after the second write
 			for _, o := range p.st.Old {
 				if o.Key == r.KeyFor && w.s1Expired(p, r, p.sinceAfter(o.Key)) {
@@ -660,6 +664,8 @@ func (p *Party) tick() {
 			}
 			return true
 		})
+		p.sendTellings() // RK14
+		p.tickKept()     // RK14
 		p.write()
 		p.completePending(false)
 		p.flush()

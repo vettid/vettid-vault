@@ -22,7 +22,7 @@ func (d dec) String() string {
 	return s + " [" + d.Cell + "]"
 }
 
-var colName = [...]string{"session", "update", "token.issued", "identity.rotate", "hs.init", "hs.resp/fin", "hs.resp/fin", "hs.confirm"}
+var colName = [...]string{"session", "update", "token.issued", "identity.rotate", "hs.init", "hs.resp/fin", "hs.resp/fin", "hs.confirm", "mailbox.closed"}
 var rowName = [...]string{"current", "earlier-before", "earlier-after", "foreign"}
 
 // handle processes one collected message (§8.3 step 2). It returns
@@ -96,6 +96,7 @@ func (q *Party) handle(m *RMsg, set []Key) bool {
 			r.noteAccKey(M, m.Sender)
 		}
 		q.st.Seen[M.Inner] = true
+		q.noteSeenBox(m)
 		w.checkI3(q, r, m, d)
 		if q.newSpec() && M.Epoch != 0 && M.Kind != KFin {
 			q.idResend(r, m)
@@ -298,6 +299,15 @@ func (q *Party) acceptFrom(r *PeerRec, m *RMsg, pos Pos, set []Key) dec {
 			return refuse("superseded_relay", cell+":handshake-kept")
 		}
 		return q.tableBFin(r, M, pos)
+	case KClosed:
+		// RK14: a durable message under an epoch, judged as a session message
+		if rs == rkAfter {
+			return refuse("superseded_relay", cell)
+		}
+		if d, bad := q.demoted(r, M, pos, cell); bad {
+			return d
+		}
+		return q.closedFrom(r, M, cell)
 	case KConfirm:
 		// SPEC FINDING: hs.confirm has no column in Table A; the model
 		// treats it as a session message.

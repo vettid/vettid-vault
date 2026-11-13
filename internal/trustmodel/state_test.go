@@ -1,6 +1,9 @@
 package trustmodel
 
-import "slices"
+import (
+	"maps"
+	"slices"
+)
 
 // Messages, party state, stored vs in-memory state.
 
@@ -15,9 +18,10 @@ const (
 	KResp                  // hs.resp
 	KFin                   // hs.fin
 	KConfirm               // hs.confirm (0.86.0 draft, §6.3.1)
+	KClosed                // relay.mailbox.closed (RK14's telling)
 )
 
-var kindName = [...]string{"session", "relay.address.update", "relay.token.issued", "identity.rotate", "hs.init", "hs.resp", "hs.fin", "hs.confirm"}
+var kindName = [...]string{"session", "relay.address.update", "relay.token.issued", "identity.rotate", "hs.init", "hs.resp", "hs.fin", "hs.confirm", "relay.mailbox.closed"}
 
 type IKLink struct{ Old, New, KEM Key }
 type RLink struct{ Old, New Key }
@@ -45,6 +49,9 @@ type Msg struct {
 	FromRelay Key
 	NewEpoch  int // KResp/KFin: the epoch the handshake makes
 	Sig       Key // KResp: sig_R's key; KFin: sig_I's key
+
+	ClosedBox Key // KClosed: the mailbox that closed
+	LastMsgID int // KClosed: last_msg_id
 }
 
 // Pos is where a message sits in Q's mailboxes (§3.4.1 "Cut-off").
@@ -209,6 +216,8 @@ type PeerRec struct {
 	WaitTok          int   // 2.7: ...or for a reconnect token other than this jti
 	WaitSince        int64 // 2.7: since
 	WaitUntil        int64 // RK10: ...or until the refused try's expiry (0: none)
+	HoldSince        int64 // RK14: relay_held's since (the first mailbox_unknown of this hold episode); 0: none
+	HoldOver         bool  // RK14: this episode reached the hold's limit (mailbox_unknown ends an entry at once)
 	RK6Since         int64 // RK6: a restart waits for a reconnect token for P's new mailbox, since the follow
 }
 
@@ -242,7 +251,8 @@ type Entry struct {
 	Ended     bool  // ended by a definite refusal
 	Revoke    []int // KDeny pseudo-entry: jtis to revoke at mailbox Box with key With
 	Denylist  bool
-	HoldSince int64 // first refused mailbox_unknown (the Q-side hold, 3.3)
+	HoldSince int64 // first refused mailbox_unknown (without HOLD: the model's old unbounded hold)
+	HeldMU    bool  // RK14: held after mailbox_unknown (re-addressed at a follow)
 	Announce  bool  // 2.4: a reconnect hs.init announcing my current relay key during S1
 }
 
@@ -273,6 +283,29 @@ type State struct {
 	Out   []Entry
 	Seen  map[int]bool
 	First map[int]int64 // msg_id -> first seen, for defer bounds
+
+	// RK14's telling (TELL)
+	Kept      []Kept        // Q: entries the relay accepted into a peer vault's mailbox (60 days; pinned at a follow)
+	ToTell    []tellRec     // P: old mailboxes whose collects ended, not yet told
+	SeenBox   map[int]Key   // P: inner id -> the mailbox it came from (dedupe kept per mailbox)
+	DedupeEnd map[Key]int64 // P: a told mailbox's inner ids are kept for dedupe until then
+}
+
+// Kept: RK14 step 3, an outbox entry the relay accepted (201) into a peer
+// vault's mailbox, with its msg_id.
+type Kept struct {
+	To       PID
+	Box      Key
+	MsgID    int
+	M        Msg
+	At       int64 // the 201
+	PinUntil int64 // pinned at a follow away from Box (0: not pinned)
+}
+
+// tellRec: RK14 step 1, P's collects of an old mailbox ended with last_msg_id.
+type tellRec struct {
+	Box  Key
+	Last int
 }
 
 func (s *State) peer(id PID) *PeerRec {
@@ -358,6 +391,14 @@ func (s *State) clone() State {
 	for k, v := range s.First {
 		c.First[k] = v
 	}
+	c.Kept = make([]Kept, len(s.Kept))
+	for i, k := range s.Kept {
+		k.M = cloneMsg(k.M)
+		c.Kept[i] = k
+	}
+	c.ToTell = slices.Clone(s.ToTell)
+	c.SeenBox = maps.Clone(s.SeenBox)
+	c.DedupeEnd = maps.Clone(s.DedupeEnd)
 	return c
 }
 

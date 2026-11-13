@@ -315,6 +315,8 @@ func (q *Party) followRelayThen(r *PeerRec, L []RLink, pos Pos, then func()) boo
 	}
 	r.Relay = L[len(L)-1].New
 	r.Toks = slices.DeleteFunc(r.Toks, func(t Token) bool { return t.Iss != r.Relay })
+	q.holdFollow(r)      // RK14
+	q.pinKept(r, passed) // RK14
 	if then != nil {
 		then()
 	}
@@ -371,6 +373,85 @@ func (q *Party) updateIK(r *PeerRec, M *Msg, pos Pos) (dec, bool) {
 	return dec{}, false
 }
 
+// ---------- RK14's hold ----------
+
+// holdMU: RK14, between two vaults, an outbox entry refused
+// mailbox_unknown is held while the connection exists and p has not
+// followed r to a newer mailbox. One anchor per peer (relay_held's since,
+// the first refusal of the episode). A handshake message is not held: it
+// ends as a refusal of its carried token does. After the hold's limit in
+// this episode, mailbox_unknown ends an entry at once.
+func (p *Party) holdMU(r *PeerRec, e *Entry) {
+	w := p.w
+	switch {
+	case e.M.Kind == KInit || e.M.Kind == KResp || e.M.Kind == KFin:
+		e.Ended = true
+		w.stat("HOLD: handshake message refused mailbox_unknown ends")
+	case r.HoldOver:
+		e.Ended = true
+		w.stat("HOLD: mailbox_unknown after the hold's limit ends the entry")
+		p.notDelivered(e, "not delivered: mailbox_unknown after the hold's limit")
+	default:
+		e.HeldMU = true
+		if r.HoldSince == 0 {
+			r.HoldSince = w.Now
+			w.stat("HOLD: relay_held set")
+		}
+	}
+}
+
+// notDelivered: an entry ends not delivered (§8.3 case 5,
+// message.not_delivered).
+func (p *Party) notDelivered(e *Entry, fate string) {
+	if e.M.Kind == KSession && e.M.Probe > 0 && !p.Copy && p.w.probeFate[e.M.Probe] == "" {
+		p.w.probeFate[e.M.Probe] = fate
+	}
+}
+
+// holdLimit: RK14, at relay_held's since + 60 days every entry held for r
+// ends, not delivered, and the connection becomes stale.
+func (p *Party) holdLimitTick(r *PeerRec) {
+	w := p.w
+	if !w.ch("HOLD") || r.HoldSince == 0 || w.Now < r.HoldSince+holdLimit {
+		return
+	}
+	for i := range p.st.Out {
+		e := &p.st.Out[i]
+		if e.To == r.ID && e.HeldMU && !e.Done && !e.Ended {
+			e.Ended = true
+			w.stat("HOLD: ended at the hold's limit (not delivered)")
+			p.notDelivered(e, "not delivered: the hold's limit")
+		}
+	}
+	r.HoldSince, r.HoldOver = 0, true
+	if r.Status == stActive {
+		w.stat("HOLD: stale at the hold's limit")
+		p.markStale(r, "RK14: the hold's limit")
+		p.h5(r, -1)
+	}
+}
+
+// holdFollow: RK14, at a follow the hold episode ends: the held entries are
+// re-addressed to the new mailbox, each with a fresh ts and a new seq (a
+// mailbox_unknown proves the relay never stored it: not tried).
+func (q *Party) holdFollow(r *PeerRec) {
+	if !q.w.ch("HOLD") {
+		return
+	}
+	for i := range q.st.Out {
+		e := &q.st.Out[i]
+		if e.To == r.ID && e.HeldMU && !e.Done && !e.Ended {
+			e.HeldMU, e.Tried, e.Indef = false, false, false
+			e.M.Ts = q.now()
+			q.w.stat("HOLD: held entry re-addressed at a follow")
+		}
+	}
+	if r.HoldSince != 0 || r.HoldOver {
+		q.w.stat("HOLD: relay_held ends at a follow")
+	}
+	r.HoldSince, r.HoldOver = 0, false
+}
+
 // ---------- rule 1 (G2-B) ----------
 
 // carried: rule 1, an entry sent on a carried token goes with the key its
@@ -406,7 +487,7 @@ func (q *Party) waiting(to PID) bool {
 		return false
 	}
 	return slices.ContainsFunc(q.st.Out, func(e Entry) bool {
-		return e.To == to && e.HoldSince != 0 && !e.Done && !e.Ended
+		return e.To == to && (e.HoldSince != 0 || e.HeldMU) && !e.Done && !e.Ended
 	})
 }
 
@@ -462,42 +543,169 @@ func gapBucket(d int64) string {
 	return "f >=60d"
 }
 
-// tell: TELL, mailbox k of its owner ended with msgs uncollected: each
-// sender queues them again, same inner id (see the switch's comment).
+// ---------- RK14's telling (TELL) ----------
+
+const keepFor = 60 * day // RK14 step 3: Q's window and pin; step 2: P's dedupe after the telling
+
+// tell: mailbox k ended at the relay with msgs in it. Its owner's collects
+// of k have ended (at the grace's end, or earlier with mailbox_unknown, or
+// when the key was deleted), and P records last_msg_id: every message
+// still in k when it ended P never acked, and the relay's msg_ids are in
+// arrival order, so it is the smallest such id less one (the relay's last
+// id if none). Model shortcut: P's record is made here, in its stored
+// state, and P sends the telling at its next tick (an unlocked P's write).
 func (w *World) tell(k Key, msgs []*RMsg) {
 	if !w.ch("TELL") {
 		return
 	}
 	o := w.keyOwner(k)
-	if o < 0 || w.party(o).Copy {
+	if o < 0 || w.party(o).Copy || w.party(o).Device {
 		return
 	}
 	owner := w.party(o)
+	last := w.R.next
 	for _, m := range msgs {
-		x := w.party(m.Actor)
-		if x.Copy || x.ID == owner.ID || m.P.Kind == KUpdate {
-			continue // an update is never re-deposited as the same bytes (2.6): (b)'s resends carry it
+		last = min(last, m.ID-1)
+	}
+	t := tellRec{Box: k, Last: last}
+	owner.st.ToTell = append(owner.st.ToTell, t)
+	owner.stored.ToTell = append(owner.stored.ToTell, t)
+	w.stat("TELL: collects of an old mailbox ended")
+}
+
+// sendTellings: RK14 step 2, P sends each connection to a vault
+// relay.mailbox.closed{mailbox, last_msg_id}, a separate durable message
+// under its then-current epoch (it waits for S2 during S1, and is held
+// while P has no epoch). P keeps the inner ids it processed from that
+// mailbox for dedupe until 60 days after.
+func (p *Party) sendTellings() {
+	if len(p.st.ToTell) == 0 {
+		return
+	}
+	for _, t := range p.st.ToTell {
+		for i := range p.st.Peers {
+			r := &p.st.Peers[i]
+			if r.Device || r.Status != stActive {
+				continue
+			}
+			p.enqueue(r.ID, Msg{Kind: KClosed, ClosedBox: t.Box, LastMsgID: t.Last}, nil)
+			p.w.stat("TELL: relay.mailbox.closed queued")
 		}
-		ro, rx := owner.st.peer(x.ID), x.st.peer(owner.ID)
-		if ro == nil || rx == nil || ro.Status != stActive || rx.Status != stActive {
-			continue
+		if p.st.DedupeEnd == nil {
+			p.st.DedupeEnd = map[Key]int64{}
 		}
-		if ro.Cur == 0 {
-			w.stat("TELL: lost (no epoch at the owner to tell under)")
-			continue
+		p.st.DedupeEnd[t.Box] = p.w.Now + keepFor
+	}
+	p.st.ToTell = nil
+}
+
+// noteSeenBox: P keeps, per mailbox, the inner ids it processed (so their
+// dedupe can end 60 days after that mailbox's telling). Ground truth
+// counts a message processed again after its dedupe ended (tickKept).
+func (q *Party) noteSeenBox(m *RMsg) {
+	w := q.w
+	if !w.ch("TELL") {
+		return
+	}
+	if q.st.SeenBox == nil {
+		q.st.SeenBox = map[int]Key{}
+	}
+	q.st.SeenBox[m.P.Inner] = m.Box
+	if !q.Copy && w.dedupeEnded[[2]int{int(q.ID), m.P.Inner}] {
+		w.stat("TELL: a message processed again after its dedupe ended")
+	}
+}
+
+// keep201: RK14 step 3, Q keeps an entry the relay accepted into a peer
+// vault's mailbox, with its msg_id, for 60 days (durable messages that are
+// deposited again as they are: not an update, which is never re-deposited
+// as the same bytes, and not a handshake message).
+func (p *Party) keep201(e *Entry, r *PeerRec, box Key, id int) {
+	if !p.w.ch("TELL") || p.Device || r.Device {
+		return
+	}
+	switch e.M.Kind {
+	case KSession, KIdRot, KClosed:
+	default:
+		return
+	}
+	p.st.Kept = append(p.st.Kept, Kept{To: e.To, Box: box, MsgID: id, M: cloneMsg(e.M), At: p.w.Now})
+}
+
+// pinKept: RK14 step 3, Q follows P away from the mailboxes passed: it pins
+// the entries it still keeps for them, until P's relay.mailbox.closed or
+// 60 days after this follow.
+func (q *Party) pinKept(r *PeerRec, passed []Key) {
+	if !q.w.ch("TELL") {
+		return
+	}
+	for i := range q.st.Kept {
+		k := &q.st.Kept[i]
+		if k.To == r.ID && k.PinUntil == 0 && slices.Contains(passed, k.Box) {
+			k.PinUntil = q.w.Now + keepFor
+			q.w.stat("TELL: entry pinned at a follow")
 		}
-		w.stat("TELL: re-deposited after the telling")
-		// the re-deposit is queued in the sender's stored state (the telling
-		// is handled in a write; ground truth, not a party's own step here)
-		e := Entry{ID: w.id(), To: owner.ID, M: cloneMsg(*m.P)}
-		x.st.Out = append(x.st.Out, e)
-		e.M = cloneMsg(e.M)
-		x.stored.Out = append(x.stored.Out, e)
-		x.storedOut[e.ID] = true
-		if w.ever[x.ID] == nil {
-			w.ever[x.ID] = map[int]bool{}
+	}
+}
+
+// closedFrom: RK14 steps 4 and 5, Q acts on relay.mailbox.closed only for a
+// mailbox of P's it has followed P away from: it deposits again every
+// pinned entry above last_msg_id (same inner id, fresh ts, a new seq, sealed
+// under the epoch current then) and drops the rest. Otherwise it acks and
+// ignores it.
+func (q *Party) closedFrom(r *PeerRec, M *Msg, cell string) dec {
+	w := q.w
+	away := M.ClosedBox != r.Relay && slices.ContainsFunc(r.RChain, func(l RLink) bool { return l.Old == M.ClosedBox })
+	if !away {
+		w.stat("TELL: relay.mailbox.closed ignored (not a mailbox followed away from)")
+		return dec{"ignore", "", cell + ":not-followed-away"}
+	}
+	q.st.Kept = slices.DeleteFunc(q.st.Kept, func(k Kept) bool {
+		if k.To != r.ID || k.Box != M.ClosedBox || k.PinUntil == 0 {
+			return false
 		}
-		w.ever[x.ID][e.ID] = true
+		if k.MsgID > M.LastMsgID {
+			m := cloneMsg(k.M)
+			m.Ts, m.Epoch = q.now(), 0
+			q.st.Out = append(q.st.Out, Entry{ID: w.id(), To: r.ID, M: m})
+			w.stat("TELL: re-deposited after the telling")
+		} else {
+			w.stat("TELL: pinned entry dropped (P collected it)")
+		}
+		return true
+	})
+	return dec{"accept", "", cell}
+}
+
+// tickKept: the end of Q's window (silently) and of a pin with no telling
+// (message.delivery_unconfirmed, RK14 step 6); and the end of P's dedupe
+// for a told mailbox.
+func (p *Party) tickKept() {
+	w := p.w
+	if !w.ch("TELL") {
+		return
+	}
+	p.st.Kept = slices.DeleteFunc(p.st.Kept, func(k Kept) bool {
+		switch {
+		case k.PinUntil != 0 && w.Now > k.PinUntil:
+			w.stat("TELL: delivery_unconfirmed (no telling 60 days after the follow)")
+			return true
+		case k.PinUntil == 0 && w.Now > k.At+keepFor:
+			return true
+		}
+		return false
+	})
+	for in, box := range p.st.SeenBox {
+		if end, ok := p.st.DedupeEnd[box]; ok && w.Now > end {
+			delete(p.st.Seen, in)
+			delete(p.st.SeenBox, in)
+			if !p.Copy {
+				if w.dedupeEnded == nil {
+					w.dedupeEnded = map[[2]int]bool{}
+				}
+				w.dedupeEnded[[2]int{int(p.ID), in}] = true
+			}
+		}
 	}
 }
 

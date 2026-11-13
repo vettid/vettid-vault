@@ -99,15 +99,16 @@ type World struct {
 	resolved   map[[2]PID]bool         // (Q, P): Q resolved a conflict of P's (connection.rotation.resolve)
 	evidKind   map[Key]string          // a successor key -> the kind of the first message that carried it
 
-	waitEv     map[[2]PID]map[string]int64 // (from, to): wait-class events, label -> last time (waitclass_test.go)
-	progressAt map[[2]PID]int64            // pair: when an epoch last became current at either side
-	staleClass map[[2]PID]string           // pair: its wait class when it first went stale
-	k5Held     map[[2]PID]bool             // (Q, P): Q's K5 retry was held by its pending epoch (noteK5Held)
-	k5Since    map[[2]PID]int64            // (Q, P): Q's K5 retry is held now, since (7.16.3)
-	chosen     map[string]bool             // the chosen design's rules that are on (chosen_test.go)
-	s1Pause    map[[2]PID][][2]int64       // (P, Q): S1's pause intervals (7.10 b)
-	revokedRC  map[[2]PID]bool             // (P, Q): P's rule U revoked reconnect tokens it issued to Q's earlier key
-	gapOpen    map[[2]PID]int64            // (P, Q): P ended the pair stale by S1 while Q waits (7.16.2), since
+	waitEv      map[[2]PID]map[string]int64 // (from, to): wait-class events, label -> last time (waitclass_test.go)
+	progressAt  map[[2]PID]int64            // pair: when an epoch last became current at either side
+	staleClass  map[[2]PID]string           // pair: its wait class when it first went stale
+	k5Held      map[[2]PID]bool             // (Q, P): Q's K5 retry was held by its pending epoch (noteK5Held)
+	k5Since     map[[2]PID]int64            // (Q, P): Q's K5 retry is held now, since (7.16.3)
+	chosen      map[string]bool             // the chosen design's rules that are on (chosen_test.go)
+	s1Pause     map[[2]PID][][2]int64       // (P, Q): S1's pause intervals (7.10 b)
+	revokedRC   map[[2]PID]bool             // (P, Q): P's rule U revoked reconnect tokens it issued to Q's earlier key
+	gapOpen     map[[2]PID]int64            // (P, Q): P ended the pair stale by S1 while Q waits (7.16.2), since
+	dedupeEnded map[[2]int]bool             // (party, inner id): its dedupe ended 60 days after a telling (RK14)
 }
 
 type rot struct {
@@ -666,7 +667,7 @@ func (p *Party) deposit(e *Entry, r *PeerRec) {
 	}
 	// session mode: sealed under the current epoch at deposit
 	switch m.Kind {
-	case KSession, KUpdate, KTokIssued, KIdRot:
+	case KSession, KUpdate, KTokIssued, KIdRot, KClosed:
 		if r.Cur == 0 {
 			return
 		}
@@ -701,6 +702,7 @@ func (p *Party) deposit(e *Entry, r *PeerRec) {
 	w.stat("deposit:" + string(err))
 	if err == okRes {
 		e.Done, e.Indef = true, false
+		p.keep201(e, r, box, id)
 		if m.Kind == KSession && m.Probe > 0 && !p.Copy {
 			w.probeDep[m.Probe] = [2]PID{p.ID, e.To}
 		}
@@ -779,19 +781,15 @@ func (p *Party) deposit(e *Entry, r *PeerRec) {
 			keep = p.tokenRevoked(r, e, tok)
 		}
 	case mailboxUnknown:
+		if w.ch("HOLD") && !p.Device && !r.Device {
+			p.holdMU(r, e) // RK14
+			break
+		}
 		if e.HoldSince == 0 {
 			e.HoldSince = w.Now
 		}
 		if e.M.Kind == KResp && e.Box != 0 {
 			e.Ended = true
-		}
-		if w.ch("HOLD") && w.Now-e.HoldSince > holdLimit && e.M.Kind != KInit && e.M.Kind != KResp && e.M.Kind != KFin {
-			// 3.3: the hold's limit, then message.not_delivered
-			e.Ended = true
-			w.stat("HOLD: ended at the hold's limit (not delivered)")
-			if e.M.Kind == KSession && e.M.Probe > 0 && !p.Copy && w.probeFate[e.M.Probe] == "" {
-				w.probeFate[e.M.Probe] = "not delivered: the hold's limit"
-			}
 		}
 	default:
 		e.Ended = true
@@ -802,7 +800,8 @@ func (p *Party) deposit(e *Entry, r *PeerRec) {
 	if !r25 && err.definite() && err != quotaExceeded && m.Kind == KInit && m.Reconnect && w.ch("R27") && r.Status == stActive {
 		p.refusedReconnect(r, e, box, tok, err)
 	}
-	if e.M.Kind == KUpdate && err.definite() && e.Resend {
+	if e.M.Kind == KUpdate && err.definite() && e.Resend && !e.HeldMU {
+		// (b): RK14's hold replaces this for mailbox_unknown between vaults
 		r.ResendEnd = true // (b): a definite answer ends the resends
 		e.Ended = true
 	}
@@ -936,6 +935,8 @@ func describe(m *Msg) string {
 		fmt.Fprintf(&b, "{%s hs %d ctx %d ik %d relay %d rot %v}", p, m.HS, m.Ctx, m.FromIK, m.FromRelay, m.Rot)
 	case KResp, KFin:
 		fmt.Fprintf(&b, "{hs %d epoch %d sig %d rot %v}", m.HS, m.NewEpoch, m.Sig, m.Rot)
+	case KClosed:
+		fmt.Fprintf(&b, "{mailbox %d last_msg_id %d}", m.ClosedBox, m.LastMsgID)
 	}
 	if m.Epoch != 0 {
 		fmt.Fprintf(&b, " under E%d", m.Epoch)

@@ -170,3 +170,124 @@ func TestR29I3CopyEpochBesideReconnectNoNamed(t *testing.T) {
 		t.Fatal("a reconnect answer without a named epoch ran strict F1")
 	}
 }
+
+// At the initiator's hs.resp. Q's own handshake is open (here a
+// reconnect naming E0, its current epoch) when P, rotated, answers it with
+// its links. While a handshake of Q's is open, Q establishes no other epoch
+// with P except one that ends it ("A verified hs.fin comes first", §6.5,
+// §6.6), and Q's rekeys wait for no pending epoch (§6.5) while its
+// reconnect abandons one at its start; so no copy's epoch can be
+// established at Q between Q's hs.init and P's hs.resp, and the epoch Q
+// named is still current when the hs.resp's links are followed (strict F1
+// with that epoch would do nothing). The copy's rekey crossing Q's
+// reconnect is answered only if Q's th1 is the lower; then, either order:
+//   - P's hs.resp first: Q's own handshake completed first, so its answer
+//     to the copy's crossing rekey is dropped (§6.5; it is also pinned to
+//     the old ik, H5), and the copy's hs.fin establishes nothing;
+//   - the copy's hs.fin first: E1 is established and Q's reconnect is
+//     abandoned, so P's hs.resp is dropped (no link followed there); the
+//     link reaches Q in P's identity.rotate under E0, and strict F1 demotes
+//     E1, so the copy's later note is refused.
+func i3QReconnect(t *testing.T) (f *r29Fx, e0, oldIK []byte) {
+	t.Helper()
+	for try := 0; try < 64; try++ {
+		f = newR29Fx(t)
+		f.longTokens()
+		for s := 0; s < 2; s++ {
+			f.do(s, func(m *Manager, _ *Peer) { m.dirty = true })
+		}
+		e0 = append([]byte(nil), f.cur(1)...)
+		oldIK = append([]byte(nil), f.p(1).IK...)
+		snap := f.snapshot(0)
+		f.rotate(0)
+		f.startCopy(0, snap)
+		f.lose(0, 1, kHSInit) // P's own rekey at its rotation: lost
+
+		f.do(1, func(m *Manager, p *Peer) { m.startReconnect(p, f.clk) })
+		og := f.openReconnect(1)
+		if og == nil || !bytes.Equal(og.Named, e0) {
+			t.Fatal("setup: Q's reconnect does not name E0")
+		}
+		f.rekey(2)
+		var theirs [32]byte
+		for _, c := range f.m(2).st.Outgoing {
+			copy(theirs[:], c.Th1)
+		}
+		var ours [32]byte
+		copy(ours[:], og.Th1)
+		if !handshake.SimultaneousRekeyWinner(ours, theirs) {
+			continue // Q's reconnect would be abandoned for the copy's rekey: not this case
+		}
+		if f.deliver(2, 1, kHSInit) != 1 || f.deliver(1, 2, kHSResp) != 1 || f.p(2).Pending == nil {
+			t.Fatalf("setup: the copy's rekey was not answered beside Q's reconnect; Q's audits %v", auditEvents(f.m(1)))
+		}
+		if f.openReconnect(1) == nil {
+			t.Fatal("setup: Q's reconnect was abandoned")
+		}
+		if f.deliver(1, 0, kHSInit) != 1 {
+			t.Fatal("setup: Q's reconnect hs.init did not reach P")
+		}
+		return f, e0, oldIK
+	}
+	t.Fatal("setup: Q's th1 was never the lower")
+	return nil, nil, nil
+}
+
+func TestR29I3QHandshakeRespFirst(t *testing.T) {
+	f, e0, oldIK := i3QReconnect(t)
+	if f.deliver(0, 1, kHSResp) != 1 {
+		t.Fatal("setup: P did not answer Q's reconnect")
+	}
+	if bytes.Equal(f.p(1).IK, oldIK) {
+		t.Fatal("Q did not follow P's link at the hs.resp")
+	}
+	if !bytes.Equal(f.cur(1), e0) {
+		t.Fatal("Q's current epoch moved before P's hs.resp")
+	}
+	for _, aw := range f.m(1).st.Awaiting {
+		if aw.PeerID == f.id[1] && aw.Purpose == handshake.PurposeRekey {
+			t.Fatal("Q's answer to the copy's crossing rekey outlived P's hs.resp")
+		}
+	}
+	e1 := append([]byte(nil), f.p(2).Pending.ID...)
+	f.deliver(2, 1, kHSFin)
+	if e := f.p(1).epochMeta(e1); e != nil {
+		t.Fatalf("the copy's hs.fin after the link made an epoch at Q; Q's audits %v", auditEvents(f.m(1)))
+	}
+	if f.p(1).suspended() {
+		t.Fatal("suspended")
+	}
+	f.deliver(0, 1, kAny)
+	f.settle()
+	if f.p(1).suspended() || !f.sameEpoch() {
+		t.Fatalf("P and Q did not settle; Q's audits %v", auditEvents(f.m(1)))
+	}
+	f.talks()
+}
+
+func TestR29I3QHandshakeCopyFinFirst(t *testing.T) {
+	f, _, oldIK := i3QReconnect(t)
+	e1 := append([]byte(nil), f.p(2).Pending.ID...)
+	if f.deliver(2, 1, kHSFin) != 1 || !bytes.Equal(f.cur(1), e1) {
+		t.Fatal("setup: Q did not establish the copy's E1")
+	}
+	if f.openReconnect(1) != nil {
+		t.Fatal("Q's reconnect was not abandoned at the copy's verified hs.fin")
+	}
+	f.deliver(1, 2, kAny)
+	f.deliver(0, 1, kHSResp) // P's answer to the abandoned reconnect: dropped
+	if !bytes.Equal(f.p(1).IK, oldIK) {
+		t.Fatal("Q followed a link from an hs.resp to an abandoned handshake")
+	}
+	f.deliver(0, 1, kRotate) // the link, under E0: strict F1
+	if e := f.p(1).epochMeta(e1); e == nil || !e.Demoted {
+		f.dump()
+		t.Fatal("E1 was not demoted by strict F1 at P's identity.rotate")
+	}
+	n := len(f.got[1])
+	f.note(2, "copy-under-e1-after-the-link")
+	f.deliver(2, 1, kNote)
+	if len(f.got[1]) != n || !f.activity(1, "drop.peer_key", "ancestor_ik") {
+		t.Fatal("Q took the copy's note under E1 deposited after the link")
+	}
+}

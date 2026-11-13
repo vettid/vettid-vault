@@ -329,7 +329,10 @@ func (m *Manager) respondReconnect(pi *handshake.PendingInit, p *Peer, sender ed
 		pi.Discard()
 		return
 	}
-	if !suite.EqualPublic(sender, p.Relay.PK) {
+	// §3.4.1 Table A: the relay key on record, or (with relay-key
+	// rotation) an earlier one; any other sender is foreign.
+	rstate := m.relayStateOf(p, sender)
+	if rstate == relayForeign {
 		m.audit(now, "reconnect_refused", p.ID)
 		pi.Discard()
 		return
@@ -347,6 +350,13 @@ func (m *Manager) respondReconnect(pi *handshake.PendingInit, p *Peer, sender ed
 			pi.Discard()
 			return
 		}
+	}
+	if rstate == relayEarlierAfter {
+		// §3.4.1 Table A, after step 3: an earlier key after its cut-off
+		// (§3.4.2 RK8's relay links are not built yet).
+		m.refusePeerKey(p, "superseded_relay", now)
+		pi.Discard()
+		return
 	}
 	m.noteFeatures(p, pi.Inner().Features) // 0.86.0, §10.8: steps 1-4 passed
 	var named86 []byte
@@ -405,7 +415,7 @@ func (m *Manager) respondReconnect(pi *handshake.PendingInit, p *Peer, sender ed
 	}
 	cfg := handshake.ResponderConfig{
 		Identity: m.keys.ik, Policy: policyFor(p.Kind), PinnedSuite: p.Suite,
-		CollectSender: sender, RecordRelayKey: p.Relay.PK, KnownInitiatorIK: p.IK,
+		CollectSender: sender, RecordRelayKey: m.recordRelayKey(p, sender), KnownInitiatorIK: p.IK,
 		KnownInitiatorChain: parseRotations(p.Chain),
 		ExpectedCtx:         body.Ctx, Now: now,
 		Rotations: m.ownRotationsSince(ownChain), Features: m.featuresFor(p),
@@ -762,7 +772,7 @@ func (m *Manager) handleRekeyInit(ctx context.Context, p *Peer, in *envelope.Inn
 	}
 	cfg := handshake.ResponderConfig{
 		Identity: m.keys.ik, Policy: policyFor(p.Kind), PinnedSuite: p.Suite,
-		CollectSender: sender, RecordRelayKey: p.Relay.PK, KnownInitiatorIK: p.IK,
+		CollectSender: sender, RecordRelayKey: m.recordRelayKey(p, sender), KnownInitiatorIK: p.IK,
 		KnownInitiatorChain: parseRotations(p.Chain), Now: now, Features: m.featuresFor(p),
 	}
 	// S8: the vault's links since the signer of the epoch rekeyed.
@@ -815,6 +825,9 @@ func (m *Manager) awaitingByKids(env *envelope.Envelope, sender ed25519.PublicKe
 			pk = aw.New.Relay.PK
 		} else if p := m.peer(aw.PeerID); p != nil {
 			pk = p.Relay.PK
+			if m.relayStateOf(p, sender) != relayForeign {
+				pk = sender // §3.4.1: an earlier key of p's, judged by Table A (handleFin)
+			}
 		}
 		if suite.EqualPublic(pk, sender) {
 			return id
@@ -838,6 +851,9 @@ func (m *Manager) peer(id string) *Peer {
 // become a request that awaits approval (0.10.3).
 func (m *Manager) handleFin(ctx context.Context, id string, raw []byte, sender ed25519.PublicKey, now time.Time) disposition {
 	aw, r := m.st.Awaiting[id], m.awaiting[id]
+	if aw.New == nil && m.tableAHandshake(m.peer(aw.PeerID), sender, now) {
+		return ackAfterFlush // §3.4.1 Table A: refused, the answer kept (S2)
+	}
 	fr, err := r.HandleFin(raw, sender, now)
 	switch {
 	case errors.Is(err, handshake.ErrType):
@@ -1260,6 +1276,13 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 			m.audit(now, "hs_resp_dropped", og.PeerID)
 			return ackAfterFlush
 		}
+	}
+	if og.New == nil && m.relayStateOf(m.peer(og.PeerID), sender) == relayEarlierAfter {
+		// §3.4.1 step 3, then Table A: the answer's identity links are
+		// checked by rule C, then it is refused and the handshake kept (S2).
+		m.respLinksEvidence(m.peer(og.PeerID), ini, raw, sender, now)
+		m.tableAHandshake(m.peer(og.PeerID), sender, now)
+		return ackAfterFlush
 	}
 	res, err := ini.HandleResp(raw, sender, now)
 	if err != nil {

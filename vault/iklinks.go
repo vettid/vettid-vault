@@ -946,7 +946,7 @@ func (m *Manager) rekeyPrecheck(p *Peer, in *envelope.Inner, ep *handshake.Epoch
 	if err := in.CheckTime(now, true); err != nil {
 		return err
 	}
-	if !bytes.Equal(sender, p.Relay.PK) || !bytes.Equal(sender, body.From.Relay.PK) {
+	if !bytes.Equal(sender, m.recordRelayKey(p, sender)) || !bytes.Equal(sender, body.From.Relay.PK) {
 		return handshake.ErrSender
 	}
 	if len(body.Rotations) == 0 {

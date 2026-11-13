@@ -454,7 +454,13 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 	}
 	// 0.86.0 (§6.3.1): a confirmation takes effect before anything else is
 	// done with the message (dedupe, the ts window, its handler).
-	if m.evidenceFirst(p, in, now) || m.beforeAccept(p, ep, in, now) {
+	if m.evidenceFirst(p, in, now) {
+		return ackAfterFlush
+	}
+	if m.opt.RelayKeyRotation && m.tableARefuses(p, in, sender, now) {
+		return ackAfterFlush // §3.4.1 acceptFrom step 4, Table A: an earlier key after its cut-off
+	}
+	if m.beforeAccept(p, ep, in, now) {
 		return ackAfterFlush
 	}
 	// §10.8: counted once the message is not refused for its epoch

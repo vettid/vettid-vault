@@ -83,7 +83,9 @@ func relayM(old, new []byte) []byte {
 // plainRelayVerdict judges a chain by rule U with no vms code: 1 to 32
 // links, each {v: 1, suite: 2} with 32-byte keys, old != new, and both
 // Ed25519 signatures over m; contiguous; no key twice; from first to
-// announced.
+// announced. It assumes well-formed vector input and is not a strict
+// parser: it does not check duplicate members, canonical base64 or
+// number forms (the vms parser, judged next to it, does).
 func plainRelayVerdict(raws []json.RawMessage, first, announced []byte) bool {
 	if len(raws) < 1 || len(raws) > 32 {
 		return false

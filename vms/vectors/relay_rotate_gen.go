@@ -31,7 +31,8 @@ type rlCase struct {
 	keys             []int
 	links            func() []*handshake.RelayLink
 	mutate           func([]*handshake.RelayLink) []*handshake.RelayLink
-	v, suite         int  // link 0's; 0: 1 and 2; -1: the member is absent
+	v, suite         int  // link vAt's; 0: 1 and 2; -1: the member is absent
+	vAt              int  // the link v and suite apply to (default link 0)
 	first, announced *int // key indexes; nil: the chain's own ends
 }
 
@@ -63,10 +64,10 @@ func (c rlCase) render() (obj, error) {
 	linkObjs, signed := []any{}, []any{}
 	for i, l := range links {
 		v, s := 1, int(suite.Suite2)
-		if i == 0 && c.v != 0 {
+		if i == c.vAt && c.v != 0 {
 			v = c.v
 		}
-		if i == 0 && c.suite != 0 {
+		if i == c.vAt && c.suite != 0 {
 			s = c.suite
 		}
 		var lo obj
@@ -137,8 +138,10 @@ func genRelayRotate() (obj, error) {
 				return []*handshake.RelayLink{relaySignedUnder(suite.LabelRelayRotate, 0, 0)}
 			}},
 		{name: "repeated_key", reason: "key 0 -> 1 -> 0: a key appears twice (first equals announced)", keys: []int{0, 1, 0}},
+		{name: "repeated_key_later", reason: "key 0 -> 1 -> 2 -> 1: key 1 appears twice, not at the ends", keys: []int{0, 1, 2, 1}},
 		{name: "v_2", reason: "unknown v with verifying signatures: the link's v is 2; both signatures verify (v is not in m)", keys: []int{0, 1}, v: 2},
 		{name: "suite_1", reason: "unknown suite with verifying signatures: the link's suite is 1; both signatures verify (the label binds suite 2)", keys: []int{0, 1}, suite: 1},
+		{name: "v_2_later_link", reason: "three links, the third with v 2; every signature verifies", keys: []int{0, 1, 2, 3}, v: 2, vAt: 2},
 		{name: "v_missing", reason: "the link has no v; both signatures verify", keys: []int{0, 1}, v: -1},
 		{name: "suite_missing", reason: "the link has no suite; both signatures verify", keys: []int{0, 1}, suite: -1},
 		{name: "no_links", reason: "an empty array: zero links (1 to 32 are required)",

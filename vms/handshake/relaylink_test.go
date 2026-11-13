@@ -262,8 +262,22 @@ func TestInitRelayLinks(t *testing.T) {
 	if _, err := wrong.Marshal(); err == nil {
 		t.Fatal("relay_links not ending at from.relay.pk marshalled")
 	}
-	if _, err := ParseInit(replaceMember(t, plain, "relay_links", []any{})); err == nil {
-		t.Fatal("empty relay_links accepted")
+	if _, err := ParseInit(replaceMember(t, plain, "relay_links", []any{})); !errors.Is(err, ErrRelayLink) || !errors.Is(err, ErrBody) {
+		t.Fatalf("empty relay_links: %v, want ErrBody wrapping ErrRelayLink", err)
+	}
+	// A link-level failure keeps ErrRelayLink (relay_unlinked) inside ErrBody.
+	var bad map[string]any
+	_ = json.Unmarshal(in.RelayLinks[0].Marshal(), &bad)
+	bad["v"] = 2
+	if _, err := ParseInit(replaceMember(t, b, "relay_links", []any{bad})); !errors.Is(err, ErrRelayLink) || !errors.Is(err, ErrBody) {
+		t.Fatalf("v 2 in hs.init: %v, want ErrBody wrapping ErrRelayLink", err)
+	}
+	many := make([]json.RawMessage, 33)
+	for i := range many {
+		many[i] = in.RelayLinks[0].Marshal()
+	}
+	if _, err := ParseInit(replaceMember(t, b, "relay_links", many)); !errors.Is(err, ErrRelayLink) {
+		t.Fatalf("33 links in hs.init: %v, want ErrRelayLink", err)
 	}
 }
 
@@ -286,6 +300,15 @@ func TestRespRelayLinks(t *testing.T) {
 	}
 	if _, err := ParseResp(b, PurposeRekey); err == nil {
 		t.Fatal("relay accepted for a rekey")
+	}
+	var badSuite map[string]any
+	_ = json.Unmarshal(r.RelayLinks[0].Marshal(), &badSuite)
+	badSuite["suite"] = 1
+	if _, err := ParseResp(replaceMember(t, b, "relay_links", []any{badSuite}), PurposeReconnect); !errors.Is(err, ErrRelayLink) || !errors.Is(err, ErrBody) {
+		t.Fatalf("suite 1 in hs.resp: %v, want ErrBody wrapping ErrRelayLink", err)
+	}
+	if _, err := ParseResp(replaceMember(t, b, "relay_links", []any{}), PurposeReconnect); !errors.Is(err, ErrRelayLink) {
+		t.Fatalf("0 links in hs.resp: %v, want ErrRelayLink", err)
 	}
 	plain := &Resp{Token: tokC, ReconnectToken: tokD, Suite: 2, Sig: make([]byte, 64)}
 	pb, _ := plain.Marshal(PurposeReconnect)

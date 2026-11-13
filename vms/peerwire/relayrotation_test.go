@@ -158,6 +158,30 @@ func TestAddressUpdateRefused(t *testing.T) {
 			t.Errorf("%s accepted", name)
 		}
 	}
+	// A link-level failure keeps handshake.ErrRelayLink (relay_unlinked)
+	// inside ErrRelayBody; a missing relay_links is a plain malformed body.
+	link := func(v, s any) map[string]any {
+		var l map[string]any
+		_ = json.Unmarshal(u.Links[0].Marshal(), &l)
+		l["v"], l["suite"] = v, s
+		return l
+	}
+	for name, raw := range map[string][]byte{
+		"suite 1":     setMember(t, b, "relay_links", []any{link(1, 1)}),
+		"suite 3":     setMember(t, b, "relay_links", []any{link(1, 3)}),
+		"v 2":         setMember(t, b, "relay_links", []any{link(2, 2)}),
+		"0 links":     setMember(t, b, "relay_links", []any{}),
+		"33 links":    setMember(t, b, "relay_links", many),
+		"later bad v": setMember(t, b, "relay_links", []any{link(1, 2), link(7, 2)}),
+	} {
+		_, err := ParseAddressUpdate(raw)
+		if !errors.Is(err, handshake.ErrRelayLink) || !errors.Is(err, ErrRelayBody) {
+			t.Errorf("%s: %v, want ErrRelayBody wrapping ErrRelayLink", name, err)
+		}
+	}
+	if _, err := ParseAddressUpdate(setMember(t, b, "relay_links", nil)); !errors.Is(err, ErrRelayBody) || errors.Is(err, handshake.ErrRelayLink) {
+		t.Errorf("missing relay_links: %v, want a plain ErrRelayBody", err)
+	}
 }
 
 func TestMailboxClosed(t *testing.T) {

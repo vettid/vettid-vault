@@ -108,7 +108,9 @@ func ParseAddressUpdate(body []byte) (*AddressUpdate, error) {
 		return nil, ErrRelayBody
 	}
 	if u.Links, err = handshake.ParseRelayLinks(arr); err != nil {
-		return nil, ErrRelayBody
+		// a link-level failure keeps handshake.ErrRelayLink (relay_unlinked);
+		// both are fixed sentinels (§13.6: no input data in errors)
+		return nil, errors.Join(ErrRelayBody, handshake.ErrRelayLink)
 	}
 	rots, _, err := o.OptArray("rotations") // (0.90.3) [] is read as absent: Rotations stays nil
 	if err != nil || len(rots) > handshake.MaxRotations {

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base32"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/url"
 	"strconv"
@@ -349,7 +350,10 @@ func parseRelayLinks(o strictjson.Object) ([]*RelayLink, bool, error) {
 	}
 	ls, err := ParseRelayLinks(arr)
 	if err != nil {
-		return nil, true, ErrBody
+		// a link-level failure (v, suite, 0 or more than 32 links) stays
+		// ErrRelayLink (relay_unlinked) inside the malformed body; both are
+		// fixed sentinels (§13.6: no input data in errors)
+		return nil, true, errors.Join(ErrBody, ErrRelayLink)
 	}
 	return ls, true, nil
 }
@@ -601,7 +605,7 @@ func ParseInit(body []byte) (*Init, error) {
 		return nil, ErrBody
 	}
 	if in.RelayLinks, _, err = parseRelayLinks(o); err != nil {
-		return nil, ErrBody
+		return nil, err
 	}
 	if in.SASCommit, err = optSASField(o, "sas_commit"); err != nil {
 		return nil, ErrBody
@@ -713,7 +717,7 @@ func ParseResp(body []byte, p Purpose) (*Resp, error) {
 		r.Relay = &a
 	}
 	if r.RelayLinks, _, err = parseRelayLinks(o); err != nil {
-		return nil, ErrBody
+		return nil, err
 	}
 	if err := r.validate(p); err != nil {
 		return nil, err

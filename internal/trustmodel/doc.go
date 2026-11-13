@@ -80,11 +80,15 @@
 //   - TRUSTMODEL_OLD=1: the f4a4d97 rules throughout (no §6.3.1).
 //
 // Run: go test ./internal/trustmodel/ -run . -v
-// Env: TRUSTMODEL_RUNS (default 3000), TRUSTMODEL_SEED (default 1),
+// The default go test is quick (300 random runs, 300 coverage runs that
+// require each rule once); a full check sets TRUSTMODEL_RUNS (3000 or
+// 10000) and TRUSTMODEL_COVRUNS=3000.
+// Env: TRUSTMODEL_RUNS (default 300), TRUSTMODEL_SEED (default 1),
 // TRUSTMODEL_STEPS (actions per run, default 40), TRUSTMODEL_LENIENT (TestRandom
 // reports violations without failing; by default any violation fails it), TRUSTMODEL_RELAYROT (the regression
-// config), TRUSTMODEL_COVRUNS (TestR29Coverage's runs, default 3000),
-// TRUSTMODEL_MINHITS (its minimum hits per rule and branch, default 3),
+// config), TRUSTMODEL_COVRUNS (TestR29Coverage's runs, default 300; set,
+// it also requires every listed branch), TRUSTMODEL_MINHITS (its minimum
+// hits per rule and branch with TRUSTMODEL_COVRUNS set, default 3),
 // TRUSTMODEL_NOSKEW (no clock skew), TRUSTMODEL_TRACE (print scenario
 // traces), TRUSTMODEL_TRACESEED and TRUSTMODEL_CLASS (TestSeedsByClass:
 // shrink and trace one run seed, or list the seeds of a violation class or

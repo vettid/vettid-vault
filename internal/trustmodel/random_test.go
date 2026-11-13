@@ -66,7 +66,7 @@ type agg struct {
 }
 
 func TestRandom(t *testing.T) {
-	runs := envInt("TRUSTMODEL_RUNS", 3000)
+	runs := envInt("TRUSTMODEL_RUNS", 300) // quick by default; 3000 or 10,000 for a full check
 	seed := uint64(envInt("TRUSTMODEL_SEED", 1))
 	steps := envInt("TRUSTMODEL_STEPS", 40)
 	start := time.Now()

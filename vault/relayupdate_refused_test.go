@@ -2,13 +2,17 @@ package vault
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/vettid/vettid-relay/relayauth"
+
+	"github.com/vettid/vettid-vault/vms/envelope"
 )
 
 // relay.address.update is refused from every peer (release 29 rotates no
@@ -44,29 +48,48 @@ func updateBody(t testing.TB, own ed25519.PublicKey, seed byte, now time.Time) [
 	return b
 }
 
-// peerSnap is what a refused update must leave alone.
+// peerSnap is what a refused update must leave alone: the peer's relay and
+// tokens, the denylist, the tokens issued (none is issued in answer: no
+// relay.token.issued), and, with a devFixture, the deposits to the peer's
+// mailbox (deposits; -1 when not counted).
 type peerSnap struct {
 	relay               PeerRelay
 	standing, reconnect HeldToken
 	deniedSubs, denied  int
+	issued, deposits    int
 }
 
 func snapPeer(m *Manager, p *Peer) peerSnap {
 	s := peerSnap{relay: p.Relay, standing: p.Standing, reconnect: p.Reconnect,
-		deniedSubs: len(m.st.DeniedSubs)}
+		deniedSubs: len(m.st.DeniedSubs), issued: len(m.st.Issued)}
 	s.relay.PK = append([]byte(nil), p.Relay.PK...)
 	for _, it := range m.st.Issued {
 		if it.Denied {
 			s.denied++
 		}
 	}
+	s.deposits = -1
+	return s
+}
+
+// snapDev settles housekeeping (a batch with nothing in it: a fixture's
+// connection is given the tokens it lacks) and snapshots p, its deposits
+// counted too.
+func snapDev(t testing.TB, d *devFixture, p *Peer) peerSnap {
+	t.Helper()
+	if err := d.m.ProcessBatch(context.Background(), &fakeCollector{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	s := snapPeer(d.m, p)
+	s.deposits = d.depositsTo(p.Relay.Mailbox)
 	return s
 }
 
 func (a peerSnap) same(b peerSnap) bool {
 	return a.relay.URL == b.relay.URL && a.relay.Mailbox == b.relay.Mailbox && bytes.Equal(a.relay.PK, b.relay.PK) &&
 		a.standing == b.standing && a.reconnect == b.reconnect &&
-		a.deniedSubs == b.deniedSubs && a.denied == b.denied
+		a.deniedSubs == b.deniedSubs && a.denied == b.denied &&
+		a.issued == b.issued && a.deposits == b.deposits
 }
 
 // From a connection, a service and the member's device: refused, audited,
@@ -79,7 +102,7 @@ func TestRelayAddressUpdateRefusedFromEveryPeer(t *testing.T) {
 		{"connection", func(t *testing.T, d *devFixture) *Peer {
 			td := d.asConnection(t, "per", 0x74)
 			p := d.m.st.Connections["per"]
-			before := snapPeer(d.m, p)
+			before := snapDev(t, d, p)
 			sendC(d, td, "relay.address.update", string(updateBody(t, d.m.keys.relay.Public().(ed25519.PublicKey), 0x91, time.Now())))
 			checkUnchanged(t, d, p, before)
 			return p
@@ -88,14 +111,14 @@ func TestRelayAddressUpdateRefusedFromEveryPeer(t *testing.T) {
 			td := d.asConnection(t, "svc", 0x70)
 			p := d.m.st.Connections["svc"]
 			p.PeerKind = "service"
-			before := snapPeer(d.m, p)
+			before := snapDev(t, d, p)
 			sendC(d, td, "relay.address.update", string(updateBody(t, d.m.keys.relay.Public().(ed25519.PublicKey), 0x92, time.Now())))
 			checkUnchanged(t, d, p, before)
 			return p
 		}},
 		{"device", func(t *testing.T, d *devFixture) *Peer {
 			p := d.devPeer
-			before := snapPeer(d.m, p)
+			before := snapDev(t, d, p)
 			if err := d.send("relay.address.update", updateBody(t, d.m.keys.relay.Public().(ed25519.PublicKey), 0x93, time.Now())); err != nil {
 				t.Fatal(err)
 			}
@@ -103,19 +126,89 @@ func TestRelayAddressUpdateRefusedFromEveryPeer(t *testing.T) {
 			return p
 		}},
 	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			d := newDevFixture(t)
-			sinkOf(d)
-			c.send(t, d)
-		})
+	cases = append(cases, []struct {
+		name string
+		send func(t *testing.T, d *devFixture) *Peer
+	}{
+		// A desktop and an agent with no access session: the type is
+		// accessExempt (§6.8), so it reaches the refusal.
+		{"desktop without an access session", func(t *testing.T, d *devFixture) *Peer {
+			return refuseFromDevice(t, d, KindDesktop)
+		}},
+		{"agent without an access session", func(t *testing.T, d *devFixture) *Peer {
+			return refuseFromDevice(t, d, KindAgent)
+		}},
+		// A malformed body is refused the same way (the refusal reads no
+		// member of it).
+		{"malformed body", func(t *testing.T, d *devFixture) *Peer {
+			td := d.asConnection(t, "per", 0x74)
+			p := d.m.st.Connections["per"]
+			before := snapDev(t, d, p)
+			sendC(d, td, "relay.address.update", `{"relay":"nowhere","token":7}`)
+			checkUnchanged(t, d, p, before)
+			return p
+		}},
+	}...)
+	for _, on := range []bool{false, true} {
+		for _, c := range cases {
+			name := c.name
+			if on {
+				name += ", relay-key rotation on" // rule C runs first; the update is still refused
+			}
+			t.Run(name, func(t *testing.T) {
+				d := newDevFixture(t)
+				sinkOf(d)
+				d.m.opt.RelayKeyRotation = on
+				c.send(t, d)
+			})
+		}
 	}
+}
+
+func refuseFromDevice(t *testing.T, d *devFixture, kind string) *Peer {
+	t.Helper()
+	td := d.addDevice(t, "d-"+kind, kind, 0x84)
+	p := td.peer
+	if p.Access != nil {
+		t.Fatal("setup: the device has an access session")
+	}
+	before := snapDev(t, d, p)
+	d.sendAs(td, "relay.address.update", string(updateBody(t, d.m.keys.relay.Public().(ed25519.PublicKey), 0x95, time.Now())))
+	checkUnchanged(t, d, p, before)
+	return p
+}
+
+// §8.2: a resend of the update with the same inner id is a duplicate: it
+// is refused and audited once.
+func TestRelayAddressUpdateResendAuditedOnce(t *testing.T) {
+	d := newDevFixture(t)
+	sinkOf(d)
+	td := d.asConnection(t, "per", 0x74)
+	p := d.m.st.Connections["per"]
+	before := snapDev(t, d, p)
+	body := string(updateBody(t, d.m.keys.relay.Public().(ed25519.PublicKey), 0x96, time.Now()))
+	id, _ := envelope.NewULID(time.Now())
+	for i := 0; i < 2; i++ {
+		raw, err := td.ep.Seal(&envelope.Inner{ID: id, Type: "relay.address.update", TS: time.Now(), Body: []byte(body)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		msg := Message{MsgID: fmt.Sprintf("dup%d", i), Sender: relayauth.EncodeKey(p.Relay.PK), JTI: "standing-per", Payload: raw}
+		if err := d.m.ProcessBatch(context.Background(), &fakeCollector{}, []Message{msg}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	checkUnchanged(t, d, p, before) // audited exactly once
 }
 
 func checkUnchanged(t *testing.T, d *devFixture, p *Peer, before peerSnap) {
 	t.Helper()
-	if !snapPeer(d.m, p).same(before) {
-		t.Fatalf("the update changed the peer's relay, tokens or the denylist:\n before %+v\n after  %+v", before, snapPeer(d.m, p))
+	after := snapPeer(d.m, p)
+	if before.deposits >= 0 {
+		after.deposits = d.depositsTo(p.Relay.Mailbox)
+	}
+	if !after.same(before) {
+		t.Fatalf("the update changed the peer's relay, tokens or the denylist, or was answered:\n before %+v\n after  %+v", before, after)
 	}
 	got := d.audits("drop.peer_key")
 	if len(got) != 1 || got[0].Ref != "relay_unlinked" || !got[0].Audit {

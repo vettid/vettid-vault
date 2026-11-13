@@ -7,88 +7,102 @@ import (
 	"strings"
 )
 
-// The relay-key rotation design the owner chose on 2026-11-12
-// (vettid.org RELAY-KEY-ROTATION.md, draft 7 at 610585f, §2, §3.3, §7),
-// each rule behind its own switch (the note's §6 step 1). The switches act
-// only between release-29 parties (newSpec). TRUSTMODEL_CHOSEN=1 turns on
-// the whole chosen set; TRUSTMODEL_CH=<a,b,...> turns on single rules (and
-// TRUSTMODEL_CH=-x with CHOSEN turns rule x off). G2BX is not part of the
-// chosen set: it is the candidate fix of 7.16 (1).
+// VAULT-MESSAGING 0.90.0 §3.4.2 (vettid.org 6b1b4f5), "Relay-key rotation
+// between vaults: the rules that close its wait cycles", RK1 to RK15, each
+// rule behind its own switch. The switches act only between release-29
+// parties (newSpec). TRUSTMODEL_CHOSEN=1 turns on the final set, every
+// switch below; TRUSTMODEL_CH=<a,b,...> turns on single rules (and
+// TRUSTMODEL_CH=-x with CHOSEN turns rule x off, for attribution). RK0
+// (who advertises relay_follow) is an assumption, not a switch (doc.go).
+// RK1 is release 29 as built and is always on. RK15 is not a rule: the
+// randomized runs check it.
 //
-//   - N1: Q, following a relay link, restarts its own open reconnect whose
-//     hs.init carried tokens naming the passed key and that has sent no
-//     hs.fin (not the one whose message made the follow).
-//   - N2: between vaults, while Q has accepted no message from P's newer
-//     key, an hs.confirm under an epoch signed by Q's current ik for P, and
-//     an hs.fin to an answer Q has open pinned to that ik, pass the cut-off.
-//   - G2B: rule 1 (a message P sends on a carried token is deposited with
-//     the key the token's sub names, if P holds it: hs.resp, hs.fin,
-//     hs.confirm), the signal unchanged (S2 advances only on
-//     relay.token.issued, not on carried or update tokens), and §6.3.1's
-//     prompt to adopt (the initiator, confirming a reconnect, queues
-//     relay.token.issued under the new epoch). Rule 0 (Q's tokens name P's
-//     key on Q's record) is what the model always did (issue mints for
-//     r.Relay).
-//   - L24: 2.4, links in reconnects: during S1, P's reconnect hs.init
+//   - G2B: RK2 (Q's tokens name P's key on Q's record: what the model
+//     always did, issue mints for r.Relay), RK3 (a message on a carried
+//     token is deposited with the key its sub names, if P holds it: hs.resp,
+//     hs.fin, hs.confirm; S2 advances only at relay.token.issued, not on
+//     carried or update tokens) and RK4 (S2's re-deposit only for entries
+//     on held tokens), with §6.3.1's prompt to adopt.
+//   - BINDL: RK5's binding L: the update carries P's identity links, sealed
+//     afresh at each deposit, which Q applies first by Table B (with K4,
+//     strict F1, H5 and R29-K9, on a duplicate too); if Table B refuses a
+//     link, no relay link is followed.
+//   - RK5: RK5's ik requirement: Q follows an update's relay links only if
+//     the chain from the update's ik (the P-side signer of its epoch) ends
+//     at Q's current ik for P, or that ik is current. With BINDL on and RK5
+//     off, an I3 probe reports a follow that fails it.
+//   - N1: RK6: Q, following a relay link, restarts its own open reconnect
+//     whose hs.init carried tokens naming a passed key and that has sent no
+//     hs.fin (not the one whose message made the follow); with no reconnect
+//     token in the message followed, the restart waits for one for the new
+//     mailbox, up to RK13's cap or 60 days after the follow.
+//   - N2: RK7: between vaults, an hs.confirm under an epoch signed by Q's
+//     current ik for P, and an hs.fin to an answer Q has open pinned to that
+//     ik, pass the cut-off; the pass closes per epoch, once Q has accepted,
+//     under that epoch or a later one, a message from a later relay key of
+//     P's than the message's sender.
+//   - L24: RK8, links in reconnects: during S1, P's reconnect hs.init
 //     (from.relay K', deposited with K) and its hs.resp to Q's reconnect
-//     carry the relay links K->K' and tokens minted by K”s mailbox (rule
-//     4); Q accepts them from K before or after the cut-off when the links
+//     carry the relay links K->K' and tokens minted by the mailbox of K'; Q
+//     accepts them from K before or after the cut-off when the links
 //     connect the sender to the announced key and pass rule C, and follows
-//     at the verified hs.fin (hs.init) or at sig_R (hs.resp). At the second
-//     write, P restarts its open reconnects that announced K and sent no
-//     hs.fin.
-//   - BINDL: binding L, the update carries P's ik links (sealed afresh at
-//     each deposit, as the model always did), which Q applies first by
-//     Table B (with K4, strict F1, H5 and R29-K9, on a duplicate too); if
-//     Table B refuses a link, no relay link is followed.
-//   - GRACE14: the relay's rotation grace is 14 days (was 7).
-//   - HOLD: Q's deposits refused mailbox_unknown are held (the model never
-//     ended them) for at most 60 days, then told (message.not_delivered).
-//   - TELL: relay.mailbox.closed. Approximation: when an old mailbox ends,
-//     each message in it that its owner never collected is queued again by
-//     its sender (same inner id, deduped by the receiver) at once, if the
-//     owner then has a current epoch with the sender; otherwise it is lost
-//     (conservative: the real telling would wait under the epoch to come,
-//     and the hop it takes is not modelled).
-//   - S1PAUSE: S1's 30 days do not run while P has accepted an
-//     authenticated message from Q in the last 16 days, capped at 60 days
-//     after the second write. The pause intervals are kept as ground truth
-//     (a failed write does not roll them back).
-//   - R25: 2.5, during S1 a token_revoked on a reconnect token for P's
-//     earlier key is not a failed try, starts no S9 clock, and the "no
-//     reconnect token" judgement is suspended while P holds none only
-//     because of it.
-//   - R27: 2.7, a definite refusal (not 429, not quota_exceeded, which
-//     stays K6's stale) of a reconnect hs.init is a failed try at once; the
-//     next try starts once a newer mailbox (or another reconnect token) is
-//     known; mailbox_unknown for P's earlier mailbox while Q knows no newer
-//     one is not counted, and Q waits for the links at most 60 days (the
-//     hold's limit). An update refused only because its epoch is demoted or
-//     destroyed has its links applied (ik links first, then relay links),
-//     its tokens not taken.
-//   - S9END: S9 at S1's end: no 24-hour clock; when S1 ends a pair stale
-//     and a token for an earlier key was revoked, the member gets S9's text
-//     (counted; the stale is visible either way).
-//   - G4HS (candidate b for G4H): the "no reconnect token" judgement is
-//     suspended while the side holds valid tokens for the peer's mailbox
-//     naming its newer key.
-//   - RSEENSUSP (candidate for the I4 relay-successor gap): relay links a
-//     message carries while the record is suspended are kept as seen.
-//   - R27T (candidate for 2.7's open point): the K'-mailbox tokens of an
-//     update refused under a demoted or destroyed epoch are kept as held
-//     tokens once its links are followed.
-//   - G2BXA (measurement variant of G2BX): the same for a record that is
-//     not demoted.
-//   - G2BX (candidate, not chosen): a demoted Q's reconnect may use a held
-//     reconnect token naming a newer key of Q's (deposited with that key);
-//     Q keeps the reconnect tokens of an update or relay.token.issued it
-//     refuses under a demoted epoch (held, no S2).
-var chosenRules = []string{"N1", "N2", "G2B", "L24", "BINDL", "GRACE14", "HOLD", "TELL", "S1PAUSE", "R25", "R27", "S9END"}
+//     at the verified hs.fin (hs.init) or after sig_R (hs.resp), identity
+//     links first; it refuses the message superseded_relay if it has
+//     followed P away from the announced key, or with rule U's reason. At
+//     the second write, P restarts its open reconnects that announced K and
+//     sent no hs.fin.
+//   - R25: RK9: during S1 a token_revoked on a reconnect token for P's
+//     earlier key is not a failed try and starts no S9 wait; "no reconnect
+//     token" is not judged while P holds none only because of it, up to
+//     RK13's cap.
+//   - S9END: RK9's S9 at S1's end: a reconnect-token revocation is judged
+//     only when S1 ends the pair stale (S9's feed item instead of the
+//     stale's); S9's 24 hours still apply to a revoked standing token.
+//   - R27: RK10: a definite refusal of a reconnect hs.init tied to rotation
+//     (any in the side's own S1, or mailbox_unknown) ends the try at once
+//     and counts as a failed try; the next try starts at a newer mailbox,
+//     a new reconnect token or the refused try's expiry.
+//     mailbox_unknown with no newer mailbox known is not counted: the side
+//     waits for the links up to RK13's cap (in its own S1) or 60 days after
+//     the first refusal, then becomes stale. Other refusals stay silent
+//     (the next try at the try's 16-day expiry). An update Q refuses has
+//     none of its links followed and none of its tokens kept (always).
+//   - G4HS: RK11: while a side that followed its peer's relay link holds
+//     tokens from the peer's current mailbox naming a newer relay key of its
+//     own, it judges neither "no valid standing token" (§8.6) nor "no
+//     reconnect token", until those tokens' exp or RK13's cap.
+//   - RSEENSUSP: RK12: relay links that pass rule C in a message refused
+//     at step 1 (a suspended record) are kept as seen, within rule C's cap
+//     of 32 seen links per peer.
+//   - S1PAUSE: RK13: S1's 30 days do not run while P has accepted, within
+//     the last 16 days, an authenticated message from Q that passed dedupe
+//     and the ts window (an hs.resp, an hs.fin or a message under an epoch;
+//     a reconnect hs.init alone does not count), capped at 60 days after
+//     the second write. The pause intervals are kept as ground truth (a
+//     failed write does not roll them back). The cap also bounds RK6, RK9,
+//     RK10 and RK11.
+//   - GRACE14: RK14's grace: the relay's rotation grace is 14 days (the
+//     model's default is 7).
+//   - HOLD: RK14's hold: a durable entry refused mailbox_unknown is held
+//     (one anchor per peer, relay_held's since) until a follow re-addresses
+//     it (fresh ts, new seq), or since + 60 days, when every held entry
+//     ends not delivered and the connection becomes stale; a handshake
+//     message is not held; after the limit, mailbox_unknown ends an entry
+//     at once until the episode resets at a follow.
+//   - TELL: RK14's telling: Q keeps its 201'd entries 60 days and pins them
+//     at a follow; P sends relay.mailbox.closed{mailbox, last_msg_id} when
+//     its collects of an old mailbox end, a durable message under its epoch
+//     (it waits for S2, and is held while P has no epoch); Q re-deposits
+//     the pinned entries above last_msg_id (fresh ts) and counts
+//     message.delivery_unconfirmed 60 days after the follow without one; P
+//     keeps the inner ids from that mailbox for dedupe until 60 days after
+//     the telling.
+var chosenRules = []string{"N1", "N2", "G2B", "L24", "BINDL", "RK5", "GRACE14", "HOLD", "TELL", "S1PAUSE", "R25", "R27", "S9END", "G4HS", "RSEENSUSP"}
 
 const (
-	holdLimit  = 60 * day // 3.3: the Q-side hold
-	s1PauseFor = 16 * day // 7.10 b
-	s1Cap      = 60 * day // 7.10 b
+	holdLimit  = 60 * day // RK14: the hold's limit
+	s1PauseFor = 16 * day // RK13: the pause after an authenticated message
+	s1Cap      = 60 * day // RK13: the cap, 60 days after the second write
 )
 
 // loadChosen sets the switches from the environment.
@@ -122,7 +136,7 @@ func (w *World) grace() int64 {
 	return graceLen
 }
 
-// ---------- S1's pause (7.10 b) ----------
+// ---------- RK13: S1's pause ----------
 
 // tsWindow is §8.4's durable ts window, 16 days back. Its 5 minutes ahead
 // is not modelled: the model's clocks are skewed by up to a day.
@@ -226,15 +240,15 @@ func (p *Party) rk10Limit(r *PeerRec) {
 	}
 	if p.w.Now > p.waitCap(r, r.WaitSince) {
 		p.w.stat("R27: no newer mailbox by the wait's limit")
-		p.markStale(r, "R27: no newer mailbox by the wait's limit")
+		p.markStale(r, "R27: no newer mailbox by the wait's limit"+p.relayMoved(r))
 		p.h5(r, -1)
 	}
 }
 
-// ---------- 2.4 and rule U: following relay links ----------
+// ---------- RK8 and rule U: following relay links ----------
 
 // links24: m announces a newer relay key of r's by links from its sender
-// (2.4): they verify, connect the sender to the announced key, pass rule
+// (RK8): they verify, connect the sender to the announced key, pass rule
 // C, and the announced key is Q's current one or is reached through them.
 func (q *Party) links24(r *PeerRec, m *RMsg) bool {
 	M := m.P
@@ -265,6 +279,33 @@ func (q *Party) links24(r *PeerRec, m *RMsg) bool {
 		skip++
 	}
 	return skip < len(L) && L[skip].Old == r.Relay
+}
+
+// rk8Check: RK8, before Q follows a reconnect's relay links L announcing
+// P's key pk: "" to go on, else the reason Q refuses the message with:
+// superseded_relay when Q has already followed P away from pk, else rule
+// U's reason when its checks fail. Every link already followed (pk is Q's
+// current key for P) changes nothing and goes on.
+func (q *Party) rk8Check(r *PeerRec, L []RLink, pk Key) string {
+	if pk == r.Relay {
+		return ""
+	}
+	if r.relayRank(pk) >= 0 {
+		return "superseded_relay"
+	}
+	skip := 0
+	for skip < len(L) && slices.Contains(r.RChain, L[skip]) {
+		skip++
+	}
+	if skip == len(L) || L[skip].Old != r.Relay {
+		return "relay_rollback"
+	}
+	for _, l := range L[skip:] {
+		if r.keeps(l.New) {
+			return "relay_rollback"
+		}
+	}
+	return ""
 }
 
 // followRelay: Q follows P's relay links L (rule U's state write without
@@ -431,6 +472,21 @@ func (p *Party) holdLimitTick(r *PeerRec) {
 	}
 }
 
+// relayMoved: RK14 "When both sides' old mailboxes end": p, in its own S1
+// toward r, still holds deposits to r refused mailbox_unknown when S1 (or
+// RK10's wait for links) ends the connection stale: the stale's reason is
+// relay_moved.
+func (p *Party) relayMoved(r *PeerRec) string {
+	if !p.w.ch("HOLD") || r.KeyFor == p.st.Relay {
+		return ""
+	}
+	if slices.ContainsFunc(p.st.Out, func(e Entry) bool { return e.To == r.ID && e.HeldMU && !e.Done && !e.Ended }) {
+		p.w.stat("HOLD: stale with reason relay_moved")
+		return " (relay_moved)"
+	}
+	return ""
+}
+
 // holdFollow: RK14, at a follow the hold episode ends: the held entries are
 // re-addressed to the new mailbox, each with a fresh ts and a new seq (a
 // mailbox_unknown proves the relay never stored it: not tried).
@@ -450,6 +506,31 @@ func (q *Party) holdFollow(r *PeerRec) {
 		q.w.stat("HOLD: relay_held ends at a follow")
 	}
 	r.HoldSince, r.HoldOver = 0, false
+}
+
+// ---------- RK5's ik requirement ----------
+
+// rk5OK: RK5, after the update's identity links are applied, the chain
+// from the update's ik (the P-side signer of the epoch it travels under)
+// ends at Q's current ik for P, or the update's ik is that ik.
+func (q *Party) rk5OK(r *PeerRec, m *RMsg) bool {
+	ep := r.epoch(m.P.Epoch)
+	if ep == nil {
+		return false
+	}
+	if ep.Signer == r.IK {
+		return true
+	}
+	L := m.P.Rot
+	if len(L) == 0 || L[0].Old != ep.Signer || L[len(L)-1].New != r.IK {
+		return false
+	}
+	for i := 1; i < len(L); i++ {
+		if L[i].Old != L[i-1].New {
+			return false
+		}
+	}
+	return true
 }
 
 // ---------- rule 1 (G2-B) ----------

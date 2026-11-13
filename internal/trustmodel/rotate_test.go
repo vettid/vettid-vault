@@ -636,7 +636,7 @@ func (p *Party) tick() {
 						w.stat("S9END: S1's stale shown with S9's text")
 						w.feedItem(p.ID, r.ID, "S9 fork_suspected at S1's end")
 					}
-					p.markStale(r, "S1: not followed in 30 days")
+					p.markStale(r, "S1: not followed in 30 days"+p.relayMoved(r))
 					p.h5(r, -1)
 					w.logf("%s: %s STALE (S1)", p.Name, w.party(r.ID).Name)
 				}

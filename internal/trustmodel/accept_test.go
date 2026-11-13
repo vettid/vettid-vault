@@ -172,12 +172,16 @@ func (q *Party) acceptFrom(r *PeerRec, m *RMsg, pos Pos, set []Key) dec {
 			}
 		}
 		if q.w.ch("RSEENSUSP") && len(M.RLinks) > 0 && r.relayState(m.Sender, pos) != rkForeign {
-			// candidate: relay links carried while suspended are kept as
-			// seen (as step 3 keeps them), so rule C judges a different
-			// successor of the same key after the resolve
+			// RK12: relay links carried while suspended that pass rule C
+			// are kept as seen (as step 3 keeps them, within rule C's cap
+			// of 32 seen links per peer), so a later different successor
+			// of the same key is a relay fork after the resolve
 			for _, l := range M.RLinks {
-				if !slices.ContainsFunc(r.RSeen, func(f RLink) bool { return f.Old == l.Old }) {
-					r.RSeen = append(r.RSeen, l)
+				if _, bad := r.relayConflict([]RLink{l}); bad {
+					q.w.stat("RSEENSUSP: relay link fails rule C while suspended (not kept)")
+					continue
+				}
+				if r.keepRSeen(l) {
 					q.w.stat("RSEENSUSP: relay link kept as seen while suspended")
 				}
 			}
@@ -293,7 +297,7 @@ func (q *Party) acceptFrom(r *PeerRec, m *RMsg, pos Pos, set []Key) dec {
 		if rs == rkAfter && !(l24 && M.Reconnect) {
 			return refuse("superseded_relay", cell+":handshake-kept")
 		}
-		return q.tableBResp(r, M, pos)
+		return q.tableBResp(r, m, pos)
 	case KFin:
 		if rs == rkAfter && !q.n2(r, m) {
 			return refuse("superseded_relay", cell+":handshake-kept")
@@ -404,12 +408,24 @@ func (q *Party) ruleC(r *PeerRec, M *Msg) (dec, bool) {
 			}
 		}
 		for _, l := range M.RLinks {
-			if !slices.ContainsFunc(r.RSeen, func(f RLink) bool { return f.Old == l.Old }) {
-				r.RSeen = append(r.RSeen, l)
-			}
+			r.keepRSeen(l)
 		}
 	}
 	return dec{}, false
+}
+
+// seenCap: rule C keeps at most 32 seen links per peer (0.87.0).
+const seenCap = 32
+
+// keepRSeen keeps relay link l as seen, one per old key, within rule C's
+// cap (counted over identity and relay links). It reports whether it kept
+// it.
+func (r *PeerRec) keepRSeen(l RLink) bool {
+	if slices.ContainsFunc(r.RSeen, func(f RLink) bool { return f.Old == l.Old }) || len(r.Seen)+len(r.RSeen) >= seenCap {
+		return false
+	}
+	r.RSeen = append(r.RSeen, l)
+	return true
 }
 
 // relayConflict: a relay link whose old key has another followed (or seen) successor.
@@ -607,6 +623,19 @@ func (q *Party) ruleU(r *PeerRec, m *RMsg, pos Pos, rs rkSt) dec {
 		if r.keeps(l.New) {
 			return refuse("relay_rollback", pre+"new-is-kept")
 		}
+	}
+	rk5 := q.rk5OK(r, m)
+	if q.w.ch("RK5") && !rk5 {
+		// RK5: Q follows no relay link from it and takes none of its
+		// tokens. SPEC FINDING: no refusal reason is named; the model
+		// refuses with ik_not_current.
+		q.w.stat("RK5: update's ik chain does not end at the current ik")
+		return refuse("ik_not_current", pre+"rk5")
+	}
+	if q.w.ch("BINDL") && !rk5 {
+		// I3 probe: with binding L, a followed update's ik chain ends at
+		// Q's current ik for P (RK5). Reachable only with RK5 off.
+		q.w.violate("I3", "%s follows relay links of an update whose ik chain does not end at its current ik for %s", q.Name, q.w.party(r.ID).Name)
 	}
 	kept, _ := q.ruleT(r, M.Toks, M.RelayPK)
 	hasStanding := false
@@ -1190,7 +1219,8 @@ func (a *HS) respMsg(q *Party, r *PeerRec) Msg {
 		Rot: a.RespRot, Reconnect: a.Reconnect, Toks: a.RespToks, RelayPK: a.RespPK, RLinks: slices.Clone(a.RespRL)}
 }
 
-func (q *Party) tableBResp(r *PeerRec, M *Msg, pos Pos) dec {
+func (q *Party) tableBResp(r *PeerRec, m *RMsg, pos Pos) dec {
+	M := m.P
 	o := r.Own
 	if q.w.Now-o.Started > q.w.hsLifeFor(o.Reconnect) {
 		if q.newSpec() {
@@ -1211,6 +1241,18 @@ func (q *Party) tableBResp(r *PeerRec, M *Msg, pos Pos) dec {
 	case ikUnknown:
 		q.abandonOwn(r)
 		return dec{"abort", "unknown_ik", cell}
+	}
+	rk8 := o.Reconnect && len(M.RLinks) > 0 && q.w.ch("L24")
+	if rk8 {
+		// RK8: the hs.resp's relay links are followed in the write that
+		// processes it; if Q has followed P away from the announced key,
+		// or rule U's checks fail, Q follows nothing and refuses it. RK5's
+		// ik requirement holds here by Table B: the hs.resp's ik is current
+		// or reached by the links it carries, which are applied first.
+		if why := q.rk8Check(r, M.RLinks, M.RelayPK); why != "" {
+			q.w.stat("L24: hs.resp refused at its relay links (" + why + ")")
+			return refuse(why, cell+":rk8-"+why+":handshake-kept")
+		}
 	}
 	var extra []IKLink
 	if st == ikCurrent {
@@ -1236,21 +1278,23 @@ func (q *Party) tableBResp(r *PeerRec, M *Msg, pos Pos) dec {
 			q.dropAnswer(r, a.ID) // own completed first: the crossing answer is dropped
 		}
 	}
-	var carriedToks []Token
-	if o.Reconnect {
-		if len(M.RLinks) > 0 && q.w.ch("L24") && q.followRelay(r, M.RLinks, pos, o.ID) {
-			q.w.stat("L24: followed at an hs.resp's sig_R")
-		}
-		toks, _ := q.ruleT(r, M.Toks, r.Relay)
-		q.keepTok(r, toks, false)
-		carriedToks = toks
-	}
 	r.Own = nil
 	if len(extra) > 0 {
 		if q.followIK(r, extra, pos, false) {
 			return dec{"suspend", "fork", cell + ":K4-flag"}
 		}
 		app = extra // H5 below
+	}
+	var carriedToks []Token
+	if o.Reconnect {
+		// RK8's order: the identity links first (above), then the relay
+		// links, then the tokens by rule T against the announced mailbox
+		if rk8 && q.followRelay(r, M.RLinks, pos, o.ID) {
+			q.w.stat("L24: followed at an hs.resp's sig_R")
+		}
+		toks, _ := q.ruleT(r, M.Toks, r.Relay)
+		q.keepTok(r, toks, false)
+		carriedToks = toks
 	}
 	if q.st.IK != o.OwnIK {
 		q.w.violate("S5", "%s would send hs.fin signed by superseded ik %d", q.Name, o.OwnIK)
@@ -1303,6 +1347,17 @@ func (q *Party) tableBFin(r *PeerRec, M *Msg, pos Pos) dec {
 		q.w.noteForkFin(q, r, a.ID)
 		q.suspend(r, "connection.fork_suspected/epoch")
 		return dec{"suspend", "fork", cell + ":fork-evidence"}
+	}
+	if len(a.RLinks) > 0 {
+		// RK8: the hs.init's relay links are followed at its verified
+		// hs.fin; Q refuses it (the handshake does not complete) if it has
+		// followed P away from the announced key, or if rule U's checks
+		// fail. RK5's ik requirement holds by Table B (the pinned ik is
+		// current or reached by the links applied here first).
+		if why := q.rk8Check(r, a.RLinks, a.RLinks[len(a.RLinks)-1].New); why != "" {
+			q.w.stat("L24: hs.fin refused at its hs.init's relay links (" + why + ")")
+			return refuse(why, cell+":rk8-"+why+":handshake-kept")
+		}
 	}
 	q.removeAnswer(r, a.ID)
 	if a.Reconnect && !q.w.noKeepAnswers {

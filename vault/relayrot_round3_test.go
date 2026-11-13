@@ -50,7 +50,7 @@ func TestRelayRotRedeliveryAfterNoAckReleasedAgain(t *testing.T) {
 // more than two leases later (acked before a crash undid its processing,
 // or dropped by the relay) no longer holds last_msg_id; one within that
 // time, one handed back, or one still held does; a ceiling ages out the
-// same way.
+// same way, once nothing from the mailbox is held or unprocessed.
 func TestRelayRotUnhandedIDsPruned(t *testing.T) {
 	t0 := time.Now()
 	bound := 3 * time.Minute
@@ -65,14 +65,18 @@ func TestRelayRotUnhandedIDsPruned(t *testing.T) {
 		t.Fatalf("pruned within the bound: %+v", r)
 	}
 	r.pruneUnhanded(map[string]bool{"03": true}, map[string]bool{"04": true}, t0.Add(bound+time.Second), bound)
-	if strings.Join(r.Unprocessed, ",") != "03,04" || r.Ceiling != "" || r.GivenAt["02"] != (time.Time{}) {
+	if strings.Join(r.Unprocessed, ",") != "03,04" || r.Ceiling != "09" || r.GivenAt["02"] != (time.Time{}) {
 		t.Fatalf("after the bound: %+v", r)
 	}
 	r.processed("03")
 	r.processed("04")
-	r.advance()
-	if r.LastMsgID != "05" {
-		t.Fatalf("last %q", r.LastMsgID)
+	r.pruneUnhanded(nil, map[string]bool{"07": true}, t0.Add(bound+2*time.Second), bound)
+	if r.Ceiling != "09" {
+		t.Fatalf("ceiling cleared while a message is held: %+v", r)
+	}
+	r.pruneUnhanded(nil, nil, t0.Add(bound+3*time.Second), bound)
+	if r.Ceiling != "" || r.LastMsgID != "05" {
+		t.Fatalf("last %q, ceiling %q", r.LastMsgID, r.Ceiling)
 	}
 }
 
@@ -81,7 +85,10 @@ func TestRelayRotUnhandedIDsPruned(t *testing.T) {
 func TestRelayRotDroppedMessageReleasesLastMsgID(t *testing.T) {
 	fx, old, _ := rotated(t)
 	fx.w.put(old, "01A", fx.clk.Add(-time.Hour), []byte("x"))
-	fx.do(func(m *Manager) { m.noteGiven(old, []string{"01A"}) })
+	fx.do(func(m *Manager) {
+		m.limits.VisibilityTimeoutSeconds = 30
+		m.noteGiven(old, []string{"01A"})
+	})
 	fx.w.mu.Lock()
 	fx.w.queue[old] = nil // the relay no longer has it
 	fx.w.mu.Unlock()
@@ -154,7 +161,10 @@ func TestRelayRotDiscardAndPurgeInTheOldMailbox(t *testing.T) {
 // full batch is not.
 func TestRelayRotSingleCollectorDrainPrunes(t *testing.T) {
 	fx := newRotFx(t)
-	fx.do(func(m *Manager) { m.noteGiven(m.st.Relay.Mailbox, []string{"05"}) })
+	fx.do(func(m *Manager) {
+		m.limits.VisibilityTimeoutSeconds = 30
+		m.noteGiven(m.st.Relay.Mailbox, []string{"05"})
+	})
 	fx.setClk(fx.clk.Add(10 * time.Minute))
 	full := make([]Message, MaxBatch)
 	for i := range full {
@@ -172,5 +182,22 @@ func TestRelayRotSingleCollectorDrainPrunes(t *testing.T) {
 	fx.do(func(m *Manager) { u = m.st.Relay.Collect.Unprocessed })
 	if len(u) != 0 {
 		t.Fatalf("not pruned by a drain: %v", u)
+	}
+}
+
+// A relay that gave no visibility timeout: nothing is pruned (fail
+// closed), however long ago the message was given.
+func TestRelayRotNoPruneWithoutAVisibilityTimeout(t *testing.T) {
+	fx := newRotFx(t)
+	fx.do(func(m *Manager) {
+		m.limits.VisibilityTimeoutSeconds = 0
+		m.noteGiven(m.st.Relay.Mailbox, []string{"05"})
+	})
+	fx.setClk(fx.clk.Add(24 * time.Hour))
+	fx.batch()
+	var u []string
+	fx.do(func(m *Manager) { u = m.st.Relay.Collect.Unprocessed })
+	if len(u) != 1 || u[0] != "05" {
+		t.Fatalf("pruned without a visibility timeout: %v", u)
 	}
 }

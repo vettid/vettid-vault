@@ -177,9 +177,11 @@ func (r *MailboxCollect) given(id string, now time.Time) {
 // returned fewer than max, over HTTP) that gave the ids in got: each
 // unprocessed id given more than bound before it, absent from it and not
 // held, is one the relay no longer has (acked before a crash undid its
-// processing, or dropped by the relay), so it holds last_msg_id no more;
-// a ceiling older than bound goes the same way (a message it stood for
-// and still unprocessed would be in got, given again).
+// processing, or dropped by the relay), so it holds last_msg_id no more.
+// A ceiling older than bound goes the same way, but only once nothing
+// from the mailbox is held and nothing given is unprocessed: a message it
+// stood for and still unprocessed would be in got, given again, unless
+// it is among those held or tracked.
 func (r *MailboxCollect) pruneUnhanded(got, held map[string]bool, now time.Time, bound time.Duration) {
 	keep := r.Unprocessed[:0]
 	for _, id := range r.Unprocessed {
@@ -190,7 +192,7 @@ func (r *MailboxCollect) pruneUnhanded(got, held map[string]bool, now time.Time,
 		keep = append(keep, id)
 	}
 	r.Unprocessed = keep
-	if r.Ceiling != "" && now.Sub(r.CeilingAt) > bound {
+	if r.Ceiling != "" && len(held) == 0 && len(r.Unprocessed) == 0 && now.Sub(r.CeilingAt) > bound {
 		r.Ceiling, r.CeilingAt = "", time.Time{}
 	}
 	r.advance()
@@ -198,10 +200,14 @@ func (r *MailboxCollect) pruneUnhanded(got, held map[string]bool, now time.Time,
 
 // leaseBound is how long after a message was given a full drain without
 // it shows the relay no longer has it: two of the relay's visibility
-// timeouts (60 s if it gave none), and a long-poll.
-func (m *Manager) leaseBound() time.Duration {
+// timeouts (at least RuleTVisibility each), and a long-poll. false: the
+// relay gave no visibility timeout, and nothing is pruned (fail closed).
+func (m *Manager) leaseBound() (time.Duration, bool) {
+	if m.limits.VisibilityTimeoutSeconds <= 0 {
+		return 0, false
+	}
 	vis := time.Duration(m.limits.VisibilityTimeoutSeconds) * time.Second
-	return 2*max(vis, RuleTVisibility) + LongPollWait
+	return 2*max(vis, RuleTVisibility) + LongPollWait, true
 }
 
 // noteDrained is pruneUnhanded for mailbox, under the lock.
@@ -209,8 +215,12 @@ func (m *Manager) noteDrained(mailbox string, got, held map[string]bool, now tim
 	if !m.relayRotation() || m.st == nil {
 		return
 	}
+	bound, ok := m.leaseBound()
+	if !ok {
+		return
+	}
 	if r := m.collectRec(mailbox); r != nil {
-		r.pruneUnhanded(got, held, now, m.leaseBound())
+		r.pruneUnhanded(got, held, now, bound)
 		m.dirty = true
 	}
 }

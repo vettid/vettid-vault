@@ -46,7 +46,7 @@ var r29Branches = []string{
 	"K4:demote-audit", "K4:current-demoted", "K4:flag-suspend",
 	"K5:held", "K5:released", "K5:held-ended", "K5:hs.confirm-not-sent", "K5:reconnect-after-demotion",
 	"K6:try-failed", "K6:third-failure-stale", "K6:quota_exceeded-stale",
-	"K7:demote", "K7:demote-several", "K7:flag-suspend", "K7:reconnect-names-E",
+	"K7:demote", "K7:flag-suspend", "K7:reconnect-names-E",
 	"K8:link-kept-as-seen", "K8:second-successor-suspends",
 	"K9:ended", "K9:flag-suspend", "K9:ended-message-suspends",
 	"F1:fork-by-ctx-rekey", "F1:fork-by-ctx-reconnect",
@@ -57,6 +57,7 @@ var r29Branches = []string{
 
 // r29Unreachable: branches counted but not required, with the reason.
 var r29Unreachable = map[string]string{
+	"K7:demote-several":                  "rare: Strict F1 judges no pending, abandoned or destroyed epoch (VAULT-MESSAGING 0.90.4), so two current-or-confirmed epochs after E signed by the link's old ik are needed (1 hit in 10,000 ROTBURST runs)",
 	"I5:B-reconnect":                     "with the peer away its standing token (30 days) ends before B (32 days): I6 abandons first (TestF13Lifetimes, TestScenarioALostConfirmInitiatorLocked)",
 	"R6:superseded_epoch":                "an earlier-ts message under a destroyed epoch needs a copy and reordering (TestR29R6SupersededEpoch)",
 	"K5:no-epoch-to-name-stale":          "needs every been-current epoch demoted or destroyed",

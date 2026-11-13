@@ -632,51 +632,16 @@ func (m *Manager) hTokenRefresh(_ context.Context, s *Session, _ *envelope.Inner
 
 // --- rotation (§3.4) ---
 
-// hAddressUpdate records a principal's new relay address and tokens after
-// it rotated its relay key (§3.4).
-func (m *Manager) hAddressUpdate(_ context.Context, s *Session, in *envelope.Inner) (json.RawMessage, error) {
-	o, err := obj(in)
-	if err != nil {
-		return nil, err
-	}
-	ro, err := o.Object("relay")
-	if err != nil {
-		return nil, errBadRequest
-	}
-	var a handshake.RelayAddr
-	a.URL, _ = ro.String("url")
-	a.Mailbox, _ = ro.String("mailbox")
-	if a.PK, err = ro.Base64("pk", ed25519.PublicKeySize); err != nil || handshake.ValidateRelayAddr(a) != nil {
-		return nil, errBadRequest
-	}
-	np := *s.peer
-	np.Relay = PeerRelay{URL: a.URL, Mailbox: a.Mailbox, PK: a.PK}
-	tok, err := str(o, "token")
-	if err != nil {
-		return nil, err
-	}
-	st, err := m.heldToken(tok, &np, TokStanding)
-	if err != nil {
-		return nil, errBadRequest
-	}
-	var rt HeldToken
-	if rs, ok, _ := o.OptString("reconnect_token"); ok {
-		if rt, err = m.heldToken(rs, &np, TokReconnect); err != nil {
-			return nil, errBadRequest
-		}
-	}
-	old := *s.peer
-	s.peer.Relay, s.peer.Standing = np.Relay, st
-	if rt.Token != "" {
-		s.peer.Reconnect = rt
-	}
-	// Tokens we issued to the old key stop working after the grace period
-	// (the relay denylists the old sub); issue fresh ones to the new key.
-	m.denySub(&old, s.now)
-	m.issueTo(s.peer, TokStanding, s.now)
-	if s.peer.Kind == KindConnection {
-		m.issueTo(s.peer, TokReconnect, s.now)
-	}
+// hAddressUpdate refuses relay.address.update from every peer
+// (connection, service, device). Release 29 rotates no relay key (§3.4.1
+// A5) and builds no receiving side for it (rule U, rule C, the relay
+// links): an update would change the peer's address and tokens on session
+// authentication alone. It is acked, dropped and audited drop.peer_key
+// with ref relay_unlinked (§3.4.1 rule U: links that do not verify); the
+// peer's relay address, tokens and denylist are left as they are. The type
+// stays registered so that it is refused here, not answered as unknown.
+func (m *Manager) hAddressUpdate(_ context.Context, s *Session, _ *envelope.Inner) (json.RawMessage, error) {
+	m.refusePeerKey(s.peer, "relay_unlinked", s.now)
 	return nil, nil
 }
 

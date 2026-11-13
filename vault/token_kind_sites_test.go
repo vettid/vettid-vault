@@ -161,8 +161,8 @@ func TestTokenKindReconnect(t *testing.T) {
 	}
 }
 
-// relay.address.update (§3.4): the new address's standing and reconnect
-// tokens.
+// relay.address.update (§3.4): refused whatever its tokens, since release
+// 29 refuses every update (§3.4.1 A5), so its tokens reach no heldToken.
 func TestTokenKindAddressUpdate(t *testing.T) {
 	for _, c := range append([]lifeCase{standingOver}, reconnectCases...) {
 		t.Run(c.name, func(t *testing.T) {
@@ -198,9 +198,10 @@ func TestTokenKindAddressUpdate(t *testing.T) {
 				t.Fatal(err)
 			}
 			sendC(d, td, "relay.address.update", string(body))
-			taken := p.Relay.Mailbox == mb && p.Standing.Token == st && p.Reconnect.Token == rt
-			if taken == c.refuse {
-				t.Fatalf("an address update with a %s: taken %v, want %v", c.name, taken, !c.refuse)
+			// Release 29 refuses every relay.address.update (§3.4.1 A5):
+			// whatever its tokens, nothing of it is taken.
+			if p.Relay.Mailbox == mb || p.Standing.Token == st || p.Reconnect.Token == rt {
+				t.Fatalf("an address update with a %s was taken; every update is refused", c.name)
 			}
 		})
 	}

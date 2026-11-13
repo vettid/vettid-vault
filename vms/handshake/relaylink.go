@@ -156,7 +156,9 @@ func MarshalRelayLinks(ls []*RelayLink) []byte {
 
 // VerifyRelayChain checks a relay link chain as rule U and §6.2 require:
 // 1 to MaxRelayLinks links, each verifying, each link's old equal to the
-// previous link's new, the first old equal to first (the collect sender:
+// previous link's new, no key appearing twice (so A->B->A and a chain
+// whose first old is its last new are refused; rule U's rollback check
+// would refuse them later too), the first old equal to first (the collect sender:
 // the key the message was deposited with) and the last new equal to last
 // (the announced key: an update's relay.pk, an hs.init's from.relay.pk,
 // an hs.resp's relay.pk). Rule C and what the receiver keeps for the
@@ -166,6 +168,7 @@ func VerifyRelayChain(first, last ed25519.PublicKey, chain []*RelayLink) error {
 		return ErrRelayLink
 	}
 	cur := first
+	seen := []ed25519.PublicKey{first}
 	for _, l := range chain {
 		if err := l.Verify(); err != nil {
 			return ErrRelayLink
@@ -173,6 +176,12 @@ func VerifyRelayChain(first, last ed25519.PublicKey, chain []*RelayLink) error {
 		if !suite.EqualPublic(l.Old, cur) {
 			return ErrRelayLink
 		}
+		for _, k := range seen {
+			if suite.EqualPublic(k, l.New) {
+				return ErrRelayLink // a key appears twice
+			}
+		}
+		seen = append(seen, l.New)
 		cur = l.New
 	}
 	if !suite.EqualPublic(cur, last) {

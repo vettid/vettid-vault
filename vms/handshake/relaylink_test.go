@@ -119,6 +119,12 @@ func TestVerifyRelayChain(t *testing.T) {
 			return VerifyRelayChain(first, last, []*RelayLink{ch[1], ch[0], ch[2]})
 		},
 		"short key": func() error { return VerifyRelayChain(first[:31], last, ch) },
+		"repeated key A->B->A": func() error {
+			return VerifyRelayChain(first, first, relayChain(t, ks[0], ks[1], ks[0]))
+		},
+		"repeated key A->B->C->B": func() error {
+			return VerifyRelayChain(first, pubOf(ks[1]), relayChain(t, ks[0], ks[1], ks[2], ks[1]))
+		},
 	}
 	for name, f := range cases {
 		if f() == nil {

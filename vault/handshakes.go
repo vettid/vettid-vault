@@ -403,6 +403,31 @@ func (m *Manager) respondReconnect(pi *handshake.PendingInit, p *Peer, sender ed
 		pi.Discard()
 		return
 	}
+	// The identity-link gate (idLinksAllowed): from an earlier key after
+	// its cut-off, links not all followed are refused before anything else
+	// can apply them (the answer at hs.fin, or §6.6 "The links of a refused
+	// reconnect" below).
+	if ok, reason := m.idLinksAllowed(p, sender, body.Rotations); !ok {
+		m.refusePeerKey(p, reason, now)
+		pi.Discard()
+		return
+	}
+	if rk8 {
+		// §3.4.2 RK8: rule T on the hs.init's tokens, for the announced
+		// key's mailbox, before the ctx is classified (and so before §6.6's
+		// refused-reconnect links).
+		a := relayOf(body.From.Relay)
+		_, err1 := m.heldTokenFrom(body.Token, p, a, TokStanding)
+		_, err2 := m.heldTokenFrom(body.ReconnectToken, p, a, TokReconnect)
+		if err1 != nil || err2 != nil {
+			// Rule U's reason (token_unusable). That a failing
+			// reconnect_token is refused too, as for any reconnect, is a
+			// reading of this release; the spec should confirm.
+			m.refusePeerKey(p, "token_unusable", now)
+			pi.Discard()
+			return
+		}
+	}
 	m.noteFeatures(p, pi.Inner().Features) // 0.86.0, §10.8: steps 1-4 passed
 	var named86 []byte
 	var namedConf, forkEp, refuse bool
@@ -479,10 +504,7 @@ func (m *Manager) respondReconnect(pi *handshake.PendingInit, p *Peer, sender ed
 	rt, err2 := m.heldTokenFrom(body.ReconnectToken, p, answerTo, TokReconnect)
 	if err1 != nil || err2 != nil {
 		if rk8 {
-			// Rule U's reason (token_unusable). That a failing
-			// reconnect_token is refused too, as for any reconnect, is a
-			// reading of this release; the spec should confirm.
-			m.refusePeerKey(p, "token_unusable", now)
+			m.refusePeerKey(p, "token_unusable", now) // cannot occur: checked above
 			pi.Discard()
 			return
 		}
@@ -946,6 +968,20 @@ func (m *Manager) handleFin(ctx context.Context, id string, raw []byte, sender e
 	rk7 := m.rk7FinPasses(m.peer(aw.PeerID), aw, sender)
 	if aw.New == nil && !rk7 && m.tableAHandshake(m.peer(aw.PeerID), sender, now) {
 		return ackAfterFlush // §3.4.1 Table A: refused, the answer kept (S2)
+	}
+	if aw.New == nil && !(aw.Reconnect != nil && aw.Reconnect.Fork) {
+		// The identity-link gate (idLinksAllowed) for the links this hs.fin
+		// would apply (its rekey's, or its reconnect hs.init's), judged by
+		// the hs.fin's sender: refused, the answer kept. (An answer kept as
+		// fork evidence applies none: finishReconnect suspends first.)
+		rots := parseRotations(aw.Links)
+		if aw.Reconnect != nil {
+			rots = parseRotations(aw.Reconnect.Rotations)
+		}
+		if ok, reason := m.idLinksAllowed(m.peer(aw.PeerID), sender, rots); !ok {
+			m.refusePeerKey(m.peer(aw.PeerID), reason, now)
+			return ackAfterFlush
+		}
 	}
 	if rk7 && !m.peer(aw.PeerID).keepsRelayKey(r.CollectSender()) {
 		m.refusePeerKey(m.peer(aw.PeerID), "superseded_relay", now)
@@ -1451,6 +1487,7 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 		}
 	}
 	from := m.unpinnedSender(og.New == nil, og.PeerID, ini.ResponderRelayKey(), sender)
+	prechecked := false // step 3 already ran on the earlier key's answer (below)
 	if og.New == nil && m.relayStateOf(m.peer(og.PeerID), sender) == relayEarlierAfter {
 		// §3.4.1 step 3, then Table A: the answer's identity links are
 		// checked by rule C, then it is refused and the handshake kept (S2),
@@ -1480,6 +1517,14 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 			}
 			return ackAfterFlush // refused, the handshake kept (an earlier key's answer)
 		}
+		// The identity-link gate (idLinksAllowed): the only path on which an
+		// hs.resp's sender is an earlier key after its cut-off. Refused,
+		// the handshake kept; no link applied.
+		if ok, reason := m.idLinksAllowed(sp, sender, peek.Resp.Rotations); !ok {
+			m.refusePeerKey(sp, reason, now)
+			return ackAfterFlush
+		}
+		prechecked = true
 		if !sp.keepsRelayKey(ini.ResponderRelayKey()) {
 			m.tableAHandshake(sp, sender, now)
 			return ackAfterFlush
@@ -1559,7 +1604,7 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 		reason := ""
 		if rk8EndRefused(sender, res.Resp.RelayLinks) {
 			reason = "relay_unlinked"
-		} else {
+		} else if !prechecked {
 			for _, r := range res.Resp.Rotations {
 				if m.rotationConflict(p, r, now) && p.Conflict != nil {
 					res.Epoch.Destroy()

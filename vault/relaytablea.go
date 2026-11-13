@@ -47,8 +47,10 @@ func (m *Manager) tableARefuses(p *Peer, in *envelope.Inner, ep *handshake.Epoch
 	case peerwire.TypeRelayAddressUpdate, tokenIssuedType:
 		return false // relay.token.issued: its tokens only (dispatch, after beforeAccept)
 	case "identity.rotate":
-		if links, err := rotateLinks(in.Body); err == nil && handshake.KnownPrefix(parseRotations(p.Chain), links) == len(links) {
-			return false // every link already followed: ignored by the handler, K9 judged
+		if links, err := rotateLinks(in.Body); err == nil {
+			if ok, _ := m.idLinksAllowed(p, sender, links); ok {
+				return false // every link already followed: ignored by the handler, K9 judged
+			}
 		}
 	}
 	m.refusePeerKey(p, "superseded_relay", now)

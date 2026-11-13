@@ -374,7 +374,9 @@ type Peer struct {
 	// EarlierRelays are the peer's relay keys the vault followed it away
 	// from, oldest first, each with its followed relay link and its
 	// cut-off, kept until no token the vault issued to it can still
-	// deposit (§3.4.1 "Relay-key states").
+	// deposit (§3.4.1 "Relay-key states"). Note for rule U: there is no
+	// per-peer cap of its own here; each follow adds at most 32 keys
+	// (handshake.MaxRelayLinks), and keys leave only by pruneEarlierRelays.
 	EarlierRelays []EarlierRelay `json:"earlier_relays,omitempty"`
 	// RelaySeen are the peer's valid relay links that passed rule C and
 	// were not followed, at most one per old key and MaxRelaySeen in all

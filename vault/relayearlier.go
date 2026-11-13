@@ -89,6 +89,13 @@ func (m *Manager) relayStateOf(p *Peer, sender []byte) relayKeyState {
 	if e == nil {
 		return relayForeign
 	}
+	// ASSUMPTION: the vault collects one mailbox, its current one, so the
+	// message being handled was collected from m.st.Relay.Mailbox (here
+	// and as the cut-off's mailbox in followRelayLinks). Once the vault
+	// rotates its own relay key and collects its old mailbox too (§3.4
+	// step 1, §3.4.1 "Order of processing"), the mailbox a message was
+	// collected from must travel in Message and be used here and there;
+	// that comes before the rotating side is built.
 	if e.beforeCutoff(m.relayAt, m.msgID, m.st.Relay.Mailbox) {
 		return relayEarlierBefore
 	}
@@ -163,6 +170,8 @@ func (m *Manager) followRelayLinks(p *Peer, links []*handshake.RelayLink, to han
 		if i == 0 {
 			r.URL, r.Mailbox = p.Relay.URL, p.Relay.Mailbox
 		}
+		// CutMailbox: the vault's current mailbox (see relayStateOf's
+		// one-mailbox assumption).
 		p.EarlierRelays = append(p.EarlierRelays, EarlierRelay{Relay: r, Link: l.Marshal(),
 			CutAt: m.relayAt, CutMsg: m.msgID, CutMailbox: m.st.Relay.Mailbox})
 	}

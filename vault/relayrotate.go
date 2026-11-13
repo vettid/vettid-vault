@@ -729,7 +729,9 @@ func (m *Manager) relayKeyStep(ctx context.Context, atUnlock bool) {
 // recoveryWaits reports whether the attempts of pr wait for a recovered
 // phone: pr is the key a recovery's open stored as pending (never a key
 // it inherited), that recovery's phone has not paired yet (its invite is
-// pending), and the current mailbox, whose address the open's vault_bundle
+// pending and has not expired: each of the phone's own unlocks renews it,
+// so the wait ends a RecoveredInviteWindow after the phone was last
+// seen), and the current mailbox, whose address the open's vault_bundle
 // gave the phone, still lives. A reading of this release (the spec should
 // confirm): the phone's first handshake checks the vault's relay key and
 // mailbox as the open's vault_bundle gave them, as retryOwedRotation waits
@@ -742,7 +744,7 @@ func (m *Manager) recoveryWaits(pr *PendingRelay) bool {
 		return false
 	}
 	inv := m.st.Invites[pr.Recovery]
-	return inv != nil && inv.CreatedBy == inviteByRecovery
+	return inv != nil && inv.CreatedBy == inviteByRecovery && m.now().Before(inv.Exp)
 }
 
 // relayKeyAttempt makes one attempt if one is due; true when the key was
@@ -848,14 +850,14 @@ func (m *Manager) relayKeyFailed(now time.Time) {
 // relayKeyAtUnlock completes a key left pending by an earlier run (the
 // unlock's attempt), and audits identity.rotation_failed when this
 // unlock's own attempt does not complete it: it fails, gets no answer, or
-// is not made because a retry_after still runs or the key waits for the
-// recovered phone (recoveryWaits).
+// is not made because a retry_after still runs. A key that waits for the
+// recovered phone (recoveryWaits) is not audited: nothing failed.
 func (m *Manager) relayKeyAtUnlock(ctx context.Context) {
 	if !m.relayRotation() {
 		return
 	}
 	m.relayKeyStep(ctx, true)
-	if m.st == nil || m.rk.left == "" || m.st.Relay.Pending == nil || m.pendingMailbox() != m.rk.left {
+	if m.st == nil || m.rk.left == "" || m.st.Relay.Pending == nil || m.pendingMailbox() != m.rk.left || m.recoveryWaits(m.st.Relay.Pending) {
 		return
 	}
 	m.relayKeyFailed(m.now())

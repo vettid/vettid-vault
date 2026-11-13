@@ -188,9 +188,9 @@ func TestRelayRotRecoveryOwnKeyAfterMailboxUnknown(t *testing.T) {
 	}
 }
 
-// An unlock whose attempt the wait skips audits identity.rotation_failed
-// for the key left pending, once.
-func TestRelayRotRecoveryOwnKeyWaitAuditedAtUnlock(t *testing.T) {
+// An unlock whose attempt the wait skips audits no
+// identity.rotation_failed: nothing failed.
+func TestRelayRotRecoveryOwnKeyWaitNotAudited(t *testing.T) {
 	f := newOpenFixture(t)
 	rw := newRotWorld()
 	f.opts.RelayKeyRotation, f.opts.RelayKeyRotationUnfinished = true, true
@@ -223,7 +223,7 @@ func TestRelayRotRecoveryOwnKeyWaitAuditedAtUnlock(t *testing.T) {
 		}
 	}
 	m.mu.Unlock()
-	if rot, _ := rw.log(); len(rot) != 0 || n != 1 {
+	if rot, _ := rw.log(); len(rot) != 0 || n != 0 {
 		t.Fatalf("rotates %v, identity.rotation_failed %d", rot, n)
 	}
 }

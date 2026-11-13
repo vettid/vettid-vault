@@ -1,6 +1,7 @@
 package vault
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
@@ -516,16 +517,14 @@ func TestRuleUQueuedDepositsFollow(t *testing.T) {
 	}
 }
 
-// Rule U's evidence first (acceptFrom step 3): the update's identity links
-// are checked by rule C, and kept as seen, even when rule U then refuses
-// the update.
-func TestRuleUIdentityLinksEvidenceFirst(t *testing.T) {
+// RK5 "Links first" (decided 2026-11-12): the update's identity links are
+// applied before rule U's checks, so they are followed even when rule U
+// then refuses the update (here for its token); its relay links are not.
+func TestRK5IdentityLinksFollowedWhenUpdateRefused(t *testing.T) {
 	f := rkPair(t)
 	f.rotate(1)
 	f.lose(1, 0, kRotate)
 	u := f.rkSend(true, true)
-	_ = u
-	// Re-send it with a token rule T refuses.
 	f.lose(1, 0, kOther)
 	f.do(1, func(m *Manager, p *Peer) {
 		u.Token = u.ReconnectToken[:len(u.ReconnectToken)-4] + "AAAA"
@@ -539,7 +538,104 @@ func TestRuleUIdentityLinksEvidenceFirst(t *testing.T) {
 	if f.followedK1() || f.activityCount(0, "drop.peer_key", "token_unusable") != 1 {
 		t.Fatal("setup: the update was not refused token_unusable")
 	}
-	if len(f.p(0).Seen) == 0 {
-		t.Fatal("the refused update's identity link was not kept as seen (rule C at step 3)")
+	if !bytes.Equal(f.p(0).IK, f.m(1).keys.ik.Public().(ed25519.PublicKey)) {
+		t.Fatal("the refused update's identity links were not followed first")
+	}
+}
+
+// rkIKLink is an identity link from the rkConn connection's ik (the
+// device seed 0x74's) to a key seeded with seed.
+func rkIKLink(t testing.TB, d *devFixture, seed byte) *handshake.Rotation {
+	t.Helper()
+	r, err := handshake.NewRotation(rkKey(0x74), rkKey(seed), d.m.keys.kem.Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+// acceptFrom step 3, evidence first: an update's identity links are checked
+// by rule C, and kept as seen, even when the message is then refused
+// before rule U (here under an epoch rule E destroyed).
+func TestRuleUIdentityLinksEvidenceFirst(t *testing.T) {
+	d, td, p, k := rkConnU(t)
+	if !suite.EqualPublic(p.IK, rkPub(rkKey(0x74))) {
+		t.Fatal("setup: the connection's ik")
+	}
+	p.Epochs[len(p.Epochs)-1].Destroyed = true
+	p.Epochs[len(p.Epochs)-1].DestroyTS = time.Now().Add(time.Hour)
+	k1 := rkKey(0x61)
+	u := rkBody(t, d, k1, rkLink(t, k, k1))
+	u.Rotations = []*handshake.Rotation{rkIKLink(t, d, 0x20)}
+	sendCFrom(d, td, rkPub(k), peerwire.TypeRelayAddressUpdate, rkMarshal(t, u))
+	if suite.EqualPublic(p.Relay.PK, rkPub(k1)) || !suite.EqualPublic(p.IK, rkPub(rkKey(0x74))) {
+		t.Fatal("setup: the update under a destroyed epoch was followed")
+	}
+	if len(p.Seen) != 1 {
+		t.Fatalf("the update's identity link was not kept as seen at step 3: %d", len(p.Seen))
+	}
+}
+
+// RK5: when applying the update's identity links makes the record suspend
+// (here R29-K9: an epoch the vault abandoned while pending, signed by the
+// link's old ik, has its received flag set), no relay link is followed.
+func TestRK5SuspendedByTheLinksFollowsNothing(t *testing.T) {
+	d, td, p, k := rkConnU(t)
+	p.Epochs = append(p.Epochs, EpochMeta{ID: bytes.Repeat([]byte{7}, len(p.LastEpochID)), Signer: append([]byte(nil), p.IK...),
+		Mine: true, Abandoned: true, GotFromPeer: true})
+	k1 := rkKey(0x61)
+	u := rkBody(t, d, k1, rkLink(t, k, k1))
+	u.Rotations = []*handshake.Rotation{rkIKLink(t, d, 0x20)}
+	sendCFrom(d, td, rkPub(k), peerwire.TypeRelayAddressUpdate, rkMarshal(t, u))
+	if !p.suspended() {
+		t.Fatal("setup: the links did not make the record suspend")
+	}
+	if suite.EqualPublic(p.Relay.PK, rkPub(k1)) {
+		t.Fatal("a relay link was followed though the identity links suspended the record")
+	}
+}
+
+// Rule T's deferral: a relay.token.issued minted by an earlier mailbox of
+// the peer's is from a known mailbox: not deferred, processed at once and
+// its token ignored.
+func TestRuleTEarlierMailboxNotDeferred(t *testing.T) {
+	d, td, p, k := rkConnU(t)
+	k1 := rkKey(0x61)
+	sendCFrom(d, td, rkPub(k), peerwire.TypeRelayAddressUpdate, rkMarshal(t, rkBody(t, d, k1, rkLink(t, k, k1))))
+	held := p.Standing
+	body := string(peerwire.TokenIssuedBody(TokStanding, rkTok(t, k, rkOwn(d), testNow().Add(25*24*time.Hour), "from-k")))
+	_, c := sendCFrom(d, td, rkPub(k1), tokenIssuedType, body)
+	if len(c.acked) != 1 || p.Standing != held || len(d.m.st.Deferred) != 0 {
+		t.Fatal("a token of an earlier mailbox was deferred, or kept")
+	}
+}
+
+// Rule T's deferral cap counts every deferral of the peer's still recorded,
+// whatever its age: the same relay.token.issued replayed under fresh
+// msg_ids is deferred at most RuleTDeferMax times, then processed at once.
+func TestRuleTDeferralsBounded(t *testing.T) {
+	d, td, p, _ := rkConnU(t)
+	clk := testNow()
+	d.m.now = func() time.Time { return clk }
+	body := string(peerwire.TokenIssuedBody(TokStanding, rkTok(t, rkKey(0x69), rkOwn(d), clk.Add(20*24*time.Hour), "nx")))
+	id, _ := envelope.NewULID(clk)
+	raw, err := td.ep.Seal(&envelope.Inner{ID: id, Type: tokenIssuedType, TS: clk, Body: []byte(body)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deferred := 0
+	for i := 0; i < 3*RuleTDeferMax; i++ {
+		clk = clk.Add(3 * RuleTVisibility) // each earlier deferral's window has passed
+		c := &fakeCollector{}
+		msg := Message{MsgID: fmt.Sprintf("replay-%02d", i), Sender: relayauth.EncodeKey(p.Relay.PK), JTI: "standing-per", Payload: raw}
+		if err := d.m.ProcessBatch(context.Background(), c, []Message{msg}); err != nil {
+			t.Fatal(err)
+		}
+		if len(c.acked) == 0 {
+			deferred++
+		}
+	}
+	if deferred != RuleTDeferMax || len(d.m.st.Deferred) > RuleTDeferMax {
+		t.Fatalf("deferred %d (state %d), want at most %d", deferred, len(d.m.st.Deferred), RuleTDeferMax)
 	}
 }

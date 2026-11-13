@@ -107,7 +107,7 @@ func badLink(l *handshake.RelayLink) *handshake.RelayLink {
 // relay, a high feed item), and connection.rotation.resolve then answers
 // not_found.
 func TestRuleCRelayForkFromTwoUpdates(t *testing.T) {
-	d, td, p, k := rkConn(t)
+	d, td, p, k := rkConnU(t)
 	ka, kb := rkKey(0x61), rkKey(0x62)
 	sendC(d, td, "relay.address.update", rkUpdate(t, ka, rkLink(t, k, ka)))
 	if s := seenLinks(p); len(s) != 1 || !suite.EqualPublic(s[0][0], rkPub(k)) || !suite.EqualPublic(s[0][1], rkPub(ka)) || p.suspended() {

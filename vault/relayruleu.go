@@ -29,13 +29,13 @@ import (
 //  2. acceptFrom steps 1-3 (dispatch): rule C on the relay links (RK12
 //     while suspended) and on the identity links (evidenceFirst).
 //  3. Table A: rule U in every row but Record suspended and Foreign.
-//  4. The handler (ruleU): rule U's chain checks (relay_unlinked), the
-//     duplicate path, relay_rollback, the per-peer cap, rule T on the
-//     update's token (token_unusable); then RK5: the identity links
-//     (Table B, H5, the demotion rules, R29-K9) and the ik requirement;
+//  4. The handler (ruleU): first RK5, the identity links (Table B, H5,
+//     the demotion rules, R29-K9) and the ik requirement; then rule U's
+//     chain checks (relay_unlinked), the duplicate path, relay_rollback,
+//     the per-peer cap, rule T on the update's token (token_unusable);
 //     then the follow, in the same state write: the links and cut-offs,
-//     relay.pk current, the tokens kept; then the answer, the revocations
-//     and RK6.
+//     relay.pk current, the tokens kept; then the answer, the
+//     revocations and RK6.
 
 // MaxEarlierRelays caps a peer's earlier relay keys (Peer.EarlierRelays).
 // The spec sets no cap: earlier keys leave only when no token the vault
@@ -43,13 +43,16 @@ import (
 // relay links, a chain's 32 (handshake.MaxRelayLinks), and fails closed: a
 // follow that would keep more is refused (unexpected) and changes nothing,
 // so that no key the vault followed away from is forgotten while it could
-// still be announced again (I3). An open question for the spec.
+// still be announced again (I3). Decided 2026-11-12; the spec should
+// confirm the cap and the refusal.
 const MaxEarlierRelays = handshake.MaxRelayLinks
 
 // RelayRestartWait is how long §3.4.2 RK6 waits for a reconnect token for
 // the peer's current mailbox before an owed restart is given up (60 days
 // after the follow, the vault not being in S1 itself: it rotates no relay
 // key of its own).
+// It is scaled with the vault's time scale (STAGING-TIME-SCALE), as RK13's
+// clocks are.
 const RelayRestartWait = 60 * 24 * time.Hour
 
 // RelayRestart is an own reconnect RK6 abandoned and owes again.
@@ -79,56 +82,70 @@ func (m *Manager) updateParseRefuses(p *Peer, in *envelope.Inner, now time.Time)
 
 // ruleU handles a relay.address.update from s.peer that acceptFrom passed
 // (see the order above).
-func (m *Manager) ruleU(s *Session, in *envelope.Inner) {
+func (m *Manager) ruleU(s *Session, in *envelope.Inner) error {
 	p, now, sender := s.peer, s.now, m.msgSender
 	u, err := peerwire.ParseAddressUpdate(in.Body)
-	if err != nil || p.suspended() {
-		return // malformed: refused as a whole (no link read); suspended: step 1
+	if err != nil {
+		// A malformed body (relay_links missing included) is refused as a
+		// whole, as any malformed body of a message that is not a request
+		// (identity.rotate's too): acked, no link read, no drop.peer_key.
+		return errBadRequest
+	}
+	if p.suspended() {
+		return nil // acceptFrom step 1
+	}
+	// §3.4.2 RK5 "Links first", and RK8's order (the identity links first,
+	// then the relay links, then the tokens): the identity links are
+	// applied, and R29-K9 judged, before any of rule U's checks, so an
+	// update then refused for its relay links or its token still has its
+	// identity links followed. RK10's "An update Q refuses has none of its
+	// links followed" is read as its relay links and tokens (decided
+	// 2026-11-12; the spec should confirm). The ik requirement is checked
+	// right after the identity links.
+	if !m.rk5(s, u.Rotations) {
+		return nil
 	}
 	if _, ok := relayLinksKept(sender, u.Relay.PK, u.Links); !ok {
 		// v, suite, old equal to new, a repeated key, a bad signature, a
 		// break, or an end mismatch (the first old is not the sender, the
 		// last new is not relay.pk).
 		m.refusePeerKey(p, "relay_unlinked", now)
-		return
+		return nil
 	}
 	k := m.followedRelayPrefix(p, u.Links)
 	if k == len(u.Links) {
-		m.ruleUDuplicate(s, u)
-		return
+		m.ruleUDuplicate(p, now)
+		return nil
 	}
 	links := u.Links[k:]
 	if !suite.EqualPublic(links[0].Old, p.Relay.PK) {
 		m.refusePeerKey(p, "relay_rollback", now)
-		return
+		return nil
 	}
 	for _, l := range links {
 		if p.keepsRelayKey(l.New) {
 			m.refusePeerKey(p, "relay_rollback", now)
-			return
+			return nil
 		}
 	}
 	if len(p.EarlierRelays)+len(links) > MaxEarlierRelays {
 		m.refusePeerKey(p, "unexpected", now)
-		return
+		return nil
 	}
 	addr := relayOf(u.Relay)
 	st, err := m.heldTokenFrom(u.Token, p, addr)
 	if err != nil {
 		m.refusePeerKey(p, "token_unusable", now)
-		return
+		return nil
 	}
 	// rule T: a reconnect_token that does not pass is ignored, no reason to
-	// refuse (rule U names the update's `token` only); only a connection
-	// holds one.
+	// refuse (rule U names the update's `token` only; decided 2026-11-12,
+	// the spec should confirm); only a connection holds one.
 	var rt HeldToken
 	if u.ReconnectToken != "" && p.Kind == KindConnection {
 		if t, err := m.heldTokenFrom(u.ReconnectToken, p, addr); err == nil {
 			rt = t
 		}
-	}
-	if !m.rk5(s, u.Rotations) {
-		return
 	}
 	passed := make([]ed25519.PublicKey, 0, len(links))
 	for _, l := range links {
@@ -137,7 +154,7 @@ func (m *Manager) ruleU(s *Session, in *envelope.Inner) {
 	old := p.Relay
 	if m.followRelayLinks(p, links, u.Relay) != nil {
 		m.refusePeerKey(p, "relay_unlinked", now) // cannot happen after the checks above
-		return
+		return nil
 	}
 	p.Standing = st
 	if h := m.opt.Hooks.Adopt; h != nil {
@@ -154,6 +171,7 @@ func (m *Manager) ruleU(s *Session, in *envelope.Inner) {
 	m.rk6(p, passed, now)
 	m.answerUpdate(p, now)
 	m.retryPeer(p.ID)
+	return nil
 }
 
 // followedRelayPrefix is how many leading links of links the vault has
@@ -176,20 +194,20 @@ func (m *Manager) followedRelayPrefix(p *Peer, links []*handshake.RelayLink) int
 // the same inner id is a duplicate at §8.2 and never reaches here) and,
 // for a connection, at most one an hour (§7.2's bound on refreshes near a
 // token's end), so that a lost answer is replaced at p's next resend.
-// RK5's identity links are applied first (R29-K9 runs on a duplicate
-// too); if Table B refuses one, or the ik requirement fails, nothing is
+// RK5's identity links were applied first (R29-K9 runs on a duplicate
+// too); if Table B refused one, or the ik requirement failed, nothing is
 // answered (conservative: the spec says only that no link is followed and
-// no token taken).
-func (m *Manager) ruleUDuplicate(s *Session, u *peerwire.AddressUpdate) {
-	p, now := s.peer, s.now
-	if !m.rk5(s, u.Rotations) {
-		return
+// no token taken). The hourly bound is §7.2's for a refresh near a token's
+// end, on the same clock as relay.token.refresh (decided 2026-11-12; the
+// spec should confirm which of §7.2's limits applies).
+func (m *Manager) ruleUDuplicate(p *Peer, now time.Time) {
+	if p.Kind == KindConnection {
+		if t, ok := m.st.attach().Renewed[p.ID]; ok && now.Sub(t) < RenewEvery {
+			return
+		}
+		m.st.attach().Renewed[p.ID] = now
+		m.dirty = true
 	}
-	if p.Kind == KindConnection && !p.RelayDupAt.IsZero() && now.Sub(p.RelayDupAt) < RenewEvery {
-		return
-	}
-	p.RelayDupAt = now.UTC()
-	m.dirty = true
 	m.answerUpdate(p, now)
 }
 
@@ -239,7 +257,7 @@ func (m *Manager) rk5(s *Session, rots []*handshake.Rotation) bool {
 	}
 	// The ik requirement failed: no relay link is followed and no token
 	// taken. The spec names no reason; Table B's for the update's ik is
-	// used (an open question for the spec).
+	// used (decided 2026-11-12; the spec should confirm).
 	switch {
 	case p.ancestor(signer):
 		m.refusePeerKey(p, "ancestor_ik", now)
@@ -274,7 +292,11 @@ func updateIKOK(p *Peer, signer []byte, rots []*handshake.Rotation) bool {
 // relay.token.issued to p is dropped instead: the tokens it carries name
 // the passed key, and §3.4.2 RK2 wants the key on record when it is
 // deposited; answerUpdate sends fresh ones. Deposits on a token of their
-// own (a handshake's carried or answer token) keep their mailbox.
+// own (a handshake's carried or answer token) keep their mailbox, and a
+// handshake message already sealed keeps the tokens it carries, minted
+// for the passed key. Rule U says only that relay.pk becomes current; the
+// re-addressing and the sealed messages' tokens are decided 2026-11-12
+// and the spec should confirm them.
 func (m *Manager) readdressQueued(p *Peer, old PeerRelay, now time.Time) {
 	for _, e := range m.st.Outbox {
 		if e.Done || e.Op != OpDeposit || e.PeerID != p.ID || e.Token != "" || e.Mailbox != old.Mailbox {
@@ -294,7 +316,9 @@ func (m *Manager) readdressQueued(p *Peer, old PeerRelay, now time.Time) {
 // p's passed relay keys (rule U; at the vault's own mailbox, which issued
 // them, S7): the registry's, and those of handshakes not activated yet (a
 // pending epoch's, an answer's). The standing tokens are left to expire.
-// The own open reconnects' tokens are revoked by RK6's abandonment.
+// The own open reconnects' tokens are revoked by RK6's abandonment. That
+// the in-flight ones are revoked too (the peer meets that as §3.4.2 RK9
+// says) is decided 2026-11-12; the spec should confirm it.
 func (m *Manager) revokePassedReconnect(p *Peer, passed []ed25519.PublicKey, now time.Time) {
 	subs := map[string]bool{}
 	for _, k := range passed {
@@ -380,6 +404,15 @@ func (m *Manager) rk6Tick(p *Peer, now time.Time) {
 		m.dirty = true
 		return
 	}
+	if !bytes.Equal(r.Named, p.LastEpochID) && !m.currentDemoted(p) {
+		// The epoch it would reconnect from is no longer the current one
+		// (another epoch was established since, §3.4.2 RK6 "dropped once
+		// P's reconnect is established"), and the current one is not
+		// demoted: nothing is owed.
+		p.RelayRestart = nil
+		m.dirty = true
+		return
+	}
 	if m.heldReconnectForCurrent(p, now) {
 		p.RelayRestart = nil
 		m.dirty = true
@@ -390,7 +423,7 @@ func (m *Manager) rk6Tick(p *Peer, now time.Time) {
 		m.startReconnectCtx(p, r.Named, now)
 		return
 	}
-	if now.Sub(r.Since) >= RelayRestartWait {
+	if now.Sub(r.Since) >= m.opt.scale(RelayRestartWait) {
 		p.RelayRestart = nil
 		m.dirty = true
 		if !m.carriedWait(p, now) {

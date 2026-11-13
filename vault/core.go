@@ -653,8 +653,7 @@ func (m *Manager) hTokenRefresh(_ context.Context, s *Session, _ *envelope.Inner
 // (ruleU) instead.
 func (m *Manager) hAddressUpdate(_ context.Context, s *Session, in *envelope.Inner) (json.RawMessage, error) {
 	if m.opt.RelayKeyRotation {
-		m.ruleU(s, in)
-		return nil, nil
+		return nil, m.ruleU(s, in)
 	}
 	m.refusePeerKey(s.peer, "relay_unlinked", s.now)
 	return nil, nil

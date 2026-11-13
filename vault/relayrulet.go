@@ -25,7 +25,10 @@ import (
 // (rule U: token_unusable), and except a relay.token.issued whose iss is a
 // mailbox the vault does not yet know for the peer, which is deferred.
 // heldToken checks signature, iss, aud, sub, scope and a revoked jti; with
-// Options.RelayKeyRotation heldTokenFrom adds "has not expired".
+// Options.RelayKeyRotation heldTokenFrom adds "has not expired". Every
+// rule T check goes through heldTokenFrom, so the holder's checks of §7.1
+// (0.90.4: the lifetime bounds, exp after iat, iat not ahead of the clock)
+// apply here too once heldToken has them; they are not repeated here.
 
 // errExpiredHeld is a token rule T does not keep: it has expired.
 var errExpiredHeld = errors.New("vault: an expired token")
@@ -60,7 +63,8 @@ func relayOf(a handshake.RelayAddr) PeerRelay {
 // The vault does not read the relay's visibility_timeout_seconds; 60 s is
 // the value §11.14.10 takes when it is absent. A relay with a longer one
 // redelivers less often than this assumes, and the message is then
-// refused sooner: fail closed (an open question for the spec).
+// refused sooner: fail closed (decided 2026-11-12; the spec should
+// confirm).
 const RuleTVisibility = 60 * time.Second
 
 // RuleTDeferMax bounds the messages deferred at once per peer and reason
@@ -107,9 +111,12 @@ func (m *Manager) ruleTDefers(p *Peer, in *envelope.Inner, now time.Time) bool {
 		return false
 	}
 	if d == nil {
+		// Every deferral of p's kept counts, whatever its age, so that
+		// replays under fresh msg_ids cannot grow the state: past the cap
+		// a message is processed at once.
 		n := 0
 		for _, x := range m.st.Deferred {
-			if x.PeerID == p.ID && x.Reason == deferUnknownIss && now.Sub(x.Since) < 2*RuleTVisibility {
+			if x.PeerID == p.ID && x.Reason == deferUnknownIss {
 				n++
 			}
 		}

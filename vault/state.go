@@ -401,9 +401,6 @@ type Peer struct {
 	// again once it holds a reconnect token for the peer's current
 	// mailbox (rk6Tick).
 	RelayRestart *RelayRestart `json:"relay_restart,omitempty"`
-	// RelayDupAt is when the vault last answered a duplicate
-	// relay.address.update with fresh tokens (rule U; §7.2's bound).
-	RelayDupAt time.Time `json:"relay_dup_at,omitzero"`
 }
 
 // RevokedToken is a revoked standing token's jti and exp.

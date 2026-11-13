@@ -1109,6 +1109,11 @@ func (m *Manager) finishReconnect(p *Peer, aw *AwaitingHS, fr *handshake.FinResu
 // already) and what the
 // epoch record says (§3.4.1: its signer, who began it).
 func (m *Manager) activate(p *Peer, ep *handshake.Epoch, purpose handshake.Purpose, issued []IssuedToken, pendingID string, ownChain int, o actOpts, now time.Time) {
+	if m.opt.RelayKeyRotation && p.RelayRestart != nil {
+		// §3.4.2 RK6: an epoch established after the follow ends a restart
+		// still owed (the peer's reconnect or rekey made one current).
+		p.RelayRestart = nil
+	}
 	isNew := m.peer(p.ID) == nil
 	// A reconnect that named an older epoch is told as
 	// connection.restored_reconnect (the caller), in place of

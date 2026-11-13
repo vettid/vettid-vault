@@ -40,10 +40,10 @@ func (w *writeCounter) Delete(ctx context.Context, key string, ifMatch store.Ver
 	return w.Store.Delete(ctx, key, ifMatch)
 }
 
-// onlyCountAndGiveBack reports whether the writes were exactly an unlock's
-// count of its PIN attempt and the count given back, both to header key
+// onlyCountAndReset reports whether the writes were exactly an unlock's
+// count of its PIN attempt and its reset to 0, both to header key
 // hkey (§11.8: a right PIN whose unlock is refused writes nothing else).
-func (w *writeCounter) onlyCountAndGiveBack(hkey string) bool {
+func (w *writeCounter) onlyCountAndReset(hkey string) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.writes == 2 && w.keys[0] == hkey && w.keys[1] == hkey
@@ -86,8 +86,8 @@ func TestR29U1UnlockRefused(t *testing.T) {
 		if out.StateSeq == 0 {
 			t.Fatalf("messaging_release %d: no state_seq on the refusal (state_unreadable gives it)", release)
 		}
-		// §11.8: the attempt's count and its giving back, header only.
-		if !wc.onlyCountAndGiveBack(store.HeaderKey(f.vid, testRelease.PCR0)) {
+		// §11.8: the attempt's count and its reset, header only.
+		if !wc.onlyCountAndReset(store.HeaderKey(f.vid, testRelease.PCR0)) {
 			t.Fatalf("messaging_release %d: %d writes on refusal: %v", release, wc.count(), wc.keys)
 		}
 		for _, ev := range out.Events {

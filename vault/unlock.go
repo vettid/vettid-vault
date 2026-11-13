@@ -246,7 +246,10 @@ func findUnlockKey(h *Header, ik ed25519.PublicKey) *UnlockKey {
 // version, its count) is it written back, with header_seq + 1, conditional
 // on that version; a header written since (a reset, a move) is left as it
 // is. A write that fails leaves the count raised: one failure more than the
-// member made, the safe side.
+// member made, the safe side. Its header_seq may equal that of a manager
+// header write that failed (not stored): the write is conditional on the
+// counted header's version, so a header that write did store is never
+// overwritten.
 func resetCount(ctx context.Context, p AltUnlockParams, hkey string, countedVer store.Version, counted Backoff,
 	out *AltUnlockOutcome) {
 	blob, ver, err := p.Store.Get(ctx, hkey)
@@ -470,8 +473,9 @@ func UnlockAlt(ctx context.Context, p AltUnlockParams) (*Manager, *AltUnlockOutc
 	}
 	if !stateSupported(&st) {
 		// R29-U1 (§6.3.1 "No upgrade: release 29 starts clean"): after
-		// §12.5's deleting check, before anything is written: no state or
-		// header write, nothing sent, no unlocked, locked again.
+		// §12.5's deleting check: no state write and no header write but
+		// §11.8's reset of the PIN count (resetCount), nothing sent, no
+		// unlocked, locked again.
 		suite.Wipe(op.dek1)
 		suite.Wipe(op.uk)
 		suite.Wipe(dek)
@@ -773,7 +777,8 @@ func (m *Manager) syncUnlockKeysWith(k *UnlockKey) {
 // refuseUnreadable is §3.3's refusal (0.88.17, owner decision
 // 2026-11-11): a feature others call directly could not read its part,
 // and the vault is not run half. Answered state_unreadable after the
-// release decisions, before anything is written or sent, no unlocked,
+// release decisions, with nothing written but §11.8's reset of the PIN
+// count (resetCount) and nothing sent, no unlocked,
 // locked again (the keys wiped); a release that reads it opens it. What
 // the unlock had changed in memory goes with the manager, the
 // cancellation of a recovery included.
@@ -882,7 +887,8 @@ func (m *Manager) resume(ctx context.Context, p AltUnlockParams, out *AltUnlockO
 	}
 	// Persist: the state (release fields, tokens) and the header (backoff
 	// reset, counter, manifest serial) under this release. A PIN-only
-	// (development) unlock writes only a header that recorded failures.
+	// (development) unlock writes the header only: it always holds this
+	// attempt's count (§11.8), to reset.
 	var err2 error
 	switch {
 	case !p.pinOnly:

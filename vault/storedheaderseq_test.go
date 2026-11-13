@@ -16,7 +16,7 @@ import (
 // A wrong PIN whose count's header put fails: the PIN is not tested (§11.8,
 // counted before it is tested), retry reports the header_seq as read, and
 // the next unlock with that floor is not refused as a rollback.
-func TestBadPINWithAFailedHeaderPutReportsTheStoredSeq(t *testing.T) {
+func TestUnlockWithAFailedCountPutReportsTheStoredSeq(t *testing.T) {
 	f := newRFixture(t)
 	f.flush()
 	if err := f.m.Lock(context.Background()); err != nil {
@@ -113,7 +113,7 @@ func TestNoBackupRefusalReportsTheStoredHeaderSeq(t *testing.T) {
 		}
 		h := storedHeader(t, d)
 		// The count's write (+1), then no_backup's (+1, the count reset with
-		// it) or, when that fails, the count given back (+1).
+		// it) or, when that fails, the count's reset (+1).
 		if fails && (h.HeaderSeq != before+2 || h.Recovery == nil) || !fails && (h.HeaderSeq != before+2 || h.Recovery != nil) {
 			t.Fatalf("put fails %v: stored header_seq %d (before %d), recovery %v", fails, h.HeaderSeq, before, h.Recovery)
 		}
@@ -235,5 +235,49 @@ func TestUnlockWrongSecretIsNotCounted(t *testing.T) {
 	}
 	if h := f.storedHeader(); h.Backoff.Failures != h0.Backoff.Failures || h.HeaderSeq != h0.HeaderSeq {
 		t.Fatalf("counted: failures %d seq %d", h.Backoff.Failures, h.HeaderSeq)
+	}
+}
+
+// §11.8: a right PIN refused for a pair superseded by a stored replacement
+// (device_secret, decided only once the PIN opened the current wrap) resets
+// the stored count to 0, and the answer reports the stored header_seq.
+func TestUnlockSupersededPairResetsTheCount(t *testing.T) {
+	f := newRFixture(t)
+	f.pinChange()
+	f.st.failHeader = 1
+	f.m.mu.Lock()
+	_ = f.m.persist(context.Background(), false)
+	f.m.mu.Unlock()
+	f.m.Crash()
+	f.mustRefuse("000000", testSecret, CodeBadPIN)
+	f.mustRefuse("000000", testSecret, CodeBadPIN)
+	if h := f.storedHeader(); h.Backoff.Failures != 2 {
+		t.Fatalf("setup: %d counted", h.Backoff.Failures)
+	}
+	_, out := f.unlock(testPIN, testSecret)
+	h := f.storedHeader()
+	if out.Code != CodeDeviceSecret || h.Backoff != (Backoff{}) || out.HeaderSeq != h.HeaderSeq {
+		t.Fatalf("code %s, stored backoff %+v, seq %d reported %d", out.Code, h.Backoff, h.HeaderSeq, out.HeaderSeq)
+	}
+}
+
+// §11.8: the third wrong PIN's count write arms the delay; the next attempt,
+// right PIN or not, is backoff with nothing written and nothing tested.
+func TestUnlockThirdCountArmsTheDelay(t *testing.T) {
+	f := newRFixture(t)
+	f.flush()
+	if err := f.m.Lock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		f.mustRefuse("000000", testSecret, CodeBadPIN)
+	}
+	h := f.storedHeader()
+	if h.Backoff.Failures != 3 || h.Backoff.NotBefore.IsZero() {
+		t.Fatalf("%+v", h.Backoff)
+	}
+	_, out := f.unlock(testPIN, testSecret)
+	if out.Code != CodeBackoff || f.storedHeader().HeaderSeq != h.HeaderSeq {
+		t.Fatalf("the fourth attempt: %+v", out)
 	}
 }

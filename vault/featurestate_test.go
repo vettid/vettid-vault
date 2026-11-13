@@ -203,9 +203,9 @@ func TestRequiredFeatureThatDoesNotLoadRefusesTheUnlock(t *testing.T) {
 	if Unlocked() != gauge {
 		t.Fatalf("unlocked gauge %d, was %d: the manager was not zeroized", Unlocked(), gauge)
 	}
-	// §11.8: the attempt's count and its giving back, both to the header;
+	// §11.8: the attempt's count and its reset to 0, both to the header;
 	// nothing else is written on the refusal.
-	if !wc.onlyCountAndGiveBack(store.HeaderKey(f.vid, testRelease.PCR0)) {
+	if !wc.onlyCountAndReset(store.HeaderKey(f.vid, testRelease.PCR0)) {
 		t.Fatalf("%d writes on refusal: %v", wc.count(), wc.keys)
 	}
 	for _, ev := range out.Events {
@@ -524,7 +524,7 @@ func TestUnreadablePartCancelsNoRecovery(t *testing.T) {
 	if out.RecoveryCancelled || out.CancelledRecoveryID != "" || out.CancelledMarker() != "" || len(out.Events) != 0 {
 		t.Fatalf("a cancellation was reported: %+v", out)
 	}
-	// §11.8: the attempt's count was stored and given back (header_seq + 2);
+	// §11.8: the attempt's count was stored and reset (header_seq + 2);
 	// nothing else in the header changed.
 	if h := storedHeader(t, d); h.Backoff != hBefore.Backoff || h.HeaderSeq != hBefore.HeaderSeq+2 {
 		t.Fatalf("the stored header changed: backoff %+v seq %d, before %+v seq %d", h.Backoff, h.HeaderSeq, hBefore.Backoff, hBefore.HeaderSeq)

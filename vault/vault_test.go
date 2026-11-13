@@ -403,14 +403,19 @@ func TestRollbackRefused(t *testing.T) {
 // zeroizes immediately, without acking.
 func TestSplitBrainZeroizes(t *testing.T) {
 	f := newFixture(t)
-	// A second instance unlocks while the first runs: its unlock writes the
-	// header (the attempt's count, then its reset, §11.8), so the first
-	// instance's versions are stale.
+	// A second instance unlocks while the first runs and writes the state
+	// and the header (its unlock also writes the attempt's count, §11.8): the
+	// first instance's versions are stale, and its state write conflicts.
 	second, _, err := f.unlock(testPIN, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer second.Crash()
+	second.mu.Lock()
+	if err := second.persist(context.Background(), false); err != nil { // the second instance writes the state too
+		t.Fatal(err)
+	}
+	second.mu.Unlock()
 	first := f.m
 	c := &fakeCollector{}
 	err = first.ProcessBatch(context.Background(), c, []Message{{MsgID: "x", Sender: "AAAA", Payload: []byte{1}}})
